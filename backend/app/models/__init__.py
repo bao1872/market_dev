@@ -1,0 +1,109 @@
+"""SQLAlchemy ORM 模型包。
+
+V1.1 各阶段模型统一继承 Base：
+- R2: User/Role/UserRole（用户与权限基础表）
+- R3: Instrument（股票主数据）
+- R4: TradingCalendar（交易日历）
+- R5: BarDaily/BarMinute（行情仓储）
+- R6: ConfigDefinition（配置注册表）
+- R7: StrategyDefinition/StrategyVersion（策略目录与版本）
+- R8: JobRun（任务运行）、Outbox（事务性发件箱）
+- R9: NotificationChannel/Template/Message/MessageDelivery（通知基础设施）
+- M3: MonitorState（监控状态仓储，复合主键 strategy_version_id+instrument_id）
+- M4: StrategyEvent（原始策略事件与快照，event_key 唯一）
+- R12: StrategyRun/StrategyResult/StrategyResultMetric（策略运行与结果）
+- C1/C4: SelectionPlan/Revision/Member/Condition + SelectionPlanRun/Result/Evidence
+  （选股组合方案与运行结果，对应迁移 007_selection_plans）
+- C5: MonitoringPlan/Revision/Member（监控组合方案，user_id 由上下文注入）
+- C6: MonitoringPlanState（监控组合状态，lock_version 乐观锁）
+- C8: CompositeMonitorEvent/Evidence（组合事件与证据，composite_event_key 唯一）
+"""
+
+from __future__ import annotations
+
+from app.models.bar import BarDaily, BarMinute
+from app.models.base import Base
+from app.models.calendar import TradingCalendar
+from app.models.composite_event import CompositeEventEvidence, CompositeMonitorEvent
+from app.models.config import ConfigDefinition
+from app.models.instrument import Instrument
+from app.models.job import JobRun
+from app.models.membership import InviteCode, InviteRedemption, Membership
+from app.models.monitor_state import MonitorState
+from app.models.monitoring_plan import (
+    MonitoringPlan,
+    MonitoringPlanMember,
+    MonitoringPlanRevision,
+)
+from app.models.monitoring_plan_state import MonitoringPlanState
+from app.models.notification import (
+    MessageDelivery,
+    NotificationChannel,
+    NotificationMessage,
+    NotificationTemplate,
+)
+from app.models.outbox import Outbox
+from app.models.selection_plan import (
+    SelectionMemberCondition,
+    SelectionPlan,
+    SelectionPlanMember,
+    SelectionPlanRevision,
+)
+from app.models.selection_plan_run import (
+    SelectionPlanResult,
+    SelectionPlanRun,
+    SelectionResultEvidence,
+)
+from app.models.strategy import StrategyDefinition, StrategyVersion
+from app.models.strategy_event import StrategyEvent
+from app.models.strategy_run import (
+    StrategyResult,
+    StrategyResultMetric,
+    StrategyRun,
+    StrategyRunItem,
+)
+from app.models.user import Role, User, UserRole
+from app.models.watchlist import UserWatchlistItem
+
+__all__ = [
+    "BarDaily",
+    "BarMinute",
+    "Base",
+    "CompositeEventEvidence",
+    "CompositeMonitorEvent",
+    "ConfigDefinition",
+    "Instrument",
+    "InviteCode",
+    "InviteRedemption",
+    "JobRun",
+    "Membership",
+    "MessageDelivery",
+    "MonitorState",
+    "MonitoringPlan",
+    "MonitoringPlanMember",
+    "MonitoringPlanRevision",
+    "MonitoringPlanState",
+    "NotificationChannel",
+    "NotificationMessage",
+    "NotificationTemplate",
+    "Outbox",
+    "Role",
+    "SelectionMemberCondition",
+    "SelectionPlan",
+    "SelectionPlanMember",
+    "SelectionPlanResult",
+    "SelectionPlanRevision",
+    "SelectionPlanRun",
+    "SelectionResultEvidence",
+    "StrategyDefinition",
+    "StrategyEvent",
+    "StrategyResult",
+    "StrategyResultMetric",
+    "StrategyRun",
+    "StrategyRunItem",
+    "StrategyVersion",
+    "TradingCalendar",
+    "User",
+    "UserRole",
+    "UserWatchlistItem",
+]

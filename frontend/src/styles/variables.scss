@@ -1,0 +1,75 @@
+// 设计变量：从 V1.5.1 原型 assets/styles.css 的 :root 迁移
+// 原型为深色交易终端风格，正式开发须严格沿用此变量体系，禁止引入新色板
+// V1.5.1 相比 V1.3 新增：TradingView 风格统一详情页、Manifest 驱动图层、生产级表格行为
+
+// ===== 颜色 - 背景与面板 =====
+$color-bg: #0f1117;
+$color-panel: #171a22;
+$color-panel-2: #1e222d;
+$color-panel-3: #252a36;
+
+// ===== 颜色 - 边框 =====
+$color-border: #2b3040;
+$color-border-soft: #232835;
+
+// ===== 颜色 - 文本 =====
+$color-text: #d1d4dc;
+$color-muted: #8b93a7;
+
+// ===== 主题色 =====
+$color-blue: #2962ff;
+$color-blue-2: #4b7cff;
+$color-green: #26a69a;
+$color-red: #ef5350;
+$color-orange: #ff9800;
+$color-yellow: #f4c430;
+$color-purple: #8b5cf6;
+
+// ===== 阴影 =====
+$shadow-card: 0 14px 40px rgba(0, 0, 0, 0.28);
+
+// ===== 布局尺寸 =====
+$sidebar-width: 236px;
+$topbar-height: 58px;
+$radius-base: 10px;
+
+// ===== 字体 =====
+$font-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+$font-sans: Inter, 'PingFang SC', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
+
+// ===== 响应式断点（V1.5.1 完整集合）=====
+$bp-wide: 1100px;       // 通用宽屏断点（侧栏收窄、KPI 2 列）
+$bp-narrow: 760px;      // 通用窄屏断点（侧栏隐藏、单列布局）
+$bp-xlarge: 1250px;     // V1.4/V1.5 新增：TradingView 工作区/编辑器布局降级
+$bp-chart: 1280px;      // V1.4 新增：图表详情布局降级
+
+// ===== TradingView 工作区尺寸（V1.5.1 新增）=====
+$tv-chart-height: 760px;
+$tv-canvas-height: 660px;
+$tv-workspace-min-height: 760px;
+$tv-layer-panel-max-height: 760px;
+
+// 同时导出为 CSS 自定义属性，便于在 CSS Modules 中通过 var() 使用，
+// 也保证第三方组件（如 lightweight-charts）可读取同一套主题变量
+:root {
+  --bg: #{$color-bg};
+  --panel: #{$color-panel};
+  --panel-2: #{$color-panel-2};
+  --panel-3: #{$color-panel-3};
+  --border: #{$color-border};
+  --border-soft: #{$color-border-soft};
+  --text: #{$color-text};
+  --muted: #{$color-muted};
+  --blue: #{$color-blue};
+  --blue-2: #{$color-blue-2};
+  --green: #{$color-green};
+  --red: #{$color-red};
+  --orange: #{$color-orange};
+  --yellow: #{$color-yellow};
+  --purple: #{$color-purple};
+  --shadow: #{$shadow-card};
+  --sidebar: #{$sidebar-width};
+  --topbar: #{$topbar-height};
+  --radius: #{$radius-base};
+  --mono: #{$font-mono};
+}

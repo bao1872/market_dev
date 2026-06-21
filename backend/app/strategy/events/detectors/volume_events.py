@@ -1,0 +1,112 @@
+"""量能事件检测 - V1.1 升级版。
+
+从 ref/交易/event_lib/detectors/volume_events.py 迁移。
+升级：添加 state_ttl_seconds 和 allowed_roles 声明。
+
+Registered Events:
+    - evt_up_move_with_vol_spike: 上涨+放量（CONFIRM）
+    - evt_down_move_with_vol_spike: 下跌+放量（CONFIRM）
+    - evt_vol_shrink: 缩量（OBSERVE）
+    - evt_vol_divergence: 量价背离（OBSERVE）
+"""
+
+from __future__ import annotations
+
+import pandas as pd
+
+from app.strategy.events.base import EventRole
+from app.strategy.events.registry import register_event
+
+
+def _detect_up_move_with_vol_spike(factors_df: pd.DataFrame) -> pd.Series:
+    """上涨+放量：价格上涨且成交量Z-score > 2。"""
+    if "vol_zscore_20" not in factors_df.columns or "close" not in factors_df.columns:
+        return pd.Series(0, index=factors_df.index)
+    price_up = factors_df["close"] > factors_df["close"].shift(1)
+    vol_spike = factors_df["vol_zscore_20"] > 2
+    return (price_up & vol_spike).astype(int)
+
+
+def _detect_down_move_with_vol_spike(factors_df: pd.DataFrame) -> pd.Series:
+    """下跌+放量：价格下跌且成交量Z-score > 2。"""
+    if "vol_zscore_20" not in factors_df.columns or "close" not in factors_df.columns:
+        return pd.Series(0, index=factors_df.index)
+    price_down = factors_df["close"] < factors_df["close"].shift(1)
+    vol_spike = factors_df["vol_zscore_20"] > 2
+    return (price_down & vol_spike).astype(int)
+
+
+def _detect_vol_shrink(factors_df: pd.DataFrame) -> pd.Series:
+    """缩量：成交量Z-score < -1。"""
+    if "vol_zscore_20" not in factors_df.columns:
+        return pd.Series(0, index=factors_df.index)
+    return (factors_df["vol_zscore_20"] < -1).astype(int)
+
+
+def _detect_vol_divergence(factors_df: pd.DataFrame) -> pd.Series:
+    """量价背离：价格上涨但成交量下降，或价格下跌但成交量上升。"""
+    if "vol_zscore_20" not in factors_df.columns or "close" not in factors_df.columns:
+        return pd.Series(0, index=factors_df.index)
+    price_change = factors_df["close"].diff()
+    vol_change = factors_df["vol_zscore_20"].diff()
+    divergence = ((price_change > 0) & (vol_change < 0)) | ((price_change < 0) & (vol_change > 0))
+    return divergence.astype(int)
+
+
+register_event(
+    name="evt_up_move_with_vol_spike",
+    category="量能事件",
+    detect_func=_detect_up_move_with_vol_spike,
+    required_factors=["vol_zscore_20", "close"],
+    description="上涨+放量（vol_zscore > 2）",
+    direction="positive",
+    is_core=True,
+    state_ttl_seconds=1800,
+    allowed_roles=[EventRole.CONFIRM],
+)
+
+register_event(
+    name="evt_down_move_with_vol_spike",
+    category="量能事件",
+    detect_func=_detect_down_move_with_vol_spike,
+    required_factors=["vol_zscore_20", "close"],
+    description="下跌+放量（vol_zscore > 2）",
+    direction="negative",
+    is_core=True,
+    state_ttl_seconds=1800,
+    allowed_roles=[EventRole.CONFIRM],
+)
+
+register_event(
+    name="evt_vol_shrink",
+    category="量能事件",
+    detect_func=_detect_vol_shrink,
+    required_factors=["vol_zscore_20"],
+    description="缩量（vol_zscore < -1）",
+    direction="neutral",
+    is_core=False,
+    state_ttl_seconds=600,
+    allowed_roles=[EventRole.OBSERVE],
+)
+
+register_event(
+    name="evt_vol_divergence",
+    category="量能事件",
+    detect_func=_detect_vol_divergence,
+    required_factors=["vol_zscore_20", "close"],
+    description="量价背离",
+    direction="neutral",
+    is_core=False,
+    state_ttl_seconds=600,
+    allowed_roles=[EventRole.OBSERVE],
+)
+
+
+if __name__ == "__main__":
+    from app.strategy.events.registry import list_by_category
+
+    events = list_by_category("量能事件")
+    print(f"量能事件已注册 {len(events)} 个")
+    for e in events:
+        print(f"  {e['name']} ttl={e['state_ttl_seconds']} roles={e['allowed_roles']}")
+    print("OK")

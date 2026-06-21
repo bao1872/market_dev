@@ -1,0 +1,383 @@
+"""SR支撑事件检测 - V1.1 升级版。
+
+从 ref/交易/event_lib/detectors/sr_support_events.py 迁移。
+升级：添加 state_ttl_seconds 和 allowed_roles 声明。
+
+角色分配：
+- positive reclaim 事件（刺破收回）：CONFIRM
+- negative break 事件（跌破/失败）：VETO
+"""
+
+from __future__ import annotations
+
+import pandas as pd
+
+from app.strategy.events.base import EventRole
+from app.strategy.events.registry import register_event
+
+
+def _detect_pierce_recent_support(factors_df: pd.DataFrame) -> pd.Series:
+    return (factors_df["low"] < factors_df["support_ref"]).astype(int)
+
+
+def _detect_pierce_support_reclaim(factors_df: pd.DataFrame) -> pd.Series:
+    return factors_df["evt_pierce_active_support_reclaim"].fillna(False).astype(int)
+
+
+def _detect_pierce_pivot_support_reclaim(factors_df: pd.DataFrame) -> pd.Series:
+    return factors_df["evt_pierce_pivot_support_reclaim"].fillna(False).astype(int)
+
+
+def _detect_pierce_flipped_support_reclaim(factors_df: pd.DataFrame) -> pd.Series:
+    return factors_df["evt_pierce_flipped_support_reclaim"].fillna(False).astype(int)
+
+
+def _detect_pierce_active_support_reclaim(factors_df: pd.DataFrame) -> pd.Series:
+    return factors_df["evt_pierce_active_support_reclaim"].fillna(False).astype(int)
+
+
+def _detect_failed_reclaim_support(factors_df: pd.DataFrame) -> pd.Series:
+    return factors_df["evt_failed_reclaim_active_support"].fillna(False).astype(int)
+
+
+def _detect_failed_reclaim_pivot_support(factors_df: pd.DataFrame) -> pd.Series:
+    return factors_df["evt_failed_reclaim_pivot_support"].fillna(False).astype(int)
+
+
+def _detect_failed_reclaim_flipped_support(factors_df: pd.DataFrame) -> pd.Series:
+    return factors_df["evt_failed_reclaim_flipped_support"].fillna(False).astype(int)
+
+
+def _detect_failed_reclaim_active_support(factors_df: pd.DataFrame) -> pd.Series:
+    return factors_df["evt_failed_reclaim_active_support"].fillna(False).astype(int)
+
+
+def _detect_close_break_recent_support(factors_df: pd.DataFrame) -> pd.Series:
+    return factors_df["evt_close_break_recent_support"].fillna(False).astype(int)
+
+
+def _detect_retest_flipped_support(factors_df: pd.DataFrame) -> pd.Series:
+    return factors_df["evt_retest_flipped_support"].fillna(False).astype(int)
+
+
+def _detect_clean_hold_flipped_support(factors_df: pd.DataFrame) -> pd.Series:
+    return factors_df["evt_clean_hold_flipped_support"].fillna(False).astype(int)
+
+
+def _detect_breakdown_flipped_support(factors_df: pd.DataFrame) -> pd.Series:
+    return factors_df["evt_breakdown_flipped_support"].fillna(False).astype(int)
+
+
+def _detect_reclaim_support_and_bull_bar(factors_df: pd.DataFrame) -> pd.Series:
+    pierce = factors_df["evt_pierce_active_support_reclaim"].fillna(False)
+    bull = factors_df.get("is_bull_bar", pd.Series(False, index=factors_df.index)).fillna(False)
+    return (pierce & bull).astype(int)
+
+
+def _detect_reclaim_support_close_strong(factors_df: pd.DataFrame) -> pd.Series:
+    pierce = factors_df["evt_pierce_active_support_reclaim"].fillna(False)
+    close_pos = factors_df.get("close_pos_in_bar", pd.Series(0.0, index=factors_df.index)).fillna(0)
+    return (pierce & (close_pos > 0.7)).astype(int)
+
+
+def _detect_pierce_strong_support_cluster_reclaim(factors_df: pd.DataFrame) -> pd.Series:
+    return factors_df["evt_pierce_strong_support_cluster_reclaim"].fillna(False).astype(int)
+
+
+def _detect_pierce_support_zone_reclaim(factors_df: pd.DataFrame) -> pd.Series:
+    return factors_df["evt_pierce_support_zone_reclaim"].fillna(False).astype(int)
+
+
+def _detect_pierce_support_zone_reclaim_strong(factors_df: pd.DataFrame) -> pd.Series:
+    return factors_df["evt_pierce_support_zone_reclaim_strong"].fillna(False).astype(int)
+
+
+def _detect_break_strong_support_cluster(factors_df: pd.DataFrame) -> pd.Series:
+    return factors_df["evt_break_strong_support_cluster"].fillna(False).astype(int)
+
+
+def _detect_break_strong_support_cluster_high_volume(factors_df: pd.DataFrame) -> pd.Series:
+    return factors_df["evt_break_strong_support_cluster_high_volume"].fillna(False).astype(int)
+
+
+def _detect_pierce_support_cluster_reclaim_low_volume(factors_df: pd.DataFrame) -> pd.Series:
+    return factors_df["evt_pierce_support_cluster_reclaim_low_volume"].fillna(False).astype(int)
+
+
+def _detect_pierce_support_cluster_reclaim_high_volume(factors_df: pd.DataFrame) -> pd.Series:
+    return factors_df["evt_pierce_support_cluster_reclaim_high_volume"].fillna(False).astype(int)
+
+
+register_event(
+    name="evt_pierce_recent_support",
+    category="SR支撑事件",
+    detect_func=_detect_pierce_recent_support,
+    required_factors=["low", "support_ref"],
+    description="盘中跌破最近支撑",
+    direction="negative",
+    is_core=False,
+    state_ttl_seconds=1800,
+    allowed_roles=[EventRole.OBSERVE],
+)
+
+register_event(
+    name="evt_pierce_support_reclaim",
+    category="SR支撑事件",
+    detect_func=_detect_pierce_support_reclaim,
+    required_factors=["evt_pierce_active_support_reclaim"],
+    description="刺破有效支撑后收回",
+    direction="positive",
+    is_core=True,
+    state_ttl_seconds=1800,
+    allowed_roles=[EventRole.CONFIRM],
+)
+
+register_event(
+    name="evt_pierce_pivot_support_reclaim",
+    category="SR支撑事件",
+    detect_func=_detect_pierce_pivot_support_reclaim,
+    required_factors=["low", "pivot_support_ref", "close"],
+    description="刺破pivot支撑后收回",
+    direction="positive",
+    is_core=True,
+    state_ttl_seconds=1800,
+    allowed_roles=[EventRole.CONFIRM],
+)
+
+register_event(
+    name="evt_pierce_flipped_support_reclaim",
+    category="SR支撑事件",
+    detect_func=_detect_pierce_flipped_support_reclaim,
+    required_factors=["low", "flipped_support_ref", "close"],
+    description="刺破压力转支撑后收回",
+    direction="positive",
+    is_core=True,
+    state_ttl_seconds=1800,
+    allowed_roles=[EventRole.CONFIRM],
+)
+
+register_event(
+    name="evt_pierce_active_support_reclaim",
+    category="SR支撑事件",
+    detect_func=_detect_pierce_active_support_reclaim,
+    required_factors=["low", "active_support_ref", "close"],
+    description="刺破当前有效支撑后收回",
+    direction="positive",
+    is_core=True,
+    state_ttl_seconds=1800,
+    allowed_roles=[EventRole.CONFIRM],
+)
+
+register_event(
+    name="evt_failed_reclaim_support",
+    category="SR支撑事件",
+    detect_func=_detect_failed_reclaim_support,
+    required_factors=["evt_failed_reclaim_active_support"],
+    description="刺破有效支撑失败",
+    direction="negative",
+    is_core=True,
+    state_ttl_seconds=3600,
+    allowed_roles=[EventRole.VETO],
+)
+
+register_event(
+    name="evt_failed_reclaim_pivot_support",
+    category="SR支撑事件",
+    detect_func=_detect_failed_reclaim_pivot_support,
+    required_factors=["low", "pivot_support_ref", "close"],
+    description="刺破pivot支撑失败",
+    direction="negative",
+    is_core=True,
+    state_ttl_seconds=3600,
+    allowed_roles=[EventRole.VETO],
+)
+
+register_event(
+    name="evt_failed_reclaim_flipped_support",
+    category="SR支撑事件",
+    detect_func=_detect_failed_reclaim_flipped_support,
+    required_factors=["low", "flipped_support_ref", "close"],
+    description="刺破压力转支撑失败",
+    direction="negative",
+    is_core=True,
+    state_ttl_seconds=3600,
+    allowed_roles=[EventRole.VETO],
+)
+
+register_event(
+    name="evt_failed_reclaim_active_support",
+    category="SR支撑事件",
+    detect_func=_detect_failed_reclaim_active_support,
+    required_factors=["low", "active_support_ref", "close"],
+    description="刺破当前有效支撑失败",
+    direction="negative",
+    is_core=True,
+    state_ttl_seconds=3600,
+    allowed_roles=[EventRole.VETO],
+)
+
+register_event(
+    name="evt_close_break_recent_support",
+    category="SR支撑事件",
+    detect_func=_detect_close_break_recent_support,
+    required_factors=["close", "support_ref"],
+    description="收盘跌破支撑",
+    direction="negative",
+    is_core=True,
+    state_ttl_seconds=3600,
+    allowed_roles=[EventRole.TRIGGER, EventRole.VETO],
+)
+
+register_event(
+    name="evt_retest_flipped_support",
+    category="SR支撑事件",
+    detect_func=_detect_retest_flipped_support,
+    required_factors=["low", "flipped_support_ref", "atr_14"],
+    description="回踩压力转支撑",
+    direction="positive",
+    is_core=True,
+    state_ttl_seconds=1800,
+    allowed_roles=[EventRole.CONFIRM],
+)
+
+register_event(
+    name="evt_clean_hold_flipped_support",
+    category="SR支撑事件",
+    detect_func=_detect_clean_hold_flipped_support,
+    required_factors=["low", "flipped_support_ref", "atr_14", "is_support_flipped"],
+    description="压力转支撑干净守住",
+    direction="positive",
+    is_core=False,
+    state_ttl_seconds=1800,
+    allowed_roles=[EventRole.CONFIRM],
+)
+
+register_event(
+    name="evt_breakdown_flipped_support",
+    category="SR支撑事件",
+    detect_func=_detect_breakdown_flipped_support,
+    required_factors=["close", "flipped_support_ref", "is_support_flipped"],
+    description="跌破压力转支撑",
+    direction="negative",
+    is_core=True,
+    state_ttl_seconds=3600,
+    allowed_roles=[EventRole.TRIGGER, EventRole.VETO],
+)
+
+register_event(
+    name="evt_reclaim_support_and_bull_bar",
+    category="SR支撑事件",
+    detect_func=_detect_reclaim_support_and_bull_bar,
+    required_factors=["evt_pierce_active_support_reclaim", "is_bull_bar"],
+    description="刺破收回+阳线",
+    direction="positive",
+    is_core=False,
+    state_ttl_seconds=1800,
+    allowed_roles=[EventRole.CONFIRM],
+)
+
+register_event(
+    name="evt_reclaim_support_close_strong",
+    category="SR支撑事件",
+    detect_func=_detect_reclaim_support_close_strong,
+    required_factors=["evt_pierce_active_support_reclaim", "close_pos_in_bar"],
+    description="刺破收回+收盘强势",
+    direction="positive",
+    is_core=False,
+    state_ttl_seconds=1800,
+    allowed_roles=[EventRole.CONFIRM],
+)
+
+register_event(
+    name="evt_pierce_strong_support_cluster_reclaim",
+    category="SR支撑事件",
+    detect_func=_detect_pierce_strong_support_cluster_reclaim,
+    required_factors=["evt_pierce_strong_support_cluster_reclaim"],
+    description="刺破强支撑簇后收回",
+    direction="positive",
+    is_core=True,
+    state_ttl_seconds=1800,
+    allowed_roles=[EventRole.CONFIRM],
+)
+
+register_event(
+    name="evt_pierce_support_zone_reclaim",
+    category="SR支撑事件",
+    detect_func=_detect_pierce_support_zone_reclaim,
+    required_factors=["evt_pierce_support_zone_reclaim"],
+    description="刺破支撑区间后收回(下界)",
+    direction="positive",
+    is_core=True,
+    state_ttl_seconds=1800,
+    allowed_roles=[EventRole.CONFIRM],
+)
+
+register_event(
+    name="evt_pierce_support_zone_reclaim_strong",
+    category="SR支撑事件",
+    detect_func=_detect_pierce_support_zone_reclaim_strong,
+    required_factors=["evt_pierce_support_zone_reclaim_strong"],
+    description="刺破支撑区间后收回(上界)",
+    direction="positive",
+    is_core=True,
+    state_ttl_seconds=1800,
+    allowed_roles=[EventRole.CONFIRM],
+)
+
+register_event(
+    name="evt_break_strong_support_cluster",
+    category="SR支撑事件",
+    detect_func=_detect_break_strong_support_cluster,
+    required_factors=["evt_break_strong_support_cluster"],
+    description="跌破强支撑簇",
+    direction="negative",
+    is_core=True,
+    state_ttl_seconds=3600,
+    allowed_roles=[EventRole.TRIGGER, EventRole.VETO],
+)
+
+register_event(
+    name="evt_break_strong_support_cluster_high_volume",
+    category="SR支撑事件",
+    detect_func=_detect_break_strong_support_cluster_high_volume,
+    required_factors=["evt_break_strong_support_cluster_high_volume"],
+    description="跌破强支撑簇+放量",
+    direction="negative",
+    is_core=True,
+    state_ttl_seconds=3600,
+    allowed_roles=[EventRole.TRIGGER, EventRole.VETO],
+)
+
+register_event(
+    name="evt_pierce_support_cluster_reclaim_low_volume",
+    category="SR支撑事件",
+    detect_func=_detect_pierce_support_cluster_reclaim_low_volume,
+    required_factors=["evt_pierce_support_cluster_reclaim_low_volume"],
+    description="强支撑簇刺破收回+缩量",
+    direction="positive",
+    is_core=True,
+    state_ttl_seconds=1800,
+    allowed_roles=[EventRole.CONFIRM],
+)
+
+register_event(
+    name="evt_pierce_support_cluster_reclaim_high_volume",
+    category="SR支撑事件",
+    detect_func=_detect_pierce_support_cluster_reclaim_high_volume,
+    required_factors=["evt_pierce_support_cluster_reclaim_high_volume"],
+    description="强支撑簇刺破收回+放量",
+    direction="negative",
+    is_core=True,
+    state_ttl_seconds=3600,
+    allowed_roles=[EventRole.VETO],
+)
+
+
+if __name__ == "__main__":
+    from app.strategy.events.registry import list_by_category
+
+    events = list_by_category("SR支撑事件")
+    print(f"SR支撑事件已注册 {len(events)} 个")
+    for e in events:
+        print(f"  {e['name']} ttl={e['state_ttl_seconds']} roles={e['allowed_roles']}")
+    print("OK")

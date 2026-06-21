@@ -1,0 +1,330 @@
+"""投递 Worker - 消费 Outbox 事件，将通知消息投递到用户渠道。
+
+设计：
+- process_notification_outbox: 轮询 outbox 表中 notification.message.created 事件
+- 对每条事件：查询消息 → 查询用户活跃渠道 → 逐渠道投递（幂等）
+- 投递失败按 error_code 分类：RETRYABLE 延迟重试，CHANNEL_INVALID 标记渠道失效
+- 静默时段：quiet_hours 配置，期间不投递（仅站内消息可见）
+
+幂等保证：
+- MessageDelivery.idempotency_key = SHA256(message_id + channel_id) 唯一
+- Outbox 记录处理完成后标记 status=processed
+
+Inputs:
+    db: AsyncSession
+    batch_size: int (单次轮询最大事件数)
+
+How to Run:
+    python -m app.services.delivery_worker    # 自测：验证函数签名（不连 DB）
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import UTC, datetime, time
+from typing import Any
+from uuid import UUID
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.notification import (
+    NotificationChannel,
+    NotificationMessage,
+)
+from app.models.outbox import Outbox
+from app.schemas.notification import DeliveryResult, NotificationMessageDTO
+from app.services.channel_adapter import get_adapter
+from app.services.notification_service import deliver_message
+
+logger = logging.getLogger("delivery_worker")
+
+# 通知事件类型（outbox.event_type）
+_NOTIFICATION_EVENT_TYPE = "notification.message.created"
+
+# 单次轮询最大事件数
+DEFAULT_BATCH_SIZE = 50
+
+# 最大重试次数
+DEFAULT_MAX_RETRY = 3
+
+# 静默时段配置（默认 22:00-08:00 不投递飞书，仅站内可见）
+DEFAULT_QUIET_HOURS_START = 22
+DEFAULT_QUIET_HOURS_END = 8
+
+
+def _is_quiet_hours(
+    now: datetime,
+    quiet_start: int = DEFAULT_QUIET_HOURS_START,
+    quiet_end: int = DEFAULT_QUIET_HOURS_END,
+) -> bool:
+    """判断当前是否在静默时段内。
+
+    Args:
+        now: 当前时间
+        quiet_start: 静默开始小时（如 22）
+        quiet_end: 静默结束小时（如 8）
+
+    Returns:
+        True 表示在静默时段内
+    """
+    hour = now.hour
+    if quiet_start > quiet_end:
+        # 跨天（如 22-8）
+        return hour >= quiet_start or hour < quiet_end
+    return quiet_start <= hour < quiet_end
+
+
+async def _get_message_and_channels(
+    db: AsyncSession,
+    message_id: UUID,
+    user_id: UUID,
+) -> tuple[NotificationMessage | None, list[NotificationChannel]]:
+    """查询消息与用户活跃渠道。
+
+    Args:
+        db: 异步会话
+        message_id: 通知消息 ID
+        user_id: 用户 ID
+
+    Returns:
+        (NotificationMessage | None, list[NotificationChannel])
+    """
+    # 查询消息
+    stmt_msg = select(NotificationMessage).where(
+        NotificationMessage.id == message_id
+    )
+    result_msg = await db.execute(stmt_msg)
+    message = result_msg.scalar_one_or_none()
+
+    # 查询用户活跃渠道
+    stmt_ch = (
+        select(NotificationChannel)
+        .where(
+            NotificationChannel.user_id == user_id,
+            NotificationChannel.status == "active",
+        )
+        .order_by(NotificationChannel.created_at.desc())
+    )
+    result_ch = await db.execute(stmt_ch)
+    channels = list(result_ch.scalars().all())
+
+    return message, channels
+
+
+async def _process_single_outbox(
+    db: AsyncSession,
+    outbox_record: Outbox,
+    quiet_hours: bool,
+) -> bool:
+    """处理单条 outbox 事件。
+
+    Args:
+        db: 异步会话
+        outbox_record: Outbox 记录
+        quiet_hours: 是否在静默时段
+
+    Returns:
+        True 表示处理成功
+    """
+    payload: dict[str, Any] = outbox_record.payload or {}
+    message_id_str = payload.get("message_id")
+    user_id_str = payload.get("user_id")
+
+    if not message_id_str or not user_id_str:
+        logger.warning(
+            "outbox 事件缺少 message_id/user_id: outbox_id=%s payload=%s",
+            outbox_record.id, payload,
+        )
+        return True  # 标记为已处理（无效事件不重试）
+
+    try:
+        message_id = UUID(message_id_str)
+        user_id = UUID(user_id_str)
+    except ValueError as e:
+        logger.warning(
+            "outbox 事件 message_id/user_id 格式非法: outbox_id=%s: %s",
+            outbox_record.id, e,
+        )
+        return True
+
+    # 查询消息与渠道
+    message, channels = await _get_message_and_channels(db, message_id, user_id)
+
+    if message is None:
+        logger.warning(
+            "通知消息不存在: message_id=%s outbox_id=%s",
+            message_id, outbox_record.id,
+        )
+        return True
+
+    if not channels:
+        logger.info(
+            "用户无活跃渠道，跳过投递: user_id=%s message_id=%s",
+            user_id, message_id,
+        )
+        return True
+
+    # 逐渠道投递
+    delivered_count = 0
+    for channel in channels:
+        # 静默时段跳过飞书渠道（仅站内可见）
+        if quiet_hours and channel.adapter_type.startswith("feishu"):
+            logger.info(
+                "静默时段跳过飞书投递: channel=%s message_id=%s",
+                channel.display_name, message_id,
+            )
+            continue
+
+        try:
+            delivery = await deliver_message(db, message_id, channel.id)
+            if delivery.status == "success":
+                delivered_count += 1
+                logger.info(
+                    "投递成功: message_id=%s channel=%s",
+                    message_id, channel.display_name,
+                )
+            else:
+                logger.warning(
+                    "投递失败: message_id=%s channel=%s status=%s error=%s",
+                    message_id, channel.display_name,
+                    delivery.status, delivery.last_error_code,
+                )
+
+                # 渠道失效时标记 invalid
+                if delivery.last_error_code == "CHANNEL_INVALID":
+                    channel.status = "invalid"
+                    logger.warning(
+                        "渠道标记失效: channel_id=%s channel=%s",
+                        channel.id, channel.display_name,
+                    )
+
+        except Exception as e:
+            logger.error(
+                "投递异常: message_id=%s channel=%s: %s",
+                message_id, channel.display_name, e,
+            )
+            # 不 re-raise，继续处理其他渠道
+
+    logger.info(
+        "outbox 事件处理完成: outbox_id=%s message_id=%s channels=%s delivered=%s",
+        outbox_record.id, message_id, len(channels), delivered_count,
+    )
+    return True
+
+
+async def process_notification_outbox(
+    db: AsyncSession,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    max_retry: int = DEFAULT_MAX_RETRY,
+    quiet_hours: bool | None = None,
+) -> int:
+    """轮询 outbox 表，处理 notification.message.created 事件。
+
+    流程：
+    1. 查询 status=pending 且 event_type=notification.message.created 的记录
+    2. 对每条事件：查询消息 → 查询用户活跃渠道 → 逐渠道投递
+    3. 处理完成后标记 status=processed
+    4. 失败则 retry_count+1，超过 max_retry 标记 failed
+
+    Args:
+        db: 异步会话
+        batch_size: 单次轮询最大事件数
+        max_retry: 最大重试次数
+        quiet_hours: 是否静默时段（None 表示自动判断）
+
+    Returns:
+        本次成功处理的事件数
+    """
+    if quiet_hours is None:
+        quiet_hours = _is_quiet_hours(datetime.now(UTC))
+
+    # 1. 查询 pending 的通知事件
+    stmt = (
+        select(Outbox)
+        .where(
+            Outbox.status == "pending",
+            Outbox.event_type == _NOTIFICATION_EVENT_TYPE,
+        )
+        .order_by(Outbox.created_at)
+        .limit(batch_size)
+    )
+    result = await db.execute(stmt)
+    pending_records = list(result.scalars().all())
+
+    if not pending_records:
+        return 0
+
+    processed_count = 0
+    for record in pending_records:
+        try:
+            success = await _process_single_outbox(db, record, quiet_hours)
+            if success:
+                record.status = "processed"
+                record.processed_at = datetime.now(UTC)
+                processed_count += 1
+            else:
+                record.retry_count += 1
+                if record.retry_count >= max_retry:
+                    record.status = "failed"
+        except Exception as e:
+            logger.error(
+                "outbox 事件处理异常: outbox_id=%s: %s",
+                record.id, e,
+            )
+            record.retry_count += 1
+            if record.retry_count >= max_retry:
+                record.status = "failed"
+
+    await db.flush()
+    return processed_count
+
+
+async def get_pending_notification_count(db: AsyncSession) -> int:
+    """获取 pending 状态的通知 outbox 事件数（监控用）。"""
+    from sqlalchemy import func
+
+    stmt = select(func.count(Outbox.id)).where(
+        Outbox.status == "pending",
+        Outbox.event_type == _NOTIFICATION_EVENT_TYPE,
+    )
+    result = await db.execute(stmt)
+    return int(result.scalar() or 0)
+
+
+if __name__ == "__main__":
+    # 自测入口：验证函数签名与静默时段判断（不连 DB，无副作用）
+    import inspect
+
+    for fn in (
+        process_notification_outbox,
+        _process_single_outbox,
+        _get_message_and_channels,
+        get_pending_notification_count,
+    ):
+        assert inspect.iscoroutinefunction(fn), f"{fn.__name__} 应为协程函数"
+        print(f"{fn.__name__} params={list(inspect.signature(fn).parameters.keys())}")
+
+    # 测试静默时段判断
+    from datetime import datetime
+
+    # 22:00 在静默时段内
+    t1 = datetime(2026, 6, 18, 22, 30)
+    assert _is_quiet_hours(t1) is True
+
+    # 10:00 不在静默时段内
+    t2 = datetime(2026, 6, 18, 10, 0)
+    assert _is_quiet_hours(t2) is False
+
+    # 03:00 在静默时段内（跨天）
+    t3 = datetime(2026, 6, 18, 3, 0)
+    assert _is_quiet_hours(t3) is True
+
+    # 08:00 不在静默时段内（边界）
+    t4 = datetime(2026, 6, 18, 8, 0)
+    assert _is_quiet_hours(t4) is False
+
+    print(f"quiet_hours_start={DEFAULT_QUIET_HOURS_START}")
+    print(f"quiet_hours_end={DEFAULT_QUIET_HOURS_END}")
+    print(f"event_type={_NOTIFICATION_EVENT_TYPE}")
+    print("OK")

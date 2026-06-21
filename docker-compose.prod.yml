@@ -1,0 +1,94 @@
+# V1.1 交易平台 - 生产环境 Docker Compose
+# 包含 5 个服务：db, redis, backend, worker, frontend
+# 用法: docker compose -f docker-compose.prod.yml up -d
+
+services:
+  # ===== PostgreSQL 数据库 =====
+  db:
+    image: postgres:16-alpine
+    container_name: trading-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: trading
+      POSTGRES_PASSWORD: trading
+      POSTGRES_DB: trading
+      TZ: Asia/Shanghai
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trading -d trading"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ===== Redis 缓存 =====
+  redis:
+    image: redis:7-alpine
+    container_name: trading-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ===== 后端 API 服务 =====
+  backend:
+    build: ./backend
+    container_name: trading-backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg://trading:trading@db:5432/trading
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-change-this-in-production-min-32bytes}
+      APP_ENV: production
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+  # ===== 后台任务 Worker =====
+  worker:
+    build: ./backend
+    container_name: trading-worker
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg://trading:trading@db:5432/trading
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-change-this-in-production-min-32bytes}
+      APP_ENV: production
+      WORKER_TYPE: all
+      WORKER_INTERVAL: "5"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: python -m app.worker
+
+  # ===== 前端 Nginx 服务 =====
+  frontend:
+    build: ./frontend
+    container_name: trading-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+
+volumes:
+  pgdata:
+    name: trading-pgdata
+  redisdata:
+    name: trading-redisdata

@@ -1,0 +1,60 @@
+# ===== 参考代码（第三方项目+实验归档，不入库） =====
+ref/
+
+# ===== 文档目录（手工开发文档 + 自动生成文档，不入库） =====
+doc/
+docs/
+
+# ===== 敏感配置文件 =====
+.env
+.env.*
+!.env.example
+
+# ===== 本地环境配置 =====
+.vscode/
+.trae/
+.idea/
+
+# ===== Python 临时文件与构建产物 =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+*.egg
+
+# ===== Node.js 临时文件与构建产物 =====
+node_modules/
+dist/
+dist-ssr/
+*.tsbuildinfo
+.vite/
+
+# ===== 数据文件 =====
+*.db
+*.sqlite
+*.sqlite3
+*.csv
+*.parquet
+*.pkl
+*.pickle
+
+# ===== 日志文件 =====
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ===== 操作系统文件 =====
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# ===== 压缩包与二进制包 =====
+*.zip
+*.whl
+*.tar.gz
+*.7z
