@@ -233,9 +233,9 @@ export const STRATEGIES: Record<string, StrategyDef> = {
 export const CALCULATION_WINDOWS: Record<string, CalculationWindow> = {
   '15m': { bars: 500, label: '最近 500 根 15m Bar' },
   '1h': { bars: 320, label: '最近 320 根 1h Bar' },
-  '1d': { bars: 180, label: '最近 180 个交易日' },
-  '1w': { bars: 104, label: '最近 104 周' },
-  '1mo': { bars: 36, label: '最近 36 个月' },
+  '1d': { bars: 300, label: '最近 300 个交易日' },
+  '1w': { bars: 156, label: '最近 156 周' },
+  '1mo': { bars: 48, label: '最近 48 个月' },
 }
 
 // ===== 辅助函数 =====

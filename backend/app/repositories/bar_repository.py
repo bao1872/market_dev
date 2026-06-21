@@ -29,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -48,6 +48,71 @@ logger = logging.getLogger("bar_repository")
 
 # 行情数据列（DB 查询返回的标准列）
 _BAR_COLUMNS = ["open", "high", "low", "close", "volume", "amount", "adj_factor"]
+
+# asyncpg 单次查询参数上限 32767，每条 record 9 列，故每批最多 32767 // 9 = 3640 条
+# 取 3000 留安全余量
+_UPSERT_BATCH_SIZE = 3000
+
+
+async def _batch_upsert_bars(
+    session: AsyncSession,
+    model: type,
+    records: list[dict[str, Any]],
+    index_elements: list[str],
+    label: str,
+    instrument_id: uuid.UUID,
+) -> int:
+    """分批 upsert 行情数据，避免 asyncpg 32767 参数限制。
+
+    每批最多 _UPSERT_BATCH_SIZE 条记录（9 列 × 3000 = 27000 < 32767）。
+    所有批次成功后统一 commit；任一批次失败则 rollback 并 re-raise。
+
+    Args:
+        session: 异步会话
+        model: ORM 模型类（BarDaily/Bar15Min/Bar60Min 等）
+        records: upsert 记录列表
+        index_elements: 冲突检测列（如 ["instrument_id", "trade_time"]）
+        label: 日志标识（如 "bars_15min"）
+        instrument_id: 标的 UUID（用于日志）
+
+    Returns:
+        写入记录总数
+
+    Raises:
+        Exception: 任一批次写入失败时 re-raise（不吞没）
+    """
+    if not records:
+        return 0
+
+    total = len(records)
+    for i in range(0, total, _UPSERT_BATCH_SIZE):
+        batch = records[i:i + _UPSERT_BATCH_SIZE]
+        try:
+            stmt = pg_insert(model).values(batch)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=index_elements,
+                set_={
+                    "open": stmt.excluded.open,
+                    "high": stmt.excluded.high,
+                    "low": stmt.excluded.low,
+                    "close": stmt.excluded.close,
+                    "volume": stmt.excluded.volume,
+                    "amount": stmt.excluded.amount,
+                    "adj_factor": stmt.excluded.adj_factor,
+                },
+            )
+            await session.execute(stmt)
+        except Exception as exc:
+            logger.warning(
+                "upsert %s 失败 instrument_id=%s batch=%d-%d/%d: %s",
+                label, instrument_id, i, i + len(batch), total, exc,
+            )
+            await session.rollback()
+            raise
+
+    await session.commit()
+    logger.info("upsert %s: instrument_id=%s records=%d", label, instrument_id, total)
+    return total
 
 
 async def _get_symbol(session: AsyncSession, instrument_id: uuid.UUID) -> str | None:
@@ -159,7 +224,11 @@ async def _query_minute_bars(
         return pd.DataFrame()
 
     df = pd.DataFrame(rows, columns=["trade_time"] + _BAR_COLUMNS)
-    df["trade_time"] = pd.to_datetime(df["trade_time"])
+    # DB 读取的 timestamptz 返回 UTC 时区感知 datetime，需转为 naive 上海时间与 pytdx 一致
+    _ts = pd.to_datetime(df["trade_time"])
+    if getattr(_ts.dt, "tz", None) is not None:
+        _ts = _ts.dt.tz_convert("Asia/Shanghai").dt.tz_localize(None)
+    df["trade_time"] = _ts
     df = df.set_index("trade_time")
     for col in _BAR_COLUMNS:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -514,7 +583,8 @@ def _calculate_adj_factor(
         events_with_factor.append((event_date, cumulative))
 
     # events_with_factor 按 event_date 降序（最新事件在前）
-    # 对每个 bar 日期，adj_factor = 第一个 event_date > bar_date 的 cumulative_factor
+    # 对每个 bar 日期，adj_factor = bar_date 之后第一个事件的 cumulative_factor
+    # 即降序列表中最后一个 event_date > bar_date 的事件
     # 如果没有晚于 bar_date 的事件，adj_factor = 1.0
     adj_factors: list[float] = []
     for _, row in raw_df.iterrows():
@@ -523,7 +593,6 @@ def _calculate_adj_factor(
         for event_date, cumulative_factor in events_with_factor:
             if event_date > bar_date:
                 factor = cumulative_factor
-                break
         adj_factors.append(factor)
 
     logger.info(
@@ -750,6 +819,70 @@ async def refresh_minute_bars(
 # - refresh_*_bars：强制从 pytdx 拉取（按 count），供调度服务使用
 # - 周线/月线使用 trade_date（Date），15min/60min 使用 trade_time（DateTime）
 # - pytdx 不支持并发，所有拉取通过 asyncio.to_thread 串行桥接
+# - Task 12: 周线/月线改为从日线合并（convert_kline_frequency），
+#   不再直接拉取 pytdx 原生周线/月线，adj_factor 从日线映射
+
+
+def convert_kline_frequency(daily_df: pd.DataFrame, to_f: str) -> pd.DataFrame:
+    """将日线 K 线合并为周线/月线。
+
+    参考 chanlunpro exchange.py:152-279 的 convert_stock_kline_frequency。
+
+    核心规则：
+    - resample("W") 或 resample("M")
+    - label="left", closed="right"（后对齐）
+    - OHLCV: open=first, close=last, high=max, low=min, volume=sum, amount=sum
+    - 日期取周期内第一个交易日（前对齐）
+    - adj_factor 取周期内最后一个交易日的 adj_factor（累积值，代表整个周期复权因子）
+
+    Args:
+        daily_df: 日线 DataFrame，index=DatetimeIndex(trade_date),
+                  columns=open/high/low/close/volume/amount/adj_factor
+        to_f: 目标周期 ("w" 或 "m")
+
+    Returns:
+        合并后的 DataFrame，index=DatetimeIndex(trade_date),
+        columns=open/high/low/close/volume/amount/adj_factor
+        无数据时返回空 DataFrame
+
+    Raises:
+        ValueError: to_f 不在 {"w", "m"} 时
+    """
+    if daily_df.empty:
+        return pd.DataFrame()
+
+    period_maps = {"w": "W", "m": "ME"}
+    if to_f not in period_maps:
+        raise ValueError(f"不支持的转换周期：{to_f}，仅支持 'w' 或 'm'")
+
+    period_type = period_maps[to_f]
+
+    # 复制避免修改原数据，并保留原始交易日用于前对齐
+    df = daily_df.copy()
+    df["_trade_date"] = df.index
+
+    # resample 聚合：label="left", closed="right"（后对齐）
+    agg_dict = {
+        "_trade_date": "first",  # 周线/月线取周期内第一个交易日（前对齐）
+        "open": "first",
+        "close": "last",
+        "high": "max",
+        "low": "min",
+        "volume": "sum",
+        "amount": "sum",
+        "adj_factor": "last",  # 累积值，取周期内最后一个交易日
+    }
+
+    period_df = df.resample(period_type, label="left", closed="right").agg(agg_dict)
+
+    # 删除 resample 产生的空周期行（_trade_date 为 NaT 表示该周期无交易日数据）
+    period_df = period_df.dropna(subset=["_trade_date"])
+
+    # 用周期内第一个交易日作为 index（前对齐）
+    period_df = period_df.set_index("_trade_date")
+    period_df.index.name = "trade_date"
+
+    return period_df
 
 
 # ----- 周线 -----
@@ -799,84 +932,6 @@ async def _query_weekly_bars(
     return df
 
 
-async def _upsert_weekly_bars(
-    session: AsyncSession,
-    instrument_id: uuid.UUID,
-    raw_df: pd.DataFrame,
-    symbol: str | None = None,
-    adapter: PytdxAdapter | None = None,
-) -> int:
-    """将 pytdx 拉取的周线数据 upsert 入库。
-
-    Args:
-        session: 异步会话
-        instrument_id: 标的 UUID
-        raw_df: pytdx 返回的 DataFrame，含 datetime/open/high/low/close/volume/amount
-        symbol: 股票代码，用于计算 adj_factor；None 时 adj_factor 默认 1.0
-        adapter: pytdx 适配器，用于计算 adj_factor
-
-    Returns:
-        写入记录数
-
-    Raises:
-        Exception: 写入失败时 re-raise（不吞没）
-    """
-    if raw_df.empty:
-        return 0
-
-    # 计算 adj_factor（周线 close 非日线 close，需 use_raw_close=False 从 pytdx 拉取日线 close）
-    if symbol:
-        try:
-            adj_factors = await asyncio.to_thread(
-                _calculate_adj_factor, symbol, raw_df, adapter, False
-            )
-        except Exception as exc:
-            logger.warning("计算 adj_factor 失败 symbol=%s: %s，使用默认 1.0", symbol, exc)
-            adj_factors = [1.0] * len(raw_df)
-    else:
-        adj_factors = [1.0] * len(raw_df)
-
-    raw_df["adj_factor"] = adj_factors
-
-    # 写入前校验数据质量
-    validation = validate_bars(raw_df, symbol or "", "w")
-    if not validation.is_valid:
-        logger.error(
-            "周线数据校验失败 symbol=%s errors=%s",
-            symbol, validation.errors[:5],
-        )
-        return 0
-
-    # 向量化构建 records（周线 volume 乘 100：pytdx 周线单位是"手"）
-    records = _df_to_upsert_records(
-        raw_df, instrument_id, is_daily=True, volume_multiplier=Decimal("100")
-    )
-
-    try:
-        stmt = pg_insert(BarWeekly).values(records)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["instrument_id", "trade_date"],
-            set_={
-                "open": stmt.excluded.open,
-                "high": stmt.excluded.high,
-                "low": stmt.excluded.low,
-                "close": stmt.excluded.close,
-                "volume": stmt.excluded.volume,
-                "amount": stmt.excluded.amount,
-                "adj_factor": stmt.excluded.adj_factor,
-            },
-        )
-        await session.execute(stmt)
-        await session.commit()
-    except Exception as exc:
-        logger.warning("upsert bars_weekly 失败 instrument_id=%s: %s", instrument_id, exc)
-        await session.rollback()
-        raise
-
-    logger.info("upsert bars_weekly: instrument_id=%s records=%d", instrument_id, len(records))
-    return len(records)
-
-
 async def fetch_weekly_bars(
     session: AsyncSession,
     instrument_id: uuid.UUID,
@@ -884,54 +939,27 @@ async def fetch_weekly_bars(
     end_date: date,
     adapter: PytdxAdapter | None = None,
 ) -> pd.DataFrame:
-    """查询周线行情：DB 优先，DB 无数据则从 pytdx 拉取并写入 DB。
+    """查询周线行情：从日线动态合成（使用 convert_kline_frequency）。
+
+    设计原则：周线/月线不存储在数据库中，从日线动态合成。
+    与 chanlunpro ExchangeTdx 设计一致。
 
     Args:
         session: 异步会话
         instrument_id: 标的 UUID
         start_date: 起始日期
         end_date: 结束日期
-        adapter: pytdx 适配器，None 使用模块单例
+        adapter: 保留兼容性（不再使用）
 
     Returns:
         DataFrame: index=DatetimeIndex(trade_date), columns=open/high/low/close/volume/amount/adj_factor
         无数据时返回空 DataFrame
     """
-    # 1. DB 查询
-    df = await _query_weekly_bars(session, instrument_id, start_date, end_date)
-    if not df.empty:
-        return df
-
-    # 2. DB 无数据，查 symbol
-    symbol = await _get_symbol(session, instrument_id)
-    if symbol is None:
-        logger.warning("instrument 不存在 instrument_id=%s", instrument_id)
-        return df
-
-    # 3. 从 pytdx 拉取（按 count，周线回补到 2023-01-01 约需 200 条）
-    weeks = max((end_date - start_date).days // 7 + 10, 10)
-    count = min(weeks, 800)
-    pytdx = adapter or get_pytdx_adapter()
-    try:
-        raw_df = await asyncio.to_thread(pytdx.get_weekly_bars, symbol, count)
-    except Exception as exc:
-        logger.warning("pytdx 拉取周线失败 symbol=%s: %s", symbol, exc)
-        raise
-
-    if raw_df.empty:
-        logger.warning("pytdx 周线数据为空 symbol=%s", symbol)
-        return raw_df
-
-    # 4. 写入 DB（含 adj_factor 计算）
-    await _upsert_weekly_bars(session, instrument_id, raw_df, symbol, pytdx)
-
-    # 5. 按日期范围过滤后返回
-    result_df = raw_df.set_index("datetime")
-    result_df.index.name = "trade_date"
-    start_ts = pd.Timestamp(start_date)
-    end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-    mask = (result_df.index >= start_ts) & (result_df.index <= end_ts)
-    return result_df.loc[mask]
+    # 从日线动态合成
+    daily_df = await fetch_daily_bars(session, instrument_id, start_date, end_date)
+    if daily_df.empty:
+        return daily_df
+    return convert_kline_frequency(daily_df, "w")
 
 
 async def refresh_weekly_bars(
@@ -940,38 +968,36 @@ async def refresh_weekly_bars(
     count: int = 200,
     adapter: PytdxAdapter | None = None,
 ) -> pd.DataFrame:
-    """强制从 pytdx 拉取周线并 upsert（供调度服务使用）。
+    """从日线合成周线数据（不写入 DB）。
+
+    设计原则：周线/月线不存储在数据库中，从日线动态合成。
+    此函数保留供需要预合成周线数据的场景使用（如批量计算），但不写入 DB。
 
     Args:
         session: 异步会话
         instrument_id: 标的 UUID
-        count: 拉取条数（默认 200，回补到 2023-01-01 约需 165 条）
-        adapter: pytdx 适配器，None 使用模块单例
+        count: 日线条数（用于估算日线回溯天数）
+        adapter: 保留兼容性（不再使用）
 
     Returns:
         DataFrame: index=DatetimeIndex(trade_date), columns=open/high/low/close/volume/amount/adj_factor
         无数据时返回空 DataFrame
     """
-    symbol = await _get_symbol(session, instrument_id)
-    if symbol is None:
-        logger.warning("instrument 不存在 instrument_id=%s", instrument_id)
+    # 1. 从 DB 读取日线数据：count 条周线 ≈ count*5 交易日，向前回溯 count*7 天确保覆盖
+    end_date = date.today()
+    lookback_days = max(count * 7, 365 * 5)  # 至少回溯 5 年
+    start_date = end_date - timedelta(days=lookback_days)
+
+    daily_df = await _query_daily_bars(session, instrument_id, start_date, end_date)
+    if daily_df.empty:
+        logger.warning("日线数据为空，无法合成周线 instrument_id=%s", instrument_id)
         return pd.DataFrame()
 
-    pytdx = adapter or get_pytdx_adapter()
-    try:
-        raw_df = await asyncio.to_thread(pytdx.get_weekly_bars, symbol, count)
-    except Exception as exc:
-        logger.warning("pytdx 刷新周线失败 symbol=%s: %s", symbol, exc)
-        raise
+    # 2. 合成周线
+    weekly_df = convert_kline_frequency(daily_df, "w")
 
-    if raw_df.empty:
-        return raw_df
-
-    await _upsert_weekly_bars(session, instrument_id, raw_df, symbol, pytdx)
-
-    result_df = raw_df.set_index("datetime")
-    result_df.index.name = "trade_date"
-    return result_df
+    # 3. 返回合成结果（不写入 DB）
+    return weekly_df
 
 
 # ----- 月线 -----
@@ -1021,84 +1047,6 @@ async def _query_monthly_bars(
     return df
 
 
-async def _upsert_monthly_bars(
-    session: AsyncSession,
-    instrument_id: uuid.UUID,
-    raw_df: pd.DataFrame,
-    symbol: str | None = None,
-    adapter: PytdxAdapter | None = None,
-) -> int:
-    """将 pytdx 拉取的月线数据 upsert 入库。
-
-    Args:
-        session: 异步会话
-        instrument_id: 标的 UUID
-        raw_df: pytdx 返回的 DataFrame，含 datetime/open/high/low/close/volume/amount
-        symbol: 股票代码，用于计算 adj_factor；None 时 adj_factor 默认 1.0
-        adapter: pytdx 适配器，用于计算 adj_factor
-
-    Returns:
-        写入记录数
-
-    Raises:
-        Exception: 写入失败时 re-raise（不吞没）
-    """
-    if raw_df.empty:
-        return 0
-
-    # 计算 adj_factor（月线 close 非日线 close，需 use_raw_close=False）
-    if symbol:
-        try:
-            adj_factors = await asyncio.to_thread(
-                _calculate_adj_factor, symbol, raw_df, adapter, False
-            )
-        except Exception as exc:
-            logger.warning("计算 adj_factor 失败 symbol=%s: %s，使用默认 1.0", symbol, exc)
-            adj_factors = [1.0] * len(raw_df)
-    else:
-        adj_factors = [1.0] * len(raw_df)
-
-    raw_df["adj_factor"] = adj_factors
-
-    # 写入前校验数据质量
-    validation = validate_bars(raw_df, symbol or "", "m")
-    if not validation.is_valid:
-        logger.error(
-            "月线数据校验失败 symbol=%s errors=%s",
-            symbol, validation.errors[:5],
-        )
-        return 0
-
-    # 向量化构建 records（月线 volume 乘 100：pytdx 月线单位是"手"）
-    records = _df_to_upsert_records(
-        raw_df, instrument_id, is_daily=True, volume_multiplier=Decimal("100")
-    )
-
-    try:
-        stmt = pg_insert(BarMonthly).values(records)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["instrument_id", "trade_date"],
-            set_={
-                "open": stmt.excluded.open,
-                "high": stmt.excluded.high,
-                "low": stmt.excluded.low,
-                "close": stmt.excluded.close,
-                "volume": stmt.excluded.volume,
-                "amount": stmt.excluded.amount,
-                "adj_factor": stmt.excluded.adj_factor,
-            },
-        )
-        await session.execute(stmt)
-        await session.commit()
-    except Exception as exc:
-        logger.warning("upsert bars_monthly 失败 instrument_id=%s: %s", instrument_id, exc)
-        await session.rollback()
-        raise
-
-    logger.info("upsert bars_monthly: instrument_id=%s records=%d", instrument_id, len(records))
-    return len(records)
-
-
 async def fetch_monthly_bars(
     session: AsyncSession,
     instrument_id: uuid.UUID,
@@ -1106,54 +1054,27 @@ async def fetch_monthly_bars(
     end_date: date,
     adapter: PytdxAdapter | None = None,
 ) -> pd.DataFrame:
-    """查询月线行情：DB 优先，DB 无数据则从 pytdx 拉取并写入 DB。
+    """查询月线行情：从日线动态合成（使用 convert_kline_frequency）。
+
+    设计原则：周线/月线不存储在数据库中，从日线动态合成。
+    与 chanlunpro ExchangeTdx 设计一致。
 
     Args:
         session: 异步会话
         instrument_id: 标的 UUID
         start_date: 起始日期
         end_date: 结束日期
-        adapter: pytdx 适配器，None 使用模块单例
+        adapter: 保留兼容性（不再使用）
 
     Returns:
         DataFrame: index=DatetimeIndex(trade_date), columns=open/high/low/close/volume/amount/adj_factor
         无数据时返回空 DataFrame
     """
-    # 1. DB 查询
-    df = await _query_monthly_bars(session, instrument_id, start_date, end_date)
-    if not df.empty:
-        return df
-
-    # 2. DB 无数据，查 symbol
-    symbol = await _get_symbol(session, instrument_id)
-    if symbol is None:
-        logger.warning("instrument 不存在 instrument_id=%s", instrument_id)
-        return df
-
-    # 3. 从 pytdx 拉取（按 count，月线回补到 2023-01-01 约需 50 条）
-    months = max((end_date.year - start_date.year) * 12 + (end_date.month - start_date.month) + 5, 5)
-    count = min(months, 800)
-    pytdx = adapter or get_pytdx_adapter()
-    try:
-        raw_df = await asyncio.to_thread(pytdx.get_monthly_bars, symbol, count)
-    except Exception as exc:
-        logger.warning("pytdx 拉取月线失败 symbol=%s: %s", symbol, exc)
-        raise
-
-    if raw_df.empty:
-        logger.warning("pytdx 月线数据为空 symbol=%s", symbol)
-        return raw_df
-
-    # 4. 写入 DB
-    await _upsert_monthly_bars(session, instrument_id, raw_df, symbol, pytdx)
-
-    # 5. 按日期范围过滤后返回
-    result_df = raw_df.set_index("datetime")
-    result_df.index.name = "trade_date"
-    start_ts = pd.Timestamp(start_date)
-    end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-    mask = (result_df.index >= start_ts) & (result_df.index <= end_ts)
-    return result_df.loc[mask]
+    # 从日线动态合成
+    daily_df = await fetch_daily_bars(session, instrument_id, start_date, end_date)
+    if daily_df.empty:
+        return daily_df
+    return convert_kline_frequency(daily_df, "m")
 
 
 async def refresh_monthly_bars(
@@ -1162,38 +1083,36 @@ async def refresh_monthly_bars(
     count: int = 50,
     adapter: PytdxAdapter | None = None,
 ) -> pd.DataFrame:
-    """强制从 pytdx 拉取月线并 upsert（供调度服务使用）。
+    """从日线合成月线数据（不写入 DB）。
+
+    设计原则：周线/月线不存储在数据库中，从日线动态合成。
+    此函数保留供需要预合成月线数据的场景使用（如批量计算），但不写入 DB。
 
     Args:
         session: 异步会话
         instrument_id: 标的 UUID
-        count: 拉取条数（默认 50，回补到 2023-01-01 约需 42 条）
-        adapter: pytdx 适配器，None 使用模块单例
+        count: 日线条数（用于估算日线回溯天数）
+        adapter: 保留兼容性（不再使用）
 
     Returns:
         DataFrame: index=DatetimeIndex(trade_date), columns=open/high/low/close/volume/amount/adj_factor
         无数据时返回空 DataFrame
     """
-    symbol = await _get_symbol(session, instrument_id)
-    if symbol is None:
-        logger.warning("instrument 不存在 instrument_id=%s", instrument_id)
+    # 1. 从 DB 读取日线数据：count 条月线 ≈ count*30 天，向前回溯 count*31 天确保覆盖
+    end_date = date.today()
+    lookback_days = max(count * 31, 365 * 5)  # 至少回溯 5 年
+    start_date = end_date - timedelta(days=lookback_days)
+
+    daily_df = await _query_daily_bars(session, instrument_id, start_date, end_date)
+    if daily_df.empty:
+        logger.warning("日线数据为空，无法合成月线 instrument_id=%s", instrument_id)
         return pd.DataFrame()
 
-    pytdx = adapter or get_pytdx_adapter()
-    try:
-        raw_df = await asyncio.to_thread(pytdx.get_monthly_bars, symbol, count)
-    except Exception as exc:
-        logger.warning("pytdx 刷新月线失败 symbol=%s: %s", symbol, exc)
-        raise
+    # 2. 合成月线
+    monthly_df = convert_kline_frequency(daily_df, "m")
 
-    if raw_df.empty:
-        return raw_df
-
-    await _upsert_monthly_bars(session, instrument_id, raw_df, symbol, pytdx)
-
-    result_df = raw_df.set_index("datetime")
-    result_df.index.name = "trade_date"
-    return result_df
+    # 3. 返回合成结果（不写入 DB）
+    return monthly_df
 
 
 # ----- 15分钟线 -----
@@ -1236,11 +1155,58 @@ async def _query_15min_bars(
         return pd.DataFrame()
 
     df = pd.DataFrame(rows, columns=["trade_time"] + _BAR_COLUMNS)
-    df["trade_time"] = pd.to_datetime(df["trade_time"])
+    # DB 读取的 timestamptz 返回 UTC 时区感知 datetime，需转为 naive 上海时间与 pytdx 一致
+    _ts = pd.to_datetime(df["trade_time"])
+    if getattr(_ts.dt, "tz", None) is not None:
+        _ts = _ts.dt.tz_convert("Asia/Shanghai").dt.tz_localize(None)
+    df["trade_time"] = _ts
     df = df.set_index("trade_time")
     for col in _BAR_COLUMNS:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
+
+
+async def _map_adj_factor_from_daily(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    raw_df: pd.DataFrame,
+) -> list[float]:
+    """从 DB 日线表映射 adj_factor 到分钟线记录。
+
+    按分钟线 bar 的日期部分，从 bars_daily 表查询对应日期的 adj_factor。
+    如果某日期在日线表中不存在，则 fallback 到 1.0。
+
+    Args:
+        session: 异步会话
+        instrument_id: 标的 UUID
+        raw_df: pytdx 返回的 DataFrame，含 datetime 列
+
+    Returns:
+        adj_factor 列表，与 raw_df 行一一对应；日线表无对应日期时为 1.0
+    """
+    # 提取分钟线 bar 的日期部分
+    bar_dates = pd.to_datetime(raw_df["datetime"]).dt.date
+    unique_dates = bar_dates.unique().tolist()
+
+    if not unique_dates:
+        return [1.0] * len(raw_df)
+
+    # 查询 bars_daily 表获取这些日期的 adj_factor
+    result = await session.execute(
+        select(BarDaily.trade_date, BarDaily.adj_factor)
+        .where(BarDaily.instrument_id == instrument_id)
+        .where(BarDaily.trade_date.in_(unique_dates))
+    )
+    rows = result.all()
+
+    # 构建 date -> adj_factor 映射（跳过 adj_factor 为 None 的记录）
+    factor_map: dict[date, float] = {}
+    for trade_date, adj_factor in rows:
+        if adj_factor is not None:
+            factor_map[trade_date] = float(adj_factor)
+
+    # 按分钟线 bar 日期查找 adj_factor，找不到则用 1.0
+    return [factor_map.get(d, 1.0) for d in bar_dates]
 
 
 async def _upsert_15min_bars(
@@ -1252,12 +1218,14 @@ async def _upsert_15min_bars(
 ) -> int:
     """将 pytdx 拉取的 15 分钟线数据 upsert 入库。
 
+    adj_factor 从日线表 bars_daily 映射（按 bar 日期匹配），保证分钟线与日线 adj_factor 一致。
+
     Args:
         session: 异步会话
         instrument_id: 标的 UUID
         raw_df: pytdx 返回的 DataFrame，含 datetime/open/high/low/close/volume/amount
-        symbol: 股票代码，用于计算 adj_factor；None 时 adj_factor 默认 1.0
-        adapter: pytdx 适配器，用于计算 adj_factor
+        symbol: 股票代码，用于数据校验
+        adapter: pytdx 适配器（保留兼容，不再用于 adj_factor 计算）
 
     Returns:
         写入记录数
@@ -1268,17 +1236,14 @@ async def _upsert_15min_bars(
     if raw_df.empty:
         return 0
 
-    # 计算 adj_factor（15min close 非日线 close，需 use_raw_close=False）
-    if symbol:
-        try:
-            adj_factors = await asyncio.to_thread(
-                _calculate_adj_factor, symbol, raw_df, adapter, False
-            )
-        except Exception as exc:
-            logger.warning("计算 adj_factor 失败 symbol=%s: %s，使用默认 1.0", symbol, exc)
-            adj_factors = [1.0] * len(raw_df)
-    else:
-        adj_factors = [1.0] * len(raw_df)
+    # 从日线表映射 adj_factor（保证分钟线与日线 adj_factor 一致）
+    try:
+        adj_factors = await _map_adj_factor_from_daily(session, instrument_id, raw_df)
+    except Exception as exc:
+        raise RuntimeError(
+            f"从日线表映射 adj_factor 失败 instrument_id={instrument_id} "
+            f"symbol={symbol} bar_count={len(raw_df)}: {exc}"
+        ) from exc
 
     raw_df["adj_factor"] = adj_factors
 
@@ -1296,29 +1261,11 @@ async def _upsert_15min_bars(
         raw_df, instrument_id, is_daily=False, volume_multiplier=Decimal("1")
     )
 
-    try:
-        stmt = pg_insert(Bar15Min).values(records)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["instrument_id", "trade_time"],
-            set_={
-                "open": stmt.excluded.open,
-                "high": stmt.excluded.high,
-                "low": stmt.excluded.low,
-                "close": stmt.excluded.close,
-                "volume": stmt.excluded.volume,
-                "amount": stmt.excluded.amount,
-                "adj_factor": stmt.excluded.adj_factor,
-            },
-        )
-        await session.execute(stmt)
-        await session.commit()
-    except Exception as exc:
-        logger.warning("upsert bars_15min 失败 instrument_id=%s: %s", instrument_id, exc)
-        await session.rollback()
-        raise
-
-    logger.info("upsert bars_15min: instrument_id=%s records=%d", instrument_id, len(records))
-    return len(records)
+    return await _batch_upsert_bars(
+        session, Bar15Min, records,
+        index_elements=["instrument_id", "trade_time"],
+        label="bars_15min", instrument_id=instrument_id,
+    )
 
 
 async def fetch_15min_bars(
@@ -1461,7 +1408,11 @@ async def _query_60min_bars(
         return pd.DataFrame()
 
     df = pd.DataFrame(rows, columns=["trade_time"] + _BAR_COLUMNS)
-    df["trade_time"] = pd.to_datetime(df["trade_time"])
+    # DB 读取的 timestamptz 返回 UTC 时区感知 datetime，需转为 naive 上海时间与 pytdx 一致
+    _ts = pd.to_datetime(df["trade_time"])
+    if getattr(_ts.dt, "tz", None) is not None:
+        _ts = _ts.dt.tz_convert("Asia/Shanghai").dt.tz_localize(None)
+    df["trade_time"] = _ts
     df = df.set_index("trade_time")
     for col in _BAR_COLUMNS:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -1477,12 +1428,14 @@ async def _upsert_60min_bars(
 ) -> int:
     """将 pytdx 拉取的 60 分钟线数据 upsert 入库。
 
+    adj_factor 从日线表 bars_daily 映射（按 bar 日期匹配），保证分钟线与日线 adj_factor 一致。
+
     Args:
         session: 异步会话
         instrument_id: 标的 UUID
         raw_df: pytdx 返回的 DataFrame，含 datetime/open/high/low/close/volume/amount
-        symbol: 股票代码，用于计算 adj_factor；None 时 adj_factor 默认 1.0
-        adapter: pytdx 适配器，用于计算 adj_factor
+        symbol: 股票代码，用于数据校验
+        adapter: pytdx 适配器（保留兼容，不再用于 adj_factor 计算）
 
     Returns:
         写入记录数
@@ -1493,17 +1446,14 @@ async def _upsert_60min_bars(
     if raw_df.empty:
         return 0
 
-    # 计算 adj_factor（60min close 非日线 close，需 use_raw_close=False）
-    if symbol:
-        try:
-            adj_factors = await asyncio.to_thread(
-                _calculate_adj_factor, symbol, raw_df, adapter, False
-            )
-        except Exception as exc:
-            logger.warning("计算 adj_factor 失败 symbol=%s: %s，使用默认 1.0", symbol, exc)
-            adj_factors = [1.0] * len(raw_df)
-    else:
-        adj_factors = [1.0] * len(raw_df)
+    # 从日线表映射 adj_factor（保证分钟线与日线 adj_factor 一致）
+    try:
+        adj_factors = await _map_adj_factor_from_daily(session, instrument_id, raw_df)
+    except Exception as exc:
+        raise RuntimeError(
+            f"从日线表映射 adj_factor 失败 instrument_id={instrument_id} "
+            f"symbol={symbol} bar_count={len(raw_df)}: {exc}"
+        ) from exc
 
     raw_df["adj_factor"] = adj_factors
 
@@ -1521,29 +1471,11 @@ async def _upsert_60min_bars(
         raw_df, instrument_id, is_daily=False, volume_multiplier=Decimal("1")
     )
 
-    try:
-        stmt = pg_insert(Bar60Min).values(records)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["instrument_id", "trade_time"],
-            set_={
-                "open": stmt.excluded.open,
-                "high": stmt.excluded.high,
-                "low": stmt.excluded.low,
-                "close": stmt.excluded.close,
-                "volume": stmt.excluded.volume,
-                "amount": stmt.excluded.amount,
-                "adj_factor": stmt.excluded.adj_factor,
-            },
-        )
-        await session.execute(stmt)
-        await session.commit()
-    except Exception as exc:
-        logger.warning("upsert bars_60min 失败 instrument_id=%s: %s", instrument_id, exc)
-        await session.rollback()
-        raise
-
-    logger.info("upsert bars_60min: instrument_id=%s records=%d", instrument_id, len(records))
-    return len(records)
+    return await _batch_upsert_bars(
+        session, Bar60Min, records,
+        index_elements=["instrument_id", "trade_time"],
+        label="bars_60min", instrument_id=instrument_id,
+    )
 
 
 async def fetch_60min_bars(
@@ -1736,8 +1668,8 @@ if __name__ == "__main__":
         assert params == expected_params, f"{fn_name} 参数不匹配: {params} != {expected_params}"
         print(f"{fn_name} params={params} ✓")
 
-    # 6. 验证 upsert 函数存在
-    for fn_name in ["_upsert_weekly_bars", "_upsert_monthly_bars", "_upsert_15min_bars", "_upsert_60min_bars"]:
+    # 6. 验证 upsert 函数存在（周线/月线不存储，已删除 _upsert_weekly/monthly_bars）
+    for fn_name in ["_upsert_15min_bars", "_upsert_60min_bars"]:
         fn = globals()[fn_name]
         assert callable(fn), f"{fn_name} 应可调用"
     print("_upsert_*_bars 可调用 ✓")
@@ -1863,5 +1795,126 @@ if __name__ == "__main__":
         assert abs(adj_factors_3[i] - 1.0) < 1e-6, \
             f"混合: 事件日及之后 bar[{i}] adj_factor 应为 1.0，实际 {adj_factors_3[i]}"
     print(f"混合: adj_factors={[round(f, 4) for f in adj_factors_3]} ✓")
+
+    # 9. 验证 convert_kline_frequency（Task 12: 日线合并为周线/月线）
+    print("\n--- Task 12: convert_kline_frequency 自测 ---")
+
+    # 构造 2 周日线数据（2026-06-15 周一到 2026-06-26 周五，跳过周末）
+    # 06-15(周一) ~ 06-19(周五): Week1, 06-22(周一) ~ 06-26(周五): Week2
+    daily_data = {
+        "open":       [10.0, 10.2, 10.4, 10.6, 10.8, 11.0, 11.3],
+        "high":       [10.5, 10.6, 10.8, 11.0, 11.2, 11.5, 11.6],
+        "low":        [9.8, 10.0, 10.2, 10.4, 10.6, 10.8, 11.0],
+        "close":      [10.2, 10.4, 10.6, 10.8, 11.0, 11.3, 11.5],
+        "volume":     [100000, 110000, 120000, 130000, 140000, 150000, 160000],
+        "amount":     [1020000, 1144000, 1272000, 1404000, 1540000, 1695000, 1840000],
+        "adj_factor": [0.98, 0.98, 0.98, 1.0, 1.0, 1.0, 1.0],
+    }
+    daily_dates = pd.to_datetime([
+        "2026-06-15", "2026-06-16", "2026-06-17", "2026-06-18", "2026-06-19",
+        "2026-06-22", "2026-06-26",
+    ])
+    daily_df_test = pd.DataFrame(daily_data, index=daily_dates)
+    daily_df_test.index.name = "trade_date"
+
+    # 9.1 周线合并
+    weekly_df_test = convert_kline_frequency(daily_df_test, "w")
+    assert len(weekly_df_test) == 2, f"周线合并应有 2 条，实际 {len(weekly_df_test)}"
+    # Week 1: 06-15 到 06-19
+    w1 = weekly_df_test.loc[pd.Timestamp("2026-06-15")]
+    assert w1["open"] == 10.0, f"Week1 open 应为 10.0，实际 {w1['open']}"
+    assert w1["close"] == 11.0, f"Week1 close 应为 11.0，实际 {w1['close']}"
+    assert w1["high"] == 11.2, f"Week1 high 应为 11.2，实际 {w1['high']}"
+    assert w1["low"] == 9.8, f"Week1 low 应为 9.8，实际 {w1['low']}"
+    assert w1["volume"] == 600000, f"Week1 volume 应为 600000，实际 {w1['volume']}"
+    # adj_factor 取周期内最后一个交易日（06-19 的 1.0，非 06-15 的 0.98）
+    assert w1["adj_factor"] == 1.0, f"Week1 adj_factor 应为 1.0（最后一个交易日），实际 {w1['adj_factor']}"
+    print(f"周线 Week1: date=06-15 open={w1['open']} close={w1['close']} high={w1['high']} low={w1['low']} adj={w1['adj_factor']} ✓")
+
+    # Week 2: 06-22, 06-26
+    w2 = weekly_df_test.loc[pd.Timestamp("2026-06-22")]
+    assert w2["open"] == 11.0, f"Week2 open 应为 11.0，实际 {w2['open']}"
+    assert w2["close"] == 11.5, f"Week2 close 应为 11.5，实际 {w2['close']}"
+    assert w2["adj_factor"] == 1.0, f"Week2 adj_factor 应为 1.0，实际 {w2['adj_factor']}"
+    print(f"周线 Week2: date=06-22 open={w2['open']} close={w2['close']} adj={w2['adj_factor']} ✓")
+
+    # 9.2 前对齐验证：周线 trade_date 应为周期内第一个交易日
+    assert pd.Timestamp("2026-06-15") in weekly_df_test.index, "Week1 trade_date 应为 06-15（第一个交易日）"
+    assert pd.Timestamp("2026-06-22") in weekly_df_test.index, "Week2 trade_date 应为 06-22（第一个交易日）"
+    print("前对齐: 周线 trade_date = 周期内第一个交易日 ✓")
+
+    # 9.3 月线合并
+    monthly_df_test = convert_kline_frequency(daily_df_test, "m")
+    assert len(monthly_df_test) == 1, f"月线合并应有 1 条（都在 6 月），实际 {len(monthly_df_test)}"
+    m1 = monthly_df_test.iloc[0]
+    assert m1["open"] == 10.0, f"月线 open 应为 10.0，实际 {m1['open']}"
+    assert m1["close"] == 11.5, f"月线 close 应为 11.5，实际 {m1['close']}"
+    assert m1["high"] == 11.6, f"月线 high 应为 11.6，实际 {m1['high']}"
+    assert m1["low"] == 9.8, f"月线 low 应为 9.8，实际 {m1['low']}"
+    assert m1["volume"] == 910000, f"月线 volume 应为 910000，实际 {m1['volume']}"
+    assert m1["adj_factor"] == 1.0, f"月线 adj_factor 应为 1.0，实际 {m1['adj_factor']}"
+    print(f"月线: open={m1['open']} close={m1['close']} high={m1['high']} low={m1['low']} adj={m1['adj_factor']} ✓")
+
+    # 9.4 空数据
+    empty_conv = convert_kline_frequency(pd.DataFrame(), "w")
+    assert empty_conv.empty, "空输入应返回空"
+    print("空数据 ✓")
+
+    # 9.5 非法周期
+    try:
+        convert_kline_frequency(daily_df_test, "d")
+        raise AssertionError("应抛出 ValueError")
+    except ValueError as e:
+        assert "不支持" in str(e), f"错误信息不匹配: {e}"
+    print("非法周期 ValueError ✓")
+
+    # 10. 验证 _map_adj_factor_from_daily（从日线表映射 adj_factor 到分钟线）
+    print("\n--- _map_adj_factor_from_daily 自测 ---")
+
+    class _MockResult:
+        """Mock session.execute 返回结果。"""
+
+        def __init__(self, rows: list) -> None:
+            self._rows = rows
+
+        def all(self) -> list:
+            return self._rows
+
+    class _MockSession:
+        """Mock AsyncSession，返回预设的 bars_daily 行。"""
+
+        def __init__(self, rows: list) -> None:
+            self._rows = rows
+
+        async def execute(self, stmt):  # noqa: ANN001
+            return _MockResult(self._rows)
+
+    # 10.1 正常映射 + fallback：分钟线日期匹配日线 adj_factor，无匹配日期 fallback 1.0
+    mock_rows = [
+        (date(2026, 6, 16), Decimal("1.5")),
+        (date(2026, 6, 17), Decimal("1.0")),
+    ]
+    mock_session = _MockSession(mock_rows)
+    test_df = pd.DataFrame({
+        "datetime": pd.to_datetime([
+            "2026-06-16 09:30", "2026-06-16 10:00", "2026-06-17 09:30", "2026-06-18 09:30",
+        ]),
+        "open": [10.0, 10.1, 10.2, 10.3],
+        "high": [10.5, 10.6, 10.7, 10.8],
+        "low": [9.8, 9.9, 10.0, 10.1],
+        "close": [10.2, 10.3, 10.4, 10.5],
+        "volume": [100000, 110000, 120000, 130000],
+        "amount": [1020000, 1133000, 1248000, 1365000],
+    })
+    factors = asyncio.run(_map_adj_factor_from_daily(mock_session, uuid.uuid4(), test_df))
+    # 06-16 两条 -> 1.5, 06-17 一条 -> 1.0, 06-18 日线表无 -> 1.0（fallback）
+    assert factors == [1.5, 1.5, 1.0, 1.0], f"adj_factor 映射错误: {factors}"
+    print(f"正常映射+fallback: {factors} ✓")
+
+    # 10.2 边界：日线表无任何匹配（全 fallback 1.0）
+    mock_session_empty = _MockSession([])
+    factors_empty = asyncio.run(_map_adj_factor_from_daily(mock_session_empty, uuid.uuid4(), test_df))
+    assert factors_empty == [1.0, 1.0, 1.0, 1.0], f"空日线表应全为 1.0: {factors_empty}"
+    print(f"空日线表 fallback: {factors_empty} ✓")
 
     print("\n所有自测通过 ✓（未进行 DB/网络测试）")

@@ -190,12 +190,20 @@ class DBExchange(Exchange):
         return self._query_bars_by_date("bars_daily", symbol, start, end)
 
     def get_weekly_bars(self, symbol: str, count: int = 800) -> pd.DataFrame:
-        """获取周线数据（按数量，取最新 count 条）。"""
-        return self._query_bars_by_count("bars_weekly", symbol, count, "trade_date")
+        """获取周线数据（按数量，取最新 count 条）。
+
+        周线不存储在 DB，从日线动态合成（convert_kline_frequency）。
+        DBExchange 不支持直接查周线表，返回空 DataFrame。
+        """
+        return pd.DataFrame()
 
     def get_monthly_bars(self, symbol: str, count: int = 800) -> pd.DataFrame:
-        """获取月线数据（按数量）。"""
-        return self._query_bars_by_count("bars_monthly", symbol, count, "trade_date")
+        """获取月线数据（按数量）。
+
+        月线不存储在 DB，从日线动态合成（convert_kline_frequency）。
+        DBExchange 不支持直接查月线表，返回空 DataFrame。
+        """
+        return pd.DataFrame()
 
     def get_15min_bars(self, symbol: str, count: int = 800) -> pd.DataFrame:
         """获取 15 分钟线数据（按数量）。"""

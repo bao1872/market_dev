@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -48,8 +49,8 @@ router = APIRouter(prefix="/api/v1", tags=["bars"])
 _ALLOWED_TIMEFRAMES = {"1d", "15m", "1h", "1w", "1mo"}
 
 # 默认查询范围
-_DEFAULT_DAILY_LOOKBACK_DAYS = 180  # 日线/周线/月线默认回看 180 天
-_DEFAULT_INTRADAY_LOOKBACK_DAYS = 5  # 15min/60min 默认回看 5 天（覆盖一周交易）
+_DEFAULT_DAILY_LOOKBACK_DAYS = 5000  # 日线/周线/月线默认回看 5000 天（覆盖约 13 年，确保周线 ≥250 条）
+_DEFAULT_INTRADAY_LOOKBACK_DAYS = 180  # 15min/60min 默认回看 180 天（DB 实测 180 天 60min=460 根 > 320 根需求）
 _MAX_PAGE_SIZE = 1000
 
 
@@ -78,7 +79,7 @@ def _parse_date_range(
             )
         return start, end
     # 15m / 1h（日内周期）
-    # 默认回看 5 天，覆盖一周的交易（避免周末/非交易日时查不到数据）
+    # 默认回看 180 天，DB 实测 180 天 60min=460 根 > 320 根需求（策略计算窗口）
     end_dt = datetime.combine(end_date or date.today(), datetime.max.time())
     start_dt = datetime.combine(
         start_date or (end_dt.date() - timedelta(days=_DEFAULT_INTRADAY_LOOKBACK_DAYS)),
@@ -239,10 +240,11 @@ async def get_bars(
                 detail=f"前复权计算失败: {exc}",
             ) from exc
 
-    # 服务端分页
+    # 服务端分页：返回最新的数据（page=1 返回最新 page_size 条）
+    # df 按时间正序排列（最旧在前），从末尾取最新数据
     total = len(df)
-    start_idx = (page - 1) * page_size
-    end_idx = start_idx + page_size
+    end_idx = total - (page - 1) * page_size
+    start_idx = max(0, end_idx - page_size)
     page_df = df.iloc[start_idx:end_idx]
 
     items = _df_to_responses(page_df, instrument_id, timeframe)
@@ -342,7 +344,7 @@ async def bars_health(session: AsyncSession = Depends(get_db)) -> dict:
                     # 分钟类：latest 为 datetime
                     latest_dt = latest
                     if latest_dt.tzinfo is not None:
-                        latest_dt = latest_dt.replace(tzinfo=None)
+                        latest_dt = latest_dt.astimezone(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
 
                 age = (now - latest_dt).total_seconds()
                 health_status["freshness"][name] = {

@@ -12,6 +12,7 @@ import {
   STRATEGIES,
   type DisplayGroupDef,
 } from '../lib/strategy-manifest'
+import type { ChartLayer, IndicatorResponse } from '../api/endpoints'
 
 // ===== 颜色常量（对齐原型 charts.js 的 C 对象）=====
 const C = {
@@ -70,6 +71,7 @@ export interface StrategyChartProps {
   symbol: string
   bars: BarData[]
   events?: ChartEvent[]
+  indicators?: IndicatorResponse | undefined
   strategyId?: string
   source?: string
   view?: 'snapshot' | 'current'
@@ -755,6 +757,125 @@ function renderBreakout(
   drawText(ctx, '结构压力', g.plotRight - 54, py(pressure) - 5, C.down, '8px sans-serif')
 }
 
+// ===== 通用渲染器（根据后端返回的 ChartLayer.renderer 分发）=====
+
+// 通用渲染器：根据 layer.renderer 分发
+function renderIndicatorLayer(
+  ctx: CanvasRenderingContext2D,
+  g: Geometry,
+  layer: ChartLayer,
+  data: Record<string, (number | null)[]>,
+  barsCount: number,
+  step: number,
+  py: (v: number) => number,
+): void {
+  switch (layer.renderer) {
+    case 'line':
+      renderIndicatorLine(ctx, g, layer, data, barsCount, step, py)
+      break
+    case 'price_zone':
+      renderIndicatorPriceZone(ctx, g, layer, data, barsCount, step, py)
+      break
+    // marker/band 暂不实现，留空即可
+  }
+}
+
+// 线图渲染（支持 direction_colored）
+function renderIndicatorLine(
+  ctx: CanvasRenderingContext2D,
+  g: Geometry,
+  layer: ChartLayer,
+  data: Record<string, (number | null)[]>,
+  barsCount: number,
+  step: number,
+  py: (v: number) => number,
+): void {
+  // layer.fields[0] 是主值字段（如 dsa_vwap）
+  // layer.fields[1] 是方向字段（如 dsa_dir，1=上涨，0=下跌）
+  const valueField = layer.fields[0]
+  const dirField = layer.fields[1]
+  const values = data[valueField]
+  if (!values || !values.length) return
+  // 对齐可见 bar 数量，避免指标数组长度超过 display 时越界绘制
+  const len = Math.min(values.length, barsCount)
+
+  if (layer.direction_colored && dirField && data[dirField]) {
+    const dirs = data[dirField]
+    // 分段绘制：相邻方向相同的点连成一段
+    let segStart = 0
+    for (let i = 1; i <= len; i++) {
+      const curDir = i < len ? dirs[i] : null
+      const prevDir = dirs[i - 1]
+      const dirChanged = i === len || curDir !== prevDir
+      if (dirChanged && i > segStart + 1) {
+        // 绘制 segStart 到 i-1 的线段
+        const dir = prevDir
+        const color = dir === 1 ? (layer.direction_up_color || '#ff1744') : (layer.direction_down_color || '#00e676')
+        ctx.beginPath()
+        let started = false
+        for (let j = segStart; j < i; j++) {
+          const v = values[j]
+          if (v == null) { started = false; continue }
+          const x = g.l + (j + 0.5) * step
+          const y = py(v)
+          if (!started) { ctx.moveTo(x, y); started = true }
+          else ctx.lineTo(x, y)
+        }
+        ctx.strokeStyle = color
+        ctx.lineWidth = 1.5
+        ctx.stroke()
+        segStart = i - 1
+      }
+    }
+  } else {
+    // 单色线
+    ctx.beginPath()
+    let started = false
+    for (let i = 0; i < len; i++) {
+      const v = values[i]
+      if (v == null) { started = false; continue }
+      const x = g.l + (i + 0.5) * step
+      const y = py(v)
+      if (!started) { ctx.moveTo(x, y); started = true }
+      else ctx.lineTo(x, y)
+    }
+    ctx.strokeStyle = layer.color || C.yellow
+    ctx.lineWidth = 1.5
+    ctx.stroke()
+  }
+}
+
+// 价格区间渲染（半透明矩形）
+function renderIndicatorPriceZone(
+  ctx: CanvasRenderingContext2D,
+  g: Geometry,
+  layer: ChartLayer,
+  data: Record<string, (number | null)[]>,
+  barsCount: number,
+  step: number,
+  py: (v: number) => number,
+): void {
+  // layer.fields: [upper_node, lower_node, poc_price]
+  const upperField = layer.fields[0]
+  const lowerField = layer.fields[1]
+  const upperVals = data[upperField]
+  const lowerVals = data[lowerField]
+  if (!upperVals || !lowerVals) return
+  // 对齐可见 bar 数量，避免指标数组长度超过 display 时越界绘制
+  const len = Math.min(upperVals.length, lowerVals.length, barsCount)
+
+  ctx.fillStyle = layer.color || 'rgba(33,150,243,0.50)'
+  for (let i = 0; i < len; i++) {
+    const upper = upperVals[i]
+    const lower = lowerVals[i]
+    if (upper == null || lower == null) continue
+    const x = g.l + i * step
+    const y1 = py(upper)
+    const y2 = py(lower)
+    ctx.fillRect(x, y1, step, y2 - y1)
+  }
+}
+
 // ===== 事件映射与可见性 =====
 
 // 事件类型 -> 颜色
@@ -826,6 +947,7 @@ function drawTrading(
   layers: LayerVisibility,
   timeframe: string,
   state: ChartState,
+  indicators?: IndicatorResponse | undefined,
 ): void {
   if (!display.length) return
   const { ctx, w, h } = fit(canvas)
@@ -879,6 +1001,16 @@ function drawTrading(
   // 7. 突破压力区
   if (layers.breakout) {
     renderBreakout(ctx, g, display, py)
+  }
+
+  // 7.5 通用渲染器：渲染后端返回的策略指标图层
+  if (indicators && indicators.layers && indicators.data) {
+    indicators.layers.forEach(layer => {
+      const layerData = indicators.data![layer.strategy_id]
+      if (layerData) {
+        renderIndicatorLayer(ctx, g, layer, layerData, display.length, step, py)
+      }
+    })
   }
 
   // 8. K 线蜡烛图
@@ -1015,6 +1147,7 @@ export function StrategyChart({
   symbol,
   bars,
   events = [],
+  indicators,
   strategyId = 'default',
   source = 'watchlist',
   height = 660,
@@ -1059,7 +1192,7 @@ export function StrategyChart({
   })
 
   // 显示 bar 数量（缩放控制）
-  const [displayBars, setDisplayBars] = useState(82)
+  const [displayBars, setDisplayBars] = useState(250)
 
   // 十字线联动图例 bar 索引（-1 表示无十字线，显示最后一根）
   const [legendIdx, setLegendIdx] = useState(-1)
@@ -1073,7 +1206,7 @@ export function StrategyChart({
 
   // 可见 bars
   const display = useMemo(() => {
-    const visibleCount = clamp(displayBars, 30, Math.min(140, calc.length))
+    const visibleCount = clamp(displayBars, 30, Math.min(250, calc.length))
     return calc.slice(-visibleCount)
   }, [calc, displayBars])
 
@@ -1087,19 +1220,23 @@ export function StrategyChart({
   const dataRef = useRef({ calc, display, mappedEvents, layers, timeframe })
   dataRef.current = { calc, display, mappedEvents, layers, timeframe }
 
+  // indicators ref（避免 draw 函数依赖 indicators 导致频繁重绘）
+  const indicatorsRef = useRef<IndicatorResponse | undefined>(undefined)
+  indicatorsRef.current = indicators
+
   // 绘制函数（稳定引用，从 dataRef 读取最新数据）
   const draw = useCallback(() => {
     const canvas = canvasRef.current
     if (!canvas || !canvas.offsetParent) return
     const { calc: c, display: d, mappedEvents: ev, layers: ly, timeframe: tf } = dataRef.current
     if (!d.length) return
-    drawTrading(canvas, c, d, ev, ly, tf, stateRef.current)
+    drawTrading(canvas, c, d, ev, ly, tf, stateRef.current, indicatorsRef.current)
   }, [])
 
   // 数据/图层变化时重绘
   useEffect(() => {
     draw()
-  }, [draw, calc, display, mappedEvents, layers, displayBars])
+  }, [draw, calc, display, mappedEvents, layers, displayBars, indicators])
 
   // 持久化图层可见性
   useEffect(() => {
@@ -1160,7 +1297,27 @@ export function StrategyChart({
         tip.classList.add('show')
         tip.style.left = Math.min(w - 235, mx + 14) + 'px'
         tip.style.top = Math.max(42, my - 58) + 'px'
-        tip.innerHTML = `<b>${formatTime(d.time)}</b><span>开 ${fmt(d.open)}　高 ${fmt(d.high)}</span><span>低 ${fmt(d.low)}　收 ${fmt(d.close)}</span><span>\u6210\u4ea4量 ${formatVolume(d.volume)}</span><span>VWAP ${fmt(d.vwap)}　Offset ${fmt(d.offset)}%</span><span>Delta ${formatVolume(d.delta)}　ATR ${fmt(d.atr)}</span>`
+        // 追加后端策略指标
+        let indicatorHtml = ''
+        if (indicatorsRef.current?.layers && indicatorsRef.current?.data) {
+          indicatorsRef.current.layers.forEach(layer => {
+            const layerData = indicatorsRef.current!.data[layer.strategy_id]
+            if (!layerData) return
+            const fields = layer.hover_fields.length ? layer.hover_fields : layer.fields
+            const parts: string[] = []
+            fields.forEach(f => {
+              const vals = layerData[f]
+              if (vals && vals[i] != null) {
+                const label = f.replace(/_/g, ' ').toUpperCase()
+                parts.push(`${label} ${fmt(vals[i]!)}`)
+              }
+            })
+            if (parts.length) {
+              indicatorHtml += `<span>${layer.layer_name}: ${parts.join(' · ')}</span>`
+            }
+          })
+        }
+        tip.innerHTML = `<b>${formatTime(d.time)}</b><span>开 ${fmt(d.open)}　高 ${fmt(d.high)}</span><span>低 ${fmt(d.low)}　收 ${fmt(d.close)}</span><span>\u6210\u4ea4量 ${formatVolume(d.volume)}</span><span>VWAP ${fmt(d.vwap)}　Offset ${fmt(d.offset)}%</span><span>Delta ${formatVolume(d.delta)}　ATR ${fmt(d.atr)}</span>${indicatorHtml}`
       }
     }
 
@@ -1244,8 +1401,8 @@ export function StrategyChart({
 
   // 缩放控制
   const zoomIn = () => setDisplayBars(n => Math.max(30, n - 15))
-  const zoomOut = () => setDisplayBars(n => Math.min(140, n + 15))
-  const resetZoom = () => setDisplayBars(82)
+  const zoomOut = () => setDisplayBars(n => Math.min(250, n + 15))
+  const resetZoom = () => setDisplayBars(250)
 
   const hasData = bars.length > 0
 

@@ -108,17 +108,22 @@ def _apply_adj_factor_core(
     # merge_asof 前按 _trade_date 排序会打乱同一天内的时间顺序，需按 index 重新排序
     merged = merged.sort_index()
 
-    # 缺失的 adj_factor 用 latest_adj 填充（与原始逻辑一致）
-    missing_count = int(merged["_adj"].isna().sum())
-    merged["_adj"] = merged["_adj"].fillna(latest_adj)
-
-    ratio = merged["_adj"] / latest_adj
+    # 优先使用 bars_df 中已有的 adj_factor 列（周线/月线从日线合成时 adj_factor 已正确）
+    # 仅在 bars_df 无 adj_factor 列时使用 merge_asof 查找的结果
+    if "adj_factor" in merged.columns:
+        missing_count = 0
+        ratio = merged["adj_factor"] / latest_adj
+    else:
+        # 缺失的 adj_factor 用 latest_adj 填充（与原始逻辑一致）
+        missing_count = int(merged["_adj"].isna().sum())
+        merged["_adj"] = merged["_adj"].fillna(latest_adj)
+        ratio = merged["_adj"] / latest_adj
 
     # 向量化列乘法（替代原始 for col in ["open","high","low","close"] 循环）
     cols_to_adj = [c for c in _PRICE_COLS if c in merged.columns]
     merged[cols_to_adj] = merged[cols_to_adj].multiply(ratio, axis=0)
 
-    # 清理临时列
+    # 清理临时列（保留 adj_factor 列，_df_to_responses 需要返回它）
     merged = merged.drop(
         columns=["_trade_date", "_adj_trade_date", "_adj"], errors="ignore"
     )

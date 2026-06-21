@@ -10,7 +10,7 @@
 - VolumeProfileConfig: VP 配置
 
 输入：MarketDataContext（bars_minute 含 1m OHLCV bars，min_bars=360）
-输出：MonitorState（current_price/upper_node/lower_node/position_0_1/poc_node/last_touched_node）
+输出：MonitorState（current_price/upper_node/lower_node/position_0_1/poc_price/last_touched_node）
       + StrategyEventDraft（node_cluster_touch 事件）
 
 事件检测：
@@ -20,7 +20,7 @@
 
 对照 volume_node_monitor.yaml 字段定义：
 - outputs: current_price(number), upper_node(json), lower_node(json),
-           position_0_1(number, ratio_0_1), poc_node(json), last_touched_node(json)
+           position_0_1(number, ratio_0_1), poc_price(json), last_touched_node(json)
 - event_types: node_cluster_touch (dedupe=touch_episode, state_ttl_seconds=120)
 - resource_budget: target_ms_per_instrument=500
 
@@ -34,7 +34,6 @@ import importlib.util
 import logging
 import os
 import sys
-import types
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -43,6 +42,7 @@ import numpy as np
 import pandas as pd
 
 from app.models.strategy import StrategyVersion
+from app.strategy._plotly_mock import ensure_plotly_mock
 from app.strategy.runtime import (
     MarketDataContext,
     MonitorState,
@@ -69,35 +69,6 @@ EVENT_TYPE_NODE_CLUSTER_TOUCH = "node_cluster_touch"
 EVENT_STATE_TTL_SECONDS = 120
 
 
-def _ensure_plotly_mock() -> None:
-    """若 plotly 未安装，注入轻量 mock 到 sys.modules（仅用于满足 features 模块顶层 import）。
-
-    features/ 模块顶层 `import plotly.graph_objects as go` 仅用于可视化函数
-    （make_volume_profile_figure 等）。monitor 仅调用 compute_volume_profile
-    与 extract_nearest_nodes，不依赖 plotly。注入 mock 避免引入重依赖，
-    同时不修改 features/ 源码。
-    """
-    if "plotly" in sys.modules:
-        return
-    try:
-        import plotly  # noqa: F401
-        return
-    except ImportError:
-        pass
-    # 构造 plotly + plotly.graph_objects mock
-    plotly_mock = types.ModuleType("plotly")
-    go_mock = types.ModuleType("plotly.graph_objects")
-    # 提供最小占位属性（可视化函数不会被 monitor 调用）
-    go_mock.Figure = type("Figure", (), {"__init__": lambda self, *a, **kw: None})
-    go_mock.Candlestick = type("Candlestick", (), {"__init__": lambda self, *a, **kw: None})
-    go_mock.Bar = type("Bar", (), {"__init__": lambda self, *a, **kw: None})
-    go_mock.Layout = type("Layout", (), {"__init__": lambda self, *a, **kw: None})
-    plotly_mock.graph_objects = go_mock
-    sys.modules["plotly"] = plotly_mock
-    sys.modules["plotly.graph_objects"] = go_mock
-    logger.debug("已注入 plotly mock（features 可视化依赖，monitor 不使用）")
-
-
 def _load_features_module() -> Any:
     """通过 importlib 从文件路径加载 features/ 算法模块（不修改 features/）。
 
@@ -118,7 +89,7 @@ def _load_features_module() -> Any:
             f"（请设置 FEATURES_DIR 环境变量指向 ref/交易/features 目录）"
         )
     # plotly 未安装时注入 mock（features 顶层 import 需要）
-    _ensure_plotly_mock()
+    ensure_plotly_mock()
     try:
         spec = importlib.util.spec_from_file_location(_VP_MODULE_NAME, _VP_MODULE_PATH)
         if spec is None or spec.loader is None:
@@ -235,6 +206,88 @@ class VolumeNodeMonitor(StrategyRuntime):
             "VolumeNodeMonitor 是 monitor 策略，不支持 execute（请使用 calculate_state + detect_events）"
         )
 
+    async def compute_indicators(self, context: MarketDataContext) -> dict[str, Any]:
+        """计算 Volume Profile + Node 图表指标（供个股详情页面使用）。
+
+        复用现有 _compute_volume_profile 逻辑，计算最近 N 根 bar 的 Volume Node。
+        支持 node_ltf=15m|1m：15m 时从 context.bars_15min 读取，1m 时从 context.bars_minute 读取。
+
+        VP 只计算一次（expensive），然后对每根 bar 的收盘价提取最近 Node 信息。
+        说明：extract_nearest_nodes 是 features/ SSOT 函数，接收单个价格，
+        无法向量化（禁止修改 features/）。bar 数量受 lookback 限制（≤360），
+        图表展示场景性能可接受。
+
+        Returns:
+            {"upper_node": [...], "lower_node": [...], "poc_price": [...],
+             "position_0_1": [...], "current_price": [...]}
+        """
+        # 选择低周期 bars
+        bars = context.bars_15min if context.bars_15min is not None else context.bars_minute
+        if bars is None or len(bars) < 10:
+            return {"upper_node": [], "lower_node": [], "poc_price": [],
+                    "position_0_1": [], "current_price": []}
+
+        if self._vp_module is None:
+            raise RuntimeError("features 模块未加载，请先调用 initialize()")
+
+        # 准备数据并计算 VP（复用现有 _compute_volume_profile，VP 只计算一次）
+        bars_prepared = _prepare_bars_for_vp(bars)
+        try:
+            vp_result = self._compute_volume_profile(bars_prepared)
+        except Exception as e:
+            raise RuntimeError(
+                f"compute_volume_profile 失败 instrument_id={context.instrument_id}: {e}"
+            ) from e
+
+        # VP 价格范围（用于 position_0_1）
+        lowest_price = float(vp_result.lowest_price)
+        highest_price = float(vp_result.highest_price)
+        price_range = highest_price - lowest_price
+        poc_price = float(vp_result.poc_price) if pd.notna(vp_result.poc_price) else None
+
+        peak_df = vp_result.peak_df
+
+        # 对每根 bar 提取 Node 信息（基于该 bar 的收盘价）
+        close_series = bars["close"].astype(float)
+
+        upper_nodes: list[Any] = []
+        lower_nodes: list[Any] = []
+        poc_prices: list[float | None] = []
+        positions: list[float] = []
+        current_prices: list[float] = []
+
+        for price in close_series:
+            # 调用 SSOT extract_nearest_nodes 获取上下方最近 Node 价格
+            nearest_info = self._vp_module.extract_nearest_nodes(vp_result, float(price))
+            upper_node = self._lookup_node_by_price(
+                peak_df, nearest_info["nearest_above_node_price"]
+            )
+            lower_node = self._lookup_node_by_price(
+                peak_df, nearest_info["nearest_below_node_price"]
+            )
+
+            # position_0_1: 当前价在 VP 价格范围中的相对位置 [0, 1]
+            if price_range > 0:
+                pos = round(
+                    float(np.clip((float(price) - lowest_price) / price_range, 0.0, 1.0)), 4
+                )
+            else:
+                pos = 0.5
+
+            upper_nodes.append(upper_node)
+            lower_nodes.append(lower_node)
+            poc_prices.append(poc_price)
+            positions.append(pos)
+            current_prices.append(round(float(price), 4))
+
+        return {
+            "upper_node": upper_nodes,
+            "lower_node": lower_nodes,
+            "poc_price": poc_prices,
+            "position_0_1": positions,
+            "current_price": current_prices,
+        }
+
     def _compute_volume_profile(self, bars: pd.DataFrame) -> Any:
         """调用 features/ compute_volume_profile 计算 VP（向量化）。
 
@@ -282,7 +335,7 @@ class VolumeNodeMonitor(StrategyRuntime):
 
         输入 MarketDataContext.bars_minute（1m bars），输出 MonitorState。
         state 字典含 manifest.outputs 声明的所有字段：
-        current_price/upper_node/lower_node/position_0_1/poc_node/last_touched_node
+        current_price/upper_node/lower_node/position_0_1/poc_price/last_touched_node
 
         Args:
             context: 市场数据上下文（bars_minute 含 1m OHLCV bars）
@@ -342,8 +395,8 @@ class VolumeNodeMonitor(StrategyRuntime):
         else:
             position_0_1 = 0.5
 
-        # poc_node: POC 价格对应的 profile 行（json 结构）
-        poc_node = self._lookup_poc_node(vp_result)
+        # poc_price: POC 价格对应的 profile 行（json 结构）
+        poc_price = self._lookup_poc_node(vp_result)
 
         # last_touched_node: 当前价触碰的 Peak Node（向量化检测）
         last_touched_node = self._find_touched_node(peak_df, current_price)
@@ -354,7 +407,7 @@ class VolumeNodeMonitor(StrategyRuntime):
             "upper_node": upper_node,
             "lower_node": lower_node,
             "position_0_1": position_0_1,
-            "poc_node": poc_node,
+            "poc_price": poc_price,
             "last_touched_node": last_touched_node,
         }
 
@@ -469,7 +522,7 @@ class VolumeNodeMonitor(StrategyRuntime):
             "position_0_1": curr_state.state.get("position_0_1"),
             "upper_node": curr_state.state.get("upper_node"),
             "lower_node": curr_state.state.get("lower_node"),
-            "poc_node": curr_state.state.get("poc_node"),
+            "poc_price": curr_state.state.get("poc_price"),
             "bar_time": bar_time_iso,
         }
 

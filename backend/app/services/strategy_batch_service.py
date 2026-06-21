@@ -722,8 +722,8 @@ class StrategyBatchService:
                     symbol, days_since_listing,
                 )
 
-        # 拉取日线行情（回看 800 bars，约 720 天）
-        lookback_days = 720
+        # 拉取日线行情（回看 5000 天，与 bars.py 一致）
+        lookback_days = 5000
         start_date = run.trade_date - timedelta(days=lookback_days)
         try:
             bars_df = await fetch_daily_bars(

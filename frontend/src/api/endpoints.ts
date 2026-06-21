@@ -1530,6 +1530,56 @@ export async function getBars(instrumentId: string, params?: BarQueryParams): Pr
 }
 
 // ============================================================
+// ===== Indicators 端点 =====
+// ============================================================
+
+/** 策略图表图层定义（来自 manifest 的 chart_layers） */
+export interface ChartLayer {
+  strategy_id: string
+  strategy_name: string
+  layer_id: string
+  layer_name: string
+  renderer: string  // line | price_zone | marker | band
+  pane: string      // price | volume | separate
+  color?: string
+  direction_colored?: boolean
+  direction_up_color?: string
+  direction_down_color?: string
+  fields: string[]
+  hover_fields: string[]
+}
+
+/** 指标查询参数 */
+export interface IndicatorQueryParams {
+  timeframe?: string  // 1d | 15m | 1h | 1w | 1mo
+  adj?: string        // qfq | none
+  bars?: number       // 返回最近 N 根 bar 的指标
+}
+
+/** 指标 API 响应 */
+export interface IndicatorResponse {
+  layers: ChartLayer[]
+  data: Record<string, Record<string, (number | null)[]>>
+  errors?: Record<string, string>
+}
+
+/**
+ * 查询指定标的的所有策略图表指标
+ * 后端 indicators router 自带 prefix="/api/v1"，完整路径为 /api/v1/instruments/{id}/indicators
+ * apiClient baseURL="/api" 会添加网关前缀，代理层处理后到达后端 /api/v1/instruments/{id}/indicators
+ */
+export async function getIndicators(
+  instrumentId: string,
+  params?: IndicatorQueryParams,
+): Promise<IndicatorResponse> {
+  const { data } = await apiClient.get<IndicatorResponse>(
+    `/api/v1/instruments/${instrumentId}/indicators`,
+    { params },
+  )
+  return data
+}
+
+// ============================================================
 // ===== Calendar 端点 =====
 // ============================================================
 

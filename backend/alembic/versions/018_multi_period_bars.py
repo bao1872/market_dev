@@ -5,8 +5,8 @@ Revises: 017_filter_indexes
 Create Date: 2026-06-20
 
 多周期行情表（周线/月线/15分钟/1小时）：
-- bars_weekly: 周线行情，PK(instrument_id, trade_date)，trade_date 为该周最后一个交易日
-- bars_monthly: 月线行情，PK(instrument_id, trade_date)，trade_date 为该月最后一个交易日
+- bars_weekly: 周线行情，PK(instrument_id, trade_date)，trade_date 为该周第一个交易日（前对齐）
+- bars_monthly: 月线行情，PK(instrument_id, trade_date)，trade_date 为该月第一个交易日（前对齐）
 - bars_15min: 15分钟线行情，PK(instrument_id, trade_time)
 - bars_60min: 60分钟线行情，PK(instrument_id, trade_time)
 

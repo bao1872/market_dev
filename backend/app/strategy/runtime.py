@@ -45,6 +45,8 @@ class MarketDataContext:
         bars_daily: 日线行情 DataFrame，index=DatetimeIndex，
                     columns 含 open/high/low/close/volume/amount/adj_factor
         bars_minute: 分钟线行情 DataFrame（可选，monitor 策略使用）
+        bars_15min: 15 分钟线行情 DataFrame（可选，Volume Node Monitor
+                    的 node_ltf=15m 低周期数据，供 compute_indicators 使用）
         adj_factor: 复权因子 DataFrame，columns=[trade_date, adj_factor]
         trade_date: 交易日（策略计算的截止日期）
     """
@@ -53,6 +55,7 @@ class MarketDataContext:
     symbol: str
     bars_daily: pd.DataFrame
     bars_minute: pd.DataFrame | None = None
+    bars_15min: pd.DataFrame | None = None
     adj_factor: pd.DataFrame | None = None
     trade_date: date | None = None
     bar_time: datetime | None = None
@@ -168,6 +171,18 @@ class StrategyRuntime(ABC):
             策略执行结果
         """
         raise NotImplementedError
+
+    async def compute_indicators(self, context: MarketDataContext) -> dict[str, Any]:
+        """计算图表指标（供个股详情页面使用）。
+
+        默认实现：调用 execute() 并返回 result.metrics。
+        子类可覆盖以提供更轻量的计算（只计算图表需要的指标）。
+
+        Returns:
+            指标字典，key=指标名, value=数值或数值列表
+        """
+        result = await self.execute(context)
+        return result.metrics
 
     async def calculate_state(self, context: MarketDataContext) -> MonitorState:
         """计算 monitor 策略当前状态（monitor kind 必须实现）。
@@ -320,4 +335,13 @@ if __name__ == "__main__":
     assert "dsa_selector" in StrategyLoader._registry
     assert "volume_node_monitor" in StrategyLoader._registry
     print("dsa_selector + volume_node_monitor 已注册 ✓")
+
+    # 验证 MarketDataContext.bars_15min 字段存在
+    assert "bars_15min" in MarketDataContext.__dataclass_fields__
+    print("MarketDataContext.bars_15min 字段存在 ✓")
+
+    # 验证 compute_indicators 方法存在（具体方法，非 abstractmethod）
+    assert hasattr(StrategyRuntime, "compute_indicators")
+    assert not getattr(StrategyRuntime.compute_indicators, "__isabstractmethod__", False)
+    print("StrategyRuntime.compute_indicators 方法存在且非抽象 ✓")
     print("OK")

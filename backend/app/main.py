@@ -47,6 +47,7 @@ from app.api.auth import router as auth_router
 from app.api.bars import router as bars_router
 from app.api.calendar import router as calendar_router
 from app.api.health import router as health_router
+from app.api.indicators import router as indicators_router
 from app.api.instruments import router as instruments_router
 from app.api.metrics import http_request_duration_seconds, http_requests_total
 from app.api.monitor_states import router as monitor_states_router
@@ -102,6 +103,8 @@ app.include_router(instruments_router)
 app.include_router(calendar_router)
 # 行情查询路由
 app.include_router(bars_router)
+# 策略指标实时计算路由
+app.include_router(indicators_router)
 # 策略目录与版本路由（R7）
 app.include_router(strategies_router)
 # 策略运行与结果路由（R12）

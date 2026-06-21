@@ -101,7 +101,7 @@ def _make_mock_version(strategy_id: str = "volume_node_monitor") -> MagicMock:
             {"key": "upper_node", "type": "json"},
             {"key": "lower_node", "type": "json"},
             {"key": "position_0_1", "type": "number", "semantic": "ratio_0_1"},
-            {"key": "poc_node", "type": "json"},
+            {"key": "poc_price", "type": "json"},
             {"key": "last_touched_node", "type": "json"},
         ],
         "event_types": [
@@ -197,7 +197,7 @@ class TestVolumeNodeMonitorState:
 
         expected_fields = {
             "current_price", "upper_node", "lower_node",
-            "position_0_1", "poc_node", "last_touched_node",
+            "position_0_1", "poc_price", "last_touched_node",
         }
         actual_fields = set(state.state.keys())
         assert actual_fields == expected_fields, (
@@ -234,7 +234,7 @@ class TestVolumeNodeMonitorState:
         context = _make_context(minute_bars)
         state = await monitor.calculate_state(context)
 
-        for field in ("upper_node", "lower_node", "poc_node", "last_touched_node"):
+        for field in ("upper_node", "lower_node", "poc_price", "last_touched_node"):
             node = state.state[field]
             if node is not None:
                 assert isinstance(node, dict), f"{field} 应为 dict 或 None，实际 {type(node)}"

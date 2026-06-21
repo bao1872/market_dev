@@ -1,6 +1,6 @@
 """数据新鲜度 SLA 检查服务。
 
-检查 bars_daily/bars_minute/bars_weekly/bars_monthly/bars_15min/bars_60min 表中数据的时效性，
+检查 bars_daily/bars_minute/bars_15min/bars_60min 表中数据的时效性，
 过期时触发拉取刷新。
 
 SLA 定义（与任务约束一致）：
@@ -10,6 +10,11 @@ SLA 定义（与任务约束一致）：
 - 60min SLA: 3600 秒（1 小时）—— 60 分钟线应在对应周期结束后 1 小时内更新
 - 周线 SLA: 7 天 —— 周线数据应在每周结束后 7 天内更新
 - 月线 SLA: 30 天 —— 月线数据应在每月结束后 30 天内更新
+
+设计说明：
+- 周线/月线不存储在 DB，从日线动态合成（convert_kline_frequency）
+- 周线/月线的新鲜度等同于日线新鲜度（数据源相同）
+- ensure_weekly_freshness/ensure_monthly_freshness 委托给 ensure_daily_freshness
 
 新鲜度计算：
 - 日线/周线/月线：last_update = MAX(trade_date) 对应的收盘时间（当天 15:00）
@@ -36,21 +41,21 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import select
 
-from app.models.bar import Bar15Min, Bar60Min, BarDaily, BarMinute, BarMonthly, BarWeekly
+from app.models.bar import Bar15Min, Bar60Min, BarDaily, BarMinute
 from app.repositories.bar_repository import (
     refresh_15min_bars,
     refresh_60min_bars,
     refresh_daily_bars,
     refresh_minute_bars,
-    refresh_monthly_bars,
-    refresh_weekly_bars,
 )
 from app.services.bars_metrics import bars_freshness_age_seconds
+from app.services.bars_scheduler_service import BarsSchedulerService
 
 logger = logging.getLogger("freshness_sla")
 
@@ -66,12 +71,8 @@ MONTHLY_SLA_SECONDS = 30 * 86400  # 30 天
 _DAILY_CLOSE_TIME = time(15, 0)
 
 # 刷新拉取的回看窗口
-_DAILY_REFRESH_LOOKBACK_DAYS = 5  # 覆盖周末
+# 日线/15min/60min 刷新条数引用 BarsSchedulerService.DAILY_COUNTS（单一权威定义）
 _MINUTE_REFRESH_LOOKBACK_MINUTES = 30
-_15MIN_REFRESH_LOOKBACK_COUNT = 50  # 15min 刷新拉取条数
-_60MIN_REFRESH_LOOKBACK_COUNT = 10  # 60min 刷新拉取条数
-_WEEKLY_REFRESH_LOOKBACK_COUNT = 5  # 周线刷新拉取条数
-_MONTHLY_REFRESH_LOOKBACK_COUNT = 5  # 月线刷新拉取条数
 
 
 def _record_freshness_metric(
@@ -195,7 +196,7 @@ async def ensure_daily_freshness(
 
     logger.info("日线数据过期，触发刷新 instrument_id=%s", instrument_id)
     now = datetime.now()
-    start = (now - timedelta(days=_DAILY_REFRESH_LOOKBACK_DAYS)).date()
+    start = (now - timedelta(days=BarsSchedulerService.DAILY_COUNTS["d"])).date()
     end = now.date()
     try:
         await refresh_daily_bars(session, instrument_id, start, end)
@@ -244,7 +245,7 @@ async def check_minute_freshness(
         )
 
     if latest_time.tzinfo is not None:
-        latest_time = latest_time.replace(tzinfo=None)
+        latest_time = latest_time.astimezone(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
 
     now = datetime.now()
     age = (now - latest_time).total_seconds()
@@ -325,7 +326,7 @@ async def check_15min_freshness(
         )
 
     if latest_time.tzinfo is not None:
-        latest_time = latest_time.replace(tzinfo=None)
+        latest_time = latest_time.astimezone(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
 
     now = datetime.now()
     age = (now - latest_time).total_seconds()
@@ -356,7 +357,7 @@ async def ensure_15min_freshness(
     logger.info("15min 数据过期，触发刷新 instrument_id=%s", instrument_id)
     try:
         await refresh_15min_bars(
-            session, instrument_id, count=_15MIN_REFRESH_LOOKBACK_COUNT
+            session, instrument_id, count=BarsSchedulerService.DAILY_COUNTS["15m"]
         )
     except Exception as exc:
         logger.warning("15min 刷新失败 instrument_id=%s: %s", instrument_id, exc)
@@ -396,7 +397,7 @@ async def check_60min_freshness(
         )
 
     if latest_time.tzinfo is not None:
-        latest_time = latest_time.replace(tzinfo=None)
+        latest_time = latest_time.astimezone(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
 
     now = datetime.now()
     age = (now - latest_time).total_seconds()
@@ -427,7 +428,7 @@ async def ensure_60min_freshness(
     logger.info("60min 数据过期，触发刷新 instrument_id=%s", instrument_id)
     try:
         await refresh_60min_bars(
-            session, instrument_id, count=_60MIN_REFRESH_LOOKBACK_COUNT
+            session, instrument_id, count=BarsSchedulerService.DAILY_COUNTS["60m"]
         )
     except Exception as exc:
         logger.warning("60min 刷新失败 instrument_id=%s: %s", instrument_id, exc)
@@ -439,139 +440,33 @@ async def ensure_60min_freshness(
 # ===== 周线 =====
 
 
-async def check_weekly_freshness(
-    session: AsyncSession,
-    instrument_id: uuid.UUID,
-) -> FreshnessResult:
-    """检查周线数据新鲜度。
-
-    last_update = MAX(trade_date) 对应的当天 15:00 收盘时间。
-    """
-    try:
-        result = await session.execute(
-            select(func.max(BarWeekly.trade_date))
-            .where(BarWeekly.instrument_id == instrument_id)
-        )
-        latest_date: date | None = result.scalar()
-    except Exception as exc:
-        logger.warning("查询周线最新日期失败 instrument_id=%s: %s", instrument_id, exc)
-        raise
-
-    if latest_date is None:
-        logger.warning("周线无数据 instrument_id=%s", instrument_id)
-        return FreshnessResult(
-            is_fresh=False,
-            last_update=None,
-            age_seconds=None,
-            sla_seconds=WEEKLY_SLA_SECONDS,
-        )
-
-    last_update = datetime.combine(latest_date, _DAILY_CLOSE_TIME)
-    now = datetime.now()
-    age = (now - last_update).total_seconds()
-
-    is_fresh = age <= WEEKLY_SLA_SECONDS
-    logger.info(
-        "周线新鲜度 instrument_id=%s latest_date=%s age=%.0fs sla=%ds is_fresh=%s",
-        instrument_id, latest_date, age, WEEKLY_SLA_SECONDS, is_fresh,
-    )
-    _record_freshness_metric("w", age, WEEKLY_SLA_SECONDS, is_fresh)
-    return FreshnessResult(
-        is_fresh=is_fresh,
-        last_update=last_update,
-        age_seconds=age,
-        sla_seconds=WEEKLY_SLA_SECONDS,
-    )
-
-
 async def ensure_weekly_freshness(
     session: AsyncSession,
     instrument_id: uuid.UUID,
 ) -> FreshnessResult:
-    """检查周线新鲜度，过期则触发拉取刷新。"""
-    result = await check_weekly_freshness(session, instrument_id)
-    if result.is_fresh:
-        return result
+    """检查周线新鲜度，过期则触发日线刷新。
 
-    logger.info("周线数据过期，触发刷新 instrument_id=%s", instrument_id)
-    try:
-        await refresh_weekly_bars(
-            session, instrument_id, count=_WEEKLY_REFRESH_LOOKBACK_COUNT
-        )
-    except Exception as exc:
-        logger.warning("周线刷新失败 instrument_id=%s: %s", instrument_id, exc)
-        raise
-
-    return await check_weekly_freshness(session, instrument_id)
+    设计原则：周线/月线不存储在 DB，从日线动态合成。
+    因此周线新鲜度等同于日线新鲜度，委托给 ensure_daily_freshness。
+    """
+    logger.info("周线新鲜度委托给日线检查 instrument_id=%s", instrument_id)
+    return await ensure_daily_freshness(session, instrument_id)
 
 
 # ===== 月线 =====
-
-
-async def check_monthly_freshness(
-    session: AsyncSession,
-    instrument_id: uuid.UUID,
-) -> FreshnessResult:
-    """检查月线数据新鲜度。
-
-    last_update = MAX(trade_date) 对应的当天 15:00 收盘时间。
-    """
-    try:
-        result = await session.execute(
-            select(func.max(BarMonthly.trade_date))
-            .where(BarMonthly.instrument_id == instrument_id)
-        )
-        latest_date: date | None = result.scalar()
-    except Exception as exc:
-        logger.warning("查询月线最新日期失败 instrument_id=%s: %s", instrument_id, exc)
-        raise
-
-    if latest_date is None:
-        logger.warning("月线无数据 instrument_id=%s", instrument_id)
-        return FreshnessResult(
-            is_fresh=False,
-            last_update=None,
-            age_seconds=None,
-            sla_seconds=MONTHLY_SLA_SECONDS,
-        )
-
-    last_update = datetime.combine(latest_date, _DAILY_CLOSE_TIME)
-    now = datetime.now()
-    age = (now - last_update).total_seconds()
-
-    is_fresh = age <= MONTHLY_SLA_SECONDS
-    logger.info(
-        "月线新鲜度 instrument_id=%s latest_date=%s age=%.0fs sla=%ds is_fresh=%s",
-        instrument_id, latest_date, age, MONTHLY_SLA_SECONDS, is_fresh,
-    )
-    _record_freshness_metric("m", age, MONTHLY_SLA_SECONDS, is_fresh)
-    return FreshnessResult(
-        is_fresh=is_fresh,
-        last_update=last_update,
-        age_seconds=age,
-        sla_seconds=MONTHLY_SLA_SECONDS,
-    )
 
 
 async def ensure_monthly_freshness(
     session: AsyncSession,
     instrument_id: uuid.UUID,
 ) -> FreshnessResult:
-    """检查月线新鲜度，过期则触发拉取刷新。"""
-    result = await check_monthly_freshness(session, instrument_id)
-    if result.is_fresh:
-        return result
+    """检查月线新鲜度，过期则触发日线刷新。
 
-    logger.info("月线数据过期，触发刷新 instrument_id=%s", instrument_id)
-    try:
-        await refresh_monthly_bars(
-            session, instrument_id, count=_MONTHLY_REFRESH_LOOKBACK_COUNT
-        )
-    except Exception as exc:
-        logger.warning("月线刷新失败 instrument_id=%s: %s", instrument_id, exc)
-        raise
-
-    return await check_monthly_freshness(session, instrument_id)
+    设计原则：周线/月线不存储在 DB，从日线动态合成。
+    因此月线新鲜度等同于日线新鲜度，委托给 ensure_daily_freshness。
+    """
+    logger.info("月线新鲜度委托给日线检查 instrument_id=%s", instrument_id)
+    return await ensure_daily_freshness(session, instrument_id)
 
 
 if __name__ == "__main__":
@@ -633,8 +528,8 @@ if __name__ == "__main__":
         check_minute_freshness, ensure_minute_freshness,
         check_15min_freshness, ensure_15min_freshness,
         check_60min_freshness, ensure_60min_freshness,
-        check_weekly_freshness, ensure_weekly_freshness,
-        check_monthly_freshness, ensure_monthly_freshness,
+        ensure_weekly_freshness,
+        ensure_monthly_freshness,
     ]
     for fn in expected_coroutines:
         assert inspect.iscoroutinefunction(fn), f"{fn.__name__} 应为协程"

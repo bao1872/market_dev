@@ -35,6 +35,7 @@ import type {
   BarQueryParams,
   CalendarQueryParams,
   ConfigQueryParams,
+  IndicatorQueryParams,
 } from '../api/endpoints'
 
 // ============================================================
@@ -658,6 +659,19 @@ export function useBars(instrumentId: string | undefined, params?: BarQueryParam
   return useQuery({
     queryKey: ['bars', instrumentId, params],
     queryFn: () => api.getBars(instrumentId!, params),
+    enabled: !!instrumentId,
+    staleTime: STALE_WATCHLIST,
+  })
+}
+
+/** 查询指定标的的所有策略图表指标 */
+export function useIndicators(
+  instrumentId: string | undefined,
+  params?: IndicatorQueryParams,
+) {
+  return useQuery({
+    queryKey: ['indicators', instrumentId, params],
+    queryFn: () => api.getIndicators(instrumentId!, params),
     enabled: !!instrumentId,
     staleTime: STALE_WATCHLIST,
   })

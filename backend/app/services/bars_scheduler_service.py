@@ -1,7 +1,7 @@
 """多周期行情定时更新服务。
 
 功能：
-- 每个交易日 16:00 自动拉取全市场 active 股票的 d/15m/1h/1w/1mo 行情
+- 每个交易日 16:00 自动拉取全市场 active 股票的 d/15m/1h 行情
 - 串行拉取（pytdx 不支持并发）
 - 分批 upsert，幂等：upsert on_conflict_do_update
 - 进度：tqdm 进度条（底部固定）
@@ -9,10 +9,11 @@
 
 设计说明：
 - pytdx 不支持并发，所有拉取通过 asyncio.to_thread 串行桥接
-- 每日增量更新使用小 count（5/50/10/5/5），将耗时从 11.1h 降至约 2h
-- 回补使用大 count（500/15000/4000/200/50），耗时约 11.1h
+- 每日增量更新使用小 count（5/50/10），将耗时从约 2h 降至约 1.8h
+- 回补使用大 count（500/15000/4000），耗时约 11.1h
 - 失败重试 3 次，间隔 5 秒，不中断整体流程
 - 日线是 adj_factor 的来源，必须定时刷新，否则前复权会失败
+- 周线/月线不存储在 DB，从日线动态合成（convert_kline_frequency），不参与定时刷新
 """
 
 from __future__ import annotations
@@ -34,8 +35,6 @@ from app.repositories.bar_repository import (
     refresh_15min_bars,
     refresh_60min_bars,
     refresh_daily_bars,
-    refresh_monthly_bars,
-    refresh_weekly_bars,
 )
 from app.services.calendar_service import is_trading_day_async
 
@@ -94,18 +93,18 @@ class BarsSchedulerService:
         result = await service.backfill_all_instruments(date(2023, 1, 1))
     """
 
-    # 5 个周期（含日线，日线是 adj_factor 的来源）
-    PERIODS = ["d", "15m", "60m", "w", "m"]
+    # 3 个周期（日线 + 日内周期；周线/月线从日线动态合成，不参与定时刷新）
+    PERIODS = ["d", "15m", "60m"]
 
     # 每日增量更新的 count（只拉最新数据，减少拉取量）
     # 日线 count 表示回看天数，其他周期表示拉取条数
-    # 耗时约 2 小时（8268 只 × 5 周期 × 0.2s）
-    DAILY_COUNTS: dict[str, int] = {"d": 5, "15m": 50, "60m": 10, "w": 5, "m": 5}
+    # 耗时约 1.8 小时（8268 只 × 3 周期 × 0.2s）
+    DAILY_COUNTS: dict[str, int] = {"d": 5, "15m": 50, "60m": 10}
 
     # 回补的 count（回补到 2023-01-01 所需拉取量）
     # 日线 500 天约覆盖 2 年交易日
-    # 耗时约 11.1 小时（8268 只 × 5 周期 × 多次拉取）
-    BACKFILL_COUNTS: dict[str, int] = {"d": 500, "15m": 15000, "60m": 4000, "w": 200, "m": 50}
+    # 耗时约 11.1 小时（8268 只 × 3 周期 × 多次拉取）
+    BACKFILL_COUNTS: dict[str, int] = {"d": 500, "15m": 15000, "60m": 4000}
 
     # 失败重试
     MAX_RETRIES = 3
@@ -117,8 +116,6 @@ class BarsSchedulerService:
         "d": refresh_daily_bars,
         "15m": refresh_15min_bars,
         "60m": refresh_60min_bars,
-        "w": refresh_weekly_bars,
-        "m": refresh_monthly_bars,
     }
 
     async def refresh_all_instruments(
@@ -224,7 +221,7 @@ class BarsSchedulerService:
         for instrument in (pbar or instruments):
             symbol = instrument.symbol
             try:
-                # 串行刷新 4 个周期
+                # 串行刷新 3 个周期
                 refresh_result = await self.refresh_one_instrument(
                     instrument_id=instrument.id,
                     symbol=symbol,
@@ -283,7 +280,7 @@ class BarsSchedulerService:
         """
         result = RefreshResult(instrument_id=instrument_id, symbol=symbol, success=True)
 
-        # 串行处理 4 个周期
+        # 串行处理 3 个周期
         for period in self.PERIODS:
             count = counts.get(period, 100)
             upsert_count = await self._refresh_one_period_with_retry(
@@ -310,7 +307,7 @@ class BarsSchedulerService:
         Args:
             instrument_id: 标的 UUID
             symbol: 股票代码
-            period: 周期（d/15m/60m/w/m）
+            period: 周期（d/15m/60m）
             count: 拉取条数（日线时为回看天数）
             db_session: 可选的 DB 会话
 
@@ -432,15 +429,15 @@ if __name__ == "__main__":
     service = BarsSchedulerService()
 
     # 1. 验证常量
-    assert service.PERIODS == ["d", "15m", "60m", "w", "m"], \
+    assert service.PERIODS == ["d", "15m", "60m"], \
         f"PERIODS 不匹配: {service.PERIODS}"
     print(f"PERIODS={service.PERIODS}")
 
-    assert service.DAILY_COUNTS == {"d": 5, "15m": 50, "60m": 10, "w": 5, "m": 5}, \
+    assert service.DAILY_COUNTS == {"d": 5, "15m": 50, "60m": 10}, \
         f"DAILY_COUNTS 不匹配: {service.DAILY_COUNTS}"
     print(f"DAILY_COUNTS={service.DAILY_COUNTS}")
 
-    assert service.BACKFILL_COUNTS == {"d": 500, "15m": 15000, "60m": 4000, "w": 200, "m": 50}, \
+    assert service.BACKFILL_COUNTS == {"d": 500, "15m": 15000, "60m": 4000}, \
         f"BACKFILL_COUNTS 不匹配: {service.BACKFILL_COUNTS}"
     print(f"BACKFILL_COUNTS={service.BACKFILL_COUNTS}")
 

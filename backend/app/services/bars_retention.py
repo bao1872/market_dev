@@ -34,7 +34,7 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.bar import Bar15Min, Bar60Min, BarDaily, BarMinute, BarMonthly, BarWeekly
+from app.models.bar import Bar15Min, Bar60Min, BarDaily, BarMinute
 from app.services.bars_metrics import bars_retention_deleted_total
 
 logger = logging.getLogger("bars_retention")
@@ -61,11 +61,9 @@ class RetentionResult:
 
 
 # 保留策略配置：(模型类, 时间字段名, 保留天数, 是否永久保留)
-# 永久保留的表（daily/weekly/monthly）不参与清理
+# 永久保留的表（daily）不参与清理；周线/月线不存储在 DB，从日线动态合成
 _RETENTION_CONFIG: list[tuple[type, str, int | None, bool]] = [
     (BarDaily, "trade_date", None, True),      # 永久保留
-    (BarWeekly, "trade_date", None, True),     # 永久保留
-    (BarMonthly, "trade_date", None, True),    # 永久保留
     (Bar15Min, "trade_time", _RETENTION_15MIN_DAYS, False),  # 保留 2 年
     (Bar60Min, "trade_time", _RETENTION_60MIN_DAYS, False),  # 保留 2 年
     (BarMinute, "trade_time", _RETENTION_MINUTE_DAYS, False),  # 保留 90 天
@@ -190,7 +188,7 @@ if __name__ == "__main__":
 
     # 1. 验证保留策略配置
     config = get_retention_config()
-    assert len(config) == 6, f"应有 6 张表配置，实际 {len(config)}"
+    assert len(config) == 4, f"应有 4 张表配置，实际 {len(config)}"
     print(f"保留策略配置（{len(config)} 张表）:")
 
     permanent_count = 0
@@ -199,14 +197,12 @@ if __name__ == "__main__":
         if c["is_permanent"]:
             permanent_count += 1
 
-    assert permanent_count == 3, f"应有 3 张永久保留表，实际 {permanent_count}"
-    print(f"✓ 永久保留表数量: {permanent_count}（daily/weekly/monthly）")
+    assert permanent_count == 1, f"应有 1 张永久保留表，实际 {permanent_count}"
+    print(f"✓ 永久保留表数量: {permanent_count}（daily）")
 
     # 2. 验证配置值
     config_by_table = {c["table_name"]: c for c in config}
     assert config_by_table["bars_daily"]["is_permanent"] is True
-    assert config_by_table["bars_weekly"]["is_permanent"] is True
-    assert config_by_table["bars_monthly"]["is_permanent"] is True
     assert config_by_table["bars_15min"]["retention_days"] == 730
     assert config_by_table["bars_60min"]["retention_days"] == 730
     assert config_by_table["bars_minute"]["retention_days"] == 90

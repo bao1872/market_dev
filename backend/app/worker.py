@@ -1,14 +1,15 @@
-"""统一 Worker 入口 - 支持 Outbox Relay / Delivery Worker / Job 消费者 / 策略批量计算 / 行情调度。
+"""统一 Worker 入口 - 支持 Outbox Relay / Delivery Worker / Job 消费者 / 策略批量计算 / 行情调度 / 选股策略调度。
 
 用法：
     WORKER_TYPE=outbox python -m app.worker           # 运行 Outbox Relay
     WORKER_TYPE=delivery python -m app.worker         # 运行投递 Worker
     WORKER_TYPE=strategy_batch python -m app.worker   # 运行策略批量计算 Worker
     WORKER_TYPE=bars_scheduler python -m app.worker   # 运行行情调度 Worker（每日 16:00）
+    WORKER_TYPE=strategy_scheduler python -m app.worker   # 运行选股策略调度 Worker（每日 16:30）
     WORKER_TYPE=all python -m app.worker              # 同时运行全部（开发模式）
 
 环境变量：
-    WORKER_TYPE: worker 类型（outbox/delivery/strategy_batch/bars_scheduler/all，默认 all）
+    WORKER_TYPE: worker 类型（outbox/delivery/strategy_batch/bars_scheduler/strategy_scheduler/all，默认 all）
     WORKER_INTERVAL: 轮询间隔秒数（默认 5）
     WORKER_BATCH_SIZE: 单次轮询最大记录数（默认 100）
     WORKER_MAX_RETRY: 最大重试次数（默认 5）
@@ -217,6 +218,104 @@ async def run_bars_scheduler_worker() -> None:
     logger.info("Bars Scheduler Worker 已退出")
 
 
+async def run_strategy_scheduler_worker() -> None:
+    """选股策略调度 Worker：每日 16:30 触发所有 kind=selector 策略的批量计算。
+
+    使用 APScheduler AsyncIOScheduler + CronTrigger：
+    - 每个交易日（周一至周五）16:30 触发
+    - 查询 strategy_definitions WHERE kind='selector' 的所有策略
+    - 为每个策略调用 StrategyBatchService.create_batch_run(run_type="scheduled")
+    - 创建的 queued run 由 strategy_batch worker 轮询执行
+
+    设计说明：
+    - 16:30 触发（bars_scheduler 16:00 刷新行情后执行）
+    - 单个策略创建失败不阻塞其他策略，记录日志继续
+    - 幂等：同一 strategy_key + trade_date + run_type=scheduled 只创建一次
+    """
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from apscheduler.triggers.cron import CronTrigger
+    from sqlalchemy import select
+
+    from app.models.strategy import StrategyDefinition
+    from app.services.strategy_batch_service import StrategyBatchService
+
+    scheduler = AsyncIOScheduler()
+    service = StrategyBatchService()
+
+    async def scheduled_strategy_run() -> None:
+        """定时任务：每日 16:30 为所有 selector 策略创建 queued run。"""
+        from datetime import date as date_cls
+
+        trade_date = date_cls.today()
+        logger.info("定时任务触发：选股策略批量计算 trade_date=%s", trade_date)
+        try:
+            async with AsyncSessionLocal() as db:
+                # 查询所有 kind=selector 的策略
+                stmt = select(StrategyDefinition.strategy_key).where(
+                    StrategyDefinition.kind == "selector"
+                )
+                result = await db.execute(stmt)
+                strategy_keys = [row[0] for row in result.fetchall()]
+
+                if not strategy_keys:
+                    logger.warning("未找到 kind=selector 的策略，跳过")
+                    return
+
+                logger.info("待计算的 selector 策略: %s", strategy_keys)
+                succeeded = 0
+                failed = 0
+                for strategy_key in strategy_keys:
+                    try:
+                        run = await service.create_batch_run(
+                            db=db,
+                            strategy_key=strategy_key,
+                            trade_date=trade_date,
+                            run_type="scheduled",
+                        )
+                        await db.commit()
+                        logger.info(
+                            "策略 %s 创建 run 成功: run_id=%s",
+                            strategy_key, run.id,
+                        )
+                        succeeded += 1
+                    except ValueError as exc:
+                        # 非交易日/数据未就绪/策略无可用版本
+                        logger.warning(
+                            "策略 %s 创建 run 跳过: %s", strategy_key, exc
+                        )
+                        await db.rollback()
+                        failed += 1
+                    except Exception as exc:
+                        logger.exception(
+                            "策略 %s 创建 run 异常: %s", strategy_key, exc
+                        )
+                        await db.rollback()
+                        failed += 1
+
+                logger.info(
+                    "定时任务完成: total=%d succeeded=%d failed=%d",
+                    len(strategy_keys), succeeded, failed,
+                )
+        except Exception as exc:
+            logger.exception("选股策略调度任务异常: %s", exc)
+
+    # 每个交易日 16:30 触发
+    scheduler.add_job(
+        scheduled_strategy_run,
+        CronTrigger(day_of_week="mon-fri", hour=16, minute=30),
+        id="strategy_run_daily",
+        replace_existing=True,
+    )
+    scheduler.start()
+    logger.info("Strategy Scheduler Worker 启动（每日 16:30 触发）")
+
+    while not _shutdown:
+        await asyncio.sleep(60)
+
+    scheduler.shutdown(wait=False)
+    logger.info("Strategy Scheduler Worker 已退出")
+
+
 async def main() -> None:
     """主入口：根据 WORKER_TYPE 启动对应的 worker。"""
     logging.basicConfig(
@@ -243,6 +342,9 @@ async def main() -> None:
     if WORKER_TYPE in ("bars_scheduler", "all"):
         tasks.append(asyncio.create_task(run_bars_scheduler_worker()))
 
+    if WORKER_TYPE in ("strategy_scheduler", "all"):
+        tasks.append(asyncio.create_task(run_strategy_scheduler_worker()))
+
     if not tasks:
         logger.error("未知 WORKER_TYPE: %s", WORKER_TYPE)
         return
@@ -258,11 +360,12 @@ if __name__ == "__main__":
     print(f"WORKER_INTERVAL={WORKER_INTERVAL}")
     print(f"WORKER_BATCH_SIZE={WORKER_BATCH_SIZE}")
     print(f"WORKER_MAX_RETRY={WORKER_MAX_RETRY}")
-    assert WORKER_TYPE in ("outbox", "delivery", "strategy_batch", "bars_scheduler", "all"), \
+    assert WORKER_TYPE in ("outbox", "delivery", "strategy_batch", "bars_scheduler", "strategy_scheduler", "all"), \
         f"未知 WORKER_TYPE: {WORKER_TYPE}"
     # 验证 worker 函数可调用
     assert callable(run_outbox_relay), "run_outbox_relay 应可调用"
     assert callable(run_delivery_worker), "run_delivery_worker 应可调用"
     assert callable(run_strategy_batch_worker), "run_strategy_batch_worker 应可调用"
     assert callable(run_bars_scheduler_worker), "run_bars_scheduler_worker 应可调用"
+    assert callable(run_strategy_scheduler_worker), "run_strategy_scheduler_worker 应可调用"
     print("OK: 配置验证通过")

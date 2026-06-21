@@ -14,9 +14,11 @@ import { useParams, useSearchParams, useNavigate } from 'react-router-dom'
 import clsx from 'clsx'
 import StrategyChart from '@/components/StrategyChart'
 import type { BarData, ChartEvent } from '@/components/StrategyChart'
+import type { IndicatorResponse } from '@/api/endpoints'
 import {
   useInstrumentBySymbol,
   useBars,
+  useIndicators,
   useInstrumentEvents,
   useAddToWatchlist,
   useRemoveFromWatchlist,
@@ -76,12 +78,20 @@ export default function StockDetailPage() {
   const instrumentQuery = useInstrumentBySymbol(symbol)
   const instrumentId = instrumentQuery.data?.id
 
-  // 数据查询：K 线行情（依赖 instrumentId，前复权，拉取足够数量的 bar 供指标计算）
+  // 数据查询：K 线行情（依赖 instrumentId，前复权，与 indicators 的 bars=250 对齐避免数据范围不匹配）
   const barsQuery = useBars(instrumentId, {
     timeframe,
     adj: 'qfq',
-    page_size: 500,
+    page_size: 250,
   })
+
+  // 数据查询：策略图表指标（依赖 instrumentId，与 bars 同 timeframe/adj，拉取最近 250 根 bar 的指标）
+  const indicatorsQuery = useIndicators(instrumentId, {
+    timeframe,
+    adj: 'qfq',
+    bars: 250,
+  })
+  const indicators: IndicatorResponse | undefined = indicatorsQuery.data
 
   // 数据查询：策略事件
   const eventsQuery = useInstrumentEvents(instrumentId, { limit: 100 })
@@ -324,6 +334,7 @@ export default function StockDetailPage() {
                 symbol={inst.symbol}
                 bars={bars}
                 events={events}
+                indicators={indicators}
                 strategyId={strategyDef.id}
                 source={source}
                 view={view}

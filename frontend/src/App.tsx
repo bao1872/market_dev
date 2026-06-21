@@ -21,10 +21,13 @@ import AdminStrategiesPage from './pages/AdminStrategiesPage'
 import AdminConfigPage from './pages/AdminConfigPage'
 import AdminJobsPage from './pages/AdminJobsPage'
 
-// 受保护路由布局：未登录重定向到 /login；已登录用 AppShell 包裹
+// 受保护路由布局：未登录或 token 缺失重定向到 /login；已登录用 AppShell 包裹
 function ProtectedLayout() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
-  if (!isAuthenticated) {
+  // 双重检查：zustand isAuthenticated + localStorage auth_token
+  // 防止 token 过期后 isAuthenticated 仍为 true 但 auth_token 已被清除
+  const hasToken = !!localStorage.getItem('auth_token')
+  if (!isAuthenticated || !hasToken) {
     return <Navigate to="/login" replace />
   }
   return (

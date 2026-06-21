@@ -35,7 +35,6 @@ import logging
 import math
 import os
 import sys
-import types
 import uuid
 from datetime import date
 from typing import Any
@@ -61,41 +60,11 @@ if _REF_TRADE_PATH not in sys.path:
     sys.path.insert(0, _REF_TRADE_PATH)
 
 
-def _ensure_plotly_mock() -> None:
-    """若 plotly 未安装，注入轻量 mock 到 sys.modules（仅满足 features 顶层 import）。
-
-    features/dynamic_swing_anchored_vwap.py 顶层 `import plotly.graph_objects as go`
-    仅用于可视化函数（绘图 HTML）。DSASelector 仅调用 dynamic_swing_anchored_vwap
-    计算函数，不依赖 plotly。注入 mock 避免引入重依赖，同时不修改 features/ 源码。
-    """
-    if "plotly" in sys.modules:
-        return
-    try:
-        import plotly  # noqa: F401
-        return
-    except ImportError:
-        pass
-    plotly_mock = types.ModuleType("plotly")
-    go_mock = types.ModuleType("plotly.graph_objects")
-    # 提供最小占位属性（可视化函数不会被 selector 调用）
-    go_mock.Figure = type("Figure", (), {"__init__": lambda self, *a, **kw: None})
-    go_mock.Candlestick = type("Candlestick", (), {"__init__": lambda self, *a, **kw: None})
-    go_mock.Bar = type("Bar", (), {"__init__": lambda self, *a, **kw: None})
-    go_mock.Layout = type("Layout", (), {"__init__": lambda self, *a, **kw: None})
-    go_mock.Scatter = type("Scatter", (), {"__init__": lambda self, *a, **kw: None})
-    plotly_mock.graph_objects = go_mock
-    # plotly.subplots.make_subplots 也被 features 顶层 import
-    subplots_mock = types.ModuleType("plotly.subplots")
-    subplots_mock.make_subplots = lambda *a, **kw: None
-    sys.modules["plotly"] = plotly_mock
-    sys.modules["plotly.graph_objects"] = go_mock
-    sys.modules["plotly.subplots"] = subplots_mock
-    logger.debug("已注入 plotly mock（features 可视化依赖，selector 不使用）")
-
+from app.strategy._plotly_mock import ensure_plotly_mock  # noqa: E402
 
 # 导入 features/ 算法（SSOT，严格不修改）
 # 依赖 sys.path 中的 ref/交易 路径（上方已设置）
-_ensure_plotly_mock()
+ensure_plotly_mock()
 from features.atr_rope_event_factor_lab_v4 import ATRRopeConfig, compute_atr_rope  # noqa: E402
 from features.dynamic_swing_anchored_vwap import (  # noqa: E402
     DSAConfig,
@@ -601,6 +570,32 @@ class DSASelector(StrategyRuntime):
             metrics=metrics,
             calculation_id=uuid.uuid4().hex,
         )
+
+    async def compute_indicators(self, context: MarketDataContext) -> dict[str, Any]:
+        """计算 DSA VWAP 图表指标（轻量版，不计算 regime/offset/crossover）。
+
+        供个股详情页面实时计算使用。只计算 DSA VWAP 线和方向，
+        参考 features/dynamic_swing_anchored_vwap.py。
+
+        Returns:
+            {"dsa_vwap": [float...], "dsa_dir": [int...]} 最近 N 根 bar 的 VWAP 和方向
+        """
+        daily_df = context.bars_daily
+        if daily_df is None or len(daily_df) < self._dsa_config.prd:
+            return {"dsa_vwap": [], "dsa_dir": []}
+
+        vwap_series, dir_series, _, _ = dynamic_swing_anchored_vwap(
+            daily_df, self._dsa_config
+        )
+        vwap_series = _remove_vwap_lookahead(
+            daily_df, vwap_series, dir_series, self._dsa_config
+        )
+
+        # 转为可 JSON 序列化的 list
+        return {
+            "dsa_vwap": [None if pd.isna(v) else float(v) for v in vwap_series],
+            "dsa_dir": [int(d) for d in dir_series],
+        }
 
     def _compute_metrics_sync(self, context: MarketDataContext) -> dict[str, Any]:
         """同步计算 DSA 指标（在线程池中执行）。
