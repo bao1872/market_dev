@@ -18,7 +18,6 @@ import MessagesPage from './pages/MessagesPage'
 import AdminIndexPage from './pages/AdminIndexPage'
 import AdminUsersPage from './pages/AdminUsersPage'
 import AdminStrategiesPage from './pages/AdminStrategiesPage'
-import AdminConfigPage from './pages/AdminConfigPage'
 import AdminJobsPage from './pages/AdminJobsPage'
 
 // 受保护路由布局：未登录或 token 缺失重定向到 /login；已登录用 AppShell 包裹
@@ -70,7 +69,6 @@ export const router = createBrowserRouter([
           { path: '/admin', element: <AdminIndexPage /> },
           { path: '/admin/users', element: <AdminUsersPage /> },
           { path: '/admin/strategies', element: <AdminStrategiesPage /> },
-          { path: '/admin/config', element: <AdminConfigPage /> },
           { path: '/admin/jobs', element: <AdminJobsPage /> },
         ],
       },

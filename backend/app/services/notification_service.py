@@ -27,6 +27,10 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import app.services.feishu_platform_app_adapter  # noqa: F401
+
+# 导入飞书 Webhook 适配器以触发注册（@register_adapter 在导入时执行）
+import app.services.feishu_webhook_adapter  # noqa: F401
 from app.models.notification import (
     MessageDelivery,
     NotificationChannel,
@@ -37,9 +41,6 @@ from app.schemas.notification import (
     NotificationMessageDTO,
 )
 from app.services.channel_adapter import get_adapter
-
-# 导入飞书 Webhook 适配器以触发注册（@register_adapter 在导入时执行）
-import app.services.feishu_webhook_adapter  # noqa: F401
 
 
 class NotificationServiceError(ValueError):

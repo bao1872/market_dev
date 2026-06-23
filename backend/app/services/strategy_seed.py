@@ -3,6 +3,7 @@
 示例策略：
 - DSA selector（dsa_selector.yaml）: 方向稳定性选股
 - Volume Node monitor（volume_node_monitor.yaml）: 成交量节点簇监控
+- BB monitor（bb_monitor.yaml）: 布林带穿越信号监控
 
 注册流程：
 1. 加载 YAML 文件为 manifest 字典
@@ -41,6 +42,7 @@ _EXAMPLES_DIR = (
 SEED_STRATEGIES: list[str] = [
     "dsa_selector.yaml",
     "volume_node_monitor.yaml",
+    "bb_monitor.yaml",
 ]
 
 

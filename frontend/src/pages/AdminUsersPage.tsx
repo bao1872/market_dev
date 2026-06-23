@@ -248,10 +248,30 @@ export default function AdminUsersPage() {
         toast.show('提示', '邀请码明文仅在生成时返回，请从生成记录中复制')
         return
       }
-      navigator.clipboard
-        .writeText(code)
-        .then(() => toast.show('已复制', `邀请码 ${code} 已复制到剪贴板`))
-        .catch(() => toast.show('复制失败', '请手动复制邀请码'))
+      try {
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+          navigator.clipboard
+            .writeText(code)
+            .then(() => toast.show('已复制', `邀请码 ${code} 已复制到剪贴板`))
+            .catch(() => toast.show('复制失败', '请手动复制邀请码'))
+        } else {
+          const textarea = document.createElement('textarea')
+          textarea.value = code
+          textarea.style.position = 'fixed'
+          textarea.style.opacity = '0'
+          document.body.appendChild(textarea)
+          textarea.select()
+          const ok = document.execCommand('copy')
+          document.body.removeChild(textarea)
+          if (ok) {
+            toast.show('已复制', `邀请码 ${code} 已复制到剪贴板`)
+          } else {
+            toast.show('复制失败', '请手动复制邀请码')
+          }
+        }
+      } catch {
+        toast.show('复制失败', '请手动复制邀请码')
+      }
     },
     [toast],
   )

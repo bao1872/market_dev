@@ -1,11 +1,11 @@
-"""小批量验证：5 只股票 × 4 周期拉取 + upsert。
+"""小批量验证：5 只股票 × 3 周期拉取 + upsert。
 
 用法：
     cd /root/web_dev/backend && .venv/bin/python -m scripts.test_multi_period_bars_small
 
 验证内容：
 1. 从 DB 查询 5 只 active 股票
-2. 串行拉取 4 个周期（15m/60min/w/m）行情
+2. 串行拉取 3 个周期（d/15m/60m）行情
 3. upsert 到对应表
 4. 验证数据完整性（COUNT + 字段非空）
 5. 重复执行验证幂等性
@@ -20,9 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 import uuid
-from datetime import date, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -90,9 +88,9 @@ async def test_single_instrument_all_periods(
 
     counts = {}
     # 使用 DAILY_COUNTS（小 count，快速验证）
-    test_counts = {"15m": 50, "60m": 10, "w": 5, "m": 5}
+    test_counts = {"d": 5, "15m": 50, "60m": 10}
 
-    # 1. 串行拉取 4 个周期
+    # 1. 串行拉取 3 个周期
     for period, count in test_counts.items():
         logger.info(
             "拉取 symbol=%s period=%s count=%d",
@@ -149,7 +147,7 @@ async def test_idempotent(
     weekly_before = await verify_table_count(db, BarWeekly, instrument.id, "bars_weekly")
 
     # 重复执行
-    df = await refresh_weekly_bars(db, instrument.id, 5)
+    await refresh_weekly_bars(db, instrument.id, 5)
 
     # 验证 count 不变
     weekly_after = await verify_table_count(db, BarWeekly, instrument.id, "bars_weekly")

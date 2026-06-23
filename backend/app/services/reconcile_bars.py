@@ -54,6 +54,12 @@ _DEFAULT_BATCH_SAMPLE_SIZE = 10
 # 批量对账默认天数
 _DEFAULT_BATCH_DAYS = 30
 
+# 15min/60min count 上限与 bars_scheduler_service.BACKFILL_COUNTS 对齐
+# 15min: 15000（覆盖 2023-01-01 至今约 14000 条）
+# 60min: 4000（覆盖 2023-01-01 至今约 3500 条）
+_15MIN_COUNT_LIMIT = 15000
+_60MIN_COUNT_LIMIT = 4000
+
 # period -> (Model, 时间字段名, 是否日线类)
 _PERIOD_CONFIG: dict[str, tuple[type, str, bool]] = {
     "d": (BarDaily, "trade_date", True),
@@ -171,14 +177,14 @@ async def _fetch_source_bars(
             # 15min 按时间范围拉取（通过 count 估算）
             if isinstance(start, datetime):
                 minutes = int((end - start).total_seconds() // 60)
-                count = min(max(minutes // 15 + 100, 100), 8000)
+                count = min(max(minutes // 15 + 100, 100), _15MIN_COUNT_LIMIT)
             else:
                 count = 800
             raw_df = await asyncio.to_thread(pytdx.get_15min_bars, symbol, count)
         elif period == "60m":
             if isinstance(start, datetime):
                 minutes = int((end - start).total_seconds() // 60)
-                count = min(max(minutes // 60 + 50, 50), 8000)
+                count = min(max(minutes // 60 + 50, 50), _60MIN_COUNT_LIMIT)
             else:
                 count = 800
             raw_df = await asyncio.to_thread(pytdx.get_60min_bars, symbol, count)

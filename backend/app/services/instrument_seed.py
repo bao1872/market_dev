@@ -1,7 +1,8 @@
 """股票主数据种子服务 - 从 pytdx 拉取 A 股全市场股票列表并写入 instruments 表。
 
 向量化处理：使用 pandas DataFrame 批量构建与去重，executemany 批量插入。
-冲突处理：ON CONFLICT (symbol) DO NOTHING（已存在的 symbol 跳过）。
+冲突处理：ON CONFLICT (symbol) DO UPDATE（upsert，用 pytdx 数据覆盖已有记录）。
+NFKC 归一化：name 列写入前做 NFKC 归一化，将全角字母转为半角（如 Ａ股指数 → A股指数）。
 
 提供：
 - fetch_instruments_from_pytdx: 从 pytdx 拉取股票列表（DataFrame）
@@ -14,15 +15,17 @@
     # 同步执行（需在同步上下文中调用，如脚本或 CLI）
     count = seed_instruments_from_pytdx()
 
-副作用：写入 instruments 表（INSERT，冲突时跳过）。
+副作用：写入 instruments 表（UPSERT，冲突时更新 name/market/status）。
 """
 
 from __future__ import annotations
 
 import logging
+import unicodedata
 from typing import Any
 
 import pandas as pd
+from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -90,6 +93,9 @@ def transform_instruments_df(raw_df: pd.DataFrame) -> pd.DataFrame:
     df["status"] = "active"
     df["listing_date"] = None  # pytdx get_security_list 不提供上市日期
 
+    # NFKC 归一化：将全角字母转为半角（如 Ａ股指数 → A股指数，ＥＴＦｓ → ETFs）
+    df["name"] = df["name"].apply(lambda x: unicodedata.normalize("NFKC", x))
+
     # 列顺序标准化
     df = df[["symbol", "name", "market", "status", "listing_date"]]
     return df.reset_index(drop=True)
@@ -130,7 +136,7 @@ async def seed_instruments_from_pytdx(
 ) -> int:
     """从 pytdx 拉取股票列表并写入 instruments 表。
 
-    冲突处理：ON CONFLICT (symbol) DO NOTHING（已存在的 symbol 跳过）。
+    冲突处理：ON CONFLICT (symbol) DO UPDATE（upsert，用 pytdx 数据覆盖已有记录）。
     向量化：pandas 批量构建记录，executemany 批量插入。
 
     Args:
@@ -139,7 +145,7 @@ async def seed_instruments_from_pytdx(
         max_count: 每个市场最多拉取条数（自测用），None 表示全部
 
     Returns:
-        新插入的记录数（不含冲突跳过的）
+        新插入或更新的记录数
 
     Raises:
         RuntimeError: pytdx 连接或拉取失败
@@ -165,13 +171,21 @@ async def seed_instruments_from_pytdx(
     for i in range(0, len(records), BATCH_SIZE):
         batch = records[i : i + BATCH_SIZE]
         stmt = pg_insert(Instrument).values(batch)
-        stmt = stmt.on_conflict_do_nothing(index_elements=["symbol"])
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["symbol"],
+            set_={
+                "name": stmt.excluded.name,
+                "market": stmt.excluded.market,
+                "status": stmt.excluded.status,
+                "updated_at": func.now(),
+            },
+        )
         result = await session.execute(stmt)
         total_inserted += result.rowcount or 0
 
     await session.commit()
 
-    logger.info("股票主数据写入完成：新插入 %d 条，跳过 %d 条（已存在）", total_inserted, len(records) - total_inserted)
+    logger.info("股票主数据写入完成：插入或更新 %d 条（总处理 %d 条）", total_inserted, len(records))
     return total_inserted
 
 

@@ -28,7 +28,7 @@ class TradingCalendar(Base):
 
     __tablename__ = "trading_calendar"
 
-    id: Mapped[UUID] = mapped_column(primary_key=True)
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=func.gen_random_uuid())
     trade_date: Mapped[date] = mapped_column(Date, nullable=False)
     is_trading_day: Mapped[bool] = mapped_column(Boolean, nullable=False)
     market: Mapped[str] = mapped_column(String(8), nullable=False, default="A")

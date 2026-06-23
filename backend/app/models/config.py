@@ -4,7 +4,7 @@
 - config_definitions: 配置项定义（config_key 唯一，value_type 区分类型，sensitivity 区分敏感度）
 
 字段说明（对齐迁移 DDL 与 config_definition.schema.json）：
-- config_key: 配置项唯一标识（如 notification.feishu.webhook_url）
+- config_key: 配置项唯一标识（如 feishu.webhook_url）
 - display_name: 展示名称（UI 显示）
 - description: 描述（可空）
 - value_type: 值类型 string/integer/number/boolean/enum/duration/time/json/secret/url

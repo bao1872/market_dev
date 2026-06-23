@@ -41,10 +41,12 @@ import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exchange import get_exchange
 from app.models.instrument import Instrument
 from app.repositories.bar_repository import (
     _get_adj_factor_df,
     _query_15min_bars,
+    _query_60min_bars,
     _query_minute_bars,
     apply_adj_factor_to_bars,
     fetch_daily_bars,
@@ -54,9 +56,9 @@ from app.strategy.runtime import MarketDataContext, StrategyLoader
 
 logger = logging.getLogger("services.indicator_service")
 
-# 查询范围常量（与 bars.py 一致：日线 5000 天，日内 180 天）
+# 查询范围常量（日线 5000 天，日内 750 天）
 _DEFAULT_DAILY_LOOKBACK_DAYS = 5000  # 日线默认回看 5000 天（与 bars.py 一致）
-_DEFAULT_INTRADAY_LOOKBACK_DAYS = 180  # 15min/1min 默认回看 180 天
+_INDICATOR_INTRADAY_LOOKBACK_DAYS = 750  # 指标计算专用 15min/1min 回看天数（750 天，与 bars.py 的 API 查询回看 180 天不同，指标计算需要更多数据）
 
 
 # ===== 工具函数 =====
@@ -137,7 +139,7 @@ async def compute_all_indicators(
 
     流程：
     1. 查询 instrument 信息（symbol）
-    2. 查询 bars 数据（日线 + 15min + 1min），构建 MarketDataContext
+    2. 通过 Exchange.klines() 获取 bars 数据（日线 + 15min + 1min），失败降级到 DB
     3. 遍历 StrategyLoader._registry 中的所有策略
     4. 对每个策略，查询最新 released 版本（复用 StrategyBatchService._get_latest_released_version）
     5. 调用 StrategyLoader.load(version) 获取 runtime
@@ -175,33 +177,56 @@ async def compute_all_indicators(
         raise ValueError(f"instrument 不存在: instrument_id={instrument_id}")
     symbol = inst_row[0]
 
-    # 2. 查询 bars 数据（日线 + 15min + 1min）
+    # 2. 数据获取：通过 Exchange.klines()（与 bars API 统一数据源）
     today = date.today()
-    daily_start = today - timedelta(days=_DEFAULT_DAILY_LOOKBACK_DAYS)
-    intraday_start_dt = datetime.combine(
-        today - timedelta(days=_DEFAULT_INTRADAY_LOOKBACK_DAYS),
-        datetime.min.time(),
-    )
-    intraday_end_dt = datetime.combine(today, datetime.max.time())
+    exchange = None
+    try:
+        exchange = get_exchange("A")
+    except Exception as exc:
+        logger.warning("获取 Exchange 实例失败 instrument_id=%s: %s", instrument_id, exc)
 
-    # 日线（所有策略都需要）
-    daily_bars = await fetch_daily_bars(session, instrument_id, daily_start, today)
+    daily_bars = pd.DataFrame()
+    bars_15min = pd.DataFrame()
+    bars_minute = pd.DataFrame()
+    bars_60min: pd.DataFrame | None = None
+
+    if exchange is not None:
+        try:
+            # 日线（5000 天回看，与 bars.py 一致）
+            daily_bars = await exchange.klines(symbol, "1d", count=5000) or pd.DataFrame()
+            # 15 分钟线（指标计算需要更多数据）
+            bars_15min = await exchange.klines(symbol, "15m", count=800) or pd.DataFrame()
+            # 1 分钟线（仅 2 天，用于监控策略）
+            bars_minute = await exchange.klines(symbol, "1m", count=2) or pd.DataFrame()
+            # 60 分钟线（策略在 timeframe='1h' 时可能需要）
+            if timeframe == "1h":
+                bars_60min = await exchange.klines(symbol, "1h", count=800) or pd.DataFrame()
+        except Exception as exc:
+            logger.warning("Exchange.klines() 失败 instrument_id=%s: %s，降级到 DB", instrument_id, exc)
+            exchange = None  # 标记为失败，后续使用 DB 降级
+
+    # Exchange 失败或无数据时降级到 DB 查询
+    if exchange is None or daily_bars.empty:
+        logger.info("使用 DB 降级查询 instrument_id=%s", instrument_id)
+        daily_start = today - timedelta(days=_DEFAULT_DAILY_LOOKBACK_DAYS)
+        intraday_start_dt = datetime.combine(
+            today - timedelta(days=_INDICATOR_INTRADAY_LOOKBACK_DAYS),
+            datetime.min.time(),
+        )
+        intraday_end_dt = datetime.combine(today, datetime.max.time())
+        try:
+            daily_bars = await fetch_daily_bars(session, instrument_id, daily_start, today)
+            bars_15min = await _query_15min_bars(session, instrument_id, intraday_start_dt, intraday_end_dt)
+            bars_minute = await _query_minute_bars(session, instrument_id, intraday_start_dt, intraday_end_dt)
+            if timeframe == "1h":
+                bars_60min = await _query_60min_bars(session, instrument_id, intraday_start_dt, intraday_end_dt)
+        except Exception as exc:
+            logger.warning("DB 降级查询也失败 instrument_id=%s: %s", instrument_id, exc)
+
     if daily_bars.empty:
         raise ValueError(
             f"无日线行情数据 instrument_id={instrument_id} symbol={symbol}"
         )
-
-    # 15min（VolumeNodeMonitor 需要，node_ltf=15m 低周期数据）
-    # 使用 _query_15min_bars 只查询不拉取，避免在指标计算时触发自动拉取和 upsert
-    bars_15min = await _query_15min_bars(
-        session, instrument_id, intraday_start_dt, intraday_end_dt
-    )
-
-    # 1min（VolumeNodeMonitor 需要，bars_minute 表可能为空）
-    # 使用 _query_minute_bars 只查询不拉取，DB 无数据时返回空 DataFrame
-    bars_minute = await _query_minute_bars(
-        session, instrument_id, intraday_start_dt, intraday_end_dt
-    )
 
     # 3. 前复权处理
     if adj == "qfq":
@@ -216,6 +241,10 @@ async def compute_all_indicators(
         if not bars_minute.empty:
             bars_minute = apply_adj_factor_to_bars(
                 bars_minute, adj_factor_df, intraday=True
+            )
+        if bars_60min is not None and not bars_60min.empty:
+            bars_60min = apply_adj_factor_to_bars(
+                bars_60min, adj_factor_df, intraday=True
             )
 
     # 确保 index 是 DatetimeIndex（策略计算依赖）

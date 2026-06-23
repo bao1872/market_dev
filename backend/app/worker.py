@@ -6,10 +6,12 @@
     WORKER_TYPE=strategy_batch python -m app.worker   # 运行策略批量计算 Worker
     WORKER_TYPE=bars_scheduler python -m app.worker   # 运行行情调度 Worker（每日 16:00）
     WORKER_TYPE=strategy_scheduler python -m app.worker   # 运行选股策略调度 Worker（每日 16:30）
+    WORKER_TYPE=calendar_scheduler python -m app.worker  # 运行日历调度 Worker（每日 02:00）
+    WORKER_TYPE=monitor_scheduler python -m app.worker    # 运行监控调度 Worker（交易时段 9:30-15:00）
     WORKER_TYPE=all python -m app.worker              # 同时运行全部（开发模式）
 
 环境变量：
-    WORKER_TYPE: worker 类型（outbox/delivery/strategy_batch/bars_scheduler/strategy_scheduler/all，默认 all）
+    WORKER_TYPE: worker 类型（outbox/delivery/strategy_batch/bars_scheduler/strategy_scheduler/calendar_scheduler/monitor_scheduler/all，默认 all）
     WORKER_INTERVAL: 轮询间隔秒数（默认 5）
     WORKER_BATCH_SIZE: 单次轮询最大记录数（默认 100）
     WORKER_MAX_RETRY: 最大重试次数（默认 5）
@@ -171,7 +173,7 @@ async def run_bars_scheduler_worker() -> None:
     使用 APScheduler AsyncIOScheduler + CronTrigger：
     - 每个交易日（周一至周五）16:00 触发
     - 调用 BarsSchedulerService.refresh_all_instruments()
-    - 串行拉取 4 个周期（15m/60min/w/m），耗时约 1.8 小时
+    - 串行拉取 3 个周期（d/15m/60m），耗时约 1.8 小时
 
     设计说明：
     - APScheduler 在事件循环中运行，不阻塞
@@ -190,8 +192,19 @@ async def run_bars_scheduler_worker() -> None:
         """定时任务：每日 16:00 刷新全市场多周期行情。"""
         from datetime import date as date_cls
 
+        from app.services.calendar_service import is_trading_day_async
+
         trade_date = date_cls.today()
-        logger.info("定时任务触发：多周期行情更新 trade_date=%s", trade_date)
+
+        # 交易日历判断（替代简单的 weekday 判断）
+        async with AsyncSessionLocal() as session:
+            is_trading = await is_trading_day_async(session, trade_date)
+
+        if not is_trading:
+            logger.info("非交易日 %s，跳过行情刷新", trade_date)
+            return
+
+        logger.info("交易日 %s，开始行情刷新", trade_date)
         try:
             result = await service.refresh_all_instruments(trade_date)
             logger.info(
@@ -201,15 +214,15 @@ async def run_bars_scheduler_worker() -> None:
         except Exception as exc:
             logger.exception("定时任务异常: %s", exc)
 
-    # 每个交易日 16:00 触发
+    # 每日 16:00 触发（含非交易日，由内部交易日历判断是否执行）
     scheduler.add_job(
         scheduled_bars_refresh,
-        CronTrigger(day_of_week="mon-fri", hour=16, minute=0),
+        CronTrigger(day_of_week="mon-sun", hour=16, minute=0),
         id="bars_refresh_daily",
         replace_existing=True,
     )
     scheduler.start()
-    logger.info("Bars Scheduler Worker 启动（每日 16:00 触发）")
+    logger.info("Bars Scheduler Worker 启动（每日 16:00 刷新行情）")
 
     while not _shutdown:
         await asyncio.sleep(60)
@@ -246,8 +259,19 @@ async def run_strategy_scheduler_worker() -> None:
         """定时任务：每日 16:30 为所有 selector 策略创建 queued run。"""
         from datetime import date as date_cls
 
+        from app.services.calendar_service import is_trading_day_async
+
         trade_date = date_cls.today()
-        logger.info("定时任务触发：选股策略批量计算 trade_date=%s", trade_date)
+
+        # 交易日历判断（替代简单的 weekday 判断）
+        async with AsyncSessionLocal() as session:
+            is_trading = await is_trading_day_async(session, trade_date)
+
+        if not is_trading:
+            logger.info("非交易日 %s，跳过选股策略计算", trade_date)
+            return
+
+        logger.info("交易日 %s，开始选股策略计算", trade_date)
         try:
             async with AsyncSessionLocal() as db:
                 # 查询所有 kind=selector 的策略
@@ -299,10 +323,10 @@ async def run_strategy_scheduler_worker() -> None:
         except Exception as exc:
             logger.exception("选股策略调度任务异常: %s", exc)
 
-    # 每个交易日 16:30 触发
+    # 每日 16:30 触发（含非交易日，由内部交易日历判断是否执行）
     scheduler.add_job(
         scheduled_strategy_run,
-        CronTrigger(day_of_week="mon-fri", hour=16, minute=30),
+        CronTrigger(day_of_week="mon-sun", hour=16, minute=30),
         id="strategy_run_daily",
         replace_existing=True,
     )
@@ -314,6 +338,223 @@ async def run_strategy_scheduler_worker() -> None:
 
     scheduler.shutdown(wait=False)
     logger.info("Strategy Scheduler Worker 已退出")
+
+
+async def run_calendar_scheduler_worker() -> None:
+    """日历调度 Worker：每日 02:00 从 pytdx 拉取当年交易日历并更新 DB。
+
+    使用 APScheduler AsyncIOScheduler + CronTrigger：
+    - 每日 02:00 触发
+    - 调用 seed_calendar_from_pytdx(session, year=当前年份)
+    - 更新或插入交易日历记录
+
+    设计说明：
+    - APScheduler 在事件循环中运行，不阻塞
+    - 信号处理：收到 SIGTERM/SIGINT 后优雅关闭 scheduler
+    - 异常不吞：捕获后记录日志，不影响下次触发
+    """
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from apscheduler.triggers.cron import CronTrigger
+
+    scheduler = AsyncIOScheduler()
+
+    async def calendar_job() -> None:
+        """每日凌晨刷新交易日历（从 pytdx 拉取当年日历并更新 DB）。"""
+        from datetime import date as date_cls
+
+        async with AsyncSessionLocal() as session:
+            try:
+                from app.services.calendar_seed import seed_calendar_from_pytdx
+                year = date_cls.today().year
+                count = await seed_calendar_from_pytdx(session, year=year)
+                logger.info("日历刷新完成: year=%d, %d 条记录更新", year, count)
+            except Exception as exc:
+                logger.error("日历刷新失败: %s", exc)
+                raise
+
+    scheduler.add_job(
+        calendar_job,
+        CronTrigger(hour=2, minute=0),
+        id="calendar_scheduler",
+        name="calendar_scheduler",
+        replace_existing=True,
+    )
+    scheduler.start()
+    logger.info("Calendar Scheduler Worker 启动（每日 02:00 刷新交易日历）")
+
+    while not _shutdown:
+        await asyncio.sleep(60)
+
+    scheduler.shutdown(wait=False)
+    logger.info("Calendar Scheduler Worker 已退出")
+
+
+async def run_monitor_scheduler_worker() -> None:
+    """监控调度 Worker：交易时段内每 30 秒执行一轮监控。
+
+    使用 APScheduler AsyncIOScheduler + 交易时段判断：
+    - 交易日 9:30-11:30：每 30 秒执行一轮
+    - 午休 11:30-13:00：暂停
+    - 交易日 13:00-15:00：每 30 秒执行一轮
+    - 非交易日：不执行
+
+    调用 MonitorBatchService.execute_monitor_cycle() 执行单轮监控。
+
+    设计说明：
+    - 不使用 CronTrigger（需要精确到秒级的循环控制）
+    - 使用 while 循环 + asyncio.sleep(30) 实现交易时段内循环
+    - 交易日检查：复用 services/calendar_service.is_trading_day()
+    - 午休暂停：11:30-13:00 期间 sleep 等待
+    - 优雅退出：检查 _shutdown 标志
+    """
+    from datetime import time as time_cls
+
+    from app.services.monitor_batch_service import MonitorBatchService
+
+    service = MonitorBatchService()
+    cycle_interval = 30  # 秒
+    morning_start = time_cls(9, 30)
+    morning_end = time_cls(11, 30)
+    afternoon_start = time_cls(13, 0)
+    afternoon_end = time_cls(15, 0)
+
+    logger.info(
+        "Monitor Scheduler Worker 启动（交易时段 %s-%s, %s-%s, 间隔=%ds）",
+        morning_start, morning_end, afternoon_start, afternoon_end, cycle_interval,
+    )
+
+    # 启动成功飞书通知
+    await _notify_monitor_status("监控服务已启动", "交易时段 9:30-11:30 / 13:00-15:00\n每 30 秒执行一轮监控")
+
+    while not _shutdown:
+        try:
+            from datetime import datetime
+
+            now = datetime.now()
+
+            # 交易日检查（使用异步接口，避免在事件循环中降级到 weekday）
+            from app.services.calendar_service import is_trading_day_async
+
+            async with AsyncSessionLocal() as db:
+                trading = await is_trading_day_async(db, now.date())
+            if not trading:
+                # 非交易日，等待到下一个工作日
+                await asyncio.sleep(300)  # 5分钟检查一次
+                continue
+
+            current_time = now.time()
+
+            # 判断是否在交易时段
+            in_morning = morning_start <= current_time < morning_end
+            in_afternoon = afternoon_start <= current_time < afternoon_end
+
+            if not (in_morning or in_afternoon):
+                # 非交易时段，等待
+                if current_time < morning_start:
+                    # 开盘前，等待到 9:30
+                    wait_seconds = (
+                        datetime(now.year, now.month, now.day, 9, 30) - now
+                    ).total_seconds()
+                    if wait_seconds > 0:
+                        logger.info("等待开盘，还需 %d 秒", int(wait_seconds))
+                        await asyncio.sleep(min(wait_seconds, 60))
+                elif morning_end <= current_time < afternoon_start:
+                    # 午休，等待到 13:00
+                    wait_seconds = (
+                        datetime(now.year, now.month, now.day, 13, 0) - now
+                    ).total_seconds()
+                    if wait_seconds > 0:
+                        logger.info("午休中，等待 %d 秒", int(wait_seconds))
+                        await asyncio.sleep(min(wait_seconds, 60))
+                elif current_time >= afternoon_end:
+                    # 收盘后，等待到明天
+                    await asyncio.sleep(300)
+                continue
+
+            # 交易时段内，执行监控周期
+            async with AsyncSessionLocal() as db:
+                result = await service.execute_monitor_cycle(db)
+                await db.commit()
+                if result.total_events_written > 0:
+                    logger.info(
+                        "监控周期完成: instruments=%d events=%d notifications=%d",
+                        result.total_instruments,
+                        result.total_events_written,
+                        result.total_notifications_created,
+                    )
+                else:
+                    logger.debug(
+                        "监控周期完成: instruments=%d events=0",
+                        result.total_instruments,
+                    )
+
+        except Exception as exc:
+            logger.exception("Monitor Scheduler 异常: %s", exc)
+            # 异常退出飞书通知
+            await _notify_monitor_status("监控服务异常", str(exc), is_error=True)
+
+        # 交易时段内每 30 秒一轮
+        await asyncio.sleep(cycle_interval)
+
+    logger.info("Monitor Scheduler Worker 已退出")
+
+
+async def _notify_monitor_status(
+    title: str, content: str, *, is_error: bool = False,
+) -> None:
+    """向所有配置了飞书渠道的用户发送监控状态通知。
+
+    通知失败不影响主流程（仅记录警告）。
+    """
+    try:
+        from sqlalchemy import select
+
+        from app.models.notification import NotificationChannel
+        from app.schemas.notification import NotificationMessageDTO
+        from app.services.channel_adapter import get_adapter
+
+        emoji = "❌" if is_error else "✅"
+        text = f"{emoji} {title}\n\n{content}"
+
+        async with AsyncSessionLocal() as db:
+            # 查询所有活跃的飞书平台应用渠道
+            stmt = select(NotificationChannel).where(
+                NotificationChannel.adapter_type == "feishu_platform_app",
+                NotificationChannel.status == "active",
+            )
+            result = await db.execute(stmt)
+            channels = list(result.scalars().all())
+
+            if not channels:
+                logger.debug("无活跃飞书渠道，跳过监控状态通知")
+                return
+
+            for channel in channels:
+                try:
+                    adapter = get_adapter(channel.adapter_type)
+                    dto = NotificationMessageDTO(
+                        title=f"{emoji} {title}",
+                        body=text,
+                        message_type="text",
+                        template_key="monitor_status",
+                        template_version="1.0.0",
+                        summary=text[:100],
+                        data_time=datetime.now(UTC).isoformat(),
+                        resource_refs={},
+                    )
+                    delivery = await adapter.send(dto, channel.target_config)
+                    if delivery.success:
+                        logger.info("监控状态通知已发送: %s -> user=%s", title, channel.user_id)
+                    else:
+                        logger.warning(
+                            "监控状态通知发送失败: %s -> user=%s: %s",
+                            title, channel.user_id, delivery.error_message,
+                        )
+                except Exception as e:
+                    logger.warning("监控状态通知发送异常: user=%s: %s", channel.user_id, e)
+
+    except Exception as e:
+        logger.warning("监控状态通知整体失败: %s", e)
 
 
 async def main() -> None:
@@ -345,6 +586,12 @@ async def main() -> None:
     if WORKER_TYPE in ("strategy_scheduler", "all"):
         tasks.append(asyncio.create_task(run_strategy_scheduler_worker()))
 
+    if WORKER_TYPE in ("calendar_scheduler", "all"):
+        tasks.append(asyncio.create_task(run_calendar_scheduler_worker()))
+
+    if WORKER_TYPE in ("monitor_scheduler", "all"):
+        tasks.append(asyncio.create_task(run_monitor_scheduler_worker()))
+
     if not tasks:
         logger.error("未知 WORKER_TYPE: %s", WORKER_TYPE)
         return
@@ -360,7 +607,7 @@ if __name__ == "__main__":
     print(f"WORKER_INTERVAL={WORKER_INTERVAL}")
     print(f"WORKER_BATCH_SIZE={WORKER_BATCH_SIZE}")
     print(f"WORKER_MAX_RETRY={WORKER_MAX_RETRY}")
-    assert WORKER_TYPE in ("outbox", "delivery", "strategy_batch", "bars_scheduler", "strategy_scheduler", "all"), \
+    assert WORKER_TYPE in ("outbox", "delivery", "strategy_batch", "bars_scheduler", "strategy_scheduler", "calendar_scheduler", "monitor_scheduler", "all"), \
         f"未知 WORKER_TYPE: {WORKER_TYPE}"
     # 验证 worker 函数可调用
     assert callable(run_outbox_relay), "run_outbox_relay 应可调用"
@@ -368,4 +615,7 @@ if __name__ == "__main__":
     assert callable(run_strategy_batch_worker), "run_strategy_batch_worker 应可调用"
     assert callable(run_bars_scheduler_worker), "run_bars_scheduler_worker 应可调用"
     assert callable(run_strategy_scheduler_worker), "run_strategy_scheduler_worker 应可调用"
+    assert callable(run_calendar_scheduler_worker), "run_calendar_scheduler_worker 应可调用"
+    assert callable(run_monitor_scheduler_worker), "run_monitor_scheduler_worker 应可调用"
     print("OK: 配置验证通过")
+    asyncio.run(main())

@@ -10,7 +10,6 @@ V1.1 交易平台后端，提供：
 - /strategies: 策略目录与版本（R7）
 - /admin/strategies: 策略管理（R7）
 - /admin/strategies/{key}/run: 策略运行（R12）
-- /admin/config: 配置注册表管理（R6）
 - /admin/invite-codes: 邀请码管理（V1.6）
 - /admin/members: 会员账户管理（V1.6）
 - /messages: 通知消息（R9）
@@ -37,11 +36,11 @@ from __future__ import annotations
 import logging
 import time
 from contextlib import asynccontextmanager
+from datetime import date
 
 from fastapi import FastAPI, Request
 
 from app.api import metrics as metrics_api
-from app.api.admin_config import router as admin_config_router
 from app.api.admin_membership import router as admin_membership_router
 from app.api.auth import router as auth_router
 from app.api.bars import router as bars_router
@@ -49,11 +48,13 @@ from app.api.calendar import router as calendar_router
 from app.api.health import router as health_router
 from app.api.indicators import router as indicators_router
 from app.api.instruments import router as instruments_router
+from app.api.market import router as market_router
 from app.api.metrics import http_request_duration_seconds, http_requests_total
 from app.api.monitor_states import router as monitor_states_router
 from app.api.monitoring_plans import router as monitoring_plans_router
 from app.api.notifications import router as notifications_router
 from app.api.selection_plans import router as selection_plans_router
+from app.api.stock_memos import router as stock_memos_router
 from app.api.strategies import router as strategies_router
 from app.api.strategy_events import router as strategy_events_router
 from app.api.strategy_runs import router as strategy_runs_router
@@ -83,6 +84,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error("种子数据初始化失败（不影响启动）: %s", e)
 
+    try:
+        from app.services.calendar_seed import seed_calendar_from_pytdx
+
+        async with AsyncSessionLocal() as db:
+            count = await seed_calendar_from_pytdx(db, year=date.today().year)
+            logger.info("启动时日历刷新完成: %d 条记录更新", count)
+    except Exception as e:
+        logger.error("启动时日历刷新失败（不影响启动）: %s", e)
+
     yield
 
 
@@ -101,6 +111,8 @@ app.include_router(auth_router)
 app.include_router(instruments_router)
 # 交易日历路由（R4）
 app.include_router(calendar_router)
+# 市场状态路由（与 calendar 同级，不走 /api/v1 前缀）
+app.include_router(market_router)
 # 行情查询路由
 app.include_router(bars_router)
 # 策略指标实时计算路由
@@ -116,11 +128,12 @@ app.include_router(strategy_events_router)
 # 通知消息与渠道路由（R9）
 app.include_router(notifications_router)
 # 配置注册表管理路由（R6，需 admin 角色）
-app.include_router(admin_config_router)
 # 会员与邀请码管理路由（V1.6，需 admin 角色）
 app.include_router(admin_membership_router)
 # 用户自选股路由（W1）
 app.include_router(watchlist_router)
+# 个股备忘录路由
+app.include_router(stock_memos_router)
 # 监控组合方案管理路由（C5/C6/C8）
 app.include_router(monitoring_plans_router)
 # 选股组合方案管理路由（C1/C4）

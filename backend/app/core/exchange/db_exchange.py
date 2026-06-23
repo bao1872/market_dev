@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime
 from typing import Any
@@ -210,7 +211,10 @@ class DBExchange(Exchange):
         return self._query_bars_by_count("bars_15min", symbol, count, "trade_time")
 
     def get_60min_bars(self, symbol: str, count: int = 800) -> pd.DataFrame:
-        """获取 60 分钟线数据（按数量）。"""
+        """获取 60 分钟线数据（按数量，取最新 count 条）。
+
+        count 默认 800（DB 查询用），回补到 2023-01-01 需 4000 条（由 BACKFILL_COUNTS 控制）。
+        """
         return self._query_bars_by_count("bars_60min", symbol, count, "trade_time")
 
     def get_minute_bars(self, symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
@@ -258,6 +262,152 @@ class DBExchange(Exchange):
             return pd.DataFrame(columns=["code", "name", "market"])
 
         return pd.DataFrame(rows, columns=["code", "name", "market"])
+
+    def _get_instrument_id_sync(self, symbol: str) -> int | None:
+        """同步查询 instrument_id（通过 symbol 查 instruments 表）。"""
+        sql = text("SELECT id FROM instruments WHERE symbol = :symbol LIMIT 1")
+        try:
+            with self._engine.connect() as conn:
+                result = conn.execute(sql, {"symbol": symbol})
+                row = result.fetchone()
+                if row is not None:
+                    return row[0]
+                return None
+        except Exception as exc:
+            logger.warning("_get_instrument_id_sync 查询失败 symbol=%s: %s", symbol, exc)
+            return None
+
+    async def klines(
+        self,
+        symbol: str,
+        frequency: str,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        count: int | None = None,
+    ) -> pd.DataFrame | None:
+        """统一行情读取接口（DB 模式，从 PostgreSQL 读取）"""
+        from app.core.exchange import FREQUENCY_MAP
+
+        if frequency not in FREQUENCY_MAP:
+            logger.warning("klines() 不支持的 frequency=%s", frequency)
+            return None
+
+        # 周线/月线：从日线合成
+        if frequency in ("1w", "1mo"):
+            return await self._klines_synthesized(symbol, frequency, start_date, end_date, count)
+
+        # 根据周期选择表和时间列
+        table_map = {"1d": ("bars_daily", "trade_date"), "15m": ("bars_15min", "trade_time"), "1h": ("bars_60min", "trade_time")}
+        table_info = table_map.get(frequency)
+        if table_info is None:
+            return None
+        table, time_col = table_info
+
+        # 查询 instrument_id
+        instrument_id = await asyncio.to_thread(self._get_instrument_id_sync, symbol)
+        if instrument_id is None:
+            return None
+
+        # 构建 SQL（使用参数化查询防止注入）
+        conditions = ["b.instrument_id = :instrument_id"]
+        params: dict[str, Any] = {"instrument_id": instrument_id}
+
+        if start_date is not None:
+            if frequency == "1d":
+                conditions.append("b.trade_date >= :start_date")
+            else:
+                conditions.append("b.trade_time >= :start_date")
+            params["start_date"] = start_date
+
+        if end_date is not None:
+            if frequency == "1d":
+                conditions.append("b.trade_date <= :end_date")
+            else:
+                conditions.append("b.trade_time <= :end_date")
+            params["end_date"] = end_date
+
+        where = " AND ".join(conditions)
+
+        # 表名受控（来自 table_map），可安全格式化
+        safe_table = table.replace("'", "").replace('"', "")
+
+        if count is not None:
+            sql_str = (
+                f"SELECT {time_col}, open, high, low, close, volume, amount, adj_factor "
+                f"FROM {safe_table} b WHERE {where} "
+                f"ORDER BY {time_col} DESC LIMIT :count"
+            )
+            params["count"] = count
+        else:
+            sql_str = (
+                f"SELECT {time_col}, open, high, low, close, volume, amount, adj_factor "
+                f"FROM {safe_table} b WHERE {where} "
+                f"ORDER BY {time_col}"
+            )
+
+        def _execute_query() -> pd.DataFrame:
+            with self._engine.connect() as conn:
+                return pd.read_sql(text(sql_str), conn, params=params)
+
+        try:
+            result = await asyncio.to_thread(_execute_query)
+            if result is None or result.empty:
+                return None
+
+            # 设置时间列为 index
+            result = result.set_index(time_col)
+            result.index = pd.to_datetime(result.index)
+            result.index = result.index.tz_localize("Asia/Shanghai")
+
+            # 如果用了 DESC LIMIT，需要重新排序
+            if count is not None:
+                result = result.sort_index()
+
+            # adj_factor 缺失时填充 1.0
+            if "adj_factor" not in result.columns:
+                result["adj_factor"] = 1.0
+            else:
+                result["adj_factor"] = result["adj_factor"].fillna(1.0)
+
+            return result
+        except Exception as e:
+            logger.warning("DBExchange.klines() 查询失败 symbol=%s: %s", symbol, e)
+            return None
+
+    async def _klines_synthesized(
+        self,
+        symbol: str,
+        frequency: str,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        count: int | None = None,
+    ) -> pd.DataFrame | None:
+        """从日线合成周线/月线"""
+        daily_count = (count or 500) * 7 if frequency == "1w" else (count or 120) * 31
+        daily_df = await self.klines(symbol, "1d", start_date=start_date, end_date=end_date, count=daily_count)
+        if daily_df is None or daily_df.empty:
+            return None
+
+        from app.repositories.bar_repository import convert_kline_frequency
+
+        # convert_kline_frequency 期望 DatetimeIndex 无时区，先去除时区
+        daily_naive = daily_df.copy()
+        if daily_naive.index.tz is not None:
+            daily_naive.index = daily_naive.index.tz_localize(None)
+
+        freq_map = {"1w": "w", "1mo": "m"}
+        target_freq = freq_map[frequency]
+        result = convert_kline_frequency(daily_naive, target_freq)
+        if result is None or result.empty:
+            return None
+
+        # 恢复时区
+        result.index = result.index.tz_localize("Asia/Shanghai")
+
+        if count is not None and len(result) > count:
+            result = result.iloc[-count:]
+
+        return result
 
 
 if __name__ == "__main__":

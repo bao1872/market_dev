@@ -5,7 +5,7 @@
 - 串行拉取（pytdx 不支持并发）
 - 分批 upsert，幂等：upsert on_conflict_do_update
 - 进度：tqdm 进度条（底部固定）
-- 回补：支持指定 start_date 回补历史数据到 2023-01-01
+- 回补：使用 start_date 参数控制日线回补范围（默认 2023-01-01），15min/60min 使用 BACKFILL_COUNTS
 
 设计说明：
 - pytdx 不支持并发，所有拉取通过 asyncio.to_thread 串行桥接
@@ -14,6 +14,7 @@
 - 失败重试 3 次，间隔 5 秒，不中断整体流程
 - 日线是 adj_factor 的来源，必须定时刷新，否则前复权会失败
 - 周线/月线不存储在 DB，从日线动态合成（convert_kline_frequency），不参与定时刷新
+- 1m 不参与定时刷新/回补，仅在指标计算时按需查询
 """
 
 from __future__ import annotations
@@ -97,13 +98,11 @@ class BarsSchedulerService:
     PERIODS = ["d", "15m", "60m"]
 
     # 每日增量更新的 count（只拉最新数据，减少拉取量）
-    # 日线 count 表示回看天数，其他周期表示拉取条数
-    # 耗时约 1.8 小时（8268 只 × 3 周期 × 0.2s）
+    # 日线 count 表示回看天数，15min/60min 表示拉取条数
     DAILY_COUNTS: dict[str, int] = {"d": 5, "15m": 50, "60m": 10}
 
     # 回补的 count（回补到 2023-01-01 所需拉取量）
-    # 日线 500 天约覆盖 2 年交易日
-    # 耗时约 11.1 小时（8268 只 × 3 周期 × 多次拉取）
+    # 日线回补使用 start_date 参数控制范围，count 不用于日线；15min/60min 使用 count
     BACKFILL_COUNTS: dict[str, int] = {"d": 500, "15m": 15000, "60m": 4000}
 
     # 失败重试
@@ -111,7 +110,7 @@ class BarsSchedulerService:
     RETRY_DELAY = 5  # 秒
 
     # 周期 → refresh 函数映射
-    # 日线使用日期范围接口，其他周期使用 count 接口
+    # 日线使用日期范围接口，15min/60min 使用 count 接口
     _REFRESH_FUNCS = {
         "d": refresh_daily_bars,
         "15m": refresh_15min_bars,
@@ -150,9 +149,11 @@ class BarsSchedulerService:
         """历史回补：串行拉取全市场历史数据。
 
         使用 BACKFILL_COUNTS，耗时约 11.1 小时。
+        日线回补范围由 start_date 参数控制（默认 2023-01-01），
+        15min/60min 仍使用 BACKFILL_COUNTS 中的 count。
 
         Args:
-            start_date: 回补起始日期（默认 2023-01-01）
+            start_date: 日线回补起始日期（默认 2023-01-01），真正控制日线回补范围
             db_session: 可选的 DB 会话（不传则内部创建）
 
         Returns:
@@ -164,6 +165,7 @@ class BarsSchedulerService:
             counts=self.BACKFILL_COUNTS,
             db_session=db_session,
             task_name="历史回补",
+            start_date=start_date,
         )
 
     async def _process_all_instruments(
@@ -172,6 +174,7 @@ class BarsSchedulerService:
         counts: dict[str, int],
         db_session: AsyncSession | None,
         task_name: str,
+        start_date: date | None = None,
     ) -> BatchResult:
         """处理全市场股票的多周期行情刷新（串行）。
 
@@ -180,13 +183,18 @@ class BarsSchedulerService:
             counts: 各周期的拉取条数
             db_session: 可选的 DB 会话
             task_name: 任务名称（用于日志）
+            start_date: 日线回补起始日期（仅回补模式使用，None 时用 count 模式）
 
         Returns:
             BatchResult: 批量刷新结果
         """
         # 1. 交易日检查（仅对每日增量更新，回补不检查）
-        if task_name == "每日增量更新" and db_session is not None:
-            is_trading = await is_trading_day_async(db_session, trade_date)
+        if task_name == "每日增量更新":
+            if db_session is not None:
+                is_trading = await is_trading_day_async(db_session, trade_date)
+            else:
+                async with AsyncSessionLocal() as session:
+                    is_trading = await is_trading_day_async(session, trade_date)
             if not is_trading:
                 logger.info("非交易日，跳过 %s trade_date=%s", task_name, trade_date)
                 return BatchResult()
@@ -227,6 +235,7 @@ class BarsSchedulerService:
                     symbol=symbol,
                     counts=counts,
                     db_session=db_session,
+                    start_date=start_date,
                 )
                 if refresh_result.success:
                     result.succeeded += 1
@@ -266,29 +275,33 @@ class BarsSchedulerService:
         symbol: str,
         counts: dict[str, int],
         db_session: AsyncSession | None = None,
+        start_date: date | None = None,
     ) -> RefreshResult:
-        """串行刷新单只股票的 4 个周期行情。
+        """串行刷新单只股票的 3 个周期行情。
 
         Args:
             instrument_id: 标的 UUID
             symbol: 股票代码
             counts: 各周期的拉取条数
             db_session: 可选的 DB 会话
+            start_date: 日线回补起始日期（None 时使用 count 模式）
 
         Returns:
             RefreshResult: 刷新结果
         """
         result = RefreshResult(instrument_id=instrument_id, symbol=symbol, success=True)
 
-        # 串行处理 3 个周期
-        for period in self.PERIODS:
-            count = counts.get(period, 100)
+        # 串行处理周期（仅处理 counts 中存在的周期）
+        active_periods = [p for p in self.PERIODS if p in counts]
+        for period in active_periods:
+            count = counts[period]
             upsert_count = await self._refresh_one_period_with_retry(
                 instrument_id=instrument_id,
                 symbol=symbol,
                 period=period,
                 count=count,
                 db_session=db_session,
+                start_date=start_date,
             )
             result.upsert_counts[period] = upsert_count
 
@@ -301,6 +314,7 @@ class BarsSchedulerService:
         period: str,
         count: int,
         db_session: AsyncSession | None = None,
+        start_date: date | None = None,
     ) -> int:
         """刷新单只股票单个周期，带重试。
 
@@ -308,8 +322,9 @@ class BarsSchedulerService:
             instrument_id: 标的 UUID
             symbol: 股票代码
             period: 周期（d/15m/60m）
-            count: 拉取条数（日线时为回看天数）
+            count: 拉取条数（日线时为回看天数，15min/60min 为拉取条数）
             db_session: 可选的 DB 会话
+            start_date: 日线回补起始日期（None 时使用 count 模式）
 
         Returns:
             upsert 记录数（失败返回 0）
@@ -319,15 +334,20 @@ class BarsSchedulerService:
 
         for attempt in range(1, self.MAX_RETRIES + 1):
             try:
-                # 日线使用日期范围接口，其他周期使用 count 接口
+                # 日线使用日期范围接口，15min/60min 使用 count 接口
                 if period == "d":
                     end_date = date.today()
-                    start_date = end_date - timedelta(days=count)
+                    if start_date is not None:
+                        # 回补模式：使用 start_date 参数控制日线回补范围
+                        actual_start = start_date
+                    else:
+                        # 每日增量模式：使用 count 回看天数
+                        actual_start = end_date - timedelta(days=count)
                     if db_session is not None:
-                        df = await refresh_fn(db_session, instrument_id, start_date, end_date, adapter)
+                        df = await refresh_fn(db_session, instrument_id, actual_start, end_date, adapter)
                     else:
                         async with AsyncSessionLocal() as session:
-                            df = await refresh_fn(session, instrument_id, start_date, end_date, adapter)
+                            df = await refresh_fn(session, instrument_id, actual_start, end_date, adapter)
                 else:
                     if db_session is not None:
                         df = await refresh_fn(db_session, instrument_id, count, adapter)
@@ -408,7 +428,7 @@ class BarsSchedulerService:
         self,
         dry_run: bool = False,
     ) -> list:
-        """执行保留策略清理（由 APScheduler 每日 02:00 触发）。
+        """执行保留策略清理（当前未配置自动调度，需手动调用或后续添加定时任务）。
 
         Args:
             dry_run: True 时只统计不删除（用于预检）
@@ -456,9 +476,21 @@ if __name__ == "__main__":
 
     sig = inspect.signature(service.refresh_one_instrument)
     params = list(sig.parameters.keys())
-    assert params == ["instrument_id", "symbol", "counts", "db_session"], \
+    assert params == ["instrument_id", "symbol", "counts", "db_session", "start_date"], \
         f"refresh_one_instrument 参数不匹配: {params}"
     print(f"refresh_one_instrument params={params}")
+
+    sig = inspect.signature(service._refresh_one_period_with_retry)
+    params = list(sig.parameters.keys())
+    assert params == ["instrument_id", "symbol", "period", "count", "db_session", "start_date"], \
+        f"_refresh_one_period_with_retry 参数不匹配: {params}"
+    print(f"_refresh_one_period_with_retry params={params}")
+
+    sig = inspect.signature(service._process_all_instruments)
+    params = list(sig.parameters.keys())
+    assert params == ["trade_date", "counts", "db_session", "task_name", "start_date"], \
+        f"_process_all_instruments 参数不匹配: {params}"
+    print(f"_process_all_instruments params={params}")
 
     # 3. 验证 refresh 函数映射
     assert set(service._REFRESH_FUNCS.keys()) == set(service.PERIODS), \

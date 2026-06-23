@@ -8,9 +8,9 @@
 已注册实现：
 - MockChannelAdapter: 测试/开发环境（不实际发送）
 - FeishuWebhookAdapter: 飞书 Webhook 渠道（签名加密）
+- FeishuPlatformAppAdapter: 飞书平台应用渠道（App API 模式）
 
 后续实现：
-- FeishuPlatformAppAdapter: 飞书平台应用渠道
 - EmailAdapter: 邮件渠道
 """
 

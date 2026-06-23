@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, func, select, text
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.bar import BarDaily
@@ -48,6 +48,9 @@ logger = logging.getLogger("strategy_batch_service")
 
 # 数据就绪检查覆盖率阈值（当日 K 线数 / 活跃标的数）
 DATA_COVERAGE_THRESHOLD = 0.9
+
+# 策略批量计算日线回看天数（与 bars.py _DEFAULT_DAILY_LOOKBACK_DAYS 一致）
+_STRATEGY_BATCH_DAILY_LOOKBACK_DAYS = 5000
 
 
 @dataclass
@@ -723,7 +726,7 @@ class StrategyBatchService:
                 )
 
         # 拉取日线行情（回看 5000 天，与 bars.py 一致）
-        lookback_days = 5000
+        lookback_days = _STRATEGY_BATCH_DAILY_LOOKBACK_DAYS
         start_date = run.trade_date - timedelta(days=lookback_days)
         try:
             bars_df = await fetch_daily_bars(

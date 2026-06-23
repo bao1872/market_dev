@@ -317,7 +317,7 @@ export default function IndexPage() {
   // --- 通知渠道（KPI 4）---
   const channelsQuery = useNotificationChannels()
   const channels = channelsQuery.data?.items ?? []
-  const feishuChannel = channels.find((c) => c.adapter_type === 'feishu')
+  const feishuChannel = channels.find((c) => c.adapter_type === 'feishu_platform_app')
 
   // --- 加入自选变更（选股结果表"＋ 自选"按钮）---
   const addWatchlistMutation = useAddToWatchlist()

@@ -244,6 +244,7 @@ class StrategyLoader:
     _registry: dict[str, str] = {
         "dsa_selector": "app.strategy.selectors.dsa_selector:DSASelector",
         "volume_node_monitor": "app.strategy.monitors.volume_node_monitor:VolumeNodeMonitor",
+        "bb_monitor": "app.strategy.monitors.bollinger_monitor:BollingerMonitor",
     }
 
     @classmethod

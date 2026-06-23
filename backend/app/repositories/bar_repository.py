@@ -1,4 +1,4 @@
-"""行情仓储 - 日线与分钟线数据的 DB 查询、pytdx 拉取回填、前复权应用。
+"""行情仓储 - 日线与分钟线数据的 DB 查询、pytdx 拉取（1m 仅手动/按需）、前复权应用。
 
 从 ref/交易/datasource/k_data_loader.py 迁移行情加载逻辑，关键改进：
 1. 异步 DB 访问：使用 AsyncSession（与 app/db.py 一致）。
@@ -299,6 +299,7 @@ async def _upsert_daily_bars(
     raw_df: pd.DataFrame,
     symbol: str | None = None,
     adapter: PytdxAdapter | None = None,
+    start_date: date | None = None,
 ) -> int:
     """将 pytdx 拉取的日线数据 upsert 入库。
 
@@ -308,6 +309,7 @@ async def _upsert_daily_bars(
         raw_df: pytdx 返回的 DataFrame，含 datetime/open/high/low/close/volume/amount
         symbol: 股票代码，用于计算 adj_factor；None 时 adj_factor 默认 1.0
         adapter: pytdx 适配器，用于计算 adj_factor
+        start_date: 日线回补起始日期，传递给 _calculate_adj_factor 的 min_date 参数
 
     Returns:
         写入记录数
@@ -322,7 +324,8 @@ async def _upsert_daily_bars(
     if symbol:
         try:
             adj_factors = await asyncio.to_thread(
-                _calculate_adj_factor, symbol, raw_df, adapter
+                _calculate_adj_factor, symbol, raw_df, adapter,
+                True, start_date,
             )
         except Exception as exc:
             logger.warning("计算 adj_factor 失败 symbol=%s: %s，使用默认 1.0", symbol, exc)
@@ -440,6 +443,7 @@ def _calculate_adj_factor(
     raw_df: pd.DataFrame,
     adapter: PytdxAdapter | None = None,
     use_raw_close: bool = True,
+    min_date: date | None = None,
 ) -> list[float]:
     """基于 pytdx 除权除息数据计算前复权因子。
 
@@ -457,9 +461,11 @@ def _calculate_adj_factor(
     前复权公式：qfq_price = raw_price × adj_factor
     其中 adj_factor = 累积因子，最新日期 adj_factor = 1.0
 
-    与旧算法的差异：
-    - 旧算法只用 fenhong，用 close_D（除权日收盘）近似
-    - 新算法用全部 xdxr 字段，用 close_{D-1}（前日收盘）精确计算
+    性能优化（min_date 参数）：
+    - 仅处理 >= min_date 的除权除息事件
+    - min_date 之前的事件不影响 min_date 之后 bar 的 adj_factor
+      （因为 bar_date > 旧事件日期，旧事件不更新 factor）
+    - supplement_df 仅拉取 min_date 附近的数据，避免从1990年代拉取8000条
 
     Args:
         symbol: 股票代码（如 '000001'）
@@ -467,6 +473,8 @@ def _calculate_adj_factor(
         adapter: pytdx 适配器，None 使用模块单例
         use_raw_close: True 时从 raw_df 提取事件日收盘价（适用于日线）；
             False 时始终从 pytdx 拉取日线 close（适用于周线/月线/分钟线，其 close 非日线 close）
+        min_date: 最小日期，仅处理 >= min_date 的除权除息事件；
+            None 表示处理全部事件（向后兼容）
 
     Returns:
         adj_factor 列表，与 raw_df 行一一对应；获取失败时全为 1.0
@@ -492,6 +500,22 @@ def _calculate_adj_factor(
     if exc_events.empty:
         return default_factors
 
+    # [行情] - 性能优化: 仅处理 >= min_date 的事件
+    # min_date 之前的事件不影响 min_date 之后 bar 的 adj_factor
+    # （因为 bar_date > 旧事件日期时，旧事件不更新 factor）
+    if min_date is not None:
+        exc_events_before = len(exc_events)
+        exc_events = exc_events[exc_events["date"].dt.date >= min_date].copy()
+        exc_events_after = len(exc_events)
+        if exc_events_before != exc_events_after:
+            logger.debug(
+                "过滤旧事件 symbol=%s: %d -> %d（跳过 %d 个 < %s 的事件）",
+                symbol, exc_events_before, exc_events_after,
+                exc_events_before - exc_events_after, min_date,
+            )
+        if exc_events.empty:
+            return default_factors
+
     # 构建 close 查找表：date -> close
     # use_raw_close=True 时从 raw_df 提取（日线场景）；
     # use_raw_close=False 时不从 raw_df 提取（周线/月线/分钟线场景，close 非日线值）
@@ -510,14 +534,12 @@ def _calculate_adj_factor(
             missing_dates.append(event_date)
 
     if missing_dates or not use_raw_close:
-        # 找出需要拉取的日期范围（向前扩展 10 天以获取 close_{D-1}）
+        # [行情] - 性能优化: 拉取范围从 min_date 附近开始，而非从1990年代
         all_event_dates = [event["date"].date() for _, event in exc_events.iterrows()]
         min_d = min(all_event_dates) if all_event_dates else date.today()
         max_d = max(all_event_dates) if all_event_dates else date.today()
         # 向前扩展 10 天确保覆盖前一交易日
-        from datetime import timedelta as _td
-
-        fetch_start = min_d - _td(days=10)
+        fetch_start = min_d - timedelta(days=10)
         try:
             supplement_df = pytdx.get_daily_bars(symbol, fetch_start, max_d)
             for _, row in supplement_df.iterrows():
@@ -681,8 +703,8 @@ async def fetch_daily_bars(
         logger.warning("pytdx 日线数据为空 symbol=%s %s~%s", symbol, start_date, end_date)
         return raw_df
 
-    # 4. 写入 DB（含 adj_factor 计算）
-    await _upsert_daily_bars(session, instrument_id, raw_df, symbol, pytdx)
+    # 4. 写入 DB（含 adj_factor 计算，传递 start_date 优化性能）
+    await _upsert_daily_bars(session, instrument_id, raw_df, symbol, pytdx, start_date)
 
     # 5. 返回（adj_factor 已由 _upsert_daily_bars 写入 raw_df）
     result_df = raw_df.set_index("datetime")
@@ -696,6 +718,7 @@ async def fetch_minute_bars(
     start_time: datetime,
     end_time: datetime,
     adapter: PytdxAdapter | None = None,
+    skip_upsert: bool = False,
 ) -> pd.DataFrame:
     """查询分钟线行情：DB 优先，DB 无数据则从 pytdx 拉取并写入 DB。
 
@@ -705,6 +728,7 @@ async def fetch_minute_bars(
         start_time: 起始时间
         end_time: 结束时间
         adapter: pytdx 适配器，None 使用模块单例
+        skip_upsert: 为 True 时仅从 pytdx 读取，不写入 DB（用于实时监控等无需持久化场景）
 
     Returns:
         DataFrame: index=DatetimeIndex(trade_time), columns=open/high/low/close/volume/amount/adj_factor
@@ -735,8 +759,9 @@ async def fetch_minute_bars(
         logger.warning("pytdx 分钟线数据为空 symbol=%s %s~%s", symbol, start_time, end_time)
         return raw_df
 
-    # 4. 写入 DB
-    await _upsert_minute_bars(session, instrument_id, raw_df)
+    # 4. 写入 DB（skip_upsert=True 时跳过，用于实时监控等无需持久化场景）
+    if not skip_upsert:
+        await _upsert_minute_bars(session, instrument_id, raw_df)
 
     # 5. 返回
     result_df = raw_df.set_index("datetime")
@@ -773,7 +798,7 @@ async def refresh_daily_bars(
     if raw_df.empty:
         return raw_df
 
-    await _upsert_daily_bars(session, instrument_id, raw_df, symbol, pytdx)
+    await _upsert_daily_bars(session, instrument_id, raw_df, symbol, pytdx, start_date)
 
     result_df = raw_df.set_index("datetime")
     result_df.index.name = "trade_date"
@@ -787,7 +812,7 @@ async def refresh_minute_bars(
     end_time: datetime,
     adapter: PytdxAdapter | None = None,
 ) -> pd.DataFrame:
-    """强制从 pytdx 拉取分钟线并 upsert（供 freshness_sla 触发刷新）。"""
+    """按需从 pytdx 拉取分钟线并 upsert（不参与定时调度，仅供手动/按需调用）。"""
     symbol = await _get_symbol(session, instrument_id)
     if symbol is None:
         logger.warning("instrument 不存在 instrument_id=%s", instrument_id)
@@ -815,12 +840,14 @@ async def refresh_minute_bars(
 
 # ===== 多周期行情：周线/月线/15分钟/60分钟 =====
 # 设计说明：
-# - fetch_*_bars：DB 优先，按日期/时间范围查询，无数据则从 pytdx 拉取并入库
-# - refresh_*_bars：强制从 pytdx 拉取（按 count），供调度服务使用
+# - 日线/15min/60min：
+#   - fetch_*_bars：DB 优先，按日期/时间范围查询，无数据则从 pytdx 拉取并入库
+#   - refresh_*_bars：强制从 pytdx 拉取（按 count），供调度服务使用
+# - 周线/月线：
+#   - fetch_*_bars：从日线动态合成（convert_kline_frequency），不存储在 DB
+#   - refresh_*_bars：从 DB 日线合并生成 DataFrame，不写入 DB
 # - 周线/月线使用 trade_date（Date），15min/60min 使用 trade_time（DateTime）
 # - pytdx 不支持并发，所有拉取通过 asyncio.to_thread 串行桥接
-# - Task 12: 周线/月线改为从日线合并（convert_kline_frequency），
-#   不再直接拉取 pytdx 原生周线/月线，adj_factor 从日线映射
 
 
 def convert_kline_frequency(daily_df: pd.DataFrame, to_f: str) -> pd.DataFrame:
@@ -976,7 +1003,9 @@ async def refresh_weekly_bars(
     Args:
         session: 异步会话
         instrument_id: 标的 UUID
-        count: 日线条数（用于估算日线回溯天数）
+        count: 期望的周线条数（用于估算日线回溯天数）。注意：实际回溯天数
+            受 max(count*7, 365*5) 下限约束，当 count*7 < 1825 时实际回溯 5 年，
+            因此 count 参数在小值时不影响回溯范围。
         adapter: 保留兼容性（不再使用）
 
     Returns:
@@ -1091,7 +1120,9 @@ async def refresh_monthly_bars(
     Args:
         session: 异步会话
         instrument_id: 标的 UUID
-        count: 日线条数（用于估算日线回溯天数）
+        count: 期望的月线条数（用于估算日线回溯天数）。注意：实际回溯天数
+            受 max(count*31, 365*5) 下限约束，当 count*31 < 1825 时实际回溯 5 年，
+            因此 count 参数在小值时不影响回溯范围。
         adapter: 保留兼容性（不再使用）
 
     Returns:

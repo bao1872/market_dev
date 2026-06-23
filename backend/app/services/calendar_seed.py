@@ -1,7 +1,7 @@
 """交易日历种子服务 - 从 Tushare 拉取年度交易日历并写入 trading_calendar 表。
 
 向量化处理：使用 pandas DataFrame 批量构建与去重，executemany 批量插入。
-冲突处理：ON CONFLICT (trade_date, market) DO NOTHING（已存在的跳过）。
+冲突处理：ON CONFLICT (trade_date, market) DO UPDATE SET is_trading_day = EXCLUDED.is_trading_day。
 
 Tushare token 来源：
 - 优先从 R6 配置注册表读取（如已实现）
@@ -18,7 +18,7 @@ Tushare token 来源：
     # 同步执行（需在同步上下文中调用）
     count = await seed_calendar_from_tushare(session, year=2026)
 
-副作用：写入 trading_calendar 表（INSERT，冲突时跳过）。
+副作用：写入 trading_calendar 表（INSERT，冲突时更新 is_trading_day）。
 """
 
 from __future__ import annotations
@@ -163,7 +163,7 @@ async def seed_calendar_from_tushare(
 ) -> int:
     """从 Tushare 拉取年度交易日历并写入 trading_calendar 表。
 
-    冲突处理：ON CONFLICT (trade_date, market) DO NOTHING。
+    冲突处理：ON CONFLICT (trade_date, market) DO UPDATE SET is_trading_day = EXCLUDED.is_trading_day。
     向量化：pandas 批量构建记录，executemany 批量插入。
 
     Args:
@@ -192,9 +192,12 @@ async def seed_calendar_from_tushare(
     # 向量化构建插入记录
     records: list[dict[str, Any]] = df.to_dict(orient="records")
 
-    # 使用 PostgreSQL ON CONFLICT DO NOTHING 批量插入
+    # 使用 PostgreSQL ON CONFLICT DO UPDATE 批量插入（冲突时更新 is_trading_day）
     stmt = pg_insert(TradingCalendar).values(records)
-    stmt = stmt.on_conflict_do_nothing(index_elements=["trade_date", "market"])
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["trade_date", "market"],
+        set_={"is_trading_day": stmt.excluded.is_trading_day},
+    )
 
     result = await session.execute(stmt)
     await session.commit()
@@ -258,9 +261,12 @@ def fetch_trading_days_from_pytdx(year: int) -> set[date]:
 
 
 def build_full_year_calendar(year: int, trading_days: set[date]) -> pd.DataFrame:
-    """生成完整年度日历（含非交易日），标记 is_trading_day。
+    """生成年度日历（含非交易日），标记 is_trading_day。
 
-    向量化：使用 pandas date_range 生成全年日期，isin 判断交易日。
+    生成到年底，过去日期仅 pytdx 确认的交易日标记为 True，
+    未来工作日乐观标记为 True（后续 seed 用权威数据覆盖）。
+
+    向量化：使用 pandas date_range 生成日期，isin 判断交易日。
 
     Args:
         year: 年份
@@ -269,9 +275,19 @@ def build_full_year_calendar(year: int, trading_days: set[date]) -> pd.DataFrame
     Returns:
         DataFrame，列：trade_date, is_trading_day, market
     """
-    all_dates = pd.date_range(start=f"{year}-01-01", end=f"{year}-12-31", freq="D").date
+    from datetime import date as date_cls
+
+    end_date = date_cls(year, 12, 31)
+    all_dates = pd.date_range(start=f"{year}-01-01", end=end_date, freq="D").date
     df = pd.DataFrame({"trade_date": all_dates})
-    df["is_trading_day"] = df["trade_date"].isin(trading_days)
+    # 过去/今天：仅 pytdx 确认的交易日标记为 True
+    # 未来日期：工作日乐观标记为 True（后续 seed 用权威数据覆盖）
+    today = date_cls.today()
+    df["is_trading_day"] = df.apply(
+        lambda row: row["trade_date"] in trading_days if row["trade_date"] <= today
+        else row["trade_date"].weekday() < 5,
+        axis=1,
+    )
     df["market"] = "A"
     df = df[["trade_date", "is_trading_day", "market"]]
     return df
@@ -284,7 +300,7 @@ async def seed_calendar_from_pytdx(
     """从 pytdx 拉取交易日并写入 trading_calendar 表（完整日历，含非交易日）。
 
     替代 Tushare 方案：当 TUSHARE_TOKEN 未配置时使用。
-    冲突处理：ON CONFLICT (trade_date, market) DO NOTHING。
+    冲突处理：ON CONFLICT (trade_date, market) DO UPDATE SET is_trading_day = EXCLUDED.is_trading_day。
 
     Args:
         session: 异步数据库会话
@@ -311,7 +327,10 @@ async def seed_calendar_from_pytdx(
     records: list[dict[str, Any]] = df.to_dict(orient="records")
 
     stmt = pg_insert(TradingCalendar).values(records)
-    stmt = stmt.on_conflict_do_nothing(index_elements=["trade_date", "market"])
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["trade_date", "market"],
+        set_={"is_trading_day": stmt.excluded.is_trading_day},
+    )
 
     result = await session.execute(stmt)
     await session.commit()

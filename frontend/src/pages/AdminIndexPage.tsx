@@ -12,12 +12,11 @@
 // - useMembers：获取会员总数（KPI 有效用户）
 // - useStrategies：获取策略目录（策略数，显示在页头描述）
 // - useStrategyRuns：获取 DSA 最近运行记录（DSA 卡片处理数/耗时）
-// - useAdminConfigs：获取配置列表（配置项数，显示在页头描述）
 
 import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { useToast } from '@/store/toast'
-import { useMembers, useStrategies, useStrategyRuns, useAdminConfigs } from '@/hooks/useApi'
+import { useMembers, useStrategies, useStrategyRuns } from '@/hooks/useApi'
 
 // ===== 监控吞吐折线图（Canvas 2D 简单实现）=====
 // 对应原型 chart-canvas data-chart="line" data-variant="green"
@@ -234,7 +233,6 @@ export default function AdminIndexPage() {
   const membersQuery = useMembers({ limit: 1 })
   const strategiesQuery = useStrategies()
   const dsaRunsQuery = useStrategyRuns('dsa', { limit: 1 })
-  const configsQuery = useAdminConfigs()
 
   // KPI 1：有效用户数（从 useMembers 获取 total）
   const memberCount = membersQuery.data?.total ?? 0
@@ -243,8 +241,6 @@ export default function AdminIndexPage() {
   // 策略数（从 useStrategies 获取 total，显示在页头描述）
   const strategyCount = strategiesQuery.data?.total ?? 0
 
-  // 配置项数（从 useAdminConfigs 获取 total，显示在页头描述）
-  const configCount = configsQuery.data?.total ?? 0
 
   // DSA 最近运行
   const latestDsaRun = dsaRunsQuery.data?.items[0]
@@ -282,9 +278,9 @@ export default function AdminIndexPage() {
     )
   }
 
-  // 页头描述：附加策略数和配置项数（数据加载完成后显示）
-  const pageDescExtra = strategiesQuery.data && configsQuery.data
-    ? ` · 已注册 ${strategyCount} 个策略 · ${configCount} 项配置`
+  // 页头描述：附加策略数（数据加载完成后显示）
+  const pageDescExtra = strategiesQuery.data
+    ? ` · 已注册 ${strategyCount} 个策略`
     : ''
 
   return (

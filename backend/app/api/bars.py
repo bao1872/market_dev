@@ -2,6 +2,10 @@
 
 GET /api/v1/instruments/{instrument_id}/bars
     查询行情数据，支持多周期（15m/1h/1d/1w/1mo）、前复权/不复权、服务端分页。
+    数据获取：Exchange.klines() 优先（实时最新），失败降级到 DB 查询。
+
+GET /api/v1/instruments/{instrument_id}/quote
+    获取标的实时报价（pytdx 1 分钟线优先，DB 日线回退）。
 
 GET /api/v1/bars/health
     行情系统健康检查，返回 DB/Redis 连通性与各周期数据新鲜度。
@@ -17,6 +21,7 @@ GET /api/v1/bars/health
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import date, datetime, timedelta
@@ -30,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import get_db, require_roles
 from app.core.redis_client import get_redis
 from app.models.bar import Bar15Min, Bar60Min, BarDaily, BarMinute, BarMonthly, BarWeekly
+from app.core.exchange import get_exchange
 from app.repositories.bar_repository import (
     _get_adj_factor_df,
     apply_adj_factor_to_bars,
@@ -173,7 +179,7 @@ async def get_bars(
     """查询指定标的的行情数据。
 
     - 支持多周期：1d（日线）/ 15m / 1h / 1w（周线）/ 1mo（月线）
-    - DB 优先：先查 DB，DB 无数据则从 pytdx 拉取并入库
+    - Exchange 优先：先从 Exchange.klines() 获取最新数据，失败则降级到 DB 查询
     - 前复权：adj=qfq 时对 OHLC 应用前复权（volume 不变）
     - 分页：服务端分页，返回 total/page/page_size
     """
@@ -194,29 +200,47 @@ async def get_bars(
         instrument_id, timeframe, adj, start_date, end_date, page, page_size,
     )
 
-    try:
-        start, end = _parse_date_range(timeframe, start_date, end_date)
-        # 按周期分发到对应的 fetch 函数
-        if timeframe == "1d":
-            df = await fetch_daily_bars(session, instrument_id, start, end)
-        elif timeframe == "1w":
-            df = await fetch_weekly_bars(session, instrument_id, start, end)
-        elif timeframe == "1mo":
-            df = await fetch_monthly_bars(session, instrument_id, start, end)
-        elif timeframe == "15m":
-            df = await fetch_15min_bars(session, instrument_id, start, end)
-        else:  # 1h
-            df = await fetch_60min_bars(session, instrument_id, start, end)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.warning("查询行情失败 instrument_id=%s: %s", instrument_id, exc)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"查询行情失败: {exc}",
-        ) from exc
+    start, end = _parse_date_range(timeframe, start_date, end_date)
 
-    if df.empty:
+    # --- 数据获取：通过 Exchange 层（参考 chanlunpro /tv/history 模式）---
+    df = None
+    try:
+        exchange = get_exchange("A")
+        # 从 DB 查询 symbol
+        from app.models.instrument import Instrument
+        inst_stmt = select(Instrument.symbol).where(Instrument.id == instrument_id)
+        inst_result = await session.execute(inst_stmt)
+        inst_row = inst_result.first()
+        if inst_row is not None:
+            symbol = inst_row[0]
+            # 通过 Exchange 层获取最新数据
+            df = await exchange.klines(symbol, timeframe, start_date=start, end_date=end)
+    except Exception as exc:
+        logger.warning("Exchange.klines() 失败 instrument_id=%s: %s", instrument_id, exc)
+
+    # Exchange 失败时降级到 DB 查询
+    if df is None or df.empty:
+        try:
+            if timeframe == "1d":
+                df = await fetch_daily_bars(session, instrument_id, start, end)
+            elif timeframe == "1w":
+                df = await fetch_weekly_bars(session, instrument_id, start, end)
+            elif timeframe == "1mo":
+                df = await fetch_monthly_bars(session, instrument_id, start, end)
+            elif timeframe == "15m":
+                df = await fetch_15min_bars(session, instrument_id, start, end)
+            else:  # 1h
+                df = await fetch_60min_bars(session, instrument_id, start, end)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.warning("DB 降级查询也失败 instrument_id=%s: %s", instrument_id, exc)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"查询行情失败: {exc}",
+            ) from exc
+
+    if df is None or df.empty:
         return BarListResponse(
             items=[],
             total=0,
@@ -226,10 +250,42 @@ async def get_bars(
             adj=adj,
         )
 
-    # 前复权处理
+    # --- 前复权处理 ---
     if adj == "qfq":
         try:
             adj_factor_df = await _get_adj_factor_df(session, instrument_id)
+            if not adj_factor_df.empty:
+                # Exchange 返回不复权数据（adj_factor=1.0），需从 DB 映射正确的 adj_factor
+                # 使用 merge_asof 按 trade_date 映射，覆盖 Exchange 的 adj_factor
+                df_copy = df.copy()
+                # 统一去除时区，避免 merge_asof 类型不兼容
+                if df_copy.index.tz is not None:
+                    df_copy.index = df_copy.index.tz_localize(None)
+                df_copy.index = df_copy.index.astype("datetime64[us]")
+                df_reset = df_copy.reset_index()
+                time_col = df_reset.columns[0]
+                df_reset["_trade_date"] = pd.to_datetime(df_reset[time_col]).dt.normalize()
+
+                _adj_map = adj_factor_df[["trade_date", "adj_factor"]].copy()
+                _adj_map["trade_date"] = pd.to_datetime(_adj_map["trade_date"]).astype("datetime64[us]")
+                _adj_map = _adj_map.sort_values("trade_date").drop_duplicates("trade_date", keep="last")
+
+                merged = pd.merge_asof(
+                    df_reset.sort_values("_trade_date"),
+                    _adj_map.rename(columns={"adj_factor": "_db_adj", "trade_date": "_adj_date"}),
+                    left_on="_trade_date",
+                    right_on="_adj_date",
+                    direction="backward",
+                )
+                merged = merged.set_index(time_col).sort_index()
+                merged = merged.drop(columns=["_trade_date", "_adj_date"], errors="ignore")
+
+                # 用 DB 的 adj_factor 覆盖 Exchange 的 adj_factor（缺失时 fallback 1.0）
+                if "_db_adj" in merged.columns:
+                    merged["adj_factor"] = merged["_db_adj"].fillna(1.0)
+                    merged = merged.drop(columns=["_db_adj"])
+
+                df = merged
             # 15min/60min 使用日内前复权，其他使用日线前复权
             intraday = timeframe in ("15m", "1h")
             df = apply_adj_factor_to_bars(df, adj_factor_df, intraday=intraday)
@@ -258,6 +314,100 @@ async def get_bars(
         adj=adj,
     )
 
+
+
+
+# ===== 实时行情 =====
+
+@router.get(
+    "/instruments/{instrument_id}/quote",
+    response_model=dict,
+    summary="获取标的实时报价",
+)
+async def get_instrument_quote(
+    instrument_id: uuid.UUID,
+    session: AsyncSession = Depends(get_db),
+) -> dict:
+    """获取标的实时报价。
+
+    优先从 pytdx 获取实时 1 分钟线数据（is_realtime=True），
+    pytdx 不可用时回退到数据库最新日线（is_realtime=False），
+    两者均无数据返回 404。
+    """
+    from app.core.pytdx_adapter import connect_pytdx
+    from app.models.instrument import Instrument
+
+    # 1. 查询标的（获取 symbol 用于 pytdx 调用）
+    stmt = select(Instrument).where(Instrument.id == instrument_id)
+    result = await session.execute(stmt)
+    instrument = result.scalar_one_or_none()
+    if instrument is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="标的不存在",
+        )
+
+    symbol = instrument.symbol
+
+    # 2. 尝试 pytdx 实时行情（per-request 连接，线程安全）
+    try:
+        import asyncio
+
+        def _fetch_quote() -> dict | None:
+            with connect_pytdx() as adapter:
+                return adapter.get_realtime_quote(symbol)
+
+        quote = await asyncio.to_thread(_fetch_quote)
+        if quote is not None:
+            quote["instrument_id"] = str(instrument_id)
+            quote["symbol"] = symbol
+            quote["name"] = instrument.name
+            return quote
+    except Exception as exc:
+        logger.warning("pytdx 实时行情失败 instrument_id=%s: %s", instrument_id, exc)
+
+    # 3. 回退：查询数据库最新 2 根日线
+    stmt_daily = (
+        select(BarDaily)
+        .where(BarDaily.instrument_id == instrument_id)
+        .order_by(BarDaily.trade_date.desc())
+        .limit(2)
+    )
+    result_daily = await session.execute(stmt_daily)
+    daily_bars = list(result_daily.scalars().all())
+
+    if not daily_bars:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="无行情数据",
+        )
+
+    latest = daily_bars[0]
+    current_price = float(latest.close or 0)
+    prev_close = float(daily_bars[1].close or 0) if len(daily_bars) >= 2 and daily_bars[1].close else current_price
+
+    if prev_close == 0:
+        change_pct = 0.0
+    else:
+        change_pct = (current_price - prev_close) / prev_close * 100
+
+    update_time = latest.trade_date.isoformat() if latest.trade_date else None
+
+    return {
+        "instrument_id": str(instrument_id),
+        "symbol": symbol,
+        "name": instrument.name,
+        "current_price": round(current_price, 4),
+        "open": round(float(latest.open or 0), 4),
+        "high": round(float(latest.high or 0), 4),
+        "low": round(float(latest.low or 0), 4),
+        "close": round(current_price, 4),
+        "volume": round(float(latest.volume or 0), 2),
+        "prev_close": round(prev_close, 4),
+        "change_pct": round(change_pct, 2),
+        "update_time": update_time,
+        "is_realtime": False,
+    }
 
 # ===== 健康检查 =====
 

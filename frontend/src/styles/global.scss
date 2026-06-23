@@ -122,6 +122,7 @@ button { cursor: pointer; }
   width: 7px; height: 7px;
   border-radius: 50%;
   margin-right: 6px;
+  background: #999;
   &.ok { background: v.$color-green; box-shadow: 0 0 8px rgba(38, 166, 154, .55); }
   &.warn { background: v.$color-orange; }
   &.err { background: v.$color-red; }
@@ -877,6 +878,17 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 // ===== V1.4 TradingView Style =====
 .tv-main { background: #0d1016; }
 .tv-content { max-width: none; padding: 10px 12px 18px; }
+.tv-content:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  border-radius: 0;
+  .tv-workspace { flex: 1; min-height: 0; }
+  .tv-chart-column { display: flex; flex-direction: column; min-height: 0; }
+  .tv-canvas-wrap { flex: 1; min-height: 0; }
+}
 .tv-symbol-bar { display: flex; align-items: center; gap: 18px; min-height: 62px; padding: 8px 12px; background: #131722; border: 1px solid v.$color-border; border-radius: 8px 8px 0 0; }
 .tv-symbol-left { display: flex; align-items: center; gap: 10px; min-width: 265px; }
 .tv-back { display: grid; place-items: center; }
@@ -885,10 +897,8 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 .tv-symbol-meta { font-size: 10px; color: v.$color-muted; margin-top: 4px; }
 .tv-quote-strip { display: flex; align-items: center; gap: 20px; flex: 1; > div { display: grid; gap: 3px; } span { font-size: 9px; color: v.$color-muted; } b { font: 12px v.$font-mono; } }
 
-// V1.6.2: 删除右侧 268px 策略栏，释放完整图表宽度
-.tv-workspace { display: grid; grid-template-columns: 38px minmax(680px, 1fr); min-height: v.$tv-workspace-min-height; border: 1px solid v.$color-border; border-top: 0; background: #10141c; }
-.tv-drawing-tools { background: #131722; border-right: 1px solid v.$color-border; display: flex; flex-direction: column; align-items: center; padding: 7px 4px; gap: 5px; button { width: 29px; height: 29px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: #8d96a8; &:hover, &.active { background: #202633; color: #fff; border-color: #343d50; } } }
-.tv-tool-sep { width: 22px; border-top: 1px solid v.$color-border; margin: 4px 0; }
+// V1.6.2: 删除右侧 268px 策略栏，释放完整图表宽度；Task 2 再删除左侧 38px 绘图工具列
+.tv-workspace { display: grid; grid-template-columns: minmax(680px, 1fr); min-height: v.$tv-workspace-min-height; border: 1px solid v.$color-border; border-top: 0; background: #10141c; }
 .tv-chart-column { min-width: 0; background: #0d1118; }
 .tv-trading-chart { height: v.$tv-chart-height; border: 0; border-radius: 0; }
 .tv-chart-toolbar { height: 42px; border-radius: 0; border-left: 0; border-right: 0; background: #131722; position: relative; z-index: 3; display: flex; align-items: center; gap: 8px; padding: 0 8px; }
@@ -967,7 +977,7 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
   .metric-mini-grid, .monitor-summary { grid-template-columns: repeat(3, 1fr); }
   .editor-layout { grid-template-columns: 1fr; }
   .sticky-summary { position: static; }
-  .tv-workspace { grid-template-columns: 36px minmax(600px, 1fr); }
+  .tv-workspace { grid-template-columns: minmax(600px, 1fr); }
   .tv-layer-panel { grid-column: 1 / -1; border-left: 0; border-top: 1px solid v.$color-border; display: grid; grid-template-columns: repeat(3, 1fr); max-height: none; }
   .tv-panel-head, .tv-layer-actions { grid-column: 1 / -1; }
   .tv-bottom-grid { grid-template-columns: 1fr; }
@@ -1118,7 +1128,7 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 
 // V1.6.2 响应式断点
 @media (max-width: 900px) {
-  .tv-workspace { grid-template-columns: 32px minmax(560px, 1fr); }
+  .tv-workspace { grid-template-columns: minmax(560px, 1fr); }
   .tv-strategy-legend { gap: 4px; }
   .tv-strategy-legend-item { padding: 0 6px; }
 }
@@ -1615,6 +1625,39 @@ button.switch {
   margin-top: 5px;
 }
 
+// 飞书渠道类型选择（radio 按钮组）
+.feishu-channel-type {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 16px;
+
+  label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    font-size: 14px;
+  }
+}
+
+// 表单提示文本（弱化色，用于辅助说明）
+.form-hint {
+  font-size: 12px;
+  color: #70798c;
+  margin-top: 4px;
+}
+
+// 渠道类型标签（渠道列表中区分群机器人/应用通知）
+.channel-type-badge {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #2b3040;
+  color: #858d9d;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
 // 响应式：窄屏时功能权限降为 2 列
 @media (max-width: 760px) {
   .membership-access-row { grid-template-columns: 1fr 1fr; }
@@ -1672,29 +1715,7 @@ button.switch {
   margin: 16px 0 9px;
 }
 
-// ===== V1.6.3 AdminConfigPage 补充样式 =====
-// 配置中心页：左侧分类导航 + 右侧配置卡栈的双列布局（替代原型内联 style）
-.config-layout {
-  grid-template-columns: 210px 1fr;
-  align-items: start;
-}
 
-// 配置分类导航项：可点击 + active 高亮（基于 .list-item 扩展）
-.config-nav-item {
-  cursor: pointer;
-  transition: .16s;
-  &:hover { background: #1c202b; }
-  &.active {
-    background: rgba(41, 98, 255, .10);
-    box-shadow: inset 2px 0 0 v.$color-blue;
-    .list-title { color: #fff; }
-  }
-}
-
-// 窄屏：配置布局降为单列
-@media (max-width: v.$bp-narrow) {
-  .config-layout { grid-template-columns: 1fr; }
-}
 
 // ===== V1.6.3 AdminIndexPage 补充样式 =====
 // 最近异常列表图标颜色变体（替代原型内联 style="color:..."）
@@ -1894,3 +1915,30 @@ button.switch {
 
 // textarea 输入框（覆盖 .input 固定高度，用于发布说明等多行文本）
 textarea.input { height: auto; min-height: 80px; padding: 9px; resize: vertical; line-height: 1.5; }
+
+// ===== 备忘录模态框 =====
+.memo-textarea {
+  width: 100%;
+  min-height: 120px;
+  padding: 8px 12px;
+  border: 1px solid var(--border, #ddd);
+  border-radius: 6px;
+  font-size: 14px;
+  resize: vertical;
+  font-family: inherit;
+}
+
+.memo-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.memo-switch input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}

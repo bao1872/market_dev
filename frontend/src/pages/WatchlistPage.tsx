@@ -135,21 +135,6 @@ function fmtStr(v: unknown): string {
   return String(v)
 }
 
-/** 格式化 ISO 时间字符串为 HH:MM:SS 形式，未知返回 '-' */
-function fmtTime(isoString: string | null | undefined): string {
-  if (!isoString) return '-'
-  try {
-    return new Date(isoString).toLocaleTimeString('zh-CN', {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false,
-    })
-  } catch {
-    return '-'
-  }
-}
-
 /** 格式化 ISO 时间为 HH:MM 形式，未知返回 '-' */
 function fmtTimeShort(isoString: string | null | undefined): string {
   if (!isoString) return '-'
@@ -720,43 +705,6 @@ export default function WatchlistPage() {
     [watchlistIdList, volumeStateMap, toVolumeRow],
   )
 
-  // ===== KPI 派生 =====
-
-  // KPI 1：自选股票数
-  const kpi1Total = watchlistItems.length
-
-  // KPI 2：当前监控方案名称
-  const kpi2Name = activePlan?.name ?? '未启用'
-  const kpi2Meta =
-    totalMembers > 0 ? `${totalMembers} 个策略 · ALL / 15m` : '未配置策略'
-
-  // KPI 3：今日组合事件数
-  const kpi3Total = planEvents.length
-  const kpi3ProcessCount = planEvents.filter((e) =>
-    String(e.event_type).toLowerCase().includes('process'),
-  ).length
-
-  // KPI 4：最近分钟数据时间（取所有监控状态中最新的 bar_time）
-  const latestBarTime = useMemo(() => {
-    const allStates = [...nodeStates, ...atrStates, ...volumeStates]
-    let latest: string | null = null
-    for (const s of allStates) {
-      if (!s.bar_time) continue
-      if (!latest || new Date(s.bar_time) > new Date(latest)) {
-        latest = s.bar_time
-      }
-    }
-    return latest
-  }, [nodeStates, atrStates, volumeStates])
-
-  const kpi4Time = fmtTime(latestBarTime)
-  const kpi4Delay = useMemo(() => {
-    if (!latestBarTime) return '-'
-    const diffMs = Date.now() - new Date(latestBarTime).getTime()
-    if (Number.isNaN(diffMs) || diffMs < 0) return '-'
-    return `${Math.round(diffMs / 1000)} 秒`
-  }, [latestBarTime])
-
   // ===== 事件处理 =====
 
   /** 跳转个股详情 */
@@ -1235,37 +1183,6 @@ export default function WatchlistPage() {
         </div>
       </div>
 
-      {/* KPI 组 */}
-      <div className="grid kpi">
-        <div className="card kpi-card">
-          <div className="kpi-label">自选股票</div>
-          <div className="kpi-value">
-            {watchlistQuery.isLoading ? '-' : kpi1Total}
-            <small className="kpi-unit">只</small>
-          </div>
-          <div className="kpi-foot">会员全功能 · 不限数量</div>
-        </div>
-        <div className="card kpi-card">
-          <div className="kpi-label">当前监控方案</div>
-          <div className="kpi-value kpi-value-sm">{kpi2Name}</div>
-          <div className="kpi-foot">{kpi2Meta}</div>
-        </div>
-        <div className="card kpi-card">
-          <div className="kpi-label">今日组合事件</div>
-          <div className="kpi-value">
-            {planEventsQuery.isLoading ? '-' : kpi3Total}
-          </div>
-          <div className="kpi-foot">过程事件 {kpi3ProcessCount}</div>
-        </div>
-        <div className="card kpi-card">
-          <div className="kpi-label">最近分钟数据</div>
-          <div className="kpi-value kpi-value-sm">{kpi4Time}</div>
-          <div className="kpi-foot">
-            <i className="dot ok"></i>延迟 {kpi4Delay}
-          </div>
-        </div>
-      </div>
-
       {/* 方案切换栏 */}
       <div className="plan-switch-bar">
         <div>
@@ -1338,7 +1255,7 @@ export default function WatchlistPage() {
         </button>
         <div className="toolbar-spacer" />
         <select className="select" defaultValue="all">
-          <option value="all">全部自选 ({kpi1Total})</option>
+          <option value="all">全部自选 ({watchlistItems.length})</option>
           <option value="focus">重点追踪</option>
         </select>
       </div>

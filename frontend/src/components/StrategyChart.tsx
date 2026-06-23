@@ -2,7 +2,7 @@
 // 对应原型 assets/charts.js 的 drawTrading 渲染管线
 // 支持 K 线 + 成交量 + VWAP + Volume Profile + Node Cluster + ATR Rope + Volume Delta + 事件标记
 // 图层可见性持久化到 localStorage，十字线联动 OHLC 图例
-// 用法：<StrategyChart symbol="688112" bars={bars} events={events} strategyId="node" source="watchlist" view="current" height={660} />
+// 用法：<StrategyChart symbol="688112" bars={bars} events={events} strategyId="node" source="watchlist" height={660} />
 
 import { useEffect, useRef, useState, useMemo, useCallback } from 'react'
 import clsx from 'clsx'
@@ -52,17 +52,17 @@ export interface ChartEvent {
   description?: string
 }
 
-// 图层可见性：对齐原型 11 个图层
+// 图层可见性
 export interface LayerVisibility {
   volume: boolean
-  vwap: boolean
-  offset: boolean
+  dsa: boolean
   breakout: boolean
   selection: boolean
   node: boolean
   poc: boolean
   profile: boolean
   atr: boolean
+  bb: boolean
   delta: boolean
   events: boolean
 }
@@ -74,7 +74,6 @@ export interface StrategyChartProps {
   indicators?: IndicatorResponse | undefined
   strategyId?: string
   source?: string
-  view?: 'snapshot' | 'current'
   height?: number
   timeframe?: string
   onTimeframeChange?: (tf: string) => void
@@ -82,15 +81,12 @@ export interface StrategyChartProps {
 
 // 计算后的 Bar（含指标字段）
 interface CalculatedBar extends BarData {
-  vwap: number
   delta: number
   cvd: number
   atr: number
   ropeMid: number
   ropeUpper: number
   ropeLower: number
-  offset: number
-  offsetMean: number
   typical: number
 }
 
@@ -199,27 +195,60 @@ function formatVolume(v: number): string {
 
 function formatTime(timeStr: string): string {
   const d = new Date(timeStr)
-  const yyyy = d.getFullYear()
-  const mm = String(d.getMonth() + 1).padStart(2, '0')
-  const dd = String(d.getDate()).padStart(2, '0')
-  const hh = String(d.getHours()).padStart(2, '0')
-  const mi = String(d.getMinutes()).padStart(2, '0')
-  return `${yyyy}-${mm}-${dd} ${hh}:${mi}`
+  if (isNaN(d.getTime())) return timeStr
+
+  const dateFmt = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  })
+  const datePart = dateFmt.format(d).replace(/\//g, '-')
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(timeStr)) {
+    return datePart
+  }
+
+  const timeFmt = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+  const timePart = timeFmt.format(d)
+  return `${datePart} ${timePart}`
 }
 
 // 时间轴刻度（对齐原型 timeTicks）
 function timeTicks(data: CalculatedBar[], count: number, tf: string): { idx: number; label: string }[] {
   const out: { idx: number; label: string }[] = []
+  const mdFmt = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    month: '2-digit',
+    day: '2-digit',
+  })
+  const timeFmt = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+  const ymFmt = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+  })
+
   for (let i = 0; i < count; i++) {
     const idx = Math.round((data.length - 1) * i / (count - 1))
     const d = new Date(data[idx].time)
     let label: string
     if (tf === '15m' || tf === '1h') {
-      label = `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+      label = `${mdFmt.format(d).replace(/\//g, '-')} ${timeFmt.format(d)}`
     } else if (tf === '1d') {
-      label = `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
+      label = mdFmt.format(d).replace(/\//g, '-')
     } else {
-      label = `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}`
+      label = ymFmt.format(d)
     }
     out.push({ idx, label })
   }
@@ -240,19 +269,7 @@ function ema(values: number[], period: number): number[] {
   return out
 }
 
-// 滚动均值
-function rollingMean(values: number[], period: number): number[] {
-  const out: number[] = []
-  let s = 0
-  for (let i = 0; i < values.length; i++) {
-    s += values[i]
-    if (i >= period) s -= values[i - period]
-    out.push(s / Math.min(period, i + 1))
-  }
-  return out
-}
-
-// 计算 VWAP / Delta / CVD / ATR / RopeMid / RopeUpper / RopeLower / Offset / OffsetMean
+// 计算 Delta / CVD / ATR / RopeMid / RopeUpper / RopeLower
 function addIndicators(bars: BarData[]): CalculatedBar[] {
   const out: CalculatedBar[] = bars.map(x => ({ ...x } as CalculatedBar))
   const closes = out.map(d => d.close)
@@ -261,14 +278,9 @@ function addIndicators(bars: BarData[]): CalculatedBar[] {
   )
   const mid = ema(closes, 20)
   const atr = ema(trs, 14)
-  let cumPV = 0
-  let cumV = 0
   let cvd = 0
   out.forEach((d, i) => {
     const typical = (d.high + d.low + d.close) / 3
-    cumPV += typical * d.volume
-    cumV += d.volume
-    d.vwap = cumPV / Math.max(1, cumV)
     const clv = (2 * d.close - d.high - d.low) / Math.max(0.001, d.high - d.low)
     d.delta = d.volume * clamp(clv * 0.82 + (d.close >= d.open ? 0.16 : -0.16), -0.95, 0.95)
     cvd += d.delta
@@ -277,11 +289,8 @@ function addIndicators(bars: BarData[]): CalculatedBar[] {
     d.ropeMid = mid[i]
     d.ropeUpper = mid[i] + atr[i] * 1.35
     d.ropeLower = mid[i] - atr[i] * 1.35
-    d.offset = (d.close - d.vwap) / d.vwap * 100
     d.typical = typical
   })
-  const means = rollingMean(out.map(d => d.offset), 12)
-  out.forEach((d, i) => { d.offsetMean = means[i] })
   return out
 }
 
@@ -391,8 +400,6 @@ function buildProfile(data: CalculatedBar[], min: number, max: number, bins = 56
 // 根据启用的图层动态分配窗格高度
 function geometry(layers: Set<string>, w: number, h: number): Geometry {
   const profileOn = layers.has('profile')
-  const deltaOn = layers.has('delta')
-  const offsetOn = layers.has('offset')
   const volumeOn = layers.has('volume')
   const l = 58
   const axis = 57
@@ -403,14 +410,6 @@ function geometry(layers: Set<string>, w: number, h: number): Geometry {
   const paneGap = 7
   let cursor = h - bottom
   const panes: Record<string, PaneRect> = {}
-  if (offsetOn) {
-    panes.offset = { bottom: cursor, top: cursor - 86 }
-    cursor = panes.offset.top - paneGap
-  }
-  if (deltaOn) {
-    panes.delta = { bottom: cursor, top: cursor - 92 }
-    cursor = panes.delta.top - paneGap
-  }
   if (volumeOn) {
     panes.volume = { bottom: cursor, top: cursor - 76 }
     cursor = panes.volume.top - paneGap
@@ -612,26 +611,6 @@ function renderVolume(
   drawPaneTicks(ctx, g, 'volume', 0, vmax, 'VOL', data[data.length - 1].volume, C.text)
 }
 
-// VWAP 线
-function renderVwap(
-  ctx: CanvasRenderingContext2D,
-  g: Geometry,
-  data: CalculatedBar[],
-  step: number,
-  py: (v: number) => number,
-): void {
-  ctx.beginPath()
-  data.forEach((d, i) => {
-    const x = g.l + (i + 0.5) * step
-    const y = py(d.vwap)
-    if (i) ctx.lineTo(x, y)
-    else ctx.moveTo(x, y)
-  })
-  ctx.strokeStyle = C.yellow
-  ctx.lineWidth = 1.5
-  ctx.stroke()
-}
-
 // ATR Rope 蓝带填充 + 上下轨线
 function renderAtr(
   ctx: CanvasRenderingContext2D,
@@ -669,82 +648,6 @@ function renderAtr(
   })
 }
 
-// Volume Delta / CVD 副图
-function renderDelta(
-  ctx: CanvasRenderingContext2D,
-  g: Geometry,
-  data: CalculatedBar[],
-  step: number,
-  barW: number,
-): void {
-  const p = g.panes.delta
-  if (!p) return
-  const dmax = Math.max(...data.map(d => Math.abs(d.delta)))
-  const zero = (p.top + p.bottom) / 2
-  drawLine(ctx, g.l, zero, g.plotRight, zero, C.grid)
-  data.forEach((d, i) => {
-    const x = g.l + (i + 0.5) * step
-    const bh = Math.abs(d.delta) / dmax * (p.bottom - p.top) * 0.43
-    ctx.fillStyle = d.delta >= 0 ? 'rgba(38,166,154,.8)' : 'rgba(239,83,80,.8)'
-    ctx.fillRect(x - barW / 2, d.delta >= 0 ? zero - bh : zero, barW, bh)
-  })
-  // CVD 线
-  const cmin = Math.min(...data.map(d => d.cvd))
-  const cmax = Math.max(...data.map(d => d.cvd))
-  const cy = (v: number) => p.top + 5 + (cmax - v) / Math.max(1, cmax - cmin) * (p.bottom - p.top - 10)
-  ctx.beginPath()
-  data.forEach((d, i) => {
-    const x = g.l + (i + 0.5) * step
-    const y = cy(d.cvd)
-    if (i) ctx.lineTo(x, y)
-    else ctx.moveTo(x, y)
-  })
-  ctx.strokeStyle = C.cyan
-  ctx.lineWidth = 1.1
-  ctx.stroke()
-  drawPaneTicks(ctx, g, 'delta', -dmax, dmax, 'DELTA / CVD', data[data.length - 1].delta, C.cyan)
-}
-
-// DSA Offset 副图
-function renderOffset(
-  ctx: CanvasRenderingContext2D,
-  g: Geometry,
-  data: CalculatedBar[],
-  step: number,
-): void {
-  const p = g.panes.offset
-  if (!p) return
-  const vals = data.map(d => d.offset)
-  const means = data.map(d => d.offsetMean)
-  const vmax = Math.max(1, ...vals.map(Math.abs))
-  const vmin = -vmax
-  const iy = (v: number) => p.top + (vmax - v) / (vmax - vmin) * (p.bottom - p.top)
-  drawLine(ctx, g.l, iy(0), g.plotRight, iy(0), C.grid)
-  // Offset 线
-  ctx.beginPath()
-  vals.forEach((v, i) => {
-    const x = g.l + (i + 0.5) * step
-    const y = iy(v)
-    if (i) ctx.lineTo(x, y)
-    else ctx.moveTo(x, y)
-  })
-  ctx.strokeStyle = C.purple
-  ctx.lineWidth = 1
-  ctx.stroke()
-  // OffsetMean 线
-  ctx.beginPath()
-  means.forEach((v, i) => {
-    const x = g.l + (i + 0.5) * step
-    const y = iy(v)
-    if (i) ctx.lineTo(x, y)
-    else ctx.moveTo(x, y)
-  })
-  ctx.strokeStyle = '#d6b4ff'
-  ctx.lineWidth = 1.35
-  ctx.stroke()
-  drawPaneTicks(ctx, g, 'offset', vmin, vmax, 'DSA OFFSET / MEAN', vals[vals.length - 1], C.purple)
-}
-
 // 突破压力区
 function renderBreakout(
   ctx: CanvasRenderingContext2D,
@@ -776,7 +679,9 @@ function renderIndicatorLayer(
     case 'price_zone':
       renderIndicatorPriceZone(ctx, g, layer, data, barsCount, step, py)
       break
-    // marker/band 暂不实现，留空即可
+    case 'band':
+      renderIndicatorBand(ctx, g, layer, data, barsCount, step, py)
+      break
   }
 }
 
@@ -876,6 +781,95 @@ function renderIndicatorPriceZone(
   }
 }
 
+// Band 带状渲染（布林带等）
+function renderIndicatorBand(
+  ctx: CanvasRenderingContext2D,
+  g: Geometry,
+  layer: ChartLayer,
+  data: Record<string, (number | null)[]>,
+  barsCount: number,
+  step: number,
+  py: (v: number) => number,
+): void {
+  const upperField = layer.fields[0]
+  const lowerField = layer.fields[1]
+  const middleField = layer.fields[2]
+  const upperVals = data[upperField]
+  const lowerVals = data[lowerField]
+  const middleVals = middleField ? data[middleField] : null
+  if (!upperVals || !lowerVals) return
+  const len = Math.min(upperVals.length, lowerVals.length, barsCount)
+  const bandColor = layer.color || 'rgba(156,39,176,0.15)'
+  const lineColor = layer.color ? layer.color.replace(/[\d.]+\)$/, '1)') : '#9c27b0'
+
+  // 1. 半透明填充带
+  ctx.beginPath()
+  let started = false
+  for (let i = 0; i < len; i++) {
+    const u = upperVals[i]
+    const l = lowerVals[i]
+    if (u == null || l == null) { started = false; continue }
+    const x = g.l + (i + 0.5) * step
+    if (!started) { ctx.moveTo(x, py(u)); started = true }
+    else ctx.lineTo(x, py(u))
+  }
+  for (let i = len - 1; i >= 0; i--) {
+    const l = lowerVals[i]
+    if (l == null) continue
+    const x = g.l + (i + 0.5) * step
+    ctx.lineTo(x, py(l))
+  }
+  ctx.closePath()
+  ctx.fillStyle = bandColor
+  ctx.fill()
+
+  // 2. 上轨线
+  ctx.beginPath()
+  started = false
+  for (let i = 0; i < len; i++) {
+    const v = upperVals[i]
+    if (v == null) { started = false; continue }
+    const x = g.l + (i + 0.5) * step
+    if (!started) { ctx.moveTo(x, py(v)); started = true }
+    else ctx.lineTo(x, py(v))
+  }
+  ctx.strokeStyle = lineColor
+  ctx.lineWidth = 1
+  ctx.stroke()
+
+  // 3. 下轨线
+  ctx.beginPath()
+  started = false
+  for (let i = 0; i < len; i++) {
+    const v = lowerVals[i]
+    if (v == null) { started = false; continue }
+    const x = g.l + (i + 0.5) * step
+    if (!started) { ctx.moveTo(x, py(v)); started = true }
+    else ctx.lineTo(x, py(v))
+  }
+  ctx.strokeStyle = lineColor
+  ctx.lineWidth = 1
+  ctx.stroke()
+
+  // 4. 中轨虚线
+  if (middleVals) {
+    ctx.beginPath()
+    started = false
+    for (let i = 0; i < len; i++) {
+      const v = middleVals[i]
+      if (v == null) { started = false; continue }
+      const x = g.l + (i + 0.5) * step
+      if (!started) { ctx.moveTo(x, py(v)); started = true }
+      else ctx.lineTo(x, py(v))
+    }
+    ctx.setLineDash([4, 3])
+    ctx.strokeStyle = lineColor
+    ctx.lineWidth = 1
+    ctx.stroke()
+    ctx.setLineDash([])
+  }
+}
+
 // ===== 事件映射与可见性 =====
 
 // 事件类型 -> 颜色
@@ -961,6 +955,39 @@ function drawTrading(
   const barW = Math.max(2.2, step * 0.56)
   const profile = buildProfile(calc, min, max, 56)
 
+  // 从后端 VP 指标提取 peak node 和 POC（优先于 buildProfile 的本地计算）
+  let backendNodes: { id: string; lo: number; hi: number; poc: boolean }[] | null = null
+  let backendPoc: number | null = null
+  if (indicators?.data) {
+    const vn = indicators.data['volume_node_monitor']
+    if (vn) {
+      const peakMap = new Map<number, { lo: number; hi: number }>()
+      const collect = (arr: unknown[]) => {
+        arr.forEach(v => {
+          if (v != null && typeof v === 'object' && (v as Record<string, unknown>).price_mid != null) {
+            const o = v as Record<string, number>
+            const mid = Number(o.price_mid)
+            if (!peakMap.has(mid)) peakMap.set(mid, { lo: Number(o.price_low), hi: Number(o.price_high) })
+          }
+        })
+      }
+      if (vn.upper_node) collect(vn.upper_node)
+      if (vn.lower_node) collect(vn.lower_node)
+      if (peakMap.size > 0) {
+        if (vn.poc_price) {
+          for (const p of vn.poc_price) { if (p != null) { backendPoc = Number(p); break } }
+        }
+        backendNodes = Array.from(peakMap.entries())
+          .map(([mid, { lo, hi }], i) => ({
+            id: `backend_node_${i + 1}`,
+            lo, hi,
+            poc: backendPoc != null && Math.abs(mid - backendPoc) < 0.01,
+          }))
+          .sort((a, b) => a.lo - b.lo)
+      }
+    }
+  }
+
   // 1. 背景 + 网格
   drawGrid(ctx, w, h, g, min, max)
 
@@ -969,23 +996,29 @@ function drawTrading(
     renderProfile(ctx, profile, g, py, state, layerSet)
   }
 
-  // 3. Node Cluster 主图叠加
+  // 3. Node Cluster 主图叠加（优先使用后端 VP peak node）
   if (layers.node) {
-    profile.nodes.forEach(n => {
+    const nodes = backendNodes || profile.nodes
+    nodes.forEach(n => {
       const y1 = py(n.hi)
       const y2 = py(n.lo)
       const selected = state.selectedNodeId === n.id
       ctx.fillStyle = n.poc ? 'rgba(255,152,0,.11)' : selected ? 'rgba(156,179,255,.15)' : 'rgba(79,124,255,.075)'
       ctx.fillRect(g.l, y1, plotW, y2 - y1)
       drawLine(ctx, g.l, py((n.lo + n.hi) / 2), g.plotRight, py((n.lo + n.hi) / 2), n.poc ? C.orange : selected ? '#dce6ff' : C.blue, selected ? 2 : 1, n.poc ? [8, 4] : [4, 5])
-      drawText(ctx, n.poc ? 'POC NODE' : 'HVN', g.l + 5, y1 + 10, n.poc ? C.orange : C.blue, '8px sans-serif')
+      if (n.poc) {
+        drawText(ctx, 'POC NODE', g.l + 5, y1 + 10, C.orange, '8px sans-serif')
+      } else {
+        drawText(ctx, `HVN ${fmt((n.lo + n.hi) / 2)}`, g.l + 5, y1 + 10, C.blue, '12px sans-serif')
+      }
     })
   }
 
-  // 4. POC 中心线
+  // 4. POC 中心线（优先使用后端 poc_price）
   if (layers.poc) {
-    drawLine(ctx, g.l, py(profile.poc), layers.profile ? g.profileEnd : g.plotRight, py(profile.poc), C.orange, 1.35, [9, 4])
-    drawText(ctx, `POC ${fmt(profile.poc)}`, g.plotRight - 62, py(profile.poc) - 5, C.orange, '9px sans-serif')
+    const pocVal = backendPoc ?? profile.poc
+    drawLine(ctx, g.l, py(pocVal), layers.profile ? g.profileEnd : g.plotRight, py(pocVal), C.orange, 1.35, [9, 4])
+    drawText(ctx, `POC ${fmt(pocVal)}`, g.plotRight - 62, py(pocVal) - 5, C.orange, '9px sans-serif')
   }
 
   // 5. ATR Rope
@@ -993,19 +1026,17 @@ function drawTrading(
     renderAtr(ctx, g, display, step, py)
   }
 
-  // 6. VWAP
-  if (layers.vwap) {
-    renderVwap(ctx, g, display, step, py)
-  }
-
-  // 7. 突破压力区
+  // 6. 突破压力区
   if (layers.breakout) {
     renderBreakout(ctx, g, display, py)
   }
 
-  // 7.5 通用渲染器：渲染后端返回的策略指标图层
+  // 7. 通用渲染器：渲染后端返回的策略指标图层（DSA VWAP 等）
   if (indicators && indicators.layers && indicators.data) {
     indicators.layers.forEach(layer => {
+      // DSA VWAP 指标受 dsa 图层开关控制
+      if (layer.layer_id === 'dsa_vwap' && !layers.dsa) return
+      if (layer.layer_id === 'bb' && !layers.bb) return
       const layerData = indicators.data![layer.strategy_id]
       if (layerData) {
         renderIndicatorLayer(ctx, g, layer, layerData, display.length, step, py)
@@ -1053,10 +1084,8 @@ function drawTrading(
     state.eventHit.push({ ...ev, x, y })
   })
 
-  // 10. Volume / Delta / Offset 副图
+  // 10. Volume 副图
   if (layers.volume) renderVolume(ctx, g, display, step, barW)
-  if (layers.delta) renderDelta(ctx, g, display, step, barW)
-  if (layers.offset) renderOffset(ctx, g, display, step)
 
   // 11. 时间轴刻度
   const labels = timeTicks(display, 7, timeframe)
@@ -1105,14 +1134,14 @@ const TIMEFRAMES = [
 function getDefaultLayers(strategyId?: string): LayerVisibility {
   const layers: LayerVisibility = {
     volume: true,
-    vwap: false,
-    offset: false,
+    dsa: false,
     breakout: false,
     selection: false,
     node: false,
     poc: false,
     profile: false,
     atr: false,
+    bb: false,
     delta: false,
     events: false,
   }
@@ -1317,7 +1346,7 @@ export function StrategyChart({
             }
           })
         }
-        tip.innerHTML = `<b>${formatTime(d.time)}</b><span>开 ${fmt(d.open)}　高 ${fmt(d.high)}</span><span>低 ${fmt(d.low)}　收 ${fmt(d.close)}</span><span>\u6210\u4ea4量 ${formatVolume(d.volume)}</span><span>VWAP ${fmt(d.vwap)}　Offset ${fmt(d.offset)}%</span><span>Delta ${formatVolume(d.delta)}　ATR ${fmt(d.atr)}</span>${indicatorHtml}`
+        tip.innerHTML = `<b>${formatTime(d.time)}</b><span>开 ${fmt(d.open)}　高 ${fmt(d.high)}</span><span>低 ${fmt(d.low)}　收 ${fmt(d.close)}</span><span>\u6210\u4ea4量 ${formatVolume(d.volume)}</span><span>Delta ${formatVolume(d.delta)}　ATR ${fmt(d.atr)}</span>${indicatorHtml}`
       }
     }
 
@@ -1391,10 +1420,6 @@ export function StrategyChart({
   }, [legendIdx, display])
 
   // 图层切换
-  const toggleLayer = (key: keyof LayerVisibility) => {
-    setLayers(prev => ({ ...prev, [key]: !prev[key] }))
-  }
-
   const handleToggleGroup = (groupId: string) => {
     setLayers(prev => toggleGroup(groupId, prev))
   }
@@ -1460,15 +1485,6 @@ export function StrategyChart({
             </label>
           )
         })}
-        {/* 事件总开关 */}
-        <label
-          className={clsx('tv-strategy-legend-item', !layers.events && 'off')}
-          onClick={() => toggleLayer('events')}
-        >
-          <i className="tv-legend-dot" style={{ '--legend-color': '#f4c430' } as React.CSSProperties} />
-          <b>事件</b>
-          <i className="tv-mini-switch" />
-        </label>
       </div>
 
       {/* 图表画布 */}

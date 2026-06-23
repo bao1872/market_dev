@@ -29,6 +29,16 @@ from app.config import get_settings
 if TYPE_CHECKING:
     pass
 
+# K线周期映射（项目内部 frequency → pytdx category）
+# 参考 chanlunpro exchange_tdx.py 的频率映射
+FREQUENCY_MAP: dict[str, int] = {
+    "1d": 8,     # 日线
+    "15m": 5,    # 15分钟
+    "1h": 4,     # 60分钟
+    "1w": -1,    # 周线（从日线合成）
+    "1mo": -2,   # 月线（从日线合成）
+}
+
 
 class Exchange(ABC):
     """行情数据源抽象基类（策略模式）。
@@ -88,6 +98,30 @@ class Exchange(ABC):
         Returns:
             DataFrame: columns=[date, category, name, fenhong, peigujia, songzhuangu, peigu]
             无数据时返回空 DataFrame
+        """
+
+    @abstractmethod
+    async def klines(
+        self,
+        symbol: str,
+        frequency: str,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        count: int | None = None,
+    ) -> pd.DataFrame | None:
+        """统一行情读取接口（参考 chanlunpro Exchange.klines）
+
+        Args:
+            symbol: 股票代码（如 '688158'）
+            frequency: K线周期（'1d', '15m', '1h', '1w', '1mo'）
+            start_date: 起始日期
+            end_date: 结束日期
+            count: 返回 bar 数量（与 start_date/end_date 二选一）
+
+        Returns:
+            DataFrame with columns: [open, high, low, close, volume, amount, adj_factor]
+            Index: DatetimeIndex (timezone-aware Asia/Shanghai)
+            Returns None if no data available
         """
 
     @abstractmethod

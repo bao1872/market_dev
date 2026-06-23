@@ -30,7 +30,7 @@ class Instrument(Base):
 
     __tablename__ = "instruments"
 
-    id: Mapped[UUID] = mapped_column(primary_key=True)
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=func.gen_random_uuid())
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, unique=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     market: Mapped[str] = mapped_column(String(8), nullable=False)

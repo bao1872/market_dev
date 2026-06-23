@@ -84,7 +84,7 @@ class BarWeekly(Base):
 
     PK: (instrument_id, trade_date)
     FK: instrument_id -> instruments.id)
-    trade_date 表示该周最后一个交易日。
+    trade_date 表示该周第一个交易日（前对齐，label='left', closed='right'）。
     """
 
     __tablename__ = "bars_weekly"

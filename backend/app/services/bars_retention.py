@@ -3,7 +3,7 @@
 保守保留策略（用户确认）：
 - 日线/周线/月线：永久保留（不清理）
 - 15min/60min：保留 2 年（730 天）
-- 1min：保留 90 天
+- 1min：保留 30 天（预留配置，当前 1m 不参与定时刷新，仅在指标计算时按需查询）
 
 清理方式：
 - 使用 DELETE FROM ... WHERE trade_time < :cutoff（向量化删除，非逐行）
@@ -11,7 +11,7 @@
 - 清理后记录 Prometheus 指标（bars_retention_deleted_total）
 
 调度：
-- 由 APScheduler 每日 02:00 触发（避开交易时间）
+- 当前未配置自动调度，需手动调用或后续添加定时任务
 - 在 bars_scheduler_service.py 的 run_retention_cleanup 方法中调用
 
 Inputs:
@@ -42,7 +42,7 @@ logger = logging.getLogger("bars_retention")
 # 保留期限（天）
 _RETENTION_15MIN_DAYS = 730  # 2 年
 _RETENTION_60MIN_DAYS = 730  # 2 年
-_RETENTION_MINUTE_DAYS = 90  # 90 天
+_RETENTION_MINUTE_DAYS = 30  # 30 天（1m 数据量大，严格控制保留期限）
 
 
 @dataclass
@@ -66,7 +66,7 @@ _RETENTION_CONFIG: list[tuple[type, str, int | None, bool]] = [
     (BarDaily, "trade_date", None, True),      # 永久保留
     (Bar15Min, "trade_time", _RETENTION_15MIN_DAYS, False),  # 保留 2 年
     (Bar60Min, "trade_time", _RETENTION_60MIN_DAYS, False),  # 保留 2 年
-    (BarMinute, "trade_time", _RETENTION_MINUTE_DAYS, False),  # 保留 90 天
+    (BarMinute, "trade_time", _RETENTION_MINUTE_DAYS, False),  # 保留 30 天（预留配置，当前 1m 不参与定时刷新）
 ]
 
 
@@ -205,13 +205,13 @@ if __name__ == "__main__":
     assert config_by_table["bars_daily"]["is_permanent"] is True
     assert config_by_table["bars_15min"]["retention_days"] == 730
     assert config_by_table["bars_60min"]["retention_days"] == 730
-    assert config_by_table["bars_minute"]["retention_days"] == 90
-    print("✓ 保留期限配置正确（15min/60min=730天, minute=90天）")
+    assert config_by_table["bars_minute"]["retention_days"] == 30
+    print("✓ 保留期限配置正确（15min/60min=730天, minute=30天）")
 
     # 3. 验证 cutoff 计算逻辑
     now = datetime.now()
     cutoff_15min = now - timedelta(days=730)
-    cutoff_minute = now - timedelta(days=90)
+    cutoff_minute = now - timedelta(days=30)
     print(f"✓ 15min cutoff 计算: {cutoff_15min.isoformat()}")
     print(f"✓ minute cutoff 计算: {cutoff_minute.isoformat()}")
 

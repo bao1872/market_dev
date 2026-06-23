@@ -34,8 +34,8 @@ import type {
   StrategyResultQueryParams,
   BarQueryParams,
   CalendarQueryParams,
-  ConfigQueryParams,
   IndicatorQueryParams,
+  StockMemoUpsertRequest,
 } from '../api/endpoints'
 
 // ============================================================
@@ -48,7 +48,19 @@ const STALE_MESSAGES = 0 // 消息始终刷新
 const STALE_PLANS = 60 * 1000 // 方案列表 1 分钟
 const STALE_REALTIME = 30 * 1000 // 实时数据 30 秒
 const STALE_CALENDAR = 30 * 60 * 1000 // 日历 30 分钟（极少变更）
-const STALE_CONFIG = 60 * 1000 // 配置 1 分钟
+
+/** 判断当前是否在 A 股交易时段（周一至周五 9:30-11:30 / 13:00-15:00） */
+function isInTradingHours(): boolean {
+  const now = new Date()
+  const day = now.getDay()
+  const hours = now.getHours()
+  const minutes = now.getMinutes()
+  const timeVal = hours * 60 + minutes
+  const isWeekday = day >= 1 && day <= 5
+  const isMorningSession = timeVal >= 570 && timeVal <= 690 // 9:30-11:30
+  const isAfternoonSession = timeVal >= 780 && timeVal <= 900 // 13:00-15:00
+  return isWeekday && (isMorningSession || isAfternoonSession)
+}
 
 // ============================================================
 // ===== Auth hooks =====
@@ -416,6 +428,43 @@ export function useRemoveFromWatchlist() {
 }
 
 // ============================================================
+// ===== Stock Memo hooks =====
+// ============================================================
+
+/** 查询当前用户对指定股票的备忘录 */
+export function useStockMemo(instrumentId: string | undefined) {
+  return useQuery({
+    queryKey: ['stock-memo', instrumentId],
+    queryFn: () => api.getStockMemo(instrumentId!),
+    enabled: !!instrumentId,
+    staleTime: 0,
+  })
+}
+
+/** 创建/更新备忘录 */
+export function useUpsertStockMemo() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ instrumentId, payload }: { instrumentId: string; payload: StockMemoUpsertRequest }) =>
+      api.upsertStockMemo(instrumentId, payload),
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['stock-memo', variables.instrumentId] })
+    },
+  })
+}
+
+/** 删除备忘录 */
+export function useDeleteStockMemo() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (instrumentId: string) => api.deleteStockMemo(instrumentId),
+    onSuccess: (_, instrumentId) => {
+      queryClient.invalidateQueries({ queryKey: ['stock-memo', instrumentId] })
+    },
+  })
+}
+
+// ============================================================
 // ===== Monitoring Plans hooks =====
 // ============================================================
 
@@ -654,26 +703,40 @@ export function useSelectionPlanRunResults(
 // ===== Bars hooks =====
 // ============================================================
 
-/** 查询指定标的的行情数据 */
-export function useBars(instrumentId: string | undefined, params?: BarQueryParams) {
+/** 查询指定标的的行情数据（交易时段内 30s 轮询，响应式检测交易时段） */
+export function useBars(instrumentId: string | undefined, params?: BarQueryParams, options?: { refetchInterval?: number | false }) {
   return useQuery({
     queryKey: ['bars', instrumentId, params],
     queryFn: () => api.getBars(instrumentId!, params),
     enabled: !!instrumentId,
     staleTime: STALE_WATCHLIST,
+    refetchInterval: options?.refetchInterval ?? (() => isInTradingHours() ? 30000 : false),
   })
 }
 
-/** 查询指定标的的所有策略图表指标 */
+/** 查询指定标的的所有策略图表指标（交易时段内 30s 轮询，响应式检测交易时段） */
 export function useIndicators(
   instrumentId: string | undefined,
   params?: IndicatorQueryParams,
+  options?: { refetchInterval?: number | false },
 ) {
   return useQuery({
     queryKey: ['indicators', instrumentId, params],
     queryFn: () => api.getIndicators(instrumentId!, params),
     enabled: !!instrumentId,
     staleTime: STALE_WATCHLIST,
+    refetchInterval: options?.refetchInterval ?? (() => isInTradingHours() ? 30000 : false),
+  })
+}
+
+/** 查询指定标的的实时报价（交易时段内 10s 轮询，响应式检测交易时段） */
+export function useRealtimeQuote(instrumentId: string | undefined) {
+  return useQuery({
+    queryKey: ['quote', instrumentId],
+    queryFn: () => api.getQuote(instrumentId!),
+    enabled: !!instrumentId,
+    staleTime: STALE_REALTIME,
+    refetchInterval: () => isInTradingHours() ? 10000 : false,
   })
 }
 
@@ -697,41 +760,6 @@ export function useIsTradingDay(targetDate: string | undefined) {
     queryFn: () => api.isTradingDay(targetDate!),
     enabled: !!targetDate,
     staleTime: STALE_CALENDAR,
-  })
-}
-
-// ============================================================
-// ===== Admin Config hooks =====
-// ============================================================
-
-/** 查询配置列表（1 分钟缓存） */
-export function useAdminConfigs(params?: ConfigQueryParams) {
-  return useQuery({
-    queryKey: ['admin', 'config', params],
-    queryFn: () => api.getAdminConfigs(params),
-    staleTime: STALE_CONFIG,
-  })
-}
-
-/** 查询单个配置 */
-export function useAdminConfig(configKey: string | undefined) {
-  return useQuery({
-    queryKey: ['admin', 'config', configKey],
-    queryFn: () => api.getAdminConfig(configKey!),
-    enabled: !!configKey,
-    staleTime: STALE_CONFIG,
-  })
-}
-
-/** 更新配置值变更 */
-export function useUpdateAdminConfig() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: ({ configKey, currentValue }: { configKey: string; currentValue: unknown }) =>
-      api.updateAdminConfig(configKey, currentValue),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'config'] })
-    },
   })
 }
 
@@ -794,3 +822,4 @@ export function useMemberRedemptions(userId: string | undefined) {
 // ============================================================
 
 export type { UseQueryOptions }
+export type { QuoteResponse } from '../api/endpoints' 

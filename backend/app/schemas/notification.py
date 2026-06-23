@@ -34,6 +34,24 @@ MESSAGE_TYPES = {
 }
 
 
+def mask_target_config(adapter_type: str, config: dict[str, Any]) -> dict[str, Any]:
+    """脱敏 target_config 中的敏感字段。
+
+    - feishu_platform_app: app_secret 脱敏为 ****xxxx（末4位），其余字段保留明文
+    - 其他类型: 原样返回
+    """
+    if not config:
+        return {}
+    masked = dict(config)
+    if adapter_type == "feishu_platform_app" and "app_secret" in masked:
+        secret = str(masked["app_secret"])
+        if len(secret) > 4:
+            masked["app_secret"] = f"****{secret[-4:]}"
+        else:
+            masked["app_secret"] = "****"
+    return masked
+
+
 class NotificationMessageDTO(BaseModel):
     """统一通知消息 DTO - 符合 notification_message.schema.json。
 
@@ -84,11 +102,11 @@ class NotificationChannelResponse(BaseModel):
     user_id: UUID = Field(..., description="用户 ID")
     adapter_type: str = Field(..., description="feishu_webhook/feishu_platform_app/email")
     display_name: str = Field(..., description="渠道名称")
+    target_config: dict[str, Any] = Field(default_factory=dict, description="渠道配置（敏感字段脱敏）")
     status: str = Field(..., description="pending/active/invalid/disabled/degraded")
     last_verified_at: datetime | None = Field(None, description="最近验证时间")
     last_error_code: str | None = Field(None, description="最近错误码")
     created_at: datetime = Field(..., description="创建时间")
-    # target_config 不返回敏感字段（GET 不返回明文）
 
 
 class CreateChannelRequest(BaseModel):

@@ -63,6 +63,7 @@ from app.models.strategy_run import (
     StrategyRunItem,
 )
 from app.models.user import Role, User, UserRole
+from app.models.stock_memo import StockMemo
 from app.models.watchlist import UserWatchlistItem
 
 __all__ = [
@@ -105,5 +106,6 @@ __all__ = [
     "TradingCalendar",
     "User",
     "UserRole",
+    "StockMemo",
     "UserWatchlistItem",
 ]

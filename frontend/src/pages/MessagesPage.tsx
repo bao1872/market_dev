@@ -117,7 +117,7 @@ function parseDelivery(body: Record<string, unknown>): { label: string; pill: De
     if (successCount === 1) {
       const feishuSuccess = channels.some(
         (c) =>
-          (c.adapter_type === 'feishu' || c.channel === 'feishu') &&
+          (c.adapter_type === 'feishu_platform_app' || c.channel === 'feishu') &&
           (c.success === true || c.status === 'success'),
       )
       return { label: feishuSuccess ? '飞书成功' : '仅站内', pill: feishuSuccess ? 'ok' : 'off' }

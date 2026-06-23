@@ -14,7 +14,7 @@ export type LayerRenderer =
   | 'band'
   | 'histogram_line'
   | 'horizontal_profile'
-export type LayerPane = 'price' | 'price_right' | 'volume' | 'offset' | 'delta'
+export type LayerPane = 'price' | 'price_right' | 'volume' | 'delta'
 
 export interface LayerDef {
   id: string
@@ -55,28 +55,6 @@ export const LAYERS: Record<string, LayerDef> = {
     color: '#53637e',
     description: '逐根成交量柱',
     defaultVisible: true,
-  },
-  vwap: {
-    id: 'vwap',
-    name: 'DSA · VWAP',
-    shortName: 'VWAP',
-    group: '选股策略',
-    renderer: 'line',
-    pane: 'price',
-    color: '#ffd166',
-    description: '策略计算窗口内累计成交均价',
-    defaultVisible: false,
-  },
-  offset: {
-    id: 'offset',
-    name: 'DSA · Offset',
-    shortName: 'OFFSET',
-    group: '选股策略',
-    renderer: 'line_pair',
-    pane: 'offset',
-    color: '#8b5cf6',
-    description: '价格相对 VWAP 的偏移及平滑均值',
-    defaultVisible: false,
   },
   breakout: {
     id: 'breakout',
@@ -145,6 +123,17 @@ export const LAYERS: Record<string, LayerDef> = {
     description: 'EMA 中轴与 ATR 上下轨形成的趋势带',
     defaultVisible: false,
   },
+  bb: {
+    id: 'bb',
+    name: 'Bollinger Bands',
+    shortName: 'BB',
+    group: '监控策略',
+    renderer: 'band',
+    pane: 'price',
+    color: 'rgba(156,39,176,0.15)',
+    description: '布林带：SMA(20) ± 2×标准差',
+    defaultVisible: false,
+  },
   delta: {
     id: 'delta',
     name: 'Volume Delta / CVD',
@@ -176,8 +165,8 @@ export const STRATEGIES: Record<string, StrategyDef> = {
     name: 'DSA 方向稳定性',
     kind: 'selection',
     version: '2.3.0',
-    layers: ['volume', 'vwap', 'offset', 'selection'],
-    defaultLayers: ['volume', 'vwap', 'offset', 'selection'],
+    layers: ['volume', 'dsa', 'selection'],
+    defaultLayers: ['volume', 'dsa', 'selection'],
   },
   breakout: {
     id: 'breakout',
@@ -192,8 +181,8 @@ export const STRATEGIES: Record<string, StrategyDef> = {
     name: 'Volume Node Cluster',
     kind: 'monitor',
     version: '2.1.0',
-    layers: ['volume', 'profile', 'node', 'poc', 'events'],
-    defaultLayers: ['volume', 'profile', 'node', 'poc', 'events'],
+    layers: ['volume', 'profile', 'node', 'poc', 'bb', 'events'],
+    defaultLayers: ['volume', 'profile', 'node', 'poc', 'bb', 'events'],
   },
   atr: {
     id: 'atr',
@@ -216,16 +205,16 @@ export const STRATEGIES: Record<string, StrategyDef> = {
     name: '强势共振选股组合',
     kind: 'selection_plan',
     version: 'revision 7',
-    layers: ['volume', 'vwap', 'offset', 'breakout', 'selection'],
-    defaultLayers: ['volume', 'vwap', 'offset', 'breakout', 'selection'],
+    layers: ['volume', 'dsa', 'breakout', 'selection'],
+    defaultLayers: ['volume', 'dsa', 'breakout', 'selection'],
   },
   monitor_combined: {
     id: 'monitor_combined',
     name: '节点共振追踪',
     kind: 'monitor_plan',
     version: 'revision 5',
-    layers: ['volume', 'profile', 'node', 'poc', 'atr', 'delta', 'events'],
-    defaultLayers: ['volume', 'profile', 'node', 'poc', 'atr', 'delta', 'events'],
+    layers: ['volume', 'profile', 'node', 'poc', 'atr', 'bb', 'delta', 'events'],
+    defaultLayers: ['volume', 'profile', 'node', 'poc', 'atr', 'bb', 'delta', 'events'],
   },
 }
 
@@ -286,10 +275,9 @@ export interface DisplayGroupDef {
 }
 
 export const DISPLAY_GROUPS: Record<string, DisplayGroupDef> = {
-  base_volume: { id: 'base_volume', name: '成交量', shortName: 'VOL', section: '基础图层', color: '#53637e', description: '主图下方成交量柱', layers: ['volume'], anchorLayer: 'volume' },
-  dsa: { id: 'dsa', name: 'DSA 方向稳定性', shortName: 'DSA', section: '选股策略', color: '#ffd166', description: 'VWAP · 偏移带 · 选股命中标记', layers: ['vwap', 'offset', 'selection'], anchorLayer: 'vwap' },
+  dsa: { id: 'dsa', name: 'DSA 方向稳定性', shortName: 'DSA', section: '选股策略', color: '#ff1744', description: '动态摆动锚定 VWAP · 选股命中标记', layers: ['dsa', 'selection'], anchorLayer: 'dsa' },
   breakout: { id: 'breakout', name: '突破强度', shortName: '突破', section: '选股策略', color: '#ef5350', description: '压力区 · 突破确认 · 选股命中标记', layers: ['breakout', 'selection'], anchorLayer: 'breakout' },
   node: { id: 'node', name: 'Node Cluster', shortName: 'NODE', section: '监控策略', color: '#4f7cff', description: '筹码峰 · 节点区间 · POC · 事件标记', layers: ['profile', 'node', 'poc'], anchorLayer: 'node' },
   atr: { id: 'atr', name: 'ATR Rope', shortName: 'ATR', section: '监控策略', color: '#82a0ff', description: '趋势带 · 上下轨 · 事件标记', layers: ['atr'], anchorLayer: 'atr' },
-  volume_delta: { id: 'volume_delta', name: 'Volume Delta', shortName: 'DELTA', section: '监控策略', color: '#26a69a', description: '主动成交量 · CVD · 事件标记', layers: ['delta'], anchorLayer: 'delta' },
+  bb: { id: 'bb', name: 'Bollinger Bands', shortName: 'BB', section: '监控策略', color: '#9c27b0', description: '布林带 · SMA(20) ± 2σ', layers: ['bb'], anchorLayer: 'bb' },
 }

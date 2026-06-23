@@ -1,11 +1,12 @@
 // AppShell：应用主布局壳（侧栏 + 顶栏 + 内容区 + Toast）
 // 对应原型：所有页面的 .app-shell > .sidebar + .topbar + .main 结构
 // V1.5.1：角色感知导航，管理员页面始终显示管理员导航
-import { type ReactNode } from 'react'
+import { type ReactNode, useState, useEffect } from 'react'
 import { useLocation, Link } from 'react-router-dom'
 import { useRoleStore } from '@/store/role'
 import { useAuthStore } from '@/store/auth'
 import { useToast } from '@/store/toast'
+import { getMarketStatus, type MarketStatus } from '@/api/endpoints'
 import clsx from 'clsx'
 
 // 导航项定义
@@ -29,7 +30,6 @@ const adminNavItems: NavItemDef[] = [
   { path: '/admin', icon: '▦', label: '系统概览' },
   { path: '/admin/users', icon: '♙', label: '用户与套餐' },
   { path: '/admin/strategies', icon: '◇', label: '策略目录' },
-  { path: '/admin/config', icon: '⚙', label: '配置中心' },
   { path: '/admin/jobs', icon: '↻', label: '任务与事件' },
 ]
 
@@ -45,7 +45,6 @@ const pageTitleMap: Record<string, string> = {
   '/admin': '系统概览',
   '/admin/users': '用户与套餐',
   '/admin/strategies': '策略目录',
-  '/admin/config': '配置中心',
   '/admin/jobs': '任务与事件',
 }
 
@@ -79,6 +78,33 @@ export default function AppShell({ children }: { children: ReactNode }) {
   const currentPath = location.pathname
   const pageTitle = getPageTitle(currentPath)
   const isAdminPath = currentPath.startsWith('/admin')
+
+  // 市场状态轮询（30s）
+  const [marketStatus, setMarketStatus] = useState<MarketStatus | null>(null)
+  useEffect(() => {
+    const fetchStatus = async () => {
+      try {
+        const status = await getMarketStatus()
+        setMarketStatus(status)
+      } catch {
+        // API 失败时保持当前状态
+      }
+    }
+    fetchStatus()
+    const interval = setInterval(fetchStatus, 30000)
+    return () => clearInterval(interval)
+  }, [])
+
+  // 实时时钟（1s 刷新）
+  const [currentTime, setCurrentTime] = useState(
+    new Date().toLocaleTimeString('zh-CN', { hour12: false })
+  )
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setCurrentTime(new Date().toLocaleTimeString('zh-CN', { hour12: false }))
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [])
 
   // 获取用户名首字母作为头像
   const userInitials = user?.name
@@ -155,8 +181,8 @@ export default function AppShell({ children }: { children: ReactNode }) {
         <div className="top-left">
           <div className="page-crumb">{pageTitle}</div>
           <div className="top-status">
-            <i className="dot ok"></i>
-            A股交易中 · {new Date().toLocaleTimeString('zh-CN', { hour12: false })}
+            <i className={marketStatus?.is_trading_hours ? 'dot ok' : 'dot'}></i>
+            A股{marketStatus?.status_text ?? '加载中'} · {currentTime}
           </div>
         </div>
         <div className="top-right">

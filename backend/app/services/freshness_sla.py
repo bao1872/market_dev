@@ -5,7 +5,6 @@
 
 SLA 定义（与任务约束一致）：
 - 日线 SLA: 1800 秒（30 分钟）—— 数据应在收盘后 30 分钟内更新
-- 分钟 SLA: 90 秒 —— 盘中分钟数据应近实时
 - 15min SLA: 900 秒（15 分钟）—— 15 分钟线应在对应周期结束后 15 分钟内更新
 - 60min SLA: 3600 秒（1 小时）—— 60 分钟线应在对应周期结束后 1 小时内更新
 - 周线 SLA: 7 天 —— 周线数据应在每周结束后 7 天内更新
@@ -15,6 +14,7 @@ SLA 定义（与任务约束一致）：
 - 周线/月线不存储在 DB，从日线动态合成（convert_kline_frequency）
 - 周线/月线的新鲜度等同于日线新鲜度（数据源相同）
 - ensure_weekly_freshness/ensure_monthly_freshness 委托给 ensure_daily_freshness
+- 1m 分钟线不参与定时刷新，仅按需查询
 
 新鲜度计算：
 - 日线/周线/月线：last_update = MAX(trade_date) 对应的收盘时间（当天 15:00）
@@ -52,7 +52,6 @@ from app.repositories.bar_repository import (
     refresh_15min_bars,
     refresh_60min_bars,
     refresh_daily_bars,
-    refresh_minute_bars,
 )
 from app.services.bars_metrics import bars_freshness_age_seconds
 from app.services.bars_scheduler_service import BarsSchedulerService
@@ -61,7 +60,6 @@ logger = logging.getLogger("freshness_sla")
 
 # SLA 常量（秒）
 DAILY_SLA_SECONDS = 1800  # 30 分钟
-MINUTE_SLA_SECONDS = 90  # 1.5 分钟
 BAR_15MIN_SLA_SECONDS = 900  # 15 分钟
 BAR_60MIN_SLA_SECONDS = 3600  # 1 小时
 WEEKLY_SLA_SECONDS = 7 * 86400  # 7 天
@@ -72,7 +70,6 @@ _DAILY_CLOSE_TIME = time(15, 0)
 
 # 刷新拉取的回看窗口
 # 日线/15min/60min 刷新条数引用 BarsSchedulerService.DAILY_COUNTS（单一权威定义）
-_MINUTE_REFRESH_LOOKBACK_MINUTES = 30
 
 
 def _record_freshness_metric(
@@ -209,6 +206,9 @@ async def ensure_daily_freshness(
 
 # ===== 分钟线 =====
 
+# 1m 健康检查参考 SLA（仅用于监控参考，不触发自动刷新）
+_MINUTE_CHECK_SLA_SECONDS = 90
+
 
 async def check_minute_freshness(
     session: AsyncSession,
@@ -217,6 +217,8 @@ async def check_minute_freshness(
     """检查分钟线数据新鲜度。
 
     last_update = MAX(trade_time)；age = now - last_update。
+
+    注意：1m 数据不参与定时刷新，此检查仅用于监控参考。
 
     Args:
         session: 异步会话
@@ -241,7 +243,7 @@ async def check_minute_freshness(
             is_fresh=False,
             last_update=None,
             age_seconds=None,
-            sla_seconds=MINUTE_SLA_SECONDS,
+            sla_seconds=_MINUTE_CHECK_SLA_SECONDS,
         )
 
     if latest_time.tzinfo is not None:
@@ -250,49 +252,18 @@ async def check_minute_freshness(
     now = datetime.now()
     age = (now - latest_time).total_seconds()
 
-    is_fresh = age <= MINUTE_SLA_SECONDS
+    is_fresh = age <= _MINUTE_CHECK_SLA_SECONDS
     logger.info(
         "分钟线新鲜度 instrument_id=%s latest_time=%s age=%.0fs sla=%ds is_fresh=%s",
-        instrument_id, latest_time, age, MINUTE_SLA_SECONDS, is_fresh,
+        instrument_id, latest_time, age, _MINUTE_CHECK_SLA_SECONDS, is_fresh,
     )
-    _record_freshness_metric("minute", age, MINUTE_SLA_SECONDS, is_fresh)
+    _record_freshness_metric("minute", age, _MINUTE_CHECK_SLA_SECONDS, is_fresh)
     return FreshnessResult(
         is_fresh=is_fresh,
         last_update=latest_time,
         age_seconds=age,
-        sla_seconds=MINUTE_SLA_SECONDS,
+        sla_seconds=_MINUTE_CHECK_SLA_SECONDS,
     )
-
-
-async def ensure_minute_freshness(
-    session: AsyncSession,
-    instrument_id: uuid.UUID,
-) -> FreshnessResult:
-    """检查分钟线新鲜度，过期则触发拉取刷新。
-
-    刷新范围：最近 30 分钟，拉取后重新检查新鲜度。
-
-    Args:
-        session: 异步会话
-        instrument_id: 标的 UUID
-
-    Returns:
-        刷新后的 FreshnessResult
-    """
-    result = await check_minute_freshness(session, instrument_id)
-    if result.is_fresh:
-        return result
-
-    logger.info("分钟线数据过期，触发刷新 instrument_id=%s", instrument_id)
-    now = datetime.now()
-    start = now - timedelta(minutes=_MINUTE_REFRESH_LOOKBACK_MINUTES)
-    try:
-        await refresh_minute_bars(session, instrument_id, start, now)
-    except Exception as exc:
-        logger.warning("分钟线刷新失败 instrument_id=%s: %s", instrument_id, exc)
-        raise
-
-    return await check_minute_freshness(session, instrument_id)
 
 
 # ===== 15 分钟线 =====
@@ -475,13 +446,11 @@ if __name__ == "__main__":
 
     # 1. 验证 SLA 常量
     assert DAILY_SLA_SECONDS == 1800, f"日线 SLA 应为 1800，实际 {DAILY_SLA_SECONDS}"
-    assert MINUTE_SLA_SECONDS == 90, f"分钟 SLA 应为 90，实际 {MINUTE_SLA_SECONDS}"
     assert BAR_15MIN_SLA_SECONDS == 900, f"15min SLA 应为 900，实际 {BAR_15MIN_SLA_SECONDS}"
     assert BAR_60MIN_SLA_SECONDS == 3600, f"60min SLA 应为 3600，实际 {BAR_60MIN_SLA_SECONDS}"
     assert WEEKLY_SLA_SECONDS == 7 * 86400, f"周线 SLA 应为 7 天，实际 {WEEKLY_SLA_SECONDS}"
     assert MONTHLY_SLA_SECONDS == 30 * 86400, f"月线 SLA 应为 30 天，实际 {MONTHLY_SLA_SECONDS}"
     print(f"DAILY_SLA_SECONDS={DAILY_SLA_SECONDS} (30 分钟)")
-    print(f"MINUTE_SLA_SECONDS={MINUTE_SLA_SECONDS} (1.5 分钟)")
     print(f"BAR_15MIN_SLA_SECONDS={BAR_15MIN_SLA_SECONDS} (15 分钟)")
     print(f"BAR_60MIN_SLA_SECONDS={BAR_60MIN_SLA_SECONDS} (1 小时)")
     print(f"WEEKLY_SLA_SECONDS={WEEKLY_SLA_SECONDS} (7 天)")
@@ -502,7 +471,7 @@ if __name__ == "__main__":
         is_fresh=False,
         last_update=None,
         age_seconds=None,
-        sla_seconds=MINUTE_SLA_SECONDS,
+        sla_seconds=_MINUTE_CHECK_SLA_SECONDS,
     )
     assert stale.is_fresh is False
     assert stale.age_seconds is None
@@ -525,7 +494,7 @@ if __name__ == "__main__":
 
     expected_coroutines = [
         check_daily_freshness, ensure_daily_freshness,
-        check_minute_freshness, ensure_minute_freshness,
+        check_minute_freshness,
         check_15min_freshness, ensure_15min_freshness,
         check_60min_freshness, ensure_60min_freshness,
         ensure_weekly_freshness,

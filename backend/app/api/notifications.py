@@ -11,7 +11,7 @@
 
 说明：
 - 当前用户 ID 通过 X-User-Id header 传入（占位，R2 阶段接入 JWT RBAC）
-- 渠道配置 GET 不返回明文敏感字段
+- 渠道配置 GET 返回脱敏后的 target_config（app_secret 仅显示末4位）
 """
 
 from __future__ import annotations
@@ -31,10 +31,11 @@ from app.schemas.notification import (
     NotificationMessageResponse,
     NotificationPreviewRequest,
     NotificationPreviewResponse,
+    mask_target_config,
 )
 from app.services.channel_adapter import get_adapter
 from app.services.feishu_card_builder import dto_to_feishu_card
-from app.services.message_builder import build_message, MessageBuilderError
+from app.services.message_builder import MessageBuilderError, build_message
 from app.services.notification_service import (
     ChannelNotFoundError,
     MessageNotFoundError,
@@ -68,6 +69,13 @@ def _get_user_id(x_user_id: str | None = Header(None)) -> UUID:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"X-User-Id 格式非法: {e}",
         ) from e
+
+
+def _channel_response(channel: object) -> NotificationChannelResponse:
+    """构建渠道响应，对 target_config 脱敏。"""
+    resp = NotificationChannelResponse.model_validate(channel)
+    resp.target_config = mask_target_config(resp.adapter_type, resp.target_config)
+    return resp
 
 
 @router.get("/messages", response_model=NotificationMessageListResponse)
@@ -131,7 +139,7 @@ async def create_channel_endpoint(
         secret_ref=request.secret_ref,
     )
     await db.commit()
-    return NotificationChannelResponse.model_validate(channel)
+    return _channel_response(channel)
 
 
 @router.post(
@@ -155,7 +163,7 @@ async def verify_channel_endpoint(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)
         ) from e
     await db.commit()
-    return NotificationChannelResponse.model_validate(channel)
+    return _channel_response(channel)
 
 
 @router.get(
@@ -168,7 +176,7 @@ async def list_channels(
 ) -> NotificationChannelListResponse:
     """获取用户通知渠道列表。"""
     channels = await list_user_channels(db, user_id)
-    items = [NotificationChannelResponse.model_validate(ch) for ch in channels]
+    items = [_channel_response(ch) for ch in channels]
     return NotificationChannelListResponse(items=items, total=len(items))
 
 
@@ -193,7 +201,7 @@ async def test_channel_endpoint(
         ) from e
     await db.commit()
     return ChannelTestResponse(
-        channel=NotificationChannelResponse.model_validate(channel),
+        channel=_channel_response(channel),
         delivery=delivery_result,
     )
 

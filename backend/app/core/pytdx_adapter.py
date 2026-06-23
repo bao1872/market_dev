@@ -21,11 +21,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import time
 from contextlib import contextmanager
-from datetime import date, datetime
+from dataclasses import dataclass
+from datetime import date, datetime, time as dt_time
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
@@ -41,6 +43,15 @@ if TYPE_CHECKING:
     from collections.abc import Generator
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _KlineCacheEntry:
+    """klines 进程内缓存条目（参考 chanlunpro FileCacheDB + ExchangeTDX.klines 增量更新）"""
+    df: pd.DataFrame
+    cached_at: datetime       # 缓存写入时间
+    last_bar_time: datetime   # DataFrame 中最后一根 bar 的时间
+
 
 # xdxr 缓存配置
 _XDXR_CACHE_PREFIX = "xdxr"
@@ -271,6 +282,9 @@ class PytdxAdapter(Exchange):
 
     异常处理：连接与数据拉取失败均抛 RuntimeError（含上下文），不吞没异常。
     """
+
+    # klines 进程内缓存（参考 chanlunpro ExchangeTDX.klines 的 FileCacheDB 增量更新机制）
+    _klines_cache: dict[str, _KlineCacheEntry] = {}
 
     def __init__(
         self,
@@ -514,12 +528,19 @@ class PytdxAdapter(Exchange):
         df = pd.DataFrame(all_bars)
 
         # 统一 datetime 列（pytdx 返回 datetime 字符串或 year/month/day/hour/minute 分量）
+        # 使用 errors='coerce' 容错畸形日期（如指数 399xxx 的 "0-00-00 15:00"），跳过无效行
         if "datetime" in df.columns:
-            df["datetime"] = pd.to_datetime(df["datetime"]).dt.tz_localize(None)
+            df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce").dt.tz_localize(None)
+            df = df.dropna(subset=["datetime"]).reset_index(drop=True)
         elif {"year", "month", "day", "hour", "minute"}.issubset(df.columns):
             df["datetime"] = pd.to_datetime(
-                df[["year", "month", "day", "hour", "minute"]].astype(int)
+                df[["year", "month", "day", "hour", "minute"]].astype(int),
+                errors="coerce",
             ).dt.tz_localize(None)
+            df = df.dropna(subset=["datetime"]).reset_index(drop=True)
+
+        if df.empty:
+            return pd.DataFrame()
 
         df = df[["datetime", "open", "high", "low", "close", "vol", "amount"]]
         df.columns = ["datetime", "open", "high", "low", "close", "volume", "amount"]
@@ -605,7 +626,7 @@ class PytdxAdapter(Exchange):
 
         Args:
             symbol: 股票代码（如 '000001'）
-            count: 拉取条数（默认 800，回补到 2023-01-01 约需 200）
+            count: 拉取条数（默认 800，回补到 2023-01-01 约需 200；实际回补由 bars_scheduler_service.BACKFILL_COUNTS 控制）
 
         Returns:
             DataFrame: columns=[datetime, open, high, low, close, volume, amount]
@@ -625,7 +646,7 @@ class PytdxAdapter(Exchange):
 
         Args:
             symbol: 股票代码（如 '000001'）
-            count: 拉取条数（默认 800，回补到 2023-01-01 约需 50）
+            count: 拉取条数（默认 800，回补到 2023-01-01 约需 50；实际回补由 bars_scheduler_service.BACKFILL_COUNTS 控制）
 
         Returns:
             DataFrame: columns=[datetime, open, high, low, close, volume, amount]
@@ -665,7 +686,7 @@ class PytdxAdapter(Exchange):
 
         Args:
             symbol: 股票代码（如 '000001'）
-            count: 拉取条数（默认 800，回补到 2023-01-01 约需 3500）
+            count: 拉取条数（默认 800；回补到 2023-01-01 需约 3500 条，由 bars_scheduler_service.BACKFILL_COUNTS["60m"]=4000 控制）
 
         Returns:
             DataFrame: columns=[datetime, open, high, low, close, volume, amount]
@@ -675,6 +696,264 @@ class PytdxAdapter(Exchange):
             RuntimeError: 重试后仍失败
         """
         return self._fetch_with_retry(symbol, "60m", count)
+
+    # frequency → PERIOD_MAP 键映射（klines 内部使用）
+    _FREQ_TO_PERIOD: dict[str, str] = {
+        "1d": "d",
+        "15m": "15m",
+        "1h": "60m",
+    }
+
+    @staticmethod
+    def _cache_key(symbol: str, frequency: str) -> str:
+        return f"{symbol}:{frequency}"
+
+    @staticmethod
+    def _klines_ttl(frequency: str) -> int:
+        """缓存 TTL（秒），交易时段短 TTL，收盘后长 TTL
+
+        参考 chanlunpro 的 FileCacheDB 读取时排除最后一根 bar 的设计理念：
+        交易时段数据变化快，需要短 TTL；收盘后数据不变，使用长 TTL。
+        """
+        now = datetime.now()
+        # 判断是否在交易时段（9:30-15:00）
+        is_trading = (
+            now.weekday() < 5
+            and dt_time(9, 30) <= now.time() <= dt_time(15, 0)
+        )
+        if is_trading:
+            return 60 if frequency in ("15m", "1h", "1m") else 300  # 分钟线 60s，日线 300s
+        else:
+            return 3600  # 收盘后 1 小时 TTL
+
+    @staticmethod
+    def _apply_filters(
+        df: pd.DataFrame,
+        start_date: date | None,
+        end_date: date | None,
+        count: int | None,
+    ) -> pd.DataFrame:
+        """应用日期范围过滤和数量限制"""
+        if start_date is not None:
+            start_ts = pd.Timestamp(start_date, tz="Asia/Shanghai")
+            df = df[df.index >= start_ts]
+        if end_date is not None:
+            end_ts = pd.Timestamp(end_date, tz="Asia/Shanghai") + pd.Timedelta(days=1)
+            df = df[df.index < end_ts]
+        if count is not None and len(df) > count:
+            df = df.iloc[-count:]
+        return df
+
+    async def klines(
+        self,
+        symbol: str,
+        frequency: str,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        count: int | None = None,
+    ) -> pd.DataFrame | None:
+        """统一行情读取接口（参考 chanlunpro ExchangeTDX.klines）
+
+        进程内缓存 + 增量更新：
+        - 缓存命中且有效：直接返回
+        - 缓存过期：增量拉取新数据页合并（参考 chanlunpro 的 pages 逐页拉取逻辑）
+        - 缓存未命中：全量拉取
+        """
+        from app.core.exchange import FREQUENCY_MAP
+
+        cat = FREQUENCY_MAP.get(frequency)
+        if cat is None:
+            logger.warning("klines() 不支持的 frequency=%s", frequency)
+            return None
+
+        # 周线/月线：从日线合成
+        if frequency in ("1w", "1mo"):
+            return await self._klines_synthesized(symbol, frequency, start_date, end_date, count)
+
+        cache_key = self._cache_key(symbol, frequency)
+        now = datetime.now()
+
+        # --- 缓存命中检查 ---
+        entry = self._klines_cache.get(cache_key)
+        if entry is not None:
+            ttl = self._klines_ttl(frequency)
+            if (now - entry.cached_at).total_seconds() < ttl:
+                # 缓存有效，直接返回（应用过滤和限制）
+                df = entry.df.copy()
+                df = self._apply_filters(df, start_date, end_date, count)
+                return df
+
+            # --- 缓存过期：增量更新（参考 chanlunpro ExchangeTDX.klines 增量拉取）---
+            try:
+                # 拉取最近 2 页数据（2 × 700 = 1400 bars），足够覆盖增量
+                incremental_df = await asyncio.to_thread(
+                    self._fetch_with_retry, symbol, self._FREQ_TO_PERIOD[frequency], 1400
+                )
+                if incremental_df is not None and not incremental_df.empty:
+                    # 转换为 DatetimeIndex 格式（与全量拉取一致）
+                    if "datetime" in incremental_df.columns:
+                        incremental_df = incremental_df.set_index("datetime")
+                    incremental_df.index = pd.to_datetime(incremental_df.index)
+                    incremental_df.index = incremental_df.index.tz_localize("Asia/Shanghai")
+                    # 添加 adj_factor 列
+                    if "adj_factor" not in incremental_df.columns:
+                        incremental_df["adj_factor"] = 1.0
+
+                    # 合并：去重（保留新数据），按时间排序
+                    merged = pd.concat([entry.df, incremental_df])
+                    merged = merged[~merged.index.duplicated(keep="last")]
+                    merged = merged.sort_index()
+                    # 更新缓存
+                    self._klines_cache[cache_key] = _KlineCacheEntry(
+                        df=merged,
+                        cached_at=now,
+                        last_bar_time=merged.index[-1].to_pydatetime(),
+                    )
+                    df = merged.copy()
+                    df = self._apply_filters(df, start_date, end_date, count)
+                    return df
+            except Exception as exc:
+                logger.warning("klines() 增量更新失败 symbol=%s: %s，使用缓存数据", symbol, exc)
+                # 增量更新失败，返回过期缓存（降级）
+                df = entry.df.copy()
+                df = self._apply_filters(df, start_date, end_date, count)
+                return df
+
+        # --- 缓存未命中：全量拉取 ---
+        fetch_count = 8000  # 缓存场景：始终拉取足够多的数据，过滤在读取时应用
+        df = await asyncio.to_thread(
+            self._fetch_with_retry, symbol, self._FREQ_TO_PERIOD[frequency], fetch_count
+        )
+        if df is None or df.empty:
+            return None
+
+        # 转换为 DatetimeIndex 格式
+        if "datetime" in df.columns:
+            df = df.set_index("datetime")
+        df.index = pd.to_datetime(df.index)
+        df.index = df.index.tz_localize("Asia/Shanghai")
+
+        # 添加 adj_factor 列（默认 1.0，qfq 由 API 层处理）
+        if "adj_factor" not in df.columns:
+            df["adj_factor"] = 1.0
+
+        # 写入缓存
+        self._klines_cache[cache_key] = _KlineCacheEntry(
+            df=df.copy(),
+            cached_at=now,
+            last_bar_time=df.index[-1].to_pydatetime(),
+        )
+
+        # 应用过滤和限制
+        df = self._apply_filters(df, start_date, end_date, count)
+        return df
+
+    async def _klines_synthesized(
+        self,
+        symbol: str,
+        frequency: str,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        count: int | None = None,
+    ) -> pd.DataFrame | None:
+        """从日线合成周线/月线"""
+        # 获取更多日线以确保有足够的合成数据
+        daily_count = (count or 500) * 7 if frequency == "1w" else (count or 120) * 31
+        daily_count = min(daily_count, 8000)
+
+        daily_df = await self.klines(symbol, "1d", start_date=start_date, end_date=end_date, count=daily_count)
+        if daily_df is None or daily_df.empty:
+            return None
+
+        # 使用 bar_repository 的 convert_kline_frequency 合成
+        from app.repositories.bar_repository import convert_kline_frequency
+
+        # convert_kline_frequency 期望 DatetimeIndex 无时区，先去除时区
+        daily_naive = daily_df.copy()
+        if daily_naive.index.tz is not None:
+            daily_naive.index = daily_naive.index.tz_localize(None)
+
+        freq_map = {"1w": "w", "1mo": "m"}
+        target_freq = freq_map[frequency]
+        result = convert_kline_frequency(daily_naive, target_freq)
+        if result is None or result.empty:
+            return None
+
+        # 恢复时区
+        result.index = result.index.tz_localize("Asia/Shanghai")
+
+        # 数量限制
+        if count is not None and len(result) > count:
+            result = result.iloc[-count:]
+
+        return result
+
+    def get_realtime_quote(self, symbol: str) -> dict[str, Any] | None:
+        """获取实时行情报价（通过 pytdx 1 分钟线 + 日线）。
+
+        流程：
+        1. 拉取最新 2 根 1 分钟线，取最新 bar 的 close 作为 current_price
+        2. 拉取最近 5 根日线，取倒数第 2 根的 close 作为 prev_close（前一交易日收盘价）
+        3. 日线不足时降级为前一根 1 分钟线的 close
+        4. 计算 change_pct = (current_price - prev_close) / prev_close * 100
+
+        Args:
+            symbol: 股票代码（如 '000001', '600519'）
+
+        Returns:
+            行情字典，包含 current_price/open/high/low/close/volume/prev_close/
+            change_pct/update_time/is_realtime；失败时返回 None（不静默兜底假数据）
+        """
+        try:
+            # [实时行情] 拉取最新 2 根 1 分钟线
+            df_1m = self._fetch_with_retry(symbol, "1m", 2)
+            if df_1m.empty:
+                logger.warning("get_realtime_quote: 1 分钟线无数据 symbol=%s", symbol)
+                return None
+
+            latest = df_1m.iloc[-1]
+            current_price = float(latest["close"])
+
+            # [实时行情] 获取前一交易日收盘价：优先从日线获取
+            prev_close: float | None = None
+            try:
+                df_daily = self._fetch_with_retry(symbol, "d", 5)
+                if len(df_daily) >= 2:
+                    prev_close = float(df_daily.iloc[-2]["close"])
+            except Exception as exc:
+                logger.debug("get_realtime_quote: 日线获取失败 symbol=%s: %s", symbol, exc)
+
+            # 日线不足时，使用前一根 1 分钟线的收盘价
+            if prev_close is None and len(df_1m) >= 2:
+                prev_close = float(df_1m.iloc[-2]["close"])
+
+            # 无法计算涨跌幅时退化为 0%
+            if prev_close is None or prev_close == 0:
+                prev_close = current_price
+
+            change_pct = (current_price - prev_close) / prev_close * 100
+
+            update_time = latest["datetime"]
+            if hasattr(update_time, "isoformat"):
+                update_time = update_time.isoformat()
+            else:
+                update_time = str(update_time)
+
+            return {
+                "current_price": round(current_price, 4),
+                "open": round(float(latest["open"]), 4),
+                "high": round(float(latest["high"]), 4),
+                "low": round(float(latest["low"]), 4),
+                "close": round(current_price, 4),
+                "volume": round(float(latest["volume"]), 2),
+                "prev_close": round(prev_close, 4),
+                "change_pct": round(change_pct, 2),
+                "update_time": update_time,
+                "is_realtime": True,
+            }
+        except Exception as exc:
+            logger.warning("get_realtime_quote 失败 symbol=%s: %s", symbol, exc)
+            return None
 
     def get_xdxr_info(self, symbol: str) -> pd.DataFrame:
         """获取除权除息数据（带 Redis 缓存与重试）。

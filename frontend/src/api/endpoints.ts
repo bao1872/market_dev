@@ -286,6 +286,7 @@ export interface NotificationChannel {
   last_verified_at: string | null
   last_error_code: string | null
   created_at: string
+  target_config?: Record<string, unknown>
 }
 
 /** 通知渠道列表响应 */
@@ -638,40 +639,6 @@ export interface TradingDayResponse {
 }
 
 // ============================================================
-// Admin Config 领域类型
-// ============================================================
-
-/** 配置定义（Secret 字段脱敏为 "***"） */
-export interface ConfigDefinition {
-  id: string
-  config_key: string
-  display_name: string
-  description: string | null
-  value_type: string
-  allowed_scopes: unknown[]
-  default_value: unknown
-  current_value: unknown
-  is_required: boolean
-  validation: Record<string, unknown> | null
-  sensitivity: string
-  restart_policy: string
-  ui: Record<string, unknown>
-  test_action: string | null
-  audit: boolean
-  status: string
-  created_at: string
-  updated_at: string
-}
-
-/** 配置列表分页响应 */
-export interface ConfigListResponse {
-  items: ConfigDefinition[]
-  total: number
-  page: number
-  page_size: number
-}
-
-// ============================================================
 // Admin Membership 领域类型
 // ============================================================
 
@@ -735,6 +702,17 @@ export interface MemberListResponse {
   total: number
   limit: number
   offset: number
+}
+
+// ============================================================
+// Market Status 领域类型
+// ============================================================
+
+/** 市场状态 */
+export interface MarketStatus {
+  is_trading_day: boolean
+  is_trading_hours: boolean
+  status_text: string  // "交易中" / "已收盘" / "休市" / "盘前"
 }
 
 // ============================================================
@@ -895,10 +873,6 @@ export interface InviteCodeCreateRequest {
   note?: string
 }
 
-/** 配置更新请求 */
-export interface ConfigDefinitionUpdate {
-  current_value: unknown
-}
 
 // ============================================================
 // 查询参数类型
@@ -948,14 +922,6 @@ export interface CalendarQueryParams {
   market?: string
 }
 
-/** 配置列表查询参数 */
-export interface ConfigQueryParams {
-  scope?: string
-  sensitivity?: string
-  value_type?: string
-  page?: number
-  page_size?: number
-}
 
 /** 分页查询参数 */
 export interface PaginationParams {
@@ -1306,6 +1272,72 @@ export async function removeFromWatchlist(instrumentId: string): Promise<void> {
 }
 
 // ============================================================
+// ===== Stock Memo 端点 =====
+// ============================================================
+
+/** 个股备忘录 */
+export interface StockMemo {
+  id: string
+  user_id: string
+  instrument_id: string
+  content: string
+  notify_feishu: boolean
+  created_at: string
+  updated_at: string
+}
+
+/** 备忘录 upsert 请求 */
+export interface StockMemoUpsertRequest {
+  content: string
+  notify_feishu?: boolean
+}
+
+/** 切换飞书推送开关请求 */
+export interface StockMemoNotifyToggleRequest {
+  notify_feishu: boolean
+}
+
+/** 获取当前用户对指定股票的备忘录 */
+export async function getStockMemo(instrumentId: string): Promise<StockMemo | null> {
+  try {
+    const { data } = await apiClient.get<StockMemo>(`/instruments/${instrumentId}/memo`)
+    return data
+  } catch (err: unknown) {
+    if (err && typeof err === 'object' && 'response' in err) {
+      const axiosErr = err as { response?: { status?: number } }
+      if (axiosErr.response?.status === 404) return null
+    }
+    throw err
+  }
+}
+
+/** 创建/更新备忘录（upsert） */
+export async function upsertStockMemo(
+  instrumentId: string,
+  payload: StockMemoUpsertRequest,
+): Promise<StockMemo> {
+  const { data } = await apiClient.put<StockMemo>(`/instruments/${instrumentId}/memo`, payload)
+  return data
+}
+
+/** 删除备忘录 */
+export async function deleteStockMemo(instrumentId: string): Promise<void> {
+  await apiClient.delete(`/instruments/${instrumentId}/memo`)
+}
+
+/** 切换飞书推送开关 */
+export async function toggleMemoNotify(
+  instrumentId: string,
+  payload: StockMemoNotifyToggleRequest,
+): Promise<StockMemo> {
+  const { data } = await apiClient.patch<StockMemo>(
+    `/instruments/${instrumentId}/memo/notify`,
+    payload,
+  )
+  return data
+}
+
+// ============================================================
 // ===== Monitoring Plans 端点 =====
 // ============================================================
 
@@ -1530,6 +1562,36 @@ export async function getBars(instrumentId: string, params?: BarQueryParams): Pr
 }
 
 // ============================================================
+// ===== Quote 端点 =====
+// ============================================================
+
+/** 实时报价响应（pytdx 实时 / 数据库降级） */
+export interface QuoteResponse {
+  instrument_id: string
+  symbol: string
+  name: string
+  current_price: number
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+  prev_close: number
+  change_pct: number
+  update_time: string
+  is_realtime: boolean
+  amount?: number
+}
+
+/** 查询指定标的的实时报价（交易时段 pytdx 实时，非交易时段降级到数据库最新日线） */
+export async function getQuote(instrumentId: string): Promise<QuoteResponse> {
+  const { data } = await apiClient.get<QuoteResponse>(
+    `/api/v1/instruments/${instrumentId}/quote`,
+  )
+  return data
+}
+
+// ============================================================
 // ===== Indicators 端点 =====
 // ============================================================
 
@@ -1596,30 +1658,12 @@ export async function isTradingDay(targetDate: string): Promise<TradingDayRespon
 }
 
 // ============================================================
-// ===== Admin Config 端点 =====
+// ===== Market Status 端点 =====
 // ============================================================
 
-/** 查询配置列表（支持 scope/sensitivity/value_type 筛选与分页） */
-export async function getAdminConfigs(params?: ConfigQueryParams): Promise<ConfigListResponse> {
-  const { data } = await apiClient.get<ConfigListResponse>('/admin/config', { params })
-  return data
-}
-
-/** 查询单个配置（按 config_key，Secret 脱敏） */
-export async function getAdminConfig(configKey: string): Promise<ConfigDefinition> {
-  const { data } = await apiClient.get<ConfigDefinition>(`/admin/config/${configKey}`)
-  return data
-}
-
-/** 更新配置值（Secret 类型传明文，服务端加密存储） */
-export async function updateAdminConfig(
-  configKey: string,
-  currentValue: unknown,
-): Promise<ConfigDefinition> {
-  const { data } = await apiClient.put<ConfigDefinition>(
-    `/admin/config/${configKey}`,
-    { current_value: currentValue } satisfies ConfigDefinitionUpdate,
-  )
+/** 查询当前 A 股市场状态（交易日/交易时段/状态文本） */
+export async function getMarketStatus(): Promise<MarketStatus> {
+  const { data } = await apiClient.get<MarketStatus>('/market/status')
   return data
 }
 

@@ -6,13 +6,13 @@
 - 卡片格式对齐飞书开放平台 interactive card 规范
 
 卡片结构：
-- header: 标题 + 颜色主题（按 message_type 映射）
+- header: 标题 + 颜色主题（优先使用 resource_refs.header_severity，回退到 message_type 映射）
 - elements: 摘要 / 关键事实 / 时间线 / 条目列表 / 操作按钮 / 免责声明
 
 颜色映射：
 - SELECTION_PLAN_SUMMARY → blue
 - MONITORING_PLAN_CONFIRMED → green
-- MONITOR_MEMBER_EVENT → turquoise
+- MONITOR_MEMBER_EVENT → 由 resource_refs.header_severity 决定（danger=red, warn=orange, info=green）
 - SYSTEM_ALERT → red
 - CHANNEL_ALERT → orange
 """
@@ -23,13 +23,20 @@ from typing import Any
 
 from app.schemas.notification import NotificationMessageDTO
 
-# message_type → 飞书卡片头部颜色模板
+# message_type → 飞书卡片头部颜色模板（默认映射，可被 resource_refs.header_severity 覆盖）
 _HEADER_TEMPLATE_MAP: dict[str, str] = {
     "SELECTION_PLAN_SUMMARY": "blue",
     "MONITORING_PLAN_CONFIRMED": "green",
     "MONITOR_MEMBER_EVENT": "turquoise",
     "SYSTEM_ALERT": "red",
     "CHANNEL_ALERT": "orange",
+}
+
+# header_severity → 飞书卡片头部颜色（监控事件专用）
+_SEVERITY_TO_TEMPLATE: dict[str, str] = {
+    "danger": "red",
+    "warn": "orange",
+    "info": "green",
 }
 
 
@@ -115,7 +122,11 @@ def dto_to_feishu_card(dto: NotificationMessageDTO) -> dict[str, Any]:
     Returns:
         飞书卡片 JSON（可直接作为 msg_type=interactive 的 card 字段）
     """
+    # header 颜色：优先使用 resource_refs.header_severity，回退到 message_type 映射
     header_template = _HEADER_TEMPLATE_MAP.get(dto.message_type, "blue")
+    severity = dto.resource_refs.get("header_severity") if dto.resource_refs else None
+    if severity and severity in _SEVERITY_TO_TEMPLATE:
+        header_template = _SEVERITY_TO_TEMPLATE[severity]
 
     elements: list[dict[str, Any]] = []
 
@@ -141,13 +152,20 @@ def dto_to_feishu_card(dto: NotificationMessageDTO) -> dict[str, Any]:
         )
         elements.append({"tag": "markdown", "content": timeline_text})
 
-    # 4. 条目列表（markdown 列表）
+    # 4. 条目列表：含 tag 键的结构化元素直接透传，否则走 _format_item 格式化
     if dto.items:
-        elements.append({"tag": "hr"})
-        items_text = "**命中标的**\n" + "\n".join(
-            _format_item(i) for i in dto.items
-        )
-        elements.append({"tag": "markdown", "content": items_text})
+        has_structured = any("tag" in item for item in dto.items)
+        if has_structured:
+            # 结构化 items：直接作为卡片元素透传（合并卡片场景）
+            for item in dto.items:
+                elements.append(item)
+        else:
+            # 普通条目列表
+            elements.append({"tag": "hr"})
+            items_text = "**命中标的**\n" + "\n".join(
+                _format_item(i) for i in dto.items
+            )
+            elements.append({"tag": "markdown", "content": items_text})
 
     # 5. 操作按钮（action 元素）
     if dto.actions:
@@ -243,6 +261,56 @@ if __name__ == "__main__":
     assert card["header"]["template"] == "green"
     assert card["header"]["title"]["content"] == "监控组合确认｜贵州茅台"
     assert len(card["elements"]) > 0
+
+    # 测试 header_severity 动态颜色
+    dto_danger = NotificationMessageDTO(
+        message_type="MONITOR_MEMBER_EVENT",
+        template_key="monitor_merged_event",
+        template_version="2.0.0",
+        title="BB+节点监控 10:15",
+        summary="自选股 17 只 | 触发 1 只",
+        resource_refs={"header_severity": "danger"},
+        data_time="2026-06-23T10:15:00+08:00",
+    )
+    card_danger = dto_to_feishu_card(dto_danger)
+    assert card_danger["header"]["template"] == "red", f"Expected red, got {card_danger['header']['template']}"
+    print(f"header_severity=danger → template={card_danger['header']['template']} ✓")
+
+    dto_warn = NotificationMessageDTO(
+        message_type="MONITOR_MEMBER_EVENT",
+        template_key="monitor_merged_event",
+        template_version="2.0.0",
+        title="BB+节点监控 10:20",
+        summary="自选股 17 只 | 触发 1 只",
+        resource_refs={"header_severity": "warn"},
+        data_time="2026-06-23T10:20:00+08:00",
+    )
+    card_warn = dto_to_feishu_card(dto_warn)
+    assert card_warn["header"]["template"] == "orange", f"Expected orange, got {card_warn['header']['template']}"
+    print(f"header_severity=warn → template={card_warn['header']['template']} ✓")
+
+    # 测试结构化 items 透传
+    dto_struct = NotificationMessageDTO(
+        message_type="MONITOR_MEMBER_EVENT",
+        template_key="monitor_merged_event",
+        template_version="2.0.0",
+        title="BB+节点监控 10:15",
+        summary="自选股 17 只 | 触发 1 只",
+        items=[
+            {"tag": "markdown", "content": "**平安银行 000001**"},
+            {"tag": "hr"},
+            {"tag": "markdown", "content": "🔴 布林上轨穿越"},
+            {"tag": "note", "elements": [{"tag": "plain_text", "content": "数据时间: 2026-06-23 10:15"}]},
+        ],
+        resource_refs={"header_severity": "info"},
+        data_time="2026-06-23T10:15:00+08:00",
+    )
+    card_struct = dto_to_feishu_card(dto_struct)
+    # 结构化 items 应直接透传，不包含 "命中标的" 标题
+    element_tags = [e.get("tag") for e in card_struct["elements"]]
+    assert "hr" in element_tags, f"Expected hr in structured items, got {element_tags}"
+    assert "note" in element_tags, f"Expected note in structured items, got {element_tags}"
+    print(f"结构化 items 透传: tags={element_tags} ✓")
 
     # 测试脱敏
     masked = mask_webhook_url("https://open.feishu.cn/open-apis/bot/v2/hook/xxxxx")

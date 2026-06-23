@@ -8,6 +8,7 @@
 
 设计说明：
 - 关键词搜索：symbol 或 name 模糊匹配（ILIKE，大小写不敏感）
+- NFKC 归一化：搜索前对 keyword 做全角→半角归一化，确保全角输入也能匹配
 - 分页：page 从 1 开始，page_size 默认 20，最大 100
 - 按 symbol 唯一约束，by-symbol 查询最多返回 1 条
 - 批量查询：避免前端逐个查询或加载全量数据，单次最多 1000 个 ID
@@ -16,6 +17,7 @@
 from __future__ import annotations
 
 import math
+import unicodedata
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -47,6 +49,8 @@ async def list_instruments(
     # 构建查询条件
     conditions = []
     if keyword:
+        # NFKC 归一化：将全角字符转为半角（如 Ａ → A），确保全角输入也能匹配
+        keyword = unicodedata.normalize("NFKC", keyword)
         # ILIKE 大小写不敏感模糊匹配
         pattern = f"%{keyword}%"
         conditions.append(

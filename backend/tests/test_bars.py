@@ -20,8 +20,8 @@ from app.main import app
 from app.repositories.bar_repository import apply_adj_factor_to_bars
 from app.services.adj_factor import apply_adj_factor, apply_adj_factor_intraday
 from app.services.freshness_sla import (
+    _MINUTE_CHECK_SLA_SECONDS,
     DAILY_SLA_SECONDS,
-    MINUTE_SLA_SECONDS,
     check_daily_freshness,
     check_minute_freshness,
 )
@@ -215,7 +215,7 @@ async def test_check_minute_freshness_no_data() -> None:
     assert result.is_fresh is False
     assert result.last_update is None
     assert result.age_seconds is None
-    assert result.sla_seconds == MINUTE_SLA_SECONDS
+    assert result.sla_seconds == _MINUTE_CHECK_SLA_SECONDS
 
 
 @pytest.mark.asyncio
@@ -229,7 +229,7 @@ async def test_check_minute_freshness_recent() -> None:
     assert result.is_fresh is True
     assert result.age_seconds is not None
     assert result.age_seconds >= 60
-    assert result.sla_seconds == MINUTE_SLA_SECONDS
+    assert result.sla_seconds == _MINUTE_CHECK_SLA_SECONDS
 
 
 @pytest.mark.asyncio
@@ -241,7 +241,7 @@ async def test_check_minute_freshness_stale() -> None:
 
     assert result.is_fresh is False
     assert result.age_seconds is not None
-    assert result.age_seconds > MINUTE_SLA_SECONDS
+    assert result.age_seconds > _MINUTE_CHECK_SLA_SECONDS
 
 
 # ============================================================
