@@ -1,5 +1,7 @@
 """MonitoringPlanState ORM 模型 - 监控组合状态仓储（C6）。
 
+[LEGACY] 本模块已从主业务流程中移除，仅保留 ORM 映射以兼容现有数据库表。
+
 对应迁移 008_monitoring_plans 中的 monitoring_plan_states 表：
 - id: UUID 主键
 - user_id + revision_id + instrument_id: 唯一约束（同一用户同一方案版本同一股票只有一条状态）

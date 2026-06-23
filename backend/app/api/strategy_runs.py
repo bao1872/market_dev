@@ -451,6 +451,15 @@ async def query_strategy_results(
     if filters:
         _validate_metric_filters(filters, version)
 
+    # 4.5 校验 sort_by 在 filterable 白名单中
+    if sort_by is not None:
+        filterable_keys = _get_filterable_metric_keys(version)
+        if sort_by not in filterable_keys:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"非法 sort_by: {sort_by}（不在 filterable 白名单中）",
+            )
+
     # 5. 查询结果（SQL 端过滤，绑定 published run）
     metric_filter_list = dict_filters_to_metric_filters(filters)
     sort_spec = SortSpec(field=sort_by, desc=sort_desc) if sort_by else None
@@ -524,6 +533,26 @@ async def list_run_results(
                 detail=f"metric_filters JSON 解析失败: {e}",
             ) from e
 
+    # 校验 universe 参数
+    if universe not in ("all", "watchlist"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"非法 universe: {universe}（合法值: all, watchlist）",
+        )
+
+    # 校验 sort_by 在 filterable 白名单中
+    if sort_by is not None:
+        run = await db.get(StrategyRun, run_id)
+        if run is not None:
+            version = await db.get(StrategyVersion, run.strategy_version_id)
+            if version is not None:
+                filterable_keys = _get_filterable_metric_keys(version)
+                if sort_by not in filterable_keys:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=f"非法 sort_by: {sort_by}（不在 filterable 白名单中）",
+                    )
+
     # 构建 MetricFilter / SortSpec
     metric_filter_list = dict_filters_to_metric_filters(filters)
     sort_spec = SortSpec(field=sort_by, desc=sort_desc) if sort_by else None
@@ -550,12 +579,23 @@ async def list_run_results(
             detail=str(e),
         ) from e
 
-    result_items = [StrategyResultResponse.model_validate(r) for r in result_page.items]
+    # 构建响应（填充 instrument 冗余字段）
+    result_items = []
+    for r in result_page.items:
+        resp = StrategyResultResponse.model_validate(r)
+        if r.instrument is not None:
+            resp.instrument_symbol = r.instrument.symbol
+            resp.instrument_name = r.instrument.name
+            resp.instrument_market = r.instrument.market
+        result_items.append(resp)
+
     return StrategyResultListResponse(
         items=result_items,
         total=result_page.filtered_total,
         source_total=result_page.source_total,
         filtered_total=result_page.filtered_total,
+        run_source_total=result_page.source_total,
+        universe_total=result_page.universe_total,
         page=result_page.page,
         page_size=result_page.page_size,
     )

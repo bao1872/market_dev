@@ -21,8 +21,6 @@ import type {
   WatchlistAddRequest,
   CreateChannelRequest,
   NotificationPreviewRequest,
-  MonitoringPlanCreateRequest,
-  MonitoringPlanUpdateRequest,
   InviteCodeCreateRequest,
   InstrumentQueryParams,
   StrategyEventQueryParams,
@@ -479,127 +477,6 @@ export function useDeleteStockMemo() {
     onSuccess: (_, instrumentId) => {
       queryClient.invalidateQueries({ queryKey: ['stock-memo', instrumentId] })
     },
-  })
-}
-
-// ============================================================
-// ===== Monitoring Plans hooks =====
-// ============================================================
-
-/** 查询当前用户的监控方案列表（1 分钟缓存） */
-export function useMonitoringPlans(status?: string) {
-  return useQuery({
-    queryKey: ['monitoring-plans', status],
-    queryFn: () => api.getMonitoringPlans(status),
-    staleTime: STALE_PLANS,
-  })
-}
-
-/** 查询方案详情（含当前 revision + 成员） */
-export function useMonitoringPlan(planId: string | undefined) {
-  return useQuery({
-    queryKey: ['monitoring-plans', planId],
-    queryFn: () => api.getMonitoringPlan(planId!),
-    enabled: !!planId,
-    staleTime: STALE_PLANS,
-  })
-}
-
-/** 创建监控方案变更 */
-export function useCreateMonitoringPlan() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (payload: MonitoringPlanCreateRequest) => api.createMonitoringPlan(payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['monitoring-plans'] })
-    },
-  })
-}
-
-/** 更新方案变更（失效方案列表 + 当前方案详情） */
-export function useUpdateMonitoringPlan() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: ({ planId, payload }: { planId: string; payload: MonitoringPlanUpdateRequest }) =>
-      api.updateMonitoringPlan(planId, payload),
-    onSuccess: (_data, variables) => {
-      queryClient.invalidateQueries({ queryKey: ['monitoring-plans'] })
-      queryClient.invalidateQueries({ queryKey: ['monitoring-plans', variables.planId] })
-    },
-  })
-}
-
-/** 验证方案变更 */
-export function useValidateMonitoringPlan() {
-  return useMutation({
-    mutationFn: (planId: string) => api.validateMonitoringPlan(planId),
-  })
-}
-
-/** 暂停方案变更 */
-export function usePauseMonitoringPlan() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (planId: string) => api.pauseMonitoringPlan(planId),
-    onSuccess: (_data, planId) => {
-      queryClient.invalidateQueries({ queryKey: ['monitoring-plans'] })
-      queryClient.invalidateQueries({ queryKey: ['monitoring-plans', planId] })
-    },
-  })
-}
-
-/** 恢复方案变更 */
-export function useResumeMonitoringPlan() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (planId: string) => api.resumeMonitoringPlan(planId),
-    onSuccess: (_data, planId) => {
-      queryClient.invalidateQueries({ queryKey: ['monitoring-plans'] })
-      queryClient.invalidateQueries({ queryKey: ['monitoring-plans', planId] })
-    },
-  })
-}
-
-/** 查询方案状态（当前 revision 下的所有股票状态） */
-export function useMonitoringPlanStates(planId: string | undefined, status?: string) {
-  return useQuery({
-    queryKey: ['monitoring-plans', planId, 'states', status],
-    queryFn: () => api.getMonitoringPlanStates(planId!, status),
-    enabled: !!planId,
-    staleTime: STALE_REALTIME,
-  })
-}
-
-/** 查询方案下的组合事件 */
-export function useMonitoringPlanEvents(
-  planId: string | undefined,
-  params?: { event_type?: string; start_time?: string; end_time?: string; limit?: number },
-) {
-  return useQuery({
-    queryKey: ['monitoring-plans', planId, 'events', params],
-    queryFn: () => api.getMonitoringPlanEvents(planId!, params),
-    enabled: !!planId,
-    staleTime: STALE_REALTIME,
-  })
-}
-
-/** 查询个股组合状态 */
-export function useInstrumentCompositeState(instrumentId: string | undefined, planId?: string) {
-  return useQuery({
-    queryKey: ['instruments', instrumentId, 'composite-state', planId],
-    queryFn: () => api.getInstrumentCompositeState(instrumentId!, planId),
-    enabled: !!instrumentId,
-    staleTime: STALE_REALTIME,
-  })
-}
-
-/** 查询组合事件详情（含 evidence） */
-export function useCompositeEventDetail(eventId: string | undefined) {
-  return useQuery({
-    queryKey: ['composite-events', eventId],
-    queryFn: () => api.getCompositeEventDetail(eventId!),
-    enabled: !!eventId,
-    staleTime: STALE_REALTIME,
   })
 }
 

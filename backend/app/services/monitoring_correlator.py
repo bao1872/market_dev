@@ -1,5 +1,7 @@
 """MonitoringCorrelator - 监控组合事件关联状态机（C7）。
 
+[LEGACY] 本模块已从主业务流程中移除，仅保留代码以备参考。
+
 实现三种组合模式的事件关联状态机：
 - INDEPENDENT: 每个成员独立触发，直接生成 CompositeEvent（member_count=1）
 - ANY: 第一个符合事件确认即触发；VETO 在同一原子批次优先处理

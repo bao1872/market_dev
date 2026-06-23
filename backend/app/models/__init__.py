@@ -26,9 +26,11 @@ from app.models.base import Base
 from app.models.calendar import TradingCalendar
 from app.models.composite_event import CompositeEventEvidence, CompositeMonitorEvent
 from app.models.config import ConfigDefinition
+from app.models.event_recipient import StrategyEventRecipient
 from app.models.instrument import Instrument
 from app.models.job import JobRun
 from app.models.membership import InviteCode, InviteRedemption, Membership
+from app.models.monitor_evaluation import MonitorEvaluation
 from app.models.monitor_state import MonitorState
 from app.models.monitoring_plan import (
     MonitoringPlan,
@@ -79,6 +81,7 @@ __all__ = [
     "JobRun",
     "Membership",
     "MessageDelivery",
+    "MonitorEvaluation",
     "MonitorState",
     "MonitoringPlan",
     "MonitoringPlanMember",
@@ -96,6 +99,7 @@ __all__ = [
     "SelectionPlanRevision",
     "SelectionPlanRun",
     "SelectionResultEvidence",
+    "StrategyEventRecipient",
     "StrategyDefinition",
     "StrategyEvent",
     "StrategyResult",

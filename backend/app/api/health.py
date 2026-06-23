@@ -2,15 +2,20 @@
 
 GET /health: 返回应用存活状态
 GET /health/ready: 返回应用就绪状态（策略资产完整性检查）
+GET /version: 返回构建版本信息（git_sha / build_time / app_version / alembic_revision）
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from fastapi import APIRouter, status
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
+
+from app.db import AsyncSessionLocal
 
 logger = logging.getLogger("health")
 
@@ -78,6 +83,30 @@ async def readiness() -> JSONResponse:
     return JSONResponse(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         content={"status": "not_ready", "reason": "strategy_assets_missing"},
+    )
+
+
+@router.get("/version")
+async def version() -> JSONResponse:
+    """版本信息端点，返回构建版本与数据库迁移版本（无需认证）。"""
+    alembic_revision = "unknown"
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(text("SELECT version_num FROM alembic_version"))
+            row = result.scalar_one_or_none()
+            if row:
+                alembic_revision = row
+    except Exception:
+        logger.exception("查询 alembic_version 失败")
+
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={
+            "git_sha": os.environ.get("GIT_SHA", "unknown"),
+            "build_time": os.environ.get("BUILD_TIME", "unknown"),
+            "app_version": "1.1.0",
+            "alembic_revision": alembic_revision,
+        },
     )
 
 

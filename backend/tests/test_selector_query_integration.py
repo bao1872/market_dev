@@ -51,11 +51,13 @@ def test_selector_result_page():
         strategy_key="dsa_selector",
         trade_date=date(2026, 6, 23),
         source_total=100,
+        universe_total=100,
         filtered_total=30,
         page=1,
         page_size=50,
     )
     assert page.source_total == 100
+    assert page.universe_total == 100
     assert page.filtered_total == 30
     assert page.items == []
     print("  SelectorResultPage ✓")

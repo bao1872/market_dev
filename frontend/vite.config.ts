@@ -7,6 +7,10 @@ import { fileURLToPath, URL } from 'node:url'
 // /api 代理：去掉 /api 前缀后转发到后端 8000（后端路由无 /api 前缀，bars 路由自带 /api/v1）
 export default defineConfig({
   plugins: [react()],
+  define: {
+    'import.meta.env.VITE_GIT_SHA': JSON.stringify(process.env.GIT_SHA || 'dev'),
+    'import.meta.env.VITE_BUILD_TIME': JSON.stringify(new Date().toISOString()),
+  },
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),

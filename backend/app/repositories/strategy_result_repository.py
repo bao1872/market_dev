@@ -28,6 +28,7 @@ from typing import Any
 from sqlalchemy import and_, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.strategy_run import (
     StrategyResult,
@@ -257,6 +258,15 @@ async def write_results(
     if not results:
         return 0
 
+    # 0. 不可变检查：已完成/已发布的运行不允许写入新结果
+    run_stmt = select(StrategyRun.status).where(StrategyRun.id == run_id)
+    run_result = await session.execute(run_stmt)
+    run_status = run_result.scalar_one_or_none()
+    if run_status is not None and run_status in ("completed", "partial_failed", "published"):
+        raise ValueError(
+            f"运行已完成或已发布（status={run_status}），禁止写入新结果: run_id={run_id}"
+        )
+
     # 1. 批量写入 strategy_results（ON CONFLICT DO NOTHING，结果不可变）
     result_records: list[dict[str, Any]] = []
     for r in results:
@@ -378,36 +388,6 @@ def _classify_metric_value(
     return None, str(value), None
 
 
-async def count_by_run(
-    session: AsyncSession,
-    run_id: uuid.UUID,
-) -> int:
-    """统计指定 run_id 下的 StrategyResult 总行数（无筛选条件）。
-
-    用于 selector_query_service 计算 source_total（过滤前总数）。
-
-    Args:
-        session: 异步会话
-        run_id: 运行 ID
-
-    Returns:
-        该 run 下的结果总数
-
-    Raises:
-        Exception: 查询失败时 re-raise
-    """
-    try:
-        stmt = select(text("count(*)")).select_from(StrategyResult).where(
-            StrategyResult.run_id == run_id
-        )
-        result = await session.execute(stmt)
-        return int(result.scalar() or 0)
-    except Exception as exc:
-        raise RuntimeError(
-            f"统计策略结果总数失败 run_id={run_id}: {exc}"
-        ) from exc
-
-
 async def query_results(
     session: AsyncSession,
     *,
@@ -417,6 +397,7 @@ async def query_results(
     filters: list[MetricFilter] | None = None,
     sort: SortSpec | None = None,
     matched_only: bool = False,
+    watchlist_instrument_ids: set[uuid.UUID] | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> QueryResultPage:
@@ -434,6 +415,7 @@ async def query_results(
         filters: 指标筛选条件列表（MetricFilter 对象）
         sort: 排序规格（SortSpec 对象，None 表示不排序）
         matched_only: 只返回 matched=True 的结果
+        watchlist_instrument_ids: 自选股 instrument_id 集合（SQL 级过滤，替代 Python 后过滤）
         limit: 返回上限
         offset: 偏移量（分页）
 
@@ -463,6 +445,12 @@ async def query_results(
         if matched_only:
             base = base.where(
                 text("payload->>'matched' = 'true'")
+            )
+
+        # 自选股 SQL 级过滤
+        if watchlist_instrument_ids is not None:
+            base = base.where(
+                StrategyResult.instrument_id.in_(watchlist_instrument_ids)
             )
 
         # 指标筛选（通过 EXISTS 子查询，支持 6 种操作符）
@@ -522,6 +510,10 @@ async def query_results(
             count_base = count_base.where(StrategyResult.trade_date == trade_date)
         if matched_only:
             count_base = count_base.where(text("payload->>'matched' = 'true'"))
+        if watchlist_instrument_ids is not None:
+            count_base = count_base.where(
+                StrategyResult.instrument_id.in_(watchlist_instrument_ids)
+            )
         if filters:
             for f in filters:
                 metric_key = f.metric_key
@@ -553,7 +545,8 @@ async def query_results(
         )
         total = int(count_result.scalar() or 0)
 
-        # 分页查询
+        # 分页查询（eager load instrument 以获取 symbol/name/market）
+        base = base.options(selectinload(StrategyResult.instrument))
         base = base.limit(limit).offset(offset)
         result = await session.execute(base)
         items = list(result.scalars().all())
@@ -571,6 +564,31 @@ async def count_by_run(session: AsyncSession, run_id: uuid.UUID) -> int:
     """返回指定 run 的总结果数（无过滤）。"""
     stmt = select(func.count()).select_from(StrategyResult).where(
         StrategyResult.run_id == run_id
+    )
+    result = await session.execute(stmt)
+    return result.scalar() or 0
+
+
+async def count_by_run_with_watchlist(
+    session: AsyncSession,
+    run_id: uuid.UUID,
+    watchlist_instrument_ids: set[uuid.UUID],
+) -> int:
+    """返回指定 run 在自选股范围内的结果数（无指标过滤，仅 watchlist 过滤）。
+
+    用于 selector_query_service 计算 universe_total（universe=watchlist 时）。
+
+    Args:
+        session: 异步会话
+        run_id: 运行 ID
+        watchlist_instrument_ids: 自选股 instrument_id 集合
+
+    Returns:
+        watchlist 范围内的结果总数
+    """
+    stmt = select(func.count()).select_from(StrategyResult).where(
+        StrategyResult.run_id == run_id,
+        StrategyResult.instrument_id.in_(watchlist_instrument_ids),
     )
     result = await session.execute(stmt)
     return result.scalar() or 0
@@ -746,6 +764,7 @@ if __name__ == "__main__":
     assert "run_id" in sig.parameters
     assert "filters" in sig.parameters
     assert "sort" in sig.parameters
+    assert "watchlist_instrument_ids" in sig.parameters
     # from __future__ import annotations 使注解变为字符串，需用 evaluate
     from typing import get_type_hints
     hints = get_type_hints(query_results)

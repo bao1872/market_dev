@@ -6,15 +6,21 @@ DSA 作为第一个支持的 strategy_key，后续可扩展其他策略。
 核心方法：
 - create_batch_run: 创建批量计算运行（status=queued），数据就绪检查 + 预创建 run_items
 - execute_run: 执行批量计算（Worker 调用），逐标的执行策略并写入结果
-- publish_run: 发布运行结果（admin 调用），completed/partial_failed → published
+- publish_run: 发布运行结果（admin 调用或定时任务自动发布），completed/partial_failed → published
 - check_data_readiness: 数据就绪检查（交易日/活跃标的/K线覆盖率/停牌/退市）
+- _check_quality_gates: 质量门禁检查（定时任务自动发布前置条件）
 
 设计说明：
 - POST API 只创建 queued 运行，Worker 异步执行（不在 HTTP 请求内计算全市场）
 - run 状态机：queued → running → completed/partial_failed → published/failed
+- 定时任务自动发布：scheduled 运行完成后，通过质量门禁自动发布
+  - 门禁 1：状态必须为 completed（非 partial_failed/failed）
+  - 门禁 2：数据覆盖率 succeeded_count / total_instruments >= 80%
+  - 门禁 3：无致命错误（failed_count == 0）
 - per-stock 跟踪：strategy_run_items 记录 status/attempt_count/error/result_id
 - effective_config 从 manifest 读取并保存到 strategy_runs.effective_config（不可变）
 - 幂等：idempotency_key = strategy_key:trade_date（不区分 run_type，同一天同策略只保留一个 run）
+- 结果不可变：运行 completed/published 后，write_results 拒绝写入
 
 禁异常吞没：所有异常补充上下文后 re-raise。
 """
@@ -26,6 +32,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Any
 
 from sqlalchemy import and_, func, select
@@ -48,6 +55,9 @@ logger = logging.getLogger("strategy_batch_service")
 
 # 数据就绪检查覆盖率阈值（当日 K 线数 / 活跃标的数）
 DATA_COVERAGE_THRESHOLD = 0.9
+
+# 自动发布质量门禁：成功率阈值（succeeded_count / total_instruments）
+AUTO_PUBLISH_COVERAGE_THRESHOLD = 0.8
 
 # 策略批量计算日线回看天数（与 bars.py _DEFAULT_DAILY_LOOKBACK_DAYS 一致）
 _STRATEGY_BATCH_DAILY_LOOKBACK_DAYS = 5000
@@ -407,6 +417,27 @@ class StrategyBatchService:
             len(run_items), succeeded, failed, skipped,
         )
 
+        # 定时任务自动发布：检查质量门禁
+        if run.run_type == "scheduled":
+            if await self._check_quality_gates(run):
+                try:
+                    await self.publish_run(db, run_id)
+                    logger.info(
+                        "定时任务自动发布成功: run_id=%s, trade_date=%s",
+                        run_id, run.trade_date,
+                    )
+                except Exception as exc:
+                    # 自动发布失败不影响运行结果，仅记录警告
+                    logger.warning(
+                        "定时任务自动发布失败（需手动发布）: run_id=%s, %s",
+                        run_id, exc,
+                    )
+            else:
+                logger.info(
+                    "定时任务质量门禁未通过，跳过自动发布: run_id=%s, status=%s",
+                    run_id, run.status,
+                )
+
     async def publish_run(self, db: AsyncSession, run_id: uuid.UUID) -> StrategyRun:
         """发布运行结果（admin 调用）。
 
@@ -437,7 +468,7 @@ class StrategyBatchService:
             )
 
         run.status = "published"
-        run.published_at = datetime.now(UTC)
+        run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
         try:
             await db.flush()
         except Exception as exc:
@@ -597,6 +628,60 @@ class StrategyBatchService:
             new_listing_count=new_listing_count,
             import_completeness=import_completeness,
         )
+
+    async def _check_quality_gates(self, run: StrategyRun) -> bool:
+        """检查运行是否通过质量门禁（用于定时任务自动发布）。
+
+        质量门禁条件：
+        1. 运行状态为 completed（非 partial_failed/failed）
+        2. 数据覆盖率：succeeded_count / total_instruments >= 0.8
+        3. 无致命错误（failed_count == 0）
+
+        Args:
+            run: 运行记录
+
+        Returns:
+            True 表示通过质量门禁，可自动发布
+        """
+        # 门禁 1：状态必须为 completed
+        if run.status != "completed":
+            logger.info(
+                "质量门禁未通过: 状态非 completed（当前 %s）, run_id=%s",
+                run.status, run.id,
+            )
+            return False
+
+        # 门禁 2：数据覆盖率 >= 80%
+        total = run.total_instruments or 0
+        succeeded = run.succeeded_count or 0
+        if total == 0:
+            logger.info("质量门禁未通过: 总标的数为 0, run_id=%s", run.id)
+            return False
+
+        coverage = succeeded / total
+        if coverage < AUTO_PUBLISH_COVERAGE_THRESHOLD:
+            logger.info(
+                "质量门禁未通过: 覆盖率 %.1f%% < %.0f%%, "
+                "succeeded=%d, total=%d, run_id=%s",
+                coverage * 100, AUTO_PUBLISH_COVERAGE_THRESHOLD * 100,
+                succeeded, total, run.id,
+            )
+            return False
+
+        # 门禁 3：无致命错误
+        failed = run.failed_count or 0
+        if failed > 0:
+            logger.info(
+                "质量门禁未通过: 存在 %d 个失败标的, run_id=%s",
+                failed, run.id,
+            )
+            return False
+
+        logger.info(
+            "质量门禁通过: coverage=%.1f%%, succeeded=%d, total=%d, run_id=%s",
+            coverage * 100, succeeded, total, run.id,
+        )
+        return True
 
     async def _get_previous_trade_date(
         self, db: AsyncSession, trade_date: date
@@ -776,11 +861,18 @@ if __name__ == "__main__":
     print(f"StrategyBatchService: {StrategyBatchService} ✓")
 
     # 验证方法签名
-    methods = ["create_batch_run", "execute_run", "publish_run", "check_data_readiness"]
+    methods = [
+        "create_batch_run", "execute_run", "publish_run",
+        "check_data_readiness", "_check_quality_gates",
+    ]
     for m in methods:
         assert hasattr(StrategyBatchService, m), f"缺少方法: {m}"
         assert callable(getattr(StrategyBatchService, m)), f"方法不可调用: {m}"
     print(f"方法存在: {methods} ✓")
+
+    # 验证 AUTO_PUBLISH_COVERAGE_THRESHOLD 常量
+    assert AUTO_PUBLISH_COVERAGE_THRESHOLD == 0.8
+    print(f"AUTO_PUBLISH_COVERAGE_THRESHOLD={AUTO_PUBLISH_COVERAGE_THRESHOLD} ✓")
 
     # 验证 DataReadinessResult
     result = DataReadinessResult(
@@ -794,6 +886,12 @@ if __name__ == "__main__":
     assert result.is_ready is True
     assert result.coverage_rate == 0.96
     print(f"DataReadinessResult: {result} ✓")
+
+    # 验证 _check_quality_gates 签名
+    sig = inspect.signature(StrategyBatchService._check_quality_gates)
+    params = list(sig.parameters.keys())
+    assert "run" in params
+    print(f"_check_quality_gates params: {params} ✓")
 
     # 验证 create_batch_run 签名
     sig = inspect.signature(StrategyBatchService.create_batch_run)

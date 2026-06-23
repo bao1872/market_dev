@@ -1,5 +1,7 @@
 """MonitoringPlanState 仓储 - 监控组合状态仓储（C6）。
 
+[LEGACY] 本模块已从主业务流程中移除，仅保留代码以备参考。
+
 提供：
 - get_or_create_state: 获取或创建状态（按 user_id+revision_id+instrument_id 唯一）
 - get_state: 查询单条状态

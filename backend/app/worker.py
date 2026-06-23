@@ -507,6 +507,11 @@ async def _notify_monitor_status(
     """向所有配置了飞书渠道的用户发送监控状态通知。
 
     通知失败不影响主流程（仅记录警告）。
+
+    TODO: [monitor_scheduler] 当前直接调用 adapter.send() 绕过 Outbox 管道。
+    应改为 create_message → write_outbox(notification.message.created) → Delivery Worker 投递，
+    与业务通知保持一致的投递语义（重试、幂等、静默时段）。风险：监控服务自身异常时
+    Outbox/Delivery Worker 可能也不可用，需评估是否保留直接发送作为降级路径。
     """
     try:
         from sqlalchemy import select

@@ -1,5 +1,7 @@
 """MonitoringPlan API 路由 - 监控组合方案管理（C5/C6/C8）。
 
+[LEGACY] 本模块已从主业务流程中移除，路由已从 main.py 注销。
+
 端点：
 - POST /monitoring-plans: 创建方案（user_id 由上下文注入）
 - GET /monitoring-plans: 当前用户方案列表

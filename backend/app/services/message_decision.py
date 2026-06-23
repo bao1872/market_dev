@@ -1,5 +1,7 @@
 """C9 消息决策服务 - 消费监控组合事件，转换为统一 NotificationMessage。
 
+[LEGACY] 本模块已从主业务流程中移除，仅保留代码以备参考。
+
 设计：
 - decide_monitoring_message: 消费 CompositeMonitorEvent → MONITORING_PLAN_CONFIRMED / MONITOR_MEMBER_EVENT DTO
 - decide_and_create: 决策 + 创建 NotificationMessage（幂等，含 Outbox 事件写入）

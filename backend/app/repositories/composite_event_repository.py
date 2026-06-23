@@ -1,5 +1,7 @@
 """CompositeMonitorEvent 仓储 - 组合监控事件与证据的幂等写入与查询（C8）。
 
+[LEGACY] 本模块已从主业务流程中移除，仅保留代码以备参考。
+
 提供：
 - write_composite_event: 幂等写入组合事件（ON CONFLICT composite_event_key DO NOTHING）+ Evidence
 - write_evidence: 写入证据（ON CONFLICT 复合主键 DO NOTHING）

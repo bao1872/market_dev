@@ -245,6 +245,7 @@ class StrategyLoader:
         "dsa_selector": "app.strategy.selectors.dsa_selector:DSASelector",
         "volume_node_monitor": "app.strategy.monitors.volume_node_monitor:VolumeNodeMonitor",
         "bb_monitor": "app.strategy.monitors.bollinger_monitor:BollingerMonitor",
+        "watchlist_monitor": "app.strategy.monitors.watchlist_monitor:WatchlistMonitor",
     }
 
     @classmethod

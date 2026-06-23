@@ -17,6 +17,7 @@ import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { useToast } from '@/store/toast'
 import { useMembers, useStrategies, useStrategyRuns } from '@/hooks/useApi'
+import { getVersion, type VersionInfo } from '@/api/endpoints'
 
 // ===== 监控吞吐折线图（Canvas 2D 简单实现）=====
 // 对应原型 chart-canvas data-chart="line" data-variant="green"
@@ -228,6 +229,12 @@ export default function AdminIndexPage() {
   const toast = useToast()
   const [maintenanceMode, setMaintenanceMode] = useState(false)
   const [pausePush, setPausePush] = useState(false)
+  const [backendVersion, setBackendVersion] = useState<VersionInfo | null>(null)
+
+  // 获取后端版本信息
+  useEffect(() => {
+    getVersion().then(setBackendVersion).catch(() => {})
+  }, [])
 
   // API 数据查询
   const membersQuery = useMembers({ limit: 1 })
@@ -491,6 +498,55 @@ export default function AdminIndexPage() {
             ))}
           </div>
         </section>
+      </div>
+
+      {/* 版本信息 */}
+      <div className="grid split-2 section-gap">
+        <section className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">版本信息</div>
+              <div className="card-sub">前端构建版本与后端运行版本</div>
+            </div>
+          </div>
+          <div className="card-body">
+            <div className="toggle-row">
+              <span>前端 Git SHA</span>
+              <b className="num" style={{ fontSize: '0.85em' }}>
+                {import.meta.env.VITE_GIT_SHA ?? 'dev'}
+              </b>
+            </div>
+            <div className="toggle-row">
+              <span>前端构建时间</span>
+              <b className="num" style={{ fontSize: '0.85em' }}>
+                {import.meta.env.VITE_BUILD_TIME ?? '-'}
+              </b>
+            </div>
+            <div className="toggle-row">
+              <span>后端 App 版本</span>
+              <b className="num">{backendVersion?.app_version ?? '-'}</b>
+            </div>
+            <div className="toggle-row">
+              <span>后端 Git SHA</span>
+              <b className="num" style={{ fontSize: '0.85em' }}>
+                {backendVersion?.git_sha ?? '-'}
+              </b>
+            </div>
+            <div className="toggle-row">
+              <span>后端构建时间</span>
+              <b className="num" style={{ fontSize: '0.85em' }}>
+                {backendVersion?.build_time ?? '-'}
+              </b>
+            </div>
+            <div className="toggle-row">
+              <span>Alembic 迁移版本</span>
+              <b className="num" style={{ fontSize: '0.85em' }}>
+                {backendVersion?.alembic_revision ?? '-'}
+              </b>
+            </div>
+          </div>
+        </section>
+        <section className="card" />
       </div>
     </>
   )

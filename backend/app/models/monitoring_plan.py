@@ -1,5 +1,7 @@
 """MonitoringPlan / MonitoringPlanRevision / MonitoringPlanMember ORM 模型 - 监控组合方案（C5）。
 
+[LEGACY] 本模块已从主业务流程中移除，仅保留 ORM 映射以兼容现有数据库表。
+
 对应迁移 008_monitoring_plans 中的三张表：
 - monitoring_plans: 监控方案主表（user_id 由认证上下文注入）
 - monitoring_plan_revisions: 方案版本（mode/窗口/冷却配置，每次修改创建新 revision）

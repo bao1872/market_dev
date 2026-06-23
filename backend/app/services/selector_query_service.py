@@ -1,7 +1,7 @@
 """选股查询统一服务。
 
 普通用户查询选股结果的唯一入口。校验 published run，执行服务端筛选/排序/分页，
-返回 source_total 和 filtered_total。
+返回 source_total、universe_total 和 filtered_total 三级计数。
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from app.repositories.strategy_result_repository import (
     QueryResultPage,
     SortSpec,
     count_by_run,
+    count_by_run_with_watchlist,
     query_results,
 )
 
@@ -52,7 +53,8 @@ class SelectorResultPage:
     run_id: uuid.UUID
     strategy_key: str
     trade_date: date | None
-    source_total: int  # 过滤前总数
+    source_total: int  # 过滤前总数（全市场）
+    universe_total: int  # 股票池内总数（watchlist 时为自选股范围，all 时等于 source_total）
     filtered_total: int  # 过滤后总数
     page: int
     page_size: int
@@ -109,11 +111,12 @@ async def query_published_selector_results(
             f"策略 {definition.strategy_key} 类型为 {definition.kind}，不是 selector"
         )
 
-    # 3. 获取 source_total（过滤前总数）
+    # 3. 获取 source_total（过滤前总数，全市场）
     source_total = await count_by_run(db, run_id)
 
     # 4. 构建 universe 过滤（watchlist 时只返回用户自选股）
     watchlist_instrument_ids: set[uuid.UUID] | None = None
+    universe_total = source_total  # 默认 universe=all，等于 source_total
     if universe == "watchlist" and user_id is not None:
         stmt = select(UserWatchlistItem.instrument_id).where(
             UserWatchlistItem.user_id == user_id,
@@ -121,32 +124,33 @@ async def query_published_selector_results(
         )
         result = await db.execute(stmt)
         watchlist_instrument_ids = {row[0] for row in result.all()}
+        # universe_total: 自选股范围内的结果数（无指标过滤）
+        universe_total = await count_by_run_with_watchlist(
+            db, run_id, watchlist_instrument_ids
+        )
 
-    # 5. 执行服务端筛选/排序/分页
+    # 5. 执行服务端筛选/排序/分页（SQL 级 watchlist 过滤）
     offset = (page - 1) * page_size
     result_page = await query_results(
         db,
         run_id=run_id,
         filters=filters,
         sort=sort,
+        watchlist_instrument_ids=watchlist_instrument_ids,
         limit=page_size,
         offset=offset,
     )
-
-    # 6. 如果 universe=watchlist，在结果中过滤
-    items = result_page.items
-    if watchlist_instrument_ids is not None:
-        items = [item for item in items if item.instrument_id in watchlist_instrument_ids]
 
     return SelectorResultPage(
         run_id=run_id,
         strategy_key=definition.strategy_key,
         trade_date=run.trade_date,
         source_total=source_total,
+        universe_total=universe_total,
         filtered_total=result_page.total,
         page=page,
         page_size=page_size,
-        items=items,
+        items=result_page.items,
     )
 
 
@@ -166,11 +170,13 @@ if __name__ == "__main__":
         strategy_key="dsa_selector",
         trade_date=date(2026, 6, 18),
         source_total=100,
+        universe_total=100,
         filtered_total=30,
         page=1,
         page_size=50,
     )
     assert test_page.source_total == 100
+    assert test_page.universe_total == 100
     assert test_page.filtered_total == 30
     assert test_page.items == []
     assert test_page.page == 1

@@ -1,57 +1,28 @@
 // 我的自选页（受保护路由）
 // 对应原型：watchlist.html (V1.6.3)
-// 用法：展示用户自选股票池，支持监控方案切换、组合状态查看、单策略明细展开、搜索添加自选
+// 用法：展示用户自选股票池，支持单策略明细展开、搜索添加自选
 // 路由：/watchlist
-// 依赖 hooks：useWatchlist / useMonitoringPlans / useMonitoringPlanStates / useMonitoringPlanEvents /
-//             useStrategyMonitorStates / useInstruments / useAddToWatchlist / useRemoveFromWatchlist
+// 依赖 hooks：useWatchlist / useStrategyMonitorStates / useInstruments / useAddToWatchlist
 import { useState, useMemo, useCallback } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import clsx from 'clsx'
 import { useQueries } from '@tanstack/react-query'
 import { useToast } from '@/store/toast'
 import {
   useWatchlist,
-  useMonitoringPlans,
-  useMonitoringPlanStates,
-  useMonitoringPlanEvents,
   useStrategyMonitorStates,
   useInstruments,
   useAddToWatchlist,
-  useRemoveFromWatchlist,
 } from '@/hooks/useApi'
 import * as api from '@/api/endpoints'
 import type {
   Instrument,
   MonitorState,
-  MonitoringPlanState,
-  CompositeMonitorEvent,
-  MonitoringPlan,
 } from '@/api/endpoints'
 import { StrategyDataTable } from '@/components/StrategyDataTable'
 import type { DataTableColumn } from '@/components/StrategyDataTable'
 
 // ===== 类型定义 =====
-
-// 组合状态行（从 MonitoringPlanState + 各策略 MonitorState + 最新组合事件派生）
-interface CombinedRow {
-  instrumentId: string
-  symbol: string
-  name: string
-  price: string
-  nodeStatus: string
-  nodeTag: string
-  atrStatus: string
-  atrTag: string
-  volumeStatus: string
-  volumeTag: string
-  confirmedCount: number
-  totalMembers: number
-  comboStatus: string
-  comboTag: 'ok' | 'wait' | 'off'
-  windowRange: string
-  lastEvent: string
-  [key: string]: unknown
-}
 
 // Node 监控行（从 MonitorState.payload 派生）
 interface NodeRow {
@@ -135,49 +106,6 @@ function fmtStr(v: unknown): string {
   return String(v)
 }
 
-/** 格式化 ISO 时间为 HH:MM 形式，未知返回 '-' */
-function fmtTimeShort(isoString: string | null | undefined): string {
-  if (!isoString) return '-'
-  try {
-    return new Date(isoString).toLocaleTimeString('zh-CN', {
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    })
-  } catch {
-    return '-'
-  }
-}
-
-/** 根据事件文本推断 tag 类别：等待类 -> warn，确认/碰触/放量类 -> good，空 -> 空串 */
-function inferTag(text: string): string {
-  if (!text || text === '-') return ''
-  if (text.includes('等待') || text.includes('pending')) return 'warn'
-  if (
-    text.includes('确认') ||
-    text.includes('碰触') ||
-    text.includes('放量') ||
-    text.includes('触发') ||
-    text.includes('向上') ||
-    text.includes('流入')
-  ) {
-    return 'good'
-  }
-  return ''
-}
-
-/** 计算组合窗口范围：已用时间 / 总窗口（分钟），无窗口返回 '-' */
-function computeWindowRange(state: MonitoringPlanState | undefined): string {
-  if (!state?.window_started_at || !state?.window_deadline_at) return '-'
-  const start = new Date(state.window_started_at).getTime()
-  const end = new Date(state.window_deadline_at).getTime()
-  if (Number.isNaN(start) || Number.isNaN(end) || end <= start) return '-'
-  const totalMin = Math.round((end - start) / 60000)
-  const now = Date.now()
-  const elapsedMin = Math.max(0, Math.round((now - start) / 60000))
-  return `${elapsedMin}m / ${totalMin}m`
-}
-
 // ===== 添加自选弹窗（仅在打开时挂载，避免未打开时触发 useInstruments 查询）=====
 function AddStockModal({
   watchlistIds,
@@ -205,7 +133,7 @@ function AddStockModal({
           instrument_id: instrumentId,
           source: 'manual',
         })
-        toast.show('已加入并开始组合监控', `${name} 已加入自选`)
+        toast.show('已加入自选', `${name} 已加入自选`)
         onClose()
       } catch {
         toast.show('加入失败', '请稍后重试')
@@ -234,7 +162,7 @@ function AddStockModal({
             />
           </div>
           <div className="notice modal-stack">
-            加入后自动进入当前启用的监控组合方案。
+            加入后可查看各策略监控状态。
           </div>
           <div className="list modal-stack">
             {instrumentsQuery.isLoading && <div className="notice">加载中…</div>}
@@ -327,7 +255,6 @@ function GroupModal({ onClose }: { onClose: () => void }) {
 // ===== 主组件 =====
 export default function WatchlistPage() {
   const navigate = useNavigate()
-  const toast = useToast.getState()
 
   // --- 自选列表 ---
   const watchlistQuery = useWatchlist()
@@ -336,38 +263,6 @@ export default function WatchlistPage() {
     () => new Set(watchlistItems.map((w) => w.instrument_id)),
     [watchlistItems],
   )
-
-  // --- 监控方案列表 ---
-  const plansQuery = useMonitoringPlans()
-  const plans: MonitoringPlan[] = plansQuery.data?.items ?? []
-
-  // --- 当前选中方案（默认取第一个 active 方案，否则取第一个） ---
-  const [selectedPlanId, setSelectedPlanId] = useState<string>('')
-  const activePlanId = useMemo(() => {
-    if (selectedPlanId) return selectedPlanId
-    const activePlan = plans.find((p) => p.status === 'active') ?? plans[0]
-    return activePlan?.id ?? ''
-  }, [selectedPlanId, plans])
-  const activePlan = plans.find((p) => p.id === activePlanId)
-  const activeRevision = activePlan?.current_revision_detail
-  const activeMembers = activeRevision?.members ?? []
-  const totalMembers = activeMembers.length
-
-  // --- 组合状态（当前方案下所有股票的组合状态） ---
-  const planStatesQuery = useMonitoringPlanStates(activePlanId || undefined)
-  const planStates: MonitoringPlanState[] = planStatesQuery.data?.items ?? []
-
-  // --- 组合事件（今日） ---
-  const todayStart = useMemo(() => {
-    const d = new Date()
-    d.setHours(0, 0, 0, 0)
-    return d.toISOString()
-  }, [])
-  const planEventsQuery = useMonitoringPlanEvents(activePlanId || undefined, {
-    start_time: todayStart,
-    limit: 200,
-  })
-  const planEvents: CompositeMonitorEvent[] = planEventsQuery.data?.items ?? []
 
   // --- 单策略监控状态（node/atr/volume，全量后按自选过滤） ---
   const nodeStatesQuery = useStrategyMonitorStates('node')
@@ -397,25 +292,11 @@ export default function WatchlistPage() {
   }, [instrumentQueries, watchlistIdList])
 
   // --- UI 状态 ---
-  const [activeTab, setActiveTab] = useState<string>('watchCombined')
+  const [activeTab, setActiveTab] = useState<string>('watchNode')
   const [searchModalOpen, setSearchModalOpen] = useState(false)
   const [groupModalOpen, setGroupModalOpen] = useState(false)
 
-  // --- 移除自选变更 ---
-  const removeMutation = useRemoveFromWatchlist()
-
   // ===== 派生数据 =====
-
-  // 按 instrument_id 索引的 Map，便于组合状态行快速查找
-  const planStateMap = useMemo(() => {
-    const m = new Map<string, MonitoringPlanState>()
-    for (const s of planStates) {
-      if (watchlistIds.has(s.instrument_id)) {
-        m.set(s.instrument_id, s)
-      }
-    }
-    return m
-  }, [planStates, watchlistIds])
 
   const nodeStateMap = useMemo(() => {
     const m = new Map<string, MonitorState>()
@@ -447,19 +328,6 @@ export default function WatchlistPage() {
     return m
   }, [volumeStates, watchlistIds])
 
-  // 每只股票的最新组合事件（按 event_time 降序取首条）
-  const latestEventMap = useMemo(() => {
-    const m = new Map<string, CompositeMonitorEvent>()
-    for (const e of planEvents) {
-      if (!watchlistIds.has(e.instrument_id)) continue
-      const prev = m.get(e.instrument_id)
-      if (!prev || new Date(e.event_time) > new Date(prev.event_time)) {
-        m.set(e.instrument_id, e)
-      }
-    }
-    return m
-  }, [planEvents, watchlistIds])
-
   // ===== 行转换函数 =====
 
   /** 提取股票展示信息 */
@@ -473,104 +341,6 @@ export default function WatchlistPage() {
       }
     },
     [instrumentMap],
-  )
-
-  /** 提取某策略状态的事件描述（用于组合状态表的 Node/ATR/Volume 列） */
-  const getStrategyStatus = useCallback(
-    (state: MonitorState | undefined): { text: string; tag: string } => {
-      if (!state) return { text: '-', tag: '' }
-      const lastEvent = fmtStr(
-        pickPayload(state.payload, [
-          'last_event',
-          'event_description',
-          'latest_event',
-        ]),
-      )
-      const barTime = fmtTimeShort(state.bar_time)
-      const text = lastEvent !== '-' ? `${barTime} ${lastEvent}` : '-'
-      return { text, tag: inferTag(text) }
-    },
-    [],
-  )
-
-  /** 将自选股 + 组合状态 + 各策略状态 + 最新事件 组合为 CombinedRow */
-  const toCombinedRow = useCallback(
-    (instrumentId: string): CombinedRow => {
-      const { symbol, name } = getStockDisplay(instrumentId)
-      const planState = planStateMap.get(instrumentId)
-      const nodeState = nodeStateMap.get(instrumentId)
-      const atrState = atrStateMap.get(instrumentId)
-      const volumeState = volumeStateMap.get(instrumentId)
-      const latestEvent = latestEventMap.get(instrumentId)
-
-      // 当前价格：优先取 Node，其次 ATR，再次 Volume
-      const price = fmtNum(
-        pickPayload(nodeState?.payload ?? atrState?.payload ?? volumeState?.payload ?? {}, [
-          'price',
-          'last_price',
-          'close',
-        ]),
-      )
-
-      const nodeStatus = getStrategyStatus(nodeState)
-      const atrStatus = getStrategyStatus(atrState)
-      const volumeStatus = getStrategyStatus(volumeState)
-
-      // 组合进度
-      const confirmedCount = planState?.confirmed_member_ids?.length ?? 0
-      const total = totalMembers || 3
-      let comboStatus = `${confirmedCount}/${total} 进行中`
-      let comboTag: 'ok' | 'wait' | 'off' = 'wait'
-      if (planState) {
-        if (planState.status === 'confirmed' || confirmedCount >= total) {
-          comboStatus = `${total}/${total} 已确认`
-          comboTag = 'ok'
-        } else if (planState.status === 'cooldown') {
-          comboStatus = `${confirmedCount}/${total} 冷却中`
-          comboTag = 'off'
-        } else {
-          comboStatus = `${confirmedCount}/${total} 进行中`
-          comboTag = 'wait'
-        }
-      }
-
-      // 组合窗口
-      const windowRange = computeWindowRange(planState)
-
-      // 最后组合事件
-      const lastEventText = latestEvent
-        ? `${fmtTimeShort(latestEvent.event_time)} · ${latestEvent.event_type}`
-        : '-'
-
-      return {
-        instrumentId,
-        symbol,
-        name,
-        price,
-        nodeStatus: nodeStatus.text,
-        nodeTag: nodeStatus.tag,
-        atrStatus: atrStatus.text,
-        atrTag: atrStatus.tag,
-        volumeStatus: volumeStatus.text,
-        volumeTag: volumeStatus.tag,
-        confirmedCount,
-        totalMembers: total,
-        comboStatus,
-        comboTag,
-        windowRange,
-        lastEvent: lastEventText,
-      }
-    },
-    [
-      getStockDisplay,
-      planStateMap,
-      nodeStateMap,
-      atrStateMap,
-      volumeStateMap,
-      latestEventMap,
-      totalMembers,
-      getStrategyStatus,
-    ],
   )
 
   /** 将 MonitorState 转换为 NodeRow */
@@ -669,12 +439,6 @@ export default function WatchlistPage() {
 
   // ===== 表格行数据 =====
 
-  // 组合状态行：所有自选股
-  const combinedRows: CombinedRow[] = useMemo(
-    () => watchlistIdList.map(toCombinedRow),
-    [watchlistIdList, toCombinedRow],
-  )
-
   // Node 行：自选股中有 Node 状态的
   const nodeRows: NodeRow[] = useMemo(
     () =>
@@ -716,30 +480,11 @@ export default function WatchlistPage() {
     [navigate, getStockDisplay],
   )
 
-  /** 切换方案 */
-  const handlePlanChange = (id: string) => {
-    setSelectedPlanId(id)
-    setActiveTab('watchCombined')
-  }
-
-  /** 移除自选 */
-  const handleRemove = useCallback(
-    async (instrumentId: string, name: string) => {
-      try {
-        await removeMutation.mutateAsync(instrumentId)
-        toast.show('已移出自选', `${name} 已从自选列表移除`)
-      } catch {
-        toast.show('移除失败', '请稍后重试')
-      }
-    },
-    [removeMutation, toast],
-  )
-
   // ===== 列定义 =====
 
   // 股票列渲染（复用）
   const renderStock = useCallback(
-    (row: CombinedRow | NodeRow | AtrRow | VolumeRow) => {
+    (row: NodeRow | AtrRow | VolumeRow) => {
       return (
         <div>
           <div className="symbol">{row.name}</div>
@@ -748,123 +493,6 @@ export default function WatchlistPage() {
       )
     },
     [],
-  )
-
-  // 组合状态列
-  const combinedColumns: DataTableColumn<CombinedRow>[] = useMemo(
-    () => [
-      {
-        key: 'stock',
-        title: '股票',
-        dataType: 'text',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => row.name,
-        filterValue: (row) => `${row.name} ${row.symbol}`,
-        render: renderStock,
-      },
-      {
-        key: 'price',
-        title: '当前价格',
-        dataType: 'number',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => Number(row.price === '-' ? 0 : row.price),
-        render: (row) => <span className="num">{row.price}</span>,
-      },
-      {
-        key: 'nodeStatus',
-        title: 'Node 状态',
-        dataType: 'text',
-        sortable: false,
-        filterable: true,
-        filterValue: (row) => row.nodeStatus,
-        render: (row) =>
-          row.nodeStatus === '-' ? (
-            <span className="muted">-</span>
-          ) : (
-            <span className={clsx('tag', row.nodeTag || undefined)}>{row.nodeStatus}</span>
-          ),
-      },
-      {
-        key: 'atrStatus',
-        title: 'ATR 状态',
-        dataType: 'text',
-        sortable: false,
-        filterable: true,
-        filterValue: (row) => row.atrStatus,
-        render: (row) =>
-          row.atrStatus === '-' ? (
-            <span className="muted">-</span>
-          ) : (
-            <span className={clsx('tag', row.atrTag || undefined)}>{row.atrStatus}</span>
-          ),
-      },
-      {
-        key: 'volumeStatus',
-        title: 'Volume 状态',
-        dataType: 'text',
-        sortable: false,
-        filterable: true,
-        filterValue: (row) => row.volumeStatus,
-        render: (row) =>
-          row.volumeStatus === '-' ? (
-            <span className="muted">-</span>
-          ) : (
-            <span className={clsx('tag', row.volumeTag || undefined)}>{row.volumeStatus}</span>
-          ),
-      },
-      {
-        key: 'comboStatus',
-        title: '组合进度',
-        dataType: 'text',
-        sortable: false,
-        filterable: false,
-        render: (row) => (
-          <span className={clsx('status-pill', row.comboTag)}>{row.comboStatus}</span>
-        ),
-      },
-      {
-        key: 'windowRange',
-        title: '组合窗口',
-        dataType: 'text',
-        sortable: false,
-        filterable: false,
-        render: (row) => <span className="num">{row.windowRange}</span>,
-      },
-      {
-        key: 'lastEvent',
-        title: '最后组合事件',
-        dataType: 'text',
-        sortable: false,
-        filterable: true,
-        filterValue: (row) => row.lastEvent,
-        render: (row) => (row.lastEvent === '-' ? <span className="muted">-</span> : row.lastEvent),
-      },
-      {
-        key: 'action',
-        title: '操作',
-        dataType: 'text',
-        sortable: false,
-        filterable: false,
-        isAction: true,
-        render: (row) => (
-          <div className="actions">
-            <button className="btn small" onClick={() => goDetail(row.instrumentId, 'combined')}>
-              详情
-            </button>
-            <button
-              className="btn small"
-              onClick={() => handleRemove(row.instrumentId, row.name)}
-              disabled={removeMutation.isPending}
-            >
-              移除
-            </button>
-          </div>
-        ),
-      },
-    ],
-    [renderStock, goDetail, handleRemove, removeMutation.isPending],
   )
 
   // Node 明细列
@@ -1133,33 +761,6 @@ export default function WatchlistPage() {
 
   // ===== 渲染 =====
 
-  const plansLoading = plansQuery.isLoading
-  const statesLoading = planStatesQuery.isLoading
-  const statesError = planStatesQuery.isError ? '组合状态加载失败，请稍后重试' : null
-  const isPlanRunning = activePlan?.status === 'active'
-
-  // 成员策略展示名（用于组合成分 chips）
-  const memberChips = useMemo(() => {
-    const chips: Array<{ key: string; name: string; color: string }> = []
-    const colors = ['blue', 'violet', 'green']
-    activeMembers.forEach((m, i) => {
-      chips.push({
-        key: m.id,
-        name: `策略 ${i + 1}`,
-        color: colors[i % colors.length],
-      })
-    })
-    // 若无成员，回退到默认三策略展示（对齐原型 Node/ATR Rope/Volume Delta）
-    if (chips.length === 0) {
-      return [
-        { key: 'node', name: 'Node', color: 'blue' },
-        { key: 'atr', name: 'ATR Rope', color: 'violet' },
-        { key: 'volume', name: 'Volume Delta', color: 'green' },
-      ]
-    }
-    return chips
-  }, [activeMembers])
-
   return (
     <div>
       {/* 页面头 */}
@@ -1167,13 +768,10 @@ export default function WatchlistPage() {
         <div>
           <h1 className="page-title">我的自选</h1>
           <div className="page-desc">
-            自选股票池共享给监控组合方案；可查看组合状态，也可展开单个策略计算结果
+            自选股票池监控状态，可展开单个策略查看计算结果
           </div>
         </div>
         <div className="actions">
-          <Link className="btn" to="/monitoring-plan-editor">
-            编辑当前监控方案
-          </Link>
           <button className="btn" onClick={() => setGroupModalOpen(true)}>
             管理分组
           </button>
@@ -1183,52 +781,8 @@ export default function WatchlistPage() {
         </div>
       </div>
 
-      {/* 方案切换栏 */}
-      <div className="plan-switch-bar">
-        <div>
-          <span className="muted">监控方案</span>
-          {plansLoading ? (
-            <span className="muted">加载中…</span>
-          ) : plans.length === 0 ? (
-            <span className="muted">暂无方案</span>
-          ) : (
-            <select
-              className="select"
-              value={activePlanId}
-              onChange={(e) => handlePlanChange(e.target.value)}
-            >
-              {plans.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name} · {totalMembers || p.current_revision} 个策略
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
-        {/* 组合成分 chips */}
-        <div className="plan-composition">
-          {memberChips.map((c, i) => (
-            <span key={c.key} className="plan-composition-item">
-              <span className={clsx('chip', c.color)}>{c.name}</span>
-              {i < memberChips.length - 1 && <span className="combo-token">+</span>}
-            </span>
-          ))}
-          <span className="combo-token">ALL / 15m</span>
-        </div>
-        <div className="toolbar-spacer" />
-        <span className={clsx('status-pill', isPlanRunning ? 'ok' : 'off')}>
-          {isPlanRunning ? '运行中' : '已暂停'}
-        </span>
-      </div>
-
       {/* 策略 tabs */}
       <div className="strategy-tabs-bar" data-strategy-group="watchMonitor">
-        <button
-          className={clsx('strategy-tab', activeTab === 'watchCombined' && 'active')}
-          onClick={() => setActiveTab('watchCombined')}
-        >
-          组合状态 <small>{combinedRows.length}</small>
-        </button>
         <button
           className={clsx('strategy-tab', activeTab === 'watchNode' && 'active')}
           onClick={() => setActiveTab('watchNode')}
@@ -1247,48 +801,11 @@ export default function WatchlistPage() {
         >
           Volume Delta <small>{volumeRows.length}</small>
         </button>
-        <button
-          className={clsx('strategy-tab', activeTab === 'watchFuture' && 'active')}
-          onClick={() => setActiveTab('watchFuture')}
-        >
-          ＋ 更多策略
-        </button>
         <div className="toolbar-spacer" />
         <select className="select" defaultValue="all">
           <option value="all">全部自选 ({watchlistItems.length})</option>
           <option value="focus">重点追踪</option>
         </select>
-      </div>
-
-      {/* 组合状态面板 */}
-      <div
-        id="watchCombined"
-        className={clsx('strategy-panel', activeTab === 'watchCombined' && 'active')}
-      >
-        <div className="strategy-ribbon">
-          <div>
-            <div className="strategy-ribbon-title">
-              {activePlan?.name ?? '监控方案'} · 组合状态
-            </div>
-            <div className="strategy-ribbon-meta">
-              Node 为触发策略，ATR Rope 与 Volume Delta 在 15 分钟内完成确认
-            </div>
-          </div>
-          <Link className="btn small" to="/monitoring-plan-editor">
-            查看组合逻辑
-          </Link>
-        </div>
-        <div className="card">
-          <StrategyDataTable
-            tableId="watchlist-combined"
-            columns={combinedColumns}
-            rows={combinedRows}
-            rowKey={(row) => row.instrumentId}
-            loading={statesLoading}
-            error={statesError}
-            emptyText="暂无自选股票，点击右上角添加"
-          />
-        </div>
       </div>
 
       {/* Node 单策略面板 */}
@@ -1300,7 +817,7 @@ export default function WatchlistPage() {
           <div>
             <div className="strategy-ribbon-title">Volume Node Cluster</div>
             <div className="strategy-ribbon-meta">
-              组合成员策略 1/3 · 分钟 Bar 动态计算节点、POC 和碰触事件
+              分钟 Bar 动态计算节点、POC 和碰触事件
             </div>
           </div>
           <span className="tag good">实时运行</span>
@@ -1327,7 +844,7 @@ export default function WatchlistPage() {
           <div>
             <div className="strategy-ribbon-title">ATR Rope</div>
             <div className="strategy-ribbon-meta">
-              组合成员策略 2/3 · 趋势方向、偏离度和蓝带位置
+              趋势方向、偏离度和蓝带位置
             </div>
           </div>
           <span className="tag good">实时运行</span>
@@ -1354,7 +871,7 @@ export default function WatchlistPage() {
           <div>
             <div className="strategy-ribbon-title">Volume Delta</div>
             <div className="strategy-ribbon-meta">
-              组合成员策略 3/3 · 量能方向与异常放量确认
+              量能方向与异常放量确认
             </div>
           </div>
           <span className="tag good">实时运行</span>
@@ -1369,22 +886,6 @@ export default function WatchlistPage() {
             error={volumeStatesQuery.isError ? 'Volume 状态加载失败' : null}
             emptyText="暂无 Volume 监控状态"
           />
-        </div>
-      </div>
-
-      {/* 更多策略面板 */}
-      <div
-        id="watchFuture"
-        className={clsx('strategy-panel', activeTab === 'watchFuture' && 'active')}
-      >
-        <div className="card">
-          <div className="empty">
-            <h3>更多监控策略可以加入当前方案</h3>
-            <p>新增策略后可配置为触发、确认或否决角色。</p>
-            <Link className="btn primary" to="/monitoring-plan-editor">
-              前往编辑监控方案
-            </Link>
-          </div>
         </div>
       </div>
 

@@ -88,6 +88,10 @@ class StrategyResultResponse(BaseModel):
     trade_date: date = Field(..., description="交易日")
     payload: dict[str, Any] = Field(..., description="完整结果 JSON（不含 matched）")
     created_at: datetime = Field(..., description="创建时间")
+    # [选股] - 标的主数据冗余字段，避免前端二次查询
+    instrument_symbol: str | None = Field(None, description="股票代码")
+    instrument_name: str | None = Field(None, description="股票名称")
+    instrument_market: str | None = Field(None, description="市场（SH/SZ/BJ）")
 
 
 class StrategyResultListResponse(BaseModel):
@@ -95,8 +99,10 @@ class StrategyResultListResponse(BaseModel):
 
     items: list[StrategyResultResponse] = Field(default_factory=list)
     total: int = Field(..., description="过滤后总数")
-    source_total: int = Field(0, description="过滤前总数")
+    source_total: int = Field(0, description="过滤前总数（向后兼容）")
     filtered_total: int = Field(0, description="过滤后总数")
+    run_source_total: int = Field(0, description="运行过滤前总数（全市场）")
+    universe_total: int = Field(0, description="股票池内总数（watchlist 时为自选股范围，all 时等于 run_source_total）")
     page: int = Field(..., description="当前页码（从 1 开始）")
     page_size: int = Field(..., description="每页大小")
 

@@ -340,7 +340,7 @@ def test_1m_bar_dedup() -> None:
         from app.strategy.monitors.volume_node_monitor import VolumeNodeMonitor
 
         # 检查 bar_time 使用已完成 Bar 时间（floor 对齐到整分钟）
-        source = inspect.getsource(MonitorBatchService._process_instrument_watchlist)
+        source = inspect.getsource(MonitorBatchService._process_instrument_evaluation)
         assert "floor" in source, "bar_time 未使用 floor 对齐到整分钟"
         _record("P0-9 MonitorBatchService floor 对齐", True)
 

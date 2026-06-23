@@ -38,7 +38,6 @@ const pageTitleMap: Record<string, string> = {
   '/': '服务总览',
   '/screener': '选股策略',
   '/watchlist': '我的自选',
-  '/monitoring-plan-editor': '监控方案编辑',
   '/settings': '通知与设置',
   '/messages': '消息中心',
   '/admin': '系统概览',

@@ -10,7 +10,6 @@ import MembershipExpiredPage from './pages/MembershipExpiredPage'
 import IndexPage from './pages/IndexPage'
 import ScreenerPage from './pages/ScreenerPage'
 import WatchlistPage from './pages/WatchlistPage'
-import MonitoringPlanEditorPage from './pages/MonitoringPlanEditorPage'
 import StockDetailPage from './pages/StockDetailPage'
 import SettingsPage from './pages/SettingsPage'
 import MessagesPage from './pages/MessagesPage'
@@ -56,7 +55,6 @@ export const router = createBrowserRouter([
       { path: '/', element: <IndexPage /> },
       { path: '/screener', element: <ScreenerPage /> },
       { path: '/watchlist', element: <WatchlistPage /> },
-      { path: '/monitoring-plan-editor', element: <MonitoringPlanEditorPage /> },
       { path: '/stock/:symbol', element: <StockDetailPage /> },
       { path: '/settings', element: <SettingsPage /> },
       { path: '/messages', element: <MessagesPage /> },

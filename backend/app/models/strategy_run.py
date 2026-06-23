@@ -45,7 +45,7 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
 
@@ -198,6 +198,11 @@ class StrategyResult(Base):
         nullable=False,
         server_default=func.now(),
         comment="创建时间",
+    )
+
+    # [选股] - 关联标的主数据，用于查询时 eager load symbol/name/market
+    instrument: Mapped["Instrument"] = relationship(
+        "Instrument", lazy="raise", foreign_keys=[instrument_id],
     )
 
     def __repr__(self) -> str:

@@ -1,8 +1,9 @@
-"""监控批量执行服务：单轮监控执行（查询→计算→检测→事件→合并通知）。
+"""监控批量执行服务：基于评估表的监控执行（查询→占位→计算→检测→事件→合并通知）。
 
 执行模式：
-- 方案模式（优先）：若存在 active MonitoringPlan，按方案成员指定的策略版本 + 用户自选股执行
-- 降级模式：若无 active MonitoringPlan，合并所有用户自选股去重 + 所有 released 策略执行
+- 自选股模式：合并所有用户自选股去重 + watchlist_monitor 策略执行
+- 基于 monitor_evaluations 表实现 exactly-once 语义：
+  INSERT ON CONFLICT DO NOTHING 确保同一 (策略版本, 股票, bar时间) 只计算一次
 
 事件通知：周期结束后按用户合并为一张飞书卡片通知，每个用户只收到自己自选股的事件。
 
@@ -28,16 +29,19 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.instrument import Instrument
+from app.models.monitor_evaluation import MonitorEvaluation
 from app.models.monitor_state import MonitorState as MonitorStateORM
-from app.models.monitoring_plan import MonitoringPlan, MonitoringPlanMember, MonitoringPlanRevision
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.strategy_event import StrategyEvent
+from app.models.watchlist import UserWatchlistItem
 from app.repositories import monitor_state_repository, strategy_event_repository
 from app.repositories.bar_repository import get_bars
-from app.strategy.runtime import MarketDataContext, MonitorState, StrategyLoader
+from app.strategy.monitors.watchlist_monitor import WatchlistMonitor
+from app.strategy.runtime import MarketDataContext, MonitorState
 
 logger = logging.getLogger("monitor_batch_service")
 
@@ -100,11 +104,11 @@ class MonitorCycleResult:
 
 
 class MonitorBatchService:
-    """监控批量执行服务 - 单轮监控执行。
+    """监控批量执行服务 - 基于评估表的监控执行。
 
     执行模式：
-    - 方案模式（优先）：若存在 active MonitoringPlan，按方案成员指定的策略版本 + 用户自选股执行
-    - 降级模式：若无 active MonitoringPlan，合并所有用户自选股去重 + 所有 released 策略执行
+    - 自选股模式：合并所有用户自选股去重 + watchlist_monitor 策略执行
+    - 基于 monitor_evaluations 表实现 exactly-once 语义
 
     事件通知：周期结束后按用户合并为一张飞书卡片通知，每个用户只收到自己自选股的事件。
 
@@ -114,17 +118,12 @@ class MonitorBatchService:
     """
 
     async def execute_monitor_cycle(self, db: AsyncSession) -> MonitorCycleResult:
-        """执行单轮监控周期。
-
-        优先使用 MonitoringPlan 方案模式：
-        - 若存在 active MonitoringPlan，按方案成员指定的策略版本 + 用户自选股执行
-        - 若无 active MonitoringPlan，降级为自选股 + 所有 released 策略模式
+        """执行单轮监控周期（基于评估表）。
 
         Steps:
-        1. 尝试从 active MonitoringPlan 解析执行对象
-        2a. 方案模式：按 plan 指定的策略版本 + 用户自选股执行
-        2b. 降级模式：合并所有用户自选股去重 + 所有 released 策略执行
-        3. 逐标的执行（拉取行情 → 计算状态 → 检测事件 → 冷却 → 写入事件）
+        1. 获取 watchlist_monitor 策略的最新 released 版本
+        2. 获取所有活跃自选股（去重，排除指数）
+        3. 逐标的：获取最新已完成 1m bar → INSERT 评估占位 → 执行算法 → 保存结果
         4. 收集所有事件，按用户合并为一张飞书卡片通知
         5. 返回 MonitorCycleResult
 
@@ -136,40 +135,34 @@ class MonitorBatchService:
         """
         result = MonitorCycleResult()
 
-        # 1. 尝试从 active MonitoringPlan 解析执行对象
-        plan_executions = await self._resolve_plan_instruments(db)
-
-        if plan_executions:
-            # 方案模式：按 MonitoringPlan 执行
-            return await self._execute_plan_cycle(db, plan_executions, result)
-
-        # 降级模式：自选股 + 所有 released 策略
-        # 1. 查询活跃监控策略及其最新 released 版本
-        strategy_versions = await self._query_monitor_strategy_versions(db)
-        if not strategy_versions:
-            logger.info("无活跃监控策略，跳过监控周期")
+        # 1. 获取 watchlist_monitor 策略的最新 released 版本
+        strategy_version = await self._get_watchlist_monitor_version(db)
+        if strategy_version is None:
+            logger.warning("watchlist_monitor 无 released 版本，跳过监控周期")
             return result
 
         logger.info(
-            "降级模式 - 活跃监控策略: %s",
-            {sv.id: sv.manifest.get("strategy_id", "?") for sv in strategy_versions},
+            "watchlist_monitor 版本: version_id=%s version=%s",
+            strategy_version.id, strategy_version.version,
         )
 
-        # 2. 合并所有用户自选股去重
-        instrument_user_map, instrument_extra_info = await self._resolve_watchlist_instruments(db)
-        if not instrument_user_map:
+        # 2. 获取所有活跃自选股（去重，排除指数）+ 用户映射（通知用）
+        instrument_ids, instrument_user_map, instrument_extra_info = (
+            await self._resolve_watchlist_instruments(db)
+        )
+        if not instrument_ids:
             logger.info("无用户自选股，跳过监控周期")
             return result
 
-        result.total_instruments = len(instrument_user_map)
-        logger.info("降级模式 - 监控标的数: %d（合并所有用户自选股去重）", result.total_instruments)
+        result.total_instruments = len(instrument_ids)
+        logger.info("监控标的数: %d（合并所有用户自选股去重）", result.total_instruments)
 
         # 3. 逐标的执行，收集所有写入的事件
         all_written_events: list[StrategyEvent] = []
-        for instrument_id, user_ids in instrument_user_map.items():
+        for instrument_id in instrument_ids:
             try:
-                events = await self._process_instrument_watchlist(
-                    db, instrument_id, user_ids, strategy_versions, result,
+                events = await self._process_instrument_evaluation(
+                    db, instrument_id, strategy_version, result,
                 )
                 all_written_events.extend(events)
             except Exception as exc:
@@ -180,7 +173,21 @@ class MonitorBatchService:
                 logger.warning(err_msg)
                 result.errors.append(err_msg)
 
-        # 4. 合并通知：按用户自选股归属，每个用户一张飞书卡片
+        # 4. 扩展事件接收人：为每个写入的事件匹配自选股用户
+        total_recipients = 0
+        if all_written_events:
+            from app.services.event_recipient_service import expand_event_recipients
+
+            for event in all_written_events:
+                try:
+                    count = await expand_event_recipients(db, event.id)
+                    total_recipients += count
+                except Exception as exc:
+                    logger.warning(
+                        "扩展事件接收人失败 event_id=%s: %s", event.id, exc,
+                    )
+
+        # 5. 合并通知：按用户自选股归属，每个用户一张飞书卡片
         if all_written_events:
             await self._send_merged_notification(
                 db, all_written_events, instrument_user_map, instrument_extra_info, result,
@@ -188,357 +195,63 @@ class MonitorBatchService:
 
         logger.info(
             "监控周期完成: instruments=%d states=%d events_detected=%d "
-            "events_written=%d notifications=%d errors=%d",
+            "events_written=%d recipients=%d notifications=%d errors=%d",
             result.total_instruments, result.total_states_computed,
             result.total_events_detected, result.total_events_written,
-            result.total_notifications_created, len(result.errors),
+            total_recipients, result.total_notifications_created, len(result.errors),
         )
         return result
 
-    async def _execute_plan_cycle(
-        self,
-        db: AsyncSession,
-        plan_executions: dict[uuid.UUID, list[tuple[uuid.UUID, uuid.UUID, uuid.UUID]]],
-        result: MonitorCycleResult,
-    ) -> MonitorCycleResult:
-        """方案模式执行监控周期。
-
-        按 MonitoringPlan 指定的策略版本 + 用户自选股执行监控。
-        每个标的只执行一次策略计算（按 strategy_version_id 去重），
-        事件通知按用户方案归属分发。
-
-        Args:
-            db: 异步会话
-            plan_executions: user_id → [(instrument_id, strategy_version_id, plan_id)] 映射
-            result: 累计结果
-
-        Returns:
-            MonitorCycleResult
-        """
-        # 构建 (instrument_id, strategy_version_id) → set(user_id) 映射（去重执行）
-        inst_sv_users: dict[tuple[uuid.UUID, uuid.UUID], set[uuid.UUID]] = {}
-        # 构建 instrument_id → set(strategy_version_id) 映射
-        instrument_svs: dict[uuid.UUID, set[uuid.UUID]] = {}
-        # 构建 user_id → set(instrument_id) 映射（用于通知）
-        user_instruments: dict[uuid.UUID, set[uuid.UUID]] = {}
-
-        for user_id, items in plan_executions.items():
-            for instrument_id, sv_id, _plan_id in items:
-                inst_sv_users.setdefault((instrument_id, sv_id), set()).add(user_id)
-                instrument_svs.setdefault(instrument_id, set()).add(sv_id)
-                user_instruments.setdefault(user_id, set()).add(instrument_id)
-
-        # 收集所有需要的 strategy_version_id，批量加载
-        all_sv_ids: set[uuid.UUID] = set()
-        for sv_ids in instrument_svs.values():
-            all_sv_ids.update(sv_ids)
-
-        # 批量查询 StrategyVersion
-        sv_map: dict[uuid.UUID, StrategyVersion] = {}
-        if all_sv_ids:
-            sv_stmt = select(StrategyVersion).where(StrategyVersion.id.in_(all_sv_ids))
-            sv_result = await db.execute(sv_stmt)
-            for sv in sv_result.scalars().all():
-                sv_map[sv.id] = sv
-
-        result.total_instruments = len(instrument_svs)
-        logger.info(
-            "方案模式 - 监控标的数: %d, 策略版本数: %d",
-            result.total_instruments, len(all_sv_ids),
-        )
-
-        # 逐标的执行策略计算
-        # 事件按 (instrument_id, strategy_version_id) 收集，后续按用户分发
-        inst_sv_events: dict[tuple[uuid.UUID, uuid.UUID], list[StrategyEvent]] = {}
-
-        for instrument_id, sv_ids in instrument_svs.items():
-            # 构建该标的的策略版本列表
-            strategy_versions = [sv_map[sv_id] for sv_id in sv_ids if sv_id in sv_map]
-            if not strategy_versions:
-                continue
-
-            # 收集该标的的所有关联用户（用于 _process_instrument_watchlist）
-            all_user_ids: set[uuid.UUID] = set()
-            for sv_id in sv_ids:
-                all_user_ids.update(inst_sv_users.get((instrument_id, sv_id), set()))
-
-            try:
-                events = await self._process_instrument_watchlist(
-                    db, instrument_id, list(all_user_ids), strategy_versions, result,
-                )
-                # 按策略版本分组存储事件
-                for ev in events:
-                    key = (instrument_id, ev.strategy_version_id)
-                    inst_sv_events.setdefault(key, []).append(ev)
-            except Exception as exc:
-                err_msg = (
-                    f"[monitor_batch] 标的处理失败(方案模式) "
-                    f"instrument_id={instrument_id}: {exc}"
-                )
-                logger.warning(err_msg)
-                result.errors.append(err_msg)
-
-        # 按用户方案归属分发事件通知
-        # 构建 instrument_user_map（用于 _send_merged_notification）
-        instrument_user_map: dict[uuid.UUID, list[uuid.UUID]] = {}
-        for user_id, inst_ids in user_instruments.items():
-            for inst_id in inst_ids:
-                instrument_user_map.setdefault(inst_id, []).append(user_id)
-
-        # 收集所有事件
-        all_events: list[StrategyEvent] = []
-        for events in inst_sv_events.values():
-            all_events.extend(events)
-
-        # 发送合并通知
-        instrument_extra_info: dict[uuid.UUID, dict] = {
-            inst_id: {} for inst_id in instrument_svs
-        }
-        if all_events:
-            await self._send_merged_notification(
-                db, all_events, instrument_user_map, instrument_extra_info, result,
-            )
-
-        logger.info(
-            "方案模式监控周期完成: instruments=%d states=%d events_detected=%d "
-            "events_written=%d notifications=%d errors=%d",
-            result.total_instruments, result.total_states_computed,
-            result.total_events_detected, result.total_events_written,
-            result.total_notifications_created, len(result.errors),
-        )
-        return result
-
-    async def _query_monitor_strategy_versions(
+    async def _get_watchlist_monitor_version(
         self, db: AsyncSession,
-    ) -> list[StrategyVersion]:
-        """查询活跃监控策略的最新 released 版本。
+    ) -> StrategyVersion | None:
+        """获取 watchlist_monitor 策略的最新 released 版本。
 
-        SELECT strategy_definitions WHERE kind='monitor' AND status='released',
-        然后对每个 definition 取最新 released 版本。
+        仅查询 strategy_key='watchlist_monitor' 的策略定义，
+        取其最新 released 版本。不再遍历所有 kind='monitor' 策略。
 
         Returns:
-            StrategyVersion 列表
+            StrategyVersion 或 None（无 released 版本时）
         """
-        # 查询所有 kind='monitor' 的策略定义
+        # 查询 strategy_key='watchlist_monitor' 的策略定义
         def_stmt = (
             select(StrategyDefinition)
-            .where(StrategyDefinition.kind == "monitor")
+            .where(StrategyDefinition.strategy_key == "watchlist_monitor")
         )
         def_result = await db.execute(def_stmt)
-        definitions = list(def_result.scalars().all())
+        defn = def_result.scalar_one_or_none()
 
-        if not definitions:
-            return []
+        if defn is None:
+            return None
 
-        versions: list[StrategyVersion] = []
-        for defn in definitions:
-            # 取最新 released 版本
-            ver_stmt = (
-                select(StrategyVersion)
-                .where(
-                    StrategyVersion.strategy_definition_id == defn.id,
-                    StrategyVersion.status == "released",
-                )
-                .order_by(StrategyVersion.released_at.desc())
-                .limit(1)
-            )
-            ver_result = await db.execute(ver_stmt)
-            ver = ver_result.scalar_one_or_none()
-            if ver is not None:
-                versions.append(ver)
-
-        return versions
-
-    async def _query_active_plans(
-        self, db: AsyncSession,
-    ) -> list[MonitoringPlan]:
-        """查询所有 active 状态的 MonitoringPlan。
-
-        Returns:
-            status='active' 的 MonitoringPlan 列表
-        """
-        stmt = select(MonitoringPlan).where(MonitoringPlan.status == "active")
-        result = await db.execute(stmt)
-        return list(result.scalars().all())
-
-    async def _resolve_plan_instruments(
-        self, db: AsyncSession,
-    ) -> dict[uuid.UUID, list[tuple[uuid.UUID, uuid.UUID, uuid.UUID]]]:
-        """从 active MonitoringPlan 解析执行对象。
-
-        流程：
-        1. 查询所有 active MonitoringPlan
-        2. 对每个 plan，查询当前 revision + enabled 成员
-        3. 对 STABLE_TRACK 成员，解析最新 released 版本
-        4. 对每个 plan 的用户，查询其自选股作为标的
-        5. 构建 user_id → [(instrument_id, strategy_version_id, plan_id)] 映射
-
-        Returns:
-            user_id → [(instrument_id, strategy_version_id, plan_id)] 映射
-        """
-        plans = await self._query_active_plans(db)
-        if not plans:
-            return {}
-
-        # 批量查询所有 plan 的当前 revision
-        plan_ids = [p.id for p in plans]
-        rev_stmt = (
-            select(MonitoringPlanRevision)
+        # 取最新 released 版本
+        ver_stmt = (
+            select(StrategyVersion)
             .where(
-                MonitoringPlanRevision.monitoring_plan_id.in_(plan_ids),
+                StrategyVersion.strategy_definition_id == defn.id,
+                StrategyVersion.status == "released",
             )
+            .order_by(StrategyVersion.released_at.desc())
+            .limit(1)
         )
-        rev_result = await db.execute(rev_stmt)
-        all_revisions = list(rev_result.scalars().all())
-
-        # 构建 plan_id → revision 映射（取 current_revision 对应的版本）
-        plan_map: dict[uuid.UUID, MonitoringPlan] = {p.id: p for p in plans}
-        rev_map: dict[uuid.UUID, MonitoringPlanRevision] = {}
-        for rev in all_revisions:
-            plan = plan_map.get(rev.monitoring_plan_id)
-            if plan and rev.revision == plan.current_revision:
-                rev_map[rev.id] = rev
-
-        # 批量查询所有 revision 的 enabled 成员
-        revision_ids = list(rev_map.keys())
-        if not revision_ids:
-            return {}
-
-        member_stmt = (
-            select(MonitoringPlanMember)
-            .where(
-                MonitoringPlanMember.revision_id.in_(revision_ids),
-                MonitoringPlanMember.enabled.is_(True),
-            )
-        )
-        member_result = await db.execute(member_stmt)
-        all_members = list(member_result.scalars().all())
-
-        # 构建 revision_id → [member] 映射
-        rev_members: dict[uuid.UUID, list[MonitoringPlanMember]] = {}
-        for m in all_members:
-            rev_members.setdefault(m.revision_id, []).append(m)
-
-        # 解析 STABLE_TRACK 成员的 strategy_version_id
-        # 收集需要解析的 strategy_definition_id
-        stable_track_def_ids: set[uuid.UUID] = set()
-        for members in rev_members.values():
-            for m in members:
-                if m.version_policy == "STABLE_TRACK" and m.strategy_version_id is None:
-                    stable_track_def_ids.add(m.strategy_definition_id)
-
-        # 批量查询最新 released 版本
-        stable_track_versions: dict[uuid.UUID, uuid.UUID] = {}
-        if stable_track_def_ids:
-            for def_id in stable_track_def_ids:
-                ver_stmt = (
-                    select(StrategyVersion.id)
-                    .where(
-                        StrategyVersion.strategy_definition_id == def_id,
-                        StrategyVersion.status == "released",
-                    )
-                    .order_by(StrategyVersion.released_at.desc())
-                    .limit(1)
-                )
-                ver_result = await db.scalar(ver_stmt)
-                if ver_result is not None:
-                    stable_track_versions[def_id] = ver_result
-
-        # 构建 plan_id → [strategy_version_id] 映射
-        plan_strategy_versions: dict[uuid.UUID, list[uuid.UUID]] = {}
-        for rev_id, members in rev_members.items():
-            # 找到对应的 plan_id
-            plan_id: uuid.UUID | None = None
-            for rev in rev_map.values():
-                if rev.id == rev_id:
-                    plan_id = rev.monitoring_plan_id
-                    break
-            if plan_id is None:
-                continue
-
-            sv_ids: list[uuid.UUID] = []
-            for m in members:
-                if m.strategy_version_id is not None:
-                    sv_ids.append(m.strategy_version_id)
-                elif m.version_policy == "STABLE_TRACK" and m.strategy_definition_id in stable_track_versions:
-                    sv_ids.append(stable_track_versions[m.strategy_definition_id])
-            plan_strategy_versions[plan_id] = sv_ids
-
-        # 查询每个 plan 用户的自选股
-        from app.models.watchlist import UserWatchlistItem
-
-        # 收集所有 plan 用户的 user_id
-        plan_user_ids = {p.user_id for p in plans}
-
-        # 批量查询自选股
-        wl_stmt = (
-            select(
-                UserWatchlistItem.user_id,
-                UserWatchlistItem.instrument_id,
-            )
-            .where(
-                UserWatchlistItem.active.is_(True),
-                UserWatchlistItem.user_id.in_(plan_user_ids),
-            )
-        )
-        wl_result = await db.execute(wl_stmt)
-        wl_rows = wl_result.all()
-
-        # 排除指数类标的
-        wl_instrument_ids = {row[1] for row in wl_rows}
-        index_ids: set[uuid.UUID] = set()
-        if wl_instrument_ids:
-            inst_stmt = select(Instrument.id, Instrument.symbol, Instrument.market).where(
-                Instrument.id.in_(wl_instrument_ids),
-            )
-            inst_result = await db.execute(inst_stmt)
-            for row in inst_result.all():
-                sym = row[1] or ""
-                mkt = row[2] or ""
-                if (mkt == "SH" and sym.startswith("000")) or (mkt == "SZ" and sym.startswith("399")):
-                    index_ids.add(row[0])
-
-        # 构建 user_id → [instrument_id] 映射（排除指数）
-        user_instruments: dict[uuid.UUID, list[uuid.UUID]] = {}
-        for user_id, instrument_id in wl_rows:
-            if instrument_id in index_ids:
-                continue
-            user_instruments.setdefault(user_id, []).append(instrument_id)
-
-        # 构建 user_id → [(instrument_id, strategy_version_id, plan_id)] 映射
-        result: dict[uuid.UUID, list[tuple[uuid.UUID, uuid.UUID, uuid.UUID]]] = {}
-        for plan in plans:
-            sv_ids = plan_strategy_versions.get(plan.id, [])
-            if not sv_ids:
-                continue
-            instruments = user_instruments.get(plan.user_id, [])
-            if not instruments:
-                continue
-            items = result.setdefault(plan.user_id, [])
-            for inst_id in instruments:
-                for sv_id in sv_ids:
-                    items.append((inst_id, sv_id, plan.id))
-
-        return result
+        ver_result = await db.execute(ver_stmt)
+        return ver_result.scalar_one_or_none()
 
     async def _resolve_watchlist_instruments(
         self, db: AsyncSession,
-    ) -> tuple[dict[uuid.UUID, list[uuid.UUID]], dict[uuid.UUID, dict]]:
-        """合并所有用户自选股去重，构建 instrument_id → [user_ids] 映射及附加信息。
+    ) -> tuple[list[uuid.UUID], dict[uuid.UUID, list[uuid.UUID]], dict[uuid.UUID, dict]]:
+        """合并所有用户自选股去重，返回标的列表、用户映射及附加信息。
 
         过滤条件：
         1. 仅取 active=True 的自选记录（排除已软删除的）
         2. 排除指数类标的（symbol 以 '000' 开头且 market=SH，或以 '399' 开头且 market=SZ）
 
         Returns:
-            (instrument_user_map, instrument_extra_info) 二元组:
-            - instrument_user_map: {instrument_id: [user_id, ...], ...} 去重后的标的与用户映射
-            - instrument_extra_info: {instrument_id: {priority, weighted_score, hype_logic,
-              total_market_cap, pred_sell_reg, ...}, ...} 附加信息（当前为空字典，待数据源接入后填充）
+            (instrument_ids, instrument_user_map, instrument_extra_info) 三元组:
+            - instrument_ids: 去重后的标的 ID 列表
+            - instrument_user_map: {instrument_id: [user_id, ...], ...} 标的与用户映射（通知用）
+            - instrument_extra_info: {instrument_id: {priority, weighted_score, ...}, ...} 附加信息
         """
-        from app.models.instrument import Instrument
-        from app.models.watchlist import UserWatchlistItem
-
         stmt = (
             select(
                 UserWatchlistItem.instrument_id,
@@ -550,11 +263,11 @@ class MonitorBatchService:
         rows = result.all()
 
         # 收集所有 instrument_id，批量查询排除指数
-        instrument_ids = {row[0] for row in rows}
+        instrument_ids_set = {row[0] for row in rows}
         index_ids: set[uuid.UUID] = set()
-        if instrument_ids:
+        if instrument_ids_set:
             inst_stmt = select(Instrument.id, Instrument.symbol, Instrument.market).where(
-                Instrument.id.in_(instrument_ids),
+                Instrument.id.in_(instrument_ids_set),
             )
             inst_result = await db.execute(inst_stmt)
             for row in inst_result.all():
@@ -572,33 +285,38 @@ class MonitorBatchService:
                 instrument_user_map[instrument_id] = []
             instrument_user_map[instrument_id].append(user_id)
 
+        # 去重后的标的 ID 列表
+        instrument_ids = list(instrument_user_map.keys())
+
         # [monitor_batch] - 附加信息: 当前项目无 stock_pools / stop_loss_predictions 模型，
         # instrument_extra_info 暂为空字典。待数据源接入后在此处填充 priority、weighted_score、
         # hype_logic、total_market_cap、pred_sell_reg 等字段。
         instrument_extra_info: dict[uuid.UUID, dict] = {
-            inst_id: {} for inst_id in instrument_user_map
+            inst_id: {} for inst_id in instrument_ids
         }
 
-        return instrument_user_map, instrument_extra_info
+        return instrument_ids, instrument_user_map, instrument_extra_info
 
-    async def _process_instrument_watchlist(
+    async def _process_instrument_evaluation(
         self,
         db: AsyncSession,
         instrument_id: uuid.UUID,
-        user_ids: list[uuid.UUID],
-        strategy_versions: list[StrategyVersion],
+        strategy_version: StrategyVersion,
         result: MonitorCycleResult,
     ) -> list[StrategyEvent]:
-        """处理单个标的的监控周期（自选股模式）。
+        """处理单个标的的监控周期（基于评估表）。
 
-        拉取行情→计算状态→检测事件→冷却→写入事件，返回写入的事件列表。
-        不负责通知，由调用方统一合并通知。
+        流程：
+        1. 获取最新已完成 1m bar 的 source_bar_time
+        2. INSERT 评估占位（ON CONFLICT DO NOTHING），冲突则跳过（exactly-once）
+        3. 拉取行情 → 执行 WatchlistMonitor → 保存结果
+        4. 更新 MonitorEvaluation 状态和指标
+        5. 更新 MonitorState + 写入 StrategyEvent
 
         Args:
             db: 异步会话
             instrument_id: 标的 UUID
-            user_ids: 持有该标的的用户 ID 列表
-            strategy_versions: 活跃监控策略版本列表
+            strategy_version: watchlist_monitor 策略版本
             result: 累计结果
 
         Returns:
@@ -610,9 +328,72 @@ class MonitorBatchService:
             logger.warning("标的不存在: instrument_id=%s", instrument_id)
             return []
 
-        # a. 拉取行情
+        # a. 获取最新已完成 1m bar
         now = datetime.now(UTC)
         today = now.date()
+        try:
+            bars_minute_result = await get_bars(
+                db, instrument_id,
+                timeframe="1m",
+                start_date=today,
+                end_date=today,
+                adjustment="qfq",
+                skip_upsert=True,
+                completed_only=True,
+            )
+            bars_minute = bars_minute_result.bars
+        except Exception as exc:
+            logger.warning("1m行情拉取失败 %s: %s", symbol, exc)
+            return []
+
+        if bars_minute is None or bars_minute.empty:
+            logger.debug("无已完成 1m bar: instrument_id=%s symbol=%s", instrument_id, symbol)
+            return []
+
+        # source_bar_time: 最新已完成 1m bar 的整分钟时间戳
+        last_ts = bars_minute.index[-1]
+        if hasattr(last_ts, "floor"):
+            source_bar_time = last_ts.floor("1min").to_pydatetime()
+        elif hasattr(last_ts, "to_pydatetime"):
+            raw_dt = last_ts.to_pydatetime()
+            source_bar_time = raw_dt.replace(second=0, microsecond=0)
+        else:
+            source_bar_time = now.replace(second=0, microsecond=0)
+
+        # b. INSERT 评估占位（exactly-once: ON CONFLICT DO NOTHING）
+        evaluation_id: uuid.UUID | None = None
+        try:
+            insert_stmt = (
+                pg_insert(MonitorEvaluation)
+                .values(
+                    strategy_version_id=strategy_version.id,
+                    instrument_id=instrument_id,
+                    source_bar_time=source_bar_time,
+                    status="PENDING",
+                )
+                .on_conflict_do_nothing(
+                    index_elements=["strategy_version_id", "instrument_id", "source_bar_time"],
+                )
+                .returning(MonitorEvaluation.id)
+            )
+            insert_result = await db.execute(insert_stmt)
+            row = insert_result.scalar_one_or_none()
+            if row is None:
+                # UNIQUE 冲突，该标的此 bar 已处理过，跳过
+                logger.debug(
+                    "评估已存在（exactly-once 跳过）: instrument_id=%s source_bar_time=%s",
+                    instrument_id, source_bar_time,
+                )
+                return []
+            evaluation_id = row
+        except Exception as exc:
+            logger.warning(
+                "INSERT 评估占位失败 instrument_id=%s source_bar_time=%s: %s",
+                instrument_id, source_bar_time, exc,
+            )
+            return []
+
+        # c. 拉取行情
         bars_daily_result = await get_bars(
             db, instrument_id,
             timeframe="1d",
@@ -623,7 +404,6 @@ class MonitorBatchService:
         bars_daily = bars_daily_result.bars
 
         bars_15min = pd.DataFrame()
-        bars_minute = pd.DataFrame()
         try:
             bars_15min_result = await get_bars(
                 db, instrument_id,
@@ -635,30 +415,8 @@ class MonitorBatchService:
             bars_15min = bars_15min_result.bars
         except Exception as exc:
             logger.warning("15min行情拉取失败 %s: %s", symbol, exc)
-        try:
-            bars_minute_result = await get_bars(
-                db, instrument_id,
-                timeframe="1m",
-                start_date=today,
-                end_date=today,
-                adjustment="qfq",
-                skip_upsert=True,
-            )
-            bars_minute = bars_minute_result.bars
-        except Exception as exc:
-            logger.warning("1m行情拉取失败 %s: %s", symbol, exc)
 
-        # b. 构建 MarketDataContext
-        # [monitor_batch] - bar_time: 使用最新已完成 1m bar 的整分钟时间戳，
-        # 而非 datetime.now()，避免同一分钟内因微秒差异产生重复事件
-        source_bar_time: datetime | None = None
-        if bars_minute is not None and not bars_minute.empty:
-            last_ts = bars_minute.index[-1]
-            if hasattr(last_ts, "floor"):
-                source_bar_time = last_ts.floor("1min").to_pydatetime()
-            elif hasattr(last_ts, "to_pydatetime"):
-                raw_dt = last_ts.to_pydatetime()
-                source_bar_time = raw_dt.replace(second=0, microsecond=0)
+        # d. 构建 MarketDataContext
         context = MarketDataContext(
             instrument_id=instrument_id,
             symbol=symbol,
@@ -666,76 +424,103 @@ class MonitorBatchService:
             bars_15min=bars_15min if not bars_15min.empty else None,
             bars_minute=bars_minute if not bars_minute.empty else None,
             trade_date=today,
-            bar_time=source_bar_time or now,
+            bar_time=source_bar_time,
         )
 
-        # c. 对每个监控策略执行 calculate_state + detect_events
-        all_event_drafts: list[tuple[StrategyVersion, Any]] = []
-
-        for version in strategy_versions:
-            try:
-                runtime = await StrategyLoader.load(version)
-            except Exception as exc:
-                logger.warning(
-                    "加载策略运行时失败 strategy_id=%s version_id=%s: %s",
-                    version.manifest.get("strategy_id", "?"), version.id, exc,
-                )
-                continue
-
-            # calculate_state
-            try:
-                curr_state = await runtime.calculate_state(context)
-            except Exception as exc:
-                logger.warning(
-                    "calculate_state 失败 instrument_id=%s version_id=%s: %s",
-                    instrument_id, version.id, exc,
-                )
-                continue
-
-            result.total_states_computed += 1
-
-            # 获取 prev_state
-            prev_state_orm = await monitor_state_repository.get_state(
-                db, instrument_id=instrument_id, strategy_version_id=version.id,
+        # e. 执行 WatchlistMonitor 算法
+        try:
+            runtime = WatchlistMonitor()
+            await runtime.initialize(strategy_version)
+        except Exception as exc:
+            await self._mark_evaluation_failed(
+                db, evaluation_id, f"WatchlistMonitor 初始化失败: {exc}",
             )
-            prev_state = self._orm_to_runtime_state(prev_state_orm) if prev_state_orm else None
+            logger.warning(
+                "WatchlistMonitor 初始化失败 instrument_id=%s: %s", instrument_id, exc,
+            )
+            return []
 
-            # detect_events
-            try:
-                event_drafts = await runtime.detect_events(context, prev_state, curr_state)
-            except Exception as exc:
-                logger.warning(
-                    "detect_events 失败 instrument_id=%s version_id=%s: %s",
-                    instrument_id, version.id, exc,
-                )
-                event_drafts = []
+        # calculate_state
+        try:
+            curr_state = await runtime.calculate_state(context)
+        except Exception as exc:
+            await self._mark_evaluation_failed(
+                db, evaluation_id, f"calculate_state 失败: {exc}",
+            )
+            logger.warning(
+                "calculate_state 失败 instrument_id=%s: %s", instrument_id, exc,
+            )
+            return []
 
-            result.total_events_detected += len(event_drafts)
+        result.total_states_computed += 1
 
-            # upsert curr_state
-            try:
-                await monitor_state_repository.upsert_state(
-                    db,
+        # 获取 prev_state
+        prev_state_orm = await monitor_state_repository.get_state(
+            db, instrument_id=instrument_id, strategy_version_id=strategy_version.id,
+        )
+        prev_state = self._orm_to_runtime_state(prev_state_orm) if prev_state_orm else None
+
+        # detect_events
+        event_drafts: list[Any] = []
+        try:
+            event_drafts = await runtime.detect_events(context, prev_state, curr_state)
+        except Exception as exc:
+            logger.warning(
+                "detect_events 失败 instrument_id=%s: %s", instrument_id, exc,
+            )
+
+        result.total_events_detected += len(event_drafts)
+
+        # f. 保存结果：更新 MonitorEvaluation 为 SUCCEEDED
+        metrics_output: dict[str, Any] = {
+            "state": curr_state.state,
+            "events_detected": len(event_drafts),
+        }
+        try:
+            await db.execute(
+                pg_insert(MonitorEvaluation)
+                .values(
+                    id=evaluation_id,
+                    strategy_version_id=strategy_version.id,
                     instrument_id=instrument_id,
-                    strategy_version_id=version.id,
-                    payload=curr_state.state,
-                    bar_time=curr_state.updated_at or now,
-                    calculation_id=curr_state.calculation_id or str(uuid.uuid4()),
-                    state_schema_version=curr_state.state_version,
+                    source_bar_time=source_bar_time,
+                    status="SUCCEEDED",
+                    metrics=metrics_output,
                 )
-            except Exception as exc:
-                logger.warning(
-                    "upsert monitor_state 失败 instrument_id=%s version_id=%s: %s",
-                    instrument_id, version.id, exc,
+                .on_conflict_do_update(
+                    index_elements=["id"],
+                    set_={
+                        "status": "SUCCEEDED",
+                        "metrics": metrics_output,
+                    },
                 )
+            )
+        except Exception as exc:
+            logger.warning(
+                "更新 MonitorEvaluation 为 SUCCEEDED 失败 evaluation_id=%s: %s",
+                evaluation_id, exc,
+            )
 
-            # 收集事件草稿
-            for draft in event_drafts:
-                all_event_drafts.append((version, draft))
+        # g. upsert MonitorState
+        try:
+            await monitor_state_repository.upsert_state(
+                db,
+                instrument_id=instrument_id,
+                strategy_version_id=strategy_version.id,
+                payload=curr_state.state,
+                bar_time=curr_state.updated_at or now,
+                calculation_id=curr_state.calculation_id or str(uuid.uuid4()),
+                state_schema_version=curr_state.state_version,
+            )
+        except Exception as exc:
+            logger.warning(
+                "upsert monitor_state 失败 instrument_id=%s version_id=%s: %s",
+                instrument_id, strategy_version.id, exc,
+            )
 
-        # d. 对每个检测到的事件：冷却检查 → 写入
+        # h. 对每个检测到的事件：冷却检查 → 写入
         written_events: list[StrategyEvent] = []
-        for version, draft in all_event_drafts:
+        for draft in event_drafts:
             # 冷却检查
             in_cooldown = await self._check_event_cooldown(
                 db, instrument_id, draft.event_type, draft.logical_entity,
@@ -752,7 +537,7 @@ class MonitorBatchService:
                 event_orm = await strategy_event_repository.write_event(
                     db,
                     event_key=draft.dedupe_key,
-                    strategy_version_id=version.id,
+                    strategy_version_id=strategy_version.id,
                     instrument_id=instrument_id,
                     event_type=draft.event_type,
                     event_time=draft.event_time,
@@ -774,6 +559,41 @@ class MonitorBatchService:
             written_events.append(event_orm)
 
         return written_events
+
+    async def _mark_evaluation_failed(
+        self,
+        db: AsyncSession,
+        evaluation_id: uuid.UUID,
+        error_message: str,
+    ) -> None:
+        """将 MonitorEvaluation 标记为 FAILED。
+
+        Args:
+            db: 异步会话
+            evaluation_id: 评估记录 ID
+            error_message: 错误信息
+        """
+        try:
+            await db.execute(
+                pg_insert(MonitorEvaluation)
+                .values(
+                    id=evaluation_id,
+                    status="FAILED",
+                    error_code=error_message[:500] if error_message else None,
+                )
+                .on_conflict_do_update(
+                    index_elements=["id"],
+                    set_={
+                        "status": "FAILED",
+                        "error_code": error_message[:500] if error_message else None,
+                    },
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "标记 MonitorEvaluation 为 FAILED 失败 evaluation_id=%s: %s",
+                evaluation_id, exc,
+            )
 
     async def _check_event_cooldown(
         self,
@@ -1101,6 +921,9 @@ class MonitorBatchService:
     ) -> None:
         """按用户自选股归属合并通知，每个用户一张飞书卡片。
 
+        通知通过 Outbox 管道投递：
+        create_message → write_outbox(notification.message.created) → Delivery Worker → deliver_message
+
         Args:
             db: 异步会话
             all_events: 本周期所有写入的事件
@@ -1108,8 +931,8 @@ class MonitorBatchService:
             instrument_extra_info: instrument_id → {priority, weighted_score, ...} 附加信息
             result: 累计结果
         """
-        from app.models.notification import NotificationChannel
-        from app.services.notification_service import create_message, deliver_message
+        from app.services.notification_service import create_message
+        from app.services.outbox_relay import write_outbox
 
         # 构建 instrument_id → events 映射
         instrument_events: dict[uuid.UUID, list[StrategyEvent]] = {}
@@ -1140,7 +963,7 @@ class MonitorBatchService:
                 if events:
                     user_events_map.setdefault(uid, []).extend(events)
 
-        # 对每个用户发送合并通知
+        # 对每个用户创建通知消息并写入 Outbox（由 Delivery Worker 异步投递）
         for user_id, user_events in user_events_map.items():
             total_inst = user_instrument_count.get(user_id, 0)
             try:
@@ -1170,41 +993,29 @@ class MonitorBatchService:
                 )
                 continue
 
-            # 查询用户活跃通知渠道
-            ch_stmt = select(NotificationChannel).where(
-                NotificationChannel.user_id == user_id,
-                NotificationChannel.status == "active",
-            )
-            ch_result = await db.execute(ch_stmt)
-            channels = list(ch_result.scalars().all())
-
-            # 投递到每个活跃渠道
-            for channel in channels:
-                try:
-                    delivery = await deliver_message(
-                        db=db,
-                        message_id=message.id,
-                        channel_id=channel.id,
-                    )
-                    if delivery.status == "success":
-                        result.total_notifications_created += 1
-                        logger.info(
-                            "合并通知投递成功: user_id=%s channel=%s events=%d",
-                            user_id, channel.adapter_type, len(user_events),
-                        )
-                    else:
-                        logger.warning(
-                            "合并通知投递失败: user_id=%s channel=%s status=%s error=%s",
-                            user_id, channel.adapter_type, delivery.status,
-                            delivery.last_error_code,
-                        )
-                except Exception as exc:
-                    logger.warning(
-                        "合并通知投递异常: user_id=%s channel=%s: %s",
-                        user_id, channel.adapter_type, exc,
-                    )
+            # 写入 Outbox：Delivery Worker 将异步投递到用户活跃渠道
+            try:
+                await write_outbox(
+                    db=db,
+                    event_type="notification.message.created",
+                    payload={
+                        "message_id": str(message.id),
+                        "user_id": str(user_id),
+                    },
+                    aggregate_type="notification_message",
+                    aggregate_id=message.id,
+                )
+                result.total_notifications_created += 1
+            except Exception as exc:
+                logger.warning(
+                    "写入通知 Outbox 失败 user_id=%s message_id=%s: %s",
+                    user_id, message.id, exc,
+                )
 
         # 卡片投递完成后，为每只触发股票渲染 PNG 并发送图片
+        # TODO: [monitor_batch] _send_chart_images 直接调用 adapter.send_image()，
+        # 绕过 Outbox 管道。待 Outbox 管道支持图片投递后，应改为写入 Outbox 由
+        # Delivery Worker 统一处理，与卡片通知保持一致的投递语义。
         await self._send_chart_images(
             db, instrument_events, instrument_info_cache, instrument_user_map,
         )
@@ -1465,6 +1276,9 @@ if __name__ == "__main__":
     service = MonitorBatchService()
     assert hasattr(service, "execute_monitor_cycle")
     assert callable(service.execute_monitor_cycle)
+    assert hasattr(service, "_get_watchlist_monitor_version")
+    assert hasattr(service, "_process_instrument_evaluation")
+    assert hasattr(service, "_mark_evaluation_failed")
     print(f"MonitorBatchService: {service} ✓")
 
     # 3. 验证 _orm_to_runtime_state 方法

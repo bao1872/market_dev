@@ -341,125 +341,6 @@ export interface WatchlistListResponse {
 }
 
 // ============================================================
-// Monitoring Plan 领域类型
-// ============================================================
-
-/** 监控方案成员 */
-export interface MonitoringPlanMember {
-  id: string
-  revision_id: string
-  strategy_definition_id: string
-  strategy_version_id: string | null
-  version_policy: string
-  event_type: string
-  role: string
-  position: number
-  required: boolean
-  enabled: boolean
-  params: Record<string, unknown>
-  conditions: unknown[]
-}
-
-/** 监控方案版本 */
-export interface MonitoringPlanRevision {
-  id: string
-  monitoring_plan_id: string
-  revision: number
-  mode: string
-  confirmation_window_seconds: number
-  ordered: boolean
-  cooldown_seconds: number
-  process_event_policy: string
-  notification_config: Record<string, unknown>
-  created_by: string
-  created_at: string
-  members: MonitoringPlanMember[]
-}
-
-/** 监控方案 */
-export interface MonitoringPlan {
-  id: string
-  user_id: string
-  name: string
-  description: string | null
-  status: string
-  current_revision: number
-  created_at: string
-  updated_at: string
-  current_revision_detail: MonitoringPlanRevision | null
-}
-
-/** 监控方案列表响应 */
-export interface MonitoringPlanListResponse {
-  items: MonitoringPlan[]
-  total: number
-}
-
-/** 监控方案验证结果 */
-export interface MonitoringPlanValidateResponse {
-  valid: boolean
-  errors: string[]
-  warnings: string[]
-}
-
-/** 监控组合状态 */
-export interface MonitoringPlanState {
-  id: string
-  user_id: string
-  monitoring_plan_id: string
-  revision_id: string
-  instrument_id: string
-  status: string
-  window_started_at: string | null
-  window_deadline_at: string | null
-  cooldown_until: string | null
-  confirmed_member_ids: string[]
-  vetoed_by_member_id: string | null
-  state_payload: Record<string, unknown>
-  lock_version: number
-  updated_at: string
-}
-
-/** 监控组合状态列表响应 */
-export interface MonitoringPlanStateListResponse {
-  items: MonitoringPlanState[]
-  total: number
-}
-
-/** 组合事件证据 */
-export interface CompositeEventEvidence {
-  composite_event_id: string
-  member_id: string
-  strategy_event_id: string
-  summary: Record<string, unknown>
-}
-
-/** 组合监控事件（列表项，不含 evidence） */
-export interface CompositeMonitorEvent {
-  id: string
-  user_id: string
-  monitoring_plan_id: string
-  revision_id: string
-  instrument_id: string
-  event_type: string
-  event_time: string
-  composite_event_key: string
-  payload: Record<string, unknown>
-  created_at: string
-}
-
-/** 组合监控事件详情（含 evidence） */
-export interface CompositeMonitorEventDetail extends CompositeMonitorEvent {
-  evidence: CompositeEventEvidence[]
-}
-
-/** 组合监控事件列表响应 */
-export interface CompositeMonitorEventListResponse {
-  items: CompositeMonitorEvent[]
-  total: number
-}
-
-// ============================================================
 // Bar 领域类型
 // ============================================================
 
@@ -580,6 +461,24 @@ export interface MemberListResponse {
 }
 
 // ============================================================
+// Version 领域类型
+// ============================================================
+
+/** 版本信息响应 */
+export interface VersionInfo {
+  git_sha: string
+  build_time: string
+  app_version: string
+  alembic_revision: string
+}
+
+/** 获取后端版本信息（无需认证） */
+export async function getVersion(): Promise<VersionInfo> {
+  const res = await apiClient.get<VersionInfo>('/version')
+  return res.data
+}
+
+// ============================================================
 // Market Status 领域类型
 // ============================================================
 
@@ -639,46 +538,6 @@ export interface NotificationPreviewRequest {
   message_type: string
   context: Record<string, unknown>
   locale?: string
-}
-
-/** 监控方案成员请求 */
-export interface MonitoringPlanMemberRequest {
-  strategy_definition_id: string
-  strategy_version_id?: string
-  version_policy: string
-  event_type: string
-  role: string
-  position: number
-  required?: boolean
-  enabled?: boolean
-  params?: Record<string, unknown>
-  conditions?: unknown[]
-}
-
-/** 创建监控方案请求 */
-export interface MonitoringPlanCreateRequest {
-  name: string
-  description?: string
-  mode: string
-  confirmation_window_seconds?: number
-  ordered?: boolean
-  cooldown_seconds?: number
-  process_event_policy?: string
-  notification_config?: Record<string, unknown>
-  members: MonitoringPlanMemberRequest[]
-}
-
-/** 更新监控方案请求 */
-export interface MonitoringPlanUpdateRequest {
-  name?: string
-  description?: string
-  mode?: string
-  confirmation_window_seconds?: number
-  ordered?: boolean
-  cooldown_seconds?: number
-  process_event_policy?: string
-  notification_config?: Record<string, unknown>
-  members?: MonitoringPlanMemberRequest[]
 }
 
 /** 邀请码生成请求 */
@@ -1172,101 +1031,6 @@ export async function toggleMemoNotify(
     `/instruments/${instrumentId}/memo/notify`,
     payload,
   )
-  return data
-}
-
-// ============================================================
-// ===== Monitoring Plans 端点 =====
-// ============================================================
-
-/** 查询当前用户的监控方案列表 */
-export async function getMonitoringPlans(status?: string): Promise<MonitoringPlanListResponse> {
-  const { data } = await apiClient.get<MonitoringPlanListResponse>('/monitoring-plans', {
-    params: { status },
-  })
-  return data
-}
-
-/** 查询方案详情（含当前 revision + 成员） */
-export async function getMonitoringPlan(planId: string): Promise<MonitoringPlan> {
-  const { data } = await apiClient.get<MonitoringPlan>(`/monitoring-plans/${planId}`)
-  return data
-}
-
-/** 创建监控方案（同时创建首个 revision + 成员） */
-export async function createMonitoringPlan(payload: MonitoringPlanCreateRequest): Promise<MonitoringPlan> {
-  const { data } = await apiClient.post<MonitoringPlan>('/monitoring-plans', payload)
-  return data
-}
-
-/** 更新方案（创建新 revision，原 revision 保留） */
-export async function updateMonitoringPlan(
-  planId: string,
-  payload: MonitoringPlanUpdateRequest,
-): Promise<MonitoringPlan> {
-  const { data } = await apiClient.put<MonitoringPlan>(`/monitoring-plans/${planId}`, payload)
-  return data
-}
-
-/** 验证方案（校验成员合法性等） */
-export async function validateMonitoringPlan(planId: string): Promise<MonitoringPlanValidateResponse> {
-  const { data } = await apiClient.post<MonitoringPlanValidateResponse>(
-    `/monitoring-plans/${planId}/validate`,
-  )
-  return data
-}
-
-/** 暂停方案（status: active -> paused） */
-export async function pauseMonitoringPlan(planId: string): Promise<MonitoringPlan> {
-  const { data } = await apiClient.post<MonitoringPlan>(`/monitoring-plans/${planId}/pause`)
-  return data
-}
-
-/** 恢复方案（status: paused -> active） */
-export async function resumeMonitoringPlan(planId: string): Promise<MonitoringPlan> {
-  const { data } = await apiClient.post<MonitoringPlan>(`/monitoring-plans/${planId}/resume`)
-  return data
-}
-
-/** 查询方案状态（当前 revision 下的所有股票状态） */
-export async function getMonitoringPlanStates(
-  planId: string,
-  status?: string,
-): Promise<MonitoringPlanStateListResponse> {
-  const { data } = await apiClient.get<MonitoringPlanStateListResponse>(
-    `/monitoring-plans/${planId}/states`,
-    { params: { status } },
-  )
-  return data
-}
-
-/** 查询方案下的组合事件 */
-export async function getMonitoringPlanEvents(
-  planId: string,
-  params?: { event_type?: string; start_time?: string; end_time?: string; limit?: number },
-): Promise<CompositeMonitorEventListResponse> {
-  const { data } = await apiClient.get<CompositeMonitorEventListResponse>(
-    `/monitoring-plans/${planId}/events`,
-    { params },
-  )
-  return data
-}
-
-/** 查询个股组合状态（可通过 plan_id 过滤） */
-export async function getInstrumentCompositeState(
-  instrumentId: string,
-  planId?: string,
-): Promise<MonitoringPlanStateListResponse> {
-  const { data } = await apiClient.get<MonitoringPlanStateListResponse>(
-    `/instruments/${instrumentId}/composite-state`,
-    { params: { plan_id: planId } },
-  )
-  return data
-}
-
-/** 查询组合事件详情（含 evidence） */
-export async function getCompositeEventDetail(eventId: string): Promise<CompositeMonitorEventDetail> {
-  const { data } = await apiClient.get<CompositeMonitorEventDetail>(`/composite-events/${eventId}`)
   return data
 }
 

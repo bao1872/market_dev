@@ -1737,20 +1737,6 @@ button.switch {
   gap: 6px;
 }
 
-// ===== V1.6.3 MonitoringPlanEditorPage 补充样式 =====
-// composer 卡片头部操作区：展开/收起 + 移除按钮横向排列
-.composer-head-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: none;
-}
-
-// 预览区小标题间距（"最近组合事件"）
-.preview-section-title {
-  margin: 16px 0 9px;
-}
-
 
 
 // ===== V1.6.3 AdminIndexPage 补充样式 =====

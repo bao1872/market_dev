@@ -1,5 +1,7 @@
 """CompositeMonitorEvent / CompositeEventEvidence ORM 模型 - 组合监控事件与证据（C8）。
 
+[LEGACY] 本模块已从主业务流程中移除，仅保留 ORM 映射以兼容现有数据库表。
+
 对应迁移 008_monitoring_plans 中的两张表：
 - composite_monitor_events: 组合监控事件（composite_event_key 唯一，幂等写入）
 - composite_event_evidence: 组合事件证据链（引用 StrategyEvent ID，冻结策略版本/事件类型/事件时间/摘要）

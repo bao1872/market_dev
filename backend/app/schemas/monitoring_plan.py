@@ -1,5 +1,7 @@
 """MonitoringPlan Pydantic schemas - 监控组合方案请求与响应模型（C5/C6/C8）。
 
+[LEGACY] 本模块已从主业务流程中移除，仅保留代码以备参考。
+
 提供：
 - MonitoringPlanMemberRequest: 成员创建/更新请求
 - MonitoringPlanCreateRequest: 创建方案请求（user_id 由上下文注入）
