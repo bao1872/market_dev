@@ -9,7 +9,6 @@ import LoginPage from './pages/LoginPage'
 import MembershipExpiredPage from './pages/MembershipExpiredPage'
 import IndexPage from './pages/IndexPage'
 import ScreenerPage from './pages/ScreenerPage'
-import StrategyPlanEditorPage from './pages/StrategyPlanEditorPage'
 import WatchlistPage from './pages/WatchlistPage'
 import MonitoringPlanEditorPage from './pages/MonitoringPlanEditorPage'
 import StockDetailPage from './pages/StockDetailPage'
@@ -56,7 +55,6 @@ export const router = createBrowserRouter([
       // 用户页面
       { path: '/', element: <IndexPage /> },
       { path: '/screener', element: <ScreenerPage /> },
-      { path: '/strategy-plan-editor', element: <StrategyPlanEditorPage /> },
       { path: '/watchlist', element: <WatchlistPage /> },
       { path: '/monitoring-plan-editor', element: <MonitoringPlanEditorPage /> },
       { path: '/stock/:symbol', element: <StockDetailPage /> },

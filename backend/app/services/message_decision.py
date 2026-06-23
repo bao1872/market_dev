@@ -1,14 +1,14 @@
-"""C9 消息决策服务 - 消费选股组合结果与监控组合事件，转换为统一 NotificationMessage。
+"""C9 消息决策服务 - 消费监控组合事件，转换为统一 NotificationMessage。
 
 设计：
-- decide_selection_message: 消费 SelectionPlanRun 结果 → SELECTION_PLAN_SUMMARY DTO
 - decide_monitoring_message: 消费 CompositeMonitorEvent → MONITORING_PLAN_CONFIRMED / MONITOR_MEMBER_EVENT DTO
 - decide_and_create: 决策 + 创建 NotificationMessage（幂等，含 Outbox 事件写入）
 
 消费流程：
-1. 选股方案运行完成 → decide_selection_message → SELECTION_PLAN_SUMMARY
-2. 监控组合事件确认 → decide_monitoring_message → MONITORING_PLAN_CONFIRMED
-3. 监控单成员事件 → decide_monitoring_message → MONITOR_MEMBER_EVENT
+1. 监控组合事件确认 → decide_monitoring_message → MONITORING_PLAN_CONFIRMED
+2. 监控单成员事件 → decide_monitoring_message → MONITOR_MEMBER_EVENT
+
+注：选股组合消息决策（decide_selection_message）已随 SelectionPlan 架构弃用而移除。
 
 幂等保证：
 - NotificationMessage.idempotency_key 唯一，相同来源不重复创建
@@ -16,7 +16,7 @@
 
 Inputs:
     db: AsyncSession
-    plan_run_id / composite_event_id: UUID
+    composite_event_id: UUID
 
 How to Run:
     python -m app.services.message_decision    # 自测：验证函数签名（不连 DB）
@@ -37,16 +37,10 @@ from app.repositories.composite_event_repository import (
     get_composite_event,
     list_evidence_by_composite_event,
 )
-from app.repositories.selection_result_repository import (
-    count_matched_results,
-    get_run_with_plan_and_revision,
-    list_results_by_run,
-)
 from app.schemas.notification import NotificationMessageDTO
 from app.services.message_builder import (
     build_monitor_member_event,
     build_monitoring_plan_confirmed,
-    build_selection_plan_summary,
 )
 
 logger = logging.getLogger("message_decision")
@@ -71,82 +65,6 @@ async def _get_instrument_name(db: AsyncSession, instrument_id: UUID) -> str:
         return str(instrument_id)[:8]
     return f"{row.name}({row.symbol})"
 
-
-async def decide_selection_message(
-    db: AsyncSession,
-    plan_run_id: UUID,
-) -> NotificationMessageDTO | None:
-    """消费选股组合运行结果，构建 SELECTION_PLAN_SUMMARY 消息。
-
-    流程：
-    1. 查询 SelectionPlanRun + SelectionPlan + SelectionPlanRevision
-    2. 统计命中数量
-    3. 查询 Top N 命中结果（按 rank_value 降序）
-    4. 构建 SELECTION_PLAN_SUMMARY DTO
-
-    Args:
-        db: 异步会话
-        plan_run_id: 选股方案运行 ID
-
-    Returns:
-        NotificationMessageDTO 或 None（运行不存在或未完成）
-
-    Raises:
-        Exception: 查询失败时补充上下文后 re-raise
-    """
-    # 1. 查询运行记录 + 方案 + 版本
-    run_info = await get_run_with_plan_and_revision(db, plan_run_id)
-    if run_info is None:
-        logger.warning("选股运行不存在: plan_run_id=%s", plan_run_id)
-        return None
-
-    run, plan, revision = run_info
-
-    # 仅 succeeded 状态才生成消息
-    if run.status != "succeeded":
-        logger.info(
-            "选股运行未完成，跳过消息决策: plan_run_id=%s status=%s",
-            plan_run_id, run.status,
-        )
-        return None
-
-    # 2. 统计命中数量
-    final_count = await count_matched_results(db, plan_run_id)
-
-    # 3. 查询 Top N 命中结果
-    results = await list_results_by_run(db, plan_run_id, matched_only=True, limit=10)
-
-    # 4. 构建 items（含股票代码/名称/排名分值）
-    items: list[dict] = []
-    for r in results:
-        instrument_name = await _get_instrument_name(db, r.instrument_id)
-        items.append({
-            "instrument_id": str(r.instrument_id),
-            "name": instrument_name,
-            "rank_value": r.rank_value,
-            "matched_member_count": len(r.matched_member_ids) if r.matched_member_ids else 0,
-            "summary": r.summary,
-        })
-
-    # 5. 构建 DTO
-    dto = build_selection_plan_summary(
-        plan_name=plan.name,
-        trade_date=run.trade_date.isoformat(),
-        operator=revision.operator,
-        final_count=final_count,
-        items=items,
-        resource_refs={
-            "plan_id": str(plan.id),
-            "run_id": str(run.id),
-            "revision_id": str(revision.id),
-        },
-    )
-
-    logger.info(
-        "选股消息决策完成: plan_run_id=%s plan=%s final_count=%s",
-        plan_run_id, plan.name, final_count,
-    )
-    return dto
 
 
 async def decide_monitoring_message(
@@ -274,62 +192,6 @@ async def decide_monitoring_message(
     return dto
 
 
-async def decide_and_create_selection(
-    db: AsyncSession,
-    plan_run_id: UUID,
-    user_id: UUID,
-) -> UUID | None:
-    """决策选股消息并创建 NotificationMessage（含 Outbox 事件）。
-
-    流程：
-    1. decide_selection_message → DTO
-    2. notification_service.create_message（幂等）
-    3. write_outbox 事件（通知投递 worker）
-
-    Args:
-        db: 异步会话
-        plan_run_id: 选股运行 ID
-        user_id: 用户 ID
-
-    Returns:
-        NotificationMessage ID 或 None（无消息可创建）
-    """
-    from app.services.notification_service import create_message
-    from app.services.outbox_relay import write_outbox
-
-    dto = await decide_selection_message(db, plan_run_id)
-    if dto is None:
-        return None
-
-    message = await create_message(
-        db=db,
-        user_id=user_id,
-        message_dto=dto,
-        source_type="selection_plan_run",
-        source_id=plan_run_id,
-    )
-
-    # 写入 Outbox 事件（通知投递 worker 消费）
-    await write_outbox(
-        db=db,
-        event_type="notification.message.created",
-        payload={
-            "message_id": str(message.id),
-            "user_id": str(user_id),
-            "message_type": dto.message_type,
-            "source_type": "selection_plan_run",
-            "source_id": str(plan_run_id),
-        },
-        aggregate_type="notification_message",
-        aggregate_id=message.id,
-    )
-
-    logger.info(
-        "选股消息已创建: message_id=%s plan_run_id=%s",
-        message.id, plan_run_id,
-    )
-    return message.id
-
 
 async def decide_and_create_monitoring(
     db: AsyncSession,
@@ -393,9 +255,7 @@ if __name__ == "__main__":
     import inspect
 
     for fn in (
-        decide_selection_message,
         decide_monitoring_message,
-        decide_and_create_selection,
         decide_and_create_monitoring,
         _get_instrument_name,
     ):

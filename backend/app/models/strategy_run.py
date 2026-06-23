@@ -146,7 +146,7 @@ class StrategyResult(Base):
     """策略结果 - 单只标的在一个交易日的计算输出。
 
     对应迁移 005 strategy_results 表。
-    唯一约束 (strategy_version_id, trade_date, instrument_id) 确保同一版本同一日期同一标的结果唯一。
+    唯一约束 (run_id, instrument_id) 确保同一 run 内同一标的结果唯一，不同 run 的结果互不覆盖。
 
     payload 存储完整结果 JSON（含所有指标），便于详情查询。
     指标同时拆分到 strategy_result_metrics 表以支持高效筛选排序。
@@ -154,12 +154,7 @@ class StrategyResult(Base):
 
     __tablename__ = "strategy_results"
     __table_args__ = (
-        UniqueConstraint(
-            "strategy_version_id",
-            "trade_date",
-            "instrument_id",
-        ),
-        # 与迁移 015 对齐：同一 run 内同一 instrument 结果唯一
+        # 同一 run 内同一 instrument 结果唯一
         UniqueConstraint(
             "run_id",
             "instrument_id",

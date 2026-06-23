@@ -1,4 +1,9 @@
-"""选股组合结果查询仓储（C4 read side）。
+"""[LEGACY] 选股组合结果查询仓储（C4 read side）- 已弃用，保留仅供参考。
+
+新架构使用 selector_query_service 统一查询已发布的选股策略结果，
+不再使用 SelectionPlanRun/Result/Evidence 模型。
+
+选股组合结果查询仓储（C4 read side）。
 
 提供已持久化的 SelectionPlanRun/Result/Evidence 查询能力，
 供 C9 消息决策服务消费选股组合结果。

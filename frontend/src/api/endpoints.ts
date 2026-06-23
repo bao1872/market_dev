@@ -175,6 +175,7 @@ export interface StrategyRun {
   started_at: string | null
   finished_at: string | null
   idempotency_key: string
+  published_at: string | null
 }
 
 /** 策略运行列表响应 */
@@ -200,6 +201,8 @@ export interface StrategyResultListResponse {
   total: number
   page: number
   page_size: number
+  source_total?: number
+  filtered_total?: number
 }
 
 // ============================================================
@@ -457,134 +460,6 @@ export interface CompositeMonitorEventListResponse {
 }
 
 // ============================================================
-// Selection Plan 领域类型
-// ============================================================
-
-/** 选股成员条件 */
-export interface SelectionMemberCondition {
-  id: string
-  member_id: string
-  position: number
-  metric_key: string
-  operator: string
-  value1: unknown
-  value2: unknown | null
-}
-
-/** 选股方案成员 */
-export interface SelectionPlanMember {
-  id: string
-  revision_id: string
-  strategy_definition_id: string
-  strategy_version_id: string | null
-  version_policy: string
-  position: number
-  enabled: boolean
-  params: Record<string, unknown>
-  conditions: SelectionMemberCondition[]
-}
-
-/** 选股方案版本 */
-export interface SelectionPlanRevision {
-  id: string
-  selection_plan_id: string
-  revision: number
-  operator: string
-  missing_member_policy: string
-  universe: Record<string, unknown>
-  sort_spec: unknown[]
-  notification_config: Record<string, unknown>
-  created_by: string
-  created_at: string
-  members: SelectionPlanMember[]
-}
-
-/** 选股方案（主表字段） */
-export interface SelectionPlan {
-  id: string
-  user_id: string
-  name: string
-  description: string | null
-  status: string
-  current_revision: number
-  created_at: string
-  updated_at: string
-}
-
-/** 选股方案详情（含当前版本数据） */
-export interface SelectionPlanDetail extends SelectionPlan {
-  current_revision_data: SelectionPlanRevision | null
-}
-
-/** 选股方案列表响应 */
-export interface SelectionPlanListResponse {
-  items: SelectionPlan[]
-  total: number
-}
-
-/** 选股方案运行记录 */
-export interface SelectionPlanRun {
-  id: string
-  user_id: string
-  selection_plan_id: string
-  revision_id: string
-  trade_date: string
-  status: string
-  input_run_set_hash: string
-  idempotency_key: string
-  started_at: string | null
-  finished_at: string | null
-}
-
-/** 选股方案运行列表响应 */
-export interface SelectionPlanRunListResponse {
-  items: SelectionPlanRun[]
-  total: number
-}
-
-/** 选股方案运行结果 */
-export interface SelectionPlanResult {
-  id: string
-  plan_run_id: string
-  instrument_id: string
-  matched: boolean
-  matched_member_ids: string[]
-  rank_value: number | null
-  summary: Record<string, unknown>
-}
-
-/** 选股方案运行结果列表响应（分页） */
-export interface SelectionPlanResultListResponse {
-  items: SelectionPlanResult[]
-  total: number
-  page: number
-  page_size: number
-}
-
-/** 选股结果证据 */
-export interface SelectionResultEvidence {
-  selection_result_id: string
-  member_id: string
-  strategy_result_id: string | null
-  matched: boolean
-  reason_code: string | null
-  summary: Record<string, unknown>
-}
-
-/** 选股方案预览响应 */
-export interface SelectionPlanPreviewResponse {
-  total: number
-  sample: SelectionPlanResult[]
-  member_hit_stats: Record<string, number>
-}
-
-/** 选股方案验证响应 */
-export interface SelectionPlanValidateResponse {
-  valid: boolean
-  errors: Record<string, unknown>[]
-}
-
-// ============================================================
 // Bar 领域类型
 // ============================================================
 
@@ -806,67 +681,6 @@ export interface MonitoringPlanUpdateRequest {
   members?: MonitoringPlanMemberRequest[]
 }
 
-/** 选股成员条件规格 */
-export interface ConditionSpec {
-  metric_key: string
-  operator: string
-  value: unknown
-  value2?: unknown
-}
-
-/** 选股成员规格 */
-export interface MemberSpec {
-  strategy_key: string
-  version_policy: string
-  strategy_version?: string
-  params?: Record<string, unknown>
-  conditions?: ConditionSpec[]
-  enabled?: boolean
-  position?: number
-}
-
-/** 创建选股方案请求 */
-export interface SelectionPlanCreateRequest {
-  name: string
-  description?: string
-  operator: string
-  missing_member_policy?: string
-  universe?: Record<string, unknown>
-  sort_spec?: Record<string, unknown>[]
-  notification?: Record<string, unknown>
-  members: MemberSpec[]
-}
-
-/** 更新选股方案请求 */
-export interface SelectionPlanUpdateRequest {
-  name?: string
-  description?: string
-  operator?: string
-  missing_member_policy?: string
-  universe?: Record<string, unknown>
-  sort_spec?: Record<string, unknown>[]
-  notification?: Record<string, unknown>
-  members?: MemberSpec[]
-}
-
-/** 克隆选股方案请求 */
-export interface SelectionPlanCloneRequest {
-  name: string
-  description?: string
-}
-
-/** 选股方案运行请求 */
-export interface SelectionPlanRunRequest {
-  trade_date: string
-  trigger_kind?: string
-}
-
-/** 选股方案预览请求 */
-export interface SelectionPlanPreviewRequest {
-  trade_date: string
-  revision_id?: string
-}
-
 /** 邀请码生成请求 */
 export interface InviteCodeCreateRequest {
   count?: number
@@ -901,6 +715,8 @@ export interface StrategyResultQueryParams {
   metric_filters?: string
   sort_by?: string
   sort_desc?: boolean
+  page?: number
+  page_size?: number
   limit?: number
   offset?: number
 }
@@ -1451,118 +1267,6 @@ export async function getInstrumentCompositeState(
 /** 查询组合事件详情（含 evidence） */
 export async function getCompositeEventDetail(eventId: string): Promise<CompositeMonitorEventDetail> {
   const { data } = await apiClient.get<CompositeMonitorEventDetail>(`/composite-events/${eventId}`)
-  return data
-}
-
-// ============================================================
-// ===== Selection Plans 端点 =====
-// ============================================================
-
-/** 查询当前用户的选股方案列表 */
-export async function getSelectionPlans(): Promise<SelectionPlanListResponse> {
-  const { data } = await apiClient.get<SelectionPlanListResponse>('/selection-plans')
-  return data
-}
-
-/** 获取选股方案详情（含当前 revision + members + conditions） */
-export async function getSelectionPlan(planId: string): Promise<SelectionPlanDetail> {
-  const { data } = await apiClient.get<SelectionPlanDetail>(`/selection-plans/${planId}`)
-  return data
-}
-
-/** 创建选股方案（同时生成 revision=1 的初始版本） */
-export async function createSelectionPlan(payload: SelectionPlanCreateRequest): Promise<SelectionPlanDetail> {
-  const { data } = await apiClient.post<SelectionPlanDetail>('/selection-plans', payload)
-  return data
-}
-
-/** 更新选股方案（创建新 revision，不可变快照） */
-export async function updateSelectionPlan(
-  planId: string,
-  payload: SelectionPlanUpdateRequest,
-): Promise<SelectionPlanDetail> {
-  const { data } = await apiClient.put<SelectionPlanDetail>(`/selection-plans/${planId}`, payload)
-  return data
-}
-
-/** 克隆选股方案（复制方案到新方案） */
-export async function cloneSelectionPlan(
-  planId: string,
-  payload: SelectionPlanCloneRequest,
-): Promise<SelectionPlanDetail> {
-  const { data } = await apiClient.post<SelectionPlanDetail>(
-    `/selection-plans/${planId}/clone`,
-    payload,
-  )
-  return data
-}
-
-/** 验证选股方案（校验当前 revision 符合 schema + 语义规则） */
-export async function validateSelectionPlan(planId: string): Promise<SelectionPlanValidateResponse> {
-  const { data } = await apiClient.post<SelectionPlanValidateResponse>(
-    `/selection-plans/${planId}/validate`,
-  )
-  return data
-}
-
-/** 预览选股方案结果（不落库） */
-export async function previewSelectionPlan(
-  planId: string,
-  payload: SelectionPlanPreviewRequest,
-): Promise<SelectionPlanPreviewResponse> {
-  const { data } = await apiClient.post<SelectionPlanPreviewResponse>(
-    `/selection-plans/${planId}/preview`,
-    payload,
-  )
-  return data
-}
-
-/** 执行选股方案（幂等） */
-export async function runSelectionPlan(
-  planId: string,
-  payload: SelectionPlanRunRequest,
-): Promise<SelectionPlanRun> {
-  const { data } = await apiClient.post<SelectionPlanRun>(
-    `/selection-plans/${planId}/run`,
-    payload,
-  )
-  return data
-}
-
-/** 查询方案的运行历史 */
-export async function getSelectionPlanRuns(
-  planId: string,
-  params?: { status?: string; limit?: number; offset?: number },
-): Promise<SelectionPlanRunListResponse> {
-  const { data } = await apiClient.get<SelectionPlanRunListResponse>(
-    `/selection-plans/${planId}/runs`,
-    { params },
-  )
-  return data
-}
-
-/** 查询运行结果（分页） */
-export async function getSelectionPlanRunResults(
-  runId: string,
-  params?: { matched_only?: boolean; limit?: number; offset?: number },
-): Promise<SelectionPlanResultListResponse> {
-  const { data } = await apiClient.get<SelectionPlanResultListResponse>(
-    `/selection-plan-runs/${runId}/results`,
-    { params },
-  )
-  return data
-}
-
-/** 查询成员级结果（证据链） */
-export async function getSelectionPlanMemberResults(
-  runId: string,
-  memberId: string,
-  params?: { matched_only?: boolean; limit?: number; offset?: number },
-): Promise<SelectionResultEvidence[]> {
-  const { data } = await apiClient.get<SelectionResultEvidence[]>(
-    `/selection-plan-runs/${runId}/member-results/${memberId}`,
-    { params },
-  )
   return data
 }
 

@@ -23,11 +23,6 @@ import type {
   NotificationPreviewRequest,
   MonitoringPlanCreateRequest,
   MonitoringPlanUpdateRequest,
-  SelectionPlanCreateRequest,
-  SelectionPlanUpdateRequest,
-  SelectionPlanCloneRequest,
-  SelectionPlanRunRequest,
-  SelectionPlanPreviewRequest,
   InviteCodeCreateRequest,
   InstrumentQueryParams,
   StrategyEventQueryParams,
@@ -604,120 +599,6 @@ export function useCompositeEventDetail(eventId: string | undefined) {
     queryKey: ['composite-events', eventId],
     queryFn: () => api.getCompositeEventDetail(eventId!),
     enabled: !!eventId,
-    staleTime: STALE_REALTIME,
-  })
-}
-
-// ============================================================
-// ===== Selection Plans hooks =====
-// ============================================================
-
-/** 查询当前用户的选股方案列表（1 分钟缓存） */
-export function useSelectionPlans() {
-  return useQuery({
-    queryKey: ['selection-plans'],
-    queryFn: api.getSelectionPlans,
-    staleTime: STALE_PLANS,
-  })
-}
-
-/** 获取选股方案详情（含当前 revision + members + conditions） */
-export function useSelectionPlan(planId: string | undefined) {
-  return useQuery({
-    queryKey: ['selection-plans', planId],
-    queryFn: () => api.getSelectionPlan(planId!),
-    enabled: !!planId,
-    staleTime: STALE_PLANS,
-  })
-}
-
-/** 创建选股方案变更 */
-export function useCreateSelectionPlan() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (payload: SelectionPlanCreateRequest) => api.createSelectionPlan(payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['selection-plans'] })
-    },
-  })
-}
-
-/** 更新选股方案变更 */
-export function useUpdateSelectionPlan() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: ({ planId, payload }: { planId: string; payload: SelectionPlanUpdateRequest }) =>
-      api.updateSelectionPlan(planId, payload),
-    onSuccess: (_data, variables) => {
-      queryClient.invalidateQueries({ queryKey: ['selection-plans'] })
-      queryClient.invalidateQueries({ queryKey: ['selection-plans', variables.planId] })
-    },
-  })
-}
-
-/** 克隆选股方案变更 */
-export function useCloneSelectionPlan() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: ({ planId, payload }: { planId: string; payload: SelectionPlanCloneRequest }) =>
-      api.cloneSelectionPlan(planId, payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['selection-plans'] })
-    },
-  })
-}
-
-/** 验证选股方案变更 */
-export function useValidateSelectionPlan() {
-  return useMutation({
-    mutationFn: (planId: string) => api.validateSelectionPlan(planId),
-  })
-}
-
-/** 预览选股方案结果变更（不落库） */
-export function usePreviewSelectionPlan() {
-  return useMutation({
-    mutationFn: ({ planId, payload }: { planId: string; payload: SelectionPlanPreviewRequest }) =>
-      api.previewSelectionPlan(planId, payload),
-  })
-}
-
-/** 执行选股方案变更（幂等） */
-export function useRunSelectionPlan() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: ({ planId, payload }: { planId: string; payload: SelectionPlanRunRequest }) =>
-      api.runSelectionPlan(planId, payload),
-    onSuccess: (_data, variables) => {
-      queryClient.invalidateQueries({
-        queryKey: ['selection-plans', variables.planId, 'runs'],
-      })
-    },
-  })
-}
-
-/** 查询方案的运行历史 */
-export function useSelectionPlanRuns(
-  planId: string | undefined,
-  params?: { status?: string; limit?: number; offset?: number },
-) {
-  return useQuery({
-    queryKey: ['selection-plans', planId, 'runs', params],
-    queryFn: () => api.getSelectionPlanRuns(planId!, params),
-    enabled: !!planId,
-    staleTime: STALE_REALTIME,
-  })
-}
-
-/** 查询运行结果（分页） */
-export function useSelectionPlanRunResults(
-  runId: string | undefined,
-  params?: { matched_only?: boolean; limit?: number; offset?: number },
-) {
-  return useQuery({
-    queryKey: ['selection-plan-runs', runId, 'results', params],
-    queryFn: () => api.getSelectionPlanRunResults(runId!, params),
-    enabled: !!runId,
     staleTime: STALE_REALTIME,
   })
 }

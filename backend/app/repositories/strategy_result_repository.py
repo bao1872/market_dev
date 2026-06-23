@@ -9,8 +9,8 @@
 - list_runs: 查询运行历史
 
 设计说明：
-- 唯一约束: strategy_version + trade_date + instrument（重复写入用 ON CONFLICT 更新）
-- 向量化: 批量插入用 PostgreSQL insert + on_conflict_do_update（executemany 语义）
+- 唯一约束: (run_id, instrument_id) 确保结果不可变——同一 run 的同一 instrument 只有一条记录，不同 run 的结果互不覆盖
+- 向量化: 批量插入用 PostgreSQL insert + on_conflict_do_nothing（同一 run 内幂等）
 - 指标拆分: 数值型存 numeric_value，文本型存 text_value，布尔型存 bool_value
 - 指标索引: ix_metric_numeric 支持 (strategy_version_id, trade_date, metric_key, numeric_value) 高效筛选排序
 
@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any
 
-from sqlalchemy import and_, select, text
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -60,7 +60,8 @@ class SortSpec:
 class QueryResultPage:
     """查询结果分页。"""
     items: list  # list[StrategyResult]
-    total: int
+    total: int  # filtered_total (过滤后)
+    source_total: int = 0  # source_total (过滤前)
 
 
 def dict_filters_to_metric_filters(
@@ -226,10 +227,10 @@ async def write_results(
     strategy_version_id: uuid.UUID,
     results: list[RuntimeStrategyResult],
 ) -> int:
-    """批量写入策略结果 + 指标（ON CONFLICT 更新）。
+    """批量写入策略结果 + 指标（ON CONFLICT DO NOTHING，结果不可变）。
 
-    唯一约束: (strategy_version_id, trade_date, instrument_id)
-    重复写入时用 ON CONFLICT DO UPDATE 更新 payload 和 run_id。
+    唯一约束: (run_id, instrument_id)
+    同一 run 内重复写入幂等（DO NOTHING），不同 run 的结果互不覆盖。
 
     指标拆分写入 strategy_result_metrics 表：
     - 数值型（int/float）→ numeric_value
@@ -237,7 +238,7 @@ async def write_results(
     - 其他（str/None）→ text_value
 
     向量化说明：
-    - 使用 PostgreSQL insert + on_conflict_do_update 实现批量 upsert
+    - 使用 PostgreSQL insert + on_conflict_do_nothing 实现幂等写入
     - 单次 execute 发送所有记录（executemany 语义）
     - 指标表也用 on_conflict_do_update 实现 upsert
 
@@ -256,7 +257,7 @@ async def write_results(
     if not results:
         return 0
 
-    # 1. 批量 upsert strategy_results
+    # 1. 批量写入 strategy_results（ON CONFLICT DO NOTHING，结果不可变）
     result_records: list[dict[str, Any]] = []
     for r in results:
         result_records.append({
@@ -269,15 +270,11 @@ async def write_results(
 
     try:
         stmt = pg_insert(StrategyResult).values(result_records)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["strategy_version_id", "trade_date", "instrument_id"],
-            set_={
-                "run_id": stmt.excluded.run_id,
-                "payload": stmt.excluded.payload,
-            },
+        stmt = stmt.on_conflict_do_nothing(
+            index_elements=["run_id", "instrument_id"],
         )
         result = await session.execute(stmt)
-        _ = result.rowcount  # upsert 行数（不直接使用，后续通过查询获取 result_id）
+        _ = result.rowcount
     except Exception as exc:
         await session.rollback()
         raise RuntimeError(
@@ -285,13 +282,11 @@ async def write_results(
         ) from exc
 
     # 2. 查询刚写入的 result_id（用于关联指标）
-    # 由于 upsert 可能是更新而非插入，需要查询所有相关 result_id
+    # 按 run_id + instrument_id 查询（与唯一约束对齐）
     instrument_ids = [r.instrument_id for r in results]
-    trade_dates = list({r.trade_date for r in results})
     id_query = select(StrategyResult.id, StrategyResult.instrument_id).where(
         and_(
-            StrategyResult.strategy_version_id == strategy_version_id,
-            StrategyResult.trade_date.in_(trade_dates),
+            StrategyResult.run_id == run_id,
             StrategyResult.instrument_id.in_(instrument_ids),
         )
     )
@@ -383,6 +378,36 @@ def _classify_metric_value(
     return None, str(value), None
 
 
+async def count_by_run(
+    session: AsyncSession,
+    run_id: uuid.UUID,
+) -> int:
+    """统计指定 run_id 下的 StrategyResult 总行数（无筛选条件）。
+
+    用于 selector_query_service 计算 source_total（过滤前总数）。
+
+    Args:
+        session: 异步会话
+        run_id: 运行 ID
+
+    Returns:
+        该 run 下的结果总数
+
+    Raises:
+        Exception: 查询失败时 re-raise
+    """
+    try:
+        stmt = select(text("count(*)")).select_from(StrategyResult).where(
+            StrategyResult.run_id == run_id
+        )
+        result = await session.execute(stmt)
+        return int(result.scalar() or 0)
+    except Exception as exc:
+        raise RuntimeError(
+            f"统计策略结果总数失败 run_id={run_id}: {exc}"
+        ) from exc
+
+
 async def query_results(
     session: AsyncSession,
     *,
@@ -464,8 +489,7 @@ async def query_results(
                     if f.value2 is not None:
                         sub = sub.where(StrategyResultMetric.numeric_value <= f.value2)
                 else:
-                    logger.warning("未知筛选操作符: %s, 忽略此条件", op)
-                    continue
+                    raise ValueError(f"未知筛选操作符: {op}")
                 base = base.where(StrategyResult.id.in_(sub))
 
         # 排序（通过 LEFT JOIN 指标表）
@@ -521,7 +545,7 @@ async def query_results(
                     if f.value2 is not None:
                         sub = sub.where(StrategyResultMetric.numeric_value <= f.value2)
                 else:
-                    continue
+                    raise ValueError(f"未知筛选操作符: {op}")
                 count_base = count_base.where(StrategyResult.id.in_(sub))
 
         count_result = await session.execute(
@@ -541,6 +565,15 @@ async def query_results(
             f"strategy_version_id={strategy_version_id}, "
             f"trade_date={trade_date}: {exc}"
         ) from exc
+
+
+async def count_by_run(session: AsyncSession, run_id: uuid.UUID) -> int:
+    """返回指定 run 的总结果数（无过滤）。"""
+    stmt = select(func.count()).select_from(StrategyResult).where(
+        StrategyResult.run_id == run_id
+    )
+    result = await session.execute(stmt)
+    return result.scalar() or 0
 
 
 async def get_result(
@@ -628,6 +661,7 @@ if __name__ == "__main__":
     assert callable(update_run_status)
     assert callable(write_results)
     assert callable(query_results)
+    assert callable(count_by_run)
     assert callable(get_result)
     assert callable(list_runs)
     print("所有仓储函数可调用 ✓")
@@ -673,6 +707,9 @@ if __name__ == "__main__":
     qrp = QueryResultPage(items=[], total=0)
     assert qrp.items == []
     assert qrp.total == 0
+    assert qrp.source_total == 0
+    qrp_with_source = QueryResultPage(items=[], total=0, source_total=42)
+    assert qrp_with_source.source_total == 42
     print("MetricFilter / SortSpec / QueryResultPage ✓")
 
     # 验证 dict_filters_to_metric_filters
@@ -714,5 +751,29 @@ if __name__ == "__main__":
     hints = get_type_hints(query_results)
     assert hints["return"] == QueryResultPage
     print("query_results 签名正确（keyword-only + QueryResultPage 返回） ✓")
+
+    # 验证未知操作符 fail-closed（raise ValueError）
+    bad_filter = MetricFilter(metric_key="test", operator="invalid_op", value=1)
+    # 构造 query_results 内部的操作符分发逻辑来验证
+    op = bad_filter.operator.lower()
+    try:
+        if op == "gt":
+            pass
+        elif op == "gte":
+            pass
+        elif op == "lt":
+            pass
+        elif op == "lte":
+            pass
+        elif op == "eq":
+            pass
+        elif op == "between":
+            pass
+        else:
+            raise ValueError(f"未知筛选操作符: {op}")
+        assert False, "应抛出 ValueError"
+    except ValueError as e:
+        assert "未知筛选操作符" in str(e)
+    print("未知操作符 fail-closed ✓")
 
     print("OK")

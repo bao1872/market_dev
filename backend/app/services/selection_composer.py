@@ -1,4 +1,9 @@
-"""选股组合引擎（C3）- ALL/ANY 集合运算 + 白名单排名。
+"""[LEGACY] 选股组合引擎（C3）- 已弃用，保留仅供参考。
+
+新架构使用 selector_query_service 统一查询已发布的选股策略结果，
+不再使用 SelectionPlan + Member + Condition 组合执行模式。
+
+选股组合引擎（C3）- ALL/ANY 集合运算 + 白名单排名。
 
 核心职责：
 - compose: 对多个成员的 MemberMatch 结果进行集合运算

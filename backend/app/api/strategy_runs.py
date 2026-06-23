@@ -28,9 +28,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import get_db, require_roles
+from app.core.deps import get_current_active_user, get_db, require_roles
 from app.models.strategy import StrategyVersion
 from app.models.strategy_run import StrategyRun
+from app.models.user import User
 from app.repositories import strategy_result_repository
 from app.repositories.strategy_result_repository import (
     MetricFilter,
@@ -44,6 +45,11 @@ from app.schemas.strategy_run import (
     StrategyRunListResponse,
     StrategyRunResponse,
     TriggerRunRequest,
+)
+from app.services.selector_query_service import (
+    NotSelectorRunError,
+    RunNotFoundError,
+    query_published_selector_results,
 )
 from app.services.strategy_batch_service import StrategyBatchService
 from app.services.strategy_service import (
@@ -484,64 +490,29 @@ async def list_run_results(
     ),
     sort_by: str | None = Query(None, description="排序指标名"),
     sort_desc: bool = Query(False, description="是否降序"),
-    limit: int = Query(100, ge=1, le=500, description="返回上限"),
-    offset: int = Query(0, ge=0, description="偏移量"),
+    universe: str = Query("all", description="股票池: all 全市场 | watchlist 仅自选股"),
+    page: int = Query(1, ge=1, description="页码（从 1 开始）"),
+    page_size: int = Query(50, ge=1, le=500, description="每页条数"),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
 ) -> StrategyResultListResponse:
     """查询运行结果（分页+筛选+排序，需 published）。
 
-    变更：
-    - 移除 matched_only 参数（matched 不再持久化）
-    - 校验 run.status == 'published'（非 published 返回 403）
-    - metric_filters 支持 operator: gt/gte/lt/lte/eq/between
-    - metric_key 白名单校验（从 manifest outputs.filterable 读取）
+    通过 selector_query_service 统一查询，返回 source_total 和 filtered_total。
 
     Args:
         run_id: 运行 ID
         metric_filters: 指标筛选条件 JSON
         sort_by: 排序指标名
         sort_desc: 是否降序
-        limit: 返回上限
-        offset: 偏移量
+        universe: 股票池（all/watchlist）
+        page: 页码
+        page_size: 每页条数
+        current_user: 当前用户（用于 universe=watchlist）
 
     Returns:
-        结果列表响应
+        结果列表响应（含 source_total/filtered_total）
     """
-    # 查询运行记录
-    run_result = await db.execute(
-        select(StrategyRun).where(StrategyRun.id == run_id)
-    )
-    run = run_result.scalar_one_or_none()
-    if run is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"运行不存在: run_id={run_id}",
-        )
-
-    if run.trade_date is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"运行无 trade_date: run_id={run_id}",
-        )
-
-    # 校验 published 状态
-    if run.status != "published":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"运行未发布（当前 {run.status}），仅 published 状态可查询结果",
-        )
-
-    # 加载策略版本（用于 metric_key 白名单校验）
-    version_result = await db.execute(
-        select(StrategyVersion).where(StrategyVersion.id == run.strategy_version_id)
-    )
-    version = version_result.scalar_one_or_none()
-    if version is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"策略版本不存在: strategy_version_id={run.strategy_version_id}",
-        )
-
     # 解析 metric_filters JSON
     filters: list[dict] | None = None
     if metric_filters:
@@ -553,31 +524,40 @@ async def list_run_results(
                 detail=f"metric_filters JSON 解析失败: {e}",
             ) from e
 
-    # 校验 metric_filters
-    if filters:
-        _validate_metric_filters(filters, version)
-
-    # 查询结果（SQL 端过滤，绑定 published run）
+    # 构建 MetricFilter / SortSpec
     metric_filter_list = dict_filters_to_metric_filters(filters)
     sort_spec = SortSpec(field=sort_by, desc=sort_desc) if sort_by else None
-    page = await strategy_result_repository.query_results(
-        db,
-        run_id=run.id,
-        strategy_version_id=run.strategy_version_id,
-        trade_date=run.trade_date,
-        filters=metric_filter_list,
-        sort=sort_spec,
-        limit=limit,
-        offset=offset,
-    )
 
-    result_items = [StrategyResultResponse.model_validate(r) for r in page.items]
-    page_num = offset // limit + 1 if limit > 0 else 1
+    try:
+        result_page = await query_published_selector_results(
+            db,
+            run_id=run_id,
+            user_id=current_user.id,
+            filters=metric_filter_list,
+            sort=sort_spec,
+            page=page,
+            page_size=page_size,
+            universe=universe,
+        )
+    except RunNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        ) from e
+    except NotSelectorRunError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        ) from e
+
+    result_items = [StrategyResultResponse.model_validate(r) for r in result_page.items]
     return StrategyResultListResponse(
         items=result_items,
-        total=page.total,
-        page=page_num,
-        page_size=limit,
+        total=result_page.filtered_total,
+        source_total=result_page.source_total,
+        filtered_total=result_page.filtered_total,
+        page=result_page.page,
+        page_size=result_page.page_size,
     )
 
 

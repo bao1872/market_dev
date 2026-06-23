@@ -37,7 +37,6 @@ const adminNavItems: NavItemDef[] = [
 const pageTitleMap: Record<string, string> = {
   '/': '服务总览',
   '/screener': '选股策略',
-  '/strategy-plan-editor': '选股方案编辑',
   '/watchlist': '我的自选',
   '/monitoring-plan-editor': '监控方案编辑',
   '/settings': '通知与设置',

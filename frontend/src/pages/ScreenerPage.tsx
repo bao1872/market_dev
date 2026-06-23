@@ -1,49 +1,40 @@
 // 选股策略页（受保护路由）
-// 对应原型：screener.html (V1.6.3)
-// 用法：展示用户选股组合方案，支持方案切换、组合结果与单策略明细查看、批量加入自选
+// 数据流：选择 selector 策略 → 加载该策略的 published runs → 选择 run_id → 服务端筛选/排序/分页
 // 路由：/screener
-// 依赖 hooks：useSelectionPlans / useSelectionPlan / useSelectionPlanRuns / useSelectionPlanRunResults / useAddToWatchlist / useStrategies
+// 依赖 hooks：useStrategies / usePublishedRuns / useStrategyRunResults / useAddToWatchlist
 import { useState, useMemo, useCallback } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import clsx from 'clsx'
 import { useToast } from '@/store/toast'
 import {
-  useSelectionPlans,
-  useSelectionPlan,
-  useSelectionPlanRuns,
-  useSelectionPlanRunResults,
-  useAddToWatchlist,
   useStrategies,
   usePublishedRuns,
   useStrategyRunResults,
-  useBatchInstruments,
+  useAddToWatchlist,
 } from '@/hooks/useApi'
 import { StrategyDataTable } from '@/components/StrategyDataTable'
-import type { DataTableColumn } from '@/components/StrategyDataTable'
-import type { SelectionPlanResult, StrategyResult, Instrument } from '@/api/endpoints'
+import type { DataTableColumn, DataTableQuery } from '@/components/StrategyDataTable'
+import type { StrategyResult, StrategyResultQueryParams } from '@/api/endpoints'
+
+// ===== 常量 =====
+const PAGE_SIZE = 50
 
 // ===== 类型定义 =====
 
-// 表格行类型（从 SelectionPlanResult 派生）
-// 扩展索引签名以满足 StrategyDataTable 的 Row extends Record<string, unknown> 约束
+// 表格行类型（从 StrategyResult.payload 派生）
 interface ScreenerRow {
   resultId: string
   instrumentId: string
-  matched: boolean
-  matchedMemberIds: string[]
-  rankValue: number | null
-  summary: Record<string, unknown>
+  payload: Record<string, unknown>
   [key: string]: unknown
 }
 
 // ===== summary 字段提取工具 =====
-// SelectionPlanResult.summary 为 Record<string, unknown>，字段名由后端策略决定
-// 按候选 key 列表取第一个非空值，兼容不同策略的命名差异
 
-/** 从 summary 中按候选 key 列表取第一个非空值 */
-function pickSummary(summary: Record<string, unknown>, keys: string[]): unknown {
+/** 从 payload 中按候选 key 列表取第一个非空值 */
+function pickPayload(payload: Record<string, unknown>, keys: string[]): unknown {
   for (const k of keys) {
-    const v = summary[k]
+    const v = payload[k]
     if (v !== undefined && v !== null && v !== '') return v
   }
   return undefined
@@ -89,43 +80,22 @@ function fmtRatio(v: unknown): string {
 
 /** 从 row 中提取股票展示信息（symbol/name/market） */
 function getStockDisplay(row: ScreenerRow): { symbol: string; name: string; market: string } {
-  const s = row.summary
+  const p = row.payload
   return {
     symbol: String(
-      pickSummary(s, ['symbol', 'code', 'instrument_symbol']) ?? row.instrumentId.slice(0, 8),
+      pickPayload(p, ['symbol', 'code', 'instrument_symbol']) ?? row.instrumentId.slice(0, 8),
     ),
-    name: String(pickSummary(s, ['name', 'instrument_name', 'stock_name']) ?? '-'),
-    market: String(pickSummary(s, ['market', 'board', 'exchange']) ?? ''),
+    name: String(pickPayload(p, ['name', 'instrument_name', 'stock_name']) ?? '-'),
+    market: String(pickPayload(p, ['market', 'board', 'exchange']) ?? ''),
   }
 }
 
-/** 将 SelectionPlanResult 转换为 ScreenerRow */
-function toRow(r: SelectionPlanResult): ScreenerRow {
+/** 将 StrategyResult 转换为 ScreenerRow */
+function toRow(r: StrategyResult): ScreenerRow {
   return {
     resultId: r.id,
     instrumentId: r.instrument_id,
-    matched: r.matched,
-    matchedMemberIds: r.matched_member_ids,
-    rankValue: r.rank_value,
-    summary: r.summary,
-  }
-}
-
-/**
- * 将 StrategyResult 转换为 ScreenerRow（降级模式：无选股方案时使用）。
- *
- * StrategyResult.payload 包含策略指标（如 dsa_dir_bars, vwap_ret_avg, offset_mean 等），
- * 需映射到 ScreenerRow.summary。无选股方案时结果为原始计算数据，matched=false，
- * 表示未经选股方案筛选，非"命中"状态。
- */
-function strategyResultToRow(r: StrategyResult): ScreenerRow {
-  return {
-    resultId: r.id,
-    instrumentId: r.instrument_id,
-    matched: false,
-    matchedMemberIds: [],
-    rankValue: null,
-    summary: r.payload,
+    payload: r.payload,
   }
 }
 
@@ -134,146 +104,72 @@ export default function ScreenerPage() {
   const navigate = useNavigate()
   const toast = useToast.getState()
 
-  // --- 方案列表 ---
-  const plansQuery = useSelectionPlans()
-  const plans = plansQuery.data?.items ?? []
-  const hasPlans = plans.length > 0
-
-  // --- 当前选中方案（默认第一个） ---
-  const [selectedPlanId, setSelectedPlanId] = useState<string>('')
-  const activePlanId = selectedPlanId || plans[0]?.id || ''
-  const planDetailQuery = useSelectionPlan(activePlanId || undefined)
-  const planDetail = planDetailQuery.data
-  const revision = planDetail?.current_revision_data
-  const members = revision?.members ?? []
-  const operator = revision?.operator ?? 'AND'
-  const planName = hasPlans ? (planDetail?.name ?? '选股方案') : 'DSA 方向稳定性选股'
-
-  // --- 策略目录（将 strategy_definition_id 映射到展示名） ---
+  // --- 策略目录（kind=selector） ---
   const strategiesQuery = useStrategies('selector')
-  const strategyMap = useMemo(() => {
-    const m = new Map<string, { key: string; name: string }>()
-    for (const s of strategiesQuery.data?.items ?? []) {
-      m.set(s.id, { key: s.strategy_key, name: s.display_name })
-    }
-    return m
-  }, [strategiesQuery.data])
+  const selectorStrategies = strategiesQuery.data?.items ?? []
 
-  // --- 方案运行历史（用于日期下拉） ---
-  const runsQuery = useSelectionPlanRuns(activePlanId || undefined, { limit: 30 })
+  // --- 当前选中的策略（默认第一个） ---
+  const [selectedStrategyKey, setSelectedStrategyKey] = useState<string>('')
+  const activeStrategyKey = selectedStrategyKey || selectorStrategies[0]?.strategy_key || ''
+
+  // --- 已发布的运行批次 ---
+  const runsQuery = usePublishedRuns(activeStrategyKey || undefined, { limit: 30 })
   const runs = runsQuery.data?.items ?? []
 
-  // --- 降级模式：无选股方案时，使用 published-runs API（普通用户可访问） ---
-  const strategyRunsQuery = usePublishedRuns(hasPlans ? undefined : 'dsa_selector', { limit: 30 })
-  const strategyRuns = strategyRunsQuery.data?.items ?? []
-
-  // --- 当前选中运行（默认最新一条） ---
+  // --- 当前选中的运行（默认最新一条） ---
   const [selectedRunId, setSelectedRunId] = useState<string>('')
-  // 有选股方案时用 selection_plan_runs，无方案时用 strategy_runs
-  const activeRunId = selectedRunId
-    || (hasPlans ? runs[0]?.id : strategyRuns[0]?.id)
-    || ''
-  const activeRun = hasPlans
-    ? runs.find((r) => r.id === activeRunId)
-    : strategyRuns.find((r) => r.id === activeRunId)
+  const activeRunId = selectedRunId || runs[0]?.id || ''
+  const activeRun = runs.find((r) => r.id === activeRunId)
 
-  // --- 运行结果（服务端分页，客户端按 tab 过滤） ---
-  // 有选股方案时用 selection_plan_run_results，无方案时用 strategy_run_results
-  // limit=5000 覆盖全市场（A 股约 5000 只），超出时显示截断警告
-  const RESULTS_LIMIT = 5000
-  const planResultsQuery = useSelectionPlanRunResults(
-    hasPlans ? activeRunId || undefined : undefined,
-    { matched_only: false, limit: RESULTS_LIMIT },
-  )
-  const strategyResultsQuery = useStrategyRunResults(
-    hasPlans ? undefined : activeRunId || undefined,
-    { limit: RESULTS_LIMIT },
-  )
-  const allResults: SelectionPlanResult[] = planResultsQuery.data?.items ?? []
-  const allStrategyResults: StrategyResult[] = strategyResultsQuery.data?.items ?? []
-  const resultsTotal = hasPlans
-    ? (planResultsQuery.data?.total ?? 0)
-    : (strategyResultsQuery.data?.total ?? 0)
-  const resultsTruncated = allResults.length + allStrategyResults.length < resultsTotal
+  // --- 服务端分页/筛选/排序状态 ---
+  const [query, setQuery] = useState<DataTableQuery>({
+    page: 1,
+    pageSize: PAGE_SIZE,
+    filters: [],
+  })
 
-  // --- 降级模式：根据 strategy_results 的 instrument_id 列表批量查询股票主数据 ---
-  // 避免加载全量 8268 只股票（page_size 上限 100），改为按需批量查询
-  const instrumentIds = useMemo(
-    () => (hasPlans ? undefined : allStrategyResults.map((r) => r.instrument_id)),
-    [hasPlans, allStrategyResults],
-  )
-  const instrumentsQuery = useBatchInstruments(instrumentIds)
-  const instrumentMap = useMemo(() => {
-    const m = new Map<string, Instrument>()
-    for (const inst of instrumentsQuery.data?.items ?? []) {
-      m.set(inst.id, inst)
+  // --- 运行结果（服务端分页） ---
+  const resultParams: StrategyResultQueryParams = useMemo(() => {
+    const params: StrategyResultQueryParams = {
+      page: query.page,
+      page_size: query.pageSize,
     }
-    return m
-  }, [instrumentsQuery.data])
-
-  const allRows: ScreenerRow[] = useMemo(() => {
-    if (hasPlans) {
-      return allResults.map(toRow)
+    if (query.sort) {
+      params.sort_by = query.sort.key
+      params.sort_desc = query.sort.direction === 'desc'
     }
-    // 降级模式：将 StrategyResult 转换为 ScreenerRow，并补充 instrument 信息
-    return allStrategyResults.map((r) => {
-      const row = strategyResultToRow(r)
-      const inst = instrumentMap.get(r.instrument_id)
-      if (inst) {
-        row.summary.symbol = inst.symbol
-        row.summary.name = inst.name
-        row.summary.market = inst.market
-      }
-      return row
-    })
-  }, [hasPlans, allResults, allStrategyResults, instrumentMap])
+    if (query.filters.length > 0) {
+      // 将 filters 转为 metric_filters 字符串格式：key>=value;key<=value
+      const parts = query.filters.map((f) => {
+        if (f.operator === 'gte') return `${f.key}>=${f.value}`
+        if (f.operator === 'lte') return `${f.key}<=${f.value}`
+        if (f.operator === 'eq') return `${f.key}==${f.value}`
+        return `${f.key}=${f.value}`
+      })
+      params.metric_filters = parts.join(';')
+    }
+    return params
+  }, [query])
+
+  const resultsQuery = useStrategyRunResults(activeRunId || undefined, resultParams)
+  const resultItems = resultsQuery.data?.items ?? []
+  const totalResults = resultsQuery.data?.total ?? 0
+  const sourceTotal = resultsQuery.data?.source_total
+  const filteredTotal = resultsQuery.data?.filtered_total
+
+  // --- 行数据 ---
+  const rows: ScreenerRow[] = useMemo(
+    () => resultItems.map(toRow),
+    [resultItems],
+  )
 
   // --- UI 状态 ---
-  const [activeTab, setActiveTab] = useState<string>('selectorCombined')
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set())
 
   // --- 加入自选变更 ---
   const addWatchlistMutation = useAddToWatchlist()
 
   // ===== 派生数据 =====
-
-  // 组合命中结果（有方案时 matched=true；无方案时显示全部原始数据）
-  const combinedRows = useMemo(() => {
-    if (!hasPlans) return allRows
-    return allRows.filter((r) => r.matched)
-  }, [hasPlans, allRows])
-
-  // 按成员过滤的命中结果
-  const getMemberRows = useCallback(
-    (memberId: string) => allRows.filter((r) => r.matchedMemberIds.includes(memberId)),
-    [allRows],
-  )
-
-  // 成员展示信息列表
-  const memberInfos = useMemo(() => {
-    return members.map((m, i) => {
-      const strategy = strategyMap.get(m.strategy_definition_id)
-      return {
-        member: m,
-        index: i,
-        strategyKey: strategy?.key ?? '',
-        strategyName: strategy?.name ?? `策略 ${i + 1}`,
-        rows: getMemberRows(m.id),
-      }
-    })
-  }, [members, strategyMap, getMemberRows])
-
-  // 成员名称列表（用于 ribbon 展示）
-  const memberNames = memberInfos.map((m) => m.strategyName)
-
-  // 计算完成时间
-  const finishedTime = activeRun?.finished_at
-    ? new Date(activeRun.finished_at).toLocaleTimeString('zh-CN', {
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-      })
-    : '-'
 
   // 批次元数据
   const batchMeta = useMemo(() => {
@@ -289,53 +185,56 @@ export default function ScreenerPage() {
         : run.status === 'running'
           ? '计算中'
           : run.status
-    const matchedCount = hasPlans ? combinedRows.length : 0
     return {
       dataDate,
       runId: run.id.slice(0, 8),
       status: statusLabel,
-      totalResults: resultsTotal,
-      matchedCount,
       isOk: run.status === 'completed',
     }
-  }, [activeRun, hasPlans, combinedRows.length, resultsTotal])
+  }, [activeRun])
 
   // ===== 事件处理 =====
 
   /** 跳转个股详情 */
   const goDetail = useCallback(
-    (row: ScreenerRow, strategy: string) => {
+    (row: ScreenerRow) => {
       const { symbol } = getStockDisplay(row)
-      navigate(`/stock/${symbol}?source=selection&strategy=${strategy}`)
+      navigate(`/stock/${symbol}?source=screener&strategy=${activeStrategyKey}`)
     },
-    [navigate],
+    [navigate, activeStrategyKey],
   )
 
-  /** 切换方案：重置运行选择、tab、选中行 */
-  const handlePlanChange = (id: string) => {
-    setSelectedPlanId(id)
+  /** 切换策略：重置运行选择、分页、选中行 */
+  const handleStrategyChange = (key: string) => {
+    setSelectedStrategyKey(key)
     setSelectedRunId('')
-    setActiveTab('selectorCombined')
+    setQuery({ page: 1, pageSize: PAGE_SIZE, filters: [] })
     setSelectedKeys(new Set())
   }
 
-  /** 切换运行日期：重置选中行 */
+  /** 切换运行日期：重置分页、选中行 */
   const handleRunChange = (id: string) => {
     setSelectedRunId(id)
+    setQuery((prev) => ({ ...prev, page: 1 }))
     setSelectedKeys(new Set())
   }
+
+  /** 服务端查询变更 */
+  const handleQueryChange = useCallback((newQuery: DataTableQuery) => {
+    setQuery(newQuery)
+  }, [])
 
   /** 批量加入自选 */
   const handleBatchAdd = async () => {
     if (selectedKeys.size === 0) return
-    const selected = combinedRows.filter((r) => selectedKeys.has(r.resultId))
+    const selected = rows.filter((r) => selectedKeys.has(r.resultId))
     let success = 0
     let fail = 0
     for (const row of selected) {
       try {
         await addWatchlistMutation.mutateAsync({
           instrument_id: row.instrumentId,
-          source: 'selection',
+          source: 'screener',
         })
         success++
       } catch {
@@ -366,8 +265,8 @@ export default function ScreenerPage() {
     )
   }, [])
 
-  // 组合结果列
-  const combinedColumns: DataTableColumn<ScreenerRow>[] = useMemo(
+  // DSA 方向稳定性列
+  const dsaColumns: DataTableColumn<ScreenerRow>[] = useMemo(
     () => [
       {
         key: 'stock',
@@ -380,84 +279,88 @@ export default function ScreenerPage() {
         render: renderStock,
       },
       {
-        key: 'comboStatus',
-        title: '组合状态',
-        dataType: 'text',
-        sortable: false,
-        filterable: false,
-        render: (row) => {
-          if (!hasPlans) {
-            // 降级模式：原始计算数据，未经选股方案筛选
-            return <span className="tag info">原始数据</span>
-          }
-          return (
-            <span className="status-pill ok">
-              {row.matchedMemberIds.length}/{members.length} 满足
-            </span>
-          )
-        },
-      },
-      {
-        key: 'dsaDuration',
+        key: 'dsa_dir_bars',
         title: 'dir 持续',
         dataType: 'number',
         sortable: true,
         filterable: true,
         sortValue: (row) =>
-          Number(pickSummary(row.summary, ['dsa_dir_bars', 'dsa_duration', 'dir_duration', 'duration']) ?? 0),
+          Number(pickPayload(row.payload, ['dsa_dir_bars', 'dsa_duration', 'dir_duration', 'duration']) ?? 0),
         render: (row) =>
-          fmtNum(pickSummary(row.summary, ['dsa_dir_bars', 'dsa_duration', 'dir_duration', 'duration']), 0),
+          fmtNum(pickPayload(row.payload, ['dsa_dir_bars', 'dsa_duration', 'dir_duration', 'duration']), 0),
       },
       {
-        key: 'dsaAvgReturn',
+        key: 'vwap_ret_avg',
         title: 'VWAP 平均收益',
         dataType: 'percent',
         sortable: true,
         filterable: true,
         sortValue: (row) =>
-          Number(pickSummary(row.summary, ['vwap_ret_avg', 'dsa_avg_return', 'vwap_avg_return', 'avg_return']) ?? 0),
+          Number(pickPayload(row.payload, ['vwap_ret_avg', 'dsa_avg_return', 'vwap_avg_return', 'avg_return']) ?? 0),
         render: (row) => {
-          const v = pickSummary(row.summary, ['vwap_ret_avg', 'dsa_avg_return', 'vwap_avg_return', 'avg_return'])
+          const v = pickPayload(row.payload, ['vwap_ret_avg', 'dsa_avg_return', 'vwap_avg_return', 'avg_return'])
           const n = typeof v === 'number' ? v : parseFloat(String(v ?? ''))
           return <span className={n > 0 ? 'pos' : ''}>{fmtPct(v)}</span>
         },
       },
       {
-        key: 'offsetMean',
-        title: 'offset_mean',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => Number(pickSummary(row.summary, ['offset_mean', 'shift_mean']) ?? 0),
-        render: (row) => fmtPct(pickSummary(row.summary, ['offset_mean', 'shift_mean'])),
-      },
-      {
-        key: 'offsetVarRate',
-        title: '偏移方差率',
+        key: 'vwap_ret_total',
+        title: 'VWAP 总收益',
         dataType: 'percent',
         sortable: true,
         filterable: true,
         sortValue: (row) =>
           Number(
-            pickSummary(row.summary, ['offset_variance_rate', 'offset_var_rate', 'shift_var']) ?? 0,
+            pickPayload(row.payload, [
+              'vwap_ret_total',
+              'vwap_total_return',
+              'total_return',
+              'dsa_total_return',
+            ]) ?? 0,
           ),
-        render: (row) =>
-          fmtPct(
-            pickSummary(row.summary, ['offset_variance_rate', 'offset_var_rate', 'shift_var']),
-          ),
+        render: (row) => {
+          const v = pickPayload(row.payload, [
+            'vwap_ret_total',
+            'vwap_total_return',
+            'total_return',
+            'dsa_total_return',
+          ])
+          const n = typeof v === 'number' ? v : parseFloat(String(v ?? ''))
+          return <span className={n > 0 ? 'pos' : ''}>{fmtPct(v)}</span>
+        },
       },
       {
-        key: 'shortPosition',
+        key: 'offset_mean',
+        title: 'offset_mean',
+        dataType: 'percent',
+        sortable: true,
+        filterable: true,
+        sortValue: (row) => Number(pickPayload(row.payload, ['offset_mean', 'shift_mean']) ?? 0),
+        render: (row) => fmtPct(pickPayload(row.payload, ['offset_mean', 'shift_mean'])),
+      },
+      {
+        key: 'offset_variance_rate',
+        title: '偏移方差率',
+        dataType: 'percent',
+        sortable: true,
+        filterable: true,
+        sortValue: (row) =>
+          Number(pickPayload(row.payload, ['offset_variance_rate', 'offset_var_rate', 'shift_var']) ?? 0),
+        render: (row) =>
+          fmtPct(pickPayload(row.payload, ['offset_variance_rate', 'offset_var_rate', 'shift_var'])),
+      },
+      {
+        key: 'offset_percentile',
         title: '短期位置',
         dataType: 'percent',
         sortable: true,
         filterable: true,
         sortValue: (row) =>
           Number(
-            pickSummary(row.summary, ['offset_percentile', 'short_position', 'position_short', 'short_pos']) ?? 0,
+            pickPayload(row.payload, ['offset_percentile', 'short_position', 'position_short', 'short_pos']) ?? 0,
           ),
         render: (row) =>
-          fmtPct(pickSummary(row.summary, ['offset_percentile', 'short_position', 'position_short', 'short_pos'])),
+          fmtPct(pickPayload(row.payload, ['offset_percentile', 'short_position', 'position_short', 'short_pos'])),
       },
       {
         key: 'price',
@@ -466,19 +369,19 @@ export default function ScreenerPage() {
         sortable: true,
         filterable: true,
         sortValue: (row) =>
-          Number(pickSummary(row.summary, ['last_close', 'price', 'current_price', 'close']) ?? 0),
-        render: (row) => fmtNum(pickSummary(row.summary, ['last_close', 'price', 'current_price', 'close'])),
+          Number(pickPayload(row.payload, ['last_close', 'price', 'current_price', 'close']) ?? 0),
+        render: (row) => fmtNum(pickPayload(row.payload, ['last_close', 'price', 'current_price', 'close'])),
       },
       {
-        key: 'changePct',
+        key: 'change_pct',
         title: '涨跌幅',
         dataType: 'percent',
         sortable: true,
         filterable: true,
         sortValue: (row) =>
-          Number(pickSummary(row.summary, ['change_pct', 'pct_change', 'change_percent']) ?? 0),
+          Number(pickPayload(row.payload, ['change_pct', 'pct_change', 'change_percent']) ?? 0),
         render: (row) => {
-          const v = pickSummary(row.summary, ['change_pct', 'pct_change', 'change_percent'])
+          const v = pickPayload(row.payload, ['change_pct', 'pct_change', 'change_percent'])
           const n = typeof v === 'number' ? v : parseFloat(String(v ?? ''))
           return (
             <span className={n > 0 ? 'pos' : n < 0 ? 'neg' : ''}>{fmtChange(v)}</span>
@@ -494,304 +397,7 @@ export default function ScreenerPage() {
         isAction: true,
         render: (row) => (
           <div className="actions">
-            <button className="btn small" onClick={() => goDetail(row, 'combined')}>
-              详情
-            </button>
-          </div>
-        ),
-      },
-    ],
-    [members.length, hasPlans, renderStock, goDetail],
-  )
-
-  // DSA 明细列
-  const dsaDetailColumns: DataTableColumn<ScreenerRow>[] = useMemo(
-    () => [
-      {
-        key: 'stock',
-        title: '股票',
-        dataType: 'text',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => getStockDisplay(row).name,
-        filterValue: (row) => `${getStockDisplay(row).name} ${getStockDisplay(row).symbol}`,
-        render: renderStock,
-      },
-      {
-        key: 'dsaDuration',
-        title: 'dir 持续',
-        dataType: 'number',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) =>
-          Number(pickSummary(row.summary, ['dsa_dir_bars', 'dir_duration', 'dsa_duration', 'duration']) ?? 0),
-        render: (row) =>
-          fmtNum(pickSummary(row.summary, ['dsa_dir_bars', 'dir_duration', 'dsa_duration', 'duration']), 0),
-      },
-      {
-        key: 'dsaAvgReturn',
-        title: 'VWAP 平均收益',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) =>
-          Number(pickSummary(row.summary, ['vwap_ret_avg', 'vwap_avg_return', 'avg_return', 'dsa_avg_return']) ?? 0),
-        render: (row) => {
-          const v = pickSummary(row.summary, ['vwap_ret_avg', 'vwap_avg_return', 'avg_return', 'dsa_avg_return'])
-          const n = typeof v === 'number' ? v : parseFloat(String(v ?? ''))
-          return <span className={n > 0 ? 'pos' : ''}>{fmtPct(v)}</span>
-        },
-      },
-      {
-        key: 'vwapTotalReturn',
-        title: 'VWAP 总收益',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) =>
-          Number(
-            pickSummary(row.summary, [
-              'vwap_ret_total',
-              'vwap_total_return',
-              'total_return',
-              'dsa_total_return',
-            ]) ?? 0,
-          ),
-        render: (row) => {
-          const v = pickSummary(row.summary, [
-            'vwap_ret_total',
-            'vwap_total_return',
-            'total_return',
-            'dsa_total_return',
-          ])
-          const n = typeof v === 'number' ? v : parseFloat(String(v ?? ''))
-          return <span className={n > 0 ? 'pos' : ''}>{fmtPct(v)}</span>
-        },
-      },
-      {
-        key: 'offsetMean',
-        title: 'offset_mean',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => Number(pickSummary(row.summary, ['offset_mean', 'shift_mean']) ?? 0),
-        render: (row) => fmtPct(pickSummary(row.summary, ['offset_mean', 'shift_mean'])),
-      },
-      {
-        key: 'offsetVarRate',
-        title: '偏移方差率',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) =>
-          Number(pickSummary(row.summary, ['offset_variance_rate', 'offset_var_rate', 'shift_var']) ?? 0),
-        render: (row) => fmtPct(pickSummary(row.summary, ['offset_variance_rate', 'offset_var_rate', 'shift_var'])),
-      },
-      {
-        key: 'shortPosition',
-        title: '短期位置',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) =>
-          Number(
-            pickSummary(row.summary, ['offset_percentile', 'short_position', 'position_short', 'short_pos']) ?? 0,
-          ),
-        render: (row) =>
-          fmtPct(pickSummary(row.summary, ['offset_percentile', 'short_position', 'position_short', 'short_pos'])),
-      },
-      {
-        key: 'inCombo',
-        title: '是否进入组合',
-        dataType: 'text',
-        sortable: false,
-        filterable: false,
-        render: (row) => {
-          if (!hasPlans) return <span className="tag info">原始数据</span>
-          if (row.matched) return <span className="tag good">是</span>
-          const missed = members.filter((m) => !row.matchedMemberIds.includes(m.id))
-          const missedNames = missed.map(
-            (m) => strategyMap.get(m.strategy_definition_id)?.name ?? '其他策略',
-          )
-          return <span className="tag">否 · 未通过 {missedNames.join('、')}</span>
-        },
-      },
-      {
-        key: 'action',
-        title: '操作',
-        dataType: 'text',
-        sortable: false,
-        filterable: false,
-        isAction: true,
-        render: (row) => (
-          <div className="actions">
-            <button className="btn small" onClick={() => goDetail(row, 'dsa')}>
-              详情
-            </button>
-          </div>
-        ),
-      },
-    ],
-    [members, strategyMap, renderStock, goDetail],
-  )
-
-  // 突破强度明细列
-  const breakoutDetailColumns: DataTableColumn<ScreenerRow>[] = useMemo(
-    () => [
-      {
-        key: 'stock',
-        title: '股票',
-        dataType: 'text',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => getStockDisplay(row).name,
-        filterValue: (row) => `${getStockDisplay(row).name} ${getStockDisplay(row).symbol}`,
-        render: renderStock,
-      },
-      {
-        key: 'structureStatus',
-        title: '结构状态',
-        dataType: 'text',
-        sortable: false,
-        filterable: true,
-        filterValue: (row) =>
-          String(pickSummary(row.summary, ['structure_status', 'struct_status']) ?? ''),
-        render: (row) => {
-          const v = pickSummary(row.summary, ['structure_status', 'struct_status'])
-          const s = fmtStr(v)
-          // 突破确认/突破 → good；回踩确认/回踩 → warn
-          const cls = s.includes('突破') ? 'good' : s.includes('回踩') ? 'warn' : ''
-          return <span className={`tag ${cls}`}>{s}</span>
-        },
-      },
-      {
-        key: 'volumeConfirm',
-        title: '量能确认',
-        dataType: 'number',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) =>
-          Number(
-            pickSummary(row.summary, ['volume_confirm', 'vol_confirm', 'volume_ratio']) ?? 0,
-          ),
-        render: (row) =>
-          fmtRatio(
-            pickSummary(row.summary, ['volume_confirm', 'vol_confirm', 'volume_ratio']),
-          ),
-      },
-      {
-        key: 'breakoutAmplitude',
-        title: '突破幅度',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) =>
-          Number(pickSummary(row.summary, ['breakout_amplitude', 'amplitude']) ?? 0),
-        render: (row) => {
-          const v = pickSummary(row.summary, ['breakout_amplitude', 'amplitude'])
-          const n = typeof v === 'number' ? v : parseFloat(String(v ?? ''))
-          return <span className={n > 0 ? 'pos' : ''}>{fmtPct(v)}</span>
-        },
-      },
-      {
-        key: 'pressureDistance',
-        title: '压力距离',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) =>
-          Number(pickSummary(row.summary, ['pressure_distance', 'pressure_dist']) ?? 0),
-        render: (row) =>
-          fmtPct(pickSummary(row.summary, ['pressure_distance', 'pressure_dist'])),
-      },
-      {
-        key: 'positionRisk',
-        title: '位置风险',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) =>
-          Number(pickSummary(row.summary, ['position_risk', 'pos_risk']) ?? 0),
-        render: (row) => fmtPct(pickSummary(row.summary, ['position_risk', 'pos_risk'])),
-      },
-      {
-        key: 'inCombo',
-        title: '是否进入组合',
-        dataType: 'text',
-        sortable: false,
-        filterable: false,
-        render: (row) => {
-          if (!hasPlans) return <span className="tag info">原始数据</span>
-          if (row.matched) return <span className="tag good">是</span>
-          const missed = members.filter((m) => !row.matchedMemberIds.includes(m.id))
-          const missedNames = missed.map(
-            (m) => strategyMap.get(m.strategy_definition_id)?.name ?? '其他策略',
-          )
-          return <span className="tag">否 · 未通过 {missedNames.join('、')}</span>
-        },
-      },
-      {
-        key: 'action',
-        title: '操作',
-        dataType: 'text',
-        sortable: false,
-        filterable: false,
-        isAction: true,
-        render: (row) => (
-          <div className="actions">
-            <button className="btn small" onClick={() => goDetail(row, 'breakout')}>
-              详情
-            </button>
-          </div>
-        ),
-      },
-    ],
-    [members, strategyMap, renderStock, goDetail],
-  )
-
-  // 通用明细列（未知策略时使用）
-  const genericDetailColumns: DataTableColumn<ScreenerRow>[] = useMemo(
-    () => [
-      {
-        key: 'stock',
-        title: '股票',
-        dataType: 'text',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => getStockDisplay(row).name,
-        filterValue: (row) => `${getStockDisplay(row).name} ${getStockDisplay(row).symbol}`,
-        render: renderStock,
-      },
-      {
-        key: 'rankValue',
-        title: '排名值',
-        dataType: 'number',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => row.rankValue ?? 0,
-        render: (row) => fmtNum(row.rankValue),
-      },
-      {
-        key: 'inCombo',
-        title: '是否进入组合',
-        dataType: 'text',
-        sortable: false,
-        filterable: false,
-        render: (row) => {
-          if (!hasPlans) return <span className="tag info">原始数据</span>
-          return row.matched ? <span className="tag good">是</span> : <span className="tag">否</span>
-        },
-      },
-      {
-        key: 'action',
-        title: '操作',
-        dataType: 'text',
-        sortable: false,
-        filterable: false,
-        isAction: true,
-        render: (row) => (
-          <div className="actions">
-            <button className="btn small" onClick={() => goDetail(row, 'member')}>
+            <button className="btn small" onClick={() => goDetail(row)}>
               详情
             </button>
           </div>
@@ -801,21 +407,148 @@ export default function ScreenerPage() {
     [renderStock, goDetail],
   )
 
-  /** 根据策略 key 选择明细列 */
-  const getDetailColumns = (strategyKey: string): DataTableColumn<ScreenerRow>[] => {
+  // 突破强度列
+  const breakoutColumns: DataTableColumn<ScreenerRow>[] = useMemo(
+    () => [
+      {
+        key: 'stock',
+        title: '股票',
+        dataType: 'text',
+        sortable: true,
+        filterable: true,
+        sortValue: (row) => getStockDisplay(row).name,
+        filterValue: (row) => `${getStockDisplay(row).name} ${getStockDisplay(row).symbol}`,
+        render: renderStock,
+      },
+      {
+        key: 'structure_status',
+        title: '结构状态',
+        dataType: 'text',
+        sortable: false,
+        filterable: true,
+        filterValue: (row) =>
+          String(pickPayload(row.payload, ['structure_status', 'struct_status']) ?? ''),
+        render: (row) => {
+          const v = pickPayload(row.payload, ['structure_status', 'struct_status'])
+          const s = fmtStr(v)
+          const cls = s.includes('突破') ? 'good' : s.includes('回踩') ? 'warn' : ''
+          return <span className={`tag ${cls}`}>{s}</span>
+        },
+      },
+      {
+        key: 'volume_confirm',
+        title: '量能确认',
+        dataType: 'number',
+        sortable: true,
+        filterable: true,
+        sortValue: (row) =>
+          Number(pickPayload(row.payload, ['volume_confirm', 'vol_confirm', 'volume_ratio']) ?? 0),
+        render: (row) =>
+          fmtRatio(pickPayload(row.payload, ['volume_confirm', 'vol_confirm', 'volume_ratio'])),
+      },
+      {
+        key: 'breakout_amplitude',
+        title: '突破幅度',
+        dataType: 'percent',
+        sortable: true,
+        filterable: true,
+        sortValue: (row) =>
+          Number(pickPayload(row.payload, ['breakout_amplitude', 'amplitude']) ?? 0),
+        render: (row) => {
+          const v = pickPayload(row.payload, ['breakout_amplitude', 'amplitude'])
+          const n = typeof v === 'number' ? v : parseFloat(String(v ?? ''))
+          return <span className={n > 0 ? 'pos' : ''}>{fmtPct(v)}</span>
+        },
+      },
+      {
+        key: 'pressure_distance',
+        title: '压力距离',
+        dataType: 'percent',
+        sortable: true,
+        filterable: true,
+        sortValue: (row) =>
+          Number(pickPayload(row.payload, ['pressure_distance', 'pressure_dist']) ?? 0),
+        render: (row) =>
+          fmtPct(pickPayload(row.payload, ['pressure_distance', 'pressure_dist'])),
+      },
+      {
+        key: 'position_risk',
+        title: '位置风险',
+        dataType: 'percent',
+        sortable: true,
+        filterable: true,
+        sortValue: (row) =>
+          Number(pickPayload(row.payload, ['position_risk', 'pos_risk']) ?? 0),
+        render: (row) => fmtPct(pickPayload(row.payload, ['position_risk', 'pos_risk'])),
+      },
+      {
+        key: 'action',
+        title: '操作',
+        dataType: 'text',
+        sortable: false,
+        filterable: false,
+        isAction: true,
+        render: (row) => (
+          <div className="actions">
+            <button className="btn small" onClick={() => goDetail(row)}>
+              详情
+            </button>
+          </div>
+        ),
+      },
+    ],
+    [renderStock, goDetail],
+  )
+
+  // 通用列（未知策略时使用，展示 payload 中的所有数值字段）
+  const genericColumns: DataTableColumn<ScreenerRow>[] = useMemo(
+    () => [
+      {
+        key: 'stock',
+        title: '股票',
+        dataType: 'text',
+        sortable: true,
+        filterable: true,
+        sortValue: (row) => getStockDisplay(row).name,
+        filterValue: (row) => `${getStockDisplay(row).name} ${getStockDisplay(row).symbol}`,
+        render: renderStock,
+      },
+      {
+        key: 'action',
+        title: '操作',
+        dataType: 'text',
+        sortable: false,
+        filterable: false,
+        isAction: true,
+        render: (row) => (
+          <div className="actions">
+            <button className="btn small" onClick={() => goDetail(row)}>
+              详情
+            </button>
+          </div>
+        ),
+      },
+    ],
+    [renderStock, goDetail],
+  )
+
+  /** 根据策略 key 选择列定义 */
+  const getColumns = (strategyKey: string): DataTableColumn<ScreenerRow>[] => {
     const k = strategyKey.toLowerCase()
-    if (k.includes('dsa')) return dsaDetailColumns
-    if (k.includes('breakout')) return breakoutDetailColumns
-    return genericDetailColumns
+    if (k.includes('dsa')) return dsaColumns
+    if (k.includes('breakout')) return breakoutColumns
+    return genericColumns
   }
 
   // ===== 渲染 =====
 
-  const plansLoading = plansQuery.isLoading
-  const resultsLoading = hasPlans ? planResultsQuery.isLoading : strategyResultsQuery.isLoading
-  const resultsError = (hasPlans ? planResultsQuery.isError : strategyResultsQuery.isError)
+  const strategiesLoading = strategiesQuery.isLoading
+  const resultsLoading = resultsQuery.isLoading
+  const resultsError = resultsQuery.isError
     ? '运行结果加载失败，请稍后重试'
     : null
+
+  const activeColumns = getColumns(activeStrategyKey)
 
   return (
     <div>
@@ -824,58 +557,46 @@ export default function ScreenerPage() {
         <div>
           <h1 className="page-title">选股策略</h1>
           <div className="page-desc">
-            用户以"组合方案"使用一个或多个选股策略；可切换查看最终组合结果与单策略明细
+            选择选股策略 → 选择运行批次 → 查看筛选结果，支持服务端排序与分页
           </div>
-        </div>
-        <div className="actions">
-          <Link className="btn" to="/strategy-plan-editor">
-            编辑当前组合方案
-          </Link>
-          <Link className="btn primary" to="/strategy-plan-editor?mode=new">
-            ＋ 新建组合方案
-          </Link>
         </div>
       </div>
 
-      {/* 方案切换栏 */}
-      <div className="plan-switch-bar">
-        <div>
-          <span className="muted">当前方案</span>
-          {plansLoading ? (
-            <span className="muted">加载中…</span>
-          ) : plans.length === 0 ? (
-            <span className="muted">暂无方案</span>
-          ) : (
-            <select
-              className="select"
-              value={activePlanId}
-              onChange={(e) => handlePlanChange(e.target.value)}
+      {/* 策略 tabs */}
+      <div className="strategy-tabs-bar" data-strategy-group="selectorResult">
+        {strategiesLoading ? (
+          <span className="muted">加载策略列表…</span>
+        ) : selectorStrategies.length === 0 ? (
+          <span className="muted">暂无选股策略</span>
+        ) : (
+          selectorStrategies.map((s) => (
+            <button
+              key={s.strategy_key}
+              className={clsx('strategy-tab', activeStrategyKey === s.strategy_key && 'active')}
+              onClick={() => handleStrategyChange(s.strategy_key)}
             >
-              {plans.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name} · {p.current_revision} 版
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
-        {/* 组合成分 chips */}
-        {memberInfos.length > 0 && (
-          <div className="plan-composition">
-            {memberInfos.map((mi, i) => (
-              <span key={mi.member.id} className="plan-composition-item">
-                <span className={clsx('chip', i % 2 === 0 ? 'blue' : 'violet')}>
-                  {mi.strategyName}
-                </span>
-                {i < memberInfos.length - 1 && (
-                  <span className="combo-token">{operator}</span>
-                )}
-              </span>
-            ))}
-          </div>
+              {s.display_name}
+            </button>
+          ))
         )}
         <div className="toolbar-spacer" />
-        <span className="status-pill ok">每日推送已启用</span>
+        {/* 日期/批次选择 */}
+        <select
+          className="select"
+          value={activeRunId}
+          onChange={(e) => handleRunChange(e.target.value)}
+          disabled={runs.length === 0}
+        >
+          {runs.length === 0 ? (
+            <option value="">暂无运行记录</option>
+          ) : (
+            runs.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.trade_date?.slice(0, 10) ?? r.id.slice(0, 8)}
+              </option>
+            ))
+          )}
+        </select>
       </div>
 
       {/* 批次元数据 */}
@@ -894,246 +615,59 @@ export default function ScreenerPage() {
               <span>状态</span>
               <b className={batchMeta.isOk ? 'pos' : 'neg'}>{batchMeta.status}</b>
             </div>
+            {sourceTotal != null && (
+              <div className="batch-meta-item">
+                <span>源</span>
+                <b>{sourceTotal}</b>
+              </div>
+            )}
+            {filteredTotal != null && (
+              <div className="batch-meta-item">
+                <span>命中</span>
+                <b className="pos">{filteredTotal}</b>
+              </div>
+            )}
             <div className="batch-meta-item">
-              <span>全量结果</span>
-              <b>{batchMeta.totalResults}</b>
+              <span>当前页结果</span>
+              <b>{totalResults}</b>
             </div>
-            {hasPlans && (
-              <div className="batch-meta-item">
-                <span>命中数</span>
-                <b className="pos">{batchMeta.matchedCount}</b>
-              </div>
-            )}
-            {resultsTruncated && (
-              <div className="batch-meta-item">
-                <span>加载</span>
-                <b className="neg">{allResults.length + allStrategyResults.length} / {resultsTotal}</b>
-              </div>
-            )}
           </div>
         </div>
       )}
 
-      {/* 策略 tabs */}
-      <div className="strategy-tabs-bar" data-strategy-group="selectorResult">
-        <button
-          className={clsx('strategy-tab', activeTab === 'selectorCombined' && 'active')}
-          onClick={() => setActiveTab('selectorCombined')}
-        >
-          组合结果 <small>{combinedRows.length}</small>
-        </button>
-        {memberInfos.map((mi) => {
-          const tabId = `selectorMember_${mi.member.id}`
-          return (
-            <button
-              key={mi.member.id}
-              className={clsx('strategy-tab', activeTab === tabId && 'active')}
-              onClick={() => setActiveTab(tabId)}
-            >
-              {mi.strategyName} 明细 <small>{mi.rows.length}</small>
-            </button>
-          )
-        })}
-        {/* 降级模式：无选股方案时显示 DSA 明细 tab */}
-        {!hasPlans && (
+      {/* 结果面板 */}
+      <div className="card">
+        {/* 工具栏 */}
+        <div className="toolbar flush">
+          <span className="muted">
+            已选择 <b>{selectedKeys.size}</b> 只
+          </span>
           <button
-            className={clsx('strategy-tab', activeTab === 'selectorDsaDetail' && 'active')}
-            onClick={() => setActiveTab('selectorDsaDetail')}
+            className="btn small"
+            disabled={selectedKeys.size === 0 || addWatchlistMutation.isPending}
+            onClick={handleBatchAdd}
           >
-            DSA 明细 <small>{allRows.length}</small>
+            {addWatchlistMutation.isPending ? '加入中…' : '批量加入自选'}
           </button>
-        )}
-        <button
-          className={clsx('strategy-tab', activeTab === 'selectorFuture' && 'active')}
-          onClick={() => setActiveTab('selectorFuture')}
-        >
-          ＋ 更多策略
-        </button>
-        <div className="toolbar-spacer" />
-        {/* 日期下拉 - 无条件渲染，无运行记录时显示禁用状态（对齐原型 V1.6.3） */}
-        {/* 有选股方案时用 selection_plan_runs，无方案时降级到 strategy_runs */}
-        {(() => {
-          const dropdownRuns = hasPlans ? runs : strategyRuns
-          return (
-            <select
-              className="select"
-              value={activeRunId}
-              onChange={(e) => handleRunChange(e.target.value)}
-              disabled={dropdownRuns.length === 0}
-            >
-              {dropdownRuns.length === 0 ? (
-                <option value="">暂无运行记录</option>
-              ) : (
-                dropdownRuns.map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.trade_date?.slice(0, 10) ?? ''}
-                  </option>
-                ))
-              )}
-            </select>
-          )
-        })()}
-      </div>
-
-      {/* 组合结果面板 */}
-      <div
-        id="selectorCombined"
-        className={clsx('strategy-panel', activeTab === 'selectorCombined' && 'active')}
-      >
-        <div className="strategy-ribbon">
-          <div>
-            <div className="strategy-ribbon-title">{planName} · 最终组合结果</div>
-            <div className="strategy-ribbon-meta">
-              {memberNames.length > 0
-                ? `${memberNames.join(' 与 ')} 同时满足（${operator}）· 计算完成于 ${finishedTime}`
-                : `计算完成于 ${finishedTime}`}
-            </div>
-          </div>
-          <div className="actions">
-            <Link className="btn small" to="/strategy-plan-editor">
-              查看组合逻辑
-            </Link>
-          </div>
+          <div className="toolbar-spacer" />
+          <span className="muted">表头支持排序与逐列过滤</span>
         </div>
-        <div className="card">
-          {/* 命中说明卡 */}
-          <div className="card-head">
-            <div>
-              <div className="card-title">
-                {hasPlans ? '组合命中说明' : '原始计算结果'}
-              </div>
-              <div className="card-sub">
-                {hasPlans
-                  ? `最终 ${combinedRows.length} 只 / 全量 ${resultsTotal} 只`
-                  : `共 ${resultsTotal} 只原始计算数据`
-                }
-                {memberInfos.map((mi) => ` · ${mi.strategyName} ${mi.rows.length} 只`).join('')}
-                {resultsTruncated && ` · ⚠ 仅加载 ${allResults.length + allStrategyResults.length} 条`}
-              </div>
-            </div>
-            <div className="chip-row">
-              {hasPlans ? (
-                <>
-                  <span className="chip blue">全部策略满足</span>
-                  <span className="chip">{members.length} 个策略</span>
-                  <span className="chip green">推送前 20 只</span>
-                </>
-              ) : (
-                <>
-                  <span className="chip orange">原始数据</span>
-                  <span className="chip">未经选股筛选</span>
-                </>
-              )}
-            </div>
-          </div>
-          {/* 工具栏 */}
-          <div className="toolbar flush">
-            <span className="muted">
-              已选择 <b>{selectedKeys.size}</b> 只
-            </span>
-            <button
-              className="btn small"
-              disabled={selectedKeys.size === 0 || addWatchlistMutation.isPending}
-              onClick={handleBatchAdd}
-            >
-              {addWatchlistMutation.isPending ? '加入中…' : '批量加入自选'}
-            </button>
-            <div className="toolbar-spacer" />
-            <span className="muted">表头支持排序与逐列过滤</span>
-          </div>
-          {/* 数据表 */}
-          <StrategyDataTable
-            tableId="screener-combined"
-            columns={combinedColumns}
-            rows={combinedRows}
-            rowKey={(row) => row.resultId}
-            total={hasPlans ? planResultsQuery.data?.total : strategyResultsQuery.data?.total}
-            loading={resultsLoading}
-            error={resultsError}
-            emptyText={hasPlans ? '暂无组合命中结果' : '暂无原始计算结果'}
-            selectable
-            selectedKeys={selectedKeys}
-            onSelectionChange={setSelectedKeys}
-          />
-        </div>
-      </div>
-
-      {/* 各成员明细面板 */}
-      {memberInfos.map((mi) => {
-        const tabId = `selectorMember_${mi.member.id}`
-        return (
-          <div
-            key={mi.member.id}
-            id={tabId}
-            className={clsx('strategy-panel', activeTab === tabId && 'active')}
-          >
-            <div className="strategy-ribbon">
-              <div>
-                <div className="strategy-ribbon-title">{mi.strategyName}选股</div>
-                <div className="strategy-ribbon-meta">
-                  组合成员策略 {mi.index + 1}/{members.length} · 当前命中 {mi.rows.length} 只
-                </div>
-              </div>
-              <span className="tag good">已参与组合</span>
-            </div>
-            <div className="card">
-              <StrategyDataTable
-                tableId={`screener-member-${mi.member.id}`}
-                columns={getDetailColumns(mi.strategyKey)}
-                rows={mi.rows}
-                rowKey={(row) => row.resultId}
-                loading={resultsLoading}
-                error={resultsError}
-                emptyText={`暂无${mi.strategyName}命中结果`}
-              />
-            </div>
-          </div>
-        )
-      })}
-
-      {/* 降级模式：DSA 明细面板（无选股方案时显示） */}
-      {!hasPlans && (
-        <div
-          id="selectorDsaDetail"
-          className={clsx('strategy-panel', activeTab === 'selectorDsaDetail' && 'active')}
-        >
-          <div className="strategy-ribbon">
-            <div>
-              <div className="strategy-ribbon-title">DSA 方向稳定性选股明细</div>
-              <div className="strategy-ribbon-meta">
-                共 {allRows.length} 只 · 计算完成于 {finishedTime}
-              </div>
-            </div>
-          </div>
-          <div className="card">
-            <StrategyDataTable
-              tableId="screener-dsa-detail"
-              columns={dsaDetailColumns}
-              rows={allRows}
-              rowKey={(row) => row.resultId}
-              total={strategyResultsQuery.data?.total}
-              loading={resultsLoading}
-              error={resultsError}
-              emptyText="暂无 DSA 明细结果"
-            />
-          </div>
-        </div>
-      )}
-
-      {/* 更多策略面板 */}
-      <div
-        id="selectorFuture"
-        className={clsx('strategy-panel', activeTab === 'selectorFuture' && 'active')}
-      >
-        <div className="card">
-          <div className="empty">
-            <h3>组合方案可继续加入其他选股策略</h3>
-            <p>新增策略后由 Manifest 定义参数、结果字段和可组合能力。</p>
-            <Link className="btn primary" to="/strategy-plan-editor">
-              前往编辑组合方案
-            </Link>
-          </div>
-        </div>
+        {/* 数据表 */}
+        <StrategyDataTable
+          tableId={`screener-${activeStrategyKey}`}
+          columns={activeColumns}
+          rows={rows}
+          rowKey={(row) => row.resultId}
+          total={totalResults}
+          serverSide
+          onQueryChange={handleQueryChange}
+          loading={resultsLoading}
+          error={resultsError}
+          emptyText="暂无选股结果"
+          selectable
+          selectedKeys={selectedKeys}
+          onSelectionChange={setSelectedKeys}
+        />
       </div>
     </div>
   )

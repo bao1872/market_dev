@@ -94,7 +94,9 @@ class StrategyResultListResponse(BaseModel):
     """策略结果列表响应（分页+筛选+排序）。"""
 
     items: list[StrategyResultResponse] = Field(default_factory=list)
-    total: int = Field(..., description="总数")
+    total: int = Field(..., description="过滤后总数")
+    source_total: int = Field(0, description="过滤前总数")
+    filtered_total: int = Field(0, description="过滤后总数")
     page: int = Field(..., description="当前页码（从 1 开始）")
     page_size: int = Field(..., description="每页大小")
 

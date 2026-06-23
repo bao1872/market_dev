@@ -1,4 +1,9 @@
-"""选股成员执行器（C2）- 执行单个成员策略并生成 MemberMatch。
+"""[LEGACY] 选股成员执行器（C2）- 已弃用，保留仅供参考。
+
+新架构使用 selector_query_service 统一查询已发布的选股策略结果，
+不再使用 SelectionPlan + Member + Condition 组合执行模式。
+
+选股成员执行器（C2）- 执行单个成员策略并生成 MemberMatch。
 
 核心职责：
 - execute_member: 通过 SQL 端过滤查询成员策略版本在指定交易日的选股结果，

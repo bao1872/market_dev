@@ -1,4 +1,9 @@
-"""选股组合方案校验器 - 校验方案符合 selection_plan.schema.json。
+"""[LEGACY] 选股组合方案校验器 - 已弃用，保留仅供参考。
+
+新架构使用 selector_query_service 统一查询已发布的选股策略结果，
+不再使用 SelectionPlan + Member + Condition 组合执行模式。
+
+选股组合方案校验器 - 校验方案符合 selection_plan.schema.json。
 
 使用 jsonschema 库进行 Draft 2020-12 校验，校验失败抛出包含字段路径的详细错误。
 

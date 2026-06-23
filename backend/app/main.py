@@ -24,9 +24,6 @@ V1.1 交易平台后端，提供：
 - /monitoring-plans/{id}/events: 组合事件查询（C8）
 - /instruments/{id}/composite-state: 个股组合状态查询（C6）
 - /composite-events/{id}: 组合事件详情（C8）
-- /selection-plans: 选股组合方案管理（C1）
-- /selection-plans/{id}/run: 选股方案执行（C4，幂等）
-- /selection-plan-runs/{run_id}/results: 选股运行结果（C4）
 - /metrics: Prometheus 指标端点（可观察性，无需认证）
 - /api/v1: 业务 API（行情查询等）
 """
@@ -53,7 +50,6 @@ from app.api.metrics import http_request_duration_seconds, http_requests_total
 from app.api.monitor_states import router as monitor_states_router
 from app.api.monitoring_plans import router as monitoring_plans_router
 from app.api.notifications import router as notifications_router
-from app.api.selection_plans import router as selection_plans_router
 from app.api.stock_memos import router as stock_memos_router
 from app.api.strategies import router as strategies_router
 from app.api.strategy_events import router as strategy_events_router
@@ -140,8 +136,6 @@ app.include_router(watchlist_router)
 app.include_router(stock_memos_router)
 # 监控组合方案管理路由（C5/C6/C8）
 app.include_router(monitoring_plans_router)
-# 选股组合方案管理路由（C1/C4）
-app.include_router(selection_plans_router)
 # Prometheus 指标路由（无需认证，供 scraper 直接抓取）
 app.include_router(metrics_api.router, tags=["metrics"])
 
