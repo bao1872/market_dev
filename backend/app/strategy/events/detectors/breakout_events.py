@@ -1,7 +1,7 @@
 """突破事件检测 - V1.1 升级版。
 
 从 ref/交易/event_lib/detectors/breakout_events.py 迁移。
-升级：添加 state_ttl_seconds 和 allowed_roles 声明。
+升级：添加 state_ttl_seconds 声明。
 
 Registered Events:
     - evt_cross_above_value_area_high: 价格上穿价值区域高点（TRIGGER/CONFIRM）
@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.strategy.events.base import EventRole
 from app.strategy.events.registry import register_event
 
 
@@ -41,7 +40,6 @@ register_event(
     direction="positive",
     is_core=True,
     state_ttl_seconds=3600,
-    allowed_roles=[EventRole.TRIGGER, EventRole.CONFIRM],
 )
 
 register_event(
@@ -53,7 +51,6 @@ register_event(
     direction="negative",
     is_core=True,
     state_ttl_seconds=3600,
-    allowed_roles=[EventRole.TRIGGER, EventRole.VETO],
 )
 
 
@@ -63,5 +60,5 @@ if __name__ == "__main__":
     events = list_by_category("突破事件")
     print(f"突破事件已注册 {len(events)} 个")
     for e in events:
-        print(f"  {e['name']} ttl={e['state_ttl_seconds']} roles={e['allowed_roles']}")
+        print(f"  {e['name']} ttl={e['state_ttl_seconds']}")
     print("OK")

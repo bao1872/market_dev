@@ -1,7 +1,7 @@
 """动量事件检测 - V1.1 升级版。
 
 从 ref/交易/event_lib/detectors/momentum_events.py 迁移。
-升级：添加 state_ttl_seconds 和 allowed_roles 声明。
+升级：添加 state_ttl_seconds 声明。
 
 Registered Events:
     - evt_bbmacd_cross_upper: BBMACD上穿上轨（CONFIRM）
@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.strategy.events.base import EventRole
 from app.strategy.events.registry import register_event
 
 
@@ -57,7 +56,6 @@ register_event(
     direction="positive",
     is_core=True,
     state_ttl_seconds=1800,
-    allowed_roles=[EventRole.CONFIRM],
 )
 
 register_event(
@@ -69,7 +67,6 @@ register_event(
     direction="negative",
     is_core=True,
     state_ttl_seconds=1800,
-    allowed_roles=[EventRole.CONFIRM],
 )
 
 register_event(
@@ -81,7 +78,6 @@ register_event(
     direction="positive",
     is_core=False,
     state_ttl_seconds=1800,
-    allowed_roles=[EventRole.CONFIRM],
 )
 
 register_event(
@@ -93,7 +89,6 @@ register_event(
     direction="negative",
     is_core=False,
     state_ttl_seconds=1800,
-    allowed_roles=[EventRole.CONFIRM],
 )
 
 
@@ -103,5 +98,5 @@ if __name__ == "__main__":
     events = list_by_category("动量事件")
     print(f"动量事件已注册 {len(events)} 个")
     for e in events:
-        print(f"  {e['name']} ttl={e['state_ttl_seconds']} roles={e['allowed_roles']}")
+        print(f"  {e['name']} ttl={e['state_ttl_seconds']}")
     print("OK")

@@ -3,7 +3,7 @@
 // 定义所有策略图层、策略映射、计算窗口
 // 图层面板由 Manifest 动态生成，页面不写死具体策略
 
-export type StrategyKind = 'selection' | 'monitor' | 'selection_plan' | 'monitor_plan'
+export type StrategyKind = 'selection' | 'monitor'
 export type LayerRenderer =
   | 'histogram'
   | 'line'
@@ -153,15 +153,15 @@ export const LAYERS: Record<string, LayerDef> = {
     renderer: 'marker',
     pane: 'price',
     color: '#f4c430',
-    description: '选股命中、Node 碰触与组合确认事件',
+    description: '选股命中、Node 碰触事件',
     defaultVisible: false,
   },
 }
 
 // ===== 策略定义（对应原型 STRATEGIES）=====
 export const STRATEGIES: Record<string, StrategyDef> = {
-  dsa: {
-    id: 'dsa',
+  dsa_selector: {
+    id: 'dsa_selector',
     name: 'DSA 方向稳定性',
     kind: 'selection',
     version: '2.3.0',
@@ -184,37 +184,13 @@ export const STRATEGIES: Record<string, StrategyDef> = {
     layers: ['volume', 'profile', 'node', 'poc', 'bb', 'events'],
     defaultLayers: ['volume', 'profile', 'node', 'poc', 'bb', 'events'],
   },
-  atr: {
-    id: 'atr',
-    name: 'ATR Rope',
+  watchlist_monitor: {
+    id: 'watchlist_monitor',
+    name: '自选监控',
     kind: 'monitor',
-    version: '1.4.2',
-    layers: ['volume', 'atr', 'events'],
-    defaultLayers: ['volume', 'atr', 'events'],
-  },
-  volume: {
-    id: 'volume',
-    name: 'Volume Delta',
-    kind: 'monitor',
-    version: '1.1.0',
-    layers: ['volume', 'delta', 'events'],
-    defaultLayers: ['volume', 'delta', 'events'],
-  },
-  selection_combined: {
-    id: 'selection_combined',
-    name: '强势共振选股组合',
-    kind: 'selection_plan',
-    version: 'revision 7',
-    layers: ['volume', 'dsa', 'breakout', 'selection'],
-    defaultLayers: ['volume', 'dsa', 'breakout', 'selection'],
-  },
-  monitor_combined: {
-    id: 'monitor_combined',
-    name: '节点共振追踪',
-    kind: 'monitor_plan',
-    version: 'revision 5',
-    layers: ['volume', 'profile', 'node', 'poc', 'atr', 'bb', 'delta', 'events'],
-    defaultLayers: ['volume', 'profile', 'node', 'poc', 'atr', 'bb', 'delta', 'events'],
+    version: '1.0.0',
+    layers: ['volume', 'profile', 'node', 'poc', 'bb', 'events'],
+    defaultLayers: ['volume', 'profile', 'node', 'poc', 'bb', 'events'],
   },
 }
 
@@ -233,9 +209,9 @@ export function resolveStrategy(
   strategy: string,
 ): StrategyDef {
   if (strategy === 'combined') {
-    return source === 'selection' ? STRATEGIES.selection_combined : STRATEGIES.monitor_combined
+    return source === 'selection' ? STRATEGIES.dsa_selector : STRATEGIES.watchlist_monitor
   }
-  return STRATEGIES[strategy] || STRATEGIES.monitor_combined
+  return STRATEGIES[strategy] || STRATEGIES.watchlist_monitor
 }
 
 export function availableLayerIds(
@@ -278,6 +254,5 @@ export const DISPLAY_GROUPS: Record<string, DisplayGroupDef> = {
   dsa: { id: 'dsa', name: 'DSA 方向稳定性', shortName: 'DSA', section: '选股策略', color: '#ff1744', description: '动态摆动锚定 VWAP · 选股命中标记', layers: ['dsa', 'selection'], anchorLayer: 'dsa' },
   breakout: { id: 'breakout', name: '突破强度', shortName: '突破', section: '选股策略', color: '#ef5350', description: '压力区 · 突破确认 · 选股命中标记', layers: ['breakout', 'selection'], anchorLayer: 'breakout' },
   node: { id: 'node', name: 'Node Cluster', shortName: 'NODE', section: '监控策略', color: '#4f7cff', description: '筹码峰 · 节点区间 · POC · 事件标记', layers: ['profile', 'node', 'poc'], anchorLayer: 'node' },
-  atr: { id: 'atr', name: 'ATR Rope', shortName: 'ATR', section: '监控策略', color: '#82a0ff', description: '趋势带 · 上下轨 · 事件标记', layers: ['atr'], anchorLayer: 'atr' },
   bb: { id: 'bb', name: 'Bollinger Bands', shortName: 'BB', section: '监控策略', color: '#9c27b0', description: '布林带 · SMA(20) ± 2σ', layers: ['bb'], anchorLayer: 'bb' },
 }

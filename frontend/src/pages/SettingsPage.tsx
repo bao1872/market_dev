@@ -3,7 +3,7 @@
 //
 // 用法：
 // 1. 路由 /settings，受保护路由（经 ProtectedLayout 包裹）
-// 2. 左栏 4 张卡片：会员状态 / 用户通知规则 / 方案消息订阅 / 我的通知渠道
+// 2. 左栏 4 张卡片：会员状态 / 用户通知规则 / 策略消息订阅 / 我的通知渠道
 // 3. 右栏 1 张卡片：飞书配置步骤
 // 4. 两个弹窗：飞书配置弹窗（新建/编辑）、续期弹窗
 //
@@ -325,7 +325,7 @@ function FeishuModal({
           <button className="icon-btn" onClick={onClose}>×</button>
         </div>
         <div className="modal-body">
-          <div className="notice">平台只调用该渠道发送方案消息，不会获得飞书账号、联系人或群聊读取权限。</div>
+          <div className="notice">平台只调用该渠道发送策略消息，不会获得飞书账号、联系人或群聊读取权限。</div>
           <div className="form-grid form-grid-gap">
             <div className="form-row full">
               <label className="form-label">配置名称</label>
@@ -423,7 +423,7 @@ export default function SettingsPage() {
   const [quietEnd, setQuietEnd] = useState('08:30')
   const [pauseOnDelay, setPauseOnDelay] = useState(true)
 
-  // 方案消息订阅状态
+  // 策略消息订阅状态
   const [subs, setSubs] = useState({
     selectionStrong: true,
     monitorNode: true,
@@ -504,7 +504,7 @@ export default function SettingsPage() {
                 <span><i>✓</i> 个股指标</span>
                 <span><i>✓</i> 飞书推送</span>
               </div>
-              <div className="notice section-gap">会员仅控制账户有效期，不设置功能等级、自选股数量或方案数量限制。</div>
+              <div className="notice section-gap">会员仅控制账户有效期，不设置功能等级、自选股数量或策略数量限制。</div>
             </div>
             <div className="drawer-foot">
               <div className="help">未到期续期将从当前到期日顺延30天</div>
@@ -517,7 +517,7 @@ export default function SettingsPage() {
             <div className="card-head">
               <div>
                 <div className="card-title">用户通知规则</div>
-                <div className="card-sub">跨全部选股和监控组合方案生效</div>
+                <div className="card-sub">跨全部选股和监控策略生效</div>
               </div>
             </div>
             <div className="card-body">
@@ -576,12 +576,12 @@ export default function SettingsPage() {
             </div>
           </div>
 
-          {/* 方案消息订阅卡 */}
+          {/* 策略消息订阅卡 */}
           <div className="card">
             <div className="card-head">
               <div>
-                <div className="card-title">方案消息订阅</div>
-                <div className="card-sub">按组合方案决定哪些消息进入第三方渠道</div>
+                <div className="card-title">策略消息订阅</div>
+                <div className="card-sub">按策略决定哪些消息进入第三方渠道</div>
               </div>
             </div>
             <div className="card-body">
@@ -593,7 +593,7 @@ export default function SettingsPage() {
                     checked={subs.selectionStrong}
                     onChange={(e) => setSubs((s) => ({ ...s, selectionStrong: e.target.checked }))}
                   />
-                  选股组合「强势共振」
+                  DSA 选股策略消息
                 </label>
                 <label className="strategy-check">
                   <input
@@ -602,7 +602,7 @@ export default function SettingsPage() {
                     checked={subs.monitorNode}
                     onChange={(e) => setSubs((s) => ({ ...s, monitorNode: e.target.checked }))}
                   />
-                  监控组合「节点共振追踪」
+                  Node 监控策略消息
                 </label>
                 <label className="strategy-check">
                   <input
@@ -648,7 +648,7 @@ export default function SettingsPage() {
                   <div className="channel-logo">内</div>
                   <div className="channel-main">
                     <div className="channel-title">站内消息</div>
-                    <div className="channel-meta">全部方案消息 · 系统默认</div>
+                    <div className="channel-meta">全部策略消息 · 系统默认</div>
                   </div>
                   <span className="status-pill ok">始终启用</span>
                 </div>
@@ -658,7 +658,7 @@ export default function SettingsPage() {
                   <div className="channel-logo">内</div>
                   <div className="channel-main">
                     <div className="channel-title">{c.display_name || '站内消息'}</div>
-                    <div className="channel-meta">全部方案消息 · 系统默认</div>
+                    <div className="channel-meta">全部策略消息 · 系统默认</div>
                   </div>
                   <span className="status-pill ok">始终启用</span>
                 </div>

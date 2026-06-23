@@ -50,22 +50,7 @@ from app.repositories.monitoring_plan_state_repository import (
     list_states_by_instrument,
     list_states_by_revision,
 )
-from app.schemas.monitoring_plan import (
-    CompositeEventEvidenceResponse,
-    CompositeMonitorEventDetailResponse,
-    CompositeMonitorEventListResponse,
-    CompositeMonitorEventResponse,
-    MonitoringPlanCreateRequest,
-    MonitoringPlanListResponse,
-    MonitoringPlanMemberRequest,
-    MonitoringPlanMemberResponse,
-    MonitoringPlanResponse,
-    MonitoringPlanRevisionResponse,
-    MonitoringPlanStateListResponse,
-    MonitoringPlanStateResponse,
-    MonitoringPlanUpdateRequest,
-    MonitoringPlanValidateResponse,
-)
+# [LEGACY] combo schemas removed - from app.schemas.monitoring_plan import ...
 
 router = APIRouter(tags=["monitoring-plans"])
 

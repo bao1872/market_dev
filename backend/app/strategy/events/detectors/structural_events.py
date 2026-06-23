@@ -3,7 +3,7 @@
 从 ref/交易/event_lib/detectors/structural_events.py 迁移。
 
 升级内容：
-1. 添加 state_ttl_seconds 和 allowed_roles 声明
+1. 添加 state_ttl_seconds 声明
 2. 修复 _detect_support_broken / _detect_resistance_broken 占位实现：
    原实现返回全 0（占位），现使用 pandas 向量化计算支撑/阻力位突破。
    - 支撑位 = rolling min(low, 20)，支撑跌破 = close < 前一 bar 支撑位
@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.strategy.events.base import EventRole
 from app.strategy.events.registry import register_event
 
 # 支撑/阻力计算窗口
@@ -87,7 +86,7 @@ def _detect_resistance_broken(factors_df: pd.DataFrame) -> pd.Series:
     return (factors_df["close"] > resistance).astype(int)
 
 
-# 注册结构事件（含 state_ttl_seconds 和 allowed_roles 声明）
+# 注册结构事件（含 state_ttl_seconds 声明）
 register_event(
     name="evt_break_sell_stop_cluster",
     category="结构事件",
@@ -97,7 +96,6 @@ register_event(
     direction="negative",
     is_core=True,
     state_ttl_seconds=3600,
-    allowed_roles=[EventRole.TRIGGER, EventRole.VETO],
 )
 
 register_event(
@@ -109,7 +107,6 @@ register_event(
     direction="positive",
     is_core=True,
     state_ttl_seconds=3600,
-    allowed_roles=[EventRole.TRIGGER, EventRole.CONFIRM],
 )
 
 register_event(
@@ -121,7 +118,6 @@ register_event(
     direction="negative",
     is_core=False,
     state_ttl_seconds=3600,
-    allowed_roles=[EventRole.TRIGGER, EventRole.VETO],
 )
 
 register_event(
@@ -133,7 +129,6 @@ register_event(
     direction="positive",
     is_core=False,
     state_ttl_seconds=3600,
-    allowed_roles=[EventRole.TRIGGER, EventRole.CONFIRM],
 )
 
 
@@ -148,9 +143,7 @@ if __name__ == "__main__":
     ]:
         meta = get_event(evt_name)
         assert meta["state_ttl_seconds"] > 0, f"{evt_name} state_ttl_seconds 应 > 0"
-        assert EventRole.OBSERVE not in meta["allowed_roles"] or len(meta["allowed_roles"]) > 1, \
-            f"{evt_name} 应有明确角色"
-        print(f"{evt_name}: ttl={meta['state_ttl_seconds']}, roles={meta['allowed_roles']}")
+        print(f"{evt_name}: ttl={meta['state_ttl_seconds']}")
 
     # 2. 验证支撑跌破检测（向量化实现）
     df = pd.DataFrame(

@@ -3,7 +3,7 @@
 测试内容：
 1. 事件检测（mock 数据）- 验证 detect_to_drafts 能正确检测事件
 2. payload 自包含 - 验证 payload 不依赖外部状态
-3. state_ttl 和 allowed_roles 声明 - 验证所有检测器都有声明
+3. state_ttl 声明 - 验证所有检测器都有声明
 4. structural_events 占位实现已修复 - 验证支撑/阻力突破检测有效
 5. StrategyEventDraft 创建与校验
 6. 去重键构建
@@ -17,7 +17,6 @@ import pandas as pd
 import pytest
 
 from app.strategy.events.base import (
-    EventRole,
     StrategyEventDraft,
     build_dedupe_key,
 )
@@ -44,11 +43,9 @@ class TestStrategyEventDraft:
             logical_entity="600519",
             payload={"direction": "up"},
             state_ttl_seconds=3600,
-            allowed_roles=[EventRole.TRIGGER, EventRole.CONFIRM],
         )
         assert draft.event_type == "evt_test"
         assert draft.state_ttl_seconds == 3600
-        assert EventRole.TRIGGER in draft.allowed_roles
 
     def test_reject_empty_dedupe_key(self) -> None:
         """测试拒绝空 dedupe_key。"""
@@ -58,17 +55,6 @@ class TestStrategyEventDraft:
                 event_time=datetime(2026, 6, 18),
                 dedupe_key="",
                 logical_entity="600519",
-            )
-
-    def test_reject_invalid_role(self) -> None:
-        """测试拒绝非法角色。"""
-        with pytest.raises(ValueError, match="非法角色"):
-            StrategyEventDraft(
-                event_type="evt_test",
-                event_time=datetime(2026, 6, 18),
-                dedupe_key="k",
-                logical_entity="600519",
-                allowed_roles=["INVALID"],
             )
 
     def test_reject_negative_ttl(self) -> None:
@@ -82,15 +68,14 @@ class TestStrategyEventDraft:
                 state_ttl_seconds=-1,
             )
 
-    def test_default_roles_is_observe(self) -> None:
-        """测试默认角色为 OBSERVE。"""
+    def test_default_ttl(self) -> None:
+        """测试默认 state_ttl_seconds 为 3600。"""
         draft = StrategyEventDraft(
             event_type="evt_test",
             event_time=datetime(2026, 6, 18),
             dedupe_key="k",
             logical_entity="600519",
         )
-        assert draft.allowed_roles == [EventRole.OBSERVE]
         assert draft.state_ttl_seconds == 3600
 
     def test_to_dict(self) -> None:
@@ -105,7 +90,7 @@ class TestStrategyEventDraft:
         d = draft.to_dict()
         assert d["event_type"] == "evt_test"
         assert d["payload"] == {"x": 1}
-        assert "allowed_roles" in d
+        assert "state_ttl_seconds" in d
 
 
 class TestDedupeKey:
@@ -134,41 +119,15 @@ class TestDedupeKey:
 
 
 class TestDetectorDeclarations:
-    """测试检测器 state_ttl_seconds 和 allowed_roles 声明。"""
+    """测试检测器 state_ttl_seconds 声明。"""
 
-    def test_all_events_have_ttl_and_roles(self) -> None:
-        """验证所有注册事件都有 state_ttl_seconds 和 allowed_roles。"""
+    def test_all_events_have_ttl(self) -> None:
+        """验证所有注册事件都有 state_ttl_seconds。"""
         events = list_all()
         assert len(events) > 0, "应至少有一个注册事件"
         for e in events:
             assert "state_ttl_seconds" in e, f"{e['name']} 缺少 state_ttl_seconds"
-            assert "allowed_roles" in e, f"{e['name']} 缺少 allowed_roles"
             assert e["state_ttl_seconds"] > 0, f"{e['name']} state_ttl_seconds 应 > 0"
-            assert len(e["allowed_roles"]) > 0, f"{e['name']} allowed_roles 不应为空"
-            # 校验角色合法
-            for role in e["allowed_roles"]:
-                assert role in EventRole.ALL_ROLES, f"{e['name']} 非法角色: {role}"
-
-    def test_core_events_have_trigger_or_veto(self) -> None:
-        """验证有方向的核心事件有 TRIGGER/VETO/CONFIRM 角色。
-
-        neutral 方向的核心事件（如 evt_trend_flat）可以仅为 OBSERVE。
-        """
-        events = list_all()
-        core_events = [e for e in events if e["is_core"]]
-        assert len(core_events) > 0, "应至少有一个核心事件"
-        for e in core_events:
-            # neutral 方向的核心事件允许仅为 OBSERVE
-            if e["direction"] == "neutral":
-                continue
-            # positive/negative 方向的核心事件应有明确角色（非仅 OBSERVE）
-            non_observe_roles = [
-                r for r in e["allowed_roles"] if r != EventRole.OBSERVE
-            ]
-            assert len(non_observe_roles) > 0, (
-                f"有方向的核心事件 {e['name']} (direction={e['direction']}) "
-                f"应有非 OBSERVE 角色，当前 roles={e['allowed_roles']}"
-            )
 
     def test_14_detector_categories_exist(self) -> None:
         """验证 14 个检测器类别都存在。"""
@@ -182,16 +141,6 @@ class TestDetectorDeclarations:
         actual_categories = {e["category"] for e in list_all()}
         missing = expected_categories - actual_categories
         assert not missing, f"缺少检测器类别: {missing}"
-
-    def test_structural_events_roles(self) -> None:
-        """验证结构事件的角色分配。"""
-        support_broken = get_event("evt_support_broken")
-        assert EventRole.VETO in support_broken["allowed_roles"]
-        assert EventRole.TRIGGER in support_broken["allowed_roles"]
-
-        resistance_broken = get_event("evt_resistance_broken")
-        assert EventRole.CONFIRM in resistance_broken["allowed_roles"]
-        assert EventRole.TRIGGER in resistance_broken["allowed_roles"]
 
 
 class TestStructuralEventsFix:
@@ -318,8 +267,8 @@ class TestDetectToDrafts:
         # payload 中的 dsa_dir 值应为触发行的值（1）
         assert draft.payload["dsa_dir"] == 1
 
-    def test_draft_has_ttl_and_roles(self) -> None:
-        """测试草稿继承检测器的 state_ttl 和 allowed_roles。"""
+    def test_draft_has_ttl(self) -> None:
+        """测试草稿继承检测器的 state_ttl。"""
         df = pd.DataFrame(
             {"dsa_dir": [0, 1]},
             index=pd.to_datetime(["2026-06-18 09:30", "2026-06-18 09:31"]),
@@ -333,7 +282,6 @@ class TestDetectToDrafts:
         assert len(drafts) == 1
         meta = get_event("evt_dsa_dir_flip_up")
         assert drafts[0].state_ttl_seconds == meta["state_ttl_seconds"]
-        assert drafts[0].allowed_roles == meta["allowed_roles"]
 
     def test_dedupe_key_unique_per_event_time(self) -> None:
         """测试不同事件时间的去重键不同。"""
@@ -434,18 +382,6 @@ class TestDetectPanelBackwardCompat:
         result = detect_panel(df, event_names=["evt_dsa_dir_flip_up"])
         assert "evt_dsa_dir_flip_up" in result.columns
         assert result["evt_dsa_dir_flip_up"].sum() == 0
-
-
-class TestEventRoleConstants:
-    """测试事件角色常量。"""
-
-    def test_all_roles_defined(self) -> None:
-        """测试所有角色常量已定义。"""
-        assert EventRole.TRIGGER == "TRIGGER"
-        assert EventRole.CONFIRM == "CONFIRM"
-        assert EventRole.VETO == "VETO"
-        assert EventRole.OBSERVE == "OBSERVE"
-        assert len(EventRole.ALL_ROLES) == 4
 
 
 if __name__ == "__main__":

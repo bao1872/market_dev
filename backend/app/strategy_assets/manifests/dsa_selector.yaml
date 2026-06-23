@@ -9,7 +9,7 @@ input:
   adjustment: forward
   markets: [SSE, SZSE, BSE]
 capabilities:
-  composable: true
+  composable: false
   supports_plan_conditions: true
   supports_table_schema: true
   supports_chart_layers: true

@@ -1,9 +1,9 @@
-"""V1.1 事件注册表 - 升级版，支持 state_ttl_seconds 和 allowed_roles 声明。
+"""V1.1 事件注册表 - 升级版，支持 state_ttl_seconds 声明。
 
 从 ref/交易/event_lib/registry.py 迁移并升级。
 
 核心升级：
-1. register_event 新增 state_ttl_seconds 和 allowed_roles 参数
+1. register_event 新增 state_ttl_seconds 参数
 2. 新增 detect_to_drafts：将检测信号转为 StrategyEventDraft 列表（自包含 payload）
 3. 保留 detect_panel：向后兼容，返回 0/1 标记列 DataFrame
 
@@ -24,7 +24,6 @@ Usage:
         direction="positive",
         is_core=True,
         state_ttl_seconds=3600,
-        allowed_roles=["TRIGGER", "CONFIRM"],
     )
 """
 
@@ -37,7 +36,6 @@ from typing import Any
 import pandas as pd
 
 from app.strategy.events.base import (
-    EventRole,
     StrategyEventDraft,
     build_dedupe_key,
 )
@@ -49,8 +47,6 @@ EVENT_REGISTRY: dict[str, dict[str, Any]] = {}
 
 # 默认状态有效期（秒）
 DEFAULT_STATE_TTL_SECONDS = 3600
-# 默认允许角色
-DEFAULT_ALLOWED_ROLES = [EventRole.OBSERVE]
 
 
 def register_event(
@@ -63,7 +59,6 @@ def register_event(
     is_core: bool = False,
     outputs_strength: bool = False,
     state_ttl_seconds: int = DEFAULT_STATE_TTL_SECONDS,
-    allowed_roles: list[str] | None = None,
 ) -> None:
     """注册一个事件到全局注册表（V1.1 升级版）。
 
@@ -77,20 +72,12 @@ def register_event(
         is_core: 是否核心事件
         outputs_strength: 是否输出强度列（evt_*_strength）
         state_ttl_seconds: 状态有效期（秒），超时后状态机窗口过期
-        allowed_roles: 允许的角色列表（TRIGGER/CONFIRM/VETO/OBSERVE），
-                       None 则默认 [OBSERVE]
 
     Raises:
-        ValueError: 事件已注册或角色非法
+        ValueError: 事件已注册
     """
     if name in EVENT_REGISTRY:
         raise ValueError(f"事件 '{name}' 已注册")
-
-    roles = allowed_roles if allowed_roles is not None else list(DEFAULT_ALLOWED_ROLES)
-    # 校验角色合法
-    for role in roles:
-        if role not in EventRole.ALL_ROLES:
-            raise ValueError(f"事件 '{name}' 非法角色: {role}，合法角色: {EventRole.ALL_ROLES}")
 
     EVENT_REGISTRY[name] = {
         "name": name,
@@ -102,7 +89,6 @@ def register_event(
         "is_core": is_core,
         "outputs_strength": outputs_strength,
         "state_ttl_seconds": state_ttl_seconds,
-        "allowed_roles": roles,
     }
 
 
@@ -263,7 +249,6 @@ def detect_to_drafts(
                 payload=payload,
                 snapshot=snapshot,
                 state_ttl_seconds=meta["state_ttl_seconds"],
-                allowed_roles=list(meta["allowed_roles"]),
             )
             drafts.append(draft)
 
@@ -353,12 +338,10 @@ if __name__ == "__main__":
         description="测试事件",
         direction="positive",
         state_ttl_seconds=1800,
-        allowed_roles=[EventRole.TRIGGER],
     )
     meta = get_event("evt_test_smoke")
     assert meta["state_ttl_seconds"] == 1800
-    assert meta["allowed_roles"] == [EventRole.TRIGGER]
-    print(f"注册表元数据 ✓: ttl={meta['state_ttl_seconds']}, roles={meta['allowed_roles']}")
+    print(f"注册表元数据 ✓: ttl={meta['state_ttl_seconds']}")
 
     # 2. detect_to_drafts
     df = pd.DataFrame(
@@ -373,7 +356,6 @@ if __name__ == "__main__":
     assert len(drafts) == 2, f"应检测到 2 个事件，实际 {len(drafts)}"
     assert drafts[0].event_type == "evt_test_smoke"
     assert drafts[0].state_ttl_seconds == 1800
-    assert drafts[0].allowed_roles == [EventRole.TRIGGER]
     assert "close" in drafts[0].payload
     print(f"detect_to_drafts ✓: 检测到 {len(drafts)} 个事件")
     print(f"  draft[0].payload={drafts[0].payload}")

@@ -24,13 +24,16 @@ interface WatchlistRow {
   instrumentId: string
   symbol: string
   name: string
-  bbUpper: string
-  bbMiddle: string
-  bbLower: string
-  nodePrice: string
-  nodeStrength: string
-  lastEvent: string
-  updatedAt: string
+  bbUpper: number | null
+  bbMid: number | null
+  bbLower: number | null
+  currentPrice: number | null
+  upperNode: number | null
+  lowerNode: number | null
+  position01: number | null
+  pocPrice: number | null
+  lastTouchedNode: number | null
+  updatedAt: string | null
   [key: string]: unknown
 }
 
@@ -56,12 +59,6 @@ function toNum(v: unknown): number | null {
 function fmtNum(v: unknown, digits = 2): string {
   const n = toNum(v)
   return n === null ? '-' : n.toFixed(digits)
-}
-
-/** 格式化为字符串，未知返回 '-' */
-function fmtStr(v: unknown): string {
-  if (v === undefined || v === null || v === '') return '-'
-  return String(v)
 }
 
 /** 格式化更新时间，取时间部分 */
@@ -238,12 +235,15 @@ export default function WatchlistPage() {
         instrumentId: s.instrument_id,
         symbol,
         name,
-        bbUpper: fmtNum(pickPayload(s.payload, ['bb_upper', 'bollinger_upper', 'upper_band'])),
-        bbMiddle: fmtNum(pickPayload(s.payload, ['bb_middle', 'bollinger_middle', 'middle_band', 'ma20'])),
-        bbLower: fmtNum(pickPayload(s.payload, ['bb_lower', 'bollinger_lower', 'lower_band'])),
-        nodePrice: fmtNum(pickPayload(s.payload, ['node_price', 'vn_price', 'volume_node_price'])),
-        nodeStrength: fmtNum(pickPayload(s.payload, ['node_strength', 'vn_strength', 'volume_node_strength'])),
-        lastEvent: fmtStr(pickPayload(s.payload, ['last_event', 'event_description', 'latest_event'])),
+        bbUpper: toNum(pickPayload(s.payload, ['bb_upper'])),
+        bbMid: toNum(pickPayload(s.payload, ['bb_mid', 'bb_middle'])),
+        bbLower: toNum(pickPayload(s.payload, ['bb_lower'])),
+        currentPrice: toNum(pickPayload(s.payload, ['current_price', 'close'])),
+        upperNode: toNum(pickPayload(s.payload, ['upper_node', 'nearest_node_price'])),
+        lowerNode: toNum(pickPayload(s.payload, ['lower_node'])),
+        position01: toNum(pickPayload(s.payload, ['position_0_1', 'node_strength'])),
+        pocPrice: toNum(pickPayload(s.payload, ['poc_price'])),
+        lastTouchedNode: toNum(pickPayload(s.payload, ['last_touched_node'])),
         updatedAt: fmtTime(s.updated_at),
       }
     },
@@ -292,22 +292,31 @@ export default function WatchlistPage() {
         ),
       },
       {
+        key: 'currentPrice',
+        title: '当前价',
+        dataType: 'number',
+        sortable: true,
+        filterable: false,
+        sortValue: (row) => row.currentPrice ?? 0,
+        render: (row) => <span className="num">{fmtNum(row.currentPrice)}</span>,
+      },
+      {
         key: 'bbUpper',
         title: 'BB上轨',
         dataType: 'number',
         sortable: true,
         filterable: false,
-        sortValue: (row) => Number(row.bbUpper === '-' ? 0 : row.bbUpper),
-        render: (row) => <span className="num">{row.bbUpper}</span>,
+        sortValue: (row) => row.bbUpper ?? 0,
+        render: (row) => <span className="num">{fmtNum(row.bbUpper)}</span>,
       },
       {
-        key: 'bbMiddle',
+        key: 'bbMid',
         title: 'BB中轨',
         dataType: 'number',
         sortable: true,
         filterable: false,
-        sortValue: (row) => Number(row.bbMiddle === '-' ? 0 : row.bbMiddle),
-        render: (row) => <span className="num">{row.bbMiddle}</span>,
+        sortValue: (row) => row.bbMid ?? 0,
+        render: (row) => <span className="num">{fmtNum(row.bbMid)}</span>,
       },
       {
         key: 'bbLower',
@@ -315,35 +324,53 @@ export default function WatchlistPage() {
         dataType: 'number',
         sortable: true,
         filterable: false,
-        sortValue: (row) => Number(row.bbLower === '-' ? 0 : row.bbLower),
-        render: (row) => <span className="num">{row.bbLower}</span>,
+        sortValue: (row) => row.bbLower ?? 0,
+        render: (row) => <span className="num">{fmtNum(row.bbLower)}</span>,
       },
       {
-        key: 'nodePrice',
-        title: 'Node价格',
+        key: 'upperNode',
+        title: '上节点',
         dataType: 'number',
         sortable: true,
         filterable: false,
-        sortValue: (row) => Number(row.nodePrice === '-' ? 0 : row.nodePrice),
-        render: (row) => <span className="num">{row.nodePrice}</span>,
+        sortValue: (row) => row.upperNode ?? 0,
+        render: (row) => <span className="num">{fmtNum(row.upperNode)}</span>,
       },
       {
-        key: 'nodeStrength',
-        title: 'Node强度',
+        key: 'lowerNode',
+        title: '下节点',
         dataType: 'number',
         sortable: true,
         filterable: false,
-        sortValue: (row) => Number(row.nodeStrength === '-' ? 0 : row.nodeStrength),
-        render: (row) => <span className="num">{row.nodeStrength}</span>,
+        sortValue: (row) => row.lowerNode ?? 0,
+        render: (row) => <span className="num">{fmtNum(row.lowerNode)}</span>,
       },
       {
-        key: 'lastEvent',
-        title: '最近事件',
-        dataType: 'text',
-        sortable: false,
-        filterable: true,
-        filterValue: (row) => row.lastEvent,
-        render: (row) => row.lastEvent,
+        key: 'position01',
+        title: '位置',
+        dataType: 'number',
+        sortable: true,
+        filterable: false,
+        sortValue: (row) => row.position01 ?? 0,
+        render: (row) => <span className="num">{fmtNum(row.position01)}</span>,
+      },
+      {
+        key: 'pocPrice',
+        title: 'POC',
+        dataType: 'number',
+        sortable: true,
+        filterable: false,
+        sortValue: (row) => row.pocPrice ?? 0,
+        render: (row) => <span className="num">{fmtNum(row.pocPrice)}</span>,
+      },
+      {
+        key: 'lastTouchedNode',
+        title: '最近触碰',
+        dataType: 'number',
+        sortable: true,
+        filterable: false,
+        sortValue: (row) => row.lastTouchedNode ?? 0,
+        render: (row) => <span className="num">{fmtNum(row.lastTouchedNode)}</span>,
       },
       {
         key: 'updatedAt',
@@ -351,8 +378,8 @@ export default function WatchlistPage() {
         dataType: 'text',
         sortable: true,
         filterable: false,
-        sortValue: (row) => row.updatedAt,
-        render: (row) => <span className="num">{row.updatedAt}</span>,
+        sortValue: (row) => row.updatedAt ?? '',
+        render: (row) => <span className="num">{row.updatedAt ?? '-'}</span>,
       },
       {
         key: 'action',

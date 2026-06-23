@@ -48,28 +48,7 @@ from app.models.selection_plan_run import (
 )
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.user import User
-from app.schemas.selection_plan import (
-    ConditionSpec,
-    MemberSpec,
-    SelectionMemberConditionResponse,
-    SelectionPlanCloneRequest,
-    SelectionPlanCreateRequest,
-    SelectionPlanDetailResponse,
-    SelectionPlanListResponse,
-    SelectionPlanMemberResponse,
-    SelectionPlanPreviewRequest,
-    SelectionPlanPreviewResponse,
-    SelectionPlanResponse,
-    SelectionPlanResultListResponse,
-    SelectionPlanResultResponse,
-    SelectionPlanRevisionResponse,
-    SelectionPlanRunListResponse,
-    SelectionPlanRunRequest,
-    SelectionPlanRunResponse,
-    SelectionPlanUpdateRequest,
-    SelectionPlanValidateResponse,
-    SelectionResultEvidenceResponse,
-)
+# [LEGACY] combo schemas removed - from app.schemas.selection_plan import ...
 from app.services.selection_plan_validator import (
     SelectionPlanValidationError,
     validate_plan,

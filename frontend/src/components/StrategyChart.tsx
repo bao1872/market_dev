@@ -1,6 +1,6 @@
 // StrategyChart：纯 Canvas 2D 策略图表组件（V1.6.3）
 // 对应原型 assets/charts.js 的 drawTrading 渲染管线
-// 支持 K 线 + 成交量 + VWAP + Volume Profile + Node Cluster + ATR Rope + Volume Delta + 事件标记
+// 支持 K 线 + 成交量 + VWAP + Volume Profile + Node Cluster + Volume Delta + 事件标记
 // 图层可见性持久化到 localStorage，十字线联动 OHLC 图例
 // 用法：<StrategyChart symbol="688112" bars={bars} events={events} strategyId="node" source="watchlist" height={660} />
 
@@ -61,7 +61,6 @@ export interface LayerVisibility {
   node: boolean
   poc: boolean
   profile: boolean
-  atr: boolean
   bb: boolean
   delta: boolean
   events: boolean
@@ -83,10 +82,6 @@ export interface StrategyChartProps {
 interface CalculatedBar extends BarData {
   delta: number
   cvd: number
-  atr: number
-  ropeMid: number
-  ropeUpper: number
-  ropeLower: number
   typical: number
 }
 
@@ -257,38 +252,16 @@ function timeTicks(data: CalculatedBar[], count: number, tf: string): { idx: num
 
 // ===== 指标计算模块（从 charts.js 迁移）=====
 
-// 指数移动平均
-function ema(values: number[], period: number): number[] {
-  const k = 2 / (period + 1)
-  const out: number[] = []
-  let prev = values[0] || 0
-  values.forEach((v, i) => {
-    prev = i ? v * k + prev * (1 - k) : v
-    out.push(prev)
-  })
-  return out
-}
-
-// 计算 Delta / CVD / ATR / RopeMid / RopeUpper / RopeLower
+// 计算 Delta / CVD
 function addIndicators(bars: BarData[]): CalculatedBar[] {
   const out: CalculatedBar[] = bars.map(x => ({ ...x } as CalculatedBar))
-  const closes = out.map(d => d.close)
-  const trs = out.map((d, i) =>
-    i === 0 ? d.high - d.low : Math.max(d.high - d.low, Math.abs(d.high - out[i - 1].close), Math.abs(d.low - out[i - 1].close))
-  )
-  const mid = ema(closes, 20)
-  const atr = ema(trs, 14)
   let cvd = 0
-  out.forEach((d, i) => {
+  out.forEach((d) => {
     const typical = (d.high + d.low + d.close) / 3
     const clv = (2 * d.close - d.high - d.low) / Math.max(0.001, d.high - d.low)
     d.delta = d.volume * clamp(clv * 0.82 + (d.close >= d.open ? 0.16 : -0.16), -0.95, 0.95)
     cvd += d.delta
     d.cvd = cvd
-    d.atr = atr[i]
-    d.ropeMid = mid[i]
-    d.ropeUpper = mid[i] + atr[i] * 1.35
-    d.ropeLower = mid[i] - atr[i] * 1.35
     d.typical = typical
   })
   return out
@@ -611,43 +584,6 @@ function renderVolume(
   drawPaneTicks(ctx, g, 'volume', 0, vmax, 'VOL', data[data.length - 1].volume, C.text)
 }
 
-// ATR Rope 蓝带填充 + 上下轨线
-function renderAtr(
-  ctx: CanvasRenderingContext2D,
-  g: Geometry,
-  data: CalculatedBar[],
-  step: number,
-  py: (v: number) => number,
-): void {
-  ctx.beginPath()
-  data.forEach((d, i) => {
-    const x = g.l + (i + 0.5) * step
-    const y = py(d.ropeUpper)
-    if (i) ctx.lineTo(x, y)
-    else ctx.moveTo(x, y)
-  })
-  for (let i = data.length - 1; i >= 0; i--) {
-    const d = data[i]
-    const x = g.l + (i + 0.5) * step
-    ctx.lineTo(x, py(d.ropeLower))
-  }
-  ctx.closePath()
-  ctx.fillStyle = 'rgba(79,124,255,.12)'
-  ctx.fill()
-  ;(['ropeUpper', 'ropeLower'] as const).forEach((k, j) => {
-    ctx.beginPath()
-    data.forEach((d, i) => {
-      const x = g.l + (i + 0.5) * step
-      const y = py(d[k])
-      if (i) ctx.lineTo(x, y)
-      else ctx.moveTo(x, y)
-    })
-    ctx.strokeStyle = j ? C.blue : C.blue2
-    ctx.lineWidth = 1.1
-    ctx.stroke()
-  })
-}
-
 // 突破压力区
 function renderBreakout(
   ctx: CanvasRenderingContext2D,
@@ -918,9 +854,8 @@ function isEventVisible(ev: MappedEvent, layers: LayerVisibility): boolean {
   const type = ev.type
   if (/selection|hit/i.test(type)) return layers.selection
   if (/node/i.test(type)) return layers.node
-  if (/atr|rope/i.test(type)) return layers.atr
-  if (/delta/i.test(type)) return layers.delta
-  if (/composite|combo|confirmed/i.test(type)) return layers.node || layers.atr || layers.delta
+  if (/atr|rope/i.test(type)) return layers.node
+  if (/composite|combo|confirmed/i.test(type)) return layers.node || layers.delta
   return true
 }
 
@@ -947,8 +882,8 @@ function drawTrading(
   const { ctx, w, h } = fit(canvas)
   const layerSet = new Set(Object.entries(layers).filter(([, v]) => v).map(([k]) => k))
   const g = geometry(layerSet, w, h)
-  const min = Math.min(...calc.map(d => Math.min(d.low, d.ropeLower))) - 0.25
-  const max = Math.max(...calc.map(d => Math.max(d.high, d.ropeUpper))) + 0.25
+  const min = Math.min(...calc.map(d => d.low)) - 0.25
+  const max = Math.max(...calc.map(d => d.high)) + 0.25
   const py = (v: number) => g.panes.price.top + (max - v) / (max - min) * (g.panes.price.bottom - g.panes.price.top)
   const plotW = g.plotRight - g.l
   const step = plotW / display.length
@@ -1021,12 +956,7 @@ function drawTrading(
     drawText(ctx, `POC ${fmt(pocVal)}`, g.plotRight - 62, py(pocVal) - 5, C.orange, '9px sans-serif')
   }
 
-  // 5. ATR Rope
-  if (layers.atr) {
-    renderAtr(ctx, g, display, step, py)
-  }
-
-  // 6. 突破压力区
+  // 5. 突破压力区
   if (layers.breakout) {
     renderBreakout(ctx, g, display, py)
   }
@@ -1140,7 +1070,6 @@ function getDefaultLayers(strategyId?: string): LayerVisibility {
     node: false,
     poc: false,
     profile: false,
-    atr: false,
     bb: false,
     delta: false,
     events: false,
@@ -1346,7 +1275,7 @@ export function StrategyChart({
             }
           })
         }
-        tip.innerHTML = `<b>${formatTime(d.time)}</b><span>开 ${fmt(d.open)}　高 ${fmt(d.high)}</span><span>低 ${fmt(d.low)}　收 ${fmt(d.close)}</span><span>\u6210\u4ea4量 ${formatVolume(d.volume)}</span><span>Delta ${formatVolume(d.delta)}　ATR ${fmt(d.atr)}</span>${indicatorHtml}`
+        tip.innerHTML = `<b>${formatTime(d.time)}</b><span>开 ${fmt(d.open)}　高 ${fmt(d.high)}</span><span>低 ${fmt(d.low)}　收 ${fmt(d.close)}</span><span>\u6210\u4ea4量 ${formatVolume(d.volume)}</span><span>Delta ${formatVolume(d.delta)}</span>${indicatorHtml}`
       }
     }
 

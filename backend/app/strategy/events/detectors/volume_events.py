@@ -1,7 +1,7 @@
 """量能事件检测 - V1.1 升级版。
 
 从 ref/交易/event_lib/detectors/volume_events.py 迁移。
-升级：添加 state_ttl_seconds 和 allowed_roles 声明。
+升级：添加 state_ttl_seconds 声明。
 
 Registered Events:
     - evt_up_move_with_vol_spike: 上涨+放量（CONFIRM）
@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.strategy.events.base import EventRole
 from app.strategy.events.registry import register_event
 
 
@@ -62,7 +61,6 @@ register_event(
     direction="positive",
     is_core=True,
     state_ttl_seconds=1800,
-    allowed_roles=[EventRole.CONFIRM],
 )
 
 register_event(
@@ -74,7 +72,6 @@ register_event(
     direction="negative",
     is_core=True,
     state_ttl_seconds=1800,
-    allowed_roles=[EventRole.CONFIRM],
 )
 
 register_event(
@@ -86,7 +83,6 @@ register_event(
     direction="neutral",
     is_core=False,
     state_ttl_seconds=600,
-    allowed_roles=[EventRole.OBSERVE],
 )
 
 register_event(
@@ -98,7 +94,6 @@ register_event(
     direction="neutral",
     is_core=False,
     state_ttl_seconds=600,
-    allowed_roles=[EventRole.OBSERVE],
 )
 
 
@@ -108,5 +103,5 @@ if __name__ == "__main__":
     events = list_by_category("量能事件")
     print(f"量能事件已注册 {len(events)} 个")
     for e in events:
-        print(f"  {e['name']} ttl={e['state_ttl_seconds']} roles={e['allowed_roles']}")
+        print(f"  {e['name']} ttl={e['state_ttl_seconds']}")
     print("OK")

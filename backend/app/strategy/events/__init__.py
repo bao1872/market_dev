@@ -1,14 +1,13 @@
 """V1.1 事件库包 - 从 ref/交易/event_lib/ 升级为 V1.1 monitor 事件格式。
 
 核心组件：
-- base.StrategyEventDraft: 事件草稿 dataclass（自包含 payload + state_ttl + allowed_roles）
-- base.EventRole: 事件角色常量（TRIGGER/CONFIRM/VETO/OBSERVE）
-- registry: 升级版注册表（支持 state_ttl_seconds 和 allowed_roles）
+- base.StrategyEventDraft: 事件草稿 dataclass（自包含 payload + state_ttl）
+- registry: 升级版注册表（支持 state_ttl_seconds）
 - detectors: 14 个检测器（从 event_lib/detectors/ 迁移）
 
 Usage:
     from app.strategy.events import (
-        StrategyEventDraft, EventRole,
+        StrategyEventDraft,
         register_event, detect_to_drafts, detect_panel, list_all,
     )
 
@@ -23,7 +22,6 @@ Usage:
 from __future__ import annotations
 
 from app.strategy.events.base import (
-    EventRole,
     StrategyEventDraft,
     build_dedupe_key,
 )
@@ -57,7 +55,6 @@ from app.strategy.events.registry import (
 
 __all__ = [
     "EVENT_REGISTRY",
-    "EventRole",
     "StrategyEventDraft",
     "build_dedupe_key",
     "detect_panel",

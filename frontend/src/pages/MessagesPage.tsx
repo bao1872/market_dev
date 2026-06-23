@@ -1,6 +1,6 @@
 // 消息中心页（受保护路由）
 // 对应原型：messages.html (V1.6.3)
-// 用法：统一管理组合方案消息、单策略过程事件与系统消息，支持按类型/时间筛选与标记已读
+// 用法：统一管理策略消息、过程事件与系统消息，支持按类型/时间筛选与标记已读
 // 依赖 hooks：useMessages / useMarkMessageRead
 // 路由：/messages
 import { useState, useMemo, useCallback } from 'react'
@@ -44,8 +44,8 @@ interface MessageRow {
 
 /** 消息类型 → 中文标签 + tag 样式 */
 const TYPE_META: Record<string, { label: string; tag: 'good' | 'info' | 'warn' }> = {
-  monitoring_composite: { label: '监控组合', tag: 'good' },
-  selection_composite: { label: '选股组合', tag: 'good' },
+  monitoring_composite: { label: '监控', tag: 'good' },
+  selection_composite: { label: '选股', tag: 'good' },
   process_event: { label: '过程事件', tag: 'info' },
   system: { label: '系统', tag: 'warn' },
 }
@@ -54,8 +54,8 @@ const TYPE_META: Record<string, { label: string; tag: 'good' | 'info' | 'warn' }
 const FILTER_OPTIONS: Array<{ value: MessageFilter; label: string }> = [
   { value: 'all', label: '全部' },
   { value: 'unread', label: '未读' },
-  { value: 'selection', label: '选股组合' },
-  { value: 'monitoring', label: '监控组合' },
+  { value: 'selection', label: '选股' },
+  { value: 'monitoring', label: '监控' },
   { value: 'process', label: '过程事件' },
   { value: 'system', label: '系统' },
 ]
@@ -326,7 +326,7 @@ export default function MessagesPage() {
       },
       {
         key: 'plan_name',
-        title: '方案 / 策略',
+        title: '策略',
         dataType: 'text',
         sortable: true,
         filterable: true,
@@ -398,7 +398,7 @@ export default function MessagesPage() {
         <div>
           <h1 className="page-title">消息中心</h1>
           <div className="page-desc">
-            组合方案消息、单策略过程事件与系统消息统一管理，渠道投递状态可追溯
+            策略消息、过程事件与系统消息统一管理，渠道投递状态可追溯
           </div>
         </div>
         <div className="actions">

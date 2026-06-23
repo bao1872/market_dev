@@ -12,7 +12,7 @@ export interface StrategyOption {
   name: string
   description: string
   version?: string
-  kind?: 'selection' | 'monitor' | 'selection_plan' | 'monitor_plan'
+  kind?: 'selection' | 'monitor'
 }
 
 // 策略面板内容
@@ -144,85 +144,6 @@ export function StrategySwitcher({
             activePanel.state === 'partial' ||
             activePanel.state === 'stale') &&
             activePanel.content}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ===== PlanSwitcher：方案切换组件（V1.3 组合方案）=====
-// 对应原型 .plan-switch-bar 结构
-export interface PlanOption {
-  id: string
-  name: string
-  revision?: string
-  composition?: string[] // 成员策略 token
-}
-
-interface PlanSwitcherProps {
-  plans: PlanOption[]
-  activePlanId: string
-  onChange: (planId: string) => void
-  // 方案组合模式（ALL/ANY）
-  comboMode?: 'ALL' | 'ANY'
-  onComboModeChange?: (mode: 'ALL' | 'ANY') => void
-}
-
-export function PlanSwitcher({
-  plans,
-  activePlanId,
-  onChange,
-  comboMode,
-  onComboModeChange,
-}: PlanSwitcherProps) {
-  const activePlan = plans.find((p) => p.id === activePlanId)
-
-  return (
-    <div className="plan-switch-bar">
-      <div>
-        <span style={{ fontSize: '11px', color: 'var(--muted)' }}>方案</span>
-        <select
-          className="select"
-          value={activePlanId}
-          onChange={(e) => onChange(e.target.value)}
-        >
-          {plans.map((plan) => (
-            <option key={plan.id} value={plan.id}>
-              {plan.name}
-              {plan.revision ? ` (${plan.revision})` : ''}
-            </option>
-          ))}
-        </select>
-      </div>
-      {activePlan?.composition && activePlan.composition.length > 0 && (
-        <div className="plan-composition">
-          {activePlan.composition.map((token, i) => (
-            <span key={i} className="combo-token">
-              {token}
-            </span>
-          ))}
-          {comboMode && (
-            <span className="chip violet" style={{ marginLeft: 4 }}>
-              {comboMode === 'ALL' ? '交集' : '并集'}
-            </span>
-          )}
-        </div>
-      )}
-      <div className="toolbar-spacer" />
-      {onComboModeChange && comboMode && (
-        <div className="segmented">
-          <button
-            className={clsx('segment', comboMode === 'ALL' && 'active')}
-            onClick={() => onComboModeChange('ALL')}
-          >
-            ALL（交集）
-          </button>
-          <button
-            className={clsx('segment', comboMode === 'ANY' && 'active')}
-            onClick={() => onComboModeChange('ANY')}
-          >
-            ANY（并集）
-          </button>
         </div>
       )}
     </div>

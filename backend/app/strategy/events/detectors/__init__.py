@@ -1,7 +1,7 @@
 """V1.1 事件检测器包 - 从 ref/交易/event_lib/detectors/ 迁移并升级。
 
 升级内容：
-1. 每个检测器添加 state_ttl_seconds 和 allowed_roles 声明
+1. 每个检测器添加 state_ttl_seconds 声明
 2. structural_events.py 修复占位实现（向量化支撑/阻力突破）
 3. 导入路径从 event_lib 改为 app.strategy.events
 

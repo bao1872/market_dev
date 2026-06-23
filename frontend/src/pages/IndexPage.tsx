@@ -1,6 +1,6 @@
 // 服务总览（首页，受保护路由）
 // 对应原型：index.html (V1.6.3)
-// 用法：集中查看选股策略结果、全部监控策略计算状态和最新事件
+// 用法：集中查看选股策略结果、监控策略计算状态和最新事件
 // 依赖 hooks：useWatchlist / useStrategies / useStrategyRuns / useStrategyRunResults /
 //             useStrategyMonitorStates / useNotificationChannels / useInstruments / useAddToWatchlist
 // 路由：/
@@ -58,39 +58,6 @@ interface NodeMonitorRow {
   upper_node: string
   upper_tag?: 'warn'
   last_touch: string
-  last_event: string
-  [key: string]: unknown
-}
-
-// ATR 监控行（从 MonitorState.payload 派生）
-interface AtrMonitorRow {
-  instrument_id: string
-  name: string
-  symbol: string
-  price: string
-  direction: string
-  direction_tag: 'good' | 'warn'
-  rope_pos: string
-  deviation: string
-  band_width: string
-  duration: string
-  last_event: string
-  [key: string]: unknown
-}
-
-// Volume Delta 监控行（从 MonitorState.payload 派生）
-interface VolumeMonitorRow {
-  instrument_id: string
-  name: string
-  symbol: string
-  price: string
-  delta_dir: string
-  delta_tag: 'good' | 'bad'
-  z_score: string
-  z_score_pos: boolean
-  buy_ratio: string
-  consec_bars: string
-  last_event: string
   [key: string]: unknown
 }
 
@@ -295,13 +262,9 @@ export default function IndexPage() {
   const selectionResultsQuery = useStrategyRunResults(latestRunId, { limit: 20 })
   const selectionResults: StrategyResult[] = selectionResultsQuery.data?.items ?? []
 
-  // --- 监控策略状态（底部 3 个表格 + 目录卡 meta）---
-  const nodeStatesQuery = useStrategyMonitorStates('node')
-  const atrStatesQuery = useStrategyMonitorStates('atr')
-  const volumeStatesQuery = useStrategyMonitorStates('volume')
-  const nodeStates: MonitorState[] = nodeStatesQuery.data?.items ?? []
-  const atrStates: MonitorState[] = atrStatesQuery.data?.items ?? []
-  const volumeStates: MonitorState[] = volumeStatesQuery.data?.items ?? []
+  // --- 监控策略状态（底部表格 + 目录卡 meta）---
+  const monitorStatesQuery = useStrategyMonitorStates('watchlist_monitor')
+  const monitorStates: MonitorState[] = monitorStatesQuery.data?.items ?? []
 
   // --- KPI 3：自选股的监控状态总数（useInstrumentMonitorStates 按自选股逐个查询后汇总）---
   const monitorStateQueries = useQueries({
@@ -326,11 +289,9 @@ export default function IndexPage() {
   const allInstrumentIds = useMemo(() => {
     const ids = new Set<string>()
     selectionResults.forEach((r) => ids.add(r.instrument_id))
-    nodeStates.forEach((s) => ids.add(s.instrument_id))
-    atrStates.forEach((s) => ids.add(s.instrument_id))
-    volumeStates.forEach((s) => ids.add(s.instrument_id))
+    monitorStates.forEach((s) => ids.add(s.instrument_id))
     return [...ids]
-  }, [selectionResults, nodeStates, atrStates, volumeStates])
+  }, [selectionResults, monitorStates])
 
   const instrumentQueries = useQueries({
     queries: allInstrumentIds.map((id) => ({
@@ -416,66 +377,6 @@ export default function IndexPage() {
         last_touch: fmtStr(
           pickPayload(payload, ['last_touch', 'last_touched_node', 'recent_touch']),
         ),
-        last_event: fmtStr(
-          pickPayload(payload, ['last_event', 'event_description', 'latest_event']),
-        ),
-      }
-    },
-    [instrumentMap],
-  )
-
-  /** 将 MonitorState 转换为 AtrMonitorRow */
-  const toAtrRow = useCallback(
-    (s: MonitorState): AtrMonitorRow => {
-      const payload = s.payload
-      const inst = instrumentMap.get(s.instrument_id)
-      const direction = fmtStr(
-        pickPayload(payload, ['direction', 'trend_direction', 'rope_direction']),
-      )
-      return {
-        instrument_id: s.instrument_id,
-        name: inst?.name ?? '-',
-        symbol: inst?.symbol ?? s.instrument_id.slice(0, 8),
-        price: fmtNum(pickPayload(payload, ['price', 'last_price', 'close'])),
-        direction,
-        direction_tag: direction === '向上' ? 'good' : 'warn',
-        rope_pos: fmtNum(pickPayload(payload, ['rope_pos', 'rope_position', 'band_position'])),
-        deviation: fmtPct(pickPayload(payload, ['deviation', 'deviation_pct', 'rope_deviation'])),
-        band_width: fmtPct(pickPayload(payload, ['band_width', 'rope_width', 'atr_band_width'])),
-        duration: fmtStr(pickPayload(payload, ['duration', 'state_duration', 'bars_in_state'])),
-        last_event: fmtStr(
-          pickPayload(payload, ['last_event', 'event_description', 'latest_event']),
-        ),
-      }
-    },
-    [instrumentMap],
-  )
-
-  /** 将 MonitorState 转换为 VolumeMonitorRow */
-  const toVolumeRow = useCallback(
-    (s: MonitorState): VolumeMonitorRow => {
-      const payload = s.payload
-      const inst = instrumentMap.get(s.instrument_id)
-      const deltaDir = fmtStr(
-        pickPayload(payload, ['delta_dir', 'delta_direction', 'flow_direction']),
-      )
-      const zScore = toNum(pickPayload(payload, ['z_score', 'volume_zscore', 'zscore']))
-      return {
-        instrument_id: s.instrument_id,
-        name: inst?.name ?? '-',
-        symbol: inst?.symbol ?? s.instrument_id.slice(0, 8),
-        price: fmtNum(pickPayload(payload, ['price', 'last_price', 'close'])),
-        delta_dir: deltaDir,
-        delta_tag: deltaDir.includes('流入') ? 'good' : 'bad',
-        z_score: zScore !== null ? zScore.toFixed(2) : '-',
-        z_score_pos: zScore !== null && zScore > 0,
-        buy_ratio: fmtPct(pickPayload(payload, ['buy_ratio', 'buy_percentage', 'active_buy_ratio'])),
-        consec_bars: fmtStr(
-          pickPayload(payload, ['consec_bars', 'consecutive_bars', 'consecutive_volume_bars']),
-        ),
-        last_event: fmtStr(
-          pickPayload(payload, ['last_event', 'event_description', 'latest_event']),
-        ),
       }
     },
     [instrumentMap],
@@ -491,16 +392,8 @@ export default function IndexPage() {
 
   // 底部监控表格：按自选股过滤
   const nodeRows: NodeMonitorRow[] = useMemo(
-    () => nodeStates.filter((s) => watchlistIds.has(s.instrument_id)).map(toNodeRow),
-    [nodeStates, watchlistIds, toNodeRow],
-  )
-  const atrRows: AtrMonitorRow[] = useMemo(
-    () => atrStates.filter((s) => watchlistIds.has(s.instrument_id)).map(toAtrRow),
-    [atrStates, watchlistIds, toAtrRow],
-  )
-  const volumeRows: VolumeMonitorRow[] = useMemo(
-    () => volumeStates.filter((s) => watchlistIds.has(s.instrument_id)).map(toVolumeRow),
-    [volumeStates, watchlistIds, toVolumeRow],
+    () => monitorStates.filter((s) => watchlistIds.has(s.instrument_id)).map(toNodeRow),
+    [monitorStates, watchlistIds, toNodeRow],
   )
 
   // KPI 1：今日选股结果数
@@ -541,29 +434,17 @@ export default function IndexPage() {
     // Volume Node Cluster
     const node = strategies.find((s) => s.strategy_key === 'node')
     if (node) {
-      const latestBarTime = nodeStates[0]?.bar_time
+      const latestBarTime = monitorStates[0]?.bar_time
       cards.push({
         type: 'MONITOR',
         status: '实时',
         title: node.display_name,
         desc: '分钟级动态节点、POC、区间位置与碰触事件。',
-        meta: `${nodeStates.length} 只 · ${fmtTime(latestBarTime)}`,
-      })
-    }
-    // ATR Rope
-    const atr = strategies.find((s) => s.strategy_key === 'atr')
-    if (atr) {
-      const latestBarTime = atrStates[0]?.bar_time
-      cards.push({
-        type: 'MONITOR',
-        status: '实时',
-        title: atr.display_name,
-        desc: '趋势方向、蓝带位置、偏离程度和状态切换事件。',
-        meta: `${atrStates.length} 只 · ${fmtTime(latestBarTime)}`,
+        meta: `${monitorStates.length} 只 · ${fmtTime(latestBarTime)}`,
       })
     }
     return cards
-  }, [strategies, latestDsaRun, nodeStates, atrStates])
+  }, [strategies, latestDsaRun, monitorStates])
 
   // ===== 事件处理 =====
 
@@ -750,169 +631,6 @@ export default function IndexPage() {
         filterable: true,
         render: (row) => <span className="num">{row.last_touch}</span>,
       },
-      {
-        key: 'last_event',
-        title: '最后事件',
-        dataType: 'text',
-        sortable: false,
-        filterable: true,
-        render: (row) => row.last_event,
-      },
-    ],
-    [],
-  )
-
-  // ATR 监控表列
-  const atrColumns: DataTableColumn<AtrMonitorRow>[] = useMemo(
-    () => [
-      {
-        key: 'stock',
-        title: '股票',
-        dataType: 'text',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => row.name,
-        filterValue: (row) => `${row.name} ${row.symbol}`,
-        render: (row) => (
-          <div>
-            <div className="symbol">{row.name}</div>
-            <div className="symbol-sub">{row.symbol}</div>
-          </div>
-        ),
-      },
-      {
-        key: 'price',
-        title: '当前价格',
-        dataType: 'number',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => Number(row.price) || 0,
-        render: (row) => <span className="num">{row.price}</span>,
-      },
-      {
-        key: 'direction',
-        title: '方向',
-        dataType: 'text',
-        sortable: true,
-        filterable: true,
-        render: (row) => <span className={`tag ${row.direction_tag}`}>{row.direction}</span>,
-      },
-      {
-        key: 'rope_pos',
-        title: '蓝带位置 0–1',
-        dataType: 'number',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => Number(row.rope_pos) || 0,
-        render: (row) => <span className="num">{row.rope_pos}</span>,
-      },
-      {
-        key: 'deviation',
-        title: '偏离度',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => Number(row.deviation.replace('%', '')) || 0,
-        render: (row) => <span className="num pos">{row.deviation}</span>,
-      },
-      {
-        key: 'band_width',
-        title: '蓝带宽度收益率',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => Number(row.band_width.replace('%', '')) || 0,
-        render: (row) => <span className="num">{row.band_width}</span>,
-      },
-      {
-        key: 'duration',
-        title: '状态持续',
-        dataType: 'text',
-        sortable: true,
-        filterable: true,
-        render: (row) => <span className="num">{row.duration}</span>,
-      },
-      {
-        key: 'last_event',
-        title: '最后事件',
-        dataType: 'text',
-        sortable: false,
-        filterable: true,
-        render: (row) => row.last_event,
-      },
-    ],
-    [],
-  )
-
-  // Volume Delta 监控表列
-  const volumeColumns: DataTableColumn<VolumeMonitorRow>[] = useMemo(
-    () => [
-      {
-        key: 'stock',
-        title: '股票',
-        dataType: 'text',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => row.name,
-        filterValue: (row) => `${row.name} ${row.symbol}`,
-        render: (row) => (
-          <div>
-            <div className="symbol">{row.name}</div>
-            <div className="symbol-sub">{row.symbol}</div>
-          </div>
-        ),
-      },
-      {
-        key: 'price',
-        title: '当前价格',
-        dataType: 'number',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => Number(row.price) || 0,
-        render: (row) => <span className="num">{row.price}</span>,
-      },
-      {
-        key: 'delta_dir',
-        title: 'Delta 方向',
-        dataType: 'text',
-        sortable: true,
-        filterable: true,
-        render: (row) => <span className={`tag ${row.delta_tag}`}>{row.delta_dir}</span>,
-      },
-      {
-        key: 'z_score',
-        title: '成交量 Z-score',
-        dataType: 'number',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => Number(row.z_score) || 0,
-        render: (row) => <span className={`num${row.z_score_pos ? ' pos' : ''}`}>{row.z_score}</span>,
-      },
-      {
-        key: 'buy_ratio',
-        title: '主动买入占比',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => Number(row.buy_ratio.replace('%', '')) || 0,
-        render: (row) => <span className="num">{row.buy_ratio}</span>,
-      },
-      {
-        key: 'consec_bars',
-        title: '连续放量',
-        dataType: 'text',
-        sortable: true,
-        filterable: true,
-        render: (row) => <span className="num">{row.consec_bars}</span>,
-      },
-      {
-        key: 'last_event',
-        title: '最后事件',
-        dataType: 'text',
-        sortable: false,
-        filterable: true,
-        render: (row) => row.last_event,
-      },
     ],
     [],
   )
@@ -926,20 +644,6 @@ export default function IndexPage() {
       description: '节点、POC 与碰触事件',
       kind: 'monitor',
       version: STRATEGIES.node.version,
-    },
-    {
-      id: 'overviewAtr',
-      name: STRATEGIES.atr.name,
-      description: '趋势、蓝带与偏离状态',
-      kind: 'monitor',
-      version: STRATEGIES.atr.version,
-    },
-    {
-      id: 'overviewVolume',
-      name: STRATEGIES.volume.name,
-      description: '量能方向与异常放量',
-      kind: 'monitor',
-      version: STRATEGIES.volume.version,
     },
   ]
 
@@ -957,53 +661,17 @@ export default function IndexPage() {
   const monitorPanels: Record<string, StrategyPanel> = {
     overviewNode: {
       id: 'overviewNode',
-      state: getPanelState(nodeStatesQuery.isLoading, nodeStatesQuery.isError, nodeRows.length),
+      state: getPanelState(monitorStatesQuery.isLoading, monitorStatesQuery.isError, nodeRows.length),
       content: (
         <StrategyDataTable
           tableId="index-node-monitor"
           columns={nodeColumns}
           rows={nodeRows}
           rowKey={(row) => row.instrument_id}
-          loading={nodeStatesQuery.isLoading}
-          error={nodeStatesQuery.isError ? '监控状态加载失败' : null}
+          loading={monitorStatesQuery.isLoading}
+          error={monitorStatesQuery.isError ? '监控状态加载失败' : null}
           searchable={false}
           emptyText="自选股暂无 Node 监控状态"
-        />
-      ),
-    },
-    overviewAtr: {
-      id: 'overviewAtr',
-      state: getPanelState(atrStatesQuery.isLoading, atrStatesQuery.isError, atrRows.length),
-      content: (
-        <StrategyDataTable
-          tableId="index-atr-monitor"
-          columns={atrColumns}
-          rows={atrRows}
-          rowKey={(row) => row.instrument_id}
-          loading={atrStatesQuery.isLoading}
-          error={atrStatesQuery.isError ? '监控状态加载失败' : null}
-          searchable={false}
-          emptyText="自选股暂无 ATR 监控状态"
-        />
-      ),
-    },
-    overviewVolume: {
-      id: 'overviewVolume',
-      state: getPanelState(
-        volumeStatesQuery.isLoading,
-        volumeStatesQuery.isError,
-        volumeRows.length,
-      ),
-      content: (
-        <StrategyDataTable
-          tableId="index-volume-monitor"
-          columns={volumeColumns}
-          rows={volumeRows}
-          rowKey={(row) => row.instrument_id}
-          loading={volumeStatesQuery.isLoading}
-          error={volumeStatesQuery.isError ? '监控状态加载失败' : null}
-          searchable={false}
-          emptyText="自选股暂无 Volume Delta 监控状态"
         />
       ),
     },
@@ -1048,7 +716,7 @@ export default function IndexPage() {
             {watchlistQuery.isLoading ? '-' : kpi2Total}
             <small className="kpi-unit">只</small>
           </div>
-          <div className="kpi-foot">已启用 3 个监控策略</div>
+          <div className="kpi-foot">已启用监控策略</div>
         </div>
         {/* KPI 3：今日策略事件数 */}
         <div className="card kpi-card">

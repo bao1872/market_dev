@@ -57,10 +57,7 @@ from app.models.selection_plan_run import (
     SelectionPlanRun,
     SelectionResultEvidence,
 )
-from app.schemas.selection_plan import (
-    SelectionPlanPreviewResponse,
-    SelectionPlanResultResponse,
-)
+# [LEGACY] combo schemas removed - from app.schemas.selection_plan import ...
 from app.services.selection_composer import (
     RankedInstrument,
     compose,
