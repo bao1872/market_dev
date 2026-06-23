@@ -5,6 +5,8 @@
 - POST /messages/{id}/read: 标记消息已读
 - POST /notification-channels: 创建通知渠道
 - GET /notification-channels: 用户渠道列表
+- PUT /notification-channels/{id}: 更新通知渠道配置
+- DELETE /notification-channels/{id}: 删除通知渠道（软删除）
 - POST /notification-channels/{id}/verify: 验证渠道
 - POST /notification-channels/{id}/test: 测试渠道投递
 - POST /notification-previews: 消息预览（渠道无关 DTO + 站内渲染 + 飞书 card JSON）
@@ -31,6 +33,7 @@ from app.schemas.notification import (
     NotificationMessageResponse,
     NotificationPreviewRequest,
     NotificationPreviewResponse,
+    UpdateChannelRequest,
     mask_target_config,
 )
 from app.services.channel_adapter import get_adapter
@@ -41,10 +44,12 @@ from app.services.notification_service import (
     MessageNotFoundError,
     NotificationServiceError,
     create_channel,
+    delete_channel,
     list_user_channels,
     list_user_messages,
     mark_message_read,
     test_channel,
+    update_channel,
     verify_channel,
 )
 
@@ -136,8 +141,50 @@ async def create_channel_endpoint(
         adapter_type=request.adapter_type,
         display_name=request.display_name,
         target_config=request.target_config,
-        secret_ref=request.secret_ref,
     )
+    await db.commit()
+    return _channel_response(channel)
+
+
+@router.put("/notification-channels/{channel_id}")
+async def update_channel_endpoint(
+    channel_id: UUID,
+    request: UpdateChannelRequest,
+    db: AsyncSession = Depends(get_db),
+    user_id: UUID = Depends(_get_user_id),
+) -> NotificationChannelResponse:
+    """更新通知渠道配置。"""
+    try:
+        channel = await update_channel(
+            db,
+            channel_id=channel_id,
+            user_id=user_id,
+            display_name=request.display_name,
+            target_config=request.target_config,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+    await db.commit()
+    return _channel_response(channel)
+
+
+@router.delete("/notification-channels/{channel_id}")
+async def delete_channel_endpoint(
+    channel_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user_id: UUID = Depends(_get_user_id),
+) -> NotificationChannelResponse:
+    """删除通知渠道（软删除）。"""
+    try:
+        channel = await delete_channel(
+            db,
+            channel_id=channel_id,
+            user_id=user_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
     await db.commit()
     return _channel_response(channel)
 

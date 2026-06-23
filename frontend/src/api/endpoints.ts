@@ -1224,6 +1224,28 @@ export async function createNotificationChannel(payload: CreateChannelRequest): 
   return data
 }
 
+/** 更新通知渠道 */
+export async function updateNotificationChannel(
+  channelId: string,
+  data: { display_name?: string; target_config?: Record<string, unknown> },
+): Promise<NotificationChannel> {
+  const res = await apiClient.put<NotificationChannel>(
+    `/notification-channels/${channelId}`,
+    data,
+  )
+  return res.data
+}
+
+/** 删除通知渠道 */
+export async function deleteNotificationChannel(
+  channelId: string,
+): Promise<NotificationChannel> {
+  const res = await apiClient.delete<NotificationChannel>(
+    `/notification-channels/${channelId}`,
+  )
+  return res.data
+}
+
 /** 验证通知渠道配置 */
 export async function verifyNotificationChannel(channelId: string): Promise<NotificationChannel> {
   const { data } = await apiClient.post<NotificationChannel>(

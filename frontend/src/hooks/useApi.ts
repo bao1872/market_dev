@@ -367,6 +367,29 @@ export function useCreateNotificationChannel() {
   })
 }
 
+/** 更新通知渠道变更 */
+export function useUpdateNotificationChannel() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (params: { channelId: string; data: { display_name?: string; target_config?: Record<string, unknown> } }) =>
+      api.updateNotificationChannel(params.channelId, params.data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['notification-channels'] })
+    },
+  })
+}
+
+/** 删除通知渠道变更 */
+export function useDeleteNotificationChannel() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (channelId: string) => api.deleteNotificationChannel(channelId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['notification-channels'] })
+    },
+  })
+}
+
 /** 验证通知渠道变更 */
 export function useVerifyNotificationChannel() {
   const queryClient = useQueryClient()

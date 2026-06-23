@@ -7,8 +7,7 @@
 - message_deliveries: 投递记录（DDL 表名：message_deliveries）
 
 设计要点：
-- 渠道配置 target_config 为 JSONB，敏感字段（如 webhook secret）通过 secret_ref
-  引用配置中心，不直接明文存储。
+- 渠道配置 target_config 为 JSONB，敏感字段（app_secret/sign_secret）在 API 读取时脱敏。
 - 模板版本化：template_key + version + locale 唯一，active 状态不可修改。
 - 消息幂等：idempotency_key 唯一，防止重复创建。
 - 投递幂等：message_deliveries.idempotency_key 唯一，至少一次投递。
@@ -31,8 +30,7 @@ from app.models.base import Base
 class NotificationChannel(Base):
     """通知渠道 - 用户配置的飞书/webhook/email 等投递渠道。
 
-    target_config 存储非敏感配置（如 webhook URL），
-    secret_ref 引用配置中心存储的敏感字段（如签名 secret）。
+    target_config JSONB 存储渠道配置，敏感字段（app_secret/sign_secret）在 API 读取时脱敏。
     """
 
     __tablename__ = "notification_channels"
@@ -51,9 +49,6 @@ class NotificationChannel(Base):
     )
     target_config: Mapped[dict[str, Any]] = mapped_column(
         JSONB(astext_type=Text()), nullable=False, comment="渠道配置 JSONB"
-    )
-    secret_ref: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True, comment="敏感字段在配置中心的引用"
     )
     status: Mapped[str] = mapped_column(
         Text(),

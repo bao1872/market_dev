@@ -7,7 +7,11 @@
    投递消息到指定渠道（调用 ChannelAdapter，幂等）
 3. create_channel(db, user_id, adapter_type, display_name, target_config):
    创建通知渠道
-4. verify_channel(db, channel_id):
+4. update_channel(db, channel_id, user_id, display_name, target_config):
+   更新通知渠道配置（敏感字段合并保留）
+5. delete_channel(db, channel_id, user_id):
+   删除通知渠道（软删除：status=inactive）
+6. verify_channel(db, channel_id):
    验证渠道配置（调用 ChannelAdapter.verify）
 
 幂等保证：
@@ -253,7 +257,6 @@ async def create_channel(
     adapter_type: str,
     display_name: str,
     target_config: dict[str, Any],
-    secret_ref: UUID | None = None,
 ) -> NotificationChannel:
     """创建通知渠道。
 
@@ -263,7 +266,6 @@ async def create_channel(
         adapter_type: 渠道类型（feishu_webhook/email/mock）
         display_name: 渠道名称
         target_config: 渠道配置
-        secret_ref: 敏感字段引用
 
     Returns:
         NotificationChannel
@@ -274,10 +276,91 @@ async def create_channel(
         adapter_type=adapter_type,
         display_name=display_name,
         target_config=target_config,
-        secret_ref=secret_ref,
         status="pending",
     )
     db.add(channel)
+    await db.flush()
+    return channel
+
+
+# 敏感字段列表：更新时若前端未传入，保留 DB 中的原值
+_SENSITIVE_FIELDS = {"app_secret", "sign_secret"}
+
+
+async def update_channel(
+    db: AsyncSession,
+    channel_id: UUID,
+    user_id: UUID,
+    display_name: str | None = None,
+    target_config: dict[str, Any] | None = None,
+) -> NotificationChannel:
+    """更新通知渠道配置。
+
+    Args:
+        db: 异步会话
+        channel_id: 渠道 ID
+        user_id: 用户 ID（权限校验）
+        display_name: 新的渠道名称（None 表示不修改）
+        target_config: 新的渠道配置（None 表示不修改）
+
+    Returns:
+        更新后的 NotificationChannel
+
+    Raises:
+        ValueError: 渠道不存在或不属于当前用户
+    """
+    channel = await db.get(NotificationChannel, channel_id)
+    if channel is None or channel.user_id != user_id:
+        raise ValueError("渠道不存在或无权操作")
+    if channel.status == "inactive":
+        raise ValueError("已删除的渠道无法修改")
+
+    if display_name is not None:
+        channel.display_name = display_name
+
+    if target_config is not None:
+        merged = dict(channel.target_config or {})
+        for key, value in target_config.items():
+            merged[key] = value
+        # 保留前端未传入的敏感字段（脱敏接口省略了这些字段）
+        for field in _SENSITIVE_FIELDS:
+            if field not in target_config and field in merged:
+                # 前端未传入，保留 DB 原值（merged 中已有）
+                pass
+            elif field not in target_config and field not in merged:
+                # DB 中也没有，跳过
+                pass
+            # field in target_config: 前端显式传入新值，已在 merged 中更新
+        channel.target_config = merged
+
+    channel.status = "pending"
+    await db.flush()
+    return channel
+
+
+async def delete_channel(
+    db: AsyncSession,
+    channel_id: UUID,
+    user_id: UUID,
+) -> NotificationChannel:
+    """删除通知渠道（软删除：status=inactive）。
+
+    Args:
+        db: 异步会话
+        channel_id: 渠道 ID
+        user_id: 用户 ID（权限校验）
+
+    Returns:
+        更新后的 NotificationChannel
+
+    Raises:
+        ValueError: 渠道不存在或不属于当前用户
+    """
+    channel = await db.get(NotificationChannel, channel_id)
+    if channel is None or channel.user_id != user_id:
+        raise ValueError("渠道不存在或无权操作")
+
+    channel.status = "inactive"
     await db.flush()
     return channel
 
@@ -483,6 +566,8 @@ if __name__ == "__main__":
     print(f"create_message={create_message}")
     print(f"deliver_message={deliver_message}")
     print(f"create_channel={create_channel}")
+    print(f"update_channel={update_channel}")
+    print(f"delete_channel={delete_channel}")
     print(f"verify_channel={verify_channel}")
     print(f"list_user_messages={list_user_messages}")
     print(f"mark_message_read={mark_message_read}")

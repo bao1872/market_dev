@@ -32,7 +32,10 @@ from app.models.monitor_state import MonitorState as MonitorStateORM
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.strategy_event import StrategyEvent
 from app.repositories import monitor_state_repository, strategy_event_repository
-from app.repositories.bar_repository import fetch_15min_bars, fetch_daily_bars, fetch_minute_bars
+from app.repositories.bar_repository import (
+    _get_adj_factor_df, apply_adj_factor_to_bars,
+    fetch_15min_bars, fetch_daily_bars, fetch_minute_bars,
+)
 from app.strategy.runtime import MarketDataContext, MonitorState, StrategyLoader
 
 logger = logging.getLogger("monitor_batch_service")
@@ -41,7 +44,7 @@ logger = logging.getLogger("monitor_batch_service")
 _EVENT_COOLDOWN_SECONDS = 600
 
 # 行情回看参数
-_DAILY_LOOKBACK_DAYS = 250
+_DAILY_LOOKBACK_DAYS = 370  # 约250个交易日（参考脚本 bars=250）
 _15MIN_LOOKBACK_DAYS = 800
 _MINUTE_LOOKBACK_BARS = 2
 
@@ -136,7 +139,7 @@ class MonitorBatchService:
         )
 
         # 2. 合并所有用户自选股去重
-        instrument_user_map = await self._resolve_watchlist_instruments(db)
+        instrument_user_map, instrument_extra_info = await self._resolve_watchlist_instruments(db)
         if not instrument_user_map:
             logger.info("无用户自选股，跳过监控周期")
             return result
@@ -163,7 +166,7 @@ class MonitorBatchService:
         # 4. 合并通知：按用户自选股归属，每个用户一张飞书卡片
         if all_written_events:
             await self._send_merged_notification(
-                db, all_written_events, instrument_user_map, result,
+                db, all_written_events, instrument_user_map, instrument_extra_info, result,
             )
 
         logger.info(
@@ -218,15 +221,18 @@ class MonitorBatchService:
 
     async def _resolve_watchlist_instruments(
         self, db: AsyncSession,
-    ) -> dict[uuid.UUID, list[uuid.UUID]]:
-        """合并所有用户自选股去重，构建 instrument_id → [user_ids] 映射。
+    ) -> tuple[dict[uuid.UUID, list[uuid.UUID]], dict[uuid.UUID, dict]]:
+        """合并所有用户自选股去重，构建 instrument_id → [user_ids] 映射及附加信息。
 
         过滤条件：
         1. 仅取 active=True 的自选记录（排除已软删除的）
         2. 排除指数类标的（symbol 以 '000' 开头且 market=SH，或以 '399' 开头且 market=SZ）
 
         Returns:
-            {instrument_id: [user_id, ...], ...} 去重后的标的与用户映射
+            (instrument_user_map, instrument_extra_info) 二元组:
+            - instrument_user_map: {instrument_id: [user_id, ...], ...} 去重后的标的与用户映射
+            - instrument_extra_info: {instrument_id: {priority, weighted_score, hype_logic,
+              total_market_cap, pred_sell_reg, ...}, ...} 附加信息（当前为空字典，待数据源接入后填充）
         """
         from app.models.instrument import Instrument
         from app.models.watchlist import UserWatchlistItem
@@ -264,7 +270,14 @@ class MonitorBatchService:
                 instrument_user_map[instrument_id] = []
             instrument_user_map[instrument_id].append(user_id)
 
-        return instrument_user_map
+        # [monitor_batch] - 附加信息: 当前项目无 stock_pools / stop_loss_predictions 模型，
+        # instrument_extra_info 暂为空字典。待数据源接入后在此处填充 priority、weighted_score、
+        # hype_logic、total_market_cap、pred_sell_reg 等字段。
+        instrument_extra_info: dict[uuid.UUID, dict] = {
+            inst_id: {} for inst_id in instrument_user_map
+        }
+
+        return instrument_user_map, instrument_extra_info
 
     async def _process_instrument_watchlist(
         self,
@@ -326,6 +339,19 @@ class MonitorBatchService:
             )
         except Exception as exc:
             logger.warning("1m行情拉取失败 %s: %s", symbol, exc)
+
+        # 前复权处理（与参考脚本 fetch_all_kline 一致：日线/15m/1m 均需前复权）
+        try:
+            adj_factor_df = await _get_adj_factor_df(db, instrument_id)
+            if not adj_factor_df.empty:
+                if not bars_daily.empty:
+                    bars_daily = apply_adj_factor_to_bars(bars_daily, adj_factor_df, intraday=False)
+                if not bars_15min.empty:
+                    bars_15min = apply_adj_factor_to_bars(bars_15min, adj_factor_df, intraday=True)
+                if not bars_minute.empty:
+                    bars_minute = apply_adj_factor_to_bars(bars_minute, adj_factor_df, intraday=True)
+        except Exception as exc:
+            logger.warning("前复权处理失败 %s: %s", symbol, exc)
 
         # b. 构建 MarketDataContext
         context = MarketDataContext(
@@ -554,19 +580,23 @@ class MonitorBatchService:
         total_instruments: int,
         instrument_info_cache: dict[uuid.UUID, tuple[str, str]],
         change_pct_map: dict[uuid.UUID, float] | None = None,
+        instrument_extra_info: dict[uuid.UUID, dict] | None = None,
     ) -> Any:
         """按旧版 monitoring.py 的 generate_monitoring_card() 格式构建合并通知 DTO。
 
         卡片结构：
         1. Header: "BB+节点监控 HH:MM"（北京时间），颜色由最严重事件级别决定
         2. 概览行: "自选股 N 只 | 触发 M 只\\n上轨 X | 中轨 Y | 下轨 Z | 节点 W"
-        3. 逐股票详情（用 hr 分隔）: 股票标题 + 信号详情 + BB上下文 + BB快照
+        3. 逐股票详情（用 hr 分隔）: 股票标题 + hype_logic + 止损预测 + 信号详情 + BB上下文 + BB快照
         4. 数据时间 note: 事件触发时间（北京时间）
 
         Args:
             user_events: 该用户相关的事件列表
             total_instruments: 该用户自选股总数
             instrument_info_cache: instrument_id → (symbol, name) 缓存
+            change_pct_map: instrument_id → 涨跌幅映射
+            instrument_extra_info: instrument_id → {priority, weighted_score, hype_logic,
+                total_market_cap, pred_sell_reg, pred_sell_cls, pred_buy_reg, pred_buy_cls} 附加信息
 
         Returns:
             NotificationMessageDTO 实例
@@ -623,14 +653,47 @@ class MonitorBatchService:
             if idx > 0:
                 elements.append({"tag": "hr"})
 
-            # 股票标题（含涨跌幅，与旧版 monitoring.py 一致）
+            # 股票标题（与参考脚本 generate_monitoring_card 格式对齐）
+            extra_info = (instrument_extra_info or {}).get(inst_id, {})
+            priority = extra_info.get("priority", "")
+            score = extra_info.get("weighted_score", 0)
+            market_cap = extra_info.get("total_market_cap")
+
+            title_parts = [f"**{name} {symbol}**"]
+            if priority:
+                title_parts.append(f"  {priority}")
+            if score:
+                title_parts.append(f"  {score}分")
             change_pct = (change_pct_map or {}).get(inst_id)
             if change_pct is not None:
                 change_str = f"+{change_pct:.2f}" if change_pct > 0 else f"{change_pct:.2f}"
-                title_md = f"**{name} {symbol}**\n涨跌 {change_str}%"
-            else:
-                title_md = f"**{name} {symbol}**"
+                title_parts.append(f"\n涨跌 {change_str}%")
+            if market_cap:
+                title_parts.append(f"  市值 {market_cap:.0f}亿")
+            title_md = "".join(title_parts)
             elements.append({"tag": "markdown", "content": title_md})
+
+            # hype_logic 显示（与参考脚本对齐）
+            hype_logic = extra_info.get("hype_logic", "")
+            if hype_logic:
+                elements.append({"tag": "markdown", "content": f"💡 {hype_logic}"})
+
+            # 止损预测（与参考脚本对齐）
+            pred_sell_reg = extra_info.get("pred_sell_reg")
+            pred_sell_cls = extra_info.get("pred_sell_cls")
+            pred_buy_reg = extra_info.get("pred_buy_reg")
+            pred_buy_cls = extra_info.get("pred_buy_cls")
+            if any(v is not None for v in [pred_sell_reg, pred_sell_cls, pred_buy_reg, pred_buy_cls]):
+                pred_lines = ["止损预测:"]
+                if pred_sell_reg is not None:
+                    pred_lines.append(f"  卖出(回归): {pred_sell_reg:.3f}")
+                if pred_sell_cls is not None:
+                    pred_lines.append(f"  卖出(分类): {pred_sell_cls:.3f}")
+                if pred_buy_reg is not None:
+                    pred_lines.append(f"  买入(回归): {pred_buy_reg:.3f}")
+                if pred_buy_cls is not None:
+                    pred_lines.append(f"  买入(分类): {pred_buy_cls:.3f}")
+                elements.append({"tag": "markdown", "content": "\n".join(pred_lines)})
 
             # 信号详情
             for ev in events:
@@ -728,6 +791,7 @@ class MonitorBatchService:
         db: AsyncSession,
         all_events: list[StrategyEvent],
         instrument_user_map: dict[uuid.UUID, list[uuid.UUID]],
+        instrument_extra_info: dict[uuid.UUID, dict],
         result: MonitorCycleResult,
     ) -> None:
         """按用户自选股归属合并通知，每个用户一张飞书卡片。
@@ -736,6 +800,7 @@ class MonitorBatchService:
             db: 异步会话
             all_events: 本周期所有写入的事件
             instrument_user_map: instrument_id → [user_ids] 映射
+            instrument_extra_info: instrument_id → {priority, weighted_score, ...} 附加信息
             result: 累计结果
         """
         from app.models.notification import NotificationChannel
@@ -777,6 +842,7 @@ class MonitorBatchService:
                 dto = self._build_merged_card_dto(
                     user_events, total_inst, instrument_info_cache,
                     change_pct_map=change_pct_map,
+                    instrument_extra_info=instrument_extra_info,
                 )
             except Exception as exc:
                 logger.warning(
@@ -943,6 +1009,14 @@ class MonitorBatchService:
             logger.debug("日线行情不足，跳过 PNG 渲染: symbol=%s bars=%d", symbol, len(bars_daily))
             return None
 
+        # 前复权处理
+        try:
+            adj_factor_df = await _get_adj_factor_df(db, instrument_id)
+            if not adj_factor_df.empty and not bars_daily.empty:
+                bars_daily = apply_adj_factor_to_bars(bars_daily, adj_factor_df, intraday=False)
+        except Exception as exc:
+            logger.warning("前复权处理失败 %s: %s", symbol, exc)
+
         # 计算布林带
         try:
             bb_module = _load_bollinger_module()
@@ -1044,6 +1118,13 @@ class MonitorBatchService:
             peaks_show="peaks",
             profile_lookback_length=360,
             profile_number_of_rows=100,
+            value_area_threshold=0.70,
+            peaks_detection_percent=0.05,
+            troughs_show="none",
+            troughs_detection_percent=0.07,
+            volume_node_threshold=0.01,
+            highest_n_volume_nodes=0,
+            lowest_n_volume_nodes=0,
         )
 
         # 日线数据需要 datetime 列供 compute_volume_profile 对齐时间
@@ -1120,7 +1201,7 @@ if __name__ == "__main__":
     assert runtime_state.state_version == 1
     print(f"_orm_to_runtime_state: {runtime_state} ✓")
 
-    # 4. 验证 _build_merged_card_dto 方法
+    # 4. 验证 _build_merged_card_dto 方法（无 instrument_extra_info，向后兼容）
     class _FakeEvent:
         def __init__(self, event_type, instrument_id, payload, event_time, snapshot=None):
             self.id = uuid.uuid4()
@@ -1153,6 +1234,7 @@ if __name__ == "__main__":
         inst_id_1: ("000001", "平安银行"),
         inst_id_2: ("600519", "贵州茅台"),
     }
+    # 无 instrument_extra_info 时向后兼容
     dto = service._build_merged_card_dto(fake_events, 5, info_cache)
     assert dto.message_type == "MONITOR_MEMBER_EVENT"
     assert dto.template_key == "monitor_merged_event"
@@ -1165,7 +1247,50 @@ if __name__ == "__main__":
     assert "自选股 5 只" in dto.items[0]["content"]
     # 验证 data_time 使用 event_time（北京时间）
     assert "2026-06-23" in dto.data_time
-    print(f"_build_merged_card_dto: title={dto.title} items_count={len(dto.items)} ✓")
+    print(f"_build_merged_card_dto (无extra_info): title={dto.title} items_count={len(dto.items)} ✓")
+
+    # 4b. 验证 _build_merged_card_dto 方法（含 instrument_extra_info，含 priority/score/market_cap/hype_logic/止损预测）
+    extra_info_with_data = {
+        inst_id_1: {
+            "priority": "S",
+            "weighted_score": 85.5,
+            "total_market_cap": 1200.0,
+            "hype_logic": "AI芯片龙头，业绩超预期",
+            "pred_sell_reg": 0.876,
+            "pred_sell_cls": 0.912,
+            "pred_buy_reg": 0.234,
+            "pred_buy_cls": 0.156,
+        },
+        inst_id_2: {
+            "priority": "A",
+            "weighted_score": 72.0,
+            "total_market_cap": None,
+            "hype_logic": "",
+            "pred_sell_reg": None,
+            "pred_sell_cls": None,
+            "pred_buy_reg": None,
+            "pred_buy_cls": None,
+        },
+    }
+    dto2 = service._build_merged_card_dto(
+        fake_events, 5, info_cache,
+        change_pct_map={inst_id_1: 2.35, inst_id_2: -1.08},
+        instrument_extra_info=extra_info_with_data,
+    )
+    assert dto2.message_type == "MONITOR_MEMBER_EVENT"
+    # 验证标题含 priority 和 score
+    title_item = dto2.items[1]  # 概览后第一个股票标题
+    assert "S" in title_item["content"], f"expected 'S' in title, got: {title_item['content']}"
+    assert "85.5分" in title_item["content"], f"expected '85.5分' in title, got: {title_item['content']}"
+    assert "市值 1200亿" in title_item["content"], f"expected '市值 1200亿' in title, got: {title_item['content']}"
+    # 验证 hype_logic 显示
+    hype_item = dto2.items[2]
+    assert "💡" in hype_item["content"], f"expected '💡' in hype_logic, got: {hype_item['content']}"
+    # 验证止损预测显示
+    pred_item = dto2.items[3]
+    assert "止损预测" in pred_item["content"], f"expected '止损预测' in pred, got: {pred_item['content']}"
+    assert "卖出(回归): 0.876" in pred_item["content"]
+    print(f"_build_merged_card_dto (含extra_info): title={dto2.title} items_count={len(dto2.items)} ✓")
 
     # 5. 验证常量映射
     assert _EVENT_EMOJI["bb_upper_touch"] == "🔴"

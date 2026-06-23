@@ -180,6 +180,9 @@ class VolumeNodeMonitor(StrategyRuntime):
         self._rows: int = VP_ROWS_DEFAULT
         self._vp_module: Any | None = None  # 懒加载
         self._strategy_version_id: UUID | None = None
+        # VP 缓存：供 detect_events 复用 calculate_state 的计算结果，避免重复计算
+        self._last_vp_result: Any | None = None
+        self._last_vp_calc_id: str | None = None
 
     async def initialize(self, version: StrategyVersion) -> None:
         """从 manifest 提取参数并懒加载 features 模块。
@@ -408,6 +411,11 @@ class VolumeNodeMonitor(StrategyRuntime):
                 f"compute_volume_profile 失败 instrument_id={context.instrument_id}: {e}"
             ) from e
 
+        # 缓存 VP 结果供 detect_events 复用
+        calc_id = f"{context.instrument_id}:{context.bar_time.isoformat() if context.bar_time else 'unknown'}"
+        self._last_vp_result = vp_result
+        self._last_vp_calc_id = calc_id
+
         # 当前价格：优先从 1m bars 取最后一根 bar 收盘价，否则从日线取
         if context.bars_minute is not None and not context.bars_minute.empty:
             current_price = float(context.bars_minute["close"].iloc[-1])
@@ -581,23 +589,28 @@ class VolumeNodeMonitor(StrategyRuntime):
         if self._vp_module is None:
             return []
 
-        # 重新计算 VP（与 calculate_state 相同逻辑：daily+15m）
-        bars_daily = context.bars_daily
-        if bars_daily is None or len(bars_daily) < 10:
-            return []
+        # 优先从缓存获取 VP 结果（与 calculate_state 共享，避免重复计算）
+        calc_id = f"{context.instrument_id}:{context.bar_time.isoformat() if context.bar_time else 'unknown'}"
+        if self._last_vp_result is not None and self._last_vp_calc_id == calc_id:
+            vp_result = self._last_vp_result
+        else:
+            # 缓存未命中，重新计算
+            bars_daily = context.bars_daily
+            if bars_daily is None or len(bars_daily) < 10:
+                return []
 
-        daily_bars_prepared = _prepare_bars_for_vp(bars_daily)
-        ltf_bars_prepared = (
-            _prepare_bars_for_vp(context.bars_15min)
-            if context.bars_15min is not None and not context.bars_15min.empty
-            else None
-        )
-        try:
-            vp_result = self._compute_volume_profile(
-                daily_bars_prepared, profile_df=ltf_bars_prepared, main_period="day"
+            daily_bars_prepared = _prepare_bars_for_vp(bars_daily)
+            ltf_bars_prepared = (
+                _prepare_bars_for_vp(context.bars_15min)
+                if context.bars_15min is not None and not context.bars_15min.empty
+                else None
             )
-        except Exception:
-            return []
+            try:
+                vp_result = self._compute_volume_profile(
+                    daily_bars_prepared, profile_df=ltf_bars_prepared, main_period="day"
+                )
+            except Exception:
+                return []
 
         # Crossover 检测
         signals = self._detect_node_crossover_signals(context.bars_minute, vp_result)

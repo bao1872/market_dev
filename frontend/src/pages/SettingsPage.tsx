@@ -20,6 +20,8 @@ import {
   useRenew,
   useNotificationChannels,
   useCreateNotificationChannel,
+  useUpdateNotificationChannel,
+  useDeleteNotificationChannel,
   useTestNotificationChannel,
 } from '@/hooks/useApi'
 import { useToast } from '@/store/toast'
@@ -178,6 +180,7 @@ function FeishuModal({
 }) {
   const toast = useToast()
   const createChannel = useCreateNotificationChannel()
+  const updateChannel = useUpdateNotificationChannel()
   const testChannel = useTestNotificationChannel()
 
   const emptyForm: FeishuFormState = {
@@ -235,29 +238,60 @@ function FeishuModal({
       toast.show('保存失败', '请填写接收者 ID')
       return
     }
-    createChannel.mutate(
-      {
-        adapter_type: 'feishu_platform_app',
-        display_name: form.displayName.trim(),
-        target_config: {
-          app_id: form.appId.trim(),
-          ...(form.appSecret.trim() ? { app_secret: form.appSecret.trim() } : {}),
-          receive_id: form.receiveId.trim(),
-          receive_id_type: form.receiveIdType,
+
+    const targetConfig: Record<string, unknown> = {
+      app_id: form.appId.trim(),
+      receive_id: form.receiveId.trim(),
+      receive_id_type: form.receiveIdType,
+    }
+    // 仅在用户输入了新 secret 时才发送（编辑时脱敏值已被清除）
+    if (form.appSecret.trim()) {
+      targetConfig.app_secret = form.appSecret.trim()
+    }
+
+    if (editingChannel) {
+      // 编辑模式：调用 UPDATE
+      updateChannel.mutate(
+        {
+          channelId: editingChannel.id,
+          data: {
+            display_name: form.displayName.trim(),
+            target_config: targetConfig,
+          },
         },
-      },
-      {
-        onSuccess: () => {
-          toast.show('保存成功', '飞书应用通知配置已保存')
-          onClose()
+        {
+          onSuccess: () => {
+            toast.show('保存成功', '飞书应用通知配置已更新')
+            onClose()
+          },
+          onError: (err: unknown) => {
+            const axiosErr = err as { response?: { data?: { detail?: string } } }
+            const message = axiosErr.response?.data?.detail ?? '保存失败，请检查配置'
+            toast.show('保存失败', message)
+          },
         },
-        onError: (err: unknown) => {
-          const axiosErr = err as { response?: { data?: { detail?: string } } }
-          const message = axiosErr.response?.data?.detail ?? '保存失败，请检查配置'
-          toast.show('保存失败', message)
+      )
+    } else {
+      // 新建模式：调用 CREATE
+      createChannel.mutate(
+        {
+          adapter_type: 'feishu_platform_app',
+          display_name: form.displayName.trim(),
+          target_config: targetConfig,
         },
-      },
-    )
+        {
+          onSuccess: () => {
+            toast.show('保存成功', '飞书应用通知配置已保存')
+            onClose()
+          },
+          onError: (err: unknown) => {
+            const axiosErr = err as { response?: { data?: { detail?: string } } }
+            const message = axiosErr.response?.data?.detail ?? '保存失败，请检查配置'
+            toast.show('保存失败', message)
+          },
+        },
+      )
+    }
   }
 
   // 发送测试消息：编辑已有渠道时调用测试接口
@@ -361,9 +395,9 @@ function FeishuModal({
             className="btn primary"
             type="button"
             onClick={handleSave}
-            disabled={createChannel.isPending}
+            disabled={createChannel.isPending || updateChannel.isPending}
           >
-            {createChannel.isPending ? '保存中...' : '验证并保存'}
+            {createChannel.isPending || updateChannel.isPending ? '保存中...' : '验证并保存'}
           </button>
         </div>
       </div>
@@ -377,6 +411,7 @@ export default function SettingsPage() {
   const toast = useToast()
   const membershipQuery = useMyMembership()
   const channelsQuery = useNotificationChannels()
+  const deleteChannel = useDeleteNotificationChannel()
 
   const [showRenewModal, setShowRenewModal] = useState(false)
   const [showFeishuModal, setShowFeishuModal] = useState(false)
@@ -653,6 +688,20 @@ export default function SettingsPage() {
                     {c.status === 'active' ? '可用' : '未验证'}
                   </span>
                   <button className="icon-btn" onClick={() => handleOpenEditFeishu(c)}>编辑</button>
+                  <button
+                    className="btn small danger"
+                    onClick={() => {
+                      if (confirm('确定要删除此飞书通知渠道吗？')) {
+                        deleteChannel.mutate(c.id, {
+                          onSuccess: () => {
+                            toast.show('已删除', '飞书通知渠道已删除')
+                          },
+                        })
+                      }
+                    }}
+                  >
+                    删除
+                  </button>
                 </div>
               ))}
             </div>

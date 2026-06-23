@@ -396,8 +396,16 @@ async def _upsert_minute_bars(
     if raw_df.empty:
         return 0
 
-    # 分钟线不做复权，adj_factor 固定为 1.0
-    raw_df["adj_factor"] = 1.0
+    # 从日线表映射 adj_factor（保证分钟线与日线 adj_factor 一致）
+    try:
+        adj_factors = await _map_adj_factor_from_daily(session, instrument_id, raw_df)
+    except Exception as exc:
+        raise RuntimeError(
+            f"从日线表映射 adj_factor 失败 instrument_id={instrument_id} "
+            f"bar_count={len(raw_df)}: {exc}"
+        ) from exc
+
+    raw_df["adj_factor"] = adj_factors
 
     # 写入前校验数据质量
     validation = validate_bars(raw_df, "", "minute")
@@ -408,7 +416,7 @@ async def _upsert_minute_bars(
         )
         return 0
 
-    # 向量化构建 records（替代 iterrows，分钟线 adj_factor 固定 1.0）
+    # 向量化构建 records（替代 iterrows，分钟线 adj_factor 从日线表映射）
     records = _df_to_upsert_records(
         raw_df, instrument_id, is_daily=False, volume_multiplier=Decimal("1")
     )

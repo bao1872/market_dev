@@ -536,50 +536,63 @@ class FeishuPlatformAppAdapter(ChannelAdapter):
 
 
 if __name__ == "__main__":
-    # 自测入口：发送测试消息到飞书平台应用
+    # 自测入口：从 DB 查询用户配置的渠道凭证
     import asyncio
 
+    from sqlalchemy import select
+
+    from app.db import AsyncSessionLocal
+    from app.models.notification import NotificationChannel
     from app.services.channel_adapter import get_adapter, list_supported_adapters
 
-    # 验证注册
-    print(f"已注册适配器: {list_supported_adapters()}")
-    assert "feishu_platform_app" in list_supported_adapters()
+    async def _test():
+        # 验证注册
+        print(f"已注册适配器: {list_supported_adapters()}")
+        assert "feishu_platform_app" in list_supported_adapters()
 
-    # 验证 adapter 实例化
-    adapter = get_adapter("feishu_platform_app")
-    print(f"adapter_type={adapter.adapter_type}")
-    assert adapter.adapter_type == "feishu_platform_app"
+        # 验证 adapter 实例化
+        adapter = get_adapter("feishu_platform_app")
+        print(f"adapter_type={adapter.adapter_type}")
+        assert adapter.adapter_type == "feishu_platform_app"
 
-    # 构建测试 DTO
-    test_dto = NotificationMessageDTO(
-        message_type="SYSTEM_ALERT",
-        template_key="system_alert",
-        template_version="1.1.0",
-        title="平台应用测试消息",
-        summary="这是一条飞书平台应用适配器的测试消息。",
-        resource_refs={"test": True},
-        data_time=str(int(time.time())),
-    )
+        # 从 DB 查询第一个活跃的平台应用渠道
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(NotificationChannel)
+                .where(
+                    NotificationChannel.adapter_type == "feishu_platform_app",
+                    NotificationChannel.status == "active",
+                )
+                .limit(1)
+            )
+            channel = result.scalar_one_or_none()
 
-    # channel_config 从环境变量读取，不硬编码凭证
-    import os
+        if channel is None:
+            print("跳过发送测试: DB 中无活跃的飞书平台应用渠道配置")
+            print("请先在前端设置页配置飞书应用通知渠道")
+            return
 
-    test_config = {
-        "app_id": os.environ.get("FEISHU_APP_ID", ""),
-        "app_secret": os.environ.get("FEISHU_APP_SECRET", ""),
-        "receive_id": os.environ.get("FEISHU_RECEIVE_ID", ""),
-        "receive_id_type": "user_id",
-    }
-    if not test_config["app_id"] or not test_config["app_secret"]:
-        print("跳过发送测试: 未设置 FEISHU_APP_ID/FEISHU_APP_SECRET 环境变量")
+        channel_config = channel.target_config
+        print(f"使用渠道: {channel.display_name} (id={channel.id})")
+
+        # 构建测试 DTO
+        test_dto = NotificationMessageDTO(
+            message_type="SYSTEM_ALERT",
+            template_key="system_alert",
+            template_version="1.1.0",
+            title="平台应用测试消息",
+            summary="这是一条飞书平台应用适配器的测试消息。",
+            resource_refs={"test": True},
+            data_time=str(int(time.time())),
+        )
+
+        result = await adapter.send(test_dto, channel_config)
+        print(f"send result: success={result.success}")
+        print(f"error_code={result.error_code}")
+        print(f"error_message={result.error_message}")
+        if result.provider_response:
+            print(f"provider_response={result.provider_response}")
+
         print("OK")
-        return
 
-    result = asyncio.run(adapter.send(test_dto, test_config))
-    print(f"send result: success={result.success}")
-    print(f"error_code={result.error_code}")
-    print(f"error_message={result.error_message}")
-    if result.provider_response:
-        print(f"provider_response={result.provider_response}")
-
-    print("OK")
+    asyncio.run(_test())

@@ -115,7 +115,13 @@ class CreateChannelRequest(BaseModel):
     adapter_type: str = Field(..., description="feishu_webhook/feishu_platform_app/email")
     display_name: str = Field(..., description="渠道名称")
     target_config: dict[str, Any] = Field(..., description="渠道配置（webhook URL 等）")
-    secret_ref: UUID | None = Field(None, description="敏感字段引用")
+
+
+class UpdateChannelRequest(BaseModel):
+    """更新通知渠道请求。"""
+
+    display_name: str | None = None
+    target_config: dict[str, Any] | None = None
 
 
 class NotificationMessageResponse(BaseModel):
