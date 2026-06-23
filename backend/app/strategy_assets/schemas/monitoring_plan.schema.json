@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Monitoring Plan V1.1",
+  "type": "object",
+  "required": [
+    "name",
+    "mode",
+    "members"
+  ],
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "mode": {
+      "enum": [
+        "INDEPENDENT",
+        "ANY",
+        "ALL"
+      ]
+    },
+    "confirmation_window_seconds": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 86400
+    },
+    "ordered": {
+      "type": "boolean"
+    },
+    "cooldown_seconds": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 86400
+    },
+    "process_event_policy": {
+      "enum": [
+        "NONE",
+        "IN_APP_ONLY",
+        "ALL_CHANNELS"
+      ]
+    },
+    "notification": {
+      "type": "object"
+    },
+    "members": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "strategy_key",
+          "event_type",
+          "role"
+        ],
+        "properties": {
+          "strategy_key": {
+            "type": "string"
+          },
+          "strategy_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version_policy": {
+            "enum": [
+              "PINNED",
+              "STABLE_TRACK"
+            ]
+          },
+          "event_type": {
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "TRIGGER",
+              "CONFIRM",
+              "VETO",
+              "OBSERVE"
+            ]
+          },
+          "position": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "params": {
+            "type": "object"
+          },
+          "conditions": {
+            "type": "array"
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

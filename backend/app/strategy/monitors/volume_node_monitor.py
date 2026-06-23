@@ -35,10 +35,7 @@ VP 数据源（与 monitoring.py 一致）：
 
 from __future__ import annotations
 
-import importlib.util
 import logging
-import os
-import sys
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -57,12 +54,13 @@ from app.strategy.runtime import (
 
 logger = logging.getLogger("strategy.monitors.volume_node_monitor")
 
-# features/ 算法模块路径（可通过环境变量覆盖，默认指向 ref/交易/features）
-FEATURES_DIR = os.environ.get(
-    "FEATURES_DIR", "/root/web_dev/ref/交易/features"
+# 导入 features/ 算法（从包内 app.strategy_assets.algorithms.features，Docker 兼容）
+ensure_plotly_mock()
+from app.strategy_assets.algorithms.features.luxalgo_volume_profile_pytdx_15m_aligned import (
+    VolumeProfileConfig,
+    compute_volume_profile,
+    extract_nearest_nodes,
 )
-_VP_MODULE_NAME = "luxalgo_volume_profile_pytdx_15m_aligned"
-_VP_MODULE_PATH = os.path.join(FEATURES_DIR, f"{_VP_MODULE_NAME}.py")
 
 # VP 标准参数（与 monitoring.py 盘中实时监控逻辑一致，VP_PEAK_DETECTION_PCT=0.05）
 VP_LOOKBACK_DEFAULT = 360
@@ -78,46 +76,6 @@ VP_LOWEST_N_NODES = 0
 # 事件参数（对照 volume_node_monitor.yaml event_types）
 EVENT_TYPE_NODE_CLUSTER_TOUCH = "node_cluster_touch"
 EVENT_STATE_TTL_SECONDS = 600
-
-
-def _load_features_module() -> Any:
-    """通过 importlib 从文件路径加载 features/ 算法模块（不修改 features/）。
-
-    features/ 模块无内部相对导入（仅依赖 numpy/pandas/plotly），
-    可独立加载。plotly 未安装时注入 mock（仅可视化用，monitor 不依赖）。
-    路径由 FEATURES_DIR 环境变量控制。
-
-    Returns:
-        features 模块对象（含 compute_volume_profile/extract_nearest_nodes/VolumeProfileConfig）
-
-    Raises:
-        FileNotFoundError: features 模块文件不存在
-        ImportError: 模块加载失败（补上下文后 re-raise）
-    """
-    if not os.path.exists(_VP_MODULE_PATH):
-        raise FileNotFoundError(
-            f"features 算法模块不存在: {_VP_MODULE_PATH}"
-            f"（请设置 FEATURES_DIR 环境变量指向 ref/交易/features 目录）"
-        )
-    # plotly 未安装时注入 mock（features 顶层 import 需要）
-    ensure_plotly_mock()
-    try:
-        spec = importlib.util.spec_from_file_location(_VP_MODULE_NAME, _VP_MODULE_PATH)
-        if spec is None or spec.loader is None:
-            raise ImportError(f"无法创建模块 spec: {_VP_MODULE_PATH}")
-        module = importlib.util.module_from_spec(spec)
-        # 必须在 exec_module 前注册到 sys.modules，否则 features 中的 @dataclass
-        # 装饰器内部 _is_type 会通过 sys.modules.get(cls.__module__).__dict__ 查找
-        # 模块字典，未注册时返回 None 导致 AttributeError
-        sys.modules[_VP_MODULE_NAME] = module
-        spec.loader.exec_module(module)
-        return module
-    except Exception as e:
-        # 加载失败时清理 sys.modules 中的残留
-        sys.modules.pop(_VP_MODULE_NAME, None)
-        raise ImportError(
-            f"features 算法模块加载失败: path={_VP_MODULE_PATH}, error={e}"
-        ) from e
 
 
 def _node_row_to_json(row: pd.Series | None) -> dict[str, float] | None:
@@ -178,14 +136,13 @@ class VolumeNodeMonitor(StrategyRuntime):
     def __init__(self) -> None:
         self._lookback: int = VP_LOOKBACK_DEFAULT
         self._rows: int = VP_ROWS_DEFAULT
-        self._vp_module: Any | None = None  # 懒加载
         self._strategy_version_id: UUID | None = None
         # VP 缓存：供 detect_events 复用 calculate_state 的计算结果，避免重复计算
         self._last_vp_result: Any | None = None
         self._last_vp_calc_id: str | None = None
 
     async def initialize(self, version: StrategyVersion) -> None:
-        """从 manifest 提取参数并懒加载 features 模块。
+        """从 manifest 提取参数。
 
         Args:
             version: 策略版本 ORM 对象（manifest 含 parameters/outputs/event_types）
@@ -199,16 +156,10 @@ class VolumeNodeMonitor(StrategyRuntime):
                 self._lookback = int(param.get("default", VP_LOOKBACK_DEFAULT))
                 break
 
-        # 从 outputs 配置中提取 rows（如 manifest 声明）
-        # 默认使用 VP_ROWS_DEFAULT=100（与 luxalgo_volume_profile_pytdx_15m_aligned.py 命令行默认值一致）
-
-        # 懒加载 features 模块（首次 initialize 时加载）
-        if self._vp_module is None:
-            self._vp_module = _load_features_module()
-            logger.info(
-                "VolumeNodeMonitor 初始化: lookback=%d, rows=%d, features=%s",
-                self._lookback, self._rows, _VP_MODULE_PATH,
-            )
+        logger.info(
+            "VolumeNodeMonitor 初始化: lookback=%d, rows=%d",
+            self._lookback, self._rows,
+        )
 
     async def execute(self, context: MarketDataContext) -> Any:  # type: ignore[override]
         """selector 执行接口（monitor 不支持）。
@@ -242,9 +193,6 @@ class VolumeNodeMonitor(StrategyRuntime):
             return {"upper_node": [], "lower_node": [], "poc_price": [],
                     "position_0_1": [], "current_price": []}
 
-        if self._vp_module is None:
-            raise RuntimeError("features 模块未加载，请先调用 initialize()")
-
         # 准备数据并计算 VP（复用现有 _compute_volume_profile，VP 只计算一次）
         bars_prepared = _prepare_bars_for_vp(bars)
         # 15m bars 作为 profile_df（低周期成交量分配来源）
@@ -275,7 +223,7 @@ class VolumeNodeMonitor(StrategyRuntime):
 
         for price in close_series:
             # 调用 SSOT extract_nearest_nodes 获取上下方最近 Node 价格
-            nearest_info = self._vp_module.extract_nearest_nodes(vp_result, float(price))
+            nearest_info = extract_nearest_nodes(vp_result, float(price))
             upper_node = self._lookup_node_by_price(
                 peak_df, nearest_info["nearest_above_node_price"]
             )
@@ -321,7 +269,7 @@ class VolumeNodeMonitor(StrategyRuntime):
         Returns:
             VolumeProfileResult 对象（含 peak_df/poc_price/lowest_price/highest_price 等）
         """
-        cfg = self._vp_module.VolumeProfileConfig(
+        cfg = VolumeProfileConfig(
             peaks_show="peaks",
             profile_lookback_length=self._lookback,
             profile_number_of_rows=self._rows,
@@ -333,7 +281,7 @@ class VolumeNodeMonitor(StrategyRuntime):
             highest_n_volume_nodes=VP_HIGHEST_N_NODES,
             lowest_n_volume_nodes=VP_LOWEST_N_NODES,
         )
-        return self._vp_module.compute_volume_profile(
+        return compute_volume_profile(
             bars, cfg, profile_df=profile_df, main_period=main_period
         )
 
@@ -383,8 +331,6 @@ class VolumeNodeMonitor(StrategyRuntime):
             raise ValueError(
                 f"VolumeNodeMonitor 需要 daily bars 数据，instrument_id={context.instrument_id}"
             )
-        if self._vp_module is None:
-            raise RuntimeError("features 模块未加载，请先调用 initialize()")
 
         bars_daily = context.bars_daily
         if len(bars_daily) < 10:
@@ -423,7 +369,7 @@ class VolumeNodeMonitor(StrategyRuntime):
             current_price = float(bars_daily["close"].iloc[-1])
 
         # 上下方最近 Node（调用 SSOT extract_nearest_nodes）
-        nearest_info = self._vp_module.extract_nearest_nodes(vp_result, current_price)
+        nearest_info = extract_nearest_nodes(vp_result, current_price)
         nearest_above_price = nearest_info["nearest_above_node_price"]
         nearest_below_price = nearest_info["nearest_below_node_price"]
 
@@ -586,8 +532,6 @@ class VolumeNodeMonitor(StrategyRuntime):
 
         # 从 curr_state 中获取 vp_result（由 calculate_state 缓存到 context）
         # 由于 detect_events 无法直接访问 vp_result，需要重新计算
-        if self._vp_module is None:
-            return []
 
         # 优先从缓存获取 VP 结果（与 calculate_state 共享，避免重复计算）
         calc_id = f"{context.instrument_id}:{context.bar_time.isoformat() if context.bar_time else 'unknown'}"
@@ -618,13 +562,15 @@ class VolumeNodeMonitor(StrategyRuntime):
             return []
 
         bar_time = curr_state.updated_at or datetime.now(UTC)
-        bar_time_iso = bar_time.isoformat() if isinstance(bar_time, datetime) else str(bar_time)
+        # [volume_node_monitor] - dedupe_key 使用整分钟时间戳（而非微秒精度），
+        # 同一 1m bar 内多次调用不会产生不同 dedupe_key
+        bar_time_key = bar_time.strftime("%Y%m%d%H%M") if isinstance(bar_time, datetime) else str(bar_time)
         instrument_id_str = str(curr_state.instrument_id)
 
         events: list[StrategyEventDraft] = []
         for sig in signals:
             boundary = sig["boundary"]
-            dedupe_key = f"{EVENT_TYPE_NODE_CLUSTER_TOUCH}:{instrument_id_str}:{boundary}:{bar_time_iso}"
+            dedupe_key = f"{EVENT_TYPE_NODE_CLUSTER_TOUCH}:{instrument_id_str}:{boundary}:{bar_time_key}"
             logical_entity = f"{instrument_id_str}:{boundary}"
 
             payload: dict[str, Any] = {
@@ -637,7 +583,7 @@ class VolumeNodeMonitor(StrategyRuntime):
                 "upper_node": curr_state.state.get("upper_node"),
                 "lower_node": curr_state.state.get("lower_node"),
                 "poc_price": curr_state.state.get("poc_price"),
-                "bar_time": bar_time_iso,
+                "bar_time": bar_time_key,
             }
 
             events.append(
@@ -655,20 +601,15 @@ class VolumeNodeMonitor(StrategyRuntime):
 
 
 if __name__ == "__main__":
-    # 自测入口：验证插件定义与 features 模块加载（无副作用，不写库表）
+    # 自测入口：验证插件定义与 features 模块导入（无副作用，不写库表）
     print(f"VolumeNodeMonitor.kind={VolumeNodeMonitor.kind}")
     assert VolumeNodeMonitor.kind == "monitor"
 
-    # 验证 features 模块可加载
-    try:
-        module = _load_features_module()
-        print(f"features 模块加载成功: {module.__name__}")
-        assert hasattr(module, "compute_volume_profile")
-        assert hasattr(module, "extract_nearest_nodes")
-        assert hasattr(module, "VolumeProfileConfig")
-        print("compute_volume_profile/extract_nearest_nodes/VolumeProfileConfig 可用 ✓")
-    except FileNotFoundError as e:
-        print(f"features 模块不可用（跳过）: {e}")
+    # 验证 features 模块已通过包内导入可用
+    assert callable(compute_volume_profile)
+    assert callable(extract_nearest_nodes)
+    assert VolumeProfileConfig is not None
+    print("compute_volume_profile/extract_nearest_nodes/VolumeProfileConfig 可用 ✓")
 
     # 验证 ABC 继承
     from app.strategy.runtime import StrategyRuntime

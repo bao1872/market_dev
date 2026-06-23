@@ -33,7 +33,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.selection_plan import SelectionMemberCondition, SelectionPlanMember
-from app.repositories.strategy_result_repository import query_results
+from app.repositories.strategy_result_repository import (
+    MetricFilter,
+    QueryResultPage,
+    query_results,
+)
 
 logger = logging.getLogger("selection_executor")
 
@@ -62,19 +66,50 @@ class MemberMatch:
     missing_reason: str | None = None
 
 
+@dataclass
+class MemberExecutionResult:
+    """成员策略执行结果，区分数据缺失和正常零匹配。
+
+    source_status 语义：
+    - AVAILABLE: 数据源有结果（page.total > 0），matched_count 可能为 0（过滤后零匹配）
+    - MISSING: 数据源缺失（无 published run 或策略版本未解析）
+    - INCOMPLETE: 数据源存在但无结果（page.total == 0，run 存在但未产出任何选股结果）
+    - FAILED: 执行失败
+
+    Attributes:
+        source_status: 数据源状态 AVAILABLE/MISSING/INCOMPLETE/FAILED
+        source_run_id: 已发布的 run ID
+        source_count: 数据源总结果数（过滤前）
+        matched_count: 过滤后匹配数
+        matches: instrument_id → MemberMatch 映射
+    """
+
+    source_status: str
+    source_run_id: uuid.UUID | None = None
+    source_count: int = 0
+    matched_count: int = 0
+    matches: dict[uuid.UUID, MemberMatch] = field(default_factory=dict)
+
+
 async def execute_member(
     db: AsyncSession,
     member: SelectionPlanMember,
     trade_date: date,
     published_run_id: uuid.UUID | None = None,
-) -> dict[uuid.UUID, MemberMatch]:
-    """执行单个成员策略，通过 SQL 端过滤生成 instrument_id → MemberMatch 映射。
+) -> MemberExecutionResult:
+    """执行单个成员策略，通过 SQL 端过滤生成 MemberExecutionResult。
 
     流程：
     1. 校验成员 strategy_version_id 是否已解析（STABLE_TRACK 可能未解析）
     2. 加载成员 conditions 并转换为 metric_filters
     3. 调用 query_results 进行 SQL 端过滤（绑定 published_run_id）
-    4. 生成 MemberMatch（通过筛选的均为 matched=True）
+    4. 根据 page.total 和 matched_count 判断 source_status，生成 MemberExecutionResult
+
+    source_status 判定逻辑：
+    - strategy_version_id 为 None → MISSING（策略版本未解析）
+    - page.total > 0 → AVAILABLE（数据源有结果，matched_count 可能为 0）
+    - page.total == 0 且有 published_run_id → INCOMPLETE（run 存在但无结果）
+    - page.total == 0 且无 published_run_id → MISSING（无数据源）
 
     Args:
         db: 异步数据库会话
@@ -83,7 +118,7 @@ async def execute_member(
         published_run_id: 已发布的 run_id（绑定 published 批次，None 时按 version_id+trade_date 查询）
 
     Returns:
-        instrument_id → MemberMatch 映射（可能为空字典）
+        MemberExecutionResult（区分数据缺失和正常零匹配）
 
     Raises:
         RuntimeError: 查询策略结果失败时补充上下文后 re-raise
@@ -95,7 +130,7 @@ async def execute_member(
             "member_id=%s, position=%d",
             member.id, member.position,
         )
-        return {}
+        return MemberExecutionResult(source_status="MISSING")
 
     # 2. 加载成员条件（若未加载则查询）
     conditions = list(member.conditions) if member.conditions else []
@@ -113,17 +148,17 @@ async def execute_member(
                 f"查询成员条件失败 member_id={member.id}: {exc}"
             ) from exc
 
-    # 3. 转换为 metric_filters 格式
+    # 3. 转换为 MetricFilter 列表
     metric_filters = _conditions_to_filters(conditions)
 
     # 4. SQL 端过滤查询（绑定 published_run_id）
     try:
-        strategy_results = await query_results(
+        page = await query_results(
             db,
             run_id=published_run_id,
             strategy_version_id=member.strategy_version_id,
             trade_date=trade_date,
-            metric_filters=metric_filters,
+            filters=metric_filters,
             limit=10000,
             offset=0,
         )
@@ -134,17 +169,47 @@ async def execute_member(
             f"trade_date={trade_date}, published_run_id={published_run_id}: {exc}"
         ) from exc
 
-    if not strategy_results:
+    if not page.items:
+        # 区分数据源状态：page.total > 0 表示有数据但过滤后零匹配，否则为数据缺失
+        if page.total > 0:
+            logger.info(
+                "成员策略过滤后零匹配（数据源有 %d 条结果）: member_id=%s, "
+                "strategy_version_id=%s, trade_date=%s, published_run_id=%s",
+                page.total, member.id, member.strategy_version_id,
+                trade_date, published_run_id,
+            )
+            return MemberExecutionResult(
+                source_status="AVAILABLE",
+                source_run_id=published_run_id,
+                source_count=page.total,
+                matched_count=0,
+                matches={},
+            )
+        # page.total == 0：数据源无结果
+        if published_run_id is not None:
+            logger.info(
+                "成员策略数据源无结果（INCOMPLETE）: member_id=%s, "
+                "strategy_version_id=%s, trade_date=%s, published_run_id=%s",
+                member.id, member.strategy_version_id,
+                trade_date, published_run_id,
+            )
+            return MemberExecutionResult(
+                source_status="INCOMPLETE",
+                source_run_id=published_run_id,
+                source_count=0,
+                matched_count=0,
+                matches={},
+            )
         logger.info(
-            "成员策略无结果（SQL 端过滤后）: member_id=%s, strategy_version_id=%s, "
-            "trade_date=%s, published_run_id=%s",
-            member.id, member.strategy_version_id, trade_date, published_run_id,
+            "成员策略无数据源（MISSING）: member_id=%s, "
+            "strategy_version_id=%s, trade_date=%s",
+            member.id, member.strategy_version_id, trade_date,
         )
-        return {}
+        return MemberExecutionResult(source_status="MISSING")
 
     # 5. 构建 MemberMatch（通过 SQL 端筛选的均为 matched=True）
     matches: dict[uuid.UUID, MemberMatch] = {}
-    for sr in strategy_results:
+    for sr in page.items:
         metrics = _extract_metrics(sr.payload)
         matches[sr.instrument_id] = MemberMatch(
             instrument_id=sr.instrument_id,
@@ -154,37 +219,46 @@ async def execute_member(
             missing_reason=None,
         )
 
-    return matches
+    return MemberExecutionResult(
+        source_status="AVAILABLE",
+        source_run_id=published_run_id,
+        source_count=page.total,
+        matched_count=len(matches),
+        matches=matches,
+    )
 
 
 def _conditions_to_filters(
     conditions: list[SelectionMemberCondition],
-) -> list[dict[str, Any]]:
-    """将 SelectionMemberCondition 转换为 metric_filters 格式。
+) -> list[MetricFilter]:
+    """将 SelectionMemberCondition 转换为 MetricFilter 列表。
 
     转换规则：
-    - gt/gte/lt/lte/eq: {"metric_key": ..., "operator": ..., "value": value1}
-    - between: {"metric_key": ..., "operator": "between", "value1": value1, "value2": value2}
+    - gt/gte/lt/lte/eq: MetricFilter(metric_key, operator, value=value1)
+    - between: MetricFilter(metric_key, "between", value1=value1, value2=value2)
     - SelectionMemberCondition 无 enabled 字段，全部条件参与转换
 
     Args:
         conditions: 成员条件列表
 
     Returns:
-        metric_filters 格式的筛选条件列表
+        MetricFilter 列表
     """
-    filters: list[dict[str, Any]] = []
+    filters: list[MetricFilter] = []
     for cond in conditions:
-        f: dict[str, Any] = {
-            "metric_key": cond.metric_key,
-            "operator": cond.operator,
-        }
         if cond.operator == "between":
-            f["value1"] = cond.value1
-            f["value2"] = cond.value2
+            filters.append(MetricFilter(
+                metric_key=cond.metric_key,
+                operator="between",
+                value1=cond.value1,
+                value2=cond.value2,
+            ))
         else:
-            f["value"] = cond.value1
-        filters.append(f)
+            filters.append(MetricFilter(
+                metric_key=cond.metric_key,
+                operator=cond.operator,
+                value=cond.value1,
+            ))
     return filters
 
 
@@ -225,10 +299,19 @@ if __name__ == "__main__":
     ]
     filters = _conditions_to_filters(conditions)
     assert len(filters) == 4, f"应有 4 个 filter，实际: {len(filters)}"
-    assert filters[0] == {"metric_key": "dsa_dir_bars", "operator": "gte", "value": 50}
-    assert filters[1] == {"metric_key": "offset_percentile", "operator": "lte", "value": 0.8}
-    assert filters[2] == {"metric_key": "vwap_ret_avg", "operator": "between", "value1": 0.0, "value2": 0.5}
-    assert filters[3] == {"metric_key": "regime_value", "operator": "eq", "value": 1}
+    assert filters[0].metric_key == "dsa_dir_bars"
+    assert filters[0].operator == "gte"
+    assert filters[0].value == 50
+    assert filters[1].metric_key == "offset_percentile"
+    assert filters[1].operator == "lte"
+    assert filters[1].value == 0.8
+    assert filters[2].metric_key == "vwap_ret_avg"
+    assert filters[2].operator == "between"
+    assert filters[2].value1 == 0.0
+    assert filters[2].value2 == 0.5
+    assert filters[3].metric_key == "regime_value"
+    assert filters[3].operator == "eq"
+    assert filters[3].value == 1
     print(f"_conditions_to_filters: {filters} ✓")
 
     # 测试空条件
@@ -257,6 +340,50 @@ if __name__ == "__main__":
     assert mm.matched is True
     assert mm.missing_reason is None
     print(f"MemberMatch: {mm} ✓")
+
+    # 测试 MemberExecutionResult dataclass
+    # AVAILABLE 且有匹配
+    mer_available = MemberExecutionResult(
+        source_status="AVAILABLE",
+        source_run_id=uuid.uuid4(),
+        source_count=5200,
+        matched_count=100,
+        matches={uuid.uuid4(): MemberMatch(uuid.uuid4(), True)},
+    )
+    assert mer_available.source_status == "AVAILABLE"
+    assert mer_available.source_count == 5200
+    assert mer_available.matched_count == 100
+    print(f"MemberExecutionResult(AVAILABLE): source_count={mer_available.source_count} ✓")
+
+    # AVAILABLE 但零匹配（过滤条件过严）
+    mer_zero_match = MemberExecutionResult(
+        source_status="AVAILABLE",
+        source_run_id=uuid.uuid4(),
+        source_count=5200,
+        matched_count=0,
+        matches={},
+    )
+    assert mer_zero_match.source_status == "AVAILABLE"
+    assert mer_zero_match.matched_count == 0
+    assert len(mer_zero_match.matches) == 0
+    print(f"MemberExecutionResult(AVAILABLE, zero match): matched_count=0 ✓")
+
+    # MISSING（策略版本未解析）
+    mer_missing = MemberExecutionResult(source_status="MISSING")
+    assert mer_missing.source_status == "MISSING"
+    assert mer_missing.source_run_id is None
+    assert mer_missing.matched_count == 0
+    print(f"MemberExecutionResult(MISSING) ✓")
+
+    # INCOMPLETE（run 存在但无结果）
+    mer_incomplete = MemberExecutionResult(
+        source_status="INCOMPLETE",
+        source_run_id=uuid.uuid4(),
+        source_count=0,
+        matched_count=0,
+    )
+    assert mer_incomplete.source_status == "INCOMPLETE"
+    print(f"MemberExecutionResult(INCOMPLETE) ✓")
 
     # 验证 execute_member 签名包含 published_run_id 参数
     import inspect

@@ -115,14 +115,15 @@ function toRow(r: SelectionPlanResult): ScreenerRow {
  * 将 StrategyResult 转换为 ScreenerRow（降级模式：无选股方案时使用）。
  *
  * StrategyResult.payload 包含策略指标（如 dsa_dir_bars, vwap_ret_avg, offset_mean 等），
- * 需映射到 ScreenerRow.summary。无选股方案时所有结果视为 matched=true。
+ * 需映射到 ScreenerRow.summary。无选股方案时结果为原始计算数据，matched=false，
+ * 表示未经选股方案筛选，非"命中"状态。
  */
 function strategyResultToRow(r: StrategyResult): ScreenerRow {
   return {
     resultId: r.id,
     instrumentId: r.instrument_id,
-    matched: true,
-    matchedMemberIds: ['dsa'],
+    matched: false,
+    matchedMemberIds: [],
     rankValue: null,
     summary: r.payload,
   }
@@ -176,18 +177,24 @@ export default function ScreenerPage() {
     ? runs.find((r) => r.id === activeRunId)
     : strategyRuns.find((r) => r.id === activeRunId)
 
-  // --- 运行结果（全量加载，客户端按 tab 过滤） ---
+  // --- 运行结果（服务端分页，客户端按 tab 过滤） ---
   // 有选股方案时用 selection_plan_run_results，无方案时用 strategy_run_results
+  // limit=5000 覆盖全市场（A 股约 5000 只），超出时显示截断警告
+  const RESULTS_LIMIT = 5000
   const planResultsQuery = useSelectionPlanRunResults(
     hasPlans ? activeRunId || undefined : undefined,
-    { matched_only: false, limit: 200 },
+    { matched_only: false, limit: RESULTS_LIMIT },
   )
   const strategyResultsQuery = useStrategyRunResults(
     hasPlans ? undefined : activeRunId || undefined,
-    { limit: 200 },
+    { limit: RESULTS_LIMIT },
   )
   const allResults: SelectionPlanResult[] = planResultsQuery.data?.items ?? []
   const allStrategyResults: StrategyResult[] = strategyResultsQuery.data?.items ?? []
+  const resultsTotal = hasPlans
+    ? (planResultsQuery.data?.total ?? 0)
+    : (strategyResultsQuery.data?.total ?? 0)
+  const resultsTruncated = allResults.length + allStrategyResults.length < resultsTotal
 
   // --- 降级模式：根据 strategy_results 的 instrument_id 列表批量查询股票主数据 ---
   // 避免加载全量 8268 只股票（page_size 上限 100），改为按需批量查询
@@ -230,8 +237,11 @@ export default function ScreenerPage() {
 
   // ===== 派生数据 =====
 
-  // 组合命中结果（matched=true）
-  const combinedRows = useMemo(() => allRows.filter((r) => r.matched), [allRows])
+  // 组合命中结果（有方案时 matched=true；无方案时显示全部原始数据）
+  const combinedRows = useMemo(() => {
+    if (!hasPlans) return allRows
+    return allRows.filter((r) => r.matched)
+  }, [hasPlans, allRows])
 
   // 按成员过滤的命中结果
   const getMemberRows = useCallback(
@@ -264,6 +274,31 @@ export default function ScreenerPage() {
         second: '2-digit',
       })
     : '-'
+
+  // 批次元数据
+  const batchMeta = useMemo(() => {
+    const run = activeRun
+    if (!run) return null
+    const dataDate = run.trade_date
+      ? new Date(run.trade_date).toLocaleDateString('zh-CN')
+      : '-'
+    const statusLabel = run.status === 'completed'
+      ? '计算完成'
+      : run.status === 'failed'
+        ? '计算失败'
+        : run.status === 'running'
+          ? '计算中'
+          : run.status
+    const matchedCount = hasPlans ? combinedRows.length : 0
+    return {
+      dataDate,
+      runId: run.id.slice(0, 8),
+      status: statusLabel,
+      totalResults: resultsTotal,
+      matchedCount,
+      isOk: run.status === 'completed',
+    }
+  }, [activeRun, hasPlans, combinedRows.length, resultsTotal])
 
   // ===== 事件处理 =====
 
@@ -352,8 +387,8 @@ export default function ScreenerPage() {
         filterable: false,
         render: (row) => {
           if (!hasPlans) {
-            // 降级模式：单策略结果，全部命中
-            return <span className="status-pill ok">DSA</span>
+            // 降级模式：原始计算数据，未经选股方案筛选
+            return <span className="tag info">原始数据</span>
           }
           return (
             <span className="status-pill ok">
@@ -572,6 +607,7 @@ export default function ScreenerPage() {
         sortable: false,
         filterable: false,
         render: (row) => {
+          if (!hasPlans) return <span className="tag info">原始数据</span>
           if (row.matched) return <span className="tag good">是</span>
           const missed = members.filter((m) => !row.matchedMemberIds.includes(m.id))
           const missedNames = missed.map(
@@ -685,6 +721,7 @@ export default function ScreenerPage() {
         sortable: false,
         filterable: false,
         render: (row) => {
+          if (!hasPlans) return <span className="tag info">原始数据</span>
           if (row.matched) return <span className="tag good">是</span>
           const missed = members.filter((m) => !row.matchedMemberIds.includes(m.id))
           const missedNames = missed.map(
@@ -740,8 +777,10 @@ export default function ScreenerPage() {
         dataType: 'text',
         sortable: false,
         filterable: false,
-        render: (row) =>
-          row.matched ? <span className="tag good">是</span> : <span className="tag">否</span>,
+        render: (row) => {
+          if (!hasPlans) return <span className="tag info">原始数据</span>
+          return row.matched ? <span className="tag good">是</span> : <span className="tag">否</span>
+        },
       },
       {
         key: 'action',
@@ -839,6 +878,42 @@ export default function ScreenerPage() {
         <span className="status-pill ok">每日推送已启用</span>
       </div>
 
+      {/* 批次元数据 */}
+      {batchMeta && (
+        <div className="batch-meta-bar">
+          <div className="batch-meta-items">
+            <div className="batch-meta-item">
+              <span>数据日期</span>
+              <b>{batchMeta.dataDate}</b>
+            </div>
+            <div className="batch-meta-item">
+              <span>批次</span>
+              <b>{batchMeta.runId}</b>
+            </div>
+            <div className="batch-meta-item">
+              <span>状态</span>
+              <b className={batchMeta.isOk ? 'pos' : 'neg'}>{batchMeta.status}</b>
+            </div>
+            <div className="batch-meta-item">
+              <span>全量结果</span>
+              <b>{batchMeta.totalResults}</b>
+            </div>
+            {hasPlans && (
+              <div className="batch-meta-item">
+                <span>命中数</span>
+                <b className="pos">{batchMeta.matchedCount}</b>
+              </div>
+            )}
+            {resultsTruncated && (
+              <div className="batch-meta-item">
+                <span>加载</span>
+                <b className="neg">{allResults.length + allStrategyResults.length} / {resultsTotal}</b>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* 策略 tabs */}
       <div className="strategy-tabs-bar" data-strategy-group="selectorResult">
         <button
@@ -924,16 +999,31 @@ export default function ScreenerPage() {
           {/* 命中说明卡 */}
           <div className="card-head">
             <div>
-              <div className="card-title">组合命中说明</div>
+              <div className="card-title">
+                {hasPlans ? '组合命中说明' : '原始计算结果'}
+              </div>
               <div className="card-sub">
-                最终 {combinedRows.length} 只
+                {hasPlans
+                  ? `最终 ${combinedRows.length} 只 / 全量 ${resultsTotal} 只`
+                  : `共 ${resultsTotal} 只原始计算数据`
+                }
                 {memberInfos.map((mi) => ` · ${mi.strategyName} ${mi.rows.length} 只`).join('')}
+                {resultsTruncated && ` · ⚠ 仅加载 ${allResults.length + allStrategyResults.length} 条`}
               </div>
             </div>
             <div className="chip-row">
-              <span className="chip blue">全部策略满足</span>
-              <span className="chip">{members.length} 个策略</span>
-              <span className="chip green">推送前 20 只</span>
+              {hasPlans ? (
+                <>
+                  <span className="chip blue">全部策略满足</span>
+                  <span className="chip">{members.length} 个策略</span>
+                  <span className="chip green">推送前 20 只</span>
+                </>
+              ) : (
+                <>
+                  <span className="chip orange">原始数据</span>
+                  <span className="chip">未经选股筛选</span>
+                </>
+              )}
             </div>
           </div>
           {/* 工具栏 */}
@@ -957,9 +1047,10 @@ export default function ScreenerPage() {
             columns={combinedColumns}
             rows={combinedRows}
             rowKey={(row) => row.resultId}
+            total={hasPlans ? planResultsQuery.data?.total : strategyResultsQuery.data?.total}
             loading={resultsLoading}
             error={resultsError}
-            emptyText="暂无组合命中结果"
+            emptyText={hasPlans ? '暂无组合命中结果' : '暂无原始计算结果'}
             selectable
             selectedKeys={selectedKeys}
             onSelectionChange={setSelectedKeys}
@@ -1020,6 +1111,7 @@ export default function ScreenerPage() {
               columns={dsaDetailColumns}
               rows={allRows}
               rowKey={(row) => row.resultId}
+              total={strategyResultsQuery.data?.total}
               loading={resultsLoading}
               error={resultsError}
               emptyText="暂无 DSA 明细结果"

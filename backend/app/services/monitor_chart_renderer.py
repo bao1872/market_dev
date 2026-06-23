@@ -50,11 +50,12 @@ def _get_completed_bar_index(df: pd.DataFrame) -> int:
         最后一根已完成 bar 的 iloc 索引（-1 或 -2）
     """
     from datetime import datetime, time
+    from zoneinfo import ZoneInfo
 
     if df.empty:
         return -1
 
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
     last_ts = df.index[-1]
 
     if last_ts.date() == now.date():
@@ -69,62 +70,20 @@ def _get_completed_bar_index(df: pd.DataFrame) -> int:
 
 
 def _load_bollinger_module() -> Any:
-    """通过 importlib 从文件路径加载 bollinger features 模块。
-
-    与 BollingerMonitor 使用相同的 importlib 方式加载，
-    plotly 未安装时注入 mock。
+    """加载 bollinger features 模块（包内导入，Docker 兼容）。
 
     Returns:
         features 模块对象（含 bollinger 函数）
 
     Raises:
-        FileNotFoundError: features 模块文件不存在
         ImportError: 模块加载失败
     """
-    import importlib.util
-    import sys
-    import types
-
     from app.strategy._plotly_mock import ensure_plotly_mock
-
-    features_dir = os.environ.get(
-        "FEATURES_DIR", "/root/web_dev/ref/交易/features"
-    )
-    module_name = "bollinger_features_plotly"
-    module_path = os.path.join(features_dir, f"{module_name}.py")
-
-    if not os.path.exists(module_path):
-        raise FileNotFoundError(
-            f"bollinger features 模块不存在: {module_path}"
-        )
 
     ensure_plotly_mock()
 
-    if "datasource" not in sys.modules:
-        try:
-            import datasource  # noqa: F401
-        except ImportError:
-            datasource_mock = types.ModuleType("datasource")
-            pytdx_client_mock = types.ModuleType("datasource.pytdx_client")
-            pytdx_client_mock.connect_pytdx = lambda *a, **kw: None
-            pytdx_client_mock.PERIOD_MAP = {}
-            datasource_mock.pytdx_client = pytdx_client_mock
-            sys.modules["datasource"] = datasource_mock
-            sys.modules["datasource.pytdx_client"] = pytdx_client_mock
-
-    try:
-        spec = importlib.util.spec_from_file_location(module_name, module_path)
-        if spec is None or spec.loader is None:
-            raise ImportError(f"无法创建模块 spec: {module_path}")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = module
-        spec.loader.exec_module(module)
-        return module
-    except Exception as e:
-        sys.modules.pop(module_name, None)
-        raise ImportError(
-            f"bollinger features 模块加载失败: path={module_path}, error={e}"
-        ) from e
+    from app.strategy_assets.algorithms.features import bollinger_features_plotly
+    return bollinger_features_plotly
 
 
 async def render_monitoring_chart(

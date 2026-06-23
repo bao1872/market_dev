@@ -33,8 +33,6 @@ from __future__ import annotations
 
 import logging
 import math
-import os
-import sys
 import uuid
 from datetime import date
 from typing import Any
@@ -44,29 +42,13 @@ import pandas as pd
 
 logger = logging.getLogger("strategy.dsa_selector")
 
-# features/ 算法模块路径（可通过环境变量覆盖，默认指向 ref/交易）
-# dynamic_swing_anchored_vwap.py 顶层有 `from datasource.pytdx_client import ...`，
-# 因此需要将 ref/交易 根目录加入 sys.path，使 features 与 datasource 均可导入。
-_REF_TRADE_PATH = os.environ.get(
-    "REF_TRADE_PATH",
-    os.path.abspath(
-        os.path.join(
-            os.path.dirname(__file__),
-            "..", "..", "..", "..", "ref", "交易",
-        )
-    ),
-)
-if _REF_TRADE_PATH not in sys.path:
-    sys.path.insert(0, _REF_TRADE_PATH)
-
-
 from app.strategy._plotly_mock import ensure_plotly_mock  # noqa: E402
 
 # 导入 features/ 算法（SSOT，严格不修改）
-# 依赖 sys.path 中的 ref/交易 路径（上方已设置）
+# 从包内 app.strategy_assets.algorithms.features 导入，Docker 兼容
 ensure_plotly_mock()
-from features.atr_rope_event_factor_lab_v4 import ATRRopeConfig, compute_atr_rope  # noqa: E402
-from features.dynamic_swing_anchored_vwap import (  # noqa: E402
+from app.strategy_assets.algorithms.features.atr_rope_event_factor_lab_v4 import ATRRopeConfig, compute_atr_rope  # noqa: E402
+from app.strategy_assets.algorithms.features.dynamic_swing_anchored_vwap import (  # noqa: E402
     DSAConfig,
     dynamic_swing_anchored_vwap,
 )
@@ -617,6 +599,12 @@ class DSASelector(StrategyRuntime):
             daily_df = daily_df.copy()
             daily_df.index = pd.to_datetime(daily_df.index)
 
+        # 应用 lookback 参数截断数据
+        if self._lookback and len(daily_df) > self._lookback:
+            original_len = len(daily_df)
+            daily_df = daily_df.tail(self._lookback)
+            logger.debug("DSA lookback 截断: %d → %d 行", original_len, len(daily_df))
+
         # 1. 计算 DSA regime
         try:
             regime, trend_strength, dsa_bars, dsa_vwap, dsa_dir = _compute_dsa_regime(
@@ -677,11 +665,8 @@ class DSASelector(StrategyRuntime):
             daily_df["close"], dsa_vwap, start_idx=start_idx
         )
 
-        # 6. 计算涨跌幅（除权防御）
+        # 6. 计算涨跌幅（前复权后不再需要除权防御，保留指标输出）
         change_pct = _compute_change_pct(daily_df)
-        if change_pct is not None and change_pct < -15:
-            logger.debug("疑似除权虚假跌幅 symbol=%s: %.2f%%，跳过", context.symbol, change_pct)
-            return {"regime_value": 0, "error": "ex_dividend_detected"}
 
         # 7. 组装指标（对齐 dsa_selector.yaml outputs）
         offset_mean = _safe_float(last_offset["offset_mean"])

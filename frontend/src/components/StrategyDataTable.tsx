@@ -450,7 +450,10 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
   }, [rows, globalQuery, filters, sortColumn, sortDirection, columns, serverSide])
 
   // 分页
-  const totalCount = serverSide ? (total ?? 0) : processedRows.length
+  // serverSide 模式：total 来自 API；客户端模式：total 优先取 prop，否则用 processedRows.length
+  const totalCount = serverSide
+    ? (total ?? 0)
+    : (total ?? processedRows.length)
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize))
   const currentPage = Math.min(page, totalPages)
   const pageRows = serverSide
@@ -494,7 +497,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
       <div className="table-meta-bar">
         <div>
           <span className="table-result-count">
-            结果 {totalCount} / {serverSide ? totalCount : rows.length}
+            结果 {totalCount}{total != null && !serverSide ? ` / 服务端 ${total}` : ''}
           </span>
           <span className="table-active-state">
             {[

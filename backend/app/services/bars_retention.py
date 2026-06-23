@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -87,7 +88,7 @@ async def apply_retention_policy(
         Exception: 删除失败时 re-raise（不吞没）
     """
     results: list[RetentionResult] = []
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
 
     for model_cls, time_col, retention_days, is_permanent in _RETENTION_CONFIG:
         table_name = model_cls.__tablename__
@@ -209,7 +210,7 @@ if __name__ == "__main__":
     print("✓ 保留期限配置正确（15min/60min=730天, minute=30天）")
 
     # 3. 验证 cutoff 计算逻辑
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
     cutoff_15min = now - timedelta(days=730)
     cutoff_minute = now - timedelta(days=30)
     print(f"✓ 15min cutoff 计算: {cutoff_15min.isoformat()}")

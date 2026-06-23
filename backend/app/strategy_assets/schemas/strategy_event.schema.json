@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Strategy Event Envelope V1.1",
+  "type": "object",
+  "required": [
+    "event_key",
+    "strategy_version_id",
+    "instrument_id",
+    "event_type",
+    "event_time",
+    "schema_version",
+    "payload",
+    "snapshot"
+  ],
+  "properties": {
+    "event_key": {
+      "type": "string"
+    },
+    "strategy_version_id": {
+      "type": "string"
+    },
+    "instrument_id": {
+      "type": "string"
+    },
+    "event_type": {
+      "type": "string"
+    },
+    "event_time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "calculation_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "logical_entity_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "payload": {
+      "type": "object"
+    },
+    "snapshot": {
+      "type": "object"
+    },
+    "dedupe_scope": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

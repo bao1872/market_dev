@@ -32,6 +32,12 @@ from app.core.deps import get_db, require_roles
 from app.models.strategy import StrategyVersion
 from app.models.strategy_run import StrategyRun
 from app.repositories import strategy_result_repository
+from app.repositories.strategy_result_repository import (
+    MetricFilter,
+    QueryResultPage,
+    SortSpec,
+    dict_filters_to_metric_filters,
+)
 from app.schemas.strategy_run import (
     StrategyResultListResponse,
     StrategyResultResponse,
@@ -440,32 +446,25 @@ async def query_strategy_results(
         _validate_metric_filters(filters, version)
 
     # 5. 查询结果（SQL 端过滤，绑定 published run）
-    items = await strategy_result_repository.query_results(
+    metric_filter_list = dict_filters_to_metric_filters(filters)
+    sort_spec = SortSpec(field=sort_by, desc=sort_desc) if sort_by else None
+    page = await strategy_result_repository.query_results(
         db,
         run_id=run.id,
         strategy_version_id=version_id,
         trade_date=trade_date,
-        metric_filters=filters,
-        sort_by=sort_by,
-        sort_desc=sort_desc,
+        filters=metric_filter_list,
+        sort=sort_spec,
         limit=limit,
         offset=offset,
     )
-    total = await strategy_result_repository.query_results(
-        db,
-        run_id=run.id,
-        strategy_version_id=version_id,
-        trade_date=trade_date,
-        metric_filters=filters,
-        count_only=True,
-    )
 
-    result_items = [StrategyResultResponse.model_validate(r) for r in items]
-    page = offset // limit + 1 if limit > 0 else 1
+    result_items = [StrategyResultResponse.model_validate(r) for r in page.items]
+    page_num = offset // limit + 1 if limit > 0 else 1
     return StrategyResultListResponse(
         items=result_items,
-        total=total,
-        page=page,
+        total=page.total,
+        page=page_num,
         page_size=limit,
     )
 
@@ -559,32 +558,25 @@ async def list_run_results(
         _validate_metric_filters(filters, version)
 
     # 查询结果（SQL 端过滤，绑定 published run）
-    items = await strategy_result_repository.query_results(
+    metric_filter_list = dict_filters_to_metric_filters(filters)
+    sort_spec = SortSpec(field=sort_by, desc=sort_desc) if sort_by else None
+    page = await strategy_result_repository.query_results(
         db,
         run_id=run.id,
         strategy_version_id=run.strategy_version_id,
         trade_date=run.trade_date,
-        metric_filters=filters,
-        sort_by=sort_by,
-        sort_desc=sort_desc,
+        filters=metric_filter_list,
+        sort=sort_spec,
         limit=limit,
         offset=offset,
     )
-    total = await strategy_result_repository.query_results(
-        db,
-        run_id=run.id,
-        strategy_version_id=run.strategy_version_id,
-        trade_date=run.trade_date,
-        metric_filters=filters,
-        count_only=True,
-    )
 
-    result_items = [StrategyResultResponse.model_validate(r) for r in items]
-    page = offset // limit + 1 if limit > 0 else 1
+    result_items = [StrategyResultResponse.model_validate(r) for r in page.items]
+    page_num = offset // limit + 1 if limit > 0 else 1
     return StrategyResultListResponse(
         items=result_items,
-        total=total,
-        page=page,
+        total=page.total,
+        page=page_num,
         page_size=limit,
     )
 

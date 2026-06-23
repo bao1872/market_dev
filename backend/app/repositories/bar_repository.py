@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -52,6 +53,28 @@ _BAR_COLUMNS = ["open", "high", "low", "close", "volume", "amount", "adj_factor"
 # asyncpg 单次查询参数上限 32767，每条 record 9 列，故每批最多 32767 // 9 = 3640 条
 # 取 3000 留安全余量
 _UPSERT_BATCH_SIZE = 3000
+
+# [行情] - get_bars 支持的 timeframe → fetch 函数映射
+_TIMEFRAME_MAP: dict[str, str] = {
+    "1d": "daily",
+    "15m": "15min",
+    "1m": "minute",
+}
+
+
+@dataclass
+class BarsResult:
+    """统一行情查询结果，包含元数据。"""
+
+    bars: pd.DataFrame  # 行情数据（OHLCV + adj_factor）
+    source: str  # "db", "pytdx", "db+pytdx"
+    timeframe: str  # "1d", "15m", "1m", etc.
+    adjustment: str | None  # None, "qfq"
+    first_bar_time: pd.Timestamp | None = None
+    last_bar_time: pd.Timestamp | None = None
+    completed_through: pd.Timestamp | None = None  # 最新已完成 Bar 时间
+    is_complete: bool = True  # 数据是否完整（无缺口）
+    missing_ranges: list[tuple[pd.Timestamp, pd.Timestamp]] = field(default_factory=list)
 
 
 async def _batch_upsert_bars(
@@ -1637,6 +1660,118 @@ def apply_adj_factor_to_bars(
     return apply_adj_factor(bars_df, adj_factor_df)
 
 
+async def get_bars(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    *,
+    timeframe: str = "1d",
+    start_date: date | None = None,
+    end_date: date | None = None,
+    adjustment: str | None = None,  # None=原始, "qfq"=前复权
+    completed_only: bool = False,  # 只返回已完成的 Bar
+    skip_upsert: bool = False,  # 仅 1m 有效，为 True 时不写入 DB
+) -> BarsResult:
+    """统一行情获取入口。
+
+    封装 fetch_*_bars + apply_adj_factor_to_bars + 元数据收集，
+    为所有调用方提供一致的行情数据。
+
+    Args:
+        session: 异步数据库会话
+        instrument_id: 标的 ID
+        timeframe: 周期 ("1d", "15m", "1m")
+        start_date: 起始日期（含），None 使用默认值
+        end_date: 结束日期（含），None 使用今天
+        adjustment: 复权方式（None=不复权, "qfq"=前复权）
+        completed_only: 是否只返回已完成的 Bar
+            - 日线：排除当日 bar（盘中未收盘）
+            - 分钟线：排除最后一根未完成 bar
+        skip_upsert: 仅 1m 有效，为 True 时不写入 DB（用于实时监控等无需持久化场景）
+
+    Returns:
+        BarsResult 包含行情数据和元数据
+
+    Raises:
+        ValueError: timeframe 不在支持列表中
+        Exception: fetch 或复权失败时 re-raise
+    """
+    if timeframe not in _TIMEFRAME_MAP:
+        raise ValueError(
+            f"不支持的 timeframe: {timeframe}，仅支持 {list(_TIMEFRAME_MAP.keys())}"
+        )
+
+    # 默认日期范围
+    if end_date is None:
+        end_date = date.today()
+    if start_date is None:
+        start_date = end_date - timedelta(days=5000)
+
+    # [行情] - 根据 timeframe 调用对应的 fetch 函数
+    is_intraday = timeframe != "1d"
+
+    if timeframe == "1d":
+        bars_df = await fetch_daily_bars(session, instrument_id, start_date, end_date)
+    elif timeframe == "15m":
+        start_time = datetime(start_date.year, start_date.month, start_date.day)
+        end_time = datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59)
+        bars_df = await fetch_15min_bars(session, instrument_id, start_time, end_time)
+    elif timeframe == "1m":
+        start_time = datetime(start_date.year, start_date.month, start_date.day)
+        end_time = datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59)
+        bars_df = await fetch_minute_bars(
+            session, instrument_id, start_time, end_time,
+            skip_upsert=skip_upsert,
+        )
+    else:
+        raise ValueError(f"不支持的 timeframe: {timeframe}")
+
+    # 判断数据来源
+    source = "db" if not bars_df.empty else "empty"
+
+    # [行情] - 前复权处理
+    if adjustment == "qfq" and not bars_df.empty:
+        try:
+            adj_factor_df = await _get_adj_factor_df(session, instrument_id)
+            if not adj_factor_df.empty:
+                bars_df = apply_adj_factor_to_bars(bars_df, adj_factor_df, intraday=is_intraday)
+        except Exception as exc:
+            logger.warning("前复权处理失败 instrument_id=%s timeframe=%s: %s", instrument_id, timeframe, exc)
+            raise
+
+    # [行情] - completed_only 过滤
+    if completed_only and not bars_df.empty:
+        now = datetime.now()
+        if timeframe == "1d":
+            # 日线：排除当日 bar（盘中未收盘）
+            today = now.date()
+            bars_df = bars_df[bars_df.index.date < today]
+        else:
+            # 分钟线：排除最后一根 bar（可能未完成）
+            if len(bars_df) > 1:
+                bars_df = bars_df.iloc[:-1]
+
+    # [行情] - 构建元数据
+    first_bar_time: pd.Timestamp | None = None
+    last_bar_time: pd.Timestamp | None = None
+    completed_through: pd.Timestamp | None = None
+
+    if not bars_df.empty:
+        first_bar_time = pd.Timestamp(bars_df.index[0])
+        last_bar_time = pd.Timestamp(bars_df.index[-1])
+        # completed_through：最后一根 bar 的时间（completed_only 已过滤掉未完成的）
+        completed_through = last_bar_time
+
+    return BarsResult(
+        bars=bars_df,
+        source=source,
+        timeframe=timeframe,
+        adjustment=adjustment,
+        first_bar_time=first_bar_time,
+        last_bar_time=last_bar_time,
+        completed_through=completed_through,
+    )
+
+
 if __name__ == "__main__":
     # 自测入口：验证函数签名与基础逻辑（不连 DB，无副作用）
     import inspect
@@ -1652,7 +1787,7 @@ if __name__ == "__main__":
 
     sig = inspect.signature(fetch_minute_bars)
     params = list(sig.parameters.keys())
-    assert params == ["session", "instrument_id", "start_time", "end_time", "adapter"], \
+    assert params == ["session", "instrument_id", "start_time", "end_time", "adapter", "skip_upsert"], \
         f"fetch_minute_bars 参数不匹配: {params}"
     print(f"fetch_minute_bars params={params}")
 

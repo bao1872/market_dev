@@ -131,6 +131,9 @@ class StrategyRun(Base):
         nullable=True,
         comment="发布时间（非空表示已发布，用户可查询）",
     )
+    # TODO: 添加 bars_snapshot_id 字段，记录 DSA 运行时使用的行情数据版本
+    # 需 DB 迁移：ALTER TABLE strategy_runs ADD COLUMN bars_snapshot_id UUID;
+    # 用于追踪 DSA 运行与 bars 刷新的对应关系，确保数据可溯源
 
     def __repr__(self) -> str:
         return (

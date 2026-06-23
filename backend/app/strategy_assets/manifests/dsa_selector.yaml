@@ -1,0 +1,111 @@
+strategy_id: dsa_selector
+kind: selector
+version: 1.3.0
+display_name: DSA 方向稳定性选股
+entrypoint: strategies.selectors.dsa:DSASelector
+input:
+  bar_frequency: 1d
+  min_bars: 800
+  adjustment: forward
+  markets: [SSE, SZSE, BSE]
+capabilities:
+  composable: true
+  supports_plan_conditions: true
+  supports_table_schema: true
+  supports_chart_layers: true
+  supports_backtest: true
+parameters:
+  # 算法参数（全部 allowed_scopes: [system]，用户不可修改）
+  # 注意：algorithm.min_dir_bars 已移出参数列表，它是 regime 命中阈值
+  # （regime[bars > min_bars] = 1），不是算法计算参数，保留为代码常量 MIN_DIR_BARS=50。
+  # 所有股票输出真实 dsa_dir_bars，由用户筛选条件动态决定。
+  - key: algorithm.lookback
+    type: integer
+    default: 800
+    allowed_scopes: [system]
+    algorithm_affecting: true
+    description: "回看 bar 数（与参考脚本 DAILY_BARS=800 对齐）"
+  # DSAConfig 参数（features/dynamic_swing_anchored_vwap.py）
+  - key: dsa.prd
+    type: integer
+    default: 50
+    allowed_scopes: [system]
+    algorithm_affecting: true
+    description: "Swing detection 周期"
+  - key: dsa.base_apt
+    type: number
+    default: 20.0
+    allowed_scopes: [system]
+    algorithm_affecting: true
+    description: "Adaptive Price Tracking 基准"
+  - key: dsa.use_adapt
+    type: boolean
+    default: false
+    allowed_scopes: [system]
+    algorithm_affecting: true
+    description: "是否启用自适应"
+  - key: dsa.vol_bias
+    type: number
+    default: 10.0
+    allowed_scopes: [system]
+    algorithm_affecting: true
+    description: "成交量偏置"
+  - key: dsa.atr_len
+    type: integer
+    default: 50
+    allowed_scopes: [system]
+    algorithm_affecting: true
+    description: "ATR 长度（代码内固定）"
+  # ATRRopeConfig 参数（features/atr_rope_event_factor_lab_v4.py）
+  - key: atr_rope.length
+    type: integer
+    default: 14
+    allowed_scopes: [system]
+    algorithm_affecting: true
+    description: "ATR Rope 长度"
+  - key: atr_rope.multi
+    type: number
+    default: 1.5
+    allowed_scopes: [system]
+    algorithm_affecting: true
+    description: "ATR 倍数"
+  - key: atr_rope.regime_lookback
+    type: integer
+    default: 55
+    allowed_scopes: [system]
+    algorithm_affecting: true
+    description: "regime 回看窗口（参考脚本硬编码 55，非 dataclass 默认 20）"
+  - key: atr_rope.regime_threshold
+    type: number
+    default: 0.55
+    allowed_scopes: [system]
+    algorithm_affecting: true
+    description: "regime 阈值"
+outputs:
+  # 核心 7 个指标（已有）
+  - {key: dsa_dir_bars, type: integer, unit: bars, filterable: true, sortable: true, description: "dir=1 持续 bar 数"}
+  - {key: vwap_ret_avg, type: number, unit: ratio, filterable: true, sortable: true, description: "平均每 bar 收益率"}
+  - {key: vwap_ret_total, type: number, unit: ratio, filterable: true, sortable: true, description: "总收益率"}
+  - {key: offset_mean, type: number, unit: ratio, filterable: true, sortable: true, description: "偏离率均值"}
+  - {key: offset_std, type: number, unit: ratio, filterable: true, sortable: true, description: "偏离率标准差"}
+  - {key: offset_variance_rate, type: number, unit: ratio, filterable: true, sortable: true, description: "偏离率变异系数"}
+  - {key: offset_percentile, type: number, unit: ratio_0_1, filterable: true, sortable: true, description: "偏离率百分位"}
+  # 扩展字段（用于详情展示和筛选）
+  - {key: regime_value, type: integer, filterable: true, sortable: true, description: "regime 值（1=多头,0=无趋势,-1=空头）"}
+  - {key: change_pct, type: number, unit: percent, filterable: true, sortable: true, description: "涨跌幅"}
+  - {key: cross_up_count, type: integer, filterable: true, sortable: true, description: "VWAP 上穿次数"}
+  - {key: cross_down_count, type: integer, filterable: true, sortable: true, description: "VWAP 下穿次数"}
+chart_layers:
+  - id: dsa_vwap
+    name: DSA VWAP
+    renderer: line
+    pane: price
+    color: "#ff1744"
+    direction_colored: true
+    direction_up_color: "#ff1744"
+    direction_down_color: "#00e676"
+    fields: [dsa_vwap, dsa_dir]
+    hover_fields: [dsa_dir, dsa_vwap]
+    description: "DSA 动态摆动锚定 VWAP 线，按方向着色"
+resource_budget:
+  target_ms_per_instrument: 5000

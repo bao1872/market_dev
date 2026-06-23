@@ -15,7 +15,7 @@
 - bb_upper_touch: prev_close < ref_upper <= cur_close（从下方穿越上轨）
 - bb_mid_touch: prev_close 和 cur_close 分列中轨两侧
 - bb_lower_touch: prev_close > ref_lower >= cur_close（从上方穿越下轨）
-- dedupe: {event_type}:{instrument_id}:{boundary}:{bar_time_iso}
+- dedupe: {event_type}:{instrument_id}:{boundary}:{bar_time_key}
 - state_ttl=600s: 冷却时间 10 分钟
 
 用法（模块自测）：
@@ -24,14 +24,11 @@
 
 from __future__ import annotations
 
-import importlib.util
 import logging
-import os
-import sys
-import types
 from datetime import UTC, datetime, time
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -47,12 +44,9 @@ from app.strategy.runtime import (
 
 logger = logging.getLogger("strategy.monitors.bollinger_monitor")
 
-# features/ 算法模块路径（可通过环境变量覆盖，默认指向 ref/交易/features）
-FEATURES_DIR = os.environ.get(
-    "FEATURES_DIR", "/root/web_dev/ref/交易/features"
-)
-_BB_MODULE_NAME = "bollinger_features_plotly"
-_BB_MODULE_PATH = os.path.join(FEATURES_DIR, f"{_BB_MODULE_NAME}.py")
+# 导入 features/ 算法（从包内 app.strategy_assets.algorithms.features，Docker 兼容）
+ensure_plotly_mock()
+from app.strategy_assets.algorithms.features.bollinger_features_plotly import bollinger as _bollinger_func
 
 # BB 标准参数（与 monitoring.py 一致）
 BB_WIN_DEFAULT = 20
@@ -65,52 +59,6 @@ BB_LOWER_TOUCH = "bb_lower_touch"
 
 # 冷却时间（秒）
 NOTIFY_COOLDOWN_SECONDS = 600
-
-
-def _load_bollinger_module() -> Any:
-    """通过 importlib 从文件路径加载 bollinger features 模块（不修改 features/）。
-
-    features/ 模块顶层 import plotly（仅可视化用），策略运行时不依赖 plotly。
-    plotly 未安装时注入 mock。
-
-    Returns:
-        features 模块对象（含 bollinger 函数）
-
-    Raises:
-        FileNotFoundError: features 模块文件不存在
-        ImportError: 模块加载失败（补上下文后 re-raise）
-    """
-    if not os.path.exists(_BB_MODULE_PATH):
-        raise FileNotFoundError(
-            f"bollinger features 模块不存在: {_BB_MODULE_PATH}"
-            f"（请设置 FEATURES_DIR 环境变量指向 ref/交易/features 目录）"
-        )
-    ensure_plotly_mock()
-    # datasource 是 features 的数据获取依赖（fetch_daily_pytdx），策略运行时不使用
-    if "datasource" not in sys.modules:
-        try:
-            import datasource  # noqa: F401
-        except ImportError:
-            datasource_mock = types.ModuleType("datasource")
-            pytdx_client_mock = types.ModuleType("datasource.pytdx_client")
-            pytdx_client_mock.connect_pytdx = lambda *a, **kw: None
-            pytdx_client_mock.PERIOD_MAP = {}
-            datasource_mock.pytdx_client = pytdx_client_mock
-            sys.modules["datasource"] = datasource_mock
-            sys.modules["datasource.pytdx_client"] = pytdx_client_mock
-    try:
-        spec = importlib.util.spec_from_file_location(_BB_MODULE_NAME, _BB_MODULE_PATH)
-        if spec is None or spec.loader is None:
-            raise ImportError(f"无法创建模块 spec: {_BB_MODULE_PATH}")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[_BB_MODULE_NAME] = module
-        spec.loader.exec_module(module)
-        return module
-    except Exception as e:
-        sys.modules.pop(_BB_MODULE_NAME, None)
-        raise ImportError(
-            f"bollinger features 模块加载失败: path={_BB_MODULE_PATH}, error={e}"
-        ) from e
 
 
 def _get_completed_bar_index(df: pd.DataFrame, freq: str = "d") -> int:
@@ -129,7 +77,7 @@ def _get_completed_bar_index(df: pd.DataFrame, freq: str = "d") -> int:
     if df.empty:
         return -1
 
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
     last_ts = df.index[-1]
 
     if freq == "d":
@@ -172,11 +120,10 @@ class BollingerMonitor(StrategyRuntime):
     def __init__(self) -> None:
         self._bb_win: int = BB_WIN_DEFAULT
         self._bb_k: float = BB_K_DEFAULT
-        self._bb_module: Any | None = None  # 懒加载
         self._strategy_version_id: UUID | None = None
 
     async def initialize(self, version: StrategyVersion) -> None:
-        """从 manifest 提取参数并懒加载 features 模块。
+        """从 manifest 提取参数。
 
         Args:
             version: 策略版本 ORM 对象（manifest 含 parameters/outputs/event_types）
@@ -192,13 +139,10 @@ class BollingerMonitor(StrategyRuntime):
             elif key == "bb_k":
                 self._bb_k = float(param.get("default", BB_K_DEFAULT))
 
-        # 懒加载 features 模块
-        if self._bb_module is None:
-            self._bb_module = _load_bollinger_module()
-            logger.info(
-                "BollingerMonitor 初始化: bb_win=%d, bb_k=%.1f, features=%s",
-                self._bb_win, self._bb_k, _BB_MODULE_PATH,
-            )
+        logger.info(
+            "BollingerMonitor 初始化: bb_win=%d, bb_k=%.1f",
+            self._bb_win, self._bb_k,
+        )
 
     async def execute(self, context: MarketDataContext) -> Any:  # type: ignore[override]
         """selector 执行接口（monitor 不支持）。"""
@@ -227,14 +171,12 @@ class BollingerMonitor(StrategyRuntime):
                 f"日线数据不足（需要至少 {self._bb_win + 5} 根），"
                 f"instrument_id={context.instrument_id}"
             )
-        if self._bb_module is None:
-            raise RuntimeError("features 模块未加载，请先调用 initialize()")
 
         daily_df = context.bars_daily
 
         # 计算 BB 参考线
         try:
-            bb_mid, bb_upper, bb_lower = self._bb_module.bollinger(
+            bb_mid, bb_upper, bb_lower = _bollinger_func(
                 daily_df, self._bb_win, self._bb_k
             )
         except Exception as e:
@@ -334,7 +276,9 @@ class BollingerMonitor(StrategyRuntime):
 
         events: list[StrategyEventDraft] = []
         bar_time = curr_state.updated_at or datetime.now(UTC)
-        bar_time_iso = bar_time.isoformat() if isinstance(bar_time, datetime) else str(bar_time)
+        # [bollinger_monitor] - dedupe_key 使用整分钟时间戳（而非微秒精度），
+        # 同一 1m bar 内多次调用不会产生不同 dedupe_key
+        bar_time_key = bar_time.strftime("%Y%m%d%H%M") if isinstance(bar_time, datetime) else str(bar_time)
         instrument_id_str = str(curr_state.instrument_id)
 
         # bb_snapshot 公共字段
@@ -349,7 +293,7 @@ class BollingerMonitor(StrategyRuntime):
         # 上轨穿越：prev_close < ref_upper <= current_price
         if ref_upper is not None and prev_close < ref_upper <= current_price:
             dev_pct = _calc_deviation_pct(current_price, ref_upper)
-            dedupe_key = f"{BB_UPPER_TOUCH}:{instrument_id_str}:{ref_upper}:{bar_time_iso}"
+            dedupe_key = f"{BB_UPPER_TOUCH}:{instrument_id_str}:{ref_upper}:{bar_time_key}"
             events.append(StrategyEventDraft(
                 event_type=BB_UPPER_TOUCH,
                 event_time=bar_time,
@@ -370,7 +314,7 @@ class BollingerMonitor(StrategyRuntime):
             mid_cross = (prev_close <= ref_mid < current_price) or (current_price <= ref_mid < prev_close)
             if mid_cross:
                 dev_pct = _calc_deviation_pct(current_price, ref_mid)
-                dedupe_key = f"{BB_MID_TOUCH}:{instrument_id_str}:{ref_mid}:{bar_time_iso}"
+                dedupe_key = f"{BB_MID_TOUCH}:{instrument_id_str}:{ref_mid}:{bar_time_key}"
                 events.append(StrategyEventDraft(
                     event_type=BB_MID_TOUCH,
                     event_time=bar_time,
@@ -389,7 +333,7 @@ class BollingerMonitor(StrategyRuntime):
         # 下轨穿越：prev_close > ref_lower >= current_price
         if ref_lower is not None and prev_close > ref_lower >= current_price:
             dev_pct = _calc_deviation_pct(current_price, ref_lower)
-            dedupe_key = f"{BB_LOWER_TOUCH}:{instrument_id_str}:{ref_lower}:{bar_time_iso}"
+            dedupe_key = f"{BB_LOWER_TOUCH}:{instrument_id_str}:{ref_lower}:{bar_time_key}"
             events.append(StrategyEventDraft(
                 event_type=BB_LOWER_TOUCH,
                 event_time=bar_time,
@@ -421,11 +365,8 @@ class BollingerMonitor(StrategyRuntime):
             return {"bb_upper": [], "bb_mid": [], "bb_lower": [],
                     "bb_width": [], "bb_pos": []}
 
-        if self._bb_module is None:
-            raise RuntimeError("features 模块未加载，请先调用 initialize()")
-
         try:
-            bb_mid, bb_upper, bb_lower = self._bb_module.bollinger(
+            bb_mid, bb_upper, bb_lower = _bollinger_func(
                 bars, self._bb_win, self._bb_k
             )
         except Exception as e:
@@ -452,18 +393,18 @@ class BollingerMonitor(StrategyRuntime):
 if __name__ == "__main__":
     # 自测入口：验证 bollinger 模块加载与信号检测（无副作用，不写库表）
     import asyncio
+    import sys
     from uuid import uuid4
 
     print(f"BollingerMonitor.kind={BollingerMonitor.kind}")
     assert BollingerMonitor.kind == "monitor"
 
-    # 验证 features 模块可加载
+    # 验证 bollinger 函数可调用
     try:
-        module = _load_bollinger_module()
-        print(f"bollinger features 模块加载成功: {module.__name__}")
-        assert hasattr(module, "bollinger")
+        print(f"bollinger features 模块已通过包内导入加载")
+        assert callable(_bollinger_func)
         print("bollinger() 函数可用 ✓")
-    except FileNotFoundError as e:
+    except ImportError as e:
         print(f"bollinger features 模块不可用（跳过后续测试）: {e}")
         print("OK（部分跳过）")
         sys.exit(0)
@@ -486,7 +427,7 @@ if __name__ == "__main__":
     )
 
     # 计算 BB 参考线
-    bb_mid, bb_upper, bb_lower = module.bollinger(daily_df, BB_WIN_DEFAULT, BB_K_DEFAULT)
+    bb_mid, bb_upper, bb_lower = _bollinger_func(daily_df, BB_WIN_DEFAULT, BB_K_DEFAULT)
     print(f"BB 参考线计算成功: mid[-1]={bb_mid.iloc[-1]:.4f}, "
           f"upper[-1]={bb_upper.iloc[-1]:.4f}, lower[-1]={bb_lower.iloc[-1]:.4f}")
 
@@ -520,9 +461,8 @@ if __name__ == "__main__":
         bar_time=m1_times[-1].to_pydatetime(),
     )
 
-    # 创建 monitor 实例并手动设置模块（跳过 initialize）
+    # 创建 monitor 实例（跳过 initialize，bollinger 函数已通过包内导入可用）
     monitor = BollingerMonitor()
-    monitor._bb_module = module
     monitor._strategy_version_id = uuid4()
 
     # 测试 calculate_state

@@ -33,11 +33,10 @@ from app.services.selection_composer import (
     rank,
 )
 from app.services.selection_executor import (
-    REASON_FILTERED_OUT,
     REASON_NO_RESULT,
+    MemberExecutionResult,
     MemberMatch,
-    _evaluate_conditions,
-    _evaluate_single_condition,
+    _conditions_to_filters,
     _extract_metrics,
 )
 from app.services.selection_run_service import (
@@ -554,24 +553,34 @@ def test_input_run_set_hash_none_version() -> None:
 
 
 def test_missing_member_policy_ignore_member() -> None:
-    """测试 IGNORE_MEMBER 策略：空成员不抛异常。"""
+    """测试 IGNORE_MEMBER 策略：MISSING 成员不抛异常。"""
     mid1, mid2 = uuid.uuid4(), uuid.uuid4()
     iid1 = uuid.uuid4()
-    member_matches = {
-        mid1: {iid1: MemberMatch(iid1, True)},
-        mid2: {},  # 空结果
+    member_results = {
+        mid1: MemberExecutionResult(
+            source_status="AVAILABLE",
+            source_count=100,
+            matched_count=1,
+            matches={iid1: MemberMatch(iid1, True)},
+        ),
+        mid2: MemberExecutionResult(source_status="MISSING"),
     }
     # IGNORE_MEMBER 不应抛异常
-    _apply_missing_member_policy(member_matches, [], "IGNORE_MEMBER")
+    _apply_missing_member_policy(member_results, [], "IGNORE_MEMBER")
 
 
 def test_missing_member_policy_fail_closed() -> None:
-    """测试 FAIL_CLOSED 策略：空成员抛 ValueError。"""
+    """测试 FAIL_CLOSED 策略：MISSING 成员抛 ValueError。"""
     mid1, mid2 = uuid.uuid4(), uuid.uuid4()
     iid1 = uuid.uuid4()
-    member_matches = {
-        mid1: {iid1: MemberMatch(iid1, True)},
-        mid2: {},  # 空结果
+    member_results = {
+        mid1: MemberExecutionResult(
+            source_status="AVAILABLE",
+            source_count=100,
+            matched_count=1,
+            matches={iid1: MemberMatch(iid1, True)},
+        ),
+        mid2: MemberExecutionResult(source_status="MISSING"),
     }
 
     class MockEnabledMember:
@@ -582,16 +591,21 @@ def test_missing_member_policy_fail_closed() -> None:
 
     members = [MockEnabledMember(mid1), MockEnabledMember(mid2)]
     with pytest.raises(ValueError, match="FAIL_CLOSED"):
-        _apply_missing_member_policy(member_matches, members, "FAIL_CLOSED")
+        _apply_missing_member_policy(member_results, members, "FAIL_CLOSED")
 
 
 def test_missing_member_policy_fail_closed_disabled_member() -> None:
     """测试 FAIL_CLOSED 策略：未启用成员不触发失败。"""
     mid1, mid2 = uuid.uuid4(), uuid.uuid4()
     iid1 = uuid.uuid4()
-    member_matches = {
-        mid1: {iid1: MemberMatch(iid1, True)},
-        mid2: {},  # 空结果但成员未启用
+    member_results = {
+        mid1: MemberExecutionResult(
+            source_status="AVAILABLE",
+            source_count=100,
+            matched_count=1,
+            matches={iid1: MemberMatch(iid1, True)},
+        ),
+        mid2: MemberExecutionResult(source_status="MISSING"),
     }
 
     class MockEnabledMember:
@@ -602,7 +616,7 @@ def test_missing_member_policy_fail_closed_disabled_member() -> None:
 
     members = [MockEnabledMember(mid1), MockEnabledMember(mid2, enabled=False)]
     # mid2 未启用，不触发 FAIL_CLOSED
-    _apply_missing_member_policy(member_matches, members, "FAIL_CLOSED")
+    _apply_missing_member_policy(member_results, members, "FAIL_CLOSED")
 
 
 # ============================================================

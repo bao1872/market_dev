@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Configuration Definition",
+  "type": "object",
+  "required": [
+    "key",
+    "value_type",
+    "allowed_scopes",
+    "sensitivity",
+    "restart_policy",
+    "ui"
+  ],
+  "properties": {
+    "key": {
+      "type": "string"
+    },
+    "value_type": {
+      "enum": [
+        "string",
+        "integer",
+        "number",
+        "boolean",
+        "enum",
+        "duration",
+        "time",
+        "json",
+        "secret",
+        "url"
+      ]
+    },
+    "allowed_scopes": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "system",
+          "plan",
+          "strategy",
+          "user",
+          "resource",
+          "runtime"
+        ]
+      }
+    },
+    "default": {},
+    "required": {
+      "type": "boolean"
+    },
+    "validation": {
+      "type": "object"
+    },
+    "sensitivity": {
+      "enum": [
+        "public",
+        "internal",
+        "secret"
+      ]
+    },
+    "restart_policy": {
+      "enum": [
+        "immediate",
+        "worker_reload",
+        "restart",
+        "redeploy",
+        "new_strategy_version"
+      ]
+    },
+    "ui": {
+      "type": "object",
+      "required": [
+        "widget",
+        "label"
+      ],
+      "properties": {
+        "widget": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "help_text": {
+          "type": "string"
+        },
+        "unit": {
+          "type": "string"
+        }
+      }
+    },
+    "test_action": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "audit": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false
+}

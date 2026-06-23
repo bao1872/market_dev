@@ -1492,6 +1492,42 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 .toolbar.flush { border: 0; border-radius: 0; margin: 0; background: #151922; }
 .toolbar.flush b { color: #fff; }
 
+// 选股策略页：批次元数据栏（数据日期、批次ID、状态、全量结果数、命中数）
+.batch-meta-bar {
+  display: flex;
+  align-items: center;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  border: 1px solid v.$color-border-soft;
+  border-radius: 7px;
+  background: #121720;
+}
+
+.batch-meta-items {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.batch-meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+
+  > span {
+    font-size: 9px;
+    color: v.$color-muted;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+  }
+
+  > b {
+    font-size: 12px;
+    font-family: v.$font-mono;
+    color: #d2d6df;
+  }
+}
+
 // ===== V1.6.3 StrategyPlanEditorPage 补充样式 =====
 // switch 按钮 reset：原型使用 span.switch，React 中改用 button.switch 需重置默认按钮样式
 button.switch {

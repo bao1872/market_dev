@@ -1,0 +1,279 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Strategy Manifest V1.1",
+  "type": "object",
+  "required": [
+    "strategy_id",
+    "kind",
+    "version",
+    "entrypoint",
+    "input",
+    "outputs",
+    "parameters",
+    "capabilities"
+  ],
+  "properties": {
+    "strategy_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.-]+$"
+    },
+    "kind": {
+      "enum": [
+        "selector",
+        "monitor"
+      ]
+    },
+    "version": {
+      "type": "string"
+    },
+    "display_name": {
+      "type": "string"
+    },
+    "entrypoint": {
+      "type": "string"
+    },
+    "input": {
+      "type": "object",
+      "required": [
+        "bar_frequency",
+        "min_bars"
+      ],
+      "properties": {
+        "bar_frequency": {
+          "type": "string"
+        },
+        "min_bars": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "adjustment": {
+          "enum": [
+            "none",
+            "forward",
+            "backward"
+          ]
+        },
+        "markets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "parameters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "key",
+          "type",
+          "default",
+          "allowed_scopes"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "default": {},
+          "allowed_scopes": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "strategy",
+                "system",
+                "plan",
+                "user",
+                "resource",
+                "runtime"
+              ]
+            }
+          },
+          "algorithm_affecting": {
+            "type": "boolean"
+          },
+          "ui": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "outputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "key",
+          "type"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "number",
+              "integer",
+              "string",
+              "boolean",
+              "datetime",
+              "json"
+            ]
+          },
+          "unit": {
+            "type": "string"
+          },
+          "nullable": {
+            "type": "boolean"
+          },
+          "filterable": {
+            "type": "boolean"
+          },
+          "sortable": {
+            "type": "boolean"
+          },
+          "description": {
+            "type": "string"
+          },
+          "ui": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "event_types": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "key"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "allowed_roles": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "TRIGGER",
+                "CONFIRM",
+                "VETO",
+                "OBSERVE"
+              ]
+            }
+          },
+          "dedupe": {
+            "type": "string"
+          },
+          "state_ttl_seconds": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "required": [
+        "composable"
+      ],
+      "properties": {
+        "composable": {
+          "type": "boolean"
+        },
+        "supports_plan_conditions": {
+          "type": "boolean"
+        },
+        "supports_table_schema": {
+          "type": "boolean"
+        },
+        "supports_chart_layers": {
+          "type": "boolean"
+        },
+        "supports_backtest": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ui_schema": {
+      "type": "object"
+    },
+    "resource_budget": {
+      "type": "object"
+    },
+    "chart_layers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "renderer",
+          "pane",
+          "fields",
+          "hover_fields"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "renderer": {
+            "enum": [
+              "line",
+              "price_zone",
+              "marker",
+              "band"
+            ]
+          },
+          "pane": {
+            "enum": [
+              "price",
+              "volume",
+              "separate"
+            ]
+          },
+          "color": {
+            "type": "string"
+          },
+          "direction_colored": {
+            "type": "boolean"
+          },
+          "direction_up_color": {
+            "type": "string"
+          },
+          "direction_down_color": {
+            "type": "string"
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "hover_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

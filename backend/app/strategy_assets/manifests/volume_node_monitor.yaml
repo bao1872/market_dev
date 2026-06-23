@@ -1,0 +1,45 @@
+strategy_id: volume_node_monitor
+kind: monitor
+version: 1.1.0
+display_name: Volume Node Cluster 分钟监控
+entrypoint: strategies.monitors.volume_node:VolumeNodeMonitor
+input:
+  bar_frequency: 1m
+  min_bars: 360
+  adjustment: forward
+  markets: [SSE, SZSE, BSE]
+capabilities:
+  composable: true
+  supports_plan_conditions: true
+  supports_table_schema: true
+  supports_chart_layers: true
+  supports_backtest: true
+parameters:
+  - key: algorithm.lookback
+    type: integer
+    default: 360
+    allowed_scopes: [strategy]
+    algorithm_affecting: true
+outputs:
+  - {key: current_price, type: number, unit: currency, sortable: true}
+  - {key: upper_node, type: json}
+  - {key: lower_node, type: json}
+  - {key: position_0_1, type: number, unit: ratio_0_1, sortable: true}
+  - {key: poc_price, type: json}
+  - {key: last_touched_node, type: json}
+chart_layers:
+  - id: volume_node
+    name: Volume Node
+    renderer: price_zone
+    pane: price
+    color: "rgba(33,150,243,0.50)"
+    fields: [upper_node, lower_node, poc_price]
+    hover_fields: [current_price, upper_node, lower_node, position_0_1, poc_price]
+    description: "Volume Node Cluster 区间"
+event_types:
+  - key: node_cluster_touch
+    allowed_roles: [TRIGGER, CONFIRM, OBSERVE]
+    dedupe: touch_episode
+    state_ttl_seconds: 120
+resource_budget:
+  target_ms_per_instrument: 500

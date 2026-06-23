@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time as dt_time
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
@@ -39,7 +40,7 @@ async def get_market_status(db: AsyncSession = Depends(get_db)):
     交易时段判断：weekday + 9:30-11:30 / 13:00-15:00
     """
     today = date.today()
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
 
     # 交易日判断
     is_trading_day = await is_trading_day_async(db, today)

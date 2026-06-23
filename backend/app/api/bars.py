@@ -432,7 +432,7 @@ async def bars_health(session: AsyncSession = Depends(get_db)) -> dict:
         "db": {"connected": False, "latest_daily_date": None},
         "redis": {"connected": False},
         "freshness": {},
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
     }
 
     # 1. 检查 DB 连通性
@@ -463,7 +463,7 @@ async def bars_health(session: AsyncSession = Depends(get_db)) -> dict:
             health_status["status"] = "degraded"
 
     # 3. 检查各周期数据新鲜度（查询最新日期/时间）
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
     freshness_checks = [
         ("daily", BarDaily.trade_date, True),
         ("weekly", BarWeekly.trade_date, True),

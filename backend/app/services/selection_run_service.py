@@ -23,8 +23,9 @@ run_selection_plan 流程：
 - trigger_kind 为运行时参数（不持久化为列，参与幂等键计算）
 
 missing_member_policy：
-- FAIL_CLOSED: 任一成员无结果（NO_RESULT/DATA_MISSING）时运行失败
-- IGNORE_MEMBER: 无结果的成员被忽略（排除出组合运算）
+- FAIL_CLOSED: 任一启用成员 source_status 为 MISSING/INCOMPLETE/FAILED 时运行失败
+  （AVAILABLE + matched_count=0 是正常的零匹配，不算失败）
+- IGNORE_MEMBER: source_status 非 AVAILABLE 的成员被忽略
 
 禁异常吞没：所有异常补充上下文后 re-raise。
 """
@@ -63,6 +64,7 @@ from app.services.selection_composer import (
 )
 from app.services.selection_executor import (
     REASON_NO_RESULT,
+    MemberExecutionResult,
     MemberMatch,
     execute_member,
 )
@@ -136,8 +138,8 @@ async def _execute_all_members(
     db: AsyncSession,
     members: list[SelectionPlanMember],
     trade_date: date,
-) -> dict[uuid.UUID, dict[uuid.UUID, MemberMatch]]:
-    """执行所有启用的成员，返回 member_id → (instrument_id → MemberMatch) 映射。
+) -> dict[uuid.UUID, MemberExecutionResult]:
+    """执行所有启用的成员，返回 member_id → MemberExecutionResult 映射。
 
     Args:
         db: 异步数据库会话
@@ -145,62 +147,71 @@ async def _execute_all_members(
         trade_date: 交易日
 
     Returns:
-        member_id → (instrument_id → MemberMatch) 映射
+        member_id → MemberExecutionResult 映射
 
     Raises:
         RuntimeError: 任一成员执行失败时补充上下文后 re-raise
     """
-    member_matches: dict[uuid.UUID, dict[uuid.UUID, MemberMatch]] = {}
+    member_results: dict[uuid.UUID, MemberExecutionResult] = {}
     for member in members:
         if not member.enabled:
             logger.info("跳过未启用成员: member_id=%s", member.id)
             continue
         try:
-            matches = await execute_member(db, member, trade_date)
+            result = await execute_member(db, member, trade_date)
         except Exception as exc:
             raise RuntimeError(
                 f"执行成员失败 member_id={member.id}, "
                 f"position={member.position}, trade_date={trade_date}: {exc}"
             ) from exc
-        member_matches[member.id] = matches
+        member_results[member.id] = result
         logger.info(
-            "成员执行完成: member_id=%s, matches=%d",
-            member.id, len(matches),
+            "成员执行完成: member_id=%s, source_status=%s, source_count=%d, matched_count=%d",
+            member.id, result.source_status, result.source_count, result.matched_count,
         )
-    return member_matches
+    return member_results
 
 
 def _apply_missing_member_policy(
-    member_matches: dict[uuid.UUID, dict[uuid.UUID, MemberMatch]],
+    member_results: dict[uuid.UUID, MemberExecutionResult],
     members: list[SelectionPlanMember],
     policy: str,
 ) -> None:
     """应用成员缺失策略。
 
-    FAIL_CLOSED: 任一启用成员无结果（空 matches）时，标记运行应失败
-    IGNORE_MEMBER: 无结果的成员被忽略（已通过空字典自然排除出组合运算）
+    FAIL_CLOSED: 任一启用成员 source_status 为 MISSING/INCOMPLETE/FAILED 时，标记运行应失败
+        （AVAILABLE + matched_count=0 是正常的零匹配，不算失败）
+    IGNORE_MEMBER: source_status 非 AVAILABLE 的成员被忽略
 
     Args:
-        member_matches: 成员执行结果
+        member_results: 成员执行结果（MemberExecutionResult）
         members: 方案成员列表
         policy: 缺失策略 FAIL_CLOSED/IGNORE_MEMBER
 
     Raises:
-        ValueError: FAIL_CLOSED 且有成员无结果时
+        ValueError: FAIL_CLOSED 且有成员 source_status 非 AVAILABLE 时
     """
     if policy == "IGNORE_MEMBER":
-        # 忽略无结果成员，无需处理
+        # 忽略非 AVAILABLE 成员，无需处理
         return
 
-    # FAIL_CLOSED: 检查是否有启用成员无结果
+    # FAIL_CLOSED: 检查是否有启用成员 source_status 非 AVAILABLE
+    _FAILURE_STATUSES = frozenset({"MISSING", "INCOMPLETE", "FAILED"})
     for member in members:
         if not member.enabled:
             continue
-        matches = member_matches.get(member.id, {})
-        if not matches:
+        result = member_results.get(member.id)
+        if result is None:
             raise ValueError(
-                f"成员无结果且策略为 FAIL_CLOSED: member_id={member.id}, "
-                f"position={member.position}（策略版本可能未解析或当日无选股结果）"
+                f"成员无执行结果且策略为 FAIL_CLOSED: member_id={member.id}, "
+                f"position={member.position}（成员未被执行）"
+            )
+        if result.source_status in _FAILURE_STATUSES:
+            raise ValueError(
+                f"成员数据源状态为 {result.source_status} 且策略为 FAIL_CLOSED: "
+                f"member_id={member.id}, position={member.position}, "
+                f"source_status={result.source_status}, source_count={result.source_count}"
+                f"（策略版本可能未解析或当日无选股结果）"
             )
 
 
@@ -308,12 +319,17 @@ async def run_selection_plan(
 
     try:
         # 6. 执行每个成员（C2）
-        member_matches = await _execute_all_members(db, members, trade_date)
+        member_results = await _execute_all_members(db, members, trade_date)
 
         # 7. 应用 missing_member_policy
         _apply_missing_member_policy(
-            member_matches, members, revision_loaded.missing_member_policy
+            member_results, members, revision_loaded.missing_member_policy
         )
+
+        # 从 MemberExecutionResult 提取 matches 供下游 compose/rank/write 使用
+        member_matches = {
+            mid: result.matches for mid, result in member_results.items()
+        }
 
         # 8. 组合（C3 ALL/ANY）
         composed_ids = compose(member_matches, revision_loaded.operator)
@@ -530,12 +546,17 @@ async def preview_selection_plan(
     members = list(revision_loaded.members)
 
     # 3. 执行每个成员（C2）
-    member_matches = await _execute_all_members(db, members, trade_date)
+    member_results = await _execute_all_members(db, members, trade_date)
 
     # 4. 应用 missing_member_policy
     _apply_missing_member_policy(
-        member_matches, members, revision_loaded.missing_member_policy
+        member_results, members, revision_loaded.missing_member_policy
     )
+
+    # 从 MemberExecutionResult 提取 matches 供下游 compose/rank 使用
+    member_matches = {
+        mid: result.matches for mid, result in member_results.items()
+    }
 
     # 5. 组合（C3 ALL/ANY）
     composed_ids = compose(member_matches, revision_loaded.operator)
@@ -609,15 +630,38 @@ if __name__ == "__main__":
     print(f"idempotency_key（scheduled）: {key3} ✓")
 
     # 测试 _apply_missing_member_policy
-    mm1 = {uuid.uuid4(): MemberMatch(uuid.uuid4(), True, {})}
-    member_matches_ok = {mid1: mm1, mid2: mm1}
-    member_matches_empty = {mid1: mm1, mid2: {}}
+    # 构造 MemberExecutionResult
+    mer_available = MemberExecutionResult(
+        source_status="AVAILABLE",
+        source_run_id=uuid.uuid4(),
+        source_count=5200,
+        matched_count=100,
+        matches={uuid.uuid4(): MemberMatch(uuid.uuid4(), True, {})},
+    )
+    mer_missing = MemberExecutionResult(source_status="MISSING")
+    mer_incomplete = MemberExecutionResult(
+        source_status="INCOMPLETE",
+        source_run_id=uuid.uuid4(),
+        source_count=0,
+        matched_count=0,
+    )
+    mer_zero_match = MemberExecutionResult(
+        source_status="AVAILABLE",
+        source_run_id=uuid.uuid4(),
+        source_count=5200,
+        matched_count=0,
+        matches={},
+    )
 
-    # IGNORE_MEMBER 不应抛异常
-    _apply_missing_member_policy(member_matches_empty, [], "IGNORE_MEMBER")
-    print("IGNORE_MEMBER 空成员不抛异常 ✓")
+    member_results_ok = {mid1: mer_available, mid2: mer_available}
+    member_results_missing = {mid1: mer_available, mid2: mer_missing}
+    member_results_zero_match = {mid1: mer_available, mid2: mer_zero_match}
 
-    # FAIL_CLOSED 空成员应抛异常
+    # IGNORE_MEMBER 不应抛异常（即使有 MISSING）
+    _apply_missing_member_policy(member_results_missing, [], "IGNORE_MEMBER")
+    print("IGNORE_MEMBER MISSING 成员不抛异常 ✓")
+
+    # FAIL_CLOSED + MISSING 成员应抛异常
     class MockMemberEnabled:
         def __init__(self, mid, enabled=True):
             self.id = mid
@@ -626,12 +670,31 @@ if __name__ == "__main__":
 
     try:
         _apply_missing_member_policy(
-            member_matches_empty,
+            member_results_missing,
             [MockMemberEnabled(mid1), MockMemberEnabled(mid2)],
             "FAIL_CLOSED",
         )
     except ValueError as e:
-        print(f"FAIL_CLOSED 空成员抛异常: {e} ✓")
+        print(f"FAIL_CLOSED MISSING 成员抛异常: {e} ✓")
+
+    # FAIL_CLOSED + AVAILABLE 零匹配不应抛异常（P0-3 核心修复验证）
+    _apply_missing_member_policy(
+        member_results_zero_match,
+        [MockMemberEnabled(mid1), MockMemberEnabled(mid2)],
+        "FAIL_CLOSED",
+    )
+    print("FAIL_CLOSED AVAILABLE 零匹配不抛异常（P0-3 修复） ✓")
+
+    # FAIL_CLOSED + INCOMPLETE 成员应抛异常
+    member_results_incomplete = {mid1: mer_available, mid2: mer_incomplete}
+    try:
+        _apply_missing_member_policy(
+            member_results_incomplete,
+            [MockMemberEnabled(mid1), MockMemberEnabled(mid2)],
+            "FAIL_CLOSED",
+        )
+    except ValueError as e:
+        print(f"FAIL_CLOSED INCOMPLETE 成员抛异常: {e} ✓")
 
     # 测试 _collect_all_instruments
     iid1, iid2, iid3 = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()

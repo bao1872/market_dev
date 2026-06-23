@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Notification Message V1.1",
+  "type": "object",
+  "required": [
+    "message_type",
+    "template_key",
+    "template_version",
+    "title",
+    "summary",
+    "resource_refs",
+    "data_time"
+  ],
+  "properties": {
+    "message_type": {
+      "enum": [
+        "SELECTION_PLAN_SUMMARY",
+        "MONITORING_PLAN_CONFIRMED",
+        "MONITOR_MEMBER_EVENT",
+        "SYSTEM_ALERT",
+        "CHANNEL_ALERT"
+      ]
+    },
+    "template_key": {
+      "type": "string"
+    },
+    "template_version": {
+      "type": "string"
+    },
+    "locale": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "facts": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "timeline": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "resource_refs": {
+      "type": "object"
+    },
+    "data_time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "disclaimer": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}

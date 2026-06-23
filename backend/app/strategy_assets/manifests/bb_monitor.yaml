@@ -1,0 +1,72 @@
+strategy_id: bb_monitor
+kind: monitor
+version: 1.0.0
+display_name: Bollinger Bands Monitor
+entrypoint: strategies.monitors.bollinger_monitor:BollingerMonitor
+input:
+  bar_frequency: 1m
+  min_bars: 25
+  adjustment: forward
+  markets: [SSE, SZSE, BSE]
+capabilities:
+  composable: true
+  supports_plan_conditions: true
+  supports_table_schema: true
+  supports_chart_layers: true
+  supports_backtest: true
+parameters:
+  - key: algorithm.bb_win
+    type: integer
+    default: 20
+    allowed_scopes: [strategy]
+    algorithm_affecting: true
+  - key: algorithm.bb_k
+    type: float
+    default: 2.0
+    allowed_scopes: [strategy]
+    algorithm_affecting: true
+outputs:
+  - key: bb_upper
+    type: number
+    description: 布林带上轨
+  - key: bb_mid
+    type: number
+    description: 布林带中轨
+  - key: bb_lower
+    type: number
+    description: 布林带下轨
+  - key: current_price
+    type: number
+    description: 当前价格
+  - key: prev_close
+    type: number
+    description: 前一根1分钟收盘价
+  - key: bb_width
+    type: number
+    description: 布林带宽度
+  - key: bb_pos
+    type: number
+    description: 布林带位置（0-1）
+event_types:
+  - key: bb_upper_touch
+    allowed_roles: [TRIGGER, CONFIRM, OBSERVE]
+    dedupe: boundary_cooldown
+    state_ttl_seconds: 600
+  - key: bb_mid_touch
+    allowed_roles: [TRIGGER, CONFIRM, OBSERVE]
+    dedupe: boundary_cooldown
+    state_ttl_seconds: 600
+  - key: bb_lower_touch
+    allowed_roles: [TRIGGER, CONFIRM, OBSERVE]
+    dedupe: boundary_cooldown
+    state_ttl_seconds: 600
+chart_layers:
+  - id: bb
+    name: Bollinger Bands
+    renderer: band
+    pane: price
+    color: "rgba(156,39,176,0.15)"
+    fields: [bb_upper, bb_lower, bb_mid]
+    hover_fields: [bb_upper, bb_lower, bb_mid]
+resource_budget:
+  target_ms_per_instrument: 200

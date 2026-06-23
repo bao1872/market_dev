@@ -28,6 +28,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, time as dt_time
+from zoneinfo import ZoneInfo
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
@@ -715,7 +716,7 @@ class PytdxAdapter(Exchange):
         参考 chanlunpro 的 FileCacheDB 读取时排除最后一根 bar 的设计理念：
         交易时段数据变化快，需要短 TTL；收盘后数据不变，使用长 TTL。
         """
-        now = datetime.now()
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
         # 判断是否在交易时段（9:30-15:00）
         is_trading = (
             now.weekday() < 5
@@ -771,7 +772,7 @@ class PytdxAdapter(Exchange):
             return await self._klines_synthesized(symbol, frequency, start_date, end_date, count)
 
         cache_key = self._cache_key(symbol, frequency)
-        now = datetime.now()
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
 
         # --- 缓存命中检查 ---
         entry = self._klines_cache.get(cache_key)

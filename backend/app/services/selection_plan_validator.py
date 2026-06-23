@@ -25,18 +25,16 @@ Schema 来源：doc/trading_platform_development_docs_v1.1/schemas/selection_pla
 
 from __future__ import annotations
 
+import importlib.resources
 import json
 from pathlib import Path
 from typing import Any
 
 from jsonschema import Draft202012Validator
 
-# Schema 文件路径（相对工程根 backend/）
+# Schema 文件路径（包内资源，Docker 兼容）
 _SCHEMA_PATH = (
-    Path(__file__).resolve().parent.parent.parent.parent
-    / "doc"
-    / "trading_platform_development_docs_v1.1"
-    / "schemas"
+    Path(str(importlib.resources.files("app.strategy_assets.schemas")))
     / "selection_plan.schema.json"
 )
 
@@ -174,10 +172,7 @@ def validate_plan(plan_dict: dict[str, Any]) -> None:
 if __name__ == "__main__":
     # 自测入口：使用 selection_plan_multi_strategy.json 示例验证校验器
     example_path = (
-        Path(__file__).resolve().parent.parent.parent.parent
-        / "doc"
-        / "trading_platform_development_docs_v1.1"
-        / "examples"
+        Path(str(importlib.resources.files("app.strategy_assets.manifests")))
         / "selection_plan_multi_strategy.json"
     )
     with example_path.open("r", encoding="utf-8") as f:

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -36,6 +37,75 @@ from app.models.strategy_run import (
 from app.strategy.runtime import StrategyResult as RuntimeStrategyResult
 
 logger = logging.getLogger("strategy_result_repository")
+
+
+@dataclass
+class MetricFilter:
+    """指标筛选条件，支持 6 种操作符。"""
+    metric_key: str
+    operator: str  # gt, gte, lt, lte, eq, between
+    value: float | None = None       # for gt/gte/lt/lte/eq
+    value1: float | None = None      # for between (lower bound)
+    value2: float | None = None      # for between (upper bound)
+
+
+@dataclass
+class SortSpec:
+    """排序规格。"""
+    field: str
+    desc: bool = False
+
+
+@dataclass
+class QueryResultPage:
+    """查询结果分页。"""
+    items: list  # list[StrategyResult]
+    total: int
+
+
+def dict_filters_to_metric_filters(
+    metric_filters: list[dict[str, Any]] | None,
+) -> list[MetricFilter] | None:
+    """将旧版 dict 格式的 metric_filters 转换为 MetricFilter 列表。
+
+    支持两种 dict 格式：
+    - 旧版 min_value/max_value 格式 → 转为 between 操作
+    - 新版 operator/value 格式 → 直接映射
+
+    Args:
+        metric_filters: 旧版 dict 格式筛选条件列表
+
+    Returns:
+        MetricFilter 列表，或 None（输入为空时）
+    """
+    if not metric_filters:
+        return None
+    result: list[MetricFilter] = []
+    for f in metric_filters:
+        metric_key = f.get("metric_key")
+        if not metric_key:
+            continue
+        # 旧版 min_value/max_value 格式
+        min_val = f.get("min_value")
+        max_val = f.get("max_value")
+        if min_val is not None or max_val is not None:
+            result.append(MetricFilter(
+                metric_key=metric_key,
+                operator="between",
+                value1=min_val,
+                value2=max_val,
+            ))
+            continue
+        # 新版 operator/value 格式
+        operator = f.get("operator", "between")
+        result.append(MetricFilter(
+            metric_key=metric_key,
+            operator=operator,
+            value=f.get("value"),
+            value1=f.get("value1"),
+            value2=f.get("value2"),
+        ))
+    return result if result else None
 
 
 async def create_run(
@@ -315,15 +385,16 @@ def _classify_metric_value(
 
 async def query_results(
     session: AsyncSession,
-    strategy_version_id: uuid.UUID,
-    trade_date: date,
-    metric_filters: list[dict[str, Any]] | None = None,
-    sort_by: str | None = None,
-    sort_desc: bool = False,
+    *,
+    run_id: uuid.UUID | None = None,
+    strategy_version_id: uuid.UUID | None = None,
+    trade_date: date | None = None,
+    filters: list[MetricFilter] | None = None,
+    sort: SortSpec | None = None,
     matched_only: bool = False,
     limit: int = 100,
     offset: int = 0,
-) -> tuple[list[StrategyResult], int]:
+) -> QueryResultPage:
     """按指标筛选排序查询结果。
 
     利用 ix_metric_numeric 索引高效筛选排序：
@@ -332,29 +403,36 @@ async def query_results(
 
     Args:
         session: 异步会话
-        strategy_version_id: 策略版本 ID
-        trade_date: 交易日
-        metric_filters: 指标筛选条件列表，每项含 metric_key/min_value/max_value
-        sort_by: 排序指标名（None 表示不排序）
-        sort_desc: 是否降序
+        run_id: 运行 ID（优先级最高，提供后按 run_id 过滤）
+        strategy_version_id: 策略版本 ID（run_id 未提供时必需）
+        trade_date: 交易日（run_id 未提供时必需）
+        filters: 指标筛选条件列表（MetricFilter 对象）
+        sort: 排序规格（SortSpec 对象，None 表示不排序）
         matched_only: 只返回 matched=True 的结果
         limit: 返回上限
         offset: 偏移量（分页）
 
     Returns:
-        (结果列表, 总数)
+        QueryResultPage（items=结果列表, total=总数）
 
     Raises:
         Exception: 查询失败时 re-raise
     """
     try:
         # 基础查询
-        base = select(StrategyResult).where(
-            and_(
-                StrategyResult.strategy_version_id == strategy_version_id,
-                StrategyResult.trade_date == trade_date,
+        base = select(StrategyResult)
+
+        # run_id 过滤（优先级最高）
+        if run_id is not None:
+            base = base.where(StrategyResult.run_id == run_id)
+
+        # strategy_version_id + trade_date 过滤
+        if strategy_version_id is not None:
+            base = base.where(
+                StrategyResult.strategy_version_id == strategy_version_id
             )
-        )
+        if trade_date is not None:
+            base = base.where(StrategyResult.trade_date == trade_date)
 
         # matched 筛选（payload->>'matched' = 'true'）
         if matched_only:
@@ -362,69 +440,92 @@ async def query_results(
                 text("payload->>'matched' = 'true'")
             )
 
-        # 指标筛选（通过 EXISTS 子查询）
-        if metric_filters:
-            for f in metric_filters:
-                metric_key = f.get("metric_key")
-                min_val = f.get("min_value")
-                max_val = f.get("max_value")
-                if metric_key is None:
-                    continue
+        # 指标筛选（通过 EXISTS 子查询，支持 6 种操作符）
+        if filters:
+            for f in filters:
+                metric_key = f.metric_key
                 sub = select(StrategyResultMetric.result_id).where(
                     StrategyResultMetric.metric_key == metric_key
                 )
-                if min_val is not None:
-                    sub = sub.where(StrategyResultMetric.numeric_value >= min_val)
-                if max_val is not None:
-                    sub = sub.where(StrategyResultMetric.numeric_value <= max_val)
+                op = f.operator.lower()
+                if op == "gt":
+                    sub = sub.where(StrategyResultMetric.numeric_value > f.value)
+                elif op == "gte":
+                    sub = sub.where(StrategyResultMetric.numeric_value >= f.value)
+                elif op == "lt":
+                    sub = sub.where(StrategyResultMetric.numeric_value < f.value)
+                elif op == "lte":
+                    sub = sub.where(StrategyResultMetric.numeric_value <= f.value)
+                elif op == "eq":
+                    sub = sub.where(StrategyResultMetric.numeric_value == f.value)
+                elif op == "between":
+                    if f.value1 is not None:
+                        sub = sub.where(StrategyResultMetric.numeric_value >= f.value1)
+                    if f.value2 is not None:
+                        sub = sub.where(StrategyResultMetric.numeric_value <= f.value2)
+                else:
+                    logger.warning("未知筛选操作符: %s, 忽略此条件", op)
+                    continue
                 base = base.where(StrategyResult.id.in_(sub))
 
         # 排序（通过 LEFT JOIN 指标表）
-        if sort_by:
-            # 使用子查询获取排序值
+        if sort is not None:
             sort_sub = (
                 select(
                     StrategyResultMetric.result_id,
                     StrategyResultMetric.numeric_value.label("sort_val"),
                 )
-                .where(StrategyResultMetric.metric_key == sort_by)
+                .where(StrategyResultMetric.metric_key == sort.field)
                 .subquery()
             )
             base = base.outerjoin(
                 sort_sub, StrategyResult.id == sort_sub.c.result_id
             )
-            if sort_desc:
+            if sort.desc:
                 base = base.order_by(sort_sub.c.sort_val.desc().nullslast())
             else:
                 base = base.order_by(sort_sub.c.sort_val.asc().nullsfirst())
 
-        # 总数查询
-        count_stmt = select(StrategyResult).where(
-            and_(
-                StrategyResult.strategy_version_id == strategy_version_id,
-                StrategyResult.trade_date == trade_date,
+        # 总数查询（复用相同过滤条件）
+        count_base = select(StrategyResult)
+        if run_id is not None:
+            count_base = count_base.where(StrategyResult.run_id == run_id)
+        if strategy_version_id is not None:
+            count_base = count_base.where(
+                StrategyResult.strategy_version_id == strategy_version_id
             )
-        )
+        if trade_date is not None:
+            count_base = count_base.where(StrategyResult.trade_date == trade_date)
         if matched_only:
-            count_stmt = count_stmt.where(text("payload->>'matched' = 'true'"))
-        if metric_filters:
-            for f in metric_filters:
-                metric_key = f.get("metric_key")
-                min_val = f.get("min_value")
-                max_val = f.get("max_value")
-                if metric_key is None:
-                    continue
+            count_base = count_base.where(text("payload->>'matched' = 'true'"))
+        if filters:
+            for f in filters:
+                metric_key = f.metric_key
                 sub = select(StrategyResultMetric.result_id).where(
                     StrategyResultMetric.metric_key == metric_key
                 )
-                if min_val is not None:
-                    sub = sub.where(StrategyResultMetric.numeric_value >= min_val)
-                if max_val is not None:
-                    sub = sub.where(StrategyResultMetric.numeric_value <= max_val)
-                count_stmt = count_stmt.where(StrategyResult.id.in_(sub))
+                op = f.operator.lower()
+                if op == "gt":
+                    sub = sub.where(StrategyResultMetric.numeric_value > f.value)
+                elif op == "gte":
+                    sub = sub.where(StrategyResultMetric.numeric_value >= f.value)
+                elif op == "lt":
+                    sub = sub.where(StrategyResultMetric.numeric_value < f.value)
+                elif op == "lte":
+                    sub = sub.where(StrategyResultMetric.numeric_value <= f.value)
+                elif op == "eq":
+                    sub = sub.where(StrategyResultMetric.numeric_value == f.value)
+                elif op == "between":
+                    if f.value1 is not None:
+                        sub = sub.where(StrategyResultMetric.numeric_value >= f.value1)
+                    if f.value2 is not None:
+                        sub = sub.where(StrategyResultMetric.numeric_value <= f.value2)
+                else:
+                    continue
+                count_base = count_base.where(StrategyResult.id.in_(sub))
 
         count_result = await session.execute(
-            select(text("count(*)")).select_from(count_stmt.subquery())
+            select(text("count(*)")).select_from(count_base.subquery())
         )
         total = int(count_result.scalar() or 0)
 
@@ -433,10 +534,11 @@ async def query_results(
         result = await session.execute(base)
         items = list(result.scalars().all())
 
-        return items, total
+        return QueryResultPage(items=items, total=total)
     except Exception as exc:
         raise RuntimeError(
-            f"查询策略结果失败 strategy_version_id={strategy_version_id}, "
+            f"查询策略结果失败 run_id={run_id}, "
+            f"strategy_version_id={strategy_version_id}, "
             f"trade_date={trade_date}: {exc}"
         ) from exc
 
@@ -552,9 +654,65 @@ if __name__ == "__main__":
         metrics={"dsa_dir_bars": 60, "offset_mean": 0.05},
     )
     payload = _build_payload(r)
-    assert payload["matched"] is True
+    assert "matched" not in payload  # matched 不持久化到 payload
     assert payload["dsa_dir_bars"] == 60
     assert payload["offset_mean"] == 0.05
     print(f"_build_payload: {payload} ✓")
+
+    # 验证 MetricFilter / SortSpec / QueryResultPage
+    mf = MetricFilter(metric_key="dsa_dir_bars", operator="gte", value=50)
+    assert mf.metric_key == "dsa_dir_bars"
+    assert mf.operator == "gte"
+    assert mf.value == 50
+    mf_between = MetricFilter(metric_key="vwap_ret_avg", operator="between", value1=0.0, value2=0.5)
+    assert mf_between.value1 == 0.0
+    assert mf_between.value2 == 0.5
+    ss = SortSpec(field="dsa_dir_bars", desc=True)
+    assert ss.field == "dsa_dir_bars"
+    assert ss.desc is True
+    qrp = QueryResultPage(items=[], total=0)
+    assert qrp.items == []
+    assert qrp.total == 0
+    print("MetricFilter / SortSpec / QueryResultPage ✓")
+
+    # 验证 dict_filters_to_metric_filters
+    # 旧版 min_value/max_value 格式
+    old_filters = [{"metric_key": "dsa_dir_bars", "min_value": 50, "max_value": 100}]
+    converted = dict_filters_to_metric_filters(old_filters)
+    assert converted is not None
+    assert len(converted) == 1
+    assert converted[0].metric_key == "dsa_dir_bars"
+    assert converted[0].operator == "between"
+    assert converted[0].value1 == 50
+    assert converted[0].value2 == 100
+    # 新版 operator/value 格式
+    new_filters = [{"metric_key": "dsa_dir_bars", "operator": "gte", "value": 50}]
+    converted2 = dict_filters_to_metric_filters(new_filters)
+    assert converted2 is not None
+    assert len(converted2) == 1
+    assert converted2[0].metric_key == "dsa_dir_bars"
+    assert converted2[0].operator == "gte"
+    assert converted2[0].value == 50
+    # 空输入
+    assert dict_filters_to_metric_filters(None) is None
+    assert dict_filters_to_metric_filters([]) is None
+    print("dict_filters_to_metric_filters ✓")
+
+    # 验证 query_results 签名（keyword-only 参数）
+    import inspect
+    sig = inspect.signature(query_results)
+    params = list(sig.parameters.keys())
+    assert params[0] == "session"
+    # session 之后的所有参数应为 keyword-only
+    for p in params[1:]:
+        assert sig.parameters[p].kind == inspect.Parameter.KEYWORD_ONLY, f"{p} 不是 keyword-only"
+    assert "run_id" in sig.parameters
+    assert "filters" in sig.parameters
+    assert "sort" in sig.parameters
+    # from __future__ import annotations 使注解变为字符串，需用 evaluate
+    from typing import get_type_hints
+    hints = get_type_hints(query_results)
+    assert hints["return"] == QueryResultPage
+    print("query_results 签名正确（keyword-only + QueryResultPage 返回） ✓")
 
     print("OK")

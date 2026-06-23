@@ -1,0 +1,50 @@
+{
+  "name": "强势共振",
+  "operator": "ALL",
+  "missing_member_policy": "FAIL_CLOSED",
+  "universe": {
+    "markets": [
+      "SSE",
+      "SZSE",
+      "BSE"
+    ],
+    "exclude_st": true
+  },
+  "members": [
+    {
+      "strategy_key": "dsa_selector",
+      "version_policy": "PINNED",
+      "strategy_version": "1.1.0",
+      "position": 0,
+      "conditions": [
+        {
+          "metric_key": "dsa_dir_bars",
+          "operator": "gte",
+          "value": 5
+        },
+        {
+          "metric_key": "offset_percentile",
+          "operator": "lte",
+          "value": 0.8
+        }
+      ]
+    },
+    {
+      "strategy_key": "breakout_selector",
+      "version_policy": "STABLE_TRACK",
+      "position": 1,
+      "conditions": [
+        {
+          "metric_key": "breakout_strength",
+          "operator": "gte",
+          "value": 0.7
+        }
+      ]
+    }
+  ],
+  "notification": {
+    "enabled": true,
+    "mode": "all",
+    "max_items": 20
+  }
+}

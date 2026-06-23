@@ -71,7 +71,11 @@ async def lifespan(app: FastAPI):
     幂等设计：seed_strategies 内部检查已存在的策略/版本并跳过，
     重复启动不会重复创建。
     """
+    from app.api.health import check_strategy_assets
     from app.services.strategy_seed import seed_strategies
+
+    # [策略资产] - 启动时检查策略资产文件完整性
+    check_strategy_assets()
 
     try:
         async with AsyncSessionLocal() as db:

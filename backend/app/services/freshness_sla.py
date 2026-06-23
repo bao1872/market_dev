@@ -155,7 +155,7 @@ async def check_daily_freshness(
         )
 
     last_update = datetime.combine(latest_date, _DAILY_CLOSE_TIME)
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
     age = (now - last_update).total_seconds()
 
     is_fresh = age <= DAILY_SLA_SECONDS
@@ -192,7 +192,7 @@ async def ensure_daily_freshness(
         return result
 
     logger.info("日线数据过期，触发刷新 instrument_id=%s", instrument_id)
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
     start = (now - timedelta(days=BarsSchedulerService.DAILY_COUNTS["d"])).date()
     end = now.date()
     try:
@@ -249,7 +249,7 @@ async def check_minute_freshness(
     if latest_time.tzinfo is not None:
         latest_time = latest_time.astimezone(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
 
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
     age = (now - latest_time).total_seconds()
 
     is_fresh = age <= _MINUTE_CHECK_SLA_SECONDS
@@ -299,7 +299,7 @@ async def check_15min_freshness(
     if latest_time.tzinfo is not None:
         latest_time = latest_time.astimezone(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
 
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
     age = (now - latest_time).total_seconds()
 
     is_fresh = age <= BAR_15MIN_SLA_SECONDS
@@ -370,7 +370,7 @@ async def check_60min_freshness(
     if latest_time.tzinfo is not None:
         latest_time = latest_time.astimezone(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
 
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
     age = (now - latest_time).total_seconds()
 
     is_fresh = age <= BAR_60MIN_SLA_SECONDS
@@ -478,7 +478,7 @@ if __name__ == "__main__":
     print(f"stale result: is_fresh={stale.is_fresh}, age=None")
 
     # 3. 验证新鲜度判断逻辑（模拟）
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
     last_update_fresh = now - timedelta(seconds=600)
     age = (now - last_update_fresh).total_seconds()
     assert age <= DAILY_SLA_SECONDS, "600s 应为 fresh"

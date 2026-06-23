@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import importlib.resources
 from pathlib import Path
 from typing import Any
 
@@ -30,13 +31,8 @@ from app.services.strategy_service import (
     release_strategy_version,
 )
 
-# 示例文件目录（相对 backend/）
-_EXAMPLES_DIR = (
-    Path(__file__).resolve().parent.parent.parent.parent
-    / "doc"
-    / "trading_platform_development_docs_v1.1"
-    / "examples"
-)
+# 示例文件目录（包内资源，Docker 兼容）
+_EXAMPLES_DIR = Path(str(importlib.resources.files("app.strategy_assets.manifests")))
 
 # 内置示例策略文件名
 SEED_STRATEGIES: list[str] = [

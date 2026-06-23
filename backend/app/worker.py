@@ -5,7 +5,7 @@
     WORKER_TYPE=delivery python -m app.worker         # 运行投递 Worker
     WORKER_TYPE=strategy_batch python -m app.worker   # 运行策略批量计算 Worker
     WORKER_TYPE=bars_scheduler python -m app.worker   # 运行行情调度 Worker（每日 16:00）
-    WORKER_TYPE=strategy_scheduler python -m app.worker   # 运行选股策略调度 Worker（每日 16:30）
+    WORKER_TYPE=strategy_scheduler python -m app.worker   # 运行选股策略调度 Worker（每日 18:00）
     WORKER_TYPE=calendar_scheduler python -m app.worker  # 运行日历调度 Worker（每日 02:00）
     WORKER_TYPE=monitor_scheduler python -m app.worker    # 运行监控调度 Worker（交易时段 9:30-15:00）
     WORKER_TYPE=all python -m app.worker              # 同时运行全部（开发模式）
@@ -29,6 +29,7 @@ import logging
 import os
 import signal
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 from app.db import AsyncSessionLocal
 
@@ -217,7 +218,7 @@ async def run_bars_scheduler_worker() -> None:
     # 每日 16:00 触发（含非交易日，由内部交易日历判断是否执行）
     scheduler.add_job(
         scheduled_bars_refresh,
-        CronTrigger(day_of_week="mon-sun", hour=16, minute=0),
+        CronTrigger(day_of_week="mon-sun", hour=16, minute=0, timezone=ZoneInfo("Asia/Shanghai")),
         id="bars_refresh_daily",
         replace_existing=True,
     )
@@ -232,16 +233,17 @@ async def run_bars_scheduler_worker() -> None:
 
 
 async def run_strategy_scheduler_worker() -> None:
-    """选股策略调度 Worker：每日 16:30 触发所有 kind=selector 策略的批量计算。
+    """选股策略调度 Worker：每日 18:00 触发所有 kind=selector 策略的批量计算。
 
     使用 APScheduler AsyncIOScheduler + CronTrigger：
-    - 每个交易日（周一至周五）16:30 触发
+    - 每个交易日（周一至周五）18:00 触发
     - 查询 strategy_definitions WHERE kind='selector' 的所有策略
     - 为每个策略调用 StrategyBatchService.create_batch_run(run_type="scheduled")
     - 创建的 queued run 由 strategy_batch worker 轮询执行
 
     设计说明：
-    - 16:30 触发（bars_scheduler 16:00 刷新行情后执行）
+    - 18:00 触发（bars_scheduler 16:00 刷新行情，约 1.8 小时完成后执行，避免竞态）
+    - 数据就绪检查：check_data_readiness() 覆盖率 < 90% 时阻断 DSA 执行
     - 单个策略创建失败不阻塞其他策略，记录日志继续
     - 幂等：同一 strategy_key + trade_date + run_type=scheduled 只创建一次
     """
@@ -256,7 +258,7 @@ async def run_strategy_scheduler_worker() -> None:
     service = StrategyBatchService()
 
     async def scheduled_strategy_run() -> None:
-        """定时任务：每日 16:30 为所有 selector 策略创建 queued run。"""
+        """定时任务：每日 18:00 为所有 selector 策略创建 queued run。"""
         from datetime import date as date_cls
 
         from app.services.calendar_service import is_trading_day_async
@@ -323,15 +325,15 @@ async def run_strategy_scheduler_worker() -> None:
         except Exception as exc:
             logger.exception("选股策略调度任务异常: %s", exc)
 
-    # 每日 16:30 触发（含非交易日，由内部交易日历判断是否执行）
+    # 每日 18:00 触发（含非交易日，由内部交易日历判断是否执行）
     scheduler.add_job(
         scheduled_strategy_run,
-        CronTrigger(day_of_week="mon-sun", hour=16, minute=30),
+        CronTrigger(day_of_week="mon-sun", hour=18, minute=0, timezone=ZoneInfo("Asia/Shanghai")),
         id="strategy_run_daily",
         replace_existing=True,
     )
     scheduler.start()
-    logger.info("Strategy Scheduler Worker 启动（每日 16:30 触发）")
+    logger.info("Strategy Scheduler Worker 启动（每日 18:00 触发）")
 
     while not _shutdown:
         await asyncio.sleep(60)
@@ -374,7 +376,7 @@ async def run_calendar_scheduler_worker() -> None:
 
     scheduler.add_job(
         calendar_job,
-        CronTrigger(hour=2, minute=0),
+        CronTrigger(hour=2, minute=0, timezone=ZoneInfo("Asia/Shanghai")),
         id="calendar_scheduler",
         name="calendar_scheduler",
         replace_existing=True,
@@ -430,7 +432,7 @@ async def run_monitor_scheduler_worker() -> None:
         try:
             from datetime import datetime
 
-            now = datetime.now()
+            now = datetime.now(ZoneInfo("Asia/Shanghai"))
 
             # 交易日检查（使用异步接口，避免在事件循环中降级到 weekday）
             from app.services.calendar_service import is_trading_day_async

@@ -49,6 +49,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       JWT_SECRET: ${JWT_SECRET:-change-this-in-production-min-32bytes}
       APP_ENV: production
+      TZ: Asia/Shanghai
     depends_on:
       db:
         condition: service_healthy
@@ -70,6 +71,7 @@ services:
       APP_ENV: production
       WORKER_TYPE: all
       WORKER_INTERVAL: "5"
+      TZ: Asia/Shanghai
     depends_on:
       db:
         condition: service_healthy

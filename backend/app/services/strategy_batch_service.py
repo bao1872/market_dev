@@ -36,7 +36,7 @@ from app.models.instrument import Instrument
 from app.models.strategy import StrategyVersion
 from app.models.strategy_run import StrategyRun, StrategyRunItem
 from app.repositories import strategy_result_repository
-from app.repositories.bar_repository import fetch_daily_bars
+from app.repositories.bar_repository import get_bars
 from app.services.calendar_service import is_trading_day_async
 from app.services.strategy_service import (
     StrategyNotFoundError,
@@ -530,7 +530,7 @@ class StrategyBatchService:
         if coverage_rate < DATA_COVERAGE_THRESHOLD:
             warnings.append(
                 f"数据覆盖率不足: {coverage_rate:.1%}（阈值 {DATA_COVERAGE_THRESHOLD:.0%}），"
-                f"bars={bars_count}, active={active_count}"
+                f"bars={bars_count}, active={active_count}，DSA 不执行"
             )
 
         # 5. 新上市标的检查（上市 < 30 天）
@@ -575,11 +575,12 @@ class StrategyBatchService:
                 f"有 {suspended_count} 只停牌标的，将跳过计算"
             )
 
-        # 数据就绪：交易日 + 有活跃标的 + 有 K 线数据 + 导入完整性 >= 50%
+        # 数据就绪：交易日 + 有活跃标的 + 有 K 线数据 + 覆盖率 >= 90% + 导入完整性 >= 50%
         is_ready = (
             is_trading
             and active_count > 0
             and bars_count > 0
+            and coverage_rate >= DATA_COVERAGE_THRESHOLD
             and import_completeness >= 0.5
         )
 
@@ -729,9 +730,14 @@ class StrategyBatchService:
         lookback_days = _STRATEGY_BATCH_DAILY_LOOKBACK_DAYS
         start_date = run.trade_date - timedelta(days=lookback_days)
         try:
-            bars_df = await fetch_daily_bars(
-                db, item.instrument_id, start_date, run.trade_date
+            bars_result = await get_bars(
+                db, item.instrument_id,
+                timeframe="1d",
+                start_date=start_date,
+                end_date=run.trade_date,
+                adjustment="qfq",
             )
+            bars_df = bars_result.bars if bars_result.bars is not None else None
         except Exception as exc:
             raise RuntimeError(
                 f"拉取行情失败 instrument_id={item.instrument_id}: {exc}"
