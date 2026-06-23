@@ -310,8 +310,8 @@ class MonitorBatchService:
         1. 获取最新已完成 1m bar 的 source_bar_time
         2. INSERT 评估占位（ON CONFLICT DO NOTHING），冲突则跳过（exactly-once）
         3. 拉取行情 → 执行 WatchlistMonitor → 保存结果
-        4. 更新 MonitorEvaluation 状态和指标
-        5. 更新 MonitorState + 写入 StrategyEvent
+        4. 更新 MonitorState + 写入 StrategyEvent
+        5. 更新 MonitorEvaluation 为 SUCCEEDED（最后一步，确保 State/Event 写入成功后再标记）
 
         Args:
             db: 异步会话
@@ -471,37 +471,7 @@ class MonitorBatchService:
 
         result.total_events_detected += len(event_drafts)
 
-        # f. 保存结果：更新 MonitorEvaluation 为 SUCCEEDED
-        metrics_output: dict[str, Any] = {
-            "state": curr_state.state,
-            "events_detected": len(event_drafts),
-        }
-        try:
-            await db.execute(
-                pg_insert(MonitorEvaluation)
-                .values(
-                    id=evaluation_id,
-                    strategy_version_id=strategy_version.id,
-                    instrument_id=instrument_id,
-                    source_bar_time=source_bar_time,
-                    status="SUCCEEDED",
-                    metrics=metrics_output,
-                )
-                .on_conflict_do_update(
-                    index_elements=["id"],
-                    set_={
-                        "status": "SUCCEEDED",
-                        "metrics": metrics_output,
-                    },
-                )
-            )
-        except Exception as exc:
-            logger.warning(
-                "更新 MonitorEvaluation 为 SUCCEEDED 失败 evaluation_id=%s: %s",
-                evaluation_id, exc,
-            )
-
-        # g. upsert MonitorState
+        # f. upsert MonitorState
         try:
             await monitor_state_repository.upsert_state(
                 db,
@@ -518,7 +488,7 @@ class MonitorBatchService:
                 instrument_id, strategy_version.id, exc,
             )
 
-        # h. 对每个检测到的事件：冷却检查 → 写入
+        # g. 对每个检测到的事件：冷却检查 → 写入
         written_events: list[StrategyEvent] = []
         for draft in event_drafts:
             # 冷却检查
@@ -557,6 +527,36 @@ class MonitorBatchService:
 
             result.total_events_written += 1
             written_events.append(event_orm)
+
+        # h. 保存结果：更新 MonitorEvaluation 为 SUCCEEDED（放在最后，确保 State/Event 写入成功后再标记）
+        metrics_output: dict[str, Any] = {
+            "state": curr_state.state,
+            "events_detected": len(event_drafts),
+        }
+        try:
+            await db.execute(
+                pg_insert(MonitorEvaluation)
+                .values(
+                    id=evaluation_id,
+                    strategy_version_id=strategy_version.id,
+                    instrument_id=instrument_id,
+                    source_bar_time=source_bar_time,
+                    status="SUCCEEDED",
+                    metrics=metrics_output,
+                )
+                .on_conflict_do_update(
+                    index_elements=["id"],
+                    set_={
+                        "status": "SUCCEEDED",
+                        "metrics": metrics_output,
+                    },
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "更新 MonitorEvaluation 为 SUCCEEDED 失败 evaluation_id=%s: %s",
+                evaluation_id, exc,
+            )
 
         return written_events
 

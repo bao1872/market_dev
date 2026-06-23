@@ -190,6 +190,9 @@ export interface StrategyResult {
   run_id: string
   strategy_version_id: string
   instrument_id: string
+  instrument_symbol?: string
+  instrument_name?: string
+  instrument_market?: string
   trade_date: string
   payload: Record<string, unknown>
   created_at: string
@@ -578,6 +581,7 @@ export interface StrategyResultQueryParams {
   page_size?: number
   limit?: number
   offset?: number
+  universe?: 'all' | 'watchlist'
 }
 
 /** 行情查询参数 */

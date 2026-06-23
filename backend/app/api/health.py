@@ -35,8 +35,7 @@ def check_strategy_assets() -> None:
     base = Path(__file__).resolve().parent.parent / "strategy_assets"
     required_files = [
         base / "manifests" / "dsa_selector.yaml",
-        base / "manifests" / "bb_monitor.yaml",
-        base / "manifests" / "volume_node_monitor.yaml",
+        base / "manifests" / "watchlist_monitor.yaml",
         base / "schemas" / "strategy_manifest.schema.json",
     ]
     required_dirs_with_py = [

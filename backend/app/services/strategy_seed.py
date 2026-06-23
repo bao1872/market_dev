@@ -2,8 +2,7 @@
 
 示例策略：
 - DSA selector（dsa_selector.yaml）: 方向稳定性选股
-- Volume Node monitor（volume_node_monitor.yaml）: 成交量节点簇监控
-- BB monitor（bb_monitor.yaml）: 布林带穿越信号监控
+- Watchlist monitor（watchlist_monitor.yaml）: 自选股监控（布林带+成交量节点）
 
 注册流程：
 1. 加载 YAML 文件为 manifest 字典
@@ -12,6 +11,7 @@
 4. 可选：调用 release_strategy_version 发布版本
 
 幂等：重复运行不会报错，已存在的策略/版本会被跳过。
+归档：旧策略（bb_monitor / volume_node_monitor）的版本会被自动归档。
 """
 
 from __future__ import annotations
@@ -37,8 +37,7 @@ _EXAMPLES_DIR = Path(str(importlib.resources.files("app.strategy_assets.manifest
 # 内置示例策略文件名
 SEED_STRATEGIES: list[str] = [
     "dsa_selector.yaml",
-    "volume_node_monitor.yaml",
-    "bb_monitor.yaml",
+    "watchlist_monitor.yaml",
 ]
 
 
@@ -130,6 +129,26 @@ async def seed_strategies(
         print(
             f"  注册策略: {strategy_key} v{version_str} -> {version_row.status}"
         )
+
+    await db.commit()
+
+    # [策略种子] - 归档旧监控策略（bb_monitor / volume_node_monitor）
+    _ARCHIVED_KEYS = ("bb_monitor", "volume_node_monitor")
+    old_defs = await db.execute(
+        select(StrategyDefinition).where(
+            StrategyDefinition.strategy_key.in_(_ARCHIVED_KEYS)
+        )
+    )
+    for old_def in old_defs.scalars():
+        old_vers = await db.execute(
+            select(StrategyVersion).where(
+                StrategyVersion.strategy_definition_id == old_def.id,
+                StrategyVersion.status != "archived",
+            )
+        )
+        for ver in old_vers.scalars():
+            ver.status = "archived"
+            print(f"  归档旧版本: {old_def.strategy_key} v{ver.version}")
 
     await db.commit()
     return results

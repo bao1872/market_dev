@@ -128,6 +128,9 @@ export default function ScreenerPage() {
     filters: [],
   })
 
+  // --- 股票池选择（全市场/我的自选） ---
+  const [universe, setUniverse] = useState<'all' | 'watchlist'>('all')
+
   // --- 运行结果（服务端分页） ---
   const resultParams: StrategyResultQueryParams = useMemo(() => {
     const params: StrategyResultQueryParams = {
@@ -139,17 +142,18 @@ export default function ScreenerPage() {
       params.sort_desc = query.sort.direction === 'desc'
     }
     if (query.filters.length > 0) {
-      // 将 filters 转为 metric_filters 字符串格式：key>=value;key<=value
-      const parts = query.filters.map((f) => {
-        if (f.operator === 'gte') return `${f.key}>=${f.value}`
-        if (f.operator === 'lte') return `${f.key}<=${f.value}`
-        if (f.operator === 'eq') return `${f.key}==${f.value}`
-        return `${f.key}=${f.value}`
-      })
-      params.metric_filters = parts.join(';')
+      // 将 filters 转为 metric_filters JSON 数组格式
+      params.metric_filters = JSON.stringify(
+        query.filters.map((f) => ({
+          metric_key: f.key,
+          operator: f.operator,
+          value: f.value,
+        }))
+      )
     }
+    params.universe = universe
     return params
-  }, [query])
+  }, [query, universe])
 
   const resultsQuery = useStrategyRunResults(activeRunId || undefined, resultParams)
   const resultItems = resultsQuery.data?.items ?? []
@@ -178,18 +182,20 @@ export default function ScreenerPage() {
     const dataDate = run.trade_date
       ? new Date(run.trade_date).toLocaleDateString('zh-CN')
       : '-'
-    const statusLabel = run.status === 'completed'
-      ? '计算完成'
-      : run.status === 'failed'
-        ? '计算失败'
-        : run.status === 'running'
-          ? '计算中'
-          : run.status
+    const statusLabel = run.status === 'published'
+      ? '已发布'
+      : run.status === 'completed'
+        ? '计算完成'
+        : run.status === 'failed'
+          ? '计算失败'
+          : run.status === 'running'
+            ? '计算中'
+            : run.status
     return {
       dataDate,
       runId: run.id.slice(0, 8),
       status: statusLabel,
-      isOk: run.status === 'completed',
+      isOk: run.status === 'published' || run.status === 'completed',
     }
   }, [activeRun])
 
@@ -580,6 +586,13 @@ export default function ScreenerPage() {
           ))
         )}
         <div className="toolbar-spacer" />
+        {/* 股票池切换 */}
+        <button
+          className={clsx('btn small', universe === 'watchlist' && 'active')}
+          onClick={() => setUniverse(universe === 'all' ? 'watchlist' : 'all')}
+        >
+          {universe === 'all' ? '全市场' : '我的自选'}
+        </button>
         {/* 日期/批次选择 */}
         <select
           className="select"

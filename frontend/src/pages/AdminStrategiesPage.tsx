@@ -51,7 +51,7 @@ function formatDate(iso: string | null): string {
 /** 策略类型显示文本（对应原型 .strategy-type） */
 function getKindTypeText(kind: string): string {
   switch (kind) {
-    case 'selection':
+    case 'selector':
       return 'Selector strategy'
     case 'monitor':
       return 'Monitor strategy'
@@ -130,7 +130,7 @@ function getStrategyChips(card: StrategyCardData): Array<{ label: string; classN
   const chips: Array<{ label: string; className?: string }> = []
 
   // kind 标签
-  if (card.kind === 'selection') {
+  if (card.kind === 'selector') {
     chips.push({ label: '选股策略', className: 'blue' })
   } else if (card.kind === 'monitor') {
     chips.push({ label: '监控策略', className: 'blue' })
@@ -169,7 +169,7 @@ export default function AdminStrategiesPage() {
 
   // ===== 发布弹窗状态 =====
   const [publishModalOpen, setPublishModalOpen] = useState(false)
-  const [publishKind, setPublishKind] = useState('selection')
+  const [publishKind, setPublishKind] = useState('selector')
   const [publishVersion, setPublishVersion] = useState('')
   const [publishFile, setPublishFile] = useState<File | null>(null)
   const [publishNotes, setPublishNotes] = useState('')
@@ -232,7 +232,7 @@ export default function AdminStrategiesPage() {
   const counts = useMemo(
     () => ({
       all: allCards.length,
-      selection: allCards.filter((c) => c.kind === 'selection').length,
+      selector: allCards.filter((c) => c.kind === 'selector').length,
       monitor: allCards.filter((c) => c.kind === 'monitor').length,
     }),
     [allCards],
@@ -245,7 +245,7 @@ export default function AdminStrategiesPage() {
 
   /** 打开发布弹窗，重置表单 */
   const handleOpenPublishModal = useCallback(() => {
-    setPublishKind('selection')
+    setPublishKind('selector')
     setPublishVersion('')
     setPublishFile(null)
     setPublishNotes('')
@@ -385,10 +385,10 @@ export default function AdminStrategiesPage() {
             全部 {counts.all}
           </button>
           <button
-            className={clsx('segment', kindFilter === 'selection' && 'active')}
-            onClick={() => setKindFilter('selection')}
+            className={clsx('segment', kindFilter === 'selector' && 'active')}
+            onClick={() => setKindFilter('selector')}
           >
-            Selector {counts.selection}
+            Selector {counts.selector}
           </button>
           <button
             className={clsx('segment', kindFilter === 'monitor' && 'active')}
@@ -536,7 +536,7 @@ export default function AdminStrategiesPage() {
                     value={publishKind}
                     onChange={(e) => setPublishKind(e.target.value)}
                   >
-                    <option value="selection">Selector</option>
+                    <option value="selector">Selector</option>
                     <option value="monitor">Monitor</option>
                   </select>
                 </div>

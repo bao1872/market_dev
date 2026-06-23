@@ -10,8 +10,8 @@ input:
   adjustment: forward
   markets: [SSE, SZSE, BSE]
 capabilities:
-  composable: true
-  supports_plan_conditions: true
+  composable: false
+  supports_plan_conditions: false
   supports_table_schema: true
   supports_chart_layers: true
   supports_backtest: true
@@ -65,20 +65,16 @@ outputs:
 event_types:
   # BB 事件（来自 bb_monitor）
   - key: bb_upper_touch
-    allowed_roles: [TRIGGER, CONFIRM, OBSERVE]
     dedupe: boundary_cooldown
     state_ttl_seconds: 600
   - key: bb_mid_touch
-    allowed_roles: [TRIGGER, CONFIRM, OBSERVE]
     dedupe: boundary_cooldown
     state_ttl_seconds: 600
   - key: bb_lower_touch
-    allowed_roles: [TRIGGER, CONFIRM, OBSERVE]
     dedupe: boundary_cooldown
     state_ttl_seconds: 600
   # VN 事件（来自 volume_node_monitor）
   - key: node_cluster_touch
-    allowed_roles: [TRIGGER, CONFIRM, OBSERVE]
     dedupe: touch_episode
     state_ttl_seconds: 120
 chart_layers:

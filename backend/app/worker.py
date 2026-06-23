@@ -455,7 +455,7 @@ async def run_monitor_scheduler_worker() -> None:
                 if current_time < morning_start:
                     # 开盘前，等待到 9:30
                     wait_seconds = (
-                        datetime(now.year, now.month, now.day, 9, 30) - now
+                        datetime(now.year, now.month, now.day, 9, 30, tzinfo=ZoneInfo("Asia/Shanghai")) - now
                     ).total_seconds()
                     if wait_seconds > 0:
                         logger.info("等待开盘，还需 %d 秒", int(wait_seconds))
