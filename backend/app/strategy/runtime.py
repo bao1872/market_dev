@@ -30,6 +30,7 @@ from uuid import UUID
 
 import pandas as pd
 
+from app.constants.strategy_keys import DSA_SELECTOR, WATCHLIST_MONITOR
 from app.models.strategy import StrategyVersion
 
 
@@ -242,10 +243,10 @@ class StrategyLoader:
 
     # 策略注册表：strategy_id -> entrypoint（module:ClassName）
     _registry: dict[str, str] = {
-        "dsa_selector": "app.strategy.selectors.dsa_selector:DSASelector",
+        DSA_SELECTOR: "app.strategy.selectors.dsa_selector:DSASelector",
         "volume_node_monitor": "app.strategy.monitors.volume_node_monitor:VolumeNodeMonitor",
         "bb_monitor": "app.strategy.monitors.bollinger_monitor:BollingerMonitor",
-        "watchlist_monitor": "app.strategy.monitors.watchlist_monitor:WatchlistMonitor",
+        WATCHLIST_MONITOR: "app.strategy.monitors.watchlist_monitor:WatchlistMonitor",
     }
 
     @classmethod
@@ -334,9 +335,9 @@ if __name__ == "__main__":
         print("StrategyRuntime ABC 不可实例化 ✓")
 
     # 验证注册表
-    assert "dsa_selector" in StrategyLoader._registry
+    assert DSA_SELECTOR in StrategyLoader._registry
     assert "volume_node_monitor" in StrategyLoader._registry
-    print("dsa_selector + volume_node_monitor 已注册 ✓")
+    print(f"{DSA_SELECTOR} + volume_node_monitor 已注册 ✓")
 
     # 验证 MarketDataContext.bars_15min 字段存在
     assert "bars_15min" in MarketDataContext.__dataclass_fields__

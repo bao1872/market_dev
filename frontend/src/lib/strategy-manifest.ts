@@ -80,7 +80,7 @@ export const LAYERS: Record<string, LayerDef> = {
   },
   node: {
     id: 'node',
-    name: 'Volume Node Cluster',
+    name: '自选监控',
     shortName: 'NODE',
     group: '监控策略',
     renderer: 'price_zone',

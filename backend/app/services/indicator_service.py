@@ -41,6 +41,7 @@ import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants.strategy_keys import DSA_SELECTOR
 from app.core.exchange import get_exchange
 from app.models.instrument import Instrument
 from app.repositories.bar_repository import (
@@ -353,7 +354,7 @@ if __name__ == "__main__":
     # 2. 验证 StrategyLoader._registry 可访问且非空
     assert hasattr(StrategyLoader, "_registry"), "StrategyLoader 应有 _registry"
     assert len(StrategyLoader._registry) > 0, "_registry 不应为空"
-    assert "dsa_selector" in StrategyLoader._registry, "应注册 dsa_selector"
+    assert DSA_SELECTOR in StrategyLoader._registry, f"应注册 {DSA_SELECTOR}"
     assert "volume_node_monitor" in StrategyLoader._registry, "应注册 volume_node_monitor"
     print(f"StrategyLoader._registry={list(StrategyLoader._registry.keys())} ✓")
 

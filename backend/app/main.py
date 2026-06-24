@@ -76,12 +76,15 @@ async def lifespan(app: FastAPI):
                     strategy_key, version, status,
                 )
     except RuntimeError as e:
-        # [策略种子] - watchlist_monitor 无 released 版本，标记就绪失败
+        # [策略种子] - 必需策略无 released 版本，标记就绪失败
         logger.error("种子数据初始化失败（就绪检查将失败）: %s", e)
         from app.api.health import mark_seed_failed
         mark_seed_failed(str(e))
     except Exception as e:
-        logger.error("种子数据初始化失败（不影响启动）: %s", e)
+        # [策略种子] - 其他异常也标记就绪失败
+        logger.error("种子数据初始化失败（就绪检查将失败）: %s", e)
+        from app.api.health import mark_seed_failed
+        mark_seed_failed(str(e))
 
     try:
         from app.services.calendar_seed import seed_calendar_from_pytdx

@@ -5,11 +5,15 @@
 - strategy_version_id: 策略版本 FK（对应 strategy_versions.id）
 - instrument_id: 股票 FK（对应 instruments.id）
 - source_bar_time: 1m bar 时间戳
-- status: SUCCEEDED/SKIPPED/FAILED
+- status: PENDING/SUCCEEDED/FAILED/DEAD
 - metrics: 完整多指标输出 (JSONB)
 - suppressed_events: 被冷却抑制的事件 (JSONB)
 - calculated_at: 计算时间
 - error_code: 错误码
+- retry_count: 重试次数
+- lease_expires_at: 租约过期时间
+- next_retry_at: 下次重试时间
+- heartbeat_at: 心跳时间
 
 唯一约束: (strategy_version_id, instrument_id, source_bar_time)
 索引: (instrument_id, source_bar_time)
@@ -60,7 +64,7 @@ class MonitorEvaluation(Base):
     status: Mapped[str] = mapped_column(
         Text(),
         nullable=False,
-        comment="SUCCEEDED/SKIPPED/FAILED",
+        comment="PENDING/SUCCEEDED/FAILED/DEAD",
     )
     metrics: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB(astext_type=Text()),

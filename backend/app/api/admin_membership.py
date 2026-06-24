@@ -1,4 +1,4 @@
-"""管理员会员与邀请码管理 API 路由 - V1.6 会员系统。
+"""管理员 API 路由 - 会员管理 + 系统概览。
 
 端点：
 - POST /admin/invite-codes: 生成邀请码（单个/批量）
@@ -6,6 +6,7 @@
 - POST /admin/invite-codes/{id}/revoke: 作废邀请码
 - GET /admin/members: 查询会员账户列表（含会员状态/到期时间/剩余天数/续期次数）
 - GET /admin/members/{user_id}/redemptions: 查询用户兑换记录
+- GET /admin/system-overview: 系统概览（活跃用户/监控标的/评估统计/服务健康）
 
 权限：
 - 所有端点需要 admin 角色（RBAC）
@@ -14,12 +15,20 @@
 from __future__ import annotations
 
 import math
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants.strategy_keys import DSA_SELECTOR
 from app.core.deps import get_db, require_roles
+from app.models.monitor_evaluation import MonitorEvaluation
+from app.models.strategy import StrategyDefinition
+from app.models.strategy_run import StrategyRun
+from app.models.user import User
+from app.models.watchlist import UserWatchlistItem
 from app.schemas.membership import (
     InviteCodeCreate,
     InviteCodeListItem,
@@ -225,10 +234,117 @@ async def get_member_redemptions(
     ]
 
 
+@router.get("/system-overview")
+async def get_system_overview(
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles("admin")),
+) -> dict:
+    """系统概览 - 管理员仪表盘数据。
+
+    返回活跃用户、监控标的、评估统计、服务健康等数据。
+    已实现的数据源：active_users, distinct_monitored_instruments, latest_selector_run,
+    evaluations_success_rate, failed_retry_count。
+    尚无数据源的字段返回 0/unknown。
+
+    Args:
+        db: 异步数据库会话
+        current_user: 当前管理员用户（由 require_roles 注入）
+
+    Returns:
+        系统概览字典
+    """
+    # 1. active_users: 有活跃自选股的去重用户数
+    active_users_stmt = select(func.count(func.distinct(UserWatchlistItem.user_id))).where(
+        UserWatchlistItem.active.is_(True),
+    )
+    active_users = await db.scalar(active_users_stmt) or 0
+
+    # 2. distinct_monitored_instruments: 活跃自选股去重标的数
+    distinct_instruments_stmt = select(
+        func.count(func.distinct(UserWatchlistItem.instrument_id)),
+    ).where(
+        UserWatchlistItem.active.is_(True),
+    )
+    distinct_monitored_instruments = await db.scalar(distinct_instruments_stmt) or 0
+
+    # 3. evaluations_last_minute: 最近 1 分钟完成的评估数
+    one_minute_ago = datetime.now(UTC) - timedelta(minutes=1)
+    eval_last_min_stmt = select(func.count()).select_from(MonitorEvaluation).where(
+        MonitorEvaluation.calculated_at >= one_minute_ago,
+        MonitorEvaluation.status.in_(["SUCCEEDED", "FAILED"]),
+    )
+    evaluations_last_minute = await db.scalar(eval_last_min_stmt) or 0
+
+    # 4. evaluations_success_rate: 已完成评估的成功率
+    total_completed_stmt = select(func.count()).select_from(MonitorEvaluation).where(
+        MonitorEvaluation.status.in_(["SUCCEEDED", "FAILED", "DEAD"]),
+    )
+    total_completed = await db.scalar(total_completed_stmt) or 0
+    succeeded_stmt = select(func.count()).select_from(MonitorEvaluation).where(
+        MonitorEvaluation.status == "SUCCEEDED",
+    )
+    succeeded_count = await db.scalar(succeeded_stmt) or 0
+    evaluations_success_rate = round(succeeded_count / total_completed, 4) if total_completed > 0 else 0.0
+
+    # 5. failed_retry_count: 当前 FAILED 状态且可重试的评估数
+    failed_retry_stmt = select(func.count()).select_from(MonitorEvaluation).where(
+        MonitorEvaluation.status == "FAILED",
+    )
+    failed_retry_count = await db.scalar(failed_retry_stmt) or 0
+
+    # 6. latest_selector_run: dsa_selector 最近一次运行
+    selector_def_stmt = select(StrategyDefinition.id).where(
+        StrategyDefinition.strategy_key == DSA_SELECTOR,
+    )
+    selector_def_id = await db.scalar(selector_def_stmt)
+    latest_selector_run = None
+    if selector_def_id is not None:
+        from app.models.strategy import StrategyVersion
+        version_ids_stmt = select(StrategyVersion.id).where(
+            StrategyVersion.strategy_definition_id == selector_def_id,
+        )
+        version_ids_result = await db.execute(version_ids_stmt)
+        version_ids = [row[0] for row in version_ids_result.all()]
+        if version_ids:
+            run_stmt = (
+                select(StrategyRun)
+                .where(StrategyRun.strategy_version_id.in_(version_ids))
+                .order_by(StrategyRun.started_at.desc())
+                .limit(1)
+            )
+            run_result = await db.execute(run_stmt)
+            run = run_result.scalar_one_or_none()
+            if run is not None:
+                latest_selector_run = {
+                    "id": str(run.id),
+                    "status": run.status,
+                    "started_at": run.started_at.isoformat() if run.started_at else None,
+                    "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+                    "total_instruments": run.total_instruments,
+                    "succeeded_count": run.succeeded_count,
+                    "failed_count": run.failed_count,
+                }
+
+    return {
+        "active_users": active_users,
+        "distinct_monitored_instruments": distinct_monitored_instruments,
+        "evaluations_last_minute": evaluations_last_minute,
+        "evaluations_success_rate": evaluations_success_rate,
+        "notification_delivery_rate": 0.0,
+        "queue_backlog": 0,
+        "failed_retry_count": failed_retry_count,
+        "latest_selector_run": latest_selector_run,
+        "worker_health": "unknown",
+        "scheduler_health": "unknown",
+        "recent_anomalies": [],
+    }
+
+
 if __name__ == "__main__":
     # 自测入口：验证路由注册
     paths = [r.path for r in router.routes]
     print(f"router.routes={paths}")
     assert "/admin/invite-codes" in paths
     assert "/admin/members" in paths
+    assert "/admin/system-overview" in paths
     print("OK")

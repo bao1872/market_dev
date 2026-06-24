@@ -20,11 +20,12 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from jose import JWTError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -36,7 +37,10 @@ from app.core.security import (
     verify_password,
 )
 from app.db import get_db
+from app.models.event_recipient import StrategyEventRecipient
+from app.models.strategy_event import StrategyEvent
 from app.models.user import User
+from app.models.watchlist import UserWatchlistItem
 from app.schemas.membership import (
     InviteCodeRenew,
     LoginResponse,
@@ -409,6 +413,124 @@ async def get_my_membership(
     )
 
 
+@router.get("/me/events/summary")
+async def get_my_events_summary(
+    date_param: date = Query(..., alias="date", description="查询日期 YYYY-MM-DD"),
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """查询当前用户指定日期的策略事件汇总。
+
+    优先通过 strategy_event_recipients 表统计用户作为接收人的事件数；
+    若 recipients 表无数据，则回退到统计用户自选股相关的 StrategyEvent。
+
+    Args:
+        date_param: 查询日期
+        current_user: 当前用户
+        db: 异步数据库会话
+
+    Returns:
+        汇总信息：date / total_events / instruments_with_events / last_event_at
+    """
+    day_start = datetime(date_param.year, date_param.month, date_param.day)
+    from datetime import timedelta
+    day_end = day_start + timedelta(days=1)
+
+    # 优先：通过 strategy_event_recipients 统计
+    recipient_count_stmt = (
+        select(func.count(StrategyEventRecipient.id))
+        .join(StrategyEvent, StrategyEventRecipient.event_id == StrategyEvent.id)
+        .where(
+            StrategyEventRecipient.user_id == current_user.id,
+            StrategyEvent.event_time >= day_start,
+            StrategyEvent.event_time < day_end,
+        )
+    )
+    recipient_result = await db.execute(recipient_count_stmt)
+    total_events = recipient_result.scalar() or 0
+
+    if total_events > 0:
+        # 有 recipients 数据：统计涉及股票数和最后事件时间
+        instruments_stmt = (
+            select(func.count(func.distinct(StrategyEvent.instrument_id)))
+            .join(StrategyEventRecipient, StrategyEventRecipient.event_id == StrategyEvent.id)
+            .where(
+                StrategyEventRecipient.user_id == current_user.id,
+                StrategyEvent.event_time >= day_start,
+                StrategyEvent.event_time < day_end,
+            )
+        )
+        inst_result = await db.execute(instruments_stmt)
+        instruments_with_events = inst_result.scalar() or 0
+
+        last_event_stmt = (
+            select(func.max(StrategyEvent.event_time))
+            .join(StrategyEventRecipient, StrategyEventRecipient.event_id == StrategyEvent.id)
+            .where(
+                StrategyEventRecipient.user_id == current_user.id,
+                StrategyEvent.event_time >= day_start,
+                StrategyEvent.event_time < day_end,
+            )
+        )
+        last_result = await db.execute(last_event_stmt)
+        last_event_at = last_result.scalar()
+    else:
+        # 回退：统计用户自选股相关的 StrategyEvent
+        watchlist_stmt = (
+            select(UserWatchlistItem.instrument_id)
+            .where(
+                UserWatchlistItem.user_id == current_user.id,
+                UserWatchlistItem.active.is_(True),
+            )
+        )
+        wl_result = await db.execute(watchlist_stmt)
+        instrument_ids = [row[0] for row in wl_result.all()]
+
+        if instrument_ids:
+            event_count_stmt = (
+                select(func.count(StrategyEvent.id))
+                .where(
+                    StrategyEvent.instrument_id.in_(instrument_ids),
+                    StrategyEvent.event_time >= day_start,
+                    StrategyEvent.event_time < day_end,
+                )
+            )
+            count_result = await db.execute(event_count_stmt)
+            total_events = count_result.scalar() or 0
+
+            inst_count_stmt = (
+                select(func.count(func.distinct(StrategyEvent.instrument_id)))
+                .where(
+                    StrategyEvent.instrument_id.in_(instrument_ids),
+                    StrategyEvent.event_time >= day_start,
+                    StrategyEvent.event_time < day_end,
+                )
+            )
+            inst_result2 = await db.execute(inst_count_stmt)
+            instruments_with_events = inst_result2.scalar() or 0
+
+            last_event_stmt2 = (
+                select(func.max(StrategyEvent.event_time))
+                .where(
+                    StrategyEvent.instrument_id.in_(instrument_ids),
+                    StrategyEvent.event_time >= day_start,
+                    StrategyEvent.event_time < day_end,
+                )
+            )
+            last_result2 = await db.execute(last_event_stmt2)
+            last_event_at = last_result2.scalar()
+        else:
+            instruments_with_events = 0
+            last_event_at = None
+
+    return {
+        "date": date_param.isoformat(),
+        "total_events": total_events,
+        "instruments_with_events": instruments_with_events,
+        "last_event_at": last_event_at.isoformat() if last_event_at else None,
+    }
+
+
 if __name__ == "__main__":
     # 自测入口：验证路由注册
     paths = [r.path for r in router.routes]
@@ -419,4 +541,5 @@ if __name__ == "__main__":
     assert "/auth/refresh" in paths
     assert "/me" in paths
     assert "/me/membership" in paths
+    assert "/me/events/summary" in paths
     print("OK")

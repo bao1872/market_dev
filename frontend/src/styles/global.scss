@@ -1473,7 +1473,7 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
   margin-left: 4px;
 }
 
-// NodePosition CSS 变量支持（替代内联 style 的 width/left）
+// PositionBetweenNodes CSS 变量支持（替代内联 style 的 width/left）
 // 通过 style={{ '--pos': '71%', '--poc': '88%' }} 传递动态值
 .position-fill {
   width: var(--pos, 0%);

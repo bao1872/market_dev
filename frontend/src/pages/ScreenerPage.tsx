@@ -548,10 +548,9 @@ export default function ScreenerPage() {
 
   // ===== 渲染 =====
 
-  const strategiesLoading = strategiesQuery.isLoading
   const resultsLoading = resultsQuery.isLoading
   const resultsError = resultsQuery.isError
-    ? '运行结果加载失败，请稍后重试'
+    ? '运行结果加载失败'
     : null
 
   const activeColumns = getColumns(activeStrategyKey)
@@ -570,10 +569,12 @@ export default function ScreenerPage() {
 
       {/* 策略 tabs */}
       <div className="strategy-tabs-bar" data-strategy-group="selectorResult">
-        {strategiesLoading ? (
-          <span className="muted">加载策略列表…</span>
+        {strategiesQuery.isLoading ? (
+          <span className="muted">正在加载选股策略…</span>
+        ) : strategiesQuery.isError ? (
+          <span className="muted neg">选股策略加载失败</span>
         ) : selectorStrategies.length === 0 ? (
-          <span className="muted">暂无选股策略</span>
+          <span className="muted">暂无已发布选股策略</span>
         ) : (
           selectorStrategies.map((s) => (
             <button
@@ -598,10 +599,14 @@ export default function ScreenerPage() {
           className="select"
           value={activeRunId}
           onChange={(e) => handleRunChange(e.target.value)}
-          disabled={runs.length === 0}
+          disabled={runs.length === 0 || runsQuery.isLoading}
         >
-          {runs.length === 0 ? (
-            <option value="">暂无运行记录</option>
+          {runsQuery.isLoading ? (
+            <option value="">正在加载运行批次…</option>
+          ) : runsQuery.isError ? (
+            <option value="">运行批次加载失败</option>
+          ) : runs.length === 0 ? (
+            <option value="">暂无已发布运行批次</option>
           ) : (
             runs.map((r) => (
               <option key={r.id} value={r.id}>
@@ -676,7 +681,7 @@ export default function ScreenerPage() {
           onQueryChange={handleQueryChange}
           loading={resultsLoading}
           error={resultsError}
-          emptyText="暂无选股结果"
+          emptyText={resultsQuery.isError ? '运行结果加载失败' : '本批次无选股结果'}
           selectable
           selectedKeys={selectedKeys}
           onSelectionChange={setSelectedKeys}

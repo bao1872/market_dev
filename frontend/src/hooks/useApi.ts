@@ -422,27 +422,51 @@ export function useWatchlist() {
   })
 }
 
-/** 加入自选变更（自动失效 watchlist + monitor-states 缓存） */
+/** 查询自选股+监控状态聚合数据（交易时段 30s 自动刷新） */
+export function useWatchlistMonitorStatus() {
+  return useQuery({
+    queryKey: ['watchlist', 'monitor-status'],
+    queryFn: api.getWatchlistMonitorStatus,
+    staleTime: STALE_REALTIME,
+    refetchInterval: () => isInTradingHours() ? 30000 : false,
+  })
+}
+
+/** 加入自选变更（自动失效 watchlist + monitor-status 缓存） */
 export function useAddToWatchlist() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (payload: WatchlistAddRequest) => api.addToWatchlist(payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['watchlist'] })
-      queryClient.invalidateQueries({ queryKey: ['strategies', 'watchlist_monitor', 'monitor-states'] })
+      queryClient.invalidateQueries({ queryKey: ['watchlist', 'monitor-status'] })
     },
   })
 }
 
-/** 移除自选变更（自动失效 watchlist + monitor-states 缓存） */
+/** 移除自选变更（自动失效 watchlist + monitor-status 缓存） */
 export function useRemoveFromWatchlist() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (instrumentId: string) => api.removeFromWatchlist(instrumentId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['watchlist'] })
-      queryClient.invalidateQueries({ queryKey: ['strategies', 'watchlist_monitor', 'monitor-states'] })
+      queryClient.invalidateQueries({ queryKey: ['watchlist', 'monitor-status'] })
     },
+  })
+}
+
+// ============================================================
+// ===== Events Summary hooks =====
+// ============================================================
+
+/** 查询当前用户指定日期的策略事件汇总 */
+export function useEventsSummary(date: string | undefined) {
+  return useQuery({
+    queryKey: ['me', 'events', 'summary', date],
+    queryFn: () => api.getEventsSummary(date!),
+    enabled: !!date,
+    staleTime: STALE_REALTIME,
   })
 }
 
@@ -597,6 +621,19 @@ export function useMemberRedemptions(userId: string | undefined) {
     queryKey: ['admin', 'members', userId, 'redemptions'],
     queryFn: () => api.getMemberRedemptions(userId!),
     enabled: !!userId,
+    staleTime: STALE_REALTIME,
+  })
+}
+
+// ============================================================
+// ===== Admin System Overview hooks =====
+// ============================================================
+
+/** 获取系统概览（30 秒缓存，管理后台首页使用） */
+export function useAdminSystemOverview() {
+  return useQuery({
+    queryKey: ['admin', 'system-overview'],
+    queryFn: api.getAdminSystemOverview,
     staleTime: STALE_REALTIME,
   })
 }

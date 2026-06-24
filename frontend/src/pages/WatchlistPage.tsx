@@ -1,30 +1,30 @@
 // 自选股监控页
-// 用法：展示用户自选股票池的统一监控状态（BB + VN 合并指标）
+// 用法：展示用户自选股票池的统一监控状态（聚合端点 /watchlist/monitor-status）
 // 路由：/watchlist
-// 依赖 hooks：useWatchlist / useStrategyMonitorStates / useInstruments / useAddToWatchlist / useRemoveFromWatchlist
+// 依赖 hooks：useWatchlistMonitorStatus / useInstruments / useAddToWatchlist / useRemoveFromWatchlist
 import { useState, useMemo, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useQueries } from '@tanstack/react-query'
 import { useToast } from '@/store/toast'
 import {
-  useWatchlist,
-  useStrategyMonitorStates,
+  useWatchlistMonitorStatus,
   useInstruments,
   useAddToWatchlist,
   useRemoveFromWatchlist,
 } from '@/hooks/useApi'
-import * as api from '@/api/endpoints'
-import type { Instrument, MonitorState, WatchlistItem } from '@/api/endpoints'
+import type { WatchlistMonitorStatusItem } from '@/api/endpoints'
 import { StrategyDataTable } from '@/components/StrategyDataTable'
 import type { DataTableColumn } from '@/components/StrategyDataTable'
 
 // ===== 类型定义 =====
 
-// 统一监控行（从 WatchlistItem 派生，MonitorState 可选）
+type MonitorStatus = 'WAITING_FIRST_RUN' | 'SUCCEEDED' | 'FAILED' | 'STALE' | 'MARKET_CLOSED'
+
+// 统一监控行（从 WatchlistMonitorStatusItem 派生）
 interface WatchlistRow {
   instrumentId: string
   symbol: string
   name: string
+  monitorStatus: MonitorStatus
   bbUpper: number | null
   bbMid: number | null
   bbLower: number | null
@@ -35,7 +35,6 @@ interface WatchlistRow {
   pocPrice: number | null
   lastTouchedNode: number | null
   updatedAt: string | null
-  hasState: boolean
   [key: string]: unknown
 }
 
@@ -67,10 +66,26 @@ function fmtNum(v: unknown, digits = 2): string {
 function fmtTime(v: unknown): string {
   if (v === undefined || v === null || v === '') return '-'
   const s = String(v)
-  // 尝试提取 HH:MM:SS 或 MM-DD HH:MM
   const timeMatch = s.match(/(\d{2}:\d{2}:\d{2})/)
   if (timeMatch) return timeMatch[1]
   return s.slice(-8)
+}
+
+/** 监控状态徽章渲染 */
+function MonitorStatusBadge({ status }: { status: MonitorStatus }) {
+  switch (status) {
+    case 'SUCCEEDED':
+      return <span className="tag success small">已计算</span>
+    case 'FAILED':
+      return <span className="tag error small">计算失败</span>
+    case 'STALE':
+      return <span className="tag warn small">数据过期</span>
+    case 'MARKET_CLOSED':
+      return <span className="tag small">已收盘</span>
+    case 'WAITING_FIRST_RUN':
+    default:
+      return <span className="tag small">等待首次计算</span>
+  }
 }
 
 // ===== 添加自选弹窗 =====
@@ -89,7 +104,7 @@ function AddStockModal({
     keyword: keyword.trim() || undefined,
     page_size: 20,
   })
-  const instruments: Instrument[] = instrumentsQuery.data?.items ?? []
+  const instruments = instrumentsQuery.data?.items ?? []
 
   const handleAdd = useCallback(
     async (instrumentId: string, name: string) => {
@@ -168,37 +183,11 @@ function AddStockModal({
 // ===== 主组件 =====
 export default function WatchlistPage() {
   const navigate = useNavigate()
+  const toast = useToast.getState()
 
-  // --- 自选列表 ---
-  const watchlistQuery = useWatchlist()
-  const watchlistItems: WatchlistItem[] = watchlistQuery.data?.items ?? []
-  const watchlistIds = useMemo(
-    () => new Set(watchlistItems.map((w) => w.instrument_id)),
-    [watchlistItems],
-  )
-
-  // --- 统一监控状态（watchlist_monitor，交易时段 30s 自动刷新） ---
-  const monitorStatesQuery = useStrategyMonitorStates('watchlist_monitor', undefined)
-  const monitorStates: MonitorState[] = monitorStatesQuery.data?.items ?? []
-
-  // --- 批量查询自选股的 Instrument 信息（名称/代码/市场） ---
-  const watchlistIdList = useMemo(() => Array.from(watchlistIds), [watchlistIds])
-  const instrumentQueries = useQueries({
-    queries: watchlistIdList.map((id) => ({
-      queryKey: ['instruments', id],
-      queryFn: () => api.getInstrumentById(id),
-      staleTime: 5 * 60 * 1000,
-    })),
-  })
-  const instrumentMap = useMemo(() => {
-    const m = new Map<string, Instrument>()
-    instrumentQueries.forEach((q, i) => {
-      if (q.data) {
-        m.set(watchlistIdList[i], q.data)
-      }
-    })
-    return m
-  }, [instrumentQueries, watchlistIdList])
+  // --- 唯一数据源：聚合端点 ---
+  const monitorStatusQuery = useWatchlistMonitorStatus()
+  const items: WatchlistMonitorStatusItem[] = monitorStatusQuery.data?.items ?? []
 
   // --- 移出自选 ---
   const removeWatchlistMutation = useRemoveFromWatchlist()
@@ -208,72 +197,61 @@ export default function WatchlistPage() {
 
   // ===== 派生数据 =====
 
-  const monitorStateMap = useMemo(() => {
-    const m = new Map<string, MonitorState>()
-    for (const s of monitorStates) {
-      if (watchlistIds.has(s.instrument_id)) {
-        m.set(s.instrument_id, s)
-      }
-    }
-    return m
-  }, [monitorStates, watchlistIds])
-
-  // ===== 行转换（行来源 = WatchlistItem，MonitorState 可选） =====
-
-  const activeItems = useMemo(
-    () => watchlistItems.filter((item) => item.active),
-    [watchlistItems],
+  const watchlistIds = useMemo(
+    () => new Set(items.map((item) => item.instrument_id)),
+    [items],
   )
 
   const rows: WatchlistRow[] = useMemo(
     () =>
-      activeItems.map((item) => {
-        const state = monitorStateMap.get(item.instrument_id)
-        const inst = instrumentMap.get(item.instrument_id)
+      items.map((item) => {
+        const metrics = item.metrics
         return {
           instrumentId: item.instrument_id,
-          symbol: inst?.symbol ?? item.instrument_id.slice(0, 8),
-          name: inst?.name ?? '-',
-          bbUpper: state ? toNum(pickPayload(state.payload, ['bb_upper'])) : null,
-          bbMid: state ? toNum(pickPayload(state.payload, ['bb_mid', 'bb_middle'])) : null,
-          bbLower: state ? toNum(pickPayload(state.payload, ['bb_lower'])) : null,
-          currentPrice: state ? toNum(pickPayload(state.payload, ['current_price', 'close'])) : null,
-          upperNode: state ? toNum(pickPayload(state.payload, ['upper_node', 'nearest_node_price'])) : null,
-          lowerNode: state ? toNum(pickPayload(state.payload, ['lower_node'])) : null,
-          position01: state ? toNum(pickPayload(state.payload, ['position_0_1', 'node_strength'])) : null,
-          pocPrice: state ? toNum(pickPayload(state.payload, ['poc_price'])) : null,
-          lastTouchedNode: state ? toNum(pickPayload(state.payload, ['last_touched_node'])) : null,
-          updatedAt: state ? fmtTime(state.updated_at) : null,
-          hasState: !!state,
+          symbol: item.symbol,
+          name: item.name,
+          monitorStatus: item.monitor_status,
+          bbUpper: metrics ? toNum(pickPayload(metrics, ['bb_upper'])) : null,
+          bbMid: metrics ? toNum(pickPayload(metrics, ['bb_mid', 'bb_middle'])) : null,
+          bbLower: metrics ? toNum(pickPayload(metrics, ['bb_lower'])) : null,
+          currentPrice: metrics ? toNum(pickPayload(metrics, ['current_price', 'close'])) : null,
+          upperNode: metrics ? toNum(pickPayload(metrics, ['upper_node', 'nearest_node_price'])) : null,
+          lowerNode: metrics ? toNum(pickPayload(metrics, ['lower_node'])) : null,
+          position01: metrics ? toNum(pickPayload(metrics, ['position_0_1', 'node_strength'])) : null,
+          pocPrice: metrics ? toNum(pickPayload(metrics, ['poc_price'])) : null,
+          lastTouchedNode: metrics ? toNum(pickPayload(metrics, ['last_touched_node'])) : null,
+          updatedAt: item.updated_at ? fmtTime(item.updated_at) : null,
         }
       }),
-    [activeItems, monitorStateMap, instrumentMap],
+    [items],
   )
 
   // ===== 事件处理 =====
 
   /** 跳转个股详情 */
   const goDetail = useCallback(
-    (instrumentId: string) => {
-      const inst = instrumentMap.get(instrumentId)
-      const symbol = inst?.symbol ?? instrumentId.slice(0, 8)
+    (_instrumentId: string, symbol: string) => {
       navigate(`/stock/${symbol}?source=watchlist`)
     },
-    [navigate, instrumentMap],
+    [navigate],
   )
 
-  /** 移出自选 */
+  /** 移出自选（带确认） */
   const handleRemove = useCallback(
-    (instrumentId: string) => {
-      removeWatchlistMutation.mutate(instrumentId)
+    (instrumentId: string, symbol: string, name: string) => {
+      const confirmed = window.confirm(`确定要将 ${symbol} ${name} 从自选中移除吗？`)
+      if (!confirmed) return
+      removeWatchlistMutation.mutate(instrumentId, {
+        onSuccess: () => {
+          toast.show('已移除', `${symbol} ${name} 已从自选中移除`)
+        },
+        onError: () => {
+          toast.show('移除失败', '请稍后重试')
+        },
+      })
     },
-    [removeWatchlistMutation],
+    [removeWatchlistMutation, toast],
   )
-
-  // ===== 加载/错误状态 =====
-
-  const isInstrumentLoading = instrumentQueries.length > 0 && instrumentQueries.some((q) => q.isLoading)
-  const isLoading = watchlistQuery.isLoading || monitorStatesQuery.isLoading || isInstrumentLoading
 
   // ===== 列定义 =====
 
@@ -300,14 +278,17 @@ export default function WatchlistPage() {
         dataType: 'text',
         sortable: true,
         filterable: true,
-        sortValue: (row) => (row.hasState ? '1' : '0'),
-        filterValue: (row) => (row.hasState ? '已计算' : '等待首次计算'),
-        render: (row) =>
-          row.hasState ? (
-            <span className="tag success small">已计算</span>
-          ) : (
-            <span className="tag warn small">等待首次计算</span>
-          ),
+        sortValue: (row) => row.monitorStatus,
+        filterValue: (row) => {
+          switch (row.monitorStatus) {
+            case 'SUCCEEDED': return '已计算'
+            case 'FAILED': return '计算失败'
+            case 'STALE': return '数据过期'
+            case 'MARKET_CLOSED': return '已收盘'
+            default: return '等待首次计算'
+          }
+        },
+        render: (row) => <MonitorStatusBadge status={row.monitorStatus} />,
       },
       {
         key: 'currentPrice',
@@ -408,12 +389,12 @@ export default function WatchlistPage() {
         isAction: true,
         render: (row) => (
           <div className="actions">
-            <button className="btn small" onClick={() => goDetail(row.instrumentId)}>
+            <button className="btn small" onClick={() => goDetail(row.instrumentId, row.symbol)}>
               详情
             </button>
             <button
               className="btn small danger"
-              onClick={() => handleRemove(row.instrumentId)}
+              onClick={() => handleRemove(row.instrumentId, row.symbol, row.name)}
               disabled={removeWatchlistMutation.isPending}
             >
               移出自选
@@ -445,14 +426,9 @@ export default function WatchlistPage() {
       </div>
 
       {/* 错误提示 */}
-      {watchlistQuery.isError && (
+      {monitorStatusQuery.isError && (
         <div className="notice error" style={{ marginBottom: '1rem' }}>
-          自选列表加载失败，请刷新重试
-        </div>
-      )}
-      {monitorStatesQuery.isError && (
-        <div className="notice warn" style={{ marginBottom: '1rem' }}>
-          监控状态加载失败，指标数据可能不完整
+          数据加载失败，请刷新重试
         </div>
       )}
 
@@ -463,9 +439,9 @@ export default function WatchlistPage() {
           columns={columns}
           rows={rows}
           rowKey={(row) => row.instrumentId}
-          loading={isLoading}
+          loading={monitorStatusQuery.isLoading}
           error={null}
-          emptyText={activeItems.length === 0 ? '暂无自选股票，请点击右上角添加' : undefined}
+          emptyText={items.length === 0 ? '暂无自选股票，请点击右上角添加' : undefined}
         />
       </div>
 

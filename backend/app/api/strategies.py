@@ -62,10 +62,8 @@ async def get_strategies(
     kind: str | None = Query(None, description="按 kind 过滤：selector/monitor"),
     db: AsyncSession = Depends(get_db),
 ) -> StrategyListResponse:
-    """获取策略列表。kind=selector 时仅返回 production 环境、对用户可见、有 released 版本的策略。"""
-    # kind=selector 时应用可见性过滤
-    user_visible_only = kind == "selector"
-    definitions = await list_strategies(db, kind=kind, user_visible_only=user_visible_only)
+    """获取策略列表。普通用户仅返回 production 环境、对用户可见、有 released 版本的策略。"""
+    definitions = await list_strategies(db, kind=kind, admin_mode=False)
     items = [StrategyResponse.model_validate(d) for d in definitions]
     return StrategyListResponse(items=items, total=len(items))
 

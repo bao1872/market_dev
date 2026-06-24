@@ -1,22 +1,24 @@
 // 服务总览（首页，受保护路由）
 // 对应原型：index.html (V1.6.3)
 // 用法：集中查看选股策略结果、监控策略计算状态和最新事件
-// 依赖 hooks：useWatchlist / useStrategies / useStrategyRuns / useStrategyRunResults /
-//             useStrategyMonitorStates / useNotificationChannels / useInstruments / useAddToWatchlist
+// 依赖 hooks：useWatchlist / useStrategies / usePublishedRuns / useStrategyRunResults /
+//             useStrategyMonitorStates / useNotificationChannels / useInstruments / useAddToWatchlist / useEventsSummary
 // 路由：/
 import { useState, useMemo, useCallback, type CSSProperties } from 'react'
 import { Link } from 'react-router-dom'
 import { useQueries } from '@tanstack/react-query'
 import { useToast } from '@/store/toast'
+import { STRATEGY_KEYS } from '@/constants/strategyKeys'
 import {
   useWatchlist,
   useStrategies,
-  useStrategyRuns,
+  usePublishedRuns,
   useStrategyRunResults,
   useStrategyMonitorStates,
   useNotificationChannels,
   useInstruments,
   useAddToWatchlist,
+  useEventsSummary,
 } from '@/hooks/useApi'
 import * as api from '@/api/endpoints'
 import type { Instrument, StrategyResult, MonitorState } from '@/api/endpoints'
@@ -46,8 +48,8 @@ interface SelectionRow {
   [key: string]: unknown
 }
 
-// Node 监控行（从 MonitorState.payload 派生）
-interface NodeMonitorRow {
+// 自选监控行（从 MonitorState.payload 派生）
+interface WatchlistMonitorRow {
   instrument_id: string
   name: string
   symbol: string
@@ -110,10 +112,10 @@ function fmtTime(isoString: string | null | undefined): string {
   }
 }
 
-// ===== NodePosition 组件（节点间位置 0–1 可视化）=====
+// ===== PositionBetweenNodes 组件（节点间位置 0–1 可视化）=====
 // 对应原型 .node-position 结构：填充条 + 位置标记 + POC 标记 + 刻度标签
 // 使用 CSS 自定义属性 --pos / --poc 传递动态值，避免内联 style 设置 width/left
-function NodePosition({
+function PositionBetweenNodes({
   position,
   pocPosition,
 }: {
@@ -254,7 +256,7 @@ export default function IndexPage() {
   const strategies = strategiesQuery.data?.items ?? []
 
   // --- DSA 最新运行（选股结果表 + KPI 1 + 目录卡 meta）---
-  const dsaRunsQuery = useStrategyRuns('dsa', { limit: 1 })
+  const dsaRunsQuery = usePublishedRuns(STRATEGY_KEYS.DSA_SELECTOR, { limit: 1 })
   const latestDsaRun = dsaRunsQuery.data?.items[0]
   const latestRunId = latestDsaRun?.id
 
@@ -263,19 +265,12 @@ export default function IndexPage() {
   const selectionResults: StrategyResult[] = selectionResultsQuery.data?.items ?? []
 
   // --- 监控策略状态（底部表格 + 目录卡 meta）---
-  const monitorStatesQuery = useStrategyMonitorStates('watchlist_monitor')
+  const monitorStatesQuery = useStrategyMonitorStates(STRATEGY_KEYS.WATCHLIST_MONITOR)
   const monitorStates: MonitorState[] = monitorStatesQuery.data?.items ?? []
 
-  // --- KPI 3：自选股的监控状态总数（useInstrumentMonitorStates 按自选股逐个查询后汇总）---
-  const monitorStateQueries = useQueries({
-    queries: watchlistItems.map((w) => ({
-      queryKey: ['instruments', w.instrument_id, 'monitor-states'],
-      queryFn: () => api.getInstrumentMonitorStates(w.instrument_id),
-      staleTime: 30 * 1000,
-    })),
-  })
-  const kpi3Total = monitorStateQueries.reduce((sum, q) => sum + (q.data?.total ?? 0), 0)
-  const kpi3Loading = monitorStateQueries.some((q) => q.isLoading)
+  // --- KPI 3：今日策略事件汇总（通过 /me/events/summary API）---
+  const todayStr = new Date().toISOString().slice(0, 10)
+  const eventsSummaryQuery = useEventsSummary(todayStr)
 
   // --- 通知渠道（KPI 4）---
   const channelsQuery = useNotificationChannels()
@@ -351,9 +346,9 @@ export default function IndexPage() {
     [instrumentMap, watchlistIds],
   )
 
-  /** 将 MonitorState 转换为 NodeMonitorRow */
-  const toNodeRow = useCallback(
-    (s: MonitorState): NodeMonitorRow => {
+  /** 将 MonitorState 转换为 WatchlistMonitorRow */
+  const toMonitorRow = useCallback(
+    (s: MonitorState): WatchlistMonitorRow => {
       const payload = s.payload
       const inst = instrumentMap.get(s.instrument_id)
       const position =
@@ -391,17 +386,17 @@ export default function IndexPage() {
   )
 
   // 底部监控表格：按自选股过滤
-  const nodeRows: NodeMonitorRow[] = useMemo(
-    () => monitorStates.filter((s) => watchlistIds.has(s.instrument_id)).map(toNodeRow),
-    [monitorStates, watchlistIds, toNodeRow],
+  const monitorRows: WatchlistMonitorRow[] = useMemo(
+    () => monitorStates.filter((s) => watchlistIds.has(s.instrument_id)).map(toMonitorRow),
+    [monitorStates, watchlistIds, toMonitorRow],
   )
 
-  // KPI 1：今日选股结果数
-  const kpi1Total = selectionResultsQuery.data?.total ?? 0
-  const kpi1Loading = selectionResultsQuery.isLoading
+  // KPI 1：今日选股结果数（最新已发布 DSA 运行的标的总数）
+  const kpi1Value = latestDsaRun?.total_instruments ?? null
+  const kpi1Loading = dsaRunsQuery.isLoading
 
-  // KPI 2：监控自选股数
-  const kpi2Total = watchlistItems.length
+  // KPI 2：监控自选股数（active 自选股数量）
+  const kpi2Total = watchlistItems.filter((i) => i.active).length
 
   // KPI 4：通知渠道状态
   const kpi4Status = feishuChannel ? '飞书正常' : '未配置'
@@ -418,7 +413,7 @@ export default function IndexPage() {
       active?: boolean
     }> = []
     // DSA 选股
-    const dsa = strategies.find((s) => s.strategy_key === 'dsa')
+    const dsa = strategies.find((s) => s.strategy_key === STRATEGY_KEYS.DSA_SELECTOR)
     if (dsa) {
       cards.push({
         type: 'SELECTION',
@@ -432,7 +427,7 @@ export default function IndexPage() {
       })
     }
     // 自选监控
-    const monitor = strategies.find((s) => s.strategy_key === 'watchlist_monitor')
+    const monitor = strategies.find((s) => s.strategy_key === STRATEGY_KEYS.WATCHLIST_MONITOR)
     if (monitor) {
       const latestBarTime = monitorStates[0]?.bar_time
       cards.push({
@@ -565,8 +560,8 @@ export default function IndexPage() {
     [handleAddToWatchlist, addWatchlistMutation.isPending],
   )
 
-  // Node 监控表列
-  const nodeColumns: DataTableColumn<NodeMonitorRow>[] = useMemo(
+  // 监控计算表列
+  const monitorColumns: DataTableColumn<WatchlistMonitorRow>[] = useMemo(
     () => [
       {
         key: 'stock',
@@ -606,7 +601,7 @@ export default function IndexPage() {
         dataType: 'text',
         sortable: false,
         filterable: false,
-        render: (row) => <NodePosition position={row.position} pocPosition={row.poc_position} />,
+        render: (row) => <PositionBetweenNodes position={row.position} pocPosition={row.poc_position} />,
       },
       {
         key: 'upper_node',
@@ -639,7 +634,7 @@ export default function IndexPage() {
 
   const monitorOptions: StrategyOption[] = [
     {
-      id: 'overviewNode',
+      id: 'watchlistMonitor',
       name: STRATEGIES.watchlist_monitor.name,
       description: '节点、POC 与碰触事件',
       kind: 'monitor',
@@ -659,19 +654,19 @@ export default function IndexPage() {
   )
 
   const monitorPanels: Record<string, StrategyPanel> = {
-    overviewNode: {
-      id: 'overviewNode',
-      state: getPanelState(monitorStatesQuery.isLoading, monitorStatesQuery.isError, nodeRows.length),
+    watchlistMonitor: {
+      id: 'watchlistMonitor',
+      state: getPanelState(monitorStatesQuery.isLoading, monitorStatesQuery.isError, monitorRows.length),
       content: (
         <StrategyDataTable
-          tableId="index-node-monitor"
-          columns={nodeColumns}
-          rows={nodeRows}
+          tableId="index-watchlist-monitor"
+          columns={monitorColumns}
+          rows={monitorRows}
           rowKey={(row) => row.instrument_id}
           loading={monitorStatesQuery.isLoading}
           error={monitorStatesQuery.isError ? '监控状态加载失败' : null}
           searchable={false}
-          emptyText="自选股暂无 Node 监控状态"
+          emptyText="暂无监控计算结果"
         />
       ),
     },
@@ -700,31 +695,39 @@ export default function IndexPage() {
 
       {/* KPI 卡片 */}
       <div className="grid kpi">
-        {/* KPI 1：今日选股结果数 */}
+        {/* KPI 1：今日选股结果（最新已发布 DSA 运行的标的总数） */}
         <div className="card kpi-card">
           <div className="kpi-label">今日选股结果</div>
           <div className="kpi-value">
-            {kpi1Loading ? '-' : kpi1Total}
-            <small className="kpi-unit">只</small>
+            {kpi1Loading ? '-' : (kpi1Value ?? '暂无')}
+            {kpi1Value !== null && <small className="kpi-unit">只</small>}
           </div>
           <div className="kpi-foot">DSA 选股策略</div>
         </div>
-        {/* KPI 2：监控自选股数 */}
+        {/* KPI 2：监控自选股数（active 自选股数量） */}
         <div className="card kpi-card">
           <div className="kpi-label">监控自选股</div>
           <div className="kpi-value">
-            {watchlistQuery.isLoading ? '-' : kpi2Total}
-            <small className="kpi-unit">只</small>
+            {watchlistQuery.isLoading ? '-' : (watchlistQuery.isError ? '加载失败' : kpi2Total)}
+            {!watchlistQuery.isLoading && !watchlistQuery.isError && <small className="kpi-unit">只</small>}
           </div>
           <div className="kpi-foot">已启用监控策略</div>
         </div>
-        {/* KPI 3：今日策略事件数 */}
+        {/* KPI 3：今日策略事件（通过 /me/events/summary API） */}
         <div className="card kpi-card">
           <div className="kpi-label">今日策略事件</div>
           <div className="kpi-value">
-            {kpi3Loading ? '-' : kpi3Total}
+            {eventsSummaryQuery.isLoading
+              ? '-'
+              : eventsSummaryQuery.isError
+                ? '加载失败'
+                : eventsSummaryQuery.data?.total_events ?? 0}
           </div>
-          <div className="kpi-foot">跨 {kpi2Total} 只自选股</div>
+          <div className="kpi-foot">
+            {eventsSummaryQuery.data
+              ? `跨 ${eventsSummaryQuery.data.instruments_with_events} 只自选股`
+              : '策略事件汇总'}
+          </div>
         </div>
         {/* KPI 4：通知渠道状态 */}
         <div className="card kpi-card">

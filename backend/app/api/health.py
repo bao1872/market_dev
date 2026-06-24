@@ -24,7 +24,7 @@ router = APIRouter(tags=["health"])
 # [策略资产] - 就绪标志：启动时检查策略资产文件完整性，缺失则置 False
 _strategy_assets_ready: bool = True
 
-# [策略种子] - 就绪标志：watchlist_monitor 无 released 版本时置 False
+# [策略种子] - 就绪标志：必需策略无 released 版本时置 False
 _seed_ready: bool = True
 _seed_failure_reason: str = ""
 

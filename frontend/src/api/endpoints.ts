@@ -176,6 +176,10 @@ export interface StrategyRun {
   finished_at: string | null
   idempotency_key: string
   published_at: string | null
+  total_instruments: number | null
+  succeeded_count: number | null
+  failed_count: number | null
+  skipped_count: number | null
 }
 
 /** 策略运行列表响应 */
@@ -341,6 +345,27 @@ export interface WatchlistItem {
 export interface WatchlistListResponse {
   items: WatchlistItem[]
   total: number
+}
+
+/** 自选股+监控状态聚合项 */
+export interface WatchlistMonitorStatusItem {
+  watchlist_item_id: string
+  instrument_id: string
+  symbol: string
+  name: string
+  market: string
+  watchlist_created_at: string
+  monitor_status: 'WAITING_FIRST_RUN' | 'SUCCEEDED' | 'FAILED' | 'STALE' | 'MARKET_CLOSED'
+  evaluation_status: string | null
+  error_code: string | null
+  source_bar_time: string | null
+  metrics: Record<string, unknown> | null
+  updated_at: string | null
+}
+
+/** 自选股+监控状态聚合响应 */
+export interface WatchlistMonitorStatusResponse {
+  items: WatchlistMonitorStatusItem[]
 }
 
 // ============================================================
@@ -647,6 +672,26 @@ export async function getMe(): Promise<UserResponse> {
 /** 获取当前用户会员状态 */
 export async function getMyMembership(): Promise<MembershipResponse> {
   const { data } = await apiClient.get<MembershipResponse>('/me/membership')
+  return data
+}
+
+// ============================================================
+// ===== Events Summary 领域类型 =====
+// ============================================================
+
+/** 策略事件汇总响应 */
+export interface EventsSummaryResponse {
+  date: string
+  total_events: number
+  instruments_with_events: number
+  last_event_at: string | null
+}
+
+/** 查询当前用户指定日期的策略事件汇总 */
+export async function getEventsSummary(date: string): Promise<EventsSummaryResponse> {
+  const { data } = await apiClient.get<EventsSummaryResponse>('/me/events/summary', {
+    params: { date },
+  })
   return data
 }
 
@@ -972,6 +1017,12 @@ export async function removeFromWatchlist(instrumentId: string): Promise<void> {
   await apiClient.delete(`/watchlist/${instrumentId}`)
 }
 
+/** 查询自选股+监控状态聚合数据 */
+export async function getWatchlistMonitorStatus(): Promise<WatchlistMonitorStatusResponse> {
+  const { data } = await apiClient.get<WatchlistMonitorStatusResponse>('/watchlist/monitor-status')
+  return data
+}
+
 // ============================================================
 // ===== Stock Memo 端点 =====
 // ============================================================
@@ -1198,5 +1249,38 @@ export async function getMembers(params?: PaginationParams): Promise<MemberListR
 /** 查询用户兑换记录 */
 export async function getMemberRedemptions(userId: string): Promise<InviteRedemption[]> {
   const { data } = await apiClient.get<InviteRedemption[]>(`/admin/members/${userId}/redemptions`)
+  return data
+}
+
+// ============================================================
+// ===== Admin System Overview 端点 =====
+// ============================================================
+
+/** 系统概览响应 */
+export interface SystemOverview {
+  active_users: number
+  distinct_monitored_instruments: number
+  evaluations_last_minute: number
+  evaluations_success_rate: number
+  notification_delivery_rate: number
+  queue_backlog: number
+  failed_retry_count: number
+  latest_selector_run: {
+    id: string
+    status: string
+    started_at: string | null
+    finished_at: string | null
+    total_instruments: number | null
+    succeeded_count: number | null
+    failed_count: number | null
+  } | null
+  worker_health: string
+  scheduler_health: string
+  recent_anomalies: unknown[]
+}
+
+/** 获取系统概览（admin） */
+export async function getAdminSystemOverview(): Promise<SystemOverview> {
+  const { data } = await apiClient.get<SystemOverview>('/admin/system-overview')
   return data
 }

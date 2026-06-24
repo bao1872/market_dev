@@ -17,16 +17,18 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time as dt_time
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
+from app.constants.strategy_keys import WATCHLIST_MONITOR
 from app.core.deps import get_current_active_user
 from app.db import get_db
+from app.services.calendar_service import is_trading_day_async
 from app.models.instrument import Instrument
 from app.models.monitor_state import MonitorState
 from app.models.strategy import StrategyDefinition, StrategyVersion
@@ -140,14 +142,34 @@ async def get_watchlist_monitor_status(
     """查询当前用户自选股+监控状态聚合数据。
 
     返回当前用户所有 active 自选股，附带最新 released watchlist_monitor 版本的
-    MonitorState。无监控状态时 has_monitor_state=false, monitor_state=null。
+    MonitorState。无监控状态时 monitor_status=WAITING_FIRST_RUN, metrics=null。
+
+    monitor_status 枚举：
+    - WAITING_FIRST_RUN: 无 MonitorState
+    - SUCCEEDED: evaluation_status=SUCCEEDED
+    - FAILED: evaluation_status=FAILED
+    - STALE: 交易时段内 updated_at 超过 30 分钟
+    - MARKET_CLOSED: 非交易时段
     """
+    # 0. 判断当前是否交易时段
+    from datetime import date as dt_date
+
+    today = dt_date.today()
+    is_trading_day = await is_trading_day_async(db, today)
+    now_cst = datetime.now(ZoneInfo("Asia/Shanghai"))
+    is_trading_hours = False
+    if is_trading_day:
+        current_time = now_cst.time()
+        morning_session = dt_time(9, 30) <= current_time <= dt_time(11, 30)
+        afternoon_session = dt_time(13, 0) <= current_time <= dt_time(15, 0)
+        is_trading_hours = morning_session or afternoon_session
+
     # 1. 查找 watchlist_monitor 策略的最新 released 版本 ID
     latest_version_stmt = (
         select(StrategyVersion.id)
         .join(StrategyDefinition, StrategyVersion.strategy_definition_id == StrategyDefinition.id)
         .where(
-            StrategyDefinition.strategy_key == "watchlist_monitor",
+            StrategyDefinition.strategy_key == WATCHLIST_MONITOR,
             StrategyVersion.status == "released",
         )
         .order_by(StrategyVersion.released_at.desc())
@@ -185,37 +207,74 @@ async def get_watchlist_monitor_status(
             monitor_states_map[state.instrument_id] = state
 
     # 4. 组装响应
+    STALE_THRESHOLD_MINUTES = 30
     response_items: list[WatchlistMonitorStatusItem] = []
-    for _watchlist_item, instrument in rows:
+    for watchlist_item, instrument in rows:
         ms = monitor_states_map.get(instrument.id)
         if ms is not None:
             payload = ms.payload
             evaluation_status = payload.get("evaluation_status")
-            evaluation_error = payload.get("evaluation_error")
+            error_code = payload.get("evaluation_error") or payload.get("error_code")
+            source_bar_time = ms.bar_time
+
+            # 计算 monitor_status
+            if not is_trading_hours:
+                monitor_status = "MARKET_CLOSED"
+            elif evaluation_status == "SUCCEEDED":
+                # 检查是否 STALE
+                if ms.updated_at:
+                    age_minutes = (now_cst - ms.updated_at.astimezone(ZoneInfo("Asia/Shanghai"))).total_seconds() / 60
+                    if age_minutes > STALE_THRESHOLD_MINUTES:
+                        monitor_status = "STALE"
+                    else:
+                        monitor_status = "SUCCEEDED"
+                else:
+                    monitor_status = "SUCCEEDED"
+            elif evaluation_status == "FAILED":
+                monitor_status = "FAILED"
+            else:
+                # PENDING 或其他状态，按 STALE 逻辑判断
+                if ms.updated_at:
+                    age_minutes = (now_cst - ms.updated_at.astimezone(ZoneInfo("Asia/Shanghai"))).total_seconds() / 60
+                    if age_minutes > STALE_THRESHOLD_MINUTES:
+                        monitor_status = "STALE"
+                    else:
+                        monitor_status = "SUCCEEDED"
+                else:
+                    monitor_status = "SUCCEEDED"
+
             response_items.append(
                 WatchlistMonitorStatusItem(
+                    watchlist_item_id=watchlist_item.id,
                     instrument_id=instrument.id,
                     symbol=instrument.symbol,
                     name=instrument.name,
                     market=instrument.market,
-                    has_monitor_state=True,
-                    monitor_state=payload,
+                    watchlist_created_at=watchlist_item.created_at,
+                    monitor_status=monitor_status,
                     evaluation_status=evaluation_status,
-                    evaluation_error=evaluation_error,
+                    error_code=error_code,
+                    source_bar_time=str(source_bar_time) if source_bar_time else None,
+                    metrics=payload,
                     updated_at=ms.updated_at,
                 )
             )
         else:
+            # 无 MonitorState
+            monitor_status = "MARKET_CLOSED" if not is_trading_hours else "WAITING_FIRST_RUN"
             response_items.append(
                 WatchlistMonitorStatusItem(
+                    watchlist_item_id=watchlist_item.id,
                     instrument_id=instrument.id,
                     symbol=instrument.symbol,
                     name=instrument.name,
                     market=instrument.market,
-                    has_monitor_state=False,
-                    monitor_state=None,
+                    watchlist_created_at=watchlist_item.created_at,
+                    monitor_status=monitor_status,
                     evaluation_status=None,
-                    evaluation_error=None,
+                    error_code=None,
+                    source_bar_time=None,
+                    metrics=None,
                     updated_at=None,
                 )
             )

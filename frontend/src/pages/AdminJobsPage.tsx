@@ -29,6 +29,7 @@ import {
   useNotificationChannels,
   useTriggerStrategyRun,
 } from '@/hooks/useApi'
+import { STRATEGY_KEYS } from '@/constants/strategyKeys'
 import * as api from '@/api/endpoints'
 import type { StrategyRun, Instrument } from '@/api/endpoints'
 import { useToast } from '@/store/toast'
@@ -133,16 +134,16 @@ export default function AdminJobsPage() {
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null)
 
   // ===== 状态：手动重跑表单 =====
-  const [rerunTaskType, setRerunTaskType] = useState('dsa')
+  const [rerunTaskType, setRerunTaskType] = useState<string>(STRATEGY_KEYS.DSA_SELECTOR)
   const [rerunTradeDate, setRerunTradeDate] = useState('')
   const [rerunOverrides, setRerunOverrides] = useState('')
 
   // ===== 查询：Job 运行列表（dsa + node 两个策略合并）=====
-  const dsaRunsQuery = useStrategyRuns('dsa', { limit: 20 })
-  const nodeRunsQuery = useStrategyRuns('node', { limit: 20 })
+  const dsaRunsQuery = useStrategyRuns(STRATEGY_KEYS.DSA_SELECTOR, { limit: 20 })
+  const nodeRunsQuery = useStrategyRuns(STRATEGY_KEYS.WATCHLIST_MONITOR, { limit: 20 })
 
   // ===== 查询：事件列表（node 策略的 node_touch 事件）=====
-  const eventsQuery = useStrategyEvents('node', { limit: 10 })
+  const eventsQuery = useStrategyEvents(STRATEGY_KEYS.WATCHLIST_MONITOR, { limit: 10 })
 
   // ===== 查询：用户消息总数（KPI 4，当前用户维度）=====
   const messagesQuery = useMessages({ limit: 1 })
@@ -166,15 +167,15 @@ export default function AdminJobsPage() {
   // 运行 ID -> 策略 key 映射（用于"仅重跑失败项"时定位策略）
   const runStrategyMap = useMemo(() => {
     const m = new Map<string, string>()
-    ;(dsaRunsQuery.data?.items ?? []).forEach((r) => m.set(r.id, 'dsa'))
-    ;(nodeRunsQuery.data?.items ?? []).forEach((r) => m.set(r.id, 'node'))
+    ;(dsaRunsQuery.data?.items ?? []).forEach((r) => m.set(r.id, STRATEGY_KEYS.DSA_SELECTOR))
+    ;(nodeRunsQuery.data?.items ?? []).forEach((r) => m.set(r.id, STRATEGY_KEYS.WATCHLIST_MONITOR))
     return m
   }, [dsaRunsQuery.data, nodeRunsQuery.data])
 
   // ===== 派生数据：转换为 JobRunRow =====
   const jobRunRows: JobRunRow[] = useMemo(() => {
     return allRuns.map((run) => {
-      const strategyKey = runStrategyMap.get(run.id) ?? 'dsa'
+      const strategyKey = runStrategyMap.get(run.id) ?? STRATEGY_KEYS.DSA_SELECTOR
       return {
         id: run.id,
         task: run.run_type || strategyKey,
@@ -286,7 +287,7 @@ export default function AdminJobsPage() {
   /** 仅重跑失败项：基于选中运行创建失败项重跑任务 */
   const handleRerunFailed = useCallback(async () => {
     if (!selectedRunId) return
-    const strategyKey = runStrategyMap.get(selectedRunId) ?? 'dsa'
+    const strategyKey = runStrategyMap.get(selectedRunId) ?? STRATEGY_KEYS.DSA_SELECTOR
     const run = allRuns.find((r) => r.id === selectedRunId)
     try {
       await triggerRun.mutateAsync({
@@ -710,8 +711,8 @@ export default function AdminJobsPage() {
                     value={rerunTaskType}
                     onChange={(e) => setRerunTaskType(e.target.value)}
                   >
-                    <option value="dsa">DSA 指定日期</option>
-                    <option value="node">Node 指定股票</option>
+                    <option value={STRATEGY_KEYS.DSA_SELECTOR}>DSA 指定日期</option>
+                    <option value={STRATEGY_KEYS.WATCHLIST_MONITOR}>Node 指定股票</option>
                   </select>
                 </div>
                 {/* 交易日 */}

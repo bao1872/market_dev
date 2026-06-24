@@ -3,20 +3,18 @@
 //
 // 用法：
 // 1. 路由 /admin，受保护路由（经 ProtectedLayout + AdminRoute 包裹）
-// 2. KPI 卡片组（admin-accent 紫色左边框，4 列）：有效用户 / 去重监控股票 / 最近一分钟处理 / 今日投递成功率
+// 2. KPI 卡片组（admin-accent 紫色左边框，4 列）：有效用户 / 去重监控股票 / 最近一分钟处理 / 评估成功率
 // 3. split-3 布局：监控吞吐折线图（Canvas）/ DSA 最近运行 / 队列与任务
 // 4. split-2 布局：服务健康状态表 / 最近异常列表
-// 5. 操作：维护模式开关 / 暂停全局推送开关（本地状态 + toast 反馈）
+// 5. 操作：维护模式开关 / 暂停全局推送开关（尚未接入后端，已禁用）
 //
 // 依赖 hooks：
-// - useMembers：获取会员总数（KPI 有效用户）
+// - useAdminSystemOverview：获取系统概览数据（活跃用户/监控标的/评估统计）
 // - useStrategies：获取策略目录（策略数，显示在页头描述）
-// - useStrategyRuns：获取 DSA 最近运行记录（DSA 卡片处理数/耗时）
 
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { useToast } from '@/store/toast'
-import { useMembers, useStrategies, useStrategyRuns } from '@/hooks/useApi'
+import { useStrategies, useAdminSystemOverview } from '@/hooks/useApi'
 import { getVersion, type VersionInfo } from '@/api/endpoints'
 
 // ===== 监控吞吐折线图 =====
@@ -62,9 +60,6 @@ function formatRunTime(iso: string | null | undefined): string {
 
 // ===== 主页面 =====
 export default function AdminIndexPage() {
-  const toast = useToast()
-  const [maintenanceMode, setMaintenanceMode] = useState(false)
-  const [pausePush, setPausePush] = useState(false)
   const [backendVersion, setBackendVersion] = useState<VersionInfo | null>(null)
 
   // 获取后端版本信息
@@ -73,49 +68,53 @@ export default function AdminIndexPage() {
   }, [])
 
   // API 数据查询
-  const membersQuery = useMembers({ limit: 1 })
   const strategiesQuery = useStrategies()
-  const dsaRunsQuery = useStrategyRuns('dsa', { limit: 1 })
-
-  // KPI 1：有效用户数（从 useMembers 获取 total）
-  const memberCount = membersQuery.data?.total ?? 0
-  const memberLoading = membersQuery.isLoading
+  const overviewQuery = useAdminSystemOverview()
 
   // 策略数（从 useStrategies 获取 total，显示在页头描述）
   const strategyCount = strategiesQuery.data?.total ?? 0
 
+  // 系统概览数据
+  const overview = overviewQuery.data
+  const overviewLoading = overviewQuery.isLoading
 
-  // DSA 最近运行
-  const latestDsaRun = dsaRunsQuery.data?.items[0]
-  const dsaLoading = dsaRunsQuery.isLoading
-  const dsaError = dsaRunsQuery.isError
+  // KPI 1：有效用户数（从 system-overview 获取 active_users）
+  const activeUsers = overview?.active_users ?? 0
 
-  // DSA 运行统计
-  // TODO: [AdminIndexPage] StrategyRun 无 processed/success/failed 字段，需后端扩展 API 返回运行统计
-  const hasDsaRun = !!latestDsaRun
+  // KPI 2：去重监控股票数
+  const distinctInstruments = overview?.distinct_monitored_instruments ?? 0
+
+  // KPI 3：最近一分钟处理数
+  const evalsLastMinute = overview?.evaluations_last_minute ?? 0
+
+  // KPI 4：评估成功率
+  const evalSuccessRate = overview?.evaluations_success_rate ?? 0
+  const evalSuccessRatePct = evalSuccessRate > 0 ? `${(evalSuccessRate * 100).toFixed(1)}%` : '暂无数据'
+
+  // DSA 最近运行（从 system-overview 获取）
+  const latestSelectorRun = overview?.latest_selector_run
+  const hasDsaRun = !!latestSelectorRun
   const dsaDuration = hasDsaRun
-    ? formatDuration(latestDsaRun!.started_at, latestDsaRun!.finished_at)
+    ? formatDuration(latestSelectorRun!.started_at, latestSelectorRun!.finished_at)
     : '-'
-  const dsaRunTime = formatRunTime(latestDsaRun?.finished_at)
+  const dsaRunTime = formatRunTime(latestSelectorRun?.finished_at)
 
-  // 切换维护模式
+  // 队列与任务
+  const queueBacklog = overview?.queue_backlog ?? 0
+  const failedRetryCount = overview?.failed_retry_count ?? 0
+
+  // 服务健康
+  const workerHealth = overview?.worker_health ?? 'unknown'
+  const schedulerHealth = overview?.scheduler_health ?? 'unknown'
+
+  // 切换维护模式（尚未接入后端，按钮已禁用）
   const handleToggleMaintenance = () => {
-    const next = !maintenanceMode
-    setMaintenanceMode(next)
-    toast.show(
-      next ? '已进入维护模式' : '已退出维护模式',
-      next ? '普通用户将看到维护提示页' : '服务恢复正常访问',
-    )
+    // [admin] - 维护模式尚未接入后端 API，暂不执行任何操作
   }
 
-  // 切换暂停全局推送
+  // 切换暂停全局推送（尚未接入后端，按钮已禁用）
   const handleTogglePausePush = () => {
-    const next = !pausePush
-    setPausePush(next)
-    toast.show(
-      next ? '全局推送已暂停' : '全局推送已恢复',
-      next ? '所有通知投递已暂停' : '通知投递已恢复',
-    )
+    // [admin] - 暂停全局推送尚未接入后端 API，暂不执行任何操作
   }
 
   // 页头描述：附加策略数（数据加载完成后显示）
@@ -135,51 +134,59 @@ export default function AdminIndexPage() {
         </div>
         <div className="actions">
           <button
-            className={`btn${maintenanceMode ? ' danger' : ''}`}
+            className="btn"
             onClick={handleToggleMaintenance}
+            disabled
+            title="尚未接入后端"
           >
-            {maintenanceMode ? '退出维护模式' : '维护模式'}
+            维护模式
+            <span style={{ fontSize: '0.75em', opacity: 0.6, marginLeft: 4 }}>尚未接入后端</span>
           </button>
           <button
-            className={`btn${pausePush ? ' danger' : ''}`}
+            className="btn"
             onClick={handleTogglePausePush}
+            disabled
+            title="尚未接入后端"
           >
-            {pausePush ? '恢复全局推送' : '暂停全局推送'}
+            暂停全局推送
+            <span style={{ fontSize: '0.75em', opacity: 0.6, marginLeft: 4 }}>尚未接入后端</span>
           </button>
         </div>
       </div>
 
       {/* KPI 卡片组（admin-accent 紫色左边框，4 列）*/}
       <div className="grid kpi">
-        {/* KPI 1：有效用户数（从 useMembers 获取）*/}
+        {/* KPI 1：有效用户数（从 system-overview 获取）*/}
         <div className="card kpi-card admin-accent">
           <div className="kpi-label">有效用户</div>
           <div className="kpi-value">
-            {memberLoading ? '-' : memberCount}
+            {overviewLoading ? '-' : activeUsers}
           </div>
-          {/* TODO: [AdminIndexPage] 需 GET /admin/metrics/active-users API 获取今日活跃数 */}
-          <div className="kpi-foot">今日活跃 暂无数据</div>
+          <div className="kpi-foot">有活跃自选股的用户</div>
         </div>
         {/* KPI 2：去重监控股票数 */}
-        {/* TODO: [AdminIndexPage] 需 GET /admin/metrics/monitored-stocks API 获取去重监控股票数 */}
         <div className="card kpi-card admin-accent">
           <div className="kpi-label">去重监控股票</div>
-          <div className="kpi-value">暂无数据</div>
-          <div className="kpi-foot">暂无数据</div>
+          <div className="kpi-value">
+            {overviewLoading ? '-' : distinctInstruments}
+          </div>
+          <div className="kpi-foot">活跃自选股去重</div>
         </div>
         {/* KPI 3：最近一分钟处理数 */}
-        {/* TODO: [AdminIndexPage] 需 GET /admin/metrics/throughput API 获取最近一分钟处理数与成功率 */}
         <div className="card kpi-card admin-accent">
           <div className="kpi-label">最近一分钟处理</div>
-          <div className="kpi-value">暂无数据</div>
-          <div className="kpi-foot">暂无数据</div>
+          <div className="kpi-value">
+            {overviewLoading ? '-' : evalsLastMinute}
+          </div>
+          <div className="kpi-foot">评估完成数</div>
         </div>
-        {/* KPI 4：今日投递成功率 */}
-        {/* TODO: [AdminIndexPage] 需 GET /admin/metrics/delivery-rate API 获取今日投递成功率 */}
+        {/* KPI 4：评估成功率 */}
         <div className="card kpi-card admin-accent">
-          <div className="kpi-label">今日投递成功率</div>
-          <div className="kpi-value">暂无数据</div>
-          <div className="kpi-foot">暂无数据</div>
+          <div className="kpi-label">评估成功率</div>
+          <div className="kpi-value">
+            {overviewLoading ? '-' : evalSuccessRatePct}
+          </div>
+          <div className="kpi-foot">SUCCEEDED / 已完成</div>
         </div>
       </div>
 
@@ -205,26 +212,23 @@ export default function AdminIndexPage() {
             </div>
           </div>
           <div className="card-body">
-            {dsaLoading ? (
+            {overviewLoading ? (
               <div className="notice">加载中…</div>
-            ) : dsaError ? (
-              <div className="notice error">DSA 运行记录加载失败</div>
             ) : !hasDsaRun ? (
               <div className="notice">今日尚未运行</div>
             ) : (
               <>
-                {/* TODO: [AdminIndexPage] 需后端扩展 StrategyRun 返回 processed/success/failed 统计 */}
                 <div className="toggle-row">
                   <span>处理股票</span>
-                  <b className="num">暂无数据</b>
+                  <b className="num">{latestSelectorRun!.total_instruments ?? '-'}</b>
                 </div>
                 <div className="toggle-row">
                   <span>成功</span>
-                  <b className="num">暂无数据</b>
+                  <b className="num">{latestSelectorRun!.succeeded_count ?? '-'}</b>
                 </div>
                 <div className="toggle-row">
                   <span>失败</span>
-                  <b className="num">暂无数据</b>
+                  <b className="num">{latestSelectorRun!.failed_count ?? '-'}</b>
                 </div>
                 <div className="toggle-row">
                   <span>耗时</span>
@@ -239,7 +243,6 @@ export default function AdminIndexPage() {
         </section>
 
         {/* 队列与任务 */}
-        {/* TODO: [AdminIndexPage] 需 GET /admin/metrics/queue-backlog API 获取各队列积压数 */}
         <section className="card">
           <div className="card-head">
             <div>
@@ -250,7 +253,7 @@ export default function AdminIndexPage() {
           <div className="card-body">
             <div className="toggle-row">
               <span>监控计算</span>
-              <b className="num">暂无数据</b>
+              <b className="num">{overviewLoading ? '-' : queueBacklog}</b>
             </div>
             <div className="toggle-row">
               <span>事件分发</span>
@@ -262,7 +265,7 @@ export default function AdminIndexPage() {
             </div>
             <div className="toggle-row">
               <span>失败重试</span>
-              <b className="num">暂无数据</b>
+              <b className="num">{overviewLoading ? '-' : failedRetryCount}</b>
             </div>
             <Link className="btn small card-body-action" to="/admin/jobs">
               任务与事件 →
@@ -282,7 +285,14 @@ export default function AdminIndexPage() {
             </div>
           </div>
           <div className="card-body">
-            <div className="notice">暂无数据</div>
+            <div className="toggle-row">
+              <span>Worker</span>
+              <b className="num">{workerHealth}</b>
+            </div>
+            <div className="toggle-row">
+              <span>Scheduler</span>
+              <b className="num">{schedulerHealth}</b>
+            </div>
           </div>
         </section>
 

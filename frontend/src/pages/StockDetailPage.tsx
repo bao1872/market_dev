@@ -29,6 +29,7 @@ import {
   useRealtimeQuote,
 } from '@/hooks/useApi'
 import { resolveStrategy } from '@/lib/strategy-manifest'
+import { STRATEGY_KEYS } from '@/constants/strategyKeys'
 import { useToast } from '@/store/toast'
 
 // 市场代码 -> 中文标签映射
@@ -57,7 +58,7 @@ export default function StockDetailPage() {
 
   // 解析 URL 参数
   const source = (searchParams.get('source') || 'watchlist') as 'selection' | 'watchlist'
-  const strategy = searchParams.get('strategy') || 'node'
+  const strategy = searchParams.get('strategy') || STRATEGY_KEYS.WATCHLIST_MONITOR
 
   // 根据 source + strategy 调用 manifest.resolveStrategy 确定默认图层集
   const strategyDef = useMemo(() => resolveStrategy(source, strategy), [source, strategy])

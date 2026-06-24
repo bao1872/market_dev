@@ -58,19 +58,26 @@ class WatchlistListResponse(BaseModel):
 class WatchlistMonitorStatusItem(BaseModel):
     """自选股+监控状态聚合响应（单条）。"""
 
+    watchlist_item_id: UUID = Field(..., description="自选记录 ID")
     instrument_id: UUID = Field(..., description="股票 ID")
     symbol: str = Field(..., description="股票代码")
     name: str = Field(..., description="股票名称")
     market: str = Field(..., description="市场（SH/SZ/BJ）")
-    has_monitor_state: bool = Field(..., description="是否有监控状态")
-    monitor_state: dict[str, Any] | None = Field(
-        None, description="监控状态 payload（无状态时为 null）"
+    watchlist_created_at: datetime = Field(..., description="加入自选时间")
+    monitor_status: str = Field(
+        ..., description="监控状态枚举：WAITING_FIRST_RUN/SUCCEEDED/FAILED/STALE/MARKET_CLOSED"
     )
     evaluation_status: str | None = Field(
         None, description="评估状态（SUCCEEDED/FAILED/PENDING）"
     )
-    evaluation_error: str | None = Field(
-        None, description="评估错误信息（无错误时为 null）"
+    error_code: str | None = Field(
+        None, description="评估错误码（无错误时为 null）"
+    )
+    source_bar_time: str | None = Field(
+        None, description="监控状态对应的 bar 时间"
+    )
+    metrics: dict[str, Any] | None = Field(
+        None, description="监控状态 metrics（MonitorState payload，无状态时为 null）"
     )
     updated_at: datetime | None = Field(
         None, description="监控状态更新时间"

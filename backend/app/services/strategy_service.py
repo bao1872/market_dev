@@ -255,6 +255,7 @@ async def list_strategies(
     db: AsyncSession,
     kind: str | None = None,
     user_visible_only: bool = False,
+    admin_mode: bool = False,
 ) -> list[StrategyDefinition]:
     """列出策略定义。
 
@@ -262,6 +263,7 @@ async def list_strategies(
         db: 异步会话
         kind: 可选，按 kind 过滤（selector/monitor）
         user_visible_only: 仅返回 production 环境 + 对用户可见 + 有 released 版本的策略
+        admin_mode: True 时跳过用户可见性过滤（仅用于 admin 端点）
 
     Returns:
         策略定义列表
@@ -269,7 +271,13 @@ async def list_strategies(
     stmt = select(StrategyDefinition).order_by(StrategyDefinition.strategy_key)
     if kind is not None:
         stmt = stmt.where(StrategyDefinition.kind == kind)
-    if user_visible_only:
+    # 非 admin 模式下始终过滤：仅返回 production + is_user_visible + 有 released 版本
+    if not admin_mode:
+        stmt = stmt.where(
+            StrategyDefinition.environment == "production",
+            StrategyDefinition.is_user_visible == True,  # noqa: E712
+        )
+    elif user_visible_only:
         stmt = stmt.where(
             StrategyDefinition.environment == "production",
             StrategyDefinition.is_user_visible == True,  # noqa: E712
@@ -277,8 +285,8 @@ async def list_strategies(
     result = await db.execute(stmt)
     definitions = list(result.scalars().all())
 
-    # user_visible_only 时过滤掉无 released 版本的策略
-    if user_visible_only:
+    # 非 admin 模式或 user_visible_only 时过滤掉无 released 版本的策略
+    if not admin_mode or user_visible_only:
         filtered = []
         for d in definitions:
             ver_stmt = (

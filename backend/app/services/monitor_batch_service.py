@@ -32,6 +32,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants.strategy_keys import WATCHLIST_MONITOR
 from app.models.instrument import Instrument
 from app.models.monitor_evaluation import MonitorEvaluation
 from app.models.monitor_state import MonitorState as MonitorStateORM
@@ -47,6 +48,11 @@ logger = logging.getLogger("monitor_batch_service")
 
 # 事件冷却窗口（秒）：同一 instrument_id + event_type + boundary 在此时间内不重复写入
 _EVENT_COOLDOWN_SECONDS = 600
+
+# [eval_recovery] - 评估租约与重试常量
+_LEASE_DURATION_SECONDS = 300  # 租约时长（秒）
+_MAX_RETRIES = 5  # 最大重试次数
+_RETRY_BACKOFF_BASE_SECONDS = 30  # 重试退避基数（秒），实际退避 = 30 * 2^retry_count
 
 # 行情回看参数
 _DAILY_LOOKBACK_DAYS = 370  # 约250个交易日（参考脚本 bars=250）
@@ -216,7 +222,7 @@ class MonitorBatchService:
         # 查询 strategy_key='watchlist_monitor' 的策略定义
         def_stmt = (
             select(StrategyDefinition)
-            .where(StrategyDefinition.strategy_key == "watchlist_monitor")
+            .where(StrategyDefinition.strategy_key == WATCHLIST_MONITOR)
         )
         def_result = await db.execute(def_stmt)
         defn = def_result.scalar_one_or_none()
@@ -360,9 +366,11 @@ class MonitorBatchService:
         else:
             source_bar_time = now.replace(second=0, microsecond=0)
 
-        # b. INSERT 评估占位（exactly-once: ON CONFLICT DO NOTHING）
+        # b. [eval_recovery] INSERT 评估占位（含租约/心跳），冲突时按状态判断是否可重入
         evaluation_id: uuid.UUID | None = None
+        now_cst = datetime.now(_CST)
         try:
+            # 先尝试 INSERT 新记录（含租约和心跳）
             insert_stmt = (
                 pg_insert(MonitorEvaluation)
                 .values(
@@ -370,6 +378,9 @@ class MonitorBatchService:
                     instrument_id=instrument_id,
                     source_bar_time=source_bar_time,
                     status="PENDING",
+                    lease_expires_at=now_cst + timedelta(seconds=_LEASE_DURATION_SECONDS),
+                    heartbeat_at=now_cst,
+                    retry_count=0,
                 )
                 .on_conflict_do_nothing(
                     index_elements=["strategy_version_id", "instrument_id", "source_bar_time"],
@@ -378,14 +389,110 @@ class MonitorBatchService:
             )
             insert_result = await db.execute(insert_stmt)
             row = insert_result.scalar_one_or_none()
-            if row is None:
-                # UNIQUE 冲突，该标的此 bar 已处理过，跳过
-                logger.debug(
-                    "评估已存在（exactly-once 跳过）: instrument_id=%s source_bar_time=%s",
-                    instrument_id, source_bar_time,
+
+            if row is not None:
+                # 新插入成功，获得租约
+                evaluation_id = row
+            else:
+                # UNIQUE 冲突，查询已有记录判断是否可重入
+                existing_stmt = select(MonitorEvaluation).where(
+                    MonitorEvaluation.strategy_version_id == strategy_version.id,
+                    MonitorEvaluation.instrument_id == instrument_id,
+                    MonitorEvaluation.source_bar_time == source_bar_time,
                 )
-                return []
-            evaluation_id = row
+                existing_result = await db.execute(existing_stmt)
+                existing = existing_result.scalar_one_or_none()
+
+                if existing is None:
+                    # 极端情况：INSERT 冲突但查不到，跳过
+                    logger.debug(
+                        "评估冲突但查不到记录，跳过: instrument_id=%s source_bar_time=%s",
+                        instrument_id, source_bar_time,
+                    )
+                    return []
+
+                if existing.status == "SUCCEEDED":
+                    # 已成功完成，跳过
+                    logger.debug(
+                        "评估已成功（exactly-once 跳过）: instrument_id=%s source_bar_time=%s",
+                        instrument_id, source_bar_time,
+                    )
+                    return []
+
+                if existing.status == "DEAD":
+                    # 已达最大重试次数，跳过
+                    logger.debug(
+                        "评估已死亡（DEAD 跳过）: instrument_id=%s source_bar_time=%s",
+                        instrument_id, source_bar_time,
+                    )
+                    return []
+
+                if existing.status == "PENDING" and existing.lease_expires_at is not None and existing.lease_expires_at < now_cst:
+                    # PENDING + 租约过期：重新认领
+                    existing.retry_count += 1
+                    if existing.retry_count >= _MAX_RETRIES:
+                        existing.status = "DEAD"
+                        logger.warning(
+                            "[eval_recovery] PENDING 评估租约过期且达最大重试次数，标记 DEAD: "
+                            "evaluation_id=%s instrument_id=%s retry_count=%d",
+                            existing.id, instrument_id, existing.retry_count,
+                        )
+                        return []
+                    existing.lease_expires_at = now_cst + timedelta(seconds=_LEASE_DURATION_SECONDS)
+                    existing.heartbeat_at = now_cst
+                    evaluation_id = existing.id
+                    logger.info(
+                        "[eval_recovery] 重新认领过期 PENDING 评估: evaluation_id=%s "
+                        "instrument_id=%s retry_count=%d",
+                        evaluation_id, instrument_id, existing.retry_count,
+                    )
+
+                elif existing.status == "FAILED" and existing.retry_count < _MAX_RETRIES:
+                    # FAILED + 未达最大重试：检查退避时间
+                    next_retry = existing.next_retry_at
+                    if next_retry is not None and next_retry <= now_cst:
+                        existing.retry_count += 1
+                        if existing.retry_count >= _MAX_RETRIES:
+                            existing.status = "DEAD"
+                            logger.warning(
+                                "[eval_recovery] FAILED 评估达最大重试次数，标记 DEAD: "
+                                "evaluation_id=%s instrument_id=%s retry_count=%d",
+                                existing.id, instrument_id, existing.retry_count,
+                            )
+                            return []
+                        existing.status = "PENDING"
+                        existing.lease_expires_at = now_cst + timedelta(seconds=_LEASE_DURATION_SECONDS)
+                        existing.heartbeat_at = now_cst
+                        evaluation_id = existing.id
+                        logger.info(
+                            "[eval_recovery] 重试 FAILED 评估: evaluation_id=%s "
+                            "instrument_id=%s retry_count=%d",
+                            evaluation_id, instrument_id, existing.retry_count,
+                        )
+                    else:
+                        # 还在退避期内，跳过
+                        logger.debug(
+                            "FAILED 评估仍在退避期: evaluation_id=%s next_retry_at=%s",
+                            existing.id, next_retry,
+                        )
+                        return []
+
+                elif existing.status == "PENDING" and existing.lease_expires_at is not None and existing.lease_expires_at >= now_cst:
+                    # PENDING + 租约未过期：其他 worker 正在处理，跳过
+                    logger.debug(
+                        "PENDING 评估租约未过期（其他 worker 处理中）: evaluation_id=%s",
+                        existing.id,
+                    )
+                    return []
+
+                else:
+                    # 其他状态组合（如 FAILED + retry_count >= MAX），跳过
+                    logger.debug(
+                        "评估状态不可重入: evaluation_id=%s status=%s retry_count=%d",
+                        existing.id, existing.status, existing.retry_count,
+                    )
+                    return []
+
         except Exception as exc:
             logger.warning(
                 "INSERT 评估占位失败 instrument_id=%s source_bar_time=%s: %s",
@@ -534,6 +641,8 @@ class MonitorBatchService:
             "events_detected": len(event_drafts),
         }
         try:
+            # [eval_recovery] 成功时清除租约，设置最终心跳
+            now_cst_final = datetime.now(_CST)
             await db.execute(
                 pg_insert(MonitorEvaluation)
                 .values(
@@ -549,6 +658,8 @@ class MonitorBatchService:
                     set_={
                         "status": "SUCCEEDED",
                         "metrics": metrics_output,
+                        "lease_expires_at": None,
+                        "heartbeat_at": now_cst_final,
                     },
                 )
             )
@@ -566,34 +677,120 @@ class MonitorBatchService:
         evaluation_id: uuid.UUID,
         error_message: str,
     ) -> None:
-        """将 MonitorEvaluation 标记为 FAILED。
+        """将 MonitorEvaluation 标记为 FAILED，含重试计数与指数退避。
+
+        [eval_recovery] 失败处理逻辑：
+        1. retry_count += 1
+        2. 若 retry_count >= MAX_RETRIES，标记为 DEAD
+        3. 否则计算指数退避时间（30 * 2^retry_count 秒），设置 next_retry_at
 
         Args:
             db: 异步会话
             evaluation_id: 评估记录 ID
             error_message: 错误信息
         """
-        try:
-            await db.execute(
-                pg_insert(MonitorEvaluation)
-                .values(
-                    id=evaluation_id,
-                    status="FAILED",
-                    error_code=error_message[:500] if error_message else None,
-                )
-                .on_conflict_do_update(
-                    index_elements=["id"],
-                    set_={
-                        "status": "FAILED",
-                        "error_code": error_message[:500] if error_message else None,
-                    },
-                )
-            )
-        except Exception as exc:
+        now_cst = datetime.now(_CST)
+
+        # 查询当前评估记录
+        stmt = select(MonitorEvaluation).where(MonitorEvaluation.id == evaluation_id)
+        result = await db.execute(stmt)
+        evaluation = result.scalar_one_or_none()
+        if evaluation is None:
+            logger.warning("标记 FAILED 时评估记录不存在: evaluation_id=%s", evaluation_id)
+            return
+
+        new_retry_count = evaluation.retry_count + 1
+        if new_retry_count >= _MAX_RETRIES:
+            # 达最大重试次数，标记 DEAD
+            evaluation.status = "DEAD"
+            evaluation.retry_count = new_retry_count
+            evaluation.error_code = error_message[:500] if error_message else None
             logger.warning(
-                "标记 MonitorEvaluation 为 FAILED 失败 evaluation_id=%s: %s",
-                evaluation_id, exc,
+                "[eval_recovery] 评估达最大重试次数，标记 DEAD: evaluation_id=%s "
+                "retry_count=%d error=%s",
+                evaluation_id, new_retry_count, error_message[:200],
             )
+        else:
+            # 计算指数退避: 30s, 60s, 120s, 240s
+            backoff_seconds = _RETRY_BACKOFF_BASE_SECONDS * (2 ** new_retry_count)
+            evaluation.status = "FAILED"
+            evaluation.retry_count = new_retry_count
+            evaluation.error_code = error_message[:500] if error_message else None
+            evaluation.next_retry_at = now_cst + timedelta(seconds=backoff_seconds)
+            evaluation.lease_expires_at = None
+            logger.info(
+                "[eval_recovery] 评估标记 FAILED（退避 %ds）: evaluation_id=%s "
+                "retry_count=%d next_retry_at=%s",
+                backoff_seconds, evaluation_id, new_retry_count, evaluation.next_retry_at,
+            )
+
+    async def update_heartbeat(self, db: AsyncSession, evaluation_id: uuid.UUID) -> None:
+        """更新评估记录的心跳和租约过期时间。
+
+        [eval_recovery] 执行期间每 60 秒调用一次，防止其他 worker 误认领。
+
+        Args:
+            db: 异步会话
+            evaluation_id: 评估记录 ID
+        """
+        now_cst = datetime.now(_CST)
+        stmt = select(MonitorEvaluation).where(MonitorEvaluation.id == evaluation_id)
+        result = await db.execute(stmt)
+        evaluation = result.scalar_one_or_none()
+        if evaluation is None:
+            return
+        evaluation.heartbeat_at = now_cst
+        evaluation.lease_expires_at = now_cst + timedelta(seconds=_LEASE_DURATION_SECONDS)
+
+    async def recover_stale_evaluations(self, db: AsyncSession) -> int:
+        """Worker 启动时恢复过期租约的 PENDING 评估。
+
+        [eval_recovery] 查找所有 PENDING 且租约已过期的评估记录：
+        - retry_count += 1
+        - 若 retry_count >= MAX_RETRIES，标记为 DEAD
+        - 否则清除租约，设置 next_retry_at 为当前时间（立即可重试）
+
+        Args:
+            db: 异步会话
+
+        Returns:
+            恢复的评估记录数（不含标记为 DEAD 的）
+        """
+        now_cst = datetime.now(_CST)
+        stmt = select(MonitorEvaluation).where(
+            MonitorEvaluation.status == "PENDING",
+            MonitorEvaluation.lease_expires_at < now_cst,
+        )
+        result = await db.execute(stmt)
+        stale_evals = list(result.scalars().all())
+
+        recovered = 0
+        for eval_obj in stale_evals:
+            eval_obj.retry_count += 1
+            if eval_obj.retry_count >= _MAX_RETRIES:
+                eval_obj.status = "DEAD"
+                logger.warning(
+                    "[eval_recovery] 启动恢复：PENDING 评估达最大重试次数，标记 DEAD: "
+                    "evaluation_id=%s retry_count=%d",
+                    eval_obj.id, eval_obj.retry_count,
+                )
+            else:
+                eval_obj.lease_expires_at = None
+                eval_obj.next_retry_at = now_cst
+                eval_obj.heartbeat_at = None
+                recovered += 1
+                logger.info(
+                    "[eval_recovery] 启动恢复：PENDING 评估租约过期，重置可重试: "
+                    "evaluation_id=%s retry_count=%d",
+                    eval_obj.id, eval_obj.retry_count,
+                )
+
+        if stale_evals:
+            logger.info(
+                "[eval_recovery] 启动恢复完成: stale=%d recovered=%d dead=%d",
+                len(stale_evals), recovered, len(stale_evals) - recovered,
+            )
+        return recovered
 
     async def _check_event_cooldown(
         self,
@@ -1279,7 +1476,19 @@ if __name__ == "__main__":
     assert hasattr(service, "_get_watchlist_monitor_version")
     assert hasattr(service, "_process_instrument_evaluation")
     assert hasattr(service, "_mark_evaluation_failed")
+    assert hasattr(service, "update_heartbeat")
+    assert hasattr(service, "recover_stale_evaluations")
     print(f"MonitorBatchService: {service} ✓")
+
+    # 2b. 验证 [eval_recovery] 常量
+    assert _LEASE_DURATION_SECONDS == 300
+    assert _MAX_RETRIES == 5
+    assert _RETRY_BACKOFF_BASE_SECONDS == 30
+    # 验证指数退避序列: 30*2^1=60, 30*2^2=120, 30*2^3=240, 30*2^4=480
+    assert _RETRY_BACKOFF_BASE_SECONDS * (2 ** 1) == 60
+    assert _RETRY_BACKOFF_BASE_SECONDS * (2 ** 2) == 120
+    assert _RETRY_BACKOFF_BASE_SECONDS * (2 ** 3) == 240
+    print("[eval_recovery] 常量与退避序列 ✓")
 
     # 3. 验证 _orm_to_runtime_state 方法
     class _FakeORM:

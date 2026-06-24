@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+
+from app.constants.strategy_keys import DSA_SELECTOR
 from typing import Any
 
 
@@ -62,7 +64,7 @@ def compute_build_hash(
 if __name__ == "__main__":
     # 自测入口：验证哈希计算的稳定性与幂等性
     manifest_a = {
-        "strategy_id": "dsa_selector",
+        "strategy_id": DSA_SELECTOR,
         "kind": "selector",
         "version": "1.1.0",
         "entrypoint": "strategies.selectors.dsa:DSASelector",

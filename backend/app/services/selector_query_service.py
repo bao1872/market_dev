@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants.strategy_keys import DSA_SELECTOR
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.strategy_run import StrategyRun
 from app.models.watchlist import UserWatchlistItem
@@ -167,7 +168,7 @@ if __name__ == "__main__":
 
     test_page = SelectorResultPage(
         run_id=uuid4(),
-        strategy_key="dsa_selector",
+        strategy_key=DSA_SELECTOR,
         trade_date=date(2026, 6, 18),
         source_total=100,
         universe_total=100,

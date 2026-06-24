@@ -24,6 +24,7 @@ import yaml
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants.strategy_keys import DSA_SELECTOR, WATCHLIST_MONITOR
 from app.services.manifest_validator import validate_manifest
 from app.services.strategy_service import (
     create_strategy,
@@ -146,25 +147,26 @@ async def seed_strategies(
 
     await db.commit()
 
-    # [策略种子] - 启动断言：watchlist_monitor 必须有 released 版本
-    wm_def = await db.execute(
-        select(StrategyDefinition).where(
-            StrategyDefinition.strategy_key == "watchlist_monitor"
-        )
-    )
-    wm_definition = wm_def.scalar_one_or_none()
-    if wm_definition is not None:
-        wm_released = await db.execute(
-            select(StrategyVersion).where(
-                StrategyVersion.strategy_definition_id == wm_definition.id,
-                StrategyVersion.status == "released",
+    # [策略种子] - 启动断言：两个必需策略都必须有 released 版本
+    for required_key in [DSA_SELECTOR, WATCHLIST_MONITOR]:
+        req_def = await db.execute(
+            select(StrategyDefinition).where(
+                StrategyDefinition.strategy_key == required_key
             )
         )
-        if wm_released.scalar_one_or_none() is None:
-            raise RuntimeError(
-                "watchlist_monitor 策略没有 released 版本，"
-                "监控功能不可用。请检查 seed_strategies 执行结果。"
+        req_definition = req_def.scalar_one_or_none()
+        if req_definition is not None:
+            req_released = await db.execute(
+                select(StrategyVersion.id).where(
+                    StrategyVersion.strategy_definition_id == req_definition.id,
+                    StrategyVersion.status == "released",
+                )
             )
+            if req_released.scalar_one_or_none() is None:
+                raise RuntimeError(
+                    f"必需策略 {required_key} 没有 released 版本，"
+                    "相关功能不可用。请检查 seed_strategies 执行结果。"
+                )
 
     # [策略种子] - 归档旧监控策略（bb_monitor / volume_node_monitor）
     _ARCHIVED_KEYS = ("bb_monitor", "volume_node_monitor")
