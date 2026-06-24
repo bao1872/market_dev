@@ -154,7 +154,7 @@ async def check_daily_freshness(
             sla_seconds=DAILY_SLA_SECONDS,
         )
 
-    last_update = datetime.combine(latest_date, _DAILY_CLOSE_TIME)
+    last_update = datetime.combine(latest_date, _DAILY_CLOSE_TIME, tzinfo=ZoneInfo("Asia/Shanghai"))
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
     age = (now - last_update).total_seconds()
 
@@ -246,8 +246,10 @@ async def check_minute_freshness(
             sla_seconds=_MINUTE_CHECK_SLA_SECONDS,
         )
 
-    if latest_time.tzinfo is not None:
-        latest_time = latest_time.astimezone(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
+    if latest_time.tzinfo is None:
+        latest_time = latest_time.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    else:
+        latest_time = latest_time.astimezone(ZoneInfo("Asia/Shanghai"))
 
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
     age = (now - latest_time).total_seconds()
@@ -296,8 +298,10 @@ async def check_15min_freshness(
             sla_seconds=BAR_15MIN_SLA_SECONDS,
         )
 
-    if latest_time.tzinfo is not None:
-        latest_time = latest_time.astimezone(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
+    if latest_time.tzinfo is None:
+        latest_time = latest_time.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    else:
+        latest_time = latest_time.astimezone(ZoneInfo("Asia/Shanghai"))
 
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
     age = (now - latest_time).total_seconds()
@@ -367,8 +371,10 @@ async def check_60min_freshness(
             sla_seconds=BAR_60MIN_SLA_SECONDS,
         )
 
-    if latest_time.tzinfo is not None:
-        latest_time = latest_time.astimezone(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
+    if latest_time.tzinfo is None:
+        latest_time = latest_time.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    else:
+        latest_time = latest_time.astimezone(ZoneInfo("Asia/Shanghai"))
 
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
     age = (now - latest_time).total_seconds()

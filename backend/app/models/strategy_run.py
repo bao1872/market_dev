@@ -4,6 +4,7 @@
 - 005_strategy_runs: strategy_runs/strategy_results/strategy_result_metrics
 - 015_strategy_batch: strategy_run_items + strategy_runs 扩展字段 + 索引
 - 016_run_published_at: strategy_runs.published_at 列
+- 026_strategy_run_lease_fields: strategy_runs 租约与恢复字段
 
 字段说明：
 - strategy_runs.run_type: 触发方式（manual/scheduled/replay）
@@ -40,6 +41,7 @@ from sqlalchemy import (
     Index,
     Integer,
     PrimaryKeyConstraint,
+    String,
     Text,
     UniqueConstraint,
     func,
@@ -130,6 +132,28 @@ class StrategyRun(Base):
         DateTime(timezone=True),
         nullable=True,
         comment="发布时间（非空表示已发布，用户可查询）",
+    )
+    # [StrategyRun] - 租约与恢复字段
+    queued_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="入队时间，创建时赋值"
+    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="Worker 心跳时间"
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="租约过期时间"
+    )
+    worker_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="执行 Worker 标识"
+    )
+    attempt_count: Mapped[int] = mapped_column(
+        Integer(), nullable=False, server_default="0", comment="尝试次数"
+    )
+    next_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="下次重试时间"
+    )
+    error_code: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, comment="错误码"
     )
     # TODO: 添加 bars_snapshot_id 字段，记录 DSA 运行时使用的行情数据版本
     # 需 DB 迁移：ALTER TABLE strategy_runs ADD COLUMN bars_snapshot_id UUID;

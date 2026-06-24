@@ -43,9 +43,9 @@ down:
 
 # ===== Docker 生产环境命令 =====
 
-# 构建生产环境镜像
+# 构建生产环境镜像（自动注入 GIT_SHA 和 BUILD_TIME）
 docker-build:
-	docker compose -f docker-compose.prod.yml build
+	GIT_SHA=$$(git rev-parse --short HEAD) BUILD_TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") docker compose -f docker-compose.prod.yml build
 
 # 启动生产环境（后台）
 docker-up:

@@ -5,6 +5,10 @@
 # ===== Stage 1: builder - 编译前端应用 =====
 FROM node:20-alpine AS builder
 
+# 构建版本注入：GIT_SHA / BUILD_TIME（Vite define 读取 process.env）
+ARG GIT_SHA=dev
+ARG BUILD_TIME=unknown
+
 WORKDIR /app
 
 # 配置清华 npm 镜像源，加速国内依赖下载
@@ -16,8 +20,10 @@ COPY package.json package-lock.json ./
 # 安装依赖（CI 模式，严格按 lockfile 安装）
 RUN npm ci
 
-# 复制源码并构建生产包
+# 复制源码并构建生产包（GIT_SHA / BUILD_TIME 通过 ARG 传入，Vite define 读取）
 COPY . .
+ENV GIT_SHA=${GIT_SHA}
+ENV BUILD_TIME=${BUILD_TIME}
 RUN npm run build
 
 # ===== Stage 2: runtime - nginx 托管静态资源 =====

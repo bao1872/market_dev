@@ -15,6 +15,7 @@ V1.1 各阶段模型统一继承 Base：
 
 [LEGACY] 以下模型文件保留以兼容现有数据库表，但已从活跃 API 中移除：
 - C1/C4: SelectionPlan/Revision/Member/Condition（选股组合方案）
+- C4: SelectionPlanRun/Result/Evidence（选股组合运行与结果）
 - C5: MonitoringPlan/Revision/Member（监控组合方案）
 - C6: MonitoringPlanState（监控组合状态）
 - C8: CompositeMonitorEvent/Evidence（组合事件与证据）
@@ -50,6 +51,8 @@ from app.models.selection_plan_run import (
     SelectionPlanRun,
     SelectionResultEvidence,
 )
+from app.models.scheduler_job_run import SchedulerJobRun
+from app.models.stock_memo import StockMemo
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.strategy_event import StrategyEvent
 from app.models.strategy_run import (
@@ -59,8 +62,8 @@ from app.models.strategy_run import (
     StrategyRunItem,
 )
 from app.models.user import Role, User, UserRole
-from app.models.stock_memo import StockMemo
 from app.models.watchlist import UserWatchlistItem
+from app.models.worker_heartbeat import WorkerHeartbeat
 
 __all__ = [
     "BarDaily",
@@ -80,9 +83,11 @@ __all__ = [
     "NotificationTemplate",
     "Outbox",
     "Role",
+    "SchedulerJobRun",
     "SelectionPlanResult",
     "SelectionPlanRun",
     "SelectionResultEvidence",
+    "StockMemo",
     "StrategyEventRecipient",
     "StrategyDefinition",
     "StrategyEvent",
@@ -94,6 +99,6 @@ __all__ = [
     "TradingCalendar",
     "User",
     "UserRole",
-    "StockMemo",
     "UserWatchlistItem",
+    "WorkerHeartbeat",
 ]

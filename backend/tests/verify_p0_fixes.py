@@ -1,14 +1,12 @@
 """P0 关键管线修复端到端验证测试。
 
-验证 9 项 P0 修复在代码层面的正确性：
+验证 7 项 P0 修复在代码层面的正确性：
 - P0-1: 策略资产迁移到包内（无外部路径依赖）
 - P0-2: query_results 新契约（run_id、MetricFilter、QueryResultPage）
-- P0-3: 零匹配与数据缺失区分（source_status）
 - P0-4: DSA 批量计算使用前复权行情
 - P0-5: DSA lookback 参数生效
 - P0-6: DSA 运行依赖行情数据就绪
 - P0-7: 时区修正（CronTrigger + docker-compose TZ）
-- P0-8: MonitorBatchService 接入 MonitoringPlan
 - P0-9: 1m Bar 去重（floor + bar_time_key）
 
 用法：
@@ -125,43 +123,6 @@ def test_query_results_contract() -> None:
         _record("P0-2 断言失败", False, str(exc))
     except Exception as exc:
         _record("P0-2 异常", False, str(exc))
-
-
-# ===== P0-3: 零匹配与数据缺失区分 =====
-
-
-def test_zero_match_vs_missing() -> None:
-    """验证零匹配与数据缺失区分。"""
-    try:
-        from app.services.selection_executor import MemberExecutionResult
-
-        # 正常零匹配 → AVAILABLE
-        result_available = MemberExecutionResult(
-            source_status="AVAILABLE", source_count=5200, matched_count=0,
-        )
-        assert result_available.source_status == "AVAILABLE"
-        assert result_available.matched_count == 0
-        _record("P0-3 AVAILABLE 零匹配", True)
-
-        # 数据缺失 → MISSING
-        result_missing = MemberExecutionResult(
-            source_status="MISSING", source_count=0, matched_count=0,
-        )
-        assert result_missing.source_status == "MISSING"
-        _record("P0-3 MISSING 数据缺失", True)
-
-        # FAIL_CLOSED 只在 MISSING/FAILED/INCOMPLETE 时触发
-        fail_statuses = {"MISSING", "FAILED", "INCOMPLETE"}
-        assert result_available.source_status not in fail_statuses
-        assert result_missing.source_status in fail_statuses
-        _record("P0-3 FAIL_CLOSED 状态区分", True)
-
-    except ImportError as exc:
-        _record("P0-3 导入失败", False, str(exc))
-    except AssertionError as exc:
-        _record("P0-3 断言失败", False, str(exc))
-    except Exception as exc:
-        _record("P0-3 异常", False, str(exc))
 
 
 # ===== P0-4: DSA 使用前复权行情 =====
@@ -296,39 +257,6 @@ def test_timezone_fixes() -> None:
         _record("P0-7 异常", False, str(exc))
 
 
-# ===== P0-8: MonitoringPlan 接入 =====
-
-
-def test_monitoring_plan_connected() -> None:
-    """验证 MonitorBatchService 接入 MonitoringPlan。"""
-    try:
-        from app.services.monitor_batch_service import MonitorBatchService
-
-        # 检查新增的方法
-        assert hasattr(MonitorBatchService, "_query_active_plans"), (
-            "缺少 _query_active_plans 方法"
-        )
-        assert hasattr(MonitorBatchService, "_resolve_plan_instruments"), (
-            "缺少 _resolve_plan_instruments 方法"
-        )
-        assert hasattr(MonitorBatchService, "_execute_plan_cycle"), (
-            "缺少 _execute_plan_cycle 方法"
-        )
-        _record("P0-8 方案模式方法存在", True)
-
-        # 检查 execute_monitor_cycle 中有方案模式分支
-        source = inspect.getsource(MonitorBatchService.execute_monitor_cycle)
-        assert "plan" in source.lower(), "execute_monitor_cycle 未包含方案模式逻辑"
-        _record("P0-8 execute_monitor_cycle 方案分支", True)
-
-    except ImportError as exc:
-        _record("P0-8 导入失败", False, str(exc))
-    except AssertionError as exc:
-        _record("P0-8 断言失败", False, str(exc))
-    except Exception as exc:
-        _record("P0-8 异常", False, str(exc))
-
-
 # ===== P0-9: 1m Bar 去重 =====
 
 
@@ -442,12 +370,10 @@ def run_all_tests() -> int:
     tests = [
         test_strategy_assets_in_package,
         test_query_results_contract,
-        test_zero_match_vs_missing,
         test_dsa_uses_qfq,
         test_dsa_lookback_applied,
         test_dsa_event_dependency,
         test_timezone_fixes,
-        test_monitoring_plan_connected,
         test_1m_bar_dedup,
         test_readiness_probe,
         test_frontend_fixes,

@@ -523,6 +523,10 @@ class MonitorBatchService:
         except Exception as exc:
             logger.warning("15min行情拉取失败 %s: %s", symbol, exc)
 
+        # [MonitorBatchService] - 心跳: 行情数据拉取完成
+        await self.update_heartbeat(db, evaluation_id)
+        await db.flush()
+
         # d. 构建 MarketDataContext
         context = MarketDataContext(
             instrument_id=instrument_id,
@@ -560,6 +564,10 @@ class MonitorBatchService:
             return []
 
         result.total_states_computed += 1
+
+        # [MonitorBatchService] - 心跳: 指标计算完成
+        await self.update_heartbeat(db, evaluation_id)
+        await db.flush()
 
         # 获取 prev_state
         prev_state_orm = await monitor_state_repository.get_state(

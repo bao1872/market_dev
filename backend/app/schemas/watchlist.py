@@ -65,16 +65,19 @@ class WatchlistMonitorStatusItem(BaseModel):
     market: str = Field(..., description="市场（SH/SZ/BJ）")
     watchlist_created_at: datetime = Field(..., description="加入自选时间")
     monitor_status: str = Field(
-        ..., description="监控状态枚举：WAITING_FIRST_RUN/SUCCEEDED/FAILED/STALE/MARKET_CLOSED"
+        ..., description="监控状态枚举：FAILED/STALE/SUCCEEDED/WAITING_FIRST_RUN/PRE_MARKET/LUNCH_BREAK/AFTER_MARKET/NON_TRADING_DAY"
     )
     evaluation_status: str | None = Field(
-        None, description="评估状态（SUCCEEDED/FAILED/PENDING）"
+        None, description="评估状态（SUCCEEDED/FAILED/PENDING/DEAD）"
+    )
+    retry_count: int | None = Field(
+        None, description="重试次数（来自 MonitorEvaluation）"
     )
     error_code: str | None = Field(
         None, description="评估错误码（无错误时为 null）"
     )
     source_bar_time: str | None = Field(
-        None, description="监控状态对应的 bar 时间"
+        None, description="评估对应的 bar 时间"
     )
     metrics: dict[str, Any] | None = Field(
         None, description="监控状态 metrics（MonitorState payload，无状态时为 null）"

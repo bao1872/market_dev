@@ -18,7 +18,6 @@ import { useStrategies, useAdminSystemOverview } from '@/hooks/useApi'
 import { getVersion, type VersionInfo } from '@/api/endpoints'
 
 // ===== 监控吞吐折线图 =====
-// TODO: [AdminIndexPage] 接入 GET /admin/metrics/throughput API 获取实时吞吐数据后恢复 Canvas 折线图
 
 function ThroughputChartPlaceholder() {
   return (
@@ -27,9 +26,6 @@ function ThroughputChartPlaceholder() {
     </div>
   )
 }
-
-// TODO: [AdminIndexPage] 接入 GET /health/ready API 获取各组件真实健康状态
-// TODO: [AdminIndexPage] 接入 GET /admin/anomalies API 获取最近异常列表
 
 // ===== 工具函数 =====
 

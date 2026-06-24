@@ -39,6 +39,9 @@ from app.strategy.runtime import StrategyResult as RuntimeStrategyResult
 
 logger = logging.getLogger("strategy_result_repository")
 
+# [策略结果] - asyncpg 参数上限 32767，批量 INSERT 分批大小
+_BATCH_SIZE = 500
+
 
 @dataclass
 class MetricFilter:
@@ -279,12 +282,13 @@ async def write_results(
         })
 
     try:
-        stmt = pg_insert(StrategyResult).values(result_records)
-        stmt = stmt.on_conflict_do_nothing(
-            index_elements=["run_id", "instrument_id"],
-        )
-        result = await session.execute(stmt)
-        _ = result.rowcount
+        for i in range(0, len(result_records), _BATCH_SIZE):
+            batch = result_records[i : i + _BATCH_SIZE]
+            stmt = pg_insert(StrategyResult).values(batch)
+            stmt = stmt.on_conflict_do_nothing(
+                index_elements=["run_id", "instrument_id"],
+            )
+            await session.execute(stmt)
     except Exception as exc:
         await session.rollback()
         raise RuntimeError(
@@ -326,16 +330,18 @@ async def write_results(
 
     if metric_records:
         try:
-            metric_stmt = pg_insert(StrategyResultMetric).values(metric_records)
-            metric_stmt = metric_stmt.on_conflict_do_update(
-                index_elements=["result_id", "metric_key"],
-                set_={
-                    "numeric_value": metric_stmt.excluded.numeric_value,
-                    "text_value": metric_stmt.excluded.text_value,
-                    "bool_value": metric_stmt.excluded.bool_value,
-                },
-            )
-            await session.execute(metric_stmt)
+            for i in range(0, len(metric_records), _BATCH_SIZE):
+                batch = metric_records[i : i + _BATCH_SIZE]
+                metric_stmt = pg_insert(StrategyResultMetric).values(batch)
+                metric_stmt = metric_stmt.on_conflict_do_update(
+                    index_elements=["result_id", "metric_key"],
+                    set_={
+                        "numeric_value": metric_stmt.excluded.numeric_value,
+                        "text_value": metric_stmt.excluded.text_value,
+                        "bool_value": metric_stmt.excluded.bool_value,
+                    },
+                )
+                await session.execute(metric_stmt)
         except Exception as exc:
             await session.rollback()
             raise RuntimeError(

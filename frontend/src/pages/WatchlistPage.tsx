@@ -17,7 +17,7 @@ import type { DataTableColumn } from '@/components/StrategyDataTable'
 
 // ===== 类型定义 =====
 
-type MonitorStatus = 'WAITING_FIRST_RUN' | 'SUCCEEDED' | 'FAILED' | 'STALE' | 'MARKET_CLOSED'
+type MonitorStatus = 'PRE_MARKET' | 'TRADING' | 'LUNCH_BREAK' | 'AFTER_MARKET' | 'NON_TRADING_DAY' | 'WAITING_FIRST_RUN' | 'SUCCEEDED' | 'FAILED' | 'STALE'
 
 // 统一监控行（从 WatchlistMonitorStatusItem 派生）
 interface WatchlistRow {
@@ -74,17 +74,26 @@ function fmtTime(v: unknown): string {
 /** 监控状态徽章渲染 */
 function MonitorStatusBadge({ status }: { status: MonitorStatus }) {
   switch (status) {
+    case 'PRE_MARKET':
+      return <span className="tag small">盘前等待开市</span>
+    case 'TRADING':
+      return <span className="tag info small">交易中</span>
+    case 'LUNCH_BREAK':
+      return <span className="tag small">午间休市</span>
+    case 'AFTER_MARKET':
+      return <span className="tag small">已收盘</span>
+    case 'NON_TRADING_DAY':
+      return <span className="tag small">非交易日</span>
+    case 'WAITING_FIRST_RUN':
+      return <span className="tag small">等待首次计算</span>
     case 'SUCCEEDED':
       return <span className="tag success small">已计算</span>
     case 'FAILED':
       return <span className="tag error small">计算失败</span>
     case 'STALE':
-      return <span className="tag warn small">数据过期</span>
-    case 'MARKET_CLOSED':
-      return <span className="tag small">已收盘</span>
-    case 'WAITING_FIRST_RUN':
+      return <span className="tag warn small">数据延迟</span>
     default:
-      return <span className="tag small">等待首次计算</span>
+      return <span className="tag small">未知</span>
   }
 }
 
@@ -281,11 +290,16 @@ export default function WatchlistPage() {
         sortValue: (row) => row.monitorStatus,
         filterValue: (row) => {
           switch (row.monitorStatus) {
+            case 'PRE_MARKET': return '盘前等待开市'
+            case 'TRADING': return '交易中'
+            case 'LUNCH_BREAK': return '午间休市'
+            case 'AFTER_MARKET': return '已收盘'
+            case 'NON_TRADING_DAY': return '非交易日'
             case 'SUCCEEDED': return '已计算'
             case 'FAILED': return '计算失败'
-            case 'STALE': return '数据过期'
-            case 'MARKET_CLOSED': return '已收盘'
-            default: return '等待首次计算'
+            case 'STALE': return '数据延迟'
+            case 'WAITING_FIRST_RUN': return '等待首次计算'
+            default: return '未知'
           }
         },
         render: (row) => <MonitorStatusBadge status={row.monitorStatus} />,

@@ -41,7 +41,11 @@ services:
 
   # ===== 后端 API 服务 =====
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
     container_name: trading-backend
     restart: unless-stopped
     environment:
@@ -61,7 +65,11 @@ services:
 
   # ===== 后台任务 Worker =====
   worker:
-    build: ./backend
+    build:
+      context: ./backend
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
     container_name: trading-worker
     restart: unless-stopped
     environment:
@@ -81,7 +89,11 @@ services:
 
   # ===== 前端 Nginx 服务 =====
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        GIT_SHA: ${GIT_SHA:-dev}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
     container_name: trading-frontend
     restart: unless-stopped
     depends_on:

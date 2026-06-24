@@ -355,7 +355,7 @@ export interface WatchlistMonitorStatusItem {
   name: string
   market: string
   watchlist_created_at: string
-  monitor_status: 'WAITING_FIRST_RUN' | 'SUCCEEDED' | 'FAILED' | 'STALE' | 'MARKET_CLOSED'
+  monitor_status: 'PRE_MARKET' | 'TRADING' | 'LUNCH_BREAK' | 'AFTER_MARKET' | 'NON_TRADING_DAY' | 'WAITING_FIRST_RUN' | 'SUCCEEDED' | 'FAILED' | 'STALE'
   evaluation_status: string | null
   error_code: string | null
   source_bar_time: string | null

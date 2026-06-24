@@ -138,9 +138,8 @@ export default function AdminJobsPage() {
   const [rerunTradeDate, setRerunTradeDate] = useState('')
   const [rerunOverrides, setRerunOverrides] = useState('')
 
-  // ===== 查询：Job 运行列表（dsa + node 两个策略合并）=====
+  // ===== 查询：Job 运行列表（仅 dsa_selector，watchlist_monitor 不创建 StrategyRun 记录）=====
   const dsaRunsQuery = useStrategyRuns(STRATEGY_KEYS.DSA_SELECTOR, { limit: 20 })
-  const nodeRunsQuery = useStrategyRuns(STRATEGY_KEYS.WATCHLIST_MONITOR, { limit: 20 })
 
   // ===== 查询：事件列表（node 策略的 node_touch 事件）=====
   const eventsQuery = useStrategyEvents(STRATEGY_KEYS.WATCHLIST_MONITOR, { limit: 10 })
@@ -157,20 +156,18 @@ export default function AdminJobsPage() {
   // ===== 变更：触发策略运行（手动重跑 / 仅重跑失败项）=====
   const triggerRun = useTriggerStrategyRun()
 
-  // ===== 派生数据：合并 dsa + node 运行列表 =====
+  // ===== 派生数据：运行列表（仅 dsa_selector）=====
   const allRuns: StrategyRun[] = useMemo(() => {
     const dsaRuns = dsaRunsQuery.data?.items ?? []
-    const nodeRuns = nodeRunsQuery.data?.items ?? []
-    return [...dsaRuns, ...nodeRuns]
-  }, [dsaRunsQuery.data, nodeRunsQuery.data])
+    return [...dsaRuns]
+  }, [dsaRunsQuery.data])
 
   // 运行 ID -> 策略 key 映射（用于"仅重跑失败项"时定位策略）
   const runStrategyMap = useMemo(() => {
     const m = new Map<string, string>()
     ;(dsaRunsQuery.data?.items ?? []).forEach((r) => m.set(r.id, STRATEGY_KEYS.DSA_SELECTOR))
-    ;(nodeRunsQuery.data?.items ?? []).forEach((r) => m.set(r.id, STRATEGY_KEYS.WATCHLIST_MONITOR))
     return m
-  }, [dsaRunsQuery.data, nodeRunsQuery.data])
+  }, [dsaRunsQuery.data])
 
   // ===== 派生数据：转换为 JobRunRow =====
   const jobRunRows: JobRunRow[] = useMemo(() => {
@@ -431,14 +428,14 @@ export default function AdminJobsPage() {
         <div className="card kpi-card">
           <div className="kpi-label">运行中任务</div>
           <div className="kpi-value">
-            {dsaRunsQuery.isLoading || nodeRunsQuery.isLoading ? '-' : kpiRunning}
+            {dsaRunsQuery.isLoading ? '-' : kpiRunning}
           </div>
         </div>
         {/* KPI 2：失败任务数 */}
         <div className="card kpi-card">
           <div className="kpi-label">失败任务</div>
           <div className="kpi-value neg">
-            {dsaRunsQuery.isLoading || nodeRunsQuery.isLoading ? '-' : kpiFailed}
+            {dsaRunsQuery.isLoading ? '-' : kpiFailed}
           </div>
           <div className="kpi-foot">最近 24 小时</div>
         </div>
@@ -467,13 +464,16 @@ export default function AdminJobsPage() {
             <span className="chip red">失败</span>
           </div>
         </div>
+        <div className="notice" style={{ margin: '0 1rem', marginTop: '0.5rem' }}>
+          监控评估数据请查看自选股页面
+        </div>
         <StrategyDataTable
           tableId="admin-jobs-runs"
           columns={jobRunColumns}
           rows={jobRunRows}
           rowKey={(row) => row.id}
-          loading={dsaRunsQuery.isLoading || nodeRunsQuery.isLoading}
-          error={dsaRunsQuery.isError || nodeRunsQuery.isError ? '运行列表加载失败' : null}
+          loading={dsaRunsQuery.isLoading}
+          error={dsaRunsQuery.isError ? '运行列表加载失败' : null}
           searchable={false}
           emptyText="暂无任务运行记录"
         />
@@ -712,7 +712,6 @@ export default function AdminJobsPage() {
                     onChange={(e) => setRerunTaskType(e.target.value)}
                   >
                     <option value={STRATEGY_KEYS.DSA_SELECTOR}>DSA 指定日期</option>
-                    <option value={STRATEGY_KEYS.WATCHLIST_MONITOR}>Node 指定股票</option>
                   </select>
                 </div>
                 {/* 交易日 */}

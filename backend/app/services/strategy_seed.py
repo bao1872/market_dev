@@ -11,7 +11,7 @@
 4. 可选：调用 release_strategy_version 发布版本
 
 幂等：重复运行不会报错（archived 版本除外，需升级版本号）。
-归档：旧策略（bb_monitor / volume_node_monitor）的版本会被自动归档。
+清理：启动时自动将非种子策略标记为 test 环境、不可见、不调度，并归档其所有版本。
 """
 
 from __future__ import annotations
@@ -168,23 +168,35 @@ async def seed_strategies(
                     "相关功能不可用。请检查 seed_strategies 执行结果。"
                 )
 
-    # [策略种子] - 归档旧监控策略（bb_monitor / volume_node_monitor）
-    _ARCHIVED_KEYS = ("bb_monitor", "volume_node_monitor")
-    old_defs = await db.execute(
-        select(StrategyDefinition).where(
-            StrategyDefinition.strategy_key.in_(_ARCHIVED_KEYS)
-        )
-    )
-    for old_def in old_defs.scalars():
-        old_vers = await db.execute(
-            select(StrategyVersion).where(
-                StrategyVersion.strategy_definition_id == old_def.id,
-                StrategyVersion.status != "archived",
+    # [策略种子] - 清理非种子策略：标记为测试环境、不可见、不调度，版本归档
+    seed_keys = {Path(s).stem for s in SEED_STRATEGIES}  # {"dsa_selector", "watchlist_monitor"}
+
+    all_defs = await db.execute(select(StrategyDefinition))
+    for sd in all_defs.scalars():
+        if sd.strategy_key not in seed_keys:
+            changed = False
+            if sd.environment != "test":
+                sd.environment = "test"
+                changed = True
+            if sd.is_user_visible:
+                sd.is_user_visible = False
+                changed = True
+            if sd.is_scheduled:
+                sd.is_scheduled = False
+                changed = True
+            # 归档该策略下所有非 archived 版本
+            old_vers = await db.execute(
+                select(StrategyVersion).where(
+                    StrategyVersion.strategy_definition_id == sd.id,
+                    StrategyVersion.status != "archived",
+                )
             )
-        )
-        for ver in old_vers.scalars():
-            ver.status = "archived"
-            print(f"  归档旧版本: {old_def.strategy_key} v{ver.version}")
+            for ver in old_vers.scalars():
+                ver.status = "archived"
+                changed = True
+                print(f"  归档非种子版本: {sd.strategy_key} v{ver.version}")
+            if changed:
+                print(f"  清理非种子策略: {sd.strategy_key} → test/archived")
 
     await db.commit()
     return results

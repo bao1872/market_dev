@@ -29,6 +29,7 @@ from app.models.strategy import StrategyDefinition
 from app.models.strategy_run import StrategyRun
 from app.models.user import User
 from app.models.watchlist import UserWatchlistItem
+from app.models.worker_heartbeat import WorkerHeartbeat
 from app.schemas.membership import (
     InviteCodeCreate,
     InviteCodeListItem,
@@ -325,17 +326,40 @@ async def get_system_overview(
                     "failed_count": run.failed_count,
                 }
 
+    # 7. queue_backlog: queued 状态的 StrategyRun 数量
+    queued_count_stmt = select(func.count(StrategyRun.id)).where(
+        StrategyRun.status == "queued",
+    )
+    queue_backlog = await db.scalar(queued_count_stmt) or 0
+
+    # 8. worker_health / scheduler_health: 基于 worker_heartbeats 实时查询
+    heartbeat_stmt = select(WorkerHeartbeat)
+    heartbeats_result = await db.execute(heartbeat_stmt)
+    hb_list = heartbeats_result.scalars().all()
+
+    now = datetime.now(UTC)
+    active_workers = [
+        hb for hb in hb_list
+        if hb.status == "running" and (now - hb.heartbeat_at).total_seconds() < 120
+    ]
+    all_running_workers = [hb for hb in hb_list if hb.status == "running"]
+
+    scheduler_names = {hb.worker_name for hb in active_workers if "scheduler" in hb.worker_name}
+
+    worker_health = "healthy" if active_workers else ("degraded" if all_running_workers else "unknown")
+    scheduler_health = "healthy" if scheduler_names else ("degraded" if all_running_workers else "unknown")
+
     return {
         "active_users": active_users,
         "distinct_monitored_instruments": distinct_monitored_instruments,
         "evaluations_last_minute": evaluations_last_minute,
         "evaluations_success_rate": evaluations_success_rate,
         "notification_delivery_rate": 0.0,
-        "queue_backlog": 0,
+        "queue_backlog": queue_backlog,
         "failed_retry_count": failed_retry_count,
         "latest_selector_run": latest_selector_run,
-        "worker_health": "unknown",
-        "scheduler_health": "unknown",
+        "worker_health": worker_health,
+        "scheduler_health": scheduler_health,
         "recent_anomalies": [],
     }
 

@@ -21,10 +21,13 @@ const PAGE_SIZE = 50
 
 // ===== 类型定义 =====
 
-// 表格行类型（从 StrategyResult.payload 派生）
+// 表格行类型（从 StrategyResult 派生，含 instrument 级字段）
 interface ScreenerRow {
   resultId: string
   instrumentId: string
+  symbol: string
+  name: string
+  market: string
   payload: Record<string, unknown>
   [key: string]: unknown
 }
@@ -78,8 +81,11 @@ function fmtRatio(v: unknown): string {
   return `${n.toFixed(2)}x`
 }
 
-/** 从 row 中提取股票展示信息（symbol/name/market） */
+/** 从 row 中提取股票展示信息（优先使用 instrument 级字段，回退到 payload） */
 function getStockDisplay(row: ScreenerRow): { symbol: string; name: string; market: string } {
+  if (row.symbol !== '-' && row.name !== '-') {
+    return { symbol: row.symbol, name: row.name, market: row.market }
+  }
   const p = row.payload
   return {
     symbol: String(
@@ -95,6 +101,9 @@ function toRow(r: StrategyResult): ScreenerRow {
   return {
     resultId: r.id,
     instrumentId: r.instrument_id,
+    symbol: r.instrument_symbol ?? '-',
+    name: r.instrument_name ?? '-',
+    market: r.instrument_market ?? '',
     payload: r.payload,
   }
 }

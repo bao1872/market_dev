@@ -19,7 +19,7 @@ DSA 作为第一个支持的 strategy_key，后续可扩展其他策略。
   - 门禁 3：无致命错误（failed_count == 0）
 - per-stock 跟踪：strategy_run_items 记录 status/attempt_count/error/result_id
 - effective_config 从 manifest 读取并保存到 strategy_runs.effective_config（不可变）
-- 幂等：idempotency_key = strategy_key:trade_date（不区分 run_type，同一天同策略只保留一个 run）
+- 幂等：idempotency_key = strategy_key:trade_date:run_type（区分 run_type，同一天同策略允许多次运行）
 - 结果不可变：运行 completed/published 后，write_results 拒绝写入
 
 禁异常吞没：所有异常补充上下文后 re-raise。
@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -61,6 +62,18 @@ AUTO_PUBLISH_COVERAGE_THRESHOLD = 0.8
 
 # 策略批量计算日线回看天数（与 bars.py _DEFAULT_DAILY_LOOKBACK_DAYS 一致）
 _STRATEGY_BATCH_DAILY_LOOKBACK_DAYS = 5000
+
+# [StrategyRun] - 租约与恢复常量
+_LEASE_DURATION_MINUTES = 30  # Worker claim 后租约时长（分钟）
+_MAX_ATTEMPTS = 3  # 最大重试次数（超过后标记 failed）
+_STALE_QUEUED_HOURS = 2  # queued 状态超过此小时数视为 stale
+_HEARTBEAT_INTERVAL_SECONDS = 60  # 心跳更新间隔（秒）
+
+
+def _get_worker_id() -> str:
+    """生成当前 Worker 的唯一标识（hostname:pid）。"""
+    import socket
+    return f"{socket.gethostname()}:{os.getpid()}"
 
 
 @dataclass
@@ -109,6 +122,72 @@ class StrategyBatchService:
         await service.publish_run(db, run.id)
     """
 
+    async def recover_stale_runs(self, db: AsyncSession) -> int:
+        """Worker 启动时恢复过期租约的 running 和 stale queued 任务。
+
+        恢复逻辑：
+        1. 查找 lease_expires_at < now() 的 running 任务 → 重置为 queued，attempt_count +1
+        2. 查找 queued_at < now() - 2h 的 queued 任务 → attempt_count +1
+        3. attempt_count >= 3 的任务标记为 failed（error_code=max_retries_exceeded）
+
+        Args:
+            db: 异步会话
+
+        Returns:
+            恢复的任务数量
+        """
+        now = datetime.now(UTC)
+        recovered = 0
+
+        # 恢复 lease 过期的 running 任务
+        stmt = select(StrategyRun).where(
+            StrategyRun.status == "running",
+            StrategyRun.lease_expires_at < now,
+        )
+        result = await db.execute(stmt)
+        stale_running = result.scalars().all()
+
+        for run in stale_running:
+            run.attempt_count = (run.attempt_count or 0) + 1
+            if run.attempt_count >= _MAX_ATTEMPTS:
+                run.status = "failed"
+                run.error_code = "max_retries_exceeded"
+                run.finished_at = now
+            else:
+                run.status = "queued"
+                run.started_at = None
+                run.lease_expires_at = None
+                run.worker_id = None
+                run.next_retry_at = now
+            recovered += 1
+
+        # 恢复 stale queued 任务（超过 2 小时未被消费）
+        stale_threshold = now - timedelta(hours=_STALE_QUEUED_HOURS)
+        stmt = select(StrategyRun).where(
+            StrategyRun.status == "queued",
+            StrategyRun.queued_at < stale_threshold,
+        )
+        result = await db.execute(stmt)
+        stale_queued = result.scalars().all()
+
+        for run in stale_queued:
+            run.attempt_count = (run.attempt_count or 0) + 1
+            if run.attempt_count >= _MAX_ATTEMPTS:
+                run.status = "failed"
+                run.error_code = "max_retries_exceeded"
+                run.finished_at = now
+            else:
+                run.next_retry_at = now
+            recovered += 1
+
+        if recovered > 0:
+            await db.flush()
+            logger.info(
+                "[StrategyBatchService] 恢复了 %d 个过期任务", recovered,
+            )
+
+        return recovered
+
     async def create_batch_run(
         self,
         db: AsyncSession,
@@ -153,8 +232,8 @@ class StrategyBatchService:
                 f"reason={readiness.reason}"
             )
 
-        # 3. 生成幂等键（不区分 run_type，同一天同策略只保留一个 run）
-        idempotency_key = f"{strategy_key}:{trade_date.isoformat()}"
+        # 3. 生成幂等键（区分 run_type，同一天同策略允许 scheduled + manual 各一次）
+        idempotency_key = f"{strategy_key}:{trade_date.isoformat()}:{run_type}"
 
         # 检查是否已存在（幂等）
         existing_stmt = select(StrategyRun).where(
@@ -195,7 +274,8 @@ class StrategyBatchService:
                 "strategy_key": strategy_key,
                 "instrument_count": len(instrument_ids),
             },
-            started_at=datetime.now(UTC),
+            started_at=None,
+            queued_at=datetime.now(UTC),
             idempotency_key=idempotency_key,
             effective_config=effective_config,
             effective_config_hash=effective_config_hash,
@@ -276,8 +356,13 @@ class StrategyBatchService:
                 f"运行状态非 queued（当前 {run.status}），拒绝执行: run_id={run_id}"
             )
 
-        # 2. 更新 status=running
+        # 2. 更新 status=running，设置租约字段（Worker claim 时赋值）
+        now = datetime.now(UTC)
         run.status = "running"
+        run.started_at = now
+        run.heartbeat_at = now
+        run.lease_expires_at = now + timedelta(minutes=_LEASE_DURATION_MINUTES)
+        run.worker_id = _get_worker_id()
         try:
             await db.flush()
         except Exception as exc:
@@ -333,8 +418,23 @@ class StrategyBatchService:
         failed = 0
         skipped = 0
         all_results = []
+        _last_heartbeat = datetime.now(UTC)
 
         for item in run_items:
+            # 心跳：每隔 _HEARTBEAT_INTERVAL_SECONDS 更新 heartbeat_at 和 lease_expires_at
+            now_hb = datetime.now(UTC)
+            if (now_hb - _last_heartbeat).total_seconds() >= _HEARTBEAT_INTERVAL_SECONDS:
+                run.heartbeat_at = now_hb
+                run.lease_expires_at = now_hb + timedelta(minutes=_LEASE_DURATION_MINUTES)
+                _last_heartbeat = now_hb
+                try:
+                    await db.flush()
+                except Exception as exc:
+                    # 心跳失败不中断执行，仅记录警告
+                    logger.warning(
+                        "心跳更新失败 run_id=%s: %s", run_id, exc,
+                    )
+
             item.status = "running"
             item.started_at = datetime.now(UTC)
             item.attempt_count += 1
@@ -864,6 +964,7 @@ if __name__ == "__main__":
     methods = [
         "create_batch_run", "execute_run", "publish_run",
         "check_data_readiness", "_check_quality_gates",
+        "recover_stale_runs",
     ]
     for m in methods:
         assert hasattr(StrategyBatchService, m), f"缺少方法: {m}"
@@ -873,6 +974,21 @@ if __name__ == "__main__":
     # 验证 AUTO_PUBLISH_COVERAGE_THRESHOLD 常量
     assert AUTO_PUBLISH_COVERAGE_THRESHOLD == 0.8
     print(f"AUTO_PUBLISH_COVERAGE_THRESHOLD={AUTO_PUBLISH_COVERAGE_THRESHOLD} ✓")
+
+    # 验证租约与恢复常量
+    assert _LEASE_DURATION_MINUTES == 30
+    assert _MAX_ATTEMPTS == 3
+    assert _STALE_QUEUED_HOURS == 2
+    assert _HEARTBEAT_INTERVAL_SECONDS == 60
+    print(f"_LEASE_DURATION_MINUTES={_LEASE_DURATION_MINUTES} ✓")
+    print(f"_MAX_ATTEMPTS={_MAX_ATTEMPTS} ✓")
+    print(f"_STALE_QUEUED_HOURS={_STALE_QUEUED_HOURS} ✓")
+    print(f"_HEARTBEAT_INTERVAL_SECONDS={_HEARTBEAT_INTERVAL_SECONDS} ✓")
+
+    # 验证 _get_worker_id 函数
+    worker_id = _get_worker_id()
+    assert ":" in worker_id, f"worker_id 格式错误: {worker_id}"
+    print(f"_get_worker_id()={worker_id} ✓")
 
     # 验证 DataReadinessResult
     result = DataReadinessResult(
@@ -913,5 +1029,11 @@ if __name__ == "__main__":
     params = list(sig.parameters.keys())
     assert "run_id" in params
     print(f"publish_run params: {params} ✓")
+
+    # 验证 recover_stale_runs 签名
+    sig = inspect.signature(StrategyBatchService.recover_stale_runs)
+    params = list(sig.parameters.keys())
+    assert "db" in params
+    print(f"recover_stale_runs params: {params} ✓")
 
     print("OK")

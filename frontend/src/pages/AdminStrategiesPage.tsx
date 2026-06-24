@@ -6,7 +6,6 @@
 // 2. 分段按钮：全部/Selector/Monitor（按 kind 筛选）+ 状态下拉（Active/Shadow/Draft）
 // 3. split-even 策略卡网格：每张含类型/名称/meta（key·version·build）/状态pill/三stat/chip-row/操作按钮
 // 4. 发布弹窗 publishModal：策略类型/版本/Manifest文件/发布说明
-// 5. 灰度发布弹窗 rolloutModal：流量比例滑块（1-100%）+ 回滚提示
 //
 // 依赖 hooks：
 // - useStrategies：获取全部策略列表（客户端按 kind 筛选，保证分段计数准确）
@@ -175,11 +174,6 @@ export default function AdminStrategiesPage() {
   const [publishNotes, setPublishNotes] = useState('')
   const [publishing, setPublishing] = useState(false)
 
-  // ===== 灰度发布弹窗状态 =====
-  const [rolloutModalOpen, setRolloutModalOpen] = useState(false)
-  const [rolloutTarget, setRolloutTarget] = useState<StrategyCardData | null>(null)
-  const [rolloutPercent, setRolloutPercent] = useState(10)
-
   // ===== 数据查询 =====
 
   // 获取全部策略（客户端按 kind 筛选，保证分段计数始终准确）
@@ -286,37 +280,6 @@ export default function AdminStrategiesPage() {
       setPublishing(false)
     }
   }, [publishing, publishFile, toast, queryClient])
-
-  /** 打开灰度发布弹窗 */
-  const handleOpenRolloutModal = useCallback((card: StrategyCardData) => {
-    setRolloutTarget(card)
-    setRolloutPercent(10)
-    setRolloutModalOpen(true)
-  }, [])
-
-  /** 关闭灰度发布弹窗 */
-  const handleCloseRolloutModal = useCallback(() => {
-    setRolloutModalOpen(false)
-    setRolloutTarget(null)
-  }, [])
-
-  /** 开始灰度（当前无后端接口，显示 toast 反馈） */
-  const handleStartRollout = useCallback(() => {
-    if (!rolloutTarget) return
-    toast.show(
-      '灰度计划已启动',
-      `${rolloutTarget.displayName} v${rolloutTarget.version} · 流量 ${rolloutPercent}%`,
-    )
-    setRolloutModalOpen(false)
-  }, [rolloutTarget, rolloutPercent, toast])
-
-  /** 停止影子（当前无后端接口，显示 toast 反馈） */
-  const handleStopShadow = useCallback(
-    (card: StrategyCardData) => {
-      toast.show('影子已停止', `${card.displayName} v${card.version} 已停止影子运行`)
-    },
-    [toast],
-  )
 
   /** 查看清单（当前无后端接口，显示 toast 反馈） */
   const handleViewManifest = useCallback(
@@ -471,17 +434,11 @@ export default function AdminStrategiesPage() {
                       </button>
                     </>
                   )}
-                  {/* Shadow：差异报告 / 灰度发布 / 停止影子 */}
+                  {/* Shadow：差异报告 */}
                   {card.status === 'shadow' && (
                     <>
                       <button className="btn small" onClick={() => handleViewTestReport(card)}>
                         差异报告
-                      </button>
-                      <button className="btn small" onClick={() => handleOpenRolloutModal(card)}>
-                        灰度发布
-                      </button>
-                      <button className="btn small danger" onClick={() => handleStopShadow(card)}>
-                        停止影子
                       </button>
                     </>
                   )}
@@ -580,43 +537,6 @@ export default function AdminStrategiesPage() {
         </div>
       )}
 
-      {/* 灰度发布弹窗 rolloutModal */}
-      {rolloutModalOpen && rolloutTarget && (
-        <div className="modal-backdrop open" onClick={handleCloseRolloutModal}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-head">
-              <b>灰度发布 v{rolloutTarget.version}</b>
-              <button className="icon-btn" onClick={handleCloseRolloutModal}>
-                ×
-              </button>
-            </div>
-            <div className="modal-body">
-              <label className="form-label">
-                流量比例：<b>{rolloutPercent}%</b>
-              </label>
-              <input
-                className="rollout-range"
-                type="range"
-                min={1}
-                max={100}
-                value={rolloutPercent}
-                onChange={(e) => setRolloutPercent(Number(e.target.value))}
-              />
-              <div className="notice warn modal-notice">
-                灰度期间新旧版本均保留事件快照；发生异常可立即回滚到上一版本。
-              </div>
-            </div>
-            <div className="modal-foot">
-              <button className="btn" onClick={handleCloseRolloutModal}>
-                取消
-              </button>
-              <button className="btn primary" onClick={handleStartRollout}>
-                开始灰度
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </>
   )
 }

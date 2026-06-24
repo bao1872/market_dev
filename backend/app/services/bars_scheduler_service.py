@@ -2,6 +2,7 @@
 
 功能：
 - 每个交易日 16:00 自动拉取全市场 active 股票的 d/15m/1h 行情
+- 按周期分阶段处理：日线优先 → 覆盖率检查 → DSA 触发 → 15min → 60min
 - 串行拉取（pytdx 不支持并发）
 - 分批 upsert，幂等：upsert on_conflict_do_update
 - 进度：tqdm 进度条（底部固定）
@@ -15,6 +16,7 @@
 - 日线是 adj_factor 的来源，必须定时刷新，否则前复权会失败
 - 周线/月线不存储在 DB，从日线动态合成（convert_kline_frequency），不参与定时刷新
 - 1m 不参与定时刷新/回补，仅在指标计算时按需查询
+- 日线阶段完成后自动检查覆盖率，≥90% 时触发 DSA 选股（事件驱动）
 """
 
 from __future__ import annotations
@@ -168,6 +170,9 @@ class BarsSchedulerService:
             start_date=start_date,
         )
 
+    # [BarsScheduler] - 分阶段处理顺序：日线优先，便于尽早触发 DSA
+    PHASE_ORDER = ["d", "15m", "60m"]
+
     async def _process_all_instruments(
         self,
         trade_date: date,
@@ -176,7 +181,13 @@ class BarsSchedulerService:
         task_name: str,
         start_date: date | None = None,
     ) -> BatchResult:
-        """处理全市场股票的多周期行情刷新（串行）。
+        """处理全市场股票的多周期行情刷新（按周期分阶段）。
+
+        分阶段执行：
+        1. Phase 1: 全部标的日线刷新
+        2. 日线完成后检查覆盖率，满足阈值则自动触发 DSA 选股
+        3. Phase 2: 全部标的 15min 刷新
+        4. Phase 3: 全部标的 60min 刷新
 
         Args:
             trade_date: 交易日期
@@ -206,68 +217,200 @@ class BarsSchedulerService:
             return BatchResult()
 
         total = len(instruments)
-        logger.info("%s: 共 %d 只股票，串行处理", task_name, total)
+        logger.info("%s: 共 %d 只股票，按周期分阶段处理", task_name, total)
 
-        # 3. 串行处理每只股票
+        # 3. 按周期分阶段处理
         result = BatchResult(total=total)
-        for period in self.PERIODS:
+        active_periods = [p for p in self.PHASE_ORDER if p in counts]
+        for period in active_periods:
             result.period_counts[period] = 0
 
-        # 使用 tqdm 进度条（底部固定）
-        try:
-            from tqdm import tqdm
-            pbar = tqdm(
-                instruments,
-                desc=task_name,
-                position=0,
-                leave=True,
-                dynamic_ncols=True,
-            )
-        except ImportError:
-            pbar = None
+        is_daily_refresh = task_name == "每日增量更新"
 
-        for instrument in (pbar or instruments):
-            symbol = instrument.symbol
+        for phase_idx, period in enumerate(active_periods):
+            phase_name = f"{task_name} [{period}]"
+            logger.info(
+                "Phase %d/%d 开始: 周期=%s, 标的数=%d",
+                phase_idx + 1, len(active_periods), period, total,
+            )
+
+            # 使用 tqdm 进度条（底部固定）
             try:
-                # 串行刷新 3 个周期
-                refresh_result = await self.refresh_one_instrument(
-                    instrument_id=instrument.id,
-                    symbol=symbol,
-                    counts=counts,
-                    db_session=db_session,
-                    start_date=start_date,
+                from tqdm import tqdm
+                pbar = tqdm(
+                    instruments,
+                    desc=phase_name,
+                    position=0,
+                    leave=True,
+                    dynamic_ncols=True,
                 )
-                if refresh_result.success:
-                    result.succeeded += 1
-                    for period, count in refresh_result.upsert_counts.items():
-                        result.period_counts[period] += count
-                else:
-                    result.failed += 1
-                    result.failed_symbols.append(symbol)
-                    logger.warning(
-                        "%s 失败 symbol=%s error=%s",
-                        task_name, symbol, refresh_result.error,
+            except ImportError:
+                pbar = None
+
+            phase_succeeded = 0
+            phase_failed = 0
+
+            for instrument in (pbar or instruments):
+                symbol = instrument.symbol
+                try:
+                    upsert_count = await self._refresh_one_period_with_retry(
+                        instrument_id=instrument.id,
+                        symbol=symbol,
+                        period=period,
+                        count=counts[period],
+                        db_session=db_session,
+                        start_date=start_date,
                     )
-            except Exception as exc:
-                result.failed += 1
-                result.failed_symbols.append(symbol)
-                logger.warning("%s 异常 symbol=%s: %s", task_name, symbol, exc)
+                    result.period_counts[period] += upsert_count
+                    phase_succeeded += 1
+                except Exception as exc:
+                    phase_failed += 1
+                    if symbol not in result.failed_symbols:
+                        result.failed_symbols.append(symbol)
+                    logger.warning(
+                        "%s 异常 symbol=%s period=%s: %s",
+                        phase_name, symbol, period, exc,
+                    )
+
+                if pbar is not None:
+                    pbar.set_postfix(
+                        ok=phase_succeeded,
+                        fail=phase_failed,
+                        total=total,
+                    )
 
             if pbar is not None:
-                pbar.set_postfix(
-                    ok=result.succeeded,
-                    fail=result.failed,
-                    total=total,
-                )
+                pbar.close()
 
-        if pbar is not None:
-            pbar.close()
+            logger.info(
+                "Phase %d/%d 完成: 周期=%s, succeeded=%d, failed=%d, upsert=%d",
+                phase_idx + 1, len(active_periods), period,
+                phase_succeeded, phase_failed, result.period_counts[period],
+            )
+
+            # [BarsScheduler] - 日线阶段完成后，检查覆盖率并触发 DSA
+            if is_daily_refresh and period == "d":
+                try:
+                    await self._check_daily_coverage_and_trigger_dsa(
+                        trade_date, db_session,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[BarsScheduler] 日线覆盖率检查/DSA 触发异常: %s", exc,
+                    )
+
+        # 汇总 succeeded/failed（按标的维度：任一周期失败即计为 failed）
+        result.succeeded = total - len(result.failed_symbols)
+        result.failed = len(result.failed_symbols)
 
         logger.info(
             "%s 完成: total=%d succeeded=%d failed=%d period_counts=%s",
             task_name, result.total, result.succeeded, result.failed, result.period_counts,
         )
         return result
+
+    async def _check_daily_coverage_and_trigger_dsa(
+        self,
+        trade_date: date,
+        db_session: AsyncSession | None = None,
+    ) -> bool:
+        """[BarsScheduler] - 检查日线覆盖率，满足阈值则自动触发 DSA 选股。
+
+        流程：
+        1. 统计今日 bars_daily 中不同标的数
+        2. 统计活跃标的总数
+        3. 覆盖率 ≥ 90% 时，检查今日是否已有 DSA run
+        4. 无则调用 create_batch_run 创建 dsa_selector queued run
+
+        Args:
+            trade_date: 交易日期
+            db_session: 可选的 DB 会话
+
+        Returns:
+            True 表示已触发 DSA run，False 表示未触发
+        """
+        from sqlalchemy import func as sa_func
+
+        from app.constants.strategy_keys import DSA_SELECTOR
+        from app.models.bar import BarDaily
+        from app.models.strategy import StrategyDefinition, StrategyVersion
+        from app.models.strategy_run import StrategyRun
+        from app.services.strategy_batch_service import StrategyBatchService
+
+        async def _do_check(db: AsyncSession) -> bool:
+            # 统计今日日线覆盖的标的数
+            daily_count_result = await db.execute(
+                select(sa_func.count(sa_func.distinct(BarDaily.instrument_id)))
+                .where(BarDaily.trade_date == trade_date)
+            )
+            covered = daily_count_result.scalar() or 0
+
+            # 统计活跃标的数
+            active_count_result = await db.execute(
+                select(sa_func.count(Instrument.id)).where(Instrument.status == "active")
+            )
+            total = active_count_result.scalar() or 1
+
+            coverage = covered / total if total > 0 else 0.0
+            logger.info(
+                "[BarsScheduler] 日线覆盖率: %d/%d = %.1f%%",
+                covered, total, coverage * 100,
+            )
+
+            if coverage < 0.9:
+                logger.warning(
+                    "[BarsScheduler] 日线覆盖率不足 %.1f%%，暂不触发 DSA",
+                    coverage * 100,
+                )
+                return False
+
+            # 检查今日是否已有 DSA run（任何状态）
+            existing_stmt = (
+                select(StrategyRun.id)
+                .where(
+                    StrategyRun.trade_date == trade_date,
+                    StrategyRun.strategy_version_id.in_(
+                        select(StrategyVersion.id).where(
+                            StrategyVersion.strategy_definition_id.in_(
+                                select(StrategyDefinition.id).where(
+                                    StrategyDefinition.strategy_key == DSA_SELECTOR,
+                                )
+                            )
+                        )
+                    ),
+                )
+                .limit(1)
+            )
+            existing_result = await db.execute(existing_stmt)
+            existing_run_id = existing_result.scalar_one_or_none()
+
+            if existing_run_id is not None:
+                logger.info(
+                    "[BarsScheduler] 今日已有 DSA 运行 (run_id=%s)，跳过自动触发",
+                    existing_run_id,
+                )
+                return False
+
+            # 触发 DSA run
+            batch_service = StrategyBatchService()
+            run = await batch_service.create_batch_run(
+                db=db,
+                strategy_key=DSA_SELECTOR,
+                trade_date=trade_date,
+                run_type="scheduled",
+            )
+            await db.commit()
+            logger.info(
+                "[BarsScheduler] 日线覆盖率达标，已自动触发 DSA 选股: run_id=%s",
+                run.id,
+            )
+            return True
+
+        if db_session is not None:
+            return await _do_check(db_session)
+        else:
+            async with AsyncSessionLocal() as session:
+                return await _do_check(session)
 
     async def refresh_one_instrument(
         self,
@@ -453,6 +596,10 @@ if __name__ == "__main__":
         f"PERIODS 不匹配: {service.PERIODS}"
     print(f"PERIODS={service.PERIODS}")
 
+    assert service.PHASE_ORDER == ["d", "15m", "60m"], \
+        f"PHASE_ORDER 不匹配: {service.PHASE_ORDER}"
+    print(f"PHASE_ORDER={service.PHASE_ORDER}")
+
     assert service.DAILY_COUNTS == {"d": 5, "15m": 50, "60m": 10}, \
         f"DAILY_COUNTS 不匹配: {service.DAILY_COUNTS}"
     print(f"DAILY_COUNTS={service.DAILY_COUNTS}")
@@ -557,5 +704,16 @@ if __name__ == "__main__":
     assert params == ["dry_run"], f"run_retention_cleanup 参数应为 [dry_run]，实际 {params}"
     assert sig.parameters["dry_run"].default is False, "dry_run 默认应为 False"
     print("run_retention_cleanup 方法验证 ✓")
+
+    # 7. 验证 _check_daily_coverage_and_trigger_dsa 方法
+    assert hasattr(service, "_check_daily_coverage_and_trigger_dsa"), \
+        "应有 _check_daily_coverage_and_trigger_dsa 方法"
+    assert callable(service._check_daily_coverage_and_trigger_dsa), \
+        "_check_daily_coverage_and_trigger_dsa 应可调用"
+    sig = inspect.signature(service._check_daily_coverage_and_trigger_dsa)
+    params = list(sig.parameters.keys())
+    assert params == ["trade_date", "db_session"], \
+        f"_check_daily_coverage_and_trigger_dsa 参数应为 [trade_date, db_session]，实际 {params}"
+    print("_check_daily_coverage_and_trigger_dsa 方法验证 ✓")
 
     print("\n所有自测通过 ✓（未进行 DB/网络测试）")

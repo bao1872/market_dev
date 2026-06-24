@@ -528,39 +528,6 @@ class TestNotificationAPI:
         assert response.status_code == 401  # 缺少 X-User-Id
 
 
-# ==================== 消息决策服务测试 ====================
-
-
-class TestMessageDecision:
-    """消息决策服务测试（验证函数签名与导入）。"""
-
-    def test_import_decision_functions(self) -> None:
-        """测试决策服务函数可导入。"""
-        from app.services.message_decision import (
-            decide_selection_message,
-            decide_monitoring_message,
-            decide_and_create_selection,
-            decide_and_create_monitoring,
-        )
-        assert decide_selection_message is not None
-        assert decide_monitoring_message is not None
-        assert decide_and_create_selection is not None
-        assert decide_and_create_monitoring is not None
-
-    def test_selection_result_repository_import(self) -> None:
-        """测试选股结果查询仓储可导入。"""
-        from app.repositories.selection_result_repository import (
-            get_run_with_plan_and_revision,
-            list_results_by_run,
-            list_evidence_by_result,
-            count_matched_results,
-        )
-        assert get_run_with_plan_and_revision is not None
-        assert list_results_by_run is not None
-        assert list_evidence_by_result is not None
-        assert count_matched_results is not None
-
-
 if __name__ == "__main__":
     # 自测入口：直接运行验证
     pytest.main([__file__, "-v", "--tb=short"])

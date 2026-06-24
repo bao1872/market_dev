@@ -6,6 +6,10 @@
 # ===== Stage 1: builder - 安装 Python 依赖 =====
 FROM python:3.11-slim AS builder
 
+# 构建版本注入：GIT_SHA / BUILD_TIME（docker compose build 时传入，缺失则回退 unknown）
+ARG GIT_SHA=unknown
+ARG BUILD_TIME=unknown
+
 WORKDIR /app
 
 # 配置清华 PyPI 镜像源，加速国内依赖下载
@@ -26,7 +30,15 @@ RUN pip install .
 # ===== Stage 2: runtime - 精简运行时镜像 =====
 FROM python:3.11-slim
 
+# 从 builder 继承构建版本参数
+ARG GIT_SHA=unknown
+ARG BUILD_TIME=unknown
+
 WORKDIR /app
+
+# 将构建版本写入运行时环境变量，/version 端点读取
+ENV GIT_SHA=${GIT_SHA}
+ENV BUILD_TIME=${BUILD_TIME}
 
 # 从 builder 复制已安装好依赖的虚拟环境
 COPY --from=builder /opt/venv /opt/venv

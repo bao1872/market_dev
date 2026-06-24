@@ -426,9 +426,7 @@ export default function SettingsPage() {
   // 策略消息订阅状态
   const [subs, setSubs] = useState({
     selectionStrong: true,
-    monitorNode: true,
     dsaSingle: false,
-    nodeSingle: false,
   })
 
   const membership = membershipQuery.data
@@ -453,11 +451,6 @@ export default function SettingsPage() {
   const handleOpenEditFeishu = (channel: NotificationChannel) => {
     setEditingChannel(channel)
     setShowFeishuModal(true)
-  }
-
-  // 保存通知规则（当前为前端态，后续接入后端配置接口）
-  const handleSaveRules = () => {
-    toast.show('已保存', '个人设置已保存')
   }
 
   return (
@@ -513,10 +506,10 @@ export default function SettingsPage() {
           </div>
 
           {/* 用户通知规则卡 */}
-          <div className="card">
+          <div className="card" style={{ opacity: 0.5, pointerEvents: 'none' }}>
             <div className="card-head">
               <div>
-                <div className="card-title">用户通知规则</div>
+                <div className="card-title">用户通知规则 <span className="status-pill off">尚未接入后端</span></div>
                 <div className="card-sub">跨全部选股和监控策略生效</div>
               </div>
             </div>
@@ -572,7 +565,7 @@ export default function SettingsPage() {
               </div>
             </div>
             <div className="drawer-foot">
-              <button className="btn primary" onClick={handleSaveRules}>保存设置</button>
+              <button className="btn primary" disabled>保存设置</button>
             </div>
           </div>
 
@@ -599,28 +592,10 @@ export default function SettingsPage() {
                   <input
                     type="checkbox"
                     className="checkbox"
-                    checked={subs.monitorNode}
-                    onChange={(e) => setSubs((s) => ({ ...s, monitorNode: e.target.checked }))}
-                  />
-                  Node 监控策略消息
-                </label>
-                <label className="strategy-check">
-                  <input
-                    type="checkbox"
-                    className="checkbox"
                     checked={subs.dsaSingle}
                     onChange={(e) => setSubs((s) => ({ ...s, dsaSingle: e.target.checked }))}
                   />
                   DSA 单策略过程消息
-                </label>
-                <label className="strategy-check">
-                  <input
-                    type="checkbox"
-                    className="checkbox"
-                    checked={subs.nodeSingle}
-                    onChange={(e) => setSubs((s) => ({ ...s, nodeSingle: e.target.checked }))}
-                  />
-                  Node 单策略过程消息
                 </label>
               </div>
             </div>

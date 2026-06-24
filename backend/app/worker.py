@@ -1,11 +1,11 @@
-"""统一 Worker 入口 - 支持 Outbox Relay / Delivery Worker / Job 消费者 / 策略批量计算 / 行情调度 / 选股策略调度。
+"""统一 Worker 入口 - 支持 Outbox Relay / Delivery Worker / Job 消费者 / 策略批量计算 / 行情调度 / 选股策略调度 / 日历调度 / 监控调度。
 
 用法：
     WORKER_TYPE=outbox python -m app.worker           # 运行 Outbox Relay
     WORKER_TYPE=delivery python -m app.worker         # 运行投递 Worker
     WORKER_TYPE=strategy_batch python -m app.worker   # 运行策略批量计算 Worker
-    WORKER_TYPE=bars_scheduler python -m app.worker   # 运行行情调度 Worker（每日 16:00）
-    WORKER_TYPE=strategy_scheduler python -m app.worker   # 运行选股策略调度 Worker（每日 18:00）
+    WORKER_TYPE=bars_scheduler python -m app.worker   # 运行行情调度 Worker（每日 16:00，日线优先+DSA 事件触发）
+    WORKER_TYPE=strategy_scheduler python -m app.worker   # 运行选股策略调度 Worker（每日 18:30，兜底机制）
     WORKER_TYPE=calendar_scheduler python -m app.worker  # 运行日历调度 Worker（每日 02:00）
     WORKER_TYPE=monitor_scheduler python -m app.worker    # 运行监控调度 Worker（交易时段 9:30-15:00）
     WORKER_TYPE=all python -m app.worker              # 同时运行全部（开发模式）
@@ -28,6 +28,7 @@ import asyncio
 import logging
 import os
 import signal
+import socket
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
@@ -43,6 +44,84 @@ WORKER_MAX_RETRY = int(os.getenv("WORKER_MAX_RETRY", "5"))
 
 # 优雅退出标志
 _shutdown = False
+
+# [WorkerHeartbeat] - 实例标识：hostname:pid
+_WORKER_INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}"
+
+
+async def _heartbeat_loop(worker_name: str, interval: int = 60) -> None:
+    """后台心跳任务，每 interval 秒更新一次 worker_heartbeats。
+
+    启动时 INSERT（若不存在），运行中 UPDATE heartbeat_at，退出时标记 stopped。
+    心跳失败仅记录警告，不中断 Worker 主流程。
+    """
+    from sqlalchemy import select
+
+    from app.models.worker_heartbeat import WorkerHeartbeat
+
+    # 启动时写入初始心跳
+    try:
+        async with AsyncSessionLocal() as db:
+            now = datetime.now(UTC)
+            stmt = select(WorkerHeartbeat).where(
+                WorkerHeartbeat.worker_name == worker_name,
+                WorkerHeartbeat.instance_id == _WORKER_INSTANCE_ID,
+            )
+            result = await db.execute(stmt)
+            hb = result.scalar_one_or_none()
+            if hb is None:
+                hb = WorkerHeartbeat(
+                    worker_name=worker_name,
+                    instance_id=_WORKER_INSTANCE_ID,
+                    started_at=now,
+                    heartbeat_at=now,
+                    status="running",
+                    build_sha=os.environ.get("GIT_SHA", "unknown"),
+                )
+                db.add(hb)
+            else:
+                hb.heartbeat_at = now
+                hb.status = "running"
+            await db.commit()
+    except Exception as e:
+        logger.warning("心跳初始化失败 %s: %s", worker_name, e)
+
+    # 定期更新心跳
+    while not _shutdown:
+        await asyncio.sleep(interval)
+        if _shutdown:
+            break
+        try:
+            async with AsyncSessionLocal() as db:
+                now = datetime.now(UTC)
+                stmt = select(WorkerHeartbeat).where(
+                    WorkerHeartbeat.worker_name == worker_name,
+                    WorkerHeartbeat.instance_id == _WORKER_INSTANCE_ID,
+                )
+                result = await db.execute(stmt)
+                hb = result.scalar_one_or_none()
+                if hb is not None:
+                    hb.heartbeat_at = now
+                    hb.status = "running"
+                    await db.commit()
+        except Exception as e:
+            logger.warning("心跳更新失败 %s: %s", worker_name, e)
+
+    # 退出时标记 stopped
+    try:
+        async with AsyncSessionLocal() as db:
+            stmt = select(WorkerHeartbeat).where(
+                WorkerHeartbeat.worker_name == worker_name,
+                WorkerHeartbeat.instance_id == _WORKER_INSTANCE_ID,
+            )
+            result = await db.execute(stmt)
+            hb = result.scalar_one_or_none()
+            if hb is not None:
+                hb.status = "stopped"
+                hb.heartbeat_at = datetime.now(UTC)
+                await db.commit()
+    except Exception as e:
+        logger.warning("心跳退出标记失败 %s: %s", worker_name, e)
 
 
 def _handle_shutdown(signum: int, _frame: object) -> None:
@@ -62,6 +141,7 @@ async def run_outbox_relay() -> None:
     """
     from app.services.outbox_relay import relay_outbox
 
+    _hb_task = asyncio.create_task(_heartbeat_loop("outbox"))
     logger.info("Outbox Relay worker 启动（间隔=%ds, 批次=%d）", WORKER_INTERVAL, WORKER_BATCH_SIZE)
     while not _shutdown:
         try:
@@ -90,6 +170,7 @@ async def run_delivery_worker() -> None:
     """
     from app.services.delivery_worker import process_notification_outbox
 
+    _hb_task = asyncio.create_task(_heartbeat_loop("delivery"))
     logger.info("Delivery Worker 启动（间隔=%ds, 批次=%d）", WORKER_INTERVAL, WORKER_BATCH_SIZE)
     while not _shutdown:
         try:
@@ -111,7 +192,7 @@ async def run_strategy_batch_worker() -> None:
     """策略批量计算 Worker：轮询 queued 状态的运行并执行。
 
     每个轮询周期：
-    1. 查询 strategy_runs WHERE status='queued'（按 started_at 排序，取 1 条）
+    1. 查询 strategy_runs WHERE status='queued'（按 queued_at 排序，取 1 条）
     2. 调用 StrategyBatchService.execute_run() 执行
     3. 提交事务
 
@@ -119,25 +200,39 @@ async def run_strategy_batch_worker() -> None:
     - 单 run 串行执行（避免并发计算同一策略版本）
     - 执行失败时记录日志，run 状态由 execute_run 内部处理
     - Worker 重启后可继续执行 queued 状态的 run（中断恢复）
+    - 启动时调用 recover_stale_runs() 恢复过期租约的 running 任务
     """
     from sqlalchemy import select
 
     from app.models.strategy_run import StrategyRun
     from app.services.strategy_batch_service import StrategyBatchService
 
+    _hb_task = asyncio.create_task(_heartbeat_loop("strategy_batch"))
     logger.info(
         "Strategy Batch Worker 启动（间隔=%ds）", WORKER_INTERVAL
     )
     service = StrategyBatchService()
 
+    # 启动时恢复过期租约的 running 和 stale queued 任务
+    try:
+        async with AsyncSessionLocal() as db:
+            recovered = await service.recover_stale_runs(db)
+            await db.commit()
+            if recovered > 0:
+                logger.info(
+                    "Strategy Batch Worker 启动恢复: %d 个过期任务", recovered,
+                )
+    except Exception as exc:
+        logger.exception("Strategy Batch Worker 启动恢复异常: %s", exc)
+
     while not _shutdown:
         try:
             async with AsyncSessionLocal() as db:
-                # 查询 queued 状态的 run（按 started_at 排序，取 1 条）
+                # 查询 queued 状态的 run（按 queued_at 排序，取 1 条）
                 stmt = (
                     select(StrategyRun)
                     .where(StrategyRun.status == "queued")
-                    .order_by(StrategyRun.started_at)
+                    .order_by(StrategyRun.queued_at)
                     .limit(1)
                 )
                 result = await db.execute(stmt)
@@ -186,6 +281,7 @@ async def run_bars_scheduler_worker() -> None:
 
     from app.services.bars_scheduler_service import BarsSchedulerService
 
+    _hb_task = asyncio.create_task(_heartbeat_loop("bars_scheduler"))
     scheduler = AsyncIOScheduler()
     service = BarsSchedulerService()
 
@@ -233,19 +329,22 @@ async def run_bars_scheduler_worker() -> None:
 
 
 async def run_strategy_scheduler_worker() -> None:
-    """选股策略调度 Worker：每日 18:00 触发所有 kind=selector 策略的批量计算。
+    """选股策略调度 Worker（兜底机制）：每日 18:30 触发所有 kind=selector 策略的批量计算。
 
     使用 APScheduler AsyncIOScheduler + CronTrigger：
-    - 每个交易日（周一至周五）18:00 触发
+    - 每个交易日 18:30 触发（比 bars 16:00 晚 2.5 小时，作为兜底）
     - 查询 strategy_definitions WHERE kind='selector' 的所有策略
-    - 为每个策略调用 StrategyBatchService.create_batch_run(run_type="scheduled")
+    - 为每个策略检查今日是否已有 run（任何状态），已有则跳过
+    - 无则调用 StrategyBatchService.create_batch_run(run_type="scheduled")
     - 创建的 queued run 由 strategy_batch worker 轮询执行
 
     设计说明：
-    - 18:00 触发（bars_scheduler 16:00 刷新行情，约 1.8 小时完成后执行，避免竞态）
+    - 18:30 触发（bars_scheduler 16:00 刷新行情，日线完成后自动触发 DSA，
+      本调度器作为兜底，防止日线触发失败时遗漏）
+    - 去重：先检查今日是否已有同 strategy_key 的 run，已有则跳过
     - 数据就绪检查：check_data_readiness() 覆盖率 < 90% 时阻断 DSA 执行
     - 单个策略创建失败不阻塞其他策略，记录日志继续
-    - 幂等：同一 strategy_key + trade_date + run_type=scheduled 只创建一次
+    - 幂等：create_batch_run 内部 idempotency_key 也保证去重
     """
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.cron import CronTrigger
@@ -254,13 +353,15 @@ async def run_strategy_scheduler_worker() -> None:
     from app.models.strategy import StrategyDefinition, StrategyVersion
     from app.services.strategy_batch_service import StrategyBatchService
 
+    _hb_task = asyncio.create_task(_heartbeat_loop("strategy_scheduler"))
     scheduler = AsyncIOScheduler()
     service = StrategyBatchService()
 
     async def scheduled_strategy_run() -> None:
-        """定时任务：每日 18:00 为所有 selector 策略创建 queued run。"""
+        """定时任务：每日 18:30 为所有 selector 策略创建 queued run（兜底）。"""
         from datetime import date as date_cls
 
+        from app.models.strategy_run import StrategyRun
         from app.services.calendar_service import is_trading_day_async
 
         trade_date = date_cls.today()
@@ -273,7 +374,7 @@ async def run_strategy_scheduler_worker() -> None:
             logger.info("非交易日 %s，跳过选股策略计算", trade_date)
             return
 
-        logger.info("交易日 %s，开始选股策略计算", trade_date)
+        logger.info("交易日 %s，开始选股策略计算（兜底调度）", trade_date)
         try:
             async with AsyncSessionLocal() as db:
                 # 查询 production 环境 + 参与调度 + 有 released 版本的 selector 策略
@@ -301,8 +402,37 @@ async def run_strategy_scheduler_worker() -> None:
 
                 logger.info("待计算的 selector 策略: %s", strategy_keys)
                 succeeded = 0
+                skipped = 0
                 failed = 0
                 for strategy_key in strategy_keys:
+                    # [StrategyScheduler] - 去重检查：今日是否已有该策略的 run
+                    existing_run_stmt = (
+                        select(StrategyRun.id)
+                        .where(
+                            StrategyRun.trade_date == trade_date,
+                            StrategyRun.strategy_version_id.in_(
+                                select(StrategyVersion.id).where(
+                                    StrategyVersion.strategy_definition_id.in_(
+                                        select(StrategyDefinition.id).where(
+                                            StrategyDefinition.strategy_key == strategy_key,
+                                        )
+                                    )
+                                )
+                            ),
+                        )
+                        .limit(1)
+                    )
+                    existing_run_result = await db.execute(existing_run_stmt)
+                    existing_run_id = existing_run_result.scalar_one_or_none()
+
+                    if existing_run_id is not None:
+                        logger.info(
+                            "策略 %s 今日已有运行 (run_id=%s)，跳过",
+                            strategy_key, existing_run_id,
+                        )
+                        skipped += 1
+                        continue
+
                     try:
                         run = await service.create_batch_run(
                             db=db,
@@ -331,21 +461,21 @@ async def run_strategy_scheduler_worker() -> None:
                         failed += 1
 
                 logger.info(
-                    "定时任务完成: total=%d succeeded=%d failed=%d",
-                    len(strategy_keys), succeeded, failed,
+                    "定时任务完成（兜底）: total=%d succeeded=%d skipped=%d failed=%d",
+                    len(strategy_keys), succeeded, skipped, failed,
                 )
         except Exception as exc:
             logger.exception("选股策略调度任务异常: %s", exc)
 
-    # 每日 18:00 触发（含非交易日，由内部交易日历判断是否执行）
+    # 每日 18:30 触发（含非交易日，由内部交易日历判断是否执行；18:30 作为兜底，日线触发优先）
     scheduler.add_job(
         scheduled_strategy_run,
-        CronTrigger(day_of_week="mon-sun", hour=18, minute=0, timezone=ZoneInfo("Asia/Shanghai")),
+        CronTrigger(day_of_week="mon-sun", hour=18, minute=30, timezone=ZoneInfo("Asia/Shanghai")),
         id="strategy_run_daily",
         replace_existing=True,
     )
     scheduler.start()
-    logger.info("Strategy Scheduler Worker 启动（每日 18:00 触发）")
+    logger.info("Strategy Scheduler Worker 启动（每日 18:30 触发，兜底机制）")
 
     while not _shutdown:
         await asyncio.sleep(60)
@@ -370,6 +500,7 @@ async def run_calendar_scheduler_worker() -> None:
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.cron import CronTrigger
 
+    _hb_task = asyncio.create_task(_heartbeat_loop("calendar_scheduler"))
     scheduler = AsyncIOScheduler()
 
     async def calendar_job() -> None:
@@ -425,12 +556,20 @@ async def run_monitor_scheduler_worker() -> None:
 
     from app.services.monitor_batch_service import MonitorBatchService
 
+    _hb_task = asyncio.create_task(_heartbeat_loop("monitor_scheduler"))
     service = MonitorBatchService()
     cycle_interval = 30  # 秒
     morning_start = time_cls(9, 30)
     morning_end = time_cls(11, 30)
     afternoon_start = time_cls(13, 0)
     afternoon_end = time_cls(15, 0)
+
+    # [eval_recovery] 启动时恢复过期租约的 PENDING 评估
+    async with AsyncSessionLocal() as db:
+        recovered = await service.recover_stale_evaluations(db)
+        await db.commit()
+        if recovered > 0:
+            logger.info("Monitor Worker 启动恢复: %d 个过期评估", recovered)
 
     logger.info(
         "Monitor Scheduler Worker 启动（交易时段 %s-%s, %s-%s, 间隔=%ds）",
