@@ -62,3 +62,6 @@ Thumbs.db
 # ===== 审计/临时文档 =====
 advice.md
 task_plan.md
+
+# ===== 本地配置（含硬编码开发密码） =====
+backend/app/config.py
