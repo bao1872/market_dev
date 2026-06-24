@@ -1,26 +1,6 @@
 # V1.1 交易平台 - 本地开发环境
-# PostgreSQL 16 + Redis 7
+# Redis 7（PostgreSQL 使用物理机实例，不再创建容器）
 services:
-  postgres:
-    image: postgres:16
-    container_name: trading-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: trading
-      POSTGRES_PASSWORD: trading
-      POSTGRES_DB: trading
-      TZ: Asia/Shanghai
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U trading -d trading"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-
   redis:
     image: redis:7
     container_name: trading-redis
@@ -38,7 +18,5 @@ services:
       start_period: 10s
 
 volumes:
-  pgdata:
-    name: trading-pgdata
   redisdata:
     name: trading-redisdata
