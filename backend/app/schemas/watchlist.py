@@ -4,6 +4,8 @@
 - WatchlistAddRequest: 加入自选请求（仅 instrument_id + source，user_id 由上下文注入）
 - WatchlistItemResponse: 单条自选响应
 - WatchlistListResponse: 自选列表响应
+- WatchlistMonitorStatusItem: 自选股+监控状态聚合响应（单条）
+- WatchlistMonitorStatusResponse: 自选股+监控状态聚合响应（列表）
 
 安全约束：
 - user_id 不出现在请求体中（由认证上下文注入）
@@ -13,6 +15,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -52,11 +55,43 @@ class WatchlistListResponse(BaseModel):
     total: int = Field(..., description="总记录数")
 
 
+class WatchlistMonitorStatusItem(BaseModel):
+    """自选股+监控状态聚合响应（单条）。"""
+
+    instrument_id: UUID = Field(..., description="股票 ID")
+    symbol: str = Field(..., description="股票代码")
+    name: str = Field(..., description="股票名称")
+    market: str = Field(..., description="市场（SH/SZ/BJ）")
+    has_monitor_state: bool = Field(..., description="是否有监控状态")
+    monitor_state: dict[str, Any] | None = Field(
+        None, description="监控状态 payload（无状态时为 null）"
+    )
+    evaluation_status: str | None = Field(
+        None, description="评估状态（SUCCEEDED/FAILED/PENDING）"
+    )
+    evaluation_error: str | None = Field(
+        None, description="评估错误信息（无错误时为 null）"
+    )
+    updated_at: datetime | None = Field(
+        None, description="监控状态更新时间"
+    )
+
+
+class WatchlistMonitorStatusResponse(BaseModel):
+    """自选股+监控状态聚合响应（列表）。"""
+
+    items: list[WatchlistMonitorStatusItem] = Field(
+        default_factory=list, description="自选股+监控状态列表"
+    )
+
+
 if __name__ == "__main__":
     # 自测入口：验证 schema 字段定义
     print(f"WatchlistAddRequest fields={list(WatchlistAddRequest.model_fields.keys())}")
     print(f"WatchlistItemResponse fields={list(WatchlistItemResponse.model_fields.keys())}")
     print(f"WatchlistListResponse fields={list(WatchlistListResponse.model_fields.keys())}")
+    print(f"WatchlistMonitorStatusItem fields={list(WatchlistMonitorStatusItem.model_fields.keys())}")
+    print(f"WatchlistMonitorStatusResponse fields={list(WatchlistMonitorStatusResponse.model_fields.keys())}")
     # 验证 user_id 不在请求体中（安全约束）
     assert "user_id" not in WatchlistAddRequest.model_fields, "user_id 不应在请求体中"
     print("OK")

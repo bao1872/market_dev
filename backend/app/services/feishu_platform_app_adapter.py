@@ -539,11 +539,10 @@ if __name__ == "__main__":
     # 自测入口：从 DB 查询用户配置的渠道凭证
     import asyncio
 
-    from sqlalchemy import select
-
     from app.db import AsyncSessionLocal
     from app.models.notification import NotificationChannel
     from app.services.channel_adapter import get_adapter, list_supported_adapters
+    from sqlalchemy import select
 
     async def _test():
         # 验证注册

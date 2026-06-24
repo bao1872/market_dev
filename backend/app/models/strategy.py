@@ -22,7 +22,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -48,6 +48,18 @@ class StrategyDefinition(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    environment: Mapped[str] = mapped_column(
+        Text(), nullable=False, server_default="production",
+        comment="环境：production/test"
+    )
+    is_user_visible: Mapped[bool] = mapped_column(
+        Boolean(), nullable=False, server_default="true",
+        comment="是否对普通用户可见"
+    )
+    is_scheduled: Mapped[bool] = mapped_column(
+        Boolean(), nullable=False, server_default="true",
+        comment="是否参与定时调度"
     )
 
     def __repr__(self) -> str:

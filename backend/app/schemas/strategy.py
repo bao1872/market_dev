@@ -28,6 +28,9 @@ class StrategyResponse(BaseModel):
     kind: str = Field(..., description="selector/monitor")
     display_name: str = Field(..., description="策略展示名称")
     created_at: datetime = Field(..., description="创建时间")
+    environment: str = Field("production", description="环境：production/test")
+    is_user_visible: bool = Field(True, description="是否对普通用户可见")
+    is_scheduled: bool = Field(True, description="是否参与定时调度")
 
 
 class StrategyVersionResponse(BaseModel):

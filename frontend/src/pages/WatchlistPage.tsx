@@ -1,7 +1,7 @@
 // 自选股监控页
 // 用法：展示用户自选股票池的统一监控状态（BB + VN 合并指标）
 // 路由：/watchlist
-// 依赖 hooks：useWatchlist / useStrategyMonitorStates / useInstruments / useAddToWatchlist
+// 依赖 hooks：useWatchlist / useStrategyMonitorStates / useInstruments / useAddToWatchlist / useRemoveFromWatchlist
 import { useState, useMemo, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQueries } from '@tanstack/react-query'
@@ -11,15 +11,16 @@ import {
   useStrategyMonitorStates,
   useInstruments,
   useAddToWatchlist,
+  useRemoveFromWatchlist,
 } from '@/hooks/useApi'
 import * as api from '@/api/endpoints'
-import type { Instrument, MonitorState } from '@/api/endpoints'
+import type { Instrument, MonitorState, WatchlistItem } from '@/api/endpoints'
 import { StrategyDataTable } from '@/components/StrategyDataTable'
 import type { DataTableColumn } from '@/components/StrategyDataTable'
 
 // ===== 类型定义 =====
 
-// 统一监控行（从 watchlist_monitor 的 MonitorState.payload 派生）
+// 统一监控行（从 WatchlistItem 派生，MonitorState 可选）
 interface WatchlistRow {
   instrumentId: string
   symbol: string
@@ -34,6 +35,7 @@ interface WatchlistRow {
   pocPrice: number | null
   lastTouchedNode: number | null
   updatedAt: string | null
+  hasState: boolean
   [key: string]: unknown
 }
 
@@ -169,14 +171,14 @@ export default function WatchlistPage() {
 
   // --- 自选列表 ---
   const watchlistQuery = useWatchlist()
-  const watchlistItems = watchlistQuery.data?.items ?? []
+  const watchlistItems: WatchlistItem[] = watchlistQuery.data?.items ?? []
   const watchlistIds = useMemo(
     () => new Set(watchlistItems.map((w) => w.instrument_id)),
     [watchlistItems],
   )
 
-  // --- 统一监控状态（watchlist_monitor，全量后按自选过滤） ---
-  const monitorStatesQuery = useStrategyMonitorStates('watchlist_monitor')
+  // --- 统一监控状态（watchlist_monitor，交易时段 30s 自动刷新） ---
+  const monitorStatesQuery = useStrategyMonitorStates('watchlist_monitor', undefined)
   const monitorStates: MonitorState[] = monitorStatesQuery.data?.items ?? []
 
   // --- 批量查询自选股的 Instrument 信息（名称/代码/市场） ---
@@ -198,6 +200,9 @@ export default function WatchlistPage() {
     return m
   }, [instrumentQueries, watchlistIdList])
 
+  // --- 移出自选 ---
+  const removeWatchlistMutation = useRemoveFromWatchlist()
+
   // --- UI 状态 ---
   const [searchModalOpen, setSearchModalOpen] = useState(false)
 
@@ -213,52 +218,36 @@ export default function WatchlistPage() {
     return m
   }, [monitorStates, watchlistIds])
 
-  // ===== 行转换 =====
+  // ===== 行转换（行来源 = WatchlistItem，MonitorState 可选） =====
 
-  /** 提取股票展示信息 */
-  const getStockDisplay = useCallback(
-    (instrumentId: string): { symbol: string; name: string } => {
-      const inst = instrumentMap.get(instrumentId)
-      return {
-        symbol: inst?.symbol ?? instrumentId.slice(0, 8),
-        name: inst?.name ?? '-',
-      }
-    },
-    [instrumentMap],
+  const activeItems = useMemo(
+    () => watchlistItems.filter((item) => item.active),
+    [watchlistItems],
   )
-
-  /** 将 MonitorState 转换为 WatchlistRow */
-  const toRow = useCallback(
-    (s: MonitorState): WatchlistRow => {
-      const { symbol, name } = getStockDisplay(s.instrument_id)
-      return {
-        instrumentId: s.instrument_id,
-        symbol,
-        name,
-        bbUpper: toNum(pickPayload(s.payload, ['bb_upper'])),
-        bbMid: toNum(pickPayload(s.payload, ['bb_mid', 'bb_middle'])),
-        bbLower: toNum(pickPayload(s.payload, ['bb_lower'])),
-        currentPrice: toNum(pickPayload(s.payload, ['current_price', 'close'])),
-        upperNode: toNum(pickPayload(s.payload, ['upper_node', 'nearest_node_price'])),
-        lowerNode: toNum(pickPayload(s.payload, ['lower_node'])),
-        position01: toNum(pickPayload(s.payload, ['position_0_1', 'node_strength'])),
-        pocPrice: toNum(pickPayload(s.payload, ['poc_price'])),
-        lastTouchedNode: toNum(pickPayload(s.payload, ['last_touched_node'])),
-        updatedAt: fmtTime(s.updated_at),
-      }
-    },
-    [getStockDisplay],
-  )
-
-  // ===== 表格行数据 =====
 
   const rows: WatchlistRow[] = useMemo(
     () =>
-      watchlistIdList
-        .map((id) => monitorStateMap.get(id))
-        .filter((s): s is MonitorState => !!s)
-        .map(toRow),
-    [watchlistIdList, monitorStateMap, toRow],
+      activeItems.map((item) => {
+        const state = monitorStateMap.get(item.instrument_id)
+        const inst = instrumentMap.get(item.instrument_id)
+        return {
+          instrumentId: item.instrument_id,
+          symbol: inst?.symbol ?? item.instrument_id.slice(0, 8),
+          name: inst?.name ?? '-',
+          bbUpper: state ? toNum(pickPayload(state.payload, ['bb_upper'])) : null,
+          bbMid: state ? toNum(pickPayload(state.payload, ['bb_mid', 'bb_middle'])) : null,
+          bbLower: state ? toNum(pickPayload(state.payload, ['bb_lower'])) : null,
+          currentPrice: state ? toNum(pickPayload(state.payload, ['current_price', 'close'])) : null,
+          upperNode: state ? toNum(pickPayload(state.payload, ['upper_node', 'nearest_node_price'])) : null,
+          lowerNode: state ? toNum(pickPayload(state.payload, ['lower_node'])) : null,
+          position01: state ? toNum(pickPayload(state.payload, ['position_0_1', 'node_strength'])) : null,
+          pocPrice: state ? toNum(pickPayload(state.payload, ['poc_price'])) : null,
+          lastTouchedNode: state ? toNum(pickPayload(state.payload, ['last_touched_node'])) : null,
+          updatedAt: state ? fmtTime(state.updated_at) : null,
+          hasState: !!state,
+        }
+      }),
+    [activeItems, monitorStateMap, instrumentMap],
   )
 
   // ===== 事件处理 =====
@@ -266,11 +255,25 @@ export default function WatchlistPage() {
   /** 跳转个股详情 */
   const goDetail = useCallback(
     (instrumentId: string) => {
-      const { symbol } = getStockDisplay(instrumentId)
+      const inst = instrumentMap.get(instrumentId)
+      const symbol = inst?.symbol ?? instrumentId.slice(0, 8)
       navigate(`/stock/${symbol}?source=watchlist`)
     },
-    [navigate, getStockDisplay],
+    [navigate, instrumentMap],
   )
+
+  /** 移出自选 */
+  const handleRemove = useCallback(
+    (instrumentId: string) => {
+      removeWatchlistMutation.mutate(instrumentId)
+    },
+    [removeWatchlistMutation],
+  )
+
+  // ===== 加载/错误状态 =====
+
+  const isInstrumentLoading = instrumentQueries.length > 0 && instrumentQueries.some((q) => q.isLoading)
+  const isLoading = watchlistQuery.isLoading || monitorStatesQuery.isLoading || isInstrumentLoading
 
   // ===== 列定义 =====
 
@@ -290,6 +293,21 @@ export default function WatchlistPage() {
             <div className="symbol-sub">{row.symbol}</div>
           </div>
         ),
+      },
+      {
+        key: 'status',
+        title: '状态',
+        dataType: 'text',
+        sortable: true,
+        filterable: true,
+        sortValue: (row) => (row.hasState ? '1' : '0'),
+        filterValue: (row) => (row.hasState ? '已计算' : '等待首次计算'),
+        render: (row) =>
+          row.hasState ? (
+            <span className="tag success small">已计算</span>
+          ) : (
+            <span className="tag warn small">等待首次计算</span>
+          ),
       },
       {
         key: 'currentPrice',
@@ -393,11 +411,18 @@ export default function WatchlistPage() {
             <button className="btn small" onClick={() => goDetail(row.instrumentId)}>
               详情
             </button>
+            <button
+              className="btn small danger"
+              onClick={() => handleRemove(row.instrumentId)}
+              disabled={removeWatchlistMutation.isPending}
+            >
+              移出自选
+            </button>
           </div>
         ),
       },
     ],
-    [goDetail],
+    [goDetail, handleRemove, removeWatchlistMutation.isPending],
   )
 
   // ===== 渲染 =====
@@ -419,6 +444,18 @@ export default function WatchlistPage() {
         </div>
       </div>
 
+      {/* 错误提示 */}
+      {watchlistQuery.isError && (
+        <div className="notice error" style={{ marginBottom: '1rem' }}>
+          自选列表加载失败，请刷新重试
+        </div>
+      )}
+      {monitorStatesQuery.isError && (
+        <div className="notice warn" style={{ marginBottom: '1rem' }}>
+          监控状态加载失败，指标数据可能不完整
+        </div>
+      )}
+
       {/* 统一监控表格 */}
       <div className="card">
         <StrategyDataTable
@@ -426,9 +463,9 @@ export default function WatchlistPage() {
           columns={columns}
           rows={rows}
           rowKey={(row) => row.instrumentId}
-          loading={monitorStatesQuery.isLoading}
-          error={monitorStatesQuery.isError ? '监控状态加载失败' : null}
-          emptyText="暂无监控状态，请先添加自选股票"
+          loading={isLoading}
+          error={null}
+          emptyText={activeItems.length === 0 ? '暂无自选股票，请点击右上角添加' : undefined}
         />
       </div>
 

@@ -431,14 +431,14 @@ export default function IndexPage() {
         active: true,
       })
     }
-    // Volume Node Cluster
-    const node = strategies.find((s) => s.strategy_key === 'node')
-    if (node) {
+    // 自选监控
+    const monitor = strategies.find((s) => s.strategy_key === 'watchlist_monitor')
+    if (monitor) {
       const latestBarTime = monitorStates[0]?.bar_time
       cards.push({
         type: 'MONITOR',
         status: '实时',
-        title: node.display_name,
+        title: monitor.display_name,
         desc: '分钟级动态节点、POC、区间位置与碰触事件。',
         meta: `${monitorStates.length} 只 · ${fmtTime(latestBarTime)}`,
       })
@@ -640,10 +640,10 @@ export default function IndexPage() {
   const monitorOptions: StrategyOption[] = [
     {
       id: 'overviewNode',
-      name: STRATEGIES.node.name,
+      name: STRATEGIES.watchlist_monitor.name,
       description: '节点、POC 与碰触事件',
       kind: 'monitor',
-      version: STRATEGIES.node.version,
+      version: STRATEGIES.watchlist_monitor.version,
     },
   ]
 

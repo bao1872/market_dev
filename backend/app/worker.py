@@ -249,9 +249,9 @@ async def run_strategy_scheduler_worker() -> None:
     """
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.cron import CronTrigger
-    from sqlalchemy import select
+    from sqlalchemy import exists, select
 
-    from app.models.strategy import StrategyDefinition
+    from app.models.strategy import StrategyDefinition, StrategyVersion
     from app.services.strategy_batch_service import StrategyBatchService
 
     scheduler = AsyncIOScheduler()
@@ -276,9 +276,21 @@ async def run_strategy_scheduler_worker() -> None:
         logger.info("交易日 %s，开始选股策略计算", trade_date)
         try:
             async with AsyncSessionLocal() as db:
-                # 查询所有 kind=selector 的策略
+                # 查询 production 环境 + 参与调度 + 有 released 版本的 selector 策略
+                released_subq = (
+                    select(StrategyVersion.id)
+                    .where(
+                        StrategyVersion.strategy_definition_id == StrategyDefinition.id,
+                        StrategyVersion.status == "released",
+                    )
+                    .limit(1)
+                    .correlate(StrategyDefinition)
+                )
                 stmt = select(StrategyDefinition.strategy_key).where(
-                    StrategyDefinition.kind == "selector"
+                    StrategyDefinition.kind == "selector",
+                    StrategyDefinition.environment == "production",
+                    StrategyDefinition.is_scheduled == True,  # noqa: E712
+                    exists(released_subq),
                 )
                 result = await db.execute(stmt)
                 strategy_keys = [row[0] for row in result.fetchall()]
@@ -463,7 +475,7 @@ async def run_monitor_scheduler_worker() -> None:
                 elif morning_end <= current_time < afternoon_start:
                     # 午休，等待到 13:00
                     wait_seconds = (
-                        datetime(now.year, now.month, now.day, 13, 0) - now
+                        datetime(now.year, now.month, now.day, 13, 0, tzinfo=ZoneInfo("Asia/Shanghai")) - now
                     ).total_seconds()
                     if wait_seconds > 0:
                         logger.info("午休中，等待 %d 秒", int(wait_seconds))

@@ -43,7 +43,7 @@ const STALE_REALTIME = 30 * 1000 // 实时数据 30 秒
 const STALE_CALENDAR = 30 * 60 * 1000 // 日历 30 分钟（极少变更）
 
 /** 判断当前是否在 A 股交易时段（周一至周五 9:30-11:30 / 13:00-15:00） */
-function isInTradingHours(): boolean {
+export function isInTradingHours(): boolean {
   const now = new Date()
   const day = now.getDay()
   const hours = now.getHours()
@@ -269,13 +269,14 @@ export function useInstrumentMonitorStates(instrumentId: string | undefined) {
   })
 }
 
-/** 查询某策略的所有股票状态（支持 version 过滤） */
+/** 查询某策略的所有股票状态（支持 version 过滤，交易时段 30s 自动刷新） */
 export function useStrategyMonitorStates(strategyKey: string | undefined, version?: string) {
   return useQuery({
     queryKey: ['strategies', strategyKey, 'monitor-states', version],
     queryFn: () => api.getStrategyMonitorStates(strategyKey!, version),
     enabled: !!strategyKey,
     staleTime: STALE_REALTIME,
+    refetchInterval: () => isInTradingHours() ? 30000 : false,
   })
 }
 
@@ -421,24 +422,26 @@ export function useWatchlist() {
   })
 }
 
-/** 加入自选变更（自动失效 watchlist 缓存） */
+/** 加入自选变更（自动失效 watchlist + monitor-states 缓存） */
 export function useAddToWatchlist() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (payload: WatchlistAddRequest) => api.addToWatchlist(payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['watchlist'] })
+      queryClient.invalidateQueries({ queryKey: ['strategies', 'watchlist_monitor', 'monitor-states'] })
     },
   })
 }
 
-/** 移除自选变更（自动失效 watchlist 缓存） */
+/** 移除自选变更（自动失效 watchlist + monitor-states 缓存） */
 export function useRemoveFromWatchlist() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (instrumentId: string) => api.removeFromWatchlist(instrumentId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['watchlist'] })
+      queryClient.invalidateQueries({ queryKey: ['strategies', 'watchlist_monitor', 'monitor-states'] })
     },
   })
 }

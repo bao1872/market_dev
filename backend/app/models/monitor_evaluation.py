@@ -21,7 +21,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, Index, Text, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -83,6 +83,22 @@ class MonitorEvaluation(Base):
         nullable=True,
         comment="错误码",
     )
+    retry_count: Mapped[int] = mapped_column(
+        Integer(), nullable=False, server_default="0",
+        comment="重试次数",
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="租约过期时间",
+    )
+    next_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="下次重试时间",
+    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="心跳时间",
+    )
 
     __table_args__ = (
         UniqueConstraint(
@@ -121,6 +137,7 @@ if __name__ == "__main__":
         "id", "strategy_version_id", "instrument_id",
         "source_bar_time", "status", "metrics",
         "suppressed_events", "calculated_at", "error_code",
+        "retry_count", "lease_expires_at", "next_retry_at", "heartbeat_at",
     ]:
         assert required in cols, f"缺少列: {required}"
     # 验证唯一约束

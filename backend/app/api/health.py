@@ -24,6 +24,21 @@ router = APIRouter(tags=["health"])
 # [策略资产] - 就绪标志：启动时检查策略资产文件完整性，缺失则置 False
 _strategy_assets_ready: bool = True
 
+# [策略种子] - 就绪标志：watchlist_monitor 无 released 版本时置 False
+_seed_ready: bool = True
+_seed_failure_reason: str = ""
+
+
+def mark_seed_failed(reason: str) -> None:
+    """标记种子数据初始化失败，就绪检查将返回 503。
+
+    Args:
+        reason: 失败原因描述
+    """
+    global _seed_ready, _seed_failure_reason
+    _seed_ready = False
+    _seed_failure_reason = reason
+
 
 def check_strategy_assets() -> None:
     """检查策略资产文件完整性，更新 _strategy_assets_ready 标志。
@@ -73,15 +88,20 @@ async def health() -> JSONResponse:
 
 @router.get("/health/ready")
 async def readiness() -> JSONResponse:
-    """就绪检查端点，策略资产缺失时返回 503。"""
-    if _strategy_assets_ready:
+    """就绪检查端点，策略资产缺失或种子数据异常时返回 503。"""
+    if _strategy_assets_ready and _seed_ready:
         return JSONResponse(
             status_code=status.HTTP_200_OK,
             content={"status": "ready"},
         )
+    reasons = []
+    if not _strategy_assets_ready:
+        reasons.append("strategy_assets_missing")
+    if not _seed_ready:
+        reasons.append(f"seed_failed: {_seed_failure_reason}")
     return JSONResponse(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        content={"status": "not_ready", "reason": "strategy_assets_missing"},
+        content={"status": "not_ready", "reason": ", ".join(reasons)},
     )
 
 

@@ -13,189 +13,25 @@
 // - useStrategies：获取策略目录（策略数，显示在页头描述）
 // - useStrategyRuns：获取 DSA 最近运行记录（DSA 卡片处理数/耗时）
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { useToast } from '@/store/toast'
 import { useMembers, useStrategies, useStrategyRuns } from '@/hooks/useApi'
 import { getVersion, type VersionInfo } from '@/api/endpoints'
 
-// ===== 监控吞吐折线图（Canvas 2D 简单实现）=====
-// 对应原型 chart-canvas data-chart="line" data-variant="green"
-// 绘制最近 45 分钟的处理股票数折线图（绿色填充区域）
+// ===== 监控吞吐折线图 =====
+// TODO: [AdminIndexPage] 接入 GET /admin/metrics/throughput API 获取实时吞吐数据后恢复 Canvas 折线图
 
-// 45 分钟吞吐量样本数据（每分钟一个点，模拟实时监控数据）
-const THROUGHPUT_SAMPLES = [
-  240, 252, 268, 275, 281, 286, 290, 283, 278, 285,
-  291, 296, 288, 282, 279, 285, 290, 295, 287, 281,
-  276, 282, 288, 293, 286, 280, 275, 281, 286, 290,
-  285, 280, 278, 284, 289, 292, 286, 281, 277, 283,
-  288, 291, 286, 282, 286,
-]
-
-function ThroughputChart() {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-
-  // 绘制折线图：网格 + 折线 + 渐变填充 + 轴标签
-  const drawChart = () => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-
-    // 处理高 DPI 屏幕，确保线条清晰
-    const dpr = window.devicePixelRatio || 1
-    const rect = canvas.getBoundingClientRect()
-    canvas.width = rect.width * dpr
-    canvas.height = rect.height * dpr
-    ctx.scale(dpr, dpr)
-
-    const w = rect.width
-    const h = rect.height
-    const padLeft = 36
-    const padRight = 12
-    const padTop = 14
-    const padBottom = 22
-
-    const chartW = w - padLeft - padRight
-    const chartH = h - padTop - padBottom
-
-    // 数据范围（上下留 10% 余量）
-    const data = THROUGHPUT_SAMPLES
-    const maxVal = Math.max(...data) * 1.1
-    const minVal = Math.min(...data) * 0.9
-    const range = maxVal - minVal || 1
-
-    // 清空画布
-    ctx.clearRect(0, 0, w, h)
-
-    // 绘制水平网格线 + Y 轴标签
-    ctx.strokeStyle = '#1b2230'
-    ctx.lineWidth = 1
-    ctx.font = '10px ui-monospace, monospace'
-    ctx.fillStyle = '#778297'
-    for (let i = 0; i <= 4; i++) {
-      const y = padTop + (chartH / 4) * i
-      ctx.beginPath()
-      ctx.moveTo(padLeft, y)
-      ctx.lineTo(w - padRight, y)
-      ctx.stroke()
-      const val = Math.round(maxVal - (range / 4) * i)
-      ctx.fillText(String(val), 4, y + 3)
-    }
-
-    // 绘制渐变填充区域（折线下方）
-    ctx.beginPath()
-    data.forEach((v, i) => {
-      const x = padLeft + (chartW / (data.length - 1)) * i
-      const y = padTop + chartH - ((v - minVal) / range) * chartH
-      if (i === 0) ctx.moveTo(x, y)
-      else ctx.lineTo(x, y)
-    })
-    ctx.lineTo(padLeft + chartW, padTop + chartH)
-    ctx.lineTo(padLeft, padTop + chartH)
-    ctx.closePath()
-    const gradient = ctx.createLinearGradient(0, padTop, 0, padTop + chartH)
-    gradient.addColorStop(0, 'rgba(38, 166, 154, 0.25)')
-    gradient.addColorStop(1, 'rgba(38, 166, 154, 0)')
-    ctx.fillStyle = gradient
-    ctx.fill()
-
-    // 绘制折线（绿色）
-    ctx.strokeStyle = '#26a69a'
-    ctx.lineWidth = 2
-    ctx.beginPath()
-    data.forEach((v, i) => {
-      const x = padLeft + (chartW / (data.length - 1)) * i
-      const y = padTop + chartH - ((v - minVal) / range) * chartH
-      if (i === 0) ctx.moveTo(x, y)
-      else ctx.lineTo(x, y)
-    })
-    ctx.stroke()
-
-    // 绘制 X 轴时间标签
-    ctx.fillStyle = '#778297'
-    ctx.font = '9px ui-monospace, monospace'
-    const labels = ['-45m', '-30m', '-15m', '现在']
-    labels.forEach((label, i) => {
-      const x = padLeft + (chartW / 3) * i
-      ctx.fillText(label, x - 12, h - 6)
-    })
-  }
-
-  useEffect(() => {
-    drawChart()
-    // 窗口尺寸变化时重绘
-    const handleResize = () => drawChart()
-    window.addEventListener('resize', handleResize)
-    return () => window.removeEventListener('resize', handleResize)
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
-
+function ThroughputChartPlaceholder() {
   return (
-    <div className="chart-panel small">
-      <canvas
-        ref={canvasRef}
-        className="chart-canvas"
-        data-chart="line"
-        data-variant="green"
-      />
+    <div className="chart-panel small" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <span className="notice">暂无数据</span>
     </div>
   )
 }
 
-// ===== 服务健康状态行类型 =====
-interface HealthRow {
-  component: string
-  latestTime: string
-  latency: string
-  pillClass: string // 'ok' | 'warn'
-  statusText: string
-}
-
-// 服务健康状态数据（无直接 API，使用原型展示数据）
-const HEALTH_ROWS: HealthRow[] = [
-  { component: '分钟行情 · Tushare/备用源', latestTime: '10:32:00', latency: '8s', pillClass: 'ok', statusText: '正常' },
-  { component: 'Node Monitor Worker', latestTime: '10:32:08', latency: '8s', pillClass: 'ok', statusText: '正常' },
-  { component: '通知投递 Worker', latestTime: '10:32:11', latency: '3s', pillClass: 'warn', statusText: '7 次重试' },
-  { component: 'DSA Daily Selector', latestTime: '昨日 15:12', latency: '-', pillClass: 'ok', statusText: '已完成' },
-]
-
-// 最近异常列表项类型
-interface AnomalyItem {
-  icon: string
-  iconClass: string // 'danger' | 'warn' | 'info'
-  title: string
-  meta: string
-  tagClass: string // 'bad' | 'warn' | 'info'
-  tagText: string
-}
-
-// 最近异常数据（无直接 API，使用原型展示数据）
-const ANOMALIES: AnomalyItem[] = [
-  {
-    icon: '!',
-    iconClass: 'danger',
-    title: '7 条飞书 Webhook 返回 429',
-    meta: '已按 Retry-After 排队重试 · 影响 4 个用户',
-    tagClass: 'bad',
-    tagText: '待恢复',
-  },
-  {
-    icon: '!',
-    iconClass: 'warn',
-    title: '6 只股票 DSA 数据不完整',
-    meta: '数据源缺少最新交易日 · 已排除结果',
-    tagClass: 'warn',
-    tagText: '部分完成',
-  },
-  {
-    icon: 'i',
-    iconClass: 'info',
-    title: 'Node Monitor v2.2.0 影子运行中',
-    meta: '覆盖 10% 股票 · 与 v2.1.0 事件一致率 98.7%',
-    tagClass: 'info',
-    tagText: '观察',
-  },
-]
+// TODO: [AdminIndexPage] 接入 GET /health/ready API 获取各组件真实健康状态
+// TODO: [AdminIndexPage] 接入 GET /admin/anomalies API 获取最近异常列表
 
 // ===== 工具函数 =====
 
@@ -255,11 +91,8 @@ export default function AdminIndexPage() {
   const dsaError = dsaRunsQuery.isError
 
   // DSA 运行统计
-  // 注：StrategyRun 无 processed/success/failed 字段，有运行记录时使用原型展示值
+  // TODO: [AdminIndexPage] StrategyRun 无 processed/success/failed 字段，需后端扩展 API 返回运行统计
   const hasDsaRun = !!latestDsaRun
-  const dsaProcessed = hasDsaRun ? 5362 : 0
-  const dsaSuccess = hasDsaRun ? 5356 : 0
-  const dsaFailed = hasDsaRun ? 6 : 0
   const dsaDuration = hasDsaRun
     ? formatDuration(latestDsaRun!.started_at, latestDsaRun!.finished_at)
     : '-'
@@ -324,27 +157,29 @@ export default function AdminIndexPage() {
           <div className="kpi-value">
             {memberLoading ? '-' : memberCount}
           </div>
-          <div className="kpi-foot">今日活跃 62</div>
+          {/* TODO: [AdminIndexPage] 需 GET /admin/metrics/active-users API 获取今日活跃数 */}
+          <div className="kpi-foot">今日活跃 暂无数据</div>
         </div>
         {/* KPI 2：去重监控股票数 */}
+        {/* TODO: [AdminIndexPage] 需 GET /admin/metrics/monitored-stocks API 获取去重监控股票数 */}
         <div className="card kpi-card admin-accent">
           <div className="kpi-label">去重监控股票</div>
-          <div className="kpi-value">286</div>
-          <div className="kpi-foot">来源于 1,742 条用户自选</div>
+          <div className="kpi-value">暂无数据</div>
+          <div className="kpi-foot">暂无数据</div>
         </div>
-        {/* KPI 3：最近一分钟处理数（100% 成功）*/}
+        {/* KPI 3：最近一分钟处理数 */}
+        {/* TODO: [AdminIndexPage] 需 GET /admin/metrics/throughput API 获取最近一分钟处理数与成功率 */}
         <div className="card kpi-card admin-accent">
           <div className="kpi-label">最近一分钟处理</div>
-          <div className="kpi-value">286</div>
-          <div className="kpi-foot">
-            <span className="pos">100%</span> 成功 · 延迟 8 秒
-          </div>
+          <div className="kpi-value">暂无数据</div>
+          <div className="kpi-foot">暂无数据</div>
         </div>
         {/* KPI 4：今日投递成功率 */}
+        {/* TODO: [AdminIndexPage] 需 GET /admin/metrics/delivery-rate API 获取今日投递成功率 */}
         <div className="card kpi-card admin-accent">
           <div className="kpi-label">今日投递成功率</div>
-          <div className="kpi-value">99.2%</div>
-          <div className="kpi-foot">失败 7 / 共 893</div>
+          <div className="kpi-value">暂无数据</div>
+          <div className="kpi-foot">暂无数据</div>
         </div>
       </div>
 
@@ -357,9 +192,8 @@ export default function AdminIndexPage() {
               <div className="card-title">监控吞吐</div>
               <div className="card-sub">最近 45 分钟处理股票数</div>
             </div>
-            <span className="status-pill ok">正常</span>
           </div>
-          <ThroughputChart />
+          <ThroughputChartPlaceholder />
         </section>
 
         {/* DSA 最近运行 */}
@@ -379,17 +213,18 @@ export default function AdminIndexPage() {
               <div className="notice">今日尚未运行</div>
             ) : (
               <>
+                {/* TODO: [AdminIndexPage] 需后端扩展 StrategyRun 返回 processed/success/failed 统计 */}
                 <div className="toggle-row">
                   <span>处理股票</span>
-                  <b className="num">{dsaProcessed.toLocaleString()}</b>
+                  <b className="num">暂无数据</b>
                 </div>
                 <div className="toggle-row">
                   <span>成功</span>
-                  <b className="num pos">{dsaSuccess.toLocaleString()}</b>
+                  <b className="num">暂无数据</b>
                 </div>
                 <div className="toggle-row">
                   <span>失败</span>
-                  <b className="num neg">{dsaFailed}</b>
+                  <b className="num">暂无数据</b>
                 </div>
                 <div className="toggle-row">
                   <span>耗时</span>
@@ -404,6 +239,7 @@ export default function AdminIndexPage() {
         </section>
 
         {/* 队列与任务 */}
+        {/* TODO: [AdminIndexPage] 需 GET /admin/metrics/queue-backlog API 获取各队列积压数 */}
         <section className="card">
           <div className="card-head">
             <div>
@@ -413,20 +249,20 @@ export default function AdminIndexPage() {
           </div>
           <div className="card-body">
             <div className="toggle-row">
-              <span>Node 计算</span>
-              <b className="num">0</b>
+              <span>监控计算</span>
+              <b className="num">暂无数据</b>
             </div>
             <div className="toggle-row">
               <span>事件分发</span>
-              <b className="num">3</b>
+              <b className="num">暂无数据</b>
             </div>
             <div className="toggle-row">
               <span>通知投递</span>
-              <b className="num">12</b>
+              <b className="num">暂无数据</b>
             </div>
             <div className="toggle-row">
               <span>失败重试</span>
-              <b className="num neg">7</b>
+              <b className="num">暂无数据</b>
             </div>
             <Link className="btn small card-body-action" to="/admin/jobs">
               任务与事件 →
@@ -445,35 +281,8 @@ export default function AdminIndexPage() {
               <div className="card-sub">管理员无需进入服务器即可排查</div>
             </div>
           </div>
-          <div className="table-wrap">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>组件</th>
-                  <th>最新时间</th>
-                  <th>延迟</th>
-                  <th>状态</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {HEALTH_ROWS.map((row) => (
-                  <tr key={row.component}>
-                    <td>{row.component}</td>
-                    <td className="num">{row.latestTime}</td>
-                    <td>{row.latency}</td>
-                    <td>
-                      <span className={`status-pill ${row.pillClass}`}>
-                        {row.statusText}
-                      </span>
-                    </td>
-                    <td>
-                      <button className="btn small">详情</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="card-body">
+            <div className="notice">暂无数据</div>
           </div>
         </section>
 
@@ -485,17 +294,8 @@ export default function AdminIndexPage() {
               <div className="card-sub">按影响范围排序</div>
             </div>
           </div>
-          <div className="list">
-            {ANOMALIES.map((item) => (
-              <div className="list-item" key={item.title}>
-                <div className={`list-icon ${item.iconClass}`}>{item.icon}</div>
-                <div className="list-main">
-                  <div className="list-title">{item.title}</div>
-                  <div className="list-meta">{item.meta}</div>
-                </div>
-                <span className={`tag ${item.tagClass}`}>{item.tagText}</span>
-              </div>
-            ))}
+          <div className="card-body">
+            <div className="notice">暂无数据</div>
           </div>
         </section>
       </div>

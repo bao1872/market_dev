@@ -254,12 +254,14 @@ async def archive_strategy_version(
 async def list_strategies(
     db: AsyncSession,
     kind: str | None = None,
+    user_visible_only: bool = False,
 ) -> list[StrategyDefinition]:
     """列出策略定义。
 
     Args:
         db: 异步会话
         kind: 可选，按 kind 过滤（selector/monitor）
+        user_visible_only: 仅返回 production 环境 + 对用户可见 + 有 released 版本的策略
 
     Returns:
         策略定义列表
@@ -267,8 +269,32 @@ async def list_strategies(
     stmt = select(StrategyDefinition).order_by(StrategyDefinition.strategy_key)
     if kind is not None:
         stmt = stmt.where(StrategyDefinition.kind == kind)
+    if user_visible_only:
+        stmt = stmt.where(
+            StrategyDefinition.environment == "production",
+            StrategyDefinition.is_user_visible == True,  # noqa: E712
+        )
     result = await db.execute(stmt)
-    return list(result.scalars().all())
+    definitions = list(result.scalars().all())
+
+    # user_visible_only 时过滤掉无 released 版本的策略
+    if user_visible_only:
+        filtered = []
+        for d in definitions:
+            ver_stmt = (
+                select(StrategyVersion.id)
+                .where(
+                    StrategyVersion.strategy_definition_id == d.id,
+                    StrategyVersion.status == "released",
+                )
+                .limit(1)
+            )
+            ver_result = await db.execute(ver_stmt)
+            if ver_result.scalar_one_or_none() is not None:
+                filtered.append(d)
+        return filtered
+
+    return definitions
 
 
 async def get_strategy_by_key(

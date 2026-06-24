@@ -10,7 +10,7 @@
 3. 调用 strategy_service.create_strategy 创建草稿版本
 4. 可选：调用 release_strategy_version 发布版本
 
-幂等：重复运行不会报错，已存在的策略/版本会被跳过。
+幂等：重复运行不会报错（archived 版本除外，需升级版本号）。
 归档：旧策略（bb_monitor / volume_node_monitor）的版本会被自动归档。
 """
 
@@ -112,11 +112,25 @@ async def seed_strategies(
             )
             version_row = existing_ver.scalar_one_or_none()
             if version_row is not None:
-                # 版本已存在，跳过创建
+                if version_row.status == "archived":
+                    raise ValueError(
+                        f"策略 {strategy_key} v{version_str} 已归档，"
+                        f"请升级版本号后再创建新版本"
+                    )
+                if release and version_row.status == "draft":
+                    # [策略种子] - 发布 draft 版本
+                    from datetime import UTC
+                    from datetime import datetime as _dt
+
+                    version_row.status = "released"
+                    version_row.released_at = _dt.now(UTC)
+                    db.add(version_row)
+                    results.append((strategy_key, version_str, "released"))
+                    print(f"  发布已存在 draft 策略: {strategy_key} v{version_str} -> released")
+                    continue
+                # 已是 released 或其他状态，跳过
                 results.append((strategy_key, version_str, version_row.status))
-                print(
-                    f"  跳过已存在策略: {strategy_key} v{version_str} -> {version_row.status}"
-                )
+                print(f"  跳过已存在策略: {strategy_key} v{version_str} -> {version_row.status}")
                 continue
 
         # 创建策略定义 + 版本
@@ -131,6 +145,26 @@ async def seed_strategies(
         )
 
     await db.commit()
+
+    # [策略种子] - 启动断言：watchlist_monitor 必须有 released 版本
+    wm_def = await db.execute(
+        select(StrategyDefinition).where(
+            StrategyDefinition.strategy_key == "watchlist_monitor"
+        )
+    )
+    wm_definition = wm_def.scalar_one_or_none()
+    if wm_definition is not None:
+        wm_released = await db.execute(
+            select(StrategyVersion).where(
+                StrategyVersion.strategy_definition_id == wm_definition.id,
+                StrategyVersion.status == "released",
+            )
+        )
+        if wm_released.scalar_one_or_none() is None:
+            raise RuntimeError(
+                "watchlist_monitor 策略没有 released 版本，"
+                "监控功能不可用。请检查 seed_strategies 执行结果。"
+            )
 
     # [策略种子] - 归档旧监控策略（bb_monitor / volume_node_monitor）
     _ARCHIVED_KEYS = ("bb_monitor", "volume_node_monitor")

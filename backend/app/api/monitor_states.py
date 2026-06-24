@@ -38,7 +38,9 @@ async def _resolve_strategy_version_ids(
     strategy_key: str,
     version: str | None = None,
 ) -> list[UUID]:
-    """将 strategy_key 解析为 strategy_version_id 列表。
+    """将 strategy_key 解析为 strategy_version_id 列表（仅 released 版本）。
+
+    仅返回 released 状态的版本，且同一股票不重复（按 released_at 降序取最新）。
 
     Args:
         db: 异步会话
@@ -46,7 +48,7 @@ async def _resolve_strategy_version_ids(
         version: 可选版本号过滤
 
     Returns:
-        strategy_version_id 列表
+        strategy_version_id 列表（仅 released 版本）
 
     Raises:
         HTTPException 404: 策略不存在
@@ -63,17 +65,20 @@ async def _resolve_strategy_version_ids(
         )
 
     stmt_ver = select(StrategyVersion.id).where(
-        StrategyVersion.strategy_definition_id == definition.id
+        StrategyVersion.strategy_definition_id == definition.id,
+        StrategyVersion.status == "released",
     )
     if version is not None:
         stmt_ver = stmt_ver.where(StrategyVersion.version == version)
+    # [监控状态] - 仅返回最新 released 版本，避免同一股票跨版本重复
+    stmt_ver = stmt_ver.order_by(StrategyVersion.released_at.desc()).limit(1)
     result_ver = await db.execute(stmt_ver)
     version_ids = [row[0] for row in result_ver.all()]
 
     if version is not None and not version_ids:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"策略版本不存在: strategy_key={strategy_key}, version={version}",
+            detail=f"策略版本不存在或未发布: strategy_key={strategy_key}, version={version}",
         )
     return version_ids
 

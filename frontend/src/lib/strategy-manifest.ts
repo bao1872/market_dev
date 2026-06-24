@@ -176,14 +176,6 @@ export const STRATEGIES: Record<string, StrategyDef> = {
     layers: ['volume', 'breakout', 'selection'],
     defaultLayers: ['volume', 'breakout', 'selection'],
   },
-  node: {
-    id: 'node',
-    name: 'Volume Node Cluster',
-    kind: 'monitor',
-    version: '2.1.0',
-    layers: ['volume', 'profile', 'node', 'poc', 'bb', 'events'],
-    defaultLayers: ['volume', 'profile', 'node', 'poc', 'bb', 'events'],
-  },
   watchlist_monitor: {
     id: 'watchlist_monitor',
     name: '自选监控',
