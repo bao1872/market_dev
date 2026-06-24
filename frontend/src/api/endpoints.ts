@@ -360,6 +360,11 @@ export interface WatchlistMonitorStatusItem {
   error_code: string | null
   source_bar_time: string | null
   metrics: Record<string, unknown> | null
+  latest_event?: {
+    event_type: string
+    event_time: string
+    boundary: number | null
+  } | null
   updated_at: string | null
 }
 
@@ -600,6 +605,7 @@ export interface StrategyEventQueryParams {
 export interface StrategyResultQueryParams {
   matched_only?: boolean
   metric_filters?: string
+  keyword?: string
   sort_by?: string
   sort_desc?: boolean
   page?: number

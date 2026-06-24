@@ -72,6 +72,7 @@ async def query_published_selector_results(
     page: int = 1,
     page_size: int = 50,
     universe: str = "all",
+    keyword: str | None = None,
 ) -> SelectorResultPage:
     """查询已发布的选股策略结果。
 
@@ -138,6 +139,7 @@ async def query_published_selector_results(
         filters=filters,
         sort=sort,
         watchlist_instrument_ids=watchlist_instrument_ids,
+        keyword=keyword,
         limit=page_size,
         offset=offset,
     )

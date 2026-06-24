@@ -7,7 +7,7 @@
 - NotificationMessageResponse: 消息响应
 
 DTO 字段对齐 doc/.../schemas/notification_message.schema.json：
-- message_type: SELECTION_PLAN_SUMMARY/MONITORING_PLAN_CONFIRMED/MONITOR_MEMBER_EVENT/SYSTEM_ALERT/CHANNEL_ALERT
+- message_type: MONITOR_EVENT/MONITOR_MEMBER_EVENT/SYSTEM_ALERT/CHANNEL_ALERT
 - template_key + template_version: 模板标识
 - title/summary: 标题与摘要
 - facts/timeline/items/actions: 结构化内容
@@ -26,8 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 # 允许的 message_type 枚举（对齐 schema）
 MESSAGE_TYPES = {
-    "SELECTION_PLAN_SUMMARY",
-    "MONITORING_PLAN_CONFIRMED",
+    "MONITOR_EVENT",
     "MONITOR_MEMBER_EVENT",
     "SYSTEM_ALERT",
     "CHANNEL_ALERT",
@@ -193,10 +192,10 @@ if __name__ == "__main__":
 
     # 使用示例验证
     dto = NotificationMessageDTO(
-        message_type="MONITORING_PLAN_CONFIRMED",
-        template_key="monitoring_plan_confirmed",
+        message_type="MONITOR_EVENT",
+        template_key="monitor_event",
         template_version="1.1.0",
-        title="监控组合确认｜贵州茅台",
+        title="监控事件｜贵州茅台",
         summary="3/3 个策略在 15 分钟内完成确认",
         facts=[{"key": "current_price", "label": "当前价格", "value": 1502.3}],
         timeline=[{"time": "2026-06-18T10:18:00+08:00", "label": "Node 碰触 POC"}],

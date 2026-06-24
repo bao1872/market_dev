@@ -388,6 +388,7 @@ async def query_strategy_results(
             '"[{"metric_key":"dsa_dir_bars","operator":"gte","value":50}]"'
         ),
     ),
+    keyword: str | None = Query(None, description="关键词（symbol 或 name 模糊匹配）"),
     sort_by: str | None = Query(None, description="排序指标名"),
     sort_desc: bool = Query(False, description="是否降序"),
     limit: int = Query(100, ge=1, le=500, description="返回上限"),
@@ -470,6 +471,7 @@ async def query_strategy_results(
         trade_date=trade_date,
         filters=metric_filter_list,
         sort=sort_spec,
+        keyword=keyword,
         limit=limit,
         offset=offset,
     )
@@ -497,6 +499,7 @@ async def list_run_results(
             '"[{"metric_key":"dsa_dir_bars","operator":"gte","value":50}]"'
         ),
     ),
+    keyword: str | None = Query(None, description="关键词（symbol 或 name 模糊匹配）"),
     sort_by: str | None = Query(None, description="排序指标名"),
     sort_desc: bool = Query(False, description="是否降序"),
     universe: str = Query("all", description="股票池: all 全市场 | watchlist 仅自选股"),
@@ -567,6 +570,7 @@ async def list_run_results(
             page=page,
             page_size=page_size,
             universe=universe,
+            keyword=keyword,
         )
     except RunNotFoundError as e:
         raise HTTPException(

@@ -140,7 +140,7 @@ class NotificationMessage(Base):
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
     )
     message_type: Mapped[str] = mapped_column(
-        Text(), nullable=False, comment="SELECTION_PLAN_SUMMARY 等"
+        Text(), nullable=False, comment="MONITOR_EVENT 等"
     )
     template_key: Mapped[str] = mapped_column(
         Text(), nullable=False, comment="模板键"

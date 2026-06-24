@@ -29,25 +29,20 @@ interface WatchlistRow {
   bbMid: number | null
   bbLower: number | null
   currentPrice: number | null
-  upperNode: number | null
-  lowerNode: number | null
+  upperNodePrice: number | null
+  upperNodeLow: number | null
+  upperNodeHigh: number | null
+  lowerNodePrice: number | null
+  lowerNodeLow: number | null
+  lowerNodeHigh: number | null
   position01: number | null
   pocPrice: number | null
-  lastTouchedNode: number | null
+  latestEvent: { event_type: string; event_time: string; boundary: number | null } | null
   updatedAt: string | null
   [key: string]: unknown
 }
 
 // ===== 工具函数 =====
-
-/** 从 payload 中按候选 key 列表取第一个非空值 */
-function pickPayload(payload: Record<string, unknown>, keys: string[]): unknown {
-  for (const k of keys) {
-    const v = payload[k]
-    if (v !== undefined && v !== null && v !== '') return v
-  }
-  return undefined
-}
 
 /** 转换为数字，失败返回 null */
 function toNum(v: unknown): number | null {
@@ -62,13 +57,19 @@ function fmtNum(v: unknown, digits = 2): string {
   return n === null ? '-' : n.toFixed(digits)
 }
 
-/** 格式化更新时间，取时间部分 */
+/** 格式化更新时间，取时间部分（上海时区） */
 function fmtTime(v: unknown): string {
   if (v === undefined || v === null || v === '') return '-'
-  const s = String(v)
-  const timeMatch = s.match(/(\d{2}:\d{2}:\d{2})/)
-  if (timeMatch) return timeMatch[1]
-  return s.slice(-8)
+  try {
+    return new Date(String(v)).toLocaleTimeString('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+  } catch {
+    return '-'
+  }
 }
 
 /** 监控状态徽章渲染 */
@@ -214,21 +215,25 @@ export default function WatchlistPage() {
   const rows: WatchlistRow[] = useMemo(
     () =>
       items.map((item) => {
-        const metrics = item.metrics
+        const metrics = item.metrics as Record<string, unknown> | null
         return {
           instrumentId: item.instrument_id,
           symbol: item.symbol,
           name: item.name,
           monitorStatus: item.monitor_status,
-          bbUpper: metrics ? toNum(pickPayload(metrics, ['bb_upper'])) : null,
-          bbMid: metrics ? toNum(pickPayload(metrics, ['bb_mid', 'bb_middle'])) : null,
-          bbLower: metrics ? toNum(pickPayload(metrics, ['bb_lower'])) : null,
-          currentPrice: metrics ? toNum(pickPayload(metrics, ['current_price', 'close'])) : null,
-          upperNode: metrics ? toNum(pickPayload(metrics, ['upper_node', 'nearest_node_price'])) : null,
-          lowerNode: metrics ? toNum(pickPayload(metrics, ['lower_node'])) : null,
-          position01: metrics ? toNum(pickPayload(metrics, ['position_0_1', 'node_strength'])) : null,
-          pocPrice: metrics ? toNum(pickPayload(metrics, ['poc_price'])) : null,
-          lastTouchedNode: metrics ? toNum(pickPayload(metrics, ['last_touched_node'])) : null,
+          bbUpper: metrics ? toNum(metrics.bb_upper) : null,
+          bbMid: metrics ? toNum(metrics.bb_mid ?? metrics.bb_middle) : null,
+          bbLower: metrics ? toNum(metrics.bb_lower) : null,
+          currentPrice: metrics ? toNum(metrics.current_price ?? metrics.close) : null,
+          upperNodePrice: metrics ? toNum(metrics.upper_node_price) : null,
+          upperNodeLow: metrics ? toNum(metrics.upper_node_low) : null,
+          upperNodeHigh: metrics ? toNum(metrics.upper_node_high) : null,
+          lowerNodePrice: metrics ? toNum(metrics.lower_node_price) : null,
+          lowerNodeLow: metrics ? toNum(metrics.lower_node_low) : null,
+          lowerNodeHigh: metrics ? toNum(metrics.lower_node_high) : null,
+          position01: metrics ? toNum(metrics.position_0_1 ?? metrics.node_strength) : null,
+          pocPrice: metrics ? toNum(metrics.poc_price) : null,
+          latestEvent: item.latest_event ?? null,
           updatedAt: item.updated_at ? fmtTime(item.updated_at) : null,
         }
       }),
@@ -346,8 +351,12 @@ export default function WatchlistPage() {
         dataType: 'number',
         sortable: true,
         filterable: false,
-        sortValue: (row) => row.upperNode ?? 0,
-        render: (row) => <span className="num">{fmtNum(row.upperNode)}</span>,
+        sortValue: (row) => row.upperNodePrice ?? 0,
+        render: (row) => (
+          <span className="num" title={row.upperNodeLow != null && row.upperNodeHigh != null ? `${row.upperNodeLow} ~ ${row.upperNodeHigh}` : undefined}>
+            {fmtNum(row.upperNodePrice)}
+          </span>
+        ),
       },
       {
         key: 'lowerNode',
@@ -355,8 +364,12 @@ export default function WatchlistPage() {
         dataType: 'number',
         sortable: true,
         filterable: false,
-        sortValue: (row) => row.lowerNode ?? 0,
-        render: (row) => <span className="num">{fmtNum(row.lowerNode)}</span>,
+        sortValue: (row) => row.lowerNodePrice ?? 0,
+        render: (row) => (
+          <span className="num" title={row.lowerNodeLow != null && row.lowerNodeHigh != null ? `${row.lowerNodeLow} ~ ${row.lowerNodeHigh}` : undefined}>
+            {fmtNum(row.lowerNodePrice)}
+          </span>
+        ),
       },
       {
         key: 'position01',
@@ -377,13 +390,26 @@ export default function WatchlistPage() {
         render: (row) => <span className="num">{fmtNum(row.pocPrice)}</span>,
       },
       {
-        key: 'lastTouchedNode',
-        title: '最近触碰',
-        dataType: 'number',
+        key: 'latestEvent',
+        title: '最近触发',
+        dataType: 'text',
         sortable: true,
         filterable: false,
-        sortValue: (row) => row.lastTouchedNode ?? 0,
-        render: (row) => <span className="num">{fmtNum(row.lastTouchedNode)}</span>,
+        sortValue: (row) => row.latestEvent?.event_time ?? '',
+        render: (row) => {
+          if (!row.latestEvent) return <span className="muted">-</span>
+          const eventType = row.latestEvent.event_type
+          const time = fmtTime(row.latestEvent.event_time)
+          const boundary = row.latestEvent.boundary
+          return (
+            <div>
+              <div className="symbol">{eventType}</div>
+              <div className="symbol-sub">
+                {time}{boundary != null ? ` · ${boundary}` : ''}
+              </div>
+            </div>
+          )
+        },
       },
       {
         key: 'updatedAt',

@@ -10,9 +10,8 @@
 - elements: 摘要 / 关键事实 / 时间线 / 条目列表 / 操作按钮 / 免责声明
 
 颜色映射：
-- SELECTION_PLAN_SUMMARY → blue
-- MONITORING_PLAN_CONFIRMED → green
-- MONITOR_MEMBER_EVENT → 由 resource_refs.header_severity 决定（danger=red, warn=orange, info=green）
+- MONITOR_EVENT → 由 resource_refs.header_severity 决定（danger=red, warn=orange, info=green）
+- MONITOR_MEMBER_EVENT → 由 resource_refs.header_severity 决定（迁移兼容）
 - SYSTEM_ALERT → red
 - CHANNEL_ALERT → orange
 """
@@ -25,8 +24,7 @@ from app.schemas.notification import NotificationMessageDTO
 
 # message_type → 飞书卡片头部颜色模板（默认映射，可被 resource_refs.header_severity 覆盖）
 _HEADER_TEMPLATE_MAP: dict[str, str] = {
-    "SELECTION_PLAN_SUMMARY": "blue",
-    "MONITORING_PLAN_CONFIRMED": "green",
+    "MONITOR_EVENT": "turquoise",
     "MONITOR_MEMBER_EVENT": "turquoise",
     "SYSTEM_ALERT": "red",
     "CHANNEL_ALERT": "orange",
@@ -235,10 +233,10 @@ if __name__ == "__main__":
     from app.schemas.notification import NotificationMessageDTO
 
     dto = NotificationMessageDTO(
-        message_type="MONITORING_PLAN_CONFIRMED",
-        template_key="monitoring_plan_confirmed",
+        message_type="MONITOR_EVENT",
+        template_key="monitor_event",
         template_version="1.1.0",
-        title="监控组合确认｜贵州茅台",
+        title="监控事件｜贵州茅台",
         summary="3/3 个策略在 15 分钟内完成确认",
         facts=[
             {"key": "current_price", "label": "当前价格", "value": 1502.3},
@@ -258,13 +256,13 @@ if __name__ == "__main__":
     print(f"header.template={card['header']['template']}")
     print(f"header.title={card['header']['title']['content']}")
     print(f"elements count={len(card['elements'])}")
-    assert card["header"]["template"] == "green"
-    assert card["header"]["title"]["content"] == "监控组合确认｜贵州茅台"
+    assert card["header"]["template"] == "turquoise"
+    assert card["header"]["title"]["content"] == "监控事件｜贵州茅台"
     assert len(card["elements"]) > 0
 
     # 测试 header_severity 动态颜色
     dto_danger = NotificationMessageDTO(
-        message_type="MONITOR_MEMBER_EVENT",
+        message_type="MONITOR_EVENT",
         template_key="monitor_merged_event",
         template_version="2.0.0",
         title="BB+节点监控 10:15",
@@ -277,7 +275,7 @@ if __name__ == "__main__":
     print(f"header_severity=danger → template={card_danger['header']['template']} ✓")
 
     dto_warn = NotificationMessageDTO(
-        message_type="MONITOR_MEMBER_EVENT",
+        message_type="MONITOR_EVENT",
         template_key="monitor_merged_event",
         template_version="2.0.0",
         title="BB+节点监控 10:20",
@@ -291,7 +289,7 @@ if __name__ == "__main__":
 
     # 测试结构化 items 透传
     dto_struct = NotificationMessageDTO(
-        message_type="MONITOR_MEMBER_EVENT",
+        message_type="MONITOR_EVENT",
         template_key="monitor_merged_event",
         template_version="2.0.0",
         title="BB+节点监控 10:15",

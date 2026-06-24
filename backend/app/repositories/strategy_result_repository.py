@@ -25,11 +25,12 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any
 
-from sqlalchemy import and_, func, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.models.instrument import Instrument
 from app.models.strategy_run import (
     StrategyResult,
     StrategyResultMetric,
@@ -404,6 +405,7 @@ async def query_results(
     sort: SortSpec | None = None,
     matched_only: bool = False,
     watchlist_instrument_ids: set[uuid.UUID] | None = None,
+    keyword: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> QueryResultPage:
@@ -457,6 +459,18 @@ async def query_results(
         if watchlist_instrument_ids is not None:
             base = base.where(
                 StrategyResult.instrument_id.in_(watchlist_instrument_ids)
+            )
+
+        # keyword 过滤（JOIN instruments 表，symbol/name ILIKE 匹配）
+        if keyword is not None:
+            kw_pattern = f"%{keyword}%"
+            base = base.join(
+                Instrument, StrategyResult.instrument_id == Instrument.id
+            ).where(
+                or_(
+                    Instrument.symbol.ilike(kw_pattern),
+                    Instrument.name.ilike(kw_pattern),
+                )
             )
 
         # 指标筛选（通过 EXISTS 子查询，支持 6 种操作符）
@@ -519,6 +533,16 @@ async def query_results(
         if watchlist_instrument_ids is not None:
             count_base = count_base.where(
                 StrategyResult.instrument_id.in_(watchlist_instrument_ids)
+            )
+        if keyword is not None:
+            kw_pattern = f"%{keyword}%"
+            count_base = count_base.join(
+                Instrument, StrategyResult.instrument_id == Instrument.id
+            ).where(
+                or_(
+                    Instrument.symbol.ilike(kw_pattern),
+                    Instrument.name.ilike(kw_pattern),
+                )
             )
         if filters:
             for f in filters:

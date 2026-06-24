@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 from app.db import AsyncSessionLocal
+from app.models.scheduler_job_run import SchedulerJobRun
 
 logger = logging.getLogger("worker")
 
@@ -129,6 +130,53 @@ def _handle_shutdown(signum: int, _frame: object) -> None:
     global _shutdown
     logger.info("收到信号 %s，准备退出...", signum)
     _shutdown = True
+
+
+async def _create_job_run(
+    db: AsyncSessionLocal,
+    job_name: str,
+    business_date: str,
+) -> SchedulerJobRun:
+    """创建 SchedulerJobRun 记录并返回。"""
+    job_run = SchedulerJobRun(
+        job_name=job_name,
+        business_date=business_date,
+        status="running",
+        started_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+    )
+    db.add(job_run)
+    await db.commit()
+    await db.refresh(job_run)
+    return job_run
+
+
+async def _finish_job_run(
+    db: AsyncSessionLocal,
+    job_run: SchedulerJobRun,
+    status: str,
+    error_message: str | None = None,
+    success_count: int = 0,
+    failure_count: int = 0,
+) -> None:
+    """更新 SchedulerJobRun 记录为完成状态。
+
+    通过 job_run.id 重新查询，兼容跨 session 的 detached 对象。
+    """
+    from sqlalchemy import select
+
+    stmt = select(SchedulerJobRun).where(SchedulerJobRun.id == job_run.id)
+    result = await db.execute(stmt)
+    attached = result.scalar_one_or_none()
+    if attached is None:
+        logger.warning("SchedulerJobRun id=%s 不存在，跳过更新", job_run.id)
+        return
+    attached.status = status
+    attached.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+    attached.heartbeat_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+    attached.error_message = error_message
+    attached.succeeded_count = success_count
+    attached.failed_count = failure_count
+    await db.commit()
 
 
 async def run_outbox_relay() -> None:
@@ -302,14 +350,23 @@ async def run_bars_scheduler_worker() -> None:
             return
 
         logger.info("交易日 %s，开始行情刷新", trade_date)
+        job_run = None
         try:
+            async with AsyncSessionLocal() as db:
+                job_run = await _create_job_run(db, "bars_scheduler", str(trade_date))
             result = await service.refresh_all_instruments(trade_date)
             logger.info(
                 "定时任务完成: total=%d succeeded=%d failed=%d period_counts=%s",
                 result.total, result.succeeded, result.failed, result.period_counts,
             )
+            if job_run is not None:
+                async with AsyncSessionLocal() as db:
+                    await _finish_job_run(db, job_run, "succeeded", success_count=1)
         except Exception as exc:
             logger.exception("定时任务异常: %s", exc)
+            if job_run is not None:
+                async with AsyncSessionLocal() as db:
+                    await _finish_job_run(db, job_run, "failed", error_message=str(exc)[:500])
 
     # 每日 16:00 触发（含非交易日，由内部交易日历判断是否执行）
     scheduler.add_job(
@@ -375,8 +432,10 @@ async def run_strategy_scheduler_worker() -> None:
             return
 
         logger.info("交易日 %s，开始选股策略计算（兜底调度）", trade_date)
+        job_run = None
         try:
             async with AsyncSessionLocal() as db:
+                job_run = await _create_job_run(db, "strategy_scheduler", str(trade_date))
                 # 查询 production 环境 + 参与调度 + 有 released 版本的 selector 策略
                 released_subq = (
                     select(StrategyVersion.id)
@@ -464,8 +523,12 @@ async def run_strategy_scheduler_worker() -> None:
                     "定时任务完成（兜底）: total=%d succeeded=%d skipped=%d failed=%d",
                     len(strategy_keys), succeeded, skipped, failed,
                 )
+                await _finish_job_run(db, job_run, "succeeded", success_count=1)
         except Exception as exc:
             logger.exception("选股策略调度任务异常: %s", exc)
+            if job_run is not None:
+                async with AsyncSessionLocal() as db:
+                    await _finish_job_run(db, job_run, "failed", error_message=str(exc)[:500])
 
     # 每日 18:30 触发（含非交易日，由内部交易日历判断是否执行；18:30 作为兜底，日线触发优先）
     scheduler.add_job(
@@ -507,15 +570,22 @@ async def run_calendar_scheduler_worker() -> None:
         """每日凌晨刷新交易日历（从 pytdx 拉取当年日历并更新 DB）。"""
         from datetime import date as date_cls
 
-        async with AsyncSessionLocal() as session:
-            try:
+        today = date_cls.today()
+        job_run = None
+        try:
+            async with AsyncSessionLocal() as session:
+                job_run = await _create_job_run(session, "calendar_scheduler", str(today))
                 from app.services.calendar_seed import seed_calendar_from_pytdx
-                year = date_cls.today().year
+                year = today.year
                 count = await seed_calendar_from_pytdx(session, year=year)
                 logger.info("日历刷新完成: year=%d, %d 条记录更新", year, count)
-            except Exception as exc:
-                logger.error("日历刷新失败: %s", exc)
-                raise
+                await _finish_job_run(session, job_run, "succeeded", success_count=1)
+        except Exception as exc:
+            logger.error("日历刷新失败: %s", exc)
+            if job_run is not None:
+                async with AsyncSessionLocal() as db:
+                    await _finish_job_run(db, job_run, "failed", error_message=str(exc)[:500])
+            raise
 
     scheduler.add_job(
         calendar_job,
@@ -580,6 +650,7 @@ async def run_monitor_scheduler_worker() -> None:
     await _notify_monitor_status("监控服务已启动", "交易时段 9:30-11:30 / 13:00-15:00\n每 30 秒执行一轮监控")
 
     while not _shutdown:
+        job_run = None
         try:
             from datetime import datetime
 
@@ -626,8 +697,10 @@ async def run_monitor_scheduler_worker() -> None:
 
             # 交易时段内，执行监控周期
             async with AsyncSessionLocal() as db:
+                job_run = await _create_job_run(db, "monitor_scheduler", str(now.date()))
                 result = await service.execute_monitor_cycle(db)
                 await db.commit()
+                await _finish_job_run(db, job_run, "succeeded", success_count=1)
                 if result.total_events_written > 0:
                     logger.info(
                         "监控周期完成: instruments=%d events=%d notifications=%d",
@@ -643,6 +716,9 @@ async def run_monitor_scheduler_worker() -> None:
 
         except Exception as exc:
             logger.exception("Monitor Scheduler 异常: %s", exc)
+            if job_run is not None:
+                async with AsyncSessionLocal() as db:
+                    await _finish_job_run(db, job_run, "failed", error_message=str(exc)[:500])
             # 异常退出飞书通知
             await _notify_monitor_status("监控服务异常", str(exc), is_error=True)
 
@@ -658,6 +734,7 @@ async def _notify_monitor_status(
     """向所有配置了飞书渠道的用户发送监控状态通知。
 
     通知失败不影响主流程（仅记录警告）。
+    使用 message_type="SYSTEM_ALERT" + template_key="system_alert" 构造通知。
 
     TODO: [monitor_scheduler] 当前直接调用 adapter.send() 绕过 Outbox 管道。
     应改为 create_message → write_outbox(notification.message.created) → Delivery Worker 投递，
@@ -692,11 +769,10 @@ async def _notify_monitor_status(
                     adapter = get_adapter(channel.adapter_type)
                     dto = NotificationMessageDTO(
                         title=f"{emoji} {title}",
-                        body=text,
-                        message_type="text",
-                        template_key="monitor_status",
-                        template_version="1.0.0",
-                        summary=text[:100],
+                        message_type="SYSTEM_ALERT",
+                        template_key="system_alert",
+                        template_version="1.1.0",
+                        summary=text[:200],
                         data_time=datetime.now(UTC).isoformat(),
                         resource_refs={},
                     )

@@ -14,8 +14,7 @@
   "properties": {
     "message_type": {
       "enum": [
-        "SELECTION_PLAN_SUMMARY",
-        "MONITORING_PLAN_CONFIRMED",
+        "MONITOR_EVENT",
         "MONITOR_MEMBER_EVENT",
         "SYSTEM_ALERT",
         "CHANNEL_ALERT"

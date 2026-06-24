@@ -30,9 +30,7 @@ from app.schemas.notification import (
 )
 from app.services.message_builder import (
     build_message,
-    build_selection_plan_summary,
-    build_monitoring_plan_confirmed,
-    build_monitor_member_event,
+    build_monitor_event,
     build_system_alert,
     build_channel_alert,
     MessageBuilderError,
@@ -62,48 +60,11 @@ from app.services.delivery_worker import (
 
 
 class TestMessageBuilder:
-    """消息构建器测试 - 覆盖全部 5 种消息类型。"""
+    """消息构建器测试 - 覆盖全部消息类型。"""
 
-    def test_build_selection_plan_summary(self) -> None:
-        """测试选股组合汇总消息构建。"""
-        dto = build_selection_plan_summary(
-            plan_name="强势共振",
-            trade_date="2026-06-18",
-            operator="ALL",
-            final_count=12,
-            items=[{"symbol": "688112.SH", "name": "鼎阳科技"}],
-            resource_refs={"plan_id": "plan_001", "run_id": "run_001"},
-        )
-        assert dto.message_type == "SELECTION_PLAN_SUMMARY"
-        assert dto.template_key == "selection_plan_summary"
-        assert dto.template_version == "1.1.0"
-        assert "强势共振" in dto.title
-        assert "12" in dto.summary
-        assert "ALL" in dto.summary
-        assert len(dto.items) == 1
-        assert len(dto.facts) == 2
-
-    def test_build_monitoring_plan_confirmed(self) -> None:
-        """测试监控组合确认消息构建。"""
-        dto = build_monitoring_plan_confirmed(
-            stock_name="贵州茅台",
-            confirmed_count=3,
-            total_count=3,
-            window_minutes=15,
-            timeline=[{"time": "2026-06-18T10:18:00+08:00", "label": "Node 碰触"}],
-            current_price=1502.30,
-            resource_refs={"instrument_id": "600519.SH"},
-        )
-        assert dto.message_type == "MONITORING_PLAN_CONFIRMED"
-        assert "贵州茅台" in dto.title
-        assert "3/3" in dto.summary
-        assert "15" in dto.summary
-        assert len(dto.timeline) == 1
-        assert len(dto.facts) == 2
-
-    def test_build_monitor_member_event(self) -> None:
-        """测试单策略过程事件消息构建。"""
-        dto = build_monitor_member_event(
+    def test_build_monitor_event(self) -> None:
+        """测试监控事件消息构建。"""
+        dto = build_monitor_event(
             stock_name="贵州茅台",
             event_type="evt_dsa_dir_flip_up",
             event_time="2026-06-18T10:18:00+08:00",
@@ -112,7 +73,9 @@ class TestMessageBuilder:
             summary_text="DSA 方向翻多",
             resource_refs={"instrument_id": "600519.SH"},
         )
-        assert dto.message_type == "MONITOR_MEMBER_EVENT"
+        assert dto.message_type == "MONITOR_EVENT"
+        assert dto.template_key == "monitor_event"
+        assert dto.template_version == "1.1.0"
         assert "贵州茅台" in dto.title
         assert dto.data_time == "2026-06-18T10:18:00+08:00"
         assert len(dto.facts) == 3
@@ -174,7 +137,7 @@ class TestMessageBuilder:
 class TestFeishuCardBuilder:
     """飞书卡片构建器测试。"""
 
-    def _make_dto(self, message_type: str = "MONITORING_PLAN_CONFIRMED") -> NotificationMessageDTO:
+    def _make_dto(self, message_type: str = "MONITOR_EVENT") -> NotificationMessageDTO:
         """构建测试用 DTO。"""
         return NotificationMessageDTO(
             message_type=message_type,
@@ -197,13 +160,12 @@ class TestFeishuCardBuilder:
         card = dto_to_feishu_card(dto)
         assert card["config"]["wide_screen_mode"] is True
         assert card["header"]["title"]["content"] == "测试标题"
-        assert card["header"]["template"] == "green"  # MONITORING_PLAN_CONFIRMED → green
+        assert card["header"]["template"] == "turquoise"  # MONITOR_EVENT → turquoise
 
     def test_card_header_color_mapping(self) -> None:
         """测试消息类型到颜色映射。"""
         color_map = {
-            "SELECTION_PLAN_SUMMARY": "blue",
-            "MONITORING_PLAN_CONFIRMED": "green",
+            "MONITOR_EVENT": "turquoise",
             "MONITOR_MEMBER_EVENT": "turquoise",
             "SYSTEM_ALERT": "red",
             "CHANNEL_ALERT": "orange",
@@ -463,9 +425,9 @@ class TestNotificationAPI:
 
         client = TestClient(app)
         response = client.post("/notification-previews", json={
-            "message_type": "MONITORING_PLAN_CONFIRMED",
+            "message_type": "MONITOR_EVENT",
             "context": {
-                "title": "监控组合确认｜贵州茅台",
+                "title": "监控事件｜贵州茅台",
                 "summary": "3/3 个策略在 15 分钟内完成确认",
                 "facts": [{"key": "price", "label": "当前价格", "value": 1502.3}],
                 "timeline": [{"time": "2026-06-18T10:18:00+08:00", "label": "Node 碰触"}],
@@ -478,9 +440,9 @@ class TestNotificationAPI:
         assert "dto" in data
         assert "in_app" in data
         assert "feishu_card" in data
-        assert data["dto"]["message_type"] == "MONITORING_PLAN_CONFIRMED"
-        assert data["feishu_card"]["header"]["template"] == "green"
-        assert data["feishu_card"]["header"]["title"]["content"] == "监控组合确认｜贵州茅台"
+        assert data["dto"]["message_type"] == "MONITOR_EVENT"
+        assert data["feishu_card"]["header"]["template"] == "turquoise"
+        assert data["feishu_card"]["header"]["title"]["content"] == "监控事件｜贵州茅台"
 
     def test_preview_invalid_message_type(self) -> None:
         """测试预览端点无效消息类型。"""

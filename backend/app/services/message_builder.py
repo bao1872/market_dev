@@ -6,9 +6,8 @@
 - 渲染：从 context 提取字段填充 DTO
 
 支持的 message_type：
-- SELECTION_PLAN_SUMMARY: 选股组合汇总
-- MONITORING_PLAN_CONFIRMED: 监控组合确认
-- MONITOR_MEMBER_EVENT: 单策略过程事件
+- MONITOR_EVENT: 监控事件（合并通知/单策略事件）
+- MONITOR_MEMBER_EVENT: 单策略过程事件（迁移兼容，逐步废弃）
 - SYSTEM_ALERT: 系统异常
 - CHANNEL_ALERT: 渠道异常
 
@@ -24,8 +23,7 @@ from app.schemas.notification import NotificationMessageDTO
 
 # 模板键与版本映射（message_type -> (template_key, template_version)）
 _TEMPLATE_MAP: dict[str, tuple[str, str]] = {
-    "SELECTION_PLAN_SUMMARY": ("selection_plan_summary", "1.1.0"),
-    "MONITORING_PLAN_CONFIRMED": ("monitoring_plan_confirmed", "1.1.0"),
+    "MONITOR_EVENT": ("monitor_event", "1.1.0"),
     "MONITOR_MEMBER_EVENT": ("monitor_member_event", "1.1.0"),
     "SYSTEM_ALERT": ("system_alert", "1.1.0"),
     "CHANNEL_ALERT": ("channel_alert", "1.1.0"),
@@ -46,7 +44,7 @@ def build_message(
     """构建统一通知消息 DTO。
 
     Args:
-        message_type: 消息类型（SELECTION_PLAN_SUMMARY 等）
+        message_type: 消息类型（MONITOR_EVENT 等）
         context: 上下文字典，包含渲染所需字段
             通用字段：
             - title: 标题（必填）
@@ -100,88 +98,8 @@ def build_message(
     return dto
 
 
-def build_selection_plan_summary(
-    plan_name: str,
-    trade_date: str,
-    operator: str,
-    final_count: int,
-    items: list[dict[str, Any]],
-    resource_refs: dict[str, Any],
-    actions: list[dict[str, Any]] | None = None,
-) -> NotificationMessageDTO:
-    """构建选股组合汇总消息（便捷方法）。
 
-    Args:
-        plan_name: 方案名称
-        trade_date: 交易日（如 2026-06-18）
-        operator: 组合逻辑（ALL/ANY）
-        final_count: 最终命中数量
-        items: Top N 股票列表
-        resource_refs: 资源引用（plan_id, run_id）
-        actions: 操作按钮
-    """
-    context = {
-        "title": f"选股组合结果｜{plan_name}",
-        "summary": f"{trade_date} 共 {final_count} 只股票满足 {operator} 组合",
-        "facts": [
-            {"key": "operator", "label": "组合逻辑", "value": operator},
-            {"key": "count", "label": "最终数量", "value": final_count},
-        ],
-        "items": items,
-        "actions": actions or [
-            {"label": "查看完整结果", "url": f"/screener?plan={resource_refs.get('plan_id', '')}"}
-        ],
-        "resource_refs": resource_refs,
-        "data_time": f"{trade_date}T15:20:00+08:00",
-    }
-    return build_message("SELECTION_PLAN_SUMMARY", context)
-
-
-def build_monitoring_plan_confirmed(
-    stock_name: str,
-    confirmed_count: int,
-    total_count: int,
-    window_minutes: int,
-    timeline: list[dict[str, Any]],
-    current_price: float,
-    resource_refs: dict[str, Any],
-    actions: list[dict[str, Any]] | None = None,
-    data_time: str | None = None,
-) -> NotificationMessageDTO:
-    """构建监控组合确认消息（便捷方法）。
-
-    Args:
-        stock_name: 股票名称
-        confirmed_count: 已确认策略数
-        total_count: 总策略数
-        window_minutes: 确认窗口（分钟）
-        timeline: 证据时间线
-        current_price: 当前价格
-        resource_refs: 资源引用（instrument_id, plan_id, event_id）
-        actions: 操作按钮
-        data_time: 数据时间（默认当前时间）
-    """
-    if data_time is None:
-        data_time = datetime.now(UTC).isoformat()
-
-    context = {
-        "title": f"监控组合确认｜{stock_name}",
-        "summary": f"{confirmed_count}/{total_count} 个策略在 {window_minutes} 分钟内完成确认",
-        "facts": [
-            {"key": "current_price", "label": "当前价格", "value": current_price, "format": "price"},
-            {"key": "confirmed", "label": "确认进度", "value": f"{confirmed_count}/{total_count}"},
-        ],
-        "timeline": timeline,
-        "actions": actions or [
-            {"label": "查看个股详情", "url": f"/stock-detail?symbol={resource_refs.get('instrument_id', '')}"}
-        ],
-        "resource_refs": resource_refs,
-        "data_time": data_time,
-    }
-    return build_message("MONITORING_PLAN_CONFIRMED", context)
-
-
-def build_monitor_member_event(
+def build_monitor_event(
     stock_name: str,
     event_type: str,
     event_time: str,
@@ -191,7 +109,7 @@ def build_monitor_member_event(
     resource_refs: dict[str, Any],
     actions: list[dict[str, Any]] | None = None,
 ) -> NotificationMessageDTO:
-    """构建单策略过程事件消息（便捷方法）。
+    """构建监控事件消息（便捷方法）。
 
     用于 INDEPENDENT 模式下单成员触发，或 ANY 模式首个成员触发。
 
@@ -219,7 +137,7 @@ def build_monitor_member_event(
         "resource_refs": resource_refs,
         "data_time": event_time,
     }
-    return build_message("MONITOR_MEMBER_EVENT", context)
+    return build_message("MONITOR_EVENT", context)
 
 
 def build_system_alert(
@@ -297,34 +215,8 @@ def build_channel_alert(
 
 if __name__ == "__main__":
     # 自测入口：验证消息构建
-    print("测试选股组合汇总消息:")
-    dto1 = build_selection_plan_summary(
-        plan_name="强势共振",
-        trade_date="2026-06-18",
-        operator="ALL",
-        final_count=12,
-        items=[{"symbol": "688112.SH", "name": "鼎阳科技"}],
-        resource_refs={"plan_id": "selector_plan_001", "run_id": "run_001"},
-    )
-    print(f"  title={dto1.title}")
-    print(f"  template_key={dto1.template_key}, version={dto1.template_version}")
-    assert dto1.message_type == "SELECTION_PLAN_SUMMARY"
-
-    print("测试监控组合确认消息:")
-    dto2 = build_monitoring_plan_confirmed(
-        stock_name="贵州茅台",
-        confirmed_count=3,
-        total_count=3,
-        window_minutes=15,
-        timeline=[{"time": "2026-06-18T10:18:00+08:00", "label": "Node 碰触 POC"}],
-        current_price=1502.30,
-        resource_refs={"instrument_id": "600519.SH", "plan_id": "monitor_plan_001"},
-    )
-    print(f"  title={dto2.title}")
-    assert dto2.message_type == "MONITORING_PLAN_CONFIRMED"
-
-    print("测试单策略过程事件消息:")
-    dto3 = build_monitor_member_event(
+    print("测试监控事件消息:")
+    dto1 = build_monitor_event(
         stock_name="贵州茅台",
         event_type="evt_dsa_dir_flip_up",
         event_time="2026-06-18T10:18:00+08:00",
@@ -333,27 +225,28 @@ if __name__ == "__main__":
         summary_text="DSA 方向翻多",
         resource_refs={"instrument_id": "600519.SH", "plan_id": "monitor_plan_001"},
     )
-    print(f"  title={dto3.title}")
-    assert dto3.message_type == "MONITOR_MEMBER_EVENT"
+    print(f"  title={dto1.title}")
+    print(f"  template_key={dto1.template_key}, version={dto1.template_version}")
+    assert dto1.message_type == "MONITOR_EVENT"
 
     print("测试系统告警消息:")
-    dto4 = build_system_alert(
+    dto2 = build_system_alert(
         alert_type="DATA_STALE",
         message="日线行情数据已过期 30 分钟",
         resource_refs={"service": "bars_daily"},
     )
-    print(f"  title={dto4.title}")
-    assert dto4.message_type == "SYSTEM_ALERT"
+    print(f"  title={dto2.title}")
+    assert dto2.message_type == "SYSTEM_ALERT"
 
     print("测试渠道异常消息:")
-    dto5 = build_channel_alert(
+    dto3 = build_channel_alert(
         channel_name="飞书Webhook",
         error_code="WEBHOOK_INVALID",
         error_message="Webhook URL 返回 404",
         resource_refs={"channel_id": "ch_001"},
     )
-    print(f"  title={dto5.title}")
-    assert dto5.message_type == "CHANNEL_ALERT"
+    print(f"  title={dto3.title}")
+    assert dto3.message_type == "CHANNEL_ALERT"
 
     print("测试不支持的消息类型:")
     try:

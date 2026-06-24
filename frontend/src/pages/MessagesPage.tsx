@@ -44,10 +44,12 @@ interface MessageRow {
 
 /** 消息类型 → 中文标签 + tag 样式 */
 const TYPE_META: Record<string, { label: string; tag: 'good' | 'info' | 'warn' }> = {
+  MONITOR_EVENT: { label: '监控', tag: 'good' },
   monitoring_composite: { label: '监控', tag: 'good' },
   selection_composite: { label: '选股', tag: 'good' },
   process_event: { label: '过程事件', tag: 'info' },
   system: { label: '系统', tag: 'warn' },
+  SYSTEM_ALERT: { label: '系统', tag: 'warn' },
 }
 
 /** 筛选项配置（对应原型 segmented 按钮） */
@@ -175,9 +177,9 @@ export default function MessagesPage() {
     for (const m of allMessages) {
       if (!m.read_at) counts.unread++
       if (m.message_type === 'selection_composite') counts.selection++
-      else if (m.message_type === 'monitoring_composite') counts.monitoring++
+      else if (m.message_type === 'monitoring_composite' || m.message_type === 'MONITOR_EVENT') counts.monitoring++
       else if (m.message_type === 'process_event') counts.process++
-      else if (m.message_type === 'system') counts.system++
+      else if (m.message_type === 'system' || m.message_type === 'SYSTEM_ALERT') counts.system++
     }
     return counts
   }, [allMessages])
@@ -195,9 +197,9 @@ export default function MessagesPage() {
       // 类型过滤
       if (activeFilter === 'all' || activeFilter === 'unread') return true
       if (activeFilter === 'selection') return m.message_type === 'selection_composite'
-      if (activeFilter === 'monitoring') return m.message_type === 'monitoring_composite'
+      if (activeFilter === 'monitoring') return m.message_type === 'monitoring_composite' || m.message_type === 'MONITOR_EVENT'
       if (activeFilter === 'process') return m.message_type === 'process_event'
-      if (activeFilter === 'system') return m.message_type === 'system'
+      if (activeFilter === 'system') return m.message_type === 'system' || m.message_type === 'SYSTEM_ALERT'
       return true
     })
   }, [allMessages, timeRange, activeFilter])
@@ -216,7 +218,7 @@ export default function MessagesPage() {
       let navigateTarget = '/watchlist'
       if (m.message_type === 'selection_composite') {
         navigateTarget = '/screener'
-      } else if (m.message_type === 'system') {
+      } else if (m.message_type === 'system' || m.message_type === 'SYSTEM_ALERT') {
         navigateTarget = '/settings'
       } else if (m.message_type === 'monitoring_composite') {
         const symbol = pickBodyStr(body, [
@@ -224,6 +226,12 @@ export default function MessagesPage() {
           'instrument_symbol',
           'stock_symbol',
         ])
+        navigateTarget = symbol ? `/stock/${symbol}` : '/watchlist'
+      } else if (m.message_type === 'MONITOR_EVENT') {
+        // 从 body.resource_refs.instruments 提取股票代码
+        const resourceRefs = body.resource_refs as Record<string, unknown> | undefined
+        const instruments = resourceRefs?.instruments as Array<Record<string, unknown>> | undefined
+        const symbol = instruments?.[0]?.symbol as string | undefined
         navigateTarget = symbol ? `/stock/${symbol}` : '/watchlist'
       }
 

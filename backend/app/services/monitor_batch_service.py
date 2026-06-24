@@ -1093,7 +1093,7 @@ class MonitorBatchService:
 
         # 构建 DTO
         dto = NotificationMessageDTO(
-            message_type="MONITOR_MEMBER_EVENT",
+            message_type="MONITOR_EVENT",
             template_key="monitor_merged_event",
             template_version="2.0.0",
             title=f"BB+节点监控 {header_time}",
@@ -1111,6 +1111,14 @@ class MonitorBatchService:
                 "event_ids": [str(ev.id) for ev in user_events],
                 "event_types": list({ev.event_type for ev in user_events}),
                 "header_severity": max_sev,
+                "instruments": [
+                    {
+                        "instrument_id": str(inst_id),
+                        "symbol": (instrument_info_cache.get(inst_id) or (str(inst_id)[:8], ""))[0],
+                        "name": (instrument_info_cache.get(inst_id) or ("", str(inst_id)[:8]))[1],
+                    }
+                    for inst_id in instrument_events.keys()
+                ],
             },
             data_time=data_time_cst.strftime("%Y-%m-%d %H:%M"),
         )
@@ -1549,7 +1557,7 @@ if __name__ == "__main__":
     }
     # 无 instrument_extra_info 时向后兼容
     dto = service._build_merged_card_dto(fake_events, 5, info_cache)
-    assert dto.message_type == "MONITOR_MEMBER_EVENT"
+    assert dto.message_type == "MONITOR_EVENT"
     assert dto.template_key == "monitor_merged_event"
     assert "BB+节点监控" in dto.title
     assert "自选股 5 只" in dto.summary
@@ -1590,7 +1598,7 @@ if __name__ == "__main__":
         change_pct_map={inst_id_1: 2.35, inst_id_2: -1.08},
         instrument_extra_info=extra_info_with_data,
     )
-    assert dto2.message_type == "MONITOR_MEMBER_EVENT"
+    assert dto2.message_type == "MONITOR_EVENT"
     # 验证标题含 priority 和 score
     title_item = dto2.items[1]  # 概览后第一个股票标题
     assert "S" in title_item["content"], f"expected 'S' in title, got: {title_item['content']}"

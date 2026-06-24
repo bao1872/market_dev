@@ -85,6 +85,9 @@ class WatchlistMonitorStatusItem(BaseModel):
     updated_at: datetime | None = Field(
         None, description="监控状态更新时间"
     )
+    latest_event: dict[str, Any] | None = Field(
+        None, description="最新策略事件（event_type/event_time/boundary）"
+    )
 
 
 class WatchlistMonitorStatusResponse(BaseModel):

@@ -54,12 +54,16 @@ interface WatchlistMonitorRow {
   name: string
   symbol: string
   price: string
-  lower_node: string
+  lower_node_price: number | null
+  lower_node_low: number | null
+  lower_node_high: number | null
   position: number
   poc_position?: number
-  upper_node: string
+  upper_node_price: number | null
+  upper_node_low: number | null
+  upper_node_high: number | null
   upper_tag?: 'warn'
-  last_touch: string
+  latest_event: { event_type: string; event_time: string; boundary: number | null } | null
   [key: string]: unknown
 }
 
@@ -91,12 +95,6 @@ function fmtNum(v: unknown, digits = 2): string {
 function fmtPct(v: unknown, digits = 2): string {
   const n = toNum(v)
   return n === null ? '-' : `${n.toFixed(digits)}%`
-}
-
-/** 格式化为字符串，未知返回 '-' */
-function fmtStr(v: unknown): string {
-  if (v === undefined || v === null || v === '') return '-'
-  return String(v)
 }
 
 /** 格式化 ISO 时间字符串为 HH:MM 形式，未知返回 '-' */
@@ -354,24 +352,50 @@ export default function IndexPage() {
       const position =
         toNum(pickPayload(payload, ['position', 'node_position', 'position_between_nodes'])) ?? 0
       const pocPosition = toNum(pickPayload(payload, ['poc_position', 'poc_pos']))
-      const upperNode = fmtStr(
-        pickPayload(payload, ['upper_node', 'node_upper', 'resistance_node']),
-      )
+
+      // 从 payload 中展平 node 对象
+      const upperNodeVal = pickPayload(payload, ['upper_node', 'node_upper', 'resistance_node'])
+      const lowerNodeVal = pickPayload(payload, ['lower_node', 'node_lower', 'support_node'])
+
+      let upperNodePrice: number | null = null
+      let upperNodeLow: number | null = null
+      let upperNodeHigh: number | null = null
+      if (typeof upperNodeVal === 'number') {
+        upperNodePrice = upperNodeVal
+      } else if (upperNodeVal && typeof upperNodeVal === 'object') {
+        const obj = upperNodeVal as Record<string, unknown>
+        upperNodePrice = toNum(obj.price_mid ?? obj.price)
+        upperNodeLow = toNum(obj.price_low)
+        upperNodeHigh = toNum(obj.price_high)
+      }
+
+      let lowerNodePrice: number | null = null
+      let lowerNodeLow: number | null = null
+      let lowerNodeHigh: number | null = null
+      if (typeof lowerNodeVal === 'number') {
+        lowerNodePrice = lowerNodeVal
+      } else if (lowerNodeVal && typeof lowerNodeVal === 'object') {
+        const obj = lowerNodeVal as Record<string, unknown>
+        lowerNodePrice = toNum(obj.price_mid ?? obj.price)
+        lowerNodeLow = toNum(obj.price_low)
+        lowerNodeHigh = toNum(obj.price_high)
+      }
+
       return {
         instrument_id: s.instrument_id,
         name: inst?.name ?? '-',
         symbol: inst?.symbol ?? s.instrument_id.slice(0, 8),
         price: fmtNum(pickPayload(payload, ['price', 'last_price', 'close'])),
-        lower_node: fmtStr(
-          pickPayload(payload, ['lower_node', 'node_lower', 'support_node']),
-        ),
+        lower_node_price: lowerNodePrice,
+        lower_node_low: lowerNodeLow,
+        lower_node_high: lowerNodeHigh,
         position,
         poc_position: pocPosition !== null ? pocPosition : undefined,
-        upper_node: upperNode,
+        upper_node_price: upperNodePrice,
+        upper_node_low: upperNodeLow,
+        upper_node_high: upperNodeHigh,
         upper_tag: pocPosition !== null && pocPosition > 0.8 ? 'warn' : undefined,
-        last_touch: fmtStr(
-          pickPayload(payload, ['last_touch', 'last_touched_node', 'recent_touch']),
-        ),
+        latest_event: null, // MonitorState 不含 latest_event；切换到 monitor-status API 后填充
       }
     },
     [instrumentMap],
@@ -590,10 +614,15 @@ export default function IndexPage() {
       {
         key: 'lower_node',
         title: '下方最近节点',
-        dataType: 'text',
+        dataType: 'number',
         sortable: true,
-        filterable: true,
-        render: (row) => <span className="num">{row.lower_node}</span>,
+        filterable: false,
+        sortValue: (row) => row.lower_node_price ?? 0,
+        render: (row) => (
+          <span className="num" title={row.lower_node_low != null && row.lower_node_high != null ? `${row.lower_node_low} ~ ${row.lower_node_high}` : undefined}>
+            {row.lower_node_price !== null ? row.lower_node_price.toFixed(2) : '-'}
+          </span>
+        ),
       },
       {
         key: 'position',
@@ -606,12 +635,13 @@ export default function IndexPage() {
       {
         key: 'upper_node',
         title: '上方最近节点',
-        dataType: 'text',
+        dataType: 'number',
         sortable: true,
-        filterable: true,
+        filterable: false,
+        sortValue: (row) => row.upper_node_price ?? 0,
         render: (row) => (
-          <span className="num">
-            {row.upper_node}
+          <span className="num" title={row.upper_node_low != null && row.upper_node_high != null ? `${row.upper_node_low} ~ ${row.upper_node_high}` : undefined}>
+            {row.upper_node_price !== null ? row.upper_node_price.toFixed(2) : '-'}
             {row.upper_tag && (
               <span className="tag warn tag-gap">POC</span>
             )}
@@ -619,12 +649,26 @@ export default function IndexPage() {
         ),
       },
       {
-        key: 'last_touch',
-        title: '最近碰触节点',
+        key: 'latest_event',
+        title: '最近触发',
         dataType: 'text',
         sortable: true,
-        filterable: true,
-        render: (row) => <span className="num">{row.last_touch}</span>,
+        filterable: false,
+        sortValue: (row) => row.latest_event?.event_time ?? '',
+        render: (row) => {
+          if (!row.latest_event) return <span className="muted">-</span>
+          const eventType = row.latest_event.event_type
+          const time = fmtTime(row.latest_event.event_time)
+          const boundary = row.latest_event.boundary
+          return (
+            <div>
+              <div className="symbol">{eventType}</div>
+              <div className="symbol-sub">
+                {time}{boundary != null ? ` · ${boundary}` : ''}
+              </div>
+            </div>
+          )
+        },
       },
     ],
     [],

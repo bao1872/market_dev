@@ -108,6 +108,20 @@ function toRow(r: StrategyResult): ScreenerRow {
   }
 }
 
+// ===== 前端操作符 → 后端合法操作符映射 =====
+
+/** 后端合法操作符集合 */
+const BACKEND_OPERATORS = new Set(['gt', 'gte', 'lt', 'lte', 'eq', 'between'])
+
+/** 将前端操作符映射为后端合法操作符；返回 null 表示跳过该筛选条件 */
+function mapOperator(op: string): string | null {
+  if (BACKEND_OPERATORS.has(op)) return op
+  // contains 对数值列语义为"至少此值"，映射为 gte
+  if (op === 'contains') return 'gte'
+  // empty / not_empty 后端不支持，跳过
+  return null
+}
+
 // ===== 主组件 =====
 export default function ScreenerPage() {
   const navigate = useNavigate()
@@ -150,15 +164,29 @@ export default function ScreenerPage() {
       params.sort_by = query.sort.key
       params.sort_desc = query.sort.direction === 'desc'
     }
-    if (query.filters.length > 0) {
-      // 将 filters 转为 metric_filters JSON 数组格式
-      params.metric_filters = JSON.stringify(
-        query.filters.map((f) => ({
-          metric_key: f.key,
-          operator: f.operator,
-          value: f.value,
-        }))
-      )
+    // 提取 stock 筛选值作为 keyword，其余做操作符映射
+    let keywordValue: string | undefined
+    const mappedFilters = query.filters
+      .filter((f) => {
+        // stock 列筛选走 keyword，不走 metric_filters
+        if (f.key === 'stock') {
+          keywordValue = String(f.value)
+          return false
+        }
+        return true
+      })
+      .map((f) => {
+        const mappedOp = mapOperator(f.operator)
+        if (mappedOp === null) return null
+        return { metric_key: f.key, operator: mappedOp, value: f.value }
+      })
+      .filter((f): f is NonNullable<typeof f> => f !== null)
+
+    if (mappedFilters.length > 0) {
+      params.metric_filters = JSON.stringify(mappedFilters)
+    }
+    if (keywordValue) {
+      params.keyword = keywordValue
     }
     params.universe = universe
     return params
@@ -288,7 +316,7 @@ export default function ScreenerPage() {
         title: '股票',
         dataType: 'text',
         sortable: true,
-        filterable: true,
+        filterable: false,
         sortValue: (row) => getStockDisplay(row).name,
         filterValue: (row) => `${getStockDisplay(row).name} ${getStockDisplay(row).symbol}`,
         render: renderStock,
@@ -382,7 +410,7 @@ export default function ScreenerPage() {
         title: '现价',
         dataType: 'number',
         sortable: true,
-        filterable: true,
+        filterable: false,
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['last_close', 'price', 'current_price', 'close']) ?? 0),
         render: (row) => fmtNum(pickPayload(row.payload, ['last_close', 'price', 'current_price', 'close'])),
@@ -430,7 +458,7 @@ export default function ScreenerPage() {
         title: '股票',
         dataType: 'text',
         sortable: true,
-        filterable: true,
+        filterable: false,
         sortValue: (row) => getStockDisplay(row).name,
         filterValue: (row) => `${getStockDisplay(row).name} ${getStockDisplay(row).symbol}`,
         render: renderStock,
@@ -523,7 +551,7 @@ export default function ScreenerPage() {
         title: '股票',
         dataType: 'text',
         sortable: true,
-        filterable: true,
+        filterable: false,
         sortValue: (row) => getStockDisplay(row).name,
         filterValue: (row) => `${getStockDisplay(row).name} ${getStockDisplay(row).symbol}`,
         render: renderStock,

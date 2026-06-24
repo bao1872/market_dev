@@ -33,6 +33,7 @@ from app.models.instrument import Instrument
 from app.models.monitor_evaluation import MonitorEvaluation
 from app.models.monitor_state import MonitorState
 from app.models.strategy import StrategyDefinition, StrategyVersion
+from app.models.strategy_event import StrategyEvent
 from app.models.user import User
 from app.models.watchlist import UserWatchlistItem
 from app.schemas.watchlist import (
@@ -63,6 +64,44 @@ def _compute_market_status(now_cst: datetime, is_trading_day: bool) -> str:
         return "TRADING"
     else:  # after 15:00
         return "AFTER_MARKET"
+
+
+def _flatten_node_metrics(metrics: dict | None) -> dict:
+    """将 metrics 中的节点对象转为扁平字段，适合前端直接使用。
+
+    输入: {"upper_node": {"price_mid": 72.35, "price_low": 72.10, "price_high": 72.60}, ...}
+    输出: {"upper_node_price": 72.35, "upper_node_low": 72.10, "upper_node_high": 72.60, ...}
+    """
+    if not metrics:
+        return {}
+
+    flat = {}
+    # Fields that are node objects (have price_mid/price_low/price_high)
+    node_keys = ["upper_node", "lower_node", "last_touched_node"]
+    for key in node_keys:
+        val = metrics.get(key)
+        if isinstance(val, dict):
+            flat[f"{key}_price"] = val.get("price_mid") or val.get("price") or None
+            flat[f"{key}_low"] = val.get("price_low") or None
+            flat[f"{key}_high"] = val.get("price_high") or None
+        elif val is not None:
+            # Already a number, pass through
+            flat[f"{key}_price"] = val
+
+    # poc_price: may be object or number
+    poc = metrics.get("poc_price")
+    if isinstance(poc, dict):
+        flat["poc_price"] = poc.get("price_mid") or poc.get("price") or None
+    elif poc is not None:
+        flat["poc_price"] = poc
+
+    # Copy non-node fields as-is (bb_upper, bb_mid, bb_lower, current_price, etc.)
+    skip_keys = set(node_keys) | {"poc_price"}
+    for k, v in metrics.items():
+        if k not in skip_keys:
+            flat[k] = v
+
+    return flat
 
 
 @router.get("", response_model=WatchlistListResponse)
@@ -253,6 +292,40 @@ async def get_watchlist_monitor_status(
         for row in eval_result:
             eval_map[row.instrument_id] = row
 
+    # 4.5. 批量查询每个 instrument 的最新 StrategyEvent
+    latest_event_map: dict[UUID, dict] = {}
+    if monitor_version_id is not None and rows:
+        instrument_ids = [row[1].id for row in rows]
+        latest_event_subq = (
+            select(
+                StrategyEvent.id,
+                StrategyEvent.instrument_id,
+                StrategyEvent.event_type,
+                StrategyEvent.event_time,
+                StrategyEvent.payload,
+                func.row_number().over(
+                    partition_by=StrategyEvent.instrument_id,
+                    order_by=StrategyEvent.event_time.desc(),
+                ).label("rn"),
+            )
+            .where(
+                StrategyEvent.strategy_version_id == monitor_version_id,
+                StrategyEvent.instrument_id.in_(instrument_ids),
+            )
+            .subquery()
+        )
+        latest_event_stmt = select(latest_event_subq).where(latest_event_subq.c.rn == 1)
+        event_result = await db.execute(latest_event_stmt)
+        for row in event_result:
+            # Extract boundary from payload if available
+            payload = row.payload if row.payload else {}
+            boundary = payload.get("boundary") or payload.get("price") or None
+            latest_event_map[row.instrument_id] = {
+                "event_type": row.event_type,
+                "event_time": row.event_time.isoformat() if row.event_time else None,
+                "boundary": boundary,
+            }
+
     # 5. 组装响应
     STALE_THRESHOLD_MINUTES = 30
     response_items: list[WatchlistMonitorStatusItem] = []
@@ -302,9 +375,10 @@ async def get_watchlist_monitor_status(
         else:
             monitor_status = "SUCCEEDED"
 
-        # metrics 仍从 MonitorState.payload 获取（价格/指标数据）
-        metrics = ms.payload if ms is not None else None
+        # metrics 仍从 MonitorState.payload 获取（价格/指标数据），节点对象扁平化
+        metrics = _flatten_node_metrics(ms.payload) if ms is not None else None
         updated_at = ms.updated_at if ms is not None else None
+        latest_event = latest_event_map.get(instrument.id)
 
         response_items.append(
             WatchlistMonitorStatusItem(
@@ -321,6 +395,7 @@ async def get_watchlist_monitor_status(
                 source_bar_time=str(source_bar_time) if source_bar_time else None,
                 metrics=metrics,
                 updated_at=updated_at,
+                latest_event=latest_event,
             )
         )
 

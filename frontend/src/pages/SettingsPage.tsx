@@ -3,7 +3,7 @@
 //
 // 用法：
 // 1. 路由 /settings，受保护路由（经 ProtectedLayout 包裹）
-// 2. 左栏 4 张卡片：会员状态 / 用户通知规则 / 策略消息订阅 / 我的通知渠道
+// 2. 左栏 3 张卡片：会员状态 / 用户通知规则 / 我的通知渠道
 // 3. 右栏 1 张卡片：飞书配置步骤
 // 4. 两个弹窗：飞书配置弹窗（新建/编辑）、续期弹窗
 //
@@ -423,12 +423,6 @@ export default function SettingsPage() {
   const [quietEnd, setQuietEnd] = useState('08:30')
   const [pauseOnDelay, setPauseOnDelay] = useState(true)
 
-  // 策略消息订阅状态
-  const [subs, setSubs] = useState({
-    selectionStrong: true,
-    dsaSingle: false,
-  })
-
   const membership = membershipQuery.data
   const remainingDays = membership?.remaining_days ?? 0
   // 环形进度百分比：剩余天数 / 30 天，上限 100%
@@ -566,38 +560,6 @@ export default function SettingsPage() {
             </div>
             <div className="drawer-foot">
               <button className="btn primary" disabled>保存设置</button>
-            </div>
-          </div>
-
-          {/* 策略消息订阅卡 */}
-          <div className="card">
-            <div className="card-head">
-              <div>
-                <div className="card-title">策略消息订阅</div>
-                <div className="card-sub">按策略决定哪些消息进入第三方渠道</div>
-              </div>
-            </div>
-            <div className="card-body">
-              <div className="strategy-check-grid">
-                <label className="strategy-check">
-                  <input
-                    type="checkbox"
-                    className="checkbox"
-                    checked={subs.selectionStrong}
-                    onChange={(e) => setSubs((s) => ({ ...s, selectionStrong: e.target.checked }))}
-                  />
-                  DSA 选股策略消息
-                </label>
-                <label className="strategy-check">
-                  <input
-                    type="checkbox"
-                    className="checkbox"
-                    checked={subs.dsaSingle}
-                    onChange={(e) => setSubs((s) => ({ ...s, dsaSingle: e.target.checked }))}
-                  />
-                  DSA 单策略过程消息
-                </label>
-              </div>
             </div>
           </div>
 

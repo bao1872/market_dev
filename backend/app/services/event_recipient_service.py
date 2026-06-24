@@ -145,9 +145,9 @@ async def create_notification_from_event(
     # 2. 构建通知消息 DTO
     payload = event.payload or {}
     dto = NotificationMessageDTO(
-        message_type="MONITOR_MEMBER_EVENT",
+        message_type="MONITOR_EVENT",
         template_key="monitor_event",
-        template_version="1.0.0",
+        template_version="1.1.0",
         title=f"策略事件: {event.event_type}",
         summary=payload.get("summary", f"事件类型: {event.event_type}"),
         facts=[],
@@ -157,6 +157,11 @@ async def create_notification_from_event(
             "event_id": str(event_id),
             "event_type": event.event_type,
             "instrument_id": str(event.instrument_id),
+            "instruments": [
+                {
+                    "instrument_id": str(event.instrument_id),
+                },
+            ],
         },
         data_time=event.event_time.isoformat() if event.event_time else "",
     )
