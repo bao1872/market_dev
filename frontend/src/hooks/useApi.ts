@@ -409,6 +409,30 @@ export function usePreviewNotification() {
   })
 }
 
+/** 查询消息投递记录（admin） */
+export function useMessageDeliveries(params?: {
+  status?: 'pending' | 'success' | 'failed' | 'retrying'
+  limit?: number
+  offset?: number
+}) {
+  return useQuery({
+    queryKey: ['admin', 'message-deliveries', params],
+    queryFn: () => api.getMessageDeliveries(params),
+    staleTime: STALE_REALTIME,
+  })
+}
+
+/** 立即重试消息投递记录（admin） */
+export function useRetryMessageDelivery() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (deliveryId: string) => api.retryMessageDelivery(deliveryId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'message-deliveries'] })
+    },
+  })
+}
+
 // ============================================================
 // ===== Watchlist hooks =====
 // ============================================================

@@ -39,6 +39,9 @@ DEFAULT_BATCH_SIZE = 100
 # 最大重试次数（超过则标记 failed）
 DEFAULT_MAX_RETRY = 5
 
+# 通知事件由 Notification Delivery Worker 独占处理，通用 Relay 不投递
+_EXCLUDED_EVENT_TYPES = {"notification.message.created"}
+
 
 async def write_outbox(
     db: AsyncSession,
@@ -107,9 +110,13 @@ async def relay_outbox(
     redis = get_redis()
 
     # 1. 查询 pending 记录（按创建时间排序，FIFO）
+    #    排除 notification.message.created，由 Notification Delivery Worker 独占处理
     stmt = (
         select(Outbox)
-        .where(Outbox.status == "pending")
+        .where(
+            Outbox.status == "pending",
+            Outbox.event_type.not_in(_EXCLUDED_EVENT_TYPES),
+        )
         .order_by(Outbox.created_at)
         .limit(batch_size)
     )

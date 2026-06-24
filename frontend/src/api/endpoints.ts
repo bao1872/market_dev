@@ -266,6 +266,34 @@ export interface StrategyEventListResponse {
 // Notification 领域类型
 // ============================================================
 
+/** 消息投递记录 */
+export interface MessageDelivery {
+  id: string
+  channel_id: string
+  notification_message_id: string
+  adapter_type: string
+  display_name: string
+  status: 'pending' | 'success' | 'failed' | 'retrying'
+  attempt_count: number
+  next_retry_at: string | null
+  last_error_code: string | null
+  created_at: string
+  // [消息投递管理] - 从关联消息提取的摘要与主要标的
+  message_summary: string | null
+  primary_instrument: {
+    instrument_id?: string
+    symbol?: string
+    name?: string
+  } | null
+}
+
+/** 主要标的（结构化字段） */
+export interface PrimaryInstrument {
+  instrument_id?: string
+  symbol?: string
+  name?: string
+}
+
 /** 通知消息 */
 export interface NotificationMessage {
   id: string
@@ -276,8 +304,15 @@ export interface NotificationMessage {
   source_type: string
   source_id: string | null
   body: Record<string, unknown>
+  deliveries: MessageDelivery[]
   read_at: string | null
   created_at: string
+  // [消息中心] - 结构化字段：前端表格直接展示
+  strategy_key: string | null
+  strategy_name: string | null
+  instrument_count: number | null
+  primary_instrument: PrimaryInstrument | null
+  event_summary: string | null
 }
 
 /** 通知消息列表响应 */
@@ -999,6 +1034,26 @@ export async function testNotificationChannel(channelId: string): Promise<Channe
 /** 消息预览 - 返回渠道无关 DTO + 站内渲染 + 飞书 card JSON */
 export async function previewNotification(payload: NotificationPreviewRequest): Promise<NotificationPreviewResponse> {
   const { data } = await apiClient.post<NotificationPreviewResponse>('/notification-previews', payload)
+  return data
+}
+
+// ============================================================
+// ===== Admin Message Deliveries 端点 =====
+// ============================================================
+
+/** 查询消息投递记录（admin） */
+export async function getMessageDeliveries(params?: {
+  status?: 'pending' | 'success' | 'failed' | 'retrying'
+  limit?: number
+  offset?: number
+}): Promise<MessageDelivery[]> {
+  const { data } = await apiClient.get<MessageDelivery[]>('/admin/message-deliveries', { params })
+  return data
+}
+
+/** 立即重试指定消息投递记录（admin） */
+export async function retryMessageDelivery(deliveryId: string): Promise<MessageDelivery> {
+  const { data } = await apiClient.post<MessageDelivery>(`/admin/message-deliveries/${deliveryId}/retry`)
   return data
 }
 

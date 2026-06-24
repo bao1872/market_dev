@@ -30,6 +30,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 import app.services.feishu_platform_app_adapter  # noqa: F401
 
@@ -413,6 +414,55 @@ async def verify_channel(
     return channel
 
 
+async def _patch_monitor_member_event_instruments(
+    db: AsyncSession,
+    messages: list[NotificationMessage],
+) -> None:
+    """补齐历史 MONITOR_MEMBER_EVENT 消息的股票信息。
+
+    若消息类型为 MONITOR_MEMBER_EVENT 且 body.resource_refs.instruments 为空，
+    按 source_id 查询对应 StrategyEvent + Instrument，将股票信息写入 body。
+
+    Args:
+        db: 异步会话
+        messages: 消息列表（原地修改 body）
+    """
+    from app.models.instrument import Instrument
+    from app.models.strategy_event import StrategyEvent
+
+    for message in messages:
+        if message.message_type != "MONITOR_MEMBER_EVENT":
+            continue
+
+        body = message.body or {}
+        resource_refs = body.get("resource_refs") or {}
+        instruments = resource_refs.get("instruments")
+        if instruments:
+            continue
+
+        source_id = message.source_id
+        if source_id is None:
+            continue
+
+        event = await db.get(StrategyEvent, source_id)
+        if event is None:
+            continue
+
+        instrument = await db.get(Instrument, event.instrument_id)
+        if instrument is None:
+            continue
+
+        resource_refs["instruments"] = [
+            {
+                "instrument_id": str(instrument.id),
+                "symbol": instrument.symbol,
+                "name": instrument.name,
+            },
+        ]
+        body["resource_refs"] = resource_refs
+        message.body = body
+
+
 async def list_user_messages(
     db: AsyncSession,
     user_id: UUID,
@@ -421,6 +471,9 @@ async def list_user_messages(
     unread_only: bool = False,
 ) -> list[NotificationMessage]:
     """列出用户消息。
+
+    对每条消息 LEFT JOIN 其 message_deliveries 与关联 channel，
+    返回真实投递状态；同时补齐历史 MONITOR_MEMBER_EVENT 的股票信息。
 
     Args:
         db: 异步会话
@@ -435,6 +488,10 @@ async def list_user_messages(
     stmt = (
         select(NotificationMessage)
         .where(NotificationMessage.user_id == user_id)
+        .options(
+            selectinload(NotificationMessage.deliveries)
+            .selectinload(MessageDelivery.channel),
+        )
         .order_by(NotificationMessage.created_at.desc())
         .limit(limit)
         .offset(offset)
@@ -442,7 +499,12 @@ async def list_user_messages(
     if unread_only:
         stmt = stmt.where(NotificationMessage.read_at.is_(None))
     result = await db.execute(stmt)
-    return list(result.scalars().all())
+    messages = list(result.scalars().unique().all())
+
+    # [历史兼容] 补齐 MONITOR_MEMBER_EVENT 股票信息
+    await _patch_monitor_member_event_instruments(db, messages)
+
+    return messages
 
 
 async def mark_message_read(
@@ -500,6 +562,115 @@ async def list_user_channels(
     )
     result = await db.execute(stmt)
     return list(result.scalars().all())
+
+
+async def list_message_deliveries(
+    db: AsyncSession,
+    status: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[MessageDelivery]:
+    """查询消息投递记录（admin）。
+
+    Args:
+        db: 异步会话
+        status: 状态筛选（pending/success/failed/retrying）
+        limit: 分页大小
+        offset: 分页偏移
+
+    Returns:
+        MessageDelivery 列表（按创建时间倒序）
+    """
+    stmt = (
+        select(MessageDelivery)
+        .options(
+            selectinload(MessageDelivery.channel),
+            selectinload(MessageDelivery.message),
+        )
+        .order_by(MessageDelivery.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    if status:
+        stmt = stmt.where(MessageDelivery.status == status)
+
+    result = await db.execute(stmt)
+    return list(result.scalars().unique().all())
+
+
+async def retry_delivery(
+    db: AsyncSession,
+    delivery_id: UUID,
+) -> MessageDelivery:
+    """重试指定投递记录。
+
+    直接更新已有的 MessageDelivery 记录并重新调用 adapter，
+    不创建新记录，从而不破坏 deliver_message 的幂等语义。
+
+    Args:
+        db: 异步会话
+        delivery_id: 投递记录 ID
+
+    Returns:
+        更新后的 MessageDelivery
+
+    Raises:
+        MessageNotFoundError: 投递记录不存在
+        ChannelNotFoundError: 关联渠道不存在
+    """
+    stmt = (
+        select(MessageDelivery)
+        .where(MessageDelivery.id == delivery_id)
+        .options(
+            selectinload(MessageDelivery.channel),
+            selectinload(MessageDelivery.message),
+        )
+    )
+    result = await db.execute(stmt)
+    delivery = result.scalar_one_or_none()
+    if delivery is None:
+        raise MessageNotFoundError(f"投递记录不存在: delivery_id={delivery_id}")
+
+    channel = delivery.channel
+    if channel is None:
+        raise ChannelNotFoundError(f"投递记录关联渠道不存在: delivery_id={delivery_id}")
+
+    message = delivery.message
+    if message is None:
+        raise MessageNotFoundError(f"投递记录关联消息不存在: delivery_id={delivery_id}")
+
+    adapter = get_adapter(channel.adapter_type)
+    message_dto = NotificationMessageDTO(**message.body)
+
+    # 重置为重试中状态
+    delivery.status = "retrying"
+    delivery.last_error_code = None
+    await db.flush()
+
+    try:
+        result: DeliveryResult = await adapter.send(message_dto, channel.target_config)
+    except Exception as e:
+        delivery.status = "failed"
+        delivery.attempt_count += 1
+        delivery.last_error_code = "ADAPTER_EXCEPTION"
+        delivery.provider_response = {"error": str(e)}
+        await db.flush()
+        raise NotificationServiceError(
+            f"重试投递异常: adapter={channel.adapter_type}, "
+            f"delivery_id={delivery_id}, message_id={message.id}: {e}"
+        ) from e
+
+    delivery.attempt_count += 1
+    if result.success:
+        delivery.status = "success"
+        delivery.last_error_code = None
+    else:
+        delivery.status = "failed"
+        delivery.last_error_code = result.error_code
+    delivery.provider_response = result.provider_response
+    await db.flush()
+
+    return delivery
 
 
 async def test_channel(

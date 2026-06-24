@@ -22,7 +22,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # 允许的 message_type 枚举（对齐 schema）
 MESSAGE_TYPES = {
@@ -74,6 +74,14 @@ class NotificationMessageDTO(BaseModel):
         default="仅展示规则触发与历史数据，不构成投资建议。",
         description="免责声明",
     )
+    # [消息中心] - 结构化字段：前端表格直接展示，避免从 Markdown/富文本解析
+    strategy_key: str | None = Field(None, description="策略键（如 watchlist_monitor）")
+    strategy_name: str | None = Field(None, description="策略展示名称")
+    instrument_count: int | None = Field(None, description="涉及标的数量")
+    primary_instrument: dict[str, Any] | None = Field(
+        None, description="主要标的（instrument_id/symbol/name）",
+    )
+    event_summary: str | None = Field(None, description="事件摘要（事件类型/边界等）")
 
     def validate_message_type(self) -> None:
         """校验 message_type 在允许枚举内。"""
@@ -123,6 +131,62 @@ class UpdateChannelRequest(BaseModel):
     target_config: dict[str, Any] | None = None
 
 
+class MessageDeliveryResponse(BaseModel):
+    """消息投递记录响应。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID = Field(..., description="投递记录 ID")
+    channel_id: UUID = Field(..., description="渠道 ID")
+    notification_message_id: UUID = Field(..., description="关联消息 ID")
+    adapter_type: str = Field(..., description="渠道类型（feishu_webhook/feishu_platform_app/email）")
+    display_name: str = Field(..., description="渠道展示名称")
+    status: str = Field(..., description="pending/success/failed/retrying")
+    attempt_count: int = Field(..., description="已尝试次数")
+    next_retry_at: datetime | None = Field(None, description="下次重试时间")
+    last_error_code: str | None = Field(None, description="最近错误码")
+    created_at: datetime = Field(..., description="创建时间")
+    # [消息投递管理] - 从关联消息提取的摘要信息，便于 admin 页面展示失败投递对应的股票/事件
+    message_summary: str | None = Field(None, description="消息摘要")
+    primary_instrument: dict[str, Any] | None = Field(None, description="主要标的")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _extract_channel_info(cls, data: Any) -> Any:
+        """从关联的 NotificationChannel 提取 adapter_type 与 display_name，
+        并从 NotificationMessage 提取摘要与主要标的。
+
+        输入为 ORM 对象时转换为 dict，确保 Pydantic 能读取到关联实体上的字段。
+        """
+        if hasattr(data, "id") and not isinstance(data, dict):
+            channel = getattr(data, "channel", None)
+            message = getattr(data, "message", None)
+            message_body = getattr(message, "body", None) or {}
+            primary_instrument = message_body.get("primary_instrument")
+            message_summary = message_body.get("summary") or message_body.get("title")
+            return {
+                "id": getattr(data, "id", None),
+                "channel_id": getattr(data, "channel_id", None),
+                "notification_message_id": getattr(data, "notification_message_id", None),
+                "adapter_type": (
+                    getattr(channel, "adapter_type", "")
+                    if channel else getattr(data, "adapter_type", "")
+                ),
+                "display_name": (
+                    getattr(channel, "display_name", "")
+                    if channel else getattr(data, "display_name", "")
+                ),
+                "status": getattr(data, "status", ""),
+                "attempt_count": getattr(data, "attempt_count", 0),
+                "next_retry_at": getattr(data, "next_retry_at", None),
+                "last_error_code": getattr(data, "last_error_code", None),
+                "created_at": getattr(data, "created_at", None),
+                "message_summary": message_summary,
+                "primary_instrument": primary_instrument,
+            }
+        return data
+
+
 class NotificationMessageResponse(BaseModel):
     """通知消息响应。"""
 
@@ -136,8 +200,33 @@ class NotificationMessageResponse(BaseModel):
     source_type: str = Field(..., description="来源类型")
     source_id: UUID | None = Field(None, description="来源 ID")
     body: dict[str, Any] = Field(..., description="消息 DTO JSONB")
+    deliveries: list[MessageDeliveryResponse] = Field(
+        default_factory=list, description="关联投递记录",
+    )
     read_at: datetime | None = Field(None, description="已读时间")
     created_at: datetime = Field(..., description="创建时间")
+    # [消息中心] - 结构化字段：从 body 提取，新老消息兼容
+    strategy_key: str | None = Field(None, description="策略键")
+    strategy_name: str | None = Field(None, description="策略展示名称")
+    instrument_count: int | None = Field(None, description="涉及标的数量")
+    primary_instrument: dict[str, Any] | None = Field(None, description="主要标的")
+    event_summary: str | None = Field(None, description="事件摘要")
+
+    @model_validator(mode="after")
+    def _extract_structured_fields(self) -> "NotificationMessageResponse":
+        """从 body 提取结构化字段（兼容旧消息未填充的情况）。"""
+        body = self.body or {}
+        if self.strategy_key is None:
+            self.strategy_key = body.get("strategy_key")
+        if self.strategy_name is None:
+            self.strategy_name = body.get("strategy_name")
+        if self.instrument_count is None:
+            self.instrument_count = body.get("instrument_count")
+        if self.primary_instrument is None:
+            self.primary_instrument = body.get("primary_instrument")
+        if self.event_summary is None:
+            self.event_summary = body.get("event_summary")
+        return self
 
 
 class NotificationMessageListResponse(BaseModel):

@@ -28,10 +28,20 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.event_recipient import StrategyEventRecipient
+from app.models.instrument import Instrument
+from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.strategy_event import StrategyEvent
 from app.models.watchlist import UserWatchlistItem
 
 logger = logging.getLogger("event_recipient_service")
+
+# 事件类型 → 中文标签（与 monitor_batch_service 保持一致）
+_EVENT_TYPE_LABEL: dict[str, str] = {
+    "bb_upper_touch": "布林上轨穿越",
+    "bb_mid_touch": "布林中轨穿越",
+    "bb_lower_touch": "布林下轨穿越",
+    "node_cluster_touch": "节点集群穿越",
+}
 
 
 async def expand_event_recipients(db: AsyncSession, event_id: UUID) -> int:
@@ -142,13 +152,32 @@ async def create_notification_from_event(
         )
         return None
 
-    # 2. 构建通知消息 DTO
+    # 2. 查询策略定义与标的名称，用于填充结构化字段
+    strategy_key: str | None = None
+    strategy_name: str | None = None
+    version = await db.get(StrategyVersion, event.strategy_version_id)
+    if version is not None:
+        definition = await db.get(StrategyDefinition, version.strategy_definition_id)
+        if definition is not None:
+            strategy_key = definition.strategy_key
+            strategy_name = definition.display_name or strategy_key
+
+    instrument = await db.get(Instrument, event.instrument_id)
+    instrument_symbol = instrument.symbol if instrument else ""
+    instrument_name = instrument.name if instrument else ""
+
+    # 3. 构建通知消息 DTO
     payload = event.payload or {}
+    event_label = _EVENT_TYPE_LABEL.get(event.event_type, event.event_type)
+    boundary = payload.get("boundary")
+    boundary_text = f" · 边界 {boundary:.2f}" if isinstance(boundary, (int, float)) else ""
+    event_summary = f"{event_label}{boundary_text}"
+
     dto = NotificationMessageDTO(
         message_type="MONITOR_EVENT",
         template_key="monitor_event",
         template_version="1.1.0",
-        title=f"策略事件: {event.event_type}",
+        title=f"策略事件: {event_label}",
         summary=payload.get("summary", f"事件类型: {event.event_type}"),
         facts=[],
         timeline=[],
@@ -160,10 +189,22 @@ async def create_notification_from_event(
             "instruments": [
                 {
                     "instrument_id": str(event.instrument_id),
+                    "symbol": instrument_symbol,
+                    "name": instrument_name,
                 },
             ],
         },
         data_time=event.event_time.isoformat() if event.event_time else "",
+        # [消息中心] - 结构化字段
+        strategy_key=strategy_key,
+        strategy_name=strategy_name,
+        instrument_count=1,
+        primary_instrument={
+            "instrument_id": str(event.instrument_id),
+            "symbol": instrument_symbol,
+            "name": instrument_name,
+        },
+        event_summary=event_summary,
     )
 
     # 3. 创建通知消息
@@ -186,7 +227,7 @@ async def create_notification_from_event(
     try:
         await write_outbox(
             db=db,
-            event_type="strategy_event.notification_created",
+            event_type="notification.message.created",
             payload={
                 "message_id": str(message.id),
                 "event_id": str(event_id),

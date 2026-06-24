@@ -31,6 +31,7 @@ from app.models.strategy_run import StrategyRun
 from app.models.user import User
 from app.models.watchlist import UserWatchlistItem
 from app.models.worker_heartbeat import WorkerHeartbeat
+from app.models.notification import MessageDelivery, NotificationChannel, NotificationMessage
 from app.schemas.membership import (
     InviteCodeCreate,
     InviteCodeListItem,
@@ -38,6 +39,7 @@ from app.schemas.membership import (
     InviteRedemptionResponse,
     MemberListItem,
 )
+from app.schemas.notification import MessageDeliveryResponse
 from app.schemas.scheduler_job_run import (
     RecentSchedulerJobSummary,
     SchedulerJobRunItem,
@@ -50,6 +52,7 @@ from app.services.membership_service import (
     list_members,
     revoke_invite_code,
 )
+from app.services.notification_service import list_message_deliveries, retry_delivery
 
 router = APIRouter(
     prefix="/admin",
@@ -285,6 +288,41 @@ async def get_scheduler_job_runs(
         limit=limit,
         offset=offset,
     )
+
+
+@router.get("/message-deliveries", response_model=list[MessageDeliveryResponse])
+async def get_message_deliveries(
+    status: str | None = Query(default=None, description="状态筛选：pending/success/failed/retrying"),
+    limit: int = Query(default=50, ge=1, le=200, description="分页大小"),
+    offset: int = Query(default=0, ge=0, description="分页偏移"),
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles("admin")),
+) -> list[MessageDeliveryResponse]:
+    """查询消息投递记录（admin）。
+
+    返回 message_deliveries 表记录，支持按状态筛选和分页。
+    复用 MessageDeliveryResponse schema，包含渠道类型与展示名称。
+    """
+    rows = await list_message_deliveries(db=db, status=status, limit=limit, offset=offset)
+    return [MessageDeliveryResponse.model_validate(r) for r in rows]
+
+
+@router.post("/message-deliveries/{delivery_id}/retry", response_model=MessageDeliveryResponse)
+async def retry_message_delivery(
+    delivery_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles("admin")),
+) -> MessageDeliveryResponse:
+    """立即重试指定消息投递记录。
+
+    直接更新已有 MessageDelivery 记录并重新调用 adapter，
+    不创建新记录，不破坏 deliver_message 的幂等语义。
+    """
+    try:
+        delivery = await retry_delivery(db=db, delivery_id=delivery_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    return MessageDeliveryResponse.model_validate(delivery)
 
 
 @router.get("/system-overview")

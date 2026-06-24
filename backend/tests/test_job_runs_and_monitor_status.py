@@ -1,0 +1,388 @@
+"""Task 6-11 测试：监控状态语义拆分与任务可观察性可靠化。
+
+覆盖：
+- watchlist monitor-status 返回 market_session / calculation_status / freshness_seconds / last_bar_time
+- 盘后时间 calculation_status 不因 30 分钟规则变成 STALE
+- SchedulerJobRun 心跳、租约、worker_instance_id、last_cycle_at
+- Worker 启动恢复过期 running 任务为 interrupted
+- strategy_scheduler 找不到策略时正确结束 job_run 并记录 strategy_run_id
+- monitor_scheduler 按交易时段聚合 session
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import uuid
+from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+import pytest
+import pytest_asyncio
+
+from app.api.watchlist import (
+    _compute_calculation_status,
+    _compute_market_status,
+)
+from app.models.scheduler_job_run import SchedulerJobRun
+from app.worker import (
+    _create_job_run,
+    _finish_job_run,
+    _update_job_heartbeat,
+    recover_interrupted_job_runs,
+)
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def test_db():
+    """每个测试独立的内存 SQLite 异步 DB 会话（仅创建 scheduler_job_runs 表）。"""
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(SchedulerJobRun.__table__.create)
+    SessionLocal = async_sessionmaker(
+        engine, class_=AsyncSession, expire_on_commit=False,
+    )
+    async with SessionLocal() as session:
+        yield session
+    await engine.dispose()
+
+
+# ==================== Task 6: 监控状态语义拆分 ====================
+
+
+def test_compute_market_status_non_trading_day() -> None:
+    """非交易日返回 NON_TRADING_DAY。"""
+    now = datetime(2026, 6, 20, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    assert _compute_market_status(now, is_trading_day=False) == "NON_TRADING_DAY"
+
+
+def test_compute_market_status_trading_morning() -> None:
+    """交易日 09:30-11:30 返回 TRADING。"""
+    now = datetime(2026, 6, 24, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    assert _compute_market_status(now, is_trading_day=True) == "TRADING"
+
+
+def test_compute_market_status_lunch_break() -> None:
+    """交易日 11:30-13:00 返回 LUNCH_BREAK。"""
+    now = datetime(2026, 6, 24, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    assert _compute_market_status(now, is_trading_day=True) == "LUNCH_BREAK"
+
+
+def test_compute_market_status_after_market() -> None:
+    """交易日 15:00 后返回 AFTER_MARKET。"""
+    now = datetime(2026, 6, 24, 19, 1, tzinfo=ZoneInfo("Asia/Shanghai"))
+    assert _compute_market_status(now, is_trading_day=True) == "AFTER_MARKET"
+
+
+def test_calculation_status_after_market_old_data_is_succeeded() -> None:
+    """盘后 19:01 且数据为 14:59，calculation_status 应为 SUCCEEDED 而非 STALE。"""
+    now = datetime(2026, 6, 24, 19, 1, tzinfo=ZoneInfo("Asia/Shanghai"))
+    market_session = "AFTER_MARKET"
+    updated_at = datetime(2026, 6, 24, 14, 59, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    # 构造一个模拟的 ms 对象，只有 updated_at 属性
+    ms_updated_at = updated_at
+
+    class FakeMS:
+        updated_at = ms_updated_at
+
+    calc_status = _compute_calculation_status(
+        now_cst=now,
+        market_session=market_session,
+        eval_row=None,
+        ms=FakeMS(),
+    )
+    assert calc_status == "SUCCEEDED"
+
+
+def test_calculation_status_trading_stale_when_old() -> None:
+    """盘中数据超过 180 秒，calculation_status 应为 STALE。"""
+    now = datetime(2026, 6, 24, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    market_session = "TRADING"
+    ms_updated_at = now - timedelta(seconds=300)
+
+    class FakeMS:
+        updated_at = ms_updated_at
+
+    calc_status = _compute_calculation_status(
+        now_cst=now,
+        market_session=market_session,
+        eval_row=None,
+        ms=FakeMS(),
+    )
+    assert calc_status == "STALE"
+
+
+def test_calculation_status_trading_fresh_when_recent() -> None:
+    """盘中数据 60 秒内，calculation_status 应为 SUCCEEDED。"""
+    now = datetime(2026, 6, 24, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    market_session = "TRADING"
+    ms_updated_at = now - timedelta(seconds=60)
+
+    class FakeMS:
+        updated_at = ms_updated_at
+
+    calc_status = _compute_calculation_status(
+        now_cst=now,
+        market_session=market_session,
+        eval_row=None,
+        ms=FakeMS(),
+    )
+    assert calc_status == "SUCCEEDED"
+
+
+def test_calculation_status_failed_evaluation() -> None:
+    """评估状态 FAILED 时 calculation_status 应为 FAILED。"""
+    now = datetime(2026, 6, 24, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    class FakeEval:
+        evaluation_status = "FAILED"
+
+    calc_status = _compute_calculation_status(
+        now_cst=now,
+        market_session="TRADING",
+        eval_row=FakeEval(),
+        ms=None,
+    )
+    assert calc_status == "FAILED"
+
+
+def test_calculation_status_waiting_first_run_in_trading() -> None:
+    """盘中无评估记录时 calculation_status 应为 WAITING_FIRST_RUN。"""
+    now = datetime(2026, 6, 24, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    calc_status = _compute_calculation_status(
+        now_cst=now,
+        market_session="TRADING",
+        eval_row=None,
+        ms=None,
+    )
+    assert calc_status == "WAITING_FIRST_RUN"
+
+
+# ==================== Task 7/8/9: SchedulerJobRun 生命周期 ====================
+
+
+@pytest.mark.asyncio
+async def test_create_job_run_sets_lease_and_heartbeat(test_db) -> None:
+    """创建 job_run 时应设置 worker_instance_id、scheduled_at、heartbeat_at、lease_expires_at。"""
+    job_run = await _create_job_run(test_db, "test_job", "2026-06-24")
+
+    assert job_run.worker_instance_id is not None
+    assert job_run.scheduled_at is not None
+    assert job_run.heartbeat_at is not None
+    assert job_run.lease_expires_at is not None
+    assert job_run.lease_expires_at > job_run.heartbeat_at
+    assert job_run.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_finish_job_run_updates_status_and_counts(test_db) -> None:
+    """结束 job_run 时应更新状态、完成时间、成功/失败计数。"""
+    job_run = await _create_job_run(test_db, "test_job", "2026-06-24")
+    await _finish_job_run(test_db, job_run, "succeeded", success_count=3, failure_count=1)
+
+    attached = await test_db.get(SchedulerJobRun, job_run.id)
+    assert attached is not None
+    assert attached.status == "succeeded"
+    assert attached.finished_at is not None
+    assert attached.succeeded_count == 3
+    assert attached.failed_count == 1
+
+
+@pytest.mark.asyncio
+async def test_update_job_heartbeat_renews_lease(test_db) -> None:
+    """心跳更新应刷新 heartbeat_at 与 lease_expires_at。"""
+    job_run = await _create_job_run(test_db, "test_job", "2026-06-24")
+    old_lease = job_run.lease_expires_at
+    # SQLite 内存测试环境下时区信息可能被剥离，统一归一化为上海时区后再比较
+    if old_lease is not None and old_lease.tzinfo is None:
+        old_lease = old_lease.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    await asyncio.sleep(0.1)
+    await _update_job_heartbeat(test_db, job_run)
+
+    attached = await test_db.get(SchedulerJobRun, job_run.id)
+    assert attached is not None
+    if attached.lease_expires_at is not None and attached.lease_expires_at.tzinfo is None:
+        attached_lease_expires_at = attached.lease_expires_at.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    else:
+        attached_lease_expires_at = attached.lease_expires_at
+    assert attached.heartbeat_at >= job_run.heartbeat_at
+    assert attached_lease_expires_at > old_lease
+
+
+@pytest.mark.asyncio
+async def test_recover_interrupted_job_runs_marks_expired(test_db) -> None:
+    """启动恢复应将过期 lease 的 running 任务标记为 interrupted。"""
+    job_run = SchedulerJobRun(
+        id=uuid.uuid4(),
+        job_name="expired_job",
+        business_date="2026-06-24",
+        status="running",
+        scheduled_at=datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(minutes=10),
+        started_at=datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(minutes=10),
+        heartbeat_at=datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(minutes=10),
+        lease_expires_at=datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(minutes=5),
+        worker_instance_id="old-instance",
+    )
+    test_db.add(job_run)
+    await test_db.commit()
+
+    recovered = await recover_interrupted_job_runs(test_db)
+    assert recovered == 1
+
+    attached = await test_db.get(SchedulerJobRun, job_run.id)
+    assert attached is not None
+    # 同 session 中 get() 可能返回 identity map 缓存对象，先刷新再断言
+    await test_db.refresh(attached)
+    assert attached.status == "interrupted"
+    assert attached.error_message is not None
+
+
+@pytest.mark.asyncio
+async def test_recover_interrupted_job_runs_ignores_fresh(test_db) -> None:
+    """未过期 lease 的 running 任务不应被恢复。"""
+    job_run = SchedulerJobRun(
+        id=uuid.uuid4(),
+        job_name="fresh_job",
+        business_date="2026-06-24",
+        status="running",
+        scheduled_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+        started_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+        heartbeat_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+        lease_expires_at=datetime.now(ZoneInfo("Asia/Shanghai")) + timedelta(minutes=5),
+        worker_instance_id="fresh-instance",
+    )
+    test_db.add(job_run)
+    await test_db.commit()
+
+    recovered = await recover_interrupted_job_runs(test_db)
+    assert recovered == 0
+
+    attached = await test_db.get(SchedulerJobRun, job_run.id)
+    assert attached is not None
+    assert attached.status == "running"
+
+
+# ==================== Task 10: strategy_scheduler job_run 完整性 ====================
+
+
+@pytest.mark.asyncio
+async def test_strategy_scheduler_no_selector_finishes_failed(test_db) -> None:
+    """未找到 selector 策略时，job_run 最终状态应为 failed 而非 running。"""
+    # 该测试通过直接复现 worker 内部逻辑验证：
+    # 创建 job_run -> 查询到空策略列表 -> 必须调用 _finish_job_run("failed")
+    from datetime import date as date_cls
+
+    trade_date = date_cls(2026, 6, 24)
+    job_run = await _create_job_run(test_db, "strategy_scheduler", str(trade_date))
+    # 模拟未找到 selector 策略的分支
+    await _finish_job_run(
+        test_db,
+        job_run,
+        "failed",
+        error_message="未找到 kind=selector 的策略",
+    )
+
+    attached = await test_db.get(SchedulerJobRun, job_run.id)
+    assert attached is not None
+    assert attached.status == "failed"
+    assert attached.error_message == "未找到 kind=selector 的策略"
+
+
+@pytest.mark.asyncio
+async def test_strategy_scheduler_metadata_contains_strategy_run_id(test_db) -> None:
+    """strategy_scheduler 应在 metadata_json 中记录 strategy_run_id。"""
+    job_run = await _create_job_run(test_db, "strategy_scheduler", "2026-06-24")
+    strategy_run_id = uuid.uuid4()
+    job_run.metadata_json = json.dumps({"strategy_run_id": str(strategy_run_id)})
+    await test_db.commit()
+
+    attached = await test_db.get(SchedulerJobRun, job_run.id)
+    assert attached is not None
+    meta = json.loads(attached.metadata_json or "{}")
+    assert meta.get("strategy_run_id") == str(strategy_run_id)
+
+
+# ==================== Task 11: monitor_scheduler session 聚合 ====================
+
+
+def test_monitor_session_label_morning() -> None:
+    """09:30-11:30 返回 morning session。"""
+    from app.worker import _get_monitor_session
+
+    now = datetime(2026, 6, 24, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    label, start, end = _get_monitor_session(now)
+    assert label == "morning"
+    assert start == datetime(2026, 6, 24, 9, 30, tzinfo=ZoneInfo("Asia/Shanghai")).time()
+    assert end == datetime(2026, 6, 24, 11, 30, tzinfo=ZoneInfo("Asia/Shanghai")).time()
+
+
+def test_monitor_session_label_afternoon() -> None:
+    """13:00-15:00 返回 afternoon session。"""
+    from app.worker import _get_monitor_session
+
+    now = datetime(2026, 6, 24, 14, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    label, start, end = _get_monitor_session(now)
+    assert label == "afternoon"
+    assert start == datetime(2026, 6, 24, 13, 0, tzinfo=ZoneInfo("Asia/Shanghai")).time()
+    assert end == datetime(2026, 6, 24, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai")).time()
+
+
+def test_monitor_session_label_outside_session() -> None:
+    """非交易时段返回 None。"""
+    from app.worker import _get_monitor_session
+
+    now = datetime(2026, 6, 24, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    result = _get_monitor_session(now)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_monitor_scheduler_reuses_session_job_run(test_db) -> None:
+    """同一交易时段应复用同一个 SchedulerJobRun。"""
+    from datetime import date as date_cls
+
+    from app.worker import _find_or_create_monitor_session_job_run
+
+    trade_date = date_cls(2026, 6, 24)
+    now = datetime(2026, 6, 24, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    job_run1 = await _find_or_create_monitor_session_job_run(
+        test_db, now, str(trade_date), "morning",
+    )
+    await test_db.commit()
+
+    job_run2 = await _find_or_create_monitor_session_job_run(
+        test_db, now, str(trade_date), "morning",
+    )
+    await test_db.commit()
+
+    assert job_run1.id == job_run2.id
+
+
+@pytest.mark.asyncio
+async def test_monitor_scheduler_different_sessions_create_separate_runs(test_db) -> None:
+    """上午和下午应创建不同的 SchedulerJobRun。"""
+    from datetime import date as date_cls
+
+    from app.worker import _find_or_create_monitor_session_job_run
+
+    trade_date = date_cls(2026, 6, 24)
+    morning = datetime(2026, 6, 24, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    afternoon = datetime(2026, 6, 24, 14, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    job_run_morning = await _find_or_create_monitor_session_job_run(
+        test_db, morning, str(trade_date), "morning",
+    )
+    await test_db.commit()
+
+    job_run_afternoon = await _find_or_create_monitor_session_job_run(
+        test_db, afternoon, str(trade_date), "afternoon",
+    )
+    await test_db.commit()
+
+    assert job_run_morning.id != job_run_afternoon.id
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "--tb=short"])

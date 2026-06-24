@@ -26,12 +26,13 @@ import {
   useStrategyEvents,
   useStrategyEventDetail,
   useMessages,
-  useNotificationChannels,
+  useMessageDeliveries,
+  useRetryMessageDelivery,
   useTriggerStrategyRun,
 } from '@/hooks/useApi'
 import { STRATEGY_KEYS } from '@/constants/strategyKeys'
 import * as api from '@/api/endpoints'
-import type { SchedulerJobRunItem, Instrument } from '@/api/endpoints'
+import type { SchedulerJobRunItem, Instrument, MessageDelivery } from '@/api/endpoints'
 import { useToast } from '@/store/toast'
 import { StrategyDataTable } from '@/components/StrategyDataTable'
 import type { DataTableColumn } from '@/components/StrategyDataTable'
@@ -149,14 +150,17 @@ export default function AdminJobsPage() {
   // ===== 查询：用户消息总数（KPI 4，当前用户维度）=====
   const messagesQuery = useMessages({ limit: 1 })
 
-  // ===== 查询：通知渠道（失败投递列表数据源）=====
-  const channelsQuery = useNotificationChannels()
+  // ===== 查询：失败消息投递记录（真实数据源）=====
+  const deliveriesQuery = useMessageDeliveries({ status: 'failed', limit: 20 })
 
   // ===== 查询：事件详情（抽屉打开时按需加载）=====
   const eventDetailQuery = useStrategyEventDetail(selectedEventId ?? undefined)
 
   // ===== 变更：触发策略运行（手动重跑 / 仅重跑失败项）=====
   const triggerRun = useTriggerStrategyRun()
+
+  // ===== 变更：立即重试消息投递（admin）=====
+  const retryDelivery = useRetryMessageDelivery()
 
   // ===== 派生数据：转换为 JobRunRow =====
   const jobRunRows: JobRunRow[] = useMemo(() => {
@@ -202,13 +206,10 @@ export default function AdminJobsPage() {
   // ===== 事件列表 =====
   const events = eventsQuery.data?.items ?? []
 
-  // ===== 失败投递列表：从通知渠道中筛选 error/invalid 状态 =====
-  const failedDeliveries = useMemo(() => {
-    const channels = channelsQuery.data?.items ?? []
-    return channels.filter(
-      (c) => c.status === 'error' || c.status === 'invalid' || c.last_error_code,
-    )
-  }, [channelsQuery.data])
+  // ===== 失败投递列表：直接查询 message_deliveries 表的 failed 记录 =====
+  const failedDeliveries = useMemo<MessageDelivery[]>(() => {
+    return deliveriesQuery.data ?? []
+  }, [deliveriesQuery.data])
 
   // ===== 事件列表 instrument 查询（批量查询构建 symbol 映射）=====
   const eventInstrumentIds = useMemo(
@@ -275,10 +276,18 @@ export default function AdminJobsPage() {
     }
   }, [rerunTaskType, rerunTradeDate, triggerRun, toast])
 
-  /** 重试失败投递（当前无专门重试 API，显示 toast 提示） */
-  const handleRetryDelivery = useCallback(() => {
-    toast.show('已加入立即重试队列', '失败投递将在下一轮重试')
-  }, [toast])
+  /** 重试失败投递：调用 POST /admin/message-deliveries/{id}/retry */
+  const handleRetryDelivery = useCallback(
+    async (deliveryId: string) => {
+      try {
+        await retryDelivery.mutateAsync(deliveryId)
+        toast.show('重试成功', '投递记录已重新尝试')
+      } catch {
+        toast.show('重试失败', '请稍后重试')
+      }
+    },
+    [retryDelivery, toast],
+  )
 
   /** 导出日志（当前无后端导出接口，显示 toast 提示） */
   const handleExportLogs = useCallback(() => {
@@ -533,22 +542,26 @@ export default function AdminJobsPage() {
             </div>
           </div>
           <div className="list">
-            {channelsQuery.isLoading && <div className="notice">加载中…</div>}
-            {!channelsQuery.isLoading && failedDeliveries.length === 0 && (
+            {deliveriesQuery.isLoading && <div className="notice">加载中…</div>}
+            {!deliveriesQuery.isLoading && failedDeliveries.length === 0 && (
               <div className="notice">暂无失败投递</div>
             )}
-            {failedDeliveries.map((channel) => (
-              <div className="list-item" key={channel.id}>
+            {failedDeliveries.map((delivery) => (
+              <div className="list-item" key={delivery.id}>
                 <div className="list-icon danger">!</div>
                 <div className="list-main">
                   <div className="list-title">
-                    {channel.display_name} · {channel.last_error_code ?? '未知错误'}
+                    {delivery.primary_instrument?.name || delivery.primary_instrument?.symbol || delivery.message_summary || '未知消息'} · {delivery.last_error_code ?? '未知错误'}
                   </div>
                   <div className="list-meta">
-                    {channel.adapter_type} · 状态 {channel.status}
+                    {delivery.display_name} · {delivery.adapter_type} · 已尝试 {delivery.attempt_count} 次
                   </div>
                 </div>
-                <button className="btn small" onClick={handleRetryDelivery}>
+                <button
+                  className="btn small"
+                  onClick={() => handleRetryDelivery(delivery.id)}
+                  disabled={retryDelivery.isPending}
+                >
                   重试
                 </button>
               </div>

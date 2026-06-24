@@ -58,6 +58,12 @@ class SchedulerJobRun(Base):
     lease_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="租约过期时间",
     )
+    worker_instance_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="Worker 实例标识 hostname:pid",
+    )
+    last_cycle_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="最近一个周期执行时间",
+    )
     total_count: Mapped[int | None] = mapped_column(
         Integer(), nullable=True, comment="总数",
     )

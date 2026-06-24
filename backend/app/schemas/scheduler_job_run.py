@@ -23,6 +23,8 @@ class SchedulerJobRunItem(BaseModel):
     status: str
     heartbeat_at: datetime | None = None
     lease_expires_at: datetime | None = None
+    worker_instance_id: str | None = None
+    last_cycle_at: datetime | None = None
     total_count: int | None = None
     succeeded_count: int | None = None
     failed_count: int | None = None

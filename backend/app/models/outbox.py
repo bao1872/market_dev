@@ -9,8 +9,9 @@
 - event_type: 事件类型
 - payload: 事件负载 JSONB
 - headers: 事件头 JSONB（如 trace_id, tenant_id）
-- status: pending/processed/failed
+- status: pending/processed/failed/deferred
 - retry_count: 重试次数
+- next_attempt_at: 下次可投递时间（deferred 状态使用）
 
 At-least-once 投递：relay worker 轮询 pending 记录，投递成功后标记 processed，
 失败则增加 retry_count，保证至少一次投递。
@@ -67,10 +68,13 @@ class Outbox(Base):
         nullable=False,
         default="pending",
         server_default=func.text("'pending'"),
-        comment="pending/processed/failed",
+        comment="pending/processed/failed/deferred",
     )
     retry_count: Mapped[int] = mapped_column(
         Integer(), nullable=False, default=0, server_default="0", comment="重试次数"
+    )
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="下次可投递时间（deferred 状态使用）"
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -96,6 +100,7 @@ if __name__ == "__main__":
     assert "payload" in cols
     assert "status" in cols
     assert "retry_count" in cols
+    assert "next_attempt_at" in cols
     idxs = [idx.name for idx in Outbox.__table__.indexes]
     print(f"Outbox indexes={idxs}")
     print("OK")

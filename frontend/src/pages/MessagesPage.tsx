@@ -29,8 +29,14 @@ interface MessageRow {
   type_label: string
   type_tag: 'good' | 'info' | 'warn'
   plan_name: string
+  strategy_name: string
   title: string
   subtitle: string
+  instrument_text: string
+  event_summary: string
+  instruments: Array<{ instrument_id?: string; symbol?: string; name?: string }>
+  instrument_count: number
+  event_id: string | null
   time_text: string
   created_at: string
   delivery_label: string
@@ -45,6 +51,7 @@ interface MessageRow {
 /** 消息类型 → 中文标签 + tag 样式 */
 const TYPE_META: Record<string, { label: string; tag: 'good' | 'info' | 'warn' }> = {
   MONITOR_EVENT: { label: '监控', tag: 'good' },
+  MONITOR_MEMBER_EVENT: { label: '监控', tag: 'good' },
   monitoring_composite: { label: '监控', tag: 'good' },
   selection_composite: { label: '选股', tag: 'good' },
   process_event: { label: '过程事件', tag: 'info' },
@@ -79,6 +86,20 @@ function pickBodyStr(body: Record<string, unknown>, keys: string[]): string {
   return ''
 }
 
+/** 从消息中提取标的列表（优先 body.resource_refs.instruments，回退 primary_instrument） */
+function extractInstruments(
+  message: NotificationMessage,
+): Array<{ instrument_id?: string; symbol?: string; name?: string }> {
+  const body = message.body || {}
+  const resourceRefs = body.resource_refs as Record<string, unknown> | undefined
+  const fromBody = resourceRefs?.instruments as
+    | Array<{ instrument_id?: string; symbol?: string; name?: string }>
+    | undefined
+  if (fromBody && fromBody.length > 0) return fromBody
+  if (message.primary_instrument) return [message.primary_instrument]
+  return []
+}
+
 /** 格式化消息时间：今日显示 HH:MM，昨日显示"昨日 HH:MM"，更早显示 MM-DD HH:MM */
 function formatMessageTime(isoString: string): string {
   try {
@@ -105,12 +126,40 @@ function formatMessageTime(isoString: string): string {
   }
 }
 
-/** 解析投递状态：优先从 body.channels 数组判断，其次从 delivery_status 字段映射 */
-function parseDelivery(body: Record<string, unknown>): { label: string; pill: DeliveryPill } {
-  const status = pickBodyStr(body, ['delivery_status', 'delivery_state', 'status'])
-  const channels = body.channels as Array<Record<string, unknown>> | undefined
+/** 解析投递状态：优先使用后端 deliveries 数组，其次兼容 body.channels / delivery_status */
+function parseDelivery(message: NotificationMessage): { label: string; pill: DeliveryPill } {
+  const deliveries = message.deliveries
+  const body = message.body
 
-  // 优先根据渠道投递结果判断
+  // 优先使用后端真实投递记录
+  if (Array.isArray(deliveries) && deliveries.length > 0) {
+    const successCount = deliveries.filter((d) => d.status === 'success').length
+    const failedCount = deliveries.filter((d) => d.status === 'failed').length
+    const pendingCount = deliveries.filter((d) => d.status === 'pending' || d.status === 'retrying').length
+
+    if (successCount > 0 && failedCount === 0 && pendingCount === 0) {
+      if (successCount >= 2) return { label: '双渠道成功', pill: 'ok' }
+      const feishuSuccess = deliveries.some(
+        (d) => d.status === 'success' && d.adapter_type.startsWith('feishu'),
+      )
+      return { label: feishuSuccess ? '飞书成功' : '渠道成功', pill: 'ok' }
+    }
+
+    if (failedCount > 0 && successCount === 0 && pendingCount === 0) {
+      return { label: '投递失败', pill: 'warn' }
+    }
+
+    if (pendingCount > 0 && successCount === 0 && failedCount === 0) {
+      return { label: '投递中', pill: 'off' }
+    }
+
+    if (successCount > 0 || pendingCount > 0) {
+      return { label: '部分失败', pill: 'warn' }
+    }
+  }
+
+  // 兼容旧数据：根据 body.channels 判断
+  const channels = body.channels as Array<Record<string, unknown>> | undefined
   if (Array.isArray(channels) && channels.length > 0) {
     const successCount = channels.filter(
       (c) => c.success === true || c.status === 'success',
@@ -128,6 +177,7 @@ function parseDelivery(body: Record<string, unknown>): { label: string; pill: De
   }
 
   // 根据 status 字符串映射
+  const status = pickBodyStr(body, ['delivery_status', 'delivery_state', 'status'])
   switch (status) {
     case 'feishu_success':
       return { label: '飞书成功', pill: 'ok' }
@@ -154,6 +204,11 @@ export default function MessagesPage() {
   const [activeFilter, setActiveFilter] = useState<MessageFilter>('all')
   const [timeRange, setTimeRange] = useState<TimeRange>('7d')
   const [isMarkingAll, setIsMarkingAll] = useState(false)
+  const [instrumentDrawerOpen, setInstrumentDrawerOpen] = useState(false)
+  const [drawerInstruments, setDrawerInstruments] = useState<
+    Array<{ instrument_id?: string; symbol?: string; name?: string }>
+  >([])
+  const [drawerEventId, setDrawerEventId] = useState<string | null>(null)
 
   // 获取消息列表：未读筛选走 API（unread_only），类型筛选走客户端
   const messagesQuery = useMessages({
@@ -177,7 +232,7 @@ export default function MessagesPage() {
     for (const m of allMessages) {
       if (!m.read_at) counts.unread++
       if (m.message_type === 'selection_composite') counts.selection++
-      else if (m.message_type === 'monitoring_composite' || m.message_type === 'MONITOR_EVENT') counts.monitoring++
+      else if (m.message_type === 'monitoring_composite' || m.message_type === 'MONITOR_EVENT' || m.message_type === 'MONITOR_MEMBER_EVENT') counts.monitoring++
       else if (m.message_type === 'process_event') counts.process++
       else if (m.message_type === 'system' || m.message_type === 'SYSTEM_ALERT') counts.system++
     }
@@ -197,7 +252,7 @@ export default function MessagesPage() {
       // 类型过滤
       if (activeFilter === 'all' || activeFilter === 'unread') return true
       if (activeFilter === 'selection') return m.message_type === 'selection_composite'
-      if (activeFilter === 'monitoring') return m.message_type === 'monitoring_composite' || m.message_type === 'MONITOR_EVENT'
+      if (activeFilter === 'monitoring') return m.message_type === 'monitoring_composite' || m.message_type === 'MONITOR_EVENT' || m.message_type === 'MONITOR_MEMBER_EVENT'
       if (activeFilter === 'process') return m.message_type === 'process_event'
       if (activeFilter === 'system') return m.message_type === 'system' || m.message_type === 'SYSTEM_ALERT'
       return true
@@ -212,27 +267,33 @@ export default function MessagesPage() {
         label: m.message_type,
         tag: 'info' as const,
       }
-      const delivery = parseDelivery(body)
+      const delivery = parseDelivery(m)
+
+      // [消息中心] - 结构化字段：优先使用后端返回，回退 body 解析
+      const instruments = extractInstruments(m)
+      const instrumentCount = m.instrument_count ?? instruments.length
+      const primary = m.primary_instrument ?? instruments[0]
+      const strategyName =
+        m.strategy_name ||
+        pickBodyStr(body, ['plan_name', 'strategy_name', 'plan', 'source_name'])
+      const eventSummary =
+        m.event_summary ||
+        pickBodyStr(body, ['subtitle', 'sub_title', 'detail', 'description', 'event_summary'])
+      const instrumentText =
+        instrumentCount > 1
+          ? `${primary?.name || primary?.symbol || ''} 等 ${instrumentCount} 只`
+          : primary?.name && primary?.symbol
+            ? `${primary.name} ${primary.symbol}`
+            : primary?.symbol || primary?.name || '-'
 
       // 根据消息类型决定查看跳转目标
-      let navigateTarget = '/watchlist'
+      let navigateTarget = ''
       if (m.message_type === 'selection_composite') {
         navigateTarget = '/screener'
       } else if (m.message_type === 'system' || m.message_type === 'SYSTEM_ALERT') {
         navigateTarget = '/settings'
-      } else if (m.message_type === 'monitoring_composite') {
-        const symbol = pickBodyStr(body, [
-          'symbol',
-          'instrument_symbol',
-          'stock_symbol',
-        ])
-        navigateTarget = symbol ? `/stock/${symbol}` : '/watchlist'
-      } else if (m.message_type === 'MONITOR_EVENT') {
-        // 从 body.resource_refs.instruments 提取股票代码
-        const resourceRefs = body.resource_refs as Record<string, unknown> | undefined
-        const instruments = resourceRefs?.instruments as Array<Record<string, unknown>> | undefined
-        const symbol = instruments?.[0]?.symbol as string | undefined
-        navigateTarget = symbol ? `/stock/${symbol}` : '/watchlist'
+      } else if (instrumentCount === 1 && primary?.symbol) {
+        navigateTarget = `/stock/${primary.symbol}?event_id=${m.source_id || ''}`
       }
 
       return {
@@ -240,12 +301,8 @@ export default function MessagesPage() {
         message_type: m.message_type,
         type_label: typeMeta.label,
         type_tag: typeMeta.tag,
-        plan_name: pickBodyStr(body, [
-          'plan_name',
-          'strategy_name',
-          'plan',
-          'source_name',
-        ]),
+        plan_name: strategyName,
+        strategy_name: strategyName,
         title: pickBodyStr(body, ['title', 'main_title', 'subject', 'summary']),
         subtitle: pickBodyStr(body, [
           'subtitle',
@@ -254,6 +311,11 @@ export default function MessagesPage() {
           'description',
           'timeline',
         ]),
+        instrument_text: instrumentText,
+        event_summary: eventSummary,
+        instruments,
+        instrument_count: instrumentCount,
+        event_id: m.source_id,
         time_text: formatMessageTime(m.created_at),
         created_at: m.created_at,
         delivery_label: delivery.label,
@@ -296,13 +358,20 @@ export default function MessagesPage() {
     }
   }, [allMessages, markReadMutation, toast])
 
-  // 点击查看：标记已读 + 跳转
+  // 点击查看：标记已读 + 跳转/抽屉
   const handleView = useCallback(
     (row: MessageRow) => {
       if (row.unread) {
         handleMarkRead(row.id)
       }
-      navigate(row.navigate_target)
+      // [消息中心] - 多只标的打开抽屉展示列表，单只跳转个股详情
+      if (row.instrument_count > 1 && row.instruments.length > 0) {
+        setDrawerInstruments(row.instruments)
+        setDrawerEventId(row.event_id)
+        setInstrumentDrawerOpen(true)
+      } else if (row.navigate_target) {
+        navigate(row.navigate_target)
+      }
     },
     [handleMarkRead, navigate],
   )
@@ -338,19 +407,21 @@ export default function MessagesPage() {
         dataType: 'text',
         sortable: true,
         filterable: true,
-        render: (row) => row.plan_name || '-',
+        sortValue: (row) => row.strategy_name,
+        filterValue: (row) => row.strategy_name,
+        render: (row) => row.strategy_name || '-',
       },
       {
         key: 'content',
-        title: '消息内容',
+        title: '股票 / 事件',
         dataType: 'text',
         sortable: false,
         filterable: true,
-        filterValue: (row) => `${row.title} ${row.subtitle}`,
+        filterValue: (row) => `${row.instrument_text} ${row.event_summary}`,
         render: (row) => (
           <div>
-            <div className="symbol">{row.title || '-'}</div>
-            {row.subtitle && <div className="symbol-sub">{row.subtitle}</div>}
+            <div className="symbol">{row.instrument_text || '-'}</div>
+            {row.event_summary && <div className="symbol-sub">{row.event_summary}</div>}
           </div>
         ),
       },
@@ -390,7 +461,7 @@ export default function MessagesPage() {
               handleView(row)
             }}
           >
-            查看
+            {row.instrument_count > 1 ? '查看列表' : '查看'}
           </button>
         ),
       },
@@ -463,6 +534,66 @@ export default function MessagesPage() {
           emptyText="没有符合条件的消息"
         />
       </div>
+
+      {/* [消息中心] - 多标的抽屉 */}
+      {instrumentDrawerOpen && (
+        <div
+          className="drawer-backdrop open"
+          onClick={() => setInstrumentDrawerOpen(false)}
+        >
+          <aside className="drawer" onClick={(e) => e.stopPropagation()}>
+            <div className="drawer-head">
+              <div>
+                <b>涉及标的</b>
+                <div className="card-sub">共 {drawerInstruments.length} 只股票</div>
+              </div>
+              <button
+                className="icon-btn"
+                onClick={() => setInstrumentDrawerOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="drawer-body">
+              <div className="list">
+                {drawerInstruments.map((inst, idx) => (
+                  <div className="list-item" key={inst.instrument_id || idx}>
+                    <div className="list-icon">
+                      {(inst.symbol || 'S').slice(0, 1)}
+                    </div>
+                    <div className="list-main">
+                      <div className="list-title">
+                        {inst.name || '-'} · {inst.symbol || '-'}
+                      </div>
+                    </div>
+                    {inst.symbol && (
+                      <button
+                        className="btn small"
+                        onClick={() => {
+                          setInstrumentDrawerOpen(false)
+                          navigate(
+                            `/stock/${inst.symbol}?event_id=${drawerEventId || ''}`,
+                          )
+                        }}
+                      >
+                        查看
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="drawer-foot">
+              <button
+                className="btn"
+                onClick={() => setInstrumentDrawerOpen(false)}
+              >
+                关闭
+              </button>
+            </div>
+          </aside>
+        </div>
+      )}
     </>
   )
 }

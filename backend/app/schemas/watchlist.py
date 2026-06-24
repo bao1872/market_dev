@@ -65,7 +65,19 @@ class WatchlistMonitorStatusItem(BaseModel):
     market: str = Field(..., description="市场（SH/SZ/BJ）")
     watchlist_created_at: datetime = Field(..., description="加入自选时间")
     monitor_status: str = Field(
-        ..., description="监控状态枚举：FAILED/STALE/SUCCEEDED/WAITING_FIRST_RUN/PRE_MARKET/LUNCH_BREAK/AFTER_MARKET/NON_TRADING_DAY"
+        ..., description="兼容字段：FAILED/STALE/SUCCEEDED/WAITING_FIRST_RUN/PRE_MARKET/LUNCH_BREAK/AFTER_MARKET/NON_TRADING_DAY"
+    )
+    market_session: str = Field(
+        ..., description="市场状态：TRADING/AFTER_MARKET/LUNCH_BREAK/PRE_MARKET/NON_TRADING_DAY"
+    )
+    calculation_status: str = Field(
+        ..., description="计算状态：SUCCEEDED/FAILED/STALE/WAITING_FIRST_RUN"
+    )
+    freshness_seconds: int | None = Field(
+        None, description="数据新鲜度（秒），基于 MonitorState.updated_at 计算"
+    )
+    last_bar_time: str | None = Field(
+        None, description="最新评估对应的 bar 时间"
     )
     evaluation_status: str | None = Field(
         None, description="评估状态（SUCCEEDED/FAILED/PENDING/DEAD）"

@@ -12,17 +12,20 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text
 
-from app.db import AsyncSessionLocal
+from app.db import AsyncSessionLocal, async_engine
 from app.models.base import Base
 
 
 @pytest_asyncio.fixture
 async def db_session():
-    """提供独立的事务性 DB session，测试后自动回滚。"""
+    """提供独立的事务性 DB session，测试后自动回滚并释放连接。"""
     async with AsyncSessionLocal() as session:
         nested = await session.begin_nested()
         yield session
         await nested.rollback()
+        await session.close()
+    # 释放 asyncpg 连接，避免跨 event loop 复用导致 "attached to a different loop"
+    await async_engine.dispose()
 
 
 @pytest_asyncio.fixture

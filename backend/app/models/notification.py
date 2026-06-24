@@ -21,7 +21,7 @@ from typing import Any
 
 from sqlalchemy import DateTime, ForeignKey, Index, Integer, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import text as sql_text
 
 from app.models.base import Base
@@ -64,6 +64,14 @@ class NotificationChannel(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    # [通知投递] - 关联投递记录
+    deliveries: Mapped[list["MessageDelivery"]] = relationship(
+        "MessageDelivery",
+        back_populates="channel",
+        lazy="selectin",
+        cascade="all, delete-orphan",
     )
 
     def __repr__(self) -> str:
@@ -167,6 +175,14 @@ class NotificationMessage(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
+    # [通知投递] - 关联投递记录，列表接口 LEFT JOIN 返回真实投递状态
+    deliveries: Mapped[list["MessageDelivery"]] = relationship(
+        "MessageDelivery",
+        back_populates="message",
+        lazy="selectin",
+        cascade="all, delete-orphan",
+    )
+
     def __repr__(self) -> str:
         return (
             f"<NotificationMessage(message_type={self.message_type!r}, "
@@ -220,6 +236,14 @@ class MessageDelivery(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    # [通知投递] - 关联消息与渠道，支持列表接口一次性加载
+    message: Mapped["NotificationMessage"] = relationship(
+        "NotificationMessage", back_populates="deliveries"
+    )
+    channel: Mapped["NotificationChannel"] = relationship(
+        "NotificationChannel", back_populates="deliveries"
     )
 
     def __repr__(self) -> str:

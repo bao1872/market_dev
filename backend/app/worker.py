@@ -25,11 +25,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
 import socket
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from app.db import AsyncSessionLocal
@@ -136,13 +137,25 @@ async def _create_job_run(
     db: AsyncSessionLocal,
     job_name: str,
     business_date: str,
+    lease_seconds: int = 120,
+    metadata: dict | None = None,
 ) -> SchedulerJobRun:
-    """创建 SchedulerJobRun 记录并返回。"""
+    """创建 SchedulerJobRun 记录并返回。
+
+    创建时填写 scheduled_at/started_at/heartbeat_at/lease_expires_at/worker_instance_id，
+    保证 Admin 页面能判断任务是否真实在跑以及租约是否过期。
+    """
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
     job_run = SchedulerJobRun(
         job_name=job_name,
         business_date=business_date,
         status="running",
-        started_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+        scheduled_at=now,
+        started_at=now,
+        heartbeat_at=now,
+        lease_expires_at=now + timedelta(seconds=lease_seconds),
+        worker_instance_id=_WORKER_INSTANCE_ID,
+        metadata_json=json.dumps(metadata) if metadata else None,
     )
     db.add(job_run)
     await db.commit()
@@ -155,12 +168,13 @@ async def _finish_job_run(
     job_run: SchedulerJobRun,
     status: str,
     error_message: str | None = None,
-    success_count: int = 0,
-    failure_count: int = 0,
+    success_count: int | None = None,
+    failure_count: int | None = None,
 ) -> None:
     """更新 SchedulerJobRun 记录为完成状态。
 
     通过 job_run.id 重新查询，兼容跨 session 的 detached 对象。
+    调用后 status 变为 succeeded/failed/interrupted，并记录 finished_at。
     """
     from sqlalchemy import select
 
@@ -170,13 +184,71 @@ async def _finish_job_run(
     if attached is None:
         logger.warning("SchedulerJobRun id=%s 不存在，跳过更新", job_run.id)
         return
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
     attached.status = status
-    attached.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
-    attached.heartbeat_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+    attached.finished_at = now
+    attached.heartbeat_at = now
+    attached.lease_expires_at = now  # 结束任务后租约立即过期
     attached.error_message = error_message
-    attached.succeeded_count = success_count
-    attached.failed_count = failure_count
+    if success_count is not None:
+        attached.succeeded_count = success_count
+    if failure_count is not None:
+        attached.failed_count = failure_count
     await db.commit()
+
+
+async def _update_job_heartbeat(
+    db: AsyncSessionLocal,
+    job_run: SchedulerJobRun,
+    lease_seconds: int = 120,
+) -> None:
+    """长任务执行期间更新心跳与租约。
+
+    每 30 秒调用一次，防止 Admin 页面误判为任务卡死或租约过期。
+    """
+    from sqlalchemy import select
+
+    stmt = select(SchedulerJobRun).where(SchedulerJobRun.id == job_run.id)
+    result = await db.execute(stmt)
+    attached = result.scalar_one_or_none()
+    if attached is None:
+        logger.warning("SchedulerJobRun id=%s 不存在，跳过半程心跳", job_run.id)
+        return
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    attached.heartbeat_at = now
+    attached.lease_expires_at = now + timedelta(seconds=lease_seconds)
+    await db.commit()
+
+
+async def recover_interrupted_job_runs(db: AsyncSessionLocal) -> int:
+    """Worker 启动时恢复过期租约的 running 任务。
+
+    将 status=running 且 lease_expires_at < now() 的记录更新为 interrupted，
+    避免崩溃重启后页面仍显示虚假的"运行中"。
+    """
+    from sqlalchemy import update
+
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    stmt = (
+        update(SchedulerJobRun)
+        .where(
+            SchedulerJobRun.status == "running",
+            SchedulerJobRun.lease_expires_at < now,
+        )
+        .values(
+            status="interrupted",
+            finished_at=now,
+            heartbeat_at=now,
+            lease_expires_at=now,
+            error_message="Worker 租约过期，启动恢复",
+        )
+    )
+    result = await db.execute(stmt)
+    await db.commit()
+    recovered = result.rowcount or 0
+    if recovered > 0:
+        logger.info("启动恢复: %d 个过期 running 任务标记为 interrupted", recovered)
+    return recovered
 
 
 async def run_outbox_relay() -> None:
@@ -333,6 +405,15 @@ async def run_bars_scheduler_worker() -> None:
     scheduler = AsyncIOScheduler()
     service = BarsSchedulerService()
 
+    # 启动时恢复过期 running 任务
+    try:
+        async with AsyncSessionLocal() as db:
+            recovered = await recover_interrupted_job_runs(db)
+            if recovered > 0:
+                logger.info("Bars Scheduler 启动恢复: %d 个过期任务", recovered)
+    except Exception as exc:
+        logger.exception("Bars Scheduler 启动恢复异常: %s", exc)
+
     async def scheduled_bars_refresh() -> None:
         """定时任务：每日 16:00 刷新全市场多周期行情。"""
         from datetime import date as date_cls
@@ -351,19 +432,45 @@ async def run_bars_scheduler_worker() -> None:
 
         logger.info("交易日 %s，开始行情刷新", trade_date)
         job_run = None
+        heartbeat_task_ref: asyncio.Task | None = None
         try:
             async with AsyncSessionLocal() as db:
                 job_run = await _create_job_run(db, "bars_scheduler", str(trade_date))
+
+            # 行情刷新耗时约 1.8 小时，后台每 30 秒更新心跳与租约
+            async def _bars_heartbeat_loop() -> None:
+                while True:
+                    await asyncio.sleep(30)
+                    async with AsyncSessionLocal() as db:
+                        await _update_job_heartbeat(db, job_run)
+
+            heartbeat_task_ref = asyncio.create_task(_bars_heartbeat_loop())
             result = await service.refresh_all_instruments(trade_date)
+            if heartbeat_task_ref is not None:
+                heartbeat_task_ref.cancel()
+                try:
+                    await heartbeat_task_ref
+                except asyncio.CancelledError:
+                    pass
             logger.info(
                 "定时任务完成: total=%d succeeded=%d failed=%d period_counts=%s",
                 result.total, result.succeeded, result.failed, result.period_counts,
             )
             if job_run is not None:
                 async with AsyncSessionLocal() as db:
-                    await _finish_job_run(db, job_run, "succeeded", success_count=1)
+                    await _finish_job_run(
+                        db, job_run, "succeeded",
+                        success_count=result.succeeded,
+                        failure_count=result.failed,
+                    )
         except Exception as exc:
             logger.exception("定时任务异常: %s", exc)
+            if heartbeat_task_ref is not None:
+                heartbeat_task_ref.cancel()
+                try:
+                    await heartbeat_task_ref
+                except asyncio.CancelledError:
+                    pass
             if job_run is not None:
                 async with AsyncSessionLocal() as db:
                     await _finish_job_run(db, job_run, "failed", error_message=str(exc)[:500])
@@ -414,6 +521,15 @@ async def run_strategy_scheduler_worker() -> None:
     scheduler = AsyncIOScheduler()
     service = StrategyBatchService()
 
+    # 启动时恢复过期 running 任务
+    try:
+        async with AsyncSessionLocal() as db:
+            recovered = await recover_interrupted_job_runs(db)
+            if recovered > 0:
+                logger.info("Strategy Scheduler 启动恢复: %d 个过期任务", recovered)
+    except Exception as exc:
+        logger.exception("Strategy Scheduler 启动恢复异常: %s", exc)
+
     async def scheduled_strategy_run() -> None:
         """定时任务：每日 18:30 为所有 selector 策略创建 queued run（兜底）。"""
         from datetime import date as date_cls
@@ -456,14 +572,19 @@ async def run_strategy_scheduler_worker() -> None:
                 strategy_keys = [row[0] for row in result.fetchall()]
 
                 if not strategy_keys:
-                    logger.warning("未找到 kind=selector 的策略，跳过")
+                    logger.warning("未找到 kind=selector 的策略")
+                    await _finish_job_run(
+                        db, job_run, "failed",
+                        error_message="未找到 kind=selector 的策略",
+                    )
                     return
 
                 logger.info("待计算的 selector 策略: %s", strategy_keys)
                 succeeded = 0
                 skipped = 0
                 failed = 0
-                for strategy_key in strategy_keys:
+                strategy_run_ids: list[str] = []
+                for idx, strategy_key in enumerate(strategy_keys):
                     # [StrategyScheduler] - 去重检查：今日是否已有该策略的 run
                     existing_run_stmt = (
                         select(StrategyRun.id)
@@ -500,6 +621,13 @@ async def run_strategy_scheduler_worker() -> None:
                             run_type="scheduled",
                         )
                         await db.commit()
+                        strategy_run_ids.append(str(run.id))
+                        # [StrategyScheduler] - 将创建的 strategy_run_id 记录到 job_run 元数据
+                        job_run.metadata_json = json.dumps({
+                            "strategy_run_id": str(run.id),
+                            "strategy_run_ids": strategy_run_ids,
+                        })
+                        await db.commit()
                         logger.info(
                             "策略 %s 创建 run 成功: run_id=%s",
                             strategy_key, run.id,
@@ -519,11 +647,18 @@ async def run_strategy_scheduler_worker() -> None:
                         await db.rollback()
                         failed += 1
 
+                    # 每 30 秒更新一次心跳与租约（兜底调度可能持续较长时间）
+                    if idx % 5 == 4:
+                        await _update_job_heartbeat(db, job_run)
+
                 logger.info(
                     "定时任务完成（兜底）: total=%d succeeded=%d skipped=%d failed=%d",
                     len(strategy_keys), succeeded, skipped, failed,
                 )
-                await _finish_job_run(db, job_run, "succeeded", success_count=1)
+                await _finish_job_run(
+                    db, job_run, "succeeded",
+                    success_count=succeeded, failure_count=failed,
+                )
         except Exception as exc:
             logger.exception("选股策略调度任务异常: %s", exc)
             if job_run is not None:
@@ -566,6 +701,15 @@ async def run_calendar_scheduler_worker() -> None:
     _hb_task = asyncio.create_task(_heartbeat_loop("calendar_scheduler"))
     scheduler = AsyncIOScheduler()
 
+    # 启动时恢复过期 running 任务
+    try:
+        async with AsyncSessionLocal() as db:
+            recovered = await recover_interrupted_job_runs(db)
+            if recovered > 0:
+                logger.info("Calendar Scheduler 启动恢复: %d 个过期任务", recovered)
+    except Exception as exc:
+        logger.exception("Calendar Scheduler 启动恢复异常: %s", exc)
+
     async def calendar_job() -> None:
         """每日凌晨刷新交易日历（从 pytdx 拉取当年日历并更新 DB）。"""
         from datetime import date as date_cls
@@ -604,13 +748,73 @@ async def run_calendar_scheduler_worker() -> None:
     logger.info("Calendar Scheduler Worker 已退出")
 
 
+def _get_monitor_session(
+    now_cst: datetime,
+) -> tuple[str, time, time] | None:
+    """根据当前上海时间返回盘中交易时段标签与起止时间。
+
+    Returns:
+        (label, start_time, end_time) 或 None（非交易时段）
+    """
+    from datetime import time as time_cls
+
+    current_time = now_cst.time()
+    morning_start = time_cls(9, 30)
+    morning_end = time_cls(11, 30)
+    afternoon_start = time_cls(13, 0)
+    afternoon_end = time_cls(15, 0)
+
+    if morning_start <= current_time < morning_end:
+        return ("morning", morning_start, morning_end)
+    if afternoon_start <= current_time < afternoon_end:
+        return ("afternoon", afternoon_start, afternoon_end)
+    return None
+
+
+async def _find_or_create_monitor_session_job_run(
+    db: AsyncSessionLocal,
+    now_cst: datetime,
+    business_date: str,
+    session_label: str,
+) -> SchedulerJobRun:
+    """查找或创建当前交易时段的 monitor_scheduler job_run。
+
+    同一业务日同一 session（morning/afternoon）只创建一条记录，session 内持续更新。
+    """
+    from sqlalchemy import select
+
+    stmt = (
+        select(SchedulerJobRun)
+        .where(
+            SchedulerJobRun.job_name == "monitor_scheduler",
+            SchedulerJobRun.business_date == business_date,
+            SchedulerJobRun.status == "running",
+            SchedulerJobRun.metadata_json.like(f'%"session_label": "{session_label}"%'),
+        )
+        .order_by(SchedulerJobRun.started_at.desc())
+        .limit(1)
+    )
+    result = await db.execute(stmt)
+    existing = result.scalar_one_or_none()
+    if existing is not None:
+        return existing
+
+    return await _create_job_run(
+        db,
+        "monitor_scheduler",
+        business_date,
+        lease_seconds=120,
+        metadata={"session_label": session_label},
+    )
+
+
 async def run_monitor_scheduler_worker() -> None:
     """监控调度 Worker：交易时段内每 30 秒执行一轮监控。
 
     使用 APScheduler AsyncIOScheduler + 交易时段判断：
-    - 交易日 9:30-11:30：每 30 秒执行一轮
+    - 交易日 9:30-11:30：每 30 秒执行一轮（同一 session 只创建一条 SchedulerJobRun）
     - 午休 11:30-13:00：暂停
-    - 交易日 13:00-15:00：每 30 秒执行一轮
+    - 交易日 13:00-15:00：每 30 秒执行一轮（同一 session 只创建一条 SchedulerJobRun）
     - 非交易日：不执行
 
     调用 MonitorBatchService.execute_monitor_cycle() 执行单轮监控。
@@ -620,6 +824,8 @@ async def run_monitor_scheduler_worker() -> None:
     - 使用 while 循环 + asyncio.sleep(30) 实现交易时段内循环
     - 交易日检查：复用 services/calendar_service.is_trading_day()
     - 午休暂停：11:30-13:00 期间 sleep 等待
+    - session 聚合：每个上午/下午只创建一条 SchedulerJobRun，session 内更新
+      last_cycle_at、succeeded_count、failed_count
     - 优雅退出：检查 _shutdown 标志
     """
     from datetime import time as time_cls
@@ -629,10 +835,7 @@ async def run_monitor_scheduler_worker() -> None:
     _hb_task = asyncio.create_task(_heartbeat_loop("monitor_scheduler"))
     service = MonitorBatchService()
     cycle_interval = 30  # 秒
-    morning_start = time_cls(9, 30)
-    morning_end = time_cls(11, 30)
-    afternoon_start = time_cls(13, 0)
-    afternoon_end = time_cls(15, 0)
+    session_finish_margin = timedelta(seconds=cycle_interval + 5)
 
     # [eval_recovery] 启动时恢复过期租约的 PENDING 评估
     async with AsyncSessionLocal() as db:
@@ -641,9 +844,18 @@ async def run_monitor_scheduler_worker() -> None:
         if recovered > 0:
             logger.info("Monitor Worker 启动恢复: %d 个过期评估", recovered)
 
+    # 启动时恢复过期的 monitor_scheduler running 任务
+    try:
+        async with AsyncSessionLocal() as db:
+            recovered = await recover_interrupted_job_runs(db)
+            if recovered > 0:
+                logger.info("Monitor Scheduler 启动恢复: %d 个过期任务", recovered)
+    except Exception as exc:
+        logger.exception("Monitor Scheduler 启动恢复异常: %s", exc)
+
     logger.info(
-        "Monitor Scheduler Worker 启动（交易时段 %s-%s, %s-%s, 间隔=%ds）",
-        morning_start, morning_end, afternoon_start, afternoon_end, cycle_interval,
+        "Monitor Scheduler Worker 启动（交易时段 9:30-11:30 / 13:00-15:00, 间隔=%ds）",
+        cycle_interval,
     )
 
     # 启动成功飞书通知
@@ -666,15 +878,11 @@ async def run_monitor_scheduler_worker() -> None:
                 await asyncio.sleep(300)  # 5分钟检查一次
                 continue
 
-            current_time = now.time()
-
-            # 判断是否在交易时段
-            in_morning = morning_start <= current_time < morning_end
-            in_afternoon = afternoon_start <= current_time < afternoon_end
-
-            if not (in_morning or in_afternoon):
+            session_info = _get_monitor_session(now)
+            if session_info is None:
                 # 非交易时段，等待
-                if current_time < morning_start:
+                current_time = now.time()
+                if current_time < time_cls(9, 30):
                     # 开盘前，等待到 9:30
                     wait_seconds = (
                         datetime(now.year, now.month, now.day, 9, 30, tzinfo=ZoneInfo("Asia/Shanghai")) - now
@@ -682,7 +890,7 @@ async def run_monitor_scheduler_worker() -> None:
                     if wait_seconds > 0:
                         logger.info("等待开盘，还需 %d 秒", int(wait_seconds))
                         await asyncio.sleep(min(wait_seconds, 60))
-                elif morning_end <= current_time < afternoon_start:
+                elif time_cls(11, 30) <= current_time < time_cls(13, 0):
                     # 午休，等待到 13:00
                     wait_seconds = (
                         datetime(now.year, now.month, now.day, 13, 0, tzinfo=ZoneInfo("Asia/Shanghai")) - now
@@ -690,28 +898,61 @@ async def run_monitor_scheduler_worker() -> None:
                     if wait_seconds > 0:
                         logger.info("午休中，等待 %d 秒", int(wait_seconds))
                         await asyncio.sleep(min(wait_seconds, 60))
-                elif current_time >= afternoon_end:
+                elif current_time >= time_cls(15, 0):
                     # 收盘后，等待到明天
                     await asyncio.sleep(300)
                 continue
 
+            session_label, _start_time, end_time = session_info
+            business_date = str(now.date())
+
             # 交易时段内，执行监控周期
             async with AsyncSessionLocal() as db:
-                job_run = await _create_job_run(db, "monitor_scheduler", str(now.date()))
-                result = await service.execute_monitor_cycle(db)
-                await db.commit()
-                await _finish_job_run(db, job_run, "succeeded", success_count=1)
-                if result.total_events_written > 0:
-                    logger.info(
-                        "监控周期完成: instruments=%d events=%d notifications=%d",
-                        result.total_instruments,
-                        result.total_events_written,
-                        result.total_notifications_created,
-                    )
+                job_run = await _find_or_create_monitor_session_job_run(
+                    db, now, business_date, session_label,
+                )
+                cycle_succeeded = False
+                try:
+                    result = await service.execute_monitor_cycle(db)
+                    await db.commit()
+                    cycle_succeeded = True
+                    if result.total_events_written > 0:
+                        logger.info(
+                            "监控周期完成: session=%s instruments=%d events=%d notifications=%d",
+                            session_label,
+                            result.total_instruments,
+                            result.total_events_written,
+                            result.total_notifications_created,
+                        )
+                    else:
+                        logger.debug(
+                            "监控周期完成: session=%s instruments=%d events=0",
+                            session_label,
+                            result.total_instruments,
+                        )
+                except Exception as exc:
+                    logger.exception("Monitor Scheduler 周期异常: %s", exc)
+                    await db.rollback()
+
+                # 更新 session 级统计与心跳
+                now = datetime.now(ZoneInfo("Asia/Shanghai"))
+                job_run.last_cycle_at = now
+                job_run.heartbeat_at = now
+                job_run.lease_expires_at = now + timedelta(seconds=120)
+                if cycle_succeeded:
+                    job_run.succeeded_count = (job_run.succeeded_count or 0) + 1
                 else:
-                    logger.debug(
-                        "监控周期完成: instruments=%d events=0",
-                        result.total_instruments,
+                    job_run.failed_count = (job_run.failed_count or 0) + 1
+                await db.commit()
+
+                # session 接近结束时标记完成
+                session_end_dt = datetime.combine(now.date(), end_time)
+                session_end_dt = session_end_dt.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+                if now + session_finish_margin >= session_end_dt:
+                    await _finish_job_run(
+                        db, job_run, "succeeded",
+                        success_count=job_run.succeeded_count,
+                        failure_count=job_run.failed_count,
                     )
 
         except Exception as exc:

@@ -911,6 +911,8 @@ class MonitorBatchService:
         instrument_info_cache: dict[uuid.UUID, tuple[str, str]],
         change_pct_map: dict[uuid.UUID, float] | None = None,
         instrument_extra_info: dict[uuid.UUID, dict] | None = None,
+        strategy_key: str = WATCHLIST_MONITOR,
+        strategy_name: str = "BB+节点监控",
     ) -> Any:
         """按旧版 monitoring.py 的 generate_monitoring_card() 格式构建合并通知 DTO。
 
@@ -1091,12 +1093,25 @@ class MonitorBatchService:
             "elements": [{"tag": "plain_text", "content": f"数据时间: {data_time_str}"}],
         })
 
+        # 取首只触发标的作为主要标的
+        primary_inst_id = next(iter(instrument_events.keys()))
+        primary_symbol, primary_name = instrument_info_cache.get(
+            primary_inst_id, (str(primary_inst_id)[:8], ""),
+        )
+        event_summary = (
+            f"触发 {triggered_count} 只 | "
+            f"上轨 {trigger_counts['bb_upper_touch']} | "
+            f"中轨 {trigger_counts['bb_mid_touch']} | "
+            f"下轨 {trigger_counts['bb_lower_touch']} | "
+            f"节点 {trigger_counts['node_cluster_touch']}"
+        )
+
         # 构建 DTO
         dto = NotificationMessageDTO(
             message_type="MONITOR_EVENT",
             template_key="monitor_merged_event",
             template_version="2.0.0",
-            title=f"BB+节点监控 {header_time}",
+            title=f"{strategy_name} {header_time}",
             summary=(
                 f"自选股 {total_instruments} 只 | 触发 {triggered_count} 只 | "
                 f"上轨 {trigger_counts['bb_upper_touch']} | "
@@ -1121,6 +1136,16 @@ class MonitorBatchService:
                 ],
             },
             data_time=data_time_cst.strftime("%Y-%m-%d %H:%M"),
+            # [消息中心] - 结构化字段
+            strategy_key=strategy_key,
+            strategy_name=strategy_name,
+            instrument_count=triggered_count,
+            primary_instrument={
+                "instrument_id": str(primary_inst_id),
+                "symbol": primary_symbol,
+                "name": primary_name,
+            },
+            event_summary=event_summary,
         )
         return dto
 
@@ -1131,6 +1156,7 @@ class MonitorBatchService:
         instrument_user_map: dict[uuid.UUID, list[uuid.UUID]],
         instrument_extra_info: dict[uuid.UUID, dict],
         result: MonitorCycleResult,
+        strategy_version: StrategyVersion | None = None,
     ) -> None:
         """按用户自选股归属合并通知，每个用户一张飞书卡片。
 
@@ -1143,9 +1169,19 @@ class MonitorBatchService:
             instrument_user_map: instrument_id → [user_ids] 映射
             instrument_extra_info: instrument_id → {priority, weighted_score, ...} 附加信息
             result: 累计结果
+            strategy_version: 当前 watchlist_monitor 策略版本，用于填充 strategy_key/name
         """
         from app.services.notification_service import create_message
         from app.services.outbox_relay import write_outbox
+
+        # 查询策略定义获取 strategy_key / display_name
+        strategy_key = WATCHLIST_MONITOR
+        strategy_name = "BB+节点监控"
+        if strategy_version is not None:
+            definition = await db.get(StrategyDefinition, strategy_version.strategy_definition_id)
+            if definition is not None:
+                strategy_key = definition.strategy_key
+                strategy_name = definition.display_name or strategy_name
 
         # 构建 instrument_id → events 映射
         instrument_events: dict[uuid.UUID, list[StrategyEvent]] = {}
@@ -1184,6 +1220,8 @@ class MonitorBatchService:
                     user_events, total_inst, instrument_info_cache,
                     change_pct_map=change_pct_map,
                     instrument_extra_info=instrument_extra_info,
+                    strategy_key=strategy_key,
+                    strategy_name=strategy_name,
                 )
             except Exception as exc:
                 logger.warning(

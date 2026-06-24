@@ -66,6 +66,57 @@ def _compute_market_status(now_cst: datetime, is_trading_day: bool) -> str:
         return "AFTER_MARKET"
 
 
+# 盘中交易时段内数据延迟判定阈值（秒）
+_IN_TRADING_STALE_SECONDS = 180
+
+
+def _compute_calculation_status(
+    now_cst: datetime,
+    market_session: str,
+    eval_row: object | None,
+    ms: MonitorState | None,
+) -> str:
+    """根据评估记录与市场状态计算 calculation_status。
+
+    优先级：FAILED > STALE > SUCCEEDED > WAITING_FIRST_RUN
+    - 盘后/非交易日/盘前/午休不判定 STALE，避免 30 分钟规则误报
+    - 盘中交易时段内使用 180 秒阈值判定数据延迟
+    """
+    if eval_row is None:
+        # 无评估记录：按 MonitorState 新鲜度判定（若存在）
+        # 盘中无 MonitorState → WAITING_FIRST_RUN；其他时段或数据新鲜 → SUCCEEDED
+        if ms is not None and ms.updated_at and market_session == "TRADING":
+            updated_at_cst = ms.updated_at.astimezone(ZoneInfo("Asia/Shanghai"))
+            age_seconds = (now_cst - updated_at_cst).total_seconds()
+            if age_seconds > _IN_TRADING_STALE_SECONDS:
+                return "STALE"
+            return "SUCCEEDED"
+        return "WAITING_FIRST_RUN" if market_session == "TRADING" else "SUCCEEDED"
+
+    evaluation_status = eval_row.evaluation_status
+
+    if evaluation_status in ("FAILED", "DEAD"):
+        return "FAILED"
+
+    if evaluation_status == "PENDING":
+        # PENDING 且租约过期 → STALE
+        if eval_row.next_retry_at and now_cst > eval_row.next_retry_at.astimezone(ZoneInfo("Asia/Shanghai")):
+            return "STALE"
+        return "SUCCEEDED"
+
+    if evaluation_status == "SUCCEEDED":
+        # 仅在盘中交易时段根据 MonitorState.updated_at 判定 STALE
+        if market_session == "TRADING" and ms is not None and ms.updated_at:
+            updated_at_cst = ms.updated_at.astimezone(ZoneInfo("Asia/Shanghai"))
+            age_seconds = (now_cst - updated_at_cst).total_seconds()
+            if age_seconds > _IN_TRADING_STALE_SECONDS:
+                return "STALE"
+        return "SUCCEEDED"
+
+    # 其他未知状态默认 SUCCEEDED
+    return "SUCCEEDED"
+
+
 def _flatten_node_metrics(metrics: dict | None) -> dict:
     """将 metrics 中的节点对象转为扁平字段，适合前端直接使用。
 
@@ -201,17 +252,16 @@ async def get_watchlist_monitor_status(
     """查询当前用户自选股+监控状态聚合数据。
 
     返回当前用户所有 active 自选股，附带最新 released watchlist_monitor 版本的
-    MonitorState 与 MonitorEvaluation。无评估记录时根据市场状态返回对应枚举。
+    MonitorState 与 MonitorEvaluation。
 
-    monitor_status 枚举（优先级从高到低）：
-    - FAILED: evaluation_status=FAILED/DEAD
-    - STALE: evaluation PENDING 且租约过期, 或 SUCCEEDED 但数据超过阈值
-    - SUCCEEDED: evaluation_status=SUCCEEDED 且数据新鲜
-    - WAITING_FIRST_RUN: 交易日交易时段, 无 MonitorEvaluation 记录
-    - PRE_MARKET: 交易日盘前(9:30前)
-    - LUNCH_BREAK: 交易日午间休市(11:30-13:00)
-    - AFTER_MARKET: 交易日盘后(15:00后)
-    - NON_TRADING_DAY: 非交易日
+    状态语义：
+    - market_session: 市场状态（TRADING/AFTER_MARKET/LUNCH_BREAK/PRE_MARKET/NON_TRADING_DAY）
+    - calculation_status: 计算状态（SUCCEEDED/FAILED/STALE/WAITING_FIRST_RUN）
+    - monitor_status: 兼容字段，由 calculation_status 推导，SUCCEEDED 时回落到 market_session
+    - freshness_seconds: 基于 MonitorState.updated_at 的数据新鲜度（秒）
+    - last_bar_time: 最新评估对应的 bar 时间
+
+    STALE 判定：仅在盘中交易时段使用 180 秒阈值；盘后/非交易日不因 30 分钟规则误判。
     """
     # 0. 计算市场状态
     from datetime import date as dt_date
@@ -327,7 +377,6 @@ async def get_watchlist_monitor_status(
             }
 
     # 5. 组装响应
-    STALE_THRESHOLD_MINUTES = 30
     response_items: list[WatchlistMonitorStatusItem] = []
     for watchlist_item, instrument in rows:
         ms = monitor_states_map.get(instrument.id)
@@ -345,35 +394,23 @@ async def get_watchlist_monitor_status(
             error_code = None
             source_bar_time = None
 
-        # 计算 monitor_status（优先级：FAILED > STALE > SUCCEEDED > WAITING_FIRST_RUN > 市场状态）
-        if eval_row is None:
-            # 无评估记录：交易日交易时段→WAITING_FIRST_RUN，否则→市场状态
-            if market_status == "TRADING":
-                monitor_status = "WAITING_FIRST_RUN"
-            else:
-                monitor_status = market_status
-        elif evaluation_status == "FAILED":
-            monitor_status = "FAILED"
-        elif evaluation_status == "DEAD":
-            monitor_status = "FAILED"
-        elif evaluation_status == "PENDING":
-            # PENDING 且租约过期 → STALE
-            if eval_row.next_retry_at and now_cst > eval_row.next_retry_at.astimezone(ZoneInfo("Asia/Shanghai")):
-                monitor_status = "STALE"
-            else:
-                monitor_status = "SUCCEEDED"
-        elif evaluation_status == "SUCCEEDED":
-            # 检查是否 STALE（MonitorState.updated_at 超过阈值）
-            if ms is not None and ms.updated_at:
-                age_minutes = (now_cst - ms.updated_at.astimezone(ZoneInfo("Asia/Shanghai"))).total_seconds() / 60
-                if age_minutes > STALE_THRESHOLD_MINUTES:
-                    monitor_status = "STALE"
-                else:
-                    monitor_status = "SUCCEEDED"
-            else:
-                monitor_status = "SUCCEEDED"
+        # [monitor_status] - 拆分为 market_session 与 calculation_status
+        market_session = market_status
+        calculation_status = _compute_calculation_status(
+            now_cst, market_session, eval_row, ms,
+        )
+        # 兼容字段：FAILED/STALE/WAITING_FIRST_RUN 保留计算语义，SUCCEEDED 时使用市场状态
+        if calculation_status in ("FAILED", "STALE", "WAITING_FIRST_RUN"):
+            monitor_status = calculation_status
         else:
-            monitor_status = "SUCCEEDED"
+            monitor_status = market_session
+
+        # 数据新鲜度
+        freshness_seconds = None
+        if ms is not None and ms.updated_at:
+            freshness_seconds = int(
+                (now_cst - ms.updated_at.astimezone(ZoneInfo("Asia/Shanghai"))).total_seconds()
+            )
 
         # metrics 仍从 MonitorState.payload 获取（价格/指标数据），节点对象扁平化
         metrics = _flatten_node_metrics(ms.payload) if ms is not None else None
@@ -389,6 +426,10 @@ async def get_watchlist_monitor_status(
                 market=instrument.market,
                 watchlist_created_at=watchlist_item.created_at,
                 monitor_status=monitor_status,
+                market_session=market_session,
+                calculation_status=calculation_status,
+                freshness_seconds=freshness_seconds,
+                last_bar_time=str(source_bar_time) if source_bar_time else None,
                 evaluation_status=evaluation_status,
                 retry_count=retry_count,
                 error_code=error_code,
