@@ -10,7 +10,7 @@
 数据库连接选择策略（按优先级）：
 1. 环境变量 DATABASE_URL 优先
 2. 本地 PostgreSQL 可用则使用本地连接
-3. 默认使用远程数据库
+3. 无可用连接时抛出 ValueError，禁止回退到硬编码远程数据库
 """
 
 from __future__ import annotations
@@ -47,10 +47,13 @@ def _resolve_database_url() -> str:
     优先级：
     1. 环境变量 DATABASE_URL（必须是 psycopg 驱动格式 postgresql+psycopg://）
     2. 本地 PostgreSQL 可用则使用本地连接
-    3. 默认使用远程数据库
+    3. 无可用连接时抛出 ValueError
 
     Returns:
         str: postgresql+psycopg:// 格式的连接串
+
+    Raises:
+        ValueError: 环境变量未设置且本地 PostgreSQL 不可用时抛出
     """
     # 1. 环境变量优先
     env_url = os.environ.get("DATABASE_URL")
@@ -59,10 +62,13 @@ def _resolve_database_url() -> str:
 
     # 2. 尝试本地连接
     if _is_local_postgres_available():
-        return "postgresql+psycopg://bz:es123456@127.0.0.1:5432/bz_stock"
+        return "postgresql+psycopg://bz:YOUR_PASSWORD@127.0.0.1:5432/bz_stock"
 
-    # 3. 默认使用远程
-    return "postgresql+psycopg://bz:es123456@43.136.118.82:5432/bz_stock"
+    # 3. 无可用连接时明确失败，禁止回退到硬编码远程数据库
+    raise ValueError(
+        "DATABASE_URL 环境变量未设置，且本地 PostgreSQL (127.0.0.1:5432) 不可用。"
+        "请在环境变量中配置 DATABASE_URL，例如 postgresql+psycopg://user:password@host:port/dbname"
+    )
 
 
 class Settings(BaseSettings):
@@ -82,7 +88,7 @@ class Settings(BaseSettings):
     # 数据库（postgresql+psycopg://，动态解析）
     database_url: str = Field(
         default_factory=_resolve_database_url,
-        description="PostgreSQL 连接串（环境变量优先 → 本地 → 远程）",
+        description="PostgreSQL 连接串（环境变量优先 → 本地；无可用连接时抛出错误）",
     )
 
     # Redis
@@ -129,9 +135,30 @@ def get_settings() -> Settings:
 
 
 if __name__ == "__main__":
-    # 自测入口：打印当前配置（无副作用）
-    s = get_settings()
-    print(f"app_env={s.app_env}")
-    print(f"database_url={s.database_url}")
-    print(f"redis_url={s.redis_url}")
-    print(f"jwt_algorithm={s.jwt_algorithm}")
+    # 自测入口：验证 database_url 解析逻辑（无副作用，不实际连接数据库）
+    original_url = os.environ.get("DATABASE_URL")
+    try:
+        # 场景 1：环境变量存在时直接返回
+        os.environ["DATABASE_URL"] = "postgresql+psycopg://user:pass@localhost:5432/db"
+        resolved = _resolve_database_url()
+        print(f"with_env database_url={resolved}")
+        assert resolved == os.environ["DATABASE_URL"]
+
+        # 场景 2：无环境变量且无本地 PG 时抛出 ValueError
+        os.environ.pop("DATABASE_URL", None)
+        # 强制本地探测失败，避免实际连接
+        original_checker = _is_local_postgres_available
+        _is_local_postgres_available = lambda **kwargs: False
+        try:
+            _resolve_database_url()
+            raise AssertionError("应抛出 ValueError")
+        except ValueError as e:
+            print(f"expected_error={e}")
+        finally:
+            _is_local_postgres_available = original_checker
+    finally:
+        if original_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = original_url
+    print("OK")

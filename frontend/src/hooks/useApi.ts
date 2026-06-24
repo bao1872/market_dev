@@ -432,6 +432,21 @@ export function useWatchlistMonitorStatus() {
   })
 }
 
+/** 查询定时任务运行记录（admin） */
+export function useSchedulerJobRuns(params?: {
+  job_name?: string
+  business_date?: string
+  status?: string
+  limit?: number
+  offset?: number
+}) {
+  return useQuery({
+    queryKey: ['admin', 'scheduler-job-runs', params],
+    queryFn: () => api.getSchedulerJobRuns(params),
+    staleTime: STALE_REALTIME,
+  })
+}
+
 /** 加入自选变更（自动失效 watchlist + monitor-status 缓存） */
 export function useAddToWatchlist() {
   const queryClient = useQueryClient()

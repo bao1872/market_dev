@@ -11,7 +11,6 @@ input:
   markets: [SSE, SZSE, BSE]
 capabilities:
   composable: false
-  supports_plan_conditions: false
   supports_table_schema: true
   supports_chart_layers: true
   supports_backtest: true

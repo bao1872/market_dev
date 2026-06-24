@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.constants.strategy_keys import DSA_SELECTOR
 from app.core.deps import get_db, require_roles
 from app.models.monitor_evaluation import MonitorEvaluation
+from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.strategy import StrategyDefinition
 from app.models.strategy_run import StrategyRun
 from app.models.user import User
@@ -36,6 +37,11 @@ from app.schemas.membership import (
     InviteCodeResponse,
     InviteRedemptionResponse,
     MemberListItem,
+)
+from app.schemas.scheduler_job_run import (
+    RecentSchedulerJobSummary,
+    SchedulerJobRunItem,
+    SchedulerJobRunListResponse,
 )
 from app.services.membership_service import (
     generate_invite_codes,
@@ -235,6 +241,52 @@ async def get_member_redemptions(
     ]
 
 
+@router.get("/scheduler-job-runs", response_model=SchedulerJobRunListResponse)
+async def get_scheduler_job_runs(
+    job_name: str | None = Query(default=None, description="任务名称筛选"),
+    business_date: str | None = Query(default=None, description="业务日期 YYYY-MM-DD"),
+    status: str | None = Query(default=None, description="状态：running/succeeded/failed"),
+    limit: int = Query(default=50, ge=1, le=200, description="分页大小"),
+    offset: int = Query(default=0, ge=0, description="分页偏移"),
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles("admin")),
+) -> SchedulerJobRunListResponse:
+    """查询定时任务运行记录（SchedulerJobRun）。
+
+    返回最近创建的定时任务执行记录，支持按任务名、业务日期、状态筛选。
+    """
+    # 构建筛选条件
+    filters = []
+    if job_name:
+        filters.append(SchedulerJobRun.job_name == job_name)
+    if business_date:
+        filters.append(SchedulerJobRun.business_date == business_date)
+    if status:
+        filters.append(SchedulerJobRun.status == status)
+
+    # 总数
+    count_stmt = select(func.count(SchedulerJobRun.id)).where(*filters)
+    total = await db.scalar(count_stmt) or 0
+
+    # 分页查询
+    stmt = (
+        select(SchedulerJobRun)
+        .where(*filters)
+        .order_by(SchedulerJobRun.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    result = await db.execute(stmt)
+    rows = list(result.scalars().all())
+
+    return SchedulerJobRunListResponse(
+        items=[SchedulerJobRunItem.model_validate(r) for r in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.get("/system-overview")
 async def get_system_overview(
     db: AsyncSession = Depends(get_db),
@@ -349,6 +401,36 @@ async def get_system_overview(
     worker_health = "healthy" if active_workers else ("degraded" if all_running_workers else "unknown")
     scheduler_health = "healthy" if scheduler_names else ("degraded" if all_running_workers else "unknown")
 
+    # 9. recent_scheduler_jobs: 最近 24 小时内各 job_name 最新一条记录
+    one_day_ago = datetime.now(UTC) - timedelta(days=1)
+    recent_jobs_subq = (
+        select(
+            SchedulerJobRun,
+            func.row_number().over(
+                partition_by=SchedulerJobRun.job_name,
+                order_by=SchedulerJobRun.created_at.desc(),
+            ).label("rn"),
+        )
+        .where(SchedulerJobRun.created_at >= one_day_ago)
+        .subquery()
+    )
+    recent_jobs_stmt = select(recent_jobs_subq).where(recent_jobs_subq.c.rn == 1)
+    recent_jobs_result = await db.execute(recent_jobs_stmt)
+    recent_scheduler_jobs = [
+        RecentSchedulerJobSummary(
+            job_name=row.job_name,
+            status=row.status,
+            business_date=row.business_date,
+            started_at=row.started_at,
+            finished_at=row.finished_at,
+            progress=row.progress,
+            succeeded_count=row.succeeded_count,
+            failed_count=row.failed_count,
+            error_message=row.error_message,
+        ).model_dump()
+        for row in recent_jobs_result
+    ]
+
     return {
         "active_users": active_users,
         "distinct_monitored_instruments": distinct_monitored_instruments,
@@ -360,6 +442,7 @@ async def get_system_overview(
         "latest_selector_run": latest_selector_run,
         "worker_health": worker_health,
         "scheduler_health": scheduler_health,
+        "recent_scheduler_jobs": recent_scheduler_jobs,
         "recent_anomalies": [],
     }
 

@@ -4,25 +4,25 @@
 // 用法：
 // 1. 路由 /admin/jobs，受保护路由（经 ProtectedLayout + AdminRoute 包裹）
 // 2. KPI 4 列：运行中数 / 失败数 / 今日全局事件数 / 今日用户消息数
-// 3. Job Run 表：使用 StrategyDataTable，列含运行ID/任务/开始/结束/处理/状态/耗时/详情
+// 3. 定时任务运行记录表：使用 StrategyDataTable，列含运行ID/任务名/业务日期/计划时间/开始/结束/处理/状态/耗时/详情
 // 4. split-even 布局：最近全局事件列表（含快照按钮）+ 失败投递列表（含重试按钮）
-// 5. 任务详情抽屉 jobDrawer：幂等键/输入/成功/错误分类/失败明细 + "仅重跑失败项"按钮
+// 5. 任务详情抽屉 jobDrawer：任务名/业务日期/计划时间/开始/结束/耗时/处理进度/错误信息/元数据
 // 6. 事件快照抽屉 eventDrawer：JSON pre 展示事件结构 + 分发统计
 // 7. 手动重跑弹窗 rerunModal：任务类型/交易日/运行时覆盖JSON
 //
 // 依赖 hooks：
-// - useStrategyRuns：获取 Job 运行列表（查询 dsa + node 策略并合并）
-// - useStrategyEvents：获取事件列表（查询 node 策略的 node_touch 事件）
+// - useSchedulerJobRuns：获取定时任务运行记录（SchedulerJobRun）
+// - useStrategyEvents：获取事件列表（查询 watchlist_monitor 策略事件）
 // - useStrategyEventDetail：获取事件详情（含 snapshot 快照，抽屉打开时按需加载）
 // - useMessages：获取用户消息总数（KPI 4，当前用户维度）
 // - useNotificationChannels：获取通知渠道（筛选失败状态作为失败投递列表）
-// - useTriggerStrategyRun：手动重跑 / 仅重跑失败项
+// - useTriggerStrategyRun：手动重跑 DSA 策略
 // - useToast：操作反馈
 
 import { useState, useMemo, useCallback } from 'react'
 import { useQueries } from '@tanstack/react-query'
 import {
-  useStrategyRuns,
+  useSchedulerJobRuns,
   useStrategyEvents,
   useStrategyEventDetail,
   useMessages,
@@ -31,29 +31,31 @@ import {
 } from '@/hooks/useApi'
 import { STRATEGY_KEYS } from '@/constants/strategyKeys'
 import * as api from '@/api/endpoints'
-import type { StrategyRun, Instrument } from '@/api/endpoints'
+import type { SchedulerJobRunItem, Instrument } from '@/api/endpoints'
 import { useToast } from '@/store/toast'
 import { StrategyDataTable } from '@/components/StrategyDataTable'
 import type { DataTableColumn } from '@/components/StrategyDataTable'
 
 // ===== 类型定义 =====
 
-/** Job Run 表行类型（带索引签名以满足 StrategyDataTable 的 Row extends Record<string, unknown>） */
+/** 定时任务运行记录表行类型（带索引签名以满足 StrategyDataTable 的 Row extends Record<string, unknown>） */
 interface JobRunRow {
   id: string
-  task: string
+  job_name: string
+  business_date: string | null
+  scheduled_at: string
   started_at: string
   finished_at: string
   processed: string
+  progress: number | null
   status: string
   status_pill_class: string
   status_text: string
   duration: string
-  idempotency_key: string
-  input_overrides: Record<string, unknown>
-  strategy_key: string
-  run_type: string
-  trade_date: string | null
+  error_code: string | null
+  error_message: string | null
+  metadata_json: string | null
+  raw: SchedulerJobRunItem
   [key: string]: unknown
 }
 
@@ -138,10 +140,10 @@ export default function AdminJobsPage() {
   const [rerunTradeDate, setRerunTradeDate] = useState('')
   const [rerunOverrides, setRerunOverrides] = useState('')
 
-  // ===== 查询：Job 运行列表（仅 dsa_selector，watchlist_monitor 不创建 StrategyRun 记录）=====
-  const dsaRunsQuery = useStrategyRuns(STRATEGY_KEYS.DSA_SELECTOR, { limit: 20 })
+  // ===== 查询：定时任务运行记录（SchedulerJobRun）=====
+  const schedulerJobRunsQuery = useSchedulerJobRuns({ limit: 20 })
 
-  // ===== 查询：事件列表（node 策略的 node_touch 事件）=====
+  // ===== 查询：事件列表（watchlist_monitor 事件）=====
   const eventsQuery = useStrategyEvents(STRATEGY_KEYS.WATCHLIST_MONITOR, { limit: 10 })
 
   // ===== 查询：用户消息总数（KPI 4，当前用户维度）=====
@@ -156,42 +158,34 @@ export default function AdminJobsPage() {
   // ===== 变更：触发策略运行（手动重跑 / 仅重跑失败项）=====
   const triggerRun = useTriggerStrategyRun()
 
-  // ===== 派生数据：运行列表（仅 dsa_selector）=====
-  const allRuns: StrategyRun[] = useMemo(() => {
-    const dsaRuns = dsaRunsQuery.data?.items ?? []
-    return [...dsaRuns]
-  }, [dsaRunsQuery.data])
-
-  // 运行 ID -> 策略 key 映射（用于"仅重跑失败项"时定位策略）
-  const runStrategyMap = useMemo(() => {
-    const m = new Map<string, string>()
-    ;(dsaRunsQuery.data?.items ?? []).forEach((r) => m.set(r.id, STRATEGY_KEYS.DSA_SELECTOR))
-    return m
-  }, [dsaRunsQuery.data])
-
   // ===== 派生数据：转换为 JobRunRow =====
   const jobRunRows: JobRunRow[] = useMemo(() => {
-    return allRuns.map((run) => {
-      const strategyKey = runStrategyMap.get(run.id) ?? STRATEGY_KEYS.DSA_SELECTOR
+    const runs = schedulerJobRunsQuery.data?.items ?? []
+    return runs.map((run) => {
+      const succeeded = run.succeeded_count ?? 0
+      const failed = run.failed_count ?? 0
+      const total = run.total_count
+      const processed = total != null ? `${succeeded + failed}/${total}` : '-'
       return {
         id: run.id,
-        task: run.run_type || strategyKey,
+        job_name: run.job_name,
+        business_date: run.business_date,
+        scheduled_at: formatTime(run.scheduled_at),
         started_at: formatTime(run.started_at),
         finished_at: formatTime(run.finished_at),
-        // "处理"列：API 未提供 success/total 计数，暂显示 '-'
-        processed: '-',
+        processed,
+        progress: run.progress,
         status: run.status,
         status_pill_class: statusToPillClass(run.status),
         status_text: statusToText(run.status),
         duration: formatDuration(run.started_at, run.finished_at),
-        idempotency_key: run.idempotency_key,
-        input_overrides: run.input_overrides,
-        strategy_key: strategyKey,
-        run_type: run.run_type,
-        trade_date: run.trade_date,
+        error_code: run.error_code,
+        error_message: run.error_message,
+        metadata_json: run.metadata_json,
+        raw: run,
       }
     })
-  }, [allRuns, runStrategyMap])
+  }, [schedulerJobRunsQuery.data])
 
   // ===== KPI 计算 =====
   const kpiRunning = useMemo(
@@ -238,8 +232,8 @@ export default function AdminJobsPage() {
 
   // ===== 选中运行详情（抽屉展示用）=====
   const selectedRun = useMemo(
-    () => allRuns.find((r) => r.id === selectedRunId),
-    [allRuns, selectedRunId],
+    () => jobRunRows.find((r) => r.id === selectedRunId)?.raw ?? null,
+    [jobRunRows, selectedRunId],
   )
 
   // ===== 事件详情（抽屉展示用）=====
@@ -281,25 +275,6 @@ export default function AdminJobsPage() {
     }
   }, [rerunTaskType, rerunTradeDate, triggerRun, toast])
 
-  /** 仅重跑失败项：基于选中运行创建失败项重跑任务 */
-  const handleRerunFailed = useCallback(async () => {
-    if (!selectedRunId) return
-    const strategyKey = runStrategyMap.get(selectedRunId) ?? STRATEGY_KEYS.DSA_SELECTOR
-    const run = allRuns.find((r) => r.id === selectedRunId)
-    try {
-      await triggerRun.mutateAsync({
-        strategyKey,
-        payload: {
-          trade_date: run?.trade_date ?? undefined,
-          run_type: 'retry_failed',
-        },
-      })
-      toast.show('失败股票重跑任务已创建', `运行 ${selectedRunId} 的失败项`)
-    } catch {
-      toast.show('重跑失败', '请稍后重试')
-    }
-  }, [selectedRunId, allRuns, runStrategyMap, triggerRun, toast])
-
   /** 重试失败投递（当前无专门重试 API，显示 toast 提示） */
   const handleRetryDelivery = useCallback(() => {
     toast.show('已加入立即重试队列', '失败投递将在下一轮重试')
@@ -324,12 +299,31 @@ export default function AdminJobsPage() {
         render: (row) => <span className="num">{row.id}</span>,
       },
       {
-        key: 'task',
-        title: '任务',
+        key: 'job_name',
+        title: '任务名',
         dataType: 'text',
         sortable: true,
         filterable: true,
-        render: (row) => row.task,
+        render: (row) => row.job_name,
+      },
+      {
+        key: 'business_date',
+        title: '业务日期',
+        dataType: 'text',
+        sortable: true,
+        filterable: true,
+        sortValue: (row) => row.business_date ?? '',
+        filterValue: (row) => row.business_date ?? '',
+        render: (row) => <span className="num">{row.business_date ?? '-'}</span>,
+      },
+      {
+        key: 'scheduled_at',
+        title: '计划时间',
+        dataType: 'datetime',
+        sortable: true,
+        filterable: true,
+        sortValue: (row) => row.scheduled_at,
+        render: (row) => <span className="num">{row.scheduled_at}</span>,
       },
       {
         key: 'started_at',
@@ -364,10 +358,9 @@ export default function AdminJobsPage() {
         sortable: true,
         filterable: true,
         enumOptions: [
-          { label: '成功', value: 'success' },
+          { label: '成功', value: 'succeeded' },
           { label: '失败', value: 'failed' },
           { label: '运行中', value: 'running' },
-          { label: '部分完成', value: 'partial' },
         ],
         sortValue: (row) => row.status_text,
         filterValue: (row) => row.status_text,
@@ -428,14 +421,14 @@ export default function AdminJobsPage() {
         <div className="card kpi-card">
           <div className="kpi-label">运行中任务</div>
           <div className="kpi-value">
-            {dsaRunsQuery.isLoading ? '-' : kpiRunning}
+            {schedulerJobRunsQuery.isLoading ? '-' : kpiRunning}
           </div>
         </div>
         {/* KPI 2：失败任务数 */}
         <div className="card kpi-card">
           <div className="kpi-label">失败任务</div>
           <div className="kpi-value neg">
-            {dsaRunsQuery.isLoading ? '-' : kpiFailed}
+            {schedulerJobRunsQuery.isLoading ? '-' : kpiFailed}
           </div>
           <div className="kpi-foot">最近 24 小时</div>
         </div>
@@ -451,31 +444,28 @@ export default function AdminJobsPage() {
         </div>
       </div>
 
-      {/* Job Run 表 */}
+      {/* 定时任务运行记录表 */}
       <section className="card">
         <div className="card-head">
           <div>
-            <div className="card-title">Job Run</div>
-            <div className="card-sub">所有运行均保存输入、版本、耗时、结果和错误分类</div>
+            <div className="card-title">定时任务运行记录</div>
+            <div className="card-sub">SchedulerJobRun 记录 bars / strategy / calendar / monitor 各调度任务</div>
           </div>
           <div className="chip-row">
             <span className="chip green">成功</span>
-            <span className="chip orange">部分完成</span>
+            <span className="chip orange">运行中</span>
             <span className="chip red">失败</span>
           </div>
-        </div>
-        <div className="notice" style={{ margin: '0 1rem', marginTop: '0.5rem' }}>
-          监控评估数据请查看自选股页面
         </div>
         <StrategyDataTable
           tableId="admin-jobs-runs"
           columns={jobRunColumns}
           rows={jobRunRows}
           rowKey={(row) => row.id}
-          loading={dsaRunsQuery.isLoading}
-          error={dsaRunsQuery.isError ? '运行列表加载失败' : null}
+          loading={schedulerJobRunsQuery.isLoading}
+          error={schedulerJobRunsQuery.isError ? '定时任务运行记录加载失败' : null}
           searchable={false}
-          emptyText="暂无任务运行记录"
+          emptyText="暂无定时任务运行记录"
         />
       </section>
 
@@ -575,7 +565,7 @@ export default function AdminJobsPage() {
               <div>
                 <b>任务详情 · {selectedRun?.id ?? '-'}</b>
                 <div className="card-sub">
-                  {selectedRun?.run_type ?? '-'} · {selectedRun?.strategy_version_id ?? '-'}
+                  {selectedRun?.job_name ?? '-'} · {selectedRun?.business_date ?? '-'}
                 </div>
               </div>
               <button className="icon-btn" onClick={() => setJobDrawerOpen(false)}>
@@ -585,26 +575,23 @@ export default function AdminJobsPage() {
             <div className="drawer-body">
               {selectedRun && (
                 <>
-                  <div className="notice warn">
+                  <div className={`notice ${selectedRun.status === 'failed' ? 'error' : selectedRun.status === 'running' ? 'warn' : ''}`}>
                     任务状态：{statusToText(selectedRun.status)}
+                    {selectedRun.error_code ? ` · ${selectedRun.error_code}` : ''}
                   </div>
                   <div className="card section-gap">
                     <div className="card-body">
                       <div className="toggle-row">
-                        <span>幂等键</span>
-                        <b className="num">{selectedRun.idempotency_key}</b>
+                        <span>任务名</span>
+                        <b className="num">{selectedRun.job_name}</b>
                       </div>
                       <div className="toggle-row">
-                        <span>运行类型</span>
-                        <b className="num">{selectedRun.run_type}</b>
+                        <span>业务日期</span>
+                        <b className="num">{selectedRun.business_date ?? '-'}</b>
                       </div>
                       <div className="toggle-row">
-                        <span>交易日</span>
-                        <b className="num">{selectedRun.trade_date ?? '-'}</b>
-                      </div>
-                      <div className="toggle-row">
-                        <span>错误分类</span>
-                        <b>{statusToText(selectedRun.status)}</b>
+                        <span>计划时间</span>
+                        <b className="num">{formatTime(selectedRun.scheduled_at)}</b>
                       </div>
                       <div className="toggle-row">
                         <span>开始时间</span>
@@ -620,18 +607,35 @@ export default function AdminJobsPage() {
                           {formatDuration(selectedRun.started_at, selectedRun.finished_at)}
                         </b>
                       </div>
+                      <div className="toggle-row">
+                        <span>处理进度</span>
+                        <b className="num">
+                          {selectedRun.succeeded_count ?? 0} 成功 / {selectedRun.failed_count ?? 0} 失败
+                          {selectedRun.total_count != null ? ` / ${selectedRun.total_count} 总计` : ''}
+                          {selectedRun.progress != null ? ` (${(selectedRun.progress * 100).toFixed(0)}%)` : ''}
+                        </b>
+                      </div>
                     </div>
                   </div>
-                  {/* 输入覆盖 JSON（仅当有覆盖时展示） */}
-                  {Object.keys(selectedRun.input_overrides).length > 0 && (
+                  {/* 错误信息（仅失败时展示） */}
+                  {selectedRun.error_message && (
                     <div className="card section-gap">
                       <div className="card-head">
-                        <div className="card-title">输入覆盖</div>
+                        <div className="card-title">错误信息</div>
                       </div>
                       <div className="card-body">
-                        <pre className="json-snapshot">
-                          {JSON.stringify(selectedRun.input_overrides, null, 2)}
-                        </pre>
+                        <pre className="json-snapshot">{selectedRun.error_message}</pre>
+                      </div>
+                    </div>
+                  )}
+                  {/* 元数据 JSON（仅当有内容时展示） */}
+                  {selectedRun.metadata_json && (
+                    <div className="card section-gap">
+                      <div className="card-head">
+                        <div className="card-title">元数据</div>
+                      </div>
+                      <div className="card-body">
+                        <pre className="json-snapshot">{selectedRun.metadata_json}</pre>
                       </div>
                     </div>
                   )}
@@ -641,13 +645,6 @@ export default function AdminJobsPage() {
             <div className="drawer-foot">
               <button className="btn" onClick={() => setJobDrawerOpen(false)}>
                 关闭
-              </button>
-              <button
-                className="btn primary"
-                onClick={handleRerunFailed}
-                disabled={triggerRun.isPending}
-              >
-                {triggerRun.isPending ? '创建中...' : '仅重跑失败项'}
               </button>
             </div>
           </aside>

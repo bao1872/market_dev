@@ -43,7 +43,7 @@ async def get_template(
 
     Args:
         db: 异步会话
-        key: 模板键（如 monitoring_plan_confirmed）
+        key: 模板键（如 monitor_event）
         version: 模板版本，None 则返回 active 状态的最新版本
         locale: 语言区域
 
@@ -186,31 +186,29 @@ if __name__ == "__main__":
 
     # 构造 mock 模板
     mock_template = MagicMock(spec=NotificationTemplate)
-    mock_template.template_key = "monitoring_plan_confirmed"
+    mock_template.template_key = "monitor_event"
     mock_template.version = "1.1.0"
     mock_template.body = {
-        "title": "监控组合确认｜{stock_name}",
-        "summary": "{confirmed}/{total} 个策略在 {window} 分钟内确认",
+        "title": "监控事件触发｜{stock_name}",
+        "summary": "事件 {event_type} 在 {stock_name} 触发",
         "facts": [{"key": "current_price", "label": "当前价格"}],
         "disclaimer": "仅展示规则触发与历史数据，不构成投资建议。",
     }
 
     context = {
         "stock_name": "贵州茅台",
-        "confirmed": 3,
-        "total": 3,
-        "window": 15,
+        "event_type": "bb_upper_touch",
     }
     rendered = render_template(mock_template, context)
     print(f"rendered title={rendered['title']}")
     print(f"rendered summary={rendered['summary']}")
     assert "贵州茅台" in rendered["title"]
-    assert "3/3" in rendered["summary"]
-    assert "15" in rendered["summary"]
+    assert "bb_upper_touch" in rendered["summary"]
+    assert "贵州茅台" in rendered["summary"]
 
     # 测试缺失占位符保留原样
     context_partial = {"stock_name": "测试"}
     rendered_partial = render_template(mock_template, context_partial)
     print(f"partial title={rendered_partial['title']}")
-    assert "{confirmed}" in rendered_partial["summary"]  # 缺失占位符保留
+    assert "{event_type}" in rendered_partial["summary"]  # 缺失占位符保留
     print("OK")

@@ -14,14 +14,14 @@ import {
   useStrategies,
   usePublishedRuns,
   useStrategyRunResults,
-  useStrategyMonitorStates,
+  useWatchlistMonitorStatus,
   useNotificationChannels,
   useInstruments,
   useAddToWatchlist,
   useEventsSummary,
 } from '@/hooks/useApi'
 import * as api from '@/api/endpoints'
-import type { Instrument, StrategyResult, MonitorState } from '@/api/endpoints'
+import type { Instrument, StrategyResult, WatchlistMonitorStatusItem } from '@/api/endpoints'
 import { StrategyDataTable } from '@/components/StrategyDataTable'
 import type { DataTableColumn } from '@/components/StrategyDataTable'
 import { StrategySwitcher } from '@/components/StrategySwitcher'
@@ -263,8 +263,8 @@ export default function IndexPage() {
   const selectionResults: StrategyResult[] = selectionResultsQuery.data?.items ?? []
 
   // --- 监控策略状态（底部表格 + 目录卡 meta）---
-  const monitorStatesQuery = useStrategyMonitorStates(STRATEGY_KEYS.WATCHLIST_MONITOR)
-  const monitorStates: MonitorState[] = monitorStatesQuery.data?.items ?? []
+  const monitorStatusQuery = useWatchlistMonitorStatus()
+  const monitorStatusItems: WatchlistMonitorStatusItem[] = monitorStatusQuery.data?.items ?? []
 
   // --- KPI 3：今日策略事件汇总（通过 /me/events/summary API）---
   const todayStr = new Date().toISOString().slice(0, 10)
@@ -282,9 +282,9 @@ export default function IndexPage() {
   const allInstrumentIds = useMemo(() => {
     const ids = new Set<string>()
     selectionResults.forEach((r) => ids.add(r.instrument_id))
-    monitorStates.forEach((s) => ids.add(s.instrument_id))
+    monitorStatusItems.forEach((s) => ids.add(s.instrument_id))
     return [...ids]
-  }, [selectionResults, monitorStates])
+  }, [selectionResults, monitorStatusItems])
 
   const instrumentQueries = useQueries({
     queries: allInstrumentIds.map((id) => ({
@@ -344,18 +344,17 @@ export default function IndexPage() {
     [instrumentMap, watchlistIds],
   )
 
-  /** 将 MonitorState 转换为 WatchlistMonitorRow */
+  /** 将 WatchlistMonitorStatusItem 转换为 WatchlistMonitorRow */
   const toMonitorRow = useCallback(
-    (s: MonitorState): WatchlistMonitorRow => {
-      const payload = s.payload
+    (s: WatchlistMonitorStatusItem): WatchlistMonitorRow => {
       const inst = instrumentMap.get(s.instrument_id)
-      const position =
-        toNum(pickPayload(payload, ['position', 'node_position', 'position_between_nodes'])) ?? 0
-      const pocPosition = toNum(pickPayload(payload, ['poc_position', 'poc_pos']))
+      const metrics = s.metrics ?? {}
+      const position = toNum(metrics.position_0_1) ?? 0
+      const pocPosition = toNum(metrics.poc_position ?? metrics.poc_pos)
 
-      // 从 payload 中展平 node 对象
-      const upperNodeVal = pickPayload(payload, ['upper_node', 'node_upper', 'resistance_node'])
-      const lowerNodeVal = pickPayload(payload, ['lower_node', 'node_lower', 'support_node'])
+      // 后端已返回扁平节点字段；保留对对象型字段的兼容展平
+      const upperNodeVal = metrics.upper_node_price ?? metrics.upper_node
+      const lowerNodeVal = metrics.lower_node_price ?? metrics.lower_node
 
       let upperNodePrice: number | null = null
       let upperNodeLow: number | null = null
@@ -383,19 +382,19 @@ export default function IndexPage() {
 
       return {
         instrument_id: s.instrument_id,
-        name: inst?.name ?? '-',
-        symbol: inst?.symbol ?? s.instrument_id.slice(0, 8),
-        price: fmtNum(pickPayload(payload, ['price', 'last_price', 'close'])),
+        name: inst?.name ?? s.name ?? '-',
+        symbol: inst?.symbol ?? s.symbol ?? s.instrument_id.slice(0, 8),
+        price: fmtNum(metrics.current_price ?? metrics.price ?? metrics.last_price ?? metrics.close),
         lower_node_price: lowerNodePrice,
-        lower_node_low: lowerNodeLow,
-        lower_node_high: lowerNodeHigh,
+        lower_node_low: lowerNodeLow ?? toNum(metrics.lower_node_low),
+        lower_node_high: lowerNodeHigh ?? toNum(metrics.lower_node_high),
         position,
         poc_position: pocPosition !== null ? pocPosition : undefined,
         upper_node_price: upperNodePrice,
-        upper_node_low: upperNodeLow,
-        upper_node_high: upperNodeHigh,
+        upper_node_low: upperNodeLow ?? toNum(metrics.upper_node_low),
+        upper_node_high: upperNodeHigh ?? toNum(metrics.upper_node_high),
         upper_tag: pocPosition !== null && pocPosition > 0.8 ? 'warn' : undefined,
-        latest_event: null, // MonitorState 不含 latest_event；切换到 monitor-status API 后填充
+        latest_event: s.latest_event ?? null,
       }
     },
     [instrumentMap],
@@ -409,10 +408,10 @@ export default function IndexPage() {
     [selectionResults, toSelectionRow],
   )
 
-  // 底部监控表格：按自选股过滤
+  // 底部监控表格：monitor-status 已返回当前用户 active 自选股
   const monitorRows: WatchlistMonitorRow[] = useMemo(
-    () => monitorStates.filter((s) => watchlistIds.has(s.instrument_id)).map(toMonitorRow),
-    [monitorStates, watchlistIds, toMonitorRow],
+    () => monitorStatusItems.map(toMonitorRow),
+    [monitorStatusItems, toMonitorRow],
   )
 
   // KPI 1：今日选股结果数（最新已发布 DSA 运行的标的总数）
@@ -453,17 +452,17 @@ export default function IndexPage() {
     // 自选监控
     const monitor = strategies.find((s) => s.strategy_key === STRATEGY_KEYS.WATCHLIST_MONITOR)
     if (monitor) {
-      const latestBarTime = monitorStates[0]?.bar_time
+      const latestUpdatedAt = monitorStatusItems[0]?.updated_at
       cards.push({
         type: 'MONITOR',
         status: '实时',
         title: monitor.display_name,
         desc: '分钟级动态节点、POC、区间位置与碰触事件。',
-        meta: `${monitorStates.length} 只 · ${fmtTime(latestBarTime)}`,
+        meta: `${monitorStatusItems.length} 只 · ${fmtTime(latestUpdatedAt)}`,
       })
     }
     return cards
-  }, [strategies, latestDsaRun, monitorStates])
+  }, [strategies, latestDsaRun, monitorStatusItems])
 
   // ===== 事件处理 =====
 
@@ -700,15 +699,15 @@ export default function IndexPage() {
   const monitorPanels: Record<string, StrategyPanel> = {
     watchlistMonitor: {
       id: 'watchlistMonitor',
-      state: getPanelState(monitorStatesQuery.isLoading, monitorStatesQuery.isError, monitorRows.length),
+      state: getPanelState(monitorStatusQuery.isLoading, monitorStatusQuery.isError, monitorRows.length),
       content: (
         <StrategyDataTable
           tableId="index-watchlist-monitor"
           columns={monitorColumns}
           rows={monitorRows}
           rowKey={(row) => row.instrument_id}
-          loading={monitorStatesQuery.isLoading}
-          error={monitorStatesQuery.isError ? '监控状态加载失败' : null}
+          loading={monitorStatusQuery.isLoading}
+          error={monitorStatusQuery.isError ? '监控状态加载失败' : null}
           searchable={false}
           emptyText="暂无监控计算结果"
         />

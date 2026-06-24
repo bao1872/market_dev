@@ -85,7 +85,7 @@ class NotificationTemplate(Base):
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
     )
     template_key: Mapped[str] = mapped_column(
-        Text(), nullable=False, comment="模板键（如 monitoring_plan_confirmed）"
+        Text(), nullable=False, comment="模板键（如 monitor_event, system_alert）"
     )
     version: Mapped[str] = mapped_column(
         Text(), nullable=False, comment="模板版本号"

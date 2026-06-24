@@ -58,3 +58,7 @@ Thumbs.db
 *.whl
 *.tar.gz
 *.7z
+
+# ===== 审计/临时文档 =====
+advice.md
+task_plan.md

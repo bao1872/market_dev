@@ -1282,7 +1282,63 @@ export interface SystemOverview {
   } | null
   worker_health: string
   scheduler_health: string
+  recent_scheduler_jobs: RecentSchedulerJobSummary[]
   recent_anomalies: unknown[]
+}
+
+/** 最近定时任务摘要（系统概览） */
+export interface RecentSchedulerJobSummary {
+  job_name: string
+  status: string
+  business_date: string | null
+  started_at: string | null
+  finished_at: string | null
+  progress: number | null
+  succeeded_count: number | null
+  failed_count: number | null
+  error_message: string | null
+}
+
+/** 定时任务运行记录项 */
+export interface SchedulerJobRunItem {
+  id: string
+  job_name: string
+  business_date: string | null
+  scheduled_at: string | null
+  started_at: string | null
+  finished_at: string | null
+  status: string
+  heartbeat_at: string | null
+  lease_expires_at: string | null
+  total_count: number | null
+  succeeded_count: number | null
+  failed_count: number | null
+  progress: number | null
+  error_code: string | null
+  error_message: string | null
+  metadata_json: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** 定时任务运行记录列表响应 */
+export interface SchedulerJobRunListResponse {
+  items: SchedulerJobRunItem[]
+  total: number
+  limit: number
+  offset: number
+}
+
+/** 查询定时任务运行记录（admin） */
+export async function getSchedulerJobRuns(params?: {
+  job_name?: string
+  business_date?: string
+  status?: string
+  limit?: number
+  offset?: number
+}): Promise<SchedulerJobRunListResponse> {
+  const { data } = await apiClient.get<SchedulerJobRunListResponse>('/admin/scheduler-job-runs', { params })
+  return data
 }
 
 /** 获取系统概览（admin） */
