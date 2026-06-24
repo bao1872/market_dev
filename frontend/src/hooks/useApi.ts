@@ -220,6 +220,19 @@ export function useStrategyRuns(
   })
 }
 
+/** 查询策略运行历史（admin，/admin 前缀路径） */
+export function useAdminStrategyRuns(
+  strategyKey: string | undefined,
+  params?: { status?: string; limit?: number; offset?: number },
+) {
+  return useQuery({
+    queryKey: ['admin', 'strategies', strategyKey, 'runs', params],
+    queryFn: () => api.getAdminStrategyRuns(strategyKey!, params),
+    enabled: !!strategyKey,
+    staleTime: STALE_REALTIME,
+  })
+}
+
 /** 查询已发布的运行批次（普通用户可访问） */
 export function usePublishedRuns(
   strategyKey: string | undefined,
@@ -251,6 +264,7 @@ export function useTriggerStrategyRun() {
       api.triggerStrategyRun(strategyKey, payload),
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['strategies', variables.strategyKey, 'runs'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'strategies', variables.strategyKey, 'runs'] })
     },
   })
 }
@@ -399,6 +413,13 @@ export function useVerifyNotificationChannel() {
 export function useTestNotificationChannel() {
   return useMutation({
     mutationFn: (channelId: string) => api.testNotificationChannel(channelId),
+  })
+}
+
+/** 最近事件实测变更 */
+export function useTestNotificationChannelLatestEvent() {
+  return useMutation({
+    mutationFn: (channelId: string) => api.testNotificationChannelLatestEvent(channelId),
   })
 }
 

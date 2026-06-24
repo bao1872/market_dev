@@ -18,9 +18,13 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import os
 import sys
 import uuid
 from datetime import UTC, date, datetime
+
+import pytest_asyncio
 
 # ---------------------------------------------------------------------------
 # 纯逻辑测试（不需要数据库）
@@ -125,6 +129,14 @@ def test_user_cannot_modify_algorithm_params():
 # ---------------------------------------------------------------------------
 # 数据库集成测试（需要 --db flag）
 # ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def test_data(db_session):
+    """创建并清理选股查询集成测试所需的基础数据。"""
+    td = await _create_test_data(db_session)
+    yield td
+    await _cleanup(db_session, td)
 
 
 async def _create_test_data(db) -> dict:
@@ -327,8 +339,6 @@ async def _create_test_data(db) -> dict:
         db.add(item)
     await db.flush()
 
-    await db.commit()
-
     return {
         "user_id": user.id,
         "definition_id": definition.id,
@@ -345,101 +355,93 @@ async def _create_test_data(db) -> dict:
     }
 
 
-async def test_unpublished_run_not_queryable(test_data: dict):
+async def test_unpublished_run_not_queryable(db_session, test_data: dict):
     """测试1: 未发布 run 不可查询（RunNotFoundError）。"""
     from app.services.selector_query_service import (
         RunNotFoundError,
         query_published_selector_results,
     )
 
-    from app.db import AsyncSessionLocal
-
-    async with AsyncSessionLocal() as db:
-        try:
-            await query_published_selector_results(
-                db,
-                run_id=test_data["unpublished_run_id"],
-            )
-            assert False, "应抛出 RunNotFoundError"
-        except RunNotFoundError as e:
-            assert "未发布" in str(e)
+    db = db_session
+    try:
+        await query_published_selector_results(
+            db,
+            run_id=test_data["unpublished_run_id"],
+        )
+        assert False, "应抛出 RunNotFoundError"
+    except RunNotFoundError as e:
+        assert "未发布" in str(e)
     print("  未发布 run 不可查询 ✓")
 
 
-async def test_published_run_no_filter(test_data: dict):
+async def test_published_run_no_filter(db_session, test_data: dict):
     """测试2: 已发布 run 无过滤（source_total == filtered_total）。"""
     from app.services.selector_query_service import query_published_selector_results
 
-    from app.db import AsyncSessionLocal
-
-    async with AsyncSessionLocal() as db:
-        page = await query_published_selector_results(
-            db,
-            run_id=test_data["published_run_id"],
-            page=1,
-            page_size=50,
-        )
-        assert page.source_total == 10, f"source_total={page.source_total}, 期望 10"
-        assert page.filtered_total == 10, f"filtered_total={page.filtered_total}, 期望 10"
-        assert page.source_total == page.filtered_total
-        assert len(page.items) == 10
+    db = db_session
+    page = await query_published_selector_results(
+        db,
+        run_id=test_data["published_run_id"],
+        page=1,
+        page_size=50,
+    )
+    assert page.source_total == 10, f"source_total={page.source_total}, 期望 10"
+    assert page.filtered_total == 10, f"filtered_total={page.filtered_total}, 期望 10"
+    assert page.source_total == page.filtered_total
+    assert len(page.items) == 10
     print("  已发布 run 无过滤: source_total == filtered_total ✓")
 
 
-async def test_valid_zero_match(test_data: dict):
+async def test_valid_zero_match(db_session, test_data: dict):
     """测试3: 合法条件零命中（200，filtered_total=0）。"""
     from app.repositories.strategy_result_repository import MetricFilter
     from app.services.selector_query_service import query_published_selector_results
 
-    from app.db import AsyncSessionLocal
-
-    async with AsyncSessionLocal() as db:
-        # dsa_dir_bars > 9999 不可能命中任何结果
-        filters = [MetricFilter(metric_key="dsa_dir_bars", operator="gt", value=9999)]
-        page = await query_published_selector_results(
-            db,
-            run_id=test_data["published_run_id"],
-            filters=filters,
-            page=1,
-            page_size=50,
-        )
-        assert page.source_total == 10, f"source_total={page.source_total}, 期望 10"
-        assert page.filtered_total == 0, f"filtered_total={page.filtered_total}, 期望 0"
-        assert len(page.items) == 0
+    db = db_session
+    # dsa_dir_bars > 9999 不可能命中任何结果
+    filters = [MetricFilter(metric_key="dsa_dir_bars", operator="gt", value=9999)]
+    page = await query_published_selector_results(
+        db,
+        run_id=test_data["published_run_id"],
+        filters=filters,
+        page=1,
+        page_size=50,
+    )
+    assert page.source_total == 10, f"source_total={page.source_total}, 期望 10"
+    assert page.filtered_total == 0, f"filtered_total={page.filtered_total}, 期望 0"
+    assert len(page.items) == 0
     print("  合法条件零命中: filtered_total=0 ✓")
 
 
-async def test_two_runs_same_version_same_date(test_data: dict):
+async def test_two_runs_same_version_same_date(db_session, test_data: dict):
     """测试4: 两个 run 同版本同日期（历史结果各自保留，不相互覆盖）。"""
     from app.services.selector_query_service import query_published_selector_results
 
-    from app.db import AsyncSessionLocal
+    db = db_session
+    # 第一个 run 有 10 条结果
+    page1 = await query_published_selector_results(
+        db,
+        run_id=test_data["published_run_id"],
+        page=1,
+        page_size=50,
+    )
+    assert page1.source_total == 10
 
-    async with AsyncSessionLocal() as db:
-        # 第一个 run 有 10 条结果
-        page1 = await query_published_selector_results(
-            db,
-            run_id=test_data["published_run_id"],
-            page=1,
-            page_size=50,
-        )
-        assert page1.source_total == 10
+    # 第二个 run 有 5 条结果
+    page2 = await query_published_selector_results(
+        db,
+        run_id=test_data["second_run_id"],
+        page=1,
+        page_size=50,
+    )
+    assert page2.source_total == 5
 
-        # 第二个 run 有 5 条结果
-        page2 = await query_published_selector_results(
-            db,
-            run_id=test_data["second_run_id"],
-            page=1,
-            page_size=50,
-        )
-        assert page2.source_total == 5
-
-        # 两个 run 的结果互不影响
-        assert page1.source_total != page2.source_total
+    # 两个 run 的结果互不影响
+    assert page1.source_total != page2.source_total
     print("  两个 run 同版本同日期: 结果各自保留 ✓")
 
 
-async def test_unknown_metric_key(test_data: dict):
+async def test_unknown_metric_key(db_session, test_data: dict):
     """测试5: 未知 metric_key（ValueError / 422）。
 
     selector_query_service 本身不做 metric_key 白名单校验，
@@ -448,185 +450,174 @@ async def test_unknown_metric_key(test_data: dict):
     """
     from app.repositories.strategy_result_repository import MetricFilter
 
-    from app.db import AsyncSessionLocal
+    db = db_session
+    from app.repositories.strategy_result_repository import query_results
 
-    async with AsyncSessionLocal() as db:
-        from app.repositories.strategy_result_repository import query_results
-
-        # 未知操作符应抛出 ValueError
-        bad_filter = MetricFilter(metric_key="dsa_dir_bars", operator="invalid", value=1)
-        try:
-            await query_results(
-                db,
-                run_id=test_data["published_run_id"],
-                filters=[bad_filter],
-            )
-            assert False, "应抛出 ValueError"
-        except (ValueError, RuntimeError) as e:
-            # ValueError 被 query_results 包装为 RuntimeError
-            assert "未知筛选操作符" in str(e)
+    # 未知操作符应抛出 ValueError
+    bad_filter = MetricFilter(metric_key="dsa_dir_bars", operator="invalid", value=1)
+    try:
+        await query_results(
+            db,
+            run_id=test_data["published_run_id"],
+            filters=[bad_filter],
+        )
+        assert False, "应抛出 ValueError"
+    except (ValueError, RuntimeError) as e:
+        # ValueError 被 query_results 包装为 RuntimeError
+        assert "未知筛选操作符" in str(e)
     print("  未知 metric_key/操作符: fail-closed ✓")
 
 
-async def test_server_side_pagination(test_data: dict):
+async def test_server_side_pagination(db_session, test_data: dict):
     """测试6: 服务端分页（所有页合计等于 filtered_total，无重复无遗漏）。"""
     from app.services.selector_query_service import query_published_selector_results
 
-    from app.db import AsyncSessionLocal
-
-    async with AsyncSessionLocal() as db:
-        # 每页 3 条，10 条结果需要 4 页
-        all_instrument_ids = []
-        page_size = 3
-        for page_num in range(1, 5):
-            page = await query_published_selector_results(
-                db,
-                run_id=test_data["published_run_id"],
-                page=page_num,
-                page_size=page_size,
-            )
-            assert page.source_total == 10
-            assert page.filtered_total == 10
-            for item in page.items:
-                all_instrument_ids.append(item.instrument_id)
-
-        # 验证无重复
-        assert len(all_instrument_ids) == 10, f"总条数={len(all_instrument_ids)}, 期望 10"
-        assert len(set(all_instrument_ids)) == 10, "存在重复的 instrument_id"
-
-        # 验证覆盖所有 instrument
-        expected_ids = set(test_data["instrument_ids"])
-        actual_ids = set(all_instrument_ids)
-        assert actual_ids == expected_ids, f"遗漏: {expected_ids - actual_ids}"
-    print("  服务端分页: 无重复无遗漏 ✓")
-
-
-async def test_universe_watchlist(test_data: dict):
-    """测试7: universe=watchlist（只返回当前用户自选股）。"""
-    from app.services.selector_query_service import query_published_selector_results
-
-    from app.db import AsyncSessionLocal
-
-    async with AsyncSessionLocal() as db:
+    db = db_session
+    # 每页 3 条，10 条结果需要 4 页
+    all_instrument_ids = []
+    page_size = 3
+    for page_num in range(1, 5):
         page = await query_published_selector_results(
             db,
             run_id=test_data["published_run_id"],
-            user_id=test_data["user_id"],
-            universe="watchlist",
-            page=1,
-            page_size=50,
+            page=page_num,
+            page_size=page_size,
         )
-        # source_total 是 run 的总结果数（10），不受 universe 影响
-        assert page.source_total == 10, f"source_total={page.source_total}, 期望 10"
+        assert page.source_total == 10
+        assert page.filtered_total == 10
+        for item in page.items:
+            all_instrument_ids.append(item.instrument_id)
 
-        # 返回的 items 应只包含用户自选股（前 3 个）
-        returned_ids = {item.instrument_id for item in page.items}
-        watchlist_ids = set(test_data["watchlist_instrument_ids"])
-        # 注意：当前实现是先查 SQL 再在 Python 中过滤
-        # 所以 filtered_total 可能包含非自选股，但 items 应只含自选股
-        assert returned_ids.issubset(watchlist_ids), (
-            f"返回了非自选股: {returned_ids - watchlist_ids}"
-        )
+    # 验证无重复
+    assert len(all_instrument_ids) == 10, f"总条数={len(all_instrument_ids)}, 期望 10"
+    assert len(set(all_instrument_ids)) == 10, "存在重复的 instrument_id"
+
+    # 验证覆盖所有 instrument
+    expected_ids = set(test_data["instrument_ids"])
+    actual_ids = set(all_instrument_ids)
+    assert actual_ids == expected_ids, f"遗漏: {expected_ids - actual_ids}"
+    print("  服务端分页: 无重复无遗漏 ✓")
+
+
+async def test_universe_watchlist(db_session, test_data: dict):
+    """测试7: universe=watchlist（只返回当前用户自选股）。"""
+    from app.services.selector_query_service import query_published_selector_results
+
+    db = db_session
+    page = await query_published_selector_results(
+        db,
+        run_id=test_data["published_run_id"],
+        user_id=test_data["user_id"],
+        universe="watchlist",
+        page=1,
+        page_size=50,
+    )
+    # source_total 是 run 的总结果数（10），不受 universe 影响
+    assert page.source_total == 10, f"source_total={page.source_total}, 期望 10"
+
+    # 返回的 items 应只包含用户自选股（前 3 个）
+    returned_ids = {item.instrument_id for item in page.items}
+    watchlist_ids = set(test_data["watchlist_instrument_ids"])
+    # 注意：当前实现是先查 SQL 再在 Python 中过滤
+    # 所以 filtered_total 可能包含非自选股，但 items 应只含自选股
+    assert returned_ids.issubset(watchlist_ids), (
+        f"返回了非自选股: {returned_ids - watchlist_ids}"
+    )
     print("  universe=watchlist: 只返回用户自选股 ✓")
 
 
-async def test_monitor_run_not_queryable(test_data: dict):
+async def test_monitor_run_not_queryable(db_session, test_data: dict):
     """测试8: monitor 类型的 run 不可通过 selector 查询。"""
     from app.services.selector_query_service import (
         NotSelectorRunError,
         query_published_selector_results,
     )
 
-    from app.db import AsyncSessionLocal
-
-    async with AsyncSessionLocal() as db:
-        try:
-            await query_published_selector_results(
-                db,
-                run_id=test_data["monitor_run_id"],
-            )
-            assert False, "应抛出 NotSelectorRunError"
-        except NotSelectorRunError as e:
-            assert "不是 selector" in str(e)
+    db = db_session
+    try:
+        await query_published_selector_results(
+            db,
+            run_id=test_data["monitor_run_id"],
+        )
+        assert False, "应抛出 NotSelectorRunError"
+    except NotSelectorRunError as e:
+        assert "不是 selector" in str(e)
     print("  monitor 类型 run 不可查询 ✓")
 
 
-async def _run_db_tests(test_data: dict):
+async def _run_db_tests(db_session, test_data: dict):
     """运行所有数据库集成测试。"""
-    await test_unpublished_run_not_queryable(test_data)
-    await test_published_run_no_filter(test_data)
-    await test_valid_zero_match(test_data)
-    await test_two_runs_same_version_same_date(test_data)
-    await test_unknown_metric_key(test_data)
-    await test_server_side_pagination(test_data)
-    await test_universe_watchlist(test_data)
-    await test_monitor_run_not_queryable(test_data)
+    await test_unpublished_run_not_queryable(db_session, test_data)
+    await test_published_run_no_filter(db_session, test_data)
+    await test_valid_zero_match(db_session, test_data)
+    await test_two_runs_same_version_same_date(db_session, test_data)
+    await test_unknown_metric_key(db_session, test_data)
+    await test_server_side_pagination(db_session, test_data)
+    await test_universe_watchlist(db_session, test_data)
+    await test_monitor_run_not_queryable(db_session, test_data)
 
 
-async def _cleanup(test_data: dict):
+async def _cleanup(db_session, test_data: dict):
     """清理测试数据。"""
-    from sqlalchemy import delete
+    from sqlalchemy import delete, select
 
     from app.models.strategy import StrategyDefinition, StrategyVersion
     from app.models.strategy_run import StrategyResult, StrategyResultMetric, StrategyRun
     from app.models.user import User
     from app.models.watchlist import UserWatchlistItem
 
-    from app.db import AsyncSessionLocal
+    db = db_session
+    # 按依赖顺序删除
+    run_ids = [
+        test_data["published_run_id"],
+        test_data["unpublished_run_id"],
+        test_data["second_run_id"],
+        test_data["monitor_run_id"],
+    ]
 
-    async with AsyncSessionLocal() as db:
-        # 按依赖顺序删除
-        run_ids = [
-            test_data["published_run_id"],
-            test_data["unpublished_run_id"],
-            test_data["second_run_id"],
-            test_data["monitor_run_id"],
-        ]
-
-        # 删除指标
-        result_ids_stmt = select(StrategyResult.id).where(
-            StrategyResult.run_id.in_(run_ids)
-        )
-        # 直接按 run_id 删除结果和指标
-        await db.execute(
-            delete(StrategyResultMetric).where(
-                StrategyResultMetric.result_id.in_(
-                    select(StrategyResult.id).where(
-                        StrategyResult.run_id.in_(run_ids)
-                    )
+    # 删除指标
+    result_ids_stmt = select(StrategyResult.id).where(
+        StrategyResult.run_id.in_(run_ids)
+    )
+    # 直接按 run_id 删除结果和指标
+    await db.execute(
+        delete(StrategyResultMetric).where(
+            StrategyResultMetric.result_id.in_(
+                select(StrategyResult.id).where(
+                    StrategyResult.run_id.in_(run_ids)
                 )
             )
         )
-        await db.execute(
-            delete(StrategyResult).where(StrategyResult.run_id.in_(run_ids))
-        )
-        await db.execute(
-            delete(StrategyRun).where(StrategyRun.id.in_(run_ids))
-        )
+    )
+    await db.execute(
+        delete(StrategyResult).where(StrategyResult.run_id.in_(run_ids))
+    )
+    await db.execute(
+        delete(StrategyRun).where(StrategyRun.id.in_(run_ids))
+    )
 
-        # 删除版本和定义
-        version_ids = [test_data["version_id"], test_data["monitor_version_id"]]
-        await db.execute(
-            delete(StrategyVersion).where(StrategyVersion.id.in_(version_ids))
-        )
-        def_ids = [test_data["definition_id"], test_data["monitor_def_id"]]
-        await db.execute(
-            delete(StrategyDefinition).where(StrategyDefinition.id.in_(def_ids))
-        )
+    # 删除版本和定义
+    version_ids = [test_data["version_id"], test_data["monitor_version_id"]]
+    await db.execute(
+        delete(StrategyVersion).where(StrategyVersion.id.in_(version_ids))
+    )
+    def_ids = [test_data["definition_id"], test_data["monitor_def_id"]]
+    await db.execute(
+        delete(StrategyDefinition).where(StrategyDefinition.id.in_(def_ids))
+    )
 
-        # 删除自选股
-        await db.execute(
-            delete(UserWatchlistItem).where(
-                UserWatchlistItem.user_id == test_data["user_id"]
-            )
+    # 删除自选股
+    await db.execute(
+        delete(UserWatchlistItem).where(
+            UserWatchlistItem.user_id == test_data["user_id"]
         )
+    )
 
-        # 删除用户
-        await db.execute(
-            delete(User).where(User.id == test_data["user_id"])
-        )
+    # 删除用户
+    await db.execute(
+        delete(User).where(User.id == test_data["user_id"])
+    )
 
-        await db.commit()
     print("  测试数据已清理 ✓")
 
 
@@ -648,25 +639,36 @@ if __name__ == "__main__":
     if "--db" in sys.argv:
         print("=== 数据库集成测试 ===")
         from sqlalchemy import select
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-        from app.db import AsyncSessionLocal
+        test_database_url = os.environ.get(
+            "TEST_DATABASE_URL",
+            "postgresql://bz:es123456@127.0.0.1:5432/bz_stock_test",
+        )
+        async_url = test_database_url.replace(
+            "postgresql+psycopg://", "postgresql+asyncpg://"
+        ).replace(
+            "postgresql://", "postgresql+asyncpg://"
+        )
+        test_engine = create_async_engine(async_url, echo=False)
+        TestSessionLocal = async_sessionmaker(
+            bind=test_engine, class_=AsyncSession, expire_on_commit=False,
+        )
 
         test_data = None
 
         async def setup_run_and_cleanup():
-            async with AsyncSessionLocal() as db:
+            async with TestSessionLocal() as db:
                 td = await _create_test_data(db)
-            print(f"  测试数据已创建: published_run={td['published_run_id']}")
-            await _run_db_tests(td)
-            await _cleanup(td)
+                print(f"  测试数据已创建: published_run={td['published_run_id']}")
+                await _run_db_tests(db, td)
+                await _cleanup(db, td)
 
         try:
             asyncio.run(setup_run_and_cleanup())
             print("数据库集成测试全部通过 ✓\n")
-        except Exception as e:
-            print(f"数据库集成测试失败: {e}")
-            import traceback
-            traceback.print_exc()
+        finally:
+            asyncio.run(test_engine.dispose())
     else:
         print("提示: 添加 --db 参数运行数据库集成测试")
         print("  python tests/test_selector_query_integration.py --db")

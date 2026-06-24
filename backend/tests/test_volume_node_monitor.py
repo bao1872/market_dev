@@ -3,12 +3,13 @@
 测试内容：
 1. 性能预算验证：单只标的 calculate_state + detect_events 总耗时 < 500ms（MONITOR_BUDGET_MS）
 2. 状态输出验证：MonitorState.state 含 manifest.outputs 声明的 6 个字段
-3. 事件检测验证：node_cluster_touch 事件 + touch_episode 去重
-4. dedupe 验证：同一 episode 不重复触发，不同 episode 触发新事件
+3. 事件检测验证：1m bar 收盘价 crossover 穿越 peak_price 触发 node_cluster_touch 事件
+4. dedupe 验证：dedupe_key / logical_entity 随 boundary 与 bar_time 变化，用于外层 touch_episode 去重
 
 测试数据：
-- 使用合成的 1m bars（不依赖真实数据库/网络）
-- 生成 360+ 根 1m bars 满足 VP lookback 要求
+- 使用合成的日线 bars（≥10 根）作为 Volume Profile 主数据
+- 使用合成的 1m bars（360+ 根）满足 VP lookback 要求，并用于 crossover 检测
+- 1m bars 价格锚定最近日线收盘价，保持数据语义一致
 - 固定随机种子确保测试可复现
 
 参考文档：
@@ -85,6 +86,52 @@ def _generate_minute_bars(
     return df
 
 
+def _generate_daily_bars(
+    n_bars: int = 20,
+    end_date: str = "2026-06-18",
+    start_price: float = 10.0,
+    seed: int = 43,
+) -> pd.DataFrame:
+    """生成合成的日线 OHLCV bars（满足 VolumeNodeMonitor 日线数据要求）。
+
+    VolumeNodeMonitor 以日线 bars 作为主数据计算 Volume Profile，
+    需要至少 10 根日线。本 helper 生成 20 根可复现的日线数据，
+    覆盖 monitor 的 lookback=360 所需的主数据周期。
+
+    Args:
+        n_bars: 生成的日线 bar 数（默认 20）
+        end_date: 最后一个交易日的日期字符串
+        start_price: 起始价格
+        seed: 随机种子（确保可复现）
+
+    Returns:
+        DataFrame: index=DatetimeIndex（交易日）, columns=open/high/low/close/volume/amount
+    """
+    np.random.seed(seed)
+    # 使用工作日频率，确保交易日语义
+    dates = pd.date_range(end=end_date, periods=n_bars, freq="B")
+
+    # 日线波动（±2%），模拟正常股价波动
+    daily_returns = np.random.uniform(-0.02, 0.02, size=n_bars)
+    close = start_price * np.cumprod(1 + daily_returns)
+    open_ = close * (1 + np.random.uniform(-0.01, 0.01, size=n_bars))
+    high = np.maximum(open_, close) * (1 + np.random.uniform(0.005, 0.02, size=n_bars))
+    low = np.minimum(open_, close) * (1 - np.random.uniform(0.005, 0.02, size=n_bars))
+    volume = np.random.uniform(1_000_000, 5_000_000, size=n_bars)
+    amount = volume * close
+
+    df = pd.DataFrame({
+        "open": open_,
+        "high": high,
+        "low": low,
+        "close": close,
+        "volume": volume,
+        "amount": amount,
+    }, index=dates)
+    df.index.name = "datetime"
+    return df
+
+
 def _make_mock_version(strategy_id: str = "volume_node_monitor") -> MagicMock:
     """创建 mock StrategyVersion 对象（含 manifest 参数）。"""
     version = MagicMock()
@@ -119,9 +166,16 @@ def _make_mock_version(strategy_id: str = "volume_node_monitor") -> MagicMock:
 
 
 @pytest.fixture
-def minute_bars() -> pd.DataFrame:
-    """400 根 1m bars（满足 VP lookback=360）。"""
-    return _generate_minute_bars(n_bars=400)
+def minute_bars(daily_bars: pd.DataFrame) -> pd.DataFrame:
+    """400 根 1m bars（满足 VP lookback=360），价格锚定最近日线收盘价。"""
+    start_price = float(daily_bars["close"].iloc[-1])
+    return _generate_minute_bars(n_bars=400, start_price=start_price)
+
+
+@pytest.fixture
+def daily_bars() -> pd.DataFrame:
+    """20 根日线 bars（满足 VolumeNodeMonitor 日线数据要求）。"""
+    return _generate_daily_bars(n_bars=20)
 
 
 @pytest.fixture
@@ -133,16 +187,95 @@ async def monitor() -> VolumeNodeMonitor:
     return m
 
 
-def _make_context(bars: pd.DataFrame, bar_time: datetime | None = None) -> MarketDataContext:
-    """构建 MarketDataContext（1m bars）。"""
+def _make_context(
+    bars_daily: pd.DataFrame,
+    bars_minute: pd.DataFrame,
+    bar_time: datetime | None = None,
+) -> MarketDataContext:
+    """构建 MarketDataContext（日线 + 1m bars）。"""
     return MarketDataContext(
         instrument_id=uuid.uuid4(),
         symbol="600519",
-        bars_daily=pd.DataFrame(),  # monitor 不使用日线
-        bars_minute=bars,
-        trade_date=bars.index[0].date() if len(bars) > 0 else None,
-        bar_time=bar_time or (bars.index[-1].to_pydatetime() if len(bars) > 0 else datetime.now(UTC)),
+        bars_daily=bars_daily,
+        bars_minute=bars_minute,
+        trade_date=bars_minute.index[0].date() if len(bars_minute) > 0 else None,
+        bar_time=bar_time or (bars_minute.index[-1].to_pydatetime() if len(bars_minute) > 0 else datetime.now(UTC)),
     )
+
+
+def _make_minute_bars_crossing_price(
+    base_bars: pd.DataFrame,
+    crossover_price: float,
+    cross_step: float = 1e-4,
+) -> pd.DataFrame:
+    """复制 1m bars 并修改最后两根 close，使其穿越指定价格。
+
+    修改后倒数第二根 close = crossover_price - cross_step，
+    最后一根 close = crossover_price + cross_step，
+    从而满足 crossover 条件：prev_close <= crossover_price < cur_close。
+    同时同步 high/low 保持 OHLC 合理性。
+
+    Args:
+        base_bars: 原始 1m bars
+        crossover_price: 需要被穿越的价格
+        cross_step: 穿越步长（默认 1e-4，避免同时穿越多个 peak_price）
+
+    Returns:
+        修改后的 1m bars 副本
+    """
+    bars = base_bars.copy()
+    loc_close = bars.columns.get_loc("close")
+    loc_open = bars.columns.get_loc("open")
+    loc_high = bars.columns.get_loc("high")
+    loc_low = bars.columns.get_loc("low")
+
+    # 倒数第二根：close 在 crossover_price 下方
+    idx_prev = -2
+    prev_close = crossover_price - cross_step
+    bars.iloc[idx_prev, loc_close] = prev_close
+    prev_open = bars.iloc[idx_prev, loc_open]
+    bars.iloc[idx_prev, loc_high] = max(prev_open, prev_close) * (1 + cross_step)
+    bars.iloc[idx_prev, loc_low] = min(prev_open, prev_close) * (1 - cross_step)
+
+    # 最后一根：close 在 crossover_price 上方
+    idx_cur = -1
+    cur_close = crossover_price + cross_step
+    bars.iloc[idx_cur, loc_close] = cur_close
+    cur_open = bars.iloc[idx_cur, loc_open]
+    bars.iloc[idx_cur, loc_high] = max(cur_open, cur_close) * (1 + cross_step)
+    bars.iloc[idx_cur, loc_low] = min(cur_open, cur_close) * (1 - cross_step)
+
+    return bars
+
+
+def _make_minute_bars_no_crossover(base_bars: pd.DataFrame) -> pd.DataFrame:
+    """复制 1m bars 并将最后一根 close 设为与倒数第二根相同，确保无穿越。
+
+    当 prev_close == cur_close 时，不可能存在 peak_price cp 使得
+    prev_close <= cp < cur_close 或 cur_close <= cp < prev_close，
+    因此不会产生 crossover 事件。
+
+    Args:
+        base_bars: 原始 1m bars
+
+    Returns:
+        修改后的 1m bars 副本
+    """
+    bars = base_bars.copy()
+    loc_close = bars.columns.get_loc("close")
+    loc_open = bars.columns.get_loc("open")
+    loc_high = bars.columns.get_loc("high")
+    loc_low = bars.columns.get_loc("low")
+
+    idx_cur = -1
+    idx_prev = -2
+    cur_close = bars.iloc[idx_prev, loc_close]
+    bars.iloc[idx_cur, loc_close] = cur_close
+    cur_open = bars.iloc[idx_cur, loc_open]
+    bars.iloc[idx_cur, loc_high] = max(cur_open, cur_close) * 1.0001
+    bars.iloc[idx_cur, loc_low] = min(cur_open, cur_close) * 0.9999
+
+    return bars
 
 
 class TestVolumeNodeMonitorPerformance:
@@ -150,14 +283,14 @@ class TestVolumeNodeMonitorPerformance:
 
     @pytest.mark.asyncio
     async def test_single_instrument_under_500ms(
-        self, monitor: VolumeNodeMonitor, minute_bars: pd.DataFrame
+        self, monitor: VolumeNodeMonitor, daily_bars: pd.DataFrame, minute_bars: pd.DataFrame
     ) -> None:
         """验证单只标的 calculate_state + detect_events 总耗时 < 500ms。
 
         对照 volume_node_monitor.yaml resource_budget.target_ms_per_instrument=500。
         测量 3 次取最小值（减少噪声），任一次通过即视为达标。
         """
-        context = _make_context(minute_bars)
+        context = _make_context(daily_bars, minute_bars)
         prev_state: MonitorState | None = None
 
         # 预热一次（避免首次加载 features 模块的冷启动开销影响判断）
@@ -189,10 +322,10 @@ class TestVolumeNodeMonitorState:
 
     @pytest.mark.asyncio
     async def test_state_contains_all_output_fields(
-        self, monitor: VolumeNodeMonitor, minute_bars: pd.DataFrame
+        self, monitor: VolumeNodeMonitor, daily_bars: pd.DataFrame, minute_bars: pd.DataFrame
     ) -> None:
         """验证 MonitorState.state 含 manifest.outputs 声明的 6 个字段。"""
-        context = _make_context(minute_bars)
+        context = _make_context(daily_bars, minute_bars)
         state = await monitor.calculate_state(context)
 
         expected_fields = {
@@ -207,20 +340,20 @@ class TestVolumeNodeMonitorState:
 
     @pytest.mark.asyncio
     async def test_current_price_is_number(
-        self, monitor: VolumeNodeMonitor, minute_bars: pd.DataFrame
+        self, monitor: VolumeNodeMonitor, daily_bars: pd.DataFrame, minute_bars: pd.DataFrame
     ) -> None:
         """验证 current_price 为数值类型。"""
-        context = _make_context(minute_bars)
+        context = _make_context(daily_bars, minute_bars)
         state = await monitor.calculate_state(context)
         assert isinstance(state.state["current_price"], (int, float))
         assert state.state["current_price"] > 0
 
     @pytest.mark.asyncio
     async def test_position_0_1_in_range(
-        self, monitor: VolumeNodeMonitor, minute_bars: pd.DataFrame
+        self, monitor: VolumeNodeMonitor, daily_bars: pd.DataFrame, minute_bars: pd.DataFrame
     ) -> None:
         """验证 position_0_1 在 [0, 1] 区间内（ratio_0_1 语义）。"""
-        context = _make_context(minute_bars)
+        context = _make_context(daily_bars, minute_bars)
         state = await monitor.calculate_state(context)
         position = state.state["position_0_1"]
         assert isinstance(position, (int, float))
@@ -228,10 +361,10 @@ class TestVolumeNodeMonitorState:
 
     @pytest.mark.asyncio
     async def test_node_json_structure(
-        self, monitor: VolumeNodeMonitor, minute_bars: pd.DataFrame
+        self, monitor: VolumeNodeMonitor, daily_bars: pd.DataFrame, minute_bars: pd.DataFrame
     ) -> None:
         """验证 node 输出为 json 结构（含 price_mid/price_low/price_high）或 None。"""
-        context = _make_context(minute_bars)
+        context = _make_context(daily_bars, minute_bars)
         state = await monitor.calculate_state(context)
 
         for field in ("upper_node", "lower_node", "poc_price", "last_touched_node"):
@@ -247,135 +380,112 @@ class TestVolumeNodeMonitorState:
 
 
 class TestVolumeNodeMonitorEvents:
-    """事件检测与去重测试（Task 16.5）。"""
+    """事件检测与去重测试（Task 16.5）——与 crossover 实现语义一致。"""
 
     @pytest.mark.asyncio
-    async def test_no_event_when_no_touch(
-        self, monitor: VolumeNodeMonitor, minute_bars: pd.DataFrame
+    async def test_no_event_when_no_crossover(
+        self, monitor: VolumeNodeMonitor, daily_bars: pd.DataFrame, minute_bars: pd.DataFrame
     ) -> None:
-        """无触碰时无事件（last_touched_node=None → 空事件列表）。"""
-        context = _make_context(minute_bars)
+        """最后两根 1m bar 无价格穿越时无事件。"""
+        no_cross_bars = _make_minute_bars_no_crossover(minute_bars)
+        context = _make_context(daily_bars, no_cross_bars)
         curr_state = await monitor.calculate_state(context)
-
-        # 强制 curr_state 无触碰
-        curr_state.state["last_touched_node"] = None
 
         events = await monitor.detect_events(context, None, curr_state)
         assert events == []
 
     @pytest.mark.asyncio
-    async def test_event_on_new_touch_episode(
-        self, monitor: VolumeNodeMonitor, minute_bars: pd.DataFrame
+    async def test_event_on_price_crossover(
+        self, monitor: VolumeNodeMonitor, daily_bars: pd.DataFrame, minute_bars: pd.DataFrame
     ) -> None:
-        """新触碰 episode 触发 node_cluster_touch 事件。
-
-        场景：prev 无触碰，curr 有触碰 → 触发事件。
-        """
-        context = _make_context(minute_bars)
+        """1m bar 收盘价向上穿越 peak_price 时触发 node_cluster_touch 事件。"""
+        context = _make_context(daily_bars, minute_bars)
         curr_state = await monitor.calculate_state(context)
 
-        # 强制 curr_state 有触碰
-        curr_state.state["last_touched_node"] = {
-            "price_mid": 10.5,
-            "price_low": 10.45,
-            "price_high": 10.55,
-        }
+        peak_prices = monitor._last_vp_result.all_peak_prices
+        assert peak_prices, "需要至少一个 peak_price 才能构造穿越"
+        crossover_price = float(peak_prices[len(peak_prices) // 2])
 
-        events = await monitor.detect_events(context, None, curr_state)
-        assert len(events) == 1
+        cross_bars = _make_minute_bars_crossing_price(minute_bars, crossover_price)
+        cross_context = _make_context(daily_bars, cross_bars)
+        cross_state = await monitor.calculate_state(cross_context)
+
+        events = await monitor.detect_events(cross_context, None, cross_state)
+        assert len(events) >= 1, "穿越 peak_price 时应至少产生一个事件"
         event = events[0]
         assert isinstance(event, StrategyEventDraft)
         assert event.event_type == EVENT_TYPE_NODE_CLUSTER_TOUCH
         assert event.state_ttl_seconds == EVENT_STATE_TTL_SECONDS
-        # 验证 dedupe_key 含 instrument_id 和 node_price_mid
-        assert str(curr_state.instrument_id) in event.dedupe_key
-        assert "10.5" in event.dedupe_key
-        # 验证 payload 自包含
-        assert event.payload["instrument_id"] == str(curr_state.instrument_id)
-        assert event.payload["node"] == curr_state.state["last_touched_node"]
+        assert str(cross_state.instrument_id) in event.dedupe_key
+        assert event.payload["instrument_id"] == str(cross_state.instrument_id)
+        assert event.payload["boundary"] == crossover_price
+        assert "cluster_price" in event.payload
+        assert "dev_pct" in event.payload
 
     @pytest.mark.asyncio
-    async def test_dedupe_same_episode_no_event(
-        self, monitor: VolumeNodeMonitor, minute_bars: pd.DataFrame
+    async def test_same_crossover_same_dedupe_key(
+        self, monitor: VolumeNodeMonitor, daily_bars: pd.DataFrame, minute_bars: pd.DataFrame
     ) -> None:
-        """同一 episode（触碰同一 Node）不重复触发。
-
-        场景：prev 触碰 Node A，curr 触碰同一 Node A → 不触发事件。
-        """
-        context = _make_context(minute_bars)
+        """同一 boundary + 同一 bar_time 调用两次产生同一 dedupe_key / logical_entity。"""
+        context = _make_context(daily_bars, minute_bars)
         curr_state = await monitor.calculate_state(context)
 
-        touched_node = {
-            "price_mid": 10.5,
-            "price_low": 10.45,
-            "price_high": 10.55,
-        }
-        curr_state.state["last_touched_node"] = touched_node
+        peak_prices = monitor._last_vp_result.all_peak_prices
+        assert peak_prices
+        crossover_price = float(peak_prices[len(peak_prices) // 2])
 
-        # prev 触碰同一 Node（同一 episode）
-        prev_state = MonitorState(
-            instrument_id=curr_state.instrument_id,
-            strategy_version_id=curr_state.strategy_version_id,
-            state={"last_touched_node": touched_node.copy()},
-        )
+        cross_bars = _make_minute_bars_crossing_price(minute_bars, crossover_price)
+        cross_context = _make_context(daily_bars, cross_bars)
+        cross_state = await monitor.calculate_state(cross_context)
 
-        events = await monitor.detect_events(context, prev_state, curr_state)
-        assert events == [], "同一 episode 不应触发事件"
+        events1 = await monitor.detect_events(cross_context, None, cross_state)
+        events2 = await monitor.detect_events(cross_context, None, cross_state)
+        assert len(events1) >= 1
+        assert len(events2) >= 1
+        assert events1[0].dedupe_key == events2[0].dedupe_key
+        assert events1[0].logical_entity == events2[0].logical_entity
 
     @pytest.mark.asyncio
-    async def test_new_episode_on_different_node(
-        self, monitor: VolumeNodeMonitor, minute_bars: pd.DataFrame
+    async def test_different_boundary_different_event(
+        self, monitor: VolumeNodeMonitor, daily_bars: pd.DataFrame, minute_bars: pd.DataFrame
     ) -> None:
-        """触碰不同 Node 触发新 episode 事件。
-
-        场景：prev 触碰 Node A，curr 触碰 Node B → 触发事件。
-        """
-        context = _make_context(minute_bars)
+        """穿越不同 peak_price 产生不同事件（dedupe_key / logical_entity 不同）。"""
+        context = _make_context(daily_bars, minute_bars)
         curr_state = await monitor.calculate_state(context)
 
-        curr_state.state["last_touched_node"] = {
-            "price_mid": 10.8,
-            "price_low": 10.75,
-            "price_high": 10.85,
-        }
+        peak_prices = monitor._last_vp_result.all_peak_prices
+        assert len(peak_prices) >= 2, "需要至少 2 个 peak_price"
+        price_a = float(peak_prices[0])
+        price_b = float(peak_prices[1])
 
-        # prev 触碰不同 Node（不同 episode）
-        prev_state = MonitorState(
-            instrument_id=curr_state.instrument_id,
-            strategy_version_id=curr_state.strategy_version_id,
-            state={"last_touched_node": {
-                "price_mid": 10.5,
-                "price_low": 10.45,
-                "price_high": 10.55,
-            }},
-        )
+        cross_bars_a = _make_minute_bars_crossing_price(minute_bars, price_a)
+        context_a = _make_context(daily_bars, cross_bars_a)
+        state_a = await monitor.calculate_state(context_a)
 
-        events = await monitor.detect_events(context, prev_state, curr_state)
-        assert len(events) == 1
-        assert events[0].event_type == EVENT_TYPE_NODE_CLUSTER_TOUCH
+        cross_bars_b = _make_minute_bars_crossing_price(minute_bars, price_b)
+        context_b = _make_context(daily_bars, cross_bars_b)
+        state_b = await monitor.calculate_state(context_b)
+
+        events_a = await monitor.detect_events(context_a, None, state_a)
+        events_b = await monitor.detect_events(context_b, None, state_b)
+        assert len(events_a) >= 1
+        assert len(events_b) >= 1
+        assert events_a[0].dedupe_key != events_b[0].dedupe_key
+        assert events_a[0].logical_entity != events_b[0].logical_entity
+        assert events_a[0].payload["boundary"] == price_a
+        assert events_b[0].payload["boundary"] == price_b
 
     @pytest.mark.asyncio
-    async def test_episode_end_no_event(
-        self, monitor: VolumeNodeMonitor, minute_bars: pd.DataFrame
+    async def test_no_event_when_minute_bars_too_short(
+        self, monitor: VolumeNodeMonitor, daily_bars: pd.DataFrame, minute_bars: pd.DataFrame
     ) -> None:
-        """episode 结束（prev 有触碰，curr 无触碰）不触发事件。"""
-        context = _make_context(minute_bars)
+        """1m bars 不足 2 根时无法做 crossover 检测，返回空事件列表。"""
+        short_bars = minute_bars.iloc[-1:].copy()
+        context = _make_context(daily_bars, short_bars)
         curr_state = await monitor.calculate_state(context)
-        curr_state.state["last_touched_node"] = None  # curr 无触碰
 
-        # prev 有触碰
-        prev_state = MonitorState(
-            instrument_id=curr_state.instrument_id,
-            strategy_version_id=curr_state.strategy_version_id,
-            state={"last_touched_node": {
-                "price_mid": 10.5,
-                "price_low": 10.45,
-                "price_high": 10.55,
-            }},
-        )
-
-        events = await monitor.detect_events(context, prev_state, curr_state)
-        assert events == [], "episode 结束不应触发事件"
+        events = await monitor.detect_events(context, None, curr_state)
+        assert events == []
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.notification import (
@@ -1088,6 +1089,201 @@ class TestMessageDeliveryAdminService:
         assert retried.attempt_count >= 2
         assert retried.status == "success"
         assert retried.last_error_code is None or retried.last_error_code == ""
+
+
+# ==================== 图片投递链路测试 ====================
+
+
+class TestImageDeliveryPipeline:
+    """图片投递链路测试：Outbox -> delivery_worker -> deliver_image_message -> adapter。"""
+
+    @pytest.mark.asyncio
+    async def test_deliver_image_message_creates_image_delivery(
+        self, db_session, test_user, test_instrument,
+    ) -> None:
+        """deliver_image_message 应创建 delivery_type=image 的投递记录。"""
+        from app.models.notification import NotificationChannel, NotificationMessage, MessageDelivery
+        from app.schemas.notification import NotificationMessageDTO
+        from app.services.notification_service import deliver_image_message
+
+        dto = NotificationMessageDTO(
+            message_type="MONITOR_EVENT",
+            template_key="monitor_event",
+            template_version="1.1.0",
+            title="测试",
+            summary="摘要",
+            resource_refs={"instrument_id": str(test_instrument.id)},
+            data_time="2026-06-24T10:00:00+08:00",
+        )
+        message = NotificationMessage(
+            user_id=test_user.id,
+            message_type=dto.message_type,
+            template_key=dto.template_key,
+            template_version=dto.template_version,
+            source_type="strategy_event",
+            source_id=None,
+            body=dto.model_dump(),
+            idempotency_key="test:image:msg:1",
+        )
+        channel = NotificationChannel(
+            user_id=test_user.id,
+            adapter_type="mock",
+            display_name="Mock渠道",
+            target_config={},
+            status="active",
+        )
+        db_session.add_all([message, channel])
+        await db_session.flush()
+
+        image_bytes = b"fake-png-bytes"
+        delivery = await deliver_image_message(
+            db_session, message.id, channel.id, image_bytes,
+        )
+
+        assert delivery.delivery_type == "image"
+        assert delivery.status == "success"
+        assert delivery.notification_message_id == message.id
+        assert delivery.channel_id == channel.id
+
+    @pytest.mark.asyncio
+    async def test_delivery_worker_processes_image_outbox(
+        self, db_session, test_user, test_instrument,
+    ) -> None:
+        """delivery_worker 应能处理 delivery_type=image 的 Outbox 事件。"""
+        from app.models.notification import NotificationChannel, NotificationMessage, MessageDelivery
+        from app.models.outbox import Outbox
+        from app.schemas.notification import NotificationMessageDTO
+        from app.services.delivery_worker import _process_single_outbox
+
+        dto = NotificationMessageDTO(
+            message_type="MONITOR_EVENT",
+            template_key="monitor_event",
+            template_version="1.1.0",
+            title="测试",
+            summary="摘要",
+            resource_refs={"instrument_id": str(test_instrument.id)},
+            data_time="2026-06-24T10:00:00+08:00",
+        )
+        message = NotificationMessage(
+            user_id=test_user.id,
+            message_type=dto.message_type,
+            template_key=dto.template_key,
+            template_version=dto.template_version,
+            source_type="strategy_event",
+            source_id=None,
+            body=dto.model_dump(),
+            idempotency_key="test:image:msg:2",
+        )
+        channel = NotificationChannel(
+            user_id=test_user.id,
+            adapter_type="mock",
+            display_name="Mock渠道",
+            target_config={},
+            status="active",
+        )
+        db_session.add_all([message, channel])
+        await db_session.flush()
+
+        outbox = Outbox(
+            id=uuid4(),
+            aggregate_type="notification_message",
+            aggregate_id=message.id,
+            event_type="notification.message.created",
+            payload={
+                "message_id": str(message.id),
+                "user_id": str(test_user.id),
+                "delivery_type": "image",
+                "image_bytes_base64": base64.b64encode(b"fake-png-bytes").decode("utf-8"),
+            },
+            headers={},
+            status="pending",
+            retry_count=0,
+        )
+
+        success = await _process_single_outbox(db_session, outbox)
+        assert success is True
+
+        # 验证创建了 image 投递记录
+        stmt = select(MessageDelivery).where(
+            MessageDelivery.notification_message_id == message.id,
+            MessageDelivery.channel_id == channel.id,
+        )
+        result = await db_session.execute(stmt)
+        delivery = result.scalar_one_or_none()
+        assert delivery is not None
+        assert delivery.delivery_type == "image"
+        assert delivery.status == "success"
+
+
+class TestCaptureToken:
+    """截图模式短期 token 测试。"""
+
+    def test_create_capture_token_has_capture_type(self) -> None:
+        """create_capture_token 应生成 type=capture 的 JWT。"""
+        from app.core.security import create_capture_token, decode_token
+
+        token = create_capture_token(subject="test-user", event_id="evt-1")
+        payload = decode_token(token)
+        assert payload["type"] == "capture"
+        assert payload["sub"] == "test-user"
+        assert payload["event_id"] == "evt-1"
+
+    def test_get_current_user_accepts_capture_token(self) -> None:
+        """get_current_user 应接受 capture token 并返回用户。"""
+        from datetime import timedelta
+        from uuid import uuid4
+
+        from fastapi import HTTPException
+
+        from app.core.security import create_capture_token
+        from app.core.deps import get_current_user
+
+        # 该测试验证 token 类型被接受；使用 AsyncMock 模拟 DB，使其返回用户不存在
+        # 预期抛出 401（用户不存在），错误信息中不应包含 "token 类型错误"
+        fake_user_id = uuid4()
+        token = create_capture_token(
+            subject=str(fake_user_id),
+            event_id="evt-1",
+            expires_delta=timedelta(minutes=5),
+        )
+
+        class FakeCreds:
+            credentials = token
+
+        mock_db = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        mock_db.execute = AsyncMock(return_value=mock_result)
+
+        # 使用同步调用包装（实际 get_current_user 是 async，此处仅做类型校验）
+        import asyncio
+        async def _call():
+            return await get_current_user(FakeCreds(), mock_db)  # type: ignore[arg-type]
+
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(_call())
+        assert exc_info.value.status_code == 401
+        assert "token 类型错误" not in str(exc_info.value.detail)
+
+
+class TestLatestEventEndpoint:
+    """真实事件图片测试端点测试。"""
+
+    def test_test_latest_event_requires_admin(self) -> None:
+        """test-latest-event 端点需要 admin 角色。"""
+        from httpx import ASGITransport, AsyncClient
+        from app.main import app
+        from uuid import uuid4
+
+        async def _call():
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                # 无 token 访问应 401
+                return await client.post(f"/notification-channels/{uuid4()}/test-latest-event")
+
+        import asyncio
+        response = asyncio.run(_call())
+        assert response.status_code == 401
 
 
 if __name__ == "__main__":

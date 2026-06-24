@@ -2,9 +2,10 @@
 // 对应原型：stock-detail.html (V1.6.3)
 // 图表工作台核心页面：以 K 线图及图上策略可视化为核心
 //
-// 用法：路由 /stock/:symbol?source=watchlist&strategy=node
+// 用法：路由 /stock/:symbol?source=watchlist&strategy=node&capture=feishu
 //   - source: selection（选股结果）/ watchlist（自选监控），默认 watchlist
 //   - strategy: 策略标识（dsa/breakout/node/atr/volume/combined），默认 node
+//   - capture: feishu 时进入截图模式，隐藏侧栏与用户信息，并暴露 data-render-ready 属性
 //
 // V1.6.3 精简：无"策略当前计算结果"模块、无"事件时间轴"模块
 
@@ -59,6 +60,7 @@ export default function StockDetailPage() {
   // 解析 URL 参数
   const source = (searchParams.get('source') || 'watchlist') as 'selection' | 'watchlist'
   const strategy = searchParams.get('strategy') || STRATEGY_KEYS.WATCHLIST_MONITOR
+  const isCaptureMode = searchParams.get('capture') === 'feishu'
 
   // 根据 source + strategy 调用 manifest.resolveStrategy 确定默认图层集
   const strategyDef = useMemo(() => resolveStrategy(source, strategy), [source, strategy])
@@ -184,6 +186,14 @@ export default function StockDetailPage() {
   // 行情数据加载中（首次加载且无缓存数据）
   const isBarsLoading = !!instrumentId && barsQuery.isLoading && bars.length === 0
 
+  // 截图模式：股票、K线、指标、事件全部加载成功后标记可渲染
+  const isRenderReady =
+    isCaptureMode &&
+    instrumentQuery.isSuccess &&
+    barsQuery.isSuccess &&
+    indicatorsQuery.isSuccess &&
+    eventsQuery.isSuccess
+
   // 来源徽章与返回链接
   const sourceBadge = source === 'selection' ? '选股结果' : '自选监控'
   const backPath = source === 'selection' ? '/screener' : '/watchlist'
@@ -236,7 +246,12 @@ export default function StockDetailPage() {
   // 股票信息加载中
   if (isInstrumentLoading) {
     return (
-      <div className="tv-content">
+      <div
+        className="tv-content"
+        data-testid="stock-detail-capture"
+        data-render-ready="false"
+        ref={containerRef}
+      >
         <div className="tv-symbol-bar">
           <div className="tv-symbol-left">
             <button className="icon-btn tv-back" onClick={() => navigate(backPath)} title="返回">←</button>
@@ -261,7 +276,12 @@ export default function StockDetailPage() {
   // 股票不存在或查询出错
   if (!instrumentQuery.data) {
     return (
-      <div className="tv-content">
+      <div
+        className="tv-content"
+        data-testid="stock-detail-capture"
+        data-render-ready="false"
+        ref={containerRef}
+      >
         <div className="tv-symbol-bar">
           <div className="tv-symbol-left">
             <button className="icon-btn tv-back" onClick={() => navigate(backPath)} title="返回">←</button>
@@ -289,7 +309,12 @@ export default function StockDetailPage() {
   ].filter(Boolean)
 
   return (
-    <div className="tv-content" ref={containerRef}>
+    <div
+      className="tv-content"
+      ref={containerRef}
+      data-testid="stock-detail-capture"
+      data-render-ready={isRenderReady ? 'true' : 'false'}
+    >
       {/* ===== 股票信息栏 ===== */}
       <div className="tv-symbol-bar">
         <div className="tv-symbol-left">

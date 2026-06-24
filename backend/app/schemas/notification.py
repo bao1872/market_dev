@@ -142,6 +142,7 @@ class MessageDeliveryResponse(BaseModel):
     adapter_type: str = Field(..., description="渠道类型（feishu_webhook/feishu_platform_app/email）")
     display_name: str = Field(..., description="渠道展示名称")
     status: str = Field(..., description="pending/success/failed/retrying")
+    delivery_type: str = Field(default="card", description="card/image")
     attempt_count: int = Field(..., description="已尝试次数")
     next_retry_at: datetime | None = Field(None, description="下次重试时间")
     last_error_code: str | None = Field(None, description="最近错误码")
@@ -177,6 +178,7 @@ class MessageDeliveryResponse(BaseModel):
                     if channel else getattr(data, "display_name", "")
                 ),
                 "status": getattr(data, "status", ""),
+                "delivery_type": getattr(data, "delivery_type", "card"),
                 "attempt_count": getattr(data, "attempt_count", 0),
                 "next_retry_at": getattr(data, "next_retry_at", None),
                 "last_error_code": getattr(data, "last_error_code", None),
@@ -272,6 +274,14 @@ class ChannelTestResponse(BaseModel):
 
     channel: NotificationChannelResponse = Field(..., description="渠道状态")
     delivery: DeliveryResult = Field(..., description="投递结果")
+
+
+class ChannelLatestEventTestResponse(BaseModel):
+    """真实事件图片测试响应。"""
+
+    channel: NotificationChannelResponse = Field(..., description="渠道状态")
+    message: NotificationMessageResponse = Field(..., description="创建的消息")
+    meta: dict[str, Any] = Field(..., description="截图元信息（event_id/symbol/image_size/capture_token）")
 
 
 if __name__ == "__main__":

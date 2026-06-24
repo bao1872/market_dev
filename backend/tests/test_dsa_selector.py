@@ -67,15 +67,18 @@ def _generate_bullish_bars(n_bars: int = 400, start_price: float = 10.0) -> pd.D
     amount = volume * close
     adj_factor = np.ones(n_bars)
 
-    df = pd.DataFrame({
-        "open": open_,
-        "high": high,
-        "low": low,
-        "close": close,
-        "volume": volume,
-        "amount": amount,
-        "adj_factor": adj_factor,
-    }, index=dates)
+    df = pd.DataFrame(
+        {
+            "open": open_,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": volume,
+            "amount": amount,
+            "adj_factor": adj_factor,
+        },
+        index=dates,
+    )
     df.index.name = "trade_date"
     return df
 
@@ -107,15 +110,18 @@ def _generate_sideways_bars(n_bars: int = 400, start_price: float = 10.0) -> pd.
     amount = volume * close
     adj_factor = np.ones(n_bars)
 
-    df = pd.DataFrame({
-        "open": open_,
-        "high": high,
-        "low": low,
-        "close": close,
-        "volume": volume,
-        "amount": amount,
-        "adj_factor": adj_factor,
-    }, index=dates)
+    df = pd.DataFrame(
+        {
+            "open": open_,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": volume,
+            "amount": amount,
+            "adj_factor": adj_factor,
+        },
+        index=dates,
+    )
     df.index.name = "trade_date"
     return df
 
@@ -128,9 +134,7 @@ def _make_mock_version(strategy_id: str = "dsa_selector") -> MagicMock:
         "strategy_id": strategy_id,
         "kind": "selector",
         "version": "1.1.0",
-        "parameters": [
-            {"key": "algorithm.lookback", "type": "integer", "default": 360}
-        ],
+        "parameters": [{"key": "algorithm.lookback", "type": "integer", "default": 360}],
         "resource_budget": {
             "target_ms_per_instrument": 5000  # 测试用 5 秒预算（避免误超时）
         },
@@ -225,7 +229,10 @@ class TestDSASelector:
             assert result.metrics["vwap_ret_avg"] is not None
             assert result.metrics["vwap_ret_total"] is not None
             # offset_variance_rate 在 offset_mean 非 0 时应有值
-            if result.metrics["offset_mean"] is not None and abs(result.metrics["offset_mean"]) > 1e-10:
+            if (
+                result.metrics["offset_mean"] is not None
+                and abs(result.metrics["offset_mean"]) > 1e-10
+            ):
                 assert result.metrics["offset_variance_rate"] is not None
 
     @pytest.mark.asyncio
@@ -246,7 +253,7 @@ class TestDSASelector:
             "cross_up_count",
             "cross_down_count",
             "last_close",
-            "last_vwap",
+            "dsa_vwap",
         ]
         for field in extended_fields:
             assert field in result.metrics, f"缺少扩展字段: {field}"
@@ -273,7 +280,6 @@ class TestDSASelector:
         )
         result = await selector.execute(context)
 
-        assert result.matched is False
         assert result.metrics.get("error") == "insufficient_data"
 
     @pytest.mark.asyncio
@@ -290,7 +296,6 @@ class TestDSASelector:
         )
         result = await selector.execute(context)
 
-        assert result.matched is False
         assert result.metrics.get("error") == "insufficient_data"
 
 

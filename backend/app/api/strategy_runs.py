@@ -1,9 +1,11 @@
-"""策略运行 API 路由 - 触发运行、查询历史、查询结果、发布批次。
+"""策略运行 API 路由 - 触发运行、查询历史、查询结果、发布批次、重试运行。
 
 端点：
 - POST /admin/strategies/{key}/run: 触发策略运行（admin）— 仅创建 queued 运行，Worker 异步执行
 - POST /admin/strategy-runs/{run_id}/publish: 发布运行结果（admin）
-- GET /strategies/{key}/runs: 运行历史（admin）
+- POST /admin/strategy-runs/{run_id}/retry: 基于已有运行创建新的 attempt（admin）
+- GET /admin/strategies/{key}/runs: 运行历史（admin，符合 Spec 路径）
+- GET /strategies/{key}/runs: 运行历史（admin，兼容旧路径）
 - GET /strategies/{key}/published-runs: 已发布批次列表（普通用户可访问）
 - GET /strategies/{key}/results: 查询策略结果（用户端，绑定 published run）
 - GET /strategy-runs/{run_id}/results: 运行结果（分页+筛选+排序，需 published）
@@ -267,7 +269,7 @@ async def list_strategy_runs(
     db: AsyncSession = Depends(get_db),
     _user=Depends(require_roles("admin")),
 ) -> StrategyRunListResponse:
-    """查询策略运行历史（admin）。
+    """查询策略运行历史（admin，兼容旧路径）。
 
     Args:
         strategy_key: 策略 key
@@ -278,6 +280,19 @@ async def list_strategy_runs(
     Returns:
         运行列表响应
     """
+    return await _list_strategy_runs_impl(
+        db, strategy_key, status_filter, limit, offset
+    )
+
+
+async def _list_strategy_runs_impl(
+    db: AsyncSession,
+    strategy_key: str,
+    status_filter: str | None,
+    limit: int,
+    offset: int,
+) -> StrategyRunListResponse:
+    """查询策略运行历史的核心实现（被 /strategies 与 /admin/strategies 复用）。"""
     # 查找策略所有版本
     try:
         versions = await list_versions(db, strategy_key)
@@ -314,6 +329,74 @@ async def list_strategy_runs(
 
     items = [StrategyRunResponse.model_validate(r) for r in paginated]
     return StrategyRunListResponse(items=items, total=total)
+
+
+@router.get(
+    "/admin/strategies/{strategy_key}/runs",
+    response_model=StrategyRunListResponse,
+)
+async def list_strategy_runs_admin(
+    strategy_key: str,
+    status_filter: str | None = Query(None, alias="status", description="运行状态过滤"),
+    limit: int = Query(50, ge=1, le=200, description="返回上限"),
+    offset: int = Query(0, ge=0, description="偏移量"),
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(require_roles("admin")),
+) -> StrategyRunListResponse:
+    """查询策略运行历史（admin，符合 Spec 路径）。
+
+    Args:
+        strategy_key: 策略 key
+        status_filter: 运行状态过滤
+        limit: 返回上限
+        offset: 偏移量
+
+    Returns:
+        运行列表响应
+    """
+    return await _list_strategy_runs_impl(
+        db, strategy_key, status_filter, limit, offset
+    )
+
+
+@router.post(
+    "/admin/strategy-runs/{run_id}/retry",
+    response_model=StrategyRunResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def retry_strategy_run(
+    run_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(require_roles("admin")),
+) -> StrategyRunResponse:
+    """基于已有运行创建新的 attempt（admin）。
+
+    仅允许 failed/partial_failed/interrupted 状态的运行重试；
+    新运行 attempt_no = 同维度最大 attempt_no + 1，状态为 queued。
+
+    Args:
+        run_id: 原运行 ID
+        db: 异步会话
+
+    Returns:
+        新建的运行记录响应（status=queued）
+    """
+    service = StrategyBatchService()
+    try:
+        run = await service.retry_run(db, run_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        ) from e
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"创建重试运行失败: {e}",
+        ) from e
+
+    await db.commit()
+    return StrategyRunResponse.model_validate(run)
 
 
 @router.get(
@@ -645,8 +728,9 @@ if __name__ == "__main__":
     paths = [r.path for r in router.routes]
     print(f"router.routes={paths}")
     assert any("/admin/strategies" in p and "/run" in p for p in paths)
+    assert any("/admin/strategies" in p and "/runs" in p for p in paths)
+    assert any("/admin/strategy-runs" in p and "/retry" in p for p in paths)
     assert any("/publish" in p for p in paths)
-    assert any("/runs" in p for p in paths)
     assert any("/published-runs" in p for p in paths)
     assert any("/results" in p for p in paths)
     print("OK")

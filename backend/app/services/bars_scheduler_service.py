@@ -82,6 +82,8 @@ class BatchResult:
     failed: int = 0
     failed_symbols: list[str] = field(default_factory=list)
     period_counts: dict[str, int] = field(default_factory=dict)
+    # [BarsScheduler] - 日线阶段触发/复用的 DSA StrategyRun id，供 job_run.metadata_json 记录
+    dsa_run_id: uuid.UUID | None = None
 
 
 class BarsSchedulerService:
@@ -288,10 +290,10 @@ class BarsSchedulerService:
                 phase_succeeded, phase_failed, result.period_counts[period],
             )
 
-            # [BarsScheduler] - 日线阶段完成后，检查覆盖率并触发 DSA
+            # [BarsScheduler] - 日线阶段完成后，检查覆盖率并触发/复用 DSA run
             if is_daily_refresh and period == "d":
                 try:
-                    await self._check_daily_coverage_and_trigger_dsa(
+                    result.dsa_run_id = await self._check_daily_coverage_and_trigger_dsa(
                         trade_date, db_session,
                     )
                 except Exception as exc:
@@ -313,31 +315,31 @@ class BarsSchedulerService:
         self,
         trade_date: date,
         db_session: AsyncSession | None = None,
-    ) -> bool:
+    ) -> uuid.UUID | None:
         """[BarsScheduler] - 检查日线覆盖率，满足阈值则自动触发 DSA 选股。
 
         流程：
         1. 统计今日 bars_daily 中不同标的数
         2. 统计活跃标的总数
-        3. 覆盖率 ≥ 90% 时，检查今日是否已有 DSA run
-        4. 无则调用 create_batch_run 创建 dsa_selector queued run
+        3. 覆盖率 ≥ 90% 时，调用 create_batch_run 创建/复用 dsa_selector queued run
+           - create_batch_run 内部统一处理 published/completed/running/queued 跳过
+             与 failed/partial_failed/interrupted 重试，本函数不再手动去重
+        4. 返回关联的 StrategyRun id（无论新建还是复用），供 job_run.metadata_json 记录
 
         Args:
             trade_date: 交易日期
             db_session: 可选的 DB 会话
 
         Returns:
-            True 表示已触发 DSA run，False 表示未触发
+            关联的 StrategyRun id，未触发时返回 None
         """
         from sqlalchemy import func as sa_func
 
         from app.constants.strategy_keys import DSA_SELECTOR
         from app.models.bar import BarDaily
-        from app.models.strategy import StrategyDefinition, StrategyVersion
-        from app.models.strategy_run import StrategyRun
         from app.services.strategy_batch_service import StrategyBatchService
 
-        async def _do_check(db: AsyncSession) -> bool:
+        async def _do_check(db: AsyncSession) -> uuid.UUID | None:
             # 统计今日日线覆盖的标的数
             daily_count_result = await db.execute(
                 select(sa_func.count(sa_func.distinct(BarDaily.instrument_id)))
@@ -362,36 +364,9 @@ class BarsSchedulerService:
                     "[BarsScheduler] 日线覆盖率不足 %.1f%%，暂不触发 DSA",
                     coverage * 100,
                 )
-                return False
+                return None
 
-            # 检查今日是否已有 DSA run（任何状态）
-            existing_stmt = (
-                select(StrategyRun.id)
-                .where(
-                    StrategyRun.trade_date == trade_date,
-                    StrategyRun.strategy_version_id.in_(
-                        select(StrategyVersion.id).where(
-                            StrategyVersion.strategy_definition_id.in_(
-                                select(StrategyDefinition.id).where(
-                                    StrategyDefinition.strategy_key == DSA_SELECTOR,
-                                )
-                            )
-                        )
-                    ),
-                )
-                .limit(1)
-            )
-            existing_result = await db.execute(existing_stmt)
-            existing_run_id = existing_result.scalar_one_or_none()
-
-            if existing_run_id is not None:
-                logger.info(
-                    "[BarsScheduler] 今日已有 DSA 运行 (run_id=%s)，跳过自动触发",
-                    existing_run_id,
-                )
-                return False
-
-            # 触发 DSA run
+            # 触发 DSA run（create_batch_run 内部统一去重/重试）
             batch_service = StrategyBatchService()
             run = await batch_service.create_batch_run(
                 db=db,
@@ -401,10 +376,10 @@ class BarsSchedulerService:
             )
             await db.commit()
             logger.info(
-                "[BarsScheduler] 日线覆盖率达标，已自动触发 DSA 选股: run_id=%s",
+                "[BarsScheduler] 日线覆盖率达标，已自动触发/复用 DSA 选股: run_id=%s",
                 run.id,
             )
-            return True
+            return run.id
 
         if db_session is not None:
             return await _do_check(db_session)

@@ -139,18 +139,22 @@ async def _create_job_run(
     business_date: str,
     lease_seconds: int = 120,
     metadata: dict | None = None,
+    scheduled_at: datetime | None = None,
 ) -> SchedulerJobRun:
     """创建 SchedulerJobRun 记录并返回。
 
     创建时填写 scheduled_at/started_at/heartbeat_at/lease_expires_at/worker_instance_id，
     保证 Admin 页面能判断任务是否真实在跑以及租约是否过期。
+
+    Args:
+        scheduled_at: CronTrigger 计划执行时间；None 时退化为 started_at（非 scheduler 场景）
     """
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
     job_run = SchedulerJobRun(
         job_name=job_name,
         business_date=business_date,
         status="running",
-        scheduled_at=now,
+        scheduled_at=scheduled_at if scheduled_at is not None else now,
         started_at=now,
         heartbeat_at=now,
         lease_expires_at=now + timedelta(seconds=lease_seconds),
@@ -322,9 +326,6 @@ async def run_strategy_batch_worker() -> None:
     - Worker 重启后可继续执行 queued 状态的 run（中断恢复）
     - 启动时调用 recover_stale_runs() 恢复过期租约的 running 任务
     """
-    from sqlalchemy import select
-
-    from app.models.strategy_run import StrategyRun
     from app.services.strategy_batch_service import StrategyBatchService
 
     _hb_task = asyncio.create_task(_heartbeat_loop("strategy_batch"))
@@ -348,21 +349,14 @@ async def run_strategy_batch_worker() -> None:
     while not _shutdown:
         try:
             async with AsyncSessionLocal() as db:
-                # 查询 queued 状态的 run（按 queued_at 排序，取 1 条）
-                stmt = (
-                    select(StrategyRun)
-                    .where(StrategyRun.status == "queued")
-                    .order_by(StrategyRun.queued_at)
-                    .limit(1)
-                )
-                result = await db.execute(stmt)
-                run = result.scalar_one_or_none()
-
+                # [StrategyBatchWorker] - 使用 claim_next_run 加锁领取任务，避免多 Worker 竞争
+                run = await service.claim_next_run(db)
                 if run is None:
                     # 无待执行 run，等待下次轮询
                     await asyncio.sleep(WORKER_INTERVAL)
                     continue
 
+                await db.commit()
                 logger.info(
                     "开始执行策略批量计算: run_id=%s, trade_date=%s",
                     run.id, run.trade_date,
@@ -435,7 +429,13 @@ async def run_bars_scheduler_worker() -> None:
         heartbeat_task_ref: asyncio.Task | None = None
         try:
             async with AsyncSessionLocal() as db:
-                job_run = await _create_job_run(db, "bars_scheduler", str(trade_date))
+                # [BarsScheduler] - scheduled_at 为 CronTrigger 计划时间（16:00），不等于 started_at
+                scheduled_at = datetime.combine(
+                    trade_date, time(16, 0), tzinfo=ZoneInfo("Asia/Shanghai")
+                )
+                job_run = await _create_job_run(
+                    db, "bars_scheduler", str(trade_date), scheduled_at=scheduled_at
+                )
 
             # 行情刷新耗时约 1.8 小时，后台每 30 秒更新心跳与租约
             async def _bars_heartbeat_loop() -> None:
@@ -458,6 +458,13 @@ async def run_bars_scheduler_worker() -> None:
             )
             if job_run is not None:
                 async with AsyncSessionLocal() as db:
+                    # [BarsScheduler] - 无论 DSA run 新建还是复用，均记录 strategy_run_id
+                    if result.dsa_run_id is not None:
+                        job_run = await db.get(SchedulerJobRun, job_run.id)
+                        if job_run is not None:
+                            job_run.metadata_json = json.dumps({
+                                "strategy_run_id": str(result.dsa_run_id)
+                            })
                     await _finish_job_run(
                         db, job_run, "succeeded",
                         success_count=result.succeeded,
@@ -498,16 +505,18 @@ async def run_strategy_scheduler_worker() -> None:
     使用 APScheduler AsyncIOScheduler + CronTrigger：
     - 每个交易日 18:30 触发（比 bars 16:00 晚 2.5 小时，作为兜底）
     - 查询 strategy_definitions WHERE kind='selector' 的所有策略
-    - 为每个策略检查今日是否已有 run（任何状态），已有则跳过
-    - 无则调用 StrategyBatchService.create_batch_run(run_type="scheduled")
-    - 创建的 queued run 由 strategy_batch worker 轮询执行
+    - 调用 StrategyBatchService.create_batch_run(run_type="scheduled")
+      创建或复用当日的 run（create_batch_run 内部统一去重/重试）
+    - 创建/复用的 queued run 由 strategy_batch worker 轮询执行
 
     设计说明：
     - 18:30 触发（bars_scheduler 16:00 刷新行情，日线完成后自动触发 DSA，
       本调度器作为兜底，防止日线触发失败时遗漏）
-    - 去重：先检查今日是否已有同 strategy_key 的 run，已有则跳过
+    - 去重：create_batch_run 内部基于 (version, date, run_type) 与 attempt_no 幂等，
+      本函数不再手动检查今日是否已有 run
     - 数据就绪检查：check_data_readiness() 覆盖率 < 90% 时阻断 DSA 执行
     - 单个策略创建失败不阻塞其他策略，记录日志继续
+    - 完成状态：按 succeeded/failed 计数映射为 succeeded/partial_failed/failed
     - 幂等：create_batch_run 内部 idempotency_key 也保证去重
     """
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -531,10 +540,9 @@ async def run_strategy_scheduler_worker() -> None:
         logger.exception("Strategy Scheduler 启动恢复异常: %s", exc)
 
     async def scheduled_strategy_run() -> None:
-        """定时任务：每日 18:30 为所有 selector 策略创建 queued run（兜底）。"""
+        """定时任务：每日 18:30 为所有 selector 策略创建/复用 queued run（兜底）。"""
         from datetime import date as date_cls
 
-        from app.models.strategy_run import StrategyRun
         from app.services.calendar_service import is_trading_day_async
 
         trade_date = date_cls.today()
@@ -551,7 +559,13 @@ async def run_strategy_scheduler_worker() -> None:
         job_run = None
         try:
             async with AsyncSessionLocal() as db:
-                job_run = await _create_job_run(db, "strategy_scheduler", str(trade_date))
+                # [StrategyScheduler] - scheduled_at 为 CronTrigger 计划时间（18:30），不等于 started_at
+                scheduled_at = datetime.combine(
+                    trade_date, time(18, 30), tzinfo=ZoneInfo("Asia/Shanghai")
+                )
+                job_run = await _create_job_run(
+                    db, "strategy_scheduler", str(trade_date), scheduled_at=scheduled_at
+                )
                 # 查询 production 环境 + 参与调度 + 有 released 版本的 selector 策略
                 released_subq = (
                     select(StrategyVersion.id)
@@ -581,39 +595,11 @@ async def run_strategy_scheduler_worker() -> None:
 
                 logger.info("待计算的 selector 策略: %s", strategy_keys)
                 succeeded = 0
-                skipped = 0
                 failed = 0
                 strategy_run_ids: list[str] = []
                 for idx, strategy_key in enumerate(strategy_keys):
-                    # [StrategyScheduler] - 去重检查：今日是否已有该策略的 run
-                    existing_run_stmt = (
-                        select(StrategyRun.id)
-                        .where(
-                            StrategyRun.trade_date == trade_date,
-                            StrategyRun.strategy_version_id.in_(
-                                select(StrategyVersion.id).where(
-                                    StrategyVersion.strategy_definition_id.in_(
-                                        select(StrategyDefinition.id).where(
-                                            StrategyDefinition.strategy_key == strategy_key,
-                                        )
-                                    )
-                                )
-                            ),
-                        )
-                        .limit(1)
-                    )
-                    existing_run_result = await db.execute(existing_run_stmt)
-                    existing_run_id = existing_run_result.scalar_one_or_none()
-
-                    if existing_run_id is not None:
-                        logger.info(
-                            "策略 %s 今日已有运行 (run_id=%s)，跳过",
-                            strategy_key, existing_run_id,
-                        )
-                        skipped += 1
-                        continue
-
                     try:
+                        # create_batch_run 内部统一处理新建/复用/重试
                         run = await service.create_batch_run(
                             db=db,
                             strategy_key=strategy_key,
@@ -622,14 +608,14 @@ async def run_strategy_scheduler_worker() -> None:
                         )
                         await db.commit()
                         strategy_run_ids.append(str(run.id))
-                        # [StrategyScheduler] - 将创建的 strategy_run_id 记录到 job_run 元数据
+                        # [StrategyScheduler] - 无论新建还是复用，均记录 strategy_run_id
                         job_run.metadata_json = json.dumps({
                             "strategy_run_id": str(run.id),
                             "strategy_run_ids": strategy_run_ids,
                         })
                         await db.commit()
                         logger.info(
-                            "策略 %s 创建 run 成功: run_id=%s",
+                            "策略 %s 创建/复用 run 成功: run_id=%s",
                             strategy_key, run.id,
                         )
                         succeeded += 1
@@ -652,11 +638,18 @@ async def run_strategy_scheduler_worker() -> None:
                         await _update_job_heartbeat(db, job_run)
 
                 logger.info(
-                    "定时任务完成（兜底）: total=%d succeeded=%d skipped=%d failed=%d",
-                    len(strategy_keys), succeeded, skipped, failed,
+                    "定时任务完成（兜底）: total=%d succeeded=%d failed=%d",
+                    len(strategy_keys), succeeded, failed,
                 )
+                # [StrategyScheduler] - 按 succeeded/failed 计数映射最终状态
+                if failed == 0:
+                    final_status = "succeeded"
+                elif succeeded > 0:
+                    final_status = "partial_failed"
+                else:
+                    final_status = "failed"
                 await _finish_job_run(
-                    db, job_run, "succeeded",
+                    db, job_run, final_status,
                     success_count=succeeded, failure_count=failed,
                 )
         except Exception as exc:
@@ -718,7 +711,13 @@ async def run_calendar_scheduler_worker() -> None:
         job_run = None
         try:
             async with AsyncSessionLocal() as session:
-                job_run = await _create_job_run(session, "calendar_scheduler", str(today))
+                # [CalendarScheduler] - scheduled_at 为 CronTrigger 计划时间（02:00），不等于 started_at
+                scheduled_at = datetime.combine(
+                    today, time(2, 0), tzinfo=ZoneInfo("Asia/Shanghai")
+                )
+                job_run = await _create_job_run(
+                    session, "calendar_scheduler", str(today), scheduled_at=scheduled_at
+                )
                 from app.services.calendar_seed import seed_calendar_from_pytdx
                 year = today.year
                 count = await seed_calendar_from_pytdx(session, year=year)

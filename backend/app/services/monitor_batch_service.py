@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import os
 import uuid
@@ -41,6 +42,9 @@ from app.models.strategy_event import StrategyEvent
 from app.models.watchlist import UserWatchlistItem
 from app.repositories import monitor_state_repository, strategy_event_repository
 from app.repositories.bar_repository import get_bars
+from app.schemas.notification import NotificationMessageDTO
+from app.services.notification_service import create_message
+from app.services.outbox_relay import write_outbox
 from app.strategy.monitors.watchlist_monitor import WatchlistMonitor
 from app.strategy.runtime import MarketDataContext, MonitorState
 
@@ -1263,22 +1267,24 @@ class MonitorBatchService:
                     user_id, message.id, exc,
                 )
 
-        # 卡片投递完成后，为每只触发股票渲染 PNG 并发送图片
-        # TODO: [monitor_batch] _send_chart_images 直接调用 adapter.send_image()，
-        # 绕过 Outbox 管道。待 Outbox 管道支持图片投递后，应改为写入 Outbox 由
-        # Delivery Worker 统一处理，与卡片通知保持一致的投递语义。
-        await self._send_chart_images(
+        # 卡片投递完成后，为每只触发股票渲染 PNG 并通过 Outbox 发送图片
+        await self._send_chart_images_via_outbox(
             db, instrument_events, instrument_info_cache, instrument_user_map,
         )
 
-    async def _send_chart_images(
+    async def _send_chart_images_via_outbox(
         self,
         db: AsyncSession,
         instrument_events: dict[uuid.UUID, list[StrategyEvent]],
         instrument_info_cache: dict[uuid.UUID, tuple[str, str]],
         instrument_user_map: dict[uuid.UUID, list[uuid.UUID]],
     ) -> None:
-        """为每只触发股票渲染 PNG 行情图并通过飞书发送。
+        """为每只触发股票渲染 PNG 行情图，并通过 Outbox 统一投递图片。
+
+        与旧版区别：
+        - 不再直接调用 adapter.send_image()，而是创建通知消息并写入 Outbox
+        - Delivery Worker 读取 Outbox 后调用 deliver_image_message 完成实际投递
+        - 图片 bytes 以 base64 形式存放在 Outbox payload 中
 
         图片渲染失败不阻塞通知流程，临时 PNG 文件发送后清理。
 
@@ -1288,10 +1294,7 @@ class MonitorBatchService:
             instrument_info_cache: instrument_id → (symbol, name) 缓存
             instrument_user_map: instrument_id → [user_ids] 映射
         """
-        from app.models.notification import NotificationChannel
-        from app.services.channel_adapter import get_adapter
-
-        for inst_id, _events in instrument_events.items():
+        for inst_id, events in instrument_events.items():
             info = instrument_info_cache.get(inst_id)
             if not info:
                 continue
@@ -1303,31 +1306,44 @@ class MonitorBatchService:
                 if png_path is None:
                     continue
 
-                # 获取持有该标的的用户列表
+                # 读取 PNG bytes 并编码为 base64
+                try:
+                    with open(png_path, "rb") as f:
+                        image_bytes = f.read()
+                except OSError as exc:
+                    logger.warning("读取 PNG 文件失败: symbol=%s path=%s: %s", symbol, png_path, exc)
+                    continue
+
+                image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
+                # 获取持有该标的的用户列表，每个用户创建一条消息并写入 Outbox
                 user_ids = instrument_user_map.get(inst_id, [])
                 for uid in user_ids:
-                    # 查询用户的飞书平台应用渠道
-                    ch_stmt = select(NotificationChannel).where(
-                        NotificationChannel.user_id == uid,
-                        NotificationChannel.status == "active",
-                        NotificationChannel.adapter_type == "feishu_platform_app",
-                    )
-                    ch_result = await db.execute(ch_stmt)
-                    channels = list(ch_result.scalars().all())
-
-                    for channel in channels:
-                        try:
-                            adapter = get_adapter("feishu_platform_app")
-                            await adapter.send_image(png_path, channel.target_config)
-                            logger.info(
-                                "PNG 行情图推送成功: symbol=%s user_id=%s channel=%s",
-                                symbol, uid, channel.adapter_type,
-                            )
-                        except Exception as exc:
-                            logger.warning(
-                                "PNG 行情图推送失败: symbol=%s user_id=%s: %s",
-                                symbol, uid, exc,
-                            )
+                    try:
+                        message = await self._create_chart_image_message(
+                            db, uid, inst_id, symbol, stock_name, events,
+                        )
+                        await write_outbox(
+                            db=db,
+                            event_type="notification.message.created",
+                            payload={
+                                "message_id": str(message.id),
+                                "user_id": str(uid),
+                                "delivery_type": "image",
+                                "image_bytes_base64": image_b64,
+                            },
+                            aggregate_type="notification_message",
+                            aggregate_id=message.id,
+                        )
+                        logger.info(
+                            "PNG 行情图已写入 Outbox: symbol=%s user_id=%s",
+                            symbol, uid,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "PNG 行情图写入 Outbox 失败: symbol=%s user_id=%s: %s",
+                            symbol, uid, exc,
+                        )
             except Exception as exc:
                 logger.warning("PNG 渲染/推送失败: %s: %s", symbol, exc)
             finally:
@@ -1337,6 +1353,57 @@ class MonitorBatchService:
                         os.unlink(png_path)
                     except OSError:
                         pass
+
+    async def _create_chart_image_message(
+        self,
+        db: AsyncSession,
+        user_id: uuid.UUID,
+        instrument_id: uuid.UUID,
+        symbol: str,
+        stock_name: str,
+        events: list[StrategyEvent],
+    ) -> Any:
+        """为单只股票图片创建通知消息（幂等）。
+
+        Args:
+            db: 异步会话
+            user_id: 用户 ID
+            instrument_id: 标的 ID
+            symbol: 股票代码
+            stock_name: 股票名称
+            events: 触发事件列表
+
+        Returns:
+            NotificationMessage 对象
+        """
+        event_type = events[0].event_type if events else "monitor_chart"
+        dto = NotificationMessageDTO(
+            message_type="MONITOR_EVENT",
+            template_key="monitor_event",
+            template_version="1.1.0",
+            title=f"监控图表｜{stock_name}",
+            summary=f"{symbol} 触发 {event_type}，详见附图",
+            resource_refs={
+                "instrument_id": str(instrument_id),
+                "symbol": symbol,
+                "event_type": event_type,
+            },
+            data_time=datetime.now(UTC).isoformat(),
+            primary_instrument={
+                "instrument_id": str(instrument_id),
+                "symbol": symbol,
+                "name": stock_name,
+            },
+            event_summary=f"{symbol} {event_type}",
+        )
+        return await create_message(
+            db=db,
+            user_id=user_id,
+            message_dto=dto,
+            source_type="monitor_chart",
+            source_id=instrument_id,
+            idempotency_key=f"monitor-chart:{user_id}:{instrument_id}:{datetime.now(UTC).strftime('%Y%m%d%H%M')}",
+        )
 
     async def _render_instrument_chart(
         self,

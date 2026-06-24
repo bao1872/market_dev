@@ -1,17 +1,16 @@
 // 服务总览（首页，受保护路由）
 // 对应原型：index.html (V1.6.3)
-// 用法：集中查看选股策略结果、监控策略计算状态和最新事件
-// 依赖 hooks：useWatchlist / useStrategies / usePublishedRuns / useStrategyRunResults /
-//             useStrategyMonitorStates / useNotificationChannels / useInstruments / useAddToWatchlist / useEventsSummary
+// 用法：集中查看选股策略结果与监控策略最新状态
+// 依赖 hooks：useWatchlist / usePublishedRuns / useStrategyRunResults /
+//             useWatchlistMonitorStatus / useNotificationChannels / useInstruments / useAddToWatchlist / useEventsSummary
 // 路由：/
-import { useState, useMemo, useCallback, type CSSProperties } from 'react'
+import { useState, useMemo, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { useQueries } from '@tanstack/react-query'
 import { useToast } from '@/store/toast'
 import { STRATEGY_KEYS } from '@/constants/strategyKeys'
 import {
   useWatchlist,
-  useStrategies,
   usePublishedRuns,
   useStrategyRunResults,
   useWatchlistMonitorStatus,
@@ -24,10 +23,6 @@ import * as api from '@/api/endpoints'
 import type { Instrument, StrategyResult, WatchlistMonitorStatusItem } from '@/api/endpoints'
 import { StrategyDataTable } from '@/components/StrategyDataTable'
 import type { DataTableColumn } from '@/components/StrategyDataTable'
-import { StrategySwitcher } from '@/components/StrategySwitcher'
-import type { StrategyOption, StrategyPanel } from '@/components/StrategySwitcher'
-import { STRATEGIES } from '@/lib/strategy-manifest'
-import type { PageState } from '@/api/types'
 
 // ===== 行类型定义（带索引签名以满足 StrategyDataTable 的 Row extends Record<string, unknown>）=====
 
@@ -40,8 +35,6 @@ interface SelectionRow {
   duration: string
   avg_return: string
   total_return: string
-  shift_mean: string
-  shift_var: string
   short_pos: string
   pos_tag: 'good' | 'warn'
   watched: boolean
@@ -55,14 +48,7 @@ interface WatchlistMonitorRow {
   symbol: string
   price: string
   lower_node_price: number | null
-  lower_node_low: number | null
-  lower_node_high: number | null
-  position: number
-  poc_position?: number
   upper_node_price: number | null
-  upper_node_low: number | null
-  upper_node_high: number | null
-  upper_tag?: 'warn'
   latest_event: { event_type: string; event_time: string; boundary: number | null } | null
   [key: string]: unknown
 }
@@ -108,38 +94,6 @@ function fmtTime(isoString: string | null | undefined): string {
   } catch {
     return '-'
   }
-}
-
-// ===== PositionBetweenNodes 组件（节点间位置 0–1 可视化）=====
-// 对应原型 .node-position 结构：填充条 + 位置标记 + POC 标记 + 刻度标签
-// 使用 CSS 自定义属性 --pos / --poc 传递动态值，避免内联 style 设置 width/left
-function PositionBetweenNodes({
-  position,
-  pocPosition,
-}: {
-  position: number
-  pocPosition?: number
-}) {
-  const posPct = `${Math.round(position * 100)}%`
-  const pocPct = pocPosition !== undefined ? `${Math.round(pocPosition * 100)}%` : undefined
-  const style = {
-    '--pos': posPct,
-    ...(pocPct ? { '--poc': pocPct } : {}),
-  } as CSSProperties
-  return (
-    <div className="node-position" style={style}>
-      <div className="position-line">
-        <div className="position-fill"></div>
-        <i className="position-marker"></i>
-        {pocPosition !== undefined && <i className="poc-marker"></i>}
-      </div>
-      <div className="position-labels">
-        <span>0</span>
-        <span>{position.toFixed(2)}</span>
-        <span>1</span>
-      </div>
-    </div>
-  )
 }
 
 // ===== 添加自选弹窗组件 =====
@@ -241,7 +195,7 @@ export default function IndexPage() {
   const toast = useToast.getState()
   const [addStockOpen, setAddStockOpen] = useState(false)
 
-  // --- 自选列表（KPI 2 + 弹窗"已自选"判断 + 底部表格过滤）---
+  // --- 自选列表（弹窗"已自选"判断）---
   const watchlistQuery = useWatchlist()
   const watchlistItems = watchlistQuery.data?.items ?? []
   const watchlistIds = useMemo(
@@ -249,11 +203,7 @@ export default function IndexPage() {
     [watchlistItems],
   )
 
-  // --- 策略目录（目录卡）---
-  const strategiesQuery = useStrategies()
-  const strategies = strategiesQuery.data?.items ?? []
-
-  // --- DSA 最新运行（选股结果表 + KPI 1 + 目录卡 meta）---
+  // --- DSA 最新运行（选股结果表 + KPI 1）---
   const dsaRunsQuery = usePublishedRuns(STRATEGY_KEYS.DSA_SELECTOR, { limit: 1 })
   const latestDsaRun = dsaRunsQuery.data?.items[0]
   const latestRunId = latestDsaRun?.id
@@ -262,7 +212,7 @@ export default function IndexPage() {
   const selectionResultsQuery = useStrategyRunResults(latestRunId, { limit: 20 })
   const selectionResults: StrategyResult[] = selectionResultsQuery.data?.items ?? []
 
-  // --- 监控策略状态（底部表格 + 目录卡 meta）---
+  // --- 监控策略状态（右侧表格）---
   const monitorStatusQuery = useWatchlistMonitorStatus()
   const monitorStatusItems: WatchlistMonitorStatusItem[] = monitorStatusQuery.data?.items ?? []
 
@@ -330,12 +280,6 @@ export default function IndexPage() {
         total_return: fmtPct(
           pickPayload(payload, ['total_return', 'dsa_total_return', 'cumulative_return']),
         ),
-        shift_mean: fmtPct(
-          pickPayload(payload, ['shift_mean', 'offset_mean', 'dsa_offset_mean']),
-        ),
-        shift_var: fmtPct(
-          pickPayload(payload, ['shift_var', 'offset_var_rate', 'offset_variance_rate']),
-        ),
         short_pos: shortPos !== null ? `${Math.round(shortPos * 100)}%` : '-',
         pos_tag: shortPos !== null && shortPos > 0.7 ? 'warn' : 'good',
         watched: watchlistIds.has(r.instrument_id),
@@ -349,35 +293,25 @@ export default function IndexPage() {
     (s: WatchlistMonitorStatusItem): WatchlistMonitorRow => {
       const inst = instrumentMap.get(s.instrument_id)
       const metrics = s.metrics ?? {}
-      const position = toNum(metrics.position_0_1) ?? 0
-      const pocPosition = toNum(metrics.poc_position ?? metrics.poc_pos)
 
       // 后端已返回扁平节点字段；保留对对象型字段的兼容展平
       const upperNodeVal = metrics.upper_node_price ?? metrics.upper_node
       const lowerNodeVal = metrics.lower_node_price ?? metrics.lower_node
 
       let upperNodePrice: number | null = null
-      let upperNodeLow: number | null = null
-      let upperNodeHigh: number | null = null
       if (typeof upperNodeVal === 'number') {
         upperNodePrice = upperNodeVal
       } else if (upperNodeVal && typeof upperNodeVal === 'object') {
         const obj = upperNodeVal as Record<string, unknown>
         upperNodePrice = toNum(obj.price_mid ?? obj.price)
-        upperNodeLow = toNum(obj.price_low)
-        upperNodeHigh = toNum(obj.price_high)
       }
 
       let lowerNodePrice: number | null = null
-      let lowerNodeLow: number | null = null
-      let lowerNodeHigh: number | null = null
       if (typeof lowerNodeVal === 'number') {
         lowerNodePrice = lowerNodeVal
       } else if (lowerNodeVal && typeof lowerNodeVal === 'object') {
         const obj = lowerNodeVal as Record<string, unknown>
         lowerNodePrice = toNum(obj.price_mid ?? obj.price)
-        lowerNodeLow = toNum(obj.price_low)
-        lowerNodeHigh = toNum(obj.price_high)
       }
 
       return {
@@ -386,14 +320,7 @@ export default function IndexPage() {
         symbol: inst?.symbol ?? s.symbol ?? s.instrument_id.slice(0, 8),
         price: fmtNum(metrics.current_price ?? metrics.price ?? metrics.last_price ?? metrics.close),
         lower_node_price: lowerNodePrice,
-        lower_node_low: lowerNodeLow ?? toNum(metrics.lower_node_low),
-        lower_node_high: lowerNodeHigh ?? toNum(metrics.lower_node_high),
-        position,
-        poc_position: pocPosition !== null ? pocPosition : undefined,
         upper_node_price: upperNodePrice,
-        upper_node_low: upperNodeLow ?? toNum(metrics.upper_node_low),
-        upper_node_high: upperNodeHigh ?? toNum(metrics.upper_node_high),
-        upper_tag: pocPosition !== null && pocPosition > 0.8 ? 'warn' : undefined,
         latest_event: s.latest_event ?? null,
       }
     },
@@ -402,15 +329,15 @@ export default function IndexPage() {
 
   // ===== 派生数据 =====
 
-  // 选股结果行
+  // 选股结果行（首页最多展示 10 条）
   const selectionRows: SelectionRow[] = useMemo(
-    () => selectionResults.map(toSelectionRow),
+    () => selectionResults.slice(0, 10).map(toSelectionRow),
     [selectionResults, toSelectionRow],
   )
 
-  // 底部监控表格：monitor-status 已返回当前用户 active 自选股
+  // 监控表格行（首页最多展示 10 条）
   const monitorRows: WatchlistMonitorRow[] = useMemo(
-    () => monitorStatusItems.map(toMonitorRow),
+    () => monitorStatusItems.slice(0, 10).map(toMonitorRow),
     [monitorStatusItems, toMonitorRow],
   )
 
@@ -424,45 +351,6 @@ export default function IndexPage() {
   // KPI 4：通知渠道状态
   const kpi4Status = feishuChannel ? '飞书正常' : '未配置'
   const kpi4Time = fmtTime(feishuChannel?.last_verified_at)
-
-  // 目录卡数据
-  const catalogCards = useMemo(() => {
-    const cards: Array<{
-      type: 'SELECTION' | 'MONITOR'
-      status: string
-      title: string
-      desc: string
-      meta: string
-      active?: boolean
-    }> = []
-    // DSA 选股
-    const dsa = strategies.find((s) => s.strategy_key === STRATEGY_KEYS.DSA_SELECTOR)
-    if (dsa) {
-      cards.push({
-        type: 'SELECTION',
-        status: '正常',
-        title: dsa.display_name,
-        desc: '收盘后计算全市场方向稳定性、收益速度与偏移指标。',
-        meta: latestDsaRun?.finished_at
-          ? `最近完成 ${fmtTime(latestDsaRun.finished_at)}`
-          : '今日尚未运行',
-        active: true,
-      })
-    }
-    // 自选监控
-    const monitor = strategies.find((s) => s.strategy_key === STRATEGY_KEYS.WATCHLIST_MONITOR)
-    if (monitor) {
-      const latestUpdatedAt = monitorStatusItems[0]?.updated_at
-      cards.push({
-        type: 'MONITOR',
-        status: '实时',
-        title: monitor.display_name,
-        desc: '分钟级动态节点、POC、区间位置与碰触事件。',
-        meta: `${monitorStatusItems.length} 只 · ${fmtTime(latestUpdatedAt)}`,
-      })
-    }
-    return cards
-  }, [strategies, latestDsaRun, monitorStatusItems])
 
   // ===== 事件处理 =====
 
@@ -507,7 +395,7 @@ export default function IndexPage() {
       },
       {
         key: 'duration',
-        title: '持续时间',
+        title: '方向持续',
         dataType: 'number',
         sortable: true,
         filterable: true,
@@ -516,7 +404,7 @@ export default function IndexPage() {
       },
       {
         key: 'avg_return',
-        title: '平均收益率',
+        title: '平均收益',
         dataType: 'percent',
         sortable: true,
         filterable: true,
@@ -525,30 +413,12 @@ export default function IndexPage() {
       },
       {
         key: 'total_return',
-        title: '总收益率',
+        title: '总收益',
         dataType: 'percent',
         sortable: true,
         filterable: true,
         sortValue: (row) => Number(row.total_return.replace('%', '')) || 0,
         render: (row) => <span className="num pos">{row.total_return}</span>,
-      },
-      {
-        key: 'shift_mean',
-        title: '偏移均值',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => Number(row.shift_mean.replace('%', '')) || 0,
-        render: (row) => <span className="num">{row.shift_mean}</span>,
-      },
-      {
-        key: 'shift_var',
-        title: '偏移方差率',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => Number(row.shift_var.replace('%', '')) || 0,
-        render: (row) => <span className="num">{row.shift_var}</span>,
       },
       {
         key: 'short_pos',
@@ -603,7 +473,7 @@ export default function IndexPage() {
       },
       {
         key: 'price',
-        title: '当前价格',
+        title: '当前价',
         dataType: 'number',
         sortable: true,
         filterable: true,
@@ -612,38 +482,27 @@ export default function IndexPage() {
       },
       {
         key: 'lower_node',
-        title: '下方最近节点',
+        title: '下方节点',
         dataType: 'number',
         sortable: true,
         filterable: false,
         sortValue: (row) => row.lower_node_price ?? 0,
         render: (row) => (
-          <span className="num" title={row.lower_node_low != null && row.lower_node_high != null ? `${row.lower_node_low} ~ ${row.lower_node_high}` : undefined}>
+          <span className="num">
             {row.lower_node_price !== null ? row.lower_node_price.toFixed(2) : '-'}
           </span>
         ),
       },
       {
-        key: 'position',
-        title: '节点间位置 0–1',
-        dataType: 'text',
-        sortable: false,
-        filterable: false,
-        render: (row) => <PositionBetweenNodes position={row.position} pocPosition={row.poc_position} />,
-      },
-      {
         key: 'upper_node',
-        title: '上方最近节点',
+        title: '上方节点',
         dataType: 'number',
         sortable: true,
         filterable: false,
         sortValue: (row) => row.upper_node_price ?? 0,
         render: (row) => (
-          <span className="num" title={row.upper_node_low != null && row.upper_node_high != null ? `${row.upper_node_low} ~ ${row.upper_node_high}` : undefined}>
+          <span className="num">
             {row.upper_node_price !== null ? row.upper_node_price.toFixed(2) : '-'}
-            {row.upper_tag && (
-              <span className="tag warn tag-gap">POC</span>
-            )}
           </span>
         ),
       },
@@ -673,48 +532,6 @@ export default function IndexPage() {
     [],
   )
 
-  // ===== StrategySwitcher 配置 =====
-
-  const monitorOptions: StrategyOption[] = [
-    {
-      id: 'watchlistMonitor',
-      name: STRATEGIES.watchlist_monitor.name,
-      description: '节点、POC 与碰触事件',
-      kind: 'monitor',
-      version: STRATEGIES.watchlist_monitor.version,
-    },
-  ]
-
-  // 面板状态计算
-  const getPanelState = useCallback(
-    (isLoading: boolean, isError: boolean, rowCount: number): PageState => {
-      if (isLoading) return 'loading'
-      if (isError) return 'error'
-      if (rowCount === 0) return 'empty'
-      return 'ready'
-    },
-    [],
-  )
-
-  const monitorPanels: Record<string, StrategyPanel> = {
-    watchlistMonitor: {
-      id: 'watchlistMonitor',
-      state: getPanelState(monitorStatusQuery.isLoading, monitorStatusQuery.isError, monitorRows.length),
-      content: (
-        <StrategyDataTable
-          tableId="index-watchlist-monitor"
-          columns={monitorColumns}
-          rows={monitorRows}
-          rowKey={(row) => row.instrument_id}
-          loading={monitorStatusQuery.isLoading}
-          error={monitorStatusQuery.isError ? '监控状态加载失败' : null}
-          searchable={false}
-          emptyText="暂无监控计算结果"
-        />
-      ),
-    },
-  }
-
   // ===== 渲染 =====
   return (
     <>
@@ -723,7 +540,7 @@ export default function IndexPage() {
         <div>
           <h1 className="page-title">服务总览</h1>
           <div className="page-desc">
-            集中查看选股策略结果、全部监控策略计算状态和最新事件
+            集中查看选股策略结果与全部监控策略最新状态
           </div>
         </div>
         <div className="actions">
@@ -783,7 +600,7 @@ export default function IndexPage() {
         </div>
       </div>
 
-      {/* 选股结果 + 策略运行状态 */}
+      {/* 选股结果 + 监控状态 */}
       <div className="grid split-2">
         {/* 最新选股策略结果 */}
         <section className="card">
@@ -817,51 +634,33 @@ export default function IndexPage() {
           />
         </section>
 
-        {/* 策略运行状态 */}
+        {/* 监控策略状态 */}
         <section className="card">
           <div className="card-head">
             <div>
-              <div className="card-title">策略运行状态</div>
+              <div className="card-title">监控策略状态</div>
               <div className="card-sub">
-                共享后台统一计算，用户按自选关系接收结果
+                自选监控最新节点与触发事件
               </div>
             </div>
-          </div>
-          <div className="card-body">
-            <div className="strategy-catalog">
-              {catalogCards.map((card) => (
-                <div
-                  key={card.title}
-                  className={`strategy-catalog-card${card.active ? ' active' : ''}`}
-                >
-                  <span className="strategy-type-pill">{card.type}</span>
-                  <span className="badge-corner tag good">{card.status}</span>
-                  <h3>{card.title}</h3>
-                  <p>{card.desc}</p>
-                  <div className="symbol-sub">{card.meta}</div>
-                </div>
-              ))}
+            <div className="card-head-actions">
+              <Link className="btn small ghost" to="/watchlist">
+                查看全部 →
+              </Link>
             </div>
           </div>
+          <StrategyDataTable
+            tableId="index-watchlist-monitor"
+            columns={monitorColumns}
+            rows={monitorRows}
+            rowKey={(row) => row.instrument_id}
+            loading={monitorStatusQuery.isLoading}
+            error={monitorStatusQuery.isError ? '监控状态加载失败' : null}
+            searchable={false}
+            emptyText="暂无监控计算结果"
+          />
         </section>
       </div>
-
-      {/* 监控策略计算结果（StrategySwitcher） */}
-      <section className="card section-gap">
-        <div className="card-head">
-          <div>
-            <div className="card-title">监控策略计算结果</div>
-            <div className="card-sub">
-              切换策略查看同一自选池的最新计算结果
-            </div>
-          </div>
-        </div>
-        <StrategySwitcher
-          group="overviewMonitor"
-          options={monitorOptions}
-          panels={monitorPanels}
-        />
-      </section>
 
       {/* 添加自选弹窗 */}
       {addStockOpen && (

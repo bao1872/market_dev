@@ -11,7 +11,7 @@ Inputs:
     无外部输入，全部从代码事实源提取
 
 Outputs:
-    docs/数据结构.md（6 张 bar 表结构 + instruments 表 + 数据流图 + 保留策略）
+    docs/数据结构.md（6 张 bar 表结构 + instruments 表 + DSA 历史回补表 + 数据流图 + 保留策略）
     docs/操作手册.md（API 规格 + 调度任务 + 监控指标 + 故障排查 + 对账操作 + 保留策略）
 
 How to Run:
@@ -48,6 +48,10 @@ from app.models.bar import (  # noqa: E402
     BarMonthly,
     BarWeekly,
 )
+from app.models.dsa_backfill import (  # noqa: E402
+    BackfillInstrumentProgress,
+    DSABackfillJob,
+)
 from app.models.instrument import Instrument  # noqa: E402
 
 # 项目根目录（docs/ 所在位置）
@@ -59,10 +63,14 @@ _OPS_MANUAL_PATH = os.path.join(_DOCS_DIR, "操作手册.md")
 # 6 张 bar 表，按周期粒度排序
 _BAR_MODELS = [BarDaily, BarMinute, BarWeekly, BarMonthly, Bar15Min, Bar60Min]
 
+# DSA 历史回补表
+_DSA_BACKFILL_MODELS = [DSABackfillJob, BackfillInstrumentProgress]
+
 
 # ---------------------------------------------------------------------------
 # ORM 模型元数据提取
 # ---------------------------------------------------------------------------
+
 
 def _extract_column_info(col: Any) -> dict:
     """从 SQLAlchemy Column 提取字段元数据。
@@ -95,17 +103,22 @@ def _extract_table_info(model_cls: Any) -> dict:
     pk_cols = [c.name for c in table.primary_key.columns]
     indexes = [
         {"name": idx.name, "columns": [c.name for c in idx.columns]}
-        for idx in table.indexes
+        for idx in sorted(table.indexes, key=lambda idx: idx.name)
     ]
     fk_constraints = []
     for constraint in table.constraints:
-        if hasattr(constraint, "elements") and constraint.__class__.__name__ == "ForeignKeyConstraint":
+        if (
+            hasattr(constraint, "elements")
+            and constraint.__class__.__name__ == "ForeignKeyConstraint"
+        ):
             for fk in constraint.elements:
-                fk_constraints.append({
-                    "columns": [col.name for col in constraint.columns],
-                    "ref_table": fk.column.table.name,
-                    "ref_column": fk.column.name,
-                })
+                fk_constraints.append(
+                    {
+                        "columns": [col.name for col in constraint.columns],
+                        "ref_table": fk.column.table.name,
+                        "ref_column": fk.column.name,
+                    }
+                )
 
     return {
         "table_name": table.name,
@@ -120,6 +133,7 @@ def _extract_table_info(model_cls: Any) -> dict:
 # ---------------------------------------------------------------------------
 # API 路由元数据提取
 # ---------------------------------------------------------------------------
+
 
 def _extract_api_routes() -> list[dict]:
     """从 bars API 路由提取端点元数据。
@@ -139,20 +153,26 @@ def _extract_api_routes() -> list[dict]:
                 default = getattr(field_info, "default", None) if field_info else None
                 # required = default 为 None 且非 Optional
                 required = getattr(dep, "required", default is None)
-                params.append({
-                    "name": dep.name,
-                    "type": str(getattr(field_info, "annotation", "str") if field_info else "str"),
-                    "required": required,
-                    "default": default,
-                    "description": getattr(field_info, "description", "") if field_info else "",
-                })
+                params.append(
+                    {
+                        "name": dep.name,
+                        "type": str(
+                            getattr(field_info, "annotation", "str") if field_info else "str"
+                        ),
+                        "required": required,
+                        "default": default,
+                        "description": getattr(field_info, "description", "") if field_info else "",
+                    }
+                )
 
-        routes.append({
-            "path": route.path,
-            "methods": list(route.methods) if hasattr(route, "methods") else [],
-            "summary": getattr(route, "summary", "") or "",
-            "params": params,
-        })
+        routes.append(
+            {
+                "path": route.path,
+                "methods": list(route.methods) if hasattr(route, "methods") else [],
+                "summary": getattr(route, "summary", "") or "",
+                "params": params,
+            }
+        )
 
     return routes
 
@@ -160,6 +180,7 @@ def _extract_api_routes() -> list[dict]:
 # ---------------------------------------------------------------------------
 # 服务配置提取
 # ---------------------------------------------------------------------------
+
 
 def _extract_metrics_info() -> list[dict]:
     """从 bars_metrics 提取 Prometheus 指标定义。
@@ -216,12 +237,14 @@ def _extract_metrics_info() -> list[dict]:
 def _extract_retention_config() -> list[dict]:
     """从 bars_retention 提取保留策略配置。"""
     from app.services.bars_retention import get_retention_config
+
     return get_retention_config()
 
 
 def _extract_scheduler_config() -> dict:
     """从 bars_scheduler_service 提取调度配置。"""
     from app.services.bars_scheduler_service import BarsSchedulerService
+
     return {
         "daily_counts": BarsSchedulerService.DAILY_COUNTS,
         "backfill_counts": BarsSchedulerService.BACKFILL_COUNTS,
@@ -236,16 +259,17 @@ def _extract_sla_config() -> dict:
     import app.services.freshness_sla as sla_mod
     from app.services.freshness_sla import (
         BAR_15MIN_SLA_SECONDS,
+        BAR_60MIN_SLA_SECONDS,
         DAILY_SLA_SECONDS,
-        MINUTE_SLA_SECONDS,
     )
+
     sla_consts = {}
     for name in dir(sla_mod):
         if name.endswith("_SLA_SECONDS"):
             sla_consts[name] = getattr(sla_mod, name)
     return {
         "daily_sla_seconds": DAILY_SLA_SECONDS,
-        "minute_sla_seconds": MINUTE_SLA_SECONDS,
+        "bar_60min_sla_seconds": BAR_60MIN_SLA_SECONDS,
         "bar_15min_sla_seconds": BAR_15MIN_SLA_SECONDS,
         "all_sla_constants": sla_consts,
     }
@@ -254,6 +278,7 @@ def _extract_sla_config() -> dict:
 def _extract_reconcile_config() -> dict:
     """从 reconcile_bars 提取对账配置。"""
     import app.services.reconcile_bars as recon_mod
+
     return {
         "mismatch_tolerance": recon_mod._MISMATCH_TOLERANCE,
         "max_mismatch_details": recon_mod._MAX_MISMATCH_DETAILS,
@@ -266,17 +291,22 @@ def _extract_reconcile_config() -> dict:
 # 文档生成：数据结构
 # ---------------------------------------------------------------------------
 
+
 def generate_db_schema_doc() -> str:
     """生成数据结构文档（docs/数据结构.md）。
 
-    内容：6 张 bar 表结构 + instruments 表 + 数据流图 + 保留策略。
+    内容：6 张 bar 表结构 + instruments 表 + DSA 历史回补表 + 数据流图 + 保留策略。
     """
     buf = io.StringIO()
     w = buf.write
 
     w("# 数据结构文档\n\n")
-    w(f"> 自动生成 by tools/update_docs.py | 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-    w("> 事实源: ORM 模型 (app.models.bar, app.models.instrument) + 服务配置\n\n")
+    w(
+        f"> 自动生成 by tools/update_docs.py | 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    )
+    w(
+        "> 事实源: ORM 模型 (app.models.bar, app.models.instrument, app.models.dsa_backfill) + 服务配置\n\n"
+    )
     w("---\n\n")
 
     # 1. 表结构总览
@@ -284,14 +314,17 @@ def generate_db_schema_doc() -> str:
     w("| 表名 | 用途 | 主键 | 外键 |\n")
     w("|------|------|------|------|\n")
 
-    all_models = _BAR_MODELS + [Instrument]
+    all_models = _BAR_MODELS + [Instrument] + _DSA_BACKFILL_MODELS
     for model_cls in all_models:
         info = _extract_table_info(model_cls)
         pk_str = ", ".join(info["primary_key"])
-        fk_str = "; ".join(
-            f"{','.join(fk['columns'])} → {fk['ref_table']}.{fk['ref_column']}"
-            for fk in info["foreign_keys"]
-        ) or "无"
+        fk_str = (
+            "; ".join(
+                f"{','.join(fk['columns'])} → {fk['ref_table']}.{fk['ref_column']}"
+                for fk in info["foreign_keys"]
+            )
+            or "无"
+        )
         # 从 docstring 提取用途（第一行）
         purpose = info["docstring"].strip().split("\n")[0] if info["docstring"] else ""
         w(f"| {info['table_name']} | {purpose} | ({pk_str}) | {fk_str} |\n")
@@ -336,7 +369,9 @@ def generate_db_schema_doc() -> str:
             pk = "是" if col["primary_key"] else ""
             fk = col["foreign_key"] or ""
             desc = field_desc.get(col["name"], "")
-            w(f"| {col['name']} | {col['type']} | {nullable} | {default} | {pk} | {fk} | {desc} |\n")
+            w(
+                f"| {col['name']} | {col['type']} | {nullable} | {default} | {pk} | {fk} | {desc} |\n"
+            )
         w("\n")
 
     # 3. 数据流图
@@ -377,7 +412,7 @@ def generate_db_schema_doc() -> str:
     w("|------|----------|------|------|\n")
     sla_names = {
         "daily": ("DAILY_SLA_SECONDS", "日线收盘后 30 分钟内更新"),
-        "minute": ("MINUTE_SLA_SECONDS", "盘中分钟数据近实时"),
+        "60min": ("BAR_60MIN_SLA_SECONDS", "60 分钟线周期结束后 1 小时内更新"),
         "15min": ("BAR_15MIN_SLA_SECONDS", "15 分钟线周期结束后 15 分钟内更新"),
     }
     for period, (const_name, desc) in sla_names.items():
@@ -426,6 +461,7 @@ def _get_field_descriptions(table_name: str) -> dict:
 # 文档生成：操作手册
 # ---------------------------------------------------------------------------
 
+
 def generate_ops_manual_doc() -> str:
     """生成操作手册文档（docs/操作手册.md）。
 
@@ -435,7 +471,9 @@ def generate_ops_manual_doc() -> str:
     w = buf.write
 
     w("# 操作手册\n\n")
-    w(f"> 自动生成 by tools/update_docs.py | 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    w(
+        f"> 自动生成 by tools/update_docs.py | 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    )
     w("> 事实源: API 路由 (app.api.bars) + 服务配置\n\n")
     w("---\n\n")
 
@@ -532,7 +570,9 @@ def generate_ops_manual_doc() -> str:
     w("    async with AsyncSessionLocal() as session:\n")
     w("        results = await reconcile_batch(session, period='d', days=30)\n")
     w("        for r in results:\n")
-    w("            print(f\"{r.symbol}: missing={r.missing_count}, extra={r.extra_count}, mismatch={r.mismatch_count}\")\n")
+    w(
+        '            print(f"{r.symbol}: missing={r.missing_count}, extra={r.extra_count}, mismatch={r.mismatch_count}")\n'
+    )
     w("```\n\n")
 
     # 5. 保留策略配置
@@ -543,7 +583,9 @@ def generate_ops_manual_doc() -> str:
     w("|------|--------|----------|------|\n")
     for r in retention:
         desc = "永久保留" if r["is_permanent"] else f"{r['retention_days']} 天"
-        w(f"| {r['table_name']} | {r['time_column']} | {desc} | {'不清理' if r['is_permanent'] else '自动清理过期数据'} |\n")
+        w(
+            f"| {r['table_name']} | {r['time_column']} | {desc} | {'不清理' if r['is_permanent'] else '自动清理过期数据'} |\n"
+        )
     w("\n")
 
     w("### 5.1 手动执行保留策略\n\n")
@@ -555,7 +597,7 @@ def generate_ops_manual_doc() -> str:
     w("        # 预检模式（只统计不删除）\n")
     w("        results = await apply_retention_policy(session, dry_run=True)\n")
     w("        for r in results:\n")
-    w("            print(f\"{r.table_name}: 待删除={r.deleted_count}, cutoff={r.cutoff_date}\")\n")
+    w('            print(f"{r.table_name}: 待删除={r.deleted_count}, cutoff={r.cutoff_date}")\n')
     w("```\n\n")
 
     # 6. 故障排查
@@ -589,6 +631,7 @@ def generate_ops_manual_doc() -> str:
 # ---------------------------------------------------------------------------
 # 主函数
 # ---------------------------------------------------------------------------
+
 
 def _write_file(path: str, content: str) -> None:
     """写入文件（自动创建目录）。"""

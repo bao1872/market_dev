@@ -20,6 +20,7 @@ How to Run:
 
 from __future__ import annotations
 
+import base64
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -35,8 +36,7 @@ from app.models.notification import (
 )
 from app.models.outbox import Outbox
 from app.schemas.notification import DeliveryResult, NotificationMessageDTO
-from app.services.channel_adapter import get_adapter
-from app.services.notification_service import deliver_message
+from app.services.notification_service import deliver_image_message, deliver_message
 
 logger = logging.getLogger("delivery_worker")
 
@@ -160,6 +160,7 @@ async def _process_single_outbox(
     payload: dict[str, Any] = outbox_record.payload or {}
     message_id_str = payload.get("message_id")
     user_id_str = payload.get("user_id")
+    delivery_type = payload.get("delivery_type", "card")
 
     if not message_id_str or not user_id_str:
         logger.warning(
@@ -177,6 +178,25 @@ async def _process_single_outbox(
             outbox_record.id, e,
         )
         return True
+
+    # 图片投递：从 payload 解析 base64 图片 bytes
+    image_bytes: bytes | None = None
+    if delivery_type == "image":
+        image_b64 = payload.get("image_bytes_base64")
+        if not image_b64:
+            logger.warning(
+                "图片 outbox 事件缺少 image_bytes_base64: outbox_id=%s",
+                outbox_record.id,
+            )
+            return True
+        try:
+            image_bytes = base64.b64decode(image_b64)
+        except Exception as e:
+            logger.warning(
+                "图片 outbox 事件 base64 解码失败: outbox_id=%s: %s",
+                outbox_record.id, e,
+            )
+            return True
 
     # 查询消息与渠道
     message, channels = await _get_message_and_channels(db, message_id, user_id)
@@ -199,17 +219,24 @@ async def _process_single_outbox(
     delivered_count = 0
     for channel in channels:
         try:
-            delivery = await deliver_message(db, message_id, channel.id)
+            if delivery_type == "image" and image_bytes is not None:
+                delivery = await deliver_image_message(
+                    db, message_id, channel.id, image_bytes,
+                )
+            else:
+                delivery = await deliver_message(db, message_id, channel.id)
+
             if delivery.status == "success":
                 delivered_count += 1
                 logger.info(
-                    "投递成功: message_id=%s channel=%s",
-                    message_id, channel.display_name,
+                    "投递成功: message_id=%s channel=%s delivery_type=%s",
+                    message_id, channel.display_name, delivery_type,
                 )
             else:
                 logger.warning(
-                    "投递失败: message_id=%s channel=%s status=%s error=%s",
-                    message_id, channel.display_name,
+                    "投递失败: message_id=%s channel=%s delivery_type=%s "
+                    "status=%s error=%s",
+                    message_id, channel.display_name, delivery_type,
                     delivery.status, delivery.last_error_code,
                 )
 
@@ -223,14 +250,15 @@ async def _process_single_outbox(
 
         except Exception as e:
             logger.error(
-                "投递异常: message_id=%s channel=%s: %s",
-                message_id, channel.display_name, e,
+                "投递异常: message_id=%s channel=%s delivery_type=%s: %s",
+                message_id, channel.display_name, delivery_type, e,
             )
             # 不 re-raise，继续处理其他渠道
 
     logger.info(
-        "outbox 事件处理完成: outbox_id=%s message_id=%s channels=%s delivered=%s",
-        outbox_record.id, message_id, len(channels), delivered_count,
+        "outbox 事件处理完成: outbox_id=%s message_id=%s "
+        "delivery_type=%s channels=%s delivered=%s",
+        outbox_record.id, message_id, delivery_type, len(channels), delivered_count,
     )
     return True
 

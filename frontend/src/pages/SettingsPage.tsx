@@ -6,6 +6,7 @@
 // 2. 左栏 3 张卡片：会员状态 / 用户通知规则 / 我的通知渠道
 // 3. 右栏 1 张卡片：飞书配置步骤
 // 4. 两个弹窗：飞书配置弹窗（新建/编辑）、续期弹窗
+// 5. 最近事件实测弹窗：展示最近事件摘要与诊断结果
 //
 // 依赖 hooks：
 // - useMyMembership：会员状态卡（到期时间、剩余天数、环形进度）
@@ -13,6 +14,7 @@
 // - useNotificationChannels：我的通知渠道列表
 // - useCreateNotificationChannel：飞书配置弹窗"验证并保存"
 // - useTestNotificationChannel：飞书配置弹窗"发送测试消息"（编辑已有渠道时）
+// - useTestNotificationChannelLatestEvent：通知渠道卡"发送最近事件实测"
 
 import { useState, useEffect, type CSSProperties } from 'react'
 import {
@@ -23,9 +25,10 @@ import {
   useUpdateNotificationChannel,
   useDeleteNotificationChannel,
   useTestNotificationChannel,
+  useTestNotificationChannelLatestEvent,
 } from '@/hooks/useApi'
 import { useToast } from '@/store/toast'
-import type { NotificationChannel } from '@/api/endpoints'
+import type { NotificationChannel, ChannelLatestEventTestResponse } from '@/api/endpoints'
 
 // ===== 工具函数 =====
 
@@ -405,6 +408,72 @@ function FeishuModal({
   )
 }
 
+// ===== 最近事件实测弹窗 =====
+
+function LatestEventTestModal({
+  channel,
+  result,
+  error,
+  onClose,
+}: {
+  channel: NotificationChannel
+  result: ChannelLatestEventTestResponse | null
+  error: string | null
+  onClose: () => void
+}) {
+  const delivery = result?.delivery
+  const diagnostics = result?.diagnostics ?? {}
+  const eventSummary =
+    (diagnostics.event_summary as string | undefined) ||
+    (diagnostics.summary as string | undefined) ||
+    (delivery?.success ? '最近事件已投递' : '暂无事件摘要')
+
+  return (
+    <div className="modal-backdrop open" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <div>
+            <b>最近事件实测</b>
+            <div className="card-sub">{channel.display_name}</div>
+          </div>
+          <button className="icon-btn" onClick={onClose}>×</button>
+        </div>
+        <div className="modal-body">
+          {error && <div className="notice error">{error}</div>}
+          {!error && !delivery && <div className="notice">正在获取最近事件与诊断结果…</div>}
+          {delivery && (
+            <>
+              <div className={delivery.success ? 'notice' : 'notice error'}>
+                投递结果：{delivery.success ? '成功' : '失败'}
+                {delivery.error_message ? ` · ${delivery.error_message}` : ''}
+              </div>
+              <div className="card section-gap">
+                <div className="card-head">
+                  <div className="card-title">最近事件摘要</div>
+                </div>
+                <div className="card-body">
+                  <p>{eventSummary}</p>
+                </div>
+              </div>
+              <div className="card section-gap">
+                <div className="card-head">
+                  <div className="card-title">诊断详情</div>
+                </div>
+                <div className="card-body">
+                  <pre className="json-snapshot">{JSON.stringify(diagnostics, null, 2)}</pre>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+        <div className="modal-foot">
+          <button className="btn" onClick={onClose}>关闭</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ===== 主页面 =====
 
 export default function SettingsPage() {
@@ -412,10 +481,14 @@ export default function SettingsPage() {
   const membershipQuery = useMyMembership()
   const channelsQuery = useNotificationChannels()
   const deleteChannel = useDeleteNotificationChannel()
+  const latestEventTest = useTestNotificationChannelLatestEvent()
 
   const [showRenewModal, setShowRenewModal] = useState(false)
   const [showFeishuModal, setShowFeishuModal] = useState(false)
   const [editingChannel, setEditingChannel] = useState<NotificationChannel | null>(null)
+  const [latestEventChannel, setLatestEventChannel] = useState<NotificationChannel | null>(null)
+  const [latestEventResult, setLatestEventResult] = useState<ChannelLatestEventTestResponse | null>(null)
+  const [latestEventError, setLatestEventError] = useState<string | null>(null)
 
   // 通知规则表单状态
   const [cooldown, setCooldown] = useState('10')
@@ -445,6 +518,22 @@ export default function SettingsPage() {
   const handleOpenEditFeishu = (channel: NotificationChannel) => {
     setEditingChannel(channel)
     setShowFeishuModal(true)
+  }
+
+  // 发送最近事件实测
+  const handleTestLatestEvent = (channel: NotificationChannel) => {
+    setLatestEventChannel(channel)
+    setLatestEventResult(null)
+    setLatestEventError(null)
+    latestEventTest.mutate(channel.id, {
+      onSuccess: (data) => {
+        setLatestEventResult(data)
+      },
+      onError: (err: unknown) => {
+        const axiosErr = err as { response?: { data?: { detail?: string } } }
+        setLatestEventError(axiosErr.response?.data?.detail ?? '实测请求失败，请稍后重试')
+      },
+    })
   }
 
   return (
@@ -626,6 +715,13 @@ export default function SettingsPage() {
                   </span>
                   <button className="icon-btn" onClick={() => handleOpenEditFeishu(c)}>编辑</button>
                   <button
+                    className="btn small"
+                    onClick={() => handleTestLatestEvent(c)}
+                    disabled={latestEventTest.isPending}
+                  >
+                    {latestEventTest.isPending && latestEventChannel?.id === c.id ? '实测中...' : '发送最近事件实测'}
+                  </button>
+                  <button
                     className="btn small danger"
                     onClick={() => {
                       if (confirm('确定要删除此飞书通知渠道吗？')) {
@@ -692,6 +788,20 @@ export default function SettingsPage() {
         <FeishuModal
           editingChannel={editingChannel}
           onClose={() => setShowFeishuModal(false)}
+        />
+      )}
+
+      {/* 最近事件实测弹窗 */}
+      {latestEventChannel && (
+        <LatestEventTestModal
+          channel={latestEventChannel}
+          result={latestEventResult}
+          error={latestEventError}
+          onClose={() => {
+            setLatestEventChannel(null)
+            setLatestEventResult(null)
+            setLatestEventError(null)
+          }}
         />
       )}
     </>

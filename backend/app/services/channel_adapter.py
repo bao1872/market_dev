@@ -69,6 +69,28 @@ class ChannelAdapter(ABC):
             - 验证成功后渠道状态变为 active
         """
 
+    async def send_image_bytes(
+        self,
+        image_bytes: bytes,
+        channel_config: dict[str, Any],
+    ) -> DeliveryResult:
+        """发送图片 bytes 到渠道（可选实现）。
+
+        默认返回 NOT_SUPPORTED；支持图片投递的渠道（如飞书平台应用）应覆盖此方法。
+
+        Args:
+            image_bytes: PNG 图片 bytes
+            channel_config: 渠道配置
+
+        Returns:
+            DeliveryResult
+        """
+        return DeliveryResult(
+            success=False,
+            error_code="NOT_SUPPORTED",
+            error_message=f"渠道类型 {self.adapter_type} 不支持图片投递",
+        )
+
 
 # 渠道适配器注册表
 _ADAPTER_REGISTRY: dict[str, type[ChannelAdapter]] = {}
@@ -140,6 +162,17 @@ class MockChannelAdapter(ChannelAdapter):
     async def verify(self, channel_config: dict[str, Any]) -> bool:
         """Mock 验证 - 总是返回 True。"""
         return True
+
+    async def send_image_bytes(
+        self,
+        image_bytes: bytes,
+        channel_config: dict[str, Any],
+    ) -> DeliveryResult:
+        """Mock 图片投递 - 总是返回成功。"""
+        return DeliveryResult(
+            success=True,
+            provider_response={"mock": True, "image_size": len(image_bytes)},
+        )
 
 
 # 注册 Mock 适配器（开发/测试环境使用）

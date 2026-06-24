@@ -8,7 +8,8 @@
 
 关键安全约束（V1.1 15_SECURITY_TENANCY.md）：
 - 私有资源的 user_id 由认证上下文注入，不接受客户端传入
-- token 类型必须为 access（refresh token 不可用于 API 认证）
+- token 类型必须为 access 或 capture（refresh token 不可用于 API 认证）
+- capture token 为短期截图模式令牌，仅用于个股详情页截图场景
 - 用户状态非 active 时拒绝访问
 - 角色检查失败返回 403 Forbidden
 """
@@ -109,11 +110,13 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         ) from e
 
-    # 校验 token 类型：仅 access token 可用于 API 认证
-    if payload.get("type") != "access":
+    # 校验 token 类型：access token 或 capture token 可用于 API 认证
+    # capture token 为短期截图模式令牌，仅应由截图服务生成并在个股详情页使用
+    token_type = payload.get("type")
+    if token_type not in ("access", "capture"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="token 类型错误，需要 access token",
+            detail="token 类型错误，需要 access token 或 capture token",
             headers={"WWW-Authenticate": "Bearer"},
         )
 

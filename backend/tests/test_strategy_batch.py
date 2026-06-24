@@ -89,29 +89,28 @@ def test_filterable_whitelist():
 # DB 集成测试（需要 DB 环境）
 # ============================================================
 
-async def test_01_non_trading_day_rejected():
+async def test_01_non_trading_day_rejected(db_session):
     """测试 #1: 非交易日触发批次，应拒绝。"""
-    from app.db import AsyncSessionLocal
     from app.services.strategy_batch_service import StrategyBatchService
 
     service = StrategyBatchService()
     non_trading_day = date(2026, 6, 20)  # 周六
 
-    async with AsyncSessionLocal() as db:
-        result = await service.check_data_readiness(db, non_trading_day)
-        if result.is_trading_day:
-            print("测试 #01 跳过（指定日期是交易日）⚠")
-            return
-        assert not result.is_ready, "非交易日应拒绝"
-        assert result.reason is not None
-        assert "非交易日" in result.reason
+    db = db_session
+    result = await service.check_data_readiness(db, non_trading_day)
+    if result.is_trading_day:
+        print("测试 #01 跳过（指定日期是交易日）⚠")
+        return
+    assert not result.is_ready, "非交易日应拒绝"
+    assert result.reason is not None
+    assert "非交易日" in result.reason
 
     print("测试 #01 (non_trading_day_rejected) ✓")
 
 
-async def run_db_tests():
+async def run_db_tests(db_session):
     """运行 DB 集成测试。"""
-    await test_01_non_trading_day_rejected()
+    await test_01_non_trading_day_rejected(db_session)
 
 
 if __name__ == "__main__":
@@ -122,7 +121,29 @@ if __name__ == "__main__":
 
     if "--db" in sys.argv:
         print("\n=== DB 集成测试 ===")
-        asyncio.run(run_db_tests())
+        import os
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        test_database_url = os.environ.get(
+            "TEST_DATABASE_URL",
+            "postgresql://bz:es123456@127.0.0.1:5432/bz_stock_test",
+        )
+        async_url = test_database_url.replace(
+            "postgresql+psycopg://", "postgresql+asyncpg://"
+        ).replace(
+            "postgresql://", "postgresql+asyncpg://"
+        )
+        test_engine = create_async_engine(async_url, echo=False)
+        TestSessionLocal = async_sessionmaker(
+            bind=test_engine, class_=AsyncSession, expire_on_commit=False,
+        )
+
+        async def _run():
+            async with TestSessionLocal() as db_session:
+                await run_db_tests(db_session)
+            await test_engine.dispose()
+
+        asyncio.run(_run())
     else:
         print("\n=== DB 集成测试（跳过，使用 --db 参数运行）===")
 

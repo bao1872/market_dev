@@ -1,6 +1,7 @@
 // AppShell：应用主布局壳（侧栏 + 顶栏 + 内容区 + Toast）
 // 对应原型：所有页面的 .app-shell > .sidebar + .topbar + .main 结构
 // V1.5.1：角色感知导航，管理员页面始终显示管理员导航
+// V1.6.3：capture=feishu 参数触发截图模式，隐藏侧栏、用户信息与角色切换按钮
 import { type ReactNode, useState, useEffect } from 'react'
 import { useLocation, Link } from 'react-router-dom'
 import { useRoleStore } from '@/store/role'
@@ -77,6 +78,9 @@ export default function AppShell({ children }: { children: ReactNode }) {
   const pageTitle = getPageTitle(currentPath)
   const isAdminPath = currentPath.startsWith('/admin')
 
+  // 截图模式：URL 参数 capture=feishu 时隐藏侧栏、用户信息与角色切换
+  const isCaptureMode = new URLSearchParams(location.search).get('capture') === 'feishu'
+
   // 市场状态轮询（30s）
   const [marketStatus, setMarketStatus] = useState<MarketStatus | null>(null)
   useEffect(() => {
@@ -112,34 +116,22 @@ export default function AppShell({ children }: { children: ReactNode }) {
   const userRoleLabel = isAdmin ? '超级管理员 · 测试账号' : '普通用户预览'
 
   return (
-    <div className="app-shell">
+    <div className={clsx('app-shell', isCaptureMode && 'capture-mode')}>
       {/* 侧栏 */}
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark">QS</div>
-          <div>
-            <div className="brand-title">量策服务台</div>
-            <div className="brand-sub">STRATEGY SERVICE</div>
+      {!isCaptureMode && (
+        <aside className="sidebar">
+          <div className="brand">
+            <div className="brand-mark">QS</div>
+            <div>
+              <div className="brand-title">量策服务台</div>
+              <div className="brand-sub">STRATEGY SERVICE</div>
+            </div>
           </div>
-        </div>
 
-        {/* 用户服务导航 */}
-        <div className="nav-section">
-          <div className="nav-label">用户服务</div>
-          {userNavItems.map((item) => (
-            <NavItem
-              key={item.path}
-              item={item}
-              active={currentPath === item.path}
-            />
-          ))}
-        </div>
-
-        {/* 管理员控制台导航（V1.5.1：默认显示，普通用户视图隐藏） */}
-        {isAdmin && (
+          {/* 用户服务导航 */}
           <div className="nav-section">
-            <div className="nav-label">管理员控制台</div>
-            {adminNavItems.map((item) => (
+            <div className="nav-label">用户服务</div>
+            {userNavItems.map((item) => (
               <NavItem
                 key={item.path}
                 item={item}
@@ -147,32 +139,46 @@ export default function AppShell({ children }: { children: ReactNode }) {
               />
             ))}
           </div>
-        )}
 
-        {/* 侧栏底部系统状态 */}
-        <div className="sidebar-footer">
-          <div className="system-mini">
-            <div className="system-mini-row">
-              <span>
-                <i className="dot ok"></i>分钟行情
-              </span>
-              <span>实时</span>
+          {/* 管理员控制台导航（V1.5.1：默认显示，普通用户视图隐藏） */}
+          {isAdmin && (
+            <div className="nav-section">
+              <div className="nav-label">管理员控制台</div>
+              {adminNavItems.map((item) => (
+                <NavItem
+                  key={item.path}
+                  item={item}
+                  active={currentPath === item.path}
+                />
+              ))}
             </div>
-            <div className="system-mini-row">
-              <span>
-                <i className="dot ok"></i>策略引擎
-              </span>
-              <span>正常</span>
-            </div>
-            <div className="system-mini-row">
-              <span>
-                <i className="dot ok"></i>消息队列
-              </span>
-              <span>3</span>
+          )}
+
+          {/* 侧栏底部系统状态 */}
+          <div className="sidebar-footer">
+            <div className="system-mini">
+              <div className="system-mini-row">
+                <span>
+                  <i className="dot ok"></i>分钟行情
+                </span>
+                <span>实时</span>
+              </div>
+              <div className="system-mini-row">
+                <span>
+                  <i className="dot ok"></i>策略引擎
+                </span>
+                <span>正常</span>
+              </div>
+              <div className="system-mini-row">
+                <span>
+                  <i className="dot ok"></i>消息队列
+                </span>
+                <span>3</span>
+              </div>
             </div>
           </div>
-        </div>
-      </aside>
+        </aside>
+      )}
 
       {/* 顶栏 */}
       <header className="topbar">
@@ -193,8 +199,8 @@ export default function AppShell({ children }: { children: ReactNode }) {
           <button className="icon-btn" title="系统通知">
             ◔
           </button>
-          {/* V1.5.1：角色感知导航切换按钮 */}
-          {!isAdminPath && (
+          {/* V1.5.1：角色感知导航切换按钮（截图模式隐藏） */}
+          {!isCaptureMode && !isAdminPath && (
             <button
               className="btn small role-preview-toggle"
               onClick={toggleRole}
@@ -203,16 +209,20 @@ export default function AppShell({ children }: { children: ReactNode }) {
               {isAdmin ? '切换普通用户视图' : '返回管理员视图'}
             </button>
           )}
-          <div className="avatar">{userInitials}</div>
-          <div>
-            <div style={{ fontSize: '11px', fontWeight: 650 }}>{userName}</div>
-            <div style={{ fontSize: '9px', color: 'var(--muted)' }}>{userRoleLabel}</div>
-          </div>
+          {!isCaptureMode && (
+            <>
+              <div className="avatar">{userInitials}</div>
+              <div>
+                <div style={{ fontSize: '11px', fontWeight: 650 }}>{userName}</div>
+                <div style={{ fontSize: '9px', color: 'var(--muted)' }}>{userRoleLabel}</div>
+              </div>
+            </>
+          )}
         </div>
       </header>
 
       {/* 主内容区 */}
-      <main className="main">
+      <main className="main" style={isCaptureMode ? { marginLeft: 0 } : undefined}>
         <div className="content">{children}</div>
       </main>
 

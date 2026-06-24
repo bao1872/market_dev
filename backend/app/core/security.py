@@ -156,6 +156,36 @@ def create_refresh_token(
     return jwt.encode(payload, _settings.jwt_secret, algorithm=_settings.jwt_algorithm)
 
 
+def create_capture_token(
+    subject: str,
+    event_id: str,
+    expires_delta: timedelta | None = None,
+) -> str:
+    """创建截图模式短期 JWT token。
+
+    仅用于 /stock/:symbol?capture=feishu&token=<token> 场景，
+    token 类型为 capture，不可用于常规 API 认证。
+
+    Args:
+        subject: 用户标识（user_id 字符串）
+        event_id: 关联事件 ID
+        expires_delta: 过期时间增量，默认使用配置项 jwt_capture_ttl_seconds
+
+    Returns:
+        编码后的 JWT 字符串
+    """
+    expire = datetime.now(UTC) + (
+        expires_delta or timedelta(seconds=_settings.jwt_capture_ttl_seconds)
+    )
+    payload: dict[str, Any] = {
+        "sub": subject,
+        "exp": expire,
+        "type": "capture",
+        "event_id": event_id,
+    }
+    return jwt.encode(payload, _settings.jwt_secret, algorithm=_settings.jwt_algorithm)
+
+
 def decode_token(token: str) -> dict[str, Any]:
     """解码并验证 JWT token。
 

@@ -20,6 +20,7 @@ from app.models.bar import BarDaily, BarMinute
 from app.models.base import Base
 from app.models.calendar import TradingCalendar
 from app.models.config import ConfigDefinition
+from app.models.dsa_backfill import BackfillInstrumentProgress, DSABackfillJob
 from app.models.event_recipient import StrategyEventRecipient
 from app.models.instrument import Instrument
 from app.models.job import JobRun
@@ -48,10 +49,12 @@ from app.models.watchlist import UserWatchlistItem
 from app.models.worker_heartbeat import WorkerHeartbeat
 
 __all__ = [
+    "BackfillInstrumentProgress",
     "BarDaily",
     "BarMinute",
     "Base",
     "ConfigDefinition",
+    "DSABackfillJob",
     "Instrument",
     "InviteCode",
     "InviteRedemption",

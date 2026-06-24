@@ -91,9 +91,32 @@ outputs:
   - {key: offset_percentile, type: number, unit: ratio_0_1, filterable: true, sortable: true, description: "偏离率百分位"}
   # 扩展字段（用于详情展示和筛选）
   - {key: regime_value, type: integer, filterable: true, sortable: true, description: "regime 值（1=多头,0=无趋势,-1=空头）"}
+  - {key: regime_strength, type: number, unit: ratio, filterable: true, sortable: true, description: "regime 强度（每 bar 收益率）"}
   - {key: change_pct, type: number, unit: percent, filterable: true, sortable: true, description: "涨跌幅"}
   - {key: cross_up_count, type: integer, filterable: true, sortable: true, description: "VWAP 上穿次数"}
   - {key: cross_down_count, type: integer, filterable: true, sortable: true, description: "VWAP 下穿次数"}
+  - {key: last_cross_up_date, type: datetime, filterable: true, sortable: true, description: "最近一次 VWAP 上穿日期"}
+  - {key: last_cross_up_price, type: number, unit: price, filterable: true, sortable: true, description: "最近一次 VWAP 上穿价格"}
+  - {key: last_cross_down_date, type: datetime, filterable: true, sortable: true, description: "最近一次 VWAP 下穿日期"}
+  - {key: last_cross_down_price, type: number, unit: price, filterable: true, sortable: true, description: "最近一次 VWAP 下穿价格"}
+  - {key: vwap_ret_5, type: number, unit: ratio, filterable: true, sortable: true, description: "VWAP 5 日收益"}
+  - {key: vwap_ret_10, type: number, unit: ratio, filterable: true, sortable: true, description: "VWAP 10 日收益"}
+  - {key: vwap_ret_20, type: number, unit: ratio, filterable: true, sortable: true, description: "VWAP 20 日收益"}
+  - {key: dsa_vwap, type: number, unit: price, filterable: false, sortable: false, description: "DSA VWAP 值"}
+  - {key: dsa_vwap_dev_pct, type: number, unit: percent, filterable: true, sortable: true, description: "close 相对 VWAP 偏离百分比"}
+  - {key: vol_zscore, type: number, unit: zscore, filterable: true, sortable: true, description: "成交量 20 日 zscore"}
+  - {key: avg_amount_20d, type: number, unit: amount, filterable: true, sortable: true, description: "20 日平均成交额"}
+  - {key: rope_dir1_pct, type: number, unit: percent, filterable: true, sortable: true, description: "ATR Rope dir=1 占比"}
+  - {key: rope_dir0_pct, type: number, unit: percent, filterable: true, sortable: true, description: "ATR Rope dir=0 占比"}
+  - {key: rope_dir_neg1_pct, type: number, unit: percent, filterable: true, sortable: true, description: "ATR Rope dir=-1 占比"}
+  - {key: touch_rope, type: boolean, filterable: true, sortable: true, description: "当日最低价触及 ATR Rope"}
+  - {key: touch_vwap, type: boolean, filterable: true, sortable: true, description: "当日最低价触及 VWAP"}
+  - {key: rope_cross_up_count, type: integer, filterable: true, sortable: true, description: "ATR Rope 上穿次数"}
+  - {key: rope_cross_down_count, type: integer, filterable: true, sortable: true, description: "ATR Rope 下穿次数"}
+  - {key: rope_cross_up_date, type: datetime, filterable: true, sortable: true, description: "最近一次 ATR Rope 上穿日期"}
+  - {key: rope_cross_up_price, type: number, unit: price, filterable: true, sortable: true, description: "最近一次 ATR Rope 上穿价格"}
+  - {key: rope_cross_down_date, type: datetime, filterable: true, sortable: true, description: "最近一次 ATR Rope 下穿日期"}
+  - {key: rope_cross_down_price, type: number, unit: price, filterable: true, sortable: true, description: "最近一次 ATR Rope 下穿价格"}
 chart_layers:
   - id: dsa_vwap
     name: DSA VWAP

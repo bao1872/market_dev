@@ -14,7 +14,9 @@ export const apiClient = axios.create({
 // 请求拦截器：注入 Bearer Token
 apiClient.interceptors.request.use(
   (config) => {
-    const token = localStorage.getItem('auth_token')
+    // 优先从 URL 读取 capture token（截图模式），其次 localStorage
+    const urlToken = new URLSearchParams(window.location.search).get('token')
+    const token = urlToken || localStorage.getItem('auth_token')
     if (token) {
       config.headers.Authorization = `Bearer ${token}`
     }

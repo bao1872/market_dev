@@ -37,6 +37,7 @@ from app.api.admin_membership import router as admin_membership_router
 from app.api.auth import router as auth_router
 from app.api.bars import router as bars_router
 from app.api.calendar import router as calendar_router
+from app.api.dsa_backfill import router as dsa_backfill_router
 from app.api.health import router as health_router
 from app.api.indicators import router as indicators_router
 from app.api.instruments import router as instruments_router
@@ -123,6 +124,8 @@ app.include_router(indicators_router)
 app.include_router(strategies_router)
 # 策略运行与结果路由（R12）
 app.include_router(strategy_runs_router)
+# DSA 历史回补路由（ad2.md）
+app.include_router(dsa_backfill_router)
 # 监控状态查询路由（M3）
 app.include_router(monitor_states_router)
 # 策略事件查询路由（M4）

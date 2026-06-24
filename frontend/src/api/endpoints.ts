@@ -354,6 +354,13 @@ export interface ChannelTestResponse {
   delivery: DeliveryResult
 }
 
+/** 最近事件实测响应 */
+export interface ChannelLatestEventTestResponse {
+  channel: NotificationChannel
+  delivery: DeliveryResult
+  diagnostics: Record<string, unknown>
+}
+
 /** 消息预览响应 */
 export interface NotificationPreviewResponse {
   dto: Record<string, unknown>
@@ -717,7 +724,7 @@ export async function getMyMembership(): Promise<MembershipResponse> {
 }
 
 // ============================================================
-// ===== Events Summary 领域类型 =====
+// ===== Events Summary 领域类型
 // ============================================================
 
 /** 策略事件汇总响应 */
@@ -848,6 +855,18 @@ export async function getStrategyRuns(
 ): Promise<StrategyRunListResponse> {
   const { data } = await apiClient.get<StrategyRunListResponse>(
     `/strategies/${strategyKey}/runs`,
+    { params },
+  )
+  return data
+}
+
+/** 查询策略运行历史（admin，/admin 前缀路径） */
+export async function getAdminStrategyRuns(
+  strategyKey: string,
+  params?: { status?: string; limit?: number; offset?: number },
+): Promise<StrategyRunListResponse> {
+  const { data } = await apiClient.get<StrategyRunListResponse>(
+    `/admin/strategies/${strategyKey}/runs`,
     { params },
   )
   return data
@@ -1025,6 +1044,16 @@ export async function verifyNotificationChannel(channelId: string): Promise<Noti
 export async function testNotificationChannel(channelId: string): Promise<ChannelTestResponse> {
   const { data } = await apiClient.post<ChannelTestResponse>(
     `/notification-channels/${channelId}/test`,
+    null,
+    { headers: getUserIdHeader() },
+  )
+  return data
+}
+
+/** 最近事件实测（发送最近事件到渠道并返回诊断结果） */
+export async function testNotificationChannelLatestEvent(channelId: string): Promise<ChannelLatestEventTestResponse> {
+  const { data } = await apiClient.post<ChannelLatestEventTestResponse>(
+    `/notification-channels/${channelId}/test-latest-event`,
     null,
     { headers: getUserIdHeader() },
   )

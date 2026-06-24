@@ -284,7 +284,9 @@ async def main() -> None:
                 if png_path:
                     from app.services.channel_adapter import get_adapter
                     adapter = get_adapter(channel.adapter_type)
-                    img_result = await adapter.send_image(png_path, channel.target_config)
+                    with open(png_path, "rb") as f:
+                        image_bytes = f.read()
+                    img_result = await adapter.send_image_bytes(image_bytes, channel.target_config)
                     print(f"\nPNG图片推送: success={img_result.success}")
                     if not img_result.success:
                         print(f"  error: {img_result.error_code} - {img_result.error_message}")

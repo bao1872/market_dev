@@ -340,7 +340,7 @@ def test_get_bars_pagination(monkeypatch: pytest.MonkeyPatch) -> None:
     assert data["page"] == 1
     assert data["page_size"] == 2
     assert len(data["items"]) == 2
-    assert data["items"][0]["close"] == 10.2  # 第一页第一条
+    assert data["items"][0]["close"] == 13.2  # 第一页第一条（按最新返回）
 
 
 def test_get_bars_invalid_timeframe() -> None:

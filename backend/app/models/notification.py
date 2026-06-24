@@ -194,6 +194,7 @@ class MessageDelivery(Base):
     """消息投递记录 - 每次投递尝试一条记录，幂等键唯一。
 
     status: success/failed/pending/retrying
+    delivery_type: card / image
     attempt_count: 已尝试次数
     next_attempt_at: 下次重试时间（指数退避）
     """
@@ -218,6 +219,13 @@ class MessageDelivery(Base):
         nullable=False,
         default="pending",
         comment="pending/success/failed/retrying",
+    )
+    delivery_type: Mapped[str] = mapped_column(
+        Text(),
+        nullable=False,
+        default="card",
+        server_default=func.text("'card'"),
+        comment="card/image",
     )
     attempt_count: Mapped[int] = mapped_column(
         Integer(), nullable=False, default=0, server_default="0", comment="已尝试次数"
@@ -259,6 +267,7 @@ if __name__ == "__main__":
         cols = [c.name for c in cls.__table__.columns]
         print(f"{cls.__name__} columns={cols}")
         assert "id" in cols
+    assert "delivery_type" in [c.name for c in MessageDelivery.__table__.columns]
     print(f"NotificationChannel table={NotificationChannel.__tablename__}")
     print(f"NotificationTemplate table={NotificationTemplate.__tablename__}")
     print(f"NotificationMessage table={NotificationMessage.__tablename__}")

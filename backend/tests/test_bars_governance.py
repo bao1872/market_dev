@@ -110,21 +110,21 @@ def test_validate_bars_abnormal_price() -> None:
 
 
 def test_retention_config() -> None:
-    """验证保留策略配置：3 张永久保留 + 3 张限期保留。"""
+    """验证保留策略配置：1 张永久保留 + 3 张限期保留。"""
     config = get_retention_config()
-    assert len(config) == 6
+    assert len(config) == 4
 
     permanent = [c for c in config if c["is_permanent"]]
-    assert len(permanent) == 3
+    assert len(permanent) == 1
     permanent_names = {c["table_name"] for c in permanent}
-    assert permanent_names == {"bars_daily", "bars_weekly", "bars_monthly"}
+    assert permanent_names == {"bars_daily"}
 
     limited = [c for c in config if not c["is_permanent"]]
     assert len(limited) == 3
     config_by_table = {c["table_name"]: c for c in limited}
     assert config_by_table["bars_15min"]["retention_days"] == 730
     assert config_by_table["bars_60min"]["retention_days"] == 730
-    assert config_by_table["bars_minute"]["retention_days"] == 90
+    assert config_by_table["bars_minute"]["retention_days"] == 30
 
 
 @pytest.mark.asyncio
@@ -137,7 +137,7 @@ async def test_retention_dry_run() -> None:
     call_count = 0
     mock_scalars = []
 
-    for _ in range(6):
+    for _ in range(4):
         mock_result = MagicMock()
         mock_result.scalar.return_value = 0  # 无过期数据
         mock_scalars.append(mock_result)
@@ -152,7 +152,7 @@ async def test_retention_dry_run() -> None:
 
     results = await apply_retention_policy(mock_session, dry_run=True)
 
-    assert len(results) == 6
+    assert len(results) == 4
     # 永久保留的表返回 deleted_count=0, cutoff_date=None
     for r in results:
         assert isinstance(r, RetentionResult)
@@ -170,9 +170,9 @@ async def test_retention_permanent_tables_not_cleaned() -> None:
     results = await apply_retention_policy(mock_session, dry_run=True)
 
     permanent_results = [r for r in results if r.cutoff_date is None]
-    assert len(permanent_results) == 3
+    assert len(permanent_results) == 1
     permanent_names = {r.table_name for r in permanent_results}
-    assert permanent_names == {"bars_daily", "bars_weekly", "bars_monthly"}
+    assert permanent_names == {"bars_daily"}
 
 
 # ============================================================

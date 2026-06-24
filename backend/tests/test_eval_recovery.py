@@ -38,6 +38,7 @@ def _make_evaluation(
     lease_expires_at=None,
     next_retry_at=None,
     heartbeat_at=None,
+    metrics=None,
 ) -> MonitorEvaluation:
     """构造 MonitorEvaluation ORM 对象（不含 id，由 DB 生成）。"""
     return MonitorEvaluation(
@@ -49,6 +50,7 @@ def _make_evaluation(
         lease_expires_at=lease_expires_at,
         next_retry_at=next_retry_at,
         heartbeat_at=heartbeat_at,
+        metrics=metrics,
     )
 
 

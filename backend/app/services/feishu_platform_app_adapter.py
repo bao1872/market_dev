@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from typing import Any, ClassVar
 
@@ -274,31 +273,30 @@ class FeishuPlatformAppAdapter(ChannelAdapter):
             provider_response=result,
         )
 
-    async def send_image(
+    async def send_image_bytes(
         self,
-        image_path: str,
+        image_bytes: bytes,
         channel_config: dict[str, Any],
     ) -> DeliveryResult:
-        """发送图片消息到飞书平台应用。
+        """发送图片 bytes 到飞书平台应用。
 
         流程：
         1. 获取 tenant_access_token
-        2. 上传图片到飞书获取 image_key
+        2. 上传图片 bytes 到飞书获取 image_key
         3. 发送图片消息
 
         Args:
-            image_path: 本地 PNG 文件路径
+            image_bytes: PNG 图片 bytes
             channel_config: 用户级渠道配置（含 app_id/app_secret/receive_id/receive_id_type）
 
         Returns:
             DeliveryResult（success=True 表示飞书返回 code=0）
         """
-        # 校验文件
-        if not image_path or not os.path.isfile(image_path):
+        if not image_bytes or len(image_bytes) < 100:
             return DeliveryResult(
                 success=False,
                 error_code="INVALID_IMAGE",
-                error_message=f"图片文件不存在: {image_path}",
+                error_message="图片 bytes 为空或过小",
             )
 
         # 从 channel_config 读取用户级凭证
@@ -332,16 +330,15 @@ class FeishuPlatformAppAdapter(ChannelAdapter):
 
         headers = {"Authorization": f"Bearer {token}"}
 
-        # 上传图片
+        # 上传图片 bytes
         try:
             async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-                with open(image_path, "rb") as f:
-                    upload_resp = await client.post(
-                        "https://open.feishu.cn/open-apis/im/v1/images",
-                        headers=headers,
-                        data={"image_type": "message"},
-                        files={"image": ("image.png", f, "image/png")},
-                    )
+                upload_resp = await client.post(
+                    "https://open.feishu.cn/open-apis/im/v1/images",
+                    headers=headers,
+                    data={"image_type": "message"},
+                    files={"image": ("image.png", image_bytes, "image/png")},
+                )
         except httpx.TimeoutException as e:
             logger.warning("飞书图片上传超时: %s", e)
             return DeliveryResult(

@@ -23,8 +23,11 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import get_db
+from app.config import get_settings
+from app.core.deps import get_db, require_roles
+from app.models.user import User
 from app.schemas.notification import (
+    ChannelLatestEventTestResponse,
     ChannelTestResponse,
     CreateChannelRequest,
     NotificationChannelListResponse,
@@ -41,6 +44,7 @@ from app.services.feishu_card_builder import dto_to_feishu_card
 from app.services.message_builder import MessageBuilderError, build_message
 from app.services.notification_service import (
     ChannelNotFoundError,
+    LatestEventNotFoundError,
     MessageNotFoundError,
     NotificationServiceError,
     create_channel,
@@ -49,6 +53,7 @@ from app.services.notification_service import (
     list_user_messages,
     mark_message_read,
     test_channel,
+    test_channel_latest_event,
     update_channel,
     verify_channel,
 )
@@ -250,6 +255,52 @@ async def test_channel_endpoint(
     return ChannelTestResponse(
         channel=_channel_response(channel),
         delivery=delivery_result,
+    )
+
+
+@router.post(
+    "/notification-channels/{channel_id}/test-latest-event",
+    response_model=ChannelLatestEventTestResponse,
+)
+async def test_channel_latest_event_endpoint(
+    channel_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles("admin")),
+) -> ChannelLatestEventTestResponse:
+    """使用最新真实事件测试渠道图片投递链路（admin only）。
+
+    流程：
+    1. 查询渠道与用户
+    2. 取最新一条 strategy_events 记录
+    3. 生成短期 capture token 并使用 Playwright 截图
+    4. 创建图片消息并写入 Outbox
+    5. Delivery Worker 异步完成飞书图片投递
+    """
+    settings = get_settings()
+    try:
+        channel, message, meta = await test_channel_latest_event(
+            db=db,
+            channel_id=channel_id,
+            frontend_base_url=settings.frontend_base_url,
+            capture_token_ttl_seconds=settings.jwt_capture_ttl_seconds,
+        )
+    except ChannelNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
+        ) from e
+    except LatestEventNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
+        ) from e
+    except NotificationServiceError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)
+        ) from e
+    await db.commit()
+    return ChannelLatestEventTestResponse(
+        channel=_channel_response(channel),
+        message=NotificationMessageResponse.model_validate(message),
+        meta=meta,
     )
 
 

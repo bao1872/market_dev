@@ -5,7 +5,9 @@ DSA 作为第一个支持的 strategy_key，后续可扩展其他策略。
 
 核心方法：
 - create_batch_run: 创建批量计算运行（status=queued），数据就绪检查 + 预创建 run_items
+- claim_next_run: Worker 加锁领取下一个 queued 运行（status=queued → running）
 - execute_run: 执行批量计算（Worker 调用），逐标的执行策略并写入结果
+- retry_run: 基于已有运行创建新的 attempt（业务重试）
 - publish_run: 发布运行结果（admin 调用或定时任务自动发布），completed/partial_failed → published
 - check_data_readiness: 数据就绪检查（交易日/活跃标的/K线覆盖率/停牌/退市）
 - _check_quality_gates: 质量门禁检查（定时任务自动发布前置条件）
@@ -19,14 +21,18 @@ DSA 作为第一个支持的 strategy_key，后续可扩展其他策略。
   - 门禁 3：无致命错误（failed_count == 0）
 - per-stock 跟踪：strategy_run_items 记录 status/attempt_count/error/result_id
 - effective_config 从 manifest 读取并保存到 strategy_runs.effective_config（不可变）
-- 幂等：idempotency_key = strategy_key:trade_date:run_type（区分 run_type，同一天同策略允许多次运行）
+- 幂等：idempotency_key = strategy_key:strategy_version_id:trade_date:run_type:attempt_no
+  同一天同策略同类型允许多个 attempt（失败重试）
 - 结果不可变：运行 completed/published 后，write_results 拒绝写入
+- Worker 领取任务使用 SELECT ... FOR UPDATE SKIP LOCKED 加锁，避免多 Worker 竞争
+- execute_run 使用独立 Session 心跳，每 30 秒更新 heartbeat_at / lease_expires_at
 
 禁异常吞没：所有异常补充上下文后 re-raise。
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -39,9 +45,10 @@ from typing import Any
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db import AsyncSessionLocal
 from app.models.bar import BarDaily
 from app.models.instrument import Instrument
-from app.models.strategy import StrategyVersion
+from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.strategy_run import StrategyRun, StrategyRunItem
 from app.repositories import strategy_result_repository
 from app.repositories.bar_repository import get_bars
@@ -67,13 +74,58 @@ _STRATEGY_BATCH_DAILY_LOOKBACK_DAYS = 5000
 _LEASE_DURATION_MINUTES = 30  # Worker claim 后租约时长（分钟）
 _MAX_ATTEMPTS = 3  # 最大重试次数（超过后标记 failed）
 _STALE_QUEUED_HOURS = 2  # queued 状态超过此小时数视为 stale
-_HEARTBEAT_INTERVAL_SECONDS = 60  # 心跳更新间隔（秒）
+_HEARTBEAT_INTERVAL_SECONDS = 30  # 独立心跳更新间隔（秒）
+
+# [StrategyRun] - 触发方式常量
+_RUN_TYPE_SCHEDULED = "scheduled"
+_RUN_TYPE_MANUAL = "manual"
+_RUN_TYPE_REPLAY = "replay"
+_RUN_TYPE_BACKFILL = "backfill"
+VALID_RUN_TYPES = {
+    _RUN_TYPE_SCHEDULED, _RUN_TYPE_MANUAL, _RUN_TYPE_REPLAY, _RUN_TYPE_BACKFILL,
+}
+
+# [StrategyRun] - 去重状态分组
+# 这些状态存在时，不允许创建新的 attempt（直接返回已存在 run）
+_BLOCKING_STATUSES = {"published", "completed", "running", "queued"}
+# 这些状态存在时，允许创建下一个 attempt（业务重试）
+_RETRYABLE_STATUSES = {"failed", "partial_failed", "interrupted"}
 
 
 def _get_worker_id() -> str:
     """生成当前 Worker 的唯一标识（hostname:pid）。"""
     import socket
     return f"{socket.gethostname()}:{os.getpid()}"
+
+
+async def _run_heartbeat_task(run_id: uuid.UUID, worker_id: str) -> None:
+    """[StrategyRun] - 独立 Session 心跳任务。
+
+    每 _HEARTBEAT_INTERVAL_SECONDS 秒使用独立 AsyncSessionLocal 更新
+    heartbeat_at / lease_expires_at / worker_id，与主执行 Session 解耦。
+
+    Args:
+        run_id: 运行 ID
+        worker_id: Worker 标识
+    """
+    while True:
+        try:
+            await asyncio.sleep(_HEARTBEAT_INTERVAL_SECONDS)
+            async with AsyncSessionLocal() as hb_db:
+                run = await hb_db.get(StrategyRun, run_id)
+                if run is None or run.status != "running":
+                    return
+                now = datetime.now(UTC)
+                run.heartbeat_at = now
+                run.lease_expires_at = now + timedelta(minutes=_LEASE_DURATION_MINUTES)
+                run.worker_id = worker_id
+                await hb_db.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[StrategyRun] 独立心跳更新失败 run_id=%s: %s", run_id, exc,
+            )
 
 
 @dataclass
@@ -117,7 +169,9 @@ class StrategyBatchService:
         service = StrategyBatchService()
         run = await service.create_batch_run(db, "dsa_selector", date(2026, 6, 20))
         # Worker 轮询 queued run 并执行
-        await service.execute_run(db, run.id)
+        claimed = await service.claim_next_run(db)
+        await db.commit()
+        await service.execute_run(db, claimed.id)
         # Admin 发布
         await service.publish_run(db, run.id)
     """
@@ -199,32 +253,42 @@ class StrategyBatchService:
         """创建批量计算运行（status=queued）。
 
         流程：
-        1. 查找策略最新 released 版本
-        2. 数据就绪检查（非交易日/数据未就绪则拒绝）
-        3. 生成幂等键：strategy_key:run_type:trade_date
-        4. 创建 StrategyRun（status=queued, effective_config 从 manifest 读取）
-        5. 预创建 strategy_run_items（status=pending）
+        1. 校验 run_type 合法
+        2. 查找策略最新 released 版本
+        3. 数据就绪检查（非交易日/数据未就绪则拒绝）
+        4. 查询当天同 (strategy_version_id, trade_date, run_type) 的所有 runs
+        5. 若存在 published/completed/running/queued 状态 run，直接返回（幂等）
+        6. 若存在 failed/partial_failed/interrupted 状态 run，创建 attempt_no = max + 1
+        7. 生成幂等键：strategy_key:strategy_version_id:trade_date:run_type:attempt_no
+        8. 创建 StrategyRun（status=queued, effective_config 从 manifest 读取）
+        9. 预创建 strategy_run_items（status=pending）
 
         Args:
             db: 异步会话
             strategy_key: 策略 key（如 "dsa_selector"）
             trade_date: 交易日
-            run_type: 触发方式（manual/scheduled/replay）
+            run_type: 触发方式（manual/scheduled/replay/backfill）
             instrument_ids: 指定标的列表（None 表示全市场活跃标的）
 
         Returns:
             StrategyRun ORM 对象（status=queued）
 
         Raises:
-            ValueError: 非交易日/数据未就绪/策略无可用版本
+            ValueError: 非交易日/数据未就绪/策略无可用版本/非法 run_type
             RuntimeError: 创建失败
         """
-        # 1. 查找策略最新 released 版本
+        # 1. 校验 run_type
+        if run_type not in VALID_RUN_TYPES:
+            raise ValueError(
+                f"非法 run_type: {run_type}（合法值: {sorted(VALID_RUN_TYPES)})"
+            )
+
+        # 2. 查找策略最新 released 版本
         version_id, version = await self._get_latest_released_version(
             db, strategy_key
         )
 
-        # 2. 数据就绪检查
+        # 3. 数据就绪检查
         readiness = await self.check_data_readiness(db, trade_date)
         if not readiness.is_ready:
             raise ValueError(
@@ -232,23 +296,56 @@ class StrategyBatchService:
                 f"reason={readiness.reason}"
             )
 
-        # 3. 生成幂等键（区分 run_type，同一天同策略允许 scheduled + manual 各一次）
-        idempotency_key = f"{strategy_key}:{trade_date.isoformat()}:{run_type}"
+        # 4. 查询当天同 (version, date, run_type) 的所有 runs
+        runs_stmt = select(StrategyRun).where(
+            StrategyRun.strategy_version_id == version_id,
+            StrategyRun.trade_date == trade_date,
+            StrategyRun.run_type == run_type,
+        )
+        runs_result = await db.execute(runs_stmt)
+        existing_runs = list(runs_result.scalars().all())
 
-        # 检查是否已存在（幂等）
-        existing_stmt = select(StrategyRun).where(
+        # 5. 存在进行中的 run（published/completed/running/queued），直接返回
+        blocking_run = next(
+            (r for r in existing_runs if r.status in _BLOCKING_STATUSES), None
+        )
+        if blocking_run is not None:
+            logger.info(
+                "批量计算已存在进行中的运行: run_id=%s, status=%s, "
+                "strategy_key=%s, trade_date=%s, run_type=%s",
+                blocking_run.id, blocking_run.status,
+                strategy_key, trade_date, run_type,
+            )
+            return blocking_run
+
+        # 6. 失败运行不阻断当日重试：基于最大 attempt_no 创建新 attempt
+        attempt_no = 1
+        retryable_runs = [
+            r for r in existing_runs if r.status in _RETRYABLE_STATUSES
+        ]
+        if retryable_runs:
+            attempt_no = max((r.attempt_no or 1) for r in retryable_runs) + 1
+
+        # 7. 生成幂等键（含 strategy_version_id 与 attempt_no）
+        idempotency_key = (
+            f"{strategy_key}:{version_id}:{trade_date.isoformat()}:"
+            f"{run_type}:{attempt_no}"
+        )
+
+        # 防御并发：二次校验幂等键唯一性
+        existing_key_stmt = select(StrategyRun).where(
             StrategyRun.idempotency_key == idempotency_key
         )
-        existing_result = await db.execute(existing_stmt)
-        existing_run = existing_result.scalar_one_or_none()
-        if existing_run is not None:
+        existing_key_result = await db.execute(existing_key_stmt)
+        existing_key_run = existing_key_result.scalar_one_or_none()
+        if existing_key_run is not None:
             logger.info(
-                "批量计算已存在（幂等）: idempotency_key=%s, run_id=%s",
-                idempotency_key, existing_run.id,
+                "幂等键已存在（并发）: idempotency_key=%s, run_id=%s",
+                idempotency_key, existing_key_run.id,
             )
-            return existing_run
+            return existing_key_run
 
-        # 4. 从 manifest 读取 effective_config
+        # 8. 从 manifest 读取 effective_config
         manifest = version.manifest
         parameters = manifest.get("parameters", [])
         effective_config: dict[str, Any] = {
@@ -260,11 +357,11 @@ class StrategyBatchService:
             config_str.encode("utf-8")
         ).hexdigest()[:16]
 
-        # 5. 解析标的列表
+        # 9. 解析标的列表
         if instrument_ids is None:
             instrument_ids = await self._resolve_active_instruments(db, trade_date)
 
-        # 6. 创建 StrategyRun
+        # 10. 创建 StrategyRun
         run = StrategyRun(
             strategy_version_id=version_id,
             run_type=run_type,
@@ -283,6 +380,7 @@ class StrategyBatchService:
             succeeded_count=0,
             failed_count=0,
             skipped_count=0,
+            attempt_no=attempt_no,
         )
         db.add(run)
         try:
@@ -294,7 +392,7 @@ class StrategyBatchService:
                 f"trade_date={trade_date}: {exc}"
             ) from exc
 
-        # 7. 预创建 strategy_run_items（status=pending）
+        # 11. 预创建 strategy_run_items（status=pending）
         run_items = [
             StrategyRunItem(
                 run_id=run.id,
@@ -315,48 +413,171 @@ class StrategyBatchService:
 
         logger.info(
             "创建批量计算: run_id=%s, strategy_key=%s, trade_date=%s, "
-            "instruments=%d, effective_config_hash=%s",
-            run.id, strategy_key, trade_date,
+            "run_type=%s, attempt_no=%d, instruments=%d, effective_config_hash=%s",
+            run.id, strategy_key, trade_date, run_type, attempt_no,
             len(instrument_ids), effective_config_hash,
         )
         return run
 
-    async def execute_run(self, db: AsyncSession, run_id: uuid.UUID) -> None:
-        """执行批量计算（由 Worker 调用）。
+    async def retry_run(
+        self,
+        db: AsyncSession,
+        run_id: uuid.UUID,
+    ) -> StrategyRun:
+        """基于已有运行创建新的 attempt（业务重试）。
 
-        流程：
-        1. 加载 StrategyRun，校验 status=queued
-        2. 更新 status=running
-        3. 加载 StrategyVersion + 策略运行时
-        4. 查询 pending 的 strategy_run_items
-        5. 逐标的执行：
-           - 更新 item status=running
-           - 拉取日线行情（lookback=800 bars）
-           - 策略 execute(context)
-           - 写入 strategy_results + strategy_result_metrics
-           - 更新 item status=succeeded/failed/skipped
-        6. 汇总统计，更新 run status=completed/partial_failed
+        旧运行保留，新运行 attempt_no = 同维度最大 attempt_no + 1。
 
         Args:
             db: 异步会话
-            run_id: 运行 ID
+            run_id: 原运行 ID
+
+        Returns:
+            新建的 StrategyRun（status=queued）
 
         Raises:
-            ValueError: run 不存在或状态非 queued
-            RuntimeError: 执行失败
+            ValueError: 运行不存在或状态不允许重试
+            RuntimeError: 创建失败
         """
-        # 1. 加载 StrategyRun
-        run_stmt = select(StrategyRun).where(StrategyRun.id == run_id)
-        run_result = await db.execute(run_stmt)
-        run = run_result.scalar_one_or_none()
+        # 1. 加载原运行
+        run = await db.get(StrategyRun, run_id)
         if run is None:
             raise ValueError(f"运行不存在: run_id={run_id}")
-        if run.status != "queued":
+        if run.status not in _RETRYABLE_STATUSES:
             raise ValueError(
-                f"运行状态非 queued（当前 {run.status}），拒绝执行: run_id={run_id}"
+                f"运行状态不允许重试（当前 {run.status}，"
+                f"仅 {sorted(_RETRYABLE_STATUSES)} 可重试）: run_id={run_id}"
             )
 
-        # 2. 更新 status=running，设置租约字段（Worker claim 时赋值）
+        # 2. 计算新 attempt_no
+        runs_stmt = select(StrategyRun).where(
+            StrategyRun.strategy_version_id == run.strategy_version_id,
+            StrategyRun.trade_date == run.trade_date,
+            StrategyRun.run_type == run.run_type,
+        )
+        runs_result = await db.execute(runs_stmt)
+        sibling_runs = list(runs_result.scalars().all())
+        attempt_no = max((r.attempt_no or 1) for r in sibling_runs) + 1
+
+        # 3. 解析 strategy_key
+        strategy_key = None
+        if run.input_overrides:
+            strategy_key = run.input_overrides.get("strategy_key")
+        if strategy_key is None:
+            version = await db.get(StrategyVersion, run.strategy_version_id)
+            if version is None:
+                raise ValueError(
+                    f"策略版本不存在: strategy_version_id={run.strategy_version_id}"
+                )
+            definition = await db.get(
+                StrategyDefinition, version.strategy_definition_id
+            )
+            if definition is None:
+                raise ValueError(
+                    f"策略定义不存在: strategy_definition_id={version.strategy_definition_id}"
+                )
+            strategy_key = definition.strategy_key
+
+        # 4. 生成幂等键
+        idempotency_key = (
+            f"{strategy_key}:{run.strategy_version_id}:"
+            f"{run.trade_date.isoformat()}:{run.run_type}:{attempt_no}"
+        )
+
+        # 5. 创建新运行（复制原运行配置）
+        new_run = StrategyRun(
+            strategy_version_id=run.strategy_version_id,
+            run_type=run.run_type,
+            trade_date=run.trade_date,
+            status="queued",
+            input_overrides=dict(run.input_overrides) if run.input_overrides else {},
+            started_at=None,
+            queued_at=datetime.now(UTC),
+            idempotency_key=idempotency_key,
+            effective_config=run.effective_config,
+            effective_config_hash=run.effective_config_hash,
+            total_instruments=run.total_instruments,
+            succeeded_count=0,
+            failed_count=0,
+            skipped_count=0,
+            attempt_no=attempt_no,
+        )
+        db.add(new_run)
+        try:
+            await db.flush()
+        except Exception as exc:
+            await db.rollback()
+            raise RuntimeError(
+                f"创建重试运行失败 run_id={run_id}: {exc}"
+            ) from exc
+
+        # 6. 复制原运行的 instrument 列表（从 run_items 恢复）
+        items_stmt = select(StrategyRunItem.instrument_id).where(
+            StrategyRunItem.run_id == run.id
+        )
+        items_result = await db.execute(items_stmt)
+        instrument_ids = [row[0] for row in items_result.all()]
+
+        if instrument_ids:
+            run_items = [
+                StrategyRunItem(
+                    run_id=new_run.id,
+                    instrument_id=iid,
+                    status="pending",
+                    attempt_count=0,
+                )
+                for iid in instrument_ids
+            ]
+            db.add_all(run_items)
+            try:
+                await db.flush()
+            except Exception as exc:
+                await db.rollback()
+                raise RuntimeError(
+                    f"预创建重试 run_items 失败 run_id={new_run.id}: {exc}"
+                ) from exc
+
+        logger.info(
+            "创建重试运行: new_run_id=%s, original_run_id=%s, strategy_key=%s, "
+            "trade_date=%s, attempt_no=%d",
+            new_run.id, run.id, strategy_key, run.trade_date, attempt_no,
+        )
+        return new_run
+
+    async def claim_next_run(
+        self,
+        db: AsyncSession,
+    ) -> StrategyRun | None:
+        """Worker 加锁领取下一个 queued 运行。
+
+        使用 SELECT ... FOR UPDATE SKIP LOCKED 避免多 Worker 竞争。
+        领取成功后更新 status=running，设置 worker_id / 心跳 / 租约。
+
+        Args:
+            db: 异步会话
+
+        Returns:
+            StrategyRun（status=running），无 queued 任务时返回 None
+
+        Raises:
+            RuntimeError: 领取失败
+        """
+        stmt = (
+            select(StrategyRun)
+            .where(StrategyRun.status == "queued")
+            .order_by(StrategyRun.queued_at)
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+        try:
+            result = await db.execute(stmt)
+        except Exception as exc:
+            raise RuntimeError(f"领取任务查询失败: {exc}") from exc
+
+        run = result.scalar_one_or_none()
+        if run is None:
+            return None
+
         now = datetime.now(UTC)
         run.status = "running"
         run.started_at = now
@@ -367,176 +588,208 @@ class StrategyBatchService:
             await db.flush()
         except Exception as exc:
             await db.rollback()
-            raise RuntimeError(
-                f"更新运行状态为 running 失败 run_id={run_id}: {exc}"
-            ) from exc
+            raise RuntimeError(f"领取任务状态更新失败 run_id={run.id}: {exc}") from exc
 
-        # 3. 加载 StrategyVersion + 策略运行时
-        version_stmt = select(StrategyVersion).where(StrategyVersion.id == run.strategy_version_id)
-        version_result = await db.execute(version_stmt)
-        version = version_result.scalar_one_or_none()
-        if version is None:
-            run.status = "failed"
-            await db.flush()
+        logger.info(
+            "Worker 领取任务: run_id=%s, worker_id=%s, lease_expires_at=%s",
+            run.id, run.worker_id, run.lease_expires_at,
+        )
+        return run
+
+    async def execute_run(self, db: AsyncSession, run_id: uuid.UUID) -> None:
+        """执行批量计算（由 Worker 调用）。
+
+        流程：
+        1. 加载 StrategyRun，校验 status=running（已由 claim_next_run 领取）
+        2. 启动独立 Session 心跳任务
+        3. 加载 StrategyVersion + 策略运行时
+        4. 查询 pending 的 strategy_run_items
+        5. 逐标的执行并写入结果
+        6. 汇总统计，更新 run status=completed/partial_failed/failed
+
+        Args:
+            db: 异步会话
+            run_id: 运行 ID
+
+        Raises:
+            ValueError: run 不存在或状态非 running
+            RuntimeError: 执行失败
+        """
+        # 1. 加载 StrategyRun
+        run = await db.get(StrategyRun, run_id)
+        if run is None:
+            raise ValueError(f"运行不存在: run_id={run_id}")
+        if run.status != "running":
             raise ValueError(
-                f"策略版本不存在: strategy_version_id={run.strategy_version_id}"
+                f"运行状态非 running（当前 {run.status}），拒绝执行: run_id={run_id}"
             )
+
+        worker_id = run.worker_id or _get_worker_id()
+
+        # 2. 启动独立 Session 心跳任务
+        heartbeat_task = asyncio.create_task(
+            _run_heartbeat_task(run.id, worker_id)
+        )
 
         try:
-            runtime = await StrategyLoader.load(version)
-        except Exception as exc:
-            run.status = "failed"
-            await db.flush()
-            raise RuntimeError(
-                f"加载策略运行时失败 run_id={run_id}: {exc}"
-            ) from exc
-
-        # 4. 查询 pending 的 strategy_run_items
-        items_stmt = (
-            select(StrategyRunItem)
-            .where(
-                and_(
-                    StrategyRunItem.run_id == run_id,
-                    StrategyRunItem.status == "pending",
+            # 3. 加载 StrategyVersion + 策略运行时
+            version = await db.get(StrategyVersion, run.strategy_version_id)
+            if version is None:
+                run.status = "failed"
+                run.finished_at = datetime.now(UTC)
+                await db.flush()
+                raise ValueError(
+                    f"策略版本不存在: strategy_version_id={run.strategy_version_id}"
                 )
+
+            try:
+                runtime = await StrategyLoader.load(version)
+            except Exception as exc:
+                run.status = "failed"
+                run.finished_at = datetime.now(UTC)
+                await db.flush()
+                raise RuntimeError(
+                    f"加载策略运行时失败 run_id={run_id}: {exc}"
+                ) from exc
+
+            # 4. 查询 pending 的 strategy_run_items
+            items_stmt = (
+                select(StrategyRunItem)
+                .where(
+                    and_(
+                        StrategyRunItem.run_id == run_id,
+                        StrategyRunItem.status == "pending",
+                    )
+                )
+                .order_by(StrategyRunItem.id)
             )
-            .order_by(StrategyRunItem.id)
-        )
-        items_result = await db.execute(items_stmt)
-        run_items = list(items_result.scalars().all())
+            items_result = await db.execute(items_stmt)
+            run_items = list(items_result.scalars().all())
 
-        if not run_items:
-            # 无待执行标的，直接完成
-            run.status = "completed"
-            run.finished_at = datetime.now(UTC)
-            await db.flush()
-            logger.info("批量计算无待执行标的，直接完成: run_id=%s", run_id)
-            return
+            if not run_items:
+                # 无待执行标的，直接完成
+                run.status = "completed"
+                run.finished_at = datetime.now(UTC)
+                await db.flush()
+                logger.info("批量计算无待执行标的，直接完成: run_id=%s", run_id)
+                return
 
-        # 5. 逐标的执行
-        succeeded = 0
-        failed = 0
-        skipped = 0
-        all_results = []
-        _last_heartbeat = datetime.now(UTC)
+            # 5. 逐标的执行
+            succeeded = 0
+            failed = 0
+            skipped = 0
+            all_results = []
 
-        for item in run_items:
-            # 心跳：每隔 _HEARTBEAT_INTERVAL_SECONDS 更新 heartbeat_at 和 lease_expires_at
-            now_hb = datetime.now(UTC)
-            if (now_hb - _last_heartbeat).total_seconds() >= _HEARTBEAT_INTERVAL_SECONDS:
-                run.heartbeat_at = now_hb
-                run.lease_expires_at = now_hb + timedelta(minutes=_LEASE_DURATION_MINUTES)
-                _last_heartbeat = now_hb
+            for item in run_items:
+                item.status = "running"
+                item.started_at = datetime.now(UTC)
+                item.attempt_count += 1
                 try:
                     await db.flush()
                 except Exception as exc:
-                    # 心跳失败不中断执行，仅记录警告
-                    logger.warning(
-                        "心跳更新失败 run_id=%s: %s", run_id, exc,
-                    )
+                    await db.rollback()
+                    raise RuntimeError(
+                        f"更新 run_item 状态为 running 失败 item_id={item.id}: {exc}"
+                    ) from exc
 
-            item.status = "running"
-            item.started_at = datetime.now(UTC)
-            item.attempt_count += 1
-            try:
-                await db.flush()
-            except Exception as exc:
-                await db.rollback()
-                raise RuntimeError(
-                    f"更新 run_item 状态为 running 失败 item_id={item.id}: {exc}"
-                ) from exc
-
-            try:
-                result = await self._execute_single_instrument(
-                    db, run, version, runtime, item
-                )
-                if result is not None:
-                    all_results.append(result)
-                    item.status = "succeeded"
-                    item.finished_at = datetime.now(UTC)
-                    succeeded += 1
-                else:
-                    item.status = "skipped"
-                    item.finished_at = datetime.now(UTC)
-                    skipped += 1
-            except Exception as exc:
-                logger.warning(
-                    "标的执行失败 instrument_id=%s: %s",
-                    item.instrument_id, exc,
-                )
-                item.status = "failed"
-                item.error_message = str(exc)[:500]
-                item.finished_at = datetime.now(UTC)
-                failed += 1
-
-            try:
-                await db.flush()
-            except Exception as exc:
-                await db.rollback()
-                raise RuntimeError(
-                    f"更新 run_item 状态失败 item_id={item.id}: {exc}"
-                ) from exc
-
-        # 5.1 批量写入结果
-        if all_results:
-            try:
-                await strategy_result_repository.write_results(
-                    db, run.id, run.strategy_version_id, all_results
-                )
-            except Exception as exc:
-                await db.rollback()
-                raise RuntimeError(
-                    f"批量写入结果失败 run_id={run_id}: {exc}"
-                ) from exc
-
-        # 6. 汇总统计，更新 run status
-        run.succeeded_count = succeeded
-        run.failed_count = failed
-        run.skipped_count = skipped
-        run.finished_at = datetime.now(UTC)
-
-        if failed == 0:
-            run.status = "completed"
-        elif succeeded > 0:
-            run.status = "partial_failed"
-        else:
-            run.status = "failed"
-
-        try:
-            await db.flush()
-        except Exception as exc:
-            await db.rollback()
-            raise RuntimeError(
-                f"更新运行汇总状态失败 run_id={run_id}: {exc}"
-            ) from exc
-
-        logger.info(
-            "批量计算完成: run_id=%s, status=%s, "
-            "total=%d, succeeded=%d, failed=%d, skipped=%d",
-            run_id, run.status,
-            len(run_items), succeeded, failed, skipped,
-        )
-
-        # 定时任务自动发布：检查质量门禁
-        if run.run_type == "scheduled":
-            if await self._check_quality_gates(run):
                 try:
-                    await self.publish_run(db, run_id)
-                    logger.info(
-                        "定时任务自动发布成功: run_id=%s, trade_date=%s",
-                        run_id, run.trade_date,
+                    result = await self._execute_single_instrument(
+                        db, run, version, runtime, item
+                    )
+                    if result is not None:
+                        all_results.append(result)
+                        item.status = "succeeded"
+                        item.finished_at = datetime.now(UTC)
+                        succeeded += 1
+                    else:
+                        item.status = "skipped"
+                        item.finished_at = datetime.now(UTC)
+                        skipped += 1
+                except Exception as exc:
+                    logger.warning(
+                        "标的执行失败 instrument_id=%s: %s",
+                        item.instrument_id, exc,
+                    )
+                    item.status = "failed"
+                    item.error_message = str(exc)[:500]
+                    item.finished_at = datetime.now(UTC)
+                    failed += 1
+
+                try:
+                    await db.flush()
+                except Exception as exc:
+                    await db.rollback()
+                    raise RuntimeError(
+                        f"更新 run_item 状态失败 item_id={item.id}: {exc}"
+                    ) from exc
+
+            # 5.1 批量写入结果
+            if all_results:
+                try:
+                    await strategy_result_repository.write_results(
+                        db, run.id, run.strategy_version_id, all_results
                     )
                 except Exception as exc:
-                    # 自动发布失败不影响运行结果，仅记录警告
-                    logger.warning(
-                        "定时任务自动发布失败（需手动发布）: run_id=%s, %s",
-                        run_id, exc,
-                    )
+                    await db.rollback()
+                    raise RuntimeError(
+                        f"批量写入结果失败 run_id={run_id}: {exc}"
+                    ) from exc
+
+            # 6. 汇总统计，更新 run status
+            run.succeeded_count = succeeded
+            run.failed_count = failed
+            run.skipped_count = skipped
+            run.finished_at = datetime.now(UTC)
+
+            if failed == 0:
+                run.status = "completed"
+            elif succeeded > 0:
+                run.status = "partial_failed"
             else:
-                logger.info(
-                    "定时任务质量门禁未通过，跳过自动发布: run_id=%s, status=%s",
-                    run_id, run.status,
-                )
+                run.status = "failed"
+
+            try:
+                await db.flush()
+            except Exception as exc:
+                await db.rollback()
+                raise RuntimeError(
+                    f"更新运行汇总状态失败 run_id={run_id}: {exc}"
+                ) from exc
+
+            logger.info(
+                "批量计算完成: run_id=%s, status=%s, "
+                "total=%d, succeeded=%d, failed=%d, skipped=%d",
+                run_id, run.status,
+                len(run_items), succeeded, failed, skipped,
+            )
+
+            # 定时任务自动发布：检查质量门禁
+            if run.run_type == _RUN_TYPE_SCHEDULED:
+                if await self._check_quality_gates(run):
+                    try:
+                        await self.publish_run(db, run_id)
+                        logger.info(
+                            "定时任务自动发布成功: run_id=%s, trade_date=%s",
+                            run_id, run.trade_date,
+                        )
+                    except Exception as exc:
+                        # 自动发布失败不影响运行结果，仅记录警告
+                        logger.warning(
+                            "定时任务自动发布失败（需手动发布）: run_id=%s, %s",
+                            run_id, exc,
+                        )
+                else:
+                    logger.info(
+                        "定时任务质量门禁未通过，跳过自动发布: run_id=%s, status=%s",
+                        run_id, run.status,
+                    )
+        finally:
+            # 取消独立心跳任务
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
 
     async def publish_run(self, db: AsyncSession, run_id: uuid.UUID) -> StrategyRun:
         """发布运行结果（admin 调用）。
@@ -555,9 +808,7 @@ class StrategyBatchService:
             ValueError: run 不存在或状态不允许发布
             RuntimeError: 更新失败
         """
-        run_stmt = select(StrategyRun).where(StrategyRun.id == run_id)
-        run_result = await db.execute(run_stmt)
-        run = run_result.scalar_one_or_none()
+        run = await db.get(StrategyRun, run_id)
         if run is None:
             raise ValueError(f"运行不存在: run_id={run_id}")
 
@@ -964,26 +1215,36 @@ if __name__ == "__main__":
     methods = [
         "create_batch_run", "execute_run", "publish_run",
         "check_data_readiness", "_check_quality_gates",
-        "recover_stale_runs",
+        "recover_stale_runs", "claim_next_run", "retry_run",
     ]
     for m in methods:
         assert hasattr(StrategyBatchService, m), f"缺少方法: {m}"
         assert callable(getattr(StrategyBatchService, m)), f"方法不可调用: {m}"
     print(f"方法存在: {methods} ✓")
 
-    # 验证 AUTO_PUBLISH_COVERAGE_THRESHOLD 常量
+    # 验证常量
     assert AUTO_PUBLISH_COVERAGE_THRESHOLD == 0.8
     print(f"AUTO_PUBLISH_COVERAGE_THRESHOLD={AUTO_PUBLISH_COVERAGE_THRESHOLD} ✓")
+
+    assert _HEARTBEAT_INTERVAL_SECONDS == 30
+    print(f"_HEARTBEAT_INTERVAL_SECONDS={_HEARTBEAT_INTERVAL_SECONDS} ✓")
+
+    assert VALID_RUN_TYPES == {"scheduled", "manual", "replay", "backfill"}
+    print(f"VALID_RUN_TYPES={VALID_RUN_TYPES} ✓")
+
+    assert _BLOCKING_STATUSES == {"published", "completed", "running", "queued"}
+    print(f"_BLOCKING_STATUSES={_BLOCKING_STATUSES} ✓")
+
+    assert _RETRYABLE_STATUSES == {"failed", "partial_failed", "interrupted"}
+    print(f"_RETRYABLE_STATUSES={_RETRYABLE_STATUSES} ✓")
 
     # 验证租约与恢复常量
     assert _LEASE_DURATION_MINUTES == 30
     assert _MAX_ATTEMPTS == 3
     assert _STALE_QUEUED_HOURS == 2
-    assert _HEARTBEAT_INTERVAL_SECONDS == 60
     print(f"_LEASE_DURATION_MINUTES={_LEASE_DURATION_MINUTES} ✓")
     print(f"_MAX_ATTEMPTS={_MAX_ATTEMPTS} ✓")
     print(f"_STALE_QUEUED_HOURS={_STALE_QUEUED_HOURS} ✓")
-    print(f"_HEARTBEAT_INTERVAL_SECONDS={_HEARTBEAT_INTERVAL_SECONDS} ✓")
 
     # 验证 _get_worker_id 函数
     worker_id = _get_worker_id()
@@ -1017,6 +1278,19 @@ if __name__ == "__main__":
     assert "run_type" in params
     assert "instrument_ids" in params
     print(f"create_batch_run params: {params} ✓")
+
+    # 验证 claim_next_run 签名
+    sig = inspect.signature(StrategyBatchService.claim_next_run)
+    params = list(sig.parameters.keys())
+    assert "db" in params
+    print(f"claim_next_run params: {params} ✓")
+
+    # 验证 retry_run 签名
+    sig = inspect.signature(StrategyBatchService.retry_run)
+    params = list(sig.parameters.keys())
+    assert "db" in params
+    assert "run_id" in params
+    print(f"retry_run params: {params} ✓")
 
     # 验证 execute_run 签名
     sig = inspect.signature(StrategyBatchService.execute_run)

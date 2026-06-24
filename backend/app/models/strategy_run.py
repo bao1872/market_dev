@@ -5,15 +5,18 @@
 - 015_strategy_batch: strategy_run_items + strategy_runs 扩展字段 + 索引
 - 016_run_published_at: strategy_runs.published_at 列
 - 026_strategy_run_lease_fields: strategy_runs 租约与恢复字段
+- 030_strategy_run_attempt_no: strategy_runs.attempt_no 业务重试序号
 
 字段说明：
-- strategy_runs.run_type: 触发方式（manual/scheduled/replay）
+- strategy_runs.run_type: 触发方式（manual/scheduled/replay/backfill）
 - strategy_runs.status: 运行状态（queued/running/completed/partial_failed/published/failed）
 - strategy_runs.input_overrides: 输入参数覆盖（JSONB，仅保留原始输入参数）
 - strategy_runs.effective_config: 运行时实际使用的配置快照（JSONB，不可变）
 - strategy_runs.effective_config_hash: effective_config 的 SHA256 哈希
 - strategy_runs.total/succeeded/failed/skipped_count: 批量统计
 - strategy_runs.published_at: 发布时间（非空表示已发布，用户可查询）
+- strategy_runs.attempt_no: 业务重试序号（同一 version/date/run_type 内第几次尝试）
+- strategy_runs.attempt_count: 租约恢复计数（Worker 宕机恢复时累加）
 - strategy_results.payload: 完整结果 JSON（含所有指标，便于详情查询）
 - strategy_result_metrics: 拆分为 numeric_value/text_value/bool_value 三列，
   支持按指标高效筛选排序（ix_metric_numeric 索引）
@@ -55,14 +58,16 @@ from app.models.base import Base
 class StrategyRun(Base):
     """策略运行记录 - 一次策略执行的生命周期。
 
-    对应迁移 005 strategy_runs 表 + 015 扩展字段。
+    对应迁移 005 strategy_runs 表 + 015 扩展字段 + 030 attempt_no。
     idempotency_key 唯一约束防止重复运行。
 
     字段映射（任务描述 → 迁移 DDL）：
-    - trigger_kind → run_type（manual/scheduled/replay）
+    - trigger_kind → run_type（manual/scheduled/replay/backfill）
     - status: queued/running/completed/partial_failed/published/failed
     - error → 存储在 strategy_run_items.error_message 中（per-stock 级别）
     - effective_config: 运行时从 manifest 读取的参数快照（迁移 015 新增）
+    - attempt_no: 业务重试序号（迁移 030 新增）
+    - attempt_count: 租约恢复计数（迁移 026 新增，与 attempt_no 语义不同）
     """
 
     __tablename__ = "strategy_runs"
@@ -79,7 +84,7 @@ class StrategyRun(Base):
         comment="策略版本 ID",
     )
     run_type: Mapped[str] = mapped_column(
-        Text(), nullable=False, comment="触发方式：manual/scheduled/replay"
+        Text(), nullable=False, comment="触发方式：manual/scheduled/replay/backfill"
     )
     trade_date: Mapped[date | None] = mapped_column(
         Date(), nullable=True, comment="交易日（selector 策略的选股日期）"
@@ -146,8 +151,13 @@ class StrategyRun(Base):
     worker_id: Mapped[str | None] = mapped_column(
         String(64), nullable=True, comment="执行 Worker 标识"
     )
+    # [StrategyRun] - attempt_count 为租约恢复计数（Worker 宕机恢复时累加）
     attempt_count: Mapped[int] = mapped_column(
-        Integer(), nullable=False, server_default="0", comment="尝试次数"
+        Integer(), nullable=False, server_default="0", comment="租约恢复计数（与 attempt_no 区分）"
+    )
+    # [StrategyRun] - attempt_no 为业务重试序号（同一 version/date/run_type 内第几次尝试）
+    attempt_no: Mapped[int] = mapped_column(
+        Integer(), nullable=False, server_default="1", comment="业务重试序号"
     )
     next_retry_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="下次重试时间"
@@ -162,7 +172,8 @@ class StrategyRun(Base):
     def __repr__(self) -> str:
         return (
             f"<StrategyRun(run_type={self.run_type!r}, "
-            f"status={self.status!r}, trade_date={self.trade_date})>"
+            f"status={self.status!r}, trade_date={self.trade_date}, "
+            f"attempt_no={self.attempt_no})>"
         )
 
 
@@ -401,6 +412,16 @@ if __name__ == "__main__":
     assert "failed_count" in run_cols
     assert "skipped_count" in run_cols
     assert "published_at" in run_cols
+    # 迁移 026 新增字段
+    assert "queued_at" in run_cols
+    assert "heartbeat_at" in run_cols
+    assert "lease_expires_at" in run_cols
+    assert "worker_id" in run_cols
+    assert "attempt_count" in run_cols
+    assert "next_retry_at" in run_cols
+    assert "error_code" in run_cols
+    # 迁移 030 新增字段
+    assert "attempt_no" in run_cols
 
     print(f"StrategyResult.__tablename__={StrategyResult.__tablename__}")
     res_cols = [c.name for c in StrategyResult.__table__.columns]

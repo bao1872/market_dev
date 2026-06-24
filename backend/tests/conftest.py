@@ -1,31 +1,115 @@
 """共享测试 fixtures - pytest 集成测试基础设施。
 
 提供：
+- 测试库连接校验（APP_ENV / TEST_DATABASE_URL）
+- 测试专用 async_engine / AsyncSessionLocal
 - async DB session fixture（每个测试独立事务，测试后回滚）
 - 测试数据工厂 fixtures（用户、策略、运行、结果）
+
+约束：
+- 禁止在 APP_ENV != test 时连接测试库。
+- TEST_DATABASE_URL 必须指向 *_test 数据库。
 """
 import asyncio
+import os
 import uuid
 from datetime import UTC, date, datetime
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.db import AsyncSessionLocal, async_engine
-from app.models.base import Base
+
+# ---------------------------------------------------------------------------
+# 测试库连接配置
+# ---------------------------------------------------------------------------
+
+_APP_ENV = os.environ.get("APP_ENV", "").lower()
+_TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
+
+if _APP_ENV != "test":
+    raise RuntimeError(
+        f"测试必须在 APP_ENV=test 下运行，当前 APP_ENV={_APP_ENV!r}。"
+        "请使用：APP_ENV=test TEST_DATABASE_URL=postgresql://... pytest tests/"
+    )
+
+if not _TEST_DATABASE_URL:
+    raise RuntimeError(
+        "TEST_DATABASE_URL 环境变量未设置。"
+        "示例：TEST_DATABASE_URL=postgresql://user:pass@host:port/dbname_test"
+    )
+
+# 解析库名并校验必须包含 _test
+from urllib.parse import urlparse
+
+_parsed = urlparse(_TEST_DATABASE_URL)
+_db_name = (_parsed.path or "").lstrip("/")
+if "_test" not in _db_name:
+    raise RuntimeError(
+        f"TEST_DATABASE_URL 必须指向测试库（库名含 _test），当前库名={_db_name!r}"
+    )
+
+# 统一转换为 asyncpg 驱动格式
+_TEST_ASYNC_URL = _TEST_DATABASE_URL.replace(
+    "postgresql+psycopg://", "postgresql+asyncpg://"
+).replace(
+    "postgresql://", "postgresql+asyncpg://"
+)
+
+# 测试专用 engine / session factory
+test_async_engine = create_async_engine(
+    _TEST_ASYNC_URL,
+    echo=False,
+    pool_pre_ping=True,
+    pool_size=5,
+    max_overflow=10,
+)
+TestAsyncSessionLocal = async_sessionmaker(
+    bind=test_async_engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+    autoflush=False,
+)
+
+
+def _run_alembic_upgrade():
+    """同步执行 Alembic 升级到测试库。"""
+    import subprocess
+
+    # Alembic env.py 使用 psycopg3 同步驱动
+    alembic_url = _TEST_DATABASE_URL.replace(
+        "postgresql+asyncpg://", "postgresql+psycopg://"
+    ).replace(
+        "postgresql://", "postgresql+psycopg://"
+    )
+    env = os.environ.copy()
+    env["DATABASE_URL"] = alembic_url
+    subprocess.run(
+        ["alembic", "upgrade", "head"],
+        cwd=os.path.dirname(os.path.dirname(__file__)),
+        env=env,
+        check=True,
+    )
+
+
+@pytest_asyncio.fixture(scope="session", autouse=True)
+async def init_test_db():
+    """在测试 session 开始前对测试库应用 Alembic 迁移。"""
+    await asyncio.to_thread(_run_alembic_upgrade)
+    yield
+    await test_async_engine.dispose()
 
 
 @pytest_asyncio.fixture
 async def db_session():
     """提供独立的事务性 DB session，测试后自动回滚并释放连接。"""
-    async with AsyncSessionLocal() as session:
+    async with TestAsyncSessionLocal() as session:
         nested = await session.begin_nested()
         yield session
         await nested.rollback()
         await session.close()
     # 释放 asyncpg 连接，避免跨 event loop 复用导致 "attached to a different loop"
-    await async_engine.dispose()
+    await test_async_engine.dispose()
 
 
 @pytest_asyncio.fixture

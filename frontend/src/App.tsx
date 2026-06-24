@@ -21,10 +21,29 @@ import AdminJobsPage from './pages/AdminJobsPage'
 // 受保护路由布局：未登录或 token 缺失重定向到 /login；已登录用 AppShell 包裹
 function ProtectedLayout() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
+  const location = window.location
+  const searchParams = new URLSearchParams(location.search)
+  // 截图模式：URL 带 capture=feishu 且 token 有效时，允许直接访问
+  const isCaptureMode = searchParams.get('capture') === 'feishu'
+  const captureToken = searchParams.get('token')
+
+  // 截图模式：将 URL token 写入 localStorage 供 axios 拦截器使用
+  if (isCaptureMode && captureToken) {
+    localStorage.setItem('auth_token', captureToken)
+  }
+
   // 双重检查：zustand isAuthenticated + localStorage auth_token
   // 防止 token 过期后 isAuthenticated 仍为 true 但 auth_token 已被清除
   const hasToken = !!localStorage.getItem('auth_token')
   if (!isAuthenticated || !hasToken) {
+    // 截图模式放行（已把 token 写入 localStorage）
+    if (isCaptureMode && captureToken) {
+      return (
+        <AppShell>
+          <Outlet />
+        </AppShell>
+      )
+    }
     return <Navigate to="/login" replace />
   }
   return (

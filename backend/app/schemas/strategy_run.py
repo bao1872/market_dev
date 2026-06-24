@@ -25,23 +25,24 @@ class TriggerRunRequest(BaseModel):
     Attributes:
         trade_date: 交易日（默认当天）
         instrument_ids: 指定标的列表（None 表示全市场）
-        run_type: 触发方式（manual/scheduled/replay，默认 manual）
+        run_type: 触发方式（manual/scheduled/replay/backfill，默认 manual）
     """
 
     trade_date: date | None = Field(None, description="交易日（默认当天）")
     instrument_ids: list[UUID] | None = Field(
         None, description="指定标的列表（None 表示全市场）"
     )
-    run_type: str = Field("manual", description="触发方式：manual/scheduled/replay")
+    run_type: str = Field("manual", description="触发方式：manual/scheduled/replay/backfill")
 
 
 class StrategyRunResponse(BaseModel):
     """策略运行响应。
 
-    含迁移 015/016 新增字段：
+    含迁移 015/016/030 新增字段：
     - effective_config/effective_config_hash: 运行时配置快照
     - total/succeeded/failed/skipped_count: 批量统计
     - published_at: 发布时间（非空表示已发布）
+    - attempt_no: 业务重试序号
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -67,6 +68,8 @@ class StrategyRunResponse(BaseModel):
     skipped_count: int | None = Field(None, description="跳过数")
     # 迁移 016 新增字段
     published_at: datetime | None = Field(None, description="发布时间")
+    # 迁移 030 新增字段
+    attempt_no: int = Field(1, description="业务重试序号")
 
 
 class StrategyRunListResponse(BaseModel):
@@ -95,7 +98,7 @@ class StrategyResultResponse(BaseModel):
 
 
 class StrategyResultListResponse(BaseModel):
-    """策略结果列表响应（分页+筛选+排序）。"""
+    """结果列表响应（分页+筛选+排序）。"""
 
     items: list[StrategyResultResponse] = Field(default_factory=list)
     total: int = Field(..., description="过滤后总数")
@@ -140,6 +143,7 @@ if __name__ == "__main__":
     assert "failed_count" in run_fields
     assert "skipped_count" in run_fields
     assert "published_at" in run_fields
+    assert "attempt_no" in run_fields
     print("StrategyRunResponse 新增字段验证 ✓")
 
     # 验证 MetricFilter operator 字段
@@ -151,4 +155,3 @@ if __name__ == "__main__":
     print("MetricFilter 增强字段验证 ✓")
 
     print("OK")
-
