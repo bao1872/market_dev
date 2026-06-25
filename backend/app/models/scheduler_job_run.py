@@ -16,7 +16,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, Integer, String, Text, func
+from sqlalchemy import DateTime, Float, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -31,6 +31,12 @@ class SchedulerJobRun(Base):
 
     __tablename__ = "scheduler_job_runs"
 
+    # [Idempotency] - run_key 唯一约束保证任务幂等；job_name+business_date 复合索引加速查询
+    __table_args__ = (
+        UniqueConstraint("run_key", name="uq_scheduler_job_runs_run_key"),
+        Index("ix_scheduler_job_runs_job_bd", "job_name", "business_date"),
+    )
+
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
     )
@@ -39,6 +45,9 @@ class SchedulerJobRun(Base):
     )
     business_date: Mapped[str | None] = mapped_column(
         String(10), nullable=True, comment="业务日期 YYYY-MM-DD",
+    )
+    run_key: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, comment="业务幂等键，如 bars_scheduler:2026-06-25",
     )
     scheduled_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="计划执行时间",
@@ -106,10 +115,18 @@ if __name__ == "__main__":
     print(f"SchedulerJobRun columns={cols}")
     assert "job_name" in cols
     assert "business_date" in cols
+    assert "run_key" in cols
     assert "status" in cols
     assert "heartbeat_at" in cols
     assert "lease_expires_at" in cols
     assert "progress" in cols
     assert "error_code" in cols
     assert "error_message" in cols
+    # 验证 __table_args__ 中的约束与索引
+    constraint_names = {c.name for c in SchedulerJobRun.__table__.constraints if hasattr(c, "name") and c.name}
+    index_names = {idx.name for idx in SchedulerJobRun.__table__.indexes if idx.name}
+    assert "uq_scheduler_job_runs_run_key" in constraint_names, f"缺少唯一约束: {constraint_names}"
+    assert "ix_scheduler_job_runs_job_bd" in index_names, f"缺少复合索引: {index_names}"
+    print(f"constraints={constraint_names}")
+    print(f"indexes={index_names}")
     print("OK")

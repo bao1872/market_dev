@@ -24,6 +24,7 @@ from app.models.dsa_backfill import BackfillInstrumentProgress, DSABackfillJob
 from app.models.event_recipient import StrategyEventRecipient
 from app.models.instrument import Instrument
 from app.models.job import JobRun
+from app.models.job_run_event import JobRunEvent
 from app.models.membership import InviteCode, InviteRedemption, Membership
 from app.models.monitor_evaluation import MonitorEvaluation
 from app.models.monitor_state import MonitorState
@@ -59,6 +60,7 @@ __all__ = [
     "InviteCode",
     "InviteRedemption",
     "JobRun",
+    "JobRunEvent",
     "Membership",
     "MessageDelivery",
     "MonitorEvaluation",

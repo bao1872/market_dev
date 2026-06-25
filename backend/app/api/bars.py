@@ -2,7 +2,8 @@
 
 GET /api/v1/instruments/{instrument_id}/bars
     查询行情数据，支持多周期（15m/1h/1d/1w/1mo）、前复权/不复权、服务端分页。
-    数据获取：Exchange.klines() 优先（实时最新），失败降级到 DB 查询。
+    数据获取：DB 优先（PostgreSQL），仅 include_realtime=True 且交易时段内
+    调用 Pytdx 补充最后一根 Bar（hybrid 模式）；DB 未命中时 Pytdx 兜底。
 
 GET /api/v1/instruments/{instrument_id}/quote
     获取标的实时报价（pytdx 1 分钟线优先，DB 日线回退）。
@@ -17,18 +18,25 @@ GET /api/v1/bars/health
     end_date: 结束日期（YYYY-MM-DD），可选
     page: 页码（1-based，默认 1）
     page_size: 每页大小（默认 100，最大 1000）
+    include_realtime: 是否在交易时段内调用 Pytdx 补充最后一根 Bar（默认 true）
+
+响应头：
+    X-Data-Source: db | pytdx | hybrid
+    X-Cache-Hit: true | false
+    X-Total-Ms: <int>（总耗时毫秒）
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dt_time, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,7 +46,11 @@ from app.models.bar import Bar15Min, Bar60Min, BarDaily, BarMinute, BarMonthly, 
 from app.core.exchange import get_exchange
 from app.repositories.bar_repository import (
     _get_adj_factor_df,
+    _query_15min_bars,
+    _query_60min_bars,
+    _query_daily_bars,
     apply_adj_factor_to_bars,
+    convert_kline_frequency,
     fetch_15min_bars,
     fetch_60min_bars,
     fetch_daily_bars,
@@ -161,6 +173,142 @@ def _df_to_responses(
     return items
 
 
+# ===== DB 优先数据获取工具函数 =====
+
+
+def _is_trading_hours() -> bool:
+    """[行情] - 判断当前是否在 A 股交易时段（周一至周五 9:30-15:00，上海时间）。
+
+    与 pytdx_adapter._klines_ttl 的交易时段判断逻辑一致，避免重复实现不一致。
+    """
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    if now.weekday() >= 5:  # 周六、周日非交易日
+        return False
+    return dt_time(9, 30) <= now.time() <= dt_time(15, 0)
+
+
+async def _query_db_only(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    timeframe: str,
+    start: date | datetime,
+    end: date | datetime,
+) -> pd.DataFrame:
+    """[行情] - 仅从 DB 查询行情（不调用 Pytdx，不 upsert）。
+
+    周线/月线从日线动态合成（与 fetch_weekly/monthly_bars 一致，SSOT）。
+
+    Args:
+        session: 异步 DB 会话
+        instrument_id: 标的 UUID
+        timeframe: 1d | 15m | 1h | 1w | 1mo
+        start: 起始日期/时间
+        end: 结束日期/时间
+
+    Returns:
+        DataFrame: index=DatetimeIndex(naive Shanghai), columns=OHLCV+adj_factor；无数据时返回空
+    """
+    if timeframe == "1d":
+        return await _query_daily_bars(session, instrument_id, start, end)
+    if timeframe in ("1w", "1mo"):
+        # 周线/月线从日线动态合成
+        daily_df = await _query_daily_bars(session, instrument_id, start, end)
+        if daily_df.empty:
+            return daily_df
+        target = "w" if timeframe == "1w" else "m"
+        return convert_kline_frequency(daily_df, target)
+    if timeframe == "15m":
+        return await _query_15min_bars(session, instrument_id, start, end)
+    if timeframe == "1h":
+        return await _query_60min_bars(session, instrument_id, start, end)
+    return pd.DataFrame()
+
+
+async def _fetch_bars_with_pytdx_fallback(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    timeframe: str,
+    start: date | datetime,
+    end: date | datetime,
+) -> pd.DataFrame:
+    """[行情] - DB 未命中时调用 fetch_*_bars（含 Pytdx fallback + upsert）。
+
+    复用 bar_repository.fetch_*_bars 的 DB→Pytdx→upsert 链路（SSOT）。
+    """
+    if timeframe == "1d":
+        return await fetch_daily_bars(session, instrument_id, start, end)
+    if timeframe == "1w":
+        return await fetch_weekly_bars(session, instrument_id, start, end)
+    if timeframe == "1mo":
+        return await fetch_monthly_bars(session, instrument_id, start, end)
+    if timeframe == "15m":
+        return await fetch_15min_bars(session, instrument_id, start, end)
+    if timeframe == "1h":
+        return await fetch_60min_bars(session, instrument_id, start, end)
+    return pd.DataFrame()
+
+
+async def _fetch_last_bar_from_pytdx(symbol: str, timeframe: str) -> pd.DataFrame | None:
+    """[行情] - 从 Pytdx 获取最后一根 Bar（交易时段内实时数据）。
+
+    使用 exchange.klines(count=1, limit=1) 仅拉取最新一根 Bar。
+    Pytdx 失败时返回 None（不抛异常，由调用方处理降级）。
+
+    Args:
+        symbol: 股票代码（如 '000001'）
+        timeframe: 1d | 15m | 1h | 1w | 1mo
+
+    Returns:
+        DataFrame（tz-aware Asia/Shanghai DatetimeIndex）或 None
+    """
+    try:
+        exchange = get_exchange("A")
+        # limit=1 控制 fetch_count=min(1+250,1000)=251；count=1 仅返回最新一根
+        df = await exchange.klines(symbol, timeframe, count=1, limit=1)
+        return df
+    except Exception as exc:
+        logger.warning("Pytdx 调用失败: %s", exc)
+        return None
+
+
+def _merge_last_bar(df: pd.DataFrame, last_bar: pd.DataFrame | None) -> tuple[pd.DataFrame, bool]:
+    """[行情] - 将 Pytdx 最后一根 Bar 合并到 DB DataFrame。
+
+    时区对齐：DB 为 naive Shanghai，Pytdx 为 tz-aware Asia/Shanghai，合并前去除时区。
+    仅保留比 DB 最新 bar 更新的数据，避免重复。
+
+    Args:
+        df: DB 行情数据（naive DatetimeIndex）
+        last_bar: Pytdx 最新 bar（tz-aware DatetimeIndex）或 None
+
+    Returns:
+        (merged_df, merged_flag): 合并后的 DataFrame + 是否成功合并新 bar
+    """
+    if last_bar is None or last_bar.empty or df.empty:
+        return df, False
+
+    last_bar_copy = last_bar.copy()
+    # 对齐时区：Pytdx 为 tz-aware，DB 为 naive
+    if last_bar_copy.index.tz is not None:
+        last_bar_copy.index = last_bar_copy.index.tz_localize(None)
+    # 确保 DB index 也为 naive（防御性）
+    if df.index.tz is not None:
+        df = df.copy()
+        df.index = df.index.tz_localize(None)
+
+    db_last_time = df.index[-1]
+    # 仅保留比 DB 最新 bar 更新的数据
+    new_bars = last_bar_copy[last_bar_copy.index > db_last_time]
+    if new_bars.empty:
+        return df, False
+
+    # 合并并去重（保留新数据）
+    merged = pd.concat([df, new_bars])
+    merged = merged[~merged.index.duplicated(keep="last")]
+    merged = merged.sort_index()
+    return merged, True
+
+
 @router.get(
     "/instruments/{instrument_id}/bars",
     response_model=BarListResponse,
@@ -174,14 +322,22 @@ async def get_bars(
     end_date: date | None = Query(None, description="结束日期 YYYY-MM-DD"),
     page: int = Query(1, ge=1, description="页码（1-based）"),
     page_size: int = Query(100, ge=1, le=_MAX_PAGE_SIZE, description="每页大小"),
+    include_realtime: bool = Query(True, description="是否在交易时段内调用 Pytdx 补充最后一根 Bar"),
     session: AsyncSession = Depends(get_db),
+    response: Response = None,
 ) -> BarListResponse:
     """查询指定标的的行情数据。
 
     - 支持多周期：1d（日线）/ 15m / 1h / 1w（周线）/ 1mo（月线）
-    - Exchange 优先：先从 Exchange.klines() 获取最新数据，失败则降级到 DB 查询
+    - DB 优先：历史 K 线从 PostgreSQL 查询；仅 include_realtime=True 且交易时段内
+      调用 Pytdx 补充最后一根 Bar（hybrid 模式）；DB 未命中时 Pytdx 兜底
     - 前复权：adj=qfq 时对 OHLC 应用前复权（volume 不变）
     - 分页：服务端分页，返回 total/page/page_size
+
+    响应头：
+        X-Data-Source: db | pytdx | hybrid
+        X-Cache-Hit: true | false
+        X-Total-Ms: <int>（总耗时毫秒）
     """
     # 参数校验
     if timeframe not in _ALLOWED_TIMEFRAMES:
@@ -196,51 +352,70 @@ async def get_bars(
         )
 
     logger.info(
-        "查询行情 instrument_id=%s timeframe=%s adj=%s start=%s end=%s page=%d size=%d",
-        instrument_id, timeframe, adj, start_date, end_date, page, page_size,
+        "查询行情 instrument_id=%s timeframe=%s adj=%s start=%s end=%s page=%d size=%d realtime=%s",
+        instrument_id, timeframe, adj, start_date, end_date, page, page_size, include_realtime,
     )
 
+    start_ms = time.time()
     start, end = _parse_date_range(timeframe, start_date, end_date)
 
-    # --- 数据获取：通过 Exchange 层（参考 chanlunpro /tv/history 模式）---
-    df = None
+    # --- 查询 symbol（用于 Pytdx 调用）---
+    symbol: str | None = None
     try:
-        exchange = get_exchange("A")
-        # 从 DB 查询 symbol
         from app.models.instrument import Instrument
         inst_stmt = select(Instrument.symbol).where(Instrument.id == instrument_id)
         inst_result = await session.execute(inst_stmt)
         inst_row = inst_result.first()
         if inst_row is not None:
             symbol = inst_row[0]
-            # 通过 Exchange 层获取最新数据
-            df = await exchange.klines(symbol, timeframe, start_date=start, end_date=end)
     except Exception as exc:
-        logger.warning("Exchange.klines() 失败 instrument_id=%s: %s", instrument_id, exc)
+        logger.warning("查询 symbol 失败 instrument_id=%s: %s", instrument_id, exc)
 
-    # Exchange 失败时降级到 DB 查询
+    # --- [行情] DB 优先数据获取 ---
+    data_source = "db"
+    cache_hit = True
+
+    df = await _query_db_only(session, instrument_id, timeframe, start, end)
+
+    # --- DB 未命中：Pytdx 兜底（fetch_*_bars 含 upsert）---
     if df is None or df.empty:
+        cache_hit = False
         try:
-            if timeframe == "1d":
-                df = await fetch_daily_bars(session, instrument_id, start, end)
-            elif timeframe == "1w":
-                df = await fetch_weekly_bars(session, instrument_id, start, end)
-            elif timeframe == "1mo":
-                df = await fetch_monthly_bars(session, instrument_id, start, end)
-            elif timeframe == "15m":
-                df = await fetch_15min_bars(session, instrument_id, start, end)
-            else:  # 1h
-                df = await fetch_60min_bars(session, instrument_id, start, end)
+            df = await _fetch_bars_with_pytdx_fallback(
+                session, instrument_id, timeframe, start, end,
+            )
+            if df is not None and not df.empty:
+                data_source = "pytdx"
         except HTTPException:
             raise
         except Exception as exc:
-            logger.warning("DB 降级查询也失败 instrument_id=%s: %s", instrument_id, exc)
+            logger.warning("Pytdx 兜底查询失败 instrument_id=%s: %s", instrument_id, exc)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"查询行情失败: {exc}",
             ) from exc
 
+    # --- DB 命中 + include_realtime + 交易时段：Pytdx 补充最后一根 Bar ---
+    if (
+        df is not None
+        and not df.empty
+        and include_realtime
+        and _is_trading_hours()
+        and data_source == "db"
+        and symbol is not None
+    ):
+        last_bar = await _fetch_last_bar_from_pytdx(symbol, timeframe)
+        df, merged = _merge_last_bar(df, last_bar)
+        if merged:
+            data_source = "hybrid"
+
+    # --- 空数据处理 ---
     if df is None or df.empty:
+        total_ms = int((time.time() - start_ms) * 1000)
+        if response is not None:
+            response.headers["X-Data-Source"] = data_source
+            response.headers["X-Cache-Hit"] = "true" if cache_hit else "false"
+            response.headers["X-Total-Ms"] = str(total_ms)
         return BarListResponse(
             items=[],
             total=0,
@@ -251,42 +426,11 @@ async def get_bars(
         )
 
     # --- 前复权处理 ---
+    # [行情] DB 数据已含正确 adj_factor；Pytdx 最后一根 adj_factor=1.0（最新日约定）
+    # 无需 merge_asof 映射，直接调用 apply_adj_factor_to_bars
     if adj == "qfq":
         try:
             adj_factor_df = await _get_adj_factor_df(session, instrument_id)
-            if not adj_factor_df.empty:
-                # Exchange 返回不复权数据（adj_factor=1.0），需从 DB 映射正确的 adj_factor
-                # 使用 merge_asof 按 trade_date 映射，覆盖 Exchange 的 adj_factor
-                df_copy = df.copy()
-                # 统一去除时区，避免 merge_asof 类型不兼容
-                if df_copy.index.tz is not None:
-                    df_copy.index = df_copy.index.tz_localize(None)
-                df_copy.index = df_copy.index.astype("datetime64[us]")
-                df_reset = df_copy.reset_index()
-                time_col = df_reset.columns[0]
-                df_reset["_trade_date"] = pd.to_datetime(df_reset[time_col]).dt.normalize()
-
-                _adj_map = adj_factor_df[["trade_date", "adj_factor"]].copy()
-                _adj_map["trade_date"] = pd.to_datetime(_adj_map["trade_date"]).astype("datetime64[us]")
-                _adj_map = _adj_map.sort_values("trade_date").drop_duplicates("trade_date", keep="last")
-
-                merged = pd.merge_asof(
-                    df_reset.sort_values("_trade_date"),
-                    _adj_map.rename(columns={"adj_factor": "_db_adj", "trade_date": "_adj_date"}),
-                    left_on="_trade_date",
-                    right_on="_adj_date",
-                    direction="backward",
-                )
-                merged = merged.set_index(time_col).sort_index()
-                merged = merged.drop(columns=["_trade_date", "_adj_date"], errors="ignore")
-
-                # 用 DB 的 adj_factor 覆盖 Exchange 的 adj_factor（缺失时 fallback 1.0）
-                if "_db_adj" in merged.columns:
-                    merged["adj_factor"] = merged["_db_adj"].fillna(1.0)
-                    merged = merged.drop(columns=["_db_adj"])
-
-                df = merged
-            # 15min/60min 使用日内前复权，其他使用日线前复权
             intraday = timeframe in ("15m", "1h")
             df = apply_adj_factor_to_bars(df, adj_factor_df, intraday=intraday)
         except Exception as exc:
@@ -304,6 +448,13 @@ async def get_bars(
     page_df = df.iloc[start_idx:end_idx]
 
     items = _df_to_responses(page_df, instrument_id, timeframe)
+
+    # --- 响应头 ---
+    total_ms = int((time.time() - start_ms) * 1000)
+    if response is not None:
+        response.headers["X-Data-Source"] = data_source
+        response.headers["X-Cache-Hit"] = "true" if cache_hit else "false"
+        response.headers["X-Total-Ms"] = str(total_ms)
 
     return BarListResponse(
         items=items,

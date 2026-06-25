@@ -142,15 +142,40 @@ async def _create_job_run(
     lease_seconds: int = 120,
     metadata: dict | None = None,
     scheduled_at: datetime | None = None,
-) -> SchedulerJobRun:
-    """创建 SchedulerJobRun 记录并返回。
+    run_key: str | None = None,
+) -> SchedulerJobRun | None:
+    """创建 SchedulerJobRun 记录并返回（幂等版本）。
 
-    创建时填写 scheduled_at/started_at/heartbeat_at/lease_expires_at/worker_instance_id，
-    保证 Admin 页面能判断任务是否真实在跑以及租约是否过期。
+    如果提供 run_key，则调用 idempotency_service.acquire_job_run_lock() 双保险获取执行权：
+    - pg_advisory_xact_lock 序列化并发
+    - 唯一索引保证只有一条记录
+
+    未抢到锁时返回 None，调用方应立即 return 不执行业务，并 logger.info("SKIPPED_DUPLICATE")。
+
+    如果未提供 run_key（向后兼容），保持原行为直接 INSERT。
 
     Args:
         scheduled_at: CronTrigger 计划执行时间；None 时退化为 started_at（非 scheduler 场景）
+        run_key: 业务幂等键；提供时启用幂等模式，None 时保持原行为
     """
+    if run_key is not None:
+        from app.services.idempotency_service import acquire_job_run_lock
+        job_run = await acquire_job_run_lock(
+            db=db,
+            run_key=run_key,
+            job_name=job_name,
+            business_date=business_date,
+            lease_seconds=lease_seconds,
+            scheduled_at=scheduled_at,
+            metadata=metadata,
+            worker_instance_id=_WORKER_INSTANCE_ID,
+        )
+        if job_run is not None:
+            await db.commit()
+            await db.refresh(job_run)
+        return job_run
+
+    # 向后兼容：无 run_key 时保持原行为直接 INSERT
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
     job_run = SchedulerJobRun(
         job_name=job_name,
@@ -436,8 +461,22 @@ async def run_bars_scheduler_worker() -> None:
                     trade_date, time(16, 0), tzinfo=ZoneInfo("Asia/Shanghai")
                 )
                 job_run = await _create_job_run(
-                    db, "bars_scheduler", str(trade_date), scheduled_at=scheduled_at
+                    db, "bars_scheduler", str(trade_date), scheduled_at=scheduled_at,
+                    run_key=f"bars_scheduler:{trade_date}",
                 )
+                if job_run is None:
+                    logger.info("bars_scheduler SKIPPED_DUPLICATE business_date=%s", trade_date)
+                    return
+                # [JobRunEvent] - 任务开始写入 START 事件
+                from app.services.job_run_event_service import append_event
+                await append_event(
+                    db=db,
+                    job_run_id=job_run.id,
+                    step="START",
+                    level="info",
+                    message="开始更新日线",
+                )
+                await db.commit()
 
             # 行情刷新耗时约 1.8 小时，后台每 30 秒更新心跳与租约
             async def _bars_heartbeat_loop() -> None:
@@ -447,7 +486,10 @@ async def run_bars_scheduler_worker() -> None:
                         await _update_job_heartbeat(db, job_run)
 
             heartbeat_task_ref = asyncio.create_task(_bars_heartbeat_loop())
-            result = await service.refresh_all_instruments(trade_date)
+            # [JobRunEvent] - 传入 job_run_id 让 service 在日线阶段完成后写 DAILY_DONE/DSA_CREATED
+            result = await service.refresh_all_instruments(
+                trade_date, job_run_id=job_run.id,
+            )
             if heartbeat_task_ref is not None:
                 heartbeat_task_ref.cancel()
                 try:
@@ -504,6 +546,20 @@ async def run_bars_scheduler_worker() -> None:
                     pass
             if job_run is not None:
                 async with AsyncSessionLocal() as db:
+                    # [JobRunEvent] - 任务失败写入 ERROR 事件（含 traceback）
+                    import traceback as tb_mod
+                    from app.services.job_run_event_service import append_event
+                    await append_event(
+                        db=db,
+                        job_run_id=job_run.id,
+                        step="ERROR",
+                        level="error",
+                        message=str(exc)[:500],
+                        payload={
+                            "traceback": tb_mod.format_exc()[:4000],
+                            "error_type": type(exc).__name__,
+                        },
+                    )
                     await _finish_job_run(db, job_run, "failed", error_message=str(exc)[:500])
 
     # 每日 16:00 触发（含非交易日，由内部交易日历判断是否执行）
@@ -588,8 +644,12 @@ async def run_strategy_scheduler_worker() -> None:
                     trade_date, time(18, 30), tzinfo=ZoneInfo("Asia/Shanghai")
                 )
                 job_run = await _create_job_run(
-                    db, "strategy_scheduler", str(trade_date), scheduled_at=scheduled_at
+                    db, "strategy_scheduler", str(trade_date), scheduled_at=scheduled_at,
+                    run_key=f"strategy_scheduler:{trade_date}",
                 )
+                if job_run is None:
+                    logger.info("strategy_scheduler SKIPPED_DUPLICATE business_date=%s", trade_date)
+                    return
                 # 查询 production 环境 + 参与调度 + 有 released 版本的 selector 策略
                 released_subq = (
                     select(StrategyVersion.id)
@@ -740,8 +800,12 @@ async def run_calendar_scheduler_worker() -> None:
                     today, time(2, 0), tzinfo=ZoneInfo("Asia/Shanghai")
                 )
                 job_run = await _create_job_run(
-                    session, "calendar_scheduler", str(today), scheduled_at=scheduled_at
+                    session, "calendar_scheduler", str(today), scheduled_at=scheduled_at,
+                    run_key=f"calendar_scheduler:{today}",
                 )
+                if job_run is None:
+                    logger.info("calendar_scheduler SKIPPED_DUPLICATE business_date=%s", today)
+                    return
                 from app.services.calendar_seed import seed_calendar_from_pytdx
                 year = today.year
                 count = await seed_calendar_from_pytdx(session, year=year)
@@ -799,35 +863,20 @@ async def _find_or_create_monitor_session_job_run(
     now_cst: datetime,
     business_date: str,
     session_label: str,
-) -> SchedulerJobRun:
-    """查找或创建当前交易时段的 monitor_scheduler job_run。
+) -> SchedulerJobRun | None:
+    """查找或创建当前交易时段的 monitor_scheduler job_run（幂等版本）。
 
-    同一业务日同一 session（morning/afternoon）只创建一条记录，session 内持续更新。
+    基于 run_key=monitor_scheduler:{business_date}:{session_label} 唯一索引保证 session 幂等。
+    返回 SchedulerJobRun 表示新建；返回 None 表示 session 已存在（调用方应按 run_key 查询复用）。
     """
-    from sqlalchemy import select
-
-    stmt = (
-        select(SchedulerJobRun)
-        .where(
-            SchedulerJobRun.job_name == "monitor_scheduler",
-            SchedulerJobRun.business_date == business_date,
-            SchedulerJobRun.status == "running",
-            SchedulerJobRun.metadata_json.like(f'%"session_label": "{session_label}"%'),
-        )
-        .order_by(SchedulerJobRun.started_at.desc())
-        .limit(1)
-    )
-    result = await db.execute(stmt)
-    existing = result.scalar_one_or_none()
-    if existing is not None:
-        return existing
-
+    run_key = f"monitor_scheduler:{business_date}:{session_label}"
     return await _create_job_run(
         db,
         "monitor_scheduler",
         business_date,
         lease_seconds=120,
         metadata={"session_label": session_label},
+        run_key=run_key,
     )
 
 
@@ -934,6 +983,29 @@ async def run_monitor_scheduler_worker() -> None:
                 job_run = await _find_or_create_monitor_session_job_run(
                     db, now, business_date, session_label,
                 )
+                if job_run is None:
+                    # session 已存在，按 run_key 查询复用（更新 last_cycle_at）
+                    from sqlalchemy import select as sa_select
+
+                    run_key = f"monitor_scheduler:{business_date}:{session_label}"
+                    stmt = (
+                        sa_select(SchedulerJobRun)
+                        .where(SchedulerJobRun.run_key == run_key)
+                        .limit(1)
+                    )
+                    result_q = await db.execute(stmt)
+                    job_run = result_q.scalar_one_or_none()
+                    if job_run is None:
+                        # 极端情况：理论上不该发生，但容错跳过本轮
+                        logger.warning(
+                            "monitor_scheduler session_job_run not found for run_key=%s",
+                            run_key,
+                        )
+                        await asyncio.sleep(cycle_interval)
+                        continue
+                    logger.debug(
+                        "monitor_scheduler 复用 session job_run_id=%s", job_run.id,
+                    )
                 cycle_succeeded = False
                 try:
                     result = await service.execute_monitor_cycle(db)

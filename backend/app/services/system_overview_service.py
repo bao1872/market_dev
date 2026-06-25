@@ -57,6 +57,14 @@ from app.schemas.system_overview import (
     PIPELINE_STATUS_PUBLISHED,
     PIPELINE_STATUS_STALE,
     PIPELINE_STATUS_WAITING_DSA,
+    WAITING_DSA_REASON_DATA_COVERAGE_INSUFFICIENT,
+    WAITING_DSA_REASON_NO_RELEASED_VERSION,
+    WAITING_DSA_REASON_NO_RUN_CREATED,
+    WAITING_DSA_REASON_PUBLISH_FAILED,
+    WAITING_DSA_REASON_QUALITY_GATE_FAILED,
+    WAITING_DSA_REASON_QUEUED_NOT_CLAIMED,
+    WAITING_DSA_REASON_RUN_FAILED,
+    WAITING_DSA_SUGGESTIONS,
 )
 from app.services.market_status_service import (
     MARKET_SESSION_AFTERNOON,
@@ -78,6 +86,12 @@ FRESHNESS_DELAYED_THRESHOLD = 180
 
 # [SystemOverview] - worker 健康心跳窗口（秒）：用于基础字段 worker_health 判定
 WORKER_HEALTH_WINDOW = 120
+
+# [SystemOverview] - DSA 排队超时阈值（秒）：queued 超 30 分钟未被 worker 领取视为异常
+WAITING_DSA_QUEUED_TIMEOUT = 1800
+
+# [SystemOverview] - DSA 覆盖率阈值：低于此值判定为 DATA_COVERAGE_INSUFFICIENT
+WAITING_DSA_COVERAGE_THRESHOLD = 0.9
 
 
 async def get_system_overview(
@@ -541,6 +555,8 @@ async def _compute_after_close_pipeline(
             "status": PIPELINE_STATUS_NOT_STARTED,
             "bars_job": None,
             "dsa_run": None,
+            "waiting_dsa_reason": None,
+            "waiting_dsa_suggestion": None,
         }
 
     # [after_close_pipeline] - 查当日 bars_scheduler job（必须过滤 business_date）
@@ -571,6 +587,8 @@ async def _compute_after_close_pipeline(
             "status": PIPELINE_STATUS_NOT_STARTED,
             "bars_job": None,
             "dsa_run": None,
+            "waiting_dsa_reason": None,
+            "waiting_dsa_suggestion": None,
         }
 
     # bars running → BARS_RUNNING
@@ -579,6 +597,8 @@ async def _compute_after_close_pipeline(
             "status": PIPELINE_STATUS_BARS_RUNNING,
             "bars_job": bars_job_summary,
             "dsa_run": None,
+            "waiting_dsa_reason": None,
+            "waiting_dsa_suggestion": None,
         }
 
     # bars failed → BARS_FAILED
@@ -587,6 +607,8 @@ async def _compute_after_close_pipeline(
             "status": PIPELINE_STATUS_BARS_FAILED,
             "bars_job": bars_job_summary,
             "dsa_run": None,
+            "waiting_dsa_reason": None,
+            "waiting_dsa_suggestion": None,
         }
 
     # [after_close_pipeline] - bars succeeded → 查 DSA（trade_date=今日, run_type=scheduled）
@@ -615,6 +637,8 @@ async def _compute_after_close_pipeline(
             "error_code": dsa_run.error_code,
             "error_message": dsa_run.error_message,
             "failure_stage": dsa_run.failure_stage,
+            "queued_at": dsa_run.queued_at.isoformat() if dsa_run.queued_at else None,
+            "worker_id": dsa_run.worker_id,
         }
 
     # DSA 状态映射
@@ -638,11 +662,184 @@ async def _compute_after_close_pipeline(
     else:
         pipeline_status = PIPELINE_STATUS_STALE
 
+    # [SystemOverview] - 细分 WAITING_DSA 原因（7 种），仅在 DSA 未成功 published 时填充
+    waiting_dsa_reason, waiting_dsa_suggestion = await _compute_waiting_dsa_reason(
+        db=db,
+        pipeline_status=pipeline_status,
+        dsa_run=dsa_run,
+        business_date_obj=business_date_obj,
+        now=now,
+    )
+
     return {
         "status": pipeline_status,
         "bars_job": bars_job_summary,
         "dsa_run": dsa_run_summary,
+        "waiting_dsa_reason": waiting_dsa_reason,
+        "waiting_dsa_suggestion": waiting_dsa_suggestion,
     }
+
+
+async def _compute_waiting_dsa_reason(
+    db: AsyncSession,
+    pipeline_status: str,
+    dsa_run: StrategyRun | None,
+    business_date_obj: Any,
+    now: datetime,
+) -> tuple[str | None, str | None]:
+    """[SystemOverview] - 细分 WAITING_DSA 7 种原因及人类可读建议。
+
+    仅在 DSA 未成功 published 时填充（成功终态 PUBLISHED/DSA_COMPLETED 等返回 None）。
+
+    7 种原因判定优先级：
+    1. WAITING_DSA (dsa_run is None):
+       - DATA_COVERAGE_INSUFFICIENT: bars 覆盖率 < 90%
+       - NO_RELEASED_VERSION: selector 策略无 released 版本
+       - NO_RUN_CREATED: 默认（bars 成功但 DSA 未创建，多因调度未触发）
+    2. DSA_QUEUED + queued_at > 30min + 无 worker_id:
+       - QUEUED_NOT_CLAIMED
+    3. DSA_FAILED:
+       - QUALITY_GATE_FAILED: failure_stage == "QUALITY_GATE"
+       - PUBLISH_FAILED: failure_stage == "PUBLISH"
+       - RUN_FAILED: 其他 failure_stage（DATA_READINESS/LOAD_*/CALCULATE_*/...）
+
+    Args:
+        db: 异步数据库会话
+        pipeline_status: 当前流水线状态枚举
+        dsa_run: DSA StrategyRun 对象（可能为 None）
+        business_date_obj: 业务日期 date 对象
+        now: 上海时区当前时间
+
+    Returns:
+        (reason, suggestion) 元组，无原因时均为 None
+    """
+    # 成功终态无需细分原因
+    if pipeline_status in (
+        PIPELINE_STATUS_PUBLISHED,
+        PIPELINE_STATUS_DSA_COMPLETED,
+        PIPELINE_STATUS_DSA_RUNNING,
+    ):
+        return None, None
+
+    # 场景 1: WAITING_DSA - bars 成功但 DSA run 未创建
+    if pipeline_status == PIPELINE_STATUS_WAITING_DSA:
+        # 1a. 检查 bars 覆盖率是否达标
+        coverage = await _compute_bars_coverage(db, business_date_obj)
+        if coverage is not None and coverage < WAITING_DSA_COVERAGE_THRESHOLD:
+            reason = WAITING_DSA_REASON_DATA_COVERAGE_INSUFFICIENT
+            return reason, WAITING_DSA_SUGGESTIONS[reason]
+
+        # 1b. 检查 selector 策略是否有 released 版本
+        has_released = await _has_released_selector_version(db)
+        if not has_released:
+            reason = WAITING_DSA_REASON_NO_RELEASED_VERSION
+            return reason, WAITING_DSA_SUGGESTIONS[reason]
+
+        # 1c. 默认：bars 成功 + 覆盖率达标 + 有 released 版本，但 DSA run 未创建
+        # 多因 strategy_scheduler 18:30 未触发或 create_batch_run 内部异常
+        reason = WAITING_DSA_REASON_NO_RUN_CREATED
+        return reason, WAITING_DSA_SUGGESTIONS[reason]
+
+    # 场景 2: DSA_QUEUED - 排队超时未被 worker 领取
+    if pipeline_status == PIPELINE_STATUS_DSA_QUEUED and dsa_run is not None:
+        if dsa_run.queued_at is not None and not dsa_run.worker_id:
+            queued_age = (now - dsa_run.queued_at).total_seconds()
+            if queued_age > WAITING_DSA_QUEUED_TIMEOUT:
+                reason = WAITING_DSA_REASON_QUEUED_NOT_CLAIMED
+                return reason, WAITING_DSA_SUGGESTIONS[reason]
+        return None, None
+
+    # 场景 3: DSA_FAILED - 按失败阶段细分
+    if pipeline_status == PIPELINE_STATUS_DSA_FAILED and dsa_run is not None:
+        from app.models.strategy_run import (
+            FAILURE_STAGE_PUBLISH,
+            FAILURE_STAGE_QUALITY_GATE,
+        )
+
+        if dsa_run.failure_stage == FAILURE_STAGE_QUALITY_GATE:
+            reason = WAITING_DSA_REASON_QUALITY_GATE_FAILED
+            return reason, WAITING_DSA_SUGGESTIONS[reason]
+        if dsa_run.failure_stage == FAILURE_STAGE_PUBLISH:
+            reason = WAITING_DSA_REASON_PUBLISH_FAILED
+            return reason, WAITING_DSA_SUGGESTIONS[reason]
+        # 其他失败阶段（DATA_READINESS/LOAD_*/CALCULATE_*/WORKER_INTERRUPTED 等）
+        reason = WAITING_DSA_REASON_RUN_FAILED
+        return reason, WAITING_DSA_SUGGESTIONS[reason]
+
+    # 其他状态（STALE 等）暂不细分
+    return None, None
+
+
+async def _compute_bars_coverage(
+    db: AsyncSession,
+    business_date_obj: Any,
+) -> float | None:
+    """[SystemOverview] - 计算当日 bars 覆盖率（covered / active_total）。
+
+    复用 bars_scheduler_service 的统计逻辑（不引入新依赖）。
+    返回 None 表示无法计算（无活跃标的）。
+
+    Args:
+        db: 异步数据库会话
+        business_date_obj: 业务日期 date 对象
+
+    Returns:
+        覆盖率 0.0-1.0，或 None
+    """
+    from app.models.bar import BarDaily
+    from app.models.instrument import Instrument
+
+    # 统计今日日线覆盖的标的数
+    covered_result = await db.scalar(
+        select(func.count(func.distinct(BarDaily.instrument_id)))
+        .where(BarDaily.trade_date == business_date_obj)
+    )
+    covered = int(covered_result or 0)
+
+    # 统计活跃标的数
+    active_result = await db.scalar(
+        select(func.count(Instrument.id)).where(Instrument.status == "active")
+    )
+    total = int(active_result or 0)
+
+    if total == 0:
+        return None
+    return covered / total
+
+
+async def _has_released_selector_version(db: AsyncSession) -> bool:
+    """[SystemOverview] - 检查 selector 策略是否有 released 版本。
+
+    查询 strategy_definitions WHERE kind='selector' JOIN strategy_versions WHERE status='released'。
+    任一 selector 策略有 released 版本即返回 True。
+
+    Args:
+        db: 异步数据库会话
+
+    Returns:
+        True 表示至少有一个 selector 策略有 released 版本
+    """
+    from sqlalchemy import exists
+
+    released_subq = (
+        select(StrategyVersion.id)
+        .where(
+            StrategyVersion.strategy_definition_id == StrategyDefinition.id,
+            StrategyVersion.status == "released",
+        )
+        .limit(1)
+        .correlate(StrategyDefinition)
+    )
+    stmt = (
+        select(func.count())
+        .select_from(StrategyDefinition)
+        .where(
+            StrategyDefinition.kind == "selector",
+            exists(released_subq),
+        )
+    )
+    count = await db.scalar(stmt)
+    return int(count or 0) > 0
 
 
 if __name__ == "__main__":
@@ -674,9 +871,13 @@ if __name__ == "__main__":
     assert HEARTBEAT_OFFLINE_THRESHOLD == 90
     assert FRESHNESS_DELAYED_THRESHOLD == 180
     assert WORKER_HEALTH_WINDOW == 120
+    assert WAITING_DSA_QUEUED_TIMEOUT == 1800
+    assert WAITING_DSA_COVERAGE_THRESHOLD == 0.9
     print(f"HEARTBEAT_OFFLINE_THRESHOLD={HEARTBEAT_OFFLINE_THRESHOLD}")
     print(f"FRESHNESS_DELAYED_THRESHOLD={FRESHNESS_DELAYED_THRESHOLD}")
     print(f"WORKER_HEALTH_WINDOW={WORKER_HEALTH_WINDOW}")
+    print(f"WAITING_DSA_QUEUED_TIMEOUT={WAITING_DSA_QUEUED_TIMEOUT}")
+    print(f"WAITING_DSA_COVERAGE_THRESHOLD={WAITING_DSA_COVERAGE_THRESHOLD}")
 
     # 验证 _determine_monitor_status 逻辑（非异步部分）
     from app.services.market_status_service import (

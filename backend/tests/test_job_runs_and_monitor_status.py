@@ -386,8 +386,10 @@ def test_monitor_session_label_outside_session() -> None:
 
 @pytest.mark.asyncio
 async def test_monitor_scheduler_reuses_session_job_run(test_db) -> None:
-    """同一交易时段应复用同一个 SchedulerJobRun。"""
+    """同一交易时段第二次调用应返回 None（幂等跳过），调用方按 run_key 查询复用。"""
     from datetime import date as date_cls
+
+    from sqlalchemy import select
 
     from app.worker import _find_or_create_monitor_session_job_run
 
@@ -397,13 +399,21 @@ async def test_monitor_scheduler_reuses_session_job_run(test_db) -> None:
         test_db, now, str(trade_date), "morning",
     )
     await test_db.commit()
+    assert job_run1 is not None
 
+    # 第二次调用返回 None（幂等：run_key 已存在）
     job_run2 = await _find_or_create_monitor_session_job_run(
         test_db, now, str(trade_date), "morning",
     )
-    await test_db.commit()
+    assert job_run2 is None
 
-    assert job_run1.id == job_run2.id
+    # 调用方按 run_key 查询复用现有记录
+    run_key = f"monitor_scheduler:{trade_date}:morning"
+    stmt = select(SchedulerJobRun).where(SchedulerJobRun.run_key == run_key).limit(1)
+    result = await test_db.execute(stmt)
+    reused = result.scalar_one_or_none()
+    assert reused is not None
+    assert reused.id == job_run1.id
 
 
 @pytest.mark.asyncio

@@ -108,6 +108,7 @@ class Exchange(ABC):
         start_date: date | None = None,
         end_date: date | None = None,
         count: int | None = None,
+        limit: int | None = None,
     ) -> pd.DataFrame | None:
         """统一行情读取接口（参考 chanlunpro Exchange.klines）
 
@@ -117,6 +118,8 @@ class Exchange(ABC):
             start_date: 起始日期
             end_date: 结束日期
             count: 返回 bar 数量（与 start_date/end_date 二选一）
+            limit: 请求量，控制 pytdx 拉取条数 fetch_count = min(limit+250, 1000)；
+                   仅 PytdxAdapter 使用，DBExchange 忽略（DB 查询无需此参数）
 
         Returns:
             DataFrame with columns: [open, high, low, close, volume, amount, adj_factor]

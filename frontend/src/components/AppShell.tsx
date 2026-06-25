@@ -124,8 +124,8 @@ export default function AppShell({ children }: { children: ReactNode }) {
   const healthQuery = useHealth()
   const isServiceHealthy = healthQuery.data?.status === 'ok'
 
-  // 管理员系统概览（详细状态）
-  const adminOverviewQuery = useAdminSystemOverview()
+  // 管理员系统概览（详细状态）- [AppShell] - 描述: 仅 admin 角色启用，避免普通用户触发 403
+  const adminOverviewQuery = useAdminSystemOverview(!!user && user.role === 'admin')
   const adminOverview = adminOverviewQuery.data
 
   // 获取用户名首字母作为头像

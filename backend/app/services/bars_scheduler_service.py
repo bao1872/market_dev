@@ -84,6 +84,10 @@ class BatchResult:
     period_counts: dict[str, int] = field(default_factory=dict)
     # [BarsScheduler] - 日线阶段触发/复用的 DSA StrategyRun id，供 job_run.metadata_json 记录
     dsa_run_id: uuid.UUID | None = None
+    # [JobRunEvent] - 日线覆盖率（日线阶段完成后填充，供 worker 写 DAILY_DONE 事件 payload）
+    daily_covered: int | None = None
+    daily_total: int | None = None
+    daily_coverage: float | None = None
 
 
 class BarsSchedulerService:
@@ -125,6 +129,7 @@ class BarsSchedulerService:
         self,
         trade_date: date,
         db_session: AsyncSession | None = None,
+        job_run_id: uuid.UUID | None = None,
     ) -> BatchResult:
         """每日增量更新：串行拉取全市场 active 股票的最新行情。
 
@@ -133,6 +138,8 @@ class BarsSchedulerService:
         Args:
             trade_date: 交易日期
             db_session: 可选的 DB 会话（不传则内部创建）
+            job_run_id: 可选的 SchedulerJobRun.id，传入时在日线阶段完成/DSA 触发后
+                写入 job_run_events 时间线事件（DAILY_DONE / DSA_CREATED）
 
         Returns:
             BatchResult: 批量刷新结果
@@ -143,6 +150,7 @@ class BarsSchedulerService:
             counts=self.DAILY_COUNTS,
             db_session=db_session,
             task_name="每日增量更新",
+            job_run_id=job_run_id,
         )
 
     async def backfill_all_instruments(
@@ -182,6 +190,7 @@ class BarsSchedulerService:
         db_session: AsyncSession | None,
         task_name: str,
         start_date: date | None = None,
+        job_run_id: uuid.UUID | None = None,
     ) -> BatchResult:
         """处理全市场股票的多周期行情刷新（按周期分阶段）。
 
@@ -197,6 +206,8 @@ class BarsSchedulerService:
             db_session: 可选的 DB 会话
             task_name: 任务名称（用于日志）
             start_date: 日线回补起始日期（仅回补模式使用，None 时用 count 模式）
+            job_run_id: 可选的 SchedulerJobRun.id，传入时在日线阶段完成/DSA 触发后
+                写入 job_run_events 时间线事件
 
         Returns:
             BatchResult: 批量刷新结果
@@ -294,12 +305,30 @@ class BarsSchedulerService:
             if is_daily_refresh and period == "d":
                 try:
                     result.dsa_run_id = await self._check_daily_coverage_and_trigger_dsa(
-                        trade_date, db_session,
+                        trade_date, db_session, job_run_id=job_run_id, result=result,
                     )
+                    # [JobRunEvent] - 日线阶段完成后写入 DAILY_DONE 事件（含覆盖率）
+                    if job_run_id is not None and result.daily_coverage is not None:
+                        await self._append_daily_done_event(
+                            db_session, job_run_id, result,
+                        )
                 except Exception as exc:
+                    # [BarsScheduler] - DSA 触发异常不中断日线刷新后续周期，
+                    # 但必须写 DSA_TRIGGER_FAILED error 事件留下诊断痕迹（禁止静默吞没）
                     logger.warning(
                         "[BarsScheduler] 日线覆盖率检查/DSA 触发异常: %s", exc,
+                        exc_info=True,
                     )
+                    if job_run_id is not None:
+                        try:
+                            await self._append_dsa_trigger_failed_event(
+                                db_session, job_run_id, exc,
+                            )
+                        except Exception as inner_exc:
+                            logger.warning(
+                                "[BarsScheduler] 写 DSA_TRIGGER_FAILED 事件失败: %s",
+                                inner_exc,
+                            )
 
         # 汇总 succeeded/failed（按标的维度：任一周期失败即计为 failed）
         result.succeeded = total - len(result.failed_symbols)
@@ -315,6 +344,8 @@ class BarsSchedulerService:
         self,
         trade_date: date,
         db_session: AsyncSession | None = None,
+        job_run_id: uuid.UUID | None = None,
+        result: BatchResult | None = None,
     ) -> uuid.UUID | None:
         """[BarsScheduler] - 检查日线覆盖率，满足阈值则自动触发 DSA 选股。
 
@@ -329,6 +360,8 @@ class BarsSchedulerService:
         Args:
             trade_date: 交易日期
             db_session: 可选的 DB 会话
+            job_run_id: 可选的 SchedulerJobRun.id，传入时在 DSA 触发后写 DSA_CREATED 事件
+            result: 可选的 BatchResult，传入时填充 daily_covered/daily_total/daily_coverage
 
         Returns:
             关联的 StrategyRun id，未触发时返回 None
@@ -337,6 +370,7 @@ class BarsSchedulerService:
 
         from app.constants.strategy_keys import DSA_SELECTOR
         from app.models.bar import BarDaily
+        from app.services.job_run_event_service import append_event
         from app.services.strategy_batch_service import StrategyBatchService
 
         async def _do_check(db: AsyncSession) -> uuid.UUID | None:
@@ -359,14 +393,39 @@ class BarsSchedulerService:
                 covered, total, coverage * 100,
             )
 
+            # [JobRunEvent] - 填充 BatchResult 覆盖率字段（供调用方写 DAILY_DONE 事件）
+            if result is not None:
+                result.daily_covered = covered
+                result.daily_total = total
+                result.daily_coverage = coverage
+
             if coverage < 0.9:
+                # [BarsScheduler] - 覆盖率不足阈值，写 COVERAGE_INSUFFICIENT warn 事件
                 logger.warning(
-                    "[BarsScheduler] 日线覆盖率不足 %.1f%%，暂不触发 DSA",
-                    coverage * 100,
+                    "[BarsScheduler] 日线覆盖率不足 %.1f%%（covered=%d/total=%d），暂不触发 DSA",
+                    coverage * 100, covered, total,
                 )
+                if job_run_id is not None:
+                    await append_event(
+                        db=db,
+                        job_run_id=job_run_id,
+                        step="COVERAGE_INSUFFICIENT",
+                        level="warn",
+                        message=(
+                            f"日线覆盖率不足 {coverage:.1%}（{covered}/{total}），暂不触发 DSA"
+                        ),
+                        payload={
+                            "covered": covered,
+                            "total": total,
+                            "coverage": coverage,
+                            "threshold": 0.9,
+                        },
+                    )
+                    await db.commit()
                 return None
 
             # 触发 DSA run（create_batch_run 内部统一去重/重试）
+            # create_batch_run 内部 _BLOCKING_STATUSES 跳过，_RETRYABLE_STATUSES 重建 attempt
             batch_service = StrategyBatchService()
             run = await batch_service.create_batch_run(
                 db=db,
@@ -376,9 +435,29 @@ class BarsSchedulerService:
             )
             await db.commit()
             logger.info(
-                "[BarsScheduler] 日线覆盖率达标，已自动触发/复用 DSA 选股: run_id=%s",
-                run.id,
+                "[BarsScheduler] 日线覆盖率达标，已自动触发/复用 DSA 选股: "
+                "run_id=%s, attempt_no=%d, covered=%d/total=%d",
+                run.id, run.attempt_no, covered, total,
             )
+
+            # [JobRunEvent] - DSA 触发后写入 DSA_CREATED 事件（含覆盖率与 attempt_no）
+            if job_run_id is not None:
+                await append_event(
+                    db=db,
+                    job_run_id=job_run_id,
+                    step="DSA_CREATED",
+                    level="info",
+                    message=f"DSA 选股已触发: run_id={run.id}, attempt_no={run.attempt_no}",
+                    payload={
+                        "run_id": str(run.id),
+                        "attempt_no": run.attempt_no,
+                        "coverage": coverage,
+                        "covered": covered,
+                        "total": total,
+                    },
+                )
+                await db.commit()
+
             return run.id
 
         if db_session is not None:
@@ -386,6 +465,81 @@ class BarsSchedulerService:
         else:
             async with AsyncSessionLocal() as session:
                 return await _do_check(session)
+
+    async def _append_daily_done_event(
+        self,
+        db_session: AsyncSession | None,
+        job_run_id: uuid.UUID,
+        result: BatchResult,
+    ) -> None:
+        """[JobRunEvent] - 写入 DAILY_DONE 事件（日线阶段完成，含覆盖率）。
+
+        db_session 为 None 时内部创建独立 session；事件写入后 commit 持久化。
+        """
+        from app.services.job_run_event_service import append_event
+
+        covered = result.daily_covered or 0
+        total = result.daily_total or 0
+        coverage = result.daily_coverage or 0.0
+
+        async def _do_write(db: AsyncSession) -> None:
+            await append_event(
+                db=db,
+                job_run_id=job_run_id,
+                step="DAILY_DONE",
+                level="info",
+                message=f"日线覆盖 {covered}/{total} = {coverage:.1%}",
+                payload={
+                    "covered": covered,
+                    "total": total,
+                    "coverage": coverage,
+                },
+            )
+            await db.commit()
+
+        if db_session is not None:
+            await _do_write(db_session)
+        else:
+            async with AsyncSessionLocal() as session:
+                await _do_write(session)
+
+    async def _append_dsa_trigger_failed_event(
+        self,
+        db_session: AsyncSession | None,
+        job_run_id: uuid.UUID,
+        exc: Exception,
+    ) -> None:
+        """[JobRunEvent] - 写入 DSA_TRIGGER_FAILED error 事件（DSA 触发异常诊断）。
+
+        DSA 触发失败不中断日线刷新后续周期（15min/60min），但需留下诊断痕迹：
+        - step=DSA_TRIGGER_FAILED, level=error
+        - payload 含 error_type / message，便于前端时间线展示与告警
+
+        db_session 为 None 时内部创建独立 session；事件写入后 commit 持久化。
+        """
+        import traceback as tb_mod
+        from app.services.job_run_event_service import append_event
+
+        async def _do_write(db: AsyncSession) -> None:
+            await append_event(
+                db=db,
+                job_run_id=job_run_id,
+                step="DSA_TRIGGER_FAILED",
+                level="error",
+                message=f"DSA 触发失败: {exc}",
+                payload={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc)[:500],
+                    "traceback": tb_mod.format_exc()[:4000],
+                },
+            )
+            await db.commit()
+
+        if db_session is not None:
+            await _do_write(db_session)
+        else:
+            async with AsyncSessionLocal() as session:
+                await _do_write(session)
 
     async def refresh_one_instrument(
         self,
@@ -586,7 +740,7 @@ if __name__ == "__main__":
     # 2. 验证方法签名
     sig = inspect.signature(service.refresh_all_instruments)
     params = list(sig.parameters.keys())
-    assert params == ["trade_date", "db_session"], \
+    assert params == ["trade_date", "db_session", "job_run_id"], \
         f"refresh_all_instruments 参数不匹配: {params}"
     print(f"refresh_all_instruments params={params}")
 
@@ -610,7 +764,7 @@ if __name__ == "__main__":
 
     sig = inspect.signature(service._process_all_instruments)
     params = list(sig.parameters.keys())
-    assert params == ["trade_date", "counts", "db_session", "task_name", "start_date"], \
+    assert params == ["trade_date", "counts", "db_session", "task_name", "start_date", "job_run_id"], \
         f"_process_all_instruments 参数不匹配: {params}"
     print(f"_process_all_instruments params={params}")
 
@@ -687,8 +841,33 @@ if __name__ == "__main__":
         "_check_daily_coverage_and_trigger_dsa 应可调用"
     sig = inspect.signature(service._check_daily_coverage_and_trigger_dsa)
     params = list(sig.parameters.keys())
-    assert params == ["trade_date", "db_session"], \
-        f"_check_daily_coverage_and_trigger_dsa 参数应为 [trade_date, db_session]，实际 {params}"
+    assert params == ["trade_date", "db_session", "job_run_id", "result"], \
+        f"_check_daily_coverage_and_trigger_dsa 参数应为 [trade_date, db_session, job_run_id, result]，实际 {params}"
     print("_check_daily_coverage_and_trigger_dsa 方法验证 ✓")
+
+    # 验证 _append_daily_done_event 方法
+    assert hasattr(service, "_append_daily_done_event"), \
+        "应有 _append_daily_done_event 方法"
+    sig = inspect.signature(service._append_daily_done_event)
+    params = list(sig.parameters.keys())
+    assert params == ["db_session", "job_run_id", "result"], \
+        f"_append_daily_done_event 参数应为 [db_session, job_run_id, result]，实际 {params}"
+    print("_append_daily_done_event 方法验证 ✓")
+
+    # 验证 _append_dsa_trigger_failed_event 方法（Phase 3 新增）
+    assert hasattr(service, "_append_dsa_trigger_failed_event"), \
+        "应有 _append_dsa_trigger_failed_event 方法"
+    sig = inspect.signature(service._append_dsa_trigger_failed_event)
+    params = list(sig.parameters.keys())
+    assert params == ["db_session", "job_run_id", "exc"], \
+        f"_append_dsa_trigger_failed_event 参数应为 [db_session, job_run_id, exc]，实际 {params}"
+    print("_append_dsa_trigger_failed_event 方法验证 ✓")
+
+    # 验证 BatchResult 新增字段
+    batch = BatchResult(total=10, succeeded=8, failed=2)
+    assert batch.daily_covered is None
+    assert batch.daily_total is None
+    assert batch.daily_coverage is None
+    print(f"BatchResult 新增字段验证 ✓（daily_covered/total/coverage 默认 None）")
 
     print("\n所有自测通过 ✓（未进行 DB/网络测试）")

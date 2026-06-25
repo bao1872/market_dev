@@ -3,7 +3,7 @@
 //
 // 用法：
 // 1. 路由 /admin/jobs，受保护路由（经 ProtectedLayout + AdminRoute 包裹）
-// 2. KPI 4 列：运行中数 / 失败数 / 今日全局事件数 / 今日用户消息数
+// 2. KPI 4 列：运行中数（status==='running'）/ 失败数 / 全部事件数 / 全部消息数
 // 3. 定时任务运行记录表：使用 StrategyDataTable，列含运行ID/任务名/业务日期/计划时间/开始/结束/处理/状态/耗时/详情
 // 4. split-even 布局：最近全局事件列表（含快照按钮）+ 失败投递列表（含重试按钮）
 // 5. 任务详情抽屉 jobDrawer：任务名/业务日期/计划时间/开始/结束/耗时/处理进度/错误信息/元数据
@@ -21,7 +21,6 @@
 // - useToast：操作反馈
 
 import { useState, useMemo, useCallback } from 'react'
-import { useQueries } from '@tanstack/react-query'
 import {
   useSchedulerJobRuns,
   useAdminStrategyRuns,
@@ -31,13 +30,28 @@ import {
   useMessageDeliveries,
   useRetryMessageDelivery,
   useTriggerStrategyRun,
+  useBatchInstruments,
 } from '@/hooks/useApi'
 import { STRATEGY_KEYS } from '@/constants/strategyKeys'
-import * as api from '@/api/endpoints'
 import type { SchedulerJobRunItem, Instrument, MessageDelivery, StrategyRun } from '@/api/endpoints'
 import { useToast } from '@/store/toast'
 import { StrategyDataTable } from '@/components/StrategyDataTable'
 import type { DataTableColumn } from '@/components/StrategyDataTable'
+import { formatShanghaiTime } from '@/utils/datetime'
+import { JobRunEventTimeline } from '@/features/admin-job-events/JobRunEventTimeline'
+
+// ===== 任务名中文映射 =====
+// [AdminJobsPage] - 描述: job_name 原始 key → 中文展示名映射表
+const JOB_NAME_CN_MAP: Record<string, string> = {
+  bars_scheduler: '盘后行情更新',
+  strategy_scheduler: '盘后选股兜底调度',
+  monitor_scheduler: '盘中自选股监控',
+  calendar_scheduler: '交易日历更新',
+  strategy_batch: 'DSA 批量计算',
+  outbox: '事件消息分发',
+  delivery: '第三方通知投递',
+  after_close_orchestrator: '盘后编排',
+}
 
 // ===== 类型定义 =====
 
@@ -87,34 +101,7 @@ interface StrategyRunRow {
 }
 
 // ===== 工具函数 =====
-
-/** 格式化 ISO 时间为 HH:MM:SS，无效返回 '-' */
-function formatTime(iso: string | null | undefined): string {
-  if (!iso) return '-'
-  try {
-    return new Date(iso).toLocaleTimeString('zh-CN', {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    })
-  } catch {
-    return '-'
-  }
-}
-
-/** 格式化 ISO 日期时间为 YYYY-MM-DD HH:MM，无效返回 '-' */
-function formatDateTime(iso: string | null | undefined): string {
-  if (!iso) return '-'
-  try {
-    const d = new Date(iso)
-    return `${d.toLocaleDateString('zh-CN')} ${d.toLocaleTimeString('zh-CN', {
-      hour: '2-digit',
-      minute: '2-digit',
-    })}`
-  } catch {
-    return '-'
-  }
-}
+// 时间格式化统一使用 formatShanghaiTime（@/utils/datetime），确保 Asia/Shanghai 时区。
 
 /** 计算耗时（秒），返回可读字符串如 "8.1s" / "2m41s" / "1h5m" */
 function formatDuration(startedAt: string | null, finishedAt: string | null): string {
@@ -241,13 +228,13 @@ export default function AdminJobsPage() {
         id: run.id,
         job_name: run.job_name,
         business_date: run.business_date,
-        scheduled_at: formatTime(run.scheduled_at),
-        started_at: formatTime(run.started_at),
-        finished_at: formatTime(run.finished_at),
-        heartbeat_at: formatTime(run.heartbeat_at),
-        lease_expires_at: formatTime(run.lease_expires_at),
+        scheduled_at: formatShanghaiTime(run.scheduled_at),
+        started_at: formatShanghaiTime(run.started_at),
+        finished_at: formatShanghaiTime(run.finished_at),
+        heartbeat_at: formatShanghaiTime(run.heartbeat_at),
+        lease_expires_at: formatShanghaiTime(run.lease_expires_at),
         current_run_id: meta.current_run_id,
-        last_bar_time: meta.last_bar_time ? formatDateTime(meta.last_bar_time) : '',
+        last_bar_time: meta.last_bar_time ? formatShanghaiTime(meta.last_bar_time) : '',
         processed,
         progress: run.progress,
         status: run.status,
@@ -284,17 +271,18 @@ export default function AdminJobsPage() {
         succeeded_count: run.succeeded_count,
         failed_count: run.failed_count,
         skipped_count: run.skipped_count,
-        started_at: formatTime(run.started_at),
-        finished_at: formatDateTime(run.finished_at),
-        published_at: formatDateTime(run.published_at),
+        started_at: formatShanghaiTime(run.started_at),
+        finished_at: formatShanghaiTime(run.finished_at),
+        published_at: formatShanghaiTime(run.published_at),
         raw: run,
       }
     })
   }, [strategyRunsQuery.data])
 
   // ===== KPI 计算 =====
+  // [AdminJobsPage] - 描述: 运行中任务仅统计 status==='running'，不含 interrupted/warn 等其他状态
   const kpiRunning = useMemo(
-    () => jobRunRows.filter((r) => r.status_pill_class === 'warn').length,
+    () => jobRunRows.filter((r) => r.status === 'running').length,
     [jobRunRows],
   )
   const kpiFailed = useMemo(
@@ -312,25 +300,19 @@ export default function AdminJobsPage() {
     return deliveriesQuery.data ?? []
   }, [deliveriesQuery.data])
 
-  // ===== 事件列表 instrument 查询（批量查询构建 symbol 映射）=====
+  // [AdminJobsPage] - 描述: 事件 instrument 批量查询，单次 POST /instruments/batch 替代 N+1 循环
   const eventInstrumentIds = useMemo(
     () => [...new Set(events.map((e) => e.instrument_id))],
     [events],
   )
-  const instrumentQueries = useQueries({
-    queries: eventInstrumentIds.map((id) => ({
-      queryKey: ['instruments', id],
-      queryFn: () => api.getInstrumentById(id),
-      staleTime: 5 * 60 * 1000,
-    })),
-  })
+  const batchInstrumentsQuery = useBatchInstruments(eventInstrumentIds)
   const instrumentMap = useMemo(() => {
     const m = new Map<string, Instrument>()
-    instrumentQueries.forEach((q, i) => {
-      if (q.data) m.set(eventInstrumentIds[i], q.data)
+    batchInstrumentsQuery.data?.items.forEach((inst) => {
+      m.set(inst.id, inst)
     })
     return m
-  }, [instrumentQueries, eventInstrumentIds])
+  }, [batchInstrumentsQuery.data])
 
   // ===== 选中运行详情（抽屉展示用）=====
   const selectedRun = useMemo(
@@ -401,11 +383,6 @@ export default function AdminJobsPage() {
     [retryDelivery, toast],
   )
 
-  /** 导出日志（当前无后端导出接口，显示 toast 提示） */
-  const handleExportLogs = useCallback(() => {
-    toast.show('导出日志', '日志导出功能开发中')
-  }, [toast])
-
   // ===== 列定义 =====
 
   const jobRunColumns: DataTableColumn<JobRunRow>[] = useMemo(
@@ -425,7 +402,14 @@ export default function AdminJobsPage() {
         dataType: 'text',
         sortable: true,
         filterable: true,
-        render: (row) => row.job_name,
+        helpText:
+          '盘中监控按上午盘/下午盘记录；盘后行情在 16:00 启动；DSA 由行情覆盖率达标后触发，18:30 有兜底调度',
+        render: (row) => (
+          <div>
+            <div className="job-name-cn">{JOB_NAME_CN_MAP[row.job_name] ?? row.job_name}</div>
+            <div className="job-name-raw">{row.job_name}</div>
+          </div>
+        ),
       },
       {
         key: 'business_date',
@@ -647,9 +631,6 @@ export default function AdminJobsPage() {
           </div>
         </div>
         <div className="actions">
-          <button className="btn" onClick={handleExportLogs}>
-            导出日志
-          </button>
           <button className="btn primary" onClick={() => setRerunModalOpen(true)}>
             手动重跑
           </button>
@@ -673,31 +654,35 @@ export default function AdminJobsPage() {
           </div>
           <div className="kpi-foot">最近 24 小时</div>
         </div>
-        {/* KPI 3：今日全局事件数 */}
+        {/* KPI 3：全部全局事件数（events API 按 event_time 范围查询，非今日维度） */}
         <div className="card kpi-card">
-          <div className="kpi-label">今日全局事件</div>
+          <div className="kpi-label">全部事件</div>
           <div className="kpi-value">{eventsQuery.isLoading ? '-' : kpiEvents}</div>
         </div>
-        {/* KPI 4：今日用户消息数 */}
+        {/* KPI 4：全部用户消息数（messages API 无日期过滤） */}
         <div className="card kpi-card">
-          <div className="kpi-label">今日用户消息</div>
+          <div className="kpi-label">全部消息</div>
           <div className="kpi-value">{messagesQuery.isLoading ? '-' : kpiMessages}</div>
         </div>
       </div>
 
       {/* Tab 切换 */}
-      <div className="tabs">
+      <div className="jobs-tabs" role="tablist">
         <button
-          className={`tab ${activeTab === 'scheduler' ? 'active' : ''}`}
+          className={`jobs-tab ${activeTab === 'scheduler' ? 'active' : ''}`}
           onClick={() => setActiveTab('scheduler')}
           type="button"
+          role="tab"
+          aria-selected={activeTab === 'scheduler'}
         >
           定时任务
         </button>
         <button
-          className={`tab ${activeTab === 'strategy' ? 'active' : ''}`}
+          className={`jobs-tab ${activeTab === 'strategy' ? 'active' : ''}`}
           onClick={() => setActiveTab('strategy')}
           type="button"
+          role="tab"
+          aria-selected={activeTab === 'strategy'}
         >
           策略计算
         </button>
@@ -792,7 +777,7 @@ export default function AdminJobsPage() {
                       {symbol} · {event.event_type} · {event.logical_entity_id ?? '-'}
                     </div>
                     <div className="list-meta">
-                      {formatTime(event.event_time)}
+                      {formatShanghaiTime(event.event_time)}
                       {nodeLow !== undefined && nodeHigh !== undefined
                         ? ` · 节点 ${nodeLow}–${nodeHigh}`
                         : ''}
@@ -883,23 +868,23 @@ export default function AdminJobsPage() {
                       </div>
                       <div className="toggle-row">
                         <span>计划时间</span>
-                        <b className="num">{formatTime(selectedRun.scheduled_at)}</b>
+                        <b className="num">{formatShanghaiTime(selectedRun.scheduled_at)}</b>
                       </div>
                       <div className="toggle-row">
                         <span>开始时间</span>
-                        <b className="num">{formatTime(selectedRun.started_at)}</b>
+                        <b className="num">{formatShanghaiTime(selectedRun.started_at)}</b>
                       </div>
                       <div className="toggle-row">
                         <span>结束时间</span>
-                        <b className="num">{formatTime(selectedRun.finished_at)}</b>
+                        <b className="num">{formatShanghaiTime(selectedRun.finished_at)}</b>
                       </div>
                       <div className="toggle-row">
                         <span>最后心跳</span>
-                        <b className="num">{formatTime(selectedRun.heartbeat_at)}</b>
+                        <b className="num">{formatShanghaiTime(selectedRun.heartbeat_at)}</b>
                       </div>
                       <div className="toggle-row">
                         <span>租约到期</span>
-                        <b className="num">{formatTime(selectedRun.lease_expires_at)}</b>
+                        <b className="num">{formatShanghaiTime(selectedRun.lease_expires_at)}</b>
                       </div>
                       <div className="toggle-row">
                         <span>当前子任务 ID</span>
@@ -912,7 +897,7 @@ export default function AdminJobsPage() {
                         <b className="num">
                           {(() => {
                             const lb = parseJobMetadata(selectedRun.metadata_json).last_bar_time
-                            return lb ? formatDateTime(lb) : '-'
+                            return lb ? formatShanghaiTime(lb) : '-'
                           })()}
                         </b>
                       </div>
@@ -954,6 +939,15 @@ export default function AdminJobsPage() {
                       </div>
                     </div>
                   )}
+                  {/* 事件时间线（按需加载，展示任务执行步骤事件） */}
+                  <div className="card section-gap">
+                    <div className="card-head">
+                      <div className="card-title">事件时间线</div>
+                    </div>
+                    <div className="card-body">
+                      <JobRunEventTimeline runId={selectedRun.id} />
+                    </div>
+                  </div>
                 </>
               )}
             </div>
@@ -1003,15 +997,15 @@ export default function AdminJobsPage() {
                       </div>
                       <div className="toggle-row">
                         <span>开始时间</span>
-                        <b className="num">{formatTime(selectedStrategyRun.started_at)}</b>
+                        <b className="num">{formatShanghaiTime(selectedStrategyRun.started_at)}</b>
                       </div>
                       <div className="toggle-row">
                         <span>完成时间</span>
-                        <b className="num">{formatDateTime(selectedStrategyRun.finished_at)}</b>
+                        <b className="num">{formatShanghaiTime(selectedStrategyRun.finished_at)}</b>
                       </div>
                       <div className="toggle-row">
                         <span>发布时间</span>
-                        <b className="num">{formatDateTime(selectedStrategyRun.published_at)}</b>
+                        <b className="num">{formatShanghaiTime(selectedStrategyRun.published_at)}</b>
                       </div>
                       <div className="toggle-row">
                         <span>处理进度</span>
@@ -1061,7 +1055,7 @@ export default function AdminJobsPage() {
                   {/* 分发统计 */}
                   <div className="notice section-gap">
                     事件类型：{eventDetail.event_type} · 事件时间：
-                    {formatTime(eventDetail.event_time)} · 逻辑实体：
+                    {formatShanghaiTime(eventDetail.event_time)} · 逻辑实体：
                     {eventDetail.logical_entity_id ?? '-'}
                   </div>
                 </>

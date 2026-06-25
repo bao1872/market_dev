@@ -740,13 +740,16 @@ export function useMemberRedemptions(userId: string | undefined) {
 // ===== Admin System Overview hooks =====
 // ============================================================
 
-/** 获取系统概览（30 秒缓存，15 秒轮询，管理后台首页使用） */
-export function useAdminSystemOverview() {
+/** 获取系统概览（30 秒缓存，15 秒轮询，管理后台首页使用）
+ *  enabled: 仅管理员启用，避免普通用户触发 403 无权限请求（AppShell 全局调用时传入角色判断）
+ */
+export function useAdminSystemOverview(enabled: boolean = true) {
   return useQuery({
     queryKey: ['admin', 'system-overview'],
     queryFn: api.getAdminSystemOverview,
+    enabled,
     staleTime: STALE_REALTIME,
-    refetchInterval: 15_000,
+    refetchInterval: enabled ? 15_000 : false,
     refetchIntervalInBackground: false,
   })
 }
@@ -762,6 +765,68 @@ export function useHealth() {
     queryFn: api.getHealth,
     staleTime: STALE_REALTIME,
     retry: false,
+  })
+}
+
+// ============================================================
+// ===== AfterClose & JobRunEvents hooks =====
+// ============================================================
+
+/** 查询任务执行事件时间线（抽屉打开时按需加载） */
+export function useJobRunEvents(runId: string | null | undefined) {
+  return useQuery({
+    queryKey: ['job-runs', runId, 'events'],
+    queryFn: () => api.getJobRunEvents(runId!),
+    enabled: !!runId,
+    staleTime: STALE_REALTIME,
+  })
+}
+
+/** 查询盘后编排状态（10 秒轮询，含事件时间线 + DSA run 状态） */
+export function useAfterCloseRunStatus(runId: string | null | undefined, enabled: boolean = true) {
+  return useQuery({
+    queryKey: ['after-close-runs', runId],
+    queryFn: () => api.getAfterCloseRunStatus(runId!),
+    enabled: !!runId && enabled,
+    staleTime: STALE_REALTIME,
+    refetchInterval: enabled ? 10_000 : false,
+    refetchIntervalInBackground: false,
+  })
+}
+
+/** 创建盘后编排变更 */
+export function useCreateAfterCloseRun() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (tradeDate: string) => api.createAfterCloseRun(tradeDate),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['after-close-runs'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'system-overview'] })
+    },
+  })
+}
+
+/** 重试盘后编排变更 */
+export function useRetryAfterCloseRun() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (runId: string) => api.retryAfterCloseRun(runId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['after-close-runs'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'system-overview'] })
+    },
+  })
+}
+
+/** 强制重新执行盘后编排变更 */
+export function useForceAfterCloseRun() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (runId: string) => api.forceAfterCloseRun(runId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['after-close-runs'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'system-overview'] })
+    },
   })
 }
 

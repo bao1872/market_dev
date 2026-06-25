@@ -27,6 +27,8 @@ export interface DataTableColumn<Row> {
   isAction?: boolean
   // V1.5.1：选择列
   isSelect?: boolean
+  // [StrategyDataTable] - 描述: 表头旁 ? tooltip 帮助文本（hover 显示）
+  helpText?: string
 }
 
 export interface DataTableFilter {
@@ -221,14 +223,17 @@ function ColumnManager({
         {manageable.map((col) => {
           const idx = columns.indexOf(col)
           return (
-            <label key={col.key} className="column-manager-item">
-              <input
-                type="checkbox"
-                checked={!hiddenColumns.has(idx)}
-                onChange={() => onToggle(idx)}
-              />
+            <div key={col.key} className="column-manager-item">
+              <label className="table-checkbox-wrapper" style={{ width: 24, height: 24 }}>
+                <input
+                  type="checkbox"
+                  className="table-checkbox"
+                  checked={!hiddenColumns.has(idx)}
+                  onChange={() => onToggle(idx)}
+                />
+              </label>
               <span>{col.title}</span>
-            </label>
+            </div>
           )
         })}
       </div>
@@ -553,15 +558,17 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
           <tr>
             {selectable && (
               <th className="table-select-column">
-                <input
-                  type="checkbox"
-                  className="checkbox"
-                  checked={allChecked}
-                  ref={(el) => {
-                    if (el) el.indeterminate = !allChecked && someChecked
-                  }}
-                  onChange={handleSelectAll}
-                />
+                <label className="table-checkbox-wrapper">
+                  <input
+                    type="checkbox"
+                    className="table-checkbox"
+                    checked={allChecked}
+                    ref={(el) => {
+                      if (el) el.indeterminate = !allChecked && someChecked
+                    }}
+                    onChange={handleSelectAll}
+                  />
+                </label>
               </th>
             )}
             {columns.map((col, i) => {
@@ -609,6 +616,12 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
                       </button>
                     )}
                     {!col.sortable && <span className="th-label">{col.title}</span>}
+                    {col.helpText && (
+                      <span className="th-help" title={col.helpText}>
+                        ?
+                        <span className="th-help-tooltip">{col.helpText}</span>
+                      </span>
+                    )}
                     {col.filterable && (
                       <button
                         className={clsx('th-filter', filters[i] && 'active')}
@@ -668,12 +681,14 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
                 <tr key={key}>
                   {selectable && (
                     <td className="table-select-column">
-                      <input
-                        type="checkbox"
-                        className="checkbox"
-                        checked={isSelected || false}
-                        onChange={() => handleSelectRow(row)}
-                      />
+                      <label className="table-checkbox-wrapper">
+                        <input
+                          type="checkbox"
+                          className="table-checkbox"
+                          checked={isSelected || false}
+                          onChange={() => handleSelectRow(row)}
+                        />
+                      </label>
                     </td>
                   )}
                   {columns.map((col, i) => {

@@ -203,15 +203,16 @@ async def compute_all_indicators(
 
     if exchange is not None:
         try:
+            # [行情] - 传递 limit 控制 pytdx 拉取量（fetch_count=min(limit+250,1000)，上限 1000）
             # 日线（5000 天回看，与 bars.py 一致）
-            daily_bars = await exchange.klines(symbol, "1d", count=5000) or pd.DataFrame()
+            daily_bars = await exchange.klines(symbol, "1d", count=5000, limit=5000) or pd.DataFrame()
             # 15 分钟线（指标计算需要更多数据）
-            bars_15min = await exchange.klines(symbol, "15m", count=800) or pd.DataFrame()
+            bars_15min = await exchange.klines(symbol, "15m", count=800, limit=800) or pd.DataFrame()
             # 1 分钟线（仅 2 天，用于监控策略）
-            bars_minute = await exchange.klines(symbol, "1m", count=2) or pd.DataFrame()
+            bars_minute = await exchange.klines(symbol, "1m", count=2, limit=2) or pd.DataFrame()
             # 60 分钟线（策略在 timeframe='1h' 时可能需要）
             if timeframe == "1h":
-                bars_60min = await exchange.klines(symbol, "1h", count=800) or pd.DataFrame()
+                bars_60min = await exchange.klines(symbol, "1h", count=800, limit=800) or pd.DataFrame()
         except Exception as exc:
             logger.warning("Exchange.klines() 失败 instrument_id=%s: %s，降级到 DB", instrument_id, exc)
             exchange = None  # 标记为失败，后续使用 DB 降级

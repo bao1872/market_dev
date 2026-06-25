@@ -4,7 +4,7 @@
 // 用法：
 // 1. 路由 /admin，受保护路由（经 ProtectedLayout + AdminRoute 包裹）
 // 2. KPI 卡片组（admin-accent 紫色左边框，4 列）：有效用户 / 去重监控股票 / 最近一分钟处理 / 评估成功率
-// 3. split-2 布局：盘中监控 / 盘后任务（后端 monitor_runtime / after_close_pipeline 直出，前端不再组合判定）
+// 3. split-2 布局：盘中监控 / 盘后流水线卡片（AfterClosePipelineCard 组件）
 // 4. split-3 布局：监控吞吐折线图（Canvas）/ DSA 最近运行 / 队列与任务
 // 5. split-2 布局：服务健康状态表 / 最近异常列表
 //
@@ -17,6 +17,7 @@ import { Link } from 'react-router-dom'
 import { useStrategies, useAdminSystemOverview } from '@/hooks/useApi'
 import { getVersion, type VersionInfo } from '@/api/endpoints'
 import { formatShanghaiTime } from '@/utils/datetime'
+import { AfterClosePipelineCard } from '@/features/after-close-pipeline/AfterClosePipelineCard'
 
 // ===== 监控吞吐折线图 =====
 
@@ -42,17 +43,11 @@ function formatDuration(startedAt: string | null, finishedAt: string | null): st
   return m > 0 ? `${m}m ${s}s` : `${s}s`
 }
 
-/** 格式化运行时间（ISO → "YYYY-MM-DD HH:MM"）*/
+/** 格式化运行时间（ISO → 上海时区 "yyyy/MM/dd HH:mm:ss"，无效返回"今日尚未运行"）*/
 function formatRunTime(iso: string | null | undefined): string {
   if (!iso) return '今日尚未运行'
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return '今日尚未运行'
-  const Y = d.getFullYear()
-  const M = String(d.getMonth() + 1).padStart(2, '0')
-  const D = String(d.getDate()).padStart(2, '0')
-  const hh = String(d.getHours()).padStart(2, '0')
-  const mm = String(d.getMinutes()).padStart(2, '0')
-  return `${Y}-${M}-${D} ${hh}:${mm}`
+  const formatted = formatShanghaiTime(iso)
+  return formatted === '-' ? '今日尚未运行' : formatted
 }
 
 // ===== 状态标签映射（后端枚举 → 中文，前端仅做展示映射，不做判定）=====
@@ -79,33 +74,6 @@ function monitorStatusLabel(status: string | undefined): string {
   }
 }
 
-/** [盘后任务] - 描述: after_close_pipeline.status 中文标签 */
-function pipelineStatusLabel(status: string | undefined): string {
-  switch (status) {
-    case 'NOT_STARTED':
-      return '未开始'
-    case 'BARS_RUNNING':
-      return '行情更新中'
-    case 'BARS_FAILED':
-      return '行情更新失败'
-    case 'WAITING_DSA':
-      return '等待DSA'
-    case 'DSA_QUEUED':
-      return 'DSA已排队'
-    case 'DSA_RUNNING':
-      return 'DSA计算中'
-    case 'DSA_COMPLETED':
-      return 'DSA已完成'
-    case 'PUBLISHED':
-      return '已发布'
-    case 'DSA_FAILED':
-      return 'DSA失败'
-    case 'STALE':
-      return '状态过期'
-    default:
-      return '-'
-  }
-}
 
 /** [盘中监控] - 描述: market_session 中文标签 */
 function marketSessionLabel(session: string | undefined): string {
@@ -323,93 +291,11 @@ export default function AdminIndexPage() {
             </div>
           </div>
         </section>
-        <section className="card">
-          <div className="card-head">
-            <div>
-              <div className="card-title">盘后任务</div>
-              <div className="card-sub">后端 after_close_pipeline 直出</div>
-            </div>
-          </div>
-          <div className="card-body">
-            <div className="toggle-row">
-              <span>状态</span>
-              <b>
-                <span
-                  className={`status-pill ${
-                    overview?.after_close_pipeline?.status === 'PUBLISHED' ? 'ok' : 'off'
-                  }`}
-                >
-                  {overviewLoading
-                    ? '-'
-                    : pipelineStatusLabel(overview?.after_close_pipeline?.status)}
-                </span>
-              </b>
-            </div>
-            <div className="toggle-row">
-              <span>计划启动</span>
-              <b className="num">16:00</b>
-            </div>
-            <div className="toggle-row">
-              <span>bars_scheduler</span>
-              <b className="num">
-                {overviewLoading
-                  ? '-'
-                  : overview?.after_close_pipeline?.bars_job?.status ?? '今日尚未运行'}
-              </b>
-            </div>
-            <div className="toggle-row">
-              <span>DSA 状态</span>
-              <b className="num">
-                {overviewLoading
-                  ? '-'
-                  : overview?.after_close_pipeline?.dsa_run?.status ?? '等待行情更新'}
-              </b>
-            </div>
-            {/* [盘后任务] - 描述: DSA 失败时展示错误详情，便于管理员排查 */}
-            {(overview?.after_close_pipeline?.dsa_run?.status === 'failed' ||
-              overview?.after_close_pipeline?.status === 'DSA_FAILED') &&
-              overview?.after_close_pipeline?.dsa_run && (
-                <>
-                  <div className="toggle-row">
-                    <span>失败阶段</span>
-                    <b className="num">
-                      {overview.after_close_pipeline.dsa_run.failure_stage ?? '-'}
-                    </b>
-                  </div>
-                  <div className="toggle-row">
-                    <span>错误码</span>
-                    <b className="num">
-                      {overview.after_close_pipeline.dsa_run.error_code ?? '-'}
-                    </b>
-                  </div>
-                  <div className="toggle-row">
-                    <span>错误摘要</span>
-                    <b className="num">
-                      {overview.after_close_pipeline.dsa_run.error_message ?? '-'}
-                    </b>
-                  </div>
-                  <div className="toggle-row">
-                    <span>业务日期</span>
-                    <b className="num">
-                      {overview.after_close_pipeline.dsa_run.trade_date ?? '-'}
-                    </b>
-                  </div>
-                  <div className="toggle-row">
-                    <span>run_type</span>
-                    <b className="num">
-                      {overview.after_close_pipeline.dsa_run.run_type ?? '-'}
-                    </b>
-                  </div>
-                  <div className="toggle-row">
-                    <span>attempt_no</span>
-                    <b className="num">
-                      {overview.after_close_pipeline.dsa_run.attempt_no ?? '-'}
-                    </b>
-                  </div>
-                </>
-              )}
-          </div>
-        </section>
+        <AfterClosePipelineCard
+          pipeline={overview?.after_close_pipeline ?? null}
+          tradeDate={overview?.business_date ?? undefined}
+          loading={overviewLoading}
+        />
       </div>
 
       {/* split-3：监控吞吐 / DSA 最近运行 / 队列与任务 */}

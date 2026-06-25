@@ -330,12 +330,22 @@ class StrategyBatchService:
             return blocking_run
 
         # 6. 失败运行不阻断当日重试：基于最大 attempt_no 创建新 attempt
+        # [StrategyRun] - _RETRYABLE_STATUSES={failed,partial_failed,interrupted} 允许重建，
+        # _BLOCKING_STATUSES={published,completed,running,queued} 已在步骤 5 跳过
         attempt_no = 1
         retryable_runs = [
             r for r in existing_runs if r.status in _RETRYABLE_STATUSES
         ]
         if retryable_runs:
             attempt_no = max((r.attempt_no or 1) for r in retryable_runs) + 1
+            logger.info(
+                "[StrategyBatch] 检测到可重试运行，创建新 attempt: "
+                "strategy_key=%s, trade_date=%s, run_type=%s, "
+                "prev_attempts=%s, new_attempt_no=%d",
+                strategy_key, trade_date, run_type,
+                [(r.id, r.status, r.attempt_no) for r in retryable_runs],
+                attempt_no,
+            )
 
         # 7. 生成幂等键（含 strategy_version_id 与 attempt_no）
         idempotency_key = (
@@ -607,7 +617,12 @@ class StrategyBatchService:
         )
         return run
 
-    async def execute_run(self, db: AsyncSession, run_id: uuid.UUID) -> None:
+    async def execute_run(
+        self,
+        db: AsyncSession,
+        run_id: uuid.UUID,
+        job_run_id: uuid.UUID | None = None,
+    ) -> None:
         """执行批量计算（由 Worker 调用）。
 
         流程：
@@ -621,6 +636,9 @@ class StrategyBatchService:
         Args:
             db: 异步会话
             run_id: 运行 ID
+            job_run_id: 可选的 SchedulerJobRun.id，传入时写入 BATCH_START/BATCH_PROGRESS/
+                BATCH_DONE/QUALITY_GATE/PUBLISH_DONE/BATCH_FAILED 事件到 job_run_events 时间线。
+                典型场景：盘后编排（after_close_orchestrator）调用时传入 orchestrator 的 job_run_id。
 
         Raises:
             ValueError: run 不存在或状态非 running
@@ -637,6 +655,14 @@ class StrategyBatchService:
 
         worker_id = run.worker_id or _get_worker_id()
 
+        # [JobRunEvent] - BATCH_START：开始计算
+        if job_run_id is not None:
+            await self._append_batch_event(
+                job_run_id, "BATCH_START", "info",
+                f"开始批量计算: run_id={run_id}",
+                {"run_id": str(run_id), "total_instruments": run.total_instruments or 0},
+            )
+
         # 2. 启动独立 Session 心跳任务
         heartbeat_task = asyncio.create_task(
             _run_heartbeat_task(run.id, worker_id)
@@ -649,6 +675,13 @@ class StrategyBatchService:
                 run.status = "failed"
                 run.finished_at = datetime.now(UTC)
                 await db.flush()
+                # [JobRunEvent] - BATCH_FAILED：策略版本不存在
+                if job_run_id is not None:
+                    await self._append_batch_event(
+                        job_run_id, "BATCH_FAILED", "error",
+                        f"策略版本不存在: strategy_version_id={run.strategy_version_id}",
+                        {"error_code": "VERSION_NOT_FOUND", "run_id": str(run_id)},
+                    )
                 raise ValueError(
                     f"策略版本不存在: strategy_version_id={run.strategy_version_id}"
                 )
@@ -659,6 +692,13 @@ class StrategyBatchService:
                 run.status = "failed"
                 run.finished_at = datetime.now(UTC)
                 await db.flush()
+                # [JobRunEvent] - BATCH_FAILED：加载策略运行时失败
+                if job_run_id is not None:
+                    await self._append_batch_event(
+                        job_run_id, "BATCH_FAILED", "error",
+                        f"加载策略运行时失败: {exc}",
+                        {"error_code": "LOAD_RUNTIME_FAILED", "run_id": str(run_id)},
+                    )
                 raise RuntimeError(
                     f"加载策略运行时失败 run_id={run_id}: {exc}"
                 ) from exc
@@ -734,6 +774,21 @@ class StrategyBatchService:
                         f"更新 run_item 状态失败 item_id={item.id}: {exc}"
                     ) from exc
 
+                # [JobRunEvent] - BATCH_PROGRESS：每 500 股一次进度事件
+                processed = succeeded + failed + skipped
+                if job_run_id is not None and processed > 0 and processed % 500 == 0:
+                    await self._append_batch_event(
+                        job_run_id, "BATCH_PROGRESS", "info",
+                        f"进度: {processed}/{len(run_items)} succeeded={succeeded} failed={failed}",
+                        {
+                            "processed": processed,
+                            "total": len(run_items),
+                            "succeeded": succeeded,
+                            "failed": failed,
+                            "skipped": skipped,
+                        },
+                    )
+
             # 5.1 批量写入结果
             if all_results:
                 try:
@@ -774,15 +829,53 @@ class StrategyBatchService:
                 len(run_items), succeeded, failed, skipped,
             )
 
+            # [JobRunEvent] - BATCH_DONE：完成
+            if job_run_id is not None:
+                await self._append_batch_event(
+                    job_run_id, "BATCH_DONE", "info",
+                    f"批量计算完成: status={run.status}, "
+                    f"succeeded={succeeded}, failed={failed}, skipped={skipped}",
+                    {
+                        "run_id": str(run_id),
+                        "status": run.status,
+                        "total": len(run_items),
+                        "succeeded": succeeded,
+                        "failed": failed,
+                        "skipped": skipped,
+                    },
+                )
+
             # 定时任务自动发布：检查质量门禁
             if run.run_type == _RUN_TYPE_SCHEDULED:
-                if await self._check_quality_gates(run):
+                quality_passed = await self._check_quality_gates(run)
+                # [JobRunEvent] - QUALITY_GATE：质量门禁结果
+                if job_run_id is not None:
+                    await self._append_batch_event(
+                        job_run_id, "QUALITY_GATE", "info" if quality_passed else "warn",
+                        f"质量门禁: {'通过' if quality_passed else '未通过'}",
+                        {
+                            "passed": quality_passed,
+                            "run_status": run.status,
+                            "coverage": (
+                                (succeeded / len(run_items))
+                                if run_items else 0.0
+                            ),
+                        },
+                    )
+                if quality_passed:
                     try:
                         await self.publish_run(db, run_id)
                         logger.info(
                             "定时任务自动发布成功: run_id=%s, trade_date=%s",
                             run_id, run.trade_date,
                         )
+                        # [JobRunEvent] - PUBLISH_DONE：发布完成
+                        if job_run_id is not None:
+                            await self._append_batch_event(
+                                job_run_id, "PUBLISH_DONE", "info",
+                                f"已发布: run_id={run_id}",
+                                {"published_run_id": str(run_id)},
+                            )
                     except Exception as exc:
                         # 自动发布失败不影响运行结果，仅记录警告
                         logger.warning(
@@ -801,6 +894,39 @@ class StrategyBatchService:
                 await heartbeat_task
             except asyncio.CancelledError:
                 pass
+
+    async def _append_batch_event(
+        self,
+        job_run_id: uuid.UUID,
+        step: str,
+        level: str,
+        message: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """[JobRunEvent] - 用独立 session 写入批量计算事件并 commit。
+
+        使用独立 session 避免与 execute_run 主 session 的 rollback 冲突，
+        确保事件即使在主流程 rollback 时也能持久化。
+        事件写入失败仅记录警告，不影响批量计算主流程。
+        """
+        from app.services.job_run_event_service import append_event
+
+        try:
+            async with AsyncSessionLocal() as event_db:
+                await append_event(
+                    db=event_db,
+                    job_run_id=job_run_id,
+                    step=step,
+                    level=level,
+                    message=message,
+                    payload=payload,
+                )
+                await event_db.commit()
+        except Exception as exc:
+            logger.warning(
+                "[StrategyBatch] 写入 job_run_event 失败 step=%s job_run_id=%s: %s",
+                step, job_run_id, exc,
+            )
 
     async def publish_run(self, db: AsyncSession, run_id: uuid.UUID) -> StrategyRun:
         """发布运行结果（admin 调用）。
@@ -1307,7 +1433,17 @@ if __name__ == "__main__":
     sig = inspect.signature(StrategyBatchService.execute_run)
     params = list(sig.parameters.keys())
     assert "run_id" in params
+    assert "job_run_id" in params
     print(f"execute_run params: {params} ✓")
+
+    # 验证 _append_batch_event 方法
+    assert hasattr(StrategyBatchService, "_append_batch_event"), \
+        "应有 _append_batch_event 方法"
+    sig = inspect.signature(StrategyBatchService._append_batch_event)
+    params = list(sig.parameters.keys())
+    assert params == ["self", "job_run_id", "step", "level", "message", "payload"], \
+        f"_append_batch_event 参数不匹配: {params}"
+    print(f"_append_batch_event params: {params} ✓")
 
     # 验证 publish_run 签名
     sig = inspect.signature(StrategyBatchService.publish_run)

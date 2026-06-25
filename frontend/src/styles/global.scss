@@ -2155,3 +2155,210 @@ textarea.input { height: auto; min-height: 80px; padding: 9px; resize: vertical;
   height: 16px;
   cursor: pointer;
 }
+
+// ===== Phase 5: 任务页 Tab 样式 + 任务名映射 + 深色复选框 =====
+
+// [AdminJobsPage] - 描述: 任务页 Tab 切换按钮组（替代通用 .tabs 下划线样式）
+.jobs-tabs {
+  display: inline-flex;
+  border: 1px solid #2a3245;
+  border-radius: 6px;
+  overflow: hidden;
+  margin-bottom: 16px;
+}
+.jobs-tab {
+  appearance: none;
+  background: #131a28;
+  color: #9ba3b5;
+  border: none;
+  border-right: 1px solid #2a3245;
+  padding: 0 20px;
+  height: 36px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  &:last-child { border-right: none; }
+  &:hover { background: #1a2333; color: #c8cdda; }
+  &.active { background: #3478f6; color: #fff; }
+  &:focus-visible { outline: 2px solid rgba(52,120,246,.45); outline-offset: -2px; }
+}
+
+// [AdminJobsPage] - 描述: 任务名单元格两行展示（中文 + 原始 key）
+.job-name-cn { color: #e4e7ee; font-size: 13px; }
+.job-name-raw { color: #6b7488; font-size: 11px; font-family: 'Menlo', 'Monaco', monospace; margin-top: 2px; }
+
+// [AdminJobsPage] - 描述: 表头 ? tooltip 帮助图标
+.th-help {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-left: 4px;
+  border-radius: 50%;
+  background: #2a3245;
+  color: #9ba3b5;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: help;
+  position: relative;
+  &:hover .th-help-tooltip { display: block; }
+}
+.th-help-tooltip {
+  display: none;
+  position: absolute;
+  z-index: 100;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  transform: translateX(-50%);
+  width: 280px;
+  padding: 8px 10px;
+  background: #202631;
+  border: 1px solid #3c4659;
+  border-radius: 6px;
+  color: #c8cdda;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.55;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+  white-space: normal;
+  text-align: left;
+}
+
+// [StrategyDataTable] - 描述: 深色主题复选框（覆盖原生样式，含 32px 点击区域）
+.table-checkbox-wrapper {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  cursor: pointer;
+}
+.table-checkbox {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border: 1px solid #46516b;
+  border-radius: 4px;
+  background: #131a28;
+  cursor: pointer;
+  position: relative;
+  &:checked {
+    background: #3478f6;
+    border-color: #3478f6;
+    &::after {
+      content: '';
+      position: absolute;
+      left: 4px;
+      top: 1px;
+      width: 5px;
+      height: 9px;
+      border: solid #fff;
+      border-width: 0 2px 2px 0;
+      transform: rotate(45deg);
+    }
+  }
+  &:indeterminate {
+    background: #3478f6;
+    border-color: #3478f6;
+    &::after {
+      content: '';
+      position: absolute;
+      left: 3px;
+      top: 7px;
+      width: 10px;
+      height: 2px;
+      background: #fff;
+    }
+  }
+  &:focus-visible {
+    outline: 2px solid rgba(52,120,246,.45);
+    outline-offset: 2px;
+  }
+}
+
+// ===== Phase 5: 盘后流水线卡片 + 任务事件时间线 =====
+
+// [AfterClosePipelineCard] - 描述: 7 阶段状态进度条
+.pipeline-steps {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 4px;
+  margin-bottom: 12px;
+}
+.pipeline-step {
+  padding: 8px 6px;
+  border: 1px solid v.$color-border-soft;
+  border-radius: 5px;
+  background: #11151d;
+  text-align: center;
+  font-size: 10px;
+  color: v.$color-muted;
+  &.done { background: rgba(38, 166, 154, .08); border-color: rgba(38, 166, 154, .3); color: #62d0c5; }
+  &.active { background: rgba(41, 98, 255, .1); border-color: rgba(41, 98, 255, .35); color: #8facff; }
+  &.error { background: rgba(239, 83, 80, .08); border-color: rgba(239, 83, 80, .3); color: #ff7774; }
+  b { display: block; font-size: 11px; margin-bottom: 2px; }
+}
+
+// [AfterClosePipelineCard] - 描述: WAITING_DSA 提示框
+.pipeline-waiting-notice {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 152, 0, .3);
+  background: rgba(255, 152, 0, .08);
+  border-radius: 6px;
+  font-size: 12px;
+  color: #ffc069;
+  b { display: block; margin-bottom: 4px; }
+}
+
+// [JobRunEventTimeline] - 描述: 任务事件时间线
+.job-event-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 400px;
+  overflow: auto;
+}
+.job-event-item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid v.$color-border-soft;
+  border-radius: 5px;
+  background: #11151d;
+  font-size: 11px;
+  &.error { border-color: rgba(239, 83, 80, .3); background: rgba(239, 83, 80, .05); }
+  &.warn { border-color: rgba(255, 152, 0, .3); background: rgba(255, 152, 0, .05); }
+  &.info { border-color: v.$color-border-soft; }
+}
+.job-event-level {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 18px;
+  border-radius: 9px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  &.error { background: rgba(239, 83, 80, .15); color: #ff7774; }
+  &.warn { background: rgba(255, 152, 0, .15); color: #ffb74d; }
+  &.info { background: #292e3a; color: #858d9d; }
+}
+.job-event-main { min-width: 0; }
+.job-event-step { font-weight: 650; color: #d2d6df; }
+.job-event-message { color: #b8becb; margin-top: 3px; word-break: break-word; }
+.job-event-time { color: v.$color-muted; font-size: 10px; margin-top: 3px; font-family: v.$font-mono; }
+.job-event-payload {
+  margin-top: 5px;
+  padding: 6px 8px;
+  background: #0f131a;
+  border-radius: 4px;
+  font: 10px/1.5 v.$font-mono;
+  color: #c8d3f5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

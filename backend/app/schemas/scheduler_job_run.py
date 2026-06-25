@@ -57,3 +57,53 @@ class RecentSchedulerJobSummary(BaseModel):
     succeeded_count: int | None = None
     failed_count: int | None = None
     error_message: str | None = None
+
+
+# [JobRunEvent] - 任务事件时间线 DTO
+class JobRunEventItem(BaseModel):
+    """单条任务执行事件。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    job_run_id: UUID
+    step: str
+    level: str
+    message: str
+    payload: dict | None = None
+    created_at: datetime
+
+
+class JobRunEventListResponse(BaseModel):
+    """任务事件时间线响应。"""
+
+    items: list[JobRunEventItem]
+    total: int
+
+
+# [AfterClose] - 盘后编排状态响应 DTO
+class AfterCloseRunStatusResponse(BaseModel):
+    """盘后编排任务状态响应（含编排状态 + DSA run 状态 + 事件时间线）。"""
+
+    job_run_id: str
+    job_name: str
+    business_date: str | None = None
+    status: str  # SchedulerJobRun.status: running/succeeded/failed
+    orchestrator_status: str  # AfterCloseRunStatus: queued/refreshing_daily/.../succeeded/failed
+    trade_date: str | None = None
+    dsa_run_id: str | None = None
+    dsa_run_status: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    error_message: str | None = None
+    events: list[JobRunEventItem] = []
+
+
+class AfterCloseRunCreateResponse(BaseModel):
+    """盘后编排任务创建/重试响应。"""
+
+    job_run_id: str
+    status: str
+    orchestrator_status: str
+    trade_date: str
+    message: str

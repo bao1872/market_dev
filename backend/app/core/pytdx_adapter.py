@@ -752,6 +752,7 @@ class PytdxAdapter(Exchange):
         start_date: date | None = None,
         end_date: date | None = None,
         count: int | None = None,
+        limit: int | None = None,
     ) -> pd.DataFrame | None:
         """统一行情读取接口（参考 chanlunpro ExchangeTDX.klines）
 
@@ -759,6 +760,15 @@ class PytdxAdapter(Exchange):
         - 缓存命中且有效：直接返回
         - 缓存过期：增量拉取新数据页合并（参考 chanlunpro 的 pages 逐页拉取逻辑）
         - 缓存未命中：全量拉取
+
+        Args:
+            symbol: 股票代码（如 '000001'）
+            frequency: K线周期（'1d', '15m', '1h', '1w', '1mo'）
+            start_date: 起始日期
+            end_date: 结束日期
+            count: 返回 bar 数量（用于结果截断，与 start_date/end_date 二选一）
+            limit: 请求量，控制 pytdx 拉取条数 fetch_count = min(limit+250, 1000)；
+                   未传时回退到 count，都未传默认 250
         """
         from app.core.exchange import FREQUENCY_MAP
 
@@ -769,7 +779,9 @@ class PytdxAdapter(Exchange):
 
         # 周线/月线：从日线合成
         if frequency in ("1w", "1mo"):
-            return await self._klines_synthesized(symbol, frequency, start_date, end_date, count)
+            return await self._klines_synthesized(
+                symbol, frequency, start_date, end_date, count, limit=limit,
+            )
 
         cache_key = self._cache_key(symbol, frequency)
         now = datetime.now(ZoneInfo("Asia/Shanghai"))
@@ -821,7 +833,10 @@ class PytdxAdapter(Exchange):
                 return df
 
         # --- 缓存未命中：全量拉取 ---
-        fetch_count = 8000  # 缓存场景：始终拉取足够多的数据，过滤在读取时应用
+        # [行情] - fetch_count: 请求量 + 预热窗口 250，上限 1000（避免过度拉取 pytdx）
+        # limit 优先；未传 limit 时回退到 count；都未传默认 250
+        effective_limit = limit if limit is not None else (count if count is not None else 250)
+        fetch_count = min(effective_limit + 250, 1000)
         df = await asyncio.to_thread(
             self._fetch_with_retry, symbol, self._FREQ_TO_PERIOD[frequency], fetch_count
         )
@@ -856,13 +871,19 @@ class PytdxAdapter(Exchange):
         start_date: date | None = None,
         end_date: date | None = None,
         count: int | None = None,
+        limit: int | None = None,
     ) -> pd.DataFrame | None:
         """从日线合成周线/月线"""
-        # 获取更多日线以确保有足够的合成数据
+        # [行情] - 合成周线/月线所需日线数：每根周线≈7日，每根月线≈31日
         daily_count = (count or 500) * 7 if frequency == "1w" else (count or 120) * 31
         daily_count = min(daily_count, 8000)
 
-        daily_df = await self.klines(symbol, "1d", start_date=start_date, end_date=end_date, count=daily_count)
+        # limit 透传给 klines，控制 pytdx 拉取量（fetch_count 上限 1000）
+        daily_df = await self.klines(
+            symbol, "1d",
+            start_date=start_date, end_date=end_date,
+            count=daily_count, limit=limit,
+        )
         if daily_df is None or daily_df.empty:
             return None
 

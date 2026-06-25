@@ -1466,6 +1466,10 @@ export interface SystemOverview {
       error_message: string | null
       failure_stage: string | null
     } | null
+    // [SystemOverview] - WAITING_DSA 细分原因（7 种之一，仅 DSA 未 published 时填充）
+    waiting_dsa_reason: string | null
+    // [SystemOverview] - 原因对应的人类可读建议（与 waiting_dsa_reason 配对）
+    waiting_dsa_suggestion: string | null
   }
 }
 
@@ -1527,5 +1531,104 @@ export async function getSchedulerJobRuns(params?: {
 /** 获取系统概览（admin） */
 export async function getAdminSystemOverview(): Promise<SystemOverview> {
   const { data } = await apiClient.get<SystemOverview>('/admin/system-overview')
+  return data
+}
+
+// ============================================================
+// ===== AfterClose & JobRunEvents 端点 =====
+// ============================================================
+
+/** 任务执行事件（时间线条目） */
+export interface JobRunEvent {
+  id: string
+  job_run_id: string
+  step: string
+  level: 'info' | 'warn' | 'error'
+  message: string
+  payload: Record<string, unknown> | null
+  created_at: string
+}
+
+/** 任务事件时间线响应 */
+export interface JobRunEventListResponse {
+  items: JobRunEvent[]
+  total: number
+}
+
+/** 盘后编排状态响应（含编排状态 + DSA run 状态 + 事件时间线） */
+export interface AfterCloseRunStatusResponse {
+  job_run_id: string
+  job_name: string
+  business_date: string | null
+  status: string
+  orchestrator_status: string
+  trade_date: string | null
+  dsa_run_id: string | null
+  dsa_run_status: string | null
+  started_at: string | null
+  finished_at: string | null
+  error_message: string | null
+  events: JobRunEvent[]
+}
+
+/** 盘后编排创建/重试响应 */
+export interface AfterCloseRunCreateResponse {
+  job_run_id: string
+  status: string
+  orchestrator_status: string
+  trade_date: string
+  message: string
+}
+
+/** 查询任务执行事件时间线（按 created_at 倒序） */
+export async function getJobRunEvents(
+  runId: string,
+  limit: number = 100,
+): Promise<JobRunEventListResponse> {
+  const { data } = await apiClient.get<JobRunEventListResponse>(
+    `/admin/job-runs/${runId}/events`,
+    { params: { limit } },
+  )
+  return data
+}
+
+/** 查询盘后编排状态（含事件时间线 + DSA run 状态） */
+export async function getAfterCloseRunStatus(
+  runId: string,
+): Promise<AfterCloseRunStatusResponse> {
+  const { data } = await apiClient.get<AfterCloseRunStatusResponse>(
+    `/admin/after-close-runs/${runId}`,
+  )
+  return data
+}
+
+/** 创建并异步执行盘后编排 */
+export async function createAfterCloseRun(
+  tradeDate: string,
+): Promise<AfterCloseRunCreateResponse> {
+  const { data } = await apiClient.post<AfterCloseRunCreateResponse>(
+    '/admin/after-close-runs',
+    { trade_date: tradeDate },
+  )
+  return data
+}
+
+/** 重试失败的盘后编排任务 */
+export async function retryAfterCloseRun(
+  runId: string,
+): Promise<AfterCloseRunCreateResponse> {
+  const { data } = await apiClient.post<AfterCloseRunCreateResponse>(
+    `/admin/after-close-runs/${runId}/retry`,
+  )
+  return data
+}
+
+/** 强制重新执行盘后编排（非 failed 状态也可触发） */
+export async function forceAfterCloseRun(
+  runId: string,
+): Promise<AfterCloseRunCreateResponse> {
+  const { data } = await apiClient.post<AfterCloseRunCreateResponse>(
+    `/admin/after-close-runs/${runId}/force`,
+  )
   return data
 }

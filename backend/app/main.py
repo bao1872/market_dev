@@ -33,6 +33,7 @@ from datetime import date
 from fastapi import FastAPI, Request
 
 from app.api import metrics as metrics_api
+from app.api.admin_after_close import router as admin_after_close_router
 from app.api.admin_membership import router as admin_membership_router
 from app.api.auth import router as auth_router
 from app.api.bars import router as bars_router
@@ -135,6 +136,8 @@ app.include_router(notifications_router)
 # 配置注册表管理路由（R6，需 admin 角色）
 # 会员与邀请码管理路由（V1.6，需 admin 角色）
 app.include_router(admin_membership_router)
+# 盘后编排管理路由（Task 2.3，需 admin 角色）
+app.include_router(admin_after_close_router)
 # 用户自选股路由（W1）
 app.include_router(watchlist_router)
 # 个股备忘录路由

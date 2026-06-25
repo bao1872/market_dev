@@ -39,6 +39,53 @@ PIPELINE_STATUS_DSA_FAILED = "DSA_FAILED"
 PIPELINE_STATUS_STALE = "STALE"
 
 
+# [SystemOverview] - WAITING_DSA 细分原因枚举（7 种）
+# 当 DSA 未成功 published 时，细分具体原因，便于前端展示可读建议
+WAITING_DSA_REASON_NO_RUN_CREATED = "NO_RUN_CREATED"
+WAITING_DSA_REASON_QUEUED_NOT_CLAIMED = "QUEUED_NOT_CLAIMED"
+WAITING_DSA_REASON_DATA_COVERAGE_INSUFFICIENT = "DATA_COVERAGE_INSUFFICIENT"
+WAITING_DSA_REASON_NO_RELEASED_VERSION = "NO_RELEASED_VERSION"
+WAITING_DSA_REASON_RUN_FAILED = "RUN_FAILED"
+WAITING_DSA_REASON_QUALITY_GATE_FAILED = "QUALITY_GATE_FAILED"
+WAITING_DSA_REASON_PUBLISH_FAILED = "PUBLISH_FAILED"
+
+# 全部 WAITING_DSA 原因集合（用于校验取值合法性）
+ALL_WAITING_DSA_REASONS = {
+    WAITING_DSA_REASON_NO_RUN_CREATED,
+    WAITING_DSA_REASON_QUEUED_NOT_CLAIMED,
+    WAITING_DSA_REASON_DATA_COVERAGE_INSUFFICIENT,
+    WAITING_DSA_REASON_NO_RELEASED_VERSION,
+    WAITING_DSA_REASON_RUN_FAILED,
+    WAITING_DSA_REASON_QUALITY_GATE_FAILED,
+    WAITING_DSA_REASON_PUBLISH_FAILED,
+}
+
+# [SystemOverview] - WAITING_DSA 原因 → 人类可读建议 映射
+WAITING_DSA_SUGGESTIONS: dict[str, str] = {
+    WAITING_DSA_REASON_NO_RUN_CREATED: (
+        "检查 strategy_scheduler 是否在 18:30 触发；或手动调用 POST /admin/after-close-runs"
+    ),
+    WAITING_DSA_REASON_QUEUED_NOT_CLAIMED: (
+        "检查 trading-worker-strategy-batch 容器是否健康"
+    ),
+    WAITING_DSA_REASON_DATA_COVERAGE_INSUFFICIENT: (
+        "重新同步日线数据"
+    ),
+    WAITING_DSA_REASON_NO_RELEASED_VERSION: (
+        "在管理员策略页发布 selector 版本"
+    ),
+    WAITING_DSA_REASON_RUN_FAILED: (
+        "查看失败股票和 error_message"
+    ),
+    WAITING_DSA_REASON_QUALITY_GATE_FAILED: (
+        "检查质量门禁配置和失败股票"
+    ),
+    WAITING_DSA_REASON_PUBLISH_FAILED: (
+        "检查发布逻辑和 published_run 表"
+    ),
+}
+
+
 class LatestSelectorRun(BaseModel):
     """dsa_selector 最近一次运行摘要。"""
 
@@ -98,6 +145,10 @@ class AfterClosePipeline(BaseModel):
     status: str
     bars_job: BarsJobSummary | None = None
     dsa_run: DsaRunSummary | None = None
+    # [SystemOverview] - WAITING_DSA 细分原因（7 种之一，仅 DSA 未 published 时填充）
+    waiting_dsa_reason: str | None = None
+    # [SystemOverview] - 原因对应的人类可读建议（与 waiting_dsa_reason 配对）
+    waiting_dsa_suggestion: str | None = None
 
 
 class SystemOverviewResponse(BaseModel):
@@ -154,6 +205,26 @@ if __name__ == "__main__":
     }
     assert len(pipeline_statuses) == 10, f"pipeline_status 应 10 值，实际 {len(pipeline_statuses)}"
     print(f"pipeline_statuses={sorted(pipeline_statuses)}")
+
+    # 验证 WAITING_DSA 原因枚举（7 种）
+    assert len(ALL_WAITING_DSA_REASONS) == 7, (
+        f"WAITING_DSA 原因应 7 值，实际 {len(ALL_WAITING_DSA_REASONS)}"
+    )
+    print(f"waiting_dsa_reasons={sorted(ALL_WAITING_DSA_REASONS)}")
+
+    # 验证每个原因都有对应建议
+    for reason in ALL_WAITING_DSA_REASONS:
+        assert reason in WAITING_DSA_SUGGESTIONS, (
+            f"原因 {reason} 缺少对应建议"
+        )
+    print(f"waiting_dsa_suggestions 覆盖 {len(WAITING_DSA_SUGGESTIONS)} 种原因 ✓")
+
+    # 验证 AfterClosePipeline 新增字段
+    pipeline_fields = set(AfterClosePipeline.model_fields.keys())
+    expected_new_fields = {"waiting_dsa_reason", "waiting_dsa_suggestion"}
+    missing = expected_new_fields - pipeline_fields
+    assert not missing, f"AfterClosePipeline 缺少字段: {missing}"
+    print(f"AfterClosePipeline fields={sorted(pipeline_fields)}")
 
     # 验证 SystemOverviewResponse 字段
     fields = SystemOverviewResponse.model_fields

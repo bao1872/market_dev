@@ -284,8 +284,12 @@ class DBExchange(Exchange):
         start_date: date | None = None,
         end_date: date | None = None,
         count: int | None = None,
+        limit: int | None = None,
     ) -> pd.DataFrame | None:
-        """统一行情读取接口（DB 模式，从 PostgreSQL 读取）"""
+        """统一行情读取接口（DB 模式，从 PostgreSQL 读取）
+
+        limit 参数仅为接口兼容，DB 查询使用 count/LIMIT，不需要 fetch_count 计算。
+        """
         from app.core.exchange import FREQUENCY_MAP
 
         if frequency not in FREQUENCY_MAP:
