@@ -224,7 +224,8 @@ async def _execute_delivery(
 
     try:
         if delivery.delivery_type == "image":
-            # 优先从 image_url 拉取图片；否则使用传入的 image_bytes
+            # [截图缓存] - 任务 6.3：优先复用 delivery.image_url（capture worker 静态 URL）
+            # 通过 _fetch_image_bytes 拉取已缓存的 PNG，不重新调用 capture worker 截图
             actual_image_bytes = image_bytes
             if actual_image_bytes is None and delivery.image_url:
                 actual_image_bytes = await _fetch_image_bytes(delivery.image_url)
@@ -785,6 +786,12 @@ async def retry_delivery(
     直接更新已有的 MessageDelivery 记录并重新调用 adapter，
     不创建新记录，从而不破坏 deliver_message 的幂等语义。
 
+    [截图缓存] - 任务 6.2/6.3：
+    - 文本 delivery 重试：仅调用 adapter.send_text_message，不触发新截图
+    - 图片 delivery 重试：复用 delivery.image_url（capture worker 返回的静态 URL），
+      通过 _fetch_image_bytes 拉取已缓存的 PNG，不重新调用 capture worker
+    - 截图缓存的 TTL（600s）由 stock_capture_service 保证，重试时通常仍在 TTL 内
+
     Args:
         db: 异步会话
         delivery_id: 投递记录 ID
@@ -979,12 +986,15 @@ async def test_channel_latest_event(
     )
 
     # 6. 调用截图 Worker 获取图片本地静态 URL
+    # [screenshot-cache] - 传入 instrument_id 与 chart_version 启用缓存（任务 6.1）
     capture_payload = {
         "symbol": symbol,
         "event_id": str(event.id),
         "token": token,
         "frontend_base_url": frontend_base_url,
         "output_filename": f"test-{channel_id}-{test_run_id}",
+        "instrument_id": str(event.instrument_id),
+        "chart_version": "v1",
     }
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:

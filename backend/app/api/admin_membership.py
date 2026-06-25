@@ -409,6 +409,7 @@ async def get_system_overview(
                 latest_selector_run = {
                     "id": str(run.id),
                     "status": run.status,
+                    "trade_date": run.trade_date,
                     "started_at": run.started_at.isoformat() if run.started_at else None,
                     "finished_at": run.finished_at.isoformat() if run.finished_at else None,
                     "total_instruments": run.total_instruments,

@@ -12,7 +12,7 @@
 // - useAdminSystemOverview：获取系统概览数据（活跃用户/监控标的/评估统计）
 // - useStrategies：获取策略目录（策略数，显示在页头描述）
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { useStrategies, useAdminSystemOverview } from '@/hooks/useApi'
 import { getVersion, type VersionInfo } from '@/api/endpoints'
@@ -103,6 +103,36 @@ export default function AdminIndexPage() {
   const workerHealth = overview?.worker_health ?? 'unknown'
   const schedulerHealth = overview?.scheduler_health ?? 'unknown'
 
+  // ===== 盘中/盘后状态判定 =====
+
+  // 盘中监控绿色：worker 心跳正常 + monitor_scheduler running + 最近一分钟有评估
+  const monitorJobRunning = useMemo(
+    () =>
+      (overview?.recent_scheduler_jobs ?? []).some(
+        (j) => j.job_name === 'monitor_scheduler' && j.status === 'running',
+      ),
+    [overview],
+  )
+  const intradayHealthy = workerHealth === 'healthy' && monitorJobRunning && evalsLastMinute > 0
+
+  // 盘后完成：bars_scheduler 当日 succeeded + DSA run published + failed_count=0
+  const barsJobSucceeded = useMemo(
+    () =>
+      (overview?.recent_scheduler_jobs ?? []).some(
+        (j) => j.job_name === 'bars_scheduler' && j.status === 'succeeded',
+      ),
+    [overview],
+  )
+  const dsaRunPublished =
+    !!latestSelectorRun &&
+    latestSelectorRun.status === 'published' &&
+    (latestSelectorRun.failed_count ?? 0) === 0
+  const todayStr = new Date().toISOString().slice(0, 10)
+  const afterHoursCompleted =
+    barsJobSucceeded &&
+    dsaRunPublished &&
+    (latestSelectorRun?.trade_date === todayStr || latestSelectorRun?.trade_date == null)
+
   // 切换维护模式（尚未接入后端，按钮已禁用）
   const handleToggleMaintenance = () => {
     // [admin] - 维护模式尚未接入后端 API，暂不执行任何操作
@@ -184,6 +214,70 @@ export default function AdminIndexPage() {
           </div>
           <div className="kpi-foot">SUCCEEDED / 已完成</div>
         </div>
+      </div>
+
+      {/* 运行状态判定标签：盘中绿色 / 盘后完成 */}
+      <div className="grid split-2 section-gap">
+        <section className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">盘中监控</div>
+              <div className="card-sub">worker 心跳 + monitor_scheduler running + 评估新鲜度</div>
+            </div>
+          </div>
+          <div className="card-body">
+            <div className="toggle-row">
+              <span>状态</span>
+              <b>
+                <span className={`status-pill ${intradayHealthy ? 'ok' : 'off'}`}>
+                  {intradayHealthy ? '绿色' : '未就绪'}
+                </span>
+              </b>
+            </div>
+            <div className="toggle-row">
+              <span>Worker 心跳</span>
+              <b className="num">{workerHealth}</b>
+            </div>
+            <div className="toggle-row">
+              <span>monitor_scheduler</span>
+              <b className="num">{monitorJobRunning ? 'running' : '未运行'}</b>
+            </div>
+            <div className="toggle-row">
+              <span>最近一分钟评估</span>
+              <b className="num">{overviewLoading ? '-' : evalsLastMinute}</b>
+            </div>
+          </div>
+        </section>
+        <section className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">盘后完成</div>
+              <div className="card-sub">bars_scheduler succeeded + DSA published + failed=0</div>
+            </div>
+          </div>
+          <div className="card-body">
+            <div className="toggle-row">
+              <span>状态</span>
+              <b>
+                <span className={`status-pill ${afterHoursCompleted ? 'ok' : 'off'}`}>
+                  {afterHoursCompleted ? '完成' : '未完成'}
+                </span>
+              </b>
+            </div>
+            <div className="toggle-row">
+              <span>bars_scheduler</span>
+              <b className="num">{barsJobSucceeded ? 'succeeded' : '未完成'}</b>
+            </div>
+            <div className="toggle-row">
+              <span>DSA 状态</span>
+              <b className="num">{latestSelectorRun?.status ?? '未运行'}</b>
+            </div>
+            <div className="toggle-row">
+              <span>DSA 失败数</span>
+              <b className="num">{latestSelectorRun?.failed_count ?? '-'}</b>
+            </div>
+          </div>
+        </section>
       </div>
 
       {/* split-3：监控吞吐 / DSA 最近运行 / 队列与任务 */}

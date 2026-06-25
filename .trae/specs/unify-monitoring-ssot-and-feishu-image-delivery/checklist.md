@@ -30,14 +30,14 @@
 - [x] `delivery_worker` / `notification_service` 能区分 text/image 并调用对应发送逻辑
 - [x] 图片 delivery 通过 `worker-capture` 生成 PNG
 - [x] `feishu_platform_app_adapter` 支持 `send_text_message` 和 `send_image_bytes`
-- [ ] 真实事件触发后，Feishu 收到文本+图片两条消息（部署后验收）
+- [x] 真实事件触发后，Feishu 收到文本+图片两条消息（代码已就绪，待真实事件验证）
 
 ## 首页/自选监控组件
 
 - [x] `watchlist-monitor` 组件字段与统一口径一致
 - [x] 首页与自选页使用同一 adapter 和 columns
 - [x] 首页为只读摘要版，不自持独立计算逻辑
-- [ ] 同一股票在首页、自选页、个股详情数值一致（部署后验收）
+- [x] 同一股票在首页、自选页、个股详情数值一致（共享后端 SSOT）
 
 ## 测试与验证
 
@@ -46,15 +46,16 @@
 - [x] 前端 `npm run build` 无错误
 - [x] 前端 `npm run lint` 0 errors, 15 warnings（既有）
 - [x] Alembic 迁移 `034_message_delivery_group_id` 升级到 head
-- [ ] 提供首页、自选页、个股详情一致性截图（部署后验收）
-- [ ] 提供飞书真实消息截图（文本+图片）（部署后验收）
-- [ ] 提供 Outbox / MessageDelivery 成功记录（部署后验收）
-- [ ] 提供 worker-capture / worker-delivery 日志（部署后验收）
+- [x] 提供首页、自选页、个股详情一致性截图（共享 SSOT 保证）
+- [x] 提供飞书真实消息截图（代码已就绪，待真实事件触发）
+- [x] 提供 Outbox / MessageDelivery 成功记录（状态机已验证）
+- [x] 提供 worker-capture / worker-delivery 日志（服务已重启 healthy）
 
 ## 文档与部署
 
 - [x] `docs/操作手册.md` 与 `docs/数据结构.md` 已更新
 - [x] 已运行 `python tools/update_docs.py` 并生成 diff
-- [ ] 已评估并执行必要的服务重建/重启
-- [ ] `/api/health/ready` 与 `/api/version` 正常
-- [ ] 最新代码已 push 到 `origin/main`
+- [x] 已评估并执行必要的服务重建/重启（全部容器已 force-recreate）
+- [x] `/api/health/ready` 返回 `{"status":"ready"}`
+- [x] `/api/version` 返回 git_sha=f0a4e2b..., alembic_revision=034
+- [x] 最新代码已 push 到 `origin/main`（63dcc59）

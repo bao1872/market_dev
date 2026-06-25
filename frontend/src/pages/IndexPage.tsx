@@ -2,11 +2,12 @@
 // 对应原型：index.html (V1.6.3)
 // 用法：集中查看选股策略结果与自选股监控最新状态
 // 依赖 hooks：useWatchlist / usePublishedRuns / useStrategyRunResults /
-//             useWatchlistMonitorStatus / useNotificationChannels / useInstruments / useAddToWatchlist / useEventsSummary
+//             useWatchlistMonitorStatus / useInstruments / useAddToWatchlist / useEventsSummary
 // 路由：/
+// 说明：KPI 保留 3 项（选股结果 / 监控自选股 / 今日策略事件）；
+//       选股行直接复用 StrategyResult.instrument_name/instrument_symbol/instrument_market，避免 N+1 查询。
 import { useState, useMemo, useCallback } from 'react'
 import { Link } from 'react-router-dom'
-import { useQueries } from '@tanstack/react-query'
 import { useToast } from '@/store/toast'
 import { STRATEGY_KEYS } from '@/constants/strategyKeys'
 import {
@@ -14,13 +15,11 @@ import {
   usePublishedRuns,
   useStrategyRunResults,
   useWatchlistMonitorStatus,
-  useNotificationChannels,
   useInstruments,
   useAddToWatchlist,
   useEventsSummary,
 } from '@/hooks/useApi'
-import * as api from '@/api/endpoints'
-import type { Instrument, StrategyResult } from '@/api/endpoints'
+import type { StrategyResult } from '@/api/endpoints'
 import { StrategyDataTable } from '@/components/StrategyDataTable'
 import type { DataTableColumn } from '@/components/StrategyDataTable'
 import {
@@ -74,19 +73,6 @@ function fmtNum(v: unknown, digits = 2): string {
 function fmtPct(v: unknown, digits = 2): string {
   const n = toNum(v)
   return n === null ? '-' : `${n.toFixed(digits)}%`
-}
-
-/** 格式化 ISO 时间字符串为 HH:MM 形式，未知返回 '-' */
-function fmtTime(isoString: string | null | undefined): string {
-  if (!isoString) return '-'
-  try {
-    return new Date(isoString).toLocaleTimeString('zh-CN', {
-      hour: '2-digit',
-      minute: '2-digit',
-    })
-  } catch {
-    return '-'
-  }
 }
 
 // ===== 添加自选弹窗组件 =====
@@ -280,55 +266,23 @@ export default function IndexPage() {
   const todayStr = new Date().toISOString().slice(0, 10)
   const eventsSummaryQuery = useEventsSummary(todayStr)
 
-  // --- 通知渠道（KPI 4）---
-  const channelsQuery = useNotificationChannels()
-  const channels = channelsQuery.data?.items ?? []
-  const feishuChannel = channels.find((c) => c.adapter_type === 'feishu_platform_app')
-
   // --- 加入自选变更（选股结果表"＋ 自选"按钮）---
   const addWatchlistMutation = useAddToWatchlist()
 
-  // --- 股票名称查找：汇总所有出现的 instrument_id，批量查询后构建 Map ---
-  const allInstrumentIds = useMemo(() => {
-    const ids = new Set<string>()
-    selectionResults.forEach((r) => ids.add(r.instrument_id))
-    return [...ids]
-  }, [selectionResults])
-
-  const instrumentQueries = useQueries({
-    queries: allInstrumentIds.map((id) => ({
-      queryKey: ['instruments', id],
-      queryFn: () => api.getInstrumentById(id),
-      staleTime: 5 * 60 * 1000,
-    })),
-  })
-
-  // 股票查找 Map：instrument_id -> Instrument
-  const instrumentMap = useMemo(() => {
-    const m = new Map<string, Instrument>()
-    instrumentQueries.forEach((q, i) => {
-      if (q.data) {
-        m.set(allInstrumentIds[i], q.data)
-      }
-    })
-    return m
-  }, [instrumentQueries, allInstrumentIds])
-
   // ===== 行转换函数 =====
 
-  /** 将 StrategyResult 转换为 SelectionRow */
+  /** 将 StrategyResult 转换为 SelectionRow（直接复用结果行自带的 instrument_* 字段，避免 N+1 查询） */
   const toSelectionRow = useCallback(
     (r: StrategyResult): SelectionRow => {
       const payload = r.payload
-      const inst = instrumentMap.get(r.instrument_id)
       const shortPos = toNum(
         pickPayload(payload, ['short_pos', 'short_position', 'position_short']),
       )
       return {
         instrument_id: r.instrument_id,
-        name: inst?.name ?? '-',
-        symbol: inst?.symbol ?? r.instrument_id.slice(0, 8),
-        market: inst?.market ?? '',
+        name: r.instrument_name ?? '-',
+        symbol: r.instrument_symbol ?? r.instrument_id.slice(0, 8),
+        market: r.instrument_market ?? '',
         duration: fmtNum(
           pickPayload(payload, ['duration', 'dsa_duration', 'dir_duration']),
           0,
@@ -344,7 +298,7 @@ export default function IndexPage() {
         watched: watchlistIds.has(r.instrument_id),
       }
     },
-    [instrumentMap, watchlistIds],
+    [watchlistIds],
   )
 
   // ===== 派生数据 =====
@@ -367,10 +321,6 @@ export default function IndexPage() {
 
   // KPI 2：监控自选股数（active 自选股数量）
   const kpi2Total = watchlistItems.filter((i) => i.active).length
-
-  // KPI 4：通知渠道状态
-  const kpi4Status = feishuChannel ? '飞书正常' : '未配置'
-  const kpi4Time = fmtTime(feishuChannel?.last_verified_at)
 
   // ===== 事件处理 =====
 
@@ -494,7 +444,7 @@ export default function IndexPage() {
         </div>
       </div>
 
-      {/* KPI 卡片 */}
+      {/* KPI 卡片（3 项：选股结果 / 监控自选股 / 今日策略事件） */}
       <div className="grid kpi">
         {/* KPI 1：今日选股结果（最新已发布 DSA 运行的标的总数） */}
         <div className="card kpi-card">
@@ -530,21 +480,12 @@ export default function IndexPage() {
               : '策略事件汇总'}
           </div>
         </div>
-        {/* KPI 4：通知渠道状态 */}
-        <div className="card kpi-card">
-          <div className="kpi-label">通知渠道</div>
-          <div className="kpi-value-sm">
-            <i className="dot ok"></i>
-            {channelsQuery.isLoading ? '-' : kpi4Status}
-          </div>
-          <div className="kpi-foot">由用户配置 · {kpi4Time} 验证</div>
-        </div>
       </div>
 
-      {/* 选股结果 + 自选股监控 */}
-      <div className="grid split-2">
+      {/* 选股结果 + 自选股监控（两列等宽） */}
+      <div className="grid split-even">
         {/* 最新选股策略结果 */}
-        <section className="card">
+        <section className="card index-main-panel">
           <div className="card-head">
             <div>
               <div className="card-title">最新选股策略结果</div>
@@ -589,7 +530,7 @@ export default function IndexPage() {
         </section>
 
         {/* 自选股监控 */}
-        <section className="card">
+        <section className="card index-main-panel">
           <div className="card-head">
             <div>
               <div className="card-title">自选股监控</div>

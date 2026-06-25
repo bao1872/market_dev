@@ -15,6 +15,7 @@ import clsx from 'clsx'
 import StrategyChart from '@/components/StrategyChart'
 import type { BarData, ChartEvent } from '@/components/StrategyChart'
 import type { IndicatorResponse } from '@/api/endpoints'
+import { formatShanghaiTimeShort } from '@/utils/datetime'
 import {
   useInstrumentBySymbol,
   useBars,
@@ -477,7 +478,7 @@ export default function StockDetailPage() {
                 <span><i className={quoteQuery.data ? 'dot ok' : 'dot warn'}></i>{quoteQuery.data ? `行情延迟 ${((Date.now() - quoteQuery.dataUpdatedAt) / 1000).toFixed(0)}s` : '行情延迟 --'}</span>
                 <span>复权：前复权</span>
                 <span>时区：Asia/Shanghai</span>
-                <span>策略计算：{new Date().toLocaleTimeString('zh-CN', { hour12: false })}</span>
+                <span>策略计算：{formatShanghaiTimeShort(new Date())}</span>
               </div>
             </>
           )}

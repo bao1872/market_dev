@@ -3,10 +3,11 @@
 //
 // 用法：
 // 1. 路由 /settings，受保护路由（经 ProtectedLayout 包裹）
-// 2. 左栏 3 张卡片：会员状态 / 用户通知规则 / 我的通知渠道
+// 2. 左栏 3 张卡片：会员状态 / 通知规则占位（后续版本支持） / 我的通知渠道
 // 3. 右栏 1 张卡片：飞书配置步骤
 // 4. 两个弹窗：飞书配置弹窗（新建/编辑）、续期弹窗
 // 5. 最近事件实测弹窗：展示最近事件摘要与诊断结果
+// 说明：用户级通知规则（冷却/静默/延迟暂停）尚未接入后端，原虚假表单已删除，保留占位说明。
 //
 // 依赖 hooks：
 // - useMyMembership：会员状态卡（到期时间、剩余天数、环形进度）
@@ -490,12 +491,6 @@ export default function SettingsPage() {
   const [latestEventResult, setLatestEventResult] = useState<ChannelLatestEventTestResponse | null>(null)
   const [latestEventError, setLatestEventError] = useState<string | null>(null)
 
-  // 通知规则表单状态
-  const [cooldown, setCooldown] = useState('10')
-  const [quietStart, setQuietStart] = useState('22:30')
-  const [quietEnd, setQuietEnd] = useState('08:30')
-  const [pauseOnDelay, setPauseOnDelay] = useState(true)
-
   const membership = membershipQuery.data
   const remainingDays = membership?.remaining_days ?? 0
   // 环形进度百分比：剩余天数 / 30 天，上限 100%
@@ -588,8 +583,8 @@ export default function SettingsPage() {
             </div>
           </div>
 
-          {/* 用户通知规则卡 */}
-          <div className="card" style={{ opacity: 0.5, pointerEvents: 'none' }}>
+          {/* 用户通知规则占位卡（原虚假表单已删除，待后端接入后再恢复编辑能力） */}
+          <div className="card">
             <div className="card-head">
               <div>
                 <div className="card-title">用户通知规则 <span className="status-pill off">尚未接入后端</span></div>
@@ -597,58 +592,7 @@ export default function SettingsPage() {
               </div>
             </div>
             <div className="card-body">
-              <div className="form-grid">
-                <div className="form-row">
-                  <label className="form-label">默认通知冷却</label>
-                  <div className="input-group">
-                    <input
-                      className="input input-group-input"
-                      value={cooldown}
-                      onChange={(e) => setCooldown(e.target.value)}
-                    />
-                    <span className="btn input-group-suffix">分钟</span>
-                  </div>
-                </div>
-                <div className="form-row">
-                  <label className="form-label">时区</label>
-                  <select className="select" defaultValue="Asia/Shanghai (UTC+8)">
-                    <option>Asia/Shanghai (UTC+8)</option>
-                  </select>
-                </div>
-                <div className="form-row">
-                  <label className="form-label">静默开始</label>
-                  <input
-                    className="input"
-                    type="time"
-                    value={quietStart}
-                    onChange={(e) => setQuietStart(e.target.value)}
-                  />
-                </div>
-                <div className="form-row">
-                  <label className="form-label">静默结束</label>
-                  <input
-                    className="input"
-                    type="time"
-                    value={quietEnd}
-                    onChange={(e) => setQuietEnd(e.target.value)}
-                  />
-                </div>
-              </div>
-              <div className="toggle-row">
-                <div>
-                  <b>数据延迟时暂停通知</b>
-                  <div className="help">分钟行情延迟超过 90 秒时不发送实时提醒。</div>
-                </div>
-                <button
-                  className={`switch${pauseOnDelay ? ' on' : ''}`}
-                  onClick={() => setPauseOnDelay((v) => !v)}
-                  type="button"
-                  aria-label="切换数据延迟时暂停通知"
-                />
-              </div>
-            </div>
-            <div className="drawer-foot">
-              <button className="btn primary" disabled>保存设置</button>
+              <div className="notice">用户级通知规则将在后续版本支持（含通知冷却、静默时段、数据延迟暂停等）。</div>
             </div>
           </div>
 

@@ -15,6 +15,7 @@ import {
 import { StrategyDataTable } from '@/components/StrategyDataTable'
 import type { DataTableColumn, DataTableQuery } from '@/components/StrategyDataTable'
 import type { StrategyResult, StrategyResultQueryParams } from '@/api/endpoints'
+import { formatShanghaiDate } from '@/utils/datetime'
 
 // ===== 常量 =====
 const PAGE_SIZE = 50
@@ -217,7 +218,7 @@ export default function ScreenerPage() {
     const run = activeRun
     if (!run) return null
     const dataDate = run.trade_date
-      ? new Date(run.trade_date).toLocaleDateString('zh-CN')
+      ? formatShanghaiDate(run.trade_date)
       : '-'
     const statusLabel = run.status === 'published'
       ? '已发布'

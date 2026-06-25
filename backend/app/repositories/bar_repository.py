@@ -40,6 +40,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import select
 
+from app.core.time import SHANGHAI_TZ
+
 from app.core.pytdx_adapter import PytdxAdapter, get_pytdx_adapter
 from app.models.bar import Bar15Min, Bar60Min, BarDaily, BarMinute, BarMonthly, BarWeekly
 from app.services.adj_factor import apply_adj_factor, apply_adj_factor_intraday
@@ -1740,7 +1742,8 @@ async def get_bars(
 
     # [行情] - completed_only 过滤
     if completed_only and not bars_df.empty:
-        now = datetime.now()
+        # 使用上海时区判断"今日"（A 股交易日边界），避免容器 UTC 时区导致盘中日线被误排除
+        now = datetime.now(SHANGHAI_TZ)
         if timeframe == "1d":
             # 日线：排除当日 bar（盘中未收盘）
             today = now.date()

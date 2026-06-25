@@ -460,13 +460,35 @@ async def run_bars_scheduler_worker() -> None:
             )
             if job_run is not None:
                 async with AsyncSessionLocal() as db:
-                    # [BarsScheduler] - 无论 DSA run 新建还是复用，均记录 strategy_run_id
-                    if result.dsa_run_id is not None:
-                        job_run = await db.get(SchedulerJobRun, job_run.id)
-                        if job_run is not None:
-                            job_run.metadata_json = json.dumps({
-                                "strategy_run_id": str(result.dsa_run_id)
-                            })
+                    job_run = await db.get(SchedulerJobRun, job_run.id)
+                    if job_run is not None:
+                        # [BarsScheduler] - 记录 strategy_run_id 和 last_bar_time 到 metadata_json
+                        meta: dict[str, object] = {}
+                        if result.dsa_run_id is not None:
+                            meta["strategy_run_id"] = str(result.dsa_run_id)
+                        # 查询业务日最新 15min bar 的 trade_time 作为 last_bar_time
+                        try:
+                            from datetime import date as date_cls
+
+                            from sqlalchemy import func as sa_func, select as sa_select
+
+                            from app.models.bar import Bar15Min
+
+                            bd = job_run.business_date
+                            if bd:
+                                bd_date = date_cls.fromisoformat(bd)
+                                latest_bt = await db.scalar(
+                                    sa_select(sa_func.max(Bar15Min.trade_time)).where(
+                                        Bar15Min.trade_time >= bd_date,
+                                        Bar15Min.trade_time < bd_date + timedelta(days=1),
+                                    )
+                                )
+                                if latest_bt is not None:
+                                    meta["last_bar_time"] = latest_bt.isoformat()
+                        except Exception as exc:
+                            logger.debug("查询 latest bar trade_time 失败: %s", exc)
+                        if meta:
+                            job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
                     await _finish_job_run(
                         db, job_run, "succeeded",
                         success_count=result.succeeded,
@@ -944,6 +966,27 @@ async def run_monitor_scheduler_worker() -> None:
                     job_run.succeeded_count = (job_run.succeeded_count or 0) + 1
                 else:
                     job_run.failed_count = (job_run.failed_count or 0) + 1
+                # [monitor_scheduler] - 查询最新 source_bar_time 写入 metadata_json，供 Admin 页面展示
+                try:
+                    from sqlalchemy import func as sa_func, select as sa_select
+
+                    from app.models.monitor_evaluation import MonitorEvaluation
+
+                    latest_bar_time = await db.scalar(
+                        sa_select(sa_func.max(MonitorEvaluation.source_bar_time))
+                    )
+                    if latest_bar_time is not None:
+                        existing_meta = (
+                            json.loads(job_run.metadata_json)
+                            if job_run.metadata_json
+                            else {}
+                        )
+                        existing_meta["last_bar_time"] = latest_bar_time.isoformat()
+                        job_run.metadata_json = json.dumps(
+                            existing_meta, ensure_ascii=False
+                        )
+                except Exception as exc:
+                    logger.debug("查询 latest source_bar_time 失败: %s", exc)
                 await db.commit()
 
                 # session 接近结束时标记完成

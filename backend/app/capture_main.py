@@ -16,7 +16,9 @@
         "event_id": "...",
         "token": "<short_lived_jwt>",
         "frontend_base_url": "http://frontend",
-        "output_filename": "optional-prefix"  // 可选，默认使用 uuid
+        "output_filename": "optional-prefix",  // 可选，默认使用 uuid
+        "instrument_id": "<uuid>",            // 可选，启用截图缓存（任务 6.1）
+        "chart_version": "v1"                  // 可选，默认 v1
     }
     -> {
         "symbol": "600519",
@@ -30,6 +32,8 @@
 - 等待 data-render-ready="true" 后截取 data-testid="stock-detail-capture"
 - 图片保存到本地静态目录，返回本地静态 URL
 - 不长期存 base64 到 Outbox
+- 截图缓存（任务 6.1）：传入 instrument_id 时，capture_stock_chart 内部按
+  event_id+instrument_id+chart_version 缓存 PNG（TTL 600s），缓存命中不启动浏览器
 """
 
 from __future__ import annotations
@@ -60,6 +64,10 @@ class CaptureRequest(BaseModel):
     token: str = Field(..., description="短期 JWT")
     frontend_base_url: str = Field(..., description="前端 base URL")
     output_filename: str | None = Field(None, description="输出文件名前缀（可选）")
+    instrument_id: str | None = Field(
+        None, description="标的 ID（可选）。提供时启用截图缓存（任务 6.1）"
+    )
+    chart_version: str = Field("v1", description="图表版本号，默认 v1")
 
 
 class CaptureResponse(BaseModel):
@@ -90,6 +98,8 @@ async def capture(request: CaptureRequest) -> CaptureResponse:
             event_id=request.event_id,
             token=request.token,
             frontend_base_url=request.frontend_base_url,
+            instrument_id=request.instrument_id,
+            chart_version=request.chart_version,
         )
     except StockCaptureError as e:
         raise HTTPException(status_code=502, detail=str(e)) from e

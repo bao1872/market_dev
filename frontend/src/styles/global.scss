@@ -370,7 +370,8 @@ button { cursor: pointer; }
 
 // ===== Grid / Cards =====
 .grid { display: grid; gap: 12px; }
-.grid.kpi { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 12px; }
+// KPI 网格：3 列等宽（选股结果 / 监控自选股 / 今日策略事件）
+.grid.kpi { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 12px; }
 
 .card {
   background: v.$color-panel;
@@ -408,6 +409,10 @@ button { cursor: pointer; }
 .split-even { grid-template-columns: 1fr 1fr; }
 .split-3 { grid-template-columns: 1.15fr .9fr .9fr; }
 .stack { display: grid; gap: 12px; }
+
+// 主页双列等宽布局下，子卡片允许内部表格/网格在 min-content 计算时收缩至 0，
+// 防止 grid 子项 min-width:auto 撑破列宽导致横向溢出。
+.index-main-panel { min-width: 0; }
 
 // ===== Toolbar / Form =====
 .toolbar {

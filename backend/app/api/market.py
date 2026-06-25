@@ -6,20 +6,21 @@
 
 设计说明：
 - 交易日判断：使用 is_trading_day_async 三级降级（DB -> Tushare -> weekday）
-- 交易时段判断：weekday + 9:30-11:30 / 13:00-15:00
+- 交易时段判断：weekday + 9:30-11:30 / 13:00-15:00（上海时间）
 - 状态文本：交易中 / 已收盘 / 休市 / 盘前
+- 时区：统一使用 app.core.time 的上海时区工具，避免散落的 ZoneInfo 实例
 """
 
 from __future__ import annotations
 
-from datetime import date, datetime, time as dt_time
-from zoneinfo import ZoneInfo
+from datetime import time as dt_time
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db
+from app.core.time import now_shanghai, shanghai_business_date
 from app.services.calendar_service import is_trading_day_async
 
 router = APIRouter(prefix="/market", tags=["market"])
@@ -37,10 +38,10 @@ async def get_market_status(db: AsyncSession = Depends(get_db)):
     """获取当前市场状态
 
     交易日判断：使用 trading_calendar 表 + Tushare + weekday 三级降级
-    交易时段判断：weekday + 9:30-11:30 / 13:00-15:00
+    交易时段判断：weekday + 9:30-11:30 / 13:00-15:00（上海时间）
     """
-    today = date.today()
-    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    today = shanghai_business_date()
+    now = now_shanghai()
 
     # 交易日判断
     is_trading_day = await is_trading_day_async(db, today)

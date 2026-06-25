@@ -1380,6 +1380,7 @@ export interface SystemOverview {
   latest_selector_run: {
     id: string
     status: string
+    trade_date: string | null
     started_at: string | null
     finished_at: string | null
     total_instruments: number | null

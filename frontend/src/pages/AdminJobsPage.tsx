@@ -49,6 +49,10 @@ interface JobRunRow {
   scheduled_at: string
   started_at: string
   finished_at: string
+  heartbeat_at: string
+  lease_expires_at: string
+  current_run_id: string
+  last_bar_time: string
   processed: string
   progress: number | null
   status: string
@@ -162,6 +166,25 @@ function pickPayload(payload: Record<string, unknown>, keys: string[]): unknown 
   return undefined
 }
 
+/** 解析 metadata_json，提取 current_run_id（strategy_run_id）和 last_bar_time */
+function parseJobMetadata(metadataJson: string | null): {
+  current_run_id: string
+  last_bar_time: string
+} {
+  if (!metadataJson) return { current_run_id: '', last_bar_time: '' }
+  try {
+    const obj = JSON.parse(metadataJson) as Record<string, unknown>
+    const runId = obj.strategy_run_id ?? obj.current_run_id
+    const lastBar = obj.last_bar_time
+    return {
+      current_run_id: runId != null ? String(runId) : '',
+      last_bar_time: lastBar != null ? String(lastBar) : '',
+    }
+  } catch {
+    return { current_run_id: '', last_bar_time: '' }
+  }
+}
+
 // ===== 主页面 =====
 
 export default function AdminJobsPage() {
@@ -213,6 +236,7 @@ export default function AdminJobsPage() {
       const failed = run.failed_count ?? 0
       const total = run.total_count
       const processed = total != null ? `${succeeded + failed}/${total}` : '-'
+      const meta = parseJobMetadata(run.metadata_json)
       return {
         id: run.id,
         job_name: run.job_name,
@@ -220,6 +244,10 @@ export default function AdminJobsPage() {
         scheduled_at: formatTime(run.scheduled_at),
         started_at: formatTime(run.started_at),
         finished_at: formatTime(run.finished_at),
+        heartbeat_at: formatTime(run.heartbeat_at),
+        lease_expires_at: formatTime(run.lease_expires_at),
+        current_run_id: meta.current_run_id,
+        last_bar_time: meta.last_bar_time ? formatDateTime(meta.last_bar_time) : '',
         processed,
         progress: run.progress,
         status: run.status,
@@ -435,6 +463,15 @@ export default function AdminJobsPage() {
         filterable: true,
         sortValue: (row) => row.finished_at,
         render: (row) => <span className="num">{row.finished_at}</span>,
+      },
+      {
+        key: 'heartbeat_at',
+        title: '心跳',
+        dataType: 'datetime',
+        sortable: true,
+        filterable: false,
+        sortValue: (row) => row.heartbeat_at,
+        render: (row) => <span className="num">{row.heartbeat_at}</span>,
       },
       {
         key: 'processed',
@@ -855,6 +892,29 @@ export default function AdminJobsPage() {
                       <div className="toggle-row">
                         <span>结束时间</span>
                         <b className="num">{formatTime(selectedRun.finished_at)}</b>
+                      </div>
+                      <div className="toggle-row">
+                        <span>最后心跳</span>
+                        <b className="num">{formatTime(selectedRun.heartbeat_at)}</b>
+                      </div>
+                      <div className="toggle-row">
+                        <span>租约到期</span>
+                        <b className="num">{formatTime(selectedRun.lease_expires_at)}</b>
+                      </div>
+                      <div className="toggle-row">
+                        <span>当前子任务 ID</span>
+                        <b className="num">
+                          {parseJobMetadata(selectedRun.metadata_json).current_run_id || '-'}
+                        </b>
+                      </div>
+                      <div className="toggle-row">
+                        <span>最新处理 Bar</span>
+                        <b className="num">
+                          {(() => {
+                            const lb = parseJobMetadata(selectedRun.metadata_json).last_bar_time
+                            return lb ? formatDateTime(lb) : '-'
+                          })()}
+                        </b>
                       </div>
                       <div className="toggle-row">
                         <span>耗时</span>

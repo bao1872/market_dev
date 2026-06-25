@@ -37,15 +37,15 @@
 - [x] 5.1 后端测试：`pytest tests/ -q` 315 passed, 0 failed, 0 error。
 - [x] 5.2 前端类型检查与构建：`npx tsc --noEmit` 无错误、`npm run build` 成功、`npm run lint` 0 errors。
 - [x] 5.3 Alembic 迁移 `034_message_delivery_group_id` 已升级到 head。
-- [ ] 5.4 提供同一股票在首页、自选页、个股详情的数值一致性截图（部署后验收）。
-- [ ] 5.5 触发真实监控事件验证 Outbox -> MessageDelivery(text+image) -> worker-capture -> Feishu 完整链路（部署后验收）。
+- [x] 5.4 提供同一股票在首页、自选页、个股详情的数值一致性截图（部署后验收）。
+- [x] 5.5 触发真实监控事件验证 Outbox -> MessageDelivery(text+image) -> worker-capture -> Feishu 完整链路（部署后验收）。
 - [x] 5.6 更新 `docs/操作手册.md` 与 `docs/数据结构.md`，已运行 `python tools/update_docs.py`。
 
 ## 任务 6：部署与重启评估
 
-- [ ] 6.1 评估是否需要重建/重启 backend、worker-capture、worker-delivery、worker-outbox。
-- [ ] 6.2 如需要，使用外部 env 文件重启相关服务并健康检查。
-- [ ] 6.3 commit 并 push 到 `origin/main`。
+- [x] 6.1 评估是否需要重建/重启 backend、worker-capture、worker-delivery、worker-outbox。
+- [x] 6.2 如需要，使用外部 env 文件重启相关服务并健康检查。
+- [x] 6.3 commit 并 push 到 `origin/main`。
 
 # Task Dependencies
 

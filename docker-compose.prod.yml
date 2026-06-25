@@ -257,6 +257,8 @@ services:
         VITE_BUILD_TIME: ${VITE_BUILD_TIME:-unknown}
     container_name: trading-frontend
     restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
     depends_on:
       - backend
     volumes:

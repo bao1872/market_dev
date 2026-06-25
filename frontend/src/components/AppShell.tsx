@@ -9,7 +9,8 @@ import { useRoleStore } from '@/store/role'
 import { useAuthStore } from '@/store/auth'
 import { useToast } from '@/store/toast'
 import { getMarketStatus, type MarketStatus } from '@/api/endpoints'
-import { useMessages, useHealth, useAdminSystemOverview } from '@/hooks/useApi'
+import { useMessages, useHealth, useAdminSystemOverview, setCachedMarketStatus } from '@/hooks/useApi'
+import { formatShanghaiTimeShort } from '@/utils/datetime'
 import clsx from 'clsx'
 
 // 导航项定义
@@ -87,15 +88,16 @@ export default function AppShell({ children }: { children: ReactNode }) {
     setDrawerOpen(false)
   }, [currentPath])
 
-  // 市场状态轮询（30s）
+  // 市场状态轮询（30s）- 同步更新模块级缓存供 isInTradingHours() 使用
   const [marketStatus, setMarketStatus] = useState<MarketStatus | null>(null)
   useEffect(() => {
     const fetchStatus = async () => {
       try {
         const status = await getMarketStatus()
         setMarketStatus(status)
+        setCachedMarketStatus(status)
       } catch {
-        // API 失败时保持当前状态
+        // API 失败时保持当前状态（缓存不更新，isInTradingHours 自动 fallback 到本地判断）
       }
     }
     fetchStatus()
@@ -103,13 +105,13 @@ export default function AppShell({ children }: { children: ReactNode }) {
     return () => clearInterval(interval)
   }, [])
 
-  // 实时时钟（1s 刷新）
+  // 实时时钟（1s 刷新，固定上海时区）
   const [currentTime, setCurrentTime] = useState(
-    new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+    formatShanghaiTimeShort(new Date()),
   )
   useEffect(() => {
     const interval = setInterval(() => {
-      setCurrentTime(new Date().toLocaleTimeString('zh-CN', { hour12: false }))
+      setCurrentTime(formatShanghaiTimeShort(new Date()))
     }, 1000)
     return () => clearInterval(interval)
   }, [])

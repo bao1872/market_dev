@@ -1343,12 +1343,16 @@ class MonitorBatchService:
                 )
 
                 # 调用 capture worker 截图
+                # [screenshot-cache] - 传入 instrument_id 与 chart_version 启用缓存（任务 6.1）
+                # 同一 event+instrument+chart_version 在 TTL 600s 内复用截图，避免重试时重复截图
                 capture_payload = {
                     "symbol": symbol,
                     "event_id": str(first_event.id),
                     "token": token,
                     "frontend_base_url": frontend_base_url,
                     "output_filename": f"monitor-{inst_id}-{first_event.id}",
+                    "instrument_id": str(inst_id),
+                    "chart_version": "v1",
                 }
                 try:
                     async with httpx.AsyncClient(timeout=60.0) as client:
