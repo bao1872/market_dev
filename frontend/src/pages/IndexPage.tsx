@@ -1,6 +1,6 @@
 // 服务总览（首页，受保护路由）
 // 对应原型：index.html (V1.6.3)
-// 用法：集中查看选股策略结果与监控策略最新状态
+// 用法：集中查看选股策略结果与自选股监控最新状态
 // 依赖 hooks：useWatchlist / usePublishedRuns / useStrategyRunResults /
 //             useWatchlistMonitorStatus / useNotificationChannels / useInstruments / useAddToWatchlist / useEventsSummary
 // 路由：/
@@ -20,9 +20,14 @@ import {
   useEventsSummary,
 } from '@/hooks/useApi'
 import * as api from '@/api/endpoints'
-import type { Instrument, StrategyResult, WatchlistMonitorStatusItem } from '@/api/endpoints'
+import type { Instrument, StrategyResult } from '@/api/endpoints'
 import { StrategyDataTable } from '@/components/StrategyDataTable'
 import type { DataTableColumn } from '@/components/StrategyDataTable'
+import {
+  WatchlistMonitorTable,
+  WatchlistMonitorCards,
+  adaptWatchlistMonitorStatusItem,
+} from '@/features/watchlist-monitor'
 
 // ===== 行类型定义（带索引签名以满足 StrategyDataTable 的 Row extends Record<string, unknown>）=====
 
@@ -38,18 +43,6 @@ interface SelectionRow {
   short_pos: string
   pos_tag: 'good' | 'warn'
   watched: boolean
-  [key: string]: unknown
-}
-
-// 自选监控行（从 MonitorState.payload 派生）
-interface WatchlistMonitorRow {
-  instrument_id: string
-  name: string
-  symbol: string
-  price: string
-  lower_node_price: number | null
-  upper_node_price: number | null
-  latest_event: { event_type: string; event_time: string; boundary: number | null } | null
   [key: string]: unknown
 }
 
@@ -114,7 +107,7 @@ function AddStockModal({
     keyword: keyword.trim() || undefined,
     page_size: 20,
   })
-  const instruments: Instrument[] = instrumentsQuery.data?.items ?? []
+  const instruments = instrumentsQuery.data?.items ?? []
 
   // 加入自选：调用 mutation 并提示
   const handleAdd = useCallback(
@@ -124,7 +117,7 @@ function AddStockModal({
           instrument_id: instrumentId,
           source: 'manual',
         })
-        toast.show('已加入自选', `${name} 已自动启用全部监控策略`)
+        toast.show('已加入自选', `${name} 已加入自选`)
         onClose()
       } catch {
         toast.show('加入失败', '请稍后重试')
@@ -152,7 +145,7 @@ function AddStockModal({
             />
           </div>
           <div className="notice modal-stack">
-            加入自选后，可直接应用所有已发布的监控策略，不受数量额度限制。
+            加入自选后，可直接查看统一监控状态。
           </div>
           <div className="list modal-stack">
             {instrumentsQuery.isLoading && <div className="notice">加载中…</div>}
@@ -177,7 +170,7 @@ function AddStockModal({
                       onClick={() => handleAdd(inst.id, inst.name)}
                       disabled={addMutation.isPending}
                     >
-                      添加并监控
+                      添加
                     </button>
                   )}
                 </div>
@@ -186,6 +179,73 @@ function AddStockModal({
           </div>
         </div>
       </div>
+    </div>
+  )
+}
+
+// ===== 选股结果移动端卡片 =====
+interface SelectionResultCardsProps {
+  rows: SelectionRow[]
+  onAdd?: (instrumentId: string, name: string) => void
+  addPending?: boolean
+  emptyText?: string
+}
+
+function SelectionResultCards({
+  rows,
+  onAdd,
+  addPending = false,
+  emptyText = '今日暂无选股结果',
+}: SelectionResultCardsProps) {
+  if (rows.length === 0) {
+    return <div className="empty">{emptyText}</div>
+  }
+
+  return (
+    <div className="selection-result-cards">
+      {rows.map((row) => (
+        <div className="selection-result-card" key={row.instrument_id}>
+          <div className="selection-card-head">
+            <div>
+              <div className="symbol">{row.name}</div>
+              <div className="symbol-sub">
+                {row.symbol}
+                {row.market ? ` · ${row.market}` : ''}
+              </div>
+            </div>
+            {row.watched ? (
+              <span className="tag info">已自选</span>
+            ) : (
+              <button
+                className="btn small"
+                onClick={() => onAdd?.(row.instrument_id, row.name)}
+                disabled={addPending}
+              >
+                ＋ 自选
+              </button>
+            )}
+          </div>
+
+          <div className="selection-card-grid">
+            <div>
+              <span>方向持续</span>
+              <b className="num">{row.duration}</b>
+            </div>
+            <div>
+              <span>平均收益</span>
+              <b className="num pos">{row.avg_return}</b>
+            </div>
+            <div>
+              <span>总收益</span>
+              <b className="num pos">{row.total_return}</b>
+            </div>
+            <div>
+              <span>短期位置</span>
+              <b className={`tag ${row.pos_tag}`}>{row.short_pos}</b>
+            </div>
+          </div>
+        </div>
+      ))}
     </div>
   )
 }
@@ -212,9 +272,9 @@ export default function IndexPage() {
   const selectionResultsQuery = useStrategyRunResults(latestRunId, { limit: 20 })
   const selectionResults: StrategyResult[] = selectionResultsQuery.data?.items ?? []
 
-  // --- 监控策略状态（右侧表格）---
+  // --- 自选股监控（右侧表格）---
   const monitorStatusQuery = useWatchlistMonitorStatus()
-  const monitorStatusItems: WatchlistMonitorStatusItem[] = monitorStatusQuery.data?.items ?? []
+  const monitorStatusItems = monitorStatusQuery.data?.items ?? []
 
   // --- KPI 3：今日策略事件汇总（通过 /me/events/summary API）---
   const todayStr = new Date().toISOString().slice(0, 10)
@@ -232,9 +292,8 @@ export default function IndexPage() {
   const allInstrumentIds = useMemo(() => {
     const ids = new Set<string>()
     selectionResults.forEach((r) => ids.add(r.instrument_id))
-    monitorStatusItems.forEach((s) => ids.add(s.instrument_id))
     return [...ids]
-  }, [selectionResults, monitorStatusItems])
+  }, [selectionResults])
 
   const instrumentQueries = useQueries({
     queries: allInstrumentIds.map((id) => ({
@@ -288,45 +347,6 @@ export default function IndexPage() {
     [instrumentMap, watchlistIds],
   )
 
-  /** 将 WatchlistMonitorStatusItem 转换为 WatchlistMonitorRow */
-  const toMonitorRow = useCallback(
-    (s: WatchlistMonitorStatusItem): WatchlistMonitorRow => {
-      const inst = instrumentMap.get(s.instrument_id)
-      const metrics = s.metrics ?? {}
-
-      // 后端已返回扁平节点字段；保留对对象型字段的兼容展平
-      const upperNodeVal = metrics.upper_node_price ?? metrics.upper_node
-      const lowerNodeVal = metrics.lower_node_price ?? metrics.lower_node
-
-      let upperNodePrice: number | null = null
-      if (typeof upperNodeVal === 'number') {
-        upperNodePrice = upperNodeVal
-      } else if (upperNodeVal && typeof upperNodeVal === 'object') {
-        const obj = upperNodeVal as Record<string, unknown>
-        upperNodePrice = toNum(obj.price_mid ?? obj.price)
-      }
-
-      let lowerNodePrice: number | null = null
-      if (typeof lowerNodeVal === 'number') {
-        lowerNodePrice = lowerNodeVal
-      } else if (lowerNodeVal && typeof lowerNodeVal === 'object') {
-        const obj = lowerNodeVal as Record<string, unknown>
-        lowerNodePrice = toNum(obj.price_mid ?? obj.price)
-      }
-
-      return {
-        instrument_id: s.instrument_id,
-        name: inst?.name ?? s.name ?? '-',
-        symbol: inst?.symbol ?? s.symbol ?? s.instrument_id.slice(0, 8),
-        price: fmtNum(metrics.current_price ?? metrics.price ?? metrics.last_price ?? metrics.close),
-        lower_node_price: lowerNodePrice,
-        upper_node_price: upperNodePrice,
-        latest_event: s.latest_event ?? null,
-      }
-    },
-    [instrumentMap],
-  )
-
   // ===== 派生数据 =====
 
   // 选股结果行（首页最多展示 10 条）
@@ -335,10 +355,10 @@ export default function IndexPage() {
     [selectionResults, toSelectionRow],
   )
 
-  // 监控表格行（首页最多展示 10 条）
-  const monitorRows: WatchlistMonitorRow[] = useMemo(
-    () => monitorStatusItems.slice(0, 10).map(toMonitorRow),
-    [monitorStatusItems, toMonitorRow],
+  // 自选股监控行（首页最多展示 10 条）
+  const monitorRows = useMemo(
+    () => monitorStatusItems.slice(0, 10).map(adaptWatchlistMonitorStatusItem),
+    [monitorStatusItems],
   )
 
   // KPI 1：今日选股结果数（最新已发布 DSA 运行的标的总数）
@@ -362,7 +382,7 @@ export default function IndexPage() {
           instrument_id: instrumentId,
           source: 'selection',
         })
-        toast.show('已加入自选', `${name} 已自动启用全部监控策略`)
+        toast.show('已加入自选', `${name} 已加入自选`)
       } catch {
         toast.show('加入失败', '请稍后重试')
       }
@@ -453,85 +473,6 @@ export default function IndexPage() {
     [handleAddToWatchlist, addWatchlistMutation.isPending],
   )
 
-  // 监控计算表列
-  const monitorColumns: DataTableColumn<WatchlistMonitorRow>[] = useMemo(
-    () => [
-      {
-        key: 'stock',
-        title: '股票',
-        dataType: 'text',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => row.name,
-        filterValue: (row) => `${row.name} ${row.symbol}`,
-        render: (row) => (
-          <div>
-            <div className="symbol">{row.name}</div>
-            <div className="symbol-sub">{row.symbol}</div>
-          </div>
-        ),
-      },
-      {
-        key: 'price',
-        title: '当前价',
-        dataType: 'number',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => Number(row.price) || 0,
-        render: (row) => <span className="num">{row.price}</span>,
-      },
-      {
-        key: 'lower_node',
-        title: '下方节点',
-        dataType: 'number',
-        sortable: true,
-        filterable: false,
-        sortValue: (row) => row.lower_node_price ?? 0,
-        render: (row) => (
-          <span className="num">
-            {row.lower_node_price !== null ? row.lower_node_price.toFixed(2) : '-'}
-          </span>
-        ),
-      },
-      {
-        key: 'upper_node',
-        title: '上方节点',
-        dataType: 'number',
-        sortable: true,
-        filterable: false,
-        sortValue: (row) => row.upper_node_price ?? 0,
-        render: (row) => (
-          <span className="num">
-            {row.upper_node_price !== null ? row.upper_node_price.toFixed(2) : '-'}
-          </span>
-        ),
-      },
-      {
-        key: 'latest_event',
-        title: '最近触发',
-        dataType: 'text',
-        sortable: true,
-        filterable: false,
-        sortValue: (row) => row.latest_event?.event_time ?? '',
-        render: (row) => {
-          if (!row.latest_event) return <span className="muted">-</span>
-          const eventType = row.latest_event.event_type
-          const time = fmtTime(row.latest_event.event_time)
-          const boundary = row.latest_event.boundary
-          return (
-            <div>
-              <div className="symbol">{eventType}</div>
-              <div className="symbol-sub">
-                {time}{boundary != null ? ` · ${boundary}` : ''}
-              </div>
-            </div>
-          )
-        },
-      },
-    ],
-    [],
-  )
-
   // ===== 渲染 =====
   return (
     <>
@@ -540,7 +481,7 @@ export default function IndexPage() {
         <div>
           <h1 className="page-title">服务总览</h1>
           <div className="page-desc">
-            集中查看选股策略结果与全部监控策略最新状态
+            集中查看选股策略结果与自选股监控最新状态
           </div>
         </div>
         <div className="actions">
@@ -571,7 +512,7 @@ export default function IndexPage() {
             {watchlistQuery.isLoading ? '-' : (watchlistQuery.isError ? '加载失败' : kpi2Total)}
             {!watchlistQuery.isLoading && !watchlistQuery.isError && <small className="kpi-unit">只</small>}
           </div>
-          <div className="kpi-foot">已启用监控策略</div>
+          <div className="kpi-foot">已启用自选监控</div>
         </div>
         {/* KPI 3：今日策略事件（通过 /me/events/summary API） */}
         <div className="card kpi-card">
@@ -600,7 +541,7 @@ export default function IndexPage() {
         </div>
       </div>
 
-      {/* 选股结果 + 监控状态 */}
+      {/* 选股结果 + 自选股监控 */}
       <div className="grid split-2">
         {/* 最新选股策略结果 */}
         <section className="card">
@@ -618,30 +559,41 @@ export default function IndexPage() {
               </Link>
             </div>
           </div>
-          <StrategyDataTable
-            tableId="index-selection-results"
-            columns={selectionColumns}
-            rows={selectionRows}
-            rowKey={(row) => row.instrument_id}
-            loading={selectionResultsQuery.isLoading || dsaRunsQuery.isLoading}
-            error={
-              selectionResultsQuery.isError || dsaRunsQuery.isError
-                ? '选股结果加载失败'
-                : null
-            }
-            searchable={false}
-            emptyText="今日暂无选股结果"
-          />
+          {/* 桌面端表格 */}
+          <div className="selection-result-table-wrap">
+            <StrategyDataTable
+              tableId="index-selection-results"
+              columns={selectionColumns}
+              rows={selectionRows}
+              rowKey={(row) => row.instrument_id}
+              loading={selectionResultsQuery.isLoading || dsaRunsQuery.isLoading}
+              error={
+                selectionResultsQuery.isError || dsaRunsQuery.isError
+                  ? '选股结果加载失败'
+                  : null
+              }
+              searchable={false}
+              emptyText="今日暂无选股结果"
+            />
+          </div>
+
+          {/* 移动端卡片 */}
+          <div className="selection-result-cards-wrap">
+            <SelectionResultCards
+              rows={selectionRows}
+              onAdd={handleAddToWatchlist}
+              addPending={addWatchlistMutation.isPending}
+              emptyText="今日暂无选股结果"
+            />
+          </div>
         </section>
 
-        {/* 监控策略状态 */}
+        {/* 自选股监控 */}
         <section className="card">
           <div className="card-head">
             <div>
-              <div className="card-title">监控策略状态</div>
-              <div className="card-sub">
-                自选监控最新节点与触发事件
-              </div>
+              <div className="card-title">自选股监控</div>
+              <div className="card-sub">自选监控最新节点与触发事件</div>
             </div>
             <div className="card-head-actions">
               <Link className="btn small ghost" to="/watchlist">
@@ -649,16 +601,28 @@ export default function IndexPage() {
               </Link>
             </div>
           </div>
-          <StrategyDataTable
-            tableId="index-watchlist-monitor"
-            columns={monitorColumns}
-            rows={monitorRows}
-            rowKey={(row) => row.instrument_id}
-            loading={monitorStatusQuery.isLoading}
-            error={monitorStatusQuery.isError ? '监控状态加载失败' : null}
-            searchable={false}
-            emptyText="暂无监控计算结果"
-          />
+
+          {/* 桌面端表格 */}
+          <div className="watchlist-monitor-table-wrap">
+            <WatchlistMonitorTable
+              tableId="index-watchlist-monitor"
+              rows={monitorRows}
+              loading={monitorStatusQuery.isLoading}
+              error={monitorStatusQuery.isError ? '监控状态加载失败' : null}
+              searchable={false}
+              emptyText="暂无监控计算结果"
+              readonly
+            />
+          </div>
+
+          {/* 移动端卡片 */}
+          <div className="watchlist-monitor-cards-wrap">
+            <WatchlistMonitorCards
+              rows={monitorRows}
+              emptyText="暂无监控计算结果"
+              readonly
+            />
+          </div>
         </section>
       </div>
 

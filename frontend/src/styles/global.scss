@@ -128,6 +128,142 @@ button { cursor: pointer; }
   &.err { background: v.$color-red; }
 }
 
+// ===== Mobile Drawer / Hamburger / User Info =====
+.icon-btn.hamburger { display: none; }
+
+.sidebar-overlay {
+  display: none;
+  position: fixed;
+  z-index: 35;
+  inset: 0;
+  background: rgba(4, 6, 10, .64);
+  backdrop-filter: blur(2px);
+  &.open { display: block; }
+}
+
+.sidebar-drawer {
+  position: fixed;
+  z-index: 36;
+  left: 0; top: 0; bottom: 0;
+  width: v.$sidebar-width;
+  transform: translateX(-100%);
+  transition: transform .2s ease;
+  background: #131722;
+  border-right: 1px solid v.$color-border;
+  display: flex;
+  flex-direction: column;
+  &.open { transform: translateX(0); }
+}
+
+.sidebar-drawer-head {
+  height: v.$topbar-height;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px 0 17px;
+  border-bottom: 1px solid v.$color-border;
+}
+
+.sidebar-drawer-body { flex: 1; overflow: auto; }
+
+.user-info { min-width: 0; }
+.user-name { font-weight: 650; font-size: 12px; }
+.user-role { font-size: 10px; color: v.$color-muted; }
+.user-email { font-size: 10px; color: v.$color-muted; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.messages-btn { position: relative; }
+.messages-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: v.$color-red;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 0 0 2px #131722;
+}
+
+.watchlist-monitor-table-wrap { display: block; }
+.watchlist-monitor-cards-wrap { display: none; }
+.watchlist-cards { display: grid; gap: 10px; }
+
+.selection-result-table-wrap { display: block; }
+.selection-result-cards-wrap { display: none; }
+.selection-result-cards { display: grid; gap: 10px; }
+.selection-result-card {
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-base;
+  padding: 12px;
+}
+.selection-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+.selection-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.selection-card-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 8px;
+  background: #11151d;
+  border: 1px solid v.$color-border-soft;
+  border-radius: 6px;
+}
+.selection-card-grid > div span { font-size: 9px; color: v.$color-muted; }
+.selection-card-grid > div b { font-size: 12px; }
+.watchlist-monitor-card {
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-base;
+  padding: 12px;
+}
+.watchlist-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+.watchlist-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.watchlist-card-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 8px;
+  background: #11151d;
+  border: 1px solid v.$color-border-soft;
+  border-radius: 6px;
+}
+.watchlist-card-grid > div span { font-size: 9px; color: v.$color-muted; }
+.watchlist-card-grid > div b { font-size: 12px; }
+.watchlist-card-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 10px;
+  color: v.$color-muted;
+  margin-bottom: 10px;
+}
+.watchlist-card-actions { display: flex; gap: 8px; }
+
 // ===== Topbar =====
 .topbar {
   position: fixed;
@@ -385,7 +521,9 @@ button { cursor: pointer; }
   &.good { background: rgba(38, 166, 154, .11); color: #62d0c5; border-color: rgba(38, 166, 154, .28); }
   &.warn { background: rgba(255, 152, 0, .1); color: #ffb64a; border-color: rgba(255, 152, 0, .25); }
   &.bad { background: rgba(239, 83, 80, .1); color: #ff7774; border-color: rgba(239, 83, 80, .25); }
+  &.error { background: rgba(239, 83, 80, .1); color: #ff7774; border-color: rgba(239, 83, 80, .25); }
   &.info { background: rgba(41, 98, 255, .12); color: #8facff; border-color: rgba(41, 98, 255, .28); }
+  &.small { height: 18px; padding: 0 6px; font-size: 9px; }
 }
 
 .checkbox { width: 15px; height: 15px; accent-color: v.$color-blue; }
@@ -898,7 +1036,7 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 .tv-quote-strip { display: flex; align-items: center; gap: 20px; flex: 1; > div { display: grid; gap: 3px; } span { font-size: 9px; color: v.$color-muted; } b { font: 12px v.$font-mono; } }
 
 // V1.6.2: 删除右侧 268px 策略栏，释放完整图表宽度；Task 2 再删除左侧 38px 绘图工具列
-.tv-workspace { display: grid; grid-template-columns: minmax(680px, 1fr); min-height: v.$tv-workspace-min-height; border: 1px solid v.$color-border; border-top: 0; background: #10141c; }
+.tv-workspace { display: grid; grid-template-columns: minmax(0, 1fr); min-height: v.$tv-workspace-min-height; border: 1px solid v.$color-border; border-top: 0; background: #10141c; }
 .tv-chart-column { min-width: 0; background: #0d1118; }
 .tv-trading-chart { height: v.$tv-chart-height; border: 0; border-radius: 0; }
 .tv-chart-toolbar { height: 42px; border-radius: 0; border-left: 0; border-right: 0; background: #131722; position: relative; z-index: 3; display: flex; align-items: center; gap: 8px; padding: 0 8px; }
@@ -963,7 +1101,6 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
   .login-page { grid-template-columns: 1fr; }
   .login-visual { display: none; }
   .top-status, .search-global { display: none; }
-  .data-table { min-width: 900px; }
   .page-head { flex-direction: column; }
   .condition-row { grid-template-columns: 1fr 85px 1fr 32px; }
   .chart-stage-pro { height: 390px; }
@@ -972,12 +1109,61 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
   .chart-interaction-hint { width: 100%; margin-left: 0; }
 }
 
+@media (max-width: 768px) {
+  .icon-btn.hamburger { display: inline-flex; align-items: center; justify-content: center; }
+  .topbar { padding: 0 12px; }
+  .top-left { gap: 8px; }
+  .top-right { gap: 8px; }
+  .search-global, .role-preview-toggle, .user-email { display: none; }
+  .user-info { display: none; }
+  .page-title { font-size: 17px; }
+  .page-desc { font-size: 11px; }
+  .page-head { gap: 10px; margin-bottom: 12px; }
+
+  .nav-item, .icon-btn.hamburger, .icon-btn.drawer-close, .drawer-close {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .watchlist-monitor-table-wrap { display: none; }
+  .watchlist-monitor-cards-wrap { display: block; }
+  .selection-result-table-wrap { display: none; }
+  .selection-result-cards-wrap { display: block; }
+
+  .modal-backdrop.open {
+    display: flex;
+    align-items: flex-end;
+    padding: 0;
+  }
+  .modal {
+    width: 100%;
+    max-width: 100%;
+    max-height: 92vh;
+    margin: 0;
+    border-radius: 12px 12px 0 0;
+  }
+  .drawer {
+    width: 100%;
+    border-radius: 12px 12px 0 0;
+    border-left: 0;
+  }
+
+  .tv-workspace { grid-template-columns: minmax(0, 1fr); }
+  .tv-canvas-wrap { min-height: 360px; height: 50vh; }
+  .tv-chart-toolbar { height: auto; min-height: 42px; flex-wrap: wrap; gap: 6px; padding: 6px 8px; }
+  .tv-symbol-bar { flex-wrap: wrap; gap: 10px; min-height: auto; padding: 10px 12px; }
+  .tv-quote-strip { gap: 10px; flex-wrap: wrap; }
+
+  .grid.kpi { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .split-2 { grid-template-columns: 1fr; }
+}
+
 @media (max-width: v.$bp-xlarge) {
   .strategy-catalog { grid-template-columns: 1fr 1fr; }
   .metric-mini-grid, .monitor-summary { grid-template-columns: repeat(3, 1fr); }
   .editor-layout { grid-template-columns: 1fr; }
   .sticky-summary { position: static; }
-  .tv-workspace { grid-template-columns: minmax(600px, 1fr); }
+  .tv-workspace { grid-template-columns: minmax(0, 1fr); }
   .tv-layer-panel { grid-column: 1 / -1; border-left: 0; border-top: 1px solid v.$color-border; display: grid; grid-template-columns: repeat(3, 1fr); max-height: none; }
   .tv-panel-head, .tv-layer-actions { grid-column: 1 / -1; }
   .tv-bottom-grid { grid-template-columns: 1fr; }
@@ -1128,7 +1314,7 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 
 // V1.6.2 响应式断点
 @media (max-width: 900px) {
-  .tv-workspace { grid-template-columns: minmax(560px, 1fr); }
+  .tv-workspace { grid-template-columns: minmax(0, 1fr); }
   .tv-strategy-legend { gap: 4px; }
   .tv-strategy-legend-item { padding: 0 6px; }
 }

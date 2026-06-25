@@ -271,10 +271,18 @@ async def test_channel_latest_event_endpoint(
 
     流程：
     1. 查询渠道与用户
-    2. 取最新一条 strategy_events 记录
-    3. 生成短期 capture token 并使用 Playwright 截图
-    4. 创建图片消息并写入 Outbox
-    5. Delivery Worker 异步完成飞书图片投递
+    2. 仅查询当前渠道用户 active watchlist 中股票的最新 StrategyEvent
+    3. 无事件返回 409 Conflict
+    4. 生成 test_run_id 避免双击重复
+    5. 调用截图 Worker 获取图片本地静态 URL
+    6. 创建图片消息并写入 Outbox
+    7. Outbox Relay 扩张为 MessageDelivery(pending)，Delivery Worker 异步投递
+
+    响应字段：
+    - event_id: 事件 ID
+    - symbol: 股票代码
+    - message_id: 创建的通知消息 ID
+    - delivery_status: 投递状态（pending）
     """
     settings = get_settings()
     try:
@@ -282,6 +290,7 @@ async def test_channel_latest_event_endpoint(
             db=db,
             channel_id=channel_id,
             frontend_base_url=settings.frontend_base_url,
+            capture_worker_url=settings.capture_worker_url,
             capture_token_ttl_seconds=settings.jwt_capture_ttl_seconds,
         )
     except ChannelNotFoundError as e:
@@ -289,8 +298,9 @@ async def test_channel_latest_event_endpoint(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
         ) from e
     except LatestEventNotFoundError as e:
+        # [test-latest-event] - 无事件返回 409 Conflict
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
+            status_code=status.HTTP_409_CONFLICT, detail=str(e)
         ) from e
     except NotificationServiceError as e:
         raise HTTPException(
@@ -298,9 +308,10 @@ async def test_channel_latest_event_endpoint(
         ) from e
     await db.commit()
     return ChannelLatestEventTestResponse(
-        channel=_channel_response(channel),
-        message=NotificationMessageResponse.model_validate(message),
-        meta=meta,
+        event_id=meta["event_id"],
+        symbol=meta["symbol"],
+        message_id=meta["message_id"],
+        delivery_status=meta["delivery_status"],
     )
 
 

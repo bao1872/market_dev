@@ -64,5 +64,8 @@ advice.md
 ad2.md
 task_plan.md
 
+# ===== 验收截图（本地生成，不入库） =====
+screenshots/
+
 # ===== 本地配置（含硬编码开发密码） =====
 backend/app/config.py

@@ -1,0 +1,126 @@
+"""截图 Worker HTTP 服务 - 独立进程运行 Playwright 截图。
+
+用法：
+    python -m app.capture_main
+
+环境变量：
+    CAPTURE_HOST: 监听地址（默认 0.0.0.0）
+    CAPTURE_PORT: 监听端口（默认 8001）
+    CAPTURE_STATIC_DIR: 截图保存目录（默认 /app/static/captures）
+    CAPTURE_STATIC_URL_PREFIX: 静态文件 URL 前缀（默认 /static/captures）
+
+端点：
+    POST /capture
+    {
+        "symbol": "600519",
+        "event_id": "...",
+        "token": "<short_lived_jwt>",
+        "frontend_base_url": "http://frontend",
+        "output_filename": "optional-prefix"  // 可选，默认使用 uuid
+    }
+    -> {
+        "symbol": "600519",
+        "event_id": "...",
+        "image_url": "/static/captures/xxx.png",
+        "size": 12345
+    }
+
+设计：
+- 复用 app.services.stock_capture_service.capture_stock_chart
+- 等待 data-render-ready="true" 后截取 data-testid="stock-detail-capture"
+- 图片保存到本地静态目录，返回本地静态 URL
+- 不长期存 base64 到 Outbox
+"""
+
+from __future__ import annotations
+
+import os
+import uuid
+from uuid import UUID
+
+from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
+from app.services.stock_capture_service import StockCaptureError, capture_stock_chart
+
+app = FastAPI(title="Capture Worker")
+
+CAPTURE_HOST = os.getenv("CAPTURE_HOST", "0.0.0.0")
+CAPTURE_PORT = int(os.getenv("CAPTURE_PORT", "8001"))
+CAPTURE_STATIC_DIR = os.getenv("CAPTURE_STATIC_DIR", "/app/static/captures")
+CAPTURE_STATIC_URL_PREFIX = os.getenv("CAPTURE_STATIC_URL_PREFIX", "/static/captures")
+
+
+class CaptureRequest(BaseModel):
+    """截图请求。"""
+
+    symbol: str = Field(..., description="股票代码")
+    event_id: UUID | str = Field(..., description="事件 ID")
+    token: str = Field(..., description="短期 JWT")
+    frontend_base_url: str = Field(..., description="前端 base URL")
+    output_filename: str | None = Field(None, description="输出文件名前缀（可选）")
+
+
+class CaptureResponse(BaseModel):
+    """截图响应。"""
+
+    symbol: str = Field(..., description="股票代码")
+    event_id: str = Field(..., description="事件 ID")
+    image_url: str = Field(..., description="图片本地静态 URL")
+    size: int = Field(..., description="图片字节数")
+
+
+# [capture-worker] - 确保静态目录存在，并挂载静态文件服务
+os.makedirs(CAPTURE_STATIC_DIR, exist_ok=True)
+app.mount(CAPTURE_STATIC_URL_PREFIX, StaticFiles(directory=CAPTURE_STATIC_DIR), name="captures")
+
+
+@app.post("/capture", response_model=CaptureResponse)
+async def capture(request: CaptureRequest) -> CaptureResponse:
+    """截取个股详情页并返回本地静态 URL。"""
+    filename_prefix = request.output_filename or str(uuid.uuid4())
+    filename = f"{filename_prefix}.png"
+    local_path = os.path.join(CAPTURE_STATIC_DIR, filename)
+    image_url = f"{CAPTURE_STATIC_URL_PREFIX}/{filename}"
+
+    try:
+        png_bytes = await capture_stock_chart(
+            symbol=request.symbol,
+            event_id=request.event_id,
+            token=request.token,
+            frontend_base_url=request.frontend_base_url,
+        )
+    except StockCaptureError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"截图异常: {e}") from e
+
+    try:
+        with open(local_path, "wb") as f:
+            f.write(png_bytes)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"保存截图失败: {e}") from e
+
+    return CaptureResponse(
+        symbol=request.symbol,
+        event_id=str(request.event_id),
+        image_url=image_url,
+        size=len(png_bytes),
+    )
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    """健康检查。"""
+    return {"status": "ok"}
+
+
+if __name__ == "__main__":
+    # 自测入口：验证模块可导入（不实际启动浏览器/服务）
+    import uvicorn
+
+    print(f"capture_main loaded: host={CAPTURE_HOST}, port={CAPTURE_PORT}")
+    print(f"static_dir={CAPTURE_STATIC_DIR}, prefix={CAPTURE_STATIC_URL_PREFIX}")
+    print(f"routes={[r.path for r in app.routes]}")
+    uvicorn.run(app, host=CAPTURE_HOST, port=CAPTURE_PORT)

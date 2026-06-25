@@ -23,9 +23,12 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
+import logging
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
+
+logger = logging.getLogger("notification_service")
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -158,12 +161,137 @@ async def create_message(
     return message
 
 
+def _delivery_idempotency_key(
+    message_id: UUID,
+    channel_id: UUID,
+    delivery_type: str = "card",
+    image_url: str | None = None,
+) -> str:
+    """生成投递幂等键。
+
+    图片投递时包含 image_url，避免同消息不同截图被去重。
+    """
+    parts = [str(message_id), str(channel_id), delivery_type]
+    if image_url:
+        parts.append(image_url)
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()
+
+
+async def _execute_delivery(
+    db: AsyncSession,
+    delivery: MessageDelivery,
+    image_bytes: bytes | None = None,
+) -> MessageDelivery:
+    """执行单条 MessageDelivery 投递（状态机核心）。
+
+    状态机：
+    - status=success：幂等快速返回，不重复投递
+    - status=failed/retrying/pending/sending：允许执行投递
+    - 进入 sending -> 调用 adapter -> success / retrying / dead
+
+    Args:
+        db: 异步会话
+        delivery: MessageDelivery 记录（需已关联 message 与 channel）
+        image_bytes: 图片字节（delivery_type=image 且未提供 image_url 时使用）
+
+    Returns:
+        更新后的 MessageDelivery
+
+    Raises:
+        NotificationServiceError: 适配器抛异常且无法归集为 DeliveryResult
+    """
+    # [通知投递] - 幂等：只有 success 才快速返回；failed/retrying 允许重发
+    if delivery.status == "success":
+        return delivery
+
+    channel = delivery.channel
+    message = delivery.message
+    if channel is None or message is None:
+        delivery.status = "dead"
+        delivery.last_error_code = "MISSING_CHANNEL_OR_MESSAGE"
+        await db.flush()
+        raise NotificationServiceError(
+            f"投递记录缺少关联渠道或消息: delivery_id={delivery.id}"
+        )
+
+    adapter = get_adapter(channel.adapter_type)
+    message_dto = NotificationMessageDTO(**message.body)
+
+    # 进入 sending 状态
+    delivery.status = "sending"
+    delivery.last_error_code = None
+    await db.flush()
+
+    try:
+        if delivery.delivery_type == "image":
+            # 优先从 image_url 拉取图片；否则使用传入的 image_bytes
+            actual_image_bytes = image_bytes
+            if actual_image_bytes is None and delivery.image_url:
+                actual_image_bytes = await _fetch_image_bytes(delivery.image_url)
+            if actual_image_bytes is None:
+                delivery.status = "failed"
+                delivery.attempt_count += 1
+                delivery.last_error_code = "IMAGE_BYTES_MISSING"
+                await db.flush()
+                return delivery
+            result: DeliveryResult = await adapter.send_image_bytes(
+                actual_image_bytes, channel.target_config
+            )
+        else:
+            result = await adapter.send(message_dto, channel.target_config)
+    except Exception as e:
+        delivery.status = "failed"
+        delivery.attempt_count += 1
+        delivery.last_error_code = "ADAPTER_EXCEPTION"
+        delivery.provider_response = {"error": str(e)}
+        await db.flush()
+        raise NotificationServiceError(
+            f"渠道投递异常: adapter={channel.adapter_type}, "
+            f"delivery_id={delivery.id}, message_id={message.id}: {e}"
+        ) from e
+
+    # 更新投递记录
+    delivery.attempt_count += 1
+    if result.success:
+        delivery.status = "success"
+        delivery.last_error_code = None
+    else:
+        # 渠道失效时标记渠道 invalid，同时本投递进入 dead
+        if result.error_code == "CHANNEL_INVALID":
+            channel.status = "invalid"
+            delivery.status = "dead"
+        else:
+            delivery.status = "failed"
+        delivery.last_error_code = result.error_code
+    delivery.provider_response = result.provider_response
+    await db.flush()
+
+    return delivery
+
+
+async def _fetch_image_bytes(image_url: str) -> bytes | None:
+    """从 image_url 拉取图片 bytes。
+
+    image_url 为 capture worker 返回的本地静态 URL，支持相对路径与绝对路径。
+    """
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(image_url)
+            resp.raise_for_status()
+            return resp.content
+    except Exception as e:
+        logger.warning("拉取截图失败 image_url=%s: %s", image_url, e)
+        return None
+
+
 async def deliver_message(
     db: AsyncSession,
     message_id: UUID,
     channel_id: UUID,
 ) -> MessageDelivery:
-    """投递消息到指定渠道（幂等）。
+    """投递消息到指定渠道（幂等同步入口）。
 
     幂等行为：
     - message_deliveries.idempotency_key = SHA256(message_id + channel_id)
@@ -196,61 +324,30 @@ async def deliver_message(
         raise ChannelNotFoundError(f"渠道不存在: channel_id={channel_id}")
 
     # 3. 生成投递幂等键
-    idem_key = hashlib.sha256(
-        f"{message_id}|{channel_id}".encode()
-    ).hexdigest()
+    idem_key = _delivery_idempotency_key(message_id, channel_id, "card")
 
-    # 4. 检查是否已投递（幂等）
+    # 4. 检查是否已存在投递记录
     stmt_del = select(MessageDelivery).where(
         MessageDelivery.idempotency_key == idem_key
     )
     result_del = await db.execute(stmt_del)
-    existing_delivery = result_del.scalar_one_or_none()
-    if existing_delivery is not None:
-        return existing_delivery
-
-    # 5. 创建投递记录
-    delivery = MessageDelivery(
-        id=uuid4(),
-        notification_message_id=message_id,
-        channel_id=channel_id,
-        status="pending",
-        delivery_type="card",
-        attempt_count=0,
-        idempotency_key=idem_key,
-    )
-    db.add(delivery)
-    await db.flush()
-
-    # 6. 调用 ChannelAdapter 投递
-    adapter = get_adapter(channel.adapter_type)
-    message_dto = NotificationMessageDTO(**message.body)
-
-    try:
-        result: DeliveryResult = await adapter.send(message_dto, channel.target_config)
-    except Exception as e:
-        # Adapter 抛异常：记录失败，不吞没上下文
-        delivery.status = "failed"
-        delivery.attempt_count += 1
-        delivery.last_error_code = "ADAPTER_EXCEPTION"
-        delivery.provider_response = {"error": str(e)}
+    delivery = result_del.scalar_one_or_none()
+    if delivery is None:
+        # 5. 创建投递记录
+        delivery = MessageDelivery(
+            id=uuid4(),
+            notification_message_id=message_id,
+            channel_id=channel_id,
+            status="pending",
+            delivery_type="card",
+            attempt_count=0,
+            idempotency_key=idem_key,
+        )
+        db.add(delivery)
         await db.flush()
-        raise NotificationServiceError(
-            f"渠道投递异常: adapter={channel.adapter_type}, "
-            f"message_id={message_id}, channel_id={channel_id}: {e}"
-        ) from e
 
-    # 7. 更新投递记录
-    delivery.attempt_count += 1
-    if result.success:
-        delivery.status = "success"
-    else:
-        delivery.status = "failed"
-        delivery.last_error_code = result.error_code
-    delivery.provider_response = result.provider_response
-    await db.flush()
-
-    return delivery
+    # 6. 执行投递状态机
+    return await _execute_delivery(db, delivery)
 
 
 async def deliver_image_message(
@@ -259,7 +356,7 @@ async def deliver_image_message(
     channel_id: UUID,
     image_bytes: bytes,
 ) -> MessageDelivery:
-    """投递图片消息到指定渠道（幂等）。
+    """投递图片消息到指定渠道（幂等同步入口）。
 
     与 deliver_message 区别：
     - delivery_type = image
@@ -303,57 +400,28 @@ async def deliver_image_message(
         f"{message_id}|{channel_id}|{image_hash}".encode()
     ).hexdigest()
 
-    # 4. 检查是否已投递（幂等）
+    # 4. 检查是否已存在投递记录
     stmt_del = select(MessageDelivery).where(
         MessageDelivery.idempotency_key == idem_key
     )
     result_del = await db.execute(stmt_del)
-    existing_delivery = result_del.scalar_one_or_none()
-    if existing_delivery is not None:
-        return existing_delivery
-
-    # 5. 创建图片投递记录
-    delivery = MessageDelivery(
-        id=uuid4(),
-        notification_message_id=message_id,
-        channel_id=channel_id,
-        status="pending",
-        delivery_type="image",
-        attempt_count=0,
-        idempotency_key=idem_key,
-    )
-    db.add(delivery)
-    await db.flush()
-
-    # 6. 调用 ChannelAdapter 投递图片
-    adapter = get_adapter(channel.adapter_type)
-
-    try:
-        result: DeliveryResult = await adapter.send_image_bytes(
-            image_bytes, channel.target_config
+    delivery = result_del.scalar_one_or_none()
+    if delivery is None:
+        # 5. 创建图片投递记录
+        delivery = MessageDelivery(
+            id=uuid4(),
+            notification_message_id=message_id,
+            channel_id=channel_id,
+            status="pending",
+            delivery_type="image",
+            attempt_count=0,
+            idempotency_key=idem_key,
         )
-    except Exception as e:
-        delivery.status = "failed"
-        delivery.attempt_count += 1
-        delivery.last_error_code = "ADAPTER_EXCEPTION"
-        delivery.provider_response = {"error": str(e)}
+        db.add(delivery)
         await db.flush()
-        raise NotificationServiceError(
-            f"图片投递异常: adapter={channel.adapter_type}, "
-            f"message_id={message_id}, channel_id={channel_id}: {e}"
-        ) from e
 
-    # 7. 更新投递记录
-    delivery.attempt_count += 1
-    if result.success:
-        delivery.status = "success"
-    else:
-        delivery.status = "failed"
-        delivery.last_error_code = result.error_code
-    delivery.provider_response = result.provider_response
-    await db.flush()
-
-    return delivery
+    # 6. 执行投递状态机
+    return await _execute_delivery(db, delivery, image_bytes=image_bytes)
 
 
 async def create_channel(
@@ -743,38 +811,12 @@ async def retry_delivery(
     if message is None:
         raise MessageNotFoundError(f"投递记录关联消息不存在: delivery_id={delivery_id}")
 
-    adapter = get_adapter(channel.adapter_type)
-    message_dto = NotificationMessageDTO(**message.body)
-
     # 重置为重试中状态
     delivery.status = "retrying"
     delivery.last_error_code = None
     await db.flush()
 
-    try:
-        result: DeliveryResult = await adapter.send(message_dto, channel.target_config)
-    except Exception as e:
-        delivery.status = "failed"
-        delivery.attempt_count += 1
-        delivery.last_error_code = "ADAPTER_EXCEPTION"
-        delivery.provider_response = {"error": str(e)}
-        await db.flush()
-        raise NotificationServiceError(
-            f"重试投递异常: adapter={channel.adapter_type}, "
-            f"delivery_id={delivery_id}, message_id={message.id}: {e}"
-        ) from e
-
-    delivery.attempt_count += 1
-    if result.success:
-        delivery.status = "success"
-        delivery.last_error_code = None
-    else:
-        delivery.status = "failed"
-        delivery.last_error_code = result.error_code
-    delivery.provider_response = result.provider_response
-    await db.flush()
-
-    return delivery
+    return await _execute_delivery(db, delivery)
 
 
 async def test_channel(
@@ -844,22 +886,25 @@ async def test_channel_latest_event(
     db: AsyncSession,
     channel_id: UUID,
     frontend_base_url: str,
+    capture_worker_url: str,
     capture_token_ttl_seconds: int = 300,
 ) -> tuple[NotificationChannel, NotificationMessage, dict[str, Any]]:
     """使用最新真实事件测试渠道图片投递链路。
 
     流程：
     1. 查询渠道与用户
-    2. 取最新一条 strategy_events 记录
-    3. 生成短期 capture token
-    4. 使用 Playwright 截取个股详情页
-    5. 创建通知消息并写入 Outbox（delivery_type=image）
-    6. 由 Delivery Worker 异步完成飞书图片投递
+    2. 取当前渠道用户 active watchlist 中股票的最新 StrategyEvent
+    3. 生成 test_run_id 避免双击重复
+    4. 生成短期 capture token
+    5. 调用截图 Worker HTTP 服务获取图片本地静态 URL
+    6. 创建通知消息并写入 Outbox（delivery_type=image, image_url=...）
+    7. 由 Outbox Relay 扩张为 MessageDelivery(pending)，Delivery Worker 异步投递
 
     Args:
         db: 异步会话
         channel_id: 渠道 ID
         frontend_base_url: 前端 base URL
+        capture_worker_url: 截图 Worker HTTP 服务地址
         capture_token_ttl_seconds: capture token 有效期（秒）
 
     Returns:
@@ -868,16 +913,15 @@ async def test_channel_latest_event(
     Raises:
         ChannelNotFoundError: 渠道不存在
         LatestEventNotFoundError: 无可用事件或事件对应标的不存在
-        StockCaptureError: 截图失败
+        NotificationServiceError: 截图服务调用失败
     """
-    import base64
+    import httpx
 
-    from app.config import get_settings
     from app.core.security import create_capture_token
     from app.models.instrument import Instrument
     from app.models.strategy_event import StrategyEvent
+    from app.models.watchlist import UserWatchlistItem
     from app.services.outbox_relay import write_outbox
-    from app.services.stock_capture_service import capture_stock_chart
 
     # 1. 查询渠道
     stmt = select(NotificationChannel).where(NotificationChannel.id == channel_id)
@@ -886,18 +930,33 @@ async def test_channel_latest_event(
     if channel is None:
         raise ChannelNotFoundError(f"渠道不存在: channel_id={channel_id}")
 
-    # 2. 取最新事件
+    # 2. 查询当前渠道用户 active watchlist 中的 instrument_id 列表
+    stmt_watchlist = (
+        select(UserWatchlistItem.instrument_id)
+        .where(
+            UserWatchlistItem.user_id == channel.user_id,
+            UserWatchlistItem.active == True,  # noqa: E712
+        )
+    )
+    result_watchlist = await db.execute(stmt_watchlist)
+    watchlist_instrument_ids = [row[0] for row in result_watchlist.all()]
+
+    if not watchlist_instrument_ids:
+        raise LatestEventNotFoundError("当前渠道用户无活跃自选股，无可用事件")
+
+    # 3. 取这些股票中的最新 StrategyEvent
     stmt_event = (
         select(StrategyEvent)
+        .where(StrategyEvent.instrument_id.in_(watchlist_instrument_ids))
         .order_by(StrategyEvent.created_at.desc())
         .limit(1)
     )
     result_event = await db.execute(stmt_event)
     event = result_event.scalar_one_or_none()
     if event is None:
-        raise LatestEventNotFoundError("未找到可用于测试的策略事件")
+        raise LatestEventNotFoundError("当前渠道用户活跃自选股中无最新策略事件")
 
-    # 3. 查询标的 symbol
+    # 4. 查询标的 symbol
     instrument = await db.get(Instrument, event.instrument_id)
     if instrument is None:
         raise LatestEventNotFoundError(
@@ -905,27 +964,40 @@ async def test_channel_latest_event(
         )
     symbol = instrument.symbol
 
-    # 4. 生成短期 capture token
+    # 5. 生成 test_run_id 与 capture token
+    test_run_id = uuid4()
     token = create_capture_token(
         subject=str(channel.user_id),
         event_id=str(event.id),
         expires_delta=timedelta(seconds=capture_token_ttl_seconds),
     )
 
-    # 5. 截图
+    # 6. 调用截图 Worker 获取图片本地静态 URL
+    capture_payload = {
+        "symbol": symbol,
+        "event_id": str(event.id),
+        "token": token,
+        "frontend_base_url": frontend_base_url,
+        "output_filename": f"test-{channel_id}-{test_run_id}",
+    }
     try:
-        image_bytes = await capture_stock_chart(
-            symbol=symbol,
-            event_id=event.id,
-            token=token,
-            frontend_base_url=frontend_base_url,
-        )
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            capture_resp = await client.post(
+                f"{capture_worker_url.rstrip('/')}/capture",
+                json=capture_payload,
+            )
+            capture_resp.raise_for_status()
+            capture_data = capture_resp.json()
     except Exception as e:
         raise NotificationServiceError(
-            f"截图失败: symbol={symbol}, event_id={event.id}: {e}"
+            f"截图服务调用失败: capture_worker={capture_worker_url}, symbol={symbol}: {e}"
         ) from e
 
-    # 6. 构建通知消息 DTO
+    image_url = capture_data.get("image_url")
+    if not image_url:
+        raise NotificationServiceError("截图服务未返回 image_url")
+
+    # 7. 构建通知消息 DTO
     event_label = event.event_type
     dto = NotificationMessageDTO(
         message_type="MONITOR_EVENT",
@@ -939,6 +1011,7 @@ async def test_channel_latest_event(
             "symbol": symbol,
             "channel_id": str(channel_id),
             "test": True,
+            "test_run_id": str(test_run_id),
         },
         data_time=event.event_time.isoformat() if event.event_time else "",
         primary_instrument={
@@ -949,18 +1022,17 @@ async def test_channel_latest_event(
         event_summary=event_label,
     )
 
-    # 7. 创建消息（幂等）
+    # 8. 创建消息（幂等，test_run_id 避免双击重复）
     message = await create_message(
         db=db,
         user_id=channel.user_id,
         message_dto=dto,
         source_type="strategy_event",
         source_id=event.id,
-        idempotency_key=f"test-latest-event:{channel_id}:{event.id}",
+        idempotency_key=f"test-latest-event:{channel_id}:{event.id}:{test_run_id}",
     )
 
-    # 8. 写入 Outbox，图片以 base64 形式携带
-    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    # 9. 写入 Outbox，携带 image_url（不长期存 base64）
     await write_outbox(
         db=db,
         event_type="notification.message.created",
@@ -968,7 +1040,7 @@ async def test_channel_latest_event(
             "message_id": str(message.id),
             "user_id": str(channel.user_id),
             "delivery_type": "image",
-            "image_bytes_base64": image_b64,
+            "image_url": image_url,
         },
         aggregate_type="notification_message",
         aggregate_id=message.id,
@@ -977,8 +1049,8 @@ async def test_channel_latest_event(
     meta = {
         "event_id": str(event.id),
         "symbol": symbol,
-        "image_size": len(image_bytes),
-        "capture_token": token,
+        "message_id": str(message.id),
+        "delivery_status": "pending",
     }
     return channel, message, meta
 

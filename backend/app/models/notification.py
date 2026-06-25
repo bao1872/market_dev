@@ -193,10 +193,11 @@ class NotificationMessage(Base):
 class MessageDelivery(Base):
     """消息投递记录 - 每次投递尝试一条记录，幂等键唯一。
 
-    status: success/failed/pending/retrying
+    status: pending/sending/success/failed/retrying/dead
     delivery_type: card / image
     attempt_count: 已尝试次数
     next_attempt_at: 下次重试时间（指数退避）
+    image_url: 图片投递时截图服务的本地静态 URL
     """
 
     __tablename__ = "message_deliveries"
@@ -218,7 +219,7 @@ class MessageDelivery(Base):
         Text(),
         nullable=False,
         default="pending",
-        comment="pending/success/failed/retrying",
+        comment="pending/sending/success/failed/retrying/dead",
     )
     delivery_type: Mapped[str] = mapped_column(
         Text(),
@@ -238,6 +239,9 @@ class MessageDelivery(Base):
     )
     provider_response: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB(astext_type=Text()), nullable=True, comment="渠道返回 JSONB"
+    )
+    image_url: Mapped[str | None] = mapped_column(
+        Text(), nullable=True, comment="图片投递时截图 URL（本地静态地址）"
     )
     idempotency_key: Mapped[str] = mapped_column(
         Text(), nullable=False, unique=True, comment="投递幂等键（唯一）"

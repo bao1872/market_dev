@@ -1,8 +1,8 @@
 """统一 Worker 入口 - 支持 Outbox Relay / Delivery Worker / Job 消费者 / 策略批量计算 / 行情调度 / 选股策略调度 / 日历调度 / 监控调度。
 
 用法：
-    WORKER_TYPE=outbox python -m app.worker           # 运行 Outbox Relay
-    WORKER_TYPE=delivery python -m app.worker         # 运行投递 Worker
+    WORKER_TYPE=outbox python -m app.worker           # 运行 Outbox Relay：将 Outbox 扩张为 MessageDelivery(pending)
+    WORKER_TYPE=delivery python -m app.worker         # 运行投递 Worker：按渠道执行 MessageDelivery 状态机
     WORKER_TYPE=strategy_batch python -m app.worker   # 运行策略批量计算 Worker
     WORKER_TYPE=bars_scheduler python -m app.worker   # 运行行情调度 Worker（每日 16:00，日线优先+DSA 事件触发）
     WORKER_TYPE=strategy_scheduler python -m app.worker   # 运行选股策略调度 Worker（每日 18:30，兜底机制）
@@ -20,6 +20,8 @@
 - 每个 worker 类型在独立 asyncio task 中运行
 - 信号处理：SIGTERM/SIGINT 优雅退出
 - 异常不吞：捕获后记录日志并等待下次轮询（避免单次失败导致 worker 退出）
+- Outbox Relay 不再直接投递渠道，而是为每个渠道创建 MessageDelivery 记录
+- Delivery Worker 负责实际渠道投递与失败重试
 """
 
 from __future__ import annotations
@@ -256,12 +258,13 @@ async def recover_interrupted_job_runs(db: AsyncSessionLocal) -> int:
 
 
 async def run_outbox_relay() -> None:
-    """Outbox Relay worker：轮询 outbox 表，投递到 Redis 队列。
+    """Outbox Relay worker：轮询 outbox 表，将通知扩张为每个渠道的 MessageDelivery。
 
     每个轮询周期：
     1. 从 outbox 表读取 status=pending 的记录
-    2. 投递到 Redis 队列（LPUSH）
-    3. 标记为 processed 或增加 retry_count
+    2. 查询通知的目标渠道
+    3. 为每个渠道创建 MessageDelivery(pending)
+    4. 将 Outbox 记录标记为 processed
     """
     from app.services.outbox_relay import relay_outbox
 
@@ -284,22 +287,21 @@ async def run_outbox_relay() -> None:
 
 
 async def run_delivery_worker() -> None:
-    """投递 Worker：消费 notification.message.created 事件，投递到用户渠道。
+    """投递 Worker：轮询 MessageDelivery 表，将通知消息投递到用户渠道。
 
     每个轮询周期：
-    1. 从 outbox 表读取 notification.message.created 事件
-    2. 查询消息 + 用户活跃渠道
-    3. 逐渠道投递（幂等）
-    4. 标记 outbox 为 processed
+    1. 从 message_deliveries 表读取 pending / 到期的 retrying 记录
+    2. 调用 _execute_delivery 执行投递状态机
+    3. 成功后 status=success；失败后 status=retrying/dead
     """
-    from app.services.delivery_worker import process_notification_outbox
+    from app.services.delivery_worker import process_pending_deliveries
 
     _hb_task = asyncio.create_task(_heartbeat_loop("delivery"))
     logger.info("Delivery Worker 启动（间隔=%ds, 批次=%d）", WORKER_INTERVAL, WORKER_BATCH_SIZE)
     while not _shutdown:
         try:
             async with AsyncSessionLocal() as db:
-                processed = await process_notification_outbox(
+                processed = await process_pending_deliveries(
                     db=db,
                     batch_size=WORKER_BATCH_SIZE,
                     max_retry=WORKER_MAX_RETRY,

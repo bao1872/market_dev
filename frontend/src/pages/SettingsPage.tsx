@@ -593,7 +593,7 @@ export default function SettingsPage() {
             <div className="card-head">
               <div>
                 <div className="card-title">用户通知规则 <span className="status-pill off">尚未接入后端</span></div>
-                <div className="card-sub">跨全部选股和监控策略生效</div>
+                <div className="card-sub">跨选股策略与自选股监控生效</div>
               </div>
             </div>
             <div className="card-body">

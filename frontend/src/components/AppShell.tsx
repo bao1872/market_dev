@@ -2,12 +2,14 @@
 // 对应原型：所有页面的 .app-shell > .sidebar + .topbar + .main 结构
 // V1.5.1：角色感知导航，管理员页面始终显示管理员导航
 // V1.6.3：capture=feishu 参数触发截图模式，隐藏侧栏、用户信息与角色切换按钮
+// V1.6.4：移动端汉堡按钮、抽屉侧栏、真实未读数与健康状态
 import { type ReactNode, useState, useEffect } from 'react'
 import { useLocation, Link } from 'react-router-dom'
 import { useRoleStore } from '@/store/role'
 import { useAuthStore } from '@/store/auth'
 import { useToast } from '@/store/toast'
 import { getMarketStatus, type MarketStatus } from '@/api/endpoints'
+import { useMessages, useHealth, useAdminSystemOverview } from '@/hooks/useApi'
 import clsx from 'clsx'
 
 // 导航项定义
@@ -15,15 +17,13 @@ interface NavItemDef {
   path: string
   icon: string
   label: string
-  badge?: string
-  badgeHot?: boolean
 }
 
 const userNavItems: NavItemDef[] = [
   { path: '/', icon: '⌂', label: '服务总览' },
   { path: '/screener', icon: '⌁', label: '选股策略' },
   { path: '/watchlist', icon: '☆', label: '我的自选' },
-  { path: '/messages', icon: '◉', label: '消息中心', badge: '7', badgeHot: true },
+  { path: '/messages', icon: '◉', label: '消息中心' },
   { path: '/settings', icon: '⚙', label: '通知与设置' },
 ]
 
@@ -53,17 +53,15 @@ function getPageTitle(pathname: string): string {
   return pageTitleMap[pathname] || '量策服务台'
 }
 
-function NavItem({ item, active }: { item: NavItemDef; active: boolean }) {
+function NavItem({ item, active, onClick }: { item: NavItemDef; active: boolean; onClick?: () => void }) {
   return (
     <Link
       to={item.path}
       className={clsx('nav-item', active && 'active')}
+      onClick={onClick}
     >
       <span className="nav-icon">{item.icon}</span>
       <span>{item.label}</span>
-      {item.badge && (
-        <span className={clsx('nav-badge', item.badgeHot && 'hot')}>{item.badge}</span>
-      )}
     </Link>
   )
 }
@@ -80,6 +78,14 @@ export default function AppShell({ children }: { children: ReactNode }) {
 
   // 截图模式：URL 参数 capture=feishu 时隐藏侧栏、用户信息与角色切换
   const isCaptureMode = new URLSearchParams(location.search).get('capture') === 'feishu'
+
+  // 移动端抽屉状态
+  const [drawerOpen, setDrawerOpen] = useState(false)
+
+  // 路由切换后自动关闭抽屉
+  useEffect(() => {
+    setDrawerOpen(false)
+  }, [currentPath])
 
   // 市场状态轮询（30s）
   const [marketStatus, setMarketStatus] = useState<MarketStatus | null>(null)
@@ -99,7 +105,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
 
   // 实时时钟（1s 刷新）
   const [currentTime, setCurrentTime] = useState(
-    new Date().toLocaleTimeString('zh-CN', { hour12: false })
+    new Date().toLocaleTimeString('zh-CN', { hour12: false }),
   )
   useEffect(() => {
     const interval = setInterval(() => {
@@ -108,81 +114,173 @@ export default function AppShell({ children }: { children: ReactNode }) {
     return () => clearInterval(interval)
   }, [])
 
+  // 真实未读消息数
+  const unreadMessagesQuery = useMessages({ unread_only: true, limit: 1 })
+  const unreadCount = unreadMessagesQuery.data?.total ?? 0
+
+  // 真实后端健康状态
+  const healthQuery = useHealth()
+  const isServiceHealthy = healthQuery.data?.status === 'ok'
+
+  // 管理员系统概览（详细状态）
+  const adminOverviewQuery = useAdminSystemOverview()
+  const adminOverview = adminOverviewQuery.data
+
   // 获取用户名首字母作为头像
   const userInitials = user?.name
-    ? user.name.split(' ').map((w) => w[0]).join('').slice(0, 2).toUpperCase()
+    ? user.name
+        .split(' ')
+        .map((w) => w[0])
+        .join('')
+        .slice(0, 2)
+        .toUpperCase()
     : 'DL'
   const userName = user?.name || 'dan lu'
+  const userEmail = user?.email || ''
   const userRoleLabel = isAdmin ? '超级管理员 · 测试账号' : '普通用户预览'
 
-  return (
-    <div className={clsx('app-shell', isCaptureMode && 'capture-mode')}>
-      {/* 侧栏 */}
-      {!isCaptureMode && (
-        <aside className="sidebar">
-          <div className="brand">
-            <div className="brand-mark">QS</div>
-            <div>
-              <div className="brand-title">量策服务台</div>
-              <div className="brand-sub">STRATEGY SERVICE</div>
-            </div>
-          </div>
+  // 侧栏导航内容
+  const sidebarContent = (
+    <>
+      <div className="brand">
+        <div className="brand-mark">QS</div>
+        <div>
+          <div className="brand-title">量策服务台</div>
+          <div className="brand-sub">STRATEGY SERVICE</div>
+        </div>
+      </div>
 
-          {/* 用户服务导航 */}
-          <div className="nav-section">
-            <div className="nav-label">用户服务</div>
-            {userNavItems.map((item) => (
-              <NavItem
-                key={item.path}
-                item={item}
-                active={currentPath === item.path}
-              />
-            ))}
-          </div>
+      {/* 用户服务导航 */}
+      <div className="nav-section">
+        <div className="nav-label">用户服务</div>
+        {userNavItems.map((item) => (
+          <NavItem
+            key={item.path}
+            item={item}
+            active={currentPath === item.path}
+          />
+        ))}
+      </div>
 
-          {/* 管理员控制台导航（V1.5.1：默认显示，普通用户视图隐藏） */}
-          {isAdmin && (
-            <div className="nav-section">
-              <div className="nav-label">管理员控制台</div>
-              {adminNavItems.map((item) => (
-                <NavItem
-                  key={item.path}
-                  item={item}
-                  active={currentPath === item.path}
-                />
-              ))}
+      {/* 管理员控制台导航（V1.5.1：默认显示，普通用户视图隐藏） */}
+      {isAdmin && (
+        <div className="nav-section">
+          <div className="nav-label">管理员控制台</div>
+          {adminNavItems.map((item) => (
+            <NavItem
+              key={item.path}
+              item={item}
+              active={currentPath === item.path}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* 侧栏底部系统状态 */}
+      <div className="sidebar-footer">
+        <div className="system-mini">
+          {/* 普通用户：简化服务状态 */}
+          {!isAdmin && (
+            <div className="system-mini-row">
+              <span>
+                <i className={clsx('dot', isServiceHealthy ? 'ok' : 'err')}></i>服务状态
+              </span>
+              <span>{healthQuery.isLoading ? '检测中' : isServiceHealthy ? '正常' : '异常'}</span>
             </div>
           )}
 
-          {/* 侧栏底部系统状态 */}
-          <div className="sidebar-footer">
-            <div className="system-mini">
+          {/* 管理员：详细 Worker / 调度器 / 队列状态 */}
+          {isAdmin && (
+            <>
               <div className="system-mini-row">
                 <span>
-                  <i className="dot ok"></i>分钟行情
+                  <i
+                    className={clsx(
+                      'dot',
+                      adminOverview?.worker_health === 'healthy' ? 'ok' : 'warn',
+                    )}
+                  ></i>
+                  策略引擎
                 </span>
-                <span>实时</span>
+                <span>{adminOverview ? (adminOverview.worker_health === 'healthy' ? '正常' : '降级') : '加载中'}</span>
               </div>
               <div className="system-mini-row">
                 <span>
-                  <i className="dot ok"></i>策略引擎
+                  <i
+                    className={clsx(
+                      'dot',
+                      adminOverview?.scheduler_health === 'healthy' ? 'ok' : 'warn',
+                    )}
+                  ></i>
+                  任务调度
                 </span>
-                <span>正常</span>
+                <span>{adminOverview ? (adminOverview.scheduler_health === 'healthy' ? '正常' : '降级') : '加载中'}</span>
               </div>
               <div className="system-mini-row">
                 <span>
-                  <i className="dot ok"></i>消息队列
+                  <i
+                    className={clsx(
+                      'dot',
+                      (adminOverview?.queue_backlog ?? 0) < 10 ? 'ok' : 'warn',
+                    )}
+                  ></i>
+                  消息队列
                 </span>
-                <span>3</span>
+                <span>{adminOverview?.queue_backlog ?? '-'}</span>
               </div>
+            </>
+          )}
+        </div>
+      </div>
+    </>
+  )
+
+  return (
+    <div className={clsx('app-shell', isCaptureMode && 'capture-mode')}>
+      {/* 侧栏（桌面端固定显示） */}
+      {!isCaptureMode && (
+        <aside className="sidebar sidebar-desktop">{sidebarContent}</aside>
+      )}
+
+      {/* 移动端抽屉侧栏 + 遮罩 */}
+      {!isCaptureMode && drawerOpen && (
+        <>
+          <div className="sidebar-overlay open" onClick={() => setDrawerOpen(false)} />
+          <aside className="sidebar sidebar-drawer open">
+            <div className="sidebar-drawer-head">
+              <div className="brand">
+                <div className="brand-mark">QS</div>
+                <div>
+                  <div className="brand-title">量策服务台</div>
+                  <div className="brand-sub">STRATEGY SERVICE</div>
+                </div>
+              </div>
+              <button
+                className="icon-btn drawer-close"
+                onClick={() => setDrawerOpen(false)}
+                aria-label="关闭导航"
+              >
+                ×
+              </button>
             </div>
-          </div>
-        </aside>
+            <div className="sidebar-drawer-body">{sidebarContent}</div>
+          </aside>
+        </>
       )}
 
       {/* 顶栏 */}
       <header className="topbar">
         <div className="top-left">
+          {/* 移动端汉堡按钮 */}
+          {!isCaptureMode && (
+            <button
+              className="icon-btn hamburger"
+              onClick={() => setDrawerOpen((prev) => !prev)}
+              aria-label="打开导航"
+            >
+              ☰
+            </button>
+          )}
           <div className="page-crumb">{pageTitle}</div>
           <div className="top-status">
             <i className={marketStatus?.is_trading_hours ? 'dot ok' : 'dot'}></i>
@@ -196,9 +294,10 @@ export default function AppShell({ children }: { children: ReactNode }) {
               placeholder="搜索股票代码 / 名称"
             />
           </div>
-          <button className="icon-btn" title="系统通知">
+          <Link className="icon-btn messages-btn" to="/messages" title="消息中心">
             ◔
-          </button>
+            {unreadCount > 0 && <span className="messages-badge">{unreadCount > 99 ? '99+' : unreadCount}</span>}
+          </Link>
           {/* V1.5.1：角色感知导航切换按钮（截图模式隐藏） */}
           {!isCaptureMode && !isAdminPath && (
             <button
@@ -212,9 +311,10 @@ export default function AppShell({ children }: { children: ReactNode }) {
           {!isCaptureMode && (
             <>
               <div className="avatar">{userInitials}</div>
-              <div>
-                <div style={{ fontSize: '11px', fontWeight: 650 }}>{userName}</div>
-                <div style={{ fontSize: '9px', color: 'var(--muted)' }}>{userRoleLabel}</div>
+              <div className="user-info">
+                <div className="user-name">{userName}</div>
+                <div className="user-role">{userRoleLabel}</div>
+                {userEmail && <div className="user-email">{userEmail}</div>}
               </div>
             </>
           )}

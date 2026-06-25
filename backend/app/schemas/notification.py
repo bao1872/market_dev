@@ -277,11 +277,16 @@ class ChannelTestResponse(BaseModel):
 
 
 class ChannelLatestEventTestResponse(BaseModel):
-    """真实事件图片测试响应。"""
+    """真实事件图片测试响应。
 
-    channel: NotificationChannelResponse = Field(..., description="渠道状态")
-    message: NotificationMessageResponse = Field(..., description="创建的消息")
-    meta: dict[str, Any] = Field(..., description="截图元信息（event_id/symbol/image_size/capture_token）")
+    仅保留核心字段：事件 ID、股票代码、消息 ID、投递状态。
+    不返回 capture_token 等敏感/冗余信息。
+    """
+
+    event_id: UUID = Field(..., description="事件 ID")
+    symbol: str = Field(..., description="股票代码")
+    message_id: UUID = Field(..., description="创建的通知消息 ID")
+    delivery_status: str = Field(..., description="投递状态（pending/success/failed/retrying/dead）")
 
 
 if __name__ == "__main__":

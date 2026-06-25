@@ -554,6 +554,23 @@ export async function getVersion(): Promise<VersionInfo> {
 }
 
 // ============================================================
+// Health 领域类型
+// ============================================================
+
+/** 健康检查响应 */
+export interface HealthResponse {
+  status: 'ok' | string
+  service: string
+  version: string
+}
+
+/** 获取后端健康状态（无需认证） */
+export async function getHealth(): Promise<HealthResponse> {
+  const res = await apiClient.get<HealthResponse>('/health')
+  return res.data
+}
+
+// ============================================================
 // Market Status 领域类型
 // ============================================================
 

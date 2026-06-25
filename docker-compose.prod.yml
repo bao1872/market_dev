@@ -1,7 +1,7 @@
 # V1.1 交易平台 - 生产环境 Docker Compose
-# 包含 4 个服务：redis, backend, worker, frontend
+# 包含多个服务：redis, backend, worker-*, frontend
 # PostgreSQL 使用物理机实例，不再创建容器
-# 用法: docker compose -f docker-compose.prod.yml up -d
+# 用法: docker compose --env-file /etc/market-dev/market.env -f docker-compose.prod.yml up -d
 
 services:
   # ===== Redis 缓存 =====
@@ -31,9 +31,11 @@ services:
     container_name: trading-backend
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql+psycopg://bz:es123456@host.docker.internal:5432/bz_stock
-      REDIS_URL: redis://redis:6379/0
-      JWT_SECRET: ${JWT_SECRET:-change-this-in-production-min-32bytes}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://frontend}
+      CAPTURE_WORKER_URL: ${CAPTURE_WORKER_URL:-http://worker-capture:8001}
       APP_ENV: production
       TZ: Asia/Shanghai
     depends_on:
@@ -43,24 +45,25 @@ services:
       - "host.docker.internal:host-gateway"
     ports:
       - "8000:8000"
+    volumes:
+      - ./doc:/doc:ro
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
 
-  # ===== 后台任务 Worker =====
-  worker:
+  # ===== 行情调度 Worker =====
+  worker-bars-scheduler:
     build:
       context: ./backend
       args:
         GIT_SHA: ${GIT_SHA:-unknown}
         BUILD_TIME: ${BUILD_TIME:-unknown}
-    container_name: trading-worker
+    container_name: trading-worker-bars-scheduler
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql+psycopg://bz:es123456@host.docker.internal:5432/bz_stock
-      REDIS_URL: redis://redis:6379/0
-      JWT_SECRET: ${JWT_SECRET:-change-this-in-production-min-32bytes}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       APP_ENV: production
-      WORKER_TYPE: all
-      WORKER_INTERVAL: "5"
+      WORKER_TYPE: bars_scheduler
       TZ: Asia/Shanghai
     depends_on:
       redis:
@@ -69,6 +72,180 @@ services:
       - "host.docker.internal:host-gateway"
     command: python -m app.worker
 
+  # ===== 选股策略调度 Worker =====
+  worker-strategy-scheduler:
+    build:
+      context: ./backend
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    container_name: trading-worker-strategy-scheduler
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      APP_ENV: production
+      WORKER_TYPE: strategy_scheduler
+      TZ: Asia/Shanghai
+    depends_on:
+      redis:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: python -m app.worker
+
+  # ===== 日历调度 Worker =====
+  worker-calendar:
+    build:
+      context: ./backend
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    container_name: trading-worker-calendar
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      APP_ENV: production
+      WORKER_TYPE: calendar_scheduler
+      TZ: Asia/Shanghai
+    depends_on:
+      redis:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: python -m app.worker
+
+  # ===== 盘中监控 Worker =====
+  worker-monitor:
+    build:
+      context: ./backend
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    container_name: trading-worker-monitor
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      APP_ENV: production
+      WORKER_TYPE: monitor_scheduler
+      TZ: Asia/Shanghai
+    depends_on:
+      redis:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: python -m app.worker
+
+  # ===== 策略批量计算 Worker =====
+  worker-strategy-batch:
+    build:
+      context: ./backend
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    container_name: trading-worker-strategy-batch
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      APP_ENV: production
+      WORKER_TYPE: strategy_batch
+      TZ: Asia/Shanghai
+    depends_on:
+      redis:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: python -m app.worker
+
+  # ===== Outbox 扩张 Worker =====
+  worker-outbox:
+    build:
+      context: ./backend
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    container_name: trading-worker-outbox
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      APP_ENV: production
+      WORKER_TYPE: outbox
+      TZ: Asia/Shanghai
+    depends_on:
+      redis:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: python -m app.worker
+
+  # ===== 投递 Worker =====
+  worker-delivery:
+    build:
+      context: ./backend
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    container_name: trading-worker-delivery
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      APP_ENV: production
+      WORKER_TYPE: delivery
+      TZ: Asia/Shanghai
+    depends_on:
+      redis:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: python -m app.worker
+
+  # ===== 截图 Worker =====
+  worker-capture:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.capture
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    container_name: trading-worker-capture
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      CAPTURE_HOST: 0.0.0.0
+      CAPTURE_PORT: 8001
+      CAPTURE_STATIC_DIR: /app/static/captures
+      CAPTURE_STATIC_URL_PREFIX: /static/captures
+      APP_ENV: production
+      TZ: Asia/Shanghai
+    volumes:
+      - capture_static:/app/static/captures
+    ports:
+      - "8001:8001"
+    depends_on:
+      redis:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
   # ===== 前端 Nginx 服务 =====
   frontend:
     build:
@@ -76,13 +253,19 @@ services:
       args:
         GIT_SHA: ${GIT_SHA:-dev}
         BUILD_TIME: ${BUILD_TIME:-unknown}
+        VITE_GIT_SHA: ${VITE_GIT_SHA:-dev}
+        VITE_BUILD_TIME: ${VITE_BUILD_TIME:-unknown}
     container_name: trading-frontend
     restart: unless-stopped
     depends_on:
       - backend
+    volumes:
+      - capture_static:/usr/share/nginx/html/static/captures:ro
     ports:
       - "80:80"
 
 volumes:
   redisdata:
     name: trading-redisdata
+  capture_static:
+    name: trading-capture-static

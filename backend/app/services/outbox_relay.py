@@ -3,29 +3,36 @@
 设计（At-least-once 投递）：
 1. 业务写入与 Outbox 记录在同一 DB 事务中（保证一致性）
 2. Relay worker 轮询 outbox 表 status=pending 的记录
-3. 投递到 Redis 队列（LPUSH）
-4. 投递成功后标记 status=processed，记录 processed_at
-5. 投递失败则 retry_count + 1，保持 pending 状态等待下次轮询
+3. 普通事件：投递到 Redis 队列（LPUSH）
+4. notification.message.created 事件：
+   - 为每个活跃渠道创建 MessageDelivery(pending)
+   - 不直接调用渠道 Adapter 投递
+   - 创建完成后标记 Outbox 为 processed
+5. 投递成功后标记 status=processed，记录 processed_at
+6. 投递失败则 retry_count + 1，保持 pending 状态等待下次轮询
 
 幂等保证：
 - 下游消费者通过 idempotency_key 去重
 - Outbox 记录的 id 作为幂等键的一部分
+- MessageDelivery.idempotency_key 唯一，避免重复投递
 
 Redis 队列键：outbox:queue:{event_type}
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from datetime import UTC, datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.redis_client import get_redis
+from app.models.notification import MessageDelivery, NotificationChannel
 from app.models.outbox import Outbox
 
 logger = logging.getLogger("outbox_relay")
@@ -39,8 +46,8 @@ DEFAULT_BATCH_SIZE = 100
 # 最大重试次数（超过则标记 failed）
 DEFAULT_MAX_RETRY = 5
 
-# 通知事件由 Notification Delivery Worker 独占处理，通用 Relay 不投递
-_EXCLUDED_EVENT_TYPES = {"notification.message.created"}
+# 通知事件类型，由本模块负责扩张为 MessageDelivery
+_NOTIFICATION_EVENT_TYPE = "notification.message.created"
 
 
 async def write_outbox(
@@ -83,15 +90,105 @@ async def write_outbox(
     return outbox
 
 
+async def _expand_notification_message_created(
+    db: AsyncSession,
+    record: Outbox,
+) -> int:
+    """将 notification.message.created 事件扩张为 MessageDelivery 记录。
+
+    流程：
+    1. 解析 payload 中的 message_id / user_id / delivery_type / image_url
+    2. 查询用户活跃渠道
+    3. 为每个渠道创建 MessageDelivery(pending)
+    4. 幂等键基于 message_id + channel_id + delivery_type + image_url
+
+    Args:
+        db: 异步会话
+        record: notification.message.created 的 Outbox 记录
+
+    Returns:
+        创建的 MessageDelivery 数量
+    """
+    payload: dict[str, Any] = record.payload or {}
+    message_id_str = payload.get("message_id")
+    user_id_str = payload.get("user_id")
+    delivery_type = payload.get("delivery_type", "card")
+    image_url = payload.get("image_url")
+
+    if not message_id_str or not user_id_str:
+        logger.warning(
+            "通知事件缺少 message_id/user_id: outbox_id=%s payload=%s",
+            record.id, payload,
+        )
+        return 0
+
+    try:
+        message_id = UUID(message_id_str)
+        user_id = UUID(user_id_str)
+    except ValueError as e:
+        logger.warning(
+            "通知事件 message_id/user_id 格式非法: outbox_id=%s: %s",
+            record.id, e,
+        )
+        return 0
+
+    # 查询用户活跃渠道
+    stmt = (
+        select(NotificationChannel)
+        .where(
+            NotificationChannel.user_id == user_id,
+            NotificationChannel.status == "active",
+        )
+        .order_by(NotificationChannel.created_at.desc())
+    )
+    result = await db.execute(stmt)
+    channels = list(result.scalars().all())
+
+    if not channels:
+        logger.info(
+            "用户无活跃渠道，跳过扩张: user_id=%s message_id=%s",
+            user_id, message_id,
+        )
+        return 0
+
+    created = 0
+    for channel in channels:
+        # 幂等键：message_id|channel_id|delivery_type|image_url
+        idem_parts = [str(message_id), str(channel.id), delivery_type]
+        if image_url:
+            idem_parts.append(image_url)
+        idem_key = hashlib.sha256("|".join(idem_parts).encode()).hexdigest()
+
+        delivery = MessageDelivery(
+            id=uuid4(),
+            notification_message_id=message_id,
+            channel_id=channel.id,
+            status="pending",
+            delivery_type=delivery_type,
+            attempt_count=0,
+            image_url=image_url,
+            idempotency_key=idem_key,
+        )
+        db.add(delivery)
+        created += 1
+
+    logger.info(
+        "通知事件扩张完成: outbox_id=%s message_id=%s channels=%s delivery_type=%s",
+        record.id, message_id, len(channels), delivery_type,
+    )
+    return created
+
+
 async def relay_outbox(
     db: AsyncSession,
     batch_size: int = DEFAULT_BATCH_SIZE,
     max_retry: int = DEFAULT_MAX_RETRY,
 ) -> int:
-    """轮询 outbox 表，投递 pending 记录到 Redis 队列。
+    """轮询 outbox 表，投递 pending 记录。
 
     At-least-once 投递：
-    - 投递成功 -> status=processed
+    - 普通事件 -> 投递到 Redis 队列，成功后 status=processed
+    - notification.message.created -> 扩张为 MessageDelivery(pending)，然后 status=processed
     - 投递失败 -> retry_count+1，超过 max_retry 则 status=failed
 
     Args:
@@ -100,7 +197,7 @@ async def relay_outbox(
         max_retry: 最大重试次数
 
     Returns:
-        本次成功投递的记录数
+        本次成功处理的记录数
     """
     if batch_size <= 0:
         raise ValueError("batch_size 必须大于 0")
@@ -110,13 +207,9 @@ async def relay_outbox(
     redis = get_redis()
 
     # 1. 查询 pending 记录（按创建时间排序，FIFO）
-    #    排除 notification.message.created，由 Notification Delivery Worker 独占处理
     stmt = (
         select(Outbox)
-        .where(
-            Outbox.status == "pending",
-            Outbox.event_type.not_in(_EXCLUDED_EVENT_TYPES),
-        )
+        .where(Outbox.status == "pending")
         .order_by(Outbox.created_at)
         .limit(batch_size)
     )
@@ -126,40 +219,49 @@ async def relay_outbox(
     if not pending_records:
         return 0
 
-    delivered_count = 0
+    processed_count = 0
     for record in pending_records:
         try:
-            # 2. 投递到 Redis 队列
-            # 队列消息包含完整事件信息，消费者可幂等处理
-            message = {
-                "outbox_id": str(record.id),
-                "event_type": record.event_type,
-                "aggregate_type": record.aggregate_type,
-                "aggregate_id": str(record.aggregate_id) if record.aggregate_id else None,
-                "payload": record.payload,
-                "headers": record.headers,
-                "created_at": record.created_at.isoformat(),
-            }
-            queue_key = f"{_OUTBOX_QUEUE_PREFIX}{record.event_type}"
-            await redis.lpush(queue_key, json.dumps(message, ensure_ascii=False))
+            if record.event_type == _NOTIFICATION_EVENT_TYPE:
+                # 通知事件：扩张为 MessageDelivery(pending)，不直接投递
+                expanded = await _expand_notification_message_created(db, record)
+                record.status = "processed"
+                record.processed_at = datetime.now(UTC)
+                processed_count += 1
+                logger.info(
+                    "outbox 通知事件已扩张: outbox_id=%s expanded=%s",
+                    record.id, expanded,
+                )
+            else:
+                # 普通事件：投递到 Redis 队列
+                message = {
+                    "outbox_id": str(record.id),
+                    "event_type": record.event_type,
+                    "aggregate_type": record.aggregate_type,
+                    "aggregate_id": str(record.aggregate_id) if record.aggregate_id else None,
+                    "payload": record.payload,
+                    "headers": record.headers,
+                    "created_at": record.created_at.isoformat(),
+                }
+                queue_key = f"{_OUTBOX_QUEUE_PREFIX}{record.event_type}"
+                await redis.lpush(queue_key, json.dumps(message, ensure_ascii=False))
 
-            # 3. 标记为 processed
-            record.status = "processed"
-            record.processed_at = datetime.now(UTC)
-            delivered_count += 1
+                record.status = "processed"
+                record.processed_at = datetime.now(UTC)
+                processed_count += 1
         except Exception as e:
-            # 投递失败：增加重试计数，超过阈值标记 failed
+            # 处理失败：增加重试计数，超过阈值标记 failed
             # 补充上下文后继续（不 re-raise，因为单条失败不应阻塞其他记录）
             record.retry_count += 1
             if record.retry_count >= max_retry:
                 record.status = "failed"
             logger.warning(
-                "outbox 投递失败 outbox_id=%s event_type=%s retry=%s: %s",
+                "outbox 处理失败 outbox_id=%s event_type=%s retry=%s: %s",
                 record.id, record.event_type, record.retry_count, e,
             )
 
     await db.flush()
-    return delivered_count
+    return processed_count
 
 
 async def get_pending_count(db: AsyncSession) -> int:
