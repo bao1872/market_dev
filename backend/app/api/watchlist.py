@@ -29,6 +29,7 @@ from app.constants.strategy_keys import WATCHLIST_MONITOR
 from app.core.deps import get_current_active_user
 from app.db import get_db
 from app.services.calendar_service import is_trading_day_async
+from app.services.market_status_service import TRADING_SESSIONS, compute_market_session
 from app.models.instrument import Instrument
 from app.models.monitor_evaluation import MonitorEvaluation
 from app.models.monitor_state import MonitorState
@@ -48,22 +49,12 @@ router = APIRouter(prefix="/watchlist", tags=["watchlist"])
 
 
 def _compute_market_status(now_cst: datetime, is_trading_day: bool) -> str:
-    """根据当前时间计算市场状态。"""
-    if not is_trading_day:
-        return "NON_TRADING_DAY"
+    """根据当前时间计算市场状态。
 
-    time_val = now_cst.hour * 60 + now_cst.minute
-
-    if time_val < 570:  # before 9:30
-        return "PRE_MARKET"
-    elif time_val <= 690:  # 9:30-11:30
-        return "TRADING"
-    elif time_val < 780:  # 11:30-13:00
-        return "LUNCH_BREAK"
-    elif time_val <= 900:  # 13:00-15:00
-        return "TRADING"
-    else:  # after 15:00
-        return "AFTER_MARKET"
+    薄包装：委托给 app.services.market_status_service.compute_market_session，
+    统一 6 值枚举（NON_TRADING_DAY/PRE_OPEN/MORNING_SESSION/LUNCH_BREAK/AFTERNOON_SESSION/MARKET_CLOSED）。
+    """
+    return compute_market_session(now_cst, is_trading_day)
 
 
 # 盘中交易时段内数据延迟判定阈值（秒）
@@ -81,17 +72,18 @@ def _compute_calculation_status(
     优先级：FAILED > STALE > SUCCEEDED > WAITING_FIRST_RUN
     - 盘后/非交易日/盘前/午休不判定 STALE，避免 30 分钟规则误报
     - 盘中交易时段内使用 180 秒阈值判定数据延迟
+    - market_session 为 6 值枚举；TRADING_SESSIONS={MORNING_SESSION,AFTERNOON_SESSION}
     """
     if eval_row is None:
         # 无评估记录：按 MonitorState 新鲜度判定（若存在）
         # 盘中无 MonitorState → WAITING_FIRST_RUN；其他时段或数据新鲜 → SUCCEEDED
-        if ms is not None and ms.updated_at and market_session == "TRADING":
+        if ms is not None and ms.updated_at and market_session in TRADING_SESSIONS:
             updated_at_cst = ms.updated_at.astimezone(ZoneInfo("Asia/Shanghai"))
             age_seconds = (now_cst - updated_at_cst).total_seconds()
             if age_seconds > _IN_TRADING_STALE_SECONDS:
                 return "STALE"
             return "SUCCEEDED"
-        return "WAITING_FIRST_RUN" if market_session == "TRADING" else "SUCCEEDED"
+        return "WAITING_FIRST_RUN" if market_session in TRADING_SESSIONS else "SUCCEEDED"
 
     evaluation_status = eval_row.evaluation_status
 
@@ -106,7 +98,7 @@ def _compute_calculation_status(
 
     if evaluation_status == "SUCCEEDED":
         # 仅在盘中交易时段根据 MonitorState.updated_at 判定 STALE
-        if market_session == "TRADING" and ms is not None and ms.updated_at:
+        if market_session in TRADING_SESSIONS and ms is not None and ms.updated_at:
             updated_at_cst = ms.updated_at.astimezone(ZoneInfo("Asia/Shanghai"))
             age_seconds = (now_cst - updated_at_cst).total_seconds()
             if age_seconds > _IN_TRADING_STALE_SECONDS:
@@ -255,7 +247,7 @@ async def get_watchlist_monitor_status(
     MonitorState 与 MonitorEvaluation。
 
     状态语义：
-    - market_session: 市场状态（TRADING/AFTER_MARKET/LUNCH_BREAK/PRE_MARKET/NON_TRADING_DAY）
+    - market_session: 市场阶段（NON_TRADING_DAY/PRE_OPEN/MORNING_SESSION/LUNCH_BREAK/AFTERNOON_SESSION/MARKET_CLOSED）
     - calculation_status: 计算状态（SUCCEEDED/FAILED/STALE/WAITING_FIRST_RUN）
     - monitor_status: 兼容字段，由 calculation_status 推导，SUCCEEDED 时回落到 market_session
     - freshness_seconds: 基于 MonitorState.updated_at 的数据新鲜度（秒）

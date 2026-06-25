@@ -24,7 +24,8 @@
 
 注意：
 - ORM 严格对齐迁移 DDL，未在迁移中声明的字段/FK 不在 ORM 中映射
-- error 信息存储在 strategy_run_items.error_message 中（不再用 input_overrides）
+- 错误信息分两级存储：run 级存 strategy_runs.error_message/error_code/failure_stage，
+  per-stock 级存 strategy_run_items.error_message（不再用 input_overrides）
 - strategy_result_metrics 的 strategy_version_id/instrument_id 在迁移中无 FK（冗余字段，用于索引）
 - matched 不持久化到 payload（命中由用户筛选条件动态决定）
 """
@@ -55,16 +56,42 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import Base
 
 
+# [StrategyRun] - 失败阶段枚举：DSA 运行各阶段异常标记，写入 failure_stage 字段
+FAILURE_STAGE_DATA_READINESS = "DATA_READINESS"
+FAILURE_STAGE_LOAD_VERSION = "LOAD_VERSION"
+FAILURE_STAGE_LOAD_RUNTIME = "LOAD_RUNTIME"
+FAILURE_STAGE_LOAD_INSTRUMENTS = "LOAD_INSTRUMENTS"
+FAILURE_STAGE_CALCULATE_INSTRUMENTS = "CALCULATE_INSTRUMENTS"
+FAILURE_STAGE_WRITE_RESULTS = "WRITE_RESULTS"
+FAILURE_STAGE_QUALITY_GATE = "QUALITY_GATE"
+FAILURE_STAGE_PUBLISH = "PUBLISH"
+FAILURE_STAGE_WORKER_INTERRUPTED = "WORKER_INTERRUPTED"
+
+# 全部失败阶段集合（用于校验 failure_stage 取值合法性）
+ALL_FAILURE_STAGES = {
+    FAILURE_STAGE_DATA_READINESS,
+    FAILURE_STAGE_LOAD_VERSION,
+    FAILURE_STAGE_LOAD_RUNTIME,
+    FAILURE_STAGE_LOAD_INSTRUMENTS,
+    FAILURE_STAGE_CALCULATE_INSTRUMENTS,
+    FAILURE_STAGE_WRITE_RESULTS,
+    FAILURE_STAGE_QUALITY_GATE,
+    FAILURE_STAGE_PUBLISH,
+    FAILURE_STAGE_WORKER_INTERRUPTED,
+}
+
+
 class StrategyRun(Base):
     """策略运行记录 - 一次策略执行的生命周期。
 
-    对应迁移 005 strategy_runs 表 + 015 扩展字段 + 030 attempt_no。
+    对应迁移 005 strategy_runs 表 + 015 扩展字段 + 030 attempt_no + 035 错误字段。
     idempotency_key 唯一约束防止重复运行。
 
     字段映射（任务描述 → 迁移 DDL）：
     - trigger_kind → run_type（manual/scheduled/replay/backfill）
     - status: queued/running/completed/partial_failed/published/failed
-    - error → 存储在 strategy_run_items.error_message 中（per-stock 级别）
+    - error → run 级存 error_code/failure_stage/error_message（迁移 035）；
+      per-stock 级存 strategy_run_items.error_message
     - effective_config: 运行时从 manifest 读取的参数快照（迁移 015 新增）
     - attempt_no: 业务重试序号（迁移 030 新增）
     - attempt_count: 租约恢复计数（迁移 026 新增，与 attempt_no 语义不同）
@@ -164,6 +191,14 @@ class StrategyRun(Base):
     )
     error_code: Mapped[str | None] = mapped_column(
         String(128), nullable=True, comment="错误码"
+    )
+    # [StrategyRun] - 运行级错误信息: 存储 DSA 运行失败的详细原因
+    error_message: Mapped[str | None] = mapped_column(
+        Text(), nullable=True, comment="运行级错误详情（per-stock 错误见 strategy_run_items.error_message）"
+    )
+    # [StrategyRun] - 失败阶段: DATA_READINESS/LOAD_VERSION/.../WORKER_INTERRUPTED
+    failure_stage: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="失败阶段枚举（见 ALL_FAILURE_STAGES）"
     )
     # TODO: 添加 bars_snapshot_id 字段，记录 DSA 运行时使用的行情数据版本
     # 需 DB 迁移：ALTER TABLE strategy_runs ADD COLUMN bars_snapshot_id UUID;
@@ -420,8 +455,16 @@ if __name__ == "__main__":
     assert "attempt_count" in run_cols
     assert "next_retry_at" in run_cols
     assert "error_code" in run_cols
+    # 迁移 035 新增字段
+    assert "error_message" in run_cols
+    assert "failure_stage" in run_cols
     # 迁移 030 新增字段
     assert "attempt_no" in run_cols
+
+    # 验证失败阶段枚举（迁移 035）
+    assert len(ALL_FAILURE_STAGES) == 9, f"ALL_FAILURE_STAGES 应包含 9 种值，实际 {len(ALL_FAILURE_STAGES)}"
+    assert FAILURE_STAGE_WORKER_INTERRUPTED in ALL_FAILURE_STAGES
+    assert FAILURE_STAGE_LOAD_VERSION in ALL_FAILURE_STAGES
 
     print(f"StrategyResult.__tablename__={StrategyResult.__tablename__}")
     res_cols = [c.name for c in StrategyResult.__table__.columns]

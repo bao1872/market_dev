@@ -6,8 +6,9 @@
 
 设计说明：
 - 交易日判断：使用 is_trading_day_async 三级降级（DB -> Tushare -> weekday）
-- 交易时段判断：weekday + 9:30-11:30 / 13:00-15:00（上海时间）
-- 状态文本：交易中 / 已收盘 / 休市 / 盘前
+- 交易时段判断：复用 app.services.market_status_service.compute_market_session（6 值枚举）
+- 状态文本：交易中 / 已收盘 / 休市 / 盘前（向后兼容保留）
+- market_session：6 值枚举（NON_TRADING_DAY/PRE_OPEN/MORNING_SESSION/LUNCH_BREAK/AFTERNOON_SESSION/MARKET_CLOSED）
 - 时区：统一使用 app.core.time 的上海时区工具，避免散落的 ZoneInfo 实例
 """
 
@@ -22,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import get_db
 from app.core.time import now_shanghai, shanghai_business_date
 from app.services.calendar_service import is_trading_day_async
+from app.services.market_status_service import compute_market_session
 
 router = APIRouter(prefix="/market", tags=["market"])
 
@@ -30,7 +32,8 @@ class MarketStatusResponse(BaseModel):
     """市场状态响应"""
     is_trading_day: bool
     is_trading_hours: bool
-    status_text: str  # "交易中" / "已收盘" / "休市" / "盘前"
+    status_text: str  # "交易中" / "已收盘" / "休市" / "盘前"（向后兼容）
+    market_session: str  # 6 值枚举（与 watchlist monitor-status 对齐）
 
 
 @router.get("/status", response_model=MarketStatusResponse)
@@ -38,7 +41,7 @@ async def get_market_status(db: AsyncSession = Depends(get_db)):
     """获取当前市场状态
 
     交易日判断：使用 trading_calendar 表 + Tushare + weekday 三级降级
-    交易时段判断：weekday + 9:30-11:30 / 13:00-15:00（上海时间）
+    交易时段判断：复用 compute_market_session（6 值枚举，与 watchlist 对齐）
     """
     today = shanghai_business_date()
     now = now_shanghai()
@@ -46,15 +49,13 @@ async def get_market_status(db: AsyncSession = Depends(get_db)):
     # 交易日判断
     is_trading_day = await is_trading_day_async(db, today)
 
-    # 交易时段判断（仅在交易日基础上判断时间）
-    is_trading_hours = False
-    if is_trading_day:
-        current_time = now.time()
-        morning_session = dt_time(9, 30) <= current_time <= dt_time(11, 30)
-        afternoon_session = dt_time(13, 0) <= current_time <= dt_time(15, 0)
-        is_trading_hours = morning_session or afternoon_session
+    # [市场阶段] - 统一调用 compute_market_session（6 值枚举）
+    market_session = compute_market_session(now, is_trading_day)
 
-    # 状态文本
+    # is_trading_hours：仅上午/下午盘为 True（用于向后兼容）
+    is_trading_hours = market_session in ("MORNING_SESSION", "AFTERNOON_SESSION")
+
+    # 状态文本（向后兼容：保留中文 status_text）
     if not is_trading_day:
         status_text = "休市"
     elif is_trading_hours:
@@ -68,6 +69,7 @@ async def get_market_status(db: AsyncSession = Depends(get_db)):
         is_trading_day=is_trading_day,
         is_trading_hours=is_trading_hours,
         status_text=status_text,
+        market_session=market_session,
     )
 
 

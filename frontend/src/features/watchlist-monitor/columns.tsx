@@ -7,13 +7,14 @@ import { fmtNum, fmtTime } from './adapters'
 /** 监控状态徽章渲染 */
 export function MonitorStatusBadge({ status }: { status: MonitorStatus }) {
   switch (status) {
-    case 'PRE_MARKET':
+    case 'PRE_OPEN':
       return <span className="tag small">盘前等待开市</span>
-    case 'TRADING':
+    case 'MORNING_SESSION':
+    case 'AFTERNOON_SESSION':
       return <span className="tag info small">交易中</span>
     case 'LUNCH_BREAK':
       return <span className="tag small">午间休市</span>
-    case 'AFTER_MARKET':
+    case 'MARKET_CLOSED':
       return <span className="tag small">已收盘</span>
     case 'NON_TRADING_DAY':
       return <span className="tag small">非交易日</span>
@@ -67,13 +68,14 @@ export function getWatchlistMonitorColumns(
       sortValue: (row) => row.monitor_status,
       filterValue: (row) => {
         switch (row.monitor_status) {
-          case 'PRE_MARKET':
+          case 'PRE_OPEN':
             return '盘前等待开市'
-          case 'TRADING':
+          case 'MORNING_SESSION':
+          case 'AFTERNOON_SESSION':
             return '交易中'
           case 'LUNCH_BREAK':
             return '午间休市'
-          case 'AFTER_MARKET':
+          case 'MARKET_CLOSED':
             return '已收盘'
           case 'NON_TRADING_DAY':
             return '非交易日'

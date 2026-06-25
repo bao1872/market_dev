@@ -49,7 +49,11 @@ from app.db import AsyncSessionLocal
 from app.models.bar import BarDaily
 from app.models.instrument import Instrument
 from app.models.strategy import StrategyDefinition, StrategyVersion
-from app.models.strategy_run import StrategyRun, StrategyRunItem
+from app.models.strategy_run import (
+    FAILURE_STAGE_WORKER_INTERRUPTED,
+    StrategyRun,
+    StrategyRunItem,
+)
 from app.repositories import strategy_result_repository
 from app.repositories.bar_repository import get_bars
 from app.services.calendar_service import is_trading_day_async
@@ -182,7 +186,8 @@ class StrategyBatchService:
         恢复逻辑：
         1. 查找 lease_expires_at < now() 的 running 任务 → 重置为 queued，attempt_count +1
         2. 查找 queued_at < now() - 2h 的 queued 任务 → attempt_count +1
-        3. attempt_count >= 3 的任务标记为 failed（error_code=max_retries_exceeded）
+        3. attempt_count >= 3 的任务标记为 failed（error_code=max_retries_exceeded，
+           failure_stage=WORKER_INTERRUPTED，error_message 记录详情）
 
         Args:
             db: 异步会话
@@ -206,6 +211,9 @@ class StrategyBatchService:
             if run.attempt_count >= _MAX_ATTEMPTS:
                 run.status = "failed"
                 run.error_code = "max_retries_exceeded"
+                # [StrategyRun] - Worker 中断恢复达上限，记录失败阶段与详情
+                run.failure_stage = FAILURE_STAGE_WORKER_INTERRUPTED
+                run.error_message = f"Worker 租约过期，重试 {run.attempt_count} 次后仍失败"
                 run.finished_at = now
             else:
                 run.status = "queued"
@@ -229,6 +237,9 @@ class StrategyBatchService:
             if run.attempt_count >= _MAX_ATTEMPTS:
                 run.status = "failed"
                 run.error_code = "max_retries_exceeded"
+                # [StrategyRun] - 排队超时恢复达上限，记录失败阶段与详情
+                run.failure_stage = FAILURE_STAGE_WORKER_INTERRUPTED
+                run.error_message = f"任务排队超 {_STALE_QUEUED_HOURS}h 未消费，重试 {run.attempt_count} 次后仍失败"
                 run.finished_at = now
             else:
                 run.next_retry_at = now

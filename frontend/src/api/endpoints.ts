@@ -400,8 +400,8 @@ export interface WatchlistMonitorStatusItem {
   name: string
   market: string
   watchlist_created_at: string
-  monitor_status: 'PRE_MARKET' | 'TRADING' | 'LUNCH_BREAK' | 'AFTER_MARKET' | 'NON_TRADING_DAY' | 'WAITING_FIRST_RUN' | 'SUCCEEDED' | 'FAILED' | 'STALE'
-  market_session: 'TRADING' | 'AFTER_MARKET' | 'LUNCH_BREAK' | 'PRE_MARKET' | 'NON_TRADING_DAY'
+  monitor_status: MarketSession | 'WAITING_FIRST_RUN' | 'SUCCEEDED' | 'FAILED' | 'STALE'
+  market_session: MarketSession
   calculation_status: 'SUCCEEDED' | 'FAILED' | 'STALE' | 'WAITING_FIRST_RUN'
   freshness_seconds: number | null
   last_bar_time: string | null
@@ -582,11 +582,21 @@ export async function getHealth(): Promise<HealthResponse> {
 // Market Status 领域类型
 // ============================================================
 
+/** 市场阶段枚举（6 值，与 backend app.services.market_status_service 对齐） */
+export type MarketSession =
+  | 'NON_TRADING_DAY'
+  | 'PRE_OPEN'
+  | 'MORNING_SESSION'
+  | 'LUNCH_BREAK'
+  | 'AFTERNOON_SESSION'
+  | 'MARKET_CLOSED'
+
 /** 市场状态 */
 export interface MarketStatus {
   is_trading_day: boolean
   is_trading_hours: boolean
-  status_text: string  // "交易中" / "已收盘" / "休市" / "盘前"
+  status_text: string  // "交易中" / "已收盘" / "休市" / "盘前"（向后兼容）
+  market_session: MarketSession  // 6 值枚举
 }
 
 // ============================================================
@@ -1394,6 +1404,69 @@ export interface SystemOverview {
   scheduler_health: string
   recent_scheduler_jobs: RecentSchedulerJobSummary[]
   recent_anomalies: unknown[]
+  // [系统概览] - 描述: 后端统一计算的服务端时间/业务日期/市场时段
+  server_time: string
+  business_date: string
+  market_session:
+    | 'NON_TRADING_DAY'
+    | 'PRE_OPEN'
+    | 'MORNING_SESSION'
+    | 'LUNCH_BREAK'
+    | 'AFTERNOON_SESSION'
+    | 'MARKET_CLOSED'
+  // [系统概览] - 描述: 盘中监控运行态（后端权威判定，前端直出）
+  monitor_runtime: {
+    status:
+      | 'RUNNING'
+      | 'IDLE_EXPECTED'
+      | 'SESSION_COMPLETED'
+      | 'DELAYED'
+      | 'FAILED'
+      | 'WORKER_OFFLINE'
+      | 'NOT_APPLICABLE'
+    heartbeat_at: string | null
+    heartbeat_age_seconds: number | null
+    business_date: string
+    session_label: 'morning' | 'afternoon' | null
+    session_job_status: 'running' | 'succeeded' | 'failed' | null
+    last_cycle_at: string | null
+    last_source_bar_time: string | null
+    evaluated_count: number
+    failed_count: number
+    freshness_seconds: number | null
+  }
+  // [系统概览] - 描述: 盘后流水线状态（后端权威判定，前端直出）
+  after_close_pipeline: {
+    status:
+      | 'NOT_STARTED'
+      | 'BARS_RUNNING'
+      | 'BARS_FAILED'
+      | 'WAITING_DSA'
+      | 'DSA_QUEUED'
+      | 'DSA_RUNNING'
+      | 'DSA_COMPLETED'
+      | 'PUBLISHED'
+      | 'DSA_FAILED'
+      | 'STALE'
+    bars_job: {
+      status: string | null
+      started_at: string | null
+      finished_at: string | null
+      error_message: string | null
+    } | null
+    dsa_run: {
+      id: string | null
+      status: string | null
+      run_type: string | null
+      attempt_no: number | null
+      trade_date: string | null
+      failed_count: number | null
+      succeeded_count: number | null
+      error_code: string | null
+      error_message: string | null
+      failure_stage: string | null
+    } | null
+  }
 }
 
 /** 最近定时任务摘要（系统概览） */

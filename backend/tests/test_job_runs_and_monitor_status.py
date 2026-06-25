@@ -60,9 +60,9 @@ def test_compute_market_status_non_trading_day() -> None:
 
 
 def test_compute_market_status_trading_morning() -> None:
-    """交易日 09:30-11:30 返回 TRADING。"""
+    """交易日 09:30-11:30 返回 MORNING_SESSION。"""
     now = datetime(2026, 6, 24, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
-    assert _compute_market_status(now, is_trading_day=True) == "TRADING"
+    assert _compute_market_status(now, is_trading_day=True) == "MORNING_SESSION"
 
 
 def test_compute_market_status_lunch_break() -> None:
@@ -72,15 +72,59 @@ def test_compute_market_status_lunch_break() -> None:
 
 
 def test_compute_market_status_after_market() -> None:
-    """交易日 15:00 后返回 AFTER_MARKET。"""
+    """交易日 15:00 后返回 MARKET_CLOSED。"""
     now = datetime(2026, 6, 24, 19, 1, tzinfo=ZoneInfo("Asia/Shanghai"))
-    assert _compute_market_status(now, is_trading_day=True) == "AFTER_MARKET"
+    assert _compute_market_status(now, is_trading_day=True) == "MARKET_CLOSED"
+
+
+# ==================== compute_market_session 6 值枚举覆盖测试 ====================
+
+
+def test_compute_market_session_six_enums() -> None:
+    """覆盖 compute_market_session 6 值枚举（advice.md 规范）。
+
+    用例：
+    - 非交易日 10:00 → NON_TRADING_DAY
+    - 交易日 09:00 → PRE_OPEN
+    - 交易日 10:00 → MORNING_SESSION
+    - 交易日 12:00 → LUNCH_BREAK
+    - 交易日 14:00 → AFTERNOON_SESSION
+    - 交易日 15:35 → MARKET_CLOSED
+    """
+    from app.services.market_status_service import compute_market_session
+
+    tz = ZoneInfo("Asia/Shanghai")
+    cases = [
+        (datetime(2026, 6, 20, 10, 0, tzinfo=tz), False, "NON_TRADING_DAY"),
+        (datetime(2026, 6, 24, 9, 0, tzinfo=tz), True, "PRE_OPEN"),
+        (datetime(2026, 6, 24, 10, 0, tzinfo=tz), True, "MORNING_SESSION"),
+        (datetime(2026, 6, 24, 12, 0, tzinfo=tz), True, "LUNCH_BREAK"),
+        (datetime(2026, 6, 24, 14, 0, tzinfo=tz), True, "AFTERNOON_SESSION"),
+        (datetime(2026, 6, 24, 15, 35, tzinfo=tz), True, "MARKET_CLOSED"),
+    ]
+    for now, is_trading_day, expected in cases:
+        got = compute_market_session(now, is_trading_day)
+        assert got == expected, f"{now.time()} is_td={is_trading_day}: got={got} expected={expected}"
+
+
+def test_compute_market_session_boundary_times() -> None:
+    """边界时间点测试：09:30 / 11:30 / 13:00 / 15:00。"""
+    from app.services.market_status_service import compute_market_session
+
+    tz = ZoneInfo("Asia/Shanghai")
+    # 边界值：左闭右闭 / 左闭右开（与实现一致）
+    assert compute_market_session(datetime(2026, 6, 24, 9, 30, tzinfo=tz), True) == "MORNING_SESSION"
+    assert compute_market_session(datetime(2026, 6, 24, 11, 30, tzinfo=tz), True) == "MORNING_SESSION"
+    assert compute_market_session(datetime(2026, 6, 24, 11, 31, tzinfo=tz), True) == "LUNCH_BREAK"
+    assert compute_market_session(datetime(2026, 6, 24, 13, 0, tzinfo=tz), True) == "AFTERNOON_SESSION"
+    assert compute_market_session(datetime(2026, 6, 24, 15, 0, tzinfo=tz), True) == "AFTERNOON_SESSION"
+    assert compute_market_session(datetime(2026, 6, 24, 15, 1, tzinfo=tz), True) == "MARKET_CLOSED"
 
 
 def test_calculation_status_after_market_old_data_is_succeeded() -> None:
     """盘后 19:01 且数据为 14:59，calculation_status 应为 SUCCEEDED 而非 STALE。"""
     now = datetime(2026, 6, 24, 19, 1, tzinfo=ZoneInfo("Asia/Shanghai"))
-    market_session = "AFTER_MARKET"
+    market_session = "MARKET_CLOSED"
     updated_at = datetime(2026, 6, 24, 14, 59, tzinfo=ZoneInfo("Asia/Shanghai"))
 
     # 构造一个模拟的 ms 对象，只有 updated_at 属性
@@ -101,7 +145,7 @@ def test_calculation_status_after_market_old_data_is_succeeded() -> None:
 def test_calculation_status_trading_stale_when_old() -> None:
     """盘中数据超过 180 秒，calculation_status 应为 STALE。"""
     now = datetime(2026, 6, 24, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
-    market_session = "TRADING"
+    market_session = "MORNING_SESSION"
     ms_updated_at = now - timedelta(seconds=300)
 
     class FakeMS:
@@ -119,7 +163,7 @@ def test_calculation_status_trading_stale_when_old() -> None:
 def test_calculation_status_trading_fresh_when_recent() -> None:
     """盘中数据 60 秒内，calculation_status 应为 SUCCEEDED。"""
     now = datetime(2026, 6, 24, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
-    market_session = "TRADING"
+    market_session = "MORNING_SESSION"
     ms_updated_at = now - timedelta(seconds=60)
 
     class FakeMS:
@@ -143,7 +187,7 @@ def test_calculation_status_failed_evaluation() -> None:
 
     calc_status = _compute_calculation_status(
         now_cst=now,
-        market_session="TRADING",
+        market_session="MORNING_SESSION",
         eval_row=FakeEval(),
         ms=None,
     )
@@ -155,7 +199,7 @@ def test_calculation_status_waiting_first_run_in_trading() -> None:
     now = datetime(2026, 6, 24, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
     calc_status = _compute_calculation_status(
         now_cst=now,
-        market_session="TRADING",
+        market_session="MORNING_SESSION",
         eval_row=None,
         ms=None,
     )

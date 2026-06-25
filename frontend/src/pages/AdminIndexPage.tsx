@@ -4,18 +4,19 @@
 // 用法：
 // 1. 路由 /admin，受保护路由（经 ProtectedLayout + AdminRoute 包裹）
 // 2. KPI 卡片组（admin-accent 紫色左边框，4 列）：有效用户 / 去重监控股票 / 最近一分钟处理 / 评估成功率
-// 3. split-3 布局：监控吞吐折线图（Canvas）/ DSA 最近运行 / 队列与任务
-// 4. split-2 布局：服务健康状态表 / 最近异常列表
-// 5. 操作：维护模式开关 / 暂停全局推送开关（尚未接入后端，已禁用）
+// 3. split-2 布局：盘中监控 / 盘后任务（后端 monitor_runtime / after_close_pipeline 直出，前端不再组合判定）
+// 4. split-3 布局：监控吞吐折线图（Canvas）/ DSA 最近运行 / 队列与任务
+// 5. split-2 布局：服务健康状态表 / 最近异常列表
 //
 // 依赖 hooks：
-// - useAdminSystemOverview：获取系统概览数据（活跃用户/监控标的/评估统计）
+// - useAdminSystemOverview：获取系统概览数据（活跃用户/监控标的/评估统计/盘中监控/盘后任务）
 // - useStrategies：获取策略目录（策略数，显示在页头描述）
 
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { useStrategies, useAdminSystemOverview } from '@/hooks/useApi'
 import { getVersion, type VersionInfo } from '@/api/endpoints'
+import { formatShanghaiTime } from '@/utils/datetime'
 
 // ===== 监控吞吐折线图 =====
 
@@ -52,6 +53,98 @@ function formatRunTime(iso: string | null | undefined): string {
   const hh = String(d.getHours()).padStart(2, '0')
   const mm = String(d.getMinutes()).padStart(2, '0')
   return `${Y}-${M}-${D} ${hh}:${mm}`
+}
+
+// ===== 状态标签映射（后端枚举 → 中文，前端仅做展示映射，不做判定）=====
+
+/** [盘中监控] - 描述: monitor_runtime.status 中文标签 */
+function monitorStatusLabel(status: string | undefined): string {
+  switch (status) {
+    case 'RUNNING':
+      return '运行中'
+    case 'IDLE_EXPECTED':
+      return '空闲（预期）'
+    case 'SESSION_COMPLETED':
+      return '已收盘，下午盘已完成'
+    case 'DELAYED':
+      return '数据延迟'
+    case 'FAILED':
+      return '下午盘失败'
+    case 'WORKER_OFFLINE':
+      return 'Worker 离线'
+    case 'NOT_APPLICABLE':
+      return '非交易日'
+    default:
+      return '-'
+  }
+}
+
+/** [盘后任务] - 描述: after_close_pipeline.status 中文标签 */
+function pipelineStatusLabel(status: string | undefined): string {
+  switch (status) {
+    case 'NOT_STARTED':
+      return '未开始'
+    case 'BARS_RUNNING':
+      return '行情更新中'
+    case 'BARS_FAILED':
+      return '行情更新失败'
+    case 'WAITING_DSA':
+      return '等待DSA'
+    case 'DSA_QUEUED':
+      return 'DSA已排队'
+    case 'DSA_RUNNING':
+      return 'DSA计算中'
+    case 'DSA_COMPLETED':
+      return 'DSA已完成'
+    case 'PUBLISHED':
+      return '已发布'
+    case 'DSA_FAILED':
+      return 'DSA失败'
+    case 'STALE':
+      return '状态过期'
+    default:
+      return '-'
+  }
+}
+
+/** [盘中监控] - 描述: market_session 中文标签 */
+function marketSessionLabel(session: string | undefined): string {
+  switch (session) {
+    case 'NON_TRADING_DAY':
+      return '非交易日'
+    case 'PRE_OPEN':
+      return '盘前'
+    case 'MORNING_SESSION':
+      return '上午盘'
+    case 'LUNCH_BREAK':
+      return '午间休市'
+    case 'AFTERNOON_SESSION':
+      return '下午盘'
+    case 'MARKET_CLOSED':
+      return '已收盘'
+    default:
+      return '-'
+  }
+}
+
+/** [盘中监控] - 描述: session_job_status 中文标签 */
+function sessionJobLabel(status: string | null | undefined): string {
+  switch (status) {
+    case 'running':
+      return '运行中'
+    case 'succeeded':
+      return '成功'
+    case 'failed':
+      return '失败'
+    default:
+      return '无记录'
+  }
+}
+
+/** [盘中监控] - 描述: worker 心跳状态（heartbeat_age_seconds < 90s 为正常） */
+function workerHeartbeatLabel(heartbeatAgeSeconds: number | null | undefined): string {
+  if (heartbeatAgeSeconds == null) return '离线'
+  return heartbeatAgeSeconds < 90 ? '正常' : '离线'
 }
 
 // ===== 主页面 =====
@@ -103,45 +196,7 @@ export default function AdminIndexPage() {
   const workerHealth = overview?.worker_health ?? 'unknown'
   const schedulerHealth = overview?.scheduler_health ?? 'unknown'
 
-  // ===== 盘中/盘后状态判定 =====
-
-  // 盘中监控绿色：worker 心跳正常 + monitor_scheduler running + 最近一分钟有评估
-  const monitorJobRunning = useMemo(
-    () =>
-      (overview?.recent_scheduler_jobs ?? []).some(
-        (j) => j.job_name === 'monitor_scheduler' && j.status === 'running',
-      ),
-    [overview],
-  )
-  const intradayHealthy = workerHealth === 'healthy' && monitorJobRunning && evalsLastMinute > 0
-
-  // 盘后完成：bars_scheduler 当日 succeeded + DSA run published + failed_count=0
-  const barsJobSucceeded = useMemo(
-    () =>
-      (overview?.recent_scheduler_jobs ?? []).some(
-        (j) => j.job_name === 'bars_scheduler' && j.status === 'succeeded',
-      ),
-    [overview],
-  )
-  const dsaRunPublished =
-    !!latestSelectorRun &&
-    latestSelectorRun.status === 'published' &&
-    (latestSelectorRun.failed_count ?? 0) === 0
-  const todayStr = new Date().toISOString().slice(0, 10)
-  const afterHoursCompleted =
-    barsJobSucceeded &&
-    dsaRunPublished &&
-    (latestSelectorRun?.trade_date === todayStr || latestSelectorRun?.trade_date == null)
-
-  // 切换维护模式（尚未接入后端，按钮已禁用）
-  const handleToggleMaintenance = () => {
-    // [admin] - 维护模式尚未接入后端 API，暂不执行任何操作
-  }
-
-  // 切换暂停全局推送（尚未接入后端，按钮已禁用）
-  const handleTogglePausePush = () => {
-    // [admin] - 暂停全局推送尚未接入后端 API，暂不执行任何操作
-  }
+  // [系统概览] - 描述: 盘中/盘后状态完全由后端 monitor_runtime / after_close_pipeline 直出，前端不再组合判定
 
   // 页头描述：附加策略数（数据加载完成后显示）
   const pageDescExtra = strategiesQuery.data
@@ -157,26 +212,6 @@ export default function AdminIndexPage() {
           <div className="page-desc">
             {`共享计算、任务、事件和通知基础设施的实时运行状态${pageDescExtra}`}
           </div>
-        </div>
-        <div className="actions">
-          <button
-            className="btn"
-            onClick={handleToggleMaintenance}
-            disabled
-            title="尚未接入后端"
-          >
-            维护模式
-            <span style={{ fontSize: '0.75em', opacity: 0.6, marginLeft: 4 }}>尚未接入后端</span>
-          </button>
-          <button
-            className="btn"
-            onClick={handleTogglePausePush}
-            disabled
-            title="尚未接入后端"
-          >
-            暂停全局推送
-            <span style={{ fontSize: '0.75em', opacity: 0.6, marginLeft: 4 }}>尚未接入后端</span>
-          </button>
         </div>
       </div>
 
@@ -216,66 +251,163 @@ export default function AdminIndexPage() {
         </div>
       </div>
 
-      {/* 运行状态判定标签：盘中绿色 / 盘后完成 */}
+      {/* 运行状态：盘中监控 / 盘后任务（后端 monitor_runtime / after_close_pipeline 直出）*/}
       <div className="grid split-2 section-gap">
         <section className="card">
           <div className="card-head">
             <div>
               <div className="card-title">盘中监控</div>
-              <div className="card-sub">worker 心跳 + monitor_scheduler running + 评估新鲜度</div>
+              <div className="card-sub">后端 monitor_runtime 直出</div>
             </div>
           </div>
           <div className="card-body">
             <div className="toggle-row">
               <span>状态</span>
               <b>
-                <span className={`status-pill ${intradayHealthy ? 'ok' : 'off'}`}>
-                  {intradayHealthy ? '绿色' : '未就绪'}
+                <span
+                  className={`status-pill ${
+                    overview?.monitor_runtime?.status === 'RUNNING' ? 'ok' : 'off'
+                  }`}
+                >
+                  {overviewLoading ? '-' : monitorStatusLabel(overview?.monitor_runtime?.status)}
                 </span>
               </b>
             </div>
             <div className="toggle-row">
+              <span>市场时段</span>
+              <b className="num">
+                {overviewLoading ? '-' : marketSessionLabel(overview?.market_session)}
+              </b>
+            </div>
+            <div className="toggle-row">
               <span>Worker 心跳</span>
-              <b className="num">{workerHealth}</b>
+              <b className="num">
+                {overviewLoading
+                  ? '-'
+                  : workerHeartbeatLabel(overview?.monitor_runtime?.heartbeat_age_seconds)}
+              </b>
             </div>
             <div className="toggle-row">
-              <span>monitor_scheduler</span>
-              <b className="num">{monitorJobRunning ? 'running' : '未运行'}</b>
+              <span>session_job</span>
+              <b className="num">
+                {overviewLoading
+                  ? '-'
+                  : sessionJobLabel(overview?.monitor_runtime?.session_job_status)}
+              </b>
             </div>
             <div className="toggle-row">
-              <span>最近一分钟评估</span>
-              <b className="num">{overviewLoading ? '-' : evalsLastMinute}</b>
+              <span>最后计算时间</span>
+              <b className="num">
+                {overviewLoading
+                  ? '-'
+                  : formatShanghaiTime(overview?.monitor_runtime?.last_cycle_at)}
+              </b>
+            </div>
+            <div className="toggle-row">
+              <span>最后源Bar时间</span>
+              <b className="num">
+                {overviewLoading
+                  ? '-'
+                  : formatShanghaiTime(overview?.monitor_runtime?.last_source_bar_time)}
+              </b>
+            </div>
+            <div className="toggle-row">
+              <span>已评估 / 失败</span>
+              <b className="num">
+                {overviewLoading
+                  ? '-'
+                  : `${overview?.monitor_runtime?.evaluated_count ?? 0} / ${
+                      overview?.monitor_runtime?.failed_count ?? 0
+                    }`}
+              </b>
             </div>
           </div>
         </section>
         <section className="card">
           <div className="card-head">
             <div>
-              <div className="card-title">盘后完成</div>
-              <div className="card-sub">bars_scheduler succeeded + DSA published + failed=0</div>
+              <div className="card-title">盘后任务</div>
+              <div className="card-sub">后端 after_close_pipeline 直出</div>
             </div>
           </div>
           <div className="card-body">
             <div className="toggle-row">
               <span>状态</span>
               <b>
-                <span className={`status-pill ${afterHoursCompleted ? 'ok' : 'off'}`}>
-                  {afterHoursCompleted ? '完成' : '未完成'}
+                <span
+                  className={`status-pill ${
+                    overview?.after_close_pipeline?.status === 'PUBLISHED' ? 'ok' : 'off'
+                  }`}
+                >
+                  {overviewLoading
+                    ? '-'
+                    : pipelineStatusLabel(overview?.after_close_pipeline?.status)}
                 </span>
               </b>
             </div>
             <div className="toggle-row">
+              <span>计划启动</span>
+              <b className="num">16:00</b>
+            </div>
+            <div className="toggle-row">
               <span>bars_scheduler</span>
-              <b className="num">{barsJobSucceeded ? 'succeeded' : '未完成'}</b>
+              <b className="num">
+                {overviewLoading
+                  ? '-'
+                  : overview?.after_close_pipeline?.bars_job?.status ?? '今日尚未运行'}
+              </b>
             </div>
             <div className="toggle-row">
               <span>DSA 状态</span>
-              <b className="num">{latestSelectorRun?.status ?? '未运行'}</b>
+              <b className="num">
+                {overviewLoading
+                  ? '-'
+                  : overview?.after_close_pipeline?.dsa_run?.status ?? '等待行情更新'}
+              </b>
             </div>
-            <div className="toggle-row">
-              <span>DSA 失败数</span>
-              <b className="num">{latestSelectorRun?.failed_count ?? '-'}</b>
-            </div>
+            {/* [盘后任务] - 描述: DSA 失败时展示错误详情，便于管理员排查 */}
+            {(overview?.after_close_pipeline?.dsa_run?.status === 'failed' ||
+              overview?.after_close_pipeline?.status === 'DSA_FAILED') &&
+              overview?.after_close_pipeline?.dsa_run && (
+                <>
+                  <div className="toggle-row">
+                    <span>失败阶段</span>
+                    <b className="num">
+                      {overview.after_close_pipeline.dsa_run.failure_stage ?? '-'}
+                    </b>
+                  </div>
+                  <div className="toggle-row">
+                    <span>错误码</span>
+                    <b className="num">
+                      {overview.after_close_pipeline.dsa_run.error_code ?? '-'}
+                    </b>
+                  </div>
+                  <div className="toggle-row">
+                    <span>错误摘要</span>
+                    <b className="num">
+                      {overview.after_close_pipeline.dsa_run.error_message ?? '-'}
+                    </b>
+                  </div>
+                  <div className="toggle-row">
+                    <span>业务日期</span>
+                    <b className="num">
+                      {overview.after_close_pipeline.dsa_run.trade_date ?? '-'}
+                    </b>
+                  </div>
+                  <div className="toggle-row">
+                    <span>run_type</span>
+                    <b className="num">
+                      {overview.after_close_pipeline.dsa_run.run_type ?? '-'}
+                    </b>
+                  </div>
+                  <div className="toggle-row">
+                    <span>attempt_no</span>
+                    <b className="num">
+                      {overview.after_close_pipeline.dsa_run.attempt_no ?? '-'}
+                    </b>
+                  </div>
+                </>
+              )}
           </div>
         </section>
       </div>
@@ -317,7 +449,7 @@ export default function AdminIndexPage() {
                   <b className="num">{latestSelectorRun!.succeeded_count ?? '-'}</b>
                 </div>
                 <div className="toggle-row">
-                  <span>失败</span>
+                  <span>股票计算失败数</span>
                   <b className="num">{latestSelectorRun!.failed_count ?? '-'}</b>
                 </div>
                 <div className="toggle-row">
