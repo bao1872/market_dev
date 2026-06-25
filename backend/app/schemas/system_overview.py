@@ -3,6 +3,7 @@
 定义 /admin/system-overview 接口的响应结构，包含：
 - 基础字段（12 个，向后兼容）：active_users/monitored_instruments/evaluations 等
 - 新增字段（5 个）：server_time/business_date/market_session/monitor_runtime/after_close_pipeline
+- Phase 9：after_close_pipeline.data_freshness 子结构（行情 + 选股两区块）
 
 用法：
     python -m app.schemas.system_overview    # 自测：验证 schema 字段
@@ -139,6 +140,59 @@ class DsaRunSummary(BaseModel):
     failure_stage: str | None = None
 
 
+class BarsFreshness(BaseModel):
+    """[SystemOverview] - 行情数据新鲜度（6 项）。
+
+    反映 bars 表各周期最新数据日期与覆盖情况，供管理员判断行情是否落后。
+    """
+
+    # 最新日线交易日（bars_daily.max(trade_date)）
+    latest_daily_trade_date: date | None = None
+    # 当日有日线数据的股票数 / 活跃股票总数（基于 latest_daily_trade_date）
+    daily_coverage: float | None = None
+    # 最新 15 分钟线时间（bars_15min.max(trade_time)，datetime ISO 字符串）
+    latest_15m_bar_time: str | None = None
+    # 最新 60 分钟线时间（bars_60min.max(trade_time)，datetime ISO 字符串）
+    latest_60m_bar_time: str | None = None
+    # 最近的 bars_scheduler succeeded 任务 id
+    last_success_job_id: str | None = None
+    # latest_daily_trade_date < 最近交易日（查 trading_calendar WHERE is_trading_day=true）
+    is_behind_latest_trade_date: bool = False
+
+
+class StrategyFreshness(BaseModel):
+    """[SystemOverview] - 选股策略新鲜度（7 项）。
+
+    反映 strategy_runs 表最新计算/发布状态，供管理员判断选股是否已发布。
+    """
+
+    # 最新计算交易日（strategy_runs.max(trade_date)，所有状态）
+    latest_compute_trade_date: date | None = None
+    # 最新发布交易日（strategy_runs.max(trade_date) WHERE status='published'）
+    latest_published_trade_date: date | None = None
+    # 最近一条 strategy_runs 的 id
+    strategy_run_id: str | None = None
+    # 最近一条 strategy_runs 的 status
+    status: str | None = None
+    # 最近一条 strategy_runs 的 total_instruments
+    total_instruments: int | None = None
+    # 最近一条 strategy_runs 的 failed_count
+    failed_count: int | None = None
+    # 最近一条 strategy_runs 的 published_at（ISO 字符串）
+    published_at: str | None = None
+
+
+class DataFreshness(BaseModel):
+    """[SystemOverview] - 数据新鲜度子结构（行情 + 选股两区块）。
+
+    管理员仪表盘最后数据日期展示，独立于流水线状态判定，
+    始终基于 DB 实时查询，反映行情与选股的最新数据落盘情况。
+    """
+
+    bars: BarsFreshness = BarsFreshness()
+    strategy: StrategyFreshness = StrategyFreshness()
+
+
 class AfterClosePipeline(BaseModel):
     """盘后流水线状态 - bars 刷新 + DSA 计算的整体进度。"""
 
@@ -149,6 +203,8 @@ class AfterClosePipeline(BaseModel):
     waiting_dsa_reason: str | None = None
     # [SystemOverview] - 原因对应的人类可读建议（与 waiting_dsa_reason 配对）
     waiting_dsa_suggestion: str | None = None
+    # [SystemOverview] - 数据新鲜度子结构（行情 + 选股两区块，Phase 9）
+    data_freshness: DataFreshness = DataFreshness()
 
 
 class SystemOverviewResponse(BaseModel):
@@ -219,12 +275,38 @@ if __name__ == "__main__":
         )
     print(f"waiting_dsa_suggestions 覆盖 {len(WAITING_DSA_SUGGESTIONS)} 种原因 ✓")
 
-    # 验证 AfterClosePipeline 新增字段
+    # 验证 AfterClosePipeline 新增字段（含 Phase 9 data_freshness）
     pipeline_fields = set(AfterClosePipeline.model_fields.keys())
-    expected_new_fields = {"waiting_dsa_reason", "waiting_dsa_suggestion"}
+    expected_new_fields = {"waiting_dsa_reason", "waiting_dsa_suggestion", "data_freshness"}
     missing = expected_new_fields - pipeline_fields
     assert not missing, f"AfterClosePipeline 缺少字段: {missing}"
     print(f"AfterClosePipeline fields={sorted(pipeline_fields)}")
+
+    # [Phase 9] 验证 DataFreshness 子结构字段完整性
+    bars_fields = set(BarsFreshness.model_fields.keys())
+    expected_bars = {
+        "latest_daily_trade_date", "daily_coverage", "latest_15m_bar_time",
+        "latest_60m_bar_time", "last_success_job_id", "is_behind_latest_trade_date",
+    }
+    assert bars_fields == expected_bars, f"BarsFreshness 字段不匹配: {bars_fields ^ expected_bars}"
+    print(f"BarsFreshness fields count={len(bars_fields)} (expected 6)")
+
+    strategy_fields = set(StrategyFreshness.model_fields.keys())
+    expected_strategy = {
+        "latest_compute_trade_date", "latest_published_trade_date", "strategy_run_id",
+        "status", "total_instruments", "failed_count", "published_at",
+    }
+    assert strategy_fields == expected_strategy, (
+        f"StrategyFreshness 字段不匹配: {strategy_fields ^ expected_strategy}"
+    )
+    print(f"StrategyFreshness fields count={len(strategy_fields)} (expected 7)")
+
+    # 验证 DataFreshness 默认值可构建
+    df = DataFreshness()
+    assert df.bars.is_behind_latest_trade_date is False
+    assert df.bars.latest_daily_trade_date is None
+    assert df.strategy.latest_published_trade_date is None
+    print("DataFreshness 空值构建 OK")
 
     # 验证 SystemOverviewResponse 字段
     fields = SystemOverviewResponse.model_fields

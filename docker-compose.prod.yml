@@ -210,6 +210,30 @@ services:
       - "host.docker.internal:host-gateway"
     command: python -m app.worker
 
+  # ===== 盘后编排 Worker（Phase5: 领取 queued 任务，断点恢复+心跳租约）=====
+  worker-after-close:
+    build:
+      context: ./backend
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    container_name: trading-worker-after-close
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      APP_ENV: production
+      WORKER_TYPE: after_close_orchestrator
+      WORKER_INTERVAL: "5"
+      TZ: Asia/Shanghai
+    depends_on:
+      redis:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: python -m app.worker
+
   # ===== 截图 Worker =====
   worker-capture:
     build:

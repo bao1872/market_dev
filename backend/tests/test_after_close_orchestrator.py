@@ -142,7 +142,8 @@ async def test_create_after_close_run_writes_queued_event(db_session) -> None:
     await db_session.flush()
 
     async def _fake_acquire(db, **kwargs):
-        return fake_job_run
+        # Phase 2: acquire_job_run_lock 返回 (job_run, is_new) tuple
+        return (fake_job_run, True)
 
     with patch(
         "app.services.after_close_orchestrator.acquire_job_run_lock",
@@ -171,9 +172,10 @@ async def test_create_after_close_run_writes_queued_event(db_session) -> None:
 
 @pytest.mark.asyncio
 async def test_create_after_close_run_returns_existing_on_duplicate(db_session) -> None:
-    """测试 1.1：create_after_close_run 在 acquire_job_run_lock 返回 None 时返回已有任务 + is_new=False。
+    """测试 1.1：create_after_close_run 在 acquire_job_run_lock 返回 (existing, False) 时直接返回已有任务。
 
-    模拟同日已有运行中任务的幂等场景：acquire 返回 None → 函数应查询已有记录返回 (existing, False)。
+    Phase 2: acquire_job_run_lock 已返回 existing（不再需要 create_after_close_run 内部 SELECT）。
+    模拟同日已有运行中任务的幂等场景：acquire 返回 (existing, False) → 函数直接返回 (existing, False)。
     """
     trade_date = date(2026, 6, 25)
     existing_run = SchedulerJobRun(
@@ -190,12 +192,13 @@ async def test_create_after_close_run_returns_existing_on_duplicate(db_session) 
     db_session.add(existing_run)
     await db_session.flush()
 
-    async def _fake_acquire_returns_none(db, **kwargs):
-        return None
+    async def _fake_acquire_returns_existing(db, **kwargs):
+        # Phase 2: acquire_job_run_lock 返回 (existing, False)，已有活跃任务
+        return (existing_run, False)
 
     with patch(
         "app.services.after_close_orchestrator.acquire_job_run_lock",
-        new=_fake_acquire_returns_none,
+        new=_fake_acquire_returns_existing,
     ):
         result, is_new = await create_after_close_run(db=db_session, trade_date=trade_date)
 
@@ -276,7 +279,8 @@ async def test_retry_after_close_run_writes_event(db_session) -> None:
     with patch.object(db_session, "commit", new=db_session.flush):
         result = await retry_after_close_run(db=db_session, job_run_id=job_run.id)
 
-    assert result.status == "running"
+    # [Phase5] retry 重置为 queued（由独立 Worker 领取），不再是 running
+    assert result.status == "queued"
     assert result.error_message is None
     assert result.finished_at is None
 

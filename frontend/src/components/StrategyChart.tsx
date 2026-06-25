@@ -201,7 +201,7 @@ interface ChartState {
 
 // ===== 通用工具函数 =====
 const clamp = (v: number, a: number, b: number): number => Math.max(a, Math.min(b, v))
-const fmt = (v: number, d = 2): string => Number(v).toFixed(d)
+const fmt = (v: number | string, d = 2): string => Number(v).toFixed(d)
 
 function formatVolume(v: number): string {
   if (v >= 1e8) return (v / 1e8).toFixed(2) + '亿'
@@ -644,7 +644,7 @@ function renderIndicatorLayer(
   ctx: CanvasRenderingContext2D,
   g: Geometry,
   layer: ChartLayer,
-  data: Record<string, (number | null)[]>,
+  data: Record<string, (number | string | null)[]>,
   barsCount: number,
   step: number,
   py: (v: number) => number,
@@ -662,12 +662,12 @@ function renderIndicatorLayer(
   }
 }
 
-// 线图渲染（支持 direction_colored）
+// [DSA 分段] - 线图渲染（支持 regime_field 分段 + direction_colored + 锚点小圆点）
 function renderIndicatorLine(
   ctx: CanvasRenderingContext2D,
   g: Geometry,
   layer: ChartLayer,
-  data: Record<string, (number | null)[]>,
+  data: Record<string, (number | string | null)[]>,
   barsCount: number,
   step: number,
   py: (v: number) => number,
@@ -681,23 +681,28 @@ function renderIndicatorLine(
   // 对齐可见 bar 数量，避免指标数组长度超过 display 时越界绘制
   const len = Math.min(values.length, barsCount)
 
-  if (layer.direction_colored && dirField && data[dirField]) {
+  // [DSA 分段] - 分组键：优先 regime_field（regime_id），回退 dirField
+  // 每次 regime_id 改变 → 结束旧段 → 新段从当前点开始（切换点不连接）
+  const segField = layer.regime_field && data[layer.regime_field] ? layer.regime_field : dirField
+  const segKeys: (number | string | null)[] | undefined = segField ? data[segField] : undefined
+
+  if (layer.direction_colored && segKeys && dirField && data[dirField]) {
     const dirs = data[dirField]
-    // 分段绘制：相邻方向相同的点连成一段
+    // 分段绘制：相邻分组键相同的点连成一段；切换点不连接（新段从 i 开始，不含 i-1）
     let segStart = 0
     for (let i = 1; i <= len; i++) {
-      const curDir = i < len ? dirs[i] : null
-      const prevDir = dirs[i - 1]
-      const dirChanged = i === len || curDir !== prevDir
-      if (dirChanged && i > segStart + 1) {
-        // 绘制 segStart 到 i-1 的线段
-        const dir = prevDir
+      const curKey = i < len ? segKeys[i] : null
+      const prevKey = segKeys[i - 1]
+      const segChanged = i === len || curKey !== prevKey
+      if (segChanged && i > segStart + 1) {
+        // 绘制 segStart 到 i-1 的线段（旧段，方向由 i-1 处的 dir 决定）
+        const dir = dirs[i - 1]
         const color = dir === 1 ? (layer.direction_up_color || '#ff1744') : (layer.direction_down_color || '#00e676')
         ctx.beginPath()
         let started = false
         for (let j = segStart; j < i; j++) {
           const v = values[j]
-          if (v == null) { started = false; continue }
+          if (v == null || typeof v === 'string') { started = false; continue }
           const x = g.l + (j + 0.5) * step
           const y = py(v)
           if (!started) { ctx.moveTo(x, y); started = true }
@@ -706,7 +711,11 @@ function renderIndicatorLine(
         ctx.strokeStyle = color
         ctx.lineWidth = 1.5
         ctx.stroke()
-        segStart = i - 1
+        // [DSA 分段] - 切换点不连接：新段从 i 开始（不是 i-1），避免跨段连线
+        segStart = i
+      } else if (segChanged && i <= segStart + 1) {
+        // 段内不足 2 个点，直接推进 segStart 到 i（不绘制）
+        segStart = i
       }
     }
   } else {
@@ -715,7 +724,7 @@ function renderIndicatorLine(
     let started = false
     for (let i = 0; i < len; i++) {
       const v = values[i]
-      if (v == null) { started = false; continue }
+      if (v == null || typeof v === 'string') { started = false; continue }
       const x = g.l + (i + 0.5) * step
       const y = py(v)
       if (!started) { ctx.moveTo(x, y); started = true }
@@ -725,6 +734,31 @@ function renderIndicatorLine(
     ctx.lineWidth = 1.5
     ctx.stroke()
   }
+
+  // [DSA 分段] - 锚点小圆点：在 anchor_field 标记的 bar 位置（vwap 值处）绘制小圆点
+  if (layer.anchor_field && data[layer.anchor_field]) {
+    const anchors = data[layer.anchor_field]
+    for (let i = 0; i < len; i++) {
+      const a = anchors[i]
+      // anchor_time != null 表示该 bar 是锚点（dir 翻转点）
+      if (a == null) continue
+      const v = values[i]
+      if (v == null || typeof v === 'string') continue
+      const x = g.l + (i + 0.5) * step
+      const y = py(v)
+      // 外圈白色 + 内圈方向色（与当前段方向一致）
+      const dir = dirField && data[dirField] ? data[dirField][i] : null
+      const innerColor = dir === 1 ? (layer.direction_up_color || '#ff1744') : (layer.direction_down_color || '#00e676')
+      ctx.beginPath()
+      ctx.arc(x, y, 3.5, 0, Math.PI * 2)
+      ctx.fillStyle = '#ffffff'
+      ctx.fill()
+      ctx.beginPath()
+      ctx.arc(x, y, 2.2, 0, Math.PI * 2)
+      ctx.fillStyle = innerColor
+      ctx.fill()
+    }
+  }
 }
 
 // 价格区间渲染（半透明矩形）
@@ -732,7 +766,7 @@ function renderIndicatorPriceZone(
   ctx: CanvasRenderingContext2D,
   g: Geometry,
   layer: ChartLayer,
-  data: Record<string, (number | null)[]>,
+  data: Record<string, (number | string | null)[]>,
   barsCount: number,
   step: number,
   py: (v: number) => number,
@@ -750,7 +784,8 @@ function renderIndicatorPriceZone(
   for (let i = 0; i < len; i++) {
     const upper = upperVals[i]
     const lower = lowerVals[i]
-    if (upper == null || lower == null) continue
+    // [类型守卫] - upper/lower 必须为 number（data 放宽为 number|string|null 后需显式收窄）
+    if (typeof upper !== 'number' || typeof lower !== 'number') continue
     const x = g.l + i * step
     const y1 = py(upper)
     const y2 = py(lower)
@@ -763,7 +798,7 @@ function renderIndicatorBand(
   ctx: CanvasRenderingContext2D,
   g: Geometry,
   layer: ChartLayer,
-  data: Record<string, (number | null)[]>,
+  data: Record<string, (number | string | null)[]>,
   barsCount: number,
   step: number,
   py: (v: number) => number,
@@ -789,14 +824,15 @@ function renderIndicatorBand(
     const l = lowerVals[i]
     if (u == null || l == null) { started = false; continue }
     const x = g.l + (i + 0.5) * step
-    if (!started) { ctx.moveTo(x, py(u)); started = true }
-    else ctx.lineTo(x, py(u))
+    const un = Number(u)
+    if (!started) { ctx.moveTo(x, py(un)); started = true }
+    else ctx.lineTo(x, py(un))
   }
   for (let i = len - 1; i >= 0; i--) {
     const l = lowerVals[i]
     if (l == null) continue
     const x = g.l + (i + 0.5) * step
-    ctx.lineTo(x, py(l))
+    ctx.lineTo(x, py(Number(l)))
   }
   ctx.closePath()
   ctx.fillStyle = bandColor
@@ -809,8 +845,9 @@ function renderIndicatorBand(
     const v = upperVals[i]
     if (v == null) { started = false; continue }
     const x = g.l + (i + 0.5) * step
-    if (!started) { ctx.moveTo(x, py(v)); started = true }
-    else ctx.lineTo(x, py(v))
+    const vn = Number(v)
+    if (!started) { ctx.moveTo(x, py(vn)); started = true }
+    else ctx.lineTo(x, py(vn))
   }
   ctx.strokeStyle = upperLowerColor
   ctx.lineWidth = 1
@@ -825,8 +862,9 @@ function renderIndicatorBand(
     const v = lowerVals[i]
     if (v == null) { started = false; continue }
     const x = g.l + (i + 0.5) * step
-    if (!started) { ctx.moveTo(x, py(v)); started = true }
-    else ctx.lineTo(x, py(v))
+    const vn = Number(v)
+    if (!started) { ctx.moveTo(x, py(vn)); started = true }
+    else ctx.lineTo(x, py(vn))
   }
   ctx.strokeStyle = upperLowerColor
   ctx.lineWidth = 1
@@ -842,8 +880,9 @@ function renderIndicatorBand(
       const v = middleVals[i]
       if (v == null) { started = false; continue }
       const x = g.l + (i + 0.5) * step
-      if (!started) { ctx.moveTo(x, py(v)); started = true }
-      else ctx.lineTo(x, py(v))
+      const vn = Number(v)
+      if (!started) { ctx.moveTo(x, py(vn)); started = true }
+      else ctx.lineTo(x, py(vn))
     }
     ctx.strokeStyle = middleColor
     ctx.lineWidth = 1.5

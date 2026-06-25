@@ -2,8 +2,10 @@
 
 端点：
 - POST /admin/after-close-runs: 创建并异步执行盘后编排（日线刷新→DSA→质量门禁→发布）
+- POST /admin/after-close-runs/dsa-only: [Phase6] 仅重算今日 DSA（要求当日日线覆盖率 ≥ 90%）
 - GET /admin/after-close-runs/{run_id}: 查询盘后编排状态（含事件时间线）
 - POST /admin/after-close-runs/{run_id}/retry: 重试失败的盘后编排
+- POST /admin/after-close-runs/{run_id}/resume: [Phase6] 从失败步骤继续（保留断点检查点）
 - POST /admin/after-close-runs/{run_id}/force: 强制重新执行盘后编排（非 failed 状态也可触发）
 - GET /admin/job-runs/{run_id}/events: 查询任意任务的执行事件时间线
 
@@ -13,7 +15,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from uuid import UUID
 
@@ -31,7 +32,6 @@ from app.schemas.scheduler_job_run import (
 from app.services.after_close_orchestrator import (
     AfterCloseRunStatus,
     create_after_close_run,
-    execute_after_close_run,
     get_after_close_run_status,
     retry_after_close_run,
 )
@@ -63,34 +63,6 @@ def _parse_trade_date(trade_date_str: str):
         ) from e
 
 
-def _kick_off_async_execution(job_run_id: UUID, trade_date) -> None:
-    """[AfterClose] - 后台异步启动盘后编排执行（fire and forget）。
-
-    使用 asyncio.create_task 在当前事件循环中启动，不阻塞 HTTP 响应。
-    execute_after_close_run 内部使用独立 AsyncSession，不依赖请求 session。
-    """
-    task = asyncio.create_task(
-        execute_after_close_run(
-            job_run_id=job_run_id,
-            trade_date=trade_date,
-        )
-    )
-    # 添加回调记录任务异常（不吞没异常，仅记录日志）
-    def _on_done(t: asyncio.Task) -> None:
-        if t.cancelled():
-            logger.info("[AfterClose] 后台执行任务已取消: job_run_id=%s", job_run_id)
-            return
-        exc = t.exception()
-        if exc is not None:
-            logger.error(
-                "[AfterClose] 后台执行任务异常: job_run_id=%s, error=%s",
-                job_run_id, exc,
-                exc_info=exc,
-            )
-
-    task.add_done_callback(_on_done)
-
-
 @router.post(
     "/after-close-runs",
     response_model=AfterCloseRunCreateResponse,
@@ -101,15 +73,18 @@ async def create_after_close_run_endpoint(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_roles("admin")),
 ) -> AfterCloseRunCreateResponse:
-    """创建并异步执行盘后编排。
+    """创建盘后编排任务（仅创建 queued 任务，由独立 Worker 领取执行）。
+
+    [Phase5] API 不再直接启动后台执行，仅创建 status=queued 任务。
+    独立的 run_after_close_orchestrator_worker 会通过 FOR UPDATE SKIP LOCKED
+    领取 queued 任务并执行，支持断点恢复 + 心跳租约。
 
     流程：
     1. 解析 trade_date
-    2. create_after_close_run 创建 SchedulerJobRun（幂等）
-    3. 后台异步启动 execute_after_close_run
-    4. 立即返回任务 ID（不等待执行完成）
+    2. create_after_close_run 创建 SchedulerJobRun（幂等，status=queued）
+    3. 立即返回任务 ID（不等待执行完成）
 
-    幂等：同 trade_date 已有 running/succeeded 任务时返回已有任务。
+    幂等：同 trade_date 已有 queued/running 任务时返回已有任务。
 
     Args:
         payload: 创建请求（含 trade_date）
@@ -123,13 +98,10 @@ async def create_after_close_run_endpoint(
 
     job_run, is_new = await create_after_close_run(db=db, trade_date=trade_date)
 
-    # 仅对新创建的任务（status=running 且 orchestrator_status=queued）启动后台执行
-    # 已存在的不重复启动
+    # [Phase5] - API 仅创建 queued 任务，由独立 Worker 领取执行（不再 _kick_off_async_execution）
     from app.services.after_close_orchestrator import _parse_metadata
     meta = _parse_metadata(job_run)
     orchestrator_status = meta.get("orchestrator_status")
-    if is_new and orchestrator_status == AfterCloseRunStatus.QUEUED.value:
-        _kick_off_async_execution(job_run.id, trade_date)
 
     # [Spec] 已有运行中任务时拒绝重复创建：返回 409 Conflict，body 含已有 after_close_run_id
     if not is_new:
@@ -150,6 +122,129 @@ async def create_after_close_run_endpoint(
         orchestrator_status=orchestrator_status or "unknown",
         trade_date=trade_date.isoformat(),
         message=f"盘后编排已创建并启动: trade_date={trade_date}",
+    )
+
+
+# [Phase6] - dsa-only 覆盖率门槛：当日日线覆盖率 ≥ 90% 才允许跳过日线刷新
+_DSA_ONLY_COVERAGE_THRESHOLD = 0.9
+
+
+@router.post(
+    "/after-close-runs/dsa-only",
+    response_model=AfterCloseRunCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_dsa_only_run_endpoint(
+    payload: AfterCloseRunCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles("admin")),
+) -> AfterCloseRunCreateResponse:
+    """[Phase6] 仅重算今日 DSA（要求当日日线覆盖率 ≥ 90%）。
+
+    流程：
+    1. 解析 trade_date
+    2. 调用 compute_daily_coverage 查询当日日线覆盖率（口径与
+       BarsSchedulerService._check_daily_coverage_and_trigger_dsa 对齐：
+       bars_daily.trade_date + instruments.status='active'）
+    3. 覆盖率 < 90% 返 409 + reason=DATA_COVERAGE_INSUFFICIENT
+    4. 覆盖率达标：调用 create_after_close_run 创建 queued 任务
+    5. 在 metadata 中设置 mode='dsa_only' + last_completed_step='daily_ready'
+       （Worker 领取后跳过 refresh_daily，直接 create_batch_run）
+    6. 返回 queued 任务
+
+    [Phase6] - 描述: 与 create_after_close_run_endpoint 的区别：
+    - 不重复拉行情（要求行情已就绪）
+    - metadata 标记 mode='dsa_only' 供 Worker 识别
+    - 覆盖率不足时返 409 而非创建任务
+
+    Args:
+        payload: 创建请求（含 trade_date）
+        db: 异步数据库会话
+        current_user: 当前管理员
+
+    Returns:
+        创建响应（含 job_run_id 和初始状态）
+
+    Raises:
+        HTTPException 409: 当日日线覆盖率不足
+    """
+    from app.services.after_close_orchestrator import (
+        _parse_metadata,
+        _update_orchestrator_status,
+        compute_daily_coverage,
+    )
+
+    trade_date = _parse_trade_date(payload.trade_date)
+
+    # [Phase6] - 计算当日日线覆盖率（纯查询，不触发 DSA）
+    covered, total, coverage = await compute_daily_coverage(db, trade_date)
+    if coverage < _DSA_ONLY_COVERAGE_THRESHOLD:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "DATA_COVERAGE_INSUFFICIENT",
+                "trade_date": trade_date.isoformat(),
+                "daily_coverage": coverage,
+                "daily_covered": covered,
+                "daily_total": total,
+                "threshold": _DSA_ONLY_COVERAGE_THRESHOLD,
+                "message": f"当日日线覆盖率不足: {coverage:.1%} < {_DSA_ONLY_COVERAGE_THRESHOLD:.0%}",
+            },
+        )
+
+    # [Phase6] - 覆盖率达标，创建 queued 任务
+    job_run, is_new = await create_after_close_run(db=db, trade_date=trade_date)
+    if not is_new:
+        # 同日已有任务，复用现有 create 端点的 409 语义
+        meta = _parse_metadata(job_run)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "after_close_run_id": str(job_run.id),
+                "status": job_run.status,
+                "orchestrator_status": meta.get("orchestrator_status", "unknown"),
+                "trade_date": trade_date.isoformat(),
+                "message": f"同日已有盘后编排任务: trade_date={trade_date}",
+            },
+        )
+
+    # [Phase6] - 在 metadata 中追加 mode='dsa_only' + last_completed_step='daily_ready'
+    # Worker 领取后应识别 mode=dsa_only 跳过 refresh_daily 直接 create_batch_run
+    await _update_orchestrator_status(
+        db=db,
+        job_run=job_run,
+        status=AfterCloseRunStatus.QUEUED,
+        message=(
+            f"[dsa-only] 仅重算今日 DSA: trade_date={trade_date}, "
+            f"coverage={coverage:.1%} ({covered}/{total})"
+        ),
+        payload={
+            "mode": "dsa_only",
+            "daily_coverage": coverage,
+            "daily_covered": covered,
+            "daily_total": total,
+        },
+        extra={
+            "mode": "dsa_only",
+            "last_completed_step": "daily_ready",
+        },
+    )
+    await db.commit()
+
+    logger.info(
+        "[Phase6] dsa-only 任务已创建: run_id=%s, trade_date=%s, coverage=%.1f%%",
+        job_run.id, trade_date, coverage * 100,
+    )
+
+    return AfterCloseRunCreateResponse(
+        job_run_id=str(job_run.id),
+        status=job_run.status,
+        orchestrator_status=AfterCloseRunStatus.QUEUED.value,
+        trade_date=trade_date.isoformat(),
+        message=(
+            f"[dsa-only] 仅重算今日 DSA 已创建: trade_date={trade_date}, "
+            f"coverage={coverage:.1%}"
+        ),
     )
 
 
@@ -196,6 +291,14 @@ async def get_after_close_run_endpoint(
         started_at=result["started_at"],
         finished_at=result["finished_at"],
         error_message=result["error_message"],
+        # [Phase7] - 详情字段透传
+        worker_instance_id=result["worker_instance_id"],
+        heartbeat_at=result["heartbeat_at"],
+        lease_expires_at=result["lease_expires_at"],
+        last_completed_step=result["last_completed_step"],
+        interrupt_reason=result["interrupt_reason"],
+        is_retryable=result["is_retryable"],
+        heartbeat_stale=result["heartbeat_stale"],
         events=[
             JobRunEventItem(
                 id=e["id"],
@@ -222,7 +325,9 @@ async def retry_after_close_run_endpoint(
 ) -> AfterCloseRunCreateResponse:
     """重试失败的盘后编排任务。
 
-    仅 failed 状态的任务可重试。重置为 queued 后重新启动后台执行。
+    [Phase5] 仅重置为 queued 状态，由独立 Worker 领取执行（不再直接启动后台任务）。
+
+    仅 failed 状态的任务可重试。重置为 queued 后由 Worker 领取。
 
     Args:
         run_id: 编排任务 ID
@@ -250,14 +355,10 @@ async def retry_after_close_run_endpoint(
             detail=error_msg,
         ) from e
 
-    # 解析 trade_date 并启动后台执行
+    # [Phase5] - 仅重置为 queued，由独立 Worker 领取执行（不再 _kick_off_async_execution）
     from app.services.after_close_orchestrator import _parse_metadata
     meta = _parse_metadata(job_run)
     trade_date_str = meta.get("trade_date", "")
-    trade_date = _parse_trade_date(trade_date_str) if trade_date_str else None
-
-    if trade_date is not None:
-        _kick_off_async_execution(job_run.id, trade_date)
 
     return AfterCloseRunCreateResponse(
         job_run_id=str(job_run.id),
@@ -265,6 +366,117 @@ async def retry_after_close_run_endpoint(
         orchestrator_status=AfterCloseRunStatus.QUEUED.value,
         trade_date=trade_date_str,
         message=f"盘后编排已重试: job_run_id={job_run.id}",
+    )
+
+
+# [Phase6] - resume 允许的状态：failed/interrupted 都可恢复（retry 仅允许 failed）
+_RESUMABLE_STATUSES = {"failed", "interrupted"}
+
+
+@router.post(
+    "/after-close-runs/{run_id}/resume",
+    response_model=AfterCloseRunCreateResponse,
+)
+async def resume_after_close_run_endpoint(
+    run_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles("admin")),
+) -> AfterCloseRunCreateResponse:
+    """[Phase6] 从失败步骤继续（复用已成功阶段，不重复拉行情）。
+
+    与 retry 的区别：
+    - retry 仅允许 status=failed，且重置 last_completed_step（从头执行）
+    - resume 允许 failed/interrupted，**保留 last_completed_step**（从断点继续）
+
+    流程：
+    1. 加载 job_run，校验为 after_close_orchestrator
+    2. 校验 status in ('failed', 'interrupted')，否则返 400
+    3. 重置 status='queued'，保留 metadata.last_completed_step
+    4. 更新 orchestrator_status='queued'
+    5. 返回 queued 任务（Worker 领取后从 last_completed_step 之后继续）
+
+    Args:
+        run_id: 编排任务 ID
+        db: 异步数据库会话
+        current_user: 当前管理员
+
+    Returns:
+        恢复响应
+
+    Raises:
+        HTTPException 404: 任务不存在
+        HTTPException 400: 任务非盘后编排或状态非 failed/interrupted
+    """
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from app.models.scheduler_job_run import SchedulerJobRun
+    from app.services.after_close_orchestrator import (
+        _ORCHESTRATOR_LEASE_SECONDS,
+        _parse_metadata,
+        _update_orchestrator_status,
+    )
+
+    job_run = await db.get(SchedulerJobRun, run_id)
+    if job_run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"编排任务不存在: job_run_id={run_id}",
+        )
+    if job_run.job_name != "after_close_orchestrator":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"任务非盘后编排: job_name={job_run.job_name}",
+        )
+    if job_run.status not in _RESUMABLE_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"仅 failed/interrupted 状态可恢复: "
+                f"current_status={job_run.status}"
+            ),
+        )
+
+    meta = _parse_metadata(job_run)
+    trade_date_str = meta.get("trade_date", "")
+    if not trade_date_str:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"metadata_json 中缺少 trade_date: job_run_id={run_id}",
+        )
+
+    # [Phase6] - 重置为 queued（保留 last_completed_step），由独立 Worker 领取执行
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    job_run.status = "queued"
+    job_run.error_message = None
+    job_run.error_code = None
+    job_run.finished_at = None
+    job_run.started_at = now
+    job_run.heartbeat_at = now
+    job_run.lease_expires_at = now + timedelta(seconds=_ORCHESTRATOR_LEASE_SECONDS)
+
+    await _update_orchestrator_status(
+        db=db,
+        job_run=job_run,
+        status=AfterCloseRunStatus.QUEUED,
+        message=(
+            f"[resume] 从失败步骤继续: job_run_id={run_id}, "
+            f"last_completed_step={meta.get('last_completed_step')}"
+        ),
+    )
+    await db.commit()
+
+    logger.info(
+        "[Phase6] resume 任务已重置为 queued: run_id=%s, last_completed_step=%s",
+        run_id, meta.get("last_completed_step"),
+    )
+
+    return AfterCloseRunCreateResponse(
+        job_run_id=str(job_run.id),
+        status=job_run.status,
+        orchestrator_status=AfterCloseRunStatus.QUEUED.value,
+        trade_date=trade_date_str,
+        message=f"[resume] 盘后编排已从断点恢复: job_run_id={job_run.id}",
     )
 
 
@@ -279,14 +491,15 @@ async def force_advance_after_close_endpoint(
 ) -> AfterCloseRunCreateResponse:
     """强制重新执行盘后编排（非 failed 状态也可触发）。
 
+    [Phase5] 仅重置为 queued 状态，由独立 Worker 领取执行（不再直接启动后台任务）。
+
     与 retry 的区别：force 不校验状态，任何状态都可强制重新执行。
     适用于任务卡在 running 状态但实际无 Worker 执行的场景。
 
     流程：
     1. 加载 job_run，校验为编排任务
-    2. 重置 status=running, error_message=None
+    2. 重置 status=queued, error_message=None（由 Worker 领取）
     3. 更新 orchestrator_status=queued
-    4. 启动后台执行
 
     Args:
         run_id: 编排任务 ID
@@ -329,11 +542,10 @@ async def force_advance_after_close_endpoint(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"metadata_json 中缺少 trade_date: job_run_id={run_id}",
         )
-    trade_date = _parse_trade_date(trade_date_str)
 
-    # 重置任务状态（不校验原状态，允许强制推进）
+    # [Phase5] - 重置为 queued（不是 running），由独立 Worker 领取执行
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
-    job_run.status = "running"
+    job_run.status = "queued"
     job_run.error_message = None
     job_run.error_code = None
     job_run.finished_at = None
@@ -349,7 +561,7 @@ async def force_advance_after_close_endpoint(
     )
     await db.commit()
 
-    _kick_off_async_execution(job_run.id, trade_date)
+    # [Phase5] - 不再 _kick_off_async_execution，由独立 Worker 领取 queued 任务
 
     return AfterCloseRunCreateResponse(
         job_run_id=str(job_run.id),
@@ -425,8 +637,10 @@ if __name__ == "__main__":
     # 验证必要端点存在
     paths = {r.path for r in router.routes}
     assert "/admin/after-close-runs" in paths, "缺少 POST /admin/after-close-runs"
+    assert "/admin/after-close-runs/dsa-only" in paths, "缺少 dsa-only 端点"
     assert "/admin/after-close-runs/{run_id}" in paths, "缺少 GET /admin/after-close-runs/{run_id}"
     assert "/admin/after-close-runs/{run_id}/retry" in paths, "缺少 retry 端点"
+    assert "/admin/after-close-runs/{run_id}/resume" in paths, "缺少 resume 端点"
     assert "/admin/after-close-runs/{run_id}/force" in paths, "缺少 force 端点"
     assert "/admin/job-runs/{run_id}/events" in paths, "缺少 events 端点"
     print("端点验证 ✓")

@@ -126,8 +126,12 @@ chart_layers:
     direction_colored: true
     direction_up_color: "#ff1744"
     direction_down_color: "#00e676"
-    fields: [dsa_vwap, dsa_dir]
-    hover_fields: [dsa_dir, dsa_vwap]
-    description: "DSA 动态摆动锚定 VWAP 线，按方向着色"
+    # [DSA 分段] - regime_field 指定 regime_id 字段，前端按 regime 分段渲染（切换点不连接）
+    # anchor_field 指定 anchor_time 字段，前端在锚点 bar 绘制小圆点
+    regime_field: regime_id
+    anchor_field: anchor_time
+    fields: [dsa_vwap, dsa_dir, regime_id, anchor_time]
+    hover_fields: [dsa_dir, dsa_vwap, regime_id]
+    description: "DSA 动态摆动锚定 VWAP 线，按 regime 分段着色，锚点标记"
 resource_budget:
   target_ms_per_instrument: 5000

@@ -526,6 +526,116 @@ async def _determine_market_closed_status(
     return MONITOR_STATUS_IDLE_EXPECTED
 
 
+async def _compute_data_freshness(db: AsyncSession, now: datetime) -> dict[str, Any]:
+    """[SystemOverview] - 计算数据新鲜度子结构（行情 + 选股两区块，Phase 9）。
+
+    独立于流水线状态判定，始终基于 DB 实时查询，反映行情与选股的最新数据落盘情况。
+    管理员可在任何时段查看数据新鲜度，不依赖盘后流水线是否启动。
+    """
+    from app.models.bar import Bar15Min, Bar60Min, BarDaily
+    from app.models.calendar import TradingCalendar
+
+    # ===== bars 子结构 =====
+    # [data_freshness.bars] - 最新日线交易日
+    # [Phase9] - 描述: 过滤 trade_date <= today，避免占位/未来日期（如 2099-12-31）
+    # 干扰 latest_daily_trade_date 语义（"行情数据最后更新到哪一天"）
+    today = now.date()
+    latest_daily = await db.scalar(
+        select(func.max(BarDaily.trade_date)).where(BarDaily.trade_date <= today)
+    )
+    latest_daily_trade_date = latest_daily if latest_daily is not None else None
+
+    # [data_freshness.bars] - 日线覆盖率（基于 latest_daily_trade_date，复用现有 _compute_bars_coverage）
+    daily_coverage: float | None = None
+    if latest_daily_trade_date is not None:
+        daily_coverage = await _compute_bars_coverage(db, latest_daily_trade_date)
+
+    # [data_freshness.bars] - 最新 15m/60m bar 时间
+    latest_15m = await db.scalar(select(func.max(Bar15Min.trade_time)))
+    latest_60m = await db.scalar(select(func.max(Bar60Min.trade_time)))
+
+    # [data_freshness.bars] - 最近的 bars_scheduler succeeded 任务 id
+    last_success_job = await db.scalar(
+        select(SchedulerJobRun.id)
+        .where(
+            SchedulerJobRun.job_name == "bars_scheduler",
+            SchedulerJobRun.status == "succeeded",
+        )
+        .order_by(SchedulerJobRun.started_at.desc())
+        .limit(1)
+    )
+
+    # [data_freshness.bars] - 最近交易日（trading_calendar WHERE is_trading_day=true AND trade_date <= today）
+    latest_trading_day = await db.scalar(
+        select(func.max(TradingCalendar.trade_date)).where(
+            TradingCalendar.is_trading_day.is_(True),
+            TradingCalendar.market == "A",
+            TradingCalendar.trade_date <= today,
+        )
+    )
+
+    # [data_freshness.bars] - is_behind_latest_trade_date: latest_daily < latest_trading_day
+    is_behind = False
+    if latest_daily_trade_date is not None and latest_trading_day is not None:
+        is_behind = latest_daily_trade_date < latest_trading_day
+
+    bars_freshness = {
+        "latest_daily_trade_date": (
+            latest_daily_trade_date.isoformat() if latest_daily_trade_date else None
+        ),
+        "daily_coverage": daily_coverage,
+        "latest_15m_bar_time": latest_15m.isoformat() if latest_15m else None,
+        "latest_60m_bar_time": latest_60m.isoformat() if latest_60m else None,
+        "last_success_job_id": str(last_success_job) if last_success_job else None,
+        "is_behind_latest_trade_date": is_behind,
+    }
+
+    # ===== strategy 子结构 =====
+    # [data_freshness.strategy] - 最新计算交易日（所有状态）
+    latest_compute = await db.scalar(select(func.max(StrategyRun.trade_date)))
+
+    # [data_freshness.strategy] - 最新发布交易日（status='published'）
+    latest_published = await db.scalar(
+        select(func.max(StrategyRun.trade_date)).where(
+            StrategyRun.status == "published"
+        )
+    )
+
+    # [data_freshness.strategy] - 最近一条 strategy_runs
+    # 排序：trade_date DESC, attempt_no DESC, started_at DESC NULLS LAST（避免 started_at 为 NULL 时排序不确定）
+    latest_run_stmt = (
+        select(StrategyRun)
+        .order_by(
+            StrategyRun.trade_date.desc(),
+            StrategyRun.attempt_no.desc(),
+            StrategyRun.started_at.desc().nullslast(),
+        )
+        .limit(1)
+    )
+    latest_run_result = await db.execute(latest_run_stmt)
+    latest_run = latest_run_result.scalar_one_or_none()
+
+    strategy_freshness = {
+        "latest_compute_trade_date": (
+            latest_compute.isoformat() if latest_compute else None
+        ),
+        "latest_published_trade_date": (
+            latest_published.isoformat() if latest_published else None
+        ),
+        "strategy_run_id": str(latest_run.id) if latest_run else None,
+        "status": latest_run.status if latest_run else None,
+        "total_instruments": latest_run.total_instruments if latest_run else None,
+        "failed_count": latest_run.failed_count if latest_run else None,
+        "published_at": (
+            latest_run.published_at.isoformat()
+            if latest_run and latest_run.published_at
+            else None
+        ),
+    }
+
+    return {"bars": bars_freshness, "strategy": strategy_freshness}
+
+
 async def _compute_after_close_pipeline(
     db: AsyncSession,
     now: datetime,
@@ -671,12 +781,16 @@ async def _compute_after_close_pipeline(
         now=now,
     )
 
+    # [Phase9] - 数据新鲜度：行情数据 + 选股策略两个独立区块
+    data_freshness = await _compute_data_freshness(db, now)
+
     return {
         "status": pipeline_status,
         "bars_job": bars_job_summary,
         "dsa_run": dsa_run_summary,
         "waiting_dsa_reason": waiting_dsa_reason,
         "waiting_dsa_suggestion": waiting_dsa_suggestion,
+        "data_freshness": data_freshness,
     }
 
 

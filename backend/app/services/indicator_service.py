@@ -311,6 +311,9 @@ async def compute_all_indicators(
                     "direction_colored": layer.get("direction_colored", False),
                     "direction_up_color": layer.get("direction_up_color"),
                     "direction_down_color": layer.get("direction_down_color"),
+                    # [DSA 分段] - 透传 regime_field/anchor_field 供前端按 regime 分段渲染
+                    "regime_field": layer.get("regime_field"),
+                    "anchor_field": layer.get("anchor_field"),
                     "fields": layer.get("fields", []),
                     "hover_fields": layer.get("hover_fields", []),
                 })

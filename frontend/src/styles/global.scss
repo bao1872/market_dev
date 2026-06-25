@@ -2313,6 +2313,83 @@ textarea.input { height: auto; min-height: 80px; padding: 9px; resize: vertical;
   b { display: block; margin-bottom: 4px; }
 }
 
+// [AfterClosePipelineCard] - 描述: 编排状态详情区块（Phase 7）
+// 展示当前阶段/Worker/心跳/租约/最后成功步骤/中断原因
+// heartbeat_stale=true 时 .toggle-row.stale 红色高亮心跳行
+// interrupt_reason 存在时 .toggle-row.interrupt-reason 红色文字
+.orchestrator-detail {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid v.$color-border-soft;
+  border-radius: 6px;
+  background: #11151d;
+  font-size: 11px;
+}
+.orchestrator-detail .detail-title {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: #c8d0dd;
+}
+.orchestrator-detail .detail-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0;
+}
+.orchestrator-detail .toggle-row {
+  padding: 8px 0;
+}
+.orchestrator-detail .toggle-row.stale {
+  // 心跳超时红色高亮
+  border-color: rgba(239, 83, 80, .3);
+  background: rgba(239, 83, 80, .06);
+  margin: 0 -6px;
+  padding: 8px 6px;
+  border-radius: 4px;
+  border-style: solid;
+  border-width: 1px;
+  .num { color: #ff7774; font-weight: 600; }
+}
+.orchestrator-detail .toggle-row.interrupt-reason {
+  // 中断原因红色文字
+  .num { color: #ff7774; font-weight: 600; }
+}
+
+// [AfterClosePipelineCard] - 描述: 数据新鲜度两区块（行情+选股，Phase 9）
+.data-freshness-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+.data-freshness-block {
+  padding: 10px 12px;
+  border: 1px solid v.$color-border-soft;
+  border-radius: 6px;
+  background: #11151d;
+  font-size: 11px;
+  // is_behind_latest_trade_date=true 时红色高亮
+  &.behind {
+    border-color: rgba(239, 83, 80, .4);
+    background: rgba(239, 83, 80, .06);
+  }
+}
+.data-freshness-title {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: #c8d0dd;
+}
+.data-freshness-warn {
+  margin-top: 6px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: rgba(239, 83, 80, .12);
+  color: #ff7774;
+  font-size: 11px;
+  font-weight: 600;
+}
+
 // [JobRunEventTimeline] - 描述: 任务事件时间线
 .job-event-timeline {
   display: flex;

@@ -47,6 +47,7 @@ from app.api.metrics import http_request_duration_seconds, http_requests_total
 from app.api.monitor_states import router as monitor_states_router
 from app.api.notifications import router as notifications_router
 from app.api.stock_memos import router as stock_memos_router
+from app.api.stock_detail_feishu import router as stock_detail_feishu_router
 from app.api.strategies import router as strategies_router
 from app.api.strategy_events import router as strategy_events_router
 from app.api.strategy_runs import router as strategy_runs_router
@@ -58,13 +59,28 @@ logger = logging.getLogger("main")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期：启动时初始化种子数据。
+    """应用生命周期：启动时恢复僵尸任务 + 初始化种子数据。
 
     幂等设计：seed_strategies 内部检查已存在的策略/版本并跳过，
     重复启动不会重复创建。
     """
     from app.api.health import check_strategy_assets
+    from app.services.scheduler_job_run_recovery_service import (
+        recover_stale_scheduler_job_runs,
+    )
     from app.services.strategy_seed import seed_strategies
+
+    # [Recovery] - API Backend 启动时清理上次崩溃残留的 running 任务
+    # 放在 seed_strategies 之前：先清理僵尸，再种种子
+    # 异常不阻塞启动（恢复失败仅记录日志，不影响 API 服务可用性）
+    try:
+        async with AsyncSessionLocal() as db:
+            recovered = await recover_stale_scheduler_job_runs(db)
+            await db.commit()
+            if recovered > 0:
+                logger.info("[Recovery] API Backend 启动恢复: %d 个过期任务", recovered)
+    except Exception as e:
+        logger.error("[Recovery] API Backend 启动恢复失败（不影响启动）: %s", e)
 
     # [策略资产] - 启动时检查策略资产文件完整性
     check_strategy_assets()
@@ -142,6 +158,8 @@ app.include_router(admin_after_close_router)
 app.include_router(watchlist_router)
 # 个股备忘录路由
 app.include_router(stock_memos_router)
+# 个股详情发送飞书路由（Phase 8，需 admin 角色）
+app.include_router(stock_detail_feishu_router)
 # Prometheus 指标路由（无需认证，供 scraper 直接抓取）
 app.include_router(metrics_api.router, tags=["metrics"])
 

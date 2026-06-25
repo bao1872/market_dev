@@ -16,7 +16,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, Index, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import DateTime, Float, Index, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -26,14 +26,20 @@ from app.models.base import Base
 class SchedulerJobRun(Base):
     """定时任务执行记录。
 
-    状态机：running -> succeeded/failed
+    状态机：running -> succeeded/failed/interrupted
     """
 
     __tablename__ = "scheduler_job_runs"
 
-    # [Idempotency] - run_key 唯一约束保证任务幂等；job_name+business_date 复合索引加速查询
+    # [Idempotency] - run_key 部分唯一索引：仅约束 queued/running 活跃记录，允许 interrupted/failed 后新建 attempt
+    # 配合迁移 038_scheduler_job_run_key_partial_index（替换 036 的全局唯一约束）
     __table_args__ = (
-        UniqueConstraint("run_key", name="uq_scheduler_job_runs_run_key"),
+        Index(
+            "uq_scheduler_job_runs_active_run_key",
+            "run_key",
+            unique=True,
+            postgresql_where=text("run_key IS NOT NULL AND status IN ('queued', 'running')"),
+        ),
         Index("ix_scheduler_job_runs_job_bd", "job_name", "business_date"),
     )
 
@@ -125,7 +131,12 @@ if __name__ == "__main__":
     # 验证 __table_args__ 中的约束与索引
     constraint_names = {c.name for c in SchedulerJobRun.__table__.constraints if hasattr(c, "name") and c.name}
     index_names = {idx.name for idx in SchedulerJobRun.__table__.indexes if idx.name}
-    assert "uq_scheduler_job_runs_run_key" in constraint_names, f"缺少唯一约束: {constraint_names}"
+    assert "uq_scheduler_job_runs_run_key" not in constraint_names, (
+        f"应已移除全局唯一约束: {constraint_names}"
+    )
+    assert "uq_scheduler_job_runs_active_run_key" in index_names, (
+        f"缺少部分唯一索引: {index_names}"
+    )
     assert "ix_scheduler_job_runs_job_bd" in index_names, f"缺少复合索引: {index_names}"
     print(f"constraints={constraint_names}")
     print(f"indexes={index_names}")

@@ -151,6 +151,9 @@ async def _update_orchestrator_status(
         new_meta["trade_date"] = trade_date_str
     if dsa_run_id is not None:
         new_meta["dsa_run_id"] = str(dsa_run_id)
+    # [Phase5] - 保留 last_completed_step 用于断点恢复
+    if "last_completed_step" in existing_meta:
+        new_meta["last_completed_step"] = existing_meta["last_completed_step"]
     if extra:
         for k, v in extra.items():
             if k not in ("orchestrator_status", "trade_date", "dsa_run_id"):
@@ -192,14 +195,20 @@ async def create_after_close_run(
 
     Returns:
         (SchedulerJobRun, is_new)：
-        - is_new=True 表示本次新建任务（status=running, orchestrator_status=queued）
+        - is_new=True 表示本次新建任务（status=queued, orchestrator_status=queued），
+          由独立 Worker 领取执行
         - is_new=False 表示同日已有任务，返回已有记录（调用方应返回 409 Conflict）
 
     Raises:
         RuntimeError: 幂等锁获取失败（同日已有运行中任务）且未找到已有记录
     """
     run_key = f"{_AFTER_CLOSE_JOB_NAME}:{trade_date.isoformat()}"
-    job_run = await acquire_job_run_lock(
+    # [AfterClose] - acquire_job_run_lock 返回 (job_run, is_new)：
+    # - is_new=True：新建任务（status=queued），由独立 Worker 领取执行
+    # - is_new=False：已有活跃任务(existing)或抢锁失败(None)，返回 (existing, False) 或抛异常
+    # [Phase5] - initial_status=queued：API 仅创建 queued 任务，不直接执行，
+    # 由 run_after_close_orchestrator_worker 领取后改为 running
+    job_run, is_new = await acquire_job_run_lock(
         db=db,
         run_key=run_key,
         job_name=_AFTER_CLOSE_JOB_NAME,
@@ -209,22 +218,19 @@ async def create_after_close_run(
             "orchestrator_status": AfterCloseRunStatus.QUEUED.value,
             "trade_date": trade_date.isoformat(),
         },
+        initial_status="queued",
     )
-    if job_run is None:
-        # [AfterClose] - 同日已有运行中/已成功的编排任务，查询已有记录返回
-        stmt = select(SchedulerJobRun).where(
-            SchedulerJobRun.run_key == run_key,
-        )
-        result = await db.execute(stmt)
-        existing = result.scalar_one_or_none()
-        if existing is not None:
+    if not is_new:
+        # acquire_job_run_lock 已返回 existing（或 None 表示抢锁失败）
+        if job_run is not None:
             logger.info(
                 "[AfterClose] 同日已有编排任务，返回已有: run_id=%s, status=%s",
-                existing.id, existing.status,
+                job_run.id, job_run.status,
             )
-            return existing, False
+            return job_run, False
+        # 抢锁失败（IntegrityError）且未返回已有记录
         raise RuntimeError(
-            f"acquire_job_run_lock 返回 None 但未找到已有记录: run_key={run_key}"
+            f"acquire_job_run_lock 抢锁失败且未返回已有记录: run_key={run_key}"
         )
 
     # 写入初始 metadata + START 事件
@@ -244,14 +250,90 @@ async def create_after_close_run(
     return job_run, True
 
 
+async def compute_daily_coverage(
+    db: AsyncSession,
+    trade_date: date,
+) -> tuple[int, int, float]:
+    """[AfterClose] - 计算当日日线覆盖率（纯查询，无 DSA 触发副作用）。
+
+    口径与 BarsSchedulerService._check_daily_coverage_and_trigger_dsa 对齐：
+    - 覆盖数：bars_daily 表中 trade_date 当日不同 instrument_id 数
+    - 总数：instruments 表中 status='active' 的股票数
+    - 覆盖率 = covered / total（total=0 时返 0.0）
+
+    [Phase6] - 描述: dsa-only 端点专用，避免调用 _check_daily_coverage_and_trigger_dsa
+    触发 DSA 副作用。覆盖率计算的权威实现仍为 bars_scheduler_service。
+
+    Args:
+        db: 异步会话
+        trade_date: 交易日期
+
+    Returns:
+        (covered, total, coverage)：覆盖数、活跃总数、覆盖率（0.0-1.0）
+    """
+    from sqlalchemy import func as sa_func
+
+    from app.models.bar import BarDaily
+    from app.models.instrument import Instrument
+
+    daily_count_result = await db.execute(
+        select(sa_func.count(sa_func.distinct(BarDaily.instrument_id)))
+        .where(BarDaily.trade_date == trade_date)
+    )
+    covered = daily_count_result.scalar() or 0
+
+    active_count_result = await db.execute(
+        select(sa_func.count(Instrument.id)).where(Instrument.status == "active")
+    )
+    total = active_count_result.scalar() or 0
+
+    coverage = covered / total if total > 0 else 0.0
+    return covered, total, coverage
+
+
+async def _update_heartbeat_and_step(
+    db: AsyncSession,
+    job_run: SchedulerJobRun,
+    last_completed_step: str,
+    worker_id: str | None = None,
+) -> None:
+    """[Phase5] - 更新 heartbeat + lease + metadata.last_completed_step（flush 不 commit）。
+
+    每个阶段完成后调用，用于：
+    - 断点恢复：下次重启时根据 last_completed_step 跳过已成功阶段
+    - 心跳租约：防止 Admin 页面误判任务卡死或租约过期
+
+    Args:
+        db: 异步会话
+        job_run: SchedulerJobRun 记录（已在 session 中）
+        last_completed_step: 刚完成的阶段名（AfterCloseRunStatus.value）
+        worker_id: Worker 实例标识（非 None 时同步更新 worker_instance_id）
+    """
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    job_run.heartbeat_at = now
+    job_run.lease_expires_at = now + timedelta(seconds=_ORCHESTRATOR_LEASE_SECONDS)
+    if worker_id is not None:
+        job_run.worker_instance_id = worker_id
+    meta = _parse_metadata(job_run)
+    meta["last_completed_step"] = last_completed_step
+    job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+    await db.flush()
+
+
 async def execute_after_close_run(
     job_run_id: uuid.UUID,
     trade_date: date,
     *,
+    worker_id: str | None = None,
     dsa_poll_interval: int = _DSA_POLL_INTERVAL_SECONDS,
     dsa_poll_timeout: int = _DSA_POLL_TIMEOUT_SECONDS,
 ) -> None:
     """执行盘后编排流水线（后台异步，使用独立 AsyncSession）。
+
+    [Phase5] 支持断点恢复 + 心跳租约：
+    - 函数开头读取 metadata.last_completed_step，跳过已成功阶段
+    - 每阶段完成后调用 _update_heartbeat_and_step 更新心跳 + lease + 检查点
+    - worker_id 非 None 时同步更新 worker_instance_id
 
     流程：
     1. refreshing_daily: 调用 BarsSchedulerService.refresh_all_instruments
@@ -262,11 +344,19 @@ async def execute_after_close_run(
     4. publishing: 调用 StrategyBatchService.publish_run
     5. succeeded: 标记整体任务成功
 
+    断点恢复（按 last_completed_step 跳过）：
+    - None/queued → 从 refreshing_daily 开始
+    - refreshing_daily → 跳过日线刷新，dsa_run_id 从 metadata 读取
+    - waiting_dsa_worker → 跳过等待，直接质量门禁
+    - quality_gate → 跳过质量门禁，直接发布
+    - publishing/succeeded → 任务已完成，直接返回
+
     任意步骤异常 → 写 ERROR 事件 + 标记 failed + 更新 SchedulerJobRun.status=failed
 
     Args:
         job_run_id: 编排任务 ID
         trade_date: 交易日期
+        worker_id: Worker 实例标识（非 None 时更新 worker_instance_id + 心跳）
         dsa_poll_interval: DSA 轮询间隔（秒，测试时可缩短）
         dsa_poll_timeout: DSA 轮询超时（秒，测试时可缩短）
 
@@ -274,16 +364,17 @@ async def execute_after_close_run(
         异常向上传播（调用方应捕获并记录日志）
     """
     logger.info(
-        "[AfterClose] 开始执行盘后编排: job_run_id=%s, trade_date=%s",
-        job_run_id, trade_date,
+        "[AfterClose] 开始执行盘后编排: job_run_id=%s, trade_date=%s, worker_id=%s",
+        job_run_id, trade_date, worker_id,
     )
 
     bars_service = BarsSchedulerService()
     batch_service = StrategyBatchService()
     dsa_run_id: uuid.UUID | None = None
+    published_run: Any = None
 
     try:
-        # ---- 步骤 1: refreshing_daily ----
+        # [Phase5] - 读取断点恢复信息：last_completed_step + dsa_run_id
         async with AsyncSessionLocal() as db:
             job_run = await db.get(SchedulerJobRun, job_run_id)
             if job_run is None:
@@ -292,149 +383,286 @@ async def execute_after_close_run(
                 logger.info("[AfterClose] 任务已成功，跳过: job_run_id=%s", job_run_id)
                 return
 
-            await _update_orchestrator_status(
-                db=db,
-                job_run=job_run,
-                status=AfterCloseRunStatus.REFRESHING_DAILY,
-                message=f"开始刷新日线: trade_date={trade_date}",
+            meta = _parse_metadata(job_run)
+            last_completed_step = meta.get("last_completed_step")
+            dsa_run_id_str = meta.get("dsa_run_id")
+            if dsa_run_id_str:
+                dsa_run_id = uuid.UUID(dsa_run_id_str)
+
+        # [Phase5] - 根据last_completed_step 计算各阶段跳过标志
+        # 阶段顺序：refreshing_daily → waiting_dsa_worker → quality_gate → publishing → succeeded
+        _completed_steps = {
+            None: set(),
+            "queued": set(),
+            "refreshing_daily": {"refreshing_daily"},
+            "waiting_dsa_worker": {"refreshing_daily", "waiting_dsa_worker"},
+            "quality_gate": {"refreshing_daily", "waiting_dsa_worker", "quality_gate"},
+            "publishing": {"refreshing_daily", "waiting_dsa_worker", "quality_gate", "publishing"},
+            "succeeded": {"refreshing_daily", "waiting_dsa_worker", "quality_gate", "publishing", "succeeded"},
+        }
+        completed = _completed_steps.get(last_completed_step, set())
+        if "succeeded" in completed:
+            logger.info(
+                "[AfterClose] 断点恢复: 已完成 succeeded，直接返回: job_run_id=%s",
+                job_run_id,
             )
-            await db.commit()
+            return
 
-        # 调用 bars_scheduler（使用独立 session，内部会传 job_run_id 写事件）
-        batch_result = await bars_service.refresh_all_instruments(
-            trade_date=trade_date,
-            db_session=None,  # 服务内部创建 session
-            job_run_id=job_run_id,
+        # [Phase6] - dsa_only 模式：跳过日线刷新（覆盖率已由 API 层校验）
+        mode = meta.get("mode")
+        if mode == "dsa_only":
+            completed = completed | {"refreshing_daily"}
+            logger.info(
+                "[AfterClose] dsa_only 模式: 强制跳过 refreshing_daily: job_run_id=%s",
+                job_run_id,
+            )
+
+        skip_refresh = "refreshing_daily" in completed
+        skip_wait = "waiting_dsa_worker" in completed
+        skip_quality = "quality_gate" in completed
+        skip_publish = "publishing" in completed
+
+        logger.info(
+            "[AfterClose] 断点恢复: last_completed_step=%s, "
+            "skip_refresh=%s, skip_wait=%s, skip_quality=%s, skip_publish=%s",
+            last_completed_step, skip_refresh, skip_wait, skip_quality, skip_publish,
         )
-        dsa_run_id = batch_result.dsa_run_id
 
-        if dsa_run_id is None:
-            # [AfterClose] - 覆盖率不足或 DSA 未触发，标记成功结束（非错误）
+        # ---- 步骤 1: refreshing_daily ----
+        if not skip_refresh:
             async with AsyncSessionLocal() as db:
                 job_run = await db.get(SchedulerJobRun, job_run_id)
                 await _update_orchestrator_status(
                     db=db,
                     job_run=job_run,
-                    status=AfterCloseRunStatus.SUCCEEDED,
-                    message=(
-                        f"日线覆盖率不足未触发 DSA，编排结束: "
-                        f"covered={batch_result.daily_covered}, "
-                        f"total={batch_result.daily_total}, "
-                        f"coverage={batch_result.daily_coverage}"
-                    ),
-                    payload={
-                        "daily_covered": batch_result.daily_covered,
-                        "daily_total": batch_result.daily_total,
-                        "daily_coverage": batch_result.daily_coverage,
-                    },
+                    status=AfterCloseRunStatus.REFRESHING_DAILY,
+                    message=f"开始刷新日线: trade_date={trade_date}",
                 )
-                job_run.status = "succeeded"
-                job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
                 await db.commit()
 
-            logger.info(
-                "[AfterClose] DSA 未触发，编排成功结束: job_run_id=%s", job_run_id,
+            # 调用 bars_scheduler（使用独立 session，内部会传 job_run_id 写事件）
+            batch_result = await bars_service.refresh_all_instruments(
+                trade_date=trade_date,
+                db_session=None,  # 服务内部创建 session
+                job_run_id=job_run_id,
             )
-            return
+            dsa_run_id = batch_result.dsa_run_id
+
+            if dsa_run_id is None:
+                # [AfterClose] - 覆盖率不足或 DSA 未触发，标记成功结束（非错误）
+                async with AsyncSessionLocal() as db:
+                    job_run = await db.get(SchedulerJobRun, job_run_id)
+                    await _update_orchestrator_status(
+                        db=db,
+                        job_run=job_run,
+                        status=AfterCloseRunStatus.SUCCEEDED,
+                        message=(
+                            f"日线覆盖率不足未触发 DSA，编排结束: "
+                            f"covered={batch_result.daily_covered}, "
+                            f"total={batch_result.daily_total}, "
+                            f"coverage={batch_result.daily_coverage}"
+                        ),
+                        payload={
+                            "daily_covered": batch_result.daily_covered,
+                            "daily_total": batch_result.daily_total,
+                            "daily_coverage": batch_result.daily_coverage,
+                        },
+                    )
+                    job_run.status = "succeeded"
+                    job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+                    await _update_heartbeat_and_step(
+                        db, job_run, "succeeded", worker_id,
+                    )
+                    await db.commit()
+
+                logger.info(
+                    "[AfterClose] DSA 未触发，编排成功结束: job_run_id=%s", job_run_id,
+                )
+                return
+
+            # [Phase5] - refreshing_daily 完成，更新心跳 + 检查点
+            async with AsyncSessionLocal() as db:
+                job_run = await db.get(SchedulerJobRun, job_run_id)
+                await _update_heartbeat_and_step(
+                    db, job_run, AfterCloseRunStatus.REFRESHING_DAILY.value, worker_id,
+                )
+                await db.commit()
+        else:
+            # [Phase5] - 断点恢复跳过日线刷新，dsa_run_id 从 metadata 读取
+            # [Phase6] - dsa_only 模式：跳过日线刷新，直接创建 DSA run（覆盖率已由 API 层校验）
+            mode = meta.get("mode")
+            if dsa_run_id is None:
+                if mode == "dsa_only":
+                    # [Phase6] - dsa_only 模式：直接调用 create_batch_run 创建 DSA run
+                    from app.constants.strategy_keys import DSA_SELECTOR
+                    logger.info(
+                        "[AfterClose] dsa_only 模式: 跳过日线刷新，直接创建 DSA run: "
+                        "job_run_id=%s, trade_date=%s",
+                        job_run_id, trade_date,
+                    )
+                    async with AsyncSessionLocal() as db:
+                        dsa_run = await batch_service.create_batch_run(
+                            db=db,
+                            strategy_key=DSA_SELECTOR,
+                            trade_date=trade_date,
+                            run_type="scheduled",
+                        )
+                        await db.commit()
+                        dsa_run_id = dsa_run.id
+                        # 更新 metadata 记录 dsa_run_id
+                        job_run = await db.get(SchedulerJobRun, job_run_id)
+                        await _update_orchestrator_status(
+                            db=db,
+                            job_run=job_run,
+                            status=AfterCloseRunStatus.REFRESHING_DAILY,
+                            message=f"dsa_only 模式: 已创建 DSA run: dsa_run_id={dsa_run_id}",
+                            dsa_run_id=dsa_run_id,
+                            payload={"mode": "dsa_only", "dsa_run_id": str(dsa_run_id)},
+                        )
+                        await _update_heartbeat_and_step(
+                            db, job_run, AfterCloseRunStatus.REFRESHING_DAILY.value, worker_id,
+                        )
+                        await db.commit()
+                else:
+                    raise ValueError(
+                        f"断点恢复: last_completed_step={last_completed_step} "
+                        f"但 metadata 缺少 dsa_run_id: job_run_id={job_run_id}"
+                    )
 
         # ---- 步骤 2: waiting_dsa_worker ----
-        async with AsyncSessionLocal() as db:
-            job_run = await db.get(SchedulerJobRun, job_run_id)
-            await _update_orchestrator_status(
-                db=db,
-                job_run=job_run,
-                status=AfterCloseRunStatus.WAITING_DSA_WORKER,
-                message=f"等待 DSA Worker 执行完成: dsa_run_id={dsa_run_id}",
+        if not skip_wait:
+            async with AsyncSessionLocal() as db:
+                job_run = await db.get(SchedulerJobRun, job_run_id)
+                await _update_orchestrator_status(
+                    db=db,
+                    job_run=job_run,
+                    status=AfterCloseRunStatus.WAITING_DSA_WORKER,
+                    message=f"等待 DSA Worker 执行完成: dsa_run_id={dsa_run_id}",
+                    dsa_run_id=dsa_run_id,
+                    payload={"dsa_run_id": str(dsa_run_id)},
+                )
+                await db.commit()
+
+            # 轮询 DSA run 状态（每轮更新心跳，防止 waiting_dsa_worker 阶段被误判为 stale）
+            dsa_final_status = await _poll_dsa_run_status(
                 dsa_run_id=dsa_run_id,
-                payload={"dsa_run_id": str(dsa_run_id)},
-            )
-            await db.commit()
-
-        # 轮询 DSA run 状态
-        dsa_final_status = await _poll_dsa_run_status(
-            dsa_run_id=dsa_run_id,
-            poll_interval=dsa_poll_interval,
-            timeout=dsa_poll_timeout,
-        )
-
-        if dsa_final_status != "completed":
-            raise RuntimeError(
-                f"DSA 运行未完成: dsa_run_id={dsa_run_id}, "
-                f"final_status={dsa_final_status}"
+                poll_interval=dsa_poll_interval,
+                timeout=dsa_poll_timeout,
+                job_run_id=job_run_id,
+                worker_id=worker_id,
             )
 
-        # ---- 步骤 3: quality_gate ----
-        async with AsyncSessionLocal() as db:
-            job_run = await db.get(SchedulerJobRun, job_run_id)
-            dsa_run = await db.get(StrategyRun, dsa_run_id)
-            if dsa_run is None:
-                raise ValueError(f"DSA 运行记录不存在: dsa_run_id={dsa_run_id}")
-
-            quality_passed = await batch_service._check_quality_gates(dsa_run)
-            await _update_orchestrator_status(
-                db=db,
-                job_run=job_run,
-                status=AfterCloseRunStatus.QUALITY_GATE,
-                message=(
-                    f"质量门禁{'通过' if quality_passed else '未通过'}: "
-                    f"dsa_run_id={dsa_run_id}, "
-                    f"succeeded={dsa_run.succeeded_count}, "
-                    f"total={dsa_run.total_instruments}, "
-                    f"failed={dsa_run.failed_count}"
-                ),
-                dsa_run_id=dsa_run_id,
-                payload={
-                    "quality_passed": quality_passed,
-                    "succeeded_count": dsa_run.succeeded_count,
-                    "total_instruments": dsa_run.total_instruments,
-                    "failed_count": dsa_run.failed_count,
-                },
-            )
-            await db.commit()
-
-            if not quality_passed:
+            if dsa_final_status != "completed":
                 raise RuntimeError(
-                    f"质量门禁未通过: dsa_run_id={dsa_run_id}, "
-                    f"status={dsa_run.status}"
+                    f"DSA 运行未完成: dsa_run_id={dsa_run_id}, "
+                    f"final_status={dsa_final_status}"
                 )
 
-        # ---- 步骤 4: publishing ----
-        async with AsyncSessionLocal() as db:
-            job_run = await db.get(SchedulerJobRun, job_run_id)
-            await _update_orchestrator_status(
-                db=db,
-                job_run=job_run,
-                status=AfterCloseRunStatus.PUBLISHING,
-                message=f"开始发布 DSA 结果: dsa_run_id={dsa_run_id}",
-                dsa_run_id=dsa_run_id,
-            )
-            await db.commit()
+            # [Phase5] - waiting_dsa_worker 完成，更新心跳 + 检查点
+            async with AsyncSessionLocal() as db:
+                job_run = await db.get(SchedulerJobRun, job_run_id)
+                await _update_heartbeat_and_step(
+                    db, job_run, AfterCloseRunStatus.WAITING_DSA_WORKER.value, worker_id,
+                )
+                await db.commit()
 
-        # 调用 publish_run（使用独立 session）
-        async with AsyncSessionLocal() as db:
-            published_run = await batch_service.publish_run(db, dsa_run_id)
-            await db.commit()
+        # ---- 步骤 3: quality_gate ----
+        if not skip_quality:
+            async with AsyncSessionLocal() as db:
+                job_run = await db.get(SchedulerJobRun, job_run_id)
+                dsa_run = await db.get(StrategyRun, dsa_run_id)
+                if dsa_run is None:
+                    raise ValueError(f"DSA 运行记录不存在: dsa_run_id={dsa_run_id}")
+
+                quality_passed = await batch_service._check_quality_gates(dsa_run)
+                await _update_orchestrator_status(
+                    db=db,
+                    job_run=job_run,
+                    status=AfterCloseRunStatus.QUALITY_GATE,
+                    message=(
+                        f"质量门禁{'通过' if quality_passed else '未通过'}: "
+                        f"dsa_run_id={dsa_run_id}, "
+                        f"succeeded={dsa_run.succeeded_count}, "
+                        f"total={dsa_run.total_instruments}, "
+                        f"failed={dsa_run.failed_count}"
+                    ),
+                    dsa_run_id=dsa_run_id,
+                    payload={
+                        "quality_passed": quality_passed,
+                        "succeeded_count": dsa_run.succeeded_count,
+                        "total_instruments": dsa_run.total_instruments,
+                        "failed_count": dsa_run.failed_count,
+                    },
+                )
+                await db.commit()
+
+                if not quality_passed:
+                    raise RuntimeError(
+                        f"质量门禁未通过: dsa_run_id={dsa_run_id}, "
+                        f"status={dsa_run.status}"
+                    )
+
+            # [Phase5] - quality_gate 完成，更新心跳 + 检查点
+            async with AsyncSessionLocal() as db:
+                job_run = await db.get(SchedulerJobRun, job_run_id)
+                await _update_heartbeat_and_step(
+                    db, job_run, AfterCloseRunStatus.QUALITY_GATE.value, worker_id,
+                )
+                await db.commit()
+
+        # ---- 步骤 4: publishing ----
+        if not skip_publish:
+            async with AsyncSessionLocal() as db:
+                job_run = await db.get(SchedulerJobRun, job_run_id)
+                await _update_orchestrator_status(
+                    db=db,
+                    job_run=job_run,
+                    status=AfterCloseRunStatus.PUBLISHING,
+                    message=f"开始发布 DSA 结果: dsa_run_id={dsa_run_id}",
+                    dsa_run_id=dsa_run_id,
+                )
+                await db.commit()
+
+            # 调用 publish_run（使用独立 session）
+            async with AsyncSessionLocal() as db:
+                published_run = await batch_service.publish_run(db, dsa_run_id)
+                await db.commit()
+
+            # [Phase5] - publishing 完成，更新心跳 + 检查点
+            async with AsyncSessionLocal() as db:
+                job_run = await db.get(SchedulerJobRun, job_run_id)
+                await _update_heartbeat_and_step(
+                    db, job_run, AfterCloseRunStatus.PUBLISHING.value, worker_id,
+                )
+                await db.commit()
 
         # ---- 步骤 5: succeeded ----
         async with AsyncSessionLocal() as db:
             job_run = await db.get(SchedulerJobRun, job_run_id)
+            # published_run 可能为 None（断点恢复跳过 publishing 时）
+            published_at_str = (
+                published_run.published_at.isoformat()
+                if published_run is not None and published_run.published_at
+                else None
+            )
+            success_message = (
+                f"盘后编排成功完成: dsa_run_id={dsa_run_id}"
+                + (f", published_at={published_run.published_at}"
+                   if published_run is not None else "")
+            )
             await _update_orchestrator_status(
                 db=db,
                 job_run=job_run,
                 status=AfterCloseRunStatus.SUCCEEDED,
-                message=(
-                    f"盘后编排成功完成: dsa_run_id={dsa_run_id}, "
-                    f"published_at={published_run.published_at}"
-                ),
+                message=success_message,
                 dsa_run_id=dsa_run_id,
-                payload={
-                    "published_at": published_run.published_at.isoformat()
-                    if published_run.published_at
-                    else None,
-                },
+                payload={"published_at": published_at_str},
             )
             job_run.status = "succeeded"
             job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+            await _update_heartbeat_and_step(
+                db, job_run, "succeeded", worker_id,
+            )
             await db.commit()
 
         logger.info(
@@ -468,6 +696,8 @@ async def execute_after_close_run(
                     job_run.status = "failed"
                     job_run.error_message = str(exc)[:500]
                     job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+                    if worker_id is not None:
+                        job_run.worker_instance_id = worker_id
                     await db.commit()
         except Exception as inner_exc:
             # [AfterClose] - 写 ERROR 事件本身失败，记录日志但不吞没原异常
@@ -482,13 +712,20 @@ async def _poll_dsa_run_status(
     dsa_run_id: uuid.UUID,
     poll_interval: int,
     timeout: int,
+    *,
+    job_run_id: uuid.UUID | None = None,
+    worker_id: str | None = None,
 ) -> str:
     """[AfterClose] - 轮询 DSA StrategyRun.status 直到终态或超时。
+
+    每个轮询周期更新 job_run 心跳，防止长时间等待被误判为 stale。
 
     Args:
         dsa_run_id: DSA StrategyRun id
         poll_interval: 轮询间隔（秒）
         timeout: 超时（秒）
+        job_run_id: 编排任务 ID（非 None 时每轮更新心跳）
+        worker_id: Worker 实例标识
 
     Returns:
         DSA run 最终状态（completed/failed/partial_failed/...）
@@ -513,6 +750,24 @@ async def _poll_dsa_run_status(
                 )
                 return status
 
+        # [Phase7] - 每轮更新心跳，防止 waiting_dsa_worker 阶段被误判为 stale
+        if job_run_id is not None:
+            try:
+                async with AsyncSessionLocal() as db:
+                    job_run = await db.get(SchedulerJobRun, job_run_id)
+                    if job_run is not None:
+                        await _update_heartbeat_and_step(
+                            db, job_run,
+                            AfterCloseRunStatus.WAITING_DSA_WORKER.value,
+                            worker_id,
+                        )
+                        await db.commit()
+            except Exception as exc:
+                logger.warning(
+                    "[AfterClose] DSA 轮询期间更新心跳失败: job_run_id=%s, error=%s",
+                    job_run_id, exc,
+                )
+
         await asyncio.sleep(poll_interval)
         elapsed += poll_interval
 
@@ -522,12 +777,24 @@ async def _poll_dsa_run_status(
     )
 
 
+# [Phase7] - 心跳超时阈值：running 状态下 heartbeat_at 落后 now 超过 60s 视为 stale
+_HEARTBEAT_STALE_SECONDS = 60
+
+
 async def get_after_close_run_status(
     db: AsyncSession,
     job_run_id: uuid.UUID,
     event_limit: int = 50,
 ) -> dict[str, Any]:
-    """查询盘后编排状态（orchestrator_status + 事件时间线 + DSA run 状态）。
+    """查询盘后编排状态（orchestrator_status + 事件时间线 + DSA run 状态 + [Phase7] 详情字段）。
+
+    [Phase7] 新增返回字段（供 Admin 后台展示）：
+    - worker_instance_id: Worker 实例标识
+    - heartbeat_at / lease_expires_at: ISO 格式心跳与租约时间
+    - last_completed_step: 最后成功步骤（从 metadata_json 解析）
+    - interrupt_reason: failed/interrupted 时拼接 "error_code: error_message"
+    - is_retryable: status in ('failed','interrupted')
+    - heartbeat_stale: running 且 heartbeat_at < now - 60s
 
     Args:
         db: 异步会话
@@ -536,11 +803,11 @@ async def get_after_close_run_status(
 
     Returns:
         dict:
-        - job_run: SchedulerJobRun 基本信息
-        - orchestrator_status: 当前编排状态（从 metadata_json 解析）
-        - trade_date: 交易日期
-        - dsa_run_id: DSA StrategyRun id（如有）
-        - dsa_run_status: DSA run 当前状态（如有）
+        - job_run_id / job_name / business_date / status / orchestrator_status
+        - trade_date / dsa_run_id / dsa_run_status
+        - started_at / finished_at / error_message
+        - [Phase7] worker_instance_id / heartbeat_at / lease_expires_at
+        - [Phase7] last_completed_step / interrupt_reason / is_retryable / heartbeat_stale
         - events: 事件时间线列表
 
     Raises:
@@ -558,6 +825,7 @@ async def get_after_close_run_status(
     orchestrator_status = meta.get("orchestrator_status", "unknown")
     trade_date_str = meta.get("trade_date")
     dsa_run_id_str = meta.get("dsa_run_id")
+    last_completed_step = meta.get("last_completed_step")
 
     dsa_run_status: str | None = None
     if dsa_run_id_str:
@@ -574,6 +842,26 @@ async def get_after_close_run_status(
 
     events = await list_events(db, job_run_id, limit=event_limit)
 
+    # [Phase7] - 中断原因：failed/interrupted 时拼接 error_code + error_message
+    interrupt_reason: str | None = None
+    if job_run.status in ("failed", "interrupted"):
+        code = job_run.error_code or "UNKNOWN"
+        msg = job_run.error_message or ""
+        interrupt_reason = f"{code}: {msg}" if msg else code
+
+    # [Phase7] - 是否允许重试：与 _RESUMABLE_STATUSES 对齐（failed/interrupted）
+    is_retryable = job_run.status in ("failed", "interrupted")
+
+    # [Phase7] - 心跳超时：仅 running 状态判断，heartbeat_at 落后 now 超过阈值视为 stale
+    heartbeat_stale = False
+    if job_run.status == "running" and job_run.heartbeat_at is not None:
+        now_sh = datetime.now(ZoneInfo("Asia/Shanghai"))
+        # heartbeat_at 可能是 naive datetime（旧数据），统一附加 tz 后比较
+        hb = job_run.heartbeat_at
+        if hb.tzinfo is None:
+            hb = hb.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+        heartbeat_stale = (now_sh - hb) > timedelta(seconds=_HEARTBEAT_STALE_SECONDS)
+
     return {
         "job_run_id": str(job_run_id),
         "job_name": job_run.job_name,
@@ -586,6 +874,14 @@ async def get_after_close_run_status(
         "started_at": job_run.started_at.isoformat() if job_run.started_at else None,
         "finished_at": job_run.finished_at.isoformat() if job_run.finished_at else None,
         "error_message": job_run.error_message,
+        # [Phase7] - 详情字段
+        "worker_instance_id": job_run.worker_instance_id,
+        "heartbeat_at": job_run.heartbeat_at.isoformat() if job_run.heartbeat_at else None,
+        "lease_expires_at": job_run.lease_expires_at.isoformat() if job_run.lease_expires_at else None,
+        "last_completed_step": last_completed_step,
+        "interrupt_reason": interrupt_reason,
+        "is_retryable": is_retryable,
+        "heartbeat_stale": heartbeat_stale,
         "events": [
             {
                 "id": str(e.id),
@@ -608,7 +904,7 @@ async def retry_after_close_run(
 
     流程：
     1. 加载 job_run，校验为编排任务且 status=failed
-    2. 重置 status=running, error_message=None, finished_at=None
+    2. 重置 status=queued, error_message=None, finished_at=None（由 Worker 领取）
     3. 更新 orchestrator_status=queued + 写 retry 事件
     4. commit
 
@@ -634,8 +930,8 @@ async def retry_after_close_run(
             f"仅 failed 状态可重试（当前 {job_run.status}）: job_run_id={job_run_id}"
         )
 
-    # 重置任务状态
-    job_run.status = "running"
+    # [Phase5] - 重置为 queued（不是 running），由独立 Worker 领取执行
+    job_run.status = "queued"
     job_run.error_message = None
     job_run.error_code = None
     job_run.finished_at = None
@@ -683,9 +979,23 @@ if __name__ == "__main__":
     assert "job_run_id" in params and "trade_date" in params, (
         f"execute_after_close_run 缺少必要参数: {params}"
     )
+    # [Phase5] - worker_id 参数支持断点恢复 + 心跳
+    assert "worker_id" in params, f"execute_after_close_run 缺少 worker_id 参数: {params}"
+    assert sig.parameters["worker_id"].default is None, (
+        "worker_id 默认值应为 None"
+    )
     assert sig.parameters["dsa_poll_interval"].default == _DSA_POLL_INTERVAL_SECONDS
     assert sig.parameters["dsa_poll_timeout"].default == _DSA_POLL_TIMEOUT_SECONDS
     print(f"execute_after_close_run 签名 ✓: {sorted(params)}")
+
+    # [Phase5] - 验证 _update_heartbeat_and_step 签名
+    sig = inspect.signature(_update_heartbeat_and_step)
+    params = set(sig.parameters.keys())
+    assert params == {"db", "job_run", "last_completed_step", "worker_id"}, (
+        f"_update_heartbeat_and_step 参数不匹配: {params}"
+    )
+    assert sig.parameters["worker_id"].default is None
+    print(f"_update_heartbeat_and_step 签名 ✓: {sorted(params)}")
 
     # 验证 get_after_close_run_status 签名
     sig = inspect.signature(get_after_close_run_status)

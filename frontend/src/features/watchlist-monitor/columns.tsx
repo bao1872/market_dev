@@ -4,6 +4,22 @@ import type { DataTableColumn } from '@/components/StrategyDataTable'
 import type { WatchlistMonitorRow, MonitorStatus } from './types'
 import { fmtNum, fmtTime } from './adapters'
 
+/** [自选监控] - 事件类型翻译（advice.md P1 通俗化映射，唯一实现） */
+export function translateEventType(eventType: string): string {
+  switch (eventType) {
+    case 'node_cluster_touch':
+      return '触及成交密集区'
+    case 'bb_upper_touch':
+      return '触及近期波动上沿'
+    case 'bb_mid_touch':
+      return '回到近期价格中枢'
+    case 'bb_lower_touch':
+      return '触及近期波动下沿'
+    default:
+      return eventType
+  }
+}
+
 /** 监控状态徽章渲染 */
 export function MonitorStatusBadge({ status }: { status: MonitorStatus }) {
   switch (status) {
@@ -104,7 +120,7 @@ export function getWatchlistMonitorColumns(
     },
     {
       key: 'bbUpper',
-      title: 'BB上轨',
+      title: '近期波动上沿',
       dataType: 'number',
       sortable: true,
       filterable: false,
@@ -196,7 +212,7 @@ export function getWatchlistMonitorColumns(
       sortValue: (row) => row.latest_event?.event_time ?? '',
       render: (row) => {
         if (!row.latest_event) return <span className="muted">-</span>
-        const eventType = row.latest_event.event_type
+        const eventType = translateEventType(row.latest_event.event_type)
         const time = fmtTime(row.latest_event.event_time)
         const boundary = row.latest_event.boundary
         return (

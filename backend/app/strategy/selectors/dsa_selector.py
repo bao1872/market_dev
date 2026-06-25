@@ -683,7 +683,14 @@ class DSASelector(StrategyRuntime):
         """
         daily_df = context.bars_daily
         if daily_df is None or len(daily_df) < self._dsa_config.prd:
-            return {"dsa_vwap": [], "dsa_dir": []}
+            return {
+                "dsa_vwap": [],
+                "dsa_dir": [],
+                "direction": [],
+                "regime_id": [],
+                "anchor_id": [],
+                "anchor_time": [],
+            }
 
         vwap_series, dir_series, _, _ = dynamic_swing_anchored_vwap(daily_df, self._dsa_config)
         vwap_series, dir_series = _remove_dsa_lookahead(

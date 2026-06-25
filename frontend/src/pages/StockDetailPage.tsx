@@ -29,10 +29,15 @@ import {
   useUpsertStockMemo,
   useDeleteStockMemo,
   useRealtimeQuote,
+  useNotificationChannels,
 } from '@/hooks/useApi'
+import { useMutation } from '@tanstack/react-query'
 import { resolveStrategy } from '@/lib/strategy-manifest'
 import { STRATEGY_KEYS } from '@/constants/strategyKeys'
 import { useToast } from '@/store/toast'
+import { useAuthStore } from '@/store/auth'
+import { sendStockDetailFeishu } from '@/api/endpoints'
+import type { StockDetailFeishuResponse } from '@/api/endpoints'
 
 // 市场代码 -> 中文标签映射
 const MARKET_LABELS: Record<string, string> = {
@@ -75,6 +80,12 @@ export default function StockDetailPage() {
   // 数据查询：股票基本信息
   const instrumentQuery = useInstrumentBySymbol(symbol)
   const instrumentId = instrumentQuery.data?.id
+
+  // admin 权限判断 + 通知渠道查询（仅 admin 可见「发送到飞书」按钮）
+  const user = useAuthStore((s) => s.user)
+  const isAdmin = user?.role === 'admin'
+  const channelsQuery = useNotificationChannels()
+  const activeChannels = (channelsQuery.data?.items ?? []).filter((c) => c.status === 'active')
 
   // 数据查询：K 线行情（依赖 instrumentId，前复权，与 indicators 的 bars=250 对齐避免数据范围不匹配）
   const barsQuery = useBars(instrumentId, {
@@ -126,6 +137,18 @@ export default function StockDetailPage() {
   const stockMemoQuery = useStockMemo(instrumentId)
   const upsertMemo = useUpsertStockMemo()
   const deleteMemo = useDeleteStockMemo()
+
+  // 发送到飞书（admin only） - 复用监控链路，返回 4 个分步骤布尔结果
+  const [feishuOpen, setFeishuOpen] = useState(false)
+  const [feishuResult, setFeishuResult] = useState<StockDetailFeishuResponse | null>(null)
+  const [selectedChannelId, setSelectedChannelId] = useState<string>('')
+  const sendFeishuMutation = useMutation<
+    StockDetailFeishuResponse,
+    Error,
+    { instrId: string; channelId: string }
+  >({
+    mutationFn: ({ instrId, channelId }) => sendStockDetailFeishu(instrId, channelId),
+  })
 
   useEffect(() => {
     if (stockMemoQuery.data) {
@@ -212,6 +235,32 @@ export default function StockDetailPage() {
         { onSuccess: () => showToast('操作完成', '已加入自选') },
       )
     }
+  }
+
+  // 发送到飞书（admin only） - 调用后端复用监控链路，根据 4 布尔结果显示 toast
+  const handleSendFeishu = (channelId: string) => {
+    if (!instrumentId) return
+    setFeishuResult(null)
+    sendFeishuMutation.mutate(
+      { instrId: instrumentId, channelId },
+      {
+        onSuccess: (res) => {
+          setFeishuResult(res)
+          if (res.text_ok && res.screenshot_ok && res.image_upload_ok && res.feishu_send_ok) {
+            showToast('发送成功', '文本+图片已发送到飞书')
+          } else {
+            const steps = [
+              res.text_ok ? '文本\u2713' : '文本\u2717',
+              res.screenshot_ok ? '截图\u2713' : '截图\u2717',
+              res.image_upload_ok ? '图片拉取\u2713' : '图片拉取\u2717',
+              res.feishu_send_ok ? '飞书发送\u2713' : '飞书发送\u2717',
+            ]
+            showToast('部分失败', steps.join(' \u00b7 '))
+          }
+        },
+        onError: () => showToast('发送失败', '请重试'),
+      },
+    )
   }
 
   // 全屏查看
@@ -379,6 +428,19 @@ export default function StockDetailPage() {
           <button className="btn small" onClick={() => setMemoOpen(true)}>
             备忘录
           </button>
+          {isAdmin && (
+            <button
+              className="btn small"
+              onClick={() => {
+                setFeishuResult(null)
+                setSelectedChannelId(activeChannels[0]?.id ?? '')
+                setFeishuOpen(true)
+              }}
+              disabled={!instrumentId}
+            >
+              发送到飞书
+            </button>
+          )}
         </div>
       </div>
 
@@ -447,6 +509,105 @@ export default function StockDetailPage() {
                 disabled={upsertMemo.isPending || !memoContent.trim()}
               >
                 保存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 发送到飞书模态框（admin only） - 选择渠道 + 显示 4 布尔结果 */}
+      {feishuOpen && (
+        <div
+          className="modal-backdrop open"
+          onClick={() => !sendFeishuMutation.isPending && setFeishuOpen(false)}
+        >
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 500 }}>
+            <div className="modal-head">
+              <h3>发送到飞书 - {inst.name}</h3>
+              <button
+                className="icon-btn"
+                onClick={() => !sendFeishuMutation.isPending && setFeishuOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="modal-body">
+              {activeChannels.length === 0 ? (
+                <p style={{ color: '#888', padding: '12px 0' }}>
+                  暂无 active 通知渠道，请先在通知渠道页面创建并启用一个飞书渠道。
+                </p>
+              ) : (
+                <>
+                  <p style={{ marginBottom: 8, fontSize: 13, color: '#666' }}>选择目标渠道：</p>
+                  <select
+                    className="memo-textarea"
+                    style={{ height: 'auto', padding: '8px', marginBottom: 12 }}
+                    value={selectedChannelId}
+                    onChange={(e) => setSelectedChannelId(e.target.value)}
+                  >
+                    {activeChannels.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.display_name}（{c.adapter_type}）
+                      </option>
+                    ))}
+                  </select>
+
+                  {feishuResult && (
+                    <div
+                      style={{
+                        padding: '12px',
+                        background: '#f5f5f5',
+                        borderRadius: 4,
+                        fontSize: 13,
+                      }}
+                    >
+                      <div style={{ marginBottom: 4 }}>
+                        文本投递:{' '}
+                        <b style={{ color: feishuResult.text_ok ? '#52c41a' : '#ff4d4f' }}>
+                          {feishuResult.text_ok ? '成功' : '失败'}
+                        </b>
+                      </div>
+                      <div style={{ marginBottom: 4 }}>
+                        截图:{' '}
+                        <b style={{ color: feishuResult.screenshot_ok ? '#52c41a' : '#ff4d4f' }}>
+                          {feishuResult.screenshot_ok ? '成功' : '失败'}
+                        </b>
+                      </div>
+                      <div style={{ marginBottom: 4 }}>
+                        图片拉取:{' '}
+                        <b
+                          style={{
+                            color: feishuResult.image_upload_ok ? '#52c41a' : '#ff4d4f',
+                          }}
+                        >
+                          {feishuResult.image_upload_ok ? '成功' : '失败'}
+                        </b>
+                      </div>
+                      <div>
+                        飞书发送:{' '}
+                        <b style={{ color: feishuResult.feishu_send_ok ? '#52c41a' : '#ff4d4f' }}>
+                          {feishuResult.feishu_send_ok ? '成功' : '失败'}
+                        </b>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+            <div className="modal-foot">
+              <button
+                className="btn primary"
+                disabled={
+                  activeChannels.length === 0 ||
+                  sendFeishuMutation.isPending ||
+                  !instrumentId ||
+                  !selectedChannelId
+                }
+                onClick={() => {
+                  if (selectedChannelId) handleSendFeishu(selectedChannelId)
+                }}
+              >
+                {sendFeishuMutation.isPending ? '发送中...' : '发送'}
               </button>
             </div>
           </div>

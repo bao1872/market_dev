@@ -806,11 +806,35 @@ export function useCreateAfterCloseRun() {
   })
 }
 
+/** [Phase6] 仅重算今日 DSA 变更（要求当日日线覆盖率 ≥ 90%） */
+export function useDsaOnlyRun() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (tradeDate: string) => api.createDsaOnlyRun(tradeDate),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['after-close-runs'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'system-overview'] })
+    },
+  })
+}
+
 /** 重试盘后编排变更 */
 export function useRetryAfterCloseRun() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (runId: string) => api.retryAfterCloseRun(runId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['after-close-runs'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'system-overview'] })
+    },
+  })
+}
+
+/** [Phase6] 从失败步骤继续变更（保留断点检查点） */
+export function useResumeAfterCloseRun() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (runId: string) => api.resumeAfterCloseRun(runId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['after-close-runs'] })
       queryClient.invalidateQueries({ queryKey: ['admin', 'system-overview'] })

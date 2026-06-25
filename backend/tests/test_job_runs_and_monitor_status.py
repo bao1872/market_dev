@@ -4,9 +4,12 @@
 - watchlist monitor-status 返回 market_session / calculation_status / freshness_seconds / last_bar_time
 - 盘后时间 calculation_status 不因 30 分钟规则变成 STALE
 - SchedulerJobRun 心跳、租约、worker_instance_id、last_cycle_at
-- Worker 启动恢复过期 running 任务为 interrupted
 - strategy_scheduler 找不到策略时正确结束 job_run 并记录 strategy_run_id
 - monitor_scheduler 按交易时段聚合 session
+
+注意：Worker 启动恢复过期 running 任务的测试已迁移至
+tests/test_scheduler_job_run_recovery_service.py（基于 PostgreSQL 测试库，
+覆盖 recover_stale_scheduler_job_runs 的 5 个场景）。
 """
 
 from __future__ import annotations
@@ -30,7 +33,6 @@ from app.worker import (
     _create_job_run,
     _finish_job_run,
     _update_job_heartbeat,
-    recover_interrupted_job_runs,
 )
 
 
@@ -255,59 +257,6 @@ async def test_update_job_heartbeat_renews_lease(test_db) -> None:
         attached_lease_expires_at = attached.lease_expires_at
     assert attached.heartbeat_at >= job_run.heartbeat_at
     assert attached_lease_expires_at > old_lease
-
-
-@pytest.mark.asyncio
-async def test_recover_interrupted_job_runs_marks_expired(test_db) -> None:
-    """启动恢复应将过期 lease 的 running 任务标记为 interrupted。"""
-    job_run = SchedulerJobRun(
-        id=uuid.uuid4(),
-        job_name="expired_job",
-        business_date="2026-06-24",
-        status="running",
-        scheduled_at=datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(minutes=10),
-        started_at=datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(minutes=10),
-        heartbeat_at=datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(minutes=10),
-        lease_expires_at=datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(minutes=5),
-        worker_instance_id="old-instance",
-    )
-    test_db.add(job_run)
-    await test_db.commit()
-
-    recovered = await recover_interrupted_job_runs(test_db)
-    assert recovered == 1
-
-    attached = await test_db.get(SchedulerJobRun, job_run.id)
-    assert attached is not None
-    # 同 session 中 get() 可能返回 identity map 缓存对象，先刷新再断言
-    await test_db.refresh(attached)
-    assert attached.status == "interrupted"
-    assert attached.error_message is not None
-
-
-@pytest.mark.asyncio
-async def test_recover_interrupted_job_runs_ignores_fresh(test_db) -> None:
-    """未过期 lease 的 running 任务不应被恢复。"""
-    job_run = SchedulerJobRun(
-        id=uuid.uuid4(),
-        job_name="fresh_job",
-        business_date="2026-06-24",
-        status="running",
-        scheduled_at=datetime.now(ZoneInfo("Asia/Shanghai")),
-        started_at=datetime.now(ZoneInfo("Asia/Shanghai")),
-        heartbeat_at=datetime.now(ZoneInfo("Asia/Shanghai")),
-        lease_expires_at=datetime.now(ZoneInfo("Asia/Shanghai")) + timedelta(minutes=5),
-        worker_instance_id="fresh-instance",
-    )
-    test_db.add(job_run)
-    await test_db.commit()
-
-    recovered = await recover_interrupted_job_runs(test_db)
-    assert recovered == 0
-
-    attached = await test_db.get(SchedulerJobRun, job_run.id)
-    assert attached is not None
-    assert attached.status == "running"
 
 
 # ==================== Task 10: strategy_scheduler job_run 完整性 ====================

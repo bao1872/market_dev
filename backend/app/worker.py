@@ -8,10 +8,11 @@
     WORKER_TYPE=strategy_scheduler python -m app.worker   # 运行选股策略调度 Worker（每日 18:30，兜底机制）
     WORKER_TYPE=calendar_scheduler python -m app.worker  # 运行日历调度 Worker（每日 02:00）
     WORKER_TYPE=monitor_scheduler python -m app.worker    # 运行监控调度 Worker（交易时段 9:30-15:00）
-    WORKER_TYPE=all python -m app.worker              # 同时运行全部（开发模式）
+    WORKER_TYPE=watchdog python -m app.worker          # 运行恢复看门狗（每 60s 清理僵尸任务）
+    WORKER_TYPE=all python -m app.worker              # 同时运行全部（开发模式，含看门狗）
 
 环境变量：
-    WORKER_TYPE: worker 类型（outbox/delivery/strategy_batch/bars_scheduler/strategy_scheduler/calendar_scheduler/monitor_scheduler/all，默认 all）
+    WORKER_TYPE: worker 类型（outbox/delivery/strategy_batch/bars_scheduler/strategy_scheduler/calendar_scheduler/monitor_scheduler/after_close_orchestrator/watchdog/all，默认 all）
     WORKER_INTERVAL: 轮询间隔秒数（默认 5）
     WORKER_BATCH_SIZE: 单次轮询最大记录数（默认 100）
     WORKER_MAX_RETRY: 最大重试次数（默认 5）
@@ -37,6 +38,9 @@ from zoneinfo import ZoneInfo
 
 from app.db import AsyncSessionLocal
 from app.models.scheduler_job_run import SchedulerJobRun
+from app.services.scheduler_job_run_recovery_service import (
+    recover_stale_scheduler_job_runs,
+)
 
 logger = logging.getLogger("worker")
 
@@ -160,7 +164,10 @@ async def _create_job_run(
     """
     if run_key is not None:
         from app.services.idempotency_service import acquire_job_run_lock
-        job_run = await acquire_job_run_lock(
+        # [Idempotency] - acquire_job_run_lock 返回 (job_run, is_new)：
+        # - is_new=True：新建任务，commit 并返回 job_run
+        # - is_new=False：已有活跃任务(existing)或抢锁失败(None)，返回 None（调用方 SKIPPED_DUPLICATE）
+        job_run, is_new = await acquire_job_run_lock(
             db=db,
             run_key=run_key,
             job_name=job_name,
@@ -170,10 +177,13 @@ async def _create_job_run(
             metadata=metadata,
             worker_instance_id=_WORKER_INSTANCE_ID,
         )
-        if job_run is not None:
+        if is_new and job_run is not None:
             await db.commit()
             await db.refresh(job_run)
-        return job_run
+            return job_run
+        # is_new=False：已有活跃任务或抢锁失败，调用方应 SKIPPED_DUPLICATE
+        # 注意：不 commit，acquire_job_run_lock 内部 recover_stale UPDATE 由抢到锁的事务统一 commit
+        return None
 
     # 向后兼容：无 run_key 时保持原行为直接 INSERT
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
@@ -249,37 +259,6 @@ async def _update_job_heartbeat(
     attached.heartbeat_at = now
     attached.lease_expires_at = now + timedelta(seconds=lease_seconds)
     await db.commit()
-
-
-async def recover_interrupted_job_runs(db: AsyncSessionLocal) -> int:
-    """Worker 启动时恢复过期租约的 running 任务。
-
-    将 status=running 且 lease_expires_at < now() 的记录更新为 interrupted，
-    避免崩溃重启后页面仍显示虚假的"运行中"。
-    """
-    from sqlalchemy import update
-
-    now = datetime.now(ZoneInfo("Asia/Shanghai"))
-    stmt = (
-        update(SchedulerJobRun)
-        .where(
-            SchedulerJobRun.status == "running",
-            SchedulerJobRun.lease_expires_at < now,
-        )
-        .values(
-            status="interrupted",
-            finished_at=now,
-            heartbeat_at=now,
-            lease_expires_at=now,
-            error_message="Worker 租约过期，启动恢复",
-        )
-    )
-    result = await db.execute(stmt)
-    await db.commit()
-    recovered = result.rowcount or 0
-    if recovered > 0:
-        logger.info("启动恢复: %d 个过期 running 任务标记为 interrupted", recovered)
-    return recovered
 
 
 async def run_outbox_relay() -> None:
@@ -429,7 +408,8 @@ async def run_bars_scheduler_worker() -> None:
     # 启动时恢复过期 running 任务
     try:
         async with AsyncSessionLocal() as db:
-            recovered = await recover_interrupted_job_runs(db)
+            recovered = await recover_stale_scheduler_job_runs(db)
+            await db.commit()
             if recovered > 0:
                 logger.info("Bars Scheduler 启动恢复: %d 个过期任务", recovered)
     except Exception as exc:
@@ -613,7 +593,8 @@ async def run_strategy_scheduler_worker() -> None:
     # 启动时恢复过期 running 任务
     try:
         async with AsyncSessionLocal() as db:
-            recovered = await recover_interrupted_job_runs(db)
+            recovered = await recover_stale_scheduler_job_runs(db)
+            await db.commit()
             if recovered > 0:
                 logger.info("Strategy Scheduler 启动恢复: %d 个过期任务", recovered)
     except Exception as exc:
@@ -781,7 +762,8 @@ async def run_calendar_scheduler_worker() -> None:
     # 启动时恢复过期 running 任务
     try:
         async with AsyncSessionLocal() as db:
-            recovered = await recover_interrupted_job_runs(db)
+            recovered = await recover_stale_scheduler_job_runs(db)
+            await db.commit()
             if recovered > 0:
                 logger.info("Calendar Scheduler 启动恢复: %d 个过期任务", recovered)
     except Exception as exc:
@@ -919,7 +901,8 @@ async def run_monitor_scheduler_worker() -> None:
     # 启动时恢复过期的 monitor_scheduler running 任务
     try:
         async with AsyncSessionLocal() as db:
-            recovered = await recover_interrupted_job_runs(db)
+            recovered = await recover_stale_scheduler_job_runs(db)
+            await db.commit()
             if recovered > 0:
                 logger.info("Monitor Scheduler 启动恢复: %d 个过期任务", recovered)
     except Exception as exc:
@@ -1196,6 +1179,153 @@ async def _notify_monitor_status(
         logger.warning("监控状态通知整体失败: %s", e)
 
 
+async def _recovery_watchdog_loop(interval_seconds: int = 60) -> None:
+    """[Recovery] - 后台看门狗：每 interval_seconds 调用 recover_stale_scheduler_job_runs。
+
+    覆盖场景：API 不重启但任务租约自然过期、Worker 被杀后无容器重启。
+    与各 Worker 启动恢复互补：启动恢复只在上次崩溃残留时执行一次，
+    看门狗持续运行，捕获运行期间产生的僵尸任务。
+
+    设计说明：
+    - 默认 60s 间隔，覆盖 lease 过期（120s）与 heartbeat 超时（90s）两种场景
+    - recover_stale_scheduler_job_runs 不 commit，本函数调用后立即 commit
+    - 异常不退出：recover 或 commit 失败仅记录日志，下个周期继续重试
+    - _shutdown 为 True 时退出循环（由信号处理设置）
+    """
+    _hb_task = asyncio.create_task(_heartbeat_loop("recovery_watchdog"))
+    logger.info("[Recovery] 看门狗启动（间隔=%ds）", interval_seconds)
+    while not _shutdown:
+        try:
+            async with AsyncSessionLocal() as db:
+                recovered = await recover_stale_scheduler_job_runs(db)
+                await db.commit()
+                if recovered > 0:
+                    logger.info("[Recovery] 看门狗恢复: %d 个过期任务", recovered)
+        except Exception as exc:
+            logger.exception("[Recovery] 看门狗异常: %s", exc)
+        await asyncio.sleep(interval_seconds)
+
+
+async def _after_close_poll_once() -> bool:
+    """[AfterCloseWorker] - 单次轮询：领取并执行一个 queued 盘后编排任务。
+
+    使用 SELECT ... FOR UPDATE SKIP LOCKED 领取任务，多个 Worker 实例只有一个能领取。
+    领取后更新 status='running' + worker_instance_id + heartbeat + lease，
+    然后调用 execute_after_close_run（含断点恢复 + 心跳更新）。
+
+    Returns:
+        True 如果领取到任务（无论执行成功与否），False 如果无 queued 任务
+    """
+    from datetime import date as date_cls
+
+    from sqlalchemy import select
+
+    from app.services.after_close_orchestrator import (
+        _ORCHESTRATOR_LEASE_SECONDS,
+        execute_after_close_run,
+    )
+
+    async with AsyncSessionLocal() as db:
+        # [AfterCloseWorker] - FOR UPDATE SKIP LOCKED 领取一个 queued 任务
+        stmt = (
+            select(SchedulerJobRun)
+            .where(
+                SchedulerJobRun.job_name == "after_close_orchestrator",
+                SchedulerJobRun.status == "queued",
+            )
+            .order_by(SchedulerJobRun.created_at)
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+        result = await db.execute(stmt)
+        job_run = result.scalar_one_or_none()
+
+        if job_run is None:
+            # 无 queued 任务，释放锁（rollback 释放 FOR UPDATE 锁）
+            await db.rollback()
+            return False
+
+        # 领取任务：更新 status='running' + worker + heartbeat + lease
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        job_run.status = "running"
+        job_run.worker_instance_id = _WORKER_INSTANCE_ID
+        if job_run.started_at is None:
+            job_run.started_at = now
+        job_run.heartbeat_at = now
+        job_run.lease_expires_at = now + timedelta(seconds=_ORCHESTRATOR_LEASE_SECONDS)
+        await db.commit()
+
+        # 提取 trade_date（expire_on_commit=False 让 commit 后属性仍可用）
+        meta = json.loads(job_run.metadata_json) if job_run.metadata_json else {}
+        trade_date_str = meta.get("trade_date")
+        job_run_id = job_run.id
+
+    if not trade_date_str:
+        logger.error(
+            "[AfterCloseWorker] 任务缺少 trade_date: job_run_id=%s", job_run_id,
+        )
+        return True  # 领取了但无法执行
+
+    trade_date = date_cls.fromisoformat(trade_date_str)
+
+    # 执行编排（异常由 execute_after_close_run 内部处理为 failed 后 re-raise）
+    # Worker 捕获 re-raised 异常仅记录日志，不崩溃
+    try:
+        await execute_after_close_run(
+            job_run_id=job_run_id,
+            trade_date=trade_date,
+            worker_id=_WORKER_INSTANCE_ID,
+        )
+    except Exception as exc:
+        logger.exception(
+            "[AfterCloseWorker] 执行异常: job_run_id=%s, error=%s", job_run_id, exc,
+        )
+        # execute_after_close_run 内部已标记 failed，此处仅记录不 re-raise
+
+    return True
+
+
+async def run_after_close_orchestrator_worker() -> None:
+    """[AfterCloseWorker] - 盘后编排独立 Worker：领取 queued 任务并执行。
+
+    使用 FOR UPDATE SKIP LOCKED 领取任务，多个 Worker 实例只有一个能领取。
+    每个轮询周期：
+    1. 启动恢复（清理上次崩溃残留的 running 任务）
+    2. _after_close_poll_once 领取并执行一个 queued 任务
+    3. sleep WORKER_INTERVAL 后继续轮询
+
+    设计说明：
+    - execute_after_close_run 内部含断点恢复 + 心跳更新，Worker 仅负责领取和调度
+    - 异常不退出：execute_after_close_run 内部标记 failed 后 re-raise，
+      Worker 捕获仅记录日志，等待下次轮询
+    """
+    _hb_task = asyncio.create_task(_heartbeat_loop("after_close_orchestrator"))
+    logger.info(
+        "[AfterCloseWorker] 启动（间隔=%ds）", WORKER_INTERVAL,
+    )
+
+    # 启动恢复：清理上次崩溃残留的 running 任务
+    try:
+        async with AsyncSessionLocal() as db:
+            recovered = await recover_stale_scheduler_job_runs(db)
+            await db.commit()
+            if recovered > 0:
+                logger.info(
+                    "[AfterCloseWorker] 启动恢复: %d 个过期任务", recovered,
+                )
+    except Exception as exc:
+        logger.exception("[AfterCloseWorker] 启动恢复异常: %s", exc)
+
+    while not _shutdown:
+        try:
+            await _after_close_poll_once()
+        except Exception as exc:
+            # _after_close_poll_once 内部已捕获 execute_after_close_run 异常，
+            # 此处仅捕获领取阶段的意外异常
+            logger.exception("[AfterCloseWorker] 轮询异常: %s", exc)
+        await asyncio.sleep(WORKER_INTERVAL)
+
+
 async def main() -> None:
     """主入口：根据 WORKER_TYPE 启动对应的 worker。"""
     logging.basicConfig(
@@ -1231,6 +1361,14 @@ async def main() -> None:
     if WORKER_TYPE in ("monitor_scheduler", "all"):
         tasks.append(asyncio.create_task(run_monitor_scheduler_worker()))
 
+    # [Phase5] - 盘后编排独立 Worker：领取 queued 任务并执行（断点恢复 + 心跳租约）
+    if WORKER_TYPE in ("after_close_orchestrator", "all"):
+        tasks.append(asyncio.create_task(run_after_close_orchestrator_worker()))
+
+    # [Recovery] - 看门狗：all 模式自动启动，或 WORKER_TYPE=watchdog 单独启动
+    if WORKER_TYPE in ("watchdog", "all"):
+        tasks.append(asyncio.create_task(_recovery_watchdog_loop()))
+
     if not tasks:
         logger.error("未知 WORKER_TYPE: %s", WORKER_TYPE)
         return
@@ -1246,7 +1384,7 @@ if __name__ == "__main__":
     print(f"WORKER_INTERVAL={WORKER_INTERVAL}")
     print(f"WORKER_BATCH_SIZE={WORKER_BATCH_SIZE}")
     print(f"WORKER_MAX_RETRY={WORKER_MAX_RETRY}")
-    assert WORKER_TYPE in ("outbox", "delivery", "strategy_batch", "bars_scheduler", "strategy_scheduler", "calendar_scheduler", "monitor_scheduler", "all"), \
+    assert WORKER_TYPE in ("outbox", "delivery", "strategy_batch", "bars_scheduler", "strategy_scheduler", "calendar_scheduler", "monitor_scheduler", "after_close_orchestrator", "watchdog", "all"), \
         f"未知 WORKER_TYPE: {WORKER_TYPE}"
     # 验证 worker 函数可调用
     assert callable(run_outbox_relay), "run_outbox_relay 应可调用"
@@ -1256,5 +1394,7 @@ if __name__ == "__main__":
     assert callable(run_strategy_scheduler_worker), "run_strategy_scheduler_worker 应可调用"
     assert callable(run_calendar_scheduler_worker), "run_calendar_scheduler_worker 应可调用"
     assert callable(run_monitor_scheduler_worker), "run_monitor_scheduler_worker 应可调用"
+    assert callable(run_after_close_orchestrator_worker), "run_after_close_orchestrator_worker 应可调用"
+    assert callable(_recovery_watchdog_loop), "_recovery_watchdog_loop 应可调用"
     print("OK: 配置验证通过")
     asyncio.run(main())

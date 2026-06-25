@@ -1,7 +1,7 @@
 // [自选监控] - 移动端卡片列表
 // 职责：在窄屏下以卡片形式展示自选监控数据
 import type { WatchlistMonitorRow } from './types'
-import { MonitorStatusBadge } from './columns'
+import { MonitorStatusBadge, translateEventType } from './columns'
 import { fmtNum } from './adapters'
 
 interface WatchlistMonitorCardProps {
@@ -35,38 +35,38 @@ function WatchlistMonitorCard({
           <b className="num">{fmtNum(row.current_price)}</b>
         </div>
         <div>
-          <span>BB上轨</span>
+          <span>近期波动上沿</span>
           <b className="num">{fmtNum(row.bb_upper)}</b>
         </div>
         <div>
-          <span>BB中轨</span>
+          <span>近期价格中枢</span>
           <b className="num">{fmtNum(row.bb_mid)}</b>
         </div>
         <div>
-          <span>BB下轨</span>
+          <span>近期波动下沿</span>
           <b className="num">{fmtNum(row.bb_lower)}</b>
         </div>
         <div>
-          <span>上节点</span>
+          <span>上方成交密集区</span>
           <b className="num">{fmtNum(row.upper_node_price)}</b>
         </div>
         <div>
-          <span>下节点</span>
+          <span>下方成交密集区</span>
           <b className="num">{fmtNum(row.lower_node_price)}</b>
         </div>
         <div>
-          <span>位置</span>
+          <span>当前区间位置</span>
           <b className="num">{fmtNum(row.position_0_1)}</b>
         </div>
         <div>
-          <span>POC</span>
+          <span>最密集成交价</span>
           <b className="num">{fmtNum(row.poc_price)}</b>
         </div>
       </div>
 
       <div className="watchlist-card-meta">
         <span>
-          最近触发: {row.latest_event ? `${row.latest_event.event_type} · ${row.latest_event.event_time.slice(11, 16)}` : '-'}
+          最近监控提示: {row.latest_event ? `${translateEventType(row.latest_event.event_type)} · ${row.latest_event.event_time.slice(11, 16)}` : '-'}
         </span>
         <span>更新时间: {row.updated_at ?? '-'}</span>
       </div>

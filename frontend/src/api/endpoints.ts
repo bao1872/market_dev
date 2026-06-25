@@ -364,6 +364,14 @@ export interface ChannelLatestEventTestResponse {
   diagnostics: Record<string, unknown>
 }
 
+/** 个股详情发送飞书响应 - 4 个分步骤布尔结果（用于定位卡点） */
+export interface StockDetailFeishuResponse {
+  text_ok: boolean
+  screenshot_ok: boolean
+  image_upload_ok: boolean
+  feishu_send_ok: boolean
+}
+
 /** 消息预览响应 */
 export interface NotificationPreviewResponse {
   dto: Record<string, unknown>
@@ -1095,6 +1103,18 @@ export async function testNotificationChannelLatestEvent(channelId: string): Pro
   return data
 }
 
+/** 个股详情发送飞书（admin only） - 复用监控链路，返回 4 个分步骤布尔结果 */
+export async function sendStockDetailFeishu(
+  instrumentId: string,
+  channelId: string,
+): Promise<StockDetailFeishuResponse> {
+  const { data } = await apiClient.post<StockDetailFeishuResponse>(
+    `/admin/instruments/${instrumentId}/send-feishu`,
+    { channel_id: channelId },
+  )
+  return data
+}
+
 /** 消息预览 - 返回渠道无关 DTO + 站内渲染 + 飞书 card JSON */
 export async function previewNotification(payload: NotificationPreviewRequest): Promise<NotificationPreviewResponse> {
   const { data } = await apiClient.post<NotificationPreviewResponse>('/notification-previews', payload)
@@ -1277,6 +1297,10 @@ export interface ChartLayer {
   direction_colored?: boolean
   direction_up_color?: string
   direction_down_color?: string
+  // [DSA 分段] - regime_field 指定 regime_id 字段名，前端按 regime 分段渲染（切换点不连接）
+  regime_field?: string
+  // [DSA 分段] - anchor_field 指定 anchor_time 字段名，前端在锚点 bar 绘制小圆点
+  anchor_field?: string
   fields: string[]
   hover_fields: string[]
 }
@@ -1291,7 +1315,8 @@ export interface IndicatorQueryParams {
 /** 指标 API 响应 */
 export interface IndicatorResponse {
   layers: ChartLayer[]
-  data: Record<string, Record<string, (number | null)[]>>
+  // [DSA 分段] - data 值支持 string（anchor_time 为 ISO 字符串|null 数组，其余字段为 number|null）
+  data: Record<string, Record<string, (number | string | null)[]>>
   errors?: Record<string, string>
 }
 
@@ -1380,6 +1405,33 @@ export async function getMemberRedemptions(userId: string): Promise<InviteRedemp
 // ============================================================
 // ===== Admin System Overview 端点 =====
 // ============================================================
+
+// [SystemOverview] - 行情数据新鲜度（6 项，Phase 9）
+export interface BarsFreshness {
+  latest_daily_trade_date: string | null
+  daily_coverage: number | null
+  latest_15m_bar_time: string | null
+  latest_60m_bar_time: string | null
+  last_success_job_id: string | null
+  is_behind_latest_trade_date: boolean
+}
+
+// [SystemOverview] - 选股策略新鲜度（7 项，Phase 9）
+export interface StrategyFreshness {
+  latest_compute_trade_date: string | null
+  latest_published_trade_date: string | null
+  strategy_run_id: string | null
+  status: string | null
+  total_instruments: number | null
+  failed_count: number | null
+  published_at: string | null
+}
+
+// [SystemOverview] - 数据新鲜度子结构（行情 + 选股两区块，Phase 9）
+export interface DataFreshness {
+  bars: BarsFreshness
+  strategy: StrategyFreshness
+}
 
 /** 系统概览响应 */
 export interface SystemOverview {
@@ -1470,6 +1522,8 @@ export interface SystemOverview {
     waiting_dsa_reason: string | null
     // [SystemOverview] - 原因对应的人类可读建议（与 waiting_dsa_reason 配对）
     waiting_dsa_suggestion: string | null
+    // [SystemOverview] - 数据新鲜度子结构（行情 + 选股两区块，Phase 9）
+    data_freshness: DataFreshness
   }
 }
 
@@ -1555,7 +1609,7 @@ export interface JobRunEventListResponse {
   total: number
 }
 
-/** 盘后编排状态响应（含编排状态 + DSA run 状态 + 事件时间线） */
+/** 盘后编排状态响应（含编排状态 + DSA run 状态 + 事件时间线 + [Phase7] 详情） */
 export interface AfterCloseRunStatusResponse {
   job_run_id: string
   job_name: string
@@ -1568,6 +1622,14 @@ export interface AfterCloseRunStatusResponse {
   started_at: string | null
   finished_at: string | null
   error_message: string | null
+  // [Phase7] - 详情字段（管理后台展示）
+  worker_instance_id: string | null
+  heartbeat_at: string | null
+  lease_expires_at: string | null
+  last_completed_step: string | null
+  interrupt_reason: string | null
+  is_retryable: boolean
+  heartbeat_stale: boolean
   events: JobRunEvent[]
 }
 
@@ -1613,12 +1675,33 @@ export async function createAfterCloseRun(
   return data
 }
 
+/** [Phase6] 仅重算今日 DSA（要求当日日线覆盖率 ≥ 90%） */
+export async function createDsaOnlyRun(
+  tradeDate: string,
+): Promise<AfterCloseRunCreateResponse> {
+  const { data } = await apiClient.post<AfterCloseRunCreateResponse>(
+    '/admin/after-close-runs/dsa-only',
+    { trade_date: tradeDate },
+  )
+  return data
+}
+
 /** 重试失败的盘后编排任务 */
 export async function retryAfterCloseRun(
   runId: string,
 ): Promise<AfterCloseRunCreateResponse> {
   const { data } = await apiClient.post<AfterCloseRunCreateResponse>(
     `/admin/after-close-runs/${runId}/retry`,
+  )
+  return data
+}
+
+/** [Phase6] 从失败步骤继续（保留断点检查点，不重复拉行情） */
+export async function resumeAfterCloseRun(
+  runId: string,
+): Promise<AfterCloseRunCreateResponse> {
+  const { data } = await apiClient.post<AfterCloseRunCreateResponse>(
+    `/admin/after-close-runs/${runId}/resume`,
   )
   return data
 }

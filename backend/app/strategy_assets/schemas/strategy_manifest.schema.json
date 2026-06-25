@@ -272,6 +272,14 @@
           },
           "description": {
             "type": "string"
+          },
+          "regime_field": {
+            "type": "string",
+            "description": "[DSA 分段] - 指定 regime_id 字段名，前端按 regime 分段渲染（切换点不连接）"
+          },
+          "anchor_field": {
+            "type": "string",
+            "description": "[DSA 分段] - 指定 anchor_time 字段名，前端在锚点 bar 绘制小圆点"
           }
         },
         "additionalProperties": false

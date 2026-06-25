@@ -123,6 +123,14 @@ function mapOperator(op: string): string | null {
   return null
 }
 
+// [ScreenerPage] - 描述: 策略通俗说明（保留策略名 + 增加一句通俗解释，普通用户友好）
+function getStrategyHint(strategyKey: string): string {
+  const k = strategyKey.toLowerCase()
+  if (k.includes('dsa')) return '以下股票符合近期趋势特征，可关注其趋势延续性'
+  if (k.includes('breakout')) return '以下股票出现突破信号，可关注其突破有效性'
+  return '以下为策略选出的股票，可进一步查看详情'
+}
+
 // ===== 主组件 =====
 export default function ScreenerPage() {
   const navigate = useNavigate()
@@ -324,10 +332,11 @@ export default function ScreenerPage() {
       },
       {
         key: 'dsa_dir_bars',
-        title: 'dir 持续',
+        title: '趋势持续时间',
         dataType: 'number',
         sortable: true,
         filterable: true,
+        helpText: '原始字段：dsa_dir_bars / dir_duration。专业定义：当前 DSA 趋势方向（多头/空头）已持续的 K 线根数，数值越大表示趋势运行越久。',
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['dsa_dir_bars', 'dsa_duration', 'dir_duration', 'duration']) ?? 0),
         render: (row) =>
@@ -335,10 +344,11 @@ export default function ScreenerPage() {
       },
       {
         key: 'vwap_ret_avg',
-        title: 'VWAP 平均收益',
+        title: '趋势内平均表现',
         dataType: 'percent',
         sortable: true,
         filterable: true,
+        helpText: '原始字段：vwap_ret_avg / dsa_avg_return。专业定义：趋势运行期间价格相对 VWAP（成交量加权平均价）的平均偏离收益，反映趋势内的平均表现强度。',
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['vwap_ret_avg', 'dsa_avg_return', 'vwap_avg_return', 'avg_return']) ?? 0),
         render: (row) => {
@@ -349,10 +359,11 @@ export default function ScreenerPage() {
       },
       {
         key: 'vwap_ret_total',
-        title: 'VWAP 总收益',
+        title: '趋势累计表现',
         dataType: 'percent',
         sortable: true,
         filterable: true,
+        helpText: '原始字段：vwap_ret_total / dsa_total_return。专业定义：趋势起点至当前的累计收益，反映趋势整体表现。',
         sortValue: (row) =>
           Number(
             pickPayload(row.payload, [
@@ -375,19 +386,21 @@ export default function ScreenerPage() {
       },
       {
         key: 'offset_mean',
-        title: 'offset_mean',
+        title: '当前偏离程度',
         dataType: 'percent',
         sortable: true,
         filterable: true,
+        helpText: '原始字段：offset_mean / shift_mean。专业定义：当前价格相对 DSA 锚点 VWAP 的平均偏离程度，正值表示价格高于锚点。',
         sortValue: (row) => Number(pickPayload(row.payload, ['offset_mean', 'shift_mean']) ?? 0),
         render: (row) => fmtPct(pickPayload(row.payload, ['offset_mean', 'shift_mean'])),
       },
       {
         key: 'offset_variance_rate',
-        title: '偏移方差率',
+        title: '趋势稳定度',
         dataType: 'percent',
         sortable: true,
         filterable: true,
+        helpText: '原始字段：offset_variance_rate / offset_var_rate。专业定义：偏离程度的方差率，数值越小表示价格围绕趋势线越稳定，趋势越健康。',
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['offset_variance_rate', 'offset_var_rate', 'shift_var']) ?? 0),
         render: (row) =>
@@ -395,10 +408,11 @@ export default function ScreenerPage() {
       },
       {
         key: 'offset_percentile',
-        title: '短期位置',
+        title: '当前所处位置',
         dataType: 'percent',
         sortable: true,
         filterable: true,
+        helpText: '原始字段：offset_percentile / short_position。专业定义：当前偏离程度在趋势历史偏离中的百分位，0% 为最低、100% 为最高，反映当前所处相对位置。',
         sortValue: (row) =>
           Number(
             pickPayload(row.payload, ['offset_percentile', 'short_position', 'position_short', 'short_pos']) ?? 0,
@@ -408,20 +422,22 @@ export default function ScreenerPage() {
       },
       {
         key: 'price',
-        title: '现价',
+        title: '最新价格',
         dataType: 'number',
         sortable: true,
         filterable: false,
+        helpText: '原始字段：last_close / price。专业定义：最新收盘价或当前价格。',
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['last_close', 'price', 'current_price', 'close']) ?? 0),
         render: (row) => fmtNum(pickPayload(row.payload, ['last_close', 'price', 'current_price', 'close'])),
       },
       {
         key: 'change_pct',
-        title: '涨跌幅',
+        title: '今日涨跌',
         dataType: 'percent',
         sortable: true,
         filterable: true,
+        helpText: '原始字段：change_pct / pct_change。专业定义：当日价格相对前一交易日的涨跌百分比。',
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['change_pct', 'pct_change', 'change_percent']) ?? 0),
         render: (row) => {
@@ -693,6 +709,12 @@ export default function ScreenerPage() {
 
       {/* 结果面板 */}
       <div className="card">
+        {/* 策略通俗说明 */}
+        {activeStrategyKey && (
+          <div className="strategy-result-hint muted">
+            {getStrategyHint(activeStrategyKey)}
+          </div>
+        )}
         {/* 工具栏 */}
         <div className="toolbar flush">
           <span className="muted">
@@ -706,7 +728,7 @@ export default function ScreenerPage() {
             {addWatchlistMutation.isPending ? '加入中…' : '批量加入自选'}
           </button>
           <div className="toolbar-spacer" />
-          <span className="muted">表头支持排序与逐列过滤</span>
+          <span className="muted">表头支持排序与逐列过滤，悬停 ? 查看字段说明</span>
         </div>
         {/* 数据表 */}
         <StrategyDataTable
