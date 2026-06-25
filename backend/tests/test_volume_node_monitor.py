@@ -40,6 +40,15 @@ from app.strategy.runtime import (
     StrategyEventDraft,
 )
 
+# compute_indicators 返回的 profile_rows 每行必需字段（与 advice.md 一致）
+_PROFILE_ROW_KEYS = {
+    "price_low", "price_high", "price_mid",
+    "bullish_volume", "bearish_volume", "total_volume",
+    "is_peak", "is_poc", "is_value_area",
+}
+# profile_meta 必需字段
+_PROFILE_META_KEYS = {"row_count", "price_step", "poc_price", "vah_price", "val_price"}
+
 
 def _generate_minute_bars(
     n_bars: int = 400,
@@ -486,6 +495,213 @@ class TestVolumeNodeMonitorEvents:
 
         events = await monitor.detect_events(context, None, curr_state)
         assert events == []
+
+
+class TestVolumeNodeMonitorComputeIndicators:
+    """compute_indicators SSOT 测试 - 验证 profile_rows/profile_meta 完整透传。"""
+
+    def _make_daily_context(self, daily_bars: pd.DataFrame) -> MarketDataContext:
+        """构建仅含日线 bars 的 MarketDataContext（compute_indicators 不依赖 1m bars）。"""
+        return MarketDataContext(
+            instrument_id=uuid.uuid4(),
+            symbol="600519",
+            bars_daily=daily_bars,
+            bars_minute=None,
+            trade_date=daily_bars.index[-1].date() if len(daily_bars) > 0 else None,
+            bar_time=daily_bars.index[-1].to_pydatetime() if len(daily_bars) > 0 else datetime.now(UTC),
+        )
+
+    @pytest.mark.asyncio
+    async def test_profile_rows_has_100_rows(
+        self, monitor: VolumeNodeMonitor, daily_bars: pd.DataFrame
+    ) -> None:
+        """profile_rows 长度恒为 100（VP_ROWS），与 VP SSOT 一致。"""
+        context = self._make_daily_context(daily_bars)
+        indicators = await monitor.compute_indicators(context)
+
+        assert "profile_rows" in indicators
+        profile_rows = indicators["profile_rows"]
+        assert isinstance(profile_rows, list)
+        assert len(profile_rows) == 100, (
+            f"profile_rows 应为 100 行，实际 {len(profile_rows)}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_profile_row_fields_complete(
+        self, monitor: VolumeNodeMonitor, daily_bars: pd.DataFrame
+    ) -> None:
+        """每行包含全部 9 个必需字段且类型正确。"""
+        context = self._make_daily_context(daily_bars)
+        indicators = await monitor.compute_indicators(context)
+
+        for i, row in enumerate(indicators["profile_rows"]):
+            assert set(row.keys()) == _PROFILE_ROW_KEYS, (
+                f"第 {i} 行字段不匹配: {set(row.keys())} != {_PROFILE_ROW_KEYS}"
+            )
+            # 价格字段为 float
+            for k in ("price_low", "price_high", "price_mid",
+                      "bullish_volume", "bearish_volume", "total_volume"):
+                assert isinstance(row[k], float), f"第 {i} 行 {k} 应为 float"
+            # 布尔字段为 bool
+            for k in ("is_peak", "is_poc", "is_value_area"):
+                assert isinstance(row[k], bool), f"第 {i} 行 {k} 应为 bool"
+            # 价格区间单调性：price_low <= price_mid <= price_high
+            assert row["price_low"] <= row["price_mid"] <= row["price_high"], (
+                f"第 {i} 行价格区间非单调: low={row['price_low']} mid={row['price_mid']} high={row['price_high']}"
+            )
+            # total_volume = bullish + bearish（VP 多空拆分守恒）
+            assert abs(row["total_volume"] - (row["bullish_volume"] + row["bearish_volume"])) < 1e-6, (
+                f"第 {i} 行 total_volume != bullish+bearish"
+            )
+
+    @pytest.mark.asyncio
+    async def test_profile_meta_fields_complete(
+        self, monitor: VolumeNodeMonitor, daily_bars: pd.DataFrame
+    ) -> None:
+        """profile_meta 包含全部 5 个必需字段。"""
+        context = self._make_daily_context(daily_bars)
+        indicators = await monitor.compute_indicators(context)
+
+        assert "profile_meta" in indicators
+        meta = indicators["profile_meta"]
+        assert isinstance(meta, dict)
+        assert set(meta.keys()) == _PROFILE_META_KEYS, (
+            f"profile_meta 字段不匹配: {set(meta.keys())}"
+        )
+        assert meta["row_count"] == 100
+        assert isinstance(meta["price_step"], float)
+        assert meta["price_step"] > 0
+        # POC/VAH/VAL 价格应落在 profile 价格范围内（非 None 时）
+        prices_low = [r["price_low"] for r in indicators["profile_rows"]]
+        prices_high = [r["price_high"] for r in indicators["profile_rows"]]
+        price_min, price_max = min(prices_low), max(prices_high)
+        for k in ("poc_price", "vah_price", "val_price"):
+            v = meta[k]
+            assert v is None or isinstance(v, float), f"{k} 应为 None 或 float"
+            if v is not None:
+                assert price_min <= v <= price_max, f"{k}={v} 不在价格范围 [{price_min}, {price_max}]"
+
+    @pytest.mark.asyncio
+    async def test_is_poc_exactly_one_row(
+        self, monitor: VolumeNodeMonitor, daily_bars: pd.DataFrame
+    ) -> None:
+        """is_poc 在 POC 行为 True，其余行为 False（有且仅有一个 POC）。"""
+        context = self._make_daily_context(daily_bars)
+        indicators = await monitor.compute_indicators(context)
+
+        poc_rows = [r for r in indicators["profile_rows"] if r["is_poc"]]
+        assert len(poc_rows) == 1, f"应恰有 1 行 is_poc=True，实际 {len(poc_rows)}"
+
+        # POC 行 price_mid 应与 profile_meta.poc_price 一致
+        poc_row = poc_rows[0]
+        poc_meta_price = indicators["profile_meta"]["poc_price"]
+        if poc_meta_price is not None:
+            assert abs(poc_row["price_mid"] - poc_meta_price) < 1e-3, (
+                f"POC 行 price_mid={poc_row['price_mid']} 与 meta.poc_price={poc_meta_price} 不一致"
+            )
+
+    @pytest.mark.asyncio
+    async def test_is_value_area_range(
+        self, monitor: VolumeNodeMonitor, daily_bars: pd.DataFrame
+    ) -> None:
+        """is_value_area 在 [VAL, VAH] 区间内为 True，且为连续区间。
+
+        SSOT 语义（luxalgo_volume_profile_pytdx_15m_aligned.py）：
+        - is_value_area 对行索引 val_level <= k <= vah_level 为 True
+        - vah_price = 最后一个 VA 行的 price_high（上边界）
+        - val_price = 第一个 VA 行的 price_low（下边界）
+        """
+        context = self._make_daily_context(daily_bars)
+        indicators = await monitor.compute_indicators(context)
+
+        rows = indicators["profile_rows"]
+        va_flags = [r["is_value_area"] for r in rows]
+        va_count = sum(va_flags)
+        assert va_count > 0, "value area 应至少有 1 行"
+
+        # value area 为连续区间：True 之间不应夹杂 False
+        first_true = va_flags.index(True)
+        last_true = len(va_flags) - 1 - va_flags[::-1].index(True)
+        va_segment = va_flags[first_true:last_true + 1]
+        assert all(va_segment), "value area 应为连续区间，内部不应有 False"
+
+        # SSOT 边界语义：VAH=最后 VA 行 price_high，VAL=首 VA 行 price_low
+        # 容差 1e-3 容纳 price 字段 round(4) 与 meta 未 round 的浮点差异
+        meta = indicators["profile_meta"]
+        first_va_row = rows[first_true]
+        last_va_row = rows[last_true]
+        if meta["vah_price"] is not None:
+            assert abs(last_va_row["price_high"] - meta["vah_price"]) < 1e-3, (
+                f"VAH={meta['vah_price']} 应≈最后 VA 行 price_high={last_va_row['price_high']}"
+            )
+        if meta["val_price"] is not None:
+            assert abs(first_va_row["price_low"] - meta["val_price"]) < 1e-3, (
+                f"VAL={meta['val_price']} 应≈首 VA 行 price_low={first_va_row['price_low']}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_peak_rows_backward_compatible(
+        self, monitor: VolumeNodeMonitor, daily_bars: pd.DataFrame
+    ) -> None:
+        """peak_rows 字段保留（向后兼容），结构不变。"""
+        context = self._make_daily_context(daily_bars)
+        indicators = await monitor.compute_indicators(context)
+
+        assert "peak_rows" in indicators
+        peak_rows = indicators["peak_rows"]
+        assert isinstance(peak_rows, list)
+        # peak_rows 可能为空（合成数据无 peak），但非空时字段必须完整
+        expected_peak_keys = {"price_mid", "bullish_volume", "bearish_volume", "total_volume", "is_peak"}
+        for row in peak_rows:
+            assert set(row.keys()) == expected_peak_keys
+            assert row["is_peak"] is True
+
+        # profile_rows 中 is_peak=True 的行数应 >= peak_rows 行数
+        # （profile_rows 的 is_peak 覆盖更广，包含重复档位）
+        profile_peak_count = sum(1 for r in indicators["profile_rows"] if r["is_peak"])
+        assert profile_peak_count >= len(peak_rows)
+
+    @pytest.mark.asyncio
+    async def test_short_bars_returns_empty_profile(
+        self, monitor: VolumeNodeMonitor
+    ) -> None:
+        """日线 bars 不足 10 根时返回空 profile_rows 和空 profile_meta。"""
+        short_bars = _generate_daily_bars(n_bars=5)
+        context = self._make_daily_context(short_bars)
+        indicators = await monitor.compute_indicators(context)
+
+        assert indicators["profile_rows"] == []
+        assert indicators["profile_meta"] == {}
+        assert indicators["peak_rows"] == []
+
+
+class TestIndicatorServiceSnapshotPassthrough:
+    """_truncate_lists 快照字段透传测试 - 保证 SSOT 完整性。"""
+
+    def test_snapshot_keys_not_truncated(self) -> None:
+        """profile_rows/profile_meta/peak_rows 不受 bars 截断。"""
+        from app.services.indicator_service import _truncate_lists
+
+        indicators = {
+            "upper_node": list(range(200)),  # 时间序列，应被截断
+            "profile_rows": [{"price_mid": i} for i in range(100)],  # 快照，不截断
+            "profile_meta": {"row_count": 100, "price_step": 0.01},
+            "peak_rows": [{"price_mid": 10.0}],
+        }
+        result = _truncate_lists(indicators, bars=50)
+        # 时间序列截断为最后 50 个
+        assert len(result["upper_node"]) == 50
+        # 快照字段保持完整
+        assert len(result["profile_rows"]) == 100
+        assert result["profile_meta"] == {"row_count": 100, "price_step": 0.01}
+        assert result["peak_rows"] == [{"price_mid": 10.0}]
+
+    def test_normal_keys_still_truncate(self) -> None:
+        """非快照字段仍按 bars 截断（回归保护）。"""
+        from app.services.indicator_service import _truncate_lists
+
+        result = _truncate_lists({"a": [1, 2, 3, 4, 5]}, 3)
+        assert result == {"a": [3, 4, 5]}
 
 
 if __name__ == "__main__":

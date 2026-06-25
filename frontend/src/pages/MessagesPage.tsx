@@ -134,8 +134,12 @@ function parseDelivery(message: NotificationMessage): { label: string; pill: Del
   // 优先使用后端真实投递记录
   if (Array.isArray(deliveries) && deliveries.length > 0) {
     const successCount = deliveries.filter((d) => d.status === 'success').length
-    const failedCount = deliveries.filter((d) => d.status === 'failed').length
-    const pendingCount = deliveries.filter((d) => d.status === 'pending' || d.status === 'retrying').length
+    // [消息投递] - dead 为终态失败（重试耗尽），与 failed 同归投递失败
+    const failedCount = deliveries.filter((d) => d.status === 'failed' || d.status === 'dead').length
+    // [消息投递] - sending 为投递中，与 pending/retrying 同归进行中
+    const pendingCount = deliveries.filter(
+      (d) => d.status === 'pending' || d.status === 'retrying' || d.status === 'sending',
+    ).length
 
     if (successCount > 0 && failedCount === 0 && pendingCount === 0) {
       if (successCount >= 2) return { label: '双渠道成功', pill: 'ok' }

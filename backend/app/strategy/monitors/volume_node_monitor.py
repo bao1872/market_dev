@@ -35,6 +35,7 @@ VP 数据源（与 monitoring.py 一致）：
 from __future__ import annotations
 
 import logging
+import math
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -121,11 +122,20 @@ class VolumeNodeMonitor(StrategyRuntime):
         供成交量分配（低周期分配），否则日线 bars 同时作为主数据和分配来源。
 
         VP 只计算一次（expensive），然后对每根日线 bar 的收盘价提取最近 Node 信息。
-        peak_rows 为当前 VP 的 peak 节点快照（非时间序列），供前端渲染多空量标签与迷你多空柱。
+        本函数是 Volume Profile 图表的唯一真源（SSOT）：
+        - profile_rows: 完整 100 行 VP 价格档位快照（非时间序列），供前端直接渲染多空量柱
+        - profile_meta: VP 元信息（row_count/price_step/poc_price/vah_price/val_price）
+        - peak_rows: 当前 VP 的 peak 节点快照（非时间序列），供前端渲染多空量标签与迷你多空柱
+
+        所有字段直接从 UnifiedVolumeProfileResult 转换，不重新计算（复用 SSOT）。
 
         Returns:
             {"upper_node": [...], "lower_node": [...], "poc_price": [...],
              "position_0_1": [...], "current_price": [...],
+             "profile_rows": [{price_low, price_high, price_mid, bullish_volume,
+                               bearish_volume, total_volume, is_peak, is_poc,
+                               is_value_area}, ...共 100 行],
+             "profile_meta": {row_count, price_step, poc_price, vah_price, val_price},
              "peak_rows": [{price_mid, bullish_volume, bearish_volume, total_volume, is_peak}, ...]}
         """
         # 主数据为日线 bars
@@ -134,6 +144,7 @@ class VolumeNodeMonitor(StrategyRuntime):
             return {
                 "upper_node": [], "lower_node": [], "poc_price": [],
                 "position_0_1": [], "current_price": [], "peak_rows": [],
+                "profile_rows": [], "profile_meta": {},
             }
 
         # 15m bars 作为 profile_df（低周期成交量分配来源）
@@ -171,6 +182,38 @@ class VolumeNodeMonitor(StrategyRuntime):
             positions.append(state["position_0_1"])
             current_prices.append(state["current_price"])
 
+        # [volume_node_monitor] - profile_rows: 完整 100 行 VP 价格档位快照（SSOT）
+        # 直接从 vp_result.profile_df 转换，供前端渲染多空量柱，禁止前端重算
+        profile_rows_list: list[dict[str, Any]] = []
+        vp_profile_df = vp_result.profile_df
+        if vp_profile_df is not None and not vp_profile_df.empty:
+            for _, row in vp_profile_df.iterrows():
+                profile_rows_list.append({
+                    "price_low": round(float(row["price_low"]), 4),
+                    "price_high": round(float(row["price_high"]), 4),
+                    "price_mid": round(float(row["price_mid"]), 4),
+                    "bullish_volume": float(row["bullish_volume"]),
+                    "bearish_volume": float(row["bearish_volume"]),
+                    "total_volume": float(row["total_volume"]),
+                    "is_peak": bool(row["is_peak"]),
+                    "is_poc": bool(row["is_poc"]),
+                    "is_value_area": bool(row["is_value_area"]),
+                })
+
+        # [volume_node_monitor] - profile_meta: VP 元信息（行数/步长/POC/VAH/VAL）
+        # NaN 转为 None 保证 JSON 可序列化
+        def _finite_or_none(v: float) -> float | None:
+            f = float(v)
+            return f if math.isfinite(f) else None
+
+        profile_meta: dict[str, Any] = {
+            "row_count": len(profile_rows_list),
+            "price_step": _finite_or_none(vp_result.price_step),
+            "poc_price": _finite_or_none(vp_result.poc_price),
+            "vah_price": _finite_or_none(vp_result.vah_price),
+            "val_price": _finite_or_none(vp_result.val_price),
+        }
+
         # [volume_node_monitor] - peak_rows: 当前 VP 的 peak 节点多空量快照
         # 供前端图表渲染 peak 节点价格标签 + 多空量标签 + 迷你多空柱
         peak_rows_list: list[dict[str, Any]] = []
@@ -191,6 +234,8 @@ class VolumeNodeMonitor(StrategyRuntime):
             "poc_price": poc_prices,
             "position_0_1": positions,
             "current_price": current_prices,
+            "profile_rows": profile_rows_list,
+            "profile_meta": profile_meta,
             "peak_rows": peak_rows_list,
         }
 

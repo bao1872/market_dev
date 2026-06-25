@@ -15,6 +15,7 @@ import asyncio
 import json
 import uuid
 from datetime import UTC, date, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -382,6 +383,191 @@ async def test_monitor_scheduler_different_sessions_create_separate_runs(test_db
     await test_db.commit()
 
     assert job_run_morning.id != job_run_afternoon.id
+
+
+# ==================== _notify_monitor_status 修复测试 ====================
+
+
+def _make_mock_channel(user_id=None):
+    """构造 mock NotificationChannel。"""
+    ch = MagicMock()
+    ch.adapter_type = "feishu_platform_app"
+    ch.status = "active"
+    ch.user_id = user_id or uuid.uuid4()
+    ch.target_config = {}
+    return ch
+
+
+def _make_mock_session_local(mock_db):
+    """构造 mock AsyncSessionLocal 上下文管理器。"""
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_db)
+    mock_session.__aexit__ = AsyncMock(return_value=None)
+    return MagicMock(return_value=mock_session)
+
+
+@pytest.mark.asyncio
+async def test_notify_monitor_summary_excludes_title(monkeypatch):
+    """启动通知 summary 不应重复 title（仅放 content）。"""
+    from app.worker import _monitor_start_notified, _notify_monitor_status
+
+    _monitor_start_notified.clear()
+
+    captured_dtos: list = []
+
+    class FakeAdapter:
+        async def send(self, dto, config):
+            captured_dtos.append(dto)
+            return MagicMock(success=True, error_message=None)
+
+    mock_redis = AsyncMock()
+    mock_redis.set = AsyncMock(return_value=True)
+
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = [_make_mock_channel()]
+    mock_db = AsyncMock()
+    mock_db.execute = AsyncMock(return_value=mock_result)
+
+    monkeypatch.setenv("GIT_SHA", "test-summary-sha")
+
+    with patch("app.worker.AsyncSessionLocal", _make_mock_session_local(mock_db)), \
+         patch("app.services.channel_adapter.get_adapter", return_value=FakeAdapter()), \
+         patch("app.core.redis_client.get_redis", return_value=mock_redis):
+        await _notify_monitor_status(
+            "监控服务已启动", "交易时段 9:30-11:30 / 13:00-15:00",
+            is_error=False,
+        )
+
+    assert len(captured_dtos) == 1
+    dto = captured_dtos[0]
+    # summary 不应包含 title 文本
+    assert "监控服务已启动" not in dto.summary
+    # summary 应包含 content
+    assert "交易时段" in dto.summary
+
+
+@pytest.mark.asyncio
+async def test_notify_monitor_data_time_shanghai_timezone(monkeypatch):
+    """data_time 应使用上海时区（含 +08:00）而非 UTC（+00:00）。"""
+    from app.worker import _monitor_start_notified, _notify_monitor_status
+
+    _monitor_start_notified.clear()
+
+    captured_dtos: list = []
+
+    class FakeAdapter:
+        async def send(self, dto, config):
+            captured_dtos.append(dto)
+            return MagicMock(success=True, error_message=None)
+
+    mock_redis = AsyncMock()
+    mock_redis.set = AsyncMock(return_value=True)
+
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = [_make_mock_channel()]
+    mock_db = AsyncMock()
+    mock_db.execute = AsyncMock(return_value=mock_result)
+
+    monkeypatch.setenv("GIT_SHA", "test-tz-sha")
+
+    with patch("app.worker.AsyncSessionLocal", _make_mock_session_local(mock_db)), \
+         patch("app.services.channel_adapter.get_adapter", return_value=FakeAdapter()), \
+         patch("app.core.redis_client.get_redis", return_value=mock_redis):
+        await _notify_monitor_status("监控服务已启动", "测试内容", is_error=False)
+
+    assert len(captured_dtos) == 1
+    assert "+08:00" in captured_dtos[0].data_time
+    assert "+00:00" not in captured_dtos[0].data_time
+
+
+@pytest.mark.asyncio
+async def test_notify_monitor_startup_idempotent(monkeypatch):
+    """同一 git_sha 第二次调用启动通知不应发送（Redis 幂等）。"""
+    from app.worker import _monitor_start_notified, _notify_monitor_status
+
+    _monitor_start_notified.clear()
+
+    send_count = 0
+
+    class FakeAdapter:
+        async def send(self, dto, config):
+            nonlocal send_count
+            send_count += 1
+            return MagicMock(success=True, error_message=None)
+
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = [_make_mock_channel()]
+    mock_db = AsyncMock()
+    mock_db.execute = AsyncMock(return_value=mock_result)
+
+    monkeypatch.setenv("GIT_SHA", "test-idem-sha")
+
+    # 第一次：Redis SET NX 返回 True（获取到锁），发送通知
+    mock_redis = AsyncMock()
+    mock_redis.set = AsyncMock(return_value=True)
+
+    with patch("app.worker.AsyncSessionLocal", _make_mock_session_local(mock_db)), \
+         patch("app.services.channel_adapter.get_adapter", return_value=FakeAdapter()), \
+         patch("app.core.redis_client.get_redis", return_value=mock_redis):
+        await _notify_monitor_status("监控服务已启动", "测试", is_error=False)
+
+    assert send_count == 1
+
+    # 第二次：Redis SET NX 返回 None（键已存在），跳过发送
+    mock_redis.set = AsyncMock(return_value=None)
+
+    with patch("app.worker.AsyncSessionLocal", _make_mock_session_local(mock_db)), \
+         patch("app.services.channel_adapter.get_adapter", return_value=FakeAdapter()), \
+         patch("app.core.redis_client.get_redis", return_value=mock_redis):
+        await _notify_monitor_status("监控服务已启动", "测试", is_error=False)
+
+    # 仍然只发送了一次
+    assert send_count == 1
+
+
+@pytest.mark.asyncio
+async def test_notify_monitor_startup_filters_admin_only(monkeypatch):
+    """启动通知 SQL 应包含 admin 角色过滤（普通用户不被推送）。"""
+    from sqlalchemy.dialects import postgresql
+
+    from app.worker import _monitor_start_notified, _notify_monitor_status
+
+    _monitor_start_notified.clear()
+
+    captured_stmts: list = []
+
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = []
+
+    async def capture_execute(stmt):
+        captured_stmts.append(stmt)
+        return mock_result
+
+    mock_db = AsyncMock()
+    mock_db.execute = capture_execute
+
+    mock_redis = AsyncMock()
+    mock_redis.set = AsyncMock(return_value=True)
+
+    monkeypatch.setenv("GIT_SHA", "test-admin-sha")
+
+    with patch("app.worker.AsyncSessionLocal", _make_mock_session_local(mock_db)), \
+         patch("app.core.redis_client.get_redis", return_value=mock_redis):
+        # 启动通知：SQL 应包含 user_roles / roles 表（admin 过滤）
+        await _notify_monitor_status("监控服务已启动", "测试", is_error=False)
+
+        assert len(captured_stmts) == 1
+        sql_str = str(captured_stmts[0].compile(dialect=postgresql.dialect()))
+        assert "user_roles" in sql_str
+        assert "roles" in sql_str
+
+        # 异常通知：SQL 不应包含 admin 过滤（发送给所有活跃飞书渠道）
+        captured_stmts.clear()
+        await _notify_monitor_status("监控服务异常", "测试错误", is_error=True)
+
+        assert len(captured_stmts) == 1
+        sql_str_err = str(captured_stmts[0].compile(dialect=postgresql.dialect()))
+        assert "user_roles" not in sql_str_err
 
 
 if __name__ == "__main__":

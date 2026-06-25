@@ -86,40 +86,57 @@ export interface StrategyChartProps {
 interface CalculatedBar extends BarData {
   delta: number
   cvd: number
-  typical: number
 }
 
-// Volume Profile bin
-interface ProfileBin {
-  i: number
-  lo: number
-  hi: number
-  buy: number
-  sell: number
-  total: number
-  smooth: number
+// [Volume Profile] - 后端 profile_rows 单行数据结构（SSOT: volume_node_monitor.compute_indicators）
+interface ProfileRow {
+  price_low: number
+  price_high: number
+  price_mid: number
+  bullish_volume: number
+  bearish_volume: number
+  total_volume: number
+  is_peak: boolean
+  is_poc: boolean
+  is_value_area: boolean
 }
 
-// Node Cluster 节点
-interface ProfileNode {
+// [Volume Profile] - 后端 profile_meta 元信息（SSOT: volume_node_monitor.compute_indicators）
+interface ProfileMeta {
+  row_count: number
+  price_step: number | null
+  poc_price: number | null
+  vah_price: number | null
+  val_price: number | null
+}
+
+// [Volume Profile] - 后端 peak_rows 单行数据（SSOT: volume_node_monitor.compute_indicators）
+interface PeakRow {
+  price_mid: number
+  bullish_volume: number
+  bearish_volume: number
+  total_volume: number
+  is_peak: boolean
+}
+
+// [Volume Profile] - 从后端 upper_node/lower_node/peak_rows 提取的节点信息
+interface BackendNode {
   id: string
-  idx: number
+  mid: number
   lo: number
   hi: number
-  volume: number
   poc: boolean
+  bullish_volume: number
+  bearish_volume: number
 }
 
-// Volume Profile 计算结果
-interface Profile {
-  bins: ProfileBin[]
-  pocIndex: number
-  poc: number
-  valueLow: number
-  valueHigh: number
-  nodes: ProfileNode[]
-  maxTotal: number
-  total: number
+// [Volume Profile] - 后端 VP 数据聚合（profile_rows + profile_meta + peak_rows）
+interface BackendProfile {
+  rows: ProfileRow[]
+  meta: ProfileMeta
+  peaks: PeakRow[]
+  nodes: BackendNode[]
+  pocPrice: number | null
 }
 
 // 窗格矩形
@@ -151,14 +168,14 @@ interface MappedEvent extends ChartEvent {
   y?: number
 }
 
-// Profile bin 命中区域
+// Profile 行命中区域
 interface ProfileHit {
   i: number
   y1: number
   y2: number
   x: number
   totalW: number
-  bin: ProfileBin
+  row: ProfileRow
 }
 
 // 图表运行时状态（供交互命中检测使用）
@@ -173,7 +190,7 @@ interface ChartState {
   max: number
   py: ((v: number) => number) | null
   step: number
-  profile: Profile | null
+  profile: BackendProfile | null
   events: MappedEvent[]
   hoverProfileIndex: number | null
   selectedNodeId: string | null
@@ -256,121 +273,128 @@ function timeTicks(data: CalculatedBar[], count: number, tf: string): { idx: num
 
 // ===== 指标计算模块（从 charts.js 迁移）=====
 
-// 计算 Delta / CVD
+// 计算 Delta / CVD（typical 已随 buildProfile 删除，不再计算）
 function addIndicators(bars: BarData[]): CalculatedBar[] {
   const out: CalculatedBar[] = bars.map(x => ({ ...x } as CalculatedBar))
   let cvd = 0
   out.forEach((d) => {
-    const typical = (d.high + d.low + d.close) / 3
     const clv = (2 * d.close - d.high - d.low) / Math.max(0.001, d.high - d.low)
     d.delta = d.volume * clamp(clv * 0.82 + (d.close >= d.open ? 0.16 : -0.16), -0.95, 0.95)
     cvd += d.delta
     d.cvd = cvd
-    d.typical = typical
   })
   return out
 }
 
-// Volume Profile 计算（56 bin、加权平滑、POC、Value Area VAH/VAL、Node Cluster 识别）
-function buildProfile(data: CalculatedBar[], min: number, max: number, bins = 56): Profile {
-  const arr: ProfileBin[] = Array.from({ length: bins }, (_, i) => ({
-    i,
-    lo: min + (max - min) * i / bins,
-    hi: min + (max - min) * (i + 1) / bins,
-    buy: 0,
-    sell: 0,
-    total: 0,
-    smooth: 0,
-  }))
-  const span = max - min
-  data.forEach(d => {
-    const samples = 11
-    const buyRatio = clamp(0.5 + (d.delta / d.volume) * 0.38, 0.08, 0.92)
-    const weights: { price: number; weight: number }[] = []
-    let sum = 0
-    for (let s = 0; s < samples; s++) {
-      const price = d.low + (d.high - d.low) * (s + 0.5) / samples
-      const dist = Math.abs(price - d.typical) / Math.max(0.001, d.high - d.low)
-      const weight = 0.25 + Math.max(0, 1 - dist * 1.55)
-      weights.push({ price, weight })
-      sum += weight
-    }
-    weights.forEach(x => {
-      const idx = clamp(Math.floor((x.price - min) / span * bins), 0, bins - 1)
-      const vol = d.volume * x.weight / sum
-      arr[idx].buy += vol * buyRatio
-      arr[idx].sell += vol * (1 - buyRatio)
-      arr[idx].total += vol
+// [Volume Profile] - 从后端 indicators 提取 VP 数据（SSOT: volume_node_monitor.compute_indicators）
+// profile_rows/profile_meta/peak_rows 为价格档位快照，非 bar 对齐时间序列，禁止前端重算
+function extractBackendProfile(indicators: IndicatorResponse | undefined): BackendProfile | null {
+  if (!indicators?.data) return null
+  const vn = indicators.data['volume_node_monitor'] as unknown as
+    | Record<string, unknown>
+    | undefined
+  if (!vn) return null
+
+  // profile_rows：完整 100 行 VP 价格档位快照
+  const rawRows = vn.profile_rows
+  const rows: ProfileRow[] = []
+  if (Array.isArray(rawRows)) {
+    rawRows.forEach(v => {
+      if (v != null && typeof v === 'object') {
+        const o = v as Record<string, unknown>
+        rows.push({
+          price_low: Number(o.price_low) || 0,
+          price_high: Number(o.price_high) || 0,
+          price_mid: Number(o.price_mid) || 0,
+          bullish_volume: Number(o.bullish_volume) || 0,
+          bearish_volume: Number(o.bearish_volume) || 0,
+          total_volume: Number(o.total_volume) || 0,
+          is_peak: Boolean(o.is_peak),
+          is_poc: Boolean(o.is_poc),
+          is_value_area: Boolean(o.is_value_area),
+        })
+      }
     })
-  })
-  // 加权平滑（5 点加权，中心权重 3，相邻权重 2，次相邻权重 1）
-  const smooth = arr.map((_, i) => {
-    let s = 0
-    let w = 0
-    for (let j = -2; j <= 2; j++) {
-      const k = i + j
-      if (k >= 0 && k < bins) {
-        const ww = j === 0 ? 3 : Math.abs(j) === 1 ? 2 : 1
-        s += arr[k].total * ww
-        w += ww
+  }
+
+  // profile_meta：VP 元信息（row_count/price_step/poc_price/vah_price/val_price）
+  const rawMeta = vn.profile_meta
+  let meta: ProfileMeta = {
+    row_count: rows.length,
+    price_step: null,
+    poc_price: null,
+    vah_price: null,
+    val_price: null,
+  }
+  if (rawMeta != null && typeof rawMeta === 'object') {
+    const m = rawMeta as Record<string, unknown>
+    meta = {
+      row_count: Number(m.row_count) || rows.length,
+      price_step: m.price_step != null ? Number(m.price_step) : null,
+      poc_price: m.poc_price != null ? Number(m.poc_price) : null,
+      vah_price: m.vah_price != null ? Number(m.vah_price) : null,
+      val_price: m.val_price != null ? Number(m.val_price) : null,
+    }
+  }
+
+  // peak_rows：peak 节点多空量快照
+  const rawPeaks = vn.peak_rows
+  const peaks: PeakRow[] = []
+  if (Array.isArray(rawPeaks)) {
+    rawPeaks.forEach(v => {
+      if (v != null && typeof v === 'object') {
+        const o = v as Record<string, unknown>
+        peaks.push({
+          price_mid: Number(o.price_mid) || 0,
+          bullish_volume: Number(o.bullish_volume) || 0,
+          bearish_volume: Number(o.bearish_volume) || 0,
+          total_volume: Number(o.total_volume) || 0,
+          is_peak: Boolean(o.is_peak),
+        })
       }
-    }
-    return s / w
-  })
-  arr.forEach((b, i) => { b.smooth = smooth[i] })
-  // POC：平滑后最大成交量的 bin
-  const pocIndex = arr.reduce((best, b, i) => (b.smooth > arr[best].smooth ? i : best), 0)
-  const total = arr.reduce((s, b) => s + b.total, 0)
-  const target = total * 0.7
-  // Value Area：从 POC 向两侧扩展直到累计 70% 成交量
-  let lo = pocIndex
-  let hi = pocIndex
-  let acc = arr[pocIndex].total
-  while (acc < target && (lo > 0 || hi < bins - 1)) {
-    const lv = lo > 0 ? arr[lo - 1].total : -1
-    const rv = hi < bins - 1 ? arr[hi + 1].total : -1
-    if (rv >= lv) { hi++; acc += arr[hi].total } else { lo--; acc += arr[lo].total }
+    })
   }
-  // Node Cluster 识别：寻找局部峰值
-  const peaks: number[] = []
-  const maxSmooth = arr[pocIndex].smooth
-  for (let i = 2; i < bins - 2; i++) {
-    if (arr[i].smooth >= arr[i - 1].smooth && arr[i].smooth >= arr[i + 1].smooth && arr[i].smooth > maxSmooth * 0.42) {
-      if (!peaks.length || i - peaks[peaks.length - 1] > 5) {
-        peaks.push(i)
-      } else if (arr[i].smooth > arr[peaks[peaks.length - 1]].smooth) {
-        peaks[peaks.length - 1] = i
+
+  // 从 upper_node/lower_node 收集 peak 节点价格区间 + peak_rows 多空量
+  const peakVolMap = new Map<number, { bullish: number; bearish: number }>()
+  peaks.forEach(p => {
+    peakVolMap.set(p.price_mid, { bullish: p.bullish_volume, bearish: p.bearish_volume })
+  })
+  const peakMap = new Map<number, { lo: number; hi: number }>()
+  const collect = (arr: unknown) => {
+    if (!Array.isArray(arr)) return
+    arr.forEach(v => {
+      if (v != null && typeof v === 'object' && (v as Record<string, unknown>).price_mid != null) {
+        const o = v as Record<string, number>
+        const mid = Number(o.price_mid)
+        if (!peakMap.has(mid)) peakMap.set(mid, { lo: Number(o.price_low), hi: Number(o.price_high) })
       }
+    })
+  }
+  collect(vn.upper_node)
+  collect(vn.lower_node)
+  let pocPrice: number | null = null
+  if (meta.poc_price != null) {
+    pocPrice = meta.poc_price
+  } else if (Array.isArray(vn.poc_price)) {
+    for (const p of vn.poc_price) {
+      if (p != null) { pocPrice = Number(p); break }
     }
   }
-  if (!peaks.includes(pocIndex)) peaks.push(pocIndex)
-  peaks.sort((a, b) => a - b)
-  // 为每个峰值构建节点区间
-  const nodes: ProfileNode[] = peaks.map((idx, n) => {
-    const threshold = arr[idx].smooth * 0.58
-    let a = idx
-    let b = idx
-    while (a > 0 && arr[a - 1].smooth >= threshold) a--
-    while (b < bins - 1 && arr[b + 1].smooth >= threshold) b++
-    return {
-      id: `node_${n + 1}`,
-      idx,
-      lo: arr[a].lo,
-      hi: arr[b].hi,
-      volume: arr.slice(a, b + 1).reduce((s, x) => s + x.total, 0),
-      poc: idx === pocIndex,
-    }
-  })
-  return {
-    bins: arr,
-    pocIndex,
-    poc: (arr[pocIndex].lo + arr[pocIndex].hi) / 2,
-    valueLow: arr[lo].lo,
-    valueHigh: arr[hi].hi,
-    nodes,
-    maxTotal: Math.max(...arr.map(x => x.total)),
-    total,
-  }
+  const nodes: BackendNode[] = Array.from(peakMap.entries())
+    .map(([mid, { lo, hi }], i) => {
+      const vol = peakVolMap.get(mid)
+      return {
+        id: `backend_node_${i + 1}`,
+        mid, lo, hi,
+        poc: pocPrice != null && Math.abs(mid - pocPrice) < 0.01,
+        bullish_volume: vol?.bullish ?? 0,
+        bearish_volume: vol?.bearish ?? 0,
+      }
+    })
+    .sort((a, b) => a.lo - b.lo)
+
+  return { rows, meta, peaks, nodes, pocPrice }
 }
 
 // ===== 布局几何模块 =====
@@ -503,60 +527,73 @@ function drawGrid(
   }
 }
 
-// 右侧 Volume Profile 渲染
+// [Volume Profile] - 右侧 VP 渲染（从后端 profile_rows 直接绘制，禁止前端重算）
 function renderProfile(
   ctx: CanvasRenderingContext2D,
-  profile: Profile,
+  profile: BackendProfile,
   g: Geometry,
   py: (v: number) => number,
   state: ChartState,
   layers: Set<string>,
 ): void {
   const width = g.profileEnd - g.profileStart
-  const max = profile.maxTotal
+  const rows = profile.rows
+  // 后端返回的 total_volume 最大值作为归一化基准
+  const maxTotal = Math.max(...rows.map(r => r.total_volume), 1)
   state.profileHit = []
-  // 价值区填充 + VAH/VAL 虚线
-  const valueTop = py(profile.valueHigh)
-  const valueBottom = py(profile.valueLow)
-  ctx.fillStyle = 'rgba(95,127,216,.055)'
-  ctx.fillRect(g.l, valueTop, g.profileEnd - g.l, Math.max(1, valueBottom - valueTop))
-  drawLine(ctx, g.l, valueTop, g.profileEnd, valueTop, 'rgba(130,160,255,.58)', 1, [3, 3])
-  drawLine(ctx, g.l, valueBottom, g.profileEnd, valueBottom, 'rgba(130,160,255,.58)', 1, [3, 3])
-  drawText(ctx, 'VAH', g.plotRight - 4, valueTop - 4, C.blue2, '8px sans-serif', 'right')
-  drawText(ctx, 'VAL', g.plotRight - 4, valueBottom - 4, C.blue2, '8px sans-serif', 'right')
-  // 买卖量双色条
-  profile.bins.forEach((b, i) => {
-    const y1 = py(b.hi)
-    const y2 = py(b.lo)
+
+  // 价值区填充 + VAH/VAL 虚线（从后端 profile_meta 读取）
+  if (profile.meta.vah_price != null && profile.meta.val_price != null) {
+    const valueTop = py(profile.meta.vah_price)
+    const valueBottom = py(profile.meta.val_price)
+    ctx.fillStyle = 'rgba(95,127,216,.055)'
+    ctx.fillRect(g.l, valueTop, g.profileEnd - g.l, Math.max(1, valueBottom - valueTop))
+    drawLine(ctx, g.l, valueTop, g.profileEnd, valueTop, 'rgba(130,160,255,.58)', 1, [3, 3])
+    drawLine(ctx, g.l, valueBottom, g.profileEnd, valueBottom, 'rgba(130,160,255,.58)', 1, [3, 3])
+    drawText(ctx, 'VAH', g.plotRight - 4, valueTop - 4, C.blue2, '8px sans-serif', 'right')
+    drawText(ctx, 'VAL', g.plotRight - 4, valueBottom - 4, C.blue2, '8px sans-serif', 'right')
+  }
+
+  // 买卖量双色条（从后端 profile_rows 直接渲染：price_high/price_low → y 坐标，total_volume → 宽度）
+  rows.forEach((row, i) => {
+    const y1 = py(row.price_high)
+    const y2 = py(row.price_low)
     const bh = Math.max(1, y2 - y1 - 0.4)
-    const totalW = b.total / max * width * 0.94
-    const buyW = b.buy / Math.max(1, b.total) * totalW
+    const totalW = row.total_volume / maxTotal * width * 0.94
+    const buyW = row.bullish_volume / Math.max(1, row.total_volume) * totalW
     const sellW = totalW - buyW
     const x = g.profileEnd - totalW
-    const inVA = b.lo >= profile.valueLow && b.hi <= profile.valueHigh
-    ctx.globalAlpha = inVA ? 1 : 0.4
+    // 价值区内 alpha=1，区外 alpha=0.4（从后端 is_value_area 标记）
+    ctx.globalAlpha = row.is_value_area ? 1 : 0.4
     ctx.fillStyle = C.profileSell
     ctx.fillRect(x, y1, sellW, bh)
     ctx.fillStyle = C.profileBuy
     ctx.fillRect(x + sellW, y1, buyW, bh)
     ctx.globalAlpha = 1
-    // POC bin 高亮
-    if (i === profile.pocIndex && layers.has('poc')) {
+    // POC 行高亮（从后端 is_poc 标记）
+    if (row.is_poc && layers.has('poc')) {
       ctx.strokeStyle = C.orange
       ctx.lineWidth = 1.3
       ctx.strokeRect(x - 0.5, y1 - 0.5, totalW + 1, bh + 1)
+    }
+    // Peak 节点标记（从后端 is_peak 标记，左侧黄色短条）
+    if (row.is_peak) {
+      ctx.fillStyle = C.yellow
+      ctx.fillRect(g.profileStart - 3, y1 + bh * 0.25, 3, Math.max(2, bh * 0.5))
     }
     // hover 高亮
     if (state.hoverProfileIndex === i) {
       ctx.fillStyle = 'rgba(255,255,255,.12)'
       ctx.fillRect(g.profileStart, y1, width, bh)
     }
-    state.profileHit.push({ i, y1, y2, x, totalW, bin: b })
+    state.profileHit.push({ i, y1, y2, x, totalW, row })
   })
+
   drawText(ctx, '卖量', g.profileStart + 3, g.panes.price.top + 12, C.profileSell, '8px sans-serif')
   drawText(ctx, '买量', g.profileStart + 32, g.panes.price.top + 12, C.profileBuy, '8px sans-serif')
-  // Node Cluster 节点矩形框
-  if (layers.has('node')) {
+
+  // Node Cluster 节点矩形框（从后端 upper_node/lower_node 提取的节点区间）
+  if (layers.has('node') && profile.nodes.length > 0) {
     profile.nodes.forEach(n => {
       const y1 = py(n.hi)
       const y2 = py(n.lo)
@@ -867,12 +904,12 @@ function isEventVisible(ev: MappedEvent, layers: LayerVisibility): boolean {
   return true
 }
 
-// Profile bin tooltip 内容
-function profileTooltip(bin: ProfileBin, profile: Profile): string {
-  const node = profile.nodes.find(n => (bin.lo + bin.hi) / 2 >= n.lo && (bin.lo + bin.hi) / 2 <= n.hi)
-  const share = bin.total / Math.max(1, profile.total) * 100
-  const inVA = bin.lo >= profile.valueLow && bin.hi <= profile.valueHigh
-  return `<b>${fmt(bin.lo)}–${fmt(bin.hi)}</b><span>\u603b\u6210\u4ea4量 ${(bin.total / 10000).toFixed(1)}万 · ${share.toFixed(2)}%</span><span>\u4f30\u7b97\u4e70量 ${(bin.buy / 10000).toFixed(1)}万 · \u4f30\u7b97\u5356量 ${(bin.sell / 10000).toFixed(1)}万</span><span>价值区 ${inVA ? '是' : '否'} · 节点 ${node ? node.id : '—'}${bin.i === profile.pocIndex ? ' · POC' : ''}</span>`
+// [Volume Profile] - 行 tooltip 内容（从后端 ProfileRow + ProfileMeta 生成）
+function profileTooltip(row: ProfileRow, profile: BackendProfile): string {
+  const totalSum = profile.rows.reduce((s, r) => s + r.total_volume, 0)
+  const share = row.total_volume / Math.max(1, totalSum) * 100
+  const node = profile.nodes.find(n => row.price_mid >= n.lo && row.price_mid <= n.hi)
+  return `<b>${fmt(row.price_low)}–${fmt(row.price_high)}</b><span>\u603b\u6210\u4ea4量 ${(row.total_volume / 10000).toFixed(1)}万 · ${share.toFixed(2)}%</span><span>\u4e70量 ${(row.bullish_volume / 10000).toFixed(1)}万 · \u5356量 ${(row.bearish_volume / 10000).toFixed(1)}万</span><span>价值区 ${row.is_value_area ? '是' : '否'} · 节点 ${node ? node.id : '—'}${row.is_poc ? ' · POC' : ''}${row.is_peak ? ' · PEAK' : ''}</span>`
 }
 
 // ===== 主绘制函数（对齐原型 drawTrading 渲染管线）=====
@@ -896,136 +933,60 @@ function drawTrading(
   const plotW = g.plotRight - g.l
   const step = plotW / display.length
   const barW = Math.max(2.2, step * 0.56)
-  const profile = buildProfile(calc, min, max, 56)
-
-  // 从后端 VP 指标提取 peak node 和 POC（优先于 buildProfile 的本地计算）
-  // peak_rows 提供每个 peak 节点的多空量，供渲染标签与迷你多空柱
-  interface BackendNode {
-    id: string
-    mid: number
-    lo: number
-    hi: number
-    poc: boolean
-    bullish_volume: number
-    bearish_volume: number
-  }
-  let backendNodes: BackendNode[] | null = null
-  let backendPoc: number | null = null
-  if (indicators?.data) {
-    // vn 的字段含对象数组（upper_node/lower_node/peak_rows）和数值数组（poc_price/position_0_1）
-    const vn = indicators.data['volume_node_monitor'] as unknown as Record<string, unknown[]> | undefined
-    if (vn) {
-      // 提取 peak_rows（含多空量）
-      const peakVolMap = new Map<number, { bullish: number; bearish: number }>()
-      const rawPeakRows = vn.peak_rows
-      if (Array.isArray(rawPeakRows)) {
-        rawPeakRows.forEach(v => {
-          if (v != null && typeof v === 'object') {
-            const o = v as Record<string, unknown>
-            const mid = Number(o.price_mid)
-            if (Number.isFinite(mid)) {
-              peakVolMap.set(mid, {
-                bullish: Number(o.bullish_volume) || 0,
-                bearish: Number(o.bearish_volume) || 0,
-              })
-            }
-          }
-        })
-      }
-      // 从 upper_node/lower_node 收集 peak 节点价格区间
-      const peakMap = new Map<number, { lo: number; hi: number }>()
-      const collect = (arr: unknown[]) => {
-        arr.forEach(v => {
-          if (v != null && typeof v === 'object' && (v as Record<string, unknown>).price_mid != null) {
-            const o = v as Record<string, number>
-            const mid = Number(o.price_mid)
-            if (!peakMap.has(mid)) peakMap.set(mid, { lo: Number(o.price_low), hi: Number(o.price_high) })
-          }
-        })
-      }
-      if (vn.upper_node) collect(vn.upper_node)
-      if (vn.lower_node) collect(vn.lower_node)
-      if (peakMap.size > 0) {
-        if (vn.poc_price) {
-          for (const p of vn.poc_price) { if (p != null) { backendPoc = Number(p); break } }
-        }
-        backendNodes = Array.from(peakMap.entries())
-          .map(([mid, { lo, hi }], i) => {
-            const vol = peakVolMap.get(mid)
-            return {
-              id: `backend_node_${i + 1}`,
-              mid, lo, hi,
-              poc: backendPoc != null && Math.abs(mid - backendPoc) < 0.01,
-              bullish_volume: vol?.bullish ?? 0,
-              bearish_volume: vol?.bearish ?? 0,
-            }
-          })
-          .sort((a, b) => a.lo - b.lo)
-      }
-    }
-  }
+  // [Volume Profile] - 从后端 indicators 提取 VP 数据（SSOT，禁止前端重算）
+  const profile = extractBackendProfile(indicators)
 
   // 1. 背景 + 网格
   drawGrid(ctx, w, h, g, min, max)
 
-  // 2. 右侧 Volume Profile
+  // 2. 右侧 Volume Profile（后端 profile_rows 直接渲染；缺失时显示提示）
   if (layers.profile) {
-    renderProfile(ctx, profile, g, py, state, layerSet)
-  }
-
-  // 3. Node Cluster 主图叠加（优先使用后端 VP peak node，含多空量标签与迷你多空柱）
-  if (layers.node) {
-    if (backendNodes) {
-      // 后端节点：含多空量，渲染峰价格标签 + 多空量标签 + 迷你多空柱
-      const maxVol = Math.max(...backendNodes.map(n => Math.max(n.bullish_volume, n.bearish_volume)), 1)
-      backendNodes.forEach(n => {
-        const y1 = py(n.hi)
-        const y2 = py(n.lo)
-        const selected = state.selectedNodeId === n.id
-        ctx.fillStyle = n.poc ? 'rgba(255,152,0,.11)' : selected ? 'rgba(156,179,255,.15)' : 'rgba(79,124,255,.075)'
-        ctx.fillRect(g.l, y1, plotW, y2 - y1)
-        drawLine(ctx, g.l, py(n.mid), g.plotRight, py(n.mid), n.poc ? C.orange : selected ? '#dce6ff' : C.blue, selected ? 2 : 1, n.poc ? [8, 4] : [4, 5])
-        // 峰价格标签
-        const labelText = n.poc ? `POC 峰 ${fmt(n.mid)}` : `峰 ${fmt(n.mid)}`
-        drawText(ctx, labelText, g.l + 5, y1 + 10, n.poc ? C.orange : C.blue, '11px sans-serif')
-        // 多空量标签 + 迷你多空柱（A 股：多头红色 / 空头绿色）
-        if (n.bullish_volume > 0 || n.bearish_volume > 0) {
-          const volText = `多 ${formatVolume(n.bullish_volume)} / 空 ${formatVolume(n.bearish_volume)}`
-          drawText(ctx, volText, g.l + 5, y1 + 22, C.text2, '9px sans-serif')
-          // 迷你多空柱：在节点垂直中心绘制水平柱
-          const nodeH = y2 - y1
-          const barH = Math.max(2, nodeH * 0.3)
-          const barY = y1 + nodeH * 0.5 - barH / 2
-          const maxBarW = plotW * 0.25
-          const bullW = n.bullish_volume / maxVol * maxBarW
-          const bearW = n.bearish_volume / maxVol * maxBarW
-          ctx.fillStyle = 'rgba(239,83,80,0.85)'
-          ctx.fillRect(g.l + 5, barY, bullW, barH)
-          ctx.fillStyle = 'rgba(38,166,154,0.85)'
-          ctx.fillRect(g.l + 5 + bullW, barY, bearW, barH)
-        }
-      })
+    if (profile && profile.rows.length > 0) {
+      renderProfile(ctx, profile, g, py, state, layerSet)
     } else {
-      // 本地计算的节点（无后端多空量数据）：仅渲染基本标签
-      profile.nodes.forEach(n => {
-        const y1 = py(n.hi)
-        const y2 = py(n.lo)
-        const selected = state.selectedNodeId === n.id
-        ctx.fillStyle = n.poc ? 'rgba(255,152,0,.11)' : selected ? 'rgba(156,179,255,.15)' : 'rgba(79,124,255,.075)'
-        ctx.fillRect(g.l, y1, plotW, y2 - y1)
-        drawLine(ctx, g.l, py((n.lo + n.hi) / 2), g.plotRight, py((n.lo + n.hi) / 2), n.poc ? C.orange : selected ? '#dce6ff' : C.blue, selected ? 2 : 1, n.poc ? [8, 4] : [4, 5])
-        if (n.poc) {
-          drawText(ctx, 'POC NODE', g.l + 5, y1 + 10, C.orange, '8px sans-serif')
-        } else {
-          drawText(ctx, `HVN ${fmt((n.lo + n.hi) / 2)}`, g.l + 5, y1 + 10, C.blue, '12px sans-serif')
-        }
-      })
+      // 后端 VP 数据缺失：在 VP 区域中央显示灰色提示（禁止降级到前端算法）
+      const cx = (g.profileStart + g.profileEnd) / 2
+      const cy = (g.panes.price.top + g.panes.price.bottom) / 2
+      drawText(ctx, '筹码分布暂不可用', cx, cy, C.text, '11px sans-serif', 'center')
     }
   }
 
-  // 4. POC 中心线（优先使用后端 poc_price）
-  if (layers.poc) {
-    const pocVal = backendPoc ?? profile.poc
+  // 3. Node Cluster 主图叠加（从后端 upper_node/lower_node/peak_rows 提取的节点，含多空量标签与迷你多空柱）
+  if (layers.node && profile && profile.nodes.length > 0) {
+    const backendNodes = profile.nodes
+    const maxVol = Math.max(...backendNodes.map(n => Math.max(n.bullish_volume, n.bearish_volume)), 1)
+    backendNodes.forEach(n => {
+      const y1 = py(n.hi)
+      const y2 = py(n.lo)
+      const selected = state.selectedNodeId === n.id
+      ctx.fillStyle = n.poc ? 'rgba(255,152,0,.11)' : selected ? 'rgba(156,179,255,.15)' : 'rgba(79,124,255,.075)'
+      ctx.fillRect(g.l, y1, plotW, y2 - y1)
+      drawLine(ctx, g.l, py(n.mid), g.plotRight, py(n.mid), n.poc ? C.orange : selected ? '#dce6ff' : C.blue, selected ? 2 : 1, n.poc ? [8, 4] : [4, 5])
+      // 峰价格标签
+      const labelText = n.poc ? `POC 峰 ${fmt(n.mid)}` : `峰 ${fmt(n.mid)}`
+      drawText(ctx, labelText, g.l + 5, y1 + 10, n.poc ? C.orange : C.blue, '11px sans-serif')
+      // 多空量标签 + 迷你多空柱（A 股：多头红色 / 空头绿色）
+      if (n.bullish_volume > 0 || n.bearish_volume > 0) {
+        const volText = `多 ${formatVolume(n.bullish_volume)} / 空 ${formatVolume(n.bearish_volume)}`
+        drawText(ctx, volText, g.l + 5, y1 + 22, C.text2, '9px sans-serif')
+        // 迷你多空柱：在节点垂直中心绘制水平柱
+        const nodeH = y2 - y1
+        const barH = Math.max(2, nodeH * 0.3)
+        const barY = y1 + nodeH * 0.5 - barH / 2
+        const maxBarW = plotW * 0.25
+        const bullW = n.bullish_volume / maxVol * maxBarW
+        const bearW = n.bearish_volume / maxVol * maxBarW
+        ctx.fillStyle = 'rgba(239,83,80,0.85)'
+        ctx.fillRect(g.l + 5, barY, bullW, barH)
+        ctx.fillStyle = 'rgba(38,166,154,0.85)'
+        ctx.fillRect(g.l + 5 + bullW, barY, bearW, barH)
+      }
+    })
+  }
+
+  // 4. POC 中心线（从后端 profile_meta.poc_price 读取）
+  if (layers.poc && profile && profile.pocPrice != null) {
+    const pocVal = profile.pocPrice
     drawLine(ctx, g.l, py(pocVal), layers.profile ? g.profileEnd : g.plotRight, py(pocVal), C.orange, 1.35, [9, 4])
     drawText(ctx, `POC ${fmt(pocVal)}`, g.plotRight - 62, py(pocVal) - 5, C.orange, '9px sans-serif')
   }
@@ -1293,7 +1254,7 @@ export function StrategyChart({
       const my = e.clientY - r.top
       const { g, data, step, w } = s
 
-      // Profile bin 命中检测
+      // Profile 行命中检测
       if (g.profileW && mx >= g.profileStart && mx <= g.profileEnd && my >= g.panes.price.top && my <= g.panes.price.bottom) {
         const hit = s.profileHit.find(x => my >= x.y1 && my <= x.y2)
         s.hoverProfileIndex = hit?.i ?? null
@@ -1302,7 +1263,7 @@ export function StrategyChart({
           tip.classList.add('show')
           tip.style.left = Math.max(g.profileStart - 245, mx - 245) + 'px'
           tip.style.top = Math.max(44, my - 56) + 'px'
-          tip.innerHTML = profileTooltip(hit.bin, s.profile)
+          tip.innerHTML = profileTooltip(hit.row, s.profile)
         }
         return
       }
@@ -1359,12 +1320,12 @@ export function StrategyChart({
       const r = canvas.getBoundingClientRect()
       const mx = e.clientX - r.left
       const my = e.clientY - r.top
-      // Profile 节点点击
+      // Profile 行点击：选中对应 peak 节点
       if (s.g.profileW && mx >= s.g.profileStart && mx <= s.g.profileEnd) {
         const hit = s.profileHit.find(x => my >= x.y1 && my <= x.y2)
         if (hit && s.profile) {
-          const center = (hit.bin.lo + hit.bin.hi) / 2
-          const node = s.profile.nodes.find(n => center >= n.lo && center <= n.hi)
+          // 用后端 price_mid 匹配 peak 节点区间
+          const node = s.profile.nodes.find(n => hit.row.price_mid >= n.lo && hit.row.price_mid <= n.hi)
           s.selectedNodeId = node?.id || null
           draw()
         }

@@ -1773,6 +1773,269 @@ class TestLatestEventEndpoint:
         assert "user_id" in outbox.payload
 
 
+# ==================== _fetch_image_bytes 相对 URL 修复测试（任务 5）====================
+
+
+class TestFetchImageBytes:
+    """_fetch_image_bytes 相对 URL 拼接与失败处理测试。
+
+    覆盖：
+    - 相对 URL（/static/...）自动拼接 capture_worker_url
+    - 绝对 URL 不被修改
+    - HTTP 失败时返回 None 并记录 IMAGE_FETCH_FAILED
+    - delivery_type=image 时 _execute_delivery 通过 _fetch_image_bytes 拉取并投递成功
+    """
+
+    @pytest.mark.asyncio
+    async def test_relative_url_prepends_capture_worker_url(self) -> None:
+        """相对 URL（以 / 开头）自动拼接 capture_worker_url，避免 httpx.get 缺 host 失败。"""
+        from app.services.notification_service import _fetch_image_bytes
+
+        mock_resp = MagicMock()
+        mock_resp.content = b"png-bytes"
+        mock_resp.raise_for_status.return_value = None
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+
+        fake_settings = MagicMock()
+        fake_settings.capture_worker_url = "http://worker-capture:8001/"
+
+        with patch("app.config.get_settings", return_value=fake_settings), \
+             patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await _fetch_image_bytes("/static/captures/test.png")
+
+        assert result == b"png-bytes"
+        # 验证 client.get 收到拼接后的绝对 URL（base 末尾斜杠被 rstrip）
+        mock_client.get.assert_awaited_once_with(
+            "http://worker-capture:8001/static/captures/test.png"
+        )
+
+    @pytest.mark.asyncio
+    async def test_absolute_url_not_modified(self) -> None:
+        """绝对 URL 不被修改，直接传给 client.get。"""
+        from app.services.notification_service import _fetch_image_bytes
+
+        mock_resp = MagicMock()
+        mock_resp.content = b"png-bytes"
+        mock_resp.raise_for_status.return_value = None
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await _fetch_image_bytes("http://other-host:9999/static/x.png")
+
+        assert result == b"png-bytes"
+        mock_client.get.assert_awaited_once_with("http://other-host:9999/static/x.png")
+
+    @pytest.mark.asyncio
+    async def test_http_error_returns_none_and_logs_image_fetch_failed(self) -> None:
+        """httpx.HTTPError 时返回 None 并记录 IMAGE_FETCH_FAILED 错误码。"""
+        import httpx
+
+        from app.services.notification_service import _fetch_image_bytes
+        from app.services import notification_service as ns_mod
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=httpx.HTTPError("connection refused"))
+
+        fake_settings = MagicMock()
+        fake_settings.capture_worker_url = "http://worker-capture:8001"
+
+        with patch("app.config.get_settings", return_value=fake_settings), \
+             patch("httpx.AsyncClient") as mock_client_cls, \
+             patch.object(ns_mod.logger, "error") as mock_error:
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await _fetch_image_bytes("/static/captures/missing.png")
+
+        assert result is None
+        mock_error.assert_called_once()
+        # 验证日志包含 IMAGE_FETCH_FAILED 错误码
+        log_fmt = mock_error.call_args.args[0]
+        assert "IMAGE_FETCH_FAILED" in log_fmt
+
+    @pytest.mark.asyncio
+    async def test_execute_delivery_image_fetches_and_sends_bytes(
+        self, db_session, test_user, test_instrument,
+    ) -> None:
+        """delivery_type=image 且 image_url 存在时，_execute_delivery 通过 _fetch_image_bytes
+        拉取 bytes 并交给 adapter.send_image_bytes，最终 status=success。"""
+        from app.models.notification import (
+            MessageDelivery,
+            NotificationChannel,
+            NotificationMessage,
+        )
+        from app.schemas.notification import NotificationMessageDTO
+        from app.services.notification_service import _execute_delivery
+
+        dto = NotificationMessageDTO(
+            message_type="MONITOR_EVENT",
+            template_key="monitor_event",
+            template_version="1.1.0",
+            title="测试",
+            summary="摘要",
+            resource_refs={"instrument_id": str(test_instrument.id)},
+            data_time="2026-06-24T10:00:00+08:00",
+        )
+        message = NotificationMessage(
+            user_id=test_user.id,
+            message_type=dto.message_type,
+            template_key=dto.template_key,
+            template_version=dto.template_version,
+            source_type="strategy_event",
+            source_id=None,
+            body=dto.model_dump(),
+            idempotency_key="test:fetch:msg:1",
+        )
+        channel = NotificationChannel(
+            user_id=test_user.id,
+            adapter_type="mock",
+            display_name="Mock渠道",
+            target_config={},
+            status="active",
+        )
+        db_session.add_all([message, channel])
+        await db_session.flush()
+
+        delivery = MessageDelivery(
+            notification_message_id=message.id,
+            channel_id=channel.id,
+            status="pending",
+            delivery_type="image",
+            attempt_count=0,
+            image_url="/static/captures/mock.png",
+            idempotency_key="test:fetch:1",
+        )
+        db_session.add(delivery)
+        await db_session.flush()
+
+        # mock _fetch_image_bytes 返回伪 bytes，避免真实 HTTP
+        with patch(
+            "app.services.notification_service._fetch_image_bytes",
+            new=AsyncMock(return_value=b"fetched-png-bytes"),
+        ) as mock_fetch:
+            result = await _execute_delivery(db_session, delivery)
+
+        assert result.status == "success"
+        assert result.attempt_count == 1
+        # 验证 _fetch_image_bytes 被相对 URL 调用
+        mock_fetch.assert_awaited_once_with("/static/captures/mock.png")
+
+
+class TestTextImageMessageGroup:
+    """text/image 投递共享 message_group_id 测试（飞书两段式投递）。"""
+
+    @pytest.mark.asyncio
+    async def test_text_image_deliveries_share_message_group_id(
+        self, db_session, test_user, test_instrument,
+    ) -> None:
+        """同一 message_group_id 的 text 与 image Outbox 经 relay 后，
+        两条 MessageDelivery 共享同一 message_group_id。"""
+        from app.models.notification import (
+            MessageDelivery,
+            NotificationChannel,
+            NotificationMessage,
+        )
+        from app.models.outbox import Outbox
+        from app.schemas.notification import NotificationMessageDTO
+        from app.services.outbox_relay import relay_outbox
+
+        dto = NotificationMessageDTO(
+            message_type="MONITOR_EVENT",
+            template_key="monitor_event",
+            template_version="1.1.0",
+            title="测试",
+            summary="摘要",
+            resource_refs={"instrument_id": str(test_instrument.id)},
+            data_time="2026-06-24T10:00:00+08:00",
+        )
+        message = NotificationMessage(
+            user_id=test_user.id,
+            message_type=dto.message_type,
+            template_key=dto.template_key,
+            template_version=dto.template_version,
+            source_type="strategy_event",
+            source_id=None,
+            body=dto.model_dump(),
+            idempotency_key="test:group:msg:1",
+        )
+        channel = NotificationChannel(
+            user_id=test_user.id,
+            adapter_type="mock",
+            display_name="Mock渠道",
+            target_config={},
+            status="active",
+        )
+        db_session.add_all([message, channel])
+        await db_session.flush()
+
+        shared_group_id = "batch-group-abc-123"
+        # 文本 Outbox
+        text_outbox = Outbox(
+            id=uuid4(),
+            aggregate_type="notification_message",
+            aggregate_id=message.id,
+            event_type="notification.message.created",
+            payload={
+                "message_id": str(message.id),
+                "user_id": str(test_user.id),
+                "delivery_type": "text",
+                "message_group_id": shared_group_id,
+            },
+            headers={},
+            status="pending",
+            retry_count=0,
+        )
+        # 图片 Outbox（共享同一 message_group_id）
+        image_outbox = Outbox(
+            id=uuid4(),
+            aggregate_type="notification_message",
+            aggregate_id=message.id,
+            event_type="notification.message.created",
+            payload={
+                "message_id": str(message.id),
+                "user_id": str(test_user.id),
+                "delivery_type": "image",
+                "image_url": "/static/captures/grouped.png",
+                "message_group_id": shared_group_id,
+            },
+            headers={},
+            status="pending",
+            retry_count=0,
+        )
+        db_session.add_all([text_outbox, image_outbox])
+        await db_session.flush()
+
+        with patch("app.services.outbox_relay.get_redis") as mock_redis:
+            mock_redis.return_value = AsyncMock()
+            processed = await relay_outbox(db_session, batch_size=10)
+
+        assert processed == 2
+
+        stmt = (
+            select(MessageDelivery)
+            .where(MessageDelivery.notification_message_id == message.id)
+            .order_by(MessageDelivery.delivery_type)
+        )
+        result = await db_session.execute(stmt)
+        deliveries = list(result.scalars().all())
+        assert len(deliveries) == 2
+
+        # 两条投递共享同一 message_group_id
+        group_ids = {d.message_group_id for d in deliveries}
+        assert group_ids == {shared_group_id}
+        # 一条 text，一条 image
+        delivery_types = {d.delivery_type for d in deliveries}
+        assert delivery_types == {"text", "image"}
+
+
 if __name__ == "__main__":
     # 自测入口：直接运行验证
     pytest.main([__file__, "-v", "--tb=short"])

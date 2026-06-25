@@ -102,11 +102,19 @@ def _to_json_safe(val: Any) -> Any:
     return val
 
 
+# 快照类字段（VP 价格档位/元信息/peak 节点）：非 bar 对齐时间序列，禁止按 bars 截断
+# 否则 profile_rows(100 行) 在 bars<100 时会被错误截断，破坏 SSOT 完整透传
+_SNAPSHOT_KEYS: frozenset[str] = frozenset({"profile_rows", "profile_meta", "peak_rows"})
+
+
 def _truncate_lists(indicators: dict[str, Any], bars: int) -> dict[str, Any]:
     """截取指标数据到最近 N 根 bar。
 
     对值为 list 的字段，截取最后 bars 个元素。
     非列表字段（如标量）保持不变。
+
+    快照类字段（profile_rows/profile_meta/peak_rows）为 VP 价格档位快照，
+    非 bar 对齐时间序列，不参与截断（保证 SSOT 完整透传）。
 
     Args:
         indicators: 策略返回的指标字典
@@ -119,7 +127,9 @@ def _truncate_lists(indicators: dict[str, Any], bars: int) -> dict[str, Any]:
         return indicators
     result: dict[str, Any] = {}
     for key, val in indicators.items():
-        if isinstance(val, list) and len(val) > bars:
+        if key in _SNAPSHOT_KEYS:
+            result[key] = val
+        elif isinstance(val, list) and len(val) > bars:
             result[key] = val[-bars:]
         else:
             result[key] = val

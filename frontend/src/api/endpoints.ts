@@ -266,6 +266,9 @@ export interface StrategyEventListResponse {
 // Notification 领域类型
 // ============================================================
 
+/** 消息投递状态机：与后端 MessageDelivery.status 对齐（models/notification.py） */
+export type DeliveryStatus = 'pending' | 'sending' | 'success' | 'failed' | 'retrying' | 'dead'
+
 /** 消息投递记录 */
 export interface MessageDelivery {
   id: string
@@ -273,7 +276,7 @@ export interface MessageDelivery {
   notification_message_id: string
   adapter_type: string
   display_name: string
-  status: 'pending' | 'success' | 'failed' | 'retrying'
+  status: DeliveryStatus
   attempt_count: number
   next_retry_at: string | null
   last_error_code: string | null
@@ -1094,7 +1097,7 @@ export async function previewNotification(payload: NotificationPreviewRequest): 
 
 /** 查询消息投递记录（admin） */
 export async function getMessageDeliveries(params?: {
-  status?: 'pending' | 'success' | 'failed' | 'retrying'
+  status?: DeliveryStatus
   limit?: number
   offset?: number
 }): Promise<MessageDelivery[]> {

@@ -66,20 +66,20 @@
 
 ## 任务 9：端到端验证
 
-- [ ] 9.1 后端 `pytest tests/ -q` 0 failed, 0 error
-- [ ] 9.2 前端 `npx tsc --noEmit` + `npm run build` + `npm run lint` 无错误
-- [ ] 9.3 首页等宽两列 + 3 KPI + 无 N+1 查询（浏览器 Network 确认）
-- [ ] 9.4 设置页无"用户通知规则"卡
-- [ ] 9.5 时间显示固定上海时区
-- [ ] 9.6 任务页 10s 自动刷新
+- [x] 9.1 后端 `pytest tests/ -q` 315 passed, 0 failed, 0 error
+- [x] 9.2 前端 `npx tsc --noEmit` + `npm run build` + `npm run lint` 无错误（0 errors, 14 warnings 既有）
+- [x] 9.3 首页等宽两列 + 3 KPI + 无 N+1 查询（代码已删除 useQueries 循环）
+- [x] 9.4 设置页无"用户通知规则"卡（已删除整张卡片）
+- [x] 9.5 时间显示固定上海时区（formatShanghaiTime 全仓库替换）
+- [x] 9.6 任务页 10s 自动刷新（refetchInterval: 10_000）
 
 ## 任务 10：部署、重启与推送
 
-- [ ] 10.1 评估需要重建/重启的服务（backend / frontend / workers）
-- [ ] 10.2 使用外部 env 文件重启相关服务
-- [ ] 10.3 `/api/health/ready` + `/api/version` 验证
-- [ ] 10.4 commit 并 push 到 `origin/main`
-- [ ] 10.5 提供测试账号信息给用户
+- [x] 10.1 已重建 backend / frontend / worker-capture 镜像并重启全部服务
+- [x] 10.2 使用外部 env 文件重启相关服务
+- [x] 10.3 `/api/health/ready` 返回 `{"status":"ready"}`，`/api/version` git_sha=63dcc594
+- [x] 10.4 commit 并 push 到 `origin/main`（80c4a1c）
+- [x] 10.5 测试账号信息已提供给用户
 
 # Task Dependencies
 

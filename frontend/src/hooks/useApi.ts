@@ -30,6 +30,7 @@ import type {
   IndicatorQueryParams,
   StockMemoUpsertRequest,
   MarketStatus,
+  DeliveryStatus,
 } from '../api/endpoints'
 
 // ============================================================
@@ -480,7 +481,7 @@ export function usePreviewNotification() {
 
 /** 查询消息投递记录（admin） */
 export function useMessageDeliveries(params?: {
-  status?: 'pending' | 'success' | 'failed' | 'retrying'
+  status?: DeliveryStatus
   limit?: number
   offset?: number
 }) {

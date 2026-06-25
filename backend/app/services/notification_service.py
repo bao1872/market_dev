@@ -280,16 +280,26 @@ async def _fetch_image_bytes(image_url: str) -> bytes | None:
     """从 image_url 拉取图片 bytes。
 
     image_url 为 capture worker 返回的本地静态 URL，支持相对路径与绝对路径。
+    相对路径（以 / 开头）自动拼接 capture_worker_url，避免 httpx.get("/static/...")
+    因缺少 host 而失败。
     """
     import httpx
+
+    from app.config import get_settings
+
+    # [飞书投递] - 描述: 相对 URL 自动拼接 capture_worker_url
+    if image_url.startswith("/"):
+        base = get_settings().capture_worker_url.rstrip("/")
+        image_url = f"{base}{image_url}"
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(image_url)
             resp.raise_for_status()
             return resp.content
-    except Exception as e:
-        logger.warning("拉取截图失败 image_url=%s: %s", image_url, e)
+    except httpx.HTTPError as e:
+        # 记录 IMAGE_FETCH_FAILED 错误码，便于 delivery_worker 归集失败原因
+        logger.error("IMAGE_FETCH_FAILED url=%s error=%s", image_url, e)
         return None
 
 
