@@ -33,6 +33,9 @@ dependencies = [
     "jsonschema>=4.21",
     "apscheduler>=3.11.0",
     "playwright>=1.43",
+    # [Dependencies] - plotly 用于 strategy_assets/algorithms/features/* 的图表渲染
+    # 历史遗漏：3d919a3 引入 import plotly 但未声明，导致 monitor worker 启动失败
+    "plotly>=5.0",
 ]
 
 [project.optional-dependencies]

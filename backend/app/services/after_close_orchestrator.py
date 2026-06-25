@@ -176,7 +176,7 @@ async def _update_orchestrator_status(
 async def create_after_close_run(
     db: AsyncSession,
     trade_date: date,
-) -> SchedulerJobRun:
+) -> tuple[SchedulerJobRun, bool]:
     """创建盘后编排任务（幂等：同 trade_date 已有 running/succeeded 则返回已有）。
 
     流程：
@@ -184,17 +184,19 @@ async def create_after_close_run(
     2. acquire_job_run_lock 获取任务执行权（幂等）
     3. 写入 metadata_json（orchestrator_status=queued）
     4. 写入 START 事件
-    5. commit 并返回 SchedulerJobRun
+    5. commit 并返回 SchedulerJobRun + is_new
 
     Args:
         db: 异步会话
         trade_date: 交易日期
 
     Returns:
-        SchedulerJobRun 记录（status=running, orchestrator_status=queued）
+        (SchedulerJobRun, is_new)：
+        - is_new=True 表示本次新建任务（status=running, orchestrator_status=queued）
+        - is_new=False 表示同日已有任务，返回已有记录（调用方应返回 409 Conflict）
 
     Raises:
-        RuntimeError: 幂等锁获取失败（同日已有运行中任务）
+        RuntimeError: 幂等锁获取失败（同日已有运行中任务）且未找到已有记录
     """
     run_key = f"{_AFTER_CLOSE_JOB_NAME}:{trade_date.isoformat()}"
     job_run = await acquire_job_run_lock(
@@ -220,7 +222,7 @@ async def create_after_close_run(
                 "[AfterClose] 同日已有编排任务，返回已有: run_id=%s, status=%s",
                 existing.id, existing.status,
             )
-            return existing
+            return existing, False
         raise RuntimeError(
             f"acquire_job_run_lock 返回 None 但未找到已有记录: run_key={run_key}"
         )
@@ -239,7 +241,7 @@ async def create_after_close_run(
         "[AfterClose] 创建盘后编排任务: run_id=%s, trade_date=%s",
         job_run.id, trade_date,
     )
-    return job_run
+    return job_run, True
 
 
 async def execute_after_close_run(

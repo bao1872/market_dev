@@ -121,15 +121,28 @@ async def create_after_close_run_endpoint(
     """
     trade_date = _parse_trade_date(payload.trade_date)
 
-    job_run = await create_after_close_run(db=db, trade_date=trade_date)
+    job_run, is_new = await create_after_close_run(db=db, trade_date=trade_date)
 
     # 仅对新创建的任务（status=running 且 orchestrator_status=queued）启动后台执行
     # 已存在的不重复启动
     from app.services.after_close_orchestrator import _parse_metadata
     meta = _parse_metadata(job_run)
     orchestrator_status = meta.get("orchestrator_status")
-    if orchestrator_status == AfterCloseRunStatus.QUEUED.value:
+    if is_new and orchestrator_status == AfterCloseRunStatus.QUEUED.value:
         _kick_off_async_execution(job_run.id, trade_date)
+
+    # [Spec] 已有运行中任务时拒绝重复创建：返回 409 Conflict，body 含已有 after_close_run_id
+    if not is_new:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "after_close_run_id": str(job_run.id),
+                "status": job_run.status,
+                "orchestrator_status": orchestrator_status or "unknown",
+                "trade_date": trade_date.isoformat(),
+                "message": f"同日已有盘后编排任务: trade_date={trade_date}",
+            },
+        )
 
     return AfterCloseRunCreateResponse(
         job_run_id=str(job_run.id),

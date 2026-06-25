@@ -148,8 +148,9 @@ async def test_create_after_close_run_writes_queued_event(db_session) -> None:
         "app.services.after_close_orchestrator.acquire_job_run_lock",
         new=_fake_acquire,
     ), patch.object(db_session, "commit", new=db_session.flush):
-        result = await create_after_close_run(db=db_session, trade_date=trade_date)
+        result, is_new = await create_after_close_run(db=db_session, trade_date=trade_date)
 
+    assert is_new is True
     assert result.id == fake_job_run.id
     assert result.status == "running"
 
@@ -166,6 +167,41 @@ async def test_create_after_close_run_writes_queued_event(db_session) -> None:
     assert len(queued_events) >= 1
     assert queued_events[0].level == "info"
     assert "盘后编排" in queued_events[0].message
+
+
+@pytest.mark.asyncio
+async def test_create_after_close_run_returns_existing_on_duplicate(db_session) -> None:
+    """测试 1.1：create_after_close_run 在 acquire_job_run_lock 返回 None 时返回已有任务 + is_new=False。
+
+    模拟同日已有运行中任务的幂等场景：acquire 返回 None → 函数应查询已有记录返回 (existing, False)。
+    """
+    trade_date = date(2026, 6, 25)
+    existing_run = SchedulerJobRun(
+        job_name="after_close_orchestrator",
+        business_date=trade_date.isoformat(),
+        run_key=f"after_close_orchestrator:{trade_date.isoformat()}",
+        status="running",
+        scheduled_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+        started_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+        heartbeat_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+        lease_expires_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+        metadata_json=json.dumps({"orchestrator_status": "refreshing_daily"}),
+    )
+    db_session.add(existing_run)
+    await db_session.flush()
+
+    async def _fake_acquire_returns_none(db, **kwargs):
+        return None
+
+    with patch(
+        "app.services.after_close_orchestrator.acquire_job_run_lock",
+        new=_fake_acquire_returns_none,
+    ):
+        result, is_new = await create_after_close_run(db=db_session, trade_date=trade_date)
+
+    assert is_new is False
+    assert result.id == existing_run.id
+    assert result.status == "running"
 
 
 @pytest.mark.asyncio
