@@ -1076,6 +1076,7 @@ class TestMessageDeliveryAdminService:
             attempt_count=1,
             last_error_code="NETWORK_ERROR",
             idempotency_key="test:retry:1",
+            delivery_type="card",
         )
         db_session.add(delivery)
         await db_session.flush()

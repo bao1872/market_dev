@@ -213,6 +213,125 @@ def build_channel_alert(
     return build_message("CHANNEL_ALERT", context)
 
 
+# [飞书两段式投递] - 事件类型 → 中文标签（纯文本消息用）
+_EVENT_TYPE_TEXT_LABEL: dict[str, str] = {
+    "bb_upper_touch": "BB上轨穿越",
+    "bb_mid_touch": "BB中轨穿越",
+    "bb_lower_touch": "BB下轨穿越",
+    "node_cluster_touch": "节点集群穿越",
+}
+
+
+def build_monitor_event_text(
+    stock_name: str,
+    symbol: str,
+    event_type: str,
+    event_time: str,
+    current_price: float | None = None,
+    bb_upper: float | None = None,
+    bb_mid: float | None = None,
+    bb_lower: float | None = None,
+    upper_node: float | None = None,
+    lower_node: float | None = None,
+    poc_price: float | None = None,
+    position_0_1: float | None = None,
+    resource_refs: dict[str, Any] | None = None,
+) -> NotificationMessageDTO:
+    """构建监控事件纯文本消息（飞书两段式投递 - 文本段）。
+
+    按 advice.md 模板生成纯文本，只保留一个时间字段"触发时间"，
+    不出现"数据时间"/"更新时间"/"发送时间"。
+
+    模板：
+        【自选监控触发】
+        {股票名称} {股票代码}
+        触发：{触发类型中文}
+        触发时间：{HH:MM}
+        现价：{current_price}
+        BB：{bb_upper} / {bb_mid} / {bb_lower}
+        上节点：{upper_node}
+        下节点：{lower_node}
+        POC：{poc_price}
+        位置：{position_0_1}
+
+    Args:
+        stock_name: 股票名称
+        symbol: 股票代码
+        event_type: 事件类型（如 bb_upper_touch）
+        event_time: 事件时间 ISO8601（仅用于提取 HH:MM 作为触发时间）
+        current_price: 现价
+        bb_upper / bb_mid / bb_lower: BB 三轨
+        upper_node / lower_node: 上下节点
+        poc_price: POC 价格
+        position_0_1: 节点位置 0~1
+        resource_refs: 资源引用（instrument_id/symbol/event_id 等）
+
+    Returns:
+        NotificationMessageDTO（text_content 字段填充纯文本）
+    """
+    from zoneinfo import ZoneInfo
+
+    _CST = ZoneInfo("Asia/Shanghai")
+
+    # 解析 event_time -> HH:MM（北京时间）
+    try:
+        from datetime import datetime as _dt
+
+        dt = _dt.fromisoformat(event_time)
+        if dt.tzinfo is None:
+            from datetime import UTC
+
+            dt = dt.replace(tzinfo=UTC)
+        trigger_time = dt.astimezone(_CST).strftime("%H:%M")
+    except (ValueError, TypeError):
+        trigger_time = "--:--"
+
+    event_label = _EVENT_TYPE_TEXT_LABEL.get(event_type, event_type)
+
+    def _fmt(v: float | None) -> str:
+        return f"{v:.2f}" if v is not None else "-"
+
+    def _fmt_pos(v: float | None) -> str:
+        return f"{v:.2f}" if v is not None else "-"
+
+    text_lines = [
+        "【自选监控触发】",
+        f"{stock_name} {symbol}",
+        f"触发：{event_label}",
+        f"触发时间：{trigger_time}",
+        f"现价：{_fmt(current_price)}",
+        f"BB：{_fmt(bb_upper)} / {_fmt(bb_mid)} / {_fmt(bb_lower)}",
+        f"上节点：{_fmt(upper_node)}",
+        f"下节点：{_fmt(lower_node)}",
+        f"POC：{_fmt(poc_price)}",
+        f"位置：{_fmt_pos(position_0_1)}",
+    ]
+    text_content = "\n".join(text_lines)
+
+    refs = resource_refs or {}
+    return NotificationMessageDTO(
+        message_type="MONITOR_EVENT",
+        template_key="monitor_event_text",
+        template_version="1.1.0",
+        title=f"监控触发｜{stock_name} {symbol}",
+        summary=text_content,
+        text_content=text_content,
+        resource_refs={
+            "instrument_id": refs.get("instrument_id", ""),
+            "symbol": symbol,
+            "event_type": event_type,
+            **refs,
+        },
+        data_time=event_time,
+        primary_instrument={
+            "instrument_id": refs.get("instrument_id", ""),
+            "symbol": symbol,
+            "name": stock_name,
+        },
+        event_summary=event_label,
+    )
+
+
 if __name__ == "__main__":
     # 自测入口：验证消息构建
     print("测试监控事件消息:")
@@ -228,6 +347,38 @@ if __name__ == "__main__":
     print(f"  title={dto1.title}")
     print(f"  template_key={dto1.template_key}, version={dto1.template_version}")
     assert dto1.message_type == "MONITOR_EVENT"
+
+    print("测试监控事件纯文本消息:")
+    dto_text = build_monitor_event_text(
+        stock_name="鼎阳科技",
+        symbol="688112",
+        event_type="bb_mid_touch",
+        event_time="2026-06-18T14:48:00+08:00",
+        current_price=71.13,
+        bb_upper=79.12,
+        bb_mid=71.20,
+        bb_lower=63.28,
+        upper_node=77.25,
+        lower_node=70.04,
+        poc_price=38.78,
+        position_0_1=0.80,
+        resource_refs={"instrument_id": "688112.SH", "event_id": "evt-001"},
+    )
+    print(f"  title={dto_text.title}")
+    print(f"  text_content:\n{dto_text.text_content}")
+    assert dto_text.text_content is not None
+    assert "【自选监控触发】" in dto_text.text_content
+    assert "触发时间：14:48" in dto_text.text_content
+    assert "现价：71.13" in dto_text.text_content
+    assert "BB：79.12 / 71.20 / 63.28" in dto_text.text_content
+    assert "上节点：77.25" in dto_text.text_content
+    assert "下节点：70.04" in dto_text.text_content
+    assert "POC：38.78" in dto_text.text_content
+    assert "位置：0.80" in dto_text.text_content
+    # 验证只有一个时间字段"触发时间"，不出现"数据时间"
+    assert "数据时间" not in dto_text.text_content
+    assert "更新时间" not in dto_text.text_content
+    print("  纯文本消息字段验证通过 ✓")
 
     print("测试系统告警消息:")
     dto2 = build_system_alert(

@@ -82,6 +82,11 @@ class NotificationMessageDTO(BaseModel):
         None, description="主要标的（instrument_id/symbol/name）",
     )
     event_summary: str | None = Field(None, description="事件摘要（事件类型/边界等）")
+    # [飞书两段式投递] - 纯文本消息内容（delivery_type=text 时使用）
+    # 仅 build_monitor_event_text 填充；card 投递忽略此字段
+    text_content: str | None = Field(
+        None, description="纯文本消息内容（文本投递专用，含触发时间/现价/BB/节点/POC/位置）",
+    )
 
     def validate_message_type(self) -> None:
         """校验 message_type 在允许枚举内。"""
@@ -142,10 +147,11 @@ class MessageDeliveryResponse(BaseModel):
     adapter_type: str = Field(..., description="渠道类型（feishu_webhook/feishu_platform_app/email）")
     display_name: str = Field(..., description="渠道展示名称")
     status: str = Field(..., description="pending/success/failed/retrying")
-    delivery_type: str = Field(default="card", description="card/image")
+    delivery_type: str = Field(default="text", description="text/image/card")
     attempt_count: int = Field(..., description="已尝试次数")
     next_retry_at: datetime | None = Field(None, description="下次重试时间")
     last_error_code: str | None = Field(None, description="最近错误码")
+    message_group_id: str | None = Field(None, description="消息组 ID（关联同一事件的 text+image 两条投递）")
     created_at: datetime = Field(..., description="创建时间")
     # [消息投递管理] - 从关联消息提取的摘要信息，便于 admin 页面展示失败投递对应的股票/事件
     message_summary: str | None = Field(None, description="消息摘要")
@@ -178,10 +184,11 @@ class MessageDeliveryResponse(BaseModel):
                     if channel else getattr(data, "display_name", "")
                 ),
                 "status": getattr(data, "status", ""),
-                "delivery_type": getattr(data, "delivery_type", "card"),
+                "delivery_type": getattr(data, "delivery_type", "text"),
                 "attempt_count": getattr(data, "attempt_count", 0),
                 "next_retry_at": getattr(data, "next_retry_at", None),
                 "last_error_code": getattr(data, "last_error_code", None),
+                "message_group_id": getattr(data, "message_group_id", None),
                 "created_at": getattr(data, "created_at", None),
                 "message_summary": message_summary,
                 "primary_instrument": primary_instrument,

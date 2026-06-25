@@ -96,11 +96,18 @@ async def _expand_notification_message_created(
 ) -> int:
     """将 notification.message.created 事件扩张为 MessageDelivery 记录。
 
-    流程：
-    1. 解析 payload 中的 message_id / user_id / delivery_type / image_url
+    [飞书两段式投递] - 流程：
+    1. 解析 payload 中的 message_id / user_id / delivery_type / image_url / message_group_id
     2. 查询用户活跃渠道
     3. 为每个渠道创建 MessageDelivery(pending)
+       - delivery_type 默认 'text'（飞书两段式投递默认文本）
+       - message_group_id 从 payload 读取（关联同一事件的 text+image 两条投递）
     4. 幂等键基于 message_id + channel_id + delivery_type + image_url
+
+    monitor_batch_service 写入 Outbox 时：
+    - 文本 Outbox: delivery_type='text', message_group_id=<batch_group_id>
+    - 图片 Outbox: delivery_type='image', message_group_id=<batch_group_id>, image_url=<capture_url>
+    两条 Outbox 共享同一 message_group_id，outbox_relay 分别扩张为 text/image delivery。
 
     Args:
         db: 异步会话
@@ -112,8 +119,11 @@ async def _expand_notification_message_created(
     payload: dict[str, Any] = record.payload or {}
     message_id_str = payload.get("message_id")
     user_id_str = payload.get("user_id")
-    delivery_type = payload.get("delivery_type", "card")
+    # [飞书两段式投递] - 默认 text（不再默认 card）
+    delivery_type = payload.get("delivery_type", "text")
     image_url = payload.get("image_url")
+    # 消息组 ID：关联同一事件的 text+image 两条投递记录
+    message_group_id = payload.get("message_group_id")
 
     if not message_id_str or not user_id_str:
         logger.warning(
@@ -167,14 +177,16 @@ async def _expand_notification_message_created(
             delivery_type=delivery_type,
             attempt_count=0,
             image_url=image_url,
+            message_group_id=message_group_id,
             idempotency_key=idem_key,
         )
         db.add(delivery)
         created += 1
 
     logger.info(
-        "通知事件扩张完成: outbox_id=%s message_id=%s channels=%s delivery_type=%s",
-        record.id, message_id, len(channels), delivery_type,
+        "通知事件扩张完成: outbox_id=%s message_id=%s channels=%s "
+        "delivery_type=%s message_group_id=%s",
+        record.id, message_id, len(channels), delivery_type, message_group_id,
     )
     return created
 

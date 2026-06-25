@@ -237,7 +237,13 @@ async def _execute_delivery(
             result: DeliveryResult = await adapter.send_image_bytes(
                 actual_image_bytes, channel.target_config
             )
+        elif delivery.delivery_type == "text":
+            # [飞书两段式投递] - 纯文本消息：调用 adapter.send_text_message
+            result = await adapter.send_text_message(
+                message_dto, channel.target_config
+            )
         else:
+            # card（兼容管理后台预览/历史投递）
             result = await adapter.send(message_dto, channel.target_config)
     except Exception as e:
         delivery.status = "failed"

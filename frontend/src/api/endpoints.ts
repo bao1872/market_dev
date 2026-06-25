@@ -389,7 +389,7 @@ export interface WatchlistListResponse {
   total: number
 }
 
-/** 自选股+监控状态聚合项 */
+/** 自选股+监控状态聚合项（与 backend/app/schemas/watchlist.py WatchlistMonitorStatusItem 对齐） */
 export interface WatchlistMonitorStatusItem {
   watchlist_item_id: string
   instrument_id: string
@@ -398,7 +398,12 @@ export interface WatchlistMonitorStatusItem {
   market: string
   watchlist_created_at: string
   monitor_status: 'PRE_MARKET' | 'TRADING' | 'LUNCH_BREAK' | 'AFTER_MARKET' | 'NON_TRADING_DAY' | 'WAITING_FIRST_RUN' | 'SUCCEEDED' | 'FAILED' | 'STALE'
+  market_session: 'TRADING' | 'AFTER_MARKET' | 'LUNCH_BREAK' | 'PRE_MARKET' | 'NON_TRADING_DAY'
+  calculation_status: 'SUCCEEDED' | 'FAILED' | 'STALE' | 'WAITING_FIRST_RUN'
+  freshness_seconds: number | null
+  last_bar_time: string | null
   evaluation_status: string | null
+  retry_count: number | null
   error_code: string | null
   source_bar_time: string | null
   metrics: Record<string, unknown> | null

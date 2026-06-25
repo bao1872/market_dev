@@ -91,6 +91,29 @@ class ChannelAdapter(ABC):
             error_message=f"渠道类型 {self.adapter_type} 不支持图片投递",
         )
 
+    async def send_text_message(
+        self,
+        message_dto: NotificationMessageDTO,
+        channel_config: dict[str, Any],
+    ) -> DeliveryResult:
+        """发送纯文本消息到渠道（可选实现）。
+
+        [飞书两段式投递] - delivery_type=text 时调用。
+        默认返回 NOT_SUPPORTED；支持文本投递的渠道（如飞书平台应用）应覆盖此方法。
+
+        Args:
+            message_dto: 统一消息 DTO（text_content 字段含纯文本内容）
+            channel_config: 渠道配置
+
+        Returns:
+            DeliveryResult
+        """
+        return DeliveryResult(
+            success=False,
+            error_code="NOT_SUPPORTED",
+            error_message=f"渠道类型 {self.adapter_type} 不支持纯文本投递",
+        )
+
 
 # 渠道适配器注册表
 _ADAPTER_REGISTRY: dict[str, type[ChannelAdapter]] = {}
@@ -172,6 +195,17 @@ class MockChannelAdapter(ChannelAdapter):
         return DeliveryResult(
             success=True,
             provider_response={"mock": True, "image_size": len(image_bytes)},
+        )
+
+    async def send_text_message(
+        self,
+        message_dto: NotificationMessageDTO,
+        channel_config: dict[str, Any],
+    ) -> DeliveryResult:
+        """Mock 纯文本投递 - 总是返回成功。"""
+        return DeliveryResult(
+            success=True,
+            provider_response={"mock": True, "text_content": message_dto.text_content},
         )
 
 

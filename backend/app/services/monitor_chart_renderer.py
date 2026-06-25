@@ -104,7 +104,8 @@ async def render_monitoring_chart(
     Args:
         df: K线 DataFrame（index 为 datetime）
         bb_mid/bb_upper/bb_lower: 布林带序列（与 df 同长度）
-        profile: VolumeProfileResult（可选，为 None 时不绘制节点集群）
+        profile: UnifiedVolumeProfileResult | VolumeProfileResult（可选，为 None 时不绘制节点集群）
+            两者均暴露 profile_df/peak_df/price_step 属性，本函数按鸭子类型访问
         symbol: 股票代码
         stock_name: 股票名称
         bars_to_plot: 绘制最近多少根 bar
@@ -146,15 +147,15 @@ async def render_monitoring_chart(
         last_x = len(df_plot) - 1
         profile_anchor = last_x + offset
 
-    # K线
+    # K线（A 股红涨绿跌：涨红色 #ef5350、跌绿色 #26a69a）
     fig.add_trace(
         go.Candlestick(
             x=x,
             open=df_plot["open"], high=df_plot["high"],
             low=df_plot["low"], close=df_plot["close"],
             name="K线",
-            increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
-            increasing_fillcolor="#26a69a", decreasing_fillcolor="#ef5350",
+            increasing_line_color="#ef5350", decreasing_line_color="#26a69a",
+            increasing_fillcolor="#ef5350", decreasing_fillcolor="#26a69a",
         ),
     )
 
@@ -171,8 +172,9 @@ async def render_monitoring_chart(
             y1 = float(row["price_low"]) + 0.9 * profile.price_step
 
             in_va = bool(row["is_value_area"])
-            up_base = "rgba(41,98,255,0.70)" if in_va else "rgba(93,96,107,0.50)"
-            down_base = "rgba(251,192,45,0.70)" if in_va else "rgba(209,212,220,0.50)"
+            # A 股风格：多头红色、空头绿色；价值区内饱和度高，非价值区饱和度低
+            up_base = "rgba(239,83,80,0.70)" if in_va else "rgba(239,83,80,0.50)"
+            down_base = "rgba(38,166,154,0.70)" if in_va else "rgba(38,166,154,0.50)"
 
             bull_w = bull / max_vol * profile_width_bars
             down_w = down / max_vol * profile_width_bars
@@ -203,7 +205,7 @@ async def render_monitoring_chart(
                     "bearish_volume": float(row["bearish_volume"]),
                 })
 
-    # 筹码峰迷你多空柱（在 peak 色带内部绘制绿色多头+红色空头水平柱）
+    # 筹码峰迷你多空柱（A 股风格：多头红色 / 空头绿色，在 peak 色带内部绘制水平柱）
     if profile_anchor is not None and peak_data:
         max_peak_vol = max(max(p["bullish_volume"], p["bearish_volume"]) for p in peak_data) or 1.0
         mini_max_w = profile_width_bars * 0.6
@@ -212,17 +214,17 @@ async def render_monitoring_chart(
             y_range = pd_item["y1"] - pd_item["y0"]
             bar_y0 = pd_item["y0"] + y_range * (0.5 - bar_h_ratio / 2)
             bar_y1 = pd_item["y0"] + y_range * (0.5 + bar_h_ratio / 2)
-            # 多头柱（绿色，从左端向右）
+            # 多头柱（红色，从左端向右）
             bull_w = pd_item["bullish_volume"] / max_peak_vol * mini_max_w
             fig.add_shape(type="rect", xref="x", yref="y",
                           x0=0, x1=bull_w, y0=bar_y0, y1=bar_y1,
-                          line={"width": 0}, fillcolor="rgba(38,166,154,0.85)",
+                          line={"width": 0}, fillcolor="rgba(239,83,80,0.85)",
                           layer="above")
-            # 空头柱（红色，紧接多头柱右侧）
+            # 空头柱（绿色，紧接多头柱右侧）
             bear_w = pd_item["bearish_volume"] / max_peak_vol * mini_max_w
             fig.add_shape(type="rect", xref="x", yref="y",
                           x0=bull_w, x1=bull_w + bear_w, y0=bar_y0, y1=bar_y1,
-                          line={"width": 0}, fillcolor="rgba(239,83,80,0.85)",
+                          line={"width": 0}, fillcolor="rgba(38,166,154,0.85)",
                           layer="above")
 
     # 布林带填充区域

@@ -19,9 +19,7 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
-import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -1162,10 +1160,15 @@ class MonitorBatchService:
         result: MonitorCycleResult,
         strategy_version: StrategyVersion | None = None,
     ) -> None:
-        """按用户自选股归属合并通知，每个用户一张飞书卡片。
+        """按用户自选股归属合并通知，每个用户一条飞书消息。
 
-        通知通过 Outbox 管道投递：
-        create_message → write_outbox(notification.message.created) → Delivery Worker → deliver_message
+        [飞书两段式投递] - 通知通过 Outbox 管道投递：
+        create_message → write_outbox(notification.message.created, delivery_type=text)
+        → outbox_relay 扩张为 MessageDelivery(text)
+        → delivery_worker → adapter.send_text_message
+
+        同时为每只触发股票调用 capture worker 截图，写入 image Outbox，
+        与 text Outbox 共享同一 message_group_id。
 
         Args:
             db: 异步会话
@@ -1216,6 +1219,10 @@ class MonitorBatchService:
                 if events:
                     user_events_map.setdefault(uid, []).extend(events)
 
+        # [飞书两段式投递] - 为本批次生成统一的 message_group_id
+        # 关联同一批次的 text + image 两条投递记录
+        batch_message_group_id = str(uuid.uuid4())
+
         # 对每个用户创建通知消息并写入 Outbox（由 Delivery Worker 异步投递）
         for user_id, user_events in user_events_map.items():
             total_inst = user_instrument_count.get(user_id, 0)
@@ -1248,7 +1255,7 @@ class MonitorBatchService:
                 )
                 continue
 
-            # 写入 Outbox：Delivery Worker 将异步投递到用户活跃渠道
+            # [飞书两段式投递] - 写入 text Outbox（delivery_type=text）
             try:
                 await write_outbox(
                     db=db,
@@ -1256,6 +1263,8 @@ class MonitorBatchService:
                     payload={
                         "message_id": str(message.id),
                         "user_id": str(user_id),
+                        "delivery_type": "text",
+                        "message_group_id": batch_message_group_id,
                     },
                     aggregate_type="notification_message",
                     aggregate_id=message.id,
@@ -1267,9 +1276,11 @@ class MonitorBatchService:
                     user_id, message.id, exc,
                 )
 
-        # 卡片投递完成后，为每只触发股票渲染 PNG 并通过 Outbox 发送图片
+        # [飞书两段式投递] - 为每只触发股票调用 capture worker 截图，
+        # 写入 image Outbox，与 text Outbox 共享 message_group_id
         await self._send_chart_images_via_outbox(
             db, instrument_events, instrument_info_cache, instrument_user_map,
+            batch_message_group_id,
         )
 
     async def _send_chart_images_via_outbox(
@@ -1278,46 +1289,90 @@ class MonitorBatchService:
         instrument_events: dict[uuid.UUID, list[StrategyEvent]],
         instrument_info_cache: dict[uuid.UUID, tuple[str, str]],
         instrument_user_map: dict[uuid.UUID, list[uuid.UUID]],
+        message_group_id: str,
     ) -> None:
-        """为每只触发股票渲染 PNG 行情图，并通过 Outbox 统一投递图片。
+        """为每只触发股票调用 capture worker 截图，并通过 Outbox 统一投递图片。
 
-        与旧版区别：
-        - 不再直接调用 adapter.send_image()，而是创建通知消息并写入 Outbox
-        - Delivery Worker 读取 Outbox 后调用 deliver_image_message 完成实际投递
-        - 图片 bytes 以 base64 形式存放在 Outbox payload 中
+        [飞书两段式投递] - 图片段：
+        - 调用 worker-capture HTTP 服务获取个股详情页截图的本地静态 URL
+        - 不再本地渲染 PNG + base64 编码到 Outbox（避免 Outbox 膨胀）
+        - image_url 由 capture worker 返回，delivery_worker 通过 _fetch_image_bytes 拉取
+        - 与 text Outbox 共享同一 message_group_id
 
-        图片渲染失败不阻塞通知流程，临时 PNG 文件发送后清理。
+        截图失败不阻塞通知流程。
 
         Args:
             db: 异步会话
             instrument_events: instrument_id → events 映射
             instrument_info_cache: instrument_id → (symbol, name) 缓存
             instrument_user_map: instrument_id → [user_ids] 映射
+            message_group_id: 消息组 ID（与 text Outbox 共享）
         """
+        import httpx
+
+        from app.config import get_settings
+        from app.core.security import create_capture_token
+
+        settings = get_settings()
+        capture_worker_url = settings.capture_worker_url
+        frontend_base_url = settings.frontend_base_url
+        capture_token_ttl = settings.jwt_capture_ttl_seconds
+
         for inst_id, events in instrument_events.items():
             info = instrument_info_cache.get(inst_id)
             if not info:
                 continue
             symbol, stock_name = info
 
-            png_path: str | None = None
+            # 取首个事件作为截图上下文
+            first_event = events[0] if events else None
+            if first_event is None:
+                continue
+
             try:
-                png_path = await self._render_instrument_chart(db, inst_id, symbol, stock_name)
-                if png_path is None:
-                    continue
-
-                # 读取 PNG bytes 并编码为 base64
-                try:
-                    with open(png_path, "rb") as f:
-                        image_bytes = f.read()
-                except OSError as exc:
-                    logger.warning("读取 PNG 文件失败: symbol=%s path=%s: %s", symbol, png_path, exc)
-                    continue
-
-                image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-
-                # 获取持有该标的的用户列表，每个用户创建一条消息并写入 Outbox
+                # 获取该标的的用户列表（取首个用户生成 capture token）
                 user_ids = instrument_user_map.get(inst_id, [])
+                if not user_ids:
+                    continue
+
+                # [飞书两段式投递] - 生成短期 capture token
+                token = create_capture_token(
+                    subject=str(user_ids[0]),
+                    event_id=str(first_event.id),
+                    expires_delta=timedelta(seconds=capture_token_ttl),
+                )
+
+                # 调用 capture worker 截图
+                capture_payload = {
+                    "symbol": symbol,
+                    "event_id": str(first_event.id),
+                    "token": token,
+                    "frontend_base_url": frontend_base_url,
+                    "output_filename": f"monitor-{inst_id}-{first_event.id}",
+                }
+                try:
+                    async with httpx.AsyncClient(timeout=60.0) as client:
+                        capture_resp = await client.post(
+                            f"{capture_worker_url.rstrip('/')}/capture",
+                            json=capture_payload,
+                        )
+                        capture_resp.raise_for_status()
+                        capture_data = capture_resp.json()
+                except Exception as exc:
+                    logger.warning(
+                        "capture worker 截图失败: symbol=%s event_id=%s: %s",
+                        symbol, first_event.id, exc,
+                    )
+                    continue
+
+                image_url = capture_data.get("image_url")
+                if not image_url:
+                    logger.warning(
+                        "capture worker 未返回 image_url: symbol=%s", symbol,
+                    )
+                    continue
+
+                # 为每个用户创建图片通知消息并写入 Outbox
                 for uid in user_ids:
                     try:
                         message = await self._create_chart_image_message(
@@ -1330,29 +1385,23 @@ class MonitorBatchService:
                                 "message_id": str(message.id),
                                 "user_id": str(uid),
                                 "delivery_type": "image",
-                                "image_bytes_base64": image_b64,
+                                "image_url": image_url,
+                                "message_group_id": message_group_id,
                             },
                             aggregate_type="notification_message",
                             aggregate_id=message.id,
                         )
                         logger.info(
-                            "PNG 行情图已写入 Outbox: symbol=%s user_id=%s",
-                            symbol, uid,
+                            "图片 Outbox 已写入: symbol=%s user_id=%s image_url=%s",
+                            symbol, uid, image_url,
                         )
                     except Exception as exc:
                         logger.warning(
-                            "PNG 行情图写入 Outbox 失败: symbol=%s user_id=%s: %s",
+                            "图片 Outbox 写入失败: symbol=%s user_id=%s: %s",
                             symbol, uid, exc,
                         )
             except Exception as exc:
-                logger.warning("PNG 渲染/推送失败: %s: %s", symbol, exc)
-            finally:
-                # 清理临时文件
-                if png_path and os.path.isfile(png_path):
-                    try:
-                        os.unlink(png_path)
-                    except OSError:
-                        pass
+                logger.warning("截图/推送失败: %s: %s", symbol, exc)
 
     async def _create_chart_image_message(
         self,
@@ -1492,64 +1541,49 @@ class MonitorBatchService:
     ) -> Any:
         """计算筹码分布（Volume Profile）。
 
+        调用唯一真源 compute_unified_volume_profile，参数固定为
+        VP_LOOKBACK=360/VP_ROWS=100/VP_VALUE_AREA_PCT=0.70 等（见 unified_volume_profile.py）。
+        返回 UnifiedVolumeProfileResult，其 profile_df/peak_df/price_step 属性
+        与历史 VolumeProfileResult 接口兼容，可直接传给 render_monitoring_chart。
+
         Args:
             bars_daily: 日线行情
             instrument_id: 标的 UUID
             db: 异步会话
 
         Returns:
-            VolumeProfileResult 对象，失败返回 None
+            UnifiedVolumeProfileResult 对象；15m 数据不可用时返回 None（由上层降级处理）
         """
         from app.strategy._plotly_mock import ensure_plotly_mock
-        from app.strategy_assets.algorithms.features.luxalgo_volume_profile_pytdx_15m_aligned import (
-            VolumeProfileConfig,
-            compute_volume_profile as vp_compute,
+        from app.strategy_assets.algorithms.features.unified_volume_profile import (
+            compute_unified_volume_profile,
         )
 
         ensure_plotly_mock()
 
-        # 获取 15min 行情
+        # 获取 15min 行情（低周期成交量分配来源）
         now = datetime.now(UTC)
         today = now.date()
-        try:
-            bars_15min_result = await get_bars(
-                db, instrument_id,
-                timeframe="15m",
-                start_date=today - timedelta(days=_15MIN_LOOKBACK_DAYS),
-                end_date=today,
-            )
-            bars_15min = bars_15min_result.bars
-        except Exception:
-            return None
-
+        bars_15min_result = await get_bars(
+            db, instrument_id,
+            timeframe="15m",
+            start_date=today - timedelta(days=_15MIN_LOOKBACK_DAYS),
+            end_date=today,
+        )
+        bars_15min = bars_15min_result.bars
         if bars_15min.empty:
             return None
 
-        cfg = VolumeProfileConfig(
-            peaks_show="peaks",
-            profile_lookback_length=360,
-            profile_number_of_rows=100,
-            value_area_threshold=0.70,
-            peaks_detection_percent=0.05,
-            troughs_show="none",
-            troughs_detection_percent=0.07,
-            volume_node_threshold=0.01,
-            highest_n_volume_nodes=0,
-            lowest_n_volume_nodes=0,
-        )
-
-        # 日线数据需要 datetime 列供 compute_volume_profile 对齐时间
-        # DB 日线的日期在 index（trade_date）中，需转为 datetime 列
-        if "datetime" not in bars_daily.columns:
-            bars_daily = bars_daily.copy()
-            bars_daily["datetime"] = pd.to_datetime(bars_daily.index)
-
-        return vp_compute(
-            df=bars_daily,
-            cfg=cfg,
-            profile_df=bars_15min,
-            main_period="day",
-        )
+        try:
+            return compute_unified_volume_profile(
+                bars_daily,
+                profile_df=bars_15min,
+                main_period="day",
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"compute_unified_volume_profile 失败 instrument_id={instrument_id}: {e}"
+            ) from e
 
     @staticmethod
     def _orm_to_runtime_state(orm: MonitorStateORM) -> MonitorState:

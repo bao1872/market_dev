@@ -194,10 +194,11 @@ class MessageDelivery(Base):
     """消息投递记录 - 每次投递尝试一条记录，幂等键唯一。
 
     status: pending/sending/success/failed/retrying/dead
-    delivery_type: card / image
+    delivery_type: text / image / card（card 仅兼容管理后台预览）
     attempt_count: 已尝试次数
     next_attempt_at: 下次重试时间（指数退避）
     image_url: 图片投递时截图服务的本地静态 URL
+    message_group_id: 消息组 ID，关联同一事件的 text+image 两条投递记录
     """
 
     __tablename__ = "message_deliveries"
@@ -224,9 +225,9 @@ class MessageDelivery(Base):
     delivery_type: Mapped[str] = mapped_column(
         Text(),
         nullable=False,
-        default="card",
-        server_default=func.text("'card'"),
-        comment="card/image",
+        default="text",
+        server_default=func.text("'text'"),
+        comment="text/image/card（card 仅兼容管理后台预览）",
     )
     attempt_count: Mapped[int] = mapped_column(
         Integer(), nullable=False, default=0, server_default="0", comment="已尝试次数"
@@ -242,6 +243,12 @@ class MessageDelivery(Base):
     )
     image_url: Mapped[str | None] = mapped_column(
         Text(), nullable=True, comment="图片投递时截图 URL（本地静态地址）"
+    )
+    message_group_id: Mapped[str | None] = mapped_column(
+        Text(),
+        nullable=True,
+        index=True,
+        comment="消息组 ID（关联同一事件的 text+image 两条投递记录）",
     )
     idempotency_key: Mapped[str] = mapped_column(
         Text(), nullable=False, unique=True, comment="投递幂等键（唯一）"
@@ -271,7 +278,10 @@ if __name__ == "__main__":
         cols = [c.name for c in cls.__table__.columns]
         print(f"{cls.__name__} columns={cols}")
         assert "id" in cols
-    assert "delivery_type" in [c.name for c in MessageDelivery.__table__.columns]
+    md_cols = [c.name for c in MessageDelivery.__table__.columns]
+    assert "delivery_type" in md_cols
+    assert "message_group_id" in md_cols
+    assert "image_url" in md_cols
     print(f"NotificationChannel table={NotificationChannel.__tablename__}")
     print(f"NotificationTemplate table={NotificationTemplate.__tablename__}")
     print(f"NotificationMessage table={NotificationMessage.__tablename__}")

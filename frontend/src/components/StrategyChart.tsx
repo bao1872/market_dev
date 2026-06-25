@@ -14,7 +14,7 @@ import {
 } from '../lib/strategy-manifest'
 import type { ChartLayer, IndicatorResponse } from '../api/endpoints'
 
-// ===== 颜色常量（对齐原型 charts.js 的 C 对象）=====
+// ===== 颜色常量（A 股红涨绿跌，对齐原型 charts.js 的 C 对象）=====
 const C = {
   bg: '#0d1118',
   panel: '#0a0e15',
@@ -22,17 +22,21 @@ const C = {
   grid2: '#1b2230',
   text: '#778297',
   text2: '#aab4c8',
-  up: '#26a69a',
-  down: '#ef5350',
+  up: '#ef5350',      // A 股红涨
+  down: '#26a69a',    // A 股绿跌
   blue: '#4f7cff',
   blue2: '#82a0ff',
   orange: '#ff9800',
   purple: '#8b5cf6',
   yellow: '#ffd166',
   cyan: '#2fd0c2',
-  profileBuy: '#2a9d8f',
-  profileSell: '#c65353',
+  profileBuy: '#ef5350',   // A 股多头红色
+  profileSell: '#26a69a',  // A 股空头绿色
   valueArea: '#5f7fd8',
+  // BB 轨配色（A 股习惯：上轨/下轨浅蓝、中轨橙黄）
+  bbUpperLower: '#2196f3',
+  bbMiddle: '#ff9800',
+  bbFill: 'rgba(33,150,243,0.08)',
 } as const
 
 // ===== 类型定义 =====
@@ -578,7 +582,7 @@ function renderVolume(
   data.forEach((d, i) => {
     const x = g.l + (i + 0.5) * step
     const bh = d.volume / vmax * (p.bottom - p.top) * 0.83
-    ctx.fillStyle = d.close >= d.open ? 'rgba(38,166,154,.58)' : 'rgba(239,83,80,.58)'
+    ctx.fillStyle = d.close >= d.open ? 'rgba(239,83,80,.58)' : 'rgba(38,166,154,.58)'
     ctx.fillRect(x - barW / 2, p.bottom - bh, barW, bh)
   })
   drawPaneTicks(ctx, g, 'volume', 0, vmax, 'VOL', data[data.length - 1].volume, C.text)
@@ -717,7 +721,7 @@ function renderIndicatorPriceZone(
   }
 }
 
-// Band 带状渲染（布林带等）
+// Band 带状渲染（布林带等，A 股配色：上轨/下轨浅蓝、中轨橙黄）
 function renderIndicatorBand(
   ctx: CanvasRenderingContext2D,
   g: Geometry,
@@ -735,8 +739,10 @@ function renderIndicatorBand(
   const middleVals = middleField ? data[middleField] : null
   if (!upperVals || !lowerVals) return
   const len = Math.min(upperVals.length, lowerVals.length, barsCount)
-  const bandColor = layer.color || 'rgba(156,39,176,0.15)'
-  const lineColor = layer.color ? layer.color.replace(/[\d.]+\)$/, '1)') : '#9c27b0'
+  // A 股 BB 配色：填充浅蓝半透明、上轨/下轨蓝色、中轨橙黄
+  const bandColor = C.bbFill
+  const upperLowerColor = C.bbUpperLower
+  const middleColor = C.bbMiddle
 
   // 1. 半透明填充带
   ctx.beginPath()
@@ -759,7 +765,7 @@ function renderIndicatorBand(
   ctx.fillStyle = bandColor
   ctx.fill()
 
-  // 2. 上轨线
+  // 2. 上轨线（浅蓝）
   ctx.beginPath()
   started = false
   for (let i = 0; i < len; i++) {
@@ -769,11 +775,13 @@ function renderIndicatorBand(
     if (!started) { ctx.moveTo(x, py(v)); started = true }
     else ctx.lineTo(x, py(v))
   }
-  ctx.strokeStyle = lineColor
+  ctx.strokeStyle = upperLowerColor
   ctx.lineWidth = 1
+  ctx.setLineDash([5, 3])
   ctx.stroke()
+  ctx.setLineDash([])
 
-  // 3. 下轨线
+  // 3. 下轨线（浅蓝）
   ctx.beginPath()
   started = false
   for (let i = 0; i < len; i++) {
@@ -783,11 +791,13 @@ function renderIndicatorBand(
     if (!started) { ctx.moveTo(x, py(v)); started = true }
     else ctx.lineTo(x, py(v))
   }
-  ctx.strokeStyle = lineColor
+  ctx.strokeStyle = upperLowerColor
   ctx.lineWidth = 1
+  ctx.setLineDash([5, 3])
   ctx.stroke()
+  ctx.setLineDash([])
 
-  // 4. 中轨虚线
+  // 4. 中轨线（橙黄实线）
   if (middleVals) {
     ctx.beginPath()
     started = false
@@ -798,11 +808,9 @@ function renderIndicatorBand(
       if (!started) { ctx.moveTo(x, py(v)); started = true }
       else ctx.lineTo(x, py(v))
     }
-    ctx.setLineDash([4, 3])
-    ctx.strokeStyle = lineColor
-    ctx.lineWidth = 1
+    ctx.strokeStyle = middleColor
+    ctx.lineWidth = 1.5
     ctx.stroke()
-    ctx.setLineDash([])
   }
 }
 
@@ -891,11 +899,40 @@ function drawTrading(
   const profile = buildProfile(calc, min, max, 56)
 
   // 从后端 VP 指标提取 peak node 和 POC（优先于 buildProfile 的本地计算）
-  let backendNodes: { id: string; lo: number; hi: number; poc: boolean }[] | null = null
+  // peak_rows 提供每个 peak 节点的多空量，供渲染标签与迷你多空柱
+  interface BackendNode {
+    id: string
+    mid: number
+    lo: number
+    hi: number
+    poc: boolean
+    bullish_volume: number
+    bearish_volume: number
+  }
+  let backendNodes: BackendNode[] | null = null
   let backendPoc: number | null = null
   if (indicators?.data) {
-    const vn = indicators.data['volume_node_monitor']
+    // vn 的字段含对象数组（upper_node/lower_node/peak_rows）和数值数组（poc_price/position_0_1）
+    const vn = indicators.data['volume_node_monitor'] as unknown as Record<string, unknown[]> | undefined
     if (vn) {
+      // 提取 peak_rows（含多空量）
+      const peakVolMap = new Map<number, { bullish: number; bearish: number }>()
+      const rawPeakRows = vn.peak_rows
+      if (Array.isArray(rawPeakRows)) {
+        rawPeakRows.forEach(v => {
+          if (v != null && typeof v === 'object') {
+            const o = v as Record<string, unknown>
+            const mid = Number(o.price_mid)
+            if (Number.isFinite(mid)) {
+              peakVolMap.set(mid, {
+                bullish: Number(o.bullish_volume) || 0,
+                bearish: Number(o.bearish_volume) || 0,
+              })
+            }
+          }
+        })
+      }
+      // 从 upper_node/lower_node 收集 peak 节点价格区间
       const peakMap = new Map<number, { lo: number; hi: number }>()
       const collect = (arr: unknown[]) => {
         arr.forEach(v => {
@@ -913,11 +950,16 @@ function drawTrading(
           for (const p of vn.poc_price) { if (p != null) { backendPoc = Number(p); break } }
         }
         backendNodes = Array.from(peakMap.entries())
-          .map(([mid, { lo, hi }], i) => ({
-            id: `backend_node_${i + 1}`,
-            lo, hi,
-            poc: backendPoc != null && Math.abs(mid - backendPoc) < 0.01,
-          }))
+          .map(([mid, { lo, hi }], i) => {
+            const vol = peakVolMap.get(mid)
+            return {
+              id: `backend_node_${i + 1}`,
+              mid, lo, hi,
+              poc: backendPoc != null && Math.abs(mid - backendPoc) < 0.01,
+              bullish_volume: vol?.bullish ?? 0,
+              bearish_volume: vol?.bearish ?? 0,
+            }
+          })
           .sort((a, b) => a.lo - b.lo)
       }
     }
@@ -931,22 +973,54 @@ function drawTrading(
     renderProfile(ctx, profile, g, py, state, layerSet)
   }
 
-  // 3. Node Cluster 主图叠加（优先使用后端 VP peak node）
+  // 3. Node Cluster 主图叠加（优先使用后端 VP peak node，含多空量标签与迷你多空柱）
   if (layers.node) {
-    const nodes = backendNodes || profile.nodes
-    nodes.forEach(n => {
-      const y1 = py(n.hi)
-      const y2 = py(n.lo)
-      const selected = state.selectedNodeId === n.id
-      ctx.fillStyle = n.poc ? 'rgba(255,152,0,.11)' : selected ? 'rgba(156,179,255,.15)' : 'rgba(79,124,255,.075)'
-      ctx.fillRect(g.l, y1, plotW, y2 - y1)
-      drawLine(ctx, g.l, py((n.lo + n.hi) / 2), g.plotRight, py((n.lo + n.hi) / 2), n.poc ? C.orange : selected ? '#dce6ff' : C.blue, selected ? 2 : 1, n.poc ? [8, 4] : [4, 5])
-      if (n.poc) {
-        drawText(ctx, 'POC NODE', g.l + 5, y1 + 10, C.orange, '8px sans-serif')
-      } else {
-        drawText(ctx, `HVN ${fmt((n.lo + n.hi) / 2)}`, g.l + 5, y1 + 10, C.blue, '12px sans-serif')
-      }
-    })
+    if (backendNodes) {
+      // 后端节点：含多空量，渲染峰价格标签 + 多空量标签 + 迷你多空柱
+      const maxVol = Math.max(...backendNodes.map(n => Math.max(n.bullish_volume, n.bearish_volume)), 1)
+      backendNodes.forEach(n => {
+        const y1 = py(n.hi)
+        const y2 = py(n.lo)
+        const selected = state.selectedNodeId === n.id
+        ctx.fillStyle = n.poc ? 'rgba(255,152,0,.11)' : selected ? 'rgba(156,179,255,.15)' : 'rgba(79,124,255,.075)'
+        ctx.fillRect(g.l, y1, plotW, y2 - y1)
+        drawLine(ctx, g.l, py(n.mid), g.plotRight, py(n.mid), n.poc ? C.orange : selected ? '#dce6ff' : C.blue, selected ? 2 : 1, n.poc ? [8, 4] : [4, 5])
+        // 峰价格标签
+        const labelText = n.poc ? `POC 峰 ${fmt(n.mid)}` : `峰 ${fmt(n.mid)}`
+        drawText(ctx, labelText, g.l + 5, y1 + 10, n.poc ? C.orange : C.blue, '11px sans-serif')
+        // 多空量标签 + 迷你多空柱（A 股：多头红色 / 空头绿色）
+        if (n.bullish_volume > 0 || n.bearish_volume > 0) {
+          const volText = `多 ${formatVolume(n.bullish_volume)} / 空 ${formatVolume(n.bearish_volume)}`
+          drawText(ctx, volText, g.l + 5, y1 + 22, C.text2, '9px sans-serif')
+          // 迷你多空柱：在节点垂直中心绘制水平柱
+          const nodeH = y2 - y1
+          const barH = Math.max(2, nodeH * 0.3)
+          const barY = y1 + nodeH * 0.5 - barH / 2
+          const maxBarW = plotW * 0.25
+          const bullW = n.bullish_volume / maxVol * maxBarW
+          const bearW = n.bearish_volume / maxVol * maxBarW
+          ctx.fillStyle = 'rgba(239,83,80,0.85)'
+          ctx.fillRect(g.l + 5, barY, bullW, barH)
+          ctx.fillStyle = 'rgba(38,166,154,0.85)'
+          ctx.fillRect(g.l + 5 + bullW, barY, bearW, barH)
+        }
+      })
+    } else {
+      // 本地计算的节点（无后端多空量数据）：仅渲染基本标签
+      profile.nodes.forEach(n => {
+        const y1 = py(n.hi)
+        const y2 = py(n.lo)
+        const selected = state.selectedNodeId === n.id
+        ctx.fillStyle = n.poc ? 'rgba(255,152,0,.11)' : selected ? 'rgba(156,179,255,.15)' : 'rgba(79,124,255,.075)'
+        ctx.fillRect(g.l, y1, plotW, y2 - y1)
+        drawLine(ctx, g.l, py((n.lo + n.hi) / 2), g.plotRight, py((n.lo + n.hi) / 2), n.poc ? C.orange : selected ? '#dce6ff' : C.blue, selected ? 2 : 1, n.poc ? [8, 4] : [4, 5])
+        if (n.poc) {
+          drawText(ctx, 'POC NODE', g.l + 5, y1 + 10, C.orange, '8px sans-serif')
+        } else {
+          drawText(ctx, `HVN ${fmt((n.lo + n.hi) / 2)}`, g.l + 5, y1 + 10, C.blue, '12px sans-serif')
+        }
+      })
+    }
   }
 
   // 4. POC 中心线（优先使用后端 poc_price）

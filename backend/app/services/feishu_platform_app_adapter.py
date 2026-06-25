@@ -494,6 +494,163 @@ class FeishuPlatformAppAdapter(ChannelAdapter):
             provider_response=result,
         )
 
+    async def send_text_message(
+        self,
+        message_dto: NotificationMessageDTO,
+        channel_config: dict[str, Any],
+    ) -> DeliveryResult:
+        """发送纯文本消息到飞书平台应用。
+
+        [飞书两段式投递] - delivery_type=text 时调用。
+        从 message_dto.text_content 读取纯文本内容，通过飞书 im/v1/messages API
+        以 msg_type=text 发送到指定 receive_id。
+
+        Args:
+            message_dto: 统一消息 DTO（text_content 字段含纯文本内容）
+            channel_config: 用户级渠道配置（含 app_id/app_secret/receive_id/receive_id_type）
+
+        Returns:
+            DeliveryResult（success=True 表示飞书返回 code=0）
+        """
+        # 从 channel_config 读取用户级凭证
+        app_id = channel_config.get("app_id", "")
+        app_secret = channel_config.get("app_secret", "")
+        receive_id = channel_config.get("receive_id", "")
+        receive_id_type = channel_config.get("receive_id_type", "user_id")
+
+        if not app_id or not app_secret:
+            return DeliveryResult(
+                success=False,
+                error_code="CONFIG_MISSING",
+                error_message="channel_config 缺少: app_id 或 app_secret",
+            )
+
+        if not receive_id:
+            return DeliveryResult(
+                success=False,
+                error_code="CONFIG_MISSING",
+                error_message="channel_config 缺少: receive_id",
+            )
+
+        # 纯文本内容：优先 text_content，回退到 summary
+        text_content = message_dto.text_content or message_dto.summary
+        if not text_content:
+            return DeliveryResult(
+                success=False,
+                error_code="TEXT_CONTENT_MISSING",
+                error_message="message_dto.text_content 与 summary 均为空",
+            )
+
+        # 获取 tenant_access_token
+        token, token_error = await _get_tenant_access_token(app_id, app_secret)
+        if token_error:
+            return DeliveryResult(
+                success=False,
+                error_code="AUTH_FAILED",
+                error_message=token_error,
+            )
+
+        # 构建文本消息 payload
+        content = json.dumps({"text": text_content})
+        payload = {
+            "receive_id": receive_id,
+            "msg_type": "text",
+            "content": content,
+        }
+        headers = {"Authorization": f"Bearer {token}"}
+        params = {"receive_id_type": receive_id_type}
+
+        # 发送消息
+        try:
+            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+                resp = await client.post(
+                    _MESSAGES_API_URL,
+                    json=payload,
+                    headers=headers,
+                    params=params,
+                )
+        except httpx.TimeoutException as e:
+            logger.warning(
+                "飞书平台应用文本消息超时: receive_id=%s: %s",
+                receive_id, e,
+            )
+            return DeliveryResult(
+                success=False,
+                error_code="NETWORK_TIMEOUT",
+                error_message=f"请求超时: {e}",
+            )
+        except httpx.HTTPError as e:
+            logger.warning(
+                "飞书平台应用文本消息网络错误: receive_id=%s: %s",
+                receive_id, e,
+            )
+            return DeliveryResult(
+                success=False,
+                error_code="NETWORK_ERROR",
+                error_message=f"网络错误: {e}",
+            )
+
+        # 检查 HTTP 状态码
+        if resp.status_code in _RETRYABLE_STATUS:
+            return DeliveryResult(
+                success=False,
+                error_code="RETRYABLE",
+                error_message=f"HTTP {resp.status_code}: {resp.text[:200]}",
+                provider_response={"status_code": resp.status_code, "body": resp.text[:500]},
+            )
+
+        if resp.status_code in _INVALID_STATUS:
+            return DeliveryResult(
+                success=False,
+                error_code="CHANNEL_INVALID",
+                error_message=f"HTTP {resp.status_code}: 渠道配置无效",
+                provider_response={"status_code": resp.status_code, "body": resp.text[:500]},
+            )
+
+        if resp.status_code != 200:
+            return DeliveryResult(
+                success=False,
+                error_code=f"HTTP_{resp.status_code}",
+                error_message=f"HTTP {resp.status_code}: {resp.text[:200]}",
+                provider_response={"status_code": resp.status_code, "body": resp.text[:500]},
+            )
+
+        # 解析飞书响应
+        try:
+            result = resp.json()
+        except Exception as e:
+            return DeliveryResult(
+                success=False,
+                error_code="RESPONSE_PARSE_ERROR",
+                error_message=f"响应解析失败: {e}",
+                provider_response={"raw": resp.text[:500]},
+            )
+
+        # 飞书返回 code=0 表示成功
+        if result.get("code") == 0:
+            logger.info(
+                "飞书平台应用文本消息投递成功: receive_id=%s",
+                receive_id,
+            )
+            return DeliveryResult(
+                success=True,
+                provider_response=result,
+            )
+
+        # 飞书返回错误码
+        error_code = str(result.get("code", "UNKNOWN"))
+        error_msg = result.get("msg", "未知错误")
+        logger.warning(
+            "飞书平台应用文本消息投递失败: receive_id=%s code=%s msg=%s",
+            receive_id, error_code, error_msg,
+        )
+        return DeliveryResult(
+            success=False,
+            error_code=f"FEISHU_{error_code}",
+            error_message=error_msg,
+            provider_response=result,
+        )
+
     async def verify(self, channel_config: dict[str, Any]) -> bool:
         """验证飞书平台应用配置有效性。
 
