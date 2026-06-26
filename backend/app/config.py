@@ -149,6 +149,36 @@ def _validate_database_url(url: str, app_env: str) -> None:
             )
 
 
+def _validate_worker_urls(frontend_base_url: str, capture_worker_url: str, app_env: str) -> None:
+    """启动硬校验截图相关地址：生产环境禁止默认 localhost 连接其他容器。
+
+    校验规则：
+    - 仅对需要截图的 worker 强制校验（backend / monitor_scheduler / after_close_orchestrator）
+    - production: frontend_base_url 不得为默认 http://localhost:5173（容器间无法通过 localhost 互访）
+    - production: capture_worker_url 不得指向 localhost
+    - 失败时抛 ValueError 阻止启动（fail-fast，不吞异常）
+    """
+    env = (app_env or "").lower()
+    if env != "production":
+        return
+    # [截图Worker校验] - 仅截图链路上的 worker 强制校验地址，其他 worker 不需要截图配置
+    import os
+    worker_type = (os.getenv("WORKER_TYPE") or "").lower()
+    capture_required_workers = {"", "monitor_scheduler", "after_close_orchestrator"}
+    if worker_type not in capture_required_workers:
+        return
+    if "localhost:5173" in frontend_base_url or "127.0.0.1:5173" in frontend_base_url:
+        raise ValueError(
+            f"拒绝启动：生产环境 frontend_base_url 不得为默认 localhost:5173（容器间无法互访），"
+            f"请设置 FRONTEND_BASE_URL=http://frontend。实际={frontend_base_url}"
+        )
+    if "localhost" in capture_worker_url or "127.0.0.1" in capture_worker_url:
+        raise ValueError(
+            f"拒绝启动：生产环境 capture_worker_url 不得指向 localhost（容器间无法互访），"
+            f"请设置 CAPTURE_WORKER_URL=http://worker-capture:8001。实际={capture_worker_url}"
+        )
+
+
 class Settings(BaseSettings):
     """启动级配置，仅环境变量或 config.local.py；业务密钥进入加密配置中心。"""
 
@@ -223,7 +253,7 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """返回单例 Settings，并在返回前执行启动硬校验。
 
-    校验规则见 _validate_database_url。失败时抛 InvalidDatabaseURLError，
+    校验规则见 _validate_database_url / _validate_worker_urls。失败时抛异常，
     阻止应用启动（fail-fast，不吞异常）。
 
     注意：校验放在此处而非 model_post_init，避免 pydantic v2 将
@@ -231,6 +261,13 @@ def get_settings() -> Settings:
     """
     s = Settings()
     _validate_database_url(s.database_url, s.app_env)
+    _validate_worker_urls(s.frontend_base_url, s.capture_worker_url, s.app_env)
+    # [启动日志] - 打印截图相关生效地址，便于排查容器间互访问题
+    import logging
+    logging.getLogger("app.config").info(
+        "[启动配置] frontend_base_url=%s capture_worker_url=%s app_env=%s",
+        s.frontend_base_url, s.capture_worker_url, s.app_env,
+    )
     return s
 
 

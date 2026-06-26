@@ -36,6 +36,7 @@ from app.constants.user_facing_labels import get_event_label, get_field_label
 from app.models.instrument import Instrument
 from app.models.monitor_evaluation import MonitorEvaluation
 from app.models.monitor_state import MonitorState as MonitorStateORM
+from app.models.capture_job import CaptureJob, CAPTURE_STATUS_FAILED, CAPTURE_STATUS_SUCCEEDED, CAPTURE_MAX_ATTEMPTS
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.strategy_event import StrategyEvent
 from app.models.watchlist import UserWatchlistItem
@@ -1264,7 +1265,7 @@ class MonitorBatchService:
                 )
                 continue
 
-            # [飞书两段式投递] - 写入 text Outbox（delivery_type=text）
+            # [飞书两段式投递] - 写入 card Outbox（delivery_type=card → msg_type=interactive）
             try:
                 await write_outbox(
                     db=db,
@@ -1272,7 +1273,7 @@ class MonitorBatchService:
                     payload={
                         "message_id": str(message.id),
                         "user_id": str(user_id),
-                        "delivery_type": "text",
+                        "delivery_type": "card",
                         "message_group_id": batch_message_group_id,
                     },
                     aggregate_type="notification_message",
@@ -1372,18 +1373,56 @@ class MonitorBatchService:
                         capture_resp.raise_for_status()
                         capture_data = capture_resp.json()
                 except Exception as exc:
+                    # advice.md: 截图失败不吞掉，写 capture_jobs 记录（支持重试 + 管理员可见）
                     logger.warning(
                         "capture worker 截图失败: symbol=%s event_id=%s: %s",
                         symbol, first_event.id, exc,
                     )
+                    db.add(CaptureJob(
+                        event_id=first_event.id,
+                        instrument_id=inst_id,
+                        user_id=user_ids[0],
+                        message_group_id=message_group_id,
+                        status=CAPTURE_STATUS_FAILED,
+                        attempt_count=1,
+                        error_code="CAPTURE_REQUEST_FAILED",
+                        error_message=str(exc)[:500],
+                        finished_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+                    ))
+                    await db.commit()
                     continue
 
                 image_url = capture_data.get("image_url")
                 if not image_url:
+                    # advice.md: 未返回 image_url 也写 capture_jobs 记录
                     logger.warning(
                         "capture worker 未返回 image_url: symbol=%s", symbol,
                     )
+                    db.add(CaptureJob(
+                        event_id=first_event.id,
+                        instrument_id=inst_id,
+                        user_id=user_ids[0],
+                        message_group_id=message_group_id,
+                        status=CAPTURE_STATUS_FAILED,
+                        attempt_count=1,
+                        error_code="NO_IMAGE_URL",
+                        error_message="capture worker 未返回 image_url",
+                        finished_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+                    ))
+                    await db.commit()
                     continue
+
+                # 截图成功：写 capture_jobs 记录（status=succeeded，便于审计 + 管理员页面展示）
+                db.add(CaptureJob(
+                    event_id=first_event.id,
+                    instrument_id=inst_id,
+                    user_id=user_ids[0],
+                    message_group_id=message_group_id,
+                    status=CAPTURE_STATUS_SUCCEEDED,
+                    attempt_count=1,
+                    image_url=image_url,
+                    finished_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+                ))
 
                 # 为每个用户创建图片通知消息并写入 Outbox
                 for uid in user_ids:

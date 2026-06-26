@@ -133,6 +133,9 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       APP_ENV: production
       WORKER_TYPE: monitor_scheduler
+      # [监控Worker地址] - 截图必须能访问前端容器，禁止默认 localhost:5173
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://frontend}
+      CAPTURE_WORKER_URL: ${CAPTURE_WORKER_URL:-http://worker-capture:8001}
       TZ: Asia/Shanghai
     depends_on:
       redis:
@@ -226,6 +229,9 @@ services:
       APP_ENV: production
       WORKER_TYPE: after_close_orchestrator
       WORKER_INTERVAL: "5"
+      # [盘后Worker地址] - 未来如需截图，必须能访问前端容器
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://frontend}
+      CAPTURE_WORKER_URL: ${CAPTURE_WORKER_URL:-http://worker-capture:8001}
       TZ: Asia/Shanghai
     depends_on:
       redis:

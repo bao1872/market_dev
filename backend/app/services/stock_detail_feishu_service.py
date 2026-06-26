@@ -197,7 +197,7 @@ async def send_stock_detail_to_feishu(
     )
 
     # 6. 复用 create_message 创建文本消息 + 写入文本 Outbox
-    # [StockDetailFeishu] - 文本段：delivery_type=text，共享 message_group_id
+    # [StockDetailFeishu] - 卡片段：delivery_type=card（→ msg_type=interactive），共享 message_group_id
     text_outbox_start = time.time()
     try:
         text_message = await create_message(
@@ -209,14 +209,14 @@ async def send_stock_detail_to_feishu(
             idempotency_key=f"stock-detail-feishu:{instrument_id}:{channel_id}:{test_run_id}:text",
         )
 
-        # 7. 写入文本 Outbox（outbox_relay 扩张为 MessageDelivery(text) → delivery_worker → adapter.send_text_message）
+        # 7. 写入 card Outbox（outbox_relay 扩张为 MessageDelivery(card) → delivery_worker → adapter.send → msg_type=interactive）
         await write_outbox(
             db=db,
             event_type="notification.message.created",
             payload={
                 "message_id": str(text_message.id),
                 "user_id": str(user_id),
-                "delivery_type": "text",
+                "delivery_type": "card",
                 "message_group_id": message_group_id,
             },
             aggregate_type="notification_message",

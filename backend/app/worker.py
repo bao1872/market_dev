@@ -1261,10 +1261,32 @@ async def _after_close_poll_once() -> bool:
         job_run_id = job_run.id
 
     if not trade_date_str:
+        # advice.md: 任务缺 trade_date 必须立即写 ERROR 事件 + status=failed + finished_at + 释放 run_key
+        # 禁止只记日志留 running 僵尸
         logger.error(
-            "[AfterCloseWorker] 任务缺少 trade_date: job_run_id=%s", job_run_id,
+            "[AfterCloseWorker] 任务缺少 trade_date，标记 failed: job_run_id=%s", job_run_id,
         )
-        return True  # 领取了但无法执行
+        async with AsyncSessionLocal() as db:
+            jr = await db.get(SchedulerJobRun, job_run_id)
+            if jr is not None:
+                now_fail = datetime.now(ZoneInfo("Asia/Shanghai"))
+                jr.status = "failed"
+                jr.finished_at = now_fail
+                jr.lease_expires_at = now_fail  # 释放 run_key
+                jr.error_message = "任务缺少 trade_date，无法执行盘后流水线"
+                # 写 ERROR 事件
+                from app.models.job_run_event import JobRunEvent
+                fail_meta = json.loads(jr.metadata_json) if jr.metadata_json else {}
+                fail_meta["orchestrator_status"] = "failed"
+                db.add(JobRunEvent(
+                    job_run_id=jr.id,
+                    step="claim",
+                    level="ERROR",
+                    message="任务缺少 trade_date，无法执行盘后流水线",
+                    payload={"reason": "missing_trade_date", **fail_meta},
+                ))
+                await db.commit()
+        return True  # 领取了但已标记 failed
 
     trade_date = date_cls.fromisoformat(trade_date_str)
 

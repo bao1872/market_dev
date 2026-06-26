@@ -592,20 +592,39 @@ async def _compute_data_freshness(db: AsyncSession, now: datetime) -> dict[str, 
     }
 
     # ===== strategy 子结构 =====
-    # [data_freshness.strategy] - 最新计算交易日（所有状态）
-    latest_compute = await db.scalar(select(func.max(StrategyRun.trade_date)))
+    # [data_freshness.strategy] - 限定 dsa_selector（关联 strategy_versions + strategy_definitions）
+    # 禁止取所有 StrategyRun 最新一条（advice.md: 选股新鲜度必须限定 dsa_selector）
+    from app.models.strategy import StrategyDefinition, StrategyVersion
+    dsa_version_ids_stmt = (
+        select(StrategyVersion.id)
+        .join(
+            StrategyDefinition,
+            StrategyDefinition.id == StrategyVersion.strategy_definition_id,
+        )
+        .where(StrategyDefinition.strategy_key == "dsa_selector")
+    )
+    dsa_version_ids_subq = dsa_version_ids_stmt.subquery()
 
-    # [data_freshness.strategy] - 最新发布交易日（status='published'）
-    latest_published = await db.scalar(
+    # [data_freshness.strategy] - 最新计算交易日（dsa_selector，所有状态）
+    latest_compute = await db.scalar(
         select(func.max(StrategyRun.trade_date)).where(
-            StrategyRun.status == "published"
+            StrategyRun.strategy_version_id.in_(select(dsa_version_ids_subq))
         )
     )
 
-    # [data_freshness.strategy] - 最近一条 strategy_runs
+    # [data_freshness.strategy] - 最新发布交易日（dsa_selector, status='published'）
+    latest_published = await db.scalar(
+        select(func.max(StrategyRun.trade_date)).where(
+            StrategyRun.status == "published",
+            StrategyRun.strategy_version_id.in_(select(dsa_version_ids_subq)),
+        )
+    )
+
+    # [data_freshness.strategy] - 最近一条 dsa_selector strategy_runs
     # 排序：trade_date DESC, attempt_no DESC, started_at DESC NULLS LAST（避免 started_at 为 NULL 时排序不确定）
     latest_run_stmt = (
         select(StrategyRun)
+        .where(StrategyRun.strategy_version_id.in_(select(dsa_version_ids_subq)))
         .order_by(
             StrategyRun.trade_date.desc(),
             StrategyRun.attempt_no.desc(),
@@ -731,6 +750,9 @@ async def _compute_after_close_pipeline(
     Returns:
         盘后流水线状态字典
     """
+    # [data_freshness] - 开头无条件计算，所有返回分支都必须携带（新鲜度是数据库现状，不依赖任务状态）
+    data_freshness = await _compute_data_freshness(db, now)
+
     # [after_close_pipeline] - 16:00 前不启动
     if now.hour < 16:
         return {
@@ -739,6 +761,7 @@ async def _compute_after_close_pipeline(
             "dsa_run": None,
             "waiting_dsa_reason": None,
             "waiting_dsa_suggestion": None,
+            "data_freshness": data_freshness,
             "job_run_id": None,
             "orchestrator_status": None,
             "heartbeat_at": None,
@@ -775,14 +798,28 @@ async def _compute_after_close_pipeline(
             "error_message": bars_job.error_message,
         }
 
-    # bars 无记录 → NOT_STARTED
+    # bars 无记录 → 检查 after_close_orchestrator 父任务是否活跃
+    # advice.md: 不再要求必须存在独立 bars_scheduler 记录，优先按父任务状态显示
     if bars_job is None:
+        orchestrator_status = orchestrator_summary.get("orchestrator_status")
+        if orchestrator_status:
+            # 父任务存在（queued/refreshing_daily/.../succeeded/failed），显示父任务阶段
+            return {
+                "status": orchestrator_status,
+                "bars_job": None,
+                "dsa_run": None,
+                "waiting_dsa_reason": None,
+                "waiting_dsa_suggestion": None,
+                "data_freshness": data_freshness,
+                **orchestrator_summary,
+            }
         return {
             "status": PIPELINE_STATUS_NOT_STARTED,
             "bars_job": None,
             "dsa_run": None,
             "waiting_dsa_reason": None,
             "waiting_dsa_suggestion": None,
+            "data_freshness": data_freshness,
             **orchestrator_summary,
         }
 
@@ -794,6 +831,7 @@ async def _compute_after_close_pipeline(
             "dsa_run": None,
             "waiting_dsa_reason": None,
             "waiting_dsa_suggestion": None,
+            "data_freshness": data_freshness,
             **orchestrator_summary,
         }
 
@@ -805,15 +843,25 @@ async def _compute_after_close_pipeline(
             "dsa_run": None,
             "waiting_dsa_reason": None,
             "waiting_dsa_suggestion": None,
+            "data_freshness": data_freshness,
             **orchestrator_summary,
         }
 
-    # [after_close_pipeline] - bars succeeded → 查 DSA（trade_date=今日, run_type=scheduled）
+    # [after_close_pipeline] - bars succeeded → 查 DSA（trade_date=今日, run_type=scheduled, strategy_key=dsa_selector）
+    # advice.md: DSA 查询必须关联 strategy_versions + strategy_definitions + strategy_key=dsa_selector
+    from app.models.strategy import StrategyDefinition as _SD, StrategyVersion as _SV
+    dsa_version_ids = (
+        select(_SV.id)
+        .join(_SD, _SD.id == _SV.strategy_definition_id)
+        .where(_SD.strategy_key == "dsa_selector")
+        .subquery()
+    )
     dsa_stmt = (
         select(StrategyRun)
         .where(
             StrategyRun.trade_date == business_date_obj,
             StrategyRun.run_type == "scheduled",
+            StrategyRun.strategy_version_id.in_(select(dsa_version_ids)),
         )
         .order_by(StrategyRun.attempt_no.desc())
         .limit(1)
@@ -868,8 +916,7 @@ async def _compute_after_close_pipeline(
         now=now,
     )
 
-    # [Phase9] - 数据新鲜度：行情数据 + 选股策略两个独立区块
-    data_freshness = await _compute_data_freshness(db, now)
+    # [Phase9] - 数据新鲜度已在函数开头无条件计算（data_freshness），此处直接复用
 
     return {
         "status": pipeline_status,

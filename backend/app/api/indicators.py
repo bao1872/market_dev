@@ -4,11 +4,13 @@ GET /api/v1/instruments/{instrument_id}/indicators
     实时计算所有已注册策略的图表指标，供个股详情页面使用。
     返回所有策略的 chart_layers 定义 + 计算结果。
 
-数据获取流程（DB 优先 + Redis 缓存）：
+数据获取流程（Redis 缓存 + 实时计算）：
 1. 查询 Redis 缓存 → 命中返回（X-Cache-Hit: true, X-Data-Source: redis）
-2. 未命中 → 复用 MonitorEvaluation.metrics（X-Data-Source: monitor_evaluation）
-3. 无 MonitorEvaluation → 实时计算（X-Data-Source: computed）
-4. 计算结果写入 Redis 缓存（TTL 300s）
+2. 未命中 → 实时计算 compute_all_indicators（X-Data-Source: computed）
+3. 计算结果写入 Redis 缓存（TTL 300s）
+
+注：MonitorEvaluation.metrics 复用路径已禁用（结构不兼容），
+    详见 _try_monitor_evaluation 文档字符串。
 
 参数：
     timeframe: 1d | 15m | 1h | 1w | 1mo（默认 1d）
@@ -16,7 +18,7 @@ GET /api/v1/instruments/{instrument_id}/indicators
     bars: 返回最近 N 根 bar 的指标（默认 250，最大 500）
 
 响应头：
-    X-Data-Source: redis | monitor_evaluation | computed
+    X-Data-Source: redis | computed
     X-Cache-Hit: true | false
     X-Total-Ms: <int>（总耗时毫秒）
 """
@@ -104,32 +106,27 @@ async def _try_monitor_evaluation(
     db: AsyncSession,
     instrument_id: uuid.UUID,
 ) -> dict[str, Any] | None:
-    """[指标缓存] - 查询最新 MonitorEvaluation.metrics（复用监控计算结果）。
+    """[指标缓存] - 已禁用：MonitorEvaluation.metrics 复用路径。
+
+    禁用原因：
+        MonitorEvaluation.metrics 返回的是监控评估格式
+        （{ state, events_detected, ... }），与图表指标格式
+        （{ layers, data, errors }）不兼容。直接复用会导致前端
+        拿不到 data.watchlist_monitor，筹码分布不可用。
+
+    决策来源：
+        advice.md P0 问题3 + Task 15 端到端验证发现的结构不匹配。
+        用户决策：禁用缓存复用路径，强制走 compute_all_indicators
+        实时计算路径，保证返回结构与前端期望一致。
 
     Args:
-        db: 异步 DB 会话
-        instrument_id: 标的 UUID
+        db: 异步 DB 会话（保留参数兼容现有调用方）
+        instrument_id: 标的 UUID（保留参数兼容现有调用方）
 
     Returns:
-        metrics dict 或 None（无 SUCCEEDED 记录时）
+        始终返回 None，强制走 compute_all_indicators 实时计算路径。
     """
-    try:
-        stmt = (
-            select(MonitorEvaluation.metrics)
-            .where(
-                MonitorEvaluation.instrument_id == instrument_id,
-                MonitorEvaluation.status == "SUCCEEDED",
-                MonitorEvaluation.metrics.isnot(None),
-            )
-            .order_by(MonitorEvaluation.source_bar_time.desc())
-            .limit(1)
-        )
-        result = await db.execute(stmt)
-        metrics = result.scalar_one_or_none()
-        if metrics is not None and isinstance(metrics, dict):
-            return metrics
-    except Exception as exc:
-        logger.warning("查询 MonitorEvaluation.metrics 失败: %s", exc)
+    # [指标缓存] - 禁用复用路径：metrics 结构与图表指标格式不兼容
     return None
 
 
@@ -146,12 +143,13 @@ async def get_indicators(
 
     数据获取流程：
     1. 查询 Redis 缓存 → 命中返回（X-Cache-Hit: true）
-    2. 未命中 → 复用 MonitorEvaluation.metrics（X-Data-Source: monitor_evaluation）
-    3. 无 MonitorEvaluation → 实时计算（X-Data-Source: computed）
-    4. 结果写入 Redis 缓存（TTL 300s）
+    2. 未命中 → 实时计算 compute_all_indicators（X-Data-Source: computed）
+    3. 结果写入 Redis 缓存（TTL 300s）
+
+    注：MonitorEvaluation.metrics 复用路径已禁用（结构不兼容）。
 
     响应头：
-        X-Data-Source: redis | monitor_evaluation | computed
+        X-Data-Source: redis | computed
         X-Cache-Hit: true | false
         X-Total-Ms: <int>（总耗时毫秒）
     """
@@ -185,12 +183,12 @@ async def get_indicators(
         )
         return cached
 
-    # [指标缓存] - 2. 缓存未命中：尝试复用 MonitorEvaluation.metrics
+    # [指标缓存] - 2. 缓存未命中：实时计算（_try_monitor_evaluation 已禁用，结构不兼容）
     data_source = "computed"
     try:
         eval_metrics = await _try_monitor_evaluation(db, instrument_id)
         if eval_metrics is not None:
-            # 复用监控计算结果，写入缓存
+            # 此分支当前不会进入（_try_monitor_evaluation 已禁用，保留以防未来恢复）
             await indicator_cache.set(
                 instrument_id, timeframe, adj, last_bar_time, eval_metrics,
             )
@@ -205,7 +203,7 @@ async def get_indicators(
             )
             return eval_metrics
 
-        # [指标缓存] - 3. 无 MonitorEvaluation：实时计算
+        # [指标缓存] - 3. 实时计算（默认路径）
         result = await compute_all_indicators(
             session=db,
             instrument_id=instrument_id,

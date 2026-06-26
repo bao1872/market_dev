@@ -299,11 +299,12 @@ function addIndicators(bars: BarData[]): CalculatedBar[] {
   return out
 }
 
-// [Volume Profile] - 从后端 indicators 提取 VP 数据（SSOT: volume_node_monitor.compute_indicators）
+// [Volume Profile] - 从后端 indicators 提取 VP 数据（SSOT: watchlist_monitor.compute_indicators）
 // profile_rows/profile_meta/peak_rows 为价格档位快照，非 bar 对齐时间序列，禁止前端重算
+// 迁移期 fallback volume_node_monitor（旧策略键），正式迁移完成后删除回退
 function extractBackendProfile(indicators: IndicatorResponse | undefined): BackendProfile | null {
   if (!indicators?.data) return null
-  const vn = indicators.data['volume_node_monitor'] as unknown as
+  const vn = (indicators.data['watchlist_monitor'] ?? indicators.data['volume_node_monitor']) as unknown as
     | Record<string, unknown>
     | undefined
   if (!vn) return null
