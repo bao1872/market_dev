@@ -27,6 +27,7 @@ from uuid import UUID
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants.user_facing_labels import get_event_label
 from app.models.event_recipient import StrategyEventRecipient
 from app.models.instrument import Instrument
 from app.models.strategy import StrategyDefinition, StrategyVersion
@@ -35,13 +36,8 @@ from app.models.watchlist import UserWatchlistItem
 
 logger = logging.getLogger("event_recipient_service")
 
-# 事件类型 → 中文标签（与 monitor_batch_service 保持一致）
-_EVENT_TYPE_LABEL: dict[str, str] = {
-    "bb_upper_touch": "布林上轨穿越",
-    "bb_mid_touch": "布林中轨穿越",
-    "bb_lower_touch": "布林下轨穿越",
-    "node_cluster_touch": "节点集群穿越",
-}
+# [advice.md 第二节] - 事件类型文案已迁移至 app.constants.user_facing_labels
+# 原本地 _EVENT_TYPE_LABEL dict 已删除，统一通过 get_event_label 查询，避免重复定义
 
 
 async def expand_event_recipients(db: AsyncSession, event_id: UUID) -> int:
@@ -166,9 +162,9 @@ async def create_notification_from_event(
     instrument_symbol = instrument.symbol if instrument else ""
     instrument_name = instrument.name if instrument else ""
 
-    # 3. 构建通知消息 DTO
+    # 3. 构建通知消息 DTO - [advice.md 第二节] 事件文案来自 user_facing_labels
     payload = event.payload or {}
-    event_label = _EVENT_TYPE_LABEL.get(event.event_type, event.event_type)
+    event_label = get_event_label(event.event_type)
     boundary = payload.get("boundary")
     boundary_text = f" · 边界 {boundary:.2f}" if isinstance(boundary, (int, float)) else ""
     event_summary = f"{event_label}{boundary_text}"

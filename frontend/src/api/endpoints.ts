@@ -1554,6 +1554,16 @@ export interface SystemOverview {
     waiting_dsa_suggestion: string | null
     // [SystemOverview] - 数据新鲜度子结构（行情 + 选股两区块，Phase 9）
     data_freshness: DataFreshness
+    // [AfterClose] - 当日 after_close_orchestrator 任务 ID（供进入任务详情/断点继续/判断冲突任务）
+    job_run_id: string | null
+    // [AfterClose] - 编排状态（queued/refreshing_daily/.../succeeded/failed）
+    orchestrator_status: string | null
+    // [AfterClose] - Worker 最后心跳（ISO 字符串，判断 worker 是否在线）
+    heartbeat_at: string | null
+    // [AfterClose] - 租约到期时间（ISO 字符串）
+    lease_expires_at: string | null
+    // [AfterClose] - 最后成功步骤（断点检查点）
+    last_completed_step: string | null
   }
 }
 

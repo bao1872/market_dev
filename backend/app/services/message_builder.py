@@ -7,7 +7,8 @@
 
 支持的 message_type：
 - MONITOR_EVENT: 监控事件（合并通知/单策略事件）
-- MONITOR_MEMBER_EVENT: 单策略过程事件（迁移兼容，逐步废弃）
+- MONITOR_MEMBER_EVENT: 【仅历史兼容】旧单策略过程事件，仅用于读取历史消息，
+  新代码禁止生成（advice.md 第十一节遗留清理）。新消息统一用 MONITOR_EVENT。
 - SYSTEM_ALERT: 系统异常
 - CHANNEL_ALERT: 渠道异常
 
@@ -19,11 +20,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from app.constants.user_facing_labels import get_event_label, get_field_label
 from app.schemas.notification import NotificationMessageDTO
 
 # 模板键与版本映射（message_type -> (template_key, template_version)）
 _TEMPLATE_MAP: dict[str, tuple[str, str]] = {
     "MONITOR_EVENT": ("monitor_event", "1.1.0"),
+    # 【仅历史兼容】仅用于读取历史消息，新代码禁止生成 MONITOR_MEMBER_EVENT
     "MONITOR_MEMBER_EVENT": ("monitor_member_event", "1.1.0"),
     "SYSTEM_ALERT": ("system_alert", "1.1.0"),
     "CHANNEL_ALERT": ("channel_alert", "1.1.0"),
@@ -213,15 +216,8 @@ def build_channel_alert(
     return build_message("CHANNEL_ALERT", context)
 
 
-# [飞书两段式投递] - 事件类型 → 中文标签（纯文本消息用）
-_EVENT_TYPE_TEXT_LABEL: dict[str, str] = {
-    "bb_upper_touch": "BB上轨穿越",
-    "bb_mid_touch": "BB中轨穿越",
-    "bb_lower_touch": "BB下轨穿越",
-    "node_cluster_touch": "节点集群穿越",
-    # [StockDetailFeishu] - 个股快照主动分享（不暴露内部 manual_send 代码）
-    "STOCK_SNAPSHOT_SHARE": "个股快照分享",
-}
+# [飞书两段式投递] - 事件类型文案已迁移至 app.constants.user_facing_labels
+# 详见 get_event_label()，service 层不再维护重复 dict（advice.md 第二节通俗化要求）
 
 
 def elements_to_text(elements: list[dict[str, Any]] | None) -> str:
@@ -294,17 +290,23 @@ def build_monitor_event_text(
     按 advice.md 模板生成纯文本，只保留一个时间字段"触发时间"，
     不出现"数据时间"/"更新时间"/"发送时间"。
 
+    [advice.md 第二节] - 字段名通俗化：
+    - "BB / 上节点 / 下节点 / POC / 位置" → "近期波动上沿/中枢/下沿 + 成交密集区 + 最密集成交价 + 当前区间位置"
+    - 事件类型文案来自 user_facing_labels.get_event_label
+
     模板：
         【自选监控触发】
         {股票名称} {股票代码}
-        触发：{触发类型中文}
+        触发：{触发类型通俗文案}
         触发时间：{HH:MM}
         现价：{current_price}
-        BB：{bb_upper} / {bb_mid} / {bb_lower}
-        上节点：{upper_node}
-        下节点：{lower_node}
-        POC：{poc_price}
-        位置：{position_0_1}
+        近期波动上沿：{bb_upper}
+        近期价格中枢：{bb_mid}
+        近期波动下沿：{bb_lower}
+        上方成交密集区：{upper_node}
+        下方成交密集区：{lower_node}
+        最密集成交价：{poc_price}
+        当前区间位置：{position_0_1}
 
     Args:
         stock_name: 股票名称
@@ -338,7 +340,7 @@ def build_monitor_event_text(
     except (ValueError, TypeError):
         trigger_time = "--:--"
 
-    event_label = _EVENT_TYPE_TEXT_LABEL.get(event_type, event_type)
+    event_label = get_event_label(event_type)
 
     def _fmt(v: float | None) -> str:
         return f"{v:.2f}" if v is not None else "-"
@@ -346,17 +348,20 @@ def build_monitor_event_text(
     def _fmt_pos(v: float | None) -> str:
         return f"{v:.2f}" if v is not None else "-"
 
+    # [advice.md 第二节] - 字段名通俗化（BB/上节点/下节点/POC/位置 → 通俗文案）
     text_lines = [
         "【自选监控触发】",
         f"{stock_name} {symbol}",
         f"触发：{event_label}",
         f"触发时间：{trigger_time}",
         f"现价：{_fmt(current_price)}",
-        f"BB：{_fmt(bb_upper)} / {_fmt(bb_mid)} / {_fmt(bb_lower)}",
-        f"上节点：{_fmt(upper_node)}",
-        f"下节点：{_fmt(lower_node)}",
-        f"POC：{_fmt(poc_price)}",
-        f"位置：{_fmt_pos(position_0_1)}",
+        f"{get_field_label('bb_upper')}：{_fmt(bb_upper)}",
+        f"{get_field_label('bb_mid')}：{_fmt(bb_mid)}",
+        f"{get_field_label('bb_lower')}：{_fmt(bb_lower)}",
+        f"{get_field_label('upper_node')}：{_fmt(upper_node)}",
+        f"{get_field_label('lower_node')}：{_fmt(lower_node)}",
+        f"{get_field_label('poc')}：{_fmt(poc_price)}",
+        f"{get_field_label('position')}：{_fmt_pos(position_0_1)}",
     ]
     text_content = "\n".join(text_lines)
 
@@ -422,11 +427,24 @@ if __name__ == "__main__":
     assert "【自选监控触发】" in dto_text.text_content
     assert "触发时间：14:48" in dto_text.text_content
     assert "现价：71.13" in dto_text.text_content
-    assert "BB：79.12 / 71.20 / 63.28" in dto_text.text_content
-    assert "上节点：77.25" in dto_text.text_content
-    assert "下节点：70.04" in dto_text.text_content
-    assert "POC：38.78" in dto_text.text_content
-    assert "位置：0.80" in dto_text.text_content
+    # [advice.md 第二节] - 字段名通俗化后断言（不再出现 BB/上节点/下节点/POC/位置 等专业术语）
+    assert "近期波动上沿：79.12" in dto_text.text_content
+    assert "近期价格中枢：71.20" in dto_text.text_content
+    assert "近期波动下沿：63.28" in dto_text.text_content
+    assert "上方成交密集区：77.25" in dto_text.text_content
+    assert "下方成交密集区：70.04" in dto_text.text_content
+    assert "最密集成交价：38.78" in dto_text.text_content
+    assert "当前区间位置：0.80" in dto_text.text_content
+    # 事件类型文案应来自 user_facing_labels（"价格回到近期价格中枢"）
+    assert "触发：价格回到近期价格中枢" in dto_text.text_content
+    # 验证旧专业术语已消除（按行检查独立字段前缀，避免子串误判）
+    lines = dto_text.text_content.split("\n")
+    assert not any(line.startswith("BB：") for line in lines), "不应有独立的 'BB：' 字段"
+    assert not any(line.startswith("上节点：") for line in lines), "不应有独立的 '上节点：' 字段"
+    assert not any(line.startswith("下节点：") for line in lines), "不应有独立的 '下节点：' 字段"
+    assert not any(line.startswith("POC：") for line in lines), "不应有独立的 'POC：' 字段"
+    # "位置：" 是 "当前区间位置：" 的子串，按行首前缀检查独立字段是否已替换
+    assert not any(line.startswith("位置：") for line in lines), "不应有独立的 '位置：' 字段（应改为 '当前区间位置：'）"
     # 验证只有一个时间字段"触发时间"，不出现"数据时间"
     assert "数据时间" not in dto_text.text_content
     assert "更新时间" not in dto_text.text_content

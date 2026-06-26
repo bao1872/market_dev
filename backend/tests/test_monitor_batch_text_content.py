@@ -68,14 +68,15 @@ class TestBuildMergedCardDtoTextContent:
 
         # text_content 不能为空
         assert dto.text_content, "text_content 不应为空"
-        # 应包含概览行
+        # 应包含概览行 - [advice.md 第二节] 通俗化后用 "密集区" 而非 "节点"
         assert "自选股 24 只" in dto.text_content
         assert "触发 1 只" in dto.text_content
+        assert "密集区 1" in dto.text_content
         # 应包含股票标题（带名称和代码）
         assert "甬矽电子" in dto.text_content
         assert "688362" in dto.text_content
-        # 应包含信号详情（事件标签和现价）
-        assert "节点集群穿越" in dto.text_content
+        # 应包含信号详情 - [advice.md 第二节] 事件文案通俗化："节点集群穿越" → "价格触及成交密集区"
+        assert "价格触及成交密集区" in dto.text_content
         assert "77.20" in dto.text_content
         # 应包含数据时间
         assert "数据时间" in dto.text_content
@@ -100,8 +101,9 @@ class TestBuildMergedCardDtoTextContent:
         assert dto.text_content
         assert "贵州茅台" in dto.text_content
         assert "五粮液" in dto.text_content
-        assert "布林上轨穿越" in dto.text_content
-        assert "布林下轨穿越" in dto.text_content
+        # [advice.md 第二节] - 事件文案通俗化："布林上轨穿越" → "价格触及近期波动上沿"
+        assert "价格触及近期波动上沿" in dto.text_content
+        assert "价格触及近期波动下沿" in dto.text_content
 
     def test_text_content_not_equal_summary(self) -> None:
         """text_content 不应等于 summary（summary 只是单行预览）。"""

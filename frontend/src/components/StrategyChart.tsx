@@ -13,6 +13,15 @@ import {
   type DisplayGroupDef,
 } from '../lib/strategy-manifest'
 import type { ChartLayer, IndicatorResponse } from '../api/endpoints'
+import {
+  MAX_VISIBLE_BARS,
+  MIN_VISIBLE_BARS,
+  type ChartViewport,
+  clampViewport,
+  createDefaultViewport,
+  panViewport,
+  zoomAtAnchor,
+} from './chartViewport'
 
 // ===== 颜色常量（A 股红涨绿跌，对齐原型 charts.js 的 C 对象）=====
 const C = {
@@ -80,6 +89,10 @@ export interface StrategyChartProps {
   height?: number
   timeframe?: string
   onTimeframeChange?: (tf: string) => void
+  // [chartViewport] - 受控 viewport：父组件按周期独立保存，切换周期时重置
+  // 未传入或失效时由组件内部计算默认值（取末尾 MAX_VISIBLE_BARS 根）
+  viewport?: ChartViewport
+  onViewportChange?: (vp: ChartViewport) => void
 }
 
 // 计算后的 Bar（含指标字段）
@@ -640,6 +653,8 @@ function renderBreakout(
 // ===== 通用渲染器（根据后端返回的 ChartLayer.renderer 分发）=====
 
 // 通用渲染器：根据 layer.renderer 分发
+// [chartViewport] - valuesOffset 指标数组中与 display[0] 对应的起始索引，
+//   取 values.length - barsCount（取最后 N 个），避免 K 线（最近 N 根）与指标（最前 N 个值）错位
 function renderIndicatorLayer(
   ctx: CanvasRenderingContext2D,
   g: Geometry,
@@ -678,8 +693,11 @@ function renderIndicatorLine(
   const dirField = layer.fields[1]
   const values = data[valueField]
   if (!values || !values.length) return
-  // 对齐可见 bar 数量，避免指标数组长度超过 display 时越界绘制
-  const len = Math.min(values.length, barsCount)
+  // [chartViewport] - 指标数组取最后 barsCount 个值与 display 对齐
+  //   offset = values.length - barsCount：指标数组中与 display[0] 对应的起始索引
+  //   避免 K 线（最近 N 根）与指标（最前 N 个值）错位（advice.md 第三节问题 2）
+  const offset = Math.max(0, values.length - barsCount)
+  const len = Math.min(values.length - offset, barsCount)
 
   // [DSA 分段] - 分组键：优先 regime_field（regime_id），回退 dirField
   // 每次 regime_id 改变 → 结束旧段 → 新段从当前点开始（切换点不连接）
@@ -691,17 +709,17 @@ function renderIndicatorLine(
     // 分段绘制：相邻分组键相同的点连成一段；切换点不连接（新段从 i 开始，不含 i-1）
     let segStart = 0
     for (let i = 1; i <= len; i++) {
-      const curKey = i < len ? segKeys[i] : null
-      const prevKey = segKeys[i - 1]
+      const curKey = i < len ? segKeys[offset + i] : null
+      const prevKey = segKeys[offset + i - 1]
       const segChanged = i === len || curKey !== prevKey
       if (segChanged && i > segStart + 1) {
         // 绘制 segStart 到 i-1 的线段（旧段，方向由 i-1 处的 dir 决定）
-        const dir = dirs[i - 1]
+        const dir = dirs[offset + i - 1]
         const color = dir === 1 ? (layer.direction_up_color || '#ff1744') : (layer.direction_down_color || '#00e676')
         ctx.beginPath()
         let started = false
         for (let j = segStart; j < i; j++) {
-          const v = values[j]
+          const v = values[offset + j]
           if (v == null || typeof v === 'string') { started = false; continue }
           const x = g.l + (j + 0.5) * step
           const y = py(v)
@@ -723,7 +741,7 @@ function renderIndicatorLine(
     ctx.beginPath()
     let started = false
     for (let i = 0; i < len; i++) {
-      const v = values[i]
+      const v = values[offset + i]
       if (v == null || typeof v === 'string') { started = false; continue }
       const x = g.l + (i + 0.5) * step
       const y = py(v)
@@ -739,15 +757,15 @@ function renderIndicatorLine(
   if (layer.anchor_field && data[layer.anchor_field]) {
     const anchors = data[layer.anchor_field]
     for (let i = 0; i < len; i++) {
-      const a = anchors[i]
+      const a = anchors[offset + i]
       // anchor_time != null 表示该 bar 是锚点（dir 翻转点）
       if (a == null) continue
-      const v = values[i]
+      const v = values[offset + i]
       if (v == null || typeof v === 'string') continue
       const x = g.l + (i + 0.5) * step
       const y = py(v)
       // 外圈白色 + 内圈方向色（与当前段方向一致）
-      const dir = dirField && data[dirField] ? data[dirField][i] : null
+      const dir = dirField && data[dirField] ? data[dirField][offset + i] : null
       const innerColor = dir === 1 ? (layer.direction_up_color || '#ff1744') : (layer.direction_down_color || '#00e676')
       ctx.beginPath()
       ctx.arc(x, y, 3.5, 0, Math.PI * 2)
@@ -777,13 +795,17 @@ function renderIndicatorPriceZone(
   const upperVals = data[upperField]
   const lowerVals = data[lowerField]
   if (!upperVals || !lowerVals) return
-  // 对齐可见 bar 数量，避免指标数组长度超过 display 时越界绘制
-  const len = Math.min(upperVals.length, lowerVals.length, barsCount)
+  // [chartViewport] - 指标数组取最后 barsCount 个值与 display 对齐
+  //   offset = min(upperVals.length, lowerVals.length) - barsCount
+  //   避免 K 线（最近 N 根）与指标（最前 N 个值）错位（advice.md 第三节问题 2）
+  const upperLen = Math.min(upperVals.length, lowerVals.length)
+  const offset = Math.max(0, upperLen - barsCount)
+  const len = Math.min(upperLen - offset, barsCount)
 
   ctx.fillStyle = layer.color || 'rgba(33,150,243,0.50)'
   for (let i = 0; i < len; i++) {
-    const upper = upperVals[i]
-    const lower = lowerVals[i]
+    const upper = upperVals[offset + i]
+    const lower = lowerVals[offset + i]
     // [类型守卫] - upper/lower 必须为 number（data 放宽为 number|string|null 后需显式收窄）
     if (typeof upper !== 'number' || typeof lower !== 'number') continue
     const x = g.l + i * step
@@ -810,7 +832,14 @@ function renderIndicatorBand(
   const lowerVals = data[lowerField]
   const middleVals = middleField ? data[middleField] : null
   if (!upperVals || !lowerVals) return
-  const len = Math.min(upperVals.length, lowerVals.length, barsCount)
+  // [chartViewport] - 指标数组取最后 barsCount 个值与 display 对齐
+  //   offset = min(upperVals.length, lowerVals.length, middleVals?.length) - barsCount
+  //   避免 K 线（最近 N 根）与指标（最前 N 个值）错位（advice.md 第三节问题 2）
+  const fieldLens = [upperVals.length, lowerVals.length]
+  if (middleVals) fieldLens.push(middleVals.length)
+  const baseLen = Math.min(...fieldLens)
+  const offset = Math.max(0, baseLen - barsCount)
+  const len = Math.min(baseLen - offset, barsCount)
   // A 股 BB 配色：填充浅蓝半透明、上轨/下轨蓝色、中轨橙黄
   const bandColor = C.bbFill
   const upperLowerColor = C.bbUpperLower
@@ -820,8 +849,8 @@ function renderIndicatorBand(
   ctx.beginPath()
   let started = false
   for (let i = 0; i < len; i++) {
-    const u = upperVals[i]
-    const l = lowerVals[i]
+    const u = upperVals[offset + i]
+    const l = lowerVals[offset + i]
     if (u == null || l == null) { started = false; continue }
     const x = g.l + (i + 0.5) * step
     const un = Number(u)
@@ -829,7 +858,7 @@ function renderIndicatorBand(
     else ctx.lineTo(x, py(un))
   }
   for (let i = len - 1; i >= 0; i--) {
-    const l = lowerVals[i]
+    const l = lowerVals[offset + i]
     if (l == null) continue
     const x = g.l + (i + 0.5) * step
     ctx.lineTo(x, py(Number(l)))
@@ -842,7 +871,7 @@ function renderIndicatorBand(
   ctx.beginPath()
   started = false
   for (let i = 0; i < len; i++) {
-    const v = upperVals[i]
+    const v = upperVals[offset + i]
     if (v == null) { started = false; continue }
     const x = g.l + (i + 0.5) * step
     const vn = Number(v)
@@ -859,7 +888,7 @@ function renderIndicatorBand(
   ctx.beginPath()
   started = false
   for (let i = 0; i < len; i++) {
-    const v = lowerVals[i]
+    const v = lowerVals[offset + i]
     if (v == null) { started = false; continue }
     const x = g.l + (i + 0.5) * step
     const vn = Number(v)
@@ -877,7 +906,7 @@ function renderIndicatorBand(
     ctx.beginPath()
     started = false
     for (let i = 0; i < len; i++) {
-      const v = middleVals[i]
+      const v = middleVals[offset + i]
       if (v == null) { started = false; continue }
       const x = g.l + (i + 0.5) * step
       const vn = Number(v)
@@ -966,8 +995,10 @@ function drawTrading(
   const { ctx, w, h } = fit(canvas)
   const layerSet = new Set(Object.entries(layers).filter(([, v]) => v).map(([k]) => k))
   const g = geometry(layerSet, w, h)
-  const min = Math.min(...calc.map(d => d.low)) - 0.25
-  const max = Math.max(...calc.map(d => d.high)) + 0.25
+  // [chartViewport] - 纵轴 min/max 从可见 display 计算（而非完整 calc），
+  // 避免放大时 K 线被压扁（advice.md 第三节问题 1）
+  const min = Math.min(...display.map(d => d.low)) - 0.25
+  const max = Math.max(...display.map(d => d.high)) + 0.25
   const py = (v: number) => g.panes.price.top + (max - v) / (max - min) * (g.panes.price.bottom - g.panes.price.top)
   const plotW = g.plotRight - g.l
   const step = plotW / display.length
@@ -1185,6 +1216,8 @@ export function StrategyChart({
   height = 660,
   timeframe = '1d',
   onTimeframeChange,
+  viewport: viewportProp,
+  onViewportChange,
 }: StrategyChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -1223,8 +1256,9 @@ export function StrategyChart({
     return getDefaultLayers(strategyId)
   })
 
-  // 显示 bar 数量（缩放控制）
-  const [displayBars, setDisplayBars] = useState(250)
+  // [chartViewport] - 显示 bar 数量（缩放控制）：保留为内部状态作为 fallback，
+  //   当父组件未传入 viewport 时使用；受控时由 viewportProp 驱动
+  const [displayBars, setDisplayBars] = useState(MAX_VISIBLE_BARS)
 
   // 十字线联动图例 bar 索引（-1 表示无十字线，显示最后一根）
   const [legendIdx, setLegendIdx] = useState(-1)
@@ -1236,11 +1270,28 @@ export function StrategyChart({
     return addIndicators(bars.slice(-win))
   }, [bars, timeframe])
 
-  // 可见 bars
+  // [chartViewport] - 当前 viewport：优先使用父组件受控值，否则用 displayBars 构造末尾视区
+  //   切换周期时父组件清空 viewportProp，自动回退到默认末尾视区（advice.md 第三节问题 3）
+  const viewport: ChartViewport = useMemo(() => {
+    if (viewportProp) return clampViewport(viewportProp, calc.length)
+    const visibleCount = clamp(displayBars, MIN_VISIBLE_BARS, Math.min(MAX_VISIBLE_BARS, calc.length))
+    return createDefaultViewport(calc.length, visibleCount)
+  }, [viewportProp, calc.length, displayBars])
+
+  // [chartViewport] - 当 viewportProp 失效（超出 calc 范围）时通知父组件 clamp 后的值
+  useEffect(() => {
+    if (!onViewportChange || !viewportProp || !calc.length) return
+    const clamped = clampViewport(viewportProp, calc.length)
+    if (clamped.fromIndex !== viewportProp.fromIndex || clamped.toIndex !== viewportProp.toIndex) {
+      onViewportChange(clamped)
+    }
+  }, [viewportProp, calc.length, onViewportChange])
+
+  // 可见 bars：基于 viewport 切片 calc（统一 viewport，所有图层共用，advice.md 第三节问题 2）
   const display = useMemo(() => {
-    const visibleCount = clamp(displayBars, 30, Math.min(250, calc.length))
-    return calc.slice(-visibleCount)
-  }, [calc, displayBars])
+    if (!calc.length) return []
+    return calc.slice(viewport.fromIndex, viewport.toIndex)
+  }, [calc, viewport])
 
   // 映射事件到 bar 索引
   const mappedEvents = useMemo(() => {
@@ -1268,7 +1319,7 @@ export function StrategyChart({
   // 数据/图层变化时重绘
   useEffect(() => {
     draw()
-  }, [draw, calc, display, mappedEvents, layers, displayBars, indicators])
+  }, [draw, calc, display, mappedEvents, layers, viewport, indicators])
 
   // 持久化图层可见性
   useEffect(() => {
@@ -1330,6 +1381,8 @@ export function StrategyChart({
         tip.style.left = Math.min(w - 235, mx + 14) + 'px'
         tip.style.top = Math.max(42, my - 58) + 'px'
         // 追加后端策略指标
+        // [chartViewport] - 指标数组取最后 data.length 个值与 display 对齐
+        //   offset = vals.length - data.length，避免 hover 时取错 bar 的指标值
         let indicatorHtml = ''
         if (indicatorsRef.current?.layers && indicatorsRef.current?.data) {
           indicatorsRef.current.layers.forEach(layer => {
@@ -1339,9 +1392,12 @@ export function StrategyChart({
             const parts: string[] = []
             fields.forEach(f => {
               const vals = layerData[f]
-              if (vals && vals[i] != null) {
+              if (!vals) return
+              const offset = Math.max(0, vals.length - data.length)
+              const v = vals[offset + i]
+              if (v != null) {
                 const label = f.replace(/_/g, ' ').toUpperCase()
-                parts.push(`${label} ${fmt(vals[i]!)}`)
+                parts.push(`${label} ${fmt(v)}`)
               }
             })
             if (parts.length) {
@@ -1386,15 +1442,129 @@ export function StrategyChart({
       draw()
     }
 
+    // [Task 16] - 滚轮缩放：以鼠标所在 K 线为锚点，缩放前后锚点保持相同横向位置
+    // Shift+滚轮：水平平移（向左查看更早数据，向右回到最近数据）
+    const handleWheel = (e: WheelEvent) => {
+      const s = stateRef.current
+      if (!s.g || !calc.length) return
+      e.preventDefault()
+      const r = canvas.getBoundingClientRect()
+      const mx = e.clientX - r.left
+      const { g, step } = s
+      // 鼠标 X → display index → calc index（锚点）
+      const dispIdx = Math.max(0, Math.min(display.length - 1, Math.floor((mx - g.l) / step)))
+      const anchorIndex = viewport.fromIndex + dispIdx
+
+      if (e.shiftKey) {
+        // Shift+滚轮：水平平移（deltaY > 0 向右/未来，< 0 向左/过去）
+        const deltaBars = e.deltaY > 0 ? 5 : -5
+        const newVp = panViewport(viewport, deltaBars, calc.length)
+        if (onViewportChange) onViewportChange(newVp)
+      } else {
+        // 普通滚轮：缩放（deltaY < 0 放大，> 0 缩小）
+        const zoom = e.deltaY < 0 ? 1.15 : 1 / 1.15
+        const newVp = zoomAtAnchor(viewport, anchorIndex, zoom, calc.length)
+        if (onViewportChange) onViewportChange(newVp)
+      }
+    }
+
+    // [Task 16] - 拖动平移：鼠标左键拖动画布，向左查看更早数据，向右回到最近数据
+    const handleMouseDown = (e: MouseEvent) => {
+      if (e.button !== 0) return // 仅左键
+      const s = stateRef.current
+      if (!s.g) return
+      const r = canvas.getBoundingClientRect()
+      dragRef.current = { startX: e.clientX - r.left, fromIndex: viewport.fromIndex }
+      canvas.style.cursor = 'grabbing'
+    }
+
+    const handleDragMove = (e: MouseEvent) => {
+      if (!dragRef.current) return
+      const s = stateRef.current
+      if (!s.g) return
+      const r = canvas.getBoundingClientRect()
+      const mx = e.clientX - r.left
+      const { step } = s
+      // 拖动距离 → bar 数（向左拖动 = 查看更早数据 = fromIndex 减小）
+      const deltaPx = mx - dragRef.current.startX
+      const deltaBars = -Math.round(deltaPx / step)
+      if (deltaBars === 0) return
+      const newVp = panViewport(viewport, deltaBars, calc.length)
+      if (onViewportChange) onViewportChange(newVp)
+      dragRef.current.startX = mx
+    }
+
+    const handleMouseUp = () => {
+      if (dragRef.current) {
+        dragRef.current = null
+        canvas.style.cursor = ''
+      }
+    }
+
+    // [Task 16] - 双击恢复自动范围（回到最新数据末尾视区）
+    const handleDoubleClick = () => {
+      if (onViewportChange) {
+        onViewportChange(createDefaultViewport(calc.length, MAX_VISIBLE_BARS))
+      }
+    }
+
+    // [Task 16] - 移动端双指缩放
+    const handleTouchStart = (e: TouchEvent) => {
+      if (e.touches.length === 2) {
+        const t0 = e.touches[0]
+        const t1 = e.touches[1]
+        const dist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY)
+        pinchRef.current = { startDist: dist, startViewport: viewport }
+      }
+    }
+
+    const handleTouchMove = (e: TouchEvent) => {
+      if (e.touches.length === 2 && pinchRef.current?.startViewport) {
+        e.preventDefault()
+        const t0 = e.touches[0]
+        const t1 = e.touches[1]
+        const dist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY)
+        const ratio = dist / pinchRef.current.startDist
+        if (ratio > 1.1 || ratio < 0.9) {
+          const zoom = ratio > 1 ? 1.1 : 1 / 1.1
+          const anchor = Math.floor((viewport.fromIndex + viewport.toIndex) / 2)
+          const newVp = zoomAtAnchor(pinchRef.current.startViewport, anchor, zoom, calc.length)
+          if (onViewportChange) onViewportChange(newVp)
+          pinchRef.current.startDist = dist
+          pinchRef.current.startViewport = newVp
+        }
+      }
+    }
+
+    const handleTouchEnd = () => {
+      pinchRef.current = null
+    }
+
     canvas.addEventListener('mousemove', handleMouseMove)
     canvas.addEventListener('click', handleClick)
     canvas.addEventListener('mouseleave', handleMouseLeave)
+    canvas.addEventListener('wheel', handleWheel, { passive: false })
+    canvas.addEventListener('mousedown', handleMouseDown)
+    window.addEventListener('mousemove', handleDragMove)
+    window.addEventListener('mouseup', handleMouseUp)
+    canvas.addEventListener('dblclick', handleDoubleClick)
+    canvas.addEventListener('touchstart', handleTouchStart, { passive: false })
+    canvas.addEventListener('touchmove', handleTouchMove, { passive: false })
+    canvas.addEventListener('touchend', handleTouchEnd)
     return () => {
       canvas.removeEventListener('mousemove', handleMouseMove)
       canvas.removeEventListener('click', handleClick)
       canvas.removeEventListener('mouseleave', handleMouseLeave)
+      canvas.removeEventListener('wheel', handleWheel)
+      canvas.removeEventListener('mousedown', handleMouseDown)
+      window.removeEventListener('mousemove', handleDragMove)
+      window.removeEventListener('mouseup', handleMouseUp)
+      canvas.removeEventListener('dblclick', handleDoubleClick)
+      canvas.removeEventListener('touchstart', handleTouchStart)
+      canvas.removeEventListener('touchmove', handleTouchMove)
+      canvas.removeEventListener('touchend', handleTouchEnd)
     }
-  }, [draw])
+  }, [draw, calc.length, viewport, onViewportChange, display.length])
 
   // ResizeObserver 自动缩放
   useEffect(() => {
@@ -1427,10 +1597,36 @@ export function StrategyChart({
     setLayers(prev => toggleGroup(groupId, prev))
   }
 
-  // 缩放控制
-  const zoomIn = () => setDisplayBars(n => Math.max(30, n - 15))
-  const zoomOut = () => setDisplayBars(n => Math.min(250, n + 15))
-  const resetZoom = () => setDisplayBars(250)
+  // [chartViewport] - 拖动平移状态（Task 16: TradingView 风格缩放）
+  const dragRef = useRef<{ startX: number; fromIndex: number } | null>(null)
+  // [chartViewport] - 移动端双指缩放状态
+  const pinchRef = useRef<{ startDist: number; startViewport: ChartViewport | null } | null>(null)
+
+  // [chartViewport] - 缩放控制：受控时通知父组件，否则更新内部 displayBars
+  //   锚点取当前视区中央，保留 +/-/复位 按钮交互（Task 16 新增滚轮/拖动/双击）
+  const zoomIn = () => {
+    const anchor = Math.floor((viewport.fromIndex + viewport.toIndex) / 2)
+    if (onViewportChange) {
+      onViewportChange(zoomAtAnchor(viewport, anchor, 1.2, calc.length))
+    } else {
+      setDisplayBars(n => Math.max(MIN_VISIBLE_BARS, n - 15))
+    }
+  }
+  const zoomOut = () => {
+    const anchor = Math.floor((viewport.fromIndex + viewport.toIndex) / 2)
+    if (onViewportChange) {
+      onViewportChange(zoomAtAnchor(viewport, anchor, 1 / 1.2, calc.length))
+    } else {
+      setDisplayBars(n => Math.min(MAX_VISIBLE_BARS, n + 15))
+    }
+  }
+  const resetZoom = () => {
+    if (onViewportChange) {
+      onViewportChange(createDefaultViewport(calc.length, MAX_VISIBLE_BARS))
+    } else {
+      setDisplayBars(MAX_VISIBLE_BARS)
+    }
+  }
 
   const hasData = bars.length > 0
 
@@ -1469,6 +1665,26 @@ export function StrategyChart({
         <button className="btn small" onClick={zoomOut} title="缩小">−</button>
         <button className="btn small" onClick={resetZoom} title="复位">复位</button>
         <button className="btn small" onClick={zoomIn} title="放大">+</button>
+        {/* [Task 16] 范围按钮：日线 1月/3月/6月/1年/全部；15m/1h 1日/5日/20日/60日 */}
+        <div className="tv-range-group">
+          {(timeframe === '1d' || timeframe === '1w' || timeframe === '1mo'
+            ? [{ label: '1月', bars: 22 }, { label: '3月', bars: 66 }, { label: '6月', bars: 132 }, { label: '1年', bars: 250 }, { label: '全部', bars: MAX_VISIBLE_BARS }]
+            : [{ label: '1日', bars: 24 }, { label: '5日', bars: 120 }, { label: '20日', bars: 240 }, { label: '60日', bars: 240 }]
+          ).map(opt => (
+            <button
+              key={opt.label}
+              className="tv-range-btn"
+              onClick={() => {
+                const visible = Math.min(opt.bars, calc.length, MAX_VISIBLE_BARS)
+                if (onViewportChange) {
+                  onViewportChange(createDefaultViewport(calc.length, Math.max(MIN_VISIBLE_BARS, visible)))
+                }
+              }}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* 策略图示区：按 DISPLAY_GROUPS 驱动 */}

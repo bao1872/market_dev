@@ -1264,3 +1264,66 @@ async def test_after_close_pipeline_has_waiting_dsa_fields(db_session):
     # NOT_STARTED 状态下应为 None
     assert pipeline["waiting_dsa_reason"] is None
     assert pipeline["waiting_dsa_suggestion"] is None
+
+
+@pytest.mark.asyncio
+async def test_pipeline_returns_after_close_orchestrator_job_run_id(db_session):
+    """[AfterClose] - system-overview 返回当日 after_close_orchestrator 的 job_run_id 及详情字段。
+
+    验证字段：job_run_id / orchestrator_status / heartbeat_at / lease_expires_at / last_completed_step，
+    供前端进入任务详情、断点继续、判断冲突任务、识别 worker 离线。
+
+    given: 当日有一条 after_close_orchestrator job_run（status=running, metadata 含 orchestrator_status + last_completed_step）
+    when: 调用 get_system_overview（16:30，无 bars 任务 → pipeline status=NOT_STARTED）
+    then: pipeline.job_run_id == 该 job_run.id，orchestrator_status/last_completed_step/heartbeat_at/lease_expires_at 透传
+    """
+    now = datetime(2026, 6, 24, 16, 30, tzinfo=SHANGHAI)
+    started = datetime(2026, 6, 24, 16, 5, tzinfo=SHANGHAI)
+    heartbeat = datetime(2026, 6, 24, 16, 10, tzinfo=SHANGHAI)
+    lease_expires = datetime(2026, 6, 24, 16, 20, tzinfo=SHANGHAI)
+
+    job = SchedulerJobRun(
+        job_name="after_close_orchestrator",
+        business_date=TEST_DATE_STR,
+        run_key=f"after_close_orchestrator:{TEST_DATE_STR}",
+        status="running",
+        started_at=started,
+        heartbeat_at=heartbeat,
+        lease_expires_at=lease_expires,
+        metadata_json=json.dumps({
+            "orchestrator_status": "refreshing_daily",
+            "trade_date": TEST_DATE_STR,
+            "last_completed_step": "refreshing_daily",
+        }),
+    )
+    db_session.add(job)
+    await db_session.flush()
+
+    with _mock_trading_day(is_trading=True):
+        result = await get_system_overview(db_session, now=now)
+
+    pipeline = result["after_close_pipeline"]
+    # job_run_id 透传，供前端进入任务详情
+    assert pipeline["job_run_id"] == str(job.id)
+    # orchestrator_status / last_completed_step 来自 metadata_json
+    assert pipeline["orchestrator_status"] == "refreshing_daily"
+    assert pipeline["last_completed_step"] == "refreshing_daily"
+    # heartbeat_at / lease_expires_at ISO 透传
+    assert pipeline["heartbeat_at"] is not None
+    assert pipeline["lease_expires_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_pipeline_job_run_id_none_when_no_orchestrator_job(db_session):
+    """[AfterClose] - 无当日 after_close_orchestrator 任务时 job_run_id 为 None。"""
+    now = datetime(2026, 6, 24, 16, 30, tzinfo=SHANGHAI)
+
+    with _mock_trading_day(is_trading=True):
+        result = await get_system_overview(db_session, now=now)
+
+    pipeline = result["after_close_pipeline"]
+    assert pipeline["job_run_id"] is None
+    assert pipeline["orchestrator_status"] is None
+    assert pipeline["last_completed_step"] is None
+    assert pipeline["heartbeat_at"] is None
+    assert pipeline["lease_expires_at"] is None

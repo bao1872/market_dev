@@ -449,5 +449,112 @@ class TestResumeEndpoint:
         assert "非盘后编排" in response.json()["detail"]
 
 
+# ============================================================
+# Task 8: POST /admin/after-close-runs 创建端点 409 detail 透明化 + 成功文案
+# ============================================================
+
+
+class TestCreateAfterCloseRunEndpoint:
+    """POST /admin/after-close-runs 创建端点测试。
+
+    [AfterClose] - 验证第八节"盘后创建错误透明化"修复：
+    - 409 响应包含 detail（error_code/after_close_run_id/started_at/...），不再丢失真实原因
+    - 成功文案改为"任务已加入队列"
+    """
+
+    @pytest.mark.asyncio
+    async def test_create_duplicate_returns_409_with_detail(
+        self, db_session, admin_user
+    ) -> None:
+        """场景：同日已有 running 编排任务，create 返 409 + detail 含完整字段。
+
+        given: 当日已有 after_close_orchestrator job_run（status=running, run_key 匹配）
+        when: POST /admin/after-close-runs { trade_date }
+        then:
+          - 响应 409
+          - detail.error_code == "DUPLICATE_RUN"
+          - detail.after_close_run_id == 已有任务 id
+          - detail.started_at / heartbeat_at / last_completed_step / orchestrator_status 透传
+          - detail.message 含"当天已有盘后任务正在运行"
+        """
+        _override_get_db(db_session)
+        trade_date = date(2099, 2, 1)
+        now = datetime.now(UTC)
+        existing = SchedulerJobRun(
+            job_name="after_close_orchestrator",
+            business_date=trade_date.isoformat(),
+            run_key=f"after_close_orchestrator:{trade_date.isoformat()}",
+            status="running",
+            scheduled_at=now,
+            started_at=now,
+            heartbeat_at=now,
+            # 租约设为远未来，避免 recover_stale 恢复为 interrupted
+            lease_expires_at=datetime(2099, 12, 31, tzinfo=UTC),
+            metadata_json=json.dumps({
+                "orchestrator_status": "refreshing_daily",
+                "trade_date": trade_date.isoformat(),
+                "last_completed_step": "refreshing_daily",
+            }),
+        )
+        db_session.add(existing)
+        await db_session.flush()
+
+        with patch(
+            "app.api.admin_after_close.is_trading_day_async",
+            new_callable=AsyncMock,
+            return_value=True,
+        ):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.post(
+                    "/admin/after-close-runs",
+                    headers=_auth_headers(admin_user.id),
+                    json={"trade_date": trade_date.isoformat()},
+                )
+
+        assert response.status_code == 409, f"响应体: {response.text}"
+        detail = response.json()["detail"]
+        assert detail["error_code"] == "DUPLICATE_RUN"
+        assert detail["after_close_run_id"] == str(existing.id)
+        assert detail["status"] == "running"
+        assert detail["orchestrator_status"] == "refreshing_daily"
+        assert detail["last_completed_step"] == "refreshing_daily"
+        assert detail["started_at"] is not None
+        assert detail["heartbeat_at"] is not None
+        assert "当天已有盘后任务正在运行" in detail["message"]
+
+    @pytest.mark.asyncio
+    async def test_create_success_message_queued(
+        self, db_session, admin_user
+    ) -> None:
+        """场景：新建成功，message 含"任务已加入队列"（不再说"已创建并启动"）。
+
+        given: 当日无 after_close_orchestrator 任务，is_trading_day=True
+        when: POST /admin/after-close-runs { trade_date: 独特未来日期 }
+        then: 响应 201 + status=queued + message 含"任务已加入队列"
+        """
+        _override_get_db(db_session)
+        trade_date = date(2099, 3, 1)
+
+        with patch(
+            "app.api.admin_after_close.is_trading_day_async",
+            new_callable=AsyncMock,
+            return_value=True,
+        ):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.post(
+                    "/admin/after-close-runs",
+                    headers=_auth_headers(admin_user.id),
+                    json={"trade_date": trade_date.isoformat()},
+                )
+
+        assert response.status_code == 201, f"响应体: {response.text}"
+        data = response.json()
+        assert data["status"] == "queued"
+        assert "任务已加入队列" in data["message"]
+        assert "已创建并启动" not in data["message"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

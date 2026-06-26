@@ -1,23 +1,16 @@
 // [自选监控] - 桌面端表格列定义
 // 职责：提供唯一列定义，首页与自选页共用
 import type { DataTableColumn } from '@/components/StrategyDataTable'
+import { getEventLabel } from '@/constants/userFacingLabels'
 import type { WatchlistMonitorRow, MonitorStatus } from './types'
 import { fmtNum, fmtTime } from './adapters'
 
-/** [自选监控] - 事件类型翻译（advice.md P1 通俗化映射，唯一实现） */
+/**
+ * [自选监控] - 事件类型翻译（advice.md 第二节通俗化映射）
+ * 委托给统一常量 userFacingLabels，避免在组件层重复维护 switch/dict。
+ */
 export function translateEventType(eventType: string): string {
-  switch (eventType) {
-    case 'node_cluster_touch':
-      return '触及成交密集区'
-    case 'bb_upper_touch':
-      return '触及近期波动上沿'
-    case 'bb_mid_touch':
-      return '回到近期价格中枢'
-    case 'bb_lower_touch':
-      return '触及近期波动下沿'
-    default:
-      return eventType
-  }
+  return getEventLabel(eventType)
 }
 
 /** 监控状态徽章渲染 */

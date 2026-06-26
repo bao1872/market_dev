@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, time, timedelta
 from typing import Any
@@ -636,6 +637,73 @@ async def _compute_data_freshness(db: AsyncSession, now: datetime) -> dict[str, 
     return {"bars": bars_freshness, "strategy": strategy_freshness}
 
 
+async def _compute_after_close_orchestrator_summary(
+    db: AsyncSession,
+    business_date_str: str,
+) -> dict[str, Any]:
+    """[AfterClose] - 查询当日 after_close_orchestrator job_run 摘要字段。
+
+    供系统概览返回 job_run_id / orchestrator_status / heartbeat_at /
+    lease_expires_at / last_completed_step，使前端能：
+    - 进入任务详情（GET /admin/after-close-runs/{id}）
+    - 断点继续 / 重试 / 强制执行
+    - 判断冲突任务（创建按钮禁用条件）
+    - 识别 worker 离线（heartbeat_at 过期）
+
+    Args:
+        db: 异步数据库会话
+        business_date_str: 业务日期字符串（YYYY-MM-DD）
+
+    Returns:
+        含 5 个字段的字典（无任务时均为 None）：
+        job_run_id / orchestrator_status / heartbeat_at / lease_expires_at / last_completed_step
+    """
+    empty = {
+        "job_run_id": None,
+        "orchestrator_status": None,
+        "heartbeat_at": None,
+        "lease_expires_at": None,
+        "last_completed_step": None,
+    }
+    stmt = (
+        select(SchedulerJobRun)
+        .where(
+            SchedulerJobRun.job_name == "after_close_orchestrator",
+            SchedulerJobRun.business_date == business_date_str,
+        )
+        .order_by(SchedulerJobRun.started_at.desc())
+        .limit(1)
+    )
+    result = await db.execute(stmt)
+    job_run = result.scalar_one_or_none()
+    if job_run is None:
+        return empty
+
+    # [AfterClose] - 解析 metadata_json 提取 orchestrator_status + last_completed_step
+    meta: dict[str, Any] = {}
+    if job_run.metadata_json:
+        try:
+            meta = json.loads(job_run.metadata_json)
+        except (ValueError, TypeError) as exc:
+            logger.warning(
+                "[SystemOverview] after_close_orchestrator metadata_json 解析失败: "
+                "run_id=%s, error=%s",
+                job_run.id, exc,
+            )
+
+    return {
+        "job_run_id": str(job_run.id),
+        "orchestrator_status": meta.get("orchestrator_status"),
+        "heartbeat_at": (
+            job_run.heartbeat_at.isoformat() if job_run.heartbeat_at else None
+        ),
+        "lease_expires_at": (
+            job_run.lease_expires_at.isoformat() if job_run.lease_expires_at else None
+        ),
+        "last_completed_step": meta.get("last_completed_step"),
+    }
+
+
 async def _compute_after_close_pipeline(
     db: AsyncSession,
     now: datetime,
@@ -649,6 +717,10 @@ async def _compute_after_close_pipeline(
     2. 查 bars_scheduler 当日 job：running → BARS_RUNNING，failed → BARS_FAILED
     3. bars succeeded → 查 DSA（trade_date=今日, run_type=scheduled, attempt_no DESC）
     4. 禁止混用历史最近运行与今日盘后状态
+
+    [AfterClose] - 额外返回 after_close_orchestrator 当日 job_run 摘要字段：
+    job_run_id / orchestrator_status / heartbeat_at / lease_expires_at / last_completed_step，
+    供前端进入任务详情、断点继续、判断冲突任务、识别 worker 离线。
 
     Args:
         db: 异步数据库会话
@@ -667,7 +739,19 @@ async def _compute_after_close_pipeline(
             "dsa_run": None,
             "waiting_dsa_reason": None,
             "waiting_dsa_suggestion": None,
+            "job_run_id": None,
+            "orchestrator_status": None,
+            "heartbeat_at": None,
+            "lease_expires_at": None,
+            "last_completed_step": None,
         }
+
+    # [AfterClose] - 查当日 after_close_orchestrator job_run（取最新一条）
+    # 提取 job_run_id / orchestrator_status / heartbeat_at / lease_expires_at / last_completed_step
+    # 供前端判断冲突任务、进入任务详情、断点继续、识别 worker 离线
+    orchestrator_summary = await _compute_after_close_orchestrator_summary(
+        db, business_date_str
+    )
 
     # [after_close_pipeline] - 查当日 bars_scheduler job（必须过滤 business_date）
     bars_stmt = (
@@ -699,6 +783,7 @@ async def _compute_after_close_pipeline(
             "dsa_run": None,
             "waiting_dsa_reason": None,
             "waiting_dsa_suggestion": None,
+            **orchestrator_summary,
         }
 
     # bars running → BARS_RUNNING
@@ -709,6 +794,7 @@ async def _compute_after_close_pipeline(
             "dsa_run": None,
             "waiting_dsa_reason": None,
             "waiting_dsa_suggestion": None,
+            **orchestrator_summary,
         }
 
     # bars failed → BARS_FAILED
@@ -719,6 +805,7 @@ async def _compute_after_close_pipeline(
             "dsa_run": None,
             "waiting_dsa_reason": None,
             "waiting_dsa_suggestion": None,
+            **orchestrator_summary,
         }
 
     # [after_close_pipeline] - bars succeeded → 查 DSA（trade_date=今日, run_type=scheduled）
@@ -791,6 +878,7 @@ async def _compute_after_close_pipeline(
         "waiting_dsa_reason": waiting_dsa_reason,
         "waiting_dsa_suggestion": waiting_dsa_suggestion,
         "data_freshness": data_freshness,
+        **orchestrator_summary,
     }
 
 

@@ -27,6 +27,11 @@
         "size": 12345
     }
 
+错误响应（advice.md 第十一节遗留清理：技术错误返回三字段）：
+    - 截图失败: {"error_code": "CAPTURE_FAILED", "error_message": "...", "failed_step": "capture"}
+    - 保存失败: {"error_code": "SAVE_FAILED", "error_message": "...", "failed_step": "save"}
+    - 截图超时: {"error_code": "CAPTURE_TIMEOUT", "error_message": "...", "failed_step": "capture"}
+
 设计：
 - 复用 app.services.stock_capture_service.capture_stock_chart
 - 等待 data-render-ready="true" 后截取 data-testid="stock-detail-capture"
@@ -54,6 +59,23 @@ CAPTURE_HOST = os.getenv("CAPTURE_HOST", "0.0.0.0")
 CAPTURE_PORT = int(os.getenv("CAPTURE_PORT", "8001"))
 CAPTURE_STATIC_DIR = os.getenv("CAPTURE_STATIC_DIR", "/app/static/captures")
 CAPTURE_STATIC_URL_PREFIX = os.getenv("CAPTURE_STATIC_URL_PREFIX", "/static/captures")
+
+
+def _error_detail(
+    error_code: str,
+    error_message: str,
+    failed_step: str,
+) -> dict[str, str]:
+    """构造技术错误三字段响应体。
+
+    [capture-worker] - 描述: HTTP 异常返回 {error_code, error_message, failed_step} 结构
+    （advice.md 第十一节遗留清理：技术错误必须返回三字段）
+    """
+    return {
+        "error_code": error_code,
+        "error_message": error_message,
+        "failed_step": failed_step,
+    }
 
 
 class CaptureRequest(BaseModel):
@@ -102,15 +124,29 @@ async def capture(request: CaptureRequest) -> CaptureResponse:
             chart_version=request.chart_version,
         )
     except StockCaptureError as e:
-        raise HTTPException(status_code=502, detail=str(e)) from e
+        # [capture-worker] - 区分超时与失败：错误消息含"超时"归为 CAPTURE_TIMEOUT
+        err_msg = str(e)
+        err_code = "CAPTURE_TIMEOUT" if "超时" in err_msg else "CAPTURE_FAILED"
+        raise HTTPException(
+            status_code=502,
+            detail=_error_detail(err_code, err_msg, "capture"),
+        ) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"截图异常: {e}") from e
+        # [capture-worker] - 其他未预期异常归为 CAPTURE_FAILED
+        raise HTTPException(
+            status_code=500,
+            detail=_error_detail("CAPTURE_FAILED", f"截图异常: {e}", "capture"),
+        ) from e
 
     try:
         with open(local_path, "wb") as f:
             f.write(png_bytes)
     except OSError as e:
-        raise HTTPException(status_code=500, detail=f"保存截图失败: {e}") from e
+        # [capture-worker] - 文件保存失败归为 SAVE_FAILED
+        raise HTTPException(
+            status_code=500,
+            detail=_error_detail("SAVE_FAILED", f"保存截图失败: {e}", "save"),
+        ) from e
 
     return CaptureResponse(
         symbol=request.symbol,

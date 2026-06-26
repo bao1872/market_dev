@@ -36,6 +36,9 @@ dependencies = [
     # [Dependencies] - plotly 用于 strategy_assets/algorithms/features/* 的图表渲染
     # 历史遗漏：3d919a3 引入 import plotly 但未声明，导致 monitor worker 启动失败
     "plotly>=5.0",
+    # [Dependencies] - pypinyin 用于股票名称拼音首字母生成（advice.md 第六节：拼音搜索）
+    # 主数据同步时生成 pinyin_initials 落库，搜索时按拼音首字母前缀匹配
+    "pypinyin>=0.51",
 ]
 
 [project.optional-dependencies]

@@ -29,11 +29,29 @@ from app.services.notification_service import (
 )
 from app.services.stock_detail_feishu_service import (
     InstrumentNotFoundError,
+    StockDetailFeishuError,
     get_share_status,
     send_stock_detail_to_feishu,
 )
 
 router = APIRouter(prefix="/admin", tags=["stock-detail-feishu"])
+
+
+def _error_detail(
+    error_code: str,
+    error_message: str,
+    failed_step: str,
+) -> dict[str, str]:
+    """构造技术错误三字段响应体。
+
+    [StockDetailFeishu] - 描述: HTTP 异常返回 {error_code, error_message, failed_step} 结构
+    （advice.md 第十一节遗留清理：技术错误必须返回三字段，不继续只返回布尔值）
+    """
+    return {
+        "error_code": error_code,
+        "error_message": error_message,
+        "failed_step": failed_step,
+    }
 
 
 class SendFeishuRequest(BaseModel):
@@ -115,18 +133,28 @@ async def send_stock_detail_feishu_endpoint(
             capture_token_ttl_seconds=settings.jwt_capture_ttl_seconds,
         )
     except InstrumentNotFoundError as e:
-        # [StockDetailFeishu] - 个股不存在返回 404
+        # [StockDetailFeishu] - 个股不存在返回 404（三字段结构）
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=_error_detail("INSTRUMENT_NOT_FOUND", str(e), "instrument"),
         ) from e
     except ChannelNotFoundError as e:
-        # [StockDetailFeishu] - 渠道不存在或不属于当前用户返回 404
+        # [StockDetailFeishu] - 渠道不存在或不属于当前用户返回 404（三字段结构）
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=_error_detail("CHANNEL_NOT_FOUND", str(e), "channel"),
+        ) from e
+    except StockDetailFeishuError as e:
+        # [StockDetailFeishu] - 快照/文本Outbox/截图/图片Outbox 失败返回 502（三字段结构）
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=_error_detail(e.error_code, str(e), e.failed_step),
         ) from e
     except NotificationServiceError as e:
+        # [StockDetailFeishu] - 其他通知服务错误返回 502（三字段结构）
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=_error_detail("NOTIFICATION_SERVICE_ERROR", str(e), "unknown"),
         ) from e
     await db.commit()
     return SendFeishuResponse(**result)
@@ -159,10 +187,20 @@ async def get_share_status_endpoint(
 
 
 if __name__ == "__main__":
-    # 自测入口：验证路由注册
+    # 自测入口：验证路由注册 + 三字段错误响应构造
     paths = [r.path for r in router.routes]
     print(f"router.routes={paths}")
     assert any("/send-feishu" in p for p in paths), "应包含 /send-feishu 路由"
     assert any("/status" in p for p in paths), "应包含 /status 路由"
     assert router.prefix == "/admin", "prefix 应为 /admin"
+
+    # 验证三字段错误响应构造（advice.md 第十一节遗留清理）
+    detail = _error_detail("SNAPSHOT_FAILED", "快照获取失败", "snapshot")
+    assert detail == {
+        "error_code": "SNAPSHOT_FAILED",
+        "error_message": "快照获取失败",
+        "failed_step": "snapshot",
+    }, f"三字段结构不匹配: {detail}"
+    print(f"_error_detail={detail} OK")
+
     print("OK")

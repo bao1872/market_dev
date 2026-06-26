@@ -9,11 +9,12 @@
 //
 // V1.6.3 精简：无"策略当前计算结果"模块、无"事件时间轴"模块
 
-import { useState, useMemo, useRef, useEffect } from 'react'
+import { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom'
 import clsx from 'clsx'
 import StrategyChart from '@/components/StrategyChart'
 import type { BarData, ChartEvent } from '@/components/StrategyChart'
+import type { ChartViewport } from '@/components/chartViewport'
 import type { IndicatorResponse } from '@/api/endpoints'
 import { formatShanghaiTimeShort } from '@/utils/datetime'
 import {
@@ -73,9 +74,30 @@ export default function StockDetailPage() {
 
   // 本地状态：当前周期（由 StrategyChart 工具栏联动）
   const [timeframe, setTimeframe] = useState<string>('1d')
+  // [chartViewport] - 每个周期独立保存 viewport，切换周期时重置目标周期 viewport
+  //   key=timeframe, value=ChartViewport（未保存的周期由 StrategyChart 内部计算默认值）
+  //   避免 15m/1h/1w/1mo 切换时 viewport 串台（advice.md 第三节问题 3）
+  const [viewportByTimeframe, setViewportByTimeframe] = useState<Record<string, ChartViewport>>({})
   // 全屏查看容器
   const containerRef = useRef<HTMLDivElement>(null)
   const [isFullscreen, setIsFullscreen] = useState(false)
+
+  // [chartViewport] - viewport 变化回调：更新当前周期的 viewport（按周期独立保存）
+  const handleViewportChange = useCallback((vp: ChartViewport) => {
+    setViewportByTimeframe(prev => ({ ...prev, [timeframe]: vp }))
+  }, [timeframe])
+
+  // [chartViewport] - 周期切换：清空目标周期的 viewport 记录，
+  //   让 StrategyChart 回退到默认末尾视区（advice.md 第三节问题 3）
+  const handleTimeframeChange = useCallback((tf: string) => {
+    setViewportByTimeframe(prev => {
+      if (!(tf in prev)) return prev  // 目标周期未保存，无需清空
+      const next = { ...prev }
+      delete next[tf]
+      return next
+    })
+    setTimeframe(tf)
+  }, [])
 
   // 数据查询：股票基本信息
   const instrumentQuery = useInstrumentBySymbol(symbol)
@@ -637,7 +659,9 @@ export default function StockDetailPage() {
                 source={source}
                 height={655}
                 timeframe={timeframe}
-                onTimeframeChange={setTimeframe}
+                onTimeframeChange={handleTimeframeChange}
+                viewport={viewportByTimeframe[timeframe]}
+                onViewportChange={handleViewportChange}
               />
               {/* 状态栏：行情延迟/复权/时区/策略计算时间 */}
               <div className="tv-chart-status">

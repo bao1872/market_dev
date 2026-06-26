@@ -11,7 +11,8 @@
 
 颜色映射：
 - MONITOR_EVENT → 由 resource_refs.header_severity 决定（danger=red, warn=orange, info=green）
-- MONITOR_MEMBER_EVENT → 由 resource_refs.header_severity 决定（迁移兼容）
+- MONITOR_MEMBER_EVENT → 由 resource_refs.header_severity 决定（【仅历史兼容】历史消息渲染，
+  新代码禁止生成 MONITOR_MEMBER_EVENT，advice.md 第十一节遗留清理）
 - SYSTEM_ALERT → red
 - CHANNEL_ALERT → orange
 """
@@ -25,6 +26,7 @@ from app.schemas.notification import NotificationMessageDTO
 # message_type → 飞书卡片头部颜色模板（默认映射，可被 resource_refs.header_severity 覆盖）
 _HEADER_TEMPLATE_MAP: dict[str, str] = {
     "MONITOR_EVENT": "turquoise",
+    # 【仅历史兼容】历史消息渲染兼容，新代码禁止生成 MONITOR_MEMBER_EVENT
     "MONITOR_MEMBER_EVENT": "turquoise",
     "SYSTEM_ALERT": "red",
     "CHANNEL_ALERT": "orange",
@@ -297,7 +299,7 @@ if __name__ == "__main__":
         items=[
             {"tag": "markdown", "content": "**平安银行 000001**"},
             {"tag": "hr"},
-            {"tag": "markdown", "content": "🔴 布林上轨穿越"},
+            {"tag": "markdown", "content": "🔴 价格触及近期波动上沿"},
             {"tag": "note", "elements": [{"tag": "plain_text", "content": "数据时间: 2026-06-23 10:15"}]},
         ],
         resource_refs={"header_severity": "info"},

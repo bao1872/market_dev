@@ -1,20 +1,25 @@
 // 消息中心页（受保护路由）
 // 对应原型：messages.html (V1.6.3)
-// 用法：统一管理策略消息、过程事件与系统消息，支持按类型/时间筛选与标记已读
+// [advice.md 第二节] - 用法: 普通用户只暴露 5 类筛选（全部/未读/选股结果/价格提醒/系统通知），
+// 过程事件仅管理员可见；时间统一上海时区；列表字段统一为
+// 提醒类别/股票/发生了什么/当时价格/触发时间/发送情况/操作
 // 依赖 hooks：useMessages / useMarkMessageRead / useReadAllMessages
 // 路由：/messages（支持 ?filter=unread 从角标进入未读筛选）
 import { useState, useMemo, useCallback } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useToast } from '@/store/toast'
+import { useRoleStore } from '@/store/role'
 import { useMessages, useMarkMessageRead, useReadAllMessages } from '@/hooks/useApi'
 import type { NotificationMessage } from '@/api/endpoints'
 import { StrategyDataTable } from '@/components/StrategyDataTable'
 import type { DataTableColumn } from '@/components/StrategyDataTable'
+import { getEventLabel } from '@/constants/userFacingLabels'
+import { formatShanghaiTime } from '@/utils/datetime'
 
 // ===== 类型定义 =====
 
-/** 消息筛选维度：全部 / 未读 / 选股组合 / 监控组合 / 过程事件 / 系统 */
-type MessageFilter = 'all' | 'unread' | 'selection' | 'monitoring' | 'process' | 'system'
+/** 消息筛选维度：全部 / 未读 / 选股结果 / 价格提醒 / 系统通知（过程事件仅管理员） */
+type MessageFilter = 'all' | 'unread' | 'selection' | 'price' | 'system' | 'process'
 
 /** 时间范围：最近 7 天 / 最近 30 天 */
 type TimeRange = '7d' | '30d'
@@ -34,6 +39,7 @@ interface MessageRow {
   subtitle: string
   instrument_text: string
   event_summary: string
+  price_text: string
   instruments: Array<{ instrument_id?: string; symbol?: string; name?: string }>
   instrument_count: number
   event_id: string | null
@@ -48,26 +54,33 @@ interface MessageRow {
 
 // ===== 常量 =====
 
-/** 消息类型 → 中文标签 + tag 样式 */
+/** 消息类型 → 中文标签 + tag 样式
+ * [advice.md 第二节] - message_type 内部值不变，仅改展示文案为通俗表达：
+ * 监控类→价格提醒，选股类→选股结果，系统类→系统通知 */
 const TYPE_META: Record<string, { label: string; tag: 'good' | 'info' | 'warn' }> = {
-  MONITOR_EVENT: { label: '监控', tag: 'good' },
-  MONITOR_MEMBER_EVENT: { label: '监控', tag: 'good' },
-  monitoring_composite: { label: '监控', tag: 'good' },
-  selection_composite: { label: '选股', tag: 'good' },
+  MONITOR_EVENT: { label: '价格提醒', tag: 'good' },
+  MONITOR_MEMBER_EVENT: { label: '价格提醒', tag: 'good' },
+  monitoring_composite: { label: '价格提醒', tag: 'good' },
+  selection_composite: { label: '选股结果', tag: 'good' },
   process_event: { label: '过程事件', tag: 'info' },
-  system: { label: '系统', tag: 'warn' },
-  SYSTEM_ALERT: { label: '系统', tag: 'warn' },
+  system: { label: '系统通知', tag: 'warn' },
+  SYSTEM_ALERT: { label: '系统通知', tag: 'warn' },
 }
 
-/** 筛选项配置（对应原型 segmented 按钮） */
+/** 普通用户筛选项配置（对应原型 segmented 按钮）：5 类 */
 const FILTER_OPTIONS: Array<{ value: MessageFilter; label: string }> = [
   { value: 'all', label: '全部' },
   { value: 'unread', label: '未读' },
-  { value: 'selection', label: '选股' },
-  { value: 'monitoring', label: '监控' },
-  { value: 'process', label: '过程事件' },
-  { value: 'system', label: '系统' },
+  { value: 'selection', label: '选股结果' },
+  { value: 'price', label: '价格提醒' },
+  { value: 'system', label: '系统通知' },
 ]
+
+/** 管理员额外追加的过程事件筛选项 */
+const FILTER_OPTION_PROCESS: { value: MessageFilter; label: string } = {
+  value: 'process',
+  label: '过程事件',
+}
 
 /** 时间范围配置（对应原型 select 下拉） */
 const TIME_RANGE_OPTIONS: Array<{ value: TimeRange; label: string }> = [
@@ -100,30 +113,30 @@ function extractInstruments(
   return []
 }
 
-/** 格式化消息时间：今日显示 HH:MM，昨日显示"昨日 HH:MM"，更早显示 MM-DD HH:MM */
-function formatMessageTime(isoString: string): string {
-  try {
-    const date = new Date(isoString)
-    const now = new Date()
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-    const yesterdayStart = new Date(todayStart.getTime() - 86400000)
-    const msgDate = new Date(date.getFullYear(), date.getMonth(), date.getDate())
-
-    const hh = String(date.getHours()).padStart(2, '0')
-    const mm = String(date.getMinutes()).padStart(2, '0')
-
-    if (msgDate.getTime() === todayStart.getTime()) {
-      return `${hh}:${mm}`
+/** 从消息 body 中提取当时价格（[advice.md 第二节] - 列表"当时价格"字段）
+ * 三级回退：facts 结构化字段 → body/resource_refs 顶层字段 → text_content/summary 纯文本正则解析
+ * 后端 build_monitor_event_text 当前仅把现价写入纯文本，故保留正则兜底 */
+function extractPrice(message: NotificationMessage): string {
+  const body = message.body || {}
+  // 1. facts 数组按 key 匹配（current_price / price / 现价）
+  const facts = body.facts as Array<Record<string, unknown>> | undefined
+  if (Array.isArray(facts)) {
+    for (const f of facts) {
+      const k = String(f.key ?? '').toLowerCase()
+      if (k === 'current_price' || k === 'price' || k === '现价') {
+        const v = f.value
+        if (v !== undefined && v !== null && v !== '') return String(v)
+      }
     }
-    if (msgDate.getTime() === yesterdayStart.getTime()) {
-      return `昨日 ${hh}:${mm}`
-    }
-    const M = String(date.getMonth() + 1).padStart(2, '0')
-    const D = String(date.getDate()).padStart(2, '0')
-    return `${M}-${D} ${hh}:${mm}`
-  } catch {
-    return '-'
   }
+  // 2. resource_refs / body 顶层结构化字段
+  const direct = pickBodyStr(body, ['current_price', 'price', 'last_price', 'close_price'])
+  if (direct) return direct
+  // 3. 从 text_content / summary 纯文本解析"现价：xxx"
+  const text = pickBodyStr(body, ['text_content', 'summary'])
+  const m = text.match(/现价[：:]\s*([\d.]+)/)
+  if (m) return m[1]
+  return '-'
 }
 
 /** 解析投递状态：优先使用后端 deliveries 数组，其次兼容 body.channels / delivery_status */
@@ -205,6 +218,8 @@ function parseDelivery(message: NotificationMessage): { label: string; pill: Del
 export default function MessagesPage() {
   const navigate = useNavigate()
   const toast = useToast.getState()
+  // [Messages] - 描述: 过程事件仅管理员可见（与 AppShell 管理员控制台导航同款判断）
+  const isAdmin = useRoleStore((s) => s.isAdmin)
   // [Messages] - 描述: 支持 ?filter=unread 从角标进入未读筛选
   const [searchParams] = useSearchParams()
   const initialFilter: MessageFilter = searchParams.get('filter') === 'unread' ? 'unread' : 'all'
@@ -234,19 +249,21 @@ export default function MessagesPage() {
       all: allMessages.length,
       unread: 0,
       selection: 0,
-      monitoring: 0,
-      process: 0,
+      price: 0,
       system: 0,
+      process: 0,
     }
     for (const m of allMessages) {
       if (!m.read_at) counts.unread++
       if (m.message_type === 'selection_composite') counts.selection++
-      else if (m.message_type === 'monitoring_composite' || m.message_type === 'MONITOR_EVENT' || m.message_type === 'MONITOR_MEMBER_EVENT') counts.monitoring++
+      else if (m.message_type === 'monitoring_composite' || m.message_type === 'MONITOR_EVENT' || m.message_type === 'MONITOR_MEMBER_EVENT') counts.price++
       else if (m.message_type === 'process_event') counts.process++
       else if (m.message_type === 'system' || m.message_type === 'SYSTEM_ALERT') counts.system++
     }
+    // [advice.md 第二节] - 普通用户不暴露过程事件，计数恒为 0
+    if (!isAdmin) counts.process = 0
     return counts
-  }, [allMessages])
+  }, [allMessages, isAdmin])
 
   // 时间范围 + 类型过滤（unread 已通过 API 参数过滤）
   const filteredMessages = useMemo(() => {
@@ -254,6 +271,9 @@ export default function MessagesPage() {
     const cutoff = now - (timeRange === '7d' ? 7 : 30) * 86400000
 
     return allMessages.filter((m) => {
+      // [advice.md 第二节] - 过程事件仅管理员可见，普通用户直接过滤掉
+      if (!isAdmin && m.message_type === 'process_event') return false
+
       // 时间范围过滤
       const msgTime = new Date(m.created_at).getTime()
       if (Number.isNaN(msgTime) || msgTime < cutoff) return false
@@ -261,12 +281,12 @@ export default function MessagesPage() {
       // 类型过滤
       if (activeFilter === 'all' || activeFilter === 'unread') return true
       if (activeFilter === 'selection') return m.message_type === 'selection_composite'
-      if (activeFilter === 'monitoring') return m.message_type === 'monitoring_composite' || m.message_type === 'MONITOR_EVENT' || m.message_type === 'MONITOR_MEMBER_EVENT'
+      if (activeFilter === 'price') return m.message_type === 'monitoring_composite' || m.message_type === 'MONITOR_EVENT' || m.message_type === 'MONITOR_MEMBER_EVENT'
       if (activeFilter === 'process') return m.message_type === 'process_event'
       if (activeFilter === 'system') return m.message_type === 'system' || m.message_type === 'SYSTEM_ALERT'
       return true
     })
-  }, [allMessages, timeRange, activeFilter])
+  }, [allMessages, timeRange, activeFilter, isAdmin])
 
   // 转换为表格行
   const rows: MessageRow[] = useMemo(() => {
@@ -285,9 +305,16 @@ export default function MessagesPage() {
       const strategyName =
         m.strategy_name ||
         pickBodyStr(body, ['plan_name', 'strategy_name', 'plan', 'source_name'])
+      // [advice.md 第二节] - event_summary 优先用后端返回，其次 body 兜底，
+      // 最后从 resource_refs.event_type 提取并用 userFacingLabels 翻译为通俗文案
+      const resourceRefs = body.resource_refs as Record<string, unknown> | undefined
+      const fallbackEventType = String(resourceRefs?.event_type ?? '')
       const eventSummary =
         m.event_summary ||
-        pickBodyStr(body, ['subtitle', 'sub_title', 'detail', 'description', 'event_summary'])
+        pickBodyStr(body, ['subtitle', 'sub_title', 'detail', 'description', 'event_summary']) ||
+        (fallbackEventType ? getEventLabel(fallbackEventType) : '')
+      // [advice.md 第二节] - 当时价格: 三级回退提取（facts 结构化 → body 字段 → 纯文本正则）
+      const priceText = extractPrice(m)
       const instrumentText =
         instrumentCount > 1
           ? `${primary?.name || primary?.symbol || ''} 等 ${instrumentCount} 只`
@@ -322,10 +349,12 @@ export default function MessagesPage() {
         ]),
         instrument_text: instrumentText,
         event_summary: eventSummary,
+        price_text: priceText,
         instruments,
         instrument_count: instrumentCount,
         event_id: m.source_id,
-        time_text: formatMessageTime(m.created_at),
+        // [advice.md 第二节] - 触发时间统一上海时区（替代浏览器本地时区）
+        time_text: formatShanghaiTime(m.created_at),
         created_at: m.created_at,
         delivery_label: delivery.label,
         delivery_pill: delivery.pill,
@@ -383,12 +412,12 @@ export default function MessagesPage() {
     [handleMarkRead, navigate],
   )
 
-  // 列定义
+  // 列定义 - [advice.md 第二节] 统一七列: 提醒类别/股票/发生了什么/当时价格/触发时间/发送情况/操作
   const columns: DataTableColumn<MessageRow>[] = useMemo(
     () => [
       {
         key: 'type',
-        title: '类型',
+        title: '提醒类别',
         dataType: 'text',
         sortable: false,
         filterable: false,
@@ -409,32 +438,35 @@ export default function MessagesPage() {
         ),
       },
       {
-        key: 'plan_name',
-        title: '策略',
-        dataType: 'text',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => row.strategy_name,
-        filterValue: (row) => row.strategy_name,
-        render: (row) => row.strategy_name || '-',
-      },
-      {
-        key: 'content',
-        title: '股票 / 事件',
+        key: 'instrument',
+        title: '股票',
         dataType: 'text',
         sortable: false,
         filterable: true,
-        filterValue: (row) => `${row.instrument_text} ${row.event_summary}`,
-        render: (row) => (
-          <div>
-            <div className="symbol">{row.instrument_text || '-'}</div>
-            {row.event_summary && <div className="symbol-sub">{row.event_summary}</div>}
-          </div>
-        ),
+        filterValue: (row) => row.instrument_text,
+        render: (row) => <div className="symbol">{row.instrument_text || '-'}</div>,
+      },
+      {
+        key: 'event',
+        title: '发生了什么',
+        dataType: 'text',
+        sortable: false,
+        filterable: true,
+        filterValue: (row) => row.event_summary,
+        render: (row) =>
+          row.event_summary ? <div className="symbol-sub">{row.event_summary}</div> : '-',
+      },
+      {
+        key: 'price',
+        title: '当时价格',
+        dataType: 'text',
+        sortable: false,
+        filterable: false,
+        render: (row) => <span className="num">{row.price_text}</span>,
       },
       {
         key: 'time_text',
-        title: '时间',
+        title: '触发时间',
         dataType: 'datetime',
         sortable: true,
         filterable: false,
@@ -443,7 +475,7 @@ export default function MessagesPage() {
       },
       {
         key: 'delivery',
-        title: '投递状态',
+        title: '发送情况',
         dataType: 'text',
         sortable: false,
         filterable: false,
@@ -455,7 +487,7 @@ export default function MessagesPage() {
       },
       {
         key: 'action',
-        title: '',
+        title: '操作',
         dataType: 'text',
         sortable: false,
         filterable: false,
@@ -484,7 +516,7 @@ export default function MessagesPage() {
         <div>
           <h1 className="page-title">消息中心</h1>
           <div className="page-desc">
-            策略消息、过程事件与系统消息统一管理，渠道投递状态可追溯
+            选股结果、价格提醒与系统通知统一管理，发送情况可追溯
           </div>
         </div>
         <div className="actions">
@@ -504,7 +536,8 @@ export default function MessagesPage() {
       {/* 工具栏：分段按钮 + 时间范围 */}
       <div className="toolbar">
         <div className="segmented">
-          {FILTER_OPTIONS.map((opt) => (
+          {/* [advice.md 第二节] - 普通用户 5 类筛选；管理员追加"过程事件" */}
+          {[...FILTER_OPTIONS, ...(isAdmin ? [FILTER_OPTION_PROCESS] : [])].map((opt) => (
             <button
               key={opt.value}
               className={`segment${activeFilter === opt.value ? ' active' : ''}`}

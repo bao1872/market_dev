@@ -14,6 +14,9 @@ DTO 字段对齐 doc/.../schemas/notification_message.schema.json：
 - resource_refs: 资源引用（instrument_id/plan_id/event_id 等）
 - data_time: 数据时间
 - disclaimer: 免责声明
+
+注意：MONITOR_MEMBER_EVENT 为【仅历史兼容】枚举值，仅用于读取历史消息，
+新代码禁止生成（advice.md 第十一节遗留清理）。新消息统一用 MONITOR_EVENT。
 """
 
 from __future__ import annotations
@@ -25,6 +28,8 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # 允许的 message_type 枚举（对齐 schema）
+# 注意：MONITOR_MEMBER_EVENT 为【仅历史兼容】枚举值，仅用于读取历史消息，
+# 新代码禁止生成；保留枚举值以保证历史消息可读（advice.md 第十一节遗留清理）
 MESSAGE_TYPES = {
     "MONITOR_EVENT",
     "MONITOR_MEMBER_EVENT",

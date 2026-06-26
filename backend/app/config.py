@@ -1,48 +1,156 @@
-"""应用配置 - 仅环境变量，禁止硬编码密码与自动回退。
+"""应用配置 - 结构与加载规则（实际值在 config.local.py / config.test.py）。
+
+职责分离：
+- 本文件（config.py）：Settings 结构定义、加载规则、启动硬校验。**入库**。
+- config.local.py：开发环境实际值。**不入库**（含本地密码）。
+- config.test.py：测试环境实际值。**不入库**。
+- config.example.py：必需字段示例。**入库**。
+
+DATABASE_URL 加载优先级：
+1. 环境变量 DATABASE_URL（最高，用于 docker 部署、Alembic 子进程、CI）
+2. config.local.py（开发环境）/ config.test.py（测试环境）中的 DATABASE_URL
+3. 都没有 → 抛 MissingRequiredSettingError
+
+环境选择（决定加载哪个 config.*.py）：
+- CONFIG_MODULE 环境变量显式指定模块名（最高优先级）
+- APP_ENV=test → 加载 app.config_test
+- 其他 → 加载 app.config_local
+
+启动硬校验（在 Settings 实例化时由 model_post_init 触发）：
+- 拒绝 sqlite URL（仅允许 PostgreSQL）
+- development: DATABASE_URL 必须含 bz_stock 且不得连测试库（不含 _test）
+- test: DATABASE_URL 必须含 _test 后缀
+- production: DATABASE_URL 不得连测试库（不含 _test）
 
 使用 Pydantic Settings 管理启动级配置：
-- DATABASE_URL: PostgreSQL 连接串（postgresql+psycopg://），必须通过环境变量提供
+- DATABASE_URL: PostgreSQL 连接串（postgresql+psycopg://）
 - REDIS_URL: Redis 连接串
-- JWT_SECRET: JWT 签名密钥，必须通过环境变量提供
+- JWT_SECRET: JWT 签名密钥
 - APP_ENV: 运行环境
 - LOG_LEVEL: 日志级别
 """
 
 from __future__ import annotations
 
+import importlib.util
 import os
 from functools import lru_cache
+from pathlib import Path
+from typing import Any
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class MissingRequiredSettingError(ValueError):
-    """缺少必须的环境变量时抛出。"""
+    """缺少必须的配置项时抛出（如 DATABASE_URL 两个来源都未提供）。"""
+
+
+class InvalidDatabaseURLError(ValueError):
+    """DATABASE_URL 启动硬校验失败时抛出（sqlite / 环境与库名不匹配等）。"""
+
+
+def _load_local_config() -> dict[str, Any]:
+    """从 config.local.py / config.test.py 读取实际配置值。
+
+    文件选择：
+    - APP_ENV=test → config.test.py
+    - 其他 → config.local.py
+
+    注意：文件名含点（config.local.py），不能用 importlib.import_module
+    （Python 模块名不允许含点），需用 importlib.util.spec_from_file_location 按路径加载。
+
+    Returns:
+        dict: 配置值字典（大写字段名 → 值）
+
+    Raises:
+        MissingRequiredSettingError: 配置文件不存在时抛出（指引开发者复制 example）
+    """
+    config_dir = Path(__file__).parent
+    app_env = os.environ.get("APP_ENV", "development").lower()
+    if app_env == "test":
+        config_file = config_dir / "config.test.py"
+    else:
+        config_file = config_dir / "config.local.py"
+    if not config_file.exists():
+        raise MissingRequiredSettingError(
+            f"配置文件 {config_file} 不存在。"
+            "请复制 config.example.py 为 config.local.py（开发）或 "
+            "config.test.py（测试）并填入实际值；或通过环境变量 DATABASE_URL 提供。"
+        )
+    spec = importlib.util.spec_from_file_location("_local_config", config_file)
+    if spec is None or spec.loader is None:
+        raise MissingRequiredSettingError(f"无法加载配置文件 {config_file}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return {attr: getattr(module, attr) for attr in dir(module) if attr.isupper()}
 
 
 def _resolve_database_url() -> str:
     """解析数据库连接串。
 
-    仅允许通过环境变量 DATABASE_URL 提供，未设置时立即失败。
+    优先级：
+    1. 环境变量 DATABASE_URL（docker 部署、Alembic 子进程、CI）
+    2. config.local.py / config.test.py 中的 DATABASE_URL
 
     Returns:
         str: postgresql+psycopg:// 格式的连接串
 
     Raises:
-        MissingRequiredSettingError: DATABASE_URL 未设置时抛出
+        MissingRequiredSettingError: 两个来源都未提供时抛出
     """
     env_url = os.environ.get("DATABASE_URL")
     if env_url:
         return env_url
+    local_url = _load_local_config().get("DATABASE_URL")
+    if local_url:
+        return local_url
     raise MissingRequiredSettingError(
-        "DATABASE_URL 环境变量未设置。请在环境变量或外部 env 文件中配置，"
+        "DATABASE_URL 未设置。请通过环境变量、config.local.py 或 config.test.py 提供，"
         "例如 postgresql+psycopg://user:password@host:port/dbname"
     )
 
 
+def _validate_database_url(url: str, app_env: str) -> None:
+    """启动硬校验 DATABASE_URL 安全性。
+
+    校验规则：
+    - 拒绝 sqlite URL（仅允许 PostgreSQL）
+    - development: 必须含 bz_stock 且不含 _test
+    - test: 必须含 _test 后缀
+    - production: 不得含 _test
+
+    Raises:
+        InvalidDatabaseURLError: 校验失败时抛出，阻止应用启动
+    """
+    if "sqlite" in url.lower():
+        raise InvalidDatabaseURLError(
+            f"拒绝启动：DATABASE_URL 含 sqlite，仅允许 PostgreSQL。URL={url}"
+        )
+    env = (app_env or "").lower()
+    if env == "development":
+        if "bz_stock" not in url:
+            raise InvalidDatabaseURLError(
+                f"开发环境 DATABASE_URL 必须含 bz_stock，实际={url}"
+            )
+        if "_test" in url:
+            raise InvalidDatabaseURLError(
+                f"开发环境 DATABASE_URL 不得连测试库（含 _test），实际={url}"
+            )
+    elif env == "test":
+        if "_test" not in url:
+            raise InvalidDatabaseURLError(
+                f"测试环境 DATABASE_URL 必须含 _test 后缀，实际={url}"
+            )
+    elif env == "production":
+        if "_test" in url:
+            raise InvalidDatabaseURLError(
+                f"生产环境 DATABASE_URL 不得连测试库（含 _test），实际={url}"
+            )
+
+
 class Settings(BaseSettings):
-    """启动级配置，仅环境变量；业务密钥进入加密配置中心。"""
+    """启动级配置，仅环境变量或 config.local.py；业务密钥进入加密配置中心。"""
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -55,10 +163,10 @@ class Settings(BaseSettings):
     app_env: str = Field(default="development", description="运行环境")
     log_level: str = Field(default="INFO", description="日志级别")
 
-    # 数据库（postgresql+psycopg://，必须通过环境变量提供）
+    # 数据库（postgresql+psycopg://，环境变量优先，否则从 config.local.py 读取）
     database_url: str = Field(
         default_factory=_resolve_database_url,
-        description="PostgreSQL 连接串（必须经 DATABASE_URL 环境变量提供）",
+        description="PostgreSQL 连接串（环境变量 DATABASE_URL 优先，否则从 config.local.py 读取）",
     )
 
     # Redis
@@ -113,36 +221,81 @@ class Settings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """返回单例 Settings，避免重复解析环境变量。"""
-    return Settings()
+    """返回单例 Settings，并在返回前执行启动硬校验。
+
+    校验规则见 _validate_database_url。失败时抛 InvalidDatabaseURLError，
+    阻止应用启动（fail-fast，不吞异常）。
+
+    注意：校验放在此处而非 model_post_init，避免 pydantic v2 将
+    InvalidDatabaseURLError 包装为 ValidationError，导致调用方无法精确捕获。
+    """
+    s = Settings()
+    _validate_database_url(s.database_url, s.app_env)
+    return s
+
+
+# 模块级单例：支持 `from app.config import settings` 用法。
+# import 时即触发启动硬校验，配置不合法直接阻止进程启动。
+settings: Settings = get_settings()
 
 
 if __name__ == "__main__":
-    # 自测入口：验证配置解析行为（无副作用，不实际连接数据库）
-    original_url = os.environ.get("DATABASE_URL")
+    # 自测入口：验证配置加载与硬校验行为（无副作用，不实际连接数据库）
+    # 直接调用 _validate_database_url 验证校验规则（校验逻辑在 get_settings() 中触发）
+
+    # 场景 1：sqlite URL 必须拒绝（任何环境）
     try:
-        # 场景 1：环境变量存在时直接返回
-        os.environ["DATABASE_URL"] = "postgresql+psycopg://user:pass@localhost:5432/db"
-        resolved = _resolve_database_url()
-        print(f"with_env database_url={resolved}")
-        assert resolved == os.environ["DATABASE_URL"]
+        _validate_database_url("sqlite:///./test.db", "development")
+        raise AssertionError("sqlite URL 应被拒绝")
+    except InvalidDatabaseURLError as exc:
+        print(f"sqlite_rejected: {exc}")
 
-        # 场景 2：无环境变量时必须抛出 MissingRequiredSettingError
-        os.environ.pop("DATABASE_URL", None)
-        try:
-            _resolve_database_url()
-            raise AssertionError("应抛出 MissingRequiredSettingError")
-        except MissingRequiredSettingError as exc:
-            print(f"expected_error={exc}")
+    # 场景 2：development + bz_stock 通过
+    _validate_database_url(
+        "postgresql+psycopg://u:p@h:5432/bz_stock", "development"
+    )
+    print("dev_ok: postgresql+psycopg://u:p@h:5432/bz_stock")
 
-        # 场景 3：Settings 能正确读取环境变量
-        os.environ["DATABASE_URL"] = "postgresql+psycopg://user:pass@localhost:5432/db"
-        settings = Settings()
-        assert settings.database_url == "postgresql+psycopg://user:pass@localhost:5432/db"
-        print("settings_loaded_ok")
-    finally:
-        if original_url is None:
-            os.environ.pop("DATABASE_URL", None)
-        else:
-            os.environ["DATABASE_URL"] = original_url
+    # 场景 3：development + _test 库拒绝（开发不得连测试库）
+    try:
+        _validate_database_url(
+            "postgresql+psycopg://u:p@h:5432/bz_stock_test", "development"
+        )
+        raise AssertionError("开发环境连测试库应被拒绝")
+    except InvalidDatabaseURLError as exc:
+        print(f"dev_test_rejected: {exc}")
+
+    # 场景 4：test 环境 + _test 库通过
+    _validate_database_url(
+        "postgresql+psycopg://u:p@h:5432/bz_stock_test", "test"
+    )
+    print("test_ok: postgresql+psycopg://u:p@h:5432/bz_stock_test")
+
+    # 场景 5：production + _test 库拒绝（生产不得连测试库）
+    try:
+        _validate_database_url(
+            "postgresql+psycopg://u:p@h:5432/bz_stock_test", "production"
+        )
+        raise AssertionError("生产环境连测试库应被拒绝")
+    except InvalidDatabaseURLError as exc:
+        print(f"prod_test_rejected: {exc}")
+
+    # 场景 6：production + 正式库通过
+    _validate_database_url(
+        "postgresql+psycopg://u:p@h:5432/bz_stock", "production"
+    )
+    print("prod_ok: postgresql+psycopg://u:p@h:5432/bz_stock")
+
+    # 场景 7：development + 非 bz_stock 库拒绝
+    try:
+        _validate_database_url(
+            "postgresql+psycopg://u:p@h:5432/other_db", "development"
+        )
+        raise AssertionError("开发环境非 bz_stock 库应被拒绝")
+    except InvalidDatabaseURLError as exc:
+        print(f"dev_other_db_rejected: {exc}")
+
+    # 场景 8：模块级 settings 单例已成功加载（验证 import 时校验通过）
+    print(f"module_settings_loaded: env={settings.app_env} db={settings.database_url[:50]}...")
+
     print("OK")

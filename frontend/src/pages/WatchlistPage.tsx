@@ -2,7 +2,7 @@
 // 用法：展示用户自选股票池的统一监控状态（聚合端点 /watchlist/monitor-status）
 // 路由：/watchlist
 // 依赖 hooks：useWatchlistMonitorStatus / useInstruments / useAddToWatchlist / useRemoveFromWatchlist
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useToast } from '@/store/toast'
 import {
@@ -28,11 +28,18 @@ function AddStockModal({
   onClose: () => void
 }) {
   const [keyword, setKeyword] = useState('')
+  // 250ms 防抖：避免每次按键都触发搜索请求（advice.md 第六节）
+  const [debouncedKeyword, setDebouncedKeyword] = useState('')
   const toast = useToast.getState()
   const addMutation = useAddToWatchlist()
 
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedKeyword(keyword), 250)
+    return () => clearTimeout(timer)
+  }, [keyword])
+
   const instrumentsQuery = useInstruments({
-    keyword: keyword.trim() || undefined,
+    keyword: debouncedKeyword.trim() || undefined,
     page_size: 20,
   })
   const instruments = instrumentsQuery.data?.items ?? []
@@ -66,7 +73,7 @@ function AddStockModal({
           <div className="field search">
             <input
               className="input search modal-full-search"
-              placeholder="代码 / 名称 / 拼音"
+              placeholder="输入代码、名称或拼音首字母，例如 DMGF"
               value={keyword}
               onChange={(e) => setKeyword(e.target.value)}
               autoFocus

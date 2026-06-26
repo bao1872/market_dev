@@ -63,6 +63,43 @@ function statusToStage(status: string | undefined): {
   return { index: idx, state: 'active' }
 }
 
+// [AfterClose] - 创建盘后编排 409 detail → 人类可读消息（透明化真实失败原因）
+// 后端 409 来源：NON_TRADING_DAY（非交易日）/ DUPLICATE_RUN（同日已有 queued/running 任务）/
+// DATA_COVERAGE_INSUFFICIENT（覆盖率不足，dsa-only 复用此 formatter）
+// 不再统一显示"请稍后重试或检查权限"，丢失真实原因
+function formatAfterCloseCreate409Message(detail: unknown): string {
+  if (typeof detail === 'string') return detail
+  if (detail && typeof detail === 'object') {
+    const d = detail as {
+      error_code?: string
+      reason?: string
+      message?: string
+      orchestrator_status?: string
+      started_at?: string
+    }
+    // 非交易日
+    if (d.error_code === 'NON_TRADING_DAY' || d.reason === 'NON_TRADING_DAY') {
+      return d.message ?? '非交易日无需执行'
+    }
+    // 同日已有盘后任务正在运行：展示当前阶段 + 开始时间
+    if (d.error_code === 'DUPLICATE_RUN') {
+      const stage = d.orchestrator_status
+        ? `（当前阶段: ${d.orchestrator_status}）`
+        : ''
+      const start = d.started_at
+        ? `，开始于 ${formatShanghaiTime(d.started_at)}`
+        : ''
+      return `当天已有盘后任务正在运行${stage}${start}`
+    }
+    // 覆盖率不足
+    if (d.reason === 'DATA_COVERAGE_INSUFFICIENT') {
+      return d.message ?? '行情覆盖率不足，暂无法执行'
+    }
+    return d.message ?? '创建失败，请稍后重试'
+  }
+  return '创建失败，请稍后重试'
+}
+
 interface AfterClosePipelineCardProps {
   /** 从 SystemOverview.after_close_pipeline 获取的流水线数据 */
   pipeline: SystemOverview['after_close_pipeline'] | null
@@ -105,36 +142,49 @@ export function AfterClosePipelineCard({
   const canResume = !!jobRunId && isFailedState
   const canForce = !!jobRunId
 
+  // [AfterClose] - 当天已有 queued/running 编排任务时禁用创建按钮（避免触发 409 DUPLICATE_RUN）
+  // afterCloseDetail.status 为编排任务 SchedulerJobRun.status（queued/running/succeeded/failed/interrupted）
+  const orchestratorJobStatus = afterCloseDetail?.status
+  const hasActiveAfterCloseRun =
+    orchestratorJobStatus === 'queued' || orchestratorJobStatus === 'running'
+
   // 创建盘后编排（更新今日日线并计算选股）
+  // [AfterClose] - 409 时透传后端真实 detail（已有任务/非交易日/覆盖率不足），不再统一"检查权限"
   const handleCreate = async () => {
     const date = tradeDate || shanghaiBusinessDate()
     try {
       const result = await createMutation.mutateAsync(date)
-      toast.show('盘后编排已创建', result.message)
-    } catch {
-      toast.show('创建失败', '请稍后重试或检查权限')
+      toast.show('任务已加入队列', result.message)
+    } catch (err: unknown) {
+      const axiosErr = err as {
+        response?: { status?: number; data?: { detail?: unknown } }
+      }
+      const respStatus = axiosErr.response?.status
+      const detail = axiosErr.response?.data?.detail
+      if (respStatus === 409) {
+        toast.show('创建失败', formatAfterCloseCreate409Message(detail))
+      } else {
+        toast.show('创建失败', '请稍后重试')
+      }
     }
   }
 
   // [Phase6] 仅重算今日 DSA（要求当日日线覆盖率 ≥ 90%）
+  // [AfterClose] - 409 时复用 formatAfterCloseCreate409Message 透传真实原因
+  // （覆盖率不足 / 同日已有任务），不再统一"检查权限"
   const handleDsaOnly = async () => {
     const date = tradeDate || shanghaiBusinessDate()
     try {
       const result = await dsaOnlyMutation.mutateAsync(date)
       toast.show('DSA 重算已创建', result.message)
     } catch (err: unknown) {
-      // [Phase6] - 409 时展示覆盖率不足原因（detail 是 dict 含 reason/message）
       const axiosErr = err as { response?: { status?: number; data?: { detail?: unknown } } }
       const respStatus = axiosErr.response?.status
       const detail = axiosErr.response?.data?.detail
-      if (respStatus === 409 && detail && typeof detail === 'object' && detail !== null) {
-        const detailDict = detail as { message?: string; reason?: string }
-        const message = detailDict.message ?? '当日日线覆盖率不足'
-        toast.show('DSA 重算失败', message)
-      } else if (respStatus === 409 && typeof detail === 'string') {
-        toast.show('DSA 重算失败', detail)
+      if (respStatus === 409) {
+        toast.show('DSA 重算失败', formatAfterCloseCreate409Message(detail))
       } else {
-        toast.show('DSA 重算失败', '请稍后重试或检查权限')
+        toast.show('DSA 重算失败', '请稍后重试')
       }
     }
   }
@@ -193,8 +243,12 @@ export function AfterClosePipelineCard({
           <button
             className="btn small primary"
             onClick={handleCreate}
-            disabled={createMutation.isPending}
-            title="更新今日日线并计算选股（完整流水线）"
+            disabled={createMutation.isPending || hasActiveAfterCloseRun}
+            title={
+              hasActiveAfterCloseRun
+                ? '当天已有盘后任务正在运行'
+                : '更新今日日线并计算选股（完整流水线）'
+            }
           >
             {createMutation.isPending ? '创建中…' : '更新日线并选股'}
           </button>

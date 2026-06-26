@@ -67,5 +67,7 @@ task_plan.md
 # ===== 验收截图（本地生成，不入库） =====
 screenshots/
 
-# ===== 本地配置（含硬编码开发密码） =====
-backend/app/config.py
+# ===== 本地配置（含硬编码开发密码，不入库） =====
+# config.py 入库（仅结构与加载规则）；config.local.py / config.test.py 不入库
+backend/app/config.local.py
+backend/app/config.test.py

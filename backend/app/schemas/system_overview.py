@@ -205,6 +205,16 @@ class AfterClosePipeline(BaseModel):
     waiting_dsa_suggestion: str | None = None
     # [SystemOverview] - 数据新鲜度子结构（行情 + 选股两区块，Phase 9）
     data_freshness: DataFreshness = DataFreshness()
+    # [AfterClose] - 当日 after_close_orchestrator 任务 ID（供前端进入任务详情/断点继续/判断冲突任务）
+    job_run_id: str | None = None
+    # [AfterClose] - 编排状态（queued/refreshing_daily/.../succeeded/failed，来自 metadata_json）
+    orchestrator_status: str | None = None
+    # [AfterClose] - Worker 最后心跳（ISO 字符串，供前端判断 worker 是否在线）
+    heartbeat_at: str | None = None
+    # [AfterClose] - 租约到期时间（ISO 字符串）
+    lease_expires_at: str | None = None
+    # [AfterClose] - 最后成功步骤（断点检查点，来自 metadata_json.last_completed_step）
+    last_completed_step: str | None = None
 
 
 class SystemOverviewResponse(BaseModel):
@@ -275,9 +285,19 @@ if __name__ == "__main__":
         )
     print(f"waiting_dsa_suggestions 覆盖 {len(WAITING_DSA_SUGGESTIONS)} 种原因 ✓")
 
-    # 验证 AfterClosePipeline 新增字段（含 Phase 9 data_freshness）
+    # 验证 AfterClosePipeline 新增字段（含 Phase 9 data_freshness + AfterClose 编排详情）
     pipeline_fields = set(AfterClosePipeline.model_fields.keys())
-    expected_new_fields = {"waiting_dsa_reason", "waiting_dsa_suggestion", "data_freshness"}
+    expected_new_fields = {
+        "waiting_dsa_reason",
+        "waiting_dsa_suggestion",
+        "data_freshness",
+        # [AfterClose] - 编排任务详情字段（供前端进入任务详情/断点继续/判断冲突）
+        "job_run_id",
+        "orchestrator_status",
+        "heartbeat_at",
+        "lease_expires_at",
+        "last_completed_step",
+    }
     missing = expected_new_fields - pipeline_fields
     assert not missing, f"AfterClosePipeline 缺少字段: {missing}"
     print(f"AfterClosePipeline fields={sorted(pipeline_fields)}")

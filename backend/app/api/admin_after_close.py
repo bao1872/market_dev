@@ -118,15 +118,25 @@ async def create_after_close_run_endpoint(
     orchestrator_status = meta.get("orchestrator_status")
 
     # [Spec] 已有运行中任务时拒绝重复创建：返回 409 Conflict，body 含已有 after_close_run_id
+    # [AfterClose] - detail 增强：透传 error_code/started_at/heartbeat_at/last_completed_step，
+    # 供前端展示真实冲突原因（当前阶段 + 开始时间）并提供"查看任务"入口（job_run_id）
     if not is_new:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
+                "error_code": "DUPLICATE_RUN",
                 "after_close_run_id": str(job_run.id),
                 "status": job_run.status,
                 "orchestrator_status": orchestrator_status or "unknown",
                 "trade_date": trade_date.isoformat(),
-                "message": f"同日已有盘后编排任务: trade_date={trade_date}",
+                "started_at": (
+                    job_run.started_at.isoformat() if job_run.started_at else None
+                ),
+                "heartbeat_at": (
+                    job_run.heartbeat_at.isoformat() if job_run.heartbeat_at else None
+                ),
+                "last_completed_step": meta.get("last_completed_step"),
+                "message": f"当天已有盘后任务正在运行: trade_date={trade_date}",
             },
         )
 
@@ -135,7 +145,7 @@ async def create_after_close_run_endpoint(
         status=job_run.status,
         orchestrator_status=orchestrator_status or "unknown",
         trade_date=trade_date.isoformat(),
-        message=f"盘后编排已创建并启动: trade_date={trade_date}",
+        message=f"任务已加入队列: trade_date={trade_date}",
     )
 
 
@@ -209,16 +219,24 @@ async def create_dsa_only_run_endpoint(
     # [Phase6] - 覆盖率达标，创建 queued 任务
     job_run, is_new = await create_after_close_run(db=db, trade_date=trade_date)
     if not is_new:
-        # 同日已有任务，复用现有 create 端点的 409 语义
+        # 同日已有任务，复用 create 端点的 409 语义（含 error_code=DUPLICATE_RUN）
         meta = _parse_metadata(job_run)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
+                "error_code": "DUPLICATE_RUN",
                 "after_close_run_id": str(job_run.id),
                 "status": job_run.status,
                 "orchestrator_status": meta.get("orchestrator_status", "unknown"),
                 "trade_date": trade_date.isoformat(),
-                "message": f"同日已有盘后编排任务: trade_date={trade_date}",
+                "started_at": (
+                    job_run.started_at.isoformat() if job_run.started_at else None
+                ),
+                "heartbeat_at": (
+                    job_run.heartbeat_at.isoformat() if job_run.heartbeat_at else None
+                ),
+                "last_completed_step": meta.get("last_completed_step"),
+                "message": f"当天已有盘后任务正在运行: trade_date={trade_date}",
             },
         )
 

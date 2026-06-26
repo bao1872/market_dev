@@ -1,9 +1,10 @@
 """Instrument ORM 模型 - 股票主数据。
 
-对应迁移 002_instruments 中的 instruments 表：
+对应迁移 002_instruments / 039_instruments_pinyin_initials 中的 instruments 表：
 - id: UUID 主键（数据库生成 gen_random_uuid()）
 - symbol: 股票代码（唯一，如 '000001'）
 - name: 股票名称
+- pinyin_initials: 名称拼音首字母（小写，如 '东睦股份' -> 'dmgf'，主数据同步时生成）
 - market: 市场（SH/SZ/BJ）
 - status: 状态（active/delisted/suspended）
 - listing_date: 上市日期（可空，pytdx 不直接提供）
@@ -12,6 +13,7 @@
 设计说明：
 - symbol 唯一约束（A 股代码跨市场不重叠：SH 6xxxxx / SZ 0xxxxx,3xxxxx / BJ 8xxxxx,4xxxxx）
 - market + status 复合索引，支持按市场筛选活跃股票
+- pinyin_initials 索引，支持拼音首字母前缀搜索（如 'dmgf' -> 东睦股份）
 """
 
 from __future__ import annotations
@@ -33,6 +35,8 @@ class Instrument(Base):
     id: Mapped[UUID] = mapped_column(primary_key=True, server_default=func.gen_random_uuid())
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, unique=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
+    # 拼音首字母（小写），主数据同步时由 pinyin_util 生成；可空（兼容历史数据回补前）
+    pinyin_initials: Mapped[str | None] = mapped_column(String(20), nullable=True)
     market: Mapped[str] = mapped_column(String(8), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     listing_date: Mapped[date | None] = mapped_column(Date, nullable=True)
@@ -46,6 +50,7 @@ class Instrument(Base):
     __table_args__ = (
         Index("ix_instruments_symbol", "symbol"),
         Index("ix_instruments_market_status", "market", "status"),
+        Index("ix_instruments_pinyin_initials", "pinyin_initials"),
     )
 
     def __repr__(self) -> str:

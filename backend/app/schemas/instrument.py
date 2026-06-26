@@ -21,6 +21,7 @@ class InstrumentResponse(BaseModel):
     id: UUID = Field(..., description="主键 UUID")
     symbol: str = Field(..., description="股票代码，如 '000001'")
     name: str = Field(..., description="股票名称")
+    pinyin_initials: str | None = Field(None, description="名称拼音首字母（小写，如 'dmgf'）")
     market: str = Field(..., description="市场：SH/SZ/BJ")
     status: str = Field(..., description="状态：active/delisted/suspended")
     listing_date: date | None = Field(None, description="上市日期")

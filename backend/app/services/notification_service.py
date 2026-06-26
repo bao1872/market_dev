@@ -609,6 +609,10 @@ async def _patch_monitor_member_event_instruments(
 ) -> None:
     """补齐历史 MONITOR_MEMBER_EVENT 消息的股票信息。
 
+    【仅历史消息读取，不生成新消息】MONITOR_MEMBER_EVENT 为旧单策略过程事件类型，
+    新代码禁止生成（advice.md 第十一节遗留清理）。本函数仅用于读取历史消息时
+    补齐缺失的股票信息，不创建任何新消息。
+
     若消息类型为 MONITOR_MEMBER_EVENT 且 body.resource_refs.instruments 为空，
     按 source_id 查询对应 StrategyEvent + Instrument，将股票信息写入 body。
 

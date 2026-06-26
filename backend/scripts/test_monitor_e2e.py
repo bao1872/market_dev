@@ -43,9 +43,9 @@ async def main() -> None:
     from app.services.monitor_batch_service import (
         MonitorBatchService,
         _EVENT_EMOJI,
-        _EVENT_TYPE_LABEL,
         _SEVERITY_TEMPLATE,
     )
+    from app.constants.user_facing_labels import get_event_label, get_field_label
     from app.services.notification_service import create_message, deliver_message
     from app.strategy.runtime import MarketDataContext, StrategyLoader
 
@@ -140,13 +140,13 @@ async def main() -> None:
         for ev in simulated_events:
             trigger_counts[ev["event_type"]] += 1
 
-        # 概览行
+        # 概览行 - [advice.md 第二节] 通俗化：上轨/中轨/下轨/节点 → 波动上沿/价格中枢/波动下沿/密集区
         overview = (
             f"自选股 {len(instrument_ids)} 只 | 触发 {len(instruments)} 只\n"
-            f"上轨 {trigger_counts['bb_upper_touch']} | "
-            f"中轨 {trigger_counts['bb_mid_touch']} | "
-            f"下轨 {trigger_counts['bb_lower_touch']} | "
-            f"节点 {trigger_counts['node_cluster_touch']}"
+            f"{get_field_label('bb_upper_short')} {trigger_counts['bb_upper_touch']} | "
+            f"{get_field_label('bb_mid_short')} {trigger_counts['bb_mid_touch']} | "
+            f"{get_field_label('bb_lower_short')} {trigger_counts['bb_lower_touch']} | "
+            f"{get_field_label('node_cluster_short')} {trigger_counts['node_cluster_touch']}"
         )
 
         # 逐股票详情
@@ -160,10 +160,13 @@ async def main() -> None:
                 prev_inst_id = ev["instrument_id"]
 
             emoji = _EVENT_EMOJI.get(ev["event_type"], "📌")
-            label = _EVENT_TYPE_LABEL.get(ev["event_type"], ev["event_type"])
+            label = get_event_label(ev["event_type"])
+            # [advice.md 第二节] 边界标签通俗化：上轨/中轨/下轨/节点 → 近期波动上沿/中枢/下沿/成交密集区
             boundary_label = {
-                "bb_upper_touch": "上轨", "bb_mid_touch": "中轨",
-                "bb_lower_touch": "下轨", "node_cluster_touch": "节点",
+                "bb_upper_touch": get_field_label("bb_upper"),
+                "bb_mid_touch": get_field_label("bb_mid"),
+                "bb_lower_touch": get_field_label("bb_lower"),
+                "node_cluster_touch": "成交密集区",
             }.get(ev["event_type"], "边界")
 
             facts.append({
@@ -172,19 +175,19 @@ async def main() -> None:
                 "value": f"现价 {ev['price']:.2f} | {boundary_label} {ev['boundary']:.2f} | 偏离 {ev['dev_pct']:+.2f}%",
             })
 
-            # BB 上下文
+            # BB 上下文 - [advice.md 第二节] 通俗化：BB/上/中/下/宽度/位置 → 通俗文案
             if ev["event_type"] in ("bb_upper_touch", "bb_mid_touch", "bb_lower_touch"):
                 facts.append({
                     "key": f"bb_ctx_{ev['event_type']}",
-                    "label": "BB",
-                    "value": f"上{ev['bb_upper']:.2f} 中{ev['bb_mid']:.2f} 下{ev['bb_lower']:.2f} | 宽度{ev['bb_width']:.4f} 位置{ev['bb_pos']:.3f}",
+                    "label": f"{get_field_label('bb_upper')}/{get_field_label('bb_mid')}/{get_field_label('bb_lower')}",
+                    "value": f"{get_field_label('bb_upper')}{ev['bb_upper']:.2f} {get_field_label('bb_mid')}{ev['bb_mid']:.2f} {get_field_label('bb_lower')}{ev['bb_lower']:.2f} | 带宽{ev['bb_width']:.4f} {get_field_label('position')}{ev['bb_pos']:.3f}",
                 })
 
         # 时间线
         timeline = []
         for ev in simulated_events:
             emoji = _EVENT_EMOJI.get(ev["event_type"], "📌")
-            label = _EVENT_TYPE_LABEL.get(ev["event_type"], ev["event_type"])
+            label = get_event_label(ev["event_type"])
             timeline.append({
                 "time": ev["event_time"].isoformat(),
                 "label": f"{emoji} {ev['name']} {label}",
@@ -202,9 +205,10 @@ async def main() -> None:
 
         earliest_time = min(ev["event_time"] for ev in simulated_events)
 
+        # [advice.md 第十一节遗留清理] 新建消息改用 MONITOR_EVENT，禁止生成 MONITOR_MEMBER_EVENT
         dto = NotificationMessageDTO(
-            message_type="MONITOR_MEMBER_EVENT",
-            template_key="monitor_member_event",
+            message_type="MONITOR_EVENT",
+            template_key="monitor_event",
             template_version="1.1.0",
             title=f"BB+节点监控 {now_cst.strftime('%H:%M')}",
             summary=overview,

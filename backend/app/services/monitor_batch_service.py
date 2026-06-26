@@ -32,6 +32,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.strategy_keys import WATCHLIST_MONITOR
+from app.constants.user_facing_labels import get_event_label, get_field_label
 from app.models.instrument import Instrument
 from app.models.monitor_evaluation import MonitorEvaluation
 from app.models.monitor_state import MonitorState as MonitorStateORM
@@ -65,19 +66,13 @@ _MINUTE_LOOKBACK_BARS = 2
 _CST = ZoneInfo("Asia/Shanghai")
 
 # 事件类型 → emoji 映射（与旧版 monitoring.py 一致）
+# [advice.md 第二节] - 文案已迁移至 app.constants.user_facing_labels.get_event_label
+# emoji 与文案分离：emoji 仅在此处维护，文案由 get_event_label 提供
 _EVENT_EMOJI: dict[str, str] = {
     "bb_upper_touch": "🔴",
     "bb_mid_touch": "🟠",
     "bb_lower_touch": "🟢",
     "node_cluster_touch": "🟣",
-}
-
-# 事件类型 → 中文标签
-_EVENT_TYPE_LABEL: dict[str, str] = {
-    "bb_upper_touch": "布林上轨穿越",
-    "bb_mid_touch": "布林中轨穿越",
-    "bb_lower_touch": "布林下轨穿越",
-    "node_cluster_touch": "节点集群穿越",
 }
 
 # 事件类型 → 严重级别
@@ -967,13 +962,13 @@ class MonitorBatchService:
 
         elements: list[dict[str, Any]] = []
 
-        # 概览行
+        # 概览行 - [advice.md 第二节] 通俗化：上轨/中轨/下轨/节点 → 波动上沿/价格中枢/波动下沿/密集区
         overview = (
             f"自选股 {total_instruments} 只 | 触发 {triggered_count} 只\n"
-            f"上轨 {trigger_counts['bb_upper_touch']} | "
-            f"中轨 {trigger_counts['bb_mid_touch']} | "
-            f"下轨 {trigger_counts['bb_lower_touch']} | "
-            f"节点 {trigger_counts['node_cluster_touch']}"
+            f"{get_field_label('bb_upper_short')} {trigger_counts['bb_upper_touch']} | "
+            f"{get_field_label('bb_mid_short')} {trigger_counts['bb_mid_touch']} | "
+            f"{get_field_label('bb_lower_short')} {trigger_counts['bb_lower_touch']} | "
+            f"{get_field_label('node_cluster_short')} {trigger_counts['node_cluster_touch']}"
         )
         elements.append({"tag": "markdown", "content": overview})
 
@@ -1029,10 +1024,10 @@ class MonitorBatchService:
                     pred_lines.append(f"  买入(分类): {pred_buy_cls:.3f}")
                 elements.append({"tag": "markdown", "content": "\n".join(pred_lines)})
 
-            # 信号详情
+            # 信号详情 - [advice.md 第二节] 事件文案/边界标签/BB上下文均改用 user_facing_labels
             for ev in events:
                 emoji = _EVENT_EMOJI.get(ev.event_type, "📌")
-                event_label = _EVENT_TYPE_LABEL.get(ev.event_type, ev.event_type)
+                event_label = get_event_label(ev.event_type)
                 payload = ev.payload or {}
                 current_price = payload.get("price") or payload.get("current_price")
                 boundary = payload.get("boundary")
@@ -1047,43 +1042,49 @@ class MonitorBatchService:
                     sig_lines.append(f"  现价: {current_price:.2f}")
 
                 if boundary is not None:
-                    boundary_label = {
-                        "bb_upper_touch": "上轨",
-                        "bb_mid_touch": "中轨",
-                        "bb_lower_touch": "下轨",
-                        "node_cluster_touch": "节点",
-                    }.get(ev.event_type, "边界")
+                    # 边界标签通俗化：上轨/中轨/下轨/节点 → 近期波动上沿/中枢/下沿/成交密集区
+                    boundary_label_map = {
+                        "bb_upper_touch": get_field_label("bb_upper"),
+                        "bb_mid_touch": get_field_label("bb_mid"),
+                        "bb_lower_touch": get_field_label("bb_lower"),
+                        "node_cluster_touch": "成交密集区",
+                    }
+                    boundary_label = boundary_label_map.get(ev.event_type, "边界")
                     dev_str = f"{dev_pct:+.2f}%" if dev_pct is not None else "-"
                     sig_lines.append(
                         f"  {boundary_label}: {boundary:.2f}  偏离: {dev_str}"
                     )
 
-                # BB上下文（仅BB事件）
+                # BB上下文（仅BB事件）- 标签通俗化：上轨/中轨/下轨 → 近期波动上沿/中枢/下沿
                 if ev.event_type in ("bb_upper_touch", "bb_mid_touch", "bb_lower_touch"):
                     bb_upper = payload.get("bb_upper")
                     bb_mid = payload.get("bb_mid")
                     bb_lower = payload.get("bb_lower")
                     if bb_upper is not None:
-                        sig_lines.append(f"  上轨: {bb_upper:.2f}")
+                        sig_lines.append(f"  {get_field_label('bb_upper')}: {bb_upper:.2f}")
                     if bb_mid is not None:
-                        sig_lines.append(f"  中轨: {bb_mid:.2f}")
+                        sig_lines.append(f"  {get_field_label('bb_mid')}: {bb_mid:.2f}")
                     if bb_lower is not None:
-                        sig_lines.append(f"  下轨: {bb_lower:.2f}")
+                        sig_lines.append(f"  {get_field_label('bb_lower')}: {bb_lower:.2f}")
 
                 elements.append({"tag": "markdown", "content": "\n".join(sig_lines)})
 
-            # BB快照
+            # BB快照 - [advice.md 第二节] 通俗化：BB上/中/下 → 近期波动上沿/中枢/下沿；宽度/位置 → 带宽/当前区间位置
             snapshot = events[0].snapshot if events else {}
             bb_snap = snapshot.get("bb_snapshot") if snapshot else None
             if bb_snap:
                 snap_upper = bb_snap.get("bb_upper")
                 snap_mid = bb_snap.get("bb_mid")
                 snap_lower = bb_snap.get("bb_lower")
-                snap_lines = [f"  BB: 上{snap_upper:.2f} 中{snap_mid:.2f} 下{snap_lower:.2f}"]
+                snap_lines = [
+                    f"  {get_field_label('bb_upper')}: {snap_upper:.2f}  "
+                    f"{get_field_label('bb_mid')}: {snap_mid:.2f}  "
+                    f"{get_field_label('bb_lower')}: {snap_lower:.2f}"
+                ]
                 bb_width = bb_snap.get("bb_width")
                 if bb_width is not None:
                     snap_lines.append(
-                        f"  宽度: {bb_width:.4f}  位置: {bb_snap.get('bb_pos', '-')}"
+                        f"  带宽: {bb_width:.4f}  {get_field_label('position')}: {bb_snap.get('bb_pos', '-')}"
                     )
                 elements.append({"tag": "markdown", "content": "\n".join(snap_lines)})
 
@@ -1100,12 +1101,13 @@ class MonitorBatchService:
         primary_symbol, primary_name = instrument_info_cache.get(
             primary_inst_id, (str(primary_inst_id)[:8], ""),
         )
+        # [advice.md 第二节] - event_summary/summary 通俗化：上轨/中轨/下轨/节点 → 波动上沿/价格中枢/波动下沿/密集区
         event_summary = (
             f"触发 {triggered_count} 只 | "
-            f"上轨 {trigger_counts['bb_upper_touch']} | "
-            f"中轨 {trigger_counts['bb_mid_touch']} | "
-            f"下轨 {trigger_counts['bb_lower_touch']} | "
-            f"节点 {trigger_counts['node_cluster_touch']}"
+            f"{get_field_label('bb_upper_short')} {trigger_counts['bb_upper_touch']} | "
+            f"{get_field_label('bb_mid_short')} {trigger_counts['bb_mid_touch']} | "
+            f"{get_field_label('bb_lower_short')} {trigger_counts['bb_lower_touch']} | "
+            f"{get_field_label('node_cluster_short')} {trigger_counts['node_cluster_touch']}"
         )
 
         # 构建 DTO
@@ -1121,10 +1123,10 @@ class MonitorBatchService:
             title=f"{strategy_name} {header_time}",
             summary=(
                 f"自选股 {total_instruments} 只 | 触发 {triggered_count} 只 | "
-                f"上轨 {trigger_counts['bb_upper_touch']} | "
-                f"中轨 {trigger_counts['bb_mid_touch']} | "
-                f"下轨 {trigger_counts['bb_lower_touch']} | "
-                f"节点 {trigger_counts['node_cluster_touch']}"
+                f"{get_field_label('bb_upper_short')} {trigger_counts['bb_upper_touch']} | "
+                f"{get_field_label('bb_mid_short')} {trigger_counts['bb_mid_touch']} | "
+                f"{get_field_label('bb_lower_short')} {trigger_counts['bb_lower_touch']} | "
+                f"{get_field_label('node_cluster_short')} {trigger_counts['node_cluster_touch']}"
             ),
             facts=[],
             timeline=[],
@@ -1763,9 +1765,12 @@ if __name__ == "__main__":
     assert "卖出(回归): 0.876" in pred_item["content"]
     print(f"_build_merged_card_dto (含extra_info): title={dto2.title} items_count={len(dto2.items)} ✓")
 
-    # 5. 验证常量映射
+    # 5. 验证常量映射 - [advice.md 第二节] 文案已迁移至 user_facing_labels
     assert _EVENT_EMOJI["bb_upper_touch"] == "🔴"
-    assert _EVENT_TYPE_LABEL["bb_mid_touch"] == "布林中轨穿越"
+    # 事件文案来自 user_facing_labels（"布林中轨穿越" → "价格回到近期价格中枢"）
+    assert get_event_label("bb_mid_touch") == "价格回到近期价格中枢"
+    assert get_event_label("bb_upper_touch") == "价格触及近期波动上沿"
+    assert get_event_label("node_cluster_touch") == "价格触及成交密集区"
     assert _EVENT_SEVERITY["bb_lower_touch"] == "info"
     assert _SEVERITY_TEMPLATE["danger"] == "red"
     assert _SEVERITY_ORDER["warn"] == 2

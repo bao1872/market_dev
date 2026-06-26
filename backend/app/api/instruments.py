@@ -7,7 +7,11 @@
 - GET /instruments/by-symbol/{symbol}: 按 symbol 查询
 
 设计说明：
-- 关键词搜索：symbol 或 name 模糊匹配（ILIKE，大小写不敏感）
+- 关键词搜索（advice.md 第六节）按优先级匹配并排序：
+  1. symbol 完全匹配（WHERE symbol = keyword）
+  2. symbol 前缀（WHERE symbol LIKE 'keyword%'）
+  3. pinyin_initials 前缀（WHERE pinyin_initials LIKE 'keyword%'，keyword 转小写）
+  4. name 包含（WHERE name ILIKE '%keyword%'）
 - NFKC 归一化：搜索前对 keyword 做全角→半角归一化，确保全角输入也能匹配
 - 分页：page 从 1 开始，page_size 默认 20，最大 100
 - 按 symbol 唯一约束，by-symbol 查询最多返回 1 条
@@ -21,7 +25,7 @@ import unicodedata
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db
@@ -38,25 +42,41 @@ router = APIRouter(prefix="/instruments", tags=["instruments"])
 
 @router.get("", response_model=InstrumentListResponse)
 async def list_instruments(
-    keyword: str | None = Query(None, description="关键词（symbol 或 name 模糊匹配）"),
+    keyword: str | None = Query(None, description="关键词：代码/名称/拼音首字母，按优先级排序"),
     market: str | None = Query(None, description="市场筛选：SH/SZ/BJ"),
     status: str | None = Query(None, description="状态筛选：active/delisted/suspended"),
     page: int = Query(1, ge=1, description="页码（从 1 开始）"),
     page_size: int = Query(20, ge=1, le=100, description="每页大小（最大 100）"),
     db: AsyncSession = Depends(get_db),
 ) -> InstrumentListResponse:
-    """查询股票列表，支持关键词搜索、市场/状态筛选与分页。"""
+    """查询股票列表，支持关键词搜索（代码/名称/拼音首字母）、市场/状态筛选与分页。"""
     # 构建查询条件
     conditions = []
+    # 关键词命中后的排序优先级（越小越靠前）；无关键词时统一为 0
+    rank_expr = literal(0)
     if keyword:
         # NFKC 归一化：将全角字符转为半角（如 Ａ → A），确保全角输入也能匹配
         keyword = unicodedata.normalize("NFKC", keyword)
-        # ILIKE 大小写不敏感模糊匹配
-        pattern = f"%{keyword}%"
+        keyword_lower = keyword.lower()
+        sym_exact = keyword
+        sym_prefix = f"{keyword}%"
+        pinyin_prefix = f"{keyword_lower}%"
+        name_pattern = f"%{keyword}%"
+
+        # 搜索优先级：代码完全匹配 → 代码前缀 → 拼音首字母前缀 → 名称包含
+        rank_expr = case(
+            (Instrument.symbol == sym_exact, 0),
+            (Instrument.symbol.like(sym_prefix), 1),
+            (Instrument.pinyin_initials.like(pinyin_prefix), 2),
+            (Instrument.name.ilike(name_pattern), 3),
+            else_=4,
+        )
         conditions.append(
             or_(
-                Instrument.symbol.ilike(pattern),
-                Instrument.name.ilike(pattern),
+                Instrument.symbol == sym_exact,
+                Instrument.symbol.like(sym_prefix),
+                Instrument.pinyin_initials.like(pinyin_prefix),
+                Instrument.name.ilike(name_pattern),
             )
         )
     if market:
@@ -71,11 +91,15 @@ async def list_instruments(
     total_result = await db.execute(count_stmt)
     total = total_result.scalar_one()
 
-    # 分页数据查询
+    # 分页数据查询（按命中优先级排序，同优先级再按 symbol 排序）
     data_stmt = select(Instrument)
     for cond in conditions:
         data_stmt = data_stmt.where(cond)
-    data_stmt = data_stmt.order_by(Instrument.symbol).offset((page - 1) * page_size).limit(page_size)
+    data_stmt = (
+        data_stmt.order_by(rank_expr, Instrument.symbol)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
     data_result = await db.execute(data_stmt)
     items = data_result.scalars().all()
 

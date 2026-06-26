@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
@@ -60,6 +61,30 @@ _DEFAULT_TIMEFRAME = "1d"
 
 class InstrumentNotFoundError(NotificationServiceError):
     """个股不存在。"""
+
+
+class StockDetailFeishuError(NotificationServiceError):
+    """个股飞书发送失败，携带 error_code/failed_step 上下文。
+
+    [StockDetailFeishu] - 描述: 技术错误返回三字段（advice.md 第十一节遗留清理）
+    所有 send_stock_detail_to_feishu 内失败步骤抛此异常，由 API 层转为
+    {"error_code":..., "error_message":..., "failed_step":...} HTTP 响应。
+
+    Attributes:
+        error_code: 错误码（如 SNAPSHOT_FAILED/TEXT_OUTBOX_FAILED/CAPTURE_FAILED）
+        failed_step: 失败步骤（如 snapshot/text_outbox/capture/image_outbox）
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str,
+        failed_step: str,
+    ) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.failed_step = failed_step
 
 
 async def send_stock_detail_to_feishu(
@@ -99,8 +124,16 @@ async def send_stock_detail_to_feishu(
     Raises:
         InstrumentNotFoundError: 个股不存在
         ChannelNotFoundError: 渠道不存在或不属于当前用户
-        NotificationServiceError: 快照获取或消息创建失败
+        StockDetailFeishuError: 快照/文本Outbox/截图/图片Outbox 失败（携带 error_code/failed_step）
+        NotificationServiceError: 其他消息创建失败
     """
+    total_start = time.time()
+    snapshot_ms = 0.0
+    text_outbox_ms = 0.0
+    capture_ms = 0.0
+    image_outbox_ms = 0.0
+    cache_hit = False
+
     # 1. 校验个股存在
     instrument = await db.get(Instrument, instrument_id)
     if instrument is None:
@@ -124,15 +157,19 @@ async def send_stock_detail_to_feishu(
 
     # 4. 调用 MonitorSnapshotService 获取非空快照（SSOT，禁止另写解析逻辑）
     # [StockDetailFeishu] - 快照来源：MonitorSnapshotService.get_snapshot 返回 MonitorSnapshot
+    snapshot_start = time.time()
     try:
         snapshot = await MonitorSnapshotService().get_snapshot(
             db, str(instrument_id), _DEFAULT_TIMEFRAME
         )
     except (ValueError, KeyError, RuntimeError) as e:
-        # 不吞异常：补上下文后 re-raise 为 NotificationServiceError
-        raise NotificationServiceError(
-            f"获取监控快照失败 instrument_id={instrument_id}: {e}"
+        # 不吞异常：补上下文后 re-raise 为 StockDetailFeishuError（携带 error_code/failed_step）
+        raise StockDetailFeishuError(
+            f"获取监控快照失败 instrument_id={instrument_id}: {e}",
+            error_code="SNAPSHOT_FAILED",
+            failed_step="snapshot",
         ) from e
+    snapshot_ms = (time.time() - snapshot_start) * 1000
 
     # 5. 复用 build_monitor_event_text 拼装文本消息（与 monitor 链同款）
     # [StockDetailFeishu] - event_type=STOCK_SNAPSHOT_SHARE，不暴露内部 manual_send 代码
@@ -159,34 +196,45 @@ async def send_stock_detail_to_feishu(
         },
     )
 
-    # 6. 复用 create_message 创建文本消息（幂等，notification_service 同款）
-    text_message = await create_message(
-        db=db,
-        user_id=user_id,
-        message_dto=dto,
-        source_type="stock_detail_share",
-        source_id=instrument_id,
-        idempotency_key=f"stock-detail-feishu:{instrument_id}:{channel_id}:{test_run_id}:text",
-    )
-
-    # 7. 写入文本 Outbox（outbox_relay 扩张为 MessageDelivery(text) → delivery_worker → adapter.send_text_message）
+    # 6. 复用 create_message 创建文本消息 + 写入文本 Outbox
     # [StockDetailFeishu] - 文本段：delivery_type=text，共享 message_group_id
-    await write_outbox(
-        db=db,
-        event_type="notification.message.created",
-        payload={
-            "message_id": str(text_message.id),
-            "user_id": str(user_id),
-            "delivery_type": "text",
-            "message_group_id": message_group_id,
-        },
-        aggregate_type="notification_message",
-        aggregate_id=text_message.id,
-    )
+    text_outbox_start = time.time()
+    try:
+        text_message = await create_message(
+            db=db,
+            user_id=user_id,
+            message_dto=dto,
+            source_type="stock_detail_share",
+            source_id=instrument_id,
+            idempotency_key=f"stock-detail-feishu:{instrument_id}:{channel_id}:{test_run_id}:text",
+        )
+
+        # 7. 写入文本 Outbox（outbox_relay 扩张为 MessageDelivery(text) → delivery_worker → adapter.send_text_message）
+        await write_outbox(
+            db=db,
+            event_type="notification.message.created",
+            payload={
+                "message_id": str(text_message.id),
+                "user_id": str(user_id),
+                "delivery_type": "text",
+                "message_group_id": message_group_id,
+            },
+            aggregate_type="notification_message",
+            aggregate_id=text_message.id,
+        )
+    except Exception as e:
+        # 不吞异常：文本 Outbox 失败属于关键步骤，携带 error_code/failed_step 抛出
+        raise StockDetailFeishuError(
+            f"文本消息创建/Outbox 写入失败 instrument_id={instrument_id}: {e}",
+            error_code="TEXT_OUTBOX_FAILED",
+            failed_step="text_outbox",
+        ) from e
+    text_outbox_ms = (time.time() - text_outbox_start) * 1000
 
     # 8. 截图 → 创建图片消息 → 写入图片 Outbox（截图失败不阻塞文本投递）
     # [StockDetailFeishu] - 图片段：delivery_type=image，与 text 共享 message_group_id
     image_message_id: str | None = None
+    capture_start = time.time()
     try:
         token = create_capture_token(
             subject=str(user_id),
@@ -212,6 +260,7 @@ async def send_stock_detail_to_feishu(
         image_url = capture_data.get("image_url")
         if not image_url:
             raise RuntimeError("截图服务未返回 image_url")
+        capture_ms = (time.time() - capture_start) * 1000
 
         # 构建图片消息 DTO（与 monitor_batch_service._create_chart_image_message 同款）
         image_dto = NotificationMessageDTO(
@@ -235,6 +284,9 @@ async def send_stock_detail_to_feishu(
             },
             event_summary=_EVENT_TYPE_STOCK_SNAPSHOT_SHARE,
         )
+
+        # 图片 Outbox 写入分段计时
+        image_outbox_start = time.time()
         image_message = await create_message(
             db=db,
             user_id=user_id,
@@ -258,13 +310,27 @@ async def send_stock_detail_to_feishu(
             aggregate_type="notification_message",
             aggregate_id=image_message.id,
         )
+        image_outbox_ms = (time.time() - image_outbox_start) * 1000
     except Exception as e:
         # 截图或图片 Outbox 失败不阻塞文本投递（文本已写入 Outbox）
-        # 不吞异常：记录上下文，image_message_id 保持 None
+        # 不吞异常：记录上下文与失败步骤，image_message_id 保持 None
+        if capture_ms == 0.0:
+            capture_ms = (time.time() - capture_start) * 1000
         logger.warning(
-            "IMAGE_OUTBOX_FAILED instrument_id=%s channel_id=%s test_run_id=%s error=%s",
+            "IMAGE_STEP_FAILED instrument_id=%s channel_id=%s test_run_id=%s "
+            "failed_step=image error_code=IMAGE_STEP_FAILED error=%s",
             instrument_id, channel_id, test_run_id, e,
         )
+
+    total_ms = (time.time() - total_start) * 1000
+    logger.info(
+        "[StockDetailFeishu] 发送完成 instrument_id=%s channel_id=%s "
+        "test_run_id=%s snapshot_ms=%.1f text_outbox_ms=%.1f capture_ms=%.1f "
+        "image_outbox_ms=%.1f total_ms=%.1f cache_hit=%s image_message_id=%s",
+        instrument_id, channel_id, test_run_id,
+        snapshot_ms, text_outbox_ms, capture_ms, image_outbox_ms, total_ms,
+        cache_hit, image_message_id,
+    )
 
     return {
         "test_run_id": str(test_run_id),
@@ -374,7 +440,9 @@ async def get_share_status(
     text_status = text_deliveries[0].status if text_deliveries else "not_created"
     image_status = image_deliveries[0].status if image_deliveries else "not_created"
 
-    # 汇总 overall_status + failed_step
+    # 汇总 overall_status + failed_step + error_code + error_message
+    # [StockDetailFeishu] - 描述: 从 MessageDelivery.last_error_code + provider_response
+    #   提取 error_message（advice.md 第十一节遗留清理：技术错误返回三字段）
     failed_step: str | None = None
     error_code: str | None = None
     error_message: str | None = None
@@ -384,11 +452,21 @@ async def get_share_status(
         overall_status = "success"
     elif any(s in ("failed", "dead") for s in all_statuses):
         overall_status = "failed"
-        # 取第一个失败的 delivery 作为 failed_step
+        # 取第一个失败的 delivery 作为 failed_step，并提取 error_code + error_message
         for d in deliveries:
             if d.status in ("failed", "dead"):
                 failed_step = d.delivery_type
                 error_code = d.last_error_code
+                # 从 provider_response 提取 error_message
+                # provider_response 结构示例：{"code": 230002, "msg": "IP 不在白名单"}
+                # 或 {"error_message": "...", "msg": "..."}，兼容多种渠道返回格式
+                pr = d.provider_response
+                if isinstance(pr, dict):
+                    error_message = (
+                        pr.get("error_message")
+                        or pr.get("msg")
+                        or pr.get("message")
+                    )
                 break
     else:
         overall_status = "pending"
@@ -432,6 +510,17 @@ if __name__ == "__main__":
     # 验证异常类
     assert issubclass(InstrumentNotFoundError, NotificationServiceError)
     print("异常类 OK")
+
+    # 验证 StockDetailFeishuError 携带 error_code/failed_step（advice.md 第十一节遗留清理）
+    assert issubclass(StockDetailFeishuError, NotificationServiceError), \
+        "StockDetailFeishuError 应继承 NotificationServiceError"
+    err = StockDetailFeishuError(
+        "测试错误", error_code="SNAPSHOT_FAILED", failed_step="snapshot"
+    )
+    assert err.error_code == "SNAPSHOT_FAILED", "error_code 应正确存储"
+    assert err.failed_step == "snapshot", "failed_step 应正确存储"
+    assert "测试错误" in str(err), "错误消息应保留"
+    print(f"StockDetailFeishuError error_code={err.error_code} failed_step={err.failed_step} OK")
 
     # 验证 event_type 常量
     assert _EVENT_TYPE_STOCK_SNAPSHOT_SHARE == "STOCK_SNAPSHOT_SHARE"

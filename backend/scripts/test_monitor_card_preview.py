@@ -209,9 +209,10 @@ async def main() -> None:
 
             dev_pct_bb = _calc_deviation_pct(cur_price_bb, ref_upper)
 
+            # [advice.md 第十一节遗留清理] 新建消息改用 MONITOR_EVENT，禁止生成 MONITOR_MEMBER_EVENT
             bb_dto = NotificationMessageDTO(
-                message_type="MONITOR_MEMBER_EVENT",
-                template_key="monitor_member_event",
+                message_type="MONITOR_EVENT",
+                template_key="monitor_event",
                 template_version="1.1.0",
                 title=f"BB+节点监控 {now_str}",
                 summary=f"自选股 19 只 | 触发 1 只\n上轨 1 | 中轨 0 | 下轨 0 | 节点 0",
@@ -296,9 +297,10 @@ async def main() -> None:
             for i, info in enumerate(node_info_parts):
                 node_facts.append({"key": f"节点{i+1}", "label": f"节点{i+1}", "value": info})
 
+            # [advice.md 第十一节遗留清理] 新建消息改用 MONITOR_EVENT，禁止生成 MONITOR_MEMBER_EVENT
             node_dto = NotificationMessageDTO(
-                message_type="MONITOR_MEMBER_EVENT",
-                template_key="monitor_member_event",
+                message_type="MONITOR_EVENT",
+                template_key="monitor_event",
                 template_version="1.1.0",
                 title=f"BB+节点监控 {now_str}",
                 summary=f"自选股 19 只 | 触发 1 只\n上轨 0 | 中轨 0 | 下轨 0 | 节点 1",

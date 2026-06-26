@@ -13,6 +13,7 @@
   ],
   "properties": {
     "message_type": {
+      "description": "消息类型枚举。MONITOR_MEMBER_EVENT 为仅历史兼容值，仅用于读取历史消息，新代码禁止生成（advice.md 第十一节遗留清理）。",
       "enum": [
         "MONITOR_EVENT",
         "MONITOR_MEMBER_EVENT",

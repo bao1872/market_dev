@@ -279,6 +279,14 @@ async def compute_all_indicators(
     data: dict[str, dict[str, Any]] = {}
     errors: dict[str, str] = {}
 
+    # [indicator_service] - 注入 time 字段（与 K线时间戳对齐），
+    #   来自 daily_bars.index，长度 = len(daily_bars)，与各策略 list 字段长度一致
+    #   供前端按时间戳 join 而非依赖数组下标，避免 viewport 切片时 K线/指标错位
+    #   （advice.md 第三节问题 2/3）
+    time_list: list[str] = [
+        idx.isoformat() for idx in daily_bars.index
+    ]
+
     # 复用 StrategyBatchService._get_latest_released_version 查询最新 released 版本
     batch_service = StrategyBatchService()
 
@@ -318,8 +326,11 @@ async def compute_all_indicators(
                     "hover_fields": layer.get("hover_fields", []),
                 })
 
-            # 截取到最近 bars 根 + 转 JSON 可序列化
-            data[strategy_id] = _to_json_safe(_truncate_lists(indicators, bars))
+            # [indicator_service] - 注入 time 字段后截取到最近 bars 根 + 转 JSON 可序列化
+            #   time_list 与其他 list 字段一起被 _truncate_lists 截取（保持长度一致），
+            #   前端可通过 data[strategy_id]["time"][i] 与 K线 time join 对齐
+            indicators_with_time = {**indicators, "time": time_list}
+            data[strategy_id] = _to_json_safe(_truncate_lists(indicators_with_time, bars))
 
             logger.info(
                 "策略指标计算成功 strategy_id=%s layers=%d",
@@ -396,6 +407,23 @@ if __name__ == "__main__":
     assert _truncate_lists({"a": [1, 2], "b": 42}, 5) == {"a": [1, 2], "b": 42}, \
         "短列表和标量应保持不变"
     print("_truncate_lists 截取 ✓")
+
+    # 5.1 验证 time 字段注入与截取（advice.md 第三节问题 2/3 修复）
+    #   time_list 与其他 list 字段一起被 _truncate_lists 截取，保持长度一致
+    indicators_sample = {
+        "dsa_vwap": [1.0, 2.0, 3.0, 4.0, 5.0],
+        "dsa_dir": [1, 1, 0, 0, 1],
+    }
+    time_sample = ["t1", "t2", "t3", "t4", "t5"]
+    indicators_with_time = {**indicators_sample, "time": time_sample}
+    truncated = _truncate_lists(indicators_with_time, 3)
+    assert truncated["time"] == ["t3", "t4", "t5"], \
+        f"time 字段应与其他 list 一起截取到最后 3 个，实际: {truncated['time']}"
+    assert len(truncated["time"]) == len(truncated["dsa_vwap"]), \
+        "time 字段长度应与 dsa_vwap 一致"
+    # 验证 time 字段不会被当作快照字段跳过
+    assert "time" not in _SNAPSHOT_KEYS, "time 不应在快照字段集合中"
+    print("time 字段注入与截取 ✓")
 
     # 6. 验证 StrategyBatchService 可实例化（复用 _get_latest_released_version）
     svc = StrategyBatchService()
