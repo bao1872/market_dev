@@ -101,6 +101,8 @@ class AfterCloseRunStatusResponse(BaseModel):
     heartbeat_at: str | None = None  # 最后心跳时间（ISO 格式）
     lease_expires_at: str | None = None  # 租约到期时间（ISO 格式）
     last_completed_step: str | None = None  # 最后成功步骤（断点检查点）
+    # [AfterClose] - 跳过原因（如 NON_TRADING_DAY 非交易日），供前端展示提示
+    skip_reason: str | None = None
     interrupt_reason: str | None = None  # 中断原因（error_code: error_message）
     is_retryable: bool = False  # 是否允许重试（status in failed/interrupted）
     heartbeat_stale: bool = False  # 心跳是否超时（running 且 heartbeat_at > 60s 前）

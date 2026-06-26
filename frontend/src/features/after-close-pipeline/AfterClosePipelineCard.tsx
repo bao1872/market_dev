@@ -344,6 +344,12 @@ export function AfterClosePipelineCard({
                 </div>
               )}
             </div>
+            {/* [AfterClose] - 非交易日等跳过原因提示（黄色警告） */}
+            {afterCloseDetail.skip_reason === 'NON_TRADING_DAY' && (
+              <div className="notice warn" style={{ marginTop: '10px' }}>
+                因非交易日跳过，未执行行情更新和选股
+              </div>
+            )}
           </div>
         )}
 

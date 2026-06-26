@@ -88,6 +88,8 @@ class BatchResult:
     daily_covered: int | None = None
     daily_total: int | None = None
     daily_coverage: float | None = None
+    # [BarsScheduler] - 描述: 跳过原因（如 NON_TRADING_DAY），供上游编排透传到 metadata
+    skip_reason: str | None = None
 
 
 class BarsSchedulerService:
@@ -221,7 +223,8 @@ class BarsSchedulerService:
                     is_trading = await is_trading_day_async(session, trade_date)
             if not is_trading:
                 logger.info("非交易日，跳过 %s trade_date=%s", task_name, trade_date)
-                return BatchResult()
+                # [BarsScheduler] - 非交易日返回带 skip_reason 的空结果，供上游编排透传到 metadata
+                return BatchResult(skip_reason="NON_TRADING_DAY")
 
         # 2. 查询全市场 active 股票
         instruments = await self._get_active_instruments(db_session)

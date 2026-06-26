@@ -16,16 +16,24 @@ export function fmtNum(v: unknown, digits = 2): string {
   return n === null ? '-' : n.toFixed(digits)
 }
 
-/** 格式化更新时间，取时间部分（上海时区） */
+// [自选监控] - 格式化时间，返回 MM-DD HH:MM（上海时区），保留日期信息
 export function fmtTime(v: unknown): string {
   if (v === undefined || v === null || v === '') return '-'
   try {
-    return new Date(String(v)).toLocaleTimeString('zh-CN', {
+    const d = new Date(String(v))
+    if (Number.isNaN(d.getTime())) return '-'
+    const fmt = new Intl.DateTimeFormat('zh-CN', {
       timeZone: 'Asia/Shanghai',
-      hour12: false,
+      month: '2-digit',
+      day: '2-digit',
       hour: '2-digit',
       minute: '2-digit',
+      hour12: false,
     })
+    const parts = fmt.formatToParts(d)
+    const get = (t: Intl.DateTimeFormatPartTypes): string =>
+      parts.find((p) => p.type === t)?.value ?? ''
+    return `${get('month')}-${get('day')} ${get('hour')}:${get('minute')}`
   } catch {
     return '-'
   }

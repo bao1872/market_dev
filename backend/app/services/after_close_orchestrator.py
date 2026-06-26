@@ -449,24 +449,37 @@ async def execute_after_close_run(
             dsa_run_id = batch_result.dsa_run_id
 
             if dsa_run_id is None:
-                # [AfterClose] - 覆盖率不足或 DSA 未触发，标记成功结束（非错误）
+                # [AfterClose] - 区分跳过原因：NON_TRADING_DAY（非交易日）vs None（覆盖率不足）
+                skip_reason = batch_result.skip_reason
+                if skip_reason == "NON_TRADING_DAY":
+                    success_message = (
+                        f"因非交易日跳过，未执行行情更新和选股: trade_date={trade_date}"
+                    )
+                    success_payload: dict[str, Any] = {"skip_reason": "NON_TRADING_DAY"}
+                    success_extra: dict[str, Any] | None = {"skip_reason": "NON_TRADING_DAY"}
+                else:
+                    success_message = (
+                        f"日线覆盖率不足未触发 DSA，编排结束: "
+                        f"covered={batch_result.daily_covered}, "
+                        f"total={batch_result.daily_total}, "
+                        f"coverage={batch_result.daily_coverage}"
+                    )
+                    success_payload = {
+                        "daily_covered": batch_result.daily_covered,
+                        "daily_total": batch_result.daily_total,
+                        "daily_coverage": batch_result.daily_coverage,
+                    }
+                    success_extra = None
+
                 async with AsyncSessionLocal() as db:
                     job_run = await db.get(SchedulerJobRun, job_run_id)
                     await _update_orchestrator_status(
                         db=db,
                         job_run=job_run,
                         status=AfterCloseRunStatus.SUCCEEDED,
-                        message=(
-                            f"日线覆盖率不足未触发 DSA，编排结束: "
-                            f"covered={batch_result.daily_covered}, "
-                            f"total={batch_result.daily_total}, "
-                            f"coverage={batch_result.daily_coverage}"
-                        ),
-                        payload={
-                            "daily_covered": batch_result.daily_covered,
-                            "daily_total": batch_result.daily_total,
-                            "daily_coverage": batch_result.daily_coverage,
-                        },
+                        message=success_message,
+                        payload=success_payload,
+                        extra=success_extra,
                     )
                     job_run.status = "succeeded"
                     job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
@@ -476,7 +489,8 @@ async def execute_after_close_run(
                     await db.commit()
 
                 logger.info(
-                    "[AfterClose] DSA 未触发，编排成功结束: job_run_id=%s", job_run_id,
+                    "[AfterClose] DSA 未触发，编排成功结束: job_run_id=%s skip_reason=%s",
+                    job_run_id, skip_reason,
                 )
                 return
 
@@ -826,6 +840,8 @@ async def get_after_close_run_status(
     trade_date_str = meta.get("trade_date")
     dsa_run_id_str = meta.get("dsa_run_id")
     last_completed_step = meta.get("last_completed_step")
+    # [AfterClose] - 透传非交易日等跳过原因到前端展示
+    skip_reason = meta.get("skip_reason")
 
     dsa_run_status: str | None = None
     if dsa_run_id_str:
@@ -879,6 +895,7 @@ async def get_after_close_run_status(
         "heartbeat_at": job_run.heartbeat_at.isoformat() if job_run.heartbeat_at else None,
         "lease_expires_at": job_run.lease_expires_at.isoformat() if job_run.lease_expires_at else None,
         "last_completed_step": last_completed_step,
+        "skip_reason": skip_reason,
         "interrupt_reason": interrupt_reason,
         "is_retryable": is_retryable,
         "heartbeat_stale": heartbeat_stale,

@@ -1627,6 +1627,8 @@ export interface AfterCloseRunStatusResponse {
   heartbeat_at: string | null
   lease_expires_at: string | null
   last_completed_step: string | null
+  // [AfterClose] - 跳过原因（如 NON_TRADING_DAY 非交易日），供前端展示提示
+  skip_reason: string | null
   interrupt_reason: string | null
   is_retryable: boolean
   heartbeat_stale: boolean

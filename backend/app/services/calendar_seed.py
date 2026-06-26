@@ -23,6 +23,7 @@ Tushare token 来源：
 
 from __future__ import annotations
 
+from datetime import date
 import logging
 import os
 from typing import Any
@@ -38,6 +39,18 @@ logger = logging.getLogger(__name__)
 # Tushare trade_cal 默认市场标识
 # SSE: 上海证券交易所，对应 A 股整体日历
 TUSHARE_DEFAULT_EXCHANGE = "SSE"
+
+# [CalendarSeed] - 描述: 已知公共假日近似日期（仅用于抑制工作日非交易日的 WARNING 噪声，非权威）
+_KNOWN_HOLIDAYS_2026 = {
+    date(2026, 1, 1),    # 元旦
+    date(2026, 2, 16), date(2026, 2, 17), date(2026, 2, 18),  # 春节
+    date(2026, 2, 19), date(2026, 2, 20), date(2026, 2, 23),  # 春节调休
+    date(2026, 4, 6),    # 清明
+    date(2026, 5, 1), date(2026, 5, 4), date(2026, 5, 5),  # 劳动节
+    date(2026, 6, 19), date(2026, 6, 22),  # 端午
+    date(2026, 9, 25),   # 中秋+国庆前
+    date(2026, 10, 1), date(2026, 10, 2), date(2026, 10, 5), date(2026, 10, 6), date(2026, 10, 7), date(2026, 10, 8),  # 国庆
+}
 
 
 def get_tushare_token() -> str | None:
@@ -266,7 +279,12 @@ def build_full_year_calendar(year: int, trading_days: set[date]) -> pd.DataFrame
     生成到年底，过去日期仅 pytdx 确认的交易日标记为 True，
     未来工作日乐观标记为 True（后续 seed 用权威数据覆盖）。
 
-    向量化：使用 pandas date_range 生成日期，isin 判断交易日。
+    合理性校验：对过去工作日（周一至周五）未被 pytdx 标记为交易日的日期
+    记 WARNING（保留 pytdx 原始结果，仅提示人工核对交易所公告）。
+    已知公共假日（_KNOWN_HOLIDAYS_2026）不告警以避免噪声。
+
+    向量化：使用 pandas date_range 生成日期，isin 判断交易日，
+    DatetimeIndex.dayofweek 向量化判断工作日。
 
     Args:
         year: 年份
@@ -275,19 +293,29 @@ def build_full_year_calendar(year: int, trading_days: set[date]) -> pd.DataFrame
     Returns:
         DataFrame，列：trade_date, is_trading_day, market
     """
-    from datetime import date as date_cls
-
-    end_date = date_cls(year, 12, 31)
-    all_dates = pd.date_range(start=f"{year}-01-01", end=end_date, freq="D").date
-    df = pd.DataFrame({"trade_date": all_dates})
+    end_date = date(year, 12, 31)
+    all_dates_idx = pd.date_range(start=f"{year}-01-01", end=end_date, freq="D")
+    df = pd.DataFrame({"trade_date": all_dates_idx.date})
+    today = date.today()
     # 过去/今天：仅 pytdx 确认的交易日标记为 True
     # 未来日期：工作日乐观标记为 True（后续 seed 用权威数据覆盖）
-    today = date_cls.today()
     df["is_trading_day"] = df.apply(
         lambda row: row["trade_date"] in trading_days if row["trade_date"] <= today
         else row["trade_date"].weekday() < 5,
         axis=1,
     )
+    # [CalendarSeed] - 合理性校验：过去工作日未被 pytdx 标记为交易日时记 WARNING（保留原始结果，仅告警）
+    suspect_mask = (
+        (df["trade_date"] <= today)
+        & (all_dates_idx.dayofweek < 5)
+        & (~df["trade_date"].isin(trading_days))
+        & (~df["trade_date"].isin(_KNOWN_HOLIDAYS_2026))
+    )
+    for d in df.loc[suspect_mask, "trade_date"]:
+        logger.warning(
+            "日历数据异常: %s 是工作日(%s)但 pytdx 未标记为交易日，请核对交易所公告",
+            d, d.strftime("%A"),
+        )
     df["market"] = "A"
     df = df[["trade_date", "is_trading_day", "market"]]
     return df
@@ -367,4 +395,14 @@ if __name__ == "__main__":
                 print(f"完整日历：{len(df)} 条，交易日 {int(df['is_trading_day'].sum())} 条")
         except RuntimeError as e:
             print(f"pytdx 自测失败：{e}")
+
+    # build_full_year_calendar 合理性校验自测：构造工作日不在 trading_days 的场景
+    # 故意剔除 2026-06-26（周五），验证 WARNING 输出（不验证日志捕获）
+    print("--- build_full_year_calendar 合理性校验自测 ---")
+    _all_weekdays_2026 = pd.date_range("2026-01-01", "2026-12-31", freq="B").date
+    _td_missing = set(_all_weekdays_2026) - {date(2026, 6, 26)}
+    _df_test = build_full_year_calendar(2026, _td_missing)
+    _row_0626 = _df_test[_df_test["trade_date"] == date(2026, 6, 26)]
+    print(f"2026-06-26 标记结果：\n{_row_0626.to_string(index=False)}")
+    print("（应见 WARNING: 日历数据异常: 2026-06-26 是工作日(Friday)但 pytdx 未标记为交易日）")
     print("=== 自测结束 ===")

@@ -35,6 +35,7 @@ from app.services.after_close_orchestrator import (
     get_after_close_run_status,
     retry_after_close_run,
 )
+from app.services.calendar_service import is_trading_day_async
 from app.services.job_run_event_service import list_events
 
 logger = logging.getLogger("admin_after_close")
@@ -95,6 +96,19 @@ async def create_after_close_run_endpoint(
         创建响应（含 job_run_id 和初始状态）
     """
     trade_date = _parse_trade_date(payload.trade_date)
+
+    # [AfterClose] - 非交易日拦截：避免创建空转的盘后编排任务（不创建 SchedulerJobRun 记录）
+    if not await is_trading_day_async(db, trade_date):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": "NON_TRADING_DAY",
+                "reason": "非交易日无需执行盘后编排",
+                "trade_date": trade_date.isoformat(),
+                "weekday": trade_date.strftime("%A"),
+                "message": f"{trade_date.isoformat()}（{trade_date.strftime('%A')}）非交易日，无需执行盘后编排",
+            },
+        )
 
     job_run, is_new = await create_after_close_run(db=db, trade_date=trade_date)
 
