@@ -30,7 +30,7 @@ from uuid import UUID, uuid4
 
 logger = logging.getLogger("notification_service")
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -731,6 +731,49 @@ async def mark_message_read(
     return message
 
 
+# [Messages] - 描述: 未读消息计数，供角标使用（避免 list 接口 total 字段语义混淆）
+async def count_unread_messages(db: AsyncSession, user_id: UUID) -> int:
+    """统计用户未读消息数（read_at IS NULL）。
+
+    Args:
+        db: 异步会话
+        user_id: 用户 ID
+
+    Returns:
+        未读消息总数
+    """
+    stmt = select(func.count()).select_from(NotificationMessage).where(
+        NotificationMessage.user_id == user_id,
+        NotificationMessage.read_at.is_(None),
+    )
+    result = await db.execute(stmt)
+    return int(result.scalar_one())
+
+
+# [Messages] - 描述: 批量标记当前用户所有未读消息为已读
+async def mark_all_messages_read(db: AsyncSession, user_id: UUID) -> int:
+    """批量标记用户所有未读消息为已读。
+
+    Args:
+        db: 异步会话
+        user_id: 用户 ID
+
+    Returns:
+        受影响行数（被标记为已读的消息数）
+    """
+    stmt = (
+        update(NotificationMessage)
+        .where(
+            NotificationMessage.user_id == user_id,
+            NotificationMessage.read_at.is_(None),
+        )
+        .values(read_at=datetime.now(UTC))
+        .execution_options(synchronize_session=False)
+    )
+    result = await db.execute(stmt)
+    return int(result.rowcount or 0)
+
+
 async def list_user_channels(
     db: AsyncSession,
     user_id: UUID,
@@ -1091,6 +1134,8 @@ if __name__ == "__main__":
     print(f"verify_channel={verify_channel}")
     print(f"list_user_messages={list_user_messages}")
     print(f"mark_message_read={mark_message_read}")
+    print(f"count_unread_messages={count_unread_messages}")
+    print(f"mark_all_messages_read={mark_all_messages_read}")
     print(f"list_user_channels={list_user_channels}")
     print(f"test_channel={test_channel}")
     print(f"test_channel_latest_event={test_channel_latest_event}")

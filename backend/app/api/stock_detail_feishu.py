@@ -1,13 +1,15 @@
-"""个股详情发送飞书 API - POST /admin/instruments/{id}/send-feishu。
+"""个股详情发送飞书 API - POST 创建 + GET 状态查询。
 
-admin only，复用监控链路组件（compute_all_indicators / build_monitor_event_text /
-capture worker / ChannelAdapter），同步返回 4 个分步骤布尔结果，
-用于定位"有文本、没图片"卡在哪一步。
+admin only，复用监控链路组件（MonitorSnapshotService / build_monitor_event_text /
+capture worker / Outbox / MessageDelivery），走正式 Outbox 异步链路。
 
 端点：
 - POST /admin/instruments/{instrument_id}/send-feishu
     请求体: {"channel_id": "<uuid>"}
-    响应: {"text_ok": bool, "screenshot_ok": bool, "image_upload_ok": bool, "feishu_send_ok": bool}
+    响应: {"test_run_id", "message_group_id", "message_id", "image_message_id", "status"}
+- GET /admin/stock-detail-feishu/{test_run_id}/status
+    响应: {"test_run_id", "message_group_id", "text_status", "image_status",
+           "overall_status", "failed_step", "error_code", "error_message"}
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from app.services.notification_service import (
 )
 from app.services.stock_detail_feishu_service import (
     InstrumentNotFoundError,
+    get_share_status,
     send_stock_detail_to_feishu,
 )
 
@@ -40,18 +43,40 @@ class SendFeishuRequest(BaseModel):
 
 
 class SendFeishuResponse(BaseModel):
-    """发送飞书响应 - 4 个分步骤布尔结果。
+    """发送飞书响应 - 走 Outbox 异步链路，返回追踪 ID。
 
-    用于定位"有文本、没图片"卡在哪一步：
-    - text_ok=True, screenshot_ok=False: 截图服务故障
-    - text_ok=True, screenshot_ok=True, image_upload_ok=False: 图片拉取失败
-    - text_ok=True, screenshot_ok=True, image_upload_ok=True, feishu_send_ok=False: 飞书发送失败
+    - test_run_id: 本次分享唯一标识（用于状态查询）
+    - message_group_id: 关联 text+image 两条投递的组 ID
+    - message_id: 文本消息 ID（主消息）
+    - image_message_id: 图片消息 ID（截图失败时为 None）
+    - status: "pending"（Outbox 异步链路，创建后即为 pending，由 delivery_worker 异步投递）
     """
 
-    text_ok: bool = Field(..., description="文本投递是否成功")
-    screenshot_ok: bool = Field(..., description="截图是否成功（capture worker 返回 image_url）")
-    image_upload_ok: bool = Field(..., description="图片拉取是否成功（_fetch_image_bytes 返回 bytes）")
-    feishu_send_ok: bool = Field(..., description="飞书图片消息发送是否成功（adapter.send_image_bytes）")
+    test_run_id: str = Field(..., description="本次分享唯一标识（用于状态查询）")
+    message_group_id: str = Field(..., description="消息组 ID（关联 text+image 投递）")
+    message_id: str = Field(..., description="文本消息 ID")
+    image_message_id: str | None = Field(None, description="图片消息 ID（截图失败时为 None）")
+    status: str = Field(..., description="投递状态（pending，异步链路）")
+
+
+class ShareStatusResponse(BaseModel):
+    """分享状态查询响应。
+
+    - text_status: 文本投递状态（pending/sending/success/failed/retrying/dead/not_created）
+    - image_status: 图片投递状态（同上，未创建截图时为 not_created）
+    - overall_status: 汇总状态（pending/success/failed）
+    - failed_step: 失败步骤（text/image，无失败时为 None）
+    - error_code: 失败错误码（无失败时为 None）
+    """
+
+    test_run_id: str = Field(..., description="分享唯一标识")
+    message_group_id: str | None = Field(None, description="消息组 ID")
+    text_status: str = Field(..., description="文本投递状态")
+    image_status: str = Field(..., description="图片投递状态")
+    overall_status: str = Field(..., description="汇总状态")
+    failed_step: str | None = Field(None, description="失败步骤（text/image）")
+    error_code: str | None = Field(None, description="失败错误码")
+    error_message: str | None = Field(None, description="失败错误信息")
 
 
 @router.post(
@@ -64,19 +89,19 @@ async def send_stock_detail_feishu_endpoint(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_roles("admin")),
 ) -> SendFeishuResponse:
-    """发送个股详情到飞书（admin only）。
+    """发送个股详情到飞书（admin only，走 Outbox 异步链路）。
 
-    [个股飞书] - 描述: 复用 test_channel_latest_event 链路组件，同步返回 4 布尔
+    [StockDetailFeishu] - 描述: 复用监控链路组件，走 Outbox → MessageDelivery → delivery_worker
 
     复用链路（禁止另写一套截图和消息拼装逻辑）：
-    1. compute_all_indicators（指标计算，与 indicators API 同款）
+    1. MonitorSnapshotService.get_snapshot（快照 SSOT，返回非空快照）
     2. build_monitor_event_text（消息拼装，与 monitor 链同款）
     3. create_message（消息创建，notification_service 同款）
-    4. capture worker HTTP（截图，test_channel_latest_event 同款）
-    5. _fetch_image_bytes（图片拉取，notification_service 同款）
-    6. adapter.send_text_message / send_image_bytes（ChannelAdapter 抽象）
+    4. write_outbox（事务性发件箱，outbox_relay 同款）
+    5. capture worker HTTP（截图，test_channel_latest_event 同款）
 
-    响应 4 布尔字段用于定位卡点，详见 SendFeishuResponse 文档。
+    返回 test_run_id/message_group_id/message_id，客户端可通过
+    GET /admin/stock-detail-feishu/{test_run_id}/status 查询投递状态。
     """
     settings = get_settings()
     try:
@@ -90,12 +115,12 @@ async def send_stock_detail_feishu_endpoint(
             capture_token_ttl_seconds=settings.jwt_capture_ttl_seconds,
         )
     except InstrumentNotFoundError as e:
-        # [个股飞书] - 个股不存在返回 404
+        # [StockDetailFeishu] - 个股不存在返回 404
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
         ) from e
     except ChannelNotFoundError as e:
-        # [个股飞书] - 渠道不存在或不属于当前用户返回 404
+        # [StockDetailFeishu] - 渠道不存在或不属于当前用户返回 404
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
         ) from e
@@ -107,10 +132,37 @@ async def send_stock_detail_feishu_endpoint(
     return SendFeishuResponse(**result)
 
 
+@router.get(
+    "/stock-detail-feishu/{test_run_id}/status",
+    response_model=ShareStatusResponse,
+)
+async def get_share_status_endpoint(
+    test_run_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles("admin")),
+) -> ShareStatusResponse:
+    """查询个股飞书分享的投递状态（admin only）。
+
+    [StockDetailFeishu] - 描述: 通过 test_run_id 查 MessageDelivery 投递状态
+
+    返回 text_status / image_status / overall_status / failed_step / error_code。
+    状态值：pending/sending/success/failed/retrying/dead/not_created。
+    """
+    try:
+        result = await get_share_status(db=db, test_run_id=test_run_id)
+    except NotificationServiceError as e:
+        # [StockDetailFeishu] - test_run_id 无对应消息返回 404
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
+        ) from e
+    return ShareStatusResponse(**result)
+
+
 if __name__ == "__main__":
     # 自测入口：验证路由注册
     paths = [r.path for r in router.routes]
     print(f"router.routes={paths}")
     assert any("/send-feishu" in p for p in paths), "应包含 /send-feishu 路由"
+    assert any("/status" in p for p in paths), "应包含 /status 路由"
     assert router.prefix == "/admin", "prefix 应为 /admin"
     print("OK")

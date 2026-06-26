@@ -2,7 +2,9 @@
 
 端点：
 - GET /messages: 用户消息列表（支持 unread_only 过滤）
+- GET /messages/unread-count: 未读消息总数（角标专用，避免 list 接口 total 字段语义混淆）
 - POST /messages/{id}/read: 标记消息已读
+- POST /messages/read-all: 批量标记当前用户所有未读消息为已读
 - POST /notification-channels: 创建通知渠道
 - GET /notification-channels: 用户渠道列表
 - PUT /notification-channels/{id}: 更新通知渠道配置
@@ -21,6 +23,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -47,10 +50,12 @@ from app.services.notification_service import (
     LatestEventNotFoundError,
     MessageNotFoundError,
     NotificationServiceError,
+    count_unread_messages,
     create_channel,
     delete_channel,
     list_user_channels,
     list_user_messages,
+    mark_all_messages_read,
     mark_message_read,
     test_channel,
     test_channel_latest_event,
@@ -102,6 +107,43 @@ async def get_messages(
     )
     items = [NotificationMessageResponse.model_validate(m) for m in messages]
     return NotificationMessageListResponse(items=items, total=len(items))
+
+
+class UnreadCountResponse(BaseModel):
+    """未读消息计数响应（角标专用）。"""
+
+    unread_count: int = Field(..., description="未读消息总数")
+
+
+class ReadAllResponse(BaseModel):
+    """批量已读响应。"""
+
+    marked_count: int = Field(..., description="被标记为已读的消息数")
+
+
+@router.get("/messages/unread-count", response_model=UnreadCountResponse)
+async def get_unread_count(
+    db: AsyncSession = Depends(get_db),
+    user_id: UUID = Depends(_get_user_id),
+) -> UnreadCountResponse:
+    """获取当前用户未读消息总数（角标专用）。
+
+    与 GET /messages 的 total 字段区分：list 接口 total 为当前页长度，
+    本端点返回真实未读总数，供顶部角标展示。
+    """
+    count = await count_unread_messages(db, user_id)
+    return UnreadCountResponse(unread_count=count)
+
+
+@router.post("/messages/read-all", response_model=ReadAllResponse)
+async def mark_all_read(
+    db: AsyncSession = Depends(get_db),
+    user_id: UUID = Depends(_get_user_id),
+) -> ReadAllResponse:
+    """批量标记当前用户所有未读消息为已读。"""
+    marked = await mark_all_messages_read(db, user_id)
+    await db.commit()
+    return ReadAllResponse(marked_count=marked)
 
 
 @router.post("/messages/{message_id}/read", response_model=NotificationMessageResponse)
@@ -356,6 +398,8 @@ if __name__ == "__main__":
     paths = [r.path for r in router.routes]
     print(f"router.routes={paths}")
     assert "/messages" in paths
+    assert "/messages/unread-count" in paths
+    assert "/messages/read-all" in paths
     assert any("/notification-channels" in p for p in paths)
     assert any("/notification-previews" in p for p in paths)
     assert any("/test" in p for p in paths)

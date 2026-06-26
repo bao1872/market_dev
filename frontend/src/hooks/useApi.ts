@@ -393,7 +393,17 @@ export function useMessages(params?: { unread_only?: boolean; limit?: number; of
   })
 }
 
-/** 标记消息已读变更 */
+// [Messages] - 描述: 未读消息计数，角标专用（queryKey 挂在 messages 下，标记已读/全部已读后自动失效）
+/** 获取当前用户未读消息总数（角标专用，始终刷新） */
+export function useUnreadCount() {
+  return useQuery({
+    queryKey: ['messages', 'unread-count'],
+    queryFn: api.getUnreadCount,
+    staleTime: STALE_MESSAGES,
+  })
+}
+
+/** 标记消息已读变更（自动失效消息列表与未读计数） */
 export function useMarkMessageRead() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -404,12 +414,29 @@ export function useMarkMessageRead() {
   })
 }
 
-/** 获取用户通知渠道列表 */
-export function useNotificationChannels() {
+// [Messages] - 描述: 批量标记所有未读为已读，成功后失效消息列表与未读计数
+/** 批量标记当前用户所有未读消息为已读变更 */
+export function useReadAllMessages() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: api.readAllMessages,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['messages'] })
+    },
+  })
+}
+
+/** 获取用户通知渠道列表
+ * [capture-mode] 截图模式下禁用：通知渠道列表需要 admin 权限，
+ * capture token 无 admin 角色，调用会触发 401 拦截器跳转登录页，
+ * 导致 StockDetailPage 卸载、data-render-ready 永远为 false、截图超时 502
+ */
+export function useNotificationChannels(enabled: boolean = true) {
   return useQuery({
     queryKey: ['notification-channels'],
     queryFn: api.getNotificationChannels,
     staleTime: STALE_PLANS,
+    enabled,
   })
 }
 

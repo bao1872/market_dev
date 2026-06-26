@@ -1109,6 +1109,11 @@ class MonitorBatchService:
         )
 
         # 构建 DTO
+        # [飞书两段式投递] - text_content 由 elements 拼接而成
+        # delivery_type=text 时 adapter.send_text_message 优先读 text_content
+        # 不填则飞书只收到 summary 单行，丢失逐股票详情
+        from app.services.message_builder import elements_to_text
+
         dto = NotificationMessageDTO(
             message_type="MONITOR_EVENT",
             template_key="monitor_merged_event",
@@ -1124,6 +1129,8 @@ class MonitorBatchService:
             facts=[],
             timeline=[],
             items=elements,
+            # [飞书两段式投递] - 文本段内容：概览 + 逐股票详情 + 数据时间
+            text_content=elements_to_text(elements),
             resource_refs={
                 "event_ids": [str(ev.id) for ev in user_events],
                 "event_types": list({ev.event_type for ev in user_events}),

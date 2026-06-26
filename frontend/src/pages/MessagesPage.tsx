@@ -1,12 +1,12 @@
 // 消息中心页（受保护路由）
 // 对应原型：messages.html (V1.6.3)
 // 用法：统一管理策略消息、过程事件与系统消息，支持按类型/时间筛选与标记已读
-// 依赖 hooks：useMessages / useMarkMessageRead
-// 路由：/messages
+// 依赖 hooks：useMessages / useMarkMessageRead / useReadAllMessages
+// 路由：/messages（支持 ?filter=unread 从角标进入未读筛选）
 import { useState, useMemo, useCallback } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useToast } from '@/store/toast'
-import { useMessages, useMarkMessageRead } from '@/hooks/useApi'
+import { useMessages, useMarkMessageRead, useReadAllMessages } from '@/hooks/useApi'
 import type { NotificationMessage } from '@/api/endpoints'
 import { StrategyDataTable } from '@/components/StrategyDataTable'
 import type { DataTableColumn } from '@/components/StrategyDataTable'
@@ -205,7 +205,10 @@ function parseDelivery(message: NotificationMessage): { label: string; pill: Del
 export default function MessagesPage() {
   const navigate = useNavigate()
   const toast = useToast.getState()
-  const [activeFilter, setActiveFilter] = useState<MessageFilter>('all')
+  // [Messages] - 描述: 支持 ?filter=unread 从角标进入未读筛选
+  const [searchParams] = useSearchParams()
+  const initialFilter: MessageFilter = searchParams.get('filter') === 'unread' ? 'unread' : 'all'
+  const [activeFilter, setActiveFilter] = useState<MessageFilter>(initialFilter)
   const [timeRange, setTimeRange] = useState<TimeRange>('7d')
   const [isMarkingAll, setIsMarkingAll] = useState(false)
   const [instrumentDrawerOpen, setInstrumentDrawerOpen] = useState(false)
@@ -220,6 +223,8 @@ export default function MessagesPage() {
     limit: 100,
   })
   const markReadMutation = useMarkMessageRead()
+  // [Messages] - 描述: 全部已读走后端批量 UPDATE，避免前端 N 次并发请求
+  const readAllMutation = useReadAllMessages()
 
   const allMessages: NotificationMessage[] = messagesQuery.data?.items ?? []
 
@@ -342,7 +347,7 @@ export default function MessagesPage() {
     [markReadMutation, toast],
   )
 
-  // 全部标记已读：并发标记所有未读消息
+  // 全部标记已读：后端批量 UPDATE（单次请求），成功后 invalidate 失效列表与角标
   const handleMarkAllRead = useCallback(async () => {
     const unreadMessages = allMessages.filter((m) => !m.read_at)
     if (unreadMessages.length === 0) {
@@ -351,16 +356,14 @@ export default function MessagesPage() {
     }
     setIsMarkingAll(true)
     try {
-      await Promise.all(
-        unreadMessages.map((m) => markReadMutation.mutateAsync(m.id)),
-      )
-      toast.show('全部标记已读', `已标记 ${unreadMessages.length} 条消息`)
+      const result = await readAllMutation.mutateAsync()
+      toast.show('全部标记已读', `已标记 ${result.marked_count} 条消息`)
     } catch {
-      toast.show('标记失败', '部分消息标记失败，请稍后重试')
+      toast.show('标记失败', '批量标记失败，请稍后重试')
     } finally {
       setIsMarkingAll(false)
     }
-  }, [allMessages, markReadMutation, toast])
+  }, [allMessages, readAllMutation, toast])
 
   // 点击查看：标记已读 + 跳转/抽屉
   const handleView = useCallback(
@@ -488,7 +491,7 @@ export default function MessagesPage() {
           <button
             className="btn"
             onClick={handleMarkAllRead}
-            disabled={isMarkingAll || markReadMutation.isPending}
+            disabled={isMarkingAll || readAllMutation.isPending}
           >
             全部已读
           </button>

@@ -9,7 +9,7 @@ import { useRoleStore } from '@/store/role'
 import { useAuthStore } from '@/store/auth'
 import { useToast } from '@/store/toast'
 import { getMarketStatus, type MarketStatus } from '@/api/endpoints'
-import { useMessages, useHealth, useAdminSystemOverview, setCachedMarketStatus } from '@/hooks/useApi'
+import { useUnreadCount, useHealth, useAdminSystemOverview, setCachedMarketStatus } from '@/hooks/useApi'
 import { formatShanghaiTimeShort } from '@/utils/datetime'
 import clsx from 'clsx'
 
@@ -116,9 +116,9 @@ export default function AppShell({ children }: { children: ReactNode }) {
     return () => clearInterval(interval)
   }, [])
 
-  // 真实未读消息数
-  const unreadMessagesQuery = useMessages({ unread_only: true, limit: 1 })
-  const unreadCount = unreadMessagesQuery.data?.total ?? 0
+  // [Messages] - 描述: 真实未读消息数（角标专用接口，避免 list 接口 total 字段语义混淆）
+  const unreadCountQuery = useUnreadCount()
+  const unreadCount = unreadCountQuery.data?.unread_count ?? 0
 
   // 真实后端健康状态
   const healthQuery = useHealth()
@@ -290,13 +290,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
           </div>
         </div>
         <div className="top-right">
-          <div className="search-wrap">
-            <input
-              className="search-global"
-              placeholder="搜索股票代码 / 名称"
-            />
-          </div>
-          <Link className="icon-btn messages-btn" to="/messages" title="消息中心">
+          <Link className="icon-btn messages-btn" to="/messages?filter=unread" title="消息中心">
             ◔
             {unreadCount > 0 && <span className="messages-badge">{unreadCount > 99 ? '99+' : unreadCount}</span>}
           </Link>

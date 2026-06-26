@@ -1,29 +1,25 @@
-"""个股详情发送飞书服务 - 复用监控链路组件（同步执行）。
+"""个股详情发送飞书服务 - 复用监控链路组件 + 走正式 Outbox 链路。
 
 设计：
-- 复用 test_channel_latest_event 链路的组件（截图/消息拼装/投递抽象），
-  但采用同步执行模式返回 4 个分步骤布尔结果，便于定位"有文本、没图片"卡在哪一步。
-- 禁止另写一套截图和消息拼装逻辑（spec P0-9 约束）。
+- 复用 test_channel_latest_event / monitor_batch_service 的 Outbox 链路组件：
+  1. MonitorSnapshotService.get_snapshot（快照 SSOT，禁止另写解析逻辑）
+  2. build_monitor_event_text（消息拼装，与 monitor 链同款）
+  3. create_message（消息创建幂等，notification_service 同款）
+  4. write_outbox（事务性发件箱，outbox_relay 同款）
+  5. capture worker HTTP（截图，test_channel_latest_event 同款）
+- 不再同步直调 adapter，改走 Outbox → MessageDelivery → delivery_worker 异步链路。
+- 飞书两段式投递（text + image）共享同一 message_group_id。
 
-4 布尔语义（响应字段）：
-- text_ok: adapter.send_text_message 成功（文本投递）
-- screenshot_ok: capture worker 返回 image_url（截图）
-- image_upload_ok: _fetch_image_bytes 返回 bytes（图片拉取）
-- feishu_send_ok: adapter.send_image_bytes 成功（飞书图片消息发送）
+返回字段（响应）：
+- test_run_id: 本次分享的唯一标识（幂等键组成部分）
+- message_group_id: 关联 text+image 两条 Outbox/MessageDelivery 的组 ID
+- message_id: 文本消息 ID（主消息）
+- image_message_id: 图片消息 ID（截图失败时为 None）
+- status: "pending"（Outbox 异步链路，创建后即为 pending）
 
-复用链路组件（与 test_channel_latest_event / notification_service 共享）：
-1. compute_all_indicators（指标计算，与 indicators API 同款）
-2. build_monitor_event_text（消息拼装，与 monitor 链同款）
-3. create_message（消息创建幂等，notification_service 同款）
-4. get_adapter + adapter.send_text_message / send_image_bytes（ChannelAdapter 抽象）
-5. capture worker HTTP 调用（截图，test_channel_latest_event 同款）
-6. _fetch_image_bytes（图片拉取，notification_service 同款）
-
-偏离 spec 说明：
-- spec 描述"Outbox → text delivery → image delivery"为异步链路，
-  但同时要求"响应返回 4 个分步骤布尔"用于同步定位卡点，两者矛盾。
-  本服务采用同步直接调用 adapter 接口（跳过 Outbox/MessageDelivery 异步状态机），
-  以满足"同步返回 4 布尔"核心约束，同时复用 ChannelAdapter 抽象不另写投递逻辑。
+状态查询：
+- GET /admin/stock-detail-feishu/{test_run_id}/status
+- 通过 test_run_id 查 MessageDelivery.message_group_id 关联的 text/image 投递状态
 """
 
 from __future__ import annotations
@@ -44,14 +40,22 @@ from app.schemas.notification import NotificationMessageDTO
 from app.services.channel_adapter import get_adapter  # noqa: F401  re-export for patch
 from app.services.indicator_service import compute_all_indicators  # noqa: F401  re-export for patch
 from app.services.message_builder import build_monitor_event_text
+from app.services.monitor_snapshot_service import MonitorSnapshotService
 from app.services.notification_service import (
     ChannelNotFoundError,
     NotificationServiceError,
-    _fetch_image_bytes,
+    _fetch_image_bytes,  # noqa: F401  re-export for patch
     create_message,
 )
+from app.services.outbox_relay import write_outbox
 
 logger = logging.getLogger("stock_detail_feishu_service")
+
+# [StockDetailFeishu] - 事件类型：个股快照主动分享（不暴露内部 manual_send 代码）
+_EVENT_TYPE_STOCK_SNAPSHOT_SHARE = "STOCK_SNAPSHOT_SHARE"
+
+# [StockDetailFeishu] - 默认周期（与 MonitorSnapshotService 默认一致）
+_DEFAULT_TIMEFRAME = "1d"
 
 
 class InstrumentNotFoundError(NotificationServiceError):
@@ -66,50 +70,43 @@ async def send_stock_detail_to_feishu(
     frontend_base_url: str,
     capture_worker_url: str,
     capture_token_ttl_seconds: int = 300,
-) -> dict[str, bool]:
-    """发送个股详情到飞书，复用监控链路组件（同步执行）。
+) -> dict[str, Any]:
+    """发送个股详情到飞书，走正式 Outbox 链路（异步投递）。
 
-    [个股飞书] - 描述: 复用 test_channel_latest_event 链路组件，同步返回 4 布尔
+    [StockDetailFeishu] - 描述: 复用监控链路组件，走 Outbox → MessageDelivery → delivery_worker
 
-    执行顺序（每步独立捕获异常，失败时对应布尔为 False 并提前返回）：
+    执行顺序：
     1. 校验 instrument + channel（不属于当前用户则 ChannelNotFoundError）
-    2. compute_all_indicators 计算指标快照
-    3. build_monitor_event_text + create_message 拼装并创建消息
-    4. adapter.send_text_message → text_ok
-    5. capture worker HTTP POST → screenshot_ok
-    6. _fetch_image_bytes → image_upload_ok
-    7. adapter.send_image_bytes → feishu_send_ok
+    2. 生成 test_run_id + message_group_id（幂等 + 关联 text/image）
+    3. MonitorSnapshotService.get_snapshot 获取非空快照（SSOT）
+    4. build_monitor_event_text + create_message 拼装并创建文本消息
+    5. write_outbox(text) → outbox_relay 扩张为 MessageDelivery(text)
+    6. capture worker HTTP 截图 → create_message + write_outbox(image)
+    7. 返回 test_run_id/message_group_id/message_id/status
 
     Args:
         db: 异步会话
         instrument_id: 个股 ID
-        channel_id: 通知渠道 ID（必须属于当前用户）
+        channel_id: 通知渠道 ID（必须属于当前用户，用于身份校验）
         user_id: 当前用户 ID（admin，由 endpoint 注入）
         frontend_base_url: 前端 base URL（截图服务访问）
         capture_worker_url: 截图 Worker HTTP 服务地址
         capture_token_ttl_seconds: capture token 有效期（秒）
 
     Returns:
-        dict 含 text_ok / screenshot_ok / image_upload_ok / feishu_send_ok
+        dict 含 test_run_id / message_group_id / message_id / image_message_id / status
 
     Raises:
         InstrumentNotFoundError: 个股不存在
         ChannelNotFoundError: 渠道不存在或不属于当前用户
-        NotificationServiceError: 其他通知服务异常
+        NotificationServiceError: 快照获取或消息创建失败
     """
-    result: dict[str, bool] = {
-        "text_ok": False,
-        "screenshot_ok": False,
-        "image_upload_ok": False,
-        "feishu_send_ok": False,
-    }
-
     # 1. 校验个股存在
     instrument = await db.get(Instrument, instrument_id)
     if instrument is None:
         raise InstrumentNotFoundError(f"个股不存在: instrument_id={instrument_id}")
 
-    # 2. 校验渠道存在且属于当前用户
+    # 2. 校验渠道存在且属于当前用户（用于身份校验，实际投递由 Outbox 扩张到所有 active 渠道）
     stmt_ch = select(NotificationChannel).where(
         NotificationChannel.id == channel_id,
         NotificationChannel.user_id == user_id,
@@ -121,68 +118,75 @@ async def send_stock_detail_to_feishu(
             f"渠道不存在或不属于当前用户: channel_id={channel_id}"
         )
 
-    # 3. 复用 compute_all_indicators 计算指标快照（与 indicators API 同款）
-    indicators = await compute_all_indicators(
-        session=db,
-        instrument_id=instrument_id,
-        timeframe="1d",
-        adj="qfq",
-        bars=250,
-    )
-    snapshot = (indicators or {}).get("snapshot") or {}
+    # 3. 生成 test_run_id + message_group_id（幂等 + 关联 text/image 两条投递）
+    test_run_id = uuid4()
+    message_group_id = str(uuid4())
 
-    # 4. 复用 build_monitor_event_text 拼装文本消息（与 monitor 链同款）
-    # [个股飞书] - 个股详情主动发送无真实事件，event_type 占位为 manual_send
+    # 4. 调用 MonitorSnapshotService 获取非空快照（SSOT，禁止另写解析逻辑）
+    # [StockDetailFeishu] - 快照来源：MonitorSnapshotService.get_snapshot 返回 MonitorSnapshot
+    try:
+        snapshot = await MonitorSnapshotService().get_snapshot(
+            db, str(instrument_id), _DEFAULT_TIMEFRAME
+        )
+    except (ValueError, KeyError, RuntimeError) as e:
+        # 不吞异常：补上下文后 re-raise 为 NotificationServiceError
+        raise NotificationServiceError(
+            f"获取监控快照失败 instrument_id={instrument_id}: {e}"
+        ) from e
+
+    # 5. 复用 build_monitor_event_text 拼装文本消息（与 monitor 链同款）
+    # [StockDetailFeishu] - event_type=STOCK_SNAPSHOT_SHARE，不暴露内部 manual_send 代码
     event_time = datetime.now(UTC).isoformat()
     dto = build_monitor_event_text(
         stock_name=instrument.name or instrument.symbol,
         symbol=instrument.symbol,
-        event_type="manual_send",
+        event_type=_EVENT_TYPE_STOCK_SNAPSHOT_SHARE,
         event_time=event_time,
-        current_price=snapshot.get("current_price"),
-        bb_upper=snapshot.get("bb_upper"),
-        bb_mid=snapshot.get("bb_mid"),
-        bb_lower=snapshot.get("bb_lower"),
-        upper_node=snapshot.get("upper_node"),
-        lower_node=snapshot.get("lower_node"),
-        poc_price=snapshot.get("poc_price"),
-        position_0_1=snapshot.get("position_0_1"),
+        current_price=snapshot.current_price,
+        bb_upper=snapshot.range_upper,
+        bb_mid=snapshot.range_center,
+        bb_lower=snapshot.range_lower,
+        upper_node=snapshot.upper_volume_zone,
+        lower_node=snapshot.lower_volume_zone,
+        poc_price=snapshot.most_traded_price,
+        position_0_1=snapshot.range_position,
         resource_refs={
             "instrument_id": str(instrument.id),
             "symbol": instrument.symbol,
             "channel_id": str(channel_id),
-            "manual_send": True,
+            "test_run_id": str(test_run_id),
+            "share": True,
         },
     )
 
-    # 5. 复用 create_message 创建消息（幂等，notification_service 同款）
-    message = await create_message(
+    # 6. 复用 create_message 创建文本消息（幂等，notification_service 同款）
+    text_message = await create_message(
         db=db,
         user_id=user_id,
         message_dto=dto,
-        source_type="stock_detail_manual",
+        source_type="stock_detail_share",
         source_id=instrument_id,
-        idempotency_key=f"stock-detail-feishu:{instrument_id}:{channel_id}:{uuid4()}",
+        idempotency_key=f"stock-detail-feishu:{instrument_id}:{channel_id}:{test_run_id}:text",
     )
 
-    # 6. 复用 get_adapter 获取适配器（ChannelAdapter 抽象）
-    adapter = get_adapter(channel.adapter_type)
+    # 7. 写入文本 Outbox（outbox_relay 扩张为 MessageDelivery(text) → delivery_worker → adapter.send_text_message）
+    # [StockDetailFeishu] - 文本段：delivery_type=text，共享 message_group_id
+    await write_outbox(
+        db=db,
+        event_type="notification.message.created",
+        payload={
+            "message_id": str(text_message.id),
+            "user_id": str(user_id),
+            "delivery_type": "text",
+            "message_group_id": message_group_id,
+        },
+        aggregate_type="notification_message",
+        aggregate_id=text_message.id,
+    )
 
-    # 7. 复用 adapter.send_text_message → text_ok（飞书两段式投递 - 文本段）
-    try:
-        text_result = await adapter.send_text_message(dto, channel.target_config)
-        result["text_ok"] = bool(text_result.success)
-    except Exception as e:
-        # [个股飞书] - 文本投递异常：不吞异常，记录上下文后继续后续步骤
-        logger.error(
-            "TEXT_SEND_FAILED instrument_id=%s channel_id=%s error=%s",
-            instrument_id, channel_id, e,
-        )
-        result["text_ok"] = False
-        return result
-
-    # 8. 复用 capture worker HTTP 调用 → screenshot_ok（与 test_channel_latest_event 同款）
-    image_url: str | None = None
+    # 8. 截图 → 创建图片消息 → 写入图片 Outbox（截图失败不阻塞文本投递）
+    # [StockDetailFeishu] - 图片段：delivery_type=image，与 text 共享 message_group_id
+    image_message_id: str | None = None
     try:
         token = create_capture_token(
             subject=str(user_id),
@@ -194,7 +198,7 @@ async def send_stock_detail_to_feishu(
             "event_id": str(instrument_id),
             "token": token,
             "frontend_base_url": frontend_base_url,
-            "output_filename": f"stock-detail-{instrument_id}-{uuid4()}",
+            "output_filename": f"stock-detail-{instrument_id}-{test_run_id}",
             "instrument_id": str(instrument_id),
             "chart_version": "v1",
         }
@@ -206,48 +210,199 @@ async def send_stock_detail_to_feishu(
             capture_resp.raise_for_status()
             capture_data = capture_resp.json()
         image_url = capture_data.get("image_url")
-        result["screenshot_ok"] = bool(image_url)
-    except Exception as e:
-        logger.error(
-            "CAPTURE_FAILED instrument_id=%s channel_id=%s error=%s",
-            instrument_id, channel_id, e,
+        if not image_url:
+            raise RuntimeError("截图服务未返回 image_url")
+
+        # 构建图片消息 DTO（与 monitor_batch_service._create_chart_image_message 同款）
+        image_dto = NotificationMessageDTO(
+            message_type="MONITOR_EVENT",
+            template_key="monitor_event",
+            template_version="1.1.0",
+            title=f"个股截图｜{instrument.name or instrument.symbol}",
+            summary=f"{instrument.symbol} 个股详情截图，详见附图",
+            resource_refs={
+                "instrument_id": str(instrument.id),
+                "symbol": instrument.symbol,
+                "channel_id": str(channel_id),
+                "test_run_id": str(test_run_id),
+                "image_url": image_url,
+            },
+            data_time=event_time,
+            primary_instrument={
+                "instrument_id": str(instrument.id),
+                "symbol": instrument.symbol,
+                "name": instrument.name or "",
+            },
+            event_summary=_EVENT_TYPE_STOCK_SNAPSHOT_SHARE,
         )
-        result["screenshot_ok"] = False
-        return result
-
-    if not image_url:
-        result["screenshot_ok"] = False
-        return result
-
-    # 9. 复用 _fetch_image_bytes 拉取图片 → image_upload_ok（notification_service 同款）
-    image_bytes: bytes | None = None
-    try:
-        image_bytes = await _fetch_image_bytes(image_url)
-        result["image_upload_ok"] = image_bytes is not None
-    except Exception as e:
-        logger.error(
-            "IMAGE_FETCH_FAILED image_url=%s error=%s",
-            image_url, e,
+        image_message = await create_message(
+            db=db,
+            user_id=user_id,
+            message_dto=image_dto,
+            source_type="stock_detail_share",
+            source_id=instrument_id,
+            idempotency_key=f"stock-detail-feishu:{instrument_id}:{channel_id}:{test_run_id}:image",
         )
-        result["image_upload_ok"] = False
-        return result
+        image_message_id = str(image_message.id)
 
-    if not image_bytes:
-        result["image_upload_ok"] = False
-        return result
-
-    # 10. 复用 adapter.send_image_bytes → feishu_send_ok（飞书两段式投递 - 图片段）
-    try:
-        image_result = await adapter.send_image_bytes(image_bytes, channel.target_config)
-        result["feishu_send_ok"] = bool(image_result.success)
-    except Exception as e:
-        logger.error(
-            "FEISHU_IMAGE_SEND_FAILED instrument_id=%s channel_id=%s error=%s",
-            instrument_id, channel_id, e,
+        await write_outbox(
+            db=db,
+            event_type="notification.message.created",
+            payload={
+                "message_id": str(image_message.id),
+                "user_id": str(user_id),
+                "delivery_type": "image",
+                "image_url": image_url,
+                "message_group_id": message_group_id,
+            },
+            aggregate_type="notification_message",
+            aggregate_id=image_message.id,
         )
-        result["feishu_send_ok"] = False
+    except Exception as e:
+        # 截图或图片 Outbox 失败不阻塞文本投递（文本已写入 Outbox）
+        # 不吞异常：记录上下文，image_message_id 保持 None
+        logger.warning(
+            "IMAGE_OUTBOX_FAILED instrument_id=%s channel_id=%s test_run_id=%s error=%s",
+            instrument_id, channel_id, test_run_id, e,
+        )
 
-    return result
+    return {
+        "test_run_id": str(test_run_id),
+        "message_group_id": message_group_id,
+        "message_id": str(text_message.id),
+        "image_message_id": image_message_id,
+        "status": "pending",
+    }
+
+
+async def get_share_status(
+    db: AsyncSession,
+    test_run_id: UUID,
+) -> dict[str, Any]:
+    """查询个股飞书分享的投递状态。
+
+    [StockDetailFeishu] - 描述: 通过 test_run_id 查 MessageDelivery 投递状态
+
+    流程：
+    1. 通过 test_run_id 从 NotificationMessage.body.resource_refs 查出 message_group_id
+    2. 按 message_group_id 查 MessageDelivery（text + image）
+    3. 汇总返回 text_status / image_status / overall_status / failed_step / error_code
+
+    Args:
+        db: 异步会话
+        test_run_id: 分享请求返回的 test_run_id
+
+    Returns:
+        dict 含 test_run_id / message_group_id / text_status / image_status /
+        overall_status / failed_step / error_code / error_message
+
+    Raises:
+        NotificationServiceError: test_run_id 无对应消息
+    """
+    from sqlalchemy import text as sql_text
+
+    from app.models.notification import NotificationMessage
+
+    # 1. 通过 test_run_id 查 message_group_id（存于 body.resource_refs.test_run_id）
+    # JSONB 查询：body->'resource_refs'->>'test_run_id' = :test_run_id
+    stmt_msg = (
+        select(NotificationMessage)
+        .where(
+            sql_text("body->'resource_refs'->>'test_run_id' = :test_run_id")
+        )
+        .params(test_run_id=str(test_run_id))
+        .limit(1)
+    )
+    result_msg = await db.execute(stmt_msg)
+    message = result_msg.scalar_one_or_none()
+    if message is None:
+        raise NotificationServiceError(
+            f"未找到 test_run_id 对应的消息: test_run_id={test_run_id}"
+        )
+
+    # 从 Outbox payload 或 MessageDelivery.message_group_id 获取组 ID
+    # 优先从 MessageDelivery 查
+    from app.models.notification import MessageDelivery
+
+    stmt_del = (
+        select(MessageDelivery)
+        .where(
+            MessageDelivery.notification_message_id == message.id
+        )
+    )
+    result_del = await db.execute(stmt_del)
+    deliveries = list(result_del.scalars().all())
+
+    # 若本消息无 delivery，可能 delivery 在关联的 image 消息上，通过 message_group_id 查
+    if not deliveries:
+        # 尝试从同 test_run_id 的其他消息查 delivery
+        stmt_group = (
+            select(MessageDelivery)
+            .where(
+                sql_text(
+                    "notification_message_id IN ("
+                    "SELECT id FROM notification_messages "
+                    "WHERE body->'resource_refs'->>'test_run_id' = :test_run_id"
+                    ")"
+                )
+            )
+            .params(test_run_id=str(test_run_id))
+        )
+        result_group = await db.execute(stmt_group)
+        deliveries = list(result_group.scalars().all())
+
+    if not deliveries:
+        # Outbox 尚未扩张为 MessageDelivery（relay worker 未轮询到）
+        return {
+            "test_run_id": str(test_run_id),
+            "message_group_id": None,
+            "text_status": "pending",
+            "image_status": "pending",
+            "overall_status": "pending",
+            "failed_step": None,
+            "error_code": None,
+            "error_message": None,
+        }
+
+    # 取 message_group_id（所有 delivery 共享）
+    message_group_id = deliveries[0].message_group_id
+
+    # 按 delivery_type 分类
+    text_deliveries = [d for d in deliveries if d.delivery_type == "text"]
+    image_deliveries = [d for d in deliveries if d.delivery_type == "image"]
+
+    text_status = text_deliveries[0].status if text_deliveries else "not_created"
+    image_status = image_deliveries[0].status if image_deliveries else "not_created"
+
+    # 汇总 overall_status + failed_step
+    failed_step: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+
+    all_statuses = [d.status for d in deliveries]
+    if all(s == "success" for s in all_statuses):
+        overall_status = "success"
+    elif any(s in ("failed", "dead") for s in all_statuses):
+        overall_status = "failed"
+        # 取第一个失败的 delivery 作为 failed_step
+        for d in deliveries:
+            if d.status in ("failed", "dead"):
+                failed_step = d.delivery_type
+                error_code = d.last_error_code
+                break
+    else:
+        overall_status = "pending"
+
+    return {
+        "test_run_id": str(test_run_id),
+        "message_group_id": message_group_id,
+        "text_status": text_status,
+        "image_status": image_status,
+        "overall_status": overall_status,
+        "failed_step": failed_step,
+        "error_code": error_code,
+        "error_message": error_message,
+    }
 
 
 if __name__ == "__main__":
@@ -270,10 +425,25 @@ if __name__ == "__main__":
     assert "build_monitor_event_text" in dir(), "build_monitor_event_text 应导入"
     assert "create_message" in dir(), "create_message 应导入"
     assert "_fetch_image_bytes" in dir(), "_fetch_image_bytes 应导入"
+    assert "write_outbox" in dir(), "write_outbox 应导入"
+    assert "MonitorSnapshotService" in dir(), "MonitorSnapshotService 应导入"
     print("复用组件导入 OK")
 
     # 验证异常类
     assert issubclass(InstrumentNotFoundError, NotificationServiceError)
     print("异常类 OK")
+
+    # 验证 event_type 常量
+    assert _EVENT_TYPE_STOCK_SNAPSHOT_SHARE == "STOCK_SNAPSHOT_SHARE"
+    assert _EVENT_TYPE_STOCK_SNAPSHOT_SHARE != "manual_send"
+    print(f"event_type={_EVENT_TYPE_STOCK_SNAPSHOT_SHARE} OK")
+
+    # 验证 get_share_status 函数存在
+    assert callable(get_share_status), "get_share_status 应可调用"
+    sig_status = inspect.signature(get_share_status)
+    params_status = list(sig_status.parameters.keys())
+    assert params_status == ["db", "test_run_id"], \
+        f"get_share_status 参数不匹配: {params_status}"
+    print(f"get_share_status params={params_status} OK")
 
     print("OK")

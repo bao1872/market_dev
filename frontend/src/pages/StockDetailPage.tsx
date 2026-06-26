@@ -84,7 +84,10 @@ export default function StockDetailPage() {
   // admin 权限判断 + 通知渠道查询（仅 admin 可见「发送到飞书」按钮）
   const user = useAuthStore((s) => s.user)
   const isAdmin = user?.role === 'admin'
-  const channelsQuery = useNotificationChannels()
+  // [capture-mode] 截图模式下禁用 admin API（通知渠道列表）：
+  // capture token 无 admin 角色，调用会 401 触发 axios 拦截器跳转登录页，
+  // 导致 StockDetailPage 卸载、data-render-ready 永远 false、截图超时 502
+  const channelsQuery = useNotificationChannels(!isCaptureMode)
   const activeChannels = (channelsQuery.data?.items ?? []).filter((c) => c.status === 'active')
 
   // 数据查询：K 线行情（依赖 instrumentId，前复权，与 indicators 的 bars=250 对齐避免数据范围不匹配）
@@ -210,13 +213,15 @@ export default function StockDetailPage() {
   // 行情数据加载中（首次加载且无缓存数据）
   const isBarsLoading = !!instrumentId && barsQuery.isLoading && bars.length === 0
 
-  // 截图模式：股票、K线、指标、事件全部加载成功后标记可渲染
+  // 截图模式：股票信息 + K线 + 指标加载成功后标记可渲染
+  // [advice.md] 事件历史加载失败不应阻止截图（事件仅用于图表标注，非截图必要条件）
+  // 历史问题：eventsQuery.isSuccess 必填导致事件接口超时时 data-render-ready 永远为 false，
+  // capture worker 等待 30s 超时返回 502，图片无法投递
   const isRenderReady =
     isCaptureMode &&
     instrumentQuery.isSuccess &&
     barsQuery.isSuccess &&
-    indicatorsQuery.isSuccess &&
-    eventsQuery.isSuccess
+    indicatorsQuery.isSuccess
 
   // 来源徽章与返回链接
   const sourceBadge = source === 'selection' ? '选股结果' : '自选监控'

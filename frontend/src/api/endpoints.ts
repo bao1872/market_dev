@@ -324,6 +324,16 @@ export interface NotificationMessageListResponse {
   total: number
 }
 
+/** 未读消息计数响应（角标专用） */
+export interface UnreadCountResponse {
+  unread_count: number
+}
+
+/** 批量标记已读响应 */
+export interface ReadAllMessagesResponse {
+  marked_count: number
+}
+
 /** 通知渠道 */
 export interface NotificationChannel {
   id: string
@@ -1029,6 +1039,26 @@ export async function getMessages(params?: {
 export async function markMessageRead(messageId: string): Promise<NotificationMessage> {
   const { data } = await apiClient.post<NotificationMessage>(
     `/messages/${messageId}/read`,
+    null,
+    { headers: getUserIdHeader() },
+  )
+  return data
+}
+
+// [Messages] - 描述: 未读消息计数，角标专用（避免 list 接口 total 字段语义混淆）
+/** 获取当前用户未读消息总数（角标专用） */
+export async function getUnreadCount(): Promise<UnreadCountResponse> {
+  const { data } = await apiClient.get<UnreadCountResponse>('/messages/unread-count', {
+    headers: getUserIdHeader(),
+  })
+  return data
+}
+
+// [Messages] - 描述: 批量标记当前用户所有未读消息为已读
+/** 批量标记当前用户所有未读消息为已读 */
+export async function readAllMessages(): Promise<ReadAllMessagesResponse> {
+  const { data } = await apiClient.post<ReadAllMessagesResponse>(
+    '/messages/read-all',
     null,
     { headers: getUserIdHeader() },
   )

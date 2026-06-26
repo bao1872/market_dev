@@ -532,13 +532,22 @@ class FeishuPlatformAppAdapter(ChannelAdapter):
                 error_message="channel_config 缺少: receive_id",
             )
 
-        # 纯文本内容：优先 text_content，回退到 summary
-        text_content = message_dto.text_content or message_dto.summary
+        # 纯文本内容：优先 text_content，回退到 items 拼接，最后回退到 summary
+        # [飞书两段式投递] - 防御性兜底：
+        # - text_content 由上游填充（如 monitor_batch_service._build_merged_card_dto）
+        # - 若上游漏填但 items 非空，由 elements_to_text 拼接 items 保证详情完整
+        # - items 也为空时退回 summary（保证至少有预览文本）
+        text_content = message_dto.text_content
+        if not text_content and message_dto.items:
+            from app.services.message_builder import elements_to_text
+            text_content = elements_to_text(message_dto.items)
+        if not text_content:
+            text_content = message_dto.summary
         if not text_content:
             return DeliveryResult(
                 success=False,
                 error_code="TEXT_CONTENT_MISSING",
-                error_message="message_dto.text_content 与 summary 均为空",
+                error_message="message_dto.text_content、items、summary 均为空",
             )
 
         # 获取 tenant_access_token

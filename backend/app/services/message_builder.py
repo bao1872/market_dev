@@ -219,7 +219,59 @@ _EVENT_TYPE_TEXT_LABEL: dict[str, str] = {
     "bb_mid_touch": "BB中轨穿越",
     "bb_lower_touch": "BB下轨穿越",
     "node_cluster_touch": "节点集群穿越",
+    # [StockDetailFeishu] - 个股快照主动分享（不暴露内部 manual_send 代码）
+    "STOCK_SNAPSHOT_SHARE": "个股快照分享",
 }
+
+
+def elements_to_text(elements: list[dict[str, Any]] | None) -> str:
+    """将卡片 elements 数组转换为纯文本（飞书两段式投递文本段使用）。
+
+    [飞书两段式投递] - 合并通知场景：
+    - _build_merged_card_dto 构建 elements 后，由此函数生成 text_content
+    - send_text_message 在 text_content 为空时回退到此函数兜底
+
+    转换规则：
+    - markdown 元素: 取 content 字段
+    - hr 元素: 转为 "---" 分隔线
+    - note 元素: 取内部 elements[0].content（plain_text）
+    - 其他: 跳过
+
+    各段用空行分隔，保证飞书文本消息可读。
+
+    Args:
+        elements: 卡片元素数组（可能为 None 或空）
+
+    Returns:
+        拼接后的纯文本（空数组/None 返回空字符串）
+    """
+    if not elements:
+        return ""
+
+    parts: list[str] = []
+    for el in elements:
+        tag = el.get("tag")
+        if tag == "markdown":
+            content = el.get("content", "")
+            if content:
+                parts.append(content)
+        elif tag == "hr":
+            parts.append("---")
+        elif tag == "note":
+            # note 内部为 plain_text elements 数组
+            inner = el.get("elements") or []
+            for item in inner:
+                if item.get("tag") == "plain_text":
+                    text = item.get("content", "")
+                    if text:
+                        parts.append(text)
+        # 其他 tag（lark_md/plain_text 等）按 content 字段兜底
+        elif "content" in el:
+            content = el.get("content", "")
+            if content:
+                parts.append(str(content))
+
+    return "\n\n".join(parts)
 
 
 def build_monitor_event_text(
