@@ -148,6 +148,8 @@ async def seed_strategies(
     await db.commit()
 
     # [策略种子] - 启动断言：两个必需策略都必须有 released 版本
+    # [策略种子] - 描述: 版本升级后同一策略可能存在多个 released 版本（旧+新），
+    # 必须使用 scalars().first() 而非 scalar_one_or_none()，否则 MultipleResultsFound
     for required_key in [DSA_SELECTOR, WATCHLIST_MONITOR]:
         req_def = await db.execute(
             select(StrategyDefinition).where(
@@ -162,7 +164,7 @@ async def seed_strategies(
                     StrategyVersion.status == "released",
                 )
             )
-            if req_released.scalar_one_or_none() is None:
+            if req_released.scalars().first() is None:
                 raise RuntimeError(
                     f"必需策略 {required_key} 没有 released 版本，"
                     "相关功能不可用。请检查 seed_strategies 执行结果。"

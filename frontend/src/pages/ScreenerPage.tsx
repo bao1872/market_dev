@@ -95,13 +95,6 @@ function fmtRatioAsPct(v: unknown, digits = 2): string {
   return n === null ? '-' : `${(n * 100).toFixed(digits)}%`
 }
 
-/** 根据 dsa_dir_bars 正负返回方向标签，未知返回 '-' */
-function getDsaDirection(v: unknown): string {
-  const n = toNum(v)
-  if (n === null) return '-'
-  return n > 0 ? '多头' : n < 0 ? '空头' : '-'
-}
-
 // [ScreenerPage] - 描述: 后端存储为小数的收益率/offset 类指标
 const RATIO_METRICS = new Set([
   'vwap_ret_avg',
@@ -342,12 +335,18 @@ export default function ScreenerPage() {
 
   // ===== 列定义 =====
 
-  // 股票列渲染函数（复用）
+  // 股票列渲染函数（复用）：第一行=名称+涨跌幅（涨红跌绿），第二行=代码·市场
   const renderStock = useCallback((row: ScreenerRow) => {
     const { name, symbol, market } = getStockDisplay(row)
+    const changePct = pickPayload(row.payload, ['change_pct', 'pct_change', 'change_percent'])
+    const n = toNum(changePct)
+    const cls = n !== null && n > 0 ? 'market-up' : n !== null && n < 0 ? 'market-down' : 'market-flat'
     return (
       <div>
-        <div className="symbol">{name}</div>
+        <div className="symbol">
+          {name}
+          <span className={cls} style={{ marginLeft: 6 }}>{fmtChange(changePct)}</span>
+        </div>
         <div className="symbol-sub">
           {symbol}
           {market ? ` · ${market}` : ''}
@@ -356,7 +355,7 @@ export default function ScreenerPage() {
     )
   }, [])
 
-  // DSA 方向稳定性列
+  // 趋势稳定性筛选列
   const dsaColumns: DataTableColumn<ScreenerRow>[] = useMemo(
     () => [
       {
@@ -365,58 +364,51 @@ export default function ScreenerPage() {
         dataType: 'text',
         sortable: true,
         filterable: false,
+        width: 150,
         sortValue: (row) => getStockDisplay(row).name,
         filterValue: (row) => `${getStockDisplay(row).name} ${getStockDisplay(row).symbol}`,
         render: renderStock,
       },
       {
-        key: 'dsa_direction',
-        title: '方向',
+        key: 'current_trend',
+        title: '当前趋势',
         dataType: 'text',
-        sortable: false,
-        filterable: false,
-        helpText: '原始字段：dsa_dir_bars。专业定义：当前 DSA 趋势方向，正值为多头，负值为空头。',
-        render: (row) => {
-          const v = pickPayload(row.payload, ['dsa_dir_bars', 'dsa_duration', 'dir_duration', 'duration'])
-          const dir = getDsaDirection(v)
-          return (
-            <span className={`tag ${dir === '多头' ? 'good' : dir === '空头' ? 'warn' : ''}`}>
-              {dir}
-            </span>
-          )
-        },
-      },
-      {
-        key: 'dsa_dir_bars',
-        title: '持续时间',
-        dataType: 'number',
         sortable: true,
-        filterable: true,
-        helpText: '原始字段：dsa_dir_bars / dir_duration。专业定义：当前 DSA 趋势方向已持续的 K 线根数，显示绝对值。',
-        sortValue: (row) =>
-          Math.abs(
-            Number(pickPayload(row.payload, ['dsa_dir_bars', 'dsa_duration', 'dir_duration', 'duration']) ?? 0),
-          ),
+        filterable: false,
+        width: 90,
+        helpText: '原始字段：dsa_dir_bars。专业定义：当前趋势方向及持续天数，正值为上涨，负值为下跌。',
+        sortValue: (row) => {
+          const v = pickPayload(row.payload, ['dsa_dir_bars', 'dsa_duration', 'dir_duration', 'duration'])
+          const n = toNum(v)
+          return n === null ? 0 : Math.abs(n)
+        },
         render: (row) => {
           const v = pickPayload(row.payload, ['dsa_dir_bars', 'dsa_duration', 'dir_duration', 'duration'])
           const n = toNum(v)
-          return <span className="num">{n !== null ? Math.abs(n).toFixed(0) : '-'}</span>
+          if (n === null || n === 0) {
+            return <span className="market-flat">方向未形成</span>
+          }
+          if (n > 0) {
+            return <span className="market-up">上涨 {n.toFixed(0)}天</span>
+          }
+          return <span className="market-down">下跌 {Math.abs(n).toFixed(0)}天</span>
         },
       },
       {
         key: 'vwap_ret_avg',
-        title: '趋势内平均表现',
+        title: '日均趋势变化',
         dataType: 'percent',
         sortable: true,
         filterable: true,
-        helpText: '原始字段：vwap_ret_avg / dsa_avg_return。专业定义：趋势运行期间价格相对 VWAP 的平均偏离收益，反映趋势内的平均表现强度。',
+        width: 88,
+        helpText: '原始字段：vwap_ret_avg / dsa_avg_return。专业定义：趋势运行期间价格相对趋势参考价的平均偏离收益，反映趋势内的平均表现强度。',
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['vwap_ret_avg', 'dsa_avg_return', 'vwap_avg_return', 'avg_return']) ?? 0),
         render: (row) => {
           const v = pickPayload(row.payload, ['vwap_ret_avg', 'dsa_avg_return', 'vwap_avg_return', 'avg_return'])
           const n = toNum(v)
           return (
-            <span className={n !== null && n > 0 ? 'pos' : n !== null && n < 0 ? 'neg' : ''}>
+            <span className={n !== null && n > 0 ? 'market-up' : n !== null && n < 0 ? 'market-down' : 'market-flat'}>
               {fmtRatioAsPct(v)}
             </span>
           )
@@ -424,10 +416,11 @@ export default function ScreenerPage() {
       },
       {
         key: 'vwap_ret_total',
-        title: '趋势累计表现',
+        title: '本轮趋势涨跌',
         dataType: 'percent',
         sortable: true,
         filterable: true,
+        width: 88,
         helpText: '原始字段：vwap_ret_total / dsa_total_return。专业定义：趋势起点至当前的累计收益，反映趋势整体表现。',
         sortValue: (row) =>
           Number(
@@ -447,7 +440,7 @@ export default function ScreenerPage() {
           ])
           const n = toNum(v)
           return (
-            <span className={n !== null && n > 0 ? 'pos' : n !== null && n < 0 ? 'neg' : ''}>
+            <span className={n !== null && n > 0 ? 'market-up' : n !== null && n < 0 ? 'market-down' : 'market-flat'}>
               {fmtRatioAsPct(v)}
             </span>
           )
@@ -455,17 +448,18 @@ export default function ScreenerPage() {
       },
       {
         key: 'offset_mean',
-        title: '当前偏离程度',
+        title: '平均偏离趋势线',
         dataType: 'percent',
         sortable: true,
         filterable: true,
-        helpText: '原始字段：offset_mean / shift_mean。专业定义：当前价格相对 DSA 锚点 VWAP 的平均偏离程度，正值表示价格高于锚点。',
+        width: 90,
+        helpText: '原始字段：offset_mean / shift_mean。专业定义：当前价格相对趋势参考价的平均偏离程度，正值表示价格高于锚点。',
         sortValue: (row) => Number(pickPayload(row.payload, ['offset_mean', 'shift_mean']) ?? 0),
         render: (row) => {
           const v = pickPayload(row.payload, ['offset_mean', 'shift_mean'])
           const n = toNum(v)
           return (
-            <span className={n !== null && n > 0 ? 'pos' : n !== null && n < 0 ? 'neg' : ''}>
+            <span className={n !== null && n > 0 ? 'market-up' : n !== null && n < 0 ? 'market-down' : 'market-flat'}>
               {fmtRatioAsPct(v)}
             </span>
           )
@@ -473,20 +467,22 @@ export default function ScreenerPage() {
       },
       {
         key: 'offset_std',
-        title: '偏离标准差',
+        title: '趋势附近波动幅度',
         dataType: 'percent',
         sortable: true,
         filterable: true,
-        helpText: '原始字段：offset_std / shift_std。专业定义：当前价格相对 DSA 锚点 VWAP 的偏离率标准差，反映偏离波动。',
+        width: 90,
+        helpText: '原始字段：offset_std / shift_std。专业定义：当前价格相对趋势参考价的偏离率标准差，反映偏离波动。',
         sortValue: (row) => Number(pickPayload(row.payload, ['offset_std', 'shift_std']) ?? 0),
         render: (row) => fmtRatioAsPct(pickPayload(row.payload, ['offset_std', 'shift_std'])),
       },
       {
         key: 'offset_percentile',
-        title: '当前所处位置',
+        title: '当前强弱位置',
         dataType: 'percent',
         sortable: true,
         filterable: true,
+        width: 86,
         helpText: '原始字段：offset_percentile / short_position。专业定义：当前偏离程度在趋势历史偏离中的百分位，0% 为最低、100% 为最高，反映当前所处相对位置。',
         sortValue: (row) =>
           Number(
@@ -499,28 +495,30 @@ export default function ScreenerPage() {
       },
       {
         key: 'dsa_vwap',
-        title: 'DSA VWAP',
+        title: '趋势参考价',
         dataType: 'number',
         sortable: true,
         filterable: true,
-        helpText: '原始字段：dsa_vwap / vwap。专业定义：当前 DSA 动态摆动锚定 VWAP 值。',
+        width: 82,
+        helpText: '原始字段：dsa_vwap / vwap。专业定义：当前趋势参考价（动态摆动锚定值）。',
         sortValue: (row) => Number(pickPayload(row.payload, ['dsa_vwap', 'vwap', 'anchor_vwap']) ?? 0),
         render: (row) => fmtNum(pickPayload(row.payload, ['dsa_vwap', 'vwap', 'anchor_vwap']), 2),
       },
       {
         key: 'dsa_vwap_dev_pct',
-        title: 'VWAP 偏离',
+        title: '距趋势参考价',
         dataType: 'percent',
         sortable: true,
         filterable: true,
-        helpText: '原始字段：dsa_vwap_dev_pct / vwap_dev_pct。专业定义：当前收盘价相对 DSA VWAP 的偏离百分比。',
+        width: 86,
+        helpText: '原始字段：dsa_vwap_dev_pct / vwap_dev_pct。专业定义：当前收盘价相对趋势参考价的偏离百分比。',
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['dsa_vwap_dev_pct', 'vwap_dev_pct', 'close_vwap_dev_pct']) ?? 0),
         render: (row) => {
           const v = pickPayload(row.payload, ['dsa_vwap_dev_pct', 'vwap_dev_pct', 'close_vwap_dev_pct'])
           const n = toNum(v)
           return (
-            <span className={n !== null && n > 0 ? 'pos' : n !== null && n < 0 ? 'neg' : ''}>
+            <span className={n !== null && n > 0 ? 'market-up' : n !== null && n < 0 ? 'market-down' : 'market-flat'}>
               {fmtPct(v)}
             </span>
           )
@@ -528,10 +526,11 @@ export default function ScreenerPage() {
       },
       {
         key: 'offset_variance_rate',
-        title: '趋势波动系数',
+        title: '趋势波动程度',
         dataType: 'percent',
         sortable: true,
         filterable: true,
+        width: 88,
         helpText: '原始字段：offset_variance_rate / offset_var_rate。专业定义：偏离程度的方差率，反映价格围绕趋势线的波动系数。',
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['offset_variance_rate', 'offset_var_rate', 'shift_var']) ?? 0),
@@ -544,29 +543,11 @@ export default function ScreenerPage() {
         dataType: 'number',
         sortable: true,
         filterable: true,
+        width: 76,
         helpText: '原始字段：last_close / price。专业定义：最新收盘价或当前价格。',
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['last_close', 'price', 'current_price', 'close']) ?? 0),
         render: (row) => fmtNum(pickPayload(row.payload, ['last_close', 'price', 'current_price', 'close'])),
-      },
-      {
-        key: 'change_pct',
-        title: '今日涨跌',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        helpText: '原始字段：change_pct / pct_change。专业定义：当日价格相对前一交易日的涨跌百分比。',
-        sortValue: (row) =>
-          Number(pickPayload(row.payload, ['change_pct', 'pct_change', 'change_percent']) ?? 0),
-        render: (row) => {
-          const v = pickPayload(row.payload, ['change_pct', 'pct_change', 'change_percent'])
-          const n = toNum(v)
-          return (
-            <span className={n !== null && n > 0 ? 'pos' : n !== null && n < 0 ? 'neg' : ''}>
-              {fmtChange(v)}
-            </span>
-          )
-        },
       },
       {
         key: 'action',
@@ -574,6 +555,7 @@ export default function ScreenerPage() {
         dataType: 'text',
         sortable: false,
         filterable: false,
+        width: 60,
         isAction: true,
         render: (row) => (
           <div className="actions">
@@ -637,7 +619,7 @@ export default function ScreenerPage() {
         render: (row) => {
           const v = pickPayload(row.payload, ['breakout_amplitude', 'amplitude'])
           const n = typeof v === 'number' ? v : parseFloat(String(v ?? ''))
-          return <span className={n > 0 ? 'pos' : ''}>{fmtPct(v)}</span>
+          return <span className={n > 0 ? 'market-up' : 'market-flat'}>{fmtPct(v)}</span>
         },
       },
       {
@@ -734,7 +716,7 @@ export default function ScreenerPage() {
       {/* 页面头 */}
       <div className="page-head">
         <div>
-          <h1 className="page-title">DSA 因子结果</h1>
+          <h1 className="page-title">趋势因子结果</h1>
           <div className="page-desc">
             选择选股策略 → 查看最新发布快照，表头筛选仅作用于已发布全量结果
           </div>
@@ -840,6 +822,7 @@ export default function ScreenerPage() {
           selectedKeys={selectedKeys}
           onSelectionChange={setSelectedKeys}
           initialPageSize={PAGE_SIZE}
+          tableClassName="compact-table"
         />
       </div>
     </div>

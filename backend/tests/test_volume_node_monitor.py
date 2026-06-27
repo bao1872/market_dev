@@ -46,8 +46,12 @@ _PROFILE_ROW_KEYS = {
     "bullish_volume", "bearish_volume", "total_volume",
     "is_peak", "is_poc", "is_value_area",
 }
-# profile_meta 必需字段
-_PROFILE_META_KEYS = {"row_count", "price_step", "poc_price", "vah_price", "val_price"}
+# profile_meta 必需字段（5 个核心 VP 字段 + 6 个 prepare_node_cluster_bars 诊断字段）
+_PROFILE_META_KEYS = {
+    "row_count", "price_step", "poc_price", "vah_price", "val_price",
+    "input_daily_bars", "input_15m_bars", "input_minute_bars",
+    "primary_period", "low_period", "parameter_version",
+}
 
 
 def _generate_minute_bars(
@@ -580,6 +584,13 @@ class TestVolumeNodeMonitorComputeIndicators:
             assert v is None or isinstance(v, float), f"{k} 应为 None 或 float"
             if v is not None:
                 assert price_min <= v <= price_max, f"{k}={v} 不在价格范围 [{price_min}, {price_max}]"
+        # prepare_node_cluster_bars 注入的诊断字段类型校验
+        assert isinstance(meta["input_daily_bars"], int)
+        assert isinstance(meta["input_15m_bars"], int)
+        assert isinstance(meta["input_minute_bars"], int)
+        assert meta["primary_period"] == "1d"
+        assert meta["low_period"] == "15m"
+        assert isinstance(meta["parameter_version"], str)
 
     @pytest.mark.asyncio
     async def test_is_poc_exactly_one_row(

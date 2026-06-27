@@ -75,6 +75,8 @@ export interface DataTableProps<Row> {
   emptyText?: string
   // [StrategyDataTable] - 描述: 初始每页条数（默认 10），服务端模式由调用方注入（如 ScreenerPage 50）
   initialPageSize?: number
+  // [StrategyDataTable] - 描述: 附加到 <table> 的 className（用于紧凑布局等场景）
+  tableClassName?: string
 }
 
 // [StrategyDataTable] - 描述: 按字段类型返回可选操作符列表（默认操作符为数组首项）
@@ -294,8 +296,8 @@ function ColumnManager({
   anchor,
 }: {
   columns: DataTableColumn<unknown>[]
-  hiddenColumns: Set<number>
-  onToggle: (index: number) => void
+  hiddenColumns: Set<string>
+  onToggle: (key: string) => void
   onReset: () => void
   onClose: () => void
   anchor: HTMLElement
@@ -310,22 +312,19 @@ function ColumnManager({
     <div className="column-filter-popover column-manager-popover" style={{ left, top }}>
       <div className="filter-pop-title">显示列</div>
       <div className="column-manager-list">
-        {manageable.map((col) => {
-          const idx = columns.indexOf(col)
-          return (
-            <div key={col.key} className="column-manager-item">
-              <label className="table-checkbox-wrapper" style={{ width: 24, height: 24 }}>
-                <input
-                  type="checkbox"
-                  className="table-checkbox"
-                  checked={!hiddenColumns.has(idx)}
-                  onChange={() => onToggle(idx)}
-                />
-              </label>
-              <span>{col.title}</span>
-            </div>
-          )
-        })}
+        {manageable.map((col) => (
+          <div key={col.key} className="column-manager-item">
+            <label className="table-checkbox-wrapper" style={{ width: 24, height: 24 }}>
+              <input
+                type="checkbox"
+                className="table-checkbox"
+                checked={!hiddenColumns.has(col.key)}
+                onChange={() => onToggle(col.key)}
+              />
+            </label>
+            <span>{col.title}</span>
+          </div>
+        ))}
       </div>
       <div className="filter-pop-actions">
         <button className="btn small columns-reset" onClick={onReset}>
@@ -360,6 +359,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     rowKey,
     emptyText = '没有符合筛选条件的数据',
     initialPageSize = 10,
+    tableClassName,
   } = props
 
   const [searchParams, setSearchParams] = useSearchParams()
@@ -371,7 +371,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
   const [globalQuery, setGlobalQuery] = useState('')
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(initialPageSize)
-  const [hiddenColumns, setHiddenColumns] = useState<Set<number>>(new Set())
+  const [hiddenColumns, setHiddenColumns] = useState<Set<string>>(new Set())
   const [filterPopover, setFilterPopover] = useState<{
     columnIndex: number
     anchor: HTMLElement
@@ -401,21 +401,29 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     if (urlPageSize) setPageSize(parseInt(urlPageSize, 10))
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ===== sessionStorage 恢复 =====
+  // ===== localStorage 恢复（按 column key 持久化，列顺序变化后不会错列）=====
   useEffect(() => {
     try {
-      const saved = sessionStorage.getItem(`table-columns:${tableId}`)
+      const saved = localStorage.getItem(`table-columns:${tableId}`)
       if (saved) {
-        setHiddenColumns(new Set(JSON.parse(saved)))
+        const validKeys = new Set(columns.map((c) => c.key))
+        const parsed: unknown = JSON.parse(saved)
+        if (Array.isArray(parsed)) {
+          // [StrategyDataTable] - 描述: 仅保留当前列中仍存在的 key，丢弃陈旧 key
+          const next = new Set<string>(
+            parsed.filter((k): k is string => typeof k === 'string' && validKeys.has(k)),
+          )
+          setHiddenColumns(next)
+        }
       }
     } catch {
       // ignore
     }
-  }, [tableId])
+  }, [tableId, columns])
 
-  // 保存列设置到 localStorage
+  // 保存列设置到 localStorage（按 column key）
   const saveColumns = useCallback(
-    (hidden: Set<number>) => {
+    (hidden: Set<string>) => {
       try {
         localStorage.setItem(`table-columns:${tableId}`, JSON.stringify([...hidden]))
       } catch {
@@ -427,7 +435,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
 
   // ===== 列可见性 =====
   const applyColumnVisibility = useCallback(
-    (hidden: Set<number>) => {
+    (hidden: Set<string>) => {
       setHiddenColumns(hidden)
       saveColumns(hidden)
     },
@@ -660,7 +668,16 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
       )}
 
       {/* 表格 */}
-      <table className="data-table interactive-table">
+      <table className={clsx('data-table interactive-table', tableClassName)}>
+        <colgroup>
+          {selectable && <col />}
+          {columns.map((col) => (
+            <col
+              key={col.key}
+              style={col.width !== undefined ? { width: `${col.width}px` } : undefined}
+            />
+          ))}
+        </colgroup>
         <thead>
           <tr>
             {selectable && (
@@ -679,7 +696,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
               </th>
             )}
             {columns.map((col, i) => {
-              const isHidden = hiddenColumns.has(i)
+              const isHidden = hiddenColumns.has(col.key)
               if (isHidden) return null
 
               // V1.5.1：操作列和选择列不参与排序与筛选
@@ -798,8 +815,8 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
                       </label>
                     </td>
                   )}
-                  {columns.map((col, i) => {
-                    if (hiddenColumns.has(i)) return null
+                  {columns.map((col) => {
+                    if (hiddenColumns.has(col.key)) return null
                     const isSticky = !stickyAssigned && !col.isAction
                     if (isSticky) stickyAssigned = true
                     return (
@@ -879,10 +896,10 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
         <ColumnManager
           columns={columns as DataTableColumn<unknown>[]}
           hiddenColumns={hiddenColumns}
-          onToggle={(idx) => {
+          onToggle={(key) => {
             const next = new Set(hiddenColumns)
-            if (next.has(idx)) next.delete(idx)
-            else next.add(idx)
+            if (next.has(key)) next.delete(key)
+            else next.add(key)
             applyColumnVisibility(next)
           }}
           onReset={() => {

@@ -514,9 +514,9 @@ class MonitorBatchService:
             adjustment="qfq",
         )
         bars_daily = bars_daily_result.bars
-        # [Node Cluster] - 描述: 按排序去重后 tail(250) 取数，不用自然日近似
+        # [Node Cluster] - 描述: 按 DatetimeIndex 去重排序后 tail(250)，与 prepare_node_cluster_bars 一致
         if not bars_daily.empty:
-            bars_daily = bars_daily.sort_values("date", ascending=True).drop_duplicates(subset=["date"]).tail(_DAILY_LOOKBACK_BARS)
+            bars_daily = bars_daily[~bars_daily.index.duplicated(keep="last")].sort_index().tail(_DAILY_LOOKBACK_BARS)
 
         bars_15min = pd.DataFrame()
         try:
@@ -527,8 +527,8 @@ class MonitorBatchService:
                 end_date=today,
                 adjustment="qfq",
             )
-            # [Node Cluster] - 描述: 按排序去重后 tail(1200) 取数
-            bars_15min = bars_15min_result.bars.sort_values("datetime", ascending=True).drop_duplicates(subset=["datetime"]).tail(_15MIN_LOOKBACK_BARS)
+            # [Node Cluster] - 描述: 按 DatetimeIndex 去重排序后 tail(1200)，与 prepare_node_cluster_bars 一致
+            bars_15min = bars_15min_result.bars[~bars_15min_result.bars.index.duplicated(keep="last")].sort_index().tail(_15MIN_LOOKBACK_BARS)
         except Exception as exc:
             logger.warning("15min行情拉取失败 %s: %s", symbol, exc)
 
@@ -1588,9 +1588,9 @@ class MonitorBatchService:
             adjustment="qfq",
         )
         bars_daily = bars_daily_result.bars
-        # [Node Cluster] - 描述: 按排序去重后 tail(250) 取数
+        # [Node Cluster] - 描述: 按 DatetimeIndex 去重排序后 tail(250)，与 prepare_node_cluster_bars 一致
         if not bars_daily.empty:
-            bars_daily = bars_daily.sort_values("date", ascending=True).drop_duplicates(subset=["date"]).tail(_DAILY_LOOKBACK_BARS)
+            bars_daily = bars_daily[~bars_daily.index.duplicated(keep="last")].sort_index().tail(_DAILY_LOOKBACK_BARS)
         if bars_daily.empty or len(bars_daily) < 20:
             logger.debug("日线行情不足，跳过 PNG 渲染: symbol=%s bars=%d", symbol, len(bars_daily))
             return None

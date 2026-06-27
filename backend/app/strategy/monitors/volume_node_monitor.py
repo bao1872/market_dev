@@ -50,9 +50,11 @@ from app.strategy.runtime import (
     StrategyRuntime,
 )
 from app.strategy_assets.algorithms.features.unified_volume_profile import (
+    NodeClusterBarsResult,
     UnifiedVolumeProfileResult,
     VP_LOOKBACK,
     compute_unified_volume_profile,
+    prepare_node_cluster_bars,
 )
 
 logger = logging.getLogger("strategy.monitors.volume_node_monitor")
@@ -138,8 +140,13 @@ class VolumeNodeMonitor(StrategyRuntime):
              "profile_meta": {row_count, price_step, poc_price, vah_price, val_price},
              "peak_rows": [{price_mid, bullish_volume, bearish_volume, total_volume, is_peak}, ...]}
         """
-        # 主数据为日线 bars
-        bars = context.bars_daily
+        # [volume_node_monitor] - 描述: 调用 prepare_node_cluster_bars 统一准备数据
+        # （DatetimeIndex 排序/去重/tail），与 MonitorBatchService/IndicatorService 共用唯一真源
+        prepared: NodeClusterBarsResult = prepare_node_cluster_bars(
+            context.bars_daily, context.bars_15min, context.bars_minute
+        )
+        # 主数据为准备后的日线 bars
+        bars = prepared.daily
         if bars is None or len(bars) < 10:
             return {
                 "upper_node": [], "lower_node": [], "poc_price": [],
@@ -147,12 +154,8 @@ class VolumeNodeMonitor(StrategyRuntime):
                 "profile_rows": [], "profile_meta": {},
             }
 
-        # 15m bars 作为 profile_df（低周期成交量分配来源）
-        profile_df = (
-            context.bars_15min
-            if context.bars_15min is not None and not context.bars_15min.empty
-            else None
-        )
+        # 15m bars 作为 profile_df（低周期成交量分配来源，使用准备后的数据）
+        profile_df = prepared.bars_15m if not prepared.bars_15m.empty else None
 
         try:
             vp_result = compute_unified_volume_profile(
@@ -213,6 +216,9 @@ class VolumeNodeMonitor(StrategyRuntime):
             "vah_price": _finite_or_none(vp_result.vah_price),
             "val_price": _finite_or_none(vp_result.val_price),
         }
+        # [volume_node_monitor] - 描述: 合并 prepare_node_cluster_bars 诊断字段
+        # （输入根数/周期/参数版本），供前端与日志排查数据完整性
+        profile_meta.update(prepared.profile_meta)
 
         # [volume_node_monitor] - peak_rows: 当前 VP 的 peak 节点多空量快照
         # 供前端图表渲染 peak 节点价格标签 + 多空量标签 + 迷你多空柱
@@ -258,24 +264,26 @@ class VolumeNodeMonitor(StrategyRuntime):
         Raises:
             ValueError: bars_daily 为 None 或数据不足
         """
-        if context.bars_daily is None or context.bars_daily.empty:
+        # [volume_node_monitor] - 描述: 调用 prepare_node_cluster_bars 统一准备数据
+        # 与 compute_indicators 共用同一组准备后数据，保证两入口 VP 计算一致
+        prepared = prepare_node_cluster_bars(
+            context.bars_daily, context.bars_15min, context.bars_minute
+        )
+        bars_daily = prepared.daily
+
+        if bars_daily.empty:
             raise ValueError(
                 f"VolumeNodeMonitor 需要 daily bars 数据，instrument_id={context.instrument_id}"
             )
 
-        bars_daily = context.bars_daily
         if len(bars_daily) < 10:
             raise ValueError(
                 f"daily bars 数据不足（需要至少 10 根，实际 {len(bars_daily)}），"
                 f"instrument_id={context.instrument_id}"
             )
 
-        # 15m bars 作为 profile_df
-        ltf_bars = (
-            context.bars_15min
-            if context.bars_15min is not None and not context.bars_15min.empty
-            else None
-        )
+        # 15m bars 作为 profile_df（使用准备后的数据）
+        ltf_bars = prepared.bars_15m if not prepared.bars_15m.empty else None
 
         # 计算 Volume Profile（日线主数据 + 15m profile_df，与 monitoring.py 一致）
         try:
@@ -459,7 +467,8 @@ if __name__ == "__main__":
     # 验证共享模块已通过包内导入可用
     assert callable(compute_unified_volume_profile)
     assert UnifiedVolumeProfileResult is not None
-    assert VP_LOOKBACK == 360
+    # [advice.md 第四节] - VP_LOOKBACK 与 indicator_contract.NODE_CLUSTER_PRIMARY_BARS 对齐（250）
+    assert VP_LOOKBACK == 250
     print("compute_unified_volume_profile/UnifiedVolumeProfileResult/VP_LOOKBACK 可用 ✓")
 
     # 验证 ABC 继承

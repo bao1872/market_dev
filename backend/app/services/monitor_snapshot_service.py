@@ -61,8 +61,13 @@ class MonitorSnapshot:
     - position_0_1 → range_position    (区间位置 0~1)
     - current_price → current_price    (最新价)
 
+    [自选股涨跌幅] - 描述: advice.md 第三节新增字段（前复权）
+    - previous_close → previous_close  (上一交易日收盘价，前复权)
+    - change_pct     → change_pct      (当日涨跌幅 %)
+
     注意：compute_indicators 返回的是 bar 对齐时间序列（list），
     快照取最新一根 bar 的值（[-1]）。
+    previous_close/change_pct 由 _fetch_previous_close 单独从 BarDaily 查询并计算。
     """
 
     instrument_id: str
@@ -77,6 +82,8 @@ class MonitorSnapshot:
     lower_volume_zone: float | None
     most_traded_price: float | None
     range_position: float | None
+    previous_close: float | None = None
+    change_pct: float | None = None
 
 
 def _last_float(values: list[Any] | None) -> float | None:
@@ -207,6 +214,73 @@ class MonitorSnapshotService:
             last_bar_time = now_shanghai().strftime("%Y-%m-%dT%H:%M")
 
         return algo_version, last_bar_time
+
+    async def _fetch_previous_close(
+        self,
+        db: AsyncSession,
+        inst_uuid: uuid.UUID,
+    ) -> float | None:
+        """查询 inst_uuid 上一交易日（不含今日）的 BarDaily.close（前复权）。
+
+        [自选股涨跌幅] - 描述: advice.md 第三节
+            - 严格 < today（SHANGHAI 时区），排除今日未完成 Bar
+            - 取最近一根 historical Bar 的 close 字段
+            - 数据缺失返回 None（不抛异常）
+
+        Args:
+            db: 异步 DB 会话
+            inst_uuid: 标的 UUID
+
+        Returns:
+            前一交易日 close（float），或 None
+        """
+        from app.models.bar import BarDaily
+
+        today = now_shanghai().date()
+        try:
+            stmt = (
+                select(BarDaily.close)
+                .where(
+                    BarDaily.instrument_id == inst_uuid,
+                    BarDaily.trade_date < today,
+                )
+                .order_by(BarDaily.trade_date.desc())
+                .limit(1)
+            )
+            result = await db.execute(stmt)
+            row = result.first()
+            if row is None:
+                return None
+            close_raw = row[0]
+            if close_raw is None:
+                return None
+            return round(float(close_raw), 4)
+        except Exception as exc:
+            logger.warning(
+                "查询 previous_close 失败 instrument_id=%s: %s",
+                inst_uuid, exc,
+            )
+            return None
+
+    @staticmethod
+    def _compute_change_pct(
+        current_price: float | None,
+        previous_close: float | None,
+    ) -> float | None:
+        """计算涨跌幅（%）：(current - previous) / previous * 100。
+
+        Args:
+            current_price: 当前价
+            previous_close: 前一交易日收盘价
+
+        Returns:
+            涨跌幅（%），保留 4 位小数；输入任一为 None 或 previous=0 时返回 None
+        """
+        if current_price is None or previous_close is None:
+            return None
+        if previous_close == 0:
+            return None
+        return round((float(current_price) - float(previous_close)) / float(previous_close) * 100, 4)
 
     def _build_cache_key(
         self,
@@ -339,12 +413,16 @@ class MonitorSnapshotService:
             )
 
         # 6. 映射字段（list[-1] → float）
+        current_price = _last_float(wm.get("current_price"))
+        # [自选股涨跌幅] - 描述: 查询 previous_close 并计算 change_pct（advice.md 第三节）
+        previous_close = await self._fetch_previous_close(db, inst_uuid)
+        change_pct = self._compute_change_pct(current_price, previous_close)
         snapshot = MonitorSnapshot(
             instrument_id=instrument_id,
             symbol=symbol,
             name=name,
             as_of=now_shanghai(),
-            current_price=_last_float(wm.get("current_price")),
+            current_price=current_price,
             range_upper=_last_float(wm.get("bb_upper")),
             range_center=_last_float(wm.get("bb_mid")),
             range_lower=_last_float(wm.get("bb_lower")),
@@ -352,6 +430,8 @@ class MonitorSnapshotService:
             lower_volume_zone=_last_float(wm.get("lower_node")),
             most_traded_price=_last_float(wm.get("poc_price")),
             range_position=_last_float(wm.get("position_0_1")),
+            previous_close=previous_close,
+            change_pct=change_pct,
         )
 
         # 7. 写入缓存

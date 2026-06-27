@@ -1,12 +1,18 @@
 """自选股监控 - 统一监控算法（BB + VN 薄包装）。
 
 唯一监控算法，内部委托 BollingerMonitor 和 VolumeNodeMonitor：
-- calculate_state(): 分别调用两个子 monitor，合并 state 字典
+- calculate_state(): 分别调用两个子 monitor，合并 state 字典；并补充 previous_close/change_pct
 - detect_events(): 分别调用两个子 monitor，合并事件列表
 - compute_indicators(): 分别调用两个子 monitor，合并指标字典
 
 这不是新算法，而是对现有 BB 和 VN 监控的薄包装（thin wrapper），
 保证逻辑唯一性：所有计算逻辑仍在 BollingerMonitor/VolumeNodeMonitor 中。
+
+[自选股涨跌幅] - 描述: previous_close/change_pct 在合并 BB+VN state 后计算
+- current_price 取 merged_state["current_price"]（VN 已写入）
+- previous_close = context.trade_date 之前最近一个交易日 close（前复权）
+- change_pct = (current_price - previous_close) / previous_close * 100
+- 当日未完成日线 Bar 不得作为 previous_close（按 trade_date 严格 < 过滤）
 
 用法（模块自测）：
     python -m app.strategy.monitors.watchlist_monitor
@@ -15,8 +21,11 @@
 from __future__ import annotations
 
 import logging
+from datetime import date
 from typing import Any
 from uuid import UUID
+
+import pandas as pd
 
 from app.models.strategy import StrategyVersion
 from app.strategy.monitors.bollinger_monitor import BollingerMonitor
@@ -76,22 +85,36 @@ class WatchlistMonitor(StrategyRuntime):
         )
 
     async def calculate_state(self, context: MarketDataContext) -> MonitorState:
-        """合并 BB + VN 子 monitor 的状态。
+        """合并 BB + VN 子 monitor 的状态，并补充 previous_close/change_pct。
 
         分别调用 BollingerMonitor.calculate_state() 和
-        VolumeNodeMonitor.calculate_state()，合并 state 字典。
+        VolumeNodeMonitor.calculate_state()，合并 state 字典后追加涨跌幅字段。
+
+        [自选股涨跌幅] - 描述:
+            current_price 已在 merged_state（由 VN 写入）；
+            previous_close 由 _compute_previous_close 从 context.bars_daily 取
+            context.trade_date 之前最近一个交易日的 close；
+            change_pct = (current_price - previous_close) / previous_close * 100。
+            当日未完成日线 Bar 不得作为 previous_close（按 trade_date 严格 < 过滤）。
 
         Args:
             context: 市场数据上下文
 
         Returns:
-            合并后的监控状态（BB 字段 + VN 字段）
+            合并后的监控状态（BB 字段 + VN 字段 + previous_close + change_pct）
         """
         bb_state = await self._bb.calculate_state(context)
         vn_state = await self._vn.calculate_state(context)
 
         # 合并 state 字典（VN 的 current_price 覆盖 BB 的，两者语义相同）
         merged_state: dict[str, Any] = {**bb_state.state, **vn_state.state}
+
+        # [自选股涨跌幅] - 描述: 在合并 state 后补充 previous_close + change_pct
+        current_price = merged_state.get("current_price")
+        previous_close = self._compute_previous_close(context)
+        change_pct = self._compute_change_pct(current_price, previous_close)
+        merged_state["previous_close"] = previous_close
+        merged_state["change_pct"] = change_pct
 
         bar_time = bb_state.updated_at or vn_state.updated_at
 
@@ -102,6 +125,55 @@ class WatchlistMonitor(StrategyRuntime):
             state_version=1,
             updated_at=bar_time,
         )
+
+    @staticmethod
+    def _compute_previous_close(context: MarketDataContext) -> float | None:
+        """从 context.bars_daily 取 trade_date 之前最近一个交易日的 close。
+
+        [自选股涨跌幅] - 描述:
+            - 严格 < context.trade_date，排除当日未完成 Bar
+            - 数据缺失或 trade_date 为 None 时返回 None
+            - 前复权数据由调用方在 get_bars(adjustment="qfq") 时已应用
+
+        Args:
+            context: 市场数据上下文
+
+        Returns:
+            前一交易日 close（float），或 None
+        """
+        bars = context.bars_daily
+        if bars is None or bars.empty:
+            return None
+        if context.trade_date is None:
+            return None
+        # 仅取 trade_date 之前（严格 <）的 Bar
+        if not isinstance(bars.index, pd.DatetimeIndex):
+            return None
+        trade_date_ts = pd.Timestamp(context.trade_date, tz=bars.index.tz)
+        historical = bars[bars.index < trade_date_ts]
+        if historical.empty:
+            return None
+        return round(float(historical["close"].iloc[-1]), 4)
+
+    @staticmethod
+    def _compute_change_pct(
+        current_price: float | None,
+        previous_close: float | None,
+    ) -> float | None:
+        """计算涨跌幅（%）：(current - previous) / previous * 100。
+
+        Args:
+            current_price: 当前价（来自 merged_state["current_price"]）
+            previous_close: 前一交易日收盘价
+
+        Returns:
+            涨跌幅（%），保留 4 位小数；输入任一为 None 或 previous=0 时返回 None
+        """
+        if current_price is None or previous_close is None:
+            return None
+        if previous_close == 0:
+            return None
+        return round((float(current_price) - float(previous_close)) / float(previous_close) * 100, 4)
 
     async def detect_events(
         self,

@@ -1946,7 +1946,7 @@ export function StrategyChart({
             <span>高 {fmt(legendData.d.high)}</span>
             <span>低 {fmt(legendData.d.low)}</span>
             <span>收 {fmt(legendData.d.close)}</span>
-            <span className={legendData.change >= 0 ? 'pos' : 'neg'}>
+            <span className={legendData.change >= 0 ? 'market-up' : 'market-down'}>
               {legendData.change >= 0 ? '+' : ''}{legendData.change.toFixed(2)}%
             </span>
             <span>量 {formatVolume(legendData.d.volume)}</span>

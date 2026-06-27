@@ -22,6 +22,29 @@ export function fmtPct(v: unknown, digits = 2): string {
   return n === null ? '-' : `${(n * 100).toFixed(digits)}%`
 }
 
+/**
+ * [自选股涨跌幅] - 描述: 格式化已为百分比的 change_pct（不乘 100），返回带正负号字符串
+ * 输入已经是百分比数值（如 3.5 表示 +3.5%），未知返回 '-'
+ */
+export function fmtChangePct(v: unknown, digits = 2): string {
+  const n = toNum(v)
+  if (n === null) return '-'
+  const sign = n > 0 ? '+' : ''
+  return `${sign}${n.toFixed(digits)}%`
+}
+
+/**
+ * [自选股涨跌幅] - 描述: 按 A 股口径返回涨跌幅颜色类名（涨红/跌绿/平灰）
+ * 与 market-colors.scss 中 .market-up/.market-down/.market-flat 对齐
+ */
+export function changePctColorClass(v: unknown): string {
+  const n = toNum(v)
+  if (n === null) return 'market-flat'
+  if (n > 0) return 'market-up'
+  if (n < 0) return 'market-down'
+  return 'market-flat'
+}
+
 // [自选监控] - 格式化时间，返回 MM-DD HH:MM（上海时区），保留日期信息
 export function fmtTime(v: unknown): string {
   if (v === undefined || v === null || v === '') return '-'
@@ -58,6 +81,9 @@ export function adaptWatchlistMonitorStatusItem(
     market: item.market ?? '',
     monitor_status: item.monitor_status,
     current_price: metrics ? toNum(metrics.current_price ?? metrics.close) : null,
+    // [自选股涨跌幅] - 描述: 从 metrics 提取上一交易日收盘价与当日涨跌幅（advice.md 第三节）
+    previous_close: metrics ? toNum(metrics.previous_close) : null,
+    change_pct: metrics ? toNum(metrics.change_pct) : null,
     bb_upper: metrics ? toNum(metrics.bb_upper) : null,
     bb_mid: metrics ? toNum(metrics.bb_mid ?? metrics.bb_middle) : null,
     bb_lower: metrics ? toNum(metrics.bb_lower) : null,

@@ -453,11 +453,11 @@ export default function StockDetailPage() {
         <div className="tv-quote-strip">
           <div>
             <span>现价</span>
-            <b className={isUp ? 'pos' : 'neg'}>{currentPrice !== null ? currentPrice.toFixed(2) : '--'}</b>
+            <b className={isUp ? 'market-up' : 'market-down'}>{currentPrice !== null ? currentPrice.toFixed(2) : '--'}</b>
           </div>
           <div>
             <span>涨跌</span>
-            <b className={isUp ? 'pos' : 'neg'}>
+            <b className={isUp ? 'market-up' : 'market-down'}>
               {changePercent !== null ? `${isUp ? '+' : ''}${changePercent.toFixed(2)}%` : '--'}
             </b>
           </div>

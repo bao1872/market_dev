@@ -1,6 +1,6 @@
 strategy_id: watchlist_monitor
 kind: monitor
-version: 1.0.0
+version: 1.1.0
 display_name: 自选股监控
 description: 唯一监控算法，包含布林带穿越和成交量节点触碰检测
 entrypoint: app.strategy.monitors.watchlist_monitor:WatchlistMonitor
@@ -55,6 +55,14 @@ outputs:
   - key: bb_pos
     type: number
     description: 布林带位置（0-1）
+  # [自选股涨跌幅] - 上一交易日收盘价与当日涨跌幅（advice.md 第三节）
+  - key: previous_close
+    type: number
+    description: 上一交易日收盘价（前复权）
+  - key: change_pct
+    type: number
+    unit: percent
+    description: 当日涨跌幅（%）
   # VN 输出（来自 volume_node_monitor）
   - {key: upper_node, type: json}
   - {key: lower_node, type: json}
@@ -78,19 +86,19 @@ event_types:
     state_ttl_seconds: 600
 chart_layers:
   - id: bb
-    name: Bollinger Bands
+    name: 布林带
     renderer: band
     pane: price
     color: "rgba(156,39,176,0.15)"
     fields: [bb_upper, bb_lower, bb_mid]
     hover_fields: [bb_upper, bb_lower, bb_mid]
   - id: volume_node
-    name: Volume Node
+    name: 成交量节点
     renderer: price_zone
     pane: price
     color: "rgba(33,150,243,0.50)"
     fields: [upper_node, lower_node, poc_price]
     hover_fields: [current_price, upper_node, lower_node, position_0_1, poc_price]
-    description: "Volume Node Cluster 区间"
+    description: "成交量节点密集区间"
 resource_budget:
   target_ms_per_instrument: 500

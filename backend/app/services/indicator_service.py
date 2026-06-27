@@ -369,13 +369,13 @@ async def compute_all_indicators(
             # [行情] - 传递 limit 控制 pytdx 拉取量（fetch_count=min(limit+250,1000)，上限 1000）
             # 日线（5000 天回看，与 bars.py 一致）
             daily_bars = await _safe_klines("1d", 5000, 5000)
-            # 15 分钟线（指标计算需要更多数据）
-            bars_15min = await _safe_klines("15m", 800, 800)
+            # 15 分钟线（指标计算需要更多数据，与 indicator_contract.INDICATOR_BARS 对齐）
+            bars_15min = await _safe_klines("15m", INDICATOR_BARS["15m"], INDICATOR_BARS["15m"])
             # 1 分钟线（仅 2 天，用于监控策略）
             bars_minute = await _safe_klines("1m", 2, 2)
-            # 60 分钟线（策略在 timeframe='1h' 时可能需要）
+            # 60 分钟线（策略在 timeframe='1h' 时可能需要，与 INDICATOR_BARS 对齐）
             if timeframe == "1h":
-                bars_60min = await _safe_klines("1h", 800, 800)
+                bars_60min = await _safe_klines("1h", INDICATOR_BARS["1h"], INDICATOR_BARS["1h"])
             # 周线/月线（MACD 按当前 timeframe 计算）
             if timeframe == "1w":
                 bars_weekly = await _safe_klines("1w", 260, 260)

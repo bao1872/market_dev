@@ -1,0 +1,13 @@
+// A 股行情颜色统一口径：上涨=红 / 下跌=绿 / 平盘=灰
+// 与 changePctColorClass() 返回的类名一一对应（adapters.ts）
+// 注意：与 global.scss 中 .pos/.neg（西方口径 绿涨红跌）共存，
+// 仅用于股票价格方向，系统状态仍用 .pos/.neg/.good/.warn
+.market-up { color: #d8413f; }
+.market-down { color: #00a861; }
+.market-flat { color: #9e9e9e; }
+
+// 加粗/强调变体（用于现价、涨跌幅等醒目位置）
+.market-up.strong,
+.strong.market-up { color: #ff1744; }
+.market-down.strong,
+.strong.market-down { color: #00e676; }

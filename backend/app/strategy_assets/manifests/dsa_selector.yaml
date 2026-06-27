@@ -1,7 +1,7 @@
 strategy_id: dsa_selector
 kind: selector
-version: 1.3.0
-display_name: DSA 方向稳定性选股
+version: 1.4.0
+display_name: 趋势稳定性筛选
 entrypoint: strategies.selectors.dsa:DSASelector
 input:
   bar_frequency: 1d
@@ -102,7 +102,7 @@ outputs:
   - {key: vwap_ret_5, type: number, unit: ratio, filterable: true, sortable: true, description: "VWAP 5 日收益"}
   - {key: vwap_ret_10, type: number, unit: ratio, filterable: true, sortable: true, description: "VWAP 10 日收益"}
   - {key: vwap_ret_20, type: number, unit: ratio, filterable: true, sortable: true, description: "VWAP 20 日收益"}
-  - {key: dsa_vwap, type: number, unit: price, filterable: false, sortable: false, description: "DSA VWAP 值"}
+  - {key: dsa_vwap, type: number, unit: price, filterable: false, sortable: false, description: "趋势参考价"}
   - {key: dsa_vwap_dev_pct, type: number, unit: percent, filterable: true, sortable: true, description: "close 相对 VWAP 偏离百分比"}
   - {key: vol_zscore, type: number, unit: zscore, filterable: true, sortable: true, description: "成交量 20 日 zscore"}
   - {key: avg_amount_20d, type: number, unit: amount, filterable: true, sortable: true, description: "20 日平均成交额"}
@@ -119,7 +119,7 @@ outputs:
   - {key: rope_cross_down_price, type: number, unit: price, filterable: true, sortable: true, description: "最近一次 ATR Rope 下穿价格"}
 chart_layers:
   - id: dsa_vwap
-    name: DSA VWAP
+    name: 趋势参考价
     renderer: line
     pane: price
     color: "#ff1744"
@@ -133,6 +133,6 @@ chart_layers:
     anchor_field: anchor_time
     fields: [dsa_vwap, dsa_dir, regime_id, anchor_time, pivot_type, pivot_price]
     hover_fields: [dsa_dir, dsa_vwap, regime_id, pivot_type, pivot_price]
-    description: "DSA 动态摆动锚定 VWAP 线，按 regime 分段着色，锚点标记，Pine 标签"
+    description: "趋势参考价线，按趋势分段着色，锚点标记，Pine 标签"
 resource_budget:
   target_ms_per_instrument: 100

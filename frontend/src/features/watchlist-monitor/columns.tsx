@@ -3,7 +3,7 @@
 import type { DataTableColumn } from '@/components/StrategyDataTable'
 import { getEventLabel } from '@/constants/userFacingLabels'
 import type { WatchlistMonitorRow, MonitorStatus } from './types'
-import { fmtNum, fmtPct, fmtTime } from './adapters'
+import { fmtNum, fmtPct, fmtTime, fmtChangePct, changePctColorClass } from './adapters'
 
 /**
  * [自选监控] - 事件类型翻译（advice.md 第二节通俗化映射）
@@ -61,9 +61,17 @@ export function getWatchlistMonitorColumns(
       filterable: true,
       sortValue: (row) => row.name,
       filterValue: (row) => `${row.name} ${row.symbol}`,
+      // [自选股涨跌幅] - 描述: 第一行=名称+涨跌幅（涨红跌绿），第二行=代码（advice.md 第三节）
       render: (row) => (
         <div>
-          <div className="symbol">{row.name}</div>
+          <div className="symbol">
+            <span>{row.name}</span>
+            {row.change_pct !== null && (
+              <span className={`change-pct ${changePctColorClass(row.change_pct)}`}>
+                {fmtChangePct(row.change_pct)}
+              </span>
+            )}
+          </div>
           <div className="symbol-sub">{row.symbol}</div>
         </div>
       ),

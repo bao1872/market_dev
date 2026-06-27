@@ -39,6 +39,7 @@ services:
       CAPTURE_WORKER_URL: ${CAPTURE_WORKER_URL:-http://worker-capture:8001}
       APP_ENV: production
       TZ: Asia/Shanghai
+      CONFIG_FILE: /app/app/config.production.py
     depends_on:
       redis:
         condition: service_healthy
@@ -48,6 +49,7 @@ services:
       - "8000:8000"
     volumes:
       - ./doc:/doc:ro
+      - /etc/market-dev/config.production.py:/app/app/config.production.py:ro
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
 
   # ===== 行情调度 Worker =====
@@ -62,11 +64,14 @@ services:
       APP_ENV: production
       WORKER_TYPE: bars_scheduler
       TZ: Asia/Shanghai
+      CONFIG_FILE: /app/app/config.production.py
     depends_on:
       redis:
         condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - /etc/market-dev/config.production.py:/app/app/config.production.py:ro
     command: python -m app.worker
 
   # ===== 选股策略调度 Worker =====
@@ -81,11 +86,14 @@ services:
       APP_ENV: production
       WORKER_TYPE: strategy_scheduler
       TZ: Asia/Shanghai
+      CONFIG_FILE: /app/app/config.production.py
     depends_on:
       redis:
         condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - /etc/market-dev/config.production.py:/app/app/config.production.py:ro
     command: python -m app.worker
 
   # ===== 日历调度 Worker =====
@@ -100,11 +108,14 @@ services:
       APP_ENV: production
       WORKER_TYPE: calendar_scheduler
       TZ: Asia/Shanghai
+      CONFIG_FILE: /app/app/config.production.py
     depends_on:
       redis:
         condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - /etc/market-dev/config.production.py:/app/app/config.production.py:ro
     command: python -m app.worker
 
   # ===== 盘中监控 Worker =====
@@ -122,11 +133,14 @@ services:
       FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://frontend}
       CAPTURE_WORKER_URL: ${CAPTURE_WORKER_URL:-http://worker-capture:8001}
       TZ: Asia/Shanghai
+      CONFIG_FILE: /app/app/config.production.py
     depends_on:
       redis:
         condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - /etc/market-dev/config.production.py:/app/app/config.production.py:ro
     command: python -m app.worker
 
   # ===== 策略批量计算 Worker =====
@@ -141,11 +155,14 @@ services:
       APP_ENV: production
       WORKER_TYPE: strategy_batch
       TZ: Asia/Shanghai
+      CONFIG_FILE: /app/app/config.production.py
     depends_on:
       redis:
         condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - /etc/market-dev/config.production.py:/app/app/config.production.py:ro
     command: python -m app.worker
 
   # ===== Outbox 扩张 Worker =====
@@ -160,11 +177,14 @@ services:
       APP_ENV: production
       WORKER_TYPE: outbox
       TZ: Asia/Shanghai
+      CONFIG_FILE: /app/app/config.production.py
     depends_on:
       redis:
         condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - /etc/market-dev/config.production.py:/app/app/config.production.py:ro
     command: python -m app.worker
 
   # ===== 投递 Worker =====
@@ -179,11 +199,14 @@ services:
       APP_ENV: production
       WORKER_TYPE: delivery
       TZ: Asia/Shanghai
+      CONFIG_FILE: /app/app/config.production.py
     depends_on:
       redis:
         condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - /etc/market-dev/config.production.py:/app/app/config.production.py:ro
     command: python -m app.worker
 
   # ===== 盘后编排 Worker（Phase5: 领取 queued 任务，断点恢复+心跳租约）=====
@@ -202,11 +225,14 @@ services:
       FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://frontend}
       CAPTURE_WORKER_URL: ${CAPTURE_WORKER_URL:-http://worker-capture:8001}
       TZ: Asia/Shanghai
+      CONFIG_FILE: /app/app/config.production.py
     depends_on:
       redis:
         condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - /etc/market-dev/config.production.py:/app/app/config.production.py:ro
     command: python -m app.worker
 
   # ===== 截图 Worker =====

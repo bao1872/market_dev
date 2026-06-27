@@ -26,14 +26,19 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
 from app.constants.indicator_contract import (
+    NODE_CLUSTER_LOW_BARS,
+    NODE_CLUSTER_LOW_PERIOD,
+    NODE_CLUSTER_MINUTE_BARS,
+    NODE_CLUSTER_PRIMARY_BARS,
     NODE_CLUSTER_PRIMARY_BARS as VP_LOOKBACK,
+    NODE_CLUSTER_PRIMARY_PERIOD,
     VP_HIGHEST_N_NODES,
     VP_LOWEST_N_NODES,
     VP_NODE_THRESHOLD_PCT,
@@ -249,6 +254,108 @@ def _prepare_bars_for_vp(bars: pd.DataFrame) -> pd.DataFrame:
         else:
             df["datetime"] = pd.to_datetime(df.index, errors="coerce")
     return df
+
+
+# ===== Node Cluster 行情准备函数（advice.md 第四节）=====
+# 参数版本标识：当 indicator_contract 中任一 Node Cluster 参数变更时，应同步更新此字符串
+_NODE_CLUSTER_PARAMETER_VERSION = "v1.1.0"
+
+
+@dataclass
+class NodeClusterBarsResult:
+    """prepare_node_cluster_bars 的返回结果。
+
+    Attributes:
+        daily: 准备后的日线 bars（DatetimeIndex 升序、去重、tail(250)）
+        bars_15m: 准备后的 15 分钟 bars（DatetimeIndex 升序、去重、tail(1200)）
+        bars_minute: 准备后的 1 分钟 bars（DatetimeIndex 升序、去重、tail(2)）
+        profile_meta: 诊断元信息，含输入根数/周期/参数版本
+    """
+
+    daily: pd.DataFrame
+    bars_15m: pd.DataFrame
+    bars_minute: pd.DataFrame
+    profile_meta: dict[str, Any] = field(default_factory=dict)
+
+
+def _dedupe_sort_tail(bars: pd.DataFrame, n: int) -> pd.DataFrame:
+    """统一执行 DatetimeIndex 排序 → 去重(keep=last) → tail(n)。
+
+    Args:
+        bars: 输入 DataFrame，期望 index 为 DatetimeIndex
+        n: 保留最近 n 根
+
+    Returns:
+        准备后的 DataFrame（升序、去重、tail(n)）；空输入返回空 DataFrame
+    """
+    if bars is None or bars.empty:
+        return pd.DataFrame() if bars is None else bars.iloc[0:0]
+
+    df = bars
+    # 若 index 不是 DatetimeIndex，尝试转换
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df = df.copy()
+        df.index = pd.to_datetime(df.index, errors="coerce")
+        # 转换失败的行（NaT）剔除
+        df = df[~df.index.isna()]
+
+    if df.empty:
+        return df.iloc[0:0]
+
+    # 删除重复 index（keep=last 保留最后一条）
+    df = df[~df.index.duplicated(keep="last")]
+    # 升序排序
+    df = df.sort_index()
+    # 取最近 n 根
+    if n > 0 and len(df) > n:
+        df = df.tail(n)
+    return df
+
+
+def prepare_node_cluster_bars(
+    daily_bars: pd.DataFrame,
+    bars_15m: pd.DataFrame,
+    bars_minute: pd.DataFrame,
+) -> NodeClusterBarsResult:
+    """Node Cluster 行情共享准备函数（advice.md 第四节唯一真源）。
+
+    统一执行：
+    1. DatetimeIndex 排序（升序）
+    2. 删除重复 index（keep=last）
+    3. 过滤未完成 Bar（由调用方保证，本函数不再额外过滤）
+    4. daily.tail(NODE_CLUSTER_PRIMARY_BARS) / 15m.tail(NODE_CLUSTER_LOW_BARS) / 1m.tail(NODE_CLUSTER_MINUTE_BARS)
+    5. 数据不足时返回实际根数（不静默改用其他参数），诊断字段记录真实根数
+
+    盘中 MonitorBatchService 和个股详情 IndicatorService 必须调用本函数，
+    禁止各自处理 sort_values/drop_duplicates/tail。
+
+    Args:
+        daily_bars: 日线 OHLCV DataFrame（DatetimeIndex）
+        bars_15m: 15 分钟 OHLCV DataFrame（DatetimeIndex）
+        bars_minute: 1 分钟 OHLCV DataFrame（DatetimeIndex）
+
+    Returns:
+        NodeClusterBarsResult，含准备后的三个 DataFrame 与 profile_meta 诊断字段
+    """
+    daily_prepared = _dedupe_sort_tail(daily_bars, NODE_CLUSTER_PRIMARY_BARS)
+    bars_15m_prepared = _dedupe_sort_tail(bars_15m, NODE_CLUSTER_LOW_BARS)
+    bars_minute_prepared = _dedupe_sort_tail(bars_minute, NODE_CLUSTER_MINUTE_BARS)
+
+    profile_meta: dict[str, Any] = {
+        "input_daily_bars": int(len(daily_prepared)),
+        "input_15m_bars": int(len(bars_15m_prepared)),
+        "input_minute_bars": int(len(bars_minute_prepared)),
+        "primary_period": NODE_CLUSTER_PRIMARY_PERIOD,  # "1d"
+        "low_period": NODE_CLUSTER_LOW_PERIOD,  # "15m"
+        "parameter_version": _NODE_CLUSTER_PARAMETER_VERSION,
+    }
+
+    return NodeClusterBarsResult(
+        daily=daily_prepared,
+        bars_15m=bars_15m_prepared,
+        bars_minute=bars_minute_prepared,
+        profile_meta=profile_meta,
+    )
 
 
 def compute_unified_volume_profile(

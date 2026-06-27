@@ -247,7 +247,7 @@ function SelectionResultCards({
             </div>
             <div>
               <span>日均趋势变化</span>
-              <b className="num pos">{row.avg_return}</b>
+              <b className="num market-up">{row.avg_return}</b>
             </div>
             <div>
               <span>当前强弱位置</span>
@@ -457,7 +457,7 @@ export default function IndexPage() {
         sortable: true,
         filterable: true,
         sortValue: (row) => Number(row.avg_return.replace('%', '')) || 0,
-        render: (row) => <span className="num pos">{row.avg_return}</span>,
+        render: (row) => <span className="num market-up">{row.avg_return}</span>,
       },
       {
         key: 'total_return',
@@ -466,7 +466,7 @@ export default function IndexPage() {
         sortable: true,
         filterable: true,
         sortValue: (row) => Number(row.total_return.replace('%', '')) || 0,
-        render: (row) => <span className="num pos">{row.total_return}</span>,
+        render: (row) => <span className="num market-up">{row.total_return}</span>,
       },
       {
         key: 'offset_mean',

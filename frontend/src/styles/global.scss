@@ -2,6 +2,7 @@
 // 包含：reset、布局壳、侧栏、顶栏、卡片、表格、图表、编辑器、模态框、Toast 等全部样式
 // 变量来源：./variables.scss
 @use 'variables' as v;
+@use 'market-colors';
 
 * { box-sizing: border-box; }
 
@@ -1021,6 +1022,14 @@ button { cursor: pointer; }
 .filter-pop-actions { display: flex; justify-content: flex-end; gap: 7px; }
 .table-empty-row td { padding: 32px !important; }
 .table-empty-state { display: flex; flex-direction: column; align-items: center; gap: 5px; color: v.$color-muted; b { color: #ccd3df; font-weight: 650; } }
+
+// [StrategyDataTable] - 描述: 紧凑表格布局（选股页等列多场景），允许表头两行、单元格 padding 6~8px
+.compact-table thead th { white-space: normal; }
+.compact-table .th-shell { min-height: auto; align-items: flex-start; padding: 2px 0; }
+.compact-table .th-sort { height: auto; min-height: 30px; padding: 4px 6px 4px 8px; }
+.compact-table .th-label { white-space: normal; overflow: visible; text-overflow: clip; }
+.compact-table td { padding: 6px 8px; }
+.compact-table .symbol-sub { white-space: nowrap; }
 
 button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; text-align: left; cursor: pointer; font: inherit; &:hover { border-color: #425273; background: #191f2b; } &.active { outline: 1px solid rgba(79, 124, 255, .36); } }
 .strategy-tabs-bar.compact { margin: 0; padding: 3px; display: inline-flex; border-radius: 7px; .strategy-tab { height: 28px; padding: 0 10px; font-size: 10px; } }

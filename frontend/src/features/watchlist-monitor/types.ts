@@ -17,6 +17,9 @@ export interface WatchlistMonitorRow {
   market: string
   monitor_status: MonitorStatus
   current_price: number | null
+  // [自选股涨跌幅] - 描述: 上一交易日收盘价与当日涨跌幅（advice.md 第三节）
+  previous_close: number | null
+  change_pct: number | null
   bb_upper: number | null
   bb_mid: number | null
   bb_lower: number | null

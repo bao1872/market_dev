@@ -2,7 +2,7 @@
 // 职责：在窄屏下以卡片形式展示自选监控数据
 import type { WatchlistMonitorRow } from './types'
 import { MonitorStatusBadge, translateEventType } from './columns'
-import { fmtNum, fmtPct } from './adapters'
+import { fmtNum, fmtPct, fmtChangePct, changePctColorClass } from './adapters'
 
 interface WatchlistMonitorCardProps {
   row: WatchlistMonitorRow
@@ -23,7 +23,15 @@ function WatchlistMonitorCard({
     <div className="watchlist-monitor-card">
       <div className="watchlist-card-head">
         <div>
-          <div className="symbol">{row.name}</div>
+          {/* [自选股涨跌幅] - 描述: 第一行=名称+涨跌幅（涨红跌绿），第二行=代码（advice.md 第三节） */}
+          <div className="symbol">
+            <span>{row.name}</span>
+            {row.change_pct !== null && (
+              <span className={`change-pct ${changePctColorClass(row.change_pct)}`}>
+                {fmtChangePct(row.change_pct)}
+              </span>
+            )}
+          </div>
           <div className="symbol-sub">{row.symbol}</div>
         </div>
         <MonitorStatusBadge status={row.monitor_status} />

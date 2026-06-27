@@ -59,13 +59,13 @@ export const LAYERS: Record<string, LayerDef> = {
   },
   dsa: {
     id: 'dsa',
-    name: 'DSA VWAP',
-    shortName: 'DSA',
+    name: '趋势参考价',
+    shortName: '趋势',
     group: '选股策略',
     renderer: 'line',
     pane: 'price',
     color: '#ff1744',
-    description: 'DSA 动态摆动锚定 VWAP 线与 Pine 标签',
+    description: '趋势参考价线与 Pine 标签',
     defaultVisible: false,
   },
   macd: {
@@ -103,8 +103,8 @@ export const LAYERS: Record<string, LayerDef> = {
   },
   node: {
     id: 'node',
-    name: '自选监控',
-    shortName: 'NODE',
+    name: '成交量节点',
+    shortName: '节点',
     group: '监控策略',
     renderer: 'price_zone',
     pane: 'price',
@@ -148,7 +148,7 @@ export const LAYERS: Record<string, LayerDef> = {
   },
   bb: {
     id: 'bb',
-    name: 'Bollinger Bands',
+    name: '布林带',
     shortName: 'BB',
     group: '监控策略',
     renderer: 'band',
@@ -185,9 +185,9 @@ export const LAYERS: Record<string, LayerDef> = {
 export const STRATEGIES: Record<string, StrategyDef> = {
   dsa_selector: {
     id: 'dsa_selector',
-    name: 'DSA 方向稳定性',
+    name: '趋势稳定性',
     kind: 'selection',
-    version: '2.3.0',
+    version: '1.4.0',
     layers: ['volume', 'dsa', 'selection'],
     defaultLayers: ['volume', 'dsa', 'selection', 'macd'],
   },
@@ -201,9 +201,9 @@ export const STRATEGIES: Record<string, StrategyDef> = {
   },
   watchlist_monitor: {
     id: 'watchlist_monitor',
-    name: '自选监控',
+    name: '自选股监控',
     kind: 'monitor',
-    version: '1.0.0',
+    version: '1.1.0',
     layers: ['volume', 'profile', 'node', 'poc', 'bb', 'events'],
     defaultLayers: ['volume', 'profile', 'node', 'poc', 'bb', 'events', 'macd'],
   },
@@ -211,7 +211,7 @@ export const STRATEGIES: Record<string, StrategyDef> = {
 
 // ===== 字段级描述（用于表头 helpText、文档生成等）=====
 export const FIELD_DESCRIPTIONS: Record<string, string> = {
-  dsa_dir_bars: '当前 DSA 趋势方向已持续的 K 线根数；负值表示空头方向，正值表示多头方向。',
+  dsa_dir_bars: '当前趋势方向已持续的 K 线根数；负值表示空头方向，正值表示多头方向。',
 }
 
 // ===== 计算窗口（对应原型 CALCULATION_WINDOWS）=====
@@ -271,9 +271,9 @@ export interface DisplayGroupDef {
 }
 
 export const DISPLAY_GROUPS: Record<string, DisplayGroupDef> = {
-  dsa: { id: 'dsa', name: 'DSA 方向稳定性', shortName: 'DSA', section: '选股策略', color: '#ff1744', description: '动态摆动锚定 VWAP · 选股命中标记', layers: ['dsa', 'selection'], anchorLayer: 'dsa' },
+  dsa: { id: 'dsa', name: '趋势稳定性', shortName: '趋势', section: '选股策略', color: '#ff1744', description: '趋势参考价 · 选股命中标记', layers: ['dsa', 'selection'], anchorLayer: 'dsa' },
   breakout: { id: 'breakout', name: '突破强度', shortName: '突破', section: '选股策略', color: '#ef5350', description: '压力区 · 突破确认 · 选股命中标记', layers: ['breakout', 'selection'], anchorLayer: 'breakout' },
-  node: { id: 'node', name: 'Node Cluster', shortName: 'NODE', section: '监控策略', color: '#4f7cff', description: '筹码峰 · 节点区间 · POC · 事件标记', layers: ['profile', 'node', 'poc'], anchorLayer: 'node' },
-  bb: { id: 'bb', name: 'Bollinger Bands', shortName: 'BB', section: '监控策略', color: '#9c27b0', description: '布林带 · SMA(20) ± 2σ', layers: ['bb'], anchorLayer: 'bb' },
+  node: { id: 'node', name: '成交量节点', shortName: '节点', section: '监控策略', color: '#4f7cff', description: '筹码峰 · 节点区间 · POC · 事件标记', layers: ['profile', 'node', 'poc'], anchorLayer: 'node' },
+  bb: { id: 'bb', name: '布林带', shortName: 'BB', section: '监控策略', color: '#9c27b0', description: '布林带 · SMA(20) ± 2σ', layers: ['bb'], anchorLayer: 'bb' },
   macd: { id: 'macd', name: 'MACD', shortName: 'MACD', section: '技术指标', color: '#f4c430', description: 'MACD 副图 · DIF/DEA/Histogram', layers: ['macd'], anchorLayer: 'macd' },
 }
