@@ -49,6 +49,10 @@ _RETRY_BACKOFF_BASE = 30
 DEFAULT_QUIET_HOURS_START = 22
 DEFAULT_QUIET_HOURS_END = 8
 
+# [DeliveryWorker] - 用户主动触发的 source_type 集合：不受静默期限制，立即投递
+# 监控自动触发的 source_type（如 monitor_event）仍受静默期保护，避免深夜打扰
+_USER_TRIGGERED_SOURCE_TYPES = frozenset({"stock_detail_share"})
+
 # 通知投递 Worker 默认时区（上海时区）
 _CST = ZoneInfo("Asia/Shanghai")
 
@@ -208,17 +212,35 @@ async def process_pending_deliveries(
     if not pending_deliveries:
         return 0
 
-    # 静默时段：统一 deferred 为 retrying，不投递
+    # [DeliveryWorker] - 静默时段处理：用户主动触发的投递立即执行，监控自动触发的延迟
+    # 原因：用户点击"发送到飞书"按钮期望立即送达，不应被静默期延迟；
+    #       监控通知才需要静默期保护，避免深夜打扰。
     if quiet_hours:
+        deferred = []
+        immediate = []
         for delivery in pending_deliveries:
+            source_type = getattr(
+                getattr(delivery, "message", None), "source_type", None,
+            )
+            if source_type in _USER_TRIGGERED_SOURCE_TYPES:
+                immediate.append(delivery)
+            else:
+                deferred.append(delivery)
+
+        # 延迟非用户主动触发的投递
+        for delivery in deferred:
             delivery.status = "retrying"
             delivery.next_attempt_at = _compute_next_attempt_at(now)
             logger.info(
                 "静默时段延迟投递: delivery_id=%s next_attempt_at=%s",
                 delivery.id, delivery.next_attempt_at,
             )
+
+        # 用户主动触发的投递立即执行（不受静默期限制）
+        pending_deliveries = immediate
         await db.flush()
-        return 0
+        if not pending_deliveries:
+            return 0
 
     success_count = 0
     for delivery in pending_deliveries:

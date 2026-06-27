@@ -431,5 +431,157 @@ async def test_execute_failure_writes_failed_event(db_session) -> None:
     assert job_run.finished_at is not None
 
 
+@pytest.mark.asyncio
+async def test_execute_starts_heartbeat_loop_during_long_refresh(db_session) -> None:
+    """测试 6：长阶段（refresh_all_instruments）执行期间应启动后台心跳任务，防止 watchdog 误判 stale。
+
+    场景：c1fec906 任务在 refreshing_daily 阶段调用 refresh_all_instruments（约13分钟），
+    期间无 heartbeat_at 更新，watchdog 60s 阈值误判任务 interrupted。
+
+    修复：在 refresh_all_instruments 调用前启动 _job_run_heartbeat_loop 后台任务，
+    完成后取消。本测试验证 _job_run_heartbeat_loop 被调用。
+    """
+    import asyncio as _asyncio
+
+    dsa_run, _ = await _create_dsa_strategy_run(db_session, status="completed")
+    job_run = await _create_after_close_job_run(db_session)
+    initial_heartbeat = job_run.heartbeat_at
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return db_session
+        async def __aexit__(self, *args):
+            return False
+
+    fake_session_local = MagicMock(return_value=_FakeSessionContext())
+
+    fake_batch_result = BatchResult(total=100, succeeded=95)
+    fake_batch_result.dsa_run_id = dsa_run.id
+    fake_batch_result.daily_covered = 95
+    fake_batch_result.daily_total = 100
+    fake_batch_result.daily_coverage = 0.95
+
+    fake_published_run = MagicMock()
+    fake_published_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+
+    # 记录心跳任务调用
+    heartbeat_calls = []
+
+    async def _fake_heartbeat_loop(*args, **kwargs):
+        heartbeat_calls.append({"args": args, "kwargs": kwargs})
+        # 模拟心跳任务运行直到被取消
+        try:
+            await _asyncio.sleep(100)
+        except _asyncio.CancelledError:
+            pass
+
+    # refresh_all_instruments 执行期间，心跳任务应已启动
+    refresh_started = _asyncio.Event()
+
+    async def _fake_refresh(*args, **kwargs):
+        refresh_started.set()
+        # 让心跳任务有机会被创建
+        await _asyncio.sleep(0.05)
+        return fake_batch_result
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        new=fake_session_local,
+    ), patch.object(
+        db_session, "commit", new=db_session.flush,
+    ), patch.object(
+        db_session, "get",
+        new=AsyncMock(side_effect=lambda model, id: {
+            (SchedulerJobRun, job_run.id): job_run,
+            (StrategyRun, dsa_run.id): dsa_run,
+        }.get((model, id))),
+    ), patch(
+        "app.services.after_close_orchestrator._job_run_heartbeat_loop",
+        new=_fake_heartbeat_loop,
+    ), patch.object(
+        BarsSchedulerService, "refresh_all_instruments",
+        new=_fake_refresh,
+    ), patch(
+        "app.services.after_close_orchestrator._poll_dsa_run_status",
+        new=AsyncMock(return_value="completed"),
+    ), patch.object(
+        StrategyBatchService, "_check_quality_gates",
+        new=AsyncMock(return_value=True),
+    ), patch.object(
+        StrategyBatchService, "publish_run",
+        new=AsyncMock(return_value=fake_published_run),
+    ):
+        await execute_after_close_run(
+            job_run_id=job_run.id,
+            trade_date=date(2026, 6, 25),
+            dsa_poll_interval=0,
+            dsa_poll_timeout=1,
+        )
+
+    # 验证心跳任务被启动 1 次
+    assert len(heartbeat_calls) == 1, (
+        f"应启动 1 次后台心跳任务，实际 {len(heartbeat_calls)} 次"
+    )
+    # 验证 refresh_all_instruments 被调用（事件已 set）
+    assert refresh_started.is_set(), "refresh_all_instruments 应被调用"
+
+
+@pytest.mark.asyncio
+async def test_update_orchestrator_status_preserves_mode_field(db_session) -> None:
+    """[TDD-RED] - 验证 _update_orchestrator_status 保留 mode 字段。
+
+    场景：dsa_only 任务已有 metadata.mode='dsa_only'，调用 _update_orchestrator_status
+    切换状态后，mode 字段应保留（与 last_completed_step 同等对待）。
+
+    根因：原实现 _update_orchestrator_status 只保留 last_completed_step，
+    每次 state 切换都会丢失 mode 字段，导致 worker 无法识别 dsa_only 模式，
+    重新走了 refreshing_daily 步骤。
+
+    given: job_run.metadata_json 含 mode='dsa_only' + last_completed_step='daily_ready'
+    when: 调用 _update_orchestrator_status(status=QUEUED)
+    then: 新 metadata_json 仍含 mode='dsa_only' + last_completed_step='daily_ready'
+    """
+    from app.services.after_close_orchestrator import (
+        AfterCloseRunStatus,
+        _update_orchestrator_status,
+    )
+
+    # 准备：创建已有 mode=dsa_only 的 job_run
+    job_run = await _create_after_close_job_run(
+        db_session,
+        status="interrupted",
+        orchestrator_status="interrupted",
+    )
+    # 手动设置含 mode 字段的 metadata
+    job_run.metadata_json = json.dumps({
+        "orchestrator_status": "interrupted",
+        "trade_date": "2026-06-25",
+        "mode": "dsa_only",
+        "last_completed_step": "daily_ready",
+    }, ensure_ascii=False)
+    await db_session.flush()
+
+    # 执行：调用 _update_orchestrator_status 切换到 QUEUED（模拟 resume）
+    await _update_orchestrator_status(
+        db=db_session,
+        job_run=job_run,
+        status=AfterCloseRunStatus.QUEUED,
+        message="[resume] 从断点恢复",
+    )
+    await db_session.flush()
+
+    # 验证：mode 字段应保留
+    meta = json.loads(job_run.metadata_json)
+    assert meta["orchestrator_status"] == "queued", (
+        f"orchestrator_status 应为 queued，实际 {meta.get('orchestrator_status')}"
+    )
+    assert meta.get("mode") == "dsa_only", (
+        f"mode 字段应保留为 'dsa_only'，实际 metadata={meta}（根因：_update_orchestrator_status 丢失 mode 字段）"
+    )
+    assert meta.get("last_completed_step") == "daily_ready", (
+        f"last_completed_step 应保留，实际 {meta.get('last_completed_step')}"
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

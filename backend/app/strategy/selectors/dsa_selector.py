@@ -155,17 +155,21 @@ def _safe_float(val: Any) -> float | None:
         return None
 
 
-def _safe_date(val: Any) -> date | None:
-    """安全转换为 date，NaT 返回 None。"""
+def _safe_date(val: Any) -> str | None:
+    """[DsaSelector] - 安全转换为 ISO 8601 日期字符串，NaT 返回 None。
+
+    返回字符串而非 date 对象：metrics 会被写入 strategy_results.payload (JSONB)，
+    json.dumps 无法序列化 date 对象（会抛 Object of type date is not JSON serializable）。
+    """
     if val is None or pd.isna(val):
         return None
     if isinstance(val, pd.Timestamp):
-        return val.date()
+        return val.date().isoformat()
     if isinstance(val, date):
-        return val
+        return val.isoformat()
     try:
         ts = pd.to_datetime(val)
-        return ts.date() if pd.notna(ts) else None
+        return ts.date().isoformat() if pd.notna(ts) else None
     except (TypeError, ValueError):
         return None
 

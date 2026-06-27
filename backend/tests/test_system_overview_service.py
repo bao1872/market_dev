@@ -1327,3 +1327,96 @@ async def test_pipeline_job_run_id_none_when_no_orchestrator_job(db_session):
     assert pipeline["last_completed_step"] is None
     assert pipeline["heartbeat_at"] is None
     assert pipeline["lease_expires_at"] is None
+
+
+# ==================== 股票代码过滤一致性测试 ====================
+
+
+@pytest.mark.asyncio
+async def test_compute_bars_coverage_excludes_non_stocks(db_session):
+    """[TDD] - _compute_bars_coverage 分子和分母都只算 A 股股票，排除指数/基金/ETF。
+
+    场景：构造 2 只股票 + 1 只指数 + 1 只 ETF，全部 active。
+    股票和指数都有 bars_daily 记录（模拟 bars_daily 残留指数数据的情况）。
+    预期：覆盖率 = 2/2 = 1.0（分子分母都不含指数/ETF）
+    """
+    from app.models.bar import BarDaily
+    from app.models.instrument import Instrument
+    from app.services.system_overview_service import _compute_bars_coverage
+
+    trade_date = date(2026, 6, 24)
+
+    # 2 只股票
+    stock1 = Instrument(id=uuid.uuid4(), symbol="600519", name="贵州茅台", market="SH", status="active")
+    stock2 = Instrument(id=uuid.uuid4(), symbol="000001", name="平安银行", market="SZ", status="active")
+    # 1 只指数（SH 000xxx）
+    index = Instrument(id=uuid.uuid4(), symbol="000016", name="上证50", market="SH", status="active")
+    # 1 只 ETF（SH 510xxx）
+    etf = Instrument(id=uuid.uuid4(), symbol="510050", name="上证50ETF", market="SH", status="active")
+    db_session.add_all([stock1, stock2, index, etf])
+    await db_session.flush()
+
+    # 股票 + 指数 都有 bars_daily 记录（模拟 bars_daily 残留指数数据）
+    db_session.add(BarDaily(
+        instrument_id=stock1.id, trade_date=trade_date,
+        open="100.0", high="101.0", low="99.0", close="100.5",
+        volume="10000", amount="1000000.0",
+    ))
+    db_session.add(BarDaily(
+        instrument_id=stock2.id, trade_date=trade_date,
+        open="10.0", high="11.0", low="9.0", close="10.5",
+        volume="10000", amount="100000.0",
+    ))
+    # 指数也有 bars_daily 记录（应被分子过滤排除）
+    db_session.add(BarDaily(
+        instrument_id=index.id, trade_date=trade_date,
+        open="3000.0", high="3010.0", low="2990.0", close="3005.0",
+        volume="100000000", amount="3000000000.0",
+    ))
+    await db_session.flush()
+
+    coverage = await _compute_bars_coverage(db_session, trade_date)
+
+    # 分子应为 2（仅股票的日线），而非 3（含指数）
+    # 分母应为 2（仅股票），而非 4（含指数/ETF）
+    # 覆盖率 = 2/2 = 1.0
+    assert coverage is not None, "覆盖率不应为 None（有活跃股票）"
+    assert coverage == 1.0, (
+        f"覆盖率应为 1.0（2 股票 / 2 股票），实际 {coverage}。"
+        f"若分子含指数，覆盖率会变为 1.5（3/2）；"
+        f"若分母含指数/ETF，覆盖率会变为 0.75（3/4）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_dsa_backfill_resolve_active_instruments_excludes_non_stocks(db_session):
+    """[TDD] - DsaBackfillService._resolve_active_instruments 只返回 A 股股票。
+
+    场景：构造 2 只股票 + 1 只指数 + 1 只 ETF，全部 active。
+    预期：只返回 2 只股票的 (id, symbol)，不含指数/ETF。
+    """
+    from app.models.instrument import Instrument
+    from app.services.dsa_backfill_service import DSABackfillService
+
+    # 2 只股票
+    stock1 = Instrument(id=uuid.uuid4(), symbol="600519", name="贵州茅台", market="SH", status="active")
+    stock2 = Instrument(id=uuid.uuid4(), symbol="000001", name="平安银行", market="SZ", status="active")
+    # 1 只指数（SH 000xxx）
+    index = Instrument(id=uuid.uuid4(), symbol="000016", name="上证50", market="SH", status="active")
+    # 1 只 ETF（SH 510xxx）
+    etf = Instrument(id=uuid.uuid4(), symbol="510050", name="上证50ETF", market="SH", status="active")
+    db_session.add_all([stock1, stock2, index, etf])
+    await db_session.flush()
+
+    service = DSABackfillService()
+    instruments = await service._resolve_active_instruments(db_session)
+
+    # 只应返回 2 只股票，不含指数/ETF
+    assert len(instruments) == 2, (
+        f"应只返回 2 只股票，实际返回 {len(instruments)} 个标的。"
+        f"若未过滤，会返回 4 个（含指数/ETF）"
+    )
+    symbols = {sym for _, sym in instruments}
+    assert symbols == {"600519", "000001"}, (
+        f"应返回股票 600519/000001，实际 {symbols}"
+    )

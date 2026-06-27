@@ -422,7 +422,7 @@ async def get_share_status(
         return {
             "test_run_id": str(test_run_id),
             "message_group_id": None,
-            "text_status": "pending",
+            "card_status": "pending",
             "image_status": "pending",
             "overall_status": "pending",
             "failed_step": None,
@@ -434,10 +434,12 @@ async def get_share_status(
     message_group_id = deliveries[0].message_group_id
 
     # 按 delivery_type 分类
-    text_deliveries = [d for d in deliveries if d.delivery_type == "text"]
+    # [StockDetailFeishu] - 文本/卡片投递 delivery_type=card（advice.md 第一节：恢复 interactive card），
+    # 图片投递 delivery_type=image。状态查询按 card/image 分类返回。
+    card_deliveries = [d for d in deliveries if d.delivery_type == "card"]
     image_deliveries = [d for d in deliveries if d.delivery_type == "image"]
 
-    text_status = text_deliveries[0].status if text_deliveries else "not_created"
+    card_status = card_deliveries[0].status if card_deliveries else "not_created"
     image_status = image_deliveries[0].status if image_deliveries else "not_created"
 
     # 汇总 overall_status + failed_step + error_code + error_message
@@ -474,7 +476,7 @@ async def get_share_status(
     return {
         "test_run_id": str(test_run_id),
         "message_group_id": message_group_id,
-        "text_status": text_status,
+        "card_status": card_status,
         "image_status": image_status,
         "overall_status": overall_status,
         "failed_step": failed_step,

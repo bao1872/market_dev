@@ -57,6 +57,7 @@ from app.models.strategy_run import (
 from app.repositories import strategy_result_repository
 from app.repositories.bar_repository import get_bars
 from app.services.calendar_service import is_trading_day_async
+from app.services.instrument_maintenance_service import stock_symbol_sql_filter
 from app.services.strategy_service import (
     StrategyNotFoundError,
     list_versions,
@@ -1007,10 +1008,11 @@ class StrategyBatchService:
             )
 
         # 2. 标的状态统计（active/suspended/delisted）
+        # [StrategyBatch] - active_count 仅算 A 股股票（排除指数/基金/ETF），与覆盖率分母口径一致
         active_count = int(await db.scalar(
             select(func.count()).select_from(Instrument).where(
                 Instrument.status == "active"
-            )
+            ).where(stock_symbol_sql_filter(Instrument))
         ) or 0)
 
         if active_count == 0:
@@ -1036,11 +1038,14 @@ class StrategyBatchService:
             )
         ) or 0)
 
-        # 3. 当日 K 线数量
+        # 3. 当日 K 线数量（仅算 A 股股票的 K 线，与 active_count 口径一致）
+        # [StrategyBatch] - JOIN instruments + stock_symbol_sql_filter 排除指数/基金/ETF 的 K 线
         bars_count = int(await db.scalar(
-            select(func.count()).select_from(BarDaily).where(
-                BarDaily.trade_date == trade_date
-            )
+            select(func.count()).select_from(BarDaily)
+            .join(Instrument, BarDaily.instrument_id == Instrument.id)
+            .where(BarDaily.trade_date == trade_date)
+            .where(Instrument.status == "active")
+            .where(stock_symbol_sql_filter(Instrument))
         ) or 0)
 
         # 4. 覆盖率检查
@@ -1054,11 +1059,12 @@ class StrategyBatchService:
 
         # 5. 新上市标的检查（上市 < 30 天）
         new_listing_cutoff = trade_date - timedelta(days=30)
+        # [StrategyBatch] - new_listing_count 也只算 A 股股票，与 active_count 口径一致
         new_listing_count = int(await db.scalar(
             select(func.count()).select_from(Instrument).where(
                 Instrument.status == "active",
                 Instrument.listing_date >= new_listing_cutoff,
-            )
+            ).where(stock_symbol_sql_filter(Instrument))
         ) or 0)
 
         if new_listing_count > 0:
@@ -1070,10 +1076,13 @@ class StrategyBatchService:
         prev_trade_date = await self._get_previous_trade_date(db, trade_date)
         prev_bars_count = 0
         if prev_trade_date is not None:
+            # [StrategyBatch] - prev_bars_count 也只算 A 股股票 K 线，与 bars_count 口径一致
             prev_bars_count = int(await db.scalar(
-                select(func.count()).select_from(BarDaily).where(
-                    BarDaily.trade_date == prev_trade_date
-                )
+                select(func.count()).select_from(BarDaily)
+                .join(Instrument, BarDaily.instrument_id == Instrument.id)
+                .where(BarDaily.trade_date == prev_trade_date)
+                .where(Instrument.status == "active")
+                .where(stock_symbol_sql_filter(Instrument))
             ) or 0)
 
         # 当日数据量 < 前一交易日的 50%，可能导入未完成
@@ -1238,17 +1247,20 @@ class StrategyBatchService:
     ) -> list[uuid.UUID]:
         """解析当日有行情的活跃标的列表。
 
+        [StrategyBatch] - 描述: 只解析 A 股股票（排除指数/基金/ETF），与覆盖率分母口径一致
+
         Args:
             db: 异步会话
             trade_date: 交易日
 
         Returns:
-            标的 ID 列表
+            标的 ID 列表（仅 A 股股票）
         """
-        # 查询当日有 K 线的活跃标的
+        # 查询当日有 K 线的活跃股票（排除指数/基金/ETF）
         stmt = (
             select(Instrument.id)
             .where(Instrument.status == "active")
+            .where(stock_symbol_sql_filter(Instrument))
             .order_by(Instrument.id)
         )
         result = await db.execute(stmt)

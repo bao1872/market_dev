@@ -104,12 +104,13 @@ def _override_get_db(session: AsyncSession) -> None:
 async def _create_active_instruments(
     db_session: AsyncSession, count: int
 ) -> list[Instrument]:
-    """创建 count 个活跃股票（status='active'），symbol 用 uuid 避免冲突。"""
+    """创建 count 个活跃股票（status='active'），symbol 用 002xxx 模式符合 A 股代码规则。"""
     instruments = []
     for i in range(count):
         inst = Instrument(
             id=uuid.uuid4(),
-            symbol=f"TS{uuid.uuid4().hex[:6]}",
+            # [测试] - symbol 用 002xxx 模式（SZ 中小板），匹配 stock_symbol_sql_filter
+            symbol=f"002{uuid.uuid4().hex[:3].upper()}",
             name=f"测试标的{i}",
             market="SZ",
             status="active",

@@ -751,6 +751,130 @@ class TestOutboxDeliveryPipeline:
         assert instruments[0]["symbol"] == test_instrument.symbol
         assert instruments[0]["name"] == test_instrument.name
 
+    @pytest.mark.asyncio
+    async def test_user_triggered_delivery_skips_quiet_hours(self) -> None:
+        """用户主动触发的投递（source_type=stock_detail_share）在静默时段应立即投递，不延迟。
+
+        场景：用户在 22:30 点击"发送到飞书"按钮，delivery_type=card/image，
+        应立即调用 _execute_delivery 投递，而不是被静默期延迟到次日 08:00。
+        """
+        from zoneinfo import ZoneInfo
+        from app.models.notification import (
+            MessageDelivery,
+            NotificationChannel,
+            NotificationMessage,
+        )
+
+        cst = ZoneInfo("Asia/Shanghai")
+        msg = NotificationMessage(
+            id=uuid4(),
+            user_id=uuid4(),
+            message_type="STOCK_DETAIL_SHARE",
+            template_key="stock_detail_share",
+            template_version="1.0.0",
+            source_type="stock_detail_share",
+            body={"title": "贵州茅台"},
+            idempotency_key="test:msg:user:1",
+        )
+        channel = NotificationChannel(
+            id=uuid4(),
+            user_id=msg.user_id,
+            adapter_type="feishu_webhook",
+            display_name="测试Webhook",
+            target_config={"webhook_url": "http://example.com/hook"},
+            status="active",
+        )
+        delivery = MessageDelivery(
+            id=uuid4(),
+            notification_message_id=msg.id,
+            channel_id=channel.id,
+            status="pending",
+            delivery_type="card",
+            attempt_count=0,
+            idempotency_key="test:delivery:user:1",
+        )
+        delivery.message = msg
+        delivery.channel = channel
+
+        mock_db = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [delivery]
+        mock_db.execute = AsyncMock(return_value=mock_result)
+
+        quiet_now = datetime(2026, 6, 24, 22, 30, tzinfo=cst)
+
+        async def _fake_execute(db, d):
+            d.status = "success"
+
+        with patch(
+            "app.services.delivery_worker._execute_delivery",
+            new=_fake_execute,
+        ):
+            count = await process_pending_deliveries(
+                mock_db, batch_size=10, quiet_hours=True, now=quiet_now,
+            )
+
+        assert count == 1, "用户主动触发的投递应立即执行并返回成功计数"
+        assert delivery.status == "success", "delivery 应被投递成功，而不是延迟"
+        assert delivery.next_attempt_at is None, "不应设置 next_attempt_at"
+
+    @pytest.mark.asyncio
+    async def test_monitor_delivery_still_deferred_in_quiet_hours(self) -> None:
+        """监控自动触发的投递（source_type=monitor_event）在静默时段仍应延迟到次日 08:00。"""
+        from zoneinfo import ZoneInfo
+        from app.models.notification import (
+            MessageDelivery,
+            NotificationChannel,
+            NotificationMessage,
+        )
+
+        cst = ZoneInfo("Asia/Shanghai")
+        msg = NotificationMessage(
+            id=uuid4(),
+            user_id=uuid4(),
+            message_type="MONITOR_EVENT",
+            template_key="monitor_event",
+            template_version="1.1.0",
+            source_type="monitor_event",
+            body={"title": "监控事件"},
+            idempotency_key="test:msg:monitor:1",
+        )
+        channel = NotificationChannel(
+            id=uuid4(),
+            user_id=msg.user_id,
+            adapter_type="feishu_webhook",
+            display_name="测试Webhook",
+            target_config={"webhook_url": "http://example.com/hook"},
+            status="active",
+        )
+        delivery = MessageDelivery(
+            id=uuid4(),
+            notification_message_id=msg.id,
+            channel_id=channel.id,
+            status="pending",
+            delivery_type="card",
+            attempt_count=0,
+            idempotency_key="test:delivery:monitor:1",
+        )
+        delivery.message = msg
+        delivery.channel = channel
+
+        mock_db = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [delivery]
+        mock_db.execute = AsyncMock(return_value=mock_result)
+
+        quiet_now = datetime(2026, 6, 24, 22, 30, tzinfo=cst)
+
+        count = await process_pending_deliveries(
+            mock_db, batch_size=10, quiet_hours=True, now=quiet_now,
+        )
+
+        assert count == 0
+        assert delivery.status == "retrying"
+        assert delivery.next_attempt_at is not None
+        assert delivery.next_attempt_at.hour == 8
+
 
 # ==================== 消息 DTO 结构化字段测试（Task 12） ====================
 

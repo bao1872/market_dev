@@ -154,6 +154,9 @@ async def _update_orchestrator_status(
     # [Phase5] - 保留 last_completed_step 用于断点恢复
     if "last_completed_step" in existing_meta:
         new_meta["last_completed_step"] = existing_meta["last_completed_step"]
+    # [Phase6] - 保留 mode 字段用于 dsa_only 模式识别（Worker 根据此字段跳过 refreshing_daily）
+    if "mode" in existing_meta:
+        new_meta["mode"] = existing_meta["mode"]
     if extra:
         for k, v in extra.items():
             if k not in ("orchestrator_status", "trade_date", "dsa_run_id"):
@@ -258,7 +261,8 @@ async def compute_daily_coverage(
 
     口径与 BarsSchedulerService._check_daily_coverage_and_trigger_dsa 对齐：
     - 覆盖数：bars_daily 表中 trade_date 当日不同 instrument_id 数
-    - 总数：instruments 表中 status='active' 的股票数
+    - 总数：instruments 表中 status='active' 且为 A 股股票代码的标的数
+      （排除指数/基金/ETF，因为这些标的不写入 bars_daily，计入分母会导致覆盖率虚低）
     - 覆盖率 = covered / total（total=0 时返 0.0）
 
     [Phase6] - 描述: dsa-only 端点专用，避免调用 _check_daily_coverage_and_trigger_dsa
@@ -269,21 +273,29 @@ async def compute_daily_coverage(
         trade_date: 交易日期
 
     Returns:
-        (covered, total, coverage)：覆盖数、活跃总数、覆盖率（0.0-1.0）
+        (covered, total, coverage)：覆盖数、活跃股票总数、覆盖率（0.0-1.0）
     """
     from sqlalchemy import func as sa_func
 
     from app.models.bar import BarDaily
     from app.models.instrument import Instrument
+    from app.services.instrument_maintenance_service import stock_symbol_sql_filter
 
+    # [AfterClose] - 分子也只算 A 股股票（JOIN instruments + stock_symbol_sql_filter）
+    # bars_daily 中可能残留指数/基金/ETF 的日线数据，必须过滤
     daily_count_result = await db.execute(
         select(sa_func.count(sa_func.distinct(BarDaily.instrument_id)))
+        .join(Instrument, BarDaily.instrument_id == Instrument.id)
         .where(BarDaily.trade_date == trade_date)
+        .where(stock_symbol_sql_filter(Instrument))
     )
     covered = daily_count_result.scalar() or 0
 
+    # [AfterClose] - 分母仅算 A 股股票（排除指数/基金/ETF），与 BarsSchedulerService 口径一致
     active_count_result = await db.execute(
-        select(sa_func.count(Instrument.id)).where(Instrument.status == "active")
+        select(sa_func.count(Instrument.id))
+        .where(Instrument.status == "active")
+        .where(stock_symbol_sql_filter(Instrument))
     )
     total = active_count_result.scalar() or 0
 
@@ -318,6 +330,45 @@ async def _update_heartbeat_and_step(
     meta["last_completed_step"] = last_completed_step
     job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
     await db.flush()
+
+
+async def _job_run_heartbeat_loop(
+    job_run_id: uuid.UUID,
+    worker_id: str | None = None,
+    interval: int = 30,
+) -> None:
+    """[AfterClose] - 后台心跳任务：定期更新 heartbeat_at + lease_expires_at。
+
+    用于长阶段（如 refresh_all_instruments 约13分钟）期间防止 watchdog 误判 stale。
+    被取消时安静退出（CancelledError 不传播）。
+
+    Args:
+        job_run_id: 编排任务 ID
+        worker_id: Worker 实例标识（非 None 时同步更新 worker_instance_id）
+        interval: 心跳间隔（秒，默认 30）
+    """
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            async with AsyncSessionLocal() as db:
+                now = datetime.now(ZoneInfo("Asia/Shanghai"))
+                job_run = await db.get(SchedulerJobRun, job_run_id)
+                if job_run is None or job_run.status != "running":
+                    return
+                job_run.heartbeat_at = now
+                job_run.lease_expires_at = now + timedelta(
+                    seconds=_ORCHESTRATOR_LEASE_SECONDS,
+                )
+                if worker_id is not None:
+                    job_run.worker_instance_id = worker_id
+                await db.commit()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            logger.warning(
+                "[AfterClose] 心跳更新失败 job_run_id=%s: %s",
+                job_run_id, exc,
+            )
 
 
 async def execute_after_close_run(
@@ -440,12 +491,24 @@ async def execute_after_close_run(
                 )
                 await db.commit()
 
-            # 调用 bars_scheduler（使用独立 session，内部会传 job_run_id 写事件）
-            batch_result = await bars_service.refresh_all_instruments(
-                trade_date=trade_date,
-                db_session=None,  # 服务内部创建 session
-                job_run_id=job_run_id,
+            # [心跳保活] - 日线刷新耗时长（约 13 分钟），启动后台心跳任务防止 watchdog 60s 误判 stale
+            # 完成后取消心跳任务（CancelledError 安静处理）
+            heartbeat_task = asyncio.create_task(
+                _job_run_heartbeat_loop(job_run_id, worker_id, interval=30)
             )
+            try:
+                # 调用 bars_scheduler（使用独立 session，内部会传 job_run_id 写事件）
+                batch_result = await bars_service.refresh_all_instruments(
+                    trade_date=trade_date,
+                    db_session=None,  # 服务内部创建 session
+                    job_run_id=job_run_id,
+                )
+            finally:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
             dsa_run_id = batch_result.dsa_run_id
 
             if dsa_run_id is None:
@@ -566,7 +629,10 @@ async def execute_after_close_run(
                 worker_id=worker_id,
             )
 
-            if dsa_final_status != "completed":
+            # [AfterClose] - 描述: 接受 completed 和 published 都为成功终态
+            # dsa_only 模式下 worker 会自动执行 quality_gate + publish，
+            # DSA run 最终状态为 published（与 _poll_dsa_run_status 的 terminal_statuses 对齐）
+            if dsa_final_status not in ("completed", "published"):
                 raise RuntimeError(
                     f"DSA 运行未完成: dsa_run_id={dsa_run_id}, "
                     f"final_status={dsa_final_status}"

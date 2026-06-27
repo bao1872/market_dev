@@ -315,10 +315,16 @@ class DSABackfillService:
         self,
         db: AsyncSession,
     ) -> list[tuple[uuid.UUID, str]]:
-        """解析活跃标的列表（含 symbol）。"""
+        """解析活跃标的列表（含 symbol）。
+
+        [DsaBackfill] - 描述: 只解析 A 股股票（排除指数/基金/ETF），与覆盖率分母口径一致
+        """
+        from app.services.instrument_maintenance_service import stock_symbol_sql_filter
+
         stmt = (
             select(Instrument.id, Instrument.symbol)
             .where(Instrument.status == "active")
+            .where(stock_symbol_sql_filter(Instrument))
             .order_by(Instrument.id)
         )
         result = await db.execute(stmt)

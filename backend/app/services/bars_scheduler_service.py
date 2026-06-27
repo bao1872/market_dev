@@ -40,6 +40,7 @@ from app.repositories.bar_repository import (
     refresh_daily_bars,
 )
 from app.services.calendar_service import is_trading_day_async
+from app.services.instrument_maintenance_service import stock_symbol_sql_filter
 
 logger = logging.getLogger("bars_scheduler_service")
 
@@ -377,16 +378,23 @@ class BarsSchedulerService:
         from app.services.strategy_batch_service import StrategyBatchService
 
         async def _do_check(db: AsyncSession) -> uuid.UUID | None:
-            # 统计今日日线覆盖的标的数
+            # [BarsScheduler] - 分子也只算 A 股股票（JOIN instruments + stock_symbol_sql_filter）
+            # bars_daily 中可能残留指数/基金/ETF 的日线数据，必须过滤
             daily_count_result = await db.execute(
                 select(sa_func.count(sa_func.distinct(BarDaily.instrument_id)))
+                .join(Instrument, BarDaily.instrument_id == Instrument.id)
                 .where(BarDaily.trade_date == trade_date)
+                .where(stock_symbol_sql_filter(Instrument))
             )
             covered = daily_count_result.scalar() or 0
 
-            # 统计活跃标的数
+            # 统计活跃标的数（仅 A 股股票，排除指数/基金/ETF）
+            # [BarsScheduler] - 分母口径与 _get_active_instruments 一致：
+            # 指数/基金/ETF 不写入 bars_daily，若计入分母会导致覆盖率永远卡在 75%
             active_count_result = await db.execute(
-                select(sa_func.count(Instrument.id)).where(Instrument.status == "active")
+                select(sa_func.count(Instrument.id))
+                .where(Instrument.status == "active")
+                .where(stock_symbol_sql_filter(Instrument))
             )
             total = active_count_result.scalar() or 1
 
@@ -679,9 +687,12 @@ class BarsSchedulerService:
             return _instruments_cache
 
         # 2. 缓存 miss：查询 DB
+        # [BarsScheduler] - 仅查询 A 股股票（排除指数/基金/ETF），与覆盖率分母口径一致
+        # 原因：pytdx 不向指数/基金/ETF 写入 bars_daily，刷新这些标的浪费时间且拉低覆盖率
         stmt = (
             select(Instrument)
             .where(Instrument.status == "active")
+            .where(stock_symbol_sql_filter(Instrument))
             .order_by(Instrument.symbol)
         )
 

@@ -1037,17 +1037,23 @@ async def _compute_bars_coverage(
     """
     from app.models.bar import BarDaily
     from app.models.instrument import Instrument
+    from app.services.instrument_maintenance_service import stock_symbol_sql_filter
 
-    # 统计今日日线覆盖的标的数
+    # [SystemOverview] - 分子也只算 A 股股票（JOIN instruments + stock_symbol_sql_filter）
+    # bars_daily 中可能残留指数/基金/ETF 的日线数据，必须过滤
     covered_result = await db.scalar(
         select(func.count(func.distinct(BarDaily.instrument_id)))
+        .join(Instrument, BarDaily.instrument_id == Instrument.id)
         .where(BarDaily.trade_date == business_date_obj)
+        .where(stock_symbol_sql_filter(Instrument))
     )
     covered = int(covered_result or 0)
 
-    # 统计活跃标的数
+    # [SystemOverview] - 描述: 分母仅算 A 股股票（排除指数/基金/ETF），与 BarsSchedulerService 口径一致
     active_result = await db.scalar(
-        select(func.count(Instrument.id)).where(Instrument.status == "active")
+        select(func.count(Instrument.id))
+        .where(Instrument.status == "active")
+        .where(stock_symbol_sql_filter(Instrument))
     )
     total = int(active_result or 0)
 

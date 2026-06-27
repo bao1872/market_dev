@@ -369,9 +369,12 @@ async def reconcile_batch(
     if symbols is None:
         # 从 DB 抽样 active 股票
         try:
+            from app.services.instrument_maintenance_service import stock_symbol_sql_filter
+            # [ReconcileBars] - 描述: 抽样只取 A 股股票，与覆盖率口径一致
             result = await session.execute(
                 select(Instrument.id, Instrument.symbol)
                 .where(Instrument.status == "active")
+                .where(stock_symbol_sql_filter(Instrument))
                 .order_by(Instrument.symbol)
                 .limit(sample_size)
             )
