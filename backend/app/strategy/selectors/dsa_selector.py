@@ -2,9 +2,10 @@
 
 从 ref/交易/selection/selection_dsa.py 迁移核心算法，重构为 StrategyRuntime 插件。
 
-核心选股逻辑：
-    DSA VWAP dir=1 持续 > 50 bars → 多头趋势确认
+核心输出逻辑：
+    为全部有效 A 股计算最近交易日 DSA 因子快照
     计算 close 与 VWAP 的偏离率统计、VWAP 收益指标、VWAP/ATR Rope 交叉事件
+    不基于 dsa_dir_bars、regime_value、offset_*、收益率、多空方向或 matched 过滤股票
 
 features/ 算法调用（SSOT，严格不修改）：
     - features.dynamic_swing_anchored_vwap: DSA VWAP 计算
@@ -308,11 +309,11 @@ def compute_dsa_history(
     valid_ts = (count > 1) & vwap_start.notna() & vwap_vals.notna() & (vwap_start != 0)
     trend_strength[valid_ts] = (vwap_vals[valid_ts] / vwap_start[valid_ts] - 1) / count[valid_ts]
 
-    # 4. offset 统计（只在 dir=1 时有效）
+    # [DSA Selector] - offset 统计：多空双向计算（dir=±1 均纳入统计）
     close = df["close"].astype(float)
     with np.errstate(divide="ignore", invalid="ignore"):
         offset_rate = (close - vwap_vals) / vwap_vals
-    offset_rate = offset_rate.where(dir_vals == 1)
+    offset_rate = offset_rate.replace([np.inf, -np.inf], np.nan)
 
     offset_mean = offset_rate.groupby(group_id).expanding().mean().reset_index(level=0, drop=True)
     offset_std = (
@@ -321,6 +322,9 @@ def compute_dsa_history(
 
     offset_percentile = pd.Series(np.nan, index=df.index, dtype=float)
     valid_pct = offset_rate.notna() & offset_mean.notna() & offset_std.notna() & (offset_std > 0)
+    zero_std_mask = (
+        offset_rate.notna() & offset_mean.notna() & offset_std.notna() & (offset_std == 0)
+    )
     if valid_pct.any():
         x = offset_rate[valid_pct].to_numpy()
         mu = offset_mean[valid_pct].to_numpy()
@@ -328,6 +332,8 @@ def compute_dsa_history(
         z_scores = (x - mu) / (sigma * math.sqrt(2.0))
         cdf_vals = np.array([0.5 * (1.0 + math.erf(z)) for z in z_scores])
         offset_percentile[valid_pct] = cdf_vals
+    if zero_std_mask.any():
+        offset_percentile[zero_std_mask] = 0.5
 
     # 5. VWAP 收益指标（在 DSA 趋势区间内计算）
     vwap_ret_total = pd.Series(np.nan, index=df.index, dtype=float)
@@ -526,7 +532,7 @@ class DSASelector(StrategyRuntime):
     从 ref/交易/selection/selection_dsa.py 迁移，继承 StrategyRuntime ABC。
     kind="selector"，按交易日输出每只股票的 DSA 指标。
 
-    选股逻辑：
+    输出逻辑：
     1. 调用 features.dynamic_swing_anchored_vwap 计算 DSA VWAP 和 dir
     2. 消除前视偏差
     3. 调用 compute_dsa_history 统一计算完整历史指标
@@ -659,20 +665,15 @@ class DSASelector(StrategyRuntime):
                 context.instrument_id,
                 context.symbol,
             )
-            return StrategyResult(
-                instrument_id=context.instrument_id,
-                strategy_version_id=self._version.id,
-                trade_date=context.trade_date or date.today(),
-                matched=False,
-                metrics={"error": "budget_exceeded"},
-                calculation_id=None,
-            )
+            # [DSA Selector] - 预算超限时抛出异常，由 batch 层记录到 run_items，
+            # 不再返回 matched=False 带 error 字段的伪结果。
+            raise
 
         matched = True
         return StrategyResult(
             instrument_id=context.instrument_id,
             strategy_version_id=self._version.id,
-            trade_date=context.trade_date or date.today(),
+            trade_date=context.trade_date,
             matched=matched,
             metrics=metrics,
             calculation_id=uuid.uuid4().hex,

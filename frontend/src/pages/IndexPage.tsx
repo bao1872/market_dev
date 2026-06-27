@@ -36,11 +36,15 @@ interface SelectionRow {
   name: string
   symbol: string
   market: string
+  direction: string
   duration: string
   avg_return: string
   total_return: string
-  short_pos: string
-  pos_tag: 'good' | 'warn'
+  offset_mean: string
+  offset_std: string
+  offset_percentile: string
+  dsa_vwap: string
+  dsa_vwap_dev_pct: string
   watched: boolean
   [key: string]: unknown
 }
@@ -73,6 +77,19 @@ function fmtNum(v: unknown, digits = 2): string {
 function fmtPct(v: unknown, digits = 2): string {
   const n = toNum(v)
   return n === null ? '-' : `${n.toFixed(digits)}%`
+}
+
+/** 将 ratio 小数格式化为百分比（乘以 100），未知返回 '-' */
+function fmtRatioAsPct(v: unknown, digits = 2): string {
+  const n = toNum(v)
+  return n === null ? '-' : `${(n * 100).toFixed(digits)}%`
+}
+
+/** 根据 dsa_dir_bars 正负返回方向标签，未知返回 '-' */
+function getDsaDirection(v: unknown): string {
+  const n = toNum(v)
+  if (n === null) return '-'
+  return n > 0 ? '多头' : n < 0 ? '空头' : '-'
 }
 
 // ===== 添加自选弹窗组件 =====
@@ -214,7 +231,17 @@ function SelectionResultCards({
 
           <div className="selection-card-grid">
             <div>
-              <span>方向持续</span>
+              <span>方向</span>
+              <b
+                className={`tag ${
+                  row.direction === '多头' ? 'good' : row.direction === '空头' ? 'warn' : ''
+                }`}
+              >
+                {row.direction}
+              </b>
+            </div>
+            <div>
+              <span>持续</span>
               <b className="num">{row.duration}</b>
             </div>
             <div>
@@ -222,12 +249,8 @@ function SelectionResultCards({
               <b className="num pos">{row.avg_return}</b>
             </div>
             <div>
-              <span>总收益</span>
-              <b className="num pos">{row.total_return}</b>
-            </div>
-            <div>
-              <span>短期位置</span>
-              <b className={`tag ${row.pos_tag}`}>{row.short_pos}</b>
+              <span>当前位置</span>
+              <b className="num">{row.offset_percentile}</b>
             </div>
           </div>
         </div>
@@ -275,26 +298,56 @@ export default function IndexPage() {
   const toSelectionRow = useCallback(
     (r: StrategyResult): SelectionRow => {
       const payload = r.payload
-      const shortPos = toNum(
-        pickPayload(payload, ['short_pos', 'short_position', 'position_short']),
-      )
+      const dirBars = pickPayload(payload, [
+        'dsa_dir_bars',
+        'dsa_duration',
+        'dir_duration',
+        'duration',
+      ])
+      const dirBarsNum = toNum(dirBars)
       return {
         instrument_id: r.instrument_id,
         name: r.instrument_name ?? '-',
         symbol: r.instrument_symbol ?? r.instrument_id.slice(0, 8),
         market: r.instrument_market ?? '',
-        duration: fmtNum(
-          pickPayload(payload, ['duration', 'dsa_duration', 'dir_duration']),
-          0,
+        direction: getDsaDirection(dirBars),
+        duration: fmtNum(dirBarsNum !== null ? Math.abs(dirBarsNum) : null, 0),
+        avg_return: fmtRatioAsPct(
+          pickPayload(payload, ['vwap_ret_avg', 'dsa_avg_return', 'vwap_avg_return', 'avg_return']),
         ),
-        avg_return: fmtPct(
-          pickPayload(payload, ['avg_return', 'dsa_avg_return', 'vwap_avg_return']),
+        total_return: fmtRatioAsPct(
+          pickPayload(payload, [
+            'vwap_ret_total',
+            'dsa_total_return',
+            'vwap_total_return',
+            'total_return',
+          ]),
         ),
-        total_return: fmtPct(
-          pickPayload(payload, ['total_return', 'dsa_total_return', 'cumulative_return']),
+        offset_mean: fmtRatioAsPct(
+          pickPayload(payload, ['offset_mean', 'shift_mean']),
         ),
-        short_pos: shortPos !== null ? `${Math.round(shortPos * 100)}%` : '-',
-        pos_tag: shortPos !== null && shortPos > 0.7 ? 'warn' : 'good',
+        offset_std: fmtRatioAsPct(
+          pickPayload(payload, ['offset_std', 'shift_std']),
+        ),
+        offset_percentile: fmtRatioAsPct(
+          pickPayload(payload, [
+            'offset_percentile',
+            'short_position',
+            'position_short',
+            'short_pos',
+          ]),
+        ),
+        dsa_vwap: fmtNum(
+          pickPayload(payload, ['dsa_vwap', 'vwap', 'anchor_vwap']),
+          2,
+        ),
+        dsa_vwap_dev_pct: fmtPct(
+          pickPayload(payload, [
+            'dsa_vwap_dev_pct',
+            'vwap_dev_pct',
+            'close_vwap_dev_pct',
+          ]),
+        ),
         watched: watchlistIds.has(r.instrument_id),
       }
     },
@@ -364,8 +417,25 @@ export default function IndexPage() {
         ),
       },
       {
+        key: 'direction',
+        title: '方向',
+        dataType: 'text',
+        sortable: true,
+        filterable: true,
+        sortValue: (row) => (row.direction === '多头' ? 1 : row.direction === '空头' ? -1 : 0),
+        render: (row) => (
+          <span
+            className={`tag ${
+              row.direction === '多头' ? 'good' : row.direction === '空头' ? 'warn' : ''
+            }`}
+          >
+            {row.direction}
+          </span>
+        ),
+      },
+      {
         key: 'duration',
-        title: '方向持续',
+        title: '持续',
         dataType: 'number',
         sortable: true,
         filterable: true,
@@ -391,13 +461,49 @@ export default function IndexPage() {
         render: (row) => <span className="num pos">{row.total_return}</span>,
       },
       {
-        key: 'short_pos',
-        title: '短期位置',
-        dataType: 'text',
+        key: 'offset_mean',
+        title: '偏离均值',
+        dataType: 'percent',
         sortable: true,
         filterable: true,
-        sortValue: (row) => Number(row.short_pos.replace('%', '')) || 0,
-        render: (row) => <span className={`tag ${row.pos_tag}`}>{row.short_pos}</span>,
+        sortValue: (row) => Number(row.offset_mean.replace('%', '')) || 0,
+        render: (row) => <span className="num">{row.offset_mean}</span>,
+      },
+      {
+        key: 'offset_std',
+        title: '偏离标准差',
+        dataType: 'percent',
+        sortable: true,
+        filterable: true,
+        sortValue: (row) => Number(row.offset_std.replace('%', '')) || 0,
+        render: (row) => <span className="num">{row.offset_std}</span>,
+      },
+      {
+        key: 'offset_percentile',
+        title: '当前位置',
+        dataType: 'percent',
+        sortable: true,
+        filterable: true,
+        sortValue: (row) => Number(row.offset_percentile.replace('%', '')) || 0,
+        render: (row) => <span className="num">{row.offset_percentile}</span>,
+      },
+      {
+        key: 'dsa_vwap',
+        title: 'DSA VWAP',
+        dataType: 'number',
+        sortable: true,
+        filterable: true,
+        sortValue: (row) => Number(row.dsa_vwap) || 0,
+        render: (row) => <span className="num">{row.dsa_vwap}</span>,
+      },
+      {
+        key: 'dsa_vwap_dev_pct',
+        title: 'VWAP 偏离',
+        dataType: 'percent',
+        sortable: true,
+        filterable: true,
+        sortValue: (row) => Number(row.dsa_vwap_dev_pct.replace('%', '')) || 0,
+        render: (row) => <span className="num">{row.dsa_vwap_dev_pct}</span>,
       },
       {
         key: 'action',
@@ -444,11 +550,11 @@ export default function IndexPage() {
         </div>
       </div>
 
-      {/* KPI 卡片（3 项：选股结果 / 监控自选股 / 今日策略事件） */}
+      {/* KPI 卡片（3 项：DSA 因子结果 / 监控自选股 / 今日策略事件） */}
       <div className="grid kpi">
-        {/* KPI 1：今日选股结果（最新已发布 DSA 运行的标的总数） */}
+        {/* KPI 1：DSA 因子结果（最新已发布 DSA 运行的标的总数） */}
         <div className="card kpi-card">
-          <div className="kpi-label">今日选股结果</div>
+          <div className="kpi-label">DSA 因子结果</div>
           <div className="kpi-value">
             {kpi1Loading ? '-' : (kpi1Value ?? '暂无')}
             {kpi1Value !== null && <small className="kpi-unit">只</small>}
@@ -484,11 +590,11 @@ export default function IndexPage() {
 
       {/* 选股结果 + 自选股监控（两列等宽） */}
       <div className="grid split-even">
-        {/* 最新选股策略结果 */}
+        {/* 最新 DSA 因子快照 */}
         <section className="card index-main-panel">
           <div className="card-head">
             <div>
-              <div className="card-title">最新选股策略结果</div>
+              <div className="card-title">最新 DSA 因子快照</div>
               <div className="card-sub">
                 策略：DSA
                 {latestDsaRun?.trade_date ? ` · ${latestDsaRun.trade_date}` : ''}
@@ -503,7 +609,9 @@ export default function IndexPage() {
           {/* 桌面端表格 */}
           <div className="selection-result-table-wrap">
             <StrategyDataTable
+              key={latestRunId ? `run-${latestRunId}` : 'run-empty'}
               tableId="index-selection-results"
+              activeRunId={latestRunId}
               columns={selectionColumns}
               rows={selectionRows}
               rowKey={(row) => row.instrument_id}

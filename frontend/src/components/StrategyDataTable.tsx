@@ -62,6 +62,8 @@ export interface DataTableProps<Row> {
   onQueryChange?: (query: DataTableQuery) => void
   // 表格唯一标识（用于 sessionStorage 持久化）
   tableId: string
+  // 当前激活的运行 ID；切换时自动重置分页到第 1 页
+  activeRunId?: string
   // 全文搜索
   searchable?: boolean
   // 行选择
@@ -350,6 +352,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     stale = false,
     onQueryChange,
     tableId,
+    activeRunId,
     searchable = true,
     selectable = false,
     selectedKeys,
@@ -374,6 +377,11 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     anchor: HTMLElement
   } | null>(null)
   const [columnManagerAnchor, setColumnManagerAnchor] = useState<HTMLElement | null>(null)
+
+  // [StrategyDataTable] - 描述: 切换运行批次时重置分页到第 1 页
+  useEffect(() => {
+    setPage(1)
+  }, [activeRunId])
 
   // ===== URL 状态同步 =====
   // 从 URL 恢复状态

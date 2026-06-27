@@ -672,6 +672,7 @@ function renderIndicatorLayer(
   barsCount: number,
   step: number,
   py: (v: number) => number,
+  displayTimes?: string[],
 ): void {
   switch (layer.renderer) {
     case 'line':
@@ -684,7 +685,7 @@ function renderIndicatorLayer(
       renderIndicatorBand(ctx, g, layer, data, barsCount, step, py)
       break
     case 'macd':
-      renderIndicatorMacd(ctx, g, layer, data, barsCount, step)
+      renderIndicatorMacd(ctx, g, layer, data, barsCount, step, displayTimes)
       break
   }
 }
@@ -956,32 +957,53 @@ function renderIndicatorBand(
   }
 }
 
-// [MACD 副图] - 仅绘制后端返回的 macd_dif/macd_dea/macd_hist，禁止前端重算
+// [MACD 副图] - 描述: 根据后端返回 time 数组建立 time->index 映射，供 MACD 对齐使用
+function buildTimeIndex(timeArr: (number | string | null)[] | undefined): Map<number, number> {
+  const map = new Map<number, number>()
+  if (!timeArr) return map
+  timeArr.forEach((t, idx) => {
+    if (t == null) return
+    const ts = new Date(t).getTime()
+    if (!Number.isNaN(ts)) map.set(ts, idx)
+  })
+  return map
+}
+
+// [MACD 副图] - 描述: 仅绘制后端返回的 macd_dif/macd_dea/macd_hist，禁止前端重算
 function renderIndicatorMacd(
   ctx: CanvasRenderingContext2D,
   g: Geometry,
   _layer: ChartLayer,
   data: Record<string, (number | string | null)[]>,
-  barsCount: number,
+  _barsCount: number,
   step: number,
+  displayTimes?: string[],
 ): void {
   const p = g.panes.macd
-  if (!p) return
+  if (!p || !displayTimes?.length) return
 
   const difVals = data.macd_dif
   const deaVals = data.macd_dea
   const histVals = data.macd_hist
   if (!difVals?.length || !deaVals?.length || !histVals?.length) return
 
-  // [chartViewport] - 指标数组取最后 barsCount 个值与 display 对齐
-  const offset = Math.max(0, difVals.length - barsCount)
-  const len = Math.min(difVals.length - offset, barsCount)
+  // [MACD 副图] - 描述: 用后端 time 数组与 K 线 time 数组 join/map 对齐，禁止数组尾部长度猜测
+  const timeIndex = buildTimeIndex(data.time)
+  const indexes = displayTimes.map(t => timeIndex.get(new Date(t).getTime()))
 
   // 计算 MACD 范围（固定包含 0 轴）
-  const visible = [difVals, deaVals, histVals].flatMap(arr =>
-    arr.slice(offset, offset + len).filter((v): v is number => typeof v === 'number' && v != null)
-  )
-  const rawMax = visible.length ? Math.max(...visible.map(Math.abs)) : 0
+  const visible: number[] = []
+  for (let i = 0; i < indexes.length; i++) {
+    const idx = indexes[i]
+    if (idx == null) continue
+    const dif = difVals[idx]
+    const dea = deaVals[idx]
+    const hist = histVals[idx]
+    if (typeof dif === 'number') visible.push(Math.abs(dif))
+    if (typeof dea === 'number') visible.push(Math.abs(dea))
+    if (typeof hist === 'number') visible.push(Math.abs(hist))
+  }
+  const rawMax = visible.length ? Math.max(...visible) : 0
   const bound = Math.max(0.0001, rawMax * 1.08)
   const range = bound * 2
 
@@ -992,8 +1014,10 @@ function renderIndicatorMacd(
 
   // 2. 柱状图（hist > 0 红色，< 0 绿色；A 股红涨绿跌）
   const barW = Math.max(1.5, step * 0.62)
-  for (let i = 0; i < len; i++) {
-    const h = histVals[offset + i]
+  for (let i = 0; i < indexes.length; i++) {
+    const idx = indexes[i]
+    if (idx == null) continue
+    const h = histVals[idx]
     if (h == null || typeof h === 'string') continue
     const hn = Number(h)
     const x = g.l + (i + 0.5) * step
@@ -1006,8 +1030,10 @@ function renderIndicatorMacd(
   // 3. DIF 快线
   ctx.beginPath()
   let started = false
-  for (let i = 0; i < len; i++) {
-    const v = difVals[offset + i]
+  for (let i = 0; i < indexes.length; i++) {
+    const idx = indexes[i]
+    if (idx == null) continue
+    const v = difVals[idx]
     if (v == null || typeof v === 'string') { started = false; continue }
     const x = g.l + (i + 0.5) * step
     const y = my(Number(v))
@@ -1021,8 +1047,10 @@ function renderIndicatorMacd(
   // 4. DEA 慢线
   ctx.beginPath()
   started = false
-  for (let i = 0; i < len; i++) {
-    const v = deaVals[offset + i]
+  for (let i = 0; i < indexes.length; i++) {
+    const idx = indexes[i]
+    if (idx == null) continue
+    const v = deaVals[idx]
     if (v == null || typeof v === 'string') { started = false; continue }
     const x = g.l + (i + 0.5) * step
     const y = my(Number(v))
@@ -1036,9 +1064,14 @@ function renderIndicatorMacd(
   // 5. 右侧刻度与当前值标签
   drawText(ctx, fmt(bound, 3), g.plotRight + 5, p.top + 9, C.text, '8px monospace')
   drawText(ctx, fmt(-bound, 3), g.plotRight + 5, p.bottom - 2, C.text, '8px monospace')
-  const lastDif = difVals[offset + len - 1]
-  const lastDea = deaVals[offset + len - 1]
-  if (typeof lastDif === 'number' && typeof lastDea === 'number') {
+  let lastDif: number | undefined
+  for (let i = indexes.length - 1; i >= 0; i--) {
+    const idx = indexes[i]
+    if (idx == null) continue
+    const v = difVals[idx]
+    if (typeof v === 'number') { lastDif = v; break }
+  }
+  if (typeof lastDif === 'number') {
     const yDif = my(lastDif)
     ctx.fillStyle = '#f4c430'
     ctx.fillRect(g.plotRight + 1, yDif - 7, 54, 14)
@@ -1203,7 +1236,7 @@ function drawTrading(
       if (layer.layer_id === 'macd' && !layers.macd) return
       const layerData = indicators.data![layer.strategy_id]
       if (layerData) {
-        renderIndicatorLayer(ctx, g, layer, layerData, display.length, step, py)
+        renderIndicatorLayer(ctx, g, layer, layerData, display.length, step, py, display.map(d => d.time))
       }
     })
   }
@@ -1374,8 +1407,8 @@ export function StrategyChart({
     eventHit: [],
   })
 
-  // 图层可见性（localStorage 持久化）
-  const storageKey = `detail-chart-strategy-groups:${source}:${strategyId}`
+  // 图层可见性（localStorage 持久化，v2 key：首次无缓存时使用 manifest 新默认图层）
+  const storageKey = `detail-chart-strategy-groups-v2:${source}:${strategyId}`
   const [layers, setLayers] = useState<LayerVisibility>(() => {
     try {
       const saved = localStorage.getItem(storageKey)
@@ -1511,20 +1544,30 @@ export function StrategyChart({
         tip.style.left = Math.min(w - 235, mx + 14) + 'px'
         tip.style.top = Math.max(42, my - 58) + 'px'
         // 追加后端策略指标
-        // [chartViewport] - 指标数组取最后 data.length 个值与 display 对齐
-        //   offset = vals.length - data.length，避免 hover 时取错 bar 的指标值
+        // [MACD 副图] - 描述: hover 时 MACD 按后端 time 数组与 K 线 time 对齐；其他图层保持原 tail 对齐
         let indicatorHtml = ''
         if (indicatorsRef.current?.layers && indicatorsRef.current?.data) {
           indicatorsRef.current.layers.forEach(layer => {
             const layerData = indicatorsRef.current!.data[layer.strategy_id]
             if (!layerData) return
             const fields = layer.hover_fields.length ? layer.hover_fields : layer.fields
+            const isMacd = layer.layer_id === 'macd'
+            const macdTimeIndex = isMacd && Array.isArray(layerData.time)
+              ? buildTimeIndex(layerData.time)
+              : null
             const parts: string[] = []
             fields.forEach(f => {
               const vals = layerData[f]
               if (!vals) return
-              const offset = Math.max(0, vals.length - data.length)
-              const v = vals[offset + i]
+              let idx: number | undefined
+              if (macdTimeIndex) {
+                idx = macdTimeIndex.get(new Date(d.time).getTime())
+              } else {
+                const offset = Math.max(0, vals.length - data.length)
+                idx = offset + i
+              }
+              if (idx == null || idx < 0 || idx >= vals.length) return
+              const v = vals[idx]
               if (v != null) {
                 const label = f.replace(/_/g, ' ').toUpperCase()
                 parts.push(`${label} ${fmt(v)}`)

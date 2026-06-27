@@ -246,7 +246,7 @@ async def publish_strategy_run(
     try:
         run = await service.publish_run(db, run_id)
     except InvalidStrategyResult as e:
-        # [StrategyRuns] - 描述: DSA 发布前硬校验失败（缺字段/非有限/有效率不足）→ 422
+        # [StrategyRuns] - 描述: 策略结果校验失败 → 422（保留异常类型兼容）
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(e),
@@ -455,9 +455,14 @@ async def list_published_runs(
         all_runs.extend(runs)
         total += count
 
-    # 按 trade_date 降序排序
+    # 按 trade_date、published_at、started_at 降序排序
+    from datetime import UTC, datetime
     all_runs.sort(
-        key=lambda r: r.trade_date or date.min,
+        key=lambda r: (
+            r.trade_date or date.min,
+            r.published_at or datetime.min.replace(tzinfo=UTC),
+            r.started_at or datetime.min.replace(tzinfo=UTC),
+        ),
         reverse=True,
     )
     paginated = all_runs[:limit]

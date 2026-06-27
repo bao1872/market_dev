@@ -189,7 +189,7 @@ export const STRATEGIES: Record<string, StrategyDef> = {
     kind: 'selection',
     version: '2.3.0',
     layers: ['volume', 'dsa', 'selection'],
-    defaultLayers: ['volume', 'dsa', 'selection'],
+    defaultLayers: ['volume', 'dsa', 'selection', 'macd'],
   },
   breakout: {
     id: 'breakout',
@@ -205,7 +205,7 @@ export const STRATEGIES: Record<string, StrategyDef> = {
     kind: 'monitor',
     version: '1.0.0',
     layers: ['volume', 'profile', 'node', 'poc', 'bb', 'events'],
-    defaultLayers: ['volume', 'profile', 'node', 'poc', 'bb', 'events'],
+    defaultLayers: ['volume', 'profile', 'node', 'poc', 'bb', 'events', 'macd'],
   },
 }
 

@@ -82,6 +82,26 @@ function fmtRatio(v: unknown): string {
   return `${n.toFixed(2)}x`
 }
 
+/** 转换为数字，失败返回 null */
+function toNum(v: unknown): number | null {
+  if (v === undefined || v === null || v === '') return null
+  const n = typeof v === 'number' ? v : parseFloat(String(v))
+  return Number.isNaN(n) ? null : n
+}
+
+/** 将 ratio 小数格式化为百分比（乘以 100），未知返回 '-' */
+function fmtRatioAsPct(v: unknown, digits = 2): string {
+  const n = toNum(v)
+  return n === null ? '-' : `${(n * 100).toFixed(digits)}%`
+}
+
+/** 根据 dsa_dir_bars 正负返回方向标签，未知返回 '-' */
+function getDsaDirection(v: unknown): string {
+  const n = toNum(v)
+  if (n === null) return '-'
+  return n > 0 ? '多头' : n < 0 ? '空头' : '-'
+}
+
 /** 从 row 中提取股票展示信息（优先使用 instrument 级字段，回退到 payload） */
 function getStockDisplay(row: ScreenerRow): { symbol: string; name: string; market: string } {
   if (row.symbol !== '-' && row.name !== '-') {
@@ -146,9 +166,6 @@ export default function ScreenerPage() {
     filters: [],
   })
 
-  // --- 股票池选择（全市场/我的自选） ---
-  const [universe, setUniverse] = useState<'all' | 'watchlist'>('all')
-
   // --- 运行结果（服务端分页） ---
   const resultParams: StrategyResultQueryParams = useMemo(() => {
     const params: StrategyResultQueryParams = {
@@ -163,21 +180,8 @@ export default function ScreenerPage() {
     if (query.keyword) {
       params.keyword = query.keyword
     }
-    // [ScreenerPage] - 描述: metric_filters 只传后端合法操作符；数值/枚举/日期列操作符已是后端合法集，仅跳过 empty/not_empty
-    const mappedFilters = query.filters
-      .filter((f) => !['empty', 'not_empty'].includes(f.operator))
-      .map((f) => {
-        if (f.operator === 'between') {
-          return { metric_key: f.key, operator: 'between', value1: f.value, value2: f.value2 }
-        }
-        return { metric_key: f.key, operator: f.operator, value: f.value }
-      })
-    if (mappedFilters.length > 0) {
-      params.metric_filters = JSON.stringify(mappedFilters)
-    }
-    params.universe = universe
     return params
-  }, [query, universe])
+  }, [query])
 
   const resultsQuery = useStrategyRunResults(activeRunId || undefined, resultParams)
   const resultItems = resultsQuery.data?.items ?? []
@@ -309,30 +313,56 @@ export default function ScreenerPage() {
         render: renderStock,
       },
       {
+        key: 'dsa_direction',
+        title: '方向',
+        dataType: 'text',
+        sortable: false,
+        filterable: false,
+        helpText: '原始字段：dsa_dir_bars。专业定义：当前 DSA 趋势方向，正值为多头，负值为空头。',
+        render: (row) => {
+          const v = pickPayload(row.payload, ['dsa_dir_bars', 'dsa_duration', 'dir_duration', 'duration'])
+          const dir = getDsaDirection(v)
+          return (
+            <span className={`tag ${dir === '多头' ? 'good' : dir === '空头' ? 'warn' : ''}`}>
+              {dir}
+            </span>
+          )
+        },
+      },
+      {
         key: 'dsa_dir_bars',
-        title: '趋势持续时间',
+        title: '持续时间',
         dataType: 'number',
         sortable: true,
-        filterable: true,
-        helpText: '原始字段：dsa_dir_bars / dir_duration。专业定义：当前 DSA 趋势方向（多头/空头）已持续的 K 线根数，数值越大表示趋势运行越久。',
+        filterable: false,
+        helpText: '原始字段：dsa_dir_bars / dir_duration。专业定义：当前 DSA 趋势方向已持续的 K 线根数，显示绝对值。',
         sortValue: (row) =>
-          Number(pickPayload(row.payload, ['dsa_dir_bars', 'dsa_duration', 'dir_duration', 'duration']) ?? 0),
-        render: (row) =>
-          fmtNum(pickPayload(row.payload, ['dsa_dir_bars', 'dsa_duration', 'dir_duration', 'duration']), 0),
+          Math.abs(
+            Number(pickPayload(row.payload, ['dsa_dir_bars', 'dsa_duration', 'dir_duration', 'duration']) ?? 0),
+          ),
+        render: (row) => {
+          const v = pickPayload(row.payload, ['dsa_dir_bars', 'dsa_duration', 'dir_duration', 'duration'])
+          const n = toNum(v)
+          return <span className="num">{n !== null ? Math.abs(n).toFixed(0) : '-'}</span>
+        },
       },
       {
         key: 'vwap_ret_avg',
         title: '趋势内平均表现',
         dataType: 'percent',
         sortable: true,
-        filterable: true,
-        helpText: '原始字段：vwap_ret_avg / dsa_avg_return。专业定义：趋势运行期间价格相对 VWAP（成交量加权平均价）的平均偏离收益，反映趋势内的平均表现强度。',
+        filterable: false,
+        helpText: '原始字段：vwap_ret_avg / dsa_avg_return。专业定义：趋势运行期间价格相对 VWAP 的平均偏离收益，反映趋势内的平均表现强度。',
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['vwap_ret_avg', 'dsa_avg_return', 'vwap_avg_return', 'avg_return']) ?? 0),
         render: (row) => {
           const v = pickPayload(row.payload, ['vwap_ret_avg', 'dsa_avg_return', 'vwap_avg_return', 'avg_return'])
-          const n = typeof v === 'number' ? v : parseFloat(String(v ?? ''))
-          return <span className={n > 0 ? 'pos' : ''}>{fmtPct(v)}</span>
+          const n = toNum(v)
+          return (
+            <span className={n !== null && n > 0 ? 'pos' : n !== null && n < 0 ? 'neg' : ''}>
+              {fmtRatioAsPct(v)}
+            </span>
+          )
         },
       },
       {
@@ -340,7 +370,7 @@ export default function ScreenerPage() {
         title: '趋势累计表现',
         dataType: 'percent',
         sortable: true,
-        filterable: true,
+        filterable: false,
         helpText: '原始字段：vwap_ret_total / dsa_total_return。专业定义：趋势起点至当前的累计收益，反映趋势整体表现。',
         sortValue: (row) =>
           Number(
@@ -358,8 +388,12 @@ export default function ScreenerPage() {
             'total_return',
             'dsa_total_return',
           ])
-          const n = typeof v === 'number' ? v : parseFloat(String(v ?? ''))
-          return <span className={n > 0 ? 'pos' : ''}>{fmtPct(v)}</span>
+          const n = toNum(v)
+          return (
+            <span className={n !== null && n > 0 ? 'pos' : n !== null && n < 0 ? 'neg' : ''}>
+              {fmtRatioAsPct(v)}
+            </span>
+          )
         },
       },
       {
@@ -367,36 +401,85 @@ export default function ScreenerPage() {
         title: '当前偏离程度',
         dataType: 'percent',
         sortable: true,
-        filterable: true,
+        filterable: false,
         helpText: '原始字段：offset_mean / shift_mean。专业定义：当前价格相对 DSA 锚点 VWAP 的平均偏离程度，正值表示价格高于锚点。',
         sortValue: (row) => Number(pickPayload(row.payload, ['offset_mean', 'shift_mean']) ?? 0),
-        render: (row) => fmtPct(pickPayload(row.payload, ['offset_mean', 'shift_mean'])),
+        render: (row) => {
+          const v = pickPayload(row.payload, ['offset_mean', 'shift_mean'])
+          const n = toNum(v)
+          return (
+            <span className={n !== null && n > 0 ? 'pos' : n !== null && n < 0 ? 'neg' : ''}>
+              {fmtRatioAsPct(v)}
+            </span>
+          )
+        },
       },
       {
-        key: 'offset_variance_rate',
-        title: '趋势稳定度',
+        key: 'offset_std',
+        title: '偏离标准差',
         dataType: 'percent',
         sortable: true,
-        filterable: true,
-        helpText: '原始字段：offset_variance_rate / offset_var_rate。专业定义：偏离程度的方差率，数值越小表示价格围绕趋势线越稳定，趋势越健康。',
-        sortValue: (row) =>
-          Number(pickPayload(row.payload, ['offset_variance_rate', 'offset_var_rate', 'shift_var']) ?? 0),
-        render: (row) =>
-          fmtPct(pickPayload(row.payload, ['offset_variance_rate', 'offset_var_rate', 'shift_var'])),
+        filterable: false,
+        helpText: '原始字段：offset_std / shift_std。专业定义：当前价格相对 DSA 锚点 VWAP 的偏离率标准差，反映偏离波动。',
+        sortValue: (row) => Number(pickPayload(row.payload, ['offset_std', 'shift_std']) ?? 0),
+        render: (row) => fmtRatioAsPct(pickPayload(row.payload, ['offset_std', 'shift_std'])),
       },
       {
         key: 'offset_percentile',
         title: '当前所处位置',
         dataType: 'percent',
         sortable: true,
-        filterable: true,
+        filterable: false,
         helpText: '原始字段：offset_percentile / short_position。专业定义：当前偏离程度在趋势历史偏离中的百分位，0% 为最低、100% 为最高，反映当前所处相对位置。',
         sortValue: (row) =>
           Number(
             pickPayload(row.payload, ['offset_percentile', 'short_position', 'position_short', 'short_pos']) ?? 0,
           ),
         render: (row) =>
-          fmtPct(pickPayload(row.payload, ['offset_percentile', 'short_position', 'position_short', 'short_pos'])),
+          fmtRatioAsPct(
+            pickPayload(row.payload, ['offset_percentile', 'short_position', 'position_short', 'short_pos']),
+          ),
+      },
+      {
+        key: 'dsa_vwap',
+        title: 'DSA VWAP',
+        dataType: 'number',
+        sortable: true,
+        filterable: false,
+        helpText: '原始字段：dsa_vwap / vwap。专业定义：当前 DSA 动态摆动锚定 VWAP 值。',
+        sortValue: (row) => Number(pickPayload(row.payload, ['dsa_vwap', 'vwap', 'anchor_vwap']) ?? 0),
+        render: (row) => fmtNum(pickPayload(row.payload, ['dsa_vwap', 'vwap', 'anchor_vwap']), 2),
+      },
+      {
+        key: 'dsa_vwap_dev_pct',
+        title: 'VWAP 偏离',
+        dataType: 'percent',
+        sortable: true,
+        filterable: false,
+        helpText: '原始字段：dsa_vwap_dev_pct / vwap_dev_pct。专业定义：当前收盘价相对 DSA VWAP 的偏离百分比。',
+        sortValue: (row) =>
+          Number(pickPayload(row.payload, ['dsa_vwap_dev_pct', 'vwap_dev_pct', 'close_vwap_dev_pct']) ?? 0),
+        render: (row) => {
+          const v = pickPayload(row.payload, ['dsa_vwap_dev_pct', 'vwap_dev_pct', 'close_vwap_dev_pct'])
+          const n = toNum(v)
+          return (
+            <span className={n !== null && n > 0 ? 'pos' : n !== null && n < 0 ? 'neg' : ''}>
+              {fmtPct(v)}
+            </span>
+          )
+        },
+      },
+      {
+        key: 'offset_variance_rate',
+        title: '趋势稳定度',
+        dataType: 'percent',
+        sortable: true,
+        filterable: false,
+        helpText: '原始字段：offset_variance_rate / offset_var_rate。专业定义：偏离程度的方差率，数值越小表示价格围绕趋势线越稳定，趋势越健康。',
+        sortValue: (row) =>
+          Number(pickPayload(row.payload, ['offset_variance_rate', 'offset_var_rate', 'shift_var']) ?? 0),
+        render: (row) =>
+          fmtPct(pickPayload(row.payload, ['offset_variance_rate', 'offset_var_rate', 'shift_var'])),
       },
       {
         key: 'price',
@@ -414,15 +497,17 @@ export default function ScreenerPage() {
         title: '今日涨跌',
         dataType: 'percent',
         sortable: true,
-        filterable: true,
+        filterable: false,
         helpText: '原始字段：change_pct / pct_change。专业定义：当日价格相对前一交易日的涨跌百分比。',
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['change_pct', 'pct_change', 'change_percent']) ?? 0),
         render: (row) => {
           const v = pickPayload(row.payload, ['change_pct', 'pct_change', 'change_percent'])
-          const n = typeof v === 'number' ? v : parseFloat(String(v ?? ''))
+          const n = toNum(v)
           return (
-            <span className={n > 0 ? 'pos' : n < 0 ? 'neg' : ''}>{fmtChange(v)}</span>
+            <span className={n !== null && n > 0 ? 'pos' : n !== null && n < 0 ? 'neg' : ''}>
+              {fmtChange(v)}
+            </span>
           )
         },
       },
@@ -463,7 +548,7 @@ export default function ScreenerPage() {
         title: '结构状态',
         dataType: 'text',
         sortable: false,
-        filterable: true,
+        filterable: false,
         filterValue: (row) =>
           String(pickPayload(row.payload, ['structure_status', 'struct_status']) ?? ''),
         render: (row) => {
@@ -478,7 +563,7 @@ export default function ScreenerPage() {
         title: '量能确认',
         dataType: 'number',
         sortable: true,
-        filterable: true,
+        filterable: false,
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['volume_confirm', 'vol_confirm', 'volume_ratio']) ?? 0),
         render: (row) =>
@@ -489,7 +574,7 @@ export default function ScreenerPage() {
         title: '突破幅度',
         dataType: 'percent',
         sortable: true,
-        filterable: true,
+        filterable: false,
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['breakout_amplitude', 'amplitude']) ?? 0),
         render: (row) => {
@@ -503,7 +588,7 @@ export default function ScreenerPage() {
         title: '压力距离',
         dataType: 'percent',
         sortable: true,
-        filterable: true,
+        filterable: false,
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['pressure_distance', 'pressure_dist']) ?? 0),
         render: (row) =>
@@ -514,7 +599,7 @@ export default function ScreenerPage() {
         title: '位置风险',
         dataType: 'percent',
         sortable: true,
-        filterable: true,
+        filterable: false,
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['position_risk', 'pos_risk']) ?? 0),
         render: (row) => fmtPct(pickPayload(row.payload, ['position_risk', 'pos_risk'])),
@@ -592,7 +677,7 @@ export default function ScreenerPage() {
       {/* 页面头 */}
       <div className="page-head">
         <div>
-          <h1 className="page-title">选股策略</h1>
+          <h1 className="page-title">DSA 因子结果</h1>
           <div className="page-desc">
             选择选股策略 → 选择运行批次 → 查看筛选结果，支持服务端排序与分页
           </div>
@@ -619,13 +704,6 @@ export default function ScreenerPage() {
           ))
         )}
         <div className="toolbar-spacer" />
-        {/* 股票池切换 */}
-        <button
-          className={clsx('btn small', universe === 'watchlist' && 'active')}
-          onClick={() => setUniverse(universe === 'all' ? 'watchlist' : 'all')}
-        >
-          {universe === 'all' ? '全市场' : '我的自选'}
-        </button>
         {/* 日期/批次选择 */}
         <select
           className="select"
@@ -678,7 +756,7 @@ export default function ScreenerPage() {
               </div>
             )}
             <div className="batch-meta-item">
-              <span>当前页结果</span>
+              <span>结果数量</span>
               <b>{totalResults}</b>
             </div>
           </div>
@@ -706,11 +784,13 @@ export default function ScreenerPage() {
             {addWatchlistMutation.isPending ? '加入中…' : '批量加入自选'}
           </button>
           <div className="toolbar-spacer" />
-          <span className="muted">表头支持排序与逐列过滤，悬停 ? 查看字段说明</span>
+          <span className="muted">表头支持排序，悬停 ? 查看字段说明</span>
         </div>
         {/* 数据表 */}
         <StrategyDataTable
+          key={activeRunId ? `run-${activeRunId}` : 'run-empty'}
           tableId={`screener-${activeStrategyKey}`}
+          activeRunId={activeRunId}
           columns={activeColumns}
           rows={rows}
           rowKey={(row) => row.resultId}

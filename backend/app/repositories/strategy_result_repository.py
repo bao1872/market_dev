@@ -115,13 +115,13 @@ def dict_filters_to_metric_filters(
         # 新版 operator/value 格式
         operator = f.get("operator", "between")
         if operator == "between":
-            # [StrategyResultRepository] - 描述: between 操作必须有 value1/value2
+            # [StrategyResultRepository] - 描述: between 操作下界写入 value1，上界写入 value2
             v1 = _to_float_or_422(f.get("value1"), metric_key, "value1")
             v2 = _to_float_or_422(f.get("value2"), metric_key, "value2")
             result.append(MetricFilter(
                 metric_key=metric_key,
                 operator=operator,
-                value=v1,
+                value1=v1,
                 value2=v2,
             ))
         else:

@@ -51,6 +51,8 @@ from app.repositories.bar_repository import (
     _query_minute_bars,
     apply_adj_factor_to_bars,
     fetch_daily_bars,
+    fetch_monthly_bars,
+    fetch_weekly_bars,
 )
 from app.services.strategy_batch_service import StrategyBatchService
 from app.strategy.runtime import MarketDataContext, StrategyLoader
@@ -267,19 +269,41 @@ async def compute_all_indicators(
     bars_15min = pd.DataFrame()
     bars_minute = pd.DataFrame()
     bars_60min: pd.DataFrame | None = None
+    bars_weekly = pd.DataFrame()
+    bars_monthly = pd.DataFrame()
+
+    async def _safe_klines(freq: str, count: int, limit: int) -> pd.DataFrame:
+        """调用 exchange.klines() 并处理空值/异常，避免 DataFrame or 触发 truth value 错误。"""
+        if exchange is None:
+            return pd.DataFrame()
+        try:
+            df = await exchange.klines(symbol, freq, count=count, limit=limit)
+            if df is None or df.empty:
+                return pd.DataFrame()
+            return df
+        except Exception as exc:
+            logger.warning(
+                "Exchange.klines() 失败 freq=%s instrument_id=%s: %s", freq, instrument_id, exc,
+            )
+            return pd.DataFrame()
 
     if exchange is not None:
         try:
             # [行情] - 传递 limit 控制 pytdx 拉取量（fetch_count=min(limit+250,1000)，上限 1000）
             # 日线（5000 天回看，与 bars.py 一致）
-            daily_bars = await exchange.klines(symbol, "1d", count=5000, limit=5000) or pd.DataFrame()
+            daily_bars = await _safe_klines("1d", 5000, 5000)
             # 15 分钟线（指标计算需要更多数据）
-            bars_15min = await exchange.klines(symbol, "15m", count=800, limit=800) or pd.DataFrame()
+            bars_15min = await _safe_klines("15m", 800, 800)
             # 1 分钟线（仅 2 天，用于监控策略）
-            bars_minute = await exchange.klines(symbol, "1m", count=2, limit=2) or pd.DataFrame()
+            bars_minute = await _safe_klines("1m", 2, 2)
             # 60 分钟线（策略在 timeframe='1h' 时可能需要）
             if timeframe == "1h":
-                bars_60min = await exchange.klines(symbol, "1h", count=800, limit=800) or pd.DataFrame()
+                bars_60min = await _safe_klines("1h", 800, 800)
+            # 周线/月线（MACD 按当前 timeframe 计算）
+            if timeframe == "1w":
+                bars_weekly = await _safe_klines("1w", 260, 260)
+            if timeframe == "1mo":
+                bars_monthly = await _safe_klines("1mo", 120, 120)
         except Exception as exc:
             logger.warning("Exchange.klines() 失败 instrument_id=%s: %s，降级到 DB", instrument_id, exc)
             exchange = None  # 标记为失败，后续使用 DB 降级
@@ -299,19 +323,41 @@ async def compute_all_indicators(
             bars_minute = await _query_minute_bars(session, instrument_id, intraday_start_dt, intraday_end_dt)
             if timeframe == "1h":
                 bars_60min = await _query_60min_bars(session, instrument_id, intraday_start_dt, intraday_end_dt)
+            if timeframe == "1w":
+                bars_weekly = await fetch_weekly_bars(session, instrument_id, daily_start, today)
+            if timeframe == "1mo":
+                bars_monthly = await fetch_monthly_bars(session, instrument_id, daily_start, today)
         except Exception as exc:
             logger.warning("DB 降级查询也失败 instrument_id=%s: %s", instrument_id, exc)
 
-    if daily_bars.empty:
+    # [MACD 副图] - 按当前 timeframe 选择对应周期 bars 计算 MACD
+    if timeframe == "15m":
+        macd_bars = bars_15min
+    elif timeframe == "1h":
+        macd_bars = bars_60min if bars_60min is not None else pd.DataFrame()
+    elif timeframe == "1d":
+        macd_bars = daily_bars
+    elif timeframe == "1w":
+        macd_bars = bars_weekly
+    elif timeframe == "1mo":
+        macd_bars = bars_monthly
+    else:
+        macd_bars = pd.DataFrame()
+
+    if macd_bars.empty:
         raise ValueError(
-            f"无日线行情数据 instrument_id={instrument_id} symbol={symbol}"
+            f"无对应周期行情数据 instrument_id={instrument_id} symbol={symbol} timeframe={timeframe}"
         )
 
     # 3. 前复权处理
     if adj == "qfq":
         adj_factor_df = await _get_adj_factor_df(session, instrument_id)
-        # 日线前复权
+        # 日线/周线/月线前复权
         daily_bars = apply_adj_factor_to_bars(daily_bars, adj_factor_df, intraday=False)
+        if not bars_weekly.empty:
+            bars_weekly = apply_adj_factor_to_bars(bars_weekly, adj_factor_df, intraday=False)
+        if not bars_monthly.empty:
+            bars_monthly = apply_adj_factor_to_bars(bars_monthly, adj_factor_df, intraday=False)
         # 15min/1min 日内前复权
         if not bars_15min.empty:
             bars_15min = apply_adj_factor_to_bars(
@@ -346,17 +392,19 @@ async def compute_all_indicators(
     data: dict[str, dict[str, Any]] = {}
     errors: dict[str, str] = {}
 
-    # [indicator_service] - 注入 time 字段（与 K线时间戳对齐），
-    #   来自 daily_bars.index，长度 = len(daily_bars)，与各策略 list 字段长度一致
-    #   供前端按时间戳 join 而非依赖数组下标，避免 viewport 切片时 K线/指标错位
-    #   （advice.md 第三节问题 2/3）
-    time_list: list[str] = [
+    # [indicator_service] - 策略指标 time 来自日线 bars（与策略输出长度一致）
+    daily_time_list: list[str] = [
         idx.isoformat() for idx in daily_bars.index
     ]
 
-    # [MACD 副图] - 统一在后端计算 MACD 指标，避免前后端多套实现
-    # 使用日线 close 计算，参数 fast=12, slow=26, signal=9，柱值 = 2*(DIF-DEA)
-    macd_indicators = compute_macd(daily_bars["close"].to_numpy(float))
+    # [MACD 副图] - 统一在后端按当前 timeframe 计算 MACD 指标，避免前后端多套实现
+    # 使用当前 timeframe 对应 bars 的 close 计算，参数 fast=12, slow=26, signal=9
+    macd_indicators = compute_macd(macd_bars["close"].to_numpy(float))
+
+    # [MACD 副图] - MACD time 与当前 timeframe bars 时间对齐（advice.md 第八节）
+    macd_time_list: list[str] = [
+        idx.isoformat() for idx in macd_bars.index
+    ]
 
     # 复用 StrategyBatchService._get_latest_released_version 查询最新 released 版本
     batch_service = StrategyBatchService()
@@ -398,9 +446,9 @@ async def compute_all_indicators(
                 })
 
             # [indicator_service] - 注入 time 字段后截取到最近 bars 根 + 转 JSON 可序列化
-            #   time_list 与其他 list 字段一起被 _truncate_lists 截取（保持长度一致），
+            #   daily_time_list 与其他 list 字段一起被 _truncate_lists 截取（保持长度一致），
             #   前端可通过 data[strategy_id]["time"][i] 与 K线 time join 对齐
-            indicators_with_time = {**indicators, "time": time_list}
+            indicators_with_time = {**indicators, "time": daily_time_list}
             data[strategy_id] = _to_json_safe(_truncate_lists(indicators_with_time, bars))
 
             logger.info(
@@ -436,7 +484,7 @@ async def compute_all_indicators(
         "fields": ["macd_dif", "macd_dea", "macd_hist"],
         "hover_fields": ["macd_dif", "macd_dea", "macd_hist"],
     })
-    macd_with_time = {**macd_indicators, "time": time_list}
+    macd_with_time = {**macd_indicators, "time": macd_time_list}
     data["macd"] = _to_json_safe(_truncate_lists(macd_with_time, bars))
 
     # [指标服务] - 返回计算窗口元信息，前端据此决定显示范围，不硬编码
@@ -503,7 +551,7 @@ if __name__ == "__main__":
     print("_truncate_lists 截取 ✓")
 
     # 5.1 验证 time 字段注入与截取（advice.md 第三节问题 2/3 修复）
-    #   time_list 与其他 list 字段一起被 _truncate_lists 截取，保持长度一致
+    #   daily_time_list 与其他 list 字段一起被 _truncate_lists 截取，保持长度一致
     indicators_sample = {
         "dsa_vwap": [1.0, 2.0, 3.0, 4.0, 5.0],
         "dsa_dir": [1, 1, 0, 0, 1],

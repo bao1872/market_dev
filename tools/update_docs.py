@@ -119,6 +119,8 @@ def _extract_table_info(model_cls: Any) -> dict:
                         "ref_column": fk.column.name,
                     }
                 )
+    # 保证外键输出顺序稳定，避免 set 迭代顺序导致文档 diff 抖动
+    fk_constraints.sort(key=lambda fk: (fk["ref_table"], fk["ref_column"]))
 
     return {
         "table_name": table.name,
