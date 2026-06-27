@@ -434,18 +434,18 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     [saveColumns],
   )
 
-  // ===== 排序切换（三态：无 → 升序 → 降序 → 无）=====
+  // ===== 排序切换（三态：无 → 降序 → 升序 → 无，默认最新/最大在前）=====
   const toggleSort = useCallback(
     (index: number) => {
       setSortColumn((prev) => {
         if (prev !== index) {
-          setSortDirection('asc')
+          setSortDirection('desc')
           return index
         }
         setSortDirection((prevDir) => {
-          if (prevDir === 'asc') return 'desc'
-          if (prevDir === 'desc') return null
-          return 'asc'
+          if (prevDir === 'desc') return 'asc'
+          if (prevDir === 'asc') return null
+          return 'desc'
         })
         return prev
       })

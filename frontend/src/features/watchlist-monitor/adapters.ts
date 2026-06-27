@@ -16,6 +16,12 @@ export function fmtNum(v: unknown, digits = 2): string {
   return n === null ? '-' : n.toFixed(digits)
 }
 
+/** 将 [0,1] 区间小数格式化为百分比（乘以 100），未知返回 '-' */
+export function fmtPct(v: unknown, digits = 2): string {
+  const n = toNum(v)
+  return n === null ? '-' : `${(n * 100).toFixed(digits)}%`
+}
+
 // [自选监控] - 格式化时间，返回 MM-DD HH:MM（上海时区），保留日期信息
 export function fmtTime(v: unknown): string {
   if (v === undefined || v === null || v === '') return '-'

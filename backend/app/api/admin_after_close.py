@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import date
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -199,6 +200,13 @@ async def create_dsa_only_run_endpoint(
     )
 
     trade_date = _parse_trade_date(payload.trade_date)
+
+    # [AfterClose] - 描述: dsa-only 仅允许今日及未来日期，拒绝历史日期
+    if trade_date < date.today():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"dsa-only 拒绝历史日期: trade_date={trade_date.isoformat()}",
+        )
 
     # [Phase6] - 计算当日日线覆盖率（纯查询，不触发 DSA）
     covered, total, coverage = await compute_daily_coverage(db, trade_date)

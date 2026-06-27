@@ -209,6 +209,11 @@ export const STRATEGIES: Record<string, StrategyDef> = {
   },
 }
 
+// ===== 字段级描述（用于表头 helpText、文档生成等）=====
+export const FIELD_DESCRIPTIONS: Record<string, string> = {
+  dsa_dir_bars: '当前 DSA 趋势方向已持续的 K 线根数；负值表示空头方向，正值表示多头方向。',
+}
+
 // ===== 计算窗口（对应原型 CALCULATION_WINDOWS）=====
 export const CALCULATION_WINDOWS: Record<string, CalculationWindow> = {
   '15m': { bars: 500, label: '最近 500 根 15m Bar' },

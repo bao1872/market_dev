@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import json
+import random
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import UTC, date, datetime
@@ -109,10 +110,10 @@ async def _create_active_instruments(
     for i in range(count):
         inst = Instrument(
             id=uuid.uuid4(),
-            # [测试] - symbol 用 002xxx 模式（SZ 中小板），匹配 stock_symbol_sql_filter
-            symbol=f"002{uuid.uuid4().hex[:3].upper()}",
+            # [测试] - symbol 用 6xxxxxx 模式（SH 主板），匹配 stock_symbol_sql_filter
+            symbol=f"{random.randint(600000, 699999):06d}",
             name=f"测试标的{i}",
-            market="SZ",
+            market="SH",
             status="active",
         )
         db_session.add(inst)
@@ -194,13 +195,45 @@ class TestDsaOnlyEndpoint:
         """场景 1：当日无日线数据，调用 dsa-only，返 409 + reason=DATA_COVERAGE_INSUFFICIENT。
 
         given: 数据库中有 10 个活跃股票，但 bars_daily 当日无数据（覆盖率 0%）
-        when: POST /admin/after-close-runs/dsa-only { trade_date: "2026-06-25" }
+        when: POST /admin/after-close-runs/dsa-only { trade_date: "2099-01-01" }
         then: 响应 409，body.detail.reason == "DATA_COVERAGE_INSUFFICIENT"
+
+        [测试隔离] - 描述: 使用未来日期 2099-01-01 绕过历史日期校验，
+        专门验证覆盖率不足场景；历史日期场景见 test_dsa_only_historical_date_returns_422。
         """
         _override_get_db(db_session)
         # 准备：10 个活跃股票，无日线数据
         await _create_active_instruments(db_session, count=10)
         await db_session.flush()
+
+        trade_date = "2099-01-01"
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/admin/after-close-runs/dsa-only",
+                headers=_auth_headers(admin_user.id),
+                json={"trade_date": trade_date},
+            )
+
+        assert response.status_code == 409, f"响应体: {response.text}"
+        detail = response.json()["detail"]
+        assert detail["reason"] == "DATA_COVERAGE_INSUFFICIENT"
+        assert detail["trade_date"] == trade_date
+        assert detail["threshold"] == 0.9
+        assert "daily_coverage" in detail
+        assert detail["daily_coverage"] < 0.9
+
+    @pytest.mark.asyncio
+    async def test_dsa_only_historical_date_returns_422(
+        self, db_session, admin_user
+    ) -> None:
+        """场景 1.1：dsa-only 传入历史日期，应直接 422，避免误触发历史回补。
+
+        given: 管理员调用 dsa-only，trade_date 为昨天
+        when: POST /admin/after-close-runs/dsa-only { trade_date: "2026-06-25" }
+        then: 响应 422，detail 含 "dsa-only 拒绝历史日期"
+        """
+        _override_get_db(db_session)
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -210,13 +243,8 @@ class TestDsaOnlyEndpoint:
                 json={"trade_date": "2026-06-25"},
             )
 
-        assert response.status_code == 409, f"响应体: {response.text}"
-        detail = response.json()["detail"]
-        assert detail["reason"] == "DATA_COVERAGE_INSUFFICIENT"
-        assert detail["trade_date"] == "2026-06-25"
-        assert detail["threshold"] == 0.9
-        assert "daily_coverage" in detail
-        assert detail["daily_coverage"] < 0.9
+        assert response.status_code == 422, f"响应体: {response.text}"
+        assert "dsa-only 拒绝历史日期" in response.json()["detail"]
 
     @pytest.mark.asyncio
     async def test_dsa_only_sufficient_coverage_creates_queued_task(
@@ -555,6 +583,43 @@ class TestCreateAfterCloseRunEndpoint:
         assert data["status"] == "queued"
         assert "任务已加入队列" in data["message"]
         assert "已创建并启动" not in data["message"]
+
+
+# ============================================================
+# DSA 历史日期拒绝校验（strategy_runs + after_close 双端点）
+# ============================================================
+
+
+class TestDsaHistoricalDateRejection:
+    """DSA 相关端点拒绝历史日期，统一返回 422。
+
+    覆盖：
+    - POST /admin/strategies/{strategy_key}/run（dsa_selector）
+    - POST /admin/after-close-runs/dsa-only
+    """
+
+    @pytest.mark.asyncio
+    async def test_trigger_strategy_run_dsa_historical_date_returns_422(
+        self, db_session, admin_user
+    ) -> None:
+        """DSA 手动运行传入历史日期，应 422，无需查策略版本。
+
+        given: 管理员调用 POST /admin/strategies/dsa_selector/run
+        when: trade_date 为昨天
+        then: 响应 422，detail 含 "DSA 拒绝历史日期运行"
+        """
+        _override_get_db(db_session)
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/admin/strategies/dsa_selector/run",
+                headers=_auth_headers(admin_user.id),
+                json={"trade_date": "2026-06-25", "run_type": "manual"},
+            )
+
+        assert response.status_code == 422, f"响应体: {response.text}"
+        assert "DSA 拒绝历史日期运行" in response.json()["detail"]
 
 
 if __name__ == "__main__":

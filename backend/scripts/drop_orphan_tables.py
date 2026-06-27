@@ -11,9 +11,10 @@
 """
 import sys
 sys.path.insert(0, ".")
-from app.config import settings
+from app.config import get_settings
 import psycopg
 
+settings = get_settings()
 url = settings.database_url.replace("postgresql+psycopg://", "postgresql://")
 
 # 项目内40张表（保留）

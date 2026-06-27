@@ -2,7 +2,7 @@
 // 职责：在窄屏下以卡片形式展示自选监控数据
 import type { WatchlistMonitorRow } from './types'
 import { MonitorStatusBadge, translateEventType } from './columns'
-import { fmtNum } from './adapters'
+import { fmtNum, fmtPct } from './adapters'
 
 interface WatchlistMonitorCardProps {
   row: WatchlistMonitorRow
@@ -56,7 +56,7 @@ function WatchlistMonitorCard({
         </div>
         <div>
           <span>当前区间位置</span>
-          <b className="num">{fmtNum(row.position_0_1)}</b>
+          <b className="num">{fmtPct(row.position_0_1)}</b>
         </div>
         <div>
           <span>最密集成交价</span>

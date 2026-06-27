@@ -250,6 +250,21 @@ function formatTime(timeStr: string): string {
   return `${datePart} ${timePart}`
 }
 
+// [chartViewport] - 规范化时间键：把前后端可能格式不同的时间统一为可匹配的字符串键
+//   日线/周线/月线用日期，15m/1h 用日期+分钟，避免 Date.getTime() 因时区/格式差异导致错位
+//   采用 advice.md 推荐的正则解析，不依赖 Date 解析做业务时间匹配
+function normalizeChartTime(raw: unknown, tf: string): string | null {
+  const value = String(raw ?? '').trim()
+  const match = value.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?/)
+  if (!match) return null
+
+  if (tf === '15m' || tf === '1h') {
+    return match[2] ? `${match[1]} ${match[2]}` : null
+  }
+
+  return match[1]
+}
+
 // 时间轴刻度（对齐原型 timeTicks）
 function timeTicks(data: CalculatedBar[], count: number, tf: string): { idx: number; label: string }[] {
   const out: { idx: number; label: string }[] = []
@@ -662,8 +677,8 @@ function renderBreakout(
 // ===== 通用渲染器（根据后端返回的 ChartLayer.renderer 分发）=====
 
 // 通用渲染器：根据 layer.renderer 分发
-// [chartViewport] - valuesOffset 指标数组中与 display[0] 对应的起始索引，
-//   取 values.length - barsCount（取最后 N 个），避免 K 线（最近 N 根）与指标（最前 N 个值）错位
+// [chartViewport] - 描述: 所有 renderer 统一按 normalizeChartTime 时间键逐根匹配，
+//   不再用 values.length - barsCount 尾部截取，避免 K 线与指标错位
 function renderIndicatorLayer(
   ctx: CanvasRenderingContext2D,
   g: Geometry,
@@ -672,22 +687,37 @@ function renderIndicatorLayer(
   barsCount: number,
   step: number,
   py: (v: number) => number,
-  displayTimes?: string[],
+  displayTimes: string[],
+  timeframe: string,
 ): void {
   switch (layer.renderer) {
     case 'line':
-      renderIndicatorLine(ctx, g, layer, data, barsCount, step, py)
+      renderIndicatorLine(ctx, g, layer, data, displayTimes, step, py, timeframe)
       break
     case 'price_zone':
-      renderIndicatorPriceZone(ctx, g, layer, data, barsCount, step, py)
+      renderIndicatorPriceZone(ctx, g, layer, data, displayTimes, step, py, timeframe)
       break
     case 'band':
-      renderIndicatorBand(ctx, g, layer, data, barsCount, step, py)
+      renderIndicatorBand(ctx, g, layer, data, displayTimes, step, py, timeframe)
       break
     case 'macd':
-      renderIndicatorMacd(ctx, g, layer, data, barsCount, step, displayTimes)
+      renderIndicatorMacd(ctx, g, layer, data, barsCount, step, displayTimes, timeframe)
       break
   }
+}
+
+// [chartViewport] - 描述: 把 display bar 时间映射到指标数组索引，按 normalizeChartTime 逐根匹配
+function buildDisplayIndexMap(
+  displayTimes: string[],
+  indicatorTimes: (number | string | null)[] | undefined,
+  tf: string,
+): (number | undefined)[] {
+  const timeIndex = buildTimeIndex(indicatorTimes, tf)
+  return displayTimes.map(t => {
+    if (t == null) return undefined
+    const key = normalizeChartTime(t, tf)
+    return key != null ? timeIndex.get(key) : undefined
+  })
 }
 
 // [DSA 分段] - 线图渲染（支持 regime_field 分段 + direction_colored + 锚点小圆点）
@@ -696,9 +726,10 @@ function renderIndicatorLine(
   g: Geometry,
   layer: ChartLayer,
   data: Record<string, (number | string | null)[]>,
-  barsCount: number,
+  displayTimes: string[],
   step: number,
   py: (v: number) => number,
+  timeframe: string,
 ): void {
   // layer.fields[0] 是主值字段（如 dsa_vwap）
   // layer.fields[1] 是方向字段（如 dsa_dir，1=上涨，0=下跌）
@@ -706,11 +737,10 @@ function renderIndicatorLine(
   const dirField = layer.fields[1]
   const values = data[valueField]
   if (!values || !values.length) return
-  // [chartViewport] - 指标数组取最后 barsCount 个值与 display 对齐
-  //   offset = values.length - barsCount：指标数组中与 display[0] 对应的起始索引
-  //   避免 K 线（最近 N 根）与指标（最前 N 个值）错位（advice.md 第三节问题 2）
-  const offset = Math.max(0, values.length - barsCount)
-  const len = Math.min(values.length - offset, barsCount)
+
+  // [chartViewport] - 按 normalizeChartTime 时间键逐根匹配，不再 tail 截取
+  const indexMap = buildDisplayIndexMap(displayTimes, data.time, timeframe)
+  const len = indexMap.length
 
   // [DSA 分段] - 分组键：优先 regime_field（regime_id），回退 dirField
   // 每次 regime_id 改变 → 结束旧段 → 新段从当前点开始（切换点不连接）
@@ -722,17 +752,22 @@ function renderIndicatorLine(
     // 分段绘制：相邻分组键相同的点连成一段；切换点不连接（新段从 i 开始，不含 i-1）
     let segStart = 0
     for (let i = 1; i <= len; i++) {
-      const curKey = i < len ? segKeys[offset + i] : null
-      const prevKey = segKeys[offset + i - 1]
+      const curIdx = i < len ? indexMap[i] : undefined
+      const prevIdx = indexMap[i - 1]
+      const curKey = curIdx != null ? segKeys[curIdx] : null
+      const prevKey = prevIdx != null ? segKeys[prevIdx] : null
       const segChanged = i === len || curKey !== prevKey
       if (segChanged && i > segStart + 1) {
         // 绘制 segStart 到 i-1 的线段（旧段，方向由 i-1 处的 dir 决定）
-        const dir = dirs[offset + i - 1]
+        const prevSegIdx = indexMap[i - 1]
+        const dir = prevSegIdx != null ? dirs[prevSegIdx] : null
         const color = dir === 1 ? (layer.direction_up_color || '#ff1744') : (layer.direction_down_color || '#00e676')
         ctx.beginPath()
         let started = false
         for (let j = segStart; j < i; j++) {
-          const v = values[offset + j]
+          const idx = indexMap[j]
+          if (idx == null) { started = false; continue }
+          const v = values[idx]
           if (v == null || typeof v === 'string') { started = false; continue }
           const x = g.l + (j + 0.5) * step
           const y = py(v)
@@ -754,7 +789,9 @@ function renderIndicatorLine(
     ctx.beginPath()
     let started = false
     for (let i = 0; i < len; i++) {
-      const v = values[offset + i]
+      const idx = indexMap[i]
+      if (idx == null) { started = false; continue }
+      const v = values[idx]
       if (v == null || typeof v === 'string') { started = false; continue }
       const x = g.l + (i + 0.5) * step
       const y = py(v)
@@ -770,15 +807,17 @@ function renderIndicatorLine(
   if (layer.anchor_field && data[layer.anchor_field]) {
     const anchors = data[layer.anchor_field]
     for (let i = 0; i < len; i++) {
-      const a = anchors[offset + i]
+      const idx = indexMap[i]
+      if (idx == null) continue
+      const a = anchors[idx]
       // anchor_time != null 表示该 bar 是锚点（dir 翻转点）
       if (a == null) continue
-      const v = values[offset + i]
+      const v = values[idx]
       if (v == null || typeof v === 'string') continue
       const x = g.l + (i + 0.5) * step
       const y = py(v)
       // 外圈白色 + 内圈方向色（与当前段方向一致）
-      const dir = dirField && data[dirField] ? data[dirField][offset + i] : null
+      const dir = dirField && data[dirField] ? data[dirField][idx] : null
       const innerColor = dir === 1 ? (layer.direction_up_color || '#ff1744') : (layer.direction_down_color || '#00e676')
       ctx.beginPath()
       ctx.arc(x, y, 3.5, 0, Math.PI * 2)
@@ -799,9 +838,11 @@ function renderIndicatorLine(
     const pivotTypes = data[pivotTypeField]
     const pivotPrices = data[pivotPriceField]
     for (let i = 0; i < len; i++) {
-      const label = pivotTypes[offset + i]
+      const idx = indexMap[i]
+      if (idx == null) continue
+      const label = pivotTypes[idx]
       if (typeof label !== 'string') continue
-      const price = pivotPrices[offset + i]
+      const price = pivotPrices[idx]
       if (price == null || typeof price === 'string') continue
       const x = g.l + (i + 0.5) * step
       const y = py(Number(price))
@@ -823,9 +864,10 @@ function renderIndicatorPriceZone(
   g: Geometry,
   layer: ChartLayer,
   data: Record<string, (number | string | null)[]>,
-  barsCount: number,
+  displayTimes: string[],
   step: number,
   py: (v: number) => number,
+  timeframe: string,
 ): void {
   // layer.fields: [upper_node, lower_node, poc_price]
   const upperField = layer.fields[0]
@@ -833,17 +875,17 @@ function renderIndicatorPriceZone(
   const upperVals = data[upperField]
   const lowerVals = data[lowerField]
   if (!upperVals || !lowerVals) return
-  // [chartViewport] - 指标数组取最后 barsCount 个值与 display 对齐
-  //   offset = min(upperVals.length, lowerVals.length) - barsCount
-  //   避免 K 线（最近 N 根）与指标（最前 N 个值）错位（advice.md 第三节问题 2）
-  const upperLen = Math.min(upperVals.length, lowerVals.length)
-  const offset = Math.max(0, upperLen - barsCount)
-  const len = Math.min(upperLen - offset, barsCount)
+
+  // [chartViewport] - 按 normalizeChartTime 时间键逐根匹配，不再 tail 截取
+  const indexMap = buildDisplayIndexMap(displayTimes, data.time, timeframe)
+  const len = indexMap.length
 
   ctx.fillStyle = layer.color || 'rgba(33,150,243,0.50)'
   for (let i = 0; i < len; i++) {
-    const upper = upperVals[offset + i]
-    const lower = lowerVals[offset + i]
+    const idx = indexMap[i]
+    if (idx == null) continue
+    const upper = upperVals[idx]
+    const lower = lowerVals[idx]
     // [类型守卫] - upper/lower 必须为 number（data 放宽为 number|string|null 后需显式收窄）
     if (typeof upper !== 'number' || typeof lower !== 'number') continue
     const x = g.l + i * step
@@ -859,9 +901,10 @@ function renderIndicatorBand(
   g: Geometry,
   layer: ChartLayer,
   data: Record<string, (number | string | null)[]>,
-  barsCount: number,
+  displayTimes: string[],
   step: number,
   py: (v: number) => number,
+  timeframe: string,
 ): void {
   const upperField = layer.fields[0]
   const lowerField = layer.fields[1]
@@ -870,14 +913,11 @@ function renderIndicatorBand(
   const lowerVals = data[lowerField]
   const middleVals = middleField ? data[middleField] : null
   if (!upperVals || !lowerVals) return
-  // [chartViewport] - 指标数组取最后 barsCount 个值与 display 对齐
-  //   offset = min(upperVals.length, lowerVals.length, middleVals?.length) - barsCount
-  //   避免 K 线（最近 N 根）与指标（最前 N 个值）错位（advice.md 第三节问题 2）
-  const fieldLens = [upperVals.length, lowerVals.length]
-  if (middleVals) fieldLens.push(middleVals.length)
-  const baseLen = Math.min(...fieldLens)
-  const offset = Math.max(0, baseLen - barsCount)
-  const len = Math.min(baseLen - offset, barsCount)
+
+  // [chartViewport] - 按 normalizeChartTime 时间键逐根匹配，不再 tail 截取
+  const indexMap = buildDisplayIndexMap(displayTimes, data.time, timeframe)
+  const len = indexMap.length
+
   // A 股 BB 配色：填充浅蓝半透明、上轨/下轨蓝色、中轨橙黄
   const bandColor = C.bbFill
   const upperLowerColor = C.bbUpperLower
@@ -887,8 +927,10 @@ function renderIndicatorBand(
   ctx.beginPath()
   let started = false
   for (let i = 0; i < len; i++) {
-    const u = upperVals[offset + i]
-    const l = lowerVals[offset + i]
+    const idx = indexMap[i]
+    if (idx == null) { started = false; continue }
+    const u = upperVals[idx]
+    const l = lowerVals[idx]
     if (u == null || l == null) { started = false; continue }
     const x = g.l + (i + 0.5) * step
     const un = Number(u)
@@ -896,7 +938,9 @@ function renderIndicatorBand(
     else ctx.lineTo(x, py(un))
   }
   for (let i = len - 1; i >= 0; i--) {
-    const l = lowerVals[offset + i]
+    const idx = indexMap[i]
+    if (idx == null) continue
+    const l = lowerVals[idx]
     if (l == null) continue
     const x = g.l + (i + 0.5) * step
     ctx.lineTo(x, py(Number(l)))
@@ -909,7 +953,9 @@ function renderIndicatorBand(
   ctx.beginPath()
   started = false
   for (let i = 0; i < len; i++) {
-    const v = upperVals[offset + i]
+    const idx = indexMap[i]
+    if (idx == null) { started = false; continue }
+    const v = upperVals[idx]
     if (v == null) { started = false; continue }
     const x = g.l + (i + 0.5) * step
     const vn = Number(v)
@@ -926,7 +972,9 @@ function renderIndicatorBand(
   ctx.beginPath()
   started = false
   for (let i = 0; i < len; i++) {
-    const v = lowerVals[offset + i]
+    const idx = indexMap[i]
+    if (idx == null) { started = false; continue }
+    const v = lowerVals[idx]
     if (v == null) { started = false; continue }
     const x = g.l + (i + 0.5) * step
     const vn = Number(v)
@@ -944,7 +992,9 @@ function renderIndicatorBand(
     ctx.beginPath()
     started = false
     for (let i = 0; i < len; i++) {
-      const v = middleVals[offset + i]
+      const idx = indexMap[i]
+      if (idx == null) { started = false; continue }
+      const v = middleVals[idx]
       if (v == null) { started = false; continue }
       const x = g.l + (i + 0.5) * step
       const vn = Number(v)
@@ -957,14 +1007,15 @@ function renderIndicatorBand(
   }
 }
 
-// [MACD 副图] - 描述: 根据后端返回 time 数组建立 time->index 映射，供 MACD 对齐使用
-function buildTimeIndex(timeArr: (number | string | null)[] | undefined): Map<number, number> {
-  const map = new Map<number, number>()
+// [chartViewport] - 描述: 根据后端返回 time 数组建立 time->index 映射，供 MACD/BB/DSA 对齐使用
+function buildTimeIndex(timeArr: (number | string | null)[] | undefined, tf: string): Map<string, number> {
+  const map = new Map<string, number>()
   if (!timeArr) return map
   timeArr.forEach((t, idx) => {
     if (t == null) return
-    const ts = new Date(t).getTime()
-    if (!Number.isNaN(ts)) map.set(ts, idx)
+    const key = normalizeChartTime(t, tf)
+    if (key == null) return
+    if (!map.has(key)) map.set(key, idx)
   })
   return map
 }
@@ -977,19 +1028,32 @@ function renderIndicatorMacd(
   data: Record<string, (number | string | null)[]>,
   _barsCount: number,
   step: number,
-  displayTimes?: string[],
+  displayTimes: string[],
+  timeframe: string,
 ): void {
   const p = g.panes.macd
-  if (!p || !displayTimes?.length) return
+  if (!p || !displayTimes.length) return
 
   const difVals = data.macd_dif
   const deaVals = data.macd_dea
   const histVals = data.macd_hist
   if (!difVals?.length || !deaVals?.length || !histVals?.length) return
 
-  // [MACD 副图] - 描述: 用后端 time 数组与 K 线 time 数组 join/map 对齐，禁止数组尾部长度猜测
-  const timeIndex = buildTimeIndex(data.time)
-  const indexes = displayTimes.map(t => timeIndex.get(new Date(t).getTime()))
+  // [MACD 副图] - 描述: 用后端 time 数组与 K 线 time 数组按 normalizeChartTime 对齐，禁止数组尾部长度猜测
+  const timeIndex = buildTimeIndex(data.time, timeframe)
+  const indexes = displayTimes.map(t => {
+    const key = normalizeChartTime(t, timeframe)
+    return key != null ? timeIndex.get(key) : undefined
+  })
+
+  // [MACD 副图] - 描述: 硬性检查对齐命中率，正常情况应与可见 K 线数量接近
+  const matchedCount = indexes.filter((v) => v != null).length
+  if (process.env.NODE_ENV === 'development' && matchedCount < displayTimes.length * 0.5) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[StrategyChart] MACD 时间对齐命中率过低: ${matchedCount}/${displayTimes.length}, timeframe=${timeframe}`,
+    )
+  }
 
   // 计算 MACD 范围（固定包含 0 轴）
   const visible: number[] = []
@@ -1096,25 +1160,50 @@ function isSelectionHit(type: string): boolean {
   return /selection|hit/i.test(type)
 }
 
+// 将归一化时间字符串转成可比较大小的分钟序数（不依赖 Date.getTime）
+function normalizedTimeValue(t: string): number {
+  const m = t.match(/^(\d{4})-(\d{2})-(\d{2})(?: (\d{2}):(\d{2}))?$/)
+  if (!m) return NaN
+  const [, y, mo, d, h = '00', min = '00'] = m
+  // 近似分钟序数：仅用于在同一周期内找最近 bar，不要求绝对精确
+  return ((+y * 12 + +mo) * 31 + +d) * 1440 + (+h * 60 + +min)
+}
+
 // 将 props 事件映射到 bar 索引
-function mapEvents(events: ChartEvent[], display: CalculatedBar[]): MappedEvent[] {
+function mapEvents(events: ChartEvent[], display: CalculatedBar[], timeframe: string): MappedEvent[] {
+  const timeIndex = new Map<string, number>()
+  display.forEach((d, i) => {
+    const key = normalizeChartTime(d.time, timeframe)
+    if (key != null && !timeIndex.has(key)) timeIndex.set(key, i)
+  })
   return events.map((ev, n) => {
-    const evTime = new Date(ev.time).getTime()
-    let bestIdx = 0
-    let bestDiff = Infinity
-    display.forEach((d, i) => {
-      const diff = Math.abs(new Date(d.time).getTime() - evTime)
-      if (diff < bestDiff) {
-        bestDiff = diff
-        bestIdx = i
+    const key = normalizeChartTime(ev.time, timeframe)
+    let bestIdx = key != null ? timeIndex.get(key) : undefined
+    if (bestIdx == null && key != null) {
+      // fallback：按归一化时间字符串找最近 bar，避免 Date.getTime() 时区歧义
+      const evVal = normalizedTimeValue(key)
+      if (!Number.isNaN(evVal)) {
+        bestIdx = 0
+        let bestDiff = Infinity
+        display.forEach((d, i) => {
+          const dKey = normalizeChartTime(d.time, timeframe)
+          if (dKey == null) return
+          const dVal = normalizedTimeValue(dKey)
+          if (Number.isNaN(dVal)) return
+          const diff = Math.abs(dVal - evVal)
+          if (diff < bestDiff) {
+            bestDiff = diff
+            bestIdx = i
+          }
+        })
       }
-    })
-    const d = display[bestIdx]
+    }
+    const d = display[bestIdx ?? 0]
     const sel = isSelectionHit(ev.type)
     return {
       ...ev,
       id: `evt_${n}`,
-      index: bestIdx,
+      index: bestIdx ?? 0,
       price: sel ? d.low : d.high,
       color: eventColor(ev.type),
     }
@@ -1155,16 +1244,60 @@ function drawTrading(
   const { ctx, w, h } = fit(canvas)
   const layerSet = new Set(Object.entries(layers).filter(([, v]) => v).map(([k]) => k))
   const g = geometry(layerSet, w, h)
-  // [chartViewport] - 纵轴 min/max 从可见 display 计算（而非完整 calc），
-  // 避免放大时 K 线被压扁（advice.md 第三节问题 1）
-  const min = Math.min(...display.map(d => d.low)) - 0.25
-  const max = Math.max(...display.map(d => d.high)) + 0.25
+  // [Volume Profile] - 从后端 indicators 提取 VP 数据（SSOT，禁止前端重算）
+  const profile = extractBackendProfile(indicators)
+  const displayTimes = display.map(d => d.time)
+
+  // [chartViewport] - 纵轴范围：可见 K 线 high/low + 可见 BB upper/lower + 可见 DSA VWAP + 可见节点区间，上下各留约 3% padding
+  const priceCandidates: number[] = []
+  display.forEach(d => {
+    priceCandidates.push(d.low, d.high)
+  })
+
+  if (indicators?.layers && indicators?.data) {
+    indicators.layers.forEach(layer => {
+      const layerData = indicators.data![layer.strategy_id]
+      if (!layerData) return
+      const indexMap = buildDisplayIndexMap(displayTimes, layerData.time, timeframe)
+      if (layer.layer_id === 'bb' && layers.bb) {
+        const upperVals = layerData[layer.fields[0]]
+        const lowerVals = layerData[layer.fields[1]]
+        indexMap.forEach(idx => {
+          if (idx == null) return
+          const u = upperVals?.[idx]
+          const l = lowerVals?.[idx]
+          if (typeof u === 'number') priceCandidates.push(u)
+          if (typeof l === 'number') priceCandidates.push(l)
+        })
+      }
+      if (layer.layer_id === 'dsa_vwap' && layers.dsa) {
+        const vwapField = layer.fields.find(f => /vwap/i.test(f)) || layer.fields[0]
+        const vwapVals = layerData[vwapField]
+        indexMap.forEach(idx => {
+          if (idx == null) return
+          const v = vwapVals?.[idx]
+          if (typeof v === 'number') priceCandidates.push(v)
+        })
+      }
+    })
+  }
+
+  if (layers.node && profile?.nodes) {
+    profile.nodes.forEach(n => {
+      priceCandidates.push(n.lo, n.hi)
+    })
+  }
+
+  const rawMin = priceCandidates.length ? Math.min(...priceCandidates) : Math.min(...display.map(d => d.low))
+  const rawMax = priceCandidates.length ? Math.max(...priceCandidates) : Math.max(...display.map(d => d.high))
+  const range = Math.max(rawMax - rawMin, rawMin * 0.001)
+  const padding = range * 0.03
+  const min = rawMin - padding
+  const max = rawMax + padding
   const py = (v: number) => g.panes.price.top + (max - v) / (max - min) * (g.panes.price.bottom - g.panes.price.top)
   const plotW = g.plotRight - g.l
   const step = plotW / display.length
   const barW = Math.max(2.2, step * 0.56)
-  // [Volume Profile] - 从后端 indicators 提取 VP 数据（SSOT，禁止前端重算）
-  const profile = extractBackendProfile(indicators)
 
   // 1. 背景 + 网格
   drawGrid(ctx, w, h, g, min, max)
@@ -1232,11 +1365,13 @@ function drawTrading(
       // DSA VWAP 指标受 dsa 图层开关控制
       if (layer.layer_id === 'dsa_vwap' && !layers.dsa) return
       if (layer.layer_id === 'bb' && !layers.bb) return
+      // [BB 图层] - 周线/月线不渲染日线布林带
+      if (layer.layer_id === 'bb' && (timeframe === '1w' || timeframe === '1mo')) return
       // [MACD 副图] - 受 macd 图层开关控制
       if (layer.layer_id === 'macd' && !layers.macd) return
       const layerData = indicators.data![layer.strategy_id]
       if (layerData) {
-        renderIndicatorLayer(ctx, g, layer, layerData, display.length, step, py, display.map(d => d.time))
+        renderIndicatorLayer(ctx, g, layer, layerData, display.length, step, py, displayTimes, timeframe)
       }
     })
   }
@@ -1459,8 +1594,8 @@ export function StrategyChart({
   // 映射事件到 bar 索引
   const mappedEvents = useMemo(() => {
     if (!events.length || !display.length) return []
-    return mapEvents(events, display)
-  }, [events, display])
+    return mapEvents(events, display, timeframe)
+  }, [events, display, timeframe])
 
   // 最新数据 ref（供 draw 函数读取）
   const dataRef = useRef({ calc, display, mappedEvents, layers, timeframe })
@@ -1544,28 +1679,24 @@ export function StrategyChart({
         tip.style.left = Math.min(w - 235, mx + 14) + 'px'
         tip.style.top = Math.max(42, my - 58) + 'px'
         // 追加后端策略指标
-        // [MACD 副图] - 描述: hover 时 MACD 按后端 time 数组与 K 线 time 对齐；其他图层保持原 tail 对齐
+        // [chartViewport] - 描述: hover 时所有图层统一按 normalizeChartTime 时间键对齐
+        const tf = dataRef.current.timeframe
         let indicatorHtml = ''
         if (indicatorsRef.current?.layers && indicatorsRef.current?.data) {
           indicatorsRef.current.layers.forEach(layer => {
             const layerData = indicatorsRef.current!.data[layer.strategy_id]
             if (!layerData) return
             const fields = layer.hover_fields.length ? layer.hover_fields : layer.fields
-            const isMacd = layer.layer_id === 'macd'
-            const macdTimeIndex = isMacd && Array.isArray(layerData.time)
-              ? buildTimeIndex(layerData.time)
+            const timeIndex = Array.isArray(layerData.time)
+              ? buildTimeIndex(layerData.time, tf)
               : null
             const parts: string[] = []
             fields.forEach(f => {
               const vals = layerData[f]
               if (!vals) return
               let idx: number | undefined
-              if (macdTimeIndex) {
-                idx = macdTimeIndex.get(new Date(d.time).getTime())
-              } else {
-                const offset = Math.max(0, vals.length - data.length)
-                idx = offset + i
-              }
+              const key = normalizeChartTime(d.time, tf)
+              idx = key != null ? timeIndex?.get(key) : undefined
               if (idx == null || idx < 0 || idx >= vals.length) return
               const v = vals[idx]
               if (v != null) {

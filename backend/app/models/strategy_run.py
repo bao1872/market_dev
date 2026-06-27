@@ -8,7 +8,7 @@
 - 030_strategy_run_attempt_no: strategy_runs.attempt_no 业务重试序号
 
 字段说明：
-- strategy_runs.run_type: 触发方式（manual/scheduled/replay/backfill）
+- strategy_runs.run_type: 触发方式（manual/scheduled/replay）
 - strategy_runs.status: 运行状态（queued/running/completed/partial_failed/published/failed）
 - strategy_runs.input_overrides: 输入参数覆盖（JSONB，仅保留原始输入参数）
 - strategy_runs.effective_config: 运行时实际使用的配置快照（JSONB，不可变）
@@ -88,7 +88,7 @@ class StrategyRun(Base):
     idempotency_key 唯一约束防止重复运行。
 
     字段映射（任务描述 → 迁移 DDL）：
-    - trigger_kind → run_type（manual/scheduled/replay/backfill）
+    - trigger_kind → run_type（manual/scheduled/replay）
     - status: queued/running/completed/partial_failed/published/failed
     - error → run 级存 error_code/failure_stage/error_message（迁移 035）；
       per-stock 级存 strategy_run_items.error_message
@@ -111,7 +111,7 @@ class StrategyRun(Base):
         comment="策略版本 ID",
     )
     run_type: Mapped[str] = mapped_column(
-        Text(), nullable=False, comment="触发方式：manual/scheduled/replay/backfill"
+        Text(), nullable=False, comment="触发方式：manual/scheduled/replay"
     )
     trade_date: Mapped[date | None] = mapped_column(
         Date(), nullable=True, comment="交易日（selector 策略的选股日期）"

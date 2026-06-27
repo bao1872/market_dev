@@ -23,12 +23,18 @@ SIZES = [
 ]
 OUTPUT_DIR = Path(__file__).parent.parent / "screenshots"
 
-# 临时验收账号
-EMAIL = "e2e-deploy@temp.local"
-PASSWORD = "TempPass2026!"
+# 临时验收账号（禁止在源码中硬编码密码；通过环境变量传入）
+EMAIL = os.getenv("E2E_EMAIL")
+PASSWORD = os.getenv("E2E_PASSWORD")
 
 
 async def login_and_screenshot() -> int:
+    if not EMAIL or not PASSWORD:
+        print(
+            "ERROR: 请通过环境变量 E2E_EMAIL 和 E2E_PASSWORD 传入验收账号密码",
+            file=sys.stderr,
+        )
+        return 1
     OUTPUT_DIR.mkdir(exist_ok=True)
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)

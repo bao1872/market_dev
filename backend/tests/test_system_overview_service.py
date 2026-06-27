@@ -3,7 +3,7 @@
 覆盖：
 - market_session 6 种场景（通过 service 集成测试，mock is_trading_day_async）
 - monitor_runtime 7 种状态（RUNNING/DELAYED/SESSION_COMPLETED/FAILED/WORKER_OFFLINE/NOT_APPLICABLE/IDLE_EXPECTED）
-- after_close_pipeline 关键场景（含昨日 bars 不满足今日、backfill 不覆盖 scheduled 边界）
+- after_close_pipeline 关键场景（含昨日 bars 不满足今日）
 
 测试策略：
 - service 函数接受可选 now 参数，注入固定时间（无需 freezegun）
@@ -487,10 +487,10 @@ async def test_pipeline_waiting_dsa(db_session):
 
 
 @pytest.mark.asyncio
-async def test_pipeline_dsa_queued(db_session, test_selector_strategy):
+async def test_pipeline_dsa_queued(db_session, dsa_selector_strategy):
     """DSA queued → DSA_QUEUED。"""
     now = datetime(2026, 6, 24, 16, 30, tzinfo=SHANGHAI)
-    version_id = test_selector_strategy["version"].id
+    version_id = dsa_selector_strategy["version"].id
 
     job = SchedulerJobRun(
         job_name="bars_scheduler",
@@ -523,10 +523,10 @@ async def test_pipeline_dsa_queued(db_session, test_selector_strategy):
 
 
 @pytest.mark.asyncio
-async def test_pipeline_dsa_running(db_session, test_selector_strategy):
+async def test_pipeline_dsa_running(db_session, dsa_selector_strategy):
     """DSA running → DSA_RUNNING。"""
     now = datetime(2026, 6, 24, 16, 30, tzinfo=SHANGHAI)
-    version_id = test_selector_strategy["version"].id
+    version_id = dsa_selector_strategy["version"].id
 
     db_session.add(SchedulerJobRun(
         job_name="bars_scheduler",
@@ -553,10 +553,10 @@ async def test_pipeline_dsa_running(db_session, test_selector_strategy):
 
 
 @pytest.mark.asyncio
-async def test_pipeline_dsa_published(db_session, test_selector_strategy):
+async def test_pipeline_dsa_published(db_session, dsa_selector_strategy):
     """DSA published 且 failed_count=0 → PUBLISHED。"""
     now = datetime(2026, 6, 24, 18, 0, tzinfo=SHANGHAI)
-    version_id = test_selector_strategy["version"].id
+    version_id = dsa_selector_strategy["version"].id
 
     db_session.add(SchedulerJobRun(
         job_name="bars_scheduler",
@@ -587,10 +587,10 @@ async def test_pipeline_dsa_published(db_session, test_selector_strategy):
 
 
 @pytest.mark.asyncio
-async def test_pipeline_dsa_failed(db_session, test_selector_strategy):
+async def test_pipeline_dsa_failed(db_session, dsa_selector_strategy):
     """DSA failed → DSA_FAILED。"""
     now = datetime(2026, 6, 24, 18, 0, tzinfo=SHANGHAI)
-    version_id = test_selector_strategy["version"].id
+    version_id = dsa_selector_strategy["version"].id
 
     db_session.add(SchedulerJobRun(
         job_name="bars_scheduler",
@@ -649,48 +649,10 @@ async def test_pipeline_yesterday_bars_not_satisfy_today(db_session):
 
 
 @pytest.mark.asyncio
-async def test_pipeline_backfill_not_cover_scheduled(db_session, test_selector_strategy):
-    """历史 backfill/manual 不覆盖 scheduled 状态（关键边界）。"""
-    now = datetime(2026, 6, 24, 18, 0, tzinfo=SHANGHAI)
-    version_id = test_selector_strategy["version"].id
-
-    # 今日 bars succeeded
-    db_session.add(SchedulerJobRun(
-        job_name="bars_scheduler",
-        business_date=TEST_DATE_STR,
-        status="succeeded",
-        started_at=datetime(2026, 6, 24, 16, 0, tzinfo=SHANGHAI),
-        finished_at=datetime(2026, 6, 24, 16, 20, tzinfo=SHANGHAI),
-    ))
-
-    # backfill 运行（不应覆盖 scheduled 状态）
-    db_session.add(StrategyRun(
-        strategy_version_id=version_id,
-        run_type="backfill",
-        trade_date=TEST_DATE,
-        status="published",
-        input_overrides={},
-        idempotency_key=f"test:{uuid.uuid4().hex}",
-        attempt_no=1,
-        failed_count=0,
-        succeeded_count=100,
-    ))
-    await db_session.flush()
-
-    with _mock_trading_day(is_trading=True):
-        result = await get_system_overview(db_session, now=now)
-
-    # 无 scheduled 运行 → WAITING_DSA（backfill 不覆盖）
-    pipeline = result["after_close_pipeline"]
-    assert pipeline["status"] == "WAITING_DSA"
-    assert pipeline["dsa_run"] is None
-
-
-@pytest.mark.asyncio
-async def test_pipeline_dsa_completed_partial(db_session, test_selector_strategy):
+async def test_pipeline_dsa_completed_partial(db_session, dsa_selector_strategy):
     """DSA published 且 failed_count>0 → DSA_COMPLETED（部分成功）。"""
     now = datetime(2026, 6, 24, 18, 0, tzinfo=SHANGHAI)
-    version_id = test_selector_strategy["version"].id
+    version_id = dsa_selector_strategy["version"].id
 
     db_session.add(SchedulerJobRun(
         job_name="bars_scheduler",
@@ -721,10 +683,10 @@ async def test_pipeline_dsa_completed_partial(db_session, test_selector_strategy
 
 
 @pytest.mark.asyncio
-async def test_pipeline_attempt_no_desc(db_session, test_selector_strategy):
+async def test_pipeline_attempt_no_desc(db_session, dsa_selector_strategy):
     """验证按 attempt_no DESC 取最新运行。"""
     now = datetime(2026, 6, 24, 18, 0, tzinfo=SHANGHAI)
-    version_id = test_selector_strategy["version"].id
+    version_id = dsa_selector_strategy["version"].id
 
     db_session.add(SchedulerJobRun(
         job_name="bars_scheduler",
@@ -847,13 +809,18 @@ async def _create_bars_succeeded_job(db_session, business_date_str: str = TEST_D
 
 
 async def _create_active_instruments(db_session, count: int = 5):
-    """创建指定数量的 active 标的（满足 FK 约束）。"""
+    """创建指定数量的 active 标的（满足 FK 约束）。
+
+    使用 SZ 30xxxx 股票代码，确保能被 _compute_bars_coverage 的 A 股过滤规则计入分母。
+    """
     from app.models.instrument import Instrument
 
     instruments = []
     for i in range(count):
+        # 生成 300000-309999 范围内的 6 位股票代码，符合 A 股正则
+        symbol = f"{300000 + (uuid.uuid4().int % 10000):06d}"
         inst = Instrument(
-            symbol=f"T{uuid.uuid4().hex[:6]}",
+            symbol=symbol,
             name=f"测试标的{i}",
             market="SZ",
             status="active",
@@ -929,7 +896,7 @@ async def _create_bars_daily_for_all_active(db_session, trade_date: date) -> int
 
 
 @pytest.mark.asyncio
-async def test_waiting_dsa_reason_no_run_created(db_session, test_selector_strategy):
+async def test_waiting_dsa_reason_no_run_created(db_session, dsa_selector_strategy):
     """WAITING_DSA 原因 1/7: NO_RUN_CREATED。
 
     场景：bars succeeded + 覆盖率达标 + 有 released selector 版本，但无 DSA run。
@@ -944,7 +911,7 @@ async def test_waiting_dsa_reason_no_run_created(db_session, test_selector_strat
     await _create_active_instruments(db_session, count=5)
     await _create_bars_daily_for_all_active(db_session, TEST_DATE)
 
-    # test_selector_strategy fixture 已创建 released selector 版本
+    # dsa_selector_strategy fixture 已创建 released selector 版本
 
     with _mock_trading_day(is_trading=True):
         result = await get_system_overview(db_session, now=now)
@@ -957,14 +924,14 @@ async def test_waiting_dsa_reason_no_run_created(db_session, test_selector_strat
 
 
 @pytest.mark.asyncio
-async def test_waiting_dsa_reason_queued_not_claimed(db_session, test_selector_strategy):
+async def test_waiting_dsa_reason_queued_not_claimed(db_session, dsa_selector_strategy):
     """WAITING_DSA 原因 2/7: QUEUED_NOT_CLAIMED。
 
     场景：DSA run 已创建 30+ 分钟但仍为 queued 且无 worker_id。
     原因：trading-worker-strategy-batch 容器不健康。
     """
     now = datetime(2026, 6, 24, 17, 30, tzinfo=SHANGHAI)
-    version_id = test_selector_strategy["version"].id
+    version_id = dsa_selector_strategy["version"].id
 
     await _create_bars_succeeded_job(db_session)
 
@@ -1027,6 +994,27 @@ async def test_waiting_dsa_reason_no_released_version(db_session):
     """
     now = datetime(2026, 6, 24, 17, 0, tzinfo=SHANGHAI)
 
+    # 归档测试库中已存在的 selector released 版本，确保 _has_released_selector_version 为 False
+    from sqlalchemy import select, update
+
+    from app.models.strategy import StrategyDefinition, StrategyVersion
+
+    selector_def_ids = (
+        await db_session.execute(
+            select(StrategyDefinition.id).where(StrategyDefinition.kind == "selector")
+        )
+    ).scalars().all()
+    if selector_def_ids:
+        await db_session.execute(
+            update(StrategyVersion)
+            .where(
+                StrategyVersion.strategy_definition_id.in_(selector_def_ids),
+                StrategyVersion.status == "released",
+            )
+            .values(status="archived")
+        )
+        await db_session.flush()
+
     await _create_bars_succeeded_job(db_session)
 
     # 创建 active 标的 + 为所有 active 标的（含 seed）创建 BarDaily，确保覆盖率 100%
@@ -1045,14 +1033,14 @@ async def test_waiting_dsa_reason_no_released_version(db_session):
 
 
 @pytest.mark.asyncio
-async def test_waiting_dsa_reason_run_failed(db_session, test_selector_strategy):
+async def test_waiting_dsa_reason_run_failed(db_session, dsa_selector_strategy):
     """WAITING_DSA 原因 5/7: RUN_FAILED。
 
     场景：DSA run failed，failure_stage = CALCULATE_INSTRUMENTS（非 QUALITY_GATE/PUBLISH）。
     原因：计算阶段异常。
     """
     now = datetime(2026, 6, 24, 18, 0, tzinfo=SHANGHAI)
-    version_id = test_selector_strategy["version"].id
+    version_id = dsa_selector_strategy["version"].id
 
     await _create_bars_succeeded_job(db_session)
 
@@ -1080,14 +1068,14 @@ async def test_waiting_dsa_reason_run_failed(db_session, test_selector_strategy)
 
 
 @pytest.mark.asyncio
-async def test_waiting_dsa_reason_quality_gate_failed(db_session, test_selector_strategy):
+async def test_waiting_dsa_reason_quality_gate_failed(db_session, dsa_selector_strategy):
     """WAITING_DSA 原因 6/7: QUALITY_GATE_FAILED。
 
     场景：DSA run failed，failure_stage = QUALITY_GATE。
     原因：质量门禁未通过。
     """
     now = datetime(2026, 6, 24, 18, 0, tzinfo=SHANGHAI)
-    version_id = test_selector_strategy["version"].id
+    version_id = dsa_selector_strategy["version"].id
 
     await _create_bars_succeeded_job(db_session)
 
@@ -1117,14 +1105,14 @@ async def test_waiting_dsa_reason_quality_gate_failed(db_session, test_selector_
 
 
 @pytest.mark.asyncio
-async def test_waiting_dsa_reason_publish_failed(db_session, test_selector_strategy):
+async def test_waiting_dsa_reason_publish_failed(db_session, dsa_selector_strategy):
     """WAITING_DSA 原因 7/7: PUBLISH_FAILED。
 
     场景：DSA run failed，failure_stage = PUBLISH。
     原因：发布逻辑异常。
     """
     now = datetime(2026, 6, 24, 18, 0, tzinfo=SHANGHAI)
-    version_id = test_selector_strategy["version"].id
+    version_id = dsa_selector_strategy["version"].id
 
     await _create_bars_succeeded_job(db_session)
 
@@ -1157,10 +1145,10 @@ async def test_waiting_dsa_reason_publish_failed(db_session, test_selector_strat
 
 
 @pytest.mark.asyncio
-async def test_waiting_dsa_reason_none_when_published(db_session, test_selector_strategy):
+async def test_waiting_dsa_reason_none_when_published(db_session, dsa_selector_strategy):
     """边界：DSA published 且 failed_count=0 → reason=None（成功终态不细分）。"""
     now = datetime(2026, 6, 24, 18, 0, tzinfo=SHANGHAI)
-    version_id = test_selector_strategy["version"].id
+    version_id = dsa_selector_strategy["version"].id
 
     await _create_bars_succeeded_job(db_session)
 
@@ -1187,10 +1175,10 @@ async def test_waiting_dsa_reason_none_when_published(db_session, test_selector_
 
 
 @pytest.mark.asyncio
-async def test_waiting_dsa_queued_not_claimed_within_timeout(db_session, test_selector_strategy):
+async def test_waiting_dsa_queued_not_claimed_within_timeout(db_session, dsa_selector_strategy):
     """边界：DSA queued 但未超 30 分钟 → reason=None（正常排队中）。"""
     now = datetime(2026, 6, 24, 17, 10, tzinfo=SHANGHAI)
-    version_id = test_selector_strategy["version"].id
+    version_id = dsa_selector_strategy["version"].id
 
     await _create_bars_succeeded_job(db_session)
 
@@ -1219,10 +1207,10 @@ async def test_waiting_dsa_queued_not_claimed_within_timeout(db_session, test_se
 
 
 @pytest.mark.asyncio
-async def test_waiting_dsa_queued_with_worker_id(db_session, test_selector_strategy):
+async def test_waiting_dsa_queued_with_worker_id(db_session, dsa_selector_strategy):
     """边界：DSA queued 超 30 分钟但有 worker_id → reason=None（已被领取）。"""
     now = datetime(2026, 6, 24, 18, 0, tzinfo=SHANGHAI)
-    version_id = test_selector_strategy["version"].id
+    version_id = dsa_selector_strategy["version"].id
 
     await _create_bars_succeeded_job(db_session)
 
@@ -1388,35 +1376,4 @@ async def test_compute_bars_coverage_excludes_non_stocks(db_session):
     )
 
 
-@pytest.mark.asyncio
-async def test_dsa_backfill_resolve_active_instruments_excludes_non_stocks(db_session):
-    """[TDD] - DsaBackfillService._resolve_active_instruments 只返回 A 股股票。
 
-    场景：构造 2 只股票 + 1 只指数 + 1 只 ETF，全部 active。
-    预期：只返回 2 只股票的 (id, symbol)，不含指数/ETF。
-    """
-    from app.models.instrument import Instrument
-    from app.services.dsa_backfill_service import DSABackfillService
-
-    # 2 只股票
-    stock1 = Instrument(id=uuid.uuid4(), symbol="600519", name="贵州茅台", market="SH", status="active")
-    stock2 = Instrument(id=uuid.uuid4(), symbol="000001", name="平安银行", market="SZ", status="active")
-    # 1 只指数（SH 000xxx）
-    index = Instrument(id=uuid.uuid4(), symbol="000016", name="上证50", market="SH", status="active")
-    # 1 只 ETF（SH 510xxx）
-    etf = Instrument(id=uuid.uuid4(), symbol="510050", name="上证50ETF", market="SH", status="active")
-    db_session.add_all([stock1, stock2, index, etf])
-    await db_session.flush()
-
-    service = DSABackfillService()
-    instruments = await service._resolve_active_instruments(db_session)
-
-    # 只应返回 2 只股票，不含指数/ETF
-    assert len(instruments) == 2, (
-        f"应只返回 2 只股票，实际返回 {len(instruments)} 个标的。"
-        f"若未过滤，会返回 4 个（含指数/ETF）"
-    )
-    symbols = {sym for _, sym in instruments}
-    assert symbols == {"600519", "000001"}, (
-        f"应返回股票 600519/000001，实际 {symbols}"
-    )

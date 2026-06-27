@@ -11,7 +11,7 @@ Inputs:
     无外部输入，全部从代码事实源提取
 
 Outputs:
-    docs/数据结构.md（6 张 bar 表结构 + instruments 表 + DSA 历史回补表 + 数据流图 + 保留策略）
+    docs/数据结构.md（6 张 bar 表结构 + instruments 表 + 数据流图 + 保留策略）
     docs/操作手册.md（API 规格 + 调度任务 + 监控指标 + 故障排查 + 对账操作 + 保留策略）
 
 How to Run:
@@ -48,10 +48,6 @@ from app.models.bar import (  # noqa: E402
     BarMonthly,
     BarWeekly,
 )
-from app.models.dsa_backfill import (  # noqa: E402
-    BackfillInstrumentProgress,
-    DSABackfillJob,
-)
 from app.models.instrument import Instrument  # noqa: E402
 
 # 项目根目录（docs/ 所在位置）
@@ -62,9 +58,6 @@ _OPS_MANUAL_PATH = os.path.join(_DOCS_DIR, "操作手册.md")
 
 # 6 张 bar 表，按周期粒度排序
 _BAR_MODELS = [BarDaily, BarMinute, BarWeekly, BarMonthly, Bar15Min, Bar60Min]
-
-# DSA 历史回补表
-_DSA_BACKFILL_MODELS = [DSABackfillJob, BackfillInstrumentProgress]
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +290,7 @@ def _extract_reconcile_config() -> dict:
 def generate_db_schema_doc() -> str:
     """生成数据结构文档（docs/数据结构.md）。
 
-    内容：6 张 bar 表结构 + instruments 表 + DSA 历史回补表 + 数据流图 + 保留策略。
+    内容：6 张 bar 表结构 + instruments 表 + 数据流图 + 保留策略。
     """
     buf = io.StringIO()
     w = buf.write
@@ -307,7 +300,7 @@ def generate_db_schema_doc() -> str:
         f"> 自动生成 by tools/update_docs.py | 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
     )
     w(
-        "> 事实源: ORM 模型 (app.models.bar, app.models.instrument, app.models.dsa_backfill) + 服务配置\n\n"
+        "> 事实源: ORM 模型 (app.models.bar, app.models.instrument) + 服务配置\n\n"
     )
     w("---\n\n")
 
@@ -316,7 +309,7 @@ def generate_db_schema_doc() -> str:
     w("| 表名 | 用途 | 主键 | 外键 |\n")
     w("|------|------|------|------|\n")
 
-    all_models = _BAR_MODELS + [Instrument] + _DSA_BACKFILL_MODELS
+    all_models = _BAR_MODELS + [Instrument]
     for model_cls in all_models:
         info = _extract_table_info(model_cls)
         pk_str = ", ".join(info["primary_key"])

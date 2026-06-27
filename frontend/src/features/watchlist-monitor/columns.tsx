@@ -3,7 +3,7 @@
 import type { DataTableColumn } from '@/components/StrategyDataTable'
 import { getEventLabel } from '@/constants/userFacingLabels'
 import type { WatchlistMonitorRow, MonitorStatus } from './types'
-import { fmtNum, fmtTime } from './adapters'
+import { fmtNum, fmtPct, fmtTime } from './adapters'
 
 /**
  * [自选监控] - 事件类型翻译（advice.md 第二节通俗化映射）
@@ -122,7 +122,7 @@ export function getWatchlistMonitorColumns(
     },
     {
       key: 'bbMid',
-      title: 'BB中轨',
+      title: '近期价格中枢',
       dataType: 'number',
       sortable: true,
       filterable: false,
@@ -131,7 +131,7 @@ export function getWatchlistMonitorColumns(
     },
     {
       key: 'bbLower',
-      title: 'BB下轨',
+      title: '近期波动下沿',
       dataType: 'number',
       sortable: true,
       filterable: false,
@@ -140,7 +140,7 @@ export function getWatchlistMonitorColumns(
     },
     {
       key: 'upperNode',
-      title: '上节点',
+      title: '上方成交密集区',
       dataType: 'number',
       sortable: true,
       filterable: false,
@@ -160,7 +160,7 @@ export function getWatchlistMonitorColumns(
     },
     {
       key: 'lowerNode',
-      title: '下节点',
+      title: '下方成交密集区',
       dataType: 'number',
       sortable: true,
       filterable: false,
@@ -180,16 +180,16 @@ export function getWatchlistMonitorColumns(
     },
     {
       key: 'position01',
-      title: '位置',
-      dataType: 'number',
+      title: '当前区间位置',
+      dataType: 'percent',
       sortable: true,
       filterable: false,
       sortValue: (row) => row.position_0_1 ?? 0,
-      render: (row) => <span className="num">{fmtNum(row.position_0_1)}</span>,
+      render: (row) => <span className="num">{fmtPct(row.position_0_1)}</span>,
     },
     {
       key: 'pocPrice',
-      title: 'POC',
+      title: '最密集成交价',
       dataType: 'number',
       sortable: true,
       filterable: false,

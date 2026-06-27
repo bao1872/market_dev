@@ -47,6 +47,7 @@ from app.services.feishu_card_builder import dto_to_feishu_card
 from app.services.message_builder import MessageBuilderError, build_message
 from app.services.notification_service import (
     ChannelNotFoundError,
+    DuplicateActiveChannelError,
     LatestEventNotFoundError,
     MessageNotFoundError,
     NotificationServiceError,
@@ -182,13 +183,18 @@ async def create_channel_endpoint(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
         ) from e
 
-    channel = await create_channel(
-        db,
-        user_id=user_id,
-        adapter_type=request.adapter_type,
-        display_name=request.display_name,
-        target_config=request.target_config,
-    )
+    try:
+        channel = await create_channel(
+            db,
+            user_id=user_id,
+            adapter_type=request.adapter_type,
+            display_name=request.display_name,
+            target_config=request.target_config,
+        )
+    except DuplicateActiveChannelError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(e)
+        ) from e
     await db.commit()
     return _channel_response(channel)
 
@@ -209,6 +215,10 @@ async def update_channel_endpoint(
             display_name=request.display_name,
             target_config=request.target_config,
         )
+    except DuplicateActiveChannelError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(e)
+        ) from e
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
 
@@ -252,6 +262,10 @@ async def verify_channel_endpoint(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
         ) from e
+    except DuplicateActiveChannelError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(e)
+        ) from e
     except NotificationServiceError as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)
@@ -292,6 +306,10 @@ async def test_channel_endpoint(
     except ChannelNotFoundError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
+        ) from e
+    except DuplicateActiveChannelError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(e)
         ) from e
     await db.commit()
     return ChannelTestResponse(

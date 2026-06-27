@@ -16,9 +16,7 @@ DSA 作为第一个支持的 strategy_key，后续可扩展其他策略。
 - POST API 只创建 queued 运行，Worker 异步执行（不在 HTTP 请求内计算全市场）
 - run 状态机：queued → running → completed/partial_failed → published/failed
 - 定时任务自动发布：scheduled 运行完成后，通过质量门禁自动发布
-  - 门禁 1：状态必须为 completed（非 partial_failed/failed）
-  - 门禁 2：数据覆盖率 succeeded_count / total_instruments >= 80%
-  - 门禁 3：无致命错误（failed_count == 0）
+  - 门禁：状态必须为 completed 或 partial_failed，且至少有一个成功结果（succeeded_count > 0）
 - per-stock 跟踪：strategy_run_items 记录 status/attempt_count/error/result_id
 - effective_config 从 manifest 读取并保存到 strategy_runs.effective_config（不可变）
 - 幂等：idempotency_key = strategy_key:strategy_version_id:trade_date:run_type:attempt_no
@@ -70,9 +68,6 @@ logger = logging.getLogger("strategy_batch_service")
 # 数据就绪检查覆盖率阈值（当日 K 线数 / 活跃标的数）
 DATA_COVERAGE_THRESHOLD = 0.9
 
-# 自动发布质量门禁：成功率阈值（succeeded_count / total_instruments）
-AUTO_PUBLISH_COVERAGE_THRESHOLD = 0.8
-
 # 策略批量计算日线回看天数（与 bars.py _DEFAULT_DAILY_LOOKBACK_DAYS 一致）
 _STRATEGY_BATCH_DAILY_LOOKBACK_DAYS = 5000
 
@@ -86,9 +81,8 @@ _HEARTBEAT_INTERVAL_SECONDS = 30  # 独立心跳更新间隔（秒）
 _RUN_TYPE_SCHEDULED = "scheduled"
 _RUN_TYPE_MANUAL = "manual"
 _RUN_TYPE_REPLAY = "replay"
-_RUN_TYPE_BACKFILL = "backfill"
 VALID_RUN_TYPES = {
-    _RUN_TYPE_SCHEDULED, _RUN_TYPE_MANUAL, _RUN_TYPE_REPLAY, _RUN_TYPE_BACKFILL,
+    _RUN_TYPE_SCHEDULED, _RUN_TYPE_MANUAL, _RUN_TYPE_REPLAY,
 }
 
 # [StrategyRun] - 去重状态分组
@@ -287,7 +281,7 @@ class StrategyBatchService:
             db: 异步会话
             strategy_key: 策略 key（如 "dsa_selector"）
             trade_date: 交易日
-            run_type: 触发方式（manual/scheduled/replay/backfill）
+            run_type: 触发方式（manual/scheduled/replay）
             instrument_ids: 指定标的列表（None 表示全市场活跃标的）
 
         Returns:
@@ -964,6 +958,9 @@ class StrategyBatchService:
                 f"仅 completed/partial_failed 可发布）: run_id={run_id}"
             )
 
+        if (run.succeeded_count or 0) <= 0:
+            raise ValueError("没有成功结果，禁止发布")
+
         run.status = "published"
         run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
         try:
@@ -1138,9 +1135,8 @@ class StrategyBatchService:
         """检查运行是否通过质量门禁（用于定时任务自动发布）。
 
         质量门禁条件：
-        1. 运行状态为 completed（非 partial_failed/failed）
-        2. 数据覆盖率：succeeded_count / total_instruments >= 0.8
-        3. 无致命错误（failed_count == 0）
+        1. 运行状态为 completed 或 partial_failed
+        2. 至少有一个成功结果（succeeded_count > 0）
 
         Args:
             run: 运行记录
@@ -1148,43 +1144,25 @@ class StrategyBatchService:
         Returns:
             True 表示通过质量门禁，可自动发布
         """
-        # 门禁 1：状态必须为 completed
-        if run.status != "completed":
+        # 门禁 1：状态必须为 completed 或 partial_failed
+        if run.status not in ("completed", "partial_failed"):
             logger.info(
-                "质量门禁未通过: 状态非 completed（当前 %s）, run_id=%s",
+                "质量门禁未通过: 状态不允许自动发布（当前 %s）, run_id=%s",
                 run.status, run.id,
             )
             return False
 
-        # 门禁 2：数据覆盖率 >= 80%
-        total = run.total_instruments or 0
+        # 门禁 2：至少有一个成功结果
         succeeded = run.succeeded_count or 0
-        if total == 0:
-            logger.info("质量门禁未通过: 总标的数为 0, run_id=%s", run.id)
-            return False
-
-        coverage = succeeded / total
-        if coverage < AUTO_PUBLISH_COVERAGE_THRESHOLD:
+        if succeeded <= 0:
             logger.info(
-                "质量门禁未通过: 覆盖率 %.1f%% < %.0f%%, "
-                "succeeded=%d, total=%d, run_id=%s",
-                coverage * 100, AUTO_PUBLISH_COVERAGE_THRESHOLD * 100,
-                succeeded, total, run.id,
-            )
-            return False
-
-        # 门禁 3：无致命错误
-        failed = run.failed_count or 0
-        if failed > 0:
-            logger.info(
-                "质量门禁未通过: 存在 %d 个失败标的, run_id=%s",
-                failed, run.id,
+                "质量门禁未通过: 没有成功结果, run_id=%s", run.id,
             )
             return False
 
         logger.info(
-            "质量门禁通过: coverage=%.1f%%, succeeded=%d, total=%d, run_id=%s",
-            coverage * 100, succeeded, total, run.id,
+            "质量门禁通过: status=%s, succeeded=%d, run_id=%s",
+            run.status, succeeded, run.id,
         )
         return True
 
@@ -1380,13 +1358,10 @@ if __name__ == "__main__":
     print(f"方法存在: {methods} ✓")
 
     # 验证常量
-    assert AUTO_PUBLISH_COVERAGE_THRESHOLD == 0.8
-    print(f"AUTO_PUBLISH_COVERAGE_THRESHOLD={AUTO_PUBLISH_COVERAGE_THRESHOLD} ✓")
-
     assert _HEARTBEAT_INTERVAL_SECONDS == 30
     print(f"_HEARTBEAT_INTERVAL_SECONDS={_HEARTBEAT_INTERVAL_SECONDS} ✓")
 
-    assert VALID_RUN_TYPES == {"scheduled", "manual", "replay", "backfill"}
+    assert VALID_RUN_TYPES == {"scheduled", "manual", "replay"}
     print(f"VALID_RUN_TYPES={VALID_RUN_TYPES} ✓")
 
     assert _BLOCKING_STATUSES == {"published", "completed", "running", "queued"}

@@ -1689,6 +1689,216 @@ class TestDeliveryStateMachine:
         assert created == 0
 
 
+class TestChannelActiveUniqueness:
+    """飞书渠道 active 唯一性约束测试（Task 15）。"""
+
+    @pytest.mark.asyncio
+    async def test_create_channel_rejects_duplicate_active_feishu(
+        self, db_session, test_user,
+    ) -> None:
+        """同一用户已存在 active feishu_webhook 时，create_channel 应拒绝。"""
+        from app.models.notification import NotificationChannel
+        from app.services.notification_service import (
+            DuplicateActiveChannelError,
+            create_channel,
+        )
+
+        existing = NotificationChannel(
+            user_id=test_user.id,
+            adapter_type="feishu_webhook",
+            display_name="已有Webhook",
+            target_config={"webhook_url": "http://example.com/hook"},
+            status="active",
+        )
+        db_session.add(existing)
+        await db_session.flush()
+
+        with pytest.raises(DuplicateActiveChannelError, match="已存在 active"):
+            await create_channel(
+                db_session,
+                user_id=test_user.id,
+                adapter_type="feishu_webhook",
+                display_name="新建Webhook",
+                target_config={"webhook_url": "http://example.com/hook2"},
+            )
+
+    @pytest.mark.asyncio
+    async def test_create_channel_allows_feishu_when_no_active(
+        self, db_session, test_user,
+    ) -> None:
+        """同一用户无 active feishu_webhook 时，create_channel 应成功。"""
+        from app.services.notification_service import create_channel
+
+        channel = await create_channel(
+            db_session,
+            user_id=test_user.id,
+            adapter_type="feishu_webhook",
+            display_name="Webhook",
+            target_config={"webhook_url": "http://example.com/hook"},
+        )
+        assert channel.status == "pending"
+        assert channel.user_id == test_user.id
+
+    @pytest.mark.asyncio
+    async def test_create_channel_allows_feishu_for_different_user(
+        self, db_session, test_user,
+    ) -> None:
+        """不同用户可各自拥有 active feishu_webhook。"""
+        from app.models.notification import NotificationChannel
+        from app.models.user import User
+        from app.services.notification_service import create_channel
+
+        existing = NotificationChannel(
+            user_id=test_user.id,
+            adapter_type="feishu_webhook",
+            display_name="用户A的Webhook",
+            target_config={"webhook_url": "http://example.com/hook"},
+            status="active",
+        )
+        other_user = User(
+            email="other@test.com",
+            password_hash="$2b$12$dummyhash",
+            status="active",
+        )
+        db_session.add_all([existing, other_user])
+        await db_session.flush()
+
+        channel = await create_channel(
+            db_session,
+            user_id=other_user.id,
+            adapter_type="feishu_webhook",
+            display_name="用户B的Webhook",
+            target_config={"webhook_url": "http://example.com/hook2"},
+        )
+        assert channel.user_id == other_user.id
+
+    @pytest.mark.asyncio
+    async def test_update_channel_rejects_when_another_active_feishu_exists(
+        self, db_session, test_user,
+    ) -> None:
+        """更新飞书渠道时，若同用户已存在另一条 active 渠道，应拒绝。"""
+        from app.models.notification import NotificationChannel
+        from app.services.notification_service import (
+            DuplicateActiveChannelError,
+            update_channel,
+        )
+
+        active_channel = NotificationChannel(
+            user_id=test_user.id,
+            adapter_type="feishu_webhook",
+            display_name="ActiveWebhook",
+            target_config={"webhook_url": "http://example.com/hook"},
+            status="active",
+        )
+        pending_channel = NotificationChannel(
+            user_id=test_user.id,
+            adapter_type="feishu_webhook",
+            display_name="PendingWebhook",
+            target_config={"webhook_url": "http://example.com/hook2"},
+            status="pending",
+        )
+        db_session.add_all([active_channel, pending_channel])
+        await db_session.flush()
+
+        with pytest.raises(DuplicateActiveChannelError, match="已存在 active"):
+            await update_channel(
+                db_session,
+                channel_id=pending_channel.id,
+                user_id=test_user.id,
+                display_name="改名",
+            )
+
+    @pytest.mark.asyncio
+    async def test_verify_channel_rejects_when_another_active_feishu_exists(
+        self, db_session, test_user,
+    ) -> None:
+        """验证飞书渠道时，若同用户已存在另一条 active 渠道，应拒绝。"""
+        from app.models.notification import NotificationChannel
+        from app.services.notification_service import (
+            DuplicateActiveChannelError,
+            verify_channel,
+        )
+
+        active_channel = NotificationChannel(
+            user_id=test_user.id,
+            adapter_type="feishu_webhook",
+            display_name="ActiveWebhook",
+            target_config={"webhook_url": "http://example.com/hook"},
+            status="active",
+        )
+        pending_channel = NotificationChannel(
+            user_id=test_user.id,
+            adapter_type="feishu_webhook",
+            display_name="PendingWebhook",
+            target_config={"webhook_url": "http://example.com/hook2"},
+            status="pending",
+        )
+        db_session.add_all([active_channel, pending_channel])
+        await db_session.flush()
+
+        with pytest.raises(DuplicateActiveChannelError, match="已存在 active"):
+            await verify_channel(db_session, pending_channel.id)
+
+    @pytest.mark.asyncio
+    async def test_create_channel_rejects_cross_type_active_feishu(
+        self, db_session, test_user,
+    ) -> None:
+        """同一用户已存在 active feishu_webhook 时，创建 feishu_platform_app 应拒绝。"""
+        from app.models.notification import NotificationChannel
+        from app.services.notification_service import (
+            DuplicateActiveChannelError,
+            create_channel,
+        )
+
+        existing = NotificationChannel(
+            user_id=test_user.id,
+            adapter_type="feishu_webhook",
+            display_name="已有Webhook",
+            target_config={"webhook_url": "http://example.com/hook"},
+            status="active",
+        )
+        db_session.add(existing)
+        await db_session.flush()
+
+        with pytest.raises(DuplicateActiveChannelError, match="已存在 active"):
+            await create_channel(
+                db_session,
+                user_id=test_user.id,
+                adapter_type="feishu_platform_app",
+                display_name="PlatformApp",
+                target_config={"app_id": "app_001", "app_secret": "secret"},
+            )
+
+    @pytest.mark.asyncio
+    async def test_non_feishu_channels_unrestricted(
+        self, db_session, test_user,
+    ) -> None:
+        """非飞书适配器类型不受 active 唯一性约束限制。"""
+        from app.services.notification_service import create_channel
+
+        channel1 = await create_channel(
+            db_session,
+            user_id=test_user.id,
+            adapter_type="mock",
+            display_name="Mock1",
+            target_config={},
+        )
+        channel1.status = "active"
+
+        channel2 = await create_channel(
+            db_session,
+            user_id=test_user.id,
+            adapter_type="mock",
+            display_name="Mock2",
+            target_config={},
+        )
+        channel2.status = "active"
+        await db_session.flush()
+
+        assert channel1.status == "active"
+        assert channel2.status == "active"
+
+
 class TestCaptureToken:
     """截图模式短期 token 测试。"""
 

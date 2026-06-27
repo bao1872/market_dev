@@ -270,7 +270,7 @@ if __name__ == "__main__":
     print(f"CACHE_TTL_SECONDS={indicator_cache.CACHE_TTL_SECONDS} OK")
 
     # 验证算法版本
-    assert indicator_cache.ALGORITHM_VERSION == "v1"
+    assert indicator_cache.ALGORITHM_VERSION == "v3"
     print(f"ALGORITHM_VERSION={indicator_cache.ALGORITHM_VERSION} OK")
 
     print("OK")

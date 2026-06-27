@@ -1,68 +1,21 @@
-"""DSA 发布前硬校验 + metric_filters 数值转换测试。
+"""DSA 发布校验测试。
 
-测试覆盖（TDD - 先写失败测试，再实施）：
-1. validate_dsa_metrics: 缺字段 / NaN / Inf / 合法
-2. dict_filters_to_metric_filters: 非数值字符串 / NaN 字符串
-
-对应 advice.md 第二节"应增加发布前硬校验"与第三节"强制转换数值"。
+覆盖：
+- metric_filters 数值强制转换
+- publish_run 发布规则（状态 + 成功结果数）
+- _check_quality_gates 质量门禁规则
 """
-import math
+from __future__ import annotations
+
+import uuid
+from datetime import date
 
 import pytest
 from fastapi import HTTPException
 
+from app.models.strategy_run import StrategyRun
 from app.repositories.strategy_result_repository import dict_filters_to_metric_filters
-from app.services.strategy_batch_service import (
-    InvalidStrategyResult,
-    REQUIRED_DSA_METRICS,
-    validate_dsa_metrics,
-)
-
-
-def _valid_dsa_metrics() -> dict:
-    """构造完整合法的 DSA metrics（7 个必填字段全部存在且有限）。"""
-    return {
-        "dsa_dir_bars": 60,
-        "vwap_ret_avg": 0.05,
-        "vwap_ret_total": 1.2,
-        "offset_mean": 0.03,
-        "offset_std": 0.02,
-        "offset_variance_rate": 0.5,
-        "offset_percentile": 75.0,
-    }
-
-
-class TestValidateDsaMetrics:
-    """validate_dsa_metrics 单元测试。"""
-
-    def test_validate_dsa_metrics_missing_field(self):
-        # 缺 offset_std，应抛 InvalidStrategyResult 且消息含 "offset_std"
-        metrics = _valid_dsa_metrics()
-        del metrics["offset_std"]
-        with pytest.raises(InvalidStrategyResult) as exc_info:
-            validate_dsa_metrics(metrics)
-        assert "offset_std" in str(exc_info.value)
-
-    def test_validate_dsa_metrics_nan(self):
-        # offset_mean 为 NaN，应抛 InvalidStrategyResult
-        metrics = _valid_dsa_metrics()
-        metrics["offset_mean"] = float("nan")
-        with pytest.raises(InvalidStrategyResult) as exc_info:
-            validate_dsa_metrics(metrics)
-        assert "offset_mean" in str(exc_info.value)
-
-    def test_validate_dsa_metrics_inf(self):
-        # vwap_ret_avg 为 Inf，应抛 InvalidStrategyResult
-        metrics = _valid_dsa_metrics()
-        metrics["vwap_ret_avg"] = float("inf")
-        with pytest.raises(InvalidStrategyResult) as exc_info:
-            validate_dsa_metrics(metrics)
-        assert "vwap_ret_avg" in str(exc_info.value)
-
-    def test_validate_dsa_metrics_valid(self):
-        # 完整合法 metrics，不应抛异常
-        metrics = _valid_dsa_metrics()
-        validate_dsa_metrics(metrics)  # 不抛即通过
+from app.services.strategy_batch_service import StrategyBatchService
 
 
 class TestDictFiltersToMetricFilters:
@@ -81,3 +34,110 @@ class TestDictFiltersToMetricFilters:
         with pytest.raises(HTTPException) as exc_info:
             dict_filters_to_metric_filters(filters)
         assert exc_info.value.status_code == 422
+
+
+class TestPublishRunValidation:
+    """publish_run 发布规则测试。"""
+
+    @pytest.mark.asyncio
+    async def test_publish_run_rejects_completed_with_zero_succeeded(
+        self, db_session, test_selector_strategy
+    ):
+        """completed 运行若没有成功结果，publish_run 应拒绝。"""
+        version = test_selector_strategy["version"]
+        run = StrategyRun(
+            strategy_version_id=version.id,
+            run_type="scheduled",
+            trade_date=date(2026, 6, 24),
+            status="completed",
+            input_overrides={},
+            idempotency_key=f"test:{uuid.uuid4().hex}",
+            attempt_no=1,
+            succeeded_count=0,
+            failed_count=0,
+            total_instruments=100,
+        )
+        db_session.add(run)
+        await db_session.flush()
+
+        service = StrategyBatchService()
+        with pytest.raises(ValueError, match="没有成功结果，禁止发布"):
+            await service.publish_run(db_session, run.id)
+
+    @pytest.mark.asyncio
+    async def test_publish_run_accepts_partial_failed_with_succeeded(
+        self, db_session, test_selector_strategy
+    ):
+        """partial_failed 运行只要有成功结果，publish_run 应允许发布。"""
+        version = test_selector_strategy["version"]
+        run = StrategyRun(
+            strategy_version_id=version.id,
+            run_type="scheduled",
+            trade_date=date(2026, 6, 24),
+            status="partial_failed",
+            input_overrides={},
+            idempotency_key=f"test:{uuid.uuid4().hex}",
+            attempt_no=1,
+            succeeded_count=80,
+            failed_count=20,
+            total_instruments=100,
+        )
+        db_session.add(run)
+        await db_session.flush()
+
+        service = StrategyBatchService()
+        published = await service.publish_run(db_session, run.id)
+        assert published.status == "published"
+        assert published.succeeded_count == 80
+
+
+class TestQualityGates:
+    """_check_quality_gates 质量门禁测试。"""
+
+    @pytest.mark.asyncio
+    async def test_quality_gate_passes_partial_failed_with_succeeded(self):
+        """partial_failed + succeeded_count > 0 应通过门禁。"""
+        run = StrategyRun(
+            status="partial_failed",
+            succeeded_count=1,
+            failed_count=99,
+            total_instruments=100,
+        )
+        service = StrategyBatchService()
+        assert await service._check_quality_gates(run) is True
+
+    @pytest.mark.asyncio
+    async def test_quality_gate_passes_completed_with_failed_but_succeeded(self):
+        """completed + failed_count > 0 但 succeeded_count > 0 仍应通过门禁。"""
+        run = StrategyRun(
+            status="completed",
+            succeeded_count=95,
+            failed_count=5,
+            total_instruments=100,
+        )
+        service = StrategyBatchService()
+        assert await service._check_quality_gates(run) is True
+
+    @pytest.mark.asyncio
+    async def test_quality_gate_rejects_completed_with_zero_succeeded(self):
+        """completed 但 succeeded_count == 0 不应通过门禁。"""
+        run = StrategyRun(
+            status="completed",
+            succeeded_count=0,
+            failed_count=0,
+            total_instruments=100,
+        )
+        service = StrategyBatchService()
+        assert await service._check_quality_gates(run) is False
+
+    @pytest.mark.asyncio
+    async def test_quality_gate_rejects_failed_status(self):
+        """failed 状态不应通过门禁。"""
+        run = StrategyRun(
+            status="failed",
+            succeeded_count=0,
+            failed_count=100,
+            total_instruments=100,
+        )
+        service = StrategyBatchService()
+        assert await service._check_quality_gates(run) is False

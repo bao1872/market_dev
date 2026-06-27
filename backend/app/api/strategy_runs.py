@@ -34,6 +34,7 @@ from app.core.deps import get_current_active_user, get_db, require_roles
 from app.models.strategy import StrategyVersion
 from app.models.strategy_run import StrategyRun
 from app.models.user import User
+from app.constants.strategy_keys import DSA_SELECTOR
 from app.repositories import strategy_result_repository
 from app.repositories.strategy_result_repository import (
     MetricFilter,
@@ -198,6 +199,14 @@ async def trigger_strategy_run(
         运行记录响应（status=queued）
     """
     trade_date = request.trade_date or date.today()
+
+    # [StrategyRuns] - 描述: DSA 手动运行拒绝历史日期，避免误触发历史回补
+    if strategy_key == DSA_SELECTOR and trade_date < date.today():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"DSA 拒绝历史日期运行: trade_date={trade_date.isoformat()}",
+        )
+
     service = StrategyBatchService()
 
     try:

@@ -176,7 +176,11 @@ def compute_macd(
     }
 
 
-def _truncate_lists(indicators: dict[str, Any], bars: int) -> dict[str, Any]:
+def _truncate_lists(
+    indicators: dict[str, Any],
+    bars: int,
+    preserve_keys: frozenset[str] | None = None,
+) -> dict[str, Any]:
     """截取指标数据到最近 N 根 bar。
 
     对值为 list 的字段，截取最后 bars 个元素。
@@ -188,20 +192,100 @@ def _truncate_lists(indicators: dict[str, Any], bars: int) -> dict[str, Any]:
     Args:
         indicators: 策略返回的指标字典
         bars: 保留最近 N 根 bar
+        preserve_keys: 额外不参与截断的字段集合（如日线 BB 完整序列）
 
     Returns:
         截取后的指标字典
     """
     if bars <= 0:
         return indicators
+    preserve = preserve_keys or frozenset()
     result: dict[str, Any] = {}
     for key, val in indicators.items():
-        if key in _SNAPSHOT_KEYS:
+        if key in _SNAPSHOT_KEYS or key in preserve:
             result[key] = val
         elif isinstance(val, list) and len(val) > bars:
             result[key] = val[-bars:]
         else:
             result[key] = val
+    return result
+
+
+# BB 字段集合（来自 watchlist_monitor / bollinger_monitor）
+_BB_FIELDS: frozenset[str] = frozenset({"bb_upper", "bb_mid", "bb_lower", "bb_width", "bb_pos"})
+
+
+def _map_daily_to_intraday(
+    daily_values: list[Any],
+    daily_times: list[str],
+    intraday_times: list[str],
+) -> list[Any]:
+    """将日线值映射到日内时间序列（阶梯线）。
+
+    对每个 intraday bar，取 daily_times 中 <= 该 bar 时间的最后一个日线值。
+    这样 15m/1h 上的 BB 呈现为日内阶梯线，符合“上一根已完成日线”的参考逻辑。
+
+    Args:
+        daily_values: 日线指标值列表
+        daily_times: 日线时间字符串列表
+        intraday_times: 日内时间字符串列表
+
+    Returns:
+        与 intraday_times 等长的映射后列表
+    """
+    if not daily_values or not daily_times or not intraday_times:
+        return [None] * len(intraday_times)
+
+    daily_dates = pd.to_datetime(daily_times)
+    intraday_dates = pd.to_datetime(intraday_times)
+    pos = daily_dates.searchsorted(intraday_dates, side="right") - 1
+    pos = np.clip(pos, 0, len(daily_values) - 1)
+    return [daily_values[i] for i in pos]
+
+
+def _adapt_watchlist_bb(
+    indicators: dict[str, Any],
+    timeframe: str,
+    macd_bars: pd.DataFrame,
+    macd_time_list: list[str],
+    daily_time_list: list[str],
+) -> dict[str, Any]:
+    """调整 watchlist_monitor 的 BB 输出以匹配当前 timeframe。
+
+    - 日线：保留完整日线 BB 序列（不截断），time 同步完整
+    - 15m/1h：将日线 BB 映射为日内阶梯线（time 用 macd_time_list）
+    - 周线/月线：移除 BB 字段（前端不渲染）
+
+    Args:
+        indicators: watchlist_monitor 原始指标字典
+        timeframe: 当前请求周期
+        macd_bars: 当前 timeframe 对应的 bars（用于 15m/1h 时间对齐）
+        macd_time_list: 当前 timeframe 对应的时间列表
+        daily_time_list: 日线时间列表
+
+    Returns:
+        调整后的指标字典
+    """
+    result = dict(indicators)
+    bb_fields_present = {f for f in _BB_FIELDS if f in result}
+
+    if timeframe in ("1w", "1mo"):
+        for field in bb_fields_present:
+            result.pop(field, None)
+        return result
+
+    if timeframe in ("15m", "1h"):
+        if not bb_fields_present or macd_bars.empty or not macd_time_list:
+            return result
+        for field in bb_fields_present:
+            daily_values = result[field]
+            if not isinstance(daily_values, list) or len(daily_values) != len(daily_time_list):
+                continue
+            result[field] = _map_daily_to_intraday(daily_values, daily_time_list, macd_time_list)
+        result["time"] = macd_time_list
+        return result
+
+    # 日线：保持完整 BB 序列，由调用方设置 preserve_keys 避免截断
     return result
 
 
@@ -330,25 +414,6 @@ async def compute_all_indicators(
         except Exception as exc:
             logger.warning("DB 降级查询也失败 instrument_id=%s: %s", instrument_id, exc)
 
-    # [MACD 副图] - 按当前 timeframe 选择对应周期 bars 计算 MACD
-    if timeframe == "15m":
-        macd_bars = bars_15min
-    elif timeframe == "1h":
-        macd_bars = bars_60min if bars_60min is not None else pd.DataFrame()
-    elif timeframe == "1d":
-        macd_bars = daily_bars
-    elif timeframe == "1w":
-        macd_bars = bars_weekly
-    elif timeframe == "1mo":
-        macd_bars = bars_monthly
-    else:
-        macd_bars = pd.DataFrame()
-
-    if macd_bars.empty:
-        raise ValueError(
-            f"无对应周期行情数据 instrument_id={instrument_id} symbol={symbol} timeframe={timeframe}"
-        )
-
     # 3. 前复权处理
     if adj == "qfq":
         adj_factor_df = await _get_adj_factor_df(session, instrument_id)
@@ -371,6 +436,26 @@ async def compute_all_indicators(
             bars_60min = apply_adj_factor_to_bars(
                 bars_60min, adj_factor_df, intraday=True
             )
+
+    # [MACD 副图] - 按当前 timeframe 选择对应周期 bars 计算 MACD
+    # 必须在 apply_adj_factor 完成后选择，确保 macd_bars 指向已复权的 DataFrame
+    if timeframe == "15m":
+        macd_bars = bars_15min
+    elif timeframe == "1h":
+        macd_bars = bars_60min if bars_60min is not None else pd.DataFrame()
+    elif timeframe == "1d":
+        macd_bars = daily_bars
+    elif timeframe == "1w":
+        macd_bars = bars_weekly
+    elif timeframe == "1mo":
+        macd_bars = bars_monthly
+    else:
+        macd_bars = pd.DataFrame()
+
+    if macd_bars.empty:
+        raise ValueError(
+            f"无对应周期行情数据 instrument_id={instrument_id} symbol={symbol} timeframe={timeframe}"
+        )
 
     # 确保 index 是 DatetimeIndex（策略计算依赖）
     if not isinstance(daily_bars.index, pd.DatetimeIndex):
@@ -427,6 +512,13 @@ async def compute_all_indicators(
             chart_layers = manifest.get("chart_layers", [])
             strategy_name = manifest.get("display_name", strategy_id)
             for layer in chart_layers:
+                # [BB 图层] - 周线/月线移除 watchlist_monitor 的 BB 图层
+                if (
+                    timeframe in ("1w", "1mo")
+                    and strategy_id == "watchlist_monitor"
+                    and layer.get("id") == "bb"
+                ):
+                    continue
                 layers.append({
                     "strategy_id": strategy_id,
                     "strategy_name": strategy_name,
@@ -449,7 +541,24 @@ async def compute_all_indicators(
             #   daily_time_list 与其他 list 字段一起被 _truncate_lists 截取（保持长度一致），
             #   前端可通过 data[strategy_id]["time"][i] 与 K线 time join 对齐
             indicators_with_time = {**indicators, "time": daily_time_list}
-            data[strategy_id] = _to_json_safe(_truncate_lists(indicators_with_time, bars))
+
+            # [BB 图层] - watchlist_monitor BB 按 timeframe 调整后处理
+            preserve_keys: frozenset[str] | None = None
+            if strategy_id == "watchlist_monitor":
+                indicators_with_time = _adapt_watchlist_bb(
+                    indicators_with_time,
+                    timeframe,
+                    macd_bars,
+                    macd_time_list,
+                    daily_time_list,
+                )
+                if timeframe == "1d":
+                    # 日线保留完整 BB 序列与完整 time，便于前端按时间键匹配
+                    preserve_keys = _BB_FIELDS | {"time"}
+
+            data[strategy_id] = _to_json_safe(
+                _truncate_lists(indicators_with_time, bars, preserve_keys)
+            )
 
             logger.info(
                 "策略指标计算成功 strategy_id=%s layers=%d",

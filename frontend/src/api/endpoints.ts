@@ -387,7 +387,7 @@ export type ShareDeliveryStatus =
   | 'dead'
   | 'not_created'
 
-/** POST /admin/instruments/{instrument_id}/send-feishu 响应 - 创建异步投递任务 */
+/** POST /instruments/{instrument_id}/send-feishu 响应 - 创建异步投递任务 */
 export interface StockDetailFeishuCreateResponse {
   test_run_id: string
   message_group_id: string
@@ -396,7 +396,7 @@ export interface StockDetailFeishuCreateResponse {
   status: 'pending'
 }
 
-/** GET /admin/stock-detail-feishu/{test_run_id}/status 响应 - 查询投递状态 */
+/** GET /stock-detail-feishu/{test_run_id}/status 响应 - 查询投递状态 */
 export interface StockDetailFeishuStatusResponse {
   test_run_id: string
   message_group_id: string | null
@@ -1162,11 +1162,10 @@ export async function testNotificationChannelLatestEvent(channelId: string): Pro
 // [StockDetailFeishu] - 描述: 创建异步投递任务（Outbox 链路），返回 test_run_id 供轮询
 export async function sendStockDetailFeishu(
   instrumentId: string,
-  channelId: string,
 ): Promise<StockDetailFeishuCreateResponse> {
   const { data } = await apiClient.post<StockDetailFeishuCreateResponse>(
-    `/admin/instruments/${instrumentId}/send-feishu`,
-    { channel_id: channelId },
+    `/instruments/${instrumentId}/send-feishu`,
+    {},
   )
   return data
 }
@@ -1176,7 +1175,7 @@ export async function getStockDetailFeishuStatus(
   testRunId: string,
 ): Promise<StockDetailFeishuStatusResponse> {
   const { data } = await apiClient.get<StockDetailFeishuStatusResponse>(
-    `/admin/stock-detail-feishu/${testRunId}/status`,
+    `/stock-detail-feishu/${testRunId}/status`,
   )
   return data
 }

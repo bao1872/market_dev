@@ -174,7 +174,7 @@ if __name__ == "__main__":
 
         test_database_url = os.environ.get(
             "TEST_DATABASE_URL",
-            "postgresql://bz:es123456@127.0.0.1:5432/bz_stock_test",
+            "postgresql://user:password@127.0.0.1:5432/bz_stock_test",
         )
         async_url = test_database_url.replace(
             "postgresql+psycopg://", "postgresql+asyncpg://"

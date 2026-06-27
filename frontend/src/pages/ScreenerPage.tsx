@@ -102,6 +102,45 @@ function getDsaDirection(v: unknown): string {
   return n > 0 ? '多头' : n < 0 ? '空头' : '-'
 }
 
+// [ScreenerPage] - 描述: 后端存储为小数的收益率/offset 类指标
+const RATIO_METRICS = new Set([
+  'vwap_ret_avg',
+  'vwap_ret_total',
+  'offset_mean',
+  'offset_std',
+  'offset_variance_rate',
+])
+
+// [ScreenerPage] - 描述: 后端存储为 0~1 的百分位类指标
+const PERCENTILE_METRICS = new Set([
+  'offset_percentile',
+  'short_position',
+  'position_short',
+  'short_pos',
+])
+
+/** 将用户输入的筛选值归一化为后端口径。
+ *
+ * 规则：
+ * - 收益率/offset 类：用户输入 3% → 0.03；输入 0.03 → 0.03
+ * - 百分位类：用户输入 80% → 0.8；输入 0.8 → 0.8
+ * - 已存储为百分比的字段（如 change_pct/dsa_vwap_dev_pct）：用户输入 3% → 3
+ */
+function normalizeMetricValue(
+  key: string,
+  raw: string | number | undefined,
+): number | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined
+  const s = String(raw).replace(/,/g, '').trim()
+  const hasPercent = s.includes('%')
+  const n = parseFloat(s.replace(/%/g, ''))
+  if (Number.isNaN(n)) return undefined
+  if (RATIO_METRICS.has(key) || PERCENTILE_METRICS.has(key)) {
+    return hasPercent ? n / 100 : n
+  }
+  return n
+}
+
 /** 从 row 中提取股票展示信息（优先使用 instrument 级字段，回退到 payload） */
 function getStockDisplay(row: ScreenerRow): { symbol: string; name: string; market: string } {
   if (row.symbol !== '-' && row.name !== '-') {
@@ -150,14 +189,13 @@ export default function ScreenerPage() {
   const [selectedStrategyKey, setSelectedStrategyKey] = useState<string>('')
   const activeStrategyKey = selectedStrategyKey || selectorStrategies[0]?.strategy_key || ''
 
-  // --- 已发布的运行批次 ---
-  const runsQuery = usePublishedRuns(activeStrategyKey || undefined, { limit: 30 })
+  // --- 已发布的运行批次（仅最新一个快照） ---
+  const runsQuery = usePublishedRuns(activeStrategyKey || undefined, { limit: 1 })
   const runs = runsQuery.data?.items ?? []
 
-  // --- 当前选中的运行（默认最新一条） ---
-  const [selectedRunId, setSelectedRunId] = useState<string>('')
-  const activeRunId = selectedRunId || runs[0]?.id || ''
-  const activeRun = runs.find((r) => r.id === activeRunId)
+  // --- 当前选中的运行（固定为最新发布批次） ---
+  const activeRunId = runs[0]?.id || ''
+  const activeRun = runs[0]
 
   // --- 服务端分页/筛选/排序状态 ---
   const [query, setQuery] = useState<DataTableQuery>({
@@ -179,6 +217,33 @@ export default function ScreenerPage() {
     // [ScreenerPage] - 描述: 直接使用 globalQuery 透传的 keyword（由 StrategyDataTable 顶部搜索框传入）
     if (query.keyword) {
       params.keyword = query.keyword
+    }
+    // [ScreenerPage] - 描述: 列筛选转 metric_filters，between 下界从 value 映射为 value1，并按字段类型换算单位
+    const supportedOps = new Set(['gt', 'gte', 'lt', 'lte', 'eq', 'between'])
+    const metricFilters = query.filters
+      .filter((f) => supportedOps.has(f.operator) && f.key !== 'stock' && f.key !== 'action')
+      .map((f) => {
+        const value = normalizeMetricValue(f.key, f.value)
+        if (value === undefined) return null
+        if (f.operator === 'between') {
+          const value2 = normalizeMetricValue(f.key, f.value2)
+          if (value2 === undefined) return null
+          return {
+            metric_key: f.key,
+            operator: f.operator,
+            value1: value,
+            value2,
+          }
+        }
+        return {
+          metric_key: f.key,
+          operator: f.operator,
+          value,
+        }
+      })
+      .filter((f): f is NonNullable<typeof f> => f !== null)
+    if (metricFilters.length > 0) {
+      params.metric_filters = JSON.stringify(metricFilters)
     }
     return params
   }, [query])
@@ -233,23 +298,15 @@ export default function ScreenerPage() {
   const goDetail = useCallback(
     (row: ScreenerRow) => {
       const { symbol } = getStockDisplay(row)
-      navigate(`/stock/${symbol}?source=screener&strategy=${activeStrategyKey}`)
+      navigate(`/stock/${symbol}?source=selection&strategy=${activeStrategyKey}`)
     },
     [navigate, activeStrategyKey],
   )
 
-  /** 切换策略：重置运行选择、分页、选中行 */
+  /** 切换策略：重置分页、选中行 */
   const handleStrategyChange = (key: string) => {
     setSelectedStrategyKey(key)
-    setSelectedRunId('')
     setQuery({ page: 1, pageSize: PAGE_SIZE, filters: [] })
-    setSelectedKeys(new Set())
-  }
-
-  /** 切换运行日期：重置分页、选中行 */
-  const handleRunChange = (id: string) => {
-    setSelectedRunId(id)
-    setQuery((prev) => ({ ...prev, page: 1 }))
     setSelectedKeys(new Set())
   }
 
@@ -334,7 +391,7 @@ export default function ScreenerPage() {
         title: '持续时间',
         dataType: 'number',
         sortable: true,
-        filterable: false,
+        filterable: true,
         helpText: '原始字段：dsa_dir_bars / dir_duration。专业定义：当前 DSA 趋势方向已持续的 K 线根数，显示绝对值。',
         sortValue: (row) =>
           Math.abs(
@@ -351,7 +408,7 @@ export default function ScreenerPage() {
         title: '趋势内平均表现',
         dataType: 'percent',
         sortable: true,
-        filterable: false,
+        filterable: true,
         helpText: '原始字段：vwap_ret_avg / dsa_avg_return。专业定义：趋势运行期间价格相对 VWAP 的平均偏离收益，反映趋势内的平均表现强度。',
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['vwap_ret_avg', 'dsa_avg_return', 'vwap_avg_return', 'avg_return']) ?? 0),
@@ -370,7 +427,7 @@ export default function ScreenerPage() {
         title: '趋势累计表现',
         dataType: 'percent',
         sortable: true,
-        filterable: false,
+        filterable: true,
         helpText: '原始字段：vwap_ret_total / dsa_total_return。专业定义：趋势起点至当前的累计收益，反映趋势整体表现。',
         sortValue: (row) =>
           Number(
@@ -401,7 +458,7 @@ export default function ScreenerPage() {
         title: '当前偏离程度',
         dataType: 'percent',
         sortable: true,
-        filterable: false,
+        filterable: true,
         helpText: '原始字段：offset_mean / shift_mean。专业定义：当前价格相对 DSA 锚点 VWAP 的平均偏离程度，正值表示价格高于锚点。',
         sortValue: (row) => Number(pickPayload(row.payload, ['offset_mean', 'shift_mean']) ?? 0),
         render: (row) => {
@@ -419,7 +476,7 @@ export default function ScreenerPage() {
         title: '偏离标准差',
         dataType: 'percent',
         sortable: true,
-        filterable: false,
+        filterable: true,
         helpText: '原始字段：offset_std / shift_std。专业定义：当前价格相对 DSA 锚点 VWAP 的偏离率标准差，反映偏离波动。',
         sortValue: (row) => Number(pickPayload(row.payload, ['offset_std', 'shift_std']) ?? 0),
         render: (row) => fmtRatioAsPct(pickPayload(row.payload, ['offset_std', 'shift_std'])),
@@ -429,7 +486,7 @@ export default function ScreenerPage() {
         title: '当前所处位置',
         dataType: 'percent',
         sortable: true,
-        filterable: false,
+        filterable: true,
         helpText: '原始字段：offset_percentile / short_position。专业定义：当前偏离程度在趋势历史偏离中的百分位，0% 为最低、100% 为最高，反映当前所处相对位置。',
         sortValue: (row) =>
           Number(
@@ -445,7 +502,7 @@ export default function ScreenerPage() {
         title: 'DSA VWAP',
         dataType: 'number',
         sortable: true,
-        filterable: false,
+        filterable: true,
         helpText: '原始字段：dsa_vwap / vwap。专业定义：当前 DSA 动态摆动锚定 VWAP 值。',
         sortValue: (row) => Number(pickPayload(row.payload, ['dsa_vwap', 'vwap', 'anchor_vwap']) ?? 0),
         render: (row) => fmtNum(pickPayload(row.payload, ['dsa_vwap', 'vwap', 'anchor_vwap']), 2),
@@ -455,7 +512,7 @@ export default function ScreenerPage() {
         title: 'VWAP 偏离',
         dataType: 'percent',
         sortable: true,
-        filterable: false,
+        filterable: true,
         helpText: '原始字段：dsa_vwap_dev_pct / vwap_dev_pct。专业定义：当前收盘价相对 DSA VWAP 的偏离百分比。',
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['dsa_vwap_dev_pct', 'vwap_dev_pct', 'close_vwap_dev_pct']) ?? 0),
@@ -471,11 +528,11 @@ export default function ScreenerPage() {
       },
       {
         key: 'offset_variance_rate',
-        title: '趋势稳定度',
+        title: '趋势波动系数',
         dataType: 'percent',
         sortable: true,
-        filterable: false,
-        helpText: '原始字段：offset_variance_rate / offset_var_rate。专业定义：偏离程度的方差率，数值越小表示价格围绕趋势线越稳定，趋势越健康。',
+        filterable: true,
+        helpText: '原始字段：offset_variance_rate / offset_var_rate。专业定义：偏离程度的方差率，反映价格围绕趋势线的波动系数。',
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['offset_variance_rate', 'offset_var_rate', 'shift_var']) ?? 0),
         render: (row) =>
@@ -486,7 +543,7 @@ export default function ScreenerPage() {
         title: '最新价格',
         dataType: 'number',
         sortable: true,
-        filterable: false,
+        filterable: true,
         helpText: '原始字段：last_close / price。专业定义：最新收盘价或当前价格。',
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['last_close', 'price', 'current_price', 'close']) ?? 0),
@@ -497,7 +554,7 @@ export default function ScreenerPage() {
         title: '今日涨跌',
         dataType: 'percent',
         sortable: true,
-        filterable: false,
+        filterable: true,
         helpText: '原始字段：change_pct / pct_change。专业定义：当日价格相对前一交易日的涨跌百分比。',
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['change_pct', 'pct_change', 'change_percent']) ?? 0),
@@ -563,7 +620,7 @@ export default function ScreenerPage() {
         title: '量能确认',
         dataType: 'number',
         sortable: true,
-        filterable: false,
+        filterable: true,
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['volume_confirm', 'vol_confirm', 'volume_ratio']) ?? 0),
         render: (row) =>
@@ -574,7 +631,7 @@ export default function ScreenerPage() {
         title: '突破幅度',
         dataType: 'percent',
         sortable: true,
-        filterable: false,
+        filterable: true,
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['breakout_amplitude', 'amplitude']) ?? 0),
         render: (row) => {
@@ -588,7 +645,7 @@ export default function ScreenerPage() {
         title: '压力距离',
         dataType: 'percent',
         sortable: true,
-        filterable: false,
+        filterable: true,
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['pressure_distance', 'pressure_dist']) ?? 0),
         render: (row) =>
@@ -599,7 +656,7 @@ export default function ScreenerPage() {
         title: '位置风险',
         dataType: 'percent',
         sortable: true,
-        filterable: false,
+        filterable: true,
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['position_risk', 'pos_risk']) ?? 0),
         render: (row) => fmtPct(pickPayload(row.payload, ['position_risk', 'pos_risk'])),
@@ -679,7 +736,7 @@ export default function ScreenerPage() {
         <div>
           <h1 className="page-title">DSA 因子结果</h1>
           <div className="page-desc">
-            选择选股策略 → 选择运行批次 → 查看筛选结果，支持服务端排序与分页
+            选择选股策略 → 查看最新发布快照，表头筛选仅作用于已发布全量结果
           </div>
         </div>
       </div>
@@ -704,27 +761,6 @@ export default function ScreenerPage() {
           ))
         )}
         <div className="toolbar-spacer" />
-        {/* 日期/批次选择 */}
-        <select
-          className="select"
-          value={activeRunId}
-          onChange={(e) => handleRunChange(e.target.value)}
-          disabled={runs.length === 0 || runsQuery.isLoading}
-        >
-          {runsQuery.isLoading ? (
-            <option value="">正在加载运行批次…</option>
-          ) : runsQuery.isError ? (
-            <option value="">运行批次加载失败</option>
-          ) : runs.length === 0 ? (
-            <option value="">暂无已发布运行批次</option>
-          ) : (
-            runs.map((r) => (
-              <option key={r.id} value={r.id}>
-                {r.trade_date?.slice(0, 10) ?? r.id.slice(0, 8)}
-              </option>
-            ))
-          )}
-        </select>
       </div>
 
       {/* 批次元数据 */}

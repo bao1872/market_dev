@@ -98,8 +98,8 @@ async def _expand_notification_message_created(
 
     [飞书两段式投递] - 流程：
     1. 解析 payload 中的 message_id / user_id / delivery_type / image_url / message_group_id
-    2. 查询用户活跃渠道
-    3. 为每个渠道创建 MessageDelivery(pending)
+    2. 若 payload 包含 target_channel_id，则只查询该目标渠道；否则查询用户全部活跃渠道
+    3. 为每个匹配渠道创建 MessageDelivery(pending)
        - delivery_type 默认 'text'（飞书两段式投递默认文本）
        - message_group_id 从 payload 读取（关联同一事件的 text+image 两条投递）
     4. 幂等键基于 message_id + channel_id + delivery_type + image_url
@@ -107,7 +107,10 @@ async def _expand_notification_message_created(
     monitor_batch_service 写入 Outbox 时：
     - 文本 Outbox: delivery_type='text', message_group_id=<batch_group_id>
     - 图片 Outbox: delivery_type='image', message_group_id=<batch_group_id>, image_url=<capture_url>
-    两条 Outbox 共享同一 message_group_id，outbox_relay 分别扩张为 text/image delivery。
+    两条 Outbox 共享同一 message_group_id，outbox_relay 分别扩张为 text/image delivery.
+
+    stock_detail_feishu_service 手动发送时：
+    - 文本/图片 Outbox 均携带 target_channel_id，确保只创建一条目标投递。
 
     Args:
         db: 异步会话
@@ -142,7 +145,20 @@ async def _expand_notification_message_created(
         )
         return 0
 
-    # 查询用户活跃渠道
+    # 解析目标渠道 ID（手动发送场景）
+    target_channel_id_str = payload.get("target_channel_id")
+    target_channel_id: UUID | None = None
+    if target_channel_id_str:
+        try:
+            target_channel_id = UUID(target_channel_id_str)
+        except ValueError as e:
+            logger.warning(
+                "通知事件 target_channel_id 格式非法: outbox_id=%s: %s",
+                record.id, e,
+            )
+            return 0
+
+    # 查询用户活跃渠道：有 target_channel_id 时只查该渠道，否则查全部
     stmt = (
         select(NotificationChannel)
         .where(
@@ -151,13 +167,15 @@ async def _expand_notification_message_created(
         )
         .order_by(NotificationChannel.created_at.desc())
     )
+    if target_channel_id is not None:
+        stmt = stmt.where(NotificationChannel.id == target_channel_id)
     result = await db.execute(stmt)
     channels = list(result.scalars().all())
 
     if not channels:
         logger.info(
-            "用户无活跃渠道，跳过扩张: user_id=%s message_id=%s",
-            user_id, message_id,
+            "无匹配活跃渠道，跳过扩张: user_id=%s message_id=%s target_channel_id=%s",
+            user_id, message_id, target_channel_id,
         )
         return 0
 

@@ -25,14 +25,14 @@ class TriggerRunRequest(BaseModel):
     Attributes:
         trade_date: 交易日（默认当天）
         instrument_ids: 指定标的列表（None 表示全市场）
-        run_type: 触发方式（manual/scheduled/replay/backfill，默认 manual）
+        run_type: 触发方式（manual/scheduled/replay，默认 manual）
     """
 
     trade_date: date | None = Field(None, description="交易日（默认当天）")
     instrument_ids: list[UUID] | None = Field(
         None, description="指定标的列表（None 表示全市场）"
     )
-    run_type: str = Field("manual", description="触发方式：manual/scheduled/replay/backfill")
+    run_type: str = Field("manual", description="触发方式：manual/scheduled/replay")
 
 
 class StrategyRunResponse(BaseModel):

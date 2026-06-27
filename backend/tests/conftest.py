@@ -178,6 +178,41 @@ async def test_selector_strategy(db_session):
 
 
 @pytest_asyncio.fixture
+async def dsa_selector_strategy(db_session):
+    """创建 strategy_key='dsa_selector' 的选股策略定义+ released 版本。
+
+    用于测试 system_overview_service 中限定 dsa_selector 的盘后流水线逻辑。
+    """
+    from app.models.strategy import StrategyDefinition, StrategyVersion
+
+    definition = StrategyDefinition(
+        strategy_key="dsa_selector",
+        kind="selector",
+        display_name="DSA选股策略",
+    )
+    db_session.add(definition)
+    await db_session.flush()
+
+    version = StrategyVersion(
+        strategy_definition_id=definition.id,
+        version="1.0.0",
+        status="released",
+        manifest={
+            "outputs": [
+                {"key": "dsa_dir_bars", "type": "numeric", "filterable": True, "sortable": True},
+                {"key": "offset_mean", "type": "numeric", "filterable": True, "sortable": True},
+            ],
+        },
+        build_hash=f"test_hash_{uuid.uuid4().hex[:16]}",
+        released_at=datetime.now(UTC),
+    )
+    db_session.add(version)
+    await db_session.flush()
+
+    yield {"definition": definition, "version": version}
+
+
+@pytest_asyncio.fixture
 async def test_published_run(db_session, test_selector_strategy):
     """创建已发布的测试运行+结果。"""
     from app.models.strategy_run import StrategyRun

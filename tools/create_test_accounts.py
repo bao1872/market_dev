@@ -36,17 +36,17 @@ from app.db import AsyncSessionLocal  # noqa: E402
 from app.models.membership import Membership  # noqa: E402
 from app.models.user import Role, User, UserRole  # noqa: E402
 
-# 测试账号配置
+# 测试账号配置（密码禁止硬编码，通过 TEST_USER_PASSWORD / TEST_ADMIN_PASSWORD 传入）
 _TEST_ACCOUNTS = [
     {
         "email": "test-user@market.dev",
-        "password": "TestUser2026!",
+        "password": os.environ.get("TEST_USER_PASSWORD"),
         "role_names": ["user"],
         "description": "测试普通用户",
     },
     {
         "email": "test-admin@market.dev",
-        "password": "TestAdmin2026!",
+        "password": os.environ.get("TEST_ADMIN_PASSWORD"),
         "role_names": ["admin", "user"],
         "description": "测试管理员",
     },
@@ -142,6 +142,20 @@ async def main() -> int:
     print("测试账号创建脚本")
     print(f"时间: {datetime.now(UTC).isoformat()}")
     print("=" * 60)
+
+    missing = [
+        account["email"]
+        for account in _TEST_ACCOUNTS
+        if not account["password"]
+    ]
+    if missing:
+        print(
+            f"ERROR: 以下测试账号未设置密码，请通过环境变量传入：\n"
+            f"  TEST_USER_PASSWORD / TEST_ADMIN_PASSWORD\n"
+            f"  缺失密码的账号：{', '.join(missing)}",
+            file=sys.stderr,
+        )
+        return 2
 
     async with AsyncSessionLocal() as db:
         for account in _TEST_ACCOUNTS:

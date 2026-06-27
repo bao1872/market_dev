@@ -45,6 +45,7 @@ interface SelectionRow {
   offset_percentile: string
   dsa_vwap: string
   dsa_vwap_dev_pct: string
+  offset_variance_rate: string
   watched: boolean
   [key: string]: unknown
 }
@@ -231,7 +232,7 @@ function SelectionResultCards({
 
           <div className="selection-card-grid">
             <div>
-              <span>方向</span>
+              <span>当前趋势</span>
               <b
                 className={`tag ${
                   row.direction === '多头' ? 'good' : row.direction === '空头' ? 'warn' : ''
@@ -241,15 +242,15 @@ function SelectionResultCards({
               </b>
             </div>
             <div>
-              <span>持续</span>
+              <span>趋势持续天数</span>
               <b className="num">{row.duration}</b>
             </div>
             <div>
-              <span>平均收益</span>
+              <span>日均趋势变化</span>
               <b className="num pos">{row.avg_return}</b>
             </div>
             <div>
-              <span>当前位置</span>
+              <span>当前强弱位置</span>
               <b className="num">{row.offset_percentile}</b>
             </div>
           </div>
@@ -348,6 +349,13 @@ export default function IndexPage() {
             'close_vwap_dev_pct',
           ]),
         ),
+        offset_variance_rate: fmtPct(
+          pickPayload(payload, [
+            'offset_variance_rate',
+            'offset_var_rate',
+            'shift_var',
+          ]),
+        ),
         watched: watchlistIds.has(r.instrument_id),
       }
     },
@@ -418,7 +426,7 @@ export default function IndexPage() {
       },
       {
         key: 'direction',
-        title: '方向',
+        title: '当前趋势',
         dataType: 'text',
         sortable: true,
         filterable: true,
@@ -435,7 +443,7 @@ export default function IndexPage() {
       },
       {
         key: 'duration',
-        title: '持续',
+        title: '趋势持续天数',
         dataType: 'number',
         sortable: true,
         filterable: true,
@@ -444,7 +452,7 @@ export default function IndexPage() {
       },
       {
         key: 'avg_return',
-        title: '平均收益',
+        title: '日均趋势变化',
         dataType: 'percent',
         sortable: true,
         filterable: true,
@@ -453,7 +461,7 @@ export default function IndexPage() {
       },
       {
         key: 'total_return',
-        title: '总收益',
+        title: '本轮趋势涨跌',
         dataType: 'percent',
         sortable: true,
         filterable: true,
@@ -462,7 +470,7 @@ export default function IndexPage() {
       },
       {
         key: 'offset_mean',
-        title: '偏离均值',
+        title: '平均偏离趋势线',
         dataType: 'percent',
         sortable: true,
         filterable: true,
@@ -471,7 +479,7 @@ export default function IndexPage() {
       },
       {
         key: 'offset_std',
-        title: '偏离标准差',
+        title: '趋势附近波动幅度',
         dataType: 'percent',
         sortable: true,
         filterable: true,
@@ -480,7 +488,7 @@ export default function IndexPage() {
       },
       {
         key: 'offset_percentile',
-        title: '当前位置',
+        title: '当前强弱位置',
         dataType: 'percent',
         sortable: true,
         filterable: true,
@@ -489,7 +497,7 @@ export default function IndexPage() {
       },
       {
         key: 'dsa_vwap',
-        title: 'DSA VWAP',
+        title: '趋势参考价',
         dataType: 'number',
         sortable: true,
         filterable: true,
@@ -498,12 +506,21 @@ export default function IndexPage() {
       },
       {
         key: 'dsa_vwap_dev_pct',
-        title: 'VWAP 偏离',
+        title: '距趋势参考价',
         dataType: 'percent',
         sortable: true,
         filterable: true,
         sortValue: (row) => Number(row.dsa_vwap_dev_pct.replace('%', '')) || 0,
         render: (row) => <span className="num">{row.dsa_vwap_dev_pct}</span>,
+      },
+      {
+        key: 'offset_variance_rate',
+        title: '趋势波动系数',
+        dataType: 'percent',
+        sortable: true,
+        filterable: true,
+        sortValue: (row) => Number(row.offset_variance_rate.replace('%', '')) || 0,
+        render: (row) => <span className="num">{row.offset_variance_rate}</span>,
       },
       {
         key: 'action',

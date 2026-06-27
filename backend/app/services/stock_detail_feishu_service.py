@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import create_capture_token
 from app.models.instrument import Instrument
 from app.models.notification import NotificationChannel
+from app.models.stock_memo import StockMemo
 from app.schemas.notification import NotificationMessageDTO
 from app.services.channel_adapter import get_adapter  # noqa: F401  re-export for patch
 from app.services.indicator_service import compute_all_indicators  # noqa: F401  re-export for patch
@@ -90,7 +91,6 @@ class StockDetailFeishuError(NotificationServiceError):
 async def send_stock_detail_to_feishu(
     db: AsyncSession,
     instrument_id: UUID,
-    channel_id: UUID,
     user_id: UUID,
     frontend_base_url: str,
     capture_worker_url: str,
@@ -101,19 +101,19 @@ async def send_stock_detail_to_feishu(
     [StockDetailFeishu] - 描述: 复用监控链路组件，走 Outbox → MessageDelivery → delivery_worker
 
     执行顺序：
-    1. 校验 instrument + channel（不属于当前用户则 ChannelNotFoundError）
-    2. 生成 test_run_id + message_group_id（幂等 + 关联 text/image）
-    3. MonitorSnapshotService.get_snapshot 获取非空快照（SSOT）
-    4. build_monitor_event_text + create_message 拼装并创建文本消息
-    5. write_outbox(text) → outbox_relay 扩张为 MessageDelivery(text)
-    6. capture worker HTTP 截图 → create_message + write_outbox(image)
-    7. 返回 test_run_id/message_group_id/message_id/status
+    1. 校验 instrument 存在
+    2. 自动查找当前用户唯一 active 飞书渠道（webhook 或 platform_app）
+    3. 生成 test_run_id + message_group_id（幂等 + 关联 text/image）
+    4. MonitorSnapshotService.get_snapshot 获取非空快照（SSOT）
+    5. build_monitor_event_text + create_message 拼装并创建文本消息（始终附带 StockMemo）
+    6. write_outbox(text) → outbox_relay 按 target_channel_id 扩张为单条 MessageDelivery(text)
+    7. capture worker HTTP 截图 → create_message + write_outbox(image)
+    8. 返回 test_run_id/message_group_id/message_id/status
 
     Args:
         db: 异步会话
         instrument_id: 个股 ID
-        channel_id: 通知渠道 ID（必须属于当前用户，用于身份校验）
-        user_id: 当前用户 ID（admin，由 endpoint 注入）
+        user_id: 当前用户 ID（由 endpoint 注入）
         frontend_base_url: 前端 base URL（截图服务访问）
         capture_worker_url: 截图 Worker HTTP 服务地址
         capture_token_ttl_seconds: capture token 有效期（秒）
@@ -123,7 +123,7 @@ async def send_stock_detail_to_feishu(
 
     Raises:
         InstrumentNotFoundError: 个股不存在
-        ChannelNotFoundError: 渠道不存在或不属于当前用户
+        ChannelNotFoundError: 用户无 active 飞书渠道
         StockDetailFeishuError: 快照/文本Outbox/截图/图片Outbox 失败（携带 error_code/failed_step）
         NotificationServiceError: 其他消息创建失败
     """
@@ -139,16 +139,27 @@ async def send_stock_detail_to_feishu(
     if instrument is None:
         raise InstrumentNotFoundError(f"个股不存在: instrument_id={instrument_id}")
 
-    # 2. 校验渠道存在且属于当前用户（用于身份校验，实际投递由 Outbox 扩张到所有 active 渠道）
+    # [StockDetailFeishu] - 手动发送时只要股票有备忘录，始终附带 memo 内容
+    # notify_feishu 开关只控制自动盘中触发是否附带，不影响手动发送
+    memo_stmt = select(StockMemo).where(
+        StockMemo.user_id == user_id,
+        StockMemo.instrument_id == instrument_id,
+    )
+    memo_result = await db.execute(memo_stmt)
+    memo = memo_result.scalar_one_or_none()
+    memo_content = memo.content if memo else None
+
+    # 2. 自动查找当前用户唯一 active 飞书渠道（webhook 或 platform_app）
     stmt_ch = select(NotificationChannel).where(
-        NotificationChannel.id == channel_id,
         NotificationChannel.user_id == user_id,
+        NotificationChannel.adapter_type.in_(["feishu_webhook", "feishu_platform_app"]),
+        NotificationChannel.status == "active",
     )
     ch_result = await db.execute(stmt_ch)
     channel = ch_result.scalar_one_or_none()
     if channel is None:
         raise ChannelNotFoundError(
-            f"渠道不存在或不属于当前用户: channel_id={channel_id}"
+            f"用户无 active 飞书渠道: user_id={user_id}"
         )
 
     # 3. 生成 test_run_id + message_group_id（幂等 + 关联 text/image 两条投递）
@@ -190,10 +201,11 @@ async def send_stock_detail_to_feishu(
         resource_refs={
             "instrument_id": str(instrument.id),
             "symbol": instrument.symbol,
-            "channel_id": str(channel_id),
+            "channel_id": str(channel.id),
             "test_run_id": str(test_run_id),
             "share": True,
         },
+        memo=memo_content,
     )
 
     # 6. 复用 create_message 创建文本消息 + 写入文本 Outbox
@@ -206,10 +218,10 @@ async def send_stock_detail_to_feishu(
             message_dto=dto,
             source_type="stock_detail_share",
             source_id=instrument_id,
-            idempotency_key=f"stock-detail-feishu:{instrument_id}:{channel_id}:{test_run_id}:text",
+            idempotency_key=f"stock-detail-feishu:{instrument_id}:{channel.id}:{test_run_id}:text",
         )
 
-        # 7. 写入 card Outbox（outbox_relay 扩张为 MessageDelivery(card) → delivery_worker → adapter.send → msg_type=interactive）
+        # 7. 写入 card Outbox（outbox_relay 按 target_channel_id 扩张为单条 MessageDelivery(card)）
         await write_outbox(
             db=db,
             event_type="notification.message.created",
@@ -218,6 +230,7 @@ async def send_stock_detail_to_feishu(
                 "user_id": str(user_id),
                 "delivery_type": "card",
                 "message_group_id": message_group_id,
+                "target_channel_id": str(channel.id),
             },
             aggregate_type="notification_message",
             aggregate_id=text_message.id,
@@ -272,7 +285,7 @@ async def send_stock_detail_to_feishu(
             resource_refs={
                 "instrument_id": str(instrument.id),
                 "symbol": instrument.symbol,
-                "channel_id": str(channel_id),
+                "channel_id": str(channel.id),
                 "test_run_id": str(test_run_id),
                 "image_url": image_url,
             },
@@ -293,7 +306,7 @@ async def send_stock_detail_to_feishu(
             message_dto=image_dto,
             source_type="stock_detail_share",
             source_id=instrument_id,
-            idempotency_key=f"stock-detail-feishu:{instrument_id}:{channel_id}:{test_run_id}:image",
+            idempotency_key=f"stock-detail-feishu:{instrument_id}:{channel.id}:{test_run_id}:image",
         )
         image_message_id = str(image_message.id)
 
@@ -306,6 +319,7 @@ async def send_stock_detail_to_feishu(
                 "delivery_type": "image",
                 "image_url": image_url,
                 "message_group_id": message_group_id,
+                "target_channel_id": str(channel.id),
             },
             aggregate_type="notification_message",
             aggregate_id=image_message.id,
@@ -319,7 +333,7 @@ async def send_stock_detail_to_feishu(
         logger.warning(
             "IMAGE_STEP_FAILED instrument_id=%s channel_id=%s test_run_id=%s "
             "failed_step=image error_code=IMAGE_STEP_FAILED error=%s",
-            instrument_id, channel_id, test_run_id, e,
+            instrument_id, channel.id, test_run_id, e,
         )
 
     total_ms = (time.time() - total_start) * 1000
@@ -327,7 +341,7 @@ async def send_stock_detail_to_feishu(
         "[StockDetailFeishu] 发送完成 instrument_id=%s channel_id=%s "
         "test_run_id=%s snapshot_ms=%.1f text_outbox_ms=%.1f capture_ms=%.1f "
         "image_outbox_ms=%.1f total_ms=%.1f cache_hit=%s image_message_id=%s",
-        instrument_id, channel_id, test_run_id,
+        instrument_id, channel.id, test_run_id,
         snapshot_ms, text_outbox_ms, capture_ms, image_outbox_ms, total_ms,
         cache_hit, image_message_id,
     )
@@ -344,22 +358,24 @@ async def send_stock_detail_to_feishu(
 async def get_share_status(
     db: AsyncSession,
     test_run_id: UUID,
+    user_id: UUID,
 ) -> dict[str, Any]:
     """查询个股飞书分享的投递状态。
 
     [StockDetailFeishu] - 描述: 通过 test_run_id 查 MessageDelivery 投递状态
 
     流程：
-    1. 通过 test_run_id 从 NotificationMessage.body.resource_refs 查出 message_group_id
+    1. 通过 test_run_id + user_id 从 NotificationMessage.body.resource_refs 查出消息
     2. 按 message_group_id 查 MessageDelivery（text + image）
-    3. 汇总返回 text_status / image_status / overall_status / failed_step / error_code
+    3. 汇总返回 card_status / image_status / overall_status / failed_step / error_code
 
     Args:
         db: 异步会话
         test_run_id: 分享请求返回的 test_run_id
+        user_id: 当前用户 ID（权限隔离）
 
     Returns:
-        dict 含 test_run_id / message_group_id / text_status / image_status /
+        dict 含 test_run_id / message_group_id / card_status / image_status /
         overall_status / failed_step / error_code / error_message
 
     Raises:
@@ -369,12 +385,12 @@ async def get_share_status(
 
     from app.models.notification import NotificationMessage
 
-    # 1. 通过 test_run_id 查 message_group_id（存于 body.resource_refs.test_run_id）
-    # JSONB 查询：body->'resource_refs'->>'test_run_id' = :test_run_id
+    # 1. 通过 test_run_id + user_id 查消息（body->'resource_refs'->>'test_run_id'）
     stmt_msg = (
         select(NotificationMessage)
         .where(
-            sql_text("body->'resource_refs'->>'test_run_id' = :test_run_id")
+            NotificationMessage.user_id == user_id,
+            sql_text("body->'resource_refs'->>'test_run_id' = :test_run_id"),
         )
         .params(test_run_id=str(test_run_id))
         .limit(1)
@@ -493,7 +509,7 @@ if __name__ == "__main__":
     sig = inspect.signature(send_stock_detail_to_feishu)
     params = list(sig.parameters.keys())
     expected = [
-        "db", "instrument_id", "channel_id", "user_id",
+        "db", "instrument_id", "user_id",
         "frontend_base_url", "capture_worker_url", "capture_token_ttl_seconds",
     ]
     assert params == expected, f"参数不匹配: {params}"
@@ -533,7 +549,7 @@ if __name__ == "__main__":
     assert callable(get_share_status), "get_share_status 应可调用"
     sig_status = inspect.signature(get_share_status)
     params_status = list(sig_status.parameters.keys())
-    assert params_status == ["db", "test_run_id"], \
+    assert params_status == ["db", "test_run_id", "user_id"], \
         f"get_share_status 参数不匹配: {params_status}"
     print(f"get_share_status params={params_status} OK")
 

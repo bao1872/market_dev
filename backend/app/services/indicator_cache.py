@@ -40,7 +40,7 @@ logger = logging.getLogger("services.indicator_cache")
 CACHE_TTL_SECONDS = 300
 
 # [指标缓存] - 算法版本：指标计算逻辑变更时递增，使旧缓存自动失效
-ALGORITHM_VERSION = "v1"
+ALGORITHM_VERSION = "v3"
 
 # 缓存键前缀
 _CACHE_PREFIX = "indicator"

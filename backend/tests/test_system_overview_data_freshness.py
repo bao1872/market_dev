@@ -48,13 +48,14 @@ def _mock_trading_day(is_trading: bool = True):
 
 
 async def _create_active_instruments(db_session, count: int = 5):
-    """创建指定数量的 active 标的（满足 FK 约束）。"""
+    """创建指定数量的 active A 股标的（满足 FK 约束与 stock_symbol_sql_filter 规则）。"""
     from app.models.instrument import Instrument
 
     instruments = []
     for i in range(count):
+        # SZ 主板代码 00xxxx，确保被 stock_symbol_sql_filter 识别为股票
         inst = Instrument(
-            symbol=f"T{uuid.uuid4().hex[:6]}",
+            symbol=f"00{1000 + i:04d}",
             name=f"测试标的{i}",
             market="SZ",
             status="active",
@@ -175,7 +176,7 @@ async def test_data_freshness_bars_behind_latest_trade_date(db_session):
 
 
 @pytest.mark.asyncio
-async def test_data_freshness_strategy_published(db_session, test_selector_strategy):
+async def test_data_freshness_strategy_published(db_session, dsa_selector_strategy):
     """场景 2: 选股已发布时 latest_published_trade_date 正确。
 
     Setup:
@@ -192,7 +193,7 @@ async def test_data_freshness_strategy_published(db_session, test_selector_strat
     - data_freshness.strategy.published_at is not None
     """
     now = datetime(2026, 6, 24, 18, 0, tzinfo=SHANGHAI)
-    version_id = test_selector_strategy["version"].id
+    version_id = dsa_selector_strategy["version"].id
 
     # bars_scheduler succeeded
     await _create_bars_succeeded_job(db_session, TEST_DATE_STR)

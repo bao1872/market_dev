@@ -1,0 +1,47 @@
+# Git
+.git
+.gitignore
+
+# Python 缓存与虚拟环境
+__pycache__
+*.py[cod]
+*.so
+.venv
+venv
+.env
+.env.example
+
+# 本地敏感配置（生产环境通过 CONFIG_FILE 挂载外部配置文件）
+app/config.local.py
+app/config.test.py
+app/config.production.py
+.env*
+
+# 本地凭证文件
+*.pem
+*.key
+*.p12
+*.crt
+id_rsa*
+.ssh/
+
+# 测试与开发工具
+tests/
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# 构建产物与文档
+*.egg-info
+dist
+build
+README.md
+scripts/
+tools/
+
+# Docker 文件本身
+Dockerfile
+Dockerfile.capture
+docker-compose*.yml

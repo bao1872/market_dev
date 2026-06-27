@@ -67,6 +67,47 @@ class DuplicateMessageError(NotificationServiceError):
     """重复消息（幂等键冲突）。"""
 
 
+class DuplicateActiveChannelError(NotificationServiceError):
+    """同一用户同一飞书适配器类型下已存在 active 渠道。"""
+
+
+# [通知渠道] - 受 active 唯一约束限制的飞书适配器类型
+_FEISHU_ADAPTER_TYPES = {"feishu_webhook", "feishu_platform_app"}
+
+
+async def _ensure_no_active_feishu_conflict(
+    db: AsyncSession,
+    user_id: UUID,
+    adapter_type: str,
+    exclude_channel_id: UUID | None = None,
+) -> None:
+    """前置校验：同一用户下是否已存在 active 飞书渠道（含 webhook / platform_app）。
+
+    用于 create_channel / update_channel / verify_channel / test_channel 等
+    可能产生或保持 active 状态的入口，确保用户最多只有一条 active 飞书渠道。
+    """
+    if adapter_type not in _FEISHU_ADAPTER_TYPES:
+        return
+
+    # [通知渠道] - 单用户最多一条 active 飞书渠道，不区分 webhook / platform_app
+    stmt = select(NotificationChannel.id, NotificationChannel.adapter_type).where(
+        NotificationChannel.user_id == user_id,
+        NotificationChannel.adapter_type.in_(_FEISHU_ADAPTER_TYPES),
+        NotificationChannel.status == "active",
+    )
+    if exclude_channel_id is not None:
+        stmt = stmt.where(NotificationChannel.id != exclude_channel_id)
+
+    result = await db.execute(stmt)
+    row = result.one_or_none()
+    if row is not None:
+        existing_id, existing_type = row
+        raise DuplicateActiveChannelError(
+            f"用户已存在 active {existing_type} 渠道（channel_id={existing_id}），"
+            "同一用户下不能同时拥有多条 active 飞书渠道"
+        )
+
+
 def _generate_idempotency_key(
     user_id: UUID,
     message_dto: NotificationMessageDTO,
@@ -460,6 +501,11 @@ async def create_channel(
     Returns:
         NotificationChannel
     """
+    # [通知渠道] - 前置校验：同一用户下最多一条 active 飞书渠道
+    # create_channel 默认 status=pending，但若已有 active 飞书渠道，后续 verify/test
+    # 将违反业务规则，因此创建时即拦截
+    await _ensure_no_active_feishu_conflict(db, user_id, adapter_type)
+
     channel = NotificationChannel(
         id=uuid4(),
         user_id=user_id,
@@ -504,6 +550,13 @@ async def update_channel(
         raise ValueError("渠道不存在或无权操作")
     if channel.status == "inactive":
         raise ValueError("已删除的渠道无法修改")
+
+    # [通知渠道] - 前置校验：飞书渠道更新时不允许与另一条 active 飞书渠道冲突
+    # 更新后会将 status 置为 pending，若已存在其他 active 飞书渠道，后续 verify/test
+    # 将违反业务规则，因此提前拦截
+    await _ensure_no_active_feishu_conflict(
+        db, user_id, channel.adapter_type, exclude_channel_id=channel.id
+    )
 
     if display_name is not None:
         channel.display_name = display_name
@@ -579,6 +632,11 @@ async def verify_channel(
     channel = result.scalar_one_or_none()
     if channel is None:
         raise ChannelNotFoundError(f"渠道不存在: channel_id={channel_id}")
+
+    # [通知渠道] - 前置校验：verify 成功后会将 status 置为 active，需避免与另一条 active 飞书渠道冲突（不区分类型）
+    await _ensure_no_active_feishu_conflict(
+        db, channel.user_id, channel.adapter_type, exclude_channel_id=channel.id
+    )
 
     adapter = get_adapter(channel.adapter_type)
     try:
@@ -929,6 +987,12 @@ async def test_channel(
     )
 
     delivery_result = await adapter.send(test_dto, channel.target_config)
+
+    # [通知渠道] - 前置校验：test 成功后会将 status 置为 active，需避免与另一条 active 飞书渠道冲突（不区分类型）
+    if delivery_result.success:
+        await _ensure_no_active_feishu_conflict(
+            db, channel.user_id, channel.adapter_type, exclude_channel_id=channel.id
+        )
 
     # 更新渠道状态
     channel.last_verified_at = datetime.now(UTC)

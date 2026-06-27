@@ -1,14 +1,14 @@
 """个股详情发送飞书 API - POST 创建 + GET 状态查询。
 
-admin only，复用监控链路组件（MonitorSnapshotService / build_monitor_event_text /
+普通用户可用，复用监控链路组件（MonitorSnapshotService / build_monitor_event_text /
 capture worker / Outbox / MessageDelivery），走正式 Outbox 异步链路。
 
 端点：
-- POST /admin/instruments/{instrument_id}/send-feishu
-    请求体: {"channel_id": "<uuid>"}
+- POST /instruments/{instrument_id}/send-feishu
+    请求体: 空（后端自动查找当前用户唯一 active Feishu 渠道）
     响应: {"test_run_id", "message_group_id", "message_id", "image_message_id", "status"}
-- GET /admin/stock-detail-feishu/{test_run_id}/status
-    响应: {"test_run_id", "message_group_id", "text_status", "image_status",
+- GET /stock-detail-feishu/{test_run_id}/status
+    响应: {"test_run_id", "message_group_id", "card_status", "image_status",
            "overall_status", "failed_step", "error_code", "error_message"}
 """
 
@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.core.deps import get_db, require_roles
+from app.core.deps import get_current_active_user, get_db
 from app.models.user import User
 from app.services.notification_service import (
     ChannelNotFoundError,
@@ -34,7 +34,7 @@ from app.services.stock_detail_feishu_service import (
     send_stock_detail_to_feishu,
 )
 
-router = APIRouter(prefix="/admin", tags=["stock-detail-feishu"])
+router = APIRouter(tags=["stock-detail-feishu"])
 
 
 def _error_detail(
@@ -52,12 +52,6 @@ def _error_detail(
         "error_message": error_message,
         "failed_step": failed_step,
     }
-
-
-class SendFeishuRequest(BaseModel):
-    """发送飞书请求体。"""
-
-    channel_id: uuid.UUID = Field(..., description="通知渠道 ID（必须属于当前 admin 用户）")
 
 
 class SendFeishuResponse(BaseModel):
@@ -106,11 +100,10 @@ class ShareStatusResponse(BaseModel):
 )
 async def send_stock_detail_feishu_endpoint(
     instrument_id: uuid.UUID,
-    request: SendFeishuRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles("admin")),
+    current_user: User = Depends(get_current_active_user),
 ) -> SendFeishuResponse:
-    """发送个股详情到飞书（admin only，走 Outbox 异步链路）。
+    """发送个股详情到飞书（普通用户可用，走 Outbox 异步链路）。
 
     [StockDetailFeishu] - 描述: 复用监控链路组件，走 Outbox → MessageDelivery → delivery_worker
 
@@ -121,15 +114,16 @@ async def send_stock_detail_feishu_endpoint(
     4. write_outbox（事务性发件箱，outbox_relay 同款）
     5. capture worker HTTP（截图，test_channel_latest_event 同款）
 
+    后端自动查找当前用户唯一 active Feishu 渠道；无渠道时返回 404。
     返回 test_run_id/message_group_id/message_id，客户端可通过
-    GET /admin/stock-detail-feishu/{test_run_id}/status 查询投递状态。
+    GET /stock-detail-feishu/{test_run_id}/status 查询投递状态。
     """
     settings = get_settings()
+
     try:
         result = await send_stock_detail_to_feishu(
             db=db,
             instrument_id=instrument_id,
-            channel_id=request.channel_id,
             user_id=current_user.id,
             frontend_base_url=settings.frontend_base_url,
             capture_worker_url=settings.capture_worker_url,
@@ -170,17 +164,19 @@ async def send_stock_detail_feishu_endpoint(
 async def get_share_status_endpoint(
     test_run_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles("admin")),
+    current_user: User = Depends(get_current_active_user),
 ) -> ShareStatusResponse:
-    """查询个股飞书分享的投递状态（admin only）。
+    """查询个股飞书分享的投递状态（当前用户只能查自己的分享）。
 
     [StockDetailFeishu] - 描述: 通过 test_run_id 查 MessageDelivery 投递状态
 
-    返回 text_status / image_status / overall_status / failed_step / error_code。
+    返回 card_status / image_status / overall_status / failed_step / error_code。
     状态值：pending/sending/success/failed/retrying/dead/not_created。
     """
     try:
-        result = await get_share_status(db=db, test_run_id=test_run_id)
+        result = await get_share_status(
+            db=db, test_run_id=test_run_id, user_id=current_user.id
+        )
     except NotificationServiceError as e:
         # [StockDetailFeishu] - test_run_id 无对应消息返回 404
         raise HTTPException(
@@ -195,7 +191,7 @@ if __name__ == "__main__":
     print(f"router.routes={paths}")
     assert any("/send-feishu" in p for p in paths), "应包含 /send-feishu 路由"
     assert any("/status" in p for p in paths), "应包含 /status 路由"
-    assert router.prefix == "/admin", "prefix 应为 /admin"
+    assert router.prefix == "", "prefix 应为空（由主应用直接挂载）"
 
     # 验证三字段错误响应构造（advice.md 第十一节遗留清理）
     detail = _error_detail("SNAPSHOT_FAILED", "快照获取失败", "snapshot")

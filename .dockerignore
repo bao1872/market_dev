@@ -1,0 +1,60 @@
+# Root .dockerignore - 排除不应进入任何 Docker build context 的敏感/临时文件
+
+# Git
+.git
+.gitignore
+
+# 本地敏感配置（生产环境通过挂载外部配置文件提供）
+.env
+.env.*
+*.env
+backend/app/config.local.py
+backend/app/config.test.py
+backend/app/config.production.py
+/etc/market-dev/config.production.py
+
+# 凭证文件
+*.pem
+*.key
+*.p12
+*.crt
+id_rsa*
+.ssh/
+
+# Python 虚拟环境与缓存
+.venv
+venv
+__pycache__
+*.py[cod]
+*.so
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# 构建产物
+*.egg-info
+dist
+build
+node_modules
+dist-ssr
+*.local
+
+# 测试产物与临时文件
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 文档生成产物（由 tools/update_docs.py 从事实源生成）
+docs/*.md
+
+# 截图与静态资源上传
+static/captures/
+*.png
+*.jpg
+*.jpeg
+*.gif

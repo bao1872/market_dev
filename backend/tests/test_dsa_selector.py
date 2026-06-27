@@ -220,11 +220,11 @@ class TestDSASelector:
         for key in yaml_outputs:
             assert key in result.metrics, f"缺少 yaml 指标: {key}"
 
-        # 多头趋势应命中（如果生成的数据足够形成多头）
-        # 注意：合成数据可能不总是触发多头，所以只验证结构不验证 matched 值
-        if result.matched:
-            # 命中时 dsa_dir_bars 应 > 50
-            assert result.metrics["dsa_dir_bars"] > 50
+        # 所有有效结果均 matched=True，不再基于 regime 判定
+        assert result.matched is True
+
+        # 若合成数据形成多头趋势，则 dsa_dir_bars 应 > 50
+        if result.metrics["dsa_dir_bars"] > 50:
             # vwap_ret_avg 和 vwap_ret_total 应有值
             assert result.metrics["vwap_ret_avg"] is not None
             assert result.metrics["vwap_ret_total"] is not None
@@ -261,8 +261,20 @@ class TestDSASelector:
         # 验证 regime_value 是 0/1/-1
         assert result.metrics["regime_value"] in (0, 1, -1)
 
-        # 验证 matched 与 regime_value 一致
-        assert result.matched == (result.metrics["regime_value"] == 1)
+        # 验证所有有效结果均 matched=True，不再与 regime_value 绑定
+        assert result.matched is True
+
+    @pytest.mark.asyncio
+    async def test_dsa_selector_matched_unconditional(
+        self, dsa_selector: DSASelector, sideways_context: MarketDataContext
+    ) -> None:
+        """测试非多头行情下 matched 仍为 True（不对 regime 过滤）。"""
+        result = await dsa_selector.execute(sideways_context)
+
+        assert isinstance(result, StrategyResult)
+        assert result.trade_date == sideways_context.trade_date
+        # 即使 regime_value 不为 1，matched 也应为 True
+        assert result.matched is True
 
     @pytest.mark.asyncio
     async def test_dsa_selector_insufficient_data(self) -> None:
@@ -335,7 +347,7 @@ class TestBudgetGuard:
         """测试 DSASelector 资源预算超时。
 
         设置极短的超时时间（1ms），确保 DSA 计算超时。
-        验证返回 matched=False 且 metrics 标记 budget_exceeded。
+        验证抛出 BudgetExceededError，由 batch 层记录到 run_items。
         """
         selector = DSASelector()
         version = _make_mock_version()
@@ -349,11 +361,9 @@ class TestBudgetGuard:
             bars_daily=_generate_bullish_bars(400),
             trade_date=date(2026, 6, 18),
         )
-        result = await selector.execute(context)
-
-        # 超时应返回 matched=False
-        assert result.matched is False
-        assert result.metrics.get("error") == "budget_exceeded"
+        with pytest.raises(BudgetExceededError) as exc_info:
+            await selector.execute(context)
+        assert exc_info.value.timeout_ms == 1
 
 
 class TestStrategyLoader:

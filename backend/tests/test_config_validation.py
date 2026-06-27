@@ -20,6 +20,8 @@ import pytest
 
 from app.config import (
     InvalidDatabaseURLError,
+    MissingRequiredSettingError,
+    _load_py_config,
     _validate_database_url,
     get_settings,
 )
@@ -113,14 +115,16 @@ class TestValidateDatabaseUrlDirect:
 
 @pytest.fixture
 def reset_settings_cache():
-    """每个测试前后清理 get_settings 的 lru_cache，避免环境变量污染。
+    """每个测试前后清理 get_settings 与 _load_py_config 的 lru_cache，避免环境变量污染。
 
-    get_settings() 用 lru_cache 缓存单例，测试用 monkeypatch 改环境变量后
+    get_settings() / _load_py_config() 用 lru_cache 缓存，测试用 monkeypatch 改环境变量后
     必须清缓存才能重新实例化。测试后再清一次，避免影响其他测试。
     """
     get_settings.cache_clear()
+    _load_py_config.cache_clear()
     yield
     get_settings.cache_clear()
+    _load_py_config.cache_clear()
 
 
 class TestGetSettingsValidation:
@@ -192,13 +196,43 @@ class TestGetSettingsValidation:
     def test_production_formal_db_starts_successfully(
         self, monkeypatch, reset_settings_cache
     ):
-        """生产环境 + 正式库正常启动。"""
+        """生产环境 + 正式库 + 强密钥 + 正确 worker 地址正常启动。"""
         monkeypatch.setenv(
             "DATABASE_URL", "postgresql+psycopg://u:p@h:5432/bz_stock"
         )
         monkeypatch.setenv("APP_ENV", "production")
+        monkeypatch.setenv("JWT_SECRET", "strong-jwt-secret-for-tests")
+        monkeypatch.setenv("SECRET_MASTER_KEY", "strong-master-key-for-tests")
+        monkeypatch.setenv("FRONTEND_BASE_URL", "http://frontend")
+        monkeypatch.setenv("CAPTURE_WORKER_URL", "http://worker-capture:8001")
         s = get_settings()
         assert "_test" not in s.database_url
+
+    def test_production_weak_jwt_secret_blocks_startup(
+        self, monkeypatch, reset_settings_cache
+    ):
+        """生产环境 JWT_SECRET 为默认值 change-me 必须阻止启动。"""
+        monkeypatch.setenv(
+            "DATABASE_URL", "postgresql+psycopg://u:p@h:5432/bz_stock"
+        )
+        monkeypatch.setenv("APP_ENV", "production")
+        monkeypatch.setenv("JWT_SECRET", "change-me")
+        monkeypatch.setenv("SECRET_MASTER_KEY", "strong-master-key-for-tests")
+        with pytest.raises(MissingRequiredSettingError, match="JWT_SECRET"):
+            get_settings()
+
+    def test_production_weak_secret_master_key_blocks_startup(
+        self, monkeypatch, reset_settings_cache
+    ):
+        """生产环境 SECRET_MASTER_KEY 为开发默认值必须阻止启动。"""
+        monkeypatch.setenv(
+            "DATABASE_URL", "postgresql+psycopg://u:p@h:5432/bz_stock"
+        )
+        monkeypatch.setenv("APP_ENV", "production")
+        monkeypatch.setenv("JWT_SECRET", "strong-jwt-secret-for-tests")
+        monkeypatch.setenv("SECRET_MASTER_KEY", "replace-in-development-only")
+        with pytest.raises(MissingRequiredSettingError, match="SECRET_MASTER_KEY"):
+            get_settings()
 
 
 # ---------------------------------------------------------------------------

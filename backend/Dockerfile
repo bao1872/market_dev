@@ -20,12 +20,12 @@ ENV PIP_NO_CACHE_DIR=1
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# 复制依赖声明与应用源码（setuptools 需解析 app 包结构才能安装）
+# 复制依赖声明并先安装锁定依赖，使代码变化不使 pip 缓存失效
 COPY pyproject.toml ./
-COPY app ./app
-
-# 安装项目及全部依赖到虚拟环境
 RUN pip install .
+
+# 复制应用源码（代码变化只影响本层及之后）
+COPY app ./app
 
 # ===== Stage 2: runtime - 精简运行时镜像 =====
 FROM python:3.11-slim
