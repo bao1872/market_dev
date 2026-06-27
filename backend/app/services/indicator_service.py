@@ -41,6 +41,7 @@ import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants.indicator_contract import INDICATOR_BARS
 from app.constants.strategy_keys import DSA_SELECTOR
 from app.core.exchange import get_exchange
 from app.models.instrument import Instrument
@@ -63,17 +64,9 @@ logger = logging.getLogger("services.indicator_service")
 _DEFAULT_DAILY_LOOKBACK_DAYS = 5000  # 日线默认回看 5000 天（与 bars.py 一致）
 _INDICATOR_INTRADAY_LOOKBACK_DAYS = 750  # 指标计算专用 15min/1min 回看天数（750 天，与 bars.py 的 API 查询回看 180 天不同，指标计算需要更多数据）
 
-# [DSA/MACD 计算窗口] - 按 timeframe 分化，前端不硬编码（advice.md 第四节）
-# calculation_window: 策略算法实际回看 bar 数
+# [DSA/MACD 计算窗口] - 从 indicator_contract 基线读取（advice.md 第一节）
+# INDICATOR_BARS 已从 app.constants.indicator_contract 导入（第44行）
 # warmup_bars: 算法预热期（如 EMA/MACD 前 N 根不稳定）
-# visible_bars: API 默认返回最近 N 根（与前端默认 bars=250 不同）
-INDICATOR_BARS: dict[str, int] = {
-    "15m": 800,
-    "1h": 800,
-    "1d": 800,
-    "1w": 260,
-    "1mo": 120,
-}
 INDICATOR_WARMUP_BARS: dict[str, int] = {
     "15m": 60,
     "1h": 60,
@@ -684,7 +677,7 @@ if __name__ == "__main__":
 
     # 7. 验证 INDICATOR_BARS 常量与返回结构元信息（advice.md 第四节）
     assert "1d" in INDICATOR_BARS, "INDICATOR_BARS 应包含 1d"
-    assert INDICATOR_BARS["1d"] == 800, "1d 计算窗口应为 800"
+    assert INDICATOR_BARS["1d"] == 250, "1d 计算窗口应为 250"
     assert INDICATOR_BARS["1w"] == 260, "1w 计算窗口应为 260"
     assert INDICATOR_BARS["1mo"] == 120, "1mo 计算窗口应为 120"
     assert "1d" in INDICATOR_WARMUP_BARS, "INDICATOR_WARMUP_BARS 应包含 1d"

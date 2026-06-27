@@ -50,6 +50,7 @@ from app.schemas.membership import (
     UserRegister,
 )
 from app.schemas.user import (
+    RefreshRequest,
     TokenResponse,
     UserLogin,
     UserResponse,
@@ -165,7 +166,7 @@ async def login(
 
 @router.post("/auth/refresh", response_model=TokenResponse)
 async def refresh_token(
-    refresh_token: str,
+    payload: RefreshRequest,
     db: AsyncSession = Depends(get_db),
 ) -> TokenResponse:
     """使用 refresh token 刷新，返回新的 access + refresh token。
@@ -177,7 +178,7 @@ async def refresh_token(
     4. 生成新的 access + refresh token
 
     Args:
-        refresh_token: refresh token 字符串（query/body 参数）
+        payload: 请求体，含 refresh_token 字段（JSON body，非 query string）
         db: 异步数据库会话
 
     Returns:
@@ -186,6 +187,7 @@ async def refresh_token(
     Raises:
         HTTPException 401: token 无效/过期/类型错误/用户不存在或非 active
     """
+    refresh_token = payload.refresh_token
     # 解码 refresh token
     try:
         token_payload = decode_token(refresh_token)

@@ -23,7 +23,7 @@ Examples:
     python tools/update_docs.py --check
 
 Side Effects:
-    生成/覆盖 docs/数据结构.md 与 docs/操作手册.md（--check 模式无副作用）
+    生成/覆盖 docs/数据结构.md、docs/操作手册.md 与 docs/指标参数基线.md（--check 模式无副作用）
 """
 
 from __future__ import annotations
@@ -55,6 +55,7 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 _DOCS_DIR = os.path.join(_PROJECT_ROOT, "docs")
 _DB_SCHEMA_PATH = os.path.join(_DOCS_DIR, "数据结构.md")
 _OPS_MANUAL_PATH = os.path.join(_DOCS_DIR, "操作手册.md")
+_INDICATOR_CONTRACT_DOC_PATH = os.path.join(_DOCS_DIR, "指标参数基线.md")
 
 # 6 张 bar 表，按周期粒度排序
 _BAR_MODELS = [BarDaily, BarMinute, BarWeekly, BarMonthly, Bar15Min, Bar60Min]
@@ -624,6 +625,117 @@ def generate_ops_manual_doc() -> str:
 
 
 # ---------------------------------------------------------------------------
+# 文档生成：指标参数基线
+# ---------------------------------------------------------------------------
+
+
+def generate_indicator_contract_doc() -> str:
+    """生成指标参数基线文档（docs/指标参数基线.md）。
+
+    内容：从 indicator_contract.py 的 all_params() 读取所有指标参数，
+    按类别分组生成参数表 + 各周期指标计算根数 + Token 有效期 + 刷新时点 + 版本。
+    """
+    from app.constants.indicator_contract import all_params
+
+    params = all_params()
+    buf = io.StringIO()
+    w = buf.write
+
+    w("# 指标参数基线\n\n")
+    w(
+        "> 本文档由 `tools/update_docs.py` 从 `backend/app/constants/indicator_contract.py` 自动生成。\n"
+    )
+    w(
+        "> 禁止手工编辑，修改参数请编辑 `indicator_contract.py` 后运行 `python tools/update_docs.py`。\n\n"
+    )
+
+    # Node Cluster / Volume Node 参数
+    w("## Node Cluster / Volume Node 参数\n\n")
+    w("| 参数名 | 值 | 说明 |\n")
+    w("|--------|-----|------|\n")
+    nc_params = [
+        ("NODE_CLUSTER_PRIMARY_PERIOD", "主周期"),
+        ("NODE_CLUSTER_PRIMARY_BARS", "主周期根数（最近 N 根已完成前复权日线）"),
+        ("NODE_CLUSTER_LOW_PERIOD", "低周期"),
+        ("NODE_CLUSTER_LOW_BARS", "低周期根数"),
+        ("NODE_CLUSTER_MINUTE_BARS", "分钟线根数（穿越检测）"),
+        ("VP_ROWS", "Volume Profile 行数"),
+        ("VP_VALUE_AREA_PCT", "价值区域占比"),
+        ("VP_PEAK_DETECTION_PCT", "峰值检测阈值"),
+        ("VP_NODE_THRESHOLD_PCT", "成交量节点阈值"),
+        ("VP_TROUGHS_SHOW", "波谷显示模式"),
+        ("VP_TROUGHS_DETECTION_PCT", "波谷检测阈值"),
+        ("VP_HIGHEST_N_NODES", "最高 N 个节点（0=不限制）"),
+        ("VP_LOWEST_N_NODES", "最低 N 个节点（0=不限制）"),
+        ("NODE_CLUSTER_EVENT_TTL_SECONDS", "事件 TTL（秒）"),
+    ]
+    for key, desc in nc_params:
+        w(f"| {key} | {params[key]} | {desc} |\n")
+    w("\n")
+
+    # DSA 参数
+    w("## DSA 参数\n\n")
+    w("| 参数名 | 值 | 说明 |\n")
+    w("|--------|-----|------|\n")
+    dsa_params = [
+        ("DSA_LOOKBACK", "回看根数"),
+        ("DSA_BUDGET_MS", "计算预算（毫秒）"),
+    ]
+    for key, desc in dsa_params:
+        w(f"| {key} | {params[key]} | {desc} |\n")
+    w("\n")
+
+    # Bollinger Bands 参数
+    w("## Bollinger Bands 参数\n\n")
+    w("| 参数名 | 值 | 说明 |\n")
+    w("|--------|-----|------|\n")
+    bb_params = [
+        ("BB_WIN", "布林带窗口"),
+        ("BB_K", "布林带系数（标准差倍数）"),
+        ("BB_EVENT_TTL_SECONDS", "布林带事件 TTL（秒）"),
+    ]
+    for key, desc in bb_params:
+        w(f"| {key} | {params[key]} | {desc} |\n")
+    w("\n")
+
+    # 各周期指标计算根数（INDICATOR_BARS dict）
+    w("## 各周期指标计算根数\n\n")
+    w("| 周期 | 计算根数 |\n")
+    w("|------|----------|\n")
+    indicator_bars = params["INDICATOR_BARS"]
+    for period in ["1d", "15m", "1h", "1w", "1mo", "1m"]:
+        w(f"| {period} | {indicator_bars[period]} |\n")
+    w("\n")
+
+    # Token 有效期
+    w("## Token 有效期\n\n")
+    w("> 供参考，实际值在 config.py（.env.example 中默认值与本文档一致）。\n\n")
+    w("| 参数名 | 值 | 说明 |\n")
+    w("|--------|-----|------|\n")
+    jwt_params = [
+        ("JWT_ACCESS_TTL_SECONDS", "JWT 访问令牌有效期（秒）"),
+        ("JWT_REFRESH_TTL_SECONDS", "JWT 刷新令牌有效期（秒）"),
+    ]
+    for key, desc in jwt_params:
+        w(f"| {key} | {params[key]} | {desc} |\n")
+    w("\n")
+
+    # 刷新时点（来源：app/worker.py + bars_scheduler_service.py，非 indicator_contract 参数）
+    w("## 刷新时点\n\n")
+    w("- 日线 / 15m / 60m：每个交易日 16:00 定时刷新（CronTrigger hour=16 minute=0, Asia/Shanghai）\n")
+    w("- 周线 / 月线：不存储 DB，从日线动态合成（convert_kline_frequency），不参与定时刷新\n")
+    w("- 1m：不在定时调度范围（调度仅覆盖 d/15m/60m），由监控策略实时拉取\n")
+    w("\n")
+
+    # 版本
+    w("## 版本\n\n")
+    w("- 基线版本：1.0.0\n")
+    w(f"- 最后更新：{datetime.now().strftime('%Y-%m-%d')}\n")
+
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
 # 主函数
 # ---------------------------------------------------------------------------
 
@@ -656,8 +768,10 @@ def main() -> int:
     print("从事实源提取元数据...")
     db_schema = generate_db_schema_doc()
     ops_manual = generate_ops_manual_doc()
+    indicator_contract = generate_indicator_contract_doc()
     print(f"  数据结构.md: {len(db_schema)} 字符")
     print(f"  操作手册.md: {len(ops_manual)} 字符")
+    print(f"  指标参数基线.md: {len(indicator_contract)} 字符")
 
     if args.check:
         # 一致性检查模式（忽略生成时间戳行，因每次运行时间不同）
@@ -665,15 +779,22 @@ def main() -> int:
 
         def _normalize_timestamp(text: str) -> str:
             """将生成时间戳行替换为占位符，避免时间差异导致校验失败。"""
-            return re.sub(
+            text = re.sub(
                 r"生成时间: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}",
                 "生成时间: <NORMALIZED>",
                 text,
             )
+            text = re.sub(
+                r"最后更新：\d{4}-\d{2}-\d{2}",
+                "最后更新：<NORMALIZED>",
+                text,
+            )
+            return text
 
         print("\n一致性检查模式 (--check)")
         existing_db = _read_file(_DB_SCHEMA_PATH)
         existing_ops = _read_file(_OPS_MANUAL_PATH)
+        existing_indicator = _read_file(_INDICATOR_CONTRACT_DOC_PATH)
 
         mismatch = False
 
@@ -695,6 +816,15 @@ def main() -> int:
         else:
             print(f"  [OK] {_OPS_MANUAL_PATH} 一致")
 
+        if existing_indicator is None:
+            print(f"  [FAIL] {_INDICATOR_CONTRACT_DOC_PATH} 不存在")
+            mismatch = True
+        elif _normalize_timestamp(existing_indicator) != _normalize_timestamp(indicator_contract):
+            print(f"  [FAIL] {_INDICATOR_CONTRACT_DOC_PATH} 内容不一致")
+            mismatch = True
+        else:
+            print(f"  [OK] {_INDICATOR_CONTRACT_DOC_PATH} 一致")
+
         if mismatch:
             print("\n一致性检查失败：文档与事实源不一致，请运行 `python tools/update_docs.py` 重建")
             return 1
@@ -707,6 +837,8 @@ def main() -> int:
     print(f"  [OK] {_DB_SCHEMA_PATH}")
     _write_file(_OPS_MANUAL_PATH, ops_manual)
     print(f"  [OK] {_OPS_MANUAL_PATH}")
+    _write_file(_INDICATOR_CONTRACT_DOC_PATH, indicator_contract)
+    print(f"  [OK] {_INDICATOR_CONTRACT_DOC_PATH}")
     print("\n文档生成完成 ✓")
     return 0
 

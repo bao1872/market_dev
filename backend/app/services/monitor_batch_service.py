@@ -31,6 +31,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants import indicator_contract as IC
 from app.constants.strategy_keys import WATCHLIST_MONITOR
 from app.constants.user_facing_labels import get_event_label, get_field_label
 from app.models.instrument import Instrument
@@ -60,10 +61,14 @@ _LEASE_DURATION_SECONDS = 300  # 租约时长（秒）
 _MAX_RETRIES = 5  # 最大重试次数
 _RETRY_BACKOFF_BASE_SECONDS = 30  # 重试退避基数（秒），实际退避 = 30 * 2^retry_count
 
-# 行情回看参数
-_DAILY_LOOKBACK_DAYS = 370  # 约250个交易日（参考脚本 bars=250）
-_15MIN_LOOKBACK_DAYS = 800
-_MINUTE_LOOKBACK_BARS = 2
+# 行情查询范围（天数，用于从数据库拉取足够多的数据）
+_DAILY_FETCH_DAYS = 370  # 查询 370 天，足以覆盖 250 个交易日
+_15MIN_FETCH_DAYS = 200  # 查询 200 天，足以覆盖 1200 根 15m bar（每天约 16 根）
+
+# Node Cluster 取数根数（从基线读取，按排序去重后 tail，不用自然日近似）
+_DAILY_LOOKBACK_BARS = IC.NODE_CLUSTER_PRIMARY_BARS  # 250
+_15MIN_LOOKBACK_BARS = IC.NODE_CLUSTER_LOW_BARS  # 1200
+_MINUTE_LOOKBACK_BARS = IC.NODE_CLUSTER_MINUTE_BARS  # 2
 
 # 北京时间
 _CST = ZoneInfo("Asia/Shanghai")
@@ -504,22 +509,26 @@ class MonitorBatchService:
         bars_daily_result = await get_bars(
             db, instrument_id,
             timeframe="1d",
-            start_date=today - timedelta(days=_DAILY_LOOKBACK_DAYS),
+            start_date=today - timedelta(days=_DAILY_FETCH_DAYS),
             end_date=today,
             adjustment="qfq",
         )
         bars_daily = bars_daily_result.bars
+        # [Node Cluster] - 描述: 按排序去重后 tail(250) 取数，不用自然日近似
+        if not bars_daily.empty:
+            bars_daily = bars_daily.sort_values("date", ascending=True).drop_duplicates(subset=["date"]).tail(_DAILY_LOOKBACK_BARS)
 
         bars_15min = pd.DataFrame()
         try:
             bars_15min_result = await get_bars(
                 db, instrument_id,
                 timeframe="15m",
-                start_date=today - timedelta(days=_15MIN_LOOKBACK_DAYS),
+                start_date=today - timedelta(days=_15MIN_FETCH_DAYS),
                 end_date=today,
                 adjustment="qfq",
             )
-            bars_15min = bars_15min_result.bars
+            # [Node Cluster] - 描述: 按排序去重后 tail(1200) 取数
+            bars_15min = bars_15min_result.bars.sort_values("datetime", ascending=True).drop_duplicates(subset=["datetime"]).tail(_15MIN_LOOKBACK_BARS)
         except Exception as exc:
             logger.warning("15min行情拉取失败 %s: %s", symbol, exc)
 
@@ -1574,11 +1583,14 @@ class MonitorBatchService:
         bars_daily_result = await get_bars(
             db, instrument_id,
             timeframe="1d",
-            start_date=today - timedelta(days=_DAILY_LOOKBACK_DAYS),
+            start_date=today - timedelta(days=_DAILY_FETCH_DAYS),
             end_date=today,
             adjustment="qfq",
         )
         bars_daily = bars_daily_result.bars
+        # [Node Cluster] - 描述: 按排序去重后 tail(250) 取数
+        if not bars_daily.empty:
+            bars_daily = bars_daily.sort_values("date", ascending=True).drop_duplicates(subset=["date"]).tail(_DAILY_LOOKBACK_BARS)
         if bars_daily.empty or len(bars_daily) < 20:
             logger.debug("日线行情不足，跳过 PNG 渲染: symbol=%s bars=%d", symbol, len(bars_daily))
             return None
@@ -1630,7 +1642,7 @@ class MonitorBatchService:
         """计算筹码分布（Volume Profile）。
 
         调用唯一真源 compute_unified_volume_profile，参数固定为
-        VP_LOOKBACK=360/VP_ROWS=100/VP_VALUE_AREA_PCT=0.70 等（见 unified_volume_profile.py）。
+        VP_LOOKBACK=250/VP_ROWS=100/VP_VALUE_AREA_PCT=0.70 等（见 unified_volume_profile.py）。
         返回 UnifiedVolumeProfileResult，其 profile_df/peak_df/price_step 属性
         与历史 VolumeProfileResult 接口兼容，可直接传给 render_monitoring_chart。
 
@@ -1655,10 +1667,10 @@ class MonitorBatchService:
         bars_15min_result = await get_bars(
             db, instrument_id,
             timeframe="15m",
-            start_date=today - timedelta(days=_15MIN_LOOKBACK_DAYS),
+            start_date=today - timedelta(days=_15MIN_FETCH_DAYS),
             end_date=today,
         )
-        bars_15min = bars_15min_result.bars
+        bars_15min = bars_15min_result.bars.tail(_15MIN_LOOKBACK_BARS)
         if bars_15min.empty:
             return None
 

@@ -18,11 +18,21 @@ echo "[deploy] 使用环境文件: ${ENV_FILE}"
 echo "[deploy] 使用 Compose 文件: ${COMPOSE_FILE}"
 echo "[deploy] GIT_SHA=${GIT_SHA}, BUILD_TIME=${BUILD_TIME}"
 
+# 部署前输出磁盘与镜像状态，便于对比清理前后变化
+echo "=== 部署前磁盘与镜像状态 ==="
+docker system df -v
+docker images
+
 # 构建必要的服务镜像（backend 镜像供所有 Python Worker 复用）
 docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" build backend frontend worker-capture
 
 # 使用已构建镜像重新创建并启动所有服务，清理孤立容器
 docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --no-build --force-recreate --remove-orphans
+
+# 部署后输出磁盘与镜像状态，确认新镜像已生成、旧镜像保留情况
+echo "=== 部署后磁盘与镜像状态 ==="
+docker system df -v
+docker images
 
 # 日常不再清理 Docker 镜像/构建缓存；每周或磁盘不足时执行 scripts/cleanup-docker.sh
 

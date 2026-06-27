@@ -28,6 +28,7 @@ services:
       args:
         GIT_SHA: ${GIT_SHA:-unknown}
         BUILD_TIME: ${BUILD_TIME:-unknown}
+    image: market-dev-backend:${GIT_SHA:-unknown}
     container_name: trading-backend
     restart: unless-stopped
     environment:
@@ -216,6 +217,7 @@ services:
       args:
         GIT_SHA: ${GIT_SHA:-unknown}
         BUILD_TIME: ${BUILD_TIME:-unknown}
+    image: market-dev-capture:${GIT_SHA:-unknown}
     container_name: trading-worker-capture
     restart: unless-stopped
     environment:
@@ -253,6 +255,7 @@ services:
         BUILD_TIME: ${BUILD_TIME:-unknown}
         VITE_GIT_SHA: ${VITE_GIT_SHA:-dev}
         VITE_BUILD_TIME: ${VITE_BUILD_TIME:-unknown}
+    image: market-dev-frontend:${GIT_SHA:-dev}
     container_name: trading-frontend
     restart: unless-stopped
     environment:

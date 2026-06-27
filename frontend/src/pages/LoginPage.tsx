@@ -57,14 +57,20 @@ export default function LoginPage() {
   // 邀请码实时校验：长度 >= 8 视为格式有效（实际校验由后端完成）
   const inviteValid = regInvite.length >= 8
 
-  // 登录成功后的统一处理：先写入 token → 拉取用户信息 → 写入认证状态 → 跳转
-  async function handleLoginSuccess(accessToken: string, membershipExpired: boolean) {
+  // 登录成功后的统一处理：先 login 写 token（含 keepLogin 选 storage）→ 拉取用户信息 → setUser 补全 → 跳转
+  async function handleLoginSuccess(
+    accessToken: string,
+    refreshToken: string,
+    membershipExpired: boolean,
+    keepLogin: boolean,
+  ) {
     setAuthenticating(true)
     try {
-      // 先写入 token 到 localStorage，让 axios 拦截器能读取
-      localStorage.setItem('auth_token', accessToken)
+      // 先 login 写入 token + storage（根据 keepLogin 选 local/session），user 暂为 null
+      // 让 axios 拦截器能从 storage 读取 token 调用 getMe
+      useAuthStore.getState().login(accessToken, null, refreshToken, keepLogin)
       const user = await getMe()
-      useAuthStore.getState().login(accessToken, {
+      useAuthStore.getState().setUser({
         id: user.id,
         name: user.email,
         email: user.email,
@@ -73,8 +79,8 @@ export default function LoginPage() {
       useToast.getState().show('登录成功', '已进入量策服务台')
       navigate(membershipExpired ? '/membership-expired' : '/')
     } catch (err) {
-      // getMe 失败时清除 token，避免残留无效 token
-      localStorage.removeItem('auth_token')
+      // getMe 失败：logout 清除 token + store 状态，避免残留无效登录态
+      useAuthStore.getState().logout()
       useToast.getState().show('获取用户信息失败', getErrorMessage(err))
     } finally {
       setAuthenticating(false)
@@ -91,7 +97,13 @@ export default function LoginPage() {
     loginMutation.mutate(
       { email: loginAccount.trim(), password: loginPassword },
       {
-        onSuccess: (data) => handleLoginSuccess(data.access_token, data.membership_expired),
+        onSuccess: (data) =>
+          handleLoginSuccess(
+            data.access_token,
+            data.refresh_token,
+            data.membership_expired,
+            keepLogin,
+          ),
         onError: (err) => useToast.getState().show('登录失败', getErrorMessage(err)),
       },
     )
@@ -126,9 +138,15 @@ export default function LoginPage() {
 
   // 注册成功页"进入服务台"按钮：复用注册返回的 token 完成登录流程
   // 新注册用户会员刚开通，membership_expired 固定为 false
+  // 注册流程默认保持登录（keepLogin=true），与登录页 keepLogin 复选框无关
   async function handleEnterService() {
     if (!registerResult) return
-    await handleLoginSuccess(registerResult.access_token, false)
+    await handleLoginSuccess(
+      registerResult.access_token,
+      registerResult.refresh_token,
+      false,
+      true,
+    )
   }
 
   // 邀请码输入：实时大写化

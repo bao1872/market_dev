@@ -4,7 +4,7 @@
 为后端所有业务链路提供单一入口。
 
 参数固定为（与 monitoring.py 盘中实时监控逻辑一致）：
-- VP_LOOKBACK=360
+- VP_LOOKBACK=250
 - VP_ROWS=100
 - VP_VALUE_AREA_PCT=0.70
 - VP_PEAK_DETECTION_PCT=0.05
@@ -32,6 +32,17 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from app.constants.indicator_contract import (
+    NODE_CLUSTER_PRIMARY_BARS as VP_LOOKBACK,
+    VP_HIGHEST_N_NODES,
+    VP_LOWEST_N_NODES,
+    VP_NODE_THRESHOLD_PCT,
+    VP_PEAK_DETECTION_PCT,
+    VP_ROWS,
+    VP_TROUGHS_DETECTION_PCT,
+    VP_TROUGHS_SHOW,
+    VP_VALUE_AREA_PCT,
+)
 from app.strategy_assets.algorithms.features.luxalgo_volume_profile_pytdx_15m_aligned import (
     VolumeProfileConfig,
     VolumeProfileResult,
@@ -39,16 +50,7 @@ from app.strategy_assets.algorithms.features.luxalgo_volume_profile_pytdx_15m_al
     extract_nearest_nodes,
 )
 
-# Volume Profile 标准参数（与 ref/交易/app/monitoring.py 保持一致）
-VP_LOOKBACK = 360
-VP_ROWS = 100
-VP_VALUE_AREA_PCT = 0.70
-VP_PEAK_DETECTION_PCT = 0.05
-VP_NODE_THRESHOLD_PCT = 0.01
-VP_TROUGHS_SHOW = "none"
-VP_TROUGHS_DETECTION_PCT = 0.07
-VP_HIGHEST_N_NODES = 0
-VP_LOWEST_N_NODES = 0
+# Volume Profile 标准参数（来自基线 indicator_contract，禁止本地硬编码第二套）
 
 
 @dataclass

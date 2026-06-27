@@ -81,6 +81,16 @@ class TokenResponse(BaseModel):
     expires_in: int = Field(..., description="Access token 有效期（秒）")
 
 
+class RefreshRequest(BaseModel):
+    """刷新 token 请求体 - refresh_token 通过 JSON body 提交（非 query string）。
+
+    改为 body 的原因：refresh_token 较长且为敏感凭证，放在 query string 会被
+    access log / 浏览器历史 / referer 头记录，存在泄露风险。
+    """
+
+    refresh_token: str = Field(..., description="待刷新的 refresh token")
+
+
 class TokenPayload(BaseModel):
     """JWT 解码后的 payload 结构。"""
 

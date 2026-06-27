@@ -7,7 +7,7 @@
 
 设计说明：
 - DSA selector 默认预算: 100ms/股（来自 dsa_selector.yaml resource_budget.target_ms_per_instrument）
-- Volume Node monitor 默认预算: 500ms/股（来自 volume_node_monitor.yaml resource_budget.target_ms_per_instrument）
+- Volume Node monitor 默认预算: 500ms/股（来自 watchlist_monitor.yaml resource_budget.target_ms_per_instrument）
 - 超时通过 asyncio.wait_for + asyncio.to_thread 实现（同步计算通过 to_thread 桥接）
 - 内存限制通过 tracemalloc 监控（可选，默认不启用以减少开销）
 - 超时抛出 BudgetExceededError，禁止吞没

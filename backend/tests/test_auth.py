@@ -279,7 +279,7 @@ async def test_refresh_token_success(db_session: AsyncSession) -> None:
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/auth/refresh",
-            params={"refresh_token": rtoken},
+            json={"refresh_token": rtoken},
         )
     assert response.status_code == 200
     data = response.json()
@@ -306,7 +306,7 @@ async def test_refresh_token_with_access_token_fails(db_session: AsyncSession) -
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/auth/refresh",
-            params={"refresh_token": atoken},
+            json={"refresh_token": atoken},
         )
     assert response.status_code == 401
     assert "类型错误" in response.json()["detail"]
@@ -319,7 +319,7 @@ async def test_refresh_token_invalid(db_session: AsyncSession) -> None:
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/auth/refresh",
-            params={"refresh_token": "invalid-token-string"},
+            json={"refresh_token": "invalid-token-string"},
         )
     assert response.status_code == 401
 
@@ -442,7 +442,7 @@ async def test_refresh_token_with_disabled_user_fails(db_session: AsyncSession) 
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/auth/refresh",
-            params={"refresh_token": rtoken},
+            json={"refresh_token": rtoken},
         )
     assert response.status_code == 401
     assert "非 active" in response.json()["detail"]

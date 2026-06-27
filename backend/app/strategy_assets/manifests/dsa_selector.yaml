@@ -5,7 +5,7 @@ display_name: DSA 方向稳定性选股
 entrypoint: strategies.selectors.dsa:DSASelector
 input:
   bar_frequency: 1d
-  min_bars: 800
+  min_bars: 250
   adjustment: forward
   markets: [SSE, SZSE, BSE]
 capabilities:
@@ -20,10 +20,10 @@ parameters:
   # 所有股票输出真实 dsa_dir_bars，由用户筛选条件动态决定。
   - key: algorithm.lookback
     type: integer
-    default: 800
+    default: 250
     allowed_scopes: [system]
     algorithm_affecting: true
-    description: "回看 bar 数（与参考脚本 DAILY_BARS=800 对齐）"
+    description: "回看 bar 数（与 indicator_contract.DSA_LOOKBACK=250 对齐）"
   # DSAConfig 参数（features/dynamic_swing_anchored_vwap.py）
   - key: dsa.prd
     type: integer
@@ -135,4 +135,4 @@ chart_layers:
     hover_fields: [dsa_dir, dsa_vwap, regime_id, pivot_type, pivot_price]
     description: "DSA 动态摆动锚定 VWAP 线，按 regime 分段着色，锚点标记，Pine 标签"
 resource_budget:
-  target_ms_per_instrument: 5000
+  target_ms_per_instrument: 100

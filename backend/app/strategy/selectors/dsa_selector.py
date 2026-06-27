@@ -23,6 +23,9 @@ SSOT：
     - 每日选股与历史回补必须共用此函数，禁止复制两套公式。
     - 每日选股：history = compute_dsa_history(bars, config); today_result = history.iloc[-1]
     - 历史回补：history = compute_dsa_history(bars, config); results = history.loc[target_dates]
+    - compute_dsa_bundle(bars, config) 是 DSA 统一计算入口，封装 compute_dsa_history
+      与图表字段（pivot_labels/regime_id）。execute() 取 last_row_metrics，
+      compute_indicators() 取 per_bar，两者共享同一份计算结果。
 
 资源预算：DSA 默认 100ms/股（通过 BudgetGuard 控制）
 """
@@ -47,6 +50,7 @@ from app.strategy._plotly_mock import ensure_plotly_mock  # noqa: E402
 # 从包内 app.strategy_assets.algorithms.features 导入，Docker 兼容
 ensure_plotly_mock()
 from app.models.strategy import StrategyVersion  # noqa: E402
+from app.constants.indicator_contract import DSA_LOOKBACK  # noqa: E402
 from app.strategy.budget import BudgetExceededError, BudgetGuard  # noqa: E402
 from app.strategy.runtime import MarketDataContext, StrategyResult, StrategyRuntime  # noqa: E402
 from app.strategy_assets.algorithms.features.atr_rope_event_factor_lab_v4 import (  # noqa: E402
@@ -60,7 +64,6 @@ from app.strategy_assets.algorithms.features.dynamic_swing_anchored_vwap import 
 
 # 策略常量
 MIN_DIR_BARS = 50  # dir=1 持续超过 50 bars 才视为多头趋势
-DEFAULT_LOOKBACK = 360  # 默认回看 bar 数（来自 yaml algorithm.lookback）
 DSA_BUDGET_MS = 100  # DSA 默认预算 100ms/股
 
 
@@ -526,6 +529,107 @@ def _history_row_to_metrics(row: pd.Series) -> dict[str, Any]:
     return metrics
 
 
+def compute_dsa_bundle(bars: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]:
+    """DSA 统一计算入口，封装 VWAP 计算 + 后处理 + metrics 提取。
+
+    同时产出 per-bar DataFrame（图表用）与最后一行标量 metrics（选股用），
+    消除 execute() 与 compute_indicators() 的双路径不一致：
+    - execute() 取 last_row_metrics 作为 StrategyResult.metrics
+    - compute_indicators() 取 per_bar 转为图表数组
+
+    内部调用 compute_dsa_history（SSOT）获取 metrics，并单独调用
+    dynamic_swing_anchored_vwap 获取图表字段（pivot_labels/regime_id）。
+    为避免修改 compute_dsa_history（SSOT，可能被其他地方引用），接受
+    dynamic_swing_anchored_vwap 被调用 2 次的开销（每次 < 100ms，预算内）。
+
+    Args:
+        bars: 日线行情 DataFrame，index 为 DatetimeIndex，
+              必须包含 open/high/low/close/volume/amount 列。
+        config: 运行时配置字典（与 compute_dsa_history 相同）：
+            - dsa_config: DSAConfig 实例（默认 DSAConfig()）
+            - rope_config: ATRRopeConfig 实例（默认 regime_lookback=55）
+            - min_dir_bars: 最小趋势 bar 数（默认 MIN_DIR_BARS=50）
+            - lookback: 回看 bar 数（默认 None，不截断）
+
+    Returns:
+        dict 包含:
+        - per_bar: pd.DataFrame，含 compute_dsa_history 全部列 +
+          dsa_dir/regime_id/anchor_time/pivot_type/pivot_price 图表字段
+        - last_row_metrics: dict，从 per_bar 最后一行提取的标量 metrics
+        数据不足时返回 {"per_bar": pd.DataFrame(), "last_row_metrics": {}}
+    """
+    if bars is None or bars.empty or len(bars) < 60:
+        return {"per_bar": pd.DataFrame(), "last_row_metrics": {}}
+
+    # 1. 调用 compute_dsa_history 获取 metrics DataFrame（SSOT）
+    history = compute_dsa_history(bars, config)
+    if history.empty:
+        return {"per_bar": pd.DataFrame(), "last_row_metrics": {}}
+
+    # 2. 提取最后一行作为标量 metrics
+    last_row = history.iloc[-1]
+    last_row_metrics = _history_row_to_metrics(last_row)
+
+    # 3. 单独调用 dynamic_swing_anchored_vwap 获取图表字段（pivot_labels/regime_id）
+    # 必须与 compute_dsa_history 使用相同的 lookback 截断，保证 df.index 与 history.index 对齐
+    dsa_config = config.get("dsa_config", DSAConfig())
+    lookback = config.get("lookback")
+
+    df = bars.copy()
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index)
+    if lookback is not None and len(df) > lookback:
+        df = df.tail(lookback)
+
+    vwap_series, dir_series, pivot_labels, _ = dynamic_swing_anchored_vwap(df, dsa_config)
+    vwap_series, dir_series = _remove_dsa_lookahead(df, vwap_series, dir_series, dsa_config)
+
+    # 4. 构建 per_bar = history + 图表字段
+    per_bar = history.copy()
+    n = len(per_bar)
+
+    # dsa_dir: 方向序列（1/-1，NaN 填 0）
+    dir_vals = dir_series.fillna(0).astype(int)
+    per_bar["dsa_dir"] = dir_vals.values
+
+    # regime_id: dir 第一次切换时递增（与原 compute_indicators 逻辑一致）
+    regime_id: list[int] = [0] * n
+    current_regime = 0
+    last_dir: int | None = None
+    for i, d_val in enumerate(dir_vals.values):
+        d_int = int(d_val)
+        if last_dir is not None and d_int != last_dir and d_int != 0:
+            current_regime += 1
+        if d_int != 0:
+            last_dir = d_int
+        regime_id[i] = current_regime
+    per_bar["regime_id"] = regime_id
+
+    # pivot_type / pivot_price / anchor_time: 从稀疏 pivot_labels 构造按 bar 对齐的密集数组
+    pivot_type: list[str | None] = [None] * n
+    pivot_price: list[float | None] = [None] * n
+    anchor_time: list[str | None] = [None] * n
+
+    index_list = list(df.index)
+    for label in pivot_labels:
+        t = int(label["t"])
+        if 0 <= t < n:
+            txt = label.get("text")
+            if txt in {"HH", "HL", "LH", "LL"}:
+                pivot_type[t] = txt
+                pivot_price[t] = float(label["y"]) if np.isfinite(label["y"]) else None
+            anchor_time[t] = index_list[t].isoformat()
+
+    per_bar["pivot_type"] = pivot_type
+    per_bar["pivot_price"] = pivot_price
+    per_bar["anchor_time"] = anchor_time
+
+    return {
+        "per_bar": per_bar,
+        "last_row_metrics": last_row_metrics,
+    }
+
+
 class DSASelector(StrategyRuntime):
     """DSA 方向稳定性选股策略运行时。
 
@@ -550,7 +654,7 @@ class DSASelector(StrategyRuntime):
 
     def __init__(self) -> None:
         self._version: StrategyVersion | None = None
-        self._lookback: int = DEFAULT_LOOKBACK
+        self._lookback: int = DSA_LOOKBACK
         self._min_dir_bars: int = MIN_DIR_BARS
         self._budget_guard: BudgetGuard = BudgetGuard(timeout_ms=DSA_BUDGET_MS)
         # DSAConfig 和 ATRRopeConfig（initialize() 中从 manifest 读取）
@@ -563,7 +667,7 @@ class DSASelector(StrategyRuntime):
         """加载策略版本配置。
 
         从 manifest.parameters 读取所有算法参数（全部 allowed_scopes: [system]）：
-        - algorithm.lookback: 回看 bar 数（默认 800）
+        - algorithm.lookback: 回看 bar 数（默认 DSA_LOOKBACK=250）
         - dsa.*: DSAConfig 参数（prd/base_apt/use_adapt/vol_bias/atr_len）
         - atr_rope.*: ATRRopeConfig 参数（length/multi/regime_lookback/regime_threshold）
         - resource_budget.target_ms_per_instrument: 超时预算（默认 100ms）
@@ -583,7 +687,7 @@ class DSASelector(StrategyRuntime):
         params: dict[str, Any] = {p["key"]: p.get("default") for p in parameters}
 
         # 算法参数（min_dir_bars 不从 manifest 读取，使用代码常量）
-        self._lookback = int(params.get("algorithm.lookback", DEFAULT_LOOKBACK))
+        self._lookback = int(params.get("algorithm.lookback", DSA_LOOKBACK))
 
         # DSAConfig 参数
         self._dsa_config = DSAConfig(
@@ -643,8 +747,8 @@ class DSASelector(StrategyRuntime):
 
         流程：
         1. 通过 BudgetGuard 在预算内执行同步计算
-        2. 调用 compute_dsa_history 计算完整历史指标
-        3. 取最后一行作为当前交易日结果
+        2. 通过 compute_dsa_bundle 统一入口计算（内部调用 compute_dsa_history）
+        3. 取 last_row_metrics 作为当前交易日结果
         4. 返回标准 StrategyResult
 
         Args:
@@ -682,7 +786,12 @@ class DSASelector(StrategyRuntime):
     async def compute_indicators(self, context: MarketDataContext) -> dict[str, Any]:
         """计算 DSA VWAP 图表指标（含 Pine 标签与 regime 分段）。
 
-        供个股详情页面实时计算使用。输出字段按 bar 对齐，长度一致，
+        供个股详情页面实时计算使用。通过 compute_dsa_bundle 统一入口获取 per_bar
+        （与 execute() 共享同一份计算结果，消除双路径不一致）。
+        应用与选股相同的 lookback=250（self._lookback，与
+        indicator_contract.DSA_LOOKBACK 对齐），确保图表与选股指标口径一致。
+
+        输出字段按 bar 对齐，长度一致（= min(len(bars_daily), lookback)），
         前端按 regime_id 分段渲染、按 anchor_time 标记锚点、按 pivot_type/pivot_price
         标注 HH/HL/LH/LL。
 
@@ -696,66 +805,51 @@ class DSASelector(StrategyRuntime):
             - pivot_price: list[float|None] 每 bar 的 pivot 价格
         """
         daily_df = context.bars_daily
-        n = len(daily_df) if daily_df is not None else 0
-        if n < self._dsa_config.prd:
-            return {
-                "dsa_vwap": [],
-                "dsa_dir": [],
-                "regime_id": [],
-                "anchor_time": [],
-                "pivot_type": [],
-                "pivot_price": [],
-            }
+        n_input = len(daily_df) if daily_df is not None else 0
+        _empty: dict[str, list] = {
+            "dsa_vwap": [],
+            "dsa_dir": [],
+            "regime_id": [],
+            "anchor_time": [],
+            "pivot_type": [],
+            "pivot_price": [],
+        }
+        if n_input < self._dsa_config.prd:
+            return _empty
 
-        vwap_series, dir_series, pivot_labels, _ = dynamic_swing_anchored_vwap(
-            daily_df, self._dsa_config
-        )
-        vwap_series, dir_series = _remove_dsa_lookahead(
-            daily_df, vwap_series, dir_series, self._dsa_config
-        )
+        # [DSA 统一入口] - 通过 compute_dsa_bundle 与 execute() 共享同一份计算，
+        # 应用相同 lookback=250，消除原 compute_indicators 用全量 bars 的口径不一致
+        try:
+            bundle = compute_dsa_bundle(daily_df, self._build_history_config())
+        except Exception as exc:
+            logger.warning(
+                "DSA bundle 计算异常 symbol=%s: %s",
+                getattr(context, "symbol", "?"),
+                exc,
+            )
+            return _empty
 
-        # [DSA Pine 标签] - 从稀疏 pivot_labels 构造按 bar 对齐的密集数组
-        pivot_type: list[str | None] = [None] * n
-        pivot_price: list[float | None] = [None] * n
-        anchor_time: list[str | None] = [None] * n
+        per_bar = bundle["per_bar"]
+        if per_bar.empty:
+            return _empty
 
-        index_list = list(daily_df.index)
-        for label in pivot_labels:
-            t = int(label["t"])
-            if 0 <= t < n:
-                txt = label.get("text")
-                if txt in {"HH", "HL", "LH", "LL"}:
-                    pivot_type[t] = txt
-                    pivot_price[t] = (
-                        float(label["y"]) if np.isfinite(label["y"]) else None
-                    )
-                anchor_time[t] = index_list[t].isoformat()
-
-        # [DSA regime 分段] - dir 第一次切换时 regime_id 递增，锚点 bar 同属于新 regime
-        regime_id: list[int] = [0] * n
-        current_regime = 0
-        last_dir: int | None = None
-        for i, d in enumerate(dir_series):
-            d_int = int(d) if pd.notna(d) else 0
-            if last_dir is not None and d_int != last_dir and d_int != 0:
-                current_regime += 1
-            if d_int != 0:
-                last_dir = d_int
-            regime_id[i] = current_regime
-
+        # [DSA 图表数组] - 从 per_bar 提取为 list，NaN -> None（保持与原 compute_indicators 输出格式一致）
+        # pivot_type/anchor_time/pivot_price 经 DataFrame 中转后 None 可能被转为 NaN，需还原
         return {
-            "dsa_vwap": [None if pd.isna(v) else float(v) for v in vwap_series],
-            "dsa_dir": [int(d) for d in dir_series],
-            "regime_id": regime_id,
-            "anchor_time": anchor_time,
-            "pivot_type": pivot_type,
-            "pivot_price": pivot_price,
+            "dsa_vwap": [None if pd.isna(v) else float(v) for v in per_bar["dsa_vwap"]],
+            "dsa_dir": [int(d) for d in per_bar["dsa_dir"]],
+            "regime_id": [int(x) for x in per_bar["regime_id"]],
+            "anchor_time": [None if pd.isna(t) else str(t) for t in per_bar["anchor_time"]],
+            "pivot_type": [None if pd.isna(t) else str(t) for t in per_bar["pivot_type"]],
+            "pivot_price": [None if pd.isna(p) else float(p) for p in per_bar["pivot_price"]],
         }
 
     def _compute_metrics_sync(self, context: MarketDataContext) -> dict[str, Any]:
         """同步计算 DSA 指标（在线程池中执行）。
 
         此方法由 BudgetGuard.run_with_budget 通过 asyncio.to_thread 调用。
+        通过 compute_dsa_bundle 统一入口获取 last_row_metrics（与 compute_indicators
+        共享同一份计算结果，消除双路径不一致）。
 
         Args:
             context: 市场数据上下文
@@ -768,16 +862,15 @@ class DSASelector(StrategyRuntime):
             return {"regime_value": 0, "error": "insufficient_data"}
 
         try:
-            history = compute_dsa_history(daily_df, self._build_history_config())
+            bundle = compute_dsa_bundle(daily_df, self._build_history_config())
         except Exception as exc:
-            logger.warning("DSA history 计算异常 symbol=%s: %s", context.symbol, exc)
+            logger.warning("DSA bundle 计算异常 symbol=%s: %s", context.symbol, exc)
             return {"regime_value": 0, "error": f"dsa_compute_failed: {exc}"}
 
-        if history.empty:
+        if bundle["per_bar"].empty:
             return {"regime_value": 0, "error": "insufficient_data"}
 
-        row = history.iloc[-1]
-        metrics = _history_row_to_metrics(row)
+        metrics = bundle["last_row_metrics"]
         metrics["last_close"] = _safe_float(daily_df["close"].iloc[-1])
 
         return metrics

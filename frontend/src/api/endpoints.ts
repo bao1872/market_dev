@@ -782,10 +782,12 @@ export async function renew(inviteCode: string): Promise<RenewSuccessResponse> {
   return data
 }
 
-/** 使用 refresh token 刷新，返回新的 access + refresh token */
+/** 使用 refresh token 刷新，返回新的 access + refresh token
+ * refresh_token 通过 JSON body 提交（非 query string），避免被 access log / referer 泄露
+ */
 export async function refreshToken(refreshToken: string): Promise<TokenResponse> {
-  const { data } = await apiClient.post<TokenResponse>('/auth/refresh', null, {
-    params: { refresh_token: refreshToken },
+  const { data } = await apiClient.post<TokenResponse>('/auth/refresh', {
+    refresh_token: refreshToken,
   })
   return data
 }
