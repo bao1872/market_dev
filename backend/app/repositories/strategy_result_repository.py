@@ -20,11 +20,13 @@
 from __future__ import annotations
 
 import logging
+import math
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any
 
+from fastapi import HTTPException, status
 from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -71,21 +73,26 @@ class QueryResultPage:
 
 def dict_filters_to_metric_filters(
     metric_filters: list[dict[str, Any]] | None,
-) -> list[MetricFilter] | None:
-    """将旧版 dict 格式的 metric_filters 转换为 MetricFilter 列表。
+) -> list[MetricFilter]:
+    """将 dict 格式的 metric_filters 转换为 MetricFilter 列表。
 
     支持两种 dict 格式：
     - 旧版 min_value/max_value 格式 → 转为 between 操作
     - 新版 operator/value 格式 → 直接映射
 
+    所有数值字段强制 float() 转换；非数值或非有限值（NaN/Inf）抛 HTTPException 422。
+
     Args:
-        metric_filters: 旧版 dict 格式筛选条件列表
+        metric_filters: dict 格式筛选条件列表
 
     Returns:
-        MetricFilter 列表，或 None（输入为空时）
+        MetricFilter 列表（输入为空时返回空列表）
+
+    Raises:
+        HTTPException 422: 筛选值非数值或非有限（NaN/Inf）
     """
     if not metric_filters:
-        return None
+        return []
     result: list[MetricFilter] = []
     for f in metric_filters:
         metric_key = f.get("metric_key")
@@ -95,23 +102,67 @@ def dict_filters_to_metric_filters(
         min_val = f.get("min_value")
         max_val = f.get("max_value")
         if min_val is not None or max_val is not None:
+            # [StrategyResultRepository] - 描述: 旧版格式数值强制转换，None 保留为 None（开区间）
+            v1 = _to_float_or_422(min_val, metric_key, "min_value") if min_val is not None else None
+            v2 = _to_float_or_422(max_val, metric_key, "max_value") if max_val is not None else None
             result.append(MetricFilter(
                 metric_key=metric_key,
                 operator="between",
-                value1=min_val,
-                value2=max_val,
+                value1=v1,
+                value2=v2,
             ))
             continue
         # 新版 operator/value 格式
         operator = f.get("operator", "between")
-        result.append(MetricFilter(
-            metric_key=metric_key,
-            operator=operator,
-            value=f.get("value"),
-            value1=f.get("value1"),
-            value2=f.get("value2"),
-        ))
-    return result if result else None
+        if operator == "between":
+            # [StrategyResultRepository] - 描述: between 操作必须有 value1/value2
+            v1 = _to_float_or_422(f.get("value1"), metric_key, "value1")
+            v2 = _to_float_or_422(f.get("value2"), metric_key, "value2")
+            result.append(MetricFilter(
+                metric_key=metric_key,
+                operator=operator,
+                value=v1,
+                value2=v2,
+            ))
+        else:
+            v = _to_float_or_422(f.get("value"), metric_key, "value")
+            result.append(MetricFilter(
+                metric_key=metric_key,
+                operator=operator,
+                value=v,
+            ))
+    return result
+
+
+def _to_float_or_422(raw_value: Any, metric_key: str, field_name: str) -> float:
+    """将 raw_value 强制转换为 float，非有限数值（NaN/Inf）返回 422。
+
+    [StrategyResultRepository] - 描述: 筛选值类型硬校验，防止字符串/None/NaN 污染 SQL 参数
+
+    Args:
+        raw_value: 原始值（前端传入，可能是 str/int/float/None）
+        metric_key: 指标键（用于错误消息定位）
+        field_name: 字段名（value/value1/value2/min_value/max_value）
+
+    Returns:
+        转换后的 float 值
+
+    Raises:
+        HTTPException 422: 转换失败或结果非有限（NaN/Inf）
+    """
+    try:
+        v = float(raw_value)
+    except (TypeError, ValueError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"筛选值必须是数值: metric_key={metric_key}, {field_name}={raw_value}",
+        ) from e
+    if not math.isfinite(v):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"筛选值必须是有限数值: metric_key={metric_key}, {field_name}={v}",
+        )
+    return v
 
 
 async def create_run(
@@ -778,9 +829,9 @@ if __name__ == "__main__":
     assert converted2[0].metric_key == "dsa_dir_bars"
     assert converted2[0].operator == "gte"
     assert converted2[0].value == 50
-    # 空输入
-    assert dict_filters_to_metric_filters(None) is None
-    assert dict_filters_to_metric_filters([]) is None
+    # 空输入（返回空列表，与 None 在 if 判断中语义等价）
+    assert dict_filters_to_metric_filters(None) == []
+    assert dict_filters_to_metric_filters([]) == []
     print("dict_filters_to_metric_filters ✓")
 
     # 验证 query_results 签名（keyword-only 参数）

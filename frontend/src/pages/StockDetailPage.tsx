@@ -37,8 +37,8 @@ import { resolveStrategy } from '@/lib/strategy-manifest'
 import { STRATEGY_KEYS } from '@/constants/strategyKeys'
 import { useToast } from '@/store/toast'
 import { useAuthStore } from '@/store/auth'
-import { sendStockDetailFeishu } from '@/api/endpoints'
-import type { StockDetailFeishuResponse } from '@/api/endpoints'
+import { sendStockDetailFeishu, getStockDetailFeishuStatus } from '@/api/endpoints'
+import type { StockDetailFeishuCreateResponse, StockDetailFeishuStatusResponse } from '@/api/endpoints'
 
 // 市场代码 -> 中文标签映射
 const MARKET_LABELS: Record<string, string> = {
@@ -163,17 +163,39 @@ export default function StockDetailPage() {
   const upsertMemo = useUpsertStockMemo()
   const deleteMemo = useDeleteStockMemo()
 
-  // 发送到飞书（admin only） - 复用监控链路，返回 4 个分步骤布尔结果
+  // [StockDetailFeishu] - 描述: 异步 Outbox 链路（POST 创建 + 1s 轮询 + 30s 超时）
   const [feishuOpen, setFeishuOpen] = useState(false)
-  const [feishuResult, setFeishuResult] = useState<StockDetailFeishuResponse | null>(null)
+  const [feishuResult, setFeishuResult] = useState<StockDetailFeishuCreateResponse | null>(null)
+  const [feishuStatus, setFeishuStatus] = useState<StockDetailFeishuStatusResponse | null>(null)
+  const [feishuPolling, setFeishuPolling] = useState(false)
+  const feishuPollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const feishuPollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [selectedChannelId, setSelectedChannelId] = useState<string>('')
   const sendFeishuMutation = useMutation<
-    StockDetailFeishuResponse,
+    StockDetailFeishuCreateResponse,
     Error,
     { instrId: string; channelId: string }
   >({
     mutationFn: ({ instrId, channelId }) => sendStockDetailFeishu(instrId, channelId),
   })
+
+  // [StockDetailFeishu] - 描述: 清理轮询定时器（卸载 / 关闭模态框 / 轮询结束均需调用）
+  const stopFeishuPolling = useCallback(() => {
+    if (feishuPollIntervalRef.current) {
+      clearInterval(feishuPollIntervalRef.current)
+      feishuPollIntervalRef.current = null
+    }
+    if (feishuPollTimeoutRef.current) {
+      clearTimeout(feishuPollTimeoutRef.current)
+      feishuPollTimeoutRef.current = null
+    }
+    setFeishuPolling(false)
+  }, [])
+
+  // 组件卸载时清理轮询定时器，避免内存泄漏
+  useEffect(() => {
+    return () => stopFeishuPolling()
+  }, [stopFeishuPolling])
 
   useEffect(() => {
     if (stockMemoQuery.data) {
@@ -264,26 +286,60 @@ export default function StockDetailPage() {
     }
   }
 
-  // 发送到飞书（admin only） - 调用后端复用监控链路，根据 4 布尔结果显示 toast
+  // [StockDetailFeishu] - 描述: POST 创建异步任务 → toast 提示入队 → 1s 轮询至 success/failed 或 30s 超时
   const handleSendFeishu = (channelId: string) => {
     if (!instrumentId) return
     setFeishuResult(null)
+    setFeishuStatus(null)
+    stopFeishuPolling()
     sendFeishuMutation.mutate(
       { instrId: instrumentId, channelId },
       {
         onSuccess: (res) => {
           setFeishuResult(res)
-          if (res.text_ok && res.screenshot_ok && res.image_upload_ok && res.feishu_send_ok) {
-            showToast('发送成功', '文本+图片已发送到飞书')
-          } else {
-            const steps = [
-              res.text_ok ? '文本\u2713' : '文本\u2717',
-              res.screenshot_ok ? '截图\u2713' : '截图\u2717',
-              res.image_upload_ok ? '图片拉取\u2713' : '图片拉取\u2717',
-              res.feishu_send_ok ? '飞书发送\u2713' : '飞书发送\u2717',
-            ]
-            showToast('部分失败', steps.join(' \u00b7 '))
-          }
+          // [StockDetailFeishu] - 描述: 创建成功，提示已入队（展示 test_run_id 前 8 位）
+          showToast('已进入发送队列', `test_run_id: ${res.test_run_id.slice(0, 8)}`)
+          setFeishuPolling(true)
+          // 30s 超时兜底：超时后停止轮询并提示用户去消息中心查看
+          feishuPollTimeoutRef.current = setTimeout(() => {
+            stopFeishuPolling()
+            showToast('发送超时', '请到消息中心查看最终状态')
+          }, 30000)
+          // 每 1s 轮询状态，命中终态（success/failed）即停止
+          feishuPollIntervalRef.current = setInterval(async () => {
+            let status: StockDetailFeishuStatusResponse
+            try {
+              status = await getStockDetailFeishuStatus(res.test_run_id)
+            } catch (e) {
+              // [StockDetailFeishu] - 描述: 轮询查询失败，停止轮询并报错（不静默兜底继续跑）
+              stopFeishuPolling()
+              showToast('状态查询失败', e instanceof Error ? e.message : '请重试')
+              return
+            }
+            setFeishuStatus(status)
+            if (status.overall_status === 'success' || status.overall_status === 'failed') {
+              stopFeishuPolling()
+              if (status.overall_status === 'success') {
+                // [StockDetailFeishu] - 描述: 成功分别展示 card/image 状态；image 为 not_created 时只展示卡片
+                const parts: string[] = []
+                parts.push(
+                  `卡片${status.card_status === 'success' ? '已送达' : status.card_status}`,
+                )
+                if (status.image_status !== 'not_created') {
+                  parts.push(
+                    `图片${status.image_status === 'success' ? '已送达' : status.image_status}`,
+                  )
+                }
+                showToast('发送成功', parts.join(' · '))
+              } else {
+                // [StockDetailFeishu] - 描述: 失败展示 failed_step / error_code / error_message
+                showToast(
+                  '发送失败',
+                  `${status.failed_step ?? '未知步骤'} · ${status.error_code ?? ''} · ${status.error_message ?? ''}`.trim(),
+                )
+              }
+            }
+          }, 1000)
         },
         onError: () => showToast('发送失败', '请重试'),
       },
@@ -459,7 +515,9 @@ export default function StockDetailPage() {
             <button
               className="btn small"
               onClick={() => {
+                stopFeishuPolling()
                 setFeishuResult(null)
+                setFeishuStatus(null)
                 setSelectedChannelId(activeChannels[0]?.id ?? '')
                 setFeishuOpen(true)
               }}
@@ -493,7 +551,7 @@ export default function StockDetailPage() {
                   checked={memoNotify}
                   onChange={(e) => setMemoNotify(e.target.checked)}
                 />
-                <span>盘中推送飞书</span>
+                <span>当该股票盘中触发监控事件时，在飞书通知中附带此备忘录</span>
               </label>
             </div>
             <div className="modal-foot">
@@ -542,33 +600,42 @@ export default function StockDetailPage() {
         </div>
       )}
 
-      {/* 发送到飞书模态框（admin only） - 选择渠道 + 显示 4 布尔结果 */}
+      {/* [StockDetailFeishu] - 发送到飞书模态框（admin only）：选择渠道 + 异步轮询状态展示 */}
       {feishuOpen && (
         <div
           className="modal-backdrop open"
-          onClick={() => !sendFeishuMutation.isPending && setFeishuOpen(false)}
+          onClick={() => {
+            if (!sendFeishuMutation.isPending && !feishuPolling) {
+              stopFeishuPolling()
+              setFeishuOpen(false)
+            }
+          }}
         >
           <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 500 }}>
             <div className="modal-head">
               <h3>发送到飞书 - {inst.name}</h3>
               <button
                 className="icon-btn"
-                onClick={() => !sendFeishuMutation.isPending && setFeishuOpen(false)}
+                onClick={() => {
+                  if (!sendFeishuMutation.isPending && !feishuPolling) {
+                    stopFeishuPolling()
+                    setFeishuOpen(false)
+                  }
+                }}
               >
                 ×
               </button>
             </div>
             <div className="modal-body">
               {activeChannels.length === 0 ? (
-                <p style={{ color: '#888', padding: '12px 0' }}>
+                <p className="feishu-empty-hint">
                   暂无 active 通知渠道，请先在通知渠道页面创建并启用一个飞书渠道。
                 </p>
               ) : (
                 <>
-                  <p style={{ marginBottom: 8, fontSize: 13, color: '#666' }}>选择目标渠道：</p>
+                  <p className="feishu-channel-label">选择目标渠道：</p>
                   <select
-                    className="memo-textarea"
-                    style={{ height: 'auto', padding: '8px', marginBottom: 12 }}
+                    className="feishu-channel-select"
                     value={selectedChannelId}
                     onChange={(e) => setSelectedChannelId(e.target.value)}
                   >
@@ -579,43 +646,37 @@ export default function StockDetailPage() {
                     ))}
                   </select>
 
-                  {feishuResult && (
-                    <div
-                      style={{
-                        padding: '12px',
-                        background: '#f5f5f5',
-                        borderRadius: 4,
-                        fontSize: 13,
-                      }}
-                    >
-                      <div style={{ marginBottom: 4 }}>
-                        文本投递:{' '}
-                        <b style={{ color: feishuResult.text_ok ? '#52c41a' : '#ff4d4f' }}>
-                          {feishuResult.text_ok ? '成功' : '失败'}
-                        </b>
-                      </div>
-                      <div style={{ marginBottom: 4 }}>
-                        截图:{' '}
-                        <b style={{ color: feishuResult.screenshot_ok ? '#52c41a' : '#ff4d4f' }}>
-                          {feishuResult.screenshot_ok ? '成功' : '失败'}
-                        </b>
-                      </div>
-                      <div style={{ marginBottom: 4 }}>
-                        图片拉取:{' '}
-                        <b
-                          style={{
-                            color: feishuResult.image_upload_ok ? '#52c41a' : '#ff4d4f',
-                          }}
-                        >
-                          {feishuResult.image_upload_ok ? '成功' : '失败'}
-                        </b>
-                      </div>
-                      <div>
-                        飞书发送:{' '}
-                        <b style={{ color: feishuResult.feishu_send_ok ? '#52c41a' : '#ff4d4f' }}>
-                          {feishuResult.feishu_send_ok ? '成功' : '失败'}
-                        </b>
-                      </div>
+                  {/* [StockDetailFeishu] - 描述: 轮询中展示状态，image 为 not_created 时只展示卡片 */}
+                  {(feishuResult || feishuStatus || feishuPolling) && (
+                    <div className="feishu-status-box">
+                      {feishuPolling && !feishuStatus && (
+                        <div className="feishu-status-polling">投递中...</div>
+                      )}
+                      {feishuStatus && (
+                        <>
+                          <div className="feishu-status-row">
+                            卡片投递:{' '}
+                            <b className={`feishu-status-${feishuStatus.card_status}`}>
+                              {feishuStatus.card_status}
+                            </b>
+                          </div>
+                          {feishuStatus.image_status !== 'not_created' && (
+                            <div className="feishu-status-row">
+                              图片投递:{' '}
+                              <b className={`feishu-status-${feishuStatus.image_status}`}>
+                                {feishuStatus.image_status}
+                              </b>
+                            </div>
+                          )}
+                          {feishuStatus.overall_status === 'failed' && (
+                            <div className="feishu-status-error">
+                              <div>失败步骤: {feishuStatus.failed_step ?? '-'}</div>
+                              <div>错误码: {feishuStatus.error_code ?? '-'}</div>
+                              <div>错误信息: {feishuStatus.error_message ?? '-'}</div>
+                            </div>
+                          )}
+                        </>
+                      )}
                     </div>
                   )}
                 </>
@@ -627,6 +688,7 @@ export default function StockDetailPage() {
                 disabled={
                   activeChannels.length === 0 ||
                   sendFeishuMutation.isPending ||
+                  feishuPolling ||
                   !instrumentId ||
                   !selectedChannelId
                 }
@@ -634,7 +696,11 @@ export default function StockDetailPage() {
                   if (selectedChannelId) handleSendFeishu(selectedChannelId)
                 }}
               >
-                {sendFeishuMutation.isPending ? '发送中...' : '发送'}
+                {sendFeishuMutation.isPending
+                  ? '发送中...'
+                  : feishuPolling
+                    ? '投递中...'
+                    : '发送'}
               </button>
             </div>
           </div>

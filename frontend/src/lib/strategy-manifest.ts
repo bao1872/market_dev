@@ -1,4 +1,4 @@
-// 策略 UI Manifest（V1.5.1）
+// 策略 UI Manifest（V1.5.2）
 // 对应原型 assets/strategy-manifest.js
 // 定义所有策略图层、策略映射、计算窗口
 // 图层面板由 Manifest 动态生成，页面不写死具体策略
@@ -14,7 +14,8 @@ export type LayerRenderer =
   | 'band'
   | 'histogram_line'
   | 'horizontal_profile'
-export type LayerPane = 'price' | 'price_right' | 'volume' | 'delta'
+  | 'macd'
+export type LayerPane = 'price' | 'price_right' | 'volume' | 'delta' | 'macd'
 
 export interface LayerDef {
   id: string
@@ -55,6 +56,28 @@ export const LAYERS: Record<string, LayerDef> = {
     color: '#53637e',
     description: '逐根成交量柱',
     defaultVisible: true,
+  },
+  dsa: {
+    id: 'dsa',
+    name: 'DSA VWAP',
+    shortName: 'DSA',
+    group: '选股策略',
+    renderer: 'line',
+    pane: 'price',
+    color: '#ff1744',
+    description: 'DSA 动态摆动锚定 VWAP 线与 Pine 标签',
+    defaultVisible: false,
+  },
+  macd: {
+    id: 'macd',
+    name: 'MACD',
+    shortName: 'MACD',
+    group: '技术指标',
+    renderer: 'macd',
+    pane: 'macd',
+    color: '#f4c430',
+    description: 'MACD 副图（DIF/DEA/Histogram），后端统一计算',
+    defaultVisible: false,
   },
   breakout: {
     id: 'breakout',
@@ -247,4 +270,5 @@ export const DISPLAY_GROUPS: Record<string, DisplayGroupDef> = {
   breakout: { id: 'breakout', name: '突破强度', shortName: '突破', section: '选股策略', color: '#ef5350', description: '压力区 · 突破确认 · 选股命中标记', layers: ['breakout', 'selection'], anchorLayer: 'breakout' },
   node: { id: 'node', name: 'Node Cluster', shortName: 'NODE', section: '监控策略', color: '#4f7cff', description: '筹码峰 · 节点区间 · POC · 事件标记', layers: ['profile', 'node', 'poc'], anchorLayer: 'node' },
   bb: { id: 'bb', name: 'Bollinger Bands', shortName: 'BB', section: '监控策略', color: '#9c27b0', description: '布林带 · SMA(20) ± 2σ', layers: ['bb'], anchorLayer: 'bb' },
+  macd: { id: 'macd', name: 'MACD', shortName: 'MACD', section: '技术指标', color: '#f4c430', description: 'MACD 副图 · DIF/DEA/Histogram', layers: ['macd'], anchorLayer: 'macd' },
 }

@@ -84,6 +84,8 @@ def _run_alembic_upgrade():
     )
     env = os.environ.copy()
     env["DATABASE_URL"] = alembic_url
+    # [测试] - 描述: alembic 子进程必须继承 test 环境，否则 app.config 会拒绝连测试库
+    env["APP_ENV"] = "test"
     subprocess.run(
         ["alembic", "upgrade", "head"],
         cwd=os.path.dirname(os.path.dirname(__file__)),

@@ -53,7 +53,10 @@ from app.services.selector_query_service import (
     RunNotFoundError,
     query_published_selector_results,
 )
-from app.services.strategy_batch_service import StrategyBatchService
+from app.services.strategy_batch_service import (
+    InvalidStrategyResult,
+    StrategyBatchService,
+)
 from app.services.strategy_service import (
     StrategyNotFoundError,
     list_versions,
@@ -242,6 +245,12 @@ async def publish_strategy_run(
 
     try:
         run = await service.publish_run(db, run_id)
+    except InvalidStrategyResult as e:
+        # [StrategyRuns] - 描述: DSA 发布前硬校验失败（缺字段/非有限/有效率不足）→ 422
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(e),
+        ) from e
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -626,18 +635,24 @@ async def list_run_results(
             detail=f"非法 universe: {universe}（合法值: all, watchlist）",
         )
 
-    # 校验 sort_by 在 filterable 白名单中
-    if sort_by is not None:
+    # [StrategyRuns] - 描述: metric_filters + sort_by 共用 run/version 查询，避免重复 DB 调用
+    # advice.md 第三节：/strategy-runs/{run_id}/results 应像 /strategies/{key}/results 一样校验 metric_filters
+    if filters or sort_by is not None:
         run = await db.get(StrategyRun, run_id)
         if run is not None:
             version = await db.get(StrategyVersion, run.strategy_version_id)
             if version is not None:
-                filterable_keys = _get_filterable_metric_keys(version)
-                if sort_by not in filterable_keys:
-                    raise HTTPException(
-                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                        detail=f"非法 sort_by: {sort_by}（不在 filterable 白名单中）",
-                    )
+                # 校验 metric_filters（白名单 + operator）
+                if filters:
+                    _validate_metric_filters(filters, version)
+                # 校验 sort_by 在 filterable 白名单中
+                if sort_by is not None:
+                    filterable_keys = _get_filterable_metric_keys(version)
+                    if sort_by not in filterable_keys:
+                        raise HTTPException(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=f"非法 sort_by: {sort_by}（不在 filterable 白名单中）",
+                        )
 
     # 构建 MetricFilter / SortSpec
     metric_filter_list = dict_filters_to_metric_filters(filters)

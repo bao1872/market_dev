@@ -39,10 +39,12 @@ from app.models.monitor_state import MonitorState as MonitorStateORM
 from app.models.capture_job import CaptureJob, CAPTURE_STATUS_FAILED, CAPTURE_STATUS_SUCCEEDED, CAPTURE_MAX_ATTEMPTS
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.strategy_event import StrategyEvent
+from app.models.stock_memo import StockMemo
 from app.models.watchlist import UserWatchlistItem
 from app.repositories import monitor_state_repository, strategy_event_repository
 from app.repositories.bar_repository import get_bars
 from app.schemas.notification import NotificationMessageDTO
+from app.services.instrument_maintenance_service import is_index_symbol
 from app.services.notification_service import create_message
 from app.services.outbox_relay import write_outbox
 from app.strategy.monitors.watchlist_monitor import WatchlistMonitor
@@ -275,10 +277,10 @@ class MonitorBatchService:
             )
             inst_result = await db.execute(inst_stmt)
             for row in inst_result.all():
-                # 指数类标的：SH市场000开头 / SZ市场399开头
+                # [monitor_batch] - 描述: 使用统一的 is_index_symbol 识别指数（SH000xxx/SZ399xxx/BJ899xxx）
                 sym = row[1] or ""
                 mkt = row[2] or ""
-                if (mkt == "SH" and sym.startswith("000")) or (mkt == "SZ" and sym.startswith("399")):
+                if is_index_symbol(sym, mkt):
                     index_ids.add(row[0])
 
         instrument_user_map: dict[uuid.UUID, list[uuid.UUID]] = {}
@@ -911,14 +913,20 @@ class MonitorBatchService:
         instrument_extra_info: dict[uuid.UUID, dict] | None = None,
         strategy_key: str = WATCHLIST_MONITOR,
         strategy_name: str = "BB+节点监控",
+        user_id: uuid.UUID | None = None,
+        memo_map: dict[tuple[uuid.UUID, uuid.UUID], str] | None = None,
     ) -> Any:
         """按旧版 monitoring.py 的 generate_monitoring_card() 格式构建合并通知 DTO。
 
         卡片结构：
         1. Header: "BB+节点监控 HH:MM"（北京时间），颜色由最严重事件级别决定
         2. 概览行: "自选股 N 只 | 触发 M 只\\n上轨 X | 中轨 Y | 下轨 Z | 节点 W"
-        3. 逐股票详情（用 hr 分隔）: 股票标题 + hype_logic + 止损预测 + 信号详情 + BB上下文 + BB快照
+        3. 逐股票详情（用 hr 分隔）: 股票标题 + hype_logic + 止损预测 + 信号详情 + BB上下文 + BB快照 + 备忘录
         4. 数据时间 note: 事件触发时间（北京时间）
+
+        [advice.md 第七节] - 备忘录闭环：
+        - memo_map 非空时，在每股详情末尾追加"备忘录:..."行
+        - 严格按 (user_id, instrument_id) 隔离，不允许跨用户读取
 
         Args:
             user_events: 该用户相关的事件列表
@@ -927,6 +935,8 @@ class MonitorBatchService:
             change_pct_map: instrument_id → 涨跌幅映射
             instrument_extra_info: instrument_id → {priority, weighted_score, hype_logic,
                 total_market_cap, pred_sell_reg, pred_sell_cls, pred_buy_reg, pred_buy_cls} 附加信息
+            user_id: 当前用户 ID（用于 memo_map 查找）
+            memo_map: (user_id, instrument_id) → 备忘录内容 映射
 
         Returns:
             NotificationMessageDTO 实例
@@ -1089,6 +1099,12 @@ class MonitorBatchService:
                     )
                 elements.append({"tag": "markdown", "content": "\n".join(snap_lines)})
 
+            # [advice.md 第七节] - 备忘录闭环：每股详情末尾追加备忘录（按 user_id 隔离）
+            if user_id is not None and memo_map:
+                memo_text = memo_map.get((user_id, inst_id))
+                if memo_text and memo_text.strip():
+                    elements.append({"tag": "markdown", "content": f"📝 备忘录：{memo_text.strip()}"})
+
         # 数据时间 note: 最早事件的 event_time（北京时间）
         data_time_cst = earliest_event.event_time.astimezone(_CST)
         data_time_str = data_time_cst.strftime("%Y-%m-%d %H:%M")
@@ -1229,6 +1245,24 @@ class MonitorBatchService:
                 if events:
                     user_events_map.setdefault(uid, []).extend(events)
 
+        # [advice.md 第七节] - 备忘录闭环：批量读取 StockMemo（notify_feishu=True）
+        # 构建 (user_id, instrument_id) → content 映射，严格按用户隔离
+        memo_map: dict[tuple[uuid.UUID, uuid.UUID], str] = {}
+        all_user_ids = list(user_events_map.keys())
+        if all_user_ids and involved_ids:
+            memo_stmt = (
+                select(StockMemo)
+                .where(
+                    StockMemo.user_id.in_(all_user_ids),
+                    StockMemo.instrument_id.in_(involved_ids),
+                    StockMemo.notify_feishu.is_(True),
+                )
+            )
+            memo_result = await db.execute(memo_stmt)
+            for memo_row in memo_result.scalars():
+                if memo_row.content and memo_row.content.strip():
+                    memo_map[(memo_row.user_id, memo_row.instrument_id)] = memo_row.content
+
         # [飞书两段式投递] - 为本批次生成统一的 message_group_id
         # 关联同一批次的 text + image 两条投递记录
         batch_message_group_id = str(uuid.uuid4())
@@ -1243,6 +1277,8 @@ class MonitorBatchService:
                     instrument_extra_info=instrument_extra_info,
                     strategy_key=strategy_key,
                     strategy_name=strategy_name,
+                    user_id=user_id,
+                    memo_map=memo_map,
                 )
             except Exception as exc:
                 logger.warning(

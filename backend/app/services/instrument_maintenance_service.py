@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, timedelta
 from typing import Any
 
@@ -41,12 +42,29 @@ logger = logging.getLogger("instrument_maintenance_service")
 # 此常量保留供历史调用方与文档引用。
 _INDEX_PREFIXES = ("SH000", "SZ399")
 
-# [InstrumentMaintenance] - A 股股票代码前缀（按市场分组）
+# [InstrumentMaintenance] - A 股股票代码正则（按市场分组）
 # 与 chanlunpro exchange_tdx.py for_sz/for_sh 规则对齐：
-# - SH 6xxxxx: 上交所 A 股（含 688xxx 科创板）
-# - SZ 00xxxx/02xxxx/30xxxx: 深交所主板（000/001/003）/ 中小板（002）/ 创业板（300/301/302）
-# - BJ 920xxx/83xxxx/87xxxx/88xxxx/43xxxx: 北交所（排除 899xxx 北证指数）
+# - SH ^6\d{5}$: 上交所 A 股（含 688xxx 科创板），严格 6 位数字
+# - SZ ^(00|02|30)\d{4}$: 深交所主板（000/001/003）/ 中小板（002）/ 创业板（300/301/302）
+# - BJ ^(920\d{3}|83\d{4}|87\d{4}|88\d{4}|43\d{4})$: 北交所（排除 899xxx 北证指数）
 # 参考：ref/chanlun-pro-master/src/chanlun/exchange/exchange_tdx.py::for_sz/for_sh
+_STOCK_SYMBOL_PATTERNS: dict[str, re.Pattern[str]] = {
+    "SH": re.compile(r"^6\d{5}$"),
+    "SZ": re.compile(r"^(00|02|30)\d{4}$"),
+    "BJ": re.compile(r"^(920\d{3}|83\d{4}|87\d{4}|88\d{4}|43\d{4})$"),
+}
+
+# [InstrumentMaintenance] - 指数类代码正则（按市场分组）
+# - SH ^000\d{3}$: 上证指数（000001 上证指数等）
+# - SZ ^399\d{3}$: 深证指数（399001 深证成指等）
+# - BJ ^899\d{3}$: 北证指数（899050 北证50 等）
+_INDEX_SYMBOL_PATTERNS: dict[str, re.Pattern[str]] = {
+    "SH": re.compile(r"^000\d{3}$"),
+    "SZ": re.compile(r"^399\d{3}$"),
+    "BJ": re.compile(r"^899\d{3}$"),
+}
+
+# 历史常量保留（供文档引用，新代码请用 _STOCK_SYMBOL_PATTERNS）
 _STOCK_SYMBOL_PREFIXES_BY_MARKET: dict[str, tuple[str, ...]] = {
     "SH": ("6",),
     "SZ": ("00", "02", "30"),
@@ -54,42 +72,105 @@ _STOCK_SYMBOL_PREFIXES_BY_MARKET: dict[str, tuple[str, ...]] = {
 }
 
 
+def normalize_symbol(symbol: str | None) -> str:
+    """标准化股票代码：去空格、大写、去后缀。
+
+    [InstrumentMaintenance] - 描述: 统一处理用户输入或外部数据源的不同格式
+    - " 600000 " → "600000"
+    - "600000.SH" → "600000"
+    - "sz000001" → "SZ000001"（仅大写，不去前缀字母，由调用方处理）
+
+    Args:
+        symbol: 原始代码（可能含空格/后缀/小写）
+
+    Returns:
+        标准化后的代码字符串（可能为空字符串）
+    """
+    s = str(symbol or "").strip().upper()
+    # 去除 .SH / .SZ / .BJ 后缀
+    if "." in s:
+        s = s.split(".")[0]
+    return s
+
+
+def normalize_market(market: str | None) -> str:
+    """标准化市场代码：去空格、大写。
+
+    [InstrumentMaintenance] - 描述: 统一处理 " sh " / "sz" 等变体
+
+    Args:
+        market: 原始市场代码
+
+    Returns:
+        标准化后的市场代码（"SH"/"SZ"/"BJ" 或空字符串）
+    """
+    return str(market or "").strip().upper()
+
+
 def is_stock_symbol(symbol: str, market: str) -> bool:
     """判断 (symbol, market) 是否为 A 股股票代码（排除指数/基金/ETF）。
 
     [InstrumentMaintenance] - 描述: 区分股票与指数/基金/ETF，用于覆盖率分母与行情刷新范围
+    先 normalize（去空格/后缀/大写），再用正则 fullmatch 严格校验。
 
     规则：
-    - SH 6xxxxx: True（上交所 A 股，含 688xxx 科创板）
+    - SH ^6\\d{5}$: True（上交所 A 股，含 688xxx 科创板，严格 6 位数字）
     - SH 000xxx/5xxxxx/880xxx/999xxx: False（指数/基金/ETF）
-    - SZ 000xxx/002xxx/300xxx: True（深交所主板/中小板/创业板）
+    - SZ ^(00|02|30)\\d{4}$: True（深交所主板/中小板/创业板）
     - SZ 399xxx/159xxx/395xxx: False（指数/ETF/基金）
-    - BJ 8xxxxx/4xxxxx/920xxx: True（北交所）
+    - BJ ^(920\\d{3}|83\\d{4}|87\\d{4}|88\\d{4}|43\\d{4})$: True（北交所）
+    - BJ 899xxx: False（北证指数）
 
     Args:
-        symbol: 股票代码（纯数字，如 '600000'）
-        market: 市场（'SH'/'SZ'/'BJ'）
+        symbol: 股票代码（允许含空格/后缀，内部 normalize）
+        market: 市场（'SH'/'SZ'/'BJ'，允许小写/空格）
 
     Returns:
         True 为股票，False 为指数/基金/ETF/未知市场
     """
-    if not symbol or not market:
+    sym = normalize_symbol(symbol)
+    mkt = normalize_market(market)
+    if not sym or not mkt:
         return False
-    prefixes = _STOCK_SYMBOL_PREFIXES_BY_MARKET.get(market)
-    if prefixes is None:
+    pattern = _STOCK_SYMBOL_PATTERNS.get(mkt)
+    if pattern is None:
         return False
-    return symbol.startswith(prefixes)
+    return pattern.fullmatch(sym) is not None
+
+
+def is_index_symbol(symbol: str, market: str) -> bool:
+    """判断 (symbol, market) 是否为指数类代码。
+
+    [InstrumentMaintenance] - 描述: 识别指数（SH000xxx / SZ399xxx / BJ899xxx），
+    供 monitor_batch_service 排除指数标的使用，替代散落的手写 startswith 判断。
+
+    Args:
+        symbol: 代码（允许含空格/后缀，内部 normalize）
+        market: 市场（'SH'/'SZ'/'BJ'，允许小写/空格）
+
+    Returns:
+        True 为指数，False 为股票/ETF/基金/未知市场
+    """
+    sym = normalize_symbol(symbol)
+    mkt = normalize_market(market)
+    if not sym or not mkt:
+        return False
+    pattern = _INDEX_SYMBOL_PATTERNS.get(mkt)
+    if pattern is None:
+        return False
+    return pattern.fullmatch(sym) is not None
 
 
 def stock_symbol_sql_filter(instrument_model: type[Instrument]) -> ColumnElement[bool]:
     """返回 SQLAlchemy 过滤条件：只匹配 A 股股票代码（排除指数/基金/ETF）。
 
     [InstrumentMaintenance] - 描述: SQL 层过滤股票代码，供 BarsSchedulerService 覆盖率分母与 _get_active_instruments 使用
+    使用 PostgreSQL `~` 正则操作符，与 is_stock_symbol 正则完全一致。
 
-    规则与 is_stock_symbol 一致（与 chanlunpro for_sz/for_sh 对齐），以 SQLAlchemy 表达式形式提供：
-    - SH 6xxxxx: 上交所 A 股（含 688xxx 科创板）
-    - SZ 00xxxx / 02xxxx / 30xxxx: 深交所主板（000/001/003）/ 中小板（002）/ 创业板（300/301/302）
-    - BJ 920xxx / 83xxxx / 87xxxx / 88xxxx / 43xxxx: 北交所（排除 899xxx 北证指数）
+    规则（与 is_stock_symbol 一致）：
+    - SH ^6[0-9]{5}$: 上交所 A 股（含 688xxx 科创板）
+    - SZ ^(00|02|30)[0-9]{4}$: 深交所主板/中小板/创业板
+    - BJ ^(920[0-9]{3}|83[0-9]{4}|87[0-9]{4}|88[0-9]{4}|43[0-9]{4})$: 北交所
 
     Args:
         instrument_model: Instrument ORM 模型类
@@ -98,21 +179,16 @@ def stock_symbol_sql_filter(instrument_model: type[Instrument]) -> ColumnElement
         SQLAlchemy 布尔表达式，可直接传入 .where()
     """
     return or_(
-        # SH 6xxxxx（含科创板 688xxx）
-        (instrument_model.market == "SH") & (instrument_model.symbol.like("6%")),
-        # SZ 00xxxx / 02xxxx / 30xxxx（主板 000/001/003 + 中小板 002 + 创业板 300/301/302）
-        (instrument_model.market == "SZ") & or_(
-            instrument_model.symbol.like("00%"),
-            instrument_model.symbol.like("02%"),
-            instrument_model.symbol.like("30%"),
-        ),
-        # BJ 920xxx / 83xxxx / 87xxxx / 88xxxx / 43xxxx（排除 899xxx 北证指数）
-        (instrument_model.market == "BJ") & or_(
-            instrument_model.symbol.like("920%"),
-            instrument_model.symbol.like("83%"),
-            instrument_model.symbol.like("87%"),
-            instrument_model.symbol.like("88%"),
-            instrument_model.symbol.like("43%"),
+        # SH ^6\d{5}$（含科创板 688xxx）
+        (instrument_model.market == "SH")
+        & instrument_model.symbol.op("~")(r"^6[0-9]{5}$"),
+        # SZ ^(00|02|30)\d{4}$（主板 000/001/003 + 中小板 002 + 创业板 300/301/302）
+        (instrument_model.market == "SZ")
+        & instrument_model.symbol.op("~")(r"^(00|02|30)[0-9]{4}$"),
+        # BJ ^(920\d{3}|83\d{4}|87\d{4}|88\d{4}|43\d{4})$（排除 899xxx 北证指数）
+        (instrument_model.market == "BJ")
+        & instrument_model.symbol.op("~")(
+            r"^(920[0-9]{3}|83[0-9]{4}|87[0-9]{4}|88[0-9]{4}|43[0-9]{4})$"
         ),
     )
 

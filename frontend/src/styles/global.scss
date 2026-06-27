@@ -653,6 +653,62 @@ button { cursor: pointer; }
 
 .modal-body { padding: 16px; overflow: auto; }
 
+// ===== 飞书渠道选择（个股详情截图/发送弹窗） =====
+.feishu-empty-hint {
+  padding: 12px 0;
+  color: #778297;
+  font-size: 13px;
+}
+
+.feishu-channel-label {
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: #aab4c8;
+}
+
+.feishu-channel-select {
+  width: 100%;
+  height: 36px;
+  padding: 0 10px;
+  margin-bottom: 12px;
+  border: 1px solid #2c3547;
+  border-radius: 5px;
+  background: #0d1118;
+  color: #c4ccda;
+  font-size: 13px;
+  cursor: pointer;
+
+  &:hover { border-color: #40517a; }
+  &:focus { outline: none; border-color: #4f7cff; }
+  option { background: #0d1118; color: #c4ccda; }
+}
+
+.feishu-status-box {
+  padding: 12px;
+  background: #0f131b;
+  border: 1px solid #202633;
+  border-radius: 5px;
+  font-size: 13px;
+  color: #aab4c8;
+}
+
+.feishu-status-polling {
+  margin-bottom: 4px;
+  color: #778297;
+}
+
+.feishu-status-row {
+  margin-bottom: 4px;
+
+  b { font-weight: 600; }
+}
+
+.feishu-status-success { color: #52c41a; }
+.feishu-status-failed,
+.feishu-status-dead,
+.feishu-status-error { color: #ff4d4f; }
+.feishu-status-pending { color: #faad14; }
+
 // ===== Form Grid =====
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .form-row { display: grid; gap: 6px; &.full { grid-column: 1 / -1; } }
@@ -959,6 +1015,9 @@ button { cursor: pointer; }
 .column-filter-popover { position: fixed; z-index: 500; width: 238px; padding: 11px; background: #202631; border: 1px solid #3c4659; border-radius: 8px; box-shadow: 0 16px 44px rgba(0, 0, 0, .45); }
 .filter-pop-title { font-size: 11px; font-weight: 700; margin-bottom: 9px; }
 .column-filter-popover .select, .column-filter-popover .input { width: 100%; margin-bottom: 8px; }
+// [StrategyDataTable] - 描述: between 操作符双输入框水平排列
+.filter-between-inputs { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; .input { width: auto; flex: 1; margin-bottom: 0; } }
+.filter-between-sep { color: v.$color-muted; font-size: 11px; }
 .filter-pop-actions { display: flex; justify-content: flex-end; gap: 7px; }
 .table-empty-row td { padding: 32px !important; }
 .table-empty-state { display: flex; flex-direction: column; align-items: center; gap: 5px; color: v.$color-muted; b { color: #ccd3df; font-weight: 650; } }
@@ -1367,6 +1426,32 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
   height: 22px;
   min-width: 32px;
   padding: 0 7px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: #8390a6;
+  font-size: 10px;
+  cursor: pointer;
+  transition: .12s ease;
+  &:hover { color: #c4ccda; background: #1a202b; }
+  &.active { background: #2a3550; color: #fff; box-shadow: 0 0 0 1px #40517a inset; }
+}
+
+// 范围按钮组（1月/3月/1年等），与周期按钮共用深色主题
+.tv-range-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid #2c3547;
+  border-radius: 5px;
+  background: #0d1118;
+}
+
+.tv-range-btn {
+  height: 22px;
+  min-width: 36px;
+  padding: 0 8px;
   border: 0;
   border-radius: 3px;
   background: transparent;

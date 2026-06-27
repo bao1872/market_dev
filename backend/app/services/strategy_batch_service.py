@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import math
 import os
 import uuid
 from dataclasses import dataclass
@@ -51,6 +52,7 @@ from app.models.instrument import Instrument
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.strategy_run import (
     FAILURE_STAGE_WORKER_INTERRUPTED,
+    StrategyResult,
     StrategyRun,
     StrategyRunItem,
 )
@@ -95,6 +97,53 @@ VALID_RUN_TYPES = {
 _BLOCKING_STATUSES = {"published", "completed", "running", "queued"}
 # 这些状态存在时，允许创建下一个 attempt（业务重试）
 _RETRYABLE_STATUSES = {"failed", "partial_failed", "interrupted"}
+
+# [StrategyBatchService] - DSA 必填指标集合（advice.md 第二节：发布前硬校验）
+# 这 7 个字段为前端 DSA 列主字段，发布时必须存在且非 None/NaN/Inf
+REQUIRED_DSA_METRICS: set[str] = {
+    "dsa_dir_bars",
+    "vwap_ret_avg",
+    "vwap_ret_total",
+    "offset_mean",
+    "offset_std",
+    "offset_variance_rate",
+    "offset_percentile",
+}
+
+# [StrategyBatchService] - DSA 发布有效率阈值（有效结果数 / succeeded_count）
+_DSA_VALID_RATE_THRESHOLD = 0.99
+
+
+class InvalidStrategyResult(Exception):
+    """策略结果校验失败（缺字段 / 非有限数值 / 有效率不足）。
+
+    [StrategyBatchService] - 描述: 发布前硬校验失败时抛出，API 层转 422
+    """
+    pass
+
+
+def validate_dsa_metrics(metrics: dict[str, Any]) -> None:
+    """校验 DSA 必填指标：7 个字段必须存在、非 None、非 NaN/Inf。
+
+    [StrategyBatchService] - 描述: 发布前硬校验单条结果，由 publish_run 批量调用
+
+    Args:
+        metrics: RuntimeStrategyResult.metrics（即 strategy_results.payload）
+
+    Raises:
+        InvalidStrategyResult: 缺字段或非有限数值，错误消息列出缺失/非法字段
+    """
+    missing = REQUIRED_DSA_METRICS - metrics.keys()
+    if missing:
+        raise InvalidStrategyResult(f"DSA metrics missing: {sorted(missing)}")
+
+    for key in REQUIRED_DSA_METRICS:
+        value = metrics[key]
+        if value is None:
+            raise InvalidStrategyResult(f"{key} is null")
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise InvalidStrategyResult(f"{key} is non-finite: {value}")
 
 
 def _get_worker_id() -> str:
@@ -935,6 +984,12 @@ class StrategyBatchService:
         status: completed/partial_failed → published
         记录 published_at 时间戳
 
+        发布前硬校验（advice.md 第二节）：
+        - 查询本次 run 的所有 strategy_results
+        - 对每条 result.payload 调用 validate_dsa_metrics
+        - 有效率 = 有效结果数 / succeeded_count，若 < 99% 抛 InvalidStrategyResult
+        - 确保错误消息明确列出缺失字段
+
         Args:
             db: 异步会话
             run_id: 运行 ID
@@ -944,6 +999,7 @@ class StrategyBatchService:
 
         Raises:
             ValueError: run 不存在或状态不允许发布
+            InvalidStrategyResult: DSA 指标校验失败（缺字段/非有限/有效率不足）
             RuntimeError: 更新失败
         """
         run = await db.get(StrategyRun, run_id)
@@ -954,6 +1010,38 @@ class StrategyBatchService:
             raise ValueError(
                 f"运行状态不允许发布（当前 {run.status}，"
                 f"仅 completed/partial_failed 可发布）: run_id={run_id}"
+            )
+
+        # [StrategyBatchService] - 描述: 发布前 DSA 硬校验，防止"published 但核心字段全空"
+        succeeded = run.succeeded_count or 0
+        if succeeded > 0:
+            results_stmt = select(StrategyResult).where(
+                StrategyResult.run_id == run_id
+            )
+            results_result = await db.execute(results_stmt)
+            results = list(results_result.scalars().all())
+
+            valid_count = 0
+            invalid_examples: list[str] = []
+            for result in results:
+                try:
+                    validate_dsa_metrics(result.payload or {})
+                    valid_count += 1
+                except InvalidStrategyResult as e:
+                    invalid_examples.append(str(e))
+
+            valid_rate = valid_count / succeeded
+            if valid_rate < _DSA_VALID_RATE_THRESHOLD:
+                raise InvalidStrategyResult(
+                    f"DSA 有效率不足: valid={valid_count}/{succeeded} "
+                    f"= {valid_rate:.1%}（阈值 {_DSA_VALID_RATE_THRESHOLD:.0%}），"
+                    f"示例: {invalid_examples[:3]}"
+                )
+
+            logger.info(
+                "[StrategyBatchService] DSA 硬校验通过: run_id=%s, "
+                "valid=%d/%d = %.1f%%",
+                run_id, valid_count, succeeded, valid_rate * 100,
             )
 
         run.status = "published"
@@ -1468,5 +1556,30 @@ if __name__ == "__main__":
     params = list(sig.parameters.keys())
     assert "db" in params
     print(f"recover_stale_runs params: {params} ✓")
+
+    # 验证 DSA 发布前硬校验相关符号
+    assert REQUIRED_DSA_METRICS == {
+        "dsa_dir_bars", "vwap_ret_avg", "vwap_ret_total",
+        "offset_mean", "offset_std", "offset_variance_rate", "offset_percentile",
+    }
+    print(f"REQUIRED_DSA_METRICS={sorted(REQUIRED_DSA_METRICS)} ✓")
+
+    assert issubclass(InvalidStrategyResult, Exception)
+    print(f"InvalidStrategyResult: {InvalidStrategyResult} ✓")
+
+    assert callable(validate_dsa_metrics)
+    # 合法 metrics 不抛
+    validate_dsa_metrics({
+        "dsa_dir_bars": 60, "vwap_ret_avg": 0.05, "vwap_ret_total": 1.2,
+        "offset_mean": 0.03, "offset_std": 0.02,
+        "offset_variance_rate": 0.5, "offset_percentile": 75.0,
+    })
+    # 缺字段抛
+    try:
+        validate_dsa_metrics({"dsa_dir_bars": 60})
+        raise AssertionError("缺字段应抛 InvalidStrategyResult")
+    except InvalidStrategyResult as e:
+        assert "offset_std" in str(e) or "missing" in str(e)
+    print("validate_dsa_metrics 校验逻辑 ✓")
 
     print("OK")

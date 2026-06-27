@@ -374,12 +374,38 @@ export interface ChannelLatestEventTestResponse {
   diagnostics: Record<string, unknown>
 }
 
-/** 个股详情发送飞书响应 - 4 个分步骤布尔结果（用于定位卡点） */
-export interface StockDetailFeishuResponse {
-  text_ok: boolean
-  screenshot_ok: boolean
-  image_upload_ok: boolean
-  feishu_send_ok: boolean
+// [StockDetailFeishu] - 描述: 异步 Outbox 投递模式类型契约（POST 创建 + GET 状态轮询）
+// 与后端 backend/app/api/stock_detail_feishu.py 的 SendFeishuResponse / ShareStatusResponse 对齐
+
+/** 单条投递状态（card / image 共用） */
+export type ShareDeliveryStatus =
+  | 'pending'
+  | 'sending'
+  | 'success'
+  | 'failed'
+  | 'retrying'
+  | 'dead'
+  | 'not_created'
+
+/** POST /admin/instruments/{instrument_id}/send-feishu 响应 - 创建异步投递任务 */
+export interface StockDetailFeishuCreateResponse {
+  test_run_id: string
+  message_group_id: string
+  message_id: string
+  image_message_id: string | null
+  status: 'pending'
+}
+
+/** GET /admin/stock-detail-feishu/{test_run_id}/status 响应 - 查询投递状态 */
+export interface StockDetailFeishuStatusResponse {
+  test_run_id: string
+  message_group_id: string | null
+  card_status: ShareDeliveryStatus
+  image_status: ShareDeliveryStatus
+  overall_status: 'pending' | 'success' | 'failed'
+  failed_step: 'card' | 'image' | null
+  error_code: string | null
+  error_message: string | null
 }
 
 /** 消息预览响应 */
@@ -1133,14 +1159,24 @@ export async function testNotificationChannelLatestEvent(channelId: string): Pro
   return data
 }
 
-/** 个股详情发送飞书（admin only） - 复用监控链路，返回 4 个分步骤布尔结果 */
+// [StockDetailFeishu] - 描述: 创建异步投递任务（Outbox 链路），返回 test_run_id 供轮询
 export async function sendStockDetailFeishu(
   instrumentId: string,
   channelId: string,
-): Promise<StockDetailFeishuResponse> {
-  const { data } = await apiClient.post<StockDetailFeishuResponse>(
+): Promise<StockDetailFeishuCreateResponse> {
+  const { data } = await apiClient.post<StockDetailFeishuCreateResponse>(
     `/admin/instruments/${instrumentId}/send-feishu`,
     { channel_id: channelId },
+  )
+  return data
+}
+
+// [StockDetailFeishu] - 描述: 轮询投递状态（card_status / image_status / overall_status）
+export async function getStockDetailFeishuStatus(
+  testRunId: string,
+): Promise<StockDetailFeishuStatusResponse> {
+  const { data } = await apiClient.get<StockDetailFeishuStatusResponse>(
+    `/admin/stock-detail-feishu/${testRunId}/status`,
   )
   return data
 }

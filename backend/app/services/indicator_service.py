@@ -61,6 +61,25 @@ logger = logging.getLogger("services.indicator_service")
 _DEFAULT_DAILY_LOOKBACK_DAYS = 5000  # 日线默认回看 5000 天（与 bars.py 一致）
 _INDICATOR_INTRADAY_LOOKBACK_DAYS = 750  # 指标计算专用 15min/1min 回看天数（750 天，与 bars.py 的 API 查询回看 180 天不同，指标计算需要更多数据）
 
+# [DSA/MACD 计算窗口] - 按 timeframe 分化，前端不硬编码（advice.md 第四节）
+# calculation_window: 策略算法实际回看 bar 数
+# warmup_bars: 算法预热期（如 EMA/MACD 前 N 根不稳定）
+# visible_bars: API 默认返回最近 N 根（与前端默认 bars=250 不同）
+INDICATOR_BARS: dict[str, int] = {
+    "15m": 800,
+    "1h": 800,
+    "1d": 800,
+    "1w": 260,
+    "1mo": 120,
+}
+INDICATOR_WARMUP_BARS: dict[str, int] = {
+    "15m": 60,
+    "1h": 60,
+    "1d": 60,
+    "1w": 26,
+    "1mo": 12,
+}
+
 
 # ===== 工具函数 =====
 
@@ -105,6 +124,54 @@ def _to_json_safe(val: Any) -> Any:
 # 快照类字段（VP 价格档位/元信息/peak 节点）：非 bar 对齐时间序列，禁止按 bars 截断
 # 否则 profile_rows(100 行) 在 bars<100 时会被错误截断，破坏 SSOT 完整透传
 _SNAPSHOT_KEYS: frozenset[str] = frozenset({"profile_rows", "profile_meta", "peak_rows"})
+
+
+def _ema(arr: np.ndarray, span: int) -> np.ndarray:
+    """计算指数移动平均（EMA）。
+
+    使用 pandas ewm 计算，忽略 NaN，与 ta.ema 一致。
+
+    Args:
+        arr: 输入价格数组
+        span: EMA 周期
+
+    Returns:
+        EMA 数组
+    """
+    return pd.Series(arr).ewm(span=span, adjust=False).mean().to_numpy()
+
+
+def compute_macd(
+    closes: np.ndarray,
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+) -> dict[str, list[float | None]]:
+    """计算 MACD 指标（A 股 2× 版本）。
+
+    公式：
+    - DIF = EMA(close, fast) - EMA(close, slow)
+    - DEA = EMA(DIF, signal)
+    - MACD(Hist) = 2 * (DIF - DEA)
+
+    Args:
+        closes: 收盘价数组
+        fast: 快线周期（默认 12）
+        slow: 慢线周期（默认 26）
+        signal: 信号线周期（默认 9）
+
+    Returns:
+        dict: macd_dif / macd_dea / macd_hist 数组
+    """
+    dif = _ema(closes, fast) - _ema(closes, slow)
+    dea = _ema(dif, signal)
+    hist = 2.0 * (dif - dea)
+
+    return {
+        "macd_dif": [None if pd.isna(v) or not np.isfinite(v) else float(v) for v in dif],
+        "macd_dea": [None if pd.isna(v) or not np.isfinite(v) else float(v) for v in dea],
+        "macd_hist": [None if pd.isna(v) or not np.isfinite(v) else float(v) for v in hist],
+    }
 
 
 def _truncate_lists(indicators: dict[str, Any], bars: int) -> dict[str, Any]:
@@ -287,6 +354,10 @@ async def compute_all_indicators(
         idx.isoformat() for idx in daily_bars.index
     ]
 
+    # [MACD 副图] - 统一在后端计算 MACD 指标，避免前后端多套实现
+    # 使用日线 close 计算，参数 fast=12, slow=26, signal=9，柱值 = 2*(DIF-DEA)
+    macd_indicators = compute_macd(daily_bars["close"].to_numpy(float))
+
     # 复用 StrategyBatchService._get_latest_released_version 查询最新 released 版本
     batch_service = StrategyBatchService()
 
@@ -352,10 +423,33 @@ async def compute_all_indicators(
         len(errors),
     )
 
+    # [MACD 副图] - 将 MACD 作为全局图层注入 layers/data
+    layers.append({
+        "strategy_id": "macd",
+        "strategy_name": "MACD",
+        "layer_id": "macd",
+        "layer_name": "MACD",
+        "renderer": "macd",
+        "pane": "macd",
+        "color": "#f4c430",
+        "direction_colored": False,
+        "fields": ["macd_dif", "macd_dea", "macd_hist"],
+        "hover_fields": ["macd_dif", "macd_dea", "macd_hist"],
+    })
+    macd_with_time = {**macd_indicators, "time": time_list}
+    data["macd"] = _to_json_safe(_truncate_lists(macd_with_time, bars))
+
+    # [指标服务] - 返回计算窗口元信息，前端据此决定显示范围，不硬编码
+    calculation_window = INDICATOR_BARS.get(timeframe, 800)
+    warmup_bars = INDICATOR_WARMUP_BARS.get(timeframe, 60)
+
     return {
         "layers": layers,
         "data": data,
         "errors": errors,
+        "calculation_window": calculation_window,
+        "warmup_bars": warmup_bars,
+        "visible_bars": bars,
     }
 
 
@@ -430,5 +524,29 @@ if __name__ == "__main__":
     assert hasattr(svc, "_get_latest_released_version"), \
         "StrategyBatchService 应有 _get_latest_released_version 方法"
     print("StrategyBatchService 可实例化 ✓")
+
+    # 7. 验证 INDICATOR_BARS 常量与返回结构元信息（advice.md 第四节）
+    assert "1d" in INDICATOR_BARS, "INDICATOR_BARS 应包含 1d"
+    assert INDICATOR_BARS["1d"] == 800, "1d 计算窗口应为 800"
+    assert INDICATOR_BARS["1w"] == 260, "1w 计算窗口应为 260"
+    assert INDICATOR_BARS["1mo"] == 120, "1mo 计算窗口应为 120"
+    assert "1d" in INDICATOR_WARMUP_BARS, "INDICATOR_WARMUP_BARS 应包含 1d"
+    print("INDICATOR_BARS 常量 ✓")
+
+    # 8. 验证 compute_macd 计算（advice.md 第五节）
+    sample_close = np.array([10.0, 10.5, 10.3, 10.8, 11.0, 11.2, 10.9, 11.5, 11.3, 11.8])
+    macd = compute_macd(sample_close)
+    assert "macd_dif" in macd
+    assert "macd_dea" in macd
+    assert "macd_hist" in macd
+    assert len(macd["macd_dif"]) == len(sample_close)
+    # 验证 hist = 2 * (dif - dea)
+    for i in range(len(sample_close)):
+        dif = macd["macd_dif"][i]
+        dea = macd["macd_dea"][i]
+        hist = macd["macd_hist"][i]
+        if dif is not None and dea is not None and hist is not None:
+            assert abs(hist - 2.0 * (dif - dea)) < 1e-9, "MACD 柱值公式错误"
+    print("compute_macd 公式 ✓")
 
     print("OK")

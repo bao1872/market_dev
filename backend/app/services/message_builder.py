@@ -284,6 +284,7 @@ def build_monitor_event_text(
     poc_price: float | None = None,
     position_0_1: float | None = None,
     resource_refs: dict[str, Any] | None = None,
+    memo: str | None = None,
 ) -> NotificationMessageDTO:
     """构建监控事件纯文本消息（飞书两段式投递 - 文本段）。
 
@@ -293,6 +294,9 @@ def build_monitor_event_text(
     [advice.md 第二节] - 字段名通俗化：
     - "BB / 上节点 / 下节点 / POC / 位置" → "近期波动上沿/中枢/下沿 + 成交密集区 + 最密集成交价 + 当前区间位置"
     - 事件类型文案来自 user_facing_labels.get_event_label
+
+    [advice.md 第七节] - 备忘录闭环：
+    - memo 非空时在文本末尾追加"备忘录:{memo}"行
 
     模板：
         【自选监控触发】
@@ -307,6 +311,7 @@ def build_monitor_event_text(
         下方成交密集区：{lower_node}
         最密集成交价：{poc_price}
         当前区间位置：{position_0_1}
+        备忘录：{memo}（仅当 memo 非空）
 
     Args:
         stock_name: 股票名称
@@ -319,6 +324,7 @@ def build_monitor_event_text(
         poc_price: POC 价格
         position_0_1: 节点位置 0~1
         resource_refs: 资源引用（instrument_id/symbol/event_id 等）
+        memo: 个股备忘录内容（非空时追加到文本末尾）
 
     Returns:
         NotificationMessageDTO（text_content 字段填充纯文本）
@@ -363,6 +369,9 @@ def build_monitor_event_text(
         f"{get_field_label('poc')}：{_fmt(poc_price)}",
         f"{get_field_label('position')}：{_fmt_pos(position_0_1)}",
     ]
+    # [advice.md 第七节] - 备忘录闭环：memo 非空时追加一行
+    if memo and memo.strip():
+        text_lines.append(f"备忘录：{memo.strip()}")
     text_content = "\n".join(text_lines)
 
     refs = resource_refs or {}

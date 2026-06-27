@@ -28,6 +28,7 @@ SSOT：
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import uuid
@@ -678,32 +679,76 @@ class DSASelector(StrategyRuntime):
         )
 
     async def compute_indicators(self, context: MarketDataContext) -> dict[str, Any]:
-        """计算 DSA VWAP 图表指标（轻量版，不计算 regime/offset/crossover）。
+        """计算 DSA VWAP 图表指标（含 Pine 标签与 regime 分段）。
 
-        供个股详情页面实时计算使用。只计算 DSA VWAP 线和方向。
+        供个股详情页面实时计算使用。输出字段按 bar 对齐，长度一致，
+        前端按 regime_id 分段渲染、按 anchor_time 标记锚点、按 pivot_type/pivot_price
+        标注 HH/HL/LH/LL。
 
         Returns:
-            {"dsa_vwap": [float...], "dsa_dir": [int...]} 最近 N 根 bar 的 VWAP 和方向
+            dict 包含:
+            - dsa_vwap: list[float|None] 每 bar 的 DSA VWAP 值
+            - dsa_dir: list[int] 每 bar 的方向（1/-1）
+            - regime_id: list[int] 每 bar 所属 regime 编号（切换点递增）
+            - anchor_time: list[str|None] 每 bar 的锚点时间（仅锚点 bar 非空）
+            - pivot_type: list[str|None] 每 bar 的 pivot 类型（HH/HL/LH/LL）
+            - pivot_price: list[float|None] 每 bar 的 pivot 价格
         """
         daily_df = context.bars_daily
-        if daily_df is None or len(daily_df) < self._dsa_config.prd:
+        n = len(daily_df) if daily_df is not None else 0
+        if n < self._dsa_config.prd:
             return {
                 "dsa_vwap": [],
                 "dsa_dir": [],
-                "direction": [],
                 "regime_id": [],
-                "anchor_id": [],
                 "anchor_time": [],
+                "pivot_type": [],
+                "pivot_price": [],
             }
 
-        vwap_series, dir_series, _, _ = dynamic_swing_anchored_vwap(daily_df, self._dsa_config)
+        vwap_series, dir_series, pivot_labels, _ = dynamic_swing_anchored_vwap(
+            daily_df, self._dsa_config
+        )
         vwap_series, dir_series = _remove_dsa_lookahead(
             daily_df, vwap_series, dir_series, self._dsa_config
         )
 
+        # [DSA Pine 标签] - 从稀疏 pivot_labels 构造按 bar 对齐的密集数组
+        pivot_type: list[str | None] = [None] * n
+        pivot_price: list[float | None] = [None] * n
+        anchor_time: list[str | None] = [None] * n
+
+        index_list = list(daily_df.index)
+        for label in pivot_labels:
+            t = int(label["t"])
+            if 0 <= t < n:
+                txt = label.get("text")
+                if txt in {"HH", "HL", "LH", "LL"}:
+                    pivot_type[t] = txt
+                    pivot_price[t] = (
+                        float(label["y"]) if np.isfinite(label["y"]) else None
+                    )
+                anchor_time[t] = index_list[t].isoformat()
+
+        # [DSA regime 分段] - dir 第一次切换时 regime_id 递增，锚点 bar 同属于新 regime
+        regime_id: list[int] = [0] * n
+        current_regime = 0
+        last_dir: int | None = None
+        for i, d in enumerate(dir_series):
+            d_int = int(d) if pd.notna(d) else 0
+            if last_dir is not None and d_int != last_dir and d_int != 0:
+                current_regime += 1
+            if d_int != 0:
+                last_dir = d_int
+            regime_id[i] = current_regime
+
         return {
             "dsa_vwap": [None if pd.isna(v) else float(v) for v in vwap_series],
             "dsa_dir": [int(d) for d in dir_series],
+            "regime_id": regime_id,
+            "anchor_time": anchor_time,
+            "pivot_type": pivot_type,
+            "pivot_price": pivot_price,
         }
 
     def _compute_metrics_sync(self, context: MarketDataContext) -> dict[str, Any]:
@@ -815,5 +860,69 @@ if __name__ == "__main__":
     assert "dsa_dir_bars" in metrics
     assert "vwap_ret_5" in metrics
     print("metrics keys 包含扩展字段 ✓")
+
+    # 7. 验证 compute_indicators 输出 Pine 标签与 regime 分段字段
+    from types import SimpleNamespace
+
+    mock_version = SimpleNamespace(
+        id=uuid.uuid4(),
+        manifest={
+            "strategy_id": "dsa_selector",
+            "kind": "selector",
+            "version": "1.3.0",
+            "parameters": [
+                {"key": "algorithm.lookback", "default": 800},
+                {"key": "dsa.prd", "default": 50},
+                {"key": "dsa.base_apt", "default": 20.0},
+                {"key": "dsa.use_adapt", "default": False},
+                {"key": "dsa.vol_bias", "default": 10.0},
+                {"key": "dsa.atr_len", "default": 50},
+                {"key": "atr_rope.length", "default": 14},
+                {"key": "atr_rope.multi", "default": 1.5},
+                {"key": "atr_rope.regime_lookback", "default": 55},
+                {"key": "atr_rope.regime_threshold", "default": 0.55},
+            ],
+            "resource_budget": {"target_ms_per_instrument": 5000},
+        },
+    )
+
+    async def _run_compute_indicators():
+        selector = DSASelector()
+        await selector.initialize(mock_version)  # type: ignore[arg-type]
+        ctx = MarketDataContext(
+            instrument_id=uuid.uuid4(),
+            symbol="600519",
+            bars_daily=df,
+            trade_date=date(2026, 6, 18),
+        )
+        return await selector.compute_indicators(ctx)
+
+    indicators = asyncio.run(_run_compute_indicators())
+    n = len(df)
+    for key in ["dsa_vwap", "dsa_dir", "regime_id", "anchor_time", "pivot_type", "pivot_price"]:
+        assert key in indicators, f"compute_indicators 缺少字段: {key}"
+        assert len(indicators[key]) == n, f"{key} 长度应与 K 线一致"
+
+    # 验证 pivot_type 只出现 HH/HL/LH/LL/null
+    allowed_pivots = {"HH", "HL", "LH", "LL"}
+    actual_pivots = {t for t in indicators["pivot_type"] if t is not None}
+    assert actual_pivots.issubset(allowed_pivots), f"非法 pivot_type: {actual_pivots - allowed_pivots}"
+
+    # 验证 regime_id 在 dir 切换时递增
+    regime_changes = sum(
+        1 for i in range(1, n) if indicators["regime_id"][i] != indicators["regime_id"][i - 1]
+    )
+    dir_changes = sum(
+        1 for i in range(1, n) if indicators["dsa_dir"][i] != indicators["dsa_dir"][i - 1]
+    )
+    assert regime_changes == dir_changes, "regime_id 切换次数应与 dsa_dir 切换次数一致"
+
+    # 验证所有 pivot 标签位置都有 anchor_time（anchor bar 不一定有 pivot 标签，
+    # 例如第一个 bar 作为初始锚点无 prev 参考，text 为空）
+    for i in range(n):
+        if indicators["pivot_type"][i] is not None:
+            assert indicators["anchor_time"][i] is not None, f"pivot bar {i} 缺少 anchor_time"
+
+    print("compute_indicators Pine 标签与 regime 分段 ✓")
 
     print("OK")

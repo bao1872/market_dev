@@ -9,7 +9,7 @@ import clsx from 'clsx'
 // ===== 类型定义（对应 UI_DEVELOPMENT_SPEC.md 3.3 推荐组件输入）=====
 export type DataType = 'text' | 'number' | 'percent' | 'datetime' | 'enum' | 'range'
 export type SortDirection = 'asc' | 'desc' | null
-export type FilterOperator = 'contains' | 'eq' | 'gte' | 'lte' | 'empty' | 'not_empty'
+export type FilterOperator = 'contains' | 'eq' | 'gt' | 'gte' | 'lt' | 'lte' | 'between' | 'empty' | 'not_empty'
 
 export interface DataTableColumn<Row> {
   key: string
@@ -35,11 +35,15 @@ export interface DataTableFilter {
   key: string
   operator: FilterOperator
   value?: string | number
+  // [StrategyDataTable] - 描述: between 操作符的第二个值（上界）
+  value2?: string | number
 }
 
 export interface DataTableQuery {
   page: number
   pageSize: number
+  // [StrategyDataTable] - 描述: 全文搜索关键词（服务端模式透传至后端 keyword 参数）
+  keyword?: string
   sort?: { key: string; direction: 'asc' | 'desc' }
   filters: DataTableFilter[]
 }
@@ -67,6 +71,38 @@ export interface DataTableProps<Row> {
   rowKey: (row: Row) => string
   // 空态文案
   emptyText?: string
+  // [StrategyDataTable] - 描述: 初始每页条数（默认 10），服务端模式由调用方注入（如 ScreenerPage 50）
+  initialPageSize?: number
+}
+
+// [StrategyDataTable] - 描述: 按字段类型返回可选操作符列表（默认操作符为数组首项）
+function operatorsForDataType(dataType: DataTableColumn<unknown>['dataType']): FilterOperator[] {
+  switch (dataType) {
+    case 'number':
+    case 'percent':
+      return ['gte', 'gt', 'lte', 'lt', 'eq', 'between']
+    case 'text':
+      return ['contains', 'eq']
+    case 'enum':
+      return ['eq']
+    case 'datetime':
+      return ['gte', 'gt', 'lte', 'lt', 'between']
+    default:
+      return ['contains', 'eq']
+  }
+}
+
+// [StrategyDataTable] - 描述: 操作符下拉框中文标签
+const OPERATOR_LABELS: Record<FilterOperator, string> = {
+  contains: '包含',
+  eq: '等于',
+  gt: '大于',
+  gte: '大于等于',
+  lt: '小于',
+  lte: '小于等于',
+  between: '区间',
+  empty: '为空',
+  not_empty: '不为空',
 }
 
 // 解析可比较值（对应原型 parseComparable）
@@ -101,14 +137,27 @@ function matchFilter(text: string, filter: DataTableFilter): boolean {
       return a.type === 'number' && b.type === 'number'
         ? a.value === b.value
         : t.toLocaleLowerCase('zh-CN') === String(filter.value).toLocaleLowerCase('zh-CN')
+    case 'gt':
+      // [StrategyDataTable] - 描述: 数值大于 value（仅数值语义，文本列不应出现 gt）
+      return a.type === 'number' && b.type === 'number' && a.value > b.value
     case 'gte':
       return a.type === 'number' && b.type === 'number'
         ? a.value >= b.value
         : t.localeCompare(String(filter.value), 'zh-CN') >= 0
+    case 'lt':
+      // [StrategyDataTable] - 描述: 数值小于 value（仅数值语义）
+      return a.type === 'number' && b.type === 'number' && a.value < b.value
     case 'lte':
       return a.type === 'number' && b.type === 'number'
         ? a.value <= b.value
         : t.localeCompare(String(filter.value), 'zh-CN') <= 0
+    case 'between': {
+      // [StrategyDataTable] - 描述: 数值在 [value, value2] 闭区间（仅数值语义）
+      const c = parseComparable(String(filter.value2 || ''))
+      return a.type === 'number' && b.type === 'number' && c.type === 'number'
+        ? a.value >= b.value && a.value <= c.value
+        : false
+    }
     default: // contains
       return t.toLocaleLowerCase('zh-CN').includes(String(filter.value).toLocaleLowerCase('zh-CN'))
   }
@@ -130,9 +179,20 @@ function FilterPopover({
   onClear: () => void
   onClose: () => void
 }) {
-  const [operator, setOperator] = useState<FilterOperator>(current?.operator || 'contains')
+  // [StrategyDataTable] - 描述: 操作符默认值由字段类型决定，不再硬编码 contains
+  const availableOps = useMemo(
+    () => operatorsForDataType(column.dataType),
+    [column.dataType],
+  )
+  const [operator, setOperator] = useState<FilterOperator>(
+    current?.operator && availableOps.includes(current.operator)
+      ? current.operator
+      : availableOps[0],
+  )
   const [value, setValue] = useState(String(current?.value || ''))
+  const [value2, setValue2] = useState(String(current?.value2 || ''))
   const isEmptyOp = operator === 'empty' || operator === 'not_empty'
+  const isBetween = operator === 'between'
 
   // 定位弹窗
   const rect = anchor.getBoundingClientRect()
@@ -152,6 +212,16 @@ function FilterPopover({
 
   const handleApply = () => {
     const val = value.trim()
+    const val2 = value2.trim()
+    // [StrategyDataTable] - 描述: between 需要两个值都非空，其余非空校验 value
+    if (isBetween) {
+      if (!val || !val2) {
+        onClear()
+        return
+      }
+      onApply({ key: column.key, operator, value: val, value2: val2 })
+      return
+    }
     if (!isEmptyOp && !val) {
       onClear()
       return
@@ -167,21 +237,39 @@ function FilterPopover({
         value={operator}
         onChange={(e) => setOperator(e.target.value as FilterOperator)}
       >
-        <option value="contains">包含</option>
-        <option value="eq">等于</option>
-        <option value="gte">大于等于</option>
-        <option value="lte">小于等于</option>
-        <option value="empty">为空</option>
-        <option value="not_empty">不为空</option>
+        {availableOps.map((op) => (
+          <option key={op} value={op}>
+            {OPERATOR_LABELS[op]}
+          </option>
+        ))}
       </select>
-      <input
-        className="input filter-value"
-        placeholder="输入筛选值"
-        value={value}
-        disabled={isEmptyOp}
-        onChange={(e) => setValue(e.target.value)}
-        autoFocus
-      />
+      {isBetween ? (
+        <div className="filter-between-inputs">
+          <input
+            className="input filter-value"
+            placeholder="下界"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            autoFocus
+          />
+          <span className="filter-between-sep">~</span>
+          <input
+            className="input filter-value"
+            placeholder="上界"
+            value={value2}
+            onChange={(e) => setValue2(e.target.value)}
+          />
+        </div>
+      ) : (
+        <input
+          className="input filter-value"
+          placeholder="输入筛选值"
+          value={value}
+          disabled={isEmptyOp}
+          onChange={(e) => setValue(e.target.value)}
+          autoFocus
+        />
+      )}
       <div className="filter-pop-actions">
         <button className="btn small filter-clear" onClick={onClear}>
           清除
@@ -268,6 +356,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     onSelectionChange,
     rowKey,
     emptyText = '没有符合筛选条件的数据',
+    initialPageSize = 10,
   } = props
 
   const [searchParams, setSearchParams] = useSearchParams()
@@ -278,7 +367,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
   const [filters, setFilters] = useState<Record<number, DataTableFilter>>({})
   const [globalQuery, setGlobalQuery] = useState('')
   const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(10)
+  const [pageSize, setPageSize] = useState(initialPageSize)
   const [hiddenColumns, setHiddenColumns] = useState<Set<number>>(new Set())
   const [filterPopover, setFilterPopover] = useState<{
     columnIndex: number
@@ -394,10 +483,11 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     }
     if (page > 1) params.set('page', String(page))
     else params.delete('page')
-    if (pageSize !== 10) params.set('page_size', String(pageSize))
+    // [StrategyDataTable] - 描述: URL 同步基准值为 initialPageSize（非默认值时写入 URL）
+    if (pageSize !== initialPageSize) params.set('page_size', String(pageSize))
     else params.delete('page_size')
     setSearchParams(params, { replace: true })
-  }, [sortColumn, sortDirection, page, pageSize, columns, searchParams, setSearchParams])
+  }, [sortColumn, sortDirection, page, pageSize, columns, searchParams, setSearchParams, initialPageSize])
 
   // ===== 服务端查询回调 =====
   useEffect(() => {
@@ -405,6 +495,8 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
       onQueryChange({
         page,
         pageSize,
+        // [StrategyDataTable] - 描述: 透传全文搜索关键词至服务端
+        keyword: globalQuery.trim() || undefined,
         sort:
           sortColumn !== null && sortDirection
             ? { key: columns[sortColumn]?.key || '', direction: sortDirection }
@@ -412,7 +504,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
         filters: Object.values(filters),
       })
     }
-  }, [page, pageSize, sortColumn, sortDirection, filters, serverSide, onQueryChange, columns])
+  }, [page, pageSize, sortColumn, sortDirection, filters, serverSide, onQueryChange, columns, globalQuery])
 
   // ===== 客户端排序和筛选 =====
   const processedRows = useMemo(() => {
@@ -464,6 +556,13 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
   const pageRows = serverSide
     ? processedRows
     : processedRows.slice((currentPage - 1) * pageSize, currentPage * pageSize)
+
+  // [StrategyDataTable] - 描述: 分页大小选项保留 10/20/50，若 initialPageSize 不在其中则补一项
+  const pageSizeOptions = useMemo(() => {
+    const base = [10, 20, 50]
+    if (!base.includes(initialPageSize)) base.push(initialPageSize)
+    return base.sort((a, b) => a - b)
+  }, [initialPageSize])
 
   // ===== 全选逻辑 =====
   const allChecked = selectable && pageRows.length > 0 && pageRows.every((r) => selectedKeys?.has(rowKey(r)))
@@ -732,9 +831,11 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
               setPage(1)
             }}
           >
-            <option value={10}>10</option>
-            <option value={20}>20</option>
-            <option value={50}>50</option>
+            {pageSizeOptions.map((size) => (
+              <option key={size} value={size}>
+                {size}
+              </option>
+            ))}
           </select>
         </label>
         <button

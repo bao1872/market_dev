@@ -109,20 +109,6 @@ function toRow(r: StrategyResult): ScreenerRow {
   }
 }
 
-// ===== 前端操作符 → 后端合法操作符映射 =====
-
-/** 后端合法操作符集合 */
-const BACKEND_OPERATORS = new Set(['gt', 'gte', 'lt', 'lte', 'eq', 'between'])
-
-/** 将前端操作符映射为后端合法操作符；返回 null 表示跳过该筛选条件 */
-function mapOperator(op: string): string | null {
-  if (BACKEND_OPERATORS.has(op)) return op
-  // contains 对数值列语义为"至少此值"，映射为 gte
-  if (op === 'contains') return 'gte'
-  // empty / not_empty 后端不支持，跳过
-  return null
-}
-
 // [ScreenerPage] - 描述: 策略通俗说明（保留策略名 + 增加一句通俗解释，普通用户友好）
 function getStrategyHint(strategyKey: string): string {
   const k = strategyKey.toLowerCase()
@@ -173,29 +159,21 @@ export default function ScreenerPage() {
       params.sort_by = query.sort.key
       params.sort_desc = query.sort.direction === 'desc'
     }
-    // 提取 stock 筛选值作为 keyword，其余做操作符映射
-    let keywordValue: string | undefined
+    // [ScreenerPage] - 描述: 直接使用 globalQuery 透传的 keyword（由 StrategyDataTable 顶部搜索框传入）
+    if (query.keyword) {
+      params.keyword = query.keyword
+    }
+    // [ScreenerPage] - 描述: metric_filters 只传后端合法操作符；数值/枚举/日期列操作符已是后端合法集，仅跳过 empty/not_empty
     const mappedFilters = query.filters
-      .filter((f) => {
-        // stock 列筛选走 keyword，不走 metric_filters
-        if (f.key === 'stock') {
-          keywordValue = String(f.value)
-          return false
-        }
-        return true
-      })
+      .filter((f) => !['empty', 'not_empty'].includes(f.operator))
       .map((f) => {
-        const mappedOp = mapOperator(f.operator)
-        if (mappedOp === null) return null
-        return { metric_key: f.key, operator: mappedOp, value: f.value }
+        if (f.operator === 'between') {
+          return { metric_key: f.key, operator: 'between', value1: f.value, value2: f.value2 }
+        }
+        return { metric_key: f.key, operator: f.operator, value: f.value }
       })
-      .filter((f): f is NonNullable<typeof f> => f !== null)
-
     if (mappedFilters.length > 0) {
       params.metric_filters = JSON.stringify(mappedFilters)
-    }
-    if (keywordValue) {
-      params.keyword = keywordValue
     }
     params.universe = universe
     return params
@@ -745,6 +723,7 @@ export default function ScreenerPage() {
           selectable
           selectedKeys={selectedKeys}
           onSelectionChange={setSelectedKeys}
+          initialPageSize={PAGE_SIZE}
         />
       </div>
     </div>

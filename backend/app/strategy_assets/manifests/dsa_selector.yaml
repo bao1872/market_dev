@@ -126,12 +126,13 @@ chart_layers:
     direction_colored: true
     direction_up_color: "#ff1744"
     direction_down_color: "#00e676"
-    # [DSA 分段] - regime_field 指定 regime_id 字段，前端按 regime 分段渲染（切换点不连接）
+    # [DSA 分段] - 透传 regime_field/anchor_field 供前端按 regime 分段渲染
     # anchor_field 指定 anchor_time 字段，前端在锚点 bar 绘制小圆点
+    # pivot_type/pivot_price 提供 HH/HL/LH/LL 标签，与 Pine 一致
     regime_field: regime_id
     anchor_field: anchor_time
-    fields: [dsa_vwap, dsa_dir, regime_id, anchor_time]
-    hover_fields: [dsa_dir, dsa_vwap, regime_id]
-    description: "DSA 动态摆动锚定 VWAP 线，按 regime 分段着色，锚点标记"
+    fields: [dsa_vwap, dsa_dir, regime_id, anchor_time, pivot_type, pivot_price]
+    hover_fields: [dsa_dir, dsa_vwap, regime_id, pivot_type, pivot_price]
+    description: "DSA 动态摆动锚定 VWAP 线，按 regime 分段着色，锚点标记，Pine 标签"
 resource_budget:
   target_ms_per_instrument: 5000

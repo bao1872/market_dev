@@ -1,6 +1,7 @@
-// StrategyChart：纯 Canvas 2D 策略图表组件（V1.6.3）
+// StrategyChart：纯 Canvas 2D 策略图表组件（V1.6.4）
 // 对应原型 assets/charts.js 的 drawTrading 渲染管线
 // 支持 K 线 + 成交量 + VWAP + Volume Profile + Node Cluster + Volume Delta + 事件标记
+// + DSA Pine 标签（HH/HL/LH/LL）与 regime 分段着色 + MACD 副图
 // 图层可见性持久化到 localStorage，十字线联动 OHLC 图例
 // 用法：<StrategyChart symbol="688112" bars={bars} events={events} strategyId="node" source="watchlist" height={660} />
 
@@ -69,6 +70,7 @@ export interface ChartEvent {
 export interface LayerVisibility {
   volume: boolean
   dsa: boolean
+  macd: boolean
   breakout: boolean
   selection: boolean
   node: boolean
@@ -412,10 +414,11 @@ function extractBackendProfile(indicators: IndicatorResponse | undefined): Backe
 }
 
 // ===== 布局几何模块 =====
-// 根据启用的图层动态分配窗格高度
+// 根据启用的图层动态分配窗格高度（价格/成交量/MACD 共享同一 X 轴与十字线索引）
 function geometry(layers: Set<string>, w: number, h: number): Geometry {
   const profileOn = layers.has('profile')
   const volumeOn = layers.has('volume')
+  const macdOn = layers.has('macd')
   const l = 58
   const axis = 57
   const profileW = profileOn ? 148 : 0
@@ -425,6 +428,11 @@ function geometry(layers: Set<string>, w: number, h: number): Geometry {
   const paneGap = 7
   let cursor = h - bottom
   const panes: Record<string, PaneRect> = {}
+  // [MACD 副图] - 放在成交量上方，与价格/成交量共享 X 轴
+  if (macdOn) {
+    panes.macd = { bottom: cursor, top: cursor - 82 }
+    cursor = panes.macd.top - paneGap
+  }
   if (volumeOn) {
     panes.volume = { bottom: cursor, top: cursor - 76 }
     cursor = panes.volume.top - paneGap
@@ -675,6 +683,9 @@ function renderIndicatorLayer(
     case 'band':
       renderIndicatorBand(ctx, g, layer, data, barsCount, step, py)
       break
+    case 'macd':
+      renderIndicatorMacd(ctx, g, layer, data, barsCount, step)
+      break
   }
 }
 
@@ -776,6 +787,31 @@ function renderIndicatorLine(
       ctx.arc(x, y, 2.2, 0, Math.PI * 2)
       ctx.fillStyle = innerColor
       ctx.fill()
+    }
+  }
+
+  // [DSA Pine 标签] - 在 pivot_type 标记的 bar 位置绘制 HH/HL/LH/LL 文本
+  // pivot_type/pivot_price 位于 layer.fields[4]/[5]，与 Pine Script 标签对齐
+  const pivotTypeField = layer.fields[4]
+  const pivotPriceField = layer.fields[5]
+  if (pivotTypeField && data[pivotTypeField] && pivotPriceField && data[pivotPriceField]) {
+    const pivotTypes = data[pivotTypeField]
+    const pivotPrices = data[pivotPriceField]
+    for (let i = 0; i < len; i++) {
+      const label = pivotTypes[offset + i]
+      if (typeof label !== 'string') continue
+      const price = pivotPrices[offset + i]
+      if (price == null || typeof price === 'string') continue
+      const x = g.l + (i + 0.5) * step
+      const y = py(Number(price))
+      // HH/LH 为波段高点，标签画在 K 线上方；HL/LL 为波段低点，画在下方
+      const isHigh = label === 'HH' || label === 'LH'
+      const labelColor = isHigh ? C.up : C.down
+      const textY = isHigh ? y - 9 : y + 14
+      ctx.fillStyle = labelColor
+      ctx.font = 'bold 9px ui-monospace, SFMono-Regular, Menlo, monospace'
+      ctx.textAlign = 'center'
+      ctx.fillText(label, x, textY)
     }
   }
 }
@@ -917,6 +953,96 @@ function renderIndicatorBand(
     ctx.strokeStyle = middleColor
     ctx.lineWidth = 1.5
     ctx.stroke()
+  }
+}
+
+// [MACD 副图] - 仅绘制后端返回的 macd_dif/macd_dea/macd_hist，禁止前端重算
+function renderIndicatorMacd(
+  ctx: CanvasRenderingContext2D,
+  g: Geometry,
+  _layer: ChartLayer,
+  data: Record<string, (number | string | null)[]>,
+  barsCount: number,
+  step: number,
+): void {
+  const p = g.panes.macd
+  if (!p) return
+
+  const difVals = data.macd_dif
+  const deaVals = data.macd_dea
+  const histVals = data.macd_hist
+  if (!difVals?.length || !deaVals?.length || !histVals?.length) return
+
+  // [chartViewport] - 指标数组取最后 barsCount 个值与 display 对齐
+  const offset = Math.max(0, difVals.length - barsCount)
+  const len = Math.min(difVals.length - offset, barsCount)
+
+  // 计算 MACD 范围（固定包含 0 轴）
+  const visible = [difVals, deaVals, histVals].flatMap(arr =>
+    arr.slice(offset, offset + len).filter((v): v is number => typeof v === 'number' && v != null)
+  )
+  const rawMax = visible.length ? Math.max(...visible.map(Math.abs)) : 0
+  const bound = Math.max(0.0001, rawMax * 1.08)
+  const range = bound * 2
+
+  const my = (v: number) => p.bottom - (v + bound) / range * (p.bottom - p.top)
+
+  // 1. 零轴
+  drawLine(ctx, g.l, my(0), g.plotRight, my(0), C.grid2, 1, [4, 3])
+
+  // 2. 柱状图（hist > 0 红色，< 0 绿色；A 股红涨绿跌）
+  const barW = Math.max(1.5, step * 0.62)
+  for (let i = 0; i < len; i++) {
+    const h = histVals[offset + i]
+    if (h == null || typeof h === 'string') continue
+    const hn = Number(h)
+    const x = g.l + (i + 0.5) * step
+    const y0 = my(0)
+    const y1 = my(hn)
+    ctx.fillStyle = hn >= 0 ? 'rgba(239,83,80,.55)' : 'rgba(38,166,154,.55)'
+    ctx.fillRect(x - barW / 2, Math.min(y0, y1), barW, Math.max(1, Math.abs(y1 - y0)))
+  }
+
+  // 3. DIF 快线
+  ctx.beginPath()
+  let started = false
+  for (let i = 0; i < len; i++) {
+    const v = difVals[offset + i]
+    if (v == null || typeof v === 'string') { started = false; continue }
+    const x = g.l + (i + 0.5) * step
+    const y = my(Number(v))
+    if (!started) { ctx.moveTo(x, y); started = true }
+    else ctx.lineTo(x, y)
+  }
+  ctx.strokeStyle = '#f4c430'
+  ctx.lineWidth = 1.2
+  ctx.stroke()
+
+  // 4. DEA 慢线
+  ctx.beginPath()
+  started = false
+  for (let i = 0; i < len; i++) {
+    const v = deaVals[offset + i]
+    if (v == null || typeof v === 'string') { started = false; continue }
+    const x = g.l + (i + 0.5) * step
+    const y = my(Number(v))
+    if (!started) { ctx.moveTo(x, y); started = true }
+    else ctx.lineTo(x, y)
+  }
+  ctx.strokeStyle = '#2196f3'
+  ctx.lineWidth = 1.2
+  ctx.stroke()
+
+  // 5. 右侧刻度与当前值标签
+  drawText(ctx, fmt(bound, 3), g.plotRight + 5, p.top + 9, C.text, '8px monospace')
+  drawText(ctx, fmt(-bound, 3), g.plotRight + 5, p.bottom - 2, C.text, '8px monospace')
+  const lastDif = difVals[offset + len - 1]
+  const lastDea = deaVals[offset + len - 1]
+  if (typeof lastDif === 'number' && typeof lastDea === 'number') {
+    const yDif = my(lastDif)
+    ctx.fillStyle = '#f4c430'
+    ctx.fillRect(g.plotRight + 1, yDif - 7, 54, 14)
+    drawText(ctx, fmt(lastDif, 3), g.plotRight + 28, yDif + 3, '#fff', '8px monospace', 'center')
   }
 }
 
@@ -1073,6 +1199,8 @@ function drawTrading(
       // DSA VWAP 指标受 dsa 图层开关控制
       if (layer.layer_id === 'dsa_vwap' && !layers.dsa) return
       if (layer.layer_id === 'bb' && !layers.bb) return
+      // [MACD 副图] - 受 macd 图层开关控制
+      if (layer.layer_id === 'macd' && !layers.macd) return
       const layerData = indicators.data![layer.strategy_id]
       if (layerData) {
         renderIndicatorLayer(ctx, g, layer, layerData, display.length, step, py)
@@ -1171,6 +1299,7 @@ function getDefaultLayers(strategyId?: string): LayerVisibility {
   const layers: LayerVisibility = {
     volume: true,
     dsa: false,
+    macd: false,
     breakout: false,
     selection: false,
     node: false,
@@ -1671,20 +1800,25 @@ export function StrategyChart({
           {(timeframe === '1d' || timeframe === '1w' || timeframe === '1mo'
             ? [{ label: '1月', bars: 22 }, { label: '3月', bars: 66 }, { label: '6月', bars: 132 }, { label: '1年', bars: 250 }, { label: '全部', bars: MAX_VISIBLE_BARS }]
             : [{ label: '1日', bars: 24 }, { label: '5日', bars: 120 }, { label: '20日', bars: 240 }, { label: '60日', bars: 240 }]
-          ).map(opt => (
-            <button
-              key={opt.label}
-              className="tv-range-btn"
-              onClick={() => {
-                const visible = Math.min(opt.bars, calc.length, MAX_VISIBLE_BARS)
-                if (onViewportChange) {
-                  onViewportChange(createDefaultViewport(calc.length, Math.max(MIN_VISIBLE_BARS, visible)))
-                }
-              }}
-            >
-              {opt.label}
-            </button>
-          ))}
+          ).map(opt => {
+            const visibleCount = viewport.toIndex - viewport.fromIndex
+            const targetVisible = Math.min(opt.bars, calc.length, MAX_VISIBLE_BARS)
+            const isActive = viewport.toIndex === calc.length && visibleCount === targetVisible
+            return (
+              <button
+                key={opt.label}
+                className={clsx('tv-range-btn', isActive && 'active')}
+                onClick={() => {
+                  const visible = Math.min(opt.bars, calc.length, MAX_VISIBLE_BARS)
+                  if (onViewportChange) {
+                    onViewportChange(createDefaultViewport(calc.length, Math.max(MIN_VISIBLE_BARS, visible)))
+                  }
+                }}
+              >
+                {opt.label}
+              </button>
+            )
+          })}
         </div>
       </div>
 
