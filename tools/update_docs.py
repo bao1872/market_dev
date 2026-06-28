@@ -11,8 +11,8 @@ Inputs:
     无外部输入，全部从代码事实源提取
 
 Outputs:
-    docs/数据结构.md（6 张 bar 表结构 + instruments 表 + 数据流图 + 保留策略）
-    docs/操作手册.md（API 规格 + 调度任务 + 监控指标 + 故障排查 + 对账操作 + 保留策略）
+    docs/数据结构.md（6 张 bar 表结构 + instruments 表 + 数据流图 + 保留策略 + 策略运行时字段与版本）
+    docs/操作手册.md（API 规格 + 调度任务 + 监控指标 + 故障排查 + 对账操作 + 保留策略 + 策略展示名与版本）
 
 How to Run:
     python tools/update_docs.py           # 生成文档
@@ -283,6 +283,37 @@ def _extract_reconcile_config() -> dict:
     }
 
 
+def _extract_strategy_manifests() -> list[dict]:
+    """从 strategy_assets/manifests/*.yaml 提取策略 manifest 元数据。
+
+    事实源：backend/app/strategy_assets/manifests/*.yaml
+
+    Returns:
+        list[dict]: strategy_id, kind, version, display_name, description, outputs
+    """
+    import glob
+
+    import yaml  # pyyaml 已在 backend 依赖中（FastAPI 间接依赖）
+
+    manifests_dir = os.path.join(_BACKEND_DIR, "app", "strategy_assets", "manifests")
+    manifest_files = sorted(glob.glob(os.path.join(manifests_dir, "*.yaml")))
+    results: list[dict] = []
+    for path in manifest_files:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        results.append(
+            {
+                "strategy_id": data.get("strategy_id", ""),
+                "kind": data.get("kind", ""),
+                "version": str(data.get("version", "")),
+                "display_name": data.get("display_name", ""),
+                "description": data.get("description", ""),
+                "outputs": data.get("outputs", []) or [],
+            }
+        )
+    return results
+
+
 # ---------------------------------------------------------------------------
 # 文档生成：数据结构
 # ---------------------------------------------------------------------------
@@ -420,6 +451,46 @@ def generate_db_schema_doc() -> str:
     for name, val in sorted(sla["all_sla_constants"].items()):
         w(f"- `{name}` = {val}\n")
     w("\n")
+
+    # 6. 策略运行时字段与版本
+    w("## 6. 策略运行时字段与版本\n\n")
+    w("> 事实源: backend/app/strategy_assets/manifests/*.yaml\n\n")
+    manifests = _extract_strategy_manifests()
+    w("| strategy_id | kind | version | display_name |\n")
+    w("|-------------|------|---------|--------------|\n")
+    for m in manifests:
+        w(f"| {m['strategy_id']} | {m['kind']} | {m['version']} | {m['display_name']} |\n")
+    w("\n")
+
+    # 6.1 MonitorSnapshot 运行时字段（watchlist_monitor outputs）
+    w("### 6.1 MonitorSnapshot 运行时字段（watchlist_monitor outputs）\n\n")
+    w("> 监控策略的运行时输出字段（非数据库表字段），通过 MonitorSnapshot 透传到 API 响应。\n\n")
+    watchlist = next(
+        (m for m in manifests if m["strategy_id"] == "watchlist_monitor"), None
+    )
+    if watchlist:
+        w("| field | type | unit | description |\n")
+        w("|-------|------|------|-------------|\n")
+        for out in watchlist["outputs"]:
+            if isinstance(out, dict):
+                key = out.get("key", "")
+                typ = out.get("type", "")
+                unit = out.get("unit", "")
+                desc = out.get("description", "")
+            else:
+                continue
+            w(f"| {key} | {typ} | {unit} | {desc} |\n")
+        w("\n")
+    w("**注**: `previous_close` 与 `change_pct` 为 advice.md v4 新增字段，用于自选股实时涨跌幅展示。\n\n")
+
+    # 6.2 profile_meta 诊断字段（Node Cluster）
+    w("### 6.2 profile_meta 诊断字段（Node Cluster）\n\n")
+    w("> `profile_meta` 由 `prepare_node_cluster_bars` 返回，包含以下诊断字段：\n")
+    w("> - `input_daily_bars` / `input_15m_bars` / `input_minute_bars`：准备后的实际根数\n")
+    w("> - `primary_period` / `low_period`：主周期与低周期\n")
+    w("> - `parameter_version`：参数版本标识\n")
+    w(">\n")
+    w("> 期望值与参数说明详见 [指标参数基线.md](指标参数基线.md#profile_meta-诊断字段node-cluster)\n\n")
 
     return buf.getvalue()
 
@@ -620,6 +691,22 @@ def generate_ops_manual_doc() -> str:
     w("2. 耗时约 11.1 小时（全市场 8000+ 股票 × 5 周期）\n")
     w("3. 回补使用 BACKFILL_COUNTS（大 count）\n")
     w("4. 回补后执行对账验证数据完整性\n\n")
+
+    # 7. 策略展示名与版本
+    w("## 7. 策略展示名与版本\n\n")
+    w("> 事实源: backend/app/strategy_assets/manifests/*.yaml\n")
+    w("> 用户可见名称与版本号，供前端展示与策略版本管理参考。\n\n")
+    manifests = _extract_strategy_manifests()
+    w("| strategy_id | kind | version | display_name | description |\n")
+    w("|-------------|------|---------|--------------|-------------|\n")
+    for m in manifests:
+        w(f"| {m['strategy_id']} | {m['kind']} | {m['version']} | {m['display_name']} | {m['description']} |\n")
+    w("\n")
+    w("**用户可见文案映射**:\n\n")
+    w("- `watchlist_monitor` → 自选股监控 (v1.1.0)\n")
+    w("- `dsa_selector` → 趋势稳定性筛选 (v1.4.0)\n")
+    w("- DSA VWAP → 趋势参考价（用户可见文案，底层字段名 `dsa_vwap` 不变）\n")
+    w("- DSA 方向稳定性 → 趋势稳定性（用户可见文案，底层 `strategy_id` 不变）\n\n")
 
     return buf.getvalue()
 
