@@ -16,7 +16,7 @@ from __future__ import annotations
 NODE_CLUSTER_PRIMARY_PERIOD: str = "1d"
 NODE_CLUSTER_PRIMARY_BARS: int = 250
 NODE_CLUSTER_LOW_PERIOD: str = "15m"
-NODE_CLUSTER_LOW_BARS: int = 1200
+NODE_CLUSTER_LOW_BARS: int = 3600
 NODE_CLUSTER_MINUTE_BARS: int = 2
 
 # Volume Profile 算法参数
@@ -47,11 +47,11 @@ BB_K: float = 2.0
 BB_EVENT_TTL_SECONDS: int = 600
 
 # ===== 各周期指标计算根数 =====
-# [indicator_contract] - 描述: 按 advice.md 口径，1d=250（与 DSA_LOOKBACK 一致），15m/1h=1200（与 Node Cluster 低周期一致），1m=2（穿越检测）
+# [indicator_contract] - 描述: 按 advice.md 口径，1d=250（与 DSA_LOOKBACK 一致），15m/1h=3600（与 Node Cluster 低周期一致），1m=2（穿越检测）
 INDICATOR_BARS: dict[str, int] = {
     "1d": 250,
-    "15m": 1200,
-    "1h": 1200,
+    "15m": 3600,
+    "1h": 3600,
     "1w": 260,
     "1mo": 120,
     "1m": 2,
