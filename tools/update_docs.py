@@ -673,6 +673,41 @@ def generate_indicator_contract_doc() -> str:
         w(f"| {key} | {params[key]} | {desc} |\n")
     w("\n")
 
+    # profile_meta 诊断字段（Node Cluster）
+    # 事实源：app/strategy_assets/algorithms/features/unified_volume_profile.py::prepare_node_cluster_bars
+    # input_*_bars 为运行时实际根数（受数据量限制可能少于下方期望值），期望值取自 indicator_contract 常量
+    from app.strategy_assets.algorithms.features.unified_volume_profile import (
+        _NODE_CLUSTER_PARAMETER_VERSION,
+    )
+    w("## profile_meta 诊断字段（Node Cluster）\n\n")
+    w(
+        "> `profile_meta` 由 `prepare_node_cluster_bars` 返回，用于诊断 Node Cluster 行情准备阶段的输入与参数版本。\n"
+    )
+    w(
+        "> `input_*_bars` 为运行时实际根数（受数据量限制可能少于下方期望值），期望值取自 indicator_contract 常量。\n\n"
+    )
+    w("| 字段 | 期望值 / 来源 | 说明 |\n")
+    w("|------|--------------|------|\n")
+    w(
+        f"| `input_daily_bars` | {params['NODE_CLUSTER_PRIMARY_BARS']}（NODE_CLUSTER_PRIMARY_BARS） | 准备后的日线根数（运行时实际值） |\n"
+    )
+    w(
+        f"| `input_15m_bars` | {params['NODE_CLUSTER_LOW_BARS']}（NODE_CLUSTER_LOW_BARS） | 准备后的 15m 根数（运行时实际值） |\n"
+    )
+    w(
+        f"| `input_minute_bars` | {params['NODE_CLUSTER_MINUTE_BARS']}（NODE_CLUSTER_MINUTE_BARS） | 准备后的 1m 根数（运行时实际值） |\n"
+    )
+    w(
+        f"| `primary_period` | {params['NODE_CLUSTER_PRIMARY_PERIOD']}（NODE_CLUSTER_PRIMARY_PERIOD） | 主周期 |\n"
+    )
+    w(
+        f"| `low_period` | {params['NODE_CLUSTER_LOW_PERIOD']}（NODE_CLUSTER_LOW_PERIOD） | 低周期 |\n"
+    )
+    w(
+        f"| `parameter_version` | {_NODE_CLUSTER_PARAMETER_VERSION} | 参数版本标识（Node Cluster 参数变更时同步更新） |\n"
+    )
+    w("\n")
+
     # DSA 参数
     w("## DSA 参数\n\n")
     w("| 参数名 | 值 | 说明 |\n")

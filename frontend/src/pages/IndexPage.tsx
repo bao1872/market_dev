@@ -515,7 +515,7 @@ export default function IndexPage() {
       },
       {
         key: 'offset_variance_rate',
-        title: '趋势波动系数',
+        title: '趋势波动程度',
         dataType: 'percent',
         sortable: true,
         filterable: true,
