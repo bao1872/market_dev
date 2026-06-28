@@ -26,12 +26,8 @@ parameters:
     default: 2.0
     allowed_scopes: [strategy]
     algorithm_affecting: true
-  # VN 参数（来自 volume_node_monitor）
-  - key: algorithm.lookback
-    type: integer
-    default: 250
-    allowed_scopes: [strategy]
-    algorithm_affecting: true
+  # VN 参数：Node Cluster lookback 由 indicator_contract.VP_LOOKBACK 唯一控制，
+  # 不在 manifest 暴露可编辑入口（advice.md v6 第4条参数固化）
 outputs:
   # BB 输出（来自 bb_monitor）
   - key: bb_upper

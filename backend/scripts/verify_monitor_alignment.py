@@ -37,6 +37,17 @@ sys.path.insert(0, BACKEND_DIR)
 REF_DIR = os.path.join(os.path.dirname(BACKEND_DIR), "ref", "交易")
 sys.path.insert(0, REF_DIR)
 
+# [verify_monitor_alignment] - 描述: VP 参数从 indicator_contract 唯一真源导入，禁止硬编码
+from app.constants.indicator_contract import (
+    NODE_CLUSTER_PRIMARY_BARS,
+    VP_NODE_THRESHOLD_PCT,
+    VP_PEAK_DETECTION_PCT,
+    VP_ROWS,
+    VP_TROUGHS_DETECTION_PCT,
+    VP_TROUGHS_SHOW,
+    VP_VALUE_AREA_PCT,
+)
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("verify_monitor_alignment")
 
@@ -196,13 +207,13 @@ def compare_vp_peak_prices(symbol: str, compute_vp_fn, VPConfig) -> dict:
 
     vp_cfg = VPConfig(
         peaks_show="peaks",
-        profile_lookback_length=360,
-        profile_number_of_rows=100,
-        value_area_threshold=0.70,
-        peaks_detection_percent=0.05,
-        troughs_show="none",
-        troughs_detection_percent=0.07,
-        volume_node_threshold=0.01,
+        profile_lookback_length=NODE_CLUSTER_PRIMARY_BARS,  # 250
+        profile_number_of_rows=VP_ROWS,  # 100
+        value_area_threshold=VP_VALUE_AREA_PCT,  # 0.70
+        peaks_detection_percent=VP_PEAK_DETECTION_PCT,  # 0.05
+        troughs_show=VP_TROUGHS_SHOW,  # "none"
+        troughs_detection_percent=VP_TROUGHS_DETECTION_PCT,  # 0.07
+        volume_node_threshold=VP_NODE_THRESHOLD_PCT,  # 0.01
         highest_n_volume_nodes=0,
         lowest_n_volume_nodes=0,
     )

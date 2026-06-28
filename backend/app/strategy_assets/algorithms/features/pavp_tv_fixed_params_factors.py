@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# [pavp_tv] - 描述: 独立工具，PAVP TV 固定参数复现，非生产链路
+# 参数与 indicator_contract 不一致属预期（用于 TradingView 截图复现对比）
 from __future__ import annotations
 
 import argparse

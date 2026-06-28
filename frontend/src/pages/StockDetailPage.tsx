@@ -88,6 +88,8 @@ export default function StockDetailPage() {
   // [chartViewport] - 周期切换：清空目标周期的 viewport 记录，
   //   让 StrategyChart 回退到默认末尾视区（advice.md 第三节问题 3）
   const handleTimeframeChange = useCallback((tf: string) => {
+    // [feishu-capture] - 描述: 截图模式锁定日线，禁用周期切换（advice.md v6 第 2 条）
+    if (isCaptureMode) return
     setViewportByTimeframe(prev => {
       if (!(tf in prev)) return prev  // 目标周期未保存，无需清空
       const next = { ...prev }
@@ -95,7 +97,7 @@ export default function StockDetailPage() {
       return next
     })
     setTimeframe(tf)
-  }, [])
+  }, [isCaptureMode])
 
   // 数据查询：股票基本信息
   const instrumentQuery = useInstrumentBySymbol(symbol)
@@ -249,11 +251,37 @@ export default function StockDetailPage() {
   // [advice.md] 事件历史加载失败不应阻止截图（事件仅用于图表标注，非截图必要条件）
   // 历史问题：eventsQuery.isSuccess 必填导致事件接口超时时 data-render-ready 永远为 false，
   // capture worker 等待 30s 超时返回 502，图片无法投递
+  //
+  // [feishu-capture] - 描述: 截图模式必须等待 K 线 + 指标 + 所有强制图层数据加载完成
+  //   advice.md v6 第 2 条：FEISHU_CAPTURE_LAYERS 中的图层（dsa/bb/profile/node/poc）数据必须就绪
+  //   indicators 接口返回所有策略数据（compute_all_indicators 遍历 _registry），
+  //   所以 watchlist_monitor（bb/profile/node/poc）和 dsa_selector（dsa）数据都在同一个响应中
+  const feishuLayersReady = isCaptureMode
+    ? (() => {
+        const data = indicatorsQuery.data?.data
+        if (!data) return false
+        // watchlist_monitor 提供 bb/profile/node/poc 数据，校验 bb_upper 非空数组
+        const watchlist = data.watchlist_monitor as
+          | Record<string, (number | string | null)[]>
+          | undefined
+        if (!watchlist) return false
+        const bbUpper = watchlist.bb_upper
+        if (!Array.isArray(bbUpper) || bbUpper.length === 0) return false
+        // dsa_selector 提供 dsa 数据，校验 visual_segments 非空数组
+        const dsaSelector = data.dsa_selector
+        if (!dsaSelector || typeof dsaSelector !== 'object') return false
+        const segments = (dsaSelector as { visual_segments?: unknown[] }).visual_segments
+        if (!Array.isArray(segments)) return false
+        return true
+      })()
+    : true
+
   const isRenderReady =
     isCaptureMode &&
     instrumentQuery.isSuccess &&
     barsQuery.isSuccess &&
-    indicatorsQuery.isSuccess
+    indicatorsQuery.isSuccess &&
+    feishuLayersReady
 
   // 来源徽章与返回链接
   const sourceBadge = source === 'selection' ? '选股结果' : '自选监控'
@@ -694,6 +722,7 @@ export default function StockDetailPage() {
                 onTimeframeChange={handleTimeframeChange}
                 viewport={viewportByTimeframe[timeframe]}
                 onViewportChange={handleViewportChange}
+                isCaptureMode={isCaptureMode}
               />
               {/* 状态栏：行情延迟/复权/时区/策略计算时间 */}
               <div className="tv-chart-status">

@@ -1370,14 +1370,25 @@ export interface ChartLayer {
   anchor_field?: string
   fields: string[]
   hover_fields: string[]
-  // [DSA 分段] - visual_segments 由后端预计算的视觉段，dsa_polyline 渲染器逐段独立绘制（段间不连线）
-  visual_segments?: VisualSegment[]
 }
 
 /** [DSA 分段] - 视觉段：方向 + 点序列，dsa_polyline 渲染器按段独立 beginPath/stroke */
 export interface VisualSegment {
   direction: 1 | -1
   points: { time: string; value: number }[]
+}
+
+// [DSA 数据契约] - dsa_selector 策略的 data 结构（visual_segments 属于 data，不属于 ChartLayer）
+//   与后端 manifest v1.4.1 对齐：visual_segments 由后端预计算，前端从 data.dsa_selector.visual_segments 读取
+export interface DsaSelectorData {
+  time: string[]
+  visual_segments: VisualSegment[]
+  dsa_vwap: (number | null)[]
+  dsa_dir: number[]
+  regime_id: number[]
+  anchor_time: (string | null)[]
+  pivot_type: (string | null)[]
+  pivot_price: (number | null)[]
 }
 
 /** 指标查询参数 */
@@ -1390,8 +1401,9 @@ export interface IndicatorQueryParams {
 /** 指标 API 响应 */
 export interface IndicatorResponse {
   layers: ChartLayer[]
-  // [DSA 分段] - data 值支持 string（anchor_time 为 ISO 字符串|null 数组，其余字段为 number|null）
-  data: Record<string, Record<string, (number | string | null)[]>>
+  // [DSA 数据契约] - data 值支持 string（anchor_time 为 ISO 字符串|null 数组，其余字段为 number|null）
+  //   dsa_selector 键的值为 DsaSelectorData（含 visual_segments），其他策略保持泛型数组结构
+  data: Record<string, DsaSelectorData | Record<string, (number | string | null)[]>>
   errors?: Record<string, string>
   // [DSA 数据源校验] - source_bar_times 指标计算所基于的 K 线时间序列，前端与当前 K 线时间比对，不一致则跳过 DSA 渲染
   source_bar_times?: string[]

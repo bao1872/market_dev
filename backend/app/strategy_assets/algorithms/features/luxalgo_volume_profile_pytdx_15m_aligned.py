@@ -40,6 +40,18 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
+from app.constants.indicator_contract import (
+    NODE_CLUSTER_PRIMARY_BARS,
+    VP_HIGHEST_N_NODES,
+    VP_LOWEST_N_NODES,
+    VP_NODE_THRESHOLD_PCT,
+    VP_PEAK_DETECTION_PCT,
+    VP_ROWS,
+    VP_TROUGHS_DETECTION_PCT,
+    VP_TROUGHS_SHOW,
+    VP_VALUE_AREA_PCT,
+)
+
 
 Placement = Literal["right", "left"]
 NodeMode = Literal["peaks", "clusters", "none", "troughs"]
@@ -49,10 +61,11 @@ GradientMode = Literal["gradient", "classic"]
 
 @dataclass
 class VolumeProfileConfig:
-    profile_lookback_length: int = 360
-    value_area_threshold: float = 0.70
-    profile_number_of_rows: int = 100
-    profile_width: float = 0.31
+    # [luxalgo] - 描述: VP 配置默认值从 indicator_contract 导入，禁止第二套硬编码定义
+    profile_lookback_length: int = NODE_CLUSTER_PRIMARY_BARS  # 250
+    value_area_threshold: float = VP_VALUE_AREA_PCT  # 0.70
+    profile_number_of_rows: int = VP_ROWS  # 100
+    profile_width: float = 0.31  # 算法内部参数，非 indicator_contract 管控
     profile_placement: Placement = "right"
     profile_horizontal_offset: int = 13
     profile_show: bool = True
@@ -66,13 +79,13 @@ class VolumeProfileConfig:
     value_area_background: bool = False
     profile_background: bool = False
 
-    peaks_show: Literal["peaks", "clusters", "none"] = "peaks"
-    peaks_detection_percent: float = 0.05
-    troughs_show: Literal["troughs", "clusters", "none"] = "none"
-    troughs_detection_percent: float = 0.07
-    volume_node_threshold: float = 0.01
-    highest_n_volume_nodes: int = 0
-    lowest_n_volume_nodes: int = 0
+    peaks_show: Literal["peaks", "clusters", "none"] = "peaks"  # 算法内部参数
+    peaks_detection_percent: float = VP_PEAK_DETECTION_PCT  # 0.05
+    troughs_show: Literal["troughs", "clusters", "none"] = VP_TROUGHS_SHOW  # "none"
+    troughs_detection_percent: float = VP_TROUGHS_DETECTION_PCT  # 0.07
+    volume_node_threshold: float = VP_NODE_THRESHOLD_PCT  # 0.01
+    highest_n_volume_nodes: int = VP_HIGHEST_N_NODES  # 0
+    lowest_n_volume_nodes: int = VP_LOWEST_N_NODES  # 0
 
     # TradingView-like colors. Values are RGBA strings or hex strings.
     value_area_up_color: str = "rgba(41,98,255,0.70)"
@@ -987,18 +1000,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--tdx-server", type=str, help="Optional fixed TDX server IP.")
     p.add_argument("--tdx-port", type=int, default=7709, help="TDX server port, default 7709.")
     p.add_argument("--output", type=str, default="volume_profile.html", help="Output HTML path.")
-    p.add_argument("--lookback", type=int, default=360, help="Profile lookback in MAIN-period bars.")
-    p.add_argument("--rows", type=int, default=100, help="Profile number of price rows, 30-130.")
-    p.add_argument("--value-area", type=float, default=70.0, help="Value area percentage, e.g. 70.")
+    # [luxalgo CLI] - 描述: CLI 默认值对齐 indicator_contract 基线（250/5.0/7.0/1.0）
+    p.add_argument("--lookback", type=int, default=NODE_CLUSTER_PRIMARY_BARS, help="Profile lookback in MAIN-period bars.")
+    p.add_argument("--rows", type=int, default=VP_ROWS, help="Profile number of price rows, 30-130.")
+    p.add_argument("--value-area", type=float, default=VP_VALUE_AREA_PCT * 100, help="Value area percentage, e.g. 70.")
     p.add_argument("--placement", choices=["right", "left"], default="right")
     p.add_argument("--poc", choices=["developing", "regular", "none"], default="none")
     p.add_argument("--vah", action="store_true", help="Show VAH line.")
     p.add_argument("--val", action="store_true", help="Show VAL line.")
     p.add_argument("--peaks", choices=["peaks", "clusters", "none"], default="peaks")
-    p.add_argument("--peak-percent", type=float, default=9.0, help="Peak node detection percent.")
-    p.add_argument("--troughs", choices=["troughs", "clusters", "none"], default="none")
-    p.add_argument("--trough-percent", type=float, default=7.0, help="Trough node detection percent.")
-    p.add_argument("--threshold", type=float, default=1.0, help="Volume node threshold percent.")
+    p.add_argument("--peak-percent", type=float, default=VP_PEAK_DETECTION_PCT * 100, help="Peak node detection percent.")
+    p.add_argument("--troughs", choices=["troughs", "clusters", "none"], default=VP_TROUGHS_SHOW)
+    p.add_argument("--trough-percent", type=float, default=VP_TROUGHS_DETECTION_PCT * 100, help="Trough node detection percent.")
+    p.add_argument("--threshold", type=float, default=VP_NODE_THRESHOLD_PCT * 100, help="Volume node threshold percent.")
     p.add_argument("--highest", type=int, default=0, help="Highlight highest N volume nodes.")
     p.add_argument("--lowest", type=int, default=0, help="Highlight lowest N unique volume nodes.")
     p.add_argument("--demo", action="store_true", help="Generate HTML from synthetic main-period demo data.")

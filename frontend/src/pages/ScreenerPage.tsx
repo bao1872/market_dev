@@ -372,6 +372,7 @@ export default function ScreenerPage() {
       {
         key: 'current_trend',
         title: '当前趋势',
+        shortTitle: '趋势',
         dataType: 'text',
         sortable: true,
         filterable: false,
@@ -397,6 +398,7 @@ export default function ScreenerPage() {
       {
         key: 'vwap_ret_avg',
         title: '日均趋势变化',
+        shortTitle: '日均',
         dataType: 'percent',
         sortable: true,
         filterable: true,
@@ -417,6 +419,7 @@ export default function ScreenerPage() {
       {
         key: 'vwap_ret_total',
         title: '本轮趋势涨跌',
+        shortTitle: '累计',
         dataType: 'percent',
         sortable: true,
         filterable: true,
@@ -468,6 +471,7 @@ export default function ScreenerPage() {
       {
         key: 'offset_std',
         title: '趋势附近波动幅度',
+        shortTitle: '波动',
         dataType: 'percent',
         sortable: true,
         filterable: true,
@@ -479,6 +483,7 @@ export default function ScreenerPage() {
       {
         key: 'offset_percentile',
         title: '当前强弱位置',
+        shortTitle: '分位',
         dataType: 'percent',
         sortable: true,
         filterable: true,
@@ -507,6 +512,7 @@ export default function ScreenerPage() {
       {
         key: 'dsa_vwap_dev_pct',
         title: '距趋势参考价',
+        shortTitle: '价差',
         dataType: 'percent',
         sortable: true,
         filterable: true,
@@ -540,6 +546,7 @@ export default function ScreenerPage() {
       {
         key: 'price',
         title: '最新价格',
+        shortTitle: '现价',
         dataType: 'number',
         sortable: true,
         filterable: true,

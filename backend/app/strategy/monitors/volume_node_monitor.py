@@ -42,6 +42,7 @@ from uuid import UUID
 
 import pandas as pd
 
+from app.constants.indicator_contract import NODE_CLUSTER_EVENT_TTL_SECONDS
 from app.models.strategy import StrategyVersion
 from app.strategy.runtime import (
     MarketDataContext,
@@ -59,9 +60,10 @@ from app.strategy_assets.algorithms.features.unified_volume_profile import (
 
 logger = logging.getLogger("strategy.monitors.volume_node_monitor")
 
-# 事件参数（对照 volume_node_monitor.yaml event_types）
+# 事件参数（对照 watchlist_monitor.yaml event_types）
 EVENT_TYPE_NODE_CLUSTER_TOUCH = "node_cluster_touch"
-EVENT_STATE_TTL_SECONDS = 600
+# [volume_node_monitor] - 描述: 事件状态 TTL，从 indicator_contract 唯一真源导入，禁止硬编码
+EVENT_STATE_TTL_SECONDS = NODE_CLUSTER_EVENT_TTL_SECONDS
 
 
 class VolumeNodeMonitor(StrategyRuntime):
@@ -87,22 +89,17 @@ class VolumeNodeMonitor(StrategyRuntime):
         self._last_vp_calc_id: str | None = None
 
     async def initialize(self, version: StrategyVersion) -> None:
-        """从 manifest 提取参数。
+        """初始化监控器，绑定策略版本。
+
+        Node Cluster 参数由 indicator_contract.py 唯一真源控制，禁止从 manifest 覆盖。
 
         Args:
             version: 策略版本 ORM 对象（manifest 含 parameters/outputs/event_types）
         """
         self._strategy_version_id = version.id
-        manifest = version.manifest
-
-        # 提取 algorithm.lookback 参数
-        for param in manifest.get("parameters", []):
-            if param.get("key") == "algorithm.lookback":
-                self._lookback = int(param.get("default", VP_LOOKBACK))
-                break
-
+        # lookback 由 indicator_contract.VP_LOOKBACK 控制，不再从 manifest 读取
         logger.info(
-            "VolumeNodeMonitor 初始化: lookback=%d",
+            "VolumeNodeMonitor 初始化: lookback=%d (from indicator_contract)",
             self._lookback,
         )
 

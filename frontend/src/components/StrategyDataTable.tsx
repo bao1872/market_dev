@@ -29,6 +29,8 @@ export interface DataTableColumn<Row> {
   isSelect?: boolean
   // [StrategyDataTable] - 描述: 表头旁 ? tooltip 帮助文本（hover 显示）
   helpText?: string
+  // [StrategyDataTable] - 描述: 表头缩写（显示用），title 保留完整描述用于 tooltip；缺省时回退到 title
+  shortTitle?: string
 }
 
 export interface DataTableFilter {
@@ -442,6 +444,22 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     [saveColumns],
   )
 
+  // [StrategyDataTable] - 描述: 可见列派生（携带 originalIndex，保留 columns 原始索引用于排序/筛选 state 定位）
+  // 说明：sortColumn / filters / filterPopover.columnIndex 均基于 columns 原始索引，故 visibleColumns 必须保留该映射
+  const visibleColumns = useMemo(
+    () =>
+      columns
+        .map((col, originalIndex) => ({ col, originalIndex }))
+        .filter(({ col }) => !hiddenColumns.has(col.key)),
+    [columns, hiddenColumns],
+  )
+
+  // [StrategyDataTable] - 描述: 可见列宽度之和（用于 table min-width，避免隐藏列后表格被压缩）
+  const visibleColumnsWidthSum = useMemo(
+    () => visibleColumns.reduce((sum, { col }) => sum + (col.width ?? 80), 0),
+    [visibleColumns],
+  )
+
   // ===== 排序切换（三态：无 → 降序 → 升序 → 无，默认最新/最大在前）=====
   const toggleSort = useCallback(
     (index: number) => {
@@ -668,10 +686,13 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
       )}
 
       {/* 表格 */}
-      <table className={clsx('data-table interactive-table', tableClassName)}>
+      <table
+        className={clsx('data-table interactive-table', tableClassName)}
+        style={{ minWidth: `${visibleColumnsWidthSum + (selectable ? 40 : 0)}px` }}
+      >
         <colgroup>
           {selectable && <col />}
-          {columns.map((col) => (
+          {visibleColumns.map(({ col }) => (
             <col
               key={col.key}
               style={col.width !== undefined ? { width: `${col.width}px` } : undefined}
@@ -695,10 +716,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
                 </label>
               </th>
             )}
-            {columns.map((col, i) => {
-              const isHidden = hiddenColumns.has(col.key)
-              if (isHidden) return null
-
+            {visibleColumns.map(({ col, originalIndex: i }) => {
               // V1.5.1：操作列和选择列不参与排序与筛选
               if (col.isAction) {
                 return (
@@ -727,7 +745,9 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
                         title={`按${col.title}排序`}
                         onClick={() => toggleSort(i)}
                       >
-                        <span className="th-label">{col.title}</span>
+                        <span className="th-label" title={col.shortTitle ? col.title : undefined}>
+                          {col.shortTitle ?? col.title}
+                        </span>
                         <span className="sort-icon">
                           {sortColumn === i
                             ? sortDirection === 'asc'
@@ -739,7 +759,11 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
                         </span>
                       </button>
                     )}
-                    {!col.sortable && <span className="th-label">{col.title}</span>}
+                    {!col.sortable && (
+                      <span className="th-label" title={col.shortTitle ? col.title : undefined}>
+                        {col.shortTitle ?? col.title}
+                      </span>
+                    )}
                     {col.helpText && (
                       <span className="th-help" title={col.helpText}>
                         ?
@@ -767,7 +791,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
         <tbody>
           {loading && (
             <tr className="table-empty-row">
-              <td colSpan={columns.length + (selectable ? 1 : 0)}>
+              <td colSpan={visibleColumns.length + (selectable ? 1 : 0)}>
                 <div className="table-empty-state">
                   <b>加载中…</b>
                   <span>正在获取数据</span>
@@ -777,7 +801,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
           )}
           {!loading && error && (
             <tr className="table-empty-row">
-              <td colSpan={columns.length + (selectable ? 1 : 0)}>
+              <td colSpan={visibleColumns.length + (selectable ? 1 : 0)}>
                 <div className="table-empty-state">
                   <b>加载失败</b>
                   <span>{error}</span>
@@ -787,7 +811,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
           )}
           {!loading && !error && pageRows.length === 0 && (
             <tr className="table-empty-row">
-              <td colSpan={columns.length + (selectable ? 1 : 0)}>
+              <td colSpan={visibleColumns.length + (selectable ? 1 : 0)}>
                 <div className="table-empty-state">
                   <b>{emptyText}</b>
                   <span>可清除列筛选或调整条件后重试</span>
@@ -815,8 +839,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
                       </label>
                     </td>
                   )}
-                  {columns.map((col) => {
-                    if (hiddenColumns.has(col.key)) return null
+                  {visibleColumns.map(({ col }) => {
                     const isSticky = !stickyAssigned && !col.isAction
                     if (isSticky) stickyAssigned = true
                     return (

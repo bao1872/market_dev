@@ -11,9 +11,11 @@ import {
   CALCULATION_WINDOWS,
   DISPLAY_GROUPS,
   STRATEGIES,
+  FEISHU_CAPTURE_LAYERS,
   type DisplayGroupDef,
+  type FeishuCaptureLayer,
 } from '../lib/strategy-manifest'
-import type { ChartLayer, IndicatorResponse } from '../api/endpoints'
+import type { ChartLayer, DsaSelectorData, IndicatorResponse } from '../api/endpoints'
 import {
   MAX_VISIBLE_BARS,
   MIN_VISIBLE_BARS,
@@ -95,6 +97,8 @@ export interface StrategyChartProps {
   // 未传入或失效时由组件内部计算默认值（取末尾 MAX_VISIBLE_BARS 根）
   viewport?: ChartViewport
   onViewportChange?: (vp: ChartViewport) => void
+  // [feishu-capture] - 描述: 飞书截图模式，强制开启 FEISHU_CAPTURE_LAYERS 且不可关闭，不读写 localStorage
+  isCaptureMode?: boolean
 }
 
 // 计算后的 Bar（含指标字段）
@@ -212,6 +216,8 @@ interface ChartState {
   focusEventId: string | null
   profileHit: ProfileHit[]
   eventHit: MappedEvent[]
+  // [DSA 数据源校验] - K 线时间与 indicators.source_bar_times 不一致标记，供 JSX 渲染页面提示横幅
+  dsaSourceMismatch: boolean
 }
 
 // ===== 通用工具函数 =====
@@ -864,18 +870,22 @@ function renderIndicatorLine(
 // [DSA 分段] - dsa_polyline 渲染器：基于后端预计算的 visual_segments 逐段独立绘制
 //   段间不连线（每段独立 beginPath/moveTo/lineTo/stroke），上涨 #ff1744 / 下降 #00e676
 //   锚点与 HH/HL/LH/LL 标签通过 segment point 的实际 time 经 normalizeChartTime 匹配 K 线索引
+// [DSA 数据契约] - visual_segments 从 data.dsa_selector.visual_segments 读取（非 layer.visual_segments）
 function renderDsaPolyline(
   ctx: CanvasRenderingContext2D,
   g: Geometry,
   layer: ChartLayer,
-  data: Record<string, (number | string | null)[]>,
+  data: DsaSelectorData | Record<string, (number | string | null)[]>,
   displayTimes: string[],
   step: number,
   py: (v: number) => number,
   timeframe: string,
 ): void {
-  const segments = layer.visual_segments
+  // [DSA 数据契约] - visual_segments 属于 data（DsaSelectorData），不属于 ChartLayer
+  const segments = (data as DsaSelectorData).visual_segments
   if (!segments || segments.length === 0) return
+  // 后续按 Record 索引访问 anchor_time / pivot_type / pivot_price / time 等数组字段
+  const recordData = data as Record<string, (number | string | null)[]>
 
   // K 线时间 → display index 映射（segment point time 经 normalizeChartTime 匹配）
   const klineTimeIndex = new Map<string, number>()
@@ -922,8 +932,8 @@ function renderDsaPolyline(
 
   // 锚点小圆点：anchor_field 提供 anchor_time 数组，非 null 即方向翻转锚点
   //   位置与值通过 anchor_time 经 normalizeChartTime 匹配 K 线索引与 segment point value
-  if (layer.anchor_field && data[layer.anchor_field]) {
-    const anchors = data[layer.anchor_field]
+  if (layer.anchor_field && recordData[layer.anchor_field]) {
+    const anchors = recordData[layer.anchor_field]
     for (let k = 0; k < anchors.length; k++) {
       const a = anchors[k]
       if (a == null) continue  // null 表示该 bar 非锚点
@@ -953,10 +963,10 @@ function renderDsaPolyline(
   //   time 取 data.time[indicator_index]，经 normalizeChartTime 匹配 K 线索引
   const pivotTypeField = layer.fields[4]
   const pivotPriceField = layer.fields[5]
-  if (pivotTypeField && data[pivotTypeField] && pivotPriceField && data[pivotPriceField] && data.time) {
-    const pivotTypes = data[pivotTypeField]
-    const pivotPrices = data[pivotPriceField]
-    const times = data.time
+  if (pivotTypeField && recordData[pivotTypeField] && pivotPriceField && recordData[pivotPriceField] && recordData.time) {
+    const pivotTypes = recordData[pivotTypeField]
+    const pivotPrices = recordData[pivotPriceField]
+    const times = recordData.time
     for (let k = 0; k < pivotTypes.length; k++) {
       const label = pivotTypes[k]
       if (typeof label !== 'string') continue
@@ -1379,7 +1389,8 @@ function drawTrading(
 
   if (indicators?.layers && indicators?.data) {
     indicators.layers.forEach(layer => {
-      const layerData = indicators.data![layer.strategy_id]
+      // [DSA 数据契约] - union 类型（DsaSelectorData | Record）按 Record 索引访问，dsa_polyline 渲染器内部再 cast 到 DsaSelectorData
+      const layerData = indicators.data![layer.strategy_id] as Record<string, (number | string | null)[]>
       if (!layerData) return
       const indexMap = buildDisplayIndexMap(displayTimes, layerData.time, timeframe)
       if (layer.layer_id === 'bb' && layers.bb) {
@@ -1510,6 +1521,8 @@ function drawTrading(
       )
     }
   }
+  // [DSA 数据源校验] - 同步到 state 供组件 useEffect 读取并渲染页面 UI 提示横幅
+  state.dsaSourceMismatch = dsaSourceMismatch
   if (indicators && indicators.layers && indicators.data) {
     indicators.layers.forEach(layer => {
       // DSA VWAP 指标受 dsa 图层开关控制
@@ -1523,7 +1536,8 @@ function drawTrading(
       if (layer.layer_id === 'bb' && (timeframe === '1w' || timeframe === '1mo')) return
       // [MACD 副图] - 受 macd 图层开关控制
       if (layer.layer_id === 'macd' && !layers.macd) return
-      const layerData = indicators.data![layer.strategy_id]
+      // [DSA 数据契约] - union 类型（DsaSelectorData | Record）按 Record 索引访问，dsa_polyline 渲染器内部再 cast 到 DsaSelectorData
+      const layerData = indicators.data![layer.strategy_id] as Record<string, (number | string | null)[]>
       if (layerData) {
         renderIndicatorLayer(ctx, g, layer, layerData, display.length, step, py, displayTimes, timeframe)
       }
@@ -1670,6 +1684,7 @@ export function StrategyChart({
   onTimeframeChange,
   viewport: viewportProp,
   onViewportChange,
+  isCaptureMode = false,
 }: StrategyChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -1694,12 +1709,22 @@ export function StrategyChart({
     focusEventId: null,
     profileHit: [],
     eventHit: [],
+    dsaSourceMismatch: false,
   })
 
   // 图层可见性（localStorage 持久化，v3 key：DSA 改用 dsa_polyline 渲染器后升级版本，
   //   旧 v2 缓存不再读取，避免残留的 DSA 配置影响新版本默认值）
   const storageKey = `detail-chart-strategy-groups-v3:${source}:${strategyId}`
   const [layers, setLayers] = useState<LayerVisibility>(() => {
+    // [feishu-capture] - 描述: 截图模式强制开启 FEISHU_CAPTURE_LAYERS，忽略 localStorage 与策略默认值
+    //   advice.md v6 第 2 条：dsa/bb/profile/node/poc 必须开启
+    if (isCaptureMode) {
+      const forced = { ...getDefaultLayers(strategyId) }
+      FEISHU_CAPTURE_LAYERS.forEach(layerId => {
+        forced[layerId as keyof LayerVisibility] = true
+      })
+      return forced
+    }
     try {
       const saved = localStorage.getItem(storageKey)
       if (saved) return { ...getDefaultLayers(strategyId), ...JSON.parse(saved) }
@@ -1715,6 +1740,10 @@ export function StrategyChart({
 
   // 十字线联动图例 bar 索引（-1 表示无十字线，显示最后一根）
   const [legendIdx, setLegendIdx] = useState(-1)
+
+  // [DSA 数据源校验] - K 线时间与 indicators.source_bar_times 不一致时显示页面 UI 提示横幅
+  //   drawTrading 写入 stateRef，重绘 useEffect 读取后同步到此 state 触发 JSX 重渲染
+  const [dsaMismatch, setDsaMismatch] = useState(false)
 
   // 计算指标
   const calc = useMemo(() => {
@@ -1772,16 +1801,21 @@ export function StrategyChart({
   // 数据/图层变化时重绘
   useEffect(() => {
     draw()
+    // [DSA 数据源校验] - drawTrading 将 mismatch 写入 stateRef，此处同步到 React state 驱动横幅渲染
+    //   setDsaMismatch 相同值时 React 自动 bailout，不会触发额外重渲染循环
+    setDsaMismatch(stateRef.current.dsaSourceMismatch)
   }, [draw, calc, display, mappedEvents, layers, viewport, indicators])
 
   // 持久化图层可见性
   useEffect(() => {
+    // [feishu-capture] - 描述: 截图模式不写 localStorage，避免污染用户偏好（advice.md v6 第 2 条）
+    if (isCaptureMode) return
     try {
       localStorage.setItem(storageKey, JSON.stringify(layers))
     } catch {
       // ignore
     }
-  }, [layers, storageKey])
+  }, [layers, storageKey, isCaptureMode])
 
   // 交互事件绑定（仅一次）
   useEffect(() => {
@@ -1839,7 +1873,7 @@ export function StrategyChart({
         let indicatorHtml = ''
         if (indicatorsRef.current?.layers && indicatorsRef.current?.data) {
           indicatorsRef.current.layers.forEach(layer => {
-            const layerData = indicatorsRef.current!.data[layer.strategy_id]
+            const layerData = indicatorsRef.current!.data[layer.strategy_id] as Record<string, (number | string | null)[]>
             if (!layerData) return
             const fields = layer.hover_fields.length ? layer.hover_fields : layer.fields
             const timeIndex = Array.isArray(layerData.time)
@@ -2053,6 +2087,8 @@ export function StrategyChart({
 
   // 图层切换
   const handleToggleGroup = (groupId: string) => {
+    // [feishu-capture] - 描述: 截图模式下强制图层不可关闭（advice.md v6 第 2 条）
+    if (isCaptureMode && FEISHU_CAPTURE_LAYERS.includes(groupId as FeishuCaptureLayer)) return
     // [DSA 周期限制] - 趋势参考价仅支持日线，非 1d 周期禁用 DSA 开关
     if (groupId === 'dsa' && timeframe !== '1d') return
     setLayers(prev => toggleGroup(groupId, prev))
@@ -2179,6 +2215,12 @@ export function StrategyChart({
       <div className="tv-canvas-wrap" ref={wrapRef} style={{ '--tv-chart-height': `${height}px` } as React.CSSProperties}>
         <canvas ref={canvasRef} />
         <div className="chart-crosshair-tooltip" ref={tipRef} />
+        {/* [DSA 数据源校验] - K 线时间与指标 source_bar_times 不一致时显示页面提示横幅（替代仅 console.warn） */}
+        {dsaMismatch && (
+          <div className="dsa-source-mismatch-banner" style={{ position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)', padding: '4px 12px', background: 'rgba(255,193,7,0.9)', color: '#333', fontSize: 12, borderRadius: 4, zIndex: 10, whiteSpace: 'nowrap' }}>
+            DSA 数据源不一致，已暂停渲染
+          </div>
+        )}
         {!hasData && <div className="tv-chart-empty">暂无行情数据</div>}
       </div>
     </div>

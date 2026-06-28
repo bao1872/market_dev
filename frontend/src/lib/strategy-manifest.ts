@@ -188,7 +188,8 @@ export const STRATEGIES: Record<string, StrategyDef> = {
     id: 'dsa_selector',
     name: '趋势稳定性',
     kind: 'selection',
-    version: '1.4.0',
+    // [DSA 数据契约] - 与后端 manifest v1.4.1 对齐（visual_segments 归属 data.dsa_selector）
+    version: '1.4.1',
     layers: ['volume', 'dsa', 'selection'],
     defaultLayers: ['volume', 'dsa', 'selection', 'macd'],
   },
@@ -214,6 +215,11 @@ export const STRATEGIES: Record<string, StrategyDef> = {
 export const FIELD_DESCRIPTIONS: Record<string, string> = {
   dsa_dir_bars: '当前趋势方向已持续的 K 线根数；负值表示空头方向，正值表示多头方向。',
 }
+
+// [feishu-capture] - 描述: 飞书截图强制图层配置，capture=feishu 时强制开启这些图层且不可关闭
+//   advice.md v6 第 2 条：截图模式下 dsa/bb/profile/node/poc 必须开启，忽略 localStorage 与策略默认值
+export const FEISHU_CAPTURE_LAYERS = ['dsa', 'bb', 'profile', 'node', 'poc'] as const
+export type FeishuCaptureLayer = typeof FEISHU_CAPTURE_LAYERS[number]
 
 // ===== 计算窗口（对应原型 CALCULATION_WINDOWS）=====
 export const CALCULATION_WINDOWS: Record<string, CalculationWindow> = {

@@ -110,3 +110,97 @@ def test_budget_no_volume_node_monitor_yaml_reference():
 
     source = inspect.getsource(budget)
     assert "volume_node_monitor.yaml" not in source
+
+
+# ===== advice.md v6 第4条：Node Cluster 参数固化 =====
+# 目标：所有 Node Cluster 参数由 indicator_contract 唯一真源控制，
+# 禁止从 manifest 覆盖、禁止第二套硬编码定义。
+
+
+def test_volume_node_monitor_no_manifest_lookback():
+    """VolumeNodeMonitor 源码不得从 manifest 读取 algorithm.lookback。
+
+    lookback 应由 indicator_contract.VP_LOOKBACK（经 unified_volume_profile）控制，
+    initialize() 不再从 manifest parameters 提取该参数。
+    """
+    from app.strategy.monitors import volume_node_monitor
+
+    source = inspect.getsource(volume_node_monitor)
+    assert "algorithm.lookback" not in source
+
+
+def test_volume_node_monitor_ttl_from_indicator_contract():
+    """EVENT_STATE_TTL_SECONDS 应从 indicator_contract 导入，不再硬编码 600。"""
+    from app.strategy.monitors import volume_node_monitor
+
+    source = inspect.getsource(volume_node_monitor)
+    assert "from app.constants.indicator_contract import" in source
+    assert "NODE_CLUSTER_EVENT_TTL_SECONDS" in source
+    # 硬编码 600 必须移除
+    assert "EVENT_STATE_TTL_SECONDS = 600" not in source
+
+
+def test_watchlist_monitor_yaml_no_algorithm_lookback():
+    """watchlist_monitor.yaml 不得包含 algorithm.lookback 参数入口。
+
+    Node Cluster lookback 由 indicator_contract 唯一控制，
+    manifest 不再暴露该可编辑入口（BB 参数入口保留）。
+    """
+    yaml_path = _MANIFESTS_DIR / "watchlist_monitor.yaml"
+    with open(yaml_path, encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    params = data.get("parameters", [])
+    keys = [p.get("key") for p in params]
+    assert "algorithm.lookback" not in keys
+
+
+def test_luxalgo_dataclass_defaults_from_indicator_contract():
+    """luxalgo VolumeProfileConfig 默认值应从 indicator_contract 导入。
+
+    dataclass 默认值不得硬编码 360（与基线 250 不一致），
+    应引用 NODE_CLUSTER_PRIMARY_BARS / VP_LOOKBACK 等 indicator_contract 常量。
+    """
+    luxalgo_path = (
+        Path(__file__).parent.parent
+        / "app" / "strategy_assets" / "algorithms" / "features"
+        / "luxalgo_volume_profile_pytdx_15m_aligned.py"
+    )
+    source = luxalgo_path.read_text(encoding="utf-8")
+    # 源码应引用 indicator_contract 常量
+    assert (
+        "from app.constants.indicator_contract import" in source
+        or "NODE_CLUSTER_PRIMARY_BARS" in source
+        or "VP_LOOKBACK" in source
+    )
+    # dataclass 默认值不再硬编码 360
+    assert "profile_lookback_length: int = 360" not in source
+
+
+def test_verify_monitor_alignment_uses_indicator_contract():
+    """verify_monitor_alignment.py 应从 indicator_contract 导入参数。
+
+    VPConfig 构造不得硬编码，应使用 indicator_contract 唯一真源。
+    """
+    verify_path = (
+        Path(__file__).parent.parent / "scripts" / "verify_monitor_alignment.py"
+    )
+    source = verify_path.read_text(encoding="utf-8")
+    assert (
+        "from app.constants.indicator_contract import" in source
+        or "import indicator_contract" in source
+    )
+
+
+def test_pavp_tv_marked_as_independent_tool():
+    """pavp_tv_fixed_params_factors.py 应标注为独立工具。
+
+    该文件参数与 indicator_contract 不一致属预期（用于 TradingView 截图复现），
+    必须在文件头注释中明确标注，避免误用为生产链路。
+    """
+    pavp_path = (
+        Path(__file__).parent.parent
+        / "app" / "strategy_assets" / "algorithms" / "features"
+        / "pavp_tv_fixed_params_factors.py"
+    )
+    source = pavp_path.read_text(encoding="utf-8")
+    assert "独立工具" in source or "independent tool" in source.lower()
