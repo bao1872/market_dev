@@ -1,0 +1,32 @@
+# ===== Node.js 依赖与构建产物（Docker 内重新安装/构建） =====
+node_modules
+dist
+dist-ssr
+.vite
+
+# ===== TypeScript 增量编译缓存（避免污染 Docker 构建的全量类型检查） =====
+*.tsbuildinfo
+
+# ===== 版本控制 =====
+.git
+.gitignore
+
+# ===== IDE 配置 =====
+.vscode
+.idea
+.trae
+
+# ===== 日志与临时文件 =====
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ===== 文档（不影响构建） =====
+*.md
+
+# ===== 操作系统文件 =====
+.DS_Store
+Thumbs.db
+*.swp
+*~

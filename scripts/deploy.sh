@@ -23,6 +23,10 @@ echo "=== 部署前磁盘与镜像状态 ==="
 docker system df -v
 docker images
 
+# [deploy] - 描述: 清理本地 TypeScript 增量缓存，确保 Docker 构建从零开始全量类型检查
+# 根因: tsbuildinfo 缓存会导致本地构建"假通过"而 Docker 构建失败
+find frontend -name "*.tsbuildinfo" -not -path "*/node_modules/*" -delete 2>/dev/null || true
+
 # 构建必要的服务镜像（backend 镜像供所有 Python Worker 复用）
 docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" build backend frontend worker-capture
 

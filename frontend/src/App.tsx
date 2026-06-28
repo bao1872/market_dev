@@ -1,7 +1,8 @@
 // 路由配置：createBrowserRouter + 受保护路由守卫 + Admin 角色守卫
-// 公开路由：/login, /membership-expired
+// 公开路由：/（门户页，lazy 加载）, /login, /membership-expired
 // 受保护路由：其余所有路由（通过 ProtectedLayout 校验 auth store + AppShell 布局）
 // Admin 路由：额外通过 AdminRoute 校验 role === 'admin'
+import { lazy, Suspense } from 'react'
 import { createBrowserRouter, Navigate, Outlet } from 'react-router-dom'
 import { useAuthStore } from './store/auth'
 import AppShell from './components/AppShell'
@@ -17,6 +18,14 @@ import AdminIndexPage from './pages/AdminIndexPage'
 import AdminUsersPage from './pages/AdminUsersPage'
 import AdminStrategiesPage from './pages/AdminStrategiesPage'
 import AdminJobsPage from './pages/AdminJobsPage'
+
+// 门户页 lazy 加载，避免门户动画代码进入业务页面首包
+const LandingPage = lazy(() => import('./pages/LandingPage'))
+
+// 门户页加载占位
+function LandingFallback() {
+  return <div style={{ minHeight: '100vh', background: '#030915' }} />
+}
 
 // 受保护路由布局：未登录或 token 缺失重定向到 /login；已登录用 AppShell 包裹
 function ProtectedLayout() {
@@ -53,17 +62,18 @@ function ProtectedLayout() {
   )
 }
 
-// Admin 角色守卫：非 admin 用户重定向到首页
+// Admin 角色守卫：非 admin 用户重定向到服务总览
 function AdminRoute() {
   const user = useAuthStore((s) => s.user)
   if (user?.role !== 'admin') {
-    return <Navigate to="/" replace />
+    return <Navigate to="/overview" replace />
   }
   return <Outlet />
 }
 
 export const router = createBrowserRouter([
   // 公开路由
+  { path: '/', element: <Suspense fallback={<LandingFallback />}><LandingPage /></Suspense> },
   { path: '/login', element: <LoginPage /> },
   { path: '/membership-expired', element: <MembershipExpiredPage /> },
   // 受保护路由组
@@ -71,7 +81,7 @@ export const router = createBrowserRouter([
     element: <ProtectedLayout />,
     children: [
       // 用户页面
-      { path: '/', element: <IndexPage /> },
+      { path: '/overview', element: <IndexPage /> },
       { path: '/screener', element: <ScreenerPage /> },
       { path: '/watchlist', element: <WatchlistPage /> },
       { path: '/stock/:symbol', element: <StockDetailPage /> },
@@ -89,6 +99,6 @@ export const router = createBrowserRouter([
       },
     ],
   },
-  // 兜底：未匹配路由重定向到首页
-  { path: '*', element: <Navigate to="/" replace /> },
+  // 兜底：未匹配路由重定向到服务总览（保留原"未匹配进服务台"语义）
+  { path: '*', element: <Navigate to="/overview" replace /> },
 ])

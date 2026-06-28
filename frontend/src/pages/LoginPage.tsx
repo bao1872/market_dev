@@ -77,7 +77,7 @@ export default function LoginPage() {
         role: user.roles?.includes('admin') ? 'admin' : 'member',
       })
       useToast.getState().show('登录成功', '已进入量策服务台')
-      navigate(membershipExpired ? '/membership-expired' : '/')
+      navigate(membershipExpired ? '/membership-expired' : '/overview')
     } catch (err) {
       // getMe 失败：logout 清除 token + store 状态，避免残留无效登录态
       useAuthStore.getState().logout()

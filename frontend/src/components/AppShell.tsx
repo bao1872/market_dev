@@ -21,7 +21,7 @@ interface NavItemDef {
 }
 
 const userNavItems: NavItemDef[] = [
-  { path: '/', icon: '⌂', label: '服务总览' },
+  { path: '/overview', icon: '⌂', label: '服务总览' },
   { path: '/screener', icon: '⌁', label: '选股策略' },
   { path: '/watchlist', icon: '☆', label: '我的自选' },
   { path: '/messages', icon: '◉', label: '消息中心' },
@@ -37,7 +37,7 @@ const adminNavItems: NavItemDef[] = [
 
 // 页面标题映射
 const pageTitleMap: Record<string, string> = {
-  '/': '服务总览',
+  '/overview': '服务总览',
   '/screener': '选股策略',
   '/watchlist': '我的自选',
   '/settings': '通知与设置',

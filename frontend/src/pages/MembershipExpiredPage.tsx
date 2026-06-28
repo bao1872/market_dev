@@ -80,7 +80,7 @@ export default function MembershipExpiredPage() {
 
   // 进入服务台
   const handleEnter = () => {
-    navigate('/')
+    navigate('/overview')
   }
 
   // 返回登录
