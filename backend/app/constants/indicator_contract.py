@@ -36,6 +36,11 @@ NODE_CLUSTER_EVENT_TTL_SECONDS: int = 600
 DSA_LOOKBACK: int = 250
 DSA_BUDGET_MS: int = 100
 
+# ===== 图表行情输入参数（advice.md v5 口径）=====
+# [chart_bars] - 描述: load_chart_bars 服务统一为 /bars 和 indicator_service 提供 250 根日线行情输入
+# 与 DSA_LOOKBACK、INDICATOR_BARS["1d"] 保持一致，禁止散落硬编码
+CHART_BARS_COUNT: int = 250
+
 # ===== Bollinger Bands 参数 =====
 BB_WIN: int = 20
 BB_K: float = 2.0
@@ -76,6 +81,7 @@ def all_params() -> dict[str, object]:
         "NODE_CLUSTER_EVENT_TTL_SECONDS": NODE_CLUSTER_EVENT_TTL_SECONDS,
         "DSA_LOOKBACK": DSA_LOOKBACK,
         "DSA_BUDGET_MS": DSA_BUDGET_MS,
+        "CHART_BARS_COUNT": CHART_BARS_COUNT,
         "BB_WIN": BB_WIN,
         "BB_K": BB_K,
         "BB_EVENT_TTL_SECONDS": BB_EVENT_TTL_SECONDS,

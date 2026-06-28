@@ -2,7 +2,9 @@
 
 使用 jsonschema 库进行 Draft 2020-12 校验，校验失败抛出包含字段路径的详细错误。
 
-Schema 来源：doc/trading_platform_development_docs_v1.1/schemas/strategy_manifest.schema.json
+Schema 来源：app/strategy_assets/schemas/strategy_manifest.schema.json
+- 该文件被 git 跟踪，随 Docker 镜像分发（COPY app ./app）
+- 不再依赖 doc/ 目录的 volume 挂载（doc/ 被 .gitignore）
 """
 
 from __future__ import annotations
@@ -13,11 +15,10 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
-# Schema 文件路径（相对工程根 backend/）
+# Schema 文件路径（app/strategy_assets/schemas/，与 manifest 同目录，git 跟踪）
 _SCHEMA_PATH = (
-    Path(__file__).resolve().parent.parent.parent.parent
-    / "doc"
-    / "trading_platform_development_docs_v1.1"
+    Path(__file__).resolve().parent.parent  # app/services -> app
+    / "strategy_assets"
     / "schemas"
     / "strategy_manifest.schema.json"
 )
@@ -97,10 +98,9 @@ if __name__ == "__main__":
     import yaml
 
     example_path = (
-        Path(__file__).resolve().parent.parent.parent.parent
-        / "doc"
-        / "trading_platform_development_docs_v1.1"
-        / "examples"
+        Path(__file__).resolve().parent.parent  # app/services -> app
+        / "strategy_assets"
+        / "manifests"
         / "dsa_selector.yaml"
     )
     with example_path.open("r", encoding="utf-8") as f:

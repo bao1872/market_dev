@@ -1,6 +1,6 @@
 strategy_id: dsa_selector
 kind: selector
-version: 1.4.0
+version: 1.4.1
 display_name: 趋势稳定性筛选
 entrypoint: strategies.selectors.dsa:DSASelector
 input:
@@ -120,19 +120,20 @@ outputs:
 chart_layers:
   - id: dsa_vwap
     name: 趋势参考价
-    renderer: line
+    renderer: dsa_polyline
     pane: price
     color: "#ff1744"
     direction_colored: true
     direction_up_color: "#ff1744"
     direction_down_color: "#00e676"
-    # [DSA 分段] - 透传 regime_field/anchor_field 供前端按 regime 分段渲染
-    # anchor_field 指定 anchor_time 字段，前端在锚点 bar 绘制小圆点
-    # pivot_type/pivot_price 提供 HH/HL/LH/LL 标签，与 Pine 一致
-    regime_field: regime_id
+    # [DSA 可视化契约] - 描述: dsa_polyline 渲染器基于后端预计算的 visual_segments
+    # 逐段独立绘制，段间不连线，与 Pine polyline 对齐。
+    # visual_segments 字段由 compute_indicators 直接透传，无需 regime_field 切段。
+    # anchor_field 指定 anchor_time 字段，前端在锚点 bar 绘制小圆点。
+    # pivot_type/pivot_price 提供 HH/HL/LH/LL 标签，与 Pine 一致。
     anchor_field: anchor_time
     fields: [dsa_vwap, dsa_dir, regime_id, anchor_time, pivot_type, pivot_price]
     hover_fields: [dsa_dir, dsa_vwap, regime_id, pivot_type, pivot_price]
-    description: "趋势参考价线，按趋势分段着色，锚点标记，Pine 标签"
+    description: "趋势参考价线，dsa_polyline 逐段渲染，锚点标记，Pine 标签"
 resource_budget:
   target_ms_per_instrument: 100

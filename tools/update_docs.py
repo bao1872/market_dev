@@ -492,6 +492,28 @@ def generate_db_schema_doc() -> str:
     w(">\n")
     w("> 期望值与参数说明详见 [指标参数基线.md](指标参数基线.md#profile_meta-诊断字段node-cluster)\n\n")
 
+    # 6.3 指标响应字段（advice.md v5 口径）
+    w("### 6.3 指标响应字段（indicator_service）\n\n")
+    w("> 事实源：`backend/app/services/indicator_service.py` + `backend/app/services/chart_bars_service.py`\n")
+    w("> `compute_all_indicators` 响应包含数据源诊断字段与 DSA 可视化契约字段。\n\n")
+    w("**数据源诊断字段**（顶层响应字段）：\n\n")
+    w("| 字段 | 类型 | 说明 |\n")
+    w("|------|------|------|\n")
+    w("| `source_bar_times` | list[str] | 250 个 ISO 日期字符串（行情输入时间序列） |\n")
+    w("| `source_bar_hash` | str | OHLCV 拼接的 SHA256 哈希前 16 位（数据源指纹） |\n\n")
+    w("**DSA 可视化契约字段**（`data.dsa_selector` 内）：\n\n")
+    w("| 字段 | 类型 | 说明 |\n")
+    w("|------|------|------|\n")
+    w("| `time` | list[str] | 250 个 ISO 日期字符串（与 `source_bar_times` 一致） |\n")
+    w("| `visual_segments` | list[dict] | Pine 风格线段，每段含 `direction`(1/-1) 和 `points`([{time,value}]) |\n")
+    w("| `dsa_vwap` | list[float\\|None] | 每 bar 的趋势参考价（因子序列） |\n")
+    w("| `dsa_dir` | list[int] | 每 bar 的方向（1/-1） |\n")
+    w("| `regime_id` | list[int] | 每 bar 所属 regime 编号 |\n")
+    w("| `anchor_time` | list[str\\|None] | 锚点时间（仅锚点 bar 非空，ISO datetime） |\n")
+    w("| `pivot_type` | list[str\\|None] | pivot 类型（HH/HL/LH/LL） |\n")
+    w("| `pivot_price` | list[float\\|None] | pivot 价格 |\n\n")
+    w("> 详细渲染规则见 [策略与指标口径.md](策略与指标口径.md#27-图表渲染契约dsa_polyline--visual_segments)\n\n")
+
     return buf.getvalue()
 
 
@@ -704,7 +726,7 @@ def generate_ops_manual_doc() -> str:
     w("\n")
     w("**用户可见文案映射**:\n\n")
     w("- `watchlist_monitor` → 自选股监控 (v1.1.0)\n")
-    w("- `dsa_selector` → 趋势稳定性筛选 (v1.4.0)\n")
+    w("- `dsa_selector` → 趋势稳定性筛选 (v1.4.1，新增 `dsa_polyline` renderer + `visual_segments` 可视化契约)\n")
     w("- DSA VWAP → 趋势参考价（用户可见文案，底层字段名 `dsa_vwap` 不变）\n")
     w("- DSA 方向稳定性 → 趋势稳定性（用户可见文案，底层 `strategy_id` 不变）\n\n")
 
@@ -806,6 +828,24 @@ def generate_indicator_contract_doc() -> str:
     for key, desc in dsa_params:
         w(f"| {key} | {params[key]} | {desc} |\n")
     w("\n")
+
+    # 图表行情输入参数（advice.md v5 口径）
+    w("## 图表行情输入参数\n\n")
+    w("> `load_chart_bars` 服务（`backend/app/services/chart_bars_service.py`）统一为 `/bars` API 和 `indicator_service` 提供 250 根日线行情输入。\n")
+    w("> 数据源：DB 优先 + Pytdx 兜底，前复权 + DatetimeIndex 升序 + 去重 + 未完成 Bar 过滤。\n\n")
+    w("| 参数名 | 值 | 说明 |\n")
+    w("|--------|-----|------|\n")
+    chart_params = [
+        ("CHART_BARS_COUNT", "图表行情输入根数（与 DSA_LOOKBACK、INDICATOR_BARS['1d'] 一致）"),
+    ]
+    for key, desc in chart_params:
+        w(f"| {key} | {params[key]} | {desc} |\n")
+    w("\n")
+    w("**诊断字段**（`indicator_service` 响应）：\n\n")
+    w("| 字段 | 类型 | 说明 |\n")
+    w("|------|------|------|\n")
+    w("| `source_bar_times` | list[str] | 250 个 ISO 日期字符串（行情输入时间序列） |\n")
+    w("| `source_bar_hash` | str | OHLCV 拼接的 SHA256 哈希前 16 位（数据源指纹） |\n\n")
 
     # Bollinger Bands 参数
     w("## Bollinger Bands 参数\n\n")

@@ -234,9 +234,11 @@
           "renderer": {
             "enum": [
               "line",
+              "dsa_polyline",
               "price_zone",
               "marker",
-              "band"
+              "band",
+              "macd"
             ]
           },
           "pane": {
