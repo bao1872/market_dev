@@ -69,17 +69,13 @@ event_types:
   # BB 事件（来自 bb_monitor）
   - key: bb_upper_touch
     dedupe: boundary_cooldown
-    state_ttl_seconds: 600
   - key: bb_mid_touch
     dedupe: boundary_cooldown
-    state_ttl_seconds: 600
   - key: bb_lower_touch
     dedupe: boundary_cooldown
-    state_ttl_seconds: 600
   # VN 事件（来自 volume_node_monitor）
   - key: node_cluster_touch
     dedupe: touch_episode
-    state_ttl_seconds: 600
 chart_layers:
   - id: bb
     name: 布林带

@@ -42,6 +42,7 @@ from app.api.health import router as health_router
 from app.api.indicators import router as indicators_router
 from app.api.instruments import router as instruments_router
 from app.api.market import router as market_router
+from app.api.me import router as me_router
 from app.api.metrics import http_request_duration_seconds, http_requests_total
 from app.api.monitor_states import router as monitor_states_router
 from app.api.notifications import router as notifications_router
@@ -126,6 +127,8 @@ app = FastAPI(
 app.include_router(health_router)
 # 认证路由（R2：登录/刷新/当前用户）
 app.include_router(auth_router)
+# 当前用户权益路由（plan_contract：套餐/监控上限/已使用/剩余/到期日）
+app.include_router(me_router)
 # 股票主数据路由（R3）
 app.include_router(instruments_router)
 # 交易日历路由（R4）

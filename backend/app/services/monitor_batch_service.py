@@ -43,7 +43,7 @@ from app.models.strategy_event import StrategyEvent
 from app.models.stock_memo import StockMemo
 from app.models.watchlist import UserWatchlistItem
 from app.repositories import monitor_state_repository, strategy_event_repository
-from app.repositories.bar_repository import get_bars
+from app.repositories.bar_repository import get_bars, get_recent_bars
 from app.schemas.notification import NotificationMessageDTO
 from app.services.instrument_maintenance_service import is_index_symbol
 from app.services.notification_service import create_message
@@ -61,13 +61,10 @@ _LEASE_DURATION_SECONDS = 300  # 租约时长（秒）
 _MAX_RETRIES = 5  # 最大重试次数
 _RETRY_BACKOFF_BASE_SECONDS = 30  # 重试退避基数（秒），实际退避 = 30 * 2^retry_count
 
-# 行情查询范围（天数，用于从数据库拉取足够多的数据）
-_DAILY_FETCH_DAYS = 370  # 查询 370 天，足以覆盖 250 个交易日
-_15MIN_FETCH_DAYS = 200  # 查询 200 天，足以覆盖 1200 根 15m bar（每天约 16 根）
-
-# Node Cluster 取数根数（从基线读取，按排序去重后 tail，不用自然日近似）
+# [Node Cluster] - 描述: 取数根数从 indicator_contract 唯一真源读取，通过
+# bar_repository.get_recent_bars 按 LIMIT N 取最近 N 根（不再用自然日估算）
 _DAILY_LOOKBACK_BARS = IC.NODE_CLUSTER_PRIMARY_BARS  # 250
-_15MIN_LOOKBACK_BARS = IC.NODE_CLUSTER_LOW_BARS  # 1200
+_15MIN_LOOKBACK_BARS = IC.NODE_CLUSTER_LOW_BARS  # 3600
 _MINUTE_LOOKBACK_BARS = IC.NODE_CLUSTER_MINUTE_BARS  # 2
 
 # 北京时间
@@ -506,29 +503,23 @@ class MonitorBatchService:
             return []
 
         # c. 拉取行情
-        bars_daily_result = await get_bars(
+        # [Node Cluster] - 描述: 按 LIMIT N 取最近 N 根，根数从 indicator_contract 唯一真源读取
+        # （IC.NODE_CLUSTER_PRIMARY_BARS=250 / IC.NODE_CLUSTER_LOW_BARS=3600）
+        bars_daily = await get_recent_bars(
             db, instrument_id,
-            timeframe="1d",
-            start_date=today - timedelta(days=_DAILY_FETCH_DAYS),
-            end_date=today,
+            period="1d",
+            limit=_DAILY_LOOKBACK_BARS,
             adjustment="qfq",
         )
-        bars_daily = bars_daily_result.bars
-        # [Node Cluster] - 描述: 按 DatetimeIndex 去重排序后 tail(250)，与 prepare_node_cluster_bars 一致
-        if not bars_daily.empty:
-            bars_daily = bars_daily[~bars_daily.index.duplicated(keep="last")].sort_index().tail(_DAILY_LOOKBACK_BARS)
 
         bars_15min = pd.DataFrame()
         try:
-            bars_15min_result = await get_bars(
+            bars_15min = await get_recent_bars(
                 db, instrument_id,
-                timeframe="15m",
-                start_date=today - timedelta(days=_15MIN_FETCH_DAYS),
-                end_date=today,
+                period="15m",
+                limit=_15MIN_LOOKBACK_BARS,
                 adjustment="qfq",
             )
-            # [Node Cluster] - 描述: 按 DatetimeIndex 去重排序后 tail(1200)，与 prepare_node_cluster_bars 一致
-            bars_15min = bars_15min_result.bars[~bars_15min_result.bars.index.duplicated(keep="last")].sort_index().tail(_15MIN_LOOKBACK_BARS)
         except Exception as exc:
             logger.warning("15min行情拉取失败 %s: %s", symbol, exc)
 
@@ -1578,19 +1569,13 @@ class MonitorBatchService:
         )
 
         # 获取日线行情
-        now = datetime.now(UTC)
-        today = now.date()
-        bars_daily_result = await get_bars(
+        # [Node Cluster] - 描述: 按 LIMIT N 取最近 N 根，根数从 indicator_contract 唯一真源读取
+        bars_daily = await get_recent_bars(
             db, instrument_id,
-            timeframe="1d",
-            start_date=today - timedelta(days=_DAILY_FETCH_DAYS),
-            end_date=today,
+            period="1d",
+            limit=_DAILY_LOOKBACK_BARS,
             adjustment="qfq",
         )
-        bars_daily = bars_daily_result.bars
-        # [Node Cluster] - 描述: 按 DatetimeIndex 去重排序后 tail(250)，与 prepare_node_cluster_bars 一致
-        if not bars_daily.empty:
-            bars_daily = bars_daily[~bars_daily.index.duplicated(keep="last")].sort_index().tail(_DAILY_LOOKBACK_BARS)
         if bars_daily.empty or len(bars_daily) < 20:
             logger.debug("日线行情不足，跳过 PNG 渲染: symbol=%s bars=%d", symbol, len(bars_daily))
             return None
@@ -1662,15 +1647,12 @@ class MonitorBatchService:
         ensure_plotly_mock()
 
         # 获取 15min 行情（低周期成交量分配来源）
-        now = datetime.now(UTC)
-        today = now.date()
-        bars_15min_result = await get_bars(
+        # [Node Cluster] - 描述: 按 LIMIT N 取最近 N 根，根数从 indicator_contract 唯一真源读取
+        bars_15min = await get_recent_bars(
             db, instrument_id,
-            timeframe="15m",
-            start_date=today - timedelta(days=_15MIN_FETCH_DAYS),
-            end_date=today,
+            period="15m",
+            limit=_15MIN_LOOKBACK_BARS,
         )
-        bars_15min = bars_15min_result.bars.tail(_15MIN_LOOKBACK_BARS)
         if bars_15min.empty:
             return None
 

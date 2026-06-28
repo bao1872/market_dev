@@ -26,6 +26,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants.indicator_contract import DAILY_HISTORY_BARS
 from app.core.time import now_shanghai
 from app.models.instrument import Instrument
 from app.services.indicator_service import compute_all_indicators
@@ -43,8 +44,8 @@ _CACHE_TTL_SECONDS = 60
 # [MonitorSnapshot] - 默认复权方式（A 股标准前复权）
 _DEFAULT_ADJ = "qfq"
 
-# [MonitorSnapshot] - 默认返回 bar 数（快照只需最新值，250 与图表默认一致）
-_DEFAULT_BARS = 250
+# [MonitorSnapshot] - 描述: 默认返回 bar 数，引用 indicator_contract.DAILY_HISTORY_BARS 唯一真源
+_DEFAULT_BARS = DAILY_HISTORY_BARS
 
 
 @dataclass(frozen=True)

@@ -8,6 +8,7 @@ import OpportunityWorkflow from '@/components/landing/OpportunityWorkflow'
 import PricingSection from '@/components/landing/PricingSection'
 import LegalModal from '@/components/landing/LegalModal'
 import LandingFooter from '@/components/landing/LandingFooter'
+import BrandLogo from '@/components/BrandLogo'
 import { navLinks, features, type LegalType } from './landingData'
 import styles from './LandingPage.module.scss'
 
@@ -51,8 +52,7 @@ export default function LandingPage() {
       <header className={styles.siteHeader}>
         <div className={`${styles.container} ${styles.nav}`}>
           <a className={styles.brand} href="#home">
-            <span className={styles.brandMark}><i></i><b></b></span>
-            <span>盘迹</span>
+            <BrandLogo variant="landing" />
             <small>数据驱动的股票跟踪工具</small>
           </a>
           <nav className={styles.navLinks} aria-label="主导航">

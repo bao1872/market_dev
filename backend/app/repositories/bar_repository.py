@@ -1775,6 +1775,119 @@ async def get_bars(
     )
 
 
+# [行情] - 描述: period → (ORM 模型, 时间列, 是否日线类) 映射，供 get_recent_bars 使用
+_PERIOD_MODEL_MAP: dict[str, tuple[type, str, bool]] = {
+    "1d": (BarDaily, "trade_date", True),
+    "15m": (Bar15Min, "trade_time", False),
+    "1m": (BarMinute, "trade_time", False),
+}
+
+
+async def get_recent_bars(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    period: str,
+    limit: int,
+    adjustment: str | None = None,
+) -> pd.DataFrame:
+    """按根数获取最近 N 根 bar（DB 优先查询，统一升序返回）。
+
+    替代旧的自然日估算取数（如 _DAILY_FETCH_DAYS=370 → tail(250)），统一为
+    "按根数 LIMIT N" 语义，避免"自然日 vs 交易日"换算误差。
+
+    实现逻辑（advice.md v6 第4条：取数根数从基线读取）：
+        1. 按 instrument_id 过滤，order_by(desc).limit(N) 查询最近 N 根
+        2. 恢复升序返回（pd.DataFrame.sort_index），与 fetch_*_bars 返回顺序一致
+        3. 前复权：adjustment="qfq" 时从 bars_daily 提取 adj_factor 应用
+
+    与 fetch_*_bars 的差异：
+        - fetch_*_bars 按日期范围查询（start_date/end_date）
+        - get_recent_bars 按根数查询（LIMIT N），更适合"取最近 250 根日线"场景
+        - 不自动从 pytdx 拉取（避免隐藏写入），DB 无数据时返回空 DataFrame
+
+    Args:
+        session: 异步会话
+        instrument_id: 标的 UUID
+        period: 周期 ("1d", "15m", "1m")
+        limit: 返回最近 N 根（受控参数应从 indicator_contract 读取，如
+            IC.NODE_CLUSTER_PRIMARY_BARS / IC.NODE_CLUSTER_LOW_BARS /
+            IC.NODE_CLUSTER_MINUTE_BARS）
+        adjustment: 复权方式（None=不复权, "qfq"=前复权）
+
+    Returns:
+        DataFrame: index 为 DatetimeIndex（升序），含 open/high/low/close/volume/
+        amount/adj_factor 列。无数据时返回空 DataFrame。
+
+    Raises:
+        ValueError: period 不在支持列表中
+        Exception: DB 查询或前复权失败时 re-raise（不吞没）
+    """
+    if period not in _PERIOD_MODEL_MAP:
+        raise ValueError(
+            f"不支持的 period: {period}，仅支持 {list(_PERIOD_MODEL_MAP.keys())}"
+        )
+    if limit <= 0:
+        raise ValueError(f"limit 必须 > 0，当前 {limit}")
+
+    model, time_col, is_daily = _PERIOD_MODEL_MAP[period]
+    time_attr = getattr(model, time_col)
+
+    # 1. DB 查询：order_by(desc).limit(N) 取最近 N 根
+    try:
+        result = await session.execute(
+            select(
+                time_attr,
+                model.open,
+                model.high,
+                model.low,
+                model.close,
+                model.volume,
+                model.amount,
+                model.adj_factor,
+            )
+            .where(model.instrument_id == instrument_id)
+            .order_by(time_attr.desc())
+            .limit(limit)
+        )
+        rows = result.all()
+    except Exception as exc:
+        logger.warning(
+            "get_recent_bars 查询失败 instrument_id=%s period=%s limit=%d: %s",
+            instrument_id, period, limit, exc,
+        )
+        raise
+
+    if not rows:
+        return pd.DataFrame()
+
+    # 2. 构建 DataFrame，恢复升序
+    df = pd.DataFrame(rows, columns=[time_col] + _BAR_COLUMNS)
+    _ts = pd.to_datetime(df[time_col])
+    if not is_daily:
+        # 分钟线：DB 读取的 timestamptz 返回 UTC 时区感知 datetime，转为 naive 上海时间
+        if getattr(_ts.dt, "tz", None) is not None:
+            _ts = _ts.dt.tz_convert("Asia/Shanghai").dt.tz_localize(None)
+    df[time_col] = _ts
+    df = df.set_index(time_col).sort_index()
+    for col in _BAR_COLUMNS:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # 3. 前复权处理（adjustment="qfq"）
+    if adjustment == "qfq" and not df.empty:
+        try:
+            adj_factor_df = await _get_adj_factor_df(session, instrument_id)
+            if not adj_factor_df.empty:
+                df = apply_adj_factor_to_bars(df, adj_factor_df, intraday=not is_daily)
+        except Exception as exc:
+            logger.warning(
+                "get_recent_bars 前复权失败 instrument_id=%s period=%s: %s",
+                instrument_id, period, exc,
+            )
+            raise
+
+    return df
+
+
 if __name__ == "__main__":
     # 自测入口：验证函数签名与基础逻辑（不连 DB，无副作用）
     import inspect

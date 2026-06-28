@@ -186,7 +186,7 @@ export const LAYERS: Record<string, LayerDef> = {
 export const STRATEGIES: Record<string, StrategyDef> = {
   dsa_selector: {
     id: 'dsa_selector',
-    name: '趋势稳定性',
+    name: '趋势选股',
     kind: 'selection',
     // [DSA 数据契约] - 与后端 manifest v1.4.1 对齐（visual_segments 归属 data.dsa_selector）
     version: '1.4.1',
@@ -278,7 +278,7 @@ export interface DisplayGroupDef {
 }
 
 export const DISPLAY_GROUPS: Record<string, DisplayGroupDef> = {
-  dsa: { id: 'dsa', name: '趋势稳定性', shortName: '趋势', section: '选股策略', color: '#ff1744', description: '趋势参考价 · 选股命中标记', layers: ['dsa', 'selection'], anchorLayer: 'dsa' },
+  dsa: { id: 'dsa', name: '趋势选股', shortName: '趋势', section: '选股策略', color: '#ff1744', description: '趋势参考价 · 选股命中标记', layers: ['dsa', 'selection'], anchorLayer: 'dsa' },
   breakout: { id: 'breakout', name: '突破强度', shortName: '突破', section: '选股策略', color: '#ef5350', description: '压力区 · 突破确认 · 选股命中标记', layers: ['breakout', 'selection'], anchorLayer: 'breakout' },
   node: { id: 'node', name: '成交量节点', shortName: '节点', section: '监控策略', color: '#4f7cff', description: '筹码峰 · 节点区间 · POC · 事件标记', layers: ['profile', 'node', 'poc'], anchorLayer: 'node' },
   bb: { id: 'bb', name: '布林带', shortName: 'BB', section: '监控策略', color: '#9c27b0', description: '布林带 · SMA(20) ± 2σ', layers: ['bb'], anchorLayer: 'bb' },

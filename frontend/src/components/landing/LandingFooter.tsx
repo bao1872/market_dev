@@ -1,7 +1,8 @@
-// [门户] - 描述: 页脚组件（IP/二维码/更新记录/协议链接/版权）
+// [门户] - 描述: 页脚组件（品牌标识/IP/二维码/更新记录/协议链接/版权）
 // 协议链接点击触发 onLegalClick 回调，由父组件打开 LegalModal
 // TODO: 运营主体、联系方式、第三方服务清单、退款规则待配置，不虚构主体信息
 import { updateRecords, type LegalType } from '@/pages/LandingPage/landingData'
+import BrandLogo from '@/components/BrandLogo'
 import styles from '@/pages/LandingPage/LandingPage.module.scss'
 
 export interface LandingFooterProps {
@@ -11,7 +12,11 @@ export interface LandingFooterProps {
 export default function LandingFooter({ onLegalClick }: LandingFooterProps) {
   return (
     <footer className={styles.footer} id="about">
-      <div className={`${styles.container} ${styles.footerGrid}`}>
+      <div className={styles.container}>
+        <div className={styles.footerBrand}>
+          <BrandLogo variant="footer" />
+        </div>
+        <div className={styles.footerGrid}>
         {/* IP 形象区 */}
         <div className={styles.ipRow}>
           <div className={styles.avatar}></div>
@@ -56,6 +61,7 @@ export default function LandingFooter({ onLegalClick }: LandingFooterProps) {
         <div className={styles.copyright}>
           <div>© 2026 盘迹 PanJi</div>
           <div>All Rights Reserved.</div>
+        </div>
         </div>
       </div>
     </footer>

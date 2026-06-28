@@ -1,7 +1,7 @@
-"""DSA 选股策略测试 - 验证 DSASelector 插件的运行、结果输出和资源预算。
+"""趋势选股策略测试 - 验证 DSASelector 插件的运行、结果输出和资源预算。
 
 测试内容：
-1. 测试 DSA 选股运行（mock MarketDataContext，生成模拟多头趋势行情）
+1. 测试趋势选股运行（mock MarketDataContext，生成模拟多头趋势行情）
 2. 测试结果输出标准 StrategyResult + metrics（验证 yaml 字段对齐）
 3. 测试资源预算超时（BudgetGuard 超时抛出 BudgetExceededError）
 4. 测试 BudgetGuard 正常执行

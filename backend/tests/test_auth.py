@@ -81,6 +81,8 @@ CREATE TABLE IF NOT EXISTS memberships (
     status TEXT NOT NULL DEFAULT 'active',
     started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     expires_at DATETIME NOT NULL,
+    plan_code TEXT,
+    monitor_limit INTEGER,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 )

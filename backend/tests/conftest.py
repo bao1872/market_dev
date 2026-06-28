@@ -188,7 +188,7 @@ async def dsa_selector_strategy(db_session):
     definition = StrategyDefinition(
         strategy_key="dsa_selector",
         kind="selector",
-        display_name="DSA选股策略",
+        display_name="趋势选股",
     )
     db_session.add(definition)
     await db_session.flush()

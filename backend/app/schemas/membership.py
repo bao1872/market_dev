@@ -61,32 +61,51 @@ class MembershipResponse(BaseModel):
 
 
 class InviteCodeCreate(BaseModel):
-    """邀请码生成请求。"""
+    """邀请码生成请求 - 绑定 plan_code/grant_months。
+
+    plan_code 默认 observe_20，grant_months 默认 1（保持向后兼容）。
+    """
 
     count: int = Field(default=1, ge=1, le=100, description="生成数量（1-100）")
     note: str | None = Field(default=None, max_length=200, description="批次备注")
+    plan_code: str = Field(
+        default="observe_20",
+        description="套餐代码 observe_20/research_50",
+    )
+    grant_months: int = Field(
+        default=1,
+        ge=1,
+        le=36,
+        description="兑换后增加的自然月数（1-36）",
+    )
 
 
 class InviteCodeResponse(BaseModel):
-    """邀请码响应 - 含明文（仅生成时返回）。"""
+    """邀请码响应 - 含明文（仅生成时返回）+ 套餐快照。"""
 
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID = Field(..., description="邀请码 ID")
     code: str = Field(..., description="邀请码明文（仅生成时返回）")
-    grant_days: int = Field(..., description="兑换后增加天数")
+    grant_days: int = Field(..., description="兑换后增加天数（旧字段，保留兼容性）")
+    plan_code: str | None = Field(None, description="套餐代码 observe_20/research_50")
+    monitor_limit: int | None = Field(None, description="监控数量上限快照")
+    grant_months: int | None = Field(None, description="兑换后增加的自然月数")
     note: str | None = Field(None, description="批次备注")
     created_at: datetime = Field(..., description="创建时间")
 
 
 class InviteCodeListItem(BaseModel):
-    """邀请码列表项 - 不含明文。"""
+    """邀请码列表项 - 不含明文，含套餐快照。"""
 
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID = Field(..., description="邀请码 ID")
     status: str = Field(..., description="unused/used/revoked")
-    grant_days: int = Field(..., description="兑换后增加天数")
+    grant_days: int = Field(..., description="兑换后增加天数（旧字段，保留兼容性）")
+    plan_code: str | None = Field(None, description="套餐代码 observe_20/research_50")
+    monitor_limit: int | None = Field(None, description="监控数量上限快照")
+    grant_months: int | None = Field(None, description="兑换后增加的自然月数")
     note: str | None = Field(None, description="批次备注")
     created_by: UUID = Field(..., description="创建者 user_id")
     created_at: datetime = Field(..., description="创建时间")

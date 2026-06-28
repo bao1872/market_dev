@@ -1,4 +1,4 @@
-// 选股策略页（受保护路由）
+// 趋势选股页（受保护路由）
 // 数据流：选择 selector 策略 → 加载该策略的 published runs → 选择 run_id → 服务端筛选/排序/分页
 // 路由：/screener
 // 依赖 hooks：useStrategies / usePublishedRuns / useStrategyRunResults / useAddToWatchlist
@@ -159,14 +159,6 @@ function toRow(r: StrategyResult): ScreenerRow {
     market: r.instrument_market ?? '',
     payload: r.payload,
   }
-}
-
-// [ScreenerPage] - 描述: 策略通俗说明（保留策略名 + 增加一句通俗解释，普通用户友好）
-function getStrategyHint(strategyKey: string): string {
-  const k = strategyKey.toLowerCase()
-  if (k.includes('dsa')) return '以下股票符合近期趋势特征，可关注其趋势延续性'
-  if (k.includes('breakout')) return '以下股票出现突破信号，可关注其突破有效性'
-  return '以下为策略选出的股票，可进一步查看详情'
 }
 
 // ===== 主组件 =====
@@ -355,7 +347,7 @@ export default function ScreenerPage() {
     )
   }, [])
 
-  // 趋势稳定性筛选列
+  // 趋势选股列
   const dsaColumns: DataTableColumn<ScreenerRow>[] = useMemo(
     () => [
       {
@@ -370,14 +362,14 @@ export default function ScreenerPage() {
         render: renderStock,
       },
       {
-        key: 'current_trend',
+        // [ScreenerPage] - 描述: 趋势列 key=dsa_dir_bars，筛选直接透传后端 metric_filters（多头>0/空头<0/持续天数）
+        key: 'dsa_dir_bars',
         title: '当前趋势',
         shortTitle: '趋势',
-        dataType: 'text',
+        dataType: 'number',
         sortable: true,
-        filterable: false,
+        filterable: true,
         width: 90,
-        helpText: '原始字段：dsa_dir_bars。专业定义：当前趋势方向及持续天数，正值为上涨，负值为下跌。',
         sortValue: (row) => {
           const v = pickPayload(row.payload, ['dsa_dir_bars', 'dsa_duration', 'dir_duration', 'duration'])
           const n = toNum(v)
@@ -403,7 +395,6 @@ export default function ScreenerPage() {
         sortable: true,
         filterable: true,
         width: 88,
-        helpText: '原始字段：vwap_ret_avg / dsa_avg_return。专业定义：趋势运行期间价格相对趋势参考价的平均偏离收益，反映趋势内的平均表现强度。',
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['vwap_ret_avg', 'dsa_avg_return', 'vwap_avg_return', 'avg_return']) ?? 0),
         render: (row) => {
@@ -424,7 +415,6 @@ export default function ScreenerPage() {
         sortable: true,
         filterable: true,
         width: 88,
-        helpText: '原始字段：vwap_ret_total / dsa_total_return。专业定义：趋势起点至当前的累计收益，反映趋势整体表现。',
         sortValue: (row) =>
           Number(
             pickPayload(row.payload, [
@@ -457,7 +447,6 @@ export default function ScreenerPage() {
         sortable: true,
         filterable: true,
         width: 90,
-        helpText: '原始字段：offset_mean / shift_mean。专业定义：当前价格相对趋势参考价的平均偏离程度，正值表示价格高于锚点。',
         sortValue: (row) => Number(pickPayload(row.payload, ['offset_mean', 'shift_mean']) ?? 0),
         render: (row) => {
           const v = pickPayload(row.payload, ['offset_mean', 'shift_mean'])
@@ -477,7 +466,6 @@ export default function ScreenerPage() {
         sortable: true,
         filterable: true,
         width: 90,
-        helpText: '原始字段：offset_std / shift_std。专业定义：当前价格相对趋势参考价的偏离率标准差，反映偏离波动。',
         sortValue: (row) => Number(pickPayload(row.payload, ['offset_std', 'shift_std']) ?? 0),
         render: (row) => fmtRatioAsPct(pickPayload(row.payload, ['offset_std', 'shift_std'])),
       },
@@ -489,7 +477,6 @@ export default function ScreenerPage() {
         sortable: true,
         filterable: true,
         width: 86,
-        helpText: '原始字段：offset_percentile / short_position。专业定义：当前偏离程度在趋势历史偏离中的百分位，0% 为最低、100% 为最高，反映当前所处相对位置。',
         sortValue: (row) =>
           Number(
             pickPayload(row.payload, ['offset_percentile', 'short_position', 'position_short', 'short_pos']) ?? 0,
@@ -507,7 +494,6 @@ export default function ScreenerPage() {
         sortable: true,
         filterable: true,
         width: 82,
-        helpText: '原始字段：dsa_vwap / vwap。专业定义：当前趋势参考价（动态摆动锚定值）。',
         sortValue: (row) => Number(pickPayload(row.payload, ['dsa_vwap', 'vwap', 'anchor_vwap']) ?? 0),
         render: (row) => fmtNum(pickPayload(row.payload, ['dsa_vwap', 'vwap', 'anchor_vwap']), 2),
       },
@@ -519,7 +505,6 @@ export default function ScreenerPage() {
         sortable: true,
         filterable: true,
         width: 86,
-        helpText: '原始字段：dsa_vwap_dev_pct / vwap_dev_pct。专业定义：当前收盘价相对趋势参考价的偏离百分比。',
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['dsa_vwap_dev_pct', 'vwap_dev_pct', 'close_vwap_dev_pct']) ?? 0),
         render: (row) => {
@@ -540,7 +525,6 @@ export default function ScreenerPage() {
         sortable: true,
         filterable: true,
         width: 88,
-        helpText: '原始字段：offset_variance_rate / offset_var_rate。专业定义：偏离程度的方差率，反映价格围绕趋势线的波动系数。',
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['offset_variance_rate', 'offset_var_rate', 'shift_var']) ?? 0),
         render: (row) =>
@@ -554,7 +538,6 @@ export default function ScreenerPage() {
         sortable: true,
         filterable: true,
         width: 76,
-        helpText: '原始字段：last_close / price。专业定义：最新收盘价或当前价格。',
         sortValue: (row) =>
           Number(pickPayload(row.payload, ['last_close', 'price', 'current_price', 'close']) ?? 0),
         render: (row) => fmtNum(pickPayload(row.payload, ['last_close', 'price', 'current_price', 'close'])),
@@ -726,7 +709,7 @@ export default function ScreenerPage() {
       {/* 页面头 */}
       <div className="page-head">
         <div>
-          <h1 className="page-title">趋势因子结果</h1>
+          <h1 className="page-title">趋势选股</h1>
           <div className="page-desc">
             选择选股策略 → 查看最新发布快照，表头筛选仅作用于已发布全量结果
           </div>
@@ -793,12 +776,6 @@ export default function ScreenerPage() {
 
       {/* 结果面板 */}
       <div className="card">
-        {/* 策略通俗说明 */}
-        {activeStrategyKey && (
-          <div className="strategy-result-hint muted">
-            {getStrategyHint(activeStrategyKey)}
-          </div>
-        )}
         {/* 工具栏 */}
         <div className="toolbar flush">
           <span className="muted">
@@ -812,7 +789,6 @@ export default function ScreenerPage() {
             {addWatchlistMutation.isPending ? '加入中…' : '批量加入自选'}
           </button>
           <div className="toolbar-spacer" />
-          <span className="muted">表头支持排序，悬停 ? 查看字段说明</span>
         </div>
         {/* 数据表 */}
         <StrategyDataTable

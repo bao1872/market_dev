@@ -17,6 +17,7 @@ import { useRenew } from '@/hooks/useApi'
 import { useAuthStore } from '@/store/auth'
 import { useToast } from '@/store/toast'
 import type { RenewSuccessResponse } from '@/api/endpoints'
+import BrandLogo from '@/components/BrandLogo'
 
 // 续期页路由 state 类型（跳转方可选传入）
 interface MembershipExpiredRouteState {
@@ -101,9 +102,9 @@ export default function MembershipExpiredPage() {
       <div className="renew-gate-shell">
         {/* 品牌标识 */}
         <div className="renew-gate-brand">
-          <div className="brand-mark">QS</div>
+          <BrandLogo variant="sidebar" />
           <div>
-            <b>量策服务台</b>
+            <b>策略主页</b>
             <span>MEMBERSHIP RENEWAL</span>
           </div>
         </div>

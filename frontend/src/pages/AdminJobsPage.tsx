@@ -721,7 +721,7 @@ export default function AdminJobsPage() {
           <div className="card-head">
             <div>
               <div className="card-title">策略计算运行记录</div>
-              <div className="card-sub">DSA 选股策略运行历史（admin）</div>
+              <div className="card-sub">趋势选股运行历史（admin）</div>
             </div>
             <div className="chip-row">
               <span className="chip green">成功</span>

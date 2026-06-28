@@ -1,7 +1,7 @@
 strategy_id: dsa_selector
 kind: selector
 version: 1.4.1
-display_name: 趋势稳定性筛选
+display_name: 趋势选股
 entrypoint: strategies.selectors.dsa:DSASelector
 input:
   bar_frequency: 1d

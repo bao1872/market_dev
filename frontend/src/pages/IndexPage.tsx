@@ -1,4 +1,4 @@
-// 服务总览（首页，受保护路由）
+// 主页（首页，受保护路由）
 // 对应原型：index.html (V1.6.3)
 // 用法：集中查看选股策略结果与自选股监控最新状态
 // 依赖 hooks：useWatchlist / usePublishedRuns / useStrategyRunResults /
@@ -552,7 +552,7 @@ export default function IndexPage() {
       {/* 页头 */}
       <div className="page-head">
         <div>
-          <h1 className="page-title">服务总览</h1>
+          <h1 className="page-title">主页</h1>
           <div className="page-desc">
             集中查看选股策略结果与自选股监控最新状态
           </div>
@@ -567,16 +567,16 @@ export default function IndexPage() {
         </div>
       </div>
 
-      {/* KPI 卡片（3 项：DSA 因子结果 / 监控自选股 / 今日策略事件） */}
+      {/* KPI 卡片（3 项：全市场股票数量 / 监控自选股 / 今日策略事件） */}
       <div className="grid kpi">
-        {/* KPI 1：DSA 因子结果（最新已发布 DSA 运行的标的总数） */}
+        {/* KPI 1：全市场股票数量（最新已发布 DSA 运行的标的总数） */}
         <div className="card kpi-card">
-          <div className="kpi-label">DSA 因子结果</div>
+          <div className="kpi-label">全市场股票数量</div>
           <div className="kpi-value">
             {kpi1Loading ? '-' : (kpi1Value ?? '暂无')}
             {kpi1Value !== null && <small className="kpi-unit">只</small>}
           </div>
-          <div className="kpi-foot">DSA 选股策略</div>
+          <div className="kpi-foot">趋势选股</div>
         </div>
         {/* KPI 2：监控自选股数（active 自选股数量） */}
         <div className="card kpi-card">
@@ -607,11 +607,11 @@ export default function IndexPage() {
 
       {/* 选股结果 + 自选股监控（两列等宽） */}
       <div className="grid split-even">
-        {/* 最新 DSA 因子快照 */}
+        {/* 最新趋势快照 */}
         <section className="card index-main-panel">
           <div className="card-head">
             <div>
-              <div className="card-title">最新 DSA 因子快照</div>
+              <div className="card-title">最新趋势快照</div>
               <div className="card-sub">
                 策略：DSA
                 {latestDsaRun?.trade_date ? ` · ${latestDsaRun.trade_date}` : ''}

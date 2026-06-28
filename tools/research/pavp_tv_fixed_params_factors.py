@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
-# [pavp_tv] - 描述: 独立工具，PAVP TV 固定参数复现，非生产链路
+# [pavp_tv] - 描述: 独立研究工具，PAVP TV 固定参数复现，非生产链路
+# 已从 backend/app/strategy_assets/algorithms/features/ 移至 tools/research/（SubTask 1.7）
 # 参数与 indicator_contract 不一致属预期（用于 TradingView 截图复现对比）
+# 禁止被 backend/app/ 生产代码导入（仅作研究复现用）
 from __future__ import annotations
 
 import argparse

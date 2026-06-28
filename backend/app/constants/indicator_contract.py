@@ -12,9 +12,19 @@
 
 from __future__ import annotations
 
+# ===== 日线根数唯一字面量（advice.md v6 第4条：受控参数禁止散落硬编码）=====
+# DAILY_HISTORY_BARS 是日线回看根数的唯一字面量，所有需要"取 250 根日线"的业务
+# 必须引用本常量，禁止在其它文件再定义 250 字面量作为参数赋值。
+# 受控参数清单（AST 一致性测试 test_no_duplicate_controlled_params 守门）：
+#   - DAILY_HISTORY_BARS (=250)
+#   - NODE_CLUSTER_LOW_BARS (=3600)
+#   - NODE_CLUSTER_EVENT_TTL_SECONDS (=600)
+DAILY_HISTORY_BARS: int = 250
+
 # ===== Node Cluster / Volume Node 参数（advice.md 第3行）=====
 NODE_CLUSTER_PRIMARY_PERIOD: str = "1d"
-NODE_CLUSTER_PRIMARY_BARS: int = 250
+# [node_cluster] - 描述: 主周期（日线）取数根数，引用 DAILY_HISTORY_BARS 唯一字面量
+NODE_CLUSTER_PRIMARY_BARS: int = DAILY_HISTORY_BARS
 NODE_CLUSTER_LOW_PERIOD: str = "15m"
 NODE_CLUSTER_LOW_BARS: int = 3600
 NODE_CLUSTER_MINUTE_BARS: int = 2
@@ -33,13 +43,14 @@ VP_LOWEST_N_NODES: int = 0
 NODE_CLUSTER_EVENT_TTL_SECONDS: int = 600
 
 # ===== DSA 参数 =====
-DSA_LOOKBACK: int = 250
+# [dsa] - 描述: DSA 回看根数，引用 DAILY_HISTORY_BARS 唯一字面量
+DSA_LOOKBACK: int = DAILY_HISTORY_BARS
 DSA_BUDGET_MS: int = 100
 
 # ===== 图表行情输入参数（advice.md v5 口径）=====
-# [chart_bars] - 描述: load_chart_bars 服务统一为 /bars 和 indicator_service 提供 250 根日线行情输入
-# 与 DSA_LOOKBACK、INDICATOR_BARS["1d"] 保持一致，禁止散落硬编码
-CHART_BARS_COUNT: int = 250
+# [chart_bars] - 描述: load_chart_bars 服务统一为 /bars 和 indicator_service 提供日线行情输入
+# 引用 DAILY_HISTORY_BARS 唯一字面量，与 DSA_LOOKBACK、INDICATOR_BARS["1d"] 保持一致，禁止散落硬编码
+CHART_BARS_COUNT: int = DAILY_HISTORY_BARS
 
 # ===== Bollinger Bands 参数 =====
 BB_WIN: int = 20
@@ -47,11 +58,13 @@ BB_K: float = 2.0
 BB_EVENT_TTL_SECONDS: int = 600
 
 # ===== 各周期指标计算根数 =====
-# [indicator_contract] - 描述: 按 advice.md 口径，1d=250（与 DSA_LOOKBACK 一致），15m/1h=3600（与 Node Cluster 低周期一致），1m=2（穿越检测）
+# [indicator_contract] - 描述: 按 advice.md 口径，1d=250（引用 DAILY_HISTORY_BARS，与 DSA_LOOKBACK 一致），
+# 15m=3600（与 Node Cluster 低周期一致），1h=1200（1h 指标窗口与 Node Cluster 15m 输入语义不同，解绑），
+# 1m=2（穿越检测）
 INDICATOR_BARS: dict[str, int] = {
-    "1d": 250,
+    "1d": DAILY_HISTORY_BARS,
     "15m": 3600,
-    "1h": 3600,
+    "1h": 1200,
     "1w": 260,
     "1mo": 120,
     "1m": 2,
@@ -65,6 +78,7 @@ JWT_REFRESH_TTL_SECONDS: int = 604800
 def all_params() -> dict[str, object]:
     """返回所有参数的字典视图，供文档生成与一致性测试使用。"""
     return {
+        "DAILY_HISTORY_BARS": DAILY_HISTORY_BARS,
         "NODE_CLUSTER_PRIMARY_PERIOD": NODE_CLUSTER_PRIMARY_PERIOD,
         "NODE_CLUSTER_PRIMARY_BARS": NODE_CLUSTER_PRIMARY_BARS,
         "NODE_CLUSTER_LOW_PERIOD": NODE_CLUSTER_LOW_PERIOD,

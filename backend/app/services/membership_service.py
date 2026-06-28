@@ -1,22 +1,24 @@
-"""会员与邀请码服务层 - V1.6 会员系统业务逻辑。
+"""会员与邀请码服务层 - V1.6 会员系统业务逻辑 + plan_contract 套餐权限。
 
 提供：
-- generate_invite_codes: 生成邀请码（单个/批量）
+- generate_invite_codes: 生成邀请码（单个/批量，绑定 plan_code/grant_months）
 - hash_invite_code: 邀请码哈希（SHA256）
-- register_with_invite_code: 邀请码注册（原子操作）
-- renew_with_invite_code: 邀请码续期
+- register_with_invite_code: 邀请码注册（原子操作，写入套餐快照）
+- renew_with_invite_code: 邀请码续期（更新套餐，按自然月顺延到期日）
 - get_membership_status: 查询会员状态
 - revoke_invite_code: 作废邀请码
 - list_invite_codes: 邀请码列表
 - list_members: 会员账户列表
 - get_redemptions_by_user: 用户兑换记录
 
-业务规则：
-- 注册：原子操作（锁定邀请码 → 创建账户 → 开通 30 天会员 → 写兑换记录）
-- 续期（未到期）：从当前到期日顺延 30 天
-- 续期（已到期）：从兑换当天重新计算 30 天
+业务规则（plan_contract 套餐权限）：
+- 生成邀请码：从 PLAN_CONTRACTS 读取 monitor_limit 快照，写入 plan_code/monitor_limit/grant_months
+- 注册：写入 plan_code/monitor_limit 到 membership，到期日按 grant_months 自然月计算
+- 续期（未到期）：从当前到期日顺延 grant_months 个自然月，同时更新 plan_code/monitor_limit
+- 续期（已到期）：从兑换当天计算 grant_months 个自然月
 - 邀请码为一次性，status: unused → used / revoked
 - 邀请码明文不存储，仅存 SHA256 哈希
+- grant_months 优先用于自然月计算（dateutil.relativedelta），grant_days 保留兼容性
 """
 
 from __future__ import annotations
@@ -26,8 +28,19 @@ import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from dateutil.relativedelta import relativedelta
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.constants.plan_contract import (
+    DEFAULT_PLAN_CODE,
+    PLAN_CONTRACTS,
+    get_monitor_limit,
+    is_valid_plan_code,
+)
+from app.core.security import get_password_hash
+from app.models.membership import InviteCode, InviteRedemption, Membership
+from app.models.user import Role, User, UserRole
 
 
 def _ensure_aware(dt: datetime) -> datetime:
@@ -40,17 +53,35 @@ def _ensure_aware(dt: datetime) -> datetime:
         return dt.replace(tzinfo=UTC)
     return dt
 
-from app.core.security import get_password_hash
-from app.models.membership import InviteCode, InviteRedemption, Membership
-from app.models.user import Role, User, UserRole
 
 # 邀请码字符集（排除易混淆字符 O/0/I/1/L）
 _INVITE_CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 # 邀请码分组：4 组 × 4 字符 = 16 字符
 _INVITE_CODE_GROUPS = 4
 _INVITE_CODE_GROUP_LEN = 4
-# 会员默认天数
+# 会员默认天数（旧字段 grant_days，保留兼容性；新逻辑优先使用 grant_months）
 _DEFAULT_GRANT_DAYS = 30
+# 默认 grant_months（管理员未指定时，1 个月 = 30 天近似）
+_DEFAULT_GRANT_MONTHS = 1
+
+
+def _compute_expires_at(base: datetime, invite: InviteCode) -> datetime:
+    """根据邀请码的 grant_months 或 grant_days 计算到期时间。
+
+    优先使用 grant_months（自然月，用 relativedelta），兼容旧邀请码的 grant_days（天数）。
+    自然月计算：1月31日 + 1月 = 2月28日（非闰年），避免 30 天近似的跨月错误。
+
+    Args:
+        base: 基准时间（注册时为 now，续期未到期时为 old_expires_at）
+        invite: 邀请码对象（含 grant_months/grant_days）
+
+    Returns:
+        到期时间（时区感知）
+    """
+    if invite.grant_months is not None and invite.grant_months > 0:
+        return base + relativedelta(months=invite.grant_months)
+    # 兼容旧邀请码（grant_months 为 NULL，仅有 grant_days）
+    return base + timedelta(days=invite.grant_days)
 
 
 def _generate_invite_code() -> str:
@@ -91,18 +122,35 @@ async def generate_invite_codes(
     count: int,
     created_by: uuid.UUID,
     note: str | None = None,
+    plan_code: str = DEFAULT_PLAN_CODE,
+    grant_months: int = _DEFAULT_GRANT_MONTHS,
 ) -> list[tuple[InviteCode, str]]:
-    """生成邀请码（批量）。
+    """生成邀请码（批量，绑定 plan_code/grant_months）。
+
+    从 PLAN_CONTRACTS 读取 monitor_limit 快照写入邀请码，作为不可变的套餐快照。
+    grant_months 用于注册/续期时按自然月计算到期日。
 
     Args:
         db: 异步数据库会话
         count: 生成数量
         created_by: 创建者 user_id（管理员）
         note: 批次备注
+        plan_code: 套餐代码（observe_20/research_50），默认 observe_20
+        grant_months: 兑换后增加的自然月数，默认 1
 
     Returns:
         list of (InviteCode ORM 对象, 明文邀请码) 元组
+
+    Raises:
+        ValueError: plan_code 不在 PLAN_CONTRACTS 中
     """
+    if not is_valid_plan_code(plan_code):
+        raise ValueError(f"未知套餐代码: {plan_code}")
+    if grant_months < 1:
+        raise ValueError(f"grant_months 必须 >= 1，实际: {grant_months}")
+
+    monitor_limit = get_monitor_limit(plan_code)
+
     results: list[tuple[InviteCode, str]] = []
     for _ in range(count):
         raw_code = _generate_invite_code()
@@ -111,6 +159,9 @@ async def generate_invite_codes(
             code_hash=code_hash,
             status="unused",
             grant_days=_DEFAULT_GRANT_DAYS,
+            plan_code=plan_code,
+            monitor_limit=monitor_limit,
+            grant_months=grant_months,
             note=note,
             created_by=created_by,
         )
@@ -192,13 +243,15 @@ async def register_with_invite_code(
     if user_role is not None:
         db.add(UserRole(user_id=user.id, role_id=user_role.id))
 
-    # 5. 创建会员记录（30 天）
-    expires_at = now + timedelta(days=invite.grant_days)
+    # 5. 创建会员记录（按 grant_months 自然月计算到期日，写入套餐快照）
+    expires_at = _compute_expires_at(now, invite)
     membership = Membership(
         user_id=user.id,
         status="active",
         started_at=now,
         expires_at=expires_at,
+        plan_code=invite.plan_code,
+        monitor_limit=invite.monitor_limit,
         updated_at=now,
     )
     db.add(membership)
@@ -229,11 +282,13 @@ async def renew_with_invite_code(
     user_id: uuid.UUID,
     raw_invite_code: str,
 ) -> tuple[Membership, datetime | None, datetime]:
-    """邀请码续期。
+    """邀请码续期 - 同时更新套餐（plan_code/monitor_limit）和按自然月顺延到期日。
 
     业务规则：
-    - 未到期续期：从当前到期日顺延 grant_days 天
-    - 已到期续期：从兑换当天重新计算 grant_days 天
+    - 未到期续期：从当前到期日顺延 grant_months 个自然月
+    - 已到期续期：从兑换当天计算 grant_months 个自然月
+    - 续期时更新 membership.plan_code/monitor_limit 为邀请码的套餐快照
+    - 兼容旧邀请码（grant_months 为 NULL 时回退 grant_days 天数计算）
 
     Args:
         db: 异步数据库会话
@@ -268,20 +323,24 @@ async def renew_with_invite_code(
     if membership is None:
         raise ValueError(f"用户会员记录不存在: {user_id}")
 
-    # 3. 计算新的到期时间
+    # 3. 计算新的到期时间（按 grant_months 自然月，兼容旧 grant_days）
+    # old_expires_at 归一化为时区感知，确保与 new_expires_at（基于 now=UTC）一致，
+    # 避免 API 响应中 old/new 一个 naive 一个 aware 导致前端解析失败
     now = datetime.now(UTC)
-    old_expires_at = membership.expires_at
+    old_expires_at = _ensure_aware(membership.expires_at)
 
-    if _ensure_aware(membership.expires_at) > now:
+    if old_expires_at > now:
         # 未到期：从当前到期日顺延
-        new_expires_at = membership.expires_at + timedelta(days=invite.grant_days)
+        new_expires_at = _compute_expires_at(old_expires_at, invite)
     else:
         # 已到期：从兑换当天重新计算
-        new_expires_at = now + timedelta(days=invite.grant_days)
+        new_expires_at = _compute_expires_at(now, invite)
 
-    # 4. 更新会员记录
+    # 4. 更新会员记录（同时更新套餐与到期日）
     membership.status = "active"
     membership.expires_at = new_expires_at
+    membership.plan_code = invite.plan_code
+    membership.monitor_limit = invite.monitor_limit
     membership.updated_at = now
 
     # 5. 更新邀请码状态

@@ -32,6 +32,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants.indicator_contract import CHART_BARS_COUNT
 from app.core.time import SHANGHAI_TZ
 from app.repositories.bar_repository import (
     _get_adj_factor_df,
@@ -41,8 +42,8 @@ from app.repositories.bar_repository import (
 
 logger = logging.getLogger("services.chart_bars_service")
 
-# 图表场景日线默认根数（与 indicator_contract.INDICATOR_BARS["1d"] 一致）
-_DEFAULT_CHART_DAILY_COUNT = 250
+# [chart_bars] - 描述: 图表场景日线默认根数，引用 indicator_contract.CHART_BARS_COUNT 唯一真源
+_DEFAULT_CHART_DAILY_COUNT = CHART_BARS_COUNT
 
 # 日线查询回看天数（与 bars.py / indicator_service.py 一致，覆盖约 13 年）
 _DEFAULT_DAILY_LOOKBACK_DAYS = 5000

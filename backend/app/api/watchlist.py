@@ -2,7 +2,7 @@
 
 端点：
 - GET /watchlist: 当前用户自选列表（user_id 由认证上下文注入）
-- POST /watchlist: 加入自选（instrument_id，user_id 由认证上下文注入）
+- POST /watchlist: 加入自选（instrument_id，user_id 由认证上下文注入，事务内校验监控额度）
 - DELETE /watchlist/{instrument_id}: 移除自选（软删除：active=false + removed_at）
 - GET /watchlist/monitor-status: 自选股+监控状态聚合查询
 
@@ -13,6 +13,13 @@
 - (user_id, instrument_id) 唯一约束：重复加入返回 409 Conflict
 - 重新加入已软删除的记录：恢复 active=true 并清空 removed_at
 - monitor-status 端点 JOIN Instrument + MonitorState(最新 released watchlist_monitor 版本) + MonitorEvaluation(最新评估记录)
+
+套餐权限（plan_contract）：
+- POST /watchlist 及恢复软删除前事务内校验 active count < monitor_limit
+- 超限返回 409 {"detail": "监控数量已达上限 N"}
+- 管理员角色绕过监控数量限制
+- 无会员记录的普通用户返回 403（无监控权限）
+- 降级后已有数量超过额度不删除，只禁止新增
 """
 
 from __future__ import annotations
@@ -26,11 +33,12 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.strategy_keys import WATCHLIST_MONITOR
-from app.core.deps import get_current_active_user
+from app.core.deps import get_current_active_user, _get_user_roles
 from app.db import get_db
 from app.services.calendar_service import is_trading_day_async
 from app.services.market_status_service import TRADING_SESSIONS, compute_market_session
 from app.models.instrument import Instrument
+from app.models.membership import Membership
 from app.models.monitor_evaluation import MonitorEvaluation
 from app.models.monitor_state import MonitorState
 from app.models.strategy import StrategyDefinition, StrategyVersion
@@ -46,6 +54,58 @@ from app.schemas.watchlist import (
 )
 
 router = APIRouter(prefix="/watchlist", tags=["watchlist"])
+
+
+async def _check_watchlist_limit(db: AsyncSession, user: User) -> None:
+    """事务内校验用户监控数量额度，超限抛 409。
+
+    规则：
+    - 管理员角色绕过监控数量限制
+    - 无会员记录的普通用户返回 403（无监控权限）
+    - 有会员记录但 active count >= monitor_limit 返回 409
+    - 降级后已有数量超过额度不删除，只禁止新增（自然满足，仅校验新增）
+
+    Args:
+        db: 异步数据库会话
+        user: 当前用户
+
+    Raises:
+        HTTPException 403: 无会员记录（无监控权限）
+        HTTPException 409: 监控数量已达上限
+    """
+    user_roles = _get_user_roles(user)
+    if "admin" in user_roles:
+        return  # 管理员绕过
+
+    # 查询会员记录
+    membership_stmt = select(Membership).where(Membership.user_id == user.id)
+    membership_result = await db.execute(membership_stmt)
+    membership = membership_result.scalar_one_or_none()
+
+    if membership is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="无会员记录，无监控权限",
+        )
+
+    monitor_limit = membership.monitor_limit or 0
+
+    # 查询当前 active 自选股数量
+    count_stmt = (
+        select(func.count(UserWatchlistItem.id))
+        .where(
+            UserWatchlistItem.user_id == user.id,
+            UserWatchlistItem.active.is_(True),
+        )
+    )
+    count_result = await db.execute(count_stmt)
+    active_count = count_result.scalar_one()
+
+    if active_count >= monitor_limit:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"监控数量已达上限 {monitor_limit}",
+        )
 
 
 def _compute_market_status(now_cst: datetime, is_trading_day: bool) -> str:
@@ -178,11 +238,18 @@ async def add_to_watchlist(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ) -> WatchlistItemResponse:
-    """加入自选。
+    """加入自选 - 事务内校验监控数量额度。
 
     user_id 由认证上下文注入（不接受 body 中的 user_id）。
     若已存在软删除记录，则恢复 active=true 并清空 removed_at（重新加入）。
     若已存在 active 记录，返回 409 Conflict。
+
+    套餐权限：
+    - 恢复软删除记录前校验额度（恢复后 active 数量 +1）
+    - 新建记录前校验额度
+    - 管理员绕过额度限制
+    - 超限返回 409 {"detail": "监控数量已达上限 N"}
+    - 无会员记录返回 403
     """
     # 校验股票存在
     inst_stmt = select(Instrument).where(Instrument.id == payload.instrument_id)
@@ -207,6 +274,8 @@ async def add_to_watchlist(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="该股票已在自选列表中",
             )
+        # 恢复软删除记录前校验额度（恢复后 active 数量 +1）
+        await _check_watchlist_limit(db, current_user)
         # 恢复软删除记录：重新加入
         existing.active = True
         existing.removed_at = None
@@ -214,6 +283,9 @@ async def add_to_watchlist(
         await db.commit()
         await db.refresh(existing)
         return WatchlistItemResponse.model_validate(existing)
+
+    # 新建记录前校验额度
+    await _check_watchlist_limit(db, current_user)
 
     # 新建自选记录
     item = UserWatchlistItem(

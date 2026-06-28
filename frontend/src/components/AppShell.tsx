@@ -11,6 +11,7 @@ import { useToast } from '@/store/toast'
 import { getMarketStatus, type MarketStatus } from '@/api/endpoints'
 import { useUnreadCount, useHealth, useAdminSystemOverview, setCachedMarketStatus } from '@/hooks/useApi'
 import { formatShanghaiTimeShort } from '@/utils/datetime'
+import BrandLogo from '@/components/BrandLogo'
 import clsx from 'clsx'
 
 // 导航项定义
@@ -21,8 +22,8 @@ interface NavItemDef {
 }
 
 const userNavItems: NavItemDef[] = [
-  { path: '/overview', icon: '⌂', label: '服务总览' },
-  { path: '/screener', icon: '⌁', label: '选股策略' },
+  { path: '/overview', icon: '⌂', label: '主页' },
+  { path: '/screener', icon: '⌁', label: '趋势选股' },
   { path: '/watchlist', icon: '☆', label: '我的自选' },
   { path: '/messages', icon: '◉', label: '消息中心' },
   { path: '/settings', icon: '⚙', label: '通知与设置' },
@@ -37,8 +38,8 @@ const adminNavItems: NavItemDef[] = [
 
 // 页面标题映射
 const pageTitleMap: Record<string, string> = {
-  '/overview': '服务总览',
-  '/screener': '选股策略',
+  '/overview': '主页',
+  '/screener': '趋势选股',
   '/watchlist': '我的自选',
   '/settings': '通知与设置',
   '/messages': '消息中心',
@@ -51,7 +52,7 @@ const pageTitleMap: Record<string, string> = {
 function getPageTitle(pathname: string): string {
   // 个股详情页特殊处理
   if (pathname.startsWith('/stock/')) return '个股详情'
-  return pageTitleMap[pathname] || '量策服务台'
+  return pageTitleMap[pathname] || '策略主页'
 }
 
 function NavItem({ item, active, onClick }: { item: NavItemDef; active: boolean; onClick?: () => void }) {
@@ -145,9 +146,9 @@ export default function AppShell({ children }: { children: ReactNode }) {
   const sidebarContent = (
     <>
       <div className="brand">
-        <div className="brand-mark">QS</div>
+        <BrandLogo variant="sidebar" />
         <div>
-          <div className="brand-title">量策服务台</div>
+          <div className="brand-title">策略主页</div>
           <div className="brand-sub">STRATEGY SERVICE</div>
         </div>
       </div>
@@ -251,9 +252,9 @@ export default function AppShell({ children }: { children: ReactNode }) {
           <aside className="sidebar sidebar-drawer open">
             <div className="sidebar-drawer-head">
               <div className="brand">
-                <div className="brand-mark">QS</div>
+                <BrandLogo variant="sidebar" />
                 <div>
-                  <div className="brand-title">量策服务台</div>
+                  <div className="brand-title">策略主页</div>
                   <div className="brand-sub">STRATEGY SERVICE</div>
                 </div>
               </div>

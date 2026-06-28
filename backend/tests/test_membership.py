@@ -76,6 +76,8 @@ CREATE TABLE IF NOT EXISTS memberships (
     status TEXT NOT NULL DEFAULT 'active',
     started_at DATETIME NOT NULL,
     expires_at DATETIME NOT NULL,
+    plan_code TEXT,
+    monitor_limit INTEGER,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 )
@@ -86,6 +88,9 @@ CREATE TABLE IF NOT EXISTS invite_codes (
     code_hash TEXT NOT NULL UNIQUE,
     status TEXT NOT NULL DEFAULT 'unused',
     grant_days INTEGER NOT NULL DEFAULT 30,
+    plan_code TEXT,
+    monitor_limit INTEGER,
+    grant_months INTEGER,
     note TEXT,
     created_by TEXT NOT NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,

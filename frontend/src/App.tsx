@@ -62,7 +62,7 @@ function ProtectedLayout() {
   )
 }
 
-// Admin 角色守卫：非 admin 用户重定向到服务总览
+// Admin 角色守卫：非 admin 用户重定向到主页
 function AdminRoute() {
   const user = useAuthStore((s) => s.user)
   if (user?.role !== 'admin') {
@@ -99,6 +99,6 @@ export const router = createBrowserRouter([
       },
     ],
   },
-  // 兜底：未匹配路由重定向到服务总览（保留原"未匹配进服务台"语义）
+  // 兜底：未匹配路由重定向到主页（保留原"未匹配进服务台"语义）
   { path: '*', element: <Navigate to="/overview" replace /> },
 ])

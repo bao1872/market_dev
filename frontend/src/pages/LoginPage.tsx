@@ -10,6 +10,7 @@ import { useToast } from '@/store/toast'
 import { useLogin, useRegister } from '@/hooks/useApi'
 import { getMe } from '@/api/endpoints'
 import type { RegisterSuccessResponse } from '@/api/endpoints'
+import BrandLogo from '@/components/BrandLogo'
 
 // 从 axios 错误中提取可读消息（FastAPI 错误体通常在 response.data.detail）
 function getErrorMessage(error: unknown): string {
@@ -76,7 +77,7 @@ export default function LoginPage() {
         email: user.email,
         role: user.roles?.includes('admin') ? 'admin' : 'member',
       })
-      useToast.getState().show('登录成功', '已进入量策服务台')
+      useToast.getState().show('登录成功', '已进入策略主页')
       navigate(membershipExpired ? '/membership-expired' : '/overview')
     } catch (err) {
       // getMe 失败：logout 清除 token + store 状态，避免残留无效登录态
@@ -160,7 +161,7 @@ export default function LoginPage() {
       <section className="login-visual">
         <div className="login-grid"></div>
         <div className="login-copy">
-          <div className="brand-mark">QS</div>
+          <BrandLogo variant="sidebar" />
           <h1 className="login-title">
             把看盘经验，变成
             <br />
@@ -305,7 +306,7 @@ export default function LoginPage() {
                   onClick={handleEnterService}
                   disabled={authenticating}
                 >
-                  {authenticating ? '进入中...' : '进入量策服务台'}
+                  {authenticating ? '进入中...' : '进入策略主页'}
                 </button>
               </div>
             ) : (

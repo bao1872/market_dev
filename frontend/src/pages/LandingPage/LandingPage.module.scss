@@ -46,12 +46,6 @@
   .nav { min-height: 78px; display: flex; align-items: center; justify-content: space-between; gap: 28px; }
   .brand { display: flex; align-items: center; gap: 14px; font-size: 26px; font-weight: 800; white-space: nowrap; }
   .brand small { font-size: 13px; font-weight: 400; color: var(--muted); letter-spacing: .03em; }
-  .brandMark { width: 38px; height: 38px; position: relative; border-radius: 50%; border: 2px solid var(--blue); box-shadow: 0 0 22px rgba(38, 140, 255, .3); }
-  .brandMark:before { content: ""; position: absolute; inset: 8px; border-radius: 50%; border: 2px solid #7252ff; }
-  .brandMark:after { content: ""; position: absolute; width: 9px; height: 9px; border-radius: 50%; background: var(--cyan); left: 50%; top: 50%; transform: translate(-50%, -50%); box-shadow: 0 0 18px var(--cyan); }
-  .brandMark i, .brandMark b { position: absolute; background: var(--blue); }
-  .brandMark i { height: 2px; width: 48px; left: -7px; top: 18px; }
-  .brandMark b { width: 2px; height: 48px; left: 18px; top: -7px; }
   .navLinks { display: flex; align-items: center; gap: 42px; color: #d6dfef; }
   .navLinks a { position: relative; font-size: 16px; }
   .navLinks a:after { content: ""; position: absolute; left: 0; right: 0; bottom: -17px; height: 2px; background: linear-gradient(90deg, var(--blue), var(--violet)); transform: scaleX(0); transition: .2s; }
@@ -295,6 +289,7 @@
 
   // ===== 页脚 =====
   .footer { padding: 26px 0 34px; border-top: 1px solid rgba(255, 255, 255, .07); margin-top: 20px; }
+  .footerBrand { margin-bottom: 18px; }
   .footerGrid { display: grid; grid-template-columns: 1.05fr .9fr 1.1fr .9fr; gap: 28px; align-items: start; }
   .ipRow { display: flex; gap: 14px; align-items: center; }
   .avatar { width: 56px; height: 56px; border-radius: 50%; background: radial-gradient(circle at 50% 35%, #b8bfca 0 13px, #2b3241 14px 24px, #0c1424 25px); border: 1px solid #4b5870; }

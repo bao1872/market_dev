@@ -726,9 +726,9 @@ def generate_ops_manual_doc() -> str:
     w("\n")
     w("**用户可见文案映射**:\n\n")
     w("- `watchlist_monitor` → 自选股监控 (v1.1.0)\n")
-    w("- `dsa_selector` → 趋势稳定性筛选 (v1.4.1，新增 `dsa_polyline` renderer + `visual_segments` 可视化契约)\n")
+    w("- `dsa_selector` → 趋势选股 (v1.4.1，新增 `dsa_polyline` renderer + `visual_segments` 可视化契约)\n")
     w("- DSA VWAP → 趋势参考价（用户可见文案，底层字段名 `dsa_vwap` 不变）\n")
-    w("- DSA 方向稳定性 → 趋势稳定性（用户可见文案，底层 `strategy_id` 不变）\n\n")
+    w("- DSA 方向稳定性 → 趋势选股（用户可见文案，底层 `strategy_id` 不变）\n\n")
 
     return buf.getvalue()
 

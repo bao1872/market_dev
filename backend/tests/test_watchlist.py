@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncGenerator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -50,11 +50,25 @@ _SQLITE_DDL = [
         id TEXT NOT NULL PRIMARY KEY,
         symbol TEXT NOT NULL UNIQUE,
         name TEXT NOT NULL,
+        pinyin_initials TEXT,
         market TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'active',
         listing_date DATE,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS memberships (
+        id TEXT NOT NULL PRIMARY KEY,
+        user_id TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL DEFAULT 'active',
+        started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        expires_at DATETIME NOT NULL,
+        plan_code TEXT,
+        monitor_limit INTEGER,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )
     """,
     """
@@ -114,6 +128,21 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
         )
         session.add(inst1)
         session.add(inst2)
+        await session.flush()
+
+        # 创建会员记录（observe_20 套餐，monitor_limit=20，满足 POST /watchlist 额度校验）
+        from app.models.membership import Membership
+
+        membership = Membership(
+            id=uuid.uuid4(),
+            user_id=test_user.id,
+            status="active",
+            started_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(days=30),
+            plan_code="observe_20",
+            monitor_limit=20,
+        )
+        session.add(membership)
         await session.commit()
 
         # 注入测试会话

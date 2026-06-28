@@ -1,7 +1,7 @@
 """管理员 API 路由 - 会员管理 + 系统概览。
 
 端点：
-- POST /admin/invite-codes: 生成邀请码（单个/批量）
+- POST /admin/invite-codes: 生成邀请码（单个/批量，绑定 plan_code/grant_months）
 - GET /admin/invite-codes: 查询邀请码列表（支持状态筛选 + 分页）
 - POST /admin/invite-codes/{id}/revoke: 作废邀请码
 - GET /admin/members: 查询会员账户列表（含会员状态/到期时间/剩余天数/续期次数）
@@ -10,6 +10,10 @@
 
 权限：
 - 所有端点需要 admin 角色（RBAC）
+
+套餐权限（plan_contract）：
+- 生成邀请码时接收 plan_code/grant_months，从 PLAN_CONTRACTS 读取 monitor_limit 快照
+- 默认 plan_code=observe_20、grant_months=1（保持向后兼容）
 """
 
 from __future__ import annotations
@@ -60,24 +64,36 @@ async def create_invite_codes(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_roles("admin")),
 ) -> list[InviteCodeResponse]:
-    """生成邀请码（单个/批量）。
+    """生成邀请码（单个/批量，绑定 plan_code/grant_months）。
 
-    固定权益为"会员 +30 天"。明文仅在生成时返回，后续不可获取。
+    从 PLAN_CONTRACTS 读取 monitor_limit 快照写入邀请码。明文仅在生成时返回，后续不可获取。
+    默认 plan_code=observe_20、grant_months=1（保持向后兼容）。
 
     Args:
-        payload: 生成请求（count + note）
+        payload: 生成请求（count + note + plan_code + grant_months）
         db: 异步数据库会话
         current_user: 当前管理员用户（由 require_roles 注入）
 
     Returns:
-        邀请码列表（含明文）
+        邀请码列表（含明文 + 套餐快照）
+
+    Raises:
+        HTTPException 400: plan_code 未知或 grant_months 非法
     """
-    results = await generate_invite_codes(
-        db=db,
-        count=payload.count,
-        created_by=current_user.id,
-        note=payload.note,
-    )
+    try:
+        results = await generate_invite_codes(
+            db=db,
+            count=payload.count,
+            created_by=current_user.id,
+            note=payload.note,
+            plan_code=payload.plan_code,
+            grant_months=payload.grant_months,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        ) from e
     await db.commit()
 
     return [
@@ -85,6 +101,9 @@ async def create_invite_codes(
             id=invite.id,
             code=raw_code,
             grant_days=invite.grant_days,
+            plan_code=invite.plan_code,
+            monitor_limit=invite.monitor_limit,
+            grant_months=invite.grant_months,
             note=invite.note,
             created_at=invite.created_at,
         )
@@ -123,6 +142,9 @@ async def get_invite_codes(
                 id=invite.id,
                 status=invite.status,
                 grant_days=invite.grant_days,
+                plan_code=invite.plan_code,
+                monitor_limit=invite.monitor_limit,
+                grant_months=invite.grant_months,
                 note=invite.note,
                 created_by=invite.created_by,
                 created_at=invite.created_at,
@@ -170,6 +192,9 @@ async def revoke_code(
         id=invite.id,
         status=invite.status,
         grant_days=invite.grant_days,
+        plan_code=invite.plan_code,
+        monitor_limit=invite.monitor_limit,
+        grant_months=invite.grant_months,
         note=invite.note,
         created_by=invite.created_by,
         created_at=invite.created_at,
