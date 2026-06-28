@@ -1358,7 +1358,7 @@ export interface ChartLayer {
   strategy_name: string
   layer_id: string
   layer_name: string
-  renderer: string  // line | price_zone | marker | band
+  renderer: string  // line | dsa_polyline | price_zone | marker | band
   pane: string      // price | volume | separate
   color?: string
   direction_colored?: boolean
@@ -1370,6 +1370,14 @@ export interface ChartLayer {
   anchor_field?: string
   fields: string[]
   hover_fields: string[]
+  // [DSA 分段] - visual_segments 由后端预计算的视觉段，dsa_polyline 渲染器逐段独立绘制（段间不连线）
+  visual_segments?: VisualSegment[]
+}
+
+/** [DSA 分段] - 视觉段：方向 + 点序列，dsa_polyline 渲染器按段独立 beginPath/stroke */
+export interface VisualSegment {
+  direction: 1 | -1
+  points: { time: string; value: number }[]
 }
 
 /** 指标查询参数 */
@@ -1385,6 +1393,10 @@ export interface IndicatorResponse {
   // [DSA 分段] - data 值支持 string（anchor_time 为 ISO 字符串|null 数组，其余字段为 number|null）
   data: Record<string, Record<string, (number | string | null)[]>>
   errors?: Record<string, string>
+  // [DSA 数据源校验] - source_bar_times 指标计算所基于的 K 线时间序列，前端与当前 K 线时间比对，不一致则跳过 DSA 渲染
+  source_bar_times?: string[]
+  // [DSA 数据源校验] - source_bar_hash K 线时间序列哈希，便于调试与后端联调定位数据源漂移
+  source_bar_hash?: string
 }
 
 /**

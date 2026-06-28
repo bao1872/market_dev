@@ -15,6 +15,7 @@ export type LayerRenderer =
   | 'histogram_line'
   | 'horizontal_profile'
   | 'macd'
+  | 'dsa_polyline'
 export type LayerPane = 'price' | 'price_right' | 'volume' | 'delta' | 'macd'
 
 export interface LayerDef {
@@ -62,7 +63,7 @@ export const LAYERS: Record<string, LayerDef> = {
     name: '趋势参考价',
     shortName: '趋势',
     group: '选股策略',
-    renderer: 'line',
+    renderer: 'dsa_polyline',
     pane: 'price',
     color: '#ff1744',
     description: '趋势参考价线与 Pine 标签',

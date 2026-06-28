@@ -43,7 +43,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.indicator_contract import INDICATOR_BARS
 from app.constants.strategy_keys import DSA_SELECTOR
-from app.core.exchange import get_exchange
 from app.models.instrument import Instrument
 from app.repositories.bar_repository import (
     _get_adj_factor_df,
@@ -51,9 +50,13 @@ from app.repositories.bar_repository import (
     _query_60min_bars,
     _query_minute_bars,
     apply_adj_factor_to_bars,
-    fetch_daily_bars,
     fetch_monthly_bars,
     fetch_weekly_bars,
+)
+from app.services.chart_bars_service import (
+    compute_source_bar_hash,
+    compute_source_bar_times,
+    load_chart_bars,
 )
 from app.services.strategy_batch_service import StrategyBatchService
 from app.strategy.runtime import MarketDataContext, StrategyLoader
@@ -296,12 +299,14 @@ async def compute_all_indicators(
 
     流程：
     1. 查询 instrument 信息（symbol）
-    2. 通过 Exchange.klines() 获取 bars 数据（日线 + 15min + 1min），失败降级到 DB
+    2. [图表行情契约] 通过 load_chart_bars 获取日线（与 /bars API 共用 SSOT），
+       日内/周线/月线通过 DB 查询获取
     3. 遍历 StrategyLoader._registry 中的所有策略
     4. 对每个策略，查询最新 released 版本（复用 StrategyBatchService._get_latest_released_version）
     5. 调用 StrategyLoader.load(version) 获取 runtime
     6. 调用 runtime.compute_indicators(context) 计算指标
     7. 收集 chart_layers 定义 + 计算结果（截取最近 bars 根，转 JSON 可序列化）
+    8. 计算 source_bar_times/source_bar_hash 作为数据源诊断字段
 
     异常处理：单个策略失败不阻塞其他策略，错误记录到 errors 字典返回给前端。
 
@@ -317,6 +322,8 @@ async def compute_all_indicators(
         - layers: list[dict] - 图表图层定义（strategy_id/layer_id/renderer/pane/color/fields 等）
         - data: dict[str, dict] - 按策略分组的指标数据
         - errors: dict[str, str] - 策略错误信息（strategy_id -> error message）
+        - source_bar_times: list[str] - 日线行情 ISO 日期字符串数组（数据源诊断）
+        - source_bar_hash: str - 日线 OHLCV 拼接的 SHA256 哈希前 16 字符（数据源诊断）
 
     Raises:
         ValueError: instrument 不存在或无日线数据
@@ -334,89 +341,49 @@ async def compute_all_indicators(
         raise ValueError(f"instrument 不存在: instrument_id={instrument_id}")
     symbol = inst_row[0]
 
-    # 2. 数据获取：通过 Exchange.klines()（与 bars API 统一数据源）
+    # 2. [图表行情契约] 数据获取：日线通过 load_chart_bars（与 /bars API 共用 SSOT），
+    #    日内/周线/月线通过 DB 查询获取
     today = date.today()
-    exchange = None
-    try:
-        exchange = get_exchange("A")
-    except Exception as exc:
-        logger.warning("获取 Exchange 实例失败 instrument_id=%s: %s", instrument_id, exc)
+    daily_start = today - timedelta(days=_DEFAULT_DAILY_LOOKBACK_DAYS)
+    intraday_start_dt = datetime.combine(
+        today - timedelta(days=_INDICATOR_INTRADAY_LOOKBACK_DAYS),
+        datetime.min.time(),
+    )
+    intraday_end_dt = datetime.combine(today, datetime.max.time())
 
-    daily_bars = pd.DataFrame()
-    bars_15min = pd.DataFrame()
-    bars_minute = pd.DataFrame()
+    # 日线：load_chart_bars 统一处理 DB 优先 + Pytdx 兜底 + 前复权 + 去重 + 未完成 Bar 过滤 + 250 截取
+    daily_bars = await load_chart_bars(
+        session, instrument_id, timeframe="1d", count=250, adj=adj,
+    )
+
+    # 日内/周线/月线：DB 查询（与原 DB 降级路径一致，SSOT）
+    bars_15min = await _query_15min_bars(
+        session, instrument_id, intraday_start_dt, intraday_end_dt,
+    )
+    bars_minute = await _query_minute_bars(
+        session, instrument_id, intraday_start_dt, intraday_end_dt,
+    )
     bars_60min: pd.DataFrame | None = None
-    bars_weekly = pd.DataFrame()
-    bars_monthly = pd.DataFrame()
-
-    async def _safe_klines(freq: str, count: int, limit: int) -> pd.DataFrame:
-        """调用 exchange.klines() 并处理空值/异常，避免 DataFrame or 触发 truth value 错误。"""
-        if exchange is None:
-            return pd.DataFrame()
-        try:
-            df = await exchange.klines(symbol, freq, count=count, limit=limit)
-            if df is None or df.empty:
-                return pd.DataFrame()
-            return df
-        except Exception as exc:
-            logger.warning(
-                "Exchange.klines() 失败 freq=%s instrument_id=%s: %s", freq, instrument_id, exc,
-            )
-            return pd.DataFrame()
-
-    if exchange is not None:
-        try:
-            # [行情] - 传递 limit 控制 pytdx 拉取量（fetch_count=min(limit+250,1000)，上限 1000）
-            # 日线（5000 天回看，与 bars.py 一致）
-            daily_bars = await _safe_klines("1d", 5000, 5000)
-            # 15 分钟线（指标计算需要更多数据，与 indicator_contract.INDICATOR_BARS 对齐）
-            bars_15min = await _safe_klines("15m", INDICATOR_BARS["15m"], INDICATOR_BARS["15m"])
-            # 1 分钟线（仅 2 天，用于监控策略）
-            bars_minute = await _safe_klines("1m", 2, 2)
-            # 60 分钟线（策略在 timeframe='1h' 时可能需要，与 INDICATOR_BARS 对齐）
-            if timeframe == "1h":
-                bars_60min = await _safe_klines("1h", INDICATOR_BARS["1h"], INDICATOR_BARS["1h"])
-            # 周线/月线（MACD 按当前 timeframe 计算）
-            if timeframe == "1w":
-                bars_weekly = await _safe_klines("1w", 260, 260)
-            if timeframe == "1mo":
-                bars_monthly = await _safe_klines("1mo", 120, 120)
-        except Exception as exc:
-            logger.warning("Exchange.klines() 失败 instrument_id=%s: %s，降级到 DB", instrument_id, exc)
-            exchange = None  # 标记为失败，后续使用 DB 降级
-
-    # Exchange 失败或无数据时降级到 DB 查询
-    if exchange is None or daily_bars.empty:
-        logger.info("使用 DB 降级查询 instrument_id=%s", instrument_id)
-        daily_start = today - timedelta(days=_DEFAULT_DAILY_LOOKBACK_DAYS)
-        intraday_start_dt = datetime.combine(
-            today - timedelta(days=_INDICATOR_INTRADAY_LOOKBACK_DAYS),
-            datetime.min.time(),
+    if timeframe == "1h":
+        bars_60min = await _query_60min_bars(
+            session, instrument_id, intraday_start_dt, intraday_end_dt,
         )
-        intraday_end_dt = datetime.combine(today, datetime.max.time())
-        try:
-            daily_bars = await fetch_daily_bars(session, instrument_id, daily_start, today)
-            bars_15min = await _query_15min_bars(session, instrument_id, intraday_start_dt, intraday_end_dt)
-            bars_minute = await _query_minute_bars(session, instrument_id, intraday_start_dt, intraday_end_dt)
-            if timeframe == "1h":
-                bars_60min = await _query_60min_bars(session, instrument_id, intraday_start_dt, intraday_end_dt)
-            if timeframe == "1w":
-                bars_weekly = await fetch_weekly_bars(session, instrument_id, daily_start, today)
-            if timeframe == "1mo":
-                bars_monthly = await fetch_monthly_bars(session, instrument_id, daily_start, today)
-        except Exception as exc:
-            logger.warning("DB 降级查询也失败 instrument_id=%s: %s", instrument_id, exc)
+    bars_weekly = pd.DataFrame()
+    if timeframe == "1w":
+        bars_weekly = await fetch_weekly_bars(session, instrument_id, daily_start, today)
+    bars_monthly = pd.DataFrame()
+    if timeframe == "1mo":
+        bars_monthly = await fetch_monthly_bars(session, instrument_id, daily_start, today)
 
-    # 3. 前复权处理
+    # 3. [图表行情契约] 前复权处理：仅对非日线（日线已由 load_chart_bars 处理）
     if adj == "qfq":
         adj_factor_df = await _get_adj_factor_df(session, instrument_id)
-        # 日线/周线/月线前复权
-        daily_bars = apply_adj_factor_to_bars(daily_bars, adj_factor_df, intraday=False)
+        # 周线/月线前复权
         if not bars_weekly.empty:
             bars_weekly = apply_adj_factor_to_bars(bars_weekly, adj_factor_df, intraday=False)
         if not bars_monthly.empty:
             bars_monthly = apply_adj_factor_to_bars(bars_monthly, adj_factor_df, intraday=False)
-        # 15min/1min 日内前复权
+        # 15min/1min/60min 日内前复权
         if not bars_15min.empty:
             bars_15min = apply_adj_factor_to_bars(
                 bars_15min, adj_factor_df, intraday=True
@@ -454,6 +421,12 @@ async def compute_all_indicators(
     if not isinstance(daily_bars.index, pd.DatetimeIndex):
         daily_bars = daily_bars.copy()
         daily_bars.index = pd.to_datetime(daily_bars.index)
+
+    # [图表行情契约] - 计算 source_bar_times/source_bar_hash（SubTask 1.4）
+    #   作为数据源诊断字段，前端据此验证 K 线时间与指标数据源一致性
+    #   必须在 daily_bars 最终确定后计算（load_chart_bars 已完成排序/去重/截取）
+    source_bar_times: list[str] = compute_source_bar_times(daily_bars)
+    source_bar_hash: str = compute_source_bar_hash(daily_bars)
 
     # 4. 构建 MarketDataContext
     context = MarketDataContext(
@@ -530,10 +503,14 @@ async def compute_all_indicators(
                     "hover_fields": layer.get("hover_fields", []),
                 })
 
-            # [indicator_service] - 注入 time 字段后截取到最近 bars 根 + 转 JSON 可序列化
+            # [图表行情契约] - 注入 time 字段（仅当策略未返回 time 时）
+            #   SubTask 1.3: 策略（如 DSA）返回自身精确 time 时不再覆盖
             #   daily_time_list 与其他 list 字段一起被 _truncate_lists 截取（保持长度一致），
             #   前端可通过 data[strategy_id]["time"][i] 与 K线 time join 对齐
-            indicators_with_time = {**indicators, "time": daily_time_list}
+            if "time" not in indicators:
+                indicators_with_time = {**indicators, "time": daily_time_list}
+            else:
+                indicators_with_time = indicators
 
             # [BB 图层] - watchlist_monitor BB 按 timeframe 调整后处理
             preserve_keys: frozenset[str] | None = None
@@ -600,6 +577,10 @@ async def compute_all_indicators(
         "calculation_window": calculation_window,
         "warmup_bars": warmup_bars,
         "visible_bars": bars,
+        # [图表行情契约] - 数据源诊断字段（SubTask 1.4）
+        #   前端据此验证 K 线时间与指标数据源一致性；hash 用于跨场景比对
+        "source_bar_times": source_bar_times,
+        "source_bar_hash": source_bar_hash,
     }
 
 

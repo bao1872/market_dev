@@ -371,43 +371,67 @@ async def get_bars(
     except Exception as exc:
         logger.warning("查询 symbol 失败 instrument_id=%s: %s", instrument_id, exc)
 
-    # --- [行情] DB 优先数据获取 ---
+    # [图表行情契约] - 图表场景使用统一图表行情输入服务 load_chart_bars，
+    # 确保 /bars API 与 indicator_service 基于完全相同的 250 根前复权日线 Bar 计算。
+    # 触发条件：timeframe=1d + adj=qfq + page_size<=500（前端图表典型请求）
+    is_chart_scenario = (
+        timeframe == "1d"
+        and adj == "qfq"
+        and page_size <= 500
+    )
+
+    # --- 数据获取 ---
     data_source = "db"
     cache_hit = True
 
-    df = await _query_db_only(session, instrument_id, timeframe, start, end)
-
-    # --- DB 未命中：Pytdx 兜底（fetch_*_bars 含 upsert）---
-    if df is None or df.empty:
-        cache_hit = False
+    if is_chart_scenario:
+        # 图表场景：load_chart_bars 已包含 DB 优先 + Pytdx 兜底 + 前复权 + 去重 + 未完成 Bar 过滤 + 250 截取
+        from app.services.chart_bars_service import load_chart_bars
         try:
-            df = await _fetch_bars_with_pytdx_fallback(
-                session, instrument_id, timeframe, start, end,
+            df = await load_chart_bars(
+                session, instrument_id, timeframe="1d", count=250, adj="qfq",
             )
-            if df is not None and not df.empty:
-                data_source = "pytdx"
-        except HTTPException:
-            raise
         except Exception as exc:
-            logger.warning("Pytdx 兜底查询失败 instrument_id=%s: %s", instrument_id, exc)
+            logger.warning("load_chart_bars 失败 instrument_id=%s: %s", instrument_id, exc)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"查询行情失败: {exc}",
+                detail=f"查询图表行情失败: {exc}",
             ) from exc
+    else:
+        # --- [行情] DB 优先数据获取 ---
+        df = await _query_db_only(session, instrument_id, timeframe, start, end)
 
-    # --- DB 命中 + include_realtime + 交易时段：Pytdx 补充最后一根 Bar ---
-    if (
-        df is not None
-        and not df.empty
-        and include_realtime
-        and _is_trading_hours()
-        and data_source == "db"
-        and symbol is not None
-    ):
-        last_bar = await _fetch_last_bar_from_pytdx(symbol, timeframe)
-        df, merged = _merge_last_bar(df, last_bar)
-        if merged:
-            data_source = "hybrid"
+        # --- DB 未命中：Pytdx 兜底（fetch_*_bars 含 upsert）---
+        if df is None or df.empty:
+            cache_hit = False
+            try:
+                df = await _fetch_bars_with_pytdx_fallback(
+                    session, instrument_id, timeframe, start, end,
+                )
+                if df is not None and not df.empty:
+                    data_source = "pytdx"
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.warning("Pytdx 兜底查询失败 instrument_id=%s: %s", instrument_id, exc)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"查询行情失败: {exc}",
+                ) from exc
+
+        # --- DB 命中 + include_realtime + 交易时段：Pytdx 补充最后一根 Bar ---
+        if (
+            df is not None
+            and not df.empty
+            and include_realtime
+            and _is_trading_hours()
+            and data_source == "db"
+            and symbol is not None
+        ):
+            last_bar = await _fetch_last_bar_from_pytdx(symbol, timeframe)
+            df, merged = _merge_last_bar(df, last_bar)
+            if merged:
+                data_source = "hybrid"
 
     # --- 空数据处理 ---
     if df is None or df.empty:
@@ -428,7 +452,8 @@ async def get_bars(
     # --- 前复权处理 ---
     # [行情] DB 数据已含正确 adj_factor；Pytdx 最后一根 adj_factor=1.0（最新日约定）
     # 无需 merge_asof 映射，直接调用 apply_adj_factor_to_bars
-    if adj == "qfq":
+    # [图表行情契约] 图表场景已由 load_chart_bars 应用前复权，跳过
+    if adj == "qfq" and not is_chart_scenario:
         try:
             adj_factor_df = await _get_adj_factor_df(session, instrument_id)
             intraday = timeframe in ("15m", "1h")

@@ -221,6 +221,28 @@ def alpha_from_apt(apt: float) -> float:
 # =========================
 
 
+def _make_segment(direction: int, points_x: list, points_y: list) -> dict:
+    """构建可视化 segment（Pine polyline 契约格式，JSON 可序列化）。
+
+    [DSA 可视化契约] - 描述: 将内部 (x, y) 数组转为 {direction, points:[{time,value}]} 格式，
+    time 为 ISO 日期字符串（YYYY-MM-DD），value 为有限 float。跳过 NaN 值以保证 JSON 合法。
+
+    Args:
+        direction: 方向（1 上行 / -1 下行）
+        points_x: 时间点列表（pd.Timestamp / datetime64 / np.datetime64）
+        points_y: 值列表（float，可能含 NaN）
+
+    Returns:
+        {"direction": int, "points": [{"time": "YYYY-MM-DD", "value": float}, ...]}
+    """
+    points = [
+        {"time": pd.Timestamp(x).strftime("%Y-%m-%d"), "value": float(y)}
+        for x, y in zip(points_x, points_y)
+        if pd.notna(y)
+    ]
+    return {"direction": int(direction), "points": points}
+
+
 def dynamic_swing_anchored_vwap(df: pd.DataFrame, cfg: DSAConfig):
     """
     Pine v6 逐行对齐版（并返回 polyline segments 以匹配 TradingView 的绘制方式）
@@ -228,7 +250,7 @@ def dynamic_swing_anchored_vwap(df: pd.DataFrame, cfg: DSAConfig):
       vwap: pd.Series
       dir_series: pd.Series (1/-1)
       pivot_labels: list[dict]
-      segments: list[dict]  # each: {"dir": int, "x": np.ndarray(datetime64), "y": np.ndarray(float)}
+      segments: list[dict]  # each: {"direction": int, "points": [{"time": "YYYY-MM-DD", "value": float}]}
     """
     d = df.copy()
     d["hlc3"] = hlc3(d)
@@ -308,11 +330,7 @@ def dynamic_swing_anchored_vwap(df: pd.DataFrame, cfg: DSAConfig):
         if dir_ != last_dir:
             # --- freeze previous polyline segment (as Pine does before clearing points) ---
             if len(cur_points_x) >= 2:
-                segments.append({
-                    "dir": int(last_dir),
-                    "x": np.array(cur_points_x),
-                    "y": np.array(cur_points_y, dtype=float),
-                })
+                segments.append(_make_segment(last_dir, cur_points_x, cur_points_y))
 
             # anchor
             x_anchor = plL if dir_ > 0 else phL
@@ -384,11 +402,11 @@ def dynamic_swing_anchored_vwap(df: pd.DataFrame, cfg: DSAConfig):
 
     # finalize last segment
     if len(cur_points_x) >= 2:
-        segments.append({
-            "dir": int(last_dir if last_dir is not None else cur_dir),
-            "x": np.array(cur_points_x),
-            "y": np.array(cur_points_y, dtype=float),
-        })
+        segments.append(_make_segment(
+            last_dir if last_dir is not None else cur_dir,
+            cur_points_x,
+            cur_points_y,
+        ))
 
     vwap_series = pd.Series(vwap_out, index=d.index, name="DSA_VWAP")
     dir_series  = pd.Series(dir_out,  index=d.index, name="DSA_DIR")
@@ -586,10 +604,12 @@ def build_plot(df, vwap, dir_series, pivot_labels, segments, out_html, title, sm
     # Pine 使用 polyline，每次 dir 翻转会“冻结上一段”，并从 anchor 重新生成新段。
     # 所以这里按 segments 逐段画线，不会出现你看到的“被截断/硬连”的问题。
     for seg in segments:
-        seg_dir = seg["dir"]
+        seg_dir = seg["direction"]
         color = "#ff1744" if seg_dir > 0 else "#00e676"  # dir>0 red, dir<0 green (match Pine)
+        seg_times = [pt["time"] for pt in seg["points"]]
+        seg_values = [pt["value"] for pt in seg["points"]]
         fig.add_trace(
-            go.Scatter(x=seg["x"], y=seg["y"], mode="lines",
+            go.Scatter(x=seg_times, y=seg_values, mode="lines",
                        line=dict(width=2, color=color),
                        hoverinfo="skip", showlegend=False),
             row=1, col=1
@@ -710,13 +730,16 @@ def main() -> None:
 
     segments_show = []
     for seg in segments_full:
-        seg_x = pd.to_datetime(seg["x"])  # 统一成 Timestamp
-        mask = (seg_x >= min_x) & (seg_x <= max_x)
+        seg_times = pd.to_datetime([pt["time"] for pt in seg["points"]])
+        seg_values = np.array([pt["value"] for pt in seg["points"]])
+        mask = (seg_times >= min_x) & (seg_times <= max_x)
         if mask.sum() >= 2:
             segments_show.append({
-                "dir": seg["dir"],
-                "x": seg_x[mask],
-                "y": np.asarray(seg["y"])[mask],
+                "direction": seg["direction"],
+                "points": [
+                    {"time": seg_times[i].strftime("%Y-%m-%d"), "value": float(seg_values[i])}
+                    for i in range(len(seg_times)) if mask[i]
+                ],
             })
 
     build_plot(df_show, vwap_show, dir_show, labels_show, segments_show,

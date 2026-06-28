@@ -25,7 +25,8 @@ SSOT：
     - 历史回补：history = compute_dsa_history(bars, config); results = history.loc[target_dates]
     - compute_dsa_bundle(bars, config) 是 DSA 统一计算入口，封装 compute_dsa_history
       与图表字段（pivot_labels/regime_id）。execute() 取 last_row_metrics，
-      compute_indicators() 取 per_bar，两者共享同一份计算结果。
+      compute_indicators() 取 factor_per_bar / visual_segments / factor_time，
+      两者共享同一份计算结果。
 
 资源预算：DSA 默认 100ms/股（通过 BudgetGuard 控制）
 """
@@ -532,13 +533,15 @@ def _history_row_to_metrics(row: pd.Series) -> dict[str, Any]:
 def compute_dsa_bundle(bars: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]:
     """DSA 统一计算入口，封装 VWAP 计算 + 后处理 + metrics 提取。
 
-    同时产出 per-bar DataFrame（图表用）与最后一行标量 metrics（选股用），
-    消除 execute() 与 compute_indicators() 的双路径不一致：
+    [DSA 因子与可视化契约分离] - 描述: 同时产出因子序列（选股用）与可视化契约
+    （图表用），因子与可视化彻底分离。factor_per_bar 仅供选股/metrics，
+    visual_segments/pivot_labels/anchor 仅供前端 Pine 风格渲染，互不混用。
+
     - execute() 取 last_row_metrics 作为 StrategyResult.metrics
-    - compute_indicators() 取 per_bar 转为图表数组
+    - compute_indicators() 取 factor_per_bar / visual_segments / factor_time 转为图表数组
 
     内部调用 compute_dsa_history（SSOT）获取 metrics，并单独调用
-    dynamic_swing_anchored_vwap 获取图表字段（pivot_labels/regime_id）。
+    dynamic_swing_anchored_vwap 获取图表字段（pivot_labels/segments）。
     为避免修改 compute_dsa_history（SSOT，可能被其他地方引用），接受
     dynamic_swing_anchored_vwap 被调用 2 次的开销（每次 < 100ms，预算内）。
 
@@ -553,18 +556,40 @@ def compute_dsa_bundle(bars: pd.DataFrame, config: dict[str, Any]) -> dict[str, 
 
     Returns:
         dict 包含:
-        - per_bar: pd.DataFrame，含 compute_dsa_history 全部列 +
+        - factor_per_bar: pd.DataFrame，含 compute_dsa_history 全部列 +
           dsa_dir/regime_id/anchor_time/pivot_type/pivot_price 图表字段
-        - last_row_metrics: dict，从 per_bar 最后一行提取的标量 metrics
-        数据不足时返回 {"per_bar": pd.DataFrame(), "last_row_metrics": {}}
+        - visual_segments: list[dict]，直接由 dynamic_swing_anchored_vwap
+          返回的 segments 转换而来，格式 [{direction, points:[{time,value}]}]
+        - factor_time: pd.DatetimeIndex，等于 factor_per_bar.index
+        - pivot_labels: list[dict]，直接由 dynamic_swing_anchored_vwap 返回
+        - anchor: dict，锚点信息（time/price/direction/type 列表）
+        - last_row_metrics: dict，从 factor_per_bar 最后一行提取的标量 metrics
+        - per_bar: pd.DataFrame，factor_per_bar 别名（向后兼容历史测试）
+        数据不足时返回各字段为空的结构
     """
     if bars is None or bars.empty or len(bars) < 60:
-        return {"per_bar": pd.DataFrame(), "last_row_metrics": {}}
+        return {
+            "factor_per_bar": pd.DataFrame(),
+            "visual_segments": [],
+            "factor_time": pd.DatetimeIndex([]),
+            "pivot_labels": [],
+            "anchor": {},
+            "last_row_metrics": {},
+            "per_bar": pd.DataFrame(),  # 向后兼容
+        }
 
     # 1. 调用 compute_dsa_history 获取 metrics DataFrame（SSOT）
     history = compute_dsa_history(bars, config)
     if history.empty:
-        return {"per_bar": pd.DataFrame(), "last_row_metrics": {}}
+        return {
+            "factor_per_bar": pd.DataFrame(),
+            "visual_segments": [],
+            "factor_time": pd.DatetimeIndex([]),
+            "pivot_labels": [],
+            "anchor": {},
+            "last_row_metrics": {},
+            "per_bar": pd.DataFrame(),  # 向后兼容
+        }
 
     # 2. 提取最后一行作为标量 metrics
     last_row = history.iloc[-1]
@@ -581,7 +606,7 @@ def compute_dsa_bundle(bars: pd.DataFrame, config: dict[str, Any]) -> dict[str, 
     if lookback is not None and len(df) > lookback:
         df = df.tail(lookback)
 
-    vwap_series, dir_series, pivot_labels, _ = dynamic_swing_anchored_vwap(df, dsa_config)
+    vwap_series, dir_series, pivot_labels, segments = dynamic_swing_anchored_vwap(df, dsa_config)
     vwap_series, dir_series = _remove_dsa_lookahead(df, vwap_series, dir_series, dsa_config)
 
     # 4. 构建 per_bar = history + 图表字段
@@ -624,9 +649,26 @@ def compute_dsa_bundle(bars: pd.DataFrame, config: dict[str, Any]) -> dict[str, 
     per_bar["pivot_price"] = pivot_price
     per_bar["anchor_time"] = anchor_time
 
+    # 5. 构建 anchor：从 pivot_labels 提取锚点信息（每个 dir 翻转点 = 一个锚点）
+    # time 使用 YYYY-MM-DD 格式，与 visual_segments 契约保持一致
+    anchor = {
+        "time": [pd.Timestamp(lab["x"]).strftime("%Y-%m-%d") for lab in pivot_labels],
+        "price": [float(lab["y"]) if np.isfinite(lab["y"]) else None for lab in pivot_labels],
+        "direction": [int(lab["dir"]) for lab in pivot_labels],
+        "type": [lab["text"] or None for lab in pivot_labels],
+    }
+
+    # 6. 返回因子与可视化契约分离的结构
+    # visual_segments 直接透传算法返回的 segments（Pine polyline 契约）
+    # per_bar 作为 factor_per_bar 别名保留，向后兼容 test_dsa_bundle_consistency 等历史测试
     return {
-        "per_bar": per_bar,
+        "factor_per_bar": per_bar,
+        "visual_segments": segments,
+        "factor_time": per_bar.index,
+        "pivot_labels": pivot_labels,
+        "anchor": anchor,
         "last_row_metrics": last_row_metrics,
+        "per_bar": per_bar,  # 向后兼容
     }
 
 
@@ -784,19 +826,24 @@ class DSASelector(StrategyRuntime):
         )
 
     async def compute_indicators(self, context: MarketDataContext) -> dict[str, Any]:
-        """计算 DSA VWAP 图表指标（含 Pine 标签与 regime 分段）。
+        """计算 DSA VWAP 图表指标（含 Pine 标签、regime 分段与可视化线段）。
 
-        供个股详情页面实时计算使用。通过 compute_dsa_bundle 统一入口获取 per_bar
-        （与 execute() 共享同一份计算结果，消除双路径不一致）。
-        应用与选股相同的 lookback=250（self._lookback，与
-        indicator_contract.DSA_LOOKBACK 对齐），确保图表与选股指标口径一致。
+        供个股详情页面实时计算使用。通过 compute_dsa_bundle 统一入口获取
+        factor_per_bar / visual_segments / factor_time（与 execute() 共享同一份
+        计算结果，消除双路径不一致）。应用与选股相同的 lookback=250
+        （self._lookback，与 indicator_contract.DSA_LOOKBACK 对齐），确保图表与
+        选股指标口径一致。
 
-        输出字段按 bar 对齐，长度一致（= min(len(bars_daily), lookback)），
-        前端按 regime_id 分段渲染、按 anchor_time 标记锚点、按 pivot_type/pivot_price
-        标注 HH/HL/LH/LL。
+        [DSA 因子与可视化契约分离] - 描述: time/visual_segments 直接由 bundle 透传，
+        与 indicator_service 的 source_bar_times 对齐；visual_segments 供前端
+        dsa_polyline renderer 逐段绘制，不再依赖 regime_id 切段。
+
+        输出字段按 bar 对齐，长度一致（= min(len(bars_daily), lookback)）。
 
         Returns:
             dict 包含:
+            - time: list[str] ISO 日期字符串（YYYY-MM-DD），与 source_bar_times 一致
+            - visual_segments: list[dict] Pine polyline 契约 [{direction, points:[{time,value}]}]
             - dsa_vwap: list[float|None] 每 bar 的 DSA VWAP 值
             - dsa_dir: list[int] 每 bar 的方向（1/-1）
             - regime_id: list[int] 每 bar 所属 regime 编号（切换点递增）
@@ -807,6 +854,8 @@ class DSASelector(StrategyRuntime):
         daily_df = context.bars_daily
         n_input = len(daily_df) if daily_df is not None else 0
         _empty: dict[str, list] = {
+            "time": [],
+            "visual_segments": [],
             "dsa_vwap": [],
             "dsa_dir": [],
             "regime_id": [],
@@ -829,19 +878,23 @@ class DSASelector(StrategyRuntime):
             )
             return _empty
 
-        per_bar = bundle["per_bar"]
-        if per_bar.empty:
+        factor_per_bar = bundle["factor_per_bar"]
+        if factor_per_bar.empty:
             return _empty
 
-        # [DSA 图表数组] - 从 per_bar 提取为 list，NaN -> None（保持与原 compute_indicators 输出格式一致）
+        # [DSA 图表数组] - 从 factor_per_bar 提取为 list，NaN -> None
         # pivot_type/anchor_time/pivot_price 经 DataFrame 中转后 None 可能被转为 NaN，需还原
+        # time 从 factor_time 转为 ISO 日期字符串，与 source_bar_times 对齐
+        # visual_segments 直接透传 bundle 返回的 Pine polyline 契约
         return {
-            "dsa_vwap": [None if pd.isna(v) else float(v) for v in per_bar["dsa_vwap"]],
-            "dsa_dir": [int(d) for d in per_bar["dsa_dir"]],
-            "regime_id": [int(x) for x in per_bar["regime_id"]],
-            "anchor_time": [None if pd.isna(t) else str(t) for t in per_bar["anchor_time"]],
-            "pivot_type": [None if pd.isna(t) else str(t) for t in per_bar["pivot_type"]],
-            "pivot_price": [None if pd.isna(p) else float(p) for p in per_bar["pivot_price"]],
+            "time": [idx.strftime("%Y-%m-%d") for idx in bundle["factor_time"]],
+            "visual_segments": bundle["visual_segments"],
+            "dsa_vwap": [None if pd.isna(v) else float(v) for v in factor_per_bar["dsa_vwap"]],
+            "dsa_dir": [int(d) for d in factor_per_bar["dsa_dir"]],
+            "regime_id": [int(x) for x in factor_per_bar["regime_id"]],
+            "anchor_time": [None if pd.isna(t) else str(t) for t in factor_per_bar["anchor_time"]],
+            "pivot_type": [None if pd.isna(t) else str(t) for t in factor_per_bar["pivot_type"]],
+            "pivot_price": [None if pd.isna(p) else float(p) for p in factor_per_bar["pivot_price"]],
         }
 
     def _compute_metrics_sync(self, context: MarketDataContext) -> dict[str, Any]:
@@ -867,7 +920,7 @@ class DSASelector(StrategyRuntime):
             logger.warning("DSA bundle 计算异常 symbol=%s: %s", context.symbol, exc)
             return {"regime_value": 0, "error": f"dsa_compute_failed: {exc}"}
 
-        if bundle["per_bar"].empty:
+        if bundle["factor_per_bar"].empty:
             return {"regime_value": 0, "error": "insufficient_data"}
 
         metrics = bundle["last_row_metrics"]

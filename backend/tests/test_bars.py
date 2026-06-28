@@ -364,7 +364,54 @@ def test_get_bars_invalid_adj() -> None:
 
 
 def test_get_bars_qfq(monkeypatch: pytest.MonkeyPatch) -> None:
-    """测试前复权行情查询。"""
+    """测试前复权行情查询（图表场景走 load_chart_bars）。
+
+    图表场景触发条件：timeframe=1d + adj=qfq + page_size<=500（默认 page_size=100）。
+    因此需 mock chart_bars_service 内部的 fetch_daily_bars 与 _get_adj_factor_df。
+    """
+    from app.services import chart_bars_service
+
+    async def mock_fetch(*args, **kwargs):
+        df = pd.DataFrame({
+            "open": [10.0, 5.0],
+            "high": [10.5, 5.5],
+            "low": [9.8, 4.8],
+            "close": [10.2, 5.2],
+            "volume": [100000, 200000],
+            "amount": [1020000, 1040000],
+            "adj_factor": [2.0, 1.0],
+        }, index=pd.to_datetime(["2026-06-16", "2026-06-17"]))
+        df.index.name = "trade_date"
+        return df
+
+    async def mock_get_adj(*args, **kwargs):
+        return pd.DataFrame({
+            "trade_date": pd.to_datetime(["2026-06-16", "2026-06-17"]),
+            "adj_factor": [2.0, 1.0],
+        })
+
+    # 图表场景下 bars_api 不再直接调用 fetch_daily_bars / _get_adj_factor_df，
+    # 而是通过 load_chart_bars -> chart_bars_service.fetch_daily_bars / _get_adj_factor_df
+    monkeypatch.setattr(chart_bars_service, "fetch_daily_bars", mock_fetch)
+    monkeypatch.setattr(chart_bars_service, "_get_adj_factor_df", mock_get_adj)
+
+    client = TestClient(app)
+    response = client.get(
+        f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
+        params={"timeframe": "1d", "adj": "qfq"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["adj"] == "qfq"
+    # 06-16 close 前复权后 = 10.2 × 2.0 = 20.4
+    assert data["items"][0]["close"] == 20.4
+    # 06-17 close 不变 = 5.2
+    assert data["items"][1]["close"] == 5.2
+
+
+def test_get_bars_qfq_non_chart_scenario(monkeypatch: pytest.MonkeyPatch) -> None:
+    """测试前复权行情查询（非图表场景 page_size>500 走原有 DB 优先 + qfq 流程）。"""
     from app.api import bars as bars_api
 
     async def mock_fetch(*args, **kwargs):
@@ -386,13 +433,14 @@ def test_get_bars_qfq(monkeypatch: pytest.MonkeyPatch) -> None:
             "adj_factor": [2.0, 1.0],
         })
 
-    monkeypatch.setattr(bars_api, "fetch_daily_bars", mock_fetch)
+    # page_size=600 > 500，非图表场景，走原有 _query_db_only + qfq 流程
+    monkeypatch.setattr(bars_api, "_query_db_only", mock_fetch)
     monkeypatch.setattr(bars_api, "_get_adj_factor_df", mock_get_adj)
 
     client = TestClient(app)
     response = client.get(
         f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
-        params={"timeframe": "1d", "adj": "qfq"},
+        params={"timeframe": "1d", "adj": "qfq", "page_size": 600},
     )
 
     assert response.status_code == 200

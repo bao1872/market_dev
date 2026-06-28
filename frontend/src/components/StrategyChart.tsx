@@ -694,6 +694,9 @@ function renderIndicatorLayer(
     case 'line':
       renderIndicatorLine(ctx, g, layer, data, displayTimes, step, py, timeframe)
       break
+    case 'dsa_polyline':
+      renderDsaPolyline(ctx, g, layer, data, displayTimes, step, py, timeframe)
+      break
     case 'price_zone':
       renderIndicatorPriceZone(ctx, g, layer, data, displayTimes, step, py, timeframe)
       break
@@ -844,6 +847,126 @@ function renderIndicatorLine(
       if (typeof label !== 'string') continue
       const price = pivotPrices[idx]
       if (price == null || typeof price === 'string') continue
+      const x = g.l + (i + 0.5) * step
+      const y = py(Number(price))
+      // HH/LH 为波段高点，标签画在 K 线上方；HL/LL 为波段低点，画在下方
+      const isHigh = label === 'HH' || label === 'LH'
+      const labelColor = isHigh ? C.up : C.down
+      const textY = isHigh ? y - 9 : y + 14
+      ctx.fillStyle = labelColor
+      ctx.font = 'bold 9px ui-monospace, SFMono-Regular, Menlo, monospace'
+      ctx.textAlign = 'center'
+      ctx.fillText(label, x, textY)
+    }
+  }
+}
+
+// [DSA 分段] - dsa_polyline 渲染器：基于后端预计算的 visual_segments 逐段独立绘制
+//   段间不连线（每段独立 beginPath/moveTo/lineTo/stroke），上涨 #ff1744 / 下降 #00e676
+//   锚点与 HH/HL/LH/LL 标签通过 segment point 的实际 time 经 normalizeChartTime 匹配 K 线索引
+function renderDsaPolyline(
+  ctx: CanvasRenderingContext2D,
+  g: Geometry,
+  layer: ChartLayer,
+  data: Record<string, (number | string | null)[]>,
+  displayTimes: string[],
+  step: number,
+  py: (v: number) => number,
+  timeframe: string,
+): void {
+  const segments = layer.visual_segments
+  if (!segments || segments.length === 0) return
+
+  // K 线时间 → display index 映射（segment point time 经 normalizeChartTime 匹配）
+  const klineTimeIndex = new Map<string, number>()
+  displayTimes.forEach((t, i) => {
+    const key = normalizeChartTime(t, timeframe)
+    if (key != null) klineTimeIndex.set(key, i)
+  })
+
+  // segment point time → value / direction 查找表（供锚点着色与定位使用）
+  const segValueByTime = new Map<string, number>()
+  const segDirByTime = new Map<string, 1 | -1>()
+  for (const seg of segments) {
+    if (!seg.points) continue
+    for (const pt of seg.points) {
+      const key = normalizeChartTime(pt.time, timeframe)
+      if (key == null) continue
+      segValueByTime.set(key, pt.value)
+      segDirByTime.set(key, seg.direction)
+    }
+  }
+
+  // 逐段绘制：每段独立 beginPath/stroke，段间不连线
+  for (const seg of segments) {
+    if (!seg.points || seg.points.length === 0) continue
+    const color = seg.direction === 1 ? '#ff1744' : '#00e676'
+    ctx.beginPath()
+    let started = false
+    for (const pt of seg.points) {
+      const key = normalizeChartTime(pt.time, timeframe)
+      if (key == null) continue
+      const i = klineTimeIndex.get(key)
+      if (i == null) continue
+      const x = g.l + (i + 0.5) * step
+      const y = py(pt.value)
+      if (!started) { ctx.moveTo(x, y); started = true }
+      else ctx.lineTo(x, y)
+    }
+    if (started) {
+      ctx.strokeStyle = color
+      ctx.lineWidth = 2
+      ctx.stroke()
+    }
+  }
+
+  // 锚点小圆点：anchor_field 提供 anchor_time 数组，非 null 即方向翻转锚点
+  //   位置与值通过 anchor_time 经 normalizeChartTime 匹配 K 线索引与 segment point value
+  if (layer.anchor_field && data[layer.anchor_field]) {
+    const anchors = data[layer.anchor_field]
+    for (let k = 0; k < anchors.length; k++) {
+      const a = anchors[k]
+      if (a == null) continue  // null 表示该 bar 非锚点
+      const key = normalizeChartTime(a, timeframe)
+      if (key == null) continue
+      const i = klineTimeIndex.get(key)
+      if (i == null) continue
+      const v = segValueByTime.get(key)
+      if (v == null) continue
+      const x = g.l + (i + 0.5) * step
+      const y = py(v)
+      // 锚点方向色：取该 time 所属 segment 的 direction（翻转后方向）
+      const dir = segDirByTime.get(key)
+      const innerColor = dir === 1 ? (layer.direction_up_color || '#ff1744') : (layer.direction_down_color || '#00e676')
+      ctx.beginPath()
+      ctx.arc(x, y, 3.5, 0, Math.PI * 2)
+      ctx.fillStyle = '#ffffff'
+      ctx.fill()
+      ctx.beginPath()
+      ctx.arc(x, y, 2.2, 0, Math.PI * 2)
+      ctx.fillStyle = innerColor
+      ctx.fill()
+    }
+  }
+
+  // [DSA Pine 标签] - HH/HL/LH/LL：pivot_type/pivot_price 按 indicator index 存储，
+  //   time 取 data.time[indicator_index]，经 normalizeChartTime 匹配 K 线索引
+  const pivotTypeField = layer.fields[4]
+  const pivotPriceField = layer.fields[5]
+  if (pivotTypeField && data[pivotTypeField] && pivotPriceField && data[pivotPriceField] && data.time) {
+    const pivotTypes = data[pivotTypeField]
+    const pivotPrices = data[pivotPriceField]
+    const times = data.time
+    for (let k = 0; k < pivotTypes.length; k++) {
+      const label = pivotTypes[k]
+      if (typeof label !== 'string') continue
+      const price = pivotPrices[k]
+      if (price == null || typeof price === 'string') continue
+      const t = times[k]
+      const key = normalizeChartTime(t, timeframe)
+      if (key == null) continue
+      const i = klineTimeIndex.get(key)
+      if (i == null) continue
       const x = g.l + (i + 0.5) * step
       const y = py(Number(price))
       // HH/LH 为波段高点，标签画在 K 线上方；HL/LL 为波段低点，画在下方
@@ -1270,7 +1393,8 @@ function drawTrading(
           if (typeof l === 'number') priceCandidates.push(l)
         })
       }
-      if (layer.layer_id === 'dsa_vwap' && layers.dsa) {
+      // [DSA 周期限制] - 仅 1d 周期且 dsa 开关开启时纳入 VWAP 值到纵轴范围（非 1d 不渲染 DSA，纵轴也不应包含）
+      if (layer.layer_id === 'dsa_vwap' && layers.dsa && timeframe === '1d') {
         const vwapField = layer.fields.find(f => /vwap/i.test(f)) || layer.fields[0]
         const vwapVals = layerData[vwapField]
         indexMap.forEach(idx => {
@@ -1360,10 +1484,40 @@ function drawTrading(
   }
 
   // 7. 通用渲染器：渲染后端返回的策略指标图层（DSA VWAP 等）
+  // [DSA 数据源校验] - 检测 K 线时间与 indicators.source_bar_times 一致性，
+  //   不一致则跳过 DSA 渲染并在控制台输出诊断信息（避免指标与 K 线错位）
+  let dsaSourceMismatch = false
+  if (indicators?.source_bar_times && displayTimes.length > 0) {
+    const klineKeys = new Set<string>()
+    displayTimes.forEach(t => {
+      const key = normalizeChartTime(t, timeframe)
+      if (key != null) klineKeys.add(key)
+    })
+    const indicatorKeys = new Set<string>()
+    indicators.source_bar_times.forEach(t => {
+      const key = normalizeChartTime(t, timeframe)
+      if (key != null) indicatorKeys.add(key)
+    })
+    let matched = 0
+    klineKeys.forEach(k => { if (indicatorKeys.has(k)) matched++ })
+    const ratio = klineKeys.size > 0 ? matched / klineKeys.size : 0
+    if (ratio < 0.5) {
+      dsaSourceMismatch = true
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[StrategyChart] DSA 数据源不一致，跳过渲染: K线时间匹配率 ${(ratio * 100).toFixed(1)}%` +
+        ` (${matched}/${klineKeys.size}), timeframe=${timeframe}, source_bar_hash=${indicators.source_bar_hash ?? 'N/A'}`,
+      )
+    }
+  }
   if (indicators && indicators.layers && indicators.data) {
     indicators.layers.forEach(layer => {
       // DSA VWAP 指标受 dsa 图层开关控制
       if (layer.layer_id === 'dsa_vwap' && !layers.dsa) return
+      // [DSA 周期限制] - 趋势参考价仅支持日线，非 1d 周期不渲染任何 DSA 数据
+      if (layer.layer_id === 'dsa_vwap' && timeframe !== '1d') return
+      // [DSA 数据源校验] - K 线时间与 source_bar_times 不一致时跳过 DSA 渲染
+      if (layer.layer_id === 'dsa_vwap' && dsaSourceMismatch) return
       if (layer.layer_id === 'bb' && !layers.bb) return
       // [BB 图层] - 周线/月线不渲染日线布林带
       if (layer.layer_id === 'bb' && (timeframe === '1w' || timeframe === '1mo')) return
@@ -1542,8 +1696,9 @@ export function StrategyChart({
     eventHit: [],
   })
 
-  // 图层可见性（localStorage 持久化，v2 key：首次无缓存时使用 manifest 新默认图层）
-  const storageKey = `detail-chart-strategy-groups-v2:${source}:${strategyId}`
+  // 图层可见性（localStorage 持久化，v3 key：DSA 改用 dsa_polyline 渲染器后升级版本，
+  //   旧 v2 缓存不再读取，避免残留的 DSA 配置影响新版本默认值）
+  const storageKey = `detail-chart-strategy-groups-v3:${source}:${strategyId}`
   const [layers, setLayers] = useState<LayerVisibility>(() => {
     try {
       const saved = localStorage.getItem(storageKey)
@@ -1898,6 +2053,8 @@ export function StrategyChart({
 
   // 图层切换
   const handleToggleGroup = (groupId: string) => {
+    // [DSA 周期限制] - 趋势参考价仅支持日线，非 1d 周期禁用 DSA 开关
+    if (groupId === 'dsa' && timeframe !== '1d') return
     setLayers(prev => toggleGroup(groupId, prev))
   }
 
@@ -2001,10 +2158,13 @@ export function StrategyChart({
         <span className="tv-strategy-legend-label">策略图层</span>
         {Object.values(DISPLAY_GROUPS).map((g: DisplayGroupDef) => {
           const active = isGroupActive(g.id, layers)
+          // [DSA 周期限制] - 趋势参考价仅支持日线，非 1d 周期禁用 DSA 开关并提示
+          const dsaDisabled = g.id === 'dsa' && timeframe !== '1d'
           return (
             <label
               key={g.id}
-              className={clsx('tv-strategy-legend-item', !active && 'off')}
+              className={clsx('tv-strategy-legend-item', !active && 'off', dsaDisabled && 'disabled')}
+              title={dsaDisabled ? '趋势参考价仅支持日线' : undefined}
               onClick={() => handleToggleGroup(g.id)}
             >
               <i className="tv-legend-dot" style={{ '--legend-color': g.color } as React.CSSProperties} />

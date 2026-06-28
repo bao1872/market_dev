@@ -1,7 +1,10 @@
-"""Task 8 测试 - 后端按 timeframe 计算 MACD。
+"""Task 1 测试 - 图表行情契约 + Task 8 MACD timeframe 对齐。
 
-验证 compute_all_indicators 在 15m/1h/1d/1w/1mo 不同 timeframe 下，
-均使用对应周期 bars 计算 MACD，且返回的 time 数组与该周期 bars 时间对齐。
+验证：
+1. compute_all_indicators 在不同 timeframe 下使用对应周期 bars 计算 MACD
+2. 响应包含 source_bar_times 和 source_bar_hash（SubTask 1.4）
+3. 策略返回 time 时不被覆盖（SubTask 1.3）
+4. 日线行情来自 load_chart_bars（不再通过 Exchange.klines）
 
 用法：
     APP_ENV=test TEST_DATABASE_URL=postgresql://... pytest tests/test_indicator_service.py -v
@@ -21,7 +24,10 @@ TEST_INSTRUMENT_ID = uuid.UUID("12345678-1234-1234-1234-123456789012")
 
 
 def _build_bars(frequency: str, length: int = 60) -> pd.DataFrame:
-    """构造指定周期的 mock bars（含 OHLCV + adj_factor）。"""
+    """构造指定周期的 mock bars（含 OHLCV + adj_factor，naive DatetimeIndex）。
+
+    naive DatetimeIndex 与 load_chart_bars 和 DB 查询的实际返回一致。
+    """
     if frequency == "1d":
         dates = pd.date_range("2026-03-01", periods=length, freq="B")
     elif frequency == "15m":
@@ -45,7 +51,7 @@ def _build_bars(frequency: str, length: int = 60) -> pd.DataFrame:
         "amount": [1000000 + i * 10 for i in range(length)],
         "adj_factor": [1.0] * length,
     }, index=dates)
-    df.index = df.index.tz_localize("Asia/Shanghai")
+    # 不再 tz_localize：load_chart_bars 和 DB 查询返回 naive DatetimeIndex
     return df
 
 
@@ -60,19 +66,37 @@ def mock_session() -> AsyncMock:
 
 
 @pytest.fixture
-def mock_exchange(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
-    """mock Exchange.klines 返回不同 frequency 的 bars。"""
-    exchange = AsyncMock()
+def mock_bars(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[图表行情契约] - mock load_chart_bars + DB 查询函数，替代原 mock_exchange。
 
-    async def klines(symbol: str, frequency: str, **kwargs) -> pd.DataFrame:
-        if frequency == "1m":
-            # 监控策略仅需要 2 根 1 分钟线
-            return _build_bars("15m", length=2)
-        return _build_bars(frequency)
+    所有 mock 数据使用 naive DatetimeIndex（与 load_chart_bars 和 DB 查询的实际行为一致）。
+    替代原 Exchange.klines 优先链路（SubTask 1.3）。
+    """
+    async def mock_load_chart_bars(session, instrument_id, timeframe="1d", count=250, adj="qfq"):
+        return _build_bars("1d")
 
-    exchange.klines = klines
-    monkeypatch.setattr(indicator_service, "get_exchange", lambda market: exchange)
-    return exchange
+    async def mock_query_15min(session, instrument_id, start, end):
+        return _build_bars("15m")
+
+    async def mock_query_minute(session, instrument_id, start, end):
+        # 监控策略仅需要 2 根 1 分钟线
+        return _build_bars("15m", length=2)
+
+    async def mock_query_60min(session, instrument_id, start, end):
+        return _build_bars("1h")
+
+    async def mock_fetch_weekly(session, instrument_id, start, end):
+        return _build_bars("1w")
+
+    async def mock_fetch_monthly(session, instrument_id, start, end):
+        return _build_bars("1mo")
+
+    monkeypatch.setattr(indicator_service, "load_chart_bars", mock_load_chart_bars)
+    monkeypatch.setattr(indicator_service, "_query_15min_bars", mock_query_15min)
+    monkeypatch.setattr(indicator_service, "_query_minute_bars", mock_query_minute)
+    monkeypatch.setattr(indicator_service, "_query_60min_bars", mock_query_60min)
+    monkeypatch.setattr(indicator_service, "fetch_weekly_bars", mock_fetch_weekly)
+    monkeypatch.setattr(indicator_service, "fetch_monthly_bars", mock_fetch_monthly)
 
 
 @pytest.fixture
@@ -84,7 +108,7 @@ def empty_registry(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize("timeframe", ["15m", "1h", "1d", "1w", "1mo"])
 async def test_macd_time_matches_timeframe(
     mock_session: AsyncMock,
-    mock_exchange: AsyncMock,
+    mock_bars: None,
     empty_registry: None,
     timeframe: str,
 ) -> None:
@@ -112,7 +136,7 @@ async def test_macd_time_matches_timeframe(
 @pytest.mark.parametrize("timeframe", ["15m", "1h", "1d", "1w", "1mo"])
 async def test_macd_time_values_are_iso_strings(
     mock_session: AsyncMock,
-    mock_exchange: AsyncMock,
+    mock_bars: None,
     empty_registry: None,
     timeframe: str,
 ) -> None:
@@ -126,6 +150,169 @@ async def test_macd_time_values_are_iso_strings(
         assert isinstance(t, str), "time 元素应为字符串"
         # 验证可解析为 Timestamp
         assert pd.Timestamp(t) is not None
+
+
+# ===== SubTask 1.3: 日线行情来自 load_chart_bars（不再通过 Exchange） =====
+
+
+async def test_daily_bars_from_load_chart_bars_not_exchange(
+    mock_session: AsyncMock,
+    empty_registry: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """日线行情来自 load_chart_bars，不再调用 get_exchange/Exchange.klines。"""
+    load_chart_bars_called = False
+
+    async def mock_load(session, instrument_id, timeframe="1d", count=250, adj="qfq"):
+        nonlocal load_chart_bars_called
+        load_chart_bars_called = True
+        return _build_bars("1d")
+
+    # mock DB 查询（避免连真实 DB）
+    async def mock_query_15min(session, instrument_id, start, end):
+        return _build_bars("15m")
+
+    async def mock_query_minute(session, instrument_id, start, end):
+        return _build_bars("15m", length=2)
+
+    monkeypatch.setattr(indicator_service, "load_chart_bars", mock_load)
+    monkeypatch.setattr(indicator_service, "_query_15min_bars", mock_query_15min)
+    monkeypatch.setattr(indicator_service, "_query_minute_bars", mock_query_minute)
+
+    # [SubTask 1.3] 验证 Exchange 链路已删除：
+    # 若模块已无 get_exchange 属性，说明 import 已被删除（理想状态）；
+    # 若仍存在（例如未来误引入），用 fail_get_exchange 替换以捕获实际调用
+    def fail_get_exchange(*args, **kwargs):
+        raise AssertionError("不应再调用 get_exchange（SubTask 1.3 要求删除 Exchange 链路）")
+
+    if hasattr(indicator_service, "get_exchange"):
+        monkeypatch.setattr(indicator_service, "get_exchange", fail_get_exchange)
+    else:
+        # 模块未导入 get_exchange，Exchange 链路已从 import 层面删除
+        pass
+
+    await indicator_service.compute_all_indicators(
+        mock_session, TEST_INSTRUMENT_ID, "1d", "none", bars=250,
+    )
+
+    assert load_chart_bars_called, "应调用 load_chart_bars 获取日线行情"
+    # 双重验证：模块层面不应再依赖 get_exchange
+    assert not hasattr(indicator_service, "get_exchange"), \
+        "indicator_service 不应再 import get_exchange"
+
+
+# ===== SubTask 1.4: source_bar_times / source_bar_hash =====
+
+
+async def test_source_bar_times_in_response(
+    mock_session: AsyncMock,
+    mock_bars: None,
+    empty_registry: None,
+) -> None:
+    """响应包含 source_bar_times（与 daily_bars 长度一致，ISO 日期字符串）。"""
+    result = await indicator_service.compute_all_indicators(
+        mock_session, TEST_INSTRUMENT_ID, "1d", "none", bars=250,
+    )
+    assert "source_bar_times" in result, "响应应包含 source_bar_times"
+    assert isinstance(result["source_bar_times"], list)
+    # 长度与 daily_bars 一致
+    expected_bars = _build_bars("1d")
+    assert len(result["source_bar_times"]) == len(expected_bars)
+    # 元素为 ISO 日期字符串（YYYY-MM-DD）
+    for t in result["source_bar_times"]:
+        assert isinstance(t, str)
+        assert len(t) == 10, f"source_bar_times 元素应为 YYYY-MM-DD 格式: {t}"
+
+
+async def test_source_bar_hash_in_response(
+    mock_session: AsyncMock,
+    mock_bars: None,
+    empty_registry: None,
+) -> None:
+    """响应包含 source_bar_hash（16 字符 hex 字符串）。"""
+    result = await indicator_service.compute_all_indicators(
+        mock_session, TEST_INSTRUMENT_ID, "1d", "none", bars=250,
+    )
+    assert "source_bar_hash" in result, "响应应包含 source_bar_hash"
+    assert isinstance(result["source_bar_hash"], str)
+    assert len(result["source_bar_hash"]) == 16, "source_bar_hash 应为 16 字符"
+    int(result["source_bar_hash"], 16)  # 验证为 hex
+
+
+async def test_source_bar_hash_consistent_with_chart_bars_service(
+    mock_session: AsyncMock,
+    mock_bars: None,
+    empty_registry: None,
+) -> None:
+    """indicator_service 的 source_bar_hash 与 chart_bars_service 计算一致。
+
+    确保 /bars API 与 indicator_service 使用相同的 hash 计算逻辑（SSOT）。
+    """
+    from app.services.chart_bars_service import compute_source_bar_hash
+
+    result = await indicator_service.compute_all_indicators(
+        mock_session, TEST_INSTRUMENT_ID, "1d", "none", bars=250,
+    )
+    expected_bars = _build_bars("1d")
+    expected_hash = compute_source_bar_hash(expected_bars)
+    assert result["source_bar_hash"] == expected_hash, (
+        f"source_bar_hash 应与 chart_bars_service 计算一致: "
+        f"expected={expected_hash}, actual={result['source_bar_hash']}"
+    )
+
+
+# ===== SubTask 1.3: 策略返回 time 时不被覆盖 =====
+
+
+async def test_strategy_time_not_overridden(
+    mock_session: AsyncMock,
+    mock_bars: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """策略返回 time 时，indicator_service 不再用 daily_time_list 覆盖。
+
+    场景：DSA 策略将在 Task 3 返回自身精确 time 数组，
+    indicator_service 必须保留策略返回的 time，不再强制覆盖。
+    """
+    custom_time = ["2026-01-01", "2026-01-02", "2026-01-03"]
+    custom_indicators = {"time": custom_time, "value": [1.0, 2.0, 3.0]}
+
+    # Mock StrategyLoader._registry 包含一个 mock 策略
+    monkeypatch.setattr(
+        indicator_service.StrategyLoader, "_registry", {"mock_strategy": None}
+    )
+
+    # Mock StrategyBatchService._get_latest_released_version
+    mock_version = MagicMock()
+    mock_version.manifest = {"chart_layers": [], "display_name": "Mock"}
+
+    mock_batch_service = MagicMock()
+    mock_batch_service._get_latest_released_version = AsyncMock(
+        return_value=(None, mock_version)
+    )
+    monkeypatch.setattr(
+        indicator_service, "StrategyBatchService", lambda: mock_batch_service
+    )
+
+    # Mock StrategyLoader.load 返回 mock runtime
+    mock_runtime = MagicMock()
+    mock_runtime.compute_indicators = AsyncMock(return_value=custom_indicators)
+    monkeypatch.setattr(
+        indicator_service.StrategyLoader, "load", AsyncMock(return_value=mock_runtime)
+    )
+
+    result = await indicator_service.compute_all_indicators(
+        mock_session, TEST_INSTRUMENT_ID, "1d", "none", bars=250,
+    )
+
+    # 验证 mock_strategy 的 time 未被覆盖
+    assert "mock_strategy" in result["data"], "mock_strategy 应在 data 中"
+    assert result["data"]["mock_strategy"]["time"] == custom_time, (
+        "策略返回 time 时不应被 daily_time_list 覆盖"
+    )
+
+
+# ===== 既有 helper 函数测试（不变） =====
 
 
 def test_map_daily_to_intraday_staircase() -> None:

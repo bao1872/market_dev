@@ -667,7 +667,9 @@ export function useIndicators(
   options?: { refetchInterval?: number | false },
 ) {
   return useQuery({
-    queryKey: ['indicators', instrumentId, params],
+    // [DSA 数据契约] - queryKey 新增 'v3' 版本标识：后端响应新增 source_bar_times/source_bar_hash/visual_segments，
+    //   旧缓存（无版本标识）结构不兼容，强制重新拉取
+    queryKey: ['indicators', 'v3', instrumentId, params],
     queryFn: () => api.getIndicators(instrumentId!, params),
     enabled: !!instrumentId,
     staleTime: STALE_WATCHLIST,

@@ -1347,6 +1347,20 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
   .tv-mini-switch:after { right: 11px; background: #929bad; }
 }
 
+// [DSA 周期限制] - 禁用状态（非 1d 周期 DSA 开关不可点，灰化 + 禁止光标）
+.tv-strategy-legend-item.disabled {
+  opacity: .4;
+  cursor: not-allowed;
+  pointer-events: auto;
+  background: #141922;
+  color: #5a647a;
+  border-color: #252d3b;
+
+  .tv-legend-dot { filter: grayscale(1); opacity: .4; box-shadow: none; }
+  .tv-mini-switch { background: #313949; }
+  .tv-mini-switch:after { right: 11px; background: #929bad; }
+}
+
 // V1.6.2 删除旧版右侧栏：强制隐藏
 .tv-layer-panel,
 .tv-profile-summary,
