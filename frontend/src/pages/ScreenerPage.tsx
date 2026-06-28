@@ -452,6 +452,7 @@ export default function ScreenerPage() {
       {
         key: 'offset_mean',
         title: '平均偏离趋势线',
+        shortTitle: '均偏',
         dataType: 'percent',
         sortable: true,
         filterable: true,
@@ -501,6 +502,7 @@ export default function ScreenerPage() {
       {
         key: 'dsa_vwap',
         title: '趋势参考价',
+        shortTitle: '参考价',
         dataType: 'number',
         sortable: true,
         filterable: true,
@@ -533,6 +535,7 @@ export default function ScreenerPage() {
       {
         key: 'offset_variance_rate',
         title: '趋势波动程度',
+        shortTitle: '变异',
         dataType: 'percent',
         sortable: true,
         filterable: true,
