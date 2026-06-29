@@ -3,7 +3,7 @@
 // 用法：路由 /login 渲染此页面，支持登录与邀请码注册双 tab
 // 登录成功后写入认证状态并跳转 /（会员到期则跳转 /membership-expired）
 // 注册成功后展示成功页，点击"进入服务台"复用注册返回的 token 完成登录
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
 import { useToast } from '@/store/toast'
@@ -41,6 +41,9 @@ export default function LoginPage() {
   const [registerResult, setRegisterResult] = useState<RegisterSuccessResponse | null>(null)
   // 登录流程进行中（含 getMe 拉取用户信息阶段）
   const [authenticating, setAuthenticating] = useState(false)
+  // 登录提交阶段：防止表单快速双击或回车触发重复 login 请求
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const submittingRef = useRef(false)
 
   // 登录表单状态
   const [loginAccount, setLoginAccount] = useState('')
@@ -88,26 +91,33 @@ export default function LoginPage() {
     }
   }
 
-  // 登录提交
-  function handleLoginSubmit(e: React.FormEvent) {
+  // 登录提交（防重复：submittingRef 阻止并发，isSubmitting 控制按钮状态与文案）
+  async function handleLoginSubmit(e: React.FormEvent) {
     e.preventDefault()
+    if (submittingRef.current || isSubmitting) return
     if (!loginAccount.trim() || !loginPassword.trim()) {
       useToast.getState().show('请填写完整', '邮箱与密码不能为空')
       return
     }
-    loginMutation.mutate(
-      { email: loginAccount.trim(), password: loginPassword },
-      {
-        onSuccess: (data) =>
-          handleLoginSuccess(
-            data.access_token,
-            data.refresh_token,
-            data.membership_expired,
-            keepLogin,
-          ),
-        onError: (err) => useToast.getState().show('登录失败', getErrorMessage(err)),
-      },
-    )
+    submittingRef.current = true
+    setIsSubmitting(true)
+    try {
+      const data = await loginMutation.mutateAsync({
+        email: loginAccount.trim(),
+        password: loginPassword,
+      })
+      await handleLoginSuccess(
+        data.access_token,
+        data.refresh_token,
+        data.membership_expired,
+        keepLogin,
+      )
+    } catch (err) {
+      useToast.getState().show('登录失败', getErrorMessage(err))
+    } finally {
+      submittingRef.current = false
+      setIsSubmitting(false)
+    }
   }
 
   // 注册提交
@@ -255,9 +265,9 @@ export default function LoginPage() {
               <button
                 className="btn primary auth-submit"
                 type="submit"
-                disabled={loginMutation.isPending || authenticating}
+                disabled={isSubmitting || authenticating}
               >
-                {loginMutation.isPending || authenticating ? '登录中...' : '登录服务台'}
+                {isSubmitting || authenticating ? '登录中...' : '登录服务台'}
               </button>
             </form>
             <div className="login-hint">

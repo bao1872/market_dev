@@ -2,7 +2,7 @@
 //
 // 职责：
 // 1. 定义所有 API 实体的 TypeScript 接口（与后端 Pydantic schema 对齐，字段使用 snake_case）
-// 2. 导出按领域分组的 API 调用函数，每个函数使用 apiClient 发起请求并返回 response.data
+// 2. 导出按领域分组的 API 调用函数，每个函数使用 apiClient 或 publicApiClient 发起请求并返回 response.data
 //
 // 约定：
 // - 后端直接返回数据（FastAPI response_model 序列化），不包裹在 ApiResponse 中
@@ -10,8 +10,9 @@
 // - UUID / datetime / date 字段在 TS 中统一为 string（JSON 序列化后为字符串）
 // - user_id 由认证上下文注入，不出现在请求体中（V1.1 安全约束）
 // - 通知 API 当前使用 X-User-Id header（占位，后续接入 JWT）
+// - 公开端点（login/register/refresh）使用 publicApiClient，避免携带旧 token 或触发 401 refresh
 
-import { apiClient } from './client'
+import { apiClient, publicApiClient } from './client'
 import { useAuthStore } from '../store/auth'
 
 // ============================================================
@@ -782,29 +783,29 @@ export interface PaginationParams {
 // ===== Auth 端点 =====
 // ============================================================
 
-/** 用户登录 - 返回 access + refresh token + 会员到期标记 */
+/** 用户登录 - 返回 access + refresh token + 会员到期标记（公开接口） */
 export async function login(email: string, password: string): Promise<LoginResponse> {
-  const { data } = await apiClient.post<LoginResponse>('/auth/login', { email, password })
+  const { data } = await publicApiClient.post<LoginResponse>('/auth/login', { email, password })
   return data
 }
 
-/** 邀请码注册 - 原子操作创建账户 + 开通 30 天会员 */
+/** 邀请码注册 - 原子操作创建账户 + 开通 30 天会员（公开接口） */
 export async function register(payload: RegisterRequest): Promise<RegisterSuccessResponse> {
-  const { data } = await apiClient.post<RegisterSuccessResponse>('/auth/register', payload)
+  const { data } = await publicApiClient.post<RegisterSuccessResponse>('/auth/register', payload)
   return data
 }
 
-/** 邀请码续期 - 未到期顺延 / 已到期从当天计算 */
+/** 邀请码续期 - 未到期顺延 / 已到期从当天计算（需认证，保持 apiClient） */
 export async function renew(inviteCode: string): Promise<RenewSuccessResponse> {
   const { data } = await apiClient.post<RenewSuccessResponse>('/auth/renew', { invite_code: inviteCode })
   return data
 }
 
-/** 使用 refresh token 刷新，返回新的 access + refresh token
+/** 使用 refresh token 刷新，返回新的 access + refresh token（公开接口）
  * refresh_token 通过 JSON body 提交（非 query string），避免被 access log / referer 泄露
  */
 export async function refreshToken(refreshToken: string): Promise<TokenResponse> {
-  const { data } = await apiClient.post<TokenResponse>('/auth/refresh', {
+  const { data } = await publicApiClient.post<TokenResponse>('/auth/refresh', {
     refresh_token: refreshToken,
   })
   return data

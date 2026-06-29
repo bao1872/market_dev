@@ -27,6 +27,7 @@ import hashlib
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 from dateutil.relativedelta import relativedelta
 from sqlalchemy import func, select
@@ -34,7 +35,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.plan_contract import (
     DEFAULT_PLAN_CODE,
-    PLAN_CONTRACTS,
     get_monitor_limit,
     is_valid_plan_code,
 )
@@ -364,6 +364,51 @@ async def renew_with_invite_code(
     return membership, old_expires_at, new_expires_at
 
 
+async def get_effective_membership_status(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+) -> tuple[Literal["active", "expired", "none"], datetime | None]:
+    """只读查询用户会员有效状态。
+
+    不修改、不 flush 数据库。根据当前时间判断 status 语义：
+    - 无会员记录 -> ("none", None)
+    - 有会员且未过期 -> ("active", expires_at)
+    - 有会员但已过期 -> ("expired", expires_at)
+
+    Args:
+        db: 异步数据库会话
+        user_id: 用户 ID
+
+    Returns:
+        (状态字符串, expires_at) 元组
+    """
+    stmt = select(Membership).where(Membership.user_id == user_id)
+    result = await db.execute(stmt)
+    membership = result.scalar_one_or_none()
+
+    if membership is None:
+        return "none", None
+
+    now = datetime.now(UTC)
+    expires_at = _ensure_aware(membership.expires_at)
+    if expires_at <= now:
+        return "expired", expires_at
+    return "active", expires_at
+
+
+async def mark_expired_membership(db: AsyncSession, membership: Membership) -> None:
+    """将会员记录标记为已过期并写回 updated_at。
+
+    Args:
+        db: 异步数据库会话
+        membership: 需要标记为过期的 Membership 对象
+    """
+    now = datetime.now(UTC)
+    membership.status = "expired"
+    membership.updated_at = now
+    await db.flush()
+
+
 async def get_membership_status(
     db: AsyncSession,
     user_id: uuid.UUID,
@@ -371,6 +416,8 @@ async def get_membership_status(
     """查询用户会员状态。
 
     同时检查并更新过期状态（如果 expires_at 已过但 status 仍为 active）。
+    旧调用方行为不变。内部先通过 get_effective_membership_status 判断，
+    若逻辑已过期但数据库仍为 active，则调用 mark_expired_membership 更新。
 
     Args:
         db: 异步数据库会话
@@ -386,12 +433,9 @@ async def get_membership_status(
     if membership is None:
         return None
 
-    # 检查是否需要更新过期状态
-    now = datetime.now(UTC)
-    if membership.status == "active" and _ensure_aware(membership.expires_at) <= now:
-        membership.status = "expired"
-        membership.updated_at = now
-        await db.flush()
+    effective_status, _ = await get_effective_membership_status(db, user_id)
+    if effective_status == "expired" and membership.status == "active":
+        await mark_expired_membership(db, membership)
 
     return membership
 

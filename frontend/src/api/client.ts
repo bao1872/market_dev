@@ -1,10 +1,21 @@
 // axios 实例 + 请求/响应拦截器
 // baseURL=/api 由 Vite 代理转发到后端 http://localhost:8000
-// 401 响应处理：单例 refresh token 刷新 + 并发请求 Promise 复用重试
+//
+// [API 客户端] - apiClient：带 Bearer Token 注入 + 401 单例 refresh 重试，供所有需要认证的端点使用
+// [API 客户端] - publicApiClient：无 Authorization 注入、无 401 refresh 逻辑，供 login/register/refresh/public beta 等公开端点使用
 import axios, { type AxiosError, type InternalAxiosRequestConfig } from 'axios'
 import { useAuthStore, ACCESS_TOKEN_KEY, REFRESH_TOKEN_KEY } from '../store/auth'
 
 export const apiClient = axios.create({
+  baseURL: '/api',
+  timeout: 30000,
+  headers: {
+    'Content-Type': 'application/json',
+  },
+})
+
+// [API 客户端] - 公开接口客户端：baseURL 与 apiClient 相同，但不挂载任何拦截器，避免公开端点携带旧 token 或触发 refresh
+export const publicApiClient = axios.create({
   baseURL: '/api',
   timeout: 30000,
   headers: {
@@ -43,8 +54,8 @@ async function refreshTokenSingleton(): Promise<string> {
     try {
       const refreshToken = getRefreshToken()
       if (!refreshToken) throw new Error('No refresh token available')
-      // 用裸 axios 调用，绕过 apiClient 拦截器，避免 refresh 请求 401 又触发刷新
-      const response = await axios.post('/api/auth/refresh', {
+      // 使用 publicApiClient 调用，绕过 apiClient 拦截器，避免 refresh 请求 401 又触发刷新
+      const response = await publicApiClient.post('/auth/refresh', {
         refresh_token: refreshToken,
       })
       const { access_token, refresh_token: new_refresh_token } = response.data

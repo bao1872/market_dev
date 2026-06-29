@@ -20,12 +20,15 @@
 
 from __future__ import annotations
 
+import logging
+import uuid
 from datetime import date, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from jose import JWTError
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -57,6 +60,7 @@ from app.schemas.user import (
 )
 from app.services.membership_service import (
     _ensure_aware,
+    get_effective_membership_status,
     get_membership_status,
     get_renewal_count,
     register_with_invite_code,
@@ -65,6 +69,7 @@ from app.services.membership_service import (
 
 router = APIRouter(tags=["auth"])
 _settings = get_settings()
+logger = logging.getLogger("api.auth")
 
 
 def _user_to_response(user: User) -> UserResponse:
@@ -87,6 +92,7 @@ def _user_to_response(user: User) -> UserResponse:
 @router.post("/auth/login", response_model=LoginResponse)
 async def login(
     payload: UserLogin,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> LoginResponse:
     """用户登录 - 验证邮箱密码，返回 access + refresh token + 会员状态。
@@ -95,7 +101,7 @@ async def login(
     1. 按 email 查询用户
     2. 验证密码（bcrypt 常量时间比较）
     3. 检查用户状态为 active
-    4. 查询会员状态，判断是否到期
+    4. 只读查询会员有效状态，判断是否到期
     5. 生成 access + refresh token
 
     会员到期后允许登录，但返回 membership_expired=true，前端跳转续期页。
@@ -103,6 +109,7 @@ async def login(
 
     Args:
         payload: 登录请求（email + password）
+        request: FastAPI 请求对象（用于获取 request_id）
         db: 异步数据库会话
 
     Returns:
@@ -110,58 +117,78 @@ async def login(
 
     Raises:
         HTTPException 401: 邮箱不存在/密码错误/用户状态非 active
+        HTTPException 500: 数据库或其他非预期异常
     """
-    # 按 email 查询用户
-    stmt = select(User).where(User.email == payload.email)
-    result = await db.execute(stmt)
-    user = result.scalar_one_or_none()
+    request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+    email = payload.email
 
-    # 用户不存在或密码错误统一返回 401（避免泄露用户是否存在）
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="邮箱或密码错误",
-        )
-
-    # 验证密码
     try:
-        password_ok = verify_password(payload.password, user.password_hash)
-    except ValueError as e:
-        # 哈希格式异常，补上下文后抛 401（不吞没）
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"密码验证失败: {e}",
-        ) from e
+        # 按 email 查询用户
+        stmt = select(User).where(User.email == email)
+        result = await db.execute(stmt)
+        user = result.scalar_one_or_none()
 
-    if not password_ok:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="邮箱或密码错误",
+        # 用户不存在或密码错误统一返回 401（避免泄露用户是否存在）
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="邮箱或密码错误",
+            )
+
+        # 验证密码
+        try:
+            password_ok = verify_password(payload.password, user.password_hash)
+        except ValueError as e:
+            # 哈希格式异常，补上下文后抛 401（不吞没）
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"密码验证失败: {e}",
+            ) from e
+
+        if not password_ok:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="邮箱或密码错误",
+            )
+
+        # 检查用户状态
+        if user.status != "active":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"用户状态非 active（当前: {user.status}），禁止登录",
+            )
+
+        # 查询会员状态（只读，不修改 DB）
+        effective_status, _ = await get_effective_membership_status(db, user.id)
+        membership_expired = effective_status in ("expired", "none")
+
+        # 生成 token
+        user_id_str = str(user.id)
+        access_token = create_access_token(user_id_str)
+        refresh_token = create_refresh_token(user_id_str)
+
+        return LoginResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            token_type="bearer",
+            expires_in=_settings.jwt_access_ttl_seconds,
+            membership_expired=membership_expired,
         )
-
-    # 检查用户状态
-    if user.status != "active":
+    except HTTPException:
+        # 认证类异常原样抛出，不伪装为 500
+        raise
+    except SQLAlchemyError as err:
+        logger.exception("登录失败 request_id=%s email=%s", request_id, email)
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"用户状态非 active（当前: {user.status}），禁止登录",
-        )
-
-    # 查询会员状态
-    membership = await get_membership_status(db, user.id)
-    membership_expired = membership is None or membership.status == "expired"
-
-    # 生成 token
-    user_id_str = str(user.id)
-    access_token = create_access_token(user_id_str)
-    refresh_token = create_refresh_token(user_id_str)
-
-    return LoginResponse(
-        access_token=access_token,
-        refresh_token=refresh_token,
-        token_type="bearer",
-        expires_in=_settings.jwt_access_ttl_seconds,
-        membership_expired=membership_expired,
-    )
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="登录服务暂不可用，请稍后重试",
+        ) from err
+    except Exception as err:
+        logger.exception("登录失败 request_id=%s email=%s", request_id, email)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="登录服务暂不可用，请稍后重试",
+        ) from err
 
 
 @router.post("/auth/refresh", response_model=TokenResponse)
