@@ -42,6 +42,16 @@ _SCREENER_PAGE_PATH = (
     / "ScreenerPage.tsx"
 )
 
+# features/trend-selection/columns.tsx 路径（advice.md v8 Task 7 重构后列定义唯一实现位置）
+_TREND_SELECTION_COLUMNS_PATH = (
+    Path(__file__).resolve().parent.parent.parent
+    / "frontend"
+    / "src"
+    / "features"
+    / "trend-selection"
+    / "columns.tsx"
+)
+
 
 def _load_dsa_selector_manifest() -> dict:
     """加载 dsa_selector.yaml manifest。"""
@@ -114,22 +124,32 @@ def test_validate_metric_filters_rejects_current_trend():
 
 
 def test_screener_page_trend_column_uses_dsa_dir_bars_key():
-    """验证 ScreenerPage.tsx 中趋势列 key 为 dsa_dir_bars，非 current_trend。
+    """验证趋势选股列定义中趋势列 key 为 dsa_dir_bars，非 current_trend。
 
+    advice.md v8 Task 7 重构后，列定义统一移至 features/trend-selection/columns.tsx，
+    ScreenerPage.tsx 与 IndexPage.tsx 均通过 getTrendSelectionColumns() 引用共享列定义。
     前端列定义的 key 直接作为 metric_filters 的 metric_key 发送到后端，
     因此趋势列 key 必须是 dsa_dir_bars。
     """
-    with open(_SCREENER_PAGE_PATH, encoding="utf-8") as f:
-        content = f.read()
+    # 优先扫描共享列定义（Task 7 后唯一实现位置）
+    with open(_TREND_SELECTION_COLUMNS_PATH, encoding="utf-8") as f:
+        shared_columns_content = f.read()
     # current_trend 不应作为列 key 出现
-    assert "key: 'current_trend'" not in content, (
-        "ScreenerPage.tsx 中趋势列 key 不应为 current_trend（会导致发送错误筛选字段）"
+    assert "key: 'current_trend'" not in shared_columns_content, (
+        "features/trend-selection/columns.tsx 中趋势列 key 不应为 current_trend"
     )
     # dsa_dir_bars 应作为列 key 出现
-    assert "key: 'dsa_dir_bars'" in content, (
-        "ScreenerPage.tsx 中趋势列 key 应为 dsa_dir_bars"
+    assert "key: 'dsa_dir_bars'" in shared_columns_content, (
+        "features/trend-selection/columns.tsx 中趋势列 key 应为 dsa_dir_bars"
     )
-    print("  ScreenerPage 趋势列 key 为 dsa_dir_bars ✓")
+
+    # ScreenerPage.tsx 不应再独立定义 current_trend 列 key（防止回退）
+    with open(_SCREENER_PAGE_PATH, encoding="utf-8") as f:
+        screener_content = f.read()
+    assert "key: 'current_trend'" not in screener_content, (
+        "ScreenerPage.tsx 中不应独立定义 current_trend 列 key"
+    )
+    print("  趋势选股列定义 key 为 dsa_dir_bars（共享模块 + ScreenerPage 无 current_trend） ✓")
 
 
 if __name__ == "__main__":

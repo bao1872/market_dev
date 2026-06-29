@@ -15,17 +15,9 @@ export default function LandingFooter({ onLegalClick }: LandingFooterProps) {
       <div className={styles.container}>
         <div className={styles.footerBrand}>
           <BrandLogo variant="footer" />
+          <p className={styles.brandTagline}>专注量化与产业研究的内容IP</p>
         </div>
         <div className={styles.footerGrid}>
-        {/* IP 形象区 */}
-        <div className={styles.ipRow}>
-          <div className={styles.avatar}></div>
-          <div>
-            <h4>久而韭之</h4>
-            <p>专注量化与产业研究的内容IP</p>
-          </div>
-        </div>
-
         {/* 二维码区 */}
         <div className={styles.qrWrap}>
           <div className={styles.qr}>

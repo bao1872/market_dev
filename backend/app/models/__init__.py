@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from app.models.bar import BarDaily, BarMinute
 from app.models.base import Base
+from app.models.beta_application import BetaApplication
 from app.models.capture_job import CaptureJob
 from app.models.calendar import TradingCalendar
 from app.models.config import ConfigDefinition
@@ -53,6 +54,7 @@ __all__ = [
     "BarDaily",
     "BarMinute",
     "Base",
+    "BetaApplication",
     "CaptureJob",
     "ConfigDefinition",
     "Instrument",

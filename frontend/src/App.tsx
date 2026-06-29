@@ -18,6 +18,7 @@ import AdminIndexPage from './pages/AdminIndexPage'
 import AdminUsersPage from './pages/AdminUsersPage'
 import AdminStrategiesPage from './pages/AdminStrategiesPage'
 import AdminJobsPage from './pages/AdminJobsPage'
+import AdminBetaApplicationsPage from './pages/AdminBetaApplicationsPage'
 
 // 门户页 lazy 加载，避免门户动画代码进入业务页面首包
 const LandingPage = lazy(() => import('./pages/LandingPage'))
@@ -93,6 +94,7 @@ export const router = createBrowserRouter([
         children: [
           { path: '/admin', element: <AdminIndexPage /> },
           { path: '/admin/users', element: <AdminUsersPage /> },
+          { path: '/admin/beta-applications', element: <AdminBetaApplicationsPage /> },
           { path: '/admin/strategies', element: <AdminStrategiesPage /> },
           { path: '/admin/jobs', element: <AdminJobsPage /> },
         ],

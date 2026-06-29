@@ -6,7 +6,7 @@
 
 设计说明：
 - 日期范围筛选：start_date / end_date（含端点）
-- is-trading-day 使用三级降级判断（DB -> Tushare -> weekday）
+- is-trading-day 使用三级降级判断（DB -> Mootdx -> weekday）
 """
 
 from __future__ import annotations
@@ -56,13 +56,13 @@ async def check_trading_day(
     target_date: date,
     db: AsyncSession = Depends(get_db),
 ) -> TradingDayResponse:
-    """查询指定日期是否为交易日（三级降级：DB -> Tushare -> weekday）。"""
+    """查询指定日期是否为交易日（三级降级：DB -> Mootdx -> weekday）。"""
     # 三级降级判断，始终返回 bool
     is_trading = await is_trading_day_async(db, target_date)
     return TradingDayResponse(
         trade_date=target_date,
         is_trading_day=is_trading,
-        source="db/tushare/weekday",  # 实际来源由服务层日志记录
+        source="db/mootdx/weekday",  # 实际来源由服务层日志记录
     )
 
 

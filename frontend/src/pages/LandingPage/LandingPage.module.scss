@@ -290,9 +290,8 @@
   // ===== 页脚 =====
   .footer { padding: 26px 0 34px; border-top: 1px solid rgba(255, 255, 255, .07); margin-top: 20px; }
   .footerBrand { margin-bottom: 18px; }
-  .footerGrid { display: grid; grid-template-columns: 1.05fr .9fr 1.1fr .9fr; gap: 28px; align-items: start; }
-  .ipRow { display: flex; gap: 14px; align-items: center; }
-  .avatar { width: 56px; height: 56px; border-radius: 50%; background: radial-gradient(circle at 50% 35%, #b8bfca 0 13px, #2b3241 14px 24px, #0c1424 25px); border: 1px solid #4b5870; }
+  .brandTagline { margin: 8px 0 0; color: #8293ab; font-size: 13px; line-height: 1.7; }
+  .footerGrid { display: grid; grid-template-columns: 1fr 1.1fr .9fr; gap: 28px; align-items: start; }
   .footer h4 { margin: 0 0 8px; font-size: 18px; }
   .footer p { margin: 0; color: #8293ab; font-size: 13px; line-height: 1.7; }
   .qrWrap { display: flex; gap: 12px; }

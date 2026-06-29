@@ -47,6 +47,10 @@ ENV PATH="/opt/venv/bin:$PATH"
 # 复制应用源码
 COPY app ./app
 
+# [迁移] - 复制 Alembic 配置与迁移脚本，runtime 阶段需执行 alembic upgrade head
+COPY alembic.ini ./
+COPY alembic ./alembic
+
 EXPOSE 8000
 
 # 启动 uvicorn ASGI 服务

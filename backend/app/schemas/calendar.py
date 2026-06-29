@@ -38,7 +38,7 @@ class TradingDayResponse(BaseModel):
 
     trade_date: date = Field(..., description="查询日期")
     is_trading_day: bool = Field(..., description="是否为交易日")
-    source: str = Field(..., description="判断来源：db/tushare/weekday")
+    source: str = Field(..., description="判断来源：db/mootdx/weekday")
 
 
 if __name__ == "__main__":

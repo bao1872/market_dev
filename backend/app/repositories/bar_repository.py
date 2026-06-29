@@ -10,7 +10,7 @@
 设计说明：
 - instrument_id 为 UUID（V1.1），pytdx 使用 symbol（6 位代码）；通过 instruments 表转换。
 - bars_daily/bars_minute 表自带 adj_factor 列；前复权时从表中提取 distinct (trade_date, adj_factor)。
-- pytdx 不提供 adj_factor，拉取写入时 adj_factor 默认 1.0；adj_factor 的实际获取（tushare）属另一任务。
+- pytdx 不提供 adj_factor，拉取写入时 adj_factor 默认 1.0；adj_factor 的实际获取属另一任务。
 
 Inputs:
     session: AsyncSession

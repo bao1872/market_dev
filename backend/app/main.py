@@ -28,12 +28,12 @@ from __future__ import annotations
 import logging
 import time
 from contextlib import asynccontextmanager
-from datetime import date
 
 from fastapi import FastAPI, Request
 
 from app.api import metrics as metrics_api
 from app.api.admin_after_close import router as admin_after_close_router
+from app.api.admin_beta_applications import router as admin_beta_applications_router
 from app.api.admin_membership import router as admin_membership_router
 from app.api.auth import router as auth_router
 from app.api.bars import router as bars_router
@@ -46,6 +46,7 @@ from app.api.me import router as me_router
 from app.api.metrics import http_request_duration_seconds, http_requests_total
 from app.api.monitor_states import router as monitor_states_router
 from app.api.notifications import router as notifications_router
+from app.api.public_beta import router as public_beta_router
 from app.api.stock_memos import router as stock_memos_router
 from app.api.stock_detail_feishu import router as stock_detail_feishu_router
 from app.api.strategies import router as strategies_router
@@ -105,11 +106,17 @@ async def lifespan(app: FastAPI):
         mark_seed_failed(str(e))
 
     try:
-        from app.services.calendar_seed import seed_calendar_from_pytdx
+        from app.core.time import shanghai_business_date
+        from app.services.calendar_seed import seed_calendar_from_mootdx
 
         async with AsyncSessionLocal() as db:
-            count = await seed_calendar_from_pytdx(db, year=date.today().year)
-            logger.info("启动时日历刷新完成: %d 条记录更新", count)
+            today = shanghai_business_date()
+            total_count = 0
+            for year in (today.year, today.year + 1):
+                count = await seed_calendar_from_mootdx(db, year=year, force=False)
+                total_count += count
+                logger.info("启动时日历刷新完成: year=%d, %d 条记录更新", year, count)
+            logger.info("启动时日历刷新总计: %d 条记录更新", total_count)
     except Exception as e:
         logger.error("启动时日历刷新失败（不影响启动）: %s", e)
 
@@ -152,6 +159,8 @@ app.include_router(notifications_router)
 # 配置注册表管理路由（R6，需 admin 角色）
 # 会员与邀请码管理路由（V1.6，需 admin 角色）
 app.include_router(admin_membership_router)
+# 内测申请管理后台路由（Task 4，需 admin 角色）
+app.include_router(admin_beta_applications_router)
 # 盘后编排管理路由（Task 2.3，需 admin 角色）
 app.include_router(admin_after_close_router)
 # 用户自选股路由（W1）
@@ -160,6 +169,8 @@ app.include_router(watchlist_router)
 app.include_router(stock_memos_router)
 # 个股详情发送飞书路由（Phase 8，需 admin 角色）
 app.include_router(stock_detail_feishu_router)
+# 公开端点路由（内测申请，无需登录）
+app.include_router(public_beta_router)
 # Prometheus 指标路由（无需认证，供 scraper 直接抓取）
 app.include_router(metrics_api.router, tags=["metrics"])
 

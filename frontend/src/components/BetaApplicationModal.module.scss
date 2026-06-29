@@ -1,0 +1,314 @@
+// [内测申请] - 描述: 内测申请问卷模态框样式（CSS Module）
+// 配色/圆角/按钮风格参考 LandingPage.module.scss 的 modal/btn 样式，独立命名空间避免冲突
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(10px);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.modal.open {
+  display: flex;
+}
+
+.modalCard {
+  width: min(560px, 100%);
+  max-height: 88vh;
+  overflow: auto;
+  border-radius: 18px;
+  background: linear-gradient(180deg, #0b172a, #07111f);
+  border: 1px solid rgba(118, 148, 193, 0.25);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
+  padding: 26px;
+  color: #f2f6ff;
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei",
+    "Noto Sans CJK SC", sans-serif;
+}
+
+.modalHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+.modalHead h3 {
+  font-size: 24px;
+  margin: 0;
+}
+
+.close {
+  border: 0;
+  background: none;
+  color: #fff;
+  font-size: 28px;
+  line-height: 1;
+  padding: 0 6px;
+  cursor: pointer;
+}
+
+.close:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.form {
+  display: grid;
+  gap: 16px;
+}
+
+.intro {
+  margin: 0;
+  color: #9eafc8;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+}
+
+.label {
+  font-size: 13px;
+  color: #c4d2e8;
+}
+
+.required {
+  color: #ff6b6b;
+  font-style: normal;
+  margin-left: 2px;
+}
+
+.input,
+.select,
+.textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(118, 148, 193, 0.28);
+  background: rgba(7, 17, 31, 0.6);
+  color: #f2f6ff;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.2s;
+  box-sizing: border-box;
+}
+
+.input:focus,
+.select:focus,
+.textarea:focus {
+  border-color: rgba(94, 122, 255, 0.6);
+}
+
+.input:disabled,
+.select:disabled,
+.textarea:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.textarea {
+  resize: vertical;
+  min-height: 72px;
+  font-family: inherit;
+}
+
+.select {
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, #8fa1bb 50%),
+    linear-gradient(135deg, #8fa1bb 50%, transparent 50%);
+  background-position: calc(100% - 18px) 50%, calc(100% - 12px) 50%;
+  background-size: 6px 6px, 6px 6px;
+  background-repeat: no-repeat;
+  padding-right: 32px;
+}
+
+.select option {
+  background: #0b172a;
+  color: #f2f6ff;
+}
+
+.checkboxRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.checkbox {
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  accent-color: #5e7aff;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.checkboxLabel {
+  font-size: 13px;
+  color: #b9c6dc;
+  line-height: 1.6;
+}
+
+.fieldError {
+  font-size: 12px;
+  color: #ff7a7a;
+  margin-top: 2px;
+}
+
+.formError {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 79, 86, 0.12);
+  border: 1px solid rgba(255, 79, 86, 0.32);
+  color: #ff9a9a;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.btn {
+  border-radius: 10px;
+  padding: 12px 24px;
+  border: 1px solid transparent;
+  color: #fff;
+  background: transparent;
+  transition: 0.22s;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  font-weight: 650;
+  font-size: 15px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.btnPrimary {
+  background: linear-gradient(135deg, #633dff, #3656ff);
+  box-shadow: 0 12px 34px rgba(80, 67, 255, 0.22);
+}
+
+.btnPrimary:not(:disabled):hover {
+  transform: translateY(-1px);
+}
+
+.btnWide {
+  width: 100%;
+}
+
+// ===== 成功页面 =====
+.success {
+  display: grid;
+  gap: 16px;
+  justify-items: center;
+  text-align: center;
+  padding: 8px 0 4px;
+}
+
+.successIcon {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #21c477, #1ea366);
+  color: #fff;
+  font-size: 30px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 12px 30px rgba(33, 196, 119, 0.3);
+}
+
+.success h3 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.successText {
+  margin: 0;
+  color: #9eafc8;
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.successMeta {
+  width: 100%;
+  display: grid;
+  gap: 10px;
+  margin: 6px 0 4px;
+  padding: 14px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.successMeta div {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.successMeta span {
+  color: #71849f;
+}
+
+.successMeta strong {
+  color: #e8efff;
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-all;
+  text-align: right;
+}
+
+// ===== 响应式 =====
+@media (max-width: 640px) {
+  .modal {
+    padding: 12px;
+    align-items: flex-end;
+  }
+
+  .modalCard {
+    width: 100%;
+    max-height: 92vh;
+    border-radius: 14px 14px 0 0;
+    padding: 20px 18px;
+  }
+
+  .row {
+    grid-template-columns: 1fr;
+  }
+
+  .modalHead h3 {
+    font-size: 20px;
+  }
+
+  .successMeta div {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
+  .successMeta strong {
+    text-align: left;
+  }
+}

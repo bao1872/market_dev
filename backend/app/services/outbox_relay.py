@@ -49,6 +49,11 @@ DEFAULT_MAX_RETRY = 5
 # 通知事件类型，由本模块负责扩张为 MessageDelivery
 _NOTIFICATION_EVENT_TYPE = "notification.message.created"
 
+# beta_application_admin 事件类型：直接调飞书 Webhook，不扩张为 MessageDelivery
+# （系统级管理员飞书渠道不入 NotificationChannel 表，不走 MessageDelivery 链路）
+# 与 beta_application_notifier.BETA_APPLICATION_ADMIN_EVENT 保持一致
+_BETA_APPLICATION_ADMIN_EVENT = "beta_application_admin"
+
 
 async def write_outbox(
     db: AsyncSession,
@@ -209,6 +214,92 @@ async def _expand_notification_message_created(
     return created
 
 
+async def _deliver_beta_application_admin(
+    db: AsyncSession, record: Outbox
+) -> None:
+    """投递 beta_application_admin 事件到管理员飞书 Webhook。
+
+    spec 第四节：系统级管理员飞书渠道，从环境变量读取配置（不入库），
+    直接调用 FeishuWebhookAdapter 发送，不通过 MessageDelivery 链路。
+
+    流程：
+    1. 从 system_channel.get_admin_feishu_config() 读取配置
+    2. 未配置：更新 beta_applications.feishu_delivery_status='failed'，raise
+    3. 查询 BetaApplication
+    4. 构建 DTO（notifier.build_beta_application_dto）
+    5. 调用 FeishuWebhookAdapter.send
+    6. 成功：更新 feishu_delivery_status='success', feishu_delivered_at=now()
+    7. 失败：更新 feishu_delivery_status='failed', feishu_last_error=msg，raise（触发 Outbox 重试）
+
+    Args:
+        db: 异步会话
+        record: beta_application_admin 的 Outbox 记录
+
+    Raises:
+        RuntimeError: 飞书发送失败或系统级渠道未配置（触发 Outbox 重试机制）
+    """
+    # 延迟导入避免循环依赖（notifier 导入 outbox_relay.write_outbox）
+    from uuid import UUID
+
+    from app.constants.system_channel import get_admin_feishu_config
+    from app.models.beta_application import BetaApplication
+    from app.services.beta_application_notifier import build_beta_application_dto
+    from app.services.feishu_webhook_adapter import FeishuWebhookAdapter
+
+    payload: dict[str, Any] = record.payload or {}
+    application_id_str = payload.get("application_id")
+    if not application_id_str:
+        raise RuntimeError("outbox payload missing application_id")
+
+    try:
+        application_id = UUID(application_id_str)
+    except ValueError as e:
+        raise RuntimeError(
+            f"invalid application_id: {application_id_str}"
+        ) from e
+
+    # 查询申请（用于构建卡片 + 更新状态）
+    app = await db.get(BetaApplication, application_id)
+    if app is None:
+        raise RuntimeError(f"BetaApplication not found: {application_id}")
+
+    # 读取系统级渠道配置（不入库，不暴露前端）
+    config = get_admin_feishu_config()
+    if config is None:
+        # 未配置：标记 failed，但仍 raise 触发 Outbox 重试（管理员配置后可自动恢复）
+        app.feishu_delivery_status = "failed"
+        app.feishu_last_error = "admin feishu channel not configured"
+        logger.warning(
+            "管理员飞书渠道未配置，标记 failed: app_id=%s outbox_id=%s",
+            application_id, record.id,
+        )
+        raise RuntimeError("admin feishu channel not configured")
+
+    # 构建 DTO + 调用飞书发送
+    dto = build_beta_application_dto(app)
+    adapter = FeishuWebhookAdapter()
+    result = await adapter.send(dto, config)
+
+    if result.success:
+        app.feishu_delivery_status = "success"
+        app.feishu_delivered_at = datetime.now(UTC)
+        app.feishu_last_error = None
+        logger.info(
+            "管理员飞书投递成功: app_id=%s outbox_id=%s",
+            application_id, record.id,
+        )
+    else:
+        error_msg = result.error_message or "unknown error"
+        app.feishu_delivery_status = "failed"
+        app.feishu_last_error = error_msg
+        logger.warning(
+            "管理员飞书投递失败: app_id=%s outbox_id=%s error=%s",
+            application_id, record.id, error_msg,
+        )
+        # raise 触发 Outbox 重试机制（外层 except 增加 retry_count）
+        raise RuntimeError(f"feishu send failed: {error_msg}")
+
+
 async def relay_outbox(
     db: AsyncSession,
     batch_size: int = DEFAULT_BATCH_SIZE,
@@ -219,6 +310,7 @@ async def relay_outbox(
     At-least-once 投递：
     - 普通事件 -> 投递到 Redis 队列，成功后 status=processed
     - notification.message.created -> 扩张为 MessageDelivery(pending)，然后 status=processed
+    - beta_application_admin -> 直接调飞书 Webhook（系统级渠道，不走 MessageDelivery），然后 status=processed
     - 投递失败 -> retry_count+1，超过 max_retry 则 status=failed
 
     Args:
@@ -234,7 +326,7 @@ async def relay_outbox(
     if max_retry <= 0:
         raise ValueError("max_retry 必须大于 0")
 
-    redis = get_redis()
+    # 注意：Redis 延迟到普通事件分支内获取，避免 beta_application_admin 分支依赖 Redis
 
     # 1. 查询 pending 记录（按创建时间排序，FIFO）
     stmt = (
@@ -262,8 +354,16 @@ async def relay_outbox(
                     "outbox 通知事件已扩张: outbox_id=%s expanded=%s",
                     record.id, expanded,
                 )
+            elif record.event_type == _BETA_APPLICATION_ADMIN_EVENT:
+                # beta_application_admin：系统级管理员飞书，直接调 Webhook
+                # 不通过 MessageDelivery 链路（系统级渠道不入 NotificationChannel 表）
+                await _deliver_beta_application_admin(db, record)
+                record.status = "processed"
+                record.processed_at = datetime.now(UTC)
+                processed_count += 1
             else:
                 # 普通事件：投递到 Redis 队列
+                redis = get_redis()  # 延迟获取：仅普通事件需要 Redis
                 message = {
                     "outbox_id": str(record.id),
                     "event_type": record.event_type,
@@ -282,6 +382,8 @@ async def relay_outbox(
         except Exception as e:
             # 处理失败：增加重试计数，超过阈值标记 failed
             # 补充上下文后继续（不 re-raise，因为单条失败不应阻塞其他记录）
+            # 注意：beta_application_admin 分支在 _deliver_beta_application_admin 内
+            # 已更新 beta_applications.feishu_delivery_status='failed'，此处仅处理 outbox 状态
             record.retry_count += 1
             if record.retry_count >= max_retry:
                 record.status = "failed"

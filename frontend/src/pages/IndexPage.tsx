@@ -21,77 +21,25 @@ import {
 } from '@/hooks/useApi'
 import type { StrategyResult } from '@/api/endpoints'
 import { StrategyDataTable } from '@/components/StrategyDataTable'
-import type { DataTableColumn } from '@/components/StrategyDataTable'
 import {
   WatchlistMonitorTable,
   WatchlistMonitorCards,
   adaptWatchlistMonitorStatusItem,
 } from '@/features/watchlist-monitor'
-
-// ===== 行类型定义（带索引签名以满足 StrategyDataTable 的 Row extends Record<string, unknown>）=====
-
-// 选股结果行（从 StrategyResult.payload 派生）
-interface SelectionRow {
-  instrument_id: string
-  name: string
-  symbol: string
-  market: string
-  direction: string
-  duration: string
-  avg_return: string
-  total_return: string
-  offset_mean: string
-  offset_std: string
-  offset_percentile: string
-  dsa_vwap: string
-  dsa_vwap_dev_pct: string
-  offset_variance_rate: string
-  watched: boolean
-  [key: string]: unknown
-}
-
-// ===== 工具函数 =====
-
-/** 从 payload 中按候选 key 列表取第一个非空值 */
-function pickPayload(payload: Record<string, unknown>, keys: string[]): unknown {
-  for (const k of keys) {
-    const v = payload[k]
-    if (v !== undefined && v !== null && v !== '') return v
-  }
-  return undefined
-}
-
-/** 转换为数字，失败返回 null */
-function toNum(v: unknown): number | null {
-  if (v === undefined || v === null || v === '') return null
-  const n = typeof v === 'number' ? v : parseFloat(String(v))
-  return Number.isNaN(n) ? null : n
-}
-
-/** 格式化为数值字符串（保留指定小数位），未知返回 '-' */
-function fmtNum(v: unknown, digits = 2): string {
-  const n = toNum(v)
-  return n === null ? '-' : n.toFixed(digits)
-}
-
-/** 格式化为百分比字符串（不带正负号），未知返回 '-' */
-function fmtPct(v: unknown, digits = 2): string {
-  const n = toNum(v)
-  return n === null ? '-' : `${n.toFixed(digits)}%`
-}
-
-/** 将 ratio 小数格式化为百分比（乘以 100），未知返回 '-' */
-function fmtRatioAsPct(v: unknown, digits = 2): string {
-  const n = toNum(v)
-  return n === null ? '-' : `${(n * 100).toFixed(digits)}%`
-}
-
-/** 根据 dsa_dir_bars 正负返回方向标签，未知返回 '-' */
-function getDsaDirection(v: unknown): string {
-  const n = toNum(v)
-  if (n === null) return '-'
-  return n > 0 ? '多头' : n < 0 ? '空头' : '-'
-}
+import {
+  adaptStrategyResultToTrendRow,
+  getTrendSelectionColumns,
+  visibleColumnKeys,
+  INDEX_VISIBLE_COLUMN_KEYS,
+  pickPayload,
+  toNum,
+  fmtRatioAsPct,
+  changePctColorClass,
+  DIR_BARS_KEYS,
+  VWAP_RET_AVG_KEYS,
+  OFFSET_PERCENTILE_KEYS,
+  type TrendSelectionRow,
+} from '@/features/trend-selection'
 
 // ===== 添加自选弹窗组件 =====
 // 独立组件：仅在弹窗打开时挂载，避免未打开时触发 useInstruments 查询
@@ -188,8 +136,9 @@ function AddStockModal({
 }
 
 // ===== 选股结果移动端卡片 =====
+// [趋势选股] - 描述: 卡片格式与桌面列同源（共享 pickPayload/格式函数/候选 key/颜色规则）
 interface SelectionResultCardsProps {
-  rows: SelectionRow[]
+  rows: TrendSelectionRow[]
   onAdd?: (instrumentId: string, name: string) => void
   addPending?: boolean
   emptyText?: string
@@ -207,55 +156,64 @@ function SelectionResultCards({
 
   return (
     <div className="selection-result-cards">
-      {rows.map((row) => (
-        <div className="selection-result-card" key={row.instrument_id}>
-          <div className="selection-card-head">
-            <div>
-              <div className="symbol">{row.name}</div>
-              <div className="symbol-sub">
-                {row.symbol}
-                {row.market ? ` · ${row.market}` : ''}
+      {rows.map((row) => {
+        // [趋势选股] - 描述: 从 payload 动态计算卡片展示字段（与桌面列同源）
+        const dirBars = toNum(pickPayload(row.payload, DIR_BARS_KEYS))
+        const direction = dirBars === null || dirBars === 0 ? '-' : dirBars > 0 ? '多头' : '空头'
+        const duration = dirBars === null ? '-' : Math.abs(dirBars).toFixed(0)
+        const avgReturn = fmtRatioAsPct(pickPayload(row.payload, VWAP_RET_AVG_KEYS))
+        const avgReturnNum = toNum(pickPayload(row.payload, VWAP_RET_AVG_KEYS))
+        const offsetPercentile = fmtRatioAsPct(pickPayload(row.payload, OFFSET_PERCENTILE_KEYS))
+        return (
+          <div className="selection-result-card" key={row.instrumentId}>
+            <div className="selection-card-head">
+              <div>
+                <div className="symbol">{row.name}</div>
+                <div className="symbol-sub">
+                  {row.symbol}
+                  {row.market ? ` · ${row.market}` : ''}
+                </div>
+              </div>
+              {row.watched ? (
+                <span className="tag info">已自选</span>
+              ) : (
+                <button
+                  className="btn small"
+                  onClick={() => onAdd?.(row.instrumentId, row.name)}
+                  disabled={addPending}
+                >
+                  ＋ 自选
+                </button>
+              )}
+            </div>
+
+            <div className="selection-card-grid">
+              <div>
+                <span>当前趋势</span>
+                <b
+                  className={`tag ${
+                    direction === '多头' ? 'good' : direction === '空头' ? 'warn' : ''
+                  }`}
+                >
+                  {direction}
+                </b>
+              </div>
+              <div>
+                <span>趋势持续天数</span>
+                <b className="num">{duration}</b>
+              </div>
+              <div>
+                <span>日均趋势变化</span>
+                <b className={`num ${changePctColorClass(avgReturnNum)}`}>{avgReturn}</b>
+              </div>
+              <div>
+                <span>当前强弱位置</span>
+                <b className="num">{offsetPercentile}</b>
               </div>
             </div>
-            {row.watched ? (
-              <span className="tag info">已自选</span>
-            ) : (
-              <button
-                className="btn small"
-                onClick={() => onAdd?.(row.instrument_id, row.name)}
-                disabled={addPending}
-              >
-                ＋ 自选
-              </button>
-            )}
           </div>
-
-          <div className="selection-card-grid">
-            <div>
-              <span>当前趋势</span>
-              <b
-                className={`tag ${
-                  row.direction === '多头' ? 'good' : row.direction === '空头' ? 'warn' : ''
-                }`}
-              >
-                {row.direction}
-              </b>
-            </div>
-            <div>
-              <span>趋势持续天数</span>
-              <b className="num">{row.duration}</b>
-            </div>
-            <div>
-              <span>日均趋势变化</span>
-              <b className="num market-up">{row.avg_return}</b>
-            </div>
-            <div>
-              <span>当前强弱位置</span>
-              <b className="num">{row.offset_percentile}</b>
-            </div>
-          </div>
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
 }
@@ -293,81 +251,13 @@ export default function IndexPage() {
   // --- 加入自选变更（选股结果表"＋ 自选"按钮）---
   const addWatchlistMutation = useAddToWatchlist()
 
-  // ===== 行转换函数 =====
-
-  /** 将 StrategyResult 转换为 SelectionRow（直接复用结果行自带的 instrument_* 字段，避免 N+1 查询） */
-  const toSelectionRow = useCallback(
-    (r: StrategyResult): SelectionRow => {
-      const payload = r.payload
-      const dirBars = pickPayload(payload, [
-        'dsa_dir_bars',
-        'dsa_duration',
-        'dir_duration',
-        'duration',
-      ])
-      const dirBarsNum = toNum(dirBars)
-      return {
-        instrument_id: r.instrument_id,
-        name: r.instrument_name ?? '-',
-        symbol: r.instrument_symbol ?? r.instrument_id.slice(0, 8),
-        market: r.instrument_market ?? '',
-        direction: getDsaDirection(dirBars),
-        duration: fmtNum(dirBarsNum !== null ? Math.abs(dirBarsNum) : null, 0),
-        avg_return: fmtRatioAsPct(
-          pickPayload(payload, ['vwap_ret_avg', 'dsa_avg_return', 'vwap_avg_return', 'avg_return']),
-        ),
-        total_return: fmtRatioAsPct(
-          pickPayload(payload, [
-            'vwap_ret_total',
-            'dsa_total_return',
-            'vwap_total_return',
-            'total_return',
-          ]),
-        ),
-        offset_mean: fmtRatioAsPct(
-          pickPayload(payload, ['offset_mean', 'shift_mean']),
-        ),
-        offset_std: fmtRatioAsPct(
-          pickPayload(payload, ['offset_std', 'shift_std']),
-        ),
-        offset_percentile: fmtRatioAsPct(
-          pickPayload(payload, [
-            'offset_percentile',
-            'short_position',
-            'position_short',
-            'short_pos',
-          ]),
-        ),
-        dsa_vwap: fmtNum(
-          pickPayload(payload, ['dsa_vwap', 'vwap', 'anchor_vwap']),
-          2,
-        ),
-        dsa_vwap_dev_pct: fmtPct(
-          pickPayload(payload, [
-            'dsa_vwap_dev_pct',
-            'vwap_dev_pct',
-            'close_vwap_dev_pct',
-          ]),
-        ),
-        offset_variance_rate: fmtPct(
-          pickPayload(payload, [
-            'offset_variance_rate',
-            'offset_var_rate',
-            'shift_var',
-          ]),
-        ),
-        watched: watchlistIds.has(r.instrument_id),
-      }
-    },
-    [watchlistIds],
-  )
-
   // ===== 派生数据 =====
 
-  // 选股结果行（首页最多展示 10 条）
-  const selectionRows: SelectionRow[] = useMemo(
-    () => selectionResults.slice(0, 10).map(toSelectionRow),
-    [selectionResults, toSelectionRow],
+  // [趋势选股] - 描述: 选股结果行通过共享 adapter 转换（保留 payload 供列渲染动态计算）
+  // 首页最多展示 10 条；watchedIds 传入以标记已自选状态
+  const selectionRows: TrendSelectionRow[] = useMemo(
+    () => selectionResults.slice(0, 10).map((r) => adaptStrategyResultToTrendRow(r, watchlistIds)),
+    [selectionResults, watchlistIds],
   )
 
   // 自选股监控行（首页最多展示 10 条）
@@ -399,151 +289,6 @@ export default function IndexPage() {
       }
     },
     [addWatchlistMutation, toast],
-  )
-
-  // ===== 列定义 =====
-
-  // 选股结果表列
-  const selectionColumns: DataTableColumn<SelectionRow>[] = useMemo(
-    () => [
-      {
-        key: 'stock',
-        title: '股票',
-        dataType: 'text',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => row.name,
-        filterValue: (row) => `${row.name} ${row.symbol}`,
-        render: (row) => (
-          <div>
-            <div className="symbol">{row.name}</div>
-            <div className="symbol-sub">
-              {row.symbol}
-              {row.market ? ` · ${row.market}` : ''}
-            </div>
-          </div>
-        ),
-      },
-      {
-        key: 'direction',
-        title: '当前趋势',
-        dataType: 'text',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => (row.direction === '多头' ? 1 : row.direction === '空头' ? -1 : 0),
-        render: (row) => (
-          <span
-            className={`tag ${
-              row.direction === '多头' ? 'good' : row.direction === '空头' ? 'warn' : ''
-            }`}
-          >
-            {row.direction}
-          </span>
-        ),
-      },
-      {
-        key: 'duration',
-        title: '趋势持续天数',
-        dataType: 'number',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => Number(row.duration) || 0,
-        render: (row) => <span className="num">{row.duration}</span>,
-      },
-      {
-        key: 'avg_return',
-        title: '日均趋势变化',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => Number(row.avg_return.replace('%', '')) || 0,
-        render: (row) => <span className="num market-up">{row.avg_return}</span>,
-      },
-      {
-        key: 'total_return',
-        title: '本轮趋势涨跌',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => Number(row.total_return.replace('%', '')) || 0,
-        render: (row) => <span className="num market-up">{row.total_return}</span>,
-      },
-      {
-        key: 'offset_mean',
-        title: '平均偏离趋势线',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => Number(row.offset_mean.replace('%', '')) || 0,
-        render: (row) => <span className="num">{row.offset_mean}</span>,
-      },
-      {
-        key: 'offset_std',
-        title: '趋势附近波动幅度',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => Number(row.offset_std.replace('%', '')) || 0,
-        render: (row) => <span className="num">{row.offset_std}</span>,
-      },
-      {
-        key: 'offset_percentile',
-        title: '当前强弱位置',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => Number(row.offset_percentile.replace('%', '')) || 0,
-        render: (row) => <span className="num">{row.offset_percentile}</span>,
-      },
-      {
-        key: 'dsa_vwap',
-        title: '趋势参考价',
-        dataType: 'number',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => Number(row.dsa_vwap) || 0,
-        render: (row) => <span className="num">{row.dsa_vwap}</span>,
-      },
-      {
-        key: 'dsa_vwap_dev_pct',
-        title: '距趋势参考价',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => Number(row.dsa_vwap_dev_pct.replace('%', '')) || 0,
-        render: (row) => <span className="num">{row.dsa_vwap_dev_pct}</span>,
-      },
-      {
-        key: 'offset_variance_rate',
-        title: '趋势波动程度',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        sortValue: (row) => Number(row.offset_variance_rate.replace('%', '')) || 0,
-        render: (row) => <span className="num">{row.offset_variance_rate}</span>,
-      },
-      {
-        key: 'action',
-        title: '操作',
-        dataType: 'text',
-        sortable: false,
-        filterable: false,
-        isAction: true,
-        render: (row) =>
-          row.watched ? (
-            <span className="tag info">已自选</span>
-          ) : (
-            <button
-              className="btn small"
-              onClick={() => handleAddToWatchlist(row.instrument_id, row.name)}
-              disabled={addWatchlistMutation.isPending}
-            >
-              ＋ 自选
-            </button>
-          ),
-      },
-    ],
-    [handleAddToWatchlist, addWatchlistMutation.isPending],
   )
 
   // ===== 渲染 =====
@@ -629,9 +374,15 @@ export default function IndexPage() {
               key={latestRunId ? `run-${latestRunId}` : 'run-empty'}
               tableId="index-selection-results"
               activeRunId={latestRunId}
-              columns={selectionColumns}
+              columns={visibleColumnKeys(
+                getTrendSelectionColumns({
+                  onAddToWatchlist: (row) => handleAddToWatchlist(row.instrumentId, row.name),
+                  addPending: addWatchlistMutation.isPending,
+                }),
+                INDEX_VISIBLE_COLUMN_KEYS,
+              )}
               rows={selectionRows}
-              rowKey={(row) => row.instrument_id}
+              rowKey={(row) => row.instrumentId}
               loading={selectionResultsQuery.isLoading || dsaRunsQuery.isLoading}
               error={
                 selectionResultsQuery.isError || dsaRunsQuery.isError

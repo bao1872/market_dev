@@ -31,6 +31,8 @@ import type {
   StockMemoUpsertRequest,
   MarketStatus,
   DeliveryStatus,
+  BetaApplicationQueryParams,
+  BetaApplicationPatchRequest,
 } from '../api/endpoints'
 
 // ============================================================
@@ -762,6 +764,64 @@ export function useMemberRedemptions(userId: string | undefined) {
     queryFn: () => api.getMemberRedemptions(userId!),
     enabled: !!userId,
     staleTime: STALE_REALTIME,
+  })
+}
+
+// ============================================================
+// ===== Admin Beta Applications hooks（Task 4） =====
+// ============================================================
+
+/** 查询内测申请列表（分页+筛选+搜索） */
+export function useAdminBetaApplications(params?: BetaApplicationQueryParams) {
+  return useQuery({
+    queryKey: ['admin', 'beta-applications', params],
+    queryFn: () => api.getAdminBetaApplications(params),
+    staleTime: STALE_REALTIME,
+  })
+}
+
+/** 获取内测申请统计数据 */
+export function useAdminBetaApplicationStats() {
+  return useQuery({
+    queryKey: ['admin', 'beta-applications', 'stats'],
+    queryFn: () => api.getAdminBetaApplicationStats(),
+    staleTime: STALE_REALTIME,
+  })
+}
+
+/** 获取内测申请详情 */
+export function useAdminBetaApplicationDetail(appId: string | undefined) {
+  return useQuery({
+    queryKey: ['admin', 'beta-applications', appId, 'detail'],
+    queryFn: () => api.getAdminBetaApplicationDetail(appId!),
+    enabled: !!appId,
+    staleTime: STALE_REALTIME,
+  })
+}
+
+/** 修改内测申请状态（status + admin_note） */
+export function useUpdateAdminBetaApplication() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ appId, payload }: { appId: string; payload: BetaApplicationPatchRequest }) =>
+      api.updateAdminBetaApplication(appId, payload),
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'beta-applications'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'beta-applications', variables.appId, 'detail'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'beta-applications', 'stats'] })
+    },
+  })
+}
+
+/** 重发内测申请飞书通知 */
+export function useRetryAdminBetaApplicationFeishu() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (appId: string) => api.retryAdminBetaApplicationFeishu(appId),
+    onSuccess: (_data, appId) => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'beta-applications', appId, 'detail'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'beta-applications'] })
+    },
   })
 }
 

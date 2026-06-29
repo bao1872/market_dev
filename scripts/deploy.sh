@@ -30,6 +30,25 @@ find frontend -name "*.tsbuildinfo" -not -path "*/node_modules/*" -delete 2>/dev
 # 构建必要的服务镜像（backend 镜像供所有 Python Worker 复用）
 docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" build backend frontend worker-capture
 
+# [部署] - 描述: 从 market.env 加载 DATABASE_URL 到当前 shell（供 alembic 迁移命令显式传参）
+# 根因: docker compose --env-file 仅用于 compose 文件内变量替换，不导出到 shell；
+#       若不 source，下方 -e DATABASE_URL="$DATABASE_URL" 会传入空值覆盖 compose 配置
+if [ -z "${DATABASE_URL:-}" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "${ENV_FILE}"
+  set +a
+fi
+
+# [部署] - 描述: 执行数据库迁移（容器内运行，禁止 APP_ENV=development 直连生产库）
+echo "=== 执行 Alembic 迁移 ==="
+docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" run --rm \
+  --no-deps \
+  -e DATABASE_URL="${DATABASE_URL}" \
+  -e APP_ENV=production \
+  -e CONFIG_FILE=/app/app/config.production.py \
+  backend alembic upgrade head
+
 # 使用已构建镜像重新创建并启动所有服务，清理孤立容器
 docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --no-build --force-recreate --remove-orphans
 

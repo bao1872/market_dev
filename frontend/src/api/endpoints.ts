@@ -525,20 +525,36 @@ export interface TradingDayResponse {
 // Admin Membership 领域类型
 // ============================================================
 
-/** 邀请码响应（含明文，仅生成时返回） */
+// [plan_contract] - 描述: 套餐契约预览映射，仅用于前端权益预览展示
+// 权威值由后端 app/constants/plan_contract.py PLAN_CONTRACTS 计算，前端不得在请求中传入 monitor_limit
+export const PLAN_CONTRACTS_PREVIEW = {
+  observe_20: { name: '观察版', monitorLimit: 20 },
+  research_50: { name: '研究版', monitorLimit: 50 },
+} as const
+
+/** 套餐代码（与后端 plan_contract.py PLAN_CONTRACTS 键一致） */
+export type PlanCode = keyof typeof PLAN_CONTRACTS_PREVIEW
+
+/** 邀请码响应（含明文，仅生成时返回）+ 套餐快照 */
 export interface InviteCode {
   id: string
   code: string
   grant_days: number
+  plan_code: PlanCode | null
+  monitor_limit: number | null
+  grant_months: number | null
   note: string | null
   created_at: string
 }
 
-/** 邀请码列表项（不含明文） */
+/** 邀请码列表项（不含明文）+ 套餐快照 */
 export interface InviteCodeListItem {
   id: string
   status: string
   grant_days: number
+  plan_code: PlanCode | null
+  monitor_limit: number | null
+  grant_months: number | null
   note: string | null
   created_by: string
   created_at: string
@@ -694,10 +710,12 @@ export interface NotificationPreviewRequest {
   locale?: string
 }
 
-/** 邀请码生成请求 */
+/** 邀请码生成请求 - plan_code/grant_months 由前端提交，monitor_limit 由后端按 plan_code 计算 */
 export interface InviteCodeCreateRequest {
   count?: number
   note?: string
+  plan_code?: PlanCode
+  grant_months?: number
 }
 
 
@@ -1437,7 +1455,7 @@ export async function getCalendar(params?: CalendarQueryParams): Promise<Calenda
   return data
 }
 
-/** 查询指定日期是否为交易日（三级降级：DB -> Tushare -> weekday） */
+/** 查询指定日期是否为交易日（三级降级：DB -> Mootdx -> weekday） */
 export async function isTradingDay(targetDate: string): Promise<TradingDayResponse> {
   const { data } = await apiClient.get<TradingDayResponse>(`/calendar/is-trading-day/${targetDate}`)
   return data
@@ -1491,6 +1509,158 @@ export async function getMembers(params?: PaginationParams): Promise<MemberListR
 export async function getMemberRedemptions(userId: string): Promise<InviteRedemption[]> {
   const { data } = await apiClient.get<InviteRedemption[]>(`/admin/members/${userId}/redemptions`)
   return data
+}
+
+// ============================================================
+// Beta Application 领域类型（Task 4 - 管理员内测申请后台）
+// ============================================================
+
+/** 内测申请状态枚举 */
+export type BetaApplicationStatus = 'new' | 'contacted' | 'approved' | 'rejected' | 'converted'
+
+/** 内测申请理由代码枚举 */
+export type BetaApplicationReasonCode = 'busy' | 'too_many' | 'forget' | 'quant' | 'other'
+
+/** 盯盘数量区间 */
+export type WatchStockRange = '1-10' | '11-20' | '21-50' | '50+'
+
+/** 内测申请列表项（含完整字段，仅 admin 可见） */
+export interface BetaApplicationListItem {
+  id: string
+  wechat: string | null
+  phone: string | null
+  watch_stock_count: number
+  reason_code: BetaApplicationReasonCode
+  reason_other: string | null
+  status: BetaApplicationStatus
+  source: string | null
+  admin_note: string | null
+  handled_by: string | null
+  handled_at: string | null
+  submitted_at: string
+  updated_at: string
+  feishu_delivery_status: string | null
+}
+
+/** 内测申请列表响应 */
+export interface BetaApplicationListResponse {
+  items: BetaApplicationListItem[]
+  total: number
+  limit: number
+  offset: number
+}
+
+/** 内测申请详情响应（含飞书投递信息） */
+export interface BetaApplicationDetail {
+  id: string
+  wechat: string | null
+  phone: string | null
+  watch_stock_count: number
+  reason_code: BetaApplicationReasonCode
+  reason_other: string | null
+  status: BetaApplicationStatus
+  source: string | null
+  admin_note: string | null
+  handled_by: string | null
+  handled_at: string | null
+  submitted_at: string
+  updated_at: string
+  ip_hash: string
+  feishu_delivery_status: string | null
+  feishu_delivered_at: string | null
+  feishu_last_error: string | null
+}
+
+/** 内测申请统计响应 */
+export interface BetaApplicationStats {
+  total: number
+  today: number
+  last_7_days: number
+  last_30_days: number
+  by_status: Record<string, number>
+  avg_watch_stock_count: number
+  by_reason: Record<string, number>
+  by_watch_range: Record<string, number>
+}
+
+/** 内测申请状态更新请求 */
+export interface BetaApplicationPatchRequest {
+  status: BetaApplicationStatus
+  admin_note?: string | null
+}
+
+/** 重发飞书响应 */
+export interface RetryFeishuResponse {
+  id: string
+  outbox_id: string
+  message: string
+}
+
+/** 内测申请列表查询参数 */
+export interface BetaApplicationQueryParams {
+  status?: BetaApplicationStatus
+  reason_code?: BetaApplicationReasonCode
+  watch_stock_range?: WatchStockRange
+  date_from?: string
+  date_to?: string
+  keyword?: string
+  limit?: number
+  offset?: number
+}
+
+// ============================================================
+// ===== Admin Beta Applications 端点 =====
+// ============================================================
+
+/** 查询内测申请列表（分页+筛选+搜索） */
+export async function getAdminBetaApplications(
+  params?: BetaApplicationQueryParams,
+): Promise<BetaApplicationListResponse> {
+  const { data } = await apiClient.get<BetaApplicationListResponse>('/admin/beta-applications', { params })
+  return data
+}
+
+/** 获取内测申请统计数据 */
+export async function getAdminBetaApplicationStats(): Promise<BetaApplicationStats> {
+  const { data } = await apiClient.get<BetaApplicationStats>('/admin/beta-applications/stats')
+  return data
+}
+
+/** 获取内测申请详情 */
+export async function getAdminBetaApplicationDetail(appId: string): Promise<BetaApplicationDetail> {
+  const { data } = await apiClient.get<BetaApplicationDetail>(`/admin/beta-applications/${appId}`)
+  return data
+}
+
+/** 修改内测申请状态（status + admin_note） */
+export async function updateAdminBetaApplication(
+  appId: string,
+  payload: BetaApplicationPatchRequest,
+): Promise<BetaApplicationDetail> {
+  const { data } = await apiClient.patch<BetaApplicationDetail>(`/admin/beta-applications/${appId}`, payload)
+  return data
+}
+
+/** 重发内测申请飞书通知 */
+export async function retryAdminBetaApplicationFeishu(appId: string): Promise<RetryFeishuResponse> {
+  const { data } = await apiClient.post<RetryFeishuResponse>(`/admin/beta-applications/${appId}/retry-feishu`)
+  return data
+}
+
+/**
+ * 导出内测申请为 CSV（带筛选条件）。
+ * 返回下载 URL（浏览器原生打开触发下载，避免 axios 解析 CSV 文本）。
+ */
+export function buildBetaApplicationExportUrl(params?: Omit<BetaApplicationQueryParams, 'limit' | 'offset'>): string {
+  const searchParams = new URLSearchParams()
+  if (params?.status) searchParams.set('status', params.status)
+  if (params?.reason_code) searchParams.set('reason_code', params.reason_code)
+  if (params?.watch_stock_range) searchParams.set('watch_stock_range', params.watch_stock_range)
+  if (params?.date_from) searchParams.set('date_from', params.date_from)
+  if (params?.date_to) searchParams.set('date_to', params.date_to)
+  if (params?.keyword) searchParams.set('keyword', params.keyword)
+  const qs = searchParams.toString()
+  return qs ? `/admin/beta-applications/export?${qs}` : '/admin/beta-applications/export'
 }
 
 // ============================================================

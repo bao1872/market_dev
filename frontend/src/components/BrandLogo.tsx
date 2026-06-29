@@ -11,7 +11,7 @@ export interface BrandLogoProps {
 }
 
 // 核心图形：圆形蓝紫渐变背景 + 白色上升趋势折线 + 末端节点（呼应 Node Cluster）
-// sidebar variant 仅渲染图形；landing/footer variant 渲染图形 + "策略主页" 文字
+// sidebar variant 仅渲染图形；landing/footer variant 渲染图形 + "盘迹" 文字
 export default function BrandLogo({ variant, className }: BrandLogoProps) {
   const showText = variant !== 'sidebar'
   return (
@@ -20,7 +20,7 @@ export default function BrandLogo({ variant, className }: BrandLogoProps) {
         className={styles.mark}
         viewBox="0 0 32 32"
         role="img"
-        aria-label="策略主页 Logo"
+        aria-label="盘迹"
         focusable="false"
       >
         <defs>
@@ -41,7 +41,7 @@ export default function BrandLogo({ variant, className }: BrandLogoProps) {
         <circle cx="26" cy="9" r="2.4" fill="#ffffff" />
         <circle cx="6" cy="21" r="1.6" fill="#ffffff" opacity="0.85" />
       </svg>
-      {showText && <span className={styles.text}>策略主页</span>}
+      {showText && <span className={styles.text}>盘迹</span>}
     </span>
   )
 }

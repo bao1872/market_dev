@@ -1,26 +1,19 @@
 // [门户] - 描述: 价格区组件（月付/年付切换 + 申请内测按钮）
-// 不接入真实支付；申请内测读取 VITE_BETA_APPLY_URL 环境变量
+// 不接入真实支付；"申请内测"按钮通过 onApply 回调触发父组件打开 BetaApplicationModal
 import { useState } from 'react'
 import { pricingPlans } from '@/pages/LandingPage/landingData'
 import styles from '@/pages/LandingPage/LandingPage.module.scss'
 
+export interface PricingSectionProps {
+  // [内测申请] - 描述: 申请内测回调，由父组件管理 Modal 状态
+  onApply: () => void
+}
+
 // 价格面板：两档套餐（观察版/研究版）+ 月付/年付切换
-// "申请内测"按钮：环境变量存在时跳转外部表单，不存在时显示"申请通道暂未配置"
-export default function PricingSection() {
+// "申请内测"按钮：通过 onApply 回调触发父组件打开站内问卷
+export default function PricingSection({ onApply }: PricingSectionProps) {
   // 计费模式：monthly | yearly
   const [billing, setBilling] = useState<'monthly' | 'yearly'>('yearly')
-  // 申请通道提示（VITE_BETA_APPLY_URL 未配置时显示）
-  const [betaHint, setBetaHint] = useState('')
-
-  // 申请内测按钮：读取环境变量决定跳转或提示
-  function handleBetaApply() {
-    const betaApplyUrl = import.meta.env.VITE_BETA_APPLY_URL
-    if (betaApplyUrl) {
-      window.open(betaApplyUrl, '_blank', 'noopener,noreferrer')
-    } else {
-      setBetaHint('申请通道暂未配置，敬请期待')
-    }
-  }
 
   return (
     <article className={styles.pricePanelWide}>
@@ -67,13 +60,13 @@ export default function PricingSection() {
           <div className={styles.priceCta}>
             <button
               className={`${styles.btn} ${styles.btnPrimary} ${styles.btnWide}`}
-              onClick={handleBetaApply}
+              onClick={onApply}
             >
               申请内测 →
             </button>
           </div>
           <div className={styles.priceNote}>
-            {betaHint || '内测期间可随时取消，费用透明无隐藏消费'}
+            {'内测期间可随时取消，费用透明无隐藏消费'}
           </div>
         </div>
       </div>

@@ -14,85 +14,40 @@ import {
 } from '@/hooks/useApi'
 import { StrategyDataTable } from '@/components/StrategyDataTable'
 import type { DataTableColumn, DataTableQuery } from '@/components/StrategyDataTable'
-import type { StrategyResult, StrategyResultQueryParams } from '@/api/endpoints'
+import type { StrategyResultQueryParams } from '@/api/endpoints'
 import { formatShanghaiDate } from '@/utils/datetime'
+import {
+  adaptStrategyResultToTrendRow,
+  getTrendSelectionColumns,
+  pickPayload,
+  toNum,
+  fmtPct,
+  fmtChange,
+  getStockDisplay,
+  type TrendSelectionRow,
+} from '@/features/trend-selection'
 
 // ===== 常量 =====
 const PAGE_SIZE = 50
 
 // ===== 类型定义 =====
+// [趋势选股] - 描述: 行类型使用共享模块的 TrendSelectionRow（spec 第七节唯一实现）
+// breakoutColumns/genericColumns 共用同一行类型
 
-// 表格行类型（从 StrategyResult 派生，含 instrument 级字段）
-interface ScreenerRow {
-  resultId: string
-  instrumentId: string
-  symbol: string
-  name: string
-  market: string
-  payload: Record<string, unknown>
-  [key: string]: unknown
-}
+// ===== breakoutColumns 专用工具（趋势选股列定义已迁移至 features/trend-selection） =====
 
-// ===== summary 字段提取工具 =====
-
-/** 从 payload 中按候选 key 列表取第一个非空值 */
-function pickPayload(payload: Record<string, unknown>, keys: string[]): unknown {
-  for (const k of keys) {
-    const v = payload[k]
-    if (v !== undefined && v !== null && v !== '') return v
-  }
-  return undefined
-}
-
-/** 格式化为字符串，未知返回 '-' */
+/** 格式化为字符串，未知返回 '-'（仅 breakoutColumns 使用） */
 function fmtStr(v: unknown): string {
   if (v === undefined || v === null || v === '') return '-'
   return String(v)
 }
 
-/** 格式化为百分比字符串（不带正负号） */
-function fmtPct(v: unknown): string {
-  if (v === undefined || v === null || v === '') return '-'
-  const n = typeof v === 'number' ? v : parseFloat(String(v))
-  if (Number.isNaN(n)) return String(v)
-  return `${n.toFixed(2)}%`
-}
-
-/** 格式化为涨跌幅字符串（正数带 + 号） */
-function fmtChange(v: unknown): string {
-  if (v === undefined || v === null || v === '') return '-'
-  const n = typeof v === 'number' ? v : parseFloat(String(v))
-  if (Number.isNaN(n)) return String(v)
-  return `${n > 0 ? '+' : ''}${n.toFixed(2)}%`
-}
-
-/** 格式化为数值字符串（保留指定小数位） */
-function fmtNum(v: unknown, digits = 2): string {
-  if (v === undefined || v === null || v === '') return '-'
-  const n = typeof v === 'number' ? v : parseFloat(String(v))
-  if (Number.isNaN(n)) return String(v)
-  return n.toFixed(digits)
-}
-
-/** 格式化为带 x 后缀的量比 */
+/** 格式化为带 x 后缀的量比（仅 breakoutColumns 使用） */
 function fmtRatio(v: unknown): string {
   if (v === undefined || v === null || v === '') return '-'
   const n = typeof v === 'number' ? v : parseFloat(String(v))
   if (Number.isNaN(n)) return String(v)
   return `${n.toFixed(2)}x`
-}
-
-/** 转换为数字，失败返回 null */
-function toNum(v: unknown): number | null {
-  if (v === undefined || v === null || v === '') return null
-  const n = typeof v === 'number' ? v : parseFloat(String(v))
-  return Number.isNaN(n) ? null : n
-}
-
-/** 将 ratio 小数格式化为百分比（乘以 100），未知返回 '-' */
-function fmtRatioAsPct(v: unknown, digits = 2): string {
-  const n = toNum(v)
-  return n === null ? '-' : `${(n * 100).toFixed(digits)}%`
 }
 
 // [ScreenerPage] - 描述: 后端存储为小数的收益率/offset 类指标
@@ -134,32 +89,7 @@ function normalizeMetricValue(
   return n
 }
 
-/** 从 row 中提取股票展示信息（优先使用 instrument 级字段，回退到 payload） */
-function getStockDisplay(row: ScreenerRow): { symbol: string; name: string; market: string } {
-  if (row.symbol !== '-' && row.name !== '-') {
-    return { symbol: row.symbol, name: row.name, market: row.market }
-  }
-  const p = row.payload
-  return {
-    symbol: String(
-      pickPayload(p, ['symbol', 'code', 'instrument_symbol']) ?? row.instrumentId.slice(0, 8),
-    ),
-    name: String(pickPayload(p, ['name', 'instrument_name', 'stock_name']) ?? '-'),
-    market: String(pickPayload(p, ['market', 'board', 'exchange']) ?? ''),
-  }
-}
-
-/** 将 StrategyResult 转换为 ScreenerRow */
-function toRow(r: StrategyResult): ScreenerRow {
-  return {
-    resultId: r.id,
-    instrumentId: r.instrument_id,
-    symbol: r.instrument_symbol ?? '-',
-    name: r.instrument_name ?? '-',
-    market: r.instrument_market ?? '',
-    payload: r.payload,
-  }
-}
+// [趋势选股] - 描述: getStockDisplay/adaptStrategyResultToTrendRow 已迁移至 features/trend-selection
 
 // ===== 主组件 =====
 export default function ScreenerPage() {
@@ -240,8 +170,9 @@ export default function ScreenerPage() {
   const filteredTotal = resultsQuery.data?.filtered_total
 
   // --- 行数据 ---
-  const rows: ScreenerRow[] = useMemo(
-    () => resultItems.map(toRow),
+  // [趋势选股] - 描述: 行数据通过共享 adapter 转换（保留 payload 供列渲染动态计算）
+  const rows: TrendSelectionRow[] = useMemo(
+    () => resultItems.map((r) => adaptStrategyResultToTrendRow(r)),
     [resultItems],
   )
 
@@ -281,7 +212,7 @@ export default function ScreenerPage() {
 
   /** 跳转个股详情 */
   const goDetail = useCallback(
-    (row: ScreenerRow) => {
+    (row: TrendSelectionRow) => {
       const { symbol } = getStockDisplay(row)
       navigate(`/stock/${symbol}?source=selection&strategy=${activeStrategyKey}`)
     },
@@ -327,8 +258,9 @@ export default function ScreenerPage() {
 
   // ===== 列定义 =====
 
-  // 股票列渲染函数（复用）：第一行=名称+涨跌幅（涨红跌绿），第二行=代码·市场
-  const renderStock = useCallback((row: ScreenerRow) => {
+  // [趋势选股] - 描述: 股票列渲染（仅 breakoutColumns/genericColumns 使用，DSA 列已用共享定义）
+  // 第一行=名称+涨跌幅（涨红跌绿），第二行=代码·市场
+  const renderStock = useCallback((row: TrendSelectionRow) => {
     const { name, symbol, market } = getStockDisplay(row)
     const changePct = pickPayload(row.payload, ['change_pct', 'pct_change', 'change_percent'])
     const n = toNum(changePct)
@@ -347,223 +279,16 @@ export default function ScreenerPage() {
     )
   }, [])
 
-  // 趋势选股列
-  const dsaColumns: DataTableColumn<ScreenerRow>[] = useMemo(
-    () => [
-      {
-        key: 'stock',
-        title: '股票',
-        dataType: 'text',
-        sortable: true,
-        filterable: false,
-        width: 150,
-        sortValue: (row) => getStockDisplay(row).name,
-        filterValue: (row) => `${getStockDisplay(row).name} ${getStockDisplay(row).symbol}`,
-        render: renderStock,
-      },
-      {
-        // [ScreenerPage] - 描述: 趋势列 key=dsa_dir_bars，筛选直接透传后端 metric_filters（多头>0/空头<0/持续天数）
-        key: 'dsa_dir_bars',
-        title: '当前趋势',
-        shortTitle: '趋势',
-        dataType: 'number',
-        sortable: true,
-        filterable: true,
-        width: 90,
-        sortValue: (row) => {
-          const v = pickPayload(row.payload, ['dsa_dir_bars', 'dsa_duration', 'dir_duration', 'duration'])
-          const n = toNum(v)
-          return n === null ? 0 : Math.abs(n)
-        },
-        render: (row) => {
-          const v = pickPayload(row.payload, ['dsa_dir_bars', 'dsa_duration', 'dir_duration', 'duration'])
-          const n = toNum(v)
-          if (n === null || n === 0) {
-            return <span className="market-flat">方向未形成</span>
-          }
-          if (n > 0) {
-            return <span className="market-up">上涨 {n.toFixed(0)}天</span>
-          }
-          return <span className="market-down">下跌 {Math.abs(n).toFixed(0)}天</span>
-        },
-      },
-      {
-        key: 'vwap_ret_avg',
-        title: '日均趋势变化',
-        shortTitle: '日均',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        width: 88,
-        sortValue: (row) =>
-          Number(pickPayload(row.payload, ['vwap_ret_avg', 'dsa_avg_return', 'vwap_avg_return', 'avg_return']) ?? 0),
-        render: (row) => {
-          const v = pickPayload(row.payload, ['vwap_ret_avg', 'dsa_avg_return', 'vwap_avg_return', 'avg_return'])
-          const n = toNum(v)
-          return (
-            <span className={n !== null && n > 0 ? 'market-up' : n !== null && n < 0 ? 'market-down' : 'market-flat'}>
-              {fmtRatioAsPct(v)}
-            </span>
-          )
-        },
-      },
-      {
-        key: 'vwap_ret_total',
-        title: '本轮趋势涨跌',
-        shortTitle: '累计',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        width: 88,
-        sortValue: (row) =>
-          Number(
-            pickPayload(row.payload, [
-              'vwap_ret_total',
-              'vwap_total_return',
-              'total_return',
-              'dsa_total_return',
-            ]) ?? 0,
-          ),
-        render: (row) => {
-          const v = pickPayload(row.payload, [
-            'vwap_ret_total',
-            'vwap_total_return',
-            'total_return',
-            'dsa_total_return',
-          ])
-          const n = toNum(v)
-          return (
-            <span className={n !== null && n > 0 ? 'market-up' : n !== null && n < 0 ? 'market-down' : 'market-flat'}>
-              {fmtRatioAsPct(v)}
-            </span>
-          )
-        },
-      },
-      {
-        key: 'offset_mean',
-        title: '平均偏离趋势线',
-        shortTitle: '均偏',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        width: 90,
-        sortValue: (row) => Number(pickPayload(row.payload, ['offset_mean', 'shift_mean']) ?? 0),
-        render: (row) => {
-          const v = pickPayload(row.payload, ['offset_mean', 'shift_mean'])
-          const n = toNum(v)
-          return (
-            <span className={n !== null && n > 0 ? 'market-up' : n !== null && n < 0 ? 'market-down' : 'market-flat'}>
-              {fmtRatioAsPct(v)}
-            </span>
-          )
-        },
-      },
-      {
-        key: 'offset_std',
-        title: '趋势附近波动幅度',
-        shortTitle: '波动',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        width: 90,
-        sortValue: (row) => Number(pickPayload(row.payload, ['offset_std', 'shift_std']) ?? 0),
-        render: (row) => fmtRatioAsPct(pickPayload(row.payload, ['offset_std', 'shift_std'])),
-      },
-      {
-        key: 'offset_percentile',
-        title: '当前强弱位置',
-        shortTitle: '分位',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        width: 86,
-        sortValue: (row) =>
-          Number(
-            pickPayload(row.payload, ['offset_percentile', 'short_position', 'position_short', 'short_pos']) ?? 0,
-          ),
-        render: (row) =>
-          fmtRatioAsPct(
-            pickPayload(row.payload, ['offset_percentile', 'short_position', 'position_short', 'short_pos']),
-          ),
-      },
-      {
-        key: 'dsa_vwap',
-        title: '趋势参考价',
-        shortTitle: '参考价',
-        dataType: 'number',
-        sortable: true,
-        filterable: true,
-        width: 82,
-        sortValue: (row) => Number(pickPayload(row.payload, ['dsa_vwap', 'vwap', 'anchor_vwap']) ?? 0),
-        render: (row) => fmtNum(pickPayload(row.payload, ['dsa_vwap', 'vwap', 'anchor_vwap']), 2),
-      },
-      {
-        key: 'dsa_vwap_dev_pct',
-        title: '距趋势参考价',
-        shortTitle: '价差',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        width: 86,
-        sortValue: (row) =>
-          Number(pickPayload(row.payload, ['dsa_vwap_dev_pct', 'vwap_dev_pct', 'close_vwap_dev_pct']) ?? 0),
-        render: (row) => {
-          const v = pickPayload(row.payload, ['dsa_vwap_dev_pct', 'vwap_dev_pct', 'close_vwap_dev_pct'])
-          const n = toNum(v)
-          return (
-            <span className={n !== null && n > 0 ? 'market-up' : n !== null && n < 0 ? 'market-down' : 'market-flat'}>
-              {fmtPct(v)}
-            </span>
-          )
-        },
-      },
-      {
-        key: 'offset_variance_rate',
-        title: '趋势波动程度',
-        shortTitle: '变异',
-        dataType: 'percent',
-        sortable: true,
-        filterable: true,
-        width: 88,
-        sortValue: (row) =>
-          Number(pickPayload(row.payload, ['offset_variance_rate', 'offset_var_rate', 'shift_var']) ?? 0),
-        render: (row) =>
-          fmtPct(pickPayload(row.payload, ['offset_variance_rate', 'offset_var_rate', 'shift_var'])),
-      },
-      {
-        key: 'price',
-        title: '最新价格',
-        shortTitle: '现价',
-        dataType: 'number',
-        sortable: true,
-        filterable: true,
-        width: 76,
-        sortValue: (row) =>
-          Number(pickPayload(row.payload, ['last_close', 'price', 'current_price', 'close']) ?? 0),
-        render: (row) => fmtNum(pickPayload(row.payload, ['last_close', 'price', 'current_price', 'close'])),
-      },
-      {
-        key: 'action',
-        title: '操作',
-        dataType: 'text',
-        sortable: false,
-        filterable: false,
-        width: 60,
-        isAction: true,
-        render: (row) => (
-          <div className="actions">
-            <button className="btn small" onClick={() => goDetail(row)}>
-              详情
-            </button>
-          </div>
-        ),
-      },
-    ],
-    [renderStock, goDetail],
+  // [趋势选股] - 描述: DSA 列定义引用 features/trend-selection 共享模块（spec 第七节唯一真源）
+  // 同 key 的 title/format/颜色规则与 IndexPage 完全一致；onDetail 由本页注入跳转逻辑
+  // breakoutColumns/genericColumns 仍为本地定义（spec 第七节仅统一 dsa 策略列）
+  const dsaColumns: DataTableColumn<TrendSelectionRow>[] = useMemo(
+    () => getTrendSelectionColumns({ onDetail: goDetail }),
+    [goDetail],
   )
 
   // 突破强度列
-  const breakoutColumns: DataTableColumn<ScreenerRow>[] = useMemo(
+  const breakoutColumns: DataTableColumn<TrendSelectionRow>[] = useMemo(
     () => [
       {
         key: 'stock',
@@ -656,7 +381,7 @@ export default function ScreenerPage() {
   )
 
   // 通用列（未知策略时使用，展示 payload 中的所有数值字段）
-  const genericColumns: DataTableColumn<ScreenerRow>[] = useMemo(
+  const genericColumns: DataTableColumn<TrendSelectionRow>[] = useMemo(
     () => [
       {
         key: 'stock',
@@ -688,7 +413,7 @@ export default function ScreenerPage() {
   )
 
   /** 根据策略 key 选择列定义 */
-  const getColumns = (strategyKey: string): DataTableColumn<ScreenerRow>[] => {
+  const getColumns = (strategyKey: string): DataTableColumn<TrendSelectionRow>[] => {
     const k = strategyKey.toLowerCase()
     if (k.includes('dsa')) return dsaColumns
     if (k.includes('breakout')) return breakoutColumns

@@ -77,7 +77,7 @@ export default function LoginPage() {
         email: user.email,
         role: user.roles?.includes('admin') ? 'admin' : 'member',
       })
-      useToast.getState().show('登录成功', '已进入策略主页')
+      useToast.getState().show('登录成功', '已进入盘迹')
       navigate(membershipExpired ? '/membership-expired' : '/overview')
     } catch (err) {
       // getMe 失败：logout 清除 token + store 状态，避免残留无效登录态
@@ -306,7 +306,7 @@ export default function LoginPage() {
                   onClick={handleEnterService}
                   disabled={authenticating}
                 >
-                  {authenticating ? '进入中...' : '进入策略主页'}
+                  {authenticating ? '进入中...' : '进入盘迹'}
                 </button>
               </div>
             ) : (

@@ -27,7 +27,11 @@ import {
 } from '@/hooks/useApi'
 import { StrategyDataTable } from '@/components/StrategyDataTable'
 import type { DataTableColumn } from '@/components/StrategyDataTable'
-import type { InviteCode } from '@/api/endpoints'
+import {
+  type InviteCode,
+  type PlanCode,
+  PLAN_CONTRACTS_PREVIEW,
+} from '@/api/endpoints'
 
 // ===== 类型定义（带索引签名以满足 StrategyDataTable 的 Row extends Record<string, unknown>）=====
 
@@ -45,11 +49,14 @@ interface MemberRow {
   [key: string]: unknown
 }
 
-/** 邀请码行类型（从 InviteCodeListItem 派生） */
+/** 邀请码行类型（从 InviteCodeListItem 派生，含套餐快照字段） */
 interface InviteCodeRow {
   id: string
   status: string
   grant_days: number
+  plan_code: PlanCode | null
+  monitor_limit: number | null
+  grant_months: number | null
   note: string | null
   created_by: string
   created_at: string
@@ -140,6 +147,19 @@ function getEmailUsername(email: string): string {
   return email.split('@')[0] || email
 }
 
+/** 套餐展示名（observe_20 → 观察版，未知/空 → '—'） */
+function getPlanName(planCode: PlanCode | null | undefined): string {
+  if (!planCode) return '—'
+  return PLAN_CONTRACTS_PREVIEW[planCode]?.name ?? '—'
+}
+
+/** 套餐最大自选数量展示（observe_20 → 20，未知/空 → '—'） */
+function getPlanMonitorLimit(planCode: PlanCode | null | undefined): string {
+  if (!planCode) return '—'
+  const limit = PLAN_CONTRACTS_PREVIEW[planCode]?.monitorLimit
+  return limit != null ? String(limit) : '—'
+}
+
 // ===== 主页面 =====
 
 export default function AdminUsersPage() {
@@ -166,6 +186,8 @@ export default function AdminUsersPage() {
   const [modalOpen, setModalOpen] = useState(false)
   const [generateCount, setGenerateCount] = useState(1)
   const [generateNote, setGenerateNote] = useState('朋友内测')
+  const [generatePlanCode, setGeneratePlanCode] = useState<PlanCode>('observe_20')
+  const [generateGrantMonths, setGenerateGrantMonths] = useState(1)
   const [generatedCodes, setGeneratedCodes] = useState<InviteCode[]>([])
 
   // 用户兑换记录（抽屉打开时按选中用户查询）
@@ -293,10 +315,15 @@ export default function AdminUsersPage() {
     [revokeInviteCode, toast],
   )
 
-  /** 生成邀请码 */
+  /** 生成邀请码 - 提交 plan_code/grant_months/count/note（monitor_limit 由后端按 plan_code 计算） */
   const handleGenerate = useCallback(() => {
     createInviteCodes.mutate(
-      { count: generateCount, note: generateNote },
+      {
+        count: generateCount,
+        note: generateNote,
+        plan_code: generatePlanCode,
+        grant_months: generateGrantMonths,
+      },
       {
         onSuccess: (codes) => {
           setGeneratedCodes(codes)
@@ -309,13 +336,22 @@ export default function AdminUsersPage() {
         },
       },
     )
-  }, [createInviteCodes, generateCount, generateNote, toast])
+  }, [
+    createInviteCodes,
+    generateCount,
+    generateNote,
+    generatePlanCode,
+    generateGrantMonths,
+    toast,
+  ])
 
   /** 打开生成弹窗，重置状态 */
   const handleOpenModal = useCallback(() => {
     setGeneratedCodes([])
     setGenerateCount(1)
     setGenerateNote('朋友内测')
+    setGeneratePlanCode('observe_20')
+    setGenerateGrantMonths(1)
     setModalOpen(true)
   }, [])
 
@@ -485,12 +521,37 @@ export default function AdminUsersPage() {
         sortValue: (row) => getInviteStatusPill(row.status).label,
       },
       {
-        key: 'grant_days',
-        title: '权益',
-        dataType: 'text',
-        sortable: false,
+        key: 'plan_code',
+        title: '套餐',
+        dataType: 'enum',
+        sortable: true,
+        filterable: true,
+        enumOptions: [
+          { label: '观察版', value: '观察版' },
+          { label: '研究版', value: '研究版' },
+        ],
+        render: (row) => getPlanName(row.plan_code),
+        filterValue: (row) => getPlanName(row.plan_code),
+        sortValue: (row) => getPlanName(row.plan_code),
+      },
+      {
+        key: 'monitor_limit',
+        title: '最大自选',
+        dataType: 'number',
+        sortable: true,
         filterable: false,
-        render: (row) => `会员 +${row.grant_days} 天`,
+        render: (row) =>
+          row.monitor_limit != null ? `${row.monitor_limit} 只` : getPlanMonitorLimit(row.plan_code),
+        sortValue: (row) => row.monitor_limit ?? 0,
+      },
+      {
+        key: 'grant_months',
+        title: '有效月数',
+        dataType: 'number',
+        sortable: true,
+        filterable: false,
+        render: (row) => (row.grant_months != null ? `${row.grant_months} 个月` : '—'),
+        sortValue: (row) => row.grant_months ?? 0,
       },
       {
         key: 'usage_type',
@@ -582,6 +643,12 @@ export default function AdminUsersPage() {
   // ===== 兑换记录时间线 =====
   const redemptions = redemptionsQuery.data ?? []
 
+  // 生成邀请码弹窗权益预览（如"研究版 · 最多50只自选股 · 有效期6个月"）
+  const benefitPreview = useMemo(() => {
+    const contract = PLAN_CONTRACTS_PREVIEW[generatePlanCode]
+    return `${contract.name} · 最多${contract.monitorLimit}只自选股 · 有效期${generateGrantMonths}个月`
+  }, [generatePlanCode, generateGrantMonths])
+
   // ===== 渲染 =====
   return (
     <>
@@ -590,7 +657,7 @@ export default function AdminUsersPage() {
         <div>
           <h1 className="page-title">会员与邀请码</h1>
           <div className="page-desc">
-            单一会员制：注册即开放全部功能；邀请码用于注册或续期，每次增加30天
+            邀请码绑定套餐（观察版/研究版）与有效期月数，用于注册或续期，兑换后按套餐开通自选额度
           </div>
         </div>
         <div className="actions">
@@ -712,15 +779,15 @@ export default function AdminUsersPage() {
                   <div>
                     <i>1</i>
                     <span>
-                      <b>单一会员身份</b>
-                      <small>不区分试用、标准、专业套餐；会员有效时开放全部功能。</small>
+                      <b>套餐制会员</b>
+                      <small>邀请码绑定观察版（20 只自选）或研究版（50 只自选），会员有效时按套餐开放功能。</small>
                     </span>
                   </div>
                   <div>
                     <i>2</i>
                     <span>
                       <b>注册必须使用邀请码</b>
-                      <small>邀请码验证成功后创建账户并立即激活30天。</small>
+                      <small>邀请码验证成功后创建账户并按套餐激活会员有效期。</small>
                     </span>
                   </div>
                   <div>
@@ -733,7 +800,7 @@ export default function AdminUsersPage() {
                   <div>
                     <i>4</i>
                     <span>
-                      <b>续期统一增加30天</b>
+                      <b>续期按邀请码套餐月数</b>
                       <small>未到期从原到期日顺延；已到期从兑换当天重新计算。</small>
                     </span>
                   </div>
@@ -783,7 +850,7 @@ export default function AdminUsersPage() {
               <div>
                 <b>会员详情 · {getEmailUsername(selectedMember.email)}</b>
                 <div className="card-sub">
-                  会员状态只控制有效期，不限制功能与资源额度
+                  会员状态控制有效期，自选股额度由套餐决定
                 </div>
               </div>
               <button className="icon-btn" onClick={handleCloseDrawer}>
@@ -901,7 +968,7 @@ export default function AdminUsersPage() {
                             <span>
                               <b>
                                 {formatDate(r.redeemed_at)} · 邀请码
-                                {tag?.label ?? r.usage_type} +30天
+                                {tag?.label ?? r.usage_type}
                               </b>
                               <small>
                                 新到期日 {formatDate(r.new_expires_at)}
@@ -946,7 +1013,7 @@ export default function AdminUsersPage() {
               <div>
                 <b>生成邀请码</b>
                 <div className="card-sub">
-                  每个邀请码仅可兑换一次，固定增加30天会员
+                  选择套餐与有效期，兑换后按套餐开通自选额度与会员月数
                 </div>
               </div>
               <button className="icon-btn" onClick={handleCloseModal}>
@@ -956,6 +1023,33 @@ export default function AdminUsersPage() {
 
             <div className="modal-body">
               <div className="form-grid">
+                <div className="form-row">
+                  <label className="form-label">套餐类型</label>
+                  <select
+                    className="select"
+                    value={generatePlanCode}
+                    onChange={(e) => setGeneratePlanCode(e.target.value as PlanCode)}
+                  >
+                    <option value="observe_20">观察版（最多20只自选股）</option>
+                    <option value="research_50">研究版（最多50只自选股）</option>
+                  </select>
+                </div>
+                <div className="form-row">
+                  <label className="form-label">有效期月数</label>
+                  <input
+                    className="input"
+                    type="number"
+                    min={1}
+                    max={36}
+                    value={generateGrantMonths}
+                    onChange={(e) => {
+                      const v = Number(e.target.value)
+                      if (Number.isFinite(v)) {
+                        setGenerateGrantMonths(Math.min(36, Math.max(1, Math.trunc(v))))
+                      }
+                    }}
+                  />
+                </div>
                 <div className="form-row">
                   <label className="form-label">生成数量</label>
                   <select
@@ -969,10 +1063,6 @@ export default function AdminUsersPage() {
                     <option value={20}>20</option>
                   </select>
                 </div>
-                <div className="form-row">
-                  <label className="form-label">会员权益</label>
-                  <input className="input" value="30 天" disabled />
-                </div>
                 <div className="form-row full">
                   <label className="form-label">批次备注</label>
                   <input
@@ -984,8 +1074,12 @@ export default function AdminUsersPage() {
                 </div>
               </div>
 
+              <div className="notice modal-notice benefit-preview">
+                权益预览：<b>{benefitPreview}</b>
+              </div>
+
               <div className="notice modal-notice">
-                邀请码不绑定具体用户。兑换成功后立即标记为已使用，并记录注册/续期用途、使用者与时间。
+                邀请码不绑定具体用户。兑换成功后立即标记为已使用，并记录注册/续期用途、使用者与时间。最大自选股数量由后端按套餐计算。
               </div>
 
               {/* 生成后显示新码 */}

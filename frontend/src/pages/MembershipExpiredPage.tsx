@@ -104,7 +104,7 @@ export default function MembershipExpiredPage() {
         <div className="renew-gate-brand">
           <BrandLogo variant="sidebar" />
           <div>
-            <b>策略主页</b>
+            <b>盘迹</b>
             <span>MEMBERSHIP RENEWAL</span>
           </div>
         </div>

@@ -741,12 +741,13 @@ async def run_strategy_scheduler_worker() -> None:
 
 
 async def run_calendar_scheduler_worker() -> None:
-    """日历调度 Worker：每日 02:00 从 pytdx 拉取当年交易日历并更新 DB。
+    """日历调度 Worker：每日 02:00 从 Mootdx 拉取本年及下一年交易日历并更新 DB。
 
     使用 APScheduler AsyncIOScheduler + CronTrigger：
     - 每日 02:00 触发
-    - 调用 seed_calendar_from_pytdx(session, year=当前年份)
+    - 调用 seed_calendar_from_mootdx(session, year=当前年份) 与下一年
     - 更新或插入交易日历记录
+    - Mootdx 失败时保留旧值并报警（异常上抛，不覆盖历史记录）
 
     设计说明：
     - APScheduler 在事件循环中运行，不阻塞
@@ -770,10 +771,10 @@ async def run_calendar_scheduler_worker() -> None:
         logger.exception("Calendar Scheduler 启动恢复异常: %s", exc)
 
     async def calendar_job() -> None:
-        """每日凌晨刷新交易日历（从 pytdx 拉取当年日历并更新 DB）。"""
-        from datetime import date as date_cls
+        """每日凌晨刷新交易日历（从 Mootdx 拉取当年及下一年日历并更新 DB）。"""
+        from app.core.time import shanghai_business_date
 
-        today = date_cls.today()
+        today = shanghai_business_date()
         job_run = None
         try:
             async with AsyncSessionLocal() as session:
@@ -788,10 +789,12 @@ async def run_calendar_scheduler_worker() -> None:
                 if job_run is None:
                     logger.info("calendar_scheduler SKIPPED_DUPLICATE business_date=%s", today)
                     return
-                from app.services.calendar_seed import seed_calendar_from_pytdx
-                year = today.year
-                count = await seed_calendar_from_pytdx(session, year=year)
-                logger.info("日历刷新完成: year=%d, %d 条记录更新", year, count)
+                from app.services.calendar_seed import seed_calendar_from_mootdx
+                total_count = 0
+                for year in (today.year, today.year + 1):
+                    count = await seed_calendar_from_mootdx(session, year=year, force=False)
+                    total_count += count
+                    logger.info("日历刷新完成: year=%d, %d 条记录更新", year, count)
                 await _finish_job_run(session, job_run, "succeeded", success_count=1)
         except Exception as exc:
             logger.error("日历刷新失败: %s", exc)

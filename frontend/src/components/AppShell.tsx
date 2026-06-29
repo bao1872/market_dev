@@ -32,6 +32,7 @@ const userNavItems: NavItemDef[] = [
 const adminNavItems: NavItemDef[] = [
   { path: '/admin', icon: '▦', label: '系统概览' },
   { path: '/admin/users', icon: '♙', label: '用户与套餐' },
+  { path: '/admin/beta-applications', icon: '✦', label: '内测申请' },
   { path: '/admin/strategies', icon: '◇', label: '策略目录' },
   { path: '/admin/jobs', icon: '↻', label: '任务与事件' },
 ]
@@ -45,6 +46,7 @@ const pageTitleMap: Record<string, string> = {
   '/messages': '消息中心',
   '/admin': '系统概览',
   '/admin/users': '用户与套餐',
+  '/admin/beta-applications': '内测申请',
   '/admin/strategies': '策略目录',
   '/admin/jobs': '任务与事件',
 }
@@ -52,7 +54,7 @@ const pageTitleMap: Record<string, string> = {
 function getPageTitle(pathname: string): string {
   // 个股详情页特殊处理
   if (pathname.startsWith('/stock/')) return '个股详情'
-  return pageTitleMap[pathname] || '策略主页'
+  return pageTitleMap[pathname] || '盘迹'
 }
 
 function NavItem({ item, active, onClick }: { item: NavItemDef; active: boolean; onClick?: () => void }) {
@@ -148,7 +150,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
       <div className="brand">
         <BrandLogo variant="sidebar" />
         <div>
-          <div className="brand-title">策略主页</div>
+          <div className="brand-title">盘迹</div>
           <div className="brand-sub">STRATEGY SERVICE</div>
         </div>
       </div>
@@ -254,7 +256,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
               <div className="brand">
                 <BrandLogo variant="sidebar" />
                 <div>
-                  <div className="brand-title">策略主页</div>
+                  <div className="brand-title">盘迹</div>
                   <div className="brand-sub">STRATEGY SERVICE</div>
                 </div>
               </div>

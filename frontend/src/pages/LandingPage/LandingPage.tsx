@@ -9,6 +9,7 @@ import PricingSection from '@/components/landing/PricingSection'
 import LegalModal from '@/components/landing/LegalModal'
 import LandingFooter from '@/components/landing/LandingFooter'
 import BrandLogo from '@/components/BrandLogo'
+import BetaApplicationModal from '@/components/BetaApplicationModal'
 import { navLinks, features, type LegalType } from './landingData'
 import styles from './LandingPage.module.scss'
 
@@ -18,22 +19,12 @@ export default function LandingPage() {
   // 法律条款模态状态
   const [legalOpen, setLegalOpen] = useState(false)
   const [legalType, setLegalType] = useState<LegalType | null>(null)
-  // 申请内测提示（VITE_BETA_APPLY_URL 未配置时显示）
-  const [betaHint, setBetaHint] = useState('')
+  // [内测申请] - 描述: 站内问卷模态开关，所有"申请内测"按钮共用同一个 Modal
+  const [betaApplyOpen, setBetaApplyOpen] = useState(false)
 
   // 登录按钮：跳转 /login（删除原型中的假登录弹窗）
   function handleLogin() {
     navigate('/login')
-  }
-
-  // 申请内测按钮：读取环境变量决定跳转或提示
-  function handleBetaApply() {
-    const betaApplyUrl = import.meta.env.VITE_BETA_APPLY_URL
-    if (betaApplyUrl) {
-      window.open(betaApplyUrl, '_blank', 'noopener,noreferrer')
-    } else {
-      setBetaHint('申请通道暂未配置，敬请期待')
-    }
   }
 
   // 打开法律条款模态
@@ -70,7 +61,10 @@ export default function LandingPage() {
             <button className={`${styles.btn} ${styles.btnGhost}`} onClick={handleLogin}>
               登录
             </button>
-            <button className={`${styles.btn} ${styles.btnPrimary}`} onClick={handleBetaApply}>
+            <button
+              className={`${styles.btn} ${styles.btnPrimary}`}
+              onClick={() => setBetaApplyOpen(true)}
+            >
               申请内测
             </button>
           </div>
@@ -85,14 +79,16 @@ export default function LandingPage() {
               <h1>同时跟踪多只股票，<br />重要变化及时知道。</h1>
               <p>基于成交密集区的动态监控，<br />当价格进入关键区域时，第一时间通知你。</p>
               <div className={styles.heroActions}>
-                <button className={`${styles.btn} ${styles.btnPrimary}`} onClick={handleBetaApply}>
+                <button
+                  className={`${styles.btn} ${styles.btnPrimary}`}
+                  onClick={() => setBetaApplyOpen(true)}
+                >
                   申请内测
                 </button>
                 <button className={`${styles.btn} ${styles.btnGhost}`} onClick={handleLogin}>
                   登录体验
                 </button>
               </div>
-              {betaHint && <div className={styles.priceNote}>{betaHint}</div>}
             </div>
             <HeroMarketDemo />
           </div>
@@ -130,7 +126,7 @@ export default function LandingPage() {
             <OpportunityWorkflow />
 
             {/* 价格区 */}
-            <PricingSection />
+            <PricingSection onApply={() => setBetaApplyOpen(true)} />
           </div>
         </section>
       </main>
@@ -140,6 +136,12 @@ export default function LandingPage() {
 
       {/* 法律条款模态 */}
       <LegalModal open={legalOpen} type={legalType} onClose={closeLegal} />
+
+      {/* 内测申请问卷模态：所有"申请内测"按钮共用 */}
+      <BetaApplicationModal
+        open={betaApplyOpen}
+        onClose={() => setBetaApplyOpen(false)}
+      />
     </div>
   )
 }

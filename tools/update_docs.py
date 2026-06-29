@@ -48,6 +48,7 @@ from app.models.bar import (  # noqa: E402
     BarMonthly,
     BarWeekly,
 )
+from app.models.calendar import TradingCalendar  # noqa: E402
 from app.models.instrument import Instrument  # noqa: E402
 
 # 项目根目录（docs/ 所在位置）
@@ -341,7 +342,7 @@ def generate_db_schema_doc() -> str:
     w("| 表名 | 用途 | 主键 | 外键 |\n")
     w("|------|------|------|------|\n")
 
-    all_models = _BAR_MODELS + [Instrument]
+    all_models = _BAR_MODELS + [Instrument, TradingCalendar]
     for model_cls in all_models:
         info = _extract_table_info(model_cls)
         pk_str = ", ".join(info["primary_key"])
@@ -360,6 +361,7 @@ def generate_db_schema_doc() -> str:
     # 2. 各表详细结构
     w("## 2. 各表详细结构\n\n")
 
+    all_models = _BAR_MODELS + [Instrument, TradingCalendar]
     for model_cls in all_models:
         info = _extract_table_info(model_cls)
         w(f"### {info['table_name']}\n\n")
@@ -541,8 +543,22 @@ def _get_field_descriptions(table_name: str) -> dict:
         "created_at": "创建时间戳",
         "updated_at": "更新时间戳",
     }
+    calendar_fields = {
+        "id": "UUID 主键",
+        "trade_date": "交易日期（唯一）",
+        "is_trading_day": "是否为交易日（由 status 派生：OPEN=true, CLOSED=false, UNKNOWN=null）",
+        "source": "数据来源（MOOTDX_HOLIDAY/MOOTDX_HISTORICAL/MANUAL_OVERRIDE）",
+        "status": "交易日语义状态（OPEN/CLOSED/UNKNOWN）",
+        "verified_at": "Mootdx 校验时间戳",
+        "note": "人工备注或覆盖说明",
+        "validation_error": "校验失败时的错误信息",
+        "created_at": "创建时间戳",
+        "updated_at": "更新时间戳",
+    }
     if table_name == "instruments":
         return instrument_fields
+    if table_name == "trading_calendar":
+        return calendar_fields
     return common
 
 
