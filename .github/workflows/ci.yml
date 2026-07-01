@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, master, develop]
   pull_request:
-    branches: [main, master, develop]
+    branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: backend
+        working-directory: .
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,9 +25,47 @@ jobs:
           cache: "pip"
           cache-dependency-path: backend/pyproject.toml
       - name: Install backend dependencies
-        run: pip install -e ".[dev]"
-      - name: Run architecture rules tests
-        run: pytest tests/test_architecture_rules.py
+        run: pip install -e "backend[dev]"
+      - name: Run architecture rules checks
+        run: python tools/check_architecture.py
+
+  docs-consistency:
+    name: Docs Consistency
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: backend/pyproject.toml
+      - name: Install backend dependencies
+        run: pip install -e "backend[dev]"
+      - name: Run docs consistency checks
+        run: python tools/check_docs_consistency.py
+
+  test-allowlist:
+    name: Test Allowlist
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: backend/pyproject.toml
+      - name: Install backend dependencies
+        run: pip install -e "backend[dev]"
+      - name: Run test allowlist checks
+        run: python tools/check_test_allowlist.py
 
   ruff:
     name: Ruff
@@ -70,7 +108,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:15
+        image: postgres:16
         env:
           POSTGRES_USER: bz
           POSTGRES_PASSWORD: bz
@@ -121,7 +159,7 @@ jobs:
       - alembic-cycle
     services:
       postgres:
-        image: postgres:15
+        image: postgres:16
         env:
           POSTGRES_USER: bz
           POSTGRES_PASSWORD: bz
