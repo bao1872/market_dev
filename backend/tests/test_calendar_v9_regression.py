@@ -390,14 +390,16 @@ async def test_sync_identifies_suspicious_dates(db_session):
 def test_no_tushare_references_in_backend():
     """backend/app、tests、pyproject.toml 中无 Tushare 引用（历史迁移文件除外）。"""
     import subprocess
+    from pathlib import Path
 
+    repo_root = str(Path(__file__).resolve().parents[2])
     result = subprocess.run(
         [
             "grep", "-Rin",
             "tushare|TUSHARE|pro_api|trade_cal|get_tushare_token|fetch_calendar_from_tushare",
             "backend/app", "backend/pyproject.toml", "backend/tests",
         ],
-        cwd="/root/web_dev",
+        cwd=repo_root,
         capture_output=True,
         text=True,
     )
