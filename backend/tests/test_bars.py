@@ -14,9 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pandas as pd
 import pytest
-from fastapi.testclient import TestClient
 
-from app.main import app
 from app.repositories.bar_repository import apply_adj_factor_to_bars
 from app.services.adj_factor import apply_adj_factor, apply_adj_factor_intraday
 from app.services.freshness_sla import (
@@ -249,12 +247,11 @@ async def test_check_minute_freshness_stale() -> None:
 # ============================================================
 
 
-@pytest.mark.xfail(reason="flaky: see tests/allowlist.json FLAKY-BARS-001", strict=False)
-def test_get_bars_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_get_bars_empty(client, monkeypatch: pytest.MonkeyPatch) -> None:
     """测试行情查询 API（无数据返回空列表）。
 
-    备注：该测试在完整套件中偶发 event loop 复用导致的 asyncpg 连接错误，
-    单独运行通常通过。已加入 allowlist.json 并标注为 flaky。
+    使用 conftest 提供的异步 client fixture，避免 TestClient 在完整套件中
+    复用 session 级 async engine 导致 event loop 不一致。
     """
     from app.api import bars as bars_api
 
@@ -263,8 +260,7 @@ def test_get_bars_empty(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(bars_api, "fetch_daily_bars", mock_fetch)
 
-    client = TestClient(app)
-    response = client.get(
+    response = await client.get(
         f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
         params={"timeframe": "1d", "adj": "none"},
     )
@@ -277,7 +273,7 @@ def test_get_bars_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     assert data["adj"] == "none"
 
 
-def test_get_bars_with_data(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_get_bars_with_data(client, monkeypatch: pytest.MonkeyPatch) -> None:
     """测试行情查询 API（有数据返回）。"""
     from app.api import bars as bars_api
 
@@ -296,8 +292,7 @@ def test_get_bars_with_data(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(bars_api, "fetch_daily_bars", mock_fetch)
 
-    client = TestClient(app)
-    response = client.get(
+    response = await client.get(
         f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
         params={"timeframe": "1d", "adj": "none"},
     )
@@ -311,7 +306,7 @@ def test_get_bars_with_data(monkeypatch: pytest.MonkeyPatch) -> None:
     assert data["items"][0]["trade_time"] is None
 
 
-def test_get_bars_pagination(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_get_bars_pagination(client, monkeypatch: pytest.MonkeyPatch) -> None:
     """测试行情查询 API 分页。"""
     from app.api import bars as bars_api
 
@@ -332,9 +327,8 @@ def test_get_bars_pagination(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(bars_api, "fetch_daily_bars", mock_fetch)
 
-    client = TestClient(app)
     # 请求第 1 页，每页 2 条
-    response = client.get(
+    response = await client.get(
         f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
         params={"timeframe": "1d", "adj": "none", "page": 1, "page_size": 2},
     )
@@ -348,27 +342,25 @@ def test_get_bars_pagination(monkeypatch: pytest.MonkeyPatch) -> None:
     assert data["items"][0]["close"] == 13.2  # 第一页第一条（按最新返回）
 
 
-def test_get_bars_invalid_timeframe() -> None:
+async def test_get_bars_invalid_timeframe(client) -> None:
     """测试无效 timeframe 参数返回 400。"""
-    client = TestClient(app)
-    response = client.get(
+    response = await client.get(
         f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
         params={"timeframe": "5m"},
     )
     assert response.status_code == 400
 
 
-def test_get_bars_invalid_adj() -> None:
+async def test_get_bars_invalid_adj(client) -> None:
     """测试无效 adj 参数返回 400。"""
-    client = TestClient(app)
-    response = client.get(
+    response = await client.get(
         f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
         params={"timeframe": "1d", "adj": "hfq"},
     )
     assert response.status_code == 400
 
 
-def test_get_bars_qfq(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_get_bars_qfq(client, monkeypatch: pytest.MonkeyPatch) -> None:
     """测试前复权行情查询（图表场景走 load_chart_bars）。
 
     图表场景触发条件：timeframe=1d + adj=qfq + page_size<=500（默认 page_size=100）。
@@ -400,8 +392,7 @@ def test_get_bars_qfq(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(chart_bars_service, "fetch_daily_bars", mock_fetch)
     monkeypatch.setattr(chart_bars_service, "_get_adj_factor_df", mock_get_adj)
 
-    client = TestClient(app)
-    response = client.get(
+    response = await client.get(
         f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
         params={"timeframe": "1d", "adj": "qfq"},
     )
@@ -415,7 +406,7 @@ def test_get_bars_qfq(monkeypatch: pytest.MonkeyPatch) -> None:
     assert data["items"][1]["close"] == 5.2
 
 
-def test_get_bars_qfq_non_chart_scenario(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_get_bars_qfq_non_chart_scenario(client, monkeypatch: pytest.MonkeyPatch) -> None:
     """测试前复权行情查询（非图表场景 page_size>500 走原有 DB 优先 + qfq 流程）。"""
     from app.api import bars as bars_api
 
@@ -442,8 +433,7 @@ def test_get_bars_qfq_non_chart_scenario(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(bars_api, "_query_db_only", mock_fetch)
     monkeypatch.setattr(bars_api, "_get_adj_factor_df", mock_get_adj)
 
-    client = TestClient(app)
-    response = client.get(
+    response = await client.get(
         f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
         params={"timeframe": "1d", "adj": "qfq", "page_size": 600},
     )

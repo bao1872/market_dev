@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.models.instrument import Instrument
-from app.models.membership import InviteCode
+from app.models.invitation import InviteCode
 from app.models.subscription import Subscription
 from app.models.user import Role, User
 

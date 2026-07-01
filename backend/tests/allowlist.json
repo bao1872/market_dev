@@ -1,12 +1,4 @@
 {
   "description": "全量 pytest 中已知但未在当前治理任务内修复的失败项。任何新增项必须附带 issue、原因、owner 和过期日期，禁止只写'预存在问题'。",
-  "items": [
-    {
-      "test": "tests/test_bars.py::test_get_bars_empty",
-      "reason": "flaky: 在完整测试套件中偶发 'Task got Future attached to a different loop'，与 AsyncAdaptedQueuePool 在不同 event loop 间复用连接有关；单独运行通常通过。",
-      "issue": "FLAKY-BARS-001",
-      "owner": "backend-oncall",
-      "expires": "2026-07-15"
-    }
-  ]
+  "items": []
 }
