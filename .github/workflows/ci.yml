@@ -10,6 +10,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# 生产环境所有服务使用 Asia/Shanghai 时区，CI runner 需保持一致，
+# 避免 datetime.now()/date.today() 在 UTC 下产生与生产不同的结果。
+env:
+  TZ: Asia/Shanghai
+
 jobs:
   architecture-rules:
     name: Architecture Rules
