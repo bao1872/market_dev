@@ -210,10 +210,8 @@ jobs:
           pytest --tb=short -q 2>&1 | tee /tmp/pytest_output.txt
           exit_code=${PIPESTATUS[0]}
           if [ $exit_code -ne 0 ]; then
-            echo "## Pytest Failed (exit $exit_code)" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            tail -80 /tmp/pytest_output.txt >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
+            FAILED_LINES=$(grep -E "^FAILED|^ERROR|Error|assert" /tmp/pytest_output.txt | tail -30)
+            echo "::error::pytest failed (exit $exit_code). First failures: $FAILED_LINES"
             exit 1
           fi
 
