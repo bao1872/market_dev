@@ -12,7 +12,7 @@
 - 禁止各 API 自行拼接 role、subscription、expires_at，统一从 AccessContext 读取
 - admin 不需要 subscription，不受订阅到期和普通额度限制（subscription_active=True 豁免）
 - is_admin 只判断 "admin" 角色，strategy_author 等其他角色不影响身份判定
-- is_member 判断 "user" 角色，与 is_admin 对称（共 11 个字段）
+- is_member 判断 "member" 角色，与 is_admin 对称（共 11 个字段）
 - subscription_active 由实时计算：status='active' AND starts_at<=now AND expires_at>now
 - get_access_context 是只读操作（不写 DB），可在登录路径使用
 - 复用 plan_service.get_plan 与 subscription_service.get_effective_subscription_status，
@@ -60,7 +60,7 @@ class AccessContext(BaseModel):
     - account_status: 用户状态（user.status，active/disabled/pending）
     - roles: 用户角色名列表（从 user._roles 读取）
     - is_admin: 是否为管理员（"admin" in roles）
-    - is_member: 是否为普通会员（"user" in roles，与 is_admin 对称）
+    - is_member: 是否为普通会员（"member" in roles，与 is_admin 对称）
     - subscription_active: 订阅是否有效（admin 豁免=True；member 实时计算）
     - plan_code: 当前套餐代码（admin/无订阅=None；member 从 subscription 读取）
     - plan_display_name: 套餐展示名（从 plans 表读取，过期订阅仍保留）
@@ -112,7 +112,7 @@ async def get_access_context(db: AsyncSession, user: User) -> AccessContext:
     """
     roles = _get_user_roles(user)
     is_admin = "admin" in roles
-    is_member = "user" in roles
+    is_member = "member" in roles
 
     # [AccessControl] - 描述: admin 路径直接豁免订阅检查，不查询 subscription 表
     if is_admin:

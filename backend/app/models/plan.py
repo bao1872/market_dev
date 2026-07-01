@@ -11,7 +11,7 @@
 - plans 表是套餐定义的唯一真源（替代旧 app/constants/plan_contract.py 的 PLAN_CONTRACTS 字典）
 - observe_20: 观察版，monitor_limit=20，6 个 features
 - research_50: 研究版，monitor_limit=50，7 个 features（含 advanced_export）
-- plan_code 字符串常量（DEFAULT_PLAN_CODE/ADMIN_PLAN_CODE）在 app/constants/plan_codes.py 中定义
+- plan_code 字符串常量 DEFAULT_PLAN_CODE 在 app/constants/plan_codes.py 中定义（管理员无套餐）
 - 业务代码通过 app.services.plan_service 查询 plans 表，禁止硬编码套餐字段
 """
 

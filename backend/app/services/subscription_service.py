@@ -5,12 +5,11 @@
 - hash_invite_code: 邀请码哈希（SHA256）
 - register_with_invite_code: 邀请码注册（原子操作，写入套餐快照到 Subscription）
 - renew_with_invite_code: 邀请码续期（更新套餐，按自然月顺延到期日）
-- get_subscription_status: 查询订阅状态
+- get_subscription_status: 查询订阅记录（纯只读，返回 Subscription 对象）
 - get_effective_subscription_status: 只读查询订阅有效状态（active/expired/none）
-- mark_expired_subscription: 标记订阅过期
 - revoke_invite_code: 作废邀请码
 - list_invite_codes: 邀请码列表
-- list_subscribers: 订阅账户列表（JOIN users + subscriptions）
+- list_subscribers: 订阅账户列表（JOIN users + subscriptions，展示用 status 实时计算不写库）
 - get_redemptions_by_user: 用户兑换记录
 
 业务规则（plans 表套餐权限）：
@@ -21,6 +20,13 @@
 - 邀请码为一次性，status: unused → used / revoked
 - 邀请码明文不存储，仅存 SHA256 哈希
 - grant_months 优先用于自然月计算（dateutil.relativedelta），grant_days 保留兼容性
+
+Phase 8 调整：
+- status 不持久化 'expired'：到期由 get_effective_subscription_status 实时计算
+  （DB CheckConstraint 仅允许 active/revoked/cancelled）
+- get_subscription_status 改为纯只读，不再写 status='expired'
+- list_subscribers 用局部变量计算展示用 status（active 且过期 -> 'expired'），不写库
+- 已删除 mark_expired_subscription（不再需要持久化 expired）
 
 Phase 2 Task 2.2：由 membership_service.py 重命名为 subscription_service.py，
 所有 Membership 引用改为 Subscription，函数名按 subscription 重命名。
@@ -260,12 +266,15 @@ async def register_with_invite_code(
     db.add(user)
     await db.flush()  # 获取 user.id
 
-    # 4. 分配 user 角色
-    role_stmt = select(Role).where(Role.name == "user")
+    # 4. 分配 member 角色（不存在则自动创建，保证注册路径自洽）
+    role_stmt = select(Role).where(Role.name == "member")
     role_result = await db.execute(role_stmt)
-    user_role = role_result.scalar_one_or_none()
-    if user_role is not None:
-        db.add(UserRole(user_id=user.id, role_id=user_role.id))
+    member_role = role_result.scalar_one_or_none()
+    if member_role is None:
+        member_role = Role(id=uuid.uuid4(), name="member", description="普通会员")
+        db.add(member_role)
+        await db.flush()
+    db.add(UserRole(user_id=user.id, role_id=member_role.id))
 
     # 5. 创建订阅记录（按 grant_months 自然月计算到期日，写入套餐快照到 entitlement_snapshot）
     expires_at = _compute_expires_at(now, invite)
@@ -439,28 +448,16 @@ async def get_effective_subscription_status(
     return "active", expires_at
 
 
-async def mark_expired_subscription(db: AsyncSession, subscription: Subscription) -> None:
-    """将订阅记录标记为已过期并写回 updated_at。
-
-    Args:
-        db: 异步数据库会话
-        subscription: 需要标记为过期的 Subscription 对象
-    """
-    now = datetime.now(UTC)
-    subscription.status = "expired"
-    subscription.updated_at = now
-    await db.flush()
-
-
 async def get_subscription_status(
     db: AsyncSession,
     user_id: uuid.UUID,
 ) -> Subscription | None:
-    """查询用户订阅状态。
+    """查询用户订阅记录（纯只读，不写 DB）。
 
-    同时检查并更新过期状态（如果 expires_at 已过但 status 仍为 active）。
-    旧调用方行为不变。内部先通过 get_effective_subscription_status 判断，
-    若逻辑已过期但数据库仍为 active，则调用 mark_expired_subscription 更新。
+    返回 Subscription 对象，status 为持久化的生命周期状态
+    （active/revoked/cancelled）。到期判断由调用方通过
+    get_effective_subscription_status 或比较 expires_at 实时计算，
+    本函数不持久化 'expired'。
 
     Args:
         db: 异步数据库会话
@@ -471,16 +468,7 @@ async def get_subscription_status(
     """
     stmt = select(Subscription).where(Subscription.user_id == user_id)
     result = await db.execute(stmt)
-    subscription = result.scalar_one_or_none()
-
-    if subscription is None:
-        return None
-
-    effective_status, _ = await get_effective_subscription_status(db, user_id)
-    if effective_status == "expired" and subscription.status == "active":
-        await mark_expired_subscription(db, subscription)
-
-    return subscription
+    return result.scalar_one_or_none()
 
 
 async def get_renewal_count(
@@ -611,9 +599,11 @@ async def list_subscribers(
         subscription = row[1]
 
         if subscription is not None:
-            # 检查是否需要更新过期状态
+            # 计算展示用 status（不写库）：active 且已过期 -> 'expired'，
+            # 其余沿用持久化状态（active/revoked/cancelled）
+            display_status = subscription.status
             if subscription.status == "active" and _ensure_aware(subscription.expires_at) <= now:
-                subscription.status = "expired"
+                display_status = "expired"
 
             remaining_days = (_ensure_aware(subscription.expires_at) - now).days
             renewal_count = await get_renewal_count(db, user.id)
@@ -621,7 +611,7 @@ async def list_subscribers(
                 "user_id": user.id,
                 "email": user.email,
                 "account_status": user.status,
-                "membership_status": subscription.status,
+                "membership_status": display_status,
                 "started_at": subscription.starts_at,
                 "expires_at": subscription.expires_at,
                 "remaining_days": remaining_days,
@@ -689,7 +679,6 @@ if __name__ == "__main__":
     assert callable(register_with_invite_code)
     assert callable(renew_with_invite_code)
     assert callable(get_effective_subscription_status)
-    assert callable(mark_expired_subscription)
     assert callable(get_subscription_status)
     assert callable(list_subscribers)
     print("OK")

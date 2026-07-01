@@ -49,7 +49,6 @@ dev = [
     "httpx>=0.25.0,<0.26.0",
     "ruff>=0.3",
     "mypy>=1.8",
-    "aiosqlite>=0.20",
 ]
 
 [tool.setuptools.packages.find]

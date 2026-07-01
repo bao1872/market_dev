@@ -4,7 +4,7 @@
     python -m app.scripts.bootstrap_admin --email admin@example.com [--dry-run] [--password PASSWORD]
 
 功能：
-    - 创建 admin 用户（status=active）+ 分配 admin 角色 + 创建 research_50 订阅
+    - 创建 admin 用户（status=active）+ 分配 admin 角色
     - 已有 admin 时拒绝执行（不写库）
     - --dry-run 不写库，仅打印将要执行的操作
     - 密码两次输入（交互式或通过 --password 传入）
@@ -13,9 +13,8 @@
 
 设计说明：
     - admin 角色不存在时自动创建（首位管理员 bootstrap 场景）
-    - research_50 订阅 source='admin_grant'，到期日设为远期（admin 豁免订阅校验，但保留记录）
-    - 复用 subscription_service._build_entitlement_snapshot 构造套餐快照，避免重复逻辑
-    - 复用 plan_service.get_plan 读取 plans 表（套餐定义唯一真源）
+    - [Phase9] admin 不创建 subscription：admin 豁免订阅校验，AccessContext 直接返回 subscription_active=True
+    - admin 不绑定 research_50，不受 monitor_limit 限制（limits={} 表示无限制）
 """
 
 from __future__ import annotations
@@ -27,23 +26,15 @@ import sys
 import uuid
 from datetime import UTC, datetime
 
-from dateutil.relativedelta import relativedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants.plan_codes import ADMIN_PLAN_CODE
 from app.core.security import get_password_hash
 from app.db import AsyncSessionLocal
-from app.models.subscription import Subscription
 from app.models.user import Role, User, UserRole
-from app.services.plan_service import get_plan
-from app.services.subscription_service import _build_entitlement_snapshot
 
 # 密码最小长度
 PASSWORD_MIN_LENGTH = 8
-
-# admin 订阅到期日顺延年数（远期，admin 豁免订阅校验但记录需保留）
-_ADMIN_SUBSCRIPTION_YEARS = 100
 
 
 def validate_password(password: str) -> None:
@@ -130,8 +121,10 @@ async def bootstrap_admin(
     4. dry_run 时返回 None（不写库）
     5. 创建用户（status=active）
     6. 分配 admin 角色
-    7. 创建 research_50 订阅（source=admin_grant，远期到期）
-    8. flush（由调用方决定 commit 或 rollback）
+    7. flush（由调用方决定 commit 或 rollback）
+
+    [Phase9] admin 不创建 subscription：admin 豁免订阅校验，
+    AccessContext 直接返回 subscription_active=True, plan_code=None, limits={}。
 
     Args:
         db: 异步数据库会话
@@ -176,24 +169,7 @@ async def bootstrap_admin(
     # 6. 分配 admin 角色
     db.add(UserRole(user_id=user.id, role_id=admin_role.id))
 
-    # 7. 创建 research_50 订阅（admin 豁免订阅校验，但保留记录）
-    # [PlanService] - 描述: 复用 plan_service.get_plan 读取套餐定义（唯一真源）
-    plan = await get_plan(db, ADMIN_PLAN_CODE)
-    entitlement_snapshot = _build_entitlement_snapshot(plan)
-    subscription = Subscription(
-        id=uuid.uuid4(),
-        user_id=user.id,
-        plan_code=ADMIN_PLAN_CODE,
-        status="active",
-        starts_at=now,
-        expires_at=now + relativedelta(years=_ADMIN_SUBSCRIPTION_YEARS),
-        entitlement_snapshot=entitlement_snapshot,
-        source="admin_grant",
-        created_by=user.id,
-        created_at=now,
-        updated_at=now,
-    )
-    db.add(subscription)
+    # [Phase9] - 描述: admin 不创建 subscription（admin 豁免订阅校验，AccessContext 直接返回 subscription_active=True）
     await db.flush()
 
     return user
@@ -220,6 +196,7 @@ async def _run(email: str, password: str, dry_run: bool) -> int:
                 await db.rollback()
                 return 0
             await db.commit()
+            assert user is not None
             print(f"管理员创建成功: {email} (id={user.id})")
             return 0
         except Exception as e:

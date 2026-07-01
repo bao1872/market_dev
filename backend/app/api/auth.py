@@ -12,7 +12,7 @@
 设计说明：
 - 登录使用 email + password，验证 bcrypt 哈希
 - 仅 active 状态用户可登录（disabled/pending 拒绝）
-- 登录路径只读：不写 DB，不调用 mark_expired_subscription；权限上下文由
+- 登录路径只读：不写 DB，不修改 subscription.status；权限上下文由
   get_access_context 统一计算（复用 AccessContext，避免逻辑重复）
 - 会员到期后允许登录，返回 subscription_active=false + next_route='/membership-expired'，
   前端跳转续期页；admin 自动豁免（subscription_active=true）
@@ -113,7 +113,7 @@ async def login(
     7. 生成 access + refresh token
 
     登录路径只读约束：
-    - 不调用 mark_expired_subscription、不修改 subscription.status
+    - 不修改 subscription.status（status 不持久化 expired，到期由 get_access_context 实时计算）
     - get_access_context 内部仅 select 查询，无 db.commit/flush/状态修改
     - 会员到期后允许登录，返回 subscription_active=false + next_route='/membership-expired'
     - admin 自动豁免（subscription_active=true，subscription_required=false）
@@ -637,7 +637,8 @@ async def get_my_events_summary(
 
 if __name__ == "__main__":
     # 自测入口：验证路由注册
-    paths = [r.path for r in router.routes]
+    paths = [getattr(r, "path", None) for r in router.routes]
+    paths = [p for p in paths if p is not None]
     print(f"router.routes={paths}")
     assert "/auth/login" in paths
     assert "/auth/register" in paths

@@ -4,10 +4,11 @@
 - GET /me/entitlements: 返回当前用户套餐、监控上限、已使用、剩余名额、到期日
 
 套餐权限规则（plans 表）：
-- 管理员：返回 ADMIN_PLAN_CODE (research_50)，monitor_limit=50，绕过会员到期限制
-- 普通用户：从 membership 读取 plan_code/monitor_limit，无会员记录返回 404
+- 管理员：plan_code=None，monitor_limit=None（无限制），绕过会员到期限制
+- 普通用户：从 subscription 读取 plan_code/monitor_limit，无会员记录返回 404
 - used = 用户 active 自选股数量
 - remaining = monitor_limit - used（不足时为 0，不返回负数）
+- 无 monitor_limit 时 remaining=None（管理员无限制场景）
 
 设计说明：
 - /me/entitlements 与 /me、/me/membership、/me/events/summary 并存（auth.py 中）
@@ -23,7 +24,6 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants.plan_codes import ADMIN_PLAN_CODE
 from app.core.deps import _get_user_roles, get_current_active_user
 from app.db import get_db
 from app.models.subscription import Subscription
@@ -42,7 +42,7 @@ async def get_my_entitlements(
 ) -> dict:
     """获取当前用户套餐权益 - 套餐、监控上限、已使用、剩余名额、到期日。
 
-    管理员：返回 ADMIN_PLAN_CODE (research_50)，绕过会员到期限制。
+    管理员：plan_code=None，monitor_limit=None（无限制），绕过会员到期限制。
     普通用户：从 membership 读取套餐快照，无会员记录返回 404。
 
     Args:
@@ -66,20 +66,15 @@ async def get_my_entitlements(
     used_result = await db.execute(used_stmt)
     used = used_result.scalar_one()
 
-    # 管理员：返回 ADMIN_PLAN_CODE，绕过会员到期限制
+    # 管理员：无套餐、无限制，绕过会员到期限制（AGENTS.md 规则 8）
     user_roles = _get_user_roles(current_user)
     if "admin" in user_roles:
-        plan_code = ADMIN_PLAN_CODE
-        # [PlanService] - 描述: 从 plans 表查询管理员套餐（research_50）
-        admin_plan = await get_plan(db, plan_code)
-        monitor_limit = admin_plan.monitor_limit
-        remaining = max(0, monitor_limit - used)
         return {
-            "plan_code": plan_code,
-            "plan_name": admin_plan.display_name,
-            "monitor_limit": monitor_limit,
+            "plan_code": None,
+            "plan_name": None,
+            "monitor_limit": None,
             "used": used,
-            "remaining": remaining,
+            "remaining": None,
             "expires_at": None,
         }
 
@@ -119,7 +114,8 @@ async def get_my_entitlements(
 
 if __name__ == "__main__":
     # 自测入口：验证路由注册
-    paths = [r.path for r in router.routes]
+    paths = [getattr(r, "path", None) for r in router.routes]
+    paths = [p for p in paths if p is not None]
     print(f"router.routes={paths}")
     assert "/me/entitlements" in paths
     print("OK")

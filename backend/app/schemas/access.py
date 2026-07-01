@@ -26,7 +26,7 @@ class AccessProfileResponse(BaseModel):
     - account_status: 用户状态（active/disabled/pending）
     - roles: 角色名列表
     - is_admin: 是否为管理员（"admin" in roles）
-    - is_member: 是否为普通会员（"user" in roles）
+    - is_member: 是否为普通会员（"member" in roles）
     - subscription_active: 订阅是否有效（admin 豁免=True；member 实时计算）
     - plan_code: 套餐代码（admin/无订阅=None；过期订阅仍保留）
     - plan_display_name: 套餐展示名（admin/无订阅=None；过期订阅仍保留）

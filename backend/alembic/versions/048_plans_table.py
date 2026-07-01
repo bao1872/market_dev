@@ -18,7 +18,7 @@ Create Date: 2026-06-30
 - 旧 plan_contract.py 的 PLAN_CONTRACTS 字典仅含 monitor_limit/name，字段不全
 - plans 表补齐 notification_channel_limit/message_retention_days/features 字段
 - 套餐定义集中到 DB 后，可通过迁移管理套餐变更，避免代码部署
-- plan_code 字符串常量（DEFAULT_PLAN_CODE/ADMIN_PLAN_CODE）保留在 app/constants/plan_codes.py
+- plan_code 字符串常量 DEFAULT_PLAN_CODE 保留在 app/constants/plan_codes.py（管理员无套餐）
 """
 
 from __future__ import annotations
