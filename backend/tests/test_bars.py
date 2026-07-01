@@ -14,7 +14,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pandas as pd
 import pytest
-
 from app.repositories.bar_repository import apply_adj_factor_to_bars
 from app.services.adj_factor import apply_adj_factor, apply_adj_factor_intraday
 from app.services.freshness_sla import (

@@ -39,6 +39,7 @@ from app.models.notification import (
 from app.models.outbox import Outbox
 from app.models.plan import Plan
 from app.models.scheduler_job_run import SchedulerJobRun
+from app.models.subscription import Subscription
 from app.models.stock_memo import StockMemo
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.strategy_event import StrategyEvent
@@ -48,7 +49,6 @@ from app.models.strategy_run import (
     StrategyRun,
     StrategyRunItem,
 )
-from app.models.subscription import Subscription
 from app.models.user import Role, User, UserRole
 from app.models.watchlist import UserWatchlistItem
 from app.models.worker_heartbeat import WorkerHeartbeat

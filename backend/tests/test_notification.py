@@ -11,48 +11,53 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
+import base64
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.notification import (
-    DeliveryResult,
     NotificationMessageDTO,
     NotificationMessageResponse,
+    DeliveryResult,
+    NotificationPreviewRequest,
+    NotificationPreviewResponse,
+    NotificationChannelResponse,
+    ChannelTestResponse,
 )
-from app.services.channel_adapter import (
-    MockChannelAdapter,
-    get_adapter,
-    list_supported_adapters,
-)
-from app.services.delivery_worker import (
-    _is_quiet_hours,
-    get_pending_delivery_count,
-    process_pending_deliveries,
+from app.services.message_builder import (
+    build_message,
+    build_monitor_event,
+    build_system_alert,
+    build_channel_alert,
+    MessageBuilderError,
 )
 from app.services.feishu_card_builder import (
     dto_to_feishu_card,
     mask_webhook_url,
 )
 from app.services.feishu_webhook_adapter import (
-    FeishuWebhookAdapter,
-    _build_webhook_payload,
     _sign,
+    _build_webhook_payload,
+    FeishuWebhookAdapter,
 )
-from app.services.message_builder import (
-    MessageBuilderError,
-    build_channel_alert,
-    build_message,
-    build_monitor_event,
-    build_system_alert,
+from app.services.channel_adapter import (
+    get_adapter,
+    list_supported_adapters,
+    MockChannelAdapter,
 )
+from app.services.delivery_worker import (
+    _is_quiet_hours,
+    process_pending_deliveries,
+    get_pending_delivery_count,
+)
+
 
 # ==================== 消息构建器测试 ====================
 
@@ -246,7 +251,7 @@ class TestFeishuWebhookAdapter:
 
         # 验证签名内容
         expected = hmac.new(
-            f"{timestamp}\n{secret}".encode(),
+            f"{timestamp}\n{secret}".encode("utf-8"),
             digestmod=hashlib.sha256,
         ).digest()
         assert sign == base64.b64encode(expected).decode("utf-8")
@@ -419,7 +424,6 @@ class TestNotificationAPI:
     def test_preview_endpoint(self) -> None:
         """测试消息预览端点。"""
         from fastapi.testclient import TestClient
-
         from app.main import app
 
         client = TestClient(app)
@@ -446,7 +450,6 @@ class TestNotificationAPI:
     def test_preview_invalid_message_type(self) -> None:
         """测试预览端点无效消息类型。"""
         from fastapi.testclient import TestClient
-
         from app.main import app
 
         client = TestClient(app)
@@ -462,7 +465,6 @@ class TestNotificationAPI:
     def test_preview_missing_required(self) -> None:
         """测试预览端点缺少必填字段。"""
         from fastapi.testclient import TestClient
-
         from app.main import app
 
         client = TestClient(app)
@@ -478,7 +480,6 @@ class TestNotificationAPI:
         无 Authorization header 时，HTTPBearer(auto_error=True) 返回 401。
         """
         from fastapi.testclient import TestClient
-
         from app.main import app
 
         client = TestClient(app)
@@ -491,7 +492,6 @@ class TestNotificationAPI:
         无 Authorization header 时，HTTPBearer(auto_error=True) 返回 401。
         """
         from fastapi.testclient import TestClient
-
         from app.main import app
 
         client = TestClient(app)
@@ -504,9 +504,8 @@ class TestNotificationAPI:
         发送 X-User-Id 但无 Authorization header，应返回 401（HTTPBearer 拒绝），
         而非 200（旧 _get_user_id 会接受 X-User-Id 并继续查询）。
         """
-        from uuid import uuid4
-
         from fastapi.testclient import TestClient
+        from uuid import uuid4
 
         from app.main import app
 
@@ -523,7 +522,6 @@ class TestNotificationAPI:
         HTTPBearer(auto_error=True) 缺失 Authorization header 返回 401 Unauthorized。
         """
         from fastapi.testclient import TestClient
-
         from app.main import app
 
         client = TestClient(app)
@@ -545,7 +543,6 @@ async def test_valid_jwt_returns_user_channels(
     from collections.abc import AsyncGenerator
 
     from httpx import ASGITransport, AsyncClient
-
     from app.core.deps import get_db as deps_get_db
     from app.core.security import create_access_token
     from app.db import get_db as db_get_db
@@ -595,7 +592,6 @@ class TestOutboxDeliveryPipeline:
     def test_is_quiet_hours_shanghai_trading_time(self) -> None:
         """北京时间 14:49 不在默认静默时段内。"""
         from zoneinfo import ZoneInfo
-
         from app.services.delivery_worker import _is_quiet_hours
 
         # 14:49 CST 是盘中交易时间，不应静默
@@ -610,7 +606,6 @@ class TestOutboxDeliveryPipeline:
     def test_next_attempt_at_computed_from_shanghai_quiet_end(self) -> None:
         """22:30 CST 触发时，next_attempt_at 应为次日 08:00 CST。"""
         from zoneinfo import ZoneInfo
-
         from app.services.delivery_worker import _compute_next_attempt_at
 
         cst = ZoneInfo("Asia/Shanghai")
@@ -628,7 +623,6 @@ class TestOutboxDeliveryPipeline:
     async def test_process_pending_deliveries_deferred_in_quiet_hours(self) -> None:
         """静默时段处理 pending MessageDelivery 应标记为 retrying 并设置 next_attempt_at。"""
         from zoneinfo import ZoneInfo
-
         from app.models.notification import MessageDelivery
 
         cst = ZoneInfo("Asia/Shanghai")
@@ -663,7 +657,6 @@ class TestOutboxDeliveryPipeline:
     async def test_process_pending_deliveries_respects_next_attempt_at(self) -> None:
         """retrying 记录未到 next_attempt_at 时不应被处理。"""
         from zoneinfo import ZoneInfo
-
         from app.models.notification import MessageDelivery
 
         cst = ZoneInfo("Asia/Shanghai")
@@ -736,11 +729,7 @@ class TestOutboxDeliveryPipeline:
         self, db_session, test_user, test_instrument,
     ) -> None:
         """GET /messages 应返回关联的 deliveries 数组。"""
-        from app.models.notification import (
-            MessageDelivery,
-            NotificationChannel,
-            NotificationMessage,
-        )
+        from app.models.notification import NotificationChannel, NotificationMessage, MessageDelivery
         from app.schemas.notification import NotificationMessageDTO
         from app.services.notification_service import list_user_messages
 
@@ -860,7 +849,6 @@ class TestOutboxDeliveryPipeline:
         应立即调用 _execute_delivery 投递，而不是被静默期延迟到次日 08:00。
         """
         from zoneinfo import ZoneInfo
-
         from app.models.notification import (
             MessageDelivery,
             NotificationChannel,
@@ -924,7 +912,6 @@ class TestOutboxDeliveryPipeline:
     async def test_monitor_delivery_still_deferred_in_quiet_hours(self) -> None:
         """监控自动触发的投递（source_type=monitor_event）在静默时段仍应延迟到次日 08:00。"""
         from zoneinfo import ZoneInfo
-
         from app.models.notification import (
             MessageDelivery,
             NotificationChannel,
@@ -1139,13 +1126,12 @@ class TestMessageStructuredFields:
         from collections.abc import AsyncGenerator
 
         from httpx import ASGITransport, AsyncClient
-
-        from app.core.deps import get_db as deps_get_db
-        from app.core.security import create_access_token
-        from app.db import get_db as db_get_db
         from app.main import app
         from app.models.notification import NotificationMessage
         from app.schemas.notification import NotificationMessageDTO
+        from app.core.deps import get_db as deps_get_db
+        from app.core.security import create_access_token
+        from app.db import get_db as db_get_db
 
         dto = NotificationMessageDTO(
             message_type="MONITOR_EVENT",
@@ -1211,11 +1197,7 @@ class TestMessageDeliveryAdminService:
         self, db_session, test_user, test_instrument,
     ) -> None:
         """list_message_deliveries 应返回 message_deliveries 记录。"""
-        from app.models.notification import (
-            MessageDelivery,
-            NotificationChannel,
-            NotificationMessage,
-        )
+        from app.models.notification import NotificationChannel, NotificationMessage, MessageDelivery
         from app.schemas.notification import NotificationMessageDTO
         from app.services.notification_service import list_message_deliveries
 
@@ -1271,14 +1253,10 @@ class TestMessageDeliveryAdminService:
         self, db_session, test_user, test_instrument,
     ) -> None:
         """retry_delivery 应复用现有记录并重新调用 adapter。"""
-        from app.models.notification import (
-            MessageDelivery,
-            NotificationChannel,
-            NotificationMessage,
-        )
+        from app.models.notification import NotificationChannel, NotificationMessage, MessageDelivery
         from app.schemas.notification import NotificationMessageDTO
-        from app.services.channel_adapter import ChannelAdapter
         from app.services.notification_service import retry_delivery
+        from app.services.channel_adapter import ChannelAdapter
 
         dto = NotificationMessageDTO(
             message_type="MONITOR_EVENT",
@@ -1325,6 +1303,7 @@ class TestMessageDeliveryAdminService:
             adapter_type = "mock"
 
             async def send(self, message_dto, target_config):
+                from app.schemas.notification import DeliveryResult
                 return DeliveryResult(success=True, provider_response={"retried": True})
 
             async def verify(self, target_config):
@@ -1351,10 +1330,7 @@ class TestImageDeliveryPipeline:
         self, db_session, test_user, test_instrument,
     ) -> None:
         """deliver_image_message 应创建 delivery_type=image 的投递记录。"""
-        from app.models.notification import (
-            NotificationChannel,
-            NotificationMessage,
-        )
+        from app.models.notification import NotificationChannel, NotificationMessage, MessageDelivery
         from app.schemas.notification import NotificationMessageDTO
         from app.services.notification_service import deliver_image_message
 
@@ -1402,11 +1378,7 @@ class TestImageDeliveryPipeline:
         self, db_session, test_user, test_instrument,
     ) -> None:
         """Outbox Relay 对 image 通知事件应扩张为 delivery_type=image 的 MessageDelivery。"""
-        from app.models.notification import (
-            MessageDelivery,
-            NotificationChannel,
-            NotificationMessage,
-        )
+        from app.models.notification import NotificationChannel, NotificationMessage, MessageDelivery
         from app.models.outbox import Outbox
         from app.schemas.notification import NotificationMessageDTO
         from app.services.outbox_relay import relay_outbox
@@ -1489,11 +1461,7 @@ class TestDeliveryStateMachine:
         self, db_session, test_user, test_instrument,
     ) -> None:
         """_execute_delivery 首次成功，再次调用幂等返回。"""
-        from app.models.notification import (
-            MessageDelivery,
-            NotificationChannel,
-            NotificationMessage,
-        )
+        from app.models.notification import NotificationChannel, NotificationMessage, MessageDelivery
         from app.schemas.notification import NotificationMessageDTO
         from app.services.notification_service import _execute_delivery
 
@@ -1551,12 +1519,8 @@ class TestDeliveryStateMachine:
         self, db_session, test_user, test_instrument,
     ) -> None:
         """适配器返回 CHANNEL_INVALID 时，渠道 invalid，投递 dead。"""
-        from app.models.notification import (
-            MessageDelivery,
-            NotificationChannel,
-            NotificationMessage,
-        )
-        from app.schemas.notification import NotificationMessageDTO
+        from app.models.notification import NotificationChannel, NotificationMessage, MessageDelivery
+        from app.schemas.notification import DeliveryResult, NotificationMessageDTO
         from app.services.channel_adapter import ChannelAdapter
         from app.services.notification_service import _execute_delivery
 
@@ -1626,12 +1590,8 @@ class TestDeliveryStateMachine:
         self, db_session, test_user, test_instrument,
     ) -> None:
         """适配器返回失败后，status=failed 且 attempt_count 增加。"""
-        from app.models.notification import (
-            MessageDelivery,
-            NotificationChannel,
-            NotificationMessage,
-        )
-        from app.schemas.notification import NotificationMessageDTO
+        from app.models.notification import NotificationChannel, NotificationMessage, MessageDelivery
+        from app.schemas.notification import DeliveryResult, NotificationMessageDTO
         from app.services.channel_adapter import ChannelAdapter
         from app.services.notification_service import _execute_delivery
 
@@ -1702,11 +1662,7 @@ class TestDeliveryStateMachine:
         self, db_session, test_user, test_instrument,
     ) -> None:
         """_expand_notification_message_created 为每个 active 渠道创建 pending 投递。"""
-        from app.models.notification import (
-            MessageDelivery,
-            NotificationChannel,
-            NotificationMessage,
-        )
+        from app.models.notification import NotificationChannel, NotificationMessage, MessageDelivery
         from app.models.outbox import Outbox
         from app.schemas.notification import NotificationMessageDTO
         from app.services.outbox_relay import _expand_notification_message_created
@@ -2185,8 +2141,8 @@ class TestCaptureToken:
 
         from fastapi import HTTPException
 
-        from app.core.deps import get_current_user
         from app.core.security import create_capture_token
+        from app.core.deps import get_current_user
 
         # capture token 应在类型校验阶段被拒绝，不应到达 DB 查询
         fake_user_id = uuid4()
@@ -2220,11 +2176,9 @@ class TestLatestEventEndpoint:
 
     def test_test_latest_event_requires_admin(self) -> None:
         """test-latest-event 端点需要 admin 角色。"""
-        from uuid import uuid4
-
         from httpx import ASGITransport, AsyncClient
-
         from app.main import app
+        from uuid import uuid4
 
         async def _call():
             transport = ASGITransport(app=app)
@@ -2439,8 +2393,8 @@ class TestFetchImageBytes:
         """httpx.HTTPError 时返回 None 并记录 IMAGE_FETCH_FAILED 错误码。"""
         import httpx
 
-        from app.services import notification_service as ns_mod
         from app.services.notification_service import _fetch_image_bytes
+        from app.services import notification_service as ns_mod
 
         mock_client = AsyncMock()
         mock_client.get = AsyncMock(side_effect=httpx.HTTPError("connection refused"))

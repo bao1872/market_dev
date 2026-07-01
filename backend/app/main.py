@@ -48,8 +48,8 @@ from app.api.monitor_states import router as monitor_states_router
 from app.api.notifications import router as notifications_router
 from app.api.plans import router as plans_router
 from app.api.public_beta import router as public_beta_router
-from app.api.stock_detail_feishu import router as stock_detail_feishu_router
 from app.api.stock_memos import router as stock_memos_router
+from app.api.stock_detail_feishu import router as stock_detail_feishu_router
 from app.api.strategies import router as strategies_router
 from app.api.strategy_events import router as strategy_events_router
 from app.api.strategy_runs import router as strategy_runs_router
