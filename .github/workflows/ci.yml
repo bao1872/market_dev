@@ -204,16 +204,7 @@ jobs:
             sleep 1
           done
       - name: Run pytest
-        run: |
-          date
-          python -c "import datetime, time; print('Python tz:', time.tzname, 'now:', datetime.datetime.now())"
-          pytest --tb=short -q 2>&1 | tee /tmp/pytest_output.txt
-          exit_code=${PIPESTATUS[0]}
-          if [ $exit_code -ne 0 ]; then
-            FAILED_LINES=$(grep -E "^FAILED|^ERROR|Error|assert" /tmp/pytest_output.txt | tail -30)
-            echo "::error::pytest failed (exit $exit_code). First failures: $FAILED_LINES"
-            exit 1
-          fi
+        run: pytest --tb=short -q
 
   frontend-tsc:
     name: Frontend Type Check
