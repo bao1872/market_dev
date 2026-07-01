@@ -1,4 +1,4 @@
-> 最后验证 Commit: 待填写
+> Last verified code baseline: 0cbfc84b993fd5fb4d767008c7896c8b8e1911be
 > 负责人: 开发团队
 > 事实来源: 代码库 + 配置文件
 > 维护方式: 人工维护
