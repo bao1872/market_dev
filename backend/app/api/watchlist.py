@@ -14,7 +14,7 @@
 - 重新加入已软删除的记录：恢复 active=true 并清空 removed_at
 - monitor-status 端点 JOIN Instrument + MonitorState(最新 released watchlist_monitor 版本) + MonitorEvaluation(最新评估记录)
 
-套餐权限（plan_contract）：
+套餐权限（plans 表）：
 - POST /watchlist 及恢复软删除前事务内校验 active count < monitor_limit
 - 超限返回 409 {"detail": "监控数量已达上限 N"}
 - 管理员角色绕过监控数量限制
@@ -38,7 +38,7 @@ from app.db import get_db
 from app.services.calendar_service import is_trading_day_async
 from app.services.market_status_service import TRADING_SESSIONS, compute_market_session
 from app.models.instrument import Instrument
-from app.models.membership import Membership
+from app.models.subscription import Subscription
 from app.models.monitor_evaluation import MonitorEvaluation
 from app.models.monitor_state import MonitorState
 from app.models.strategy import StrategyDefinition, StrategyVersion
@@ -77,18 +77,20 @@ async def _check_watchlist_limit(db: AsyncSession, user: User) -> None:
     if "admin" in user_roles:
         return  # 管理员绕过
 
-    # 查询会员记录
-    membership_stmt = select(Membership).where(Membership.user_id == user.id)
-    membership_result = await db.execute(membership_stmt)
-    membership = membership_result.scalar_one_or_none()
+    # 查询订阅记录
+    subscription_stmt = select(Subscription).where(Subscription.user_id == user.id)
+    subscription_result = await db.execute(subscription_stmt)
+    subscription = subscription_result.scalar_one_or_none()
 
-    if membership is None:
+    if subscription is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="无会员记录，无监控权限",
         )
 
-    monitor_limit = membership.monitor_limit or 0
+    # monitor_limit 从 entitlement_snapshot 读取（迁移后旧数据 snapshot 为 NULL，回退到 plans 表）
+    snapshot = subscription.entitlement_snapshot or {}
+    monitor_limit = int(snapshot.get("monitor_limit") or 0)
 
     # 查询当前 active 自选股数量
     count_stmt = (

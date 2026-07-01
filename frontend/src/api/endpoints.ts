@@ -32,13 +32,43 @@ function getUserIdHeader(): Record<string, string> {
 // Auth 领域类型
 // ============================================================
 
-/** 登录响应（含 token + 会员到期标记） */
+// [Auth] - 描述: AccessProfile 当前用户完整权限上下文（11 字段，对齐后端 AccessProfileResponse）
+// 与 backend/app/schemas/access.py AccessProfileResponse 字段语义完全一致
+// 唯一真源为 backend/app/services/access_control_service.get_access_context
+export interface AccessProfile {
+  user_id: string
+  account_status: string
+  roles: string[]
+  is_admin: boolean
+  is_member: boolean
+  subscription_active: boolean
+  plan_code: string | null
+  plan_display_name: string | null
+  expires_at: string | null
+  features: string[]
+  limits: Record<string, number>
+}
+
+// [Auth] - 描述: 登录响应 - 含 4 个 token 字段 + 10 个 AccessProfile 字段（对齐后端 LoginResponse）
+// 替代旧字段 membership_expired（语义等价：subscription_active = not membership_expired）
+// next_route 由后端权威计算：admin→/admin/overview；member active→/overview；member expired→/membership-expired
 export interface LoginResponse {
+  // token 字段（4 个）
   access_token: string
   refresh_token: string
   token_type: string
   expires_in: number
-  membership_expired: boolean
+  // AccessProfile 字段（10 个）
+  is_admin: boolean
+  roles: string[]
+  subscription_required: boolean
+  subscription_active: boolean
+  plan_code: string | null
+  plan_display_name: string | null
+  expires_at: string | null
+  features: string[]
+  limits: Record<string, number>
+  next_route: string
 }
 
 /** Token 刷新响应 */
@@ -783,7 +813,8 @@ export interface PaginationParams {
 // ===== Auth 端点 =====
 // ============================================================
 
-/** 用户登录 - 返回 access + refresh token + 会员到期标记（公开接口） */
+// [Auth] - 描述: 用户登录 - 返回 token + AccessProfile 权限上下文 + next_route（公开接口）
+// 前端不再判断 membership_expired，直接使用 next_route 跳转
 export async function login(email: string, password: string): Promise<LoginResponse> {
   const { data } = await publicApiClient.post<LoginResponse>('/auth/login', { email, password })
   return data
@@ -814,6 +845,13 @@ export async function refreshToken(refreshToken: string): Promise<TokenResponse>
 /** 获取当前用户信息（含角色列表） */
 export async function getMe(): Promise<UserResponse> {
   const { data } = await apiClient.get<UserResponse>('/me')
+  return data
+}
+
+// [Auth] - 描述: 获取当前用户完整权限上下文 AccessProfile（11 字段，对齐后端 AccessProfileResponse）
+// 续期成功后调用此接口刷新前端 accessProfile，避免重新登录
+export async function getMyAccess(): Promise<AccessProfile> {
+  const { data } = await apiClient.get<AccessProfile>('/me/access')
   return data
 }
 

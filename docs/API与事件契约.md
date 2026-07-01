@@ -26,11 +26,12 @@
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/auth/login` | 登录（email + password）→ access + refresh token + membership_expired |
+| POST | `/auth/login` | 登录（email + password）→ access + refresh token + AccessProfile 权限上下文（见 9.1） |
 | POST | `/auth/register` | 邀请码注册 → 创建账户 + 30 天会员 + token |
 | POST | `/auth/renew` | 邀请码续期（需登录态） |
 | POST | `/auth/refresh` | refresh token 刷新 |
 | GET | `/me` | 当前用户信息（含角色列表） |
+| GET | `/me/access` | 当前用户完整权限上下文（AccessProfileResponse，见 9.2） |
 | GET | `/me/membership` | 当前用户会员状态 |
 | GET | `/me/events/summary?date=YYYY-MM-DD` | 当前用户指定日期事件汇总 |
 
@@ -96,7 +97,9 @@
 | POST | `/notification-channels/{id}/test` | 是 | 测试渠道投递 |
 | POST | `/notification-previews` | 是 | 消息预览（站内 + 飞书 card JSON） |
 
-### 1.8 管理员（需 admin 角色）
+> **认证变更（Phase 3）**：所有 notifications 端点改用 JWT Bearer token 认证（`Authorization: Bearer <token>`，由 `get_current_active_user` 注入用户身份），不再接受 `X-User-Id` 请求头。`verify_channel` 与 `test_channel` 新增渠道所有权校验：`channel.user_id` 必须等于当前登录用户，不匹配返回 403（`ChannelOwnershipError`）。详见 `docs/安全规范.md` 第 11.1 / 11.2 节。
+
+## 1.8 管理员（需 admin 角色）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -122,7 +125,7 @@
 Authorization: Bearer <jwt_access_token>
 ```
 
-- **token 类型**：`access`（API 认证）/ `refresh`（刷新）/ `capture`（截图短期令牌）
+- **token 类型**：`access`（API 认证）/ `refresh`（刷新）/ `capture`（截图短期令牌，仅通过 URL query parameter 用于截图端点，不可作为 Authorization Bearer 调用 API — 见 `docs/安全规范.md` 第 11.3 节）
 - **算法**：HS256
 - **access TTL**：3600 秒（1 小时）
 - **refresh TTL**：604800 秒（7 天）
@@ -286,3 +289,48 @@ idempotency_key = SHA256(message_id + channel_id + delivery_type + image_url)
   "offset": 0
 }
 ```
+
+## 9. 认证响应契约（Phase 2）
+
+本节定义登录响应与权限上下文响应的字段契约。事实源：`backend/app/schemas/membership.py` + `backend/app/schemas/access.py`。权限上下文由 `app.services.access_control_service.get_access_context` 统一计算（唯一真源），登录与 `/me/access` 均只读不写 DB。
+
+### 9.1 LoginResponse（破坏性变更）
+
+`POST /auth/login` 响应。Phase 2 破坏性变更：移除旧字段 `membership_expired`（语义等价迁移至 `subscription_active = not membership_expired`），新增 10 个 AccessProfile 字段供前端路由分发与 UI 降级。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `access_token` | str | Access token |
+| `refresh_token` | str | Refresh token |
+| `token_type` | str | 固定 `bearer` |
+| `expires_in` | int | Access token 有效期（秒，默认 3600） |
+| `is_admin` | bool | 是否为管理员（`"admin" in roles`） |
+| `roles` | list[str] | 角色名列表 |
+| `subscription_required` | bool | 是否需要订阅（admin=false，member=true） |
+| `subscription_active` | bool | 订阅是否有效（admin 豁免=true；member 实时计算） |
+| `plan_code` | str \| null | 套餐代码（admin/无订阅=null） |
+| `plan_display_name` | str \| null | 套餐展示名（过期订阅仍保留，便于前端降级提示） |
+| `expires_at` | datetime \| null | 订阅过期时间（admin/无订阅=null） |
+| `features` | list[str] | 功能特性列表 |
+| `limits` | dict | 额度限制（monitor_limit / notification_channel_limit / message_retention_days） |
+| `next_route` | str | 前端登录后跳转路由（admin→`/admin/overview`；active→`/overview`；expired→`/membership-expired`） |
+
+### 9.2 AccessProfileResponse
+
+`GET /me/access` 响应（认证：JWT Bearer token）。返回当前用户完整权限上下文，11 个字段与 `AccessContext` 完全对齐（仅作为 API 响应模型，解耦内部模型与外部契约）。供前端在 token 刷新后或路由守卫中按需拉取，避免依赖登录响应的快照。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `user_id` | str | 用户 ID（字符串化 UUID，与 JWT sub 声明一致） |
+| `account_status` | str | 用户状态 active/disabled/pending |
+| `roles` | list[str] | 角色名列表 |
+| `is_admin` | bool | 是否为管理员 |
+| `is_member` | bool | 是否为普通会员（`"user" in roles`，与 is_admin 对称） |
+| `subscription_active` | bool | 订阅是否有效（admin 豁免=true；member 实时计算） |
+| `plan_code` | str \| null | 套餐代码（admin/无订阅=null；过期订阅仍保留） |
+| `plan_display_name` | str \| null | 套餐展示名（admin/无订阅=null；过期订阅仍保留） |
+| `expires_at` | datetime \| null | 订阅过期时间（admin/无订阅=null） |
+| `features` | list[str] | 功能特性列表（admin/无订阅=[]） |
+| `limits` | dict | 额度限制 dict |
+
+> **与 LoginResponse 的关系**：LoginResponse 的 10 个 AccessProfile 字段是 `AccessContext` 的子集（不含 `user_id` / `account_status` / `is_member`），并额外含 `next_route` / `subscription_required`；`AccessProfileResponse` 则完整暴露 `AccessContext` 的 11 个字段，不含 token 与 `next_route`。

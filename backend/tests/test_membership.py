@@ -1,17 +1,17 @@
-"""V1.6 会员与邀请码系统测试。
+"""V1.6 订阅与邀请码系统测试。
 
 测试内容：
 1. 邀请码注册（成功/邀请码无效/已使用/已作废/邮箱已注册）
 2. 邀请码续期（未到期顺延/已到期从当天计算）
-3. 会员状态查询（active/expired/无记录）
-4. 登录会员到期拦截（到期返回 membership_expired=true）
+3. 订阅状态查询（active/expired/无记录）
+4. 登录订阅到期拦截（到期返回 subscription_active=false，Phase 2 Task 2.4）
 5. 管理员邀请码管理（生成/作废/列表）
-6. 管理员会员列表（含会员状态/到期时间/续期次数）
+6. 管理员订阅列表（含订阅状态/到期时间/续期次数）
 7. RBAC 越权访问（普通用户不能访问 admin 端点）
 
 测试策略：
 - 使用 sqlite 内存数据库 + 异步 SQLAlchemy
-- 创建 users/roles/user_roles/memberships/invite_codes/invite_redemptions 表
+- 创建 users/roles/user_roles/subscriptions/invite_codes/invite_redemptions/plans 表
 - 通过 dependency_overrides 注入测试会话
 - 覆盖主逻辑 + 边界条件
 """
@@ -26,16 +26,25 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.compiler import compiles
 
 from app.core.security import create_access_token, get_password_hash
 from app.main import app
-from app.models.membership import InviteCode, InviteRedemption, Membership
+from app.models.subscription import Subscription
 from app.models.user import Role, User, UserRole
-from app.services.membership_service import (
+from app.services.subscription_service import (
     generate_invite_codes,
     hash_invite_code,
 )
+
+
+# 注册 JSONB 在 SQLite 上的编译回退（测试环境兼容）
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_sqlite(element: JSONB, compiler: object, **kw: object) -> str:  # noqa: ARG001
+    """JSONB 在 SQLite 上回退为 TEXT 类型。"""
+    return "TEXT"
 
 
 # SQLite 兼容的建表 DDL
@@ -70,16 +79,20 @@ CREATE TABLE IF NOT EXISTS user_roles (
 )
 """,
     """
-CREATE TABLE IF NOT EXISTS memberships (
+CREATE TABLE IF NOT EXISTS subscriptions (
     id TEXT NOT NULL PRIMARY KEY,
     user_id TEXT NOT NULL UNIQUE,
+    plan_code TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',
-    started_at DATETIME NOT NULL,
+    starts_at DATETIME NOT NULL,
     expires_at DATETIME NOT NULL,
-    plan_code TEXT,
-    monitor_limit INTEGER,
+    entitlement_snapshot TEXT,
+    source TEXT NOT NULL DEFAULT 'invite',
+    created_by TEXT,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (created_by) REFERENCES users(id)
 )
 """,
     """
@@ -114,14 +127,42 @@ CREATE TABLE IF NOT EXISTS invite_redemptions (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 )
 """,
+    """
+CREATE TABLE IF NOT EXISTS plans (
+    id TEXT NOT NULL PRIMARY KEY,
+    plan_code TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL,
+    monitor_limit INTEGER NOT NULL,
+    notification_channel_limit INTEGER NOT NULL DEFAULT 1,
+    message_retention_days INTEGER NOT NULL DEFAULT 30,
+    features TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME
+)
+""",
 ]
+
+# plans 表初始套餐数据（与 048_plans_table 迁移保持一致）
+# SQLite 无 gen_random_uuid()，显式提供 id（测试用固定 UUID）
+_PLANS_SEED_SQL = """
+INSERT INTO plans (id, plan_code, display_name, monitor_limit,
+    notification_channel_limit, message_retention_days, features, status)
+VALUES
+    ('00000000-0000-0000-0000-000000000001', 'observe_20', '观察版', 20, 1, 30,
+     '["trend_selection","stock_detail","node_monitor","in_app_message","feishu_notification","stock_memo"]',
+     'active'),
+    ('00000000-0000-0000-0000-000000000002', 'research_50', '研究版', 50, 3, 180,
+     '["trend_selection","stock_detail","node_monitor","in_app_message","feishu_notification","stock_memo","advanced_export"]',
+     'active')
+"""
 
 
 @pytest_asyncio.fixture
 async def db_session() -> AsyncGenerator[AsyncSession, None]:
     """创建内存 SQLite 异步会话，测试后销毁。
 
-    创建 users/roles/user_roles/memberships/invite_codes/invite_redemptions 表，
+    创建 users/roles/user_roles/subscriptions/invite_codes/invite_redemptions/plans 表，
     注入测试数据：admin 用户（admin 角色）+ normal 用户（user 角色）。
     """
     try:
@@ -132,6 +173,8 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
     async with engine.begin() as conn:
         for ddl_stmt in _SQLITE_DDL_STATEMENTS:
             await conn.execute(text(ddl_stmt))
+        # 插入 plans 表初始套餐数据（subscription_service 通过 plan_service 查询 plans 表）
+        await conn.execute(text(_PLANS_SEED_SQL))
 
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -425,7 +468,7 @@ async def test_register_duplicate_email(db_session: AsyncSession) -> None:
 
 @pytest.mark.asyncio
 async def test_login_membership_active(db_session: AsyncSession) -> None:
-    """测试会员有效时登录返回 membership_expired=false。"""
+    """测试会员有效时登录返回 subscription_active=True（替代旧 membership_expired=false）。"""
     admin_user = db_session._test_admin_user  # type: ignore[attr-defined]
     results = await generate_invite_codes(
         db=db_session, count=1, created_by=admin_user.id
@@ -450,12 +493,13 @@ async def test_login_membership_active(db_session: AsyncSession) -> None:
         )
     assert response.status_code == 200
     data = response.json()
-    assert data["membership_expired"] is False
+    # [Auth] - 描述: subscription_active 替代旧 membership_expired（语义等价取反）
+    assert data["subscription_active"] is True
 
 
 @pytest.mark.asyncio
 async def test_login_membership_expired(db_session: AsyncSession) -> None:
-    """测试会员到期后登录返回 membership_expired=true。"""
+    """测试会员到期后登录返回 subscription_active=False（替代旧 membership_expired=true）。"""
     admin_user = db_session._test_admin_user  # type: ignore[attr-defined]
     results = await generate_invite_codes(
         db=db_session, count=1, created_by=admin_user.id
@@ -485,14 +529,14 @@ async def test_login_membership_expired(db_session: AsyncSession) -> None:
     user_result = await db_session.execute(user_stmt)
     user = user_result.scalar_one()
 
-    membership_stmt = sa_select(Membership).where(Membership.user_id == user.id)
-    membership_result = await db_session.execute(membership_stmt)
-    membership = membership_result.scalar_one()
-    membership.expires_at = datetime.now(UTC) - timedelta(days=1)
-    membership.status = "expired"
+    subscription_stmt = sa_select(Subscription).where(Subscription.user_id == user.id)
+    subscription_result = await db_session.execute(subscription_stmt)
+    subscription = subscription_result.scalar_one()
+    subscription.expires_at = datetime.now(UTC) - timedelta(days=1)
+    subscription.status = "expired"
     await db_session.commit()
 
-    # 登录应返回 membership_expired=true
+    # 登录应返回 subscription_active=False
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/auth/login",
@@ -500,7 +544,8 @@ async def test_login_membership_expired(db_session: AsyncSession) -> None:
         )
     assert response.status_code == 200
     data = response.json()
-    assert data["membership_expired"] is True
+    # [Auth] - 描述: subscription_active 替代旧 membership_expired（语义等价取反）
+    assert data["subscription_active"] is False
 
 
 # ============================================================
@@ -509,7 +554,7 @@ async def test_login_membership_expired(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_membership_status(db_session: AsyncSession) -> None:
+async def test_get_subscription_status(db_session: AsyncSession) -> None:
     """测试查询会员状态。"""
     admin_user = db_session._test_admin_user  # type: ignore[attr-defined]
     results = await generate_invite_codes(
@@ -643,11 +688,11 @@ async def test_renew_membership_expired(db_session: AsyncSession) -> None:
     user_result = await db_session.execute(user_stmt)
     user = user_result.scalar_one()
 
-    membership_stmt = sa_select(Membership).where(Membership.user_id == user.id)
-    membership_result = await db_session.execute(membership_stmt)
-    membership = membership_result.scalar_one()
-    membership.expires_at = datetime.now(UTC) - timedelta(days=5)
-    membership.status = "expired"
+    subscription_stmt = sa_select(Subscription).where(Subscription.user_id == user.id)
+    subscription_result = await db_session.execute(subscription_stmt)
+    subscription = subscription_result.scalar_one()
+    subscription.expires_at = datetime.now(UTC) - timedelta(days=5)
+    subscription.status = "expired"
     await db_session.commit()
 
     # 续期
@@ -760,7 +805,7 @@ async def test_list_invite_codes_by_status(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_members(db_session: AsyncSession) -> None:
+async def test_list_subscribers(db_session: AsyncSession) -> None:
     """测试查询会员账户列表。"""
     admin_user = db_session._test_admin_user  # type: ignore[attr-defined]
     results = await generate_invite_codes(

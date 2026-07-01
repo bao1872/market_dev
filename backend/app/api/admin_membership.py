@@ -11,8 +11,8 @@
 权限：
 - 所有端点需要 admin 角色（RBAC）
 
-套餐权限（plan_contract）：
-- 生成邀请码时接收 plan_code/grant_months，从 PLAN_CONTRACTS 读取 monitor_limit 快照
+套餐权限（plans 表）：
+- 生成邀请码时接收 plan_code/grant_months，从 plans 表读取 monitor_limit 快照
 - 默认 plan_code=observe_20、grant_months=1（保持向后兼容）
 """
 
@@ -42,11 +42,11 @@ from app.schemas.scheduler_job_run import (
     SchedulerJobRunListResponse,
 )
 from app.schemas.system_overview import SystemOverviewResponse
-from app.services.membership_service import (
+from app.services.subscription_service import (
     generate_invite_codes,
     get_redemptions_by_user,
     list_invite_codes,
-    list_members,
+    list_subscribers,
     revoke_invite_code,
 )
 from app.services.notification_service import list_message_deliveries, retry_delivery
@@ -66,7 +66,7 @@ async def create_invite_codes(
 ) -> list[InviteCodeResponse]:
     """生成邀请码（单个/批量，绑定 plan_code/grant_months）。
 
-    从 PLAN_CONTRACTS 读取 monitor_limit 快照写入邀请码。明文仅在生成时返回，后续不可获取。
+    从 plans 表读取 monitor_limit 快照写入邀请码。明文仅在生成时返回，后续不可获取。
     默认 plan_code=observe_20、grant_months=1（保持向后兼容）。
 
     Args:
@@ -221,7 +221,7 @@ async def get_members(
     Returns:
         {items: MemberListItem[], total: int, limit: int, offset: int}
     """
-    members, total = await list_members(db=db, limit=limit, offset=offset)
+    members, total = await list_subscribers(db=db, limit=limit, offset=offset)
     return {
         "items": [MemberListItem(**m) for m in members],
         "total": total,

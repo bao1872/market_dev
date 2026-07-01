@@ -1,7 +1,8 @@
-// 路由配置：createBrowserRouter + 受保护路由守卫 + Admin 角色守卫
+// [Auth] - 描述: 路由配置 + 受保护路由守卫 + Admin/Subscriber 角色守卫
 // 公开路由：/（门户页，lazy 加载）, /login, /membership-expired
 // 受保护路由：其余所有路由（通过 ProtectedLayout 校验 auth store + AppShell 布局）
-// Admin 路由：额外通过 AdminRoute 校验 role === 'admin'
+// SubscriberRoute：有效订阅或 admin 豁免，否则重定向到 /membership-expired
+// AdminRoute：is_admin=true 才可访问，否则重定向到 /overview
 import { lazy, Suspense } from 'react'
 import { createBrowserRouter, Navigate, Outlet } from 'react-router-dom'
 import { useAuthStore } from './store/auth'
@@ -63,10 +64,27 @@ function ProtectedLayout() {
   )
 }
 
-// Admin 角色守卫：非 admin 用户重定向到主页
+// [Auth] - 描述: SubscriberRoute 订阅守卫 - 非有效订阅用户重定向到 /membership-expired
+// admin 用户豁免（is_admin=true 直接通过，不强制订阅）
+// 用于 /overview /screener /watchlist 等需有效订阅的核心业务路由
+function SubscriberRoute() {
+  const user = useAuthStore((s) => s.user)
+  // admin 豁免：管理员无需有效订阅即可访问所有页面
+  if (user?.is_admin) {
+    return <Outlet />
+  }
+  // 非订阅用户重定向到续期页
+  if (!user?.subscription_active) {
+    return <Navigate to="/membership-expired" replace />
+  }
+  return <Outlet />
+}
+
+// [Auth] - 描述: AdminRoute 管理员守卫 - 使用 is_admin 字段判断（替代旧 user.role）
+// 非 admin 用户重定向到 /overview
 function AdminRoute() {
   const user = useAuthStore((s) => s.user)
-  if (user?.role !== 'admin') {
+  if (user?.is_admin !== true) {
     return <Navigate to="/overview" replace />
   }
   return <Outlet />
@@ -81,18 +99,26 @@ export const router = createBrowserRouter([
   {
     element: <ProtectedLayout />,
     children: [
-      // 用户页面
-      { path: '/overview', element: <IndexPage /> },
-      { path: '/screener', element: <ScreenerPage /> },
-      { path: '/watchlist', element: <WatchlistPage /> },
-      { path: '/stock/:symbol', element: <StockDetailPage /> },
+      // 需有效订阅的核心业务页面（SubscriberRoute 守卫）
+      {
+        element: <SubscriberRoute />,
+        children: [
+          { path: '/overview', element: <IndexPage /> },
+          { path: '/screener', element: <ScreenerPage /> },
+          { path: '/watchlist', element: <WatchlistPage /> },
+          { path: '/stock/:symbol', element: <StockDetailPage /> },
+        ],
+      },
+      // 不强制订阅的辅助页面（仅认证即可）
       { path: '/settings', element: <SettingsPage /> },
       { path: '/messages', element: <MessagesPage /> },
       // Admin 页面（额外角色守卫）
       {
         element: <AdminRoute />,
         children: [
+          // [Auth] - 描述: /admin/overview 为后端 next_route 返回值，与 /admin 同渲染 AdminIndexPage
           { path: '/admin', element: <AdminIndexPage /> },
+          { path: '/admin/overview', element: <AdminIndexPage /> },
           { path: '/admin/users', element: <AdminUsersPage /> },
           { path: '/admin/beta-applications', element: <AdminBetaApplicationsPage /> },
           { path: '/admin/strategies', element: <AdminStrategiesPage /> },

@@ -29,10 +29,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import create_access_token, get_password_hash
 from app.main import app
 from app.models.instrument import Instrument
-from app.models.membership import Membership
+from app.models.subscription import Subscription
 from app.models.user import Role, User, UserRole
 from app.models.watchlist import UserWatchlistItem
-from app.services.membership_service import generate_invite_codes, register_with_invite_code
+from app.services.subscription_service import generate_invite_codes, register_with_invite_code
 
 
 async def _ensure_role(db: AsyncSession, name: str) -> Role:
@@ -66,8 +66,8 @@ async def _create_admin(db: AsyncSession) -> User:
 
 async def _create_normal_user_with_membership(
     db: AsyncSession, plan_code: str, grant_months: int = 1
-) -> tuple[User, Membership]:
-    """通过邀请码注册创建普通用户 + 会员记录。"""
+) -> tuple[User, Subscription]:
+    """通过邀请码注册创建普通用户 + 订阅记录。"""
     admin = await _create_admin(db)
     results = await generate_invite_codes(
         db=db, count=1, created_by=admin.id,
@@ -75,12 +75,12 @@ async def _create_normal_user_with_membership(
     )
     await db.flush()
     email = f"user_{uuid.uuid4().hex[:8]}@test.com"
-    user, membership = await register_with_invite_code(
+    user, subscription = await register_with_invite_code(
         db=db, email=email, password="password-12345",
         raw_invite_code=results[0][1],
     )
     await db.flush()
-    return user, membership
+    return user, subscription
 
 
 async def _create_instruments(db: AsyncSession, count: int) -> list[Instrument]:
@@ -248,12 +248,12 @@ async def test_entitlements_used_excludes_inactive_watchlist(entitlements_client
 
 @pytest.mark.asyncio
 async def test_entitlements_expired_membership_still_returns_plan(entitlements_client):
-    """已到期会员：仍返回套餐信息（status=expired，monitor_limit 不变）。"""
+    """已到期订阅：仍返回套餐信息（status=expired，monitor_limit 不变）。"""
     client, db = entitlements_client
-    user, membership = await _create_normal_user_with_membership(db, "observe_20", grant_months=1)
+    user, subscription = await _create_normal_user_with_membership(db, "observe_20", grant_months=1)
     # 手动设为已到期
-    membership.expires_at = datetime.now(UTC) - timedelta(days=1)
-    membership.status = "expired"
+    subscription.expires_at = datetime.now(UTC) - timedelta(days=1)
+    subscription.status = "expired"
     await db.flush()
 
     resp = await client.get("/me/entitlements", headers=_auth_headers(user.id))

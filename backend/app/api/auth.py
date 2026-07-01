@@ -1,17 +1,21 @@
 """认证 API 路由 - 登录、注册、续期、token 刷新、当前用户信息、会员状态。
 
 端点：
-- POST /auth/login: 用户登录，返回 access_token + refresh_token + 会员状态
+- POST /auth/login: 用户登录，返回 access_token + refresh_token + AccessProfile 权限上下文
 - POST /auth/register: 邀请码注册，原子操作创建账户 + 开通 30 天会员
 - POST /auth/renew: 邀请码续期，未到期顺延 / 已到期从当天计算
 - POST /auth/refresh: 使用 refresh token 刷新
 - GET /me: 获取当前用户信息（含角色列表）
 - GET /me/membership: 获取当前用户会员状态
+- GET /me/access: 获取当前用户完整权限上下文 AccessContext（11 个字段）
 
 设计说明：
 - 登录使用 email + password，验证 bcrypt 哈希
 - 仅 active 状态用户可登录（disabled/pending 拒绝）
-- 会员到期后允许登录，但返回 membership_expired=true，前端跳转续期页
+- 登录路径只读：不写 DB，不调用 mark_expired_subscription；权限上下文由
+  get_access_context 统一计算（复用 AccessContext，避免逻辑重复）
+- 会员到期后允许登录，返回 subscription_active=false + next_route='/membership-expired'，
+  前端跳转续期页；admin 自动豁免（subscription_active=true）
 - 注册需邀请码，原子操作：锁定邀请码 → 创建账户 → 开通会员 → 写兑换记录
 - 续期需邀请码，未到期顺延 30 天，已到期从当天计算 30 天
 - refresh token 类型校验：仅 refresh 类型可刷新
@@ -44,6 +48,7 @@ from app.models.event_recipient import StrategyEventRecipient
 from app.models.strategy_event import StrategyEvent
 from app.models.user import User
 from app.models.watchlist import UserWatchlistItem
+from app.schemas.access import AccessProfileResponse
 from app.schemas.membership import (
     InviteCodeRenew,
     LoginResponse,
@@ -58,11 +63,11 @@ from app.schemas.user import (
     UserLogin,
     UserResponse,
 )
-from app.services.membership_service import (
+from app.services.access_control_service import get_access_context
+from app.services.subscription_service import (
     _ensure_aware,
-    get_effective_membership_status,
-    get_membership_status,
     get_renewal_count,
+    get_subscription_status,
     register_with_invite_code,
     renew_with_invite_code,
 )
@@ -95,17 +100,23 @@ async def login(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> LoginResponse:
-    """用户登录 - 验证邮箱密码，返回 access + refresh token + 会员状态。
+    """用户登录 - 验证邮箱密码，返回 access + refresh token + AccessProfile 权限上下文。
 
     流程：
     1. 按 email 查询用户
     2. 验证密码（bcrypt 常量时间比较）
     3. 检查用户状态为 active
-    4. 只读查询会员有效状态，判断是否到期
-    5. 生成 access + refresh token
+    4. 重新查询带角色的 user 对象（_fetch_user_with_roles 挂载 _roles 属性）
+    5. 调用 get_access_context 计算 AccessProfile（只读，不写 DB）
+    6. 计算 next_route（admin→/admin/overview；member active→/overview；
+       member expired→/membership-expired）
+    7. 生成 access + refresh token
 
-    会员到期后允许登录，但返回 membership_expired=true，前端跳转续期页。
-    管理员停用账户（status=disabled）拒绝登录，与会员到期是两个独立状态。
+    登录路径只读约束：
+    - 不调用 mark_expired_subscription、不修改 subscription.status
+    - get_access_context 内部仅 select 查询，无 db.commit/flush/状态修改
+    - 会员到期后允许登录，返回 subscription_active=false + next_route='/membership-expired'
+    - admin 自动豁免（subscription_active=true，subscription_required=false）
 
     Args:
         payload: 登录请求（email + password）
@@ -113,7 +124,7 @@ async def login(
         db: 异步数据库会话
 
     Returns:
-        LoginResponse（access_token + refresh_token + membership_expired）
+        LoginResponse（4 token 字段 + 10 AccessProfile 字段）
 
     Raises:
         HTTPException 401: 邮箱不存在/密码错误/用户状态非 active
@@ -158,9 +169,26 @@ async def login(
                 detail=f"用户状态非 active（当前: {user.status}），禁止登录",
             )
 
-        # 查询会员状态（只读，不修改 DB）
-        effective_status, _ = await get_effective_membership_status(db, user.id)
-        membership_expired = effective_status in ("expired", "none")
+        # [Auth] - 描述: 重新查询带角色的 user 对象，挂载 _roles 属性供 get_access_context 读取
+        # login 直接 select(User) 没有挂载 _roles，必须通过 _fetch_user_with_roles 重新获取
+        user = await _fetch_user_with_roles(db, user.id)
+        if user is None:
+            # 理论不可达：刚查询到的用户，重新查询不应消失
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="用户不存在",
+            )
+
+        # [Auth] - 描述: 调用 get_access_context 计算 AccessProfile（只读，不写 DB）
+        ctx = await get_access_context(db, user)
+
+        # [Auth] - 描述: 计算 next_route 路由（admin→/admin/overview；active→/overview；expired→/membership-expired）
+        if ctx.is_admin:
+            next_route = "/admin/overview"
+        elif ctx.subscription_active:
+            next_route = "/overview"
+        else:
+            next_route = "/membership-expired"
 
         # 生成 token
         user_id_str = str(user.id)
@@ -172,7 +200,16 @@ async def login(
             refresh_token=refresh_token,
             token_type="bearer",
             expires_in=_settings.jwt_access_ttl_seconds,
-            membership_expired=membership_expired,
+            is_admin=ctx.is_admin,
+            roles=ctx.roles,
+            subscription_required=not ctx.is_admin,
+            subscription_active=ctx.subscription_active,
+            plan_code=ctx.plan_code,
+            plan_display_name=ctx.plan_display_name,
+            expires_at=ctx.expires_at,
+            features=ctx.features,
+            limits=ctx.limits,
+            next_route=next_route,
         )
     except HTTPException:
         # 认证类异常原样抛出，不伪装为 500
@@ -320,7 +357,7 @@ async def register(
         HTTPException 400: 邀请码无效/已使用/已作废，或邮箱已注册
     """
     try:
-        user, membership = await register_with_invite_code(
+        user, subscription = await register_with_invite_code(
             db=db,
             email=payload.email,
             password=payload.password,
@@ -345,8 +382,8 @@ async def register(
         refresh_token=refresh_token,
         token_type="bearer",
         expires_in=_settings.jwt_access_ttl_seconds,
-        membership_started_at=membership.started_at,
-        membership_expires_at=membership.expires_at,
+        membership_started_at=subscription.starts_at,
+        membership_expires_at=subscription.expires_at,
     )
 
 
@@ -373,7 +410,7 @@ async def renew(
         HTTPException 400: 邀请码无效/已使用/已作废，或会员记录不存在
     """
     try:
-        membership, old_expires_at, new_expires_at = await renew_with_invite_code(
+        subscription, old_expires_at, new_expires_at = await renew_with_invite_code(
             db=db,
             user_id=current_user.id,
             raw_invite_code=payload.invite_code,
@@ -393,7 +430,7 @@ async def renew(
 
     return RenewSuccessResponse(
         membership_status="active",
-        started_at=membership.started_at,
+        started_at=subscription.starts_at,
         old_expires_at=old_expires_at,
         new_expires_at=new_expires_at,
         remaining_days=remaining_days,
@@ -420,8 +457,8 @@ async def get_my_membership(
     Raises:
         HTTPException 404: 用户无会员记录
     """
-    membership = await get_membership_status(db, current_user.id)
-    if membership is None:
+    subscription = await get_subscription_status(db, current_user.id)
+    if subscription is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="用户无会员记录",
@@ -430,15 +467,53 @@ async def get_my_membership(
     from datetime import UTC, datetime
 
     now = datetime.now(UTC)
-    remaining_days = (_ensure_aware(membership.expires_at) - now).days
+    remaining_days = (_ensure_aware(subscription.expires_at) - now).days
     renewal_count = await get_renewal_count(db, current_user.id)
 
     return MembershipResponse(
-        status=membership.status,
-        started_at=membership.started_at,
-        expires_at=membership.expires_at,
+        status=subscription.status,
+        started_at=subscription.starts_at,
+        expires_at=subscription.expires_at,
         remaining_days=remaining_days,
         renewal_count=renewal_count,
+    )
+
+
+@router.get("/me/access", response_model=AccessProfileResponse)
+async def get_my_access(
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+) -> AccessProfileResponse:
+    """获取当前用户的完整权限上下文 AccessContext（11 个字段）。
+
+    返回字段：user_id, account_status, roles, is_admin, is_member,
+    subscription_active, plan_code, plan_display_name, expires_at, features, limits。
+
+    端点只读：不写 DB，复用 get_access_context 唯一真源计算权限上下文。
+    admin 路径 subscription_active=True（豁免），plan_code=None；
+    member 过期订阅仍保留 plan_code/plan_display_name/features/limits（前端降级提示）。
+
+    Args:
+        current_user: 当前用户（由 get_current_active_user 注入）
+        db: 异步数据库会话
+
+    Returns:
+        AccessProfileResponse（11 个字段，与 AccessContext 对齐）
+    """
+    # [Auth] - 描述: 复用 get_access_context 唯一真源，端点不重复实现权限计算
+    ctx = await get_access_context(db, current_user)
+    return AccessProfileResponse(
+        user_id=ctx.user_id,
+        account_status=ctx.account_status,
+        roles=ctx.roles,
+        is_admin=ctx.is_admin,
+        is_member=ctx.is_member,
+        subscription_active=ctx.subscription_active,
+        plan_code=ctx.plan_code,
+        plan_display_name=ctx.plan_display_name,
+        expires_at=ctx.expires_at,
+        features=ctx.features,
+        limits=ctx.limits,
     )
 
 
@@ -570,5 +645,6 @@ if __name__ == "__main__":
     assert "/auth/refresh" in paths
     assert "/me" in paths
     assert "/me/membership" in paths
+    assert "/me/access" in paths
     assert "/me/events/summary" in paths
     print("OK")

@@ -145,13 +145,49 @@ class MemberListItem(BaseModel):
 
 
 class LoginResponse(BaseModel):
-    """登录响应 - 含 token + 会员状态。"""
+    """登录响应 - 含 token + AccessProfile 权限上下文（Phase 2 Task 2.4）。
 
+    字段语义：
+    - token 字段（4 个）：access_token / refresh_token / token_type / expires_in
+    - AccessProfile 字段（10 个）：复用 AccessContext 语义，供前端路由分发与 UI 降级
+      * is_admin: 是否为管理员（"admin" in roles）
+      * roles: 角色名列表
+      * subscription_required: 是否需要订阅（admin=False，member=True）
+      * subscription_active: 订阅是否有效（admin 豁免=True；member 实时计算）
+      * plan_code: 套餐代码（admin/无订阅=None）
+      * plan_display_name: 套餐展示名（过期订阅仍保留，便于前端降级提示）
+      * expires_at: 订阅过期时间（admin/无订阅=None）
+      * features: 功能特性列表
+      * limits: 额度限制 dict
+      * next_route: 前端下一步路由（admin→/admin/overview；member active→/overview；
+        member expired→/membership-expired）
+
+    设计要点：
+    - 替代旧字段 membership_expired（语义等价：subscription_active = not membership_expired）
+    - 登录路径只读，不写 DB；权限上下文由 get_access_context 统一计算
+    """
+
+    # token 字段
     access_token: str = Field(..., description="Access token")
     refresh_token: str = Field(..., description="Refresh token")
     token_type: str = Field(default="bearer", description="Token 类型")
     expires_in: int = Field(..., description="Access token 有效期（秒）")
-    membership_expired: bool = Field(..., description="会员是否已到期")
+
+    # AccessProfile 字段（10 个）
+    is_admin: bool = Field(..., description="是否为管理员")
+    roles: list[str] = Field(..., description="角色名列表")
+    subscription_required: bool = Field(
+        ..., description="是否需要订阅（admin=False，member=True）"
+    )
+    subscription_active: bool = Field(
+        ..., description="订阅是否有效（admin 豁免=True；member 实时计算）"
+    )
+    plan_code: str | None = Field(default=None, description="套餐代码")
+    plan_display_name: str | None = Field(default=None, description="套餐展示名")
+    expires_at: datetime | None = Field(default=None, description="订阅过期时间")
+    features: list[str] = Field(default_factory=list, description="功能特性列表")
+    limits: dict = Field(default_factory=dict, description="额度限制 dict")
+    next_route: str = Field(..., description="前端下一步路由")
 
 
 class RegisterSuccessResponse(BaseModel):

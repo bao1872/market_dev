@@ -1,24 +1,29 @@
-"""会员与邀请码服务层 - V1.6 会员系统业务逻辑 + plan_contract 套餐权限。
+"""订阅与邀请码服务层 - V1.6 订阅系统业务逻辑 + plans 表套餐权限。
 
 提供：
 - generate_invite_codes: 生成邀请码（单个/批量，绑定 plan_code/grant_months）
 - hash_invite_code: 邀请码哈希（SHA256）
-- register_with_invite_code: 邀请码注册（原子操作，写入套餐快照）
+- register_with_invite_code: 邀请码注册（原子操作，写入套餐快照到 Subscription）
 - renew_with_invite_code: 邀请码续期（更新套餐，按自然月顺延到期日）
-- get_membership_status: 查询会员状态
+- get_subscription_status: 查询订阅状态
+- get_effective_subscription_status: 只读查询订阅有效状态（active/expired/none）
+- mark_expired_subscription: 标记订阅过期
 - revoke_invite_code: 作废邀请码
 - list_invite_codes: 邀请码列表
-- list_members: 会员账户列表
+- list_subscribers: 订阅账户列表（JOIN users + subscriptions）
 - get_redemptions_by_user: 用户兑换记录
 
-业务规则（plan_contract 套餐权限）：
-- 生成邀请码：从 PLAN_CONTRACTS 读取 monitor_limit 快照，写入 plan_code/monitor_limit/grant_months
-- 注册：写入 plan_code/monitor_limit 到 membership，到期日按 grant_months 自然月计算
-- 续期（未到期）：从当前到期日顺延 grant_months 个自然月，同时更新 plan_code/monitor_limit
+业务规则（plans 表套餐权限）：
+- 生成邀请码：从 plans 表读取 monitor_limit 快照，写入 plan_code/monitor_limit/grant_months
+- 注册：创建 Subscription（source='invite'），到期日按 grant_months 自然月计算
+- 续期（未到期）：从当前到期日顺延 grant_months 个自然月，同时更新 plan_code/entitlement_snapshot
 - 续期（已到期）：从兑换当天计算 grant_months 个自然月
 - 邀请码为一次性，status: unused → used / revoked
 - 邀请码明文不存储，仅存 SHA256 哈希
 - grant_months 优先用于自然月计算（dateutil.relativedelta），grant_days 保留兼容性
+
+Phase 2 Task 2.2：由 membership_service.py 重命名为 subscription_service.py，
+所有 Membership 引用改为 Subscription，函数名按 subscription 重命名。
 """
 
 from __future__ import annotations
@@ -33,14 +38,13 @@ from dateutil.relativedelta import relativedelta
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants.plan_contract import (
-    DEFAULT_PLAN_CODE,
-    get_monitor_limit,
-    is_valid_plan_code,
-)
+from app.constants.plan_codes import DEFAULT_PLAN_CODE
 from app.core.security import get_password_hash
-from app.models.membership import InviteCode, InviteRedemption, Membership
+from app.models.membership import InviteCode, InviteRedemption
+from app.models.subscription import Subscription
 from app.models.user import Role, User, UserRole
+from app.services.plan_service import get_monitor_limit as get_monitor_limit_async
+from app.services.plan_service import get_plan as get_plan_async
 
 
 def _ensure_aware(dt: datetime) -> datetime:
@@ -101,6 +105,19 @@ def _generate_invite_code() -> str:
     return "-".join(groups)
 
 
+def _build_entitlement_snapshot(plan) -> dict:
+    """从 Plan ORM 对象构造 entitlement_snapshot JSONB 快照。
+
+    快照字段：monitor_limit/notification_channel_limit/message_retention_days/features
+    """
+    return {
+        "monitor_limit": int(plan.monitor_limit),
+        "notification_channel_limit": int(plan.notification_channel_limit),
+        "message_retention_days": int(plan.message_retention_days),
+        "features": list(plan.features) if plan.features else [],
+    }
+
+
 def hash_invite_code(raw_code: str) -> str:
     """计算邀请码的 SHA256 哈希。
 
@@ -127,7 +144,7 @@ async def generate_invite_codes(
 ) -> list[tuple[InviteCode, str]]:
     """生成邀请码（批量，绑定 plan_code/grant_months）。
 
-    从 PLAN_CONTRACTS 读取 monitor_limit 快照写入邀请码，作为不可变的套餐快照。
+    从 plans 表读取 monitor_limit 快照写入邀请码，作为不可变的套餐快照。
     grant_months 用于注册/续期时按自然月计算到期日。
 
     Args:
@@ -142,14 +159,13 @@ async def generate_invite_codes(
         list of (InviteCode ORM 对象, 明文邀请码) 元组
 
     Raises:
-        ValueError: plan_code 不在 PLAN_CONTRACTS 中
+        ValueError: plan_code 不在 plans 表中，或 grant_months 非法
     """
-    if not is_valid_plan_code(plan_code):
-        raise ValueError(f"未知套餐代码: {plan_code}")
     if grant_months < 1:
         raise ValueError(f"grant_months 必须 >= 1，实际: {grant_months}")
 
-    monitor_limit = get_monitor_limit(plan_code)
+    # [PlanService] - 描述: 从 plans 表查询 monitor_limit，未知 plan_code 抛 ValueError
+    monitor_limit = await get_monitor_limit_async(db, plan_code)
 
     results: list[tuple[InviteCode, str]] = []
     for _ in range(count):
@@ -177,18 +193,22 @@ async def register_with_invite_code(
     password: str,
     raw_invite_code: str,
     timezone: str = "Asia/Shanghai",
-) -> tuple[User, Membership]:
-    """邀请码注册 - 原子操作。
+) -> tuple[User, Subscription]:
+    """邀请码注册 - 原子操作（悲观锁防止并发一码多用）。
 
     流程：
-    1. 哈希邀请码并查找
+    1. 哈希邀请码并查找（SELECT ... FOR UPDATE 行级锁，串行化并发请求）
     2. 校验邀请码状态为 unused
     3. 检查邮箱未被注册
     4. 创建用户（status=active）
-    5. 创建会员记录（30 天）
+    5. 创建订阅记录（source='invite'，含 entitlement_snapshot 套餐快照）
     6. 更新邀请码状态为 used
     7. 写入兑换记录
-    8. flush（由调用方 commit）
+    8. flush（由调用方 commit，提交后释放行锁）
+
+    并发安全：with_for_update() 在 PostgreSQL 生成 SELECT ... FOR UPDATE，
+    第二个并发请求会阻塞直到第一个事务提交，然后读到 status=used 失败。
+    SQLite 忽略 with_for_update（不支持行级锁）。
 
     Args:
         db: 异步数据库会话
@@ -198,14 +218,18 @@ async def register_with_invite_code(
         timezone: 用户时区
 
     Returns:
-        (User, Membership) 元组
+        (User, Subscription) 元组
 
     Raises:
         ValueError: 邀请码无效/已使用/已作废，或邮箱已注册
     """
-    # 1. 哈希邀请码并查找
+    # 1. 哈希邀请码并查找（FOR UPDATE 行锁防止并发注册同一邀请码）
     code_hash = hash_invite_code(raw_invite_code)
-    invite_stmt = select(InviteCode).where(InviteCode.code_hash == code_hash)
+    invite_stmt = (
+        select(InviteCode)
+        .where(InviteCode.code_hash == code_hash)
+        .with_for_update()
+    )
     invite_result = await db.execute(invite_stmt)
     invite = invite_result.scalar_one_or_none()
 
@@ -243,18 +267,23 @@ async def register_with_invite_code(
     if user_role is not None:
         db.add(UserRole(user_id=user.id, role_id=user_role.id))
 
-    # 5. 创建会员记录（按 grant_months 自然月计算到期日，写入套餐快照）
+    # 5. 创建订阅记录（按 grant_months 自然月计算到期日，写入套餐快照到 entitlement_snapshot）
     expires_at = _compute_expires_at(now, invite)
-    membership = Membership(
+    # [PlanService] - 描述: 从 plans 表查询套餐构造 entitlement_snapshot 快照
+    plan = await get_plan_async(db, invite.plan_code or DEFAULT_PLAN_CODE)
+    entitlement_snapshot = _build_entitlement_snapshot(plan)
+    subscription = Subscription(
         user_id=user.id,
+        plan_code=invite.plan_code or DEFAULT_PLAN_CODE,
         status="active",
-        started_at=now,
+        starts_at=now,
         expires_at=expires_at,
-        plan_code=invite.plan_code,
-        monitor_limit=invite.monitor_limit,
+        entitlement_snapshot=entitlement_snapshot,
+        source="invite",
+        created_by=None,
         updated_at=now,
     )
-    db.add(membership)
+    db.add(subscription)
 
     # 6. 更新邀请码状态
     invite.status = "used"
@@ -274,21 +303,24 @@ async def register_with_invite_code(
     db.add(redemption)
     await db.flush()
 
-    return user, membership
+    return user, subscription
 
 
 async def renew_with_invite_code(
     db: AsyncSession,
     user_id: uuid.UUID,
     raw_invite_code: str,
-) -> tuple[Membership, datetime | None, datetime]:
-    """邀请码续期 - 同时更新套餐（plan_code/monitor_limit）和按自然月顺延到期日。
+) -> tuple[Subscription, datetime | None, datetime]:
+    """邀请码续期 - 同时更新套餐（plan_code/entitlement_snapshot）和按自然月顺延到期日。
 
     业务规则：
     - 未到期续期：从当前到期日顺延 grant_months 个自然月
     - 已到期续期：从兑换当天计算 grant_months 个自然月
-    - 续期时更新 membership.plan_code/monitor_limit 为邀请码的套餐快照
+    - 续期时更新 subscription.plan_code/entitlement_snapshot 为邀请码的套餐快照
     - 兼容旧邀请码（grant_months 为 NULL 时回退 grant_days 天数计算）
+
+    并发安全：与 register_with_invite_code 一致，使用 SELECT ... FOR UPDATE
+    行级锁串行化并发续期请求，防止一码多用。
 
     Args:
         db: 异步数据库会话
@@ -296,14 +328,18 @@ async def renew_with_invite_code(
         raw_invite_code: 邀请码明文
 
     Returns:
-        (Membership, old_expires_at, new_expires_at) 元组
+        (Subscription, old_expires_at, new_expires_at) 元组
 
     Raises:
-        ValueError: 邀请码无效/已使用/已作废，或用户不存在，或会员记录不存在
+        ValueError: 邀请码无效/已使用/已作废，或用户不存在，或订阅记录不存在
     """
-    # 1. 哈希邀请码并查找
+    # 1. 哈希邀请码并查找（FOR UPDATE 行锁防止并发续期同一邀请码）
     code_hash = hash_invite_code(raw_invite_code)
-    invite_stmt = select(InviteCode).where(InviteCode.code_hash == code_hash)
+    invite_stmt = (
+        select(InviteCode)
+        .where(InviteCode.code_hash == code_hash)
+        .with_for_update()
+    )
     invite_result = await db.execute(invite_stmt)
     invite = invite_result.scalar_one_or_none()
 
@@ -315,19 +351,19 @@ async def renew_with_invite_code(
     if invite.status == "revoked":
         raise ValueError("邀请码已被作废")
 
-    # 2. 查找用户会员记录
-    membership_stmt = select(Membership).where(Membership.user_id == user_id)
-    membership_result = await db.execute(membership_stmt)
-    membership = membership_result.scalar_one_or_none()
+    # 2. 查找用户订阅记录
+    subscription_stmt = select(Subscription).where(Subscription.user_id == user_id)
+    subscription_result = await db.execute(subscription_stmt)
+    subscription = subscription_result.scalar_one_or_none()
 
-    if membership is None:
-        raise ValueError(f"用户会员记录不存在: {user_id}")
+    if subscription is None:
+        raise ValueError(f"用户订阅记录不存在: {user_id}")
 
     # 3. 计算新的到期时间（按 grant_months 自然月，兼容旧 grant_days）
     # old_expires_at 归一化为时区感知，确保与 new_expires_at（基于 now=UTC）一致，
     # 避免 API 响应中 old/new 一个 naive 一个 aware 导致前端解析失败
     now = datetime.now(UTC)
-    old_expires_at = _ensure_aware(membership.expires_at)
+    old_expires_at = _ensure_aware(subscription.expires_at)
 
     if old_expires_at > now:
         # 未到期：从当前到期日顺延
@@ -336,12 +372,16 @@ async def renew_with_invite_code(
         # 已到期：从兑换当天重新计算
         new_expires_at = _compute_expires_at(now, invite)
 
-    # 4. 更新会员记录（同时更新套餐与到期日）
-    membership.status = "active"
-    membership.expires_at = new_expires_at
-    membership.plan_code = invite.plan_code
-    membership.monitor_limit = invite.monitor_limit
-    membership.updated_at = now
+    # 4. 更新订阅记录（同时更新套餐与到期日 + 刷新 entitlement_snapshot）
+    new_plan_code = invite.plan_code or DEFAULT_PLAN_CODE
+    # [PlanService] - 描述: 从 plans 表查询套餐构造 entitlement_snapshot 快照
+    plan = await get_plan_async(db, new_plan_code)
+    entitlement_snapshot = _build_entitlement_snapshot(plan)
+    subscription.status = "active"
+    subscription.expires_at = new_expires_at
+    subscription.plan_code = new_plan_code
+    subscription.entitlement_snapshot = entitlement_snapshot
+    subscription.updated_at = now
 
     # 5. 更新邀请码状态
     invite.status = "used"
@@ -361,19 +401,22 @@ async def renew_with_invite_code(
     db.add(redemption)
     await db.flush()
 
-    return membership, old_expires_at, new_expires_at
+    return subscription, old_expires_at, new_expires_at
 
 
-async def get_effective_membership_status(
+async def get_effective_subscription_status(
     db: AsyncSession,
     user_id: uuid.UUID,
 ) -> tuple[Literal["active", "expired", "none"], datetime | None]:
-    """只读查询用户会员有效状态。
+    """只读查询用户订阅有效状态。
 
     不修改、不 flush 数据库。根据当前时间判断 status 语义：
-    - 无会员记录 -> ("none", None)
-    - 有会员且未过期 -> ("active", expires_at)
-    - 有会员但已过期 -> ("expired", expires_at)
+    - 无订阅记录 -> ("none", None)
+    - 有订阅且未过期 -> ("active", expires_at)
+    - 有订阅但已过期 -> ("expired", expires_at)
+
+    有效订阅实时计算（不缓存到登录态）：
+        status = 'active' AND starts_at <= now AND expires_at > now
 
     Args:
         db: 异步数据库会话
@@ -382,62 +425,62 @@ async def get_effective_membership_status(
     Returns:
         (状态字符串, expires_at) 元组
     """
-    stmt = select(Membership).where(Membership.user_id == user_id)
+    stmt = select(Subscription).where(Subscription.user_id == user_id)
     result = await db.execute(stmt)
-    membership = result.scalar_one_or_none()
+    subscription = result.scalar_one_or_none()
 
-    if membership is None:
+    if subscription is None:
         return "none", None
 
     now = datetime.now(UTC)
-    expires_at = _ensure_aware(membership.expires_at)
+    expires_at = _ensure_aware(subscription.expires_at)
     if expires_at <= now:
         return "expired", expires_at
     return "active", expires_at
 
 
-async def mark_expired_membership(db: AsyncSession, membership: Membership) -> None:
-    """将会员记录标记为已过期并写回 updated_at。
+async def mark_expired_subscription(db: AsyncSession, subscription: Subscription) -> None:
+    """将订阅记录标记为已过期并写回 updated_at。
 
     Args:
         db: 异步数据库会话
-        membership: 需要标记为过期的 Membership 对象
+        subscription: 需要标记为过期的 Subscription 对象
     """
     now = datetime.now(UTC)
-    membership.status = "expired"
-    membership.updated_at = now
+    subscription.status = "expired"
+    subscription.updated_at = now
     await db.flush()
 
 
-async def get_membership_status(
+async def get_subscription_status(
     db: AsyncSession,
     user_id: uuid.UUID,
-) -> Membership | None:
-    """查询用户会员状态。
+) -> Subscription | None:
+    """查询用户订阅状态。
 
     同时检查并更新过期状态（如果 expires_at 已过但 status 仍为 active）。
-    旧调用方行为不变。内部先通过 get_effective_membership_status 判断，
-    若逻辑已过期但数据库仍为 active，则调用 mark_expired_membership 更新。
+    旧调用方行为不变。内部先通过 get_effective_subscription_status 判断，
+    若逻辑已过期但数据库仍为 active，则调用 mark_expired_subscription 更新。
 
     Args:
         db: 异步数据库会话
         user_id: 用户 ID
 
     Returns:
-        Membership 对象或 None（用户无会员记录）
+        Subscription 对象或 None（用户无订阅记录）
     """
-    stmt = select(Membership).where(Membership.user_id == user_id)
+    stmt = select(Subscription).where(Subscription.user_id == user_id)
     result = await db.execute(stmt)
-    membership = result.scalar_one_or_none()
+    subscription = result.scalar_one_or_none()
 
-    if membership is None:
+    if subscription is None:
         return None
 
-    effective_status, _ = await get_effective_membership_status(db, user_id)
-    if effective_status == "expired" and membership.status == "active":
-        await mark_expired_membership(db, membership)
+    effective_status, _ = await get_effective_subscription_status(db, user_id)
+    if effective_status == "expired" and subscription.status == "active":
+        await mark_expired_subscription(db, subscription)
 
-    return membership
+    return subscription
 
 
 async def get_renewal_count(
@@ -531,12 +574,12 @@ async def list_invite_codes(
     return items, total
 
 
-async def list_members(
+async def list_subscribers(
     db: AsyncSession,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[dict], int]:
-    """查询会员账户列表（JOIN users + memberships）。
+    """查询订阅账户列表（JOIN users + subscriptions）。
 
     Args:
         db: 异步数据库会话
@@ -544,17 +587,17 @@ async def list_members(
         offset: 分页偏移
 
     Returns:
-        (会员列表 dict, 总数) 元组
+        (订阅列表 dict, 总数) 元组
     """
     # 查询总数
     count_stmt = select(func.count()).select_from(User)
     count_result = await db.execute(count_stmt)
     total = count_result.scalar_one()
 
-    # 查询用户 + 会员信息
+    # 查询用户 + 订阅信息
     stmt = (
-        select(User, Membership)
-        .outerjoin(Membership, Membership.user_id == User.id)
+        select(User, Subscription)
+        .outerjoin(Subscription, Subscription.user_id == User.id)
         .order_by(User.created_at.desc())
         .limit(limit)
         .offset(offset)
@@ -562,31 +605,31 @@ async def list_members(
     result = await db.execute(stmt)
 
     now = datetime.now(UTC)
-    members: list[dict] = []
+    subscribers: list[dict] = []
     for row in result.all():
         user = row[0]
-        membership = row[1]
+        subscription = row[1]
 
-        if membership is not None:
+        if subscription is not None:
             # 检查是否需要更新过期状态
-            if membership.status == "active" and _ensure_aware(membership.expires_at) <= now:
-                membership.status = "expired"
+            if subscription.status == "active" and _ensure_aware(subscription.expires_at) <= now:
+                subscription.status = "expired"
 
-            remaining_days = (_ensure_aware(membership.expires_at) - now).days
+            remaining_days = (_ensure_aware(subscription.expires_at) - now).days
             renewal_count = await get_renewal_count(db, user.id)
-            members.append({
+            subscribers.append({
                 "user_id": user.id,
                 "email": user.email,
                 "account_status": user.status,
-                "membership_status": membership.status,
-                "started_at": membership.started_at,
-                "expires_at": membership.expires_at,
+                "membership_status": subscription.status,
+                "started_at": subscription.starts_at,
+                "expires_at": subscription.expires_at,
                 "remaining_days": remaining_days,
                 "renewal_count": renewal_count,
                 "created_at": user.created_at,
             })
         else:
-            members.append({
+            subscribers.append({
                 "user_id": user.id,
                 "email": user.email,
                 "account_status": user.status,
@@ -598,7 +641,7 @@ async def list_members(
                 "created_at": user.created_at,
             })
 
-    return members, total
+    return subscribers, total
 
 
 async def get_redemptions_by_user(
@@ -642,4 +685,11 @@ if __name__ == "__main__":
     assert hash_invite_code(code) != hash_invite_code(code2)
     print("different codes hash differently")
 
+    # 验证函数签名
+    assert callable(register_with_invite_code)
+    assert callable(renew_with_invite_code)
+    assert callable(get_effective_subscription_status)
+    assert callable(mark_expired_subscription)
+    assert callable(get_subscription_status)
+    assert callable(list_subscribers)
     print("OK")

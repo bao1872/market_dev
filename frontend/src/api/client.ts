@@ -5,6 +5,7 @@
 // [API 客户端] - publicApiClient：无 Authorization 注入、无 401 refresh 逻辑，供 login/register/refresh/public beta 等公开端点使用
 import axios, { type AxiosError, type InternalAxiosRequestConfig } from 'axios'
 import { useAuthStore, ACCESS_TOKEN_KEY, REFRESH_TOKEN_KEY } from '../store/auth'
+import { useToast } from '../store/toast'
 
 export const apiClient = axios.create({
   baseURL: '/api',
@@ -88,16 +89,22 @@ apiClient.interceptors.request.use(
   (error) => Promise.reject(error),
 )
 
-// 响应拦截器：401 处理（单例刷新 + 重试一次）
+// 响应拦截器：401 处理（单例刷新 + 重试一次）+ 403 显式提示
 // [capture-mode] 截图模式下（URL 含 capture=feishu）不刷新不跳转：
 // capture token 无 refresh token，调用 admin API 会 401，若跳转登录页会导致
 // StockDetailPage 卸载、data-render-ready 永远 false、截图超时 502
+// [Auth] - 描述: 403 与 401 处理完全隔离——403 仅显示 toast 提示权限不足，不清除登录态、不跳转
 apiClient.interceptors.response.use(
   (response) => response,
   async (error: AxiosError) => {
     const originalRequest = error.config as
       | (InternalAxiosRequestConfig & { _retry?: boolean })
       | undefined
+    // [Auth] - 描述: 403 权限不足：显示 toast 友好提示，不清除 token、不跳转（与 401 隔离）
+    if (error.response?.status === 403) {
+      useToast.getState().show('权限不足', '当前账号无权访问该资源')
+      return Promise.reject(error)
+    }
     // 非 401 或无 config：直接 reject
     if (error.response?.status !== 401 || !originalRequest) {
       return Promise.reject(error)

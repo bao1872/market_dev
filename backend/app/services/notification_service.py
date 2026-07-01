@@ -11,8 +11,8 @@
    更新通知渠道配置（敏感字段合并保留）
 5. delete_channel(db, channel_id, user_id):
    删除通知渠道（软删除：status=inactive）
-6. verify_channel(db, channel_id):
-   验证渠道配置（调用 ChannelAdapter.verify）
+6. verify_channel(db, channel_id, user_id):
+   验证渠道配置（调用 ChannelAdapter.verify，含所有权校验）
 
 幂等保证：
 - 消息创建：idempotency_key 唯一约束
@@ -61,6 +61,10 @@ class MessageNotFoundError(NotificationServiceError):
 
 class ChannelNotFoundError(NotificationServiceError):
     """渠道不存在。"""
+
+
+class ChannelOwnershipError(NotificationServiceError):
+    """渠道不属于当前用户（跨用户操作被拒绝）。"""
 
 
 class DuplicateMessageError(NotificationServiceError):
@@ -611,6 +615,7 @@ async def delete_channel(
 async def verify_channel(
     db: AsyncSession,
     channel_id: UUID,
+    user_id: UUID,
 ) -> NotificationChannel:
     """验证渠道配置（调用 ChannelAdapter.verify）。
 
@@ -620,18 +625,22 @@ async def verify_channel(
     Args:
         db: 异步会话
         channel_id: 渠道 ID
+        user_id: 用户 ID（所有权校验，仅渠道所有者可操作）
 
     Returns:
         更新后的 NotificationChannel
 
     Raises:
         ChannelNotFoundError: 渠道不存在
+        ChannelOwnershipError: 渠道不属于当前用户
     """
     stmt = select(NotificationChannel).where(NotificationChannel.id == channel_id)
     result = await db.execute(stmt)
     channel = result.scalar_one_or_none()
     if channel is None:
         raise ChannelNotFoundError(f"渠道不存在: channel_id={channel_id}")
+    if channel.user_id != user_id:
+        raise ChannelOwnershipError(f"无权操作渠道: channel_id={channel_id}")
 
     # [通知渠道] - 前置校验：verify 成功后会将 status 置为 active，需避免与另一条 active 飞书渠道冲突（不区分类型）
     await _ensure_no_active_feishu_conflict(
@@ -950,6 +959,7 @@ async def retry_delivery(
 async def test_channel(
     db: AsyncSession,
     channel_id: UUID,
+    user_id: UUID,
 ) -> tuple[NotificationChannel, DeliveryResult]:
     """测试渠道投递（发送测试消息）。
 
@@ -960,18 +970,22 @@ async def test_channel(
     Args:
         db: 异步会话
         channel_id: 渠道 ID
+        user_id: 用户 ID（所有权校验，仅渠道所有者可操作）
 
     Returns:
         (NotificationChannel, DeliveryResult) 渠道与投递结果
 
     Raises:
         ChannelNotFoundError: 渠道不存在
+        ChannelOwnershipError: 渠道不属于当前用户
     """
     stmt = select(NotificationChannel).where(NotificationChannel.id == channel_id)
     result = await db.execute(stmt)
     channel = result.scalar_one_or_none()
     if channel is None:
         raise ChannelNotFoundError(f"渠道不存在: channel_id={channel_id}")
+    if channel.user_id != user_id:
+        raise ChannelOwnershipError(f"无权操作渠道: channel_id={channel_id}")
 
     adapter = get_adapter(channel.adapter_type)
 

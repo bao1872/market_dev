@@ -59,14 +59,17 @@ _SQLITE_DDL = [
     )
     """,
     """
-    CREATE TABLE IF NOT EXISTS memberships (
+    CREATE TABLE IF NOT EXISTS subscriptions (
         id TEXT NOT NULL PRIMARY KEY,
         user_id TEXT NOT NULL UNIQUE,
         status TEXT NOT NULL DEFAULT 'active',
-        started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        starts_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         expires_at DATETIME NOT NULL,
-        plan_code TEXT,
-        monitor_limit INTEGER,
+        plan_code TEXT NOT NULL,
+        entitlement_snapshot TEXT,
+        source TEXT NOT NULL DEFAULT 'invite',
+        created_by TEXT,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )
@@ -130,19 +133,20 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
         session.add(inst2)
         await session.flush()
 
-        # 创建会员记录（observe_20 套餐，monitor_limit=20，满足 POST /watchlist 额度校验）
-        from app.models.membership import Membership
+        # 创建订阅记录（observe_20 套餐，entitlement_snapshot.monitor_limit=20，满足 POST /watchlist 额度校验）
+        from app.models.subscription import Subscription
 
-        membership = Membership(
+        subscription = Subscription(
             id=uuid.uuid4(),
             user_id=test_user.id,
             status="active",
-            started_at=datetime.now(UTC),
+            starts_at=datetime.now(UTC),
             expires_at=datetime.now(UTC) + timedelta(days=30),
             plan_code="observe_20",
-            monitor_limit=20,
+            entitlement_snapshot={"monitor_limit": 20},
+            source="invite",
         )
-        session.add(membership)
+        session.add(subscription)
         await session.commit()
 
         # 注入测试会话

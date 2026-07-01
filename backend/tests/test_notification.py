@@ -475,22 +475,112 @@ class TestNotificationAPI:
         assert response.status_code == 400
 
     def test_messages_endpoint_requires_auth(self) -> None:
-        """测试消息列表端点需要认证。"""
+        """测试消息列表端点需要 JWT 认证。
+
+        无 Authorization header 时，HTTPBearer(auto_error=True) 返回 401。
+        """
         from fastapi.testclient import TestClient
         from app.main import app
 
         client = TestClient(app)
         response = client.get("/messages")
-        assert response.status_code == 401  # 缺少 X-User-Id
+        assert response.status_code == 401  # 缺少 Authorization header
 
     def test_channels_endpoint_requires_auth(self) -> None:
-        """测试渠道列表端点需要认证。"""
+        """测试渠道列表端点需要 JWT 认证。
+
+        无 Authorization header 时，HTTPBearer(auto_error=True) 返回 401。
+        """
         from fastapi.testclient import TestClient
         from app.main import app
 
         client = TestClient(app)
         response = client.get("/notification-channels")
-        assert response.status_code == 401  # 缺少 X-User-Id
+        assert response.status_code == 401  # 缺少 Authorization header
+
+    def test_x_user_id_header_rejected(self) -> None:
+        """X-User-Id header 不再被接受为身份认证。
+
+        发送 X-User-Id 但无 Authorization header，应返回 401（HTTPBearer 拒绝），
+        而非 200（旧 _get_user_id 会接受 X-User-Id 并继续查询）。
+        """
+        from fastapi.testclient import TestClient
+        from uuid import uuid4
+
+        from app.main import app
+
+        client = TestClient(app)
+        response = client.get(
+            "/notification-channels",
+            headers={"X-User-Id": str(uuid4())},
+        )
+        assert response.status_code == 401  # X-User-Id 不再认证，需 Authorization
+
+    def test_jwt_required_for_notifications(self) -> None:
+        """无任何认证 header 时，GET /notification-channels 返回 401。
+
+        HTTPBearer(auto_error=True) 缺失 Authorization header 返回 401 Unauthorized。
+        """
+        from fastapi.testclient import TestClient
+        from app.main import app
+
+        client = TestClient(app)
+        response = client.get("/notification-channels")
+        assert response.status_code == 401
+
+
+# ==================== JWT 认证集成测试（Task 3.1） ====================
+
+
+@pytest.mark.asyncio
+async def test_valid_jwt_returns_user_channels(
+    db_session, test_user,
+) -> None:
+    """使用有效 JWT token 访问 GET /notification-channels，返回当前用户的渠道。
+
+    验证 user_id 来自 JWT（Authorization: Bearer <token>）而非 X-User-Id header。
+    """
+    from collections.abc import AsyncGenerator
+
+    from httpx import ASGITransport, AsyncClient
+    from app.core.deps import get_db as deps_get_db
+    from app.core.security import create_access_token
+    from app.db import get_db as db_get_db
+    from app.main import app
+    from app.models.notification import NotificationChannel
+
+    # 为 test_user 创建一个渠道
+    channel = NotificationChannel(
+        user_id=test_user.id,
+        adapter_type="feishu_webhook",
+        display_name="JWT 测试渠道",
+        target_config={"webhook_url": "http://example.com/hook"},
+        status="active",
+    )
+    db_session.add(channel)
+    await db_session.flush()
+
+    async def get_test_db() -> AsyncGenerator[AsyncSession, None]:
+        yield db_session
+
+    app.dependency_overrides[deps_get_db] = get_test_db
+    app.dependency_overrides[db_get_db] = get_test_db
+    try:
+        token = create_access_token(str(test_user.id))
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get(
+                "/notification-channels",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        assert response.status_code == 200
+        data = response.json()
+        items = data["items"]
+        found = next((c for c in items if c["id"] == str(channel.id)), None)
+        assert found is not None
+        assert found["display_name"] == "JWT 测试渠道"
+    finally:
+        app.dependency_overrides.clear()
 
 
 # ==================== Outbox 投递链修复测试 ====================
@@ -1040,6 +1130,7 @@ class TestMessageStructuredFields:
         from app.models.notification import NotificationMessage
         from app.schemas.notification import NotificationMessageDTO
         from app.core.deps import get_db as deps_get_db
+        from app.core.security import create_access_token
         from app.db import get_db as db_get_db
 
         dto = NotificationMessageDTO(
@@ -1077,7 +1168,10 @@ class TestMessageStructuredFields:
         try:
             transport = ASGITransport(app=app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
-                response = await client.get("/messages", headers={"X-User-Id": str(test_user.id)})
+                response = await client.get(
+                    "/messages",
+                    headers={"Authorization": f"Bearer {create_access_token(str(test_user.id))}"},
+                )
             assert response.status_code == 200
             data = response.json()
             items = data["items"]
@@ -1837,7 +1931,9 @@ class TestChannelActiveUniqueness:
         await db_session.flush()
 
         with pytest.raises(DuplicateActiveChannelError, match="已存在 active"):
-            await verify_channel(db_session, pending_channel.id)
+            await verify_channel(
+                db_session, pending_channel.id, user_id=test_user.id
+            )
 
     @pytest.mark.asyncio
     async def test_create_channel_rejects_cross_type_active_feishu(
@@ -1899,6 +1995,128 @@ class TestChannelActiveUniqueness:
         assert channel2.status == "active"
 
 
+class TestChannelOwnership:
+    """通知渠道所有权校验测试（Task 3.2）。
+
+    安全需求：verify_channel / test_channel 必须校验渠道所有权，防止跨用户操作
+    （用户 B 不能 verify/test 用户 A 的渠道，否则触发他人渠道状态变更与实际投递）。
+    服务层测试：直接调用 service 函数，断言 ChannelOwnershipError（API 层映射为 403）。
+    使用 adapter_type="mock" 避免依赖外部飞书服务。
+    """
+
+    @pytest.mark.asyncio
+    async def test_verify_channel_rejects_other_user_channel(
+        self, db_session, test_user,
+    ) -> None:
+        """用户 A 创建渠道，用户 B 调用 verify → ChannelOwnershipError。"""
+        from app.models.notification import NotificationChannel
+        from app.models.user import User
+        from app.services.notification_service import (
+            ChannelOwnershipError,
+            verify_channel,
+        )
+
+        # 用户 A 的 mock 渠道（mock 类型不触发飞书 active 冲突检查）
+        channel = NotificationChannel(
+            user_id=test_user.id,
+            adapter_type="mock",
+            display_name="用户A的渠道",
+            target_config={},
+            status="pending",
+        )
+        db_session.add(channel)
+        # 用户 B
+        other_user = User(
+            email=f"other_{uuid4().hex[:8]}@test.com",
+            password_hash="$2b$12$dummyhash",
+            status="active",
+        )
+        db_session.add(other_user)
+        await db_session.flush()
+
+        with pytest.raises(ChannelOwnershipError, match="无权操作"):
+            await verify_channel(db_session, channel.id, user_id=other_user.id)
+
+    @pytest.mark.asyncio
+    async def test_test_channel_rejects_other_user_channel(
+        self, db_session, test_user,
+    ) -> None:
+        """用户 A 创建渠道，用户 B 调用 test → ChannelOwnershipError。"""
+        from app.models.notification import NotificationChannel
+        from app.models.user import User
+        from app.services.notification_service import (
+            ChannelOwnershipError,
+            test_channel,
+        )
+
+        channel = NotificationChannel(
+            user_id=test_user.id,
+            adapter_type="mock",
+            display_name="用户A的渠道",
+            target_config={},
+            status="pending",
+        )
+        db_session.add(channel)
+        other_user = User(
+            email=f"other_{uuid4().hex[:8]}@test.com",
+            password_hash="$2b$12$dummyhash",
+            status="active",
+        )
+        db_session.add(other_user)
+        await db_session.flush()
+
+        with pytest.raises(ChannelOwnershipError, match="无权操作"):
+            await test_channel(db_session, channel.id, user_id=other_user.id)
+
+    @pytest.mark.asyncio
+    async def test_verify_channel_owner_success(
+        self, db_session, test_user,
+    ) -> None:
+        """用户 A 创建渠道，用户 A 调用 verify → 成功（status=active，正常路径仍工作）。"""
+        from app.models.notification import NotificationChannel
+        from app.services.notification_service import verify_channel
+
+        channel = NotificationChannel(
+            user_id=test_user.id,
+            adapter_type="mock",
+            display_name="用户A的渠道",
+            target_config={},
+            status="pending",
+        )
+        db_session.add(channel)
+        await db_session.flush()
+
+        result = await verify_channel(db_session, channel.id, user_id=test_user.id)
+        assert result.id == channel.id
+        assert result.status == "active"
+        assert result.last_verified_at is not None
+
+    @pytest.mark.asyncio
+    async def test_test_channel_owner_success(
+        self, db_session, test_user,
+    ) -> None:
+        """用户 A 创建渠道，用户 A 调用 test → 成功投递（status=active，正常路径仍工作）。"""
+        from app.models.notification import NotificationChannel
+        from app.services.notification_service import test_channel
+
+        channel = NotificationChannel(
+            user_id=test_user.id,
+            adapter_type="mock",
+            display_name="用户A的渠道",
+            target_config={},
+            status="pending",
+        )
+        db_session.add(channel)
+        await db_session.flush()
+
+        result_channel, delivery_result = await test_channel(
+            db_session, channel.id, user_id=test_user.id
+        )
+        assert result_channel.id == channel.id
+        assert result_channel.status == "active"
+        assert delivery_result.success is True
+
+
 class TestCaptureToken:
     """截图模式短期 token 测试。"""
 
@@ -1912,8 +2130,12 @@ class TestCaptureToken:
         assert payload["sub"] == "test-user"
         assert payload["event_id"] == "evt-1"
 
-    def test_get_current_user_accepts_capture_token(self) -> None:
-        """get_current_user 应接受 capture token 并返回用户。"""
+    def test_get_current_user_rejects_capture_token(self) -> None:
+        """get_current_user 应拒绝 capture token（安全隔离，Phase 3 Task 3.3）。
+
+        capture token 仅通过 URL query parameter 用于截图端点，
+        不得通过 Authorization header 访问常规 API。
+        """
         from datetime import timedelta
         from uuid import uuid4
 
@@ -1922,8 +2144,7 @@ class TestCaptureToken:
         from app.core.security import create_capture_token
         from app.core.deps import get_current_user
 
-        # 该测试验证 token 类型被接受；使用 AsyncMock 模拟 DB，使其返回用户不存在
-        # 预期抛出 401（用户不存在），错误信息中不应包含 "token 类型错误"
+        # capture token 应在类型校验阶段被拒绝，不应到达 DB 查询
         fake_user_id = uuid4()
         token = create_capture_token(
             subject=str(fake_user_id),
@@ -1947,7 +2168,7 @@ class TestCaptureToken:
         with pytest.raises(HTTPException) as exc_info:
             asyncio.run(_call())
         assert exc_info.value.status_code == 401
-        assert "token 类型错误" not in str(exc_info.value.detail)
+        assert "token 类型错误" in str(exc_info.value.detail)
 
 
 class TestLatestEventEndpoint:

@@ -75,16 +75,20 @@ CREATE TABLE IF NOT EXISTS user_roles (
 )
 """,
     """
-CREATE TABLE IF NOT EXISTS memberships (
+CREATE TABLE IF NOT EXISTS subscriptions (
     id TEXT NOT NULL PRIMARY KEY,
     user_id TEXT NOT NULL UNIQUE,
+    plan_code TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',
-    started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    starts_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     expires_at DATETIME NOT NULL,
-    plan_code TEXT,
-    monitor_limit INTEGER,
+    entitlement_snapshot TEXT,
+    source TEXT NOT NULL DEFAULT 'invite',
+    created_by TEXT,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (created_by) REFERENCES users(id)
 )
 """,
 ]

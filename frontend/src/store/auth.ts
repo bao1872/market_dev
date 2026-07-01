@@ -8,13 +8,21 @@
 import { create } from 'zustand'
 import { createJSONStorage, persist, type StateStorage } from 'zustand/middleware'
 
-export type UserRole = 'admin' | 'member'
-
+// [Auth] - 描述: AuthUser 当前用户身份 + AccessProfile 权限上下文（对齐后端 LoginResponse 字段）
+// 替代旧 role: 'admin' | 'member' 单值，改用 is_admin + roles[] + subscription_active 等
+// 唯一真源为后端 get_access_context，前端不在本地计算权限
 export interface AuthUser {
   id: string
-  name: string
+  name: string  // = email（兼容 AppShell 头像首字母抽取）
   email: string
-  role: UserRole
+  is_admin: boolean
+  roles: string[]
+  subscription_active: boolean
+  plan_code: string | null
+  plan_display_name: string | null
+  expires_at: string | null
+  features: string[]
+  limits: Record<string, number>
 }
 
 // token 在 storage 中的 key（client.ts 拦截器读取这两个 key）

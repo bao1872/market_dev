@@ -134,7 +134,7 @@ app = FastAPI(
 app.include_router(health_router)
 # 认证路由（R2：登录/刷新/当前用户）
 app.include_router(auth_router)
-# 当前用户权益路由（plan_contract：套餐/监控上限/已使用/剩余/到期日）
+# 当前用户权益路由（plans 表：套餐/监控上限/已使用/剩余/到期日）
 app.include_router(me_router)
 # 股票主数据路由（R3）
 app.include_router(instruments_router)
