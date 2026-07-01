@@ -117,6 +117,7 @@ jobs:
           POSTGRES_USER: bz
           POSTGRES_PASSWORD: bz
           POSTGRES_DB: bz_stock_test
+          TZ: Asia/Shanghai
         ports:
           - 5432:5432
         options: >-
@@ -168,6 +169,7 @@ jobs:
           POSTGRES_USER: bz
           POSTGRES_PASSWORD: bz
           POSTGRES_DB: bz_stock_test
+          TZ: Asia/Shanghai
         ports:
           - 5432:5432
         options: >-
