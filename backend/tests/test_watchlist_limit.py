@@ -328,7 +328,7 @@ async def test_watchlist_no_membership_user_blocked(watchlist_client):
         updated_at=datetime.now(UTC),
     )
     db.add(user)
-    user_role = await _ensure_role(db, "user")
+    user_role = await _ensure_role(db, "member")
     db.add(UserRole(user_id=user.id, role_id=user_role.id))
     instruments = await _create_instruments(db, 1)
     await db.flush()

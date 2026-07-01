@@ -10,214 +10,27 @@
 7. RBAC 越权访问（普通用户不能访问 admin 端点）
 
 测试策略：
-- 使用 sqlite 内存数据库 + 异步 SQLAlchemy
-- 创建 users/roles/user_roles/subscriptions/invite_codes/invite_redemptions/plans 表
-- 通过 dependency_overrides 注入测试会话
-- 覆盖主逻辑 + 边界条件
+- 使用 PostgreSQL 测试库 + Alembic 迁移结构
+- 通过 conftest.py 的 client/user_factory/role_factory/subscription_factory/invite_code_factory 构造测试数据
+- client fixture 自动覆盖 get_db 注入当前测试 session
 """
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy import text
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.ext.compiler import compiles
+from httpx import AsyncClient
+from sqlalchemy import select as sa_select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import create_access_token, get_password_hash
-from app.main import app
 from app.models.subscription import Subscription
-from app.models.user import Role, User, UserRole
-from app.services.subscription_service import (
-    generate_invite_codes,
-    hash_invite_code,
-)
-
-
-# 注册 JSONB 在 SQLite 上的编译回退（测试环境兼容）
-@compiles(JSONB, "sqlite")
-def _compile_jsonb_sqlite(element: JSONB, compiler: object, **kw: object) -> str:  # noqa: ARG001
-    """JSONB 在 SQLite 上回退为 TEXT 类型。"""
-    return "TEXT"
-
-
-# SQLite 兼容的建表 DDL
-_SQLITE_DDL_STATEMENTS = [
-    """
-CREATE TABLE IF NOT EXISTS users (
-    id TEXT NOT NULL PRIMARY KEY,
-    email TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'active',
-    timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-)
-""",
-    """
-CREATE TABLE IF NOT EXISTS roles (
-    id TEXT NOT NULL PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
-    description TEXT,
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-)
-""",
-    """
-CREATE TABLE IF NOT EXISTS user_roles (
-    user_id TEXT NOT NULL,
-    role_id TEXT NOT NULL,
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (user_id, role_id),
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-    FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE
-)
-""",
-    """
-CREATE TABLE IF NOT EXISTS subscriptions (
-    id TEXT NOT NULL PRIMARY KEY,
-    user_id TEXT NOT NULL UNIQUE,
-    plan_code TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'active',
-    starts_at DATETIME NOT NULL,
-    expires_at DATETIME NOT NULL,
-    entitlement_snapshot TEXT,
-    source TEXT NOT NULL DEFAULT 'invite',
-    created_by TEXT,
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-    FOREIGN KEY (created_by) REFERENCES users(id)
-)
-""",
-    """
-CREATE TABLE IF NOT EXISTS invite_codes (
-    id TEXT NOT NULL PRIMARY KEY,
-    code_hash TEXT NOT NULL UNIQUE,
-    status TEXT NOT NULL DEFAULT 'unused',
-    grant_days INTEGER NOT NULL DEFAULT 30,
-    plan_code TEXT,
-    monitor_limit INTEGER,
-    grant_months INTEGER,
-    note TEXT,
-    created_by TEXT NOT NULL,
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    used_by TEXT,
-    used_at DATETIME,
-    usage_type TEXT,
-    FOREIGN KEY (created_by) REFERENCES users(id),
-    FOREIGN KEY (used_by) REFERENCES users(id)
-)
-""",
-    """
-CREATE TABLE IF NOT EXISTS invite_redemptions (
-    id TEXT NOT NULL PRIMARY KEY,
-    invite_code_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    usage_type TEXT NOT NULL,
-    old_expires_at DATETIME,
-    new_expires_at DATETIME NOT NULL,
-    redeemed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (invite_code_id) REFERENCES invite_codes(id) ON DELETE CASCADE,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-)
-""",
-    """
-CREATE TABLE IF NOT EXISTS plans (
-    id TEXT NOT NULL PRIMARY KEY,
-    plan_code TEXT NOT NULL UNIQUE,
-    display_name TEXT NOT NULL,
-    monitor_limit INTEGER NOT NULL,
-    notification_channel_limit INTEGER NOT NULL DEFAULT 1,
-    message_retention_days INTEGER NOT NULL DEFAULT 30,
-    features TEXT NOT NULL DEFAULT '[]',
-    status TEXT NOT NULL DEFAULT 'active',
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME
-)
-""",
-]
-
-# plans 表初始套餐数据（与 048_plans_table 迁移保持一致）
-# SQLite 无 gen_random_uuid()，显式提供 id（测试用固定 UUID）
-_PLANS_SEED_SQL = """
-INSERT INTO plans (id, plan_code, display_name, monitor_limit,
-    notification_channel_limit, message_retention_days, features, status)
-VALUES
-    ('00000000-0000-0000-0000-000000000001', 'observe_20', '观察版', 20, 1, 30,
-     '["trend_selection","stock_detail","node_monitor","in_app_message","feishu_notification","stock_memo"]',
-     'active'),
-    ('00000000-0000-0000-0000-000000000002', 'research_50', '研究版', 50, 3, 180,
-     '["trend_selection","stock_detail","node_monitor","in_app_message","feishu_notification","stock_memo","advanced_export"]',
-     'active')
-"""
-
-
-@pytest_asyncio.fixture
-async def db_session() -> AsyncGenerator[AsyncSession, None]:
-    """创建内存 SQLite 异步会话，测试后销毁。
-
-    创建 users/roles/user_roles/subscriptions/invite_codes/invite_redemptions/plans 表，
-    注入测试数据：admin 用户（admin 角色）+ normal 用户（user 角色）。
-    """
-    try:
-        engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
-    except Exception:
-        pytest.skip("aiosqlite 不可用，跳过 DB 测试")
-
-    async with engine.begin() as conn:
-        for ddl_stmt in _SQLITE_DDL_STATEMENTS:
-            await conn.execute(text(ddl_stmt))
-        # 插入 plans 表初始套餐数据（subscription_service 通过 plan_service 查询 plans 表）
-        await conn.execute(text(_PLANS_SEED_SQL))
-
-    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-    async with session_factory() as session:
-        # 创建角色
-        admin_role = Role(id=uuid.uuid4(), name="admin", description="管理员")
-        user_role = Role(id=uuid.uuid4(), name="user", description="普通用户")
-        session.add(admin_role)
-        session.add(user_role)
-
-        # 创建 admin 用户
-        admin_user = User(
-            id=uuid.uuid4(),
-            email="admin@example.com",
-            password_hash=get_password_hash("admin-password-123"),
-            status="active",
-            timezone="Asia/Shanghai",
-            created_at=datetime.now(UTC),
-            updated_at=datetime.now(UTC),
-        )
-        session.add(admin_user)
-        session.add(UserRole(user_id=admin_user.id, role_id=admin_role.id))
-
-        await session.commit()
-
-        # 注入测试会话
-        async def get_test_db() -> AsyncGenerator[AsyncSession, None]:
-            yield session
-
-        from app.core.deps import get_db as deps_get_db
-        from app.db import get_db as db_get_db
-        app.dependency_overrides[deps_get_db] = get_test_db
-        app.dependency_overrides[db_get_db] = get_test_db
-
-        session._test_admin_user = admin_user  # type: ignore[attr-defined]
-        session._test_admin_role = admin_role  # type: ignore[attr-defined]
-        session._test_user_role = user_role  # type: ignore[attr-defined]
-
-        yield session
-
-        app.dependency_overrides.clear()
-
-    await engine.dispose()
+from app.models.user import User
+from app.services.subscription_service import hash_invite_code
 
 
 def _auth_headers(user_id: uuid.UUID) -> dict[str, str]:
@@ -226,24 +39,33 @@ def _auth_headers(user_id: uuid.UUID) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+@pytest_asyncio.fixture
+async def admin_user(user_factory: Callable[..., User]) -> User:
+    """创建管理员测试用户。"""
+    return await user_factory(
+        email="admin@example.com",
+        password_hash=get_password_hash("admin-password-123"),
+        roles=["admin"],
+    )
+
+
 # ============================================================
 # 邀请码生成测试
 # ============================================================
 
 
 @pytest.mark.asyncio
-async def test_generate_invite_codes_single(db_session: AsyncSession) -> None:
+async def test_generate_invite_codes_single(
+    client: AsyncClient,
+    admin_user: User,
+) -> None:
     """测试管理员生成单个邀请码。"""
-    admin_user = db_session._test_admin_user  # type: ignore[attr-defined]
     headers = _auth_headers(admin_user.id)
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/admin/invite-codes",
-            headers=headers,
-            json={"count": 1, "note": "test batch"},
-        )
+    response = await client.post(
+        "/admin/invite-codes",
+        headers=headers,
+        json={"count": 1, "note": "test batch"},
+    )
     assert response.status_code == 200
     data = response.json()
     assert len(data) == 1
@@ -254,18 +76,17 @@ async def test_generate_invite_codes_single(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_generate_invite_codes_batch(db_session: AsyncSession) -> None:
+async def test_generate_invite_codes_batch(
+    client: AsyncClient,
+    admin_user: User,
+) -> None:
     """测试管理员批量生成邀请码。"""
-    admin_user = db_session._test_admin_user  # type: ignore[attr-defined]
     headers = _auth_headers(admin_user.id)
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/admin/invite-codes",
-            headers=headers,
-            json={"count": 5, "note": "batch of 5"},
-        )
+    response = await client.post(
+        "/admin/invite-codes",
+        headers=headers,
+        json={"count": 5, "note": "batch of 5"},
+    )
     assert response.status_code == 200
     data = response.json()
     assert len(data) == 5
@@ -275,37 +96,30 @@ async def test_generate_invite_codes_batch(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_generate_invite_codes_normal_user_forbidden(db_session: AsyncSession) -> None:
+async def test_generate_invite_codes_normal_user_forbidden(
+    client: AsyncClient,
+    admin_user: User,
+    invite_code_factory: Callable[..., tuple],
+) -> None:
     """测试普通用户不能生成邀请码。"""
-    # 先注册一个普通用户
-    admin_user = db_session._test_admin_user  # type: ignore[attr-defined]
-    results = await generate_invite_codes(
-        db=db_session, count=1, created_by=admin_user.id, note="for register"
+    invite, raw_code = await invite_code_factory(created_by=admin_user.id, note="for register")
+    reg_resp = await client.post(
+        "/auth/register",
+        json={
+            "email": "newuser@example.com",
+            "password": "newuser-password-123",
+            "invite_code": raw_code,
+        },
     )
-    await db_session.commit()
-    raw_code = results[0][1]
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        # 注册新用户
-        reg_response = await client.post(
-            "/auth/register",
-            json={
-                "email": "newuser@example.com",
-                "password": "newuser-password-123",
-                "invite_code": raw_code,
-            },
-        )
-    assert reg_response.status_code == 200
-    new_user_token = reg_response.json()["access_token"]
+    assert reg_resp.status_code == 200
+    new_user_token = reg_resp.json()["access_token"]
 
     # 新用户尝试生成邀请码（应被拒绝）
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/admin/invite-codes",
-            headers={"Authorization": f"Bearer {new_user_token}"},
-            json={"count": 1},
-        )
+    response = await client.post(
+        "/admin/invite-codes",
+        headers={"Authorization": f"Bearer {new_user_token}"},
+        json={"count": 1},
+    )
     assert response.status_code == 403
 
 
@@ -315,25 +129,21 @@ async def test_generate_invite_codes_normal_user_forbidden(db_session: AsyncSess
 
 
 @pytest.mark.asyncio
-async def test_register_success(db_session: AsyncSession) -> None:
+async def test_register_success(
+    client: AsyncClient,
+    admin_user: User,
+    invite_code_factory: Callable[..., tuple],
+) -> None:
     """测试邀请码注册成功。"""
-    admin_user = db_session._test_admin_user  # type: ignore[attr-defined]
-    results = await generate_invite_codes(
-        db=db_session, count=1, created_by=admin_user.id, note="for register"
+    invite, raw_code = await invite_code_factory(created_by=admin_user.id, note="for register")
+    response = await client.post(
+        "/auth/register",
+        json={
+            "email": "newuser@example.com",
+            "password": "newuser-password-123",
+            "invite_code": raw_code,
+        },
     )
-    await db_session.commit()
-    raw_code = results[0][1]
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/auth/register",
-            json={
-                "email": "newuser@example.com",
-                "password": "newuser-password-123",
-                "invite_code": raw_code,
-            },
-        )
     assert response.status_code == 200
     data = response.json()
     assert "access_token" in data
@@ -343,120 +153,109 @@ async def test_register_success(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_register_invalid_invite_code(db_session: AsyncSession) -> None:
+async def test_register_invalid_invite_code(client: AsyncClient) -> None:
     """测试无效邀请码注册失败。"""
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/auth/register",
-            json={
-                "email": "newuser@example.com",
-                "password": "newuser-password-123",
-                "invite_code": "INVALID-CODE-1234",
-            },
-        )
+    response = await client.post(
+        "/auth/register",
+        json={
+            "email": "newuser@example.com",
+            "password": "newuser-password-123",
+            "invite_code": "INVALID-CODE-1234",
+        },
+    )
     assert response.status_code == 400
     assert "邀请码无效" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
-async def test_register_used_invite_code(db_session: AsyncSession) -> None:
+async def test_register_used_invite_code(
+    client: AsyncClient,
+    admin_user: User,
+    invite_code_factory: Callable[..., tuple],
+) -> None:
     """测试已使用邀请码注册失败。"""
-    admin_user = db_session._test_admin_user  # type: ignore[attr-defined]
-    results = await generate_invite_codes(
-        db=db_session, count=1, created_by=admin_user.id
-    )
-    await db_session.commit()
-    raw_code = results[0][1]
+    invite, raw_code = await invite_code_factory(created_by=admin_user.id)
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        # 第一次注册成功
-        await client.post(
-            "/auth/register",
-            json={
-                "email": "user1@example.com",
-                "password": "password-12345",
-                "invite_code": raw_code,
-            },
-        )
-        # 第二次使用同一邀请码注册失败
-        response = await client.post(
-            "/auth/register",
-            json={
-                "email": "user2@example.com",
-                "password": "password-12345",
-                "invite_code": raw_code,
-            },
-        )
+    # 第一次注册成功
+    await client.post(
+        "/auth/register",
+        json={
+            "email": "user1@example.com",
+            "password": "password-12345",
+            "invite_code": raw_code,
+        },
+    )
+    # 第二次使用同一邀请码注册失败
+    response = await client.post(
+        "/auth/register",
+        json={
+            "email": "user2@example.com",
+            "password": "password-12345",
+            "invite_code": raw_code,
+        },
+    )
     assert response.status_code == 400
     assert "已被使用" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
-async def test_register_revoked_invite_code(db_session: AsyncSession) -> None:
+async def test_register_revoked_invite_code(
+    client: AsyncClient,
+    admin_user: User,
+    invite_code_factory: Callable[..., tuple],
+) -> None:
     """测试已作废邀请码注册失败。"""
-    admin_user = db_session._test_admin_user  # type: ignore[attr-defined]
-    results = await generate_invite_codes(
-        db=db_session, count=1, created_by=admin_user.id
-    )
-    await db_session.commit()
-    invite = results[0][0]
-    raw_code = results[0][1]
+    invite, raw_code = await invite_code_factory(created_by=admin_user.id)
 
     # 作废邀请码
     headers = _auth_headers(admin_user.id)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        revoke_resp = await client.post(
-            f"/admin/invite-codes/{invite.id}/revoke", headers=headers
-        )
+    revoke_resp = await client.post(
+        f"/admin/invite-codes/{invite.id}/revoke", headers=headers
+    )
     assert revoke_resp.status_code == 200
     assert revoke_resp.json()["status"] == "revoked"
 
     # 使用已作废邀请码注册失败
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/auth/register",
-            json={
-                "email": "newuser@example.com",
-                "password": "newuser-password-123",
-                "invite_code": raw_code,
-            },
-        )
+    response = await client.post(
+        "/auth/register",
+        json={
+            "email": "newuser@example.com",
+            "password": "newuser-password-123",
+            "invite_code": raw_code,
+        },
+    )
     assert response.status_code == 400
     assert "已被作废" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
-async def test_register_duplicate_email(db_session: AsyncSession) -> None:
+async def test_register_duplicate_email(
+    client: AsyncClient,
+    admin_user: User,
+    invite_code_factory: Callable[..., tuple],
+) -> None:
     """测试邮箱已注册时注册失败。"""
-    admin_user = db_session._test_admin_user  # type: ignore[attr-defined]
-    results = await generate_invite_codes(
-        db=db_session, count=2, created_by=admin_user.id
-    )
-    await db_session.commit()
+    invite1, raw_code1 = await invite_code_factory(created_by=admin_user.id)
+    invite2, raw_code2 = await invite_code_factory(created_by=admin_user.id)
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        # 第一次注册成功
-        await client.post(
-            "/auth/register",
-            json={
-                "email": "dup@example.com",
-                "password": "password-12345",
-                "invite_code": results[0][1],
-            },
-        )
-        # 第二次用同一邮箱注册失败
-        response = await client.post(
-            "/auth/register",
-            json={
-                "email": "dup@example.com",
-                "password": "password-12345",
-                "invite_code": results[1][1],
-            },
-        )
+    # 第一次注册成功
+    await client.post(
+        "/auth/register",
+        json={
+            "email": "dup@example.com",
+            "password": "password-12345",
+            "invite_code": raw_code1,
+        },
+    )
+    # 第二次用同一邮箱注册失败
+    response = await client.post(
+        "/auth/register",
+        json={
+            "email": "dup@example.com",
+            "password": "password-12345",
+            "invite_code": raw_code2,
+        },
+    )
     assert response.status_code == 400
     assert "已被注册" in response.json()["detail"]
 
@@ -467,30 +266,28 @@ async def test_register_duplicate_email(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_login_membership_active(db_session: AsyncSession) -> None:
+async def test_login_membership_active(
+    client: AsyncClient,
+    admin_user: User,
+    invite_code_factory: Callable[..., tuple],
+) -> None:
     """测试会员有效时登录返回 subscription_active=True（替代旧 membership_expired=false）。"""
-    admin_user = db_session._test_admin_user  # type: ignore[attr-defined]
-    results = await generate_invite_codes(
-        db=db_session, count=1, created_by=admin_user.id
-    )
-    await db_session.commit()
+    invite, raw_code = await invite_code_factory(created_by=admin_user.id)
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        # 注册
-        await client.post(
-            "/auth/register",
-            json={
-                "email": "active@example.com",
-                "password": "password-12345",
-                "invite_code": results[0][1],
-            },
-        )
-        # 登录
-        response = await client.post(
-            "/auth/login",
-            json={"email": "active@example.com", "password": "password-12345"},
-        )
+    # 注册
+    await client.post(
+        "/auth/register",
+        json={
+            "email": "active@example.com",
+            "password": "password-12345",
+            "invite_code": raw_code,
+        },
+    )
+    # 登录
+    response = await client.post(
+        "/auth/login",
+        json={"email": "active@example.com", "password": "password-12345"},
+    )
     assert response.status_code == 200
     data = response.json()
     # [Auth] - 描述: subscription_active 替代旧 membership_expired（语义等价取反）
@@ -498,33 +295,27 @@ async def test_login_membership_active(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_login_membership_expired(db_session: AsyncSession) -> None:
+async def test_login_membership_expired(
+    client: AsyncClient,
+    admin_user: User,
+    invite_code_factory: Callable[..., tuple],
+    db_session: AsyncSession,
+) -> None:
     """测试会员到期后登录返回 subscription_active=False（替代旧 membership_expired=true）。"""
-    admin_user = db_session._test_admin_user  # type: ignore[attr-defined]
-    results = await generate_invite_codes(
-        db=db_session, count=1, created_by=admin_user.id
-    )
-    await db_session.commit()
+    invite, raw_code = await invite_code_factory(created_by=admin_user.id)
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        # 注册
-        reg_resp = await client.post(
-            "/auth/register",
-            json={
-                "email": "expired@example.com",
-                "password": "password-12345",
-                "invite_code": results[0][1],
-            },
-        )
+    # 注册
+    reg_resp = await client.post(
+        "/auth/register",
+        json={
+            "email": "expired@example.com",
+            "password": "password-12345",
+            "invite_code": raw_code,
+        },
+    )
     assert reg_resp.status_code == 200
 
-    # 手动将会员到期时间设为过去
-    from sqlalchemy import select as sa_select
-
-    # 通过 email 查找用户
-    from app.models.user import User
-
+    # 手动将会员到期时间设为过去（status 不持久化 expired，仅通过 expires_at<now 表示）
     user_stmt = sa_select(User).where(User.email == "expired@example.com")
     user_result = await db_session.execute(user_stmt)
     user = user_result.scalar_one()
@@ -533,15 +324,13 @@ async def test_login_membership_expired(db_session: AsyncSession) -> None:
     subscription_result = await db_session.execute(subscription_stmt)
     subscription = subscription_result.scalar_one()
     subscription.expires_at = datetime.now(UTC) - timedelta(days=1)
-    subscription.status = "expired"
     await db_session.commit()
 
     # 登录应返回 subscription_active=False
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/auth/login",
-            json={"email": "expired@example.com", "password": "password-12345"},
-        )
+    response = await client.post(
+        "/auth/login",
+        json={"email": "expired@example.com", "password": "password-12345"},
+    )
     assert response.status_code == 200
     data = response.json()
     # [Auth] - 描述: subscription_active 替代旧 membership_expired（语义等价取反）
@@ -554,33 +343,30 @@ async def test_login_membership_expired(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_subscription_status(db_session: AsyncSession) -> None:
+async def test_get_subscription_status(
+    client: AsyncClient,
+    admin_user: User,
+    invite_code_factory: Callable[..., tuple],
+) -> None:
     """测试查询会员状态。"""
-    admin_user = db_session._test_admin_user  # type: ignore[attr-defined]
-    results = await generate_invite_codes(
-        db=db_session, count=1, created_by=admin_user.id
-    )
-    await db_session.commit()
+    invite, raw_code = await invite_code_factory(created_by=admin_user.id)
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        # 注册
-        reg_resp = await client.post(
-            "/auth/register",
-            json={
-                "email": "status@example.com",
-                "password": "password-12345",
-                "invite_code": results[0][1],
-            },
-        )
+    # 注册
+    reg_resp = await client.post(
+        "/auth/register",
+        json={
+            "email": "status@example.com",
+            "password": "password-12345",
+            "invite_code": raw_code,
+        },
+    )
     assert reg_resp.status_code == 200
     token = reg_resp.json()["access_token"]
 
     # 查询会员状态
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get(
-            "/me/membership", headers={"Authorization": f"Bearer {token}"}
-        )
+    response = await client.get(
+        "/me/membership", headers={"Authorization": f"Bearer {token}"}
+    )
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "active"
@@ -589,14 +375,13 @@ async def test_get_subscription_status(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_membership_no_record(db_session: AsyncSession) -> None:
+async def test_get_membership_no_record(
+    client: AsyncClient,
+    admin_user: User,
+) -> None:
     """测试无会员记录的用户查询会员状态返回 404。"""
-    admin_user = db_session._test_admin_user  # type: ignore[attr-defined]
     headers = _auth_headers(admin_user.id)
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get("/me/membership", headers=headers)
+    response = await client.get("/me/membership", headers=headers)
     assert response.status_code == 404
 
 
@@ -606,42 +391,33 @@ async def test_get_membership_no_record(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_renew_membership_active(db_session: AsyncSession) -> None:
+async def test_renew_membership_active(
+    client: AsyncClient,
+    admin_user: User,
+    invite_code_factory: Callable[..., tuple],
+) -> None:
     """测试未到期续期 - 从当前到期日顺延 30 天。"""
-    admin_user = db_session._test_admin_user  # type: ignore[attr-defined]
-    results = await generate_invite_codes(
-        db=db_session, count=2, created_by=admin_user.id
-    )
-    await db_session.commit()
+    invite1, raw_code1 = await invite_code_factory(created_by=admin_user.id)
+    invite2, raw_code2 = await invite_code_factory(created_by=admin_user.id)
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        # 注册
-        reg_resp = await client.post(
-            "/auth/register",
-            json={
-                "email": "renew@example.com",
-                "password": "password-12345",
-                "invite_code": results[0][1],
-            },
-        )
+    # 注册
+    reg_resp = await client.post(
+        "/auth/register",
+        json={
+            "email": "renew@example.com",
+            "password": "password-12345",
+            "invite_code": raw_code1,
+        },
+    )
     assert reg_resp.status_code == 200
     token = reg_resp.json()["access_token"]
 
-    # 查询续期前的到期时间
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        before_resp = await client.get(
-            "/me/membership", headers={"Authorization": f"Bearer {token}"}
-        )
-    before_expires = before_resp.json()["expires_at"]
-
     # 续期
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        renew_resp = await client.post(
-            "/auth/renew",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"invite_code": results[1][1]},
-        )
+    renew_resp = await client.post(
+        "/auth/renew",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"invite_code": raw_code2},
+    )
     assert renew_resp.status_code == 200
     renew_data = renew_resp.json()
     assert renew_data["membership_status"] == "active"
@@ -657,33 +433,29 @@ async def test_renew_membership_active(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_renew_membership_expired(db_session: AsyncSession) -> None:
+async def test_renew_membership_expired(
+    client: AsyncClient,
+    admin_user: User,
+    invite_code_factory: Callable[..., tuple],
+    db_session: AsyncSession,
+) -> None:
     """测试已到期续期 - 从兑换当天重新计算 30 天。"""
-    admin_user = db_session._test_admin_user  # type: ignore[attr-defined]
-    results = await generate_invite_codes(
-        db=db_session, count=2, created_by=admin_user.id
-    )
-    await db_session.commit()
+    invite1, raw_code1 = await invite_code_factory(created_by=admin_user.id)
+    invite2, raw_code2 = await invite_code_factory(created_by=admin_user.id)
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        # 注册
-        reg_resp = await client.post(
-            "/auth/register",
-            json={
-                "email": "renew2@example.com",
-                "password": "password-12345",
-                "invite_code": results[0][1],
-            },
-        )
+    # 注册
+    reg_resp = await client.post(
+        "/auth/register",
+        json={
+            "email": "renew2@example.com",
+            "password": "password-12345",
+            "invite_code": raw_code1,
+        },
+    )
     assert reg_resp.status_code == 200
     token = reg_resp.json()["access_token"]
 
-    # 手动将会员到期时间设为过去
-    from sqlalchemy import select as sa_select
-
-    from app.models.user import User
-
+    # 手动将会员到期时间设为过去（status 不持久化 expired）
     user_stmt = sa_select(User).where(User.email == "renew2@example.com")
     user_result = await db_session.execute(user_stmt)
     user = user_result.scalar_one()
@@ -692,16 +464,14 @@ async def test_renew_membership_expired(db_session: AsyncSession) -> None:
     subscription_result = await db_session.execute(subscription_stmt)
     subscription = subscription_result.scalar_one()
     subscription.expires_at = datetime.now(UTC) - timedelta(days=5)
-    subscription.status = "expired"
     await db_session.commit()
 
     # 续期
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        renew_resp = await client.post(
-            "/auth/renew",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"invite_code": results[1][1]},
-        )
+    renew_resp = await client.post(
+        "/auth/renew",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"invite_code": raw_code2},
+    )
     assert renew_resp.status_code == 200
     renew_data = renew_resp.json()
     assert renew_data["membership_status"] == "active"
@@ -714,52 +484,45 @@ async def test_renew_membership_expired(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_revoke_invite_code(db_session: AsyncSession) -> None:
+async def test_revoke_invite_code(
+    client: AsyncClient,
+    admin_user: User,
+    invite_code_factory: Callable[..., tuple],
+) -> None:
     """测试作废未使用邀请码。"""
-    admin_user = db_session._test_admin_user  # type: ignore[attr-defined]
-    results = await generate_invite_codes(
-        db=db_session, count=1, created_by=admin_user.id
-    )
-    await db_session.commit()
-    invite = results[0][0]
+    invite, raw_code = await invite_code_factory(created_by=admin_user.id)
 
     headers = _auth_headers(admin_user.id)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            f"/admin/invite-codes/{invite.id}/revoke", headers=headers
-        )
+    response = await client.post(
+        f"/admin/invite-codes/{invite.id}/revoke", headers=headers
+    )
     assert response.status_code == 200
     assert response.json()["status"] == "revoked"
 
 
 @pytest.mark.asyncio
-async def test_revoke_used_invite_code_fails(db_session: AsyncSession) -> None:
+async def test_revoke_used_invite_code_fails(
+    client: AsyncClient,
+    admin_user: User,
+    invite_code_factory: Callable[..., tuple],
+) -> None:
     """测试作废已使用邀请码失败。"""
-    admin_user = db_session._test_admin_user  # type: ignore[attr-defined]
-    results = await generate_invite_codes(
-        db=db_session, count=1, created_by=admin_user.id
-    )
-    await db_session.commit()
-    invite = results[0][0]
-    raw_code = results[0][1]
+    invite, raw_code = await invite_code_factory(created_by=admin_user.id)
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        # 先注册使用邀请码
-        await client.post(
-            "/auth/register",
-            json={
-                "email": "used@example.com",
-                "password": "password-12345",
-                "invite_code": raw_code,
-            },
-        )
-        # 尝试作废已使用邀请码
-        headers = _auth_headers(admin_user.id)
-        response = await client.post(
-            f"/admin/invite-codes/{invite.id}/revoke", headers=headers
-        )
+    # 先注册使用邀请码
+    await client.post(
+        "/auth/register",
+        json={
+            "email": "used@example.com",
+            "password": "password-12345",
+            "invite_code": raw_code,
+        },
+    )
+    # 尝试作废已使用邀请码
+    headers = _auth_headers(admin_user.id)
+    response = await client.post(
+        f"/admin/invite-codes/{invite.id}/revoke", headers=headers
+    )
     assert response.status_code == 400
     assert "仅未使用" in response.json()["detail"]
 
@@ -770,16 +533,17 @@ async def test_revoke_used_invite_code_fails(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_invite_codes(db_session: AsyncSession) -> None:
+async def test_list_invite_codes(
+    client: AsyncClient,
+    admin_user: User,
+    invite_code_factory: Callable[..., tuple],
+) -> None:
     """测试查询邀请码列表。"""
-    admin_user = db_session._test_admin_user  # type: ignore[attr-defined]
-    await generate_invite_codes(db=db_session, count=3, created_by=admin_user.id)
-    await db_session.commit()
+    for _ in range(3):
+        await invite_code_factory(created_by=admin_user.id)
 
     headers = _auth_headers(admin_user.id)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get("/admin/invite-codes", headers=headers)
+    response = await client.get("/admin/invite-codes", headers=headers)
     assert response.status_code == 200
     data = response.json()
     assert data["total"] >= 3
@@ -787,48 +551,46 @@ async def test_list_invite_codes(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_invite_codes_by_status(db_session: AsyncSession) -> None:
+async def test_list_invite_codes_by_status(
+    client: AsyncClient,
+    admin_user: User,
+    invite_code_factory: Callable[..., tuple],
+) -> None:
     """测试按状态筛选邀请码列表。"""
-    admin_user = db_session._test_admin_user  # type: ignore[attr-defined]
-    await generate_invite_codes(db=db_session, count=2, created_by=admin_user.id)
-    await db_session.commit()
+    for _ in range(2):
+        await invite_code_factory(created_by=admin_user.id)
 
     headers = _auth_headers(admin_user.id)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get(
-            "/admin/invite-codes?status=unused", headers=headers
-        )
+    response = await client.get(
+        "/admin/invite-codes?status=unused", headers=headers
+    )
     assert response.status_code == 200
     data = response.json()
     assert all(item["status"] == "unused" for item in data["items"])
 
 
 @pytest.mark.asyncio
-async def test_list_subscribers(db_session: AsyncSession) -> None:
+async def test_list_subscribers(
+    client: AsyncClient,
+    admin_user: User,
+    invite_code_factory: Callable[..., tuple],
+) -> None:
     """测试查询会员账户列表。"""
-    admin_user = db_session._test_admin_user  # type: ignore[attr-defined]
-    results = await generate_invite_codes(
-        db=db_session, count=1, created_by=admin_user.id
-    )
-    await db_session.commit()
+    invite, raw_code = await invite_code_factory(created_by=admin_user.id)
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        # 注册一个新用户
-        await client.post(
-            "/auth/register",
-            json={
-                "email": "member@example.com",
-                "password": "password-12345",
-                "invite_code": results[0][1],
-            },
-        )
+    # 注册一个新用户
+    await client.post(
+        "/auth/register",
+        json={
+            "email": "member@example.com",
+            "password": "password-12345",
+            "invite_code": raw_code,
+        },
+    )
 
     # 查询会员列表
     headers = _auth_headers(admin_user.id)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get("/admin/members", headers=headers)
+    response = await client.get("/admin/members", headers=headers)
     assert response.status_code == 200
     data = response.json()
     assert data["total"] >= 2  # admin + 新注册用户
@@ -838,42 +600,36 @@ async def test_list_subscribers(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_member_redemptions(db_session: AsyncSession) -> None:
+async def test_get_member_redemptions(
+    client: AsyncClient,
+    admin_user: User,
+    invite_code_factory: Callable[..., tuple],
+    db_session: AsyncSession,
+) -> None:
     """测试查询用户兑换记录。"""
-    admin_user = db_session._test_admin_user  # type: ignore[attr-defined]
-    results = await generate_invite_codes(
-        db=db_session, count=1, created_by=admin_user.id
-    )
-    await db_session.commit()
+    invite, raw_code = await invite_code_factory(created_by=admin_user.id)
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        # 注册
-        reg_resp = await client.post(
-            "/auth/register",
-            json={
-                "email": "redemption@example.com",
-                "password": "password-12345",
-                "invite_code": results[0][1],
-            },
-        )
+    # 注册
+    reg_resp = await client.post(
+        "/auth/register",
+        json={
+            "email": "redemption@example.com",
+            "password": "password-12345",
+            "invite_code": raw_code,
+        },
+    )
     assert reg_resp.status_code == 200
 
     # 查找用户
-    from sqlalchemy import select as sa_select
-
-    from app.models.user import User
-
     user_stmt = sa_select(User).where(User.email == "redemption@example.com")
     user_result = await db_session.execute(user_stmt)
     user = user_result.scalar_one()
 
     # 查询兑换记录
     headers = _auth_headers(admin_user.id)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get(
-            f"/admin/members/{user.id}/redemptions", headers=headers
-        )
+    response = await client.get(
+        f"/admin/members/{user.id}/redemptions", headers=headers
+    )
     assert response.status_code == 200
     data = response.json()
     assert len(data) >= 1

@@ -5,7 +5,7 @@
 - observe_20: monitor_limit=20, display_name=观察版
 - research_50: monitor_limit=50, display_name=研究版
 - 未知 plan_code 查询抛 ValueError（旧为 KeyError）
-- plan_codes.py 提供 DEFAULT_PLAN_CODE/ADMIN_PLAN_CODE 纯字符串常量
+- plan_codes.py 提供 DEFAULT_PLAN_CODE 纯字符串常量（管理员无套餐，AGENTS.md 规则 8）
 - plan_contract.py 模块已删除（import 应失败）
 
 测试策略：
@@ -20,7 +20,7 @@ import importlib
 
 import pytest
 
-from app.constants.plan_codes import ADMIN_PLAN_CODE, DEFAULT_PLAN_CODE
+from app.constants.plan_codes import DEFAULT_PLAN_CODE
 from app.services.plan_service import get_monitor_limit, get_plan
 
 # ============================================================
@@ -42,11 +42,6 @@ def test_plan_contract_module_removed():
 def test_default_plan_code_is_observe_20():
     """DEFAULT_PLAN_CODE 必须为 observe_20（旧数据迁移默认值）。"""
     assert DEFAULT_PLAN_CODE == "observe_20"
-
-
-def test_admin_plan_code_is_research_50():
-    """ADMIN_PLAN_CODE 必须为 research_50（管理员默认套餐）。"""
-    assert ADMIN_PLAN_CODE == "research_50"
 
 
 # ============================================================

@@ -25,7 +25,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.subscription import Subscription
 from app.models.user import Role, User, UserRole
-from app.services.subscription_service import get_effective_subscription_status
+from app.services.subscription_service import (
+    get_effective_subscription_status,
+    get_subscription_status,
+    list_subscribers,
+)
+
+# [Subscription] - 描述: 测试用默认权益快照（满足 entitlement_snapshot NOT NULL 约束）
+_DEFAULT_SNAPSHOT = {
+    "monitor_limit": 20,
+    "notification_channel_limit": 1,
+    "message_retention_days": 30,
+    "features": [],
+}
 
 
 def _list_table_names_sync(sync_session) -> set[str]:
@@ -38,19 +50,19 @@ def _list_table_names_sync(sync_session) -> set[str]:
     return set(inspect(conn).get_table_names())
 
 
-async def _ensure_user_role(db: AsyncSession) -> Role:
-    """确保 user 角色存在并返回。"""
-    result = await db.execute(select(Role).where(Role.name == "user"))
+async def _ensure_member_role(db: AsyncSession) -> Role:
+    """确保 member 角色存在并返回（Phase 10：roles 统一为 admin/member）。"""
+    result = await db.execute(select(Role).where(Role.name == "member"))
     role = result.scalar_one_or_none()
     if role is None:
-        role = Role(id=uuid.uuid4(), name="user", description="普通用户")
+        role = Role(id=uuid.uuid4(), name="member", description="普通会员")
         db.add(role)
         await db.flush()
     return role
 
 
 async def _create_user(db: AsyncSession, email: str | None = None) -> User:
-    """创建普通用户（user 角色）。"""
+    """创建普通用户（member 角色，Phase 10 统一）。"""
     email = email or f"sub_{uuid.uuid4().hex[:8]}@test.com"
     user = User(
         id=uuid.uuid4(),
@@ -62,7 +74,7 @@ async def _create_user(db: AsyncSession, email: str | None = None) -> User:
         updated_at=datetime.now(UTC),
     )
     db.add(user)
-    role = await _ensure_user_role(db)
+    role = await _ensure_member_role(db)
     db.add(UserRole(user_id=user.id, role_id=role.id))
     await db.flush()
     return user
@@ -76,8 +88,13 @@ def _build_subscription(
     expires_at: datetime | None = None,
     plan_code: str = "observe_20",
     source: str = "invite",
+    entitlement_snapshot: dict | None = _DEFAULT_SNAPSHOT,
 ) -> Subscription:
-    """构造 Subscription 对象（不写库，由调用方 add + flush）。"""
+    """构造 Subscription 对象（不写库，由调用方 add + flush）。
+
+    entitlement_snapshot 默认提供有效快照（满足 NOT NULL 约束）；
+    测试 NOT NULL 拒绝时显式传入 None。
+    """
     now = datetime.now(UTC)
     return Subscription(
         id=uuid.uuid4(),
@@ -86,7 +103,7 @@ def _build_subscription(
         status=status,
         starts_at=starts_at or now,
         expires_at=expires_at or (now + timedelta(days=30)),
-        entitlement_snapshot=None,
+        entitlement_snapshot=entitlement_snapshot,
         source=source,
         created_by=None,
     )
@@ -224,6 +241,128 @@ async def test_subscription_status_literal(db_session: AsyncSession) -> None:
     user = await _create_user(db_session)
     status, _ = await get_effective_subscription_status(db_session, user.id)
     assert status in ("active", "expired", "none")
+
+
+# ============================================================
+# Phase 8 RED: status 枚举 / entitlement_snapshot NOT NULL / source 枚举
+# 设计要点：expired 不持久化（实时计算），DB CheckConstraint 应拒绝 'expired'；
+# status 允许 active/revoked/cancelled；source 允许 invite/admin_grant/migration；
+# entitlement_snapshot 必须非空。
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_subscription_status_revoked_accepted(db_session: AsyncSession) -> None:
+    """status='revoked' 应可写入（管理员撤销订阅）。"""
+    user = await _create_user(db_session)
+    sub = _build_subscription(user.id, status="revoked")
+    db_session.add(sub)
+    await db_session.flush()  # 不抛异常即通过
+
+    stmt = select(Subscription).where(Subscription.user_id == user.id)
+    result = await db_session.execute(stmt)
+    fetched = result.scalar_one()
+    assert fetched.status == "revoked"
+
+
+@pytest.mark.asyncio
+async def test_subscription_status_cancelled_accepted(db_session: AsyncSession) -> None:
+    """status='cancelled' 应可写入（用户主动取消）。"""
+    user = await _create_user(db_session)
+    sub = _build_subscription(user.id, status="cancelled")
+    db_session.add(sub)
+    await db_session.flush()
+
+    stmt = select(Subscription).where(Subscription.user_id == user.id)
+    result = await db_session.execute(stmt)
+    fetched = result.scalar_one()
+    assert fetched.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_subscription_status_expired_rejected(db_session: AsyncSession) -> None:
+    """status='expired' 应被 DB CheckConstraint 拒绝（expired 实时计算，不持久化）。"""
+    user = await _create_user(db_session)
+    sub = _build_subscription(user.id, status="expired")
+    db_session.add(sub)
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+
+
+@pytest.mark.asyncio
+async def test_subscription_entitlement_snapshot_not_null(db_session: AsyncSession) -> None:
+    """entitlement_snapshot=None 应被 DB NOT NULL 约束拒绝。"""
+    user = await _create_user(db_session)
+    sub = _build_subscription(user.id, entitlement_snapshot=None)
+    db_session.add(sub)
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+
+
+@pytest.mark.asyncio
+async def test_subscription_source_migration_accepted(db_session: AsyncSession) -> None:
+    """source='migration' 应可写入（旧 memberships 数据迁移来源）。"""
+    user = await _create_user(db_session)
+    sub = _build_subscription(user.id, source="migration")
+    db_session.add(sub)
+    await db_session.flush()
+
+    stmt = select(Subscription).where(Subscription.user_id == user.id)
+    result = await db_session.execute(stmt)
+    fetched = result.scalar_one()
+    assert fetched.source == "migration"
+
+
+# ============================================================
+# Phase 8 RED: get_subscription_status / list_subscribers 无写副作用
+# 设计要点：expired 实时计算，不持久化到 status 字段。
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_get_subscription_status_no_side_effect(db_session: AsyncSession) -> None:
+    """调用 get_subscription_status 后，过期订阅的 status 仍为 'active'（不写 expired）。"""
+    user = await _create_user(db_session)
+    now = datetime.now(UTC)
+    sub = _build_subscription(
+        user.id,
+        status="active",
+        starts_at=now - timedelta(days=10),
+        expires_at=now - timedelta(days=1),  # 已过期
+    )
+    db_session.add(sub)
+    await db_session.flush()
+
+    await get_subscription_status(db_session, user.id)
+
+    # 重新查询验证 status 未被写为 'expired'
+    stmt = select(Subscription).where(Subscription.user_id == user.id)
+    result = await db_session.execute(stmt)
+    fetched = result.scalar_one()
+    assert fetched.status == "active"
+
+
+@pytest.mark.asyncio
+async def test_list_subscribers_no_expired_write(db_session: AsyncSession) -> None:
+    """调用 list_subscribers 后，过期订阅的 status 仍为 'active'（不写 expired）。"""
+    user = await _create_user(db_session)
+    now = datetime.now(UTC)
+    sub = _build_subscription(
+        user.id,
+        status="active",
+        starts_at=now - timedelta(days=10),
+        expires_at=now - timedelta(days=1),  # 已过期
+    )
+    db_session.add(sub)
+    await db_session.flush()
+
+    await list_subscribers(db_session)
+
+    # 重新查询验证 status 未被写为 'expired'
+    stmt = select(Subscription).where(Subscription.user_id == user.id)
+    result = await db_session.execute(stmt)
+    fetched = result.scalar_one()
+    assert fetched.status == "active"
 
 
 if __name__ == "__main__":

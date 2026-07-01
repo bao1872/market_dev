@@ -44,7 +44,7 @@ async def _ensure_role(db: AsyncSession, name: str) -> Role:
 
 
 async def _create_normal_user(db: AsyncSession) -> User:
-    """创建 active 状态的普通用户（仅 user 角色，无 admin 角色）。"""
+    """创建 active 状态的普通用户（仅 member 角色，无 admin 角色）。"""
     user = User(
         id=uuid.uuid4(),
         email=f"strat_auth_{uuid.uuid4().hex[:8]}@test.com",
@@ -53,7 +53,7 @@ async def _create_normal_user(db: AsyncSession) -> User:
         timezone="Asia/Shanghai",
     )
     db.add(user)
-    user_role = await _ensure_role(db, "user")
+    user_role = await _ensure_role(db, "member")
     db.add(UserRole(user_id=user.id, role_id=user_role.id))
     await db.flush()
     return user

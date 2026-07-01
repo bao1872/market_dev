@@ -20,9 +20,7 @@
 
 from __future__ import annotations
 
-import asyncio
-from datetime import date, datetime
-from typing import Any
+from datetime import date
 
 import pytest
 import pytest_asyncio
@@ -35,12 +33,11 @@ from app.services.mootdx_calendar_provider import (
     CALENDAR_STATUS_OPEN,
     CALENDAR_STATUS_UNKNOWN,
     MANUAL_OVERRIDE_SOURCE,
-    MOOTDX_HOLIDAY_SOURCE,
     MOOTDX_HISTORICAL_SOURCE,
+    MOOTDX_HOLIDAY_SOURCE,
     build_calendar_for_year,
     is_trading_day_by_mootdx,
 )
-
 
 # ---------------------------------------------------------------------------
 # Provider 层测试
@@ -69,7 +66,7 @@ def test_historical_trading_day_2026_06_29():
     """2026-06-29 在历史覆盖内且为交易日 -> OPEN + MOOTDX_HISTORICAL。"""
     df = build_calendar_for_year(2026)
     row = df[df["date"] == date(2026, 6, 29)].iloc[0]
-    assert row["is_trading_day"] == True
+    assert row["is_trading_day"]
     assert row["status"] == CALENDAR_STATUS_OPEN
     assert row["source"] == MOOTDX_HISTORICAL_SOURCE
 
@@ -78,7 +75,7 @@ def test_historical_weekend_2026_06_27():
     """2026-06-27 周六 -> CLOSED + MOOTDX_HISTORICAL。"""
     df = build_calendar_for_year(2026)
     row = df[df["date"] == date(2026, 6, 27)].iloc[0]
-    assert row["is_trading_day"] == False
+    assert not row["is_trading_day"]
     assert row["status"] == CALENDAR_STATUS_CLOSED
     assert row["source"] == MOOTDX_HISTORICAL_SOURCE
 
@@ -87,7 +84,7 @@ def test_historical_holiday_2026_01_01():
     """2026-01-01 元旦 -> CLOSED + MOOTDX_HISTORICAL。"""
     df = build_calendar_for_year(2026)
     row = df[df["date"] == date(2026, 1, 1)].iloc[0]
-    assert row["is_trading_day"] == False
+    assert not row["is_trading_day"]
     assert row["status"] == CALENDAR_STATUS_CLOSED
     assert row["source"] == MOOTDX_HISTORICAL_SOURCE
 
@@ -104,7 +101,7 @@ def test_future_date_uses_mootdx_holiday_source():
     assert row["source"] in (MOOTDX_HOLIDAY_SOURCE, MOOTDX_HISTORICAL_SOURCE)
     if row["source"] == MOOTDX_HOLIDAY_SOURCE:
         # 未来工作日，mootdx holiday() 返回 False 才标记为 OPEN
-        assert row["is_trading_day"] == True
+        assert row["is_trading_day"]
         assert row["status"] == CALENDAR_STATUS_OPEN
 
 
@@ -287,7 +284,7 @@ async def test_service_no_db_uses_mootdx(db_session):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_market_status_response_has_diagnostic_fields(db_session):
+async def test_market_status_response_has_diagnostic_fields(db_session, monkeypatch):
     """market/status 返回诊断字段。"""
     from app.api.market import get_market_status
 
@@ -303,6 +300,11 @@ async def test_market_status_response_has_diagnostic_fields(db_session):
     )
     await db_session.flush()
 
+    # [CalendarTest] - 描述: 固定 market/status 使用的当前日期，避免硬编码日期随运行日失效
+    monkeypatch.setattr(
+        "app.api.market.shanghai_business_date", lambda: date(2026, 6, 29)
+    )
+
     resp = await get_market_status(db_session)
     assert resp.calendar_date == date(2026, 6, 29)
     assert resp.calendar_status == CALENDAR_STATUS_OPEN
@@ -313,7 +315,7 @@ async def test_market_status_response_has_diagnostic_fields(db_session):
 
 
 @pytest.mark.asyncio
-async def test_market_status_unknown_shows_waiting_text(db_session):
+async def test_market_status_unknown_shows_waiting_text(db_session, monkeypatch):
     """DB UNKNOWN 时不显示休市，状态文案为交易日历待确认。"""
     from app.api.market import get_market_status
 
@@ -328,6 +330,11 @@ async def test_market_status_unknown_shows_waiting_text(db_session):
         )
     )
     await db_session.flush()
+
+    # [CalendarTest] - 描述: 固定 market/status 使用的当前日期，确保命中已种子的 UNKNOWN 记录
+    monkeypatch.setattr(
+        "app.api.market.shanghai_business_date", lambda: date(2026, 6, 29)
+    )
 
     resp = await get_market_status(db_session)
     assert resp.degraded is True

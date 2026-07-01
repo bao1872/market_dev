@@ -3,7 +3,7 @@
 验证返回字段：{plan_code, plan_name, monitor_limit, used, remaining, expires_at}
 - 普通用户 observe_20：monitor_limit=20，used=自选股 active 数，remaining=20-used
 - 普通用户 research_50：monitor_limit=50
-- 管理员：返回 ADMIN_PLAN_CODE (research_50)，monitor_limit=50
+- 管理员：plan_code=None，monitor_limit=None（无限制），无会员记录要求
 - 无会员记录：404
 - 已到期会员：仍返回套餐信息（status=expired）
 
@@ -188,8 +188,8 @@ async def test_entitlements_research_50_user(entitlements_client):
 
 
 @pytest.mark.asyncio
-async def test_entitlements_admin_returns_research_50(entitlements_client):
-    """管理员：返回 ADMIN_PLAN_CODE (research_50)，monitor_limit=50。"""
+async def test_entitlements_admin_has_no_plan(entitlements_client):
+    """管理员：plan_code=None，monitor_limit=None（无限制），无会员记录要求（AGENTS.md 规则 8）。"""
     client, db = entitlements_client
     admin = await _create_admin(db)
     await db.flush()
@@ -198,9 +198,11 @@ async def test_entitlements_admin_returns_research_50(entitlements_client):
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data["plan_code"] == "research_50"
-    assert data["plan_name"] == "研究版"
-    assert data["monitor_limit"] == 50
+    assert data["plan_code"] is None
+    assert data["plan_name"] is None
+    assert data["monitor_limit"] is None
+    assert data["remaining"] is None
+    assert data["expires_at"] is None
 
 
 @pytest.mark.asyncio
@@ -218,8 +220,8 @@ async def test_entitlements_no_membership_returns_404(entitlements_client):
         updated_at=datetime.now(UTC),
     )
     db.add(user)
-    user_role = await _ensure_role(db, "user")
-    db.add(UserRole(user_id=user.id, role_id=user_role.id))
+    member_role = await _ensure_role(db, "member")
+    db.add(UserRole(user_id=user.id, role_id=member_role.id))
     await db.flush()
 
     resp = await client.get("/me/entitlements", headers=_auth_headers(user.id))
@@ -251,9 +253,8 @@ async def test_entitlements_expired_membership_still_returns_plan(entitlements_c
     """已到期订阅：仍返回套餐信息（status=expired，monitor_limit 不变）。"""
     client, db = entitlements_client
     user, subscription = await _create_normal_user_with_membership(db, "observe_20", grant_months=1)
-    # 手动设为已到期
+    # [Subscription] - 描述: 手动设为已到期（Phase 8 后 expired 不持久化，仅 expires_at<now 实时判断）
     subscription.expires_at = datetime.now(UTC) - timedelta(days=1)
-    subscription.status = "expired"
     await db.flush()
 
     resp = await client.get("/me/entitlements", headers=_auth_headers(user.id))

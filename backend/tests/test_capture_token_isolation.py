@@ -48,7 +48,7 @@ async def _ensure_role(db: AsyncSession, name: str) -> Role:
 
 
 async def _create_active_user(db: AsyncSession) -> User:
-    """创建 active 状态的普通用户（user 角色），用于 token 隔离测试。"""
+    """创建 active 状态的普通用户（member 角色），用于 token 隔离测试。"""
     now = datetime.now(UTC)
     user = User(
         id=uuid.uuid4(),
@@ -60,7 +60,7 @@ async def _create_active_user(db: AsyncSession) -> User:
         updated_at=now,
     )
     db.add(user)
-    user_role = await _ensure_role(db, "user")
+    user_role = await _ensure_role(db, "member")
     db.add(UserRole(user_id=user.id, role_id=user_role.id))
     await db.flush()
     return user

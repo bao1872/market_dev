@@ -91,7 +91,41 @@ async def _create_subscription(
     plan_code: str = "observe_20",
     expired: bool = False,
 ) -> Subscription:
-    """创建订阅记录（expired=True 时 expires_at < now）。"""
+    """创建订阅记录（expired=True 时 expires_at < now）。
+
+    [Subscription] - 描述: entitlement_snapshot 必须为非空 dict（Phase 8 NOT NULL 约束），
+    从 plans 表的套餐定义构造，与生产 subscription_service._build_entitlement_snapshot 语义一致。
+    """
+    # [Plan] - 描述: 套餐 entitlement_snapshot 预定义（与 048_plans_table.py 数据对齐）
+    _plan_entitlements = {
+        "observe_20": {
+            "monitor_limit": 20,
+            "notification_channel_limit": 1,
+            "message_retention_days": 30,
+            "features": [
+                "trend_selection",
+                "stock_detail",
+                "node_monitor",
+                "in_app_message",
+                "feishu_notification",
+                "stock_memo",
+            ],
+        },
+        "research_50": {
+            "monitor_limit": 50,
+            "notification_channel_limit": 3,
+            "message_retention_days": 180,
+            "features": [
+                "trend_selection",
+                "stock_detail",
+                "node_monitor",
+                "in_app_message",
+                "feishu_notification",
+                "stock_memo",
+                "advanced_export",
+            ],
+        },
+    }
     now = datetime.now(UTC)
     if expired:
         starts_at = now - timedelta(days=40)
@@ -106,7 +140,8 @@ async def _create_subscription(
         status="active",
         starts_at=starts_at,
         expires_at=expires_at,
-        entitlement_snapshot=None,
+        # [Subscription] - 描述: 必填字段，从预定义套餐构造（与 plans 表对齐）
+        entitlement_snapshot=_plan_entitlements.get(plan_code, _plan_entitlements["observe_20"]),
         source="invite",
         created_by=None,
     )
@@ -138,7 +173,7 @@ async def test_admin_without_subscription(db_session: AsyncSession) -> None:
 @pytest.mark.asyncio
 async def test_member_with_observe_20_active(db_session: AsyncSession) -> None:
     """member 用户有 observe_20 有效订阅 → is_admin=False, subscription_active=True, plan_code="observe_20"。"""
-    member = await _create_user_with_roles(db_session, ["user"])
+    member = await _create_user_with_roles(db_session, ["member"])
     await _create_subscription(db_session, member.id, plan_code="observe_20", expired=False)
     ctx = await get_access_context(db_session, member)
 
@@ -168,7 +203,7 @@ async def test_member_with_observe_20_active(db_session: AsyncSession) -> None:
 @pytest.mark.asyncio
 async def test_member_with_research_50_active(db_session: AsyncSession) -> None:
     """member 用户有 research_50 有效订阅 → plan_code="research_50", features 含 7 项, limits monitor_limit=50。"""
-    member = await _create_user_with_roles(db_session, ["user"])
+    member = await _create_user_with_roles(db_session, ["member"])
     await _create_subscription(db_session, member.id, plan_code="research_50", expired=False)
     ctx = await get_access_context(db_session, member)
 
@@ -188,7 +223,7 @@ async def test_member_with_research_50_active(db_session: AsyncSession) -> None:
 @pytest.mark.asyncio
 async def test_member_with_expired_subscription(db_session: AsyncSession) -> None:
     """member 用户订阅已过期 → subscription_active=False, plan_code 仍记录原套餐, plan_display_name 保留。"""
-    member = await _create_user_with_roles(db_session, ["user"])
+    member = await _create_user_with_roles(db_session, ["member"])
     await _create_subscription(db_session, member.id, plan_code="observe_20", expired=True)
     ctx = await get_access_context(db_session, member)
 
@@ -206,7 +241,7 @@ async def test_member_with_expired_subscription(db_session: AsyncSession) -> Non
 @pytest.mark.asyncio
 async def test_member_without_subscription(db_session: AsyncSession) -> None:
     """member 用户无订阅记录 → subscription_active=False, plan_code=None, features=[], limits={}。"""
-    member = await _create_user_with_roles(db_session, ["user"])
+    member = await _create_user_with_roles(db_session, ["member"])
     ctx = await get_access_context(db_session, member)
 
     assert ctx.is_admin is False
@@ -252,7 +287,7 @@ async def test_require_admin_passes_for_admin(db_session: AsyncSession) -> None:
 @pytest.mark.asyncio
 async def test_require_admin_fails_for_member(db_session: AsyncSession) -> None:
     """require_admin 依赖对 member 用户返回 403。"""
-    member = await _create_user_with_roles(db_session, ["user"])
+    member = await _create_user_with_roles(db_session, ["member"])
     ctx = await get_access_context(db_session, member)
 
     with pytest.raises(HTTPException) as exc_info:
@@ -278,7 +313,7 @@ async def test_require_active_subscription_passes_for_admin(db_session: AsyncSes
 @pytest.mark.asyncio
 async def test_require_active_subscription_fails_for_expired(db_session: AsyncSession) -> None:
     """require_active_subscription 对过期订阅返回 403。"""
-    member = await _create_user_with_roles(db_session, ["user"])
+    member = await _create_user_with_roles(db_session, ["member"])
     await _create_subscription(db_session, member.id, plan_code="observe_20", expired=True)
     ctx = await get_access_context(db_session, member)
 
@@ -296,7 +331,7 @@ async def test_require_active_subscription_fails_for_expired(db_session: AsyncSe
 @pytest.mark.asyncio
 async def test_require_feature_passes(db_session: AsyncSession) -> None:
     """require_feature("trend_selection") 对 observe_20 用户通过。"""
-    member = await _create_user_with_roles(db_session, ["user"])
+    member = await _create_user_with_roles(db_session, ["member"])
     await _create_subscription(db_session, member.id, plan_code="observe_20", expired=False)
     ctx = await get_access_context(db_session, member)
 
@@ -308,7 +343,7 @@ async def test_require_feature_passes(db_session: AsyncSession) -> None:
 @pytest.mark.asyncio
 async def test_require_feature_fails(db_session: AsyncSession) -> None:
     """require_feature("advanced_export") 对 observe_20 用户返回 403。"""
-    member = await _create_user_with_roles(db_session, ["user"])
+    member = await _create_user_with_roles(db_session, ["member"])
     await _create_subscription(db_session, member.id, plan_code="observe_20", expired=False)
     ctx = await get_access_context(db_session, member)
 
@@ -368,7 +403,7 @@ def test_access_context_has_all_11_fields() -> None:
 @pytest.mark.asyncio
 async def test_require_quota_returns_limit_for_member(db_session: AsyncSession) -> None:
     """require_quota("monitor_limit") 对 observe_20 用户返回 20。"""
-    member = await _create_user_with_roles(db_session, ["user"])
+    member = await _create_user_with_roles(db_session, ["member"])
     await _create_subscription(db_session, member.id, plan_code="observe_20", expired=False)
     ctx = await get_access_context(db_session, member)
 
@@ -393,7 +428,7 @@ async def test_require_quota_missing_for_member_without_subscription(
     db_session: AsyncSession,
 ) -> None:
     """require_quota 对无订阅 member（quota 不在 limits）返回 403。"""
-    member = await _create_user_with_roles(db_session, ["user"])
+    member = await _create_user_with_roles(db_session, ["member"])
     ctx = await get_access_context(db_session, member)
     assert ctx.limits == {}
 

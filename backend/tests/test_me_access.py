@@ -111,7 +111,7 @@ async def _create_normal_user_with_membership(
 
 
 async def _create_member_without_subscription(db: AsyncSession) -> User:
-    """创建无订阅记录的普通用户（仅 user 角色，无 subscription）。"""
+    """创建无订阅记录的普通用户（仅 member 角色，无 subscription）。"""
     user = User(
         id=uuid.uuid4(),
         email=f"nomember_{uuid.uuid4().hex[:8]}@test.com",
@@ -122,8 +122,8 @@ async def _create_member_without_subscription(db: AsyncSession) -> User:
         updated_at=datetime.now(UTC),
     )
     db.add(user)
-    user_role = await _ensure_role(db, "user")
-    db.add(UserRole(user_id=user.id, role_id=user_role.id))
+    member_role = await _ensure_role(db, "member")
+    db.add(UserRole(user_id=user.id, role_id=member_role.id))
     await db.flush()
     return user
 
@@ -214,7 +214,7 @@ async def test_me_access_member_active(
     assert data["limits"]["monitor_limit"] == 20
     assert data["limits"]["notification_channel_limit"] == 1
     assert data["limits"]["message_retention_days"] == 30
-    assert "user" in data["roles"]
+    assert "member" in data["roles"]
     assert data["user_id"] == str(user.id)
 
 
@@ -225,9 +225,8 @@ async def test_me_access_member_expired(
     """member 订阅过期：subscription_active=False，plan_code 仍保留（前端降级提示）。"""
     client, db = access_client
     user, subscription = await _create_normal_user_with_membership(db, "observe_20", grant_months=1)
-    # [Test] - 描述: 手动设为已到期，验证 get_access_context 实时计算为 expired
+    # [Test] - 描述: 手动设为已到期（Phase 8 后 expired 不持久化，仅 expires_at<now 实时计算为过期）
     subscription.expires_at = datetime.now(UTC) - timedelta(days=1)
-    subscription.status = "expired"
     await db.flush()
 
     resp = await client.get("/me/access", headers=_auth_headers(user.id))

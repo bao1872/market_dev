@@ -61,7 +61,7 @@ async def _create_admin(db: AsyncSession) -> User:
     )
     db.add(admin)
     admin_role = await _ensure_role(db, "admin")
-    await _ensure_role(db, "user")
+    await _ensure_role(db, "member")
     db.add(UserRole(user_id=admin.id, role_id=admin_role.id))
     await db.flush()
     return admin

@@ -3,7 +3,7 @@
 验证套餐定义从 plan_contract.py 字典迁移到 plans 表后的正确性：
 - plans 表存在 observe_20 / research_50 两条记录，字段值与 permission-matrix.md 一致
 - plan_service.get_plan 查询返回完整 Plan 对象，未知 plan_code 抛 ValueError
-- plan_codes.py 仅保留纯字符串常量 DEFAULT_PLAN_CODE / ADMIN_PLAN_CODE
+- plan_codes.py 仅保留纯字符串常量 DEFAULT_PLAN_CODE（管理员无套餐，AGENTS.md 规则 8）
 
 测试策略：
 - 使用 conftest 的 db_session fixture（PostgreSQL 测试库，已 alembic upgrade head）
@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select, text
 
-from app.constants.plan_codes import ADMIN_PLAN_CODE, DEFAULT_PLAN_CODE
+from app.constants.plan_codes import DEFAULT_PLAN_CODE
 from app.models.plan import Plan
 from app.services.plan_service import get_monitor_limit, get_plan
 
@@ -158,12 +158,10 @@ async def test_plan_service_get_monitor_limit_unknown_raises(db_session):
 
 
 def test_plan_codes_constants_exist():
-    """plan_codes.py 必须提供 DEFAULT_PLAN_CODE 和 ADMIN_PLAN_CODE 纯字符串常量。"""
+    """plan_codes.py 必须提供 DEFAULT_PLAN_CODE 纯字符串常量（管理员无套餐）。"""
     assert DEFAULT_PLAN_CODE == "observe_20"
-    assert ADMIN_PLAN_CODE == "research_50"
     # 必须是字符串类型（不是函数/对象）
     assert isinstance(DEFAULT_PLAN_CODE, str)
-    assert isinstance(ADMIN_PLAN_CODE, str)
 
 
 if __name__ == "__main__":

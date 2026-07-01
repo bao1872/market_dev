@@ -24,12 +24,12 @@ from sqlalchemy import select
 
 from app.core.security import get_password_hash
 from app.models.user import Role, User, UserRole
+from app.services.plan_service import get_monitor_limit
 from app.services.subscription_service import (
     generate_invite_codes,
     register_with_invite_code,
     renew_with_invite_code,
 )
-from app.services.plan_service import get_monitor_limit
 
 
 async def _ensure_admin_role(db_session) -> Role:
@@ -43,12 +43,12 @@ async def _ensure_admin_role(db_session) -> Role:
     return role
 
 
-async def _ensure_user_role(db_session) -> Role:
-    """确保 user 角色存在并返回。"""
-    result = await db_session.execute(select(Role).where(Role.name == "user"))
+async def _ensure_member_role(db_session) -> Role:
+    """确保 member 角色存在并返回（Phase 10：roles 统一为 admin/member）。"""
+    result = await db_session.execute(select(Role).where(Role.name == "member"))
     role = result.scalar_one_or_none()
     if role is None:
-        role = Role(id=uuid.uuid4(), name="user", description="普通用户")
+        role = Role(id=uuid.uuid4(), name="member", description="普通会员")
         db_session.add(role)
         await db_session.flush()
     return role
@@ -293,9 +293,8 @@ async def test_renew_expired_from_today(db_session):
     )
     await db_session.flush()
 
-    # 手动将会员设为已到期
+    # [Subscription] - 描述: 手动将会员设为已到期（Phase 8 后 expired 不持久化，仅设置 expires_at<now，实时计算判断为过期）
     subscription.expires_at = datetime.now(UTC) - dt_module.timedelta(days=5)
-    subscription.status = "expired"
     await db_session.flush()
 
     renew_start = datetime.now(UTC)

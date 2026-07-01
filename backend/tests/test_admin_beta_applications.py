@@ -39,9 +39,6 @@ from app.main import app
 from app.models.beta_application import BetaApplication
 from app.models.outbox import Outbox
 from app.models.user import Role, User, UserRole
-from app.schemas.beta_application import BetaApplicationCreate
-from app.services.beta_application_service import create_application
-
 
 # ============================================================
 # 测试 fixtures
@@ -76,10 +73,10 @@ async def admin_beta_db_session() -> AsyncGenerator[AsyncSession, None]:
             admin_role = Role(id=uuid.uuid4(), name="admin", description="管理员")
             session.add(admin_role)
 
-        user_role_stmt = select(Role).where(Role.name == "user")
+        user_role_stmt = select(Role).where(Role.name == "member")
         user_role = (await session.execute(user_role_stmt)).scalar_one_or_none()
         if user_role is None:
-            user_role = Role(id=uuid.uuid4(), name="user", description="普通用户")
+            user_role = Role(id=uuid.uuid4(), name="member", description="普通会员")
             session.add(user_role)
 
         await session.flush()

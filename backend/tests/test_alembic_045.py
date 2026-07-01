@@ -21,7 +21,6 @@ from pathlib import Path
 import pytest
 from sqlalchemy import text
 
-
 _MIGRATION_FILE = (
     Path(__file__).parent.parent
     / "alembic"
@@ -161,11 +160,11 @@ async def test_beta_applications_has_status_check_constraint(db_session):
     """status 列应有 CHECK 约束（限定 new/contacted/approved/rejected/converted）。"""
     result = await db_session.execute(
         text(
-            "SELECT constraint_name, check_clause "
-            "FROM information_schema.check_constraints "
-            "WHERE constraint_name LIKE 'beta_applications_%status%' "
-            "OR (check_clause LIKE '%new%' AND check_clause LIKE '%contacted%' "
-            "    AND check_clause LIKE '%approved%' AND constraint_name LIKE 'beta_applications%')"
+            "SELECT conname, pg_get_constraintdef(oid) "
+            "FROM pg_constraint "
+            "WHERE conrelid = 'beta_applications'::regclass "
+            "AND contype = 'c' "
+            "AND conname LIKE 'beta_applications_%status%'"
         )
     )
     rows = result.all()
@@ -177,11 +176,11 @@ async def test_beta_applications_has_reason_code_check_constraint(db_session):
     """reason_code 列应有 CHECK 约束（限定 busy/too_many/forget/quant/other）。"""
     result = await db_session.execute(
         text(
-            "SELECT constraint_name, check_clause "
-            "FROM information_schema.check_constraints "
-            "WHERE constraint_name LIKE 'beta_applications_%reason%' "
-            "OR (check_clause LIKE '%busy%' AND check_clause LIKE '%too_many%' "
-            "    AND check_clause LIKE '%quant%' AND constraint_name LIKE 'beta_applications%')"
+            "SELECT conname, pg_get_constraintdef(oid) "
+            "FROM pg_constraint "
+            "WHERE conrelid = 'beta_applications'::regclass "
+            "AND contype = 'c' "
+            "AND conname LIKE 'beta_applications_%reason%'"
         )
     )
     rows = result.all()

@@ -1,13 +1,13 @@
 """bootstrap_admin CLI 测试（Task 4.1）。
 
 验证首位管理员账户创建逻辑：
-- 首次 bootstrap 成功创建 admin 用户（status=active）+ admin 角色 + research_50 订阅
+- 首次 bootstrap 成功创建 admin 用户（status=active）+ admin 角色
 - 已有 admin 用户时拒绝执行（不写库）
 - --dry-run 不写库
 - 密码两次输入不一致时拒绝
 - 密码长度 < 8 拒绝
 - 创建后用户有 admin 角色
-- 创建后用户有 research_50 订阅
+- 创建后 admin 用户无 subscription 记录（admin 不需要订阅）
 
 测试策略：
 - 使用 conftest 的 db_session fixture（PostgreSQL 测试库，不 mock DB）
@@ -29,7 +29,6 @@ from app.models.user import Role, User, UserRole
 from app.scripts.bootstrap_admin import (
     bootstrap_admin,
     read_password_interactive,
-    validate_password,
 )
 
 
@@ -137,10 +136,8 @@ async def test_bootstrap_dry_run_does_not_write(db_session):
     user_result = await db_session.execute(user_stmt)
     assert user_result.scalar_one_or_none() is None
 
-    # 验证未写入 subscription
-    sub_stmt = select(Subscription).where(Subscription.user_id.is_not(None))
-    # dry_run 不应新增任何 subscription（仅校验，不写库）
-    # 由于 db_session 可能有其他测试数据，这里仅校验 dry_run 调用本身不产生新增
+    # [Test] - 描述: dry_run 不写库，且 admin 路径本身也不创建 subscription（Phase 9 架构）
+    # 此处无需再查询 subscription 表：dry_run 返回 None 已证明未写库
 
 
 # ---------------------------------------------------------------------------
@@ -207,30 +204,24 @@ async def test_bootstrap_creates_admin_role_assignment(db_session):
 
 
 # ---------------------------------------------------------------------------
-# 7. 创建后用户有 research_50 订阅
+# 7. 创建后 admin 用户无 subscription 记录
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_creates_subscription(db_session):
-    """bootstrap 创建后，用户有 research_50 订阅记录（source=admin_grant）。"""
+async def test_bootstrap_no_subscription(db_session):
+    """bootstrap 创建后，admin 用户**无 subscription 记录**（admin 不需要订阅）。"""
     email = f"sub_{uuid.uuid4().hex[:8]}@test.com"
 
     user = await bootstrap_admin(db_session, email=email, password="secure-password-123", dry_run=False)
     await db_session.flush()
 
-    # 查询用户订阅
+    # 查询用户订阅 - 应为 None（admin 不创建订阅）
     sub_stmt = select(Subscription).where(Subscription.user_id == user.id)
     sub_result = await db_session.execute(sub_stmt)
     subscription = sub_result.scalar_one_or_none()
 
-    assert subscription is not None
-    assert subscription.plan_code == "research_50"
-    assert subscription.status == "active"
-    assert subscription.source == "admin_grant"
-    # entitlement_snapshot 应包含 monitor_limit
-    assert subscription.entitlement_snapshot is not None
-    assert "monitor_limit" in subscription.entitlement_snapshot
+    assert subscription is None
 
 
 if __name__ == "__main__":
