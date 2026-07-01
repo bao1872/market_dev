@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """端到端验证：项目监控实现与参考脚本 monitoring.py 的对齐性。
 
 Purpose: 对比项目监控链路（前复权+BB+VP+穿越检测）与参考脚本的输出一致性。
@@ -91,20 +90,21 @@ def compare_bb_reference_lines(symbol: str, bollinger_fn) -> dict:
     ref_lower = float(bb_lower_ref.iloc[ref_idx])
     ref_close = float(ref_df["close"].iloc[ref_idx])
 
-    print(f"  参考侧（pytdx+内置复权）:")
+    print("  参考侧（pytdx+内置复权）:")
     print(f"    bars={len(ref_df)}, close={_fmt_price(ref_close)}")
     print(f"    bb_upper={_fmt_price(ref_upper)}, bb_mid={_fmt_price(ref_mid)}, bb_lower={_fmt_price(ref_lower)}")
 
     # 项目侧：DB + 项目复权
     async def _project_side():
+        from sqlalchemy import select
+
         from app.db import AsyncSessionLocal
+        from app.models.instrument import Instrument
         from app.repositories.bar_repository import (
             _get_adj_factor_df,
             apply_adj_factor_to_bars,
             fetch_daily_bars,
         )
-        from app.models.instrument import Instrument
-        from sqlalchemy import select
 
         async with AsyncSessionLocal() as db:
             # 查 instrument_id
@@ -146,7 +146,7 @@ def compare_bb_reference_lines(symbol: str, bollinger_fn) -> dict:
     proj_lower = float(bb_lower_proj.iloc[proj_idx])
     proj_close = float(proj_df["close"].iloc[proj_idx])
 
-    print(f"  项目侧（DB+项目复权）:")
+    print("  项目侧（DB+项目复权）:")
     print(f"    bars={len(proj_df)}, close={_fmt_price(proj_close)}")
     print(f"    bb_upper={_fmt_price(proj_upper)}, bb_mid={_fmt_price(proj_mid)}, bb_lower={_fmt_price(proj_lower)}")
 
@@ -224,16 +224,18 @@ def compare_vp_peak_prices(symbol: str, compute_vp_fn, VPConfig) -> dict:
 
     # 项目侧
     async def _project_side():
+        from datetime import date, timedelta
+
+        from sqlalchemy import select
+
         from app.db import AsyncSessionLocal
+        from app.models.instrument import Instrument
         from app.repositories.bar_repository import (
             _get_adj_factor_df,
             apply_adj_factor_to_bars,
-            fetch_daily_bars,
             fetch_15min_bars,
+            fetch_daily_bars,
         )
-        from app.models.instrument import Instrument
-        from sqlalchemy import select
-        from datetime import date, timedelta
 
         async with AsyncSessionLocal() as db:
             stmt = select(Instrument.id, Instrument.symbol).where(Instrument.symbol == symbol)
@@ -317,7 +319,7 @@ def compare_vp_peak_prices(symbol: str, compute_vp_fn, VPConfig) -> dict:
 def verify_crossover_detection(bollinger_fn, compute_vp_fn, VPConfig) -> dict:
     """验证穿越检测逻辑一致性（构造合成数据）。"""
     print(f"\n{'='*60}")
-    print(f"=== 穿越检测逻辑验证（合成数据）===")
+    print("=== 穿越检测逻辑验证（合成数据）===")
     print(f"{'='*60}")
 
     # 构造合成日线数据（100根bar，close从10到20线性增长）
@@ -376,7 +378,7 @@ def verify_crossover_detection(bollinger_fn, compute_vp_fn, VPConfig) -> dict:
     print(f"  匹配: {'YES' if match else 'NO'}")
 
     # Node 穿越检测
-    print(f"\n  --- Node 穿越检测 ---")
+    print("\n  --- Node 穿越检测 ---")
     # 构造合成 peak prices
     class FakeVPResult:
         all_peak_prices = [15.0, 17.5]
@@ -439,14 +441,16 @@ def verify_adj_factor_effect(symbol: str, bollinger_fn) -> dict:
 
     # 项目侧：获取未复权数据再手动应用复权
     async def _project_side():
+        from datetime import date, timedelta
+
+        from sqlalchemy import select
+
         from app.db import AsyncSessionLocal
+        from app.models.instrument import Instrument
         from app.repositories.bar_repository import (
             _get_adj_factor_df,
             fetch_daily_bars,
         )
-        from app.models.instrument import Instrument
-        from sqlalchemy import select
-        from datetime import date, timedelta
 
         async with AsyncSessionLocal() as db:
             stmt = select(Instrument.id, Instrument.symbol).where(Instrument.symbol == symbol)
@@ -492,9 +496,9 @@ def verify_adj_factor_effect(symbol: str, bollinger_fn) -> dict:
         diff_close = abs(raw_close - adj_close)
         diff_upper = abs(raw_upper - adj_upper)
         print(f"  复权影响: close差异={diff_close:.4f}, upper差异={diff_upper:.4f}")
-        print(f"  结论: 前复权对除权股票有显著影响，必须应用")
+        print("  结论: 前复权对除权股票有显著影响，必须应用")
     else:
-        print(f"  结论: 该股票近期无除权事件，前复权影响极小（ratio≈1.0）")
+        print("  结论: 该股票近期无除权事件，前复权影响极小（ratio≈1.0）")
 
     return {"has_adj_change": has_adj, "raw_close": raw_close, "adj_close": adj_close}
 
@@ -548,7 +552,7 @@ def main():
 
     # 汇总
     print(f"\n{'='*60}")
-    print(f"=== 验证汇总 ===")
+    print("=== 验证汇总 ===")
     print(f"{'='*60}")
     bb_ok = results.get("bb", {}).get("match", False)
     vp_ok = results.get("vp", {}).get("match", False)
@@ -558,7 +562,7 @@ def main():
     print(f"  VP Peak Prices: {'PASS' if vp_ok else 'FAIL'}")
     print(f"  BB 穿越检测: {'PASS' if co_bb else 'FAIL'}")
     print(f"  Node 穿越检测: {'PASS' if co_node else 'FAIL'}")
-    print(f"  前复权效果: 已验证")
+    print("  前复权效果: 已验证")
 
     all_pass = bb_ok and vp_ok and co_bb and co_node
     print(f"\n  总体结果: {'ALL PASS' if all_pass else 'SOME FAILED'}")

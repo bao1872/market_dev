@@ -9,8 +9,7 @@
 
 设计要点：
 - plans 表是套餐定义的唯一真源（替代旧 app/constants/plan_contract.py 的 PLAN_CONTRACTS 字典）
-- observe_20: 观察版，monitor_limit=20，6 个 features
-- research_50: 研究版，monitor_limit=50，7 个 features（含 advanced_export）
+- observe_20 / research_50 套餐字段值由 Alembic 048 迁移初始化并存储于 plans 表
 - plan_code 字符串常量 DEFAULT_PLAN_CODE 在 app/constants/plan_codes.py 中定义（管理员无套餐）
 - 业务代码通过 app.services.plan_service 查询 plans 表，禁止硬编码套餐字段
 """
@@ -35,7 +34,7 @@ class Plan(Base):
     字段语义：
     - plan_code: 套餐代码（observe_20/research_50），业务代码引用此标识
     - display_name: 展示名称（如"观察版"/"研究版"），用于 UI 显示
-    - monitor_limit: 监控数量上限（observe_20=20, research_50=50）
+    - monitor_limit: 监控数量上限（具体数值由 plans 表记录决定）
     - notification_channel_limit: 通知渠道数量上限
     - message_retention_days: 消息保留天数
     - features: 功能特性列表（JSONB 数组，如 ["trend_selection", ...]）
@@ -43,7 +42,7 @@ class Plan(Base):
 
     设计说明：
     - 业务代码通过 plan_service.get_plan 查询，未知 plan_code 抛 ValueError
-    - monitor_limit 字面量 20/50 只允许在此表与初始化迁移中出现
+    - 套餐数值字面量只允许在 Alembic 048 初始化迁移中出现；ORM 模型与业务代码禁止硬编码
     """
 
     __tablename__ = "plans"

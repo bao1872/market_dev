@@ -227,7 +227,7 @@ class NotificationMessageResponse(BaseModel):
     event_summary: str | None = Field(None, description="事件摘要")
 
     @model_validator(mode="after")
-    def _extract_structured_fields(self) -> "NotificationMessageResponse":
+    def _extract_structured_fields(self) -> NotificationMessageResponse:
         """从 body 提取结构化字段（兼容旧消息未填充的情况）。"""
         body = self.body or {}
         if self.strategy_key is None:

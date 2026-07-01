@@ -19,7 +19,7 @@
 - member 有效订阅：从 subscription.plan_code 查询 plans 表填充 features/limits
 - member 已过期订阅：subscription_active=False，但仍记录原 plan_code/plan_display_name
 - member 无订阅：subscription_active=False，plan_code=None
-- is_admin 仅判断 "admin" 角色，strategy_author 等其他角色不影响
+- is_admin 仅判断 "admin" 角色，其他非 admin 角色不影响
 """
 
 from __future__ import annotations
@@ -252,21 +252,6 @@ async def test_member_without_subscription(db_session: AsyncSession) -> None:
     assert ctx.expires_at is None
     assert ctx.features == []
     assert ctx.limits == {}
-
-
-@pytest.mark.asyncio
-async def test_strategy_author_role(db_session: AsyncSession) -> None:
-    """用户有 strategy_author 角色但无 admin → is_admin=False, is_member 判定不影响。"""
-    user = await _create_user_with_roles(db_session, ["strategy_author"])
-    ctx = await get_access_context(db_session, user)
-
-    # strategy_author 不是 admin，也不是 user
-    assert ctx.is_admin is False
-    assert ctx.is_member is False
-    assert "strategy_author" in ctx.roles
-    # 无 admin 角色且无订阅 → subscription_active=False
-    assert ctx.subscription_active is False
-    assert ctx.plan_code is None
 
 
 # ============================================================

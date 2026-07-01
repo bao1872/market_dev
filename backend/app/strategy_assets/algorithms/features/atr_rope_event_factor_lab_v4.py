@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 atr_rope_event_factor_lab.py
 
@@ -35,7 +34,6 @@ import argparse
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -110,10 +108,10 @@ def _market_from_symbol(symbol: str) -> int:
     return 1 if str(symbol).startswith(("5", "6", "9")) else 0
 
 
-def connect_pytdx() -> "TdxHq_API":
+def connect_pytdx() -> TdxHq_API:
     if TdxHq_API is None:
         raise RuntimeError("请先安装 pytdx: pip install pytdx")
-    errors: List[str] = []
+    errors: list[str] = []
     for host, port in SERVERS:
         try:
             api = TdxHq_API(raise_exception=True, auto_retry=True)
@@ -130,7 +128,7 @@ def fetch_kline_pytdx(symbol: str, freq: str, count: int) -> pd.DataFrame:
         cat = _category_from_freq(freq)
         mkt = _market_from_symbol(symbol)
         size = 800
-        frames: List[pd.DataFrame] = []
+        frames: list[pd.DataFrame] = []
         start = 0
         target = max(int(count), 300)
         while start < target + size:
@@ -859,7 +857,7 @@ def build_html(df_full: pd.DataFrame, df_plot: pd.DataFrame, out_html: str, titl
     fig.write_html(out_html, include_plotlyjs="cdn")
 
 
-def _make_default_paths(symbol: Optional[str], freq: str, out_dir: str) -> Tuple[str, str]:
+def _make_default_paths(symbol: str | None, freq: str, out_dir: str) -> tuple[str, str]:
     tag = symbol or "csv"
     f = normalize_freq(freq)
     base = Path(out_dir)
@@ -867,7 +865,7 @@ def _make_default_paths(symbol: Optional[str], freq: str, out_dir: str) -> Tuple
     return str(base / f"{tag}_atr_rope_{f}.csv"), str(base / f"{tag}_atr_rope_{f}.html")
 
 
-def run_one(args: argparse.Namespace, freq: str) -> Tuple[str, str]:
+def run_one(args: argparse.Namespace, freq: str) -> tuple[str, str]:
     freq = normalize_freq(freq)
     if args.csv:
         df = read_kline_csv(args.csv)
@@ -940,7 +938,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_arg_parser().parse_args()
     freqs = [normalize_freq(x.strip()) for x in args.freqs.split(",")] if args.freqs else [normalize_freq(args.freq)]
-    results: List[Tuple[str, str]] = []
+    results: list[tuple[str, str]] = []
     for f in freqs:
         results.append(run_one(args, f))
     print("输出完成：")

@@ -1,7 +1,6 @@
-# -*- coding: utf-8 -*-
 """系统概览服务 - /admin/system-overview 业务逻辑层。
 
-从 admin_membership.py 路由抽出数据查询逻辑，新增市场阶段/监控运行时/盘后流水线状态。
+从 admin_subscription.py 路由抽出数据查询逻辑，新增市场阶段/监控运行时/盘后流水线状态。
 
 设计原则：
 - 单一数据源：所有状态判定基于 DB 实时查询，不引用历史/昨日数据满足今日状态
@@ -144,7 +143,7 @@ async def get_system_overview(
 
 
 async def _compute_base_fields(db: AsyncSession, now: datetime) -> dict[str, Any]:
-    """计算 12 个基础字段（从原 admin_membership.py 迁移）。
+    """计算 12 个基础字段（从原 admin_subscription.py 迁移）。
 
     Args:
         db: 异步数据库会话
@@ -849,7 +848,8 @@ async def _compute_after_close_pipeline(
 
     # [after_close_pipeline] - bars succeeded → 查 DSA（trade_date=今日, run_type=scheduled, strategy_key=dsa_selector）
     # advice.md: DSA 查询必须关联 strategy_versions + strategy_definitions + strategy_key=dsa_selector
-    from app.models.strategy import StrategyDefinition as _SD, StrategyVersion as _SV
+    from app.models.strategy import StrategyDefinition as _SD
+    from app.models.strategy import StrategyVersion as _SV
     dsa_version_ids = (
         select(_SV.id)
         .join(_SD, _SD.id == _SV.strategy_definition_id)
@@ -1136,12 +1136,12 @@ if __name__ == "__main__":
 
     # 验证 _determine_monitor_status 逻辑（非异步部分）
     from app.services.market_status_service import (
-        MARKET_SESSION_NON_TRADING_DAY,
-        MARKET_SESSION_PRE_OPEN,
-        MARKET_SESSION_MORNING,
-        MARKET_SESSION_LUNCH,
         MARKET_SESSION_AFTERNOON,
         MARKET_SESSION_CLOSED,
+        MARKET_SESSION_LUNCH,
+        MARKET_SESSION_MORNING,
+        MARKET_SESSION_NON_TRADING_DAY,
+        MARKET_SESSION_PRE_OPEN,
     )
 
     # 非交易日

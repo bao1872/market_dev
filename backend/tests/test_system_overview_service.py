@@ -15,13 +15,12 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from app.core.time import SHANGHAI_TZ
 from app.models.monitor_evaluation import MonitorEvaluation
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.strategy_run import StrategyRun

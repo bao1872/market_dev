@@ -41,7 +41,7 @@ def _safe_import(module_path: str) -> object | None:
     """安全导入模块，失败时返回 None。"""
     try:
         return importlib.import_module(module_path)
-    except Exception as exc:
+    except Exception:
         return None
 
 

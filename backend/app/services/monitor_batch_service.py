@@ -34,13 +34,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.constants import indicator_contract as IC
 from app.constants.strategy_keys import WATCHLIST_MONITOR
 from app.constants.user_facing_labels import get_event_label, get_field_label
+from app.models.capture_job import (
+    CAPTURE_STATUS_FAILED,
+    CAPTURE_STATUS_SUCCEEDED,
+    CaptureJob,
+)
 from app.models.instrument import Instrument
 from app.models.monitor_evaluation import MonitorEvaluation
 from app.models.monitor_state import MonitorState as MonitorStateORM
-from app.models.capture_job import CaptureJob, CAPTURE_STATUS_FAILED, CAPTURE_STATUS_SUCCEEDED, CAPTURE_MAX_ATTEMPTS
+from app.models.stock_memo import StockMemo
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.strategy_event import StrategyEvent
-from app.models.stock_memo import StockMemo
 from app.models.watchlist import UserWatchlistItem
 from app.repositories import monitor_state_repository, strategy_event_repository
 from app.repositories.bar_repository import get_bars, get_recent_bars

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 price_action_toolkit_lite_ualgo.py
 
@@ -32,7 +31,6 @@ import argparse
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -107,10 +105,10 @@ def _market_from_symbol(symbol: str) -> int:
     return 1 if str(symbol).startswith(("5", "6", "9")) else 0
 
 
-def connect_pytdx() -> "TdxHq_API":
+def connect_pytdx() -> TdxHq_API:
     if TdxHq_API is None:
         raise RuntimeError("请先安装 pytdx: pip install pytdx")
-    errors: List[str] = []
+    errors: list[str] = []
     for host, port in SERVERS:
         try:
             api = TdxHq_API(raise_exception=True, auto_retry=True)
@@ -127,7 +125,7 @@ def fetch_kline_pytdx(symbol: str, freq: str, count: int) -> pd.DataFrame:
         cat = _category_from_freq(freq)
         mkt = _market_from_symbol(symbol)
         size = 800
-        frames: List[pd.DataFrame] = []
+        frames: list[pd.DataFrame] = []
         start = 0
         target = max(int(count), 300)
         while start < target + size:
@@ -205,7 +203,7 @@ def _atr_wilder(df: pd.DataFrame, length: int = 14) -> pd.Series:
     return tr.ewm(alpha=1 / length, adjust=False, min_periods=length).mean()
 
 
-def _tv_pivots_confirmed(high: np.ndarray, low: np.ndarray, length: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _tv_pivots_confirmed(high: np.ndarray, low: np.ndarray, length: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """TradingView ta.pivothigh/ta.pivotlow 风格，确认 bar 记录值，anchor 记录真实 pivot 位置。"""
     n = len(high)
     ph = np.full(n, np.nan)
@@ -240,7 +238,7 @@ class PATConfig:
     show_trend_lines: bool = True
 
 
-def compute_price_action_toolkit(df: pd.DataFrame, cfg: PATConfig) -> Tuple[pd.DataFrame, Dict[str, list]]:
+def compute_price_action_toolkit(df: pd.DataFrame, cfg: PATConfig) -> tuple[pd.DataFrame, dict[str, list]]:
     out = df.copy().sort_index()
     for col in ["open", "high", "low", "close"]:
         if col not in out.columns:
@@ -276,15 +274,15 @@ def compute_price_action_toolkit(df: pd.DataFrame, cfg: PATConfig) -> Tuple[pd.D
         to_up[i] = np.isfinite(h[cand]) and h[cand] >= np.nanmax(hi_window)
         to_down[i] = np.isfinite(l[cand]) and l[cand] <= np.nanmin(lo_window)
 
-    high_vals: List[Tuple[int, float]] = []
-    low_vals: List[Tuple[int, float]] = []
-    zigzag_lines: List[Dict] = []
-    structure_lines: List[Dict] = []
-    bullish_ob: List[Dict] = []
-    bearish_ob: List[Dict] = []
+    high_vals: list[tuple[int, float]] = []
+    low_vals: list[tuple[int, float]] = []
+    zigzag_lines: list[dict] = []
+    structure_lines: list[dict] = []
+    bullish_ob: list[dict] = []
+    bearish_ob: list[dict] = []
 
     trend = 1
-    last_state: Optional[str] = None
+    last_state: str | None = None
     draw_up = False
     draw_down = False
 
@@ -404,9 +402,9 @@ def compute_price_action_toolkit(df: pd.DataFrame, cfg: PATConfig) -> Tuple[pd.D
     # Liquidity pivots and sweep lines.
     llen = int(cfg.liquidity_len)
     ph_liq, pl_liq, ph_liq_anchor, pl_liq_anchor = _tv_pivots_confirmed(h, l, llen)
-    bearish_liq_active: List[Dict] = []  # line above price, breaks by high > value
-    bullish_liq_active: List[Dict] = []  # line below price, breaks by low < value
-    liquidity_lines: List[Dict] = []
+    bearish_liq_active: list[dict] = []  # line above price, breaks by high > value
+    bullish_liq_active: list[dict] = []  # line below price, breaks by low < value
+    liquidity_lines: list[dict] = []
     evt_bearish_liquidity_sweep = np.zeros(n, dtype=bool)  # sweep upper, close back below: bearish
     evt_bullish_liquidity_sweep = np.zeros(n, dtype=bool)  # sweep lower, close back above: bullish
     evt_upper_sweep_fail_up = np.zeros(n, dtype=bool)  # 上扫收回后反而向上突破/转强
@@ -496,11 +494,11 @@ def compute_price_action_toolkit(df: pd.DataFrame, cfg: PATConfig) -> Tuple[pd.D
     # Trend lines: 最后两个 confirmed pivot high/low，下降高点线、上升低点线。
     tlen = int(cfg.trend_line_len)
     ph_tr, pl_tr, ph_tr_anchor, pl_tr_anchor = _tv_pivots_confirmed(h, l, tlen)
-    trend_lines: List[Dict] = []
-    ph_seq: List[Tuple[int, float, int]] = []  # anchor, value, confirm
-    pl_seq: List[Tuple[int, float, int]] = []
-    cur_bear_line_id: Optional[int] = None
-    cur_bull_line_id: Optional[int] = None
+    trend_lines: list[dict] = []
+    ph_seq: list[tuple[int, float, int]] = []  # anchor, value, confirm
+    pl_seq: list[tuple[int, float, int]] = []
+    cur_bear_line_id: int | None = None
+    cur_bull_line_id: int | None = None
 
     for i in range(n):
         if np.isfinite(ph_tr[i]):
@@ -563,7 +561,7 @@ def compute_price_action_toolkit(df: pd.DataFrame, cfg: PATConfig) -> Tuple[pd.D
 # =============================================================================
 # 可视化
 # =============================================================================
-def _clamp_line(line: Dict, plot_start: int, plot_end_exclusive: int) -> Optional[Tuple[float, float, float, float]]:
+def _clamp_line(line: dict, plot_start: int, plot_end_exclusive: int) -> tuple[float, float, float, float] | None:
     x1 = int(line["x1"])
     x2 = int(line["x2"])
     if x2 < plot_start or x1 >= plot_end_exclusive:
@@ -585,7 +583,7 @@ def _clamp_line(line: Dict, plot_start: int, plot_end_exclusive: int) -> Optiona
     return None
 
 
-def build_html(df_full: pd.DataFrame, objects: Dict[str, list], df_plot: pd.DataFrame, out_html: str, title: str, cfg: PATConfig) -> None:
+def build_html(df_full: pd.DataFrame, objects: dict[str, list], df_plot: pd.DataFrame, out_html: str, title: str, cfg: PATConfig) -> None:
     if go is None or make_subplots is None:
         raise RuntimeError("未安装 plotly: pip install plotly")
 
@@ -652,7 +650,7 @@ def build_html(df_full: pd.DataFrame, objects: Dict[str, list], df_plot: pd.Data
                 fig.add_trace(go.Scatter(x=[lx], y=[ly], mode="markers+text", text=["x"], textposition="middle center", marker=dict(symbol=sym, size=11, color="#7e57c2" if line["side"] == "upper" else "#00bfa5"), name="Sweep", showlegend=False), row=1, col=1)
 
     # Order blocks: show active/unbroken last N by default, and recently broken if inside plotting window.
-    def add_ob(ob: Dict, color: str, name: str) -> None:
+    def add_ob(ob: dict, color: str, name: str) -> None:
         start = int(ob["start"])
         end = int(ob.get("end", start))
         if end < plot_start or start >= plot_end:
@@ -761,7 +759,7 @@ def build_html(df_full: pd.DataFrame, objects: Dict[str, list], df_plot: pd.Data
     fig.write_html(out_html, include_plotlyjs="cdn")
 
 
-def _make_default_paths(symbol: Optional[str], freq: str, out_dir: str) -> Tuple[str, str]:
+def _make_default_paths(symbol: str | None, freq: str, out_dir: str) -> tuple[str, str]:
     tag = symbol or "csv"
     f = normalize_freq(freq)
     base = Path(out_dir)
@@ -769,7 +767,7 @@ def _make_default_paths(symbol: Optional[str], freq: str, out_dir: str) -> Tuple
     return str(base / f"{tag}_pat_lite_{f}.csv"), str(base / f"{tag}_pat_lite_{f}.html")
 
 
-def run_one(args: argparse.Namespace, freq: str) -> Tuple[str, str]:
+def run_one(args: argparse.Namespace, freq: str) -> tuple[str, str]:
     freq = normalize_freq(freq)
     if args.csv:
         df = read_kline_csv(args.csv)
@@ -839,7 +837,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_arg_parser().parse_args()
     freqs = [normalize_freq(x.strip()) for x in args.freqs.split(",")] if args.freqs else [normalize_freq(args.freq)]
-    results: List[Tuple[str, str]] = []
+    results: list[tuple[str, str]] = []
     for f in freqs:
         results.append(run_one(args, f))
     print("输出完成：")

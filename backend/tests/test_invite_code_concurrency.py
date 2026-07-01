@@ -305,7 +305,7 @@ async def test_concurrent_registration_only_one_succeeds() -> None:
 
     # 清理：按 FK 依赖顺序删除测试数据，避免污染测试库
     # 顺序：invite_codes（解除 used_by/created_by FK）→ users（级联 subscriptions/user_roles/invite_redemptions）
-    from app.models.membership import InviteCode
+    from app.models.invitation import InviteCode
     from app.services.subscription_service import hash_invite_code
 
     cleanup_session = TestAsyncSessionLocal()

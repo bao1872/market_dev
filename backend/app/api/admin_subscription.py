@@ -1,10 +1,10 @@
-"""管理员 API 路由 - 会员管理 + 系统概览。
+"""管理员 API 路由 - 订阅管理 + 系统概览。
 
 端点：
 - POST /admin/invite-codes: 生成邀请码（单个/批量，绑定 plan_code/grant_months）
 - GET /admin/invite-codes: 查询邀请码列表（支持状态筛选 + 分页）
 - POST /admin/invite-codes/{id}/revoke: 作废邀请码
-- GET /admin/members: 查询会员账户列表（含会员状态/到期时间/剩余天数/续期次数）
+- GET /admin/members: 查询订阅账户列表（含订阅状态/到期时间/剩余天数/续期次数）
 - GET /admin/members/{user_id}/redemptions: 查询用户兑换记录
 - GET /admin/system-overview: 系统概览（活跃用户/监控标的/评估统计/服务健康）
 
@@ -18,7 +18,6 @@
 
 from __future__ import annotations
 
-import math
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -27,21 +26,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db, require_roles
 from app.models.scheduler_job_run import SchedulerJobRun
-from app.models.user import User
-from app.models.notification import MessageDelivery, NotificationChannel, NotificationMessage
-from app.schemas.membership import (
+from app.schemas.invitation import (
     InviteCodeCreate,
     InviteCodeListItem,
     InviteCodeResponse,
     InviteRedemptionResponse,
-    MemberListItem,
 )
 from app.schemas.notification import MessageDeliveryResponse
 from app.schemas.scheduler_job_run import (
     SchedulerJobRunItem,
     SchedulerJobRunListResponse,
 )
+from app.schemas.subscription import MemberListItem
 from app.schemas.system_overview import SystemOverviewResponse
+from app.services.notification_service import list_message_deliveries, retry_delivery
 from app.services.subscription_service import (
     generate_invite_codes,
     get_redemptions_by_user,
@@ -49,12 +47,11 @@ from app.services.subscription_service import (
     list_subscribers,
     revoke_invite_code,
 )
-from app.services.notification_service import list_message_deliveries, retry_delivery
 from app.services.system_overview_service import get_system_overview
 
 router = APIRouter(
     prefix="/admin",
-    tags=["admin-membership"],
+    tags=["admin-subscription"],
 )
 
 

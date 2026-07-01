@@ -39,9 +39,10 @@ _LOOKBACK_DAYS = 60
 
 
 async def main() -> None:
+    from zoneinfo import ZoneInfo
+
     import pandas as pd
     from sqlalchemy import select
-    from zoneinfo import ZoneInfo
 
     from app.db import AsyncSessionLocal
     from app.models.instrument import Instrument
@@ -250,7 +251,7 @@ async def main() -> None:
             if r["node"]:
                 ev = r["node"]
                 p = ev["payload"]
-                print(f"  🟣 节点集群穿越")
+                print("  🟣 节点集群穿越")
                 print(f"    触发时间: {ev['date']} 收盘")
                 if p.get("price") is not None:
                     print(f"    现价: {p['price']:.2f}  边界: {p.get('boundary', 0):.2f}  偏离: {p.get('dev_pct', 0):+.2f}%")

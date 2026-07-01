@@ -556,15 +556,20 @@ export interface TradingDayResponse {
 // Admin Membership 领域类型
 // ============================================================
 
-// [plan_contract] - 描述: 套餐契约预览映射，仅用于前端权益预览展示
-// 权威值由后端 app/constants/plan_contract.py PLAN_CONTRACTS 计算，前端不得在请求中传入 monitor_limit
-export const PLAN_CONTRACTS_PREVIEW = {
-  observe_20: { name: '观察版', monitorLimit: 20 },
-  research_50: { name: '研究版', monitorLimit: 50 },
-} as const
+// [plan_contract] - 描述: 套餐定义由后端 plans 表唯一真源驱动，前端不硬编码套餐字段
+// 权威值为 backend/app/models/plan.py / app/services/plan_service.py，通过 GET /plans 公开端点获取
+/** 套餐代码（与后端 plans.plan_code 一致） */
+export type PlanCode = string
 
-/** 套餐代码（与后端 plan_contract.py PLAN_CONTRACTS 键一致） */
-export type PlanCode = keyof typeof PLAN_CONTRACTS_PREVIEW
+/** 套餐定义响应（与 backend/app/schemas/plan.py PlanResponse 对齐） */
+export interface PlanResponse {
+  plan_code: string
+  display_name: string
+  monitor_limit: number
+  notification_channel_limit: number
+  message_retention_days: number
+  features: string[]
+}
 
 /** 邀请码响应（含明文，仅生成时返回）+ 套餐快照 */
 export interface InviteCode {
@@ -1513,6 +1518,12 @@ export async function getMarketStatus(): Promise<MarketStatus> {
 // ============================================================
 // ===== Admin Membership 端点 =====
 // ============================================================
+
+/** 获取所有 active 套餐定义（公开端点，无需登录） */
+export async function getPlans(): Promise<PlanResponse[]> {
+  const { data } = await publicApiClient.get<PlanResponse[]>('/plans')
+  return data
+}
 
 /** 生成邀请码（单个/批量，明文仅生成时返回） */
 export async function createInviteCodes(payload: InviteCodeCreateRequest): Promise<InviteCode[]> {

@@ -46,7 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.plan_codes import DEFAULT_PLAN_CODE
 from app.core.security import get_password_hash
-from app.models.membership import InviteCode, InviteRedemption
+from app.models.invitation import InviteCode, InviteRedemption
 from app.models.subscription import Subscription
 from app.models.user import Role, User, UserRole
 from app.services.plan_service import get_monitor_limit as get_monitor_limit_async

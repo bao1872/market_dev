@@ -1,5 +1,4 @@
 
-# -*- coding: utf-8 -*-
 """
 Volume Sentiment Breakout Channels [AlgoAlpha] -> Python (Plotly)
 
@@ -31,12 +30,10 @@ Usage
 from __future__ import annotations
 
 import argparse
-import math
 import os
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import List, Optional
 
 import numpy as np
 import pandas as pd
@@ -48,7 +45,6 @@ if base_dir not in sys.path:
     sys.path.insert(0, base_dir)
 
 from datasource.pytdx_client import connect_pytdx
-
 
 # =========================
 # Data source (pytdx)
@@ -203,8 +199,8 @@ class Channel:
     upper_zone_bottom: float
     lower_zone_top: float
     center_y: float
-    breakout: Optional[str] = None
-    breakout_idx: Optional[int] = None
+    breakout: str | None = None
+    breakout_idx: int | None = None
     current_sentiment_text: str = ""
     overall_sentiment_text: str = ""
     current_sentiment_color: str = ""
@@ -220,8 +216,8 @@ def profile_calculation(df: pd.DataFrame,
                         end_idx: int,
                         res: int,
                         scale: int,
-                        top_truncation: Optional[float],
-                        bottom_truncation: Optional[float]):
+                        top_truncation: float | None,
+                        bottom_truncation: float | None):
 
     sub = df.iloc[start_idx:end_idx + 1]
     if sub.empty:
@@ -316,7 +312,7 @@ def compute_indicator(
 
     vola = atr_wilder(d, length_box) / 2.0
 
-    channels: List[Channel] = []
+    channels: list[Channel] = []
     bullish_break = pd.Series(False, index=d.index)
     bearish_break = pd.Series(False, index=d.index)
     new_channel = pd.Series(False, index=d.index)

@@ -31,8 +31,8 @@ import logging
 import uuid
 from datetime import date, datetime, timedelta
 from enum import Enum
-from zoneinfo import ZoneInfo
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1105,6 +1105,6 @@ if __name__ == "__main__":
     assert parsed["orchestrator_status"] == "queued"
     assert parsed["trade_date"] == "2026-06-25"
     assert parsed["dsa_run_id"] == str(drid)
-    print(f"_build_metadata / _parse_metadata 互逆 ✓")
+    print("_build_metadata / _parse_metadata 互逆 ✓")
 
     print("OK")

@@ -29,7 +29,11 @@ import pytest
 
 from app.constants.indicator_contract import DSA_LOOKBACK
 from app.strategy.runtime import MarketDataContext
-from app.strategy.selectors.dsa_selector import DSASelector
+from app.strategy.selectors.dsa_selector import (
+    MIN_DIR_BARS,
+    DSASelector,
+    compute_dsa_bundle,
+)
 from app.strategy_assets.algorithms.features.atr_rope_event_factor_lab_v4 import (
     ATRRopeConfig,
 )
@@ -37,11 +41,6 @@ from app.strategy_assets.algorithms.features.dynamic_swing_anchored_vwap import 
     DSAConfig,
     dynamic_swing_anchored_vwap,
 )
-from app.strategy.selectors.dsa_selector import (
-    MIN_DIR_BARS,
-    compute_dsa_bundle,
-)
-
 
 # ---------------------------------------------------------------------------
 # 测试数据与配置工厂

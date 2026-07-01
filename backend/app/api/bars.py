@@ -28,11 +28,11 @@ GET /api/v1/bars/health
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 import uuid
-from datetime import date, datetime, time as dt_time, timedelta
+from datetime import date, datetime, timedelta
+from datetime import time as dt_time
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -41,9 +41,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db, require_roles
+from app.core.exchange import get_exchange
 from app.core.redis_client import get_redis
 from app.models.bar import Bar15Min, Bar60Min, BarDaily, BarMinute, BarMonthly, BarWeekly
-from app.core.exchange import get_exchange
 from app.repositories.bar_repository import (
     _get_adj_factor_df,
     _query_15min_bars,

@@ -16,7 +16,6 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-
 # [SystemOverview] - 监控运行时状态枚举
 MONITOR_STATUS_RUNNING = "RUNNING"
 MONITOR_STATUS_IDLE_EXPECTED = "IDLE_EXPECTED"

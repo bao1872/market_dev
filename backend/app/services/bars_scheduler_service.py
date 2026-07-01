@@ -529,6 +529,7 @@ class BarsSchedulerService:
         db_session 为 None 时内部创建独立 session；事件写入后 commit 持久化。
         """
         import traceback as tb_mod
+
         from app.services.job_run_event_service import append_event
 
         async def _do_write(db: AsyncSession) -> None:
@@ -882,6 +883,6 @@ if __name__ == "__main__":
     assert batch.daily_covered is None
     assert batch.daily_total is None
     assert batch.daily_coverage is None
-    print(f"BatchResult 新增字段验证 ✓（daily_covered/total/coverage 默认 None）")
+    print("BatchResult 新增字段验证 ✓（daily_covered/total/coverage 默认 None）")
 
     print("\n所有自测通过 ✓（未进行 DB/网络测试）")

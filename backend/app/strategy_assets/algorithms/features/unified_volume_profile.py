@@ -37,7 +37,6 @@ from app.constants.indicator_contract import (
     NODE_CLUSTER_LOW_PERIOD,
     NODE_CLUSTER_MINUTE_BARS,
     NODE_CLUSTER_PRIMARY_BARS,
-    NODE_CLUSTER_PRIMARY_BARS as VP_LOOKBACK,
     NODE_CLUSTER_PRIMARY_PERIOD,
     VP_HIGHEST_N_NODES,
     VP_LOWEST_N_NODES,
@@ -47,6 +46,9 @@ from app.constants.indicator_contract import (
     VP_TROUGHS_DETECTION_PCT,
     VP_TROUGHS_SHOW,
     VP_VALUE_AREA_PCT,
+)
+from app.constants.indicator_contract import (
+    NODE_CLUSTER_PRIMARY_BARS as VP_LOOKBACK,
 )
 from app.strategy_assets.algorithms.features.luxalgo_volume_profile_pytdx_15m_aligned import (
     VolumeProfileConfig,

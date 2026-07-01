@@ -31,10 +31,10 @@ from __future__ import annotations
 
 import argparse
 import math
+import socket
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Literal, Optional
-import socket
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -51,7 +51,6 @@ from app.constants.indicator_contract import (
     VP_TROUGHS_SHOW,
     VP_VALUE_AREA_PCT,
 )
-
 
 Placement = Literal["right", "left"]
 NodeMode = Literal["peaks", "clusters", "none", "troughs"]
@@ -121,10 +120,10 @@ class VolumeProfileResult:
     val_price: float
     start_index: int
     last_index: int
-    developing_poc: Optional[pd.DataFrame]
+    developing_poc: pd.DataFrame | None
     # --- peak/node 聚合字段，由 _detect_nodes 计算后填充，禁止外部重复计算 ---
-    all_peak_prices: List[float] = field(default_factory=list)
-    peak_df: Optional[pd.DataFrame] = None
+    all_peak_prices: list[float] = field(default_factory=list)
+    peak_df: pd.DataFrame | None = None
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -201,7 +200,7 @@ def _prepare_profile_bars(
     main_data: pd.DataFrame,
     main_window: pd.DataFrame,
     start_index: int,
-    profile_df: Optional[pd.DataFrame],
+    profile_df: pd.DataFrame | None,
     main_period: str,
 ) -> tuple[pd.DataFrame, np.ndarray]:
     """Select lower-timeframe bars belonging to the selected main-bar window.
@@ -261,7 +260,7 @@ def _prepare_profile_bars(
 def compute_volume_profile(
     df: pd.DataFrame,
     cfg: VolumeProfileConfig = VolumeProfileConfig(),
-    profile_df: Optional[pd.DataFrame] = None,
+    profile_df: pd.DataFrame | None = None,
     main_period: str = "day",
 ) -> VolumeProfileResult:
     main_data = _normalize_columns(df)
@@ -750,7 +749,7 @@ TDX_PERIOD_MAP: dict[str, int] = {
 
 
 
-def pine_lower_timeframe(main_period: str, profile_lookback_length: int) -> Optional[str]:
+def pine_lower_timeframe(main_period: str, profile_lookback_length: int) -> str | None:
     """Replicate calculateTimeframe(2), except daily 60m is intentionally 15m.
 
     Pine uses the current/main bars instead of request.security_lower_tf when its
@@ -851,8 +850,8 @@ def fetch_pytdx_bars(
     code: str,
     period: str = "day",
     count: int = 800,
-    market: Optional[int] = None,
-    server: Optional[str] = None,
+    market: int | None = None,
+    server: str | None = None,
     port: int = 7709,
     timeout: float = 3.0,
 ) -> pd.DataFrame:
@@ -938,7 +937,7 @@ def write_html(
     output_html: str | Path,
     cfg: VolumeProfileConfig = VolumeProfileConfig(),
     title: str = "LuxAlgo-style Volume Profile with Node Detection",
-    profile_df: Optional[pd.DataFrame] = None,
+    profile_df: pd.DataFrame | None = None,
     main_period: str = "day",
 ) -> VolumeProfileResult:
     result = compute_volume_profile(
@@ -1026,7 +1025,7 @@ def main() -> None:
     if source_count != 1:
         raise SystemExit("Choose exactly one data source: --tdx-code, --db-code, --csv, or --demo.")
 
-    profile_df: Optional[pd.DataFrame] = None
+    profile_df: pd.DataFrame | None = None
     profile_period_label = "main"
 
     if args.demo:
@@ -1071,8 +1070,8 @@ def main() -> None:
         )
     elif args.db_code:
         # 从数据库加载前复权数据
-        from datasource.k_data_loader import load_k_data
         from datasource.adj_factor import apply_adj_factor_intraday
+        from datasource.k_data_loader import load_k_data
 
         ts_code = args.db_code
         main_period = "day"

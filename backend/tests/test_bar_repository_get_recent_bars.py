@@ -26,7 +26,6 @@ from app.constants import indicator_contract as IC
 from app.models.bar import Bar15Min, BarDaily, BarMinute
 from app.repositories.bar_repository import get_recent_bars
 
-
 # ============================================================
 # 1. 日线：limit=250 返回恰好 250 根（升序）
 # ============================================================

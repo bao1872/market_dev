@@ -33,6 +33,7 @@ import type {
   DeliveryStatus,
   BetaApplicationQueryParams,
   BetaApplicationPatchRequest,
+  PlanResponse,
 } from '../api/endpoints'
 
 // ============================================================
@@ -716,6 +717,15 @@ export function useIsTradingDay(targetDate: string | undefined) {
 // ============================================================
 // ===== Admin Membership hooks =====
 // ============================================================
+
+/** 查询所有 active 套餐定义（1 分钟缓存，公开端点） */
+export function usePlans() {
+  return useQuery<PlanResponse[], Error>({
+    queryKey: ['plans'],
+    queryFn: api.getPlans,
+    staleTime: STALE_PLANS,
+  })
+}
 
 /** 查询邀请码列表 */
 export function useInviteCodes(params?: { status?: string; limit?: number; offset?: number }) {

@@ -37,8 +37,8 @@ import os
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from zoneinfo import ZoneInfo
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,7 +49,6 @@ from app.models.instrument import Instrument
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.strategy_run import (
     FAILURE_STAGE_WORKER_INTERRUPTED,
-    StrategyResult,
     StrategyRun,
     StrategyRunItem,
 )

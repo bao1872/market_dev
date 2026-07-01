@@ -180,17 +180,16 @@ export const features: Feature[] = [
 ]
 
 // ===== 价格区：2 档套餐 =====
+// 套餐展示名与监控限额由后端 GET /plans 动态提供，此处仅保留价格与 key 映射
 export interface PricingPlan {
   key: string
-  title: string
   monthly: number
   yearly: number
-  sub: string
 }
 
 export const pricingPlans: PricingPlan[] = [
-  { key: 'observe', title: '观察版', monthly: 50, yearly: 480, sub: '同时监控 20 只股票' },
-  { key: 'research', title: '研究版', monthly: 100, yearly: 960, sub: '同时监控 50 只股票' },
+  { key: 'observe', monthly: 50, yearly: 480 },
+  { key: 'research', monthly: 100, yearly: 960 },
 ]
 
 // ===== 顶部导航锚点 =====

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 文件名：
     atr_trendlines_jd_with_factors.py
@@ -29,7 +28,6 @@ import math
 import os
 import sys
 from dataclasses import dataclass
-from typing import List, Optional
 
 import numpy as np
 import pandas as pd
@@ -122,8 +120,8 @@ def atr_pine(df: pd.DataFrame, length: int) -> pd.Series:
     return pine_rma(true_range(df), length)
 
 
-def fixnan_pine(values: List[float]) -> List[float]:
-    out: List[float] = []
+def fixnan_pine(values: list[float]) -> list[float]:
+    out: list[float] = []
     last = math.nan
     for v in values:
         if pd.isna(v):
@@ -168,7 +166,7 @@ def pivotlow_like_pine(src: pd.Series, leftbars: int, rightbars: int) -> pd.Seri
     return pd.Series(out, index=src.index)
 
 
-def percentile_rank_last(window_vals: List[float], current_val: float) -> float:
+def percentile_rank_last(window_vals: list[float], current_val: float) -> float:
     """返回当前值在过去窗口中的经验分位数 [0,1]，逐 bar 可用。"""
     valid = [float(v) for v in window_vals if pd.notna(v)]
     if pd.isna(current_val) or len(valid) == 0:
@@ -206,7 +204,7 @@ class ATRTrendlinesJDWithFactors:
 
         self.line_color_high = TEAL if args.do_mono else GREEN
         self.line_color_low = TEAL if args.do_mono else FUCHSIA
-        self.trendlines: List[TrendlineRecord] = []
+        self.trendlines: list[TrendlineRecord] = []
 
     def angle_to_slope_percent(self, atr_value: float) -> float:
         if pd.isna(atr_value):
@@ -221,11 +219,11 @@ class ATRTrendlinesJDWithFactors:
         highs = self.df["high"].tolist()
         lows = self.df["low"].tolist()
 
-        active_res: Optional[TrendlineRecord] = None
-        active_sup: Optional[TrendlineRecord] = None
+        active_res: TrendlineRecord | None = None
+        active_sup: TrendlineRecord | None = None
 
-        res_slope_raw_hist: List[float] = []
-        sup_slope_raw_hist: List[float] = []
+        res_slope_raw_hist: list[float] = []
+        sup_slope_raw_hist: list[float] = []
 
         res_above_count = 0
         sup_below_count = 0

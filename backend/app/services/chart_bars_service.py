@@ -26,7 +26,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import uuid
-from datetime import date, datetime, time as dt_time, timedelta
+from datetime import date, datetime, timedelta
+from datetime import time as dt_time
 from zoneinfo import ZoneInfo
 
 import pandas as pd

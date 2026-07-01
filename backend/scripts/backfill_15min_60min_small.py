@@ -20,11 +20,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-import uuid
-from datetime import date, datetime, timedelta
-from decimal import Decimal
+from datetime import datetime, timedelta
 
-import pandas as pd
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from tqdm import tqdm
@@ -173,7 +170,7 @@ async def verify_completeness(db: AsyncSession, instruments: list[Instrument]) -
             {"iid": inst.id},
         )
         rows15 = daily15.all()
-        cnt_dist_15 = {c: 0 for c in [16]}
+        cnt_dist_15 = dict.fromkeys([16], 0)
         abnormal_15 = []
         for d, c in rows15:
             if c in cnt_dist_15:
@@ -192,7 +189,7 @@ async def verify_completeness(db: AsyncSession, instruments: list[Instrument]) -
             {"iid": inst.id},
         )
         rows60 = daily60.all()
-        cnt_dist_60 = {c: 0 for c in [4]}
+        cnt_dist_60 = dict.fromkeys([4], 0)
         abnormal_60 = []
         for d, c in rows60:
             if c in cnt_dist_60:
@@ -658,11 +655,11 @@ async def main() -> None:
     if adj_result["mismatch_60min_samples"]:
         print(f"  60min 不匹配样本: {adj_result['mismatch_60min_samples']}")
     if adj_result["sample_15_around_ex_div"]:
-        print(f"  15min 除权除息日附近样本（前 8 条）:")
+        print("  15min 除权除息日附近样本（前 8 条）:")
         for s in adj_result["sample_15_around_ex_div"]:
             print(f"    {s}")
     if adj_result["sample_60_around_ex_div"]:
-        print(f"  60min 除权除息日附近样本（前 8 条）:")
+        print("  60min 除权除息日附近样本（前 8 条）:")
         for s in adj_result["sample_60_around_ex_div"]:
             print(f"    {s}")
 

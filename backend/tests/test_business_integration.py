@@ -3,11 +3,9 @@ import uuid
 from datetime import UTC, date, datetime
 
 import pytest
-from sqlalchemy import text
 
 from app.services.selector_query_service import (
     RunNotFoundError,
-    NotSelectorRunError,
     query_published_selector_results,
 )
 
@@ -153,7 +151,6 @@ async def test_monitor_evaluation_exactly_once(db_session, test_selector_strateg
 @pytest.mark.asyncio
 async def test_event_recipient_expansion(db_session, test_user, test_instrument, test_selector_strategy):
     """事件收件人展开：自选该股票的用户应被添加为收件人。"""
-    from app.models.event_recipient import StrategyEventRecipient
     from app.models.strategy_event import StrategyEvent
     from app.models.watchlist import UserWatchlistItem
 

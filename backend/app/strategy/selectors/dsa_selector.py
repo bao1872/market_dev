@@ -50,8 +50,8 @@ from app.strategy._plotly_mock import ensure_plotly_mock  # noqa: E402
 # 导入 features/ 算法（SSOT，严格不修改）
 # 从包内 app.strategy_assets.algorithms.features 导入，Docker 兼容
 ensure_plotly_mock()
-from app.models.strategy import StrategyVersion  # noqa: E402
 from app.constants.indicator_contract import DSA_LOOKBACK  # noqa: E402
+from app.models.strategy import StrategyVersion  # noqa: E402
 from app.strategy.budget import BudgetExceededError, BudgetGuard  # noqa: E402
 from app.strategy.runtime import MarketDataContext, StrategyResult, StrategyRuntime  # noqa: E402
 from app.strategy_assets.algorithms.features.atr_rope_event_factor_lab_v4 import (  # noqa: E402

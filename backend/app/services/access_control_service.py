@@ -11,7 +11,7 @@
 设计原则：
 - 禁止各 API 自行拼接 role、subscription、expires_at，统一从 AccessContext 读取
 - admin 不需要 subscription，不受订阅到期和普通额度限制（subscription_active=True 豁免）
-- is_admin 只判断 "admin" 角色，strategy_author 等其他角色不影响身份判定
+- is_admin 只判断 "admin" 角色，其他非 admin 角色不影响身份判定
 - is_member 判断 "member" 角色，与 is_admin 对称（共 11 个字段）
 - subscription_active 由实时计算：status='active' AND starts_at<=now AND expires_at>now
 - get_access_context 是只读操作（不写 DB），可在登录路径使用
@@ -19,8 +19,8 @@
   不重复实现套餐查询与订阅状态判定逻辑
 
 业务规则（permission-matrix.md 设计）：
-- observe_20: monitor_limit=20, notification_channel_limit=1, message_retention_days=30, 6 features
-- research_50: monitor_limit=50, notification_channel_limit=3, message_retention_days=180, 7 features
+- observe_20 / research_50 套餐字段（monitor_limit/notification_channel_limit/message_retention_days/features）
+  以 plans 表记录为准，由 Alembic 048 迁移初始化
 - 过期订阅仍记录原 plan_code/plan_display_name（便于前端展示降级提示），但 subscription_active=False
 """
 

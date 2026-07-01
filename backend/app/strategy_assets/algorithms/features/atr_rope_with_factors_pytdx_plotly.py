@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 ATR Rope 趋势跟踪策略 + 因子计算 (pytdx/plotly)
 
@@ -78,7 +77,6 @@ import math
 import os
 import sys
 from dataclasses import dataclass
-from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -172,8 +170,8 @@ def pine_cross(curr_a: float, curr_b: float, prev_a: float, prev_b: float) -> bo
     return bool(crossover or crossunder)
 
 
-def segment_runs(mask: np.ndarray) -> List[Tuple[int, int]]:
-    runs: List[Tuple[int, int]] = []
+def segment_runs(mask: np.ndarray) -> list[tuple[int, int]]:
+    runs: list[tuple[int, int]] = []
     start = None
     for i, m in enumerate(mask):
         if m and start is None:

@@ -55,7 +55,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
 
-
 # [StrategyRun] - 失败阶段枚举：DSA 运行各阶段异常标记，写入 failure_stage 字段
 FAILURE_STAGE_DATA_READINESS = "DATA_READINESS"
 FAILURE_STAGE_LOAD_VERSION = "LOAD_VERSION"
@@ -271,7 +270,7 @@ class StrategyResult(Base):
     )
 
     # [选股] - 关联标的主数据，用于查询时 eager load symbol/name/market
-    instrument: Mapped["Instrument"] = relationship(
+    instrument: Mapped[Instrument] = relationship(
         "Instrument", lazy="raise", foreign_keys=[instrument_id],
     )
 

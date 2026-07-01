@@ -170,6 +170,7 @@ if __name__ == "__main__":
     if "--db" in sys.argv:
         print("\n=== DB 集成测试 ===")
         import os
+
         from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
         test_database_url = os.environ.get(

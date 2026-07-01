@@ -33,16 +33,14 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.strategy_keys import WATCHLIST_MONITOR
-from app.core.deps import get_current_active_user, _get_user_roles
+from app.core.deps import _get_user_roles, get_current_active_user
 from app.db import get_db
-from app.services.calendar_service import is_trading_day_async
-from app.services.market_status_service import TRADING_SESSIONS, compute_market_session
 from app.models.instrument import Instrument
-from app.models.subscription import Subscription
 from app.models.monitor_evaluation import MonitorEvaluation
 from app.models.monitor_state import MonitorState
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.strategy_event import StrategyEvent
+from app.models.subscription import Subscription
 from app.models.user import User
 from app.models.watchlist import UserWatchlistItem
 from app.schemas.watchlist import (
@@ -52,6 +50,8 @@ from app.schemas.watchlist import (
     WatchlistMonitorStatusItem,
     WatchlistMonitorStatusResponse,
 )
+from app.services.calendar_service import is_trading_day_async
+from app.services.market_status_service import TRADING_SESSIONS, compute_market_session
 
 router = APIRouter(prefix="/watchlist", tags=["watchlist"])
 

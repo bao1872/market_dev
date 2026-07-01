@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """市场阶段统一计算服务。
 
 提供 compute_market_session 函数，返回 6 种市场阶段枚举。

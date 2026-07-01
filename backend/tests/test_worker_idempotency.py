@@ -18,11 +18,11 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import select
-from unittest.mock import patch
 
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.worker import _create_job_run, _find_or_create_monitor_session_job_run

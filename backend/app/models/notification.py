@@ -67,7 +67,7 @@ class NotificationChannel(Base):
     )
 
     # [通知投递] - 关联投递记录
-    deliveries: Mapped[list["MessageDelivery"]] = relationship(
+    deliveries: Mapped[list[MessageDelivery]] = relationship(
         "MessageDelivery",
         back_populates="channel",
         lazy="selectin",
@@ -176,7 +176,7 @@ class NotificationMessage(Base):
     )
 
     # [通知投递] - 关联投递记录，列表接口 LEFT JOIN 返回真实投递状态
-    deliveries: Mapped[list["MessageDelivery"]] = relationship(
+    deliveries: Mapped[list[MessageDelivery]] = relationship(
         "MessageDelivery",
         back_populates="message",
         lazy="selectin",
@@ -258,10 +258,10 @@ class MessageDelivery(Base):
     )
 
     # [通知投递] - 关联消息与渠道，支持列表接口一次性加载
-    message: Mapped["NotificationMessage"] = relationship(
+    message: Mapped[NotificationMessage] = relationship(
         "NotificationMessage", back_populates="deliveries"
     )
-    channel: Mapped["NotificationChannel"] = relationship(
+    channel: Mapped[NotificationChannel] = relationship(
         "NotificationChannel", back_populates="deliveries"
     )
 

@@ -21,7 +21,6 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import date, datetime, timedelta
-from decimal import Decimal
 
 import akshare as ak
 import pandas as pd

@@ -28,7 +28,6 @@ from app.models.stock_memo import StockMemo
 from app.models.user import User
 from app.services.outbox_relay import relay_outbox
 
-
 # ============================================================
 # 测试 fixtures
 # ============================================================

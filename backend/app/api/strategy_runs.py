@@ -30,15 +30,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants.strategy_keys import DSA_SELECTOR
 from app.core.deps import get_current_active_user, get_db, require_roles
 from app.models.strategy import StrategyVersion
 from app.models.strategy_run import StrategyRun
 from app.models.user import User
-from app.constants.strategy_keys import DSA_SELECTOR
 from app.repositories import strategy_result_repository
 from app.repositories.strategy_result_repository import (
-    MetricFilter,
-    QueryResultPage,
     SortSpec,
     dict_filters_to_metric_filters,
 )
