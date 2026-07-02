@@ -297,6 +297,9 @@ class FeishuPlatformAppAdapter(ChannelAdapter):
                 success=False,
                 error_code="INVALID_IMAGE",
                 error_message="图片 bytes 为空或过小",
+                image_upload_success=False,
+                image_upload_error_code="INVALID_IMAGE",
+                image_upload_error_message="图片 bytes 为空或过小",
             )
 
         # 从 channel_config 读取用户级凭证
@@ -310,6 +313,9 @@ class FeishuPlatformAppAdapter(ChannelAdapter):
                 success=False,
                 error_code="CONFIG_MISSING",
                 error_message="channel_config 缺少: app_id 或 app_secret",
+                image_upload_success=False,
+                image_upload_error_code="CONFIG_MISSING",
+                image_upload_error_message="channel_config 缺少: app_id 或 app_secret",
             )
 
         if not receive_id:
@@ -317,6 +323,9 @@ class FeishuPlatformAppAdapter(ChannelAdapter):
                 success=False,
                 error_code="CONFIG_MISSING",
                 error_message="channel_config 缺少: receive_id",
+                image_upload_success=False,
+                image_upload_error_code="CONFIG_MISSING",
+                image_upload_error_message="channel_config 缺少: receive_id",
             )
 
         # 获取 tenant_access_token
@@ -326,6 +335,9 @@ class FeishuPlatformAppAdapter(ChannelAdapter):
                 success=False,
                 error_code="AUTH_FAILED",
                 error_message=token_error,
+                image_upload_success=False,
+                image_upload_error_code="AUTH_FAILED",
+                image_upload_error_message=token_error,
             )
 
         headers = {"Authorization": f"Bearer {token}"}
@@ -345,6 +357,9 @@ class FeishuPlatformAppAdapter(ChannelAdapter):
                 success=False,
                 error_code="NETWORK_TIMEOUT",
                 error_message=f"图片上传超时: {e}",
+                image_upload_success=False,
+                image_upload_error_code="NETWORK_TIMEOUT",
+                image_upload_error_message=f"图片上传超时: {e}",
             )
         except httpx.HTTPError as e:
             logger.warning("飞书图片上传网络错误: %s", e)
@@ -352,14 +367,22 @@ class FeishuPlatformAppAdapter(ChannelAdapter):
                 success=False,
                 error_code="NETWORK_ERROR",
                 error_message=f"图片上传网络错误: {e}",
+                image_upload_success=False,
+                image_upload_error_code="NETWORK_ERROR",
+                image_upload_error_message=f"图片上传网络错误: {e}",
             )
 
         # 检查上传响应
+        upload_provider_response = {"status_code": upload_resp.status_code, "body": upload_resp.text[:500]}
         if upload_resp.status_code in _RETRYABLE_STATUS:
             return DeliveryResult(
                 success=False,
                 error_code="RETRYABLE",
                 error_message=f"图片上传 HTTP {upload_resp.status_code}: {upload_resp.text[:200]}",
+                image_upload_success=False,
+                image_upload_error_code="RETRYABLE",
+                image_upload_error_message=f"图片上传 HTTP {upload_resp.status_code}: {upload_resp.text[:200]}",
+                image_upload_provider_response=upload_provider_response,
             )
 
         if upload_resp.status_code in _INVALID_STATUS:
@@ -367,6 +390,10 @@ class FeishuPlatformAppAdapter(ChannelAdapter):
                 success=False,
                 error_code="CHANNEL_INVALID",
                 error_message=f"图片上传 HTTP {upload_resp.status_code}: 渠道配置无效",
+                image_upload_success=False,
+                image_upload_error_code="CHANNEL_INVALID",
+                image_upload_error_message=f"图片上传 HTTP {upload_resp.status_code}: 渠道配置无效",
+                image_upload_provider_response=upload_provider_response,
             )
 
         if upload_resp.status_code != 200:
@@ -374,6 +401,10 @@ class FeishuPlatformAppAdapter(ChannelAdapter):
                 success=False,
                 error_code=f"HTTP_{upload_resp.status_code}",
                 error_message=f"图片上传 HTTP {upload_resp.status_code}: {upload_resp.text[:200]}",
+                image_upload_success=False,
+                image_upload_error_code=f"HTTP_{upload_resp.status_code}",
+                image_upload_error_message=f"图片上传 HTTP {upload_resp.status_code}: {upload_resp.text[:200]}",
+                image_upload_provider_response=upload_provider_response,
             )
 
         try:
@@ -383,6 +414,9 @@ class FeishuPlatformAppAdapter(ChannelAdapter):
                 success=False,
                 error_code="RESPONSE_PARSE_ERROR",
                 error_message=f"图片上传响应解析失败: {e}",
+                image_upload_success=False,
+                image_upload_error_code="RESPONSE_PARSE_ERROR",
+                image_upload_error_message=f"图片上传响应解析失败: {e}",
             )
 
         if upload_result.get("code") != 0:
@@ -393,6 +427,10 @@ class FeishuPlatformAppAdapter(ChannelAdapter):
                 success=False,
                 error_code=f"FEISHU_{error_code}",
                 error_message=error_msg,
+                image_upload_success=False,
+                image_upload_error_code=f"FEISHU_{error_code}",
+                image_upload_error_message=error_msg,
+                image_upload_provider_response=upload_result,
             )
 
         image_key = upload_result.get("data", {}).get("image_key", "")
@@ -401,6 +439,10 @@ class FeishuPlatformAppAdapter(ChannelAdapter):
                 success=False,
                 error_code="IMAGE_KEY_MISSING",
                 error_message="飞书图片上传成功但未返回 image_key",
+                image_upload_success=False,
+                image_upload_error_code="IMAGE_KEY_MISSING",
+                image_upload_error_message="飞书图片上传成功但未返回 image_key",
+                image_upload_provider_response=upload_result,
             )
 
         # 发送图片消息
@@ -412,6 +454,7 @@ class FeishuPlatformAppAdapter(ChannelAdapter):
         }
         params = {"receive_id_type": receive_id_type}
 
+        # 图片上传已成功，后续为图片消息发送阶段
         try:
             async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
                 resp = await client.post(
@@ -426,6 +469,8 @@ class FeishuPlatformAppAdapter(ChannelAdapter):
                 success=False,
                 error_code="NETWORK_TIMEOUT",
                 error_message=f"图片消息发送超时: {e}",
+                image_upload_success=True,
+                image_key=image_key,
             )
         except httpx.HTTPError as e:
             logger.warning("飞书图片消息发送网络错误: receive_id=%s: %s", receive_id, e)
@@ -433,15 +478,20 @@ class FeishuPlatformAppAdapter(ChannelAdapter):
                 success=False,
                 error_code="NETWORK_ERROR",
                 error_message=f"图片消息发送网络错误: {e}",
+                image_upload_success=True,
+                image_key=image_key,
             )
 
         # 检查 HTTP 状态码
+        send_provider_response = {"status_code": resp.status_code, "body": resp.text[:500]}
         if resp.status_code in _RETRYABLE_STATUS:
             return DeliveryResult(
                 success=False,
                 error_code="RETRYABLE",
                 error_message=f"HTTP {resp.status_code}: {resp.text[:200]}",
-                provider_response={"status_code": resp.status_code, "body": resp.text[:500]},
+                provider_response=send_provider_response,
+                image_upload_success=True,
+                image_key=image_key,
             )
 
         if resp.status_code in _INVALID_STATUS:
@@ -449,7 +499,9 @@ class FeishuPlatformAppAdapter(ChannelAdapter):
                 success=False,
                 error_code="CHANNEL_INVALID",
                 error_message=f"HTTP {resp.status_code}: 渠道配置无效",
-                provider_response={"status_code": resp.status_code, "body": resp.text[:500]},
+                provider_response=send_provider_response,
+                image_upload_success=True,
+                image_key=image_key,
             )
 
         if resp.status_code != 200:
@@ -457,7 +509,9 @@ class FeishuPlatformAppAdapter(ChannelAdapter):
                 success=False,
                 error_code=f"HTTP_{resp.status_code}",
                 error_message=f"HTTP {resp.status_code}: {resp.text[:200]}",
-                provider_response={"status_code": resp.status_code, "body": resp.text[:500]},
+                provider_response=send_provider_response,
+                image_upload_success=True,
+                image_key=image_key,
             )
 
         # 解析飞书响应
@@ -469,6 +523,8 @@ class FeishuPlatformAppAdapter(ChannelAdapter):
                 error_code="RESPONSE_PARSE_ERROR",
                 error_message=f"响应解析失败: {e}",
                 provider_response={"raw": resp.text[:500]},
+                image_upload_success=True,
+                image_key=image_key,
             )
 
         if result.get("code") == 0:
@@ -479,6 +535,8 @@ class FeishuPlatformAppAdapter(ChannelAdapter):
             return DeliveryResult(
                 success=True,
                 provider_response=result,
+                image_upload_success=True,
+                image_key=image_key,
             )
 
         error_code = str(result.get("code", "UNKNOWN"))
@@ -492,6 +550,8 @@ class FeishuPlatformAppAdapter(ChannelAdapter):
             error_code=f"FEISHU_{error_code}",
             error_message=error_msg,
             provider_response=result,
+            image_upload_success=True,
+            image_key=image_key,
         )
 
     async def send_text_message(

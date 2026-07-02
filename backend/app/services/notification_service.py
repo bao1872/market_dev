@@ -316,6 +316,20 @@ async def _execute_delivery(
             delivery.status = "failed"
         delivery.last_error_code = result.error_code
     delivery.provider_response = result.provider_response
+
+    # [ImageDelivery] - 分别记录图片上传状态与最终投递状态
+    if delivery.delivery_type == "image":
+        if result.image_upload_success is True:
+            delivery.image_upload_status = "success"
+            delivery.image_upload_error_code = None
+        elif result.image_upload_success is False:
+            delivery.image_upload_status = "failed"
+            delivery.image_upload_error_code = (
+                result.image_upload_error_code or result.error_code
+            )
+        delivery.image_upload_provider_response = result.image_upload_provider_response
+        delivery.image_key = result.image_key
+
     await db.flush()
 
     return delivery
@@ -954,6 +968,52 @@ async def retry_delivery(
     await db.flush()
 
     return await _execute_delivery(db, delivery)
+
+
+async def retry_image_delivery(
+    db: AsyncSession,
+    message_group_id: str,
+    user_id: UUID,
+) -> list[MessageDelivery]:
+    """按 message_group_id 重试失败的图片投递（不重复发送文字）。
+
+    [StockDetailFeishu] - 描述: 仅重试 delivery_type='image' 且状态为 failed/dead 的投递，
+    复用 retry_delivery，不创建新 MessageDelivery，从而不触发新的卡片段投递。
+
+    Args:
+        db: 异步会话
+        message_group_id: 消息组 ID（关联 text+image 两条投递）
+        user_id: 当前用户 ID（权限隔离）
+
+    Returns:
+        被重试的 MessageDelivery 列表（可能为空，表示无失败图片投递可重试）
+
+    Raises:
+        NotificationServiceError: 查询或重试过程中发生错误
+    """
+    stmt = (
+        select(MessageDelivery)
+        .join(NotificationChannel, MessageDelivery.channel_id == NotificationChannel.id)
+        .where(
+            MessageDelivery.message_group_id == message_group_id,
+            MessageDelivery.delivery_type == "image",
+            MessageDelivery.status.in_(["pending", "failed", "retrying", "dead"]),
+            NotificationChannel.user_id == user_id,
+        )
+        .options(
+            selectinload(MessageDelivery.channel),
+            selectinload(MessageDelivery.message),
+        )
+        .order_by(MessageDelivery.created_at.asc())
+    )
+    result = await db.execute(stmt)
+    image_deliveries = list(result.scalars().all())
+
+    retried: list[MessageDelivery] = []
+    for delivery in image_deliveries:
+        retried_delivery = await retry_delivery(db, delivery.id)
+        retried.append(retried_delivery)
+    return retried
 
 
 async def test_channel(
