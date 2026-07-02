@@ -43,6 +43,10 @@ dist-ssr/
 *.parquet
 *.pkl
 *.pickle
+*.dump
+
+# ===== 备份目录（迁移/恢复产生的 dump，不入库） =====
+backups/
 
 # ===== 日志文件 =====
 *.log
