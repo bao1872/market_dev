@@ -1,4 +1,4 @@
-"""一次性脚本：创建测试账号（普通用户 + 管理员）+ 开通会员。
+"""一次性脚本：创建测试账号（普通用户 + 管理员）+ 开通订阅。
 
 用法：
     DATABASE_URL="postgresql+psycopg://bz:***@127.0.0.1:5432/bz_stock" \
@@ -6,14 +6,14 @@
 
 事实源：
 - backend/app/models/user.py: User / Role / UserRole ORM
-- backend/app/models/membership.py: Membership ORM
+- backend/app/models/subscription.py: Subscription ORM
 - backend/app/core/security.py: get_password_hash
 
 约束：
 - 仅在测试环境使用，不修改现有用户密码
 - 不启用 MFA（系统当前无 MFA 字段，此约束自动满足）
 - 测试账号邮箱：test-user@market.dev / test-admin@market.dev
-- 测试账号需开通会员，否则前端会跳转到续期页（membership_expired=true）
+- 测试账号需开通订阅，否则前端会跳转到续期页（subscription_active=false）
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from sqlalchemy import select  # noqa: E402
 
 from app.core.security import get_password_hash  # noqa: E402
 from app.db import AsyncSessionLocal  # noqa: E402
-from app.models.membership import Membership  # noqa: E402
+from app.models.subscription import Subscription  # noqa: E402
 from app.models.user import Role, User, UserRole  # noqa: E402
 
 # 测试账号配置（密码禁止硬编码，通过 TEST_USER_PASSWORD / TEST_ADMIN_PASSWORD 传入）
@@ -41,19 +41,19 @@ _TEST_ACCOUNTS = [
     {
         "email": "test-user@market.dev",
         "password": os.environ.get("TEST_USER_PASSWORD"),
-        "role_names": ["user"],
+        "role_names": ["member"],
         "description": "测试普通用户",
     },
     {
         "email": "test-admin@market.dev",
         "password": os.environ.get("TEST_ADMIN_PASSWORD"),
-        "role_names": ["admin", "user"],
+        "role_names": ["admin"],
         "description": "测试管理员",
     },
 ]
 
-# 测试账号会员有效期（365 天，确保测试期间不会过期）
-_TEST_MEMBERSHIP_DAYS = 365
+# 测试账号订阅有效期（365 天，确保测试期间不会过期）
+_TEST_SUBSCRIPTION_DAYS = 365
 
 
 async def _upsert_test_account(
@@ -63,7 +63,7 @@ async def _upsert_test_account(
     role_names: list[str],
     description: str,
 ) -> str:
-    """创建或更新测试账号（已存在则跳过密码修改，仅补全角色与会员）。
+    """创建或更新测试账号（已存在则跳过密码修改，仅补全角色与订阅）。
 
     Args:
         db: 异步数据库会话
@@ -92,7 +92,7 @@ async def _upsert_test_account(
         await db.flush()
         action = f"创建 {description}（id={user.id}）"
     else:
-        # 已存在：不修改密码（任务约束），仅补全角色与会员
+        # 已存在：不修改密码（任务约束），仅补全角色与订阅
         action = f"已存在 {description}（id={user.id}），跳过密码修改"
 
     # 查询角色并补全关联
@@ -113,25 +113,44 @@ async def _upsert_test_account(
             db.add(UserRole(user_id=user.id, role_id=role.id))
             action += f"，补全角色 {role_name}"
 
-    # 补全会员记录（确保测试账号可访问用户端功能）
-    membership_stmt = select(Membership).where(Membership.user_id == user.id)
-    membership_result = await db.execute(membership_stmt)
-    membership = membership_result.scalar_one_or_none()
-    now = datetime.now(UTC)
-    if membership is None:
-        membership = Membership(
-            user_id=user.id,
-            status="active",
-            started_at=now,
-            expires_at=now + timedelta(days=_TEST_MEMBERSHIP_DAYS),
-        )
-        db.add(membership)
-        action += f"，开通会员 {_TEST_MEMBERSHIP_DAYS} 天"
-    elif membership.expires_at < now + timedelta(days=30):
-        # 临近到期则顺延，避免测试期间过期
-        membership.expires_at = now + timedelta(days=_TEST_MEMBERSHIP_DAYS)
-        membership.status = "active"
-        action += f"，顺延会员至 {membership.expires_at.isoformat()}"
+    # 补全订阅记录（确保测试账号可访问用户端功能；admin 不需要订阅）
+    if "admin" not in role_names:
+        subscription_stmt = select(Subscription).where(Subscription.user_id == user.id)
+        subscription_result = await db.execute(subscription_stmt)
+        subscription = subscription_result.scalar_one_or_none()
+        now = datetime.now(UTC)
+        if subscription is None:
+            subscription = Subscription(
+                user_id=user.id,
+                plan_code="observe_20",
+                status="active",
+                starts_at=now,
+                expires_at=now + timedelta(days=_TEST_SUBSCRIPTION_DAYS),
+                entitlement_snapshot={
+                    "monitor_limit": 20,
+                    "notification_channel_limit": 1,
+                    "message_retention_days": 30,
+                    "features": [
+                        "trend_selection",
+                        "stock_detail",
+                        "node_monitor",
+                        "in_app_message",
+                        "feishu_notification",
+                        "stock_memo",
+                    ],
+                },
+                source="admin_grant",
+                created_by=None,
+                updated_at=now,
+            )
+            db.add(subscription)
+            action += f"，开通订阅 {_TEST_SUBSCRIPTION_DAYS} 天"
+        elif subscription.expires_at < now + timedelta(days=30):
+            # 临近到期则顺延，避免测试期间过期
+            subscription.expires_at = now + timedelta(days=_TEST_SUBSCRIPTION_DAYS)
+            subscription.status = "active"
+            subscription.updated_at = now
+            action += f"，顺延订阅至 {subscription.expires_at.isoformat()}"
 
     return action
 

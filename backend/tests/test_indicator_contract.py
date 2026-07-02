@@ -7,7 +7,6 @@ import ast
 import inspect
 from pathlib import Path
 
-import pytest
 import yaml
 
 from app.constants import indicator_contract as IC

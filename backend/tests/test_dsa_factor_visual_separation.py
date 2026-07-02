@@ -21,6 +21,11 @@ import pandas as pd
 import pytest
 
 from app.constants.indicator_contract import DSA_LOOKBACK
+from app.strategy.selectors.dsa_selector import (
+    MIN_DIR_BARS,
+    _safe_float,
+    compute_dsa_bundle,
+)
 from app.strategy_assets.algorithms.features.atr_rope_event_factor_lab_v4 import (
     ATRRopeConfig,
 )
@@ -28,12 +33,6 @@ from app.strategy_assets.algorithms.features.dynamic_swing_anchored_vwap import 
     DSAConfig,
     dynamic_swing_anchored_vwap,
 )
-from app.strategy.selectors.dsa_selector import (
-    MIN_DIR_BARS,
-    _safe_float,
-    compute_dsa_bundle,
-)
-
 
 # ---------------------------------------------------------------------------
 # 测试数据与配置工厂（与 test_dsa_bundle_consistency.py 同口径，确保可对比）

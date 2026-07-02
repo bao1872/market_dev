@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Stop Loss Clustering (Breakouts) + Native Factors (pytdx/plotly)
 
@@ -32,8 +31,8 @@ from __future__ import annotations
 
 import argparse
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -106,7 +105,7 @@ def _market_from_symbol(symbol: str) -> int:
 
 
 def connect_pytdx() -> TdxHq_API:
-    errors: List[str] = []
+    errors: list[str] = []
     for host, port in SERVERS:
         try:
             api = TdxHq_API(raise_exception=True, auto_retry=True)
@@ -123,7 +122,7 @@ def fetch_kline_pytdx(symbol: str, freq: str, count: int) -> pd.DataFrame:
         cat = _category_from_freq(freq)
         mkt = _market_from_symbol(symbol)
         size = 800
-        frames: List[pd.DataFrame] = []
+        frames: list[pd.DataFrame] = []
         start = 0
         target = max(int(count), 300)
         while start < target + size:
@@ -252,7 +251,7 @@ class SwingCluster:
     price: float
     barrier: float
     pivot_idx: int
-    triggered_idx: Optional[int] = None
+    triggered_idx: int | None = None
     intra_bar_move: float = np.nan
 
 
@@ -263,7 +262,7 @@ class TimeLayer:
     first_idx: int
     last_idx: int
     side: str  # "buy" or "sell"
-    triggered_idx: Optional[int] = None
+    triggered_idx: int | None = None
 
 
 class IQZZ:
@@ -275,7 +274,7 @@ class IQZZ:
         self.close = close
         self.atr = atr * atr_mult
 
-    def run(self) -> Tuple[np.ndarray, List[float], List[int], List[str]]:
+    def run(self) -> tuple[np.ndarray, list[float], list[int], list[str]]:
         n = len(self.close)
         direction = 0
         pivot_price = float(self.close[0]) if n else np.nan
@@ -284,9 +283,9 @@ class IQZZ:
         prev_confirmed_idx = -1
 
         market_state = np.zeros(n, dtype=float)
-        point_arr: List[float] = []
-        time_arr: List[int] = []
-        point_kind: List[str] = []
+        point_arr: list[float] = []
+        time_arr: list[int] = []
+        point_kind: list[str] = []
 
         for i in range(n):
             atr_i = self.atr[i]
@@ -354,14 +353,14 @@ class StopLossClusteringEngine:
         self.df["hlc3"] = (self.df["high"] + self.df["low"] + self.df["close"]) / 3.0
         self.df["signed_volume"] = self._get_signed_volume_series()
 
-        self.buy_clusters_active: List[SwingCluster] = []
-        self.sell_clusters_active: List[SwingCluster] = []
-        self.buy_clusters_removed: List[SwingCluster] = []
-        self.sell_clusters_removed: List[SwingCluster] = []
-        self.buy_layers_active: List[TimeLayer] = []
-        self.sell_layers_active: List[TimeLayer] = []
-        self.buy_layers_removed: List[TimeLayer] = []
-        self.sell_layers_removed: List[TimeLayer] = []
+        self.buy_clusters_active: list[SwingCluster] = []
+        self.sell_clusters_active: list[SwingCluster] = []
+        self.buy_clusters_removed: list[SwingCluster] = []
+        self.sell_clusters_removed: list[SwingCluster] = []
+        self.buy_layers_active: list[TimeLayer] = []
+        self.sell_layers_active: list[TimeLayer] = []
+        self.buy_layers_removed: list[TimeLayer] = []
+        self.sell_layers_removed: list[TimeLayer] = []
 
     @staticmethod
     def _infer_mintick(close: np.ndarray) -> float:
@@ -436,8 +435,8 @@ class StopLossClusteringEngine:
         point_meta.sort(key=lambda x: x[0])
         next_point_ptr = 1  # mimic Pine getPointSize > 1 requirement
 
-        typical_buy_moves: List[float] = []
-        typical_sell_moves: List[float] = []
+        typical_buy_moves: list[float] = []
+        typical_sell_moves: list[float] = []
         point_indices_only = [p[0] for p in point_meta]
 
         for i in range(n):
@@ -462,7 +461,7 @@ class StopLossClusteringEngine:
                 next_point_ptr += 1
 
             # trigger detection
-            triggered_sells: List[SwingCluster] = []
+            triggered_sells: list[SwingCluster] = []
             max_vol_sell_price = np.nan
             max_vol_sell_volume = -1.0
             for cl in list(self.sell_clusters_active):
@@ -484,7 +483,7 @@ class StopLossClusteringEngine:
             if sell_trigger[i] == 1.0 and np.isfinite(max_vol_sell_price):
                 sell_trigger_max_vol_price[i] = max_vol_sell_price
 
-            triggered_buys: List[SwingCluster] = []
+            triggered_buys: list[SwingCluster] = []
             for cl in list(self.buy_clusters_active):
                 if low[i] <= cl.barrier:
                     cl.triggered_idx = i

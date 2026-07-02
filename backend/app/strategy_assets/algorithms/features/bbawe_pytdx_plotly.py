@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 文件名：
     bbawe_pytdx_plotly.py
@@ -32,13 +31,12 @@ import argparse
 import os
 import sys
 from dataclasses import dataclass
-from typing import Tuple
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from plotly.offline import plot
+from plotly.subplots import make_subplots
 
 if __name__ == "__main__":
     _base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -84,7 +82,7 @@ def normalize_freq(freq: str) -> str:
     raise ValueError(f"Unsupported freq: {freq}")
 
 
-def fetch_data(symbol: str, freq: str, bars: int) -> Tuple[pd.DataFrame, object]:
+def fetch_data(symbol: str, freq: str, bars: int) -> tuple[pd.DataFrame, object]:
     client = connect_pytdx()
     freq = normalize_freq(freq)
 

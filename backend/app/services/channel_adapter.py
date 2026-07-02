@@ -89,6 +89,9 @@ class ChannelAdapter(ABC):
             success=False,
             error_code="NOT_SUPPORTED",
             error_message=f"渠道类型 {self.adapter_type} 不支持图片投递",
+            image_upload_success=False,
+            image_upload_error_code="NOT_SUPPORTED",
+            image_upload_error_message=f"渠道类型 {self.adapter_type} 不支持图片投递",
         )
 
     async def send_text_message(

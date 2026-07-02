@@ -61,7 +61,7 @@ async def _no_op_seed_strategies(db, release=False):
     return []
 
 
-async def _no_op_seed_calendar(db, year=None):
+async def _no_op_seed_calendar(db, year=None, force=False, commit=True):
     """测试用 no-op 日历种子。"""
     return 0
 
@@ -100,7 +100,7 @@ async def test_lifespan_calls_recovery_on_startup(db_session) -> None:
          patch.object(db_session, "commit", new=db_session.flush), \
          patch("app.api.health.check_strategy_assets", _no_op_check_strategy_assets), \
          patch("app.services.strategy_seed.seed_strategies", _no_op_seed_strategies), \
-         patch("app.services.calendar_seed.seed_calendar_from_pytdx", _no_op_seed_calendar):
+         patch("app.services.calendar_seed.seed_calendar_from_mootdx", _no_op_seed_calendar):
         async with lifespan(None):
             pass  # yield 被到达，lifespan 正常运行
 
@@ -135,7 +135,7 @@ async def test_lifespan_recovery_failure_does_not_block_startup(db_session) -> N
          patch.object(db_session, "commit", new=db_session.flush), \
          patch("app.api.health.check_strategy_assets", _no_op_check_strategy_assets), \
          patch("app.services.strategy_seed.seed_strategies", _no_op_seed_strategies), \
-         patch("app.services.calendar_seed.seed_calendar_from_pytdx", _no_op_seed_calendar), \
+         patch("app.services.calendar_seed.seed_calendar_from_mootdx", _no_op_seed_calendar), \
          patch(
              "app.services.scheduler_job_run_recovery_service.recover_stale_scheduler_job_runs",
              failing_recover,

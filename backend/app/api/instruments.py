@@ -25,11 +25,12 @@ import unicodedata
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import case, func, literal, or_, select
+from sqlalchemy import ColumnElement, case, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db
 from app.models.instrument import Instrument
+from app.services.instrument_maintenance_service import stock_symbol_sql_filter
 from app.schemas.instrument import (
     InstrumentBatchRequest,
     InstrumentBatchResponse,
@@ -49,11 +50,14 @@ async def list_instruments(
     page_size: int = Query(20, ge=1, le=100, description="每页大小（最大 100）"),
     db: AsyncSession = Depends(get_db),
 ) -> InstrumentListResponse:
-    """查询股票列表，支持关键词搜索（代码/名称/拼音首字母）、市场/状态筛选与分页。"""
-    # 构建查询条件
-    conditions = []
+    """查询股票列表，支持关键词搜索（代码/名称/拼音首字母）、市场/状态筛选与分页。
+
+    默认仅返回 A 股股票（排除指数/ETF/基金），避免自选股搜索出现上证能源等指数标的。
+    """
+    # 构建查询条件：默认仅返回 A 股股票
+    conditions = [stock_symbol_sql_filter(Instrument)]
     # 关键词命中后的排序优先级（越小越靠前）；无关键词时统一为 0
-    rank_expr = literal(0)
+    rank_expr: ColumnElement[int] = literal(0)
     if keyword:
         # NFKC 归一化：将全角字符转为半角（如 Ａ → A），确保全角输入也能匹配
         keyword = unicodedata.normalize("NFKC", keyword)
@@ -63,10 +67,10 @@ async def list_instruments(
         pinyin_prefix = f"{keyword_lower}%"
         name_pattern = f"%{keyword}%"
 
-        # 搜索优先级：代码完全匹配 → 代码前缀 → 拼音首字母前缀 → 名称包含
+        # 搜索优先级：代码完全匹配 → 代码前缀（大小写不敏感） → 拼音首字母前缀 → 名称包含
         rank_expr = case(
             (Instrument.symbol == sym_exact, 0),
-            (Instrument.symbol.like(sym_prefix), 1),
+            (Instrument.symbol.ilike(sym_prefix), 1),
             (Instrument.pinyin_initials.like(pinyin_prefix), 2),
             (Instrument.name.ilike(name_pattern), 3),
             else_=4,
@@ -74,7 +78,7 @@ async def list_instruments(
         conditions.append(
             or_(
                 Instrument.symbol == sym_exact,
-                Instrument.symbol.like(sym_prefix),
+                Instrument.symbol.ilike(sym_prefix),
                 Instrument.pinyin_initials.like(pinyin_prefix),
                 Instrument.name.ilike(name_pattern),
             )
@@ -169,5 +173,7 @@ async def get_instrument(
 
 if __name__ == "__main__":
     # 自测入口：验证路由注册
-    print(f"router.routes={[r.path for r in router.routes]}")
+    paths = [getattr(r, "path", None) for r in router.routes]
+    paths = [p for p in paths if p is not None]
+    print(f"router.routes={paths}")
     print("OK")

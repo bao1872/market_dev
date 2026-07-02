@@ -15,7 +15,7 @@ import asyncio
 import logging
 import sys
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 backend_dir = Path(__file__).resolve().parent.parent
@@ -33,21 +33,19 @@ USER_ID = uuid.UUID("b4ce72ca-f81d-4a52-a16f-402af9b660c8")
 async def main() -> None:
     from sqlalchemy import select
 
+    from app.constants.user_facing_labels import get_event_label, get_field_label
     from app.db import AsyncSessionLocal
     from app.models.instrument import Instrument
     from app.models.notification import NotificationChannel
-    from app.models.strategy import StrategyDefinition, StrategyVersion
     from app.models.watchlist import UserWatchlistItem
-    from app.repositories.bar_repository import fetch_15min_bars, fetch_daily_bars
+    from app.repositories.bar_repository import fetch_daily_bars
     from app.schemas.notification import NotificationMessageDTO
     from app.services.monitor_batch_service import (
-        MonitorBatchService,
         _EVENT_EMOJI,
         _SEVERITY_TEMPLATE,
+        MonitorBatchService,
     )
-    from app.constants.user_facing_labels import get_event_label, get_field_label
     from app.services.notification_service import create_message, deliver_message
-    from app.strategy.runtime import MarketDataContext, StrategyLoader
 
     async with AsyncSessionLocal() as db:
         # ===== Step 1: 执行 MonitorBatchService 完整监控周期 =====
@@ -312,5 +310,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    import pandas as pd
     asyncio.run(main())

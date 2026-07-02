@@ -68,7 +68,11 @@ class TestPublishRunValidation:
     async def test_publish_run_accepts_partial_failed_with_succeeded(
         self, db_session, test_selector_strategy
     ):
-        """partial_failed 运行只要有成功结果，publish_run 应允许发布。"""
+        """admin 手动 publish_run：partial_failed + succeeded>0 仍允许发布。
+
+        注意：自动发布门禁（_check_quality_gates）对 partial_failed 严格拒绝，
+        但 admin 手动发布口径保留 completed/partial_failed + succeeded>0。
+        """
         version = test_selector_strategy["version"]
         run = StrategyRun(
             strategy_version_id=version.id,
@@ -92,52 +96,100 @@ class TestPublishRunValidation:
 
 
 class TestQualityGates:
-    """_check_quality_gates 质量门禁测试。"""
+    """_check_quality_gates 自动发布质量门禁测试（严格模式）。"""
 
     @pytest.mark.asyncio
-    async def test_quality_gate_passes_partial_failed_with_succeeded(self):
-        """partial_failed + succeeded_count > 0 应通过门禁。"""
+    async def test_quality_gate_passes_completed_all_instruments_no_failed(self):
+        """completed + failed=0 + succeeded+skipped=total + 覆盖率 100% 通过门禁。"""
         run = StrategyRun(
-            status="partial_failed",
-            succeeded_count=1,
-            failed_count=99,
+            id=uuid.uuid4(),
+            status="completed",
+            succeeded_count=95,
+            failed_count=0,
+            skipped_count=5,
             total_instruments=100,
         )
         service = StrategyBatchService()
-        assert await service._check_quality_gates(run) is True
+        assert await service._check_quality_gates(run, result_count=95) is True
 
     @pytest.mark.asyncio
-    async def test_quality_gate_passes_completed_with_failed_but_succeeded(self):
-        """completed + failed_count > 0 但 succeeded_count > 0 仍应通过门禁。"""
+    async def test_quality_gate_rejects_partial_failed(self):
+        """partial_failed 禁止自动发布。"""
         run = StrategyRun(
+            id=uuid.uuid4(),
+            status="partial_failed",
+            succeeded_count=80,
+            failed_count=20,
+            total_instruments=100,
+        )
+        service = StrategyBatchService()
+        assert await service._check_quality_gates(run, result_count=80) is False
+
+    @pytest.mark.asyncio
+    async def test_quality_gate_rejects_completed_with_failed(self):
+        """completed 但 failed_count > 0 禁止自动发布。"""
+        run = StrategyRun(
+            id=uuid.uuid4(),
             status="completed",
             succeeded_count=95,
             failed_count=5,
+            skipped_count=0,
             total_instruments=100,
         )
         service = StrategyBatchService()
-        assert await service._check_quality_gates(run) is True
+        assert await service._check_quality_gates(run, result_count=95) is False
+
+    @pytest.mark.asyncio
+    async def test_quality_gate_rejects_when_result_count_mismatch(self):
+        """strategy_results.count != succeeded_count 禁止自动发布。"""
+        run = StrategyRun(
+            id=uuid.uuid4(),
+            status="completed",
+            succeeded_count=95,
+            failed_count=0,
+            skipped_count=5,
+            total_instruments=100,
+        )
+        service = StrategyBatchService()
+        assert await service._check_quality_gates(run, result_count=94) is False
+
+    @pytest.mark.asyncio
+    async def test_quality_gate_rejects_incomplete_coverage(self):
+        """succeeded + skipped != total 禁止自动发布。"""
+        run = StrategyRun(
+            id=uuid.uuid4(),
+            status="completed",
+            succeeded_count=90,
+            failed_count=0,
+            skipped_count=5,
+            total_instruments=100,
+        )
+        service = StrategyBatchService()
+        assert await service._check_quality_gates(run, result_count=90) is False
 
     @pytest.mark.asyncio
     async def test_quality_gate_rejects_completed_with_zero_succeeded(self):
         """completed 但 succeeded_count == 0 不应通过门禁。"""
         run = StrategyRun(
+            id=uuid.uuid4(),
             status="completed",
             succeeded_count=0,
             failed_count=0,
+            skipped_count=100,
             total_instruments=100,
         )
         service = StrategyBatchService()
-        assert await service._check_quality_gates(run) is False
+        assert await service._check_quality_gates(run, result_count=0) is False
 
     @pytest.mark.asyncio
     async def test_quality_gate_rejects_failed_status(self):
         """failed 状态不应通过门禁。"""
         run = StrategyRun(
+            id=uuid.uuid4(),
             status="failed",
             succeeded_count=0,
             failed_count=100,
             total_instruments=100,
         )
         service = StrategyBatchService()
-        assert await service._check_quality_gates(run) is False
+        assert await service._check_quality_gates(run, result_count=0) is False

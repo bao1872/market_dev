@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Bollinguer sobre Macd（MACD 上的布林带）可视化脚本（独立可运行）
 
@@ -30,7 +29,6 @@ Dependencies
 from __future__ import annotations
 
 import argparse
-from typing import List
 
 import numpy as np
 import pandas as pd
@@ -98,7 +96,7 @@ def _market_from_symbol(symbol: str) -> int:
 
 
 def connect_pytdx() -> TdxHq_API:
-    errors: List[str] = []
+    errors: list[str] = []
     for host, port in SERVERS:
         try:
             api = TdxHq_API(raise_exception=True, auto_retry=True)
@@ -115,7 +113,7 @@ def fetch_kline_pytdx(symbol: str, freq: str, count: int) -> pd.DataFrame:
         cat = _category_from_freq(freq)
         mkt = _market_from_symbol(symbol)
         size = 800
-        frames: List[pd.DataFrame] = []
+        frames: list[pd.DataFrame] = []
         start = 0
         target = max(int(count), 300)
         while start < target + size:
@@ -163,7 +161,7 @@ def pine_ema(src: pd.Series, length: int) -> pd.Series:
     alpha = 2.0 / (length + 1.0)
     prev = np.nan
     valid_count = 0
-    seed_vals: List[float] = []
+    seed_vals: list[float] = []
     seeded = False
     for i, val in enumerate(arr):
         if np.isnan(val):

@@ -15,7 +15,7 @@
 // - useCreateInviteCodes：生成邀请码
 // - useRevokeInviteCode：作废邀请码
 
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback, useEffect } from 'react'
 import clsx from 'clsx'
 import { useToast } from '@/store/toast'
 import {
@@ -24,13 +24,19 @@ import {
   useInviteCodes,
   useCreateInviteCodes,
   useRevokeInviteCode,
+  usePlans,
+  useAdminEnableUser,
+  useAdminDisableUser,
+  useAdminChangeSubscriptionPlan,
+  useAdminAuditLogs,
 } from '@/hooks/useApi'
 import { StrategyDataTable } from '@/components/StrategyDataTable'
 import type { DataTableColumn } from '@/components/StrategyDataTable'
 import {
   type InviteCode,
   type PlanCode,
-  PLAN_CONTRACTS_PREVIEW,
+  type PlanResponse,
+  type AuditLogListItem,
 } from '@/api/endpoints'
 
 // ===== 类型定义（带索引签名以满足 StrategyDataTable 的 Row extends Record<string, unknown>）=====
@@ -147,16 +153,22 @@ function getEmailUsername(email: string): string {
   return email.split('@')[0] || email
 }
 
-/** 套餐展示名（observe_20 → 观察版，未知/空 → '—'） */
-function getPlanName(planCode: PlanCode | null | undefined): string {
+/** 套餐展示名（从 plans 数组查询，未知/空 → '—'） */
+function getPlanName(
+  planCode: PlanCode | null | undefined,
+  plans: PlanResponse[],
+): string {
   if (!planCode) return '—'
-  return PLAN_CONTRACTS_PREVIEW[planCode]?.name ?? '—'
+  return plans.find((p) => p.plan_code === planCode)?.display_name ?? '—'
 }
 
-/** 套餐最大自选数量展示（observe_20 → 20，未知/空 → '—'） */
-function getPlanMonitorLimit(planCode: PlanCode | null | undefined): string {
+/** 套餐最大自选数量展示（从 plans 数组查询，未知/空 → '—'） */
+function getPlanMonitorLimit(
+  planCode: PlanCode | null | undefined,
+  plans: PlanResponse[],
+): string {
   if (!planCode) return '—'
-  const limit = PLAN_CONTRACTS_PREVIEW[planCode]?.monitorLimit
+  const limit = plans.find((p) => p.plan_code === planCode)?.monitor_limit
   return limit != null ? String(limit) : '—'
 }
 
@@ -165,30 +177,48 @@ function getPlanMonitorLimit(planCode: PlanCode | null | undefined): string {
 export default function AdminUsersPage() {
   const toast = useToast()
 
-  // 数据查询 hooks
-  const membersQuery = useMembers()
-  const inviteCodesQuery = useInviteCodes()
-  const createInviteCodes = useCreateInviteCodes()
-  const revokeInviteCode = useRevokeInviteCode()
-
   // 页面状态
   const [activeTab, setActiveTab] = useState<string>('memberList')
   // 用户详情抽屉
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [selectedMember, setSelectedMember] = useState<MemberRow | null>(null)
   const [drawerTab, setDrawerTab] = useState<string>('profile')
+
+  // 数据查询 hooks（依赖 selectedMember 的需放在状态定义之后）
+  const membersQuery = useMembers()
+  const inviteCodesQuery = useInviteCodes()
+  const plansQuery = usePlans()
+  const createInviteCodes = useCreateInviteCodes()
+  const revokeInviteCode = useRevokeInviteCode()
+  const enableUser = useAdminEnableUser()
+  const disableUser = useAdminDisableUser()
+  const changePlan = useAdminChangeSubscriptionPlan()
+  const auditLogsQuery = useAdminAuditLogs(
+    selectedMember ? { target_user_id: selectedMember.user_id } : undefined,
+    !!selectedMember,
+  )
+
+  const plans = plansQuery.data ?? []
+  const firstPlanCode = plans[0]?.plan_code ?? ''
   // 抽屉表单编辑状态
   const [accountStatusEdit, setAccountStatusEdit] = useState('有效')
   const [membershipStatusEdit, setMembershipStatusEdit] = useState('有效')
   const [expiresAtEdit, setExpiresAtEdit] = useState('')
-  const [roleEdit, setRoleEdit] = useState('普通会员')
+  const [planCodeEdit, setPlanCodeEdit] = useState<PlanCode>('')
   // 生成邀请码弹窗
   const [modalOpen, setModalOpen] = useState(false)
   const [generateCount, setGenerateCount] = useState(1)
   const [generateNote, setGenerateNote] = useState('朋友内测')
-  const [generatePlanCode, setGeneratePlanCode] = useState<PlanCode>('observe_20')
+  const [generatePlanCode, setGeneratePlanCode] = useState<PlanCode>('')
   const [generateGrantMonths, setGenerateGrantMonths] = useState(1)
   const [generatedCodes, setGeneratedCodes] = useState<InviteCode[]>([])
+
+  // 套餐加载后，默认选中第一个 plan_code（仅在未选择时）
+  useEffect(() => {
+    if (!generatePlanCode && firstPlanCode) {
+      setGeneratePlanCode(firstPlanCode)
+    }
+  }, [firstPlanCode, generatePlanCode])
 
   // 用户兑换记录（抽屉打开时按选中用户查询）
   const redemptionsQuery = useMemberRedemptions(selectedMember?.user_id)
@@ -253,7 +283,7 @@ export default function AdminUsersPage() {
     const statusPill = getMemberStatusPill(member)
     setMembershipStatusEdit(statusPill.label)
     setExpiresAtEdit(member.expires_at ? formatDate(member.expires_at) : '')
-    setRoleEdit('普通会员')
+    setPlanCodeEdit('')
     setDrawerOpen(true)
   }, [])
 
@@ -350,10 +380,10 @@ export default function AdminUsersPage() {
     setGeneratedCodes([])
     setGenerateCount(1)
     setGenerateNote('朋友内测')
-    setGeneratePlanCode('observe_20')
+    setGeneratePlanCode(firstPlanCode || '')
     setGenerateGrantMonths(1)
     setModalOpen(true)
-  }, [])
+  }, [firstPlanCode])
 
   /** 关闭生成弹窗 */
   const handleCloseModal = useCallback(() => {
@@ -361,26 +391,63 @@ export default function AdminUsersPage() {
     setGeneratedCodes([])
   }, [])
 
-  /** 重置登录（当前无后端接口，显示 toast 提示） */
-  const handleResetLogin = useCallback(() => {
-    toast.show('密码重置邮件已发送', `已向 ${selectedMember?.email ?? ''} 发送重置邮件`)
-  }, [toast, selectedMember])
-
-  /** 只读排障视角（当前无后端接口，显示 toast 提示） */
-  const handleReadOnlyDebug = useCallback(() => {
-    toast.show('已进入只读排障视角', '当前管理员以只读模式查看该用户数据')
-  }, [toast])
-
-  /** 保存会员资料（当前无后端接口，显示 toast 提示） */
+  /** 保存账户状态：仅映射 accountStatusEdit 到 enable/disable */
   const handleSaveProfile = useCallback(() => {
-    toast.show('会员资料已保存', '账户状态、会员状态、到期时间、角色已更新')
-    handleCloseDrawer()
-  }, [toast, handleCloseDrawer])
+    if (!selectedMember) return
+    const wantDisabled = accountStatusEdit === '停用'
+    const currentlyDisabled = selectedMember.account_status === 'disabled'
 
-  /** 导出会员（当前无后端接口，显示 toast 提示） */
-  const handleExportMembers = useCallback(() => {
-    toast.show('导出会员', '会员列表导出功能开发中')
-  }, [toast])
+    const onError = (err: unknown) => {
+      const axiosErr = err as { response?: { data?: { detail?: string } } }
+      const message = axiosErr.response?.data?.detail ?? '账户状态更新失败'
+      toast.show('保存失败', message)
+    }
+
+    if (wantDisabled && !currentlyDisabled) {
+      disableUser.mutate(selectedMember.user_id, {
+        onSuccess: () => {
+          toast.show('账户已停用', '该用户账户已停用')
+          handleCloseDrawer()
+        },
+        onError,
+      })
+    } else if (!wantDisabled && currentlyDisabled) {
+      enableUser.mutate(selectedMember.user_id, {
+        onSuccess: () => {
+          toast.show('账户已启用', '该用户账户已启用')
+          handleCloseDrawer()
+        },
+        onError,
+      })
+    } else {
+      handleCloseDrawer()
+    }
+  }, [selectedMember, accountStatusEdit, disableUser, enableUser, toast, handleCloseDrawer])
+
+  /** 选择目标套餐：调用 change-plan 变更用户套餐（grant_months 默认 1） */
+  const handlePlanChange = useCallback(
+    (planCode: PlanCode) => {
+      if (!planCode || !selectedMember) return
+      setPlanCodeEdit(planCode)
+      changePlan.mutate(
+        {
+          userId: selectedMember.user_id,
+          payload: { plan_code: planCode, grant_months: 1 },
+        },
+        {
+          onSuccess: () => {
+            toast.show('套餐已变更', `用户套餐已更新为 ${getPlanName(planCode, plans)}`)
+          },
+          onError: (err: unknown) => {
+            const axiosErr = err as { response?: { data?: { detail?: string } } }
+            const message = axiosErr.response?.data?.detail ?? '套餐变更失败'
+            toast.show('变更失败', message)
+          },
+        },
+      )
+    },
+    [selectedMember, changePlan, plans, toast],
+  )
 
   // ===== 会员表列定义 =====
   const memberColumns: DataTableColumn<MemberRow>[] = useMemo(
@@ -526,13 +593,10 @@ export default function AdminUsersPage() {
         dataType: 'enum',
         sortable: true,
         filterable: true,
-        enumOptions: [
-          { label: '观察版', value: '观察版' },
-          { label: '研究版', value: '研究版' },
-        ],
-        render: (row) => getPlanName(row.plan_code),
-        filterValue: (row) => getPlanName(row.plan_code),
-        sortValue: (row) => getPlanName(row.plan_code),
+        enumOptions: plans.map((p) => ({ label: p.display_name, value: p.display_name })),
+        render: (row) => getPlanName(row.plan_code, plans),
+        filterValue: (row) => getPlanName(row.plan_code, plans),
+        sortValue: (row) => getPlanName(row.plan_code, plans),
       },
       {
         key: 'monitor_limit',
@@ -541,7 +605,7 @@ export default function AdminUsersPage() {
         sortable: true,
         filterable: false,
         render: (row) =>
-          row.monitor_limit != null ? `${row.monitor_limit} 只` : getPlanMonitorLimit(row.plan_code),
+          row.monitor_limit != null ? `${row.monitor_limit} 只` : `${getPlanMonitorLimit(row.plan_code, plans)} 只`,
         sortValue: (row) => row.monitor_limit ?? 0,
       },
       {
@@ -637,17 +701,19 @@ export default function AdminUsersPage() {
         },
       },
     ],
-    [handleCopyCode, handleRevoke, toast],
+    [handleCopyCode, handleRevoke, toast, plans],
   )
 
   // ===== 兑换记录时间线 =====
   const redemptions = redemptionsQuery.data ?? []
 
-  // 生成邀请码弹窗权益预览（如"研究版 · 最多50只自选股 · 有效期6个月"）
+  // 生成邀请码弹窗权益预览：从 plans 查询当前选中套餐的展示名与 monitor_limit
   const benefitPreview = useMemo(() => {
-    const contract = PLAN_CONTRACTS_PREVIEW[generatePlanCode]
-    return `${contract.name} · 最多${contract.monitorLimit}只自选股 · 有效期${generateGrantMonths}个月`
-  }, [generatePlanCode, generateGrantMonths])
+    const contract = plans.find((p) => p.plan_code === generatePlanCode)
+    const name = contract?.display_name ?? '—'
+    const limit = contract?.monitor_limit ?? '—'
+    return `${name} · 最多${limit}只自选股 · 有效期${generateGrantMonths}个月`
+  }, [generatePlanCode, generateGrantMonths, plans])
 
   // ===== 渲染 =====
   return (
@@ -661,9 +727,6 @@ export default function AdminUsersPage() {
           </div>
         </div>
         <div className="actions">
-          <button className="btn" onClick={handleExportMembers}>
-            导出会员
-          </button>
           <button className="btn primary" onClick={handleOpenModal}>
             ＋ 生成邀请码
           </button>
@@ -780,7 +843,7 @@ export default function AdminUsersPage() {
                     <i>1</i>
                     <span>
                       <b>套餐制会员</b>
-                      <small>邀请码绑定观察版（20 只自选）或研究版（50 只自选），会员有效时按套餐开放功能。</small>
+                      <small>邀请码绑定套餐后按套餐开放功能，最大自选数量由后端配置决定。</small>
                     </span>
                   </div>
                   <div>
@@ -931,14 +994,19 @@ export default function AdminUsersPage() {
                       />
                     </div>
                     <div className="form-row">
-                      <label className="form-label">角色</label>
+                      <label className="form-label">套餐</label>
                       <select
                         className="select"
-                        value={roleEdit}
-                        onChange={(e) => setRoleEdit(e.target.value)}
+                        value={planCodeEdit}
+                        onChange={(e) => handlePlanChange(e.target.value)}
+                        disabled={plansQuery.isLoading || plans.length === 0}
                       >
-                        <option>普通会员</option>
-                        <option>管理员</option>
+                        <option value="">选择目标套餐</option>
+                        {plans.map((p) => (
+                          <option key={p.plan_code} value={p.plan_code}>
+                            {p.display_name}
+                          </option>
+                        ))}
                       </select>
                     </div>
                   </div>
@@ -985,17 +1053,42 @@ export default function AdminUsersPage() {
               {/* 审计 tab */}
               {drawerTab === 'audit' && (
                 <div className="tab-panel active drawer-tab-panel">
-                  <div className="empty">最近管理员审计记录</div>
+                  {auditLogsQuery.isLoading && (
+                    <div className="empty">加载审计记录中…</div>
+                  )}
+                  {!auditLogsQuery.isLoading && auditLogsQuery.isError && (
+                    <div className="empty">
+                      审计记录加载失败：
+                      {(auditLogsQuery.error as Error)?.message ?? '未知错误'}
+                    </div>
+                  )}
+                  {!auditLogsQuery.isLoading &&
+                    !auditLogsQuery.isError &&
+                    (auditLogsQuery.data?.items ?? []).length === 0 && (
+                      <div className="empty">暂无审计记录</div>
+                  )}
+                  {!auditLogsQuery.isLoading && !auditLogsQuery.isError && (
+                    <div className="timeline-simple">
+                      {(auditLogsQuery.data?.items ?? []).map((log: AuditLogListItem) => (
+                        <div key={log.id}>
+                          <i />
+                          <span>
+                            <b>
+                              {formatDateTime(log.created_at)} · {log.action}
+                            </b>
+                            <small>操作者 {log.actor_user_id}</small>
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
 
             <div className="drawer-foot">
-              <button className="btn" onClick={handleResetLogin}>
-                重置登录
-              </button>
-              <button className="btn" onClick={handleReadOnlyDebug}>
-                只读排障
+              <button className="btn" onClick={handleCloseDrawer}>
+                关闭
               </button>
               <button className="btn primary" onClick={handleSaveProfile}>
                 保存
@@ -1029,9 +1122,13 @@ export default function AdminUsersPage() {
                     className="select"
                     value={generatePlanCode}
                     onChange={(e) => setGeneratePlanCode(e.target.value as PlanCode)}
+                    disabled={plansQuery.isLoading || plans.length === 0}
                   >
-                    <option value="observe_20">观察版（最多20只自选股）</option>
-                    <option value="research_50">研究版（最多50只自选股）</option>
+                    {plans.map((p) => (
+                      <option key={p.plan_code} value={p.plan_code}>
+                        {p.display_name}（最多{p.monitor_limit}只自选股）
+                      </option>
+                    ))}
                   </select>
                 </div>
                 <div className="form-row">

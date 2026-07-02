@@ -6,14 +6,15 @@
 - POST /admin/strategy-runs/{run_id}/retry: 基于已有运行创建新的 attempt（admin）
 - GET /admin/strategies/{key}/runs: 运行历史（admin，符合 Spec 路径）
 - GET /strategies/{key}/runs: 运行历史（admin，兼容旧路径）
-- GET /strategies/{key}/published-runs: 已发布批次列表（普通用户可访问）
-- GET /strategies/{key}/results: 查询策略结果（用户端，绑定 published run）
-- GET /strategy-runs/{run_id}/results: 运行结果（分页+筛选+排序，需 published）
-- GET /strategy-runs/{run_id}/results/{result_id}: 单个结果详情
+- GET /strategies/{key}/published-runs: 已发布批次列表（需登录 + trend_selection feature）
+- GET /strategies/{key}/results: 查询策略结果（需登录 + trend_selection feature，绑定 published run）
+- GET /strategy-runs/{run_id}/results: 运行结果（需有效订阅 + trend_selection feature，分页+筛选+排序，需 published）
+- GET /strategy-runs/{run_id}/results/{result_id}: 单个结果详情（需有效订阅 + trend_selection feature）
 
 说明：
 - /admin/strategies 为管理端点，需 admin 角色
-- /strategies 为只读端点，所有用户可访问
+- /strategies/{key}/published-runs 和 /strategies/{key}/results 需登录 + trend_selection feature
+- /strategy-runs/{run_id}/results 系列端点需有效订阅 + trend_selection feature（admin 豁免）
 - 运行结果支持按指标筛选（metric_filters，支持 gt/gte/lt/lte/eq/between）和排序（sort_by）
 - metric_key 必须在 manifest outputs.filterable 白名单中
 - 普通用户只能查询 published 状态的 run 结果
@@ -30,15 +31,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import get_current_active_user, get_db, require_roles
+from app.constants.strategy_keys import DSA_SELECTOR
+from app.core.deps import get_db, require_roles
 from app.models.strategy import StrategyVersion
 from app.models.strategy_run import StrategyRun
-from app.models.user import User
-from app.constants.strategy_keys import DSA_SELECTOR
 from app.repositories import strategy_result_repository
 from app.repositories.strategy_result_repository import (
-    MetricFilter,
-    QueryResultPage,
     SortSpec,
     dict_filters_to_metric_filters,
 )
@@ -48,6 +46,12 @@ from app.schemas.strategy_run import (
     StrategyRunListResponse,
     StrategyRunResponse,
     TriggerRunRequest,
+)
+from app.services.access_control_service import (
+    AccessContext,
+    require_active_subscription,
+    require_authenticated,
+    require_feature,
 )
 from app.services.selector_query_service import (
     NotSelectorRunError,
@@ -426,10 +430,16 @@ async def list_published_runs(
     limit: int = Query(30, ge=1, le=100, description="返回上限"),
     offset: int = Query(0, ge=0, description="偏移量"),
     db: AsyncSession = Depends(get_db),
+    _ctx: AccessContext = Depends(require_active_subscription),
+    _feat: AccessContext = Depends(require_feature("trend_selection")),
 ) -> StrategyRunListResponse:
-    """查询已发布的运行批次（普通用户可访问）。
+    """查询已发布的运行批次（需有效订阅 + trend_selection feature）。
 
     只返回 status='published' 的 run，按 trade_date 降序。
+
+    权限：
+    - require_active_subscription: 需有效订阅（admin 豁免）
+    - require_feature("trend_selection"): 需具备趋势选股功能（admin 豁免）
 
     Args:
         strategy_key: 策略 key
@@ -500,8 +510,14 @@ async def query_strategy_results(
     limit: int = Query(100, ge=1, le=500, description="返回上限"),
     offset: int = Query(0, ge=0, description="偏移量"),
     db: AsyncSession = Depends(get_db),
+    _ctx: AccessContext = Depends(require_active_subscription),
+    _feat: AccessContext = Depends(require_feature("trend_selection")),
 ) -> StrategyResultListResponse:
     """查询策略结果（用户端，绑定 published run）。
+
+    权限：
+    - require_active_subscription: 需有效订阅（admin 豁免）
+    - require_feature("trend_selection"): 需具备趋势选股功能（admin 豁免）
 
     流程：
     1. 查找 strategy_key 最新 released 版本
@@ -612,11 +628,16 @@ async def list_run_results(
     page: int = Query(1, ge=1, description="页码（从 1 开始）"),
     page_size: int = Query(50, ge=1, le=500, description="每页条数"),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
+    ctx: AccessContext = Depends(require_active_subscription),
+    _feat: AccessContext = Depends(require_feature("trend_selection")),
 ) -> StrategyResultListResponse:
     """查询运行结果（分页+筛选+排序，需 published）。
 
     通过 selector_query_service 统一查询，返回 source_total 和 filtered_total。
+
+    权限：
+    - require_active_subscription: 需有效订阅（admin 豁免）
+    - require_feature("trend_selection"): 需具备趋势选股功能（admin 豁免）
 
     Args:
         run_id: 运行 ID
@@ -626,7 +647,7 @@ async def list_run_results(
         universe: 股票池（all/watchlist）
         page: 页码
         page_size: 每页条数
-        current_user: 当前用户（用于 universe=watchlist）
+        ctx: 权限上下文（用于 universe=watchlist 时获取 user_id）
 
     Returns:
         结果列表响应（含 source_total/filtered_total）
@@ -676,7 +697,7 @@ async def list_run_results(
         result_page = await query_published_selector_results(
             db,
             run_id=run_id,
-            user_id=current_user.id,
+            user_id=uuid.UUID(ctx.user_id),
             filters=metric_filter_list,
             sort=sort_spec,
             page=page,
@@ -725,8 +746,14 @@ async def get_run_result_detail(
     run_id: uuid.UUID,
     result_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
+    _ctx: AccessContext = Depends(require_active_subscription),
+    _feat: AccessContext = Depends(require_feature("trend_selection")),
 ) -> StrategyResultResponse:
     """获取单个结果详情。
+
+    权限：
+    - require_active_subscription: 需有效订阅（admin 豁免）
+    - require_feature("trend_selection"): 需具备趋势选股功能（admin 豁免）
 
     Args:
         run_id: 运行 ID（用于验证归属）

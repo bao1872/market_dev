@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 
@@ -812,8 +812,8 @@ class TestStrategyService:
     @pytest.mark.asyncio
     async def test_create_strategy_invalid_manifest(self) -> None:
         """测试无效 manifest 抛出 ManifestValidationError。"""
-        from app.services.manifest_validator import ManifestValidationError
         from app.services import strategy_service
+        from app.services.manifest_validator import ManifestValidationError
 
         bad_manifest = {"strategy_id": "test"}  # 缺少必填字段
         mock_db = AsyncMock()

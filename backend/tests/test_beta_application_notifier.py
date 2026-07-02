@@ -33,7 +33,6 @@ from app.schemas.notification import DeliveryResult
 from app.services.beta_application_service import create_application, retry_feishu
 from app.services.outbox_relay import relay_outbox
 
-
 # ============================================================
 # 测试 fixtures
 # ============================================================

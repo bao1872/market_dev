@@ -51,7 +51,6 @@ def get_admin_feishu_config() -> dict[str, Any] | None:
 
 if __name__ == "__main__":
     # 自测入口：验证配置读取逻辑（无副作用，不连接网络）
-    import tempfile
 
     # 场景 1：未配置返回 None
     os.environ.pop("ADMIN_FEISHU_WEBHOOK_URL", None)

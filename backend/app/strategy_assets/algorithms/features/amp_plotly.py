@@ -1,5 +1,4 @@
 # amp_plotly.py
-# -*- coding: utf-8 -*-
 """
 AMP 自适应移动通道算法及可视化（含逐 bar 时序特征副图）
 
@@ -88,7 +87,6 @@ import math
 import os
 import sys
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -97,7 +95,7 @@ from plotly.subplots import make_subplots
 
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from datasource.pytdx_client import PERIOD_MAP, connect_pytdx, get_kline_data
+from datasource.pytdx_client import connect_pytdx, get_kline_data
 
 
 def fetch_daily_pytdx(symbol: str, start: str, end: str, *, max_bars: int = 800) -> pd.DataFrame:
@@ -123,8 +121,8 @@ class AMPConfig:
 
     regColor: str = "rgba(160,160,160,0.85)"
     channelFill: str = "rgba(144,148,151,0.10)"
-    loAct: Tuple[int, int, int, float] = (0, 187, 255, 0.05)
-    hiAct: Tuple[int, int, int, float] = (0, 187, 255, 0.75)
+    loAct: tuple[int, int, int, float] = (0, 187, 255, 0.05)
+    hiAct: tuple[int, int, int, float] = (0, 187, 255, 0.75)
     useCustomColor: bool = True
     customActLine: str = "rgba(0,187,255,0.55)"
     minActivityThresholdFrac: float = 0.10
@@ -152,7 +150,7 @@ def calc_line_value(startY: float, endY: float, currentBar: float, totalBars: in
     return f_unadjust(v, use_log)
 
 
-def gradient_rgba(percent: float, c1: Tuple[int, int, int, float], c2: Tuple[int, int, int, float]) -> str:
+def gradient_rgba(percent: float, c1: tuple[int, int, int, float], c2: tuple[int, int, int, float]) -> str:
     p = float(np.clip(percent, 0.0, 1.0))
     r = c1[0] + (c2[0] - c1[0]) * p
     g = c1[1] + (c2[1] - c1[1]) * p
@@ -173,7 +171,7 @@ def safe_ratio(num: float, den: float, default: float = np.nan) -> float:
     return float(num / den)
 
 
-def calcDevATF(close_r: np.ndarray, length: int, use_log: bool) -> Tuple[float, float, float, float]:
+def calcDevATF(close_r: np.ndarray, length: int, use_log: bool) -> tuple[float, float, float, float]:
     if length <= 1:
         return (np.nan, np.nan, np.nan, np.nan)
     n1 = length - 1
@@ -215,7 +213,7 @@ def calcDevATF(close_r: np.ndarray, length: int, use_log: bool) -> Tuple[float, 
     return (float(unStdDev), float(r), float(slope), float(intercept))
 
 
-def cS(close_r: np.ndarray, length: int, use_log: bool) -> Tuple[float, float, float]:
+def cS(close_r: np.ndarray, length: int, use_log: bool) -> tuple[float, float, float]:
     if length <= 1:
         return (np.nan, np.nan, np.nan)
     sX = sY = sXS = sXY = 0.0
@@ -234,7 +232,7 @@ def cS(close_r: np.ndarray, length: int, use_log: bool) -> Tuple[float, float, f
 
 
 def cD(high_r: np.ndarray, low_r: np.ndarray, close_r: np.ndarray,
-       length: int, sl: float, av: float, ic: float, use_log: bool) -> Tuple[float, float, float, float]:
+       length: int, sl: float, av: float, ic: float, use_log: bool) -> tuple[float, float, float, float]:
     uD = dD = sDA = dxx = dyy = dxy = 0.0
     per = length - 1
     dY = ic + sl * per / 2.0
@@ -266,10 +264,10 @@ def apply_deviation(base_value: float, deviation: float, use_log: bool) -> float
     return f_unadjust(f_adjust(base_value, use_log) + deviation, use_log)
 
 
-def detect_period(close_r: np.ndarray, cfg: AMPConfig) -> Tuple[int, Optional[float]]:
+def detect_period(close_r: np.ndarray, cfg: AMPConfig) -> tuple[int, float | None]:
     n = len(close_r)
     detected_period = cfg.pI
-    detected_r: Optional[float] = None
+    detected_r: float | None = None
     if cfg.useAdaptive:
         best_r = -1e9
         for p in CANDIDATE_PERIODS:
@@ -282,7 +280,7 @@ def detect_period(close_r: np.ndarray, cfg: AMPConfig) -> Tuple[int, Optional[fl
     return int(min(detected_period, n)), detected_r
 
 
-def _compute_core_from_window(df_win: pd.DataFrame, cfg: AMPConfig) -> Dict:
+def _compute_core_from_window(df_win: pd.DataFrame, cfg: AMPConfig) -> dict:
     lI = len(df_win)
     if lI < 2:
         raise ValueError("窗口过短")
@@ -357,8 +355,8 @@ def _compute_core_from_window(df_win: pd.DataFrame, cfg: AMPConfig) -> Dict:
     activitySlope = (f_adjust(actY2_0, cfg.uL) - f_adjust(actY1_0, cfg.uL)) / bars
 
     x = df_win.index.to_list()
-    activity_lines: List[Dict] = []
-    activity_line_stats: List[Dict] = []
+    activity_lines: list[dict] = []
+    activity_line_stats: list[dict] = []
     minThreshold = maxCount * cfg.minActivityThresholdFrac
     displayed = 0
     channel_h_start = upper_start - lower_start
@@ -401,7 +399,7 @@ def _compute_core_from_window(df_win: pd.DataFrame, cfg: AMPConfig) -> Dict:
             })
             displayed += 1
 
-    profile_polys: List[Dict] = []
+    profile_polys: list[dict] = []
     if cfg.showProfile:
         maxProfileBars = 25
         effectiveProfileBars = max(cfg.numActivityLines, min(nFills, max(maxProfileBars - (cfg.numActivityLines - 2), 2)))
@@ -449,7 +447,7 @@ def _compute_core_from_window(df_win: pd.DataFrame, cfg: AMPConfig) -> Dict:
     }
 
 
-def compute_amp_last(df_all: pd.DataFrame, cfg: AMPConfig) -> Dict:
+def compute_amp_last(df_all: pd.DataFrame, cfg: AMPConfig) -> dict:
     n = len(df_all)
     if n < 60:
         raise ValueError("数据太少，至少 60 根 K 线")
@@ -502,7 +500,7 @@ def compute_amp_last(df_all: pd.DataFrame, cfg: AMPConfig) -> Dict:
 def compute_amp_timeseries(
     df_all: pd.DataFrame,
     cfg: AMPConfig,
-    final_period: Optional[int] = None,
+    final_period: int | None = None,
     adaptive_period: bool = True,
 ) -> pd.DataFrame:
     n = len(df_all)
@@ -559,7 +557,7 @@ def compute_amp_timeseries(
     return out
 
 
-def build_plot(payload: Dict, ts: pd.DataFrame, symbol: str = "", stock_name: str = "") -> go.Figure:
+def build_plot(payload: dict, ts: pd.DataFrame, symbol: str = "", stock_name: str = "") -> go.Figure:
     df_all = payload["data_all"]
     cfg: AMPConfig = payload["cfg"]
     m = payload["metrics"]

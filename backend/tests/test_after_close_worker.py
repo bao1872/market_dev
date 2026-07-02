@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import text
 
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.strategy_run import StrategyRun
@@ -157,8 +157,8 @@ async def test_worker_claims_queued_job() -> None:
     3. 调用 _after_close_poll_once() 单次轮询
     4. 验证任务被领取：status=running, worker_instance_id 已设置, heartbeat_at 已更新
     """
+    from app.worker import _WORKER_INSTANCE_ID, _after_close_poll_once
     from tests.conftest import TestAsyncSessionLocal
-    from app.worker import _after_close_poll_once, _WORKER_INSTANCE_ID
 
     job_run = await _create_queued_after_close_run(TestAsyncSessionLocal)
     job_run_id = job_run.id
@@ -202,8 +202,8 @@ async def test_worker_concurrent_only_one_claims() -> None:
     3. mock execute_after_close_run 记录调用次数
     4. 验证只有一个 claimed=True，execute_after_close_run 只被调用一次
     """
-    from tests.conftest import TestAsyncSessionLocal
     from app.worker import _after_close_poll_once
+    from tests.conftest import TestAsyncSessionLocal
 
     job_run = await _create_queued_after_close_run(TestAsyncSessionLocal)
     job_run_id = job_run.id
@@ -262,8 +262,8 @@ async def test_worker_exception_marks_failed() -> None:
     4. 验证 Worker 不崩溃（_after_close_poll_once 正常返回）
     5. 验证任务被标记 failed（由 execute_after_close_run 内部异常处理）
     """
-    from tests.conftest import TestAsyncSessionLocal
     from app.worker import _after_close_poll_once
+    from tests.conftest import TestAsyncSessionLocal
 
     job_run = await _create_queued_after_close_run(TestAsyncSessionLocal)
     job_run_id = job_run.id

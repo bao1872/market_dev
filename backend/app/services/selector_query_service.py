@@ -20,7 +20,6 @@ from app.models.strategy_run import StrategyRun
 from app.models.watchlist import UserWatchlistItem
 from app.repositories.strategy_result_repository import (
     MetricFilter,
-    QueryResultPage,
     SortSpec,
     count_by_run,
     count_by_run_with_watchlist,

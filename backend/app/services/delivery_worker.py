@@ -244,6 +244,28 @@ async def process_pending_deliveries(
 
     success_count = 0
     for delivery in pending_deliveries:
+        # [eligible_user_service] - 投递前再次检查用户资格（仅监控通知）
+        # 用户主动触发的投递（stock_detail_share）不受订阅状态限制，立即投递
+        # 失效用户（disabled/expired/admin）的监控通知标记 dead，避免无效重试
+        _msg = getattr(delivery, "message", None)
+        _source_type = getattr(_msg, "source_type", None)
+        if (
+            _msg is not None
+            and _source_type not in _USER_TRIGGERED_SOURCE_TYPES
+            and getattr(_msg, "user_id", None) is not None
+        ):
+            from app.services.eligible_user_service import is_user_eligible
+
+            if not await is_user_eligible(db, _msg.user_id):
+                delivery.status = "dead"
+                delivery.last_error_code = "USER_INELIGIBLE"
+                delivery.next_attempt_at = None
+                logger.info(
+                    "用户无资格，跳过投递: delivery_id=%s user_id=%s",
+                    delivery.id, _msg.user_id,
+                )
+                continue
+
         try:
             await _execute_delivery(db, delivery)
             if delivery.status == "success":

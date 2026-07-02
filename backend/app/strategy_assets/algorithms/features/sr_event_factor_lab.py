@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 sr_event_factor_lab.py
 
@@ -32,9 +31,9 @@ SR_EVENT_FACTOR_LAB_VERSION = "cluster_confluence_v2_2026_05_18"
 
 import argparse
 import warnings
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -109,10 +108,10 @@ def _market_from_symbol(symbol: str) -> int:
     return 1 if str(symbol).startswith(("5", "6", "9")) else 0
 
 
-def connect_pytdx() -> "TdxHq_API":
+def connect_pytdx() -> TdxHq_API:
     if TdxHq_API is None:
         raise RuntimeError("请先安装 pytdx: pip install pytdx")
-    errors: List[str] = []
+    errors: list[str] = []
     for host, port in SERVERS:
         try:
             api = TdxHq_API(raise_exception=True, auto_retry=True)
@@ -129,7 +128,7 @@ def fetch_kline_pytdx(symbol: str, freq: str, count: int) -> pd.DataFrame:
         cat = _category_from_freq(freq)
         mkt = _market_from_symbol(symbol)
         size = 800
-        frames: List[pd.DataFrame] = []
+        frames: list[pd.DataFrame] = []
         start = 0
         target = max(int(count), 300)
         while start < target + size:
@@ -200,7 +199,7 @@ def read_kline_csv(path: str) -> pd.DataFrame:
 # =============================================================================
 # 基础计算工具
 # =============================================================================
-def tv_pivots_confirmed(high: np.ndarray, low: np.ndarray, length: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def tv_pivots_confirmed(high: np.ndarray, low: np.ndarray, length: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """TradingView ta.pivothigh/ta.pivotlow 风格，确认延迟 = length。"""
     n = len(high)
     pvt_high = np.full(n, np.nan)
@@ -250,7 +249,7 @@ def _atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
 
 def _bars_since_level_change(level: np.ndarray) -> np.ndarray:
     out = np.full(len(level), np.nan)
-    last_change: Optional[int] = None
+    last_change: int | None = None
     prev_val = np.nan
     for i, val in enumerate(level):
         if np.isfinite(val):
@@ -314,7 +313,7 @@ def _level_cluster_features(
     level_ref: np.ndarray,
     primary_events: np.ndarray,
     secondary_events: np.ndarray,
-    extra_events: Optional[np.ndarray],
+    extra_events: np.ndarray | None,
     atr_arr: np.ndarray,
     lookback: int = 120,
     tol_pct: float = 0.015,
@@ -322,7 +321,7 @@ def _level_cluster_features(
     primary_weight: float = 1.0,
     secondary_weight: float = 1.0,
     extra_weight: float = 1.50,
-) -> Dict[str, np.ndarray]:
+) -> dict[str, np.ndarray]:
     """
     围绕当前 level_ref 统计过去 lookback 根内的结构位聚集程度。
 
@@ -350,8 +349,8 @@ def _level_cluster_features(
         tol = max(abs(level) * tol_pct, atr_i * tol_atr)
         start = max(0, i - int(lookback) + 1)
 
-        vals: List[float] = [float(level)]
-        weights: List[float] = [1.0]
+        vals: list[float] = [float(level)]
+        weights: list[float] = [1.0]
 
         pvals = primary_events[start:i + 1]
         mask = np.isfinite(pvals) & (np.abs(pvals - level) <= tol)
@@ -383,8 +382,8 @@ def _level_cluster_features(
             order = np.argsort(arr)
             arr = arr[order]
             w = w[order]
-            unique_vals: List[float] = []
-            unique_w: List[float] = []
+            unique_vals: list[float] = []
+            unique_w: list[float] = []
             bucket_tol = max(abs(level) * 0.001, atr_i * 0.05)
             for v, ww in zip(arr, w):
                 if not unique_vals or abs(v - unique_vals[-1]) > bucket_tol:
@@ -414,7 +413,7 @@ def _level_cluster_features(
     }
 
 
-def _pivot_sequence_features(pvt_confirm: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _pivot_sequence_features(pvt_confirm: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """返回 active/prev/is_higher/slope2/slope3。"""
     n = len(pvt_confirm)
     active = np.full(n, np.nan)
@@ -423,7 +422,7 @@ def _pivot_sequence_features(pvt_confirm: np.ndarray) -> Tuple[np.ndarray, np.nd
     is_higher = np.full(n, np.nan)
     slope2 = np.full(n, np.nan)
     slope3 = np.full(n, np.nan)
-    seq: List[Tuple[int, float]] = []
+    seq: list[tuple[int, float]] = []
     for i, val in enumerate(pvt_confirm):
         if np.isfinite(val):
             if not seq or abs(seq[-1][1] - val) > 1e-12 or seq[-1][0] != i:
@@ -467,9 +466,9 @@ def _future_labels(df: pd.DataFrame, horizons: Sequence[int]) -> pd.DataFrame:
 class LabConfig:
     pivot_len: int = 10
     use_prev_confirmed_level: bool = True
-    low_zone_thresholds: Tuple[float, ...] = (0.25, 0.35, 0.50)
-    low_zone_windows: Tuple[int, ...] = (5, 10)
-    horizons: Tuple[int, ...] = (1, 3, 5, 10, 20)
+    low_zone_thresholds: tuple[float, ...] = (0.25, 0.35, 0.50)
+    low_zone_windows: tuple[int, ...] = (5, 10)
+    horizons: tuple[int, ...] = (1, 3, 5, 10, 20)
     # 结构簇 / 共振区参数：用于区分单一支撑/压力与多结构位重叠区
     cluster_lookback: int = 120
     cluster_tolerance_pct: float = 0.015
@@ -553,7 +552,7 @@ def compute_sr_factor_lab(df: pd.DataFrame, cfg: LabConfig) -> pd.DataFrame:
     flipped_active = np.full(n, np.nan)
     flipped_age_active = np.full(n, np.nan)
     cur_flip = np.nan
-    cur_age: Optional[int] = None
+    cur_age: int | None = None
     for i in range(n):
         # 先判断旧 R2S 是否失效：收盘跌破则取消。
         if np.isfinite(cur_flip) and c[i] < cur_flip:
@@ -628,8 +627,8 @@ def compute_sr_factor_lab(df: pd.DataFrame, cfg: LabConfig) -> pd.DataFrame:
         resistance_anchor_idx_ref = resistance_anchor_idx_active
 
     dates = pd.Series(out.index.astype(str), index=np.arange(n))
-    def _idx_to_date(idx_arr: np.ndarray) -> List[Optional[str]]:
-        ret: List[Optional[str]] = []
+    def _idx_to_date(idx_arr: np.ndarray) -> list[str | None]:
+        ret: list[str | None] = []
         for v in idx_arr:
             if np.isfinite(v) and 0 <= int(v) < n:
                 ret.append(str(dates.iloc[int(v)]))
@@ -1003,7 +1002,7 @@ def compute_sr_factor_lab(df: pd.DataFrame, cfg: LabConfig) -> pd.DataFrame:
     ]:
         mask = out[col].fillna(False).to_numpy(dtype=bool)
         last = np.full(n, np.nan)
-        last_idx: Optional[int] = None
+        last_idx: int | None = None
         for i, flag in enumerate(mask):
             if flag:
                 last_idx = i
@@ -1021,10 +1020,10 @@ def compute_sr_factor_lab(df: pd.DataFrame, cfg: LabConfig) -> pd.DataFrame:
 # =============================================================================
 # 可视化
 # =============================================================================
-def _volume_weighted_bar_colors(df: pd.DataFrame, sma_len: int = 89, up_thresh: float = 1.618, low_thresh: float = 0.618) -> List[str]:
+def _volume_weighted_bar_colors(df: pd.DataFrame, sma_len: int = 89, up_thresh: float = 1.618, low_thresh: float = 0.618) -> list[str]:
     vol = df["volume"].astype(float) if "volume" in df.columns else pd.Series(np.nan, index=df.index)
     v_sma = vol.rolling(sma_len, min_periods=1).mean()
-    colors: List[str] = []
+    colors: list[str] = []
     for o, cl, vv, ma in zip(df["open"], df["close"], vol, v_sma):
         bull = cl >= o
         if np.isfinite(vv) and np.isfinite(ma) and vv > ma * up_thresh:
@@ -1191,14 +1190,14 @@ def build_html(df_full: pd.DataFrame, df_plot: pd.DataFrame, out_html: str, titl
 # =============================================================================
 # CLI
 # =============================================================================
-def _default_output_paths(symbol: str, freq: str, pivot_len: int, out_dir: str) -> Tuple[str, str, str]:
+def _default_output_paths(symbol: str, freq: str, pivot_len: int, out_dir: str) -> tuple[str, str, str]:
     stem = f"{symbol}_{freq}_sr_factor_lab_pv{pivot_len}"
     p = Path(out_dir)
     p.mkdir(parents=True, exist_ok=True)
     return str(p / f"{stem}.csv"), str(p / f"{stem}.html"), str(p / f"{stem}_events_only.csv")
 
 
-def run_one(args, freq: str) -> Dict[str, str]:
+def run_one(args, freq: str) -> dict[str, str]:
     freq = normalize_freq(freq)
     if args.csv:
         raw = read_kline_csv(args.csv)
@@ -1305,7 +1304,7 @@ def main() -> None:
     else:
         args.freqs_list = [normalize_freq(args.freq)]
 
-    all_stats: List[Dict[str, str]] = []
+    all_stats: list[dict[str, str]] = []
     for f in args.freqs_list:
         stats = run_one(args, f)
         all_stats.append(stats)

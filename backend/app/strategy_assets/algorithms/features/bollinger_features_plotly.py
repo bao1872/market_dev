@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Bollinger Bands 特征可视化（Plotly HTML）
 
@@ -29,14 +28,12 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import List
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from datasource.pytdx_client import PERIOD_MAP, connect_pytdx
 from plotly.subplots import make_subplots
-
-from datasource.pytdx_client import connect_pytdx, PERIOD_MAP
 
 
 def fetch_daily_pytdx(symbol: str, start: str, end: str, *, max_bars: int = 800) -> pd.DataFrame:

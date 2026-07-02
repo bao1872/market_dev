@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Volume Spread Analysis IQ [TradingIQ] -> Python viewer
 
@@ -21,7 +20,6 @@ Example
 from __future__ import annotations
 
 import argparse
-from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -93,7 +91,7 @@ def connect_pytdx():
         from pytdx.hq import TdxHq_API
     except Exception as exc:  # pragma: no cover
         raise RuntimeError("请先安装 pytdx: pip install pytdx") from exc
-    errors: List[str] = []
+    errors: list[str] = []
     for host, port in SERVERS:
         try:
             api = TdxHq_API(raise_exception=True, auto_retry=True)
@@ -110,7 +108,7 @@ def fetch_kline_pytdx(symbol: str, freq: str, count: int) -> pd.DataFrame:
         cat = _category_from_freq(freq)
         mkt = _market_from_symbol(symbol)
         size = 800
-        frames: List[pd.DataFrame] = []
+        frames: list[pd.DataFrame] = []
         start = 0
         target = max(int(count), 300)
         while start < target + size:
@@ -161,7 +159,7 @@ def pine_ema(src: pd.Series, length: int) -> pd.Series:
     alpha = 2.0 / (length + 1.0)
     prev = np.nan
     valid_count = 0
-    seed_vals: List[float] = []
+    seed_vals: list[float] = []
     seeded = False
     for i, val in enumerate(arr):
         if np.isnan(val):
@@ -358,7 +356,7 @@ def compute_vsa_iq(
 
     # Result classification (Pine order preserved)
     result = np.full(len(out), "Neutral", dtype=object)
-    conds_vals: List[Tuple[np.ndarray, str]] = [
+    conds_vals: list[tuple[np.ndarray, str]] = [
         ((out["up_bar"] & (out["close_pos"] == "High") & out["spread_class"].isin(["Ultra Wide", "Wide"])).to_numpy(), "Strong Upward"),
         ((out["up_bar"] & (out["close_pos"] == "High") & (out["spread_class"] == "Normal")).to_numpy(), "Moderate Upward"),
         ((out["up_bar"] & (out["close_pos"] == "Middle") & out["spread_class"].isin(["Ultra Wide", "Wide"])).to_numpy(), "Questionable Upward"),

@@ -23,9 +23,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.core.deps import get_current_active_user, get_db
 from app.models.user import User
+from app.schemas.notification import MessageDeliveryResponse
 from app.services.notification_service import (
     ChannelNotFoundError,
     NotificationServiceError,
+    retry_image_delivery,
 )
 from app.services.stock_detail_feishu_service import (
     InstrumentNotFoundError,
@@ -79,9 +81,10 @@ class ShareStatusResponse(BaseModel):
 
     - card_status: 卡片投递状态（pending/sending/success/failed/retrying/dead/not_created）
     - image_status: 图片投递状态（同上，未创建截图时为 not_created）
-    - overall_status: 汇总状态（pending/success/failed）
-    - failed_step: 失败步骤（card/image，无失败时为 None）
+    - overall_status: 汇总状态（pending/success/partial_failed/failed）
+    - failed_step: 失败步骤（capture/image_outbox/image_upload/image_delivery/card，无失败时为 None）
     - error_code: 失败错误码（无失败时为 None）
+    - image_message_id: 图片消息 ID（未创建时为 None）
     """
 
     test_run_id: str = Field(..., description="分享唯一标识")
@@ -89,9 +92,23 @@ class ShareStatusResponse(BaseModel):
     card_status: str = Field(..., description="卡片投递状态")
     image_status: str = Field(..., description="图片投递状态")
     overall_status: str = Field(..., description="汇总状态")
-    failed_step: str | None = Field(None, description="失败步骤（card/image）")
+    failed_step: str | None = Field(None, description="失败步骤")
     error_code: str | None = Field(None, description="失败错误码")
     error_message: str | None = Field(None, description="失败错误信息")
+    image_message_id: str | None = Field(None, description="图片消息 ID")
+
+
+class RetryImageResponse(BaseModel):
+    """图片单独重试响应。
+
+    [StockDetailFeishu] - 描述: 仅重试图片投递，不重复发送文字
+    """
+
+    retried_count: int = Field(..., description="重试的图片投递数量")
+    image_message_id: str | None = Field(None, description="图片消息 ID")
+    deliveries: list[MessageDeliveryResponse] = Field(
+        default_factory=list, description="被重试的投递记录",
+    )
 
 
 @router.post(
@@ -185,12 +202,60 @@ async def get_share_status_endpoint(
     return ShareStatusResponse(**result)
 
 
+@router.post(
+    "/stock-detail-feishu/{test_run_id}/retry-image",
+    response_model=RetryImageResponse,
+)
+async def retry_image_endpoint(
+    test_run_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> RetryImageResponse:
+    """仅重试图片投递（不重复发送文字）。
+
+    [StockDetailFeishu] - 描述: 按 message_group_id 找到失败的图片 Delivery，
+    调用 retry_delivery 复用现有记录；卡片段不会被重发。
+    """
+    try:
+        share_status = await get_share_status(
+            db=db, test_run_id=test_run_id, user_id=current_user.id
+        )
+    except NotificationServiceError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
+        ) from e
+
+    message_group_id = share_status.get("message_group_id")
+    if not message_group_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="消息组 ID 不存在，无法重试",
+        )
+
+    try:
+        retried = await retry_image_delivery(
+            db=db, message_group_id=message_group_id, user_id=current_user.id
+        )
+    except NotificationServiceError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)
+        ) from e
+
+    await db.commit()
+    return RetryImageResponse(
+        retried_count=len(retried),
+        image_message_id=share_status.get("image_message_id"),
+        deliveries=[MessageDeliveryResponse.model_validate(d) for d in retried],
+    )
+
+
 if __name__ == "__main__":
     # 自测入口：验证路由注册 + 三字段错误响应构造
     paths = [r.path for r in router.routes]
     print(f"router.routes={paths}")
     assert any("/send-feishu" in p for p in paths), "应包含 /send-feishu 路由"
     assert any("/status" in p for p in paths), "应包含 /status 路由"
+    assert any("/retry-image" in p for p in paths), "应包含 /retry-image 路由"
     assert router.prefix == "", "prefix 应为空（由主应用直接挂载）"
 
     # 验证三字段错误响应构造（advice.md 第十一节遗留清理）

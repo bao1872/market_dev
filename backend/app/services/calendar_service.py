@@ -42,7 +42,6 @@ from app.models.calendar import TradingCalendar
 from app.services.mootdx_calendar_provider import (
     CALENDAR_STATUS_CLOSED,
     CALENDAR_STATUS_OPEN,
-    CALENDAR_STATUS_UNKNOWN,
     is_trading_day_by_mootdx,
 )
 
