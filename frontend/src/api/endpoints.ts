@@ -51,7 +51,7 @@ export interface AccessProfile {
 
 // [Auth] - 描述: 登录响应 - 含 4 个 token 字段 + 10 个 AccessProfile 字段（对齐后端 LoginResponse）
 // 替代旧字段 membership_expired（语义等价：subscription_active = not membership_expired）
-// next_route 由后端权威计算：admin→/admin/overview；member active→/overview；member expired→/membership-expired
+// next_route 由后端权威计算：admin→/admin/overview；member active→/overview；member expired→/subscription-expired
 export interface LoginResponse {
   // token 字段（4 个）
   access_token: string

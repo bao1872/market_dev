@@ -33,12 +33,16 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.strategy_keys import WATCHLIST_MONITOR
-from app.core.deps import get_current_active_user, _get_user_roles
+from app.core.deps import get_current_active_user
 from app.db import get_db
+from app.services.access_control_service import (
+    AccessContext,
+    require_active_subscription,
+    require_quota,
+)
 from app.services.calendar_service import is_trading_day_async
 from app.services.market_status_service import TRADING_SESSIONS, compute_market_session
 from app.models.instrument import Instrument
-from app.models.subscription import Subscription
 from app.models.monitor_evaluation import MonitorEvaluation
 from app.models.monitor_state import MonitorState
 from app.models.strategy import StrategyDefinition, StrategyVersion
@@ -56,47 +60,32 @@ from app.schemas.watchlist import (
 router = APIRouter(prefix="/watchlist", tags=["watchlist"])
 
 
-async def _check_watchlist_limit(db: AsyncSession, user: User) -> None:
-    """事务内校验用户监控数量额度，超限抛 409。
+async def _check_limit_if_needed(
+    db: AsyncSession, user_id: UUID, monitor_limit: int | None
+) -> None:
+    """校验用户监控数量额度，超限抛 409（admin 跳过）。
 
-    规则：
-    - 管理员角色绕过监控数量限制
-    - 无会员记录的普通用户返回 403（无监控权限）
-    - 有会员记录但 active count >= monitor_limit 返回 409
-    - 降级后已有数量超过额度不删除，只禁止新增（自然满足，仅校验新增）
+    使用 AccessContext 统一权限模型：
+    - monitor_limit is None（admin）：跳过额度检查
+    - monitor_limit is not None（member）：查询 active count，超限返回 409
+
+    订阅有效性由 require_active_subscription 依赖在路由层校验，本函数只负责额度比较。
 
     Args:
         db: 异步数据库会话
-        user: 当前用户
+        user_id: 用户 ID
+        monitor_limit: 额度值（admin=None 无限制；member=int 限额）
 
     Raises:
-        HTTPException 403: 无会员记录（无监控权限）
         HTTPException 409: 监控数量已达上限
     """
-    user_roles = _get_user_roles(user)
-    if "admin" in user_roles:
-        return  # 管理员绕过
+    if monitor_limit is None:
+        return  # admin 无限制
 
-    # 查询订阅记录
-    subscription_stmt = select(Subscription).where(Subscription.user_id == user.id)
-    subscription_result = await db.execute(subscription_stmt)
-    subscription = subscription_result.scalar_one_or_none()
-
-    if subscription is None:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="无会员记录，无监控权限",
-        )
-
-    # monitor_limit 从 entitlement_snapshot 读取（迁移后旧数据 snapshot 为 NULL，回退到 plans 表）
-    snapshot = subscription.entitlement_snapshot or {}
-    monitor_limit = int(snapshot.get("monitor_limit") or 0)
-
-    # 查询当前 active 自选股数量
     count_stmt = (
         select(func.count(UserWatchlistItem.id))
         .where(
-            UserWatchlistItem.user_id == user.id,
+            UserWatchlistItem.user_id == user_id,
             UserWatchlistItem.active.is_(True),
         )
     )

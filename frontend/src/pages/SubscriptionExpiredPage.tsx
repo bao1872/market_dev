@@ -1,11 +1,11 @@
-// [Auth] - 描述: 会员到期续期拦截页（公开路由）
+// [Auth] - 描述: 订阅到期续期拦截页（公开路由）
 // 对应原型：membership-expired.html (V1.6.3)
 //
 // 用法：
-// 1. 在路由配置中注册为公开路由 /membership-expired（不经过 ProtectedLayout）
-// 2. [Auth] - 描述: 当后端 next_route='/membership-expired' 时（subscription_active=false）跳转到此页引导续期
+// 1. 在路由配置中注册为公开路由 /subscription-expired（canonical，不经过 ProtectedLayout）
+// 2. [Auth] - 描述: 当后端 next_route='/subscription-expired' 时（subscription_active=false）跳转到此页引导续期
 // 3. 跳转时可通过 route state 传递 { email, expiresAt } 以展示原账户信息：
-//    navigate('/membership-expired', { state: { email, expiresAt } })
+//    navigate('/subscription-expired', { state: { email, expiresAt } })
 //
 // 交互：
 // - 邀请码输入时自动大写化，清洁长度（仅字母数字）≥8 时显示"✓ 邀请码格式正确"
@@ -23,7 +23,7 @@ import type { RenewSuccessResponse } from '@/api/endpoints'
 import BrandLogo from '@/components/BrandLogo'
 
 // 续期页路由 state 类型（跳转方可选传入）
-interface MembershipExpiredRouteState {
+interface SubscriptionExpiredRouteState {
   email?: string
   expiresAt?: string
 }
@@ -39,7 +39,7 @@ function cleanLength(code: string): number {
   return code.replace(/[^A-Za-z0-9]/g, '').length
 }
 
-export default function MembershipExpiredPage() {
+export default function SubscriptionExpiredPage() {
   const navigate = useNavigate()
   const location = useLocation()
   const renew = useRenew()
@@ -47,7 +47,7 @@ export default function MembershipExpiredPage() {
   const toast = useToast()
 
   // 从 route state 读取跳转时传入的账户信息（可选）
-  const routeState = location.state as MembershipExpiredRouteState | null
+  const routeState = location.state as SubscriptionExpiredRouteState | null
 
   const [inviteCode, setInviteCode] = useState('')
   const [error, setError] = useState('')
@@ -72,7 +72,7 @@ export default function MembershipExpiredPage() {
         setSuccess(data)
         toast.show('续期成功', `会员有效期已更新至 ${formatDate(data.new_expires_at)}`)
         // [Auth] - 描述: 续期成功后异步刷新 AuthUser.subscription_active 等字段
-        // 避免用户进入 /overview 时被 SubscriberRoute 拦回 /membership-expired
+        // 避免用户进入 /overview 时被 SubscriberRoute 拦回 /subscription-expired
         getMyAccess()
           .then((access) => {
             const currentUser = useAuthStore.getState().user

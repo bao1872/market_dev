@@ -257,6 +257,8 @@ class MonitorBatchService:
         过滤条件：
         1. 仅取 active=True 的自选记录（排除已软删除的）
         2. 排除指数类标的（symbol 以 '000' 开头且 market=SH，或以 '399' 开头且 market=SZ）
+        3. [eligible_user_service] 仅保留有资格用户（active member + 有效 subscription），
+           disabled/expired/admin 用户的自选股不进入监控 universe
 
         Returns:
             (instrument_ids, instrument_user_map, instrument_extra_info) 三元组:
@@ -264,6 +266,8 @@ class MonitorBatchService:
             - instrument_user_map: {instrument_id: [user_id, ...], ...} 标的与用户映射（通知用）
             - instrument_extra_info: {instrument_id: {priority, weighted_score, ...}, ...} 附加信息
         """
+        from app.services.eligible_user_service import filter_eligible_recipients
+
         stmt = (
             select(
                 UserWatchlistItem.instrument_id,
@@ -273,6 +277,16 @@ class MonitorBatchService:
         )
         result = await db.execute(stmt)
         rows = result.all()
+
+        # [eligible_user_service] - 批量过滤有资格用户（disabled/expired/admin 不进入 universe）
+        # 仅保留 eligible 用户的自选股，避免为失效用户监控标的与发送通知
+        all_user_ids = list({row[1] for row in rows})
+        if all_user_ids:
+            eligible_user_ids = set(await filter_eligible_recipients(db, all_user_ids))
+            rows = [
+                (inst_id, uid) for inst_id, uid in rows
+                if uid in eligible_user_ids
+            ]
 
         # 收集所有 instrument_id，批量查询排除指数
         instrument_ids_set = {row[0] for row in rows}

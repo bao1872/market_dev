@@ -19,7 +19,8 @@ echo "[deploy] 使用环境文件: ${ENV_FILE}"
 echo "[deploy] 使用 Compose 文件: ${COMPOSE_FILE}"
 echo "[deploy] GIT_SHA=${GIT_SHA}, BUILD_TIME=${BUILD_TIME}"
 if [ "${CORE_ONLY:-0}" = "1" ]; then
-  echo "[deploy] CORE_ONLY=1，仅启动核心服务（postgres/redis/backend/frontend/worker-bars-scheduler）"
+  echo "[deploy] CORE_ONLY=1，仅启动核心服务（postgres/redis/backend/frontend/worker-bars-scheduler/worker-strategy-batch/worker-strategy-scheduler/worker-calendar/worker-after-close）"
+  echo "[deploy] CORE_ONLY 不包含 monitor/outbox/delivery/capture（按需单独启动）"
 fi
 
 # [deploy] - 描述: 验证 env 文件权限不宽于 600
@@ -81,11 +82,14 @@ docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" run --rm \
   -e CONFIG_FILE=/app/app/config.production.py \
   backend alembic upgrade head
 
-# [deploy] - 描述: 启动应用服务（CORE_ONLY 模式仅启动核心服务）
+# [deploy] - 描述: 启动应用服务（CORE_ONLY 模式仅启动核心服务，含策略与盘后编排链路）
+# CORE_ONLY=1 启动：postgres/redis/backend/frontend/worker-bars-scheduler/worker-strategy-batch/worker-strategy-scheduler/worker-calendar/worker-after-close
+# monitor/outbox/delivery/capture 不加入 CORE_ONLY（按需单独启动）
 if [ "${CORE_ONLY:-0}" = "1" ]; then
-  echo "=== 启动核心服务 ==="
+  echo "=== 启动核心服务（含策略与盘后编排） ==="
   docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --no-build --force-recreate \
-    postgres redis backend frontend worker-bars-scheduler
+    postgres redis backend frontend \
+    worker-bars-scheduler worker-strategy-batch worker-strategy-scheduler worker-calendar worker-after-close
 else
   echo "=== 启动全部服务 ==="
   docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --no-build --force-recreate --remove-orphans

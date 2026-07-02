@@ -14,7 +14,7 @@
 - 仅 active 状态用户可登录（disabled/pending 拒绝）
 - 登录路径只读：不写 DB，不修改 subscription.status；权限上下文由
   get_access_context 统一计算（复用 AccessContext，避免逻辑重复）
-- 会员到期后允许登录，返回 subscription_active=false + next_route='/membership-expired'，
+- 会员到期后允许登录，返回 subscription_active=false + next_route='/subscription-expired'，
   前端跳转续期页；admin 自动豁免（subscription_active=true）
 - 注册需邀请码，原子操作：锁定邀请码 → 创建账户 → 开通会员 → 写兑换记录
 - 续期需邀请码，未到期顺延 30 天，已到期从当天计算 30 天
@@ -60,7 +60,11 @@ from app.schemas.user import (
     UserRegister,
     UserResponse,
 )
-from app.services.access_control_service import get_access_context
+from app.services.access_control_service import (
+    AccessContext,
+    get_access_context,
+    require_authenticated,
+)
 from app.services.subscription_service import (
     _ensure_aware,
     get_renewal_count,
@@ -106,13 +110,13 @@ async def login(
     4. 重新查询带角色的 user 对象（_fetch_user_with_roles 挂载 _roles 属性）
     5. 调用 get_access_context 计算 AccessProfile（只读，不写 DB）
     6. 计算 next_route（admin→/admin/overview；member active→/overview；
-       member expired→/membership-expired）
+       member expired→/subscription-expired）
     7. 生成 access + refresh token
 
     登录路径只读约束：
     - 不修改 subscription.status（status 不持久化 expired，到期由 get_access_context 实时计算）
     - get_access_context 内部仅 select 查询，无 db.commit/flush/状态修改
-    - 会员到期后允许登录，返回 subscription_active=false + next_route='/membership-expired'
+    - 会员到期后允许登录，返回 subscription_active=false + next_route='/subscription-expired'
     - admin 自动豁免（subscription_active=true，subscription_required=false）
 
     Args:
@@ -179,13 +183,13 @@ async def login(
         # [Auth] - 描述: 调用 get_access_context 计算 AccessProfile（只读，不写 DB）
         ctx = await get_access_context(db, user)
 
-        # [Auth] - 描述: 计算 next_route 路由（admin→/admin/overview；active→/overview；expired→/membership-expired）
+        # [Auth] - 描述: 计算 next_route 路由（admin→/admin/overview；active→/overview；expired→/subscription-expired）
         if ctx.is_admin:
             next_route = "/admin/overview"
         elif ctx.subscription_active:
             next_route = "/overview"
         else:
-            next_route = "/membership-expired"
+            next_route = "/subscription-expired"
 
         # 生成 token
         user_id_str = str(user.id)
@@ -478,27 +482,25 @@ async def get_my_membership(
 
 @router.get("/me/access", response_model=AccessProfileResponse)
 async def get_my_access(
-    current_user: User = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db),
+    ctx: AccessContext = Depends(require_authenticated),
 ) -> AccessProfileResponse:
     """获取当前用户的完整权限上下文 AccessContext（11 个字段）。
 
     返回字段：user_id, account_status, roles, is_admin, is_member,
     subscription_active, plan_code, plan_display_name, expires_at, features, limits。
 
-    端点只读：不写 DB，复用 get_access_context 唯一真源计算权限上下文。
+    端点只读：不写 DB，通过 require_authenticated 依赖复用 get_access_context 唯一真源。
     admin 路径 subscription_active=True（豁免），plan_code=None；
     member 过期订阅仍保留 plan_code/plan_display_name/features/limits（前端降级提示）。
+    不要求 require_active_subscription：已登录但订阅过期也应返回上下文（前端刷新校验用）。
 
     Args:
-        current_user: 当前用户（由 get_current_active_user 注入）
-        db: 异步数据库会话
+        ctx: 权限上下文（由 require_authenticated 注入，链式复用 get_access_context）
 
     Returns:
         AccessProfileResponse（11 个字段，与 AccessContext 对齐）
     """
-    # [Auth] - 描述: 复用 get_access_context 唯一真源，端点不重复实现权限计算
-    ctx = await get_access_context(db, current_user)
+    # [Auth] - 描述: require_authenticated 已通过链式依赖复用 get_access_context 唯一真源
     return AccessProfileResponse(
         user_id=ctx.user_id,
         account_status=ctx.account_status,

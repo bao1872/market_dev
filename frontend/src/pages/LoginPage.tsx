@@ -64,7 +64,7 @@ export default function LoginPage() {
 
   // [Auth] - 描述: 登录成功后的统一处理 - 直接使用 login 响应的 AccessProfile 字段构造 AuthUser
   // 不再调用 getMe 二次请求（login 响应已含 is_admin/roles/subscription_active 等权限上下文）
-  // 跳转目标由后端权威计算的 next_route 决定（admin→/admin/overview；member active→/overview；expired→/membership-expired）
+  // 跳转目标由后端权威计算的 next_route 决定（admin→/admin/overview；member active→/overview；expired→/subscription-expired）
   async function handleLoginSuccess(data: LoginResponse, keepLogin: boolean) {
     setAuthenticating(true)
     try {
@@ -234,7 +234,7 @@ export default function LoginPage() {
             可计算、可追踪的服务
           </h1>
           <p className="login-lead">
-            注册即成为会员，30天内开放全部选股、监控、个股指标与消息推送功能。无需选择套餐，也没有功能额度限制。
+            注册即成为会员，30天内开放全部选股、监控、个股指标与消息推送功能。
           </p>
           <div className="login-feature">
             <span className="tag info">注册即全功能</span>
@@ -341,7 +341,7 @@ export default function LoginPage() {
               <div className="register-success">
                 <div className="success-orb">✓</div>
                 <h2>注册成功，会员已开通</h2>
-                <p>你的账户已获得完整功能权限，无需选择套餐。</p>
+                <p>你的账户已获得完整功能权限。</p>
                 <div className="membership-result">
                   <div>
                     <span>会员状态</span>
@@ -376,7 +376,7 @@ export default function LoginPage() {
               // 注册表单
               <div>
                 <h2>注册会员</h2>
-                <p className="page-desc">无需付费，邀请码验证通过后自动获得30天会员</p>
+                <p className="page-desc">邀请码验证通过后自动获得30天会员</p>
                 <form onSubmit={handleRegisterSubmit} noValidate>
                   <div className="form-grid auth-form-grid">
                     <div className="form-row">

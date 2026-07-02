@@ -42,6 +42,7 @@ from app.schemas.scheduler_job_run import (
     SchedulerJobRunListResponse,
 )
 from app.schemas.system_overview import SystemOverviewResponse
+from app.services.access_audit_service import write_audit_log
 from app.services.subscription_service import (
     generate_invite_codes,
     get_redemptions_by_user,
@@ -94,6 +95,25 @@ async def create_invite_codes(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         ) from e
+
+    # [AuditLog] - 描述: 为每个生成的邀请码写审计日志（不含明文 code，仅记录套餐快照与状态）
+    for invite, _raw_code in results:
+        await write_audit_log(
+            db=db,
+            actor_user_id=current_user.id,
+            action="invite_code.create",
+            target_type="invite_code",
+            target_id=str(invite.id),
+            after_data={
+                "status": invite.status,
+                "plan_code": invite.plan_code,
+                "monitor_limit": invite.monitor_limit,
+                "grant_months": invite.grant_months,
+                "grant_days": invite.grant_days,
+                "note": invite.note,
+            },
+        )
+
     await db.commit()
 
     return [
@@ -185,6 +205,22 @@ async def revoke_code(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         ) from e
+
+    # [AuditLog] - 描述: 记录邀请码作废操作（before=unused -> after=revoked）
+    # revoke_invite_code 仅允许 unused 状态作废，故 before_data.status 必为 "unused"
+    await write_audit_log(
+        db=db,
+        actor_user_id=current_user.id,
+        action="invite_code.revoke",
+        target_type="invite_code",
+        target_id=str(invite.id),
+        before_data={"status": "unused"},
+        after_data={
+            "status": invite.status,
+            "plan_code": invite.plan_code,
+            "grant_months": invite.grant_months,
+        },
+    )
 
     await db.commit()
 

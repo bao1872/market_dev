@@ -13,10 +13,12 @@ V1.1 各阶段模型统一继承 Base：
 - M4: StrategyEvent（原始策略事件与快照，event_key 唯一）
 - R12: StrategyRun/StrategyResult/StrategyResultMetric（策略运行与结果）
 - Phase2: Plan（套餐定义表 plans，套餐契约唯一真源，替代 plan_contract.py 字典）
+- Phase4.5: AccessAuditLog（访问审计日志表 access_audit_logs，记录 admin 关键操作）
 """
 
 from __future__ import annotations
 
+from app.models.access_audit_log import AccessAuditLog
 from app.models.bar import BarDaily, BarMinute
 from app.models.base import Base
 from app.models.beta_application import BetaApplication
@@ -54,6 +56,7 @@ from app.models.watchlist import UserWatchlistItem
 from app.models.worker_heartbeat import WorkerHeartbeat
 
 __all__ = [
+    "AccessAuditLog",
     "BarDaily",
     "BarMinute",
     "Base",

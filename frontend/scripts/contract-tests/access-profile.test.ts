@@ -168,10 +168,10 @@ test('App.tsx 存在 SubscriberRoute 守卫检查 subscription_active', () => {
     /is_admin/.test(subscriberRouteMatch[1]),
     'SubscriberRoute 函数体必须包含 is_admin 豁免逻辑（admin 直接通过）',
   )
-  // [Auth] - 描述: 非订阅用户重定向到 /membership-expired
+  // [Auth] - 描述: 非订阅用户重定向到 /subscription-expired（canonical）
   assert.ok(
-    /\/membership-expired/.test(subscriberRouteMatch[1]),
-    'SubscriberRoute 函数体必须将非订阅用户重定向到 /membership-expired',
+    /\/subscription-expired/.test(subscriberRouteMatch[1]),
+    'SubscriberRoute 函数体必须将非订阅用户重定向到 /subscription-expired',
   )
 })
 

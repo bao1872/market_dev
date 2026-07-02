@@ -1,14 +1,14 @@
 // [Auth] - 描述: 路由配置 + 受保护路由守卫 + Admin/Subscriber 角色守卫
-// 公开路由：/（门户页，lazy 加载）, /login, /membership-expired
+// 公开路由：/（门户页，lazy 加载）, /login, /subscription-expired（canonical），/membership-expired（重定向）
 // 受保护路由：其余所有路由（通过 ProtectedLayout 校验 auth store + AppShell 布局）
-// SubscriberRoute：有效订阅或 admin 豁免，否则重定向到 /membership-expired
+// SubscriberRoute：有效订阅或 admin 豁免，否则重定向到 /subscription-expired
 // AdminRoute：is_admin=true 才可访问，否则重定向到 /overview
-import { lazy, Suspense } from 'react'
+import { lazy, Suspense, useEffect, useRef } from 'react'
 import { createBrowserRouter, Navigate, Outlet } from 'react-router-dom'
-import { useAuthStore } from './store/auth'
+import { useAuthStore, ACCESS_TOKEN_KEY, CAPTURE_TOKEN_KEY } from './store/auth'
 import AppShell from './components/AppShell'
 import LoginPage from './pages/LoginPage'
-import MembershipExpiredPage from './pages/MembershipExpiredPage'
+import SubscriptionExpiredPage from './pages/SubscriptionExpiredPage'
 import IndexPage from './pages/IndexPage'
 import ScreenerPage from './pages/ScreenerPage'
 import WatchlistPage from './pages/WatchlistPage'
@@ -32,22 +32,35 @@ function LandingFallback() {
 // 受保护路由布局：未登录或 token 缺失重定向到 /login；已登录用 AppShell 包裹
 function ProtectedLayout() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
+  const revalidateAccess = useAuthStore((s) => s.revalidateAccess)
   const location = window.location
   const searchParams = new URLSearchParams(location.search)
   // 截图模式：URL 带 capture=feishu 且 token 有效时，允许直接访问
   const isCaptureMode = searchParams.get('capture') === 'feishu'
   const captureToken = searchParams.get('token')
 
-  // 截图模式：将 URL token 写入 localStorage 供 axios 拦截器使用
+  // [capture-mode] 截图模式：将 capture token 写入独立的 capture_token storage key
+  // 不写入 auth_token（避免污染普通登录态）；清理可能残留的 auth_token（历史污染遗留）
   if (isCaptureMode && captureToken) {
-    localStorage.setItem('auth_token', captureToken)
+    localStorage.setItem(CAPTURE_TOKEN_KEY, captureToken)
+    localStorage.removeItem(ACCESS_TOKEN_KEY)
   }
+
+  // [Auth] - 描述: 刷新页面后校验权限上下文（防止 persist 的 subscription_active 过期）
+  // 仅执行一次（useRef 守卫避免路由切换重复触发），capture 模式由 revalidateAccess 内部跳过
+  const revalidatedRef = useRef(false)
+  useEffect(() => {
+    if (revalidatedRef.current) return
+    revalidatedRef.current = true
+    void revalidateAccess()
+  }, [revalidateAccess])
 
   // 双重检查：zustand isAuthenticated + localStorage auth_token
   // 防止 token 过期后 isAuthenticated 仍为 true 但 auth_token 已被清除
-  const hasToken = !!localStorage.getItem('auth_token')
+  // capture 模式使用 URL token + capture_token key，不依赖 auth_token storage
+  const hasToken = !!localStorage.getItem(ACCESS_TOKEN_KEY)
   if (!isAuthenticated || !hasToken) {
-    // 截图模式放行（已把 token 写入 localStorage）
+    // 截图模式放行（capture token 通过 URL + capture_token key 提供，apiClient 拦截器读取）
     if (isCaptureMode && captureToken) {
       return (
         <AppShell>
@@ -64,7 +77,7 @@ function ProtectedLayout() {
   )
 }
 
-// [Auth] - 描述: SubscriberRoute 订阅守卫 - 非有效订阅用户重定向到 /membership-expired
+// [Auth] - 描述: SubscriberRoute 订阅守卫 - 非有效订阅用户重定向到 /subscription-expired（canonical）
 // admin 用户豁免（is_admin=true 直接通过，不强制订阅）
 // 用于 /overview /screener /watchlist 等需有效订阅的核心业务路由
 function SubscriberRoute() {
@@ -75,7 +88,7 @@ function SubscriberRoute() {
   }
   // 非订阅用户重定向到续期页
   if (!user?.subscription_active) {
-    return <Navigate to="/membership-expired" replace />
+    return <Navigate to="/subscription-expired" replace />
   }
   return <Outlet />
 }
@@ -94,7 +107,9 @@ export const router = createBrowserRouter([
   // 公开路由
   { path: '/', element: <Suspense fallback={<LandingFallback />}><LandingPage /></Suspense> },
   { path: '/login', element: <LoginPage /> },
-  { path: '/membership-expired', element: <MembershipExpiredPage /> },
+  // [Auth] - 描述: /subscription-expired 为 canonical 路由，/membership-expired 重定向到此（向后兼容）
+  { path: '/subscription-expired', element: <SubscriptionExpiredPage /> },
+  { path: '/membership-expired', element: <Navigate to="/subscription-expired" replace /> },
   // 受保护路由组
   {
     element: <ProtectedLayout />,
