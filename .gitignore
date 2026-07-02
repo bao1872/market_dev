@@ -14,8 +14,8 @@ doc/
 
 # ===== 本地环境配置 =====
 .vscode/
-.trae/
 .idea/
+.trae/
 
 # ===== Python 临时文件与构建产物 =====
 __pycache__/
