@@ -1,9 +1,29 @@
 # V1.1 交易平台 - 生产环境 Docker Compose
 # 包含多个服务：redis, backend, worker-*, frontend
-# PostgreSQL 使用物理机实例，不再创建容器
+# PostgreSQL 使用容器实例
 # 用法: docker compose --env-file /etc/market-dev/market.env -f docker-compose.prod.yml up -d
 
 services:
+  # ===== PostgreSQL 数据库 =====
+  postgres:
+    image: postgres:16
+    container_name: trading-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-bz}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-bz_stock}
+      TZ: Asia/Shanghai
+    volumes:
+      - postgresdata:/var/lib/postgresql/data
+    shm_size: 1gb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-bz} -d ${POSTGRES_DB:-bz_stock}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
   # ===== Redis 缓存 =====
   redis:
     image: redis:7-alpine
@@ -43,6 +63,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -68,6 +90,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -90,6 +114,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -111,6 +137,8 @@ services:
       CONFIG_FILE: /app/app/config.production.py
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -137,6 +165,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -158,6 +188,8 @@ services:
       CONFIG_FILE: /app/app/config.production.py
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -183,6 +215,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -204,6 +238,8 @@ services:
       CONFIG_FILE: /app/app/config.production.py
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -230,6 +266,8 @@ services:
       CONFIG_FILE: /app/app/config.production.py
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -265,6 +303,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
@@ -296,6 +336,8 @@ services:
       - "80:80"
 
 volumes:
+  postgresdata:
+    name: trading-postgresdata
   redisdata:
     name: trading-redisdata
   capture_static:
