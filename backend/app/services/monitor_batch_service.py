@@ -522,7 +522,7 @@ class MonitorBatchService:
 
         # c. 拉取行情
         # [Node Cluster] - 描述: 按 LIMIT N 取最近 N 根，根数从 indicator_contract 唯一真源读取
-        # （IC.NODE_CLUSTER_PRIMARY_BARS=250 / IC.NODE_CLUSTER_LOW_BARS=3600）
+        # （IC.NODE_CLUSTER_PRIMARY_BARS=250 / IC.NODE_CLUSTER_LOW_BARS=4000）
         bars_daily = await get_recent_bars(
             db, instrument_id,
             period="1d",

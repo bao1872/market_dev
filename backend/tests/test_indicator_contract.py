@@ -17,11 +17,11 @@ _MANIFESTS_DIR = Path(__file__).parent.parent / "app" / "strategy_assets" / "man
 # backend/app/ 生产代码根目录（AST 扫描范围）
 _APP_DIR = Path(__file__).parent.parent / "app"
 
-# 受控参数清单：禁止在 indicator_contract.py 之外出现字面量 250/3600/600 作为参数赋值
+# 受控参数清单：禁止在 indicator_contract.py 之外出现字面量 250/4000/600 作为参数赋值
 # 字面量 → 对应受控参数名映射（用于错误信息定位）
 _CONTROLLED_PARAMS = {
     "DAILY_HISTORY_BARS": 250,
-    "NODE_CLUSTER_LOW_BARS": 3600,
+    "NODE_CLUSTER_LOW_BARS": 4000,
     "NODE_CLUSTER_EVENT_TTL_SECONDS": 600,
 }
 
@@ -261,7 +261,7 @@ def test_pavp_tv_marked_as_independent_tool():
 # 不属于"受控参数第二套定义"。每条必须给出明确的语义差异说明。
 # 维护规则：新增条目必须在 PR 中说明"为何不属于受控参数同语义"。
 _KNOWN_SEMANTIC_DIFFERENCES: set[tuple[str, str, int]] = {
-    # 60min bar 新鲜度 SLA 秒数（3600 秒 = 1 小时），与 NODE_CLUSTER_LOW_BARS=3600（15m bar 根数）语义不同
+    # 60min bar 新鲜度 SLA 秒数（3600 秒 = 1 小时），与 NODE_CLUSTER_LOW_BARS=4000（15m bar 根数）语义不同
     ("app/services/freshness_sla.py", "BAR_60MIN_SLA_SECONDS", 3600),
     # 事件基类默认 state_ttl_seconds（3600 秒），用于 stage/sr 等通用事件，与 Node Cluster bar 根数语义不同
     ("app/strategy/events/base.py", "state_ttl_seconds", 3600),
@@ -274,6 +274,17 @@ _KNOWN_SEMANTIC_DIFFERENCES: set[tuple[str, str, int]] = {
     ("app/services/monitor_batch_service.py", "_EVENT_COOLDOWN_SECONDS", 600),
     # BB 通知冷却（600 秒）：Bollinger 通知去重窗口，与 Node Cluster 事件 TTL 业务规则不同
     ("app/strategy/monitors/bollinger_monitor.py", "NOTIFY_COOLDOWN_SECONDS", 600),
+    # 60min bar 回补/对账数量上限（4000 条，覆盖 2023-01-01 至今约 3500 条），
+    # 与 NODE_CLUSTER_LOW_BARS=4000（15m bar 根数）语义不同（60min 回补数量 vs 15m 输入根数）
+    ("app/services/reconcile_bars.py", "_60MIN_COUNT_LIMIT", 4000),
+}
+
+# 字典字面量已知例外：以下 (相对路径, 字面量值) 二元组属于"语义不同的同值用法"，
+# 不属于"受控参数第二套定义"。每条必须给出明确的语义差异说明。
+_KNOWN_DICT_LITERAL_EXCEPTIONS: set[tuple[str, int]] = {
+    # bars_scheduler_service.py BACKFILL_COUNTS["60m"]=4000：60min bar 回补数量上限，
+    # 与 NODE_CLUSTER_LOW_BARS=4000（15m bar 根数）语义不同（60min 回补 vs 15m Node 输入）
+    ("app/services/bars_scheduler_service.py", 4000),
 }
 
 
@@ -282,7 +293,7 @@ def test_no_duplicate_controlled_params():
 
     受控参数清单（_CONTROLLED_PARAMS）：
         - DAILY_HISTORY_BARS (=250)
-        - NODE_CLUSTER_LOW_BARS (=3600)
+        - NODE_CLUSTER_LOW_BARS (=4000)
         - NODE_CLUSTER_EVENT_TTL_SECONDS (=600)
 
     规则：
@@ -350,6 +361,8 @@ def test_no_duplicate_controlled_params():
                         and isinstance(val.value, int)
                         and val.value in controlled_literals
                     ):
+                        if (str(rel_path), val.value) in _KNOWN_DICT_LITERAL_EXCEPTIONS:
+                            continue
                         violations.append(
                             f"{rel_path}:{node.lineno} 字典字面量中含受控字面量 {val.value} "
                             f"（应从 indicator_contract 导入）"

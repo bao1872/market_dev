@@ -6,7 +6,7 @@
 - 输出：准备后的三个 DataFrame + 诊断元信息（实际根数/period/parameter_version）
 
 测试场景：
-1. 正常输入：daily=300/15m=1500/1m=10 → 输出 daily=250/15m=3600/1m=2
+1. 正常输入：daily=300/15m=1500/1m=10 → 输出 daily=250/15m=4000/1m=2
 2. 重复 index：dedupe keep=last，确保使用最新一条
 3. 超过 N 根：tail(N) 截断
 4. 不足 N 根：返回实际根数，诊断字段记录真实根数（不静默改用其他参数）
@@ -79,15 +79,15 @@ def _make_bars(
 
 
 def test_prepare_node_cluster_bars_normal_input():
-    """场景1：正常输入截断到 250/3600/2。"""
+    """场景1：正常输入截断到 250/4000/2。"""
     daily = _make_bars(300, datetime(2025, 1, 1), freq="D")
-    bars_15m = _make_bars(4000, datetime(2025, 1, 1), freq="15min")
+    bars_15m = _make_bars(IC.NODE_CLUSTER_LOW_BARS, datetime(2025, 1, 1), freq="15min")
     bars_1m = _make_bars(10, datetime(2025, 6, 18, 9, 30), freq="1min")
 
     result = prepare_node_cluster_bars(daily, bars_15m, bars_1m)
 
     assert len(result.daily) == IC.NODE_CLUSTER_PRIMARY_BARS  # 250
-    assert len(result.bars_15m) == IC.NODE_CLUSTER_LOW_BARS  # 3600
+    assert len(result.bars_15m) == IC.NODE_CLUSTER_LOW_BARS  # 4000
     assert len(result.bars_minute) == IC.NODE_CLUSTER_MINUTE_BARS  # 2
 
 
@@ -100,7 +100,7 @@ def test_prepare_node_cluster_bars_dedup_keep_last():
     daily_dup = pd.concat([daily, last_row])
 
     result = prepare_node_cluster_bars(
-        daily_dup, _make_bars(3600, datetime(2025, 1, 1), freq="15min"),
+        daily_dup, _make_bars(IC.NODE_CLUSTER_LOW_BARS, datetime(2025, 1, 1), freq="15min"),
         _make_bars(2, datetime(2025, 6, 18, 9, 30), freq="1min"),
     )
 
@@ -110,8 +110,8 @@ def test_prepare_node_cluster_bars_dedup_keep_last():
 
 
 def test_prepare_node_cluster_bars_truncate_over_limit():
-    """场景3：超过 3600 根 15m 数据时只取最后 3600 根。"""
-    bars_15m_extra = _make_bars(4000, datetime(2025, 1, 1), freq="15min")
+    """场景3：超过 NODE_CLUSTER_LOW_BARS 根 15m 数据时只取最后 NODE_CLUSTER_LOW_BARS 根。"""
+    bars_15m_extra = _make_bars(IC.NODE_CLUSTER_LOW_BARS + 500, datetime(2025, 1, 1), freq="15min")
     # 标记最后一根 close 为唯一值
     bars_15m_extra.iloc[-1, bars_15m_extra.columns.get_loc("close")] = 888.88
 
@@ -121,7 +121,7 @@ def test_prepare_node_cluster_bars_truncate_over_limit():
         _make_bars(2, datetime(2025, 6, 18, 9, 30), freq="1min"),
     )
 
-    assert len(result.bars_15m) == 3600
+    assert len(result.bars_15m) == IC.NODE_CLUSTER_LOW_BARS
     # 最后一根 close 应为 888.88（tail 截断保留最新）
     assert result.bars_15m["close"].iloc[-1] == pytest.approx(888.88)
 
@@ -129,7 +129,7 @@ def test_prepare_node_cluster_bars_truncate_over_limit():
 def test_prepare_node_cluster_bars_insufficient_records_actual_count():
     """场景4：数据不足时记录实际根数，不静默改用其他参数。"""
     daily_short = _make_bars(100, datetime(2025, 1, 1), freq="D")  # < 250
-    bars_15m_short = _make_bars(500, datetime(2025, 1, 1), freq="15min")  # < 3600
+    bars_15m_short = _make_bars(500, datetime(2025, 1, 1), freq="15min")  # < 4000
     bars_1m_short = _make_bars(1, datetime(2025, 6, 18, 9, 30), freq="1min")  # < 2
 
     result = prepare_node_cluster_bars(daily_short, bars_15m_short, bars_1m_short)
@@ -153,7 +153,7 @@ def test_prepare_node_cluster_bars_no_date_column_required():
     无 date/datetime 列。函数应正常工作，不抛 KeyError。
     """
     daily = _make_bars(250, datetime(2025, 1, 1), freq="D")
-    bars_15m = _make_bars(3600, datetime(2025, 1, 1), freq="15min")
+    bars_15m = _make_bars(IC.NODE_CLUSTER_LOW_BARS, datetime(2025, 1, 1), freq="15min")
     bars_1m = _make_bars(2, datetime(2025, 6, 18, 9, 30), freq="1min")
 
     # 确认无 date/datetime 列
@@ -165,14 +165,14 @@ def test_prepare_node_cluster_bars_no_date_column_required():
     # 应正常执行，不抛 KeyError
     result = prepare_node_cluster_bars(daily, bars_15m, bars_1m)
     assert len(result.daily) == 250
-    assert len(result.bars_15m) == 3600
+    assert len(result.bars_15m) == IC.NODE_CLUSTER_LOW_BARS
     assert len(result.bars_minute) == 2
 
 
 def test_prepare_node_cluster_bars_profile_meta_diagnostic_fields():
     """场景6：profile_meta 包含 6 个诊断字段。"""
     daily = _make_bars(250, datetime(2025, 1, 1), freq="D")
-    bars_15m = _make_bars(3600, datetime(2025, 1, 1), freq="15min")
+    bars_15m = _make_bars(IC.NODE_CLUSTER_LOW_BARS, datetime(2025, 1, 1), freq="15min")
     bars_1m = _make_bars(2, datetime(2025, 6, 18, 9, 30), freq="1min")
 
     result = prepare_node_cluster_bars(daily, bars_15m, bars_1m)
@@ -190,7 +190,7 @@ def test_prepare_node_cluster_bars_profile_meta_diagnostic_fields():
 
     # 验证字段值
     assert meta["input_daily_bars"] == 250
-    assert meta["input_15m_bars"] == 3600
+    assert meta["input_15m_bars"] == IC.NODE_CLUSTER_LOW_BARS
     assert meta["input_minute_bars"] == 2
     assert meta["primary_period"] == IC.NODE_CLUSTER_PRIMARY_PERIOD  # "1d"
     assert meta["low_period"] == IC.NODE_CLUSTER_LOW_PERIOD  # "15m"
@@ -207,7 +207,7 @@ def test_prepare_node_cluster_bars_sort_index_ascending():
 
     result = prepare_node_cluster_bars(
         daily_reverse,
-        _make_bars(3600, datetime(2025, 1, 1), freq="15min"),
+        _make_bars(IC.NODE_CLUSTER_LOW_BARS, datetime(2025, 1, 1), freq="15min"),
         _make_bars(2, datetime(2025, 6, 18, 9, 30), freq="1min"),
     )
 

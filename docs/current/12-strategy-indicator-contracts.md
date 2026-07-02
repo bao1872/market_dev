@@ -118,9 +118,10 @@ DSA、Node、页面和截图必须使用同一行情快照和时间键。partial
 
 代码中发现重复预算、窗口或事件常量时，必须登记 Alignment 并收口，不能复制新的第三处。
 
-## 6. Node Cluster 输入契约（目标）
+## 6. Node Cluster 输入契约
 
 - 日线：最近 250 根已完成 qfq（DAILY_HISTORY_BARS=250）
-- 15m：最近 4000 根已完成 qfq（250*16=4000）
+- 15m：最近 4000 根已完成 qfq（DAILY_HISTORY_BARS × NODE_CLUSTER_15M_BARS_PER_DAY = 250×16=4000）
 - 1m：最近 2 根已完成 Bar
-- 当前状态：KNOWN_GAP（运行时仍为 3600，待 Phase B 修复，见 ALIGN-016）
+- INDICATOR_BARS["15m"] 引用 NODE_CLUSTER_LOW_BARS（15m 指标即 Node Cluster 指标）
+- CHART_BARS_COUNT=250（页面显示）与 NODE_CLUSTER_LOW_BARS=4000（Node 内部输入）分离

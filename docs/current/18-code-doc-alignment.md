@@ -29,11 +29,11 @@
 | ALIGN-013 | 文档旧术语 | 仓库旧文档仍出现 plan_contract、Membership、旧到期路由等 | plans + Subscription + `/subscription-expired` | `CLOSED` | 全局扫描完成；当前设计文档已统一为 plans + Subscription + `/subscription-expired`；遗留 API 路径/字段已标注 V1.6 遗留命名；见 CHANGE-20260702-005 |
 | ALIGN-014 | CI | `6f5ae2c` 尚无最终 release PR 的 blocking CI 证据，且全量 Ruff/mypy 曾为非阻断 | release 候选最终 HEAD 的 blocking jobs 全绿，修改文件零新增错误 | `KNOWN_GAP` | Phase 7 完整测试与 CI 尚未执行 |
 | ALIGN-015 | 运行服务 | CORE_ONLY 不包含 capture/outbox/delivery，可能造成文字有、图片无 | 部署能力与业务功能匹配；服务健康不可用时不假成功 | `KNOWN_GAP` | Phase 9 生产部署验证尚未执行 |
-| ALIGN-016 | Node Cluster 输入 | `indicator_contract.py` 中 `NODE_CLUSTER_LOW_BARS=3600`，应为 250*16=4000 | 15m 输入 4000 根，1d=250，1m=2 | `KNOWN_GAP` | 待 Phase B 修复 |
+| ALIGN-016 | Node Cluster 输入 | `indicator_contract.py` 中 `NODE_CLUSTER_LOW_BARS=3600`，应为 250*16=4000 | 15m 输入 4000 根，1d=250，1m=2 | `CLOSED` | `NODE_CLUSTER_LOW_BARS` 已改为 `DAILY_HISTORY_BARS * NODE_CLUSTER_15M_BARS_PER_DAY = 4000`，新增 `NODE_CLUSTER_15M_BARS_PER_DAY=16`，`test_node_cluster_contract.py` 8 passed |
 | ALIGN-017 | 飞书渠道 | 运行时仍存在 `FeishuWebhookAdapter` 和 Webhook 环境变量 | Platform App only，删除全部 Webhook | `KNOWN_GAP` | 待 Phase C 修复 |
 | ALIGN-018 | Capture 链路 | `stock_capture_service` 访问普通 `/stock/:symbol`，无专用 Capture API | 专用 `/capture/stock/:symbol` 路由 + Capture Token 校验 | `KNOWN_GAP` | 待 Phase C 修复 |
 | ALIGN-019 | DSA 发布门禁 | `publish_run` 仍允许 partial_failed 状态发布 | partial_failed 禁止自动发布 | `KNOWN_GAP` | 待后续修复 |
-| ALIGN-020 | 数量语义耦合 | `INDICATOR_BARS["15m"]=3600` 同时代表页面显示、API 返回和 Node 输入 | 拆分为 CHART_DISPLAY_BARS、INDICATOR_RESPONSE_BARS、NODE_CLUSTER_INPUT_SPEC | `KNOWN_GAP` | 待 Phase B 修复 |
+| ALIGN-020 | 数量语义耦合 | `INDICATOR_BARS["15m"]=3600` 同时代表页面显示、API 返回和 Node 输入 | 拆分为 CHART_DISPLAY_BARS、INDICATOR_RESPONSE_BARS、NODE_CLUSTER_INPUT_SPEC | `CLOSED` | `INDICATOR_BARS["15m"]` 已改为引用 `NODE_CLUSTER_LOW_BARS`（不再硬编码 3600），`CHART_BARS_COUNT=250` 与 `NODE_CLUSTER_LOW_BARS=4000` 已分离，`test_node_cluster_contract.py` 验证通过 |
 
 ## 关闭要求
 

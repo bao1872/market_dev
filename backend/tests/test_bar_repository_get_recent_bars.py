@@ -3,14 +3,14 @@
 测试内容：
 1. 日线：插入 300 根 bar，断言 get_recent_bars(period="1d", limit=250) 返回恰好 250 根（升序）
 2. 不足时返回实际可用数量（如插入 100 根，limit=250 返回 100 根）
-3. 15m 周期：插入 4000 根 bar，断言 limit=3600 返回恰好 3600 根（升序）
+3. 15m 周期：插入 4000 根 bar，断言 limit=NODE_CLUSTER_LOW_BARS 返回恰好 4000 根（升序）
 4. 1m 周期：插入 5 根 bar，断言 limit=2 返回恰好 2 根（升序，最新两根）
 5. 非法 period / limit 抛出 ValueError
 
 测试约束：
 - 使用 conftest.py 的 db_session / test_instrument fixtures（事务回滚，无副作用）
 - 不连接真实行情源（pytdx），仅验证 DB 查询逻辑
-- limit=250 / 3600 / 2 来自 indicator_contract 受控参数（与 NODE_CLUSTER_PRIMARY_BARS /
+- limit=250 / 4000 / 2 来自 indicator_contract 受控参数（与 NODE_CLUSTER_PRIMARY_BARS /
   NODE_CLUSTER_LOW_BARS / NODE_CLUSTER_MINUTE_BARS 一致）
 """
 from __future__ import annotations
@@ -103,15 +103,15 @@ async def test_get_recent_bars_daily_returns_actual_when_insufficient(
 
 
 # ============================================================
-# 3. 15m 周期：limit=3600 返回恰好 3600 根（升序）
+# 3. 15m 周期：limit=NODE_CLUSTER_LOW_BARS 返回恰好 4000 根（升序）
 # ============================================================
 
 
 @pytest.mark.asyncio
-async def test_get_recent_bars_15min_returns_exactly_3600(
+async def test_get_recent_bars_15min_returns_exactly_node_cluster_low_bars(
     db_session: AsyncSession, test_instrument,
 ):
-    """插入 4000 根 15m bar，断言 limit=3600 返回恰好 3600 根（升序）。"""
+    """插入 4000 根 15m bar，断言 limit=NODE_CLUSTER_LOW_BARS 返回恰好 4000 根（升序）。"""
     inst_id = test_instrument.id
     # 4000 根 15m bar ≈ 250 个交易日 × 16 根/天，从 2026-06-27 09:30 倒推
     base_ts = datetime(2026, 6, 27, 15, 0)
@@ -135,7 +135,7 @@ async def test_get_recent_bars_15min_returns_exactly_3600(
 
     df = await get_recent_bars(db_session, inst_id, period="15m", limit=IC.NODE_CLUSTER_LOW_BARS)
 
-    assert len(df) == IC.NODE_CLUSTER_LOW_BARS == 3600
+    assert len(df) == IC.NODE_CLUSTER_LOW_BARS == 4000
     assert df.index.is_monotonic_increasing
     # 最后一根是最新插入的
     assert df.index[-1] == pd.Timestamp(base_ts)

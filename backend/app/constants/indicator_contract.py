@@ -17,16 +17,22 @@ from __future__ import annotations
 # 必须引用本常量，禁止在其它文件再定义 250 字面量作为参数赋值。
 # 受控参数清单（AST 一致性测试 test_no_duplicate_controlled_params 守门）：
 #   - DAILY_HISTORY_BARS (=250)
-#   - NODE_CLUSTER_LOW_BARS (=3600)
+#   - NODE_CLUSTER_15M_BARS_PER_DAY (=16)
+#   - NODE_CLUSTER_LOW_BARS (=4000, =DAILY_HISTORY_BARS*NODE_CLUSTER_15M_BARS_PER_DAY)
 #   - NODE_CLUSTER_EVENT_TTL_SECONDS (=600)
 DAILY_HISTORY_BARS: int = 250
+
+# ===== Node Cluster 每交易日 15m Bar 根数 =====
+# 每个交易日有 16 根 15m Bar（4 根/小时 × 4 小时 = 16，A股交易日 4 小时）
+NODE_CLUSTER_15M_BARS_PER_DAY: int = 16
 
 # ===== Node Cluster / Volume Node 参数（advice.md 第3行）=====
 NODE_CLUSTER_PRIMARY_PERIOD: str = "1d"
 # [node_cluster] - 描述: 主周期（日线）取数根数，引用 DAILY_HISTORY_BARS 唯一字面量
 NODE_CLUSTER_PRIMARY_BARS: int = DAILY_HISTORY_BARS
 NODE_CLUSTER_LOW_PERIOD: str = "15m"
-NODE_CLUSTER_LOW_BARS: int = 3600
+# [node_cluster] - 描述: 低周期（15m）取数根数 = DAILY_HISTORY_BARS × 每交易日 15m 根数 = 250×16=4000
+NODE_CLUSTER_LOW_BARS: int = DAILY_HISTORY_BARS * NODE_CLUSTER_15M_BARS_PER_DAY
 NODE_CLUSTER_MINUTE_BARS: int = 2
 
 # Volume Profile 算法参数
@@ -59,11 +65,12 @@ BB_EVENT_TTL_SECONDS: int = 600
 
 # ===== 各周期指标计算根数 =====
 # [indicator_contract] - 描述: 按 advice.md 口径，1d=250（引用 DAILY_HISTORY_BARS，与 DSA_LOOKBACK 一致），
-# 15m=3600（与 Node Cluster 低周期一致），1h=1200（1h 指标窗口与 Node Cluster 15m 输入语义不同，解绑），
+# 15m=NODE_CLUSTER_LOW_BARS（15m 指标即 Node Cluster 指标，引用 Node 输入常量），
+# 1h=1200（1h 指标窗口与 Node Cluster 15m 输入语义不同，解绑），
 # 1m=2（穿越检测）
 INDICATOR_BARS: dict[str, int] = {
     "1d": DAILY_HISTORY_BARS,
-    "15m": 3600,
+    "15m": NODE_CLUSTER_LOW_BARS,
     "1h": 1200,
     "1w": 260,
     "1mo": 120,
@@ -79,6 +86,7 @@ def all_params() -> dict[str, object]:
     """返回所有参数的字典视图，供文档生成与一致性测试使用。"""
     return {
         "DAILY_HISTORY_BARS": DAILY_HISTORY_BARS,
+        "NODE_CLUSTER_15M_BARS_PER_DAY": NODE_CLUSTER_15M_BARS_PER_DAY,
         "NODE_CLUSTER_PRIMARY_PERIOD": NODE_CLUSTER_PRIMARY_PERIOD,
         "NODE_CLUSTER_PRIMARY_BARS": NODE_CLUSTER_PRIMARY_BARS,
         "NODE_CLUSTER_LOW_PERIOD": NODE_CLUSTER_LOW_PERIOD,

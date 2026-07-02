@@ -269,7 +269,7 @@ class NodeClusterBarsResult:
 
     Attributes:
         daily: 准备后的日线 bars（DatetimeIndex 升序、去重、tail(250)）
-        bars_15m: 准备后的 15 分钟 bars（DatetimeIndex 升序、去重、tail(1200)）
+        bars_15m: 准备后的 15 分钟 bars（DatetimeIndex 升序、去重、tail(NODE_CLUSTER_LOW_BARS)）
         bars_minute: 准备后的 1 分钟 bars（DatetimeIndex 升序、去重、tail(2)）
         profile_meta: 诊断元信息，含输入根数/周期/参数版本
     """
