@@ -1283,3 +1283,20 @@ API 和数据契约
 ```
 
 任何一部分不一致，这次修改都不能视为完成。
+
+---
+
+# 盘迹项目硬规则
+
+1. 当前真实文档地图为 docs/current/00-18，docs/current 是唯一当前设计事实源；
+2. docs 根目录禁止生成业务 Markdown，只允许存在 README.md；
+3. 飞书唯一接入为 feishu_platform_app，禁止恢复 feishu_webhook 及 Webhook 环境变量；
+4. Node Cluster 固定契约：1d=250 根日线，15m=250*16=4000 根，1m=2 根；
+5. 图表显示数量、指标输出数量、Node 内部输入数量必须分离，禁止用同一个常量同时代表三种语义；
+6. 参数修改必须按顺序更新：常量 → Manifest/StrategyVersion → 测试 → current 文档 → CHANGE 记录；
+7. Capture Token 只能访问 Capture API，不能访问普通用户 API；
+8. 每项任务必须检查指定分支，禁止在错误分支上操作；
+9. 不得修改已发布历史 migration；
+10. 未经测试和真实运行证据不得关闭 Alignment；
+11. 不直接修改 main，不 force push 已共享分支；
+12. 不把 Mock E2E 描述成真实飞书 E2E。

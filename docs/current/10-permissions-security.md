@@ -67,3 +67,9 @@ Monitor、Recipient、Outbox 和 Delivery 统一要求 active member + active su
 ## 8. 安全验收
 
 每次权限修改至少验证 active、expired、no-subscription、disabled、admin、用户 A/B 所有权、Capture Token 隔离、Secret 脱敏和 Worker 资格。
+
+## 9. Capture Token 规则（目标）
+
+- type=capture, scope=stock_detail_capture
+- 只能访问 Capture API，不能访问普通用户 API
+- 当前状态：KNOWN_GAP（待 Phase C 实现，见 ALIGN-018）

@@ -90,3 +90,9 @@ Bars/Quote 响应除 OHLCV 外，应提供或通过响应头提供：
 ## 8. 兼容与废弃
 
 `/subscription-expired` 为 canonical 前端路由；`/membership-expired` 仅兼容重定向。旧 Membership API 和模型不得作为第二套长期路径。
+
+## 9. Capture API（目标）
+
+- GET /api/v1/capture/stocks/{instrument_id}/snapshot
+- Capture Token 校验：type=capture, scope=stock_detail_capture
+- 当前状态：KNOWN_GAP（待 Phase C 实现，见 ALIGN-018）
