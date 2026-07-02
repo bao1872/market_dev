@@ -1,0 +1,372 @@
+"""Task 4.5 测试 - market_data_aggregation_service 作为行情聚合唯一事实源。
+
+验证：
+1. 日线 DB 命中且无缺口：返回 db 数据源、非 degraded、无 partial
+2. DB 尾部缺失：调用 Pytdx 补齐并标记 hybrid
+3. Pytdx 失败：降级到 DB，返回 degraded=true，不抛 502
+4. 非交易时段：不调用实时源
+5. 15m/1h 交易时段：拉 1m 聚合为 partial bar
+6. Redis 缓存命中：直接返回缓存，不查 DB
+7. 返回对象包含所有数据源诊断字段
+
+用法：
+    APP_ENV=test TEST_DATABASE_URL=postgresql://... pytest tests/test_market_data_aggregation_service.py -v
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import date, datetime
+from typing import Any
+from unittest.mock import AsyncMock
+from zoneinfo import ZoneInfo
+
+import pandas as pd
+import pytest
+
+from app.services import market_data_aggregation_service as mdas
+
+TEST_INSTRUMENT_ID = uuid.UUID("12345678-1234-1234-1234-123456789012")
+
+
+async def _async_return(value: Any) -> Any:
+    """辅助：让同步值可被 await（用于 monkeypatch 异步函数）。"""
+    return value
+
+
+def _build_daily_bars(
+    dates: list[str],
+    close_start: float = 10.0,
+) -> pd.DataFrame:
+    """构造 mock 日线 DataFrame（naive DatetimeIndex）。"""
+    closes = [close_start + i * 0.1 for i in range(len(dates))]
+    df = pd.DataFrame({
+        "open": [c - 0.05 for c in closes],
+        "high": [c + 0.1 for c in closes],
+        "low": [c - 0.1 for c in closes],
+        "close": closes,
+        "volume": [100000.0 + i for i in range(len(dates))],
+        "amount": [1000000.0 + i * 10 for i in range(len(dates))],
+        "adj_factor": [1.0] * len(dates),
+    }, index=pd.to_datetime(dates))
+    df.index.name = "trade_date"
+    return df
+
+
+def _build_minute_bars(
+    start: str,
+    periods: int,
+    freq: str = "1min",
+) -> pd.DataFrame:
+    """构造 mock 1 分钟线 DataFrame（naive DatetimeIndex）。"""
+    times = pd.date_range(start, periods=periods, freq=freq)
+    closes = [10.0 + i * 0.01 for i in range(len(times))]
+    df = pd.DataFrame({
+        "open": [c - 0.01 for c in closes],
+        "high": [c + 0.01 for c in closes],
+        "low": [c - 0.01 for c in closes],
+        "close": closes,
+        "volume": [1000.0 + i for i in range(len(times))],
+        "amount": [10000.0 + i * 10 for i in range(len(times))],
+        "adj_factor": [1.0] * len(times),
+    }, index=times)
+    df.index.name = "trade_time"
+    return df
+
+
+def _mock_session() -> AsyncMock:
+    """返回空的 mock AsyncSession。"""
+    return AsyncMock()
+
+
+# ============================================================
+# 基础返回结构
+# ============================================================
+
+
+async def test_get_bars_returns_bar_aggregation_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    """get_bars 返回 BarAggregationResult，包含 bars DataFrame 与诊断字段。"""
+    service = mdas.MarketDataAggregationService()
+    db_df = _build_daily_bars(["2026-06-16", "2026-06-17", "2026-06-18"])
+
+    monkeypatch.setattr(
+        mdas, "_query_daily_bars",
+        lambda *a, **kw: _async_return(db_df.copy()),
+    )
+    monkeypatch.setattr(
+        mdas, "_expected_last_completed_daily_bar",
+        lambda session, now: date(2026, 6, 18),
+    )
+    monkeypatch.setattr(mdas, "_is_trading_hours", lambda now: False)
+
+    result = await service.get_bars(
+        _mock_session(), TEST_INSTRUMENT_ID, timeframe="1d", adj="none",
+    )
+
+    assert isinstance(result, mdas.BarAggregationResult)
+    assert result.data_source == "db"
+    assert not result.degraded
+    assert result.degraded_reason is None
+    assert result.last_persisted_bar_time == pd.Timestamp("2026-06-18")
+    assert len(result.bars) == 3
+
+
+# ============================================================
+# 日线：DB 命中无缺口
+# ============================================================
+
+
+async def test_daily_db_hit_no_gap_returns_db_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DB 数据已覆盖最后一个已完成 bar，不请求 Pytdx。"""
+    service = mdas.MarketDataAggregationService()
+    db_df = _build_daily_bars(["2026-06-16", "2026-06-17", "2026-06-18"])
+
+    monkeypatch.setattr(
+        mdas, "_query_daily_bars",
+        lambda *a, **kw: _async_return(db_df.copy()),
+    )
+    monkeypatch.setattr(
+        mdas, "_expected_last_completed_daily_bar",
+        lambda session, now: date(2026, 6, 18),
+    )
+    monkeypatch.setattr(mdas, "_is_trading_hours", lambda now: False)
+    pytdx_called = {"called": False}
+    monkeypatch.setattr(
+        mdas, "fetch_daily_bars",
+        lambda *a, **kw: _async_return(pytdx_called.update(called=True) or pd.DataFrame()),
+    )
+
+    result = await service.get_bars(
+        _mock_session(), TEST_INSTRUMENT_ID, timeframe="1d", adj="none",
+    )
+
+    assert result.data_source == "db"
+    assert not result.degraded
+    assert not result.is_partial
+    assert result.last_persisted_bar_time == pd.Timestamp("2026-06-18")
+    assert result.last_live_bar_time is None
+    assert not pytdx_called["called"], "DB 无缺口时不应请求 Pytdx"
+
+
+# ============================================================
+# 日线：DB 有历史但尾部缺一天，请求 Pytdx 补齐
+# ============================================================
+
+
+async def test_daily_db_missing_tail_calls_pytdx(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DB 最新 bar 早于最后一个已完成 bar，应调用 Pytdx 补齐。"""
+    service = mdas.MarketDataAggregationService()
+    db_df = _build_daily_bars(["2026-06-16", "2026-06-17"])  # 缺 06-18
+    pytdx_tail = _build_daily_bars(["2026-06-18"], close_start=11.0)
+
+    monkeypatch.setattr(
+        mdas, "_query_daily_bars",
+        lambda *a, **kw: _async_return(db_df.copy()),
+    )
+    monkeypatch.setattr(
+        mdas, "_expected_last_completed_daily_bar",
+        lambda session, now: date(2026, 6, 18),
+    )
+    monkeypatch.setattr(mdas, "_is_trading_hours", lambda now: False)
+    monkeypatch.setattr(
+        mdas, "fetch_daily_bars",
+        lambda *a, **kw: _async_return(pytdx_tail.copy()),
+    )
+
+    result = await service.get_bars(
+        _mock_session(), TEST_INSTRUMENT_ID, timeframe="1d", adj="none",
+    )
+
+    assert result.data_source == "hybrid"
+    assert not result.degraded
+    assert len(result.bars) == 3
+    assert pd.Timestamp("2026-06-18") in result.bars.index
+    assert result.last_persisted_bar_time == pd.Timestamp("2026-06-17")
+    assert result.last_live_bar_time == pd.Timestamp("2026-06-18")
+
+
+# ============================================================
+# Pytdx 失败降级
+# ============================================================
+
+
+async def test_pytdx_failure_returns_degraded_with_db_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pytdx 补尾失败时返回 DB 数据，并标记 degraded=true。"""
+    service = mdas.MarketDataAggregationService()
+    db_df = _build_daily_bars(["2026-06-16", "2026-06-17"])
+
+    async def failing_fetch(*args, **kwargs):
+        raise RuntimeError("pytdx timeout")
+
+    monkeypatch.setattr(
+        mdas, "_query_daily_bars",
+        lambda *a, **kw: _async_return(db_df.copy()),
+    )
+    monkeypatch.setattr(
+        mdas, "_expected_last_completed_daily_bar",
+        lambda session, now: date(2026, 6, 18),
+    )
+    monkeypatch.setattr(mdas, "_is_trading_hours", lambda now: False)
+    monkeypatch.setattr(mdas, "fetch_daily_bars", failing_fetch)
+
+    result = await service.get_bars(
+        _mock_session(), TEST_INSTRUMENT_ID, timeframe="1d", adj="none",
+    )
+
+    assert result.data_source == "degraded"
+    assert result.degraded is True
+    assert result.degraded_reason is not None
+    assert "pytdx" in result.degraded_reason.lower() or "timeout" in result.degraded_reason.lower()
+    assert len(result.bars) == 2
+
+
+# ============================================================
+# 非交易时段不调用 Pytdx 实时源
+# ============================================================
+
+
+async def test_non_trading_hours_skips_realtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """非交易时段 include_realtime=True 也不调用实时 1m 源。"""
+    service = mdas.MarketDataAggregationService()
+    db_df = _build_daily_bars(["2026-06-16", "2026-06-17", "2026-06-18"])
+
+    monkeypatch.setattr(
+        mdas, "_query_daily_bars",
+        lambda *a, **kw: _async_return(db_df.copy()),
+    )
+    monkeypatch.setattr(
+        mdas, "_expected_last_completed_daily_bar",
+        lambda session, now: date(2026, 6, 18),
+    )
+    monkeypatch.setattr(mdas, "_is_trading_hours", lambda now: False)
+    realtime_called = {"called": False}
+    monkeypatch.setattr(
+        mdas, "fetch_minute_bars",
+        lambda *a, **kw: _async_return(realtime_called.update(called=True) or pd.DataFrame()),
+    )
+
+    result = await service.get_bars(
+        _mock_session(), TEST_INSTRUMENT_ID, timeframe="1d", adj="none",
+        include_realtime=True,
+    )
+
+    assert not realtime_called["called"]
+    assert not result.is_partial
+
+
+# ============================================================
+# 交易时段 15m 拉 1m 聚合为 partial bar
+# ============================================================
+
+
+async def test_intraday_15m_aggregates_live_partial_bar(monkeypatch: pytest.MonkeyPatch) -> None:
+    """交易时段请求 15m，服务从 1m 聚合出当前 partial bar。"""
+    service = mdas.MarketDataAggregationService()
+    # DB 已有一个历史 15m bar（09:30）
+    db_15m = pd.DataFrame({
+        "open": [10.0],
+        "high": [10.1],
+        "low": [9.9],
+        "close": [10.05],
+        "volume": [10000.0],
+        "amount": [100000.0],
+        "adj_factor": [1.0],
+    }, index=pd.to_datetime(["2026-06-18 09:30:00"]))
+    db_15m.index.name = "trade_time"
+    # 1m 数据覆盖 09:45 新周期（未完成）
+    live_1m = _build_minute_bars("2026-06-18 09:45:00", periods=5)
+
+    monkeypatch.setattr(mdas, "_query_15min_bars", lambda *a, **kw: _async_return(db_15m.copy()))
+    monkeypatch.setattr(mdas, "_is_trading_hours", lambda now: True)
+    monkeypatch.setattr(
+        mdas, "fetch_minute_bars",
+        lambda *a, **kw: _async_return(live_1m.copy()),
+    )
+
+    result = await service.get_bars(
+        _mock_session(), TEST_INSTRUMENT_ID, timeframe="15m", adj="none",
+        include_realtime=True,
+    )
+
+    assert result.data_source == "hybrid"
+    assert result.is_partial is True
+    assert result.last_live_bar_time is not None
+    assert pd.Timestamp("2026-06-18 09:45:00") in result.bars.index
+
+
+# ============================================================
+# Redis 缓存命中
+# ============================================================
+
+
+async def test_cache_hit_returns_cached_result_without_db_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redis 缓存命中时直接返回，不查 DB。"""
+    service = mdas.MarketDataAggregationService()
+    db_df = _build_daily_bars(["2026-06-16", "2026-06-17", "2026-06-18"])
+    cached = mdas.BarAggregationResult(
+        bars=db_df.copy(),
+        data_source="db",
+        as_of=datetime.now(ZoneInfo("Asia/Shanghai")),
+        is_partial=False,
+        last_persisted_bar_time=pd.Timestamp("2026-06-18"),
+        last_live_bar_time=None,
+        freshness_seconds=2.0,
+        degraded=False,
+        degraded_reason=None,
+    )
+
+    db_called = {"called": False}
+    monkeypatch.setattr(
+        mdas, "_query_daily_bars",
+        lambda *a, **kw: _async_return(db_called.update(called=True) or db_df.copy()),
+    )
+    monkeypatch.setattr(
+        mdas, "_cache_get", lambda *a, **kw: cached,
+    )
+
+    result = await service.get_bars(
+        _mock_session(), TEST_INSTRUMENT_ID, timeframe="1d", adj="none",
+    )
+
+    assert not db_called["called"], "缓存命中时不应查询 DB"
+    assert result.data_source == "db"
+    assert result.last_persisted_bar_time == pd.Timestamp("2026-06-18")
+
+
+# ============================================================
+# 诊断字段完整性
+# ============================================================
+
+
+async def test_diagnostic_fields_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BarAggregationResult 包含 spec 要求的所有诊断字段。"""
+    service = mdas.MarketDataAggregationService()
+    db_df = _build_daily_bars(["2026-06-18"])
+
+    monkeypatch.setattr(
+        mdas, "_query_daily_bars",
+        lambda *a, **kw: _async_return(db_df.copy()),
+    )
+    monkeypatch.setattr(
+        mdas, "_expected_last_completed_daily_bar",
+        lambda session, now: date(2026, 6, 18),
+    )
+    monkeypatch.setattr(mdas, "_is_trading_hours", lambda now: False)
+
+    result = await service.get_bars(
+        _mock_session(), TEST_INSTRUMENT_ID, timeframe="1d", adj="none",
+    )
+
+    assert hasattr(result, "data_source")
+    assert hasattr(result, "as_of")
+    assert hasattr(result, "is_partial")
+    assert hasattr(result, "last_persisted_bar_time")
+    assert hasattr(result, "last_live_bar_time")
+    assert hasattr(result, "freshness_seconds")
+    assert hasattr(result, "degraded")
+    assert hasattr(result, "degraded_reason")
+    assert isinstance(result.freshness_seconds, (int, float))
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -4,7 +4,7 @@
 1. compute_all_indicators 在不同 timeframe 下使用对应周期 bars 计算 MACD
 2. 响应包含 source_bar_times 和 source_bar_hash（SubTask 1.4）
 3. 策略返回 time 时不被覆盖（SubTask 1.3）
-4. 日线行情来自 load_chart_bars（不再通过 Exchange.klines）
+4. 日线行情来自 MarketDataAggregationService（不再通过 Exchange.klines）
 
 用法：
     APP_ENV=test TEST_DATABASE_URL=postgresql://... pytest tests/test_indicator_service.py -v
@@ -26,7 +26,7 @@ TEST_INSTRUMENT_ID = uuid.UUID("12345678-1234-1234-1234-123456789012")
 def _build_bars(frequency: str, length: int = 60) -> pd.DataFrame:
     """构造指定周期的 mock bars（含 OHLCV + adj_factor，naive DatetimeIndex）。
 
-    naive DatetimeIndex 与 load_chart_bars 和 DB 查询的实际返回一致。
+    naive DatetimeIndex 与 MarketDataAggregationService 和 DB 查询的实际返回一致。
     """
     if frequency == "1d":
         dates = pd.date_range("2026-03-01", periods=length, freq="B")
@@ -51,7 +51,7 @@ def _build_bars(frequency: str, length: int = 60) -> pd.DataFrame:
         "amount": [1000000 + i * 10 for i in range(length)],
         "adj_factor": [1.0] * length,
     }, index=dates)
-    # 不再 tz_localize：load_chart_bars 和 DB 查询返回 naive DatetimeIndex
+    # 不再 tz_localize：MarketDataAggregationService 和 DB 查询返回 naive DatetimeIndex
     return df
 
 
@@ -67,13 +67,31 @@ def mock_session() -> AsyncMock:
 
 @pytest.fixture
 def mock_bars(monkeypatch: pytest.MonkeyPatch) -> None:
-    """[图表行情契约] - mock load_chart_bars + DB 查询函数，替代原 mock_exchange。
+    """[图表行情契约] - mock MarketDataAggregationService + DB 查询函数。
 
-    所有 mock 数据使用 naive DatetimeIndex（与 load_chart_bars 和 DB 查询的实际行为一致）。
-    替代原 Exchange.klines 优先链路（SubTask 1.3）。
+    日线通过 MarketDataAggregationService（行情聚合 SSOT）获取；
+    日内/周线/月线通过 DB 查询函数获取（与 indicator_service.py 当前实现一致）。
+    所有 mock 数据使用 naive DatetimeIndex（与 DB 查询的实际行为一致）。
     """
-    async def mock_load_chart_bars(session, instrument_id, timeframe="1d", count=250, adj="qfq"):
-        return _build_bars("1d")
+    from datetime import datetime
+
+    from app.services.market_data_aggregation_service import BarAggregationResult
+
+    class _MockAggService:
+        async def get_bars(self, session, instrument_id, timeframe="1d", adj="qfq", **kwargs):
+            return BarAggregationResult(
+                bars=_build_bars("1d"),
+                data_source="db",
+                as_of=datetime.now(),
+                is_partial=False,
+                last_persisted_bar_time=None,
+                last_live_bar_time=None,
+                freshness_seconds=0.0,
+                degraded=False,
+                degraded_reason=None,
+            )
+
+    monkeypatch.setattr(indicator_service, "MarketDataAggregationService", _MockAggService)
 
     async def mock_query_15min(session, instrument_id, start, end):
         return _build_bars("15m")
@@ -91,7 +109,6 @@ def mock_bars(monkeypatch: pytest.MonkeyPatch) -> None:
     async def mock_fetch_monthly(session, instrument_id, start, end):
         return _build_bars("1mo")
 
-    monkeypatch.setattr(indicator_service, "load_chart_bars", mock_load_chart_bars)
     monkeypatch.setattr(indicator_service, "_query_15min_bars", mock_query_15min)
     monkeypatch.setattr(indicator_service, "_query_minute_bars", mock_query_minute)
     monkeypatch.setattr(indicator_service, "_query_60min_bars", mock_query_60min)
@@ -152,7 +169,7 @@ async def test_macd_time_values_are_iso_strings(
         assert pd.Timestamp(t) is not None
 
 
-# ===== SubTask 1.3: 日线行情来自 load_chart_bars（不再通过 Exchange） =====
+# ===== SubTask 1.3: 日线行情来自 MarketDataAggregationService（不再通过 Exchange） =====
 
 
 async def test_daily_bars_from_load_chart_bars_not_exchange(
@@ -160,13 +177,30 @@ async def test_daily_bars_from_load_chart_bars_not_exchange(
     empty_registry: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """日线行情来自 load_chart_bars，不再调用 get_exchange/Exchange.klines。"""
-    load_chart_bars_called = False
+    """日线行情来自 MarketDataAggregationService，不再调用 get_exchange/Exchange.klines。"""
+    from datetime import datetime
 
-    async def mock_load(session, instrument_id, timeframe="1d", count=250, adj="qfq"):
-        nonlocal load_chart_bars_called
-        load_chart_bars_called = True
-        return _build_bars("1d")
+    from app.services.market_data_aggregation_service import BarAggregationResult
+
+    get_bars_called = False
+
+    class _MockService:
+        async def get_bars(self, session, instrument_id, timeframe="1d", adj="qfq", **kwargs):
+            nonlocal get_bars_called
+            get_bars_called = True
+            return BarAggregationResult(
+                bars=_build_bars("1d"),
+                data_source="db",
+                as_of=datetime.now(),
+                is_partial=False,
+                last_persisted_bar_time=None,
+                last_live_bar_time=None,
+                freshness_seconds=0.0,
+                degraded=False,
+                degraded_reason=None,
+            )
+
+    monkeypatch.setattr(indicator_service, "MarketDataAggregationService", _MockService)
 
     # mock DB 查询（避免连真实 DB）
     async def mock_query_15min(session, instrument_id, start, end):
@@ -175,7 +209,6 @@ async def test_daily_bars_from_load_chart_bars_not_exchange(
     async def mock_query_minute(session, instrument_id, start, end):
         return _build_bars("15m", length=2)
 
-    monkeypatch.setattr(indicator_service, "load_chart_bars", mock_load)
     monkeypatch.setattr(indicator_service, "_query_15min_bars", mock_query_15min)
     monkeypatch.setattr(indicator_service, "_query_minute_bars", mock_query_minute)
 
@@ -195,7 +228,7 @@ async def test_daily_bars_from_load_chart_bars_not_exchange(
         mock_session, TEST_INSTRUMENT_ID, "1d", "none", bars=250,
     )
 
-    assert load_chart_bars_called, "应调用 load_chart_bars 获取日线行情"
+    assert get_bars_called, "应调用 MarketDataAggregationService.get_bars 获取日线行情"
     # 双重验证：模块层面不应再依赖 get_exchange
     assert not hasattr(indicator_service, "get_exchange"), \
         "indicator_service 不应再 import get_exchange"

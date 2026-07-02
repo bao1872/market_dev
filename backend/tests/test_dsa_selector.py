@@ -344,14 +344,18 @@ class TestBudgetGuard:
 
     @pytest.mark.asyncio
     async def test_dsa_selector_budget_exceeded(self) -> None:
-        """测试 DSASelector 资源预算超时。
+        """测试 DSASelector 资源预算参数不再触发单股超时。
 
-        设置极短的超时时间（1ms），确保 DSA 计算超时。
-        验证抛出 BudgetExceededError，由 batch 层记录到 run_items。
+        [Phase 5] - DSASelector 已移除单股 BudgetGuard，超时控制上移到
+        strategy_batch_service 的 run 级总超时 + 可取消机制。即使
+        target_ms_per_instrument=1，execute 也不再抛出 BudgetExceededError，
+        而是正常返回 StrategyResult，避免高历史数据股票被误杀。
+
+        保留本测试以验证：单股预算参数不再阻断 DSA 计算。
         """
         selector = DSASelector()
         version = _make_mock_version()
-        # 设置极短超时
+        # 设置极短超时（已不再生效，仅验证不抛异常）
         version.manifest["resource_budget"] = {"target_ms_per_instrument": 1}
         await selector.initialize(version)
 
@@ -361,9 +365,10 @@ class TestBudgetGuard:
             bars_daily=_generate_bullish_bars(400),
             trade_date=date(2026, 6, 18),
         )
-        with pytest.raises(BudgetExceededError) as exc_info:
-            await selector.execute(context)
-        assert exc_info.value.timeout_ms == 1
+        # [Phase 5] - 超时控制已上移到 strategy_batch_service，单股不再抛 BudgetExceededError
+        result = await selector.execute(context)
+        assert isinstance(result, StrategyResult)
+        assert result.matched is True
 
 
 class TestStrategyLoader:

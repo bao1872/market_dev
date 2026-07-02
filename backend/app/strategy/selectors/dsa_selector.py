@@ -28,7 +28,8 @@ SSOT：
       compute_indicators() 取 factor_per_bar / visual_segments / factor_time，
       两者共享同一份计算结果。
 
-资源预算：DSA 默认 100ms/股（通过 BudgetGuard 控制）
+超时控制：已取消单股 100ms 硬超时，改为 strategy_batch_service 的
+run 级总超时 + 可取消机制，避免高历史数据股票被误杀。
 """
 
 from __future__ import annotations
@@ -52,7 +53,6 @@ from app.strategy._plotly_mock import ensure_plotly_mock  # noqa: E402
 ensure_plotly_mock()
 from app.constants.indicator_contract import DSA_LOOKBACK  # noqa: E402
 from app.models.strategy import StrategyVersion  # noqa: E402
-from app.strategy.budget import BudgetExceededError, BudgetGuard  # noqa: E402
 from app.strategy.runtime import MarketDataContext, StrategyResult, StrategyRuntime  # noqa: E402
 from app.strategy_assets.algorithms.features.atr_rope_event_factor_lab_v4 import (  # noqa: E402
     ATRRopeConfig,
@@ -65,7 +65,6 @@ from app.strategy_assets.algorithms.features.dynamic_swing_anchored_vwap import 
 
 # 策略常量
 MIN_DIR_BARS = 50  # dir=1 持续超过 50 bars 才视为多头趋势
-DSA_BUDGET_MS = 100  # DSA 默认预算 100ms/股
 
 
 def _remove_dsa_lookahead(
@@ -689,7 +688,8 @@ class DSASelector(StrategyRuntime):
     MIN_DIR_BARS=50 是 regime 命中阈值（代码常量），不是算法计算参数，
     不从 manifest 读取，所有股票输出真实 dsa_dir_bars 供用户筛选。
 
-    资源预算：100ms/股（通过 BudgetGuard 控制）
+    注意：已取消单股 100ms 硬超时。run 级总超时与可取消机制由
+    strategy_batch_service 统一控制，避免高历史数据股票被误杀。
     """
 
     kind = "selector"
@@ -698,7 +698,6 @@ class DSASelector(StrategyRuntime):
         self._version: StrategyVersion | None = None
         self._lookback: int = DSA_LOOKBACK
         self._min_dir_bars: int = MIN_DIR_BARS
-        self._budget_guard: BudgetGuard = BudgetGuard(timeout_ms=DSA_BUDGET_MS)
         # DSAConfig 和 ATRRopeConfig（initialize() 中从 manifest 读取）
         self._dsa_config: DSAConfig = DSAConfig()
         self._rope_config: ATRRopeConfig = ATRRopeConfig(regime_lookback=55)
@@ -748,19 +747,13 @@ class DSASelector(StrategyRuntime):
             regime_threshold=float(params.get("atr_rope.regime_threshold", 0.55)),
         )
 
-        # 从 manifest.resource_budget 提取超时预算
-        budget = manifest.get("resource_budget", {})
-        target_ms = int(budget.get("target_ms_per_instrument", DSA_BUDGET_MS))
-        self._budget_guard = BudgetGuard(timeout_ms=target_ms)
-
         # 保存 effective_config 快照
         self._effective_config = params
 
         logger.info(
             "DSASelector 初始化: lookback=%d, min_dir_bars=%d(常量), "
             "dsa_config(prd=%d, baseAPT=%.1f, useAdapt=%s, volBias=%.1f, atrLen=%d), "
-            "rope_config(length=%d, multi=%.1f, regime_lookback=%d, regime_threshold=%.2f), "
-            "budget_ms=%d",
+            "rope_config(length=%d, multi=%.1f, regime_lookback=%d, regime_threshold=%.2f)",
             self._lookback,
             self._min_dir_bars,
             self._dsa_config.prd,
@@ -772,7 +765,6 @@ class DSASelector(StrategyRuntime):
             self._rope_config.multi,
             self._rope_config.regime_lookback,
             self._rope_config.regime_threshold,
-            target_ms,
         )
 
     def _build_history_config(self) -> dict[str, Any]:
@@ -788,10 +780,12 @@ class DSASelector(StrategyRuntime):
         """执行 DSA 选股计算。
 
         流程：
-        1. 通过 BudgetGuard 在预算内执行同步计算
-        2. 通过 compute_dsa_bundle 统一入口计算（内部调用 compute_dsa_history）
-        3. 取 last_row_metrics 作为当前交易日结果
-        4. 返回标准 StrategyResult
+        1. 通过 compute_dsa_bundle 统一入口计算（内部调用 compute_dsa_history）
+        2. 取 last_row_metrics 作为当前交易日结果
+        3. 返回标准 StrategyResult
+
+        注意：已取消单股 100ms 硬超时。超时控制上移到 strategy_batch_service
+        的 run 级总超时 + 可取消机制，避免高历史数据股票被误杀。
 
         Args:
             context: 市场数据上下文（含日线行情）
@@ -802,18 +796,7 @@ class DSASelector(StrategyRuntime):
         if self._version is None:
             raise RuntimeError("DSASelector 未初始化，请先调用 initialize()")
 
-        # 通过 BudgetGuard 在预算内执行同步计算
-        try:
-            metrics = await self._budget_guard.run_with_budget(self._compute_metrics_sync, context)
-        except BudgetExceededError:
-            logger.warning(
-                "DSA 计算超时 instrument_id=%s symbol=%s",
-                context.instrument_id,
-                context.symbol,
-            )
-            # [DSA Selector] - 预算超限时抛出异常，由 batch 层记录到 run_items，
-            # 不再返回 matched=False 带 error 字段的伪结果。
-            raise
+        metrics = await asyncio.to_thread(self._compute_metrics_sync, context)
 
         matched = True
         return StrategyResult(
@@ -900,7 +883,8 @@ class DSASelector(StrategyRuntime):
     def _compute_metrics_sync(self, context: MarketDataContext) -> dict[str, Any]:
         """同步计算 DSA 指标（在线程池中执行）。
 
-        此方法由 BudgetGuard.run_with_budget 通过 asyncio.to_thread 调用。
+        此方法由 execute() 通过 asyncio.to_thread 调用。已取消单股 100ms 硬超时，
+        超时控制上移到 strategy_batch_service 的 run 级总超时。
         通过 compute_dsa_bundle 统一入口获取 last_row_metrics（与 compute_indicators
         共享同一份计算结果，消除双路径不一致）。
 

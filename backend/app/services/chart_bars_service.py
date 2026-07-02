@@ -12,8 +12,7 @@
     bar_hash = compute_source_bar_hash(df)
 
 事实源:
-- bar_repository.fetch_daily_bars（DB 优先 + Pytdx 兜底，SSOT）
-- bar_repository._get_adj_factor_df / apply_adj_factor_to_bars（前复权，SSOT）
+- app.services.market_data_aggregation_service.MarketDataAggregationService（行情聚合唯一事实源）
 - indicator_contract.INDICATOR_BARS["1d"]=250（图表场景日线根数）
 
 约束:
@@ -26,30 +25,20 @@ from __future__ import annotations
 import hashlib
 import logging
 import uuid
-from datetime import date, datetime, timedelta
-from datetime import time as dt_time
+from datetime import date, datetime, time as dt_time
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.indicator_contract import CHART_BARS_COUNT
-from app.core.time import SHANGHAI_TZ
-from app.repositories.bar_repository import (
-    _get_adj_factor_df,
-    apply_adj_factor_to_bars,
-    fetch_daily_bars,
-)
 
 logger = logging.getLogger("services.chart_bars_service")
 
 # [chart_bars] - 描述: 图表场景日线默认根数，引用 indicator_contract.CHART_BARS_COUNT 唯一真源
 _DEFAULT_CHART_DAILY_COUNT = CHART_BARS_COUNT
 
-# 日线查询回看天数（与 bars.py / indicator_service.py 一致，覆盖约 13 年）
-_DEFAULT_DAILY_LOOKBACK_DAYS = 5000
-
-# A 股收盘时间 15:00 Asia/Shanghai
+# A 股收盘时间 15:00 Asia/Shanghai（_filter_unfinished_daily_bars 保留兼容）
 _DAILY_CLOSE_TIME = dt_time(15, 0)
 
 
@@ -63,14 +52,8 @@ async def load_chart_bars(
     """统一图表行情输入服务。
 
     /bars API 与 indicator_service 共用此服务获取日线行情，确保数据源一致。
-
-    统一规则:
-        - 数据源: DB 优先 + Pytdx 兜底（复用 bar_repository.fetch_daily_bars）
-        - 复权: adj="qfq" 时应用前复权（adj_factor）；adj="none" 时跳过
-        - 排序: DatetimeIndex 升序
-        - 去重: index.duplicated(keep="last")
-        - 未完成 Bar 过滤: 日线过滤当日未完成 Bar（最新 Bar 为今日且未到 15:00 收盘）
-        - count 截取: 取最近 count 根
+    内部委托 MarketDataAggregationService（行情聚合唯一事实源）处理数据获取、
+    Pytdx 兜底、复权、排序、去重、未完成 Bar 过滤；本函数仅做最后的 count 截取。
 
     Args:
         session: 异步 DB 会话
@@ -93,32 +76,20 @@ async def load_chart_bars(
     if adj not in ("qfq", "none"):
         raise ValueError(f"load_chart_bars adj 只支持 qfq/none, got {adj!r}")
 
-    # 1. 数据获取: DB 优先 + Pytdx 兜底（复用 bar_repository 现有逻辑，SSOT）
-    today = date.today()
-    start_date = today - timedelta(days=_DEFAULT_DAILY_LOOKBACK_DAYS)
-    df = await fetch_daily_bars(session, instrument_id, start_date, today)
+    from app.services.market_data_aggregation_service import (
+        MarketDataAggregationService,
+    )
+
+    service = MarketDataAggregationService()
+    result = await service.get_bars(
+        session, instrument_id, timeframe="1d", adj=adj,
+    )
+    df = result.bars
     if df.empty:
         return df
 
-    # 2. 前复权（复用 bar_repository 的 SSOT 实现；adj="none" 时跳过）
-    if adj == "qfq":
-        adj_factor_df = await _get_adj_factor_df(session, instrument_id)
-        if not adj_factor_df.empty:
-            df = apply_adj_factor_to_bars(df, adj_factor_df, intraday=False)
-
-    # 3. 排序: DatetimeIndex 升序
-    df = df.sort_index()
-
-    # 4. 去重: index.duplicated(keep="last")
-    df = df[~df.index.duplicated(keep="last")]
-
-    # 5. 未完成 Bar 过滤: 日线过滤当日未完成 Bar
-    df = _filter_unfinished_daily_bars(df)
-
-    # 6. count 截取: 取最近 count 根
-    df = df.tail(count)
-
-    return df
+    # count 截取: 取最近 count 根
+    return df.tail(count)
 
 
 def _filter_unfinished_daily_bars(

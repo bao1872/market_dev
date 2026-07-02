@@ -43,6 +43,7 @@ from app.models.strategy_run import StrategyRun
 from app.services.bars_scheduler_service import BarsSchedulerService
 from app.services.idempotency_service import acquire_job_run_lock
 from app.services.job_run_event_service import append_event, list_events
+from app.repositories import strategy_result_repository
 from app.services.strategy_batch_service import StrategyBatchService
 
 logger = logging.getLogger("after_close_orchestrator")
@@ -654,7 +655,12 @@ async def execute_after_close_run(
                 if dsa_run is None:
                     raise ValueError(f"DSA 运行记录不存在: dsa_run_id={dsa_run_id}")
 
-                quality_passed = await batch_service._check_quality_gates(dsa_run)
+                result_count = await strategy_result_repository.count_by_run(
+                    db, dsa_run_id
+                )
+                quality_passed = await batch_service._check_quality_gates(
+                    dsa_run, result_count=result_count, db=db
+                )
                 await _update_orchestrator_status(
                     db=db,
                     job_run=job_run,
