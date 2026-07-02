@@ -1,16 +1,14 @@
-"""趋势选股 API 权限测试（Phase 4 Task 4.1）。
+"""趋势选股 API 权限测试（Phase 2 Task 2.6 / 2.7）。
 
-验证权限矩阵：
-- GET /strategies/{key}/published-runs: require_authenticated + require_feature("trend_selection")
-- GET /strategies/{key}/results: require_authenticated + require_feature("trend_selection")
+验证权限矩阵（advice.md Phase 2）：
+- GET /strategies/{key}/published-runs: require_active_subscription + require_feature("trend_selection")
+- GET /strategies/{key}/results: require_active_subscription + require_feature("trend_selection")
 - GET /strategy-runs/{run_id}/results: require_active_subscription + require_feature("trend_selection")
 - GET /strategy-runs/{run_id}/results/{result_id}: require_active_subscription + require_feature("trend_selection")
 
 权限分层设计：
-- published-runs / results（视图端点）：登录 + trend_selection feature 即可访问
-  - 过期订阅 member 仍可访问（features 保留 trend_selection 用于降级提示）
-- strategy-runs/{run_id}/results（详情端点）：需要有效订阅 + trend_selection feature
-  - 过期订阅 member 不可访问（require_active_subscription 拒绝）
+- 所有 4 个趋势选股端点均需有效订阅 + trend_selection feature
+- 过期/无订阅 member 返回 403；admin 豁免
 
 测试策略：
 - 使用 conftest 的 db_session fixture（PostgreSQL 测试库 bz_stock_test）
@@ -250,7 +248,7 @@ def _auth_headers(user_id: uuid.UUID) -> dict[str, str]:
 
 # ============================================================
 # GET /strategies/{key}/published-runs 权限测试
-# require_authenticated + require_feature("trend_selection")
+# require_active_subscription + require_feature("trend_selection")
 # ============================================================
 
 
@@ -312,9 +310,26 @@ async def test_published_runs_active_member_allowed(
     assert resp.status_code == 200, resp.text
 
 
+@pytest.mark.asyncio
+async def test_published_runs_rejects_expired_member(
+    perm_client: tuple[AsyncClient, AsyncSession],
+) -> None:
+    """过期订阅 member → 403（require_active_subscription 拒绝）。"""
+    client, db = perm_client
+    user = await _create_expired_member(db)
+    data = await _create_trend_selection_data(db)
+    await db.flush()
+
+    resp = await client.get(
+        f"/strategies/{data['strategy_key']}/published-runs",
+        headers=_auth_headers(user.id),
+    )
+    assert resp.status_code == 403, resp.text
+
+
 # ============================================================
 # GET /strategies/{key}/results 权限测试
-# require_authenticated + require_feature("trend_selection")
+# require_active_subscription + require_feature("trend_selection")
 # ============================================================
 
 
@@ -382,6 +397,24 @@ async def test_strategy_results_active_member_allowed(
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.asyncio
+async def test_strategy_results_rejects_expired_member(
+    perm_client: tuple[AsyncClient, AsyncSession],
+) -> None:
+    """过期订阅 member → 403（require_active_subscription 拒绝）。"""
+    client, db = perm_client
+    user = await _create_expired_member(db)
+    data = await _create_trend_selection_data(db)
+    await db.flush()
+
+    resp = await client.get(
+        f"/strategies/{data['strategy_key']}/results",
+        params={"trade_date": data["trade_date"]},
+        headers=_auth_headers(user.id),
+    )
+    assert resp.status_code == 403, resp.text
 
 
 # ============================================================

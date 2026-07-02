@@ -430,15 +430,15 @@ async def list_published_runs(
     limit: int = Query(30, ge=1, le=100, description="返回上限"),
     offset: int = Query(0, ge=0, description="偏移量"),
     db: AsyncSession = Depends(get_db),
-    _ctx: AccessContext = Depends(require_authenticated),
+    _ctx: AccessContext = Depends(require_active_subscription),
     _feat: AccessContext = Depends(require_feature("trend_selection")),
 ) -> StrategyRunListResponse:
-    """查询已发布的运行批次（需登录 + trend_selection feature）。
+    """查询已发布的运行批次（需有效订阅 + trend_selection feature）。
 
     只返回 status='published' 的 run，按 trade_date 降序。
 
     权限：
-    - require_authenticated: 必须登录
+    - require_active_subscription: 需有效订阅（admin 豁免）
     - require_feature("trend_selection"): 需具备趋势选股功能（admin 豁免）
 
     Args:
@@ -510,13 +510,13 @@ async def query_strategy_results(
     limit: int = Query(100, ge=1, le=500, description="返回上限"),
     offset: int = Query(0, ge=0, description="偏移量"),
     db: AsyncSession = Depends(get_db),
-    _ctx: AccessContext = Depends(require_authenticated),
+    _ctx: AccessContext = Depends(require_active_subscription),
     _feat: AccessContext = Depends(require_feature("trend_selection")),
 ) -> StrategyResultListResponse:
     """查询策略结果（用户端，绑定 published run）。
 
     权限：
-    - require_authenticated: 必须登录
+    - require_active_subscription: 需有效订阅（admin 豁免）
     - require_feature("trend_selection"): 需具备趋势选股功能（admin 豁免）
 
     流程：

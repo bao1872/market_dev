@@ -1,17 +1,21 @@
-"""watchlist 权限统一测试（Phase 4 Task 4.2）。
+"""watchlist 权限统一测试（Phase 2 Task 2.6 / 2.7）。
 
-验证 POST /watchlist 使用 AccessContext 统一权限模型，而非自行查询 Subscription。
+验证 watchlist 4 个端点均使用 AccessContext 统一权限模型，而非自行查询 Subscription：
+- GET /watchlist
+- POST /watchlist
+- DELETE /watchlist/{instrument_id}
+- GET /watchlist/monitor-status
 
-权限矩阵（新行为）：
-- admin → 201（require_active_subscription 豁免，require_quota 返回 None 跳过额度检查）
-- active member + 未达 limit → 201
-- active member + 达到 monitor_limit → 409
+权限矩阵（advice.md Phase 2）：
+- admin → 200/201/204（require_active_subscription 豁免，POST 时 require_quota 返回 None 跳过额度检查）
+- active member + 未达 limit → 200/201/204
+- active member + 达到 monitor_limit → POST 409，其他端点 200/204
 - expired member → 403（require_active_subscription 拒绝，subscription_active=False）
 - 无 subscription member → 403（require_active_subscription 拒绝）
 
 关键行为变化（与旧 _check_watchlist_limit 对比）：
-- 旧代码：过期订阅 member 仍可添加自选股（仅检查 subscription 记录是否存在，不检查过期）
-- 新代码：过期订阅 member 被拒绝（require_active_subscription 检查 subscription_active）
+- 旧代码：过期订阅 member 仍可访问自选股（GET/DELETE/monitor-status 仅检查登录）
+- 新代码：过期订阅 member 访问全部 4 个端点均被拒绝（require_active_subscription 检查 subscription_active）
 
 测试策略：
 - 使用 conftest 的 db_session fixture（PostgreSQL 测试库 bz_stock_test）
@@ -319,6 +323,155 @@ async def test_active_member_under_limit_allowed(
     )
 
     assert resp.status_code == 201, resp.text
+
+
+# ============================================================
+# GET /watchlist 权限测试
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_get_watchlist_expired_member_blocked(
+    watchlist_perm_client: tuple[AsyncClient, AsyncSession],
+) -> None:
+    """过期订阅 member 调 GET /watchlist → 403。"""
+    client, db = watchlist_perm_client
+    user, subscription = await _create_member_with_plan(db, "observe_20")
+    subscription.expires_at = datetime.now(UTC) - timedelta(days=1)
+    await db.flush()
+
+    resp = await client.get("/watchlist", headers=_auth_headers(user.id))
+    assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.asyncio
+async def test_get_watchlist_no_subscription_member_blocked(
+    watchlist_perm_client: tuple[AsyncClient, AsyncSession],
+) -> None:
+    """无 subscription member 调 GET /watchlist → 403。"""
+    client, db = watchlist_perm_client
+    user = await _create_member_without_subscription(db)
+    await db.flush()
+
+    resp = await client.get("/watchlist", headers=_auth_headers(user.id))
+    assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.asyncio
+async def test_get_watchlist_active_member_allowed(
+    watchlist_perm_client: tuple[AsyncClient, AsyncSession],
+) -> None:
+    """active member 调 GET /watchlist → 200。"""
+    client, db = watchlist_perm_client
+    user, _ = await _create_member_with_plan(db, "observe_20")
+    await db.flush()
+
+    resp = await client.get("/watchlist", headers=_auth_headers(user.id))
+    assert resp.status_code == 200, resp.text
+
+
+# ============================================================
+# DELETE /watchlist/{instrument_id} 权限测试
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_delete_watchlist_expired_member_blocked(
+    watchlist_perm_client: tuple[AsyncClient, AsyncSession],
+) -> None:
+    """过期订阅 member 调 DELETE /watchlist/{id} → 403。"""
+    client, db = watchlist_perm_client
+    user, subscription = await _create_member_with_plan(db, "observe_20")
+    instruments = await _create_instruments(db, 1)
+    await _add_active_watchlist(db, user, instruments, count=1)
+    subscription.expires_at = datetime.now(UTC) - timedelta(days=1)
+    await db.flush()
+
+    resp = await client.delete(
+        f"/watchlist/{instruments[0].id}",
+        headers=_auth_headers(user.id),
+    )
+    assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.asyncio
+async def test_delete_watchlist_no_subscription_member_blocked(
+    watchlist_perm_client: tuple[AsyncClient, AsyncSession],
+) -> None:
+    """无 subscription member 调 DELETE /watchlist/{id} → 403。"""
+    client, db = watchlist_perm_client
+    user = await _create_member_without_subscription(db)
+    instruments = await _create_instruments(db, 1)
+    await db.flush()
+
+    resp = await client.delete(
+        f"/watchlist/{instruments[0].id}",
+        headers=_auth_headers(user.id),
+    )
+    assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.asyncio
+async def test_delete_watchlist_active_member_allowed(
+    watchlist_perm_client: tuple[AsyncClient, AsyncSession],
+) -> None:
+    """active member 调 DELETE /watchlist/{id} → 204。"""
+    client, db = watchlist_perm_client
+    user, _ = await _create_member_with_plan(db, "observe_20")
+    instruments = await _create_instruments(db, 1)
+    await _add_active_watchlist(db, user, instruments, count=1)
+    await db.flush()
+
+    resp = await client.delete(
+        f"/watchlist/{instruments[0].id}",
+        headers=_auth_headers(user.id),
+    )
+    assert resp.status_code == 204, resp.text
+
+
+# ============================================================
+# GET /watchlist/monitor-status 权限测试
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_monitor_status_expired_member_blocked(
+    watchlist_perm_client: tuple[AsyncClient, AsyncSession],
+) -> None:
+    """过期订阅 member 调 GET /watchlist/monitor-status → 403。"""
+    client, db = watchlist_perm_client
+    user, subscription = await _create_member_with_plan(db, "observe_20")
+    subscription.expires_at = datetime.now(UTC) - timedelta(days=1)
+    await db.flush()
+
+    resp = await client.get("/watchlist/monitor-status", headers=_auth_headers(user.id))
+    assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.asyncio
+async def test_monitor_status_no_subscription_member_blocked(
+    watchlist_perm_client: tuple[AsyncClient, AsyncSession],
+) -> None:
+    """无 subscription member 调 GET /watchlist/monitor-status → 403。"""
+    client, db = watchlist_perm_client
+    user = await _create_member_without_subscription(db)
+    await db.flush()
+
+    resp = await client.get("/watchlist/monitor-status", headers=_auth_headers(user.id))
+    assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.asyncio
+async def test_monitor_status_active_member_allowed(
+    watchlist_perm_client: tuple[AsyncClient, AsyncSession],
+) -> None:
+    """active member 调 GET /watchlist/monitor-status → 200。"""
+    client, db = watchlist_perm_client
+    user, _ = await _create_member_with_plan(db, "observe_20")
+    await db.flush()
+
+    resp = await client.get("/watchlist/monitor-status", headers=_auth_headers(user.id))
+    assert resp.status_code == 200, resp.text
 
 
 if __name__ == "__main__":

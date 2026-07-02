@@ -338,6 +338,7 @@ async def renew_with_invite_code(
     业务规则：
     - 未到期续期：从当前到期日顺延 grant_months 个自然月
     - 已到期续期：从兑换当天计算 grant_months 个自然月
+    - 无 subscription 用户：视为首次开通，从当天计算到期日并新建 subscription
     - 续期时更新 subscription.plan_code/entitlement_snapshot 为邀请码的套餐快照
     - 兼容旧邀请码（grant_months 为 NULL 时回退 grant_days 天数计算）
 
@@ -353,7 +354,7 @@ async def renew_with_invite_code(
         (Subscription, old_expires_at, new_expires_at) 元组
 
     Raises:
-        ValueError: 邀请码无效/已使用/已作废，或用户不存在，或订阅记录不存在
+        ValueError: 邀请码无效/已使用/已作废，或用户不存在
     """
     # 1. 哈希邀请码并查找（FOR UPDATE 行锁防止并发续期同一邀请码）
     code_hash = hash_invite_code(raw_invite_code)
@@ -373,37 +374,52 @@ async def renew_with_invite_code(
     if invite.status == "revoked":
         raise ValueError("邀请码已被作废")
 
-    # 2. 查找用户订阅记录
+    # 2. 查找用户订阅记录；无记录时本次邀请码兑换视为首次开通（兼容 no-subscription member 续期）
     subscription_stmt = select(Subscription).where(Subscription.user_id == user_id)
     subscription_result = await db.execute(subscription_stmt)
     subscription = subscription_result.scalar_one_or_none()
-
-    if subscription is None:
-        raise ValueError(f"用户订阅记录不存在: {user_id}")
+    is_new_subscription = subscription is None
 
     # 3. 计算新的到期时间（按 grant_months 自然月，兼容旧 grant_days）
     # old_expires_at 归一化为时区感知，确保与 new_expires_at（基于 now=UTC）一致，
     # 避免 API 响应中 old/new 一个 naive 一个 aware 导致前端解析失败
     now = datetime.now(UTC)
-    old_expires_at = _ensure_aware(subscription.expires_at)
-
-    if old_expires_at > now:
-        # 未到期：从当前到期日顺延
-        new_expires_at = _compute_expires_at(old_expires_at, invite)
-    else:
-        # 已到期：从兑换当天重新计算
+    if is_new_subscription:
+        old_expires_at = None
         new_expires_at = _compute_expires_at(now, invite)
+    else:
+        old_expires_at = _ensure_aware(subscription.expires_at)
+        if old_expires_at > now:
+            # 未到期：从当前到期日顺延
+            new_expires_at = _compute_expires_at(old_expires_at, invite)
+        else:
+            # 已到期：从兑换当天重新计算
+            new_expires_at = _compute_expires_at(now, invite)
 
-    # 4. 更新订阅记录（同时更新套餐与到期日 + 刷新 entitlement_snapshot）
+    # 4. 更新或新建订阅记录（同时更新套餐与到期日 + 刷新 entitlement_snapshot）
     new_plan_code = invite.plan_code or DEFAULT_PLAN_CODE
     # [PlanService] - 描述: 从 plans 表查询套餐构造 entitlement_snapshot 快照
     plan = await get_plan_async(db, new_plan_code)
     entitlement_snapshot = _build_entitlement_snapshot(plan)
-    subscription.status = "active"
-    subscription.expires_at = new_expires_at
-    subscription.plan_code = new_plan_code
-    subscription.entitlement_snapshot = entitlement_snapshot
-    subscription.updated_at = now
+    if is_new_subscription:
+        subscription = Subscription(
+            user_id=user_id,
+            plan_code=new_plan_code,
+            status="active",
+            starts_at=now,
+            expires_at=new_expires_at,
+            entitlement_snapshot=entitlement_snapshot,
+            source="invite",
+            created_by=None,
+            updated_at=now,
+        )
+        db.add(subscription)
+    else:
+        subscription.status = "active"
+        subscription.expires_at = new_expires_at
+        subscription.plan_code = new_plan_code
+        subscription.entitlement_snapshot = entitlement_snapshot
+        subscription.updated_at = now
 
     # 5. 更新邀请码状态
     invite.status = "used"

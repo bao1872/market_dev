@@ -37,7 +37,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.strategy_keys import WATCHLIST_MONITOR
-from app.core.deps import get_current_active_user
 from app.db import get_db
 from app.services.access_control_service import (
     AccessContext,
@@ -205,16 +204,16 @@ def _flatten_node_metrics(metrics: dict | None) -> dict:
 @router.get("", response_model=WatchlistListResponse)
 async def list_watchlist(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
+    ctx: AccessContext = Depends(require_active_subscription),
 ) -> WatchlistListResponse:
     """查询当前用户的自选列表（仅 active=true）。
 
-    user_id 由认证上下文注入，不接受查询参数传入。
+    user_id 由权限上下文注入，不接受查询参数传入。
     """
     stmt = (
         select(UserWatchlistItem)
         .where(
-            UserWatchlistItem.user_id == current_user.id,
+            UserWatchlistItem.user_id == UUID(ctx.user_id),
             UserWatchlistItem.active.is_(True),
         )
         .order_by(UserWatchlistItem.created_at.desc())
@@ -312,7 +311,7 @@ async def add_to_watchlist(
 @router.get("/monitor-status", response_model=WatchlistMonitorStatusResponse)
 async def get_watchlist_monitor_status(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
+    ctx: AccessContext = Depends(require_active_subscription),
 ) -> WatchlistMonitorStatusResponse:
     """查询当前用户自选股+监控状态聚合数据。
 
@@ -355,7 +354,7 @@ async def get_watchlist_monitor_status(
         select(UserWatchlistItem, Instrument)
         .join(Instrument, UserWatchlistItem.instrument_id == Instrument.id)
         .where(
-            UserWatchlistItem.user_id == current_user.id,
+            UserWatchlistItem.user_id == UUID(ctx.user_id),
             UserWatchlistItem.active.is_(True),
         )
         .order_by(UserWatchlistItem.created_at.desc())
@@ -512,15 +511,15 @@ async def get_watchlist_monitor_status(
 async def remove_from_watchlist(
     instrument_id: UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
+    ctx: AccessContext = Depends(require_active_subscription),
 ) -> None:
     """移除自选（软删除：active=false + removed_at）。
 
-    user_id 由认证上下文注入。
+    user_id 由权限上下文注入。
     不存在或已移除返回 404。
     """
     stmt = select(UserWatchlistItem).where(
-        UserWatchlistItem.user_id == current_user.id,
+        UserWatchlistItem.user_id == UUID(ctx.user_id),
         UserWatchlistItem.instrument_id == instrument_id,
         UserWatchlistItem.active.is_(True),
     )
