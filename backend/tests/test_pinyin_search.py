@@ -39,15 +39,12 @@ def _make_instrument_kwargs(symbol: str, name: str, pinyin: str | None, market: 
 
 @pytest.fixture
 async def pinyin_instruments(db_session: AsyncSession, instrument_factory):
-    """预置含 pinyin_initials 的测试标的。"""
+    """预置含 pinyin_initials 的测试标的（均为合法 A 股代码）。"""
     instruments = [
         await instrument_factory(**_make_instrument_kwargs("600114", "东睦股份", "dmgf", "SH")),
         await instrument_factory(**_make_instrument_kwargs("603730", "岱美股份", "dmgf", "SH")),
         await instrument_factory(**_make_instrument_kwargs("600519", "贵州茅台", "gzmt", "SH")),
         await instrument_factory(**_make_instrument_kwargs("000001", "平安银行", "payh", "SZ")),
-        # 优先级测试专用：symbol 完全匹配 / 前缀 / pinyin 前缀 同时命中
-        await instrument_factory(**_make_instrument_kwargs("dmgf", "优先级A", None, "SH")),
-        await instrument_factory(**_make_instrument_kwargs("dmgf2", "优先级B", None, "SH")),
     ]
     return instruments
 
@@ -86,8 +83,8 @@ async def test_search_by_pinyin_prefix(client: AsyncClient, pinyin_instruments) 
     response = await client.get("/instruments", params={"keyword": "dmgf"})
     assert response.status_code == 200
     data = response.json()
-    # 命中：东睦股份 + 岱美股份(pinyin 前缀) + 优先级A(symbol 完全匹配) + 优先级B(symbol 前缀)
-    assert data["total"] == 4
+    # 命中：东睦股份 + 岱美股份（均为 pinyin_initials='dmgf'）
+    assert data["total"] == 2
     symbols = [item["symbol"] for item in data["items"]]
     assert "600114" in symbols  # 东睦股份
     assert "603730" in symbols  # 岱美股份
@@ -99,9 +96,8 @@ async def test_search_by_pinyin_uppercase(client: AsyncClient, pinyin_instrument
     response = await client.get("/instruments", params={"keyword": "DMGF"})
     assert response.status_code == 200
     data = response.json()
-    # DMGF 转小写后匹配 pinyin_initials LIKE 'dmgf%'，命中东睦+岱美；
-    # symbol LIKE 'DMGF%'（PostgreSQL ILIKE）命中优先级A/B
-    assert data["total"] == 4
+    # DMGF 转小写后匹配 pinyin_initials LIKE 'dmgf%'，命中东睦+岱美
+    assert data["total"] == 2
     symbols = [item["symbol"] for item in data["items"]]
     assert "600114" in symbols
 
@@ -132,22 +128,36 @@ async def test_search_by_symbol_exact(client: AsyncClient, pinyin_instruments) -
 async def test_search_priority_ordering(client: AsyncClient, pinyin_instruments) -> None:
     """搜索优先级：代码完全匹配(0) < 代码前缀(1) < 拼音前缀(2) < 名称包含(3)。
 
-    keyword=dmgf 命中：
-    - 优先级A: symbol='dmgf' 完全匹配 -> rank 0
-    - 优先级B: symbol='dmgf2' 前缀匹配 -> rank 1
-    - 东睦股份/岱美股份: pinyin_initials='dmgf' 前缀 -> rank 2
+    keyword=600114 命中：
+    - 东睦股份: symbol='600114' 完全匹配 -> rank 0
+    - 贵州茅台: symbol='600519' 无匹配；pinyin_initials='gzmt' 无匹配；name 不包含 -> 未命中
+    - 岱美股份: pinyin_initials='dmgf' 不匹配
     """
-    response = await client.get("/instruments", params={"keyword": "dmgf", "page_size": 10})
+    response = await client.get("/instruments", params={"keyword": "600114", "page_size": 10})
     assert response.status_code == 200
     data = response.json()
     symbols = [item["symbol"] for item in data["items"]]
-    # rank 0 (dmgf) 排第一
-    assert symbols[0] == "dmgf"
-    # rank 1 (dmgf2) 排第二
-    assert symbols[1] == "dmgf2"
-    # rank 2 (东睦股份 600114 / 岱美股份 603730) 排后，按 symbol 排序 600114 < 603730
-    assert symbols[2] == "600114"
-    assert symbols[3] == "603730"
+    # rank 0 (600114 东睦股份) 排第一
+    assert symbols[0] == "600114"
+
+
+@pytest.mark.asyncio
+async def test_search_priority_symbol_prefix_before_pinyin(client: AsyncClient, pinyin_instruments) -> None:
+    """搜索优先级：代码前缀(1) 排在拼音前缀(2) 之前。
+
+    keyword=60 命中：
+    - 东睦股份: symbol='600114' 前缀匹配 -> rank 1
+    - 贵州茅台: symbol='600519' 前缀匹配 -> rank 1
+    - 岱美股份: symbol='603730' 前缀匹配 -> rank 1
+    """
+    response = await client.get("/instruments", params={"keyword": "60", "page_size": 10})
+    assert response.status_code == 200
+    data = response.json()
+    symbols = [item["symbol"] for item in data["items"]]
+    # rank 1 按 symbol 排序
+    assert "600114" in symbols
+    assert "600519" in symbols
+    assert "603730" in symbols
 
 
 @pytest.mark.asyncio

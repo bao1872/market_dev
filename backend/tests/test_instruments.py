@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 @pytest.fixture
 async def instruments_fixture(db_session: AsyncSession, instrument_factory):
-    """预置 4 只测试标的。"""
+    """预置 4 只测试标的（含 1 只指数，用于验证默认过滤）。"""
     instruments = [
         await instrument_factory(
             symbol="600519", name="贵州茅台", market="SH", status="active",
@@ -45,29 +45,39 @@ async def instruments_fixture(db_session: AsyncSession, instrument_factory):
             listing_date=date(2002, 4, 9),
             created_at=datetime.now(UTC), updated_at=datetime.now(UTC),
         ),
+        await instrument_factory(
+            symbol="000032", name="上证能源", market="SH", status="active",
+            listing_date=date(2002, 4, 9),
+            created_at=datetime.now(UTC), updated_at=datetime.now(UTC),
+        ),
     ]
     return instruments
 
 
 @pytest.mark.asyncio
 async def test_list_instruments_default(client: AsyncClient, instruments_fixture) -> None:
-    """测试默认列表查询（无筛选，分页）。"""
+    """测试默认列表查询：应排除指数/ETF/基金，只返回 A 股股票。"""
     response = await client.get("/instruments")
     assert response.status_code == 200
     data = response.json()
+    # fixture 共 5 条，其中 000032 上证能源（SH 指数）应被过滤
     assert data["total"] == 4
     assert data["page"] == 1
     assert data["page_size"] == 20
     assert len(data["items"]) == 4
+    symbols = {item["symbol"] for item in data["items"]}
+    assert "000032" not in symbols
+    assert "600519" in symbols
 
 
 @pytest.mark.asyncio
 async def test_list_instruments_pagination(client: AsyncClient, instruments_fixture) -> None:
-    """测试分页查询。"""
+    """测试分页查询（指数已被默认过滤）。"""
     # 第一页，每页 2 条
     response = await client.get("/instruments", params={"page": 1, "page_size": 2})
     assert response.status_code == 200
     data = response.json()
+    # 过滤后共 4 条 A 股股票
     assert data["total"] == 4
     assert data["page"] == 1
     assert data["page_size"] == 2
@@ -86,6 +96,16 @@ async def test_list_instruments_keyword_search(client: AsyncClient, instruments_
     symbols = [item["symbol"] for item in data["items"]]
     assert "600519" in symbols
     assert "600036" in symbols
+
+
+@pytest.mark.asyncio
+async def test_list_instruments_keyword_search_excludes_index(client: AsyncClient, instruments_fixture) -> None:
+    """测试关键词搜索指数代码 000032 不应返回上证能源。"""
+    response = await client.get("/instruments", params={"keyword": "000032"})
+    assert response.status_code == 200
+    data = response.json()
+    # 000032 上证能源是 SH 指数，应被默认 A 股过滤排除
+    assert data["total"] == 0
 
 
 @pytest.mark.asyncio
