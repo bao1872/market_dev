@@ -311,7 +311,7 @@ async def get_members(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_roles("admin")),
 ) -> dict:
-    """查询会员账户列表（含会员状态/到期时间/剩余天数/续期次数）。
+    """查询订阅账户列表（含订阅状态/到期时间/剩余天数/续期次数；MemberListItem 为 V1.6 遗留命名）。
 
     Args:
         limit: 分页大小

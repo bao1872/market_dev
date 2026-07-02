@@ -514,7 +514,7 @@ def generate_db_schema_doc() -> str:
     w("| `anchor_time` | list[str\\|None] | 锚点时间（仅锚点 bar 非空，ISO datetime） |\n")
     w("| `pivot_type` | list[str\\|None] | pivot 类型（HH/HL/LH/LL） |\n")
     w("| `pivot_price` | list[float\\|None] | pivot 价格 |\n\n")
-    w("> 详细渲染规则见 [策略与指标口径.md](策略与指标口径.md#27-图表渲染契约dsa_polyline--visual_segments)\n\n")
+    w("> 详细渲染规则见 [12-strategy-indicator-contracts.md](current/12-strategy-indicator-contracts.md#4-行情和图表契约)\n\n")
 
     return buf.getvalue()
 

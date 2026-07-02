@@ -4,7 +4,7 @@ V1.1 交易平台后端，提供：
 - /health: 健康检查
 - /auth: 认证 API（登录/注册/续期/刷新/当前用户）（R2 + V1.6）
 - /me: 当前用户信息（R2）
-- /me/membership: 当前用户订阅状态（V1.6）
+- /me/membership: 当前用户订阅状态（V1.6 遗留路径，语义等价于 /me/subscription；返回 Subscription 状态）
 - /instruments: 股票主数据 API（R3）
 - /calendar: 交易日历 API（R4）
 - /strategies: 策略目录与版本（R7）

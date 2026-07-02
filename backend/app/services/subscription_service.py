@@ -69,7 +69,7 @@ _INVITE_CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 # 邀请码分组：4 组 × 4 字符 = 16 字符
 _INVITE_CODE_GROUPS = 4
 _INVITE_CODE_GROUP_LEN = 4
-# 会员默认天数（旧字段 grant_days，保留兼容性；新逻辑优先使用 grant_months）
+# 订阅默认天数（旧字段 grant_days，保留兼容性；新逻辑优先使用 grant_months）
 _DEFAULT_GRANT_DAYS = 30
 # 默认 grant_months（管理员未指定时，1 个月 = 30 天近似）
 _DEFAULT_GRANT_MONTHS = 1

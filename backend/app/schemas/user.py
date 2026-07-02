@@ -119,7 +119,7 @@ class LoginResponse(BaseModel):
       * features: 功能特性列表
       * limits: 额度限制 dict
       * next_route: 前端下一步路由（admin→/admin/overview；member active→/overview；
-        member expired→/membership-expired）
+        member expired→/subscription-expired；/membership-expired 仅保留兼容重定向）
 
     设计要点：
     - 替代旧字段 membership_expired（语义等价：subscription_active = not membership_expired）
@@ -150,14 +150,14 @@ class LoginResponse(BaseModel):
 
 
 class RegisterSuccessResponse(BaseModel):
-    """注册成功响应 - 含 token + 订阅开始/到期时间。"""
+    """注册成功响应 - 含 token + 订阅开始/到期时间（membership_* 字段为 V1.6 API 遗留命名）。"""
 
     access_token: str = Field(..., description="Access token")
     refresh_token: str = Field(..., description="Refresh token")
     token_type: str = Field(default="bearer", description="Token 类型")
     expires_in: int = Field(..., description="Access token 有效期（秒）")
-    membership_started_at: datetime = Field(..., description="订阅开始时间")
-    membership_expires_at: datetime = Field(..., description="订阅到期时间")
+    membership_started_at: datetime = Field(..., description="订阅开始时间（V1.6 遗留字段名，语义等价于 subscription_started_at）")
+    membership_expires_at: datetime = Field(..., description="订阅到期时间（V1.6 遗留字段名，语义等价于 subscription_expires_at）")
 
 
 class RefreshRequest(BaseModel):

@@ -25,17 +25,30 @@
 User.status = active
 具有 member 角色
 Subscription.status = active
-starts_at <= 当前时间
-expires_at > 当前时间
+starts_at <= 当前时间 < expires_at
 ```
+
+资格链：JWT → AccessContext → User → Role → Subscription → Feature → Quota → Ownership。
 
 ### BR-SUB-002 到期冻结
 
 到期或无 Subscription 的普通会员：
 
-允许登录、读取 `/me/access`、读取套餐、使用邀请码续期、维护账户安全、只读历史消息。
+允许动作：
+- 登录；
+- 读取 `/me/access`；
+- 读取 `/plans` 套餐列表；
+- 使用邀请码续期；
+- 访问 `/subscription-expired` 续期引导页；
+- 维护账户与安全设置；
+- 只读读取历史消息、历史事件、历史订阅记录。
 
-禁止读取趋势选股、自选股、监控状态和个股详情；禁止新增、删除或恢复自选；禁止进入新监控；禁止生成新事件、消息、Outbox、Delivery 和飞书投递。
+禁止动作：
+- 趋势选股相关 API；
+- 自选股读/写（`GET/POST/DELETE /watchlist*`）；
+- 个股详情与相关行情/指标；
+- 新建或恢复监控；
+- 新建事件、站内消息、Outbox、Delivery 和飞书投递。
 
 原自选股、历史消息、历史事件和订阅记录保留。续期后自动恢复，不补发冻结期间未生成的盘中事件。
 

@@ -22,12 +22,25 @@
 - Access Token 只访问普通业务 API；
 - Refresh Token 只用于刷新；
 - Capture Token 只访问指定截图场景，不能访问普通 API；
-- Capture Token 使用独立存储和请求客户端，不覆盖普通 Access Token；
+- Capture Token 使用独立存储 key 和请求客户端，短期有效，权限最小化；
+- Capture Token 不覆盖、不污染普通 Access Token；
 - disabled 用户拒绝登录和访问。
 
 ## 3. Subscription 资格
 
-有效资格由 `access_control_service.py` 统一计算。到期或无订阅用户仍可登录和续期，但核心业务 API 必须 403；不能只在前端重定向。
+有效资格由 `access_control_service.py` 统一计算。资格链：
+
+```text
+JWT → AccessContext → User → Role → Subscription → Feature → Quota → Ownership
+```
+
+- JWT 只携带 user_id 与 token 类型；
+- `AccessContext` 由 `access_control_service.py` 统一计算，聚合 User.status、roles、Subscription 有效期、Plan features 和 quotas；
+- Feature 检查（如 `trend_selection`）在 active subscription 之后进行；
+- 资源所有权（自选股、消息、渠道等）由 JWT user_id 隔离；
+- 管理员角色绕过 subscription 检查，但仍受 admin RBAC 约束。
+
+到期或无订阅用户仍可登录和续期，但核心业务 API 必须 403；不能只在前端重定向。
 
 ## 4. 私有资源所有权
 

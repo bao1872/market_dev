@@ -4,14 +4,14 @@
 - GET /me/entitlements: 返回当前用户套餐、监控上限、已使用、剩余名额、到期日
 
 套餐权限规则（plans 表）：
-- 管理员：plan_code=None，monitor_limit=None（无限制），绕过会员到期限制
-- 普通用户：从 subscription 读取 plan_code/monitor_limit，无会员记录返回 404
+- 管理员：plan_code=None，monitor_limit=None（无限制），绕过订阅到期限制
+- 普通用户：从 subscription 读取 plan_code/monitor_limit，无订阅记录返回 404
 - used = 用户 active 自选股数量
 - remaining = monitor_limit - used（不足时为 0，不返回负数）
 - 无 monitor_limit 时 remaining=None（管理员无限制场景）
 
 设计说明：
-- /me/entitlements 与 /me、/me/membership、/me/events/summary 并存（auth.py 中）
+- /me/entitlements 与 /me、/me/membership（V1.6 遗留路径名，语义等价于 /me/subscription）、/me/events/summary 并存（auth.py 中）
 - 本模块仅承载权益查询端点，保持最小改动，不迁移现有 /me/* 端点
 - 套餐字段从 plans 表查询（plan_service.get_plan），不再使用 plan_contract.py 字典
 """
@@ -84,7 +84,7 @@ async def get_my_entitlements(
         {plan_code, plan_name, monitor_limit, used, remaining, expires_at}
 
     Raises:
-        HTTPException 404: 普通用户无会员记录
+        HTTPException 404: 普通用户无订阅记录
     """
     # 查询用户 active 自选股数量
     used_stmt = (
@@ -117,7 +117,7 @@ async def get_my_entitlements(
     if subscription is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="用户无会员记录",
+            detail="用户无订阅记录",
         )
 
     # 优先使用 subscription 中的套餐快照；若为 NULL（旧数据），回退到 DEFAULT_PLAN_CODE

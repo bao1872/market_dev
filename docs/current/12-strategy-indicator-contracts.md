@@ -21,23 +21,32 @@
 
 > 实现核对：本节为已确认契约；`6f5ae2c` 尚未满足完整发布要求，当前差异见 `ALIGN-004`、`ALIGN-005`。
 
-### 2.1 Universe
+### 2.1 职责分离
+
+DSA Selector 由四个独立阶段组成：
+
+1. **Universe Builder**：确定 total universe 与 computable universe；
+2. **Feature Computation**：为 computable universe 中每只股票计算特征并写入 `StrategyResult`；
+3. **Run Quality Gate**：检查运行完整性，决定是否允许自动发布；
+4. **Selector Query**：在已发布结果上执行前端筛选、排序、分页，不触发重算。
+
+### 2.2 Universe
 
 - 总 Universe：全部 active A 股标的；
 - computable universe：满足市场支持、最小 250 根前复权日线和数据质量要求的股票；
 - 停牌、行情不足或明确不支持可 skipped，必须保存 reason code；
 - BSE 或其他市场不能因为数据源实现缺陷被静默排除，应明确支持或明确 skipped 原因。
 
-### 2.2 计算原则
+### 2.3 计算原则
 
 - 只计算特征，不做预筛选；
-- 多头、空头、震荡、强弱和 `matched=false` 都应写入结果；
+- 多头、空头、震荡、强弱和 `matched=false`、特征值为负都应写入结果；
 - 用户筛选不影响运行 Universe；
-- 每个 computable 股票产生一条 StrategyResult；
-- 超时和异常属于 failed；
+- 每个 computable 股票必须产生一条 StrategyResult；
+- 单股超时、异常、数据库失败和预算失败属于 failed，不得当作 skipped 或未命中；
 - DSA 公式、窗口、复权和输出由 released StrategyVersion 固定。
 
-### 2.3 输出
+### 2.4 输出
 
 | 输出 | 用途 |
 |---|---|
@@ -48,15 +57,47 @@
 | `anchor` | 锚点元信息 |
 | `diagnostics` | 数据质量、耗时和错误诊断 |
 
-### 2.4 发布完整性
+### 2.5 发布完整性
 
-自动发布要求 run=`completed`、failed=0、result_count=succeeded_count、所有 skipped 有允许原因、computable coverage=100%。`partial_failed` 不得发布。
+自动发布要求同时满足：
 
-前端必须显示 total、computable、succeeded、failed、skipped、result_count 和 coverage。每页 50 仅是分页，不代表只计算 50。
+- run 状态为 `completed`；
+- `failed_count = 0`；
+- `result_count = succeeded_count`；
+- `succeeded_count + skipped_count = total_instruments`；
+- 所有 skipped 有允许原因并保存 reason code；
+- computable universe 结果覆盖率为 100%。
 
-### 2.5 资源预算
+`partial_failed` 不得自动发布。用户查询始终绑定不可变 `published_run_id`。
+
+前端显示字段：
+
+| 字段 | 含义 |
+|---|---|
+| `total` | 总 Universe 股票数 |
+| `computable` | 可计算 Universe 股票数 |
+| `succeeded` | 成功计算数 |
+| `failed` | 失败数 |
+| `skipped` | 允许跳过数 |
+| `result_count` | 写入 StrategyResult 数 |
+| `coverage` | computable universe 覆盖率 |
+| `source_total` | 原始数据源股票数 |
+| `filtered_total` | 前端筛选后股票数 |
+
+每页 50 仅是分页，不代表只计算 50。
+
+### 2.6 资源预算
 
 单股 100ms 硬中断不是确认的永久产品规则。预算必须通过代表性基准测试得到，至少统计冷/热启动 p50、p90、p95、p99、max，并使用 run 级心跳和总超时。预算超限不得被当作未命中或允许 skipped。
+
+基于 2026-07-02 对 350 只代表性活跃 A 股的基准测试（`backend/tools/dsa_benchmark.py`）：
+
+| 启动类型 | p50 (ms) | p90 (ms) | p95 (ms) | p99 (ms) | max (ms) | avg (ms) |
+|---|---|---|---|---|---|---|
+| 冷启动 | 129.62 | 181.87 | 203.89 | 231.60 | 321.32 | 138.17 |
+| 热启动 | 130.46 | 182.29 | 195.79 | 224.66 | 270.01 | 136.53 |
+
+测试规模：有效冷启动 350、有效热启动 350、失败 0、跳过 0、总耗时约 105.78s。完整报告见 `backend/reports/dsa_benchmark_20260702.md`。
 
 ## 3. Watchlist Monitor
 

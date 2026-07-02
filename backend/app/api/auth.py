@@ -1,12 +1,12 @@
-"""认证 API 路由 - 登录、注册、续期、token 刷新、当前用户信息、会员状态。
+"""认证 API 路由 - 登录、注册、续期、token 刷新、当前用户信息、订阅状态。
 
 端点：
 - POST /auth/login: 用户登录，返回 access_token + refresh_token + AccessProfile 权限上下文
-- POST /auth/register: 邀请码注册，原子操作创建账户 + 开通 30 天会员
+- POST /auth/register: 邀请码注册，原子操作创建账户 + 开通 30 天订阅
 - POST /auth/renew: 邀请码续期，未到期顺延 / 已到期从当天计算
 - POST /auth/refresh: 使用 refresh token 刷新
 - GET /me: 获取当前用户信息（含角色列表）
-- GET /me/membership: 获取当前用户会员状态
+- GET /me/membership: 获取当前用户订阅状态（V1.6 遗留路径名）
 - GET /me/access: 获取当前用户完整权限上下文 AccessContext（11 个字段）
 
 设计说明：
@@ -14,12 +14,12 @@
 - 仅 active 状态用户可登录（disabled/pending 拒绝）
 - 登录路径只读：不写 DB，不修改 subscription.status；权限上下文由
   get_access_context 统一计算（复用 AccessContext，避免逻辑重复）
-- 会员到期后允许登录，返回 subscription_active=false + next_route='/subscription-expired'，
+- 订阅到期后允许登录，返回 subscription_active=false + next_route='/subscription-expired'，
   前端跳转续期页；admin 自动豁免（subscription_active=true）
-- 注册需邀请码，原子操作：锁定邀请码 → 创建账户 → 开通会员 → 写兑换记录
+- 注册需邀请码，原子操作：锁定邀请码 → 创建账户 → 开通订阅 → 写兑换记录
 - 续期需邀请码，未到期顺延 30 天，已到期从当天计算 30 天
 - refresh token 类型校验：仅 refresh 类型可刷新
-- /me 和 /me/membership 通过 get_current_active_user 注入当前用户
+- /me 和 /me/membership 通过 get_current_active_user 注入当前用户（/me/membership 为 V1.6 遗留路径名，语义等价于订阅状态）
 """
 
 from __future__ import annotations
@@ -116,7 +116,7 @@ async def login(
     登录路径只读约束：
     - 不修改 subscription.status（status 不持久化 expired，到期由 get_access_context 实时计算）
     - get_access_context 内部仅 select 查询，无 db.commit/flush/状态修改
-    - 会员到期后允许登录，返回 subscription_active=false + next_route='/subscription-expired'
+    - 订阅到期后允许登录，返回 subscription_active=false + next_route='/subscription-expired'
     - admin 自动豁免（subscription_active=true，subscription_required=false）
 
     Args:
@@ -336,13 +336,13 @@ async def register(
     payload: UserRegister,
     db: AsyncSession = Depends(get_db),
 ) -> RegisterSuccessResponse:
-    """邀请码注册 - 原子操作创建账户 + 开通 30 天会员。
+    """邀请码注册 - 原子操作创建账户 + 开通 30 天订阅。
 
     流程：
     1. 校验邀请码（哈希查找，状态必须为 unused）
     2. 检查邮箱未被注册
-    3. 创建用户（status=active）+ 分配 user 角色
-    4. 创建会员记录（30 天）
+    3. 创建用户（status=active）+ 分配 member 角色
+    4. 创建订阅记录（30 天）
     5. 更新邀请码状态为 used
     6. 写入兑换记录
     7. 生成 access + refresh token
@@ -352,7 +352,7 @@ async def register(
         db: 异步数据库会话
 
     Returns:
-        RegisterSuccessResponse（token + 会员开始/到期时间）
+        RegisterSuccessResponse（token + 订阅开始/到期时间；字段名 membership_* 为 V1.6 遗留命名）
 
     Raises:
         HTTPException 400: 邀请码无效/已使用/已作废，或邮箱已注册
@@ -397,7 +397,7 @@ async def renew(
     """邀请码续期 - 未到期顺延 30 天 / 已到期从当天计算 30 天。
 
     需要有效的 access token（登录状态）。
-    会员到期后允许登录但只能访问续期相关端点，此端点允许到期用户调用。
+    订阅到期后允许登录但只能访问续期相关端点，此端点允许到期用户调用。
 
     Args:
         payload: 续期请求（invite_code）
@@ -405,10 +405,10 @@ async def renew(
         db: 异步数据库会话
 
     Returns:
-        RenewSuccessResponse（会员状态 + 新到期时间 + 剩余天数）
+        RenewSuccessResponse（订阅状态 + 新到期时间 + 剩余天数；字段名 membership_status 为 V1.6 遗留命名）
 
     Raises:
-        HTTPException 400: 邀请码无效/已使用/已作废，或会员记录不存在
+        HTTPException 400: 邀请码无效/已使用/已作废，或订阅记录不存在
     """
     try:
         subscription, old_expires_at, new_expires_at = await renew_with_invite_code(
@@ -462,7 +462,7 @@ async def get_my_membership(
     if subscription is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="用户无会员记录",
+            detail="用户无订阅记录",
         )
 
     from datetime import UTC, datetime

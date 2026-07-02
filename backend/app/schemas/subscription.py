@@ -1,9 +1,10 @@
 """Subscription Pydantic schemas - 订阅状态与账户列表响应模型。
 
 提供：
-- MembershipResponse: 当前用户订阅状态响应（status/expires_at/剩余天数）
-- RenewSuccessResponse: 邀请码续期成功响应
-- MemberListItem: 管理员订阅账户列表项
+- MembershipResponse: 当前用户订阅状态响应（status/expires_at/剩余天数）；类名与 /me/membership
+  路径保留 V1.6 遗留命名，语义等价于 Subscription 状态响应
+- RenewSuccessResponse: 邀请码续期成功响应（membership_status 为 V1.6 遗留字段名）
+- MemberListItem: 管理员订阅账户列表项（membership_status 为 V1.6 遗留字段名）
 """
 
 from __future__ import annotations

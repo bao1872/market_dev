@@ -50,7 +50,7 @@ export interface AccessProfile {
 }
 
 // [Auth] - 描述: 登录响应 - 含 4 个 token 字段 + 10 个 AccessProfile 字段（对齐后端 LoginResponse）
-// 替代旧字段 membership_expired（语义等价：subscription_active = not membership_expired）
+// 替代旧字段 membership_expired（语义等价：subscription_active = not membership_expired；字段名保留为 V1.6 API 兼容）
 // next_route 由后端权威计算：admin→/admin/overview；member active→/overview；member expired→/subscription-expired
 export interface LoginResponse {
   // token 字段（4 个）
@@ -129,7 +129,7 @@ export interface MembershipResponse {
   renewal_count: number
 }
 
-/** 注册成功响应 */
+/** 注册成功响应（membership_* 字段为 V1.6 API 遗留命名，语义等价于 subscription_*） */
 export interface RegisterSuccessResponse {
   access_token: string
   refresh_token: string
@@ -139,7 +139,7 @@ export interface RegisterSuccessResponse {
   membership_expires_at: string
 }
 
-/** 续期成功响应 */
+/** 续期成功响应（membership_status 为 V1.6 API 遗留命名，语义等价于 subscription_status） */
 export interface RenewSuccessResponse {
   membership_status: string
   started_at: string
@@ -669,7 +669,7 @@ export interface InviteRedemption {
   redeemed_at: string
 }
 
-/** 会员账户列表项 */
+/** 订阅账户列表项（MemberListItem / membership_status 为 V1.6 API 遗留命名） */
 export interface MemberListItem {
   user_id: string
   email: string
@@ -933,7 +933,7 @@ export async function getMyAccess(): Promise<AccessProfile> {
   return data
 }
 
-/** 获取当前用户会员状态 */
+/** 获取当前用户订阅状态（/me/membership 为 V1.6 遗留路径名） */
 export async function getMyMembership(): Promise<MembershipResponse> {
   const { data } = await apiClient.get<MembershipResponse>('/me/membership')
   return data
@@ -1622,7 +1622,7 @@ export async function revokeInviteCode(inviteCodeId: string): Promise<InviteCode
   return data
 }
 
-/** 查询会员账户列表（含会员状态/到期时间/剩余天数/续期次数） */
+/** 查询订阅账户列表（含订阅状态/到期时间/剩余天数/续期次数；MemberListResponse 为 V1.6 API 遗留命名） */
 export async function getMembers(params?: PaginationParams): Promise<MemberListResponse> {
   const { data } = await apiClient.get<MemberListResponse>('/admin/members', { params })
   return data
