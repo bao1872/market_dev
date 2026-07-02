@@ -1,0 +1,35 @@
+> 文档状态：CURRENT DESIGN BASELINE  
+> 基线日期：2026-07-02  
+> 已核对代码基线：`6f5ae2cec6b24dbd1b7bf6f23477f5e6f5096822`（`refactor/access-v2-platform-recovery`）  
+> 事实来源：代码库 + 项目负责人截至 2026-07-02 已确认的产品与架构要求  
+> 维护要求：任何代码、配置、测试、部署或文档修改都必须同步更新相关当前设计文档，并新增 CHANGE 记录。  
+> 注意：该代码基线用于设计核对，不代表已经满足合并 `main` 或生产发布条件。
+> 对齐口径：`CURRENT` 表示已确认设计，不等同于代码已完成；代码未实现、未验证或生产表现不一致的内容，必须在 `18-code-doc-alignment.md` 标为 `KNOWN_GAP`。
+
+# 18 代码、文档与生产反馈对齐表
+
+本表是代码基线 `6f5ae2c` 的实现事实快照，只记录“当前确认设计已经明确，但实现、测试、部署或生产表现尚未一致”的问题。未决产品问题进入 `17-open-decisions.md`；历史经过进入 CHANGE。
+
+只要本表仍有未关闭条目，就只能声明“文档已准确对齐当前代码及其差异”，不能声明“代码已经完全符合设计”。
+
+| ID | 领域 | 当前证据与差异 | 目标设计 | 状态 |
+|---|---|---|---|---|
+| ALIGN-001 | Git 分支 | 主要改动位于 `refactor/access-v2-platform-recovery`，`main` 仍是较早基线 | 从修复分支建立精确 release 候选，最终通过 PR merge commit 合入 main | `KNOWN_GAP` |
+| ALIGN-002 | 历史迁移 | feature 分支 diff 包含 022–027、040 等既有 migration 的变更，尚未完成逐文件语义审计 | 已执行历史 migration 不修改；新结构只新增 migration | `KNOWN_GAP` |
+| ALIGN-003 | 算法文件 | feature 分支包含大量 algorithm asset 改动，尚无完整的公式、参数和输出字段等价性证据 | 证明无语义变化，否则撤销或独立评审 | `KNOWN_GAP` |
+| ALIGN-004 | 趋势覆盖 | 已出现 total 5223、成功约 729、大量 100ms timeout，残缺批次可被发布 | computable universe 100% 结果覆盖；partial_failed 不发布 | `KNOWN_GAP` |
+| ALIGN-005 | DSA 预算 | 当前存在 100ms 单股硬中断 | 用代表性基准确定预算，超时计 failed，不得当筛选 | `KNOWN_GAP` |
+| ALIGN-006 | Watchlist 权限 | 代码中曾出现新旧额度检查函数并存，读接口未全部要求有效订阅 | 全部 watchlist API 复用 AccessContext + active subscription | `KNOWN_GAP` |
+| ALIGN-007 | 趋势 API 权限 | 部分结果接口仅检查 feature，过期用户仍可能保留 feature | active subscription + feature 双重检查 | `KNOWN_GAP` |
+| ALIGN-008 | Worker 资格 | `eligible_user_service.py` 已存在，但尚无证据证明 Monitor、Recipient、Outbox、Delivery 全链路均复用并在投递前复核 | active member + active subscription，投递前复核 | `KNOWN_GAP` |
+| ALIGN-009 | 个股行情 | 图表场景 DB 有历史时不补尾部，且可能绕过实时 last-bar merge | 统一历史+尾部补齐+盘中 partial 聚合 | `KNOWN_GAP` |
+| ALIGN-010 | 飞书图片 | 生产反馈只收到文字；图片异常可被记录后接口仍返回 pending | 独立 card/image 状态、partial_failed、仅重试图片、真实 E2E | `KNOWN_GAP` |
+| ALIGN-011 | Capture Token | 前端已使用独立 storage key，但尚未完成普通 API 隔离、有效期和最小权限 E2E 证据 | 最小权限、短期、独立客户端、不污染登录 | `KNOWN_GAP` |
+| ALIGN-012 | 管理页面 | 当前后端已实现邀请码、会员列表、任务和部分审计；用户启停、直接授予/续期/撤销/改套餐 API 与对应页面尚不完整，部分控件曾仅 Toast | 无真实 API 的控件删除；所有成功来自服务器结果 | `KNOWN_GAP` |
+| ALIGN-013 | 文档旧术语 | 仓库旧文档仍出现 plan_contract、Membership、旧到期路由等 | plans + Subscription + `/subscription-expired` | `KNOWN_GAP` |
+| ALIGN-014 | CI | `6f5ae2c` 尚无最终 release PR 的 blocking CI 证据，且全量 Ruff/mypy 曾为非阻断 | release 候选最终 HEAD 的 blocking jobs 全绿，修改文件零新增错误 | `KNOWN_GAP` |
+| ALIGN-015 | 运行服务 | CORE_ONLY 不包含 capture/outbox/delivery，可能造成文字有、图片无 | 部署能力与业务功能匹配；服务健康不可用时不假成功 | `KNOWN_GAP` |
+
+## 关闭要求
+
+每项关闭必须记录：发现证据、当前代码行为、修复分支、Commit、测试、生产验收、关闭日期和对应 CHANGE。关闭后只保留摘要，详细历史归入 CHANGE。
