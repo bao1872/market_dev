@@ -297,6 +297,33 @@ async def subscription_factory(db_session: AsyncSession) -> Callable[..., Subscr
 
 
 @pytest_asyncio.fixture
+async def make_user_eligible(
+    db_session: AsyncSession,
+    role_factory: Callable[..., Role],
+    subscription_factory: Callable[..., Subscription],
+) -> Callable[..., User]:
+    """为用户添加 member 角色 + active subscription，使其有资格进入监控 universe。
+
+    [eligible_user_service] - 资格条件：active member + 有效 subscription
+    用于需要通过 Worker 资格检查的测试场景（outbox_relay / delivery_worker /
+    event_recipient_service / monitor_batch_service）。
+    """
+    async def _make_eligible(
+        user: User,
+        plan_code: str = "observe_20",
+    ) -> User:
+        from app.models.user import UserRole
+
+        role = await role_factory(name="member")
+        db_session.add(UserRole(user_id=user.id, role_id=role.id))
+        await db_session.flush()
+        await subscription_factory(user_id=user.id, plan_code=plan_code)
+        return user
+
+    return _make_eligible
+
+
+@pytest_asyncio.fixture
 async def invite_code_factory(
     db_session: AsyncSession,
 ) -> Callable[..., tuple[InviteCode, str]]:

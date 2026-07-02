@@ -5,9 +5,8 @@ Revises: 026_strat_run_lease
 Create Date: 2026-06-24
 """
 
-import sqlalchemy as sa
-
 from alembic import op
+import sqlalchemy as sa
 
 revision = "027_job_runs_heartbeats"
 down_revision = "026_strat_run_lease"

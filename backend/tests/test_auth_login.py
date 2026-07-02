@@ -162,7 +162,7 @@ async def test_login_without_membership_subscription_active_false(
     data = response.json()
     # [Auth] - 描述: 无订阅记录的 member，subscription_active=False（替代旧 membership_expired=true）
     assert data["subscription_active"] is False
-    assert data["next_route"] == "/membership-expired"
+    assert data["next_route"] == "/subscription-expired"
 
 
 @pytest.mark.asyncio
@@ -193,7 +193,7 @@ async def test_login_expired_subscription_not_modify_status(
     data = response.json()
     # [Auth] - 描述: 过期订阅 subscription_active=False（替代旧 membership_expired=true）
     assert data["subscription_active"] is False
-    assert data["next_route"] == "/membership-expired"
+    assert data["next_route"] == "/subscription-expired"
 
     # 刷新会话，重新查询 subscription status，确认未被 login 改为 expired
     await db_session.refresh(subscription)
@@ -253,7 +253,7 @@ async def test_login_invalid_password_hash_returns_401(
 # AccessProfile 登录响应测试（Phase 2 Task 2.4）
 # 验证登录响应包含 4 个 token 字段 + 10 个 AccessProfile 字段
 # next_route 逻辑：admin → /admin/overview；member active → /overview；
-#                  member expired → /membership-expired
+#                  member expired → /subscription-expired
 # ============================================================
 
 
@@ -325,7 +325,7 @@ async def test_login_response_member_expired_next_route(
     subscription_factory: Callable[..., Subscription],
     db_session,
 ) -> None:
-    """member 订阅过期 next_route='/membership-expired'。"""
+    """member 订阅过期 next_route='/subscription-expired'。"""
     user = await user_factory(
         email="member_expired@example.com",
         password_hash=get_password_hash("password123"),
@@ -343,7 +343,7 @@ async def test_login_response_member_expired_next_route(
         json={"email": "member_expired@example.com", "password": "password123"},
     )
     assert response.status_code == 200
-    assert response.json()["next_route"] == "/membership-expired"
+    assert response.json()["next_route"] == "/subscription-expired"
 
 
 @pytest.mark.asyncio

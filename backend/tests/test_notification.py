@@ -1375,13 +1375,16 @@ class TestImageDeliveryPipeline:
 
     @pytest.mark.asyncio
     async def test_relay_outbox_creates_image_delivery(
-        self, db_session, test_user, test_instrument,
+        self, db_session, test_user, test_instrument, make_user_eligible,
     ) -> None:
         """Outbox Relay 对 image 通知事件应扩张为 delivery_type=image 的 MessageDelivery。"""
         from app.models.notification import NotificationChannel, NotificationMessage, MessageDelivery
         from app.models.outbox import Outbox
         from app.schemas.notification import NotificationMessageDTO
         from app.services.outbox_relay import relay_outbox
+
+        # [eligible_user_service] - 使 test_user 有资格通过 Worker 资格检查
+        await make_user_eligible(test_user)
 
         dto = NotificationMessageDTO(
             message_type="MONITOR_EVENT",
@@ -1659,13 +1662,16 @@ class TestDeliveryStateMachine:
 
     @pytest.mark.asyncio
     async def test_expand_notification_message_created_with_active_channels(
-        self, db_session, test_user, test_instrument,
+        self, db_session, test_user, test_instrument, make_user_eligible,
     ) -> None:
         """_expand_notification_message_created 为每个 active 渠道创建 pending 投递。"""
         from app.models.notification import NotificationChannel, NotificationMessage, MessageDelivery
         from app.models.outbox import Outbox
         from app.schemas.notification import NotificationMessageDTO
         from app.services.outbox_relay import _expand_notification_message_created
+
+        # [eligible_user_service] - 使 test_user 有资格通过 Worker 资格检查
+        await make_user_eligible(test_user)
 
         dto = NotificationMessageDTO(
             message_type="MONITOR_EVENT",
@@ -2489,7 +2495,7 @@ class TestTextImageMessageGroup:
 
     @pytest.mark.asyncio
     async def test_text_image_deliveries_share_message_group_id(
-        self, db_session, test_user, test_instrument,
+        self, db_session, test_user, test_instrument, make_user_eligible,
     ) -> None:
         """同一 message_group_id 的 text 与 image Outbox 经 relay 后，
         两条 MessageDelivery 共享同一 message_group_id。"""
@@ -2501,6 +2507,9 @@ class TestTextImageMessageGroup:
         from app.models.outbox import Outbox
         from app.schemas.notification import NotificationMessageDTO
         from app.services.outbox_relay import relay_outbox
+
+        # [eligible_user_service] - 使 test_user 有资格通过 Worker 资格检查
+        await make_user_eligible(test_user)
 
         dto = NotificationMessageDTO(
             message_type="MONITOR_EVENT",

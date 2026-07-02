@@ -149,12 +149,17 @@ async def test_monitor_evaluation_exactly_once(db_session, test_selector_strateg
 
 
 @pytest.mark.asyncio
-async def test_event_recipient_expansion(db_session, test_user, test_instrument, test_selector_strategy):
+async def test_event_recipient_expansion(
+    db_session, test_user, test_instrument, test_selector_strategy, make_user_eligible,
+):
     """事件收件人展开：自选该股票的用户应被添加为收件人。"""
     from app.models.strategy_event import StrategyEvent
     from app.models.watchlist import UserWatchlistItem
 
     version = test_selector_strategy["version"]
+
+    # [eligible_user_service] - 使 test_user 有资格进入监控 universe
+    await make_user_eligible(test_user)
 
     # 创建自选股记录
     item = UserWatchlistItem(

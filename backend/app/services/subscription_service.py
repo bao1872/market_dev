@@ -75,6 +75,22 @@ _DEFAULT_GRANT_DAYS = 30
 _DEFAULT_GRANT_MONTHS = 1
 
 
+def _compute_expires_at_from_months(base: datetime, grant_months: int | None) -> datetime:
+    """按 grant_months 自然月计算到期时间。
+
+    Args:
+        base: 基准时间
+        grant_months: 自然月数
+
+    Returns:
+        到期时间（时区感知）
+    """
+    if grant_months is not None and grant_months > 0:
+        return base + relativedelta(months=grant_months)
+    # 兼容旧逻辑（未提供 grant_months 时回退 30 天）
+    return base + timedelta(days=_DEFAULT_GRANT_DAYS)
+
+
 def _compute_expires_at(base: datetime, invite: InviteCode) -> datetime:
     """根据邀请码的 grant_months 或 grant_days 计算到期时间。
 
@@ -88,10 +104,7 @@ def _compute_expires_at(base: datetime, invite: InviteCode) -> datetime:
     Returns:
         到期时间（时区感知）
     """
-    if invite.grant_months is not None and invite.grant_months > 0:
-        return base + relativedelta(months=invite.grant_months)
-    # 兼容旧邀请码（grant_months 为 NULL，仅有 grant_days）
-    return base + timedelta(days=invite.grant_days)
+    return _compute_expires_at_from_months(base, invite.grant_months)
 
 
 def _generate_invite_code() -> str:
@@ -469,6 +482,251 @@ async def get_subscription_status(
     stmt = select(Subscription).where(Subscription.user_id == user_id)
     result = await db.execute(stmt)
     return result.scalar_one_or_none()
+
+
+async def _is_admin_user(db: AsyncSession, user_id: uuid.UUID) -> bool:
+    """检查用户是否拥有 admin 角色。"""
+    role_stmt = (
+        select(Role.name)
+        .join(UserRole, UserRole.role_id == Role.id)
+        .where(UserRole.user_id == user_id, Role.name == "admin")
+    )
+    result = await db.execute(role_stmt)
+    return result.scalar_one_or_none() is not None
+
+
+async def grant_subscription_to_user(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    plan_code: str,
+    grant_months: int,
+    actor_user_id: uuid.UUID | None = None,
+) -> Subscription:
+    """管理员授予用户订阅（source='admin_grant'）。
+
+    业务规则：
+    - 管理员（admin 角色）不绑定套餐，禁止授予
+    - 用户已存在 subscription 时失败（避免覆盖）
+    - 从 plans 表读取 entitlement_snapshot 快照
+    - 到期日按 grant_months 自然月计算
+
+    Args:
+        db: 异步数据库会话
+        user_id: 被授权用户 ID
+        plan_code: 套餐代码
+        grant_months: 授予自然月数
+        actor_user_id: 操作管理员 ID（可选）
+
+    Returns:
+        新创建的 Subscription 对象
+
+    Raises:
+        ValueError: 用户不存在、是 admin、已存在 subscription、或 plan_code 未知
+    """
+    if grant_months < 1:
+        raise ValueError(f"grant_months 必须 >= 1，实际: {grant_months}")
+
+    user_stmt = select(User).where(User.id == user_id)
+    user_result = await db.execute(user_stmt)
+    user = user_result.scalar_one_or_none()
+    if user is None:
+        raise ValueError(f"用户不存在: {user_id}")
+
+    if await _is_admin_user(db, user_id):
+        raise ValueError("admin 角色不绑定套餐，禁止授予 subscription")
+
+    existing_stmt = select(Subscription).where(Subscription.user_id == user_id)
+    existing_result = await db.execute(existing_stmt)
+    if existing_result.scalar_one_or_none() is not None:
+        raise ValueError(f"用户已存在 subscription: {user_id}")
+
+    plan = await get_plan_async(db, plan_code)
+    entitlement_snapshot = _build_entitlement_snapshot(plan)
+
+    now = datetime.now(UTC)
+    expires_at = _compute_expires_at_from_months(now, grant_months)
+    subscription = Subscription(
+        user_id=user_id,
+        plan_code=plan_code,
+        status="active",
+        starts_at=now,
+        expires_at=expires_at,
+        entitlement_snapshot=entitlement_snapshot,
+        source="admin_grant",
+        created_by=actor_user_id,
+        updated_at=now,
+    )
+    db.add(subscription)
+    await db.flush()
+    return subscription
+
+
+async def renew_subscription(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    grant_months: int,
+    actor_user_id: uuid.UUID | None = None,
+) -> tuple[Subscription, datetime, datetime]:
+    """管理员为用户续期订阅（按自然月顺延或从当前时间重新计算）。
+
+    业务规则：
+    - 未到期：从当前 expires_at 顺延 grant_months 个自然月
+    - 已到期：从当前时间重新计算 grant_months 个自然月
+    - 管理员（admin 角色）不续期
+
+    Args:
+        db: 异步数据库会话
+        user_id: 用户 ID
+        grant_months: 续期自然月数
+        actor_user_id: 操作管理员 ID（可选）
+
+    Returns:
+        (Subscription, old_expires_at, new_expires_at)
+
+    Raises:
+        ValueError: 用户不存在、是 admin、或无 subscription
+    """
+    if grant_months < 1:
+        raise ValueError(f"grant_months 必须 >= 1，实际: {grant_months}")
+
+    user_stmt = select(User).where(User.id == user_id)
+    user_result = await db.execute(user_stmt)
+    if user_result.scalar_one_or_none() is None:
+        raise ValueError(f"用户不存在: {user_id}")
+
+    if await _is_admin_user(db, user_id):
+        raise ValueError("admin 角色不绑定套餐，禁止续期 subscription")
+
+    subscription_stmt = select(Subscription).where(Subscription.user_id == user_id)
+    subscription_result = await db.execute(subscription_stmt)
+    subscription = subscription_result.scalar_one_or_none()
+    if subscription is None:
+        raise ValueError(f"用户订阅记录不存在: {user_id}")
+
+    now = datetime.now(UTC)
+    old_expires_at = _ensure_aware(subscription.expires_at)
+
+    if old_expires_at > now:
+        new_expires_at = _compute_expires_at_from_months(old_expires_at, grant_months)
+    else:
+        new_expires_at = _compute_expires_at_from_months(now, grant_months)
+
+    subscription.status = "active"
+    subscription.expires_at = new_expires_at
+    subscription.updated_at = now
+    await db.flush()
+    return subscription, old_expires_at, new_expires_at
+
+
+async def revoke_subscription(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    actor_user_id: uuid.UUID | None = None,
+) -> Subscription:
+    """管理员撤销用户订阅（status='revoked'）。
+
+    Args:
+        db: 异步数据库会话
+        user_id: 用户 ID
+        actor_user_id: 操作管理员 ID（可选）
+
+    Returns:
+        更新后的 Subscription 对象
+
+    Raises:
+        ValueError: 用户不存在或无 subscription
+    """
+    user_stmt = select(User).where(User.id == user_id)
+    user_result = await db.execute(user_stmt)
+    if user_result.scalar_one_or_none() is None:
+        raise ValueError(f"用户不存在: {user_id}")
+
+    subscription_stmt = select(Subscription).where(Subscription.user_id == user_id)
+    subscription_result = await db.execute(subscription_stmt)
+    subscription = subscription_result.scalar_one_or_none()
+    if subscription is None:
+        raise ValueError(f"用户订阅记录不存在: {user_id}")
+
+    subscription.status = "revoked"
+    subscription.updated_at = datetime.now(UTC)
+    await db.flush()
+    return subscription
+
+
+async def change_subscription_plan(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    plan_code: str,
+    grant_months: int,
+    actor_user_id: uuid.UUID | None = None,
+) -> Subscription:
+    """管理员修改用户套餐（无 subscription 时创建，有时更新并续期）。
+
+    业务规则：
+    - 用户无 subscription：按 admin_grant 创建新 subscription
+    - 用户有 subscription：更新 plan_code/entitlement_snapshot，并按 grant_months
+      从当前到期日或当前时间顺延
+    - 管理员（admin 角色）不绑定套餐
+
+    Args:
+        db: 异步数据库会话
+        user_id: 用户 ID
+        plan_code: 目标套餐代码
+        grant_months: 授予/续期自然月数
+        actor_user_id: 操作管理员 ID（可选）
+
+    Returns:
+        Subscription 对象
+
+    Raises:
+        ValueError: 用户不存在、是 admin、或 plan_code 未知
+    """
+    if grant_months < 1:
+        raise ValueError(f"grant_months 必须 >= 1，实际: {grant_months}")
+
+    user_stmt = select(User).where(User.id == user_id)
+    user_result = await db.execute(user_stmt)
+    user = user_result.scalar_one_or_none()
+    if user is None:
+        raise ValueError(f"用户不存在: {user_id}")
+
+    if await _is_admin_user(db, user_id):
+        raise ValueError("admin 角色不绑定套餐，禁止修改 subscription")
+
+    plan = await get_plan_async(db, plan_code)
+    entitlement_snapshot = _build_entitlement_snapshot(plan)
+
+    subscription_stmt = select(Subscription).where(Subscription.user_id == user_id)
+    subscription_result = await db.execute(subscription_stmt)
+    subscription = subscription_result.scalar_one_or_none()
+
+    now = datetime.now(UTC)
+    if subscription is None:
+        expires_at = _compute_expires_at_from_months(now, grant_months)
+        subscription = Subscription(
+            user_id=user_id,
+            plan_code=plan_code,
+            status="active",
+            starts_at=now,
+            expires_at=expires_at,
+            entitlement_snapshot=entitlement_snapshot,
+            source="admin_grant",
+            created_by=actor_user_id,
+            updated_at=now,
+        )
+        db.add(subscription)
+    else:
+        old_expires_at = _ensure_aware(subscription.expires_at)
+        base = old_expires_at if old_expires_at > now else now
+        new_expires_at = _compute_expires_at_from_months(base, grant_months)
+        subscription.plan_code = plan_code
+        subscription.entitlement_snapshot = entitlement_snapshot
+        subscription.expires_at = new_expires_at
+        subscription.status = "active"
+        subscription.updated_at = now
+
+    await db.flush()
+    return subscription
 
 
 async def get_renewal_count(

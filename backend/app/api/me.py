@@ -29,10 +29,41 @@ from app.db import get_db
 from app.models.subscription import Subscription
 from app.models.user import User
 from app.models.watchlist import UserWatchlistItem
+from app.services.access_control_service import require_authenticated
 from app.services.plan_service import get_monitor_limit as get_monitor_limit_async
 from app.services.plan_service import get_plan
 
 router = APIRouter(tags=["me"])
+
+
+@router.get("/me/access")
+async def get_my_access(
+    ctx = Depends(require_authenticated),
+) -> dict:
+    """获取当前用户权限上下文（用于前端刷新校验）。
+
+    已登录但订阅过期的用户也能调用（用于前端判断跳转 /subscription-expired）。
+    admin 返回 plan_code=None、limits={}、features=[]、subscription_active=True（豁免）。
+
+    Args:
+        ctx: 权限上下文（由 require_authenticated 注入）
+
+    Returns:
+        与 AccessContext 对齐的 11 字段 JSON
+    """
+    return {
+        "user_id": ctx.user_id,
+        "account_status": ctx.account_status,
+        "roles": ctx.roles,
+        "is_admin": ctx.is_admin,
+        "is_member": ctx.is_member,
+        "subscription_active": ctx.subscription_active,
+        "plan_code": ctx.plan_code,
+        "plan_display_name": ctx.plan_display_name,
+        "expires_at": ctx.expires_at.isoformat() if ctx.expires_at else None,
+        "features": ctx.features,
+        "limits": ctx.limits,
+    }
 
 
 @router.get("/me/entitlements")
@@ -117,5 +148,6 @@ if __name__ == "__main__":
     paths = [getattr(r, "path", None) for r in router.routes]
     paths = [p for p in paths if p is not None]
     print(f"router.routes={paths}")
+    assert "/me/access" in paths
     assert "/me/entitlements" in paths
     print("OK")

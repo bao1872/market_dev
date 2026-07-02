@@ -234,12 +234,12 @@ export default function LoginPage() {
             可计算、可追踪的服务
           </h1>
           <p className="login-lead">
-            注册即成为会员，30天内开放全部选股、监控、个股指标与消息推送功能。
+            注册后用邀请码激活套餐，按所选套餐解锁选股、监控、个股指标与消息推送功能。
           </p>
           <div className="login-feature">
-            <span className="tag info">注册即全功能</span>
-            <span className="tag good">会员有效期 30 天</span>
-            <span className="tag warn">邀请码注册与续期</span>
+            <span className="tag info">邀请码激活套餐</span>
+            <span className="tag good">按套餐解锁功能</span>
+            <span className="tag warn">到期前可续期</span>
           </div>
           <div className="auth-flow-mini">
             <div>
@@ -340,11 +340,11 @@ export default function LoginPage() {
               // 注册成功页
               <div className="register-success">
                 <div className="success-orb">✓</div>
-                <h2>注册成功，会员已开通</h2>
-                <p>你的账户已获得完整功能权限。</p>
+                <h2>注册成功，套餐已激活</h2>
+                <p>你的账户已按所选套餐解锁对应功能权限。</p>
                 <div className="membership-result">
                   <div>
-                    <span>会员状态</span>
+                    <span>套餐状态</span>
                     <b className="pos">有效</b>
                   </div>
                   <div>
@@ -357,7 +357,7 @@ export default function LoginPage() {
                   </div>
                   <div>
                     <span>功能权限</span>
-                    <b>全部开放</b>
+                    <b>按套餐开放</b>
                   </div>
                 </div>
                 <div className="notice">

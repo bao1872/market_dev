@@ -2,23 +2,27 @@
 
 端点：
 - GET /watchlist: 当前用户自选列表（user_id 由认证上下文注入）
-- POST /watchlist: 加入自选（instrument_id，user_id 由认证上下文注入，事务内校验监控额度）
+- POST /watchlist: 加入自选（使用 AccessContext 统一权限模型校验订阅与额度）
 - DELETE /watchlist/{instrument_id}: 移除自选（软删除：active=false + removed_at）
 - GET /watchlist/monitor-status: 自选股+监控状态聚合查询
 
 设计说明：
-- user_id 由 get_current_active_user 注入，不接受请求体传入（V1.1 安全约束）
+- user_id 由认证上下文注入，不接受请求体传入（V1.1 安全约束）
+- POST /watchlist 使用 AccessContext 统一权限模型：
+  - require_active_subscription: 需有效订阅（admin 豁免），过期/无订阅返回 403
+  - require_quota("monitor_limit"): 返回额度值（admin=None 无限制；member=int 限额）
+  - 不再自行查询 Subscription 表或判断 admin 角色（单一事实源原则）
 - 加入自选即参与当前启用的监控方案（universe_service 聚合 active=true 记录）
 - 移除采用软删除（active=false + removed_at），保留历史，支持重新加入
 - (user_id, instrument_id) 唯一约束：重复加入返回 409 Conflict
 - 重新加入已软删除的记录：恢复 active=true 并清空 removed_at
 - monitor-status 端点 JOIN Instrument + MonitorState(最新 released watchlist_monitor 版本) + MonitorEvaluation(最新评估记录)
 
-套餐权限（plans 表）：
-- POST /watchlist 及恢复软删除前事务内校验 active count < monitor_limit
+套餐权限（plans 表，通过 AccessContext 统一读取）：
+- POST /watchlist 及恢复软删除前校验 active count < monitor_limit
 - 超限返回 409 {"detail": "监控数量已达上限 N"}
-- 管理员角色绕过监控数量限制
-- 无会员记录的普通用户返回 403（无监控权限）
+- admin（monitor_limit=None）绕过监控数量限制
+- 过期订阅或无订阅返回 403（由 require_active_subscription 校验）
 - 降级后已有数量超过额度不删除，只禁止新增
 """
 
@@ -227,21 +231,27 @@ async def list_watchlist(
 async def add_to_watchlist(
     payload: WatchlistAddRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
+    ctx: AccessContext = Depends(require_active_subscription),
+    monitor_limit: int | None = Depends(require_quota("monitor_limit")),
 ) -> WatchlistItemResponse:
-    """加入自选 - 事务内校验监控数量额度。
+    """加入自选 - 使用 AccessContext 统一权限模型校验订阅与额度。
 
-    user_id 由认证上下文注入（不接受 body 中的 user_id）。
+    权限链：
+    - require_active_subscription: 需有效订阅（admin 豁免），过期/无订阅返回 403
+    - require_quota("monitor_limit"): 返回额度值（admin=None 无限制；member=int 限额）
+
+    user_id 由权限上下文注入（不接受 body 中的 user_id）。
     若已存在软删除记录，则恢复 active=true 并清空 removed_at（重新加入）。
     若已存在 active 记录，返回 409 Conflict。
 
-    套餐权限：
+    套餐额度：
     - 恢复软删除记录前校验额度（恢复后 active 数量 +1）
     - 新建记录前校验额度
-    - 管理员绕过额度限制
+    - admin（monitor_limit=None）绕过额度限制
     - 超限返回 409 {"detail": "监控数量已达上限 N"}
-    - 无会员记录返回 403
     """
+    user_id = UUID(ctx.user_id)
+
     # 校验股票存在
     inst_stmt = select(Instrument).where(Instrument.id == payload.instrument_id)
     inst_result = await db.execute(inst_stmt)
@@ -253,7 +263,7 @@ async def add_to_watchlist(
 
     # 查询是否已有记录（含软删除）
     stmt = select(UserWatchlistItem).where(
-        UserWatchlistItem.user_id == current_user.id,
+        UserWatchlistItem.user_id == user_id,
         UserWatchlistItem.instrument_id == payload.instrument_id,
     )
     result = await db.execute(stmt)
@@ -266,7 +276,7 @@ async def add_to_watchlist(
                 detail="该股票已在自选列表中",
             )
         # 恢复软删除记录前校验额度（恢复后 active 数量 +1）
-        await _check_watchlist_limit(db, current_user)
+        await _check_limit_if_needed(db, user_id, monitor_limit)
         # 恢复软删除记录：重新加入
         existing.active = True
         existing.removed_at = None
@@ -276,11 +286,11 @@ async def add_to_watchlist(
         return WatchlistItemResponse.model_validate(existing)
 
     # 新建记录前校验额度
-    await _check_watchlist_limit(db, current_user)
+    await _check_limit_if_needed(db, user_id, monitor_limit)
 
     # 新建自选记录
     item = UserWatchlistItem(
-        user_id=current_user.id,
+        user_id=user_id,
         instrument_id=payload.instrument_id,
         source=payload.source,
         active=True,

@@ -11,9 +11,8 @@ advice.md: 新增持久化 CaptureJob 表，支持截图失败重试 + 达上限
 from __future__ import annotations
 
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
-
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = "040_capture_jobs"

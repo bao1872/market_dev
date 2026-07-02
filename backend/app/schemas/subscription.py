@@ -52,6 +52,64 @@ class MemberListItem(BaseModel):
     created_at: datetime = Field(..., description="用户创建时间")
 
 
+class GrantSubscriptionRequest(BaseModel):
+    """管理员授予用户订阅请求。"""
+
+    plan_code: str = Field(..., description="套餐代码 observe_20/research_50")
+    grant_months: int = Field(..., ge=1, le=36, description="授予自然月数（1-36）")
+
+
+class RenewSubscriptionRequest(BaseModel):
+    """管理员续期用户订阅请求。"""
+
+    grant_months: int = Field(..., ge=1, le=36, description="续期自然月数（1-36）")
+
+
+class ChangePlanRequest(BaseModel):
+    """管理员修改用户套餐请求。"""
+
+    plan_code: str = Field(..., description="目标套餐代码 observe_20/research_50")
+    grant_months: int = Field(..., ge=1, le=36, description="授予/续期自然月数（1-36）")
+
+
+class SubscriptionResponse(BaseModel):
+    """订阅记录响应。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID = Field(..., description="订阅 ID")
+    user_id: UUID = Field(..., description="用户 ID")
+    plan_code: str = Field(..., description="套餐代码")
+    status: str = Field(..., description="active/revoked/cancelled")
+    starts_at: datetime = Field(..., description="订阅开始时间")
+    expires_at: datetime = Field(..., description="订阅到期时间")
+    entitlement_snapshot: dict = Field(..., description="权益快照")
+    source: str = Field(..., description="来源 invite/admin_grant/migration")
+    created_by: UUID | None = Field(None, description="创建人 user_id")
+    created_at: datetime = Field(..., description="创建时间")
+    updated_at: datetime = Field(..., description="更新时间")
+
+
+class SubscriptionRenewResponse(BaseModel):
+    """管理员续期订阅响应（含 old/new expires_at）。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID = Field(..., description="订阅 ID")
+    user_id: UUID = Field(..., description="用户 ID")
+    plan_code: str = Field(..., description="套餐代码")
+    status: str = Field(..., description="active/revoked/cancelled")
+    starts_at: datetime = Field(..., description="订阅开始时间")
+    expires_at: datetime = Field(..., description="续期后到期时间")
+    old_expires_at: datetime = Field(..., description="续期前到期时间")
+    new_expires_at: datetime = Field(..., description="续期后到期时间")
+    entitlement_snapshot: dict = Field(..., description="权益快照")
+    source: str = Field(..., description="来源 invite/admin_grant/migration")
+    created_by: UUID | None = Field(None, description="创建人 user_id")
+    created_at: datetime = Field(..., description="创建时间")
+    updated_at: datetime = Field(..., description="更新时间")
+
+
 if __name__ == "__main__":
     # 自测入口：验证 schema 字段定义（不连接数据库）
     print(f"MembershipResponse fields={list(MembershipResponse.model_fields.keys())}")

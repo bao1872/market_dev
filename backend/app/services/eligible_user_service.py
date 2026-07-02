@@ -89,6 +89,7 @@ async def list_eligible_user_ids(db: AsyncSession) -> list[UUID]:
     """
     stmt = (
         select(User.id)
+        .distinct()
         .join(Subscription, Subscription.user_id == User.id)
         .where(
             User.status == "active",
@@ -153,6 +154,7 @@ async def filter_eligible_recipients(
 
     stmt = (
         select(User.id)
+        .distinct()
         .join(Subscription, Subscription.user_id == User.id)
         .where(
             User.id.in_(user_ids),

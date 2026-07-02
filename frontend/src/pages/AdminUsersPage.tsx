@@ -25,6 +25,10 @@ import {
   useCreateInviteCodes,
   useRevokeInviteCode,
   usePlans,
+  useAdminEnableUser,
+  useAdminDisableUser,
+  useAdminChangeSubscriptionPlan,
+  useAdminAuditLogs,
 } from '@/hooks/useApi'
 import { StrategyDataTable } from '@/components/StrategyDataTable'
 import type { DataTableColumn } from '@/components/StrategyDataTable'
@@ -32,6 +36,7 @@ import {
   type InviteCode,
   type PlanCode,
   type PlanResponse,
+  type AuditLogListItem,
 } from '@/api/endpoints'
 
 // ===== 类型定义（带索引签名以满足 StrategyDataTable 的 Row extends Record<string, unknown>）=====
@@ -172,27 +177,34 @@ function getPlanMonitorLimit(
 export default function AdminUsersPage() {
   const toast = useToast()
 
-  // 数据查询 hooks
-  const membersQuery = useMembers()
-  const inviteCodesQuery = useInviteCodes()
-  const plansQuery = usePlans()
-  const createInviteCodes = useCreateInviteCodes()
-  const revokeInviteCode = useRevokeInviteCode()
-
-  const plans = plansQuery.data ?? []
-  const firstPlanCode = plans[0]?.plan_code ?? ''
-
   // 页面状态
   const [activeTab, setActiveTab] = useState<string>('memberList')
   // 用户详情抽屉
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [selectedMember, setSelectedMember] = useState<MemberRow | null>(null)
   const [drawerTab, setDrawerTab] = useState<string>('profile')
+
+  // 数据查询 hooks（依赖 selectedMember 的需放在状态定义之后）
+  const membersQuery = useMembers()
+  const inviteCodesQuery = useInviteCodes()
+  const plansQuery = usePlans()
+  const createInviteCodes = useCreateInviteCodes()
+  const revokeInviteCode = useRevokeInviteCode()
+  const enableUser = useAdminEnableUser()
+  const disableUser = useAdminDisableUser()
+  const changePlan = useAdminChangeSubscriptionPlan()
+  const auditLogsQuery = useAdminAuditLogs(
+    selectedMember ? { target_user_id: selectedMember.user_id } : undefined,
+    !!selectedMember,
+  )
+
+  const plans = plansQuery.data ?? []
+  const firstPlanCode = plans[0]?.plan_code ?? ''
   // 抽屉表单编辑状态
   const [accountStatusEdit, setAccountStatusEdit] = useState('有效')
   const [membershipStatusEdit, setMembershipStatusEdit] = useState('有效')
   const [expiresAtEdit, setExpiresAtEdit] = useState('')
-  const [roleEdit, setRoleEdit] = useState('普通会员')
+  const [planCodeEdit, setPlanCodeEdit] = useState<PlanCode>('')
   // 生成邀请码弹窗
   const [modalOpen, setModalOpen] = useState(false)
   const [generateCount, setGenerateCount] = useState(1)
@@ -271,7 +283,7 @@ export default function AdminUsersPage() {
     const statusPill = getMemberStatusPill(member)
     setMembershipStatusEdit(statusPill.label)
     setExpiresAtEdit(member.expires_at ? formatDate(member.expires_at) : '')
-    setRoleEdit('普通会员')
+    setPlanCodeEdit('')
     setDrawerOpen(true)
   }, [])
 
@@ -379,26 +391,63 @@ export default function AdminUsersPage() {
     setGeneratedCodes([])
   }, [])
 
-  /** 重置登录（当前无后端接口，显示 toast 提示） */
-  const handleResetLogin = useCallback(() => {
-    toast.show('密码重置邮件已发送', `已向 ${selectedMember?.email ?? ''} 发送重置邮件`)
-  }, [toast, selectedMember])
-
-  /** 只读排障视角（当前无后端接口，显示 toast 提示） */
-  const handleReadOnlyDebug = useCallback(() => {
-    toast.show('已进入只读排障视角', '当前管理员以只读模式查看该用户数据')
-  }, [toast])
-
-  /** 保存会员资料（当前无后端接口，显示 toast 提示） */
+  /** 保存账户状态：仅映射 accountStatusEdit 到 enable/disable */
   const handleSaveProfile = useCallback(() => {
-    toast.show('会员资料已保存', '账户状态、会员状态、到期时间、角色已更新')
-    handleCloseDrawer()
-  }, [toast, handleCloseDrawer])
+    if (!selectedMember) return
+    const wantDisabled = accountStatusEdit === '停用'
+    const currentlyDisabled = selectedMember.account_status === 'disabled'
 
-  /** 导出会员（当前无后端接口，显示 toast 提示） */
-  const handleExportMembers = useCallback(() => {
-    toast.show('导出会员', '会员列表导出功能开发中')
-  }, [toast])
+    const onError = (err: unknown) => {
+      const axiosErr = err as { response?: { data?: { detail?: string } } }
+      const message = axiosErr.response?.data?.detail ?? '账户状态更新失败'
+      toast.show('保存失败', message)
+    }
+
+    if (wantDisabled && !currentlyDisabled) {
+      disableUser.mutate(selectedMember.user_id, {
+        onSuccess: () => {
+          toast.show('账户已停用', '该用户账户已停用')
+          handleCloseDrawer()
+        },
+        onError,
+      })
+    } else if (!wantDisabled && currentlyDisabled) {
+      enableUser.mutate(selectedMember.user_id, {
+        onSuccess: () => {
+          toast.show('账户已启用', '该用户账户已启用')
+          handleCloseDrawer()
+        },
+        onError,
+      })
+    } else {
+      handleCloseDrawer()
+    }
+  }, [selectedMember, accountStatusEdit, disableUser, enableUser, toast, handleCloseDrawer])
+
+  /** 选择目标套餐：调用 change-plan 变更用户套餐（grant_months 默认 1） */
+  const handlePlanChange = useCallback(
+    (planCode: PlanCode) => {
+      if (!planCode || !selectedMember) return
+      setPlanCodeEdit(planCode)
+      changePlan.mutate(
+        {
+          userId: selectedMember.user_id,
+          payload: { plan_code: planCode, grant_months: 1 },
+        },
+        {
+          onSuccess: () => {
+            toast.show('套餐已变更', `用户套餐已更新为 ${getPlanName(planCode, plans)}`)
+          },
+          onError: (err: unknown) => {
+            const axiosErr = err as { response?: { data?: { detail?: string } } }
+            const message = axiosErr.response?.data?.detail ?? '套餐变更失败'
+            toast.show('变更失败', message)
+          },
+        },
+      )
+    },
+    [selectedMember, changePlan, plans, toast],
+  )
 
   // ===== 会员表列定义 =====
   const memberColumns: DataTableColumn<MemberRow>[] = useMemo(
@@ -678,9 +727,6 @@ export default function AdminUsersPage() {
           </div>
         </div>
         <div className="actions">
-          <button className="btn" onClick={handleExportMembers}>
-            导出会员
-          </button>
           <button className="btn primary" onClick={handleOpenModal}>
             ＋ 生成邀请码
           </button>
@@ -948,14 +994,19 @@ export default function AdminUsersPage() {
                       />
                     </div>
                     <div className="form-row">
-                      <label className="form-label">角色</label>
+                      <label className="form-label">套餐</label>
                       <select
                         className="select"
-                        value={roleEdit}
-                        onChange={(e) => setRoleEdit(e.target.value)}
+                        value={planCodeEdit}
+                        onChange={(e) => handlePlanChange(e.target.value)}
+                        disabled={plansQuery.isLoading || plans.length === 0}
                       >
-                        <option>普通会员</option>
-                        <option>管理员</option>
+                        <option value="">选择目标套餐</option>
+                        {plans.map((p) => (
+                          <option key={p.plan_code} value={p.plan_code}>
+                            {p.display_name}
+                          </option>
+                        ))}
                       </select>
                     </div>
                   </div>
@@ -1002,17 +1053,42 @@ export default function AdminUsersPage() {
               {/* 审计 tab */}
               {drawerTab === 'audit' && (
                 <div className="tab-panel active drawer-tab-panel">
-                  <div className="empty">最近管理员审计记录</div>
+                  {auditLogsQuery.isLoading && (
+                    <div className="empty">加载审计记录中…</div>
+                  )}
+                  {!auditLogsQuery.isLoading && auditLogsQuery.isError && (
+                    <div className="empty">
+                      审计记录加载失败：
+                      {(auditLogsQuery.error as Error)?.message ?? '未知错误'}
+                    </div>
+                  )}
+                  {!auditLogsQuery.isLoading &&
+                    !auditLogsQuery.isError &&
+                    (auditLogsQuery.data?.items ?? []).length === 0 && (
+                      <div className="empty">暂无审计记录</div>
+                  )}
+                  {!auditLogsQuery.isLoading && !auditLogsQuery.isError && (
+                    <div className="timeline-simple">
+                      {(auditLogsQuery.data?.items ?? []).map((log: AuditLogListItem) => (
+                        <div key={log.id}>
+                          <i />
+                          <span>
+                            <b>
+                              {formatDateTime(log.created_at)} · {log.action}
+                            </b>
+                            <small>操作者 {log.actor_user_id}</small>
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
 
             <div className="drawer-foot">
-              <button className="btn" onClick={handleResetLogin}>
-                重置登录
-              </button>
-              <button className="btn" onClick={handleReadOnlyDebug}>
-                只读排障
+              <button className="btn" onClick={handleCloseDrawer}>
+                关闭
               </button>
               <button className="btn primary" onClick={handleSaveProfile}>
                 保存

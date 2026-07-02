@@ -5,9 +5,8 @@ Revises: 023_event_recips
 Create Date: 2026-06-24
 """
 
-import sqlalchemy as sa
-
 from alembic import op
+import sqlalchemy as sa
 
 revision = "024_strat_def_env"
 down_revision = "023_event_recips"

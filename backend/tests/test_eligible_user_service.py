@@ -10,7 +10,7 @@
 测试策略：
 - 使用 conftest.py 的 db_session fixture（PostgreSQL 测试库 bz_stock_test）
 - 使用 user_factory / subscription_factory 创建测试数据
-- 表结构由 Alembic 迁移创建（禁止手写 CREATE TABLE）
+- 表结构由 Alembic 迁移创建（禁止手写 DDL 建表语句）
 - 角色名用 member（不是 user），admin 无套餐无 subscription
 """
 

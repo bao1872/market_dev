@@ -90,6 +90,36 @@ export interface UserResponse {
   updated_at: string
 }
 
+/** 用户列表分页响应 */
+export interface UserListResponse {
+  items: UserResponse[]
+  total: number
+  limit: number
+  offset: number
+}
+
+/** 审计日志列表项 */
+export interface AuditLogListItem {
+  id: string
+  actor_user_id: string
+  action: string
+  target_type: string
+  target_id: string | null
+  before_data: Record<string, unknown> | null
+  after_data: Record<string, unknown> | null
+  request_id: string | null
+  ip_hash: string | null
+  created_at: string
+}
+
+/** 审计日志列表响应 */
+export interface AuditLogListResponse {
+  items: AuditLogListItem[]
+  total: number
+  limit: number
+  offset: number
+}
+
 /** 会员状态响应 */
 export interface MembershipResponse {
   status: string
@@ -116,6 +146,27 @@ export interface RenewSuccessResponse {
   old_expires_at: string | null
   new_expires_at: string
   remaining_days: number
+}
+
+/** 订阅记录响应 */
+export interface SubscriptionResponse {
+  id: string
+  user_id: string
+  plan_code: string
+  status: string
+  starts_at: string
+  expires_at: string
+  entitlement_snapshot: Record<string, unknown>
+  source: string
+  created_by: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** 管理员续期订阅响应 */
+export interface SubscriptionRenewResponse extends SubscriptionResponse {
+  old_expires_at: string
+  new_expires_at: string
 }
 
 // ============================================================
@@ -752,6 +803,28 @@ export interface InviteCodeCreateRequest {
   note?: string
   plan_code?: PlanCode
   grant_months?: number
+}
+
+/** 管理员授予用户套餐请求 */
+export interface GrantSubscriptionRequest {
+  plan_code: PlanCode
+  grant_months: number
+}
+
+/** 管理员续期用户套餐请求 */
+export interface RenewSubscriptionRequest {
+  grant_months: number
+}
+
+/** 管理员变更用户套餐请求 */
+export interface ChangePlanRequest {
+  plan_code: PlanCode
+  grant_months: number
+}
+
+/** 管理员变更用户账户状态请求 */
+export interface ChangeAccountStatusRequest {
+  status: 'active' | 'disabled'
 }
 
 
@@ -1558,6 +1631,85 @@ export async function getMembers(params?: PaginationParams): Promise<MemberListR
 /** 查询用户兑换记录 */
 export async function getMemberRedemptions(userId: string): Promise<InviteRedemption[]> {
   const { data } = await apiClient.get<InviteRedemption[]>(`/admin/members/${userId}/redemptions`)
+  return data
+}
+
+/** 查询用户列表（admin） */
+export async function getAdminUsers(params?: PaginationParams): Promise<UserListResponse> {
+  const { data } = await apiClient.get<UserListResponse>('/admin/users', { params })
+  return data
+}
+
+/** 查询用户详情（admin） */
+export async function getAdminUser(userId: string): Promise<UserResponse> {
+  const { data } = await apiClient.get<UserResponse>(`/admin/users/${userId}`)
+  return data
+}
+
+/** 启用用户账户（admin） */
+export async function adminEnableUser(userId: string): Promise<UserResponse> {
+  const { data } = await apiClient.post<UserResponse>(`/admin/users/${userId}/enable`)
+  return data
+}
+
+/** 停用用户账户（admin） */
+export async function adminDisableUser(userId: string): Promise<UserResponse> {
+  const { data } = await apiClient.post<UserResponse>(`/admin/users/${userId}/disable`)
+  return data
+}
+
+/** 管理员授予用户套餐 */
+export async function adminGrantSubscription(
+  userId: string,
+  payload: GrantSubscriptionRequest,
+): Promise<SubscriptionResponse> {
+  const { data } = await apiClient.post<SubscriptionResponse>(
+    `/admin/users/${userId}/subscriptions/grant`,
+    payload,
+  )
+  return data
+}
+
+/** 管理员续期用户套餐 */
+export async function adminRenewSubscription(
+  userId: string,
+  payload: RenewSubscriptionRequest,
+): Promise<SubscriptionRenewResponse> {
+  const { data } = await apiClient.post<SubscriptionRenewResponse>(
+    `/admin/users/${userId}/subscriptions/renew`,
+    payload,
+  )
+  return data
+}
+
+/** 管理员撤销用户套餐 */
+export async function adminRevokeSubscription(userId: string): Promise<SubscriptionResponse> {
+  const { data } = await apiClient.post<SubscriptionResponse>(
+    `/admin/users/${userId}/subscriptions/revoke`,
+  )
+  return data
+}
+
+/** 管理员变更用户套餐 */
+export async function adminChangeSubscriptionPlan(
+  userId: string,
+  payload: ChangePlanRequest,
+): Promise<SubscriptionResponse> {
+  const { data } = await apiClient.post<SubscriptionResponse>(
+    `/admin/users/${userId}/subscriptions/change-plan`,
+    payload,
+  )
+  return data
+}
+
+/** 查询管理员审计日志 */
+export async function getAdminAuditLogs(params?: {
+  target_user_id?: string
+  action?: string
+  limit?: number
+  offset?: number
+}): Promise<AuditLogListResponse> {
+  const { data } = await apiClient.get<AuditLogListResponse>('/admin/audit-logs', { params })
   return data
 }
 
