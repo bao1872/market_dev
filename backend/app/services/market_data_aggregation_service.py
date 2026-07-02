@@ -398,6 +398,11 @@ def _deserialize_result(raw: str) -> BarAggregationResult | None:
 
 def _cache_get(cache_key: str) -> BarAggregationResult | None:
     """从 Redis 读取缓存结果。"""
+    from app.config import get_settings
+
+    settings = get_settings()
+    if not settings.bars_redis_cache_enabled:
+        return None
     try:
         client = get_sync_redis()
         raw = client.get(cache_key)
@@ -415,6 +420,11 @@ def _cache_set(
     ttl: int | None = None,
 ) -> None:
     """写入 Redis 缓存。"""
+    from app.config import get_settings
+
+    settings = get_settings()
+    if not settings.bars_redis_cache_enabled:
+        return
     if ttl is None:
         ttl = random.randint(_MIN_CACHE_TTL, _MAX_CACHE_TTL)
     try:
