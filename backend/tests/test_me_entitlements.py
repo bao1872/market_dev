@@ -3,9 +3,9 @@
 验证返回字段：{plan_code, plan_name, monitor_limit, used, remaining, expires_at}
 - 普通用户 observe_20：monitor_limit=20，used=自选股 active 数，remaining=20-used
 - 普通用户 research_50：monitor_limit=50
-- 管理员：plan_code=None，monitor_limit=None（无限制），无会员记录要求
-- 无会员记录：404
-- 已到期会员：仍返回套餐信息（status=expired）
+- 管理员：plan_code=None，monitor_limit=None（无限制），无订阅记录要求
+- 无订阅记录：404
+- 已到期订阅：仍返回套餐信息（status=expired）
 
 测试策略：
 - 使用 conftest 的 db_session fixture（PostgreSQL 测试库）
@@ -189,7 +189,7 @@ async def test_entitlements_research_50_user(entitlements_client):
 
 @pytest.mark.asyncio
 async def test_entitlements_admin_has_no_plan(entitlements_client):
-    """管理员：plan_code=None，monitor_limit=None（无限制），无会员记录要求（AGENTS.md 规则 8）。"""
+    """管理员：plan_code=None，monitor_limit=None（无限制），无订阅记录要求（AGENTS.md 规则 8）。"""
     client, db = entitlements_client
     admin = await _create_admin(db)
     await db.flush()
@@ -207,9 +207,9 @@ async def test_entitlements_admin_has_no_plan(entitlements_client):
 
 @pytest.mark.asyncio
 async def test_entitlements_no_membership_returns_404(entitlements_client):
-    """无会员记录用户：返回 404。"""
+    """无订阅记录用户：返回 404。"""
     client, db = entitlements_client
-    # 创建无会员记录的普通用户
+    # 创建无订阅记录的普通用户
     user = User(
         id=uuid.uuid4(),
         email=f"nomember_{uuid.uuid4().hex[:8]}@test.com",
@@ -227,7 +227,7 @@ async def test_entitlements_no_membership_returns_404(entitlements_client):
     resp = await client.get("/me/entitlements", headers=_auth_headers(user.id))
 
     assert resp.status_code == 404
-    assert "会员记录" in resp.json()["detail"] or "无会员" in resp.json()["detail"]
+    assert "无订阅记录" in resp.json()["detail"] or "无订阅" in resp.json()["detail"]
 
 
 @pytest.mark.asyncio
