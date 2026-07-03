@@ -44,7 +44,7 @@ error_code / error_message
 
 管理员和运维必须能回答：运行中的 Worker、Git SHA、心跳、next run、当前任务、股票计数、失败阶段、重试状态、发布完整性、文字状态、图片状态和数据新鲜度。
 
-生产只读审计发现：`worker_heartbeats` 存在 stale/running 僵尸记录，导致 Worker 状态可信度不足。该问题应作为独立小 PR 修复，不要混入飞书或 worker.py 大拆分。
+生产只读审计发现：`worker_heartbeats` 存在 stale/running 僵尸记录，导致 Worker 状态可信度不足。代码修复已由 PR #4 实现：`_recovery_watchdog_loop` 每 60 秒调用 `mark_stale_worker_heartbeats`，将 `status='running'` 且 `heartbeat_at` 超过 600 秒的记录标记为 `stopped`。待生产部署后验证僵尸记录被实际清理（ALIGN-023）。
 
 ## 4. 飞书 Platform App
 
