@@ -2,7 +2,7 @@
 > 基线日期：2026-07-02  
 > 操作分支：`fix/release-remaining-alignment-gaps`  
 > Phase D 起始代码基线（implementation_base_commit）：`64ed75cce80f5b3f2b5ab95f96b52aac11475e3e`  
-> 已验证实现 Commit（verified_implementation_commit）：`4e146f0bcc1d3d05e51f4fe968913eac74651778`  
+> 已验证实现 Commit（verified_implementation_commit）：`ed8bcef2117f8cc62d61ada8d59f280e05453843`  
 > 验证日期：2026-07-02  
 > 验证状态：本地验证完成；CI 未验证；生产未验证  
 > 事实来源：代码库 + 项目负责人截至 2026-07-02 已确认的产品与架构要求  
@@ -12,7 +12,7 @@
 
 # 18 代码、文档与生产反馈对齐表
 
-本表是代码基线 `4e146f0bcc1d3d05e51f4fe968913eac74651778`（verified_implementation_commit）的实现事实快照，只记录“当前确认设计已经明确，但实现、测试、部署或生产表现尚未一致”的问题。未决产品问题进入 `17-open-decisions.md`；历史经过进入 CHANGE。
+本表是代码基线 `ed8bcef2117f8cc62d61ada8d59f280e05453843`（verified_implementation_commit）的实现事实快照，只记录“当前确认设计已经明确，但实现、测试、部署或生产表现尚未一致”的问题。未决产品问题进入 `17-open-decisions.md`；历史经过进入 CHANGE。
 
 只要本表仍有未关闭条目，就只能声明“文档已准确对齐当前代码及其差异”，不能声明“代码已经完全符合设计”。
 
