@@ -944,12 +944,19 @@ def _check_docs_root_clean() -> list[str]:
 
 
 def _check_current_contracts() -> list[str]:
-    """核对 docs/current 关键契约是否与代码事实源一致。
+    """核对 docs/current 关键契约是否与代码事实源一致（v2 文档结构）。
+
+    v2 文件名映射：
+    - 旧 12-strategy-indicator-contracts.md → 新 00-product-business.md（Node Cluster 输入契约）
+    - 旧 11-jobs-integrations.md → 新 03-jobs-integrations-operations.md（飞书渠道）
+    - 旧 18-code-doc-alignment.md → 新 code-doc-alignment.md
+    - 旧 13-configuration-parameters.md → v2 无独立配置文档（移除检查）
 
     核对项：
-    - docs/current/12-strategy-indicator-contracts.md 存在并记录 Node Cluster 输入契约；
-    - docs/current/11-jobs-integrations.md 存在并记录飞书渠道；
-    - docs/current/18-code-doc-alignment.md 存在；
+    - docs/current/MANIFEST.md 存在（v2 唯一基线头）；
+    - docs/current/00-product-business.md 存在并记录 Node Cluster 输入契约；
+    - docs/current/03-jobs-integrations-operations.md 存在并记录飞书渠道；
+    - docs/current/code-doc-alignment.md 存在；
     - indicator_contract.py 中 CHART_BARS_COUNT 与 INDICATOR_BARS['1d'] 自洽。
 
     Returns:
@@ -957,32 +964,41 @@ def _check_current_contracts() -> list[str]:
     """
     issues: list[str] = []
 
-    # 1. 关键 current 文档存在性
+    # 1. 关键 current 文档存在性（v2 文件名）
     required_current_docs = [
-        "12-strategy-indicator-contracts.md",
-        "11-jobs-integrations.md",
-        "18-code-doc-alignment.md",
-        "13-configuration-parameters.md",
+        "MANIFEST.md",
+        "00-product-business.md",
+        "01-system-architecture.md",
+        "02-data-api-contracts.md",
+        "03-jobs-integrations-operations.md",
+        "04-frontend-ux.md",
+        "05-testing-acceptance.md",
+        "open-decisions.md",
+        "code-doc-alignment.md",
     ]
     for name in required_current_docs:
         path = os.path.join(_DOCS_CURRENT_DIR, name)
         if not os.path.exists(path):
             issues.append(f"缺少关键当前设计文档: docs/current/{name}")
 
-    # 2. 策略与指标契约文档应包含 Node Cluster 输入契约
-    strategy_contract = _read_file(
-        os.path.join(_DOCS_CURRENT_DIR, "12-strategy-indicator-contracts.md")
+    # 2. 产品业务文档应包含 Node Cluster 输入契约
+    product_doc = _read_file(
+        os.path.join(_DOCS_CURRENT_DIR, "00-product-business.md")
     )
-    if strategy_contract is not None:
-        if "Node Cluster" not in strategy_contract:
+    if product_doc is not None:
+        if "Node Cluster" not in product_doc:
             issues.append(
-                "docs/current/12-strategy-indicator-contracts.md 缺少 Node Cluster 输入契约"
+                "docs/current/00-product-business.md 缺少 Node Cluster 输入契约"
             )
 
     # 3. 飞书集成文档应记录渠道方式
-    jobs_doc = _read_file(os.path.join(_DOCS_CURRENT_DIR, "11-jobs-integrations.md"))
+    jobs_doc = _read_file(
+        os.path.join(_DOCS_CURRENT_DIR, "03-jobs-integrations-operations.md")
+    )
     if jobs_doc is not None and "飞书" not in jobs_doc:
-        issues.append("docs/current/11-jobs-integrations.md 缺少飞书渠道说明")
+        issues.append(
+            "docs/current/03-jobs-integrations-operations.md 缺少飞书渠道说明"
+        )
 
     # 4. 核对 indicator_contract 关键参数自洽性
     try:

@@ -646,12 +646,17 @@ def check_plan_value_hardcoding() -> list[Violation]:
 
 
 def check_daili_placeholder() -> list[Violation]:
-    """规则：docs/ 与 AGENTS.md 禁止 '待填写' 占位符。"""
+    """规则：docs/current/ 与 docs/maps/ 禁止 '待填写' 占位符（v2 适配）。
+
+    v2 调整：只在 current/maps（事实源）中检查占位符；
+    archive/changes/根目录规则说明文档/AGENTS.md 可能引用"待填写"作为规则描述，
+    不检查，避免误判。
+    """
     violations: list[Violation] = []
     for path in iter_scanned_files(extensions={".md"}, include_markdown=True):
-        if path == ROOT / "AGENTS.md":
-            pass
-        elif not is_under(path, ROOT / "docs"):
+        # v2：只在 current/maps 中检查占位符
+        if not (is_under(path, ROOT / "docs" / "current") or
+                is_under(path, ROOT / "docs" / "maps")):
             continue
         text = read_text(path)
         for match in DAILI_PLACEHOLDER_PATTERN.finditer(text):

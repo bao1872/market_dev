@@ -1,21 +1,27 @@
 #!/usr/bin/env python3
 """
-检查 docs/ 与 AGENTS.md 的文档一致性。
+检查 docs/ 文档一致性（v2：MANIFEST 集中基线）。
 
 用法:
     python tools/check_docs_consistency.py
 
-检查项（advice §8 第 1-10 条）:
-1. 所有 docs/current/*.md 和 docs/README.md 必须有 `实现核对基线：<40位SHA>`；
-2. 零匹配必须失败；
-3. 缺失基线字段必须失败（设计基线日期/实现核对基线/实现核对分支/最近一致性检查日期）；
-4. 非法 SHA 必须失败（非 40 位 hex 或 git 验证失败）；
-5. SHA 不是当前 HEAD 祖先必须失败；
-6. current 文档之间 baseline 不一致必须失败；
-7. current 文档重新写 feishu_webhook 为当前方案必须失败（删除语境豁免）；
-8. current 文档把 Webhook vs Platform App 写成 OPEN 必须失败；
-9. 本地 Markdown 链接检查和 `待填写` 检查继续保留；
-10. 输出显示扫描 current 文档数量、解析 baseline 数量、统一 baseline SHA。
+v2 规则（docs/restructure-system-map-v2 之后）:
+1. 只要求 docs/current/MANIFEST.md 有全局基线字段 `实现核对基线：<40位SHA>`；
+2. MANIFEST 的 实现核对基线 必须是 40 位 SHA；
+3. SHA 必须是真实 git 提交；
+4. SHA 必须是当前 HEAD 的祖先；
+5. current 其他文档不要求重复 baseline 字段；
+6. archive 旧文档不参与 baseline 一致性检查；
+7. 保留 docs 本地 Markdown 链接检查（docs/ 递归 + AGENTS.md）；
+8. 保留 `待填写` 占位符检查；
+9. 保留 feishu_webhook 当前方案回归阻断（current 文档，删除语境豁免）；
+10. 保留 open-decisions 把 Webhook vs Platform App 写回 OPEN 的阻断。
+
+输出汇总：
+- MANIFEST baseline SHA
+- current 文档数量
+- maps 文档数量
+- 链接检查文件数量
 """
 
 from __future__ import annotations
@@ -29,22 +35,17 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCS_DIR = REPO_ROOT / "docs"
 CURRENT_DIR = DOCS_DIR / "current"
-README_FILE = DOCS_DIR / "README.md"
+MANIFEST_FILE = CURRENT_DIR / "MANIFEST.md"
+MAPS_DIR = DOCS_DIR / "maps"
+ARCHIVE_DIR = DOCS_DIR / "archive"
 AGENTS_FILE = REPO_ROOT / "AGENTS.md"
 
 # 同时识别英文 `Last verified code baseline` 和中文 `实现核对基线`，要求 40 位 hex
 # 兼容 ASCII `:` 和中文全角 `：`
+# 允许可选反引号包围 SHA（v2 MANIFEST 使用 `sha` 格式）
 BASELINE_RE = re.compile(
-    r"(?:Last verified code baseline|实现核对基线)[:：]\s*([0-9a-fA-F]{40})"
+    r"(?:Last verified code baseline|实现核对基线)[:：]\s*`?([0-9a-fA-F]{40})`?"
 )
-
-# 必需的基线头部字段（docs/current/*.md 和 docs/README.md 必须全部包含）
-REQUIRED_BASELINE_FIELDS = [
-    "设计基线日期",
-    "实现核对基线",
-    "实现核对分支",
-    "最近一致性检查日期",
-]
 
 # Webhook 回归检测：feishu_webhook 出现在 current 文档时，若行内包含以下删除语境关键词则豁免
 WEBHOOK_DELETION_CONTEXT = [
@@ -57,7 +58,7 @@ WEBHOOK_DELETION_CONTEXT = [
     "adapter_type",
 ]
 
-# OPEN 回归检测：17-open-decisions.md 中 Webhook 与以下关键词同时出现即视为 OPEN 回归
+# OPEN 回归检测：open-decisions.md 中 Webhook 与以下关键词同时出现即视为 OPEN 回归
 OPEN_REGRESSION_KEYWORDS = ["仍需决定", "未决", "OPEN"]
 
 LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
@@ -89,14 +90,28 @@ def is_ancestor_of_head(sha: str) -> bool:
 
 
 def collect_current_docs() -> list[Path]:
-    """收集 docs/current/*.md 文件（不递归，仅顶层）。"""
+    """收集 docs/current/*.md 文件（不递归，仅顶层）。
+
+    包含 MANIFEST.md，用于链接/占位符/webhook 检查。
+    """
     if not CURRENT_DIR.exists():
         return []
     return sorted(p for p in CURRENT_DIR.glob("*.md") if p.is_file())
 
 
+def collect_maps_docs() -> list[Path]:
+    """收集 docs/maps/*.md 文件（不递归，仅顶层）。"""
+    if not MAPS_DIR.exists():
+        return []
+    return sorted(p for p in MAPS_DIR.glob("*.md") if p.is_file())
+
+
 def collect_all_doc_files() -> list[Path]:
-    """收集所有需检查链接/占位符的文档（docs/ 递归 + AGENTS.md）。"""
+    """收集所有需检查链接/占位符的文档（docs/ 递归 + AGENTS.md）。
+
+    注意：archive 目录下的旧文档参与链接/占位符检查，
+    但不参与 baseline 一致性检查（见规则 6）。
+    """
     files: list[Path] = []
     if DOCS_DIR.exists():
         files.extend(sorted(p for p in DOCS_DIR.rglob("*.md") if p.is_file()))
@@ -110,19 +125,8 @@ def extract_baselines(content: str) -> list[str]:
     return BASELINE_RE.findall(content)
 
 
-def check_required_fields(doc_path: Path, content: str) -> list[str]:
-    """规则 3：检查必需基线字段是否齐全。"""
-    errors: list[str] = []
-    for field in REQUIRED_BASELINE_FIELDS:
-        # 允许 `>` 后有空格，兼容 ASCII/全角冒号
-        pattern = re.compile(rf">\s*{re.escape(field)}[:：]\s*\S+")
-        if not pattern.search(content):
-            errors.append(f"缺少必需基线字段: {field}")
-    return errors
-
-
-def check_baseline_sha_format(doc_path: Path, shas: list[str]) -> list[str]:
-    """规则 4：检查 baseline SHA 是否为合法 40 位 hex。"""
+def check_baseline_sha_format(shas: list[str]) -> list[str]:
+    """规则 2：检查 baseline SHA 是否为合法 40 位 hex。"""
     errors: list[str] = []
     for sha in shas:
         if not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
@@ -130,8 +134,8 @@ def check_baseline_sha_format(doc_path: Path, shas: list[str]) -> list[str]:
     return errors
 
 
-def check_baseline_real_commit(doc_path: Path, shas: list[str]) -> list[str]:
-    """规则 4：检查 baseline SHA 是否为真实 git 提交。"""
+def check_baseline_real_commit(shas: list[str]) -> list[str]:
+    """规则 3：检查 baseline SHA 是否为真实 git 提交。"""
     errors: list[str] = []
     for sha in shas:
         if re.fullmatch(r"[0-9a-fA-F]{40}", sha) and not is_valid_commit(sha):
@@ -139,8 +143,8 @@ def check_baseline_real_commit(doc_path: Path, shas: list[str]) -> list[str]:
     return errors
 
 
-def check_baseline_ancestor(doc_path: Path, shas: list[str]) -> list[str]:
-    """规则 5：检查 baseline SHA 是否为当前 HEAD 的祖先。"""
+def check_baseline_ancestor(shas: list[str]) -> list[str]:
+    """规则 4：检查 baseline SHA 是否为当前 HEAD 的祖先。"""
     errors: list[str] = []
     for sha in shas:
         if re.fullmatch(r"[0-9a-fA-F]{40}", sha) and is_valid_commit(sha):
@@ -150,7 +154,7 @@ def check_baseline_ancestor(doc_path: Path, shas: list[str]) -> list[str]:
 
 
 def check_webhook_regression(doc_path: Path, content: str) -> list[str]:
-    """规则 7：current 文档不得把 feishu_webhook 写成当前方案（删除语境豁免）。"""
+    """规则 9：current 文档不得把 feishu_webhook 写成当前方案（删除语境豁免）。"""
     errors: list[str] = []
     lines = content.splitlines()
     for i, line in enumerate(lines, start=1):
@@ -166,9 +170,10 @@ def check_webhook_regression(doc_path: Path, content: str) -> list[str]:
 
 
 def check_open_regression(doc_path: Path, content: str) -> list[str]:
-    """规则 8：17-open-decisions.md 不得把 Webhook vs Platform App 写成 OPEN。
+    """规则 10：open-decisions.md 不得把 Webhook vs Platform App 写成 OPEN。
 
-    判定：行含 "Webhook" 且含 "仍需决定"/"未决"，且不含 "已决定"（已决定表示已闭环）。
+    判定：行含 "Webhook" 且含 "仍需决定"/"未决"/"OPEN"，且不含 "已决定"
+    （已决定表示已闭环，不视为回归）。
     """
     errors: list[str] = []
     lines = content.splitlines()
@@ -236,7 +241,7 @@ def extract_local_links(doc_path: Path, content: str) -> list[tuple[str, Path]]:
 
 
 def check_placeholders(relative_path: str, content: str) -> list[str]:
-    """规则 9：检查待填写占位符。"""
+    """规则 8：检查待填写占位符。"""
     errors: list[str] = []
     for match in PLACEHOLDER_RE.finditer(content):
         line = content[: match.start()].count("\n") + 1
@@ -245,7 +250,7 @@ def check_placeholders(relative_path: str, content: str) -> list[str]:
 
 
 def check_links(doc_path: Path, content: str) -> list[str]:
-    """规则 9：检查本地 Markdown 链接是否指向存在文件。"""
+    """规则 7：检查本地 Markdown 链接是否指向存在文件。"""
     errors: list[str] = []
     for raw_link, target in extract_local_links(doc_path, content):
         if not target.exists():
@@ -253,51 +258,73 @@ def check_links(doc_path: Path, content: str) -> list[str]:
     return errors
 
 
+def check_manifest_baseline() -> tuple[list[str], str | None]:
+    """v2 规则 1-4：检查 docs/current/MANIFEST.md 的全局基线字段。
+
+    Returns:
+        (errors, baseline_sha)：错误列表与解析到的 baseline SHA（无则为 None）
+    """
+    errors: list[str] = []
+
+    if not MANIFEST_FILE.exists():
+        errors.append(f"缺少 MANIFEST 文件: {MANIFEST_FILE.relative_to(REPO_ROOT)}")
+        return errors, None
+
+    content = MANIFEST_FILE.read_text(encoding="utf-8")
+    shas = extract_baselines(content)
+
+    # 规则 1：MANIFEST 必须有 实现核对基线 字段
+    if not shas:
+        errors.append("MANIFEST.md 缺少 实现核对基线 字段")
+        return errors, None
+
+    # 规则 2：SHA 格式校验
+    errors.extend(check_baseline_sha_format(shas))
+
+    # 规则 3：真实提交校验
+    errors.extend(check_baseline_real_commit(shas))
+
+    # 规则 4：祖先校验
+    errors.extend(check_baseline_ancestor(shas))
+
+    # v2 不再要求多文档 baseline 一致性（MANIFEST 是唯一基线头）
+    # 取第一个合法 SHA 作为统一 baseline
+    baseline_sha = shas[0] if shas else None
+    return errors, baseline_sha
+
+
 def main() -> int:
     all_errors: list[str] = []
     placeholder_files: list[str] = []
 
-    # === 第一阶段：基线检查（docs/current/*.md + docs/README.md）===
-    current_docs = collect_current_docs()
-    baseline_files: list[Path] = []
-    if README_FILE.exists():
-        baseline_files.append(README_FILE)
-    baseline_files.extend(current_docs)
-
-    all_baselines: list[tuple[Path, str]] = []
-    baseline_doc_count = 0
-
+    # === 第一阶段：MANIFEST 集中基线检查（v2 规则 1-4）===
     print(f"检查文档目录: {DOCS_DIR.relative_to(REPO_ROOT)}")
-    print(f"共扫描 {len(baseline_files)} 个基线文档（current + README）\n")
+    print(f"MANIFEST 文件: {MANIFEST_FILE.relative_to(REPO_ROOT)}\n")
 
-    for doc_path in baseline_files:
+    manifest_errors, baseline_sha = check_manifest_baseline()
+    if manifest_errors:
+        all_errors.extend([f"MANIFEST: {e}" for e in manifest_errors])
+        print("[FAIL] docs/current/MANIFEST.md")
+        for e in manifest_errors:
+            print(f"       - {e}")
+    else:
+        print("[PASS] docs/current/MANIFEST.md")
+    print(f"       MANIFEST baseline: {baseline_sha or '(未解析)'}")
+
+    # === 第二阶段：current 文档回归检查（webhook + open-decisions）===
+    current_docs = collect_current_docs()
+    print(f"\n共扫描 {len(current_docs)} 个 current 文档（webhook/open 回归检查）\n")
+
+    for doc_path in current_docs:
         relative = doc_path.relative_to(REPO_ROOT)
         content = doc_path.read_text(encoding="utf-8")
         doc_errors: list[str] = []
 
-        # 规则 3：必需字段
-        doc_errors.extend(check_required_fields(doc_path, content))
+        # 规则 9：Webhook 回归（所有 current 文档）
+        doc_errors.extend(check_webhook_regression(doc_path, content))
 
-        # 规则 1/4：提取 baseline 并校验格式
-        shas = extract_baselines(content)
-        if shas:
-            baseline_doc_count += 1
-            for sha in shas:
-                all_baselines.append((doc_path, sha))
-            doc_errors.extend(check_baseline_sha_format(doc_path, shas))
-            # 规则 4：真实提交校验
-            doc_errors.extend(check_baseline_real_commit(doc_path, shas))
-            # 规则 5：祖先校验
-            doc_errors.extend(check_baseline_ancestor(doc_path, shas))
-        else:
-            doc_errors.append("未找到 实现核对基线 字段")
-
-        # 规则 7：Webhook 回归（仅 current 文档）
-        if doc_path.parent == CURRENT_DIR:
-            doc_errors.extend(check_webhook_regression(doc_path, content))
-
-        # 规则 8：OPEN 回归（仅 17-open-decisions.md）
-        if doc_path.name == "17-open-decisions.md":
+        # 规则 10：OPEN 回归（仅 open-decisions.md）
+        if doc_path.name == "open-decisions.md":
             doc_errors.extend(check_open_regression(doc_path, content))
 
         if doc_errors:
@@ -308,52 +335,45 @@ def main() -> int:
         else:
             print(f"[PASS] {relative}")
 
-    # 规则 2：零匹配失败
-    if baseline_files and baseline_doc_count == 0:
-        all_errors.append("零匹配：扫描了基线文档但未解析到任何 baseline SHA")
-
-    # 规则 6：baseline 一致性
-    unique_shas = {sha for _path, sha in all_baselines}
-    if len(unique_shas) > 1:
-        all_errors.append(
-            f"baseline 不一致：发现 {len(unique_shas)} 个不同 SHA: {sorted(unique_shas)}"
-        )
-
-    unified_sha = next(iter(unique_shas)) if len(unique_shas) == 1 else None
-
-    print()
-    print("-" * 50)
-    print(f"解析 baseline 数量: {len(all_baselines)}")
-    print(f"统一 baseline SHA: {unified_sha or '(不一致或零匹配)'}")
-
-    # === 第二阶段：链接与占位符检查（docs/ 递归 + AGENTS.md）===
+    # === 第三阶段：链接与占位符检查 ===
+    # 链接检查：docs/ 递归 + AGENTS.md（所有文档）
+    # 占位符检查：仅 current + maps（v2 事实源，不应有占位符；
+    #            archive/changes/规则说明文档可能引用"待填写"作为规则描述，不检查）
     all_doc_files = collect_all_doc_files()
-    print(f"\n共扫描 {len(all_doc_files)} 个文档文件（链接+占位符检查）\n")
+    maps_docs = collect_maps_docs()
+    placeholder_check_files = set(current_docs) | set(maps_docs)
+    print(f"\n共扫描 {len(all_doc_files)} 个文档文件（链接检查）")
+    print(f"current 文档数量: {len(current_docs)}")
+    print(f"maps 文档数量: {len(maps_docs)}")
+    print(f"链接检查文件数量: {len(all_doc_files)}")
+    print(f"占位符检查文件数量: {len(placeholder_check_files)}（仅 current + maps）\n")
 
     for doc_path in all_doc_files:
         relative = doc_path.relative_to(REPO_ROOT)
         content = doc_path.read_text(encoding="utf-8")
         doc_errors: list[str] = []
 
+        # 链接检查：所有文档
         link_errors = check_links(doc_path, content)
-        placeholder_errors = check_placeholders(str(relative), content)
         doc_errors.extend(link_errors)
-        doc_errors.extend(placeholder_errors)
 
-        if placeholder_errors:
-            placeholder_files.append(str(relative))
+        # 占位符检查：仅 current + maps（v2 事实源）
+        if doc_path in placeholder_check_files:
+            placeholder_errors = check_placeholders(str(relative), content)
+            doc_errors.extend(placeholder_errors)
+            if placeholder_errors:
+                placeholder_files.append(str(relative))
 
         if doc_errors:
             all_errors.extend([f"{relative}: {e}" for e in doc_errors])
             print(f"[FAIL] {relative}")
             for e in doc_errors:
                 print(f"       - {e}")
-        else:
-            print(f"[PASS] {relative}")
+        # PASS 行不打印，避免输出过长
 
     # === 汇总 ===
     print()
-    print("=" * 50)
+    print("=" * 60)
     if all_errors:
         print(f"文档一致性检查未通过，共 {len(all_errors)} 个问题。")
         if placeholder_files:
@@ -363,9 +383,10 @@ def main() -> int:
         return 1
     else:
         print(
-            f"全部通过。扫描 current 文档 {len(current_docs)} 个，"
-            f"解析 baseline {len(all_baselines)} 个，"
-            f"统一 SHA: {unified_sha or 'N/A'}。"
+            f"全部通过。MANIFEST baseline: {baseline_sha or 'N/A'}，"
+            f"current 文档 {len(current_docs)} 个，"
+            f"maps 文档 {len(maps_docs)} 个，"
+            f"链接检查文件 {len(all_doc_files)} 个。"
         )
         return 0
 

@@ -1,1306 +1,669 @@
-# 通用软件项目开发与文档一致性规则
+# 盘迹项目开发与文档一致性规则 v2
 
-版本：1.0
+适用项目：`market_dev` / 盘迹 PanJi\
+适用阶段：探索期产品 + 可运行生产验证期\
+核心目标：防止 AI/Trae 在新对话、新机器或新分支中误解当前系统，防止已确认业务逻辑被旧代码、旧文档或旧记忆还原。
 
-适用范围：所有包含前端、后端、数据库、任务系统、第三方集成或部署环境的软件项目。
+***
 
----
+## 一、最高原则
 
-# 一、核心原则
+任何修改必须形成闭环：
 
-项目必须同时维护两套记录：
+```
+读取文档入口
+→ 理解当前系统地图
+→ 核对真实代码入口
+→ 建立 CHANGE
+→ 明确修改范围和不修改范围
+→ 修改代码/文档/测试
+→ 运行一致性检查
+→ 创建 PR
+→ 人工 Review 后合并
 
-## 1. 当前设计基线
+```
 
-当前设计基线不是单一文件，而是一组描述“系统当前应该如何运行”的文档。
+完成标准不是“代码能跑”，而是：
 
-它回答：
+```
+代码实现
+= 当前设计文档
+= 系统地图
+= API / 数据契约
+= 测试验证
+= 部署配置
 
-* 当前产品有哪些功能；
-* 用户如何使用；
-* 前端如何展示和交互；
-* 后端如何实现；
-* 数据如何存储；
-* API 如何约定；
-* 系统模块如何连接；
-* 参数和配置是什么；
-* 权限如何控制；
-* 后台任务如何运行；
-* 系统如何部署和测试。
+```
 
-当前设计基线只描述**当前有效状态**，不负责保存历史版本。
+***
 
-## 2. 变更记录
+## 二、当前文档结构
 
-变更记录回答：
+当前真实文档结构以 v2 为准：
 
-* 为什么修改；
-* 修改依据来自哪里；
-* 修改前是什么；
-* 修改后是什么；
-* 修改了哪些代码和文档；
-* 影响了哪些模块；
-* 如何测试；
-* 对应哪个 Git 分支和 Commit。
-
-历史设计由变更记录保存，不应继续混在当前设计文档中。
-
----
-
-# 二、目录结构
-
-所有项目建议使用以下文档结构：
-
-```text
+```
 docs/
-├── README.md
-├── current/
-│   ├── 00-project-overview.md
-│   ├── 01-product-requirements.md
-│   ├── 02-business-rules.md
-│   ├── 03-business-workflows.md
-│   ├── 04-system-architecture.md
-│   ├── 05-frontend-design.md
-│   ├── 06-backend-design.md
-│   ├── 07-data-model.md
-│   ├── 08-api-contracts.md
-│   ├── 09-permissions-security.md
-│   ├── 10-jobs-integrations.md
-│   ├── 11-configuration-parameters.md
-│   ├── 12-deployment-operations.md
-│   ├── 13-testing-acceptance.md
-│   ├── 14-ui-design-system.md
-│   └── 15-open-decisions.md
-│
-├── changes/
-│   ├── CHANGELOG.md
-│   ├── CHANGE-TEMPLATE.md
-│   └── records/
-│       ├── CHANGE-20260702-001.md
-│       ├── CHANGE-20260702-002.md
-│       └── ...
-│
-└── archive/
-    ├── deprecated-designs/
-    └── historical-documents/
+  README.md
+  AI-ONBOARDING.md
+  RESTORE-CHECKLIST.md
+  MAINTENANCE.md
+  MIGRATION-MAP.md
+  SOURCE-SNAPSHOT.md
+
+  current/
+    MANIFEST.md
+    00-product-business.md
+    01-system-architecture.md
+    02-data-api-contracts.md
+    03-jobs-integrations-operations.md
+    04-frontend-ux.md
+    05-testing-acceptance.md
+    open-decisions.md
+    code-doc-alignment.md
+
+  maps/
+    backend-module-map.md
+    frontend-route-map.md
+    api-route-map.md
+    database-model-map.md
+    worker-job-map.md
+    notification-flow-map.md
+    test-coverage-map.md
+    deployment-runtime-map.md
+
+  changes/
+    CHANGELOG.md
+    records/
+
+  archive/
+    current-legacy-20260703/
+
 ```
 
-并不是所有项目一开始都必须写满所有文档。
+旧规则中 `docs/current/00-18` 的结构已经废弃。旧 current 文档只作为历史归档，不再作为当前事实源。
 
-没有对应内容的文档可以保持简短，但目录职责必须明确，避免同一个事实分散在多个位置。
+***
 
----
+## 三、文档职责
 
-# 三、文档职责
+### 1. `docs/README.md`
 
-## 1. `docs/README.md`
+文档系统入口。说明文档地图、阅读顺序、事实源边界和修改流程。
 
-这是整个文档系统的入口。
+### 2. `docs/AI-ONBOARDING.md`
 
-必须记录：
+新对话、新机器、新 agent 必须先读。用于快速恢复项目上下文。
 
-* 文档目录；
-* 每个文档负责什么；
-* 哪个文档是某类事实的唯一权威来源；
-* 当前文档版本；
-* 对应 Git Commit；
-* 最近一次一致性检查时间。
+任何 Trae/Codex/ChatGPT 任务开始前，必须先读取：
 
-示例：
+```
+docs/AI-ONBOARDING.md
+docs/current/MANIFEST.md
 
-```text
-产品功能范围：01-product-requirements.md
-业务判断规则：02-business-rules.md
-完整业务流程：03-business-workflows.md
-系统模块关系：04-system-architecture.md
-前端页面和状态：05-frontend-design.md
-后端服务和职责：06-backend-design.md
-数据库结构：07-data-model.md
-接口契约：08-api-contracts.md
-权限规则：09-permissions-security.md
-任务和外部集成：10-jobs-integrations.md
-参数和配置：11-configuration-parameters.md
-部署方式：12-deployment-operations.md
-测试和验收：13-testing-acceptance.md
 ```
 
-同一事实只能有一个负责文档。
+### 3. `docs/RESTORE-CHECKLIST.md`
 
-其他文档需要提及时，应通过链接引用，不得复制一份独立定义。
+用于判断新环境是否已经正确理解项目。不得跳过。
 
----
+### 4. `docs/current/MANIFEST.md`
 
-## 2. 项目概述
+当前设计基线唯一总入口。\
+全局基线字段只维护在这里，不再要求每个 current 文档重复维护。
 
-文件：
+必须包含：
 
-```text
-docs/current/00-project-overview.md
+```
+设计基线日期
+设计确认截止日期
+实现核对基线
+实现核对分支
+最近一致性检查日期
+
 ```
 
-记录：
+### 5. `docs/current/*.md`
 
-* 项目目的；
-* 目标用户；
-* 当前产品形态；
-* 核心能力；
-* 当前不做什么；
-* 主要技术栈；
-* 核心模块；
-* 系统边界；
-* 当前版本状态。
+只描述当前有效设计，不保存历史。
 
-这个文档帮助开发者在修改局部代码前理解整个项目。
+职责：
 
----
+```
+00-product-business.md              产品定位、用户、核心业务边界
+01-system-architecture.md           系统架构、模块边界、技术栈、部署单元
+02-data-api-contracts.md            数据模型、API、权限、安全、参数契约
+03-jobs-integrations-operations.md  Worker、调度、飞书、Capture、Outbox、部署运维
+04-frontend-ux.md                   路由、页面、前端状态、UI 规则
+05-testing-acceptance.md            测试层级、验收门禁、CI 策略
+open-decisions.md                   真正未决的问题
+code-doc-alignment.md               当前代码/文档/生产表现不一致的 Known Gap
 
-## 3. 产品需求
-
-文件：
-
-```text
-docs/current/01-product-requirements.md
 ```
 
-它相当于当前版本的 PRD。
+### 6. `docs/maps/*.md`
 
-记录：
+这是系统实现地图，不是 PRD。
 
-* 用户类型；
-* 用户目标；
-* 功能模块；
-* 页面入口；
-* 主要使用场景；
-* 功能状态；
-* 验收标准；
-* 当前版本暂不支持的能力。
+必须帮助新 agent 回答：
 
-功能状态可以使用：
+```
+代码在哪里？
+哪个页面调哪个 API？
+哪个 API 调哪个 Service？
+哪个 Worker 处理哪个任务？
+哪些表保存核心状态？
+哪些测试覆盖关键规则？
+生产服务如何运行？
 
-```text
-CURRENT：当前生效
-EXPERIMENTAL：正在试验
-PLANNED：计划开发
-PAUSED：暂缓
-DEPRECATED：已经废弃
-OPEN：尚未确定
 ```
 
-产品仍处于探索期时，大量内容可以标记为 `EXPERIMENTAL` 或 `OPEN`。
+maps 可以半自动维护，但不能胡编。
 
-规则不会阻止继续探索。
+### 7. `docs/changes/`
 
----
+只保存变更历史。\
+历史设计、旧方案、修复过程、证据链都放这里，不放 current。
 
-## 4. 业务规则
+### 8. `docs/archive/`
 
-文件：
+只保存历史归档，不作为当前事实源。\
+旧 `docs/current/00-18` 已归档后，不得再作为修改依据。
 
-```text
-docs/current/02-business-rules.md
+***
+
+## 四、事实源优先级
+
+当代码、文档、历史 CHANGE、生产表现冲突时，不得擅自判断谁一定正确。
+
+判断顺序：
+
+```
+1. 用户当前明确要求
+2. 当前 main 代码
+3. docs/current/MANIFEST.md
+4. docs/current/*.md
+5. docs/maps/*.md
+6. 最新 docs/changes/records/*.md
+7. 测试与 CI 结果
+8. 生产只读验证结果
+9. archive 历史文档
+10. 旧聊天记忆
+
 ```
 
-记录系统中的业务判断，例如：
+archive 和旧聊天不能覆盖 current。
 
-* 什么条件下可以执行某项操作；
-* 用户拥有什么权限；
-* 一个状态如何转换成另一个状态；
-* 重复操作如何处理；
-* 数据什么时候有效；
-* 什么情况属于异常；
-* 哪些规则还没有最终确定。
+***
 
-每条重要规则应有稳定编号：
+## 五、每次修改前必须读取
 
-```text
-BR-USER-001
-BR-ORDER-002
-BR-CONTENT-003
-BR-NOTIFY-004
+### 通用必读
+
+```
+docs/AI-ONBOARDING.md
+docs/current/MANIFEST.md
+docs/RESTORE-CHECKLIST.md
+
 ```
 
-修改代码时，应该明确影响哪些业务规则编号。
+### 修改产品/业务
 
----
+```
+docs/current/00-product-business.md
+docs/current/02-data-api-contracts.md
+docs/maps/api-route-map.md
+docs/maps/database-model-map.md
 
-## 5. 业务流程
-
-文件：
-
-```text
-docs/current/03-business-workflows.md
 ```
 
-描述系统当前的端到端流程，而不是某个函数的内部实现。
+### 修改后端
 
-例如论坛项目可以记录：
+```
+docs/current/01-system-architecture.md
+docs/current/02-data-api-contracts.md
+docs/maps/backend-module-map.md
+docs/maps/api-route-map.md
+docs/maps/database-model-map.md
 
-```text
-用户提交帖子
-→ 后端校验
-→ 保存草稿
-→ 内容审核
-→ 正式发布
-→ 推送给订阅用户
-→ 写入消息中心
 ```
 
-门户项目可以记录：
+### 修改前端
 
-```text
-编辑创建内容
-→ 审核
-→ 发布
-→ 首页聚合
-→ 缓存刷新
-→ 搜索索引更新
+```
+docs/current/04-frontend-ux.md
+docs/maps/frontend-route-map.md
+docs/maps/api-route-map.md
+
 ```
 
-每个流程必须说明：
+### 修改 Worker / 飞书 / Capture / Outbox / Delivery
 
-* 触发入口；
-* 前端动作；
-* 后端服务；
-* 数据表；
-* 外部依赖；
-* 成功结果；
-* 失败处理；
-* 重试和幂等；
-* 用户可见状态。
+```
+docs/current/03-jobs-integrations-operations.md
+docs/maps/worker-job-map.md
+docs/maps/notification-flow-map.md
+docs/maps/deployment-runtime-map.md
 
----
-
-## 6. 系统架构
-
-文件：
-
-```text
-docs/current/04-system-architecture.md
 ```
 
-记录：
+### 修改测试 / CI
 
-* 系统整体架构；
-* 前端、后端、数据库、缓存和消息队列关系；
-* 服务边界；
-* 模块依赖方向；
-* 同步和异步调用；
-* 数据流；
-* 部署单元；
-* 第三方服务；
-* 关键技术决策。
-
-这个文档描述“系统如何组成”，不记录具体页面细节或数据库全部字段。
-
----
-
-## 7. 前端设计
-
-文件：
-
-```text
-docs/current/05-frontend-design.md
 ```
+docs/current/05-testing-acceptance.md
+docs/maps/test-coverage-map.md
 
-记录：
-
-* 页面和路由；
-* 页面之间的跳转关系；
-* 页面职责；
-* 页面读取哪些 API；
-* 用户操作流程；
-* 页面状态；
-* loading、empty、error、success 状态；
-* 表单校验；
-* 数据刷新方式；
-* 前端权限控制；
-* DTO 到 ViewModel 的转换；
-* 组件复用关系；
-* 响应式规则；
-* 截图、打印或嵌入模式；
-* 当前已删除或停用的前端入口。
-
-任何前端代码修改后，都必须检查这个文档是否需要同步更新。
-
-即使只是：
-
-* 修改按钮；
-* 改变字段名称；
-* 调整跳转；
-* 修改默认值；
-* 改变页面状态；
-* 删除组件；
-* 调整图表行为；
-
-也必须更新相应前端设计说明。
-
----
-
-## 8. 后端设计
-
-文件：
-
-```text
-docs/current/06-backend-design.md
-```
-
-记录：
-
-* 后端模块结构；
-* API 层职责；
-* Service 层职责；
-* Repository 层职责；
-* Domain 层职责；
-* 计算模块职责；
-* Worker 和 Scheduler 职责；
-* 外部系统 Adapter；
-* 事务边界；
-* 缓存策略；
-* 异常处理；
-* 幂等设计；
-* 重试机制；
-* 日志和监控；
-* 模块之间的依赖关系。
-
-修改任何后端代码前，必须确认：
-
-* 当前功能由哪个模块负责；
-* 是否已经存在相同能力；
-* 新修改是否会形成第二条实现路径；
-* 是否会绕过现有 Service；
-* 是否会破坏事务、幂等或权限边界。
-
----
-
-## 9. 数据模型
-
-文件：
-
-```text
-docs/current/07-data-model.md
-```
-
-记录：
-
-* 核心实体；
-* 表结构；
-* 字段语义；
-* 主键和外键；
-* 唯一约束；
-* 索引；
-* 状态字段；
-* 数据生命周期；
-* 软删除规则；
-* 审计字段；
-* 实体关系；
-* 数据迁移要求；
-* 缓存数据和正式数据的区别。
-
-修改模型、Schema、迁移、查询或缓存结构后，必须更新该文档。
-
----
-
-## 10. API 契约
-
-文件：
-
-```text
-docs/current/08-api-contracts.md
-```
-
-记录：
-
-* API 路径；
-* 请求方法；
-* 权限要求；
-* 请求参数；
-* 响应结构；
-* 字段含义；
-* 枚举；
-* 错误码；
-* 分页；
-* 排序；
-* 筛选；
-* 版本兼容；
-* 前端调用页面；
-* 是否已经废弃。
-
-API 文档描述当前接口，不保存旧接口历史。
-
-旧接口变化记录在变更记录中。
-
----
-
-## 11. 权限和安全
-
-文件：
-
-```text
-docs/current/09-permissions-security.md
-```
-
-记录：
-
-* 用户角色；
-* 资源所有权；
-* 功能权限；
-* 数据隔离；
-* 管理员能力；
-* 登录和认证；
-* Token；
-* Secret 管理；
-* 输入校验；
-* 上传文件安全；
-* 速率限制；
-* 审计日志；
-* 隐私数据；
-* 外部回调安全。
-
-任何涉及用户、角色、资源访问或敏感数据的修改，都必须更新该文档。
-
----
-
-## 12. 后台任务和第三方集成
-
-文件：
-
-```text
-docs/current/10-jobs-integrations.md
-```
-
-记录：
-
-* 定时任务；
-* Worker；
-* 消息队列；
-* Webhook；
-* 邮件；
-* 短信；
-* 第三方登录；
-* 支付；
-* 搜索服务；
-* 通知服务；
-* 文件存储；
-* 数据抓取；
-* 外部 API。
-
-每个任务或集成必须说明：
-
-* 触发条件；
-* 执行频率；
-* 输入；
-* 输出；
-* 状态；
-* 幂等键；
-* 重试；
-* 超时；
-* 失败处理；
-* 人工恢复方式。
-
----
-
-## 13. 参数和配置
-
-文件：
-
-```text
-docs/current/11-configuration-parameters.md
-```
-
-记录所有会影响系统行为的配置：
-
-* 功能开关；
-* 默认值；
-* 时间间隔；
-* 超时；
-* 重试次数；
-* 分页大小；
-* 上传限制；
-* 缓存时间；
-* 算法参数；
-* 套餐限制；
-* 第三方配置；
-* 环境变量；
-* 开发、测试和生产差异。
-
-每项参数必须记录：
-
-```text
-参数编号
-参数名称
-当前值
-代码权威位置
-作用范围
-是否允许用户修改
-是否允许管理员修改
-修改后的影响
-```
-
-参数的真实值应尽量由代码配置或环境配置作为机器事实源。
-
-文档负责解释参数含义和当前口径。
-
----
-
-## 14. 部署和运维
-
-文件：
-
-```text
-docs/current/12-deployment-operations.md
-```
-
-记录：
-
-* 环境划分；
-* 构建过程；
-* 部署方式；
-* 容器和服务；
-* 数据库迁移；
-* 环境变量；
-* 健康检查；
-* 日志；
-* 备份；
-* 恢复；
-* 回滚；
-* 版本识别；
-* 生产验证；
-* 常见故障处理。
-
-任何 Docker、CI、部署脚本、环境配置或服务启动方式变化，都必须更新该文档。
-
----
-
-## 15. 测试和验收
-
-文件：
-
-```text
-docs/current/13-testing-acceptance.md
-```
-
-记录：
-
-* 测试层级；
-* 单元测试；
-* 集成测试；
-* API 测试；
-* 前端测试；
-* 端到端测试；
-* 回归测试；
-* 数据库迁移测试；
-* 部署验证；
-* 当前关键验收场景；
-* 已知测试缺口。
-
-测试代码修改也属于项目修改，必须更新：
-
-* 测试覆盖范围；
-* 被替代的旧测试；
-* 新增的回归场景；
-* 当前无法覆盖的风险。
-
----
-
-## 16. UI 设计系统
-
-文件：
-
-```text
-docs/current/14-ui-design-system.md
-```
-
-记录：
-
-* 页面布局；
-* 颜色；
-* 字体；
-* 间距；
-* 按钮；
-* 表单；
-* 表格；
-* 卡片；
-* 对话框；
-* 空状态；
-* 错误提示；
-* 图标；
-* 响应式断点；
-* 深色模式；
-* 可访问性；
-* 组件使用规范。
-
-纯视觉修改也必须更新当前设计文档和变更记录。
-
-否则未来开发者可能根据旧截图或旧设计再次还原。
-
----
-
-## 17. 未决问题
-
-文件：
-
-```text
-docs/current/15-open-decisions.md
-```
-
-记录仍在探索中的问题。
-
-每项应包含：
-
-```text
-问题编号
-当前背景
-已经尝试的方案
-当前临时实现
-尚未确定的原因
-可能影响的模块
-下一步验证方式
-```
-
-未决问题不能被描述成最终规则。
-
-临时实现必须明确标注，避免以后被误认为永久设计。
-
----
-
-# 四、当前设计基线的规则
-
-## 规则 1：当前设计文档描述当前系统
-
-`docs/current/` 只描述当前有效状态。
-
-不得长期保留：
-
-```text
-旧方案也可以
-以前使用的是……
-未来可能改为……
-方案 A 和方案 B 都保留
-```
-
-历史内容应进入变更记录或归档。
-
-尚未确定的内容进入 `15-open-decisions.md`。
-
----
-
-## 规则 2：一个事实只能有一个权威文档
-
-例如：
-
-* 页面路由由前端设计文档负责；
-* API 字段由 API 契约负责；
-* 表字段由数据模型文档负责；
-* 参数值由参数文档负责；
-* 业务判断由业务规则文档负责。
-
-其他文档可以引用，但不能重新定义。
-
----
-
-## 规则 3：代码和文档不存在自动优先级
-
-代码代表当前实际实现。
-
-文档代表当前确认设计。
-
-两者冲突时，说明项目已经失去一致性。
-
-Trae 不得擅自认定：
-
-```text
-代码一定正确
-```
-
-也不得擅自认定：
-
-```text
-文档一定正确
-```
-
-必须通过以下信息判断：
-
-1. 最近的变更记录；
-2. 对应 Git Commit；
-3. 测试；
-4. 当前用户要求；
-5. 实际生产行为。
-
-在冲突没有确认前，不得扩大修改。
-
----
-
-# 五、每次修改前的强制流程
-
-任何代码修改都必须先完成“当前设计理解”。
-
-无论是：
-
-* 后端功能；
-* 前端样式；
-* 数据库；
-* API；
-* 测试；
-* CI；
-* 部署脚本；
-* 配置；
-* 性能优化；
-* 依赖升级；
-* 删除死代码；
-
-都必须执行。
-
-## 第一步：读取项目文档入口
-
-必须先阅读：
-
-```text
-docs/README.md
-docs/current/00-project-overview.md
-```
-
-然后根据任务阅读相关设计文档。
-
-例如：
-
-### 修改前端页面
-
-至少阅读：
-
-```text
-01-product-requirements.md
-03-business-workflows.md
-05-frontend-design.md
-08-api-contracts.md
-14-ui-design-system.md
-```
-
-### 修改后端服务
-
-至少阅读：
-
-```text
-02-business-rules.md
-03-business-workflows.md
-04-system-architecture.md
-06-backend-design.md
-07-data-model.md
-08-api-contracts.md
-```
-
-### 修改 Worker
-
-至少阅读：
-
-```text
-03-business-workflows.md
-04-system-architecture.md
-06-backend-design.md
-07-data-model.md
-10-jobs-integrations.md
 ```
 
 ### 修改部署
 
-至少阅读：
+```
+docs/current/03-jobs-integrations-operations.md
+docs/maps/deployment-runtime-map.md
+docker-compose.prod.yml
 
-```text
-04-system-architecture.md
-10-jobs-integrations.md
-11-configuration-parameters.md
-12-deployment-operations.md
-13-testing-acceptance.md
 ```
 
----
+***
 
-## 第二步：检查实际代码
+## 六、修改前理解说明
 
-Trae 必须确认：
+Trae 在动手前必须输出：
 
-* 当前真实入口；
-* 当前调用链；
-* 前端调用哪个 API；
-* 后端调用哪个 Service；
-* Service 使用哪个 Repository；
-* 涉及哪些表；
-* 是否存在后台任务；
-* 是否存在外部集成；
-* 是否存在重复实现；
-* 是否存在旧入口；
-* 当前测试覆盖什么。
+```
+1. 当前任务目标
+2. 当前分支和 base commit
+3. 已阅读哪些 docs/current 文件
+4. 已阅读哪些 docs/maps 文件
+5. 当前代码真实入口
+6. 当前前端入口
+7. 当前 API 入口
+8. 当前 Service / Repository / Worker 入口
+9. 当前涉及哪些数据表
+10. 当前测试覆盖哪些规则
+11. 文档和代码是否一致
+12. 本次准备修改什么
+13. 明确不修改什么
+14. 预计更新哪些 docs/current
+15. 预计更新哪些 docs/maps
+16. 预计新增哪个 CHANGE
 
-不得只根据文件名判断实现。
-
-不得只阅读一个函数就开始修改。
-
----
-
-## 第三步：提交修改前理解说明
-
-开始修改前，Trae 必须输出：
-
-```text
-本次任务理解：
-
-1. 当前功能是什么；
-2. 用户从哪里进入；
-3. 当前前端流程是什么；
-4. 当前后端流程是什么；
-5. 当前涉及哪些 API；
-6. 当前涉及哪些数据表；
-7. 当前是否涉及 Worker 或第三方集成；
-8. 当前设计文档如何描述；
-9. 当前代码是否与文档一致；
-10. 本次准备修改什么；
-11. 明确不修改什么；
-12. 预计更新哪些当前设计文档。
 ```
 
-如果文档和代码冲突，必须先列出冲突。
+如果发现冲突，先列出冲突，不得直接编码。
 
-不得直接跳过冲突开始编码。
+***
 
----
+## 七、CHANGE 规则
 
-# 六、变更记录规则
+每次修改必须新增：
 
-每次修改必须建立独立记录：
-
-```text
+```
 docs/changes/records/CHANGE-YYYYMMDD-NNN.md
+
 ```
 
-包括 Bug 修复、样式调整、测试更新、依赖升级和部署调整。
+并更新：
 
-不存在“改动太小所以不用记录”。
+```
+docs/changes/CHANGELOG.md
 
-## 修改前先建立记录
+```
 
-编码前先填写：
+CHANGE 必须包含：
 
-```text
+```
 变更编号
 任务名称
 需求出处
-当前问题
-当前设计理解
-影响模块
-预计修改文件
-预计更新文档
-风险
-验收标准
-```
-
-## 修改后补全记录
-
-完成后补充：
-
-```text
-实际修改内容
 修改前行为
 修改后行为
-代码文件
-文档文件
-测试
+影响模块
+修改文件
+文档更新
+测试证据
 Git 分支
 Git Commit
 数据库迁移
 配置变化
-兼容性影响
+风险
 遗留问题
+
 ```
 
----
+不存在“小改不用 CHANGE”。
 
-# 七、变更出处
+***
 
-每次变更必须记录来源。
+## 八、current 文档修改规则
 
-允许的来源包括：
+`docs/current/` 只写当前状态，不写流水账。
 
-```text
-用户在某日期明确提出的需求
-GitHub Issue
-Bug 报告
-产品评审
-设计评审
-监控告警
-安全审计
-性能测试
-依赖升级要求
-法律或平台规则变化
+错误写法：
+
+```
+以前是 A，现在改成 B。
+
 ```
 
-记录示例：
+正确写法：
 
-```text
-需求出处：
-用户于 2026-07-02 明确要求：
-“每次修改代码之前要先确认理解当前的前后端设计，
-修改后更新文档，保证代码逻辑和文档统一。”
+```
+当前系统使用 B。
+
 ```
 
-不允许只写：
+历史 A 放入 CHANGE 或 archive。
 
-```text
-根据需求修改
-按要求调整
-优化代码
+***
+
+## 九、maps 修改规则
+
+如果修改了真实代码结构，必须检查对应 `docs/maps/`。
+
+例如：
+
+```
+新增/删除 API              → api-route-map.md
+新增/移动 Service          → backend-module-map.md
+新增/移动页面              → frontend-route-map.md
+改表、字段、约束            → database-model-map.md
+改 Worker / 调度           → worker-job-map.md
+改飞书、Capture、Outbox     → notification-flow-map.md
+改测试覆盖                 → test-coverage-map.md
+改 compose / 部署服务       → deployment-runtime-map.md
+
 ```
 
----
+maps 不能变成理想设计，必须描述真实实现位置。
 
-# 八、所有修改都必须更新两套记录
+***
 
-任何代码修改完成后，必须同时更新：
+## 十、禁止行为
 
-## 1. 当前设计基线
+Trae 和开发者禁止：
 
-至少更新一个 `docs/current/` 文档。
+```
+1. 未读 AI-ONBOARDING 和 MANIFEST 就修改；
+2. 根据旧 docs/current/00-18 修改当前系统；
+3. 根据 archive 恢复旧设计；
+4. 根据旧聊天记忆覆盖 current；
+5. 只改代码不改文档；
+6. 只改 current 不改 CHANGE；
+7. 改代码结构不更新 maps；
+8. 只更新文档不核对真实代码；
+9. 复制旧实现形成第二条路径；
+10. 在前端重新实现后端业务规则；
+11. 删除测试以适配错误实现；
+12. 修改 API 不检查前端调用；
+13. 修改数据模型不检查 migration；
+14. 修改 Worker 不检查幂等、心跳、重试；
+15. 修改权限不检查用户隔离；
+16. 把 Mock E2E 说成真实生产 E2E；
+17. 把 OPEN 问题写成最终结论；
+18. 把临时实验写成永久规则；
+19. 直接修改 main；
+20. force push 已共享分支；
+21. 为通过检查削弱 check_docs_consistency.py。
 
-不同修改对应不同文档：
-
-| 修改类型                  | 至少更新          |
-| --------------------- | ------------- |
-| 前端页面、交互、样式            | 前端设计或 UI 设计系统 |
-| 后端 Service、Repository | 后端设计          |
-| API                   | API 契约        |
-| 数据库、缓存                | 数据模型          |
-| 业务逻辑                  | 业务规则和业务流程     |
-| Worker、Scheduler      | 后台任务和集成       |
-| 参数、环境变量               | 参数配置          |
-| 权限                    | 权限和安全         |
-| 部署、Docker、CI          | 部署和运维         |
-| 测试                    | 测试和验收         |
-| 架构调整                  | 系统架构          |
-| 依赖升级                  | 架构、部署或参数配置    |
-| 删除死代码                 | 对应模块设计文档      |
-| 性能优化                  | 对应模块设计和测试文档   |
-
-即使修改没有改变用户可见功能，也必须更新对应设计文档，说明当前实现结构或非功能特性。
-
-## 2. 变更记录
-
-必须新增一个 CHANGE 记录，并更新总 `CHANGELOG.md`。
-
----
-
-# 九、当前设计文档的修改方式
-
-更新设计文档不是简单增加一行：
-
-```text
-2026-07-02 修改了某功能
 ```
 
-这种内容属于变更记录，不属于当前设计。
+***
 
-当前设计文档必须直接改成修改后的真实状态。
+## 十一、docs consistency 硬规则
 
-例如修改前：
+`tools/check_docs_consistency.py` 必须匹配 v2 文档结构。
 
-```text
-帖子发布后立即公开。
+必须检查：
+
+```
+1. docs/current/MANIFEST.md 存在；
+2. MANIFEST 包含实现核对基线；
+3. 实现核对基线是 40 位 SHA；
+4. SHA 是真实 commit；
+5. SHA 是当前 HEAD 祖先；
+6. docs/current/*.md 存在；
+7. docs/maps/*.md 存在；
+8. 本地 Markdown 链接有效；
+9. 不存在 待填写 占位符；
+10. current 文档不得把 feishu_webhook 写成当前方案；
+11. open-decisions 不得把 Webhook vs Platform App 写回 OPEN；
+12. archive 旧文档不参与 baseline 一致性检查。
+
 ```
 
-修改后：
+禁止把检查改成摆设。
 
-```text
-帖子提交后进入审核状态。
-审核通过后才对普通用户公开。
-作者可以在个人中心查看审核状态。
+***
+
+## 十二、盘迹项目硬规则
+
+### 1. 产品边界
+
+盘迹是 A 股研究、全市场特征计算、自选股盘中监控和消息投递平台。
+
+不做：
+
+```
+自动交易
+券商账户连接
+资金管理
+收益承诺
+单一指标买卖信号
+普通用户修改生产算法参数
+
 ```
 
-历史上曾经“立即公开”，只记录在 CHANGE 文档中。
+### 2. 策略规则
 
----
+当前生产只保留：
 
-# 十、修改后的强制一致性检查
+```
+dsa_selector
+watchlist_monitor
 
-修改完成后，Trae 必须逐项核对：
-
-## 产品一致性
-
-* 当前功能是否与 PRD 一致；
-* 页面入口是否真实存在；
-* 已删除功能是否仍在文档中；
-* 新功能是否写入当前产品范围。
-
-## 前端一致性
-
-* 路由是否与文档一致；
-* 页面状态是否一致；
-* API 字段是否一致；
-* 页面跳转是否一致；
-* UI 规范是否一致。
-
-## 后端一致性
-
-* 模块职责是否一致；
-* 调用链是否一致；
-* 是否出现第二条实现路径；
-* 事务和异常处理是否一致；
-* Worker 行为是否一致。
-
-## 数据一致性
-
-* 表和字段是否一致；
-* 状态值是否一致；
-* 唯一约束是否一致；
-* 数据生命周期是否一致。
-
-## API 一致性
-
-* 请求参数是否一致；
-* 响应字段是否一致；
-* 类型和单位是否一致；
-* 错误码是否一致；
-* 前端是否仍调用旧接口。
-
-## 配置一致性
-
-* 默认值是否一致；
-* 环境变量是否一致；
-* 示例配置是否一致；
-* 部署配置是否一致。
-
-## 测试一致性
-
-* 测试是否验证当前设计；
-* 是否仍有测试验证旧逻辑；
-* 是否新增回归测试；
-* 是否通过删除断言让测试通过。
-
----
-
-# 十一、禁止行为
-
-Trae 和开发者不得：
-
-1. 未阅读当前设计文档就直接修改代码；
-2. 只修改代码，不更新设计文档；
-3. 只更新变更记录，不更新当前设计；
-4. 只更新文档，不验证真实代码；
-5. 使用旧分支文件整体覆盖当前文件；
-6. 根据旧注释恢复旧逻辑；
-7. 根据历史聊天忽略当前设计；
-8. 复制现有功能形成第二套实现；
-9. 在前端重新实现后端业务规则；
-10. 在多个文件重复定义同一参数；
-11. 删除测试以适应错误实现；
-12. 修改 API 却不检查前端调用；
-13. 修改数据模型却不检查迁移和旧数据；
-14. 修改 Worker 却不检查幂等和重试；
-15. 修改权限却不检查其他用户的数据隔离；
-16. 修改配置却不更新部署环境；
-17. 把仍在探索的内容写成最终结论；
-18. 把当前临时实现误写成永久规则；
-19. 提交“已完成”但不说明代码与文档是否一致。
-
----
-
-# 十二、探索阶段的处理
-
-这套规则不阻止功能探索。
-
-探索中的功能可以标记为：
-
-```text
-EXPERIMENTAL
 ```
 
-对应文档必须说明：
+多策略组合已废弃，不得从旧代码或旧文档恢复。
 
-* 当前实验目的；
-* 当前临时实现；
-* 用户入口；
-* 是否默认开启；
-* 使用哪些数据；
-* 是否影响正式功能；
-* 如何删除或转正；
-* 当前验证结果。
+### 3. DSA 规则
 
-实验设计改变时，同样更新：
+DSA 对全市场 computable universe 计算特征。\
+不得在计算阶段按方向、强弱、matched、用户筛选提前删除股票。
 
-```text
-当前设计文档
-+
-变更记录
-+
-代码
-+
-测试
+发布必须满足严格完整性门禁。\
+`partial_failed` 不得发布。
+
+### 4. 自选和监控
+
+有效会员添加自选后自动进入盘中监控。\
+不创建 MonitoringPlan。\
+到期用户保留历史数据，但不能读取、修改、监控或产生新投递。
+
+### 5. Node Cluster
+
+固定契约：
+
+```
+1d = 250 根日线
+15m = 250 * 16 = 4000 根
+1m = 2 根已完成 Bar
+
 ```
 
-探索允许频繁改变，但每次改变都必须留下明确轨迹。
+图表显示数量、指标输出数量、Node 内部输入数量必须分离。
 
----
+### 6. 飞书
 
-# 十三、Git 与分支要求
+唯一接入方式：
+
+```
+feishu_platform_app
+
+```
+
+禁止恢复：
+
+```
+feishu_webhook
+FEISHU_WEBHOOK
+独立管理员飞书 App
+独立管理员接收人配置
+
+```
+
+管理员内测申请通知必须复用管理员用户自己的 active `feishu_platform_app` NotificationChannel。
+
+### 7. Capture Token
+
+Capture Token 只能访问 Capture API。\
+不能访问普通用户 API。\
+不能污染普通 Access Token。
+
+### 8. Outbox target\_channel\_id
+
+`notification.message.created` payload 含 `target_channel_id` 时，属于用户主动触发/手动指定渠道通知，跳过 `eligible_user_service`。
+
+无 `target_channel_id` 的自动通知仍必须走用户资格过滤。
+
+### 9. Migration
+
+不得修改已发布历史 migration。\
+只允许新增前向 migration。\
+修改 migration 必须有 upgrade/downgrade/upgrade 验证。
+
+### 10. Alignment
+
+未经测试、CI 或真实运行证据，不得关闭 `code-doc-alignment.md` 条目。\
+Mock 不能替代真实生产 E2E。
+
+***
+
+## 十三、质量门禁
+
+### Ruff
+
+新增或修改的 Python 文件必须 Ruff 零错误。\
+全仓 Ruff 历史债务由 `tools/quality_baselines/ruff.json` 管控。\
+禁止通过全局 ignore、批量 noqa、扩大 exclude 掩盖新增问题。
+
+### Mypy
+
+新增 backend/app Python 生产文件必须 mypy 零错误。\
+全仓 mypy 历史债务由 `tools/quality_baselines/mypy.json` 管控。\
+禁止批量 `type: ignore` 或关闭检查掩盖新增问题。
+
+### 文档检查
+
+每次 PR 至少运行：
+
+```
+python tools/check_docs_consistency.py
+python tools/check_architecture.py
+python tools/check_test_allowlist.py
+python tools/update_docs.py --check
+
+```
+
+***
+
+## 十四、分支和 PR
 
 每个变更使用独立分支：
 
-```text
-fix/<change-id>-<name>
-feat/<change-id>-<name>
-refactor/<change-id>-<name>
-chore/<change-id>-<name>
-experiment/<change-id>-<name>
+```
+fix/<topic>
+feat/<topic>
+docs/<topic>
+refactor/<topic>
+chore/<topic>
+experiment/<topic>
+
 ```
 
-Change 记录中的分支名称必须与真实分支一致。
+禁止直接改 main。
 
-禁止直接修改 `main`。
+PR 必须说明：
 
-提交前必须检查：
+```
+1. 当前系统原来如何运行；
+2. 本次为什么修改；
+3. 修改了哪些代码；
+4. 修改了哪些 docs/current；
+5. 修改了哪些 docs/maps；
+6. 新增哪个 CHANGE；
+7. 是否改变 API；
+8. 是否改变数据模型；
+9. 是否改变 Worker 或第三方集成；
+10. 测试结果；
+11. 是否仍有 Known Gap；
+12. 是否需要生产验证。
 
-```bash
-git status --short
-git branch --show-current
-git diff --name-only
-git diff --stat
 ```
 
-提交中必须包含：
+***
 
-```text
-代码修改
-相关当前设计文档修改
-CHANGE 记录
-必要测试
+## 十五、完成报告格式
+
+Trae 完成后必须输出：
+
 ```
-
----
-
-# 十四、Pull Request 要求
-
-每个 PR 必须回答：
-
-```text
-1. 当前系统原来如何运行？
-2. 依据哪些当前设计文档？
-3. 本次为什么修改？
-4. 修改后的前端流程是什么？
-5. 修改后的后端流程是什么？
-6. 是否改变 API？
-7. 是否改变数据模型？
-8. 是否改变参数？
-9. 是否改变 Worker 或第三方集成？
-10. 更新了哪些当前设计文档？
-11. 新增了哪个 CHANGE 记录？
-12. 增加了哪些测试？
-13. 是否仍存在代码与文档冲突？
-```
-
-任何一项无法回答，PR 不应合并。
-
----
-
-# 十五、完成报告
-
-Trae 完成任务后必须输出：
-
-```text
 当前分支：
 Base Commit：
 Head Commit：
 
 一、修改前理解
 - 当前产品行为：
-- 当前前端流程：
-- 当前后端流程：
-- 当前数据流程：
+- 当前系统地图依据：
+- 当前代码入口：
 - 当前文档依据：
+- 当前冲突：
 
 二、实际修改
 - 代码文件：
-- 前端变化：
-- 后端变化：
-- 数据变化：
-- API 变化：
-- 配置变化：
-- 测试变化：
+- docs/current：
+- docs/maps：
+- docs/changes：
+- tools：
+- 测试：
 
-三、文档更新
-- 更新的当前设计文档：
-- 每个文档修改内容：
-- 新增 CHANGE 编号：
-- 需求出处：
+三、一致性检查
+- current 是否更新：
+- maps 是否更新：
+- CHANGE 是否新增：
+- CHANGELOG 是否更新：
+- archive 是否只作历史参考：
+- 是否存在未登记冲突：
 
-四、一致性检查
-- 产品与代码：
-- 前端与 API：
-- 后端与数据模型：
-- 参数与配置：
-- Worker 与业务流程：
-- 测试与当前设计：
-
-五、验证
+四、验证
 - 执行命令：
 - 测试结果：
-- 构建结果：
+- CI 状态：
 
-六、剩余问题
-- 当前仍存在的冲突：
-- 尚未确定的设计：
-- 未处理事项：
+五、剩余问题
+- Known Gap：
+- OPEN：
+- 需要生产验证：
+
 ```
 
----
+***
 
-# 十六、最重要的最终规则
+## 十六、最终规则
 
-任何软件修改都必须形成以下完整闭环：
+任何修改都必须满足：
 
-```text
-读取当前设计
-→ 理解前端、后端、数据和流程
-→ 建立变更记录
-→ 明确修改范围
-→ 修改代码
-→ 修改测试
-→ 更新当前设计文档
-→ 补全变更记录
-→ 检查代码、测试和文档一致性
-→ 提交 Pull Request
 ```
-
-完成标准不是“代码可以运行”。
-
-真正的完成标准是：
-
-```text
-代码实现
-=
 当前设计文档
-=
-API 和数据契约
-=
-测试验证
-=
-部署配置
++ 系统实现地图
++ 真实代码
++ 测试
++ CHANGE
++ PR
+
 ```
 
-任何一部分不一致，这次修改都不能视为完成。
+六者缺一不可。
 
----
-
-# 盘迹项目硬规则
-
-1. 当前真实文档地图为 docs/current/00-18，docs/current 是唯一当前设计事实源；
-2. docs 根目录禁止生成业务 Markdown，只允许存在 README.md；
-3. 飞书唯一接入为 feishu_platform_app，禁止恢复 feishu_webhook 及 Webhook 环境变量；
-4. Node Cluster 固定契约：1d=250 根日线，15m=250*16=4000 根，1m=2 根；
-5. 图表显示数量、指标输出数量、Node 内部输入数量必须分离，禁止用同一个常量同时代表三种语义；
-6. 参数修改必须按顺序更新：常量 → Manifest/StrategyVersion → 测试 → current 文档 → CHANGE 记录；
-7. Capture Token 只能访问 Capture API，不能访问普通用户 API；
-8. 每项任务必须检查指定分支，禁止在错误分支上操作；
-9. 不得修改已发布历史 migration；
-10. 未经测试和真实运行证据不得关闭 Alignment；
-11. 不直接修改 main，不 force push 已共享分支；
-12. 不把 Mock E2E 描述成真实飞书 E2E。
-13. Ruff 质量门禁采用增量阻断策略：PR 中新增或修改的 Python 文件必须 Ruff 零错误（`Ruff New Files` 任务阻断合并）；全仓库 Ruff 历史债务以 `tools/quality_baselines/ruff.json` 为基线，`Ruff Baseline Regression` 任务阻断新增/增加诊断；`Ruff Full Repository Report` 任务非阻断但上传完整报告；禁止用全局 ignore、per-file-ignores 或批量 noqa 掩盖新增错误；历史债务在独立分支 `chore/ruff-historical-debt` 中清理，清零后再将全仓库 Ruff 改为完全阻断。
-14. Mypy 质量门禁采用与 Ruff 同构的增量阻断策略：PR 中新增的 backend/app Python 生产文件必须 mypy 零错误（`Mypy New Files` 任务阻断合并）；全仓库 mypy 历史债务以 `tools/quality_baselines/mypy.json` 为基线，`Mypy Baseline Regression` 任务阻断新增/增加诊断；`Mypy Full Repository Report` 任务非阻断但上传完整报告；`backend/pyproject.toml` 将 `mypy` 固定为具体版本（当前 `2.1.0`），避免 mypy 版本差异导致基线比较波动；禁止用大范围 ignore、批量 `type: ignore`、扩大 exclude 或关闭全仓检查掩盖新增错误；历史债务在独立分支 `chore/mypy-historical-debt` 中清理，清零后再将全仓库 mypy 改为完全阻断。
-15. 管理员内测申请通知必须复用管理员用户自己的 feishu_platform_app NotificationChannel，禁止维护独立管理员飞书 App 和接收人配置；管理员身份由 users/roles/user_roles 决定，不要求管理员拥有 subscription，不使用 eligible_user_service；无管理员 active Platform App 渠道时，内测申请正常保存，Outbox 不无限重试，feishu_delivery_status 标为 failed，feishu_last_error 写入 ADMIN_PLATFORM_CHANNEL_NOT_CONFIGURED。
-16. 环境变量检查仅验证 DATABASE_URL、POSTGRES_PASSWORD、JWT_SECRET、REDIS_URL、SECRET_MASTER_KEY，不得要求 SECRET_KEY、FEISHU_APP_ID、FEISHU_APP_SECRET、ADMIN_FEISHU_*、APP_ENV、TZ；APP_ENV=production 和 TZ=Asia/Shanghai 由 docker-compose.prod.yml 设置，market.env 不得重复配置。
+如果只是代码变了，文档没变，不算完成。\
+如果只是文档变了，代码没核对，不算完成。\
+如果 maps 过期，新对话会误解项目，也不算完成。
