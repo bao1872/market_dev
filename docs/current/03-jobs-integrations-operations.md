@@ -12,6 +12,7 @@
 | worker-outbox | `outbox` | 扩张 Outbox 为 MessageDelivery |
 | worker-delivery | `delivery` | 实际渠道投递、重试、最终状态 |
 | worker-after-close | `after_close_orchestrator` | 盘后编排任务 |
+| worker-watchdog | `watchdog` | 每 60s 清理 stale scheduler_job_runs 和僵尸 worker_heartbeats |
 | worker-capture | capture service | 生成个股详情图片 |
 
 统一 Worker 入口是 `backend/app/worker.py`。服务编排事实源是 `docker-compose.prod.yml`。
@@ -44,7 +45,7 @@ error_code / error_message
 
 管理员和运维必须能回答：运行中的 Worker、Git SHA、心跳、next run、当前任务、股票计数、失败阶段、重试状态、发布完整性、文字状态、图片状态和数据新鲜度。
 
-生产只读审计发现：`worker_heartbeats` 存在 stale/running 僵尸记录，导致 Worker 状态可信度不足。代码修复已由 PR #4 实现：`_recovery_watchdog_loop` 每 60 秒调用 `mark_stale_worker_heartbeats`，将 `status='running'` 且 `heartbeat_at` 超过 600 秒的记录标记为 `stopped`。待生产部署后验证僵尸记录被实际清理（ALIGN-023）。
+生产只读审计发现：`worker_heartbeats` 存在 stale/running 僵尸记录，导致 Worker 状态可信度不足。代码修复已由 PR #4 实现：`_recovery_watchdog_loop` 每 60 秒调用 `mark_stale_worker_heartbeats`，将 `status='running'` 且 `heartbeat_at` 超过 600 秒的记录标记为 `stopped`。但 PR #4 部署后该 loop 因 `WORKER_TYPE` 启动条件未匹配任何生产 worker 而从未运行；已新增独立 `worker-watchdog` 生产服务（`WORKER_TYPE=watchdog`）使其在生产运行，待部署后验证 stale running 清零（ALIGN-023）。
 
 ## 4. 飞书 Platform App
 

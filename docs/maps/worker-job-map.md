@@ -12,6 +12,7 @@
 | worker-outbox | outbox | outbox, message_deliveries | 资格过滤或渠道扩张错误 |
 | worker-delivery | delivery | message_deliveries, notification_channels | 假成功、吞错误 |
 | worker-after-close | after_close_orchestrator | scheduler_job_runs | 盘后链路断点恢复 |
+| worker-watchdog | watchdog | scheduler_job_runs, worker_heartbeats | 看门狗未运行导致僵尸残留 |
 | worker-capture | capture service | capture_jobs, notification_messages | 截图失败但状态不可见 |
 
 ## 2. 任务状态
@@ -31,7 +32,7 @@ run_key 是什么
 
 ## 3. Stale 处理
 
-已有恢复逻辑会处理 stale scheduler_job_runs。生产审计新增发现：worker_heartbeats 中 status=running 但 heartbeat_at 过旧的记录不会自动清理。应作为独立修复：
+已有恢复逻辑会处理 stale scheduler_job_runs。生产审计发现：worker_heartbeats 中 status=running 但 heartbeat_at 过旧的记录曾不会自动清理（PR #4 的 `_recovery_watchdog_loop` 因 `WORKER_TYPE` 启动条件未匹配生产 worker 而从未运行）。已新增独立 `worker-watchdog` 生产服务（`WORKER_TYPE=watchdog`）让看门狗在生产运行：
 
 ```text
 running + heartbeat_at < now - threshold → stopped/stale

@@ -16,6 +16,7 @@
 | worker-outbox | trading-worker-outbox | 无 | Outbox 扩张 |
 | worker-delivery | trading-worker-delivery | 无 | 投递 |
 | worker-after-close | trading-worker-after-close | 无 | 盘后编排 |
+| worker-watchdog | trading-worker-watchdog | 无 | 恢复看门狗（清理 stale job/heartbeat） |
 | worker-capture | trading-worker-capture | 8001 | 截图服务，volume `trading-capture-static` |
 
 ## 2. 关键环境变量
