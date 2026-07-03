@@ -6,7 +6,7 @@
 > Release 候选分支：`release/docs-aligned-candidate-v3`  
 > Release merge commit（release_merge_commit）：`ac07d4b439d45fda1ac5da78afcb471771c67934`（两个 parent：origin/main `69ea24ee44cb34820d5d20d86133fb4bfeb99113`、origin/fix/release-remaining-alignment-gaps `4de9811a4e744c25390605d83526e21d200c6b98`）  
 > 验证日期：2026-07-03  
-> 验证状态：本地验证完成；`verified_implementation_commit` 的 GitHub Actions CI 验证完成（Run #39，最终 HEAD `4de9811` 全部 blocking jobs success）；v3 最终 HEAD CI 待 push 后补记；生产未验证  
+> 验证状态：本地验证完成；`verified_implementation_commit` 的 GitHub Actions CI 验证完成（Run #39，最终 HEAD `4de9811` 全部 blocking jobs success）；`release_merge_commit` 的 GitHub Actions CI 验证完成（Run #41，最终 HEAD `2090bb0` 全部 blocking jobs success，非阻断的 Ruff/Mypy Full Repository Report 失败为预期历史债务展示）；生产未验证  
 > 事实来源：代码库 + 项目负责人截至 2026-07-03 已确认的产品与架构要求  
 > 维护要求：任何代码、配置、测试、部署或文档修改都必须同步更新相关当前设计文档，并新增 CHANGE 记录。  
 > 注意：该代码基线用于设计核对，不代表已经满足合并 `main` 或生产发布条件；文档 Commit 不记录自身 SHA，最终 release HEAD 在 PR 描述与合并后 CHANGE 中补记。  
@@ -35,7 +35,7 @@
 | ALIGN-011 | Capture Token | 前端已使用独立 storage key，但尚未完成普通 API 隔离、有效期和最小权限 E2E 证据 | 最小权限、短期、独立客户端、不污染登录 | `CLOSED` | `tests/test_capture_token_isolation.py` + `tests/test_auth_login.py` 共 18 passed；代码提交 `c06a2ea` |
 | ALIGN-012 | 管理页面 | 当前后端已实现邀请码、会员列表、任务和部分审计；用户启停、直接授予/续期/撤销/改套餐 API 与对应页面尚不完整，部分控件曾仅 Toast | 无真实 API 的控件删除；所有成功来自服务器结果 | `KNOWN_GAP` | 后端 admin API 与测试已覆盖，admin 生产 E2E 尚未执行 |
 | ALIGN-013 | 文档旧术语 | 仓库旧文档仍出现 plan_contract、Membership、旧到期路由等 | plans + Subscription + `/subscription-expired` | `CLOSED` | 全局扫描完成；当前设计文档已统一为 plans + Subscription + `/subscription-expired`；遗留 API 路径/字段已标注 V1.6 遗留命名；见 CHANGE-20260702-005 |
-| ALIGN-014 | CI | `ruff`/`type-check` job 曾设置 `continue-on-error: true`，失败不阻断 workflow；`Ruff Changed Files` 相对 `main` 检查整个大型 feature diff 会失败；旧 `type-check` 任务因 252 个历史 mypy 错误直接阻断合并 | release 候选最终 HEAD 的 blocking jobs 全绿，新增文件 Ruff/mypy 零错误，历史债务不新增/不增加/总数不超基线 | `KNOWN_GAP` | v3 最终 HEAD 尚未 push，CI 待 `release/docs-aligned-candidate-v3` 推送后运行并确认全绿；`verified_implementation_commit` `4de9811` 的 Run #39 已在分支内验证；见 CHANGE-20260702-010、CHANGE-20260702-011、CHANGE-20260703-012 |
+| ALIGN-014 | CI | `ruff`/`type-check` job 曾设置 `continue-on-error: true`，失败不阻断 workflow；`Ruff Changed Files` 相对 `main` 检查整个大型 feature diff 会失败；旧 `type-check` 任务因 252 个历史 mypy 错误直接阻断合并 | release 候选最终 HEAD 的 blocking jobs 全绿，新增文件 Ruff/mypy 零错误，历史债务不新增/不增加/总数不超基线 | `CLOSED` | `release/docs-aligned-candidate-v3` 最终 HEAD `2090bb0` 的 GitHub Actions Run #41 全部 blocking jobs success（Architecture Rules、Docs Consistency、Test Allowlist、Ruff New Files、Ruff Baseline Regression、Mypy New Files、Mypy Baseline Regression、Alembic Cycle、PostgreSQL Integration Tests、Frontend Type Check、Frontend Lint、Frontend Build）；非阻断的 Ruff/Mypy Full Repository Report 失败为预期历史债务展示；CI URL: `https://github.com/bao1872/market_dev/actions/runs/28657970319`；见 CHANGE-20260702-010、CHANGE-20260702-011、CHANGE-20260703-012 |
 | ALIGN-015 | 运行服务 | CORE_ONLY 不包含 capture/outbox/delivery，可能造成文字有、图片无 | 部署能力与业务功能匹配；服务健康不可用时不假成功 | `KNOWN_GAP` | Phase F 生产部署验证尚未执行 |
 | ALIGN-016 | Node Cluster 输入 | `indicator_contract.py` 中 `NODE_CLUSTER_LOW_BARS=3600`，应为 250*16=4000 | 15m 输入 4000 根，1d=250，1m=2 | `CLOSED` | `NODE_CLUSTER_LOW_BARS` 已改为 `DAILY_HISTORY_BARS * NODE_CLUSTER_15M_BARS_PER_DAY = 4000`，新增 `NODE_CLUSTER_15M_BARS_PER_DAY=16`，`test_node_cluster_contract.py` 8 passed |
 | ALIGN-017 | 飞书渠道 | Phase C 已永久删除 `FeishuWebhookAdapter`，统一为 `feishu_platform_app`；migration 055 添加 CHECK 约束禁止 `feishu_webhook` | Platform App only，删除全部 Webhook | `CLOSED` | `backend/app/services/feishu_webhook_adapter.py` 已删除；`notification_service.py` / `outbox_relay.py` / `beta_application_notifier.py` / `channel_adapter.py` / `system_channel.py` 改用 `FeishuPlatformAppAdapter`；migration 055 添加 CHECK 约束；`tests/test_feishu_platform_app_only.py` 11 passed；CHANGE-20260702-009 |
@@ -50,7 +50,7 @@
 |---|---|---|
 | 本地代码/测试/文档检查 | 已完成 | pytest 1106 passed、frontend contract 52 passed、`tools/update_docs.py --check`、`check_architecture.py`、`check_docs_consistency.py`、`check_test_allowlist.py` 通过；Ruff 新增文件零错误、Mypy 新增文件零错误、基线无回归 |
 | GitHub Actions CI（verified_implementation_commit） | 已完成 | Run #39 最终 HEAD `4de9811` 全部 blocking jobs success |
-| GitHub Actions CI（release_merge_commit） | 待补记 | v3 push 后更新 |
+| GitHub Actions CI（release_merge_commit） | 已完成 | Run #41 最终 HEAD `2090bb0` 全部 blocking jobs success；非阻断的 Ruff/Mypy Full Repository Report 失败为预期历史债务展示；URL: `https://github.com/bao1872/market_dev/actions/runs/28657970319` |
 | 生产部署验证 | 未验证 | 未执行 |
 
 > 规则：本地验证通过不能替代 CI 验证；CI 未全绿前，ALIGN-014 保持 `KNOWN_GAP`，不得进入 Phase E 或创建 release candidate。
