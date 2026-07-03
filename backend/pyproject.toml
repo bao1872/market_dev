@@ -24,7 +24,9 @@ dependencies = [
     "python-multipart>=0.0.9",
     "pytdx>=1.72",
     "pandas>=2.2",
-    "numpy>=1.26",
+    # [Dependencies] - numpy 上限：mypy 2.1.0 与 numpy 2.5.0+ 的 stub 存在语法不兼容，会
+    # 导致 CI `mypy app` 崩溃并产生虚假的 site-packages 诊断；上限保持与基线生成环境一致。
+    "numpy>=1.26,<2.5.0",
     "prometheus-client>=0.20",
     "structlog>=24.1",
     "httpx>=0.25.0,<0.26.0",

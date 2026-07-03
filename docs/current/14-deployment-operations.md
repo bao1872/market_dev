@@ -76,5 +76,5 @@ Backend、Python Workers、Frontend 和 Capture 必须可追踪 Git SHA、Build 
 - **阻断任务 `Mypy Baseline Regression`**：执行 `mypy app --output json --show-error-codes` 生成 JSONL 报告，并与 `tools/quality_baselines/mypy.json` 中的诊断集合（`filename` + `error_code` + `message` + `count`）比较；当前诊断集合中不得出现基线没有的新问题，同一组合的数量也不得增加，总错误数不得超过基线，否则阻断合并；
 - **非阻断任务 `Mypy Full Repository Report`**：执行 `mypy app --output json --show-error-codes` 并上传 JSONL 报告 artifact（`mypy-full-report`），仅展示剩余历史债务总数，不直接阻断合并；新增债务由 `Mypy Baseline Regression` 判断；
 - 历史债务在独立分支 `chore/ruff-historical-debt` 与 `chore/mypy-historical-debt` 中分别清理，清零后再将对应 `Full Repository Report` 改为完全阻断；
-- `backend/pyproject.toml` 将 `mypy` 固定为 `2.1.0`，避免 mypy 版本差异导致基线比较波动；
+- `backend/pyproject.toml` 将 `mypy` 固定为 `2.1.0`，并将 `numpy` 上限收紧为 `<2.5.0`，避免 mypy/numpy stub 版本差异导致基线比较波动或 mypy 崩溃；
 - 禁止通过扩大 `ignore`、新增 `per-file-ignores`、批量 `noqa` / `type: ignore`、扩大 `exclude` 或关闭全仓检查等手段让新增/增加诊断通过阻断任务。
