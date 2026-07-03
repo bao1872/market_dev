@@ -1,6 +1,18 @@
-"""tools/check_docs_consistency.py 治理规则测试。
+"""tools/check_docs_consistency.py v2 治理规则测试。
 
-覆盖 advice §8 第 1-10 条规则的 10 个反向/正向用例。
+覆盖 v2 MANIFEST 集中基线规则的 11 个场景：
+1. MANIFEST 合法 baseline 通过；
+2. MANIFEST 缺 baseline 失败；
+3. baseline 非 40 位 SHA 失败；
+4. baseline 非真实 commit 失败；
+5. baseline 非 HEAD 祖先失败；
+6. current 文档无重复 baseline 也通过；
+7. 坏本地链接失败；
+8. 待填写占位符失败；
+9. feishu_webhook 当前方案失败（删除语境豁免）；
+10. open-decisions 写回 Webhook OPEN 失败；
+11. archive 旧 baseline 不触发失败。
+
 使用 tmp_path + monkeypatch 注入临时文档目录，不修改真实文档。
 
 运行:
@@ -26,51 +38,81 @@ VALID_SHA = "a" * 40
 ALT_SHA = "b" * 40
 
 
-def _valid_header(sha: str = VALID_SHA) -> str:
-    """生成合法的基线头部字段。"""
+def _manifest_content(sha: str = VALID_SHA) -> str:
+    """生成合法的 v2 MANIFEST.md 内容（含全局基线字段）。"""
     return (
+        "# Current Docs Manifest\n\n"
         "> 文档状态：CURRENT DESIGN BASELINE  \n"
+        f"> 实现核对基线：`{sha}`  \n"
         "> 设计基线日期：2026-07-03  \n"
-        f"> 实现核对基线：{sha}  \n"
-        "> 实现核对分支：main  \n"
-        "> 最近一致性检查日期：2026-07-03  \n"
+        "> 注意：该文件是 v2 唯一基线头；其他 current 文档不再重复基线字段。\n\n"
+        "## 1. 文档状态定义\n\n"
+        "| 状态 | 含义 |\n|---|---|\n| CURRENT | 当前确认采用的设计 |\n"
     )
 
 
 def _setup_docs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    manifest: str | None = None,
     current_docs: dict[str, str] | None = None,
+    maps_docs: dict[str, str] | None = None,
+    archive_docs: dict[str, str] | None = None,
     readme: str | None = None,
+    agents: str | None = None,
 ) -> Path:
-    """在 tmp_path 下创建 docs 结构并注入模块路径变量。
+    """在 tmp_path 下创建 v2 docs 结构并注入模块路径变量。
 
     Args:
         tmp_path: 临时目录
         monkeypatch: pytest monkeypatch
-        current_docs: {文件名: 内容} 字典，创建 docs/current/ 下的文档
+        manifest: docs/current/MANIFEST.md 内容；None 则不创建
+        current_docs: {文件名: 内容} 字典，创建 docs/current/ 下的其他文档
+        maps_docs: {文件名: 内容} 字典，创建 docs/maps/ 下的文档
+        archive_docs: {文件名: 内容} 字典，创建 docs/archive/current-legacy-20260703/ 下的文档
         readme: docs/README.md 内容
+        agents: AGENTS.md 内容
 
     Returns:
         tmp_path（作为 REPO_ROOT）
     """
     docs_dir = tmp_path / "docs"
     current_dir = docs_dir / "current"
+    maps_dir = docs_dir / "maps"
+    archive_dir = docs_dir / "archive" / "current-legacy-20260703"
     current_dir.mkdir(parents=True, exist_ok=True)
+    maps_dir.mkdir(parents=True, exist_ok=True)
+    archive_dir.mkdir(parents=True, exist_ok=True)
 
     if readme is not None:
         (docs_dir / "README.md").write_text(readme, encoding="utf-8")
+
+    if manifest is not None:
+        (current_dir / "MANIFEST.md").write_text(manifest, encoding="utf-8")
 
     if current_docs:
         for name, content in current_docs.items():
             (current_dir / name).write_text(content, encoding="utf-8")
 
-    # 注入模块路径变量
+    if maps_docs:
+        for name, content in maps_docs.items():
+            (maps_dir / name).write_text(content, encoding="utf-8")
+
+    if archive_docs:
+        for name, content in archive_docs.items():
+            (archive_dir / name).write_text(content, encoding="utf-8")
+
+    if agents is not None:
+        (tmp_path / "AGENTS.md").write_text(agents, encoding="utf-8")
+
+    # 注入模块路径变量（v2 新增 MANIFEST_FILE 与 MAPS_DIR）
     monkeypatch.setattr(cdc, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(cdc, "DOCS_DIR", docs_dir)
     monkeypatch.setattr(cdc, "CURRENT_DIR", current_dir)
-    monkeypatch.setattr(cdc, "README_FILE", docs_dir / "README.md")
-    monkeypatch.setattr(cdc, "AGENTS_FILE", tmp_path / "AGENTS.md")  # 不存在，跳过
+    monkeypatch.setattr(cdc, "MANIFEST_FILE", current_dir / "MANIFEST.md")
+    monkeypatch.setattr(cdc, "MAPS_DIR", maps_dir)
+    monkeypatch.setattr(cdc, "ARCHIVE_DIR", archive_dir.parent)
+    monkeypatch.setattr(cdc, "AGENTS_FILE", tmp_path / "AGENTS.md")
 
     # 默认 mock git 校验为通过
     monkeypatch.setattr(cdc, "is_valid_commit", lambda sha: True)
@@ -80,197 +122,253 @@ def _setup_docs(
 
 
 # ============================================================
-# 测试用例（advice §8）
+# 测试用例（v2 MANIFEST 集中基线规则 11 个场景）
 # ============================================================
 
 
-class TestCheckDocsConsistency:
-    """check_docs_consistency.py 10 条规则测试。"""
+class TestCheckDocsConsistencyV2:
+    """check_docs_consistency.py v2 11 条规则测试。"""
 
-    def test_valid_unified_baseline_passes(
+    def test_01_manifest_valid_baseline_passes(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
     ) -> None:
-        """规则 1/3/6：合法统一 baseline 通过。"""
-        header = _valid_header()
+        """场景 1：MANIFEST 合法 baseline 通过。"""
         _setup_docs(
             tmp_path,
             monkeypatch,
-            current_docs={"00-test.md": header + "\n# 测试文档\n"},
-            readme=header + "\n# README\n",
+            manifest=_manifest_content(VALID_SHA),
+            current_docs={"00-product-business.md": "# 产品业务\n"},
+            maps_docs={"api-route-map.md": "# API 路由\n"},
+            readme="# README\n",
         )
 
         rc = cdc.main()
         assert rc == 0, f"合法 baseline 应通过，实际返回 {rc}"
 
-    def test_invalid_sha_fails(
+    def test_02_manifest_missing_baseline_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
     ) -> None:
-        """规则 4：非法 SHA（非 40 位 hex）失败。"""
-        # 38 位 hex，非 40 位
-        short_sha = "a" * 38
-        header = (
+        """场景 2：MANIFEST 缺 baseline 字段失败。"""
+        manifest_no_baseline = (
+            "# Current Docs Manifest\n\n"
             "> 文档状态：CURRENT DESIGN BASELINE  \n"
             "> 设计基线日期：2026-07-03  \n"
-            f"> 实现核对基线：{short_sha}  \n"
-            "> 实现核对分支：main  \n"
-            "> 最近一致性检查日期：2026-07-03  \n"
+            "> 注意：无 baseline 字段。\n"
         )
         _setup_docs(
             tmp_path,
             monkeypatch,
-            current_docs={"00-test.md": header + "\n# 测试\n"},
-            readme=header + "\n# README\n",
+            manifest=manifest_no_baseline,
+            readme="# README\n",
         )
 
         rc = cdc.main()
-        assert rc == 1, "非法 SHA 应失败"
+        assert rc == 1, "MANIFEST 缺 baseline 字段应失败"
 
-    def test_non_ancestor_sha_fails(
+    def test_03_baseline_invalid_sha_format_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
     ) -> None:
-        """规则 5：非祖先 SHA 失败。"""
-        header = _valid_header()
+        """场景 3：baseline 非 40 位 SHA 失败。"""
+        # 38 位 hex，非 40 位
+        short_sha = "a" * 38
         _setup_docs(
             tmp_path,
             monkeypatch,
-            current_docs={"00-test.md": header + "\n# 测试\n"},
-            readme=header + "\n# README\n",
+            manifest=_manifest_content(short_sha),
+            readme="# README\n",
+        )
+
+        rc = cdc.main()
+        assert rc == 1, "非 40 位 SHA 应失败"
+
+    def test_04_baseline_not_real_commit_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """场景 4：baseline 非真实 git 提交失败。"""
+        _setup_docs(
+            tmp_path,
+            monkeypatch,
+            manifest=_manifest_content(VALID_SHA),
+            readme="# README\n",
+        )
+        # mock is_valid_commit 返回 False
+        monkeypatch.setattr(cdc, "is_valid_commit", lambda sha: False)
+
+        rc = cdc.main()
+        assert rc == 1, "非真实 commit 的 SHA 应失败"
+
+    def test_05_baseline_not_head_ancestor_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """场景 5：baseline 非 HEAD 祖先失败。"""
+        _setup_docs(
+            tmp_path,
+            monkeypatch,
+            manifest=_manifest_content(VALID_SHA),
+            readme="# README\n",
         )
         # mock is_ancestor_of_head 返回 False
         monkeypatch.setattr(cdc, "is_ancestor_of_head", lambda sha: False)
 
         rc = cdc.main()
-        assert rc == 1, "非祖先 SHA 应失败"
+        assert rc == 1, "非 HEAD 祖先的 SHA 应失败"
 
-    def test_missing_baseline_fails(
+    def test_06_current_docs_without_baseline_passes(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
     ) -> None:
-        """规则 1/3：缺失 baseline 字段失败。"""
-        # 只有部分字段，缺少 实现核对基线
-        partial_header = (
-            "> 文档状态：CURRENT DESIGN BASELINE  \n"
-            "> 设计基线日期：2026-07-03  \n"
-            "> 实现核对分支：main  \n"
-            "> 最近一致性检查日期：2026-07-03  \n"
-        )
+        """场景 6：current 其他文档无重复 baseline 字段也通过（v2 核心规则）。"""
         _setup_docs(
             tmp_path,
             monkeypatch,
-            current_docs={"00-test.md": partial_header + "\n# 测试\n"},
-            readme=partial_header + "\n# README\n",
-        )
-
-        rc = cdc.main()
-        assert rc == 1, "缺失 baseline 字段应失败"
-
-    def test_inconsistent_baselines_fail(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
-    ) -> None:
-        """规则 6：baseline 不一致失败。"""
-        header_a = _valid_header(VALID_SHA)
-        header_b = _valid_header(ALT_SHA)
-        _setup_docs(
-            tmp_path,
-            monkeypatch,
+            manifest=_manifest_content(VALID_SHA),
             current_docs={
-                "00-a.md": header_a + "\n# A\n",
-                "01-b.md": header_b + "\n# B\n",
+                # current 其他文档不含 baseline 字段
+                "00-product-business.md": "# 产品业务\n\n无基线头。\n",
+                "01-system-architecture.md": "# 系统架构\n\n无基线头。\n",
+                "open-decisions.md": "# 未决问题\n\n已决定 Webhook 已永久删除。\n",
             },
-            readme=header_a + "\n# README\n",
+            maps_docs={"api-route-map.md": "# API 路由\n"},
+            readme="# README\n",
         )
 
         rc = cdc.main()
-        assert rc == 1, "baseline 不一致应失败"
+        assert rc == 0, "current 其他文档无 baseline 也应通过"
 
-    def test_zero_matches_fails(
+    def test_07_broken_local_link_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
     ) -> None:
-        """规则 2：零匹配失败（有文档但无任何 baseline）。"""
-        no_baseline_content = (
-            "> 文档状态：DRAFT  \n"
-            "> 无基线字段  \n"
-            "\n# 测试文档\n"
-        )
-        _setup_docs(
-            tmp_path,
-            monkeypatch,
-            current_docs={"00-test.md": no_baseline_content},
-            readme=no_baseline_content,
-        )
-
-        rc = cdc.main()
-        assert rc == 1, "零匹配应失败"
-
-    def test_broken_local_link_fails(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
-    ) -> None:
-        """规则 9：失效本地链接失败。"""
-        header = _valid_header()
+        """场景 7：坏本地链接失败。"""
         # 链接到不存在的文件
-        content_with_bad_link = header + "\n# 测试\n\n[不存在](nonexistent.md)\n"
+        content_with_bad_link = "# 产品业务\n\n[不存在](nonexistent.md)\n"
         _setup_docs(
             tmp_path,
             monkeypatch,
-            current_docs={"00-test.md": content_with_bad_link},
-            readme=header + "\n# README\n",
+            manifest=_manifest_content(VALID_SHA),
+            current_docs={"00-product-business.md": content_with_bad_link},
+            readme="# README\n",
         )
 
         rc = cdc.main()
         assert rc == 1, "失效本地链接应失败"
 
-    def test_placeholder_fails(
+    def test_08_placeholder_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
     ) -> None:
-        """规则 9：待填写占位符失败。"""
-        header = _valid_header()
-        content_with_placeholder = header + "\n# 测试\n\n这里是待填写内容\n"
+        """场景 8：待填写占位符失败。"""
+        content_with_placeholder = "# 产品业务\n\n这里是待填写内容\n"
         _setup_docs(
             tmp_path,
             monkeypatch,
-            current_docs={"00-test.md": content_with_placeholder},
-            readme=header + "\n# README\n",
+            manifest=_manifest_content(VALID_SHA),
+            current_docs={"00-product-business.md": content_with_placeholder},
+            readme="# README\n",
         )
 
         rc = cdc.main()
         assert rc == 1, "待填写占位符应失败"
 
-    def test_webhook_current_solution_regresses(
+    def test_09_feishu_webhook_current_solution_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
     ) -> None:
-        """规则 7：feishu_webhook 作为当前方案（非删除语境）失败。"""
-        header = _valid_header()
-        # feishu_webhook 出现但无删除语境关键词
+        """场景 9：feishu_webhook 作为当前方案（非删除语境）失败。"""
         content_with_webhook = (
-            header + "\n# 测试\n\n当前通知方式包括 feishu_webhook 和平台应用。\n"
+            "# 产品业务\n\n当前通知方式包括 feishu_webhook 和平台应用。\n"
         )
         _setup_docs(
             tmp_path,
             monkeypatch,
-            current_docs={"00-test.md": content_with_webhook},
-            readme=header + "\n# README\n",
+            manifest=_manifest_content(VALID_SHA),
+            current_docs={"00-product-business.md": content_with_webhook},
+            readme="# README\n",
         )
 
         rc = cdc.main()
         assert rc == 1, "feishu_webhook 作为当前方案应失败"
 
-    def test_webhook_vs_platform_app_open_regresses(
+    def test_09b_feishu_webhook_deletion_context_passes(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
     ) -> None:
-        """规则 8：Webhook vs Platform App 写成 OPEN 失败。"""
-        header = _valid_header()
-        # 17-open-decisions.md 中 Webhook + 仍需决定 且无 已决定
-        open_content = (
-            header
-            + "\n# 17 未决设计问题\n\n"
-            + "## OPEN-NOTIFY-001 飞书长期形态\n\n"
-            + "仍需决定 Webhook 与平台应用的长期优先级。\n"
+        """场景 9b：feishu_webhook 在删除语境中通过（豁免）。"""
+        content_with_deletion = (
+            "# 产品业务\n\nfeishu_webhook 已永久删除，禁止恢复。\n"
         )
         _setup_docs(
             tmp_path,
             monkeypatch,
-            current_docs={"17-open-decisions.md": open_content},
-            readme=header + "\n# README\n",
+            manifest=_manifest_content(VALID_SHA),
+            current_docs={"00-product-business.md": content_with_deletion},
+            readme="# README\n",
         )
 
         rc = cdc.main()
-        assert rc == 1, "Webhook vs Platform App 写成 OPEN 应失败"
+        assert rc == 0, "feishu_webhook 在删除语境中应通过"
+
+    def test_10_open_decisions_webhook_open_regresses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """场景 10：open-decisions.md 把 Webhook vs Platform App 写成 OPEN 失败。"""
+        open_content = (
+            "# 未决设计问题\n\n"
+            "## OPEN-NOTIFY-001 飞书长期形态\n\n"
+            "仍需决定 Webhook 与平台应用的长期优先级。\n"
+        )
+        _setup_docs(
+            tmp_path,
+            monkeypatch,
+            manifest=_manifest_content(VALID_SHA),
+            current_docs={"open-decisions.md": open_content},
+            readme="# README\n",
+        )
+
+        rc = cdc.main()
+        assert rc == 1, "open-decisions.md 把 Webhook 写成 OPEN 应失败"
+
+    def test_10b_open_decisions_webhook_decided_passes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """场景 10b：open-decisions.md Webhook 已决定通过（豁免）。"""
+        decided_content = (
+            "# 未决设计问题\n\n"
+            "## NOTIFY-001 飞书长期形态\n\n"
+            "已决定 Webhook 已永久删除，仅保留 Platform App。\n"
+        )
+        _setup_docs(
+            tmp_path,
+            monkeypatch,
+            manifest=_manifest_content(VALID_SHA),
+            current_docs={"open-decisions.md": decided_content},
+            readme="# README\n",
+        )
+
+        rc = cdc.main()
+        assert rc == 0, "open-decisions.md Webhook 已决定应通过"
+
+    def test_11_archive_legacy_baseline_not_checked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """场景 11：archive 旧文档含 baseline 不触发一致性检查失败（v2 规则 6）。
+
+        旧 current 文档归档到 docs/archive/current-legacy-20260703/，
+        其中可能含旧 baseline 字段，但 v2 不对其做 baseline 一致性检查。
+        """
+        # 旧 current 文档含旧 baseline 头（与 MANIFEST baseline 不同）
+        legacy_header = (
+            "> 文档状态：CURRENT DESIGN BASELINE  \n"
+            f"> 实现核对基线：{ALT_SHA}  \n"
+            "> 设计基线日期：2026-07-02  \n"
+        )
+        legacy_content = legacy_header + "\n# 旧产品概述\n\n这是归档旧文档。\n"
+        _setup_docs(
+            tmp_path,
+            monkeypatch,
+            manifest=_manifest_content(VALID_SHA),
+            current_docs={"00-product-business.md": "# 产品业务\n"},
+            archive_docs={"00-project-overview.md": legacy_content},
+            readme="# README\n",
+        )
+
+        rc = cdc.main()
+        assert rc == 0, (
+            "archive 旧文档 baseline 不应触发一致性检查失败；"
+            f"实际返回 {rc}"
+        )

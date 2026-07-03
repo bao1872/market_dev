@@ -646,12 +646,17 @@ def check_plan_value_hardcoding() -> list[Violation]:
 
 
 def check_daili_placeholder() -> list[Violation]:
-    """规则：docs/ 与 AGENTS.md 禁止 '待填写' 占位符。"""
+    """规则：docs/current/ 与 docs/maps/ 禁止 '待填写' 占位符（v2 适配）。
+
+    v2 调整：只在 current/maps（事实源）中检查占位符；
+    archive/changes/根目录规则说明文档/AGENTS.md 可能引用"待填写"作为规则描述，
+    不检查，避免误判。
+    """
     violations: list[Violation] = []
     for path in iter_scanned_files(extensions={".md"}, include_markdown=True):
-        if path == ROOT / "AGENTS.md":
-            pass
-        elif not is_under(path, ROOT / "docs"):
+        # v2：只在 current/maps 中检查占位符
+        if not (is_under(path, ROOT / "docs" / "current") or
+                is_under(path, ROOT / "docs" / "maps")):
             continue
         text = read_text(path)
         for match in DAILI_PLACEHOLDER_PATTERN.finditer(text):
@@ -665,6 +670,118 @@ def check_daili_placeholder() -> list[Violation]:
                 )
             )
             break
+    return violations
+
+
+# ---------------------------------------------------------------------------
+# v2 文档结构完整性检查
+# ---------------------------------------------------------------------------
+
+V2_REQUIRED_CURRENT_FILES = [
+    "MANIFEST.md",
+    "00-product-business.md",
+    "01-system-architecture.md",
+    "02-data-api-contracts.md",
+    "03-jobs-integrations-operations.md",
+    "04-frontend-ux.md",
+    "05-testing-acceptance.md",
+    "open-decisions.md",
+    "code-doc-alignment.md",
+]
+
+V2_LEGACY_CURRENT_FILES = [
+    "00-project-overview.md",
+    "01-product-requirements.md",
+    "02-domain-glossary.md",
+    "03-business-rules.md",
+    "04-business-workflows.md",
+    "05-system-architecture.md",
+    "06-frontend-design.md",
+    "07-backend-design.md",
+    "08-data-model.md",
+    "09-api-contracts.md",
+    "10-permissions-security.md",
+    "11-jobs-integrations.md",
+    "12-strategy-indicator-contracts.md",
+    "13-configuration-parameters.md",
+    "14-deployment-operations.md",
+    "15-testing-acceptance.md",
+    "16-frontend-route-map.md",
+    "17-open-decisions.md",
+    "18-code-doc-alignment.md",
+]
+
+
+def check_v2_docs_structure() -> list[Violation]:
+    """规则：v2 文档结构完整性检查（AGENTS.md §十一 规则 6/7）。
+
+    1. docs/current/ 下 9 个必需文件全部存在；
+    2. docs/current/ 下不得残留旧 00-18 文件名；
+    3. docs/maps/ 下至少存在 1 个 map 文件。
+    """
+    violations: list[Violation] = []
+    current_dir = ROOT / "docs" / "current"
+    maps_dir = ROOT / "docs" / "maps"
+
+    # 1. 必需文件存在性
+    if current_dir.exists():
+        existing = {p.name for p in current_dir.iterdir() if p.is_file()}
+        for required in V2_REQUIRED_CURRENT_FILES:
+            if required not in existing:
+                violations.append(
+                    Violation(
+                        "v2-docs-structure",
+                        current_dir / required,
+                        1,
+                        f"缺少 v2 必需 current 文件：{required}",
+                    )
+                )
+    else:
+        violations.append(
+            Violation(
+                "v2-docs-structure",
+                current_dir,
+                1,
+                "docs/current/ 目录不存在",
+            )
+        )
+
+    # 2. 旧 00-18 文件名残留检查
+    if current_dir.exists():
+        for legacy in V2_LEGACY_CURRENT_FILES:
+            legacy_path = current_dir / legacy
+            if legacy_path.exists():
+                violations.append(
+                    Violation(
+                        "v2-docs-structure",
+                        legacy_path,
+                        1,
+                        f"docs/current/ 残留旧 00-18 文件：{legacy}（应已归档至 docs/archive/current-legacy-20260703/）",
+                    )
+                )
+
+    # 3. maps 目录至少存在 1 个 map 文件
+    if maps_dir.exists():
+        map_files = [p for p in maps_dir.iterdir() if p.is_file() and p.suffix == ".md"]
+        if not map_files:
+            violations.append(
+                Violation(
+                    "v2-docs-structure",
+                    maps_dir,
+                    1,
+                    "docs/maps/ 目录下不存在任何 .md 文件",
+                )
+            )
+    else:
+        violations.append(
+            Violation(
+                "v2-docs-structure",
+                maps_dir,
+                1,
+                "docs/maps/ 目录不存在",
+            )
+        )
+
     return violations
 
 
@@ -683,6 +800,7 @@ CHECKS = [
     ("strategy_author", check_strategy_author),
     ("Plan value hardcoding/duplication", check_plan_value_hardcoding),
     ("待填写 placeholder", check_daili_placeholder),
+    ("v2 docs structure", check_v2_docs_structure),
 ]
 
 
