@@ -10,7 +10,6 @@
 | ALIGN-012 | 管理页面 E2E | AdminJobsPage 与部分管理 API 已存在，但用户启停、订阅变更、任务与审计生产操作未完整验收 | 所有管理按钮真实 API、审计完整、生产 E2E 通过 | P1 |
 | ALIGN-015 | 服务健康与业务能力 | CORE_ONLY 不包含 capture/outbox/delivery；服务不全会造成业务部分可用 | 部署能力与业务功能匹配；服务不可用时不假成功 | P1 |
 | ALIGN-021 | Ruff/Mypy 历史债务 | 全仓 Ruff/Mypy Full Report 仍有历史债务，非阻断展示 | 独立债务分支清零，再改为完全阻断 | P2 |
-| ALIGN-023 | Worker heartbeat 僵尸 running | PR #4 代码已部署(b4b5918)但 `_recovery_watchdog_loop` 因 `WORKER_TYPE in ("watchdog","all")` 启动条件未匹配任何生产 worker 而从未运行，30 条 stale running 未清理；已新增独立 `worker-watchdog` 生产服务(本 PR)，待部署后验证 stale running 清零再关闭 | stale running heartbeat 应被标记 stopped/stale，任务状态可信 | P1 |
 
 ## CLOSED 摘要
 
@@ -23,6 +22,7 @@
 | ALIGN-016 | Node Cluster 15m 输入已修正为 4000 |
 | ALIGN-017 | 飞书 Platform App only，Webhook 永久删除 |
 | ALIGN-022 | `target_channel_id` 手动通知跳过资格过滤，自动通知仍过滤，已补隔离测试 |
+| ALIGN-023 | worker-watchdog 生产服务已部署(67105c2)，38 条 stale running 已自动清理为 stopped，stale running=0 |
 | ALIGN-024 | docs v2 结构已通过 PR #5 合并落库（cafbdc4），旧 00-18 归档，check 已适配 |
 
 ## 关闭要求

@@ -45,7 +45,7 @@ error_code / error_message
 
 管理员和运维必须能回答：运行中的 Worker、Git SHA、心跳、next run、当前任务、股票计数、失败阶段、重试状态、发布完整性、文字状态、图片状态和数据新鲜度。
 
-生产只读审计发现：`worker_heartbeats` 存在 stale/running 僵尸记录，导致 Worker 状态可信度不足。代码修复已由 PR #4 实现：`_recovery_watchdog_loop` 每 60 秒调用 `mark_stale_worker_heartbeats`，将 `status='running'` 且 `heartbeat_at` 超过 600 秒的记录标记为 `stopped`。但 PR #4 部署后该 loop 因 `WORKER_TYPE` 启动条件未匹配任何生产 worker 而从未运行；已新增独立 `worker-watchdog` 生产服务（`WORKER_TYPE=watchdog`）使其在生产运行，待部署后验证 stale running 清零（ALIGN-023）。
+生产只读审计发现：`worker_heartbeats` 存在 stale/running 僵尸记录，导致 Worker 状态可信度不足。代码修复已由 PR #4 实现：`_recovery_watchdog_loop` 每 60 秒调用 `mark_stale_worker_heartbeats`，将 `status='running'` 且 `heartbeat_at` 超过 600 秒的记录标记为 `stopped`。PR #4 部署后该 loop 因 `WORKER_TYPE` 启动条件未匹配任何生产 worker 而从未运行；PR #7 新增独立 `worker-watchdog` 生产服务（`WORKER_TYPE=watchdog`）使其在生产运行。生产部署 67105c2 后验证：watchdog 启动即标记 38 条僵尸心跳为 stopped，stale running 已清零（ALIGN-023 已关闭）。
 
 ## 4. 飞书 Platform App
 
