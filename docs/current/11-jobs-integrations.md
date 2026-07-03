@@ -42,6 +42,23 @@
 
 重要任务保存 run_key、business_date、scheduled/started/finished、status、heartbeat、lease、instance、计数、错误和 Git SHA。重复触发复用或返回 duplicate；stale 任务按服务规则恢复，禁止直接手改数据库状态。
 
+### 3.1 Worker 心跳与僵尸清理
+
+`worker_heartbeats` 表记录每个 Worker 实例的运行状态。`_heartbeat_loop` 启动时 INSERT（status=running），运行中每 60s UPDATE heartbeat_at，正常 SIGTERM 退出时 UPDATE status=stopped。
+
+容器被 SIGKILL（无 SIGTERM）或进程崩溃时，`_heartbeat_loop` 无法执行退出清理，会残留 status=running 的僵尸记录，导致管理员面板的 Worker 健康状态不可信。
+
+僵尸心跳由 `_recovery_watchdog_loop` 统一清理：
+
+- 函数：`app.worker.mark_stale_worker_heartbeats(db, now=None, threshold_seconds=600)`
+- 阈值：`STALE_HEARTBEAT_THRESHOLD_SECONDS=600`（10 个心跳周期，远大于正常抖动），通过环境变量可调整
+- 行为：原子 UPDATE `worker_heartbeats SET status='stopped' WHERE status='running' AND heartbeat_at < now - threshold`；不删除记录，保留 started_at/heartbeat_at/build_sha 供审计；不 commit（由调用方控制事务，与 `recover_stale_scheduler_job_runs` 模式一致）
+- 幂等：status 已是 stopped 的记录不会被重复处理
+- 触发：`_recovery_watchdog_loop` 每 60s 调用一次，与 `recover_stale_scheduler_job_runs` 同事务执行后 commit
+- 异常处理：数据库异常向上传播，由 watchdog 外层捕获并记录日志，下个周期继续重试
+
+`stopped` 是 `WorkerHeartbeat.status` 的合法值（`String(32)`，注释 `running/idle/stopped`），不涉及数据库 migration。
+
 ## 4. 行情集成
 
 Pytdx 提供行情，Mootdx 提供交易日历。统一行情聚合服务 `market_data_aggregation_service.py` 是唯一事实源，负责历史完成 Bar、尾部补齐和盘中 partial Bar；外部源失败时记录降级。交易日不能通过“是否有 K 线”推断。
