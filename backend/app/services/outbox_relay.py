@@ -157,17 +157,18 @@ async def _expand_notification_message_created(
 
     # [eligible_user_service] - 过滤失效用户：disabled/expired/admin 不扩张投递
     # 资格判定唯一事实源：active member + 有效 subscription（admin 不进入 universe）
-    from app.services.eligible_user_service import is_user_eligible
-
-    if not await is_user_eligible(db, user_id):
-        logger.info(
-            "用户无资格，跳过通知扩张: outbox_id=%s user_id=%s message_id=%s",
-            record.id, user_id, message_id,
-        )
-        return 0
-
-    # 解析目标渠道 ID（手动发送场景）
+    # 例外：用户主动触发的通知（stock_detail_share）和手动指定 target_channel_id 的通知
+    #       不受订阅状态限制，立即扩张（与 delivery_worker._USER_TRIGGERED_SOURCE_TYPES 一致）
     target_channel_id_str = payload.get("target_channel_id")
+    if not target_channel_id_str:
+        from app.services.eligible_user_service import is_user_eligible
+
+        if not await is_user_eligible(db, user_id):
+            logger.info(
+                "用户无资格，跳过通知扩张: outbox_id=%s user_id=%s message_id=%s",
+                record.id, user_id, message_id,
+            )
+            return 0
     target_channel_id: UUID | None = None
     if target_channel_id_str:
         try:
