@@ -262,7 +262,8 @@ async def retry_image_endpoint(
 
 if __name__ == "__main__":
     # 自测入口：验证路由注册 + 三字段错误响应构造
-    paths = [r.path for r in router.routes]
+    # [StockDetailFeishu] - 描述: router.routes 为 BaseRoute 列表，用 getattr 安全取 path
+    paths = [p for p in (getattr(r, "path", None) for r in router.routes) if p]
     print(f"router.routes={paths}")
     assert any("/send-feishu" in p for p in paths), "应包含 /send-feishu 路由"
     assert any("/status" in p for p in paths), "应包含 /status 路由"

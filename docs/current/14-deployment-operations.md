@@ -72,5 +72,8 @@ Backend、Python Workers、Frontend 和 Capture 必须可追踪 Git SHA、Build 
 - **阻断任务 `Ruff New Files`**：仅检查当前 PR / push 相对 base 新增的 Python 文件（`git diff --diff-filter=A`），必须零错误，失败阻断合并；
 - **阻断任务 `Ruff Baseline Regression`**：执行 `ruff check .` 生成 JSON 报告，并与 `tools/quality_baselines/ruff.json` 中的诊断集合（`filename` + `code` + `message` + `count`）比较；当前诊断集合中不得出现基线没有的新问题，同一组合的数量也不得增加，否则阻断合并；
 - **非阻断任务 `Ruff Full Repository Report`**：执行 `ruff check .` 并上传 JSON 报告 artifact，仅展示剩余历史债务总数，不直接阻断合并；新增债务由 `Ruff Baseline Regression` 判断；
-- 历史债务在独立分支 `chore/ruff-historical-debt` 中清理，清零后再将 `Ruff Full Repository Report` 改为完全阻断；
-- 禁止通过扩大 `ignore`、新增 `per-file-ignores`、批量 `noqa` 或 `exclude` 等手段让新增/增加诊断通过阻断任务。
+- **阻断任务 `Mypy New Files`**：检查当前 PR / push 相对 Phase D 基线新增的 backend/app Python 生产文件（`git diff --diff-filter=A`），必须 mypy 零错误，失败阻断合并；测试文件不纳入阻断对象；
+- **阻断任务 `Mypy Baseline Regression`**：执行 `mypy app --output json --show-error-codes` 生成 JSONL 报告，并与 `tools/quality_baselines/mypy.json` 中的诊断集合（`filename` + `error_code` + `message` + `count`）比较；当前诊断集合中不得出现基线没有的新问题，同一组合的数量也不得增加，总错误数不得超过基线，否则阻断合并；
+- **非阻断任务 `Mypy Full Repository Report`**：执行 `mypy app --output json --show-error-codes` 并上传 JSONL 报告 artifact（`mypy-full-report`），仅展示剩余历史债务总数，不直接阻断合并；新增债务由 `Mypy Baseline Regression` 判断；
+- 历史债务在独立分支 `chore/ruff-historical-debt` 与 `chore/mypy-historical-debt` 中分别清理，清零后再将对应 `Full Repository Report` 改为完全阻断；
+- 禁止通过扩大 `ignore`、新增 `per-file-ignores`、批量 `noqa` / `type: ignore`、扩大 `exclude` 或关闭全仓检查等手段让新增/增加诊断通过阻断任务。

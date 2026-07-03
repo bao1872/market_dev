@@ -92,6 +92,8 @@ python tools/check_test_allowlist.py
 - **Ruff New Files（阻断）**：相对 base 新增的 Python 文件必须零错误；
 - **Ruff Baseline Regression（阻断）**：当前全仓库诊断集合相对 `tools/quality_baselines/ruff.json` 基线不得新增问题、不得增加数量；
 - **Ruff Full Repository Report（非阻断）**：执行全仓库扫描并上传 JSON 报告 artifact，仅展示剩余历史债务；
-- mypy `app` 阻断；
+- **Mypy New Files（阻断）**：相对 Phase D 基线新增的 backend/app Python 生产文件必须 mypy 零错误；
+- **Mypy Baseline Regression（阻断）**：当前 backend/app mypy 诊断集合相对 `tools/quality_baselines/mypy.json` 基线不得新增问题、不得增加数量、总数不得超过基线；
+- **Mypy Full Repository Report（非阻断）**：执行 `mypy app` 并上传 JSONL 报告 artifact（`mypy-full-report`），仅展示剩余历史债务；
 - GitHub Actions 针对最终 HEAD 全部 blocking jobs success；
 - 没有未登记的代码—文档冲突。

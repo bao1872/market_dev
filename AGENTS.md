@@ -1300,4 +1300,5 @@ API 和数据契约
 10. 未经测试和真实运行证据不得关闭 Alignment；
 11. 不直接修改 main，不 force push 已共享分支；
 12. 不把 Mock E2E 描述成真实飞书 E2E。
-13. Ruff 质量门禁采用增量阻断策略：PR 中新增或修改的 Python 文件必须 Ruff 零错误（`Ruff Changed Files` 任务阻断合并）；全仓库 Ruff 历史债务以 `tools/quality_baselines/ruff.json` 为基线，`Ruff Full Repository Baseline` 任务非阻断但会失败于基线回归；禁止用全局 ignore、per-file-ignores 或批量 noqa 掩盖新增错误；历史债务在独立分支 `chore/ruff-historical-debt` 中清理，清零后再将全仓库 Ruff 改为完全阻断。
+13. Ruff 质量门禁采用增量阻断策略：PR 中新增或修改的 Python 文件必须 Ruff 零错误（`Ruff New Files` 任务阻断合并）；全仓库 Ruff 历史债务以 `tools/quality_baselines/ruff.json` 为基线，`Ruff Baseline Regression` 任务阻断新增/增加诊断；`Ruff Full Repository Report` 任务非阻断但上传完整报告；禁止用全局 ignore、per-file-ignores 或批量 noqa 掩盖新增错误；历史债务在独立分支 `chore/ruff-historical-debt` 中清理，清零后再将全仓库 Ruff 改为完全阻断。
+14. Mypy 质量门禁采用与 Ruff 同构的增量阻断策略：PR 中新增的 backend/app Python 生产文件必须 mypy 零错误（`Mypy New Files` 任务阻断合并）；全仓库 mypy 历史债务以 `tools/quality_baselines/mypy.json` 为基线，`Mypy Baseline Regression` 任务阻断新增/增加诊断；`Mypy Full Repository Report` 任务非阻断但上传完整报告；禁止用大范围 ignore、批量 `type: ignore`、扩大 exclude 或关闭全仓检查掩盖新增错误；历史债务在独立分支 `chore/mypy-historical-debt` 中清理，清零后再将全仓库 mypy 改为完全阻断。
