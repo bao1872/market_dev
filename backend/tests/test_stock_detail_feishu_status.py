@@ -203,7 +203,7 @@ class TestStockDetailFeishuStatusAggregation:
             assert types == {"card", "image"}, f"delivery_type 集合应为 {{card, image}}，实际 {types}"
             assert all(d.channel_id == channel.id for d in deliveries), "投递应指向同一渠道"
 
-            # 状态查询端点返回 8 字段
+            # 状态查询端点返回 10 字段
             transport = ASGITransport(app=app)
             async with AsyncClient(
                 transport=transport, base_url="http://test"
@@ -219,6 +219,8 @@ class TestStockDetailFeishuStatusAggregation:
             assert status_data["test_run_id"] == test_run_id
             assert status_data["message_group_id"] == message_group_id
             assert status_data["card_status"] == "pending"
+            assert status_data["capture_status"] == "success"
+            assert status_data["image_upload_status"] == "pending"
             assert status_data["image_status"] == "pending"
             assert status_data["overall_status"] == "pending"
             assert status_data["image_message_id"] is not None
@@ -226,6 +228,8 @@ class TestStockDetailFeishuStatusAggregation:
                 "test_run_id",
                 "message_group_id",
                 "card_status",
+                "capture_status",
+                "image_upload_status",
                 "image_status",
                 "overall_status",
                 "failed_step",

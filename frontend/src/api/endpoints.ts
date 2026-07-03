@@ -456,10 +456,27 @@ export interface ChannelLatestEventTestResponse {
   diagnostics: Record<string, unknown>
 }
 
+// [Capture] - 描述: Capture Snapshot API 响应类型
+// 与后端 backend/app/api/capture.py 的 get_capture_snapshot 返回结构对齐
+
+/** 截图数据快照响应（一次返回 instrument / bars / indicators / events） */
+export interface CaptureSnapshotResponse {
+  instrument: Instrument
+  bars: BarListResponse
+  indicators: IndicatorResponse
+  events: StrategyEventListResponse
+  snapshot_time: string
+  capture: {
+    user_id: string
+    event_id: string
+    scope: string
+  }
+}
+
 // [StockDetailFeishu] - 描述: 异步 Outbox 投递模式类型契约（POST 创建 + GET 状态轮询）
 // 与后端 backend/app/api/stock_detail_feishu.py 的 SendFeishuResponse / ShareStatusResponse 对齐
 
-/** 单条投递状态（card / image 共用） */
+/** 单条投递状态（card / image / capture 共用） */
 export type ShareDeliveryStatus =
   | 'pending'
   | 'sending'
@@ -483,11 +500,14 @@ export interface StockDetailFeishuStatusResponse {
   test_run_id: string
   message_group_id: string | null
   card_status: ShareDeliveryStatus
+  capture_status: ShareDeliveryStatus
+  image_upload_status: ShareDeliveryStatus
   image_status: ShareDeliveryStatus
-  overall_status: 'pending' | 'success' | 'failed'
-  failed_step: 'card' | 'image' | null
+  overall_status: 'pending' | 'success' | 'partial_failed' | 'failed'
+  failed_step: 'capture' | 'image_upload' | 'image_delivery' | 'card' | 'image' | null
   error_code: string | null
   error_message: string | null
+  image_message_id: string | null
 }
 
 /** 消息预览响应 */

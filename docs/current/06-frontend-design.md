@@ -45,6 +45,10 @@ API Client → Domain Adapter → ViewModel → Page/Component
 
 字段、单位、时区、错误和空值转换集中在 Adapter；多个页面不得复制同一业务转换。
 
+当前已提取的共享工具：
+- `src/utils/market.ts`：市场中文标签（`MARKET_LABELS`）与成交额格式化（`formatAmount`），供个股详情页与截图页复用。
+- `src/utils/chart.ts`：后端 `Bar` 到 `StrategyChart` 所需 `BarData` 的转换（`mapBarsToBarData`），避免多处重复映射 K 线字段。
+
 ## 5. 页面设计
 
 ### 5.1 趋势选股

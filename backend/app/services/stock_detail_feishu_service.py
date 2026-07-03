@@ -515,7 +515,9 @@ async def get_share_status(
             "test_run_id": str(test_run_id),
             "message_group_id": None,
             "card_status": "pending",
-            "image_status": "pending",
+            "capture_status": "pending",
+            "image_upload_status": "not_created",
+            "image_status": "not_created",
             "overall_status": "pending",
             "failed_step": None,
             "error_code": None,
@@ -537,6 +539,19 @@ async def get_share_status(
     image_message_id = (
         str(image_deliveries[0].notification_message_id) if image_deliveries else None
     )
+    # [StockDetailFeishu] - 描述: 图片上传状态取 image delivery 的 image_upload_status
+    # 若字段为 None，按 delivery.status 推断：success→success，failed/dead→failed，其他→pending
+    if image_deliveries:
+        image_upload_status = image_deliveries[0].image_upload_status
+        if image_upload_status is None:
+            if image_deliveries[0].status == "success":
+                image_upload_status = "success"
+            elif image_deliveries[0].status in ("failed", "dead"):
+                image_upload_status = "failed"
+            else:
+                image_upload_status = "pending"
+    else:
+        image_upload_status = "not_created"
 
     # 查询同 message_group_id 的截图失败记录（capture 失败时不会创建 image delivery）
     stmt_cj = (
@@ -550,6 +565,15 @@ async def get_share_status(
     )
     result_cj = await db.execute(stmt_cj)
     capture_job_failed = result_cj.scalar_one_or_none()
+
+    # [StockDetailFeishu] - 描述: capture_status 反映截图任务状态
+    # capture 失败时不会有 image delivery，因此单独查询 CaptureJob 失败记录
+    capture_status: str = "pending"
+    if capture_job_failed:
+        capture_status = "failed"
+    elif image_deliveries:
+        # image delivery 已创建说明截图已成功返回 image_url
+        capture_status = "success"
 
     # 汇总 overall_status + failed_step + error_code + error_message
     # [StockDetailFeishu] - 描述: 文字成功+图片失败 → overall_status=partial_failed
@@ -608,6 +632,8 @@ async def get_share_status(
         "test_run_id": str(test_run_id),
         "message_group_id": message_group_id,
         "card_status": card_status,
+        "capture_status": capture_status,
+        "image_upload_status": image_upload_status,
         "image_status": image_status,
         "overall_status": overall_status,
         "failed_step": failed_step,

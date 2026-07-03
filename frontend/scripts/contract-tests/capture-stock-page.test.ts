@@ -8,7 +8,8 @@
 // 5. CaptureStockPage 不加载 watchlist/events/memo/batchInstruments（无对应 hook 调用）
 // 6. CaptureStockPage 设置 data-testid="stock-detail-capture" 与 data-render-ready
 // 7. CaptureStockPage 的 isRenderReady 不依赖 eventsQuery（事件查询超时是 30s 截图失败根因）
-// 8. stock_capture_service.py URL 已更新为 /capture/stock/{symbol}
+// 8. stock_capture_service.py URL 已更新为 /capture/stock/{symbol} 并携带 instrument_id
+// 9. CaptureStockPage 只调用 Snapshot API，不调用普通端点
 
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
@@ -207,17 +208,17 @@ test('CaptureStockPage 的 isRenderReady 表达式只依赖 bars + indicators', 
     `isRenderReady 表达式禁止依赖 eventsQuery，实际: ${expr}`,
   )
   assert.ok(
-    /barsQuery/.test(expr),
-    `isRenderReady 表达式必须依赖 barsQuery，实际: ${expr}`,
+    /barsResponse/.test(expr),
+    `isRenderReady 表达式必须依赖 barsResponse，实际: ${expr}`,
   )
   assert.ok(
-    /indicatorsQuery/.test(expr),
-    `isRenderReady 表达式必须依赖 indicatorsQuery，实际: ${expr}`,
+    /indicatorsResponse/.test(expr),
+    `isRenderReady 表达式必须依赖 indicatorsResponse，实际: ${expr}`,
   )
 })
 
-// ===== 15. stock_capture_service.py URL 已更新为 /capture/stock/{symbol} =====
-test('stock_capture_service.py URL 已更新为 /capture/stock/{symbol}', () => {
+// ===== 15. stock_capture_service.py URL 已更新为 /capture/stock/{symbol} 并携带 instrument_id =====
+test('stock_capture_service.py URL 已更新为 /capture/stock/{symbol} 并携带 instrument_id', () => {
   const src = readSource(CAPTURE_SERVICE_PATH)
   assert.ok(
     src.includes('/capture/stock/{symbol}'),
@@ -231,6 +232,34 @@ test('stock_capture_service.py URL 已更新为 /capture/stock/{symbol}', () => 
     assert.ok(
       urlBuildLine.includes('/capture/stock/'),
       `URL 构建行必须使用 /capture/stock/，实际: ${urlBuildLine.trim()}`,
+    )
+  }
+  assert.ok(
+    src.includes('instrument_id={instrument_id}'),
+    'stock_capture_service.py URL 必须携带 instrument_id 参数',
+  )
+})
+
+// ===== 16. CaptureStockPage 只调用 Snapshot API，不调用普通业务端点 =====
+test('CaptureStockPage 只调用 Snapshot API，不调用普通业务端点', () => {
+  const src = readSource(CAPTURE_PAGE_PATH)
+  // 必须包含 Snapshot API 路径
+  assert.ok(
+    src.includes('/api/v1/capture/stocks/'),
+    'CaptureStockPage 必须调用 /api/v1/capture/stocks/{instrument_id}/snapshot',
+  )
+  // 禁止调用普通端点
+  const forbiddenEndpoints = [
+    '/instruments/by-symbol/',
+    '/api/v1/instruments/',
+    '/api/v1/instruments/{instrumentId}/bars',
+    '/api/v1/instruments/{instrumentId}/indicators',
+    '/api/v1/instruments/{instrumentId}/quote',
+  ]
+  for (const endpoint of forbiddenEndpoints) {
+    assert.ok(
+      !src.includes(endpoint),
+      `CaptureStockPage 禁止调用普通业务端点: ${endpoint}`,
     )
   }
 })

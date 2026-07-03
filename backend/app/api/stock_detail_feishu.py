@@ -83,13 +83,15 @@ class SendFeishuResponse(BaseModel):
 class ShareStatusResponse(BaseModel):
     """分享状态查询响应。
 
-    [StockDetailFeishu] - 描述: 按 delivery_type 分类返回 card_status/image_status
+    [StockDetailFeishu] - 描述: 按 delivery_type 分类返回 card/image 状态，并补充 capture/image_upload 状态
     （advice.md 第一节：delivery_type=card 走 adapter.send → msg_type=interactive）
 
     - card_status: 卡片投递状态（pending/sending/success/failed/retrying/dead/not_created）
+    - capture_status: 截图任务状态（pending/success/failed）
+    - image_upload_status: 图片上传状态（pending/success/failed/not_created）
     - image_status: 图片投递状态（同上，未创建截图时为 not_created）
     - overall_status: 汇总状态（pending/success/partial_failed/failed）
-    - failed_step: 失败步骤（capture/image_outbox/image_upload/image_delivery/card，无失败时为 None）
+    - failed_step: 失败步骤（capture/image_upload/image_delivery/card/image，无失败时为 None）
     - error_code: 失败错误码（无失败时为 None）
     - image_message_id: 图片消息 ID（未创建时为 None）
     """
@@ -97,6 +99,8 @@ class ShareStatusResponse(BaseModel):
     test_run_id: str = Field(..., description="分享唯一标识")
     message_group_id: str | None = Field(None, description="消息组 ID")
     card_status: str = Field(..., description="卡片投递状态")
+    capture_status: str = Field(..., description="截图任务状态")
+    image_upload_status: str = Field(..., description="图片上传状态")
     image_status: str = Field(..., description="图片投递状态")
     overall_status: str = Field(..., description="汇总状态")
     failed_step: str | None = Field(None, description="失败步骤")

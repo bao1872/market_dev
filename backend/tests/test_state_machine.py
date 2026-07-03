@@ -392,6 +392,8 @@ class TestStateMachineGetShareStatus:
         # 验证状态机汇总
         assert status["overall_status"] == "partial_failed"
         assert status["card_status"] == "success"
+        assert status["capture_status"] == "failed"
+        assert status["image_upload_status"] == "not_created"
         assert status["image_status"] == "not_created"
         assert status["failed_step"] == "capture"
         assert status["error_code"] == "CAPTURE_REQUEST_FAILED"
@@ -467,6 +469,8 @@ class TestStateMachineGetShareStatus:
         # 验证状态机汇总
         assert status["overall_status"] == "success"
         assert status["card_status"] == "success"
+        assert status["capture_status"] == "success"
+        assert status["image_upload_status"] == "success"
         assert status["image_status"] == "success"
         assert status["failed_step"] is None
         assert status["error_code"] is None
@@ -514,7 +518,9 @@ class TestStateMachineGetShareStatus:
         # 验证状态机汇总：消息存在但无 delivery → pending
         assert status["overall_status"] == "pending"
         assert status["card_status"] == "pending"
-        assert status["image_status"] == "pending"
+        assert status["capture_status"] == "pending"
+        assert status["image_upload_status"] == "not_created"
+        assert status["image_status"] == "not_created"
         assert status["failed_step"] is None
         assert status["error_code"] is None
 

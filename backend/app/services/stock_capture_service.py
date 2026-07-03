@@ -143,10 +143,11 @@ async def capture_stock_chart(
 
     # [capture-route] - 描述: 使用专用 /capture/stock/{symbol} 路由（不经过 ProtectedLayout/AppShell）
     # 整个路由即为 capture 专用，无需 capture=feishu 参数；token 由页面写入 CAPTURE_TOKEN_KEY
+    # instrument_id 必须传入，前端从 URL 读取后调用 Snapshot API
     url = (
         f"{frontend_base_url.rstrip('/')}/capture/stock/{symbol}?"
         f"source=watchlist&strategy=watchlist_monitor&event_id={event_id}&"
-        f"token={token}"
+        f"token={token}&instrument_id={instrument_id}"
     )
 
     try:
