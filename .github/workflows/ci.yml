@@ -215,6 +215,7 @@ jobs:
       - name: Run mypy on backend
         working-directory: backend
         run: |
+          set +e
           mypy app \
             --output json \
             --show-error-codes \
@@ -222,6 +223,10 @@ jobs:
             --hide-error-context \
             --no-pretty \
             > mypy-report.jsonl
+          EXIT_CODE=$?
+          COUNT=$(jq -s 'length' mypy-report.jsonl)
+          echo "Mypy raw error count: $COUNT (historical debt; new files checked next)"
+          exit 0
       - name: Check new app files for mypy errors
         run: python tools/check_mypy_new_files.py "$BASE_SHA" "$HEAD_SHA" backend/mypy-report.jsonl
 
@@ -240,6 +245,7 @@ jobs:
       - name: Run mypy on backend
         working-directory: backend
         run: |
+          set +e
           mypy app \
             --output json \
             --show-error-codes \
@@ -247,6 +253,10 @@ jobs:
             --hide-error-context \
             --no-pretty \
             > mypy-report.jsonl
+          EXIT_CODE=$?
+          COUNT=$(jq -s 'length' mypy-report.jsonl)
+          echo "Mypy raw error count: $COUNT (compared to baseline next)"
+          exit 0
       - name: Compare with mypy baseline
         run: python tools/compare_mypy_baseline.py backend/mypy-report.jsonl tools/quality_baselines/mypy.json
 
