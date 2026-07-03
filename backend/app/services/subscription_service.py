@@ -388,6 +388,7 @@ async def renew_with_invite_code(
         old_expires_at = None
         new_expires_at = _compute_expires_at(now, invite)
     else:
+        assert subscription is not None  # 由 is_new_subscription 保证
         old_expires_at = _ensure_aware(subscription.expires_at)
         if old_expires_at > now:
             # 未到期：从当前到期日顺延
@@ -415,6 +416,7 @@ async def renew_with_invite_code(
         )
         db.add(subscription)
     else:
+        assert subscription is not None  # 由 is_new_subscription 保证
         subscription.status = "active"
         subscription.expires_at = new_expires_at
         subscription.plan_code = new_plan_code
@@ -439,6 +441,7 @@ async def renew_with_invite_code(
     db.add(redemption)
     await db.flush()
 
+    assert subscription is not None  # 新建或续期分支均保证 subscription 非空
     return subscription, old_expires_at, new_expires_at
 
 

@@ -409,6 +409,8 @@ def _cache_get(cache_key: str) -> BarAggregationResult | None:
         raw = client.get(cache_key)
         if raw is None:
             return None
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
         return _deserialize_result(raw)
     except Exception as exc:
         logger.warning("MDAS 缓存读取失败: %s", exc)

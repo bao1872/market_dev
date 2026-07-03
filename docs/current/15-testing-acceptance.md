@@ -98,3 +98,5 @@ python tools/check_test_allowlist.py
 - `backend/pyproject.toml` 将 `mypy` 固定为 `2.1.0`，并将 `numpy` 上限收紧为 `<2.5.0`，保证基线比较不受 mypy/numpy stub 版本差异影响；
 - GitHub Actions 针对最终 HEAD 全部 blocking jobs success；
 - 没有未登记的代码—文档冲突。
+
+> 2026-07-03：release/docs-aligned-candidate-v3 在 Run #45 中 `Mypy New Files` 任务失败，本地复现新增 backend/app 文件存在 13 个 mypy 错误。已在 release candidate 上最小侵入式修复（类型断言、`bytes` 解码、`getattr` 安全访问、`response_model` 显式构造、`# type: ignore[attr-defined]` 等），本地验证新增文件零错误、历史债务从 251 降至 238，满足 Baseline Regression 要求。详见 CHANGE-20260703-013。

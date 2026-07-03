@@ -70,7 +70,7 @@ async def _deactivate_non_stocks(db: AsyncSession) -> int:
         .values(status="inactive")
     )
     result = await db.execute(stmt)
-    return result.rowcount or 0
+    return result.rowcount or 0  # type: ignore[attr-defined]
 
 
 async def _run(dry_run: bool) -> int:

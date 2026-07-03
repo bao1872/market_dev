@@ -459,7 +459,7 @@ async def get_system_overview_endpoint(
     Returns:
         系统概览响应（17 个字段：12 基础 + 5 新增）
     """
-    return await get_system_overview(db)
+    return SystemOverviewResponse(**await get_system_overview(db))
 
 
 # ============================================================
@@ -1153,7 +1153,11 @@ async def get_audit_logs(
 
 if __name__ == "__main__":
     # 自测入口：验证路由注册
-    paths = [r.path for r in router.routes]
+    paths: list[str] = []
+    for r in router.routes:
+        path = getattr(r, "path", None)
+        if isinstance(path, str):
+            paths.append(path)
     print(f"router.routes={paths}")
     assert "/admin/invite-codes" in paths
     assert "/admin/members" in paths

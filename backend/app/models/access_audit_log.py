@@ -161,7 +161,7 @@ if __name__ == "__main__":
     assert AccessAuditLog.__table__.c.request_id.nullable is True
     assert AccessAuditLog.__table__.c.ip_hash.nullable is True
     # 验证索引
-    index_names = {idx.name for idx in AccessAuditLog.__table__.indexes}
+    index_names = {idx.name for idx in AccessAuditLog.__table__.indexes}  # type: ignore[attr-defined]
     assert "idx_access_audit_logs_actor_created" in index_names
     assert "idx_access_audit_logs_target" in index_names
     print(f"AccessAuditLog columns={sorted(columns)}")

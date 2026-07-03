@@ -209,7 +209,11 @@ async def get_capture_snapshot(
 
 if __name__ == "__main__":
     # 自测入口：验证路由注册 + 依赖配置（不连 DB）
-    paths = [r.path for r in router.routes]
+    paths: list[str] = []
+    for r in router.routes:
+        path = getattr(r, "path", None)
+        if isinstance(path, str):
+            paths.append(path)
     print(f"router.prefix={router.prefix}")
     print(f"router.routes={paths}")
     assert any("/capture/stocks/" in p for p in paths), "应包含 /capture/stocks/{id}/snapshot 路由"
