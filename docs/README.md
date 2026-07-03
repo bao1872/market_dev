@@ -5,7 +5,9 @@
 > 维护要求：任何代码、配置、测试、部署或文档修改都必须同步更新相关当前设计文档，并新增 CHANGE 记录。  
 > 注意：该代码基线用于设计核对，不代表已经满足合并 `main` 或生产发布条件。
 > 对齐口径：`CURRENT` 表示已确认设计，不等同于代码已完成；代码未实现、未验证或生产表现不一致的内容，必须在 `18-code-doc-alignment.md` 标为 `KNOWN_GAP`。
-> 最近一次一致性检查时间：2026-07-02
+> 最近一次一致性检查时间：2026-07-03
+> Release 候选分支：`release/docs-aligned-candidate-v3`
+> Release merge commit：`ac07d4b439d45fda1ac5da78afcb471771c67934`
 
 # 盘迹（PanJi）项目文档入口
 

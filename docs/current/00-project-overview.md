@@ -1,6 +1,6 @@
 > 文档状态：CURRENT DESIGN BASELINE  
 > 基线日期：2026-07-02  
-> 已核对代码基线：`6f5ae2cec6b24dbd1b7bf6f23477f5e6f5096822`（`refactor/access-v2-platform-recovery`）  
+> 已核对代码基线：`ac07d4b439d45fda1ac5da78afcb471771c67934`（`release/docs-aligned-candidate-v3` merge commit）  
 > 事实来源：代码库 + 项目负责人截至 2026-07-02 已确认的产品与架构要求  
 > 维护要求：任何代码、配置、测试、部署或文档修改都必须同步更新相关当前设计文档，并新增 CHANGE 记录。  
 > 注意：该代码基线用于设计核对，不代表已经满足合并 `main` 或生产发布条件。
