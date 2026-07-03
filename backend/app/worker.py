@@ -36,12 +36,13 @@ import socket
 from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.db import AsyncSessionLocal
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.services.scheduler_job_run_recovery_service import (
     recover_stale_scheduler_job_runs,
 )
-from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger("worker")
 
@@ -1228,16 +1229,20 @@ async def mark_stale_worker_heartbeats(
     heartbeat_cutoff = now - timedelta(seconds=threshold_seconds)
 
     # [WorkerHeartbeat] - 原子 UPDATE：status running -> stopped
+    # 使用 RETURNING + fetchall() + len() 计数（与 recover_stale_scheduler_job_runs 模式一致），
+    # 避免 mypy 对 Result.rowcount 的 attr-defined 误报
     update_sql = text(
         """
         UPDATE worker_heartbeats
         SET status = 'stopped'
         WHERE status = 'running'
             AND heartbeat_at < :heartbeat_cutoff
+        RETURNING worker_name
         """
     )
     result = await db.execute(update_sql, {"heartbeat_cutoff": heartbeat_cutoff})
-    marked_count = result.rowcount
+    marked_rows = result.fetchall()
+    marked_count = len(marked_rows)
 
     if marked_count > 0:
         logger.info(

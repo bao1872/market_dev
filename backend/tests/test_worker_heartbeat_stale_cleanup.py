@@ -250,7 +250,7 @@ async def test_watchdog_calls_mark_stale_worker_heartbeats(db_session) -> None:
     不能使用 _FIXED_NOW（可能在未来导致不被标记）。
     """
     from app import worker as worker_mod
-    from app.worker import _recovery_watchdog_loop, STALE_HEARTBEAT_THRESHOLD_SECONDS
+    from app.worker import STALE_HEARTBEAT_THRESHOLD_SECONDS, _recovery_watchdog_loop
 
     # 使用真实当前时间构造 stale heartbeat（age 远超阈值 600s）
     real_now = datetime.now(UTC)
