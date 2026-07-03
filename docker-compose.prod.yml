@@ -273,6 +273,30 @@ services:
       - /etc/market-dev/config.production.py:/app/app/config.production.py:ro
     command: python -m app.worker
 
+  # ===== 恢复看门狗 Worker =====
+  worker-watchdog:
+    image: market-dev-backend:${GIT_SHA:-unknown}
+    container_name: trading-worker-watchdog
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      APP_ENV: production
+      WORKER_TYPE: watchdog
+      TZ: Asia/Shanghai
+      CONFIG_FILE: /app/app/config.production.py
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /etc/market-dev/config.production.py:/app/app/config.production.py:ro
+    command: python -m app.worker
+
   # ===== 截图 Worker =====
   worker-capture:
     build:
