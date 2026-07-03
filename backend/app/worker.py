@@ -41,6 +41,7 @@ from app.models.scheduler_job_run import SchedulerJobRun
 from app.services.scheduler_job_run_recovery_service import (
     recover_stale_scheduler_job_runs,
 )
+from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger("worker")
 
@@ -49,6 +50,10 @@ WORKER_TYPE = os.getenv("WORKER_TYPE", "all")
 WORKER_INTERVAL = int(os.getenv("WORKER_INTERVAL", "5"))
 WORKER_BATCH_SIZE = int(os.getenv("WORKER_BATCH_SIZE", "100"))
 WORKER_MAX_RETRY = int(os.getenv("WORKER_MAX_RETRY", "5"))
+
+# [WorkerHeartbeat] - 僵尸心跳清理阈值（秒）：超过此值未刷新的 running 心跳视为僵尸
+# 600s = 10 个心跳周期（默认心跳间隔 60s），远大于正常抖动，避免误杀活跃 worker
+STALE_HEARTBEAT_THRESHOLD_SECONDS = int(os.getenv("STALE_HEARTBEAT_THRESHOLD_SECONDS", "600"))
 
 # 优雅退出标志
 _shutdown = False
@@ -1185,8 +1190,66 @@ async def _notify_monitor_status(
         logger.warning("监控状态通知整体失败: %s", e)
 
 
+async def mark_stale_worker_heartbeats(
+    db: AsyncSession,
+    now: datetime | None = None,
+    threshold_seconds: int = STALE_HEARTBEAT_THRESHOLD_SECONDS,
+) -> int:
+    """[WorkerHeartbeat] - 将 status='running' 但 heartbeat_at 过旧的僵尸心跳标记为 stopped。
+
+    覆盖场景：容器被 SIGKILL（无 SIGTERM graceful shutdown）时，_heartbeat_loop
+    无法执行退出清理，worker_heartbeats 表残留 status='running' 记录，导致
+    管理员看到的 Worker 状态不可信。
+
+    设计说明：
+    - 只 UPDATE status='running' AND heartbeat_at < now - threshold 的记录为 'stopped'
+    - 不删除历史记录，保留 started_at/heartbeat_at/build_sha 供审计
+    - 不 commit（由调用方控制事务，与 recover_stale_scheduler_job_runs 模式一致）
+    - 不吞异常：数据库异常向上传播
+    - 使用 timezone-aware UTC（与 _heartbeat_loop 一致）
+    - 幂等：status 已是 stopped 的记录不会被重复处理（WHERE status='running'）
+
+    Args:
+        db: 异步数据库会话（不 commit，由调用方控制事务）
+        now: 当前时间（默认 UTC now），可注入用于测试
+        threshold_seconds: 僵尸判定阈值（秒），默认 STALE_HEARTBEAT_THRESHOLD_SECONDS=600
+
+    Returns:
+        被标记为 stopped 的记录数量
+
+    Raises:
+        Exception: 数据库执行异常向上传播（不吞异常）
+    """
+    from sqlalchemy import text
+
+    if now is None:
+        now = datetime.now(UTC)
+
+    heartbeat_cutoff = now - timedelta(seconds=threshold_seconds)
+
+    # [WorkerHeartbeat] - 原子 UPDATE：status running -> stopped
+    update_sql = text(
+        """
+        UPDATE worker_heartbeats
+        SET status = 'stopped'
+        WHERE status = 'running'
+            AND heartbeat_at < :heartbeat_cutoff
+        """
+    )
+    result = await db.execute(update_sql, {"heartbeat_cutoff": heartbeat_cutoff})
+    marked_count = result.rowcount
+
+    if marked_count > 0:
+        logger.info(
+            "[WorkerHeartbeat] 标记 %d 个僵尸心跳为 stopped（阈值=%ds）",
+            marked_count, threshold_seconds,
+        )
+
+    return marked_count
+
+
 async def _recovery_watchdog_loop(interval_seconds: int = 60) -> None:
-    """[Recovery] - 后台看门狗：每 interval_seconds 调用 recover_stale_scheduler_job_runs。
+    """[Recovery] - 后台看门狗：每 interval_seconds 调用 recover_stale_scheduler_job_runs 和 mark_stale_worker_heartbeats。
 
     覆盖场景：API 不重启但任务租约自然过期、Worker 被杀后无容器重启。
     与各 Worker 启动恢复互补：启动恢复只在上次崩溃残留时执行一次，
@@ -1195,7 +1258,8 @@ async def _recovery_watchdog_loop(interval_seconds: int = 60) -> None:
     设计说明：
     - 默认 60s 间隔，覆盖 lease 过期（120s）与 heartbeat 超时（90s）两种场景
     - recover_stale_scheduler_job_runs 不 commit，本函数调用后立即 commit
-    - 异常不退出：recover 或 commit 失败仅记录日志，下个周期继续重试
+    - mark_stale_worker_heartbeats 同事务内执行，清理 worker_heartbeats 僵尸记录（阈值 600s）
+    - 异常不退出：recover/heartbeat/commit 失败仅记录日志，下个周期继续重试
     - _shutdown 为 True 时退出循环（由信号处理设置）
     """
     _hb_task = asyncio.create_task(_heartbeat_loop("recovery_watchdog"))
@@ -1204,9 +1268,12 @@ async def _recovery_watchdog_loop(interval_seconds: int = 60) -> None:
         try:
             async with AsyncSessionLocal() as db:
                 recovered = await recover_stale_scheduler_job_runs(db)
+                stale_marked = await mark_stale_worker_heartbeats(db)
                 await db.commit()
                 if recovered > 0:
                     logger.info("[Recovery] 看门狗恢复: %d 个过期任务", recovered)
+                if stale_marked > 0:
+                    logger.info("[Recovery] 看门狗清理: %d 个僵尸心跳", stale_marked)
         except Exception as exc:
             logger.exception("[Recovery] 看门狗异常: %s", exc)
         await asyncio.sleep(interval_seconds)
