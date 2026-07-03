@@ -90,7 +90,7 @@ def test_no_webhook_env_vars_in_runtime() -> None:
     )
     # 允许 feishu_webhook 作为废弃字符串出现在错误信息中
     lines = [line for line in result.stdout.splitlines() if "feishu_webhook" not in line.lower()]
-    assert not lines, f"运行时代码仍存在 Webhook 相关引用:\n{'\\n'.join(lines)}"
+    assert not lines, "运行时代码仍存在 Webhook 相关引用:\n" + "\n".join(lines)
 
 
 # ============================================================

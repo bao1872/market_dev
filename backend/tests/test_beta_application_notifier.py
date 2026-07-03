@@ -23,7 +23,6 @@ import logging
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
@@ -39,7 +38,6 @@ from app.schemas.notification import DeliveryResult
 from app.services.beta_application_notifier import (
     BETA_APPLICATION_ADMIN_EVENT,
     build_beta_application_card,
-    build_beta_application_dto,
 )
 from app.services.beta_application_service import create_application, retry_feishu
 from app.services.delivery_worker import process_pending_deliveries
@@ -506,7 +504,7 @@ async def test_delivery_worker_uses_platform_app_adapter(
 ):
     """delivery worker 通过 FeishuPlatformAppAdapter 投递管理员通知。"""
     admin = await _create_user(notifier_db_session, admin_role, email_prefix="admin_delivery")
-    channel = await _create_active_channel(notifier_db_session, admin.id)
+    await _create_active_channel(notifier_db_session, admin.id)
 
     payload = BetaApplicationCreate(**_make_payload(wechat="delivery_user"))
     app, _ = await create_application(
