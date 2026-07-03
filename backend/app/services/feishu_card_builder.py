@@ -207,29 +207,6 @@ def dto_to_feishu_card(dto: NotificationMessageDTO) -> dict[str, Any]:
     return card
 
 
-def mask_webhook_url(url: str) -> str:
-    """脱敏 Webhook URL（用于预览/API 返回）。
-
-    保留协议+域名，路径部分用 *** 替代。
-
-    Args:
-        url: 完整 Webhook URL
-
-    Returns:
-        脱敏后的 URL（如 "https://open.feishu.cn/***"）
-    """
-    if not url:
-        return ""
-    # 保留协议和域名
-    if "://" in url:
-        protocol, rest = url.split("://", 1)
-        if "/" in rest:
-            domain = rest.split("/", 1)[0]
-            return f"{protocol}://{domain}/***"
-        return f"{protocol}://{rest}/***"
-    return "***"
-
-
 if __name__ == "__main__":
     # 自测入口：验证卡片构建
     from app.schemas.notification import NotificationMessageDTO
@@ -311,10 +288,5 @@ if __name__ == "__main__":
     assert "hr" in element_tags, f"Expected hr in structured items, got {element_tags}"
     assert "note" in element_tags, f"Expected note in structured items, got {element_tags}"
     print(f"结构化 items 透传: tags={element_tags} ✓")
-
-    # 测试脱敏
-    masked = mask_webhook_url("https://open.feishu.cn/open-apis/bot/v2/hook/xxxxx")
-    print(f"masked_url={masked}")
-    assert masked == "https://open.feishu.cn/***"
 
     print("OK")

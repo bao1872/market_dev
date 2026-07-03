@@ -35,10 +35,7 @@ from app.services.message_builder import (
     build_channel_alert,
     MessageBuilderError,
 )
-from app.services.feishu_card_builder import (
-    dto_to_feishu_card,
-    mask_webhook_url,
-)
+from app.services.feishu_card_builder import dto_to_feishu_card
 from app.services.channel_adapter import (
     get_adapter,
     list_supported_adapters,
@@ -198,16 +195,6 @@ class TestFeishuCardBuilder:
         markdown_contents = [e.get("content", "") for e in elements if e.get("tag") == "markdown"]
         assert not any("关键事实" in c for c in markdown_contents)
         assert not any("时间线" in c for c in markdown_contents)
-
-    def test_mask_webhook_url(self) -> None:
-        """测试 Webhook URL 脱敏。"""
-        url = "https://open.feishu.cn/open-apis/bot/v2/hook/abc123"
-        masked = mask_webhook_url(url)
-        assert masked == "https://open.feishu.cn/***"
-
-    def test_mask_webhook_url_empty(self) -> None:
-        """测试空 URL 脱敏。"""
-        assert mask_webhook_url("") == ""
 
 
 # ==================== 投递 Worker 测试 ====================

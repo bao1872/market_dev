@@ -1,14 +1,22 @@
-"""部署前数据库预检脚本。
+"""部署前环境与数据库预检脚本。
 
 用法（必须先设置 DATABASE_URL 或提供外部 env 文件）：
     DATABASE_URL=... python tools/pre_deploy_check.py
     python tools/pre_deploy_check.py --env-file /etc/market-dev/market.env
 
 检查项：
-1. 能连接到 PostgreSQL
-2. 当前数据库名等于 bz_stock
-3. alembic revision 等于 head
-4. 必要表存在
+1. 必要环境变量已设置且不为弱默认值
+   - DATABASE_URL, REDIS_URL
+   - JWT_SECRET（不得为 change-me 或空）
+   - SECRET_MASTER_KEY（可从环境变量或 CONFIG_FILE 读取；不得为开发默认值或空）
+   - POSTGRES_PASSWORD（环境变量或 DATABASE_URL 密码段）
+2. 能连接到 PostgreSQL
+3. 当前数据库名等于 bz_stock
+4. alembic revision 等于 head
+5. 必要表存在
+
+注意：APP_ENV=production 与 TZ=Asia/Shanghai 由 docker-compose.prod.yml 设置，
+不要求 market.env 重复配置。
 
 预检失败时退出码非 0，且脚本不会创建数据库、拉取镜像或运行迁移。
 """
@@ -16,9 +24,11 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 import psycopg
 
@@ -35,6 +45,92 @@ REQUIRED_TABLES = [
     "message_deliveries",
     "notification_channels",
 ]
+
+# 弱默认值集合（只检查是否为这些值，不输出实际内容）
+_WEAK_JWT_SECRETS = {"change-me", ""}
+_WEAK_SECRET_MASTER_KEYS = {"replace-in-development-only", "local-dev-only", ""}
+
+
+def _load_py_config(config_file: str) -> dict[str, object]:
+    """从 Python 配置文件读取大写变量（仅用于读取 SECRET_MASTER_KEY）。"""
+    path = Path(config_file)
+    if not path.exists():
+        return {}
+    spec = importlib.util.spec_from_file_location("_pre_deploy_py_config", path)
+    if spec is None or spec.loader is None:
+        return {}
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return {
+        attr: getattr(module, attr)
+        for attr in dir(module)
+        if attr.isupper() and not attr.startswith("_")
+    }
+
+
+def _get_secret_master_key() -> str | None:
+    """获取 SECRET_MASTER_KEY（环境变量优先，否则从 CONFIG_FILE 读取）。"""
+    env_value = os.environ.get("SECRET_MASTER_KEY")
+    if env_value:
+        return env_value.strip()
+    config_file = os.environ.get("CONFIG_FILE")
+    if config_file:
+        config = _load_py_config(config_file)
+        value = config.get("SECRET_MASTER_KEY")
+        if value:
+            return str(value).strip()
+    return None
+
+
+def _check_required_env_vars() -> int:
+    """检查必要环境变量是否存在且不为弱默认值。
+
+    Returns:
+        0 表示通过，非 0 表示失败
+    """
+    errors: list[str] = []
+
+    # DATABASE_URL
+    if not os.environ.get("DATABASE_URL"):
+        errors.append("DATABASE_URL 未设置")
+
+    # REDIS_URL
+    if not os.environ.get("REDIS_URL"):
+        errors.append("REDIS_URL 未设置")
+
+    # JWT_SECRET
+    jwt_secret = os.environ.get("JWT_SECRET", "").strip()
+    if not jwt_secret:
+        errors.append("JWT_SECRET 未设置")
+    elif jwt_secret in _WEAK_JWT_SECRETS:
+        errors.append("JWT_SECRET 为弱默认值，请更换为强密钥")
+
+    # SECRET_MASTER_KEY（环境变量或 CONFIG_FILE）
+    secret_master_key = _get_secret_master_key()
+    if not secret_master_key:
+        errors.append("SECRET_MASTER_KEY 未设置（环境变量或 CONFIG_FILE）")
+    elif secret_master_key in _WEAK_SECRET_MASTER_KEYS:
+        errors.append("SECRET_MASTER_KEY 为弱默认值，请更换为强密钥")
+
+    # POSTGRES_PASSWORD：独立环境变量或 DATABASE_URL 密码段
+    postgres_password = os.environ.get("POSTGRES_PASSWORD", "").strip()
+    if not postgres_password:
+        database_url = os.environ.get("DATABASE_URL", "")
+        try:
+            parsed = urlparse(database_url)
+            postgres_password = parsed.password or ""
+        except Exception:
+            postgres_password = ""
+    if not postgres_password:
+        errors.append("POSTGRES_PASSWORD 未设置（环境变量或 DATABASE_URL 密码段）")
+
+    if errors:
+        for msg in errors:
+            print(f"ERROR: {msg}", file=sys.stderr)
+        return 1
+
+    print("OK: 必要环境变量已设置且不为弱默认值")
+    return 0
 
 
 def _load_env_file(path: str) -> None:
@@ -83,6 +179,10 @@ def main() -> int:
 
     if args.env_file:
         _load_env_file(args.env_file)
+
+    # 1. 环境变量检查
+    if _check_required_env_vars() != 0:
+        return 1
 
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:

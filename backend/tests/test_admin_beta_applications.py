@@ -119,7 +119,7 @@ async def admin_beta_db_session() -> AsyncGenerator[AsyncSession, None]:
             pass
         # 清理顺序：outbox -> beta_applications -> user_roles -> users
         await session.execute(
-            text("DELETE FROM outbox WHERE event_type = 'beta_application_admin'")
+            text("DELETE FROM outbox WHERE event_type = 'beta_application.admin_notification.created'")
         )
         await session.execute(text("DELETE FROM beta_applications"))
         if created_user_ids:
@@ -855,7 +855,7 @@ async def test_admin_retry_feishu_writes_outbox_event(
     # 验证 outbox 表有该 application 的事件
     result = await admin_beta_db_session.execute(
         select(Outbox)
-        .where(Outbox.event_type == "beta_application_admin")
+        .where(Outbox.event_type == "beta_application.admin_notification.created")
         .where(Outbox.aggregate_id == app.id)
     )
     outbox_records = list(result.scalars().all())

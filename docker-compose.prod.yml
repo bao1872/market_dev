@@ -210,10 +210,6 @@ services:
       WORKER_TYPE: outbox
       TZ: Asia/Shanghai
       CONFIG_FILE: /app/app/config.production.py
-      ADMIN_FEISHU_APP_ID: ${ADMIN_FEISHU_APP_ID:?ADMIN_FEISHU_APP_ID is required}
-      ADMIN_FEISHU_APP_SECRET: ${ADMIN_FEISHU_APP_SECRET:?ADMIN_FEISHU_APP_SECRET is required}
-      ADMIN_FEISHU_RECEIVE_ID: ${ADMIN_FEISHU_RECEIVE_ID:?ADMIN_FEISHU_RECEIVE_ID is required}
-      ADMIN_FEISHU_RECEIVE_ID_TYPE: ${ADMIN_FEISHU_RECEIVE_ID_TYPE:-user_id}
     depends_on:
       redis:
         condition: service_healthy

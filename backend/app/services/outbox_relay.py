@@ -8,8 +8,14 @@
    - 为每个活跃渠道创建 MessageDelivery(pending)
    - 不直接调用渠道 Adapter 投递
    - 创建完成后标记 Outbox 为 processed
-5. 投递成功后标记 status=processed，记录 processed_at
-6. 投递失败则 retry_count + 1，保持 pending 状态等待下次轮询
+5. beta_application.admin_notification.created 事件：
+   - 专用分支，查询 active admin 用户的 active feishu_platform_app 渠道
+   - 为每个渠道创建 NotificationMessage + MessageDelivery(pending)
+   - 不进入普通通知路径，避免 eligible_user_service 过滤 admin
+   - 无渠道时更新 beta_applications.feishu_delivery_status='failed'，
+     feishu_last_error='ADMIN_PLATFORM_CHANNEL_NOT_CONFIGURED'
+6. 投递成功后标记 status=processed，记录 processed_at
+7. 投递失败则 retry_count + 1，保持 pending 状态等待下次轮询
 
 幂等保证：
 - 下游消费者通过 idempotency_key 去重
@@ -49,10 +55,9 @@ DEFAULT_MAX_RETRY = 5
 # 通知事件类型，由本模块负责扩张为 MessageDelivery
 _NOTIFICATION_EVENT_TYPE = "notification.message.created"
 
-# beta_application_admin 事件类型：直接调飞书 Webhook，不扩张为 MessageDelivery
-# （系统级管理员飞书渠道不入 NotificationChannel 表，不走 MessageDelivery 链路）
+# 管理员内测申请通知专用事件类型：由本模块专用分支扩张为 MessageDelivery
 # 与 beta_application_notifier.BETA_APPLICATION_ADMIN_EVENT 保持一致
-_BETA_APPLICATION_ADMIN_EVENT = "beta_application_admin"
+_BETA_APPLICATION_ADMIN_EVENT = "beta_application.admin_notification.created"
 
 
 async def write_outbox(
@@ -225,37 +230,44 @@ async def _expand_notification_message_created(
     return created
 
 
-async def _deliver_beta_application_admin(
+async def _expand_beta_application_admin_notification(
     db: AsyncSession, record: Outbox
-) -> None:
-    """投递 beta_application_admin 事件到管理员飞书 Platform App。
+) -> int:
+    """将 beta_application.admin_notification.created 事件扩张为管理员渠道投递。
 
-    spec 第四节：系统级管理员飞书渠道，从环境变量读取配置（不入库），
-    直接调用 FeishuPlatformAppAdapter 发送，不通过 MessageDelivery 链路。
+    管理员身份由 users/roles/user_roles 决定；管理员飞书渠道复用管理员用户自己的
+    feishu_platform_app NotificationChannel。不查询、不维护独立管理员凭证。
 
     流程：
-    1. 从 system_channel.get_admin_feishu_config() 读取配置
-    2. 未配置：更新 beta_applications.feishu_delivery_status='failed'，raise
-    3. 查询 BetaApplication
-    4. 构建 DTO（notifier.build_beta_application_dto）
-    5. 调用 FeishuPlatformAppAdapter.send
-    6. 成功：更新 feishu_delivery_status='success', feishu_delivered_at=now()
-    7. 失败：更新 feishu_delivery_status='failed', feishu_last_error=msg，raise（触发 Outbox 重试）
+    1. 解析 payload 中的 application_id
+    2. 查询 BetaApplication（用于构建 DTO + 更新状态）
+    3. 查询 User.status='active' 且拥有 admin 角色的用户
+    4. 查询这些用户的 active feishu_platform_app NotificationChannel
+    5. 为每个 (admin_user, channel) 创建：
+       - NotificationMessage(user_id=admin_user.id, source_type='beta_application_admin')
+       - MessageDelivery(delivery_type='card', idempotency_key=application_id|user_id|channel_id)
+    6. 无渠道：更新 beta_applications.feishu_delivery_status='failed'，
+       feishu_last_error='ADMIN_PLATFORM_CHANNEL_NOT_CONFIGURED'，Outbox 标记 processed，
+       不 raise，不触发无限重试
+    7. 有渠道：保持 feishu_delivery_status='pending'，由 delivery worker 异步投递
 
     Args:
         db: 异步会话
-        record: beta_application_admin 的 Outbox 记录
+        record: beta_application.admin_notification.created 的 Outbox 记录
+
+    Returns:
+        创建的 MessageDelivery 数量
 
     Raises:
-        RuntimeError: 飞书发送失败或系统级渠道未配置（触发 Outbox 重试机制）
+        RuntimeError: payload 缺少 application_id 或 application_id 格式非法
     """
-    # 延迟导入避免循环依赖（notifier 导入 outbox_relay.write_outbox）
     from uuid import UUID
 
-    from app.constants.system_channel import get_admin_feishu_config
     from app.models.beta_application import BetaApplication
+    from app.models.user import Role, User, UserRole
+    from app.schemas.notification import NotificationMessageDTO
     from app.services.beta_application_notifier import build_beta_application_dto
-    from app.services.feishu_platform_app_adapter import FeishuPlatformAppAdapter
+    from app.services.notification_service import create_message
 
     payload: dict[str, Any] = record.payload or {}
     application_id_str = payload.get("application_id")
@@ -274,41 +286,89 @@ async def _deliver_beta_application_admin(
     if app is None:
         raise RuntimeError(f"BetaApplication not found: {application_id}")
 
-    # 读取系统级渠道配置（不入库，不暴露前端）
-    config = get_admin_feishu_config()
-    if config is None:
-        # 未配置：标记 failed，但仍 raise 触发 Outbox 重试（管理员配置后可自动恢复）
-        app.feishu_delivery_status = "failed"
-        app.feishu_last_error = "admin feishu channel not configured"
-        logger.warning(
-            "管理员飞书渠道未配置，标记 failed: app_id=%s outbox_id=%s",
-            application_id, record.id,
-        )
-        raise RuntimeError("admin feishu channel not configured")
-
-    # 构建 DTO + 调用飞书发送
     dto = build_beta_application_dto(app)
-    adapter = FeishuPlatformAppAdapter()
-    result = await adapter.send(dto, config)
 
-    if result.success:
-        app.feishu_delivery_status = "success"
-        app.feishu_delivered_at = datetime.now(UTC)
-        app.feishu_last_error = None
-        logger.info(
-            "管理员飞书投递成功: app_id=%s outbox_id=%s",
+    # 查询 active admin 用户及其 active feishu_platform_app 渠道
+    # 通过 outerjoin 一次性加载用户与渠道，无需在 User 模型定义 relationship
+    stmt = (
+        select(User, NotificationChannel)
+        .join(UserRole, UserRole.user_id == User.id)
+        .join(Role, Role.id == UserRole.role_id)
+        .outerjoin(
+            NotificationChannel,
+            (NotificationChannel.user_id == User.id)
+            & (NotificationChannel.status == "active")
+            & (NotificationChannel.adapter_type == "feishu_platform_app"),
+        )
+        .where(User.status == "active")
+        .where(Role.name == "admin")
+    )
+    result = await db.execute(stmt)
+
+    # 按 user_id 去重，收集 (admin, channel) 对
+    seen_users: dict[UUID, User] = {}
+    channels: list[tuple[User, NotificationChannel]] = []
+    for admin, channel in result.all():
+        if admin.id not in seen_users:
+            seen_users[admin.id] = admin
+        if channel is not None:
+            channels.append((admin, channel))
+
+    if not channels:
+        # 无管理员渠道：明确终止，不无限重试
+        app.feishu_delivery_status = "failed"
+        app.feishu_last_error = "ADMIN_PLATFORM_CHANNEL_NOT_CONFIGURED"
+        logger.warning(
+            "无 active 管理员 Platform App 渠道: app_id=%s outbox_id=%s",
             application_id, record.id,
         )
-    else:
-        error_msg = result.error_message or "unknown error"
-        app.feishu_delivery_status = "failed"
-        app.feishu_last_error = error_msg
-        logger.warning(
-            "管理员飞书投递失败: app_id=%s outbox_id=%s error=%s",
-            application_id, record.id, error_msg,
+        return 0
+
+    created = 0
+    skipped = 0
+    for admin, channel in channels:
+        message_dto = NotificationMessageDTO(**dto.model_dump())
+        message = await create_message(
+            db=db,
+            user_id=admin.id,
+            message_dto=message_dto,
+            source_type="beta_application_admin",
+            source_id=application_id,
+            idempotency_key=f"beta_application_admin:{application_id}:{admin.id}",
         )
-        # raise 触发 Outbox 重试机制（外层 except 增加 retry_count）
-        raise RuntimeError(f"feishu send failed: {error_msg}")
+
+        # 幂等键：application_id|admin_user_id|channel_id
+        idem_key = hashlib.sha256(
+            f"{application_id}|{admin.id}|{channel.id}".encode()
+        ).hexdigest()
+
+        # [管理员通知] - 幂等：同一 application + admin + channel 已存在投递则跳过
+        existing_delivery = await db.execute(
+            select(MessageDelivery).where(MessageDelivery.idempotency_key == idem_key)
+        )
+        if existing_delivery.scalar_one_or_none() is not None:
+            skipped += 1
+            continue
+
+        delivery = MessageDelivery(
+            id=uuid4(),
+            notification_message_id=message.id,
+            channel_id=channel.id,
+            status="pending",
+            delivery_type="card",
+            attempt_count=0,
+            idempotency_key=idem_key,
+        )
+        db.add(delivery)
+        # [管理员通知] - 立即 flush，使同一 batch 内后续 outbox 记录的幂等检查可见
+        await db.flush()
+        created += 1
+
+    logger.info(
+        "管理员通知已扩张: app_id=%s outbox_id=%s admins=%s channels=%s created=%s skipped=%s",
+        application_id, record.id, len(seen_users), len(channels), created, skipped,
+    )
+    return created
 
 
 async def relay_outbox(
@@ -321,7 +381,9 @@ async def relay_outbox(
     At-least-once 投递：
     - 普通事件 -> 投递到 Redis 队列，成功后 status=processed
     - notification.message.created -> 扩张为 MessageDelivery(pending)，然后 status=processed
-    - beta_application_admin -> 直接调飞书 Platform App（系统级渠道，不走 MessageDelivery），然后 status=processed
+    - beta_application.admin_notification.created -> 扩张为管理员自己的 Platform App 渠道
+      MessageDelivery(pending)，然后 status=processed；无渠道时标记 beta_applications
+      feishu_delivery_status='failed'，不触发无限重试
     - 投递失败 -> retry_count+1，超过 max_retry 则 status=failed
 
     Args:
@@ -366,9 +428,9 @@ async def relay_outbox(
                     record.id, expanded,
                 )
             elif record.event_type == _BETA_APPLICATION_ADMIN_EVENT:
-                # beta_application_admin：系统级管理员飞书，直接调 Webhook
-                # 不通过 MessageDelivery 链路（系统级渠道不入 NotificationChannel 表）
-                await _deliver_beta_application_admin(db, record)
+                # beta_application.admin_notification.created：
+                # 扩张为管理员自己的 Platform App 渠道 MessageDelivery，不直接调用 Adapter
+                await _expand_beta_application_admin_notification(db, record)
                 record.status = "processed"
                 record.processed_at = datetime.now(UTC)
                 processed_count += 1
@@ -393,7 +455,7 @@ async def relay_outbox(
         except Exception as e:
             # 处理失败：增加重试计数，超过阈值标记 failed
             # 补充上下文后继续（不 re-raise，因为单条失败不应阻塞其他记录）
-            # 注意：beta_application_admin 分支在 _deliver_beta_application_admin 内
+            # 注意：beta_application.admin_notification.created 分支在无管理员渠道时
             # 已更新 beta_applications.feishu_delivery_status='failed'，此处仅处理 outbox 状态
             record.retry_count += 1
             if record.retry_count >= max_retry:

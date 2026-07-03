@@ -53,6 +53,10 @@ DEFAULT_QUIET_HOURS_END = 8
 # 监控自动触发的 source_type（如 monitor_event）仍受静默期保护，避免深夜打扰
 _USER_TRIGGERED_SOURCE_TYPES = frozenset({"stock_detail_share"})
 
+# [DeliveryWorker] - 管理员通知 source_type 集合：跳过 eligible_user_service 资格检查
+# 管理员身份由角色权限体系决定，不要求 subscription；同时不受静默期限制
+_ADMIN_NOTIFICATION_SOURCE_TYPES = frozenset({"beta_application_admin"})
+
 # 通知投递 Worker 默认时区（上海时区）
 _CST = ZoneInfo("Asia/Shanghai")
 
@@ -212,9 +216,9 @@ async def process_pending_deliveries(
     if not pending_deliveries:
         return 0
 
-    # [DeliveryWorker] - 静默时段处理：用户主动触发的投递立即执行，监控自动触发的延迟
-    # 原因：用户点击"发送到飞书"按钮期望立即送达，不应被静默期延迟；
-    #       监控通知才需要静默期保护，避免深夜打扰。
+    # [DeliveryWorker] - 静默时段处理：用户主动触发或管理员通知立即执行，监控自动触发的延迟
+    # 原因：用户点击"发送到飞书"按钮期望立即送达，管理员内测申请需及时通知，
+    #       均不应被静默期延迟；监控通知才需要静默期保护，避免深夜打扰。
     if quiet_hours:
         deferred = []
         immediate = []
@@ -222,7 +226,10 @@ async def process_pending_deliveries(
             source_type = getattr(
                 getattr(delivery, "message", None), "source_type", None,
             )
-            if source_type in _USER_TRIGGERED_SOURCE_TYPES:
+            if (
+                source_type in _USER_TRIGGERED_SOURCE_TYPES
+                or source_type in _ADMIN_NOTIFICATION_SOURCE_TYPES
+            ):
                 immediate.append(delivery)
             else:
                 deferred.append(delivery)
@@ -236,7 +243,7 @@ async def process_pending_deliveries(
                 delivery.id, delivery.next_attempt_at,
             )
 
-        # 用户主动触发的投递立即执行（不受静默期限制）
+        # 用户主动触发或管理员通知的投递立即执行（不受静默期限制）
         pending_deliveries = immediate
         await db.flush()
         if not pending_deliveries:
@@ -246,12 +253,14 @@ async def process_pending_deliveries(
     for delivery in pending_deliveries:
         # [eligible_user_service] - 投递前再次检查用户资格（仅监控通知）
         # 用户主动触发的投递（stock_detail_share）不受订阅状态限制，立即投递
+        # 管理员通知（beta_application_admin）由角色权限体系决定，不要求 subscription
         # 失效用户（disabled/expired/admin）的监控通知标记 dead，避免无效重试
         _msg = getattr(delivery, "message", None)
         _source_type = getattr(_msg, "source_type", None)
         if (
             _msg is not None
             and _source_type not in _USER_TRIGGERED_SOURCE_TYPES
+            and _source_type not in _ADMIN_NOTIFICATION_SOURCE_TYPES
             and getattr(_msg, "user_id", None) is not None
         ):
             from app.services.eligible_user_service import is_user_eligible

@@ -1,23 +1,26 @@
-"""管理员飞书异步通知测试 (Task 3, SubTask 3.6).
+"""管理员内测申请通知测试 - 复用管理员用户 Platform App 渠道。
 
-TDD 红灯阶段：先写失败测试，再实现业务代码。
+TDD 红灯阶段：验证管理员通知通过专用 Outbox 事件扩张为 MessageDelivery，
+最终由 delivery worker 调用 FeishuPlatformAppAdapter，不依赖独立管理员凭证。
 
-测试内容（对应 spec 第四节"提交后推送管理员飞书"）：
-1. Outbox 写入测试（create_application 后 outbox 表有 beta_application_admin 事件，含申请数据）
-2. 飞书失败不影响提交（mock 飞书发送失败，create_application 仍返回 is_new=True）
-3. 投递状态更新（Outbox 投递成功后 beta_applications.feishu_delivery_status='success'）
-4. Outbox 重试（投递失败后 feishu_delivery_status='failed'，retry_feishu 重新入队）
-
-测试策略：
-- service 层测试使用真实 PostgreSQL 测试库（允许 commit），测试后清理 beta_applications + outbox
-- 飞书发送通过 monkeypatch mock FeishuPlatformAppAdapter.send，避免真实网络调用
-- relay_outbox 直接调用，验证 beta_application_admin 事件处理分支
+测试覆盖：
+1. active admin + active Platform App 渠道收到通知
+2. admin 无 subscription 仍能收到
+3. inactive admin 不接收
+4. 普通 member 不接收管理员通知
+5. 多管理员、多渠道正确扩张
+6. 无管理员渠道不影响申请提交
+7. 无管理员渠道不无限重试
+8. 幂等键阻止重复投递
+9. delivery worker 复用 Platform App Adapter
+10. 运行时代码零 ADMIN_FEISHU_* / Webhook
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
+import uuid
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 
@@ -27,10 +30,18 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.beta_application import BetaApplication
+from app.models.notification import MessageDelivery, NotificationChannel, NotificationMessage
 from app.models.outbox import Outbox
+from app.models.user import Role, User, UserRole
 from app.schemas.beta_application import BetaApplicationCreate
 from app.schemas.notification import DeliveryResult
+from app.services.beta_application_notifier import (
+    BETA_APPLICATION_ADMIN_EVENT,
+    build_beta_application_card,
+)
 from app.services.beta_application_service import create_application, retry_feishu
+from app.services.delivery_worker import process_pending_deliveries
+from app.services.notification_service import create_channel
 from app.services.outbox_relay import relay_outbox
 
 # ============================================================
@@ -40,15 +51,15 @@ from app.services.outbox_relay import relay_outbox
 
 @pytest_asyncio.fixture
 async def notifier_db_session() -> AsyncGenerator[AsyncSession, None]:
-    """notifier 测试用 DB session（允许 commit，测试后清理）。
-
-    使用真实 PostgreSQL 测试库，测试后清理 beta_applications 与对应 outbox 记录，
-    保证测试隔离。不使用 conftest.db_session 的 nested transaction 模式，因为
-    create_application 内部需要 db.commit()。
-    """
+    """notifier 测试用 DB session（允许 commit，测试后清理）。"""
     from tests.conftest import TestAsyncSessionLocal
 
     session = TestAsyncSessionLocal()
+    created_user_ids: list[uuid.UUID] = []
+    created_channel_ids: list[uuid.UUID] = []
+
+    session.created_user_ids = created_user_ids
+    session.created_channel_ids = created_channel_ids
     try:
         yield session
     finally:
@@ -56,12 +67,106 @@ async def notifier_db_session() -> AsyncGenerator[AsyncSession, None]:
             await session.rollback()
         except Exception:
             pass
+        # 清理顺序：deliveries -> messages -> outbox -> channels -> beta_applications -> user_roles -> users
+        await session.execute(text("DELETE FROM message_deliveries"))
+        await session.execute(text("DELETE FROM notification_messages"))
         await session.execute(
-            text("DELETE FROM outbox WHERE event_type = 'beta_application_admin'")
+            text("DELETE FROM outbox WHERE event_type = :event_type"),
+            {"event_type": BETA_APPLICATION_ADMIN_EVENT},
         )
+        if created_channel_ids:
+            for cid in created_channel_ids:
+                await session.execute(
+                    text("DELETE FROM notification_channels WHERE id = :cid"),
+                    {"cid": str(cid)},
+                )
         await session.execute(text("DELETE FROM beta_applications"))
+        if created_user_ids:
+            for uid in created_user_ids:
+                await session.execute(
+                    text("DELETE FROM user_roles WHERE user_id = :uid"),
+                    {"uid": str(uid)},
+                )
+            for uid in created_user_ids:
+                await session.execute(
+                    text("DELETE FROM users WHERE id = :uid"),
+                    {"uid": str(uid)},
+                )
         await session.commit()
         await session.close()
+
+
+@pytest_asyncio.fixture
+async def admin_role(notifier_db_session: AsyncSession) -> Role:
+    """创建或获取 admin 角色。"""
+    stmt = select(Role).where(Role.name == "admin")
+    role = (await notifier_db_session.execute(stmt)).scalar_one_or_none()
+    if role is None:
+        role = Role(id=uuid.uuid4(), name="admin", description="管理员")
+        notifier_db_session.add(role)
+        await notifier_db_session.commit()
+    return role
+
+
+@pytest_asyncio.fixture
+async def member_role(notifier_db_session: AsyncSession) -> Role:
+    """创建或获取 member 角色。"""
+    stmt = select(Role).where(Role.name == "member")
+    role = (await notifier_db_session.execute(stmt)).scalar_one_or_none()
+    if role is None:
+        role = Role(id=uuid.uuid4(), name="member", description="普通会员")
+        notifier_db_session.add(role)
+        await notifier_db_session.commit()
+    return role
+
+
+async def _create_user(
+    db: AsyncSession,
+    role: Role,
+    status: str = "active",
+    email_prefix: str = "user",
+) -> User:
+    """创建测试用户并分配角色。"""
+    user = User(
+        id=uuid.uuid4(),
+        email=f"{email_prefix}_{uuid.uuid4().hex[:8]}@test.com",
+        password_hash="$2b$12$dummyhash",
+        status=status,
+        timezone="Asia/Shanghai",
+    )
+    db.add(user)
+    db.add(UserRole(user_id=user.id, role_id=role.id))
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
+async def _create_active_channel(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    app_id: str = "cli_test_app_001",
+) -> NotificationChannel:
+    """创建 active feishu_platform_app 渠道。"""
+    channel = await create_channel(
+        db=db,
+        user_id=user_id,
+        adapter_type="feishu_platform_app",
+        display_name="Admin Platform App",
+        target_config={
+            "app_id": app_id,
+            "app_secret": "test_secret_value",
+            "receive_id": "bg33237",
+            "receive_id_type": "user_id",
+        },
+    )
+    channel.status = "active"
+    await db.commit()
+    await db.refresh(channel)
+    # [测试清理] - 追踪创建的渠道 ID，供 fixture finally 块清理
+    ids = getattr(db, "created_channel_ids", None)
+    if ids is not None:
+        ids.append(channel.id)
+    return channel
 
 
 def _hash_ip(ip: str) -> str:
@@ -93,27 +198,6 @@ def _make_payload(
     return payload
 
 
-def _set_admin_feishu_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """设置管理员飞书 Platform App 环境变量（测试用）。"""
-    monkeypatch.setenv("ADMIN_FEISHU_APP_ID", "cli_test_app_001")
-    monkeypatch.setenv("ADMIN_FEISHU_APP_SECRET", "test_secret_value")
-    monkeypatch.setenv("ADMIN_FEISHU_RECEIVE_ID", "bg33237")
-    monkeypatch.setenv("ADMIN_FEISHU_RECEIVE_ID_TYPE", "user_id")
-    # 清理旧 webhook 环境变量（避免遗留干扰）
-    monkeypatch.delenv("ADMIN_FEISHU_WEBHOOK_URL", raising=False)
-    monkeypatch.delenv("ADMIN_FEISHU_SIGN_SECRET", raising=False)
-
-
-def _clear_admin_feishu_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """清理全部管理员飞书环境变量（模拟未配置场景）。"""
-    monkeypatch.delenv("ADMIN_FEISHU_APP_ID", raising=False)
-    monkeypatch.delenv("ADMIN_FEISHU_APP_SECRET", raising=False)
-    monkeypatch.delenv("ADMIN_FEISHU_RECEIVE_ID", raising=False)
-    monkeypatch.delenv("ADMIN_FEISHU_RECEIVE_ID_TYPE", raising=False)
-    monkeypatch.delenv("ADMIN_FEISHU_WEBHOOK_URL", raising=False)
-    monkeypatch.delenv("ADMIN_FEISHU_SIGN_SECRET", raising=False)
-
-
 def _mock_feishu_send_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """mock FeishuPlatformAppAdapter.send 返回成功。"""
     from app.services.feishu_platform_app_adapter import FeishuPlatformAppAdapter
@@ -124,232 +208,344 @@ def _mock_feishu_send_success(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(FeishuPlatformAppAdapter, "send", mock_send)
 
 
-def _mock_feishu_send_failure(monkeypatch: pytest.MonkeyPatch, error_msg: str = "mock failure") -> None:
-    """mock FeishuPlatformAppAdapter.send 返回失败。"""
-    from app.services.feishu_platform_app_adapter import FeishuPlatformAppAdapter
-
-    async def mock_send(self, message_dto, channel_config):
-        return DeliveryResult(
-            success=False,
-            error_code="NETWORK_ERROR",
-            error_message=error_msg,
-        )
-
-    monkeypatch.setattr(FeishuPlatformAppAdapter, "send", mock_send)
-
-
 # ============================================================
-# SubTask 3.6 测试 1: Outbox 写入测试
+# 测试 1: active admin + active Platform App 渠道收到通知
 # ============================================================
 
 
 @pytest.mark.asyncio
-async def test_create_application_writes_beta_application_admin_outbox(
+async def test_create_application_notifies_active_admin_channel(
     notifier_db_session: AsyncSession,
+    admin_role: Role,
 ):
-    """create_application 后 outbox 表有 beta_application_admin 事件，payload 含申请数据。"""
-    payload = BetaApplicationCreate(**_make_payload(wechat="notifier_user_001"))
-    ip_hash = _hash_ip("192.168.100.1")
+    """create_application -> outbox 专用事件 -> relay -> MessageDelivery。"""
+    admin = await _create_user(notifier_db_session, admin_role, email_prefix="admin")
+    channel = await _create_active_channel(notifier_db_session, admin.id)
 
+    payload = BetaApplicationCreate(**_make_payload(wechat="notifier_user_001"))
     app, is_new = await create_application(
-        db=notifier_db_session, payload=payload, ip_hash=ip_hash
+        db=notifier_db_session, payload=payload, ip_hash=_hash_ip("192.168.100.1")
     )
     assert is_new is True
 
+    # 验证 outbox 事件
     result = await notifier_db_session.execute(
         select(Outbox)
-        .where(Outbox.event_type == "beta_application_admin")
+        .where(Outbox.event_type == BETA_APPLICATION_ADMIN_EVENT)
         .where(Outbox.aggregate_id == app.id)
     )
     outbox_records = list(result.scalars().all())
-    assert len(outbox_records) >= 1, "未写入 beta_application_admin Outbox 事件"
+    assert len(outbox_records) == 1
+    assert outbox_records[0].payload == {"application_id": str(app.id)}
 
-    outbox = outbox_records[0]
-    assert outbox.aggregate_type == "beta_application"
-    assert outbox.status == "pending"
-    # payload 包含申请数据（不含 Platform App 敏感配置，安全考虑）
-    assert outbox.payload["application_id"] == str(app.id)
-    assert outbox.payload["wechat"] == "notifier_user_001"
-    assert outbox.payload["watch_stock_count"] == 10
-    # payload 不应包含 Platform App 敏感字段
-    assert "app_secret" not in outbox.payload
-    assert "app_id" not in outbox.payload
-    assert "receive_id" not in outbox.payload
+    # relay 扩张
+    processed = await relay_outbox(db=notifier_db_session, batch_size=10, max_retry=3)
+    await notifier_db_session.commit()
+    assert processed >= 1
 
-
-@pytest.mark.asyncio
-async def test_create_application_sets_feishu_status_pending(
-    notifier_db_session: AsyncSession,
-):
-    """create_application 后 beta_applications.feishu_delivery_status='pending'。"""
-    payload = BetaApplicationCreate(**_make_payload(wechat="notifier_user_002"))
-    ip_hash = _hash_ip("192.168.100.2")
-
-    app, is_new = await create_application(
-        db=notifier_db_session, payload=payload, ip_hash=ip_hash
+    # 验证 NotificationMessage + MessageDelivery
+    msg_result = await notifier_db_session.execute(
+        select(NotificationMessage).where(NotificationMessage.user_id == admin.id)
     )
-    assert is_new is True
+    messages = list(msg_result.scalars().all())
+    assert len(messages) == 1
+    assert messages[0].source_type == "beta_application_admin"
+
+    delivery_result = await notifier_db_session.execute(
+        select(MessageDelivery).where(MessageDelivery.channel_id == channel.id)
+    )
+    deliveries = list(delivery_result.scalars().all())
+    assert len(deliveries) == 1
+    assert deliveries[0].status == "pending"
+    assert deliveries[0].delivery_type == "card"
+
+    # 幂等键包含 application_id + admin_user_id + channel_id
+    expected_idem = hashlib.sha256(
+        f"{app.id}|{admin.id}|{channel.id}".encode()
+    ).hexdigest()
+    assert deliveries[0].idempotency_key == expected_idem
 
     await notifier_db_session.refresh(app)
     assert app.feishu_delivery_status == "pending"
 
 
 # ============================================================
-# SubTask 3.6 测试 2: 飞书失败不影响提交
+# 测试 2: admin 无 subscription 仍能收到
 # ============================================================
 
 
 @pytest.mark.asyncio
-async def test_feishu_failure_does_not_affect_submission(
+async def test_admin_without_subscription_receives_notification(
     notifier_db_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
+    admin_role: Role,
 ):
-    """飞书发送失败不影响用户提交（create_application 仍返回 is_new=True）。
+    """管理员通知不依赖 subscription，admin 无 subscription 仍创建 MessageDelivery。"""
+    admin = await _create_user(notifier_db_session, admin_role, email_prefix="admin_nosub")
+    channel = await _create_active_channel(notifier_db_session, admin.id)
 
-    场景：system_channel 未配置（返回 None），create_application 仍成功。
-    """
-    # 不设置环境变量，system_channel 返回 None
-    _clear_admin_feishu_env(monkeypatch)
-
-    payload = BetaApplicationCreate(**_make_payload(wechat="feishu_fail_user"))
-    ip_hash = _hash_ip("192.168.100.3")
-
-    # create_application 应成功（飞书是异步投递，不影响提交）
-    app, is_new = await create_application(
-        db=notifier_db_session, payload=payload, ip_hash=ip_hash
-    )
-    assert is_new is True
-    assert app.id is not None
-
-    # 申请已写入数据库
-    await notifier_db_session.refresh(app)
-    assert app.wechat == "feishu_fail_user"
-
-
-@pytest.mark.asyncio
-async def test_relay_without_admin_config_marks_failed(
-    notifier_db_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """system_channel 未配置时，relay_outbox 标记 feishu_delivery_status='failed'。"""
-    # 不设置环境变量，system_channel 返回 None
-    _clear_admin_feishu_env(monkeypatch)
-
-    payload = BetaApplicationCreate(**_make_payload(wechat="no_config_user"))
-    ip_hash = _hash_ip("192.168.100.4")
+    payload = BetaApplicationCreate(**_make_payload(wechat="no_sub_user"))
     app, _ = await create_application(
-        db=notifier_db_session, payload=payload, ip_hash=ip_hash
+        db=notifier_db_session, payload=payload, ip_hash=_hash_ip("192.168.100.2")
     )
-
-    # relay_outbox 处理事件（system_channel 未配置应标记 failed）
     await relay_outbox(db=notifier_db_session, batch_size=10, max_retry=3)
     await notifier_db_session.commit()
 
-    await notifier_db_session.refresh(app)
-    assert app.feishu_delivery_status == "failed"
-    assert app.feishu_last_error is not None
-    assert "not configured" in app.feishu_last_error or "未配置" in app.feishu_last_error
+    delivery_result = await notifier_db_session.execute(
+        select(MessageDelivery).where(MessageDelivery.channel_id == channel.id)
+    )
+    assert len(list(delivery_result.scalars().all())) == 1
 
 
 # ============================================================
-# SubTask 3.6 测试 3: 投递状态更新（成功）
+# 测试 3: inactive admin 不接收
 # ============================================================
 
 
 @pytest.mark.asyncio
-async def test_relay_outbox_success_updates_feishu_status(
+async def test_inactive_admin_does_not_receive_notification(
     notifier_db_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
+    admin_role: Role,
 ):
-    """Outbox 投递成功后 beta_applications.feishu_delivery_status='success'。"""
-    _set_admin_feishu_env(monkeypatch)
-    _mock_feishu_send_success(monkeypatch)
+    """User.status != active 的管理员不接收通知。"""
+    admin = await _create_user(
+        notifier_db_session, admin_role, status="disabled", email_prefix="admin_inactive"
+    )
+    await _create_active_channel(notifier_db_session, admin.id)
 
-    payload = BetaApplicationCreate(**_make_payload(wechat="relay_success_user"))
-    ip_hash = _hash_ip("192.168.100.5")
+    payload = BetaApplicationCreate(**_make_payload(wechat="inactive_admin_user"))
+    app, _ = await create_application(
+        db=notifier_db_session, payload=payload, ip_hash=_hash_ip("192.168.100.3")
+    )
+    await relay_outbox(db=notifier_db_session, batch_size=10, max_retry=3)
+    await notifier_db_session.commit()
+
+    msg_result = await notifier_db_session.execute(
+        select(NotificationMessage).where(NotificationMessage.user_id == admin.id)
+    )
+    assert len(list(msg_result.scalars().all())) == 0
+
+    await notifier_db_session.refresh(app)
+    assert app.feishu_delivery_status == "failed"
+    assert app.feishu_last_error == "ADMIN_PLATFORM_CHANNEL_NOT_CONFIGURED"
+
+
+# ============================================================
+# 测试 4: 普通 member 不接收管理员通知
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_member_does_not_receive_admin_notification(
+    notifier_db_session: AsyncSession,
+    admin_role: Role,
+    member_role: Role,
+):
+    """普通 member 的 active channel 不应收到管理员内测申请通知。"""
+    admin = await _create_user(notifier_db_session, admin_role, email_prefix="admin_only")
+    await _create_active_channel(notifier_db_session, admin.id)
+
+    member = await _create_user(notifier_db_session, member_role, email_prefix="member")
+    member_channel = await _create_active_channel(
+        notifier_db_session, member.id, app_id="cli_member_app"
+    )
+
+    payload = BetaApplicationCreate(**_make_payload(wechat="member_test_user"))
+    app, _ = await create_application(
+        db=notifier_db_session, payload=payload, ip_hash=_hash_ip("192.168.100.4")
+    )
+    await relay_outbox(db=notifier_db_session, batch_size=10, max_retry=3)
+    await notifier_db_session.commit()
+
+    delivery_result = await notifier_db_session.execute(
+        select(MessageDelivery).where(MessageDelivery.channel_id == member_channel.id)
+    )
+    assert len(list(delivery_result.scalars().all())) == 0
+
+
+# ============================================================
+# 测试 5: 多管理员、多渠道正确扩张
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_multiple_admins_multiple_channels(
+    notifier_db_session: AsyncSession,
+    admin_role: Role,
+):
+    """多个 active admin 配置渠道时，每个渠道创建独立 MessageDelivery。"""
+    admin1 = await _create_user(notifier_db_session, admin_role, email_prefix="admin1")
+    admin2 = await _create_user(notifier_db_session, admin_role, email_prefix="admin2")
+    channel1 = await _create_active_channel(notifier_db_session, admin1.id, app_id="app1")
+    channel2 = await _create_active_channel(notifier_db_session, admin2.id, app_id="app2")
+
+    payload = BetaApplicationCreate(**_make_payload(wechat="multi_admin_user"))
+    app, _ = await create_application(
+        db=notifier_db_session, payload=payload, ip_hash=_hash_ip("192.168.100.5")
+    )
+    await relay_outbox(db=notifier_db_session, batch_size=10, max_retry=3)
+    await notifier_db_session.commit()
+
+    delivery_result = await notifier_db_session.execute(
+        select(MessageDelivery).where(
+            MessageDelivery.channel_id.in_([channel1.id, channel2.id])
+        )
+    )
+    deliveries = list(delivery_result.scalars().all())
+    assert len(deliveries) == 2
+    assert {d.channel_id for d in deliveries} == {channel1.id, channel2.id}
+
+
+# ============================================================
+# 测试 6: 无管理员渠道不影响申请提交
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_no_admin_channel_does_not_block_submission(
+    notifier_db_session: AsyncSession,
+    admin_role: Role,
+):
+    """无 active admin Platform App 渠道时，用户申请仍成功保存。"""
+    await _create_user(notifier_db_session, admin_role, email_prefix="admin_no_channel")
+
+    payload = BetaApplicationCreate(**_make_payload(wechat="no_channel_user"))
     app, is_new = await create_application(
-        db=notifier_db_session, payload=payload, ip_hash=ip_hash
+        db=notifier_db_session, payload=payload, ip_hash=_hash_ip("192.168.100.6")
     )
     assert is_new is True
+    await notifier_db_session.refresh(app)
+    assert app.wechat == "no_channel_user"
 
-    # 调用 relay_outbox 处理事件
+
+# ============================================================
+# 测试 7: 无管理员渠道不无限重试
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_no_admin_channel_does_not_retry_infinitely(
+    notifier_db_session: AsyncSession,
+    admin_role: Role,
+):
+    """无渠道时 outbox 一次处理后标记 processed，beta_applications 标记 failed。"""
+    await _create_user(notifier_db_session, admin_role, email_prefix="admin_no_channel_retry")
+
+    payload = BetaApplicationCreate(**_make_payload(wechat="no_channel_retry_user"))
+    app, _ = await create_application(
+        db=notifier_db_session, payload=payload, ip_hash=_hash_ip("192.168.100.7")
+    )
+
+    # 第一次 relay
+    await relay_outbox(db=notifier_db_session, batch_size=10, max_retry=3)
+    await notifier_db_session.commit()
+
+    # 第二次 relay 不应再处理（已 processed）
     processed = await relay_outbox(db=notifier_db_session, batch_size=10, max_retry=3)
     await notifier_db_session.commit()
+    assert processed == 0
 
-    assert processed >= 1, "relay_outbox 应处理至少 1 条记录"
-
-    # 验证 beta_applications.feishu_delivery_status='success'
     await notifier_db_session.refresh(app)
-    assert app.feishu_delivery_status == "success"
-    assert app.feishu_delivered_at is not None
-    assert app.feishu_last_error is None
-
-    # 验证 outbox 记录已 processed
-    result = await notifier_db_session.execute(
-        select(Outbox)
-        .where(Outbox.event_type == "beta_application_admin")
-        .where(Outbox.aggregate_id == app.id)
-    )
-    outbox_records = list(result.scalars().all())
-    assert any(r.status == "processed" for r in outbox_records), (
-        "outbox 记录应标记为 processed"
-    )
+    assert app.feishu_delivery_status == "failed"
+    assert app.feishu_last_error == "ADMIN_PLATFORM_CHANNEL_NOT_CONFIGURED"
 
 
 # ============================================================
-# SubTask 3.6 测试 4: Outbox 重试（失败 + retry_feishu）
+# 测试 8: 幂等键阻止重复投递
 # ============================================================
 
 
 @pytest.mark.asyncio
-async def test_relay_outbox_failure_marks_failed_and_retry_requeues(
+async def test_idempotency_prevents_duplicate_deliveries(
     notifier_db_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
+    admin_role: Role,
 ):
-    """投递失败后 feishu_delivery_status='failed'，retry_feishu 重新入队。"""
-    _set_admin_feishu_env(monkeypatch)
-    _mock_feishu_send_failure(monkeypatch, error_msg="mock failure for retry test")
+    """同一 outbox 事件重复 relay 不会创建重复 MessageDelivery。"""
+    admin = await _create_user(notifier_db_session, admin_role, email_prefix="admin_idem")
+    channel = await _create_active_channel(notifier_db_session, admin.id)
 
-    payload = BetaApplicationCreate(**_make_payload(wechat="relay_fail_user"))
-    ip_hash = _hash_ip("192.168.100.6")
-    app, is_new = await create_application(
-        db=notifier_db_session, payload=payload, ip_hash=ip_hash
+    payload = BetaApplicationCreate(**_make_payload(wechat="idem_user"))
+    app, _ = await create_application(
+        db=notifier_db_session, payload=payload, ip_hash=_hash_ip("192.168.100.8")
     )
-    assert is_new is True
 
-    # 调用 relay_outbox 处理事件（max_retry=1 确保第一次失败后标记 failed）
-    await relay_outbox(db=notifier_db_session, batch_size=10, max_retry=1)
+    # 模拟 retry_feishu 重新入队同一事件
+    await retry_feishu(db=notifier_db_session, app_id=app.id)
     await notifier_db_session.commit()
 
-    # 验证 beta_applications.feishu_delivery_status='failed'
-    await notifier_db_session.refresh(app)
-    assert app.feishu_delivery_status == "failed"
-    assert app.feishu_last_error is not None
-    assert "mock failure for retry test" in app.feishu_last_error
+    # 两个 outbox 事件
+    outbox_result = await notifier_db_session.execute(
+        select(Outbox).where(Outbox.event_type == BETA_APPLICATION_ADMIN_EVENT)
+    )
+    assert len(list(outbox_result.scalars().all())) == 2
 
-    # retry_feishu 重新入队
-    await notifier_db_session.refresh(app)
-    new_outbox = await retry_feishu(db=notifier_db_session, app_id=app.id)
-    assert new_outbox.id is not None
-    assert new_outbox.event_type == "beta_application_admin"
-    assert new_outbox.status == "pending"
+    # 两次 relay
+    await relay_outbox(db=notifier_db_session, batch_size=10, max_retry=3)
+    await notifier_db_session.commit()
+    await relay_outbox(db=notifier_db_session, batch_size=10, max_retry=3)
+    await notifier_db_session.commit()
 
-    # retry_feishu 后 feishu_delivery_status 应恢复为 pending
-    await notifier_db_session.refresh(app)
-    assert app.feishu_delivery_status == "pending"
+    delivery_result = await notifier_db_session.execute(
+        select(MessageDelivery).where(MessageDelivery.channel_id == channel.id)
+    )
+    deliveries = list(delivery_result.scalars().all())
+    assert len(deliveries) == 1
 
 
 # ============================================================
-# SubTask 3.2 测试: 卡片构建
+# 测试 9: delivery worker 复用 Platform App Adapter
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_delivery_worker_uses_platform_app_adapter(
+    notifier_db_session: AsyncSession,
+    admin_role: Role,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """delivery worker 通过 FeishuPlatformAppAdapter 投递管理员通知。"""
+    admin = await _create_user(notifier_db_session, admin_role, email_prefix="admin_delivery")
+    await _create_active_channel(notifier_db_session, admin.id)
+
+    payload = BetaApplicationCreate(**_make_payload(wechat="delivery_user"))
+    app, _ = await create_application(
+        db=notifier_db_session, payload=payload, ip_hash=_hash_ip("192.168.100.9")
+    )
+    await relay_outbox(db=notifier_db_session, batch_size=10, max_retry=3)
+    await notifier_db_session.commit()
+
+    _mock_feishu_send_success(monkeypatch)
+    send_calls = []
+    from app.services.feishu_platform_app_adapter import FeishuPlatformAppAdapter
+
+    original_send = FeishuPlatformAppAdapter.send
+
+    async def tracking_send(self, message_dto, channel_config):
+        send_calls.append(channel_config)
+        return await original_send(self, message_dto, channel_config)
+
+    monkeypatch.setattr(FeishuPlatformAppAdapter, "send", tracking_send)
+
+    success = await process_pending_deliveries(
+        db=notifier_db_session, batch_size=10, max_retry=3
+    )
+    await notifier_db_session.commit()
+    assert success == 1
+    assert len(send_calls) == 1
+    assert send_calls[0]["app_id"] == "cli_test_app_001"
+
+    await notifier_db_session.refresh(app)
+    assert app.feishu_delivery_status == "pending"  # delivery worker 不更新 beta_application 状态
+
+
+# ============================================================
+# 测试 10: 卡片构建
 # ============================================================
 
 
 def test_build_beta_application_card_contains_all_required_fields():
     """飞书卡片必须包含 spec 要求的所有字段。"""
-    from app.services.beta_application_notifier import build_beta_application_card
-
     app = BetaApplication(
-        id=__import__("uuid").uuid4(),
+        id=uuid.uuid4(),
         wechat="test_wechat_id",
         phone="13800138000",
         watch_stock_count=15,
@@ -361,13 +557,12 @@ def test_build_beta_application_card_contains_all_required_fields():
 
     card = build_beta_application_card(app)
 
-    # 验证卡片结构
     assert "header" in card
     assert "elements" in card
     assert card["header"]["title"]["content"] == "新的内测申请"
 
-    # 验证卡片内容包含所有必需字段（转为 JSON 字符串检查）
     import json
+
     card_text = json.dumps(card, ensure_ascii=False)
     assert "申请编号" in card_text
     assert "提交时间" in card_text
@@ -375,19 +570,13 @@ def test_build_beta_application_card_contains_all_required_fields():
     assert "手机号" in card_text
     assert "盯盘" in card_text
     assert "理由" in card_text
-    assert "后台" in card_text or "查看" in card_text  # 后台入口
+    assert "后台" in card_text or "查看" in card_text
 
 
 def test_build_beta_application_card_masks_contact_in_summary():
-    """卡片正文可包含完整联系方式（管理员飞书是内部通知，需完整信息）。
-
-    注意：管理员飞书是系统级内部通知，发送给管理员，需完整联系方式以便联系用户。
-    日志脱敏是针对 logger 的，不是针对管理员飞书内容。
-    """
-    from app.services.beta_application_notifier import build_beta_application_card
-
+    """管理员飞书是内部通知，卡片含完整联系方式。"""
     app = BetaApplication(
-        id=__import__("uuid").uuid4(),
+        id=uuid.uuid4(),
         wechat="my_wechat_id",
         phone="13800138000",
         watch_stock_count=10,
@@ -399,41 +588,41 @@ def test_build_beta_application_card_masks_contact_in_summary():
 
     card = build_beta_application_card(app)
     import json
+
     card_text = json.dumps(card, ensure_ascii=False)
-    # 管理员飞书应包含完整联系方式（便于管理员联系用户）
     assert "13800138000" in card_text
     assert "my_wechat_id" in card_text
 
 
 # ============================================================
-# 日志脱敏测试
+# 测试 11: 日志脱敏
 # ============================================================
 
 
 @pytest.mark.asyncio
 async def test_notifier_logs_do_not_leak_full_contact(
     notifier_db_session: AsyncSession,
+    admin_role: Role,
     caplog: pytest.LogCaptureFixture,
-    monkeypatch: pytest.MonkeyPatch,
 ):
     """notifier 日志中不输出完整手机号/微信号。"""
-    _set_admin_feishu_env(monkeypatch)
-    _mock_feishu_send_success(monkeypatch)
+    await _create_user(notifier_db_session, admin_role, email_prefix="admin_log")
+    await _create_active_channel(notifier_db_session, (await _create_user(
+        notifier_db_session, admin_role, email_prefix="admin_log2"
+    )).id)
 
     payload = BetaApplicationCreate(
         **_make_payload(wechat=None, phone="13900139000")
     )
-    ip_hash = _hash_ip("192.168.100.7")
 
     with caplog.at_level(logging.INFO):
-        await create_application(
-            db=notifier_db_session, payload=payload, ip_hash=ip_hash
+        app, _ = await create_application(
+            db=notifier_db_session, payload=payload, ip_hash=_hash_ip("192.168.100.10")
         )
         await relay_outbox(db=notifier_db_session, batch_size=10, max_retry=3)
         await notifier_db_session.commit()
 
     log_text = caplog.text
-    # 完整手机号不得出现在日志中
     assert "13900139000" not in log_text, (
         f"日志中出现了完整手机号: {log_text}"
     )
