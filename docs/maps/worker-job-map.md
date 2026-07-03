@@ -46,3 +46,7 @@ running + heartbeat_at < now - threshold → stopped/stale
 - 先补测试再移动代码；
 - 每次只改一种 WORKER_TYPE 或一个横切能力；
 - 保持 WORKER_TYPE、compose 服务名、调度时间、run_key、幂等逻辑不变。
+
+## 5. `_notify_monitor_status` 直接发送路径
+
+`worker.py:1087-1191` 的 `_notify_monitor_status` 用于监控启动/异常通知，**直接调用 `adapter.send()` 绕过 Outbox/Delivery Worker 管道**。代码 TODO 已标记，待产品决策是否保留作为降级路径（监控服务异常时 Outbox/Delivery Worker 可能也不可用）。该路径缺少重试、幂等（除启动通知 Redis 幂等）、静默时段规避，且无单元测试覆盖（ALIGN-025）。

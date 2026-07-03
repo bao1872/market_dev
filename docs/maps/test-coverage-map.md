@@ -35,6 +35,7 @@
 | target_channel_id | `test_outbox_target_channel_id.py` |
 | 状态机 | `test_state_machine.py`, `test_stock_detail_feishu_status.py` |
 | beta admin 通知 | `test_beta_application_notifier.py` |
+| `_notify_monitor_status` 直接发送路径 | **无测试**（缺口，ALIGN-025） |
 
 ## 5. 前端
 

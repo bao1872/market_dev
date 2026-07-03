@@ -76,3 +76,16 @@ overall_status
 - 图片上传/发送失败后仅重试图片；
 - 重试不重复文字；
 - 用户只能查询自己的状态。
+
+## 6. 监控启动/异常通知（直接发送路径）
+
+`worker.py:1087-1191` 的 `_notify_monitor_status` 用于监控启动/异常通知，**直接调用 `adapter.send()` 绕过 Outbox/Delivery Worker 管道**：
+
+```text
+monitor_scheduler 启动/异常
+→ _notify_monitor_status (worker.py:1087)
+→ Redis SET NX EX 7天 幂等（启动通知）
+→ 直接调用 FeishuPlatformAppAdapter.send()
+```
+
+此路径不经 `create_message → write_outbox → delivery_worker`，缺少重试、静默时段规避、可查询状态。代码 TODO 已标记，待产品决策（ALIGN-025）。
