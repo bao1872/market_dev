@@ -2,9 +2,9 @@
 > 基线日期：2026-07-02  
 > 操作分支：`fix/release-remaining-alignment-gaps`  
 > Phase D 起始代码基线（implementation_base_commit）：`64ed75cce80f5b3f2b5ab95f96b52aac11475e3e`  
-> 已验证实现 Commit（verified_implementation_commit）：`a053d0c1a1b28d4238e7fb80eab76e1604f7560c`
+> 已验证实现 Commit（verified_implementation_commit）：`73b1a5db7340f547bd265d6d10bde02aeab249f0`
 > 验证日期：2026-07-03
-> 验证状态：本地验证完成；GitHub Actions CI 验证完成（Run #36，最终 HEAD `a053d0c` 全部 blocking jobs success）；生产未验证  
+> 验证状态：本地验证完成；GitHub Actions CI 验证完成（Run #38，最终 HEAD `73b1a5d` 全部 blocking jobs success）；生产未验证  
 > 事实来源：代码库 + 项目负责人截至 2026-07-02 已确认的产品与架构要求  
 > 维护要求：任何代码、配置、测试、部署或文档修改都必须同步更新相关当前设计文档，并新增 CHANGE 记录。  
 > 注意：该代码基线用于设计核对，不代表已经满足合并 `main` 或生产发布条件；文档 Commit 不记录自身 SHA，最终 release HEAD 在 PR 描述与合并后 CHANGE 中补记。
