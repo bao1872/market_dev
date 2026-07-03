@@ -79,6 +79,23 @@ async def expand_event_recipients(db: AsyncSession, event_id: UUID) -> int:
         )
         return 0
 
+    # [eligible_user_service] - 批量过滤有资格用户（disabled/expired/admin 不接收事件通知）
+    from app.services.eligible_user_service import filter_eligible_recipients
+
+    all_user_ids = [uid for _, uid in watchlist_rows]
+    eligible_user_ids = set(await filter_eligible_recipients(db, all_user_ids))
+    watchlist_rows = [
+        (wid, uid) for wid, uid in watchlist_rows
+        if uid in eligible_user_ids
+    ]
+
+    if not watchlist_rows:
+        logger.info(
+            "事件自选股用户均无资格，跳过接收人扩展: event_id=%s instrument_id=%s",
+            event_id, event.instrument_id,
+        )
+        return 0
+
     # 3. 逐用户插入接收人（ON CONFLICT DO NOTHING）
     created_count = 0
     for watchlist_item_id, user_id in watchlist_rows:

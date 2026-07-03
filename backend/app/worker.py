@@ -492,7 +492,8 @@ async def run_bars_scheduler_worker() -> None:
                         try:
                             from datetime import date as date_cls
 
-                            from sqlalchemy import func as sa_func, select as sa_select
+                            from sqlalchemy import func as sa_func
+                            from sqlalchemy import select as sa_select
 
                             from app.models.bar import Bar15Min
 
@@ -528,6 +529,7 @@ async def run_bars_scheduler_worker() -> None:
                 async with AsyncSessionLocal() as db:
                     # [JobRunEvent] - 任务失败写入 ERROR 事件（含 traceback）
                     import traceback as tb_mod
+
                     from app.services.job_run_event_service import append_event
                     await append_event(
                         db=db,
@@ -1026,7 +1028,8 @@ async def run_monitor_scheduler_worker() -> None:
                     job_run.failed_count = (job_run.failed_count or 0) + 1
                 # [monitor_scheduler] - 查询最新 source_bar_time 写入 metadata_json，供 Admin 页面展示
                 try:
-                    from sqlalchemy import func as sa_func, select as sa_select
+                    from sqlalchemy import func as sa_func
+                    from sqlalchemy import select as sa_select
 
                     from app.models.monitor_evaluation import MonitorEvaluation
 

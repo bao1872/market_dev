@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Divergence for Many Indicators v4 (TradingView Pine by LonesomeTheBlue) -> Plotly HTML
 
@@ -85,7 +84,6 @@ import argparse
 import os
 import sys
 from dataclasses import dataclass
-from typing import List
 
 import numpy as np
 import pandas as pd
@@ -95,7 +93,7 @@ from plotly.subplots import make_subplots
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from datasource.pytdx_client import connect_pytdx, PERIOD_MAP
+from datasource.pytdx_client import PERIOD_MAP, connect_pytdx
 
 
 @dataclass
@@ -158,7 +156,7 @@ def fetch_bars_pytdx(symbol: str, freq: str, start: str, end: str, *, max_pages:
 
         page = 0
         size = 800
-        frames: List[pd.DataFrame] = []
+        frames: list[pd.DataFrame] = []
 
         while page < max_pages:
             recs = api.get_security_bars(cat, mkt, symbol, page * size, size)

@@ -28,15 +28,14 @@ from app.models.stock_memo import StockMemo
 from app.models.user import User
 from app.services.outbox_relay import relay_outbox
 
-
 # ============================================================
 # 测试 fixtures
 # ============================================================
 
 
 @pytest_asyncio.fixture
-async def user_with_feishu_channel(db_session: AsyncSession):
-    """创建普通用户 + active 飞书 webhook 渠道（无 admin 角色）。"""
+async def user_with_feishu_channel(db_session: AsyncSession, make_user_eligible):
+    """创建普通用户 + active 飞书 Platform App 渠道（member 角色 + 有效订阅，有资格进入监控 universe）。"""
     user = User(
         id=uuid.uuid4(),
         email=f"user_{uuid.uuid4().hex[:8]}@test.com",
@@ -47,12 +46,15 @@ async def user_with_feishu_channel(db_session: AsyncSession):
     db_session.add(user)
     await db_session.flush()
 
+    # [eligible_user_service] - 普通用户应有资格进入监控 universe（member + 有效订阅）
+    await make_user_eligible(user)
+
     channel = NotificationChannel(
         id=uuid.uuid4(),
         user_id=user.id,
-        adapter_type="feishu_webhook",
+        adapter_type="feishu_platform_app",
         display_name="测试飞书渠道",
-        target_config={"webhook_url": "http://example.com/hook"},
+        target_config={"app_id": "cli_test_001", "app_secret": "secret_value", "receive_id": "bg12345", "receive_id_type": "user_id"},
         status="active",
     )
     db_session.add(channel)

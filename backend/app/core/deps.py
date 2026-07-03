@@ -5,11 +5,14 @@
 - get_current_user: 从 Authorization header 解析 JWT，查询数据库返回 User 对象
 - get_current_active_user: 检查用户状态为 active
 - require_roles(*roles): 角色检查依赖工厂（RBAC）
+- get_capture_token_payload: Capture Token 解析依赖（仅用于 /api/v1/capture/* 端点）
 
-关键安全约束（V1.1 15_SECURITY_TENANCY.md）：
+关键安全约束（V1.1 15_SECURITY_TENANCY.md + advice.md 第十节）：
 - 私有资源的 user_id 由认证上下文注入，不接受客户端传入
-- token 类型必须为 access 或 capture（refresh token 不可用于 API 认证）
-- capture token 为短期截图模式令牌，仅用于个股详情页截图场景
+- token 类型必须为 access（refresh/capture token 不可用于 API 认证）
+- capture token 为短期截图模式令牌，仅通过 URL query parameter 或 Authorization
+  header 传给 /api/v1/capture/* 端点，不能访问普通 API
+- Capture Token 必须校验 type=capture + scope=stock_detail_capture + exp 未过期
 - 用户状态非 active 时拒绝访问
 - 角色检查失败返回 403 Forbidden
 """
@@ -17,9 +20,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Query, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError
 from sqlalchemy import select
@@ -29,7 +33,13 @@ from app.core.security import decode_token
 from app.db import get_db
 from app.models.user import Role, User, UserRole
 
-__all__ = ["get_db", "get_current_user", "get_current_active_user", "require_roles"]
+__all__ = [
+    "get_db",
+    "get_current_user",
+    "get_current_active_user",
+    "require_roles",
+    "get_capture_token_payload",
+]
 
 # Bearer token 提取器（自动从 Authorization: Bearer <token> 解析）
 _bearer_scheme = HTTPBearer(
@@ -110,13 +120,13 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         ) from e
 
-    # 校验 token 类型：access token 或 capture token 可用于 API 认证
-    # capture token 为短期截图模式令牌，仅应由截图服务生成并在个股详情页使用
+    # 校验 token 类型：仅 access token 可用于 API 认证
+    # capture token 仅通过 URL query parameter 用于截图端点，不经过此依赖
     token_type = payload.get("type")
-    if token_type not in ("access", "capture"):
+    if token_type != "access":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="token 类型错误，需要 access token 或 capture token",
+            detail="token 类型错误，需要 access token",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -211,6 +221,100 @@ def require_roles(*required_roles: str) -> Callable[..., object]:
     return _check_roles
 
 
+# [Capture] - 描述: stock_detail_capture 作用域常量（advice.md 第六节）
+CAPTURE_SCOPE_STOCK_DETAIL = "stock_detail_capture"
+
+
+async def get_capture_token_payload(
+    credentials: HTTPAuthorizationCredentials | None = Depends(
+        HTTPBearer(auto_error=False)
+    ),
+    token_query: str | None = Query(
+        None, alias="token", description="Capture Token（query 参数，与 Authorization header 二选一）"
+    ),
+) -> dict[str, Any]:
+    """解析并校验 Capture Token，返回 payload。
+
+    [Capture] - 描述: 仅用于 /api/v1/capture/* 端点（advice.md 第六节 + 第十节硬规则）
+
+    支持两种传入方式（任一即可）：
+    1. Authorization: Bearer <token>
+    2. query 参数 token=<token>（前端 /capture/stock/:symbol?...&token=... 场景）
+
+    校验规则（任一失败返回 401）：
+    - token 可解码（签名 + exp 有效）
+    - payload.type == "capture"
+    - payload.scope == "stock_detail_capture"
+    - payload.user_id 存在
+    - payload.instrument_id 存在
+    - payload.event_id 存在
+
+    普通访问 token（type=access）会被拒绝（type 不匹配），保证 Capture Token 隔离。
+
+    Args:
+        credentials: Bearer token 凭证（可选，从 Authorization header 解析）
+        token_query: query 参数 token（可选）
+
+    Returns:
+        Capture Token payload dict（含 user_id/instrument_id/event_id/scope/type/exp）
+
+    Raises:
+        HTTPException 401: token 缺失/无效/类型错误/scope 不匹配/缺少必需声明
+    """
+    # 1. 提取 token 字符串（Authorization header 优先，回退 query 参数）
+    token_str: str | None = None
+    if credentials is not None and credentials.credentials:
+        token_str = credentials.credentials
+    elif token_query:
+        token_str = token_query
+
+    if not token_str:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="缺少 Capture Token（Authorization header 或 query 参数 token）",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # 2. 解码 + 验证签名/过期
+    try:
+        payload = decode_token(token_str)
+    except JWTError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"无效或过期的 Capture Token: {e}",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from e
+
+    # 3. 校验 type=capture（拒绝 access/refresh token）
+    if payload.get("type") != "capture":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="token 类型错误，需要 capture token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # 4. 校验 scope=stock_detail_capture（advice.md 第六节硬规则）
+    if payload.get("scope") != CAPTURE_SCOPE_STOCK_DETAIL:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Capture Token scope 错误，需要 {CAPTURE_SCOPE_STOCK_DETAIL}",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # 5. 校验必需声明（user_id/instrument_id/event_id）
+    missing = [
+        k for k in ("user_id", "instrument_id", "event_id") if not payload.get(k)
+    ]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Capture Token 缺少必需声明: {missing}",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return payload
+
+
 if __name__ == "__main__":
     # 自测入口：验证依赖函数可调用
     print(f"get_db={get_db}")
@@ -218,4 +322,10 @@ if __name__ == "__main__":
     print(f"get_current_active_user={get_current_active_user}")
     checker = require_roles("admin")
     print(f"require_roles('admin') -> {checker}")
+
+    # [Capture] - 验证 get_capture_token_payload 与 scope 常量
+    assert CAPTURE_SCOPE_STOCK_DETAIL == "stock_detail_capture"
+    assert callable(get_capture_token_payload), "get_capture_token_payload 应可调用"
+    print(f"CAPTURE_SCOPE_STOCK_DETAIL={CAPTURE_SCOPE_STOCK_DETAIL}")
+    print(f"get_capture_token_payload={get_capture_token_payload}")
     print("OK")

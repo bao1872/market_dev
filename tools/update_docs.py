@@ -1,29 +1,33 @@
 #!/usr/bin/env python3
-"""文档自动生成脚本 - 从事实源生成数据结构文档与操作手册。
+"""文档事实源检查脚本 - 从代码提取机器事实并核对 docs/current 契约。
 
 事实源：
 - ORM 模型（app.models.bar, app.models.instrument）→ 表结构
 - API 路由（app.api.bars）→ API 规格
 - 服务配置（bars_metrics, bars_retention, bars_scheduler_service, freshness_sla, reconcile_bars）
   → 监控指标、保留策略、调度配置、SLA、对账参数
+- 策略 manifest（strategy_assets/manifests/*.yaml）→ 策略版本与展示名
+- 指标契约（indicator_contract.py）→ Node Cluster / DSA / Bollinger 参数
+
+行为说明：
+- 本脚本不再生成 docs 根目录 Markdown。docs/current 是唯一当前设计事实源，
+  人工设计部分不被覆盖，避免形成第二套事实源。
+- 默认模式：从代码提取机器事实并打印检查报告到 stdout（不写文件）。
+- --check 模式：核对 docs/current 关键契约，冲突返回非 0。
 
 Inputs:
     无外部输入，全部从代码事实源提取
 
-Outputs:
-    docs/数据结构.md（6 张 bar 表结构 + instruments 表 + 数据流图 + 保留策略 + 策略运行时字段与版本）
-    docs/操作手册.md（API 规格 + 调度任务 + 监控指标 + 故障排查 + 对账操作 + 保留策略 + 策略展示名与版本）
-
 How to Run:
-    python tools/update_docs.py           # 生成文档
-    python tools/update_docs.py --check   # 一致性检查（不写入，仅比对）
+    python tools/update_docs.py           # 打印机器事实检查报告到 stdout
+    python tools/update_docs.py --check   # 核对 docs/current 关键契约
 
 Examples:
     python tools/update_docs.py
     python tools/update_docs.py --check
 
 Side Effects:
-    生成/覆盖 docs/数据结构.md、docs/操作手册.md 与 docs/指标参数基线.md（--check 模式无副作用）
+    无文件写入。--check 模式仅读取 docs/current 并输出核对结果。
 """
 
 from __future__ import annotations
@@ -54,9 +58,7 @@ from app.models.instrument import Instrument  # noqa: E402
 # 项目根目录（docs/ 所在位置）
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 _DOCS_DIR = os.path.join(_PROJECT_ROOT, "docs")
-_DB_SCHEMA_PATH = os.path.join(_DOCS_DIR, "数据结构.md")
-_OPS_MANUAL_PATH = os.path.join(_DOCS_DIR, "操作手册.md")
-_INDICATOR_CONTRACT_DOC_PATH = os.path.join(_DOCS_DIR, "指标参数基线.md")
+_DOCS_CURRENT_DIR = os.path.join(_DOCS_DIR, "current")
 
 # 6 张 bar 表，按周期粒度排序
 _BAR_MODELS = [BarDaily, BarMinute, BarWeekly, BarMonthly, Bar15Min, Bar60Min]
@@ -492,7 +494,7 @@ def generate_db_schema_doc() -> str:
     w("> - `primary_period` / `low_period`：主周期与低周期\n")
     w("> - `parameter_version`：参数版本标识\n")
     w(">\n")
-    w("> 期望值与参数说明详见 [指标参数基线.md](指标参数基线.md#profile_meta-诊断字段node-cluster)\n\n")
+    w("> 期望值与参数说明详见 docs/current/12-strategy-indicator-contracts.md 与 docs/current/13-configuration-parameters.md\n\n")
 
     # 6.3 指标响应字段（advice.md v5 口径）
     w("### 6.3 指标响应字段（indicator_service）\n\n")
@@ -514,7 +516,7 @@ def generate_db_schema_doc() -> str:
     w("| `anchor_time` | list[str\\|None] | 锚点时间（仅锚点 bar 非空，ISO datetime） |\n")
     w("| `pivot_type` | list[str\\|None] | pivot 类型（HH/HL/LH/LL） |\n")
     w("| `pivot_price` | list[float\\|None] | pivot 价格 |\n\n")
-    w("> 详细渲染规则见 [策略与指标口径.md](策略与指标口径.md#27-图表渲染契约dsa_polyline--visual_segments)\n\n")
+    w("> 详细渲染规则见 [12-strategy-indicator-contracts.md](current/12-strategy-indicator-contracts.md#4-行情和图表契约)\n\n")
 
     return buf.getvalue()
 
@@ -914,15 +916,8 @@ def generate_indicator_contract_doc() -> str:
 
 
 # ---------------------------------------------------------------------------
-# 主函数
+# docs/current 契约核对
 # ---------------------------------------------------------------------------
-
-
-def _write_file(path: str, content: str) -> None:
-    """写入文件（自动创建目录）。"""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
 
 
 def _read_file(path: str) -> str | None:
@@ -933,91 +928,166 @@ def _read_file(path: str) -> str | None:
         return f.read()
 
 
+def _check_docs_root_clean() -> list[str]:
+    """检查 docs 根目录不存在已废弃的生成文件，防止回归。
+
+    Returns:
+        list[str]: 发现的问题描述列表（空列表表示通过）
+    """
+    issues: list[str] = []
+    deprecated_files = ["数据结构.md", "操作手册.md", "指标参数基线.md"]
+    for name in deprecated_files:
+        path = os.path.join(_DOCS_DIR, name)
+        if os.path.exists(path):
+            issues.append(f"docs 根目录仍存在已废弃生成文件: {name}")
+    return issues
+
+
+def _check_current_contracts() -> list[str]:
+    """核对 docs/current 关键契约是否与代码事实源一致。
+
+    核对项：
+    - docs/current/12-strategy-indicator-contracts.md 存在并记录 Node Cluster 输入契约；
+    - docs/current/11-jobs-integrations.md 存在并记录飞书渠道；
+    - docs/current/18-code-doc-alignment.md 存在；
+    - indicator_contract.py 中 CHART_BARS_COUNT 与 INDICATOR_BARS['1d'] 自洽。
+
+    Returns:
+        list[str]: 发现的问题描述列表（空列表表示通过）
+    """
+    issues: list[str] = []
+
+    # 1. 关键 current 文档存在性
+    required_current_docs = [
+        "12-strategy-indicator-contracts.md",
+        "11-jobs-integrations.md",
+        "18-code-doc-alignment.md",
+        "13-configuration-parameters.md",
+    ]
+    for name in required_current_docs:
+        path = os.path.join(_DOCS_CURRENT_DIR, name)
+        if not os.path.exists(path):
+            issues.append(f"缺少关键当前设计文档: docs/current/{name}")
+
+    # 2. 策略与指标契约文档应包含 Node Cluster 输入契约
+    strategy_contract = _read_file(
+        os.path.join(_DOCS_CURRENT_DIR, "12-strategy-indicator-contracts.md")
+    )
+    if strategy_contract is not None:
+        if "Node Cluster" not in strategy_contract:
+            issues.append(
+                "docs/current/12-strategy-indicator-contracts.md 缺少 Node Cluster 输入契约"
+            )
+
+    # 3. 飞书集成文档应记录渠道方式
+    jobs_doc = _read_file(os.path.join(_DOCS_CURRENT_DIR, "11-jobs-integrations.md"))
+    if jobs_doc is not None and "飞书" not in jobs_doc:
+        issues.append("docs/current/11-jobs-integrations.md 缺少飞书渠道说明")
+
+    # 4. 核对 indicator_contract 关键参数自洽性
+    try:
+        from app.constants.indicator_contract import all_params
+
+        params = all_params()
+        indicator_bars = params.get("INDICATOR_BARS", {})
+        chart_bars_count = params.get("CHART_BARS_COUNT")
+        daily_bars = indicator_bars.get("1d")
+        # CHART_BARS_COUNT 应与 INDICATOR_BARS['1d'] 一致（同源行情输入根数）
+        if chart_bars_count is not None and daily_bars is not None:
+            if chart_bars_count != daily_bars:
+                issues.append(
+                    f"代码事实自洽性失败: CHART_BARS_COUNT={chart_bars_count} "
+                    f"与 INDICATOR_BARS['1d']={daily_bars} 不一致"
+                )
+    except Exception as exc:  # noqa: BLE001
+        issues.append(f"读取 indicator_contract 参数失败: {exc}")
+
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# 主函数
+# ---------------------------------------------------------------------------
+
+
+def _print_fact_report() -> None:
+    """从代码提取机器事实并打印检查报告到 stdout（不写文件）。"""
+    print("=" * 70)
+    print("机器事实检查报告（从代码事实源提取，不写入文件）")
+    print("=" * 70)
+
+    print("\n[1] 数据结构（ORM 模型 + 服务配置）")
+    db_schema = generate_db_schema_doc()
+    print(f"  报告长度: {len(db_schema)} 字符")
+    # 只打印表结构总览部分，避免输出过长
+    lines = db_schema.split("\n")
+    summary_end = 0
+    for i, line in enumerate(lines):
+        if line.startswith("## 2."):
+            summary_end = i
+            break
+    if summary_end > 0:
+        print("\n".join(lines[:summary_end]))
+
+    print("\n[2] 操作手册（API + 调度 + 监控 + 对账 + 保留策略）")
+    ops_manual = generate_ops_manual_doc()
+    print(f"  报告长度: {len(ops_manual)} 字符")
+
+    print("\n[3] 指标参数基线（indicator_contract.py 机器事实）")
+    indicator_contract = generate_indicator_contract_doc()
+    print(f"  报告长度: {len(indicator_contract)} 字符")
+    # 打印关键参数摘要
+    try:
+        from app.constants.indicator_contract import all_params
+
+        params = all_params()
+        print("\n  关键参数摘要:")
+        print(f"    NODE_CLUSTER_PRIMARY_BARS = {params.get('NODE_CLUSTER_PRIMARY_BARS')}")
+        print(f"    NODE_CLUSTER_LOW_BARS     = {params.get('NODE_CLUSTER_LOW_BARS')}")
+        print(f"    NODE_CLUSTER_MINUTE_BARS  = {params.get('NODE_CLUSTER_MINUTE_BARS')}")
+        print(f"    CHART_BARS_COUNT          = {params.get('CHART_BARS_COUNT')}")
+        print(f"    INDICATOR_BARS['1d']      = {params.get('INDICATOR_BARS', {}).get('1d')}")
+        print(f"    INDICATOR_BARS['15m']     = {params.get('INDICATOR_BARS', {}).get('15m')}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [WARN] 读取 indicator_contract 参数失败: {exc}")
+
+    print("\n" + "=" * 70)
+    print("报告说明: docs/current 是唯一当前设计事实源，本报告仅用于核对代码机器事实。")
+    print("使用 `python tools/update_docs.py --check` 核对 docs/current 关键契约。")
+    print("=" * 70)
+
+
 def main() -> int:
-    """主函数：生成或检查文档。"""
-    parser = argparse.ArgumentParser(description="从事实源生成数据结构文档与操作手册")
+    """主函数：打印机器事实报告或核对 docs/current 契约。"""
+    parser = argparse.ArgumentParser(
+        description="从代码事实源提取机器事实并核对 docs/current 契约（不生成 docs 根目录文件）"
+    )
     parser.add_argument(
         "--check",
         action="store_true",
-        help="一致性检查模式：比对现有文档与事实源生成的文档，不一致时返回非 0 退出码",
+        help="契约核对模式：核对 docs/current 关键契约，冲突返回非 0 退出码",
     )
     args = parser.parse_args()
 
-    print("从事实源提取元数据...")
-    db_schema = generate_db_schema_doc()
-    ops_manual = generate_ops_manual_doc()
-    indicator_contract = generate_indicator_contract_doc()
-    print(f"  数据结构.md: {len(db_schema)} 字符")
-    print(f"  操作手册.md: {len(ops_manual)} 字符")
-    print(f"  指标参数基线.md: {len(indicator_contract)} 字符")
-
     if args.check:
-        # 一致性检查模式（忽略生成时间戳行，因每次运行时间不同）
-        import re
+        print("核对 docs/current 关键契约...")
+        issues: list[str] = []
+        issues.extend(_check_docs_root_clean())
+        issues.extend(_check_current_contracts())
 
-        def _normalize_timestamp(text: str) -> str:
-            """将生成时间戳行替换为占位符，避免时间差异导致校验失败。"""
-            text = re.sub(
-                r"生成时间: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}",
-                "生成时间: <NORMALIZED>",
-                text,
-            )
-            text = re.sub(
-                r"最后更新：\d{4}-\d{2}-\d{2}",
-                "最后更新：<NORMALIZED>",
-                text,
-            )
-            return text
-
-        print("\n一致性检查模式 (--check)")
-        existing_db = _read_file(_DB_SCHEMA_PATH)
-        existing_ops = _read_file(_OPS_MANUAL_PATH)
-        existing_indicator = _read_file(_INDICATOR_CONTRACT_DOC_PATH)
-
-        mismatch = False
-
-        if existing_db is None:
-            print(f"  [FAIL] {_DB_SCHEMA_PATH} 不存在")
-            mismatch = True
-        elif _normalize_timestamp(existing_db) != _normalize_timestamp(db_schema):
-            print(f"  [FAIL] {_DB_SCHEMA_PATH} 内容不一致")
-            mismatch = True
-        else:
-            print(f"  [OK] {_DB_SCHEMA_PATH} 一致")
-
-        if existing_ops is None:
-            print(f"  [FAIL] {_OPS_MANUAL_PATH} 不存在")
-            mismatch = True
-        elif _normalize_timestamp(existing_ops) != _normalize_timestamp(ops_manual):
-            print(f"  [FAIL] {_OPS_MANUAL_PATH} 内容不一致")
-            mismatch = True
-        else:
-            print(f"  [OK] {_OPS_MANUAL_PATH} 一致")
-
-        if existing_indicator is None:
-            print(f"  [FAIL] {_INDICATOR_CONTRACT_DOC_PATH} 不存在")
-            mismatch = True
-        elif _normalize_timestamp(existing_indicator) != _normalize_timestamp(indicator_contract):
-            print(f"  [FAIL] {_INDICATOR_CONTRACT_DOC_PATH} 内容不一致")
-            mismatch = True
-        else:
-            print(f"  [OK] {_INDICATOR_CONTRACT_DOC_PATH} 一致")
-
-        if mismatch:
-            print("\n一致性检查失败：文档与事实源不一致，请运行 `python tools/update_docs.py` 重建")
+        if issues:
+            print("\n契约核对失败：")
+            for issue in issues:
+                print(f"  [FAIL] {issue}")
+            print("\n请修复上述冲突后再提交。")
             return 1
-        print("\n一致性检查通过 ✓")
+        print("\n契约核对通过 ✓")
+        print("  - docs 根目录无已废弃生成文件")
+        print("  - docs/current 关键文档存在且包含必要契约")
+        print("  - indicator_contract 关键参数自洽")
         return 0
 
-    # 生成模式
-    print("\n生成文档...")
-    _write_file(_DB_SCHEMA_PATH, db_schema)
-    print(f"  [OK] {_DB_SCHEMA_PATH}")
-    _write_file(_OPS_MANUAL_PATH, ops_manual)
-    print(f"  [OK] {_OPS_MANUAL_PATH}")
-    _write_file(_INDICATOR_CONTRACT_DOC_PATH, indicator_contract)
-    print(f"  [OK] {_INDICATOR_CONTRACT_DOC_PATH}")
-    print("\n文档生成完成 ✓")
+    _print_fact_report()
     return 0
 
 

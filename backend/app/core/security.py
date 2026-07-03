@@ -160,16 +160,27 @@ def create_capture_token(
     subject: str,
     event_id: str,
     expires_delta: timedelta | None = None,
+    *,
+    scope: str | None = None,
+    instrument_id: str | None = None,
+    user_id: str | None = None,
 ) -> str:
     """创建截图模式短期 JWT token。
 
-    仅用于 /stock/:symbol?capture=feishu&token=<token> 场景，
-    token 类型为 capture，不可用于常规 API 认证。
+    [Capture] - 描述: 仅用于 /api/v1/capture/stocks/{instrument_id}/snapshot 场景，
+    token 类型为 capture，不可用于常规 API 认证（advice.md 第六节 + Capture 专用链路）。
+
+    新增 scope/instrument_id/user_id 关键字参数（向后兼容，monitor_batch_service 等旧
+    调用方不传新参数时仍可工作）。stock_detail 链路必须传递 scope=stock_detail_capture
+    与 instrument_id，由 get_capture_token_payload 依赖校验。
 
     Args:
         subject: 用户标识（user_id 字符串）
-        event_id: 关联事件 ID
+        event_id: 关联事件 ID（stock_detail 链路传入 instrument_id 字符串）
         expires_delta: 过期时间增量，默认使用配置项 jwt_capture_ttl_seconds
+        scope: 作用域（如 "stock_detail_capture"），可选用于精细校验
+        instrument_id: 标的 ID 字符串，可选用于 path 与 token 一致性校验
+        user_id: 用户 ID 字符串，可选；未提供时使用 subject
 
     Returns:
         编码后的 JWT 字符串
@@ -183,6 +194,13 @@ def create_capture_token(
         "type": "capture",
         "event_id": event_id,
     }
+    # [Capture] - 描述: scope/instrument_id/user_id 为 stock_detail 专用链路字段
+    # 旧调用方（monitor_batch_service）不传，保持向后兼容；新链路必须传以通过校验
+    if scope is not None:
+        payload["scope"] = scope
+    if instrument_id is not None:
+        payload["instrument_id"] = instrument_id
+    payload["user_id"] = user_id if user_id is not None else subject
     return jwt.encode(payload, _settings.jwt_secret, algorithm=_settings.jwt_algorithm)
 
 
@@ -285,6 +303,30 @@ if __name__ == "__main__":
     rdecoded = decode_token(rtoken)
     assert rdecoded["type"] == "refresh"
     print(f"refresh_token type={rdecoded['type']}")
+
+    # 2b. capture token（向后兼容：不传新参数）
+    ctok_old = create_capture_token(subject="test-user", event_id="evt-1")
+    cdec_old = decode_token(ctok_old)
+    assert cdec_old["type"] == "capture"
+    assert cdec_old["event_id"] == "evt-1"
+    assert cdec_old["user_id"] == "test-user"  # 默认回退 subject
+    assert "scope" not in cdec_old  # 旧调用方不传 scope
+    assert "instrument_id" not in cdec_old
+    print(f"capture_token(legacy) type={cdec_old['type']} user_id={cdec_old['user_id']}")
+
+    # 2c. capture token（stock_detail 链路：传 scope/instrument_id/user_id）
+    ctok_new = create_capture_token(
+        subject="test-user",
+        event_id="inst-uuid-123",
+        scope="stock_detail_capture",
+        instrument_id="inst-uuid-123",
+        user_id="test-user",
+    )
+    cdec_new = decode_token(ctok_new)
+    assert cdec_new["scope"] == "stock_detail_capture"
+    assert cdec_new["instrument_id"] == "inst-uuid-123"
+    assert cdec_new["user_id"] == "test-user"
+    print(f"capture_token(stock_detail) scope={cdec_new['scope']} instrument_id={cdec_new['instrument_id']}")
 
     # 3. 密码哈希与验证
     hashed = get_password_hash("test-password-123")

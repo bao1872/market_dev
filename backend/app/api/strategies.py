@@ -10,7 +10,7 @@
 
 说明：
 - /strategies 为只读端点，所有用户可访问
-- /admin/strategies 为管理端点，需 admin 角色（当前占位，R2 阶段接入 RBAC）
+- /admin/strategies 为管理端点，需 admin 角色（require_roles("admin")）
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import get_db
+from app.core.deps import get_db, require_roles
 from app.schemas.strategy import (
     CreateStrategyRequest,
     StrategyListResponse,
@@ -129,6 +129,7 @@ async def get_strategy_version_schema(
 async def create_strategy_endpoint(
     request: CreateStrategyRequest,
     db: AsyncSession = Depends(get_db),
+    _user=Depends(require_roles("admin")),
 ) -> StrategyVersionResponse:
     """创建策略（admin）- 提交 Manifest 创建策略定义 + 草稿版本。"""
     try:
@@ -155,6 +156,7 @@ async def release_strategy_version_endpoint(
     strategy_key: str,
     version: str,
     db: AsyncSession = Depends(get_db),
+    _user=Depends(require_roles("admin")),
 ) -> StrategyVersionResponse:
     """发布策略版本（admin）- draft -> released，不可修改。
 
@@ -197,6 +199,7 @@ async def archive_strategy_version_endpoint(
     strategy_key: str,
     version: str,
     db: AsyncSession = Depends(get_db),
+    _user=Depends(require_roles("admin")),
 ) -> StrategyVersionResponse:
     """归档策略版本（admin）- released -> archived。"""
     try:

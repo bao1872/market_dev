@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.pytdx_adapter import PytdxAdapter
 from app.models.instrument import Instrument
+from app.services.instrument_maintenance_service import is_stock_symbol
 from app.services.pinyin_util import compute_pinyin_initials
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,7 @@ STOCK_CODE_PATTERN = r"^\d{6}$"
 
 
 def _filter_stock_codes(df: pd.DataFrame) -> pd.DataFrame:
-    """过滤非股票代码（指数、板块等），仅保留 6 位数字代码。
+    """基础过滤：仅保留 6 位数字代码（先排除名称型板块、可转债等非 6 位代码）。
 
     Args:
         df: 含 'code' 列的 DataFrame
@@ -64,11 +65,12 @@ def transform_instruments_df(raw_df: pd.DataFrame) -> pd.DataFrame:
     """将 pytdx 拉取的原始 DataFrame 转换为 instruments 表结构。
 
     转换步骤（向量化）：
-    1. 过滤非 6 位数字代码
-    2. 重命名列：code -> symbol
-    3. 去重（按 symbol）
-    4. 补充默认字段：status='active', listing_date=None
-    5. name NFKC 归一化 + 生成 pinyin_initials
+    1. 基础过滤：仅保留 6 位数字代码（排除名称型板块、可转债等）
+    2. A 股过滤：按 (symbol, market) 调用 is_stock_symbol，剔除指数/ETF/基金
+    3. 重命名列：code -> symbol
+    4. 去重（按 symbol；过滤后只剩 A 股，跨市场代码不重叠）
+    5. 补充默认字段：status='active', listing_date=None
+    6. name NFKC 归一化 + 生成 pinyin_initials
 
     Args:
         raw_df: pytdx 拉取的 DataFrame，列：code, name, market
@@ -81,13 +83,26 @@ def transform_instruments_df(raw_df: pd.DataFrame) -> pd.DataFrame:
             columns=["symbol", "name", "pinyin_initials", "market", "status", "listing_date"]
         )
 
-    # 过滤非股票代码
+    # [InstrumentSeed] - 描述: 基础过滤 6 位数字代码，再按权威规则剔除指数/ETF/基金
     df = _filter_stock_codes(raw_df)
 
     # 重命名列
     df = df.rename(columns={"code": "symbol"})
 
-    # 去重（按 symbol，保留第一条）
+    # A 股过滤：复用 instrument_maintenance_service.is_stock_symbol 作为唯一事实源
+    before_stock_filter = len(df)
+    stock_mask = df.apply(lambda row: is_stock_symbol(row["symbol"], row["market"]), axis=1)
+    df = df[stock_mask].copy()
+    after_stock_filter = len(df)
+    if before_stock_filter != after_stock_filter:
+        logger.info(
+            "A 股过滤：%d -> %d（删除 %d 条指数/ETF/基金）",
+            before_stock_filter,
+            after_stock_filter,
+            before_stock_filter - after_stock_filter,
+        )
+
+    # 去重（按 symbol；过滤后只剩 A 股，跨市场代码不重叠，保留第一条即可）
     before_dedup = len(df)
     df = df.drop_duplicates(subset=["symbol"], keep="first")
     after_dedup = len(df)

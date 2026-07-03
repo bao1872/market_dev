@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 文件名：
     smc_luxalgo_pytdx_plotly.py
@@ -62,7 +61,6 @@ import argparse
 import os
 import sys
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Tuple
 
 import numpy as np
 import pandas as pd
@@ -76,7 +74,6 @@ if __name__ == "__main__":
         sys.path.insert(0, _base_dir)
 
 from datasource.pytdx_client import connect_pytdx, get_kline_data, get_stock_name
-
 
 BULLISH_LEG = 1
 BEARISH_LEG = 0
@@ -137,8 +134,8 @@ class Pivot:
     currentLevel: float = np.nan
     lastLevel: float = np.nan
     crossed: bool = False
-    barTime: Optional[pd.Timestamp] = None
-    barIndex: Optional[int] = None
+    barTime: pd.Timestamp | None = None
+    barIndex: int | None = None
 
 
 @dataclass
@@ -150,10 +147,10 @@ class Trend:
 class TrailingExtremes:
     top: float = np.nan
     bottom: float = np.nan
-    barTime: Optional[pd.Timestamp] = None
-    barIndex: Optional[int] = None
-    lastTopTime: Optional[pd.Timestamp] = None
-    lastBottomTime: Optional[pd.Timestamp] = None
+    barTime: pd.Timestamp | None = None
+    barIndex: int | None = None
+    lastTopTime: pd.Timestamp | None = None
+    lastBottomTime: pd.Timestamp | None = None
 
 
 @dataclass
@@ -176,8 +173,8 @@ class FairValueGap:
 
 @dataclass
 class EqualDisplay:
-    line_key: Optional[str] = None
-    label_key: Optional[str] = None
+    line_key: str | None = None
+    label_key: str | None = None
 
 
 def normalize_freq(freq: str) -> str:
@@ -263,14 +260,14 @@ def time_to_str(ts: pd.Timestamp, is_intraday: bool) -> str:
 
 class DrawBuffer:
     def __init__(self):
-        self.lines: Dict[str, dict] = {}
-        self.labels: Dict[str, dict] = {}
-        self.boxes: Dict[str, dict] = {}
+        self.lines: dict[str, dict] = {}
+        self.labels: dict[str, dict] = {}
+        self.boxes: dict[str, dict] = {}
 
     def set_line(self, key: str, **kwargs):
         self.lines[key] = kwargs
 
-    def delete_line(self, key: Optional[str]):
+    def delete_line(self, key: str | None):
         if key and key in self.lines:
             del self.lines[key]
 
@@ -281,7 +278,7 @@ class DrawBuffer:
     def set_label(self, key: str, **kwargs):
         self.labels[key] = kwargs
 
-    def delete_label(self, key: Optional[str]):
+    def delete_label(self, key: str | None):
         if key and key in self.labels:
             del self.labels[key]
 
@@ -375,18 +372,18 @@ class SMCIndicatorPineCloser:
         self.trailing = TrailingExtremes()
         self.currentAlerts = Alerts()
 
-        self.swingOrderBlocks: List[OrderBlock] = []
-        self.internalOrderBlocks: List[OrderBlock] = []
-        self.fairValueGaps: List[FairValueGap] = []
+        self.swingOrderBlocks: list[OrderBlock] = []
+        self.internalOrderBlocks: list[OrderBlock] = []
+        self.fairValueGaps: list[FairValueGap] = []
 
-        self.swing_bullish_choch_times: List[pd.Timestamp] = []
-        self.internal_bullish_choch_times: List[pd.Timestamp] = []
-        self.swing_bullish_bos_times: List[pd.Timestamp] = []
-        self.internal_bullish_bos_times: List[pd.Timestamp] = []
-        self.swing_bearish_choch_times: List[pd.Timestamp] = []
-        self.internal_bearish_choch_times: List[pd.Timestamp] = []
+        self.swing_bullish_choch_times: list[pd.Timestamp] = []
+        self.internal_bullish_choch_times: list[pd.Timestamp] = []
+        self.swing_bullish_bos_times: list[pd.Timestamp] = []
+        self.internal_bullish_bos_times: list[pd.Timestamp] = []
+        self.swing_bearish_choch_times: list[pd.Timestamp] = []
+        self.internal_bearish_choch_times: list[pd.Timestamp] = []
 
-        self.factor_rows: List[Dict[str, object]] = []
+        self.factor_rows: list[dict[str, object]] = []
 
         self.times = list(self.df.index)
         self.highs = self.df["high"].tolist()
@@ -410,7 +407,7 @@ class SMCIndicatorPineCloser:
         self.all_x_list = self.base_x_list + self.pad_x_list
 
         self.buffer = DrawBuffer()
-        self.leg_states: Dict[Tuple[str, int], Dict[int, int]] = {}
+        self.leg_states: dict[tuple[str, int], dict[int, int]] = {}
 
         self.swingBullishColor = MONO_BULLISH if args.style == MONOCHROME else args.swing_bull_color
         self.swingBearishColor = MONO_BEARISH if args.style == MONOCHROME else args.swing_bear_color
@@ -863,7 +860,7 @@ class SMCIndicatorPineCloser:
     def draw_order_blocks(self):
         right_x = self._right_x(5)
 
-        def _draw(arr: List[OrderBlock], internal: bool):
+        def _draw(arr: list[OrderBlock], internal: bool):
             max_count = self.args.internal_ob_size if internal else self.args.swing_ob_size
             use = arr[:max_count]
 
@@ -910,7 +907,7 @@ class SMCIndicatorPineCloser:
             self.trailing.bottom = row["low"]
             self.trailing.lastBottomTime = self.times[i]
 
-    def _last_event_bars_since(self, ts_list: List[pd.Timestamp], current_i: int) -> int:
+    def _last_event_bars_since(self, ts_list: list[pd.Timestamp], current_i: int) -> int:
         if not ts_list:
             return 9999
         last_ts = ts_list[-1]
@@ -927,14 +924,14 @@ class SMCIndicatorPineCloser:
             return "HH" if current.currentLevel > current.lastLevel else "LH"
         return "HL" if current.currentLevel > current.lastLevel else "LL"
 
-    def _nearest_ob(self, internal: bool, bias: int) -> Optional[OrderBlock]:
+    def _nearest_ob(self, internal: bool, bias: int) -> OrderBlock | None:
         obs = self.internalOrderBlocks if internal else self.swingOrderBlocks
         for ob in obs:
             if ob.bias == bias:
                 return ob
         return None
 
-    def _ob_metrics(self, ob: Optional[OrderBlock], close: float, atr_val: float) -> Dict[str, float]:
+    def _ob_metrics(self, ob: OrderBlock | None, close: float, atr_val: float) -> dict[str, float]:
         if ob is None or pd.isna(atr_val) or atr_val <= 0:
             return {
                 "top": np.nan,
@@ -965,7 +962,7 @@ class SMCIndicatorPineCloser:
             "reclaim_mid": int(not pd.isna(prev_close) and prev_close < mid <= close),
         }
 
-    def build_factor_row(self, i: int) -> Dict[str, object]:
+    def build_factor_row(self, i: int) -> dict[str, object]:
         self._factor_build_i = i
         row = self.df.iloc[i]
         close = float(row["close"])
@@ -1248,7 +1245,7 @@ class SMCIndicatorPineCloser:
             else pd.Series(0.0, index=fvg_df.index)
         )
 
-        new_gaps: List[FairValueGap] = []
+        new_gaps: list[FairValueGap] = []
         for i in range(2, len(fvg_df)):
             last_close = fvg_df["close"].iloc[i - 1]
             current_high = fvg_df["high"].iloc[i]
@@ -1287,7 +1284,7 @@ class SMCIndicatorPineCloser:
                     ),
                 )
 
-        kept: List[FairValueGap] = []
+        kept: list[FairValueGap] = []
         for gap in new_gaps:
             sub = self.df[self.df.index >= gap.right_time]
             invalid = (sub["low"] < gap.bottom).any() if gap.bias == BULLISH else (sub["high"] > gap.top).any()
@@ -1409,7 +1406,7 @@ class SMCIndicatorPineCloser:
         return any(t > start_time for t in self.swing_bullish_choch_times) or \
                any(t > start_time for t in self.internal_bullish_choch_times)
 
-    def get_bullish_choch_times(self, internal: bool = False) -> List[pd.Timestamp]:
+    def get_bullish_choch_times(self, internal: bool = False) -> list[pd.Timestamp]:
         """返回所有 bullish CHoCH 发生的时间点"""
         if internal:
             return self.internal_bullish_choch_times

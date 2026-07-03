@@ -22,7 +22,7 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -31,21 +31,25 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants import indicator_contract as IC
+from app.constants import indicator_contract
 from app.constants.strategy_keys import WATCHLIST_MONITOR
 from app.constants.user_facing_labels import get_event_label, get_field_label
+from app.models.capture_job import (
+    CAPTURE_STATUS_FAILED,
+    CAPTURE_STATUS_SUCCEEDED,
+    CaptureJob,
+)
 from app.models.instrument import Instrument
 from app.models.monitor_evaluation import MonitorEvaluation
 from app.models.monitor_state import MonitorState as MonitorStateORM
-from app.models.capture_job import CaptureJob, CAPTURE_STATUS_FAILED, CAPTURE_STATUS_SUCCEEDED, CAPTURE_MAX_ATTEMPTS
+from app.models.stock_memo import StockMemo
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.strategy_event import StrategyEvent
-from app.models.stock_memo import StockMemo
 from app.models.watchlist import UserWatchlistItem
 from app.repositories import monitor_state_repository, strategy_event_repository
-from app.repositories.bar_repository import get_bars, get_recent_bars
 from app.schemas.notification import NotificationMessageDTO
 from app.services.instrument_maintenance_service import is_index_symbol
+from app.services.market_data_aggregation_service import MarketDataAggregationService
 from app.services.notification_service import create_message
 from app.services.outbox_relay import write_outbox
 from app.strategy.monitors.watchlist_monitor import WatchlistMonitor
@@ -62,10 +66,10 @@ _MAX_RETRIES = 5  # 最大重试次数
 _RETRY_BACKOFF_BASE_SECONDS = 30  # 重试退避基数（秒），实际退避 = 30 * 2^retry_count
 
 # [Node Cluster] - 描述: 取数根数从 indicator_contract 唯一真源读取，通过
-# bar_repository.get_recent_bars 按 LIMIT N 取最近 N 根（不再用自然日估算）
-_DAILY_LOOKBACK_BARS = IC.NODE_CLUSTER_PRIMARY_BARS  # 250
-_15MIN_LOOKBACK_BARS = IC.NODE_CLUSTER_LOW_BARS  # 3600
-_MINUTE_LOOKBACK_BARS = IC.NODE_CLUSTER_MINUTE_BARS  # 2
+# MarketDataAggregationService.get_bars 取行情后再 tail(N) 保留最近 N 根
+_DAILY_LOOKBACK_BARS = indicator_contract.NODE_CLUSTER_PRIMARY_BARS  # 250
+_15MIN_LOOKBACK_BARS = indicator_contract.NODE_CLUSTER_LOW_BARS  # 4000 = 250 * 16
+_MINUTE_LOOKBACK_BARS = indicator_contract.NODE_CLUSTER_MINUTE_BARS  # 2
 
 # 北京时间
 _CST = ZoneInfo("Asia/Shanghai")
@@ -253,6 +257,8 @@ class MonitorBatchService:
         过滤条件：
         1. 仅取 active=True 的自选记录（排除已软删除的）
         2. 排除指数类标的（symbol 以 '000' 开头且 market=SH，或以 '399' 开头且 market=SZ）
+        3. [eligible_user_service] 仅保留有资格用户（active member + 有效 subscription），
+           disabled/expired/admin 用户的自选股不进入监控 universe
 
         Returns:
             (instrument_ids, instrument_user_map, instrument_extra_info) 三元组:
@@ -260,6 +266,8 @@ class MonitorBatchService:
             - instrument_user_map: {instrument_id: [user_id, ...], ...} 标的与用户映射（通知用）
             - instrument_extra_info: {instrument_id: {priority, weighted_score, ...}, ...} 附加信息
         """
+        from app.services.eligible_user_service import filter_eligible_recipients
+
         stmt = (
             select(
                 UserWatchlistItem.instrument_id,
@@ -269,6 +277,16 @@ class MonitorBatchService:
         )
         result = await db.execute(stmt)
         rows = result.all()
+
+        # [eligible_user_service] - 批量过滤有资格用户（disabled/expired/admin 不进入 universe）
+        # 仅保留 eligible 用户的自选股，避免为失效用户监控标的与发送通知
+        all_user_ids = list({row[1] for row in rows})
+        if all_user_ids:
+            eligible_user_ids = set(await filter_eligible_recipients(db, all_user_ids))
+            rows = [
+                (inst_id, uid) for inst_id, uid in rows
+                if uid in eligible_user_ids
+            ]
 
         # 收集所有 instrument_id，批量查询排除指数
         instrument_ids_set = {row[0] for row in rows}
@@ -305,6 +323,38 @@ class MonitorBatchService:
 
         return instrument_ids, instrument_user_map, instrument_extra_info
 
+    async def _fetch_md_bars(
+        self,
+        db: AsyncSession,
+        instrument_id: uuid.UUID,
+        timeframe: str,
+        *,
+        adj: str = "qfq",
+        limit: int | None = None,
+        include_realtime: bool = True,
+        start_date: date | datetime | None = None,
+        end_date: date | datetime | None = None,
+    ) -> pd.DataFrame:
+        """通过 MarketDataAggregationService 统一获取行情。
+
+        [monitor_batch] - 描述: monitor 链路统一走行情聚合服务，获取缓存、尾部补齐、
+        数据源和新鲜度诊断；返回 df 按原语义升序排列。若传入 limit，则取最后 N 根，
+        保持 Node Cluster 输入根数不变。
+        """
+        result = await MarketDataAggregationService().get_bars(
+            session=db,
+            instrument_id=instrument_id,
+            timeframe=timeframe,
+            adj=adj,
+            include_realtime=include_realtime,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        df = result.bars
+        if limit is not None and not df.empty:
+            df = df.tail(limit)
+        return df
+
     async def _process_instrument_evaluation(
         self,
         db: AsyncSession,
@@ -340,16 +390,17 @@ class MonitorBatchService:
         now = datetime.now(UTC)
         today = now.date()
         try:
-            bars_minute_result = await get_bars(
+            bars_minute = await self._fetch_md_bars(
                 db, instrument_id,
                 timeframe="1m",
+                adj="qfq",
+                include_realtime=False,
                 start_date=today,
                 end_date=today,
-                adjustment="qfq",
-                skip_upsert=True,
-                completed_only=True,
             )
-            bars_minute = bars_minute_result.bars
+            # [monitor_batch] - 描述: 仅处理已完成 1m bar，剔除最后一根可能未完成的 bar
+            if not bars_minute.empty and len(bars_minute) > 1:
+                bars_minute = bars_minute.iloc[:-1]
         except Exception as exc:
             logger.warning("1m行情拉取失败 %s: %s", symbol, exc)
             return []
@@ -503,22 +554,25 @@ class MonitorBatchService:
             return []
 
         # c. 拉取行情
-        # [Node Cluster] - 描述: 按 LIMIT N 取最近 N 根，根数从 indicator_contract 唯一真源读取
-        # （IC.NODE_CLUSTER_PRIMARY_BARS=250 / IC.NODE_CLUSTER_LOW_BARS=3600）
-        bars_daily = await get_recent_bars(
+        # [Node Cluster] - 描述: 统一走 MarketDataAggregationService，再 tail(N) 保留最近 N 根
+        # （indicator_contract.NODE_CLUSTER_PRIMARY_BARS=250 /
+        #  indicator_contract.NODE_CLUSTER_LOW_BARS=4000）
+        bars_daily = await self._fetch_md_bars(
             db, instrument_id,
-            period="1d",
+            timeframe="1d",
+            adj="qfq",
             limit=_DAILY_LOOKBACK_BARS,
-            adjustment="qfq",
+            include_realtime=False,
         )
 
         bars_15min = pd.DataFrame()
         try:
-            bars_15min = await get_recent_bars(
+            bars_15min = await self._fetch_md_bars(
                 db, instrument_id,
-                period="15m",
+                timeframe="15m",
+                adj="qfq",
                 limit=_15MIN_LOOKBACK_BARS,
-                adjustment="qfq",
+                include_realtime=False,
             )
         except Exception as exc:
             logger.warning("15min行情拉取失败 %s: %s", symbol, exc)
@@ -1569,12 +1623,13 @@ class MonitorBatchService:
         )
 
         # 获取日线行情
-        # [Node Cluster] - 描述: 按 LIMIT N 取最近 N 根，根数从 indicator_contract 唯一真源读取
-        bars_daily = await get_recent_bars(
+        # [Node Cluster] - 描述: 统一走 MarketDataAggregationService，再 tail(N) 保留最近 N 根
+        bars_daily = await self._fetch_md_bars(
             db, instrument_id,
-            period="1d",
+            timeframe="1d",
+            adj="qfq",
             limit=_DAILY_LOOKBACK_BARS,
-            adjustment="qfq",
+            include_realtime=False,
         )
         if bars_daily.empty or len(bars_daily) < 20:
             logger.debug("日线行情不足，跳过 PNG 渲染: symbol=%s bars=%d", symbol, len(bars_daily))
@@ -1647,11 +1702,13 @@ class MonitorBatchService:
         ensure_plotly_mock()
 
         # 获取 15min 行情（低周期成交量分配来源）
-        # [Node Cluster] - 描述: 按 LIMIT N 取最近 N 根，根数从 indicator_contract 唯一真源读取
-        bars_15min = await get_recent_bars(
+        # [Node Cluster] - 描述: 统一走 MarketDataAggregationService，再 tail(N) 保留最近 N 根
+        bars_15min = await self._fetch_md_bars(
             db, instrument_id,
-            period="15m",
+            timeframe="15m",
+            adj="none",
             limit=_15MIN_LOOKBACK_BARS,
+            include_realtime=False,
         )
         if bars_15min.empty:
             return None
@@ -1712,6 +1769,7 @@ if __name__ == "__main__":
     assert callable(service.execute_monitor_cycle)
     assert hasattr(service, "_get_watchlist_monitor_version")
     assert hasattr(service, "_process_instrument_evaluation")
+    assert hasattr(service, "_fetch_md_bars")
     assert hasattr(service, "_mark_evaluation_failed")
     assert hasattr(service, "update_heartbeat")
     assert hasattr(service, "recover_stale_evaluations")

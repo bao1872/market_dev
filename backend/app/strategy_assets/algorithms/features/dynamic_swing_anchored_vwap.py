@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Dynamic Swing Anchored VWAP (Zeiierman) -> Python (Plotly)
 
@@ -45,8 +44,7 @@ base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if base_dir not in sys.path:
     sys.path.insert(0, base_dir)
 
-from datasource.pytdx_client import connect_pytdx, PERIOD_MAP
-
+from datasource.pytdx_client import connect_pytdx
 
 # =========================
 # Data source (pytdx)
@@ -113,7 +111,7 @@ def fetch_kline_pytdx(symbol: str, start: str, end: str, freq, api=None) -> pd.D
         should_close = True
     else:
         should_close = False
-    
+
     try:
         cat = _category_from_freq(freq)
         mkt = 1 if symbol.startswith("6") else 0
@@ -691,7 +689,6 @@ def main() -> None:
     ap.add_argument("--volBias", type=float, default=10.0, help="Volatility Bias (Pine default=10.0)")
 
     args = ap.parse_args()
-    from datetime import datetime, timedelta
 
     end = datetime.now().date()
         # Parse freq

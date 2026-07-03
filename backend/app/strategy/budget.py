@@ -3,10 +3,11 @@
 提供：
 - BudgetExceededError: 预算超限异常
 - BudgetGuard: 资源预算守卫，封装超时/内存控制逻辑
-- 预算常量: SELECTOR_BUDGET_MS / MONITOR_BUDGET_MS
+- 预算常量: MONITOR_BUDGET_MS
 
 设计说明：
-- DSA selector 默认预算: 100ms/股（来自 dsa_selector.yaml resource_budget.target_ms_per_instrument）
+- DSA selector 已取消单股 100ms 硬超时，改为 strategy_batch_service 的
+  run 级总超时 + 可取消机制，因此不再定义 SELECTOR_BUDGET_MS。
 - Volume Node monitor 默认预算: 500ms/股（来自 watchlist_monitor.yaml resource_budget.target_ms_per_instrument）
 - 超时通过 asyncio.wait_for + asyncio.to_thread 实现（同步计算通过 to_thread 桥接）
 - 内存限制通过 tracemalloc 监控（可选，默认不启用以减少开销）
@@ -28,7 +29,6 @@ logger = logging.getLogger("strategy.budget")
 T = TypeVar("T")
 
 # 预算常量（对照各策略 manifest 的 resource_budget.target_ms_per_instrument）
-SELECTOR_BUDGET_MS = 100  # DSA selector: 100ms/股
 MONITOR_BUDGET_MS = 500  # Volume Node monitor: 500ms/股（1m bar 频率）
 
 

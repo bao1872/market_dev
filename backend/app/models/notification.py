@@ -7,7 +7,7 @@
 - message_deliveries: 投递记录（DDL 表名：message_deliveries）
 
 设计要点：
-- 渠道配置 target_config 为 JSONB，敏感字段（app_secret/sign_secret）在 API 读取时脱敏。
+- 渠道配置 target_config 为 JSONB，敏感字段（app_secret）在 API 读取时脱敏。
 - 模板版本化：template_key + version + locale 唯一，active 状态不可修改。
 - 消息幂等：idempotency_key 唯一，防止重复创建。
 - 投递幂等：message_deliveries.idempotency_key 唯一，至少一次投递。
@@ -28,9 +28,9 @@ from app.models.base import Base
 
 
 class NotificationChannel(Base):
-    """通知渠道 - 用户配置的飞书/webhook/email 等投递渠道。
+    """通知渠道 - 用户配置的飞书平台应用/email 等投递渠道。
 
-    target_config JSONB 存储渠道配置，敏感字段（app_secret/sign_secret）在 API 读取时脱敏。
+    target_config JSONB 存储渠道配置，敏感字段（app_secret）在 API 读取时脱敏。
     """
 
     __tablename__ = "notification_channels"
@@ -42,7 +42,7 @@ class NotificationChannel(Base):
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
     )
     adapter_type: Mapped[str] = mapped_column(
-        Text(), nullable=False, comment="feishu_webhook/feishu_platform_app/email"
+        Text(), nullable=False, comment="feishu_platform_app/email/mock"
     )
     display_name: Mapped[str] = mapped_column(
         Text(), nullable=False, comment="渠道展示名称"
@@ -67,7 +67,7 @@ class NotificationChannel(Base):
     )
 
     # [通知投递] - 关联投递记录
-    deliveries: Mapped[list["MessageDelivery"]] = relationship(
+    deliveries: Mapped[list[MessageDelivery]] = relationship(
         "MessageDelivery",
         back_populates="channel",
         lazy="selectin",
@@ -176,7 +176,7 @@ class NotificationMessage(Base):
     )
 
     # [通知投递] - 关联投递记录，列表接口 LEFT JOIN 返回真实投递状态
-    deliveries: Mapped[list["MessageDelivery"]] = relationship(
+    deliveries: Mapped[list[MessageDelivery]] = relationship(
         "MessageDelivery",
         back_populates="message",
         lazy="selectin",
@@ -244,6 +244,19 @@ class MessageDelivery(Base):
     image_url: Mapped[str | None] = mapped_column(
         Text(), nullable=True, comment="图片投递时截图 URL（本地静态地址）"
     )
+    # [MessageDelivery] - 图片上传阶段状态（与最终投递状态分离）
+    image_upload_status: Mapped[str | None] = mapped_column(
+        Text(), nullable=True, comment="图片上传状态 pending/success/failed（仅 delivery_type=image）"
+    )
+    image_upload_error_code: Mapped[str | None] = mapped_column(
+        Text(), nullable=True, comment="图片上传错误码"
+    )
+    image_upload_provider_response: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(astext_type=Text()), nullable=True, comment="图片上传渠道返回"
+    )
+    image_key: Mapped[str | None] = mapped_column(
+        Text(), nullable=True, comment="飞书图片 image_key"
+    )
     message_group_id: Mapped[str | None] = mapped_column(
         Text(),
         nullable=True,
@@ -258,10 +271,10 @@ class MessageDelivery(Base):
     )
 
     # [通知投递] - 关联消息与渠道，支持列表接口一次性加载
-    message: Mapped["NotificationMessage"] = relationship(
+    message: Mapped[NotificationMessage] = relationship(
         "NotificationMessage", back_populates="deliveries"
     )
-    channel: Mapped["NotificationChannel"] = relationship(
+    channel: Mapped[NotificationChannel] = relationship(
         "NotificationChannel", back_populates="deliveries"
     )
 

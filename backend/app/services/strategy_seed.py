@@ -28,7 +28,6 @@ from app.constants.strategy_keys import DSA_SELECTOR, WATCHLIST_MONITOR
 from app.services.manifest_validator import validate_manifest
 from app.services.strategy_service import (
     create_strategy,
-    list_strategies,
     release_strategy_version,
 )
 

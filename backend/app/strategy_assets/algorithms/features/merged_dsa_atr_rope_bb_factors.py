@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 合并版：Dynamic Swing Anchored VWAP + ATR Rope + Bollinger 因子研究脚本（独立可运行）
 
@@ -26,10 +25,7 @@ from __future__ import annotations
 
 import argparse
 import math
-import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -100,7 +96,7 @@ def _market_from_symbol(symbol: str) -> int:
 
 
 def connect_pytdx() -> TdxHq_API:
-    errors: List[str] = []
+    errors: list[str] = []
     for host, port in SERVERS:
         try:
             api = TdxHq_API(raise_exception=True, auto_retry=True)
@@ -117,7 +113,7 @@ def fetch_kline_pytdx(symbol: str, freq: str, count: int) -> pd.DataFrame:
         cat = _category_from_freq(freq)
         mkt = _market_from_symbol(symbol)
         size = 800
-        frames: List[pd.DataFrame] = []
+        frames: list[pd.DataFrame] = []
         start = 0
         target = max(int(count), 300)
         while start < target + size:
@@ -228,7 +224,7 @@ def alpha_from_apt(apt: float) -> float:
     return float(1.0 - decay)
 
 
-def compute_dsa(df: pd.DataFrame, cfg: DSAConfig) -> Tuple[pd.DataFrame, List[Dict], List[Dict]]:
+def compute_dsa(df: pd.DataFrame, cfg: DSAConfig) -> tuple[pd.DataFrame, list[dict], list[dict]]:
     d = df.copy()
     d["hlc3"] = hlc3(d)
     atr = atr_pine(d, cfg.atr_len)
@@ -256,7 +252,7 @@ def compute_dsa(df: pd.DataFrame, cfg: DSAConfig) -> Tuple[pd.DataFrame, List[Di
     pl_prev_store = np.nan
     p = h3[0] * vol[0]
     v = vol[0]
-    last_dir: Optional[int] = None
+    last_dir: int | None = None
 
     vwap_out = np.full(n, np.nan)
     dir_out = np.full(n, np.nan)
@@ -270,17 +266,17 @@ def compute_dsa(df: pd.DataFrame, cfg: DSAConfig) -> Tuple[pd.DataFrame, List[Di
     lh_hh_low_pos = np.full(n, np.nan)
     last_pivot_type = np.array([""] * n, dtype=object)
 
-    segments: List[Dict] = []
-    cur_points_x: List[pd.Timestamp] = []
-    cur_points_y: List[float] = []
-    pivot_labels: List[Dict] = []
+    segments: list[dict] = []
+    cur_points_x: list[pd.Timestamp] = []
+    cur_points_y: list[float] = []
+    pivot_labels: list[dict] = []
 
-    last_lh_hh_idx: Optional[int] = None
+    last_lh_hh_idx: int | None = None
     last_lh_hh_price = np.nan
     recent_pivot_high_price = np.nan
     recent_pivot_low_price = np.nan
-    recent_pivot_high_idx: Optional[int] = None
-    recent_pivot_low_idx: Optional[int] = None
+    recent_pivot_high_idx: int | None = None
+    recent_pivot_low_idx: int | None = None
     latest_label_type = ""
 
     for t in range(n):
@@ -391,13 +387,13 @@ def compute_dsa(df: pd.DataFrame, cfg: DSAConfig) -> Tuple[pd.DataFrame, List[Di
     # 2) 再按连续方向段回看确认该段的最终极值；
     # 3) 将结果回填到原来的 pivot_labels / last_pivot_type，
     #    保持 HTML 输出层完全不改。
-    hindsight_labels: List[Dict] = []
+    hindsight_labels: list[dict] = []
     hindsight_last_pivot_type = np.array([""] * n, dtype=object)
     prev_confirmed_up_bars_arr = np.full(n, np.nan)
     prev_confirmed_down_bars_arr = np.full(n, np.nan)
     last_confirmed_run_bars_arr = np.full(n, np.nan)
     current_run_bars_arr = np.full(n, np.nan)
-    runs: List[Tuple[int, int, int]] = []
+    runs: list[tuple[int, int, int]] = []
     if n > 0:
         run_start = 0
         for i in range(1, n):
@@ -480,8 +476,8 @@ def compute_dsa(df: pd.DataFrame, cfg: DSAConfig) -> Tuple[pd.DataFrame, List[Di
     hindsight_pos_arr = np.full(n, np.nan)
 
     # 从 hindsight_labels 中提取已确认的高点和低点
-    confirmed_highs: List[Tuple[int, float]] = []  # (index, price)
-    confirmed_lows: List[Tuple[int, float]] = []   # (index, price)
+    confirmed_highs: list[tuple[int, float]] = []  # (index, price)
+    confirmed_lows: list[tuple[int, float]] = []   # (index, price)
 
     for label in hindsight_labels:
         if label["text"] in {"HH", "LH"}:
@@ -552,9 +548,9 @@ def pine_cross(curr_a: float, curr_b: float, prev_a: float, prev_b: float) -> bo
     return bool((curr_rel > 0 and prev_rel <= 0) or (curr_rel < 0 and prev_rel >= 0))
 
 
-def segment_runs(mask: np.ndarray) -> List[Tuple[int, int]]:
-    runs: List[Tuple[int, int]] = []
-    start: Optional[int] = None
+def segment_runs(mask: np.ndarray) -> list[tuple[int, int]]:
+    runs: list[tuple[int, int]] = []
+    start: int | None = None
     for i, m in enumerate(mask):
         if m and start is None:
             start = i
@@ -606,7 +602,7 @@ def compute_atr_rope(df: pd.DataFrame, cfg: RopeConfig) -> pd.DataFrame:
 
     rope = math.nan
     dir_val = 0
-    last_dir_change_idx: Optional[int] = None
+    last_dir_change_idx: int | None = None
     segment_start_idx = 0
     c_hi = math.nan
     c_lo = math.nan
@@ -667,7 +663,7 @@ def compute_atr_rope(df: pd.DataFrame, cfg: RopeConfig) -> pd.DataFrame:
                 c_count += 1
                 c_hi = h_sum / c_count
                 c_lo = l_sum / c_count
-        
+
         if dir_val == 1:
             highest_since_pivot = np.nanmax([highest_since_pivot, high[i]]) if np.isfinite(highest_since_pivot) else high[i]
         elif dir_val == -1:
@@ -823,7 +819,7 @@ def add_range_segments(fig: go.Figure, x_num: np.ndarray, df: pd.DataFrame, hi_c
         first = False
 
 
-def build_figure(df: pd.DataFrame, dsa_segments: List[Dict], dsa_labels: List[Dict], out_html: str, title: str) -> None:
+def build_figure(df: pd.DataFrame, dsa_segments: list[dict], dsa_labels: list[dict], out_html: str, title: str) -> None:
     x_num = np.arange(len(df), dtype=float)
     tick_text = [ts.strftime("%Y-%m-%d %H:%M") if (len(df.index) > 1 and (df.index[1] - df.index[0]) < pd.Timedelta("20H")) else ts.strftime("%Y-%m-%d") for ts in df.index]
 

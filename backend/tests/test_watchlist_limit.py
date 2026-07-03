@@ -29,10 +29,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import create_access_token, get_password_hash
 from app.main import app
 from app.models.instrument import Instrument
-from app.models.membership import Membership
+from app.models.subscription import Subscription
 from app.models.user import Role, User, UserRole
 from app.models.watchlist import UserWatchlistItem
-from app.services.membership_service import generate_invite_codes, register_with_invite_code
+from app.services.subscription_service import generate_invite_codes, register_with_invite_code
 
 
 async def _ensure_role(db: AsyncSession, name: str) -> Role:
@@ -66,8 +66,8 @@ async def _create_admin(db: AsyncSession) -> User:
 
 async def _create_user_with_plan(
     db: AsyncSession, plan_code: str, grant_months: int = 1
-) -> tuple[User, Membership]:
-    """通过邀请码注册创建普通用户 + 会员记录。"""
+) -> tuple[User, Subscription]:
+    """通过邀请码注册创建普通用户 + 订阅记录。"""
     admin = await _create_admin(db)
     results = await generate_invite_codes(
         db=db, count=1, created_by=admin.id,
@@ -75,12 +75,12 @@ async def _create_user_with_plan(
     )
     await db.flush()
     email = f"user_{uuid.uuid4().hex[:8]}@test.com"
-    user, membership = await register_with_invite_code(
+    user, subscription = await register_with_invite_code(
         db=db, email=email, password="password-12345",
         raw_invite_code=results[0][1],
     )
     await db.flush()
-    return user, membership
+    return user, subscription
 
 
 async def _create_instruments(db: AsyncSession, count: int) -> list[Instrument]:
@@ -228,14 +228,14 @@ async def test_watchlist_downgrade_does_not_delete(watchlist_client):
     """
     client, db = watchlist_client
     # 1. research_50 用户添加 30 只自选股
-    user, membership = await _create_user_with_plan(db, "research_50")
+    user, subscription = await _create_user_with_plan(db, "research_50")
     instruments = await _create_instruments(db, 31)
     await _add_active_watchlist(db, user, instruments, count=30)
     await db.flush()
 
-    # 2. 续期降级到 observe_20（直接修改 membership 字段模拟降级）
-    membership.plan_code = "observe_20"
-    membership.monitor_limit = 20
+    # 2. 续期降级到 observe_20（直接修改 subscription 字段模拟降级）
+    subscription.plan_code = "observe_20"
+    subscription.entitlement_snapshot = {"monitor_limit": 20}
     await db.flush()
 
     # 3. 验证 30 只自选股仍保留
@@ -328,7 +328,7 @@ async def test_watchlist_no_membership_user_blocked(watchlist_client):
         updated_at=datetime.now(UTC),
     )
     db.add(user)
-    user_role = await _ensure_role(db, "user")
+    user_role = await _ensure_role(db, "member")
     db.add(UserRole(user_id=user.id, role_id=user_role.id))
     instruments = await _create_instruments(db, 1)
     await db.flush()

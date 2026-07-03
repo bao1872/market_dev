@@ -11,11 +11,11 @@
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
-UTC_TZ = timezone.utc
+UTC_TZ = UTC
 
 
 def now_utc() -> datetime:

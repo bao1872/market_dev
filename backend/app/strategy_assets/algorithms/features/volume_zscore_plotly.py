@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Volume Z-Score (成交量 ZScore) -> Plotly HTML (TradingView 风格：柱状 + 分段着色 + 🐋)
 
@@ -21,8 +20,8 @@ Notes on exact match vs TradingView:
 from __future__ import annotations
 
 import argparse
-import sys
 import os
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -35,7 +34,7 @@ from plotly.subplots import make_subplots
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # 依赖你本地工程里的 pytdx 封装（保持与你原脚本一致）
-from datasource.pytdx_client import connect_pytdx, PERIOD_MAP
+from datasource.pytdx_client import PERIOD_MAP, connect_pytdx
 
 
 def fetch_daily_pytdx(symbol: str, start: str, end: str) -> pd.DataFrame:
@@ -136,7 +135,7 @@ def tv_color_bar(zv: float) -> str:
 def build_plot(df: pd.DataFrame, cfg: VolZCfg, title: str, out_html: str, out_png: str = "") -> None:
     df = df.sort_index().copy()
     vol = df["volume"].astype(float)
-    
+
     # 将日期索引转换为字符串列表，避免显示非交易时间段
     x_labels = df.index.strftime("%Y-%m-%d").tolist()
 
@@ -262,15 +261,15 @@ def build_plot(df: pd.DataFrame, cfg: VolZCfg, title: str, out_html: str, out_pn
         margin=dict(l=40, r=40, t=60, b=40),
         bargap=0.0,
     )
-    
+
     # 强制所有 x 轴为字符串类型（category）
     fig.update_xaxes(
-        showgrid=True, 
-        gridcolor="rgba(255,255,255,0.06)", 
+        showgrid=True,
+        gridcolor="rgba(255,255,255,0.06)",
         rangeslider_visible=False,
         type="category",  # 强制为字符串类型
     )
-    
+
     fig.update_yaxes(showgrid=True, gridcolor="rgba(255,255,255,0.06)", row=1, col=1)
     fig.update_yaxes(showgrid=True, gridcolor="rgba(255,255,255,0.06)", row=2, col=1, rangemode="tozero")
     fig.update_yaxes(showgrid=True, gridcolor="rgba(255,255,255,0.06)", row=3, col=1)

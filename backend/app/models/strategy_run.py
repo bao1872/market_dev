@@ -55,7 +55,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
 
-
 # [StrategyRun] - 失败阶段枚举：DSA 运行各阶段异常标记，写入 failure_stage 字段
 FAILURE_STAGE_DATA_READINESS = "DATA_READINESS"
 FAILURE_STAGE_LOAD_VERSION = "LOAD_VERSION"
@@ -271,7 +270,7 @@ class StrategyResult(Base):
     )
 
     # [选股] - 关联标的主数据，用于查询时 eager load symbol/name/market
-    instrument: Mapped["Instrument"] = relationship(
+    instrument: Mapped[Instrument] = relationship(
         "Instrument", lazy="raise", foreign_keys=[instrument_id],
     )
 
@@ -358,8 +357,8 @@ class StrategyRunItem(Base):
 
     状态流转：pending → running → succeeded/failed/skipped
     - succeeded: 计算成功，result_id 指向写入的 strategy_results 记录
-    - failed: 计算失败，error_message 记录原因
-    - skipped: 跳过（停牌、数据不足等），不视为失败
+    - failed: 计算失败，error_message 记录原因，reason_code 记录标准错误码
+    - skipped: 跳过（停牌、数据不足等），不视为失败，reason_code 记录跳过原因
 
     索引：
     - ix_run_items_run_status: (run_id, status) 按批次查询某状态股票
@@ -408,6 +407,9 @@ class StrategyRunItem(Base):
     )
     error_message: Mapped[str | None] = mapped_column(
         Text(), nullable=True, comment="失败原因"
+    )
+    reason_code: Mapped[str | None] = mapped_column(
+        Text(), nullable=True, comment="skipped/failed 原因标准编码（allowlist 校验）"
     )
     result_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
@@ -502,6 +504,7 @@ if __name__ == "__main__":
     assert "status" in item_cols
     assert "attempt_count" in item_cols
     assert "error_message" in item_cols
+    assert "reason_code" in item_cols
     assert "result_id" in item_cols
     assert "started_at" in item_cols
     assert "finished_at" in item_cols

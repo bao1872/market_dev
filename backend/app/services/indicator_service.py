@@ -56,8 +56,8 @@ from app.repositories.bar_repository import (
 from app.services.chart_bars_service import (
     compute_source_bar_hash,
     compute_source_bar_times,
-    load_chart_bars,
 )
+from app.services.market_data_aggregation_service import MarketDataAggregationService
 from app.services.strategy_batch_service import StrategyBatchService
 from app.strategy.runtime import MarketDataContext, StrategyLoader
 
@@ -341,7 +341,7 @@ async def compute_all_indicators(
         raise ValueError(f"instrument 不存在: instrument_id={instrument_id}")
     symbol = inst_row[0]
 
-    # 2. [图表行情契约] 数据获取：日线通过 load_chart_bars（与 /bars API 共用 SSOT），
+    # 2. [图表行情契约] 数据获取：日线通过 MarketDataAggregationService（行情聚合 SSOT），
     #    日内/周线/月线通过 DB 查询获取
     today = date.today()
     daily_start = today - timedelta(days=_DEFAULT_DAILY_LOOKBACK_DAYS)
@@ -351,10 +351,15 @@ async def compute_all_indicators(
     )
     intraday_end_dt = datetime.combine(today, datetime.max.time())
 
-    # 日线：load_chart_bars 统一处理 DB 优先 + Pytdx 兜底 + 前复权 + 去重 + 未完成 Bar 过滤 + 250 截取
-    daily_bars = await load_chart_bars(
-        session, instrument_id, timeframe="1d", count=250, adj=adj,
+    # 日线：MarketDataAggregationService 统一处理 DB 优先 + Pytdx 兜底 +
+    # 前复权 + 去重 + 未完成 Bar 过滤；本层再截取最近 N 根
+    daily_count = INDICATOR_BARS.get("1d", 250)
+    daily_agg = await MarketDataAggregationService().get_bars(
+        session, instrument_id, timeframe="1d", adj=adj,
     )
+    daily_bars = daily_agg.bars
+    if not daily_bars.empty:
+        daily_bars = daily_bars.tail(daily_count)
 
     # 日内/周线/月线：DB 查询（与原 DB 降级路径一致，SSOT）
     bars_15min = await _query_15min_bars(

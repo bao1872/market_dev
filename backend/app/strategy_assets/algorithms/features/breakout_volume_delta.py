@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Breakout Volume Delta | Flux Charts 的 Python/Plotly 主周期自洽版。
 
@@ -39,17 +38,14 @@ Notes:
 from __future__ import annotations
 
 import argparse
-import math
 import os
 import sys
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
-
-import requests
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import requests
 from plotly.offline import plot
 from plotly.subplots import make_subplots
 
@@ -59,7 +55,6 @@ if __name__ == "__main__":
         sys.path.insert(0, _base_dir)
 
 from datasource.pytdx_client import connect_pytdx, get_kline_data
-
 
 BULL_COL = "#00FF6A"
 BEAR_COL = "#FF2D55"
@@ -76,7 +71,7 @@ class Level:
     source_index: int
     source_time: pd.Timestamp
     mitigated: bool = False
-    broken_index: Optional[int] = None
+    broken_index: int | None = None
 
 
 @dataclass
@@ -178,9 +173,9 @@ class BreakoutVolumeDeltaEngine:
         self.x = np.arange(len(self.df), dtype=float)
         self.tick_text = [self._format_tick_text(t) for t in self.times]
 
-        self.high_levels: List[Level] = []
-        self.low_levels: List[Level] = []
-        self.break_events: List[BreakEvent] = []
+        self.high_levels: list[Level] = []
+        self.low_levels: list[Level] = []
+        self.break_events: list[BreakEvent] = []
 
     @staticmethod
     def _format_tick_text(ts: pd.Timestamp) -> str:
@@ -207,7 +202,7 @@ class BreakoutVolumeDeltaEngine:
         return f"{p:.1f}%"
 
     @staticmethod
-    def _trim_levels(levels: List[Level], max_lvls: int) -> List[Level]:
+    def _trim_levels(levels: list[Level], max_lvls: int) -> list[Level]:
         if len(levels) <= max_lvls:
             return levels
         return levels[-max_lvls:]
@@ -233,7 +228,7 @@ class BreakoutVolumeDeltaEngine:
         na_ts = pd.NaT
         return SwBar(h=PxT(p=np.nan, t=na_ts), l=PxT(p=np.nan, t=na_ts))
 
-    def _detect_pivots(self) -> Tuple[pd.Series, pd.Series]:
+    def _detect_pivots(self) -> tuple[pd.Series, pd.Series]:
         """
         Pine 对应逻辑：
         - 用 swCur/swHist 聚合 swing bars；
@@ -252,8 +247,8 @@ class BreakoutVolumeDeltaEngine:
         right = int(self.args.swing_right)
         keep_n = max(50, left + right + 10)
 
-        sw_hist: List[SwBar] = []
-        sw_cur: Optional[SwBar] = None
+        sw_hist: list[SwBar] = []
+        sw_cur: SwBar | None = None
         sw_inited = False
         last_ph_t = pd.NaT
         last_pl_t = pd.NaT

@@ -2,7 +2,7 @@
 
 对应迁移 001_users：
 - users: 用户主表（email 唯一，status 状态机 active/disabled/pending）
-- roles: 角色表（name 唯一，如 admin/user）
+- roles: 角色表（name 唯一，如 admin/member）
 - user_roles: 用户-角色关联表（多对多，复合主键 user_id + role_id）
 
 设计要点：
@@ -69,7 +69,7 @@ class User(Base):
 
 
 class Role(Base):
-    """角色表 - name 唯一，如 admin/user/strategy_author。
+    """角色表 - name 唯一，如 admin/member。
 
     用于 RBAC 权限控制，通过 user_roles 关联到用户。
     """
@@ -80,7 +80,7 @@ class Role(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, server_default=func.gen_random_uuid()
     )
     name: Mapped[str] = mapped_column(
-        Text(), nullable=False, unique=True, comment="角色名（唯一，如 admin/user）"
+        Text(), nullable=False, unique=True, comment="角色名（唯一，如 admin/member）"
     )
     description: Mapped[str | None] = mapped_column(
         Text(), nullable=True, comment="角色描述"

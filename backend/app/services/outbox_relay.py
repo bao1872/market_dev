@@ -150,6 +150,17 @@ async def _expand_notification_message_created(
         )
         return 0
 
+    # [eligible_user_service] - 过滤失效用户：disabled/expired/admin 不扩张投递
+    # 资格判定唯一事实源：active member + 有效 subscription（admin 不进入 universe）
+    from app.services.eligible_user_service import is_user_eligible
+
+    if not await is_user_eligible(db, user_id):
+        logger.info(
+            "用户无资格，跳过通知扩张: outbox_id=%s user_id=%s message_id=%s",
+            record.id, user_id, message_id,
+        )
+        return 0
+
     # 解析目标渠道 ID（手动发送场景）
     target_channel_id_str = payload.get("target_channel_id")
     target_channel_id: UUID | None = None
@@ -217,17 +228,17 @@ async def _expand_notification_message_created(
 async def _deliver_beta_application_admin(
     db: AsyncSession, record: Outbox
 ) -> None:
-    """投递 beta_application_admin 事件到管理员飞书 Webhook。
+    """投递 beta_application_admin 事件到管理员飞书 Platform App。
 
     spec 第四节：系统级管理员飞书渠道，从环境变量读取配置（不入库），
-    直接调用 FeishuWebhookAdapter 发送，不通过 MessageDelivery 链路。
+    直接调用 FeishuPlatformAppAdapter 发送，不通过 MessageDelivery 链路。
 
     流程：
     1. 从 system_channel.get_admin_feishu_config() 读取配置
     2. 未配置：更新 beta_applications.feishu_delivery_status='failed'，raise
     3. 查询 BetaApplication
     4. 构建 DTO（notifier.build_beta_application_dto）
-    5. 调用 FeishuWebhookAdapter.send
+    5. 调用 FeishuPlatformAppAdapter.send
     6. 成功：更新 feishu_delivery_status='success', feishu_delivered_at=now()
     7. 失败：更新 feishu_delivery_status='failed', feishu_last_error=msg，raise（触发 Outbox 重试）
 
@@ -244,7 +255,7 @@ async def _deliver_beta_application_admin(
     from app.constants.system_channel import get_admin_feishu_config
     from app.models.beta_application import BetaApplication
     from app.services.beta_application_notifier import build_beta_application_dto
-    from app.services.feishu_webhook_adapter import FeishuWebhookAdapter
+    from app.services.feishu_platform_app_adapter import FeishuPlatformAppAdapter
 
     payload: dict[str, Any] = record.payload or {}
     application_id_str = payload.get("application_id")
@@ -277,7 +288,7 @@ async def _deliver_beta_application_admin(
 
     # 构建 DTO + 调用飞书发送
     dto = build_beta_application_dto(app)
-    adapter = FeishuWebhookAdapter()
+    adapter = FeishuPlatformAppAdapter()
     result = await adapter.send(dto, config)
 
     if result.success:
@@ -310,7 +321,7 @@ async def relay_outbox(
     At-least-once 投递：
     - 普通事件 -> 投递到 Redis 队列，成功后 status=processed
     - notification.message.created -> 扩张为 MessageDelivery(pending)，然后 status=processed
-    - beta_application_admin -> 直接调飞书 Webhook（系统级渠道，不走 MessageDelivery），然后 status=processed
+    - beta_application_admin -> 直接调飞书 Platform App（系统级渠道，不走 MessageDelivery），然后 status=processed
     - 投递失败 -> retry_count+1，超过 max_retry 则 status=failed
 
     Args:

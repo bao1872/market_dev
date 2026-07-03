@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """系统概览服务 - /admin/system-overview 业务逻辑层。
 
-从 admin_membership.py 路由抽出数据查询逻辑，新增市场阶段/监控运行时/盘后流水线状态。
+从 admin_subscription.py 路由抽出数据查询逻辑，新增市场阶段/监控运行时/盘后流水线状态。
 
 设计原则：
 - 单一数据源：所有状态判定基于 DB 实时查询，不引用历史/昨日数据满足今日状态
@@ -144,7 +144,7 @@ async def get_system_overview(
 
 
 async def _compute_base_fields(db: AsyncSession, now: datetime) -> dict[str, Any]:
-    """计算 12 个基础字段（从原 admin_membership.py 迁移）。
+    """计算 12 个基础字段（从原 admin_subscription.py 迁移）。
 
     Args:
         db: 异步数据库会话

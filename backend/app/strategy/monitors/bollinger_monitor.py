@@ -46,7 +46,9 @@ logger = logging.getLogger("strategy.monitors.bollinger_monitor")
 
 # 导入 features/ 算法（从包内 app.strategy_assets.algorithms.features，Docker 兼容）
 ensure_plotly_mock()
-from app.strategy_assets.algorithms.features.bollinger_features_plotly import bollinger as _bollinger_func
+from app.strategy_assets.algorithms.features.bollinger_features_plotly import (
+    bollinger as _bollinger_func,
+)
 
 # BB 标准参数（与 monitoring.py 一致）
 BB_WIN_DEFAULT = 20
@@ -401,7 +403,7 @@ if __name__ == "__main__":
 
     # 验证 bollinger 函数可调用
     try:
-        print(f"bollinger features 模块已通过包内导入加载")
+        print("bollinger features 模块已通过包内导入加载")
         assert callable(_bollinger_func)
         print("bollinger() 函数可用 ✓")
     except ImportError as e:

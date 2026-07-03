@@ -7,7 +7,6 @@
 
 已注册实现：
 - MockChannelAdapter: 测试/开发环境（不实际发送）
-- FeishuWebhookAdapter: 飞书 Webhook 渠道（签名加密）
 - FeishuPlatformAppAdapter: 飞书平台应用渠道（App API 模式）
 
 后续实现：
@@ -25,7 +24,7 @@ from app.schemas.notification import DeliveryResult, NotificationMessageDTO
 class ChannelAdapter(ABC):
     """渠道适配器抽象基类。
 
-    每种通知渠道（飞书 webhook/平台应用/邮件）实现一个子类。
+    每种通知渠道（飞书平台应用/邮件）实现一个子类。
     Adapter 不新增业务字段，仅按渠道格式化与投递。
 
     子类必须定义类属性 adapter_type（ClassVar[str]），用于注册与查找。
@@ -43,7 +42,7 @@ class ChannelAdapter(ABC):
 
         Args:
             message_dto: 统一消息 DTO
-            channel_config: 渠道配置（如 webhook URL、签名 secret 引用等）
+            channel_config: 渠道配置（如平台应用 app_id/app_secret/receive_id 等）
 
         Returns:
             DeliveryResult 投递结果
@@ -89,6 +88,9 @@ class ChannelAdapter(ABC):
             success=False,
             error_code="NOT_SUPPORTED",
             error_message=f"渠道类型 {self.adapter_type} 不支持图片投递",
+            image_upload_success=False,
+            image_upload_error_code="NOT_SUPPORTED",
+            image_upload_error_message=f"渠道类型 {self.adapter_type} 不支持图片投递",
         )
 
     async def send_text_message(
@@ -124,8 +126,8 @@ def register_adapter(adapter_cls: type[ChannelAdapter]) -> type[ChannelAdapter]:
 
     用法：
         @register_adapter
-        class FeishuWebhookAdapter(ChannelAdapter):
-            adapter_type = "feishu_webhook"
+        class FeishuPlatformAppAdapter(ChannelAdapter):
+            adapter_type = "feishu_platform_app"
             ...
 
     Args:

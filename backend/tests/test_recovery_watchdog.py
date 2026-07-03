@@ -27,9 +27,6 @@ import pytest
 from sqlalchemy import select
 
 from app.models.scheduler_job_run import SchedulerJobRun
-from app.services.scheduler_job_run_recovery_service import (
-    recover_stale_scheduler_job_runs,
-)
 
 _TZ = ZoneInfo("Asia/Shanghai")
 

@@ -1,15 +1,16 @@
 // 登录/注册页（公开路由）
 // 对应原型：login.html（V1.6.3）
 // 用法：路由 /login 渲染此页面，支持登录与邀请码注册双 tab
-// 登录成功后写入认证状态并跳转 /（会员到期则跳转 /membership-expired）
+// [Auth] - 描述: 登录成功后直接使用后端返回的 next_route 跳转（替代旧会员到期判断逻辑）
 // 注册成功后展示成功页，点击"进入服务台"复用注册返回的 token 完成登录
 import { useState, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
+import type { AuthUser } from '@/store/auth'
 import { useToast } from '@/store/toast'
 import { useLogin, useRegister } from '@/hooks/useApi'
-import { getMe } from '@/api/endpoints'
-import type { RegisterSuccessResponse } from '@/api/endpoints'
+import { getMe, getMyAccess } from '@/api/endpoints'
+import type { LoginResponse, RegisterSuccessResponse } from '@/api/endpoints'
 import BrandLogo from '@/components/BrandLogo'
 
 // 从 axios 错误中提取可读消息（FastAPI 错误体通常在 response.data.detail）
@@ -61,31 +62,50 @@ export default function LoginPage() {
   // 邀请码实时校验：长度 >= 8 视为格式有效（实际校验由后端完成）
   const inviteValid = regInvite.length >= 8
 
-  // 登录成功后的统一处理：先 login 写 token（含 keepLogin 选 storage）→ 拉取用户信息 → setUser 补全 → 跳转
-  async function handleLoginSuccess(
-    accessToken: string,
-    refreshToken: string,
-    membershipExpired: boolean,
-    keepLogin: boolean,
-  ) {
+  // [Auth] - 描述: 登录成功后的统一处理 - 直接使用 login 响应的 AccessProfile 字段构造 AuthUser
+  // 不再调用 getMe 二次请求（login 响应已含 is_admin/roles/subscription_active 等权限上下文）
+  // 跳转目标由后端权威计算的 next_route 决定（admin→/admin/overview；member active→/overview；expired→/subscription-expired）
+  async function handleLoginSuccess(data: LoginResponse, keepLogin: boolean) {
     setAuthenticating(true)
     try {
       // 先 login 写入 token + storage（根据 keepLogin 选 local/session），user 暂为 null
-      // 让 axios 拦截器能从 storage 读取 token 调用 getMe
-      useAuthStore.getState().login(accessToken, null, refreshToken, keepLogin)
-      const user = await getMe()
-      useAuthStore.getState().setUser({
-        id: user.id,
-        name: user.email,
-        email: user.email,
-        role: user.roles?.includes('admin') ? 'admin' : 'member',
-      })
+      // 让 axios 拦截器能从 storage 读取 token
+      useAuthStore.getState().login(data.access_token, null, data.refresh_token, keepLogin)
+      // [Auth] - 描述: 直接使用 login 响应的 AccessProfile 字段构造 AuthUser（避免再调 getMe）
+      const user: AuthUser = {
+        id: '', // login 响应不含 user_id，由后续 getMe 或 /me/access 补全；路由守卫仅依赖 is_admin/subscription_active
+        name: '',
+        email: '',
+        is_admin: data.is_admin,
+        roles: data.roles,
+        subscription_active: data.subscription_active,
+        plan_code: data.plan_code,
+        plan_display_name: data.plan_display_name,
+        expires_at: data.expires_at,
+        features: data.features,
+        limits: data.limits,
+      }
+      // 异步补全 user.id/email/name（不阻塞跳转，路由守卫不依赖这些字段）
+      getMe()
+        .then((me) => {
+          useAuthStore.getState().setUser({
+            ...user,
+            id: me.id,
+            email: me.email,
+            name: me.email,
+          })
+        })
+        .catch(() => {
+          // getMe 失败不阻塞跳转，权限上下文已由 login 响应提供
+        })
+      useAuthStore.getState().setUser(user)
       useToast.getState().show('登录成功', '已进入盘迹')
-      navigate(membershipExpired ? '/membership-expired' : '/overview')
+      // [Auth] - 描述: 使用后端返回的 next_route 跳转（权威路由分发，前端不再本地判断会员到期状态）
+      navigate(data.next_route)
     } catch (err) {
-      // getMe 失败：logout 清除 token + store 状态，避免残留无效登录态
+      // 登录流程异常：logout 清除 token + store 状态，避免残留无效登录态
       useAuthStore.getState().logout()
-      useToast.getState().show('获取用户信息失败', getErrorMessage(err))
+      useToast.getState().show('登录失败', getErrorMessage(err))
     } finally {
       setAuthenticating(false)
     }
@@ -106,12 +126,7 @@ export default function LoginPage() {
         email: loginAccount.trim(),
         password: loginPassword,
       })
-      await handleLoginSuccess(
-        data.access_token,
-        data.refresh_token,
-        data.membership_expired,
-        keepLogin,
-      )
+      await handleLoginSuccess(data, keepLogin)
     } catch (err) {
       useToast.getState().show('登录失败', getErrorMessage(err))
     } finally {
@@ -147,17 +162,58 @@ export default function LoginPage() {
     )
   }
 
-  // 注册成功页"进入服务台"按钮：复用注册返回的 token 完成登录流程
-  // 新注册用户会员刚开通，membership_expired 固定为 false
+  // [Auth] - 描述: 注册成功页"进入服务台"按钮 - 复用注册返回的 token 走 login 流程拉取完整 AccessProfile
+  // 新注册用户会员刚开通，subscription_active 必为 true，next_route 必为 /overview
   // 注册流程默认保持登录（keepLogin=true），与登录页 keepLogin 复选框无关
   async function handleEnterService() {
     if (!registerResult) return
-    await handleLoginSuccess(
-      registerResult.access_token,
-      registerResult.refresh_token,
-      false,
-      true,
-    )
+    // 注册响应不含 AccessProfile 字段，需先 login 写 token 后再调 /me/access 获取权限上下文
+    setAuthenticating(true)
+    try {
+      useAuthStore.getState().login(
+        registerResult.access_token,
+        null,
+        registerResult.refresh_token,
+        true,
+      )
+      // [Auth] - 描述: 注册成功后必须拉取 /me/access 获取完整 AccessProfile 构造 AuthUser
+      // 注册响应只有 token + 会员时间，无 is_admin/roles/subscription_active 等权限字段
+      const access = await getMyAccess()
+      const user: AuthUser = {
+        id: access.user_id,
+        name: '',
+        email: '',
+        is_admin: access.is_admin,
+        roles: access.roles,
+        subscription_active: access.subscription_active,
+        plan_code: access.plan_code,
+        plan_display_name: access.plan_display_name,
+        expires_at: access.expires_at,
+        features: access.features,
+        limits: access.limits,
+      }
+      // 异步补全 email/name（不阻塞跳转）
+      getMe()
+        .then((me) => {
+          useAuthStore.getState().setUser({
+            ...user,
+            name: me.email,
+            email: me.email,
+          })
+        })
+        .catch(() => {
+          // getMe 失败不阻塞跳转
+        })
+      useAuthStore.getState().setUser(user)
+      useToast.getState().show('登录成功', '已进入盘迹')
+      // [Auth] - 描述: 注册后默认跳转 /overview（新注册订阅已激活，无 next_route 字段）
+      navigate('/overview')
+    } catch (err) {
+      useAuthStore.getState().logout()
+      useToast.getState().show('获取权限信息失败', getErrorMessage(err))
+    } finally {
+      setAuthenticating(false)
+    }
   }
 
   // 邀请码输入：实时大写化
@@ -178,12 +234,12 @@ export default function LoginPage() {
             可计算、可追踪的服务
           </h1>
           <p className="login-lead">
-            注册即成为会员，30天内开放全部选股、监控、个股指标与消息推送功能。无需选择套餐，也没有功能额度限制。
+            注册后用邀请码激活套餐，按所选套餐解锁选股、监控、个股指标与消息推送功能。
           </p>
           <div className="login-feature">
-            <span className="tag info">注册即全功能</span>
-            <span className="tag good">会员有效期 30 天</span>
-            <span className="tag warn">邀请码注册与续期</span>
+            <span className="tag info">邀请码激活套餐</span>
+            <span className="tag good">按套餐解锁功能</span>
+            <span className="tag warn">到期前可续期</span>
           </div>
           <div className="auth-flow-mini">
             <div>
@@ -270,9 +326,6 @@ export default function LoginPage() {
                 {isSubmitting || authenticating ? '登录中...' : '登录服务台'}
               </button>
             </form>
-            <div className="login-hint">
-              静态演示：输入 expired@quant.local 可查看会员到期续期流程
-            </div>
             <div className="auth-switch-copy">
               还没有账户？
               <button type="button" className="link-btn" onClick={() => setActiveTab('register')}>
@@ -287,11 +340,11 @@ export default function LoginPage() {
               // 注册成功页
               <div className="register-success">
                 <div className="success-orb">✓</div>
-                <h2>注册成功，会员已开通</h2>
-                <p>你的账户已获得完整功能权限，无需选择套餐。</p>
+                <h2>注册成功，套餐已激活</h2>
+                <p>你的账户已按所选套餐解锁对应功能权限。</p>
                 <div className="membership-result">
                   <div>
-                    <span>会员状态</span>
+                    <span>套餐状态</span>
                     <b className="pos">有效</b>
                   </div>
                   <div>
@@ -304,7 +357,7 @@ export default function LoginPage() {
                   </div>
                   <div>
                     <span>功能权限</span>
-                    <b>全部开放</b>
+                    <b>按套餐开放</b>
                   </div>
                 </div>
                 <div className="notice">
@@ -323,7 +376,7 @@ export default function LoginPage() {
               // 注册表单
               <div>
                 <h2>注册会员</h2>
-                <p className="page-desc">无需付费，邀请码验证通过后自动获得30天会员</p>
+                <p className="page-desc">邀请码验证通过后自动获得30天会员</p>
                 <form onSubmit={handleRegisterSubmit} noValidate>
                   <div className="form-grid auth-form-grid">
                     <div className="form-row">

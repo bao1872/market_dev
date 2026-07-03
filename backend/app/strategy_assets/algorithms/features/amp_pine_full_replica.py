@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Adaptive Market Profile (AMP) - Pine strict replica + factor extraction
 
@@ -26,7 +25,6 @@ from __future__ import annotations
 import argparse
 import math
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -73,8 +71,8 @@ class AMPConfig:
 
     regColor: str = "rgba(160,160,160,0.85)"
     channelFill: str = "rgba(144,148,151,0.10)"
-    loAct: Tuple[int, int, int, float] = (0, 187, 255, 0.05)
-    hiAct: Tuple[int, int, int, float] = (0, 187, 255, 0.75)
+    loAct: tuple[int, int, int, float] = (0, 187, 255, 0.05)
+    hiAct: tuple[int, int, int, float] = (0, 187, 255, 0.75)
     useCustomColor: bool = True
     customActLine: str = "rgba(0,187,255,0.55)"
     minActivityThresholdFrac: float = 0.10
@@ -120,7 +118,7 @@ def _market_from_symbol(symbol: str) -> int:
 
 
 def connect_pytdx() -> TdxHq_API:
-    errors: List[str] = []
+    errors: list[str] = []
     for host, port in SERVERS:
         try:
             api = TdxHq_API(raise_exception=True, auto_retry=True)
@@ -137,7 +135,7 @@ def fetch_kline_pytdx(symbol: str, freq: str, count: int) -> pd.DataFrame:
         cat = _category_from_freq(freq)
         mkt = _market_from_symbol(symbol)
         size = 800
-        frames: List[pd.DataFrame] = []
+        frames: list[pd.DataFrame] = []
         start = 0
         target = max(int(count), 450)
         while start < target + size:
@@ -202,7 +200,7 @@ def calc_line_value(startY: float, endY: float, currentBar: float, totalBars: in
     return f_unadjust(v, use_log)
 
 
-def gradient_rgba(percent: float, c1: Tuple[int, int, int, float], c2: Tuple[int, int, int, float]) -> str:
+def gradient_rgba(percent: float, c1: tuple[int, int, int, float], c2: tuple[int, int, int, float]) -> str:
     p = float(np.clip(percent, 0.0, 1.0))
     r = c1[0] + (c2[0] - c1[0]) * p
     g = c1[1] + (c2[1] - c1[1]) * p
@@ -211,7 +209,7 @@ def gradient_rgba(percent: float, c1: Tuple[int, int, int, float], c2: Tuple[int
     return f"rgba({int(round(r))},{int(round(g))},{int(round(b))},{a:.4f})"
 
 
-def calcDevATF(close_r: np.ndarray, length: int, use_log: bool) -> Tuple[float, float, float, float]:
+def calcDevATF(close_r: np.ndarray, length: int, use_log: bool) -> tuple[float, float, float, float]:
     if length <= 1:
         return (np.nan, np.nan, np.nan, np.nan)
     n1 = length - 1
@@ -248,7 +246,7 @@ def calcDevATF(close_r: np.ndarray, length: int, use_log: bool) -> Tuple[float, 
     return (float(unStdDev), float(r), float(slope), float(intercept))
 
 
-def cS(close_r: np.ndarray, length: int, use_log: bool) -> Tuple[float, float, float]:
+def cS(close_r: np.ndarray, length: int, use_log: bool) -> tuple[float, float, float]:
     if length <= 1:
         return (np.nan, np.nan, np.nan)
     sX = sY = sXS = sXY = 0.0
@@ -266,7 +264,7 @@ def cS(close_r: np.ndarray, length: int, use_log: bool) -> Tuple[float, float, f
     return (float(sl), float(av), float(ic))
 
 
-def cD(high_r: np.ndarray, low_r: np.ndarray, close_r: np.ndarray, length: int, sl: float, av: float, ic: float, use_log: bool) -> Tuple[float, float, float, float]:
+def cD(high_r: np.ndarray, low_r: np.ndarray, close_r: np.ndarray, length: int, sl: float, av: float, ic: float, use_log: bool) -> tuple[float, float, float, float]:
     uD = dD = sDA = dxx = dyy = dxy = 0.0
     per = length - 1
     dY = ic + sl * per / 2.0
@@ -298,10 +296,10 @@ def apply_deviation(base_value: float, deviation: float, use_log: bool) -> float
     return f_unadjust(f_adjust(base_value, use_log) + deviation, use_log)
 
 
-def detect_period(close_r: np.ndarray, cfg: AMPConfig) -> Tuple[int, Optional[float]]:
+def detect_period(close_r: np.ndarray, cfg: AMPConfig) -> tuple[int, float | None]:
     n = len(close_r)
     detected_period = min(cfg.pI, n)
-    detected_r: Optional[float] = None
+    detected_r: float | None = None
     if cfg.useAdaptive:
         best_r = -1e18
         for p in CANDIDATE_PERIODS:
@@ -314,7 +312,7 @@ def detect_period(close_r: np.ndarray, cfg: AMPConfig) -> Tuple[int, Optional[fl
     return int(min(detected_period, n)), detected_r
 
 
-def compute_amp_core(df_win: pd.DataFrame, cfg: AMPConfig) -> Dict:
+def compute_amp_core(df_win: pd.DataFrame, cfg: AMPConfig) -> dict:
     lI = len(df_win)
     if lI < 2:
         raise ValueError("窗口过短")
@@ -376,8 +374,8 @@ def compute_amp_core(df_win: pd.DataFrame, cfg: AMPConfig) -> Dict:
     activity_slope = (f_adjust(actY2_0, cfg.uL) - f_adjust(actY1_0, cfg.uL)) / bars
 
     x = df_win.index.to_list()
-    activity_lines: List[Dict] = []
-    profile_polys: List[Dict] = []
+    activity_lines: list[dict] = []
+    profile_polys: list[dict] = []
     min_threshold = max_count * cfg.minActivityThresholdFrac
     displayed = 0
 
@@ -446,7 +444,7 @@ def compute_amp_core(df_win: pd.DataFrame, cfg: AMPConfig) -> Dict:
     }
 
 
-def compute_amp_last(df_all: pd.DataFrame, cfg: AMPConfig) -> Dict:
+def compute_amp_last(df_all: pd.DataFrame, cfg: AMPConfig) -> dict:
     close_r = df_all["close"].to_numpy(float)[::-1]
     final_period, detected_r = detect_period(close_r, cfg)
     lI = min(len(df_all), int(final_period))
@@ -519,7 +517,7 @@ def compute_amp_factor_timeseries(df_all: pd.DataFrame, cfg: AMPConfig) -> pd.Da
     return out
 
 
-def build_plot(payload: Dict, symbol: str) -> go.Figure:
+def build_plot(payload: dict, symbol: str) -> go.Figure:
     df_all = payload["data_all"]
     df_win = payload["window"]
     cfg: AMPConfig = payload["cfg"]

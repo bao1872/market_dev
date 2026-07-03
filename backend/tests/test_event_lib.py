@@ -22,12 +22,10 @@ from app.strategy.events.base import (
 )
 from app.strategy.events.detectors import structural_events
 from app.strategy.events.registry import (
-    EVENT_REGISTRY,
     detect_panel,
     detect_to_drafts,
     get_event,
     list_all,
-    list_by_category,
 )
 
 

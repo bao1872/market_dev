@@ -215,7 +215,7 @@ async def main() -> None:
                 template_key="monitor_event",
                 template_version="1.1.0",
                 title=f"BB+节点监控 {now_str}",
-                summary=f"自选股 19 只 | 触发 1 只\n上轨 1 | 中轨 0 | 下轨 0 | 节点 0",
+                summary="自选股 19 只 | 触发 1 只\n上轨 1 | 中轨 0 | 下轨 0 | 节点 0",
                 facts=[
                     {"key": "股票", "label": "股票", "value": f"{name} {symbol}"},
                     {"key": "事件", "label": "事件", "value": f"{bb_emoji} {bb_event_label}"},
@@ -303,7 +303,7 @@ async def main() -> None:
                 template_key="monitor_event",
                 template_version="1.1.0",
                 title=f"BB+节点监控 {now_str}",
-                summary=f"自选股 19 只 | 触发 1 只\n上轨 0 | 中轨 0 | 下轨 0 | 节点 1",
+                summary="自选股 19 只 | 触发 1 只\n上轨 0 | 中轨 0 | 下轨 0 | 节点 1",
                 facts=node_facts,
                 timeline=[
                     {"time": now_cst.isoformat(), "label": f"{node_emoji} {node_event_label} 节点={_fmt_price(peak_price)}"},

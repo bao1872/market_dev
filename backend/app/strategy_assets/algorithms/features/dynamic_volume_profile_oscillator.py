@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Dynamic Volume Profile Oscillator | AlphaAlgos -> Python (Plotly)
 
@@ -27,7 +26,6 @@ import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -77,7 +75,7 @@ def fetch_kline_pytdx(symbol: str, start: str, end: str, freq, api=None) -> pd.D
         mkt = 1 if symbol.startswith(("5", "6", "9")) else 0
         page = 0
         size = 700
-        frames: List[pd.DataFrame] = []
+        frames: list[pd.DataFrame] = []
 
         while True:
             recs = api.get_security_bars(cat, mkt, symbol, page * size, size)
@@ -170,7 +168,7 @@ def rolling_normalized_volume(volume: pd.Series, smoothing: int, lookback: int) 
     return pd.Series(out, index=volume.index, name="oscillator_raw")
 
 
-def calculate_volume_profile_metrics(price: pd.Series, volume: pd.Series, lookback: int, profile_periods: int) -> Tuple[pd.Series, pd.Series]:
+def calculate_volume_profile_metrics(price: pd.Series, volume: pd.Series, lookback: int, profile_periods: int) -> tuple[pd.Series, pd.Series]:
     n = len(price)
     px = price.to_numpy(dtype=float)
     vol = volume.to_numpy(dtype=float)
@@ -178,8 +176,8 @@ def calculate_volume_profile_metrics(price: pd.Series, volume: pd.Series, lookba
     vwap_level = np.full(n, np.nan, dtype=float)
     price_deviation = np.full(n, np.nan, dtype=float)
 
-    cached_prices: List[float] = []
-    cached_profile: List[float] = []
+    cached_prices: list[float] = []
+    cached_profile: list[float] = []
 
     for i in range(n):
         if len(cached_profile) == 0 or i % profile_periods == 0:
@@ -310,7 +308,7 @@ def add_feature_table(fig: go.Figure, df: pd.DataFrame) -> None:
     )
 
 
-def _fmt_x_labels(index: pd.Index) -> List[str]:
+def _fmt_x_labels(index: pd.Index) -> list[str]:
     idx = pd.to_datetime(index)
     has_time = any((ts.hour != 0 or ts.minute != 0) for ts in idx)
     if has_time:

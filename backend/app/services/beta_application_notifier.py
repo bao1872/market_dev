@@ -9,7 +9,7 @@
 设计要点：
 - 复用 feishu_card_builder.dto_to_feishu_card 渲染逻辑，保持卡片风格一致
 - message_type=SYSTEM_ALERT（红色头部，符合"管理员需注意的新申请"语义）
-- payload 只含申请数据，不含 webhook 配置（安全考虑，webhook 由 relay 运行时从
+- payload 只含申请数据，不含平台应用配置（安全考虑，配置由 relay 运行时从
   system_channel 读取）
 - 使用 savepoint 隔离 Outbox 写入，失败时回滚 savepoint 但不影响已提交的申请
 
@@ -24,7 +24,6 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from typing import Any
-from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -81,13 +80,13 @@ def build_beta_application_dto(application: BetaApplication) -> NotificationMess
     复用现有 DTO + dto_to_feishu_card 渲染逻辑，保持卡片风格一致。
     message_type=SYSTEM_ALERT（红色头部，管理员需注意的新申请）。
 
-    公开函数：outbox_relay 投递时调用，传入 FeishuWebhookAdapter.send。
+    公开函数：outbox_relay 投递时调用，传入 FeishuPlatformAppAdapter.send。
 
     Args:
         application: BetaApplication ORM 对象
 
     Returns:
-        NotificationMessageDTO（可传入 dto_to_feishu_card 或 FeishuWebhookAdapter.send）
+        NotificationMessageDTO（可传入 dto_to_feishu_card 或 FeishuPlatformAppAdapter.send）
     """
     submitted_at_str = _format_submitted_at(application.submitted_at)
 

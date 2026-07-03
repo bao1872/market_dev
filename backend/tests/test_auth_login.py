@@ -1,193 +1,87 @@
-"""登录接口专项测试 - 认证 + 会员状态 + 异常处理。
+"""登录接口专项测试 - 认证 + AccessProfile 登录响应 + 异常处理。
 
 测试内容：
 1. 正确账号密码登录成功（200）
 2. 错误密码登录失败（401）
 3. 不存在用户登录失败（401）
 4. disabled 用户登录失败（401）
-5. 无 membership 用户可登录且 membership_expired=true
-6. expired membership 登录返回 membership_expired=true 且不修改 DB status
-7. 数据库异常返回 500 且有日志
-8. 密码 hash 格式异常返回 401
+5. 登录响应包含全部 AccessProfile 字段（10 字段 + 4 token 字段）
+6. admin / member-active / member-expired 三种 next_route 路由
+7. admin 的 subscription_required=False，member 的 subscription_required=True
+8. 响应不再包含 membership_expired 字段（已被 subscription_active 替代）
+9. 数据库异常返回 500 且有日志
+10. 密码 hash 格式异常返回 401
 
 测试策略：
-- 使用 sqlite 内存数据库 + 异步 SQLAlchemy（与 test_auth.py 一致，避免依赖外部 PG）
-- 注册 JSONB 类型在 SQLite 上的编译回退
-- 通过 dependency_overrides 注入测试会话
+- 使用 PostgreSQL 测试库 + 共享 fixtures（client / user_factory / role_factory /
+  subscription_factory）
+- 通过 conftest.client 自动注入测试 session
 """
 
 from __future__ import annotations
 
-import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
+import httpx
 import pytest
 import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy import text
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.ext.compiler import compiles
 
 from app.core.security import get_password_hash
-from app.main import app
-from app.models.membership import Membership
-from app.models.user import Role, User, UserRole
-
-
-# 注册 JSONB 在 SQLite 上的编译回退（测试环境兼容）
-@compiles(JSONB, "sqlite")
-def _compile_jsonb_sqlite(element: JSONB, compiler: object, **kw: object) -> str:  # noqa: ARG001
-    """JSONB 在 SQLite 上回退为 TEXT 类型。"""
-    return "TEXT"
-
-
-# SQLite 兼容的建表 DDL（绕过 PostgreSQL 特有的 server_default）
-_SQLITE_DDL_STATEMENTS = [
-    """
-CREATE TABLE IF NOT EXISTS users (
-    id TEXT NOT NULL PRIMARY KEY,
-    email TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'active',
-    timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-)
-""",
-    """
-CREATE TABLE IF NOT EXISTS roles (
-    id TEXT NOT NULL PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
-    description TEXT,
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-)
-""",
-    """
-CREATE TABLE IF NOT EXISTS user_roles (
-    user_id TEXT NOT NULL,
-    role_id TEXT NOT NULL,
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (user_id, role_id),
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-    FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE
-)
-""",
-    """
-CREATE TABLE IF NOT EXISTS memberships (
-    id TEXT NOT NULL PRIMARY KEY,
-    user_id TEXT NOT NULL UNIQUE,
-    status TEXT NOT NULL DEFAULT 'active',
-    started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    expires_at DATETIME NOT NULL,
-    plan_code TEXT,
-    monitor_limit INTEGER,
-    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-)
-""",
-]
+from app.models.subscription import Subscription
+from app.models.user import Role, User
 
 
 @pytest_asyncio.fixture
-async def db_session() -> AsyncGenerator[AsyncSession, None]:
-    """创建内存 SQLite 异步会话，测试后销毁。"""
-    try:
-        engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
-    except Exception:
-        pytest.skip("aiosqlite 不可用，跳过 DB 测试")
-
-    async with engine.begin() as conn:
-        for ddl_stmt in _SQLITE_DDL_STATEMENTS:
-            await conn.execute(text(ddl_stmt))
-
-    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-    async with session_factory() as session:
-        user_role = Role(id=uuid.uuid4(), name="user", description="普通用户")
-        session.add(user_role)
-        await session.commit()
-
-        async def get_test_db() -> AsyncGenerator[AsyncSession, None]:
-            yield session
-
-        from app.core.deps import get_db as deps_get_db
-        from app.db import get_db as db_get_db
-        app.dependency_overrides[deps_get_db] = get_test_db
-        app.dependency_overrides[db_get_db] = get_test_db
-
-        session._test_user_role = user_role  # type: ignore[attr-defined]
-
-        yield session
-
-        app.dependency_overrides.clear()
-
-    await engine.dispose()
-
-
-async def _create_user(
-    session: AsyncSession,
-    email: str,
-    password: str,
-    status: str = "active",
+async def admin_user(
+    user_factory: Callable[..., User],
+    role_factory: Callable[..., Role],
 ) -> User:
-    """在测试会话中创建用户。"""
-    now = datetime.now(UTC)
-    user = User(
-        id=uuid.uuid4(),
-        email=email,
-        password_hash=get_password_hash(password),
-        status=status,
-        timezone="Asia/Shanghai",
-        created_at=now,
-        updated_at=now,
+    """创建 admin 角色与 admin@example.com 测试用户。"""
+    await role_factory(name="admin", description="管理员")
+    return await user_factory(
+        email="admin@example.com",
+        password_hash=get_password_hash("admin-password-123"),
+        roles=["admin"],
     )
-    session.add(user)
-    await session.flush()
-
-    user_role = session._test_user_role  # type: ignore[attr-defined]
-    session.add(UserRole(user_id=user.id, role_id=user_role.id))
-    await session.flush()
-    return user
 
 
-async def _create_membership(
-    session: AsyncSession,
-    user_id: uuid.UUID,
-    status: str,
-    expires_at: datetime,
-) -> Membership:
-    """在测试会话中创建会员记录。"""
-    now = datetime.now(UTC)
-    membership = Membership(
-        user_id=user_id,
-        status=status,
-        started_at=now - timedelta(days=30),
-        expires_at=expires_at,
-        plan_code="observe_20",
-        monitor_limit=20,
-        updated_at=now,
-    )
-    session.add(membership)
-    await session.flush()
-    return membership
+# 期望的 4 个 token 字段
+_TOKEN_FIELDS = {"access_token", "refresh_token", "token_type", "expires_in"}
+
+# 期望的 10 个 AccessProfile 字段
+_ACCESS_PROFILE_FIELDS = {
+    "is_admin",
+    "roles",
+    "subscription_required",
+    "subscription_active",
+    "plan_code",
+    "plan_display_name",
+    "expires_at",
+    "features",
+    "limits",
+    "next_route",
+}
 
 
 @pytest.mark.asyncio
-async def test_login_success(db_session: AsyncSession) -> None:
+async def test_login_success(
+    client: httpx.AsyncClient,
+    user_factory: Callable[..., User],
+) -> None:
     """正确账号密码登录成功，返回 token。"""
-    await _create_user(db_session, "login_ok@example.com", "password123")
-    await db_session.commit()
+    await user_factory(
+        email="login_ok@example.com",
+        password_hash=get_password_hash("password123"),
+        roles=["member"],
+    )
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/auth/login",
-            json={"email": "login_ok@example.com", "password": "password123"},
-        )
+    response = await client.post(
+        "/auth/login",
+        json={"email": "login_ok@example.com", "password": "password123"},
+    )
     assert response.status_code == 200
     data = response.json()
     assert "access_token" in data
@@ -197,107 +91,136 @@ async def test_login_success(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_login_wrong_password(db_session: AsyncSession) -> None:
+async def test_login_wrong_password(
+    client: httpx.AsyncClient,
+    user_factory: Callable[..., User],
+) -> None:
     """错误密码登录失败（401）。"""
-    await _create_user(db_session, "wrong_pwd@example.com", "password123")
-    await db_session.commit()
+    await user_factory(
+        email="wrong_pwd@example.com",
+        password_hash=get_password_hash("password123"),
+        roles=["member"],
+    )
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/auth/login",
-            json={"email": "wrong_pwd@example.com", "password": "wrong-password"},
-        )
+    response = await client.post(
+        "/auth/login",
+        json={"email": "wrong_pwd@example.com", "password": "wrong-password"},
+    )
     assert response.status_code == 401
     assert "邮箱或密码错误" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
-async def test_login_nonexistent_user(db_session: AsyncSession) -> None:
+async def test_login_nonexistent_user(client: httpx.AsyncClient) -> None:
     """不存在用户登录失败（401，统一错误信息）。"""
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/auth/login",
-            json={"email": "nobody@example.com", "password": "any-password-123"},
-        )
+    response = await client.post(
+        "/auth/login",
+        json={"email": "nobody@example.com", "password": "any-password-123"},
+    )
     assert response.status_code == 401
     assert "邮箱或密码错误" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
-async def test_login_disabled_user(db_session: AsyncSession) -> None:
+async def test_login_disabled_user(
+    client: httpx.AsyncClient,
+    user_factory: Callable[..., User],
+) -> None:
     """disabled 用户登录失败（401）。"""
-    await _create_user(db_session, "disabled_login@example.com", "password123", status="disabled")
-    await db_session.commit()
+    await user_factory(
+        email="disabled_login@example.com",
+        password_hash=get_password_hash("password123"),
+        status="disabled",
+        roles=["member"],
+    )
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/auth/login",
-            json={"email": "disabled_login@example.com", "password": "password123"},
-        )
+    response = await client.post(
+        "/auth/login",
+        json={"email": "disabled_login@example.com", "password": "password123"},
+    )
     assert response.status_code == 401
     assert "非 active" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
-async def test_login_without_membership_expired_true(db_session: AsyncSession) -> None:
-    """无 membership 用户可登录，且 membership_expired=true。"""
-    await _create_user(db_session, "no_member@example.com", "password123")
-    await db_session.commit()
+async def test_login_without_membership_subscription_active_false(
+    client: httpx.AsyncClient,
+    user_factory: Callable[..., User],
+) -> None:
+    """无 subscription 用户可登录，且 subscription_active=False（无订阅记录）。"""
+    await user_factory(
+        email="no_member@example.com",
+        password_hash=get_password_hash("password123"),
+        roles=["member"],
+    )
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/auth/login",
-            json={"email": "no_member@example.com", "password": "password123"},
-        )
+    response = await client.post(
+        "/auth/login",
+        json={"email": "no_member@example.com", "password": "password123"},
+    )
     assert response.status_code == 200
-    assert response.json()["membership_expired"] is True
+    data = response.json()
+    # [Auth] - 描述: 无订阅记录的 member，subscription_active=False（替代旧 membership_expired=true）
+    assert data["subscription_active"] is False
+    assert data["next_route"] == "/subscription-expired"
 
 
 @pytest.mark.asyncio
-async def test_login_expired_membership_not_modify_status(db_session: AsyncSession) -> None:
-    """expired membership 登录返回 membership_expired=true，且不修改 DB status。"""
-    user = await _create_user(db_session, "expired_member@example.com", "password123")
-    membership = await _create_membership(
-        db_session,
-        user.id,
+async def test_login_expired_subscription_not_modify_status(
+    client: httpx.AsyncClient,
+    db_session,
+    user_factory: Callable[..., User],
+    subscription_factory: Callable[..., Subscription],
+) -> None:
+    """过期订阅登录返回 subscription_active=False，且不修改 DB status。"""
+    user = await user_factory(
+        email="expired_member@example.com",
+        password_hash=get_password_hash("password123"),
+        roles=["member"],
+    )
+    subscription = await subscription_factory(
+        user_id=user.id,
         status="active",
         expires_at=datetime.now(UTC) - timedelta(days=1),
     )
     await db_session.commit()
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/auth/login",
-            json={"email": "expired_member@example.com", "password": "password123"},
-        )
+    response = await client.post(
+        "/auth/login",
+        json={"email": "expired_member@example.com", "password": "password123"},
+    )
     assert response.status_code == 200
-    assert response.json()["membership_expired"] is True
+    data = response.json()
+    # [Auth] - 描述: 过期订阅 subscription_active=False（替代旧 membership_expired=true）
+    assert data["subscription_active"] is False
+    assert data["next_route"] == "/subscription-expired"
 
-    # 刷新会话，重新查询 membership status，确认未被 login 改为 expired
-    await db_session.refresh(membership)
-    assert membership.status == "active"
+    # 刷新会话，重新查询 subscription status，确认未被 login 改为 expired
+    await db_session.refresh(subscription)
+    assert subscription.status == "active"
 
 
 @pytest.mark.asyncio
-async def test_login_db_error_returns_500(db_session: AsyncSession, caplog) -> None:
+async def test_login_db_error_returns_500(
+    client: httpx.AsyncClient,
+    user_factory: Callable[..., User],
+    caplog,
+) -> None:
     """数据库异常返回 500，并记录日志。"""
-    await _create_user(db_session, "db_error@example.com", "password123")
-    await db_session.commit()
+    await user_factory(
+        email="db_error@example.com",
+        password_hash=get_password_hash("password123"),
+        roles=["member"],
+    )
 
-    with patch("app.api.auth.get_effective_membership_status") as mock_status:
-        mock_status.side_effect = SQLAlchemyError("simulated db failure")
+    # [Auth] - 描述: login 调用 get_access_context，patch 该函数模拟 DB 异常
+    with patch("app.api.auth.get_access_context") as mock_ctx:
+        mock_ctx.side_effect = SQLAlchemyError("simulated db failure")
 
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post(
-                "/auth/login",
-                json={"email": "db_error@example.com", "password": "password123"},
-            )
+        response = await client.post(
+            "/auth/login",
+            json={"email": "db_error@example.com", "password": "password123"},
+        )
 
     assert response.status_code == 500
     assert "登录服务暂不可用" in response.json()["detail"]
@@ -306,32 +229,181 @@ async def test_login_db_error_returns_500(db_session: AsyncSession, caplog) -> N
 
 
 @pytest.mark.asyncio
-async def test_login_invalid_password_hash_returns_401(db_session: AsyncSession) -> None:
+async def test_login_invalid_password_hash_returns_401(
+    client: httpx.AsyncClient,
+    db_session,
+    user_factory: Callable[..., User],
+) -> None:
     """密码 hash 格式异常返回 401。"""
-    now = datetime.now(UTC)
-    user = User(
-        id=uuid.uuid4(),
+    user = await user_factory(
         email="bad_hash@example.com",
-        password_hash="not-a-valid-bcrypt-hash",
-        status="active",
-        timezone="Asia/Shanghai",
-        created_at=now,
-        updated_at=now,
+        roles=["member"],
     )
-    db_session.add(user)
-    await db_session.flush()
-
-    user_role = db_session._test_user_role  # type: ignore[attr-defined]
-    db_session.add(UserRole(user_id=user.id, role_id=user_role.id))
+    user.password_hash = "not-a-valid-bcrypt-hash"
     await db_session.commit()
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/auth/login",
-            json={"email": "bad_hash@example.com", "password": "any-password"},
-        )
+    response = await client.post(
+        "/auth/login",
+        json={"email": "bad_hash@example.com", "password": "any-password"},
+    )
     assert response.status_code == 401
+
+
+# ============================================================
+# AccessProfile 登录响应测试（Phase 2 Task 2.4）
+# 验证登录响应包含 4 个 token 字段 + 10 个 AccessProfile 字段
+# next_route 逻辑：admin → /admin/overview；member active → /overview；
+#                  member expired → /subscription-expired
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_login_response_contains_access_profile_fields(
+    client: httpx.AsyncClient,
+    admin_user: User,
+) -> None:
+    """登录成功后响应 JSON 包含全部 10 个 AccessProfile 字段 + 4 个 token 字段。"""
+    response = await client.post(
+        "/auth/login",
+        json={"email": "admin@example.com", "password": "admin-password-123"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    expected_fields = _TOKEN_FIELDS | _ACCESS_PROFILE_FIELDS
+    assert set(data.keys()) == expected_fields, (
+        f"响应字段不匹配，缺失: {expected_fields - set(data.keys())}，"
+        f"多余: {set(data.keys()) - expected_fields}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_login_response_admin_next_route(
+    client: httpx.AsyncClient,
+    admin_user: User,
+) -> None:
+    """admin 登录 next_route='/admin/overview'。"""
+    response = await client.post(
+        "/auth/login",
+        json={"email": "admin@example.com", "password": "admin-password-123"},
+    )
+    assert response.status_code == 200
+    assert response.json()["next_route"] == "/admin/overview"
+
+
+@pytest.mark.asyncio
+async def test_login_response_member_active_next_route(
+    client: httpx.AsyncClient,
+    user_factory: Callable[..., User],
+    subscription_factory: Callable[..., Subscription],
+    db_session,
+) -> None:
+    """member 有效订阅 next_route='/overview'。"""
+    user = await user_factory(
+        email="member_active@example.com",
+        password_hash=get_password_hash("password123"),
+        roles=["member"],
+    )
+    await subscription_factory(
+        user_id=user.id,
+        status="active",
+        expires_at=datetime.now(UTC) + timedelta(days=30),
+    )
+    await db_session.commit()
+
+    response = await client.post(
+        "/auth/login",
+        json={"email": "member_active@example.com", "password": "password123"},
+    )
+    assert response.status_code == 200
+    assert response.json()["next_route"] == "/overview"
+
+
+@pytest.mark.asyncio
+async def test_login_response_member_expired_next_route(
+    client: httpx.AsyncClient,
+    user_factory: Callable[..., User],
+    subscription_factory: Callable[..., Subscription],
+    db_session,
+) -> None:
+    """member 订阅过期 next_route='/subscription-expired'。"""
+    user = await user_factory(
+        email="member_expired@example.com",
+        password_hash=get_password_hash("password123"),
+        roles=["member"],
+    )
+    await subscription_factory(
+        user_id=user.id,
+        status="active",  # DB 中仍为 active，但 expires_at 已过，get_access_context 实时计算为 expired
+        expires_at=datetime.now(UTC) - timedelta(days=1),
+    )
+    await db_session.commit()
+
+    response = await client.post(
+        "/auth/login",
+        json={"email": "member_expired@example.com", "password": "password123"},
+    )
+    assert response.status_code == 200
+    assert response.json()["next_route"] == "/subscription-expired"
+
+
+@pytest.mark.asyncio
+async def test_login_response_no_membership_expired_field(
+    client: httpx.AsyncClient,
+    admin_user: User,
+) -> None:
+    """响应不再包含 membership_expired 字段（已被 subscription_active 替代）。"""
+    response = await client.post(
+        "/auth/login",
+        json={"email": "admin@example.com", "password": "admin-password-123"},
+    )
+    assert response.status_code == 200
+    assert "membership_expired" not in response.json()
+
+
+@pytest.mark.asyncio
+async def test_login_response_admin_subscription_required_false(
+    client: httpx.AsyncClient,
+    admin_user: User,
+) -> None:
+    """admin 的 subscription_required=False（admin 不需要订阅）。"""
+    response = await client.post(
+        "/auth/login",
+        json={"email": "admin@example.com", "password": "admin-password-123"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["subscription_required"] is False
+    assert data["is_admin"] is True
+
+
+@pytest.mark.asyncio
+async def test_login_response_member_subscription_required_true(
+    client: httpx.AsyncClient,
+    user_factory: Callable[..., User],
+    subscription_factory: Callable[..., Subscription],
+    db_session,
+) -> None:
+    """member 的 subscription_required=True（member 需要订阅）。"""
+    user = await user_factory(
+        email="member_req@example.com",
+        password_hash=get_password_hash("password123"),
+        roles=["member"],
+    )
+    await subscription_factory(
+        user_id=user.id,
+        status="active",
+        expires_at=datetime.now(UTC) + timedelta(days=30),
+    )
+    await db_session.commit()
+
+    response = await client.post(
+        "/auth/login",
+        json={"email": "member_req@example.com", "password": "password123"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["subscription_required"] is True
+    assert data["is_admin"] is False
 
 
 if __name__ == "__main__":

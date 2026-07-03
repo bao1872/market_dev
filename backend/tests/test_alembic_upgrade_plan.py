@@ -2,10 +2,11 @@
 
 验证 044_plan_contract_fields 迁移：
 - invite_codes 表新增 plan_code/monitor_limit/grant_months 列
-- memberships 表新增 plan_code/monitor_limit 列
 - 旧数据回填：invite_codes → plan_code='observe_20', monitor_limit=20, grant_months=1
-- 旧数据回填：memberships → plan_code='observe_20', monitor_limit=20
 - 迁移文件 revision 链正确（down_revision=043_rename_dsa_selector_display_name）
+
+注意：memberships 表的列与回填测试已移除，因 049_subscriptions_table 已删除 memberships 表。
+迁移文件内容测试（test_migration_contains_backfill_for_memberships）仍保留，校验 044 源码。
 
 测试策略：
 - 使用 conftest 的 db_session fixture（PostgreSQL 测试库，已 alembic upgrade head）
@@ -21,8 +22,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import text
 
-from app.constants.plan_contract import DEFAULT_PLAN_CODE
-
+from app.constants.plan_codes import DEFAULT_PLAN_CODE
 
 _MIGRATION_FILE = (
     Path(__file__).parent.parent
@@ -74,36 +74,6 @@ async def test_invite_codes_has_grant_months_column(db_session):
     row = result.first()
     assert row is not None, "invite_codes 缺少 grant_months 列"
     assert row[0] == "grant_months"
-    assert row[1] == "integer"
-
-
-@pytest.mark.asyncio
-async def test_memberships_has_plan_code_column(db_session):
-    """memberships 表必须包含 plan_code 列。"""
-    result = await db_session.execute(
-        text(
-            "SELECT column_name, data_type FROM information_schema.columns "
-            "WHERE table_name='memberships' AND column_name='plan_code'"
-        )
-    )
-    row = result.first()
-    assert row is not None, "memberships 缺少 plan_code 列"
-    assert row[0] == "plan_code"
-    assert row[1] in ("character varying", "text")
-
-
-@pytest.mark.asyncio
-async def test_memberships_has_monitor_limit_column(db_session):
-    """memberships 表必须包含 monitor_limit 列（Integer）。"""
-    result = await db_session.execute(
-        text(
-            "SELECT column_name, data_type FROM information_schema.columns "
-            "WHERE table_name='memberships' AND column_name='monitor_limit'"
-        )
-    )
-    row = result.first()
-    assert row is not None, "memberships 缺少 monitor_limit 列"
-    assert row[0] == "monitor_limit"
     assert row[1] == "integer"
 
 
@@ -201,59 +171,6 @@ async def test_backfill_invite_codes_old_data_default_mapping(db_session):
     assert row[0] == DEFAULT_PLAN_CODE, f"plan_code 应为 {DEFAULT_PLAN_CODE}，实际 {row[0]}"
     assert row[1] == 20, f"monitor_limit 应为 20，实际 {row[1]}"
     assert row[2] == 1, f"grant_months 应为 1，实际 {row[2]}"
-
-
-@pytest.mark.asyncio
-async def test_backfill_memberships_old_data_default_mapping(db_session):
-    """旧 memberships 记录（plan_code=NULL）回填后应为 observe_20/monitor_limit=20。"""
-    import uuid
-    from datetime import UTC, datetime, timedelta
-
-    # 插入一条旧风格 membership（不设置 plan_code/monitor_limit）
-    user_id = uuid.uuid4()
-    await db_session.execute(
-        text(
-            "INSERT INTO users (id, email, password_hash, status, timezone) "
-            "VALUES (:uid, :email, 'hash', 'active', 'Asia/Shanghai')"
-        ),
-        {"uid": user_id, "email": f"member_test_{uuid.uuid4().hex[:8]}@test.com"},
-    )
-    now = datetime.now(UTC)
-    await db_session.execute(
-        text(
-            "INSERT INTO memberships (id, user_id, status, started_at, expires_at, updated_at) "
-            "VALUES (:id, :uid, 'active', :started, :expires, :updated)"
-        ),
-        {
-            "id": uuid.uuid4(),
-            "uid": user_id,
-            "started": now,
-            "expires": now + timedelta(days=30),
-            "updated": now,
-        },
-    )
-    await db_session.flush()
-
-    # 执行回填
-    await db_session.execute(
-        text(
-            "UPDATE memberships SET plan_code='observe_20', monitor_limit=20 "
-            "WHERE plan_code IS NULL"
-        )
-    )
-    await db_session.flush()
-
-    # 验证
-    result = await db_session.execute(
-        text(
-            "SELECT plan_code, monitor_limit FROM memberships WHERE user_id=:uid"
-        ),
-        {"uid": user_id},
-    )
-    row = result.first()
-    assert row is not None, "回填后查询不到记录"
-    assert row[0] == DEFAULT_PLAN_CODE, f"plan_code 应为 {DEFAULT_PLAN_CODE}，实际 {row[0]}"
-    assert row[1] == 20, f"monitor_limit 应为 20，实际 {row[1]}"
 
 
 if __name__ == "__main__":

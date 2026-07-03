@@ -72,12 +72,12 @@ def _generate_daily_bars(
 
 
 def _generate_15m_bars(
-    n_bars: int = 3700,
+    n_bars: int = 4100,
     end_date: str = "2026-06-18 15:00",
     start_price: float = 10.0,
     seed: int = 44,
 ) -> pd.DataFrame:
-    """生成合成 15m bars（满足 NODE_CLUSTER_LOW_BARS=3600）。"""
+    """生成合成 15m bars（满足 NODE_CLUSTER_LOW_BARS=4000）。"""
     np.random.seed(seed)
     dates = pd.date_range(end=end_date, periods=n_bars, freq="15min")
     returns = np.random.uniform(-0.002, 0.002, size=n_bars)

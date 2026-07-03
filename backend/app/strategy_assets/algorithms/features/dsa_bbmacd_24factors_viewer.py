@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 DSA + BBMacd 24因子可视化脚本（独立可运行）
 
@@ -20,7 +19,6 @@ from __future__ import annotations
 import argparse
 import math
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -88,7 +86,7 @@ def _market_from_symbol(symbol: str) -> int:
 
 
 def connect_pytdx() -> TdxHq_API:
-    errors: List[str] = []
+    errors: list[str] = []
     for host, port in SERVERS:
         try:
             api = TdxHq_API(raise_exception=True, auto_retry=True)
@@ -105,7 +103,7 @@ def fetch_kline_pytdx(symbol: str, freq: str, count: int) -> pd.DataFrame:
         cat = _category_from_freq(freq)
         mkt = _market_from_symbol(symbol)
         size = 800
-        frames: List[pd.DataFrame] = []
+        frames: list[pd.DataFrame] = []
         start = 0
         target = max(int(count), 300)
         while start < target + size:
@@ -151,7 +149,7 @@ def pine_ema(src: pd.Series, length: int) -> pd.Series:
     alpha = 2.0 / (length + 1.0)
     prev = np.nan
     valid_count = 0
-    seed_vals: List[float] = []
+    seed_vals: list[float] = []
     seeded = False
     for i, val in enumerate(arr):
         if np.isnan(val):
@@ -177,7 +175,7 @@ def pine_rma(src: pd.Series, length: int) -> pd.Series:
     alpha = 1.0 / float(length)
     prev = np.nan
     valid_count = 0
-    seed_vals: List[float] = []
+    seed_vals: list[float] = []
     seeded = False
     for i, val in enumerate(arr):
         if np.isnan(val):
@@ -278,8 +276,8 @@ def compute_bbmacd(
     return out
 
 
-def _run_from_dir(dir_out: np.ndarray) -> List[Tuple[int, int, int]]:
-    runs: List[Tuple[int, int, int]] = []
+def _run_from_dir(dir_out: np.ndarray) -> list[tuple[int, int, int]]:
+    runs: list[tuple[int, int, int]] = []
     n = len(dir_out)
     if n == 0:
         return runs
@@ -297,7 +295,7 @@ def _run_from_dir(dir_out: np.ndarray) -> List[Tuple[int, int, int]]:
     return runs
 
 
-def compute_dsa(df: pd.DataFrame, cfg: DSAConfig) -> Tuple[pd.DataFrame, List[PivotLabel], List[Dict]]:
+def compute_dsa(df: pd.DataFrame, cfg: DSAConfig) -> tuple[pd.DataFrame, list[PivotLabel], list[dict]]:
     d = df.copy()
     d["hlc3"] = hlc3(d)
     atr = atr_pine(d, cfg.atr_len)
@@ -325,15 +323,15 @@ def compute_dsa(df: pd.DataFrame, cfg: DSAConfig) -> Tuple[pd.DataFrame, List[Pi
     pl_prev_store = np.nan
     p = h3[0] * vol[0]
     v = vol[0]
-    last_dir: Optional[int] = None
+    last_dir: int | None = None
 
     vwap_out = np.full(n, np.nan)
     dir_out = np.full(n, np.nan)
 
-    segments: List[Dict] = []
-    cur_points_x: List[pd.Timestamp] = []
-    cur_points_y: List[float] = []
-    pivot_labels: List[PivotLabel] = []
+    segments: list[dict] = []
+    cur_points_x: list[pd.Timestamp] = []
+    cur_points_y: list[float] = []
+    pivot_labels: list[PivotLabel] = []
 
     for t in range(n):
         st = max(0, t - cfg.prd + 1)
@@ -404,7 +402,7 @@ def compute_dsa(df: pd.DataFrame, cfg: DSAConfig) -> Tuple[pd.DataFrame, List[Pi
 
     # hindsight确认标签与最近确认高低点
     runs = _run_from_dir(dir_out)
-    hindsight_labels: List[PivotLabel] = []
+    hindsight_labels: list[PivotLabel] = []
     last_pivot_type = np.array([""] * n, dtype=object)
     prev_confirmed_run_bars = np.full(n, np.nan)
     current_run_bars = np.full(n, np.nan)
@@ -454,8 +452,8 @@ def compute_dsa(df: pd.DataFrame, cfg: DSAConfig) -> Tuple[pd.DataFrame, List[Pi
     bars_since_last_high = np.full(n, np.nan)
     bars_since_last_low = np.full(n, np.nan)
 
-    confirmed_highs: List[Tuple[int, float]] = []
-    confirmed_lows: List[Tuple[int, float]] = []
+    confirmed_highs: list[tuple[int, float]] = []
+    confirmed_lows: list[tuple[int, float]] = []
     for lab in hindsight_labels:
         if lab.text in {"HH", "LH"}:
             confirmed_highs.append((lab.t, lab.y))
@@ -464,14 +462,14 @@ def compute_dsa(df: pd.DataFrame, cfg: DSAConfig) -> Tuple[pd.DataFrame, List[Pi
 
     for t in range(n):
         recent_high = np.nan
-        recent_high_idx: Optional[int] = None
+        recent_high_idx: int | None = None
         for idx, price in reversed(confirmed_highs):
             if idx <= t:
                 recent_high = price
                 recent_high_idx = idx
                 break
         recent_low = np.nan
-        recent_low_idx: Optional[int] = None
+        recent_low_idx: int | None = None
         for idx, price in reversed(confirmed_lows):
             if idx <= t:
                 recent_low = price
@@ -589,7 +587,7 @@ def compute_24_factors(df: pd.DataFrame) -> pd.DataFrame:
     return out[["prev_pivot_type"] + field_order]
 
 
-def _format_factor_hover(df: pd.DataFrame) -> List[str]:
+def _format_factor_hover(df: pd.DataFrame) -> list[str]:
     cols = [
         "prev_pivot_type", "dsa_dir", "prev_pivot_code", "last_confirmed_high", "last_confirmed_low",
         "dsa_pivot_pos_01", "ret_to_last_high_pct", "ret_to_last_low_pct", "price_vs_dsa_vwap_pct",
@@ -609,10 +607,10 @@ def _format_factor_hover(df: pd.DataFrame) -> List[str]:
             return v[0] if len(v) else np.nan
         return v
 
-    texts: List[str] = []
+    texts: list[str] = []
     view = df.loc[:, cols]
     for _, row in view.iterrows():
-        parts: List[str] = []
+        parts: list[str] = []
         for c in cols:
             v = _scalarize(row[c])
             if isinstance(v, str):
@@ -625,7 +623,7 @@ def _format_factor_hover(df: pd.DataFrame) -> List[str]:
     return texts
 
 
-def build_figure(df: pd.DataFrame, dsa_segments: List[Dict], dsa_labels: List[PivotLabel], out_html: str, title: str) -> None:
+def build_figure(df: pd.DataFrame, dsa_segments: list[dict], dsa_labels: list[PivotLabel], out_html: str, title: str) -> None:
     x_num = np.arange(len(df), dtype=float)
     intraday = len(df.index) > 1 and (df.index[1] - df.index[0]) < pd.Timedelta("20h")
     tick_text = [ts.strftime("%Y-%m-%d %H:%M") if intraday else ts.strftime("%Y-%m-%d") for ts in df.index]
@@ -663,8 +661,8 @@ def build_figure(df: pd.DataFrame, dsa_segments: List[Dict], dsa_labels: List[Pi
         mask = (seg_x >= df.index.min()) & (seg_x <= df.index.max())
         if mask.sum() < 2:
             continue
-        seg_idx: List[int] = []
-        seg_y: List[float] = []
+        seg_idx: list[int] = []
+        seg_y: list[float] = []
         for xv, yv in zip(seg_x[mask], np.asarray(seg["y"])[mask]):
             loc = df.index.get_indexer([pd.Timestamp(xv)])[0]
             if loc >= 0:

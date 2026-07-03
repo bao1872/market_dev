@@ -12,21 +12,24 @@ V1.1 各阶段模型统一继承 Base：
 - M3: MonitorState（监控状态仓储，复合主键 strategy_version_id+instrument_id）
 - M4: StrategyEvent（原始策略事件与快照，event_key 唯一）
 - R12: StrategyRun/StrategyResult/StrategyResultMetric（策略运行与结果）
+- Phase2: Plan（套餐定义表 plans，套餐契约唯一真源，替代 plan_contract.py 字典）
+- Phase4.5: AccessAuditLog（访问审计日志表 access_audit_logs，记录 admin 关键操作）
 """
 
 from __future__ import annotations
 
+from app.models.access_audit_log import AccessAuditLog
 from app.models.bar import BarDaily, BarMinute
 from app.models.base import Base
 from app.models.beta_application import BetaApplication
-from app.models.capture_job import CaptureJob
 from app.models.calendar import TradingCalendar
+from app.models.capture_job import CaptureJob
 from app.models.config import ConfigDefinition
 from app.models.event_recipient import StrategyEventRecipient
 from app.models.instrument import Instrument
+from app.models.invitation import InviteCode, InviteRedemption
 from app.models.job import JobRun
 from app.models.job_run_event import JobRunEvent
-from app.models.membership import InviteCode, InviteRedemption, Membership
 from app.models.monitor_evaluation import MonitorEvaluation
 from app.models.monitor_state import MonitorState
 from app.models.notification import (
@@ -36,7 +39,9 @@ from app.models.notification import (
     NotificationTemplate,
 )
 from app.models.outbox import Outbox
+from app.models.plan import Plan
 from app.models.scheduler_job_run import SchedulerJobRun
+from app.models.subscription import Subscription
 from app.models.stock_memo import StockMemo
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.strategy_event import StrategyEvent
@@ -51,6 +56,7 @@ from app.models.watchlist import UserWatchlistItem
 from app.models.worker_heartbeat import WorkerHeartbeat
 
 __all__ = [
+    "AccessAuditLog",
     "BarDaily",
     "BarMinute",
     "Base",
@@ -62,7 +68,6 @@ __all__ = [
     "InviteRedemption",
     "JobRun",
     "JobRunEvent",
-    "Membership",
     "MessageDelivery",
     "MonitorEvaluation",
     "MonitorState",
@@ -70,6 +75,7 @@ __all__ = [
     "NotificationMessage",
     "NotificationTemplate",
     "Outbox",
+    "Plan",
     "Role",
     "SchedulerJobRun",
     "StockMemo",
@@ -81,6 +87,7 @@ __all__ = [
     "StrategyRun",
     "StrategyRunItem",
     "StrategyVersion",
+    "Subscription",
     "TradingCalendar",
     "User",
     "UserRole",

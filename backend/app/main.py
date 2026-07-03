@@ -4,14 +4,14 @@ V1.1 交易平台后端，提供：
 - /health: 健康检查
 - /auth: 认证 API（登录/注册/续期/刷新/当前用户）（R2 + V1.6）
 - /me: 当前用户信息（R2）
-- /me/membership: 当前用户会员状态（V1.6）
+- /me/membership: 当前用户订阅状态（V1.6 遗留路径，语义等价于 /me/subscription；返回 Subscription 状态）
 - /instruments: 股票主数据 API（R3）
 - /calendar: 交易日历 API（R4）
 - /strategies: 策略目录与版本（R7）
 - /admin/strategies: 策略管理（R7）
 - /admin/strategies/{key}/run: 策略运行（R12）
 - /admin/invite-codes: 邀请码管理（V1.6）
-- /admin/members: 会员账户管理（V1.6）
+- /admin/members: 订阅账户管理（V1.6）
 - /messages: 通知消息（R9）
 - /notification-channels: 通知渠道（R9）
 - /instruments/{id}/monitor-states: 监控状态查询（M3）
@@ -34,10 +34,11 @@ from fastapi import FastAPI, Request
 from app.api import metrics as metrics_api
 from app.api.admin_after_close import router as admin_after_close_router
 from app.api.admin_beta_applications import router as admin_beta_applications_router
-from app.api.admin_membership import router as admin_membership_router
+from app.api.admin_subscription import router as admin_subscription_router
 from app.api.auth import router as auth_router
 from app.api.bars import router as bars_router
 from app.api.calendar import router as calendar_router
+from app.api.capture import router as capture_router
 from app.api.health import router as health_router
 from app.api.indicators import router as indicators_router
 from app.api.instruments import router as instruments_router
@@ -46,9 +47,10 @@ from app.api.me import router as me_router
 from app.api.metrics import http_request_duration_seconds, http_requests_total
 from app.api.monitor_states import router as monitor_states_router
 from app.api.notifications import router as notifications_router
+from app.api.plans import router as plans_router
 from app.api.public_beta import router as public_beta_router
-from app.api.stock_memos import router as stock_memos_router
 from app.api.stock_detail_feishu import router as stock_detail_feishu_router
+from app.api.stock_memos import router as stock_memos_router
 from app.api.strategies import router as strategies_router
 from app.api.strategy_events import router as strategy_events_router
 from app.api.strategy_runs import router as strategy_runs_router
@@ -134,7 +136,7 @@ app = FastAPI(
 app.include_router(health_router)
 # 认证路由（R2：登录/刷新/当前用户）
 app.include_router(auth_router)
-# 当前用户权益路由（plan_contract：套餐/监控上限/已使用/剩余/到期日）
+# 当前用户权益路由（plans 表：套餐/监控上限/已使用/剩余/到期日）
 app.include_router(me_router)
 # 股票主数据路由（R3）
 app.include_router(instruments_router)
@@ -144,6 +146,8 @@ app.include_router(calendar_router)
 app.include_router(market_router)
 # 行情查询路由
 app.include_router(bars_router)
+# [Capture] - 个股详情截图专用数据快照路由（Capture Token 隔离，不走普通认证）
+app.include_router(capture_router)
 # 策略指标实时计算路由
 app.include_router(indicators_router)
 # 策略目录与版本路由（R7）
@@ -157,8 +161,8 @@ app.include_router(strategy_events_router)
 # 通知消息与渠道路由（R9）
 app.include_router(notifications_router)
 # 配置注册表管理路由（R6，需 admin 角色）
-# 会员与邀请码管理路由（V1.6，需 admin 角色）
-app.include_router(admin_membership_router)
+# 订阅与邀请码管理路由（V1.6，需 admin 角色）
+app.include_router(admin_subscription_router)
 # 内测申请管理后台路由（Task 4，需 admin 角色）
 app.include_router(admin_beta_applications_router)
 # 盘后编排管理路由（Task 2.3，需 admin 角色）
@@ -171,6 +175,8 @@ app.include_router(stock_memos_router)
 app.include_router(stock_detail_feishu_router)
 # 公开端点路由（内测申请，无需登录）
 app.include_router(public_beta_router)
+# 公开套餐列表路由（无需登录）
+app.include_router(plans_router)
 # Prometheus 指标路由（无需认证，供 scraper 直接抓取）
 app.include_router(metrics_api.router, tags=["metrics"])
 

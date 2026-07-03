@@ -8,15 +8,15 @@ DSA 作为第一个支持的 strategy_key，后续可扩展其他策略。
 - claim_next_run: Worker 加锁领取下一个 queued 运行（status=queued → running）
 - execute_run: 执行批量计算（Worker 调用），逐标的执行策略并写入结果
 - retry_run: 基于已有运行创建新的 attempt（业务重试）
-- publish_run: 发布运行结果（admin 调用或定时任务自动发布），completed/partial_failed → published
+- publish_run: 发布运行结果（admin 调用或盘后编排器调用），completed/partial_failed → published
 - check_data_readiness: 数据就绪检查（交易日/活跃标的/K线覆盖率/停牌/退市）
-- _check_quality_gates: 质量门禁检查（定时任务自动发布前置条件）
+- _check_quality_gates: 严格质量门禁检查（盘后编排器自动发布前置条件）
 
 设计说明：
 - POST API 只创建 queued 运行，Worker 异步执行（不在 HTTP 请求内计算全市场）
 - run 状态机：queued → running → completed/partial_failed → published/failed
-- 定时任务自动发布：scheduled 运行完成后，通过质量门禁自动发布
-  - 门禁：状态必须为 completed 或 partial_failed，且至少有一个成功结果（succeeded_count > 0）
+- 质量门禁：scheduled 运行完成后，execute_run 仅记录门禁是否通过；
+  实际自动发布由 after_close_orchestrator / 调度任务统一负责，避免重复 publish
 - per-stock 跟踪：strategy_run_items 记录 status/attempt_count/error/result_id
 - effective_config 从 manifest 读取并保存到 strategy_runs.effective_config（不可变）
 - 幂等：idempotency_key = strategy_key:strategy_version_id:trade_date:run_type:attempt_no
@@ -37,8 +37,8 @@ import os
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from zoneinfo import ZoneInfo
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,7 +49,6 @@ from app.models.instrument import Instrument
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.strategy_run import (
     FAILURE_STAGE_WORKER_INTERRUPTED,
-    StrategyResult,
     StrategyRun,
     StrategyRunItem,
 )
@@ -61,6 +60,7 @@ from app.services.strategy_service import (
     StrategyNotFoundError,
     list_versions,
 )
+from app.strategy.budget import BudgetExceededError
 from app.strategy.runtime import MarketDataContext, StrategyLoader
 
 logger = logging.getLogger("strategy_batch_service")
@@ -91,7 +91,7 @@ _BLOCKING_STATUSES = {"published", "completed", "running", "queued"}
 # 这些状态存在时，允许创建下一个 attempt（业务重试）
 _RETRYABLE_STATUSES = {"failed", "partial_failed", "interrupted"}
 
-class InvalidStrategyResult(Exception):
+class InvalidStrategyResultError(Exception):
     """策略结果校验失败。
 
     [StrategyBatchService] - 描述: 保留供 API 层捕获转 422（原 DSA 硬校验已移除）
@@ -182,6 +182,33 @@ class StrategyBatchService:
         # Admin 发布
         await service.publish_run(db, run.id)
     """
+
+    # [StrategyBatchService] - run 级总超时默认值（秒）。
+    # 取消单股硬超时后，由 run 级总预算控制整体执行时间；测试可覆盖。
+    _RUN_TOTAL_TIMEOUT_SECONDS: float = 600.0
+
+    # [StrategyBatchService] - skipped 原因标准编码允许列表。
+    # 自动发布门禁会校验所有 skipped 项的 reason_code 必须在此集合内。
+    _SKIPPED_REASON_ALLOWLIST: set[str] = {
+        "insufficient_data",
+        "suspended",
+        "delisted",
+        "new_listing",
+    }
+
+    # [StrategyBatchService] - failed 原因标准编码集合（仅用于日志/可读性）。
+    _FAILED_REASON_CODES: set[str] = {
+        "timeout",
+        "runtime_error",
+        "data_error",
+    }
+
+    def __init__(self) -> None:
+        """初始化 batch service。
+
+        实例级 run 超时时间默认使用类常量，允许测试或调用方覆盖。
+        """
+        self._run_total_timeout_seconds: float = self._RUN_TOTAL_TIMEOUT_SECONDS
 
     async def recover_stale_runs(self, db: AsyncSession) -> int:
         """Worker 启动时恢复过期租约的 running 和 stale queued 任务。
@@ -728,11 +755,13 @@ class StrategyBatchService:
                 logger.info("批量计算无待执行标的，直接完成: run_id=%s", run_id)
                 return
 
-            # 5. 逐标的执行
+            # 5. 逐标的执行（run 级总超时 + 可取消）
             succeeded = 0
             failed = 0
             skipped = 0
             all_results = []
+            run_start_at = datetime.now(UTC)
+            timeout_seconds = self._run_total_timeout_seconds
 
             for item in run_items:
                 item.status = "running"
@@ -746,9 +775,30 @@ class StrategyBatchService:
                         f"更新 run_item 状态为 running 失败 item_id={item.id}: {exc}"
                     ) from exc
 
+                # 计算剩余 run 级预算；若已耗尽，剩余项直接记 timeout 失败
+                elapsed = (datetime.now(UTC) - run_start_at).total_seconds()
+                remaining_seconds = timeout_seconds - elapsed
+                if remaining_seconds <= 0:
+                    item.status = "failed"
+                    item.reason_code = "timeout"
+                    item.error_message = "run 级总超时，剩余项取消"
+                    item.finished_at = datetime.now(UTC)
+                    failed += 1
+                    try:
+                        await db.flush()
+                    except Exception as exc:
+                        await db.rollback()
+                        raise RuntimeError(
+                            f"更新 run_item 状态失败 item_id={item.id}: {exc}"
+                        ) from exc
+                    continue
+
                 try:
-                    result = await self._execute_single_instrument(
-                        db, run, version, runtime, item
+                    result = await asyncio.wait_for(
+                        self._execute_single_instrument(
+                            db, run, version, runtime, item
+                        ),
+                        timeout=remaining_seconds,
                     )
                     if result is not None:
                         all_results.append(result)
@@ -757,14 +807,36 @@ class StrategyBatchService:
                         succeeded += 1
                     else:
                         item.status = "skipped"
+                        item.reason_code = "insufficient_data"
                         item.finished_at = datetime.now(UTC)
                         skipped += 1
+                except TimeoutError:
+                    logger.warning(
+                        "标的执行超时 instrument_id=%s",
+                        item.instrument_id,
+                    )
+                    item.status = "failed"
+                    item.reason_code = "timeout"
+                    item.error_message = "run 级总超时"
+                    item.finished_at = datetime.now(UTC)
+                    failed += 1
+                except BudgetExceededError as exc:
+                    logger.warning(
+                        "标的执行超出预算 instrument_id=%s: %s",
+                        item.instrument_id, exc,
+                    )
+                    item.status = "failed"
+                    item.reason_code = "timeout"
+                    item.error_message = str(exc)[:500]
+                    item.finished_at = datetime.now(UTC)
+                    failed += 1
                 except Exception as exc:
                     logger.warning(
                         "标的执行失败 instrument_id=%s: %s",
                         item.instrument_id, exc,
                     )
                     item.status = "failed"
+                    item.reason_code = "runtime_error"
                     item.error_message = str(exc)[:500]
                     item.finished_at = datetime.now(UTC)
                     failed += 1
@@ -848,9 +920,25 @@ class StrategyBatchService:
                     },
                 )
 
-            # 定时任务自动发布：检查质量门禁
+            # 6.1 统计实际写入结果数，用于质量门禁校验
+            result_count = 0
+            try:
+                result_count = await strategy_result_repository.count_by_run(
+                    db, run.id
+                )
+            except Exception as exc:
+                logger.warning(
+                    "统计 strategy_results 数量失败 run_id=%s: %s",
+                    run_id, exc,
+                )
+
+            # 6.2 质量门禁检查（仅记录结果，不自动发布）
+            # 自动发布由 after_close_orchestrator / 调度任务统一负责，避免 execute_run
+            # 与 orchestrator 重复调用 publish_run。
             if run.run_type == _RUN_TYPE_SCHEDULED:
-                quality_passed = await self._check_quality_gates(run)
+                quality_passed = await self._check_quality_gates(
+                    run, result_count=result_count, db=db
+                )
                 # [JobRunEvent] - QUALITY_GATE：质量门禁结果
                 if job_run_id is not None:
                     await self._append_batch_event(
@@ -866,28 +954,13 @@ class StrategyBatchService:
                         },
                     )
                 if quality_passed:
-                    try:
-                        await self.publish_run(db, run_id)
-                        logger.info(
-                            "定时任务自动发布成功: run_id=%s, trade_date=%s",
-                            run_id, run.trade_date,
-                        )
-                        # [JobRunEvent] - PUBLISH_DONE：发布完成
-                        if job_run_id is not None:
-                            await self._append_batch_event(
-                                job_run_id, "PUBLISH_DONE", "info",
-                                f"已发布: run_id={run_id}",
-                                {"published_run_id": str(run_id)},
-                            )
-                    except Exception as exc:
-                        # 自动发布失败不影响运行结果，仅记录警告
-                        logger.warning(
-                            "定时任务自动发布失败（需手动发布）: run_id=%s, %s",
-                            run_id, exc,
-                        )
+                    logger.info(
+                        "质量门禁通过，等待调度任务发布: run_id=%s, trade_date=%s",
+                        run_id, run.trade_date,
+                    )
                 else:
                     logger.info(
-                        "定时任务质量门禁未通过，跳过自动发布: run_id=%s, status=%s",
+                        "质量门禁未通过: run_id=%s, status=%s",
                         run_id, run.status,
                     )
         finally:
@@ -934,8 +1007,11 @@ class StrategyBatchService:
     async def publish_run(self, db: AsyncSession, run_id: uuid.UUID) -> StrategyRun:
         """发布运行结果（admin 调用）。
 
-        status: completed/partial_failed → published
+        status: completed → published
         记录 published_at 时间戳
+
+        [DSA] - 描述: admin 手动发布同样禁止 partial_failed，与自动发布门禁一致，
+        仅允许 completed 状态进入 published。
 
         Args:
             db: 异步会话
@@ -952,10 +1028,11 @@ class StrategyBatchService:
         if run is None:
             raise ValueError(f"运行不存在: run_id={run_id}")
 
-        if run.status not in ("completed", "partial_failed"):
+        # [DSA] - 描述: publish_run 显式拒绝 partial_failed，仅 completed 可发布
+        if run.status != "completed":
             raise ValueError(
                 f"运行状态不允许发布（当前 {run.status}，"
-                f"仅 completed/partial_failed 可发布）: run_id={run_id}"
+                f"仅 completed 可发布）: run_id={run_id}"
             )
 
         if (run.succeeded_count or 0) <= 0:
@@ -1131,29 +1208,91 @@ class StrategyBatchService:
             import_completeness=import_completeness,
         )
 
-    async def _check_quality_gates(self, run: StrategyRun) -> bool:
-        """检查运行是否通过质量门禁（用于定时任务自动发布）。
+    async def _check_quality_gates(
+        self,
+        run: StrategyRun,
+        result_count: int,
+        db: AsyncSession | None = None,
+    ) -> bool:
+        """检查运行是否通过严格质量门禁（用于定时任务自动发布）。
 
-        质量门禁条件：
-        1. 运行状态为 completed 或 partial_failed
-        2. 至少有一个成功结果（succeeded_count > 0）
+        自动发布必须同时满足：
+        1. status == "completed"（partial_failed 禁止自动发布）
+        2. failed_count == 0
+        3. strategy_results.count == succeeded_count
+        4. succeeded_count + skipped_count == total_instruments
+        5. skipped 原因全部在允许列表内且每个 skipped 都有 reason_code
+        6. computable universe 覆盖率 100%（即 (succeeded + skipped) / total == 1）
+        7. succeeded_count > 0
 
         Args:
             run: 运行记录
+            result_count: 实际写入的 strategy_results 数量（来自 repository 统计）
+            db: 可选的数据库 session；传入时校验 skipped 项的 reason_code
 
         Returns:
-            True 表示通过质量门禁，可自动发布
+            True 表示通过严格质量门禁，可自动发布
         """
-        # 门禁 1：状态必须为 completed 或 partial_failed
-        if run.status not in ("completed", "partial_failed"):
+        # 门禁 1：状态必须为 completed
+        if run.status != "completed":
             logger.info(
-                "质量门禁未通过: 状态不允许自动发布（当前 %s）, run_id=%s",
+                "质量门禁未通过: 状态不允许自动发布（当前 %s，仅 completed 可发布）, run_id=%s",
                 run.status, run.id,
             )
             return False
 
-        # 门禁 2：至少有一个成功结果
         succeeded = run.succeeded_count or 0
+        failed = run.failed_count or 0
+        skipped = run.skipped_count or 0
+        total = run.total_instruments or 0
+
+        # 门禁 2：失败数必须为 0
+        if failed != 0:
+            logger.info(
+                "质量门禁未通过: failed_count=%d > 0, run_id=%s",
+                failed, run.id,
+            )
+            return False
+
+        # 门禁 3：实际结果数必须等于 succeeded_count
+        if result_count != succeeded:
+            logger.info(
+                "质量门禁未通过: result_count=%d != succeeded_count=%d, run_id=%s",
+                result_count, succeeded, run.id,
+            )
+            return False
+
+        # 门禁 4：成功 + 跳过必须覆盖全部标的
+        if total <= 0 or (succeeded + skipped) != total:
+            logger.info(
+                "质量门禁未通过: succeeded+skipped=%d != total_instruments=%d, run_id=%s",
+                succeeded + skipped, total, run.id,
+            )
+            return False
+
+        # 门禁 5：skipped 原因必须在允许列表且每个 skipped 都有 reason_code
+        if skipped > 0 and db is not None:
+            stmt = select(StrategyRunItem.reason_code).where(
+                StrategyRunItem.run_id == run.id,
+                StrategyRunItem.status == "skipped",
+            )
+            result = await db.execute(stmt)
+            skipped_reasons = {row[0] for row in result.all()}
+            if None in skipped_reasons or "" in skipped_reasons:
+                logger.info(
+                    "质量门禁未通过: 存在无 reason_code 的 skipped 项, run_id=%s",
+                    run.id,
+                )
+                return False
+            invalid_reasons = skipped_reasons - self._SKIPPED_REASON_ALLOWLIST
+            if invalid_reasons:
+                logger.info(
+                    "质量门禁未通过: skipped 原因 %s 不在允许列表, run_id=%s",
+                    invalid_reasons, run.id,
+                )
+                return False
+
+        # 门禁 6：至少有一个成功结果
         if succeeded <= 0:
             logger.info(
                 "质量门禁未通过: 没有成功结果, run_id=%s", run.id,
@@ -1161,8 +1300,9 @@ class StrategyBatchService:
             return False
 
         logger.info(
-            "质量门禁通过: status=%s, succeeded=%d, run_id=%s",
-            run.status, succeeded, run.id,
+            "质量门禁通过: status=%s, succeeded=%d, skipped=%d, "
+            "total=%d, result_count=%d, run_id=%s",
+            run.status, succeeded, skipped, total, result_count, run.id,
         )
         return True
 
@@ -1331,6 +1471,9 @@ class StrategyBatchService:
         try:
             result = await runtime.execute(context)
             return result
+        except BudgetExceededError:
+            # 预算/超时异常保持原类型上抛，由 execute_run 标记 reason_code=timeout
+            raise
         except Exception as exc:
             raise RuntimeError(
                 f"策略执行失败 instrument_id={item.instrument_id}, "
@@ -1452,8 +1595,8 @@ if __name__ == "__main__":
     assert "db" in params
     print(f"recover_stale_runs params: {params} ✓")
 
-    # 验证 InvalidStrategyResult 仍保留供 API 层捕获
-    assert issubclass(InvalidStrategyResult, Exception)
-    print(f"InvalidStrategyResult: {InvalidStrategyResult} ✓")
+    # 验证 InvalidStrategyResultError 仍保留供 API 层捕获
+    assert issubclass(InvalidStrategyResultError, Exception)
+    print(f"InvalidStrategyResultError: {InvalidStrategyResultError} ✓")
 
     print("OK")
