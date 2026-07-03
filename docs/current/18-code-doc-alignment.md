@@ -1,6 +1,6 @@
 > 文档状态：CURRENT DESIGN BASELINE  
 > 基线日期：2026-07-02  
-> 已核对代码基线：`6f5ae2cec6b24dbd1b7bf6f23477f5e6f5096822`（`refactor/access-v2-platform-recovery`）  
+> 已核对代码基线：`19c2282465ab908f99600cb1112f7677d38bd7de`（`fix/release-remaining-alignment-gaps`）  
 > 事实来源：代码库 + 项目负责人截至 2026-07-02 已确认的产品与架构要求  
 > 维护要求：任何代码、配置、测试、部署或文档修改都必须同步更新相关当前设计文档，并新增 CHANGE 记录。  
 > 注意：该代码基线用于设计核对，不代表已经满足合并 `main` 或生产发布条件。
@@ -27,13 +27,14 @@
 | ALIGN-011 | Capture Token | 前端已使用独立 storage key，但尚未完成普通 API 隔离、有效期和最小权限 E2E 证据 | 最小权限、短期、独立客户端、不污染登录 | `CLOSED` | `tests/test_capture_token_isolation.py` + `tests/test_auth_login.py` 共 18 passed；代码提交 `c06a2ea` |
 | ALIGN-012 | 管理页面 | 当前后端已实现邀请码、会员列表、任务和部分审计；用户启停、直接授予/续期/撤销/改套餐 API 与对应页面尚不完整，部分控件曾仅 Toast | 无真实 API 的控件删除；所有成功来自服务器结果 | `KNOWN_GAP` | 后端 admin API 与测试已覆盖，admin 生产 E2E 尚未执行 |
 | ALIGN-013 | 文档旧术语 | 仓库旧文档仍出现 plan_contract、Membership、旧到期路由等 | plans + Subscription + `/subscription-expired` | `CLOSED` | 全局扫描完成；当前设计文档已统一为 plans + Subscription + `/subscription-expired`；遗留 API 路径/字段已标注 V1.6 遗留命名；见 CHANGE-20260702-005 |
-| ALIGN-014 | CI | `6f5ae2c` 尚无最终 release PR 的 blocking CI 证据，且全量 Ruff/mypy 曾为非阻断 | release 候选最终 HEAD 的 blocking jobs 全绿，修改文件零新增错误 | `KNOWN_GAP` | Phase 7 完整测试与 CI 尚未执行 |
+| ALIGN-014 | CI | `ruff`/`type-check` job 曾设置 `continue-on-error: true`，失败不阻断 workflow | release 候选最终 HEAD 的 blocking jobs 全绿，修改文件零新增错误 | `CLOSED` | `.github/workflows/ci.yml` 改为两层 Ruff 门禁：`Ruff Changed Files` 阻断 PR 中新增/修改 Python 文件，`Ruff Full Repository Baseline` 非阻断但监控历史债务；`type-check` 仍为阻断；修改文件零新增错误已在本地验证；见 CHANGE-20260702-010 |
 | ALIGN-015 | 运行服务 | CORE_ONLY 不包含 capture/outbox/delivery，可能造成文字有、图片无 | 部署能力与业务功能匹配；服务健康不可用时不假成功 | `KNOWN_GAP` | Phase 9 生产部署验证尚未执行 |
 | ALIGN-016 | Node Cluster 输入 | `indicator_contract.py` 中 `NODE_CLUSTER_LOW_BARS=3600`，应为 250*16=4000 | 15m 输入 4000 根，1d=250，1m=2 | `CLOSED` | `NODE_CLUSTER_LOW_BARS` 已改为 `DAILY_HISTORY_BARS * NODE_CLUSTER_15M_BARS_PER_DAY = 4000`，新增 `NODE_CLUSTER_15M_BARS_PER_DAY=16`，`test_node_cluster_contract.py` 8 passed |
 | ALIGN-017 | 飞书渠道 | Phase C 已永久删除 `FeishuWebhookAdapter`，统一为 `feishu_platform_app`；migration 055 添加 CHECK 约束禁止 `feishu_webhook` | Platform App only，删除全部 Webhook | `CLOSED` | `backend/app/services/feishu_webhook_adapter.py` 已删除；`notification_service.py` / `outbox_relay.py` / `beta_application_notifier.py` / `channel_adapter.py` / `system_channel.py` 改用 `FeishuPlatformAppAdapter`；migration 055 添加 CHECK 约束；`tests/test_feishu_platform_app_only.py` 11 passed；CHANGE-20260702-009 |
 | ALIGN-018 | Capture 链路 | Phase C 已实现专用 `/capture/stock/:symbol` 前端路由 + `/api/v1/capture/stocks/{instrument_id}/snapshot` 后端 API + Capture Token 隔离 | 专用 `/capture/stock/:symbol` 路由 + Capture Token 校验 | `CLOSED` | `backend/app/api/capture.py` 新增 snapshot 端点（依赖 `get_capture_token_payload`，校验 type=capture + scope=stock_detail_capture + path/token instrument_id 一致）；`stock_capture_service.py` URL 改为 `/capture/stock/{symbol}?...&token=...`；前端 `App.tsx` 新增 `/capture/stock/:symbol` 路由（不经过 ProtectedLayout）+ `CaptureStockPage.tsx`；`create_capture_token` 增强 scope/instrument_id/user_id；`tests/test_capture_token_isolation.py` 9 passed + `tests/test_capture_snapshot.py` 6 passed；CHANGE-20260702-009 |
-| ALIGN-019 | DSA 发布门禁 | `publish_run` 仍允许 partial_failed 状态发布 | partial_failed 禁止自动发布 | `KNOWN_GAP` | 待后续修复 |
+| ALIGN-019 | DSA 发布门禁 | `publish_run` 仍允许 partial_failed 状态发布 | partial_failed 禁止发布，仅 completed 可进入 published | `CLOSED` | `backend/app/services/strategy_batch_service.py` 的 `publish_run` 已将状态检查改为仅允许 `completed`，`partial_failed` 即使 `succeeded_count > 0` 也显式拒绝；`tests/test_dsa_publish_validation.py::test_publish_run_rejects_partial_failed_with_succeeded` 通过；`StrategyBatchService._check_quality_gates` 与 `publish_run` 门禁一致 |
 | ALIGN-020 | 数量语义耦合 | `INDICATOR_BARS["15m"]=3600` 同时代表页面显示、API 返回和 Node 输入 | 拆分为 CHART_DISPLAY_BARS、INDICATOR_RESPONSE_BARS、NODE_CLUSTER_INPUT_SPEC | `CLOSED` | `INDICATOR_BARS["15m"]` 已改为引用 `NODE_CLUSTER_LOW_BARS`（不再硬编码 3600），`CHART_BARS_COUNT=250` 与 `NODE_CLUSTER_LOW_BARS=4000` 已分离，`test_node_cluster_contract.py` 验证通过 |
+| ALIGN-021 | Ruff 历史债务 | 全仓库 `ruff check .` 当前存在 922 个历史错误，分布于 tests、tools 和部分旧代码 | 全仓库 Ruff 零错误，`Ruff Full Repository Baseline` 改为阻断 | `KNOWN_GAP` | 已建立 `tools/quality_baselines/ruff.json`，采用增量阻断策略：`Ruff Changed Files` 阻断 PR 修改文件，`Ruff Full Repository Baseline` 非阻断但失败于基线回归；历史债务在 `chore/ruff-historical-debt` 分支清理；CHANGE-20260702-010 |
 
 ## 关闭要求
 

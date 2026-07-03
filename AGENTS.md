@@ -1300,3 +1300,4 @@ API 和数据契约
 10. 未经测试和真实运行证据不得关闭 Alignment；
 11. 不直接修改 main，不 force push 已共享分支；
 12. 不把 Mock E2E 描述成真实飞书 E2E。
+13. Ruff 质量门禁采用增量阻断策略：PR 中新增或修改的 Python 文件必须 Ruff 零错误（`Ruff Changed Files` 任务阻断合并）；全仓库 Ruff 历史债务以 `tools/quality_baselines/ruff.json` 为基线，`Ruff Full Repository Baseline` 任务非阻断但会失败于基线回归；禁止用全局 ignore、per-file-ignores 或批量 noqa 掩盖新增错误；历史债务在独立分支 `chore/ruff-historical-debt` 中清理，清零后再将全仓库 Ruff 改为完全阻断。

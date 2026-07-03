@@ -1229,6 +1229,54 @@ async def _query_15min_bars(
     return df
 
 
+async def _query_minute_bars(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    start_time: datetime,
+    end_time: datetime,
+) -> pd.DataFrame:
+    """从 DB 查询 1 分钟线行情。
+
+    Returns:
+        DataFrame: index=DatetimeIndex(trade_time), columns=open/high/low/close/volume/amount/adj_factor
+        无数据时返回空 DataFrame
+    """
+    try:
+        result = await session.execute(
+            select(
+                BarMinute.trade_time,
+                BarMinute.open,
+                BarMinute.high,
+                BarMinute.low,
+                BarMinute.close,
+                BarMinute.volume,
+                BarMinute.amount,
+                BarMinute.adj_factor,
+            )
+            .where(BarMinute.instrument_id == instrument_id)
+            .where(BarMinute.trade_time >= start_time)
+            .where(BarMinute.trade_time <= end_time)
+            .order_by(BarMinute.trade_time)
+        )
+        rows = result.all()
+    except Exception as exc:
+        logger.warning("查询 bars_minute 失败 instrument_id=%s: %s", instrument_id, exc)
+        raise
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows, columns=["trade_time"] + _BAR_COLUMNS)
+    _ts = pd.to_datetime(df["trade_time"])
+    if getattr(_ts.dt, "tz", None) is not None:
+        _ts = _ts.dt.tz_convert("Asia/Shanghai").dt.tz_localize(None)
+    df["trade_time"] = _ts
+    df = df.set_index("trade_time")
+    for col in _BAR_COLUMNS:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
 async def _map_adj_factor_from_daily(
     session: AsyncSession,
     instrument_id: uuid.UUID,

@@ -1,0 +1,7 @@
+{
+  "baseline_commit": "3e75b2319ff85929601a7a8fe6c25f5ed9897029",
+  "error_count": 922,
+  "captured_at": "2026-07-03T02:31:16Z",
+  "policy": "changed-files-blocking-full-repo-non-regression",
+  "description": "Ruff 全仓库历史债务基线。当前采用增量阻断策略：PR 中新增或修改的 Python 文件必须零错误（Ruff Changed Files 任务阻断），全仓库错误数不得高于此基线（Ruff Full Repository Baseline 任务非阻断但会失败）。历史债务在独立分支 chore/ruff-historical-debt 中清理，清零后再将全仓库 Ruff 改为完全阻断。"
+}

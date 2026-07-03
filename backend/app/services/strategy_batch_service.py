@@ -91,7 +91,7 @@ _BLOCKING_STATUSES = {"published", "completed", "running", "queued"}
 # 这些状态存在时，允许创建下一个 attempt（业务重试）
 _RETRYABLE_STATUSES = {"failed", "partial_failed", "interrupted"}
 
-class InvalidStrategyResult(Exception):
+class InvalidStrategyResultError(Exception):
     """策略结果校验失败。
 
     [StrategyBatchService] - 描述: 保留供 API 层捕获转 422（原 DSA 硬校验已移除）
@@ -810,7 +810,7 @@ class StrategyBatchService:
                         item.reason_code = "insufficient_data"
                         item.finished_at = datetime.now(UTC)
                         skipped += 1
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logger.warning(
                         "标的执行超时 instrument_id=%s",
                         item.instrument_id,
@@ -1007,8 +1007,11 @@ class StrategyBatchService:
     async def publish_run(self, db: AsyncSession, run_id: uuid.UUID) -> StrategyRun:
         """发布运行结果（admin 调用）。
 
-        status: completed/partial_failed → published
+        status: completed → published
         记录 published_at 时间戳
+
+        [DSA] - 描述: admin 手动发布同样禁止 partial_failed，与自动发布门禁一致，
+        仅允许 completed 状态进入 published。
 
         Args:
             db: 异步会话
@@ -1025,10 +1028,11 @@ class StrategyBatchService:
         if run is None:
             raise ValueError(f"运行不存在: run_id={run_id}")
 
-        if run.status not in ("completed", "partial_failed"):
+        # [DSA] - 描述: publish_run 显式拒绝 partial_failed，仅 completed 可发布
+        if run.status != "completed":
             raise ValueError(
                 f"运行状态不允许发布（当前 {run.status}，"
-                f"仅 completed/partial_failed 可发布）: run_id={run_id}"
+                f"仅 completed 可发布）: run_id={run_id}"
             )
 
         if (run.succeeded_count or 0) <= 0:
@@ -1591,8 +1595,8 @@ if __name__ == "__main__":
     assert "db" in params
     print(f"recover_stale_runs params: {params} ✓")
 
-    # 验证 InvalidStrategyResult 仍保留供 API 层捕获
-    assert issubclass(InvalidStrategyResult, Exception)
-    print(f"InvalidStrategyResult: {InvalidStrategyResult} ✓")
+    # 验证 InvalidStrategyResultError 仍保留供 API 层捕获
+    assert issubclass(InvalidStrategyResultError, Exception)
+    print(f"InvalidStrategyResultError: {InvalidStrategyResultError} ✓")
 
     print("OK")

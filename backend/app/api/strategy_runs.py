@@ -50,7 +50,6 @@ from app.schemas.strategy_run import (
 from app.services.access_control_service import (
     AccessContext,
     require_active_subscription,
-    require_authenticated,
     require_feature,
 )
 from app.services.selector_query_service import (
@@ -59,7 +58,7 @@ from app.services.selector_query_service import (
     query_published_selector_results,
 )
 from app.services.strategy_batch_service import (
-    InvalidStrategyResult,
+    InvalidStrategyResultError,
     StrategyBatchService,
 )
 from app.services.strategy_service import (
@@ -258,7 +257,7 @@ async def publish_strategy_run(
 
     try:
         run = await service.publish_run(db, run_id)
-    except InvalidStrategyResult as e:
+    except InvalidStrategyResultError as e:
         # [StrategyRuns] - 描述: 策略结果校验失败 → 422（保留异常类型兼容）
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

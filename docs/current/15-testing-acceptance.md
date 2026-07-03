@@ -89,6 +89,8 @@ python tools/check_test_allowlist.py
 - Alembic upgrade/downgrade/upgrade；
 - 前端 TypeScript、lint、build、contract tests；
 - Docker Compose config；
-- 修改文件 Ruff/mypy 阻断；
+- **Ruff 增量阻断**：PR 中新增或修改的 Python 文件必须零错误（`Ruff Changed Files` 阻断任务）；
+- mypy `app` 阻断；
+- `Ruff Full Repository Baseline` 非阻断，但全仓库错误数不得高于 `tools/quality_baselines/ruff.json` 基线；
 - GitHub Actions 针对最终 HEAD 全部 blocking jobs success；
 - 没有未登记的代码—文档冲突。

@@ -65,3 +65,11 @@ Backend、Python Workers、Frontend 和 Capture 必须可追踪 Git SHA、Build 
 ## 7. Secret 与日志
 
 `/etc/market-dev/market.env` 权限为 600。部署脚本不得回显完整连接串或飞书密钥。日志包含 service、git_sha、run_id、run_key、instrument、source_bar_time、error_code 和 request_id，但不包含 Secret。
+
+## 8. CI / GitHub Actions
+
+- 工作流定义位于 `.github/workflows/ci.yml`；
+- **阻断任务 `Ruff Changed Files`**：仅检查当前 PR 相对于 `main` 新增或修改的 Python 文件（`git diff --diff-filter=ACMR`），必须零错误，失败阻断合并；
+- **非阻断任务 `Ruff Full Repository Baseline`**：执行 `ruff check .` 并上传 JSON 报告 artifact；当前全仓库历史债务以 `tools/quality_baselines/ruff.json` 为基线，错误数不得高于基线，否则该任务失败但不阻断合并；
+- 历史债务在独立分支 `chore/ruff-historical-debt` 中清理，清零后再将全仓库 Ruff 改为完全阻断；
+- 禁止通过 `continue-on-error` 以外的手段（如扩大 `ignore`、新增 `per-file-ignores`、批量 `noqa`）让新增错误通过阻断任务。

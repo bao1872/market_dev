@@ -9,7 +9,7 @@ from pathlib import Path
 
 import yaml
 
-from app.constants import indicator_contract as IC
+from app.constants import indicator_contract
 
 # manifest 文件目录（backend/app/strategy_assets/manifests/）
 _MANIFESTS_DIR = Path(__file__).parent.parent / "app" / "strategy_assets" / "manifests"
@@ -35,34 +35,36 @@ def test_unified_volume_profile_vp_lookback_matches_baseline():
         VP_LOOKBACK,
     )
 
-    assert VP_LOOKBACK == IC.NODE_CLUSTER_PRIMARY_BARS
+    assert VP_LOOKBACK == indicator_contract.NODE_CLUSTER_PRIMARY_BARS
 
 
 # ===== monitor_batch_service 行情回看参数（旧值应已迁移至基线）=====
 
 
 def test_monitor_batch_service_no_daily_fetch_days_370():
-    """旧值 _DAILY_FETCH_DAYS=370 应已删除，改用 get_recent_bars 按根数取数。"""
+    """旧值 _DAILY_FETCH_DAYS=370 应已删除，改用 MarketDataAggregationService 统一入口。"""
     from app.services import monitor_batch_service
 
     source = inspect.getsource(monitor_batch_service)
     # 旧自然日估算常量不得残留
     assert "_DAILY_FETCH_DAYS = 370" not in source
     assert "_DAILY_FETCH_DAYS" not in source
-    # 新模式：使用 get_recent_bars 按根数取数
-    assert "get_recent_bars" in source
+    # 新模式：统一走 MarketDataAggregationService 并按根数 tail(N)
+    assert "MarketDataAggregationService" in source
+    assert "_fetch_md_bars" in source
 
 
 def test_monitor_batch_service_no_15min_fetch_days_200():
-    """旧值 _15MIN_FETCH_DAYS=200 应已删除，改用 get_recent_bars 按根数取数。"""
+    """旧值 _15MIN_FETCH_DAYS=200 应已删除，改用 MarketDataAggregationService 统一入口。"""
     from app.services import monitor_batch_service
 
     source = inspect.getsource(monitor_batch_service)
     # 旧自然日估算常量不得残留
     assert "_15MIN_FETCH_DAYS = 200" not in source
     assert "_15MIN_FETCH_DAYS" not in source
-    # 新模式：使用 get_recent_bars 按根数取数
-    assert "get_recent_bars" in source
+    # 新模式：统一走 MarketDataAggregationService 并按根数 tail(N)
+    assert "MarketDataAggregationService" in source
+    assert "_fetch_md_bars" in source
 
 
 # ===== watchlist_monitor.yaml 事件 TTL =====
@@ -105,24 +107,24 @@ def test_dsa_selector_yaml_lookback_matches_baseline():
     with open(yaml_path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
     params = {p["key"]: p for p in data["parameters"]}
-    assert params["algorithm.lookback"]["default"] == IC.DSA_LOOKBACK
+    assert params["algorithm.lookback"]["default"] == indicator_contract.DSA_LOOKBACK
 
 
 # ===== indicator_service 各周期根数 =====
 
 
 def test_indicator_service_daily_bars_matches_baseline():
-    """INDICATOR_BARS['1d'] 应与基线 IC.INDICATOR_BARS['1d'] 一致。"""
+    """INDICATOR_BARS['1d'] 应与基线 indicator_contract.INDICATOR_BARS['1d'] 一致。"""
     from app.services.indicator_service import INDICATOR_BARS
 
-    assert INDICATOR_BARS["1d"] == IC.INDICATOR_BARS["1d"]
+    assert INDICATOR_BARS["1d"] == indicator_contract.INDICATOR_BARS["1d"]
 
 
 def test_indicator_service_15min_bars_matches_baseline():
-    """INDICATOR_BARS['15m'] 应与基线 IC.INDICATOR_BARS['15m'] 一致。"""
+    """INDICATOR_BARS['15m'] 应与基线 indicator_contract.INDICATOR_BARS['15m'] 一致。"""
     from app.services.indicator_service import INDICATOR_BARS
 
-    assert INDICATOR_BARS["15m"] == IC.INDICATOR_BARS["15m"]
+    assert INDICATOR_BARS["15m"] == indicator_contract.INDICATOR_BARS["15m"]
 
 
 # ===== dsa_selector.py 旧常量清理 =====
@@ -298,7 +300,7 @@ def test_no_duplicate_controlled_params():
 
     规则：
         - 允许在 indicator_contract.py 中定义（唯一真源）
-        - 允许从 indicator_contract 导入后引用（如 IC.NODE_CLUSTER_LOW_BARS）
+        - 允许从 indicator_contract 导入后引用（如 indicator_contract.NODE_CLUSTER_LOW_BARS）
         - 禁止其它文件用字面量 250/3600/600 作为"参数赋值"形成第二套定义
         - 例外：注释、字符串、非参数赋值（如数组索引/比较/算术）不报错
         - 例外：_KNOWN_SEMANTIC_DIFFERENCES 白名单（语义不同的同值用法）

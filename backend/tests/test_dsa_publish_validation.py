@@ -65,14 +65,10 @@ class TestPublishRunValidation:
             await service.publish_run(db_session, run.id)
 
     @pytest.mark.asyncio
-    async def test_publish_run_accepts_partial_failed_with_succeeded(
+    async def test_publish_run_rejects_partial_failed_with_succeeded(
         self, db_session, test_selector_strategy
     ):
-        """admin 手动 publish_run：partial_failed + succeeded>0 仍允许发布。
-
-        注意：自动发布门禁（_check_quality_gates）对 partial_failed 严格拒绝，
-        但 admin 手动发布口径保留 completed/partial_failed + succeeded>0。
-        """
+        """admin 手动 publish_run：partial_failed 即使 succeeded>0 也禁止发布。"""
         version = test_selector_strategy["version"]
         run = StrategyRun(
             strategy_version_id=version.id,
@@ -90,9 +86,8 @@ class TestPublishRunValidation:
         await db_session.flush()
 
         service = StrategyBatchService()
-        published = await service.publish_run(db_session, run.id)
-        assert published.status == "published"
-        assert published.succeeded_count == 80
+        with pytest.raises(ValueError, match="运行状态不允许发布"):
+            await service.publish_run(db_session, run.id)
 
 
 class TestQualityGates:

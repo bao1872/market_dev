@@ -23,22 +23,23 @@ import logging
 import random
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, time as dt_time, timedelta
+from datetime import date, datetime, timedelta
+from datetime import time as dt_time
 from typing import Any
 
 import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncSession
-from zoneinfo import ZoneInfo
 
 from app.core.pytdx_adapter import get_pytdx_adapter
 from app.core.redis_client import get_sync_redis
-from app.core.time import SHANGHAI_TZ, now_shanghai
+from app.core.time import now_shanghai
 from app.repositories.bar_repository import (
     _get_adj_factor_df,
     _get_symbol,
     _query_15min_bars,
     _query_60min_bars,
     _query_daily_bars,
+    _query_minute_bars,
     apply_adj_factor_to_bars,
     convert_kline_frequency,
 )
@@ -47,7 +48,7 @@ from app.services.calendar_service import is_trading_day_async
 logger = logging.getLogger("services.market_data_aggregation_service")
 
 # [mdas] - 描述: 支持的周期与复权方式
-_ALLOWED_TIMEFRAMES: set[str] = {"1d", "15m", "1h", "1w", "1mo"}
+_ALLOWED_TIMEFRAMES: set[str] = {"1d", "15m", "1h", "1w", "1mo", "1m"}
 _ALLOWED_ADJ: set[str] = {"qfq", "none"}
 
 # [mdas] - 描述: 默认回看范围（与 bars.py / indicator_service.py 保持一致）
@@ -455,7 +456,7 @@ class MarketDataAggregationService:
         Args:
             session: 异步 DB 会话
             instrument_id: 标的 UUID
-            timeframe: 1d | 15m | 1h | 1w | 1mo
+            timeframe: 1d | 15m | 1h | 1w | 1mo | 1m
             adj: qfq | none
             include_realtime: 交易时段是否补充实时 1m 数据
             start_date: 起始日期/时间（可选）
@@ -547,13 +548,15 @@ class MarketDataAggregationService:
                     data_source = "degraded"
 
         # ============================================================
-        # 日内周期
+        # 日内周期（含 1m 原始分钟线）
         # ============================================================
         else:
             if timeframe == "15m":
                 bars_df = await _query_15min_bars(session, instrument_id, start, end)  # type: ignore[arg-type]
-            else:  # 1h
+            elif timeframe == "1h":
                 bars_df = await _query_60min_bars(session, instrument_id, start, end)  # type: ignore[arg-type]
+            else:  # 1m
+                bars_df = await _query_minute_bars(session, instrument_id, start, end)  # type: ignore[arg-type]
 
             if not bars_df.empty:
                 last_persisted_bar_time = pd.Timestamp(bars_df.index[-1])
@@ -566,7 +569,10 @@ class MarketDataAggregationService:
                         session, instrument_id, live_start, live_end
                     )
                     if not live_1m.empty:
-                        live_agg = _aggregate_minute_to_target(live_1m, timeframe)
+                        if timeframe == "1m":
+                            live_agg = live_1m
+                        else:
+                            live_agg = _aggregate_minute_to_target(live_1m, timeframe)
                         if not live_agg.empty:
                             bars_df = _merge_bars(bars_df, live_agg)
                             if data_source == "db":
