@@ -2,7 +2,7 @@
 
 测试策略：
 - 纯函数测试（message_builder、feishu_card_builder、签名）：直接验证
-- 适配器注册测试：验证 feishu_webhook 已注册
+- 适配器注册测试：验证 feishu_platform_app 已注册
 - API 端点测试：使用 FastAPI TestClient
 - DB 依赖测试：使用 mock 模拟 AsyncSession
 
@@ -11,9 +11,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import base64
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
@@ -41,11 +38,6 @@ from app.services.message_builder import (
 from app.services.feishu_card_builder import (
     dto_to_feishu_card,
     mask_webhook_url,
-)
-from app.services.feishu_webhook_adapter import (
-    _sign,
-    _build_webhook_payload,
-    FeishuWebhookAdapter,
 )
 from app.services.channel_adapter import (
     get_adapter,
@@ -97,14 +89,14 @@ class TestMessageBuilder:
     def test_build_channel_alert(self) -> None:
         """测试渠道异常消息构建。"""
         dto = build_channel_alert(
-            channel_name="飞书Webhook",
-            error_code="WEBHOOK_INVALID",
-            error_message="Webhook URL 返回 404",
+            channel_name="飞书PlatformApp",
+            error_code="PLATFORM_APP_INVALID",
+            error_message="Platform App app_id 无效",
             resource_refs={"channel_id": "ch_001"},
         )
         assert dto.message_type == "CHANNEL_ALERT"
-        assert "飞书Webhook" in dto.title
-        assert "WEBHOOK_INVALID" in dto.facts[1]["value"]
+        assert "飞书PlatformApp" in dto.title
+        assert "PLATFORM_APP_INVALID" in dto.facts[1]["value"]
 
     def test_build_message_invalid_type(self) -> None:
         """测试不支持的消息类型。"""
@@ -216,117 +208,6 @@ class TestFeishuCardBuilder:
     def test_mask_webhook_url_empty(self) -> None:
         """测试空 URL 脱敏。"""
         assert mask_webhook_url("") == ""
-
-
-# ==================== 飞书 Webhook 适配器测试 ====================
-
-
-class TestFeishuWebhookAdapter:
-    """飞书 Webhook 适配器测试。"""
-
-    def test_adapter_registered(self) -> None:
-        """测试适配器已注册。"""
-        adapters = list_supported_adapters()
-        assert "feishu_webhook" in adapters
-        assert "mock" in adapters
-
-    def test_get_adapter(self) -> None:
-        """测试获取适配器实例。"""
-        adapter = get_adapter("feishu_webhook")
-        assert adapter.adapter_type == "feishu_webhook"
-        assert isinstance(adapter, FeishuWebhookAdapter)
-
-    def test_sign_algorithm(self) -> None:
-        """测试飞书签名算法。"""
-        timestamp = "1597362936"
-        secret = "test_secret"
-        sign = _sign(timestamp, secret)
-
-        # 验证签名可重复
-        assert sign == _sign(timestamp, secret)
-
-        # 验证签名格式（Base64）
-        decoded = base64.b64decode(sign)
-        assert len(decoded) == 32  # SHA256 输出 32 字节
-
-        # 验证签名内容
-        expected = hmac.new(
-            f"{timestamp}\n{secret}".encode("utf-8"),
-            digestmod=hashlib.sha256,
-        ).digest()
-        assert sign == base64.b64encode(expected).decode("utf-8")
-
-    def test_build_payload_with_sign(self) -> None:
-        """测试带签名的 payload 构建。"""
-        dto = NotificationMessageDTO(
-            message_type="SYSTEM_ALERT",
-            template_key="test",
-            template_version="1.1.0",
-            title="测试",
-            summary="摘要",
-            resource_refs={},
-            data_time="2026-06-18",
-        )
-        payload = _build_webhook_payload(dto, "secret")
-        assert payload["msg_type"] == "interactive"
-        assert "timestamp" in payload
-        assert "sign" in payload
-        assert "card" in payload
-        assert payload["card"]["header"]["title"]["content"] == "测试"
-
-    def test_build_payload_without_sign(self) -> None:
-        """测试无签名的 payload 构建。"""
-        dto = NotificationMessageDTO(
-            message_type="SYSTEM_ALERT",
-            template_key="test",
-            template_version="1.1.0",
-            title="测试",
-            summary="摘要",
-            resource_refs={},
-            data_time="2026-06-18",
-        )
-        payload = _build_webhook_payload(dto, None)
-        assert "timestamp" not in payload
-        assert "sign" not in payload
-        assert payload["msg_type"] == "interactive"
-
-    @pytest.mark.asyncio
-    async def test_send_missing_webhook_url(self) -> None:
-        """测试缺少 webhook_url 时的错误处理。"""
-        adapter = FeishuWebhookAdapter()
-        dto = NotificationMessageDTO(
-            message_type="SYSTEM_ALERT",
-            template_key="test",
-            template_version="1.1.0",
-            title="测试",
-            summary="摘要",
-            resource_refs={},
-            data_time="2026-06-18",
-        )
-        result = await adapter.send(dto, {})
-        assert result.success is False
-        assert result.error_code == "CONFIG_MISSING"
-
-    @pytest.mark.asyncio
-    async def test_send_network_error(self) -> None:
-        """测试网络错误处理。"""
-        adapter = FeishuWebhookAdapter()
-        dto = NotificationMessageDTO(
-            message_type="SYSTEM_ALERT",
-            template_key="test",
-            template_version="1.1.0",
-            title="测试",
-            summary="摘要",
-            resource_refs={},
-            data_time="2026-06-18",
-        )
-        # 使用不可达的 URL 触发网络错误
-        result = await adapter.send(dto, {
-            "webhook_url": "http://127.0.0.1:19999/hook",  # 不可达端口
-            "sign_secret": "secret",
-        })
-        assert result.success is False
-        assert result.error_code in ("NETWORK_ERROR", "NETWORK_TIMEOUT", "RETRYABLE")
 
 
 # ==================== 投递 Worker 测试 ====================
@@ -552,9 +433,9 @@ async def test_valid_jwt_returns_user_channels(
     # 为 test_user 创建一个渠道
     channel = NotificationChannel(
         user_id=test_user.id,
-        adapter_type="feishu_webhook",
+        adapter_type="feishu_platform_app",
         display_name="JWT 测试渠道",
-        target_config={"webhook_url": "http://example.com/hook"},
+        target_config={"app_id": "cli_test_001", "app_secret": "secret_value", "receive_id": "bg12345", "receive_id_type": "user_id"},
         status="active",
     )
     db_session.add(channel)
@@ -757,9 +638,9 @@ class TestOutboxDeliveryPipeline:
         )
         channel = NotificationChannel(
             user_id=test_user.id,
-            adapter_type="feishu_webhook",
-            display_name="测试Webhook",
-            target_config={"webhook_url": "http://example.com/hook"},
+            adapter_type="feishu_platform_app",
+            display_name="测试PlatformApp",
+            target_config={"app_id": "cli_test_001", "app_secret": "secret_value", "receive_id": "bg12345", "receive_id_type": "user_id"},
             status="active",
         )
         db_session.add_all([message, channel])
@@ -782,8 +663,8 @@ class TestOutboxDeliveryPipeline:
         assert len(found.deliveries) == 1
         delivery = found.deliveries[0]
         assert delivery.status == "failed"
-        assert delivery.channel.adapter_type == "feishu_webhook"
-        assert delivery.channel.display_name == "测试Webhook"
+        assert delivery.channel.adapter_type == "feishu_platform_app"
+        assert delivery.channel.display_name == "测试PlatformApp"
         assert delivery.last_error_code == "NETWORK_ERROR"
 
     @pytest.mark.asyncio
@@ -869,9 +750,9 @@ class TestOutboxDeliveryPipeline:
         channel = NotificationChannel(
             id=uuid4(),
             user_id=msg.user_id,
-            adapter_type="feishu_webhook",
-            display_name="测试Webhook",
-            target_config={"webhook_url": "http://example.com/hook"},
+            adapter_type="feishu_platform_app",
+            display_name="测试PlatformApp",
+            target_config={"app_id": "cli_test_001", "app_secret": "secret_value", "receive_id": "bg12345", "receive_id_type": "user_id"},
             status="active",
         )
         delivery = MessageDelivery(
@@ -932,9 +813,9 @@ class TestOutboxDeliveryPipeline:
         channel = NotificationChannel(
             id=uuid4(),
             user_id=msg.user_id,
-            adapter_type="feishu_webhook",
-            display_name="测试Webhook",
-            target_config={"webhook_url": "http://example.com/hook"},
+            adapter_type="feishu_platform_app",
+            display_name="测试PlatformApp",
+            target_config={"app_id": "cli_test_001", "app_secret": "secret_value", "receive_id": "bg12345", "receive_id_type": "user_id"},
             status="active",
         )
         delivery = MessageDelivery(
@@ -1222,9 +1103,9 @@ class TestMessageDeliveryAdminService:
         )
         channel = NotificationChannel(
             user_id=test_user.id,
-            adapter_type="feishu_webhook",
+            adapter_type="feishu_platform_app",
             display_name="测试渠道",
-            target_config={"webhook_url": "http://example.com/hook"},
+            target_config={"app_id": "cli_test_001", "app_secret": "secret_value", "receive_id": "bg12345", "receive_id_type": "user_id"},
             status="active",
         )
         db_session.add_all([message, channel])
@@ -1548,9 +1429,9 @@ class TestDeliveryStateMachine:
         )
         channel = NotificationChannel(
             user_id=test_user.id,
-            adapter_type="feishu_webhook",
+            adapter_type="feishu_platform_app",
             display_name="飞书渠道",
-            target_config={"webhook_url": "http://example.com/hook"},
+            target_config={"app_id": "cli_test_001", "app_secret": "secret_value", "receive_id": "bg12345", "receive_id_type": "user_id"},
             status="active",
         )
         db_session.add_all([message, channel])
@@ -1568,13 +1449,13 @@ class TestDeliveryStateMachine:
         await db_session.flush()
 
         class _InvalidAdapter(ChannelAdapter):
-            adapter_type = "feishu_webhook"
+            adapter_type = "feishu_platform_app"
 
             async def send(self, message_dto, channel_config):
                 return DeliveryResult(
                     success=False,
                     error_code="CHANNEL_INVALID",
-                    error_message="webhook invalid",
+                    error_message="platform app invalid",
                 )
 
             async def verify(self, channel_config):
@@ -1619,9 +1500,9 @@ class TestDeliveryStateMachine:
         )
         channel = NotificationChannel(
             user_id=test_user.id,
-            adapter_type="feishu_webhook",
+            adapter_type="feishu_platform_app",
             display_name="飞书渠道",
-            target_config={"webhook_url": "http://example.com/hook"},
+            target_config={"app_id": "cli_test_001", "app_secret": "secret_value", "receive_id": "bg12345", "receive_id_type": "user_id"},
             status="active",
         )
         db_session.add_all([message, channel])
@@ -1639,7 +1520,7 @@ class TestDeliveryStateMachine:
         await db_session.flush()
 
         class _RetryableAdapter(ChannelAdapter):
-            adapter_type = "feishu_webhook"
+            adapter_type = "feishu_platform_app"
 
             async def send(self, message_dto, channel_config):
                 return DeliveryResult(
@@ -1796,7 +1677,7 @@ class TestChannelActiveUniqueness:
     async def test_create_channel_rejects_duplicate_active_feishu(
         self, db_session, test_user,
     ) -> None:
-        """同一用户已存在 active feishu_webhook 时，create_channel 应拒绝。"""
+        """同一用户已存在 active feishu_platform_app 时，create_channel 应拒绝。"""
         from app.models.notification import NotificationChannel
         from app.services.notification_service import (
             DuplicateActiveChannelError,
@@ -1805,9 +1686,9 @@ class TestChannelActiveUniqueness:
 
         existing = NotificationChannel(
             user_id=test_user.id,
-            adapter_type="feishu_webhook",
-            display_name="已有Webhook",
-            target_config={"webhook_url": "http://example.com/hook"},
+            adapter_type="feishu_platform_app",
+            display_name="已有PlatformApp",
+            target_config={"app_id": "cli_test_001", "app_secret": "secret_value", "receive_id": "bg12345", "receive_id_type": "user_id"},
             status="active",
         )
         db_session.add(existing)
@@ -1817,24 +1698,24 @@ class TestChannelActiveUniqueness:
             await create_channel(
                 db_session,
                 user_id=test_user.id,
-                adapter_type="feishu_webhook",
-                display_name="新建Webhook",
-                target_config={"webhook_url": "http://example.com/hook2"},
+                adapter_type="feishu_platform_app",
+                display_name="新建PlatformApp",
+                target_config={"app_id": "cli_test_002", "app_secret": "secret_value", "receive_id": "bg67890", "receive_id_type": "user_id"},
             )
 
     @pytest.mark.asyncio
     async def test_create_channel_allows_feishu_when_no_active(
         self, db_session, test_user,
     ) -> None:
-        """同一用户无 active feishu_webhook 时，create_channel 应成功。"""
+        """同一用户无 active feishu_platform_app 时，create_channel 应成功。"""
         from app.services.notification_service import create_channel
 
         channel = await create_channel(
             db_session,
             user_id=test_user.id,
-            adapter_type="feishu_webhook",
-            display_name="Webhook",
-            target_config={"webhook_url": "http://example.com/hook"},
+            adapter_type="feishu_platform_app",
+            display_name="PlatformApp",
+            target_config={"app_id": "cli_test_001", "app_secret": "secret_value", "receive_id": "bg12345", "receive_id_type": "user_id"},
         )
         assert channel.status == "pending"
         assert channel.user_id == test_user.id
@@ -1843,16 +1724,16 @@ class TestChannelActiveUniqueness:
     async def test_create_channel_allows_feishu_for_different_user(
         self, db_session, test_user,
     ) -> None:
-        """不同用户可各自拥有 active feishu_webhook。"""
+        """不同用户可各自拥有 active feishu_platform_app。"""
         from app.models.notification import NotificationChannel
         from app.models.user import User
         from app.services.notification_service import create_channel
 
         existing = NotificationChannel(
             user_id=test_user.id,
-            adapter_type="feishu_webhook",
-            display_name="用户A的Webhook",
-            target_config={"webhook_url": "http://example.com/hook"},
+            adapter_type="feishu_platform_app",
+            display_name="用户A的PlatformApp",
+            target_config={"app_id": "cli_test_001", "app_secret": "secret_value", "receive_id": "bg12345", "receive_id_type": "user_id"},
             status="active",
         )
         other_user = User(
@@ -1866,9 +1747,9 @@ class TestChannelActiveUniqueness:
         channel = await create_channel(
             db_session,
             user_id=other_user.id,
-            adapter_type="feishu_webhook",
-            display_name="用户B的Webhook",
-            target_config={"webhook_url": "http://example.com/hook2"},
+            adapter_type="feishu_platform_app",
+            display_name="用户B的PlatformApp",
+            target_config={"app_id": "cli_test_002", "app_secret": "secret_value", "receive_id": "bg67890", "receive_id_type": "user_id"},
         )
         assert channel.user_id == other_user.id
 
@@ -1885,16 +1766,16 @@ class TestChannelActiveUniqueness:
 
         active_channel = NotificationChannel(
             user_id=test_user.id,
-            adapter_type="feishu_webhook",
-            display_name="ActiveWebhook",
-            target_config={"webhook_url": "http://example.com/hook"},
+            adapter_type="feishu_platform_app",
+            display_name="ActivePlatformApp",
+            target_config={"app_id": "cli_test_001", "app_secret": "secret_value", "receive_id": "bg12345", "receive_id_type": "user_id"},
             status="active",
         )
         pending_channel = NotificationChannel(
             user_id=test_user.id,
-            adapter_type="feishu_webhook",
-            display_name="PendingWebhook",
-            target_config={"webhook_url": "http://example.com/hook2"},
+            adapter_type="feishu_platform_app",
+            display_name="PendingPlatformApp",
+            target_config={"app_id": "cli_test_002", "app_secret": "secret_value", "receive_id": "bg67890", "receive_id_type": "user_id"},
             status="pending",
         )
         db_session.add_all([active_channel, pending_channel])
@@ -1921,16 +1802,16 @@ class TestChannelActiveUniqueness:
 
         active_channel = NotificationChannel(
             user_id=test_user.id,
-            adapter_type="feishu_webhook",
-            display_name="ActiveWebhook",
-            target_config={"webhook_url": "http://example.com/hook"},
+            adapter_type="feishu_platform_app",
+            display_name="ActivePlatformApp",
+            target_config={"app_id": "cli_test_001", "app_secret": "secret_value", "receive_id": "bg12345", "receive_id_type": "user_id"},
             status="active",
         )
         pending_channel = NotificationChannel(
             user_id=test_user.id,
-            adapter_type="feishu_webhook",
-            display_name="PendingWebhook",
-            target_config={"webhook_url": "http://example.com/hook2"},
+            adapter_type="feishu_platform_app",
+            display_name="PendingPlatformApp",
+            target_config={"app_id": "cli_test_002", "app_secret": "secret_value", "receive_id": "bg67890", "receive_id_type": "user_id"},
             status="pending",
         )
         db_session.add_all([active_channel, pending_channel])
@@ -1939,36 +1820,6 @@ class TestChannelActiveUniqueness:
         with pytest.raises(DuplicateActiveChannelError, match="已存在 active"):
             await verify_channel(
                 db_session, pending_channel.id, user_id=test_user.id
-            )
-
-    @pytest.mark.asyncio
-    async def test_create_channel_rejects_cross_type_active_feishu(
-        self, db_session, test_user,
-    ) -> None:
-        """同一用户已存在 active feishu_webhook 时，创建 feishu_platform_app 应拒绝。"""
-        from app.models.notification import NotificationChannel
-        from app.services.notification_service import (
-            DuplicateActiveChannelError,
-            create_channel,
-        )
-
-        existing = NotificationChannel(
-            user_id=test_user.id,
-            adapter_type="feishu_webhook",
-            display_name="已有Webhook",
-            target_config={"webhook_url": "http://example.com/hook"},
-            status="active",
-        )
-        db_session.add(existing)
-        await db_session.flush()
-
-        with pytest.raises(DuplicateActiveChannelError, match="已存在 active"):
-            await create_channel(
-                db_session,
-                user_id=test_user.id,
-                adapter_type="feishu_platform_app",
-                display_name="PlatformApp",
-                target_config={"app_id": "app_001", "app_secret": "secret"},
             )
 
     @pytest.mark.asyncio

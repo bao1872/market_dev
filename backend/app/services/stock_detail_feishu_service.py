@@ -15,7 +15,10 @@
 - message_group_id: 关联 text+image 两条 Outbox/MessageDelivery 的组 ID
 - message_id: 文本消息 ID（主消息）
 - image_message_id: 图片消息 ID（截图失败时为 None）
-- status: "pending"（Outbox 异步链路，创建后即为 pending）
+- status: "pending"（截图成功，Outbox 异步投递中）| "partial_failed"（截图失败）
+- failed_step: 截图失败时的失败步骤（"capture" | "image_outbox" | None）
+- error_code: 截图失败时的错误码（NO_IMAGE_URL | CAPTURE_REQUEST_FAILED | IMAGE_OUTBOX_FAILED | None）
+- error_message: 截图失败时的错误详情（包含 worker 返回的响应体，最多 500 字符）
 
 状态查询：
 - GET /admin/stock-detail-feishu/{test_run_id}/status
@@ -40,7 +43,7 @@ from app.models.capture_job import (
     CaptureJob,
 )
 from app.models.instrument import Instrument
-from app.models.notification import NotificationChannel
+from app.models.notification import MessageDelivery, NotificationChannel
 from app.models.stock_memo import StockMemo
 from app.schemas.notification import NotificationMessageDTO
 from app.services.channel_adapter import get_adapter  # noqa: F401  re-export for patch
@@ -123,12 +126,16 @@ async def send_stock_detail_to_feishu(
         capture_token_ttl_seconds: capture token 有效期（秒）
 
     Returns:
-        dict 含 test_run_id / message_group_id / message_id / image_message_id / status
+        dict 含 test_run_id / message_group_id / message_id / image_message_id /
+        status / failed_step / error_code / error_message
+        - status="pending": 截图成功，Outbox 异步投递中（终态由 delivery_worker 决定）
+        - status="partial_failed": 截图失败，文本已写入 Outbox，支持仅重试图片
+        - failed_step/error_code/error_message: 截图成功时为 None，失败时携带上下文
 
     Raises:
         InstrumentNotFoundError: 个股不存在
         ChannelNotFoundError: 用户无 active 飞书渠道
-        StockDetailFeishuError: 快照/文本Outbox/截图/图片Outbox 失败（携带 error_code/failed_step）
+        StockDetailFeishuError: 快照/文本Outbox 失败（携带 error_code/failed_step）
         NotificationServiceError: 其他消息创建失败
     """
     total_start = time.time()
@@ -153,10 +160,10 @@ async def send_stock_detail_to_feishu(
     memo = memo_result.scalar_one_or_none()
     memo_content = memo.content if memo else None
 
-    # 2. 自动查找当前用户唯一 active 飞书渠道（webhook 或 platform_app）
+    # 2. 自动查找当前用户唯一 active 飞书渠道（仅 Platform App）
     stmt_ch = select(NotificationChannel).where(
         NotificationChannel.user_id == user_id,
-        NotificationChannel.adapter_type.in_(["feishu_webhook", "feishu_platform_app"]),
+        NotificationChannel.adapter_type == "feishu_platform_app",
         NotificationChannel.status == "active",
     )
     ch_result = await db.execute(stmt_ch)
@@ -250,14 +257,23 @@ async def send_stock_detail_to_feishu(
 
     # 8. 截图 → 创建图片消息 → 写入图片 Outbox（截图失败不阻塞文本投递）
     # [StockDetailFeishu] - 图片段：delivery_type=image，与 text 共享 message_group_id
+    # [StockDetailFeishu] - 状态机：在 try 块外维护失败上下文，截图失败时返回 partial_failed
     image_message_id: str | None = None
     image_url: str | None = None
+    failed_step_local: str | None = None
+    error_code_local: str | None = None
+    error_message_local: str | None = None
     capture_start = time.time()
     try:
+        # [Capture] - 描述: stock_detail 链路必须传 scope=stock_detail_capture + instrument_id
+        # （advice.md 第六节硬规则，由 get_capture_token_payload 校验）
         token = create_capture_token(
             subject=str(user_id),
             event_id=str(instrument_id),
             expires_delta=timedelta(seconds=capture_token_ttl_seconds),
+            scope="stock_detail_capture",
+            instrument_id=str(instrument_id),
+            user_id=str(user_id),
         )
         capture_payload = {
             "symbol": instrument.symbol,
@@ -273,7 +289,24 @@ async def send_stock_detail_to_feishu(
                 f"{capture_worker_url.rstrip('/')}/capture",
                 json=capture_payload,
             )
-            capture_resp.raise_for_status()
+            # [StockDetailFeishu] - 修复: 不丢弃 worker 返回的错误详情（advice.md 第七节状态机）
+            try:
+                capture_resp.raise_for_status()
+            except httpx.HTTPStatusError as http_err:
+                # 解析 worker 返回的错误详情，不丢弃响应体
+                # error_code 由外层 except 根据 failed_step_local 重新判定，此处只提取 err_msg
+                try:
+                    err_body = capture_resp.json()
+                    err_msg = (
+                        err_body.get("detail")
+                        or err_body.get("message")
+                        or str(http_err)
+                    )
+                except Exception:
+                    err_msg = str(http_err)
+                raise RuntimeError(
+                    f"截图服务返回 {capture_resp.status_code}: {err_msg}"
+                ) from http_err
             capture_data = capture_resp.json()
         image_url = capture_data.get("image_url")
         if not image_url:
@@ -338,13 +371,16 @@ async def send_stock_detail_to_feishu(
 
         # 判定失败阶段：未拿到 image_url 视为 capture 失败；否则为 image_outbox 失败
         failed_step_local = "capture" if not image_url else "image_outbox"
-        error_code_local = (
-            "NO_IMAGE_URL"
-            if isinstance(e, RuntimeError) and "截图服务未返回 image_url" in str(e)
-            else "CAPTURE_REQUEST_FAILED"
-            if failed_step_local == "capture"
-            else "IMAGE_OUTBOX_FAILED"
-        )
+        # [StockDetailFeishu] - 优先复用 worker 返回的 error_code（HTTPStatusError 分支已抛 RuntimeError）
+        if (
+            isinstance(e, RuntimeError)
+            and "截图服务未返回 image_url" in str(e)
+        ):
+            error_code_local = "NO_IMAGE_URL"
+        elif failed_step_local == "capture":
+            error_code_local = "CAPTURE_REQUEST_FAILED"
+        else:
+            error_code_local = "IMAGE_OUTBOX_FAILED"
         error_message_local = str(e)[:500]
 
         db.add(
@@ -371,18 +407,30 @@ async def send_stock_detail_to_feishu(
     logger.info(
         "[StockDetailFeishu] 发送完成 instrument_id=%s channel_id=%s "
         "test_run_id=%s snapshot_ms=%.1f text_outbox_ms=%.1f capture_ms=%.1f "
-        "image_outbox_ms=%.1f total_ms=%.1f cache_hit=%s image_message_id=%s",
+        "image_outbox_ms=%.1f total_ms=%.1f cache_hit=%s image_message_id=%s "
+        "failed_step=%s error_code=%s",
         instrument_id, channel.id, test_run_id,
         snapshot_ms, text_outbox_ms, capture_ms, image_outbox_ms, total_ms,
         cache_hit, image_message_id,
+        failed_step_local, error_code_local,
     )
+
+    # [StockDetailFeishu] - 状态机：截图失败时返回 partial_failed（advice.md 第七节）
+    # 截图成功时仍返回 pending（Outbox 异步投递尚未完成，由 delivery_worker 处理）
+    if failed_step_local is not None:
+        final_status = "partial_failed"
+    else:
+        final_status = "pending"
 
     return {
         "test_run_id": str(test_run_id),
         "message_group_id": message_group_id,
         "message_id": str(text_message.id),
         "image_message_id": image_message_id,
-        "status": "pending",
+        "status": final_status,
+        "failed_step": failed_step_local,
+        "error_code": error_code_local,
+        "error_message": error_message_local,
     }
 
 

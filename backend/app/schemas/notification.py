@@ -123,7 +123,7 @@ class NotificationChannelResponse(BaseModel):
 
     id: UUID = Field(..., description="渠道 ID")
     user_id: UUID = Field(..., description="用户 ID")
-    adapter_type: str = Field(..., description="feishu_webhook/feishu_platform_app/email")
+    adapter_type: str = Field(..., description="feishu_platform_app/email/mock")
     display_name: str = Field(..., description="渠道名称")
     target_config: dict[str, Any] = Field(default_factory=dict, description="渠道配置（敏感字段脱敏）")
     status: str = Field(..., description="pending/active/invalid/disabled/degraded")
@@ -135,9 +135,9 @@ class NotificationChannelResponse(BaseModel):
 class CreateChannelRequest(BaseModel):
     """创建通知渠道请求。"""
 
-    adapter_type: str = Field(..., description="feishu_webhook/feishu_platform_app/email")
+    adapter_type: str = Field(..., description="feishu_platform_app/email/mock")
     display_name: str = Field(..., description="渠道名称")
-    target_config: dict[str, Any] = Field(..., description="渠道配置（webhook URL 等）")
+    target_config: dict[str, Any] = Field(..., description="渠道配置（app_id/app_secret/receive_id 等）")
 
 
 class UpdateChannelRequest(BaseModel):
@@ -155,7 +155,7 @@ class MessageDeliveryResponse(BaseModel):
     id: UUID = Field(..., description="投递记录 ID")
     channel_id: UUID = Field(..., description="渠道 ID")
     notification_message_id: UUID = Field(..., description="关联消息 ID")
-    adapter_type: str = Field(..., description="渠道类型（feishu_webhook/feishu_platform_app/email）")
+    adapter_type: str = Field(..., description="渠道类型（feishu_platform_app/email/mock）")
     display_name: str = Field(..., description="渠道展示名称")
     status: str = Field(..., description="pending/success/failed/retrying")
     delivery_type: str = Field(default="text", description="text/image/card")

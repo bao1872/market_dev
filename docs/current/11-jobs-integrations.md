@@ -58,22 +58,48 @@ Pytdx 提供行情，Mootdx 提供交易日历。统一行情聚合服务 `marke
 
 ## 6. 飞书
 
-用户渠道支持 Webhook 或平台应用，每个用户最多一个 active 渠道。管理员系统通知使用独立受限配置。
+用户渠道唯一接入方式为 `feishu_platform_app`（Platform App），每个用户最多一个 active 渠道。`feishu_webhook` 已永久删除，禁止恢复（`feishu_webhook_adapter.py` 已删除，migration 055 添加 CHECK 约束禁止 `adapter_type='feishu_webhook'`）。管理员系统通知使用独立受限配置（`ADMIN_FEISHU_APP_ID/APP_SECRET/RECEIVE_ID/RECEIVE_ID_TYPE`）。
 
 文字和图片分开记录 Delivery；Capture、图片上传和图片发送分别可失败。状态必须可查询，支持仅重试图片。
 
 ## 7. 截图与投递健康
 
-Capture Worker 使用短期 Token 访问指定个股详情，等待 `data-render-ready=true`，截取明确区域。截图使用与页面相同的行情聚合快照，保存 as_of 和 source hash。
+Capture Worker 使用短期 Capture Token 访问专用 `/capture/stock/:symbol` 路由（不经过 ProtectedLayout/AppShell），等待 `data-render-ready=true`，截取 `data-testid="stock-detail-capture"` 区域。截图使用与页面相同的行情聚合快照，保存 as_of 和 source hash。
 
 Capture、Outbox、Delivery 服务必须健康可用；服务未运行或健康检查失败时，后端不得返回整体成功，也不得伪造成功状态。消息组应记录真实失败状态并允许后续重试。
+
+### 7.1 Capture Worker 链路
+
+- `stock_detail_feishu_service.send_stock_detail_to_feishu` 调用 `create_capture_token`（scope=stock_detail_capture + instrument_id + user_id）生成短期 token；
+- 通过 `httpx.AsyncClient` POST `{capture_worker_url}/capture` 触发截图 worker；
+- 截图 worker 内部 `stock_capture_service.capture_stock_chart` 访问 `{frontend_base_url}/capture/stock/{symbol}?source=watchlist&strategy=watchlist_monitor&event_id=...&token=...`；
+- 前端 `CaptureStockPage` 使用独立 `captureClient`，从 query 参数读取 token 写入 `CAPTURE_TOKEN_KEY`，不污染普通 Access Token；
+- 截图成功：worker 返回 `image_url`，后端创建图片消息 + 写入 image Outbox（与 text 共享 message_group_id）；
+- 截图失败：写入 `CaptureJob(status=failed)` + 返回 `status="partial_failed"` + `failed_step` + `error_code` + `error_message`，文本 Outbox 已写入不阻塞；
+- `capture_resp.raise_for_status()` 失败时解析 worker 返回的响应体（不丢弃 502 错误详情）。
+
+### 7.2 状态机
+
+| 状态 | 含义 | 触发条件 |
+|---|---|---|
+| `pending` | 截图成功，Outbox 异步投递中（终态由 delivery_worker 决定） | 截图 + 图片 Outbox 均成功 |
+| `partial_failed` | 截图失败，文本已写入 Outbox，支持仅重试图片 | 截图或图片 Outbox 失败 |
+| `failed` | 卡片段失败，整条消息组失败 | 文本 Outbox 失败 |
+| `success` | 卡片 + 图片均投递成功 | delivery_worker 投递成功 |
+
+失败上下文字段：
+
+- `failed_step`：`capture` / `image_outbox` / `image_upload` / `image_delivery` / `card` / `text_outbox` / `snapshot`；
+- `error_code`：`NO_IMAGE_URL` / `CAPTURE_REQUEST_FAILED` / `IMAGE_OUTBOX_FAILED` / `SNAPSHOT_FAILED` / `TEXT_OUTBOX_FAILED` 等；
+- `error_message`：错误详情（最多 500 字符，含 worker 返回的响应体）。
 
 ## 8. 可观察性
 
 管理员和运维必须能回答：运行中的 Worker、Git SHA、心跳、next run、当前任务、股票计数、失败阶段、重试状态、发布完整性、文字状态、图片状态和数据新鲜度。
 
-## 9. 飞书渠道目标
+## 9. 飞书渠道（已实现 Platform App only）
 
-- 唯一接入方式：feishu_platform_app
-- 禁止恢复 feishu_webhook
-- 当前状态：KNOWN_GAP（运行时仍有 Webhook 遗留，待 Phase C 修复，见 ALIGN-017）
+- 唯一接入方式：`feishu_platform_app`；
+- `feishu_webhook` 已永久删除（`feishu_webhook_adapter.py` 已删除，migration 055 添加 CHECK 约束禁止 `adapter_type='feishu_webhook'`）；
+- 管理员通知使用 `FeishuPlatformAppAdapter` + `ADMIN_FEISHU_APP_ID/APP_SECRET/RECEIVE_ID/RECEIVE_ID_TYPE`；
+- 实现证据：`backend/tests/test_feishu_platform_app_only.py` 11 passed，ALIGN-017 已 CLOSED。

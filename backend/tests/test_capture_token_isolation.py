@@ -1,16 +1,21 @@
-"""capture token 隔离测试（Phase 3 Task 3.3）。
+"""capture token 隔离测试（Phase 3 Task 3.3 + Phase C Task C.11.1）。
 
 安全约束：
 - capture token 是短期截图模式令牌（TTL 通常 300 秒），仅通过 URL query parameter
-  传递给前端个股详情页（/stock/:symbol?capture=feishu&token=<token>），由外部
-  Playwright worker 截图消费，不经过 get_current_user。
+  或 Authorization header 传给 /api/v1/capture/* 端点，不经过 get_current_user。
 - access token 是常规 API 认证令牌，通过 Authorization: Bearer <token> 传递。
+- Capture Token 必须校验 type=capture + scope=stock_detail_capture（advice.md 第六节）。
 
 本测试验证：
 1. capture token 通过 Authorization header 访问 GET /me 应返回 401（隔离）
 2. access token 通过 Authorization header 访问 GET /me 应返回 200（正常）
 3. capture token 通过 Authorization header 访问写端点 POST /me 相关也应返回 401
    （此处以 GET /me/access 覆盖，证明隔离对所有依赖 get_current_user 的端点生效）
+4. capture token 访问 /instruments/{id} 返回 401（C.11.1 扩展）
+5. capture token 访问 /watchlist 返回 401（C.11.1 扩展）
+6. access token 访问 /api/v1/capture/stocks/{id}/snapshot 返回 401（C.11.1 扩展）
+7. capture token instrument_id 与 path 不匹配返回 403（C.11.1 扩展）
+8. 缺失 token 返回 401（C.11.1 扩展）
 
 测试策略：
 - 使用 conftest 的 db_session fixture（PostgreSQL 测试库 bz_stock_test）
@@ -97,18 +102,29 @@ def _access_token_headers(user_id: uuid.UUID) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def _capture_token_headers(user_id: uuid.UUID) -> dict[str, str]:
-    """生成 capture token 的 Bearer 认证头（模拟攻击者用 capture token 访问 API）。"""
+def _capture_token_headers(
+    user_id: uuid.UUID,
+    instrument_id: uuid.UUID | str | None = None,
+    scope: str = "stock_detail_capture",
+) -> dict[str, str]:
+    """生成 capture token 的 Bearer 认证头（携带 scope/instrument_id/user_id）。
+
+    [Capture] - 描述: stock_detail 链路必须传 scope=stock_detail_capture + instrument_id
+    """
+    inst_str = str(instrument_id) if instrument_id else "evt-isolation-test"
     token = create_capture_token(
         subject=str(user_id),
-        event_id="evt-isolation-test",
+        event_id=inst_str,
         expires_delta=timedelta(minutes=5),
+        scope=scope,
+        instrument_id=inst_str,
+        user_id=str(user_id),
     )
     return {"Authorization": f"Bearer {token}"}
 
 
 # ============================================================
-# capture token 隔离测试
+# capture token 隔离测试（原有 + C.11.1 扩展）
 # ============================================================
 
 
@@ -165,6 +181,144 @@ async def test_capture_token_rejected_for_access_endpoint(
 
     assert resp.status_code == 401
     assert "token 类型错误" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_capture_token_rejected_for_stock_memos_api(
+    isolation_client: tuple[AsyncClient, AsyncSession],
+    test_instrument,
+) -> None:
+    """capture token 访问 GET /stock-memos 应返回 401（C.11.1 扩展）。
+
+    [Security] - 描述: capture token 不能访问普通用户 API（/stock-memos 走 get_current_active_user）
+    注：/instruments/{id} 是公开端点（无认证依赖），capture token 访问返回 200 属正常行为，
+    故改用 /stock-memos 验证隔离。
+    """
+    client, db = isolation_client
+    user = await _create_active_user(db)
+    await db.flush()
+
+    resp = await client.get(
+        f"/instruments/{test_instrument.id}/memo",
+        headers=_capture_token_headers(user.id),
+    )
+
+    assert resp.status_code == 401
+    assert "token 类型错误" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_capture_token_rejected_for_watchlist_api(
+    isolation_client: tuple[AsyncClient, AsyncSession],
+) -> None:
+    """capture token 访问 GET /watchlist 应返回 401（C.11.1 扩展）。
+
+    [Security] - 描述: capture token 不能访问普通用户 API（/watchlist 走 get_current_user）
+    """
+    client, db = isolation_client
+    user = await _create_active_user(db)
+    await db.flush()
+
+    resp = await client.get("/watchlist", headers=_capture_token_headers(user.id))
+
+    assert resp.status_code == 401
+    assert "token 类型错误" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_access_token_rejected_for_capture_snapshot(
+    isolation_client: tuple[AsyncClient, AsyncSession],
+    test_instrument,
+) -> None:
+    """access token 访问 /api/v1/capture/stocks/{id}/snapshot 应返回 401（C.11.1 扩展）。
+
+    [Security] - 描述: Capture API 只接受 capture token，普通 access token 被拒绝
+    （advice.md 第十节硬规则：Capture Token 只能访问 Capture API，反向也成立）
+    """
+    client, db = isolation_client
+    user = await _create_active_user(db)
+    await db.flush()
+
+    resp = await client.get(
+        f"/api/v1/capture/stocks/{test_instrument.id}/snapshot",
+        headers=_access_token_headers(user.id),
+    )
+
+    assert resp.status_code == 401
+    detail = resp.json()["detail"]
+    assert "token 类型错误" in detail or "需要 capture token" in detail, f"detail={detail}"
+
+
+@pytest.mark.asyncio
+async def test_capture_token_instrument_id_mismatch_returns_403(
+    isolation_client: tuple[AsyncClient, AsyncSession],
+    test_instrument,
+) -> None:
+    """capture token instrument_id 与 path 不匹配应返回 403（C.11.1 扩展）。
+
+    [Security] - 描述: Capture Token 中的 instrument_id 必须与 path 一致（防越权）
+    """
+    client, db = isolation_client
+    user = await _create_active_user(db)
+    await db.flush()
+
+    # token 中的 instrument_id 与 path 不同
+    other_instrument_id = uuid.uuid4()
+    headers = _capture_token_headers(user.id, instrument_id=other_instrument_id)
+
+    resp = await client.get(
+        f"/api/v1/capture/stocks/{test_instrument.id}/snapshot",
+        headers=headers,
+    )
+
+    assert resp.status_code == 403
+    assert "不匹配" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_capture_token_missing_returns_401(
+    isolation_client: tuple[AsyncClient, AsyncSession],
+    test_instrument,
+) -> None:
+    """缺失 Capture Token 应返回 401（C.11.1 扩展）。
+
+    [Security] - 描述: Capture API 必须携带 token，缺失时拒绝访问
+    """
+    client, db = isolation_client
+
+    resp = await client.get(
+        f"/api/v1/capture/stocks/{test_instrument.id}/snapshot",
+    )
+
+    assert resp.status_code == 401
+    assert "Capture Token" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_capture_token_scope_mismatch_returns_401(
+    isolation_client: tuple[AsyncClient, AsyncSession],
+    test_instrument,
+) -> None:
+    """capture token scope 不是 stock_detail_capture 应返回 401（C.11.1 扩展）。
+
+    [Security] - 描述: scope 校验确保 token 仅用于指定场景（advice.md 第六节硬规则）
+    """
+    client, db = isolation_client
+    user = await _create_active_user(db)
+    await db.flush()
+
+    # 故意使用错误的 scope
+    headers = _capture_token_headers(
+        user.id, instrument_id=test_instrument.id, scope="wrong_scope"
+    )
+
+    resp = await client.get(
+        f"/api/v1/capture/stocks/{test_instrument.id}/snapshot",
+        headers=headers,
+    )
+
+    assert resp.status_code == 401
+    assert "scope" in resp.json()["detail"].lower()
 
 
 if __name__ == "__main__":

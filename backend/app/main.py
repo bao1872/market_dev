@@ -38,6 +38,7 @@ from app.api.admin_subscription import router as admin_subscription_router
 from app.api.auth import router as auth_router
 from app.api.bars import router as bars_router
 from app.api.calendar import router as calendar_router
+from app.api.capture import router as capture_router
 from app.api.health import router as health_router
 from app.api.indicators import router as indicators_router
 from app.api.instruments import router as instruments_router
@@ -48,8 +49,8 @@ from app.api.monitor_states import router as monitor_states_router
 from app.api.notifications import router as notifications_router
 from app.api.plans import router as plans_router
 from app.api.public_beta import router as public_beta_router
-from app.api.stock_memos import router as stock_memos_router
 from app.api.stock_detail_feishu import router as stock_detail_feishu_router
+from app.api.stock_memos import router as stock_memos_router
 from app.api.strategies import router as strategies_router
 from app.api.strategy_events import router as strategy_events_router
 from app.api.strategy_runs import router as strategy_runs_router
@@ -145,6 +146,8 @@ app.include_router(calendar_router)
 app.include_router(market_router)
 # 行情查询路由
 app.include_router(bars_router)
+# [Capture] - 个股详情截图专用数据快照路由（Capture Token 隔离，不走普通认证）
+app.include_router(capture_router)
 # 策略指标实时计算路由
 app.include_router(indicators_router)
 # 策略目录与版本路由（R7）

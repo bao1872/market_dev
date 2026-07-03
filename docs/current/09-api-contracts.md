@@ -91,8 +91,101 @@ Bars/Quote 响应除 OHLCV 外，应提供或通过响应头提供：
 
 `/subscription-expired` 为 canonical 前端路由；`/membership-expired` 仅兼容重定向。旧 Membership API 和模型不得作为第二套长期路径。
 
-## 9. Capture API（目标）
+## 9. Capture API（专用 Capture 链路）
 
-- GET /api/v1/capture/stocks/{instrument_id}/snapshot
-- Capture Token 校验：type=capture, scope=stock_detail_capture
-- 当前状态：KNOWN_GAP（待 Phase C 实现，见 ALIGN-018）
+### 9.1 端点
+
+#### GET /api/v1/capture/stocks/{instrument_id}/snapshot
+
+用途：个股详情截图数据快照（仅供截图 worker 通过 Capture Token 访问，一次返回行情、指标、事件，避免前端多次请求）。
+
+前端调用页面：`/capture/stock/:symbol`（专用 Capture 路由，不经过 ProtectedLayout/AppShell，仅使用 captureClient）。
+
+### 9.2 认证
+
+Capture Token（type=capture, scope=stock_detail_capture）：
+
+- 不依赖 `get_current_active_user`（普通用户认证链路）；
+- 依赖 `get_capture_token_payload`（位于 `backend/app/core/deps.py`）；
+- 支持两种传入方式（任一即可）：
+  1. `Authorization: Bearer <token>`；
+  2. query 参数 `token=<token>`（前端 `/capture/stock/:symbol?...&token=...` 场景）。
+- path 参数 `instrument_id` 必须与 token 中的 `instrument_id` 一致，否则返回 403（防越权）。
+
+Capture Token 校验项（任一失败返回 401）：
+
+- token 可解码（签名 + exp 有效）；
+- `payload.type == "capture"`；
+- `payload.scope == "stock_detail_capture"`；
+- 必需声明：`user_id`、`instrument_id`、`event_id`。
+
+Capture Token 隔离规则（详见 `10-permissions-security.md` 第 9 节）：
+
+- Capture Token 只能访问 `/api/v1/capture/*` 端点；
+- 普通访问 token（type=access）不能访问 Capture API（`get_capture_token_payload` 拒绝 type != capture）；
+- Capture Token 不能访问普通 API（`get_current_user` 拒绝 type != access）。
+
+### 9.3 请求参数
+
+| 位置 | 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|---|
+| path | `instrument_id` | UUID | 是 | 标的 ID，必须与 token 中的 instrument_id 一致 |
+| query | `token` | string | 否 | Capture Token（与 Authorization header 二选一） |
+
+固定参数（代码事实源 `backend/app/api/capture.py`）：
+
+- timeframe=`1d`（引用 `_CAPTURE_TIMEFRAME`）；
+- adj=`qfq`（引用 `_CAPTURE_ADJ`）；
+- bars 截取最近 `CHART_BARS_COUNT=250` 根（引用 `indicator_contract.CHART_BARS_COUNT` 唯一真源，与页面显示一致）；
+- events 上限 20 条（`_CAPTURE_EVENTS_LIMIT`）；
+- `include_realtime=False`（截图场景无需实时聚合）。
+
+### 9.4 响应结构
+
+```json
+{
+  "instrument": { "...": "InstrumentResponse" },
+  "bars": {
+    "items": [ "...BarResponse" ],
+    "total": 250,
+    "timeframe": "1d",
+    "adj": "qfq",
+    "data_source": "...",
+    "as_of": "...",
+    "is_partial": false,
+    "last_persisted_bar_time": "...",
+    "last_live_bar_time": "...",
+    "freshness_seconds": 0,
+    "degraded": false,
+    "degraded_reason": null
+  },
+  "indicators": { "...": "compute_all_indicators 输出（layers/data/errors）" },
+  "events": {
+    "items": [ "...StrategyEventResponse" ],
+    "total": 20
+  },
+  "snapshot_time": "...",
+  "capture": {
+    "user_id": "...",
+    "event_id": "...",
+    "scope": "stock_detail_capture"
+  }
+}
+```
+
+复用现有服务（禁止重新实现，详见 `07-backend-design.md`）：
+
+- `MarketDataAggregationService.get_bars`：行情聚合 SSOT（与 `/bars` API 同款）；
+- `compute_all_indicators`：策略指标（与 `/indicators` API 同款，失败不阻塞截图，返回 `errors._capture`）；
+- `query_events`：策略事件（与 `/instruments/{id}/events` 同款，失败返回空列表）；
+- `_df_to_responses`：DataFrame → BarResponse（与 bars API 同款）。
+
+### 9.5 错误码
+
+| 状态码 | 触发条件 |
+|---|---|
+| 401 | Capture Token 缺失/无效/过期/类型错误/scope 不匹配/缺少必需声明 |
+| 403 | path 参数 instrument_id 与 token 中的 instrument_id 不一致 |
+| 404 | 标的不存在 |
+| 400 | 行情查询参数错误（ValueError） |
+| 502 | 行情聚合失败（MarketDataAggregationService 抛出非 ValueError 异常） |

@@ -10,7 +10,7 @@ TDD 红灯阶段：先写失败测试，再实现业务代码。
 
 测试策略：
 - service 层测试使用真实 PostgreSQL 测试库（允许 commit），测试后清理 beta_applications + outbox
-- 飞书发送通过 monkeypatch mock FeishuWebhookAdapter.send，避免真实网络调用
+- 飞书发送通过 monkeypatch mock FeishuPlatformAppAdapter.send，避免真实网络调用
 - relay_outbox 直接调用，验证 beta_application_admin 事件处理分支
 """
 
@@ -94,27 +94,39 @@ def _make_payload(
 
 
 def _set_admin_feishu_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """设置管理员飞书环境变量（测试用）。"""
-    monkeypatch.setenv(
-        "ADMIN_FEISHU_WEBHOOK_URL",
-        "https://open.feishu.cn/open-apis/bot/v2/hook/test-admin",
-    )
-    monkeypatch.setenv("ADMIN_FEISHU_SIGN_SECRET", "test_sign_secret")
+    """设置管理员飞书 Platform App 环境变量（测试用）。"""
+    monkeypatch.setenv("ADMIN_FEISHU_APP_ID", "cli_test_app_001")
+    monkeypatch.setenv("ADMIN_FEISHU_APP_SECRET", "test_secret_value")
+    monkeypatch.setenv("ADMIN_FEISHU_RECEIVE_ID", "bg33237")
+    monkeypatch.setenv("ADMIN_FEISHU_RECEIVE_ID_TYPE", "user_id")
+    # 清理旧 webhook 环境变量（避免遗留干扰）
+    monkeypatch.delenv("ADMIN_FEISHU_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("ADMIN_FEISHU_SIGN_SECRET", raising=False)
+
+
+def _clear_admin_feishu_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """清理全部管理员飞书环境变量（模拟未配置场景）。"""
+    monkeypatch.delenv("ADMIN_FEISHU_APP_ID", raising=False)
+    monkeypatch.delenv("ADMIN_FEISHU_APP_SECRET", raising=False)
+    monkeypatch.delenv("ADMIN_FEISHU_RECEIVE_ID", raising=False)
+    monkeypatch.delenv("ADMIN_FEISHU_RECEIVE_ID_TYPE", raising=False)
+    monkeypatch.delenv("ADMIN_FEISHU_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("ADMIN_FEISHU_SIGN_SECRET", raising=False)
 
 
 def _mock_feishu_send_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    """mock FeishuWebhookAdapter.send 返回成功。"""
-    from app.services.feishu_webhook_adapter import FeishuWebhookAdapter
+    """mock FeishuPlatformAppAdapter.send 返回成功。"""
+    from app.services.feishu_platform_app_adapter import FeishuPlatformAppAdapter
 
     async def mock_send(self, message_dto, channel_config):
         return DeliveryResult(success=True, provider_response={"code": 0})
 
-    monkeypatch.setattr(FeishuWebhookAdapter, "send", mock_send)
+    monkeypatch.setattr(FeishuPlatformAppAdapter, "send", mock_send)
 
 
 def _mock_feishu_send_failure(monkeypatch: pytest.MonkeyPatch, error_msg: str = "mock failure") -> None:
-    """mock FeishuWebhookAdapter.send 返回失败。"""
-    from app.services.feishu_webhook_adapter import FeishuWebhookAdapter
+    """mock FeishuPlatformAppAdapter.send 返回失败。"""
+    from app.services.feishu_platform_app_adapter import FeishuPlatformAppAdapter
 
     async def mock_send(self, message_dto, channel_config):
         return DeliveryResult(
@@ -123,7 +135,7 @@ def _mock_feishu_send_failure(monkeypatch: pytest.MonkeyPatch, error_msg: str = 
             error_message=error_msg,
         )
 
-    monkeypatch.setattr(FeishuWebhookAdapter, "send", mock_send)
+    monkeypatch.setattr(FeishuPlatformAppAdapter, "send", mock_send)
 
 
 # ============================================================
@@ -155,13 +167,14 @@ async def test_create_application_writes_beta_application_admin_outbox(
     outbox = outbox_records[0]
     assert outbox.aggregate_type == "beta_application"
     assert outbox.status == "pending"
-    # payload 包含申请数据（不含 webhook 配置，安全考虑）
+    # payload 包含申请数据（不含 Platform App 敏感配置，安全考虑）
     assert outbox.payload["application_id"] == str(app.id)
     assert outbox.payload["wechat"] == "notifier_user_001"
     assert outbox.payload["watch_stock_count"] == 10
-    # payload 不应包含 webhook_url 或 sign_secret
-    assert "webhook_url" not in outbox.payload
-    assert "sign_secret" not in outbox.payload
+    # payload 不应包含 Platform App 敏感字段
+    assert "app_secret" not in outbox.payload
+    assert "app_id" not in outbox.payload
+    assert "receive_id" not in outbox.payload
 
 
 @pytest.mark.asyncio
@@ -196,8 +209,7 @@ async def test_feishu_failure_does_not_affect_submission(
     场景：system_channel 未配置（返回 None），create_application 仍成功。
     """
     # 不设置环境变量，system_channel 返回 None
-    monkeypatch.delenv("ADMIN_FEISHU_WEBHOOK_URL", raising=False)
-    monkeypatch.delenv("ADMIN_FEISHU_SIGN_SECRET", raising=False)
+    _clear_admin_feishu_env(monkeypatch)
 
     payload = BetaApplicationCreate(**_make_payload(wechat="feishu_fail_user"))
     ip_hash = _hash_ip("192.168.100.3")
@@ -221,8 +233,7 @@ async def test_relay_without_admin_config_marks_failed(
 ):
     """system_channel 未配置时，relay_outbox 标记 feishu_delivery_status='failed'。"""
     # 不设置环境变量，system_channel 返回 None
-    monkeypatch.delenv("ADMIN_FEISHU_WEBHOOK_URL", raising=False)
-    monkeypatch.delenv("ADMIN_FEISHU_SIGN_SECRET", raising=False)
+    _clear_admin_feishu_env(monkeypatch)
 
     payload = BetaApplicationCreate(**_make_payload(wechat="no_config_user"))
     ip_hash = _hash_ip("192.168.100.4")
@@ -392,60 +403,6 @@ def test_build_beta_application_card_masks_contact_in_summary():
     # 管理员飞书应包含完整联系方式（便于管理员联系用户）
     assert "13800138000" in card_text
     assert "my_wechat_id" in card_text
-
-
-# ============================================================
-# SubTask 3.1 测试: system_channel
-# ============================================================
-
-
-def test_get_admin_feishu_config_returns_none_when_not_configured(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """环境变量未设置时返回 None。"""
-    monkeypatch.delenv("ADMIN_FEISHU_WEBHOOK_URL", raising=False)
-    monkeypatch.delenv("ADMIN_FEISHU_SIGN_SECRET", raising=False)
-
-    from app.constants.system_channel import get_admin_feishu_config
-
-    config = get_admin_feishu_config()
-    assert config is None
-
-
-def test_get_admin_feishu_config_returns_dict_when_configured(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """环境变量设置时返回 dict。"""
-    monkeypatch.setenv(
-        "ADMIN_FEISHU_WEBHOOK_URL",
-        "https://open.feishu.cn/open-apis/bot/v2/hook/test",
-    )
-    monkeypatch.setenv("ADMIN_FEISHU_SIGN_SECRET", "secret123")
-
-    from app.constants.system_channel import get_admin_feishu_config
-
-    config = get_admin_feishu_config()
-    assert config is not None
-    assert config["webhook_url"] == "https://open.feishu.cn/open-apis/bot/v2/hook/test"
-    assert config["sign_secret"] == "secret123"
-
-
-def test_get_admin_feishu_config_without_sign_secret(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """仅设置 webhook_url（无 sign_secret）时返回 dict 不含 sign_secret。"""
-    monkeypatch.setenv(
-        "ADMIN_FEISHU_WEBHOOK_URL",
-        "https://open.feishu.cn/open-apis/bot/v2/hook/test",
-    )
-    monkeypatch.delenv("ADMIN_FEISHU_SIGN_SECRET", raising=False)
-
-    from app.constants.system_channel import get_admin_feishu_config
-
-    config = get_admin_feishu_config()
-    assert config is not None
-    assert config["webhook_url"] == "https://open.feishu.cn/open-apis/bot/v2/hook/test"
-    assert "sign_secret" not in config
 
 
 # ============================================================

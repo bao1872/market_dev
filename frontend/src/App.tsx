@@ -13,6 +13,7 @@ import IndexPage from './pages/IndexPage'
 import ScreenerPage from './pages/ScreenerPage'
 import WatchlistPage from './pages/WatchlistPage'
 import StockDetailPage from './pages/StockDetailPage'
+import CaptureStockPage from './pages/CaptureStockPage'
 import SettingsPage from './pages/SettingsPage'
 import MessagesPage from './pages/MessagesPage'
 import AdminIndexPage from './pages/AdminIndexPage'
@@ -110,6 +111,9 @@ export const router = createBrowserRouter([
   // [Auth] - 描述: /subscription-expired 为 canonical 路由，/membership-expired 重定向到此（向后兼容）
   { path: '/subscription-expired', element: <SubscriptionExpiredPage /> },
   { path: '/membership-expired', element: <Navigate to="/subscription-expired" replace /> },
+  // [capture-mode] 专用 Capture 路由（不经过 ProtectedLayout/SubscriberRoute/AppShell，只使用 captureClient）
+  // capture worker 通过 /capture/stock/:symbol?capture=feishu&token=xxx 访问，避免加载 watchlist/memo/events
+  { path: '/capture/stock/:symbol', element: <CaptureStockPage /> },
   // 受保护路由组
   {
     element: <ProtectedLayout />,

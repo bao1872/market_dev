@@ -36,9 +36,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 import app.services.feishu_platform_app_adapter  # noqa: F401
-
-# 导入飞书 Webhook 适配器以触发注册（@register_adapter 在导入时执行）
-import app.services.feishu_webhook_adapter  # noqa: F401
 from app.models.notification import (
     MessageDelivery,
     NotificationChannel,
@@ -75,8 +72,8 @@ class DuplicateActiveChannelError(NotificationServiceError):
     """同一用户同一飞书适配器类型下已存在 active 渠道。"""
 
 
-# [通知渠道] - 受 active 唯一约束限制的飞书适配器类型
-_FEISHU_ADAPTER_TYPES = {"feishu_webhook", "feishu_platform_app"}
+# [通知渠道] - 受 active 唯一约束限制的飞书适配器类型（仅 Platform App）
+_FEISHU_ADAPTER_TYPES = {"feishu_platform_app"}
 
 
 async def _ensure_no_active_feishu_conflict(
@@ -85,7 +82,7 @@ async def _ensure_no_active_feishu_conflict(
     adapter_type: str,
     exclude_channel_id: UUID | None = None,
 ) -> None:
-    """前置校验：同一用户下是否已存在 active 飞书渠道（含 webhook / platform_app）。
+    """前置校验：同一用户下是否已存在 active 飞书渠道（Platform App）。
 
     用于 create_channel / update_channel / verify_channel / test_channel 等
     可能产生或保持 active 状态的入口，确保用户最多只有一条 active 飞书渠道。
@@ -93,7 +90,7 @@ async def _ensure_no_active_feishu_conflict(
     if adapter_type not in _FEISHU_ADAPTER_TYPES:
         return
 
-    # [通知渠道] - 单用户最多一条 active 飞书渠道，不区分 webhook / platform_app
+    # [通知渠道] - 单用户最多一条 active 飞书渠道（仅 Platform App）
     stmt = select(NotificationChannel.id, NotificationChannel.adapter_type).where(
         NotificationChannel.user_id == user_id,
         NotificationChannel.adapter_type.in_(_FEISHU_ADAPTER_TYPES),
@@ -512,13 +509,21 @@ async def create_channel(
     Args:
         db: 异步会话
         user_id: 用户 ID
-        adapter_type: 渠道类型（feishu_webhook/email/mock）
+        adapter_type: 渠道类型（feishu_platform_app/email/mock）
         display_name: 渠道名称
         target_config: 渠道配置
 
     Returns:
         NotificationChannel
+
+    Raises:
+        NotificationServiceError: adapter_type='feishu_webhook' 已废弃，被拒绝
     """
+    # [通知渠道] - feishu_webhook 已废弃，统一为 feishu_platform_app
+    if adapter_type == "feishu_webhook":
+        raise NotificationServiceError(
+            "feishu_webhook 渠道已废弃，请使用 feishu_platform_app（平台应用模式）"
+        )
     # [通知渠道] - 前置校验：同一用户下最多一条 active 飞书渠道
     # create_channel 默认 status=pending，但若已有 active 飞书渠道，后续 verify/test
     # 将违反业务规则，因此创建时即拦截
@@ -537,8 +542,8 @@ async def create_channel(
     return channel
 
 
-# 敏感字段列表：更新时若前端未传入，保留 DB 中的原值
-_SENSITIVE_FIELDS = {"app_secret", "sign_secret"}
+# 敏感字段列表：更新时若前端未传入，保留 DB 中的原值（仅 Platform App 的 app_secret）
+_SENSITIVE_FIELDS = {"app_secret"}
 
 
 async def update_channel(
@@ -1289,6 +1294,7 @@ if __name__ == "__main__":
     adapters = list_supported_adapters()
     print(f"registered_adapters={adapters}")
     assert "mock" in adapters
-    assert "feishu_webhook" in adapters
+    assert "feishu_webhook" not in adapters
+    assert "feishu_platform_app" in adapters
 
     print("OK")

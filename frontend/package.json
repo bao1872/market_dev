@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "lint": "eslint .",
     "format": "prettier --write \"src/**/*.{ts,tsx,scss}\"",
-    "test:contract": "node --experimental-strip-types --test scripts/contract-tests/index-page-columns.test.ts scripts/contract-tests/access-profile.test.ts scripts/contract-tests/error-handling.test.ts src/features/trend-selection/__tests__/contract.test.ts"
+    "test:contract": "node --experimental-strip-types --test scripts/contract-tests/index-page-columns.test.ts scripts/contract-tests/access-profile.test.ts scripts/contract-tests/error-handling.test.ts scripts/contract-tests/capture-stock-page.test.ts src/features/trend-selection/__tests__/contract.test.ts"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.51.0",

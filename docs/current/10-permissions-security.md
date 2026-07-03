@@ -52,7 +52,7 @@ Monitor、Recipient、Outbox 和 Delivery 统一要求 active member + active su
 
 ## 6. Secret
 
-数据库密码、JWT、飞书 Webhook、签名 Secret 和第三方凭据只进入受限环境文件或 Secret 管理系统：
+数据库密码、JWT、飞书 Platform App 凭据（app_id/app_secret）、签名 Secret 和第三方凭据只进入受限环境文件或 Secret 管理系统：
 
 - 不提交 Git；
 - 不写进文档示例；
@@ -68,8 +68,51 @@ Monitor、Recipient、Outbox 和 Delivery 统一要求 active member + active su
 
 每次权限修改至少验证 active、expired、no-subscription、disabled、admin、用户 A/B 所有权、Capture Token 隔离、Secret 脱敏和 Worker 资格。
 
-## 9. Capture Token 规则（目标）
+## 9. Capture Token 隔离（advice.md 第十节硬规则）
 
-- type=capture, scope=stock_detail_capture
-- 只能访问 Capture API，不能访问普通用户 API
-- 当前状态：KNOWN_GAP（待 Phase C 实现，见 ALIGN-018）
+Capture Token 是截图 worker 专用短期 JWT，与普通用户 Access Token 严格隔离。
+
+### 9.1 隔离规则
+
+- Capture Token 只能访问 `/api/v1/capture/*` 端点；
+- 普通访问 token（type=access）不能访问 Capture API（`get_capture_token_payload` 拒绝 `type != "capture"`）；
+- Capture Token 不能访问普通 API（`get_current_user` 拒绝 `type != "access"`）；
+- Capture Token 不覆盖、不污染普通 Access Token（前端使用独立 storage key 与 captureClient）；
+- Capture Token 短期有效，权限最小化（默认 TTL 由 `settings.jwt_capture_ttl_seconds` 控制）。
+
+### 9.2 Capture Token 校验项
+
+`get_capture_token_payload`（位于 `backend/app/core/deps.py`）依次校验，任一失败返回 401：
+
+- token 可解码（签名 + exp 有效）；
+- `payload.type == "capture"`；
+- `payload.scope == "stock_detail_capture"`；
+- 必需声明：`user_id`、`instrument_id`、`event_id`。
+
+支持两种传入方式（任一即可）：
+
+1. `Authorization: Bearer <token>`；
+2. query 参数 `token=<token>`（前端 `/capture/stock/:symbol?...&token=...` 场景）。
+
+### 9.3 path 与 token 一致性校验
+
+`/api/v1/capture/stocks/{instrument_id}/snapshot` 端点在依赖校验通过后，额外校验：
+
+- path 参数 `instrument_id` 必须与 token 中的 `instrument_id` 一致，否则返回 403（防越权）。
+
+### 9.4 实现位置
+
+| 职责 | 代码位置 |
+|---|---|
+| Capture Token 生成 | `backend/app/core/security.py: create_capture_token` |
+| Capture Token 校验依赖 | `backend/app/core/deps.py: get_capture_token_payload` |
+| 普通用户认证拒绝 capture token | `backend/app/core/deps.py: get_current_user`（校验 `type == "access"`） |
+| Capture API 端点 | `backend/app/api/capture.py: GET /api/v1/capture/stocks/{instrument_id}/snapshot` |
+| scope 常量 | `backend/app/core/deps.py: CAPTURE_SCOPE_STOCK_DETAIL = "stock_detail_capture"` |
+
+### 9.5 向后兼容
+
+`create_capture_token` 的 `scope`、`instrument_id`、`user_id` 为关键字参数（可选）：
+
+- 旧调用方（`monitor_batch_service` 等不传新参数）仍可工作，生成无 scope 的 legacy capture token；
+- stock_detail 链路必须传 `scope=stock_detail_capture` 与 `instrument_id`，由 `get_capture_token_payload` 校验。

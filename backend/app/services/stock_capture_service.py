@@ -12,7 +12,8 @@
     )
 
 设计要点：
-- 访问 /stock/{symbol}?source=watchlist&strategy=watchlist_monitor&event_id=...&capture=feishu&token=...
+- 访问 /capture/stock/{symbol}?source=watchlist&strategy=watchlist_monitor&event_id=...&token=...
+  （专用 Capture 路由，不经过 ProtectedLayout/AppShell，只使用 captureClient）
 - 等待 data-render-ready="true"（禁止固定 sleep）
 - 截取 data-testid="stock-detail-capture" 区域
 - 返回 PNG bytes
@@ -140,10 +141,12 @@ async def capture_stock_chart(
         if cached is not None:
             return cached
 
+    # [capture-route] - 描述: 使用专用 /capture/stock/{symbol} 路由（不经过 ProtectedLayout/AppShell）
+    # 整个路由即为 capture 专用，无需 capture=feishu 参数；token 由页面写入 CAPTURE_TOKEN_KEY
     url = (
-        f"{frontend_base_url.rstrip('/')}/stock/{symbol}?"
+        f"{frontend_base_url.rstrip('/')}/capture/stock/{symbol}?"
         f"source=watchlist&strategy=watchlist_monitor&event_id={event_id}&"
-        f"capture=feishu&token={token}"
+        f"token={token}"
     )
 
     try:

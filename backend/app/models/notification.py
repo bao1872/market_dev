@@ -7,7 +7,7 @@
 - message_deliveries: 投递记录（DDL 表名：message_deliveries）
 
 设计要点：
-- 渠道配置 target_config 为 JSONB，敏感字段（app_secret/sign_secret）在 API 读取时脱敏。
+- 渠道配置 target_config 为 JSONB，敏感字段（app_secret）在 API 读取时脱敏。
 - 模板版本化：template_key + version + locale 唯一，active 状态不可修改。
 - 消息幂等：idempotency_key 唯一，防止重复创建。
 - 投递幂等：message_deliveries.idempotency_key 唯一，至少一次投递。
@@ -28,9 +28,9 @@ from app.models.base import Base
 
 
 class NotificationChannel(Base):
-    """通知渠道 - 用户配置的飞书/webhook/email 等投递渠道。
+    """通知渠道 - 用户配置的飞书平台应用/email 等投递渠道。
 
-    target_config JSONB 存储渠道配置，敏感字段（app_secret/sign_secret）在 API 读取时脱敏。
+    target_config JSONB 存储渠道配置，敏感字段（app_secret）在 API 读取时脱敏。
     """
 
     __tablename__ = "notification_channels"
@@ -42,7 +42,7 @@ class NotificationChannel(Base):
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
     )
     adapter_type: Mapped[str] = mapped_column(
-        Text(), nullable=False, comment="feishu_webhook/feishu_platform_app/email"
+        Text(), nullable=False, comment="feishu_platform_app/email/mock"
     )
     display_name: Mapped[str] = mapped_column(
         Text(), nullable=False, comment="渠道展示名称"
