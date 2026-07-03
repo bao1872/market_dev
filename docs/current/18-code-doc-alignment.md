@@ -1,5 +1,9 @@
 > 文档状态：CURRENT DESIGN BASELINE  
-> 基线日期：2026-07-03  
+> 设计基线日期：2026-07-03  
+> 设计确认截止日期：2026-07-03  
+> 实现核对基线：ddca659b8c9d64b6a414da0b4bbd6f80f704aef1  
+> 实现核对分支：main  
+> 最近一致性检查日期：2026-07-03  
 > 操作分支：`release/docs-aligned-candidate-v3`  
 > Phase D 起始代码基线（implementation_base_commit）：`64ed75cce80f5b3f2b5ab95f96b52aac11475e3e`  
 > 已验证实现 Commit（verified_implementation_commit）：`4de9811a4e744c25390605d83526e21d200c6b98`（`fix/release-remaining-alignment-gaps` 最终 HEAD）  
@@ -43,6 +47,7 @@
 | ALIGN-019 | DSA 发布门禁 | `publish_run` 仍允许 partial_failed 状态发布 | partial_failed 禁止发布，仅 completed 可进入 published | `CLOSED` | `backend/app/services/strategy_batch_service.py` 的 `publish_run` 已将状态检查改为仅允许 `completed`，`partial_failed` 即使 `succeeded_count > 0` 也显式拒绝；`tests/test_dsa_publish_validation.py::test_publish_run_rejects_partial_failed_with_succeeded` 通过；`StrategyBatchService._check_quality_gates` 与 `publish_run` 门禁一致 |
 | ALIGN-020 | 数量语义耦合 | `INDICATOR_BARS["15m"]=3600` 同时代表页面显示、API 返回和 Node 输入 | 拆分为 CHART_DISPLAY_BARS、INDICATOR_RESPONSE_BARS、NODE_CLUSTER_INPUT_SPEC | `CLOSED` | `INDICATOR_BARS["15m"]` 已改为引用 `NODE_CLUSTER_LOW_BARS`（不再硬编码 3600），`CHART_BARS_COUNT=250` 与 `NODE_CLUSTER_LOW_BARS=4000` 已分离，`test_node_cluster_contract.py` 验证通过 |
 | ALIGN-021 | Ruff 历史债务 | 全仓库 `ruff check .` 当前存在 903 个历史错误（基线 930），分布于 tests、tools 和部分旧代码 | 全仓库 Ruff 零错误，`Ruff Full Repository Report` 改为阻断 | `KNOWN_GAP` | 已建立 `tools/quality_baselines/ruff.json`（基线 commit `64ed75c`、诊断集合 358 项），采用三层策略：`Ruff New Files` 阻断新增 Python 文件错误，`Ruff Baseline Regression` 阻断历史债务新增/增加，`Ruff Full Repository Report` 非阻断上传报告；历史债务在 `chore/ruff-historical-debt` 分支清理；CHANGE-20260702-010 |
+| ALIGN-022 | outbox target_channel_id | ddca659 hotfix 已实现：`notification.message.created` payload 含 `target_channel_id` 时跳过 `eligible_user_service`，无 `target_channel_id` 的自动通知仍走资格过滤；现有 HTTP 端到端测试覆盖手动发送场景；缺隔离单元测试与 CHANGE 闭环 | 用户主动触发/手动指定渠道的通知不受订阅状态限制；自动通知仍过滤资格；隔离单元测试覆盖 5 个场景；CHANGE 闭环登记 | `CLOSED` | `backend/tests/test_outbox_target_channel_id.py` 5 passed 覆盖（无 target_channel_id 走资格、有 target_channel_id 跳过资格、只匹配指定渠道、非法 UUID 不扩张、无匹配渠道不创建）；CHANGE-20260703-015；真实飞书生产 E2E 仍为 ALIGN-010 KNOWN_GAP |
 
 ## 验证状态
 
