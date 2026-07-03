@@ -1,7 +1,7 @@
 {
   "baseline_commit": "64ed75cce80f5b3f2b5ab95f96b52aac11475e3e",
-  "total": 239,
-  "unique": 172,
+  "total": 242,
+  "unique": 175,
   "diagnostics": [
     {
       "filename": "app/api/admin_after_close.py",
@@ -30,7 +30,7 @@
     {
       "filename": "app/api/bars.py",
       "error_code": "assignment",
-      "message": "Incompatible default for argument \"response\" (default has type \"None\", argument has type \"Response\")",
+      "message": "Incompatible default for parameter \"response\" (default has type \"None\", parameter has type \"Response\")",
       "count": 1
     },
     {
@@ -72,7 +72,7 @@
     {
       "filename": "app/api/indicators.py",
       "error_code": "assignment",
-      "message": "Incompatible default for argument \"response\" (default has type \"None\", argument has type \"Response\")",
+      "message": "Incompatible default for parameter \"response\" (default has type \"None\", parameter has type \"Response\")",
       "count": 1
     },
     {
@@ -221,14 +221,14 @@
     },
     {
       "filename": "app/core/pytdx_adapter.py",
-      "error_code": "union-attr",
-      "message": "Item \"None\" of \"Any | None\" has no attribute \"get_xdxr_info\"",
+      "error_code": "arg-type",
+      "message": "Argument 1 to \"StringIO\" has incompatible type \"bytes | str\"; expected \"str | None\"",
       "count": 1
     },
     {
-      "filename": "app/core/redis_client.py",
-      "error_code": "attr-defined",
-      "message": "\"Redis[Any]\" has no attribute \"aclose\"; maybe \"close\"?",
+      "filename": "app/core/pytdx_adapter.py",
+      "error_code": "union-attr",
+      "message": "Item \"None\" of \"Any | None\" has no attribute \"get_xdxr_info\"",
       "count": 1
     },
     {
@@ -372,7 +372,7 @@
     {
       "filename": "app/models/strategy_run.py",
       "error_code": "name-defined",
-      "message": "Name \"Instrument\" is not defined",
+      "message": "Name \"Instrument\" is not defined; did you mean \"instrument\"?",
       "count": 1
     },
     {
@@ -508,6 +508,12 @@
       "count": 2
     },
     {
+      "filename": "app/services/bars_cache.py",
+      "error_code": "arg-type",
+      "message": "Argument 1 to \"_deserialize_response\" has incompatible type \"bytes | str\"; expected \"str\"",
+      "count": 1
+    },
+    {
       "filename": "app/services/bars_metrics.py",
       "error_code": "attr-defined",
       "message": "\"Counter\" has no attribute \"_values\"; maybe \"_value\"?",
@@ -610,6 +616,30 @@
       "count": 1
     },
     {
+      "filename": "app/services/job_queue.py",
+      "error_code": "arg-type",
+      "message": "Argument 1 to \"UUID\" has incompatible type \"bytes | str\"; expected \"str | None\"",
+      "count": 2
+    },
+    {
+      "filename": "app/services/job_queue.py",
+      "error_code": "arg-type",
+      "message": "Argument 1 to \"where\" of \"Select\" has incompatible type \"bool\"; expected \"ColumnElement[bool] | _HasClauseElement[bool] | SQLCoreOperations[bool] | ExpressionElementRole[bool] | TypedColumnsClauseRole[bool] | Callable[[], ColumnElement[bool]] | LambdaElement\"",
+      "count": 2
+    },
+    {
+      "filename": "app/services/job_queue.py",
+      "error_code": "return-value",
+      "message": "Incompatible return value type (got \"tuple[str, bytes | str]\", expected \"tuple[str, str] | None\")",
+      "count": 1
+    },
+    {
+      "filename": "app/services/market_data_aggregation_service.py",
+      "error_code": "arg-type",
+      "message": "Argument 1 to \"_deserialize_result\" has incompatible type \"bytes | str\"; expected \"str\"",
+      "count": 1
+    },
+    {
       "filename": "app/services/monitor_batch_service.py",
       "error_code": "arg-type",
       "message": "Argument 1 to \"_build_merged_card_dto\" of \"MonitorBatchService\" has incompatible type \"list[_FakeEvent]\"; expected \"list[StrategyEvent]\"",
@@ -674,12 +704,6 @@
       "error_code": "attr-defined",
       "message": "\"type\" has no attribute \"instrument_id\"",
       "count": 1
-    },
-    {
-      "filename": "app/services/reconcile_bars.py",
-      "error_code": "operator",
-      "message": "No overload variant of \"__sub__\" of \"datetime\" matches argument type \"date\"",
-      "count": 2
     },
     {
       "filename": "app/services/strategy_batch_service.py",
@@ -826,12 +850,6 @@
       "count": 2
     },
     {
-      "filename": "app/strategy_assets/algorithms/features/bbawe_pytdx_plotly.py",
-      "error_code": "attr-defined",
-      "message": "\"ndarray[tuple[Any, ...], dtype[Any]]\" has no attribute \"abs\"",
-      "count": 2
-    },
-    {
       "filename": "app/strategy_assets/algorithms/features/dsa_bbmacd_24factors_viewer.py",
       "error_code": "arg-type",
       "message": "Argument 1 to \"float\" has incompatible type \"object\"; expected \"str | Buffer | SupportsFloat | SupportsIndex\"",
@@ -960,25 +978,25 @@
     {
       "filename": "app/strategy_assets/algorithms/features/ths_query.py",
       "error_code": "assignment",
-      "message": "Incompatible default for argument \"end_date\" (default has type \"None\", argument has type \"str\")",
+      "message": "Incompatible default for parameter \"end_date\" (default has type \"None\", parameter has type \"str\")",
       "count": 1
     },
     {
       "filename": "app/strategy_assets/algorithms/features/ths_query.py",
       "error_code": "assignment",
-      "message": "Incompatible default for argument \"group_name\" (default has type \"None\", argument has type \"str\")",
+      "message": "Incompatible default for parameter \"group_name\" (default has type \"None\", parameter has type \"str\")",
       "count": 1
     },
     {
       "filename": "app/strategy_assets/algorithms/features/ths_query.py",
       "error_code": "assignment",
-      "message": "Incompatible default for argument \"start_date\" (default has type \"None\", argument has type \"str\")",
+      "message": "Incompatible default for parameter \"start_date\" (default has type \"None\", parameter has type \"str\")",
       "count": 1
     },
     {
       "filename": "app/strategy_assets/algorithms/features/ths_query.py",
       "error_code": "assignment",
-      "message": "Incompatible default for argument \"ts_code\" (default has type \"None\", argument has type \"str\")",
+      "message": "Incompatible default for parameter \"ts_code\" (default has type \"None\", parameter has type \"str\")",
       "count": 1
     },
     {
