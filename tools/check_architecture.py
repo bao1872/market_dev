@@ -689,6 +689,17 @@ V2_REQUIRED_CURRENT_FILES = [
     "code-doc-alignment.md",
 ]
 
+V2_REQUIRED_MAP_FILES = [
+    "backend-module-map.md",
+    "frontend-route-map.md",
+    "api-route-map.md",
+    "database-model-map.md",
+    "worker-job-map.md",
+    "notification-flow-map.md",
+    "test-coverage-map.md",
+    "deployment-runtime-map.md",
+]
+
 V2_LEGACY_CURRENT_FILES = [
     "00-project-overview.md",
     "01-product-requirements.md",
@@ -717,13 +728,13 @@ def check_v2_docs_structure() -> list[Violation]:
 
     1. docs/current/ 下 9 个必需文件全部存在；
     2. docs/current/ 下不得残留旧 00-18 文件名；
-    3. docs/maps/ 下至少存在 1 个 map 文件。
+    3. docs/maps/ 下 8 个指定 map 文件全部存在。
     """
     violations: list[Violation] = []
     current_dir = ROOT / "docs" / "current"
     maps_dir = ROOT / "docs" / "maps"
 
-    # 1. 必需文件存在性
+    # 1. 必需 current 文件存在性
     if current_dir.exists():
         existing = {p.name for p in current_dir.iterdir() if p.is_file()}
         for required in V2_REQUIRED_CURRENT_FILES:
@@ -760,18 +771,19 @@ def check_v2_docs_structure() -> list[Violation]:
                     )
                 )
 
-    # 3. maps 目录至少存在 1 个 map 文件
+    # 3. 必需 map 文件存在性（8 个全部检查）
     if maps_dir.exists():
-        map_files = [p for p in maps_dir.iterdir() if p.is_file() and p.suffix == ".md"]
-        if not map_files:
-            violations.append(
-                Violation(
-                    "v2-docs-structure",
-                    maps_dir,
-                    1,
-                    "docs/maps/ 目录下不存在任何 .md 文件",
+        for required in V2_REQUIRED_MAP_FILES:
+            required_path = maps_dir / required
+            if not required_path.exists():
+                violations.append(
+                    Violation(
+                        "v2-docs-structure",
+                        required_path,
+                        1,
+                        f"缺少 v2 必需 map 文件：{required}",
+                    )
                 )
-            )
     else:
         violations.append(
             Violation(
