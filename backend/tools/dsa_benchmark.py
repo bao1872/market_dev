@@ -36,7 +36,6 @@ from app.services.instrument_maintenance_service import stock_symbol_sql_filter
 from app.services.strategy_service import list_versions
 from app.strategy.runtime import MarketDataContext, StrategyLoader
 
-
 # [DSABenchmark] - 默认样本数与回看天数
 _DEFAULT_SAMPLE_SIZE = 350
 _DEFAULT_LOOKBACK_DAYS = 1000

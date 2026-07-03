@@ -19,8 +19,8 @@ import re
 import sys
 import tomllib
 from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 ROOT = Path(__file__).parent.parent.resolve()
 CHECKER_PATH = Path(__file__).resolve()
@@ -583,7 +583,7 @@ def check_plan_value_hardcoding() -> list[Violation]:
 
                     # dict literal 中的 plan_code -> display_name
                     if isinstance(node, ast.Dict):
-                        for key, value in zip(node.keys, node.values):
+                        for key, value in zip(node.keys, node.values, strict=False):
                             k = _string_arg_value(key) if key else None
                             v = _string_arg_value(value)
                             if k and v and ("observe" in k or "research" in k or "_20" in k or "_50" in k):
@@ -608,7 +608,7 @@ def check_plan_value_hardcoding() -> list[Violation]:
                 plan_name_maps[(k, v)].append((path, lineno, get_line(text, lineno)))
 
     # 报告重复 feature list
-    for items, locations in feature_lists.items():
+    for _items, locations in feature_lists.items():
         if len(locations) <= 1:
             continue
         # 仅当出现在不同文件时才报告
@@ -626,7 +626,7 @@ def check_plan_value_hardcoding() -> list[Violation]:
             )
 
     # 报告重复 plan name map
-    for key, locations in plan_name_maps.items():
+    for _key, locations in plan_name_maps.items():
         if len(locations) <= 1:
             continue
         files = {loc[0] for loc in locations}

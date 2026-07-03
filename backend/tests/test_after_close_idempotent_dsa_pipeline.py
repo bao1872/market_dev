@@ -26,7 +26,6 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import func, select
 
-from app.constants.strategy_keys import DSA_SELECTOR
 from app.models.bar import BarDaily
 from app.models.calendar import TradingCalendar
 from app.models.instrument import Instrument

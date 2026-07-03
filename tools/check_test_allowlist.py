@@ -20,7 +20,7 @@ import ast
 import json
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -172,9 +172,9 @@ def validate_expires(value: Any, entry_id: str) -> list[str]:
         return errors
 
     if expires_dt.tzinfo is None:
-        expires_dt = expires_dt.replace(tzinfo=timezone.utc)
+        expires_dt = expires_dt.replace(tzinfo=UTC)
 
-    if expires_dt <= datetime.now(timezone.utc):
+    if expires_dt <= datetime.now(UTC):
         errors.append(
             f"[{entry_id}] expires 必须是未来日期: {value}"
         )

@@ -14,12 +14,9 @@ TDD 红灯阶段：验证 feishu_webhook 运行时已被永久删除，统一为
 from __future__ import annotations
 
 import importlib
-import os
 from unittest.mock import MagicMock, patch
-from uuid import uuid4
 
 import pytest
-
 
 # ============================================================
 # 测试 3: feishu_webhook_adapter 模块已删除
@@ -226,8 +223,8 @@ def test_migration_passes_when_no_feishu_webhook_rows() -> None:
 
     with patch("alembic.op.get_bind", return_value=mock_conn), \
          patch("alembic.op.create_check_constraint"), \
-         patch("alembic.op.drop_index") as mock_drop_index, \
-         patch("alembic.op.create_index") as mock_create_index:
+         patch("alembic.op.drop_index"), \
+         patch("alembic.op.create_index"):
         # upgrade 不应抛异常
         module.upgrade()
         # 应创建 CHECK 约束

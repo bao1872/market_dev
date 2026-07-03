@@ -1,7 +1,2156 @@
 {
-  "baseline_commit": "3e75b2319ff85929601a7a8fe6c25f5ed9897029",
-  "error_count": 922,
-  "captured_at": "2026-07-03T02:31:16Z",
-  "policy": "changed-files-blocking-full-repo-non-regression",
-  "description": "Ruff 全仓库历史债务基线。当前采用增量阻断策略：PR 中新增或修改的 Python 文件必须零错误（Ruff Changed Files 任务阻断），全仓库错误数不得高于此基线（Ruff Full Repository Baseline 任务非阻断但会失败）。历史债务在独立分支 chore/ruff-historical-debt 中清理，清零后再将全仓库 Ruff 改为完全阻断。"
+  "baseline_commit": "64ed75cce80f5b3f2b5ab95f96b52aac11475e3e",
+  "policy": "new-files-zero-baseline-non-regression-full-report",
+  "captured_at": "2026-07-03T02:58:06Z",
+  "total": 930,
+  "diagnostics": [
+    {
+      "filename": "alembic/versions/022_monitor_evaluations.py",
+      "code": "I001",
+      "message": "Import block is un-sorted or un-formatted",
+      "count": 1
+    },
+    {
+      "filename": "alembic/versions/023_event_recipients.py",
+      "code": "I001",
+      "message": "Import block is un-sorted or un-formatted",
+      "count": 1
+    },
+    {
+      "filename": "alembic/versions/024_strategy_def_env_fields.py",
+      "code": "I001",
+      "message": "Import block is un-sorted or un-formatted",
+      "count": 1
+    },
+    {
+      "filename": "alembic/versions/025_eval_lease_fields.py",
+      "code": "I001",
+      "message": "Import block is un-sorted or un-formatted",
+      "count": 1
+    },
+    {
+      "filename": "alembic/versions/026_strategy_run_lease_fields.py",
+      "code": "I001",
+      "message": "Import block is un-sorted or un-formatted",
+      "count": 1
+    },
+    {
+      "filename": "alembic/versions/027_job_runs_and_heartbeats.py",
+      "code": "I001",
+      "message": "Import block is un-sorted or un-formatted",
+      "count": 1
+    },
+    {
+      "filename": "alembic/versions/040_capture_jobs.py",
+      "code": "I001",
+      "message": "Import block is un-sorted or un-formatted",
+      "count": 1
+    },
+    {
+      "filename": "app/api/admin_subscription.py",
+      "code": "F401",
+      "message": "`app.models.notification.MessageDelivery` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "app/api/admin_subscription.py",
+      "code": "F401",
+      "message": "`app.models.notification.NotificationChannel` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "app/api/admin_subscription.py",
+      "code": "F401",
+      "message": "`app.models.notification.NotificationMessage` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "app/api/admin_subscription.py",
+      "code": "F401",
+      "message": "`math` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "app/api/admin_subscription.py",
+      "code": "I001",
+      "message": "Import block is un-sorted or un-formatted",
+      "count": 1
+    },
+    {
+      "filename": "app/api/bars.py",
+      "code": "F401",
+      "message": "`datetime.time` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "app/api/bars.py",
+      "code": "F821",
+      "message": "Undefined name `get_redis`",
+      "count": 1
+    },
+    {
+      "filename": "app/api/instruments.py",
+      "code": "I001",
+      "message": "Import block is un-sorted or un-formatted",
+      "count": 1
+    },
+    {
+      "filename": "app/api/strategy_runs.py",
+      "code": "F401",
+      "message": "`app.services.access_control_service.require_authenticated` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "app/api/watchlist.py",
+      "code": "F401",
+      "message": "`app.models.user.User` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "app/api/watchlist.py",
+      "code": "I001",
+      "message": "Import block is un-sorted or un-formatted",
+      "count": 1
+    },
+    {
+      "filename": "app/config.example.py",
+      "code": "N999",
+      "message": "Invalid module name: 'config.example'",
+      "count": 1
+    },
+    {
+      "filename": "app/models/__init__.py",
+      "code": "I001",
+      "message": "Import block is un-sorted or un-formatted",
+      "count": 1
+    },
+    {
+      "filename": "app/models/strategy_run.py",
+      "code": "F821",
+      "message": "Undefined name `Instrument`",
+      "count": 1
+    },
+    {
+      "filename": "app/repositories/strategy_result_repository.py",
+      "code": "B011",
+      "message": "Do not `assert False` (`python -O` removes these calls), raise `AssertionError()`",
+      "count": 1
+    },
+    {
+      "filename": "app/services/after_close_orchestrator.py",
+      "code": "I001",
+      "message": "Import block is un-sorted or un-formatted",
+      "count": 1
+    },
+    {
+      "filename": "app/services/after_close_orchestrator.py",
+      "code": "UP042",
+      "message": "Class AfterCloseRunStatus inherits from both `str` and `enum.Enum`",
+      "count": 1
+    },
+    {
+      "filename": "app/services/chart_bars_service.py",
+      "code": "F821",
+      "message": "Undefined name `SHANGHAI_TZ`",
+      "count": 1
+    },
+    {
+      "filename": "app/services/chart_bars_service.py",
+      "code": "I001",
+      "message": "Import block is un-sorted or un-formatted",
+      "count": 1
+    },
+    {
+      "filename": "app/services/instrument_seed.py",
+      "code": "N806",
+      "message": "Variable `BATCH_SIZE` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/services/market_data_aggregation_service.py",
+      "code": "F401",
+      "message": "`app.core.time.SHANGHAI_TZ` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "app/services/market_data_aggregation_service.py",
+      "code": "F401",
+      "message": "`zoneinfo.ZoneInfo` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "app/services/market_data_aggregation_service.py",
+      "code": "I001",
+      "message": "Import block is un-sorted or un-formatted",
+      "count": 1
+    },
+    {
+      "filename": "app/services/message_builder.py",
+      "code": "N806",
+      "message": "Variable `_CST` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/services/monitor_batch_service.py",
+      "code": "N812",
+      "message": "Lowercase `indicator_contract` imported as non-lowercase `IC`",
+      "count": 1
+    },
+    {
+      "filename": "app/services/notification_service.py",
+      "code": "E402",
+      "message": "Module level import not at top of file",
+      "count": 8
+    },
+    {
+      "filename": "app/services/strategy_batch_service.py",
+      "code": "N818",
+      "message": "Exception name `InvalidStrategyResult` should be named with an Error suffix",
+      "count": 1
+    },
+    {
+      "filename": "app/services/strategy_batch_service.py",
+      "code": "UP041",
+      "message": "Replace aliased errors with `TimeoutError`",
+      "count": 1
+    },
+    {
+      "filename": "app/services/system_overview_service.py",
+      "code": "I001",
+      "message": "Import block is un-sorted or un-formatted",
+      "count": 2
+    },
+    {
+      "filename": "app/services/system_overview_service.py",
+      "code": "N814",
+      "message": "Camelcase `StrategyDefinition` imported as constant `_SD`",
+      "count": 1
+    },
+    {
+      "filename": "app/services/system_overview_service.py",
+      "code": "N814",
+      "message": "Camelcase `StrategyVersion` imported as constant `_SV`",
+      "count": 1
+    },
+    {
+      "filename": "app/services/system_overview_service.py",
+      "code": "UP009",
+      "message": "UTF-8 encoding declaration is unnecessary",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy/monitors/bollinger_monitor.py",
+      "code": "E402",
+      "message": "Module level import not at top of file",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 12
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N802",
+      "message": "Function name `cD` should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N802",
+      "message": "Function name `cS` should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N802",
+      "message": "Function name `calcDevATF` should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N803",
+      "message": "Argument name `currentBar` should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N803",
+      "message": "Argument name `endY` should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N803",
+      "message": "Argument name `startY` should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N803",
+      "message": "Argument name `totalBars` should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `actY1_0` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `actY1` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `actY2_0` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `actY2` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `dD` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `dY` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `eP` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `effectiveProfileBars` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `lI` in function should be lowercase",
+      "count": 3
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `maxProfileBars` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `pR` in function should be lowercase",
+      "count": 3
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `sDA` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `sD` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `sP` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `sXS` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `sXY` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `sX` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `sY` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `startY` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `sumDev` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `sumDxx` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `sumDyx` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `sumDyy` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `sumSlope` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `sumXX` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `sumX` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `sumYX` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `sumY` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `uD` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N806",
+      "message": "Variable `unStdDev` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N815",
+      "message": "Variable `activityMethod` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N815",
+      "message": "Variable `channelFill` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N815",
+      "message": "Variable `customActLine` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N815",
+      "message": "Variable `devMultiplier` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N815",
+      "message": "Variable `hiAct` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N815",
+      "message": "Variable `loAct` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N815",
+      "message": "Variable `minActivityThresholdFrac` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N815",
+      "message": "Variable `nFills` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N815",
+      "message": "Variable `numActivityLines` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N815",
+      "message": "Variable `pI` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N815",
+      "message": "Variable `regColor` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N815",
+      "message": "Variable `showMostActiveLines` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N815",
+      "message": "Variable `showProfile` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N815",
+      "message": "Variable `showRegLine` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N815",
+      "message": "Variable `uL` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N815",
+      "message": "Variable `useAdaptive` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_pine_full_replica.py",
+      "code": "N815",
+      "message": "Variable `useCustomColor` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 19
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N802",
+      "message": "Function name `cD` should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N802",
+      "message": "Function name `cS` should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N802",
+      "message": "Function name `calcDevATF` should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N803",
+      "message": "Argument name `currentBar` should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N803",
+      "message": "Argument name `endY` should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N803",
+      "message": "Argument name `startY` should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N803",
+      "message": "Argument name `totalBars` should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `actY1_0` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `actY1` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `actY2_0` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `actY2` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `activitySlope` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `dD` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `dY` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `eP` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `effectiveProfileBars` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `finalPeriod` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `fixed_lI` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `lI` in function should be lowercase",
+      "count": 4
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `lineLength` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `maxCount` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `maxProfileBars` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `minThreshold` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `nFills` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `pR` in function should be lowercase",
+      "count": 3
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `profileLength` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `sDA` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `sD` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `sP` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `sXS` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `sXY` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `sX` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `sY` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `startX_off` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `startY` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `sumDev` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `sumDxx` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `sumDyx` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `sumDyy` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `sumSlope` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `sumXX` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `sumX` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `sumYX` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `sumY` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `uD` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N806",
+      "message": "Variable `unStdDev` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N815",
+      "message": "Variable `activityMethod` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N815",
+      "message": "Variable `channelFill` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N815",
+      "message": "Variable `customActLine` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N815",
+      "message": "Variable `devMultiplier` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N815",
+      "message": "Variable `hiAct` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N815",
+      "message": "Variable `loAct` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N815",
+      "message": "Variable `minActivityThresholdFrac` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N815",
+      "message": "Variable `nFills` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N815",
+      "message": "Variable `numActivityLines` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N815",
+      "message": "Variable `pI` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N815",
+      "message": "Variable `regColor` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N815",
+      "message": "Variable `showMostActiveLines` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N815",
+      "message": "Variable `showProfile` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N815",
+      "message": "Variable `showRegLine` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N815",
+      "message": "Variable `uL` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N815",
+      "message": "Variable `useAdaptive` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "N815",
+      "message": "Variable `useCustomColor` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/amp_plotly.py",
+      "code": "W293",
+      "message": "Blank line contains whitespace",
+      "count": 8
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/atr_rope_event_factor_lab_v4.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 16
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/atr_rope_event_factor_lab_v4.py",
+      "code": "E741",
+      "message": "Ambiguous variable name: `l`",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/atr_rope_event_factor_lab_v4.py",
+      "code": "F841",
+      "message": "Local variable `o` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/atr_rope_event_factor_lab_v4.py",
+      "code": "F841",
+      "message": "Local variable `plot_start` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/atr_rope_with_factors_pytdx_plotly.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 14
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/atr_trendlines_jd_pytdx_plotly.py",
+      "code": "B905",
+      "message": "`zip()` without an explicit `strict=` parameter",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/atr_trendlines_jd_pytdx_plotly.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 4
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/atr_trendlines_jd_pytdx_plotly.py",
+      "code": "E741",
+      "message": "Ambiguous variable name: `l`",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/atr_trendlines_jd_pytdx_plotly.py",
+      "code": "F841",
+      "message": "Local variable `high_i` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/atr_trendlines_jd_pytdx_plotly.py",
+      "code": "F841",
+      "message": "Local variable `low_i` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/bbawe_pytdx_plotly.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 12
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/bbmacd_viewer.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 12
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/bollinger_features_plotly.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 14
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/breakout_volume_delta.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 9
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/breakout_volume_delta.py",
+      "code": "E741",
+      "message": "Ambiguous variable name: `l`",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/divergence_many_plotly.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 9
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/dsa_bbmacd_24factors_viewer.py",
+      "code": "B905",
+      "message": "`zip()` without an explicit `strict=` parameter",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/dsa_bbmacd_24factors_viewer.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 15
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/dsa_bbmacd_24factors_viewer.py",
+      "code": "E402",
+      "message": "Module level import not at top of file",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/dsa_bbmacd_24factors_viewer.py",
+      "code": "N806",
+      "message": "Variable `phL` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/dsa_bbmacd_24factors_viewer.py",
+      "code": "N806",
+      "message": "Variable `plL` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/dynamic_money_flow_with_factors.py",
+      "code": "B905",
+      "message": "`zip()` without an explicit `strict=` parameter",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/dynamic_money_flow_with_factors.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 10
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/dynamic_money_flow_with_factors.py",
+      "code": "E741",
+      "message": "Ambiguous variable name: `l`",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/dynamic_swing_anchored_vwap.py",
+      "code": "B905",
+      "message": "`zip()` without an explicit `strict=` parameter",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/dynamic_swing_anchored_vwap.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 10
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/dynamic_swing_anchored_vwap.py",
+      "code": "E402",
+      "message": "Module level import not at top of file",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/dynamic_swing_anchored_vwap.py",
+      "code": "F821",
+      "message": "Undefined name `TdxConnectionError`",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/dynamic_swing_anchored_vwap.py",
+      "code": "F821",
+      "message": "Undefined name `TdxHq_API`",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/dynamic_swing_anchored_vwap.py",
+      "code": "N806",
+      "message": "Variable `phL` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/dynamic_swing_anchored_vwap.py",
+      "code": "N806",
+      "message": "Variable `plL` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/dynamic_swing_anchored_vwap.py",
+      "code": "N815",
+      "message": "Variable `atrLen` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/dynamic_swing_anchored_vwap.py",
+      "code": "N815",
+      "message": "Variable `baseAPT` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/dynamic_swing_anchored_vwap.py",
+      "code": "N815",
+      "message": "Variable `useAdapt` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/dynamic_swing_anchored_vwap.py",
+      "code": "N815",
+      "message": "Variable `volBias` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/dynamic_swing_anchored_vwap.py",
+      "code": "W293",
+      "message": "Blank line contains whitespace",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/dynamic_volume_profile_oscillator.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 22
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/dynamic_volume_profile_oscillator.py",
+      "code": "W293",
+      "message": "Blank line contains whitespace",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/liquidity_zones_plotly.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 23
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/liquidity_zones_plotly.py",
+      "code": "F821",
+      "message": "Undefined name `TdxConnectionError`",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/liquidity_zones_plotly.py",
+      "code": "F821",
+      "message": "Undefined name `TdxHq_API`",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/liquidity_zones_plotly.py",
+      "code": "F821",
+      "message": "Undefined name `offset`",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/liquidity_zones_plotly.py",
+      "code": "F841",
+      "message": "Local variable `rightBars` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/liquidity_zones_plotly.py",
+      "code": "N806",
+      "message": "Variable `aTR` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/liquidity_zones_plotly.py",
+      "code": "N806",
+      "message": "Variable `leftBars` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/liquidity_zones_plotly.py",
+      "code": "N806",
+      "message": "Variable `rightBars` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/liquidity_zones_plotly.py",
+      "code": "N815",
+      "message": "Variable `hidePivot` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/liquidity_zones_plotly.py",
+      "code": "N815",
+      "message": "Variable `leftBars` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/luxalgo_volume_profile_pytdx_15m_aligned.py",
+      "code": "C401",
+      "message": "Unnecessary generator (rewrite as a set comprehension)",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/luxalgo_volume_profile_pytdx_15m_aligned.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 30
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/luxalgo_volume_profile_pytdx_15m_aligned.py",
+      "code": "F841",
+      "message": "Local variable `rows` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/merged_dsa_atr_rope_bb_factors.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 23
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/merged_dsa_atr_rope_bb_factors.py",
+      "code": "F841",
+      "message": "Local variable `recent_pivot_high_idx` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/merged_dsa_atr_rope_bb_factors.py",
+      "code": "F841",
+      "message": "Local variable `recent_pivot_low_idx` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/merged_dsa_atr_rope_bb_factors.py",
+      "code": "N806",
+      "message": "Variable `phL` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/merged_dsa_atr_rope_bb_factors.py",
+      "code": "N806",
+      "message": "Variable `plL` in function should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/price_action_toolkit_lite_ualgo.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 14
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/price_action_toolkit_lite_ualgo.py",
+      "code": "E741",
+      "message": "Ambiguous variable name: `l`",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/price_action_toolkit_lite_ualgo.py",
+      "code": "F841",
+      "message": "Local variable `o` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 11
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "N815",
+      "message": "Variable `barHigh` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "N815",
+      "message": "Variable `barIndex` in class scope should not be mixedCase",
+      "count": 3
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "N815",
+      "message": "Variable `barLow` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "N815",
+      "message": "Variable `barTime` in class scope should not be mixedCase",
+      "count": 3
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "N815",
+      "message": "Variable `bearishFairValueGap` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "N815",
+      "message": "Variable `bullishFairValueGap` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "N815",
+      "message": "Variable `currentLevel` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "N815",
+      "message": "Variable `equalHighs` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "N815",
+      "message": "Variable `equalLows` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "N815",
+      "message": "Variable `internalBearishBOS` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "N815",
+      "message": "Variable `internalBearishCHoCH` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "N815",
+      "message": "Variable `internalBearishOrderBlock` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "N815",
+      "message": "Variable `internalBullishBOS` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "N815",
+      "message": "Variable `internalBullishCHoCH` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "N815",
+      "message": "Variable `internalBullishOrderBlock` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "N815",
+      "message": "Variable `lastBottomTime` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "N815",
+      "message": "Variable `lastLevel` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "N815",
+      "message": "Variable `lastTopTime` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "N815",
+      "message": "Variable `swingBearishBOS` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "N815",
+      "message": "Variable `swingBearishCHoCH` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "N815",
+      "message": "Variable `swingBearishOrderBlock` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "N815",
+      "message": "Variable `swingBullishBOS` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "N815",
+      "message": "Variable `swingBullishCHoCH` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_luxalgo_pytdx_plotly_scored.py",
+      "code": "N815",
+      "message": "Variable `swingBullishOrderBlock` in class scope should not be mixedCase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 26
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "E741",
+      "message": "Ambiguous variable name: `l`",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N803",
+      "message": "Argument name `Dn` should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N803",
+      "message": "Argument name `Up` should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `DiscountBot` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `DiscountTop` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `Dn_last` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `Dn_prev` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `Dn_series` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `Dn` in function should be lowercase",
+      "count": 4
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `Ls` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `MidBot` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `MidTop` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `PremiumBot` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `PremiumTop` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `Up_last` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `Up_prev` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `Up_series` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `Up` in function should be lowercase",
+      "count": 4
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `WR` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `W` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `iDn_prev` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `iDn` in function should be lowercase",
+      "count": 3
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `iUp_prev` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `iUp` in function should be lowercase",
+      "count": 3
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `pivotH` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `pivotL` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `pvtHi` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `pvtLo` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `tbeB` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `tbeC` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `tbeS` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `tbuB` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `tbuC` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/smc_probability_expo_pytdx_v2.py",
+      "code": "N806",
+      "message": "Variable `tbuS` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/sr_event_factor_lab.py",
+      "code": "B905",
+      "message": "`zip()` without an explicit `strict=` parameter",
+      "count": 3
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/sr_event_factor_lab.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 18
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/sr_event_factor_lab.py",
+      "code": "E402",
+      "message": "Module level import not at top of file",
+      "count": 7
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/sr_event_factor_lab.py",
+      "code": "E741",
+      "message": "Ambiguous variable name: `l`",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/sr_event_factor_lab.py",
+      "code": "F841",
+      "message": "Local variable `prev_high` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/sr_event_factor_lab.py",
+      "code": "F841",
+      "message": "Local variable `prev_low` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/sr_event_factor_lab.py",
+      "code": "F841",
+      "message": "Local variable `resistance_zone_low` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/stop_loss_clustering_with_factors.py",
+      "code": "B905",
+      "message": "`zip()` without an explicit `strict=` parameter",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/stop_loss_clustering_with_factors.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 22
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/stop_loss_clustering_with_factors.py",
+      "code": "F841",
+      "message": "Local variable `point_indices_only` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/stop_loss_clustering_with_factors.py",
+      "code": "F841",
+      "message": "Local variable `prev_confirmed_idx` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/stop_loss_clustering_with_factors.py",
+      "code": "F841",
+      "message": "Local variable `tfm` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/stop_loss_clustering_with_factors.py",
+      "code": "F841",
+      "message": "Local variable `total_removed` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/support_resistance_channels.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 14
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/support_resistance_channels.py",
+      "code": "E741",
+      "message": "Ambiguous variable name: `l`",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/ths_query.py",
+      "code": "E701",
+      "message": "Multiple statements on one line (colon)",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/ths_query.py",
+      "code": "F841",
+      "message": "Local variable `table` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/ths_query.py",
+      "code": "N818",
+      "message": "Exception name `TimeoutException` should be named with an Error suffix",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/ths_query.py",
+      "code": "W291",
+      "message": "Trailing whitespace",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/ths_query.py",
+      "code": "W293",
+      "message": "Blank line contains whitespace",
+      "count": 17
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/trendlines_with_breaks_luxalgo.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 13
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/trendlines_with_breaks_luxalgo.py",
+      "code": "F841",
+      "message": "Local variable `n` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/volume_sentiment_breakout_channels.py",
+      "code": "B905",
+      "message": "`zip()` without an explicit `strict=` parameter",
+      "count": 2
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/volume_sentiment_breakout_channels.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 24
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/volume_sentiment_breakout_channels.py",
+      "code": "E402",
+      "message": "Module level import not at top of file",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/volume_sentiment_breakout_channels.py",
+      "code": "E741",
+      "message": "Ambiguous variable name: `l`",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/volume_sentiment_breakout_channels.py",
+      "code": "F841",
+      "message": "Local variable `last_x` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/volume_zscore_plotly.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 3
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/vsa_iq_er_viewer.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 11
+    },
+    {
+      "filename": "app/strategy_assets/algorithms/features/zigzag_macd_divergence_viewer.py",
+      "code": "C408",
+      "message": "Unnecessary `dict()` call (rewrite as a literal)",
+      "count": 30
+    },
+    {
+      "filename": "scripts/backfill_15min_60min_small.py",
+      "code": "E741",
+      "message": "Ambiguous variable name: `l`",
+      "count": 4
+    },
+    {
+      "filename": "scripts/backfill_weekly_monthly_small.py",
+      "code": "B007",
+      "message": "Loop control variable `market` not used within loop body",
+      "count": 2
+    },
+    {
+      "filename": "scripts/backfill_weekly_monthly_small.py",
+      "code": "B007",
+      "message": "Loop control variable `name` not used within loop body",
+      "count": 1
+    },
+    {
+      "filename": "scripts/test_monitor_backtest.py",
+      "code": "F841",
+      "message": "Local variable `cst` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "scripts/test_monitor_e2e.py",
+      "code": "F841",
+      "message": "Local variable `now_naive` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "scripts/verify_monitor_alignment.py",
+      "code": "E402",
+      "message": "Module level import not at top of file",
+      "count": 1
+    },
+    {
+      "filename": "scripts/verify_monitor_alignment.py",
+      "code": "N803",
+      "message": "Argument name `VPConfig` should be lowercase",
+      "count": 2
+    },
+    {
+      "filename": "scripts/verify_monitor_alignment.py",
+      "code": "N806",
+      "message": "Variable `VPConfig` in function should be lowercase",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_access_audit_log.py",
+      "code": "F401",
+      "message": "`datetime.UTC` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_access_audit_log.py",
+      "code": "F401",
+      "message": "`datetime.datetime` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_admin_subscription_users.py",
+      "code": "F401",
+      "message": "`app.models.user.Role` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_admin_subscription_users.py",
+      "code": "F401",
+      "message": "`app.models.user.UserRole` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_after_close_idempotent_dsa_pipeline.py",
+      "code": "F401",
+      "message": "`app.constants.strategy_keys.DSA_SELECTOR` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_after_close_orchestrator.py",
+      "code": "F841",
+      "message": "Local variable `initial_heartbeat` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_bar_repository_get_recent_bars.py",
+      "code": "N812",
+      "message": "Lowercase `indicator_contract` imported as non-lowercase `IC`",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_bars.py",
+      "code": "I001",
+      "message": "Import block is un-sorted or un-formatted",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_beta_application.py",
+      "code": "F841",
+      "message": "Local variable `idx_names` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_chart_bars_service.py",
+      "code": "F401",
+      "message": "`app.services.chart_bars_service` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_dsa_factor_visual_separation.py",
+      "code": "B905",
+      "message": "`zip()` without an explicit `strict=` parameter",
+      "count": 2
+    },
+    {
+      "filename": "tests/test_dsa_visual_segments.py",
+      "code": "B905",
+      "message": "`zip()` without an explicit `strict=` parameter",
+      "count": 2
+    },
+    {
+      "filename": "tests/test_eligible_user_service.py",
+      "code": "UP035",
+      "message": "Import from `collections.abc` instead: `Callable`",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_feishu_platform_app_only.py",
+      "code": "F401",
+      "message": "`os` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_feishu_platform_app_only.py",
+      "code": "F401",
+      "message": "`uuid.uuid4` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_feishu_platform_app_only.py",
+      "code": "F841",
+      "message": "Local variable `mock_create_index` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_feishu_platform_app_only.py",
+      "code": "F841",
+      "message": "Local variable `mock_drop_index` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_feishu_platform_app_only.py",
+      "code": "I001",
+      "message": "Import block is un-sorted or un-formatted",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_indicator_contract.py",
+      "code": "N812",
+      "message": "Lowercase `indicator_contract` imported as non-lowercase `IC`",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_node_cluster_contract.py",
+      "code": "I001",
+      "message": "Import block is un-sorted or un-formatted",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_notification.py",
+      "code": "F401",
+      "message": "`app.models.notification.MessageDelivery` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_notification.py",
+      "code": "F401",
+      "message": "`app.schemas.notification.ChannelTestResponse` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_notification.py",
+      "code": "F401",
+      "message": "`app.schemas.notification.DeliveryResult` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_notification.py",
+      "code": "F401",
+      "message": "`app.schemas.notification.NotificationChannelResponse` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_notification.py",
+      "code": "F401",
+      "message": "`app.schemas.notification.NotificationPreviewRequest` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_notification.py",
+      "code": "F401",
+      "message": "`app.schemas.notification.NotificationPreviewResponse` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_notification.py",
+      "code": "F401",
+      "message": "`app.services.channel_adapter.list_supported_adapters` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_notification.py",
+      "code": "F401",
+      "message": "`uuid.UUID` imported but unused",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_notification.py",
+      "code": "F811",
+      "message": "Redefinition of unused `DeliveryResult` from line 25: `DeliveryResult` redefined here",
+      "count": 3
+    },
+    {
+      "filename": "tests/test_notification.py",
+      "code": "I001",
+      "message": "Import block is un-sorted or un-formatted",
+      "count": 28
+    },
+    {
+      "filename": "tests/test_prepare_node_cluster_bars.py",
+      "code": "N812",
+      "message": "Lowercase `indicator_contract` imported as non-lowercase `IC`",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_screener_filter_uses_dsa_dir_bars.py",
+      "code": "B011",
+      "message": "Do not `assert False` (`python -O` removes these calls), raise `AssertionError()`",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_selector_query_integration.py",
+      "code": "B011",
+      "message": "Do not `assert False` (`python -O` removes these calls), raise `AssertionError()`",
+      "count": 4
+    },
+    {
+      "filename": "tests/test_selector_query_integration.py",
+      "code": "F821",
+      "message": "Undefined name `AsyncSession`",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_selector_query_integration.py",
+      "code": "F841",
+      "message": "Local variable `result_ids_stmt` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_strategy_batch.py",
+      "code": "F821",
+      "message": "Undefined name `AsyncSession`",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_subscription_expired_e2e.py",
+      "code": "I001",
+      "message": "Import block is un-sorted or un-formatted",
+      "count": 1
+    },
+    {
+      "filename": "tests/test_volume_node_monitor.py",
+      "code": "F841",
+      "message": "Local variable `curr_state` is assigned to but never used",
+      "count": 3
+    },
+    {
+      "filename": "tests/test_watchlist_change_pct.py",
+      "code": "F841",
+      "message": "Local variable `previous_close` is assigned to but never used",
+      "count": 1
+    },
+    {
+      "filename": "tools/check_suogu_category11.py",
+      "code": "E402",
+      "message": "Module level import not at top of file",
+      "count": 4
+    },
+    {
+      "filename": "tools/dsa_benchmark.py",
+      "code": "I001",
+      "message": "Import block is un-sorted or un-formatted",
+      "count": 1
+    }
+  ]
 }

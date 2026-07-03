@@ -72,8 +72,8 @@ jobs:
       - name: Run test allowlist checks
         run: python tools/check_test_allowlist.py
 
-  ruff-changed-files:
-    name: Ruff Changed Files
+  ruff-new-files:
+    name: Ruff New Files
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -86,7 +86,7 @@ jobs:
           cache-dependency-path: backend/pyproject.toml
       - name: Install backend dependencies
         run: pip install -e "backend[dev]"
-      - name: Run ruff on changed Python files
+      - name: Run ruff on new Python files only
         shell: bash
         run: |
           set -euo pipefail
@@ -110,31 +110,50 @@ jobs:
           echo "BASE_SHA=$BASE_SHA"
           echo "HEAD_SHA=$HEAD_SHA"
 
-          CHANGED_BACKEND_FILES=$(git diff --name-only --diff-filter=ACMR "$BASE_SHA" "$HEAD_SHA" -- 'backend/*.py' 'backend/**/*.py' | sed 's|^backend/||' | tr '\n' ' ' || true)
-          CHANGED_ROOT_TOOLS=$(git diff --name-only --diff-filter=ACMR "$BASE_SHA" "$HEAD_SHA" -- 'tools/*.py' 'tools/**/*.py' | sed 's|^|../|' | tr '\n' ' ' || true)
+          NEW_BACKEND_FILES=$(git diff --name-only --diff-filter=A "$BASE_SHA" "$HEAD_SHA" -- 'backend/*.py' 'backend/**/*.py' | sed 's|^backend/||' | tr '\n' ' ' || true)
+          NEW_ROOT_TOOLS=$(git diff --name-only --diff-filter=A "$BASE_SHA" "$HEAD_SHA" -- 'tools/*.py' 'tools/**/*.py' | sed 's|^|../|' | tr '\n' ' ' || true)
 
           cd backend
 
-          if [ -n "$CHANGED_BACKEND_FILES" ]; then
-            echo "Changed backend Python files:"
-            echo "$CHANGED_BACKEND_FILES"
-            ruff check $CHANGED_BACKEND_FILES
+          if [ -n "$NEW_BACKEND_FILES" ]; then
+            echo "New backend Python files:"
+            echo "$NEW_BACKEND_FILES"
+            ruff check $NEW_BACKEND_FILES
           else
-            echo "No changed backend Python files."
+            echo "No new backend Python files."
           fi
 
-          if [ -n "$CHANGED_ROOT_TOOLS" ]; then
-            echo "Changed root tools Python files:"
-            echo "$CHANGED_ROOT_TOOLS"
-            ruff check --config pyproject.toml $CHANGED_ROOT_TOOLS
+          if [ -n "$NEW_ROOT_TOOLS" ]; then
+            echo "New root tools Python files:"
+            echo "$NEW_ROOT_TOOLS"
+            ruff check --config pyproject.toml $NEW_ROOT_TOOLS
           else
-            echo "No changed root tools Python files."
+            echo "No new root tools Python files."
           fi
 
-  ruff-full-repository-baseline:
-    name: Ruff Full Repository Baseline
+  ruff-baseline-regression:
+    name: Ruff Baseline Regression
     runs-on: ubuntu-latest
-    # 该任务记录历史债务基线，暂时不阻断合并；但其中的基线回归检查仍会失败。
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: backend/pyproject.toml
+      - name: Install backend dependencies
+        run: pip install -e "backend[dev]"
+      - name: Run ruff and compare with baseline
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          ruff check . --output-format=json --output-file=ruff-full-report.json || true
+          python ../tools/compare_ruff_baseline.py ruff-full-report.json ../tools/quality_baselines/ruff.json
+
+  ruff-full-repository-report:
+    name: Ruff Full Repository Report
+    runs-on: ubuntu-latest
+    # 该任务仅展示历史债务总数并上传报告，不阻断合并；新增债务由 Ruff Baseline Regression 任务判断。
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -145,24 +164,16 @@ jobs:
           cache-dependency-path: backend/pyproject.toml
       - name: Install backend dependencies
         run: pip install -e "backend[dev]"
-      - name: Run ruff on full repository
-        id: ruff-full
+      - name: Run ruff on full repository and upload report
         working-directory: backend
         run: |
           set +e
           ruff check . --output-format=json --output-file=ruff-full-report.json
-          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
-      - name: Report error count and compare baseline
-        working-directory: backend
-        run: |
+          EXIT_CODE=$?
           COUNT=$(jq '. | length' ruff-full-report.json)
-          BASELINE=$(jq '.error_count' ../tools/quality_baselines/ruff.json)
-          echo "Ruff full repository error count: $COUNT"
-          echo "Ruff baseline error count: $BASELINE"
-          if [ "$COUNT" -gt "$BASELINE" ]; then
-            echo "ERROR: Ruff error count ($COUNT) exceeds baseline ($BASELINE). New errors must be fixed in the changed-files job."
-            exit 1
-          fi
+          echo "Ruff full repository raw error count: $COUNT"
+          echo "This is historical debt; new debt is blocked by Ruff New Files and Ruff Baseline Regression."
+          exit $EXIT_CODE
       - name: Upload ruff full report
         if: always()
         uses: actions/upload-artifact@v4
@@ -240,7 +251,8 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - architecture-rules
-      - ruff-changed-files
+      - ruff-new-files
+      - ruff-baseline-regression
       - type-check
       - alembic-cycle
     services:

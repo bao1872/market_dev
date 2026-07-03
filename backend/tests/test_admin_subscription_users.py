@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import create_access_token, get_password_hash
 from app.models.access_audit_log import AccessAuditLog
 from app.models.subscription import Subscription
-from app.models.user import Role, User, UserRole
+from app.models.user import User
 from app.services.subscription_service import (
     change_subscription_plan,
     grant_subscription_to_user,

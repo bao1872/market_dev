@@ -43,7 +43,6 @@ from app.models.subscription import Subscription
 from app.models.user import Role, User, UserRole
 from app.services.subscription_service import generate_invite_codes
 
-
 # ============================================================
 # 测试辅助函数
 # ============================================================
