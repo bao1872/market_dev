@@ -11,7 +11,6 @@
 | ALIGN-015 | 服务健康与业务能力 | CORE_ONLY 不包含 capture/outbox/delivery；服务不全会造成业务部分可用 | 部署能力与业务功能匹配；服务不可用时不假成功 | P1 |
 | ALIGN-021 | Ruff/Mypy 历史债务 | 全仓 Ruff/Mypy Full Report 仍有历史债务，非阻断展示 | 独立债务分支清零，再改为完全阻断 | P2 |
 | ALIGN-023 | Worker heartbeat 僵尸 running | 代码修复已实现（PR #4 `mark_stale_worker_heartbeats`，10 分钟阈值，60 秒轮询，含测试与 CI），待生产部署后验证僵尸记录被实际清理 | stale running heartbeat 应被标记 stopped/stale，任务状态可信 | P1 |
-| ALIGN-024 | docs v2 尚未落库 | 本 PR（#5）应用 v2 结构：归档旧 00-18、应用 current+maps、更新 check_docs_consistency 与 check_architecture | 通过 PR 合并后 v2 结构成为当前事实源 | P1 |
 
 ## CLOSED 摘要
 
@@ -24,6 +23,7 @@
 | ALIGN-016 | Node Cluster 15m 输入已修正为 4000 |
 | ALIGN-017 | 飞书 Platform App only，Webhook 永久删除 |
 | ALIGN-022 | `target_channel_id` 手动通知跳过资格过滤，自动通知仍过滤，已补隔离测试 |
+| ALIGN-024 | docs v2 结构已通过 PR #5 合并落库（cafbdc4），旧 00-18 归档，check 已适配 |
 
 ## 关闭要求
 
