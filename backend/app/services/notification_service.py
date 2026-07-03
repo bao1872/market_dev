@@ -11,8 +11,8 @@
    更新通知渠道配置（敏感字段合并保留）
 5. delete_channel(db, channel_id, user_id):
    删除通知渠道（软删除：status=inactive）
-6. verify_channel(db, channel_id):
-   验证渠道配置（调用 ChannelAdapter.verify）
+6. verify_channel(db, channel_id, user_id):
+   验证渠道配置（调用 ChannelAdapter.verify，含所有权校验）
 
 幂等保证：
 - 消息创建：idempotency_key 唯一约束
@@ -36,9 +36,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 import app.services.feishu_platform_app_adapter  # noqa: F401
-
-# 导入飞书 Webhook 适配器以触发注册（@register_adapter 在导入时执行）
-import app.services.feishu_webhook_adapter  # noqa: F401
 from app.models.notification import (
     MessageDelivery,
     NotificationChannel,
@@ -63,6 +60,10 @@ class ChannelNotFoundError(NotificationServiceError):
     """渠道不存在。"""
 
 
+class ChannelOwnershipError(NotificationServiceError):
+    """渠道不属于当前用户（跨用户操作被拒绝）。"""
+
+
 class DuplicateMessageError(NotificationServiceError):
     """重复消息（幂等键冲突）。"""
 
@@ -71,8 +72,8 @@ class DuplicateActiveChannelError(NotificationServiceError):
     """同一用户同一飞书适配器类型下已存在 active 渠道。"""
 
 
-# [通知渠道] - 受 active 唯一约束限制的飞书适配器类型
-_FEISHU_ADAPTER_TYPES = {"feishu_webhook", "feishu_platform_app"}
+# [通知渠道] - 受 active 唯一约束限制的飞书适配器类型（仅 Platform App）
+_FEISHU_ADAPTER_TYPES = {"feishu_platform_app"}
 
 
 async def _ensure_no_active_feishu_conflict(
@@ -81,7 +82,7 @@ async def _ensure_no_active_feishu_conflict(
     adapter_type: str,
     exclude_channel_id: UUID | None = None,
 ) -> None:
-    """前置校验：同一用户下是否已存在 active 飞书渠道（含 webhook / platform_app）。
+    """前置校验：同一用户下是否已存在 active 飞书渠道（Platform App）。
 
     用于 create_channel / update_channel / verify_channel / test_channel 等
     可能产生或保持 active 状态的入口，确保用户最多只有一条 active 飞书渠道。
@@ -89,7 +90,7 @@ async def _ensure_no_active_feishu_conflict(
     if adapter_type not in _FEISHU_ADAPTER_TYPES:
         return
 
-    # [通知渠道] - 单用户最多一条 active 飞书渠道，不区分 webhook / platform_app
+    # [通知渠道] - 单用户最多一条 active 飞书渠道（仅 Platform App）
     stmt = select(NotificationChannel.id, NotificationChannel.adapter_type).where(
         NotificationChannel.user_id == user_id,
         NotificationChannel.adapter_type.in_(_FEISHU_ADAPTER_TYPES),
@@ -312,6 +313,20 @@ async def _execute_delivery(
             delivery.status = "failed"
         delivery.last_error_code = result.error_code
     delivery.provider_response = result.provider_response
+
+    # [ImageDelivery] - 分别记录图片上传状态与最终投递状态
+    if delivery.delivery_type == "image":
+        if result.image_upload_success is True:
+            delivery.image_upload_status = "success"
+            delivery.image_upload_error_code = None
+        elif result.image_upload_success is False:
+            delivery.image_upload_status = "failed"
+            delivery.image_upload_error_code = (
+                result.image_upload_error_code or result.error_code
+            )
+        delivery.image_upload_provider_response = result.image_upload_provider_response
+        delivery.image_key = result.image_key
+
     await db.flush()
 
     return delivery
@@ -494,13 +509,21 @@ async def create_channel(
     Args:
         db: 异步会话
         user_id: 用户 ID
-        adapter_type: 渠道类型（feishu_webhook/email/mock）
+        adapter_type: 渠道类型（feishu_platform_app/email/mock）
         display_name: 渠道名称
         target_config: 渠道配置
 
     Returns:
         NotificationChannel
+
+    Raises:
+        NotificationServiceError: adapter_type='feishu_webhook' 已废弃，被拒绝
     """
+    # [通知渠道] - feishu_webhook 已废弃，统一为 feishu_platform_app
+    if adapter_type == "feishu_webhook":
+        raise NotificationServiceError(
+            "feishu_webhook 渠道已废弃，请使用 feishu_platform_app（平台应用模式）"
+        )
     # [通知渠道] - 前置校验：同一用户下最多一条 active 飞书渠道
     # create_channel 默认 status=pending，但若已有 active 飞书渠道，后续 verify/test
     # 将违反业务规则，因此创建时即拦截
@@ -519,8 +542,8 @@ async def create_channel(
     return channel
 
 
-# 敏感字段列表：更新时若前端未传入，保留 DB 中的原值
-_SENSITIVE_FIELDS = {"app_secret", "sign_secret"}
+# 敏感字段列表：更新时若前端未传入，保留 DB 中的原值（仅 Platform App 的 app_secret）
+_SENSITIVE_FIELDS = {"app_secret"}
 
 
 async def update_channel(
@@ -611,6 +634,7 @@ async def delete_channel(
 async def verify_channel(
     db: AsyncSession,
     channel_id: UUID,
+    user_id: UUID,
 ) -> NotificationChannel:
     """验证渠道配置（调用 ChannelAdapter.verify）。
 
@@ -620,18 +644,22 @@ async def verify_channel(
     Args:
         db: 异步会话
         channel_id: 渠道 ID
+        user_id: 用户 ID（所有权校验，仅渠道所有者可操作）
 
     Returns:
         更新后的 NotificationChannel
 
     Raises:
         ChannelNotFoundError: 渠道不存在
+        ChannelOwnershipError: 渠道不属于当前用户
     """
     stmt = select(NotificationChannel).where(NotificationChannel.id == channel_id)
     result = await db.execute(stmt)
     channel = result.scalar_one_or_none()
     if channel is None:
         raise ChannelNotFoundError(f"渠道不存在: channel_id={channel_id}")
+    if channel.user_id != user_id:
+        raise ChannelOwnershipError(f"无权操作渠道: channel_id={channel_id}")
 
     # [通知渠道] - 前置校验：verify 成功后会将 status 置为 active，需避免与另一条 active 飞书渠道冲突（不区分类型）
     await _ensure_no_active_feishu_conflict(
@@ -947,9 +975,56 @@ async def retry_delivery(
     return await _execute_delivery(db, delivery)
 
 
+async def retry_image_delivery(
+    db: AsyncSession,
+    message_group_id: str,
+    user_id: UUID,
+) -> list[MessageDelivery]:
+    """按 message_group_id 重试失败的图片投递（不重复发送文字）。
+
+    [StockDetailFeishu] - 描述: 仅重试 delivery_type='image' 且状态为 failed/dead 的投递，
+    复用 retry_delivery，不创建新 MessageDelivery，从而不触发新的卡片段投递。
+
+    Args:
+        db: 异步会话
+        message_group_id: 消息组 ID（关联 text+image 两条投递）
+        user_id: 当前用户 ID（权限隔离）
+
+    Returns:
+        被重试的 MessageDelivery 列表（可能为空，表示无失败图片投递可重试）
+
+    Raises:
+        NotificationServiceError: 查询或重试过程中发生错误
+    """
+    stmt = (
+        select(MessageDelivery)
+        .join(NotificationChannel, MessageDelivery.channel_id == NotificationChannel.id)
+        .where(
+            MessageDelivery.message_group_id == message_group_id,
+            MessageDelivery.delivery_type == "image",
+            MessageDelivery.status.in_(["pending", "failed", "retrying", "dead"]),
+            NotificationChannel.user_id == user_id,
+        )
+        .options(
+            selectinload(MessageDelivery.channel),
+            selectinload(MessageDelivery.message),
+        )
+        .order_by(MessageDelivery.created_at.asc())
+    )
+    result = await db.execute(stmt)
+    image_deliveries = list(result.scalars().all())
+
+    retried: list[MessageDelivery] = []
+    for delivery in image_deliveries:
+        retried_delivery = await retry_delivery(db, delivery.id)
+        retried.append(retried_delivery)
+    return retried
+
+
 async def test_channel(
     db: AsyncSession,
     channel_id: UUID,
+    user_id: UUID,
 ) -> tuple[NotificationChannel, DeliveryResult]:
     """测试渠道投递（发送测试消息）。
 
@@ -960,18 +1035,22 @@ async def test_channel(
     Args:
         db: 异步会话
         channel_id: 渠道 ID
+        user_id: 用户 ID（所有权校验，仅渠道所有者可操作）
 
     Returns:
         (NotificationChannel, DeliveryResult) 渠道与投递结果
 
     Raises:
         ChannelNotFoundError: 渠道不存在
+        ChannelOwnershipError: 渠道不属于当前用户
     """
     stmt = select(NotificationChannel).where(NotificationChannel.id == channel_id)
     result = await db.execute(stmt)
     channel = result.scalar_one_or_none()
     if channel is None:
         raise ChannelNotFoundError(f"渠道不存在: channel_id={channel_id}")
+    if channel.user_id != user_id:
+        raise ChannelOwnershipError(f"无权操作渠道: channel_id={channel_id}")
 
     adapter = get_adapter(channel.adapter_type)
 
@@ -1215,6 +1294,7 @@ if __name__ == "__main__":
     adapters = list_supported_adapters()
     print(f"registered_adapters={adapters}")
     assert "mock" in adapters
-    assert "feishu_webhook" in adapters
+    assert "feishu_webhook" not in adapters
+    assert "feishu_platform_app" in adapters
 
     print("OK")

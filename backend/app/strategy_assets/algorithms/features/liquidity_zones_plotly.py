@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Liquidity Zones [BigBeluga] -> Python (Plotly)
 
@@ -27,14 +26,13 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import List, Optional, Tuple, Dict, Any
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from datasource.pytdx_client import connect_pytdx
 from plotly.subplots import make_subplots
-
-from datasource.pytdx_client import connect_pytdx, PERIOD_MAP
 
 # =========================
 # pytdx data fetch (same style as your attached script)
@@ -243,7 +241,7 @@ def _gradient_color(intense_0_100: float, col_hex: str, alpha_lo: float, alpha_h
     return f"rgba({r},{g},{b},{a:.3f})"
 
 
-def build_liquidity_zones(df: pd.DataFrame, cfg: LZConfig) -> Dict[str, Any]:
+def build_liquidity_zones(df: pd.DataFrame, cfg: LZConfig) -> dict[str, Any]:
     """
     Returns dict containing:
       zones: list of dicts with box + line + states
@@ -281,8 +279,8 @@ def build_liquidity_zones(df: pd.DataFrame, cfg: LZConfig) -> Dict[str, Any]:
 
     flt_val = _filter_value(cfg.flt)
 
-    zones: List[Dict[str, Any]] = []
-    pivot_pts: List[Dict[str, Any]] = []
+    zones: list[dict[str, Any]] = []
+    pivot_pts: list[dict[str, Any]] = []
 
     # active lines: index in zones list; we will update as we go
     for t in range(n):
@@ -398,27 +396,27 @@ def build_liquidity_zones(df: pd.DataFrame, cfg: LZConfig) -> Dict[str, Any]:
 # Plot
 # =========================
 
-def _add_dashboard(fig: go.Figure, cfg: LZConfig, zones: List[Dict], df: pd.DataFrame):
+def _add_dashboard(fig: go.Figure, cfg: LZConfig, zones: list[dict], df: pd.DataFrame):
     mode_txt = "Dynamic Mode" if cfg.dynamic else "Simple Mode"
     qty = int(cfg.qty_pivots)
-    
+
     last_close = float(df["close"].iloc[-1])
-    
+
     upper_zones = [z for z in zones if z["kind"] == "upper" and not z["grabbed"]]
     lower_zones = [z for z in zones if z["kind"] == "lower" and not z["grabbed"]]
-    
+
     upper_prices = sorted([z["y"] for z in upper_zones if z["y"] > last_close])
     lower_prices = sorted([z["y"] for z in lower_zones if z["y"] < last_close], reverse=True)
-    
+
     nearest_upper = upper_prices[0] if upper_prices else None
     nearest_lower = lower_prices[0] if lower_prices else None
-    
+
     upper_dist = f"{((nearest_upper - last_close) / last_close * 100):.2f}%" if nearest_upper else "N/A"
     lower_dist = f"{((last_close - nearest_lower) / last_close * 100):.2f}%" if nearest_lower else "N/A"
-    
+
     upper_price_str = f"{nearest_upper:.2f}" if nearest_upper else "N/A"
     lower_price_str = f"{nearest_lower:.2f}" if nearest_lower else "N/A"
-    
+
     if nearest_upper and nearest_lower:
         upper_dist_val = (nearest_upper - last_close) / last_close * 100
         lower_dist_val = (last_close - nearest_lower) / last_close * 100
@@ -426,7 +424,7 @@ def _add_dashboard(fig: go.Figure, cfg: LZConfig, zones: List[Dict], df: pd.Data
         risk_reward_str = f"{risk_reward:.2f}" if risk_reward else "N/A"
     else:
         risk_reward_str = "N/A"
-    
+
     fig.add_trace(
         go.Table(
             header=dict(
@@ -453,7 +451,7 @@ def _add_dashboard(fig: go.Figure, cfg: LZConfig, zones: List[Dict], df: pd.Data
         )
     )
 
-def build_plot(df: pd.DataFrame, zones_payload: Dict[str, Any], cfg: LZConfig, out_html: str, title: str):
+def build_plot(df: pd.DataFrame, zones_payload: dict[str, Any], cfg: LZConfig, out_html: str, title: str):
     d = df.copy()
     zones = zones_payload["zones"]
     pivot_pts = zones_payload["pivot_points"]

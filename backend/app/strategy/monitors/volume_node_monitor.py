@@ -51,9 +51,9 @@ from app.strategy.runtime import (
     StrategyRuntime,
 )
 from app.strategy_assets.algorithms.features.unified_volume_profile import (
+    VP_LOOKBACK,
     NodeClusterBarsResult,
     UnifiedVolumeProfileResult,
-    VP_LOOKBACK,
     compute_unified_volume_profile,
     prepare_node_cluster_bars,
 )

@@ -45,7 +45,6 @@ from app.models.instrument import Instrument
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.user import Role, User, UserRole
 
-
 # ============================================================
 # 测试 fixtures
 # ============================================================

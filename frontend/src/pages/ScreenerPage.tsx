@@ -124,6 +124,8 @@ export default function ScreenerPage() {
     const params: StrategyResultQueryParams = {
       page: query.page,
       page_size: query.pageSize,
+      // [ScreenerPage] - 描述: 默认查询全市场 universe，与 spec 第 5.5 节对齐
+      universe: 'all',
     }
     if (query.sort) {
       params.sort_by = query.sort.key
@@ -200,11 +202,23 @@ export default function ScreenerPage() {
           : run.status === 'running'
             ? '计算中'
             : run.status
+    const succeeded = run.succeeded_count ?? 0
+    const failed = run.failed_count ?? 0
+    const skipped = run.skipped_count ?? 0
+    const total = run.total_instruments ?? 0
+    const coverage = total > 0 ? (succeeded + skipped) / total : 0
     return {
       dataDate,
       runId: run.id.slice(0, 8),
       status: statusLabel,
       isOk: run.status === 'published' || run.status === 'completed',
+      // [ScreenerPage] - 描述: 批次计数与覆盖率（spec 第 5.5 节）
+      succeeded,
+      failed,
+      skipped,
+      total,
+      coverage,
+      incomplete: failed > 0 || (total > 0 && succeeded + skipped !== total),
     }
   }, [activeRun])
 
@@ -465,38 +479,79 @@ export default function ScreenerPage() {
 
       {/* 批次元数据 */}
       {batchMeta && (
-        <div className="batch-meta-bar">
-          <div className="batch-meta-items">
-            <div className="batch-meta-item">
-              <span>数据日期</span>
-              <b>{batchMeta.dataDate}</b>
+        <>
+          {/* [ScreenerPage] - 描述: 不完整批次顶部红色警告（spec 第 5.5 节） */}
+          {batchMeta.incomplete && (
+            <div
+              className="batch-warning"
+              style={{
+                background: '#fff1f0',
+                border: '1px solid #ffccc7',
+                color: '#cf1322',
+                padding: '8px 12px',
+                borderRadius: 4,
+                marginBottom: 12,
+              }}
+            >
+              警告：当前批次计算不完整（存在失败或覆盖率不足），结果可能不代表全市场，请谨慎使用。
             </div>
-            <div className="batch-meta-item">
-              <span>批次</span>
-              <b>{batchMeta.runId}</b>
-            </div>
-            <div className="batch-meta-item">
-              <span>状态</span>
-              <b className={batchMeta.isOk ? 'pos' : 'neg'}>{batchMeta.status}</b>
-            </div>
-            {sourceTotal != null && (
+          )}
+          <div className="batch-meta-bar">
+            <div className="batch-meta-items">
               <div className="batch-meta-item">
-                <span>源</span>
-                <b>{sourceTotal}</b>
+                <span>数据日期</span>
+                <b>{batchMeta.dataDate}</b>
               </div>
-            )}
-            {filteredTotal != null && (
               <div className="batch-meta-item">
-                <span>命中</span>
-                <b className="pos">{filteredTotal}</b>
+                <span>批次</span>
+                <b>{batchMeta.runId}</b>
               </div>
-            )}
-            <div className="batch-meta-item">
-              <span>结果数量</span>
-              <b>{totalResults}</b>
+              <div className="batch-meta-item">
+                <span>状态</span>
+                <b className={batchMeta.isOk ? 'pos' : 'neg'}>{batchMeta.status}</b>
+              </div>
+              {sourceTotal != null && (
+                <div className="batch-meta-item">
+                  <span>源</span>
+                  <b>{sourceTotal}</b>
+                </div>
+              )}
+              {filteredTotal != null && (
+                <div className="batch-meta-item">
+                  <span>命中</span>
+                  <b className="pos">{filteredTotal}</b>
+                </div>
+              )}
+              <div className="batch-meta-item">
+                <span>结果数量</span>
+                <b>{totalResults}</b>
+              </div>
+              {/* [ScreenerPage] - 描述: 批次成功/失败/跳过计数与覆盖率（spec 第 5.5 节） */}
+              {batchMeta.total > 0 && (
+                <>
+                  <div className="batch-meta-item">
+                    <span>成功</span>
+                    <b className="pos">{batchMeta.succeeded}</b>
+                  </div>
+                  <div className="batch-meta-item">
+                    <span>跳过</span>
+                    <b>{batchMeta.skipped}</b>
+                  </div>
+                  <div className="batch-meta-item">
+                    <span>覆盖率</span>
+                    <b>{(batchMeta.coverage * 100).toFixed(1)}%</b>
+                  </div>
+                </>
+              )}
+              {batchMeta.failed > 0 && (
+                <div className="batch-meta-item">
+                  <span>失败</span>
+                  <b className="neg">{batchMeta.failed}</b>
+                </div>
+              )}
             </div>
           </div>
-        </div>
+        </>
       )}
 
       {/* 结果面板 */}

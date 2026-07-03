@@ -86,15 +86,16 @@ Usage
     # 查看帮助
     python features/ths_query.py --help
 """
-import pywencai as wc
-import pandas as pd
+import logging
+import os
+import random
 import re
 import sys
-import os
-import logging
 import time
-import random
 from datetime import datetime, timedelta
+
+import pandas as pd
+import pywencai as wc
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -148,7 +149,7 @@ def _transform_raw_data(raw_df: pd.DataFrame) -> pd.DataFrame | None:
         code_padded = code_str.zfill(6)
         return f"{code_padded}.SZ" if code_padded.startswith(('0', '3')) else f"{code_padded}.SH"
     cache_df['ts_code'] = cache_df['股票代码'].apply(format_ts_code)
-    
+
     original_count = len(cache_df)
     cache_df['popularity_rank'] = pd.to_numeric(cache_df['popularity_rank'], errors='coerce')
     cache_df['market_cap'] = pd.to_numeric(cache_df['market_cap'], errors='coerce')
@@ -158,13 +159,13 @@ def _transform_raw_data(raw_df: pd.DataFrame) -> pd.DataFrame | None:
         cache_df['industry_pe'] = pd.to_numeric(cache_df['industry_pe'], errors='coerce')
     cache_df.dropna(subset=['popularity_rank', 'market_cap'], inplace=True)
     cleaned_count = len(cache_df)
-    
+
     if original_count > cleaned_count:
         logger.info(f"数据清洗：发现并删除了 {original_count - cleaned_count} 行无效数据")
-    
+
     if not cache_df.empty:
         cache_df['popularity_rank'] = cache_df['popularity_rank'].astype(int)
-    
+
     output_cols = ['ts_code', 'name', 'concepts', 'popularity_rank', 'market_cap']
     if 'total_market_cap' in cache_df.columns:
         output_cols.append('total_market_cap')
@@ -174,7 +175,7 @@ def _transform_raw_data(raw_df: pd.DataFrame) -> pd.DataFrame | None:
         output_cols.append('industry_l3')
     if 'industry_pe' in cache_df.columns:
         output_cols.append('industry_pe')
-        
+
     return cache_df[output_cols]
 
 def save_concepts_to_db(df: pd.DataFrame, session) -> int:
@@ -245,41 +246,41 @@ def get_popularity_rank_by_date(target_date: str, max_retries: int = 3):
         DataFrame: 包含人气排名数据的 DataFrame
     """
     query_text = f'{target_date} 科创板或创业板或主板非st，人气排名，总市值大于200亿'
-    
+
     for attempt in range(1, max_retries + 1):
         import signal
-        
+
         class TimeoutException(Exception):
             pass
-        
+
         def timeout_handler(signum, frame):
             raise TimeoutException("wc.get() 调用超时（>10 分钟）")
-        
+
         old_handler = signal.signal(signal.SIGALRM, timeout_handler)
         signal.alarm(600)
-        
+
         try:
             res = wc.get(query=query_text, loop=True, sleep=2, cookie=None)
             signal.alarm(0)
-            
+
             if res is None:
                 logger.warning(f"未能从问财获取到 {target_date} 的数据 (返回 None)")
                 if attempt < max_retries:
                     time.sleep(30)
                     continue
                 return None
-            
+
             if res.empty:
                 logger.warning(f"未能从问财获取到 {target_date} 的数据 (DataFrame 为空)")
                 if attempt < max_retries:
                     time.sleep(30)
                     continue
                 return None
-            
+
             logger.info(f"成功获取到 {len(res)} 条数据")
             return res
-            
-        except TimeoutException as e:
+
+        except TimeoutException:
             signal.alarm(0)
             logger.error(f"获取 {target_date} 人气排名时超时（第{attempt}次尝试）")
             if attempt < max_retries:
@@ -287,7 +288,7 @@ def get_popularity_rank_by_date(target_date: str, max_retries: int = 3):
             else:
                 logger.error(f"获取 {target_date} 人气排名失败：已重试 {max_retries} 次")
             continue
-            
+
         except Exception as e:
             signal.alarm(0)
             logger.error(f"获取 {target_date} 人气排名时发生错误：{e}")
@@ -298,7 +299,7 @@ def get_popularity_rank_by_date(target_date: str, max_retries: int = 3):
             continue
         finally:
             signal.signal(signal.SIGALRM, old_handler)
-    
+
     return None
 
 
@@ -315,16 +316,16 @@ def _transform_rank_data(raw_df: pd.DataFrame, trade_date: str) -> pd.DataFrame 
     """
     if raw_df is None or raw_df.empty:
         return None
-    
+
     # 匹配列名（支持多种格式）
     rank_col = next((col for col in raw_df.columns if '排名' in col or '热度排名' in col), None)
     name_col = next((col for col in raw_df.columns if '股票简称' in col or '股票名称' in col), None)
-    
+
     if not all([rank_col, name_col]):
-        logger.error(f"未能找到必需的列（排名、名称）")
+        logger.error("未能找到必需的列（排名、名称）")
         logger.error(f"可用列：{raw_df.columns.tolist()}")
         return None
-    
+
     def format_ts_code(code):
         code_str = str(code)
         if '.' in code_str:
@@ -334,16 +335,16 @@ def _transform_rank_data(raw_df: pd.DataFrame, trade_date: str) -> pd.DataFrame 
             return f"{code_padded}.SZ"
         else:
             return f"{code_padded}.SH"
-    
+
     result_df = pd.DataFrame({
         'trade_date': trade_date,
         'ts_code': raw_df['股票代码'].apply(format_ts_code),
         'name': raw_df[name_col],
         'rank': pd.to_numeric(raw_df[rank_col], errors='coerce').astype(int)
     })
-    
+
     result_df.dropna(subset=['rank'], inplace=True)
-    
+
     return result_df[['trade_date', 'ts_code', 'name', 'rank']]
 
 
@@ -359,17 +360,17 @@ def save_popularity_to_db(df: pd.DataFrame, session) -> int:
         写入的行数
     """
     from datasource.database import bulk_upsert
-    from sqlalchemy import Table, MetaData
-    
+    from sqlalchemy import MetaData, Table
+
     if df is None or df.empty:
         return 0
-    
+
     metadata = MetaData()
     table = Table('stock_popularity_rank', metadata, autoload_with=session.bind)
-    
+
     unique_keys = ['trade_date', 'ts_code']
     count = bulk_upsert(session, type('Model', (), {'__tablename__': 'stock_popularity_rank'}), df, unique_keys)
-    
+
     logger.info(f"写入人气排名数据 {count} 条")
     return count
 
@@ -387,7 +388,7 @@ def get_existing_dates(session, start_date: str, end_date: str) -> set:
         已存在日期的集合
     """
     from sqlalchemy import text
-    
+
     sql = """
         SELECT DISTINCT trade_date 
         FROM stock_popularity_rank 
@@ -409,12 +410,12 @@ def delete_popularity_by_date(session, trade_date: str) -> int:
         删除的行数
     """
     from sqlalchemy import text
-    
+
     sql = "DELETE FROM stock_popularity_rank WHERE trade_date = :trade_date"
     result = session.execute(text(sql), {"trade_date": trade_date})
     deleted_count = result.rowcount
     session.commit()
-    
+
     logger.info(f"已删除 {trade_date} 的 {deleted_count} 条数据")
     return deleted_count
 
@@ -433,22 +434,22 @@ def get_trading_dates(start_date: str, end_date: str) -> list:
     try:
         import qstock as qs
         logger.info(f"正在通过 qstock 获取交易日历：{start_date} 至 {end_date}")
-        
+
         latest = qs.latest_trade_date()
         logger.info(f"最新交易日：{latest}")
-        
+
         all_dates = pd.date_range(start=start_date, end=end_date)
         trading_dates = []
-        
+
         for date in all_dates:
             date_str = date.strftime('%Y-%m-%d')
             if date_str <= latest and date.weekday() < 5:
                 trading_dates.append(date_str)
-        
+
         trading_dates.sort()
         logger.info(f"获取到 {len(trading_dates)} 个交易日")
         return trading_dates
-        
+
     except Exception as e:
         logger.warning(f"获取交易日历失败：{e}，将使用周末判断法")
         all_dates = pd.date_range(start=start_date, end=end_date)
@@ -468,22 +469,22 @@ def scan_popularity_rank_for_year(start_date: str = None, end_date: str = None, 
         incremental: 是否增量更新（跳过已存在的日期）
     """
     from tqdm import tqdm
-    
+
     if end_date is None:
         end_date = datetime.now().strftime('%Y-%m-%d')
-    
+
     end_dt = datetime.strptime(end_date, '%Y-%m-%d')
-    
+
     if start_date is None:
         start_dt = end_dt - timedelta(days=365)
         start_date = start_dt.strftime('%Y-%m-%d')
     else:
         start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-    
+
     logger.info(f"开始扫描人气排名：{start_date} 至 {end_date}")
-    
+
     trading_dates = get_trading_dates(start_date, end_date)
-    
+
     if save_to_db and incremental:
         from datasource.database import get_session
         with get_session() as session:
@@ -491,30 +492,30 @@ def scan_popularity_rank_for_year(start_date: str = None, end_date: str = None, 
             logger.info(f"数据库中已存在 {len(existing_dates)} 个日期的数据")
             trading_dates = [d for d in trading_dates if d not in existing_dates]
             logger.info(f"需要获取 {len(trading_dates)} 个新日期的数据")
-            
+
             if not trading_dates:
                 logger.info("所有日期的数据都已存在，无需更新")
                 return
-    
+
     pbar = tqdm(trading_dates, desc="获取人气数据", ncols=100)
     for trade_date in pbar:
         pbar.set_postfix_str(trade_date)
-        
+
         df = get_popularity_rank_by_date(trade_date)
-        
+
         if df is not None and not df.empty:
             transformed_df = _transform_rank_data(df, trade_date)
-            
+
             if transformed_df is not None and not transformed_df.empty:
                 if save_to_db:
                     from datasource.database import get_session
                     with get_session() as session:
                         count = save_popularity_to_db(transformed_df, session)
                         logger.info(f"{trade_date}: 已保存 {count} 条数据")
-        
+
         sleep_time = random.randint(10, 20)
         time.sleep(sleep_time)
-    
+
     logger.info(f"扫描完成！共处理 {len(trading_dates)} 个交易日")
 
 
@@ -536,11 +537,11 @@ def _check_group_data_exists(report_date: str, group_name: str, session) -> bool
         True 如果已有数据，False 如果没有
     """
     from sqlalchemy import text
-    
+
     check_field = GROUP_CHECK_FIELDS.get(group_name)
     if not check_field:
         return False
-    
+
     sql = f'''
         SELECT COUNT(*)
         FROM stock_financial_summary
@@ -558,17 +559,17 @@ def _extract_expected_date(query: str) -> str | None:
     match = re.search(r'(\d{4})年(一季度|二季度|三季度|四季度)', query)
     if not match:
         return None
-    
+
     year = match.group(1)
     quarter = match.group(2)
-    
+
     quarter_end_dates = {
         "一季度": "0331",
         "二季度": "0630",
         "三季度": "0930",
         "四季度": "1231",
     }
-    
+
     return year + quarter_end_dates[quarter]
 
 
@@ -586,19 +587,19 @@ def _validate_dataframe(df: pd.DataFrame, expected_date: str, min_rows: int = 10
     """
     if df is None or df.empty:
         return False, "DataFrame 为空"
-    
+
     if len(df) < min_rows:
         return False, f"数据行数过少 ({len(df)} < {min_rows})，可能查询被误解"
-    
+
     date_cols = [col for col in df.columns if f'[{expected_date}]' in col]
     if not date_cols:
         return False, f"未找到预期日期 [{expected_date}] 的列，可能时间不匹配"
-    
+
     invalid_keywords = ['溯源', '文章', '相关产品']
     for kw in invalid_keywords:
         if any(kw in col for col in df.columns):
             return False, f"包含无关字段（{kw}），问句可能被误解"
-    
+
     return True, ""
 
 
@@ -606,7 +607,7 @@ def _load_field_mapping():
     """从 JSON 文件加载字段映射关系"""
     import json
     mapping_file = os.path.join(os.path.dirname(__file__), '..', 'pywencai_queries', 'field_mapping.json')
-    with open(mapping_file, 'r', encoding='utf-8') as f:
+    with open(mapping_file, encoding='utf-8') as f:
         return json.load(f)
 
 
@@ -785,8 +786,9 @@ def _validate_saved_data(report_date: str, session, sample_count: int = 5) -> tu
     从 stock_financial_summary 抽样校验关键字段是否非空且量级合理
     返回 (是否通过, 错误信息)
     """
-    from sqlalchemy import text
     import random
+
+    from sqlalchemy import text
 
     check_fields = ['归母净利润', 'EBIT', '总资产', '应收账款']
     field_checks = ' AND '.join([f'"{f}" IS NOT NULL' for f in check_fields])
@@ -826,10 +828,9 @@ def execute_financial_queries(group_name: str = None, test_mode: bool = False, s
         save_to_db: 是否保存到数据库，默认 True
         incremental: 增量更新模式，跳过已有数据的报告期
     """
-    from tqdm import tqdm
-    import sys
 
-    from pywencai_queries.all_queries import ALL_QUERIES, START_YEAR, YEAR_LIST, REPORT_PERIOD_LIST
+    from pywencai_queries.all_queries import ALL_QUERIES, REPORT_PERIOD_LIST, START_YEAR, YEAR_LIST
+    from tqdm import tqdm
 
     groups_to_query = ALL_QUERIES
 
@@ -1001,12 +1002,12 @@ def execute_financial_queries(group_name: str = None, test_mode: bool = False, s
 
 if __name__ == '__main__':
     import argparse
-    
+
     # 添加项目根目录到路径
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if base_dir not in sys.path:
         sys.path.insert(0, base_dir)
-    
+
     parser = argparse.ArgumentParser(description="同花顺数据查询工具")
     parser.add_argument("--update-cache", action="store_true", help="更新股票概念缓存（保存到数据库）")
     parser.add_argument("--no-db", action="store_true", help="不保存到数据库（调试用）")
@@ -1022,24 +1023,25 @@ if __name__ == '__main__':
     parser.add_argument("--group", type=str, default=None, help="指定财务查询的组名（配合 --financial-query 使用）")
     parser.add_argument("--test", action="store_true", help="测试模式，每组只查询第一条问句")
     parser.add_argument("--incremental", action="store_true", help="增量更新模式，跳过已有数据的报告期")
-    
+
     args = parser.parse_args()
-    
+
     if args.create_table:
         from datasource.database import get_session
-        from app.models import get_create_sql
         from sqlalchemy import text
+
+        from app.models import get_create_sql
         with get_session() as session:
             # 创建人气排名表
             sql = get_create_sql("stock_popularity_rank")
             session.execute(text(sql))
             logger.info("已创建表 stock_popularity_rank")
-            
+
             # 创建股票概念缓存表
             sql = get_create_sql("stock_pools")
             session.execute(text(sql))
             logger.info("已创建表 stock_pools")
-            
+
             # 创建财务数据表
             sql = get_create_sql("stock_financial_data")
             session.execute(text(sql))
@@ -1050,7 +1052,7 @@ if __name__ == '__main__':
             session.execute(text(sql))
             logger.info("已创建表 stock_financial_summary")
         sys.exit(0)
-    
+
     if args.update_cache:
         save_to_db = not args.no_db
         update_cache_from_pywencai(save_to_db=save_to_db)
@@ -1059,7 +1061,7 @@ if __name__ == '__main__':
         from datasource.database import get_session
         with get_session() as session:
             delete_popularity_by_date(session, args.force_update_date)
-        
+
         df = get_popularity_rank_by_date(args.force_update_date)
         if df is not None and not df.empty:
             transformed_df = _transform_rank_data(df, args.force_update_date)
@@ -1069,7 +1071,7 @@ if __name__ == '__main__':
                     count = save_popularity_to_db(transformed_df, session)
                     logger.info(f"强制更新完成，已保存 {count} 条数据")
             else:
-                logger.warning(f"数据转换失败，未写入数据库")
+                logger.warning("数据转换失败，未写入数据库")
         else:
             logger.warning(f"未能获取到 {args.force_update_date} 的数据")
     elif args.financial_query:
@@ -1089,7 +1091,7 @@ if __name__ == '__main__':
             name_col = next((col for col in df.columns if '股票简称' in col or '股票名称' in col), None)
             if rank_col and name_col:
                 print(df[[name_col, rank_col]].head(20).to_string(index=False))
-            
+
             if args.save_to_db:
                 transformed_df = _transform_rank_data(df, args.date)
                 if transformed_df is not None and not transformed_df.empty:

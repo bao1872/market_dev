@@ -1,5 +1,4 @@
 # smc_probability_expo_pytdx.py
-# -*- coding: utf-8 -*-
 """
 Smart Money Concepts Probability (Expo) — Python复刻版（pytdx + Plotly）
 
@@ -20,16 +19,12 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from typing import List, Tuple
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-
-from datasource.pytdx_client import connect_pytdx, PERIOD_MAP
-from zoneinfo import ZoneInfo
-
 from pytdx.hq import TdxHq_API
 
 SH_TZ = ZoneInfo("Asia/Shanghai")
@@ -41,7 +36,7 @@ def fmt_percent(x: float, digits: int = 2) -> str:
     return f"{x:.{digits}f}%"
 
 
-def to_market_and_code(symbol_6: str) -> Tuple[int, str]:
+def to_market_and_code(symbol_6: str) -> tuple[int, str]:
     s = symbol_6.strip()
     if len(s) != 6 or not s.isdigit():
         raise ValueError("symbol 必须是 6 位数字，例如 601398 / 000001")
@@ -49,7 +44,7 @@ def to_market_and_code(symbol_6: str) -> Tuple[int, str]:
     return market, s
 
 
-def default_stock_servers() -> List[Tuple[str, int]]:
+def default_stock_servers() -> list[tuple[str, int]]:
     base = [
         ("119.147.212.81", 7709),
         ("119.147.212.82", 7709),
@@ -73,7 +68,7 @@ def default_stock_servers() -> List[Tuple[str, int]]:
     return base
 
 
-def connect_any_stock_server(timeout: int = 2) -> Tuple[TdxHq_API, Tuple[str, int]]:
+def connect_any_stock_server(timeout: int = 2) -> tuple[TdxHq_API, tuple[str, int]]:
     servers = default_stock_servers()
     api = TdxHq_API()
     last_err = None
@@ -92,7 +87,7 @@ def connect_any_stock_server(timeout: int = 2) -> Tuple[TdxHq_API, Tuple[str, in
     raise RuntimeError(f"pytdx 连接失败：{last_err}")
 
 
-def records_to_df(records: List[dict]) -> pd.DataFrame:
+def records_to_df(records: list[dict]) -> pd.DataFrame:
     df = pd.DataFrame(records)
     if df.empty:
         return df
@@ -169,7 +164,7 @@ def fetch_security_bars(
     return all_df
 
 
-def pivots_tv_style(high: np.ndarray, low: np.ndarray, length: int) -> Tuple[np.ndarray, np.ndarray]:
+def pivots_tv_style(high: np.ndarray, low: np.ndarray, length: int) -> tuple[np.ndarray, np.ndarray]:
     """
     近似 TradingView ta.pivothigh/ta.pivotlow 的“确认型”枢轴点：
     - 在 bar i（当前）确认 piv = i-length 为枢轴中心，需要左右各 length 根K线
@@ -220,7 +215,7 @@ def run_probability_expo(
     prd: int = 20,
     resp_on: bool = True,
     resp: int = 7,
-) -> Tuple[np.ndarray, np.ndarray, int, np.ndarray, List[StructEvent]]:
+) -> tuple[np.ndarray, np.ndarray, int, np.ndarray, list[StructEvent]]:
     """
     逐 bar 回放，复刻 Pine 的结构状态机 + 概率矩阵更新。
 
@@ -247,7 +242,7 @@ def run_probability_expo(
     # vals: 9x4（与 Pine 一致的矩阵形状）
     vals = np.zeros((9, 4), dtype=float)
     txt = ["", ""]
-    events: List[StructEvent] = []
+    events: list[StructEvent] = []
 
     def resp_len() -> int:
         return resp if resp_on else prd
@@ -257,7 +252,7 @@ def run_probability_expo(
             return "na"
         return f"{v:.2f}%"
 
-    def current(v: int) -> Tuple[str, float, float]:
+    def current(v: int) -> tuple[str, float, float]:
         if v >= 0:
             if v == 1:
                 return "SMS: ", vals[0, 1], vals[0, 3]
@@ -428,7 +423,7 @@ def plot_expo(
     Dn: np.ndarray,
     pos: int,
     vals: np.ndarray,
-    events: List[StructEvent],
+    events: list[StructEvent],
     show_pd: bool,
     hlloc: str,
     out_html: str,

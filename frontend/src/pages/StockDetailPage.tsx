@@ -13,10 +13,12 @@ import { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom'
 import clsx from 'clsx'
 import StrategyChart from '@/components/StrategyChart'
-import type { BarData, ChartEvent } from '@/components/StrategyChart'
+import type { ChartEvent } from '@/components/StrategyChart'
 import type { ChartViewport } from '@/components/chartViewport'
 import type { IndicatorResponse } from '@/api/endpoints'
 import { formatShanghaiTimeShort } from '@/utils/datetime'
+import { MARKET_LABELS, formatAmount } from '@/utils/market'
+import { mapBarsToBarData } from '@/utils/chart'
 import {
   useInstrumentBySymbol,
   useBars,
@@ -37,24 +39,6 @@ import { STRATEGY_KEYS } from '@/constants/strategyKeys'
 import { useToast } from '@/store/toast'
 import { sendStockDetailFeishu, getStockDetailFeishuStatus } from '@/api/endpoints'
 import type { StockDetailFeishuCreateResponse, StockDetailFeishuStatusResponse } from '@/api/endpoints'
-
-// 市场代码 -> 中文标签映射
-const MARKET_LABELS: Record<string, string> = {
-  A_SHARE: 'A股',
-  STAR: '科创板',
-  MAIN: '主板',
-  SME: '中小板',
-  GEM: '创业板',
-  BSE: '北交所',
-}
-
-// 格式化成交额（元 -> 亿/万）
-function formatAmount(v: number): string {
-  if (!v || v <= 0) return '--'
-  if (v >= 1e8) return (v / 1e8).toFixed(2) + '亿'
-  if (v >= 1e4) return (v / 1e4).toFixed(1) + '万'
-  return v.toFixed(0)
-}
 
 export default function StockDetailPage() {
   const { symbol } = useParams<{ symbol: string }>()
@@ -206,17 +190,7 @@ export default function StockDetailPage() {
   }, [instrumentId, watchlistQuery.data])
 
   // 转换 Bar 数据为 StrategyChart 需要的 BarData 格式
-  const bars: BarData[] = useMemo(() => {
-    if (!barsQuery.data?.items) return []
-    return barsQuery.data.items.map((b) => ({
-      time: b.trade_time || b.trade_date || '',
-      open: b.open,
-      high: b.high,
-      low: b.low,
-      close: b.close,
-      volume: b.volume,
-    }))
-  }, [barsQuery.data])
+  const bars = useMemo(() => mapBarsToBarData(barsQuery.data?.items), [barsQuery.data])
 
   // 转换策略事件为 StrategyChart 需要的 ChartEvent 格式
   const events: ChartEvent[] = useMemo(() => {

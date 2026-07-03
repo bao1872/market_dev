@@ -32,7 +32,7 @@ class BarResponse(BaseModel):
 
 
 class BarListResponse(BaseModel):
-    """行情列表响应（服务端分页）。"""
+    """行情列表响应（服务端分页 + 数据源诊断）。"""
 
     items: list[BarResponse] = Field(..., description="行情列表")
     total: int = Field(..., description="总记录数")
@@ -40,6 +40,15 @@ class BarListResponse(BaseModel):
     page_size: int = Field(..., description="每页大小")
     timeframe: str = Field(..., description="周期: 1d | 15m | 1h | 1w | 1mo")
     adj: str = Field(..., description="复权方式: qfq | none")
+    # [bars] - 数据源诊断字段（Phase 4 行情聚合 SSOT）
+    data_source: str = Field("db", description="数据来源: db | hybrid | pytdx | degraded")
+    as_of: datetime | None = Field(None, description="数据生成时间（ISO 8601）")
+    is_partial: bool = Field(False, description="最后一根 bar 是否为未完成 partial bar")
+    last_persisted_bar_time: datetime | None = Field(None, description="最后一条持久化 bar 时间")
+    last_live_bar_time: datetime | None = Field(None, description="最后一条实时 bar 时间")
+    freshness_seconds: float = Field(0.0, description="数据新鲜度（秒）")
+    degraded: bool = Field(False, description="是否降级（Pytdx 失败等）")
+    degraded_reason: str | None = Field(None, description="降级原因")
 
 
 if __name__ == "__main__":

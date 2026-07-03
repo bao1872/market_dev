@@ -40,9 +40,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import select
 
-from app.core.time import SHANGHAI_TZ
-
 from app.core.pytdx_adapter import PytdxAdapter, get_pytdx_adapter
+from app.core.time import SHANGHAI_TZ
 from app.models.bar import Bar15Min, Bar60Min, BarDaily, BarMinute, BarMonthly, BarWeekly
 from app.services.adj_factor import apply_adj_factor, apply_adj_factor_intraday
 from app.services.bars_validator import validate_bars

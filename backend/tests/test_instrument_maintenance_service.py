@@ -6,7 +6,6 @@
 
 对应 advice.md 第五节"股票代码标准化正则"。
 """
-import pytest
 
 from app.services.instrument_maintenance_service import (
     is_index_symbol,

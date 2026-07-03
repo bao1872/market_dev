@@ -161,7 +161,7 @@ if __name__ == "__main__":
     params = set(sig.parameters.keys())
     assert params == {"db", "now"}, f"参数不匹配: {params}"
     assert sig.parameters["now"].default is None, "now 默认值应为 None"
-    print(f"recover_stale_scheduler_job_runs 签名验证 ✓")
+    print("recover_stale_scheduler_job_runs 签名验证 ✓")
     print(f"参数列表: {sorted(params)}")
 
     # 验证返回注解（from __future__ import annotations 使注解为字符串）

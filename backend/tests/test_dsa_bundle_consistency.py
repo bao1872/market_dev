@@ -16,24 +16,24 @@
 from __future__ import annotations
 
 import math
-from types import SimpleNamespace
 import uuid
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from app.constants.indicator_contract import DSA_LOOKBACK
+from app.strategy.selectors.dsa_selector import (
+    MIN_DIR_BARS,
+    _safe_float,
+    compute_dsa_bundle,
+)
 from app.strategy_assets.algorithms.features.atr_rope_event_factor_lab_v4 import (
     ATRRopeConfig,
 )
 from app.strategy_assets.algorithms.features.dynamic_swing_anchored_vwap import (
     DSAConfig,
-)
-from app.strategy.selectors.dsa_selector import (
-    MIN_DIR_BARS,
-    _safe_float,
-    compute_dsa_bundle,
 )
 
 

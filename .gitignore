@@ -6,7 +6,6 @@ panji-website-v3/
 
 # ===== 文档目录（手工开发文档 + 自动生成文档，不入库） =====
 doc/
-docs/
 
 # ===== 敏感配置文件 =====
 .env
@@ -15,8 +14,8 @@ docs/
 
 # ===== 本地环境配置 =====
 .vscode/
-.trae/
 .idea/
+.trae/
 
 # ===== Python 临时文件与构建产物 =====
 __pycache__/
@@ -43,6 +42,10 @@ dist-ssr/
 *.parquet
 *.pkl
 *.pickle
+*.dump
+
+# ===== 备份目录（迁移/恢复产生的 dump，不入库） =====
+backups/
 
 # ===== 日志文件 =====
 *.log

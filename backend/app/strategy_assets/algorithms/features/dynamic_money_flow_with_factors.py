@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 文件名：
     dynamic_money_flow_with_factors.py
@@ -24,7 +23,6 @@ import argparse
 import math
 import os
 import sys
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -182,7 +180,7 @@ def rolling_percentile_rank(series: pd.Series, window: int) -> pd.Series:
 
 def bars_since_event(event: pd.Series) -> pd.Series:
     out = np.full(len(event), np.nan, dtype=float)
-    last_idx: Optional[int] = None
+    last_idx: int | None = None
     ev = event.fillna(False).astype(bool).to_numpy()
     for i, flag in enumerate(ev):
         if flag:

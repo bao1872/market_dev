@@ -14,7 +14,7 @@
 - POST /notification-previews: 消息预览（渠道无关 DTO + 站内渲染 + 飞书 card JSON）
 
 说明：
-- 当前用户 ID 通过 X-User-Id header 传入（占位，R2 阶段接入 JWT RBAC）
+- 当前用户通过 JWT（Authorization: Bearer <token>）认证，由 get_current_active_user 注入
 - 渠道配置 GET 返回脱敏后的 target_config（app_secret 仅显示末4位）
 """
 
@@ -22,12 +22,12 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.core.deps import get_db, require_roles
+from app.core.deps import get_current_active_user, get_db, require_roles
 from app.models.user import User
 from app.schemas.notification import (
     ChannelLatestEventTestResponse,
@@ -47,6 +47,7 @@ from app.services.feishu_card_builder import dto_to_feishu_card
 from app.services.message_builder import MessageBuilderError, build_message
 from app.services.notification_service import (
     ChannelNotFoundError,
+    ChannelOwnershipError,
     DuplicateActiveChannelError,
     LatestEventNotFoundError,
     MessageNotFoundError,
@@ -67,26 +68,6 @@ from app.services.notification_service import (
 router = APIRouter(tags=["notifications"])
 
 
-def _get_user_id(x_user_id: str | None = Header(None)) -> UUID:
-    """从 X-User-Id header 获取用户 ID（占位，R2 阶段接入 JWT）。
-
-    Raises:
-        HTTPException: 未提供 X-User-Id
-    """
-    if x_user_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="缺少 X-User-Id header",
-        )
-    try:
-        return UUID(x_user_id)
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"X-User-Id 格式非法: {e}",
-        ) from e
-
-
 def _channel_response(channel: object) -> NotificationChannelResponse:
     """构建渠道响应，对 target_config 脱敏。"""
     resp = NotificationChannelResponse.model_validate(channel)
@@ -100,11 +81,11 @@ async def get_messages(
     limit: int = Query(50, ge=1, le=200, description="返回条数"),
     offset: int = Query(0, ge=0, description="偏移量"),
     db: AsyncSession = Depends(get_db),
-    user_id: UUID = Depends(_get_user_id),
+    current_user: User = Depends(get_current_active_user),
 ) -> NotificationMessageListResponse:
     """获取用户消息列表。"""
     messages = await list_user_messages(
-        db, user_id, limit=limit, offset=offset, unread_only=unread_only
+        db, current_user.id, limit=limit, offset=offset, unread_only=unread_only
     )
     items = [NotificationMessageResponse.model_validate(m) for m in messages]
     return NotificationMessageListResponse(items=items, total=len(items))
@@ -125,24 +106,24 @@ class ReadAllResponse(BaseModel):
 @router.get("/messages/unread-count", response_model=UnreadCountResponse)
 async def get_unread_count(
     db: AsyncSession = Depends(get_db),
-    user_id: UUID = Depends(_get_user_id),
+    current_user: User = Depends(get_current_active_user),
 ) -> UnreadCountResponse:
     """获取当前用户未读消息总数（角标专用）。
 
     与 GET /messages 的 total 字段区分：list 接口 total 为当前页长度，
     本端点返回真实未读总数，供顶部角标展示。
     """
-    count = await count_unread_messages(db, user_id)
+    count = await count_unread_messages(db, current_user.id)
     return UnreadCountResponse(unread_count=count)
 
 
 @router.post("/messages/read-all", response_model=ReadAllResponse)
 async def mark_all_read(
     db: AsyncSession = Depends(get_db),
-    user_id: UUID = Depends(_get_user_id),
+    current_user: User = Depends(get_current_active_user),
 ) -> ReadAllResponse:
     """批量标记当前用户所有未读消息为已读。"""
-    marked = await mark_all_messages_read(db, user_id)
+    marked = await mark_all_messages_read(db, current_user.id)
     await db.commit()
     return ReadAllResponse(marked_count=marked)
 
@@ -151,11 +132,11 @@ async def mark_all_read(
 async def mark_read(
     message_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user_id: UUID = Depends(_get_user_id),
+    current_user: User = Depends(get_current_active_user),
 ) -> NotificationMessageResponse:
     """标记消息已读。"""
     try:
-        message = await mark_message_read(db, message_id, user_id)
+        message = await mark_message_read(db, message_id, current_user.id)
     except MessageNotFoundError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
@@ -172,7 +153,7 @@ async def mark_read(
 async def create_channel_endpoint(
     request: CreateChannelRequest,
     db: AsyncSession = Depends(get_db),
-    user_id: UUID = Depends(_get_user_id),
+    current_user: User = Depends(get_current_active_user),
 ) -> NotificationChannelResponse:
     """创建通知渠道。"""
     # 校验 adapter_type 是否支持
@@ -186,7 +167,7 @@ async def create_channel_endpoint(
     try:
         channel = await create_channel(
             db,
-            user_id=user_id,
+            user_id=current_user.id,
             adapter_type=request.adapter_type,
             display_name=request.display_name,
             target_config=request.target_config,
@@ -204,14 +185,14 @@ async def update_channel_endpoint(
     channel_id: UUID,
     request: UpdateChannelRequest,
     db: AsyncSession = Depends(get_db),
-    user_id: UUID = Depends(_get_user_id),
+    current_user: User = Depends(get_current_active_user),
 ) -> NotificationChannelResponse:
     """更新通知渠道配置。"""
     try:
         channel = await update_channel(
             db,
             channel_id=channel_id,
-            user_id=user_id,
+            user_id=current_user.id,
             display_name=request.display_name,
             target_config=request.target_config,
         )
@@ -230,14 +211,14 @@ async def update_channel_endpoint(
 async def delete_channel_endpoint(
     channel_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user_id: UUID = Depends(_get_user_id),
+    current_user: User = Depends(get_current_active_user),
 ) -> NotificationChannelResponse:
     """删除通知渠道（软删除）。"""
     try:
         channel = await delete_channel(
             db,
             channel_id=channel_id,
-            user_id=user_id,
+            user_id=current_user.id,
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
@@ -253,14 +234,18 @@ async def delete_channel_endpoint(
 async def verify_channel_endpoint(
     channel_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user_id: UUID = Depends(_get_user_id),
+    current_user: User = Depends(get_current_active_user),
 ) -> NotificationChannelResponse:
     """验证通知渠道配置。"""
     try:
-        channel = await verify_channel(db, channel_id)
+        channel = await verify_channel(db, channel_id, user_id=current_user.id)
     except ChannelNotFoundError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
+        ) from e
+    except ChannelOwnershipError as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail=str(e)
         ) from e
     except DuplicateActiveChannelError as e:
         raise HTTPException(
@@ -280,10 +265,10 @@ async def verify_channel_endpoint(
 )
 async def list_channels(
     db: AsyncSession = Depends(get_db),
-    user_id: UUID = Depends(_get_user_id),
+    current_user: User = Depends(get_current_active_user),
 ) -> NotificationChannelListResponse:
     """获取用户通知渠道列表。"""
-    channels = await list_user_channels(db, user_id)
+    channels = await list_user_channels(db, current_user.id)
     items = [_channel_response(ch) for ch in channels]
     return NotificationChannelListResponse(items=items, total=len(items))
 
@@ -295,17 +280,23 @@ async def list_channels(
 async def test_channel_endpoint(
     channel_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user_id: UUID = Depends(_get_user_id),
+    current_user: User = Depends(get_current_active_user),
 ) -> ChannelTestResponse:
     """测试渠道投递（发送测试消息到渠道）。
 
     与 verify 的区别：test 实际发送一条测试消息，验证完整投递链路。
     """
     try:
-        channel, delivery_result = await test_channel(db, channel_id)
+        channel, delivery_result = await test_channel(
+            db, channel_id, user_id=current_user.id
+        )
     except ChannelNotFoundError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
+        ) from e
+    except ChannelOwnershipError as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail=str(e)
         ) from e
     except DuplicateActiveChannelError as e:
         raise HTTPException(

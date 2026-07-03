@@ -33,6 +33,11 @@ import type {
   DeliveryStatus,
   BetaApplicationQueryParams,
   BetaApplicationPatchRequest,
+  PlanResponse,
+  GrantSubscriptionRequest,
+  RenewSubscriptionRequest,
+  ChangePlanRequest,
+  PaginationParams,
 } from '../api/endpoints'
 
 // ============================================================
@@ -717,6 +722,15 @@ export function useIsTradingDay(targetDate: string | undefined) {
 // ===== Admin Membership hooks =====
 // ============================================================
 
+/** 查询所有 active 套餐定义（1 分钟缓存，公开端点） */
+export function usePlans() {
+  return useQuery<PlanResponse[], Error>({
+    queryKey: ['plans'],
+    queryFn: api.getPlans,
+    staleTime: STALE_PLANS,
+  })
+}
+
 /** 查询邀请码列表 */
 export function useInviteCodes(params?: { status?: string; limit?: number; offset?: number }) {
   return useQuery({
@@ -764,6 +778,133 @@ export function useMemberRedemptions(userId: string | undefined) {
     queryFn: () => api.getMemberRedemptions(userId!),
     enabled: !!userId,
     staleTime: STALE_REALTIME,
+  })
+}
+
+/** 查询用户列表（admin） */
+export function useAdminUsers(params?: PaginationParams) {
+  return useQuery({
+    queryKey: ['admin', 'users', params],
+    queryFn: () => api.getAdminUsers(params),
+    staleTime: STALE_REALTIME,
+  })
+}
+
+/** 查询用户详情（admin） */
+export function useAdminUser(userId: string | undefined) {
+  return useQuery({
+    queryKey: ['admin', 'users', userId],
+    queryFn: () => api.getAdminUser(userId!),
+    enabled: !!userId,
+    staleTime: STALE_REALTIME,
+  })
+}
+
+/** 启用用户账户（admin） */
+export function useAdminEnableUser() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (userId: string) => api.adminEnableUser(userId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
+    },
+  })
+}
+
+/** 停用用户账户（admin） */
+export function useAdminDisableUser() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (userId: string) => api.adminDisableUser(userId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
+    },
+  })
+}
+
+/** 管理员授予用户套餐 */
+export function useAdminGrantSubscription() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      userId,
+      payload,
+    }: {
+      userId: string
+      payload: GrantSubscriptionRequest
+    }) => api.adminGrantSubscription(userId, payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
+    },
+  })
+}
+
+/** 管理员续期用户套餐 */
+export function useAdminRenewSubscription() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      userId,
+      payload,
+    }: {
+      userId: string
+      payload: RenewSubscriptionRequest
+    }) => api.adminRenewSubscription(userId, payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
+    },
+  })
+}
+
+/** 管理员撤销用户套餐 */
+export function useAdminRevokeSubscription() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (userId: string) => api.adminRevokeSubscription(userId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
+    },
+  })
+}
+
+/** 管理员变更用户套餐 */
+export function useAdminChangeSubscriptionPlan() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      userId,
+      payload,
+    }: {
+      userId: string
+      payload: ChangePlanRequest
+    }) => api.adminChangeSubscriptionPlan(userId, payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
+    },
+  })
+}
+
+/** 查询管理员审计日志 */
+export function useAdminAuditLogs(
+  params?: {
+    target_user_id?: string
+    action?: string
+    limit?: number
+    offset?: number
+  },
+  enabled: boolean = true,
+) {
+  return useQuery({
+    queryKey: ['admin', 'audit-logs', params],
+    queryFn: () => api.getAdminAuditLogs(params),
+    staleTime: STALE_REALTIME,
+    enabled,
   })
 }
 

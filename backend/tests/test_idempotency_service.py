@@ -23,7 +23,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import text
 
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.services.idempotency_service import acquire_job_run_lock

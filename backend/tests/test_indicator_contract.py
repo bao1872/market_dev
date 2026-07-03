@@ -7,10 +7,9 @@ import ast
 import inspect
 from pathlib import Path
 
-import pytest
 import yaml
 
-from app.constants import indicator_contract as IC
+from app.constants import indicator_contract
 
 # manifest 文件目录（backend/app/strategy_assets/manifests/）
 _MANIFESTS_DIR = Path(__file__).parent.parent / "app" / "strategy_assets" / "manifests"
@@ -18,11 +17,11 @@ _MANIFESTS_DIR = Path(__file__).parent.parent / "app" / "strategy_assets" / "man
 # backend/app/ 生产代码根目录（AST 扫描范围）
 _APP_DIR = Path(__file__).parent.parent / "app"
 
-# 受控参数清单：禁止在 indicator_contract.py 之外出现字面量 250/3600/600 作为参数赋值
+# 受控参数清单：禁止在 indicator_contract.py 之外出现字面量 250/4000/600 作为参数赋值
 # 字面量 → 对应受控参数名映射（用于错误信息定位）
 _CONTROLLED_PARAMS = {
     "DAILY_HISTORY_BARS": 250,
-    "NODE_CLUSTER_LOW_BARS": 3600,
+    "NODE_CLUSTER_LOW_BARS": 4000,
     "NODE_CLUSTER_EVENT_TTL_SECONDS": 600,
 }
 
@@ -36,34 +35,36 @@ def test_unified_volume_profile_vp_lookback_matches_baseline():
         VP_LOOKBACK,
     )
 
-    assert VP_LOOKBACK == IC.NODE_CLUSTER_PRIMARY_BARS
+    assert VP_LOOKBACK == indicator_contract.NODE_CLUSTER_PRIMARY_BARS
 
 
 # ===== monitor_batch_service 行情回看参数（旧值应已迁移至基线）=====
 
 
 def test_monitor_batch_service_no_daily_fetch_days_370():
-    """旧值 _DAILY_FETCH_DAYS=370 应已删除，改用 get_recent_bars 按根数取数。"""
+    """旧值 _DAILY_FETCH_DAYS=370 应已删除，改用 MarketDataAggregationService 统一入口。"""
     from app.services import monitor_batch_service
 
     source = inspect.getsource(monitor_batch_service)
     # 旧自然日估算常量不得残留
     assert "_DAILY_FETCH_DAYS = 370" not in source
     assert "_DAILY_FETCH_DAYS" not in source
-    # 新模式：使用 get_recent_bars 按根数取数
-    assert "get_recent_bars" in source
+    # 新模式：统一走 MarketDataAggregationService 并按根数 tail(N)
+    assert "MarketDataAggregationService" in source
+    assert "_fetch_md_bars" in source
 
 
 def test_monitor_batch_service_no_15min_fetch_days_200():
-    """旧值 _15MIN_FETCH_DAYS=200 应已删除，改用 get_recent_bars 按根数取数。"""
+    """旧值 _15MIN_FETCH_DAYS=200 应已删除，改用 MarketDataAggregationService 统一入口。"""
     from app.services import monitor_batch_service
 
     source = inspect.getsource(monitor_batch_service)
     # 旧自然日估算常量不得残留
     assert "_15MIN_FETCH_DAYS = 200" not in source
     assert "_15MIN_FETCH_DAYS" not in source
-    # 新模式：使用 get_recent_bars 按根数取数
-    assert "get_recent_bars" in source
+    # 新模式：统一走 MarketDataAggregationService 并按根数 tail(N)
+    assert "MarketDataAggregationService" in source
+    assert "_fetch_md_bars" in source
 
 
 # ===== watchlist_monitor.yaml 事件 TTL =====
@@ -106,24 +107,24 @@ def test_dsa_selector_yaml_lookback_matches_baseline():
     with open(yaml_path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
     params = {p["key"]: p for p in data["parameters"]}
-    assert params["algorithm.lookback"]["default"] == IC.DSA_LOOKBACK
+    assert params["algorithm.lookback"]["default"] == indicator_contract.DSA_LOOKBACK
 
 
 # ===== indicator_service 各周期根数 =====
 
 
 def test_indicator_service_daily_bars_matches_baseline():
-    """INDICATOR_BARS['1d'] 应与基线 IC.INDICATOR_BARS['1d'] 一致。"""
+    """INDICATOR_BARS['1d'] 应与基线 indicator_contract.INDICATOR_BARS['1d'] 一致。"""
     from app.services.indicator_service import INDICATOR_BARS
 
-    assert INDICATOR_BARS["1d"] == IC.INDICATOR_BARS["1d"]
+    assert INDICATOR_BARS["1d"] == indicator_contract.INDICATOR_BARS["1d"]
 
 
 def test_indicator_service_15min_bars_matches_baseline():
-    """INDICATOR_BARS['15m'] 应与基线 IC.INDICATOR_BARS['15m'] 一致。"""
+    """INDICATOR_BARS['15m'] 应与基线 indicator_contract.INDICATOR_BARS['15m'] 一致。"""
     from app.services.indicator_service import INDICATOR_BARS
 
-    assert INDICATOR_BARS["15m"] == IC.INDICATOR_BARS["15m"]
+    assert INDICATOR_BARS["15m"] == indicator_contract.INDICATOR_BARS["15m"]
 
 
 # ===== dsa_selector.py 旧常量清理 =====
@@ -262,7 +263,7 @@ def test_pavp_tv_marked_as_independent_tool():
 # 不属于"受控参数第二套定义"。每条必须给出明确的语义差异说明。
 # 维护规则：新增条目必须在 PR 中说明"为何不属于受控参数同语义"。
 _KNOWN_SEMANTIC_DIFFERENCES: set[tuple[str, str, int]] = {
-    # 60min bar 新鲜度 SLA 秒数（3600 秒 = 1 小时），与 NODE_CLUSTER_LOW_BARS=3600（15m bar 根数）语义不同
+    # 60min bar 新鲜度 SLA 秒数（3600 秒 = 1 小时），与 NODE_CLUSTER_LOW_BARS=4000（15m bar 根数）语义不同
     ("app/services/freshness_sla.py", "BAR_60MIN_SLA_SECONDS", 3600),
     # 事件基类默认 state_ttl_seconds（3600 秒），用于 stage/sr 等通用事件，与 Node Cluster bar 根数语义不同
     ("app/strategy/events/base.py", "state_ttl_seconds", 3600),
@@ -275,6 +276,17 @@ _KNOWN_SEMANTIC_DIFFERENCES: set[tuple[str, str, int]] = {
     ("app/services/monitor_batch_service.py", "_EVENT_COOLDOWN_SECONDS", 600),
     # BB 通知冷却（600 秒）：Bollinger 通知去重窗口，与 Node Cluster 事件 TTL 业务规则不同
     ("app/strategy/monitors/bollinger_monitor.py", "NOTIFY_COOLDOWN_SECONDS", 600),
+    # 60min bar 回补/对账数量上限（4000 条，覆盖 2023-01-01 至今约 3500 条），
+    # 与 NODE_CLUSTER_LOW_BARS=4000（15m bar 根数）语义不同（60min 回补数量 vs 15m 输入根数）
+    ("app/services/reconcile_bars.py", "_60MIN_COUNT_LIMIT", 4000),
+}
+
+# 字典字面量已知例外：以下 (相对路径, 字面量值) 二元组属于"语义不同的同值用法"，
+# 不属于"受控参数第二套定义"。每条必须给出明确的语义差异说明。
+_KNOWN_DICT_LITERAL_EXCEPTIONS: set[tuple[str, int]] = {
+    # bars_scheduler_service.py BACKFILL_COUNTS["60m"]=4000：60min bar 回补数量上限，
+    # 与 NODE_CLUSTER_LOW_BARS=4000（15m bar 根数）语义不同（60min 回补 vs 15m Node 输入）
+    ("app/services/bars_scheduler_service.py", 4000),
 }
 
 
@@ -283,12 +295,12 @@ def test_no_duplicate_controlled_params():
 
     受控参数清单（_CONTROLLED_PARAMS）：
         - DAILY_HISTORY_BARS (=250)
-        - NODE_CLUSTER_LOW_BARS (=3600)
+        - NODE_CLUSTER_LOW_BARS (=4000)
         - NODE_CLUSTER_EVENT_TTL_SECONDS (=600)
 
     规则：
         - 允许在 indicator_contract.py 中定义（唯一真源）
-        - 允许从 indicator_contract 导入后引用（如 IC.NODE_CLUSTER_LOW_BARS）
+        - 允许从 indicator_contract 导入后引用（如 indicator_contract.NODE_CLUSTER_LOW_BARS）
         - 禁止其它文件用字面量 250/3600/600 作为"参数赋值"形成第二套定义
         - 例外：注释、字符串、非参数赋值（如数组索引/比较/算术）不报错
         - 例外：_KNOWN_SEMANTIC_DIFFERENCES 白名单（语义不同的同值用法）
@@ -351,6 +363,8 @@ def test_no_duplicate_controlled_params():
                         and isinstance(val.value, int)
                         and val.value in controlled_literals
                     ):
+                        if (str(rel_path), val.value) in _KNOWN_DICT_LITERAL_EXCEPTIONS:
+                            continue
                         violations.append(
                             f"{rel_path}:{node.lineno} 字典字面量中含受控字面量 {val.value} "
                             f"（应从 indicator_contract 导入）"

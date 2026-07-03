@@ -15,7 +15,10 @@
 - message_group_id: 关联 text+image 两条 Outbox/MessageDelivery 的组 ID
 - message_id: 文本消息 ID（主消息）
 - image_message_id: 图片消息 ID（截图失败时为 None）
-- status: "pending"（Outbox 异步链路，创建后即为 pending）
+- status: "pending"（截图成功，Outbox 异步投递中）| "partial_failed"（截图失败）
+- failed_step: 截图失败时的失败步骤（"capture" | "image_outbox" | None）
+- error_code: 截图失败时的错误码（NO_IMAGE_URL | CAPTURE_REQUEST_FAILED | IMAGE_OUTBOX_FAILED | None）
+- error_message: 截图失败时的错误详情（包含 worker 返回的响应体，最多 500 字符）
 
 状态查询：
 - GET /admin/stock-detail-feishu/{test_run_id}/status
@@ -35,8 +38,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import create_capture_token
+from app.models.capture_job import (
+    CAPTURE_STATUS_FAILED,
+    CaptureJob,
+)
 from app.models.instrument import Instrument
-from app.models.notification import NotificationChannel
+from app.models.notification import MessageDelivery, NotificationChannel
 from app.models.stock_memo import StockMemo
 from app.schemas.notification import NotificationMessageDTO
 from app.services.channel_adapter import get_adapter  # noqa: F401  re-export for patch
@@ -119,12 +126,16 @@ async def send_stock_detail_to_feishu(
         capture_token_ttl_seconds: capture token 有效期（秒）
 
     Returns:
-        dict 含 test_run_id / message_group_id / message_id / image_message_id / status
+        dict 含 test_run_id / message_group_id / message_id / image_message_id /
+        status / failed_step / error_code / error_message
+        - status="pending": 截图成功，Outbox 异步投递中（终态由 delivery_worker 决定）
+        - status="partial_failed": 截图失败，文本已写入 Outbox，支持仅重试图片
+        - failed_step/error_code/error_message: 截图成功时为 None，失败时携带上下文
 
     Raises:
         InstrumentNotFoundError: 个股不存在
         ChannelNotFoundError: 用户无 active 飞书渠道
-        StockDetailFeishuError: 快照/文本Outbox/截图/图片Outbox 失败（携带 error_code/failed_step）
+        StockDetailFeishuError: 快照/文本Outbox 失败（携带 error_code/failed_step）
         NotificationServiceError: 其他消息创建失败
     """
     total_start = time.time()
@@ -149,10 +160,10 @@ async def send_stock_detail_to_feishu(
     memo = memo_result.scalar_one_or_none()
     memo_content = memo.content if memo else None
 
-    # 2. 自动查找当前用户唯一 active 飞书渠道（webhook 或 platform_app）
+    # 2. 自动查找当前用户唯一 active 飞书渠道（仅 Platform App）
     stmt_ch = select(NotificationChannel).where(
         NotificationChannel.user_id == user_id,
-        NotificationChannel.adapter_type.in_(["feishu_webhook", "feishu_platform_app"]),
+        NotificationChannel.adapter_type == "feishu_platform_app",
         NotificationChannel.status == "active",
     )
     ch_result = await db.execute(stmt_ch)
@@ -246,13 +257,23 @@ async def send_stock_detail_to_feishu(
 
     # 8. 截图 → 创建图片消息 → 写入图片 Outbox（截图失败不阻塞文本投递）
     # [StockDetailFeishu] - 图片段：delivery_type=image，与 text 共享 message_group_id
+    # [StockDetailFeishu] - 状态机：在 try 块外维护失败上下文，截图失败时返回 partial_failed
     image_message_id: str | None = None
+    image_url: str | None = None
+    failed_step_local: str | None = None
+    error_code_local: str | None = None
+    error_message_local: str | None = None
     capture_start = time.time()
     try:
+        # [Capture] - 描述: stock_detail 链路必须传 scope=stock_detail_capture + instrument_id
+        # （advice.md 第六节硬规则，由 get_capture_token_payload 校验）
         token = create_capture_token(
             subject=str(user_id),
             event_id=str(instrument_id),
             expires_delta=timedelta(seconds=capture_token_ttl_seconds),
+            scope="stock_detail_capture",
+            instrument_id=str(instrument_id),
+            user_id=str(user_id),
         )
         capture_payload = {
             "symbol": instrument.symbol,
@@ -268,7 +289,24 @@ async def send_stock_detail_to_feishu(
                 f"{capture_worker_url.rstrip('/')}/capture",
                 json=capture_payload,
             )
-            capture_resp.raise_for_status()
+            # [StockDetailFeishu] - 修复: 不丢弃 worker 返回的错误详情（advice.md 第七节状态机）
+            try:
+                capture_resp.raise_for_status()
+            except httpx.HTTPStatusError as http_err:
+                # 解析 worker 返回的错误详情，不丢弃响应体
+                # error_code 由外层 except 根据 failed_step_local 重新判定，此处只提取 err_msg
+                try:
+                    err_body = capture_resp.json()
+                    err_msg = (
+                        err_body.get("detail")
+                        or err_body.get("message")
+                        or str(http_err)
+                    )
+                except Exception:
+                    err_msg = str(http_err)
+                raise RuntimeError(
+                    f"截图服务返回 {capture_resp.status_code}: {err_msg}"
+                ) from http_err
             capture_data = capture_resp.json()
         image_url = capture_data.get("image_url")
         if not image_url:
@@ -327,32 +365,83 @@ async def send_stock_detail_to_feishu(
         image_outbox_ms = (time.time() - image_outbox_start) * 1000
     except Exception as e:
         # 截图或图片 Outbox 失败不阻塞文本投递（文本已写入 Outbox）
-        # 不吞异常：记录上下文与失败步骤，image_message_id 保持 None
+        # 不吞异常：写 CaptureJob 失败记录并补充上下文，image_message_id 保持 None
         if capture_ms == 0.0:
             capture_ms = (time.time() - capture_start) * 1000
+
+        # 判定失败阶段：未拿到 image_url 视为 capture 失败；否则为 image_outbox 失败
+        failed_step_local = "capture" if not image_url else "image_outbox"
+        # [StockDetailFeishu] - 优先复用 worker 返回的 error_code（HTTPStatusError 分支已抛 RuntimeError）
+        if (
+            isinstance(e, RuntimeError)
+            and "截图服务未返回 image_url" in str(e)
+        ):
+            error_code_local = "NO_IMAGE_URL"
+        elif failed_step_local == "capture":
+            error_code_local = "CAPTURE_REQUEST_FAILED"
+        else:
+            error_code_local = "IMAGE_OUTBOX_FAILED"
+        error_message_local = str(e)[:500]
+
+        db.add(
+            CaptureJob(
+                event_id=instrument_id,
+                instrument_id=instrument_id,
+                user_id=user_id,
+                message_group_id=message_group_id,
+                status=CAPTURE_STATUS_FAILED,
+                attempt_count=1,
+                image_url=image_url,
+                error_code=error_code_local,
+                error_message=error_message_local,
+            )
+        )
         logger.warning(
             "IMAGE_STEP_FAILED instrument_id=%s channel_id=%s test_run_id=%s "
-            "failed_step=image error_code=IMAGE_STEP_FAILED error=%s",
-            instrument_id, channel.id, test_run_id, e,
+            "failed_step=%s error_code=%s error=%s",
+            instrument_id, channel.id, test_run_id,
+            failed_step_local, error_code_local, e,
         )
 
     total_ms = (time.time() - total_start) * 1000
     logger.info(
         "[StockDetailFeishu] 发送完成 instrument_id=%s channel_id=%s "
         "test_run_id=%s snapshot_ms=%.1f text_outbox_ms=%.1f capture_ms=%.1f "
-        "image_outbox_ms=%.1f total_ms=%.1f cache_hit=%s image_message_id=%s",
+        "image_outbox_ms=%.1f total_ms=%.1f cache_hit=%s image_message_id=%s "
+        "failed_step=%s error_code=%s",
         instrument_id, channel.id, test_run_id,
         snapshot_ms, text_outbox_ms, capture_ms, image_outbox_ms, total_ms,
         cache_hit, image_message_id,
+        failed_step_local, error_code_local,
     )
+
+    # [StockDetailFeishu] - 状态机：截图失败时返回 partial_failed（advice.md 第七节）
+    # 截图成功时仍返回 pending（Outbox 异步投递尚未完成，由 delivery_worker 处理）
+    if failed_step_local is not None:
+        final_status = "partial_failed"
+    else:
+        final_status = "pending"
 
     return {
         "test_run_id": str(test_run_id),
         "message_group_id": message_group_id,
         "message_id": str(text_message.id),
         "image_message_id": image_message_id,
-        "status": "pending",
+        "status": final_status,
+        "failed_step": failed_step_local,
+        "error_code": error_code_local,
+        "error_message": error_message_local,
     }
+
+
+def _extract_delivery_error_message(delivery: MessageDelivery) -> str | None:
+    """从 MessageDelivery 的 provider_response / image_upload_provider_response 提取可读错误信息。"""
+    for pr in (delivery.image_upload_provider_response, delivery.provider_response):
+        if isinstance(pr, dict):
+            msg = pr.get("error_message") or pr.get("msg") or pr.get("message")
+            if msg:
+                return str(msg)
+    return None
 
 
 async def get_share_status(
@@ -376,74 +465,64 @@ async def get_share_status(
 
     Returns:
         dict 含 test_run_id / message_group_id / card_status / image_status /
-        overall_status / failed_step / error_code / error_message
+        overall_status / failed_step / error_code / error_message / image_message_id
 
     Raises:
         NotificationServiceError: test_run_id 无对应消息
     """
     from sqlalchemy import text as sql_text
 
-    from app.models.notification import NotificationMessage
+    from app.models.notification import MessageDelivery, NotificationMessage
 
-    # 1. 通过 test_run_id + user_id 查消息（body->'resource_refs'->>'test_run_id'）
-    stmt_msg = (
-        select(NotificationMessage)
-        .where(
-            NotificationMessage.user_id == user_id,
-            sql_text("body->'resource_refs'->>'test_run_id' = :test_run_id"),
-        )
-        .params(test_run_id=str(test_run_id))
-        .limit(1)
-    )
-    result_msg = await db.execute(stmt_msg)
-    message = result_msg.scalar_one_or_none()
-    if message is None:
-        raise NotificationServiceError(
-            f"未找到 test_run_id 对应的消息: test_run_id={test_run_id}"
-        )
-
-    # 从 Outbox payload 或 MessageDelivery.message_group_id 获取组 ID
-    # 优先从 MessageDelivery 查
-    from app.models.notification import MessageDelivery
-
+    # 1. 通过 test_run_id + user_id 一次性查询所有关联 MessageDelivery
+    # [StockDetailFeishu] - 描述: 文本/图片是两条独立 NotificationMessage，各带一条
+    # MessageDelivery，必须跨消息汇总，不能仅查第一条消息的 delivery。
     stmt_del = (
         select(MessageDelivery)
         .where(
-            MessageDelivery.notification_message_id == message.id
+            sql_text(
+                "notification_message_id IN ("
+                "SELECT id FROM notification_messages "
+                "WHERE user_id = :user_id AND body->'resource_refs'->>'test_run_id' = :test_run_id"
+                ")"
+            )
         )
+        .params(user_id=str(user_id), test_run_id=str(test_run_id))
     )
     result_del = await db.execute(stmt_del)
     deliveries = list(result_del.scalars().all())
 
-    # 若本消息无 delivery，可能 delivery 在关联的 image 消息上，通过 message_group_id 查
     if not deliveries:
-        # 尝试从同 test_run_id 的其他消息查 delivery
-        stmt_group = (
-            select(MessageDelivery)
+        # 确认消息是否存在：存在但 Outbox 尚未 relay 则返回 pending；不存在则 404
+        stmt_msg = (
+            select(NotificationMessage)
             .where(
-                sql_text(
-                    "notification_message_id IN ("
-                    "SELECT id FROM notification_messages "
-                    "WHERE body->'resource_refs'->>'test_run_id' = :test_run_id"
-                    ")"
-                )
+                NotificationMessage.user_id == user_id,
+                sql_text("body->'resource_refs'->>'test_run_id' = :test_run_id"),
             )
             .params(test_run_id=str(test_run_id))
+            .limit(1)
         )
-        result_group = await db.execute(stmt_group)
-        deliveries = list(result_group.scalars().all())
+        result_msg = await db.execute(stmt_msg)
+        message = result_msg.scalar_one_or_none()
+        if message is None:
+            raise NotificationServiceError(
+                f"未找到 test_run_id 对应的消息: test_run_id={test_run_id}"
+            )
 
-    if not deliveries:
         # Outbox 尚未扩张为 MessageDelivery（relay worker 未轮询到）
         return {
             "test_run_id": str(test_run_id),
             "message_group_id": None,
             "card_status": "pending",
-            "image_status": "pending",
+            "capture_status": "pending",
+            "image_upload_status": "not_created",
+            "image_status": "not_created",
             "overall_status": "pending",
             "failed_step": None,
             "error_code": None,
             "error_message": None,
+            "image_message_id": None,
         }
 
     # 取 message_group_id（所有 delivery 共享）
@@ -457,34 +536,94 @@ async def get_share_status(
 
     card_status = card_deliveries[0].status if card_deliveries else "not_created"
     image_status = image_deliveries[0].status if image_deliveries else "not_created"
+    image_message_id = (
+        str(image_deliveries[0].notification_message_id) if image_deliveries else None
+    )
+    # [StockDetailFeishu] - 描述: 图片上传状态取 image delivery 的 image_upload_status
+    # 若字段为 None，按 delivery.status 推断：success→success，failed/dead→failed，其他→pending
+    if image_deliveries:
+        image_upload_status = image_deliveries[0].image_upload_status
+        if image_upload_status is None:
+            if image_deliveries[0].status == "success":
+                image_upload_status = "success"
+            elif image_deliveries[0].status in ("failed", "dead"):
+                image_upload_status = "failed"
+            else:
+                image_upload_status = "pending"
+    else:
+        image_upload_status = "not_created"
+
+    # 查询同 message_group_id 的截图失败记录（capture 失败时不会创建 image delivery）
+    stmt_cj = (
+        select(CaptureJob)
+        .where(
+            CaptureJob.message_group_id == message_group_id,
+            CaptureJob.status == CAPTURE_STATUS_FAILED,
+        )
+        .order_by(CaptureJob.created_at.desc())
+        .limit(1)
+    )
+    result_cj = await db.execute(stmt_cj)
+    capture_job_failed = result_cj.scalar_one_or_none()
+
+    # [StockDetailFeishu] - 描述: capture_status 反映截图任务状态
+    # capture 失败时不会有 image delivery，因此单独查询 CaptureJob 失败记录
+    capture_status: str = "pending"
+    if capture_job_failed:
+        capture_status = "failed"
+    elif image_deliveries:
+        # image delivery 已创建说明截图已成功返回 image_url
+        capture_status = "success"
 
     # 汇总 overall_status + failed_step + error_code + error_message
-    # [StockDetailFeishu] - 描述: 从 MessageDelivery.last_error_code + provider_response
-    #   提取 error_message（advice.md 第十一节遗留清理：技术错误返回三字段）
+    # [StockDetailFeishu] - 描述: 文字成功+图片失败 → overall_status=partial_failed
     failed_step: str | None = None
     error_code: str | None = None
     error_message: str | None = None
 
-    all_statuses = [d.status for d in deliveries]
-    if all(s == "success" for s in all_statuses):
+    card_success = card_status == "success"
+    image_exists = bool(image_deliveries)
+    image_success = image_exists and image_status == "success"
+    any_failed_or_dead = any(d.status in ("failed", "dead") for d in deliveries)
+
+    if card_success and image_success:
         overall_status = "success"
-    elif any(s in ("failed", "dead") for s in all_statuses):
+    elif card_success and not image_success:
+        # 卡片段成功，但图片段未成功（pending/sending/retrying/failed/dead/not_created）
+        # [StockDetailFeishu] - 描述: 文字成功+图片未成功 → partial_failed
+        overall_status = "partial_failed"
+        if capture_job_failed:
+            failed_step = "capture"
+            error_code = capture_job_failed.error_code
+            error_message = capture_job_failed.error_message
+        elif image_deliveries and image_deliveries[0].status in ("failed", "dead", "retrying"):
+            image_delivery = image_deliveries[0]
+            if image_delivery.image_upload_status == "failed":
+                failed_step = "image_upload"
+                error_code = image_delivery.image_upload_error_code
+            else:
+                failed_step = "image_delivery"
+                error_code = image_delivery.last_error_code
+            error_message = _extract_delivery_error_message(image_delivery)
+        else:
+            # 卡片段成功但图片段尚未创建，也视为 partial_failed（等待中）
+            # 此时没有具体失败步骤，保持 None
+            pass
+    elif any_failed_or_dead:
         overall_status = "failed"
-        # 取第一个失败的 delivery 作为 failed_step，并提取 error_code + error_message
         for d in deliveries:
             if d.status in ("failed", "dead"):
-                failed_step = d.delivery_type
+                if d.delivery_type == "card":
+                    failed_step = "card"
+                elif d.delivery_type == "image":
+                    if d.image_upload_status == "failed":
+                        failed_step = "image_upload"
+                    else:
+                        failed_step = "image_delivery"
+                else:
+                    failed_step = d.delivery_type
                 error_code = d.last_error_code
-                # 从 provider_response 提取 error_message
-                # provider_response 结构示例：{"code": 230002, "msg": "IP 不在白名单"}
-                # 或 {"error_message": "...", "msg": "..."}，兼容多种渠道返回格式
-                pr = d.provider_response
-                if isinstance(pr, dict):
-                    error_message = (
-                        pr.get("error_message")
-                        or pr.get("msg")
-                        or pr.get("message")
-                    )
+                error_message = _extract_delivery_error_message(d)
                 break
     else:
         overall_status = "pending"
@@ -493,11 +632,14 @@ async def get_share_status(
         "test_run_id": str(test_run_id),
         "message_group_id": message_group_id,
         "card_status": card_status,
+        "capture_status": capture_status,
+        "image_upload_status": image_upload_status,
         "image_status": image_status,
         "overall_status": overall_status,
         "failed_step": failed_step,
         "error_code": error_code,
         "error_message": error_message,
+        "image_message_id": image_message_id,
     }
 
 

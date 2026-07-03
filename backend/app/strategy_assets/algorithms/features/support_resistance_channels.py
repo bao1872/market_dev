@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Support Resistance Channels (Pine v6 by LonesomeTheBlue) -> Python / Plotly
 
@@ -26,12 +25,10 @@ python support_resistance_channels.py \
 from __future__ import annotations
 
 import argparse
-import math
 import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -81,7 +78,7 @@ def fetch_kline_pytdx(symbol: str, start: str, end: str, freq, api=None) -> pd.D
         mkt = 1 if symbol.startswith(("5", "6", "9")) else 0
         page = 0
         size = 700
-        frames: List[pd.DataFrame] = []
+        frames: list[pd.DataFrame] = []
 
         while True:
             recs = api.get_security_bars(cat, mkt, symbol, page * size, size)
@@ -157,7 +154,7 @@ def calc_ma(series: pd.Series, length: int, ma_type: str) -> pd.Series:
     return sma(series, length) if ma_type.upper() == "SMA" else ema(series, length)
 
 
-def _fmt_x_labels(index: pd.Index) -> List[str]:
+def _fmt_x_labels(index: pd.Index) -> list[str]:
     idx = pd.to_datetime(index)
     has_time = any((ts.hour != 0 or ts.minute != 0) for ts in idx)
     if has_time:
@@ -193,12 +190,12 @@ def pivotlow(series: pd.Series, left: int, right: int) -> pd.Series:
     return pd.Series(out, index=series.index)
 
 
-def _rgba(rgb: Tuple[int, int, int], alpha: float) -> str:
+def _rgba(rgb: tuple[int, int, int], alpha: float) -> str:
     return f"rgba({rgb[0]},{rgb[1]},{rgb[2]},{alpha:.3f})"
 
 
 # --------------------------- core pine port ---------------------------
-def compute_sr_channels(df: pd.DataFrame, cfg: SRChannelConfig) -> Tuple[pd.DataFrame, List[dict]]:
+def compute_sr_channels(df: pd.DataFrame, cfg: SRChannelConfig) -> tuple[pd.DataFrame, list[dict]]:
     d = df.copy()
     n = len(d)
     close = d["close"].astype(float)
@@ -221,16 +218,16 @@ def compute_sr_channels(df: pd.DataFrame, cfg: SRChannelConfig) -> Tuple[pd.Data
     d["ma1"] = calc_ma(close, cfg.ma1_len, cfg.ma1_type) if cfg.show_ma1 else np.nan
     d["ma2"] = calc_ma(close, cfg.ma2_len, cfg.ma2_type) if cfg.show_ma2 else np.nan
 
-    pivotvals: List[float] = []
-    pivotlocs: List[int] = []
+    pivotvals: list[float] = []
+    pivotlocs: list[int] = []
 
     # final channels snapshot to display on the chart's last bar
     suportresistance = [0.0] * 20
     resistancebroken = np.full(n, False)
     supportbroken = np.full(n, False)
-    channels_by_bar: List[List[dict]] = [[] for _ in range(n)]
+    channels_by_bar: list[list[dict]] = [[] for _ in range(n)]
 
-    def get_sr_vals(ind: int, cwidth: float) -> Tuple[float, float, int]:
+    def get_sr_vals(ind: int, cwidth: float) -> tuple[float, float, int]:
         lo = pivotvals[ind]
         hi = lo
         numpp = 0
@@ -244,7 +241,7 @@ def compute_sr_channels(df: pd.DataFrame, cfg: SRChannelConfig) -> Tuple[pd.Data
                 numpp += 20
         return hi, lo, numpp
 
-    def changeit(arr: List[float], x: int, y: int) -> None:
+    def changeit(arr: list[float], x: int, y: int) -> None:
         arr[y * 2], arr[x * 2] = arr[x * 2], arr[y * 2]
         arr[y * 2 + 1], arr[x * 2 + 1] = arr[x * 2 + 1], arr[y * 2 + 1]
 
@@ -278,7 +275,7 @@ def compute_sr_channels(df: pd.DataFrame, cfg: SRChannelConfig) -> Tuple[pd.Data
                 pivotvals.pop()
 
         if new_pivot and pivotvals:
-            supres: List[float] = []  # triplets: strength, hi, lo
+            supres: list[float] = []  # triplets: strength, hi, lo
             strengths = [0.0] * 10
 
             for x in range(len(pivotvals)):
@@ -328,7 +325,7 @@ def compute_sr_channels(df: pd.DataFrame, cfg: SRChannelConfig) -> Tuple[pd.Data
                         changeit(suportresistance, x, y)
 
         # per-bar channels snapshot for optional inspection / broken logic
-        current_channels: List[dict] = []
+        current_channels: list[dict] = []
         limit = min(9, cfg.maxnumsr - 1)
         for x in range(limit + 1):
             hi_ = suportresistance[x * 2]
@@ -368,7 +365,7 @@ def compute_sr_channels(df: pd.DataFrame, cfg: SRChannelConfig) -> Tuple[pd.Data
 
 
 # --------------------------- plotting ---------------------------
-def add_feature_table(fig: go.Figure, df: pd.DataFrame, final_channels: List[dict], cfg: SRChannelConfig) -> None:
+def add_feature_table(fig: go.Figure, df: pd.DataFrame, final_channels: list[dict], cfg: SRChannelConfig) -> None:
     if len(df) == 0:
         return
     last = df.iloc[-1]
@@ -407,7 +404,7 @@ def add_feature_table(fig: go.Figure, df: pd.DataFrame, final_channels: List[dic
     )
 
 
-def build_plot(df: pd.DataFrame, final_channels: List[dict], out_html: str, title: str, cfg: SRChannelConfig) -> None:
+def build_plot(df: pd.DataFrame, final_channels: list[dict], out_html: str, title: str, cfg: SRChannelConfig) -> None:
     bg = "#0b0f14"
     grid = "rgba(255,255,255,0.06)"
     bull = "#26a69a"

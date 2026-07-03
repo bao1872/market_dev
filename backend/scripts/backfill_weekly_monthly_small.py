@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import date, timedelta
+from datetime import timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession

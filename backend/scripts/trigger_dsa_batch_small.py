@@ -120,6 +120,7 @@ async def main() -> None:
 
         # 重新加载 run 获取最终状态
         from sqlalchemy import select
+
         from app.models.strategy_run import StrategyRun
         result = await db.execute(select(StrategyRun).where(StrategyRun.id == run.id))
         run = result.scalar_one()
@@ -155,7 +156,7 @@ async def main() -> None:
     print(f"skipped_count: {run.skipped_count}")
     print(f"published_at: {run.published_at}")
     print("\n前端验证 URL: http://43.136.118.82/screener")
-    print(f"API 验证: curl 'http://43.136.118.82/api/strategies/dsa_selector/published-runs'")
+    print("API 验证: curl 'http://43.136.118.82/api/strategies/dsa_selector/published-runs'")
 
 
 if __name__ == "__main__":

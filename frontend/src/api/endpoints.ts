@@ -32,13 +32,43 @@ function getUserIdHeader(): Record<string, string> {
 // Auth 领域类型
 // ============================================================
 
-/** 登录响应（含 token + 会员到期标记） */
+// [Auth] - 描述: AccessProfile 当前用户完整权限上下文（11 字段，对齐后端 AccessProfileResponse）
+// 与 backend/app/schemas/access.py AccessProfileResponse 字段语义完全一致
+// 唯一真源为 backend/app/services/access_control_service.get_access_context
+export interface AccessProfile {
+  user_id: string
+  account_status: string
+  roles: string[]
+  is_admin: boolean
+  is_member: boolean
+  subscription_active: boolean
+  plan_code: string | null
+  plan_display_name: string | null
+  expires_at: string | null
+  features: string[]
+  limits: Record<string, number>
+}
+
+// [Auth] - 描述: 登录响应 - 含 4 个 token 字段 + 10 个 AccessProfile 字段（对齐后端 LoginResponse）
+// 替代旧字段 membership_expired（语义等价：subscription_active = not membership_expired；字段名保留为 V1.6 API 兼容）
+// next_route 由后端权威计算：admin→/admin/overview；member active→/overview；member expired→/subscription-expired
 export interface LoginResponse {
+  // token 字段（4 个）
   access_token: string
   refresh_token: string
   token_type: string
   expires_in: number
-  membership_expired: boolean
+  // AccessProfile 字段（10 个）
+  is_admin: boolean
+  roles: string[]
+  subscription_required: boolean
+  subscription_active: boolean
+  plan_code: string | null
+  plan_display_name: string | null
+  expires_at: string | null
+  features: string[]
+  limits: Record<string, number>
+  next_route: string
 }
 
 /** Token 刷新响应 */
@@ -60,6 +90,36 @@ export interface UserResponse {
   updated_at: string
 }
 
+/** 用户列表分页响应 */
+export interface UserListResponse {
+  items: UserResponse[]
+  total: number
+  limit: number
+  offset: number
+}
+
+/** 审计日志列表项 */
+export interface AuditLogListItem {
+  id: string
+  actor_user_id: string
+  action: string
+  target_type: string
+  target_id: string | null
+  before_data: Record<string, unknown> | null
+  after_data: Record<string, unknown> | null
+  request_id: string | null
+  ip_hash: string | null
+  created_at: string
+}
+
+/** 审计日志列表响应 */
+export interface AuditLogListResponse {
+  items: AuditLogListItem[]
+  total: number
+  limit: number
+  offset: number
+}
+
 /** 会员状态响应 */
 export interface MembershipResponse {
   status: string
@@ -69,7 +129,7 @@ export interface MembershipResponse {
   renewal_count: number
 }
 
-/** 注册成功响应 */
+/** 注册成功响应（membership_* 字段为 V1.6 API 遗留命名，语义等价于 subscription_*） */
 export interface RegisterSuccessResponse {
   access_token: string
   refresh_token: string
@@ -79,13 +139,34 @@ export interface RegisterSuccessResponse {
   membership_expires_at: string
 }
 
-/** 续期成功响应 */
+/** 续期成功响应（membership_status 为 V1.6 API 遗留命名，语义等价于 subscription_status） */
 export interface RenewSuccessResponse {
   membership_status: string
   started_at: string
   old_expires_at: string | null
   new_expires_at: string
   remaining_days: number
+}
+
+/** 订阅记录响应 */
+export interface SubscriptionResponse {
+  id: string
+  user_id: string
+  plan_code: string
+  status: string
+  starts_at: string
+  expires_at: string
+  entitlement_snapshot: Record<string, unknown>
+  source: string
+  created_by: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** 管理员续期订阅响应 */
+export interface SubscriptionRenewResponse extends SubscriptionResponse {
+  old_expires_at: string
+  new_expires_at: string
 }
 
 // ============================================================
@@ -375,10 +456,27 @@ export interface ChannelLatestEventTestResponse {
   diagnostics: Record<string, unknown>
 }
 
+// [Capture] - 描述: Capture Snapshot API 响应类型
+// 与后端 backend/app/api/capture.py 的 get_capture_snapshot 返回结构对齐
+
+/** 截图数据快照响应（一次返回 instrument / bars / indicators / events） */
+export interface CaptureSnapshotResponse {
+  instrument: Instrument
+  bars: BarListResponse
+  indicators: IndicatorResponse
+  events: StrategyEventListResponse
+  snapshot_time: string
+  capture: {
+    user_id: string
+    event_id: string
+    scope: string
+  }
+}
+
 // [StockDetailFeishu] - 描述: 异步 Outbox 投递模式类型契约（POST 创建 + GET 状态轮询）
 // 与后端 backend/app/api/stock_detail_feishu.py 的 SendFeishuResponse / ShareStatusResponse 对齐
 
-/** 单条投递状态（card / image 共用） */
+/** 单条投递状态（card / image / capture 共用） */
 export type ShareDeliveryStatus =
   | 'pending'
   | 'sending'
@@ -402,11 +500,14 @@ export interface StockDetailFeishuStatusResponse {
   test_run_id: string
   message_group_id: string | null
   card_status: ShareDeliveryStatus
+  capture_status: ShareDeliveryStatus
+  image_upload_status: ShareDeliveryStatus
   image_status: ShareDeliveryStatus
-  overall_status: 'pending' | 'success' | 'failed'
-  failed_step: 'card' | 'image' | null
+  overall_status: 'pending' | 'success' | 'partial_failed' | 'failed'
+  failed_step: 'capture' | 'image_upload' | 'image_delivery' | 'card' | 'image' | null
   error_code: string | null
   error_message: string | null
+  image_message_id: string | null
 }
 
 /** 消息预览响应 */
@@ -526,15 +627,20 @@ export interface TradingDayResponse {
 // Admin Membership 领域类型
 // ============================================================
 
-// [plan_contract] - 描述: 套餐契约预览映射，仅用于前端权益预览展示
-// 权威值由后端 app/constants/plan_contract.py PLAN_CONTRACTS 计算，前端不得在请求中传入 monitor_limit
-export const PLAN_CONTRACTS_PREVIEW = {
-  observe_20: { name: '观察版', monitorLimit: 20 },
-  research_50: { name: '研究版', monitorLimit: 50 },
-} as const
+// [plan_contract] - 描述: 套餐定义由后端 plans 表唯一真源驱动，前端不硬编码套餐字段
+// 权威值为 backend/app/models/plan.py / app/services/plan_service.py，通过 GET /plans 公开端点获取
+/** 套餐代码（与后端 plans.plan_code 一致） */
+export type PlanCode = string
 
-/** 套餐代码（与后端 plan_contract.py PLAN_CONTRACTS 键一致） */
-export type PlanCode = keyof typeof PLAN_CONTRACTS_PREVIEW
+/** 套餐定义响应（与 backend/app/schemas/plan.py PlanResponse 对齐） */
+export interface PlanResponse {
+  plan_code: string
+  display_name: string
+  monitor_limit: number
+  notification_channel_limit: number
+  message_retention_days: number
+  features: string[]
+}
 
 /** 邀请码响应（含明文，仅生成时返回）+ 套餐快照 */
 export interface InviteCode {
@@ -583,7 +689,7 @@ export interface InviteRedemption {
   redeemed_at: string
 }
 
-/** 会员账户列表项 */
+/** 订阅账户列表项（MemberListItem / membership_status 为 V1.6 API 遗留命名） */
 export interface MemberListItem {
   user_id: string
   email: string
@@ -719,6 +825,28 @@ export interface InviteCodeCreateRequest {
   grant_months?: number
 }
 
+/** 管理员授予用户套餐请求 */
+export interface GrantSubscriptionRequest {
+  plan_code: PlanCode
+  grant_months: number
+}
+
+/** 管理员续期用户套餐请求 */
+export interface RenewSubscriptionRequest {
+  grant_months: number
+}
+
+/** 管理员变更用户套餐请求 */
+export interface ChangePlanRequest {
+  plan_code: PlanCode
+  grant_months: number
+}
+
+/** 管理员变更用户账户状态请求 */
+export interface ChangeAccountStatusRequest {
+  status: 'active' | 'disabled'
+}
+
 
 // ============================================================
 // 查询参数类型
@@ -783,7 +911,8 @@ export interface PaginationParams {
 // ===== Auth 端点 =====
 // ============================================================
 
-/** 用户登录 - 返回 access + refresh token + 会员到期标记（公开接口） */
+// [Auth] - 描述: 用户登录 - 返回 token + AccessProfile 权限上下文 + next_route（公开接口）
+// 前端不再判断 membership_expired，直接使用 next_route 跳转
 export async function login(email: string, password: string): Promise<LoginResponse> {
   const { data } = await publicApiClient.post<LoginResponse>('/auth/login', { email, password })
   return data
@@ -817,7 +946,14 @@ export async function getMe(): Promise<UserResponse> {
   return data
 }
 
-/** 获取当前用户会员状态 */
+// [Auth] - 描述: 获取当前用户完整权限上下文 AccessProfile（11 字段，对齐后端 AccessProfileResponse）
+// 续期成功后调用此接口刷新前端 accessProfile，避免重新登录
+export async function getMyAccess(): Promise<AccessProfile> {
+  const { data } = await apiClient.get<AccessProfile>('/me/access')
+  return data
+}
+
+/** 获取当前用户订阅状态（/me/membership 为 V1.6 遗留路径名） */
 export async function getMyMembership(): Promise<MembershipResponse> {
   const { data } = await apiClient.get<MembershipResponse>('/me/membership')
   return data
@@ -1476,6 +1612,12 @@ export async function getMarketStatus(): Promise<MarketStatus> {
 // ===== Admin Membership 端点 =====
 // ============================================================
 
+/** 获取所有 active 套餐定义（公开端点，无需登录） */
+export async function getPlans(): Promise<PlanResponse[]> {
+  const { data } = await publicApiClient.get<PlanResponse[]>('/plans')
+  return data
+}
+
 /** 生成邀请码（单个/批量，明文仅生成时返回） */
 export async function createInviteCodes(payload: InviteCodeCreateRequest): Promise<InviteCode[]> {
   const { data } = await apiClient.post<InviteCode[]>('/admin/invite-codes', payload)
@@ -1500,7 +1642,7 @@ export async function revokeInviteCode(inviteCodeId: string): Promise<InviteCode
   return data
 }
 
-/** 查询会员账户列表（含会员状态/到期时间/剩余天数/续期次数） */
+/** 查询订阅账户列表（含订阅状态/到期时间/剩余天数/续期次数；MemberListResponse 为 V1.6 API 遗留命名） */
 export async function getMembers(params?: PaginationParams): Promise<MemberListResponse> {
   const { data } = await apiClient.get<MemberListResponse>('/admin/members', { params })
   return data
@@ -1509,6 +1651,85 @@ export async function getMembers(params?: PaginationParams): Promise<MemberListR
 /** 查询用户兑换记录 */
 export async function getMemberRedemptions(userId: string): Promise<InviteRedemption[]> {
   const { data } = await apiClient.get<InviteRedemption[]>(`/admin/members/${userId}/redemptions`)
+  return data
+}
+
+/** 查询用户列表（admin） */
+export async function getAdminUsers(params?: PaginationParams): Promise<UserListResponse> {
+  const { data } = await apiClient.get<UserListResponse>('/admin/users', { params })
+  return data
+}
+
+/** 查询用户详情（admin） */
+export async function getAdminUser(userId: string): Promise<UserResponse> {
+  const { data } = await apiClient.get<UserResponse>(`/admin/users/${userId}`)
+  return data
+}
+
+/** 启用用户账户（admin） */
+export async function adminEnableUser(userId: string): Promise<UserResponse> {
+  const { data } = await apiClient.post<UserResponse>(`/admin/users/${userId}/enable`)
+  return data
+}
+
+/** 停用用户账户（admin） */
+export async function adminDisableUser(userId: string): Promise<UserResponse> {
+  const { data } = await apiClient.post<UserResponse>(`/admin/users/${userId}/disable`)
+  return data
+}
+
+/** 管理员授予用户套餐 */
+export async function adminGrantSubscription(
+  userId: string,
+  payload: GrantSubscriptionRequest,
+): Promise<SubscriptionResponse> {
+  const { data } = await apiClient.post<SubscriptionResponse>(
+    `/admin/users/${userId}/subscriptions/grant`,
+    payload,
+  )
+  return data
+}
+
+/** 管理员续期用户套餐 */
+export async function adminRenewSubscription(
+  userId: string,
+  payload: RenewSubscriptionRequest,
+): Promise<SubscriptionRenewResponse> {
+  const { data } = await apiClient.post<SubscriptionRenewResponse>(
+    `/admin/users/${userId}/subscriptions/renew`,
+    payload,
+  )
+  return data
+}
+
+/** 管理员撤销用户套餐 */
+export async function adminRevokeSubscription(userId: string): Promise<SubscriptionResponse> {
+  const { data } = await apiClient.post<SubscriptionResponse>(
+    `/admin/users/${userId}/subscriptions/revoke`,
+  )
+  return data
+}
+
+/** 管理员变更用户套餐 */
+export async function adminChangeSubscriptionPlan(
+  userId: string,
+  payload: ChangePlanRequest,
+): Promise<SubscriptionResponse> {
+  const { data } = await apiClient.post<SubscriptionResponse>(
+    `/admin/users/${userId}/subscriptions/change-plan`,
+    payload,
+  )
+  return data
+}
+
+/** 查询管理员审计日志 */
+export async function getAdminAuditLogs(params?: {
+  target_user_id?: string
+  action?: string
+  limit?: number
+  offset?: number
+}): Promise<AuditLogListResponse> {
+  const { data } = await apiClient.get<AuditLogListResponse>('/admin/audit-logs', { params })
   return data
 }
 

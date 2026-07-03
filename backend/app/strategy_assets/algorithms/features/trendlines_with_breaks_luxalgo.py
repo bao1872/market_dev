@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Trendlines with Breaks [LuxAlgo] -> Python (Plotly)
 
@@ -29,8 +28,6 @@ import argparse
 import os
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import List, Optional
 
 import numpy as np
 import pandas as pd
@@ -79,7 +76,7 @@ def fetch_kline_pytdx(symbol: str, start: str, end: str, freq, api=None) -> pd.D
         mkt = 1 if symbol.startswith(("5", "6", "9")) else 0
         page = 0
         size = 700
-        frames: List[pd.DataFrame] = []
+        frames: list[pd.DataFrame] = []
 
         while True:
             recs = api.get_security_bars(cat, mkt, symbol, page * size, size)
@@ -322,7 +319,7 @@ def trendlines_with_breaks(df: pd.DataFrame, cfg: TLBConfig) -> pd.DataFrame:
     return d
 
 
-def _fmt_x(index: pd.DatetimeIndex, freq: str) -> List[str]:
+def _fmt_x(index: pd.DatetimeIndex, freq: str) -> list[str]:
     f = str(freq).lower()
     if f in ("d", "day", "daily", "101"):
         return [ts.strftime("%Y-%m-%d") for ts in index]
@@ -337,7 +334,7 @@ def build_extended_segments(df: pd.DataFrame, cfg: TLBConfig, freq: str) -> list
     segments: list[tuple[list[str], list[float], str]] = []
     n = len(df)
 
-    def _last_valid_pos(s: pd.Series) -> Optional[int]:
+    def _last_valid_pos(s: pd.Series) -> int | None:
         idx = np.where(np.isfinite(s.to_numpy(dtype=float)))[0]
         return int(idx[-1]) if len(idx) else None
 

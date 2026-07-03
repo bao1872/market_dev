@@ -25,8 +25,8 @@ sys.path.insert(0, str(BACKEND_DIR))
 import pandas as pd
 from sqlalchemy import create_engine, text
 
-from app.core.pytdx_adapter import PytdxAdapter
 from app.config import get_settings
+from app.core.pytdx_adapter import PytdxAdapter
 
 
 def get_sample_symbols_from_db(limit: int = 10) -> list[tuple[str, str]]:
@@ -278,14 +278,14 @@ def main() -> None:
     total_cat11 = int(result_df["cat11_count"].sum())
     broad_cat11_count = int(broad_result["cat11_count"].sum()) if 'broad_result' in dir() else 0
     if total_cat11 > 0 or broad_cat11_count > 0:
-        print(f"  ✗ 存在 category==11（扩缩股）事件")
+        print("  ✗ 存在 category==11（扩缩股）事件")
         print(f"    抽样 10 只: {total_cat11} 个事件")
         print(f"    大范围 100 只: {broad_cat11_count} 个事件")
-        print(f"  ✗ 当前 _calculate_adj_factor 仅处理 category==1，不处理 category==11")
-        print(f"  → 建议：需要添加扩缩股处理逻辑")
+        print("  ✗ 当前 _calculate_adj_factor 仅处理 category==1，不处理 category==11")
+        print("  → 建议：需要添加扩缩股处理逻辑")
     else:
-        print(f"  ✓ 抽样 10 只 + 大范围 100 只股票均未发现 category==11 事件")
-        print(f"  → 当前实现不受影响（category==11 事件在 A 股中极为罕见或不存在）")
+        print("  ✓ 抽样 10 只 + 大范围 100 只股票均未发现 category==11 事件")
+        print("  → 当前实现不受影响（category==11 事件在 A 股中极为罕见或不存在）")
 
     # 保存结果到 CSV
     output_path = BACKEND_DIR / "tools" / "check_suogu_category11_result.csv"

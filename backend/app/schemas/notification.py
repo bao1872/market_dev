@@ -108,6 +108,12 @@ class DeliveryResult(BaseModel):
     error_code: str | None = Field(None, description="错误码")
     error_message: str | None = Field(None, description="错误信息")
     provider_response: dict[str, Any] | None = Field(None, description="渠道返回")
+    # [ImageDelivery] - 图片上传阶段结果（仅 send_image_bytes 使用）
+    image_upload_success: bool | None = Field(None, description="图片上传是否成功")
+    image_upload_error_code: str | None = Field(None, description="图片上传错误码")
+    image_upload_error_message: str | None = Field(None, description="图片上传错误信息")
+    image_upload_provider_response: dict[str, Any] | None = Field(None, description="图片上传渠道返回")
+    image_key: str | None = Field(None, description="飞书图片 image_key")
 
 
 class NotificationChannelResponse(BaseModel):
@@ -117,7 +123,7 @@ class NotificationChannelResponse(BaseModel):
 
     id: UUID = Field(..., description="渠道 ID")
     user_id: UUID = Field(..., description="用户 ID")
-    adapter_type: str = Field(..., description="feishu_webhook/feishu_platform_app/email")
+    adapter_type: str = Field(..., description="feishu_platform_app/email/mock")
     display_name: str = Field(..., description="渠道名称")
     target_config: dict[str, Any] = Field(default_factory=dict, description="渠道配置（敏感字段脱敏）")
     status: str = Field(..., description="pending/active/invalid/disabled/degraded")
@@ -129,9 +135,9 @@ class NotificationChannelResponse(BaseModel):
 class CreateChannelRequest(BaseModel):
     """创建通知渠道请求。"""
 
-    adapter_type: str = Field(..., description="feishu_webhook/feishu_platform_app/email")
+    adapter_type: str = Field(..., description="feishu_platform_app/email/mock")
     display_name: str = Field(..., description="渠道名称")
-    target_config: dict[str, Any] = Field(..., description="渠道配置（webhook URL 等）")
+    target_config: dict[str, Any] = Field(..., description="渠道配置（app_id/app_secret/receive_id 等）")
 
 
 class UpdateChannelRequest(BaseModel):
@@ -149,14 +155,17 @@ class MessageDeliveryResponse(BaseModel):
     id: UUID = Field(..., description="投递记录 ID")
     channel_id: UUID = Field(..., description="渠道 ID")
     notification_message_id: UUID = Field(..., description="关联消息 ID")
-    adapter_type: str = Field(..., description="渠道类型（feishu_webhook/feishu_platform_app/email）")
+    adapter_type: str = Field(..., description="渠道类型（feishu_platform_app/email/mock）")
     display_name: str = Field(..., description="渠道展示名称")
     status: str = Field(..., description="pending/success/failed/retrying")
     delivery_type: str = Field(default="text", description="text/image/card")
     attempt_count: int = Field(..., description="已尝试次数")
     next_retry_at: datetime | None = Field(None, description="下次重试时间")
     last_error_code: str | None = Field(None, description="最近错误码")
-    message_group_id: str | None = Field(None, description="消息组 ID（关联同一事件的 text+image 两条投递）")
+    image_upload_status: str | None = Field(None, description="图片上传状态 pending/success/failed")
+    image_upload_error_code: str | None = Field(None, description="图片上传错误码")
+    image_key: str | None = Field(None, description="飞书图片 image_key")
+    message_group_id: str | None = Field(None, description="消息组 ID（关联同一事件的 text+image 两条投递记录）")
     created_at: datetime = Field(..., description="创建时间")
     # [消息投递管理] - 从关联消息提取的摘要信息，便于 admin 页面展示失败投递对应的股票/事件
     message_summary: str | None = Field(None, description="消息摘要")
@@ -193,6 +202,9 @@ class MessageDeliveryResponse(BaseModel):
                 "attempt_count": getattr(data, "attempt_count", 0),
                 "next_retry_at": getattr(data, "next_retry_at", None),
                 "last_error_code": getattr(data, "last_error_code", None),
+                "image_upload_status": getattr(data, "image_upload_status", None),
+                "image_upload_error_code": getattr(data, "image_upload_error_code", None),
+                "image_key": getattr(data, "image_key", None),
                 "message_group_id": getattr(data, "message_group_id", None),
                 "created_at": getattr(data, "created_at", None),
                 "message_summary": message_summary,
@@ -227,7 +239,7 @@ class NotificationMessageResponse(BaseModel):
     event_summary: str | None = Field(None, description="事件摘要")
 
     @model_validator(mode="after")
-    def _extract_structured_fields(self) -> "NotificationMessageResponse":
+    def _extract_structured_fields(self) -> NotificationMessageResponse:
         """从 body 提取结构化字段（兼容旧消息未填充的情况）。"""
         body = self.body or {}
         if self.strategy_key is None:

@@ -22,9 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import uuid
 from collections.abc import AsyncGenerator
-from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -41,10 +39,8 @@ from app.models.beta_application import BetaApplication
 from app.models.outbox import Outbox
 from app.schemas.beta_application import (
     BetaApplicationCreate,
-    BetaApplicationResponse,
 )
 from app.services.beta_application_service import create_application
-
 
 # ============================================================
 # 测试 fixtures

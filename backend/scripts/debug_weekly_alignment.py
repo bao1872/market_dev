@@ -14,10 +14,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import date, timedelta
+from datetime import timedelta
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import AsyncSessionLocal
 from app.models.bar import BarDaily, BarWeekly
@@ -49,12 +48,12 @@ async def main() -> None:
         weekly_result = await db.execute(weekly_stmt)
         weekly_rows = list(weekly_result.all())
 
-        print(f"\n--- 周线最近 5 条（trade_date 是周一/前对齐）---")
+        print("\n--- 周线最近 5 条（trade_date 是周一/前对齐）---")
         for w_date, w_close, w_open, w_high, w_low in weekly_rows:
             print(f"  trade_date={w_date} open={w_open} high={w_high} low={w_low} close={w_close}")
 
         # 2. 对每条周线，查询该周范围内的日线 [w_date, w_date+7)
-        print(f"\n--- 对应日线（[w_date, w_date+7) 范围内）---")
+        print("\n--- 对应日线（[w_date, w_date+7) 范围内）---")
         for w_date, w_close, w_open, w_high, w_low in weekly_rows:
             week_end = w_date + timedelta(days=7)
             daily_stmt = (
@@ -86,7 +85,7 @@ async def main() -> None:
                 d_low_min = min(float(r[4]) for r in daily_rows if r[4] is not None)
                 low_match = abs(float(w_low) - d_low_min) < 1e-6 if w_low else False
 
-                print(f"  对齐检查:")
+                print("  对齐检查:")
                 print(f"    open: weekly={w_open} vs daily_first={first[2]} [{'OK' if open_match else 'MISMATCH'}]")
                 print(f"    close: weekly={w_close} vs daily_last={last[1]} [{'OK' if close_match else 'MISMATCH'}]")
                 print(f"    high: weekly={w_high} vs daily_max={d_high_max} [{'OK' if high_match else 'MISMATCH'}]")

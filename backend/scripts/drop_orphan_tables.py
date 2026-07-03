@@ -10,9 +10,11 @@
     - 安全检查：确认待删除清单不含项目表
 """
 import sys
+
 sys.path.insert(0, ".")
-from app.config import get_settings
 import psycopg
+
+from app.config import get_settings
 
 settings = get_settings()
 url = settings.database_url.replace("postgresql+psycopg://", "postgresql://")

@@ -17,12 +17,11 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
-import pytest_asyncio
 
 from app.api.watchlist import (
     _compute_calculation_status,
@@ -34,23 +33,6 @@ from app.worker import (
     _finish_job_run,
     _update_job_heartbeat,
 )
-
-
-@pytest_asyncio.fixture(loop_scope="session")
-async def test_db():
-    """每个测试独立的内存 SQLite 异步 DB 会话（仅创建 scheduler_job_runs 表）。"""
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(SchedulerJobRun.__table__.create)
-    SessionLocal = async_sessionmaker(
-        engine, class_=AsyncSession, expire_on_commit=False,
-    )
-    async with SessionLocal() as session:
-        yield session
-    await engine.dispose()
-
 
 # ==================== Task 6: 监控状态语义拆分 ====================
 
@@ -212,9 +194,9 @@ def test_calculation_status_waiting_first_run_in_trading() -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_job_run_sets_lease_and_heartbeat(test_db) -> None:
+async def test_create_job_run_sets_lease_and_heartbeat(db_session) -> None:
     """创建 job_run 时应设置 worker_instance_id、scheduled_at、heartbeat_at、lease_expires_at。"""
-    job_run = await _create_job_run(test_db, "test_job", "2026-06-24")
+    job_run = await _create_job_run(db_session, "test_job", "2026-06-24")
 
     assert job_run.worker_instance_id is not None
     assert job_run.scheduled_at is not None
@@ -225,12 +207,12 @@ async def test_create_job_run_sets_lease_and_heartbeat(test_db) -> None:
 
 
 @pytest.mark.asyncio
-async def test_finish_job_run_updates_status_and_counts(test_db) -> None:
+async def test_finish_job_run_updates_status_and_counts(db_session) -> None:
     """结束 job_run 时应更新状态、完成时间、成功/失败计数。"""
-    job_run = await _create_job_run(test_db, "test_job", "2026-06-24")
-    await _finish_job_run(test_db, job_run, "succeeded", success_count=3, failure_count=1)
+    job_run = await _create_job_run(db_session, "test_job", "2026-06-24")
+    await _finish_job_run(db_session, job_run, "succeeded", success_count=3, failure_count=1)
 
-    attached = await test_db.get(SchedulerJobRun, job_run.id)
+    attached = await db_session.get(SchedulerJobRun, job_run.id)
     assert attached is not None
     assert attached.status == "succeeded"
     assert attached.finished_at is not None
@@ -239,61 +221,54 @@ async def test_finish_job_run_updates_status_and_counts(test_db) -> None:
 
 
 @pytest.mark.asyncio
-async def test_update_job_heartbeat_renews_lease(test_db) -> None:
+async def test_update_job_heartbeat_renews_lease(db_session) -> None:
     """心跳更新应刷新 heartbeat_at 与 lease_expires_at。"""
-    job_run = await _create_job_run(test_db, "test_job", "2026-06-24")
+    job_run = await _create_job_run(db_session, "test_job", "2026-06-24")
     old_lease = job_run.lease_expires_at
-    # SQLite 内存测试环境下时区信息可能被剥离，统一归一化为上海时区后再比较
-    if old_lease is not None and old_lease.tzinfo is None:
-        old_lease = old_lease.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
     await asyncio.sleep(0.1)
-    await _update_job_heartbeat(test_db, job_run)
+    await _update_job_heartbeat(db_session, job_run)
 
-    attached = await test_db.get(SchedulerJobRun, job_run.id)
+    attached = await db_session.get(SchedulerJobRun, job_run.id)
     assert attached is not None
-    if attached.lease_expires_at is not None and attached.lease_expires_at.tzinfo is None:
-        attached_lease_expires_at = attached.lease_expires_at.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
-    else:
-        attached_lease_expires_at = attached.lease_expires_at
     assert attached.heartbeat_at >= job_run.heartbeat_at
-    assert attached_lease_expires_at > old_lease
+    assert attached.lease_expires_at > old_lease
 
 
 # ==================== Task 10: strategy_scheduler job_run 完整性 ====================
 
 
 @pytest.mark.asyncio
-async def test_strategy_scheduler_no_selector_finishes_failed(test_db) -> None:
+async def test_strategy_scheduler_no_selector_finishes_failed(db_session) -> None:
     """未找到 selector 策略时，job_run 最终状态应为 failed 而非 running。"""
     # 该测试通过直接复现 worker 内部逻辑验证：
     # 创建 job_run -> 查询到空策略列表 -> 必须调用 _finish_job_run("failed")
     from datetime import date as date_cls
 
     trade_date = date_cls(2026, 6, 24)
-    job_run = await _create_job_run(test_db, "strategy_scheduler", str(trade_date))
+    job_run = await _create_job_run(db_session, "strategy_scheduler", str(trade_date))
     # 模拟未找到 selector 策略的分支
     await _finish_job_run(
-        test_db,
+        db_session,
         job_run,
         "failed",
         error_message="未找到 kind=selector 的策略",
     )
 
-    attached = await test_db.get(SchedulerJobRun, job_run.id)
+    attached = await db_session.get(SchedulerJobRun, job_run.id)
     assert attached is not None
     assert attached.status == "failed"
     assert attached.error_message == "未找到 kind=selector 的策略"
 
 
 @pytest.mark.asyncio
-async def test_strategy_scheduler_metadata_contains_strategy_run_id(test_db) -> None:
+async def test_strategy_scheduler_metadata_contains_strategy_run_id(db_session) -> None:
     """strategy_scheduler 应在 metadata_json 中记录 strategy_run_id。"""
-    job_run = await _create_job_run(test_db, "strategy_scheduler", "2026-06-24")
+    job_run = await _create_job_run(db_session, "strategy_scheduler", "2026-06-24")
     strategy_run_id = uuid.uuid4()
     job_run.metadata_json = json.dumps({"strategy_run_id": str(strategy_run_id)})
-    await test_db.commit()
+    await db_session.commit()
 
-    attached = await test_db.get(SchedulerJobRun, job_run.id)
+    attached = await db_session.get(SchedulerJobRun, job_run.id)
     assert attached is not None
     meta = json.loads(attached.metadata_json or "{}")
     assert meta.get("strategy_run_id") == str(strategy_run_id)
@@ -334,7 +309,7 @@ def test_monitor_session_label_outside_session() -> None:
 
 
 @pytest.mark.asyncio
-async def test_monitor_scheduler_reuses_session_job_run(test_db) -> None:
+async def test_monitor_scheduler_reuses_session_job_run(db_session) -> None:
     """同一交易时段第二次调用应返回 None（幂等跳过），调用方按 run_key 查询复用。"""
     from datetime import date as date_cls
 
@@ -345,28 +320,28 @@ async def test_monitor_scheduler_reuses_session_job_run(test_db) -> None:
     trade_date = date_cls(2026, 6, 24)
     now = datetime(2026, 6, 24, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
     job_run1 = await _find_or_create_monitor_session_job_run(
-        test_db, now, str(trade_date), "morning",
+        db_session, now, str(trade_date), "morning",
     )
-    await test_db.commit()
+    await db_session.commit()
     assert job_run1 is not None
 
     # 第二次调用返回 None（幂等：run_key 已存在）
     job_run2 = await _find_or_create_monitor_session_job_run(
-        test_db, now, str(trade_date), "morning",
+        db_session, now, str(trade_date), "morning",
     )
     assert job_run2 is None
 
     # 调用方按 run_key 查询复用现有记录
     run_key = f"monitor_scheduler:{trade_date}:morning"
     stmt = select(SchedulerJobRun).where(SchedulerJobRun.run_key == run_key).limit(1)
-    result = await test_db.execute(stmt)
+    result = await db_session.execute(stmt)
     reused = result.scalar_one_or_none()
     assert reused is not None
     assert reused.id == job_run1.id
 
 
 @pytest.mark.asyncio
-async def test_monitor_scheduler_different_sessions_create_separate_runs(test_db) -> None:
+async def test_monitor_scheduler_different_sessions_create_separate_runs(db_session) -> None:
     """上午和下午应创建不同的 SchedulerJobRun。"""
     from datetime import date as date_cls
 
@@ -376,14 +351,14 @@ async def test_monitor_scheduler_different_sessions_create_separate_runs(test_db
     morning = datetime(2026, 6, 24, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
     afternoon = datetime(2026, 6, 24, 14, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
     job_run_morning = await _find_or_create_monitor_session_job_run(
-        test_db, morning, str(trade_date), "morning",
+        db_session, morning, str(trade_date), "morning",
     )
-    await test_db.commit()
+    await db_session.commit()
 
     job_run_afternoon = await _find_or_create_monitor_session_job_run(
-        test_db, afternoon, str(trade_date), "afternoon",
+        db_session, afternoon, str(trade_date), "afternoon",
     )
-    await test_db.commit()
+    await db_session.commit()
 
     assert job_run_morning.id != job_run_afternoon.id
 

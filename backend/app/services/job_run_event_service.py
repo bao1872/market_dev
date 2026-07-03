@@ -103,7 +103,7 @@ if __name__ == "__main__":
     assert sig.parameters["level"].default == "info"
     assert sig.parameters["message"].default == ""
     assert sig.parameters["payload"].default is None
-    print(f"append_event 签名验证 ✓")
+    print("append_event 签名验证 ✓")
     print(f"参数列表: {sorted(actual_params)}")
 
     # 验证 list_events 签名
@@ -112,7 +112,7 @@ if __name__ == "__main__":
     actual_params = set(sig.parameters.keys())
     assert expected_params == actual_params, f"list_events 参数不匹配: {actual_params}"
     assert sig.parameters["limit"].default == 100
-    print(f"list_events 签名验证 ✓")
+    print("list_events 签名验证 ✓")
     print(f"参数列表: {sorted(actual_params)}")
 
     # 验证 JobRunEvent 导入

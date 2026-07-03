@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Zigzag + MACD 趋势/背离检测器（独立可运行）
 
@@ -30,7 +29,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -101,7 +99,7 @@ def _market_from_symbol(symbol: str) -> int:
 
 
 def connect_pytdx() -> TdxHq_API:
-    errors: List[str] = []
+    errors: list[str] = []
     for host, port in SERVERS:
         try:
             api = TdxHq_API(raise_exception=True, auto_retry=True)
@@ -118,7 +116,7 @@ def fetch_kline_pytdx(symbol: str, freq: str, count: int) -> pd.DataFrame:
         cat = _category_from_freq(freq)
         mkt = _market_from_symbol(symbol)
         size = 800
-        frames: List[pd.DataFrame] = []
+        frames: list[pd.DataFrame] = []
         start = 0
         target = max(int(count), 300)
         while start < target + size:
@@ -197,7 +195,7 @@ def pine_ema(src: pd.Series, length: int) -> pd.Series:
     alpha = 2.0 / (length + 1.0)
     prev = np.nan
     valid_count = 0
-    seed_vals: List[float] = []
+    seed_vals: list[float] = []
     seeded = False
     for i, val in enumerate(arr):
         if np.isnan(val):
@@ -219,7 +217,7 @@ def atr_pine(df: pd.DataFrame, length: int) -> pd.Series:
     return pine_rma(true_range(df), length)
 
 
-def adx_di_pine(df: pd.DataFrame, length: int = 14) -> Tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+def adx_di_pine(df: pd.DataFrame, length: int = 14) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
     high = df['high']
     low = df['low']
     prev_high = high.shift(1)
@@ -248,7 +246,7 @@ def adx_di_pine(df: pd.DataFrame, length: int = 14) -> Tuple[pd.Series, pd.Serie
     return di_plus, di_minus, dx, adx
 
 
-def macd_pine(close: pd.Series, fast: int, slow: int, signal: int) -> Tuple[pd.Series, pd.Series, pd.Series]:
+def macd_pine(close: pd.Series, fast: int, slow: int, signal: int) -> tuple[pd.Series, pd.Series, pd.Series]:
     ema_fast = pine_ema(close, fast)
     ema_slow = pine_ema(close, slow)
     macd_line = ema_fast - ema_slow
@@ -257,7 +255,7 @@ def macd_pine(close: pd.Series, fast: int, slow: int, signal: int) -> Tuple[pd.S
     return macd_line, signal_line, hist_line
 
 
-def add_to_array(arr: List, val, max_items: int) -> None:
+def add_to_array(arr: list, val, max_items: int) -> None:
     arr.insert(0, val)
     if len(arr) > max_items:
         arr.pop()
@@ -279,20 +277,20 @@ class ZigzagMacdConfig:
 
 class ZigzagState:
     def __init__(self) -> None:
-        self.zigzagsupertrenddirs: List[int] = [1]
-        self.zigzagsupertrend: List[float] = [np.nan, np.nan]  # buyStop, sellStop
+        self.zigzagsupertrenddirs: list[int] = [1]
+        self.zigzagsupertrend: list[float] = [np.nan, np.nan]  # buyStop, sellStop
 
-        self.pZigzagPivots: List[float] = []
-        self.pZigzagPivotBars: List[int] = []
-        self.pZigzagPivotDirs: List[int] = []
-        self.opZigzagPivots: List[float] = []
-        self.opZigzagPivotDirs: List[int] = []
+        self.pZigzagPivots: list[float] = []
+        self.pZigzagPivotBars: list[int] = []
+        self.pZigzagPivotDirs: list[int] = []
+        self.opZigzagPivots: list[float] = []
+        self.opZigzagPivotDirs: list[int] = []
 
-        self.labels: List[Dict] = []
-        self.lines: List[Dict] = []
+        self.labels: list[dict] = []
+        self.lines: list[dict] = []
 
 
-def get_sentiment_by_divergence_and_bias(divergence: int, bias: int) -> Tuple[str, str]:
+def get_sentiment_by_divergence_and_bias(divergence: int, bias: int) -> tuple[str, str]:
     if divergence == 1:
         sentiment_color = "#00e676" if bias == 1 else "#ff4d5a"
     elif divergence in (-1, -2):
@@ -309,7 +307,7 @@ def get_sentiment_by_divergence_and_bias(divergence: int, bias: int) -> Tuple[st
     return sentiment, sentiment_color
 
 
-def f_get_divergence(p_dir: int, o_dir: int, s_dir: int) -> Tuple[int, str]:
+def f_get_divergence(p_dir: int, o_dir: int, s_dir: int) -> tuple[int, str]:
     divergence = 0
     if p_dir == o_dir:
         if (p_dir % 2 == 0 and int(p_dir / 2) == s_dir) or (p_dir % 2 != 0 and p_dir != s_dir):
@@ -338,7 +336,7 @@ def f_get_bias(p_dir: int, o_dir: int) -> int:
     return 0
 
 
-def compute_zigzag_macd(df: pd.DataFrame, cfg: ZigzagMacdConfig) -> Tuple[pd.DataFrame, List[Dict], List[Dict], List[Dict]]:
+def compute_zigzag_macd(df: pd.DataFrame, cfg: ZigzagMacdConfig) -> tuple[pd.DataFrame, list[dict], list[dict], list[dict]]:
     d = df.copy()
     n = len(d)
     start_index = 1 if cfg.wait_for_confirmation else 0
@@ -372,7 +370,7 @@ def compute_zigzag_macd(df: pd.DataFrame, cfg: ZigzagMacdConfig) -> Tuple[pd.Dat
     sentiment_arr = np.array(["" for _ in range(n)], dtype=object)
     latest_label_arr = np.array(["" for _ in range(n)], dtype=object)
 
-    stats_rows: List[Dict] = []
+    stats_rows: list[dict] = []
 
     high_src = d["close"].to_numpy(dtype=float) if cfg.use_close_prices else d["high"].to_numpy(dtype=float)
     low_src = d["close"].to_numpy(dtype=float) if cfg.use_close_prices else d["low"].to_numpy(dtype=float)
@@ -587,7 +585,7 @@ def compute_zigzag_macd(df: pd.DataFrame, cfg: ZigzagMacdConfig) -> Tuple[pd.Dat
     return out, state.lines, state.labels, stats_unique
 
 
-def build_figure(df: pd.DataFrame, zigzag_lines: List[Dict], zigzag_labels: List[Dict], stats_rows: List[Dict], out_html: str, title: str) -> None:
+def build_figure(df: pd.DataFrame, zigzag_lines: list[dict], zigzag_labels: list[dict], stats_rows: list[dict], out_html: str, title: str) -> None:
     x_num = np.arange(len(df), dtype=float)
     intraday = len(df.index) > 1 and (df.index[1] - df.index[0]) < pd.Timedelta("20H")
     tick_text = [ts.strftime("%Y-%m-%d %H:%M") if intraday else ts.strftime("%Y-%m-%d") for ts in df.index]
@@ -759,14 +757,14 @@ def main() -> None:
 
     # 只保留展示窗口内的线和标签
     offset = len(df) - len(merged)
-    filtered_lines: List[Dict] = []
+    filtered_lines: list[dict] = []
     for ln in zigzag_lines:
         if ln["x1"] >= offset and ln["x2"] >= offset:
             ln2 = dict(ln)
             ln2["x1"] -= offset
             ln2["x2"] -= offset
             filtered_lines.append(ln2)
-    filtered_labels: List[Dict] = []
+    filtered_labels: list[dict] = []
     for lb in zigzag_labels:
         if lb["x"] >= offset:
             lb2 = dict(lb)

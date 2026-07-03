@@ -14,10 +14,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pandas as pd
 import pytest
-from fastapi.testclient import TestClient
-
-from app.main import app
 from app.repositories.bar_repository import apply_adj_factor_to_bars
+from app.services import market_data_aggregation_service as mdas
 from app.services.adj_factor import apply_adj_factor, apply_adj_factor_intraday
 from app.services.freshness_sla import (
     _MINUTE_CHECK_SLA_SECONDS,
@@ -249,17 +247,39 @@ async def test_check_minute_freshness_stale() -> None:
 # ============================================================
 
 
-def test_get_bars_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """测试行情查询 API（无数据返回空列表）。"""
-    from app.api import bars as bars_api
+def _disable_mdas_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[测试] - 禁用 MarketDataAggregationService 的 Redis 缓存（测试不依赖 Redis）。"""
+    monkeypatch.setattr(mdas, "_cache_get", lambda *_a, **_k: None)
+    monkeypatch.setattr(mdas, "_cache_set", lambda *_a, **_k: None)
 
-    async def mock_fetch(*args, **kwargs):
+
+async def test_get_bars_empty(client, monkeypatch: pytest.MonkeyPatch) -> None:
+    """测试行情查询 API（无数据返回空列表）。
+
+    使用 conftest 提供的异步 client fixture，避免 TestClient 在完整套件中
+    复用 session 级 async engine 导致 event loop 不一致。
+
+    [Phase 4] - bars.py 已改为调用 MarketDataAggregationService，patch mdas
+    内部函数（_query_daily_bars / _call_expected_last_completed_daily_bar /
+    fetch_daily_bars / cache）替代旧的 bars_api.fetch_daily_bars。
+    """
+    _disable_mdas_cache(monkeypatch)
+
+    async def mock_query_daily(*args, **kwargs):
         return pd.DataFrame()
 
-    monkeypatch.setattr(bars_api, "fetch_daily_bars", mock_fetch)
+    async def mock_expected(*args, **kwargs):
+        # [测试] - DB 空 -> need_tail=True，需 patch fetch_daily_bars 返回空避免触发 Pytdx
+        return date(2020, 1, 1)
 
-    client = TestClient(app)
-    response = client.get(
+    async def mock_fetch_daily(*args, **kwargs):
+        return pd.DataFrame()
+
+    monkeypatch.setattr(mdas, "_query_daily_bars", mock_query_daily)
+    monkeypatch.setattr(mdas, "_call_expected_last_completed_daily_bar", mock_expected)
+    monkeypatch.setattr(mdas, "fetch_daily_bars", mock_fetch_daily)
+
+    response = await client.get(
         f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
         params={"timeframe": "1d", "adj": "none"},
     )
@@ -272,11 +292,14 @@ def test_get_bars_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     assert data["adj"] == "none"
 
 
-def test_get_bars_with_data(monkeypatch: pytest.MonkeyPatch) -> None:
-    """测试行情查询 API（有数据返回）。"""
-    from app.api import bars as bars_api
+async def test_get_bars_with_data(client, monkeypatch: pytest.MonkeyPatch) -> None:
+    """测试行情查询 API（有数据返回）。
 
-    async def mock_fetch(*args, **kwargs):
+    [Phase 4] - patch mdas 内部函数替代旧的 bars_api.fetch_daily_bars。
+    """
+    _disable_mdas_cache(monkeypatch)
+
+    async def mock_query_daily(*args, **kwargs):
         df = pd.DataFrame({
             "open": [10.0, 11.0],
             "high": [10.5, 11.5],
@@ -289,10 +312,14 @@ def test_get_bars_with_data(monkeypatch: pytest.MonkeyPatch) -> None:
         df.index.name = "trade_date"
         return df
 
-    monkeypatch.setattr(bars_api, "fetch_daily_bars", mock_fetch)
+    async def mock_expected(*args, **kwargs):
+        # [测试] - 远早于 DB 最新 bar (2026-06-18)，使 need_tail=False，避免触发 Pytdx
+        return date(2020, 1, 1)
 
-    client = TestClient(app)
-    response = client.get(
+    monkeypatch.setattr(mdas, "_query_daily_bars", mock_query_daily)
+    monkeypatch.setattr(mdas, "_call_expected_last_completed_daily_bar", mock_expected)
+
+    response = await client.get(
         f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
         params={"timeframe": "1d", "adj": "none"},
     )
@@ -306,11 +333,14 @@ def test_get_bars_with_data(monkeypatch: pytest.MonkeyPatch) -> None:
     assert data["items"][0]["trade_time"] is None
 
 
-def test_get_bars_pagination(monkeypatch: pytest.MonkeyPatch) -> None:
-    """测试行情查询 API 分页。"""
-    from app.api import bars as bars_api
+async def test_get_bars_pagination(client, monkeypatch: pytest.MonkeyPatch) -> None:
+    """测试行情查询 API 分页。
 
-    async def mock_fetch(*args, **kwargs):
+    [Phase 4] - patch mdas 内部函数替代旧的 bars_api.fetch_daily_bars。
+    """
+    _disable_mdas_cache(monkeypatch)
+
+    async def mock_query_daily(*args, **kwargs):
         # 构造 5 条数据
         dates = pd.to_datetime([f"2026-06-1{i}" for i in range(5)])
         df = pd.DataFrame({
@@ -325,11 +355,15 @@ def test_get_bars_pagination(monkeypatch: pytest.MonkeyPatch) -> None:
         df.index.name = "trade_date"
         return df
 
-    monkeypatch.setattr(bars_api, "fetch_daily_bars", mock_fetch)
+    async def mock_expected(*args, **kwargs):
+        # [测试] - 远早于 DB 最新 bar，使 need_tail=False，避免触发 Pytdx
+        return date(2020, 1, 1)
 
-    client = TestClient(app)
+    monkeypatch.setattr(mdas, "_query_daily_bars", mock_query_daily)
+    monkeypatch.setattr(mdas, "_call_expected_last_completed_daily_bar", mock_expected)
+
     # 请求第 1 页，每页 2 条
-    response = client.get(
+    response = await client.get(
         f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
         params={"timeframe": "1d", "adj": "none", "page": 1, "page_size": 2},
     )
@@ -343,35 +377,35 @@ def test_get_bars_pagination(monkeypatch: pytest.MonkeyPatch) -> None:
     assert data["items"][0]["close"] == 13.2  # 第一页第一条（按最新返回）
 
 
-def test_get_bars_invalid_timeframe() -> None:
+async def test_get_bars_invalid_timeframe(client) -> None:
     """测试无效 timeframe 参数返回 400。"""
-    client = TestClient(app)
-    response = client.get(
+    response = await client.get(
         f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
         params={"timeframe": "5m"},
     )
     assert response.status_code == 400
 
 
-def test_get_bars_invalid_adj() -> None:
+async def test_get_bars_invalid_adj(client) -> None:
     """测试无效 adj 参数返回 400。"""
-    client = TestClient(app)
-    response = client.get(
+    response = await client.get(
         f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
         params={"timeframe": "1d", "adj": "hfq"},
     )
     assert response.status_code == 400
 
 
-def test_get_bars_qfq(monkeypatch: pytest.MonkeyPatch) -> None:
-    """测试前复权行情查询（图表场景走 load_chart_bars）。
+async def test_get_bars_qfq(client, monkeypatch: pytest.MonkeyPatch) -> None:
+    """测试前复权行情查询。
 
-    图表场景触发条件：timeframe=1d + adj=qfq + page_size<=500（默认 page_size=100）。
-    因此需 mock chart_bars_service 内部的 fetch_daily_bars 与 _get_adj_factor_df。
+    [Phase 4] - bars.py 已改为调用 MarketDataAggregationService，所有 page_size
+    统一走 mdas。patch mdas 内部函数（_query_daily_bars /
+    _call_expected_last_completed_daily_bar / _get_adj_factor_df / cache）替代
+    旧的 chart_bars_service.fetch_daily_bars。
     """
-    from app.services import chart_bars_service
+    _disable_mdas_cache(monkeypatch)
 
-    async def mock_fetch(*args, **kwargs):
+    async def mock_query_daily(*args, **kwargs):
         df = pd.DataFrame({
             "open": [10.0, 5.0],
             "high": [10.5, 5.5],
@@ -384,19 +418,21 @@ def test_get_bars_qfq(monkeypatch: pytest.MonkeyPatch) -> None:
         df.index.name = "trade_date"
         return df
 
+    async def mock_expected(*args, **kwargs):
+        # [测试] - 远早于 DB 最新 bar，使 need_tail=False，避免触发 Pytdx
+        return date(2020, 1, 1)
+
     async def mock_get_adj(*args, **kwargs):
         return pd.DataFrame({
             "trade_date": pd.to_datetime(["2026-06-16", "2026-06-17"]),
             "adj_factor": [2.0, 1.0],
         })
 
-    # 图表场景下 bars_api 不再直接调用 fetch_daily_bars / _get_adj_factor_df，
-    # 而是通过 load_chart_bars -> chart_bars_service.fetch_daily_bars / _get_adj_factor_df
-    monkeypatch.setattr(chart_bars_service, "fetch_daily_bars", mock_fetch)
-    monkeypatch.setattr(chart_bars_service, "_get_adj_factor_df", mock_get_adj)
+    monkeypatch.setattr(mdas, "_query_daily_bars", mock_query_daily)
+    monkeypatch.setattr(mdas, "_call_expected_last_completed_daily_bar", mock_expected)
+    monkeypatch.setattr(mdas, "_get_adj_factor_df", mock_get_adj)
 
-    client = TestClient(app)
-    response = client.get(
+    response = await client.get(
         f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
         params={"timeframe": "1d", "adj": "qfq"},
     )
@@ -410,11 +446,15 @@ def test_get_bars_qfq(monkeypatch: pytest.MonkeyPatch) -> None:
     assert data["items"][1]["close"] == 5.2
 
 
-def test_get_bars_qfq_non_chart_scenario(monkeypatch: pytest.MonkeyPatch) -> None:
-    """测试前复权行情查询（非图表场景 page_size>500 走原有 DB 优先 + qfq 流程）。"""
-    from app.api import bars as bars_api
+async def test_get_bars_qfq_non_chart_scenario(client, monkeypatch: pytest.MonkeyPatch) -> None:
+    """测试前复权行情查询（page_size>500 仍走 MarketDataAggregationService）。
 
-    async def mock_fetch(*args, **kwargs):
+    [Phase 4] - 已无 chart/non-chart 分支，所有 page_size 统一走 mdas。
+    本测试验证 page_size=600 时 qfq 仍能正确返回数据。
+    """
+    _disable_mdas_cache(monkeypatch)
+
+    async def mock_query_daily(*args, **kwargs):
         df = pd.DataFrame({
             "open": [10.0, 5.0],
             "high": [10.5, 5.5],
@@ -427,18 +467,22 @@ def test_get_bars_qfq_non_chart_scenario(monkeypatch: pytest.MonkeyPatch) -> Non
         df.index.name = "trade_date"
         return df
 
+    async def mock_expected(*args, **kwargs):
+        # [测试] - 远早于 DB 最新 bar，使 need_tail=False，避免触发 Pytdx
+        return date(2020, 1, 1)
+
     async def mock_get_adj(*args, **kwargs):
         return pd.DataFrame({
             "trade_date": pd.to_datetime(["2026-06-16", "2026-06-17"]),
             "adj_factor": [2.0, 1.0],
         })
 
-    # page_size=600 > 500，非图表场景，走原有 _query_db_only + qfq 流程
-    monkeypatch.setattr(bars_api, "_query_db_only", mock_fetch)
-    monkeypatch.setattr(bars_api, "_get_adj_factor_df", mock_get_adj)
+    monkeypatch.setattr(mdas, "_query_daily_bars", mock_query_daily)
+    monkeypatch.setattr(mdas, "_call_expected_last_completed_daily_bar", mock_expected)
+    monkeypatch.setattr(mdas, "_get_adj_factor_df", mock_get_adj)
 
-    client = TestClient(app)
-    response = client.get(
+    # page_size=600 > 500，验证大分页仍正确走 mdas qfq 流程
+    response = await client.get(
         f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
         params={"timeframe": "1d", "adj": "qfq", "page_size": 600},
     )

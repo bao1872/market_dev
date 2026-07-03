@@ -21,7 +21,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
 from typing import Any
 from uuid import UUID
 
@@ -266,8 +265,8 @@ if __name__ == "__main__":
     print("子 monitor BollingerMonitor + VolumeNodeMonitor 创建 ✓")
 
     # 验证 _extract_sub_state
-    from uuid import uuid4
     from datetime import UTC, datetime
+    from uuid import uuid4
 
     test_state = MonitorState(
         instrument_id=uuid4(),

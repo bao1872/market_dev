@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from typing import Any
 
 from app.constants.strategy_keys import DSA_SELECTOR
-from typing import Any
 
 
 def _canonical_json(obj: Any) -> str:

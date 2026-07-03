@@ -23,9 +23,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.core.deps import get_current_active_user, get_db
 from app.models.user import User
+from app.schemas.notification import MessageDeliveryResponse
 from app.services.notification_service import (
     ChannelNotFoundError,
     NotificationServiceError,
+    retry_image_delivery,
 )
 from app.services.stock_detail_feishu_service import (
     InstrumentNotFoundError,
@@ -55,43 +57,69 @@ def _error_detail(
 
 
 class SendFeishuResponse(BaseModel):
-    """发送飞书响应 - 走 Outbox 异步链路，返回追踪 ID。
+    """发送飞书响应 - 走 Outbox 异步链路，返回追踪 ID + 状态机上下文。
 
+    [StockDetailFeishu] - 描述: 响应字段对齐 advice.md 第七节状态机
     - test_run_id: 本次分享唯一标识（用于状态查询）
     - message_group_id: 关联 text+image 两条投递的组 ID
     - message_id: 文本消息 ID（主消息）
     - image_message_id: 图片消息 ID（截图失败时为 None）
-    - status: "pending"（Outbox 异步链路，创建后即为 pending，由 delivery_worker 异步投递）
+    - status: "pending"（截图成功，Outbox 异步投递中）| "partial_failed"（截图失败）
+    - failed_step: 失败步骤（capture | image_outbox | None）
+    - error_code: 错误码（NO_IMAGE_URL | CAPTURE_REQUEST_FAILED | IMAGE_OUTBOX_FAILED | None）
+    - error_message: 错误详情（包含 worker 返回的响应体，最多 500 字符）
     """
 
     test_run_id: str = Field(..., description="本次分享唯一标识（用于状态查询）")
     message_group_id: str = Field(..., description="消息组 ID（关联 text+image 投递）")
     message_id: str = Field(..., description="文本消息 ID")
     image_message_id: str | None = Field(None, description="图片消息 ID（截图失败时为 None）")
-    status: str = Field(..., description="投递状态（pending，异步链路）")
+    status: str = Field(..., description="投递状态（pending|partial_failed）")
+    failed_step: str | None = Field(None, description="失败步骤（capture|image_outbox|None）")
+    error_code: str | None = Field(None, description="错误码（NO_IMAGE_URL|CAPTURE_REQUEST_FAILED|IMAGE_OUTBOX_FAILED|None）")
+    error_message: str | None = Field(None, description="错误详情（最多 500 字符）")
 
 
 class ShareStatusResponse(BaseModel):
     """分享状态查询响应。
 
-    [StockDetailFeishu] - 描述: 按 delivery_type 分类返回 card_status/image_status
+    [StockDetailFeishu] - 描述: 按 delivery_type 分类返回 card/image 状态，并补充 capture/image_upload 状态
     （advice.md 第一节：delivery_type=card 走 adapter.send → msg_type=interactive）
 
     - card_status: 卡片投递状态（pending/sending/success/failed/retrying/dead/not_created）
+    - capture_status: 截图任务状态（pending/success/failed）
+    - image_upload_status: 图片上传状态（pending/success/failed/not_created）
     - image_status: 图片投递状态（同上，未创建截图时为 not_created）
-    - overall_status: 汇总状态（pending/success/failed）
-    - failed_step: 失败步骤（card/image，无失败时为 None）
+    - overall_status: 汇总状态（pending/success/partial_failed/failed）
+    - failed_step: 失败步骤（capture/image_upload/image_delivery/card/image，无失败时为 None）
     - error_code: 失败错误码（无失败时为 None）
+    - image_message_id: 图片消息 ID（未创建时为 None）
     """
 
     test_run_id: str = Field(..., description="分享唯一标识")
     message_group_id: str | None = Field(None, description="消息组 ID")
     card_status: str = Field(..., description="卡片投递状态")
+    capture_status: str = Field(..., description="截图任务状态")
+    image_upload_status: str = Field(..., description="图片上传状态")
     image_status: str = Field(..., description="图片投递状态")
     overall_status: str = Field(..., description="汇总状态")
-    failed_step: str | None = Field(None, description="失败步骤（card/image）")
+    failed_step: str | None = Field(None, description="失败步骤")
     error_code: str | None = Field(None, description="失败错误码")
     error_message: str | None = Field(None, description="失败错误信息")
+    image_message_id: str | None = Field(None, description="图片消息 ID")
+
+
+class RetryImageResponse(BaseModel):
+    """图片单独重试响应。
+
+    [StockDetailFeishu] - 描述: 仅重试图片投递，不重复发送文字
+    """
+
+    retried_count: int = Field(..., description="重试的图片投递数量")
+    image_message_id: str | None = Field(None, description="图片消息 ID")
+    deliveries: list[MessageDeliveryResponse] = Field(
+        default_factory=list, description="被重试的投递记录",
+    )
 
 
 @router.post(
@@ -185,12 +213,61 @@ async def get_share_status_endpoint(
     return ShareStatusResponse(**result)
 
 
+@router.post(
+    "/stock-detail-feishu/{test_run_id}/retry-image",
+    response_model=RetryImageResponse,
+)
+async def retry_image_endpoint(
+    test_run_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> RetryImageResponse:
+    """仅重试图片投递（不重复发送文字）。
+
+    [StockDetailFeishu] - 描述: 按 message_group_id 找到失败的图片 Delivery，
+    调用 retry_delivery 复用现有记录；卡片段不会被重发。
+    """
+    try:
+        share_status = await get_share_status(
+            db=db, test_run_id=test_run_id, user_id=current_user.id
+        )
+    except NotificationServiceError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
+        ) from e
+
+    message_group_id = share_status.get("message_group_id")
+    if not message_group_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="消息组 ID 不存在，无法重试",
+        )
+
+    try:
+        retried = await retry_image_delivery(
+            db=db, message_group_id=message_group_id, user_id=current_user.id
+        )
+    except NotificationServiceError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)
+        ) from e
+
+    await db.commit()
+    return RetryImageResponse(
+        retried_count=len(retried),
+        image_message_id=share_status.get("image_message_id"),
+        deliveries=[MessageDeliveryResponse.model_validate(d) for d in retried],
+    )
+
+
 if __name__ == "__main__":
     # 自测入口：验证路由注册 + 三字段错误响应构造
-    paths = [r.path for r in router.routes]
+    # [StockDetailFeishu] - 描述: router.routes 为 BaseRoute 列表，用 getattr 安全取 path
+    paths = [p for p in (getattr(r, "path", None) for r in router.routes) if p]
     print(f"router.routes={paths}")
     assert any("/send-feishu" in p for p in paths), "应包含 /send-feishu 路由"
     assert any("/status" in p for p in paths), "应包含 /status 路由"
+    assert any("/retry-image" in p for p in paths), "应包含 /retry-image 路由"
     assert router.prefix == "", "prefix 应为空（由主应用直接挂载）"
 
     # 验证三字段错误响应构造（advice.md 第十一节遗留清理）
