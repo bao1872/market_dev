@@ -1,17 +1,19 @@
-"""内测申请管理员飞书通知器 - 构建卡片 + Outbox 写入（spec 第四节）。
+"""内测申请管理员飞书通知器 - 构建卡片 + 专用 Outbox 事件写入。
 
 职责：
 - build_beta_application_card(application): 构建飞书互动卡片（含申请编号/提交时间/
   微信号/手机号/盯盘数/理由/其他补充/后台入口）
-- send_admin_notification(db, application): 通过 Outbox 写入 beta_application_admin 事件，
-  设置 feishu_delivery_status='pending'。失败仅 logger.error，不影响用户提交
+- send_admin_notification(db, application): 写入 beta_application.admin_notification.created
+  专用 Outbox 事件，设置 feishu_delivery_status='pending'。失败仅 logger.error，不影响用户提交
 
 设计要点：
 - 复用 feishu_card_builder.dto_to_feishu_card 渲染逻辑，保持卡片风格一致
 - message_type=SYSTEM_ALERT（红色头部，符合"管理员需注意的新申请"语义）
-- payload 只含申请数据，不含平台应用配置（安全考虑，配置由 relay 运行时从
-  system_channel 读取）
+- payload 只含申请数据，不含平台应用配置（安全考虑，配置由 relay 从管理员自己的
+  NotificationChannel.target_config 读取）
 - 使用 savepoint 隔离 Outbox 写入，失败时回滚 savepoint 但不影响已提交的申请
+- 管理员飞书渠道复用管理员用户在 /settings 配置的 feishu_platform_app NotificationChannel，
+  不维护独立管理员凭证
 
 用法:
     from app.services.beta_application_notifier import send_admin_notification
@@ -34,8 +36,10 @@ from app.services.outbox_relay import write_outbox
 
 logger = logging.getLogger("beta_application_notifier")
 
-# Outbox 事件类型（与 beta_application_service 共享，单一权威定义）
-BETA_APPLICATION_ADMIN_EVENT = "beta_application_admin"
+# 管理员内测申请通知专用 Outbox 事件类型
+# 由 outbox_relay 的专用分支扩张为 NotificationMessage + MessageDelivery，
+# 不进入普通 notification.message.created 路径，避免 eligible_user_service 过滤 admin。
+BETA_APPLICATION_ADMIN_EVENT = "beta_application.admin_notification.created"
 
 # reason_code → 中文标签映射（飞书通知展示用）
 # 仅在此模块定义，因为 constants/beta_application.py 只维护代码枚举，
@@ -146,15 +150,15 @@ async def send_admin_notification(
     db: AsyncSession,
     application: BetaApplication,
 ) -> None:
-    """通过 Outbox 写入 beta_application_admin 事件（best-effort）。
+    """写入 beta_application.admin_notification.created 专用 Outbox 事件（best-effort）。
 
     spec 要求：先 DB 后 Outbox，Outbox 失败不影响用户提交。
-    使用独立事务（begin_nested savepoint）隔离 Outbox 写入，失败时回滚
-    savepoint 但不影响已提交的申请。
+    管理员渠道查询与 MessageDelivery 创建由 outbox_relay 的专用分支负责，
+    避免进入普通 notification.message.created 路径（该路径会过滤 admin）。
 
     流程：
     1. 设置 application.feishu_delivery_status='pending'
-    2. write_outbox（savepoint 内，payload 含申请数据，不含 webhook 配置）
+    2. write_outbox（savepoint 内，payload 含 application_id，不含任何凭证）
     3. commit（提交 pending 状态 + outbox 记录）
     4. 失败：设置 feishu_delivery_status='failed' + feishu_last_error，commit
 
@@ -164,13 +168,6 @@ async def send_admin_notification(
     """
     payload: dict[str, Any] = {
         "application_id": str(application.id),
-        "wechat": application.wechat,
-        "phone": application.phone,
-        "watch_stock_count": application.watch_stock_count,
-        "reason_code": application.reason_code,
-        "reason_other": application.reason_other,
-        "submitted_at": application.submitted_at.isoformat() if application.submitted_at else None,
-        "source": application.source,
     }
     try:
         # 设置 pending 状态（在外层事务，savepoint 失败时回滚到此处之前）

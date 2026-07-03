@@ -7,13 +7,15 @@ TDD 红灯阶段：验证 feishu_webhook 运行时已被永久删除，统一为
 2. test_create_channel_accepts_feishu_platform_app: 创建 feishu_platform_app 渠道成功
 3. test_feishu_webhook_adapter_file_deleted: feishu_webhook_adapter 模块不存在
 4. test_feishu_adapter_types_only_platform_app: _FEISHU_ADAPTER_TYPES 仅含 platform_app
-5. test_admin_feishu_config_returns_platform_app_format: 管理员配置返回 Platform App 格式
-6. test_migration_fails_when_feishu_webhook_rows_exist: migration 在有 webhook 行时主动失败
+5. test_no_admin_feishu_env_vars_in_runtime: 运行时代码不存在 ADMIN_FEISHU_* 独立凭证
+6. test_no_webhook_env_vars_in_runtime: 运行时代码不存在 Webhook 相关变量
+7. test_migration_fails_when_feishu_webhook_rows_exist: migration 在有 webhook 行时主动失败
 """
 
 from __future__ import annotations
 
 import importlib
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -43,67 +45,52 @@ def test_feishu_adapter_types_only_platform_app() -> None:
 
 
 # ============================================================
-# 测试 5: 管理员飞书配置返回 Platform App 格式
+# 测试 5: 运行时代码不存在 ADMIN_FEISHU_* 独立管理员凭证
 # ============================================================
 
 
-def test_admin_feishu_config_returns_platform_app_format(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """get_admin_feishu_config() 应返回 app_id/app_secret/receive_id/receive_id_type 格式。"""
-    monkeypatch.setenv("ADMIN_FEISHU_APP_ID", "cli_test_app_001")
-    monkeypatch.setenv("ADMIN_FEISHU_APP_SECRET", "test_secret_value")
-    monkeypatch.setenv("ADMIN_FEISHU_RECEIVE_ID", "bg33237")
-    monkeypatch.setenv("ADMIN_FEISHU_RECEIVE_ID_TYPE", "user_id")
+def test_no_admin_feishu_env_vars_in_runtime() -> None:
+    """后端运行时代码不得读取 ADMIN_FEISHU_APP_ID/APP_SECRET/RECEIVE_ID/RECEIVE_ID_TYPE。"""
+    import subprocess
 
-    # 清理旧 webhook 环境变量
-    monkeypatch.delenv("ADMIN_FEISHU_WEBHOOK_URL", raising=False)
-    monkeypatch.delenv("ADMIN_FEISHU_SIGN_SECRET", raising=False)
-
-    from app.constants.system_channel import get_admin_feishu_config
-
-    config = get_admin_feishu_config()
-    assert config is not None
-    assert config["app_id"] == "cli_test_app_001"
-    assert config["app_secret"] == "test_secret_value"
-    assert config["receive_id"] == "bg33237"
-    assert config["receive_id_type"] == "user_id"
-    # 不应包含 webhook 字段
-    assert "webhook_url" not in config
-    assert "sign_secret" not in config
+    repo_root = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [
+            "grep", "-R", "-n",
+            "ADMIN_FEISHU_APP_ID\\|ADMIN_FEISHU_APP_SECRET\\|"
+            "ADMIN_FEISHU_RECEIVE_ID\\|ADMIN_FEISHU_RECEIVE_ID_TYPE",
+            str(repo_root / "app"),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0 or result.stdout == "", (
+        f"运行时代码仍存在 ADMIN_FEISHU_* 引用:\n{result.stdout}"
+    )
 
 
-def test_admin_feishu_config_returns_none_when_not_configured(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """未配置 Platform App 环境变量时返回 None。"""
-    monkeypatch.delenv("ADMIN_FEISHU_APP_ID", raising=False)
-    monkeypatch.delenv("ADMIN_FEISHU_APP_SECRET", raising=False)
-    monkeypatch.delenv("ADMIN_FEISHU_RECEIVE_ID", raising=False)
-    monkeypatch.delenv("ADMIN_FEISHU_RECEIVE_ID_TYPE", raising=False)
-    monkeypatch.delenv("ADMIN_FEISHU_WEBHOOK_URL", raising=False)
-    monkeypatch.delenv("ADMIN_FEISHU_SIGN_SECRET", raising=False)
-
-    from app.constants.system_channel import get_admin_feishu_config
-
-    config = get_admin_feishu_config()
-    assert config is None
+# ============================================================
+# 测试 6: 运行时代码不存在 Webhook 相关变量
+# ============================================================
 
 
-def test_admin_feishu_config_receive_id_type_defaults_to_user_id(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """未设置 RECEIVE_ID_TYPE 时默认为 user_id。"""
-    monkeypatch.setenv("ADMIN_FEISHU_APP_ID", "cli_test_app_002")
-    monkeypatch.setenv("ADMIN_FEISHU_APP_SECRET", "secret")
-    monkeypatch.setenv("ADMIN_FEISHU_RECEIVE_ID", "bg12345")
-    monkeypatch.delenv("ADMIN_FEISHU_RECEIVE_ID_TYPE", raising=False)
+def test_no_webhook_env_vars_in_runtime() -> None:
+    """后端运行时代码不得读取 ADMIN_FEISHU_WEBHOOK_URL/SIGN_SECRET 或通用 webhook_url。"""
+    import subprocess
 
-    from app.constants.system_channel import get_admin_feishu_config
-
-    config = get_admin_feishu_config()
-    assert config is not None
-    assert config["receive_id_type"] == "user_id"
+    repo_root = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [
+            "grep", "-R", "-n", "-i",
+            "ADMIN_FEISHU_WEBHOOK_URL\\|ADMIN_FEISHU_SIGN_SECRET\\|webhook_url\\|sign_secret",
+            str(repo_root / "app"),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    # 允许 feishu_webhook 作为废弃字符串出现在错误信息中
+    lines = [line for line in result.stdout.splitlines() if "feishu_webhook" not in line.lower()]
+    assert not lines, f"运行时代码仍存在 Webhook 相关引用:\n{'\\n'.join(lines)}"
 
 
 # ============================================================

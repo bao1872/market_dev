@@ -45,7 +45,7 @@ _IP_RATE_LIMIT_MAX = 5
 _DUPLICATE_WINDOW_HOURS = 24
 
 # Outbox 事件类型（与 beta_application_notifier.BETA_APPLICATION_ADMIN_EVENT 保持一致）
-_BETA_APPLICATION_ADMIN_EVENT = "beta_application_admin"
+_BETA_APPLICATION_ADMIN_EVENT = "beta_application.admin_notification.created"
 
 
 def _mask_contact(value: str | None) -> str:
@@ -427,5 +427,5 @@ if __name__ == "__main__":
     assert _IP_RATE_LIMIT_MAX == 5
     assert _IP_RATE_LIMIT_WINDOW_HOURS == 1
     assert _DUPLICATE_WINDOW_HOURS == 24
-    assert _BETA_APPLICATION_ADMIN_EVENT == "beta_application_admin"
+    assert _BETA_APPLICATION_ADMIN_EVENT == "beta_application.admin_notification.created"
     print("OK")

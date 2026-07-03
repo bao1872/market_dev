@@ -69,7 +69,7 @@ async def beta_db_session() -> AsyncGenerator[AsyncSession, None]:
         except Exception:
             pass
         await session.execute(
-            text("DELETE FROM outbox WHERE event_type = 'beta_application_admin'")
+            text("DELETE FROM outbox WHERE event_type = 'beta_application.admin_notification.created'")
         )
         await session.execute(text("DELETE FROM beta_applications"))
         await session.commit()
@@ -445,7 +445,7 @@ async def test_create_application_writes_outbox_event(beta_db_session: AsyncSess
     # 查询 outbox 表
     result = await beta_db_session.execute(
         select(Outbox)
-        .where(Outbox.event_type == "beta_application_admin")
+        .where(Outbox.event_type == "beta_application.admin_notification.created")
         .where(Outbox.aggregate_id == app.id)
     )
     outbox_records = list(result.scalars().all())
