@@ -8,6 +8,7 @@
 > 最近一次一致性检查时间：2026-07-03
 > Release 候选分支：`release/docs-aligned-candidate-v3`
 > Release merge commit：`ac07d4b439d45fda1ac5da78afcb471771c67934`
+> Release 最终 HEAD：`aab2c72c5f7933edeb61126836f109c95f6803d6`
 
 # 盘迹（PanJi）项目文档入口
 
