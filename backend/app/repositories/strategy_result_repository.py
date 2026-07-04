@@ -718,7 +718,11 @@ def _apply_run_item_filters(
     - run_id: 必填，主过滤
     - watchlist_instrument_ids: IN 过滤 instrument_id
     - keyword: JOIN instruments ILIKE
-    - filters: metric_filter 通过 result_id IN 子查询（skipped/failed 行 result_id=None 自动不命中）
+    - filters: metric_filter 通过 (run_id, instrument_id) 子查询过滤（skipped/failed 行无 strategy_results 自动不命中）
+
+    注意：strategy_run_items.result_id 在 PR #14 batch service 中未回填（始终为 None），
+    因此不能通过 result_id 关联 strategy_results/strategy_result_metrics，
+    必须通过 (run_id, instrument_id) 关联。
     """
     base = base.where(StrategyRunItem.run_id == run_id)
 
@@ -741,8 +745,16 @@ def _apply_run_item_filters(
     if filters:
         for f in filters:
             metric_key = f.metric_key
-            sub = select(StrategyResultMetric.result_id).where(
-                StrategyResultMetric.metric_key == metric_key
+            # [StrategyResultRepository] - 描述: 通过 (run_id, instrument_id) 关联 metrics
+            # batch service 未回填 result_id，必须用 instrument_id 关联
+            sub = (
+                select(StrategyResult.instrument_id)
+                .join(
+                    StrategyResultMetric,
+                    StrategyResultMetric.result_id == StrategyResult.id,
+                )
+                .where(StrategyResult.run_id == run_id)
+                .where(StrategyResultMetric.metric_key == metric_key)
             )
             op = f.operator.lower()
             if op == "gt":
@@ -762,8 +774,7 @@ def _apply_run_item_filters(
                     sub = sub.where(StrategyResultMetric.numeric_value <= f.value2)
             else:
                 raise ValueError(f"未知筛选操作符: {op}")
-            # [StrategyResultRepository] - 描述: skipped/failed 行 result_id=None 自然不命中 IN
-            base = base.where(StrategyRunItem.result_id.in_(sub))
+            base = base.where(StrategyRunItem.instrument_id.in_(sub))
 
     return base
 
@@ -783,12 +794,15 @@ async def query_run_items_with_results(
 
     趋势选股页全量 universe 展示的查询入口：
     - 主表 strategy_run_items（含 succeeded/skipped/failed 全部行）
-    - LEFT JOIN strategy_results（仅 succeeded 行有匹配，result_id 非空）
+    - LEFT JOIN strategy_results（通过 run_id + instrument_id 关联，非 result_id）
     - LEFT JOIN instruments（取 symbol/name/market）
-    - metric_filters 通过 result_id IN 子查询过滤（自动排除 skipped/failed）
+    - metric_filters 通过 (run_id, instrument_id) 子查询过滤（自动排除 skipped/failed）
     - sort 通过 LEFT JOIN 指标表（NULLS LAST）
     - keyword 通过 JOIN instruments ILIKE 过滤
     - watchlist_instrument_ids 通过 IN 过滤 instrument_id
+
+    注意：strategy_run_items.result_id 在 PR #14 batch service 中未回填（始终为 None），
+    因此不能通过 result_id 关联 strategy_results，必须通过 (run_id, instrument_id) 关联。
 
     Returns:
         QueryResultPage(items=list[RunItemResultRow], total=filtered_total)
@@ -797,10 +811,8 @@ async def query_run_items_with_results(
         Exception: 查询失败时 re-raise
     """
     try:
-        # 构建基础查询（StrategyRunItem 为主表）
-        base = select(StrategyRunItem).options(
-            selectinload(StrategyRunItem.result),
-        )
+        # 构建基础查询（StrategyRunItem 为主表，不使用 selectinload 因 result_id 未回填）
+        base = select(StrategyRunItem)
 
         # 应用通用过滤（run_id + watchlist + keyword + metric_filters）
         base = _apply_run_item_filters(
@@ -811,18 +823,24 @@ async def query_run_items_with_results(
             keyword=keyword,
         )
 
-        # 排序（LEFT JOIN 指标表，NULLS LAST）
+        # 排序（LEFT JOIN 指标表，通过 instrument_id 关联，NULLS LAST）
         if sort is not None:
             sort_sub = (
                 select(
-                    StrategyResultMetric.result_id,
+                    StrategyResult.instrument_id.label("sort_instrument_id"),
                     StrategyResultMetric.numeric_value.label("sort_val"),
                 )
+                .join(
+                    StrategyResultMetric,
+                    StrategyResultMetric.result_id == StrategyResult.id,
+                )
+                .where(StrategyResult.run_id == run_id)
                 .where(StrategyResultMetric.metric_key == sort.field)
                 .subquery()
             )
             base = base.outerjoin(
-                sort_sub, StrategyRunItem.result_id == sort_sub.c.result_id
+                sort_sub,
+                StrategyRunItem.instrument_id == sort_sub.c.sort_instrument_id,
             )
             if sort.desc:
                 base = base.order_by(sort_sub.c.sort_val.desc().nullslast())
@@ -848,9 +866,19 @@ async def query_run_items_with_results(
         result = await session.execute(base)
         items_orm = list(result.scalars().all())
 
-        # 转换为 RunItemResultRow（含 instrument 冗余字段）
-        # 批量加载 instruments 避免 N+1
+        # 批量加载 strategy_results（通过 run_id + instrument_id 关联，非 result_id）
         instrument_ids = {item.instrument_id for item in items_orm}
+        results_map: dict[uuid.UUID, StrategyResult] = {}
+        if instrument_ids:
+            res_stmt = select(StrategyResult).where(
+                StrategyResult.run_id == run_id,
+                StrategyResult.instrument_id.in_(instrument_ids),
+            )
+            res_result = await session.execute(res_stmt)
+            for res in res_result.scalars().all():
+                results_map[res.instrument_id] = res
+
+        # 批量加载 instruments 避免 N+1
         instruments_map: dict[uuid.UUID, Instrument] = {}
         if instrument_ids:
             inst_stmt = select(Instrument).where(
@@ -870,7 +898,7 @@ async def query_run_items_with_results(
                     item_status=item.status,
                     reason_code=item.reason_code,
                     error_message=item.error_message,
-                    result=item.result,
+                    result=results_map.get(item.instrument_id),
                     instrument=instruments_map.get(item.instrument_id),
                 )
             )
