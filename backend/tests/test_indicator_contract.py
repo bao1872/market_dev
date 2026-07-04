@@ -279,6 +279,9 @@ _KNOWN_SEMANTIC_DIFFERENCES: set[tuple[str, str, int]] = {
     # 60min bar 回补/对账数量上限（4000 条，覆盖 2023-01-01 至今约 3500 条），
     # 与 NODE_CLUSTER_LOW_BARS=4000（15m bar 根数）语义不同（60min 回补数量 vs 15m 输入根数）
     ("app/services/reconcile_bars.py", "_60MIN_COUNT_LIMIT", 4000),
+    # Worker 心跳 stale 阈值（600 秒），用于判断 running Worker 是否失联，
+    # 与 NODE_CLUSTER_EVENT_TTL_SECONDS=600（事件状态过期）业务规则不同
+    ("app/schemas/worker_heartbeat.py", "WORKER_STALE_THRESHOLD_SECONDS", 600),
 }
 
 # 字典字面量已知例外：以下 (相对路径, 字面量值) 二元组属于"语义不同的同值用法"，

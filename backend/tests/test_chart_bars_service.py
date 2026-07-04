@@ -70,16 +70,19 @@ def _build_raw_daily_bars(length: int = 300, end_date: date | None = None) -> pd
     """
     if end_date is None:
         end_date = date.today() - timedelta(days=1)
-    dates = pd.date_range(end=end_date, periods=length, freq="B")
-    closes = [10.0 + i * 0.05 for i in range(length)]
+    # [测试数据构造] - 描述: 使用生成的实际日期长度构造数组，避免 end_date 落在非交易日时
+    # periods=length 与 freq="B" 产生 business-day 索引，数组长度必须与索引严格一致。
+    dates = pd.bdate_range(end=end_date, periods=length)
+    n = len(dates)
+    closes = [10.0 + i * 0.05 for i in range(n)]
     df = pd.DataFrame({
         "open": [c - 0.05 for c in closes],
         "high": [c + 0.1 for c in closes],
         "low": [c - 0.1 for c in closes],
         "close": closes,
-        "volume": [100000.0 + i for i in range(length)],
-        "amount": [1000000.0 + i * 10 for i in range(length)],
-        "adj_factor": [1.0] * length,
+        "volume": [100000.0 + i for i in range(n)],
+        "amount": [1000000.0 + i * 10 for i in range(n)],
+        "adj_factor": [1.0] * n,
     }, index=dates)
     df.index.name = "trade_date"
     return df
