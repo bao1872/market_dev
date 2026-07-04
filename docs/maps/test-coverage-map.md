@@ -9,6 +9,7 @@
 | active/expired/no-sub/admin | `test_trend_selection_api_permissions.py`, watchlist permission tests |
 | AccessContext | `test_eligible_user_service.py`, access control tests |
 | Capture Token 隔离 | `test_capture_token_isolation.py`, auth tests |
+| Worker 心跳 admin API（admin/non-admin/unauthenticated + status 筛选 + health_state 分类） | `test_admin_worker_heartbeats_api.py` |
 
 ## 2. 趋势选股
 

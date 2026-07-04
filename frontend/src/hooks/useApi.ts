@@ -577,6 +577,22 @@ export function useSchedulerJobRuns(params?: {
   })
 }
 
+/** 查询 Worker 心跳记录（admin 只读，10 秒轮询同 useSchedulerJobRuns） */
+export function useWorkerHeartbeats(params?: {
+  status?: string
+  worker_name?: string
+  limit?: number
+  offset?: number
+}) {
+  return useQuery({
+    queryKey: ['admin', 'worker-heartbeats', params],
+    queryFn: () => api.getWorkerHeartbeats(params),
+    staleTime: STALE_REALTIME,
+    refetchInterval: 10_000,
+    refetchIntervalInBackground: false,
+  })
+}
+
 /** 加入自选变更（自动失效 watchlist + monitor-status 缓存） */
 export function useAddToWatchlist() {
   const queryClient = useQueryClient()

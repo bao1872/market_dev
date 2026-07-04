@@ -20,7 +20,7 @@
 | monitor_states | `app/api/monitor_states.py` | 监控状态 |
 | strategy_events | `app/api/strategy_events.py` | 策略事件 |
 | notifications | `app/api/notifications.py` | 消息与通知渠道 |
-| admin_subscription | `app/api/admin_subscription.py` | 订阅/邀请码管理 |
+| admin_subscription | `app/api/admin_subscription.py` | 订阅/邀请码/调度任务/Worker 心跳/消息投递管理 |
 | admin_beta_applications | `app/api/admin_beta_applications.py` | 内测申请管理 |
 | admin_after_close | `app/api/admin_after_close.py` | 盘后编排管理；`/after-close-runs/dsa-only` 支持 fallback 到最新可用交易日，覆盖率门禁使用 `coverage_raw` 原始值 |
 | watchlist | `app/api/watchlist.py` | 用户自选股；`/watchlist/monitor-status` 无 MonitorState 或 payload 无效时通过 `MonitorSnapshotService` fallback 返回指标，单只失败单行降级 |

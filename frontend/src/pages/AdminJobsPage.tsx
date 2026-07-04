@@ -31,9 +31,10 @@ import {
   useRetryMessageDelivery,
   useTriggerStrategyRun,
   useBatchInstruments,
+  useWorkerHeartbeats,
 } from '@/hooks/useApi'
 import { STRATEGY_KEYS } from '@/constants/strategyKeys'
-import type { SchedulerJobRunItem, Instrument, MessageDelivery, StrategyRun } from '@/api/endpoints'
+import type { SchedulerJobRunItem, Instrument, MessageDelivery, StrategyRun, WorkerHeartbeatItem } from '@/api/endpoints'
 import { useToast } from '@/store/toast'
 import { StrategyDataTable } from '@/components/StrategyDataTable'
 import type { DataTableColumn } from '@/components/StrategyDataTable'
@@ -51,6 +52,7 @@ const JOB_NAME_CN_MAP: Record<string, string> = {
   outbox: '事件消息分发',
   delivery: '第三方通知投递',
   after_close_orchestrator: '盘后编排',
+  watchdog: '看门狗',
 }
 
 // ===== 类型定义 =====
@@ -97,6 +99,26 @@ interface StrategyRunRow {
   finished_at: string
   published_at: string
   raw: StrategyRun
+  [key: string]: unknown
+}
+
+/** Worker 心跳表行类型 */
+interface WorkerHeartbeatRow {
+  worker_name: string
+  worker_name_cn: string
+  instance_id: string
+  status: string
+  status_pill_class: string
+  status_text: string
+  health_state: string
+  health_pill_class: string
+  health_text: string
+  heartbeat_at: string
+  heartbeat_age: string
+  build_sha: string
+  current_job_id: string
+  started_at: string
+  raw: WorkerHeartbeatItem
   [key: string]: unknown
 }
 
@@ -178,7 +200,7 @@ export default function AdminJobsPage() {
   const toast = useToast.getState()
 
   // ===== 状态：Tab / 抽屉/弹窗开关 =====
-  const [activeTab, setActiveTab] = useState<'scheduler' | 'strategy'>('scheduler')
+  const [activeTab, setActiveTab] = useState<'scheduler' | 'strategy' | 'workers'>('scheduler')
   const [jobDrawerOpen, setJobDrawerOpen] = useState(false)
   const [strategyDrawerOpen, setStrategyDrawerOpen] = useState(false)
   const [eventDrawerOpen, setEventDrawerOpen] = useState(false)
@@ -205,6 +227,9 @@ export default function AdminJobsPage() {
 
   // ===== 查询：失败消息投递记录（真实数据源）=====
   const deliveriesQuery = useMessageDeliveries({ status: 'failed', limit: 20 })
+
+  // ===== 查询：Worker 心跳记录（admin 只读，10 秒轮询）=====
+  const workerHeartbeatsQuery = useWorkerHeartbeats({ limit: 100 })
 
   // ===== 查询：事件详情（抽屉打开时按需加载）=====
   const eventDetailQuery = useStrategyEventDetail(selectedEventId ?? undefined)
@@ -278,6 +303,37 @@ export default function AdminJobsPage() {
       }
     })
   }, [strategyRunsQuery.data])
+
+  // ===== 派生数据：转换为 WorkerHeartbeatRow =====
+  // [AdminJobsPage] - 描述: health_state 由后端计算，前端只做 pill 颜色映射
+  const workerHeartbeatRows: WorkerHeartbeatRow[] = useMemo(() => {
+    const items = workerHeartbeatsQuery.data?.items ?? []
+    return items.map((hb) => {
+      const healthPillClass =
+        hb.health_state === 'fresh' ? 'ok' :
+        hb.health_state === 'stale' ? 'warn' : 'bad'
+      const healthText =
+        hb.health_state === 'fresh' ? '健康' :
+        hb.health_state === 'stale' ? '迟滞' : '停止'
+      return {
+        worker_name: hb.worker_name,
+        worker_name_cn: JOB_NAME_CN_MAP[hb.worker_name] ?? hb.worker_name,
+        instance_id: hb.instance_id,
+        status: hb.status,
+        status_pill_class: statusToPillClass(hb.status),
+        status_text: statusToText(hb.status),
+        health_state: hb.health_state,
+        health_pill_class: healthPillClass,
+        health_text: healthText,
+        heartbeat_at: formatShanghaiTime(hb.heartbeat_at),
+        heartbeat_age: `${hb.heartbeat_age_seconds}s`,
+        build_sha: hb.build_sha ?? '-',
+        current_job_id: hb.current_job_id ?? '-',
+        started_at: formatShanghaiTime(hb.started_at),
+        raw: hb,
+      }
+    })
+  }, [workerHeartbeatsQuery.data])
 
   // ===== KPI 计算 =====
   // [AdminJobsPage] - 描述: 运行中任务仅统计 status==='running'，不含 interrupted/warn 等其他状态
@@ -619,6 +675,105 @@ export default function AdminJobsPage() {
     [handleOpenStrategyDrawer],
   )
 
+  // ===== 列定义：Worker 心跳表 =====
+  const workerHeartbeatColumns: DataTableColumn<WorkerHeartbeatRow>[] = useMemo(
+    () => [
+      {
+        key: 'worker_name',
+        title: 'Worker',
+        dataType: 'text',
+        sortable: true,
+        filterable: true,
+        sortValue: (row) => row.worker_name,
+        render: (row) => (
+          <div>
+            <div className="job-name-cn">{row.worker_name_cn}</div>
+            <div className="job-name-raw">{row.worker_name}</div>
+          </div>
+        ),
+      },
+      {
+        key: 'instance_id',
+        title: '实例 ID',
+        dataType: 'text',
+        sortable: true,
+        filterable: true,
+        sortValue: (row) => row.instance_id,
+        render: (row) => <span className="num">{row.instance_id}</span>,
+      },
+      {
+        key: 'status',
+        title: '状态',
+        dataType: 'enum',
+        sortable: true,
+        filterable: true,
+        enumOptions: [
+          { label: '运行中', value: 'running' },
+          { label: '空闲', value: 'idle' },
+          { label: '停止', value: 'stopped' },
+        ],
+        sortValue: (row) => row.status_text,
+        filterValue: (row) => row.status_text,
+        render: (row) => (
+          <span className={`status-pill ${row.status_pill_class}`}>{row.status_text}</span>
+        ),
+      },
+      {
+        key: 'health_state',
+        title: '健康度',
+        dataType: 'enum',
+        sortable: true,
+        filterable: true,
+        enumOptions: [
+          { label: '健康', value: 'fresh' },
+          { label: '迟滞', value: 'stale' },
+          { label: '停止', value: 'stopped' },
+        ],
+        sortValue: (row) => row.health_text,
+        filterValue: (row) => row.health_text,
+        render: (row) => (
+          <span className={`status-pill ${row.health_pill_class}`}>{row.health_text}</span>
+        ),
+      },
+      {
+        key: 'heartbeat_at',
+        title: '心跳时间',
+        dataType: 'datetime',
+        sortable: true,
+        filterable: false,
+        sortValue: (row) => row.heartbeat_at,
+        render: (row) => <span className="num">{row.heartbeat_at}</span>,
+      },
+      {
+        key: 'heartbeat_age',
+        title: '心跳年龄',
+        dataType: 'text',
+        sortable: true,
+        filterable: false,
+        sortValue: (row) => row.heartbeat_age,
+        render: (row) => <span className="num">{row.heartbeat_age}</span>,
+      },
+      {
+        key: 'build_sha',
+        title: 'Build SHA',
+        dataType: 'text',
+        sortable: true,
+        filterable: true,
+        sortValue: (row) => row.build_sha,
+        render: (row) => <span className="num">{row.build_sha}</span>,
+      },
+      {
+        key: 'current_job_id',
+        title: '当前任务',
+        dataType: 'text',
+        sortable: false,
+        filterable: false,
+        render: (row) => <span className="num">{row.current_job_id}</span>,
+      },
+    ],
+    [],
+  )
+
   // ===== 渲染 =====
   return (
     <>
@@ -686,6 +841,15 @@ export default function AdminJobsPage() {
         >
           策略计算
         </button>
+        <button
+          className={`jobs-tab ${activeTab === 'workers' ? 'active' : ''}`}
+          onClick={() => setActiveTab('workers')}
+          type="button"
+          role="tab"
+          aria-selected={activeTab === 'workers'}
+        >
+          Worker 心跳
+        </button>
       </div>
 
       {/* 定时任务运行记录表 */}
@@ -738,6 +902,33 @@ export default function AdminJobsPage() {
             error={strategyRunsQuery.isError ? '策略运行记录加载失败' : null}
             searchable={false}
             emptyText="暂无策略计算运行记录"
+          />
+        </section>
+      )}
+
+      {/* Worker 心跳记录表 */}
+      {activeTab === 'workers' && (
+        <section className="card section-gap">
+          <div className="card-head">
+            <div>
+              <div className="card-title">Worker 心跳</div>
+              <div className="card-sub">worker_heartbeats 表实时视图，区分 fresh / stale / stopped</div>
+            </div>
+            <div className="chip-row">
+              <span className="chip green">健康</span>
+              <span className="chip orange">迟滞</span>
+              <span className="chip red">停止</span>
+            </div>
+          </div>
+          <StrategyDataTable
+            tableId="admin-worker-heartbeats"
+            columns={workerHeartbeatColumns}
+            rows={workerHeartbeatRows}
+            rowKey={(row) => `${row.worker_name}:${row.instance_id}`}
+            loading={workerHeartbeatsQuery.isLoading}
+            error={workerHeartbeatsQuery.isError ? 'Worker 心跳加载失败' : null}
+            searchable={false}
+            emptyText="暂无 Worker 心跳记录"
           />
         </section>
       )}
