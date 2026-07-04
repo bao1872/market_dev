@@ -597,7 +597,13 @@ async def query_strategy_results(
         offset=offset,
     )
 
-    result_items = [StrategyResultResponse.model_validate(r) for r in page.items]
+    # [StrategyRuns] - 描述: /strategies/{key}/results 主表仍为 strategy_results（仅 succeeded 行），
+    # item_status 显式标 "succeeded" 以满足 schema 必填要求
+    result_items = []
+    for r in page.items:
+        resp = StrategyResultResponse.model_validate(r)
+        resp.item_status = "succeeded"
+        result_items.append(resp)
     page_num = offset // limit + 1 if limit > 0 else 1
     return StrategyResultListResponse(
         items=result_items,
@@ -715,14 +721,34 @@ async def list_run_results(
             detail=str(e),
         ) from e
 
-    # 构建响应（填充 instrument 冗余字段）
+    # 构建响应（适配 RunItemResultRow：succeeded 行有 result，skipped/failed 行 result=None）
+    # [StrategyRuns] - 描述: 全量 universe 展示，行 key 在前端改用 instrument_id
     result_items = []
-    for r in result_page.items:
-        resp = StrategyResultResponse.model_validate(r)
-        if r.instrument is not None:
-            resp.instrument_symbol = r.instrument.symbol
-            resp.instrument_name = r.instrument.name
-            resp.instrument_market = r.instrument.market
+    for row in result_page.items:
+        if row.result is not None:
+            # succeeded 行: 从 StrategyResult 构建，再补充 item 字段
+            resp = StrategyResultResponse.model_validate(row.result)
+            resp.item_status = row.item_status
+            resp.reason_code = row.reason_code
+            resp.error_message = row.error_message
+        else:
+            # skipped/failed 行: 手动构建（无 StrategyResult，payload=None）
+            resp = StrategyResultResponse(
+                id=None,
+                run_id=row.run_id,
+                strategy_version_id=None,
+                instrument_id=row.instrument_id,
+                trade_date=None,
+                payload=None,
+                created_at=None,
+                item_status=row.item_status,
+                reason_code=row.reason_code,
+                error_message=row.error_message,
+            )
+        if row.instrument is not None:
+            resp.instrument_symbol = row.instrument.symbol
+            resp.instrument_name = row.instrument.name
+            resp.instrument_market = row.instrument.market
         result_items.append(resp)
 
     return StrategyResultListResponse(
@@ -775,7 +801,10 @@ async def get_run_result_detail(
             detail=f"结果不属于该运行: run_id={run_id}, result_id={result_id}",
         )
 
-    return StrategyResultResponse.model_validate(result)
+    # [StrategyRuns] - 描述: 单个结果详情，item_status 显式标 "succeeded"
+    resp = StrategyResultResponse.model_validate(result)
+    resp.item_status = "succeeded"
+    return resp
 
 
 if __name__ == "__main__":

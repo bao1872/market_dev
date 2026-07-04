@@ -20,6 +20,8 @@
 | DSA benchmark | `backend/reports/dsa_benchmark_20260702.md` |
 | Node Cluster 输入 | `test_node_cluster_contract.py` |
 | run 级总超时可配置 / insufficient_history skipped / run_timeout_budget_exhausted / execute_run 保留 skipped_count | `test_strategy_batch_service.py` |
+| 全量 universe 主表（strategy_run_items LEFT JOIN strategy_results）+ skipped/failed 行 + metric_filter + watchlist 过滤 | `test_strategy_results_universe.py` |
+| adapter 处理 null id/payload（skipped/failed 行 resultId=''、payload={}） | `frontend/src/features/trend-selection/__tests__/adapter.test.ts` |
 
 ## 3. 行情聚合
 

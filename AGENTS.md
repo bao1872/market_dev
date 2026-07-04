@@ -539,6 +539,13 @@ Capture Token 只能访问 Capture API。\
 
 测试期部署默认不备份数据库；除非用户明确说“先备份数据库”，否则禁止 `pg_dump` / 大体积备份，禁止写入 `/root/backups` 或 `/root/web_dev/backups`。当前物理机磁盘紧张，优先节省硬盘；有问题直接定位修复。
 
+### 12. Docker 镜像保护
+
+`node:20-alpine` 是受保护基础镜像，拉取很慢。禁止主动删除 `node:20-alpine`。\
+禁止 `docker image prune -a`。\
+除非明确升级 Node 版本或镜像损坏，否则不要删除 `node:20-alpine`。\
+普通清理只允许 `docker builder prune -f`、`docker image prune -f`、`docker container prune -f`。
+
 ***
 
 ## 十三、质量门禁

@@ -2,6 +2,17 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-04 Phase H: 趋势选股页全量 Universe 展示
+
+- 修复趋势选股页只显示 804 命中/4391 失败的问题：根因为 `/strategy-runs/{run_id}/results` 以 `strategy_results` 为主表（仅 succeeded 行）
+- 后端改为以 `strategy_run_items` 为主表 LEFT JOIN `strategy_results` + `instruments`，返回全量 universe（含 succeeded/skipped/failed）
+- 新增 `item_status`/`reason_code`/`error_message` 字段，skipped/failed 行 `id`/`payload` 为 null
+- 前端 ScreenerPage 行 key 改用 `instrumentId`（不依赖 `result_id`），"命中"改名"筛选结果"
+- 前端 adapter 支持 null id/payload 降级（`resultId=''`、`payload={}`）
+- AGENTS.md 写入 node:20-alpine 保护规则（第 12 条）
+- 新增 4 个后端测试 + 4 个前端 adapter 测试
+- 新增 CHANGE-20260704-028，新增 ALIGN-032
+
 ## 2026-07-04 Phase G: DSA Run 总超时与 Computable Universe 口径修复
 
 - 修复 DSA-only 运行后 1881 只 failed（全部 reason_code=timeout）：run 级总超时从 600s 改为 7200s（可配置 STRATEGY_RUN_TOTAL_TIMEOUT_SECONDS），与 after_close_orchestrator 对齐
@@ -75,6 +86,7 @@
 | CHANGE-20260704-024 | 2026-07-04 | 自选监控页 UI 调整、AGENTS 无备份部署规则、TCL 科技单标历史回补 | committed | `fix/bars-indicators-page-size-15m` | `43e2334` | 待合并后填写 | `frontend/src/features/watchlist-monitor/*`、`frontend/src/pages/WatchlistPage.tsx`、`frontend/src/styles/global.scss`、`frontend/package.json`、`backend/tools/backfill_single_instrument.py`、`AGENTS.md`、`docs/current/02-data-api-contracts.md`、`docs/current/04-frontend-ux.md`、`docs/current/code-doc-alignment.md`、`docs/maps/api-route-map.md`、`docs/maps/frontend-route-map.md`、`docs/maps/test-coverage-map.md`、`docs/changes/CHANGELOG.md`、`docs/changes/records/CHANGE-20260704-024.md` |
 | CHANGE-20260704-025 | 2026-07-04 | Admin Jobs 可观察性补齐 - Worker 心跳 Tab + 只读 admin API | committed | `feat/admin-jobs-observability` | `0f29e5e` | 待合并后填写 | `backend/app/schemas/worker_heartbeat.py`、`backend/app/api/admin_subscription.py`、`backend/tests/test_admin_worker_heartbeats_api.py`、`frontend/src/api/endpoints.ts`、`frontend/src/hooks/useApi.ts`、`frontend/src/pages/AdminJobsPage.tsx`、`docs/current/02-data-api-contracts.md`、`docs/current/03-jobs-integrations-operations.md`、`docs/current/04-frontend-ux.md`、`docs/maps/api-route-map.md`、`docs/maps/frontend-route-map.md`、`docs/maps/worker-job-map.md`、`docs/maps/test-coverage-map.md`、`docs/current/code-doc-alignment.md`、`docs/changes/CHANGELOG.md`、`docs/changes/records/CHANGE-20260704-025.md` |
 | CHANGE-20260704-027 | 2026-07-04 | DSA Run 总超时与 Computable Universe 口径修复 | committed | `fix/dsa-run-timeout-and-computable-universe` | 待填写 | 待合并后填写 | `backend/app/services/strategy_batch_service.py`、`backend/tests/test_strategy_batch_service.py`、`docker-compose.prod.yml`、`docs/current/02-data-api-contracts.md`、`docs/current/03-jobs-integrations-operations.md`、`docs/current/code-doc-alignment.md`、`docs/maps/*`、`docs/changes/CHANGELOG.md`、`docs/changes/records/CHANGE-20260704-027.md` |
+| CHANGE-20260704-028 | 2026-07-04 | 趋势选股页全量 universe 展示：主表改 strategy_run_items LEFT JOIN strategy_results，行 key 改 instrumentId，"命中"改名"筛选结果"，AGENTS 写入 node:20-alpine 保护规则 | in_validation | `fix/screener-full-universe-results` | `d47bb46` | 待合并后填写 | `backend/app/repositories/strategy_result_repository.py`、`backend/app/services/selector_query_service.py`、`backend/app/schemas/strategy_run.py`、`backend/app/api/strategy_runs.py`、`backend/app/models/strategy_run.py`、`backend/tests/test_strategy_results_universe.py`、`backend/tests/test_business_integration.py`、`backend/tests/test_selector_query_integration.py`、`frontend/src/api/endpoints.ts`、`frontend/src/features/trend-selection/adapters.ts`、`frontend/src/features/trend-selection/__tests__/adapter.test.ts`、`frontend/src/pages/ScreenerPage.tsx`、`AGENTS.md`、`docs/AI-ONBOARDING.md`、`docs/current/02-data-api-contracts.md`、`docs/current/04-frontend-ux.md`、`docs/current/code-doc-alignment.md`、`docs/maps/api-route-map.md`、`docs/maps/frontend-route-map.md`、`docs/maps/deployment-runtime-map.md`、`docs/maps/test-coverage-map.md`、`docs/changes/CHANGELOG.md`、`docs/changes/records/CHANGE-20260704-028.md` |
 
 ## 规则
 

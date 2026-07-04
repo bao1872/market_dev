@@ -271,17 +271,22 @@ export interface StrategyRunListResponse {
 }
 
 /** 策略运行结果 */
+// [全量 universe] - 描述: id/payload 等字段可空（skipped/failed 行无 strategy_results 记录）
 export interface StrategyResult {
-  id: string
-  run_id: string
-  strategy_version_id: string
+  id: string | null
+  run_id: string | null
+  strategy_version_id: string | null
   instrument_id: string
   instrument_symbol?: string
   instrument_name?: string
   instrument_market?: string
-  trade_date: string
-  payload: Record<string, unknown>
-  created_at: string
+  trade_date: string | null
+  payload: Record<string, unknown> | null
+  created_at: string | null
+  // 全量 universe 改造新增字段
+  item_status: string
+  reason_code?: string
+  error_message?: string
 }
 
 /** 策略运行结果列表响应（分页） */

@@ -38,10 +38,12 @@ Node Cluster 算法
 
 ### 趋势选股
 
-- 固定读取最新完整 published 批次；
-- 默认无隐式筛选；
+- 以全量 active 股票 universe 为展示主表（`strategy_run_items`），DSA 指标为 LEFT JOIN 附加字段；
+- 默认无隐式筛选时显示全量股票（succeeded 有指标、skipped/failed 指标为空但仍显示）；
 - 展示 source_total、filtered_total、成功、失败、跳过和覆盖率；
-- 批次不完整显示阻断，不伪装正常。
+- 批次不完整显示阻断，不伪装正常；
+- 行 key 使用 `instrumentId`（不依赖 `result_id`，skipped/failed 行也能选中加入自选）；
+- "筛选结果" 标签替代原 "命中"（`filtered_total` 是当前筛选条件下的数量，不是命中数）。
 
 ### 我的自选
 
