@@ -533,8 +533,11 @@ Capture Token 只能访问 Capture API。\
 
 ### 10. Alignment
 
-未经测试、CI 或真实运行证据，不得关闭 `code-doc-alignment.md` 条目。\
-Mock 不能替代真实生产 E2E。
+未经测试、CI 或真实运行证据，不得关闭 `code-doc-alignment.md` 条目。\nMock 不能替代真实生产 E2E。
+
+### 11. 测试期部署不备份数据库
+
+测试期部署默认不备份数据库；除非用户明确说“先备份数据库”，否则禁止 `pg_dump` / 大体积备份，禁止写入 `/root/backups` 或 `/root/web_dev/backups`。当前物理机磁盘紧张，优先节省硬盘；有问题直接定位修复。
 
 ***
 

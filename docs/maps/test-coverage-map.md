@@ -30,6 +30,8 @@
 | bars_daily 覆盖率统一口径 | `test_bars_coverage_service.py` |
 | coverage 阈值判断使用 `coverage_raw` 原始值 | `test_bars_coverage_service.py` |
 | dsa-only fallback 到最新交易日 | `test_dsa_only_coverage_endpoint.py` |
+| bars API page_size 按 timeframe 限制（15m=4000, 1h=1200, 其他=1000） | `test_bars.py` |
+| indicators API `bars` 参数最大 4000 | `test_indicators_api.py` |
 
 ## 3.5 自选股监控
 
@@ -37,6 +39,7 @@
 |---|---|
 | monitor-status 无 MonitorState 或 payload 无效时 fallback | `test_watchlist_monitor_status_fallback.py` |
 | monitor-status 单只 fallback 失败单行降级 | `test_watchlist_monitor_status_fallback.py` |
+| 自选监控页无每行状态栏、页眉全局状态、数据列可过滤、compact-table 对齐 | `frontend/src/features/watchlist-monitor/__tests__/columns.test.ts` |
 
 ## 4. 飞书与通知
 
