@@ -13,8 +13,8 @@ export function translateEventType(eventType: string): string {
   return getEventLabel(eventType)
 }
 
-/** 监控状态徽章渲染 */
-export function MonitorStatusBadge({ status }: { status: MonitorStatus }) {
+/** 监控状态徽章渲染（支持 UNKNOWN 占位，用于无数据时的全局状态） */
+export function MonitorStatusBadge({ status }: { status: MonitorStatus | 'UNKNOWN' }) {
   switch (status) {
     case 'PRE_OPEN':
       return <span className="tag small">盘前等待开市</span>
@@ -35,6 +35,8 @@ export function MonitorStatusBadge({ status }: { status: MonitorStatus }) {
       return <span className="tag error small">计算失败</span>
     case 'STALE':
       return <span className="tag warn small">数据延迟</span>
+    case 'UNKNOWN':
+      return <span className="tag small">未知</span>
     default:
       return <span className="tag small">未知</span>
   }
@@ -77,45 +79,11 @@ export function getWatchlistMonitorColumns(
       ),
     },
     {
-      key: 'status',
-      title: '状态',
-      dataType: 'text',
-      sortable: true,
-      filterable: true,
-      sortValue: (row) => row.monitor_status,
-      filterValue: (row) => {
-        switch (row.monitor_status) {
-          case 'PRE_OPEN':
-            return '盘前等待开市'
-          case 'MORNING_SESSION':
-          case 'AFTERNOON_SESSION':
-            return '交易中'
-          case 'LUNCH_BREAK':
-            return '午间休市'
-          case 'MARKET_CLOSED':
-            return '已收盘'
-          case 'NON_TRADING_DAY':
-            return '非交易日'
-          case 'SUCCEEDED':
-            return '已计算'
-          case 'FAILED':
-            return '计算失败'
-          case 'STALE':
-            return '数据延迟'
-          case 'WAITING_FIRST_RUN':
-            return '等待首次计算'
-          default:
-            return '未知'
-        }
-      },
-      render: (row) => <MonitorStatusBadge status={row.monitor_status} />,
-    },
-    {
       key: 'currentPrice',
       title: '当前价',
       dataType: 'number',
       sortable: true,
-      filterable: false,
+      filterable: true,
       sortValue: (row) => row.current_price ?? 0,
       render: (row) => <span className="num">{fmtNum(row.current_price)}</span>,
     },
@@ -124,7 +92,7 @@ export function getWatchlistMonitorColumns(
       title: '近期波动上沿',
       dataType: 'number',
       sortable: true,
-      filterable: false,
+      filterable: true,
       sortValue: (row) => row.bb_upper ?? 0,
       render: (row) => <span className="num">{fmtNum(row.bb_upper)}</span>,
     },
@@ -133,7 +101,7 @@ export function getWatchlistMonitorColumns(
       title: '近期价格中枢',
       dataType: 'number',
       sortable: true,
-      filterable: false,
+      filterable: true,
       sortValue: (row) => row.bb_mid ?? 0,
       render: (row) => <span className="num">{fmtNum(row.bb_mid)}</span>,
     },
@@ -142,7 +110,7 @@ export function getWatchlistMonitorColumns(
       title: '近期波动下沿',
       dataType: 'number',
       sortable: true,
-      filterable: false,
+      filterable: true,
       sortValue: (row) => row.bb_lower ?? 0,
       render: (row) => <span className="num">{fmtNum(row.bb_lower)}</span>,
     },
@@ -151,7 +119,7 @@ export function getWatchlistMonitorColumns(
       title: '上方成交密集区',
       dataType: 'number',
       sortable: true,
-      filterable: false,
+      filterable: true,
       sortValue: (row) => row.upper_node_price ?? 0,
       render: (row) => (
         <span
@@ -171,7 +139,7 @@ export function getWatchlistMonitorColumns(
       title: '下方成交密集区',
       dataType: 'number',
       sortable: true,
-      filterable: false,
+      filterable: true,
       sortValue: (row) => row.lower_node_price ?? 0,
       render: (row) => (
         <span
@@ -191,7 +159,7 @@ export function getWatchlistMonitorColumns(
       title: '当前区间位置',
       dataType: 'percent',
       sortable: true,
-      filterable: false,
+      filterable: true,
       sortValue: (row) => row.position_0_1 ?? 0,
       render: (row) => <span className="num">{fmtPct(row.position_0_1)}</span>,
     },
@@ -200,7 +168,7 @@ export function getWatchlistMonitorColumns(
       title: '最密集成交价',
       dataType: 'number',
       sortable: true,
-      filterable: false,
+      filterable: true,
       sortValue: (row) => row.poc_price ?? 0,
       render: (row) => <span className="num">{fmtNum(row.poc_price)}</span>,
     },
@@ -209,8 +177,10 @@ export function getWatchlistMonitorColumns(
       title: '最近触发',
       dataType: 'text',
       sortable: true,
-      filterable: false,
+      filterable: true,
       sortValue: (row) => row.latest_event?.event_time ?? '',
+      filterValue: (row) =>
+        row.latest_event ? translateEventType(row.latest_event.event_type) : '',
       render: (row) => {
         if (!row.latest_event) return <span className="muted">-</span>
         const eventType = translateEventType(row.latest_event.event_type)
@@ -232,8 +202,9 @@ export function getWatchlistMonitorColumns(
       title: '更新时间',
       dataType: 'text',
       sortable: true,
-      filterable: false,
+      filterable: true,
       sortValue: (row) => row.updated_at ?? '',
+      filterValue: (row) => row.updated_at ?? '',
       render: (row) => <span className="num">{row.updated_at ?? '-'}</span>,
     },
   ]

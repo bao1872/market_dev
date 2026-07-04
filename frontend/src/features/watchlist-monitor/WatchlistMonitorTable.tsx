@@ -41,6 +41,7 @@ export function WatchlistMonitorTable({
       error={error}
       emptyText={emptyText}
       searchable={searchable}
+      tableClassName="compact-table"
     />
   )
 }

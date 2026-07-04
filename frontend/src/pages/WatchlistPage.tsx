@@ -18,6 +18,7 @@ import {
   adaptWatchlistMonitorStatusItem,
 } from '@/features/watchlist-monitor'
 import type { WatchlistMonitorRow } from '@/features/watchlist-monitor'
+import { MonitorStatusBadge } from '@/features/watchlist-monitor/columns'
 
 // ===== 添加自选弹窗 =====
 function AddStockModal({
@@ -143,6 +144,12 @@ export default function WatchlistPage() {
     [items],
   )
 
+  // [自选监控] - 描述: 市场状态全局显示在页眉，不在每行重复展示
+  const globalMarketStatus = useMemo(
+    () => (items.length > 0 ? items[0].market_session : 'UNKNOWN'),
+    [items],
+  )
+
   // ===== 事件处理 =====
 
   /** 跳转个股详情 */
@@ -180,7 +187,14 @@ export default function WatchlistPage() {
       <div className="page-head">
         <div>
           <h1 className="page-title">自选股监控</h1>
-          <div className="page-desc">自选股票池统一监控，合并 BB 布林带与 Volume Node 指标</div>
+          <div className="page-desc">
+            自选股票池统一监控，合并 BB 布林带与 Volume Node 指标
+            {globalMarketStatus !== 'UNKNOWN' && (
+              <span className="watchlist-global-status">
+                <MonitorStatusBadge status={globalMarketStatus} />
+              </span>
+            )}
+          </div>
         </div>
         <div className="actions">
           <button className="btn primary" onClick={() => setSearchModalOpen(true)}>
