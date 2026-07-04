@@ -206,13 +206,16 @@ class TestDsaOnlyEndpoint:
         await db_session.flush()
 
         trade_date = "2099-01-01"
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post(
-                "/admin/after-close-runs/dsa-only",
-                headers=_auth_headers(admin_user.id),
-                json={"trade_date": trade_date},
-            )
+        with patch(
+            "app.core.time.shanghai_business_date", return_value=date(2099, 1, 1)
+        ):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.post(
+                    "/admin/after-close-runs/dsa-only",
+                    headers=_auth_headers(admin_user.id),
+                    json={"trade_date": trade_date},
+                )
 
         assert response.status_code == 409, f"响应体: {response.text}"
         detail = response.json()["detail"]
@@ -287,13 +290,18 @@ class TestDsaOnlyEndpoint:
         await _insert_daily_bars(db_session, new_instruments, trade_date)
         await db_session.flush()
 
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post(
-                "/admin/after-close-runs/dsa-only",
-                headers=_auth_headers(admin_user.id),
-                json={"trade_date": trade_date.isoformat()},
-            )
+        with patch(
+            "app.core.time.shanghai_business_date", return_value=date(2099, 1, 1)
+        ):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                response = await client.post(
+                    "/admin/after-close-runs/dsa-only",
+                    headers=_auth_headers(admin_user.id),
+                    json={"trade_date": trade_date.isoformat()},
+                )
 
         assert response.status_code == 201, f"响应体: {response.text}"
         data = response.json()

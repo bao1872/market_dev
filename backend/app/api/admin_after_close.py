@@ -202,11 +202,18 @@ async def create_dsa_only_run_endpoint(
     requested_date = _parse_trade_date(payload.trade_date)
     today = shanghai_business_date()
 
-    # [AfterClose] - 描述: dsa-only 拒绝未来日期（不允许重算未发生的交易日）
+    # [AfterClose] - 描述: dsa-only 仅重算今日，拒绝未来日期
     if requested_date > today:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"dsa-only 拒绝未来日期: trade_date={requested_date.isoformat()}",
+        )
+
+    # [AfterClose] - 描述: dsa-only 仅重算今日，拒绝历史日期
+    if requested_date < today:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"dsa-only 拒绝历史日期: trade_date={requested_date.isoformat()}",
         )
 
     # [Bugfix] - 描述: dsa-only 与系统概览覆盖率口径对齐
