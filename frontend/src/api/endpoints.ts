@@ -2044,6 +2044,10 @@ export interface SchedulerJobRunItem {
   status: string
   heartbeat_at: string | null
   lease_expires_at: string | null
+  // [AdminJobs] - 描述: 领取该任务的 Worker 实例标识（与 worker_heartbeats.instance_id 对应）
+  worker_instance_id: string | null
+  // [AdminJobs] - 描述: Worker 最后一次循环时间（长任务周期性心跳）
+  last_cycle_at: string | null
   total_count: number | null
   succeeded_count: number | null
   failed_count: number | null
@@ -2072,6 +2076,44 @@ export async function getSchedulerJobRuns(params?: {
   offset?: number
 }): Promise<SchedulerJobRunListResponse> {
   const { data } = await apiClient.get<SchedulerJobRunListResponse>('/admin/scheduler-job-runs', { params })
+  return data
+}
+
+/** Worker 心跳记录项（admin 只读，health_state 由后端计算） */
+export interface WorkerHeartbeatItem {
+  worker_name: string
+  instance_id: string
+  started_at: string
+  heartbeat_at: string
+  status: string // running/idle/stopped
+  current_job_id: string | null
+  build_sha: string | null
+  metadata_json: string | null
+  updated_at: string
+  // 后端计算字段（避免前端复制业务规则）
+  heartbeat_age_seconds: number
+  health_state: string // fresh/stale/stopped
+}
+
+/** Worker 心跳列表响应 */
+export interface WorkerHeartbeatListResponse {
+  items: WorkerHeartbeatItem[]
+  total: number
+  limit: number
+  offset: number
+}
+
+/** 查询 Worker 心跳记录（admin 只读） */
+export async function getWorkerHeartbeats(params?: {
+  status?: string
+  worker_name?: string
+  limit?: number
+  offset?: number
+}): Promise<WorkerHeartbeatListResponse> {
+  const { data } = await apiClient.get<WorkerHeartbeatListResponse>(
+    '/admin/worker-heartbeats',
+    { params },
+  )
   return data
 }
 

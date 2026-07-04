@@ -31,6 +31,7 @@ from app.models.access_audit_log import AccessAuditLog
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.subscription import Subscription
 from app.models.user import Role, User, UserRole
+from app.models.worker_heartbeat import WorkerHeartbeat
 from app.schemas.invitation import (
     InviteCodeCreate,
     InviteCodeListItem,
@@ -52,6 +53,11 @@ from app.schemas.subscription import (
 )
 from app.schemas.system_overview import SystemOverviewResponse
 from app.schemas.user import UserResponse
+from app.schemas.worker_heartbeat import (
+    WorkerHeartbeatItem,
+    WorkerHeartbeatListResponse,
+    classify_health_state,
+)
 from app.services.access_audit_service import query_audit_logs, write_audit_log
 from app.services.notification_service import list_message_deliveries, retry_delivery
 from app.services.subscription_service import (
@@ -401,6 +407,75 @@ async def get_scheduler_job_runs(
 
     return SchedulerJobRunListResponse(
         items=[SchedulerJobRunItem.model_validate(r) for r in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/worker-heartbeats", response_model=WorkerHeartbeatListResponse)
+async def get_worker_heartbeats(
+    status: str | None = Query(default=None, description="状态筛选：running/idle/stopped"),
+    worker_name: str | None = Query(default=None, description="Worker 名称筛选"),
+    limit: int = Query(default=100, ge=1, le=200, description="分页大小"),
+    offset: int = Query(default=0, ge=0, description="分页偏移"),
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles("admin")),
+) -> WorkerHeartbeatListResponse:
+    """查询 Worker 心跳记录（admin 只读）。
+
+    返回 worker_heartbeats 表的 raw 记录，附加后端计算的
+    heartbeat_age_seconds 和 health_state。health_state 阈值：
+    - fresh:   status=running 且 age < 120s
+    - stale:   status=running 且 120s ≤ age < 600s
+    - stopped: status=stopped 或 age ≥ 600s
+
+    阈值常量定义在 app.schemas.worker_heartbeat，与
+    system_overview_service.WORKER_HEALTH_WINDOW 和
+    worker.STALE_HEARTBEAT_THRESHOLD_SECONDS 保持一致。
+    """
+    filters = []
+    if status:
+        filters.append(WorkerHeartbeat.status == status)
+    if worker_name:
+        filters.append(WorkerHeartbeat.worker_name == worker_name)
+
+    count_stmt = select(func.count()).select_from(WorkerHeartbeat).where(*filters)
+    total = await db.scalar(count_stmt) or 0
+
+    stmt = (
+        select(WorkerHeartbeat)
+        .where(*filters)
+        .order_by(WorkerHeartbeat.worker_name.asc(), WorkerHeartbeat.started_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    result = await db.execute(stmt)
+    rows = list(result.scalars().all())
+
+    now = datetime.now(UTC)
+    items: list[WorkerHeartbeatItem] = []
+    for r in rows:
+        age = int((now - r.heartbeat_at).total_seconds())
+        health = classify_health_state(r.status, age)
+        items.append(
+            WorkerHeartbeatItem(
+                worker_name=r.worker_name,
+                instance_id=r.instance_id,
+                started_at=r.started_at,
+                heartbeat_at=r.heartbeat_at,
+                status=r.status,
+                current_job_id=r.current_job_id,
+                build_sha=r.build_sha,
+                metadata_json=r.metadata_json,
+                updated_at=r.updated_at,
+                heartbeat_age_seconds=age,
+                health_state=health,
+            )
+        )
+
+    return WorkerHeartbeatListResponse(
+        items=items,
         total=total,
         limit=limit,
         offset=offset,

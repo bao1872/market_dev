@@ -40,6 +40,15 @@ running + heartbeat_at < now - threshold → stopped/stale
 
 不得删除历史记录，不得影响 fresh heartbeat。
 
+## 3.1 Admin 可观察性入口
+
+`GET /admin/worker-heartbeats`（admin 只读）返回 `worker_heartbeats` 表 raw 记录，附加后端计算的 `heartbeat_age_seconds` 和 `health_state`：
+- fresh：running + age<120s（同 `system_overview_service.WORKER_HEALTH_WINDOW`）
+- stale：running + 120s≤age<600s（同 `worker.STALE_HEARTBEAT_THRESHOLD_SECONDS`）
+- stopped：status=stopped 或 age≥600s
+
+AdminJobsPage "Worker 心跳" Tab 展示该数据，10 秒轮询。watchdog 服务在 `worker_heartbeats` 表中可见。
+
 ## 4. 修改 worker.py 原则
 
 - 不做大拆分；

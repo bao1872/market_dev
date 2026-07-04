@@ -21,7 +21,7 @@
 | `/admin/users` | `AdminUsersPage` | Admin | 用户/订阅/邀请码 |
 | `/admin/beta-applications` | `AdminBetaApplicationsPage` | Admin | 内测申请 |
 | `/admin/strategies` | `AdminStrategiesPage` | Admin | 策略管理 |
-| `/admin/jobs` | `AdminJobsPage` | Admin | 任务/Worker/投递 |
+| `/admin/jobs` | `AdminJobsPage` | Admin | 定时任务/策略计算/Worker 心跳（worker_heartbeats 实时视图，health_state fresh/stale/stopped）/投递 |
 
 ## 2. 守卫语义
 

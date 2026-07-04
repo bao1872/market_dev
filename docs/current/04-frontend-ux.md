@@ -71,7 +71,8 @@ Node Cluster 算法
 
 - 所有按钮调用真实 API；
 - 启用、禁用、授予、续期、撤销、改套餐、重试都有 loading/error/refresh；
-- 禁止用本地 state 或 Toast 模拟成功。
+- 禁止用本地 state 或 Toast 模拟成功；
+- AdminJobsPage 提供 "Worker 心跳" Tab，展示 worker_name/instance_id/status/health_state/heartbeat_at/age/build_sha/current_job_id，10 秒轮询，health_state 由后端计算（fresh/stale/stopped）。
 
 ## 4. UI 状态
 
