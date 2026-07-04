@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.constants import indicator_contract
 from app.constants.strategy_keys import WATCHLIST_MONITOR
 from app.constants.user_facing_labels import get_event_label, get_field_label
+from app.core.time import format_shanghai_datetime
 from app.models.capture_job import (
     CAPTURE_STATUS_FAILED,
     CAPTURE_STATUS_SUCCEEDED,
@@ -1579,7 +1580,7 @@ class MonitorBatchService:
                 "symbol": symbol,
                 "event_type": event_type,
             },
-            data_time=datetime.now(UTC).isoformat(),
+            data_time=format_shanghai_datetime(),
             primary_instrument={
                 "instrument_id": str(instrument_id),
                 "symbol": symbol,

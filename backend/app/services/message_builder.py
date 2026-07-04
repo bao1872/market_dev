@@ -17,10 +17,10 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any
 
 from app.constants.user_facing_labels import get_event_label, get_field_label
+from app.core.time import format_shanghai_datetime
 from app.schemas.notification import NotificationMessageDTO
 
 # 模板键与版本映射（message_type -> (template_key, template_version)）
@@ -164,7 +164,7 @@ def build_system_alert(
         actions: 操作按钮
     """
     if data_time is None:
-        data_time = datetime.now(UTC).isoformat()
+        data_time = format_shanghai_datetime()
 
     context = {
         "title": f"系统告警｜{alert_type}",
@@ -200,7 +200,7 @@ def build_channel_alert(
         actions: 操作按钮
     """
     if data_time is None:
-        data_time = datetime.now(UTC).isoformat()
+        data_time = format_shanghai_datetime()
 
     context = {
         "title": f"渠道异常｜{channel_name}",
@@ -329,11 +329,8 @@ def build_monitor_event_text(
     Returns:
         NotificationMessageDTO（text_content 字段填充纯文本）
     """
-    from zoneinfo import ZoneInfo
-
-    _CST = ZoneInfo("Asia/Shanghai")
-
-    # 解析 event_time -> HH:MM（北京时间）
+    # 解析 event_time -> HH:MM（北京时间）+ 人类可读 data_time
+    # 复用 app.core.time.format_shanghai_datetime 统一时区格式化
     try:
         from datetime import datetime as _dt
 
@@ -342,9 +339,11 @@ def build_monitor_event_text(
             from datetime import UTC
 
             dt = dt.replace(tzinfo=UTC)
-        trigger_time = dt.astimezone(_CST).strftime("%H:%M")
+        trigger_time = format_shanghai_datetime(dt, "%H:%M")
+        display_data_time = format_shanghai_datetime(dt)
     except (ValueError, TypeError):
         trigger_time = "--:--"
+        display_data_time = event_time
 
     event_label = get_event_label(event_type)
 
@@ -388,7 +387,7 @@ def build_monitor_event_text(
             "event_type": event_type,
             **refs,
         },
-        data_time=event_time,
+        data_time=display_data_time,
         primary_instrument={
             "instrument_id": refs.get("instrument_id", ""),
             "symbol": symbol,

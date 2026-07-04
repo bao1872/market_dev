@@ -14,7 +14,7 @@
 | `/overview` | `IndexPage` | Subscriber/Admin | 服务总览 |
 | `/screener` | `ScreenerPage` | Subscriber/Admin | 趋势选股 |
 | `/watchlist` | `WatchlistPage` | Subscriber/Admin | 我的自选 |
-| `/stock/:symbol` | `StockDetailPage` | Subscriber/Admin | 个股详情 |
+| `/stock/:symbol` | `StockDetailPage` | Subscriber/Admin | 个股详情；按 timeframe 请求对应根数，K 线通过 `mergeRealtimeQuoteIntoBars` 合并实时行情显示，1d 保留日期语义、intraday 使用 `quote.update_time` |
 | `/settings` | `SettingsPage` | Authenticated | 设置与通知渠道 |
 | `/messages` | `MessagesPage` | Authenticated | 历史消息 |
 | `/admin`, `/admin/overview` | `AdminIndexPage` | Admin | 管理总览 |

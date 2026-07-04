@@ -49,6 +49,8 @@ public beta application
 
 ## 4. 图文状态机
 
+消息体中的 `data_time` 与文本段触发时间统一格式化为 Asia/Shanghai（CST），由 `app.core.time.format_shanghai_datetime` 处理，避免 UTC/`+00:00` 展示。
+
 | 状态 | 含义 |
 |---|---|
 | pending | 截图成功，Outbox 异步投递中 |

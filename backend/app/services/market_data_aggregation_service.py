@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.pytdx_adapter import get_pytdx_adapter
 from app.core.redis_client import get_sync_redis
-from app.core.time import now_shanghai
+from app.core.time import now_shanghai, shanghai_business_date
 from app.repositories.bar_repository import (
     _get_adj_factor_df,
     _get_symbol,
@@ -151,7 +151,8 @@ def _resolve_date_range(
     end_date: date | datetime | None,
 ) -> tuple[date, date] | tuple[datetime, datetime]:
     """解析查询范围。"""
-    today = date.today()
+    # [mdas] - 描述: 统一使用上海业务日期，避免服务器本地时区跨日误判
+    today = shanghai_business_date()
     if timeframe in ("1d", "1w", "1mo"):
         end = end_date if isinstance(end_date, date) else (end_date.date() if isinstance(end_date, datetime) else today)
         start = (

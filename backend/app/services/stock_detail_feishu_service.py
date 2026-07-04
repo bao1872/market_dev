@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -38,6 +38,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import create_capture_token
+from app.core.time import format_shanghai_datetime, now_utc, to_shanghai_iso
 from app.models.capture_job import (
     CAPTURE_STATUS_FAILED,
     CaptureJob,
@@ -195,7 +196,9 @@ async def send_stock_detail_to_feishu(
 
     # 5. 复用 build_monitor_event_text 拼装文本消息（与 monitor 链同款）
     # [StockDetailFeishu] - event_type=STOCK_SNAPSHOT_SHARE，不暴露内部 manual_send 代码
-    event_time = datetime.now(UTC).isoformat()
+    # event_time 保持 ISO 可解析（build_monitor_event_text 内部解析取 HH:MM）
+    # 使用 to_shanghai_iso 生成 +08:00 而非 UTC +00:00
+    event_time = to_shanghai_iso(now_utc())
     dto = build_monitor_event_text(
         stock_name=instrument.name or instrument.symbol,
         symbol=instrument.symbol,
@@ -327,7 +330,7 @@ async def send_stock_detail_to_feishu(
                 "test_run_id": str(test_run_id),
                 "image_url": image_url,
             },
-            data_time=event_time,
+            data_time=format_shanghai_datetime(),
             primary_instrument={
                 "instrument_id": str(instrument.id),
                 "symbol": instrument.symbol,

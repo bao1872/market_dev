@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from app.models.instrument import Instrument
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.services.bars_scheduler_service import BarsSchedulerService, BatchResult
 from app.services.job_run_event_service import append_event, list_events
@@ -110,6 +111,19 @@ async def test_coverage_below_threshold_fills_result(db_session) -> None:
     job_run = await _create_job_run(db_session)
     # 使用独特未来日期避免与其他测试数据冲突
     trade_date = date(2099, 11, 30)
+
+    # 创建 active instruments，确保 BarsCoverageService 分母 > 0
+    for i in range(5):
+        db_session.add(
+            Instrument(
+                id=uuid.uuid4(),
+                symbol=f"{600000 + i:06d}",
+                name=f"测试标的{i}",
+                market="SH",
+                status="active",
+            )
+        )
+    await db_session.flush()
 
     service = BarsSchedulerService()
     result = BatchResult(total=10)

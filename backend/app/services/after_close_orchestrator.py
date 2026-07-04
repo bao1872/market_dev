@@ -30,20 +30,19 @@ import json
 import logging
 import uuid
 from datetime import date, datetime, timedelta
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import AsyncSessionLocal
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.strategy_run import StrategyRun
+from app.repositories import strategy_result_repository
 from app.services.bars_scheduler_service import BarsSchedulerService
 from app.services.idempotency_service import acquire_job_run_lock
 from app.services.job_run_event_service import append_event, list_events
-from app.repositories import strategy_result_repository
 from app.services.strategy_batch_service import StrategyBatchService
 
 logger = logging.getLogger("after_close_orchestrator")
@@ -61,7 +60,7 @@ _DSA_POLL_TIMEOUT_SECONDS = 7200
 _ORCHESTRATOR_LEASE_SECONDS = 14400
 
 
-class AfterCloseRunStatus(str, Enum):
+class AfterCloseRunStatus(StrEnum):
     """盘后编排流水线状态枚举。
 
     状态流转：
@@ -266,8 +265,8 @@ async def compute_daily_coverage(
       （排除指数/基金/ETF，因为这些标的不写入 bars_daily，计入分母会导致覆盖率虚低）
     - 覆盖率 = covered / total（total=0 时返 0.0）
 
-    [Phase6] - 描述: dsa-only 端点专用，避免调用 _check_daily_coverage_and_trigger_dsa
-    触发 DSA 副作用。覆盖率计算的权威实现仍为 bars_scheduler_service。
+    [Bugfix] - 描述: 本函数作为历史兼容 wrapper，内部复用 BarsCoverageService 统一 SQL，
+    禁止复制覆盖率查询。
 
     Args:
         db: 异步会话
@@ -276,32 +275,10 @@ async def compute_daily_coverage(
     Returns:
         (covered, total, coverage)：覆盖数、活跃股票总数、覆盖率（0.0-1.0）
     """
-    from sqlalchemy import func as sa_func
+    from app.services.bars_coverage_service import BarsCoverageService
 
-    from app.models.bar import BarDaily
-    from app.models.instrument import Instrument
-    from app.services.instrument_maintenance_service import stock_symbol_sql_filter
-
-    # [AfterClose] - 分子也只算 A 股股票（JOIN instruments + stock_symbol_sql_filter）
-    # bars_daily 中可能残留指数/基金/ETF 的日线数据，必须过滤
-    daily_count_result = await db.execute(
-        select(sa_func.count(sa_func.distinct(BarDaily.instrument_id)))
-        .join(Instrument, BarDaily.instrument_id == Instrument.id)
-        .where(BarDaily.trade_date == trade_date)
-        .where(stock_symbol_sql_filter(Instrument))
-    )
-    covered = daily_count_result.scalar() or 0
-
-    # [AfterClose] - 分母仅算 A 股股票（排除指数/基金/ETF），与 BarsSchedulerService 口径一致
-    active_count_result = await db.execute(
-        select(sa_func.count(Instrument.id))
-        .where(Instrument.status == "active")
-        .where(stock_symbol_sql_filter(Instrument))
-    )
-    total = active_count_result.scalar() or 0
-
-    coverage = covered / total if total > 0 else 0.0
-    return covered, total, coverage
+    result = await BarsCoverageService.compute_daily_coverage(db, trade_date)
+    return result["covered"], result["total"], result["coverage"]
 
 
 async def _update_heartbeat_and_step(

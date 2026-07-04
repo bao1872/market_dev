@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """系统概览服务 - /admin/system-overview 业务逻辑层。
 
 从 admin_subscription.py 路由抽出数据查询逻辑，新增市场阶段/监控运行时/盘后流水线状态。
@@ -849,11 +848,12 @@ async def _compute_after_close_pipeline(
 
     # [after_close_pipeline] - bars succeeded → 查 DSA（trade_date=今日, run_type=scheduled, strategy_key=dsa_selector）
     # advice.md: DSA 查询必须关联 strategy_versions + strategy_definitions + strategy_key=dsa_selector
-    from app.models.strategy import StrategyDefinition as _SD, StrategyVersion as _SV
+    from app.models.strategy import StrategyDefinition as SdModel
+    from app.models.strategy import StrategyVersion as SvModel
     dsa_version_ids = (
-        select(_SV.id)
-        .join(_SD, _SD.id == _SV.strategy_definition_id)
-        .where(_SD.strategy_key == "dsa_selector")
+        select(SvModel.id)
+        .join(SdModel, SdModel.id == SvModel.strategy_definition_id)
+        .where(SdModel.strategy_key == "dsa_selector")
         .subquery()
     )
     dsa_stmt = (
@@ -908,12 +908,23 @@ async def _compute_after_close_pipeline(
         pipeline_status = PIPELINE_STATUS_STALE
 
     # [SystemOverview] - 细分 WAITING_DSA 原因（7 种），仅在 DSA 未成功 published 时填充
+    # [Bugfix] - 传入 latest_daily_trade_date 让覆盖率查询与 data_freshness 口径对齐
+    latest_daily_trade_date_str = data_freshness.get("bars", {}).get("latest_daily_trade_date")
+    latest_daily_trade_date_obj: Any = None
+    if latest_daily_trade_date_str:
+        try:
+            from datetime import date as date_cls
+            latest_daily_trade_date_obj = date_cls.fromisoformat(latest_daily_trade_date_str)
+        except ValueError:
+            latest_daily_trade_date_obj = None
+
     waiting_dsa_reason, waiting_dsa_suggestion = await _compute_waiting_dsa_reason(
         db=db,
         pipeline_status=pipeline_status,
         dsa_run=dsa_run,
         business_date_obj=business_date_obj,
         now=now,
+        latest_daily_trade_date=latest_daily_trade_date_obj,
     )
 
     # [Phase9] - 数据新鲜度已在函数开头无条件计算（data_freshness），此处直接复用
@@ -935,6 +946,7 @@ async def _compute_waiting_dsa_reason(
     dsa_run: StrategyRun | None,
     business_date_obj: Any,
     now: datetime,
+    latest_daily_trade_date: Any = None,
 ) -> tuple[str | None, str | None]:
     """[SystemOverview] - 细分 WAITING_DSA 7 种原因及人类可读建议。
 
@@ -973,10 +985,21 @@ async def _compute_waiting_dsa_reason(
     # 场景 1: WAITING_DSA - bars 成功但 DSA run 未创建
     if pipeline_status == PIPELINE_STATUS_WAITING_DSA:
         # 1a. 检查 bars 覆盖率是否达标
-        coverage = await _compute_bars_coverage(db, business_date_obj)
-        if coverage is not None and coverage < WAITING_DSA_COVERAGE_THRESHOLD:
-            reason = WAITING_DSA_REASON_DATA_COVERAGE_INSUFFICIENT
-            return reason, WAITING_DSA_SUGGESTIONS[reason]
+        # [Bugfix] - 描述: 与 data_freshness.bars.daily_coverage 口径对齐
+        # 原逻辑用 business_date_obj（today）查覆盖率，今日未回补时 0%，与系统概览显示的 ~98% 不一致
+        # 修复：优先用 latest_daily_trade_date（最新已落盘日），fallback 到 business_date_obj
+        coverage_date = business_date_obj
+        if latest_daily_trade_date is not None:
+            coverage_date = latest_daily_trade_date
+        # 覆盖率门禁使用原始值，避免四舍五入边缘误判
+        from app.services.bars_coverage_service import BarsCoverageService
+
+        coverage_result = await BarsCoverageService.compute_daily_coverage(db, coverage_date)
+        if coverage_result["total"] > 0:
+            coverage_raw = coverage_result["coverage_raw"]
+            if coverage_raw < WAITING_DSA_COVERAGE_THRESHOLD:
+                reason = WAITING_DSA_REASON_DATA_COVERAGE_INSUFFICIENT
+                return reason, WAITING_DSA_SUGGESTIONS[reason]
 
         # 1b. 检查 selector 策略是否有 released 版本
         has_released = await _has_released_selector_version(db)
@@ -1025,7 +1048,7 @@ async def _compute_bars_coverage(
 ) -> float | None:
     """[SystemOverview] - 计算当日 bars 覆盖率（covered / active_total）。
 
-    复用 bars_scheduler_service 的统计逻辑（不引入新依赖）。
+    复用 BarsCoverageService 统一 SQL（收口三处重复实现）。
     返回 None 表示无法计算（无活跃标的）。
 
     Args:
@@ -1035,31 +1058,12 @@ async def _compute_bars_coverage(
     Returns:
         覆盖率 0.0-1.0，或 None
     """
-    from app.models.bar import BarDaily
-    from app.models.instrument import Instrument
-    from app.services.instrument_maintenance_service import stock_symbol_sql_filter
+    from app.services.bars_coverage_service import BarsCoverageService
 
-    # [SystemOverview] - 分子也只算 A 股股票（JOIN instruments + stock_symbol_sql_filter）
-    # bars_daily 中可能残留指数/基金/ETF 的日线数据，必须过滤
-    covered_result = await db.scalar(
-        select(func.count(func.distinct(BarDaily.instrument_id)))
-        .join(Instrument, BarDaily.instrument_id == Instrument.id)
-        .where(BarDaily.trade_date == business_date_obj)
-        .where(stock_symbol_sql_filter(Instrument))
-    )
-    covered = int(covered_result or 0)
-
-    # [SystemOverview] - 描述: 分母仅算 A 股股票（排除指数/基金/ETF），与 BarsSchedulerService 口径一致
-    active_result = await db.scalar(
-        select(func.count(Instrument.id))
-        .where(Instrument.status == "active")
-        .where(stock_symbol_sql_filter(Instrument))
-    )
-    total = int(active_result or 0)
-
-    if total == 0:
+    result = await BarsCoverageService.compute_daily_coverage(db, business_date_obj)
+    if result["total"] == 0:
         return None
-    return covered / total
+    return result["coverage"]
 
 
 async def _has_released_selector_version(db: AsyncSession) -> bool:
@@ -1136,12 +1140,12 @@ if __name__ == "__main__":
 
     # 验证 _determine_monitor_status 逻辑（非异步部分）
     from app.services.market_status_service import (
-        MARKET_SESSION_NON_TRADING_DAY,
-        MARKET_SESSION_PRE_OPEN,
-        MARKET_SESSION_MORNING,
-        MARKET_SESSION_LUNCH,
         MARKET_SESSION_AFTERNOON,
         MARKET_SESSION_CLOSED,
+        MARKET_SESSION_LUNCH,
+        MARKET_SESSION_MORNING,
+        MARKET_SESSION_NON_TRADING_DAY,
+        MARKET_SESSION_PRE_OPEN,
     )
 
     # 非交易日

@@ -28,6 +28,8 @@
 
 from __future__ import annotations
 
+import logging
+import math
 from datetime import UTC, datetime
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -37,20 +39,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.strategy_keys import WATCHLIST_MONITOR
+from app.core.time import now_shanghai, shanghai_business_date
 from app.db import get_db
-from app.services.access_control_service import (
-    AccessContext,
-    require_active_subscription,
-    require_quota,
-)
-from app.services.calendar_service import is_trading_day_async
-from app.services.market_status_service import TRADING_SESSIONS, compute_market_session
 from app.models.instrument import Instrument
 from app.models.monitor_evaluation import MonitorEvaluation
 from app.models.monitor_state import MonitorState
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.strategy_event import StrategyEvent
-from app.models.user import User
 from app.models.watchlist import UserWatchlistItem
 from app.schemas.watchlist import (
     WatchlistAddRequest,
@@ -59,6 +54,16 @@ from app.schemas.watchlist import (
     WatchlistMonitorStatusItem,
     WatchlistMonitorStatusResponse,
 )
+from app.services.access_control_service import (
+    AccessContext,
+    require_active_subscription,
+    require_quota,
+)
+from app.services.calendar_service import is_trading_day_async
+from app.services.market_status_service import TRADING_SESSIONS, compute_market_session
+from app.services.monitor_snapshot_service import MonitorSnapshot, MonitorSnapshotService
+
+logger = logging.getLogger("watchlist_api")
 
 router = APIRouter(prefix="/watchlist", tags=["watchlist"])
 
@@ -201,6 +206,57 @@ def _flatten_node_metrics(metrics: dict | None) -> dict:
     return flat
 
 
+def _snapshot_to_metrics(snapshot: MonitorSnapshot) -> dict:
+    """将 MonitorSnapshotService 输出映射为 _flatten_node_metrics 输入格式。
+
+    复用 MonitorSnapshotService 的计算结果，不复制 BB/VN 算法。
+    只读 fallback：不生成事件、不写 MonitorState。
+    """
+    return {
+        "current_price": snapshot.current_price,
+        "bb_upper": snapshot.range_upper,
+        "bb_mid": snapshot.range_center,
+        "bb_lower": snapshot.range_lower,
+        "upper_node": snapshot.upper_volume_zone,
+        "lower_node": snapshot.lower_volume_zone,
+        "poc_price": snapshot.most_traded_price,
+        "position_0_1": snapshot.range_position,
+        "previous_close": snapshot.previous_close,
+        "change_pct": snapshot.change_pct,
+        "_source": "fallback_snapshot",
+    }
+
+
+def _is_payload_valid(payload: dict | None) -> bool:
+    """判定 MonitorState.payload 是否包含有效的监控指标字段。
+
+    关键字段缺失、为 None 或 NaN 时视为无效，应触发 fallback。
+    """
+    if not payload:
+        return False
+
+    required_fields = [
+        "current_price",
+        "bb_upper",
+        "bb_mid",
+        "bb_lower",
+        "upper_node",
+        "lower_node",
+        "poc_price",
+        "position_0_1",
+    ]
+    for field in required_fields:
+        value = payload.get(field)
+        if value is None:
+            return False
+        try:
+            if isinstance(value, float) and math.isnan(value):
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 @router.get("", response_model=WatchlistListResponse)
 async def list_watchlist(
     db: AsyncSession = Depends(get_db),
@@ -328,11 +384,10 @@ async def get_watchlist_monitor_status(
     STALE 判定：仅在盘中交易时段使用 180 秒阈值；盘后/非交易日不因 30 分钟规则误判。
     """
     # 0. 计算市场状态
-    from datetime import date as dt_date
-
-    today = dt_date.today()
+    # 统一使用上海业务日期/时间作为唯一事实源，避免服务器本地时区跨日误判
+    today = shanghai_business_date()
     is_trading_day = await is_trading_day_async(db, today)
-    now_cst = datetime.now(ZoneInfo("Asia/Shanghai"))
+    now_cst = now_shanghai()
     market_status = _compute_market_status(now_cst, is_trading_day)
 
     # 1. 查找 watchlist_monitor 策略的最新 released 版本 ID
@@ -477,8 +532,31 @@ async def get_watchlist_monitor_status(
             )
 
         # metrics 仍从 MonitorState.payload 获取（价格/指标数据），节点对象扁平化
-        metrics = _flatten_node_metrics(ms.payload) if ms is not None else None
-        updated_at = ms.updated_at if ms is not None else None
+        # [Bugfix] - 描述: MonitorState 不存在或 payload 无效时，基于已有 bars fallback 计算
+        # 复用 MonitorSnapshotService.get_snapshot（只读，不生成事件/不写 MonitorState）
+        fallback_error_code: str | None = None
+        if ms is not None and _is_payload_valid(ms.payload):
+            metrics = _flatten_node_metrics(ms.payload)
+            updated_at = ms.updated_at
+        else:
+            try:
+                snapshot = await MonitorSnapshotService().get_snapshot(
+                    db, str(instrument.id), timeframe="1d"
+                )
+                metrics = _flatten_node_metrics(_snapshot_to_metrics(snapshot))
+                updated_at = None
+            except Exception as exc:
+                # 单行降级：不阻断整个自选列表，记录 error 并返回空 metrics
+                logger.exception(
+                    "[watchlist.monitor-status] fallback 计算失败 instrument_id=%s: %s",
+                    instrument.id,
+                    exc,
+                )
+                metrics = {}
+                updated_at = None
+                fallback_error_code = "FALLBACK_FAILED"
+        if fallback_error_code:
+            error_code = fallback_error_code
         latest_event = latest_event_map.get(instrument.id)
 
         response_items.append(
