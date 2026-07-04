@@ -242,10 +242,10 @@ class StrategyLoader:
     """
 
     # 策略注册表：strategy_id -> entrypoint（module:ClassName）
+    # 生产策略只有 dsa_selector 和 watchlist_monitor；BB/VN 作为 watchlist_monitor 内部子模块，
+    # 不在注册表中暴露为独立策略 key（避免 indicators API 遍历到无 released 版本的旧 key）
     _registry: dict[str, str] = {
         DSA_SELECTOR: "app.strategy.selectors.dsa_selector:DSASelector",
-        "volume_node_monitor": "app.strategy.monitors.volume_node_monitor:VolumeNodeMonitor",
-        "bb_monitor": "app.strategy.monitors.bollinger_monitor:BollingerMonitor",
         WATCHLIST_MONITOR: "app.strategy.monitors.watchlist_monitor:WatchlistMonitor",
     }
 
@@ -334,10 +334,12 @@ if __name__ == "__main__":
     except TypeError:
         print("StrategyRuntime ABC 不可实例化 ✓")
 
-    # 验证注册表
+    # 验证注册表：生产策略仅 dsa_selector / watchlist_monitor
     assert DSA_SELECTOR in StrategyLoader._registry
-    assert "volume_node_monitor" in StrategyLoader._registry
-    print(f"{DSA_SELECTOR} + volume_node_monitor 已注册 ✓")
+    assert WATCHLIST_MONITOR in StrategyLoader._registry
+    assert "volume_node_monitor" not in StrategyLoader._registry, "volume_node_monitor 不应再作为独立策略 key 注册"
+    assert "bb_monitor" not in StrategyLoader._registry, "bb_monitor 不应再作为独立策略 key 注册"
+    print(f"生产策略仅注册 {DSA_SELECTOR} / {WATCHLIST_MONITOR}，旧 key 已移除 ✓")
 
     # 验证 MarketDataContext.bars_15min 字段存在
     assert "bars_15min" in MarketDataContext.__dataclass_fields__

@@ -14,7 +14,7 @@
 | market | `app/api/market.py` | 市场状态 |
 | bars | `app/api/bars.py` | 行情查询；`page_size` 最大 4000，与 Node Cluster 15m=4000/1h=1200 契约对齐 |
 | capture | `app/api/capture.py` | Capture Snapshot 专用 API |
-| indicators | `app/api/indicators.py` | 策略指标实时计算；`bars` 最大 4000，与 bars API 及 Node Cluster 契约对齐 |
+| indicators | `app/api/indicators.py` | 策略指标实时计算；`bars` 最大 4000，与 bars API 及 Node Cluster 契约对齐；遍历 `StrategyLoader._registry`，当前仅含 `dsa_selector` 与 `watchlist_monitor`；`watchlist_monitor` 内部通过 `BollingerMonitor`/`VolumeNodeMonitor` 输出 `bb`/`volume_node` 图层 |
 | strategies | `app/api/strategies.py` | 策略目录/版本 |
 | strategy_runs | `app/api/strategy_runs.py` | 策略运行/结果 |
 | monitor_states | `app/api/monitor_states.py` | 监控状态 |

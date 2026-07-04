@@ -100,7 +100,7 @@ def _make_mock_version() -> MagicMock:
     version = MagicMock()
     version.id = uuid.uuid4()
     version.manifest = {
-        "strategy_id": "volume_node_monitor",
+        "strategy_id": "watchlist_monitor",
         "kind": "monitor",
         "version": "1.1.0",
         "parameters": [

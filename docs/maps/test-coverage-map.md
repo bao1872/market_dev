@@ -32,6 +32,9 @@
 | dsa-only fallback 到最新交易日 | `test_dsa_only_coverage_endpoint.py` |
 | bars API page_size 按 timeframe 限制（15m=4000, 1h=1200, 其他=1000） | `test_bars.py` |
 | indicators API `bars` 参数最大 4000 | `test_indicators_api.py` |
+| `StrategyLoader._registry` 仅含 `dsa_selector`/`watchlist_monitor`，旧 `bb_monitor`/`volume_node_monitor` 不再作为独立策略 key | `backend/app/services/indicator_service.py` 自测、`test_node_cluster_consistency.py`、`test_indicator_contract.py` |
+| manifests 目录仅含 `dsa_selector.yaml`/`watchlist_monitor.yaml` | `tests/verify_p0_fixes.py` |
+| 前端 VP 提取不再回退旧 `volume_node_monitor` key | `frontend/src/components/StrategyChart.tsx` |
 
 ## 3.5 自选股监控
 

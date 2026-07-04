@@ -42,7 +42,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.indicator_contract import INDICATOR_BARS
-from app.constants.strategy_keys import DSA_SELECTOR
+from app.constants.strategy_keys import DSA_SELECTOR, WATCHLIST_MONITOR
 from app.models.instrument import Instrument
 from app.repositories.bar_repository import (
     _get_adj_factor_df,
@@ -610,7 +610,10 @@ if __name__ == "__main__":
     assert hasattr(StrategyLoader, "_registry"), "StrategyLoader 应有 _registry"
     assert len(StrategyLoader._registry) > 0, "_registry 不应为空"
     assert DSA_SELECTOR in StrategyLoader._registry, f"应注册 {DSA_SELECTOR}"
-    assert "volume_node_monitor" in StrategyLoader._registry, "应注册 volume_node_monitor"
+    assert WATCHLIST_MONITOR in StrategyLoader._registry, f"应注册 {WATCHLIST_MONITOR}"
+    # 生产策略只有 dsa_selector / watchlist_monitor；旧 volume_node_monitor / bb_monitor 作为内部子模块
+    assert "volume_node_monitor" not in StrategyLoader._registry, "volume_node_monitor 不应再作为独立策略注册"
+    assert "bb_monitor" not in StrategyLoader._registry, "bb_monitor 不应再作为独立策略注册"
     print(f"StrategyLoader._registry={list(StrategyLoader._registry.keys())} ✓")
 
     # 3. 验证 MarketDataContext 字段

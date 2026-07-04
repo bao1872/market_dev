@@ -19,7 +19,8 @@
 |---|---|---|---|---|
 | access/auth | `api/auth.py`, `api/me.py`, `api/plans.py` | `access_control_service.py`, `plan_service.py`, `subscription_service.py` | `models/user.py`, `models/subscription.py`, `models/plan.py` | 权限修改必须覆盖 active/expired/admin |
 | market_data | `api/bars.py`, `api/market.py`, `api/calendar.py`, `api/instruments.py` | `market_data_aggregation_service.py`, `bars_coverage_service.py`, `calendar_seed.py` | bar/instrument/calendar models & repositories | 页面、指标、截图必须同源；覆盖率统一由 `BarsCoverageService` 计算 |
-| screening | `api/strategies.py`, `api/strategy_runs.py` | `strategy_batch_service.py`, strategy runtime | `strategy_*` models | 发布门禁关键模块 |
+| screening | `api/strategies.py`, `api/strategy_runs.py` | `strategy_batch_service.py`, strategy runtime | `strategy_*` models | 发布门禁关键模块；`StrategyLoader._registry` 仅注册 `dsa_selector` 与 `watchlist_monitor` |
+| indicators | `api/indicators.py` | `indicator_service.compute_all_indicators` | `StrategyLoader`, `StrategyRuntime` | `watchlist_monitor` 内部委托 `BollingerMonitor`/`VolumeNodeMonitor`；旧 `bb_monitor`/`volume_node_monitor` 不再作为独立策略 key 注册 |
 | watchlist | `api/watchlist.py` | watchlist service / limit logic / `MonitorSnapshotService` fallback | `user_watchlist_items` model | 到期权限和额度检查；无 MonitorState 或 payload 无效时 fallback，单只失败单行降级 |
 | monitoring | `api/monitor_states.py`, `api/strategy_events.py` | monitor scheduler/services, eligible user | monitor/evaluation/event models | 只处理 completed 1m Bar |
 | notifications | `api/notifications.py`, `api/stock_detail_feishu.py` | `outbox_relay.py`, `delivery_worker.py`, `stock_detail_feishu_service.py`, `channel_adapter.py`, `feishu_card_builder.py`, `message_builder.py` | notification/outbox/delivery models | 飞书、图文、重试；消息时间使用 `format_shanghai_datetime` |

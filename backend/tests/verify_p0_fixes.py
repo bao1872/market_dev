@@ -64,8 +64,8 @@ def test_strategy_assets_in_package() -> None:
 
         manifests = pkg_resources.files("app.strategy_assets.manifests")
         assert (manifests / "dsa_selector.yaml").is_file(), "dsa_selector.yaml 不存在"
-        assert (manifests / "bb_monitor.yaml").is_file(), "bb_monitor.yaml 不存在"
-        assert (manifests / "volume_node_monitor.yaml").is_file(), "volume_node_monitor.yaml 不存在"
+        assert (manifests / "watchlist_monitor.yaml").is_file(), "watchlist_monitor.yaml 不存在"
+        # BB/VN 已作为 watchlist_monitor 内部子模块，不再维护独立 manifest
         _record("P0-1 manifests YAML 文件存在", True)
 
         schemas = pkg_resources.files("app.strategy_assets.schemas")

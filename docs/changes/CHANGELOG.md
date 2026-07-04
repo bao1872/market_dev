@@ -2,6 +2,18 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-05 Phase G: 修复 indicators 旧 strategy_key 残留与 ALIGN-030 扫描证据
+
+- 生产部署后发现 `indicators` API 仍会触发 `volume_node_monitor`/`bb_monitor` 策略不存在的 warning/error
+- 从 `StrategyLoader._registry` 移除旧 key，统一用户可见策略为 `dsa_selector`/`watchlist_monitor`
+- 保留 `BollingerMonitor`/`VolumeNodeMonitor` 作为 `watchlist_monitor` 内部子模块（不删文件、不改算法）
+- 删除前端 `StrategyChart.tsx` 对 `volume_node_monitor` 的迁移期 fallback
+- 更新 `verify_p0_fixes.py` manifest 断言、`indicator_service.py` 自测断言、`test_node_cluster_consistency.py` mock strategy_id
+- 执行全市场只读扫描：5293 只 active 标的中 247 只日线 < 250 根，其中 97 只为北交所（92 开头）且日线为 0
+- 按扫描结果更新 ALIGN-030 为 PARTIAL/OPEN，不关闭
+- 同步更新 `docs/current/02-data-api-contracts.md`、`04-frontend-ux.md`、`code-doc-alignment.md`、`docs/maps/api-route-map.md`、`backend-module-map.md`、`test-coverage-map.md`
+- 新增 CHANGE-20260704-026
+
 ## 2026-07-04 Phase F: PR #11 部署后热修 bars/indicators page_size 上限
 
 - 生产验证发现 15m/1h 个股详情请求触发 422：`/api/v1/instruments/{id}/bars` page_size 上限 1000，`/api/v1/instruments/{id}/indicators` bars 上限 500
