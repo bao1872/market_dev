@@ -40,6 +40,9 @@ Node Cluster 算法
 
 - 以全量 active 股票 universe 为展示主表（`strategy_run_items`），DSA 指标为 LEFT JOIN 附加字段；
 - 默认无隐式筛选时显示全量股票（succeeded 有指标、skipped/failed 指标为空但仍显示）；
+- succeeded 行应正确显示 35 个 DSA 指标（如 `bb.position`、`bb.width`、`node.position` 等）；后端通过 `(run_id, instrument_id)` 关联 `strategy_results` 加载指标（因 `strategy_run_items.result_id` 当前未回填，见 ALIGN-033）；
+- skipped 行（reason_code=insufficient_history）显示股票代码和名称，指标列显示 "-"；
+- failed 行显示股票代码和名称，指标列显示 "-"，附带 reason_code/error_message；
 - 展示 source_total、filtered_total、成功、失败、跳过和覆盖率；
 - 批次不完整显示阻断，不伪装正常；
 - 行 key 使用 `instrumentId`（不依赖 `result_id`，skipped/failed 行也能选中加入自选）；

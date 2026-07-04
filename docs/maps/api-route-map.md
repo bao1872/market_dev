@@ -16,7 +16,7 @@
 | capture | `app/api/capture.py` | Capture Snapshot 专用 API |
 | indicators | `app/api/indicators.py` | 策略指标实时计算；`bars` 最大 4000，与 bars API 及 Node Cluster 契约对齐 |
 | strategies | `app/api/strategies.py` | 策略目录/版本 |
-| strategy_runs | `app/api/strategy_runs.py` | 策略运行/结果；`/strategy-runs/{run_id}/results` 以 `strategy_run_items` 为主表 LEFT JOIN `strategy_results` + `instruments`，返回全量 universe（含 succeeded/skipped/failed），新增 `item_status`/`reason_code`/`error_message` 字段 |
+| strategy_runs | `app/api/strategy_runs.py` | 策略运行/结果；`/strategy-runs/{run_id}/results` 以 `strategy_run_items` 为主表 LEFT JOIN `strategy_results` + `instruments`，返回全量 universe（含 succeeded/skipped/failed），新增 `item_status`/`reason_code`/`error_message` 字段。JOIN 策略：因 `strategy_run_items.result_id` 当前未回填（ALIGN-033 P2），统一改用 `(run_id, instrument_id)` 关联 `strategy_results`，包括 `selectinload` 替代批量加载、metric_filter 子查询、sort LEFT JOIN 三处 |
 | monitor_states | `app/api/monitor_states.py` | 监控状态 |
 | strategy_events | `app/api/strategy_events.py` | 策略事件 |
 | notifications | `app/api/notifications.py` | 消息与通知渠道 |
