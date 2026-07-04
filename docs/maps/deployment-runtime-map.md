@@ -33,6 +33,7 @@
 | WORKER_TYPE | 区分 worker 行为 |
 | CONFIG_FILE | 生产配置 |
 | POSTGRES_USER/PASSWORD/DB | PostgreSQL 容器 |
+| STRATEGY_RUN_TOTAL_TIMEOUT_SECONDS | worker-strategy-batch run 级总超时（默认 7200） |
 
 Secret 不写入文档示例，不回显日志。
 

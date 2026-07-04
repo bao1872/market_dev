@@ -19,6 +19,7 @@
 | computable 结果覆盖 | `test_strategy_batch.py` |
 | DSA benchmark | `backend/reports/dsa_benchmark_20260702.md` |
 | Node Cluster 输入 | `test_node_cluster_contract.py` |
+| run 级总超时可配置 / insufficient_history skipped / run_timeout_budget_exhausted / execute_run 保留 skipped_count | `test_strategy_batch_service.py` |
 
 ## 3. 行情聚合
 

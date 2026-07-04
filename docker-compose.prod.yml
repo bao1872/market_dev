@@ -184,6 +184,8 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       APP_ENV: production
       WORKER_TYPE: strategy_batch
+      # [StrategyBatchService] - run 级总超时，默认 7200 秒与 after_close_orchestrator 对齐
+      STRATEGY_RUN_TOTAL_TIMEOUT_SECONDS: ${STRATEGY_RUN_TOTAL_TIMEOUT_SECONDS:-7200}
       TZ: Asia/Shanghai
       CONFIG_FILE: /app/app/config.production.py
     depends_on:

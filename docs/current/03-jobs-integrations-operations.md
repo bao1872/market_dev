@@ -17,6 +17,8 @@
 
 统一 Worker 入口是 `backend/app/worker.py`。服务编排事实源是 `docker-compose.prod.yml`。
 
+worker-strategy-batch 的 run 级总超时由 STRATEGY_RUN_TOTAL_TIMEOUT_SECONDS 环境变量控制（默认 7200 秒，与 after_close_orchestrator._DSA_POLL_TIMEOUT_SECONDS 对齐）。run 级总超时耗尽后剩余 pending 项标记 failed/run_timeout_budget_exhausted。历史 bars 不足标的（< 60 根日线）在 create_batch_run 时标记 skipped/insufficient_history，不进入计算循环。
+
 ## 2. 调度语义
 
 - 日历刷新：约 02:00 Asia/Shanghai；

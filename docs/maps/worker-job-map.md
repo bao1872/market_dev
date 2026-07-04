@@ -8,7 +8,7 @@
 | worker-strategy-scheduler | strategy_scheduler | strategy_runs | 重复创建 run |
 | worker-calendar | calendar_scheduler | trading_calendar | 交易日错误导致调度错误 |
 | worker-monitor | monitor_scheduler | watchlist, monitor_evaluations, strategy_events, outbox | 未完成 Bar 触发正式事件；通知时间使用 `format_shanghai_datetime` |
-| worker-strategy-batch | strategy_batch | strategy_runs, strategy_results | 发布残缺结果 |
+| worker-strategy-batch | strategy_batch | strategy_runs, strategy_results | 发布残缺结果；run 级总超时 7200s（STRATEGY_RUN_TOTAL_TIMEOUT_SECONDS 可配置），历史不足标的标记 skipped/insufficient_history |
 | worker-outbox | outbox | outbox, message_deliveries | 资格过滤或渠道扩张错误 |
 | worker-delivery | delivery | message_deliveries, notification_channels | 假成功、吞错误 |
 | worker-after-close | after_close_orchestrator | scheduler_job_runs | 盘后链路断点恢复；覆盖率检查复用 `BarsCoverageService`；dsa-only 支持 fallback 到最新交易日 |
