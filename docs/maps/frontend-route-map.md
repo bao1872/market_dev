@@ -13,7 +13,7 @@
 | `/capture/stock/:symbol` | `CaptureStockPage` | Capture Token | 专用截图路由，不走 AppShell |
 | `/overview` | `IndexPage` | Subscriber/Admin | 服务总览 |
 | `/screener` | `ScreenerPage` | Subscriber/Admin | 趋势选股 |
-| `/watchlist` | `WatchlistPage` | Subscriber/Admin | 我的自选 |
+| `/watchlist` | `WatchlistPage` | Subscriber/Admin | 我的自选；页眉全局展示市场状态，桌面表格/移动卡片不显示每行状态栏，数据列可表头过滤，表格使用 `compact-table` 与趋势选股页对齐 |
 | `/stock/:symbol` | `StockDetailPage` | Subscriber/Admin | 个股详情；按 timeframe 请求对应根数，K 线通过 `mergeRealtimeQuoteIntoBars` 合并实时行情显示，1d 保留日期语义、intraday 使用 `quote.update_time` |
 | `/settings` | `SettingsPage` | Authenticated | 设置与通知渠道 |
 | `/messages` | `MessagesPage` | Authenticated | 历史消息 |

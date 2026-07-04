@@ -17,7 +17,7 @@ GET /api/v1/bars/health
     start_date: 起始日期（YYYY-MM-DD），可选
     end_date: 结束日期（YYYY-MM-DD），可选
     page: 页码（1-based，默认 1）
-    page_size: 每页大小（默认 100，最大 1000）
+    page_size: 每页大小（默认 100；15m 最大 4000，1h 最大 1200，其他最大 1000）
     include_realtime: 是否在交易时段内调用 Pytdx 补充最后一根 Bar（默认 true）
 
 响应头：
@@ -32,7 +32,6 @@ import logging
 import time
 import uuid
 from datetime import date, datetime, timedelta
-from datetime import time as dt_time
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -40,7 +39,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants.indicator_contract import INDICATOR_BARS
 from app.core.deps import get_db, require_roles
+from app.core.redis_client import get_redis
 from app.models.bar import Bar15Min, Bar60Min, BarDaily, BarMinute, BarMonthly, BarWeekly
 from app.schemas.bar import BarListResponse, BarResponse
 from app.services.market_data_aggregation_service import MarketDataAggregationService
@@ -55,7 +56,13 @@ _ALLOWED_TIMEFRAMES = {"1d", "15m", "1h", "1w", "1mo"}
 # 默认查询范围
 _DEFAULT_DAILY_LOOKBACK_DAYS = 5000  # 日线/周线/月线默认回看 5000 天（覆盖约 13 年，确保周线 ≥250 条）
 _DEFAULT_INTRADAY_LOOKBACK_DAYS = 180  # 15min/60min 默认回看 180 天（DB 实测 180 天 60min=460 根 > 320 根需求）
-_MAX_PAGE_SIZE = 1000
+# [Chart] - page_size 上限与 Node Cluster 契约对齐：15m 需要 4000 根，1h 需要 1200 根
+# 引用 indicator_contract 唯一真源，禁止散落硬编码 4000/1200
+_DEFAULT_PAGE_SIZE_LIMIT = 1000
+_PAGE_SIZE_LIMITS = {
+    "15m": INDICATOR_BARS["15m"],
+    "1h": INDICATOR_BARS["1h"],
+}
 
 
 def _parse_date_range(
@@ -174,7 +181,9 @@ async def get_bars(
     start_date: date | None = Query(None, description="起始日期 YYYY-MM-DD"),
     end_date: date | None = Query(None, description="结束日期 YYYY-MM-DD"),
     page: int = Query(1, ge=1, description="页码（1-based）"),
-    page_size: int = Query(100, ge=1, le=_MAX_PAGE_SIZE, description="每页大小"),
+    page_size: int = Query(
+        100, ge=1, le=max(_PAGE_SIZE_LIMITS.values()), description="每页大小（15m 最大 4000，1h 最大 1200，其他最大 1000）"
+    ),
     include_realtime: bool = Query(True, description="是否在交易时段内调用 Pytdx 补充最后一根 Bar"),
     session: AsyncSession = Depends(get_db),
     response: Response = None,
@@ -201,6 +210,12 @@ async def get_bars(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="adj 只支持 qfq 或 none",
+        )
+    max_page_size = _PAGE_SIZE_LIMITS.get(timeframe, _DEFAULT_PAGE_SIZE_LIMIT)
+    if page_size > max_page_size:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"timeframe={timeframe} 的 page_size 最大为 {max_page_size}",
         )
 
     logger.info(

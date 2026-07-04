@@ -1,7 +1,7 @@
 // [自选监控] - 移动端卡片列表
 // 职责：在窄屏下以卡片形式展示自选监控数据
 import type { WatchlistMonitorRow } from './types'
-import { MonitorStatusBadge, translateEventType } from './columns'
+import { translateEventType } from './columns'
 import { fmtNum, fmtPct, fmtChangePct, changePctColorClass } from './adapters'
 
 interface WatchlistMonitorCardProps {
@@ -34,7 +34,6 @@ function WatchlistMonitorCard({
           </div>
           <div className="symbol-sub">{row.symbol}</div>
         </div>
-        <MonitorStatusBadge status={row.monitor_status} />
       </div>
 
       <div className="watchlist-card-grid">

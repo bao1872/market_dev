@@ -183,6 +183,7 @@ button { cursor: pointer; }
 .watchlist-monitor-table-wrap { display: block; }
 .watchlist-monitor-cards-wrap { display: none; }
 .watchlist-cards { display: grid; gap: 10px; }
+.watchlist-global-status { display: inline-flex; margin-left: 10px; vertical-align: middle; }
 
 .selection-result-table-wrap { display: block; }
 .selection-result-cards-wrap { display: none; }
