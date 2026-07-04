@@ -26,6 +26,14 @@
 | DB 尾部补齐 | `test_market_data_aggregation_service.py`, `test_chart_bars_service.py` |
 | bars API DB-first | `test_bars_api_db_first.py` |
 | 指标服务同源 | `test_indicator_service.py` |
+| bars_daily 覆盖率统一口径 | `test_bars_coverage_service.py` |
+| dsa-only fallback 到最新交易日 | `test_dsa_only_coverage_endpoint.py` |
+
+## 3.5 自选股监控
+
+| 规则 | 测试 |
+|---|---|
+| monitor-status 无 MonitorState 时 fallback | `test_watchlist_monitor_status_fallback.py` |
 
 ## 4. 飞书与通知
 
@@ -36,6 +44,7 @@
 | 状态机 | `test_state_machine.py`, `test_stock_detail_feishu_status.py` |
 | beta admin 通知 | `test_beta_application_notifier.py` |
 | `_notify_monitor_status` 直接发送路径 | **无测试**（缺口，ALIGN-025） |
+| 飞书消息时间显示中国时区 | `test_feishu_timezone_format.py` |
 
 ## 5. 前端
 
@@ -43,6 +52,7 @@
 |---|---|
 | Capture 页面契约 | frontend contract capture tests |
 | TypeScript/lint/build | CI blocking jobs |
+| K 线合并实时行情 | `frontend/src/utils/__tests__/chart.test.ts` |
 
 ## 6. 文档和工程治理
 

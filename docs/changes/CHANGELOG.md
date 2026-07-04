@@ -2,6 +2,15 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-04 Phase E: 修复 4 个生产功能缺陷
+
+- 修复 DSA-only 覆盖率 0% 与系统概览 98% 口径不一致：新增 `BarsCoverageService` 统一三处重复 SQL，DSA-only 端点 fallback 到最新可用交易日
+- 修复个股详情 K 线图未合并实时行情：前端新增 `mergeRealtimeQuoteIntoBars`，区分 baseBars（指标用）与 displayBars（图表用）
+- 修复自选股监控列表空值：无 `MonitorState` 时通过 `MonitorSnapshotService` 只读 fallback 计算指标
+- 修复飞书消息时间显示 UTC/+0：统一使用 `format_shanghai_datetime` 输出 Asia/Shanghai 时区
+- 新增 5 个测试文件覆盖上述修复
+- 更新 `docs/current/02-data-api-contracts.md`、`03-jobs-integrations-operations.md`、`04-frontend-ux.md`、`05-testing-acceptance.md` 及相关 maps
+
 ## 2026-07-02 Phase D: 剩余 Alignment 缺口修复
 
 - 修复 ALIGN-019：`publish_run` 仅允许 `completed` 发布，拒绝 `partial_failed`
@@ -45,6 +54,7 @@
 | CHANGE-20260704-019 | 2026-07-04 | 新增生产 worker-watchdog 服务让 _recovery_watchdog_loop 在生产运行 | merged | `fix/worker-watchdog-production-service` | `b4b5918c23df2b21a1f54e0e81aaa323f287e150` | `67105c2` | `docker-compose.prod.yml`、`docs/current/03-jobs-integrations-operations.md`、`docs/maps/worker-job-map.md`、`docs/maps/deployment-runtime-map.md`、`docs/current/code-doc-alignment.md`、`docs/changes/CHANGELOG.md`、`docs/changes/records/CHANGE-20260704-019.md` |
 | CHANGE-20260704-020 | 2026-07-04 | 关闭 ALIGN-023：worker-watchdog 生产验证 stale running 清零 | merged | `chore/close-align-023-worker-watchdog` | `67105c2` | `30ddc8a` | `docs/current/code-doc-alignment.md`、`docs/current/03-jobs-integrations-operations.md`、`docs/changes/CHANGELOG.md`、`docs/changes/records/CHANGE-20260704-020.md` |
 | CHANGE-20260704-021 | 2026-07-04 | worker/notification/capture 边界审计 + 后续小 PR 拆分计划 | committed | `chore/boundary-audit-worker-notification-capture` | `30ddc8a` | 待合并后填写 | `docs/architecture-audits/AUDIT-20260704-worker-notification-capture-boundaries.md`、`docs/changes/CHANGELOG.md`、`docs/changes/records/CHANGE-20260704-021.md`、`docs/maps/worker-job-map.md`、`docs/maps/notification-flow-map.md`、`docs/maps/test-coverage-map.md`、`docs/current/code-doc-alignment.md` |
+| CHANGE-20260704-022 | 2026-07-04 | 修复 4 个生产功能缺陷：DSA-only 覆盖率口径、K 线实时行情合并、自选股监控 fallback、飞书消息中国时区 | committed | `fix/market-data-dsa-watchlist-feishu-timezone` | `4af271d` | 待提交后填写 | `backend/app/services/bars_coverage_service.py`、`backend/app/core/time.py`、`backend/app/api/admin_after_close.py`、`backend/app/api/watchlist.py`、`backend/app/services/after_close_orchestrator.py`、`backend/app/services/bars_scheduler_service.py`、`backend/app/services/message_builder.py`、`backend/app/services/monitor_batch_service.py`、`backend/app/services/notification_service.py`、`backend/app/services/stock_detail_feishu_service.py`、`backend/app/services/system_overview_service.py`、`frontend/src/utils/chart.ts`、`frontend/src/pages/StockDetailPage.tsx`、测试文件、docs |
 
 ## 规则
 

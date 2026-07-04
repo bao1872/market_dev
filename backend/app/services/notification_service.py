@@ -28,14 +28,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
-logger = logging.getLogger("notification_service")
-
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 import app.services.feishu_platform_app_adapter  # noqa: F401
+from app.core.time import format_shanghai_datetime
 from app.models.notification import (
     MessageDelivery,
     NotificationChannel,
@@ -46,6 +45,8 @@ from app.schemas.notification import (
     NotificationMessageDTO,
 )
 from app.services.channel_adapter import get_adapter
+
+logger = logging.getLogger("notification_service")
 
 
 class NotificationServiceError(ValueError):
@@ -1062,7 +1063,7 @@ async def test_channel(
         title="渠道测试消息",
         summary=f"渠道「{channel.display_name}」测试投递，此消息无需关注。",
         resource_refs={"channel_id": str(channel_id), "test": True},
-        data_time=datetime.now(UTC).isoformat(),
+        data_time=format_shanghai_datetime(),
     )
 
     delivery_result = await adapter.send(test_dto, channel.target_config)

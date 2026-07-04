@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -38,19 +39,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.strategy_keys import WATCHLIST_MONITOR
 from app.db import get_db
-from app.services.access_control_service import (
-    AccessContext,
-    require_active_subscription,
-    require_quota,
-)
-from app.services.calendar_service import is_trading_day_async
-from app.services.market_status_service import TRADING_SESSIONS, compute_market_session
 from app.models.instrument import Instrument
 from app.models.monitor_evaluation import MonitorEvaluation
 from app.models.monitor_state import MonitorState
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.strategy_event import StrategyEvent
-from app.models.user import User
 from app.models.watchlist import UserWatchlistItem
 from app.schemas.watchlist import (
     WatchlistAddRequest,
@@ -59,6 +52,16 @@ from app.schemas.watchlist import (
     WatchlistMonitorStatusItem,
     WatchlistMonitorStatusResponse,
 )
+from app.services.access_control_service import (
+    AccessContext,
+    require_active_subscription,
+    require_quota,
+)
+from app.services.calendar_service import is_trading_day_async
+from app.services.market_status_service import TRADING_SESSIONS, compute_market_session
+from app.services.monitor_snapshot_service import MonitorSnapshot, MonitorSnapshotService
+
+logger = logging.getLogger("watchlist_api")
 
 router = APIRouter(prefix="/watchlist", tags=["watchlist"])
 
@@ -199,6 +202,27 @@ def _flatten_node_metrics(metrics: dict | None) -> dict:
             flat[k] = v
 
     return flat
+
+
+def _snapshot_to_metrics(snapshot: MonitorSnapshot) -> dict:
+    """将 MonitorSnapshotService 输出映射为 _flatten_node_metrics 输入格式。
+
+    复用 MonitorSnapshotService 的计算结果，不复制 BB/VN 算法。
+    只读 fallback：不生成事件、不写 MonitorState。
+    """
+    return {
+        "current_price": snapshot.current_price,
+        "bb_upper": snapshot.range_upper,
+        "bb_mid": snapshot.range_center,
+        "bb_lower": snapshot.range_lower,
+        "upper_node": snapshot.upper_volume_zone,
+        "lower_node": snapshot.lower_volume_zone,
+        "poc_price": snapshot.most_traded_price,
+        "position_0_1": snapshot.range_position,
+        "previous_close": snapshot.previous_close,
+        "change_pct": snapshot.change_pct,
+        "_source": "fallback_snapshot",
+    }
 
 
 @router.get("", response_model=WatchlistListResponse)
@@ -477,8 +501,33 @@ async def get_watchlist_monitor_status(
             )
 
         # metrics 仍从 MonitorState.payload 获取（价格/指标数据），节点对象扁平化
-        metrics = _flatten_node_metrics(ms.payload) if ms is not None else None
-        updated_at = ms.updated_at if ms is not None else None
+        # [Bugfix] - 描述: MonitorState 不存在时，基于已有 daily/15m bars fallback 计算
+        # 复用 MonitorSnapshotService.get_snapshot（只读，不生成事件/不写 MonitorState）
+        if ms is not None:
+            metrics = _flatten_node_metrics(ms.payload)
+            updated_at = ms.updated_at
+        else:
+            try:
+                snapshot = await MonitorSnapshotService().get_snapshot(
+                    db, str(instrument.id), timeframe="1d"
+                )
+                metrics = _flatten_node_metrics(_snapshot_to_metrics(snapshot))
+            except Exception as exc:
+                # 不吞异常：记录上下文后 re-raise，便于定位 fallback 失败根因
+                logger.exception(
+                    "[watchlist.monitor-status] fallback 计算失败 instrument_id=%s: %s",
+                    instrument.id,
+                    exc,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail={
+                        "error": "MONITOR_STATUS_FALLBACK_FAILED",
+                        "instrument_id": str(instrument.id),
+                        "message": f"MonitorState 缺失且 fallback 计算失败: {exc}",
+                    },
+                ) from exc
+            updated_at = None
         latest_event = latest_event_map.get(instrument.id)
 
         response_items.append(

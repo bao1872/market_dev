@@ -32,6 +32,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.pytdx_adapter import get_pytdx_adapter
+from app.core.time import shanghai_business_date
 from app.db import AsyncSessionLocal
 from app.models.instrument import Instrument
 from app.repositories.bar_repository import (
@@ -99,7 +100,7 @@ class BarsSchedulerService:
     用法：
         # 每日增量更新
         service = BarsSchedulerService()
-        result = await service.refresh_all_instruments(date.today())
+        result = await service.refresh_all_instruments(shanghai_business_date())
 
         # 历史回补
         result = await service.backfill_all_instruments(date(2023, 1, 1))
@@ -370,35 +371,18 @@ class BarsSchedulerService:
         Returns:
             关联的 StrategyRun id，未触发时返回 None
         """
-        from sqlalchemy import func as sa_func
-
         from app.constants.strategy_keys import DSA_SELECTOR
-        from app.models.bar import BarDaily
         from app.services.job_run_event_service import append_event
         from app.services.strategy_batch_service import StrategyBatchService
 
         async def _do_check(db: AsyncSession) -> uuid.UUID | None:
-            # [BarsScheduler] - 分子也只算 A 股股票（JOIN instruments + stock_symbol_sql_filter）
-            # bars_daily 中可能残留指数/基金/ETF 的日线数据，必须过滤
-            daily_count_result = await db.execute(
-                select(sa_func.count(sa_func.distinct(BarDaily.instrument_id)))
-                .join(Instrument, BarDaily.instrument_id == Instrument.id)
-                .where(BarDaily.trade_date == trade_date)
-                .where(stock_symbol_sql_filter(Instrument))
-            )
-            covered = daily_count_result.scalar() or 0
+            # [BarsScheduler] - 复用 BarsCoverageService 统一 SQL，禁止复制覆盖率查询
+            from app.services.bars_coverage_service import BarsCoverageService
 
-            # 统计活跃标的数（仅 A 股股票，排除指数/基金/ETF）
-            # [BarsScheduler] - 分母口径与 _get_active_instruments 一致：
-            # 指数/基金/ETF 不写入 bars_daily，若计入分母会导致覆盖率永远卡在 75%
-            active_count_result = await db.execute(
-                select(sa_func.count(Instrument.id))
-                .where(Instrument.status == "active")
-                .where(stock_symbol_sql_filter(Instrument))
-            )
-            total = active_count_result.scalar() or 1
-
-            coverage = covered / total if total > 0 else 0.0
+            coverage_result = await BarsCoverageService.compute_daily_coverage(db, trade_date)
+            covered = coverage_result["covered"]
+            total = coverage_result["total"]
+            coverage = coverage_result["coverage"]
             logger.info(
                 "[BarsScheduler] 日线覆盖率: %d/%d = %.1f%%",
                 covered, total, coverage * 100,
@@ -620,7 +604,7 @@ class BarsSchedulerService:
             try:
                 # 日线使用日期范围接口，15min/60min 使用 count 接口
                 if period == "d":
-                    end_date = date.today()
+                    end_date = shanghai_business_date()
                     if start_date is not None:
                         # 回补模式：使用 start_date 参数控制日线回补范围
                         actual_start = start_date

@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -193,33 +192,54 @@ async def create_dsa_only_run_endpoint(
     Raises:
         HTTPException 409: 当日日线覆盖率不足
     """
+    from app.core.time import shanghai_business_date
     from app.services.after_close_orchestrator import (
         _parse_metadata,
         _update_orchestrator_status,
-        compute_daily_coverage,
     )
+    from app.services.bars_coverage_service import BarsCoverageService
 
-    trade_date = _parse_trade_date(payload.trade_date)
+    requested_date = _parse_trade_date(payload.trade_date)
+    today = shanghai_business_date()
 
-    # [AfterClose] - 描述: dsa-only 仅允许今日及未来日期，拒绝历史日期
-    if trade_date < date.today():
+    # [AfterClose] - 描述: dsa-only 拒绝未来日期（不允许重算未发生的交易日）
+    if requested_date > today:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"dsa-only 拒绝历史日期: trade_date={trade_date.isoformat()}",
+            detail=f"dsa-only 拒绝未来日期: trade_date={requested_date.isoformat()}",
         )
 
+    # [Bugfix] - 描述: dsa-only 与系统概览覆盖率口径对齐
+    # 原逻辑：用前端传入的 trade_date（=today）精确匹配，今日未回补时覆盖率 0%
+    # 修复：若请求日期当日无数据，fallback 到最新已落盘交易日（与系统概览一致）
+    latest_available = await BarsCoverageService.get_latest_trade_date(db)
+    if latest_available is not None and requested_date > latest_available:
+        # 请求日期 > 最新可用日（今日未回补），用最新可用日
+        trade_date = latest_available
+        logger.info(
+            "[dsa-only] 请求日期 %s 当日无数据，fallback 到最新可用日 %s",
+            requested_date, trade_date,
+        )
+    else:
+        trade_date = requested_date
+
     # [Phase6] - 计算当日日线覆盖率（纯查询，不触发 DSA）
-    covered, total, coverage = await compute_daily_coverage(db, trade_date)
+    coverage_result = await BarsCoverageService.compute_daily_coverage(db, trade_date)
+    covered = coverage_result["covered"]
+    total = coverage_result["total"]
+    coverage = coverage_result["coverage"]
     if coverage < _DSA_ONLY_COVERAGE_THRESHOLD:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
                 "reason": "DATA_COVERAGE_INSUFFICIENT",
-                "trade_date": trade_date.isoformat(),
+                "trade_date": coverage_result["trade_date"],
+                "requested_trade_date": requested_date.isoformat(),
                 "daily_coverage": coverage,
                 "daily_covered": covered,
                 "daily_total": total,
                 "threshold": _DSA_ONLY_COVERAGE_THRESHOLD,
+                "source": coverage_result["source"],
                 "message": f"当日日线覆盖率不足: {coverage:.1%} < {_DSA_ONLY_COVERAGE_THRESHOLD:.0%}",
             },
         )

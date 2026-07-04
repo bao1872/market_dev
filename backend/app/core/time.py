@@ -43,9 +43,27 @@ def to_shanghai_iso(value: datetime) -> str:
     return value.astimezone(SHANGHAI_TZ).isoformat()
 
 
+def format_shanghai_datetime(
+    value: datetime | None = None,
+    fmt: str = "%Y-%m-%d %H:%M:%S CST",
+) -> str:
+    """将 datetime 格式化为 Asia/Shanghai 人类可读字符串。
+
+    - value 为 None 时使用当前上海时间；
+    - 无 tzinfo 的 datetime 视为 UTC 转换；
+    - 默认格式：2026-07-04 09:31:00 CST。
+    """
+    if value is None:
+        value = now_shanghai()
+    elif value.tzinfo is None:
+        value = value.replace(tzinfo=UTC_TZ)
+    return value.astimezone(SHANGHAI_TZ).strftime(fmt)
+
+
 if __name__ == "__main__":
     print(f"now_utc: {now_utc()}")
     print(f"now_shanghai: {now_shanghai()}")
     print(f"shanghai_business_date: {shanghai_business_date()}")
     print(f"to_shanghai_iso: {to_shanghai_iso(now_utc())}")
+    print(f"format_shanghai_datetime: {format_shanghai_datetime()}")
     print("OK")

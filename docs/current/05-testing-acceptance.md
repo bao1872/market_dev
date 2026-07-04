@@ -24,6 +24,14 @@
 - 飞书：文字图片成功、partial_failed、仅重试图片、不重复文字、所有权；
 - 管理任务：真实 API、审计日志、run key、heartbeat、lease、stale recovery、Worker Git SHA。
 
+## 3.1 本轮新增回归
+
+- `BarsCoverageService` 统一 A 股口径，排除指数/ETF，默认使用 `shanghai_business_date`；
+- `/admin/after-close-runs/dsa-only` 当日无数据时 fallback 到最新交易日，覆盖率不足返回 409；
+- `/watchlist/monitor-status` 无 `MonitorState` 时通过 `MonitorSnapshotService` fallback 返回指标；
+- 飞书消息时间统一格式化为 Asia/Shanghai，文本中触发时间显示 CST；
+- 前端 `mergeRealtimeQuoteIntoBars` 不修改原数组、仅更新显示用最后一根 K 线。
+
 ## 4. CI 门禁
 
 阻断项：

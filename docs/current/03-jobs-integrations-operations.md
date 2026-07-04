@@ -26,6 +26,8 @@
 - Outbox/Delivery：短轮询；
 - Worker 心跳：持续更新。
 
+行情调度与盘后编排中的覆盖率检查统一复用 `BarsCoverageService`，禁止复制 SQL。`worker-bars-scheduler` 与 `worker-after-close` 均以 `shanghai_business_date()` 作为业务日期，避免服务器时区偏差。`/admin/after-close-runs/dsa-only` 在当日无数据时 fallback 到最新可用交易日再校验覆盖率。
+
 ## 3. 任务状态与可观察性
 
 重要任务必须记录：

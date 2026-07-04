@@ -18,7 +18,7 @@ import type { ChartViewport } from '@/components/chartViewport'
 import type { IndicatorResponse } from '@/api/endpoints'
 import { formatShanghaiTimeShort } from '@/utils/datetime'
 import { MARKET_LABELS, formatAmount } from '@/utils/market'
-import { mapBarsToBarData } from '@/utils/chart'
+import { mapBarsToBarData, mergeRealtimeQuoteIntoBars } from '@/utils/chart'
 import {
   useInstrumentBySymbol,
   useBars,
@@ -190,7 +190,13 @@ export default function StockDetailPage() {
   }, [instrumentId, watchlistQuery.data])
 
   // 转换 Bar 数据为 StrategyChart 需要的 BarData 格式
-  const bars = useMemo(() => mapBarsToBarData(barsQuery.data?.items), [barsQuery.data])
+  // baseBars 用于 indicators 计算（不污染指标）
+  // displayBars 合并实时行情，仅用于图表显示
+  const baseBars = useMemo(() => mapBarsToBarData(barsQuery.data?.items), [barsQuery.data])
+  const displayBars = useMemo(
+    () => mergeRealtimeQuoteIntoBars(baseBars, quoteQuery.data),
+    [baseBars, quoteQuery.data],
+  )
 
   // 转换策略事件为 StrategyChart 需要的 ChartEvent 格式
   const events: ChartEvent[] = useMemo(() => {
@@ -219,7 +225,7 @@ export default function StockDetailPage() {
   // 加载状态：股票信息加载中
   const isInstrumentLoading = instrumentQuery.isLoading
   // 行情数据加载中（首次加载且无缓存数据）
-  const isBarsLoading = !!instrumentId && barsQuery.isLoading && bars.length === 0
+  const isBarsLoading = !!instrumentId && barsQuery.isLoading && baseBars.length === 0
 
   // 截图模式：股票信息 + K线 + 指标加载成功后标记可渲染
   // [advice.md] 事件历史加载失败不应阻止截图（事件仅用于图表标注，非截图必要条件）
@@ -686,7 +692,7 @@ export default function StockDetailPage() {
               {/* StrategyChart 内部渲染：工具栏 + 策略图示区 + 画布区 */}
               <StrategyChart
                 symbol={inst.symbol}
-                bars={bars}
+                bars={displayBars}
                 events={events}
                 indicators={indicators}
                 strategyId={strategyDef.id}
