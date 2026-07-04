@@ -103,8 +103,10 @@ class StrategyResultResponse(BaseModel):
     instrument_name: str | None = Field(None, description="股票名称")
     instrument_market: str | None = Field(None, description="市场（SH/SZ/BJ）")
     # [StrategyRunItem] - 全量 universe 展示新增字段
+    # 默认 "succeeded"：从 StrategyResult ORM 构建时自动填充，后续被 row.item_status 覆盖
     item_status: str = Field(
-        ..., description="item 状态: pending/running/succeeded/failed/skipped"
+        default="succeeded",
+        description="item 状态: pending/running/succeeded/failed/skipped",
     )
     reason_code: str | None = Field(None, description="跳过/失败原因代码")
     error_message: str | None = Field(None, description="失败错误信息")
