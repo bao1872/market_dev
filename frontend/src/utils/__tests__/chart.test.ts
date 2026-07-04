@@ -54,26 +54,68 @@ test('mergeRealtimeQuoteIntoBars: 空数组或无 quote 时原样返回', () => 
   )
 })
 
-// ===== 3. mergeRealtimeQuoteIntoBars：价格合并逻辑 =====
-test('mergeRealtimeQuoteIntoBars: 将最新价合并到最后一根 K 线', () => {
+// ===== 3. mergeRealtimeQuoteIntoBars：1d 保留日期语义 =====
+test('mergeRealtimeQuoteIntoBars: 1d 保留日期语义，不改成 intraday timestamp', () => {
   const bars = [
     { time: '2026-06-23', open: 10, high: 11, low: 9, close: 10.5, volume: 100 },
     { time: '2026-06-24', open: 10.5, high: 11, low: 10, close: 10.8, volume: 200 },
   ]
 
   const quote = { current_price: 11.5, update_time: '2026-06-24T15:00:00' }
+  // 默认 timeframe='1d'
   const merged = mergeRealtimeQuoteIntoBars(bars as any, quote as any)
 
   assert.equal(merged.length, 2)
   // 前一根不变
   assert.deepEqual(merged[0], bars[0])
-  // 最后一根更新 close/high/time，low 保持不变
+  // 最后一根更新 close/high/low，但 1d 保留原日期
+  assert.equal(merged[1].time, '2026-06-24')
+  assert.equal(merged[1].close, 11.5)
+  assert.equal(merged[1].high, 11.5)
+  assert.equal(merged[1].low, 10)
+  assert.equal(merged[1].open, 10.5)
+  assert.equal(merged[1].volume, 200)
+})
+
+// ===== 3b. mergeRealtimeQuoteIntoBars：intraday 使用 quote.update_time =====
+test('mergeRealtimeQuoteIntoBars: 15m 使用 quote.update_time 更新最后一根时间', () => {
+  const bars = [
+    { time: '2026-06-23', open: 10, high: 11, low: 9, close: 10.5, volume: 100 },
+    { time: '2026-06-24T10:30:00', open: 10.5, high: 11, low: 10, close: 10.8, volume: 200 },
+  ]
+
+  const quote = { current_price: 11.5, update_time: '2026-06-24T15:00:00' }
+  const merged = mergeRealtimeQuoteIntoBars(bars as any, quote as any, '15m')
+
+  assert.equal(merged.length, 2)
+  assert.deepEqual(merged[0], bars[0])
   assert.equal(merged[1].time, '2026-06-24T15:00:00')
   assert.equal(merged[1].close, 11.5)
   assert.equal(merged[1].high, 11.5)
   assert.equal(merged[1].low, 10)
   assert.equal(merged[1].open, 10.5)
   assert.equal(merged[1].volume, 200)
+})
+
+// ===== 3c. mergeRealtimeQuoteIntoBars：1d 跨日追加实时 bar =====
+test('mergeRealtimeQuoteIntoBars: 1d 跨日时追加新实时 bar', () => {
+  const bars = [
+    { time: '2026-06-23', open: 10, high: 11, low: 9, close: 10.5, volume: 100 },
+    { time: '2026-06-24', open: 10.5, high: 11, low: 10, close: 10.8, volume: 200 },
+  ]
+
+  const quote = { current_price: 11.5, update_time: '2026-06-25T10:30:00' }
+  const merged = mergeRealtimeQuoteIntoBars(bars as any, quote as any, '1d')
+
+  assert.equal(merged.length, 3)
+  assert.deepEqual(merged[0], bars[0])
+  assert.deepEqual(merged[1], bars[1])
+  assert.equal(merged[2].time, '2026-06-25')
+  assert.equal(merged[2].open, 10.8)
+  assert.equal(merged[2].close, 11.5)
+  assert.equal(merged[2].high, 11.5)
+  assert.equal(merged[2].low, 10.8)
+  assert.equal(merged[2].volume, 0)
 })
 
 // ===== 4. mergeRealtimeQuoteIntoBars：低价更新 low/high =====

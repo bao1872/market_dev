@@ -56,7 +56,8 @@ Node Cluster 算法
 - 展示 as_of、数据源、partial、degraded；
 - DSA 与 Node 图层可开关；
 - 截图区设置 render-ready 标志；
-- 实时报价通过 `mergeRealtimeQuoteIntoBars` 合并到最后一根 K 线用于显示（更新 close/high/low/time），`baseBars` 仍用于指标计算，避免污染算法输入；
+- 按 timeframe 请求对应根数（1d=250、15m=4000、1h=1200、1w=260、1mo=120、1m=2），与 Node Cluster / indicator_contract 对齐；
+- 实时报价通过 `mergeRealtimeQuoteIntoBars` 合并到最后一根 K 线用于显示：1d 保留日期语义并跨日追加实时 bar，intraday（15m/1h 等）使用 `quote.update_time`；`baseBars` 仍用于指标计算，避免污染算法输入；
 - 顶部报价条优先使用实时报价，fallback 到最后一根 bar。
 
 ### 消息与飞书

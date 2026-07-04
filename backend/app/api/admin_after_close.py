@@ -228,7 +228,9 @@ async def create_dsa_only_run_endpoint(
     covered = coverage_result["covered"]
     total = coverage_result["total"]
     coverage = coverage_result["coverage"]
-    if coverage < _DSA_ONLY_COVERAGE_THRESHOLD:
+    coverage_raw = coverage_result["coverage_raw"]
+    # 覆盖率门禁使用原始值，避免四舍五入边缘误判
+    if coverage_raw < _DSA_ONLY_COVERAGE_THRESHOLD:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={

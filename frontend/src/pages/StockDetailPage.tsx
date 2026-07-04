@@ -87,18 +87,30 @@ export default function StockDetailPage() {
   const instrumentQuery = useInstrumentBySymbol(symbol)
   const instrumentId = instrumentQuery.data?.id
 
-  // 数据查询：K 线行情（依赖 instrumentId，前复权，与 indicators 的 bars=250 对齐避免数据范围不匹配）
+  // [Chart] - 按 timeframe 请求对应根数，与 Node Cluster / indicator_contract 对齐
+  // 1d=250, 15m=4000, 1h=1200, 1w=260, 1mo=120, 1m=2
+  const barsCountByTimeframe: Record<string, number> = {
+    '1d': 250,
+    '15m': 4000,
+    '1h': 1200,
+    '1w': 260,
+    '1mo': 120,
+    '1m': 2,
+  }
+  const barsCount = barsCountByTimeframe[timeframe] ?? 250
+
+  // 数据查询：K 线行情（依赖 instrumentId，前复权，与 indicators 的 bars 对齐避免数据范围不匹配）
   const barsQuery = useBars(instrumentId, {
     timeframe,
     adj: 'qfq',
-    page_size: 250,
+    page_size: barsCount,
   })
 
-  // 数据查询：策略图表指标（依赖 instrumentId，与 bars 同 timeframe/adj，拉取最近 250 根 bar 的指标）
+  // 数据查询：策略图表指标（依赖 instrumentId，与 bars 同 timeframe/adj，拉取相同根数的指标）
   const indicatorsQuery = useIndicators(instrumentId, {
     timeframe,
     adj: 'qfq',
-    bars: 250,
+    bars: barsCount,
   })
   const indicators: IndicatorResponse | undefined = indicatorsQuery.data
 
@@ -194,8 +206,8 @@ export default function StockDetailPage() {
   // displayBars 合并实时行情，仅用于图表显示
   const baseBars = useMemo(() => mapBarsToBarData(barsQuery.data?.items), [barsQuery.data])
   const displayBars = useMemo(
-    () => mergeRealtimeQuoteIntoBars(baseBars, quoteQuery.data),
-    [baseBars, quoteQuery.data],
+    () => mergeRealtimeQuoteIntoBars(baseBars, quoteQuery.data, timeframe),
+    [baseBars, quoteQuery.data, timeframe],
   )
 
   // 转换策略事件为 StrategyChart 需要的 ChartEvent 格式

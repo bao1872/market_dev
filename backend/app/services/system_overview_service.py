@@ -991,10 +991,15 @@ async def _compute_waiting_dsa_reason(
         coverage_date = business_date_obj
         if latest_daily_trade_date is not None:
             coverage_date = latest_daily_trade_date
-        coverage = await _compute_bars_coverage(db, coverage_date)
-        if coverage is not None and coverage < WAITING_DSA_COVERAGE_THRESHOLD:
-            reason = WAITING_DSA_REASON_DATA_COVERAGE_INSUFFICIENT
-            return reason, WAITING_DSA_SUGGESTIONS[reason]
+        # 覆盖率门禁使用原始值，避免四舍五入边缘误判
+        from app.services.bars_coverage_service import BarsCoverageService
+
+        coverage_result = await BarsCoverageService.compute_daily_coverage(db, coverage_date)
+        if coverage_result["total"] > 0:
+            coverage_raw = coverage_result["coverage_raw"]
+            if coverage_raw < WAITING_DSA_COVERAGE_THRESHOLD:
+                reason = WAITING_DSA_REASON_DATA_COVERAGE_INSUFFICIENT
+                return reason, WAITING_DSA_SUGGESTIONS[reason]
 
         # 1b. 检查 selector 策略是否有 released 版本
         has_released = await _has_released_selector_version(db)

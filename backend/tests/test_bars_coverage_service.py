@@ -81,13 +81,14 @@ async def test_compute_daily_coverage_counts_only_a_stocks(db_session):
 
     result = await BarsCoverageService.compute_daily_coverage(db_session, TEST_DATE)
 
-    assert set(result.keys()) == {"trade_date", "covered", "total", "coverage", "source"}
+    assert set(result.keys()) == {"trade_date", "covered", "total", "coverage", "coverage_raw", "source"}
     assert result["trade_date"] == TEST_DATE.isoformat()
     # 分子应只含 2 只股票，不含指数
     assert result["covered"] == 2
     # 分母应只含 2 只股票，不含指数/ETF
     assert result["total"] == 2
     assert result["coverage"] == 1.0
+    assert result["coverage_raw"] == 1.0
     assert result["source"] == "bars_daily"
 
 
@@ -109,6 +110,45 @@ async def test_compute_daily_coverage_default_trade_date(db_session):
     assert result["covered"] == 1
     assert result["total"] == 1
     assert result["coverage"] == 1.0
+    assert result["coverage_raw"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_coverage_raw_used_for_threshold_not_rounded_value(db_session):
+    """阈值判断应使用 coverage_raw，round 后的 coverage 仅用于展示。"""
+    stock = _a_stock("600000", "SH")
+    db_session.add(stock)
+    await db_session.flush()
+
+    # 清理旧 bar
+    from sqlalchemy import delete
+    await db_session.execute(delete(BarDaily).where(BarDaily.instrument_id == stock.id))
+    await db_session.flush()
+
+    # 只写入 1 根日线，total=1，covered=1，coverage_raw=1.0
+    await _add_bar_daily(db_session, stock.id, TEST_DATE)
+    result = await BarsCoverageService.compute_daily_coverage(db_session, TEST_DATE)
+    assert result["coverage_raw"] == 1.0
+    assert result["coverage"] == 1.0
+
+    # 关键验证：coverage_raw 与 coverage 的关系——coverage 是 coverage_raw 的 round(..., 4)
+    # 通过 mock covered/total 为 0.949999 验证 round 后可能改变阈值判断
+    with patch.object(
+        BarsCoverageService,
+        "compute_daily_coverage",
+        return_value={
+            "trade_date": TEST_DATE.isoformat(),
+            "covered": 95,
+            "total": 100,
+            "coverage": 0.95,  # round(0.94999, 4) 可能显示为 0.95
+            "coverage_raw": 0.94999,
+            "source": "bars_daily",
+        },
+    ):
+        mocked = await BarsCoverageService.compute_daily_coverage(db_session, TEST_DATE)
+        # 阈值判断应使用原始值，不应使用 round 后的 coverage
+        assert mocked["coverage_raw"] < 0.95
+        assert mocked["coverage"] == 0.95
 
 
 @pytest.mark.asyncio

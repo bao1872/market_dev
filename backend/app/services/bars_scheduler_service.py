@@ -383,9 +383,10 @@ class BarsSchedulerService:
             covered = coverage_result["covered"]
             total = coverage_result["total"]
             coverage = coverage_result["coverage"]
+            coverage_raw = coverage_result["coverage_raw"]
             logger.info(
-                "[BarsScheduler] 日线覆盖率: %d/%d = %.1f%%",
-                covered, total, coverage * 100,
+                "[BarsScheduler] 日线覆盖率: %d/%d = %.1f%% (raw=%.6f)",
+                covered, total, coverage * 100, coverage_raw,
             )
 
             # [JobRunEvent] - 填充 BatchResult 覆盖率字段（供调用方写 DAILY_DONE 事件）
@@ -394,7 +395,8 @@ class BarsSchedulerService:
                 result.daily_total = total
                 result.daily_coverage = coverage
 
-            if coverage < 0.9:
+            # 覆盖率门禁使用原始值，避免四舍五入边缘误判
+            if coverage_raw < 0.9:
                 # [BarsScheduler] - 覆盖率不足阈值，写 COVERAGE_INSUFFICIENT warn 事件
                 logger.warning(
                     "[BarsScheduler] 日线覆盖率不足 %.1f%%（covered=%d/total=%d），暂不触发 DSA",

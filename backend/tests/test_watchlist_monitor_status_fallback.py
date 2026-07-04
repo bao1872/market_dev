@@ -1,14 +1,15 @@
 """自选股监控列表 fallback 测试。
 
 覆盖：
-- 当 MonitorState 不存在时，monitor-status 端点通过 MonitorSnapshotService 只读计算 fallback 指标
-- fallback 失败时返回 500 并携带 MONITOR_STATUS_FALLBACK_FAILED 错误码
-- 已有 MonitorState 时仍优先使用 MonitorState.payload
+- 当 MonitorState 不存在或 payload 无效时，monitor-status 端点通过 MonitorSnapshotService 只读计算 fallback 指标
+- fallback 失败时单行降级（error_code=FALLBACK_FAILED），不阻断整个自选列表
+- 已有有效 MonitorState 时仍优先使用 MonitorState.payload
+- 多只自选中单只 fallback 失败不影响其他行
 
 测试策略：
 - 使用 conftest client fixture + 认证用户覆盖
 - mock is_trading_day_async 固定交易日
-- mock MonitorSnapshotService.get_snapshot 返回可控快照
+- mock MonitorSnapshotService.get_snapshot 返回可控快照或异常
 """
 
 from __future__ import annotations
@@ -161,10 +162,10 @@ async def test_monitor_status_fallback_when_no_monitor_state(
 
 
 @pytest.mark.asyncio
-async def test_monitor_status_fallback_failure_returns_500(
+async def test_monitor_status_fallback_failure_single_row_degraded(
     db_session, monitor_user, client
 ):
-    """fallback 计算失败时返回 500 并携带明确错误码。"""
+    """fallback 计算失败时单行降级，整体列表仍返回 200。"""
     user, instrument = monitor_user
     _version = await _create_watchlist_monitor_version(db_session)
 
@@ -179,11 +180,13 @@ async def test_monitor_status_fallback_failure_returns_500(
     ):
         response = await client.get("/watchlist/monitor-status")
 
-    assert response.status_code == 500, f"响应体: {response.text}"
-    detail = response.json()["detail"]
-    assert detail["error"] == "MONITOR_STATUS_FALLBACK_FAILED"
-    assert detail["instrument_id"] == str(instrument.id)
-    assert "指标计算失败" in detail["message"]
+    assert response.status_code == 200, f"响应体: {response.text}"
+    data = response.json()
+    assert len(data["items"]) == 1
+    item = data["items"][0]
+    assert item["instrument_id"] == str(instrument.id)
+    assert item["metrics"] == {}
+    assert item["error_code"] == "FALLBACK_FAILED"
 
 
 @pytest.mark.asyncio
@@ -233,3 +236,43 @@ async def test_monitor_status_uses_monitor_state_when_present(
     assert item["metrics"]["current_price"] == 1800.0
     assert item["metrics"]["bb_upper"] == 1900.0
     assert "_source" not in item["metrics"]
+
+
+@pytest.mark.asyncio
+async def test_monitor_status_fallback_when_payload_empty(
+    db_session, monitor_user, client
+):
+    """MonitorState 存在但 payload 为空/关键字段缺失时，应触发 fallback。"""
+    user, instrument = monitor_user
+    version = await _create_watchlist_monitor_version(db_session)
+
+    db_session.add(
+        MonitorState(
+            strategy_version_id=version.id,
+            instrument_id=instrument.id,
+            bar_time=datetime.now(UTC),
+            calculation_id="calc_test_002",
+            state_schema_version=1,
+            payload={},
+        )
+    )
+    await db_session.flush()
+
+    snapshot = _make_snapshot(instrument.id)
+
+    with patch(
+        "app.api.watchlist.is_trading_day_async",
+        new_callable=AsyncMock,
+        return_value=True,
+    ), patch(
+        "app.api.watchlist.MonitorSnapshotService.get_snapshot",
+        new_callable=AsyncMock,
+        return_value=snapshot,
+    ) as mock_snapshot:
+        response = await client.get("/watchlist/monitor-status")
+
+    assert response.status_code == 200, f"响应体: {response.text}"
+    mock_snapshot.assert_awaited_once()
+    item = response.json()["items"][0]
+    assert item["metrics"]["_source"] == "fallback_snapshot"
+    assert item["metrics"]["current_price"] == 1500.0

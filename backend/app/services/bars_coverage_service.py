@@ -72,7 +72,8 @@ class BarsCoverageService:
         - trade_date 为 None 时使用 shanghai_business_date()；
         - covered = 当日 bars_daily 不同 instrument_id 数（仅 A 股）；
         - total = instruments 中 status='active' 且为 A 股股票的标的数；
-        - coverage = covered / total（total=0 时返 0.0）；
+        - coverage = covered / total（total=0 时返 0.0），已 round(..., 4)，仅用于展示；
+        - coverage_raw = covered / total 原始值，供阈值/门禁判断使用，避免四舍五入边缘误判；
         - source = "bars_daily"。
 
         Args:
@@ -80,7 +81,7 @@ class BarsCoverageService:
             trade_date: 交易日期，None 时使用当前上海业务日期
 
         Returns:
-            {trade_date, covered, total, coverage, source}
+            {trade_date, covered, total, coverage, coverage_raw, source}
         """
         if trade_date is None:
             trade_date = shanghai_business_date()
@@ -115,6 +116,7 @@ class BarsCoverageService:
             "covered": covered,
             "total": total,
             "coverage": round(coverage, 4),
+            "coverage_raw": coverage,
             "source": "bars_daily",
         }
 
