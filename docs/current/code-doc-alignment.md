@@ -11,7 +11,8 @@
 | ALIGN-015 | 服务健康与业务能力 | CORE_ONLY 不包含 capture/outbox/delivery；服务不全会造成业务部分可用 | 部署能力与业务功能匹配；服务不可用时不假成功 | P1 |
 | ALIGN-021 | Ruff/Mypy 历史债务 | 全仓 Ruff/Mypy Full Report 仍有历史债务，非阻断展示 | 独立债务分支清零，再改为完全阻断 | P2 |
 | ALIGN-025 | `_notify_monitor_status` 绕过 Outbox | `worker.py:1087-1191` 直接调用 `adapter.send()` 绕过 Outbox/Delivery Worker，缺少重试/幂等/静默时段规避/可查询状态；代码 TODO 已标记，待产品决策（降级路径 vs 一致性） | 待产品决策后确定目标状态 | P2 |
-| ALIGN-030 | 部分标的历史 bars 覆盖不足 | 生产 DB 中 `000001` 仅 5 根日线、66 根 15m（约 6 个交易日），导致个股详情 K 线显示最近几天；`600519`/`300750` 日线 846 根、15m 约 8000 根数据充足。2026-07-04 已对 `000100`（TCL科技）执行单标回补：日线 846 根、15m 8000 根、60m 2000 根，API `page_size=4000` 可正常返回 4000 根。全市场仍有约 81 只 active 标的日线 < 50 根，需后续统一回补决策 | 完成全市场历史行情回补，或明确排除/标记该类标的；所有页面显示标的需满足 Node Cluster 最小输入 | P1 |
+| ALIGN-030 | 部分标的历史 bars 覆盖不足 | 生产 DB 中 `000001` 仅 5 根日线、66 根 15m（约 6 个交易日），导致个股详情 K 线显示最近几天；`600519`/`300750` 日线 846 根、15m 约 8000 根数据充足。2026-07-04 已对 `000100`（TCL科技）执行单标回补：日线 846 根、15m 8000 根、60m 2000 根，API `page_size=4000` 可正常返回 4000 根。全市场仍有约 81 只 active 标的日线 < 50 根，需后续统一回补决策。2026-07-04 全市场约 187 只 active 标的日线 < 60 根（BSE_920 97 只、主板 85 只、其他 5 只），已通过 _DSA_MIN_HISTORY_BARS=60 前置分类为 skipped/insufficient_history | 完成全市场历史行情回补，或明确排除/标记该类标的；所有页面显示标的需满足 Node Cluster 最小输入 | P1 |
+| ALIGN-031 | DSA-only 大量 failed | 1881 只 failed 全部 reason_code=timeout，根因为 run 级总超时 600s 与编排层 7200s 冲突；historical bars 不足标的未前置分类；execute_run 覆盖 skipped_count | 修复后需生产验证 failed_count 大幅下降 | P1 |
 
 ## CLOSED 摘要
 

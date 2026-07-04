@@ -13,6 +13,10 @@
 
 partial 实时 Bar 不写入完成 Bar 表，只存在于请求快照或短缓存。
 
+strategy_run_items.reason_code 标准编码：
+- failed: timeout（单股超时）、runtime_error、data_error、run_timeout_budget_exhausted（run 级总超时预算耗尽）
+- skipped: insufficient_data、insufficient_history（历史日线 < 60 根）、suspended、delisted、new_listing
+
 ## 2. 权限契约
 
 | API 类型 | 有效会员 | 到期/无订阅 | Admin |

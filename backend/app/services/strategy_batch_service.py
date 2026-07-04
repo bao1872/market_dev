@@ -185,16 +185,24 @@ class StrategyBatchService:
 
     # [StrategyBatchService] - run 级总超时默认值（秒）。
     # 取消单股硬超时后，由 run 级总预算控制整体执行时间；测试可覆盖。
-    _RUN_TOTAL_TIMEOUT_SECONDS: float = 600.0
+    # 默认 7200 秒与 after_close_orchestrator._DSA_POLL_TIMEOUT_SECONDS 对齐，
+    # 避免编排层等待 2 小时而执行层 600 秒就超时的大面积失败。
+    _RUN_TOTAL_TIMEOUT_SECONDS: float = 7200.0
 
     # [StrategyBatchService] - skipped 原因标准编码允许列表。
     # 自动发布门禁会校验所有 skipped 项的 reason_code 必须在此集合内。
     _SKIPPED_REASON_ALLOWLIST: set[str] = {
         "insufficient_data",
+        "insufficient_history",
         "suspended",
         "delisted",
         "new_listing",
     }
+
+    # [StrategyBatchService] - DSA 可计算 universe 最小历史日线条数。
+    # 低于此值的 active 标的在 create_batch_run 时直接标记 skipped/insufficient_history，
+    # 避免进入计算阶段后产生无意义的 failed。该值应 >= dsa_selector.MIN_DIR_BARS。
+    _DSA_MIN_HISTORY_BARS: int = 60
 
     # [StrategyBatchService] - failed 原因标准编码集合（仅用于日志/可读性）。
     _FAILED_REASON_CODES: set[str] = {
@@ -206,9 +214,15 @@ class StrategyBatchService:
     def __init__(self) -> None:
         """初始化 batch service。
 
-        实例级 run 超时时间默认使用类常量，允许测试或调用方覆盖。
+        实例级 run 超时时间从 STRATEGY_RUN_TOTAL_TIMEOUT_SECONDS 环境变量读取，
+        未设置时回退到类默认值 _RUN_TOTAL_TIMEOUT_SECONDS。
         """
-        self._run_total_timeout_seconds: float = self._RUN_TOTAL_TIMEOUT_SECONDS
+        self._run_total_timeout_seconds: float = float(
+            os.environ.get(
+                "STRATEGY_RUN_TOTAL_TIMEOUT_SECONDS",
+                str(self._RUN_TOTAL_TIMEOUT_SECONDS),
+            )
+        )
 
     async def recover_stale_runs(self, db: AsyncSession) -> int:
         """Worker 启动时恢复过期租约的 running 和 stale queued 任务。
@@ -408,11 +422,24 @@ class StrategyBatchService:
             config_str.encode("utf-8")
         ).hexdigest()[:16]
 
-        # 9. 解析标的列表
+        # 9. 解析标的列表（active universe）
         if instrument_ids is None:
             instrument_ids = await self._resolve_active_instruments(db, trade_date)
 
-        # 10. 创建 StrategyRun
+        # 10. 区分 active universe 与 computable universe
+        # [StrategyBatchService] - 历史数据不足标的直接标记 skipped/insufficient_history，
+        # 不进入计算循环，避免产生无意义 failed。
+        strategy_key_for_run = strategy_key
+        computable_ids: list[uuid.UUID] = []
+        insufficient_history_ids: list[uuid.UUID] = []
+        if strategy_key_for_run == "dsa_selector":
+            computable_ids, insufficient_history_ids = await self._classify_computable_universe(
+                db, trade_date, instrument_ids
+            )
+        else:
+            computable_ids = list(instrument_ids)
+
+        # 11. 创建 StrategyRun
         run = StrategyRun(
             strategy_version_id=version_id,
             run_type=run_type,
@@ -430,7 +457,7 @@ class StrategyBatchService:
             total_instruments=len(instrument_ids),
             succeeded_count=0,
             failed_count=0,
-            skipped_count=0,
+            skipped_count=len(insufficient_history_ids),
             attempt_no=attempt_no,
         )
         db.add(run)
@@ -443,16 +470,24 @@ class StrategyBatchService:
                 f"trade_date={trade_date}: {exc}"
             ) from exc
 
-        # 11. 预创建 strategy_run_items（status=pending）
-        run_items = [
-            StrategyRunItem(
+        # 12. 预创建 strategy_run_items
+        # computable 标的状态 pending；历史不足标的状态 skipped
+        run_items: list[StrategyRunItem] = []
+        for iid in computable_ids:
+            run_items.append(StrategyRunItem(
                 run_id=run.id,
                 instrument_id=iid,
                 status="pending",
                 attempt_count=0,
-            )
-            for iid in instrument_ids
-        ]
+            ))
+        for iid in insufficient_history_ids:
+            run_items.append(StrategyRunItem(
+                run_id=run.id,
+                instrument_id=iid,
+                status="skipped",
+                reason_code="insufficient_history",
+                attempt_count=0,
+            ))
         db.add_all(run_items)
         try:
             await db.flush()
@@ -758,7 +793,9 @@ class StrategyBatchService:
             # 5. 逐标的执行（run 级总超时 + 可取消）
             succeeded = 0
             failed = 0
-            skipped = 0
+            # [StrategyBatchService] - 保留 create_batch_run 预置的 skipped 数量
+            # （如 insufficient_history 标的），避免质量门禁 succeeded + skipped == total 失败。
+            skipped = run.skipped_count or 0
             all_results = []
             run_start_at = datetime.now(UTC)
             timeout_seconds = self._run_total_timeout_seconds
@@ -775,13 +812,13 @@ class StrategyBatchService:
                         f"更新 run_item 状态为 running 失败 item_id={item.id}: {exc}"
                     ) from exc
 
-                # 计算剩余 run 级预算；若已耗尽，剩余项直接记 timeout 失败
+                # 计算剩余 run 级预算；若已耗尽，剩余项标记为 run_timeout_budget_exhausted
                 elapsed = (datetime.now(UTC) - run_start_at).total_seconds()
                 remaining_seconds = timeout_seconds - elapsed
                 if remaining_seconds <= 0:
                     item.status = "failed"
-                    item.reason_code = "timeout"
-                    item.error_message = "run 级总超时，剩余项取消"
+                    item.reason_code = "run_timeout_budget_exhausted"
+                    item.error_message = "run 级总超时预算耗尽，剩余项取消"
                     item.finished_at = datetime.now(UTC)
                     failed += 1
                     try:
@@ -817,7 +854,7 @@ class StrategyBatchService:
                     )
                     item.status = "failed"
                     item.reason_code = "timeout"
-                    item.error_message = "run 级总超时"
+                    item.error_message = "单标的执行超时"
                     item.finished_at = datetime.now(UTC)
                     failed += 1
                 except BudgetExceededError as exc:
@@ -1367,6 +1404,60 @@ class StrategyBatchService:
             raise ValueError(f"策略无可用版本: strategy_key={strategy_key}")
 
         return version.id, version
+
+    async def _classify_computable_universe(
+        self,
+        db: AsyncSession,
+        trade_date: date,
+        instrument_ids: list[uuid.UUID],
+    ) -> tuple[list[uuid.UUID], list[uuid.UUID]]:
+        """将 active universe 分为可计算标的与历史不足标的。
+
+        [StrategyBatchService] - 描述: DSA 计算需要足够历史日线条数，
+        历史条数 < _DSA_MIN_HISTORY_BARS 的标的计入 insufficient_history，
+        在 create_batch_run 时直接标记 skipped，不进入计算循环。
+
+        Args:
+            db: 异步会话
+            trade_date: 交易日（统计截止该日期的历史 bars 数量）
+            instrument_ids: active universe 标的 ID 列表
+
+        Returns:
+            (computable_ids, insufficient_history_ids)
+        """
+        if not instrument_ids:
+            return [], []
+
+        # 批量查询每个标的截至 trade_date 的日线条数
+        stmt = (
+            select(
+                BarDaily.instrument_id,
+                func.count().label("bar_count"),
+            )
+            .where(
+                BarDaily.instrument_id.in_(instrument_ids),
+                BarDaily.trade_date <= trade_date,
+            )
+            .group_by(BarDaily.instrument_id)
+        )
+        result = await db.execute(stmt)
+        counts = {row[0]: row[1] for row in result.all()}
+
+        computable: list[uuid.UUID] = []
+        insufficient: list[uuid.UUID] = []
+        for iid in instrument_ids:
+            if counts.get(iid, 0) >= self._DSA_MIN_HISTORY_BARS:
+                computable.append(iid)
+            else:
+                insufficient.append(iid)
+
+        if insufficient:
+            logger.info(
+                "[StrategyBatchService] 历史数据不足标的: trade_date=%s, count=%d, "
+                "threshold=%d",
+                trade_date, len(insufficient), self._DSA_MIN_HISTORY_BARS,
+            )
+        return computable, insufficient
 
     async def _resolve_active_instruments(
         self, db: AsyncSession, trade_date: date
