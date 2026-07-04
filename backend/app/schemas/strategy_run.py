@@ -80,21 +80,34 @@ class StrategyRunListResponse(BaseModel):
 
 
 class StrategyResultResponse(BaseModel):
-    """策略结果响应。"""
+    """策略结果响应。
+
+    支持全量 universe 展示：
+    - succeeded 行: id/run_id/strategy_version_id/trade_date/payload/created_at 来自 strategy_results
+    - skipped/failed 行: id=None, payload=None, item_status/reason_code/error_message 来自 strategy_run_items
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: UUID = Field(..., description="结果 ID")
-    run_id: UUID = Field(..., description="所属运行 ID")
-    strategy_version_id: UUID = Field(..., description="策略版本 ID")
+    id: UUID | None = Field(None, description="结果 ID（skipped/failed 行为 None）")
+    run_id: UUID | None = Field(None, description="所属运行 ID")
+    strategy_version_id: UUID | None = Field(None, description="策略版本 ID")
     instrument_id: UUID = Field(..., description="标的 ID")
-    trade_date: date = Field(..., description="交易日")
-    payload: dict[str, Any] = Field(..., description="完整结果 JSON（不含 matched）")
-    created_at: datetime = Field(..., description="创建时间")
+    trade_date: date | None = Field(None, description="交易日")
+    payload: dict[str, Any] | None = Field(
+        None, description="完整结果 JSON（skipped/failed 行为 None）"
+    )
+    created_at: datetime | None = Field(None, description="创建时间")
     # [选股] - 标的主数据冗余字段，避免前端二次查询
     instrument_symbol: str | None = Field(None, description="股票代码")
     instrument_name: str | None = Field(None, description="股票名称")
     instrument_market: str | None = Field(None, description="市场（SH/SZ/BJ）")
+    # [StrategyRunItem] - 全量 universe 展示新增字段
+    item_status: str = Field(
+        ..., description="item 状态: pending/running/succeeded/failed/skipped"
+    )
+    reason_code: str | None = Field(None, description="跳过/失败原因代码")
+    error_message: str | None = Field(None, description="失败错误信息")
 
 
 class StrategyResultListResponse(BaseModel):

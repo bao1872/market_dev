@@ -71,4 +71,12 @@ SELECT job_name, status, business_date, started_at, finished_at FROM scheduler_j
 - card/image delivery state queryable；
 - capture static accessible；
 - expired member 403 verified；
-- admin jobs page shows real state。
+- admin jobs page shows real state.
+
+## 5. Docker 镜像保护
+
+- `node:20-alpine` 是受保护基础镜像，拉取很慢，禁止主动删除；
+- 禁止 `docker image prune -a`；
+- 除非明确升级 Node 版本或镜像损坏，否则不要删除 `node:20-alpine`；
+- 普通清理只允许 `docker builder prune -f`、`docker image prune -f`、`docker container prune -f`；
+- 测试期部署默认不备份数据库，禁止 `pg_dump`，禁止写入 `/root/backups` 或 `/root/web_dev/backups`。

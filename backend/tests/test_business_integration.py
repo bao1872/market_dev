@@ -37,7 +37,7 @@ async def test_selector_published_run_returns_results(
     db_session, test_published_run, test_instrument
 ):
     """已发布 run 返回结果。"""
-    from app.models.strategy_run import StrategyResult
+    from app.models.strategy_run import StrategyResult, StrategyRunItem
 
     result = StrategyResult(
         run_id=test_published_run.id,
@@ -47,6 +47,20 @@ async def test_selector_published_run_returns_results(
         payload={"dsa_dir_bars": 40, "offset_mean": 0.01},
     )
     db_session.add(result)
+    await db_session.flush()
+
+    # [Test] - 描述: 全量 universe 改造后需创建 StrategyRunItem（主表）
+    item = StrategyRunItem(
+        run_id=test_published_run.id,
+        instrument_id=test_instrument.id,
+        status="succeeded",
+        result_id=result.id,
+        started_at=datetime.now(UTC),
+        finished_at=datetime.now(UTC),
+    )
+    db_session.add(item)
+    test_published_run.total_instruments = 1
+    test_published_run.succeeded_count = 1
     await db_session.flush()
 
     page = await query_published_selector_results(
@@ -62,11 +76,12 @@ async def test_selector_three_level_counts(
 ):
     """选股三级计数：run_source_total / universe_total / filtered_total。"""
     from app.models.instrument import Instrument
-    from app.models.strategy_run import StrategyResult
+    from app.models.strategy_run import StrategyResult, StrategyRunItem
     from app.models.watchlist import UserWatchlistItem
 
     # 创建 5 个标的 + 5 条结果
     instrument_ids = []
+    now = datetime.now(UTC)
     for i in range(5):
         inst = Instrument(
             symbol=f"T3LC{uuid.uuid4().hex[:4]}",
@@ -86,6 +101,18 @@ async def test_selector_three_level_counts(
             payload={"dsa_dir_bars": 40, "offset_mean": 0.01},
         )
         db_session.add(result)
+        await db_session.flush()
+
+        # [Test] - 描述: 全量 universe 改造后需创建 StrategyRunItem（主表）
+        item = StrategyRunItem(
+            run_id=test_published_run.id,
+            instrument_id=inst.id,
+            status="succeeded",
+            result_id=result.id,
+            started_at=now,
+            finished_at=now,
+        )
+        db_session.add(item)
 
     # 添加 2 个标的到用户自选股
     for inst_id in instrument_ids[:2]:
@@ -97,6 +124,9 @@ async def test_selector_three_level_counts(
         )
         db_session.add(item)
 
+    # [Test] - 描述: 设置 total_instruments 以满足 source_total 计算
+    test_published_run.total_instruments = 5
+    test_published_run.succeeded_count = 5
     await db_session.flush()
 
     page = await query_published_selector_results(

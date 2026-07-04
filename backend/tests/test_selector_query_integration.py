@@ -145,8 +145,14 @@ async def _create_test_data(db) -> dict:
     Returns:
         dict 包含所有创建的实体 ID
     """
+    from app.models.instrument import Instrument
     from app.models.strategy import StrategyDefinition, StrategyVersion
-    from app.models.strategy_run import StrategyResult, StrategyResultMetric, StrategyRun
+    from app.models.strategy_run import (
+        StrategyResult,
+        StrategyResultMetric,
+        StrategyRun,
+        StrategyRunItem,
+    )
     from app.models.user import User
     from app.models.watchlist import UserWatchlistItem
 
@@ -189,8 +195,18 @@ async def _create_test_data(db) -> dict:
     db.add(version)
     await db.flush()
 
-    # 4. 创建 instrument（使用虚拟 ID，不依赖 instruments 表已有数据）
-    instrument_ids = [uuid.uuid4() for _ in range(10)]
+    # 4. 创建 instrument（创建真实 Instrument 行以满足 strategy_run_items FK 约束）
+    instrument_ids: list[uuid.UUID] = []
+    for i in range(10):
+        inst = Instrument(
+            symbol=f"TINT{uuid.uuid4().hex[:5]}",
+            name=f"测试标的{i}",
+            market="SZ",
+            status="active",
+        )
+        db.add(inst)
+        await db.flush()
+        instrument_ids.append(inst.id)
 
     # 5. 创建已发布的 run + 结果
     published_run = StrategyRun(
@@ -203,11 +219,13 @@ async def _create_test_data(db) -> dict:
         finished_at=now,
         idempotency_key=f"test:{version.id}:scheduled:{trade_date}",
         published_at=now,
+        total_instruments=10,
+        succeeded_count=10,
     )
     db.add(published_run)
     await db.flush()
 
-    # 写入 10 条结果 + 指标
+    # 写入 10 条结果 + 指标 + run_items（全量 universe 改造后主表为 strategy_run_items）
     for i, inst_id in enumerate(instrument_ids):
         result = StrategyResult(
             run_id=published_run.id,
@@ -222,6 +240,17 @@ async def _create_test_data(db) -> dict:
         )
         db.add(result)
         await db.flush()
+
+        # 写入 run_item（succeeded，关联 result_id）
+        item = StrategyRunItem(
+            run_id=published_run.id,
+            instrument_id=inst_id,
+            status="succeeded",
+            result_id=result.id,
+            started_at=now,
+            finished_at=now,
+        )
+        db.add(item)
 
         # 写入指标
         for key, val in result.payload.items():
@@ -262,6 +291,8 @@ async def _create_test_data(db) -> dict:
         finished_at=now,
         idempotency_key=f"test:second:{version.id}:manual:{trade_date}",
         published_at=now,
+        total_instruments=5,
+        succeeded_count=5,
     )
     db.add(second_run)
     await db.flush()
@@ -281,6 +312,17 @@ async def _create_test_data(db) -> dict:
         )
         db.add(result)
         await db.flush()
+
+        # 写入 run_item（succeeded，关联 result_id）
+        item = StrategyRunItem(
+            run_id=second_run.id,
+            instrument_id=inst_id,
+            status="succeeded",
+            result_id=result.id,
+            started_at=now,
+            finished_at=now,
+        )
+        db.add(item)
 
         for key, val in result.payload.items():
             metric = StrategyResultMetric(
@@ -562,7 +604,12 @@ async def _cleanup(db_session, test_data: dict):
     from sqlalchemy import delete, select
 
     from app.models.strategy import StrategyDefinition, StrategyVersion
-    from app.models.strategy_run import StrategyResult, StrategyResultMetric, StrategyRun
+    from app.models.strategy_run import (
+        StrategyResult,
+        StrategyResultMetric,
+        StrategyRun,
+        StrategyRunItem,
+    )
     from app.models.user import User
     from app.models.watchlist import UserWatchlistItem
 
@@ -578,6 +625,11 @@ async def _cleanup(db_session, test_data: dict):
     # 删除指标
     result_ids_stmt = select(StrategyResult.id).where(
         StrategyResult.run_id.in_(run_ids)
+    )
+    # [Cleanup] - 描述: 先删 StrategyRunItem（result_id FK 引用 strategy_results），
+    # 再删 StrategyResultMetric / StrategyResult / StrategyRun
+    await db.execute(
+        delete(StrategyRunItem).where(StrategyRunItem.run_id.in_(run_ids))
     )
     # 直接按 run_id 删除结果和指标
     await db.execute(

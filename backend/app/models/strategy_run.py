@@ -423,6 +423,12 @@ class StrategyRunItem(Base):
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="完成时间"
     )
+    # [StrategyRunItem] - 描述: 关联 StrategyResult（succeeded 时非空，skipped/failed 时为 None）
+    result: Mapped[StrategyResult | None] = relationship(
+        "StrategyResult",
+        foreign_keys=[result_id],
+        lazy="raise",
+    )
 
     def __repr__(self) -> str:
         return (

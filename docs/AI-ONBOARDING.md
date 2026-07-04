@@ -73,7 +73,9 @@ docs/maps/test-coverage-map.md
 - 修改算法参数但不发新 StrategyVersion；
 - 把部分失败伪装成成功；
 - 为通过 CI 扩大 ignore、skip、noqa、type ignore；
-- 一次性全盘重构。
+- 一次性全盘重构；
+- 主动删除 `node:20-alpine` 镜像或执行 `docker image prune -a`（受保护镜像，拉取很慢）；
+- 测试期部署执行 `pg_dump` 或写入 `/root/backups`、`/root/web_dev/backups`（除非用户明确要求备份）。
 
 ## 6. 推荐工作方式
 

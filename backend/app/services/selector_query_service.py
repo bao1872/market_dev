@@ -21,9 +21,9 @@ from app.models.watchlist import UserWatchlistItem
 from app.repositories.strategy_result_repository import (
     MetricFilter,
     SortSpec,
-    count_by_run,
-    count_by_run_with_watchlist,
-    query_results,
+    count_run_items_by_run,
+    count_run_items_with_watchlist,
+    query_run_items_with_results,
 )
 
 
@@ -113,7 +113,12 @@ async def query_published_selector_results(
         )
 
     # 3. 获取 source_total（过滤前总数，全市场）
-    source_total = await count_by_run(db, run_id)
+    # [SelectorQueryService] - 描述: 优先使用 run.total_instruments（PR #14 后生产必填），
+    # fallback 到 count_run_items_by_run（兼容旧测试 fixture 未设置 total_instruments 的场景）
+    if run.total_instruments is not None:
+        source_total = run.total_instruments
+    else:
+        source_total = await count_run_items_by_run(db, run_id)
 
     # 4. 构建 universe 过滤（watchlist 时只返回用户自选股）
     watchlist_instrument_ids: set[uuid.UUID] | None = None
@@ -125,14 +130,16 @@ async def query_published_selector_results(
         )
         result = await db.execute(stmt)
         watchlist_instrument_ids = {row[0] for row in result.all()}
-        # universe_total: 自选股范围内的结果数（无指标过滤）
-        universe_total = await count_by_run_with_watchlist(
+        # universe_total: 自选股范围内的 run_items 数（无指标过滤）
+        universe_total = await count_run_items_with_watchlist(
             db, run_id, watchlist_instrument_ids
         )
 
     # 5. 执行服务端筛选/排序/分页（SQL 级 watchlist 过滤）
+    # [SelectorQueryService] - 描述: 以 strategy_run_items 为主表 LEFT JOIN strategy_results
+    # 返回全量 universe（含 succeeded/skipped/failed），skipped/failed 行 result 为 None
     offset = (page - 1) * page_size
-    result_page = await query_results(
+    result_page = await query_run_items_with_results(
         db,
         run_id=run_id,
         filters=filters,

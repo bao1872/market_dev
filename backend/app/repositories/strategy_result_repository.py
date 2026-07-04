@@ -31,12 +31,14 @@ from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.sql.selectable import Select
 
 from app.models.instrument import Instrument
 from app.models.strategy_run import (
     StrategyResult,
     StrategyResultMetric,
     StrategyRun,
+    StrategyRunItem,
 )
 from app.strategy.runtime import StrategyResult as RuntimeStrategyResult
 
@@ -670,6 +672,244 @@ async def count_by_run_with_watchlist(
     stmt = select(func.count()).select_from(StrategyResult).where(
         StrategyResult.run_id == run_id,
         StrategyResult.instrument_id.in_(watchlist_instrument_ids),
+    )
+    result = await session.execute(stmt)
+    return result.scalar() or 0
+
+
+# ---------------------------------------------------------------------------
+# 全量 Universe 查询（以 strategy_run_items 为主表）
+# 用于趋势选股页展示 succeeded/skipped/failed 全部行
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RunItemResultRow:
+    """[StrategyResultRepository] - 描述: 以 strategy_run_items 为主表的结果行
+
+    趋势选股页全量 universe 展示的查询结果单元：
+    - item_status/reason_code/error_message 来自 strategy_run_items
+    - result 为 StrategyResult 或 None（skipped/failed 行为 None）
+    - instrument 来自 instruments 表（LEFT JOIN，理论上永不为 None）
+    """
+
+    item_id: uuid.UUID
+    run_id: uuid.UUID
+    instrument_id: uuid.UUID
+    item_status: str
+    reason_code: str | None
+    error_message: str | None
+    result: StrategyResult | None
+    instrument: Instrument | None
+
+
+def _apply_run_item_filters(
+    base: Select,
+    *,
+    run_id: uuid.UUID,
+    filters: list[MetricFilter] | None,
+    watchlist_instrument_ids: set[uuid.UUID] | None,
+    keyword: str | None,
+) -> Select:
+    """[StrategyResultRepository] - 描述: 对 strategy_run_items 查询应用通用过滤条件
+
+    复用过滤逻辑避免 query_run_items_with_results 与 count 之间漂移。
+
+    - run_id: 必填，主过滤
+    - watchlist_instrument_ids: IN 过滤 instrument_id
+    - keyword: JOIN instruments ILIKE
+    - filters: metric_filter 通过 result_id IN 子查询（skipped/failed 行 result_id=None 自动不命中）
+    """
+    base = base.where(StrategyRunItem.run_id == run_id)
+
+    if watchlist_instrument_ids is not None:
+        base = base.where(
+            StrategyRunItem.instrument_id.in_(watchlist_instrument_ids)
+        )
+
+    if keyword is not None:
+        kw_pattern = f"%{keyword}%"
+        base = base.join(
+            Instrument, StrategyRunItem.instrument_id == Instrument.id
+        ).where(
+            or_(
+                Instrument.symbol.ilike(kw_pattern),
+                Instrument.name.ilike(kw_pattern),
+            )
+        )
+
+    if filters:
+        for f in filters:
+            metric_key = f.metric_key
+            sub = select(StrategyResultMetric.result_id).where(
+                StrategyResultMetric.metric_key == metric_key
+            )
+            op = f.operator.lower()
+            if op == "gt":
+                sub = sub.where(StrategyResultMetric.numeric_value > f.value)
+            elif op == "gte":
+                sub = sub.where(StrategyResultMetric.numeric_value >= f.value)
+            elif op == "lt":
+                sub = sub.where(StrategyResultMetric.numeric_value < f.value)
+            elif op == "lte":
+                sub = sub.where(StrategyResultMetric.numeric_value <= f.value)
+            elif op == "eq":
+                sub = sub.where(StrategyResultMetric.numeric_value == f.value)
+            elif op == "between":
+                if f.value1 is not None:
+                    sub = sub.where(StrategyResultMetric.numeric_value >= f.value1)
+                if f.value2 is not None:
+                    sub = sub.where(StrategyResultMetric.numeric_value <= f.value2)
+            else:
+                raise ValueError(f"未知筛选操作符: {op}")
+            # [StrategyResultRepository] - 描述: skipped/failed 行 result_id=None 自然不命中 IN
+            base = base.where(StrategyRunItem.result_id.in_(sub))
+
+    return base
+
+
+async def query_run_items_with_results(
+    session: AsyncSession,
+    *,
+    run_id: uuid.UUID,
+    filters: list[MetricFilter] | None = None,
+    sort: SortSpec | None = None,
+    watchlist_instrument_ids: set[uuid.UUID] | None = None,
+    keyword: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> QueryResultPage:
+    """以 strategy_run_items 为主表 LEFT JOIN strategy_results + instruments 查询。
+
+    趋势选股页全量 universe 展示的查询入口：
+    - 主表 strategy_run_items（含 succeeded/skipped/failed 全部行）
+    - LEFT JOIN strategy_results（仅 succeeded 行有匹配，result_id 非空）
+    - LEFT JOIN instruments（取 symbol/name/market）
+    - metric_filters 通过 result_id IN 子查询过滤（自动排除 skipped/failed）
+    - sort 通过 LEFT JOIN 指标表（NULLS LAST）
+    - keyword 通过 JOIN instruments ILIKE 过滤
+    - watchlist_instrument_ids 通过 IN 过滤 instrument_id
+
+    Returns:
+        QueryResultPage(items=list[RunItemResultRow], total=filtered_total)
+
+    Raises:
+        Exception: 查询失败时 re-raise
+    """
+    try:
+        # 构建基础查询（StrategyRunItem 为主表）
+        base = select(StrategyRunItem).options(
+            selectinload(StrategyRunItem.result),
+        )
+
+        # 应用通用过滤（run_id + watchlist + keyword + metric_filters）
+        base = _apply_run_item_filters(
+            base,
+            run_id=run_id,
+            filters=filters,
+            watchlist_instrument_ids=watchlist_instrument_ids,
+            keyword=keyword,
+        )
+
+        # 排序（LEFT JOIN 指标表，NULLS LAST）
+        if sort is not None:
+            sort_sub = (
+                select(
+                    StrategyResultMetric.result_id,
+                    StrategyResultMetric.numeric_value.label("sort_val"),
+                )
+                .where(StrategyResultMetric.metric_key == sort.field)
+                .subquery()
+            )
+            base = base.outerjoin(
+                sort_sub, StrategyRunItem.result_id == sort_sub.c.result_id
+            )
+            if sort.desc:
+                base = base.order_by(sort_sub.c.sort_val.desc().nullslast())
+            else:
+                base = base.order_by(sort_sub.c.sort_val.asc().nullsfirst())
+
+        # 总数查询（复用相同过滤条件，不含 limit/offset/sort）
+        count_base = select(StrategyRunItem)
+        count_base = _apply_run_item_filters(
+            count_base,
+            run_id=run_id,
+            filters=filters,
+            watchlist_instrument_ids=watchlist_instrument_ids,
+            keyword=keyword,
+        )
+        count_result = await session.execute(
+            select(func.count()).select_from(count_base.subquery())
+        )
+        total = int(count_result.scalar() or 0)
+
+        # 分页查询
+        base = base.limit(limit).offset(offset)
+        result = await session.execute(base)
+        items_orm = list(result.scalars().all())
+
+        # 转换为 RunItemResultRow（含 instrument 冗余字段）
+        # 批量加载 instruments 避免 N+1
+        instrument_ids = {item.instrument_id for item in items_orm}
+        instruments_map: dict[uuid.UUID, Instrument] = {}
+        if instrument_ids:
+            inst_stmt = select(Instrument).where(
+                Instrument.id.in_(instrument_ids)
+            )
+            inst_result = await session.execute(inst_stmt)
+            for inst in inst_result.scalars().all():
+                instruments_map[inst.id] = inst
+
+        rows: list[RunItemResultRow] = []
+        for item in items_orm:
+            rows.append(
+                RunItemResultRow(
+                    item_id=item.id,
+                    run_id=item.run_id,
+                    instrument_id=item.instrument_id,
+                    item_status=item.status,
+                    reason_code=item.reason_code,
+                    error_message=item.error_message,
+                    result=item.result,
+                    instrument=instruments_map.get(item.instrument_id),
+                )
+            )
+
+        return QueryResultPage(items=rows, total=total)
+    except Exception as exc:
+        raise RuntimeError(
+            f"查询 run_items 全量结果失败 run_id={run_id}: {exc}"
+        ) from exc
+
+
+async def count_run_items_by_run(
+    session: AsyncSession,
+    run_id: uuid.UUID,
+) -> int:
+    """返回指定 run 的 strategy_run_items 总数（无过滤，含全部 status）。
+
+    用于 selector_query_service 的 source_total fallback
+    （run.total_instruments 为 None 时使用，正常生产场景 run.total_instruments 已填充）。
+    """
+    stmt = select(func.count()).select_from(StrategyRunItem).where(
+        StrategyRunItem.run_id == run_id
+    )
+    result = await session.execute(stmt)
+    return result.scalar() or 0
+
+
+async def count_run_items_with_watchlist(
+    session: AsyncSession,
+    run_id: uuid.UUID,
+    watchlist_instrument_ids: set[uuid.UUID],
+) -> int:
+    """返回指定 run 在自选股范围内的 strategy_run_items 总数（无指标过滤，仅 watchlist 过滤）。
+
+    用于 selector_query_service 计算 universe_total（universe=watchlist 时）。
+    """
+    stmt = select(func.count()).select_from(StrategyRunItem).where(
+        StrategyRunItem.run_id == run_id,
+        StrategyRunItem.instrument_id.in_(watchlist_instrument_ids),
     )
     result = await session.execute(stmt)
     return result.scalar() or 0

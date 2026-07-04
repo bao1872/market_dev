@@ -107,13 +107,14 @@ export function adaptStrategyResultToTrendRow(
   result: StrategyResult,
   watchedIds?: Set<string>,
 ): TrendSelectionRow {
+  // [全量 universe] - 描述: skipped/failed 行 result.id 和 payload 为 null，降级为空值
   return {
-    resultId: result.id,
+    resultId: result.id ?? '',
     instrumentId: result.instrument_id,
     symbol: result.instrument_symbol ?? '-',
     name: result.instrument_name ?? '-',
     market: result.instrument_market ?? '',
-    payload: result.payload,
+    payload: result.payload ?? {},
     watched: watchedIds ? watchedIds.has(result.instrument_id) : false,
   }
 }

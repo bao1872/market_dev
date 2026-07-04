@@ -577,7 +577,7 @@ export default function ScreenerPage() {
           activeRunId={activeRunId}
           columns={activeColumns}
           rows={rows}
-          rowKey={(row) => row.resultId}
+          rowKey={(row) => row.instrumentId}
           total={totalResults}
           serverSide
           onQueryChange={handleQueryChange}
