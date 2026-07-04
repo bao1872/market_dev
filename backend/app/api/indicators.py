@@ -15,7 +15,7 @@ GET /api/v1/instruments/{instrument_id}/indicators
 参数：
     timeframe: 1d | 15m | 1h | 1w | 1mo（默认 1d）
     adj: qfq | none（默认 qfq）
-    bars: 返回最近 N 根 bar 的指标（默认 250，最大 500）
+    bars: 返回最近 N 根 bar 的指标（默认 250，最大 4000，与 Node Cluster 15m/1h 契约对齐）
 
 响应头：
     X-Data-Source: redis | computed
@@ -134,7 +134,7 @@ async def get_indicators(
     instrument_id: uuid.UUID,
     timeframe: str = Query("1d", description="K线周期: 1d | 15m | 1h | 1w | 1mo"),
     adj: str = Query("qfq", description="复权方式: qfq | none"),
-    bars: int = Query(250, ge=50, le=500, description="返回最近 N 根 bar 的指标"),
+    bars: int = Query(250, ge=50, le=4000, description="返回最近 N 根 bar 的指标（最大 4000，与 Node Cluster 15m 契约对齐）"),
     db: AsyncSession = Depends(get_db),
     response: Response = None,
 ) -> dict[str, Any]:

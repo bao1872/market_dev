@@ -2,6 +2,13 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-04 Phase F: PR #11 部署后热修 bars/indicators page_size 上限
+
+- 生产验证发现 15m/1h 个股详情请求触发 422：`/api/v1/instruments/{id}/bars` page_size 上限 1000，`/api/v1/instruments/{id}/indicators` bars 上限 500
+- 将 bars page_size 上限提升至 4000，indicators bars 上限提升至 4000，与 Node Cluster 15m=4000、1h=1200 契约对齐
+- 顺手修复 `backend/app/api/bars.py` Ruff 错误（未使用导入、缺失 `get_redis` 导入）
+- 新增 CHANGE-20260704-023，更新 `docs/maps/api-route-map.md`
+
 ## 2026-07-04 Phase E: 修复 4 个生产功能缺陷
 
 - 修复 DSA-only 覆盖率 0% 与系统概览 98% 口径不一致：新增 `BarsCoverageService` 统一三处重复 SQL，DSA-only 端点 fallback 到最新可用交易日
@@ -55,6 +62,7 @@
 | CHANGE-20260704-020 | 2026-07-04 | 关闭 ALIGN-023：worker-watchdog 生产验证 stale running 清零 | merged | `chore/close-align-023-worker-watchdog` | `67105c2` | `30ddc8a` | `docs/current/code-doc-alignment.md`、`docs/current/03-jobs-integrations-operations.md`、`docs/changes/CHANGELOG.md`、`docs/changes/records/CHANGE-20260704-020.md` |
 | CHANGE-20260704-021 | 2026-07-04 | worker/notification/capture 边界审计 + 后续小 PR 拆分计划 | committed | `chore/boundary-audit-worker-notification-capture` | `30ddc8a` | 待合并后填写 | `docs/architecture-audits/AUDIT-20260704-worker-notification-capture-boundaries.md`、`docs/changes/CHANGELOG.md`、`docs/changes/records/CHANGE-20260704-021.md`、`docs/maps/worker-job-map.md`、`docs/maps/notification-flow-map.md`、`docs/maps/test-coverage-map.md`、`docs/current/code-doc-alignment.md` |
 | CHANGE-20260704-022 | 2026-07-04 | 修复 4 个生产功能缺陷：DSA-only 覆盖率口径、K 线实时行情合并、自选股监控 fallback、飞书消息中国时区；残留修复：覆盖率门禁使用 `coverage_raw`、watchlist fallback 条件扩展、1d K 线日期语义 | committed | `fix/market-data-dsa-watchlist-feishu-timezone` | `4af271d` | 待提交后填写 | `backend/app/services/bars_coverage_service.py`、`backend/app/core/time.py`、`backend/app/api/admin_after_close.py`、`backend/app/api/watchlist.py`、`backend/app/services/after_close_orchestrator.py`、`backend/app/services/bars_scheduler_service.py`、`backend/app/services/message_builder.py`、`backend/app/services/monitor_batch_service.py`、`backend/app/services/notification_service.py`、`backend/app/services/stock_detail_feishu_service.py`、`backend/app/services/system_overview_service.py`、`frontend/src/utils/chart.ts`、`frontend/src/pages/StockDetailPage.tsx`、测试文件、docs |
+| CHANGE-20260704-023 | 2026-07-04 | PR #11 部署后热修：bars / indicators page_size、bars 上限与 Node Cluster 15m/1h 契约对齐 | in_validation | `fix/bars-indicators-page-size-15m` | `0f29e5e` | 待合并后填写 | `backend/app/api/bars.py`、`backend/app/api/indicators.py`、`docs/maps/api-route-map.md`、`docs/changes/CHANGELOG.md` |
 | CHANGE-20260704-025 | 2026-07-04 | Admin Jobs 可观察性补齐 - Worker 心跳 Tab + 只读 admin API | committed | `feat/admin-jobs-observability` | `0f29e5e` | 待合并后填写 | `backend/app/schemas/worker_heartbeat.py`、`backend/app/api/admin_subscription.py`、`backend/tests/test_admin_worker_heartbeats_api.py`、`frontend/src/api/endpoints.ts`、`frontend/src/hooks/useApi.ts`、`frontend/src/pages/AdminJobsPage.tsx`、`docs/current/02-data-api-contracts.md`、`docs/current/03-jobs-integrations-operations.md`、`docs/current/04-frontend-ux.md`、`docs/maps/api-route-map.md`、`docs/maps/frontend-route-map.md`、`docs/maps/worker-job-map.md`、`docs/maps/test-coverage-map.md`、`docs/current/code-doc-alignment.md`、`docs/changes/CHANGELOG.md`、`docs/changes/records/CHANGE-20260704-025.md` |
 
 ## 规则

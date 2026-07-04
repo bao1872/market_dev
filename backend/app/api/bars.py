@@ -17,7 +17,7 @@ GET /api/v1/bars/health
     start_date: 起始日期（YYYY-MM-DD），可选
     end_date: 结束日期（YYYY-MM-DD），可选
     page: 页码（1-based，默认 1）
-    page_size: 每页大小（默认 100，最大 1000）
+    page_size: 每页大小（默认 100，最大 4000，与 Node Cluster 15m 4000 根契约对齐）
     include_realtime: 是否在交易时段内调用 Pytdx 补充最后一根 Bar（默认 true）
 
 响应头：
@@ -32,7 +32,6 @@ import logging
 import time
 import uuid
 from datetime import date, datetime, timedelta
-from datetime import time as dt_time
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -41,6 +40,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db, require_roles
+from app.core.redis_client import get_redis
 from app.models.bar import Bar15Min, Bar60Min, BarDaily, BarMinute, BarMonthly, BarWeekly
 from app.schemas.bar import BarListResponse, BarResponse
 from app.services.market_data_aggregation_service import MarketDataAggregationService
@@ -55,7 +55,8 @@ _ALLOWED_TIMEFRAMES = {"1d", "15m", "1h", "1w", "1mo"}
 # 默认查询范围
 _DEFAULT_DAILY_LOOKBACK_DAYS = 5000  # 日线/周线/月线默认回看 5000 天（覆盖约 13 年，确保周线 ≥250 条）
 _DEFAULT_INTRADAY_LOOKBACK_DAYS = 180  # 15min/60min 默认回看 180 天（DB 实测 180 天 60min=460 根 > 320 根需求）
-_MAX_PAGE_SIZE = 1000
+# [Chart] - page_size 上限与 Node Cluster 契约对齐：15m 需要 4000 根，1h 需要 1200 根
+_MAX_PAGE_SIZE = 4000
 
 
 def _parse_date_range(
