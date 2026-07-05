@@ -48,8 +48,6 @@ import math
 from typing import Any
 
 import numpy as np
-import pandas as pd
-import pytest
 
 from app.strategy_assets.algorithms.features.sqzmom_lb import (
     _highest,
@@ -60,7 +58,6 @@ from app.strategy_assets.algorithms.features.sqzmom_lb import (
     _true_range,
     compute_sqzmom_lb,
 )
-
 
 # ===== 默认参数（与 Pine 原代码一致）=====
 DEFAULT_PARAMS: dict[str, Any] = {
@@ -127,12 +124,11 @@ def test_bb_dev_uses_multkc_not_mult() -> None:
     idx = 25
     closes = ohlcv["closes"]
     length = 20
-    multKC = 1.5
+    mult_kc = 1.5
 
-    # 手算 expected dev
-    expected_basis = float(np.mean(closes[idx - length + 1:idx + 1]))
+    # 手算 expected dev（验证 BB dev = multKC * stdev，不修正 Pine 原代码）
     expected_stdev = float(np.std(closes[idx - length + 1:idx + 1], ddof=0))
-    expected_dev = multKC * expected_stdev
+    expected_dev = mult_kc * expected_stdev
 
     # 后端返回的 BB 内部值通过 _compute_bb_kc 暴露在 _debug 字段（仅测试用）
     bb_debug = result.get("_debug_bb_kc")
@@ -140,7 +136,7 @@ def test_bb_dev_uses_multkc_not_mult() -> None:
 
     actual_dev = bb_debug["upperBB"][idx] - bb_debug["basis"][idx]
     assert abs(actual_dev - expected_dev) < 1e-9, (
-        f"BB dev 应使用 multKC={multKC}，得到 dev={expected_dev}，"
+        f"BB dev 应使用 multKC={mult_kc}，得到 dev={expected_dev}，"
         f"实际 dev={actual_dev}，stdev={expected_stdev}"
     )
 
@@ -220,7 +216,6 @@ def test_no_sqz_when_partial_overlap() -> None:
     构造场景：BB 上轨在 KC 内，但 BB 下轨在 KC 外（或反之）。
     此时 sqzOn=False, sqzOff=False, noSqz=True。
     """
-    n = 50
     # 构造 close 上升趋势（影响 BB 中轨位置）
     closes = np.concatenate([
         np.full(20, 100.0),
@@ -541,7 +536,7 @@ def test_stdev_uses_ddof_zero_matches_pine() -> None:
         "ddof=0 和 ddof=1 应有差异（length=20）"
     )
     assert abs(actual - expected_ddof1) > 1e-6, (
-        f"_stdev_biased 不应使用 ddof=1，差异应大于 1e-6"
+        "_stdev_biased 不应使用 ddof=1，差异应大于 1e-6"
     )
 
 
