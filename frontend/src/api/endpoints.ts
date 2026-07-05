@@ -2257,3 +2257,60 @@ export async function forceAfterCloseRun(
   )
   return data
 }
+
+// ============================================================
+// ===== Structural Factors 端点 =====
+// ============================================================
+
+/**
+ * 结构状态因子查询参数
+ * - primary_timeframe: 主周期（默认 1d）
+ * - secondary_timeframe: 副周期（默认 15m）
+ * - adj: 复权方式（默认 qfq）
+ * - as_of: 截止时间（默认 latest）
+ */
+export interface StructuralFactorQueryParams {
+  primary_timeframe?: string
+  secondary_timeframe?: string
+  adj?: string
+  as_of?: string
+}
+
+/**
+ * 结构状态因子响应
+ * 包含双周期 (1d + 15m) 5 组结构因子 + relation + meta
+ *
+ * 前端只渲染后端 DTO，严禁重新计算。
+ */
+export interface StructuralFactorResponse {
+  primary: Record<string, Record<string, unknown> | null>
+  secondary: Record<string, Record<string, unknown> | null>
+  relation: {
+    trend_alignment?: string | null
+    momentum_alignment?: string | null
+    notes?: string[]
+  }
+  meta: {
+    as_of: string
+    primary_lookback_bars: number
+    secondary_lookback_bars: number
+    degraded_reasons: string[]
+    warmup_notes: string[]
+  }
+}
+
+/**
+ * 查询指定标的的双周期结构状态因子
+ * 后端 structural_factors router prefix="/api/v1/instruments"
+ * 完整路径: /api/v1/instruments/{id}/structural-factors
+ */
+export async function getStructuralFactors(
+  instrumentId: string,
+  params?: StructuralFactorQueryParams,
+): Promise<StructuralFactorResponse> {
+  const { data } = await apiClient.get<StructuralFactorResponse>(
+    `/api/v1/instruments/${instrumentId}/structural-factors`,
+    { params },
+  )
+  return data
+}

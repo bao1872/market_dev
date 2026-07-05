@@ -2,6 +2,17 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-05: 个股详情页新增结构状态因子面板（V1.7）
+
+- 后端新增 ATR SSOT `app.strategy_assets.algorithms.features.atr_utils.compute_atr`（Pine RMA 等价）。
+- 后端新增 `app.services.structural_factor_service.compute_structural_factors`：双周期（1d+15m）5 组结构因子（DSA 段/Swing/成本节点/动量波动/成交参与），每组独立 try/except 异常隔离。
+- 后端新增 API `GET /api/v1/instruments/{id}/structural-factors`，无认证要求，250-500 bar lookback，15m 仅已完成 bar，Swing 无未来函数。
+- 前端新增 `StockStructuralStatePanel.tsx`（5 卡片 + 双周期 tabs + 降级提示 + 明细折叠），`StockDetailPage` 改为双列布局（1fr + 340px），截图模式和窄屏（≤1250px）隐藏面板。
+- 前端只渲染后端 DTO，禁止重新计算因子。
+- 新增后端测试 34 个（ATR SSOT 9 + 服务 20 + API 5）、前端 contract test 8 个；后端 34/34 passed，前端 71/71 contract test passed。
+- 更新 `docs/current/02-data-api-contracts.md`、`04-frontend-ux.md`、`05-testing-acceptance.md` 及相关 maps。
+- 新增 CHANGE-20260705-031。
+
 ## 2026-07-05: 个股详情页新增 SQZMOM_LB 指标图层
 
 - 后端新增 `app.strategy_assets.algorithms.features.sqzmom_lb`，逐行复刻 TradingView Pine `SQZMOM_LB`。

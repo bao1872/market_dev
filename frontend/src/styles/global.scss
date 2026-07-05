@@ -1082,8 +1082,11 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 .tv-quote-strip { display: flex; align-items: center; gap: 20px; flex: 1; > div { display: grid; gap: 3px; } span { font-size: 9px; color: v.$color-muted; } b { font: 12px v.$font-mono; } }
 
 // V1.6.2: 删除右侧 268px 策略栏，释放完整图表宽度；Task 2 再删除左侧 38px 绘图工具列
-.tv-workspace { display: grid; grid-template-columns: minmax(0, 1fr); min-height: v.$tv-workspace-min-height; border: 1px solid v.$color-border; border-top: 0; background: #10141c; }
+// V1.7: 新增右侧 340px 结构状态因子面板（StockStructuralStatePanel），双列布局
+.tv-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 340px; min-height: v.$tv-workspace-min-height; border: 1px solid v.$color-border; border-top: 0; background: #10141c; }
+.tv-workspace.capture-mode { grid-template-columns: minmax(0, 1fr); } // 截图模式：隐藏右侧面板，恢复单列
 .tv-chart-column { min-width: 0; background: #0d1118; }
+.tv-side-column { min-width: 0; background: #0d1118; border-left: 1px solid v.$color-border; overflow-y: auto; max-height: v.$tv-workspace-min-height; }
 .tv-trading-chart { height: v.$tv-chart-height; border: 0; border-radius: 0; }
 .tv-chart-toolbar { height: 42px; border-radius: 0; border-left: 0; border-right: 0; background: #131722; position: relative; z-index: 3; display: flex; align-items: center; gap: 8px; padding: 0 8px; }
 .tv-chart-toolbar .chart-ohlc { min-width: 0; white-space: nowrap; overflow: hidden; }
@@ -1209,6 +1212,7 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
   .editor-layout { grid-template-columns: 1fr; }
   .sticky-summary { position: static; }
   .tv-workspace { grid-template-columns: minmax(0, 1fr); }
+  .tv-side-column { display: none; } // 窄屏隐藏结构状态面板，优先图表宽度
   .tv-layer-panel { grid-column: 1 / -1; border-left: 0; border-top: 1px solid v.$color-border; display: grid; grid-template-columns: repeat(3, 1fr); max-height: none; }
   .tv-panel-head, .tv-layer-actions { grid-column: 1 / -1; }
   .tv-bottom-grid { grid-template-columns: 1fr; }
@@ -1377,6 +1381,27 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
   .tv-strategy-legend { gap: 4px; }
   .tv-strategy-legend-item { padding: 0 6px; }
 }
+
+// ===== V1.7 StockStructuralStatePanel 结构状态因子面板 =====
+.ssp-panel { display: flex; flex-direction: column; height: 100%; font-size: 11px; color: #c5ccd9; background: #0d1118; }
+.ssp-header { display: flex; justify-content: space-between; align-items: center; padding: 9px 10px; border-bottom: 1px solid #202633; background: #131722; }
+.ssp-title { font-weight: 600; font-size: 12px; color: #e1e6f0; }
+.ssp-as-of { font: 10px v.$font-mono; color: v.$color-muted; }
+.ssp-loading, .ssp-empty { padding: 24px 12px; text-align: center; color: v.$color-muted; font-size: 11px; }
+.ssp-degraded { padding: 6px 10px; background: #2a1a0e; color: #ffb74d; font-size: 10px; border-bottom: 1px solid #3a2a1a; cursor: help; }
+.ssp-tabs { display: flex; align-items: center; gap: 4px; padding: 6px 10px; border-bottom: 1px solid #202633; background: #11151d; }
+.ssp-tab { background: transparent; border: 1px solid transparent; color: v.$color-muted; font-size: 10px; padding: 3px 8px; border-radius: 3px; cursor: pointer; &.active { background: #1b2230; border-color: #2c3547; color: #c5ccd9; } &:hover { color: #e1e6f0; } }
+.ssp-tab-sep { color: #3a4357; font-size: 10px; }
+.ssp-cards { flex: 1; overflow-y: auto; padding: 6px 8px; display: flex; flex-direction: column; gap: 6px; }
+.ssp-card { background: #11151d; border: 1px solid #202633; border-radius: 4px; overflow: hidden; }
+.ssp-card-title { padding: 5px 8px; font-size: 10px; font-weight: 600; color: #9ca9be; background: #0f131b; border-bottom: 1px solid #202633; text-transform: uppercase; letter-spacing: .5px; }
+.ssp-card-body { padding: 4px 8px; }
+.ssp-row { display: flex; justify-content: space-between; align-items: center; padding: 2px 0; gap: 8px; }
+.ssp-label { color: v.$color-muted; font-size: 10px; flex-shrink: 0; }
+.ssp-value { color: #c5ccd9; font: 10px v.$font-mono; text-align: right; word-break: break-all; }
+.ssp-relation { padding: 6px 10px; border-top: 1px solid #202633; background: #11151d; }
+.ssp-detail { border-top: 1px solid #202633; background: #0f131b; summary { padding: 5px 10px; font-size: 10px; color: v.$color-muted; cursor: pointer; outline: none; &:hover { color: #c5ccd9; } } }
+.ssp-detail-pre { margin: 0; padding: 8px 10px; font: 9px v.$font-mono; color: #707b90; max-height: 200px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
 
 // ===== V1.6.3 StrategyChart 纯 Canvas 2D 补充样式 =====
 
