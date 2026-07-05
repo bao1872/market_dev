@@ -32,6 +32,7 @@ import numpy as np
 import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants.indicator_contract import DAILY_HISTORY_BARS
 from app.services.market_data_aggregation_service import (
     MarketDataAggregationService,
 )
@@ -50,8 +51,8 @@ from app.strategy_assets.algorithms.features.unified_volume_profile import (
 
 logger = logging.getLogger(__name__)
 
-# 固定参数
-_PRIMARY_LOOKBACK = 250
+# 固定参数（_PRIMARY_LOOKBACK 引用 DAILY_HISTORY_BARS 唯一真源，禁止硬编码 250）
+_PRIMARY_LOOKBACK = DAILY_HISTORY_BARS
 _SECONDARY_LOOKBACK = 500
 _SWING_LENGTH = 5  # TradingView 默认风格，左右各 5 根确认
 _BB_WIN = 20
@@ -626,9 +627,9 @@ def _extract_as_of(
 
 
 if __name__ == "__main__":
-    # 模块自测：用合成数据验证
+    # 模块自测：用合成数据验证（n 引用 DAILY_HISTORY_BARS 真源，避免硬编码受控字面量）
     rng = np.random.default_rng(42)
-    n = 250
+    n = DAILY_HISTORY_BARS
     closes = 100.0 + np.linspace(0, 20.0, n) + rng.normal(0, 2.0, n)
     intrabar = np.abs(rng.normal(0, 1.5, n)) + 0.5
     idx = pd.date_range("2025-01-01", periods=n, freq="B")
