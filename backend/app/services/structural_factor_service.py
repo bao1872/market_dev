@@ -174,7 +174,7 @@ def _compute_volatility_momentum_factors(
         return result
 
     closes = bars["close"].to_numpy(dtype=float)
-    last_close = closes[-1] if len(closes) > 0 else None
+    last_close: float | None = float(closes[-1]) if len(closes) > 0 else None
     last_atr = (
         float(atr[-1])
         if atr is not None and len(atr) > 0
@@ -191,7 +191,7 @@ def _compute_volatility_momentum_factors(
     last_upper = upper_arr[-1]
     last_lower = lower_arr[-1]
 
-    if np.isfinite(last_close) and np.isfinite(last_upper) and np.isfinite(last_lower):
+    if last_close is not None and np.isfinite(last_close) and np.isfinite(last_upper) and np.isfinite(last_lower):
         bw = last_upper - last_lower
         if bw > 0:
             result["bb_percent_b"] = float((last_close - last_lower) / bw)
@@ -503,7 +503,7 @@ def _compute_dsa_segment_factors(
                         result["prev_dsa_segment_slope_pct_per_bar"] = float(prev_return_pct / prev_age_bars)
 
                 # prev slope_atr_per_bar
-                prev_seg_atr = atr[prev_start_idx:prev_end_idx + 1] if atr is not None else None
+                prev_seg_atr: np.ndarray | None = atr[prev_start_idx:prev_end_idx + 1] if atr is not None else None
                 if prev_seg_atr is not None and np.any(np.isfinite(prev_seg_atr)) and prev_age_bars > 0:
                     mean_atr_prev = float(np.nanmean(prev_seg_atr))
                     if mean_atr_prev > 0:

@@ -21,7 +21,6 @@ from unittest.mock import MagicMock
 import numpy as np
 import pandas as pd
 
-from app.constants.indicator_contract import DAILY_HISTORY_BARS
 from app.services.structural_factor_service import (
     _compute_all_factors_for_bars,
     _compute_cost_position_factors,
@@ -33,8 +32,8 @@ from app.services.structural_factor_service import (
     compute_structural_factors,
     percentile_rank,
 )
-from app.strategy_assets.algorithms.features.atr_utils import compute_atr
 from app.strategy.selectors.dsa_selector import compute_dsa_bundle
+from app.strategy_assets.algorithms.features.atr_utils import compute_atr
 
 
 def _build_bars(n: int = 250, seed: int = 42) -> pd.DataFrame:
@@ -639,8 +638,6 @@ def test_participation_v18_segment_volume_null_when_no_dsa() -> None:
 # ===== 7f. V1.8 Relation 客观关系字段 =====
 def test_relation_v18_objective_fields() -> None:
     """V1.8 Relation：primary_dir、secondary_dir、trend_alignment 等。"""
-    bars1 = _build_bars(n=250, seed=42)
-    bars2 = _build_bars(n=250, seed=99)
     primary = {"dsa_segment": {"segment_dir": 1, "current_dsa_segment_slope_atr_per_bar": 0.5}}
     secondary = {"dsa_segment": {"segment_dir": -1, "current_dsa_segment_slope_atr_per_bar": -0.3},
                  "swing_position": {"price_position_in_swing_0_1": 0.7}}
