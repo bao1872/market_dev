@@ -70,9 +70,10 @@ Node Cluster 算法
 - 实时报价通过 `mergeRealtimeQuoteIntoBars` 合并到最后一根 K 线用于显示：1d 保留日期语义并跨日追加实时 bar，intraday（15m/1h 等）使用 `quote.update_time`；`baseBars` 仍用于指标计算，避免污染算法输入；
 - 顶部报价条优先使用实时报价，fallback 到最后一根 bar。
 - **结构状态因子面板（V1.8）**：右侧 340px 新增 `StockStructuralStatePanel` 组件，双列布局（图表 + 因子面板）；面板含 5 张卡片（DSA 段质量/Swing 结构位置/成本节点/动量波动/成交参与），双周期 tabs（1d/15m）切换；V1.8 约 50 字段（含 dsa_segment 段收益/斜率/效率/段级成交量、swing_range/price_position/retracement、price_vs_poc_atr/value_area_position、distance_to_bb_*_atr/sqz_on/sqz_off/sqzmom_abs_percentile、current_vs_prev_volume_ratio、客观 relation 字段 primary_dir/secondary_dir/trend_alignment/primary_slope_atr 等）；前端只渲染后端 DTO，禁止重新计算因子；API 失败显示"暂无数据"，null 字段显示"-"，`degraded_reasons` 显示警告条；bool 字段（sqz_on/sqz_off）以"是/否"展示；数据源 `useStructuralFactors` hook → `GET /api/v1/instruments/{id}/structural-factors`，交易时段 60s 轮询。
-  - **V1 默认隐藏**：面板默认不渲染，用户点击图表工具栏右侧「结构状态」开关后显示；`localStorage.showStructuralState` 持久化用户选择（默认 `null`/非 `"true"` 时隐藏）；
-  - **强制隐藏**：URL 参数 `?hideStructuralState=1` / `?capture=1` / `?capture=feishu` 任意一个命中即强制隐藏面板且禁用开关按钮（`toggleStructuralState` 回调 early return），忽略 `localStorage`；
+  - **V1 默认隐藏**：面板默认不渲染，用户点击图表上方 toolbar 右侧「显示结构状态」开关后显示；`localStorage.showStructuralState` 持久化用户选择（默认 `null`/非 `"true"` 时隐藏）；按钮文案动态切换（隐藏时「显示结构状态」，显示时「隐藏结构状态」）；
+  - **强制隐藏**：URL 参数 `?hideStructuralState=1` / `?capture=1` / `?capture=feishu` 任意一个命中即强制隐藏按钮和面板且禁用开关按钮（`toggleStructuralState` 回调 early return），忽略 `localStorage`；
   - **截图模式**：盘中监控截图发送飞书默认必须隐藏结构状态面板（`capture=feishu` 自动命中强制隐藏规则），截图默认只包含 K 线和基础信息；
+  - **时序特征 V1 卡片**：`StockStructuralStatePanel` 末尾折叠卡片渲染 `temporal-features` API DTO（daily_context 9 字段 + m15_response 9 字段 + derived_relation 3 字段 + meta），前端只渲染 DTO 不重算，null 显示「-」，`warmup_notes`/`degraded_reasons` 有内容时显示提示；卡片受同一个结构状态开关控制（默认随面板隐藏，用户打开面板后显示）；
   - 窄屏（≤1250px）保持现有单列行为。
 
 ### 消息与飞书

@@ -39,6 +39,7 @@ import type {
   ChangePlanRequest,
   PaginationParams,
   StructuralFactorQueryParams,
+  TemporalFeaturesQueryParams,
 } from '../api/endpoints'
 
 // ============================================================
@@ -1124,9 +1125,32 @@ export function useStructuralFactors(
 }
 
 // ============================================================
+// ===== Temporal Features hooks =====
+// ============================================================
+
+/**
+ * 查询指定标的的时序特征 V1（daily_context + m15_response + derived_relation）。
+ * 交易时段 60s 轮询，非交易时段不轮询。
+ * 前端只渲染后端 DTO，严禁重新计算。
+ */
+export function useTemporalFeatures(
+  instrumentId: string | undefined,
+  params?: TemporalFeaturesQueryParams,
+) {
+  return useQuery({
+    queryKey: ['temporal-features', instrumentId, params],
+    queryFn: () => api.getTemporalFeatures(instrumentId!, params),
+    enabled: !!instrumentId,
+    staleTime: STALE_WATCHLIST,
+    refetchInterval: () => isInTradingHours() ? 60000 : false,
+  })
+}
+
+// ============================================================
 // 类型重导出（方便页面直接引用）
 // ============================================================
 
 export type { UseQueryOptions }
 export type { QuoteResponse } from '../api/endpoints'
 export type { StructuralFactorQueryParams, StructuralFactorResponse } from '../api/endpoints'
+export type { TemporalFeaturesQueryParams, TemporalFeaturesResponse } from '../api/endpoints'
