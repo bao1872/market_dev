@@ -23,6 +23,10 @@
 - 行情聚合：尾部补齐、partial、degraded、页面/指标/截图同源；
 - 飞书：文字图片成功、partial_failed、仅重试图片、不重复文字、所有权；
 - 管理任务：真实 API、审计日志、run key、heartbeat、lease、stale recovery、Worker Git SHA。
+- SQZMOM_LB：
+  - 后端算法单元测试覆盖 Pine 等价（`dev = multKC * stdev`、`linreg offset=0`、`nz(val[1])` 颜色逻辑、数据不足不 500）；
+  - `indicator_service` 在 `compute_all_indicators` 中注入 `sqzmom_lb` 图层与序列；
+  - 前端 contract test 覆盖：开关默认关闭、renderer 已注册、独立 pane 分配、API 缺失不崩溃、前端不重新计算指标。
 
 ## 3.1 本轮新增回归
 

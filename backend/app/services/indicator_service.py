@@ -60,6 +60,7 @@ from app.services.chart_bars_service import (
 from app.services.market_data_aggregation_service import MarketDataAggregationService
 from app.services.strategy_batch_service import StrategyBatchService
 from app.strategy.runtime import MarketDataContext, StrategyLoader
+from app.strategy_assets.algorithms.features.sqzmom_lb import compute_sqzmom_lb
 
 logger = logging.getLogger("services.indicator_service")
 
@@ -462,6 +463,18 @@ async def compute_all_indicators(
         idx.isoformat() for idx in macd_bars.index
     ]
 
+    # [SQZMOM_LB 副图] - 复刻 LazyBear Pine 代码，逐行等价
+    # 不修正 dev = multKC * stdev(...)（Pine 原代码如此）
+    # 参数：length=20, mult=2.0, lengthKC=20, multKC=1.5, useTrueRange=True
+    # 复用 macd_bars（当前 timeframe 已选好的 bars），与 MACD 同源
+    sqzmom_indicators = compute_sqzmom_lb(
+        opens=macd_bars["open"].to_numpy(float),
+        highs=macd_bars["high"].to_numpy(float),
+        lows=macd_bars["low"].to_numpy(float),
+        closes=macd_bars["close"].to_numpy(float),
+        params={"length": 20, "mult": 2.0, "lengthKC": 20, "multKC": 1.5, "useTrueRange": True},
+    )
+
     # 复用 StrategyBatchService._get_latest_released_version 查询最新 released 版本
     batch_service = StrategyBatchService()
 
@@ -571,6 +584,34 @@ async def compute_all_indicators(
     macd_with_time = {**macd_indicators, "time": macd_time_list}
     data["macd"] = _to_json_safe(_truncate_lists(macd_with_time, bars))
 
+    # [SQZMOM_LB 副图] - 将 SQZMOM 作为全局图层注入 layers/data
+    # 字段命名加 sqzmom_ 前缀避免与其他策略字段冲突
+    sqzmom_renamed = {
+        "sqzmom_val": sqzmom_indicators["val"],
+        "sqzmom_bcolor": sqzmom_indicators["bcolor"],
+        "sqzmom_scolor": sqzmom_indicators["scolor"],
+        "sqzmom_sqz_on": sqzmom_indicators["sqzOn"],
+        "sqzmom_sqz_off": sqzmom_indicators["sqzOff"],
+        "sqzmom_no_sqz": sqzmom_indicators["noSqz"],
+        "params": sqzmom_indicators["params"],
+        "time": macd_time_list,  # 与 MACD 共用 timeframe bars 时间
+    }
+    layers.append({
+        "strategy_id": "sqzmom_lb",
+        "strategy_name": "SQZMOM_LB",
+        "layer_id": "sqzmom_lb",
+        "layer_name": "SQZMOM_LB",
+        "renderer": "sqzmom",
+        "pane": "sqzmom",
+        "color": "#26a69a",
+        "direction_colored": False,
+        "fields": ["sqzmom_val", "sqzmom_bcolor", "sqzmom_scolor",
+                    "sqzmom_sqz_on", "sqzmom_sqz_off", "sqzmom_no_sqz"],
+        "hover_fields": ["sqzmom_val", "sqzmom_bcolor", "sqzmom_scolor",
+                          "sqzmom_sqz_on", "sqzmom_sqz_off", "sqzmom_no_sqz"],
+    })
+    data["sqzmom_lb"] = _to_json_safe(_truncate_lists(sqzmom_renamed, bars))
+
     # [指标服务] - 返回计算窗口元信息，前端据此决定显示范围，不硬编码
     calculation_window = INDICATOR_BARS.get(timeframe, 800)
     warmup_bars = INDICATOR_WARMUP_BARS.get(timeframe, 60)
@@ -637,6 +678,32 @@ if __name__ == "__main__":
     assert _truncate_lists({"a": [1, 2], "b": 42}, 5) == {"a": [1, 2], "b": 42}, \
         "短列表和标量应保持不变"
     print("_truncate_lists 截取 ✓")
+
+    # 6. [SQZMOM_LB 副图] - 验证 compute_sqzmom_lb 可导入且签名正确
+    assert callable(compute_sqzmom_lb), "compute_sqzmom_lb 应可调用"
+    sig_sqzmom = inspect.signature(compute_sqzmom_lb)
+    sqzmom_params = list(sig_sqzmom.parameters.keys())
+    expected_sqzmom = ["opens", "highs", "lows", "closes", "params"]
+    assert sqzmom_params == expected_sqzmom, \
+        f"compute_sqzmom_lb 参数不匹配: {sqzmom_params} != {expected_sqzmom}"
+    print(f"compute_sqzmom_lb params={sqzmom_params} ✓")
+
+    # 7. [SQZMOM_LB 副图] - 验证小样本计算不抛异常
+    import numpy as np
+    rng = np.random.default_rng(42)
+    n = 60
+    closes_t = 100.0 + np.cumsum(rng.normal(0, 0.5, n))
+    highs_t = closes_t + np.abs(rng.normal(0, 1.0, n))
+    lows_t = closes_t - np.abs(rng.normal(0, 1.0, n))
+    opens_t = closes_t + rng.normal(0, 0.3, n)
+    sqzmom_result = compute_sqzmom_lb(
+        opens=opens_t, highs=highs_t, lows=lows_t, closes=closes_t,
+    )
+    assert "val" in sqzmom_result and "bcolor" in sqzmom_result
+    assert "sqzOn" in sqzmom_result and "sqzOff" in sqzmom_result
+    assert "noSqz" in sqzmom_result and "scolor" in sqzmom_result
+    assert sqzmom_result["params"]["bb_dev_uses"] == "multKC"
+    print(f"compute_sqzmom_lb full run OK (n={n}) ✓")
 
     # 5.1 验证 time 字段注入与截取（advice.md 第三节问题 2/3 修复）
     #   daily_time_list 与其他 list 字段一起被 _truncate_lists 截取，保持长度一致

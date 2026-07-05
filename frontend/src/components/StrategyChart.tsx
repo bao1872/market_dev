@@ -81,6 +81,7 @@ export interface LayerVisibility {
   bb: boolean
   delta: boolean
   events: boolean
+  sqzmom: boolean
 }
 
 export interface StrategyChartProps {
@@ -440,6 +441,7 @@ function geometry(layers: Set<string>, w: number, h: number): Geometry {
   const profileOn = layers.has('profile')
   const volumeOn = layers.has('volume')
   const macdOn = layers.has('macd')
+  const sqzmomOn = layers.has('sqzmom')
   const l = 58
   const axis = 57
   const profileW = profileOn ? 148 : 0
@@ -453,6 +455,11 @@ function geometry(layers: Set<string>, w: number, h: number): Geometry {
   if (macdOn) {
     panes.macd = { bottom: cursor, top: cursor - 82 }
     cursor = panes.macd.top - paneGap
+  }
+  // [SQZMOM_LB 副图] - 放在 MACD 上方（两个动量副图相邻），后端返回 val/bcolor/scolor 序列
+  if (sqzmomOn) {
+    panes.sqzmom = { bottom: cursor, top: cursor - 82 }
+    cursor = panes.sqzmom.top - paneGap
   }
   if (volumeOn) {
     panes.volume = { bottom: cursor, top: cursor - 76 }
@@ -711,6 +718,9 @@ function renderIndicatorLayer(
       break
     case 'macd':
       renderIndicatorMacd(ctx, g, layer, data, barsCount, step, displayTimes, timeframe)
+      break
+    case 'sqzmom':
+      renderIndicatorSqzmom(ctx, g, layer, data, barsCount, step, displayTimes, timeframe)
       break
   }
 }
@@ -1276,6 +1286,135 @@ function renderIndicatorMacd(
   }
 }
 
+// [SQZMOM_LB 副图] - 描述: 仅绘制后端返回的 sqzmom_val/sqzmom_bcolor/sqzmom_scolor，禁止前端重算
+// Pine 颜色 → Canvas hex 映射（与 TradingView Pine 内置颜色一致）：
+//   bcolor: lime(#00FF00) green(#008000) red(#FF0000) maroon(#800000)
+//   scolor: blue(#0000FF) black(#000000) gray(#808080)
+const SQZMOM_BCOLOR: Record<string, string> = {
+  lime: '#00FF00',
+  green: '#008000',
+  red: '#FF0000',
+  maroon: '#800000',
+}
+const SQZMOM_SCOLOR: Record<string, string> = {
+  blue: '#0000FF',
+  black: '#000000',
+  gray: '#808080',
+}
+
+function renderIndicatorSqzmom(
+  ctx: CanvasRenderingContext2D,
+  g: Geometry,
+  _layer: ChartLayer,
+  data: Record<string, (number | string | null)[]>,
+  _barsCount: number,
+  step: number,
+  displayTimes: string[],
+  timeframe: string,
+): void {
+  const p = g.panes.sqzmom
+  if (!p || !displayTimes.length) return
+
+  const vals = data.sqzmom_val
+  const bcolors = data.sqzmom_bcolor
+  const scolors = data.sqzmom_scolor
+  // [SQZMOM_LB 副图] - 描述: 早返回 guard，API 缺失 sqzmom_lb 时不崩溃
+  if (!vals?.length) return
+
+  // [chartViewport] - 描述: 用后端 time 数组与 K 线 time 数组按 normalizeChartTime 对齐
+  const timeIndex = buildTimeIndex(data.time, timeframe)
+  const indexes = displayTimes.map(t => {
+    const key = normalizeChartTime(t, timeframe)
+    return key != null ? timeIndex.get(key) : undefined
+  })
+
+  // 计算 val 范围（含 0 轴对称）
+  const visible: number[] = []
+  for (let i = 0; i < indexes.length; i++) {
+    const idx = indexes[i]
+    if (idx == null) continue
+    const v = vals[idx]
+    if (typeof v === 'number') visible.push(Math.abs(v))
+  }
+  const rawMax = visible.length ? Math.max(...visible) : 0
+  const bound = Math.max(0.0001, rawMax * 1.08)
+  const range = bound * 2
+
+  const my = (v: number) => p.bottom - (v + bound) / range * (p.bottom - p.top)
+
+  // 1. 零轴（虚线）
+  drawLine(ctx, g.l, my(0), g.plotRight, my(0), C.grid2, 1, [4, 3])
+
+  // 2. histogram 柱状图（颜色取自后端 sqzmom_bcolor）
+  const barW = Math.max(1.5, step * 0.62)
+  for (let i = 0; i < indexes.length; i++) {
+    const idx = indexes[i]
+    if (idx == null) continue
+    const v = vals[idx]
+    if (v == null || typeof v === 'string') continue
+    const vn = Number(v)
+    const x = g.l + (i + 0.5) * step
+    const y0 = my(0)
+    const y1 = my(vn)
+    // 颜色按 bar 取 sqzmom_bcolor，未识别时回退到红涨绿跌
+    const bc = bcolors?.[idx]
+    const colorHex = typeof bc === 'string' ? (SQZMOM_BCOLOR[bc] ?? (vn >= 0 ? '#ef5350' : '#26a69a')) : (vn >= 0 ? '#ef5350' : '#26a69a')
+    ctx.fillStyle = colorHex
+    ctx.fillRect(x - barW / 2, Math.min(y0, y1), barW, Math.max(1, Math.abs(y1 - y0)))
+  }
+
+  // 3. squeeze marker：在 0 轴画 cross 标记（颜色取自后端 sqzmom_scolor）
+  // Pine 原代码：plot(0, color=scolor, style=cross, linewidth=2)
+  for (let i = 0; i < indexes.length; i++) {
+    const idx = indexes[i]
+    if (idx == null) continue
+    const sc = scolors?.[idx]
+    if (typeof sc !== 'string') continue
+    const colorHex = SQZMOM_SCOLOR[sc]
+    if (!colorHex) continue
+    const x = g.l + (i + 0.5) * step
+    const y = my(0)
+    ctx.strokeStyle = colorHex
+    ctx.lineWidth = 1.5
+    ctx.beginPath()
+    ctx.moveTo(x - 3, y)
+    ctx.lineTo(x + 3, y)
+    ctx.moveTo(x, y - 3)
+    ctx.lineTo(x, y + 3)
+    ctx.stroke()
+  }
+
+  // 4. 右侧刻度标签
+  drawText(ctx, fmt(bound, 3), g.plotRight + 5, p.top + 9, C.text, '8px monospace')
+  drawText(ctx, fmt(-bound, 3), g.plotRight + 5, p.bottom - 2, C.text, '8px monospace')
+
+  // 5. 当前 val 标签
+  let lastVal: number | undefined
+  for (let i = indexes.length - 1; i >= 0; i--) {
+    const idx = indexes[i]
+    if (idx == null) continue
+    const v = vals[idx]
+    if (typeof v === 'number') { lastVal = v; break }
+  }
+  if (typeof lastVal === 'number') {
+    const yVal = my(lastVal)
+    // 用最后一个有效 bcolor 作为标签底色
+    let labelColor = '#26a69a'
+    for (let i = indexes.length - 1; i >= 0; i--) {
+      const idx = indexes[i]
+      if (idx == null) continue
+      const b = bcolors?.[idx]
+      if (typeof b === 'string' && SQZMOM_BCOLOR[b]) {
+        labelColor = SQZMOM_BCOLOR[b]
+        break
+      }
+    }
+    ctx.fillStyle = labelColor
+    ctx.fillRect(g.plotRight + 1, yVal - 7, 54, 14)
+    drawText(ctx, fmt(lastVal, 3), g.plotRight + 28, yVal + 3, '#fff', '8px monospace', 'center')
+  }
+}
+
 // ===== 事件映射与可见性 =====
 
 // 事件类型 -> 颜色
@@ -1536,6 +1675,8 @@ function drawTrading(
       if (layer.layer_id === 'bb' && (timeframe === '1w' || timeframe === '1mo')) return
       // [MACD 副图] - 受 macd 图层开关控制
       if (layer.layer_id === 'macd' && !layers.macd) return
+      // [SQZMOM_LB 副图] - 受 sqzmom 图层开关控制
+      if (layer.layer_id === 'sqzmom_lb' && !layers.sqzmom) return
       // [DSA 数据契约] - union 类型（DsaSelectorData | Record）按 Record 索引访问，dsa_polyline 渲染器内部再 cast 到 DsaSelectorData
       const layerData = indicators.data![layer.strategy_id] as Record<string, (number | string | null)[]>
       if (layerData) {
@@ -1644,6 +1785,7 @@ function getDefaultLayers(strategyId?: string): LayerVisibility {
     bb: false,
     delta: false,
     events: false,
+    sqzmom: false,
   }
   if (strategyId && STRATEGIES[strategyId]) {
     STRATEGIES[strategyId].defaultLayers.forEach(id => {
