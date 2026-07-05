@@ -63,6 +63,9 @@
 | Capture 页面契约 | frontend contract capture tests |
 | TypeScript/lint/build | CI blocking jobs |
 | K 线合并实时行情（1d 保留日期、intraday 使用 update_time、跨日追加） | `frontend/src/utils/__tests__/chart.test.ts` |
+| SQZMOM_LB 后端算法 Pine 等价 | `backend/tests/test_sqzmom_lb.py` |
+| SQZMOM_LB indicator service 注入 | `backend/tests/test_indicator_service.py` |
+| SQZMOM_LB 前端图层开关/副图/渲染契约 | `frontend/scripts/contract-tests/sqzmom-layer.test.ts` |
 
 ## 6. 文档和工程治理
 

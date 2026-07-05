@@ -434,5 +434,122 @@ def test_adapt_watchlist_bb_weekly_removes_bb() -> None:
     assert result["upper_node"] == {"price_mid": 10.0}
 
 
+# ===== SQZMOM_LB 副图集成测试 =====
+
+
+@pytest.mark.parametrize("timeframe", ["1d", "15m", "1h", "1w", "1mo"])
+async def test_sqzmom_layer_in_response(
+    mock_session: AsyncMock,
+    mock_bars: None,
+    empty_registry: None,
+    timeframe: str,
+) -> None:
+    """[SQZMOM_LB 副图] - 响应应包含 sqzmom_lb layer 和 data。
+
+    验证：
+    1. layers 列表包含 layer_id == "sqzmom_lb" 的条目
+    2. data["sqzmom_lb"] 包含 sqzmom_val/sqzmom_bcolor/sqzmom_scolor 等字段
+    3. time 数组与请求 timeframe 的 bars 时间对齐
+    4. 数据长度一致
+    """
+    result = await indicator_service.compute_all_indicators(
+        mock_session, TEST_INSTRUMENT_ID, timeframe, "none", bars=250,
+    )
+
+    # 1. 验证 layers 包含 sqzmom_lb
+    sqzmom_layer = None
+    for layer in result["layers"]:
+        if layer.get("layer_id") == "sqzmom_lb":
+            sqzmom_layer = layer
+            break
+    assert sqzmom_layer is not None, "layers 应包含 layer_id='sqzmom_lb'"
+    assert sqzmom_layer["renderer"] == "sqzmom"
+    assert sqzmom_layer["pane"] == "sqzmom"
+    assert "sqzmom_val" in sqzmom_layer["fields"]
+    assert "sqzmom_bcolor" in sqzmom_layer["fields"]
+    assert "sqzmom_scolor" in sqzmom_layer["fields"]
+
+    # 2. 验证 data["sqzmom_lb"] 存在且包含所有字段
+    sqzmom_data = result["data"].get("sqzmom_lb")
+    assert sqzmom_data is not None, "data 应包含 sqzmom_lb 键"
+    expected_fields = [
+        "sqzmom_val", "sqzmom_bcolor", "sqzmom_scolor",
+        "sqzmom_sqz_on", "sqzmom_sqz_off", "sqzmom_no_sqz",
+        "time",
+    ]
+    for field in expected_fields:
+        assert field in sqzmom_data, f"sqzmom_lb data 应包含字段 {field}"
+
+    # 3. 验证 time 与当前 timeframe bars 对齐
+    expected_bars = _build_bars(timeframe)
+    expected_last_time = expected_bars.index[-1]
+    last_time = pd.Timestamp(sqzmom_data["time"][-1])
+    assert last_time == expected_last_time, (
+        f"SQZMOM time 最后一个应与 {timeframe} bars 对齐: "
+        f"expected={expected_last_time}, actual={last_time}"
+    )
+
+    # 4. 验证所有数组长度一致
+    n = len(sqzmom_data["time"])
+    for field in ["sqzmom_val", "sqzmom_bcolor", "sqzmom_scolor",
+                   "sqzmom_sqz_on", "sqzmom_sqz_off", "sqzmom_no_sqz"]:
+        assert len(sqzmom_data[field]) == n, (
+            f"sqzmom_lb.{field} 长度应与 time 一致: expected={n}, actual={len(sqzmom_data[field])}"
+        )
+
+
+async def test_sqzmom_val_has_valid_values_after_warmup(
+    mock_session: AsyncMock,
+    mock_bars: None,
+    empty_registry: None,
+) -> None:
+    """[SQZMOM_LB 副图] - warmup 后 sqzmom_val 应有有效数值（None 比例不超过一半）。"""
+    result = await indicator_service.compute_all_indicators(
+        mock_session, TEST_INSTRUMENT_ID, "1d", "none", bars=250,
+    )
+
+    sqzmom_data = result["data"]["sqzmom_lb"]
+    val_arr = sqzmom_data["sqzmom_val"]
+    n = len(val_arr)
+    none_count = sum(1 for v in val_arr if v is None)
+    # mock 数据有 60 根，warmup 需要 length+lengthKC=40 根
+    # 实际返回 60 根（截取到 bars=250 但 mock 只有 60 根），所以至少 20 根应有效
+    assert none_count < n, "应至少有一个有效 val 值"
+    valid_count = n - none_count
+    assert valid_count >= 20, f"warmup 后应有足够有效值，实际 {valid_count}/{n}"
+
+
+async def test_sqzmom_bcolor_only_contains_valid_colors(
+    mock_session: AsyncMock,
+    mock_bars: None,
+    empty_registry: None,
+) -> None:
+    """[SQZMOM_LB 副图] - bcolor 只能是 lime/green/red/maroon。"""
+    result = await indicator_service.compute_all_indicators(
+        mock_session, TEST_INSTRUMENT_ID, "1d", "none", bars=250,
+    )
+
+    sqzmom_data = result["data"]["sqzmom_lb"]
+    valid_colors = {"lime", "green", "red", "maroon"}
+    for c in sqzmom_data["sqzmom_bcolor"]:
+        assert c in valid_colors, f"bcolor 应是合法颜色，实际 {c}"
+
+
+async def test_sqzmom_scolor_only_contains_valid_colors(
+    mock_session: AsyncMock,
+    mock_bars: None,
+    empty_registry: None,
+) -> None:
+    """[SQZMOM_LB 副图] - scolor 只能是 blue/black/gray。"""
+    result = await indicator_service.compute_all_indicators(
+        mock_session, TEST_INSTRUMENT_ID, "1d", "none", bars=250,
+    )
+
+    sqzmom_data = result["data"]["sqzmom_lb"]
+    valid_colors = {"blue", "black", "gray"}
+    for c in sqzmom_data["sqzmom_scolor"]:
+        assert c in valid_colors, f"scolor 应是合法颜色，实际 {c}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -64,6 +64,7 @@ Node Cluster 算法
 - K 线、指标和截图共享行情快照；
 - 展示 as_of、数据源、partial、degraded；
 - DSA 与 Node 图层可开关；
+- **SQZMOM_LB 图层开关**：位于技术指标分组，默认关闭；开启后在 K 线下方新增独立副图，使用后端返回的 `val` 渲染 histogram、`bcolor` 渲染柱色、`scolor` 渲染 0 轴 squeeze marker；前端只消费后端 DTO，不重新计算 `val`/`sqzOn`/`sqzOff`/`noSqz`；API 未返回 `sqzmom_lb` 时页面不崩溃；
 - 截图区设置 render-ready 标志；
 - 按 timeframe 请求对应根数（1d=250、15m=4000、1h=1200、1w=260、1mo=120、1m=2），与 Node Cluster / indicator_contract 对齐；
 - 实时报价通过 `mergeRealtimeQuoteIntoBars` 合并到最后一根 K 线用于显示：1d 保留日期语义并跨日追加实时 bar，intraday（15m/1h 等）使用 `quote.update_time`；`baseBars` 仍用于指标计算，避免污染算法输入；

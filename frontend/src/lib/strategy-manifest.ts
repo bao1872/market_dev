@@ -16,7 +16,8 @@ export type LayerRenderer =
   | 'horizontal_profile'
   | 'macd'
   | 'dsa_polyline'
-export type LayerPane = 'price' | 'price_right' | 'volume' | 'delta' | 'macd'
+  | 'sqzmom'
+export type LayerPane = 'price' | 'price_right' | 'volume' | 'delta' | 'macd' | 'sqzmom'
 
 export interface LayerDef {
   id: string
@@ -78,6 +79,17 @@ export const LAYERS: Record<string, LayerDef> = {
     pane: 'macd',
     color: '#f4c430',
     description: 'MACD 副图（DIF/DEA/Histogram），后端统一计算',
+    defaultVisible: false,
+  },
+  sqzmom: {
+    id: 'sqzmom',
+    name: 'SQZMOM_LB',
+    shortName: 'SQZMOM',
+    group: '技术指标',
+    renderer: 'sqzmom',
+    pane: 'sqzmom',
+    color: '#26a69a',
+    description: 'Squeeze Momentum [LazyBear] 副图，后端逐行复刻 Pine 代码',
     defaultVisible: false,
   },
   breakout: {
@@ -283,4 +295,5 @@ export const DISPLAY_GROUPS: Record<string, DisplayGroupDef> = {
   node: { id: 'node', name: '成交量节点', shortName: '节点', section: '监控策略', color: '#4f7cff', description: '筹码峰 · 节点区间 · POC · 事件标记', layers: ['profile', 'node', 'poc'], anchorLayer: 'node' },
   bb: { id: 'bb', name: '布林带', shortName: 'BB', section: '监控策略', color: '#9c27b0', description: '布林带 · SMA(20) ± 2σ', layers: ['bb'], anchorLayer: 'bb' },
   macd: { id: 'macd', name: 'MACD', shortName: 'MACD', section: '技术指标', color: '#f4c430', description: 'MACD 副图 · DIF/DEA/Histogram', layers: ['macd'], anchorLayer: 'macd' },
+  sqzmom: { id: 'sqzmom', name: 'SQZMOM_LB', shortName: 'SQZMOM', section: '技术指标', color: '#26a69a', description: 'Squeeze Momentum · LazyBear Pine 复刻', layers: ['sqzmom'], anchorLayer: 'sqzmom' },
 }

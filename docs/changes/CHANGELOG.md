@@ -2,6 +2,15 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-05: 个股详情页新增 SQZMOM_LB 指标图层
+
+- 后端新增 `app.strategy_assets.algorithms.features.sqzmom_lb`，逐行复刻 TradingView Pine `SQZMOM_LB`。
+- `indicator_service.compute_all_indicators` 注入 `sqzmom_lb` 数据与图层；`/api/v1/instruments/{instrument_id}/indicators` 响应新增 `data.sqzmom_lb`。
+- 前端 `StrategyChart.tsx` 新增 SQZMOM_LB 图层开关（默认关闭）和独立副图渲染；前端只消费后端 DTO，不重新计算指标。
+- 新增后端测试 21 个、前端 contract test 5 个；后端 49/49 passed，前端 63/63 contract test passed。
+- 更新 `docs/current/02-data-api-contracts.md`、`04-frontend-ux.md`、`05-testing-acceptance.md` 及相关 maps。
+- 新增 CHANGE-20260704-030。
+
 ## 2026-07-04 Phase I: 趋势选股 result_id 未回填修复 + 生产验证
 
 - PR #15 部署后发现 succeeded 行 `result_id` 全部为 None（PR #14 batch service 未回填）
