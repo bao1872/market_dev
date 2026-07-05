@@ -38,6 +38,7 @@ import type {
   RenewSubscriptionRequest,
   ChangePlanRequest,
   PaginationParams,
+  StructuralFactorQueryParams,
 } from '../api/endpoints'
 
 // ============================================================
@@ -1101,8 +1102,31 @@ export function useForceAfterCloseRun() {
 }
 
 // ============================================================
+// ===== Structural Factors hooks =====
+// ============================================================
+
+/**
+ * 查询指定标的的双周期结构状态因子（1d + 15m）。
+ * 交易时段 60s 轮询，非交易时段不轮询。
+ * 前端只渲染后端 DTO，严禁重新计算。
+ */
+export function useStructuralFactors(
+  instrumentId: string | undefined,
+  params?: StructuralFactorQueryParams,
+) {
+  return useQuery({
+    queryKey: ['structural-factors', instrumentId, params],
+    queryFn: () => api.getStructuralFactors(instrumentId!, params),
+    enabled: !!instrumentId,
+    staleTime: STALE_WATCHLIST,
+    refetchInterval: () => isInTradingHours() ? 60000 : false,
+  })
+}
+
+// ============================================================
 // 类型重导出（方便页面直接引用）
 // ============================================================
 
 export type { UseQueryOptions }
-export type { QuoteResponse } from '../api/endpoints' 
+export type { QuoteResponse } from '../api/endpoints'
+export type { StructuralFactorQueryParams, StructuralFactorResponse } from '../api/endpoints'

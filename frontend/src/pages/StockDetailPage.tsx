@@ -13,6 +13,7 @@ import { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom'
 import clsx from 'clsx'
 import StrategyChart from '@/components/StrategyChart'
+import { StockStructuralStatePanel } from '@/components/StockStructuralStatePanel'
 import type { ChartEvent } from '@/components/StrategyChart'
 import type { ChartViewport } from '@/components/chartViewport'
 import type { IndicatorResponse } from '@/api/endpoints'
@@ -693,8 +694,8 @@ export default function StockDetailPage() {
         </div>
       )}
 
-      {/* ===== 工作区：单列表布（完整图表宽度） ===== */}
-      <div className="tv-workspace">
+      {/* ===== 工作区：双列布局（图表 + 结构状态因子面板） ===== */}
+      <div className={clsx('tv-workspace', { 'capture-mode': isCaptureMode })}>
         {/* 图表区 */}
         <section className="tv-chart-column">
           {isBarsLoading ? (
@@ -726,6 +727,12 @@ export default function StockDetailPage() {
             </>
           )}
         </section>
+        {/* 结构状态因子面板（截图模式隐藏，节省截图宽度） */}
+        {!isCaptureMode && instrumentId && (
+          <aside className="tv-side-column">
+            <StockStructuralStatePanel instrumentId={instrumentId} />
+          </aside>
+        )}
       </div>
     </div>
   )
