@@ -55,6 +55,7 @@ from app.api.strategies import router as strategies_router
 from app.api.strategy_events import router as strategy_events_router
 from app.api.strategy_runs import router as strategy_runs_router
 from app.api.structural_factors import router as structural_factors_router
+from app.api.temporal_features import router as temporal_features_router
 from app.api.watchlist import router as watchlist_router
 from app.db import AsyncSessionLocal
 
@@ -176,6 +177,8 @@ app.include_router(stock_memos_router)
 app.include_router(stock_detail_feishu_router)
 # 结构状态因子路由（个股详情页右侧面板）
 app.include_router(structural_factors_router)
+# 时序特征路由（个股详情页 temporal features V1）
+app.include_router(temporal_features_router)
 # 公开端点路由（内测申请，无需登录）
 app.include_router(public_beta_router)
 # 公开套餐列表路由（无需登录）

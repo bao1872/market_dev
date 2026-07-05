@@ -51,6 +51,26 @@ export default function StockDetailPage() {
   const source = (searchParams.get('source') || 'watchlist') as 'selection' | 'watchlist'
   const strategy = searchParams.get('strategy') || STRATEGY_KEYS.WATCHLIST_MONITOR
   const isCaptureMode = searchParams.get('capture') === 'feishu'
+  // [结构状态隐藏开关] - 描述: hideStructuralState=1 / capture=1 / capture=feishu 强制隐藏面板
+  const hideStructuralStateParam =
+    searchParams.get('hideStructuralState') === '1' ||
+    searchParams.get('capture') === '1' ||
+    isCaptureMode
+
+  // [结构状态开关] - 描述: 默认隐藏，用户点击显示，localStorage 持久化；强制隐藏时忽略 localStorage
+  const [showStructuralState, setShowStructuralState] = useState<boolean>(() => {
+    if (hideStructuralStateParam) return false
+    return localStorage.getItem('showStructuralState') === 'true'
+  })
+  const toggleStructuralState = useCallback(() => {
+    if (hideStructuralStateParam) return
+    setShowStructuralState(prev => {
+      const next = !prev
+      localStorage.setItem('showStructuralState', String(next))
+      return next
+    })
+  }, [hideStructuralStateParam])
+  const shouldShowPanel = showStructuralState && !hideStructuralStateParam
 
   // 根据 source + strategy 调用 manifest.resolveStrategy 确定默认图层集
   const strategyDef = useMemo(() => resolveStrategy(source, strategy), [source, strategy])
@@ -695,7 +715,7 @@ export default function StockDetailPage() {
       )}
 
       {/* ===== 工作区：双列布局（图表 + 结构状态因子面板） ===== */}
-      <div className={clsx('tv-workspace', { 'capture-mode': isCaptureMode })}>
+      <div className={clsx('tv-workspace', { 'capture-mode': isCaptureMode, 'hide-structural-state': !shouldShowPanel })}>
         {/* 图表区 */}
         <section className="tv-chart-column">
           {isBarsLoading ? (
@@ -727,11 +747,23 @@ export default function StockDetailPage() {
             </>
           )}
         </section>
-        {/* 结构状态因子面板（截图模式隐藏，节省截图宽度） */}
-        {!isCaptureMode && instrumentId && (
+        {/* 结构状态因子面板（默认隐藏，用户开关控制；截图模式强制隐藏） */}
+        {shouldShowPanel && instrumentId && (
           <aside className="tv-side-column">
             <StockStructuralStatePanel instrumentId={instrumentId} />
           </aside>
+        )}
+        {/* 结构状态开关按钮（强制隐藏时不渲染） */}
+        {!hideStructuralStateParam && instrumentId && (
+          <button
+            type="button"
+            className="structural-state-toggle"
+            onClick={toggleStructuralState}
+            aria-label="切换结构状态面板"
+          >
+            <span className="structural-state-toggle-icon">{showStructuralState ? '◀' : '▶'}</span>
+            <span className="structural-state-toggle-label">结构状态</span>
+          </button>
         )}
       </div>
     </div>
