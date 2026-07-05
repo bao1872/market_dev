@@ -593,6 +593,7 @@ async def compute_all_indicators(
         "sqzmom_sqz_on": sqzmom_indicators["sqzOn"],
         "sqzmom_sqz_off": sqzmom_indicators["sqzOff"],
         "sqzmom_no_sqz": sqzmom_indicators["noSqz"],
+        "params": sqzmom_indicators["params"],
         "time": macd_time_list,  # 与 MACD 共用 timeframe bars 时间
     }
     layers.append({
