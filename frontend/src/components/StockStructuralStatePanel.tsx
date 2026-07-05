@@ -58,35 +58,79 @@ function fmtDir(value: unknown): string {
   return String(value)
 }
 
-// ===== 卡片配置 =====
+// [V1.8] - 描述: bool 字段格式化为 是/否
+function fmtBool(value: unknown): string {
+  if (value === null || value === undefined) return '-'
+  if (typeof value === 'boolean') return value ? '是' : '否'
+  return String(value)
+}
+
+// ===== 卡片配置（V1.8 扩展字段）=====
 const CARDS: Array<{ title: string; group: FactorGroup; rows: FactorRow[] }> = [
   {
     title: 'DSA 段质量',
     group: 'dsa_segment',
     rows: [
+      // V1.7 保留字段
       { label: '段 ID', key: 'segment_id', format: fmtInt },
       { label: '方向', key: 'segment_dir', format: fmtDir },
       { label: '起始价', key: 'segment_start_price', format: fmtPrice },
       { label: '持续 bar', key: 'age_bars', format: fmtInt },
       { label: '幅度/ATR', key: 'segment_extents_pct', format: (v) => fmt(v, 2) },
+      // V1.8 基础字段
+      { label: 'DSA VWAP', key: 'dsa_value', format: fmtPrice },
+      { label: 'close vs DSA / ATR', key: 'price_vs_dsa_atr', format: (v) => fmt(v, 3) },
+      // V1.8 当前段字段
+      { label: '当前段 ID', key: 'current_dsa_segment_id', format: fmtInt },
+      { label: '当前段方向', key: 'current_dsa_segment_dir', format: fmtDir },
+      { label: '当前段持续 bar', key: 'current_dsa_segment_age_bars', format: fmtInt },
+      { label: '当前段收益 %', key: 'current_dsa_segment_return_pct', format: fmtPct },
+      { label: '当前段斜率 %/bar', key: 'current_dsa_segment_slope_pct_per_bar', format: (v) => fmt(v, 4) },
+      { label: '当前段斜率 ATR/bar', key: 'current_dsa_segment_slope_atr_per_bar', format: (v) => fmt(v, 4) },
+      { label: '当前段效率', key: 'current_dsa_segment_efficiency_0_1', format: (v) => fmt(v, 3) },
+      { label: '当前段成交量', key: 'current_segment_volume_sum', format: fmtInt },
+      // V1.8 前一段字段
+      { label: '前段方向', key: 'prev_dsa_segment_dir', format: fmtDir },
+      { label: '前段持续 bar', key: 'prev_dsa_segment_age_bars', format: fmtInt },
+      { label: '前段收益 %', key: 'prev_dsa_segment_return_pct', format: fmtPct },
+      { label: '前段效率', key: 'prev_dsa_segment_efficiency_0_1', format: (v) => fmt(v, 3) },
+      // V1.8 段间对比字段
+      { label: '收益绝对比', key: 'segment_return_abs_ratio', format: (v) => fmt(v, 3) },
+      { label: '斜率绝对比', key: 'segment_slope_abs_ratio', format: (v) => fmt(v, 3) },
+      { label: '持续时长比', key: 'segment_duration_ratio', format: (v) => fmt(v, 3) },
+      { label: '效率差值', key: 'segment_efficiency_delta', format: (v) => fmt(v, 4) },
+      { label: '当前/前段量比', key: 'current_vs_prev_volume_ratio', format: (v) => fmt(v, 3) },
+      { label: '当前段收益/量', key: 'current_segment_return_per_volume', format: (v) => fmt(v, 8) },
+      { label: '前段收益/量', key: 'prev_segment_return_per_volume', format: (v) => fmt(v, 8) },
+      { label: '收益/量比', key: 'return_per_volume_ratio', format: (v) => fmt(v, 3) },
+      { label: '每1%收益量', key: 'volume_per_1pct_return', format: fmtInt },
     ],
   },
   {
     title: 'Swing 结构位置',
     group: 'swing_position',
     rows: [
+      // V1.7 保留字段
       { label: '最近 swing high', key: 'confirmed_swing_high', format: fmtPrice },
       { label: '最近 swing low', key: 'confirmed_swing_low', format: fmtPrice },
       { label: '距 high bar 数', key: 'bars_since_swing_high', format: fmtInt },
       { label: '距 low bar 数', key: 'bars_since_swing_low', format: fmtInt },
       { label: 'close vs high', key: 'swing_high_to_close_pct', format: fmtPct },
       { label: 'close vs low', key: 'swing_low_to_close_pct', format: fmtPct },
+      // V1.8 新增字段
+      { label: 'Swing 范围', key: 'swing_range', format: fmtPrice },
+      { label: '位置 [0,1]', key: 'price_position_in_swing_0_1', format: (v) => fmt(v, 3) },
+      { label: '距 high / ATR', key: 'distance_to_swing_high_atr', format: (v) => fmt(v, 3) },
+      { label: '距 low / ATR', key: 'distance_to_swing_low_atr', format: (v) => fmt(v, 3) },
+      { label: '高点回撤', key: 'retracement_from_high_0_1', format: (v) => fmt(v, 3) },
+      { label: '低点反弹', key: 'rebound_from_low_0_1', format: (v) => fmt(v, 3) },
     ],
   },
   {
     title: '成本/节点',
     group: 'cost_position',
     rows: [
+      // V1.7 保留字段
       { label: 'POC', key: 'poc_price', format: fmtPrice },
       { label: '上方节点', key: 'nearest_upper_node', format: (v) => {
         if (v === null || v === undefined) return '-'
@@ -104,26 +148,50 @@ const CARDS: Array<{ title: string; group: FactorGroup; rows: FactorRow[] }> = [
       } },
       { label: '位置 [0,1]', key: 'position_0_1', format: (v) => fmt(v, 3) },
       { label: 'close vs POC', key: 'close_to_poc_pct', format: fmtPct },
+      // V1.8 新增字段
+      { label: 'close vs POC / ATR', key: 'price_vs_poc_atr', format: (v) => fmt(v, 3) },
+      { label: 'VA 位置 [0,1]', key: 'value_area_position_0_1', format: (v) => fmt(v, 3) },
+      { label: '上方节点价', key: 'nearest_node_above_price', format: fmtPrice },
+      { label: '下方节点价', key: 'nearest_node_below_price', format: fmtPrice },
+      { label: '距上方节点 / ATR', key: 'distance_to_node_above_atr', format: (v) => fmt(v, 3) },
+      { label: '距下方节点 / ATR', key: 'distance_to_node_below_atr', format: (v) => fmt(v, 3) },
+      { label: '上方节点强度', key: 'node_above_strength', format: fmtInt },
+      { label: '下方节点强度', key: 'node_below_strength', format: fmtInt },
     ],
   },
   {
     title: '动量/波动',
     group: 'volatility_momentum',
     rows: [
+      // V1.7 保留字段
       { label: 'BB %B', key: 'bb_percent_b', format: (v) => fmt(v, 3) },
       { label: 'BB 带宽', key: 'bb_bandwidth_pct', format: (v) => fmt(v, 3) },
       { label: 'BB 带宽分位', key: 'bb_bandwidth_percentile', format: fmtPct },
       { label: 'SQZMOM val', key: 'sqzmom_val', format: (v) => fmt(v, 4) },
       { label: 'SQZMOM Δ1', key: 'sqzmom_delta_1', format: (v) => fmt(v, 4) },
       { label: 'SQZMOM 分位', key: 'sqzmom_percentile', format: fmtPct },
+      // V1.8 新增字段
+      { label: '距 BB 上轨 / ATR', key: 'distance_to_bb_upper_atr', format: (v) => fmt(v, 3) },
+      { label: '距 BB 下轨 / ATR', key: 'distance_to_bb_lower_atr', format: (v) => fmt(v, 3) },
+      { label: 'SQZMOM 绝对分位', key: 'sqzmom_abs_percentile', format: fmtPct },
+      { label: 'Squeeze On', key: 'sqz_on', format: fmtBool },
+      { label: 'Squeeze Off', key: 'sqz_off', format: fmtBool },
     ],
   },
   {
     title: '成交参与',
     group: 'participation',
     rows: [
+      // V1.7 保留字段
       { label: '量比 20', key: 'volume_ratio_20', format: (v) => fmt(v, 3) },
       { label: '量能 120 分位', key: 'volume_percentile_120', format: fmtPct },
+      // V1.8 段级成交量字段（从 dsa_segment 共享）
+      { label: '当前段成交量', key: 'current_segment_volume_sum', format: fmtInt },
+      { label: '前段成交量', key: 'prev_segment_volume_sum', format: fmtInt },
+      { label: '当前/前段量比', key: 'current_vs_prev_volume_ratio', format: (v) => fmt(v, 3) },
+      { label: '当前段收益/量', key: 'current_segment_return_per_volume', format: (v) => fmt(v, 8) },
+      { label: '前段收益/量', key: 'prev_segment_return_per_volume', format: (v) => fmt(v, 8) },
+      { label: '收益/量比', key: 'return_per_volume_ratio', format: (v) => fmt(v, 3) },
     ],
   },
 ]
@@ -244,19 +312,44 @@ export function StockStructuralStatePanel({
         ))}
       </div>
 
-      {/* 对比关系 */}
-      {(data.relation.trend_alignment || data.relation.momentum_alignment) && (
+      {/* 对比关系（V1.8 客观关系字段，移除动量一致性事件字段）*/}
+      {(data.relation.primary_dir !== null && data.relation.primary_dir !== undefined) ||
+      (data.relation.secondary_dir !== null && data.relation.secondary_dir !== undefined) ? (
         <div className="ssp-relation">
+          <div className="ssp-row">
+            <span className="ssp-label">主周期方向</span>
+            <span className="ssp-value">{fmtDir(data.relation.primary_dir)}</span>
+          </div>
+          <div className="ssp-row">
+            <span className="ssp-label">副周期方向</span>
+            <span className="ssp-value">{fmtDir(data.relation.secondary_dir)}</span>
+          </div>
           <div className="ssp-row">
             <span className="ssp-label">趋势一致性</span>
             <span className="ssp-value">{data.relation.trend_alignment ?? '-'}</span>
           </div>
           <div className="ssp-row">
-            <span className="ssp-label">动量一致性</span>
-            <span className="ssp-value">{data.relation.momentum_alignment ?? '-'}</span>
+            <span className="ssp-label">主周期 Swing 位置</span>
+            <span className="ssp-value">{fmt(data.relation.primary_swing_position, 3)}</span>
+          </div>
+          <div className="ssp-row">
+            <span className="ssp-label">副周期 Swing 位置</span>
+            <span className="ssp-value">{fmt(data.relation.secondary_swing_position, 3)}</span>
+          </div>
+          <div className="ssp-row">
+            <span className="ssp-label">主周期斜率 ATR</span>
+            <span className="ssp-value">{fmt(data.relation.primary_slope_atr, 4)}</span>
+          </div>
+          <div className="ssp-row">
+            <span className="ssp-label">副周期斜率 ATR</span>
+            <span className="ssp-value">{fmt(data.relation.secondary_slope_atr, 4)}</span>
+          </div>
+          <div className="ssp-row">
+            <span className="ssp-label">副 vs 主 位置差</span>
+            <span className="ssp-value">{fmt(data.relation.secondary_vs_primary_position_delta, 3)}</span>
           </div>
         </div>
-      )}
+      ) : null}
 
       {/* 明细折叠 */}
       <details className="ssp-detail">
