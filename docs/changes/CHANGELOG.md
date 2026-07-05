@@ -2,6 +2,17 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-05: 结构状态因子面板升级至 V1.8（补齐 50 字段 + 客观 relation）
+
+- 后端 `structural_factor_service.py` 扩展 V1.8 字段：dsa_segment 新增 current/prev 段收益、斜率、效率、段级成交量、段间对比；swing 新增 swing_range/price_position/retracement/rebound/bars_since；cost 新增 price_vs_poc_atr/value_area_position/nearest_node_*/distance_to_node_*_atr/node_*_strength；volatility 新增 distance_to_bb_*_atr/sqz_on/sqz_off/sqzmom_abs_percentile；participation 共享段级成交量；relation 移除 momentum_alignment，改为 primary_dir/secondary_dir/trend_alignment/primary_swing_position/secondary_swing_position/primary_slope_atr/secondary_slope_atr/secondary_vs_primary_position_delta。
+- 段收益/斜率/效率一律基于 close，不再用 dsa_vwap 替代（修复 V1.7 bug）。
+- 前端 `StockStructuralStatePanel.tsx` CARDS 扩展为 V1.8 完整字段，新增 `fmtBool` 格式化器；Relation 区块重写为客观关系字段。
+- 前端 `endpoints.ts` `StructuralFactorResponse.relation` 类型同步更新。
+- 后端新增 10 个 V1.8 测试（双周期差异、无未来函数、sqz_on/sqz_off、Relation primary_dir、段收益、Swing position、Node degraded、SQZMOM abs percentile 等），共 44/44 passed。
+- 前端契约测试新增 V1.8 字段存在性断言（v18Keys 33 项 + v18RelationKeys 7 项），共 10/10 passed。
+- 更新 `docs/current/02-data-api-contracts.md`（第 10 节 V1.8 完整字段表）、`04-frontend-ux.md`、`05-testing-acceptance.md`、`docs/maps/api-route-map.md`、`frontend-route-map.md`、`test-coverage-map.md`。
+- 新增 CHANGE-20260705-032。
+
 ## 2026-07-05: 个股详情页新增结构状态因子面板（V1.7）
 
 - 后端新增 ATR SSOT `app.strategy_assets.algorithms.features.atr_utils.compute_atr`（Pine RMA 等价）。

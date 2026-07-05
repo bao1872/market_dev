@@ -2280,14 +2280,21 @@ export interface StructuralFactorQueryParams {
  * 结构状态因子响应
  * 包含双周期 (1d + 15m) 5 组结构因子 + relation + meta
  *
+ * V1.8：relation 移除 momentum_alignment，新增客观关系字段
  * 前端只渲染后端 DTO，严禁重新计算。
  */
 export interface StructuralFactorResponse {
   primary: Record<string, Record<string, unknown> | null>
   secondary: Record<string, Record<string, unknown> | null>
   relation: {
+    primary_dir?: number | null
+    secondary_dir?: number | null
     trend_alignment?: string | null
-    momentum_alignment?: string | null
+    primary_swing_position?: number | null
+    secondary_swing_position?: number | null
+    primary_slope_atr?: number | null
+    secondary_slope_atr?: number | null
+    secondary_vs_primary_position_delta?: number | null
     notes?: string[]
   }
   meta: {

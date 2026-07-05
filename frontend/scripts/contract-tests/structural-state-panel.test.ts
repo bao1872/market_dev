@@ -155,3 +155,84 @@ test('Frontend does not recompute factors', () => {
     )
   }
 })
+
+// ===== 9. V1.8 核心字段存在性检查 =====
+test('Panel includes V1.8 core fields in CARDS', () => {
+  const src = readSource(PANEL_PATH)
+
+  // V1.8 新增字段必须出现在 CARDS 配置中（key 字符串）
+  const v18Keys = [
+    // DSA segment V1.8
+    'dsa_value',
+    'price_vs_dsa_atr',
+    'current_dsa_segment_age_bars',
+    'current_dsa_segment_return_pct',
+    'current_dsa_segment_slope_atr_per_bar',
+    'current_dsa_segment_efficiency_0_1',
+    'current_segment_volume_sum',
+    'prev_dsa_segment_dir',
+    'segment_return_abs_ratio',
+    'current_vs_prev_volume_ratio',
+    'return_per_volume_ratio',
+    // Swing V1.8
+    'swing_range',
+    'price_position_in_swing_0_1',
+    'distance_to_swing_high_atr',
+    'distance_to_swing_low_atr',
+    'retracement_from_high_0_1',
+    'rebound_from_low_0_1',
+    // Cost position V1.8
+    'price_vs_poc_atr',
+    'value_area_position_0_1',
+    'nearest_node_above_price',
+    'nearest_node_below_price',
+    'distance_to_node_above_atr',
+    'distance_to_node_below_atr',
+    'node_above_strength',
+    'node_below_strength',
+    // Volatility V1.8
+    'distance_to_bb_upper_atr',
+    'distance_to_bb_lower_atr',
+    'sqzmom_abs_percentile',
+    'sqz_on',
+    'sqz_off',
+    // Participation V1.8 (shared from dsa_segment)
+    'prev_segment_volume_sum',
+    'current_segment_return_per_volume',
+    'prev_segment_return_per_volume',
+  ]
+  for (const key of v18Keys) {
+    assert.ok(
+      src.includes(`'${key}'`),
+      `Panel CARDS 必须包含 V1.8 字段 '${key}'`,
+    )
+  }
+})
+
+// ===== 10. V1.8 Relation 区块字段检查 =====
+test('Panel relation section uses V1.8 objective fields', () => {
+  const src = readSource(PANEL_PATH)
+
+  // V1.8 relation 必须包含客观关系字段
+  const v18RelationKeys = [
+    'primary_dir',
+    'secondary_dir',
+    'primary_swing_position',
+    'secondary_swing_position',
+    'primary_slope_atr',
+    'secondary_slope_atr',
+    'secondary_vs_primary_position_delta',
+  ]
+  for (const key of v18RelationKeys) {
+    assert.ok(
+      src.includes(`data.relation.${key}`),
+      `Panel relation 区块必须引用 V1.8 字段 'data.relation.${key}'`,
+    )
+  }
+
+  // V1.8 移除 momentum_alignment
+  assert.ok(
+    !/momentum_alignment/.test(src),
+    'Panel V1.8 必须移除 momentum_alignment 引用',
+  )
+})

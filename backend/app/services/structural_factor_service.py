@@ -86,19 +86,27 @@ def percentile_rank(
 
 
 # =============================================================================
-# 因子组 1：成交参与
+# 因子组 1：成交参与（V1.8 含段级成交量）
 # =============================================================================
-def _compute_participation_factors(bars: pd.DataFrame) -> dict[str, Any]:
+def _compute_participation_factors(
+    bars: pd.DataFrame,
+    dsa_segment_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """计算成交参与因子。
 
     Returns:
-        dict with:
-        - volume_ratio_20: last_volume / SMA(volume, 20)
-        - volume_percentile_120: last_volume 在 120 日内的百分位
+        V1.7 保留字段 + V1.8 段级成交量字段（从 dsa_segment 共享）
     """
     result: dict[str, Any] = {
         "volume_ratio_20": None,
         "volume_percentile_120": None,
+        # V1.8 段级成交量字段（从 dsa_segment 共享）
+        "current_segment_volume_sum": None,
+        "prev_segment_volume_sum": None,
+        "current_vs_prev_volume_ratio": None,
+        "current_segment_return_per_volume": None,
+        "prev_segment_return_per_volume": None,
+        "return_per_volume_ratio": None,
     }
     if bars is None or len(bars) < 20 or "volume" not in bars.columns:
         return result
@@ -112,6 +120,21 @@ def _compute_participation_factors(bars: pd.DataFrame) -> dict[str, Any]:
     result["volume_percentile_120"] = percentile_rank(
         last_vol, volumes, _PERCENTILE_LOOKBACK
     )
+
+    # V1.8 从 dsa_segment 共享段级成交量字段
+    if dsa_segment_result is not None:
+        for key in [
+            "current_segment_volume_sum",
+            "prev_segment_volume_sum",
+            "current_vs_prev_volume_ratio",
+            "current_segment_return_per_volume",
+            "prev_segment_return_per_volume",
+            "return_per_volume_ratio",
+        ]:
+            val = dsa_segment_result.get(key)
+            if val is not None:
+                result[key] = val
+
     return result
 
 
@@ -123,14 +146,15 @@ def _compute_volatility_momentum_factors(
 ) -> dict[str, Any]:
     """计算动量/波动因子 (Bollinger Bands + SQZMOM_LB)。
 
+    V1.8 新增字段：
+    - distance_to_bb_upper_atr: (close - bb_upper) / last_atr
+    - distance_to_bb_lower_atr: (close - bb_lower) / last_atr
+    - sqzmom_abs_percentile: abs(sqzmom_val) 在 abs(sqzmom_series) 120 日内的百分位
+    - sqz_on: 最后一根 bar 是否 squeeze on（bool）
+    - sqz_off: 最后一根 bar 是否 squeeze off（bool）
+
     Returns:
-        dict with:
-        - bb_percent_b: (close - lower) / (upper - lower)
-        - bb_bandwidth_pct: (upper - lower) / mid
-        - bb_bandwidth_percentile: bandwidth 在 120 日内的百分位
-        - sqzmom_val: SQZMOM linreg 值
-        - sqzmom_delta_1: val[-1] - val[-2]
-        - sqzmom_percentile: val 在 120 日内的百分位
+        V1.7 保留字段 + V1.8 新增字段
     """
     result: dict[str, Any] = {
         "bb_percent_b": None,
@@ -139,22 +163,35 @@ def _compute_volatility_momentum_factors(
         "sqzmom_val": None,
         "sqzmom_delta_1": None,
         "sqzmom_percentile": None,
+        # V1.8 新增字段
+        "distance_to_bb_upper_atr": None,
+        "distance_to_bb_lower_atr": None,
+        "sqzmom_abs_percentile": None,
+        "sqz_on": None,
+        "sqz_off": None,
     }
     if bars is None or len(bars) < _BB_WIN + 10:
         return result
 
     closes = bars["close"].to_numpy(dtype=float)
+    last_close: float | None = float(closes[-1]) if len(closes) > 0 else None
+    last_atr = (
+        float(atr[-1])
+        if atr is not None and len(atr) > 0
+        and np.isfinite(atr[-1]) and atr[-1] > 0
+        else None
+    )
+
     # Bollinger Bands
     mid, upper, lower = bollinger(bars, _BB_WIN, _BB_K)
     mid_arr = mid.to_numpy(dtype=float)
     upper_arr = upper.to_numpy(dtype=float)
     lower_arr = lower.to_numpy(dtype=float)
-    last_close = closes[-1]
     last_mid = mid_arr[-1]
     last_upper = upper_arr[-1]
     last_lower = lower_arr[-1]
 
-    if np.isfinite(last_close) and np.isfinite(last_upper) and np.isfinite(last_lower):
+    if last_close is not None and np.isfinite(last_close) and np.isfinite(last_upper) and np.isfinite(last_lower):
         bw = last_upper - last_lower
         if bw > 0:
             result["bb_percent_b"] = float((last_close - last_lower) / bw)
@@ -165,6 +202,14 @@ def _compute_volatility_momentum_factors(
         result["bb_bandwidth_percentile"] = percentile_rank(
             result["bb_bandwidth_pct"], bandwidth_series, _PERCENTILE_LOOKBACK
         )
+        # V1.8 distance_to_bb_upper/lower_atr
+        if last_atr is not None:
+            result["distance_to_bb_upper_atr"] = float(
+                (last_close - last_upper) / last_atr
+            )
+            result["distance_to_bb_lower_atr"] = float(
+                (last_close - last_lower) / last_atr
+            )
 
     # SQZMOM_LB
     opens = bars["open"].to_numpy(dtype=float) if "open" in bars.columns else closes
@@ -172,6 +217,13 @@ def _compute_volatility_momentum_factors(
     lows = bars["low"].to_numpy(dtype=float) if "low" in bars.columns else closes
     sqz = compute_sqzmom_lb(opens, highs, lows, closes)
     val_list = sqz.get("val", [])
+    # V1.8 sqz_on / sqz_off（bool 列表，取最后一根 bar）
+    sqz_on_list = sqz.get("sqzOn", []) or []
+    sqz_off_list = sqz.get("sqzOff", []) or []
+    if sqz_on_list:
+        result["sqz_on"] = bool(sqz_on_list[-1])
+    if sqz_off_list:
+        result["sqz_off"] = bool(sqz_off_list[-1])
     if val_list:
         last_val = val_list[-1]
         if last_val is not None:
@@ -184,11 +236,16 @@ def _compute_volatility_momentum_factors(
             result["sqzmom_percentile"] = percentile_rank(
                 float(last_val), val_arr, _PERCENTILE_LOOKBACK
             )
+            # V1.8 sqzmom_abs_percentile: 基于 abs 值的百分位
+            abs_val_arr = np.abs(val_arr)
+            result["sqzmom_abs_percentile"] = percentile_rank(
+                abs(float(last_val)), abs_val_arr, _PERCENTILE_LOOKBACK
+            )
     return result
 
 
 # =============================================================================
-# 因子组 3：Swing 结构位置
+# 因子组 3：Swing 结构位置（V1.8 完整位置分析）
 # =============================================================================
 def _compute_swing_factors(
     bars: pd.DataFrame, atr: np.ndarray | None = None
@@ -196,13 +253,7 @@ def _compute_swing_factors(
     """计算 Swing 结构位置因子（已确认 pivot，无未来函数）。
 
     Returns:
-        dict with:
-        - confirmed_swing_high: 最后一个已确认 swing high 价格
-        - confirmed_swing_low: 最后一个已确认 swing low 价格
-        - bars_since_swing_high: 距离最后一个 swing high 的 bar 数
-        - bars_since_swing_low: 距离最后一个 swing low 的 bar 数
-        - swing_high_to_close_pct: (close - swing_high) / swing_high
-        - swing_low_to_close_pct: (close - swing_low) / swing_low
+        V1.7 保留字段 + V1.8 新增字段（swing_range/position/atr_distance/retracement）
     """
     result: dict[str, Any] = {
         "confirmed_swing_high": None,
@@ -211,6 +262,13 @@ def _compute_swing_factors(
         "bars_since_swing_low": None,
         "swing_high_to_close_pct": None,
         "swing_low_to_close_pct": None,
+        # V1.8 新增字段
+        "swing_range": None,
+        "price_position_in_swing_0_1": None,
+        "distance_to_swing_high_atr": None,
+        "distance_to_swing_low_atr": None,
+        "retracement_from_high_0_1": None,
+        "rebound_from_low_0_1": None,
     }
     if bars is None or len(bars) < 2 * _SWING_LENGTH + 1:
         return result
@@ -219,6 +277,9 @@ def _compute_swing_factors(
     lows = bars["low"].to_numpy(dtype=float)
     closes = bars["close"].to_numpy(dtype=float)
     ph, pl, ph_anchor, pl_anchor = _tv_pivots_confirmed(highs, lows, _SWING_LENGTH)
+
+    last_close = closes[-1] if len(closes) > 0 else None
+    last_atr = float(atr[-1]) if atr is not None and len(atr) > 0 and np.isfinite(atr[-1]) and atr[-1] > 0 else None
 
     # 找最后一个非 NaN 的 swing high
     ph_valid = np.where(np.isfinite(ph))[0]
@@ -229,10 +290,14 @@ def _compute_swing_factors(
         ) else last_ph_idx
         result["confirmed_swing_high"] = float(ph[last_ph_idx])
         result["bars_since_swing_high"] = int(len(highs) - 1 - last_ph_anchor)
-        last_close = closes[-1]
-        if np.isfinite(last_close) and ph[last_ph_idx] > 0:
+        if last_close is not None and np.isfinite(last_close) and ph[last_ph_idx] > 0:
             result["swing_high_to_close_pct"] = float(
                 (last_close - ph[last_ph_idx]) / ph[last_ph_idx]
+            )
+        # V1.8 distance_to_swing_high_atr
+        if last_close is not None and last_atr is not None:
+            result["distance_to_swing_high_atr"] = float(
+                (last_close - ph[last_ph_idx]) / last_atr
             )
 
     # 找最后一个非 NaN 的 swing low
@@ -244,34 +309,52 @@ def _compute_swing_factors(
         ) else last_pl_idx
         result["confirmed_swing_low"] = float(pl[last_pl_idx])
         result["bars_since_swing_low"] = int(len(lows) - 1 - last_pl_anchor)
-        last_close = closes[-1]
-        if np.isfinite(last_close) and pl[last_pl_idx] > 0:
+        if last_close is not None and np.isfinite(last_close) and pl[last_pl_idx] > 0:
             result["swing_low_to_close_pct"] = float(
                 (last_close - pl[last_pl_idx]) / pl[last_pl_idx]
+            )
+        # V1.8 distance_to_swing_low_atr
+        if last_close is not None and last_atr is not None:
+            result["distance_to_swing_low_atr"] = float(
+                (last_close - pl[last_pl_idx]) / last_atr
+            )
+
+    # V1.8 swing_range / position / retracement / rebound
+    sh = result["confirmed_swing_high"]
+    sl = result["confirmed_swing_low"]
+    if sh is not None and sl is not None:
+        swing_range = sh - sl
+        result["swing_range"] = float(swing_range)
+        if last_close is not None and swing_range > 0:
+            result["price_position_in_swing_0_1"] = float(
+                (last_close - sl) / swing_range
+            )
+            result["retracement_from_high_0_1"] = float(
+                (sh - last_close) / swing_range
+            )
+            result["rebound_from_low_0_1"] = float(
+                (last_close - sl) / swing_range
             )
     return result
 
 
 # =============================================================================
-# 因子组 4：DSA 段质量
+# 因子组 4：DSA 段质量（V1.8 完整段分析）
 # =============================================================================
 def _compute_dsa_segment_factors(
-    bars: pd.DataFrame, dsa_bundle: dict[str, Any]
+    bars: pd.DataFrame,
+    dsa_bundle: dict[str, Any],
+    atr: np.ndarray | None = None,
 ) -> dict[str, Any]:
-    """计算 DSA 段质量因子。
+    """计算 DSA 段质量因子（V1.8 完整段分析）。
 
     从 visual_segments[-1] 推导当前段，visual_segments[-2] 推导前一段。
-    segment_id 用 factor_per_bar["regime_id"] 最后一个值。
+    段收益/斜率/效率一律基于 close 或 segment 实际端点价格，不用 dsa_vwap 替代价格。
 
     Returns:
-        dict with:
-        - segment_id: 当前段 ID
-        - segment_dir: 当前段方向 (1/-1)
-        - segment_start_price: 当前段起始价格
-        - segment_start_bar_index: 当前段起始 bar index
-        - age_bars: 当前段已持续的 bar 数
-        - segment_extents_pct: 当前段价格幅度 / ATR
+        V1.7 保留字段 + V1.8 新增字段（基础/当前段/前一段/段间对比）
     """
+    # V1.7 保留字段
     result: dict[str, Any] = {
         "segment_id": None,
         "segment_dir": None,
@@ -279,56 +362,233 @@ def _compute_dsa_segment_factors(
         "segment_start_bar_index": None,
         "age_bars": None,
         "segment_extents_pct": None,
+        # V1.8 基础字段
+        "dsa_value": None,
+        "price_vs_dsa_atr": None,
+        # V1.8 当前段字段
+        "current_dsa_segment_id": None,
+        "current_dsa_segment_dir": None,
+        "current_dsa_segment_age_bars": None,
+        "current_dsa_segment_return_pct": None,
+        "current_dsa_segment_slope_pct_per_bar": None,
+        "current_dsa_segment_slope_atr_per_bar": None,
+        "current_dsa_segment_efficiency_0_1": None,
+        "current_segment_volume_sum": None,
+        # V1.8 前一段字段
+        "prev_dsa_segment_dir": None,
+        "prev_dsa_segment_age_bars": None,
+        "prev_dsa_segment_return_pct": None,
+        "prev_dsa_segment_slope_pct_per_bar": None,
+        "prev_dsa_segment_slope_atr_per_bar": None,
+        "prev_dsa_segment_efficiency_0_1": None,
+        "prev_segment_volume_sum": None,
+        # V1.8 段间对比字段
+        "segment_return_abs_ratio": None,
+        "segment_slope_abs_ratio": None,
+        "segment_duration_ratio": None,
+        "segment_efficiency_delta": None,
+        "current_vs_prev_volume_ratio": None,
+        "current_segment_return_per_volume": None,
+        "prev_segment_return_per_volume": None,
+        "return_per_volume_ratio": None,
+        "volume_per_1pct_return": None,
     }
     factor_per_bar = dsa_bundle.get("factor_per_bar")
     visual_segments = dsa_bundle.get("visual_segments", [])
     if factor_per_bar is None or factor_per_bar.empty or len(visual_segments) == 0:
         return result
 
-    # 当前段 = visual_segments[-1]
+    closes = bars["close"].to_numpy(dtype=float) if "close" in bars.columns else None
+    volumes = bars["volume"].to_numpy(dtype=float) if "volume" in bars.columns else None
+    last_bar_index = len(bars) - 1
+    last_close = float(closes[-1]) if closes is not None else None
+    last_atr = float(atr[-1]) if atr is not None and len(atr) > 0 and np.isfinite(atr[-1]) else None
+
+    # ========== 基础字段 ==========
+    if "dsa_vwap" in factor_per_bar.columns:
+        dsa_val = factor_per_bar["dsa_vwap"].iloc[-1]
+        if pd.notna(dsa_val):
+            result["dsa_value"] = float(dsa_val)
+            if last_close is not None and last_atr is not None and last_atr > 0:
+                result["price_vs_dsa_atr"] = float((last_close - float(dsa_val)) / last_atr)
+
+    # ========== 当前段 = visual_segments[-1] ==========
     current_seg = visual_segments[-1]
-    points = current_seg.get("points", [])
-    if not points:
+    cur_points = current_seg.get("points", [])
+    if not cur_points:
         return result
 
-    # segment_id: regime_id 最后一个值
+    # V1.7 保留字段（segment_start_price 仍用 points[0].value）
+    cur_start_price = float(cur_points[0]["value"])
+    cur_dir = int(current_seg.get("direction", 0))
     if "regime_id" in factor_per_bar.columns:
-        result["segment_id"] = int(factor_per_bar["regime_id"].iloc[-1])
+        cur_seg_id = factor_per_bar["regime_id"].iloc[-1]
+        if pd.notna(cur_seg_id):
+            result["segment_id"] = int(cur_seg_id)
+            result["current_dsa_segment_id"] = int(cur_seg_id)
+    result["segment_dir"] = cur_dir
+    result["current_dsa_segment_dir"] = cur_dir
+    result["segment_start_price"] = cur_start_price
 
-    # segment_dir
-    result["segment_dir"] = int(current_seg.get("direction", 0))
+    # 定位当前段起始 bar index
+    cur_start_bar_idx = _find_bar_index_by_time(factor_per_bar.index, cur_points[0].get("time"))
+    if cur_start_bar_idx is not None:
+        result["segment_start_bar_index"] = int(cur_start_bar_idx)
+        cur_age_bars = last_bar_index - cur_start_bar_idx + 1
+        result["age_bars"] = int(last_bar_index - 1 - cur_start_bar_idx)  # V1.7 保留旧公式
+        result["current_dsa_segment_age_bars"] = int(cur_age_bars)
 
-    # segment_start_price: 第一个 point 的 value
-    result["segment_start_price"] = float(points[0]["value"])
+        # 段内 close/volume/atr
+        seg_closes = closes[cur_start_bar_idx:last_bar_index + 1] if closes is not None else None
+        seg_volumes = volumes[cur_start_bar_idx:last_bar_index + 1] if volumes is not None else None
+        seg_atr = atr[cur_start_bar_idx:last_bar_index + 1] if atr is not None else None
 
-    # segment_start_bar_index: 通过 points[0]["time"] 匹配 factor_per_bar.index
-    start_time = points[0].get("time")
-    if start_time is not None:
-        try:
-            start_ts = pd.Timestamp(start_time)
-            idx_array = factor_per_bar.index
-            # 找到匹配的 bar index
-            match_mask = idx_array == start_ts
-            if match_mask.any():
-                start_bar_idx = int(np.where(match_mask)[0][0])
-                result["segment_start_bar_index"] = start_bar_idx
-                result["age_bars"] = len(factor_per_bar) - 1 - start_bar_idx
-        except (ValueError, TypeError):
-            pass
-
-    # segment_extents_pct: (last_close - start_price) / |start_price|
-    last_close = float(factor_per_bar["dsa_vwap"].iloc[-1]) if "dsa_vwap" in factor_per_bar.columns else None
-    if last_close is not None and result["segment_start_price"] is not None:
-        start_price = result["segment_start_price"]
-        if abs(start_price) > 0:
+        # segment_extents_pct: 基于 close 修复 bug
+        if last_close is not None and abs(cur_start_price) > 0:
             result["segment_extents_pct"] = float(
-                (last_close - start_price) / abs(start_price)
+                (last_close - cur_start_price) / abs(cur_start_price)
             )
+
+        # current_dsa_segment_return_pct = close_last / current_start_price - 1
+        if last_close is not None and cur_start_price > 0:
+            cur_return_pct = last_close / cur_start_price - 1.0
+            result["current_dsa_segment_return_pct"] = float(cur_return_pct)
+            # slope_pct_per_bar
+            if cur_age_bars > 0:
+                result["current_dsa_segment_slope_pct_per_bar"] = float(cur_return_pct / cur_age_bars)
+
+        # current_dsa_segment_slope_atr_per_bar
+        if (last_close is not None and seg_atr is not None and cur_age_bars > 0
+                and np.any(np.isfinite(seg_atr))):
+            mean_atr = float(np.nanmean(seg_atr))
+            if mean_atr > 0:
+                result["current_dsa_segment_slope_atr_per_bar"] = float(
+                    (last_close - cur_start_price) / (mean_atr * cur_age_bars)
+                )
+
+        # current_dsa_segment_efficiency_0_1
+        if seg_closes is not None and len(seg_closes) >= 2 and last_close is not None:
+            diffs = np.abs(np.diff(seg_closes))
+            path_sum = float(np.nansum(diffs))
+            net = abs(last_close - cur_start_price)
+            if path_sum > 0:
+                result["current_dsa_segment_efficiency_0_1"] = float(net / path_sum)
+
+        # current_segment_volume_sum
+        if seg_volumes is not None:
+            result["current_segment_volume_sum"] = float(np.nansum(seg_volumes))
+
+    # ========== 前一段 = visual_segments[-2] ==========
+    if len(visual_segments) >= 2:
+        prev_seg = visual_segments[-2]
+        prev_points = prev_seg.get("points", [])
+        if len(prev_points) >= 2:
+            prev_start_price = float(prev_points[0]["value"])
+            prev_end_price = float(prev_points[-1]["value"])
+            prev_dir = int(prev_seg.get("direction", 0))
+            result["prev_dsa_segment_dir"] = prev_dir
+
+            # 定位前一段 bar index
+            prev_start_idx = _find_bar_index_by_time(factor_per_bar.index, prev_points[0].get("time"))
+            prev_end_idx = _find_bar_index_by_time(factor_per_bar.index, prev_points[-1].get("time"))
+            if prev_start_idx is not None and prev_end_idx is not None and prev_end_idx >= prev_start_idx:
+                prev_age_bars = prev_end_idx - prev_start_idx + 1
+                result["prev_dsa_segment_age_bars"] = int(prev_age_bars)
+
+                # prev return
+                if prev_start_price > 0:
+                    prev_return_pct = prev_end_price / prev_start_price - 1.0
+                    result["prev_dsa_segment_return_pct"] = float(prev_return_pct)
+                    if prev_age_bars > 0:
+                        result["prev_dsa_segment_slope_pct_per_bar"] = float(prev_return_pct / prev_age_bars)
+
+                # prev slope_atr_per_bar
+                prev_seg_atr: np.ndarray | None = atr[prev_start_idx:prev_end_idx + 1] if atr is not None else None
+                if prev_seg_atr is not None and np.any(np.isfinite(prev_seg_atr)) and prev_age_bars > 0:
+                    mean_atr_prev = float(np.nanmean(prev_seg_atr))
+                    if mean_atr_prev > 0:
+                        result["prev_dsa_segment_slope_atr_per_bar"] = float(
+                            (prev_end_price - prev_start_price) / (mean_atr_prev * prev_age_bars)
+                        )
+
+                # prev efficiency
+                prev_seg_closes = closes[prev_start_idx:prev_end_idx + 1] if closes is not None else None
+                if prev_seg_closes is not None and len(prev_seg_closes) >= 2:
+                    prev_diffs = np.abs(np.diff(prev_seg_closes))
+                    prev_path_sum = float(np.nansum(prev_diffs))
+                    prev_net = abs(prev_end_price - prev_start_price)
+                    if prev_path_sum > 0:
+                        result["prev_dsa_segment_efficiency_0_1"] = float(prev_net / prev_path_sum)
+
+                # prev volume sum
+                prev_seg_volumes = volumes[prev_start_idx:prev_end_idx + 1] if volumes is not None else None
+                if prev_seg_volumes is not None:
+                    result["prev_segment_volume_sum"] = float(np.nansum(prev_seg_volumes))
+
+        # ========== 段间对比字段 ==========
+        cur_ret = result["current_dsa_segment_return_pct"]
+        prev_ret = result["prev_dsa_segment_return_pct"]
+        cur_slope_atr = result["current_dsa_segment_slope_atr_per_bar"]
+        prev_slope_atr = result["prev_dsa_segment_slope_atr_per_bar"]
+        cur_age = result["current_dsa_segment_age_bars"]
+        prev_age = result["prev_dsa_segment_age_bars"]
+        cur_eff = result["current_dsa_segment_efficiency_0_1"]
+        prev_eff = result["prev_dsa_segment_efficiency_0_1"]
+        cur_vol_sum = result["current_segment_volume_sum"]
+        prev_vol_sum = result["prev_segment_volume_sum"]
+
+        if cur_ret is not None and prev_ret is not None and abs(prev_ret) > 0:
+            result["segment_return_abs_ratio"] = float(abs(cur_ret) / abs(prev_ret))
+        if cur_slope_atr is not None and prev_slope_atr is not None and abs(prev_slope_atr) > 0:
+            result["segment_slope_abs_ratio"] = float(abs(cur_slope_atr) / abs(prev_slope_atr))
+        if cur_age is not None and prev_age is not None and prev_age > 0:
+            result["segment_duration_ratio"] = float(cur_age / prev_age)
+        if cur_eff is not None and prev_eff is not None:
+            result["segment_efficiency_delta"] = float(cur_eff - prev_eff)
+        if cur_vol_sum is not None and prev_vol_sum is not None and prev_vol_sum > 0:
+            result["current_vs_prev_volume_ratio"] = float(cur_vol_sum / prev_vol_sum)
+
+        # return per volume
+        cur_rpv = cur_ret / cur_vol_sum if (cur_ret is not None and cur_vol_sum and cur_vol_sum > 0) else None
+        prev_rpv = prev_ret / prev_vol_sum if (prev_ret is not None and prev_vol_sum and prev_vol_sum > 0) else None
+        if cur_rpv is not None:
+            result["current_segment_return_per_volume"] = float(cur_rpv)
+        if prev_rpv is not None:
+            result["prev_segment_return_per_volume"] = float(prev_rpv)
+        if cur_rpv is not None and prev_rpv is not None and abs(prev_rpv) > 0:
+            result["return_per_volume_ratio"] = float(cur_rpv / prev_rpv)
+        if cur_ret is not None and abs(cur_ret) > 0 and cur_vol_sum is not None and cur_vol_sum > 0:
+            result["volume_per_1pct_return"] = float(cur_vol_sum / abs(cur_ret * 100))
+
     return result
 
 
+def _find_bar_index_by_time(
+    idx_array: pd.Index, time_str: str | None
+) -> int | None:
+    """通过时间字符串匹配 pandas Index，返回位置 index。
+
+    Args:
+        idx_array: pandas Index（DatetimeIndex）
+        time_str: "YYYY-MM-DD" 格式的时间字符串
+
+    Returns:
+        位置 index（int）或 None
+    """
+    if time_str is None:
+        return None
+    try:
+        ts = pd.Timestamp(time_str)
+        match_mask = idx_array == ts
+        if match_mask.any():
+            return int(np.where(match_mask)[0][0])
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
 # =============================================================================
-# 因子组 5：成本/节点
+# 因子组 5：成本/节点（V1.8 完整成本分析）
 # =============================================================================
 def _compute_cost_position_factors(
     bars: pd.DataFrame, atr: np.ndarray | None = None
@@ -336,12 +596,7 @@ def _compute_cost_position_factors(
     """计算成本/节点因子 (Volume Profile / POC / Node)。
 
     Returns:
-        dict with:
-        - poc_price: POC 价格
-        - nearest_upper_node: 上方最近节点 {price_mid, price_low, price_high}
-        - nearest_lower_node: 下方最近节点
-        - position_0_1: close 在 [lowest, highest] 中的位置 [0,1]
-        - close_to_poc_pct: (close - poc) / poc
+        V1.7 保留字段 + V1.8 新增字段（atr_distance/value_area/node_strength）
     """
     result: dict[str, Any] = {
         "poc_price": None,
@@ -349,6 +604,15 @@ def _compute_cost_position_factors(
         "nearest_lower_node": None,
         "position_0_1": None,
         "close_to_poc_pct": None,
+        # V1.8 新增字段
+        "price_vs_poc_atr": None,
+        "value_area_position_0_1": None,
+        "nearest_node_above_price": None,
+        "nearest_node_below_price": None,
+        "distance_to_node_above_atr": None,
+        "distance_to_node_below_atr": None,
+        "node_above_strength": None,
+        "node_below_strength": None,
     }
     if bars is None or len(bars) < 20:
         return result
@@ -367,6 +631,8 @@ def _compute_cost_position_factors(
     if not np.isfinite(last_close):
         return result
 
+    last_atr = float(atr[-1]) if atr is not None and len(atr) > 0 and np.isfinite(atr[-1]) and atr[-1] > 0 else None
+
     # POC
     try:
         poc = vp_result.poc_price
@@ -374,8 +640,22 @@ def _compute_cost_position_factors(
             result["poc_price"] = float(poc)
             if poc > 0:
                 result["close_to_poc_pct"] = float((last_close - poc) / poc)
+            # V1.8 price_vs_poc_atr
+            if last_atr is not None:
+                result["price_vs_poc_atr"] = float((last_close - poc) / last_atr)
     except Exception as exc:
         logger.warning("POC 提取失败: %s", exc)
+
+    # V1.8 value_area_position_0_1
+    try:
+        vah = vp_result.vah_price
+        val = vp_result.val_price
+        if np.isfinite(vah) and np.isfinite(val) and (vah - val) != 0:
+            result["value_area_position_0_1"] = float(
+                (last_close - val) / (vah - val)
+            )
+    except Exception as exc:
+        logger.warning("value_area_position 计算失败: %s", exc)
 
     # nearest nodes
     try:
@@ -383,17 +663,39 @@ def _compute_cost_position_factors(
         upper = nodes.get("upper_node")
         lower = nodes.get("lower_node")
         if upper is not None:
+            upper_mid = float(upper.get("price_mid", 0))
             result["nearest_upper_node"] = {
-                "price_mid": float(upper.get("price_mid", 0)),
+                "price_mid": upper_mid,
                 "price_low": float(upper.get("price_low", 0)),
                 "price_high": float(upper.get("price_high", 0)),
             }
+            result["nearest_node_above_price"] = upper_mid
+            # V1.8 distance_to_node_above_atr
+            if last_atr is not None:
+                result["distance_to_node_above_atr"] = float(
+                    (last_close - upper_mid) / last_atr
+                )
+            # V1.8 node_above_strength from peak_df
+            result["node_above_strength"] = _lookup_node_strength(
+                vp_result, upper_mid
+            )
         if lower is not None:
+            lower_mid = float(lower.get("price_mid", 0))
             result["nearest_lower_node"] = {
-                "price_mid": float(lower.get("price_mid", 0)),
+                "price_mid": lower_mid,
                 "price_low": float(lower.get("price_low", 0)),
                 "price_high": float(lower.get("price_high", 0)),
             }
+            result["nearest_node_below_price"] = lower_mid
+            # V1.8 distance_to_node_below_atr
+            if last_atr is not None:
+                result["distance_to_node_below_atr"] = float(
+                    (last_close - lower_mid) / last_atr
+                )
+            # V1.8 node_below_strength from peak_df
+            result["node_below_strength"] = _lookup_node_strength(
+                vp_result, lower_mid
+            )
     except Exception as exc:
         logger.warning("Node 提取失败: %s", exc)
 
@@ -406,6 +708,35 @@ def _compute_cost_position_factors(
         logger.warning("position_0_1 计算失败: %s", exc)
 
     return result
+
+
+def _lookup_node_strength(vp_result: Any, price_mid: float) -> float | None:
+    """从 peak_df 按 price_mid 精确匹配 total_volume。
+
+    Args:
+        vp_result: UnifiedVolumeProfileResult
+        price_mid: 节点的 price_mid 值
+
+    Returns:
+        total_volume（float）或 None
+    """
+    try:
+        peak_df = getattr(vp_result, "peak_df", None)
+        if peak_df is None or peak_df.empty or "price_mid" not in peak_df.columns:
+            return None
+        # 精确匹配 price_mid（round 4 与 _node_row_to_json 对齐）
+        matched = peak_df[peak_df["price_mid"] == price_mid]
+        if matched.empty:
+            # 尝试近似匹配（浮点容差）
+            matched = peak_df[np.isclose(peak_df["price_mid"], price_mid, atol=1e-4)]
+        if matched.empty or "total_volume" not in matched.columns:
+            return None
+        val = matched["total_volume"].iloc[0]
+        if pd.notna(val) and val > 0:
+            return float(val)
+    except Exception:
+        pass
+    return None
 
 
 # =============================================================================
@@ -545,7 +876,7 @@ def _compute_all_factors_for_bars(
     # 1. DSA 段质量
     try:
         dsa_bundle = compute_dsa_bundle(bars, {})
-        factors["dsa_segment"] = _compute_dsa_segment_factors(bars, dsa_bundle)
+        factors["dsa_segment"] = _compute_dsa_segment_factors(bars, dsa_bundle, atr)
     except Exception as exc:
         degraded_reasons.append(f"{timeframe}: dsa_segment failed: {exc}")
         logger.warning("%s DSA 段质量计算失败: %s", timeframe, exc)
@@ -571,9 +902,11 @@ def _compute_all_factors_for_bars(
         degraded_reasons.append(f"{timeframe}: volatility_momentum failed: {exc}")
         logger.warning("%s 动量/波动计算失败: %s", timeframe, exc)
 
-    # 5. 成交参与
+    # 5. 成交参与（V1.8 从 dsa_segment 共享段级成交量字段）
     try:
-        factors["participation"] = _compute_participation_factors(bars)
+        factors["participation"] = _compute_participation_factors(
+            bars, factors.get("dsa_segment")
+        )
     except Exception as exc:
         degraded_reasons.append(f"{timeframe}: participation failed: {exc}")
         logger.warning("%s 成交参与计算失败: %s", timeframe, exc)
@@ -584,31 +917,63 @@ def _compute_all_factors_for_bars(
 def _compute_relation(
     primary: dict[str, Any], secondary: dict[str, Any]
 ) -> dict[str, Any]:
-    """计算 primary vs secondary 对比关系。"""
+    """计算 primary vs secondary 对比关系（V1.8 客观关系字段）。
+
+    V1.8 变更：
+    - 移除 momentum_alignment（按 spec "不要输出事件，只输出客观关系"）
+    - 新增 primary_dir/secondary_dir/trend_alignment/primary_swing_position/
+      secondary_swing_position/primary_slope_atr/secondary_slope_atr/
+      secondary_vs_primary_position_delta
+
+    Returns:
+        dict with V1.8 客观关系字段（不输出事件）
+    """
     relation: dict[str, Any] = {
+        "primary_dir": None,
+        "secondary_dir": None,
         "trend_alignment": None,
-        "momentum_alignment": None,
+        "primary_swing_position": None,
+        "secondary_swing_position": None,
+        "primary_slope_atr": None,
+        "secondary_slope_atr": None,
+        "secondary_vs_primary_position_delta": None,
         "notes": [],
     }
-    # 提取关键值
+
+    # 提取 DSA 段方向（优先 V1.8 current_dsa_segment_dir，fallback V1.7 segment_dir）
     p_dsa = primary.get("dsa_segment") or {}
     s_dsa = secondary.get("dsa_segment") or {}
-    p_dir = p_dsa.get("segment_dir")
-    s_dir = s_dsa.get("segment_dir")
+    p_dir = p_dsa.get("current_dsa_segment_dir")
+    if p_dir is None:
+        p_dir = p_dsa.get("segment_dir")
+    s_dir = s_dsa.get("current_dsa_segment_dir")
+    if s_dir is None:
+        s_dir = s_dsa.get("segment_dir")
+
+    relation["primary_dir"] = p_dir
+    relation["secondary_dir"] = s_dir
     if p_dir is not None and s_dir is not None:
         relation["trend_alignment"] = "aligned" if p_dir == s_dir else "divergent"
 
-    p_sqz = primary.get("volatility_momentum") or {}
-    s_sqz = secondary.get("volatility_momentum") or {}
-    p_val = p_sqz.get("sqzmom_val")
-    s_val = s_sqz.get("sqzmom_val")
-    if p_val is not None and s_val is not None:
-        if p_val > 0 and s_val > 0:
-            relation["momentum_alignment"] = "both_bullish"
-        elif p_val < 0 and s_val < 0:
-            relation["momentum_alignment"] = "both_bearish"
-        else:
-            relation["momentum_alignment"] = "mixed"
+    # 提取 swing_position（V1.8 price_position_in_swing_0_1）
+    p_swing = primary.get("swing_position") or {}
+    s_swing = secondary.get("swing_position") or {}
+    p_swing_pos = p_swing.get("price_position_in_swing_0_1")
+    s_swing_pos = s_swing.get("price_position_in_swing_0_1")
+    relation["primary_swing_position"] = p_swing_pos
+    relation["secondary_swing_position"] = s_swing_pos
+    if p_swing_pos is not None and s_swing_pos is not None:
+        relation["secondary_vs_primary_position_delta"] = float(
+            s_swing_pos - p_swing_pos
+        )
+
+    # 提取 slope_atr（V1.8 current_dsa_segment_slope_atr_per_bar）
+    relation["primary_slope_atr"] = p_dsa.get(
+        "current_dsa_segment_slope_atr_per_bar"
+    )
+    relation["secondary_slope_atr"] = s_dsa.get(
+        "current_dsa_segment_slope_atr_per_bar"
+    )
 
     return relation
 
@@ -655,8 +1020,7 @@ if __name__ == "__main__":
     cp = _compute_cost_position_factors(bars)
     print({k: (v if not isinstance(v, dict) else "...") for k, v in cp.items()})
     print("=== DSA 段 ===")
-    from app.strategy.selectors.dsa_selector import compute_dsa_bundle
     bundle = compute_dsa_bundle(bars, {})
-    ds = _compute_dsa_segment_factors(bars, bundle)
+    ds = _compute_dsa_segment_factors(bars, bundle, None)
     print(ds)
     print("自测完成")

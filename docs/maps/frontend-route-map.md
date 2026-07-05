@@ -14,7 +14,7 @@
 | `/overview` | `IndexPage` | Subscriber/Admin | 服务总览 |
 | `/screener` | `ScreenerPage` | Subscriber/Admin | 趋势选股；行 key 使用 `instrumentId`（不依赖 `result_id`），"筛选结果" 标签替代原 "命中"，全量 universe 展示含 skipped/failed 行。succeeded 行显示 35 个 DSA 指标（后端 `(run_id, instrument_id)` JOIN，绕过 result_id 未回填问题，见 ALIGN-033），skipped/failed 行指标列显示 "-" |
 | `/watchlist` | `WatchlistPage` | Subscriber/Admin | 我的自选；页眉全局展示市场状态，桌面表格/移动卡片不显示每行状态栏，数据列可表头过滤，表格使用 `compact-table` 与趋势选股页对齐 |
-| `/stock/:symbol` | `StockDetailPage` | Subscriber/Admin | 个股详情；按 timeframe 请求对应根数，K 线通过 `mergeRealtimeQuoteIntoBars` 合并实时行情显示，1d 保留日期语义、intraday 使用 `quote.update_time`；新增 SQZMOM_LB 图层开关（默认关闭），开启后在 K 线下方显示独立副图，前端只消费后端 DTO 不重新计算；V1.7 右侧 340px 新增 `StockStructuralStatePanel` 结构状态因子面板（双周期 tabs + 5 张卡片），截图模式和窄屏（≤1250px）隐藏恢复单列 |
+| `/stock/:symbol` | `StockDetailPage` | Subscriber/Admin | 个股详情；按 timeframe 请求对应根数，K 线通过 `mergeRealtimeQuoteIntoBars` 合并实时行情显示，1d 保留日期语义、intraday 使用 `quote.update_time`；新增 SQZMOM_LB 图层开关（默认关闭），开启后在 K 线下方显示独立副图，前端只消费后端 DTO 不重新计算；V1.8 右侧 340px 新增 `StockStructuralStatePanel` 结构状态因子面板（双周期 tabs + 5 张卡片 + 约 50 字段，含 dsa_segment 段分析/swing_position/cost_position/volatility_momentum/participation/客观 relation），bool 字段以"是/否"展示，截图模式和窄屏（≤1250px）隐藏恢复单列 |
 | `/settings` | `SettingsPage` | Authenticated | 设置与通知渠道 |
 | `/messages` | `MessagesPage` | Authenticated | 历史消息 |
 | `/admin`, `/admin/overview` | `AdminIndexPage` | Admin | 管理总览 |
