@@ -21,12 +21,16 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from app.services.structural_factor_service import _compute_all_factors_for_bars
 from app.services.temporal_feature_service import (
+    _compute_bb_bandwidth_percentile_at_bar,
     _compute_daily_context,
     _compute_derived_relation,
     _compute_m15_response,
+    _compute_volume_percentile_at_bar,
+    _find_swing_anchor,
     compute_temporal_features,
 )
 from app.strategy_assets.algorithms.features.sqzmom_lb import compute_sqzmom_lb
@@ -403,3 +407,147 @@ def test_m15_bb_bandwidth_change_since_swing_anchor() -> None:
     change = result["m15_bb_bandwidth_change_since_swing_anchor"]
     if change is not None:
         assert np.isfinite(change)
+
+
+# ===== 16. swing anchor 选择规则：bsl < bsh → anchor=low =====
+def test_swing_anchor_low_when_bsl_less_than_bsh() -> None:
+    """bsl < bsh → anchor=swing_low_bar（n - 1 - bsl）。"""
+    bars = _build_bars(n=250, seed=42)
+    swing_factors = {
+        "bars_since_swing_high": 20,
+        "bars_since_swing_low": 10,
+        "confirmed_swing_high": 110.0,
+        "confirmed_swing_low": 90.0,
+    }
+    result = _find_swing_anchor(bars, swing_factors)
+    assert result is not None
+    anchor_idx, swing_high, swing_low = result
+    n = len(bars)
+    # bsl=10 < bsh=20 → anchor=low → anchor_idx = n-1-bsl
+    assert anchor_idx == n - 1 - 10
+    # swing range = [min(90, 110), max(90, 110)] = [90, 110]
+    assert swing_high == 110.0
+    assert swing_low == 90.0
+
+
+# ===== 17. swing anchor 选择规则：bsh <= bsl → anchor=high =====
+def test_swing_anchor_high_when_bsh_less_equal_bsl() -> None:
+    """bsh <= bsl → anchor=swing_high_bar（n - 1 - bsh）。"""
+    bars = _build_bars(n=250, seed=42)
+    swing_factors = {
+        "bars_since_swing_high": 10,
+        "bars_since_swing_low": 20,
+        "confirmed_swing_high": 110.0,
+        "confirmed_swing_low": 90.0,
+    }
+    result = _find_swing_anchor(bars, swing_factors)
+    assert result is not None
+    anchor_idx, swing_high, swing_low = result
+    n = len(bars)
+    # bsh=10 <= bsl=20 → anchor=high → anchor_idx = n-1-bsh
+    assert anchor_idx == n - 1 - 10
+    assert swing_high == 110.0
+    assert swing_low == 90.0
+
+
+# ===== 18. m15_position_change_since_swing_anchor 手算验证 =====
+def test_m15_position_change_since_swing_anchor_manual_calc() -> None:
+    """手算 m15_position_change_since_swing_anchor = m15_pos_now - pos_at_anchor。"""
+    bars = _build_bars(n=500, seed=99)
+    secondary_factors, degraded, warmup = _build_v18_factors(bars, "15m")
+    swing = secondary_factors.get("swing_position") or {}
+    anchor = _find_swing_anchor(bars, swing)
+    if anchor is None:
+        return  # 数据不支持，跳过
+
+    anchor_idx, swing_high, swing_low = anchor
+    swing_range = swing_high - swing_low
+    if swing_range <= 0:
+        return
+
+    close_anchor = float(bars["close"].iloc[anchor_idx])
+    pos_at_anchor = (close_anchor - swing_low) / swing_range
+    m15_pos_now = swing.get("price_position_in_swing_0_1")
+    if m15_pos_now is None:
+        return
+
+    expected = float(m15_pos_now) - pos_at_anchor
+    result = _compute_m15_response(secondary_factors, bars, [], [])
+    change = result["m15_position_change_since_swing_anchor"]
+    assert change is not None
+    assert abs(change - expected) < 1e-9
+
+
+# ===== 19. anchor 处 volume_percentile / bb_bandwidth_percentile 不变性 =====
+def test_anchor_percentile_invariant_after_modification() -> None:
+    """修改 anchor 之后的数据，anchor 处 percentile 不变（point-in-time）。"""
+    bars = _build_bars(n=500, seed=99)
+    secondary_factors, _, _ = _build_v18_factors(bars, "15m")
+    swing = secondary_factors.get("swing_position") or {}
+    anchor = _find_swing_anchor(bars, swing)
+    if anchor is None:
+        return
+    anchor_idx = anchor[0]
+
+    orig_vol_pct = _compute_volume_percentile_at_bar(bars, anchor_idx)
+    orig_bw_pct = _compute_bb_bandwidth_percentile_at_bar(bars, anchor_idx)
+
+    # 修改 anchor 之后的某根 bar 数据
+    bars_modified = bars.copy()
+    if anchor_idx + 1 < len(bars_modified):
+        col_loc_vol = bars_modified.columns.get_loc("volume")
+        bars_modified.iloc[anchor_idx + 1, col_loc_vol] = 999_999_999.0
+        # 修改 close 影响 BB bandwidth
+        col_loc_close = bars_modified.columns.get_loc("close")
+        bars_modified.iloc[anchor_idx + 1, col_loc_close] = 999.0
+
+    new_vol_pct = _compute_volume_percentile_at_bar(bars_modified, anchor_idx)
+    new_bw_pct = _compute_bb_bandwidth_percentile_at_bar(bars_modified, anchor_idx)
+
+    # anchor 处 percentile 应保持不变（point-in-time 只用截至 anchor 的数据）
+    if orig_vol_pct is not None and new_vol_pct is not None:
+        assert abs(orig_vol_pct - new_vol_pct) < 1e-9
+    if orig_bw_pct is not None and new_bw_pct is not None:
+        assert abs(orig_bw_pct - new_bw_pct) < 1e-9
+
+
+# ===== 20. 组级异常隔离：m15_response 异常不影响整体返回 =====
+@pytest.mark.asyncio
+async def test_m15_response_exception_isolation(monkeypatch) -> None:
+    """_compute_m15_response 抛异常时，整体返回 200，m15_response 全 null，degraded_reasons 有记录。"""
+    bars = _build_bars(n=250, seed=42)
+    bars15 = _build_bars(n=500, seed=99)
+    primary_factors, _, _ = _build_v18_factors(bars, "1d")
+    secondary_factors, _, _ = _build_v18_factors(bars15, "15m")
+
+    # _fetch_bars 和 _compute_all_factors_for_bars 是从 structural_factor_service 延迟导入
+    # 必须在 structural_factor_service 模块上 patch
+    from app.services import structural_factor_service as sfs
+    import app.services.temporal_feature_service as tfs
+
+    async def fake_fetch_bars(service, session, instrument_id, timeframe, adj, lookback, degraded):
+        return bars if timeframe == "1d" else bars15
+
+    def fake_compute_factors(bars_arg, timeframe, degraded, warmup):
+        return primary_factors if timeframe == "1d" else secondary_factors
+
+    def boom_m15(*args, **kwargs):
+        raise RuntimeError("m15 boom")
+
+    monkeypatch.setattr(sfs, "_fetch_bars", fake_fetch_bars)
+    monkeypatch.setattr(sfs, "_compute_all_factors_for_bars", fake_compute_factors)
+    monkeypatch.setattr(tfs, "_compute_m15_response", boom_m15)
+
+    result = await compute_temporal_features(
+        session=None,  # type: ignore[arg-type]
+        instrument_id=None,  # type: ignore[arg-type]
+    )
+
+    # m15_response 应全 null
+    assert all(v is None for v in result["m15_response"].values())
+    # degraded_reasons 应含 m15_response failed
+    assert any("m15_response" in r and "failed" in r for r in result["meta"]["degraded_reasons"])
+    # daily_context 不应受影响
+    assert "daily_dsa_dir" in result["daily_context"]
+    # derived_relation 仍返回（值可能为 null）
+    assert "m15_position_relative_to_daily" in result["derived_relation"]

@@ -716,7 +716,7 @@ export default function StockDetailPage() {
 
       {/* ===== 工作区：双列布局（图表 + 结构状态因子面板） ===== */}
       <div className={clsx('tv-workspace', { 'capture-mode': isCaptureMode, 'hide-structural-state': !shouldShowPanel })}>
-        {/* 图表区 */}
+        {/* 图表区（同时承载 toggle 按钮的定位上下文） */}
         <section className="tv-chart-column">
           {isBarsLoading ? (
             <div className="tv-chart-loading">行情数据加载中...</div>
@@ -746,24 +746,24 @@ export default function StockDetailPage() {
               </div>
             </>
           )}
+          {/* 结构状态开关按钮：放在 tv-chart-column 内部，以 tv-chart-column (position: relative) 为定位上下文 */}
+          {!hideStructuralStateParam && instrumentId && (
+            <button
+              type="button"
+              className="structural-state-toggle"
+              onClick={toggleStructuralState}
+              aria-label="切换结构状态面板"
+            >
+              <span className="structural-state-toggle-icon">{showStructuralState ? '◀' : '▶'}</span>
+              <span className="structural-state-toggle-label">结构状态</span>
+            </button>
+          )}
         </section>
         {/* 结构状态因子面板（默认隐藏，用户开关控制；截图模式强制隐藏） */}
         {shouldShowPanel && instrumentId && (
           <aside className="tv-side-column">
             <StockStructuralStatePanel instrumentId={instrumentId} />
           </aside>
-        )}
-        {/* 结构状态开关按钮（强制隐藏时不渲染） */}
-        {!hideStructuralStateParam && instrumentId && (
-          <button
-            type="button"
-            className="structural-state-toggle"
-            onClick={toggleStructuralState}
-            aria-label="切换结构状态面板"
-          >
-            <span className="structural-state-toggle-icon">{showStructuralState ? '◀' : '▶'}</span>
-            <span className="structural-state-toggle-label">结构状态</span>
-          </button>
         )}
       </div>
     </div>

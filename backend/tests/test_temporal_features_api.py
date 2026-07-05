@@ -198,5 +198,17 @@ async def test_response_meta_structure(client: AsyncClient) -> None:
     assert isinstance(meta["warmup_notes"], list)
 
 
+# ===== 6. as_of != latest 返回 400 =====
+@pytest.mark.asyncio
+async def test_invalid_as_of_returns_400(client: AsyncClient) -> None:
+    """V1 只支持 as_of=latest，其他值返回 400。"""
+    resp = await client.get(
+        "/api/v1/instruments/00000000-0000-0000-0000-000000000001/temporal-features"
+        "?as_of=2025-01-01"
+    )
+    assert resp.status_code == 400
+    assert "as_of" in resp.text
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

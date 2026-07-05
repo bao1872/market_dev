@@ -58,6 +58,53 @@ _MIN_SEGMENTS_FOR_PERCENTILE = 5
 _TEMPORAL_PRIMARY_LOOKBACK = DAILY_HISTORY_BARS
 _TEMPORAL_SECONDARY_LOOKBACK = 500
 
+# 组级异常隔离：每组失败时返回的 null default dict
+_NULL_DAILY_CONTEXT: dict[str, Any] = {
+    "daily_dsa_dir": None,
+    "daily_dsa_segment_duration_percentile": None,
+    "daily_dsa_slope_atr_per_bar": None,
+    "daily_dsa_efficiency_0_1": None,
+    "daily_price_position_in_swing_0_1": None,
+    "daily_distance_to_swing_high_atr": None,
+    "daily_distance_to_node_above_atr": None,
+    "daily_sqzmom_change_since_segment_start": None,
+    "daily_volume_percentile_change_since_segment_start": None,
+}
+_NULL_M15_RESPONSE: dict[str, Any] = {
+    "m15_price_position_in_swing_0_1": None,
+    "m15_position_change_since_swing_anchor": None,
+    "m15_distance_to_swing_high_atr": None,
+    "m15_distance_to_swing_low_atr": None,
+    "m15_sqzmom_change_since_swing_anchor": None,
+    "m15_sqzmom_abs_percentile": None,
+    "m15_sqz_off": None,
+    "m15_bb_bandwidth_change_since_swing_anchor": None,
+    "m15_volume_percentile_change_since_swing_anchor": None,
+}
+_NULL_DERIVED_RELATION: dict[str, Any] = {
+    "m15_position_relative_to_daily": None,
+    "m15_response_direction_relative_to_daily": None,
+    "m15_response_intensity": None,
+}
+
+
+def _safe_compute(
+    func: Any,
+    group_name: str,
+    degraded_reasons: list[str],
+    null_default: dict[str, Any],
+) -> dict[str, Any]:
+    """组级异常隔离：调用 func，捕获异常返回 null default + degraded_reasons。
+
+    单组失败不影响其他组或整体 API 返回。
+    """
+    try:
+        return func()
+    except Exception as exc:
+        logger.error("%s failed: %s", group_name, exc, exc_info=True)
+        degraded_reasons.append(f"{group_name} failed: {exc}")
+        return dict(null_default)
+
 
 # =============================================================================
 # 辅助函数：point-in-time 历史值计算
@@ -525,15 +572,30 @@ async def compute_temporal_features(
         secondary_bars, secondary_timeframe, degraded_reasons, warmup_notes
     )
 
-    # 计算 temporal 特征
-    daily_context = _compute_daily_context(
-        primary_factors, primary_bars, degraded_reasons, warmup_notes
+    # 计算 temporal 特征：每个组独立 try/except，单组失败返回 null dict + degraded_reasons
+    daily_context = _safe_compute(
+        lambda: _compute_daily_context(
+            primary_factors, primary_bars, degraded_reasons, warmup_notes
+        ),
+        "daily_context",
+        degraded_reasons,
+        _NULL_DAILY_CONTEXT,
     )
-    m15_response = _compute_m15_response(
-        secondary_factors, secondary_bars, degraded_reasons, warmup_notes
+    m15_response = _safe_compute(
+        lambda: _compute_m15_response(
+            secondary_factors, secondary_bars, degraded_reasons, warmup_notes
+        ),
+        "m15_response",
+        degraded_reasons,
+        _NULL_M15_RESPONSE,
     )
-    derived_relation = _compute_derived_relation(
-        daily_context, m15_response, degraded_reasons
+    derived_relation = _safe_compute(
+        lambda: _compute_derived_relation(
+            daily_context, m15_response, degraded_reasons
+        ),
+        "derived_relation",
+        degraded_reasons,
+        _NULL_DERIVED_RELATION,
     )
 
     # as_of 时间

@@ -125,3 +125,31 @@ test('Force-hide disables toggle (early return in toggle callback)', () => {
     'toggleStructuralState 回调必须在 hideStructuralStateParam=true 时 early return（强制隐藏时禁用 toggle）',
   )
 })
+
+// ===== 8. toggle 按钮在 tv-chart-column 内部（定位上下文） =====
+test('Toggle button is inside tv-chart-column for stable absolute positioning', () => {
+  const src = readSource()
+
+  // 源码中可能有多个 tv-chart-column section，用位置检测：
+  // 1. 找到 structural-state-toggle 按钮的位置
+  // 2. 向前查找最近的 <section className="tv-chart-column">
+  // 3. 向后查找最近的 </section>
+  // 4. 验证 toggle 在两者之间
+  const toggleIdx = src.indexOf('structural-state-toggle')
+  assert.ok(toggleIdx > 0, 'StockDetailPage 必须含 structural-state-toggle')
+
+  const sectionOpenIdx = src.lastIndexOf('<section className="tv-chart-column">', toggleIdx)
+  assert.ok(sectionOpenIdx > 0, 'structural-state-toggle 必须在 <section className="tv-chart-column"> 之后')
+
+  const sectionCloseIdx = src.indexOf('</section>', toggleIdx)
+  assert.ok(sectionCloseIdx > toggleIdx, 'structural-state-toggle 必须在 </section> 之前')
+
+  // 同时确认 tv-chart-column 有 position: relative（在 global.scss 中）
+  const scssPath = join(FRONTEND_ROOT, 'src', 'styles', 'global.scss')
+  const scss = readFileSync(scssPath, 'utf-8')
+  const chartColRuleMatch = scss.match(/\.tv-chart-column\s*\{[^}]*position:\s*relative[^}]*\}/)
+  assert.ok(
+    chartColRuleMatch,
+    '.tv-chart-column 必须含 position: relative（作为 toggle 按钮的定位上下文）',
+  )
+})

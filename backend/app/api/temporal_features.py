@@ -40,6 +40,7 @@ router = APIRouter(prefix="/api/v1/instruments", tags=["temporal-features"])
 
 _ALLOWED_TIMEFRAMES = {"1d", "15m", "1h", "1w", "1mo"}
 _ALLOWED_ADJ = {"qfq", "none"}
+_ALLOWED_AS_OF = {"latest"}
 
 
 @router.get("/{instrument_id}/temporal-features")
@@ -64,6 +65,7 @@ async def get_temporal_features(
     - meta: as_of/timeframes/degraded_reasons/warmup_notes
 
     字段无法计算返回 null + warmup_notes，不阻塞页面。
+    V1 只支持 as_of=latest，其他值返回 400。
     """
     if primary_timeframe not in _ALLOWED_TIMEFRAMES:
         raise HTTPException(
@@ -81,6 +83,11 @@ async def get_temporal_features(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"不支持的 adj: {adj}, 允许: {sorted(_ALLOWED_ADJ)}",
+        )
+    if as_of not in _ALLOWED_AS_OF:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"不支持的 as_of: {as_of}, V1 只支持: {sorted(_ALLOWED_AS_OF)}",
         )
 
     result = await compute_temporal_features(

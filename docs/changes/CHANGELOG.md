@@ -4,11 +4,11 @@
 
 ## 2026-07-05: 时序特征 V1 + 个股详情页结构状态面板隐藏开关
 
-- 后端新增 `app.services.temporal_feature_service.compute_temporal_features`：双周期（1d+15m）时序特征，补变化量/持续度/派生关系；daily_context 9 字段 + m15_response 9 字段 + derived_relation 3 字段；复用 V1.8 `compute_structural_factors` 获取 primary/secondary factors；point-in-time 重算 SQZMOM/BB bandwidth/volume_percentile，无未来函数；V1 只支持 `as_of=latest`。
-- 后端新增 API `GET /api/v1/instruments/{id}/temporal-features`，无认证要求，参数 `primary_timeframe`/`secondary_timeframe`/`adj`/`as_of`；非法参数返回 400；不存在 instrument 返回 200 + degraded_reasons。
-- 前端 `StockDetailPage.tsx` 结构状态面板默认隐藏 + 用户开关 + localStorage 持久化；`?hideStructuralState=1` / `?capture=1` / `?capture=feishu` 强制隐藏且禁用开关；截图模式默认只渲染 K 线和基础信息。
-- 新增后端测试 20 个（服务 15 + API 5）、前端 contract test 7 个。
-- 更新 `docs/current/02-data-api-contracts.md`（新增第 11 节）、`04-frontend-ux.md`、`05-testing-acceptance.md`、`docs/maps/api-route-map.md`、`frontend-route-map.md`、`test-coverage-map.md`。
+- 后端新增 `app.services.temporal_feature_service.compute_temporal_features`：双周期（1d+15m）时序特征，补变化量/持续度/派生关系；daily_context 9 字段 + m15_response 9 字段 + derived_relation 3 字段；复用 V1.8 `compute_structural_factors` 获取 primary/secondary factors；point-in-time 重算 SQZMOM/BB bandwidth/volume_percentile，无未来函数；V1 只支持 `as_of=latest`；组级异常隔离（daily/m15/derived 独立 try/except，单组失败返回 null dict + degraded_reasons）。
+- 后端新增 API `GET /api/v1/instruments/{id}/temporal-features`，无认证要求，参数 `primary_timeframe`/`secondary_timeframe`/`adj`/`as_of`；非法参数返回 400（含 `as_of != "latest"`）；不存在 instrument 返回 200 + degraded_reasons。
+- 前端 `StockDetailPage.tsx` 结构状态面板默认隐藏 + 用户开关 + localStorage 持久化；`?hideStructuralState=1` / `?capture=1` / `?capture=feishu` 强制隐藏且禁用开关；截图模式默认只渲染 K 线和基础信息；toggle 按钮移入 `tv-chart-column` 内部（`position: relative`）确保定位稳定。
+- 新增后端测试 26 个（服务 20 + API 6）、前端 contract test 8 个。
+- 更新 `docs/current/02-data-api-contracts.md`（新增第 11 节，含 `as_of!=latest` 返回 400 与组级异常隔离描述）、`04-frontend-ux.md`、`05-testing-acceptance.md`、`docs/maps/api-route-map.md`、`frontend-route-map.md`、`test-coverage-map.md`。
 - 新增 CHANGE-20260705-033。
 
 ## 2026-07-05: 结构状态因子面板升级至 V1.8（补齐 50 字段 + 客观 relation）
