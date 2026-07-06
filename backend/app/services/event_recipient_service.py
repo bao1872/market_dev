@@ -79,11 +79,11 @@ async def expand_event_recipients(db: AsyncSession, event_id: UUID) -> int:
         )
         return 0
 
-    # [eligible_user_service] - 批量过滤有资格用户（disabled/expired/admin 不接收事件通知）
-    from app.services.eligible_user_service import filter_eligible_recipients
+    # [eligible_user_service] - 批量过滤监控有资格用户（admin 也接收自己自选股的事件通知）
+    from app.services.eligible_user_service import filter_monitor_eligible_recipients
 
     all_user_ids = [uid for _, uid in watchlist_rows]
-    eligible_user_ids = set(await filter_eligible_recipients(db, all_user_ids))
+    eligible_user_ids = set(await filter_monitor_eligible_recipients(db, all_user_ids))
     watchlist_rows = [
         (wid, uid) for wid, uid in watchlist_rows
         if uid in eligible_user_ids

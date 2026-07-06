@@ -14,6 +14,8 @@
 | ALIGN-030 | 部分标的历史 bars 覆盖不足 | 生产 DB 中 `000001` 仅 5 根日线、66 根 15m（约 6 个交易日），导致个股详情 K 线显示最近几天；`600519`/`300750` 日线 846 根、15m 约 8000 根数据充足。2026-07-04 已对 `000100`（TCL科技）执行单标回补：日线 846 根、15m 8000 根、60m 2000 根，API `page_size=4000` 可正常返回 4000 根。全市场仍有约 81 只 active 标的日线 < 50 根，需后续统一回补决策。2026-07-04 全市场约 187 只 active 标的日线 < 60 根（BSE_920 97 只、主板 85 只、其他 5 只），已通过 _DSA_MIN_HISTORY_BARS=60 前置分类为 skipped/insufficient_history | 完成全市场历史行情回补，或明确排除/标记该类标的；所有页面显示标的需满足 Node Cluster 最小输入 | P1 |
 | ALIGN-031 | DSA-only 大量 failed | 1881 只 failed 全部 reason_code=timeout，根因为 run 级总超时 600s 与编排层 7200s 冲突；historical bars 不足标的未前置分类；execute_run 覆盖 skipped_count | 修复后需生产验证 failed_count 大幅下降 | P1 |
 | ALIGN-033 | `strategy_run_items.result_id` 未回填 | PR #14 batch service 写入 `strategy_results` 后未更新 `strategy_run_items.result_id`（始终为 None）。PR #15 的 `query_run_items_with_results` 已改用 `(run_id, instrument_id)` 关联 `strategy_results` 绕过此问题。但 `result_id` 字段仍为 None，需后续修复 batch service 在写入 results 后回填 `result_id` | 修复 `strategy_batch_service._write_results_to_db` 写入 results 后回填 `result_id` | P2 |
+| ALIGN-034 | admin monitor 资格修复待生产验证 | 代码已实现 `filter_monitor_eligible_recipients`/`is_user_eligible_for_monitor`，monitor_batch/event_recipient/outbox_relay 三处已切到监控资格过滤；测试覆盖 active admin、active member+subscription、disabled admin、无订阅普通用户。生产环境尚未重新 build/restart 验证真实监控 universe 与投递链路。 | 部署后检查 monitor_batch universe 包含 admin 自选股，monitor 日志无 admin 被过滤，outbox/delivery 为 admin 生成 MessageDelivery | P1 |
+| ALIGN-035 | quote 可信化与 pytdx 连接保护待生产验证 | 代码已实现 QuoteResponse 可信字段、午休统一口径、Redis 短缓存、pytdx 单例+线程锁；测试与本地 ASGI 验证通过。生产环境尚未验证真实 pytdx 连接在交易时段的成功/fallback 行为、断线重连、以及容器日志的可观测性。 | 部署后在交易时段 curl /quote，确认 pytdx 成功/降级字段正确，日志可见区分日志，页面状态徽章非固定“实时行情” | P1 |
 
 ## CLOSED 摘要
 

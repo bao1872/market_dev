@@ -45,7 +45,7 @@
 - 飞书：Platform App only，Webhook 已永久删除；
 - Capture：专用路由、专用 token、独立 worker；
 - 生产审计：13 个服务 Up，飞书图文曾成功一次，但 partial_failed/仅重试图片生产 E2E 仍需验证；
-- Worker heartbeat 僵尸清理已实现（PR #4 `mark_stale_worker_heartbeats`），待生产验证（ALIGN-023）。
+- Worker heartbeat 僵尸清理已生产验证（ALIGN-023 CLOSED）：worker-watchdog 部署后 38 条 stale running 自动清理为 stopped。
 
 ## 4. 修改原则
 

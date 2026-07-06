@@ -592,7 +592,7 @@ export interface Bar {
   adj_factor: number
 }
 
-/** 行情列表响应（服务端分页） */
+/** 行情列表响应（服务端分页 + 数据源诊断） */
 export interface BarListResponse {
   items: Bar[]
   total: number
@@ -600,6 +600,13 @@ export interface BarListResponse {
   page_size: number
   timeframe: string
   adj: string
+  // [bars] - 数据源诊断字段
+  data_source: string
+  as_of: string | null
+  is_partial: boolean
+  freshness_seconds: number
+  degraded: boolean
+  degraded_reason: string | null
 }
 
 // ============================================================
@@ -1482,7 +1489,7 @@ export async function getBars(instrumentId: string, params?: BarQueryParams): Pr
 // ===== Quote 端点 =====
 // ============================================================
 
-/** 实时报价响应（pytdx 实时 / 数据库降级） */
+/** 实时报价响应（可信来源与新鲜度） */
 export interface QuoteResponse {
   instrument_id: string
   symbol: string
@@ -1496,7 +1503,11 @@ export interface QuoteResponse {
   prev_close: number
   change_pct: number
   update_time: string
+  source: 'pytdx' | 'daily_fallback'
   is_realtime: boolean
+  freshness_seconds: number
+  degraded: boolean
+  degraded_reason: string | null
   amount?: number
 }
 

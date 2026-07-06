@@ -38,7 +38,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.redis_client import get_redis
-from app.models.notification import MessageDelivery, NotificationChannel
+from app.models.notification import MessageDelivery, NotificationChannel, NotificationMessage
 from app.models.outbox import Outbox
 
 logger = logging.getLogger("outbox_relay")
@@ -58,6 +58,9 @@ _NOTIFICATION_EVENT_TYPE = "notification.message.created"
 # 管理员内测申请通知专用事件类型：由本模块专用分支扩张为 MessageDelivery
 # 与 beta_application_notifier.BETA_APPLICATION_ADMIN_EVENT 保持一致
 _BETA_APPLICATION_ADMIN_EVENT = "beta_application.admin_notification.created"
+
+# [monitor] - 监控自动通知 source_type 集合：对 admin 用户放行（无需 subscription）
+_MONITOR_SOURCE_TYPES = frozenset({"monitor_event", "strategy_event", "monitor_chart"})
 
 
 async def write_outbox(
@@ -155,18 +158,32 @@ async def _expand_notification_message_created(
         )
         return 0
 
-    # [eligible_user_service] - 过滤失效用户：disabled/expired/admin 不扩张投递
-    # 资格判定唯一事实源：active member + 有效 subscription（admin 不进入 universe）
+    # [eligible_user_service] - 过滤失效用户：disabled/expired 不扩张投递
+    # 资格判定唯一事实源：
+    # - 普通通知：active member + 有效 subscription
+    # - 监控自动通知（monitor_event/strategy_event/monitor_chart）：admin 用户也放行
     # 例外：用户主动触发的通知（stock_detail_share）和手动指定 target_channel_id 的通知
     #       不受订阅状态限制，立即扩张（与 delivery_worker._USER_TRIGGERED_SOURCE_TYPES 一致）
     target_channel_id_str = payload.get("target_channel_id")
     if not target_channel_id_str:
-        from app.services.eligible_user_service import is_user_eligible
+        # 查询消息 source_type 以判断是否为监控通知
+        message = await db.get(NotificationMessage, message_id)
+        source_type = getattr(message, "source_type", None) if message else None
+        monitor_source = source_type in _MONITOR_SOURCE_TYPES
 
-        if not await is_user_eligible(db, user_id):
+        from app.services.eligible_user_service import (
+            is_user_eligible,
+            is_user_eligible_for_monitor,
+        )
+
+        eligibility_check = (
+            is_user_eligible_for_monitor if monitor_source else is_user_eligible
+        )
+        if not await eligibility_check(db, user_id):
             logger.info(
-                "用户无资格，跳过通知扩张: outbox_id=%s user_id=%s message_id=%s",
-                record.id, user_id, message_id,
+                "用户无资格，跳过通知扩张: outbox_id=%s user_id=%s message_id=%s "
+                "source_type=%s monitor_source=%s",
+                record.id, user_id, message_id, source_type, monitor_source,
             )
             return 0
     target_channel_id: UUID | None = None

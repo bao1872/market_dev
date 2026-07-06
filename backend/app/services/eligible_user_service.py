@@ -70,6 +70,18 @@ def _admin_role_absent():
     )
 
 
+def _admin_role_exists():
+    """构造「用户拥有 admin 角色」EXISTS 子查询条件。
+
+    监控场景下 active admin 需要进入 universe 接收自选股通知。
+    """
+    return exists(
+        select(UserRole.user_id)
+        .join(Role, Role.id == UserRole.role_id)
+        .where(UserRole.user_id == User.id, Role.name == _ADMIN_ROLE)
+    )
+
+
 async def list_eligible_user_ids(db: AsyncSession) -> list[UUID]:
     """返回所有有资格进入监控 universe 的用户 ID 列表。
 
@@ -166,6 +178,97 @@ async def filter_eligible_recipients(
             _admin_role_absent(),
         )
     )
+    result = await db.execute(stmt)
+    return [row[0] for row in result.all()]
+
+
+async def is_user_eligible_for_monitor(db: AsyncSession, user_id: UUID) -> bool:
+    """检查单个用户是否有资格进入监控 universe（含 admin）。
+
+    监控场景资格条件：
+    - User.status = 'active'
+    - (有 member 角色 AND 无 admin 角色 AND Subscription 有效)
+      OR (有 admin 角色)
+
+    Args:
+        db: 异步会话
+        user_id: 用户 ID
+
+    Returns:
+        True 表示有资格，False 表示无资格
+    """
+    member_eligible = (
+        select(User.id)
+        .join(Subscription, Subscription.user_id == User.id)
+        .where(
+            User.id == user_id,
+            User.status == "active",
+            Subscription.status == "active",
+            Subscription.starts_at <= func.now(),
+            Subscription.expires_at > func.now(),
+            _member_role_exists(),
+            _admin_role_absent(),
+        )
+        .limit(1)
+    )
+    admin_eligible = (
+        select(User.id)
+        .where(
+            User.id == user_id,
+            User.status == "active",
+            _admin_role_exists(),
+        )
+        .limit(1)
+    )
+    stmt = member_eligible.union(admin_eligible)
+    result = await db.execute(stmt)
+    return result.first() is not None
+
+
+async def filter_monitor_eligible_recipients(
+    db: AsyncSession, user_ids: list[UUID],
+) -> list[UUID]:
+    """批量过滤监控场景有资格的用户 ID（admin 放行）。
+
+    监控场景资格条件：
+    - User.status = 'active'
+    - (有 member 角色 AND 无 admin 角色 AND Subscription 有效)
+      OR (有 admin 角色)
+
+    Args:
+        db: 异步会话
+        user_ids: 待过滤的用户 ID 列表
+
+    Returns:
+        有资格的用户 ID 列表（输入为空时返回空列表）
+    """
+    if not user_ids:
+        return []
+
+    member_eligible = (
+        select(User.id)
+        .distinct()
+        .join(Subscription, Subscription.user_id == User.id)
+        .where(
+            User.id.in_(user_ids),
+            User.status == "active",
+            Subscription.status == "active",
+            Subscription.starts_at <= func.now(),
+            Subscription.expires_at > func.now(),
+            _member_role_exists(),
+            _admin_role_absent(),
+        )
+    )
+    admin_eligible = (
+        select(User.id)
+        .distinct()
+        .where(
+            User.id.in_(user_ids),
+            User.status == "active",
+            _admin_role_exists(),
+        )
+    )
+    stmt = member_eligible.union(admin_eligible)
     result = await db.execute(stmt)
     return [row[0] for row in result.all()]
 
