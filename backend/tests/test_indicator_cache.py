@@ -65,41 +65,41 @@ def test_cache_key_construction() -> None:
     assert key_none_adj != key, "不同 adj 应生成不同键"
 
 
-def test_cache_algorithm_version_bumped_to_v4() -> None:
-    """[PR #31] - ALGORITHM_VERSION 必须 bump 到 v4。
+def test_cache_algorithm_version_bumped_to_v5() -> None:
+    """[PR #32] - ALGORITHM_VERSION 必须 bump 到 v5。
 
-    修复根因：PR #30 修改了 source_bar_times 格式（从日线日期→按 timeframe），
-    但 ALGORITHM_VERSION 仍是 v3，导致旧缓存（v3，旧格式 source_bar_times）被命中，
-    返回旧格式数据，触发 DSA mismatch。
+    修复根因：PR #31 仍把 DSA 限制为 1d-only 且 1w/1mo BB 被移除。
+    PR #32 改为 DSA 全周期支持 + 1w/1mo BB 用 compute_bollinger(macd_bars) 计算，
+    但 ALGORITHM_VERSION 仍是 v4，导致旧缓存（v4，1d-only DSA + 1w/1mo 无 BB）被命中。
 
-    bump 到 v4 后，旧 v3 缓存键自然不匹配，强制重算。
+    bump 到 v5 后，旧 v4 缓存键自然不匹配，强制重算。
     """
-    assert indicator_cache.ALGORITHM_VERSION == "v4", (
-        f"ALGORITHM_VERSION 应为 v4（PR #31 source_bar_times 格式变更后 bump），"
+    assert indicator_cache.ALGORITHM_VERSION == "v5", (
+        f"ALGORITHM_VERSION 应为 v5（PR #32 DSA 全周期 + 1w/1mo BB 后 bump），"
         f"实际为 {indicator_cache.ALGORITHM_VERSION}"
     )
 
-    # 验证新 key 包含 v4，不包含 v3
+    # 验证新 key 包含 v5，不包含 v4
     key = indicator_cache.build_cache_key(
         TEST_INSTRUMENT_ID, "1d", "qfq", "2026-07-06",
     )
-    assert ":v4" in key, f"新缓存键应含 v4: {key}"
-    assert ":v3" not in key, f"新缓存键不应含 v3: {key}"
+    assert ":v5" in key, f"新缓存键应含 v5: {key}"
+    assert ":v4" not in key, f"新缓存键不应含 v4: {key}"
 
 
-def test_old_v3_cache_key_not_matched() -> None:
-    """[PR #31] - 旧 v3 缓存键不会被新版本命中。
+def test_old_v4_cache_key_not_matched() -> None:
+    """[PR #32] - 旧 v4 缓存键不会被新版本命中。
 
-    构造一个 v3 key，验证与当前 build_cache_key 生成的 key 不同。
+    构造一个 v4 key，验证与当前 build_cache_key 生成的 key 不同。
     """
     new_key = indicator_cache.build_cache_key(
         TEST_INSTRUMENT_ID, "15m", "qfq", "2026-07-06",
     )
-    old_v3_key = (
-        f"indicator:{TEST_INSTRUMENT_ID}:15m:qfq:2026-07-06:v3"
+    old_v4_key = (
+        f"indicator:{TEST_INSTRUMENT_ID}:15m:qfq:2026-07-06:v4"
     )
-    assert new_key != old_v3_key, (
-        f"新版本 key 不应等于旧 v3 key: new={new_key}, old_v3={old_v3_key}"
+    assert new_key != old_v4_key, (
+        f"新版本 key 不应等于旧 v4 key: new={new_key}, old_v4={old_v4_key}"
     )
 
 
@@ -308,7 +308,7 @@ if __name__ == "__main__":
     print(f"CACHE_TTL_SECONDS={indicator_cache.CACHE_TTL_SECONDS} OK")
 
     # 验证算法版本
-    assert indicator_cache.ALGORITHM_VERSION == "v3"
+    assert indicator_cache.ALGORITHM_VERSION == "v5"
     print(f"ALGORITHM_VERSION={indicator_cache.ALGORITHM_VERSION} OK")
 
     print("OK")

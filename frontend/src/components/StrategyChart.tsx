@@ -260,9 +260,9 @@ function formatTime(timeStr: string): string {
 // [chartViewport] - 时间键规范化和时间轴刻度函数已迁移至 src/utils/chartTime.ts
 //   纯 .ts 文件便于 Node --experimental-strip-types 单元测试（DSA source alignment contract test）
 import { normalizeChartTime, timeTicks } from '@/utils/chartTime'
-// [DSA Overlay Policy] - DSA 周期策略与禁用提示文案（PR #31）
-//   15m/1h 下 DSA 不渲染也不校验 mismatch，避免误报"DSA 数据源不一致"
-import { DSA_DISABLED_HINT, shouldCheckDsaMismatch } from '@/utils/dsaOverlayPolicy'
+// [DSA Overlay Policy] - DSA 全周期支持与 title 提示文案（PR #32）
+//   DSA VWAP 支持 1d/15m/1h/1w/1mo；1d 是主结构锚，非 1d 是验证图层
+import { DSA_TITLE_HINT, shouldCheckDsaMismatch } from '@/utils/dsaOverlayPolicy'
 
 // ===== 指标计算模块（从 charts.js 迁移）=====
 
@@ -2327,13 +2327,13 @@ export function StrategyChart({
         <span className="tv-strategy-legend-label">策略图层</span>
         {Object.values(DISPLAY_GROUPS).map((g: DisplayGroupDef) => {
           const active = isGroupActive(g.id, layers)
-          // [DSA 周期限制] - 趋势参考价仅支持日线，非 1d 周期禁用 DSA 开关并提示
-          const dsaDisabled = g.id === 'dsa' && timeframe !== '1d'
+          // [PR #32] - DSA 全周期支持，title 按周期区分（1d 主结构锚，非 1d 验证图层）
+          const dsaTitleHint = g.id === 'dsa' ? DSA_TITLE_HINT(timeframe) : undefined
           return (
             <label
               key={g.id}
-              className={clsx('tv-strategy-legend-item', !active && 'off', dsaDisabled && 'disabled')}
-              title={dsaDisabled ? DSA_DISABLED_HINT : undefined}
+              className={clsx('tv-strategy-legend-item', !active && 'off')}
+              title={dsaTitleHint}
               onClick={() => handleToggleGroup(g.id)}
             >
               <i className="tv-legend-dot" style={{ '--legend-color': g.color } as React.CSSProperties} />

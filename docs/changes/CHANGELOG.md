@@ -3,6 +3,16 @@
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
 ## 2026-07-07
+- CHANGE-20260707-042: Indicator Overlay All Timeframes
+  - 修复 PR #31 的两个错误规则：DSA 1d-only 误禁用 + 1w/1mo BB 字段被直接 pop
+  - DSA overlay 全周期支持（1d/15m/1h/1w/1mo），不再 1d-only by design
+  - `shouldAllowDsaOverlay` / `shouldCheckDsaMismatch` 全周期返回 true，全部需校验 source 对齐（不绕过 mismatch 保护）
+  - DSA toggle 全周期可点击，`DSA_TITLE_HINT(timeframe)` 按周期返回 title（1d="日线结构锚"，非 1d="当前周期验证图层"）
+  - 后端 `MarketDataContext.bars_daily=macd_bars` + `daily_time_list=macd_bars.index`，DSA 在所有周期用当前 timeframe bars 计算
+  - 后端 `_adapt_watchlist_bb` 1w/1mo 合并到 15m/1h 路径，统一用 `compute_bollinger(macd_bars)` 计算 BB（不再 pop BB 字段）
+  - 后端 `chart_layers` 循环删除 1w/1mo BB `continue` 跳过逻辑，1w/1mo BB 图层正常进入 renderer
+  - `indicator_cache.ALGORITHM_VERSION` v4→v5，旧 v4 缓存 key 不匹配，强制重算（避免旧缓存返回 1d-only DSA + 1w/1mo 无 BB）
+  - 后端新增/修订 6 个测试（cache v5 + BB 1w/1mo + DSA 全周期），前端重写第 4 节 4 个 contract 测试
 - CHANGE-20260707-041: Indicator Overlay Final Alignment
   - 修复 DSA VWAP 15m/1h 误禁用根因：Redis cache `ALGORITHM_VERSION` 未 bump（v3→v4），旧缓存命中返回旧格式 source_bar_times + 日线阶梯线 BB
   - 修复 15m/1h BB 图层错位根因：`_adapt_watchlist_bb` 15m/1h 用 `_map_daily_to_intraday` 映射日线 BB（阶梯线），改用 `compute_bollinger(macd_bars)` 重新计算当前周期 BB

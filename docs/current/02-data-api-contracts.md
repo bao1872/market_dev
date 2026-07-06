@@ -677,24 +677,24 @@ DSA overlay（`indicators.source_bar_times` / `indicators.source_bar_hash`）必
 
 ### 12.5 Indicator overlay 周期策略与 cache schema 版本契约
 
-#### 12.5.1 DSA overlay 周期策略（1d-only by design）
+#### 12.5.1 DSA overlay 周期策略（全周期支持）
 
-DSA（Pine 标签 + VWAP）是日线级别结构锚，**仅支持 1d 周期渲染**。15m/1h 下 DSA overlay 按钮必须 disabled，并提示：
+DSA（Pine 标签 + VWAP）支持全周期渲染（1d/15m/1h/1w/1mo）。1d 是主结构锚，非 1d 是验证图层（用于核查该周期结构，不作为主趋势锚）。
 
-> DSA VWAP 当前仅支持日线结构锚；15m/1h 请使用 Swing、BB、SQZMOM。
-
-约束：
-
-- DSA overlay 按钮在 15m/1h 下 `disabled=true`，提示文案来自 `frontend/src/utils/dsaOverlayPolicy.ts::DSA_DISABLED_HINT`；
-- DSA source mismatch 校验由 `shouldCheckDsaMismatch(timeframe)` 控制：仅 1d 返回 `true`，15m/1h 返回 `false`，避免 15m/1h 误报 "DSA 数据源不一致"；
-- 右侧 `StockStructuralStatePanel` 仍可显示 daily DSA 背景和 m15 response（结构状态因子不受图层禁用影响）；
-- 不得通过关闭 mismatch 保护或伪造 source 数据让 15m/1h 渲染 DSA。
+- DSA overlay 按钮在所有周期可点击（不 disabled），`title` 由 `frontend/src/utils/dsaOverlayPolicy.ts::DSA_TITLE_HINT(timeframe)` 提供：
+  - 1d: "DSA VWAP 日线结构锚。"
+  - 非 1d: "DSA VWAP 当前周期验证图层：用于核查该周期结构，不作为主趋势锚。"
+- DSA source mismatch 校验由 `shouldCheckDsaMismatch(timeframe)` 控制：全周期返回 `true`（DSA 全周期渲染，全部需校验 source 对齐）；
+- DSA 数据必须用当前 timeframe bars 计算（`indicator_service` 传 `bars_daily=macd_bars`），不得用日线 DSA 映射到其他周期；
+- 仍保留 source mismatch 保护：当 K线时间与 `source_bar_times` 匹配率 < 50% 时暂停渲染并提示，不允许无校验强画；
+- 右侧 `StockStructuralStatePanel` 仍可显示 daily DSA 背景和 m15 response（结构状态因子不受图层渲染影响）。
 
 #### 12.5.2 BB/MACD/SQZMOM overlay 跟随当前周期
 
-BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars 计算，不允许用日线阶梯线伪装成 15m/1h BB：
+BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars 计算，全周期支持（1d/15m/1h/1w/1mo）：
 
-- `indicator_service._adapt_watchlist_bb` 在 15m/1h 必须用 `macd_bars`（当前 timeframe bars）调用 `compute_bollinger(macd_bars, length=20, mult=2.0)` 重新计算 BB upper/mid/lower/pos/width；
+- `indicator_service._adapt_watchlist_bb` 在 15m/1h/1w/1mo 必须用 `macd_bars`（当前 timeframe bars）调用 `compute_bollinger(macd_bars, length=20, mult=2.0)` 重新计算 BB upper/mid/lower/pos/width；
+- 1w/1mo 不再移除 BB 字段（PR #32 修复：之前直接 `pop` BB 字段导致前端无 BB overlay）；
 - 字段映射：`bb_pos_01` → `bb_pos`，`bb_width_norm` → `bb_width`；NaN 转 `None` 以保证 JSON 可序列化；
 - 当 `len(macd_bars) < 20`（BB 计算窗口不足）时，BB 字段填 `None`，但 `time` 数组仍与 `macd_bars` 对齐；
 - MACD / SQZMOM 同理：必须用 `macd_bars`（当前 timeframe）计算，不允许串日线；
@@ -707,7 +707,7 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 - cache key 格式：`indicator:{algorithm_version}:{timeframe}:{adj}:{bars}:{symbol}`；
 - 旧版本 cache key 与新版本不匹配，强制重算，避免旧格式 `source_bar_times` 或日线阶梯线 BB 污染渲染；
 - 禁止通过手动 `DEL` 单只股票 key 修复缓存问题（不可扩展，且无法覆盖所有时间周期）；
-- 当前 `ALGORITHM_VERSION = "v4"`（PR #31：source_bar_times 按 timeframe 格式化 + 15m/1h BB 改用 macd_bars 计算）。
+- 当前 `ALGORITHM_VERSION = "v5"`（PR #32：DSA 全周期支持 + 1w/1mo BB 用 compute_bollinger 计算）。
 
 #### 12.5.4 ?debugIndicatorAlignment=1 诊断工具
 

@@ -40,9 +40,9 @@ logger = logging.getLogger("services.indicator_cache")
 CACHE_TTL_SECONDS = 300
 
 # [指标缓存] - 算法版本：指标计算逻辑变更时递增，使旧缓存自动失效
-# v4: PR #31 - source_bar_times 格式变更（按 timeframe）+ 15m/1h BB 改用 macd_bars 计算
-#     v3 旧缓存返回旧格式 source_bar_times 与日线阶梯线 BB，必须强制失效
-ALGORITHM_VERSION = "v4"
+# v5: PR #32 - DSA 全周期支持（bars_daily=macd_bars）+ 1w/1mo BB 用 compute_bollinger 计算
+#     v4 旧缓存返回 1d-only DSA + 1w/1mo 无 BB，必须强制失效
+ALGORITHM_VERSION = "v5"
 
 # 缓存键前缀
 _CACHE_PREFIX = "indicator"

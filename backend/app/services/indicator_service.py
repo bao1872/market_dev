@@ -253,8 +253,7 @@ def _adapt_watchlist_bb(
     """调整 watchlist_monitor 的 BB 输出以匹配当前 timeframe。
 
     - 日线：保留完整日线 BB 序列（不截断），time 同步完整
-    - 15m/1h：用 macd_bars 重新计算 BB（length=20, mult=2.0），不再映射日线阶梯线
-    - 周线/月线：移除 BB 字段（前端不渲染）
+    - 15m/1h/1w/1mo：用 macd_bars 重新计算 BB（length=20, mult=2.0），不再映射日线阶梯线
 
     修复根因（PR #31）：
         之前 15m/1h 调用 _map_daily_to_intraday 把日线 BB 映射到日内时间轴，
@@ -262,10 +261,13 @@ def _adapt_watchlist_bb(
         新行为：15m/1h 用 compute_bollinger(macd_bars) 重新计算 BB，
         bb_upper/bb_mid/bb_lower 反映当前 timeframe close 的波动。
 
+    [PR #32] - 1w/1mo 也用 compute_bollinger(macd_bars) 计算，不再移除 BB 字段。
+        之前 1w/1mo 直接 pop BB 字段导致前端无 BB overlay。
+
     Args:
         indicators: watchlist_monitor 原始指标字典
         timeframe: 当前请求周期
-        macd_bars: 当前 timeframe 对应的 bars（用于 15m/1h BB 计算）
+        macd_bars: 当前 timeframe 对应的 bars（用于 BB 计算）
         macd_time_list: 当前 timeframe 对应的时间列表
         daily_time_list: 日线时间列表（15m/1h 路径不再使用，保留参数兼容）
 
@@ -275,13 +277,8 @@ def _adapt_watchlist_bb(
     result = dict(indicators)
     bb_fields_present = {f for f in _BB_FIELDS if f in result}
 
-    if timeframe in ("1w", "1mo"):
-        for field in bb_fields_present:
-            result.pop(field, None)
-        return result
-
-    if timeframe in ("15m", "1h"):
-        # [PR #31] - 15m/1h BB 用 macd_bars 重新计算，不再映射日线阶梯线
+    if timeframe in ("15m", "1h", "1w", "1mo"):
+        # [PR #31/#32] - 15m/1h/1w/1mo BB 用 macd_bars 重新计算，不再映射日线阶梯线或移除
         #   compute_bollinger 返回 bb_upper/bb_mid/bb_lower/bb_pos_01/bb_width_norm
         #   映射到 watchlist_monitor 字段名：bb_pos_01→bb_pos, bb_width_norm→bb_width
         if not bb_fields_present or macd_bars.empty or not macd_time_list:
@@ -469,10 +466,12 @@ async def compute_all_indicators(
     source_bar_hash: str = compute_source_bar_hash(macd_bars, timeframe)
 
     # 4. 构建 MarketDataContext
+    # [PR #32] - bars_daily 传入 macd_bars（当前 timeframe bars），让 DSA 在全周期计算
+    #   之前传 daily_bars 导致 15m/1h/1w/1mo 的 DSA 是日线 DSA，与当前周期 K线不对齐
     context = MarketDataContext(
         instrument_id=instrument_id,
         symbol=symbol,
-        bars_daily=daily_bars,
+        bars_daily=macd_bars,
         bars_minute=bars_minute if not bars_minute.empty else None,
         bars_15min=bars_15min if not bars_15min.empty else None,
         trade_date=today,
@@ -483,9 +482,10 @@ async def compute_all_indicators(
     data: dict[str, dict[str, Any]] = {}
     errors: dict[str, str] = {}
 
-    # [indicator_service] - 策略指标 time 来自日线 bars（与策略输出长度一致）
+    # [indicator_service] - 策略指标 time 来自当前 timeframe bars（与策略输出长度一致）
+    # [PR #32] - 改用 macd_bars.index（当前 tf），让 DSA 在 15m/1h/1w/1mo 也有正确 time
     daily_time_list: list[str] = [
-        idx.isoformat() for idx in daily_bars.index
+        idx.isoformat() for idx in macd_bars.index
     ]
 
     # [MACD 副图] - 统一在后端按当前 timeframe 计算 MACD 指标，避免前后端多套实现
@@ -530,13 +530,7 @@ async def compute_all_indicators(
             chart_layers = manifest.get("chart_layers", [])
             strategy_name = manifest.get("display_name", strategy_id)
             for layer in chart_layers:
-                # [BB 图层] - 周线/月线移除 watchlist_monitor 的 BB 图层
-                if (
-                    timeframe in ("1w", "1mo")
-                    and strategy_id == "watchlist_monitor"
-                    and layer.get("id") == "bb"
-                ):
-                    continue
+                # [PR #32] - 1w/1mo BB 不再移除，由 _adapt_watchlist_bb 用 macd_bars 计算
                 layers.append({
                     "strategy_id": strategy_id,
                     "strategy_name": strategy_name,
