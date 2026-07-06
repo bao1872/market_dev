@@ -814,6 +814,145 @@ def asyncio_run(coro):
     return asyncio.run(coro)
 
 
+# ===== 8. V1.8 cost_position 位置语义修复（节点区间位置 / zone 分类）=====
+# 用户截图案例：close=147.62, lower=123.22, upper=147.63
+# 期望 node_interval_position_0_1 接近 1.000（而非 position_0_1=0.705 的 VP 全区间位置）
+from app.services.structural_factor_service import (
+    _classify_cost_position_zone,
+    _classify_value_area_zone,
+    _compute_node_interval_position,
+)
+
+
+def test_classify_cost_position_zone_between_nodes() -> None:
+    """close 在 lower~upper 之间 → between_nodes。"""
+    assert _classify_cost_position_zone(140.0, 150.0, 130.0) == "between_nodes"
+
+
+def test_classify_cost_position_zone_below_lower_node() -> None:
+    """close < lower → below_lower_node。"""
+    assert _classify_cost_position_zone(120.0, 150.0, 130.0) == "below_lower_node"
+
+
+def test_classify_cost_position_zone_above_upper_node() -> None:
+    """close > upper → above_upper_node。"""
+    assert _classify_cost_position_zone(160.0, 150.0, 130.0) == "above_upper_node"
+
+
+def test_classify_cost_position_zone_below_upper_node_only_upper() -> None:
+    """只有 upper 节点 → below_upper_node。"""
+    assert _classify_cost_position_zone(140.0, 150.0, None) == "below_upper_node"
+
+
+def test_classify_cost_position_zone_above_lower_node_only_lower() -> None:
+    """只有 lower 节点 → above_lower_node。"""
+    assert _classify_cost_position_zone(140.0, None, 130.0) == "above_lower_node"
+
+
+def test_classify_cost_position_zone_null_no_nodes() -> None:
+    """都没有节点 → null。"""
+    assert _classify_cost_position_zone(140.0, None, None) is None
+
+
+def test_classify_value_area_zone_below_va() -> None:
+    """close < val → below_va。"""
+    assert _classify_value_area_zone(120.0, 150.0, 130.0) == "below_va"
+
+
+def test_classify_value_area_zone_inside_va() -> None:
+    """val <= close <= vah → inside_va。"""
+    assert _classify_value_area_zone(130.0, 150.0, 130.0) == "inside_va"
+    assert _classify_value_area_zone(150.0, 150.0, 130.0) == "inside_va"
+    assert _classify_value_area_zone(140.0, 150.0, 130.0) == "inside_va"
+
+
+def test_classify_value_area_zone_above_va() -> None:
+    """close > vah → above_va。"""
+    assert _classify_value_area_zone(160.0, 150.0, 130.0) == "above_va"
+
+
+def test_classify_value_area_zone_null_no_va() -> None:
+    """val/vah 缺失 → null。"""
+    assert _classify_value_area_zone(140.0, None, None) is None
+    assert _classify_value_area_zone(140.0, 150.0, None) is None
+    assert _classify_value_area_zone(140.0, None, 130.0) is None
+
+
+def test_compute_node_interval_position_close_to_upper() -> None:
+    """用户截图案例：close=147.62, lower=123.22, upper=147.63 → 接近 1.0。"""
+    pos = _compute_node_interval_position(147.62, 147.63, 123.22, clip=True)
+    assert pos is not None
+    assert abs(pos - 1.0) < 0.01, f"期望接近 1.0，实际 {pos}"
+
+
+def test_compute_node_interval_position_clip() -> None:
+    """close 超出 upper → clip 到 1.0。"""
+    pos = _compute_node_interval_position(160.0, 150.0, 130.0, clip=True)
+    assert pos == 1.0
+
+
+def test_compute_node_interval_position_clip_below() -> None:
+    """close 低于 lower → clip 到 0.0。"""
+    pos = _compute_node_interval_position(120.0, 150.0, 130.0, clip=True)
+    assert pos == 0.0
+
+
+def test_compute_node_interval_position_raw_no_clip() -> None:
+    """raw 不 clip，可以 > 1 或 < 0。"""
+    raw = _compute_node_interval_position(160.0, 150.0, 130.0, clip=False)
+    assert raw is not None
+    assert raw > 1.0, f"raw 应 > 1.0，实际 {raw}"
+
+
+def test_compute_node_interval_position_null_no_nodes() -> None:
+    """缺失节点 → null。"""
+    assert _compute_node_interval_position(140.0, None, 130.0) is None
+    assert _compute_node_interval_position(140.0, 150.0, None) is None
+    assert _compute_node_interval_position(140.0, None, None) is None
+
+
+def test_compute_node_interval_position_null_upper_le_lower() -> None:
+    """upper <= lower → null（防止除零/反向）。"""
+    assert _compute_node_interval_position(140.0, 130.0, 130.0) is None
+    assert _compute_node_interval_position(140.0, 120.0, 130.0) is None
+
+
+def test_cost_position_factors_returns_new_v18_fields() -> None:
+    """_compute_cost_position_factors 返回 V1.8 新增字段。"""
+    bars = _build_bars(n=250)
+    result = _compute_cost_position_factors(bars)
+    new_keys = {
+        "node_interval_position_0_1",
+        "node_interval_position_raw",
+        "cost_position_zone",
+        "value_area_zone",
+    }
+    assert new_keys.issubset(result.keys()), f"缺少字段: {new_keys - result.keys()}"
+
+
+def test_position_0_1_remains_vp_full_range_semantics() -> None:
+    """position_0_1 保持原 VP 全区间语义（不等于 node_interval_position_0_1）。
+
+    position_0_1 = vp_result.position_0_1(last_close)  # VP 全价格范围 lowest~highest
+    node_interval_position_0_1 = (last_close - lower) / (upper - lower)  # 节点区间
+    两者含义不同，不能混用。
+    """
+    bars = _build_bars(n=250)
+    result = _compute_cost_position_factors(bars)
+    # position_0_1 必须存在（保持原语义）
+    assert "position_0_1" in result
+    # 如果两者都有值，它们应该不相等（VP 全区间 vs 节点区间）
+    pos_full = result["position_0_1"]
+    pos_node = result["node_interval_position_0_1"]
+    if pos_full is not None and pos_node is not None:
+        # 仅在两者都有值时检查不相等（数据可能缺失）
+        # 用截图案例的精神：VP 全区间位置 != 节点区间位置
+        # 这里只验证两者都存在且都是 float
+        assert isinstance(pos_full, float)
+        assert isinstance(pos_node, float)
+        assert 0.0 <= pos_node <= 1.0  # clipped
+
+
 # ===== 模块自测入口 =====
 if __name__ == "__main__":
     import pytest

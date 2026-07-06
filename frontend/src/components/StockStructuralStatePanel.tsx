@@ -133,6 +133,8 @@ const CARDS: Array<{ title: string; group: FactorGroup; rows: FactorRow[] }> = [
     rows: [
       // V1.7 保留字段
       { label: 'POC', key: 'poc_price', format: fmtPrice },
+      { label: 'VAL', key: 'val_price', format: fmtPrice },
+      { label: 'VAH', key: 'vah_price', format: fmtPrice },
       { label: '上方节点', key: 'nearest_upper_node', format: (v) => {
         if (v === null || v === undefined) return '-'
         if (typeof v === 'object' && v !== null && 'price_mid' in v) {
@@ -147,17 +149,26 @@ const CARDS: Array<{ title: string; group: FactorGroup; rows: FactorRow[] }> = [
         }
         return '-'
       } },
-      { label: '位置 [0,1]', key: 'position_0_1', format: (v) => fmt(v, 3) },
+      // V1.8 位置语义修复：VP 全区间位置（原 position_0_1，保持语义，仅改标签避免误读）
+      { label: 'VP全区间位置[0,1]', key: 'position_0_1', format: (v) => fmt(v, 3) },
+      // V1.8 新增：节点区间位置（close 在 [lower, upper] 中的位置，clip 到 [0,1]）
+      { label: '节点区间位置[0,1]', key: 'node_interval_position_0_1', format: (v) => fmt(v, 3) },
+      // V1.8 VA 位置（保留 raw，不 clip）
+      { label: 'VA位置raw', key: 'value_area_position_0_1', format: (v) => fmt(v, 3) },
+      // V1.8 新增：VA 状态分类
+      { label: 'VA状态', key: 'value_area_zone', format: (v) => fmt(v, 0) },
+      // V1.8 新增：成本区间状态分类
+      { label: '成本区间状态', key: 'cost_position_zone', format: (v) => fmt(v, 0) },
       { label: 'close vs POC', key: 'close_to_poc_pct', format: fmtPct },
-      // V1.8 新增字段
       { label: 'close vs POC / ATR', key: 'price_vs_poc_atr', format: (v) => fmt(v, 3) },
-      { label: 'VA 位置 [0,1]', key: 'value_area_position_0_1', format: (v) => fmt(v, 3) },
       { label: '上方节点价', key: 'nearest_node_above_price', format: fmtPrice },
       { label: '下方节点价', key: 'nearest_node_below_price', format: fmtPrice },
       { label: '距上方节点 / ATR', key: 'distance_to_node_above_atr', format: (v) => fmt(v, 3) },
       { label: '距下方节点 / ATR', key: 'distance_to_node_below_atr', format: (v) => fmt(v, 3) },
       { label: '上方节点强度', key: 'node_above_strength', format: fmtInt },
       { label: '下方节点强度', key: 'node_below_strength', format: fmtInt },
+      // V1.8 诊断字段：节点区间位置 raw（不 clip，可 > 1 或 < 0）
+      { label: '节点区间位置raw', key: 'node_interval_position_raw', format: (v) => fmt(v, 3) },
     ],
   },
   {

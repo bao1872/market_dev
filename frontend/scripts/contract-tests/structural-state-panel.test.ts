@@ -190,6 +190,13 @@ test('Panel includes V1.8 core fields in CARDS', () => {
     'distance_to_node_below_atr',
     'node_above_strength',
     'node_below_strength',
+    // V1.8 位置语义修复字段（区分 VP 全区间 / 节点区间 / VA 区间）
+    'node_interval_position_0_1',
+    'node_interval_position_raw',
+    'cost_position_zone',
+    'value_area_zone',
+    'val_price',
+    'vah_price',
     // Volatility V1.8
     'distance_to_bb_upper_atr',
     'distance_to_bb_lower_atr',
@@ -234,5 +241,56 @@ test('Panel relation section uses V1.8 objective fields', () => {
   assert.ok(
     !/momentum_alignment/.test(src),
     'Panel V1.8 必须移除 momentum_alignment 引用',
+  )
+})
+
+// ===== 11. V1.8 成本/节点卡片位置语义标签修复 =====
+test('Cost/Node card uses unambiguous position labels (V1.8 semantic fix)', () => {
+  const src = readSource(PANEL_PATH)
+
+  // 提取成本/节点卡片配置范围（title: '成本/节点' 到下一个 title: 之间）
+  const costCardStart = src.indexOf("title: '成本/节点'")
+  assert.ok(costCardStart > 0, '必须存在「成本/节点」卡片')
+  // 找到下一个 title: 'xxx' 作为成本卡结束
+  const nextTitleMatch = src.slice(costCardStart + 20).match(/\n\s*title:\s*'/)
+  const costCardEnd = nextTitleMatch
+    ? costCardStart + 20 + (nextTitleMatch.index ?? 0)
+    : src.length
+  const costCardSrc = src.slice(costCardStart, costCardEnd)
+
+  // 成本卡内禁止含糊的「位置 [0,1]」标签（与节点区间位置混淆）
+  assert.ok(
+    !/label:\s*'位置\s*\[0,1\]'/.test(costCardSrc),
+    '成本/节点卡片禁止使用含糊的「位置 [0,1]」标签（与节点区间位置混淆）',
+  )
+
+  // 必须出现明确的 VP 全区间位置标签
+  assert.ok(
+    costCardSrc.includes("'VP全区间位置[0,1]'"),
+    "成本/节点卡片必须含「VP全区间位置[0,1]」标签（原 position_0_1 改名，保持 VP 全区间语义）",
+  )
+
+  // 必须出现节点区间位置标签
+  assert.ok(
+    costCardSrc.includes("'节点区间位置[0,1]'"),
+    "成本/节点卡片必须含「节点区间位置[0,1]」标签（新增 node_interval_position_0_1）",
+  )
+
+  // 必须出现 VA 状态标签
+  assert.ok(
+    costCardSrc.includes("'VA状态'"),
+    "成本/节点卡片必须含「VA状态」标签（新增 value_area_zone 分类）",
+  )
+
+  // VA 位置标签改为 raw（避免误读为已 clip）
+  assert.ok(
+    costCardSrc.includes("'VA位置raw'"),
+    "成本/节点卡片必须含「VA位置raw」标签（value_area_position_0_1 不 clip）",
+  )
+
+  // 必须显示 VAL / VAH 原值
+  assert.ok(
+    costCardSrc.includes("'VAL'") && costCardSrc.includes("'VAH'"),
+    "成本/节点卡片必须显示 VAL / VAH 原值",
   )
 })
