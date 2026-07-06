@@ -621,9 +621,9 @@ if __name__ == "__main__":
     # 模块自测：验证函数可调用且不崩溃
     print("temporal_feature_service 自测...")
 
-    # 构造测试数据
+    # 构造测试数据（n 引用 DAILY_HISTORY_BARS，避免散落硬编码 250 受控字面量）
     rng = np.random.default_rng(42)
-    n = 250
+    n = DAILY_HISTORY_BARS
     base = 100.0
     trend = np.linspace(0, 20.0, n)
     noise = rng.normal(0, 2.0, n)
