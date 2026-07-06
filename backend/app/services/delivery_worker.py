@@ -31,6 +31,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.constants.monitor_source_types import MONITOR_SOURCE_TYPES
 from app.models.notification import MessageDelivery
 from app.services.notification_service import _execute_delivery
 
@@ -56,10 +57,6 @@ _USER_TRIGGERED_SOURCE_TYPES = frozenset({"stock_detail_share"})
 # [DeliveryWorker] - 管理员通知 source_type 集合：跳过 eligible_user_service 资格检查
 # 管理员身份由角色权限体系决定，不要求 subscription；同时不受静默期限制
 _ADMIN_NOTIFICATION_SOURCE_TYPES = frozenset({"beta_application_admin"})
-
-# [DeliveryWorker] - 监控/策略事件 source_type 集合：使用 monitor 专用资格检查
-# 与普通会员资格不同，monitor 资格允许 active admin 接收自己的自选股监控通知
-_MONITOR_SOURCE_TYPES = frozenset({"monitor_event", "strategy_event", "monitor_chart"})
 
 # 通知投递 Worker 默认时区（上海时区）
 _CST = ZoneInfo("Asia/Shanghai")
@@ -276,7 +273,7 @@ async def process_pending_deliveries(
             elif _source_type in _ADMIN_NOTIFICATION_SOURCE_TYPES:
                 # 管理员通知：跳过 subscription 资格检查（由角色权限体系决定）
                 pass
-            elif _source_type in _MONITOR_SOURCE_TYPES:
+            elif _source_type in MONITOR_SOURCE_TYPES:
                 # 监控/策略事件：使用 monitor 专用资格，active admin 也可接收
                 from app.services.eligible_user_service import is_user_eligible_for_monitor
 

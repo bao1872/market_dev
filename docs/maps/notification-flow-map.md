@@ -9,14 +9,15 @@ MonitorEvaluation
 → NotificationMessage
 → Outbox(notification.message.created)
 → outbox_relay
-→ eligible_user_service 资格过滤
+→ eligible_user_service 资格过滤（`filter_monitor_eligible_recipients`/`is_user_eligible_for_monitor`，MONITOR_SOURCE_TYPES 真源见 `app/constants/monitor_source_types.py`）
 → active NotificationChannel
 → MessageDelivery
 → delivery_worker
+  → 对 monitor_event / strategy_event / monitor_chart 再次调用 `is_user_eligible_for_monitor` 复核
 → FeishuPlatformAppAdapter
 ```
 
-无 `target_channel_id` 的自动通知必须走 eligible_user_service。
+无 `target_channel_id` 的自动通知必须走 eligible_user_service；delivery_worker 是 monitor source 的最后资格防线。
 
 ## 2. 手动发送个股详情
 

@@ -38,7 +38,7 @@ worker-strategy-batch 的 run 级总超时由 STRATEGY_RUN_TOTAL_TIMEOUT_SECONDS
 - 同步 pytdx 调用通过线程池提交到 async event loop，避免阻塞主循环；
 - 日志必须区分 `pytdx 成功`、`pytdx 失败 fallback`、`非交易时段 fallback` 三种场景。
 
-`MarketDataAggregationService` 在 `timeframe=1d && include_realtime=true && 交易时段` 时，用当日已完成 1m bar 合成一根 partial daily bar 追加到响应末尾，返回 `data_source=hybrid`、`is_partial=true`、`last_live_bar_time`；非交易时段、收盘后、`include_realtime=false` 时不合成。partial daily bar 不写库，仅用于前端盘中展示。
+`MarketDataAggregationService` 在 `timeframe=1d && include_realtime=true && 交易时段` 时，用当日已完成 1m bar 合成一根 partial daily bar 追加到响应末尾，返回 `data_source=hybrid`、`is_partial=true`、`last_live_bar_time`；非交易时段、收盘后、`include_realtime=false` 时不合成。partial daily bar 不写库，仅用于前端盘中展示。盘中监控（`monitor_batch_service`）与个股详情 K线均依赖 MDAS 的实时语义：前者用最新已完成 1m bar 作为算法输入，后者通过 1d partial bar 在页面展示盘中价格。
 
 行情调度与盘后编排中的覆盖率检查统一复用 `BarsCoverageService`，禁止复制 SQL。`worker-bars-scheduler` 与 `worker-after-close` 均以 `shanghai_business_date()` 作为业务日期，避免服务器时区偏差。所有覆盖率门禁（`bars_scheduler` 自动触发 DSA、`dsa-only`、系统概览 `WAITING_DSA` 判定）均使用 `BarsCoverageService.compute_daily_coverage` 返回的 `coverage_raw` 原始值进行阈值判断，`coverage` 仅用于展示。`/admin/after-close-runs/dsa-only` 在当日无数据时 fallback 到最新可用交易日再校验覆盖率。
 

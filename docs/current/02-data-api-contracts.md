@@ -13,7 +13,21 @@
 
 partial 实时 Bar 不写入完成 Bar 表，只存在于请求快照或短缓存。
 
-`timeframe=1d && include_realtime=true && 交易时段（MORNING_SESSION/AFTERNOON_SESSION）` 时，`MarketDataAggregationService` 会用当日已完成 1m bar 合成一根 partial daily bar 追加到响应末尾，返回 `data_source=hybrid`、`is_partial=true`、`last_live_bar_time`；非交易时段、收盘后或 `include_realtime=false` 时不合成，返回 DB 已完成日线。partial daily bar 不写库。
+### 个股详情 K线实时契约
+
+- `/quote` 实时 **只代表顶部行情卡片实时**，不等价于 K线实时；
+- `/bars?timeframe=1d&include_realtime=true` 是个股详情 1d K线实时的唯一后端契约；
+- 交易时段（`MORNING_SESSION`/`AFTERNOON_SESSION`）内，`/bars?timeframe=1d&include_realtime=true` 必须返回今日 partial daily bar：
+  - `data_source=hybrid`
+  - `is_partial=true`
+  - `last_live_bar_time` 非空
+  - 最后一根 bar 日期为今日
+  - close 来自最新已完成 1m bar；
+- 收盘后或非交易时段，`/bars?timeframe=1d` 不得伪装实时：
+  - `is_partial=false`
+  - 最后一根为完整日线
+  - `/quote` 可为 `daily_fallback`；
+- 前端 `mergeRealtimeQuoteIntoBars()` 只能作为兜底视觉增强，不能替代后端 partial bar，不参与指标计算，不写入库。
 
 strategy_run_items.reason_code 标准编码：
 - failed: timeout（单股超时）、runtime_error、data_error、run_timeout_budget_exhausted（run 级总超时预算耗尽）

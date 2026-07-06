@@ -62,6 +62,23 @@
   - `test_market_data_aggregation_partial_daily.py` 覆盖交易时段 1d 合成 partial daily bar（`data_source=hybrid`、`is_partial=true`、`last_live_bar_time` 非空）、非交易时段不合成；
   - `test_quote_timezone.py` 覆盖 `/quote` 返回 `update_time` 带 `+08:00`、UTC 字符串被修正为 `+08:00`。
 
+## 3.2 K线实时契约门禁（blocking）
+
+- 任何修改 `backend/app/api/bars.py`、`backend/app/services/market_data_aggregation_service.py`、`backend/app/core/pytdx_adapter.py`、`frontend/src/pages/StockDetailPage.tsx`、`frontend/src/utils/chart.ts` 必须跑 K线实时契约测试；
+- 必须覆盖：
+  - 交易时段 1d partial daily bar（`is_partial=true`、`last_live_bar_time` 非空、最后一根日期为今日）；
+  - 收盘后/非交易时段 1d 非 partial（`is_partial=false`、最后一根为完整日线）；
+  - `/quote` 返回 `update_time` 带 `+08:00`；
+  - 前端状态展示区分 quote 实时状态与 K线 partial 状态；
+- 这些测试不得 `xfail`，不得删除或以适配错误实现；
+- 回归命令：
+
+```bash
+cd /root/web_dev/backend
+APP_ENV=test TEST_DATABASE_URL=postgresql+asyncpg://bz:bz@localhost:5432/bz_stock_test \
+pytest tests/test_delivery_worker_monitor_eligible.py tests/test_monitor_batch_live_minute.py tests/test_market_data_aggregation_partial_daily.py tests/test_quote_timezone.py -q
+```
+
 ## 4. CI 门禁
 
 阻断项：

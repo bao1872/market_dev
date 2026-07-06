@@ -8,10 +8,12 @@
 - 修复 `monitor_batch_service.py` 盘中监控 1m 输入仍用 `include_realtime=False` 的问题：1m 改为 `include_realtime=True` 并剔除最后一根未完成 bar，日线/15m 输入保持 `include_realtime=False`；`MonitorCycleResult` 新增 `last_minute_is_partial`，cycle done 与单标的日志输出 `instrument/symbol/source_bar_time/minute_data_source/minute_is_partial/events_detected/events_written`。
 - 修复 `market_data_aggregation_service.py` 1d 交易时段无 partial daily bar 的问题：`timeframe=1d && include_realtime=true && MORNING_SESSION/AFTERNOON_SESSION` 时，用当日已完成 1m bar 合成 partial daily bar 追加到响应末尾，返回 `data_source=hybrid`、`is_partial=true`、`last_live_bar_time`；非交易时段、收盘后、`include_realtime=false` 时不合成；不写库。
 - 修复 `/quote` 时区：`backend/app/api/bars.py` 与 `backend/app/core/pytdx_adapter.py` 对 naive datetime 和 `+00:00` 字符串统一按 Asia/Shanghai 解释，确保前端显示上海时间。
+- 修复 Architecture Rules `duplicate-plan-feature-list`：`outbox_relay.py` 与 `delivery_worker.py` 中的 `_MONITOR_SOURCE_TYPES` 提取为 `app/constants/monitor_source_types.py` 单点真源。
+- 新增 `AGENTS.md` `### 13. 个股详情 K线实时契约`，把 `/bars?timeframe=1d&include_realtime=true` 固化为个股详情 K线实时的唯一后端契约，明确 `/quote` 实时 ≠ K线实时、`mergeRealtimeQuoteIntoBars()` 只能兜底视觉增强。
 - 新增后端测试 4 个文件 6 个用例：`test_delivery_worker_monitor_eligible.py`、`test_monitor_batch_live_minute.py`、`test_market_data_aggregation_partial_daily.py`、`test_quote_timezone.py`。
-- 更新 `docs/current/02-data-api-contracts.md`、`03-jobs-integrations-operations.md`、`04-frontend-ux.md`、`05-testing-acceptance.md`、`code-doc-alignment.md`；更新 `docs/maps/backend-module-map.md`、`test-coverage-map.md`。
-- 新增 ALIGN-036（delivery_worker monitor 资格修复待生产验证）、ALIGN-037（1d partial daily bar 与 live 1m monitor 待生产验证）。
-- 新增 CHANGE-20260706-036。
+- 更新 `AGENTS.md`；更新 `docs/current/02-data-api-contracts.md`、`03-jobs-integrations-operations.md`、`04-frontend-ux.md`、`05-testing-acceptance.md`（新增 K线实时契约 blocking 门禁）、`code-doc-alignment.md`；更新 `docs/maps/api-route-map.md`、`backend-module-map.md`、`frontend-route-map.md`、`notification-flow-map.md`、`test-coverage-map.md`。
+- 新增/更新 ALIGN-036（delivery_worker monitor 资格修复待生产验证）、ALIGN-037（1d partial daily bar 与 live 1m monitor 待生产验证）。
+- 新增 CHANGE-20260706-036（含根因：8c991e3d 统一 MDAS 后旧 `/bars` 1d 实时合并语义未完整迁移；PR #25 修 quote 可信化但未恢复 1d partial bar）。
 - 本次不部署生产，待用户确认 diff、测试结果与验证证据后授权 build/restart。
 
 ## 2026-07-05: Admin 监控资格修复 + 个股详情实时行情可信化
