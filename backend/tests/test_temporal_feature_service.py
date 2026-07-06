@@ -205,7 +205,8 @@ def test_m15_swing_anchor_selection() -> None:
 
     result = _compute_m15_response(secondary_factors, bars, degraded, warmup)
     # 只要 anchor 能定位，position_change 就应该有值（或 null 如果 range=0）
-    pos_change = result["m15_position_change_since_swing_anchor"]
+    # 不强制断言：可能 range=0 或数据不足，pos_change 由内部计算
+    _ = result["m15_position_change_since_swing_anchor"]
 
     if bsh is not None and bsl is not None:
         # anchor 存在时验证逻辑
@@ -215,7 +216,6 @@ def test_m15_swing_anchor_selection() -> None:
         else:
             # anchor = swing_high
             pass
-    # 不强制 pos_change 非 None（可能 range=0 或数据不足）
 
 
 # ===== 7. m15 sqzmom change since anchor =====
@@ -522,8 +522,8 @@ async def test_m15_response_exception_isolation(monkeypatch) -> None:
 
     # _fetch_bars 和 _compute_all_factors_for_bars 是从 structural_factor_service 延迟导入
     # 必须在 structural_factor_service 模块上 patch
-    from app.services import structural_factor_service as sfs
     import app.services.temporal_feature_service as tfs
+    from app.services import structural_factor_service as sfs
 
     async def fake_fetch_bars(service, session, instrument_id, timeframe, adj, lookback, degraded):
         return bars if timeframe == "1d" else bars15

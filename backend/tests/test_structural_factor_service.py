@@ -22,9 +22,12 @@ import numpy as np
 import pandas as pd
 
 from app.services.structural_factor_service import (
+    _classify_cost_position_zone,
+    _classify_value_area_zone,
     _compute_all_factors_for_bars,
     _compute_cost_position_factors,
     _compute_dsa_segment_factors,
+    _compute_node_interval_position,
     _compute_participation_factors,
     _compute_relation,
     _compute_swing_factors,
@@ -817,11 +820,8 @@ def asyncio_run(coro):
 # ===== 8. V1.8 cost_position 位置语义修复（节点区间位置 / zone 分类）=====
 # 用户截图案例：close=147.62, lower=123.22, upper=147.63
 # 期望 node_interval_position_0_1 接近 1.000（而非 position_0_1=0.705 的 VP 全区间位置）
-from app.services.structural_factor_service import (
-    _classify_cost_position_zone,
-    _classify_value_area_zone,
-    _compute_node_interval_position,
-)
+# 注：_classify_cost_position_zone / _classify_value_area_zone / _compute_node_interval_position
+# 已在文件顶部统一 import，避免 E402 module level import not at top of file。
 
 
 def test_classify_cost_position_zone_between_nodes() -> None:

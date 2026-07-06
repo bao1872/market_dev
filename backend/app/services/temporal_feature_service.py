@@ -401,7 +401,7 @@ def _compute_m15_response(
     if secondary_bars is not None:
         anchor_info = _find_swing_anchor(secondary_bars, swing_pos)
 
-    if anchor_info is not None and m15_pos_now is not None:
+    if anchor_info is not None and m15_pos_now is not None and secondary_bars is not None:
         anchor_bar_idx, swing_high, swing_low = anchor_info
         swing_range = swing_high - swing_low
         if swing_range > 0 and anchor_bar_idx < len(secondary_bars):

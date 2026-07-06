@@ -126,20 +126,20 @@ async def test_nonexistent_instrument_returns_200_degraded(
     服务层会捕获 get_bars 失败，返回 degraded 结构。
     """
     mock_result = {
-        "daily_context": {k: None for k in [
+        "daily_context": dict.fromkeys([
             "daily_dsa_dir", "daily_dsa_segment_duration_percentile",
             "daily_dsa_slope_atr_per_bar", "daily_dsa_efficiency_0_1",
             "daily_price_position_in_swing_0_1", "daily_distance_to_swing_high_atr",
             "daily_distance_to_node_above_atr", "daily_sqzmom_change_since_segment_start",
             "daily_volume_percentile_change_since_segment_start",
-        ]},
-        "m15_response": {k: None for k in [
+        ]),
+        "m15_response": dict.fromkeys([
             "m15_price_position_in_swing_0_1", "m15_position_change_since_swing_anchor",
             "m15_distance_to_swing_high_atr", "m15_distance_to_swing_low_atr",
             "m15_sqzmom_change_since_swing_anchor", "m15_sqzmom_abs_percentile",
             "m15_sqz_off", "m15_bb_bandwidth_change_since_swing_anchor",
             "m15_volume_percentile_change_since_swing_anchor",
-        ]},
+        ]),
         "derived_relation": {
             "m15_position_relative_to_daily": None,
             "m15_response_direction_relative_to_daily": None,
