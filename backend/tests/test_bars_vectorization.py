@@ -284,6 +284,9 @@ def test_performance_upsert_records() -> None:
     """性能对比：向量化 _df_to_upsert_records 耗时 < iterrows 耗时。"""
     df = _build_raw_df(2000)
 
+    # warmup：首次调用有 pandas/numpy JIT 编译开销，预热避免 CI runner 性能波动误判
+    _df_to_upsert_records(df, TEST_INSTRUMENT_ID, is_daily=True)
+
     # 向量化
     start = time.perf_counter()
     _df_to_upsert_records(df, TEST_INSTRUMENT_ID, is_daily=True)
@@ -314,6 +317,9 @@ def test_performance_upsert_records() -> None:
 def test_performance_df_to_responses() -> None:
     """性能对比：向量化 _df_to_responses 耗时 < iterrows 耗时。"""
     df = _build_query_df(2000)
+
+    # warmup：首次调用有 pandas/numpy JIT 编译开销，预热避免 CI runner 性能波动误判
+    _df_to_responses(df, TEST_INSTRUMENT_ID, "1d")
 
     # 向量化
     start = time.perf_counter()

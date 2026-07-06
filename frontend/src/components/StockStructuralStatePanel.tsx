@@ -111,15 +111,16 @@ const CARDS: Array<{ title: string; group: FactorGroup; rows: FactorRow[] }> = [
     title: 'Swing 结构位置',
     group: 'swing_position',
     rows: [
-      // [V1.9] active swing 摘要：当前正在发展的结构区间，跟随最新价格
-      // confirmed pivot 字段在"结构因子明细"折叠卡片 JSON 中查看
-      { label: 'Active high', key: 'active_swing_high', format: fmtPrice },
-      { label: 'Active low', key: 'active_swing_low', format: fmtPrice },
-      { label: '距 active high bar', key: 'bars_since_active_swing_high', format: fmtInt },
-      { label: '距 active low bar', key: 'bars_since_active_swing_low', format: fmtInt },
-      { label: 'Active 位置[0,1]', key: 'price_position_in_active_swing_0_1', format: (v) => fmt(v, 3) },
-      { label: '距 active high / ATR', key: 'distance_to_active_swing_high_atr', format: (v) => fmt(v, 3) },
-      { label: '距 active low / ATR', key: 'distance_to_active_swing_low_atr', format: (v) => fmt(v, 3) },
+      // [V1.10] developing swing 摘要：当前正在发生的回落/反弹结构
+      // active major leg 和 confirmed pivot 字段在"结构因子明细"折叠卡片 JSON 中查看
+      { label: 'Developing 方向', key: 'developing_swing_dir', format: fmtDir },
+      { label: 'Developing high', key: 'developing_swing_high', format: fmtPrice },
+      { label: 'Developing low', key: 'developing_swing_low', format: fmtPrice },
+      { label: '距 developing high bar', key: 'bars_since_developing_swing_high', format: fmtInt },
+      { label: '距 developing low bar', key: 'bars_since_developing_swing_low', format: fmtInt },
+      { label: 'Developing 位置[0,1]', key: 'price_position_in_developing_swing_0_1', format: (v) => fmt(v, 3) },
+      { label: '距 developing high / ATR', key: 'distance_to_developing_swing_high_atr', format: (v) => fmt(v, 3) },
+      { label: '距 developing low / ATR', key: 'distance_to_developing_swing_low_atr', format: (v) => fmt(v, 3) },
     ],
   },
   {
@@ -240,24 +241,27 @@ const TEMPORAL_DAILY_ROWS: FactorRow[] = [
   { label: '段持续分位', key: 'daily_dsa_segment_duration_percentile', format: fmtPct },
   { label: '段斜率 ATR/bar', key: 'daily_dsa_slope_atr_per_bar', format: (v) => fmt(v, 4) },
   { label: '段效率', key: 'daily_dsa_efficiency_0_1', format: (v) => fmt(v, 3) },
-  // [V1.9] active swing 时序位置：当前正在发展的结构区间，跟随最新价格
-  { label: 'Active high', key: 'daily_active_swing_high', format: fmtPrice },
-  { label: 'Active low', key: 'daily_active_swing_low', format: fmtPrice },
-  { label: 'Active 位置[0,1]', key: 'daily_price_position_in_active_swing_0_1', format: (v) => fmt(v, 3) },
-  { label: '距 active high / ATR', key: 'daily_distance_to_active_swing_high_atr', format: (v) => fmt(v, 3) },
-  { label: '距 active low / ATR', key: 'daily_distance_to_active_swing_low_atr', format: (v) => fmt(v, 3) },
+  // [V1.10] developing swing 时序位置：当前正在发生的回落/反弹结构
+  // active major leg / confirmed raw 字段在明细 JSON 中查看
+  { label: 'Developing 方向', key: 'daily_developing_swing_dir', format: fmtDir },
+  { label: 'Developing high', key: 'daily_developing_swing_high', format: fmtPrice },
+  { label: 'Developing low', key: 'daily_developing_swing_low', format: fmtPrice },
+  { label: 'Developing 位置[0,1]', key: 'daily_price_position_in_developing_swing_0_1', format: (v) => fmt(v, 3) },
+  { label: '距 developing high / ATR', key: 'daily_distance_to_developing_swing_high_atr', format: (v) => fmt(v, 3) },
+  { label: '距 developing low / ATR', key: 'daily_distance_to_developing_swing_low_atr', format: (v) => fmt(v, 3) },
   { label: '距上方节点 / ATR', key: 'daily_distance_to_node_above_atr', format: (v) => fmt(v, 3) },
   { label: 'SQZMOM 段内变化', key: 'daily_sqzmom_change_since_segment_start', format: (v) => fmt(v, 4) },
   { label: '量能分位段内变化', key: 'daily_volume_percentile_change_since_segment_start', format: fmtPct },
 ]
 
 const TEMPORAL_M15_ROWS: FactorRow[] = [
-  // [V1.9] active swing 时序位置：当前正在发展的结构区间，跟随最新价格
-  { label: 'Active high', key: 'm15_active_swing_high', format: fmtPrice },
-  { label: 'Active low', key: 'm15_active_swing_low', format: fmtPrice },
-  { label: 'Active 位置[0,1]', key: 'm15_price_position_in_active_swing_0_1', format: (v) => fmt(v, 3) },
-  { label: '距 active high / ATR', key: 'm15_distance_to_active_swing_high_atr', format: (v) => fmt(v, 3) },
-  { label: '距 active low / ATR', key: 'm15_distance_to_active_swing_low_atr', format: (v) => fmt(v, 3) },
+  // [V1.10] developing swing 时序位置：当前正在发生的回落/反弹结构
+  { label: 'Developing 方向', key: 'm15_developing_swing_dir', format: fmtDir },
+  { label: 'Developing high', key: 'm15_developing_swing_high', format: fmtPrice },
+  { label: 'Developing low', key: 'm15_developing_swing_low', format: fmtPrice },
+  { label: 'Developing 位置[0,1]', key: 'm15_price_position_in_developing_swing_0_1', format: (v) => fmt(v, 3) },
+  { label: '距 developing high / ATR', key: 'm15_distance_to_developing_swing_high_atr', format: (v) => fmt(v, 3) },
+  { label: '距 developing low / ATR', key: 'm15_distance_to_developing_swing_low_atr', format: (v) => fmt(v, 3) },
   // confirmed swing anchor 后变化（基于 confirmed pivot 位置）
   { label: 'Confirmed 位置 anchor 后变化', key: 'm15_position_change_since_swing_anchor', format: (v) => fmt(v, 3) },
   { label: 'SQZMOM anchor 后变化', key: 'm15_sqzmom_change_since_swing_anchor', format: (v) => fmt(v, 4) },
@@ -268,7 +272,8 @@ const TEMPORAL_M15_ROWS: FactorRow[] = [
 ]
 
 const TEMPORAL_DERIVED_ROWS: FactorRow[] = [
-  { label: 'm15 vs daily 位置', key: 'm15_position_relative_to_daily', format: (v) => fmt(v, 3) },
+  // [V1.10] derived_relation 改用 developing swing 计算（不回退 active/confirmed raw）
+  { label: 'm15 vs daily Developing 位置差', key: 'm15_position_relative_to_daily', format: (v) => fmt(v, 3) },
   { label: '响应方向', key: 'm15_response_direction_relative_to_daily', format: (v) => fmt(v, 0) },
   { label: '响应强度', key: 'm15_response_intensity', format: (v) => fmt(v, 3) },
 ]

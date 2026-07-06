@@ -1262,6 +1262,223 @@ def test_active_swing_fallback_when_no_confirmed_pivots() -> None:
     assert result["active_swing_low"] == expected_low
 
 
+# ===== V1.10 developing swing（当前正在发生的回落/反弹结构）=====
+def _compute_active_and_developing(
+    n: int,
+    last_ph_anchor: float | None,
+    last_ph_val: float | None,
+    last_pl_anchor: float | None,
+    last_pl_val: float | None,
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    last_close: float,
+    last_atr: float = 0.3,
+) -> tuple[dict, dict]:
+    """辅助：先算 active_swing，再算 developing_swing。"""
+    from app.services.structural_factor_service import (
+        _compute_active_swing_factors,
+        _compute_developing_swing_factors,
+    )
+    _, _, _, ph, pl, ph_a, pl_a = _make_pivot_input(
+        n,
+        last_ph_anchor=last_ph_anchor, last_ph_val=last_ph_val,
+        last_pl_anchor=last_pl_anchor, last_pl_val=last_pl_val,
+        highs=highs, lows=lows, closes=closes,
+    )
+    active = _compute_active_swing_factors(
+        highs, lows, closes, ph, pl, ph_a, pl_a,
+        last_close=last_close, last_atr=last_atr,
+    )
+    developing = _compute_developing_swing_factors(
+        highs, lows, closes, active,
+        last_close=last_close, last_atr=last_atr,
+    )
+    return active, developing
+
+
+def test_developing_swing_major_up_leg_retracement() -> None:
+    """major up leg 回落：active_high_bar_idx < current_idx 时，developing_low = min(lows[active_high_bar:now])，不等于 active_low。"""
+    n = 250
+    # up leg: confirmed_low anchor=100 (val=4.45), confirmed_high anchor=50 (val=5.05)
+    # active_high 在 bar 149 = 6.26, current bar 249 close=5.19
+    highs = np.full(n, 5.0)
+    highs[149] = 6.26  # active high 在 bar 149
+    lows = np.full(n, 4.4)
+    lows[149:] = 5.0  # active_high bar 之后（含）low=5.0，回落结构
+    closes = np.full(n, 5.0)
+    closes[-1] = 5.19
+
+    active, developing = _compute_active_and_developing(
+        n,
+        last_ph_anchor=50.0, last_ph_val=5.05,
+        last_pl_anchor=100.0, last_pl_val=4.45,
+        highs=highs, lows=lows, closes=closes,
+        last_close=5.19, last_atr=0.3,
+    )
+
+    # active_low = confirmed_low = 4.45（major leg 起点）
+    assert active["active_swing_low"] == 4.45
+    # active_high = 6.26
+    assert active["active_swing_high"] == 6.26
+    # developing_high = active_high = 6.26
+    assert developing["developing_swing_high"] == 6.26
+    # developing_low = min(lows[149:250]) = 5.0，不等于 active_low=4.45
+    assert developing["developing_swing_low"] is not None
+    assert developing["developing_swing_low"] != 4.45
+    assert developing["developing_swing_low"] >= 5.0
+    # developing_swing_dir = -1（回落）
+    assert developing["developing_swing_dir"] == -1
+    # developing position ∈ [0,1]
+    pos = developing["price_position_in_developing_swing_0_1"]
+    assert pos is not None
+    assert 0.0 <= pos <= 1.0
+
+
+def test_developing_swing_major_down_leg_rebound() -> None:
+    """major down leg 反弹：active_low_bar_idx < current_idx 时，developing_high = max(highs[active_low_bar:now])，不等于 active_high。"""
+    n = 250
+    # down leg: confirmed_high anchor=100 (val=6.0), confirmed_low anchor=50 (val=5.5)
+    # active_low 在 bar 149 = 4.0, current bar 249 close=4.8
+    highs = np.full(n, 5.5)
+    highs[149:] = 5.0  # active_low bar 之后（含）high=5.0，反弹结构
+    lows = np.full(n, 4.5)
+    lows[149] = 4.0  # active low 在 bar 149
+    closes = np.full(n, 4.5)
+    closes[-1] = 4.8
+
+    active, developing = _compute_active_and_developing(
+        n,
+        last_ph_anchor=100.0, last_ph_val=6.0,
+        last_pl_anchor=50.0, last_pl_val=5.5,
+        highs=highs, lows=lows, closes=closes,
+        last_close=4.8, last_atr=0.3,
+    )
+
+    # active_high = confirmed_high = 6.0
+    assert active["active_swing_high"] == 6.0
+    # active_low = 4.0
+    assert active["active_swing_low"] == 4.0
+    # developing_low = active_low = 4.0
+    assert developing["developing_swing_low"] == 4.0
+    # developing_high = max(highs[149:250]) = 5.0，不等于 active_high=6.0
+    assert developing["developing_swing_high"] is not None
+    assert developing["developing_swing_high"] != 6.0
+    assert developing["developing_swing_high"] <= 5.0
+    # developing_swing_dir = 1（反弹）
+    assert developing["developing_swing_dir"] == 1
+    # developing position ∈ [0,1]
+    pos = developing["price_position_in_developing_swing_0_1"]
+    assert pos is not None
+    assert 0.0 <= pos <= 1.0
+
+
+def test_developing_swing_still_making_new_high() -> None:
+    """继续创新高：active_high_bar_idx == current_idx 时，developing = active，dir=1。"""
+    n = 250
+    # up leg: confirmed_low anchor=100 (val=4.45), confirmed_high anchor=50 (val=5.05)
+    # 单边上涨：active_high 在 current bar
+    highs = np.linspace(4.5, 6.0, n)
+    lows = highs - 0.1
+    closes = highs - 0.05
+    last_close = float(closes[-1])
+
+    active, developing = _compute_active_and_developing(
+        n,
+        last_ph_anchor=50.0, last_ph_val=4.6,
+        last_pl_anchor=100.0, last_pl_val=4.45,
+        highs=highs, lows=lows, closes=closes,
+        last_close=last_close, last_atr=0.3,
+    )
+
+    # active_high = highs[-1]（current bar）
+    assert active["active_swing_high"] == highs[-1]
+    # bars_since_active_swing_high = 0
+    assert active["bars_since_active_swing_high"] == 0
+    # developing = active（仍在创新高）
+    assert developing["developing_swing_dir"] == 1
+    assert developing["developing_swing_high"] == active["active_swing_high"]
+    assert developing["developing_swing_low"] == active["active_swing_low"]
+
+
+def test_developing_swing_still_making_new_low() -> None:
+    """继续创新低：active_low_bar_idx == current_idx 时，developing = active，dir=-1。"""
+    n = 250
+    # down leg: confirmed_high anchor=100 (val=6.0), confirmed_low anchor=50 (val=5.5)
+    # 单边下跌：active_low 在 current bar
+    highs = np.linspace(6.0, 4.5, n)
+    lows = highs - 0.1
+    closes = highs - 0.05
+    last_close = float(closes[-1])
+
+    active, developing = _compute_active_and_developing(
+        n,
+        last_ph_anchor=100.0, last_ph_val=6.0,
+        last_pl_anchor=50.0, last_pl_val=5.5,
+        highs=highs, lows=lows, closes=closes,
+        last_close=last_close, last_atr=0.3,
+    )
+
+    # active_low = lows[-1]（current bar）
+    assert active["active_swing_low"] == lows[-1]
+    # bars_since_active_swing_low = 0
+    assert active["bars_since_active_swing_low"] == 0
+    # developing = active（仍在创新低）
+    assert developing["developing_swing_dir"] == -1
+    assert developing["developing_swing_high"] == active["active_swing_high"]
+    assert developing["developing_swing_low"] == active["active_swing_low"]
+
+
+def test_developing_swing_000100_like_case() -> None:
+    """000100 类似 case：4.45 → 6.26 → 5.19 回落场景。
+
+    active_low 可仍为 4.45（major leg 起点），但 developing_low 必须来自
+    6.26 之后到当前的最低 low，不得等于 4.45。
+    """
+    n = 250
+    # up leg: confirmed_low anchor=100 (val=4.45), confirmed_high anchor=50 (val=5.05)
+    highs = np.full(n, 5.0)
+    # 100-149: 上涨到 6.26
+    highs[100:150] = np.linspace(4.5, 6.26, 50)
+    # 150-249: 回落到 5.5
+    highs[150:] = np.linspace(6.0, 5.5, 100)
+
+    lows = np.full(n, 4.4)
+    # 100-149: low 上涨
+    lows[100:150] = np.linspace(4.45, 5.5, 50)
+    # 150-249: 回落后 low，最低 5.18（接近当前 close）
+    lows[150:] = np.linspace(5.5, 5.18, 100)
+
+    closes = np.full(n, 5.0)
+    closes[-1] = 5.19  # 当前 close
+
+    active, developing = _compute_active_and_developing(
+        n,
+        last_ph_anchor=50.0, last_ph_val=5.05,
+        last_pl_anchor=100.0, last_pl_val=4.45,
+        highs=highs, lows=lows, closes=closes,
+        last_close=5.19, last_atr=0.3,
+    )
+
+    # active_low = 4.45（major leg 起点，保留兼容）
+    assert active["active_swing_low"] == 4.45
+    # active_high = 6.26（major leg 最高点）
+    assert active["active_swing_high"] == 6.26
+
+    # developing_low 必须来自 6.26 之后，不得等于 4.45
+    assert developing["developing_swing_low"] is not None
+    assert developing["developing_swing_low"] != 4.45
+    assert developing["developing_swing_low"] >= 5.0  # 接近当前回落 low
+    # developing_high = active_high = 6.26
+    assert developing["developing_swing_high"] == 6.26
+    # developing_swing_dir = -1（回落）
+    assert developing["developing_swing_dir"] == -1
+    # developing position ∈ [0,1]
+    pos = developing["price_position_in_developing_swing_0_1"]
+    assert pos is not None
+    assert 0.0 <= pos <= 1.0
+
+
 # ===== 模块自测入口 =====
 if __name__ == "__main__":
     import pytest

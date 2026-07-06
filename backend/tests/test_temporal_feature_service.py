@@ -70,7 +70,7 @@ def _build_v18_factors(bars: pd.DataFrame, timeframe: str = "1d"):
 
 # ===== 1. daily_context 结构 =====
 def test_daily_context_returns_dict_with_9_fields() -> None:
-    """daily_context 返回 dict 且含 V1.7 9 字段 + V1.9 5 active + 2 confirmed alias（共 16）。"""
+    """daily_context 返回 dict 且含 V1.7 9 + V1.9 5 active + 2 confirmed alias + V1.10 6 developing（共 22）。"""
     bars = _build_bars(n=250, seed=42)
     primary_factors, degraded, warmup = _build_v18_factors(bars, "1d")
     result = _compute_daily_context(primary_factors, bars, degraded, warmup)
@@ -95,6 +95,13 @@ def test_daily_context_returns_dict_with_9_fields() -> None:
         # V1.9 confirmed raw alias
         "daily_price_position_in_confirmed_swing_raw",
         "daily_confirmed_swing_breakout_state",
+        # V1.10 developing swing 字段
+        "daily_developing_swing_dir",
+        "daily_developing_swing_high",
+        "daily_developing_swing_low",
+        "daily_price_position_in_developing_swing_0_1",
+        "daily_distance_to_developing_swing_high_atr",
+        "daily_distance_to_developing_swing_low_atr",
     }
     assert set(result.keys()) == expected_keys
 
@@ -183,7 +190,7 @@ def test_daily_volume_percentile_change_since_segment_start() -> None:
 
 # ===== 5. m15_response 结构 =====
 def test_m15_response_returns_dict_with_9_fields() -> None:
-    """m15_response 返回 dict 且含 V1.7 9 字段 + V1.9 5 active 字段（共 14）。"""
+    """m15_response 返回 dict 且含 V1.7 9 + V1.9 5 active + V1.10 6 developing 字段（共 20）。"""
     bars = _build_bars(n=500, seed=99)  # 15m 需要更多 bars
     secondary_factors, degraded, warmup = _build_v18_factors(bars, "15m")
     result = _compute_m15_response(secondary_factors, bars, degraded, warmup)
@@ -205,6 +212,13 @@ def test_m15_response_returns_dict_with_9_fields() -> None:
         "m15_active_swing_low",
         "m15_distance_to_active_swing_high_atr",
         "m15_distance_to_active_swing_low_atr",
+        # V1.10 developing swing 字段
+        "m15_developing_swing_dir",
+        "m15_developing_swing_high",
+        "m15_developing_swing_low",
+        "m15_price_position_in_developing_swing_0_1",
+        "m15_distance_to_developing_swing_high_atr",
+        "m15_distance_to_developing_swing_low_atr",
     }
     assert set(result.keys()) == expected_keys
 
@@ -333,12 +347,12 @@ def test_derived_intensity_mean_abs() -> None:
 
 # ===== 11. m15_position_relative_to_daily =====
 def test_m15_position_relative_to_daily() -> None:
-    """m15_position_relative_to_daily = m15_active_pos - daily_active_pos（V1.9 改用 active swing）。"""
+    """m15_position_relative_to_daily = m15_developing_pos - daily_developing_pos（V1.10 改用 developing swing）。"""
     daily = {
         "daily_dsa_dir": 1,
-        "daily_price_position_in_active_swing_0_1": 0.3,
+        "daily_price_position_in_developing_swing_0_1": 0.3,
     }
-    m15 = {"m15_price_position_in_active_swing_0_1": 0.7}
+    m15 = {"m15_price_position_in_developing_swing_0_1": 0.7}
     r = _compute_derived_relation(daily, m15, [])
     assert r["m15_position_relative_to_daily"] is not None
     assert abs(r["m15_position_relative_to_daily"] - 0.4) < 1e-9
@@ -346,9 +360,69 @@ def test_m15_position_relative_to_daily() -> None:
     # 任一为 null → null
     daily_null = {
         "daily_dsa_dir": 1,
-        "daily_price_position_in_active_swing_0_1": None,
+        "daily_price_position_in_developing_swing_0_1": None,
     }
     r = _compute_derived_relation(daily_null, m15, [])
+    assert r["m15_position_relative_to_daily"] is None
+
+
+# ===== V1.10 developing swing derived_relation =====
+def test_derived_relation_uses_developing_not_active() -> None:
+    """derived_relation 必须使用 developing swing，不回退 active 或 confirmed raw。"""
+    daily = {
+        "daily_dsa_dir": 1,
+        # developing 字段存在
+        "daily_price_position_in_developing_swing_0_1": 0.4,
+        # active 字段也存在（但不应被使用）
+        "daily_price_position_in_active_swing_0_1": 0.3,
+    }
+    m15 = {
+        "m15_price_position_in_developing_swing_0_1": 0.6,
+        "m15_price_position_in_active_swing_0_1": 0.5,
+    }
+    r = _compute_derived_relation(daily, m15, [])
+    # 应使用 developing：0.6 - 0.4 = 0.2，而不是 active：0.5 - 0.3 = 0.2
+    # 注意：这里两个差值相同，所以再测试一个不等的情况
+    assert r["m15_position_relative_to_daily"] is not None
+    assert abs(r["m15_position_relative_to_daily"] - 0.2) < 1e-9
+
+    # 关键测试：developing 存在但 active 不存在时，仍应返回值
+    daily_only_dev = {
+        "daily_dsa_dir": 1,
+        "daily_price_position_in_developing_swing_0_1": 0.4,
+        # 无 active 字段
+    }
+    m15_only_dev = {
+        "m15_price_position_in_developing_swing_0_1": 0.6,
+    }
+    r = _compute_derived_relation(daily_only_dev, m15_only_dev, [])
+    assert r["m15_position_relative_to_daily"] is not None
+    assert abs(r["m15_position_relative_to_daily"] - 0.2) < 1e-9
+
+
+def test_derived_relation_developing_null_returns_null() -> None:
+    """任一 developing 缺失时 derived_relation 返回 null，不回退 active 或 confirmed raw。"""
+    # m15 developing 为 None
+    daily = {
+        "daily_dsa_dir": 1,
+        "daily_price_position_in_developing_swing_0_1": 0.4,
+        "daily_price_position_in_active_swing_0_1": 0.3,  # active 有值
+    }
+    m15 = {
+        "m15_price_position_in_developing_swing_0_1": None,  # developing 缺失
+        "m15_price_position_in_active_swing_0_1": 0.7,  # active 有值但不应使用
+    }
+    r = _compute_derived_relation(daily, m15, [])
+    assert r["m15_position_relative_to_daily"] is None
+
+    # daily developing 为 None
+    daily_none = {
+        "daily_dsa_dir": 1,
+        "daily_price_position_in_developing_swing_0_1": None,
+        "daily_price_position_in_active_swing_0_1": 0.3,
+    }
+    m15_ok = {"m15_price_position_in_developing_swing_0_1": 0.7}
+    r = _compute_derived_relation(daily_none, m15_ok, [])
     assert r["m15_position_relative_to_daily"] is None
 
 
@@ -591,40 +665,48 @@ def test_daily_context_includes_active_swing_fields() -> None:
     assert "daily_confirmed_swing_breakout_state" in result
 
 
-def test_derived_relation_uses_active_swing_not_confirmed_raw() -> None:
-    """derived_relation 用 active swing，不用 confirmed raw。
+def test_derived_relation_uses_developing_not_confirmed_raw() -> None:
+    """derived_relation 用 developing swing，不用 confirmed raw 或 active。
 
-    场景：daily active=0.8, confirmed_raw=1.997；m15 active=0.6, confirmed_raw=0.5
-    期望：m15_position_relative_to_daily = 0.6 - 0.8 = -0.2（不是 0.5 - 1.997 = -1.497）
+    场景：daily developing=0.8, confirmed_raw=1.997, active=0.7
+          m15 developing=0.6, confirmed_raw=0.5, active=0.55
+    期望：m15_position_relative_to_daily = 0.6 - 0.8 = -0.2
+    （不是 confirmed raw 0.5-1.997=-1.497，也不是 active 0.55-0.7=-0.15）
     """
     daily = {
         "daily_dsa_dir": 1,
         "daily_price_position_in_swing_0_1": 1.997,  # confirmed raw（旧字段）
-        "daily_price_position_in_active_swing_0_1": 0.8,  # active（新字段）
+        "daily_price_position_in_active_swing_0_1": 0.7,  # active（V1.9 字段）
+        "daily_price_position_in_developing_swing_0_1": 0.8,  # developing（V1.10 字段）
     }
     m15 = {
-        "m15_price_position_in_swing_0_1": 0.5,  # confirmed raw（旧字段）
-        "m15_price_position_in_active_swing_0_1": 0.6,  # active（新字段）
+        "m15_price_position_in_swing_0_1": 0.5,  # confirmed raw
+        "m15_price_position_in_active_swing_0_1": 0.55,  # active
+        "m15_price_position_in_developing_swing_0_1": 0.6,  # developing
     }
     r = _compute_derived_relation(daily, m15, [])
-    # 必须用 active：0.6 - 0.8 = -0.2
+    # 必须用 developing：0.6 - 0.8 = -0.2
     assert r["m15_position_relative_to_daily"] is not None
     assert abs(r["m15_position_relative_to_daily"] - (-0.2)) < 1e-9
     # 不应等于 confirmed raw 相减（-1.497）
     assert abs(r["m15_position_relative_to_daily"] - (-1.497)) > 0.1
+    # 不应等于 active 相减（-0.15）
+    assert abs(r["m15_position_relative_to_daily"] - (-0.15)) > 0.01
 
 
-def test_derived_relation_returns_null_when_active_missing() -> None:
-    """active 缺失时 derived_relation 返回 null，不回退 confirmed raw。"""
+def test_derived_relation_returns_null_when_developing_missing() -> None:
+    """developing 缺失时 derived_relation 返回 null，不回退 active 或 confirmed raw。"""
     daily = {
         "daily_dsa_dir": 1,
         "daily_price_position_in_swing_0_1": 1.997,  # confirmed raw 存在
-        "daily_price_position_in_active_swing_0_1": None,  # active 缺失
+        "daily_price_position_in_active_swing_0_1": 0.7,  # active 存在
+        "daily_price_position_in_developing_swing_0_1": None,  # developing 缺失
     }
     m15 = {
         "m15_price_position_in_swing_0_1": 0.5,  # confirmed raw 存在
-        "m15_price_position_in_active_swing_0_1": 0.6,  # active 存在
+        "m15_price_position_in_active_swing_0_1": 0.55,  # active 存在
+        "m15_price_position_in_developing_swing_0_1": 0.6,  # developing 存在
     }
     r = _compute_derived_relation(daily, m15, [])
-    # active 任一缺失 → null，不回退 confirmed raw
+    # developing 任一缺失 → null，不回退 active 或 confirmed raw
     assert r["m15_position_relative_to_daily"] is None

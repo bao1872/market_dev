@@ -408,6 +408,162 @@ def _compute_active_swing_factors(
     return result
 
 
+def _compute_developing_swing_factors(
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    active_swing: dict[str, Any],
+    last_close: float,
+    last_atr: float,
+) -> dict[str, Any]:
+    """计算 developing swing 当前状态因子（V1.10 新增）。
+
+    developing swing 表示"当前正在发生的回落/反弹结构"，
+    从 active major leg 的高/低点开始计算，反映当前价格行为。
+
+    口径：
+    - major up leg + active_high_bar_idx < current_idx → 回落
+      developing_dir=-1, developing_high=active_high,
+      developing_low=min(lows[active_high_bar_idx:now])
+    - major up leg + active_high_bar_idx == current_idx → 仍在创新高
+      developing_dir=1, developing=active
+    - major down leg + active_low_bar_idx < current_idx → 反弹
+      developing_dir=1, developing_low=active_low,
+      developing_high=max(highs[active_low_bar_idx:now])
+    - major down leg + active_low_bar_idx == current_idx → 仍在创新低
+      developing_dir=-1, developing=active
+    - fallback（active_dir=None）→ developing=active
+
+    无未来函数：只用到当前 bar 及之前的数据。
+    """
+    n = len(highs)
+    result: dict[str, Any] = {
+        "developing_swing_dir": None,
+        "developing_swing_high": None,
+        "developing_swing_low": None,
+        "developing_swing_high_bar_index": None,
+        "developing_swing_low_bar_index": None,
+        "bars_since_developing_swing_high": None,
+        "bars_since_developing_swing_low": None,
+        "developing_swing_range": None,
+        "price_position_in_developing_swing_raw": None,
+        "price_position_in_developing_swing_0_1": None,
+        "distance_to_developing_swing_high_atr": None,
+        "distance_to_developing_swing_low_atr": None,
+        "developing_retracement_from_high_0_1": None,
+        "developing_rebound_from_low_0_1": None,
+    }
+
+    active_dir = active_swing.get("active_swing_dir")
+    active_high = active_swing.get("active_swing_high")
+    active_low = active_swing.get("active_swing_low")
+    bars_since_high = active_swing.get("bars_since_active_swing_high")
+    bars_since_low = active_swing.get("bars_since_active_swing_low")
+
+    if active_high is None or active_low is None:
+        return result
+
+    # [DevelopingSwing] - 反推 active bar_index
+    current_idx = n - 1
+    active_high_bar_idx = (
+        int(n - 1 - bars_since_high) if bars_since_high is not None else None
+    )
+    active_low_bar_idx = (
+        int(n - 1 - bars_since_low) if bars_since_low is not None else None
+    )
+
+    dev_high: float | None = None
+    dev_low: float | None = None
+    dev_high_bar_idx: int | None = None
+    dev_low_bar_idx: int | None = None
+    dev_dir: int | None = None
+
+    if active_dir == 1:
+        # [DevelopingSwing] - major up leg
+        if active_high_bar_idx is not None and active_high_bar_idx < current_idx:
+            # 回落：developing_low = min(lows[active_high_bar_idx:now])
+            dev_dir = -1
+            dev_high = float(active_high)
+            dev_high_bar_idx = int(active_high_bar_idx)
+            search_lows = lows[active_high_bar_idx:]
+            if len(search_lows) > 0:
+                local_idx = int(np.argmin(search_lows))
+                dev_low = float(search_lows[local_idx])
+                dev_low_bar_idx = int(active_high_bar_idx) + local_idx
+        else:
+            # 仍在创新高：developing = active
+            dev_dir = 1
+            dev_high = float(active_high)
+            dev_low = float(active_low)
+            dev_high_bar_idx = active_high_bar_idx
+            dev_low_bar_idx = active_low_bar_idx
+    elif active_dir == -1:
+        # [DevelopingSwing] - major down leg
+        if active_low_bar_idx is not None and active_low_bar_idx < current_idx:
+            # 反弹：developing_high = max(highs[active_low_bar_idx:now])
+            dev_dir = 1
+            dev_low = float(active_low)
+            dev_low_bar_idx = int(active_low_bar_idx)
+            search_highs = highs[active_low_bar_idx:]
+            if len(search_highs) > 0:
+                local_idx = int(np.argmax(search_highs))
+                dev_high = float(search_highs[local_idx])
+                dev_high_bar_idx = int(active_low_bar_idx) + local_idx
+        else:
+            # 仍在创新低：developing = active
+            dev_dir = -1
+            dev_high = float(active_high)
+            dev_low = float(active_low)
+            dev_high_bar_idx = active_high_bar_idx
+            dev_low_bar_idx = active_low_bar_idx
+    else:
+        # [DevelopingSwing] - fallback（无 confirmed pivot）：developing = active
+        dev_dir = active_dir
+        dev_high = float(active_high)
+        dev_low = float(active_low)
+        dev_high_bar_idx = active_high_bar_idx
+        dev_low_bar_idx = active_low_bar_idx
+
+    if dev_high is None or dev_low is None:
+        return result
+
+    result["developing_swing_dir"] = dev_dir
+    result["developing_swing_high"] = dev_high
+    result["developing_swing_low"] = dev_low
+    result["developing_swing_high_bar_index"] = dev_high_bar_idx
+    result["developing_swing_low_bar_index"] = dev_low_bar_idx
+    if dev_high_bar_idx is not None:
+        result["bars_since_developing_swing_high"] = int(n - 1 - dev_high_bar_idx)
+    if dev_low_bar_idx is not None:
+        result["bars_since_developing_swing_low"] = int(n - 1 - dev_low_bar_idx)
+
+    dev_range = dev_high - dev_low
+    result["developing_swing_range"] = float(dev_range)
+
+    if dev_range > 0:
+        raw = (last_close - dev_low) / dev_range
+        result["price_position_in_developing_swing_raw"] = float(raw)
+        result["price_position_in_developing_swing_0_1"] = float(
+            max(0.0, min(1.0, raw))
+        )
+        result["developing_retracement_from_high_0_1"] = float(
+            (dev_high - last_close) / dev_range
+        )
+        result["developing_rebound_from_low_0_1"] = float(
+            (last_close - dev_low) / dev_range
+        )
+
+    if last_atr > 0:
+        result["distance_to_developing_swing_high_atr"] = float(
+            (last_close - dev_high) / last_atr
+        )
+        result["distance_to_developing_swing_low_atr"] = float(
+            (last_close - dev_low) / last_atr
+        )
+
+    return result
+
+
 def _compute_swing_factors(
     bars: pd.DataFrame, atr: np.ndarray | None = None
 ) -> dict[str, Any]:
@@ -448,6 +604,21 @@ def _compute_swing_factors(
         "distance_to_active_swing_low_atr": None,
         "active_retracement_from_high_0_1": None,
         "active_rebound_from_low_0_1": None,
+        # V1.10 developing swing 字段（当前正在发生的回落/反弹结构）
+        "developing_swing_dir": None,
+        "developing_swing_high": None,
+        "developing_swing_low": None,
+        "developing_swing_high_bar_index": None,
+        "developing_swing_low_bar_index": None,
+        "bars_since_developing_swing_high": None,
+        "bars_since_developing_swing_low": None,
+        "developing_swing_range": None,
+        "price_position_in_developing_swing_raw": None,
+        "price_position_in_developing_swing_0_1": None,
+        "distance_to_developing_swing_high_atr": None,
+        "distance_to_developing_swing_low_atr": None,
+        "developing_retracement_from_high_0_1": None,
+        "developing_rebound_from_low_0_1": None,
     }
     if bars is None or len(bars) < 2 * _SWING_LENGTH + 1:
         return result
@@ -539,6 +710,18 @@ def _compute_swing_factors(
             last_atr=last_atr if last_atr is not None else 0.0,
         )
         result.update(active_factors)
+
+        # V1.10 developing swing 因子（当前正在发生的回落/反弹结构）
+        # 从 active major leg 的高/低点开始计算，反映当前价格行为
+        developing_factors = _compute_developing_swing_factors(
+            highs=highs,
+            lows=lows,
+            closes=closes,
+            active_swing=active_factors,
+            last_close=float(last_close),
+            last_atr=last_atr if last_atr is not None else 0.0,
+        )
+        result.update(developing_factors)
 
     return result
 

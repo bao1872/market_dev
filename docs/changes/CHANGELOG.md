@@ -2,6 +2,15 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-07
+- CHANGE-20260707-039: Developing Swing Current State（V1.10）
+  - 新增 developing swing 字段（14 个），反映"当前正在发生的回落/反弹结构"
+  - 修复 active swing 仍不代表当前状态的问题（000100 active_low=4.45 是大段起点，developing_low 应为 6.26 回落后的当前 low）
+  - swing_position 三层语义：confirmed pivot + active major leg + developing swing
+  - 前端 Swing 摘要卡改用 developing 字段（active/confirmed 移到明细 JSON）
+  - Temporal derived_relation 改用 developing swing，不回退 active/confirmed raw
+  - 5 种计算场景：major up 回落 / major up 创新高 / major down 反弹 / major down 创新低 / fallback
+
 ## 2026-07-06
 - CHANGE-20260706-038: Swing Active State + Capture 布局 + Publish Auto-trigger
   - 新增 active swing 字段（clip [0,1]），修复 confirmed raw >1 问题
