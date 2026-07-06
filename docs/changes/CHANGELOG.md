@@ -2,6 +2,16 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-06: 前端不覆盖后端 1d partial bar
+
+- 修复 `StockDetailPage.tsx` 在交易时段后端已返回 1d partial bar 时仍调用 `mergeRealtimeQuoteIntoBars` 覆盖 K线的问题：仅当 `timeframe==='1d' && barsQuery.data?.is_partial !== true` 时才允许 quote 合并，否则 `displayBars` 直接使用 `baseBars`。
+- 修复 `frontend/src/utils/chart.ts::mergeRealtimeQuoteIntoBars` 无条件合并 quote 的问题：新增 `backendIsPartial` 参数，后端已返回 partial bar 时直接返回原 bars。
+- 新增前端测试 2 个：`1d 后端已返回 partial bar 时 quote 不覆盖`、`1d 后端未返回 partial bar 时 quote 可兜底追加`。
+- 更新 `docs/current/02-data-api-contracts.md`：明确 `mergeRealtimeQuoteIntoBars()` 当且仅当后端未返回 `is_partial=true` 时才允许合并；补充 `12.2` 的 `last_live_bar_time` 与 `is_partial` 事实源说明；把“后端未返回 partial”写入 `12.3` 合并条件首位。
+- 更新 `docs/maps/frontend-route-map.md`、`docs/maps/test-coverage-map.md`。
+- 新增 CHANGE-20260706-037。
+- 本次不部署生产，待用户确认 diff、测试结果与验证证据后授权 build/restart。
+
 ## 2026-07-06: Monitor 投递与 live bar 后续修复
 
 - 修复 `delivery_worker.py` 对 `monitor_event`/`strategy_event`/`monitor_chart` 仍走普通资格导致 admin 自动监控被排除的问题：投递前调用 `is_user_eligible_for_monitor` 复核，active admin 与 active member + 有效 subscription 放行，disabled admin / 无订阅普通用户标记 dead/USER_INELIGIBLE；`stock_detail_share` 仍跳过资格，`beta_application_admin` 仍跳过 subscription。
@@ -13,7 +23,7 @@
 - 新增后端测试 4 个文件 6 个用例：`test_delivery_worker_monitor_eligible.py`、`test_monitor_batch_live_minute.py`、`test_market_data_aggregation_partial_daily.py`、`test_quote_timezone.py`。
 - 更新 `AGENTS.md`；更新 `docs/current/02-data-api-contracts.md`、`03-jobs-integrations-operations.md`、`04-frontend-ux.md`、`05-testing-acceptance.md`（新增 K线实时契约 blocking 门禁）、`code-doc-alignment.md`；更新 `docs/maps/api-route-map.md`、`backend-module-map.md`、`frontend-route-map.md`、`notification-flow-map.md`、`test-coverage-map.md`。
 - 新增/更新 ALIGN-036（delivery_worker monitor 资格修复待生产验证）、ALIGN-037（1d partial daily bar 与 live 1m monitor 待生产验证）。
-- 新增 CHANGE-20260706-036（含根因：8c991e3d 统一 MDAS 后旧 `/bars` 1d 实时合并语义未完整迁移；PR #25 修 quote 可信化但未恢复 1d partial bar）。
+- 新增 CHANGE-20260706-036（含根因：8c991e3d 统一 MDAS 后旧 `/bars` 1d 实时语义未完整迁移；PR #25 修 quote 可信化但未恢复 1d partial bar）。
 - 本次不部署生产，待用户确认 diff、测试结果与验证证据后授权 build/restart。
 
 ## 2026-07-05: Admin 监控资格修复 + 个股详情实时行情可信化
