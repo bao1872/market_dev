@@ -92,6 +92,13 @@ Node Cluster 算法
   - capture 模式 CSS：`.tv-side-column { display: none; }` 隐藏右侧列，`.tv-chart-column { width: 100%; }` 让图表列占满宽度；
   - capture 模式 `data-testid="tv-chart-column"` 必须挂在 `.tv-chart-column` 元素上（不再挂在 `.tv-content`），确保截图 testid 与单列布局对齐；
   - 非 capture 模式保持原双列布局（图表列 + 结构状态列）。
+- **DSA overlay source mismatch 保护**（修复 15m/1h 误报"DSA 数据源不一致"）：
+  - 图表在渲染 DSA overlay 前比较 `displayTimes` 与 `indicators.source_bar_times` 的 canonical key 交集；
+  - canonical key 由 `frontend/src/utils/chartTime.ts::normalizeChartTime(time, timeframe)` 计算：15m/1h 用 `"YYYY-MM-DD HH:MM"`（提取前 16 字符），1d 用 `"YYYY-MM-DD"`；忽略 `+08:00` 时区后缀和秒数，使 K线（aware）与 `source_bar_times`（naive）产生相同 key；
+  - 交集比例 `matched / klineKeys.size < 0.5` → 触发 "DSA 数据源不一致，已暂停渲染" banner，DSA overlay 不渲染，但 structural/temporal 因子卡片仍可显示；
+  - 后端 `compute_source_bar_times` / `compute_source_bar_hash` 必须按当前 `timeframe` 使用对应 macd_bars，格式随 timeframe（1d=`YYYY-MM-DD`，15m/1h=`YYYY-MM-DDTHH:MM:SS`）；禁止 15m/1h source_bar_times 仍返回日线日期格式；
+  - 15m/1h `bars.trade_time` 必须返回 aware ISO（`+08:00` 后缀），避免前端 `new Date("2026-07-06T15:00:00")` 在非亚洲时区浏览器中当作本地时间导致时区误判（如显示 `2026-07-07 03:00`）。
+  - 15m/1h 时间轴刻度 `timeTicks` 使用 `Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai' })` 格式化，A 股交易时间正确显示，不应出现 `03:00` 这类非交易时段错误时间。
 
 ### 消息与飞书
 

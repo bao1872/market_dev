@@ -636,3 +636,42 @@ Bar 列表响应在分页字段之外补充以下诊断字段：
 - `1d` 周期保留日期语义：同一交易日合并到最后一根 bar；跨日追加一根新的日期粒度实时 bar。
 - intraday 周期（15m/1h 等）使用 `quote.update_time` 更新最后一根 bar 的时间。
 - `1m` 周期当前不在工具栏暴露，后端 bars API 亦不返回 1m 数据，不执行 1m 合并。
+
+### 12.4 K 线与 DSA overlay 时间戳/时区/数据源对齐契约
+
+DSA overlay（`indicators.source_bar_times` / `indicators.source_bar_hash`）必须与当前图表同 `symbol/timeframe/adj/source/timezone` 数据对齐。前端 `frontend/src/utils/chartTime.ts::normalizeChartTime` 通过正则提取 date+HH:MM 前缀作为 canonical key，使 K线 `trade_time`（aware ISO）与 `source_bar_times`（naive ISO）产生相同 canonical key。
+
+#### 12.4.1 时间戳与时区
+
+| 字段 | 1d/1w/1mo | 15m/1h |
+|---|---|---|
+| `bars.trade_date` | `YYYY-MM-DD`（无时区，date 对象） | `null` |
+| `bars.trade_time` | `null` | `YYYY-MM-DDTHH:MM:SS+08:00`（aware Asia/Shanghai ISO） |
+| `indicators.source_bar_times[]` | `YYYY-MM-DD` | `YYYY-MM-DDTHH:MM:SS`（naive，无时区后缀） |
+| `indicators.source_bar_hash` | OHLCV + `YYYY-MM-DD` 拼接 SHA256[:16] | OHLCV + `YYYY-MM-DDTHH:MM:SS` 拼接 SHA256[:16] |
+
+约束：
+
+- 15m/1h `bars.trade_time` **必须** 返回 aware datetime（Asia/Shanghai tzinfo），序列化为 `+08:00` 后缀，避免前端 `new Date(...)` 在非亚洲时区浏览器中把 naive ISO 当作本地时间解析导致时区误判（如 `2026-07-06T15:00:00` 在 `America/New_York` 浏览器中显示为 `2026-07-07 03:00`）。
+- 1d `bars.trade_date` 仍为 `YYYY-MM-DD` date 对象（无时区），向后兼容。
+- `indicators.source_bar_times` 与 `source_bar_hash` 必须按当前 `timeframe` 使用对应 macd_bars（而非永远用 daily_bars），格式随 timeframe：
+  - 1d/1w/1mo: `YYYY-MM-DD`
+  - 15m/1h: `YYYY-MM-DDTHH:MM:SS`（无时区后缀）
+
+#### 12.4.2 DSA source mismatch 保护
+
+前端 `frontend/src/components/StrategyChart.tsx` 在 DSA overlay 渲染前比较 `displayTimes` 与 `source_bar_times` 的 canonical key 交集：
+
+- 交集比例 `matched / klineKeys.size < 0.5` → 触发 "DSA 数据源不一致，已暂停渲染" banner，DSA overlay 不渲染，但 structural/temporal 因子卡片仍可显示。
+- canonical key 由 `normalizeChartTime(time, timeframe)` 计算：
+  - 15m/1h: `"YYYY-MM-DD HH:MM"`（提取前 16 字符）
+  - 1d: `"YYYY-MM-DD"`
+- 关键不变量：`normalizeChartTime` 仅提取 date+HH:MM 前缀，忽略 `+08:00` 时区后缀和秒数，使 K线（aware）与 `source_bar_times`（naive）产生相同 canonical key。
+- 故意构造的 source mismatch（如 15m source 仍是日线日期格式）仍触发 banner，保护 DSA 数学正确性。
+
+#### 12.4.3 图表 header 时间显示
+
+- 15m/1h 时间轴刻度 `timeTicks` 使用 `Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai' })` 格式化，确保 A 股交易时间正确显示。
+- 1d 时间轴刻度仅显示 `MM-DD`。
+- 不应在 15m 图表显示 `03:00` 这类非 A 股交易时间（naive datetime 在非亚洲时区浏览器中的时区误判）。
+

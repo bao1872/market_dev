@@ -257,56 +257,9 @@ function formatTime(timeStr: string): string {
   return `${datePart} ${timePart}`
 }
 
-// [chartViewport] - 规范化时间键：把前后端可能格式不同的时间统一为可匹配的字符串键
-//   日线/周线/月线用日期，15m/1h 用日期+分钟，避免 Date.getTime() 因时区/格式差异导致错位
-//   采用 advice.md 推荐的正则解析，不依赖 Date 解析做业务时间匹配
-function normalizeChartTime(raw: unknown, tf: string): string | null {
-  const value = String(raw ?? '').trim()
-  const match = value.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?/)
-  if (!match) return null
-
-  if (tf === '15m' || tf === '1h') {
-    return match[2] ? `${match[1]} ${match[2]}` : null
-  }
-
-  return match[1]
-}
-
-// 时间轴刻度（对齐原型 timeTicks）
-function timeTicks(data: CalculatedBar[], count: number, tf: string): { idx: number; label: string }[] {
-  const out: { idx: number; label: string }[] = []
-  const mdFmt = new Intl.DateTimeFormat('zh-CN', {
-    timeZone: 'Asia/Shanghai',
-    month: '2-digit',
-    day: '2-digit',
-  })
-  const timeFmt = new Intl.DateTimeFormat('zh-CN', {
-    timeZone: 'Asia/Shanghai',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  })
-  const ymFmt = new Intl.DateTimeFormat('zh-CN', {
-    timeZone: 'Asia/Shanghai',
-    year: 'numeric',
-    month: '2-digit',
-  })
-
-  for (let i = 0; i < count; i++) {
-    const idx = Math.round((data.length - 1) * i / (count - 1))
-    const d = new Date(data[idx].time)
-    let label: string
-    if (tf === '15m' || tf === '1h') {
-      label = `${mdFmt.format(d).replace(/\//g, '-')} ${timeFmt.format(d)}`
-    } else if (tf === '1d') {
-      label = mdFmt.format(d).replace(/\//g, '-')
-    } else {
-      label = ymFmt.format(d)
-    }
-    out.push({ idx, label })
-  }
-  return out
-}
+// [chartViewport] - 时间键规范化和时间轴刻度函数已迁移至 src/utils/chartTime.ts
+//   纯 .ts 文件便于 Node --experimental-strip-types 单元测试（DSA source alignment contract test）
+import { normalizeChartTime, timeTicks } from '@/utils/chartTime'
 
 // ===== 指标计算模块（从 charts.js 迁移）=====
 

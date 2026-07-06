@@ -144,6 +144,40 @@ node --experimental-strip-types --test scripts/contract-tests/structural-state-p
   scripts/contract-tests/structural-state-toggle.test.ts
 ```
 
+## 3.4 DSA overlay source alignment 回归（blocking）
+
+任何修改 `backend/app/api/bars.py::_df_to_responses`、`backend/app/services/chart_bars_service.py::compute_source_bar_times/hash`、`backend/app/services/indicator_service.py`（source_bar_times/hash 计算）、`frontend/src/utils/chartTime.ts`、`frontend/src/components/StrategyChart.tsx`（normalizeChartTime 调用方）必须跑 DSA overlay source alignment 回归测试。
+
+后端 source 对齐回归：
+- `compute_source_bar_times(df, "15m")` 返回 `YYYY-MM-DDTHH:MM:SS`（含时间）；
+- `compute_source_bar_times(df, "1h")` 返回 `YYYY-MM-DDTHH:MM:SS`（含时间）；
+- `compute_source_bar_times(df, "1d")` 仍返回 `YYYY-MM-DD`（向后兼容）；
+- `compute_source_bar_hash(df, "15m")` 拼接串含时间，与 15m 一致；
+- `compute_source_bar_hash(df, "1d")` 仍用 `YYYY-MM-DD`（向后兼容）；
+- `indicator_service.compute_all_indicators` 在 15m/1h 使用 `macd_bars`（当前 timeframe bars），不得永远用 `daily_bars`；
+- 15m/1h `bars.trade_time` 必须返回 aware datetime（带 `Asia/Shanghai` tzinfo），序列化为 `+08:00` 后缀；
+- 1d `bars.trade_date` 仍为 date 对象（无时区）。
+
+前端 contract 回归（`src/components/__tests__/dsaSourceAlignment.test.ts`）：
+- `normalizeChartTime("2026-07-06T15:00:00+08:00", "15m")` 返回 `"2026-07-06 15:00"`；
+- `normalizeChartTime("2026-07-06T15:00:00", "15m")` 返回 `"2026-07-06 15:00"`（naive 与 aware 产生相同 canonical key）；
+- 15m K线 aware 与 source_bar_times naive 全部匹配（matched / klineKeys.size = 1.0，不触发 mismatch）；
+- 故意构造的 source mismatch（15m source 仍是日线日期格式）仍触发暂停（matched = 0，ratio < 0.5）；
+- 1d K线 trade_date 与 source_bar_times 全部匹配；
+- `timeTicks` 15m aware 时间显示北京交易时间（`14:45`/`15:00`），不显示 `03:00` 这类非交易时段错误时间；
+- 1d `timeTicks` 仅显示 `MM-DD`。
+
+回归命令：
+
+```bash
+cd /root/web_dev/backend
+APP_ENV=test TEST_DATABASE_URL=postgresql+asyncpg://bz:bz@127.0.0.1:5432/bz_stock_test \
+pytest tests/test_chart_bars_service.py tests/test_indicator_service.py tests/test_bars_vectorization.py -v
+
+cd /root/web_dev/frontend
+node --experimental-strip-types --test src/components/__tests__/dsaSourceAlignment.test.ts
+```
+
 ## 4. CI 门禁
 
 阻断项：

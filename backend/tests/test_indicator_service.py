@@ -294,6 +294,60 @@ async def test_source_bar_hash_consistent_with_chart_bars_service(
     )
 
 
+async def test_source_bar_times_15m_includes_time(
+    mock_session: AsyncMock,
+    mock_bars: None,
+    empty_registry: None,
+) -> None:
+    """15m source_bar_times 元素含时间（YYYY-MM-DDTHH:MM:SS），与 /bars API trade_time 一致。
+
+    修复根因：之前 source_bar_times 永远用 daily_bars，15m 图表上
+    source_bar_times 是日线日期格式，与 15m K线时间不匹配，前端必然 mismatch。
+    """
+    result = await indicator_service.compute_all_indicators(
+        mock_session, TEST_INSTRUMENT_ID, "15m", "none", bars=50,
+    )
+    assert "source_bar_times" in result
+    times = result["source_bar_times"]
+    assert len(times) > 0
+    for t in times:
+        # 15m 格式：YYYY-MM-DDTHH:MM:SS（19 字符）
+        assert len(t) == 19, f"15m source_bar_times 应含时间: {t}"
+        assert "T" in t, f"15m source_bar_times 应含 T 分隔符: {t}"
+
+
+async def test_source_bar_hash_15m_consistent_with_chart_bars_service(
+    mock_session: AsyncMock,
+    mock_bars: None,
+    empty_registry: None,
+) -> None:
+    """15m source_bar_hash 与 chart_bars_service 用 macd_bars + timeframe='15m' 计算一致。"""
+    from app.services.chart_bars_service import compute_source_bar_hash
+
+    result = await indicator_service.compute_all_indicators(
+        mock_session, TEST_INSTRUMENT_ID, "15m", "none", bars=50,
+    )
+    expected_bars = _build_bars("15m")
+    expected_hash = compute_source_bar_hash(expected_bars, timeframe="15m")
+    assert result["source_bar_hash"] == expected_hash, (
+        f"15m source_bar_hash 应与 chart_bars_service(timeframe='15m') 一致: "
+        f"expected={expected_hash}, actual={result['source_bar_hash']}"
+    )
+
+
+async def test_source_bar_times_1d_still_date_only(
+    mock_session: AsyncMock,
+    mock_bars: None,
+    empty_registry: None,
+) -> None:
+    """1d source_bar_times 仍为 YYYY-MM-DD 格式（向后兼容）。"""
+    result = await indicator_service.compute_all_indicators(
+        mock_session, TEST_INSTRUMENT_ID, "1d", "none", bars=250,
+    )
+    for t in result["source_bar_times"]:
+        assert len(t) == 10, f"1d source_bar_times 应为 YYYY-MM-DD: {t}"
+
+
 # ===== SubTask 1.3: 策略返回 time 时不被覆盖 =====
 
 
