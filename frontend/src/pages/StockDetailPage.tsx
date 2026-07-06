@@ -223,11 +223,12 @@ export default function StockDetailPage() {
 
   // 转换 Bar 数据为 StrategyChart 需要的 BarData 格式
   // baseBars 用于 indicators 计算（不污染指标）
-  // displayBars 合并实时行情，仅用于图表显示
+  // displayBars 合并实时行情，仅用于图表显示；后端已返回 1d partial bar 时不得覆盖
   const baseBars = useMemo(() => mapBarsToBarData(barsQuery.data?.items), [barsQuery.data])
+  const backendIsPartial = barsQuery.data?.is_partial === true
   const displayBars = useMemo(
-    () => mergeRealtimeQuoteIntoBars(baseBars, quoteQuery.data, timeframe),
-    [baseBars, quoteQuery.data, timeframe],
+    () => mergeRealtimeQuoteIntoBars(baseBars, quoteQuery.data, timeframe, backendIsPartial),
+    [baseBars, quoteQuery.data, timeframe, backendIsPartial],
   )
 
   // 转换策略事件为 StrategyChart 需要的 ChartEvent 格式

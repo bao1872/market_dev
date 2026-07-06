@@ -317,3 +317,102 @@ test('mergeRealtimeQuoteIntoBars: 返回新数组，不修改原数组', () => {
   assert.equal(original.close, 10.5)
   assert.equal(merged[0].close, 11.2)
 })
+
+// ===== 6. mergeRealtimeQuoteIntoBars：后端已返回 partial bar 时不得覆盖 =====
+test('mergeRealtimeQuoteIntoBars: 1d 后端已返回 partial bar 时 quote 不覆盖', () => {
+  const bars: BarData[] = [
+    { time: '2026-06-24', open: 10, high: 11, low: 9, close: 10.5, volume: 100 },
+  ]
+
+  const quote = {
+    instrument_id: 'id',
+    symbol: 'TEST',
+    name: 'Test',
+    current_price: 11.5,
+    open: 10,
+    high: 12,
+    low: 9,
+    close: 11.5,
+    volume: 1000,
+    prev_close: 10,
+    change_pct: 15,
+    update_time: '2026-06-24T15:00:00',
+    source: 'pytdx',
+    is_realtime: true,
+    freshness_seconds: 10,
+    degraded: false,
+    degraded_reason: null,
+  } satisfies QuoteResponse
+
+  // 后端已返回今日 partial bar，即使 quote 可信也不得覆盖
+  const merged = mergeRealtimeQuoteIntoBars(bars, quote, '1d', true)
+
+  assert.deepEqual(merged, bars)
+})
+
+// ===== 7. mergeRealtimeQuoteIntoBars：后端未返回 partial bar 时 quote 兜底 =====
+test('mergeRealtimeQuoteIntoBars: 1d 后端未返回 partial bar 时 quote 可兜底追加', () => {
+  const bars: BarData[] = [
+    { time: '2026-06-23', open: 10, high: 11, low: 9, close: 10.5, volume: 100 },
+  ]
+
+  const quote = {
+    instrument_id: 'id',
+    symbol: 'TEST',
+    name: 'Test',
+    current_price: 11.5,
+    open: 10,
+    high: 12,
+    low: 9,
+    close: 11.5,
+    volume: 1000,
+    prev_close: 10,
+    change_pct: 15,
+    update_time: '2026-06-24T10:30:00',
+    source: 'pytdx',
+    is_realtime: true,
+    freshness_seconds: 10,
+    degraded: false,
+    degraded_reason: null,
+  } satisfies QuoteResponse
+
+  // 后端未返回 partial bar，quote 作为兜底视觉增强追加今日 bar
+  const merged = mergeRealtimeQuoteIntoBars(bars, quote, '1d', false)
+
+  assert.equal(merged.length, 2)
+  assert.deepEqual(merged[0], bars[0])
+  assert.equal(merged[1].time, '2026-06-24')
+  assert.equal(merged[1].close, 11.5)
+})
+
+// ===== 8. mergeRealtimeQuoteIntoBars：intraday 后端已返回 partial bar 时 quote 不覆盖 =====
+test('mergeRealtimeQuoteIntoBars: intraday 后端已返回 partial bar 时 quote 不覆盖', () => {
+  const bars: BarData[] = [
+    { time: '2026-06-24T10:00:00', open: 10, high: 11, low: 9, close: 10.5, volume: 100 },
+  ]
+
+  const quote = {
+    instrument_id: 'id',
+    symbol: 'TEST',
+    name: 'Test',
+    current_price: 11.5,
+    open: 10,
+    high: 12,
+    low: 9,
+    close: 11.5,
+    volume: 1000,
+    prev_close: 10,
+    change_pct: 15,
+    update_time: '2026-06-24T10:30:00',
+    source: 'pytdx',
+    is_realtime: true,
+    freshness_seconds: 10,
+    degraded: false,
+    degraded_reason: null,
+  } satisfies QuoteResponse
+
+  // intraday 后端已返回 partial bar，quote 同样不得覆盖
+  const merged = mergeRealtimeQuoteIntoBars(bars, quote, '15m', true)
+
+  assert.deepEqual(merged, bars)
+})

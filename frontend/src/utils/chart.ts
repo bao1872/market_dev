@@ -21,12 +21,17 @@ export function mapBarsToBarData(items: Bar[] | undefined): BarData[] {
 // 不污染 indicators 计算、不写数据库
 // 合并条件：quote.is_realtime === true && source === 'pytdx' && freshness_seconds <= 60
 // timeframe 决定合并语义：1d 保留日期粒度，intraday 使用 quote.update_time
+// backendIsPartial: 后端 /bars 已返回 partial bar 时，不得用 quote 覆盖，直接返回 bars
 export function mergeRealtimeQuoteIntoBars(
   bars: BarData[],
   quote: QuoteResponse | undefined,
   timeframe: string = '1d',
+  backendIsPartial: boolean = false,
 ): BarData[] {
   if (!quote || bars.length === 0) return bars
+
+  // [KlineContract] - 后端已返回 partial bar 时，quote 不得覆盖 K 线
+  if (backendIsPartial) return bars
 
   // [QuoteTrust] - 只合并可信实时行情；daily_fallback / 延迟 / 降级均不混入 K 线
   const isTrustworthy =
