@@ -36,6 +36,9 @@
 | dsa-only fallback 到最新交易日 | `test_dsa_only_coverage_endpoint.py` |
 | bars API page_size 按 timeframe 限制（15m=4000, 1h=1200, 其他=1000） | `test_bars.py` |
 | indicators API `bars` 参数最大 4000 | `test_indicators_api.py` |
+| 1d 交易时段 partial daily bar（`data_source=hybrid`、`is_partial=true`、`last_live_bar_time`） | `test_market_data_aggregation_partial_daily.py` |
+| `/quote` 时区输出 `+08:00` | `test_quote_timezone.py` |
+| `/quote` 可信化字段（source/is_realtime/freshness_seconds/degraded/degraded_reason） | `test_quote_trustworthy.py` |
 
 ## 3.5 自选股监控
 
@@ -44,6 +47,9 @@
 | monitor-status 无 MonitorState 或 payload 无效时 fallback | `test_watchlist_monitor_status_fallback.py` |
 | monitor-status 单只 fallback 失败单行降级 | `test_watchlist_monitor_status_fallback.py` |
 | 自选监控页无每行状态栏、页眉全局状态、数据列可过滤、compact-table 对齐 | `frontend/src/features/watchlist-monitor/__tests__/columns.test.ts` |
+| admin monitor 资格：active admin 与 active member + 有效 subscription 放行，disabled admin / 无订阅普通用户排除 | `test_monitor_eligible.py` |
+| monitor_batch / event_recipient / outbox_relay / delivery_worker 监控资格口径一致 | `test_outbox_relay_monitor_eligibility_consistency.py`, `test_delivery_worker_monitor_eligible.py` |
+| monitor_batch 使用 live 1m 输入（`include_realtime=True`）并剔除最后一根未完成 bar | `test_monitor_batch_live_minute.py` |
 
 ## 4. 飞书与通知
 

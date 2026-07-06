@@ -57,6 +57,10 @@ _USER_TRIGGERED_SOURCE_TYPES = frozenset({"stock_detail_share"})
 # 管理员身份由角色权限体系决定，不要求 subscription；同时不受静默期限制
 _ADMIN_NOTIFICATION_SOURCE_TYPES = frozenset({"beta_application_admin"})
 
+# [DeliveryWorker] - 监控/策略事件 source_type 集合：使用 monitor 专用资格检查
+# 与普通会员资格不同，monitor 资格允许 active admin 接收自己的自选股监控通知
+_MONITOR_SOURCE_TYPES = frozenset({"monitor_event", "strategy_event", "monitor_chart"})
+
 # 通知投递 Worker 默认时区（上海时区）
 _CST = ZoneInfo("Asia/Shanghai")
 
@@ -251,29 +255,53 @@ async def process_pending_deliveries(
 
     success_count = 0
     for delivery in pending_deliveries:
-        # [eligible_user_service] - 投递前再次检查用户资格（仅监控通知）
-        # 用户主动触发的投递（stock_detail_share）不受订阅状态限制，立即投递
-        # 管理员通知（beta_application_admin）由角色权限体系决定，不要求 subscription
-        # 失效用户（disabled/expired/admin）的监控通知标记 dead，避免无效重试
+        # [eligible_user_service] - 投递前再次检查用户资格
+        # 分层资格检查：
+        # - 用户主动触发（stock_detail_share）：跳过资格，立即投递；
+        # - 管理员通知（beta_application_admin）：跳过 subscription 资格，由角色决定；
+        # - 监控/策略事件（monitor_event 等）：使用 monitor 专用资格，放行 active admin；
+        # - 其他普通消息：使用普通会员资格。
+        # 失效用户的监控/普通通知标记 dead，避免无效重试。
         _msg = getattr(delivery, "message", None)
         _source_type = getattr(_msg, "source_type", None)
-        if (
-            _msg is not None
-            and _source_type not in _USER_TRIGGERED_SOURCE_TYPES
-            and _source_type not in _ADMIN_NOTIFICATION_SOURCE_TYPES
-            and getattr(_msg, "user_id", None) is not None
-        ):
-            from app.services.eligible_user_service import is_user_eligible
+        _user_id = getattr(_msg, "user_id", None)
+        logger.info(
+            "[delivery_worker] 开始处理投递 delivery_id=%s message_id=%s source_type=%s user_id=%s",
+            delivery.id, getattr(_msg, "id", None), _source_type, _user_id,
+        )
+        if _msg is not None and _user_id is not None:
+            if _source_type in _USER_TRIGGERED_SOURCE_TYPES:
+                # 用户主动触发：跳过所有资格检查
+                pass
+            elif _source_type in _ADMIN_NOTIFICATION_SOURCE_TYPES:
+                # 管理员通知：跳过 subscription 资格检查（由角色权限体系决定）
+                pass
+            elif _source_type in _MONITOR_SOURCE_TYPES:
+                # 监控/策略事件：使用 monitor 专用资格，active admin 也可接收
+                from app.services.eligible_user_service import is_user_eligible_for_monitor
 
-            if not await is_user_eligible(db, _msg.user_id):
-                delivery.status = "dead"
-                delivery.last_error_code = "USER_INELIGIBLE"
-                delivery.next_attempt_at = None
-                logger.info(
-                    "用户无资格，跳过投递: delivery_id=%s user_id=%s",
-                    delivery.id, _msg.user_id,
-                )
-                continue
+                if not await is_user_eligible_for_monitor(db, _user_id):
+                    delivery.status = "dead"
+                    delivery.last_error_code = "USER_INELIGIBLE"
+                    delivery.next_attempt_at = None
+                    logger.info(
+                        "监控通知用户无资格，跳过投递: delivery_id=%s user_id=%s source_type=%s",
+                        delivery.id, _user_id, _source_type,
+                    )
+                    continue
+            else:
+                # 其他普通消息：使用普通会员资格
+                from app.services.eligible_user_service import is_user_eligible
+
+                if not await is_user_eligible(db, _user_id):
+                    delivery.status = "dead"
+                    delivery.last_error_code = "USER_INELIGIBLE"
+                    delivery.next_attempt_at = None
+                    logger.info(
+                        "用户无资格，跳过投递: delivery_id=%s user_id=%s source_type=%s",
+                        delivery.id, _user_id, _source_type,
+                    )
+                    continue
 
         try:
             await _execute_delivery(db, delivery)

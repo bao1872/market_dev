@@ -70,7 +70,8 @@ Node Cluster 算法
 - 实时报价通过 `mergeRealtimeQuoteIntoBars` 合并到最后一根 K 线用于显示，但仅当 `quote.is_realtime === true && quote.source === "pytdx" && quote.freshness_seconds <= 60` 时才合并；daily_fallback / 延迟 / 降级行情只用于顶部报价 fallback/状态提示，不混入 `displayBars`；1d 保留日期语义并跨日追加实时 bar，intraday（15m/1h 等）使用 `quote.update_time`；`baseBars` 仍用于指标计算，避免污染算法输入；
 - 顶部报价条优先使用实时报价，fallback 到最后一根 bar；
 - **行情状态徽章**：根据 quote 来源/实时性/新鲜度/降级状态显示“实时行情 / 日线回退 / 数据延迟 / 行情降级”，并显示 `update_time`；不再固定显示“实时行情”；
-- **K 线状态条**：显示 bars 的 `data_source`、`as_of`、`is_partial`、`degraded`、`degraded_reason`；
+- **K 线状态条**：显示 bars 的 `data_source`、`as_of`、`is_partial`、`degraded`、`degraded_reason`；交易时段 1d 返回 `is_partial=true` 时，状态条明确提示“盘中 partial bar（未收盘）”；
+- **1d K 线实时性**：`include_realtime=true` 且交易时段时，1d bars 最后一根为当日 partial daily bar（由已完成 1m 聚合），收盘后自动恢复为完整日线；
 - **轮询与性能**：`useRealtimeQuote` 交易时段 10s 轮询；`useBars`/`useIndicators` 交易时段 30s 轮询；均设置 `refetchIntervalInBackground: false`，页面 hidden 时停止后台轮询。
 - **结构状态因子面板（V1.8）**：右侧 340px 新增 `StockStructuralStatePanel` 组件，双列布局（图表 + 因子面板）；面板含 5 张卡片（DSA 段质量/Swing 结构位置/成本节点/动量波动/成交参与），双周期 tabs（1d/15m）切换；V1.8 约 50 字段（含 dsa_segment 段收益/斜率/效率/段级成交量、swing_range/price_position/retracement、price_vs_poc_atr/value_area_position、distance_to_bb_*_atr/sqz_on/sqz_off/sqzmom_abs_percentile、current_vs_prev_volume_ratio、客观 relation 字段 primary_dir/secondary_dir/trend_alignment/primary_slope_atr 等）；前端只渲染后端 DTO，禁止重新计算因子；API 失败显示"暂无数据"，null 字段显示"-"，`degraded_reasons` 显示警告条；bool 字段（sqz_on/sqz_off）以"是/否"展示；数据源 `useStructuralFactors` hook → `GET /api/v1/instruments/{id}/structural-factors`，交易时段 60s 轮询。
   - **V1 默认隐藏**：面板默认不渲染，用户点击图表上方 toolbar 右侧「显示结构状态」开关后显示；`localStorage.showStructuralState` 持久化用户选择（默认 `null`/非 `"true"` 时隐藏）；按钮文案动态切换（隐藏时「显示结构状态」，显示时「隐藏结构状态」）；
