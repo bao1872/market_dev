@@ -3,9 +3,10 @@
 // 契约：前端只渲染后端 DTO，严禁重新计算因子。所有因子由后端 structural_factor_service 计算。
 // 数据源：useStructuralFactors hook → GET /api/v1/instruments/{id}/structural-factors
 // 降级策略：API 失败显示"暂无数据"；null 字段显示"-"；degraded_reasons 显示警告条
+// [时序特征 V1] - 描述: 面板末尾折叠卡片，渲染 temporal-features API DTO（受同一个结构状态开关控制）
 import { useState, type ReactNode } from 'react'
-import { useStructuralFactors } from '../hooks/useApi'
-import type { StructuralFactorResponse } from '../api/endpoints'
+import { useStructuralFactors, useTemporalFeatures } from '../hooks/useApi'
+import type { StructuralFactorResponse, TemporalFeaturesResponse } from '../api/endpoints'
 
 interface StockStructuralStatePanelProps {
   instrumentId: string
@@ -132,6 +133,8 @@ const CARDS: Array<{ title: string; group: FactorGroup; rows: FactorRow[] }> = [
     rows: [
       // V1.7 保留字段
       { label: 'POC', key: 'poc_price', format: fmtPrice },
+      { label: 'VAL', key: 'val_price', format: fmtPrice },
+      { label: 'VAH', key: 'vah_price', format: fmtPrice },
       { label: '上方节点', key: 'nearest_upper_node', format: (v) => {
         if (v === null || v === undefined) return '-'
         if (typeof v === 'object' && v !== null && 'price_mid' in v) {
@@ -146,17 +149,26 @@ const CARDS: Array<{ title: string; group: FactorGroup; rows: FactorRow[] }> = [
         }
         return '-'
       } },
-      { label: '位置 [0,1]', key: 'position_0_1', format: (v) => fmt(v, 3) },
+      // V1.8 位置语义修复：VP 全区间位置（原 position_0_1，保持语义，仅改标签避免误读）
+      { label: 'VP全区间位置[0,1]', key: 'position_0_1', format: (v) => fmt(v, 3) },
+      // V1.8 新增：节点区间位置（close 在 [lower, upper] 中的位置，clip 到 [0,1]）
+      { label: '节点区间位置[0,1]', key: 'node_interval_position_0_1', format: (v) => fmt(v, 3) },
+      // V1.8 VA 位置（保留 raw，不 clip）
+      { label: 'VA位置raw', key: 'value_area_position_0_1', format: (v) => fmt(v, 3) },
+      // V1.8 新增：VA 状态分类
+      { label: 'VA状态', key: 'value_area_zone', format: (v) => fmt(v, 0) },
+      // V1.8 新增：成本区间状态分类
+      { label: '成本区间状态', key: 'cost_position_zone', format: (v) => fmt(v, 0) },
       { label: 'close vs POC', key: 'close_to_poc_pct', format: fmtPct },
-      // V1.8 新增字段
       { label: 'close vs POC / ATR', key: 'price_vs_poc_atr', format: (v) => fmt(v, 3) },
-      { label: 'VA 位置 [0,1]', key: 'value_area_position_0_1', format: (v) => fmt(v, 3) },
       { label: '上方节点价', key: 'nearest_node_above_price', format: fmtPrice },
       { label: '下方节点价', key: 'nearest_node_below_price', format: fmtPrice },
       { label: '距上方节点 / ATR', key: 'distance_to_node_above_atr', format: (v) => fmt(v, 3) },
       { label: '距下方节点 / ATR', key: 'distance_to_node_below_atr', format: (v) => fmt(v, 3) },
       { label: '上方节点强度', key: 'node_above_strength', format: fmtInt },
       { label: '下方节点强度', key: 'node_below_strength', format: fmtInt },
+      // V1.8 诊断字段：节点区间位置 raw（不 clip，可 > 1 或 < 0）
+      { label: '节点区间位置raw', key: 'node_interval_position_raw', format: (v) => fmt(v, 3) },
     ],
   },
   {
@@ -222,6 +234,86 @@ function FactorCard({
         })}
       </div>
     </div>
+  )
+}
+
+// ===== Temporal Features V1 折叠卡片 =====
+// 渲染 temporal-features API DTO（daily_context + m15_response + derived_relation + meta）
+// 前端只渲染 DTO，严禁重新计算。null 字段显示 "-"。
+const TEMPORAL_DAILY_ROWS: FactorRow[] = [
+  { label: 'DSA 方向', key: 'daily_dsa_dir', format: fmtDir },
+  { label: '段持续分位', key: 'daily_dsa_segment_duration_percentile', format: fmtPct },
+  { label: '段斜率 ATR/bar', key: 'daily_dsa_slope_atr_per_bar', format: (v) => fmt(v, 4) },
+  { label: '段效率', key: 'daily_dsa_efficiency_0_1', format: (v) => fmt(v, 3) },
+  { label: 'Swing 位置 [0,1]', key: 'daily_price_position_in_swing_0_1', format: (v) => fmt(v, 3) },
+  { label: '距 high / ATR', key: 'daily_distance_to_swing_high_atr', format: (v) => fmt(v, 3) },
+  { label: '距上方节点 / ATR', key: 'daily_distance_to_node_above_atr', format: (v) => fmt(v, 3) },
+  { label: 'SQZMOM 段内变化', key: 'daily_sqzmom_change_since_segment_start', format: (v) => fmt(v, 4) },
+  { label: '量能分位段内变化', key: 'daily_volume_percentile_change_since_segment_start', format: fmtPct },
+]
+
+const TEMPORAL_M15_ROWS: FactorRow[] = [
+  { label: 'Swing 位置 [0,1]', key: 'm15_price_position_in_swing_0_1', format: (v) => fmt(v, 3) },
+  { label: '位置 anchor 后变化', key: 'm15_position_change_since_swing_anchor', format: (v) => fmt(v, 3) },
+  { label: '距 high / ATR', key: 'm15_distance_to_swing_high_atr', format: (v) => fmt(v, 3) },
+  { label: '距 low / ATR', key: 'm15_distance_to_swing_low_atr', format: (v) => fmt(v, 3) },
+  { label: 'SQZMOM anchor 后变化', key: 'm15_sqzmom_change_since_swing_anchor', format: (v) => fmt(v, 4) },
+  { label: 'SQZMOM 绝对分位', key: 'm15_sqzmom_abs_percentile', format: fmtPct },
+  { label: 'Squeeze Off', key: 'm15_sqz_off', format: fmtBool },
+  { label: 'BB 带宽 anchor 后变化', key: 'm15_bb_bandwidth_change_since_swing_anchor', format: (v) => fmt(v, 3) },
+  { label: '量能分位 anchor 后变化', key: 'm15_volume_percentile_change_since_swing_anchor', format: fmtPct },
+]
+
+const TEMPORAL_DERIVED_ROWS: FactorRow[] = [
+  { label: 'm15 vs daily 位置', key: 'm15_position_relative_to_daily', format: (v) => fmt(v, 3) },
+  { label: '响应方向', key: 'm15_response_direction_relative_to_daily', format: (v) => fmt(v, 0) },
+  { label: '响应强度', key: 'm15_response_intensity', format: (v) => fmt(v, 3) },
+]
+
+function TemporalFeaturesCard({
+  instrumentId,
+}: {
+  instrumentId: string
+}): ReactNode {
+  const query = useTemporalFeatures(instrumentId)
+
+  // 加载中
+  if (query.isLoading || query.isPending) {
+    return (
+      <details className="ssp-detail ssp-temporal" open>
+        <summary>时序特征 V1</summary>
+        <div className="ssp-loading">加载中...</div>
+      </details>
+    )
+  }
+
+  // API 失败或无数据
+  if (query.isError || !query.data) {
+    return (
+      <details className="ssp-detail ssp-temporal" open>
+        <summary>时序特征 V1</summary>
+        <div className="ssp-empty">暂无数据</div>
+      </details>
+    )
+  }
+
+  const data: TemporalFeaturesResponse = query.data
+  const hasNotes = data.meta.warmup_notes.length > 0 || data.meta.degraded_reasons.length > 0
+
+  return (
+    <details className="ssp-detail ssp-temporal" open>
+      <summary>时序特征 V1（{data.meta.primary_timeframe} + {data.meta.secondary_timeframe}）</summary>
+      {hasNotes && (
+        <div className="ssp-degraded" title={[...data.meta.degraded_reasons, ...data.meta.warmup_notes].join('; ')}>
+          ⚠ {data.meta.degraded_reasons.length + data.meta.warmup_notes.length} 项提示
+        </div>
+      )}
+      <div className="ssp-cards">
+        <FactorCard title="日线上下文 (daily_context)" factors={data.daily_context as unknown as Record<string, unknown>} rows={TEMPORAL_DAILY_ROWS} />
+        <FactorCard title="15 分钟响应 (m15_response)" factors={data.m15_response as unknown as Record<string, unknown>} rows={TEMPORAL_M15_ROWS} />
+        <FactorCard title="派生关系 (derived_relation)" factors={data.derived_relation as unknown as Record<string, unknown>} rows={TEMPORAL_DERIVED_ROWS} />
+      </div>
+    </details>
   )
 }
 
@@ -358,6 +450,9 @@ export function StockStructuralStatePanel({
           {JSON.stringify(activeFactors, null, 2)}
         </pre>
       </details>
+
+      {/* 时序特征 V1 折叠卡片：渲染 temporal-features API DTO，受同一个结构状态开关控制 */}
+      <TemporalFeaturesCard instrumentId={instrumentId} />
     </div>
   )
 }

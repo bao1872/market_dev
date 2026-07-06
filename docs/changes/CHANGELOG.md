@@ -2,6 +2,15 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-05: 时序特征 V1 + 个股详情页结构状态面板隐藏开关
+
+- 后端新增 `app.services.temporal_feature_service.compute_temporal_features`：双周期（1d+15m）时序特征，补变化量/持续度/派生关系；daily_context 9 字段 + m15_response 9 字段 + derived_relation 3 字段；复用 V1.8 `compute_structural_factors` 获取 primary/secondary factors；point-in-time 重算 SQZMOM/BB bandwidth/volume_percentile，无未来函数；V1 只支持 `as_of=latest`；组级异常隔离（daily/m15/derived 独立 try/except，单组失败返回 null dict + degraded_reasons）。
+- 后端新增 API `GET /api/v1/instruments/{id}/temporal-features`，无认证要求，参数 `primary_timeframe`/`secondary_timeframe`/`adj`/`as_of`；非法参数返回 400（含 `as_of != "latest"`）；不存在 instrument 返回 200 + degraded_reasons。
+- 前端 `StockDetailPage.tsx` 结构状态面板默认隐藏 + 用户开关 + localStorage 持久化；`?hideStructuralState=1` / `?capture=1` / `?capture=feishu` 强制隐藏且禁用开关；截图模式默认只渲染 K 线和基础信息；toggle 按钮移入 `tv-chart-column` 内部（`position: relative`）确保定位稳定。
+- 新增后端测试 26 个（服务 20 + API 6）、前端 contract test 8 个。
+- 更新 `docs/current/02-data-api-contracts.md`（新增第 11 节，含 `as_of!=latest` 返回 400 与组级异常隔离描述）、`04-frontend-ux.md`、`05-testing-acceptance.md`、`docs/maps/api-route-map.md`、`frontend-route-map.md`、`test-coverage-map.md`。
+- 新增 CHANGE-20260705-033。
+
 ## 2026-07-05: 结构状态因子面板升级至 V1.8（补齐 50 字段 + 客观 relation）
 
 - 后端 `structural_factor_service.py` 扩展 V1.8 字段：dsa_segment 新增 current/prev 段收益、斜率、效率、段级成交量、段间对比；swing 新增 swing_range/price_position/retracement/rebound/bars_since；cost 新增 price_vs_poc_atr/value_area_position/nearest_node_*/distance_to_node_*_atr/node_*_strength；volatility 新增 distance_to_bb_*_atr/sqz_on/sqz_off/sqzmom_abs_percentile；participation 共享段级成交量；relation 移除 momentum_alignment，改为 primary_dir/secondary_dir/trend_alignment/primary_swing_position/secondary_swing_position/primary_slope_atr/secondary_slope_atr/secondary_vs_primary_position_delta。

@@ -1085,7 +1085,33 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 // V1.7: 新增右侧 340px 结构状态因子面板（StockStructuralStatePanel），双列布局
 .tv-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 340px; min-height: v.$tv-workspace-min-height; border: 1px solid v.$color-border; border-top: 0; background: #10141c; }
 .tv-workspace.capture-mode { grid-template-columns: minmax(0, 1fr); } // 截图模式：隐藏右侧面板，恢复单列
-.tv-chart-column { min-width: 0; background: #0d1118; }
+.tv-workspace.hide-structural-state { grid-template-columns: minmax(0, 1fr); } // 结构状态隐藏：恢复单列
+
+// 结构状态开关 toolbar：放在图表上方，按钮右对齐，默认可见
+// [结构状态开关] - 描述: 替代旧浮动按钮，位置明显，文案动态切换（显示/隐藏结构状态）
+.structural-state-toolbar {
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 10px;
+  background: #131722;
+  border-bottom: 1px solid v.$color-border;
+}
+.structural-state-toggle-btn {
+  height: 26px;
+  padding: 0 12px;
+  background: #1d222d;
+  border: 1px solid v.$color-border;
+  color: #d2d6df;
+  border-radius: 5px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  &:hover { background: #262c39; border-color: #49536b; color: #fff; }
+  &.active { background: #29334b; border-color: #4169e1; color: #fff; }
+}
+.tv-chart-column { min-width: 0; background: #0d1118; position: relative; }
 .tv-side-column { min-width: 0; background: #0d1118; border-left: 1px solid v.$color-border; overflow-y: auto; max-height: v.$tv-workspace-min-height; }
 .tv-trading-chart { height: v.$tv-chart-height; border: 0; border-radius: 0; }
 .tv-chart-toolbar { height: 42px; border-radius: 0; border-left: 0; border-right: 0; background: #131722; position: relative; z-index: 3; display: flex; align-items: center; gap: 8px; padding: 0 8px; }

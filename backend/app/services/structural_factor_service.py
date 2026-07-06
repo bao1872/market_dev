@@ -590,6 +590,76 @@ def _find_bar_index_by_time(
 # =============================================================================
 # 因子组 5：成本/节点（V1.8 完整成本分析）
 # =============================================================================
+def _classify_cost_position_zone(
+    last_close: float, upper: float | None, lower: float | None
+) -> str | None:
+    """分类 close 相对上下节点的位置 zone。
+
+    规则:
+        - upper/lower 都存在:
+            close < lower → "below_lower_node"
+            close > upper → "above_upper_node"
+            lower <= close <= upper → "between_nodes"
+        - 只存在 upper → "below_upper_node"
+        - 只存在 lower → "above_lower_node"
+        - 都不存在 → None
+    """
+    if upper is None and lower is None:
+        return None
+    if upper is not None and lower is not None:
+        if last_close < lower:
+            return "below_lower_node"
+        if last_close > upper:
+            return "above_upper_node"
+        return "between_nodes"
+    if upper is not None:
+        return "below_upper_node"
+    return "above_lower_node"
+
+
+def _classify_value_area_zone(
+    last_close: float, vah: float | None, val: float | None
+) -> str | None:
+    """分类 close 相对 VA（Value Area）的位置 zone。
+
+    规则:
+        - vah/val 任一缺失 → None
+        - close < val → "below_va"
+        - close > vah → "above_va"
+        - val <= close <= vah → "inside_va"
+    """
+    if vah is None or val is None:
+        return None
+    if last_close < val:
+        return "below_va"
+    if last_close > vah:
+        return "above_va"
+    return "inside_va"
+
+
+def _compute_node_interval_position(
+    last_close: float,
+    upper: float | None,
+    lower: float | None,
+    clip: bool = True,
+) -> float | None:
+    """计算 close 在节点区间 [lower, upper] 中的位置。
+
+    公式: (last_close - lower) / (upper - lower)
+    - clip=True: 限制到 [0, 1]
+    - clip=False: 原始值（可 > 1 或 < 0），用于诊断
+    - upper/lower 任一缺失，或 upper <= lower → None
+    """
+    if upper is None or lower is None:
+        return None
+    if upper <= lower:
+        return None
+    raw = (last_close - lower) / (upper - lower)
+    if clip:
+        return float(max(0.0, min(1.0, raw)))
+    return float(raw)
+
+
 def _compute_cost_position_factors(
     bars: pd.DataFrame, atr: np.ndarray | None = None
 ) -> dict[str, Any]:
@@ -613,6 +683,13 @@ def _compute_cost_position_factors(
         "distance_to_node_below_atr": None,
         "node_above_strength": None,
         "node_below_strength": None,
+        # V1.8 位置语义修复字段（区分 VP 全区间 / 节点区间 / VA 区间）
+        "node_interval_position_0_1": None,
+        "node_interval_position_raw": None,
+        "cost_position_zone": None,
+        "value_area_zone": None,
+        "val_price": None,
+        "vah_price": None,
     }
     if bars is None or len(bars) < 20:
         return result
@@ -654,6 +731,17 @@ def _compute_cost_position_factors(
             result["value_area_position_0_1"] = float(
                 (last_close - val) / (vah - val)
             )
+        # V1.8 暴露 VAL/VAH 原值供前端显示
+        if np.isfinite(val):
+            result["val_price"] = float(val)
+        if np.isfinite(vah):
+            result["vah_price"] = float(vah)
+        # V1.8 value_area_zone（close 相对 VA 的位置分类）
+        result["value_area_zone"] = _classify_value_area_zone(
+            last_close,
+            float(vah) if np.isfinite(vah) else None,
+            float(val) if np.isfinite(val) else None,
+        )
     except Exception as exc:
         logger.warning("value_area_position 计算失败: %s", exc)
 
@@ -699,7 +787,20 @@ def _compute_cost_position_factors(
     except Exception as exc:
         logger.warning("Node 提取失败: %s", exc)
 
-    # position_0_1
+    # V1.8 节点区间位置 + cost_position_zone（区分于 VP 全区间 position_0_1）
+    upper_price = result.get("nearest_node_above_price")
+    lower_price = result.get("nearest_node_below_price")
+    result["node_interval_position_0_1"] = _compute_node_interval_position(
+        last_close, upper_price, lower_price, clip=True
+    )
+    result["node_interval_position_raw"] = _compute_node_interval_position(
+        last_close, upper_price, lower_price, clip=False
+    )
+    result["cost_position_zone"] = _classify_cost_position_zone(
+        last_close, upper_price, lower_price
+    )
+
+    # position_0_1（保持原 VP 全区间语义：lowest_price~highest_price 中的位置，不 clip）
     try:
         pos = vp_result.position_0_1(last_close)
         if np.isfinite(pos):

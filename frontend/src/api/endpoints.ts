@@ -2321,3 +2321,77 @@ export async function getStructuralFactors(
   )
   return data
 }
+
+// ============================================================
+// Temporal Features V1（时序特征：daily_context + m15_response + derived_relation）
+// ============================================================
+
+/**
+ * Temporal Features 查询参数。
+ * V1 仅支持 as_of=latest（默认），历史回测 as_of 待 V2。
+ */
+export interface TemporalFeaturesQueryParams {
+  as_of?: 'latest'
+  primary_timeframe?: string
+  secondary_timeframe?: string
+  adj?: 'qfq' | 'none'
+}
+
+/**
+ * 时序特征响应 DTO。
+ * 与后端 temporal_feature_service.compute_temporal_features 返回结构严格对齐。
+ * 前端只渲染 DTO，严禁重新计算。
+ */
+export interface TemporalFeaturesResponse {
+  daily_context: {
+    daily_dsa_dir: number | null
+    daily_dsa_segment_duration_percentile: number | null
+    daily_dsa_slope_atr_per_bar: number | null
+    daily_dsa_efficiency_0_1: number | null
+    daily_price_position_in_swing_0_1: number | null
+    daily_distance_to_swing_high_atr: number | null
+    daily_distance_to_node_above_atr: number | null
+    daily_sqzmom_change_since_segment_start: number | null
+    daily_volume_percentile_change_since_segment_start: number | null
+  }
+  m15_response: {
+    m15_price_position_in_swing_0_1: number | null
+    m15_position_change_since_swing_anchor: number | null
+    m15_distance_to_swing_high_atr: number | null
+    m15_distance_to_swing_low_atr: number | null
+    m15_sqzmom_change_since_swing_anchor: number | null
+    m15_sqzmom_abs_percentile: number | null
+    m15_sqz_off: boolean | null
+    m15_bb_bandwidth_change_since_swing_anchor: number | null
+    m15_volume_percentile_change_since_swing_anchor: number | null
+  }
+  derived_relation: {
+    m15_position_relative_to_daily: number | null
+    m15_response_direction_relative_to_daily: string | null
+    m15_response_intensity: number | null
+  }
+  meta: {
+    as_of: string
+    primary_timeframe: string
+    secondary_timeframe: string
+    degraded_reasons: string[]
+    warmup_notes: string[]
+  }
+}
+
+/**
+ * 查询指定标的的时序特征 V1。
+ * 后端 temporal_features router prefix="/api/v1/instruments"
+ * 完整路径: /api/v1/instruments/{id}/temporal-features
+ * V1 仅支持 as_of=latest，as_of=其他值后端返回 400。
+ */
+export async function getTemporalFeatures(
+  instrumentId: string,
+  params?: TemporalFeaturesQueryParams,
+): Promise<TemporalFeaturesResponse> {
+  const { data } = await apiClient.get<TemporalFeaturesResponse>(
+    `/api/v1/instruments/${instrumentId}/temporal-features`,
+    { params },
+  )
+  return data
+}

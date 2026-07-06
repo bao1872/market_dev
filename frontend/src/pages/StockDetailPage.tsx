@@ -51,6 +51,26 @@ export default function StockDetailPage() {
   const source = (searchParams.get('source') || 'watchlist') as 'selection' | 'watchlist'
   const strategy = searchParams.get('strategy') || STRATEGY_KEYS.WATCHLIST_MONITOR
   const isCaptureMode = searchParams.get('capture') === 'feishu'
+  // [结构状态隐藏开关] - 描述: hideStructuralState=1 / capture=1 / capture=feishu 强制隐藏面板
+  const hideStructuralStateParam =
+    searchParams.get('hideStructuralState') === '1' ||
+    searchParams.get('capture') === '1' ||
+    isCaptureMode
+
+  // [结构状态开关] - 描述: 默认隐藏，用户点击显示，localStorage 持久化；强制隐藏时忽略 localStorage
+  const [showStructuralState, setShowStructuralState] = useState<boolean>(() => {
+    if (hideStructuralStateParam) return false
+    return localStorage.getItem('showStructuralState') === 'true'
+  })
+  const toggleStructuralState = useCallback(() => {
+    if (hideStructuralStateParam) return
+    setShowStructuralState(prev => {
+      const next = !prev
+      localStorage.setItem('showStructuralState', String(next))
+      return next
+    })
+  }, [hideStructuralStateParam])
+  const shouldShowPanel = showStructuralState && !hideStructuralStateParam
 
   // 根据 source + strategy 调用 manifest.resolveStrategy 确定默认图层集
   const strategyDef = useMemo(() => resolveStrategy(source, strategy), [source, strategy])
@@ -695,9 +715,22 @@ export default function StockDetailPage() {
       )}
 
       {/* ===== 工作区：双列布局（图表 + 结构状态因子面板） ===== */}
-      <div className={clsx('tv-workspace', { 'capture-mode': isCaptureMode })}>
-        {/* 图表区 */}
+      <div className={clsx('tv-workspace', { 'capture-mode': isCaptureMode, 'hide-structural-state': !shouldShowPanel })}>
+        {/* 图表区（同时承载 toggle 按钮的定位上下文） */}
         <section className="tv-chart-column">
+          {/* 结构状态开关 toolbar：放在图表上方，按钮右对齐，默认可见 */}
+          {!hideStructuralStateParam && instrumentId && (
+            <div className="structural-state-toolbar">
+              <button
+                type="button"
+                className="structural-state-toggle-btn"
+                onClick={toggleStructuralState}
+                aria-label="切换结构状态面板"
+              >
+                {showStructuralState ? '隐藏结构状态' : '显示结构状态'}
+              </button>
+            </div>
+          )}
           {isBarsLoading ? (
             <div className="tv-chart-loading">行情数据加载中...</div>
           ) : (
@@ -727,8 +760,8 @@ export default function StockDetailPage() {
             </>
           )}
         </section>
-        {/* 结构状态因子面板（截图模式隐藏，节省截图宽度） */}
-        {!isCaptureMode && instrumentId && (
+        {/* 结构状态因子面板（默认隐藏，用户开关控制；截图模式强制隐藏；Temporal Features 卡片随之显示） */}
+        {shouldShowPanel && instrumentId && (
           <aside className="tv-side-column">
             <StockStructuralStatePanel instrumentId={instrumentId} />
           </aside>
