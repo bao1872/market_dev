@@ -111,20 +111,15 @@ const CARDS: Array<{ title: string; group: FactorGroup; rows: FactorRow[] }> = [
     title: 'Swing 结构位置',
     group: 'swing_position',
     rows: [
-      // V1.7 保留字段
-      { label: '最近 swing high', key: 'confirmed_swing_high', format: fmtPrice },
-      { label: '最近 swing low', key: 'confirmed_swing_low', format: fmtPrice },
-      { label: '距 high bar 数', key: 'bars_since_swing_high', format: fmtInt },
-      { label: '距 low bar 数', key: 'bars_since_swing_low', format: fmtInt },
-      { label: 'close vs high', key: 'swing_high_to_close_pct', format: fmtPct },
-      { label: 'close vs low', key: 'swing_low_to_close_pct', format: fmtPct },
-      // V1.8 新增字段
-      { label: 'Swing 范围', key: 'swing_range', format: fmtPrice },
-      { label: '位置 [0,1]', key: 'price_position_in_swing_0_1', format: (v) => fmt(v, 3) },
-      { label: '距 high / ATR', key: 'distance_to_swing_high_atr', format: (v) => fmt(v, 3) },
-      { label: '距 low / ATR', key: 'distance_to_swing_low_atr', format: (v) => fmt(v, 3) },
-      { label: '高点回撤', key: 'retracement_from_high_0_1', format: (v) => fmt(v, 3) },
-      { label: '低点反弹', key: 'rebound_from_low_0_1', format: (v) => fmt(v, 3) },
+      // [V1.9] active swing 摘要：当前正在发展的结构区间，跟随最新价格
+      // confirmed pivot 字段在"结构因子明细"折叠卡片 JSON 中查看
+      { label: 'Active high', key: 'active_swing_high', format: fmtPrice },
+      { label: 'Active low', key: 'active_swing_low', format: fmtPrice },
+      { label: '距 active high bar', key: 'bars_since_active_swing_high', format: fmtInt },
+      { label: '距 active low bar', key: 'bars_since_active_swing_low', format: fmtInt },
+      { label: 'Active 位置[0,1]', key: 'price_position_in_active_swing_0_1', format: (v) => fmt(v, 3) },
+      { label: '距 active high / ATR', key: 'distance_to_active_swing_high_atr', format: (v) => fmt(v, 3) },
+      { label: '距 active low / ATR', key: 'distance_to_active_swing_low_atr', format: (v) => fmt(v, 3) },
     ],
   },
   {
@@ -245,18 +240,26 @@ const TEMPORAL_DAILY_ROWS: FactorRow[] = [
   { label: '段持续分位', key: 'daily_dsa_segment_duration_percentile', format: fmtPct },
   { label: '段斜率 ATR/bar', key: 'daily_dsa_slope_atr_per_bar', format: (v) => fmt(v, 4) },
   { label: '段效率', key: 'daily_dsa_efficiency_0_1', format: (v) => fmt(v, 3) },
-  { label: 'Swing 位置 [0,1]', key: 'daily_price_position_in_swing_0_1', format: (v) => fmt(v, 3) },
-  { label: '距 high / ATR', key: 'daily_distance_to_swing_high_atr', format: (v) => fmt(v, 3) },
+  // [V1.9] active swing 时序位置：当前正在发展的结构区间，跟随最新价格
+  { label: 'Active high', key: 'daily_active_swing_high', format: fmtPrice },
+  { label: 'Active low', key: 'daily_active_swing_low', format: fmtPrice },
+  { label: 'Active 位置[0,1]', key: 'daily_price_position_in_active_swing_0_1', format: (v) => fmt(v, 3) },
+  { label: '距 active high / ATR', key: 'daily_distance_to_active_swing_high_atr', format: (v) => fmt(v, 3) },
+  { label: '距 active low / ATR', key: 'daily_distance_to_active_swing_low_atr', format: (v) => fmt(v, 3) },
   { label: '距上方节点 / ATR', key: 'daily_distance_to_node_above_atr', format: (v) => fmt(v, 3) },
   { label: 'SQZMOM 段内变化', key: 'daily_sqzmom_change_since_segment_start', format: (v) => fmt(v, 4) },
   { label: '量能分位段内变化', key: 'daily_volume_percentile_change_since_segment_start', format: fmtPct },
 ]
 
 const TEMPORAL_M15_ROWS: FactorRow[] = [
-  { label: 'Swing 位置 [0,1]', key: 'm15_price_position_in_swing_0_1', format: (v) => fmt(v, 3) },
-  { label: '位置 anchor 后变化', key: 'm15_position_change_since_swing_anchor', format: (v) => fmt(v, 3) },
-  { label: '距 high / ATR', key: 'm15_distance_to_swing_high_atr', format: (v) => fmt(v, 3) },
-  { label: '距 low / ATR', key: 'm15_distance_to_swing_low_atr', format: (v) => fmt(v, 3) },
+  // [V1.9] active swing 时序位置：当前正在发展的结构区间，跟随最新价格
+  { label: 'Active high', key: 'm15_active_swing_high', format: fmtPrice },
+  { label: 'Active low', key: 'm15_active_swing_low', format: fmtPrice },
+  { label: 'Active 位置[0,1]', key: 'm15_price_position_in_active_swing_0_1', format: (v) => fmt(v, 3) },
+  { label: '距 active high / ATR', key: 'm15_distance_to_active_swing_high_atr', format: (v) => fmt(v, 3) },
+  { label: '距 active low / ATR', key: 'm15_distance_to_active_swing_low_atr', format: (v) => fmt(v, 3) },
+  // confirmed swing anchor 后变化（基于 confirmed pivot 位置）
+  { label: 'Confirmed 位置 anchor 后变化', key: 'm15_position_change_since_swing_anchor', format: (v) => fmt(v, 3) },
   { label: 'SQZMOM anchor 后变化', key: 'm15_sqzmom_change_since_swing_anchor', format: (v) => fmt(v, 4) },
   { label: 'SQZMOM 绝对分位', key: 'm15_sqzmom_abs_percentile', format: fmtPct },
   { label: 'Squeeze Off', key: 'm15_sqz_off', format: fmtBool },

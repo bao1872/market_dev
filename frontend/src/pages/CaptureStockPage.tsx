@@ -164,8 +164,6 @@ export default function CaptureStockPage() {
   return (
     <div
       className="tv-content"
-      data-testid="stock-detail-capture"
-      data-render-ready={isRenderReady ? 'true' : 'false'}
     >
       {/* ===== 股票信息栏（精简：名称+代码+报价，无操作按钮） ===== */}
       <div className="tv-symbol-bar">
@@ -211,7 +209,11 @@ export default function CaptureStockPage() {
 
       {/* ===== 工作区：单列布局（全屏图表，无侧栏/导航） ===== */}
       <div className="tv-workspace">
-        <section className="tv-chart-column">
+        <section
+          className="tv-chart-column"
+          data-testid="stock-detail-capture"
+          data-render-ready={isRenderReady ? 'true' : 'false'}
+        >
           {bars.length === 0 ? (
             <div className="tv-chart-loading">行情数据加载中...</div>
           ) : (

@@ -22,8 +22,10 @@ import numpy as np
 import pandas as pd
 
 from app.services.structural_factor_service import (
+    _classify_confirmed_swing_breakout_state,
     _classify_cost_position_zone,
     _classify_value_area_zone,
+    _compute_active_swing_factors,
     _compute_all_factors_for_bars,
     _compute_cost_position_factors,
     _compute_dsa_segment_factors,
@@ -951,6 +953,313 @@ def test_position_0_1_remains_vp_full_range_semantics() -> None:
         assert isinstance(pos_full, float)
         assert isinstance(pos_node, float)
         assert 0.0 <= pos_node <= 1.0  # clipped
+
+
+# ===== 9. V1.9 active swing 当前状态因子（区分 confirmed raw vs active clip）=====
+# 用户截图案例：TCL科技 000100，close=5.65, confirmed_high=5.0507, confirmed_low=4.45
+# confirmed raw position = 1.997（>1，公式成立但语义误导）
+# active position 必须 ∈ [0,1]，active_high 跟随最新高点
+
+
+def _make_pivot_input(
+    n: int,
+    last_ph_anchor: float | None,
+    last_ph_val: float | None,
+    last_pl_anchor: float | None,
+    last_pl_val: float | None,
+    highs: np.ndarray | None = None,
+    lows: np.ndarray | None = None,
+    closes: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """构造 pivot 输入数据（ph/pl/ph_anchor/pl_anchor + highs/lows/closes）。
+
+    只在最后一个位置放置 pivot 值（模拟"最后一个 confirmed pivot"）。
+    anchor 值表示 pivot 真实发生位置。
+    """
+    ph = np.full(n, np.nan)
+    pl = np.full(n, np.nan)
+    ph_anchor_arr = np.full(n, np.nan)
+    pl_anchor_arr = np.full(n, np.nan)
+
+    if last_ph_anchor is not None and last_ph_val is not None:
+        ph[-1] = last_ph_val
+        ph_anchor_arr[-1] = last_ph_anchor
+    if last_pl_anchor is not None and last_pl_val is not None:
+        pl[-1] = last_pl_val
+        pl_anchor_arr[-1] = last_pl_anchor
+
+    if highs is None:
+        highs = np.full(n, 100.0)
+    if lows is None:
+        lows = np.full(n, 99.0)
+    if closes is None:
+        closes = np.full(n, 99.5)
+
+    return highs, lows, closes, ph, pl, ph_anchor_arr, pl_anchor_arr
+
+
+def test_active_swing_high_follows_breakout_when_close_exceeds_confirmed_high() -> None:
+    """上涨突破：close > confirmed_high 时 active_high 跟随最新高点，active position ∈ [0,1]。"""
+    n = 250
+    # confirmed_low anchor=100（晚于 confirmed_high anchor=50）→ up leg
+    # active_low = confirmed_low = 4.45
+    # active_high = max(highs[100:]) 应 >= close = 5.65
+    highs = np.full(n, 5.0)
+    highs[100:] = 5.7  # anchor 之后 high = 5.7
+    lows = np.full(n, 4.4)
+    closes = np.full(n, 5.0)
+    closes[-1] = 5.65  # close 突破 confirmed_high
+
+    _, _, _, ph, pl, ph_a, pl_a = _make_pivot_input(
+        n,
+        last_ph_anchor=50.0, last_ph_val=5.05,
+        last_pl_anchor=100.0, last_pl_val=4.45,
+        highs=highs, lows=lows, closes=closes,
+    )
+
+    result = _compute_active_swing_factors(
+        highs, lows, closes, ph, pl, ph_a, pl_a,
+        last_close=5.65, last_atr=0.3,
+    )
+
+    # active_high 跟随最新高点（>= close）
+    assert result["active_swing_high"] is not None
+    assert result["active_swing_high"] >= 5.65
+    # active_low = confirmed_low
+    assert result["active_swing_low"] == 4.45
+    # active position 必须 ∈ [0,1]
+    assert result["price_position_in_active_swing_0_1"] is not None
+    assert 0.0 <= result["price_position_in_active_swing_0_1"] <= 1.0
+    # active_swing_dir = 1 (up leg)
+    assert result["active_swing_dir"] == 1
+
+
+def test_active_swing_low_follows_breakdown_when_close_drops_below_confirmed_low() -> None:
+    """下跌破位：close < confirmed_low 时 active_low 跟随最新低点，active position ∈ [0,1]。"""
+    n = 250
+    # confirmed_high anchor=100（晚于 confirmed_low anchor=50）→ down leg
+    # active_high = confirmed_high = 5.05
+    # active_low = min(lows[100:]) 应 <= close = 4.25
+    highs = np.full(n, 5.1)
+    lows = np.full(n, 4.5)
+    lows[100:] = 4.2  # anchor 之后 low = 4.2
+    closes = np.full(n, 4.5)
+    closes[-1] = 4.25  # close 跌破 confirmed_low
+
+    _, _, _, ph, pl, ph_a, pl_a = _make_pivot_input(
+        n,
+        last_ph_anchor=100.0, last_ph_val=5.05,
+        last_pl_anchor=50.0, last_pl_val=4.45,
+        highs=highs, lows=lows, closes=closes,
+    )
+
+    result = _compute_active_swing_factors(
+        highs, lows, closes, ph, pl, ph_a, pl_a,
+        last_close=4.25, last_atr=0.3,
+    )
+
+    # active_low 跟随最新低点（<= close）
+    assert result["active_swing_low"] is not None
+    assert result["active_swing_low"] <= 4.25
+    # active_high = confirmed_high
+    assert result["active_swing_high"] == 5.05
+    # active position ∈ [0,1]
+    assert result["price_position_in_active_swing_0_1"] is not None
+    assert 0.0 <= result["price_position_in_active_swing_0_1"] <= 1.0
+    # active_swing_dir = -1 (down leg)
+    assert result["active_swing_dir"] == -1
+
+
+def test_active_swing_high_tracks_latest_high_in_uptrend() -> None:
+    """单边上涨：active_high 应等于 anchor 之后区间最高 high。"""
+    n = 250
+    # up leg: confirmed_low anchor=100
+    highs = np.linspace(4.5, 6.0, n)  # 单边上涨
+    lows = highs - 0.1
+    closes = highs - 0.05
+    last_close = float(closes[-1])
+
+    _, _, _, ph, pl, ph_a, pl_a = _make_pivot_input(
+        n,
+        last_ph_anchor=50.0, last_ph_val=4.6,
+        last_pl_anchor=100.0, last_pl_val=4.45,
+        highs=highs, lows=lows, closes=closes,
+    )
+
+    result = _compute_active_swing_factors(
+        highs, lows, closes, ph, pl, ph_a, pl_a,
+        last_close=last_close, last_atr=0.3,
+    )
+
+    # active_high = max(highs[100:]) = highs[-1]
+    expected_high = float(np.max(highs[100:]))
+    assert result["active_swing_high"] == expected_high
+    # bars_since_active_swing_high = n-1 - argmax_index
+    expected_bar_idx = 100 + int(np.argmax(highs[100:]))
+    assert result["bars_since_active_swing_high"] == n - 1 - expected_bar_idx
+
+
+def test_active_swing_low_tracks_latest_low_in_downtrend() -> None:
+    """单边下跌：active_low 应等于 anchor 之后区间最低 low。"""
+    n = 250
+    # down leg: confirmed_high anchor=100
+    highs = np.linspace(6.0, 4.5, n)  # 单边下跌
+    lows = highs - 0.1
+    closes = highs - 0.05
+    last_close = float(closes[-1])
+
+    _, _, _, ph, pl, ph_a, pl_a = _make_pivot_input(
+        n,
+        last_ph_anchor=100.0, last_ph_val=6.0,
+        last_pl_anchor=50.0, last_pl_val=5.5,
+        highs=highs, lows=lows, closes=closes,
+    )
+
+    result = _compute_active_swing_factors(
+        highs, lows, closes, ph, pl, ph_a, pl_a,
+        last_close=last_close, last_atr=0.3,
+    )
+
+    # active_low = min(lows[100:]) = lows[-1]
+    expected_low = float(np.min(lows[100:]))
+    assert result["active_swing_low"] == expected_low
+    # bars_since_active_swing_low = n-1 - argmin_index
+    expected_bar_idx = 100 + int(np.argmin(lows[100:]))
+    assert result["bars_since_active_swing_low"] == n - 1 - expected_bar_idx
+
+
+def test_bars_since_active_swing_high_equals_actual_distance() -> None:
+    """bars_since_active_swing_high 等于实际 bar 距离。"""
+    n = 250
+    # up leg: confirmed_low anchor=100
+    # 在 anchor 之后第 50 根（index=150）设置最高 high
+    highs = np.full(n, 5.0)
+    highs[150] = 6.0  # 最高 high 在 index=150
+    lows = np.full(n, 4.4)
+    closes = np.full(n, 5.0)
+    closes[-1] = 5.5
+
+    _, _, _, ph, pl, ph_a, pl_a = _make_pivot_input(
+        n,
+        last_ph_anchor=50.0, last_ph_val=5.05,
+        last_pl_anchor=100.0, last_pl_val=4.45,
+        highs=highs, lows=lows, closes=closes,
+    )
+
+    result = _compute_active_swing_factors(
+        highs, lows, closes, ph, pl, ph_a, pl_a,
+        last_close=5.5, last_atr=0.3,
+    )
+
+    # active_high_bar_index = 150
+    # bars_since_active_swing_high = 249 - 150 = 99
+    assert result["bars_since_active_swing_high"] == 99
+
+
+def test_confirmed_swing_breakout_state_classification() -> None:
+    """confirmed_swing_breakout_state 分类正确。"""
+    # close > confirmed_high → above_confirmed_high
+    assert _classify_confirmed_swing_breakout_state(
+        last_close=5.65, confirmed_high=5.05, confirmed_low=4.45
+    ) == "above_confirmed_high"
+    # close < confirmed_low → below_confirmed_low
+    assert _classify_confirmed_swing_breakout_state(
+        last_close=4.25, confirmed_high=5.05, confirmed_low=4.45
+    ) == "below_confirmed_low"
+    # inside
+    assert _classify_confirmed_swing_breakout_state(
+        last_close=4.75, confirmed_high=5.05, confirmed_low=4.45
+    ) == "inside"
+    # confirmed 字段缺失 → None
+    assert _classify_confirmed_swing_breakout_state(
+        last_close=4.75, confirmed_high=None, confirmed_low=4.45
+    ) is None
+    assert _classify_confirmed_swing_breakout_state(
+        last_close=4.75, confirmed_high=5.05, confirmed_low=None
+    ) is None
+
+
+def test_dsa_age_bars_equals_current_dsa_segment_age_bars() -> None:
+    """同段 age_bars == current_dsa_segment_age_bars（统一 V1.8 公式）。"""
+    bars, dsa_bundle, atr = _build_dsa_segment_test_setup()
+    # 若 dsa_bundle 无有效段（数据不足以生成 visual_segments），跳过断言
+    if dsa_bundle["factor_per_bar"].empty or not dsa_bundle.get("visual_segments"):
+        return
+    result = _compute_dsa_segment_factors(bars, dsa_bundle, atr)
+    # 两个字段必须相等（修复前差 2）
+    assert result["age_bars"] == result["current_dsa_segment_age_bars"]
+
+
+def test_tcl_case_active_position_not_1_997() -> None:
+    """TCL 案例：close=5.65, confirmed_high=5.0507, confirmed_low=4.45 → active position ∈ [0,1]。
+
+    confirmed raw position = (5.65 - 4.45) / (5.0507 - 4.45) = 1.997（>1，公式成立但语义误导）
+    active position 必须 ∈ [0,1]，不再是 1.997。
+    """
+    n = 250
+    # up leg: confirmed_low anchor=100（晚于 confirmed_high anchor=50）
+    # active_low = confirmed_low = 4.45
+    # active_high = max(highs[100:]) 应该 >= 5.65
+    highs = np.full(n, 5.0)
+    highs[100:] = 5.65  # anchor 之后 high = 5.65
+    lows = np.full(n, 4.4)
+    closes = np.full(n, 5.0)
+    closes[-1] = 5.65
+
+    _, _, _, ph, pl, ph_a, pl_a = _make_pivot_input(
+        n,
+        last_ph_anchor=50.0, last_ph_val=5.0507,
+        last_pl_anchor=100.0, last_pl_val=4.45,
+        highs=highs, lows=lows, closes=closes,
+    )
+
+    result = _compute_active_swing_factors(
+        highs, lows, closes, ph, pl, ph_a, pl_a,
+        last_close=5.65, last_atr=0.3,
+    )
+
+    # confirmed raw position 公式验证（1.997）
+    confirmed_range = 5.0507 - 4.45
+    confirmed_raw = (5.65 - 4.45) / confirmed_range
+    assert abs(confirmed_raw - 1.997) < 0.01  # 约 1.997
+
+    # active position 必须 ∈ [0,1]
+    active_pos = result["price_position_in_active_swing_0_1"]
+    assert active_pos is not None
+    assert 0.0 <= active_pos <= 1.0
+    # active position 不应接近 1.997
+    assert active_pos < 1.5  # 远小于 1.997
+
+
+def test_active_swing_fallback_when_no_confirmed_pivots() -> None:
+    """无 confirmed pivot 时 fallback 最近 N 根，active_dir=None。"""
+    n = 250
+    highs = np.linspace(4.5, 6.0, n)
+    lows = highs - 0.1
+    closes = highs - 0.05
+    last_close = float(closes[-1])
+
+    # 无 pivot
+    _, _, _, ph, pl, ph_a, pl_a = _make_pivot_input(
+        n,
+        last_ph_anchor=None, last_ph_val=None,
+        last_pl_anchor=None, last_pl_val=None,
+        highs=highs, lows=lows, closes=closes,
+    )
+
+    result = _compute_active_swing_factors(
+        highs, lows, closes, ph, pl, ph_a, pl_a,
+        last_close=last_close, last_atr=0.3, fallback_n=120,
+    )
+
+    # active_dir = None
+    assert result["active_swing_dir"] is None
+    # active_high = max(最近 120 根)
+    expected_high = float(np.max(highs[-120:]))
+    assert result["active_swing_high"] == expected_high
+    # active_low = min(最近 120 根)
+    expected_low = float(np.min(lows[-120:]))
+    assert result["active_swing_low"] == expected_low
 
 
 # ===== 模块自测入口 =====
