@@ -23,6 +23,8 @@ const FRONTEND_ROOT = join(__dirname, '..', '..')
 const CAPTURE_PAGE_PATH = join(FRONTEND_ROOT, 'src', 'pages', 'CaptureStockPage.tsx')
 const APP_TSX_PATH = join(FRONTEND_ROOT, 'src', 'App.tsx')
 const CAPTURE_SERVICE_PATH = join(__dirname, '..', '..', '..', 'backend', 'app', 'services', 'stock_capture_service.py')
+const STOCK_DETAIL_PAGE_PATH = join(FRONTEND_ROOT, 'src', 'pages', 'StockDetailPage.tsx')
+const GLOBAL_SCSS_PATH = join(FRONTEND_ROOT, 'src', 'styles', 'global.scss')
 
 function readSource(p: string): string {
   return readFileSync(p, 'utf-8')
@@ -262,4 +264,42 @@ test('CaptureStockPage 只调用 Snapshot API，不调用普通业务端点', ()
       `CaptureStockPage 禁止调用普通业务端点: ${endpoint}`,
     )
   }
+})
+
+// ===== 17. capture=feishu 模式无操作按钮（StockDetailPage）=====
+test('test_capture_mode_no_buttons', () => {
+  const src = readSource(STOCK_DETAIL_PAGE_PATH)
+
+  // 必须包含 !isCaptureMode 条件（截图模式隐藏操作按钮）
+  assert.ok(
+    src.includes('!isCaptureMode'),
+    'StockDetailPage 必须包含 !isCaptureMode 条件（截图模式隐藏操作按钮）',
+  )
+
+  // 验证 !isCaptureMode 包裹按钮组（actions div）
+  // 模式：{!isCaptureMode && ( ... <div className="actions"> ... )}
+  const actionsWrapped = /\{!isCaptureMode\s*&&\s*\([\s\S]*?<div className="actions">/.test(src)
+  assert.ok(
+    actionsWrapped,
+    '操作按钮组（<div className="actions">）必须被 {!isCaptureMode && (...)} 包裹（截图模式隐藏全部操作按钮）',
+  )
+})
+
+// ===== 18. capture=feishu 单列布局（global.scss）=====
+test('test_capture_mode_single_column_layout', () => {
+  const scss = readSource(GLOBAL_SCSS_PATH)
+
+  // .tv-workspace.capture-mode .tv-side-column { display: none; }
+  // 截图模式隐藏侧栏，不占位
+  assert.ok(
+    /\.tv-workspace\.capture-mode\s+\.tv-side-column[\s\S]*?display:\s*none/.test(scss),
+    '.tv-workspace.capture-mode .tv-side-column 必须设置 display: none（截图模式隐藏侧栏，不占位）',
+  )
+
+  // .tv-workspace.capture-mode .tv-chart-column { width: 100%; }
+  // 截图模式图表占满宽度
+  assert.ok(
+    /\.tv-workspace\.capture-mode\s+\.tv-chart-column[\s\S]*?width:\s*100%/.test(scss),
+    '.tv-workspace.capture-mode .tv-chart-column 必须设置 width: 100%（截图模式图表占满宽度）',
+  )
 })

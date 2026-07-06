@@ -2,6 +2,15 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-06
+- CHANGE-20260706-038: Swing Active State + Capture 布局 + Publish Auto-trigger
+  - 新增 active swing 字段（clip [0,1]），修复 confirmed raw >1 问题
+  - temporal derived_relation 改用 active swing
+  - DSA age 统一为 +1 口径
+  - capture 模式隐藏按钮和侧列
+  - worker.py DSA 完成后自动触发 after_close_orchestrator
+  - 生产补偿发布 2026-07-06 DSA run（job_run_id=90683e3e, published_at=2026-07-06 23:54:17）
+
 ## 2026-07-06: 前端不覆盖后端 1d partial bar
 
 - 修复 `StockDetailPage.tsx` 在交易时段后端已返回 1d partial bar 时仍调用 `mergeRealtimeQuoteIntoBars` 覆盖 K线的问题：仅当 `timeframe==='1d' && barsQuery.data?.is_partial !== true` 时才允许 quote 合并，否则 `displayBars` 直接使用 `baseBars`。

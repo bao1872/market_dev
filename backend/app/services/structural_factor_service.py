@@ -245,8 +245,169 @@ def _compute_volatility_momentum_factors(
 
 
 # =============================================================================
-# 因子组 3：Swing 结构位置（V1.8 完整位置分析）
+# 因子组 3：Swing 结构位置（V1.8 完整位置分析 + V1.9 active swing 当前状态）
 # =============================================================================
+def _classify_confirmed_swing_breakout_state(
+    last_close: float | None,
+    confirmed_high: float | None,
+    confirmed_low: float | None,
+) -> str | None:
+    """分类 close 相对 confirmed pivot 的突破状态。
+
+    - close > confirmed_high → "above_confirmed_high"
+    - close < confirmed_low → "below_confirmed_low"
+    - confirmed_low <= close <= confirmed_high → "inside"
+    - confirmed_high/low 任一缺失 → None
+    """
+    if last_close is None or confirmed_high is None or confirmed_low is None:
+        return None
+    if last_close > confirmed_high:
+        return "above_confirmed_high"
+    if last_close < confirmed_low:
+        return "below_confirmed_low"
+    return "inside"
+
+
+def _compute_active_swing_factors(
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    ph: np.ndarray,
+    pl: np.ndarray,
+    ph_anchor: np.ndarray,
+    pl_anchor: np.ndarray,
+    last_close: float,
+    last_atr: float,
+    fallback_n: int = 120,
+) -> dict[str, Any]:
+    """计算 active swing 当前状态因子（V1.9 新增）。
+
+    active swing 表示"当前正在发展的结构区间"，必须更贴近图上 K 线。
+    与 confirmed pivot（滞后）不同，active high/low 跟随最新价格。
+
+    口径：
+    - 若最近 confirmed low anchor 晚于最近 confirmed high anchor → up leg
+      active_low = confirmed_low；active_high = max(highs[anchor:])
+    - 若最近 confirmed high anchor 晚于最近 confirmed low anchor → down leg
+      active_high = confirmed_high；active_low = min(lows[anchor:])
+    - 都没有 → fallback 最近 min(fallback_n, len) 根
+
+    无未来函数：只用到当前 bar 及之前的数据。
+    """
+    n = len(highs)
+    result: dict[str, Any] = {
+        "active_swing_dir": None,
+        "active_swing_high": None,
+        "active_swing_low": None,
+        "bars_since_active_swing_high": None,
+        "bars_since_active_swing_low": None,
+        "active_swing_range": None,
+        "price_position_in_active_swing_raw": None,
+        "price_position_in_active_swing_0_1": None,
+        "distance_to_active_swing_high_atr": None,
+        "distance_to_active_swing_low_atr": None,
+        "active_retracement_from_high_0_1": None,
+        "active_rebound_from_low_0_1": None,
+    }
+
+    # 找最后一个非 NaN 的 ph/pl anchor
+    ph_valid = np.where(np.isfinite(ph))[0]
+    pl_valid = np.where(np.isfinite(pl))[0]
+    last_ph_anchor_val = (
+        float(ph_anchor[ph_valid[-1]])
+        if len(ph_valid) > 0 and np.isfinite(ph_anchor[ph_valid[-1]])
+        else None
+    )
+    last_pl_anchor_val = (
+        float(pl_anchor[pl_valid[-1]])
+        if len(pl_valid) > 0 and np.isfinite(pl_anchor[pl_valid[-1]])
+        else None
+    )
+
+    active_high: float | None = None
+    active_low: float | None = None
+    active_high_bar_idx: int | None = None
+    active_low_bar_idx: int | None = None
+
+    # 判断 active leg
+    # active_low/active_high 使用 confirmed pivot 值（pl/ph），与用户规格
+    # "active_low=confirmed_low；active_high=confirmed_high" 一致。
+    # anchor_idx 用于定位 anchor bar，搜索 max/min high/low 从 anchor 到当前 bar。
+    if last_pl_anchor_val is not None and (
+        last_ph_anchor_val is None or last_pl_anchor_val > last_ph_anchor_val
+    ):
+        # up leg: confirmed low 晚于 confirmed high
+        result["active_swing_dir"] = 1
+        anchor_idx = int(last_pl_anchor_val)
+        active_low = float(pl[pl_valid[-1]])
+        active_low_bar_idx = anchor_idx
+        search_highs = highs[anchor_idx:]
+        if len(search_highs) > 0:
+            local_idx = int(np.argmax(search_highs))
+            active_high = float(search_highs[local_idx])
+            active_high_bar_idx = anchor_idx + local_idx
+    elif last_ph_anchor_val is not None:
+        # down leg: confirmed high 晚于 confirmed low
+        result["active_swing_dir"] = -1
+        anchor_idx = int(last_ph_anchor_val)
+        active_high = float(ph[ph_valid[-1]])
+        active_high_bar_idx = anchor_idx
+        search_lows = lows[anchor_idx:]
+        if len(search_lows) > 0:
+            local_idx = int(np.argmin(search_lows))
+            active_low = float(search_lows[local_idx])
+            active_low_bar_idx = anchor_idx + local_idx
+    else:
+        # fallback: 最近 min(fallback_n, n) 根
+        result["active_swing_dir"] = None
+        n_fb = min(fallback_n, n)
+        search_start = n - n_fb
+        search_highs = highs[search_start:]
+        search_lows = lows[search_start:]
+        if len(search_highs) > 0:
+            local_idx = int(np.argmax(search_highs))
+            active_high = float(search_highs[local_idx])
+            active_high_bar_idx = search_start + local_idx
+        if len(search_lows) > 0:
+            local_idx = int(np.argmin(search_lows))
+            active_low = float(search_lows[local_idx])
+            active_low_bar_idx = search_start + local_idx
+
+    if active_high is None or active_low is None:
+        return result
+
+    result["active_swing_high"] = active_high
+    result["active_swing_low"] = active_low
+    if active_high_bar_idx is not None:
+        result["bars_since_active_swing_high"] = int(n - 1 - active_high_bar_idx)
+    if active_low_bar_idx is not None:
+        result["bars_since_active_swing_low"] = int(n - 1 - active_low_bar_idx)
+
+    active_range = active_high - active_low
+    result["active_swing_range"] = float(active_range)
+
+    if active_range > 0:
+        raw = (last_close - active_low) / active_range
+        result["price_position_in_active_swing_raw"] = float(raw)
+        result["price_position_in_active_swing_0_1"] = float(max(0.0, min(1.0, raw)))
+        result["active_retracement_from_high_0_1"] = float(
+            (active_high - last_close) / active_range
+        )
+        result["active_rebound_from_low_0_1"] = float(
+            (last_close - active_low) / active_range
+        )
+
+    if last_atr > 0:
+        result["distance_to_active_swing_high_atr"] = float(
+            (last_close - active_high) / last_atr
+        )
+        result["distance_to_active_swing_low_atr"] = float(
+            (last_close - active_low) / last_atr
+        )
+
+    return result
+
+
 def _compute_swing_factors(
     bars: pd.DataFrame, atr: np.ndarray | None = None
 ) -> dict[str, Any]:
@@ -269,6 +430,24 @@ def _compute_swing_factors(
         "distance_to_swing_low_atr": None,
         "retracement_from_high_0_1": None,
         "rebound_from_low_0_1": None,
+        # V1.9 confirmed alias（与 active 对齐的别名，便于前端区分 confirmed vs active）
+        "bars_since_confirmed_swing_high": None,
+        "bars_since_confirmed_swing_low": None,
+        "price_position_in_confirmed_swing_raw": None,
+        "confirmed_swing_breakout_state": None,
+        # V1.9 active swing 字段（当前正在发展的结构区间，跟随最新价格）
+        "active_swing_dir": None,
+        "active_swing_high": None,
+        "active_swing_low": None,
+        "bars_since_active_swing_high": None,
+        "bars_since_active_swing_low": None,
+        "active_swing_range": None,
+        "price_position_in_active_swing_raw": None,
+        "price_position_in_active_swing_0_1": None,
+        "distance_to_active_swing_high_atr": None,
+        "distance_to_active_swing_low_atr": None,
+        "active_retracement_from_high_0_1": None,
+        "active_rebound_from_low_0_1": None,
     }
     if bars is None or len(bars) < 2 * _SWING_LENGTH + 1:
         return result
@@ -290,6 +469,8 @@ def _compute_swing_factors(
         ) else last_ph_idx
         result["confirmed_swing_high"] = float(ph[last_ph_idx])
         result["bars_since_swing_high"] = int(len(highs) - 1 - last_ph_anchor)
+        # V1.9 confirmed alias（与 active 对齐）
+        result["bars_since_confirmed_swing_high"] = int(len(highs) - 1 - last_ph_anchor)
         if last_close is not None and np.isfinite(last_close) and ph[last_ph_idx] > 0:
             result["swing_high_to_close_pct"] = float(
                 (last_close - ph[last_ph_idx]) / ph[last_ph_idx]
@@ -309,6 +490,8 @@ def _compute_swing_factors(
         ) else last_pl_idx
         result["confirmed_swing_low"] = float(pl[last_pl_idx])
         result["bars_since_swing_low"] = int(len(lows) - 1 - last_pl_anchor)
+        # V1.9 confirmed alias（与 active 对齐）
+        result["bars_since_confirmed_swing_low"] = int(len(lows) - 1 - last_pl_anchor)
         if last_close is not None and np.isfinite(last_close) and pl[last_pl_idx] > 0:
             result["swing_low_to_close_pct"] = float(
                 (last_close - pl[last_pl_idx]) / pl[last_pl_idx]
@@ -326,15 +509,37 @@ def _compute_swing_factors(
         swing_range = sh - sl
         result["swing_range"] = float(swing_range)
         if last_close is not None and swing_range > 0:
-            result["price_position_in_swing_0_1"] = float(
-                (last_close - sl) / swing_range
-            )
+            raw_position = (last_close - sl) / swing_range
+            result["price_position_in_swing_0_1"] = float(raw_position)
+            # V1.9 confirmed raw alias（可能 <0 或 >1，反映突破 confirmed pivot）
+            result["price_position_in_confirmed_swing_raw"] = float(raw_position)
             result["retracement_from_high_0_1"] = float(
                 (sh - last_close) / swing_range
             )
             result["rebound_from_low_0_1"] = float(
                 (last_close - sl) / swing_range
             )
+        # V1.9 confirmed breakout state（close 相对 confirmed pivot 的突破状态）
+        result["confirmed_swing_breakout_state"] = _classify_confirmed_swing_breakout_state(
+            last_close, sh, sl,
+        )
+
+    # V1.9 active swing 因子（当前正在发展的结构区间，跟随最新价格）
+    # active high/low 从 anchor 到当前 bar 的 max/min，比 confirmed pivot 更贴近图上 K 线
+    if last_close is not None:
+        active_factors = _compute_active_swing_factors(
+            highs=highs,
+            lows=lows,
+            closes=closes,
+            ph=ph,
+            pl=pl,
+            ph_anchor=ph_anchor,
+            pl_anchor=pl_anchor,
+            last_close=float(last_close),
+            last_atr=last_atr if last_atr is not None else 0.0,
+        )
+        result.update(active_factors)
+
     return result
 
 
@@ -435,7 +640,8 @@ def _compute_dsa_segment_factors(
     if cur_start_bar_idx is not None:
         result["segment_start_bar_index"] = int(cur_start_bar_idx)
         cur_age_bars = last_bar_index - cur_start_bar_idx + 1
-        result["age_bars"] = int(last_bar_index - 1 - cur_start_bar_idx)  # V1.7 保留旧公式
+        # V1.9 统一 age_bars = current_dsa_segment_age_bars（含起始 bar，+1 口径）
+        result["age_bars"] = int(cur_age_bars)
         result["current_dsa_segment_age_bars"] = int(cur_age_bars)
 
         # 段内 close/volume/atr

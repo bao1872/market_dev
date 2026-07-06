@@ -1086,6 +1086,11 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 .tv-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 340px; min-height: v.$tv-workspace-min-height; border: 1px solid v.$color-border; border-top: 0; background: #10141c; }
 .tv-workspace.capture-mode { grid-template-columns: minmax(0, 1fr); } // 截图模式：隐藏右侧面板，恢复单列
 .tv-workspace.hide-structural-state { grid-template-columns: minmax(0, 1fr); } // 结构状态隐藏：恢复单列
+// [V1.9] 防御性 CSS：capture/hide-structural-state 模式下确保侧栏不占位、图表列占满宽度
+.tv-workspace.capture-mode .tv-side-column,
+.tv-workspace.hide-structural-state .tv-side-column { display: none; }
+.tv-workspace.capture-mode .tv-chart-column,
+.tv-workspace.hide-structural-state .tv-chart-column { width: 100%; min-width: 0; }
 
 // 结构状态开关 toolbar：放在图表上方，按钮右对齐，默认可见
 // [结构状态开关] - 描述: 替代旧浮动按钮，位置明显，文案动态切换（显示/隐藏结构状态）

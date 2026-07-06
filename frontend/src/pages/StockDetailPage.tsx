@@ -497,8 +497,6 @@ export default function StockDetailPage() {
     <div
       className="tv-content"
       ref={containerRef}
-      data-testid="stock-detail-capture"
-      data-render-ready={isRenderReady ? 'true' : 'false'}
     >
       {/* ===== 股票信息栏 ===== */}
       <div className="tv-symbol-bar">
@@ -542,28 +540,28 @@ export default function StockDetailPage() {
             <b>{amountValue !== null ? formatAmount(amountValue) : '--'}</b>
           </div>
         </div>
-        {/* 操作：加入/移出自选、切换、全屏 */}
-        <div className="actions">
-          <button
-            className={clsx('btn', inWatchlist ? 'danger' : 'primary')}
-            onClick={handleToggleWatchlist}
-            disabled={!instrumentId || addWatchlist.isPending || removeWatchlist.isPending}
-          >
-            {inWatchlist ? '移出自选' : '加入自选'}
-          </button>
-          <button className="btn small" onClick={() => navigateToStock(-1)} disabled={!canNavigate}>
-            上一只
-          </button>
-          <button className="btn small" onClick={() => navigateToStock(1)} disabled={!canNavigate}>
-            下一只
-          </button>
-          <button className="btn small" onClick={handleFullscreen}>
-            {isFullscreen ? '退出全屏' : '全屏查看'}
-          </button>
-          <button className="btn small" onClick={() => setMemoOpen(true)}>
-            备忘录
-          </button>
-          {!isCaptureMode && (
+        {/* 操作：加入/移出自选、切换、全屏（截图模式隐藏全部按钮） */}
+        {!isCaptureMode && (
+          <div className="actions">
+            <button
+              className={clsx('btn', inWatchlist ? 'danger' : 'primary')}
+              onClick={handleToggleWatchlist}
+              disabled={!instrumentId || addWatchlist.isPending || removeWatchlist.isPending}
+            >
+              {inWatchlist ? '移出自选' : '加入自选'}
+            </button>
+            <button className="btn small" onClick={() => navigateToStock(-1)} disabled={!canNavigate}>
+              上一只
+            </button>
+            <button className="btn small" onClick={() => navigateToStock(1)} disabled={!canNavigate}>
+              下一只
+            </button>
+            <button className="btn small" onClick={handleFullscreen}>
+              {isFullscreen ? '退出全屏' : '全屏查看'}
+            </button>
+            <button className="btn small" onClick={() => setMemoOpen(true)}>
+              备忘录
+            </button>
             <button
               className="btn small"
               onClick={() => {
@@ -576,8 +574,8 @@ export default function StockDetailPage() {
             >
               发送到飞书
             </button>
-          )}
-        </div>
+          </div>
+        )}
       </div>
 
       {/* 备忘录模态框 */}
@@ -740,7 +738,11 @@ export default function StockDetailPage() {
       {/* ===== 工作区：双列布局（图表 + 结构状态因子面板） ===== */}
       <div className={clsx('tv-workspace', { 'capture-mode': isCaptureMode, 'hide-structural-state': !shouldShowPanel })}>
         {/* 图表区（同时承载 toggle 按钮的定位上下文） */}
-        <section className="tv-chart-column">
+        <section
+          className="tv-chart-column"
+          data-testid="stock-detail-capture"
+          data-render-ready={isRenderReady ? 'true' : 'false'}
+        >
           {/* 结构状态开关 toolbar：放在图表上方，按钮右对齐，默认可见 */}
           {!hideStructuralStateParam && instrumentId && (
             <div className="structural-state-toolbar">

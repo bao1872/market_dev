@@ -235,3 +235,43 @@ test('TemporalFeaturesCard is rendered inside StockStructuralStatePanel (uses us
   assert.ok(/m15_response/.test(panelSrc), 'TemporalFeaturesCard 必须含 m15_response 分组')
   assert.ok(/derived_relation/.test(panelSrc), 'TemporalFeaturesCard 必须含 derived_relation 分组')
 })
+
+// ===== 13. capture=feishu 隐藏结构面板（hideStructuralStateParam 含 isCaptureMode）=====
+test('test_capture_mode_hides_panel', () => {
+  const src = readSource()
+
+  // hideStructuralStateParam 必须包含 isCaptureMode 引用
+  // capture=feishu 时 isCaptureMode=true → hideStructuralStateParam=true → 面板强制隐藏
+  assert.ok(
+    /hideStructuralStateParam\s*=\s*[\s\S]*?isCaptureMode/.test(src),
+    'hideStructuralStateParam 必须包含 isCaptureMode（capture=feishu 触发结构面板隐藏）',
+  )
+
+  // shouldShowPanel 必须基于 !hideStructuralStateParam
+  // 当 isCaptureMode=true 时 hideStructuralStateParam=true，shouldShowPanel=false（面板不渲染）
+  assert.ok(
+    /shouldShowPanel\s*=\s*showStructuralState\s*&&\s*!hideStructuralStateParam/.test(src),
+    'shouldShowPanel 必须基于 !hideStructuralStateParam（capture=feishu 时面板强制隐藏）',
+  )
+})
+
+// ===== 14. capture=feishu 无侧列（testid 落在 tv-chart-column，不在 tv-content）=====
+test('test_capture_mode_no_side_column', () => {
+  const src = readSource()
+
+  // 主渲染路径中 <section className="tv-chart-column" ... data-testid="stock-detail-capture" ...>
+  // 截图模式 testid 落在图表列（不在 tv-content），capture worker 通过该选择器截图
+  // 注意：加载状态的 <section className="tv-chart-column"> 无 testid，需匹配带 testid 的 section
+  const chartColWithTestid =
+    /<section\s+className="tv-chart-column"[\s\S]{0,200}?data-testid="stock-detail-capture"/.test(src)
+  assert.ok(
+    chartColWithTestid,
+    '主渲染路径必须存在 <section className="tv-chart-column" ... data-testid="stock-detail-capture">（testid 落在图表列，不在 tv-content）',
+  )
+
+  // 源码必须包含 data-testid="stock-detail-capture"（capture worker 截图选择器）
+  assert.ok(
+    src.includes('data-testid="stock-detail-capture"'),
+    'StockDetailPage 必须设置 data-testid="stock-detail-capture"（capture worker 通过该选择器截图）',
+  )
+})

@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import AsyncSessionLocal
 from app.models.scheduler_job_run import SchedulerJobRun
+from app.models.strategy_run import StrategyRun
 from app.services.scheduler_job_run_recovery_service import (
     recover_stale_scheduler_job_runs,
 )
@@ -324,6 +325,79 @@ async def run_delivery_worker() -> None:
         await asyncio.sleep(WORKER_INTERVAL)
 
 
+async def _maybe_trigger_after_close_orchestrator(
+    db: AsyncSession,
+    run: StrategyRun,
+) -> None:
+    """[AfterCloseAutoTrigger] - DSA scheduled 完成后自动触发盘后编排。
+
+    仅当 strategy_key == 'dsa_selector' 时触发。
+    create_after_close_run 是幂等的：同 trade_date 已有 queued/running 任务时返回已有任务。
+
+    异常处理：触发失败仅记录日志，不传播异常，避免影响 worker 主流程
+    （execute_run 已完成，auto-trigger 失败不应导致 worker 崩溃）。
+
+    Args:
+        db: 异步数据库会话（execute_run 已 commit，session 干净）
+        run: 已完成的 StrategyRun
+    """
+    from sqlalchemy import select
+
+    from app.constants.strategy_keys import DSA_SELECTOR
+    from app.models.strategy import StrategyDefinition, StrategyVersion
+    from app.services.after_close_orchestrator import create_after_close_run
+
+    # 查询 strategy_key（通过 strategy_version_id 关联）
+    stmt = (
+        select(StrategyDefinition.strategy_key)
+        .select_from(StrategyRun)
+        .join(
+            StrategyVersion,
+            StrategyRun.strategy_version_id == StrategyVersion.id,
+        )
+        .join(
+            StrategyDefinition,
+            StrategyVersion.strategy_definition_id == StrategyDefinition.id,
+        )
+        .where(StrategyRun.id == run.id)
+    )
+    result = await db.execute(stmt)
+    strategy_key = result.scalar_one_or_none()
+
+    if strategy_key != DSA_SELECTOR:
+        return
+
+    trade_date = run.trade_date
+    if trade_date is None:
+        logger.warning(
+            "[AfterCloseAutoTrigger] DSA run 缺少 trade_date，跳过: run_id=%s",
+            run.id,
+        )
+        return
+
+    try:
+        job_run, is_new = await create_after_close_run(db=db, trade_date=trade_date)
+        if is_new:
+            logger.info(
+                "[AfterCloseAutoTrigger] DSA 完成后自动触发盘后编排: "
+                "dsa_run_id=%s, trade_date=%s, after_close_run_id=%s",
+                run.id, trade_date, job_run.id,
+            )
+        else:
+            logger.info(
+                "[AfterCloseAutoTrigger] 盘后编排任务已存在（幂等）: "
+                "dsa_run_id=%s, trade_date=%s, after_close_run_id=%s, status=%s",
+                run.id, trade_date, job_run.id, job_run.status,
+            )
+    except Exception as exc:
+        # 触发失败不传播异常：execute_run 已完成，auto-trigger 失败不应影响 worker
+        logger.exception(
+            "[AfterCloseAutoTrigger] 触发盘后编排失败（不影响 worker 主流程）: "
+            "dsa_run_id=%s, trade_date=%s, error=%s",
+            run.id, trade_date, exc,
+        )
+
+
 async def run_strategy_batch_worker() -> None:
     """策略批量计算 Worker：轮询 queued 状态的运行并执行。
 
@@ -379,6 +453,10 @@ async def run_strategy_batch_worker() -> None:
                     "策略批量计算完成: run_id=%s, status=%s",
                     run.id, run.status,
                 )
+                # [AfterCloseAutoTrigger] - DSA scheduled 完成后自动触发盘后编排
+                # 仅对 scheduled + completed 的 run 触发，manual run 或失败 run 不触发
+                if run.status == "completed" and run.run_type == "scheduled":
+                    await _maybe_trigger_after_close_orchestrator(db, run)
         except Exception as exc:
             logger.exception("Strategy Batch Worker 异常: %s", exc)
             # 异常时回滚，等待下次轮询重试

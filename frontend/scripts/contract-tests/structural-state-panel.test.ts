@@ -157,10 +157,14 @@ test('Frontend does not recompute factors', () => {
 })
 
 // ===== 9. V1.8 核心字段存在性检查 =====
+// [V1.9] - Swing 摘要卡禁用 V1.8 confirmed 字段（swing_range、price_position_in_swing_0_1 等），
+// 改为 Active 字段。Confirmed pivot 字段在"结构因子明细"折叠卡片 JSON 中查看。
+// 测试 12/14 已单独验证 V1.9 Active 字段在 CARDS 中。
 test('Panel includes V1.8 core fields in CARDS', () => {
   const src = readSource(PANEL_PATH)
 
   // V1.8 新增字段必须出现在 CARDS 配置中（key 字符串）
+  // V1.9: Swing confirmed 字段已移到"结构因子明细"折叠区，不在 CARDS 中
   const v18Keys = [
     // DSA segment V1.8
     'dsa_value',
@@ -174,13 +178,6 @@ test('Panel includes V1.8 core fields in CARDS', () => {
     'segment_return_abs_ratio',
     'current_vs_prev_volume_ratio',
     'return_per_volume_ratio',
-    // Swing V1.8
-    'swing_range',
-    'price_position_in_swing_0_1',
-    'distance_to_swing_high_atr',
-    'distance_to_swing_low_atr',
-    'retracement_from_high_0_1',
-    'rebound_from_low_0_1',
     // Cost position V1.8
     'price_vs_poc_atr',
     'value_area_position_0_1',
@@ -292,5 +289,87 @@ test('Cost/Node card uses unambiguous position labels (V1.8 semantic fix)', () =
   assert.ok(
     costCardSrc.includes("'VAL'") && costCardSrc.includes("'VAH'"),
     "成本/节点卡片必须显示 VAL / VAH 原值",
+  )
+})
+
+// ===== 12. Swing 摘要卡使用 active 标签（V1.9 active swing 语义）=====
+test('test_swing_summary_uses_active_labels', () => {
+  const src = readSource(PANEL_PATH)
+
+  // 摘要卡必须使用 active 标签（当前正在发展的结构区间，跟随最新价格）
+  assert.ok(
+    src.includes('active_swing_high') || src.includes('Active high'),
+    'Swing 摘要卡必须使用 active_swing_high 或 Active high 标签（V1.9 active swing 语义）',
+  )
+  assert.ok(
+    src.includes('active_swing_low') || src.includes('Active low'),
+    'Swing 摘要卡必须使用 active_swing_low 或 Active low 标签（V1.9 active swing 语义）',
+  )
+  assert.ok(
+    src.includes('price_position_in_active_swing_0_1') || src.includes('Active 位置'),
+    'Swing 摘要卡必须使用 price_position_in_active_swing_0_1 或 Active 位置 标签（V1.9 active swing 位置）',
+  )
+
+  // 禁止模糊标签（与 confirmed pivot 混淆）
+  assert.ok(
+    !src.includes('最近 swing high'),
+    'Swing 摘要卡不得使用模糊标签「最近 swing high」（应使用 Active high）',
+  )
+  assert.ok(
+    !src.includes('最近 swing low'),
+    'Swing 摘要卡不得使用模糊标签「最近 swing low」（应使用 Active low）',
+  )
+})
+
+// ===== 13. confirmed pivot 只在明细（摘要卡不作为显示标签）=====
+test('test_confirmed_pivot_only_in_detail', () => {
+  const src = readSource(PANEL_PATH)
+
+  // 摘要卡片（CARDS 配置）不得包含 confirmed_swing_high 作为显示标签/键
+  // confirmed pivot 字段只在「结构因子明细」折叠卡片的 JSON 中可见
+  assert.ok(
+    !src.includes("'confirmed_swing_high'") && !src.includes('"confirmed_swing_high"'),
+    'Swing 摘要卡不得包含 confirmed_swing_high 作为显示标签（confirmed pivot 只在 JSON 明细中）',
+  )
+
+  // 源码必须包含 confirmed 字样（在明细注释/标签中，confirmed pivot 在明细部分可见）
+  assert.ok(
+    /confirmed/i.test(src),
+    '源码必须包含 confirmed 字样（confirmed pivot 在明细部分可见，不在摘要卡）',
+  )
+})
+
+// ===== 14. 时序卡使用 active 标签（V1.9 active swing 时序位置）=====
+test('test_temporal_rows_use_active_labels', () => {
+  const src = readSource(PANEL_PATH)
+
+  // 时序卡必须使用 active swing 标签
+  assert.ok(
+    src.includes('daily_price_position_in_active_swing_0_1') || src.includes('daily_active_swing'),
+    '时序卡必须使用 daily_price_position_in_active_swing_0_1 或 daily_active_swing 标签（日线上下文 active swing）',
+  )
+  assert.ok(
+    src.includes('m15_price_position_in_active_swing_0_1') || src.includes('m15_active_swing'),
+    '时序卡必须使用 m15_price_position_in_active_swing_0_1 或 m15_active_swing 标签（15 分钟响应 active swing）',
+  )
+
+  // 提取时序行配置区间（TEMPORAL_DAILY_ROWS 到 TEMPORAL_DERIVED_ROWS）
+  const temporalStart = src.indexOf('TEMPORAL_DAILY_ROWS')
+  const temporalEnd = src.indexOf('TEMPORAL_DERIVED_ROWS')
+  assert.ok(
+    temporalStart > 0 && temporalEnd > temporalStart,
+    '必须存在 TEMPORAL_DAILY_ROWS 到 TEMPORAL_DERIVED_ROWS 时序行配置区间',
+  )
+  const temporalSrc = src.slice(temporalStart, temporalEnd)
+
+  // 时序标签必须包含 active 或 confirmed（使用明确的 active swing 标签）
+  assert.ok(
+    /active|confirmed/i.test(temporalSrc),
+    '时序行标签必须包含 active 或 confirmed（使用明确的 active swing / confirmed anchor 标签）',
+  )
+  // 时序行不得使用模糊的「Swing 位置」（应使用 Active 位置）
+  assert.ok(
+    !/Swing 位置/.test(temporalSrc),
+    '时序行标签不得使用模糊的「Swing 位置」（应使用 Active 位置[0,1]）',
   )
 })
