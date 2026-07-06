@@ -180,25 +180,30 @@ node --experimental-strip-types --test src/components/__tests__/dsaSourceAlignme
 
 ## 3.5 Indicator overlay alignment 回归（blocking）
 
-任何修改 `backend/app/services/indicator_cache.py`（`ALGORITHM_VERSION`）、`backend/app/services/indicator_service.py::_adapt_watchlist_bb`、`frontend/src/utils/dsaOverlayPolicy.ts`、`frontend/src/components/StrategyChart.tsx`（DSA disabled / BB overlay 对齐 / debug 工具）必须跑 indicator overlay alignment 回归测试。
+任何修改 `backend/app/services/indicator_cache.py`（`ALGORITHM_VERSION`）、`backend/app/services/indicator_service.py::_adapt_watchlist_bb`、`frontend/src/utils/dsaOverlayPolicy.ts`、`frontend/src/components/StrategyChart.tsx`（DSA toggle / BB overlay 对齐 / debug 工具）必须跑 indicator overlay alignment 回归测试。
 
 后端 cache schema 版本回归：
-- `indicator_cache.ALGORITHM_VERSION == "v4"`（PR #31 bump）；
-- 旧 v3 cache key 与新 `build_cache_key` 生成的 key 不相等（旧缓存自然失效）；
-- 修改 indicator 计算逻辑、`source_bar_times` 格式、BB/SQZMOM/MACD 计算路径必须 bump `ALGORITHM_VERSION`。
+- `indicator_cache.ALGORITHM_VERSION == "v5"`（PR #32 bump：DSA 全周期 + 1w/1mo BB 改变计算路径）；
+- 旧 v4 cache key 与新 `build_cache_key` 生成的 key 不相等（旧缓存自然失效，避免旧 v4 缓存返回 1d-only DSA + 1w/1mo 无 BB）；
+- 修改 indicator 计算逻辑、`source_bar_times` 格式、BB/SQZMOM/MACD 计算路径、DSA 全周期支持、1w/1mo BB 计算必须 bump `ALGORITHM_VERSION`。
+
+后端 DSA 全周期计算回归：
+- `MarketDataContext.bars_daily` 在所有周期（1d/15m/1h/1w/1mo）都使用 `macd_bars`（当前 timeframe bars），DSA 不再仅由日线驱动；
+- `daily_time_list` 使用 `macd_bars.index`（与策略输出长度一致），使 15m/1h/1w/1mo DSA 的 `time` 数组正确反映当前周期；
+- 15m 下 DSA `time[0]` 含 `T` 分隔符（含时间部分，非日线 YYYY-MM-DD）。
 
 后端 BB overlay 计算回归：
-- `_adapt_watchlist_bb` 在 15m 用 `macd_bars` 调用 `compute_bollinger(macd_bars, length=20, mult=2.0)` 计算 BB，不再用日线阶梯线映射；
-- 15m BB 长度与 `macd_bars` 长度对齐（非日线长度）；
-- 15m BB 与 `compute_bollinger(macd_bars)` 计算结果一致（数值近似相等）；
-- 1h 同理；
-- `len(macd_bars) < 20` 时 BB 字段填 `None`，`time` 数组仍与 `macd_bars` 对齐。
+- `_adapt_watchlist_bb` 在 1d/15m/1h/1w/1mo 全部用 `macd_bars` 调用 `compute_bollinger(macd_bars, length=20, mult=2.0)` 计算 BB（不再移除 1w/1mo BB 字段）；
+- 1w/1mo BB 字段 `bb_upper`/`bb_mid`/`bb_lower`/`bb_pos`/`bb_width` 与 `compute_bollinger(macd_bars)` 计算结果一致；
+- BB `time` 数组长度与 `macd_bars` 对齐（非日线长度）；
+- `len(macd_bars) < 20` 时 BB 字段填 `None`，`time` 数组仍与 `macd_bars` 对齐；
+- `chart_layers` 循环不得 `continue` 跳过 1w/1mo BB 图层。
 
 前端 DSA overlay policy 回归（`src/components/__tests__/dsaSourceAlignment.test.ts`）：
-- `DSA_DISABLED_HINT` 包含 "DSA.*日线结构锚" 与 "Swing|BB|SQZMOM"；
-- `shouldCheckDsaMismatch('15m')` 返回 `false`（不校验 mismatch）；
-- `shouldCheckDsaMismatch('1h')` 返回 `false`；
-- `shouldCheckDsaMismatch('1d')` 返回 `true`（仍校验）。
+- `shouldAllowDsaOverlay('1d'/'15m'/'1h'/'1w'/'1mo')` 全部返回 `true`（DSA 全周期支持，不再 1d-only）；
+- `shouldCheckDsaMismatch('1d'/'15m'/'1h'/'1w'/'1mo')` 全部返回 `true`（全周期渲染，全部需校验 source 对齐）；
+- `DSA_TITLE_HINT('1d')` 含 "日线结构锚"；
+- `DSA_TITLE_HINT('15m'/'1h'/'1w'/'1mo')` 含 "当前周期验证图层" 且不含 "日线结构锚"。
 
 回归命令：
 

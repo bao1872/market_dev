@@ -99,12 +99,15 @@ Node Cluster 算法
   - 后端 `compute_source_bar_times` / `compute_source_bar_hash` 必须按当前 `timeframe` 使用对应 macd_bars，格式随 timeframe（1d=`YYYY-MM-DD`，15m/1h=`YYYY-MM-DDTHH:MM:SS`）；禁止 15m/1h source_bar_times 仍返回日线日期格式；
   - 15m/1h `bars.trade_time` 必须返回 aware ISO（`+08:00` 后缀），避免前端 `new Date("2026-07-06T15:00:00")` 在非亚洲时区浏览器中当作本地时间导致时区误判（如显示 `2026-07-07 03:00`）。
   - 15m/1h 时间轴刻度 `timeTicks` 使用 `Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai' })` 格式化，A 股交易时间正确显示，不应出现 `03:00` 这类非交易时段错误时间。
-- **DSA overlay 周期策略（1d-only by design，PR #31）**：
-  - DSA（Pine 标签 + VWAP）是日线级别结构锚，**仅 1d 周期渲染**；15m/1h 下 DSA overlay 按钮 `disabled=true`，提示文案来自 `frontend/src/utils/dsaOverlayPolicy.ts::DSA_DISABLED_HINT`（"DSA VWAP 当前仅支持日线结构锚；15m/1h 请使用 Swing、BB、SQZMOM。"）；
-  - DSA source mismatch 校验由 `shouldCheckDsaMismatch(timeframe)` 控制：仅 1d 返回 `true`，15m/1h 返回 `false`，避免 15m/1h 误报 "DSA 数据源不一致"；
-  - 右侧 `StockStructuralStatePanel` 仍可显示 daily DSA 背景和 m15 response（结构状态因子不受图层禁用影响）；
-- **BB/MACD/SQZMOM overlay 跟随当前周期（PR #31）**：
-  - 后端 `indicator_service._adapt_watchlist_bb` 在 15m/1h 必须用 `macd_bars`（当前 timeframe bars）调用 `compute_bollinger(macd_bars, length=20, mult=2.0)` 重新计算 BB，禁止用日线阶梯线伪装成 15m/1h BB；
+- **DSA overlay 周期策略（全周期支持，PR #32）**：
+  - DSA（Pine 标签 + VWAP）支持全周期渲染（1d/15m/1h/1w/1mo）；1d 是主结构锚，非 1d 是验证图层；
+  - DSA overlay 按钮在所有周期可点击（不 disabled），`title` 由 `DSA_TITLE_HINT(timeframe)` 提供：1d 显示"DSA VWAP 日线结构锚。"，非 1d 显示"DSA VWAP 当前周期验证图层：用于核查该周期结构，不作为主趋势锚。"；
+  - DSA source mismatch 校验由 `shouldCheckDsaMismatch(timeframe)` 控制：全周期返回 `true`（DSA 全周期渲染，全部需校验 source 对齐）；
+  - 仍保留 source mismatch 保护：匹配率 < 50% 时暂停渲染并提示，不允许无校验强画；
+  - 右侧 `StockStructuralStatePanel` 仍可显示 daily DSA 背景和 m15 response（结构状态因子不受图层渲染影响）；
+- **BB/MACD/SQZMOM overlay 跟随当前周期（PR #31/#32）**：
+  - 后端 `indicator_service._adapt_watchlist_bb` 在 15m/1h/1w/1mo 必须用 `macd_bars`（当前 timeframe bars）调用 `compute_bollinger(macd_bars, length=20, mult=2.0)` 重新计算 BB，禁止用日线阶梯线伪装成当前周期 BB；
+  - 1w/1mo 不再移除 BB 字段（PR #32 修复：之前直接 `pop` BB 字段导致前端无 BB overlay）；
   - BB overlay 时间轴必须用 `buildDisplayIndexMap` 按 canonical time 对齐，禁止尾部截取（tail slice）；
   - MACD / SQZMOM 同理：必须用 `macd_bars`（当前 timeframe）计算，不允许串日线；
 - **?debugIndicatorAlignment=1 诊断工具（PR #31）**：

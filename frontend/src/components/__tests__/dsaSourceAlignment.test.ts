@@ -211,45 +211,54 @@ test('timeTicks: 1d 仅显示月-日', () => {
   assert.match(ticks[1].label, /07-06/, `1d 应显示 07-06，实际: ${ticks[1].label}`)
 })
 
-// ===== 4. DSA Overlay Policy：周期策略与禁用提示文案 =====
+// ===== 4. DSA Overlay Policy：全周期支持 + title 按周期区分 =====
 
-import { DSA_DISABLED_HINT, shouldCheckDsaMismatch } from '../../utils/dsaOverlayPolicy.ts'
+import {
+  DSA_TITLE_HINT,
+  shouldAllowDsaOverlay,
+  shouldCheckDsaMismatch,
+} from '../../utils/dsaOverlayPolicy.ts'
 
-test('DSA_DISABLED_HINT: 包含完整提示文案', () => {
-  // 用户要求文案："DSA VWAP 当前仅支持日线结构锚；15m/1h 请使用 Swing、BB、SQZMOM。"
+test('shouldAllowDsaOverlay: 1d/15m/1h/1w/1mo 全部允许 DSA overlay', () => {
+  // [PR #32] - DSA VWAP 支持全周期，不再 1d-only
+  assert.equal(shouldAllowDsaOverlay('1d'), true, '1d 应允许 DSA overlay')
+  assert.equal(shouldAllowDsaOverlay('15m'), true, '15m 应允许 DSA overlay')
+  assert.equal(shouldAllowDsaOverlay('1h'), true, '1h 应允许 DSA overlay')
+  assert.equal(shouldAllowDsaOverlay('1w'), true, '1w 应允许 DSA overlay')
+  assert.equal(shouldAllowDsaOverlay('1mo'), true, '1mo 应允许 DSA overlay')
+})
+
+test('shouldCheckDsaMismatch: 1d/15m/1h/1w/1mo 全部校验 mismatch', () => {
+  // [PR #32] - DSA 全周期渲染，全部需要校验 source mismatch
+  assert.equal(shouldCheckDsaMismatch('1d'), true, '1d 应校验 DSA mismatch')
+  assert.equal(shouldCheckDsaMismatch('15m'), true, '15m 应校验 DSA mismatch')
+  assert.equal(shouldCheckDsaMismatch('1h'), true, '1h 应校验 DSA mismatch')
+  assert.equal(shouldCheckDsaMismatch('1w'), true, '1w 应校验 DSA mismatch')
+  assert.equal(shouldCheckDsaMismatch('1mo'), true, '1mo 应校验 DSA mismatch')
+})
+
+test('DSA_TITLE_HINT: 1d 含"日线结构锚"', () => {
+  const hint = DSA_TITLE_HINT('1d')
   assert.match(
-    DSA_DISABLED_HINT,
-    /DSA.*日线结构锚/,
-    `提示文案应包含"DSA 日线结构锚"，实际: ${DSA_DISABLED_HINT}`,
-  )
-  assert.match(
-    DSA_DISABLED_HINT,
-    /Swing|BB|SQZMOM/,
-    `提示文案应包含替代图层建议，实际: ${DSA_DISABLED_HINT}`,
+    hint,
+    /日线结构锚/,
+    `1d DSA title 应含"日线结构锚"，实际: ${hint}`,
   )
 })
 
-test('shouldCheckDsaMismatch: 15m 不校验 mismatch（DSA 不在 15m 渲染）', () => {
-  // 修复根因：15m 下 DSA 被禁用，但仍校验 mismatch 会误报"DSA 数据源不一致"
-  assert.equal(
-    shouldCheckDsaMismatch('15m'),
-    false,
-    '15m 不应校验 DSA mismatch（DSA 不在 15m 渲染）',
-  )
-})
-
-test('shouldCheckDsaMismatch: 1h 不校验 mismatch', () => {
-  assert.equal(
-    shouldCheckDsaMismatch('1h'),
-    false,
-    '1h 不应校验 DSA mismatch',
-  )
-})
-
-test('shouldCheckDsaMismatch: 1d 仍校验 mismatch（DSA 在 1d 渲染）', () => {
-  assert.equal(
-    shouldCheckDsaMismatch('1d'),
-    true,
-    '1d 应校验 DSA mismatch（DSA 在 1d 渲染）',
-  )
+test('DSA_TITLE_HINT: 非 1d 含"当前周期验证图层"', () => {
+  // [PR #32] - 非 1d 周期 DSA 是验证图层，不作为主趋势锚
+  for (const tf of ['15m', '1h', '1w', '1mo']) {
+    const hint = DSA_TITLE_HINT(tf)
+    assert.match(
+      hint,
+      /当前周期验证图层/,
+      `${tf} DSA title 应含"当前周期验证图层"，实际: ${hint}`,
+    )
+    assert.doesNotMatch(
+      hint,
+      /日线结构锚/,
+      `${tf} DSA title 不应含"日线结构锚"，实际: ${hint}`,
+    )
+  }
 })

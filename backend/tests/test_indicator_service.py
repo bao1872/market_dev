@@ -399,6 +399,120 @@ async def test_strategy_time_not_overridden(
     )
 
 
+# ===== PR #32: DSA 全周期 + BB 全周期 =====
+
+
+async def test_indicator_time_injected_from_macd_bars_in_15m(
+    mock_session: AsyncMock,
+    mock_bars: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[PR #32] - 15m 下策略未返回 time 时，注入的 time 应来自 macd_bars（当前 tf），非 daily_bars。
+
+    修复根因：之前 bars_daily=daily_bars 且 daily_time_list 用 daily_bars.index，
+    导致 DSA 在 15m 下收到日线 bars 且 time 是日线格式，与 15m K线不对齐。
+    新行为：bars_daily=macd_bars，daily_time_list 用 macd_bars.index，
+    DSA 在 15m 下用 15m bars 计算且 time 与 15m K线对齐。
+    """
+    # Mock StrategyLoader._registry 包含一个不返回 time 的 mock 策略
+    monkeypatch.setattr(
+        indicator_service.StrategyLoader, "_registry", {"mock_strategy": None}
+    )
+
+    mock_version = MagicMock()
+    mock_version.manifest = {"chart_layers": [], "display_name": "Mock"}
+
+    mock_batch_service = MagicMock()
+    mock_batch_service._get_latest_released_version = AsyncMock(
+        return_value=(None, mock_version)
+    )
+    monkeypatch.setattr(
+        indicator_service, "StrategyBatchService", lambda: mock_batch_service
+    )
+
+    # mock runtime 返回不带 time 的 indicators
+    mock_runtime = MagicMock()
+    mock_runtime.compute_indicators = AsyncMock(
+        return_value={"value": [1.0, 2.0, 3.0]}  # 无 time 字段
+    )
+    monkeypatch.setattr(
+        indicator_service.StrategyLoader, "load", AsyncMock(return_value=mock_runtime)
+    )
+
+    result = await indicator_service.compute_all_indicators(
+        mock_session, TEST_INSTRUMENT_ID, "15m", "none", bars=50,
+    )
+
+    # 验证注入的 time 来自 macd_bars（15m 格式，含时间，非日线 YYYY-MM-DD）
+    injected_time = result["data"]["mock_strategy"]["time"]
+    assert len(injected_time) > 0, "应注入非空 time 数组"
+    assert "T" in injected_time[0], (
+        f"15m time 应含 T 分隔符（来自 macd_bars）: {injected_time[0]}"
+    )
+    # 不应是日线格式（YYYY-MM-DD，长度 10）
+    assert len(injected_time[0]) > 10, (
+        f"15m time 应含时间（非日线 YYYY-MM-DD）: {injected_time[0]}"
+    )
+
+
+async def test_dsa_context_bars_daily_uses_macd_bars_in_15m(
+    mock_session: AsyncMock,
+    mock_bars: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[PR #32] - 15m 下传给策略的 context.bars_daily 应是 macd_bars（当前 tf），非 daily_bars。
+
+    验证 DSA 在 15m 下用 15m bars 计算（通过捕获 MarketDataContext）。
+    """
+    monkeypatch.setattr(
+        indicator_service.StrategyLoader, "_registry", {"mock_strategy": None}
+    )
+
+    mock_version = MagicMock()
+    mock_version.manifest = {"chart_layers": [], "display_name": "Mock"}
+
+    mock_batch_service = MagicMock()
+    mock_batch_service._get_latest_released_version = AsyncMock(
+        return_value=(None, mock_version)
+    )
+    monkeypatch.setattr(
+        indicator_service, "StrategyBatchService", lambda: mock_batch_service
+    )
+
+    # 捕获传给策略的 context
+    captured_contexts: list = []
+    mock_runtime = MagicMock()
+    async def _capture(context):
+        captured_contexts.append(context)
+        return {"value": [1.0]}
+    mock_runtime.compute_indicators = _capture
+    monkeypatch.setattr(
+        indicator_service.StrategyLoader, "load", AsyncMock(return_value=mock_runtime)
+    )
+
+    await indicator_service.compute_all_indicators(
+        mock_session, TEST_INSTRUMENT_ID, "15m", "none", bars=50,
+    )
+
+    assert len(captured_contexts) > 0, "应至少调用一次策略"
+    ctx = captured_contexts[0]
+    # bars_daily 应是 15m bars（macd_bars），长度与 15m bars 一致
+    expected_15m_bars = _build_bars("15m")
+    assert len(ctx.bars_daily) == len(expected_15m_bars), (
+        f"15m 下 context.bars_daily 长度应等于 15m bars({len(expected_15m_bars)}), "
+        f"实际={len(ctx.bars_daily)}"
+    )
+    # bars_daily 时间应为 15m 格式（含 HH:MM:SS），非日线日期 00:00:00
+    first_time = ctx.bars_daily.index[0]
+    assert hasattr(first_time, 'hour'), (
+        f"15m bars_daily 应是 DatetimeIndex 含时间: {first_time}"
+    )
+    # 15m 第一个 bar 是 09:30（hour=9），daily 第一个 bar 是 00:00（hour=0）
+    assert first_time.hour == 9, (
+        f"15m bars_daily 第一个时间应为 09:30（hour=9），实际: {first_time}（hour={first_time.hour}）"
+    )
+
+
 # ===== 既有 helper 函数测试（不变） =====
 
 
@@ -587,21 +701,82 @@ def test_adapt_watchlist_bb_15m_bb_matches_compute_bollinger() -> None:
     )
 
 
-def test_adapt_watchlist_bb_weekly_removes_bb() -> None:
-    """周线/月线 timeframe 移除 BB 字段。"""
+def test_adapt_watchlist_bb_1w_uses_macd_bars_not_removed() -> None:
+    """[PR #32] - 1w BB 必须用 macd_bars 计算，不再移除 BB 字段。
+
+    修复根因：之前 _adapt_watchlist_bb 在 1w/1mo 路径直接 pop BB 字段，
+    导致前端 1w/1mo 图表无 BB overlay。新行为：1w/1mo 用 compute_bollinger(macd_bars)
+    重新计算 BB，与 15m/1h 路径一致。
+    """
     indicators = {
-        "bb_upper": [1.0, 2.0, 3.0],
-        "bb_mid": [1.1, 2.1, 3.1],
-        "bb_lower": [0.9, 1.9, 2.9],
-        "upper_node": {"price_mid": 10.0},
+        "bb_upper": [10.0, 11.0, 12.0],
+        "bb_mid": [9.0, 10.0, 11.0],
+        "bb_lower": [8.0, 9.0, 10.0],
     }
+    # 25 根 1w bars（close 逐根变化，足够计算 BB length=20）
+    macd_times = pd.date_range("2026-01-05", periods=25, freq="W-MON").astype(str).tolist()
+    closes = [10.0 + i * 0.2 for i in range(25)]
+    macd_bars = pd.DataFrame({
+        "open": closes,
+        "high": [c + 0.3 for c in closes],
+        "low": [c - 0.3 for c in closes],
+        "close": closes,
+        "volume": [1000000] * 25,
+    }, index=pd.to_datetime(macd_times))
+
     result = indicator_service._adapt_watchlist_bb(
-        indicators, "1w", pd.DataFrame(), [], [],
+        indicators, "1w", macd_bars, macd_times, [],
     )
-    assert "bb_upper" not in result
-    assert "bb_mid" not in result
-    assert "bb_lower" not in result
-    assert result["upper_node"] == {"price_mid": 10.0}
+
+    # 1. BB 字段不被移除
+    assert "bb_upper" in result, "1w bb_upper 不应被移除"
+    assert "bb_mid" in result, "1w bb_mid 不应被移除"
+    assert "bb_lower" in result, "1w bb_lower 不应被移除"
+
+    # 2. time 用 macd_time_list（与 1w bars 对齐）
+    assert result["time"] == macd_times, "1w BB time 应与 macd_time_list 一致"
+
+    # 3. bb_upper 长度 == macd_bars 长度（25）
+    assert len(result["bb_upper"]) == len(macd_times), (
+        f"1w bb_upper 长度应等于 macd_bars 长度({len(macd_times)}), "
+        f"实际={len(result['bb_upper'])}"
+    )
+
+    # 4. bb_upper 最后值 != 日线 BB 最后值（12.0），应该是基于 1w close 计算
+    assert result["bb_upper"][-1] != 12.0, (
+        f"1w bb_upper 最后值不应等于日线 BB 最后值(12.0): {result['bb_upper'][-1]}"
+    )
+
+
+def test_adapt_watchlist_bb_1mo_uses_macd_bars_not_removed() -> None:
+    """[PR #32] - 1mo BB 同样用 macd_bars 计算，不移除。"""
+    indicators = {
+        "bb_upper": [10.0, 11.0, 12.0],
+        "bb_mid": [9.0, 10.0, 11.0],
+        "bb_lower": [8.0, 9.0, 10.0],
+    }
+    macd_times = pd.date_range("2024-01-01", periods=25, freq="MS").astype(str).tolist()
+    closes = [10.0 + i * 0.5 for i in range(25)]
+    macd_bars = pd.DataFrame({
+        "open": closes,
+        "high": [c + 0.5 for c in closes],
+        "low": [c - 0.5 for c in closes],
+        "close": closes,
+        "volume": [5000000] * 25,
+    }, index=pd.to_datetime(macd_times))
+
+    result = indicator_service._adapt_watchlist_bb(
+        indicators, "1mo", macd_bars, macd_times, [],
+    )
+
+    assert "bb_upper" in result, "1mo bb_upper 不应被移除"
+    assert "bb_mid" in result, "1mo bb_mid 不应被移除"
+    assert "bb_lower" in result, "1mo bb_lower 不应被移除"
+    assert result["time"] == macd_times
+    assert len(result["bb_upper"]) == len(macd_times)
+    assert result["bb_upper"][-1] != 12.0, (
+        f"1mo bb_upper 最后值不应等于日线 BB 最后值(12.0): {result['bb_upper'][-1]}"
+    )
 
 
 # ===== SQZMOM_LB 副图集成测试 =====
