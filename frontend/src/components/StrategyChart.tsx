@@ -262,7 +262,14 @@ function formatTime(timeStr: string): string {
 import { normalizeChartTime, timeTicks } from '@/utils/chartTime'
 // [DSA Overlay Policy] - DSA 全周期支持与 title 提示文案（PR #32）
 //   DSA VWAP 支持 1d/15m/1h/1w/1mo；1d 是主结构锚，非 1d 是验证图层
-import { DSA_TITLE_HINT, shouldCheckDsaMismatch } from '@/utils/dsaOverlayPolicy'
+import {
+  DSA_TITLE_HINT,
+  shouldCheckDsaMismatch,
+  shouldIncludeDsaInPriceRange,
+  shouldRenderBbLayer,
+  shouldRenderDsaLayer,
+  shouldToggleDsa,
+} from '@/utils/dsaOverlayPolicy'
 
 // ===== 指标计算模块（从 charts.js 迁移）=====
 
@@ -1499,8 +1506,9 @@ function drawTrading(
           if (typeof l === 'number') priceCandidates.push(l)
         })
       }
-      // [DSA 周期限制] - 仅 1d 周期且 dsa 开关开启时纳入 VWAP 值到纵轴范围（非 1d 不渲染 DSA，纵轴也不应包含）
-      if (layer.layer_id === 'dsa_vwap' && layers.dsa && timeframe === '1d') {
+      // [DSA Overlay Policy] - DSA 纵轴范围候选决策：开关 / 周期支持
+      // [PR #33] - 移除 `timeframe === '1d'` 硬编码，全周期 DSA 都参与 y-axis range
+      if (shouldIncludeDsaInPriceRange(layer.layer_id, layers, timeframe)) {
         const vwapField = layer.fields.find(f => /vwap/i.test(f)) || layer.fields[0]
         const vwapVals = layerData[vwapField]
         indexMap.forEach(idx => {
@@ -1655,15 +1663,12 @@ function drawTrading(
 
   if (indicators && indicators.layers && indicators.data) {
     indicators.layers.forEach(layer => {
-      // DSA VWAP 指标受 dsa 图层开关控制
-      if (layer.layer_id === 'dsa_vwap' && !layers.dsa) return
-      // [DSA 周期限制] - 趋势参考价仅支持日线，非 1d 周期不渲染任何 DSA 数据
-      if (layer.layer_id === 'dsa_vwap' && timeframe !== '1d') return
-      // [DSA 数据源校验] - K 线时间与 source_bar_times 不一致时跳过 DSA 渲染
-      if (layer.layer_id === 'dsa_vwap' && dsaSourceMismatch) return
-      if (layer.layer_id === 'bb' && !layers.bb) return
-      // [BB 图层] - 周线/月线不渲染日线布林带
-      if (layer.layer_id === 'bb' && (timeframe === '1w' || timeframe === '1mo')) return
+      // [DSA Overlay Policy] - DSA 渲染决策：开关 / source mismatch / 周期支持
+      // [PR #33] - 移除 `timeframe !== '1d'` 硬编码 skip，全周期按 shouldRenderDsaLayer 决策
+      if (layer.layer_id === 'dsa_vwap' && !shouldRenderDsaLayer(layer.layer_id, layers, dsaSourceMismatch, timeframe)) return
+      // [BB Overlay Policy] - BB 渲染决策：开关 / 周期支持
+      // [PR #33] - 移除 `timeframe === '1w' || '1mo'` 硬编码 skip，全周期按 shouldRenderBbLayer 决策
+      if (layer.layer_id === 'bb' && !shouldRenderBbLayer(layer.layer_id, layers, timeframe)) return
       // [MACD 副图] - 受 macd 图层开关控制
       if (layer.layer_id === 'macd' && !layers.macd) return
       // [SQZMOM_LB 副图] - 受 sqzmom 图层开关控制
@@ -2222,8 +2227,9 @@ export function StrategyChart({
   const handleToggleGroup = (groupId: string) => {
     // [feishu-capture] - 描述: 截图模式下强制图层不可关闭（advice.md v6 第 2 条）
     if (isCaptureMode && FEISHU_CAPTURE_LAYERS.includes(groupId as FeishuCaptureLayer)) return
-    // [DSA 周期限制] - 趋势参考价仅支持日线，非 1d 周期禁用 DSA 开关
-    if (groupId === 'dsa' && timeframe !== '1d') return
+    // [DSA Overlay Policy] - DSA toggle 决策：capture 锁定 / 全周期可切换
+    // [PR #33] - 移除 `timeframe !== '1d'` 硬编码 disable，全周期按 shouldToggleDsa 决策
+    if (!shouldToggleDsa(groupId, isCaptureMode, FEISHU_CAPTURE_LAYERS)) return
     setLayers(prev => toggleGroup(groupId, prev))
   }
 
