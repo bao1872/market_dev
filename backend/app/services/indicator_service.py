@@ -430,9 +430,12 @@ async def compute_all_indicators(
 
     # [图表行情契约] - 计算 source_bar_times/source_bar_hash（SubTask 1.4）
     #   作为数据源诊断字段，前端据此验证 K 线时间与指标数据源一致性
-    #   必须在 daily_bars 最终确定后计算（load_chart_bars 已完成排序/去重/截取）
-    source_bar_times: list[str] = compute_source_bar_times(daily_bars)
-    source_bar_hash: str = compute_source_bar_hash(daily_bars)
+    #   必须在 macd_bars 最终确定后计算（与当前 timeframe 一致，15m/1h 含时间，1d 仅日期）
+    #   修复：之前永远用 daily_bars，导致 15m/1h source_bar_times 是日线日期格式，
+    #   与 15m K线时间格式不匹配，前端 normalizeChartTime 对 15m 要求 HH:MM，
+    #   日线日期返回 null，必然触发 "DSA 数据源不一致" banner。
+    source_bar_times: list[str] = compute_source_bar_times(macd_bars, timeframe)
+    source_bar_hash: str = compute_source_bar_hash(macd_bars, timeframe)
 
     # 4. 构建 MarketDataContext
     context = MarketDataContext(

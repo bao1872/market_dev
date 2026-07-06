@@ -118,37 +118,49 @@ def _filter_unfinished_daily_bars(
     return df
 
 
-def compute_source_bar_times(df: pd.DataFrame) -> list[str]:
-    """计算 source_bar_times（ISO 日期字符串数组）。
+def compute_source_bar_times(df: pd.DataFrame, timeframe: str = "1d") -> list[str]:
+    """计算 source_bar_times（时间字符串数组，格式随 timeframe）。
+
+    格式规则（与 /bars API trade_time/trade_date 序列化一致）：
+    - 1d/1w/1mo: YYYY-MM-DD（10 字符）
+    - 15m/1h: YYYY-MM-DDTHH:MM:SS（19 字符，naive 北京时间）
 
     Args:
         df: 行情 DataFrame，index 为 DatetimeIndex
+        timeframe: 周期 1d | 15m | 1h | 1w | 1mo（默认 1d，向后兼容）
 
     Returns:
-        ISO 日期字符串列表（YYYY-MM-DD），长度等于 DataFrame 行数
+        时间字符串列表，长度等于 DataFrame 行数
     """
-    return [idx.strftime("%Y-%m-%d") for idx in df.index]
+    fmt = "%Y-%m-%dT%H:%M:%S" if timeframe in ("15m", "1h") else "%Y-%m-%d"
+    return [idx.strftime(fmt) for idx in df.index]
 
 
-def compute_source_bar_hash(df: pd.DataFrame) -> str:
+def compute_source_bar_hash(df: pd.DataFrame, timeframe: str = "1d") -> str:
     """计算 source_bar_hash（OHLCV 拼接的 SHA256 哈希前 16 字符）。
 
-    拼接格式（每行一个）: date|open|high|low|close|volume|amount
+    拼接格式（每行一个）: time|open|high|low|close|volume|amount
     所有行用换行符连接后计算 SHA256，取 hexdigest 前 16 字符。
+
+    time 格式随 timeframe（与 compute_source_bar_times 一致）：
+    - 1d/1w/1mo: YYYY-MM-DD
+    - 15m/1h: YYYY-MM-DDTHH:MM:SS
 
     Args:
         df: 行情 DataFrame，含 open/high/low/close/volume/amount 列
+        timeframe: 周期 1d | 15m | 1h | 1w | 1mo（默认 1d，向后兼容）
 
     Returns:
         SHA256 hexdigest 前 16 字符；空 DataFrame 返回空字符串
     """
     if df.empty:
         return ""
+    fmt = "%Y-%m-%dT%H:%M:%S" if timeframe in ("15m", "1h") else "%Y-%m-%d"
     parts: list[str] = []
     for idx, row in df.iterrows():
-        date_str = idx.strftime("%Y-%m-%d")
+        time_str = idx.strftime(fmt)
         parts.append(
-            f"{date_str}|{row['open']}|{row['high']}|{row['low']}|"
+            f"{time_str}|{row['open']}|{row['high']}|{row['low']}|"
             f"{row['close']}|{row['volume']}|{row['amount']}"
         )
     joined = "\n".join(parts)

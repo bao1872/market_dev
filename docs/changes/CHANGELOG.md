@@ -3,6 +3,14 @@
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
 ## 2026-07-07
+- CHANGE-20260707-040: DSA Overlay Source Alignment
+  - 修复 15m/1h 图表误报 "DSA 数据源不一致，已暂停渲染" 根因（source_bar_times 永远用日线日期格式）
+  - 修复 15m 图顶部显示 2026-07-07 03:00 时区错误根因（trade_time 返回 naive datetime 被前端时区误判）
+  - 后端 `_df_to_responses` 对 15m/1h 返回 aware datetime（Asia/Shanghai tzinfo，`+08:00`），1d 仍为 date 对象
+  - 后端 `compute_source_bar_times/hash` 新增 `timeframe` 参数（15m/1h 含时间，1d 仍日期）
+  - 后端 `indicator_service` 15m/1h 改用 `macd_bars` 计算 source 字段，与 chart bars 同源
+  - 前端 `normalizeChartTime`/`timeTicks` 迁移到纯 .ts 模块 `chartTime.ts`，便于 Node 测试
+  - 新增 14 个前端 contract 测试 + 12 个后端测试（chart_bars_service 6 + indicator_service 3 + bars_vectorization 3）
 - CHANGE-20260707-039: Developing Swing Current State（V1.10）
   - 新增 developing swing 字段（14 个），反映"当前正在发生的回落/反弹结构"
   - 修复 active swing 仍不代表当前状态的问题（000100 active_low=4.45 是大段起点，developing_low 应为 6.26 回落后的当前 low）

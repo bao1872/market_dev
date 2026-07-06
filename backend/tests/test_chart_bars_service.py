@@ -166,6 +166,114 @@ def test_compute_source_bar_times_iso_date_format() -> None:
         pd.Timestamp(t)
 
 
+def test_compute_source_bar_times_default_timeframe_is_daily() -> None:
+    """未传 timeframe 时默认 1d，返回 YYYY-MM-DD 格式（向后兼容）。"""
+    df = _build_raw_daily_bars(length=3)
+    times = compute_source_bar_times(df)
+    for t in times:
+        assert len(t) == 10  # YYYY-MM-DD
+
+
+def test_compute_source_bar_times_15m_includes_time() -> None:
+    """15m timeframe 返回 YYYY-MM-DDTHH:MM:SS 格式（与 bars API trade_time 一致）。
+
+    修复根因：之前 source_bar_times 永远用日线日期格式，导致 15m/1h K线
+    与 indicators source_bar_times 时间格式不匹配，前端 normalizeChartTime
+    对 15m 要求 HH:MM，日线日期返回 null，必然触发 mismatch banner。
+    """
+    dates = pd.date_range("2026-07-01 09:45", periods=3, freq="15min")
+    df = pd.DataFrame({
+        "open": [10.0, 10.1, 10.2],
+        "high": [10.5, 10.6, 10.7],
+        "low": [9.8, 9.9, 10.0],
+        "close": [10.2, 10.3, 10.4],
+        "volume": [100000.0, 110000.0, 120000.0],
+        "amount": [1020000.0, 1133000.0, 1248000.0],
+        "adj_factor": [1.0, 1.0, 1.0],
+    }, index=dates)
+    df.index.name = "trade_time"
+
+    times = compute_source_bar_times(df, timeframe="15m")
+    assert len(times) == 3
+    # 15m 格式：YYYY-MM-DDTHH:MM:SS（19 字符，与 bars API trade_time 一致）
+    assert times[0] == "2026-07-01T09:45:00"
+    assert times[1] == "2026-07-01T10:00:00"
+    assert times[2] == "2026-07-01T10:15:00"
+    for t in times:
+        assert len(t) == 19
+        # 验证可解析为 Timestamp
+        pd.Timestamp(t)
+
+
+def test_compute_source_bar_times_1h_includes_time() -> None:
+    """1h timeframe 返回 YYYY-MM-DDTHH:MM:SS 格式。"""
+    dates = pd.date_range("2026-07-01 10:00", periods=2, freq="1h")
+    df = pd.DataFrame({
+        "open": [10.0, 10.1],
+        "high": [10.5, 10.6],
+        "low": [9.8, 9.9],
+        "close": [10.2, 10.3],
+        "volume": [100000.0, 110000.0],
+        "amount": [1020000.0, 1133000.0],
+        "adj_factor": [1.0, 1.0],
+    }, index=dates)
+    df.index.name = "trade_time"
+
+    times = compute_source_bar_times(df, timeframe="1h")
+    assert times[0] == "2026-07-01T10:00:00"
+    assert times[1] == "2026-07-01T11:00:00"
+
+
+def test_compute_source_bar_times_1d_still_returns_date_only() -> None:
+    """1d timeframe 仍返回 YYYY-MM-DD 格式（保持现状）。"""
+    df = _build_raw_daily_bars(length=3)
+    times = compute_source_bar_times(df, timeframe="1d")
+    for t in times:
+        assert len(t) == 10  # YYYY-MM-DD
+
+
+def test_compute_source_bar_hash_15m_includes_time() -> None:
+    """15m timeframe 的 hash 拼接串包含时间（YYYY-MM-DDTHH:MM:SS）。"""
+    dates = pd.to_datetime(["2026-07-01T09:45:00"])
+    df = pd.DataFrame({
+        "open": [10.0],
+        "high": [10.5],
+        "low": [9.8],
+        "close": [10.2],
+        "volume": [100000.0],
+        "amount": [1020000.0],
+        "adj_factor": [1.0],
+    }, index=dates)
+    df.index.name = "trade_time"
+
+    expected_str = "2026-07-01T09:45:00|10.0|10.5|9.8|10.2|100000.0|1020000.0"
+    expected_hash = hashlib.sha256(expected_str.encode("utf-8")).hexdigest()[:16]
+
+    assert compute_source_bar_hash(df, timeframe="15m") == expected_hash
+
+
+def test_compute_source_bar_hash_1d_still_uses_date_only() -> None:
+    """1d timeframe 的 hash 仍用 YYYY-MM-DD（向后兼容）。"""
+    df = pd.DataFrame({
+        "open": [10.0],
+        "high": [10.5],
+        "low": [9.8],
+        "close": [10.2],
+        "volume": [100000.0],
+        "amount": [1020000.0],
+        "adj_factor": [1.0],
+    }, index=pd.to_datetime(["2026-06-16"]))
+    df.index.name = "trade_date"
+
+    expected_str = "2026-06-16|10.0|10.5|9.8|10.2|100000.0|1020000.0"
+    expected_hash = hashlib.sha256(expected_str.encode("utf-8")).hexdigest()[:16]
+
+    # 默认 timeframe=1d
+    assert compute_source_bar_hash(df) == expected_hash
+    # 显式传 1d
+    assert compute_source_bar_hash(df, timeframe="1d") == expected_hash
+
+
 # ============================================================
 # load_chart_bars 测试
 # ============================================================

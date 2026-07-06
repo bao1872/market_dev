@@ -333,6 +333,13 @@ def _df_to_responses(
     amounts = df["amount"].fillna(0.0).astype(float).tolist()
     adj_factors = df["adj_factor"].fillna(1.0).astype(float).tolist()
 
+    # [bars] - intraday 周期（15m/1h）使用 Asia/Shanghai tzinfo 标记 trade_time
+    #   避免 naive datetime 被前端 new Date(...) 当作本地时间解析导致时区误判
+    #   （如 America/New_York 浏览器将 "2026-07-06T15:00:00" 当作 NY 本地时间，
+    #   转 Asia/Shanghai 后显示为 "2026-07-07 03:00" 错误时间）
+    #   返回 aware datetime(+08:00) 后，前端正确解析为 UTC 时刻再转上海时间显示
+    shanghai_tz = ZoneInfo("Asia/Shanghai")
+
     items: list[BarResponse] = []
     for i in range(n):
         ts = timestamps[i]
@@ -341,7 +348,11 @@ def _df_to_responses(
             trade_time = None
         else:
             trade_date = None
-            trade_time = ts.to_pydatetime()
+            # naive -> aware（DB 已是上海时间，直接 localize；如已是 aware 保持原样）
+            ts_aware = (
+                ts.tz_localize(shanghai_tz) if ts.tzinfo is None else ts
+            )
+            trade_time = ts_aware.to_pydatetime()
 
         items.append(BarResponse(
             instrument_id=instrument_id,

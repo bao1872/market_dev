@@ -199,6 +199,77 @@ def test_df_to_responses_intraday() -> None:
     assert r0.trade_date is None
 
 
+def test_df_to_responses_intraday_trade_time_has_shanghai_tzinfo() -> None:
+    """15m trade_time 必须带 Asia/Shanghai tzinfo，避免前端时区误判。
+
+    修复根因：之前返回 naive datetime，前端 new Date("2026-07-06T15:00:00")
+    在非亚洲时区浏览器中被当作本地时间，再转 Asia/Shanghai 显示为
+    错误时间（如 2026-07-07 03:00）。返回 aware datetime(+08:00) 后，
+    前端 new Date(...) 正确解析为 UTC 时刻，再转 Asia/Shanghai 显示正确。
+    """
+    from zoneinfo import ZoneInfo
+
+    dates = pd.date_range("2026-06-16 09:30", periods=3, freq="15min")
+    df = pd.DataFrame({
+        "open": [10.0] * 3,
+        "high": [10.5] * 3,
+        "low": [9.8] * 3,
+        "close": [10.2] * 3,
+        "volume": [100000] * 3,
+        "amount": [1000000.0] * 3,
+        "adj_factor": [1.0] * 3,
+    }, index=dates)
+    responses = _df_to_responses(df, TEST_INSTRUMENT_ID, "15m")
+
+    for r in responses:
+        assert r.trade_time is not None
+        assert r.trade_time.tzinfo is not None, (
+            "15m trade_time 必须带 tzinfo（Asia/Shanghai），避免前端时区误判"
+        )
+        # 验证时区为 Asia/Shanghai（UTC+8）
+        assert r.trade_time.utcoffset().total_seconds() == 8 * 3600
+
+
+def test_df_to_responses_1h_trade_time_has_shanghai_tzinfo() -> None:
+    """1h trade_time 必须带 Asia/Shanghai tzinfo。"""
+    dates = pd.date_range("2026-06-16 10:00", periods=2, freq="1h")
+    df = pd.DataFrame({
+        "open": [10.0] * 2,
+        "high": [10.5] * 2,
+        "low": [9.8] * 2,
+        "close": [10.2] * 2,
+        "volume": [100000] * 2,
+        "amount": [1000000.0] * 2,
+        "adj_factor": [1.0] * 2,
+    }, index=dates)
+    responses = _df_to_responses(df, TEST_INSTRUMENT_ID, "1h")
+
+    for r in responses:
+        assert r.trade_time is not None
+        assert r.trade_time.tzinfo is not None
+
+
+def test_df_to_responses_1d_trade_date_no_change() -> None:
+    """1d trade_date 仍为 date 对象（无时区），向后兼容。"""
+    dates = pd.to_datetime(["2026-06-16", "2026-06-17"])
+    df = pd.DataFrame({
+        "open": [10.0, 10.1],
+        "high": [10.5, 10.6],
+        "low": [9.8, 9.9],
+        "close": [10.2, 10.3],
+        "volume": [100000, 110000],
+        "amount": [1000000.0, 1100000.0],
+        "adj_factor": [1.0, 1.0],
+    }, index=dates)
+    responses = _df_to_responses(df, TEST_INSTRUMENT_ID, "1d")
+
+    for r in responses:
+        assert r.trade_time is None
+        assert r.trade_date is not None
+        # trade_date 是 date 对象，无 tzinfo
+        assert r.trade_date.isoformat() == r.trade_date.isoformat()
+
+
 def test_df_to_responses_empty() -> None:
     """空 DataFrame 返回空列表。"""
     df = pd.DataFrame()
