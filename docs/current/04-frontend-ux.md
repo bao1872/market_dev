@@ -99,6 +99,18 @@ Node Cluster 算法
   - 后端 `compute_source_bar_times` / `compute_source_bar_hash` 必须按当前 `timeframe` 使用对应 macd_bars，格式随 timeframe（1d=`YYYY-MM-DD`，15m/1h=`YYYY-MM-DDTHH:MM:SS`）；禁止 15m/1h source_bar_times 仍返回日线日期格式；
   - 15m/1h `bars.trade_time` 必须返回 aware ISO（`+08:00` 后缀），避免前端 `new Date("2026-07-06T15:00:00")` 在非亚洲时区浏览器中当作本地时间导致时区误判（如显示 `2026-07-07 03:00`）。
   - 15m/1h 时间轴刻度 `timeTicks` 使用 `Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai' })` 格式化，A 股交易时间正确显示，不应出现 `03:00` 这类非交易时段错误时间。
+- **DSA overlay 周期策略（1d-only by design，PR #31）**：
+  - DSA（Pine 标签 + VWAP）是日线级别结构锚，**仅 1d 周期渲染**；15m/1h 下 DSA overlay 按钮 `disabled=true`，提示文案来自 `frontend/src/utils/dsaOverlayPolicy.ts::DSA_DISABLED_HINT`（"DSA VWAP 当前仅支持日线结构锚；15m/1h 请使用 Swing、BB、SQZMOM。"）；
+  - DSA source mismatch 校验由 `shouldCheckDsaMismatch(timeframe)` 控制：仅 1d 返回 `true`，15m/1h 返回 `false`，避免 15m/1h 误报 "DSA 数据源不一致"；
+  - 右侧 `StockStructuralStatePanel` 仍可显示 daily DSA 背景和 m15 response（结构状态因子不受图层禁用影响）；
+- **BB/MACD/SQZMOM overlay 跟随当前周期（PR #31）**：
+  - 后端 `indicator_service._adapt_watchlist_bb` 在 15m/1h 必须用 `macd_bars`（当前 timeframe bars）调用 `compute_bollinger(macd_bars, length=20, mult=2.0)` 重新计算 BB，禁止用日线阶梯线伪装成 15m/1h BB；
+  - BB overlay 时间轴必须用 `buildDisplayIndexMap` 按 canonical time 对齐，禁止尾部截取（tail slice）；
+  - MACD / SQZMOM 同理：必须用 `macd_bars`（当前 timeframe）计算，不允许串日线；
+- **?debugIndicatorAlignment=1 诊断工具（PR #31）**：
+  - `StrategyChart` 支持通过 URL 参数 `?debugIndicatorAlignment=1` 输出 overlay 对齐诊断到 console.table；
+  - 输出 `bars`（timeframe/count/first/last/canonical_first/canonical_last）、`dsa_mismatch`（check_enabled/mismatched/source_bar_hash/source_bar_times_count）、`indicators.layers`（layer_id/renderer/fields/time_count）；
+  - 默认不打印，不刷日志，仅用于诊断 15m/1h overlay 对齐问题。
 
 ### 消息与飞书
 

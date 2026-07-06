@@ -210,3 +210,46 @@ test('timeTicks: 1d 仅显示月-日', () => {
   assert.match(ticks[0].label, /07-05/, `1d 应显示 07-05，实际: ${ticks[0].label}`)
   assert.match(ticks[1].label, /07-06/, `1d 应显示 07-06，实际: ${ticks[1].label}`)
 })
+
+// ===== 4. DSA Overlay Policy：周期策略与禁用提示文案 =====
+
+import { DSA_DISABLED_HINT, shouldCheckDsaMismatch } from '../../utils/dsaOverlayPolicy.ts'
+
+test('DSA_DISABLED_HINT: 包含完整提示文案', () => {
+  // 用户要求文案："DSA VWAP 当前仅支持日线结构锚；15m/1h 请使用 Swing、BB、SQZMOM。"
+  assert.match(
+    DSA_DISABLED_HINT,
+    /DSA.*日线结构锚/,
+    `提示文案应包含"DSA 日线结构锚"，实际: ${DSA_DISABLED_HINT}`,
+  )
+  assert.match(
+    DSA_DISABLED_HINT,
+    /Swing|BB|SQZMOM/,
+    `提示文案应包含替代图层建议，实际: ${DSA_DISABLED_HINT}`,
+  )
+})
+
+test('shouldCheckDsaMismatch: 15m 不校验 mismatch（DSA 不在 15m 渲染）', () => {
+  // 修复根因：15m 下 DSA 被禁用，但仍校验 mismatch 会误报"DSA 数据源不一致"
+  assert.equal(
+    shouldCheckDsaMismatch('15m'),
+    false,
+    '15m 不应校验 DSA mismatch（DSA 不在 15m 渲染）',
+  )
+})
+
+test('shouldCheckDsaMismatch: 1h 不校验 mismatch', () => {
+  assert.equal(
+    shouldCheckDsaMismatch('1h'),
+    false,
+    '1h 不应校验 DSA mismatch',
+  )
+})
+
+test('shouldCheckDsaMismatch: 1d 仍校验 mismatch（DSA 在 1d 渲染）', () => {
+  assert.equal(
+    shouldCheckDsaMismatch('1d'),
+    true,
+    '1d 应校验 DSA mismatch（DSA 在 1d 渲染）',
+  )
+})

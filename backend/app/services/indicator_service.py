@@ -60,6 +60,9 @@ from app.services.chart_bars_service import (
 from app.services.market_data_aggregation_service import MarketDataAggregationService
 from app.services.strategy_batch_service import StrategyBatchService
 from app.strategy.runtime import MarketDataContext, StrategyLoader
+from app.strategy_assets.algorithms.features.merged_dsa_atr_rope_bb_factors import (
+    compute_bollinger,
+)
 from app.strategy_assets.algorithms.features.sqzmom_lb import compute_sqzmom_lb
 
 logger = logging.getLogger("services.indicator_service")
@@ -250,15 +253,21 @@ def _adapt_watchlist_bb(
     """调整 watchlist_monitor 的 BB 输出以匹配当前 timeframe。
 
     - 日线：保留完整日线 BB 序列（不截断），time 同步完整
-    - 15m/1h：将日线 BB 映射为日内阶梯线（time 用 macd_time_list）
+    - 15m/1h：用 macd_bars 重新计算 BB（length=20, mult=2.0），不再映射日线阶梯线
     - 周线/月线：移除 BB 字段（前端不渲染）
+
+    修复根因（PR #31）：
+        之前 15m/1h 调用 _map_daily_to_intraday 把日线 BB 映射到日内时间轴，
+        导致 15m BB 全部相同（阶梯线），不是真正的 15m 周期 BB。
+        新行为：15m/1h 用 compute_bollinger(macd_bars) 重新计算 BB，
+        bb_upper/bb_mid/bb_lower 反映当前 timeframe close 的波动。
 
     Args:
         indicators: watchlist_monitor 原始指标字典
         timeframe: 当前请求周期
-        macd_bars: 当前 timeframe 对应的 bars（用于 15m/1h 时间对齐）
+        macd_bars: 当前 timeframe 对应的 bars（用于 15m/1h BB 计算）
         macd_time_list: 当前 timeframe 对应的时间列表
-        daily_time_list: 日线时间列表
+        daily_time_list: 日线时间列表（15m/1h 路径不再使用，保留参数兼容）
 
     Returns:
         调整后的指标字典
@@ -272,13 +281,35 @@ def _adapt_watchlist_bb(
         return result
 
     if timeframe in ("15m", "1h"):
+        # [PR #31] - 15m/1h BB 用 macd_bars 重新计算，不再映射日线阶梯线
+        #   compute_bollinger 返回 bb_upper/bb_mid/bb_lower/bb_pos_01/bb_width_norm
+        #   映射到 watchlist_monitor 字段名：bb_pos_01→bb_pos, bb_width_norm→bb_width
         if not bb_fields_present or macd_bars.empty or not macd_time_list:
             return result
-        for field in bb_fields_present:
-            daily_values = result[field]
-            if not isinstance(daily_values, list) or len(daily_values) != len(daily_time_list):
-                continue
-            result[field] = _map_daily_to_intraday(daily_values, daily_time_list, macd_time_list)
+        if len(macd_bars) < 20:
+            # 不足 20 根无法计算 BB length=20，返回 None 填充
+            n = len(macd_time_list)
+            for field in bb_fields_present:
+                result[field] = [None] * n
+            result["time"] = macd_time_list
+            return result
+
+        bb_result = compute_bollinger(macd_bars, length=20, mult=2.0)
+        # 字段映射：compute_bollinger 返回名 → watchlist_monitor 字段名
+        field_map = {
+            "bb_upper": "bb_upper",
+            "bb_mid": "bb_mid",
+            "bb_lower": "bb_lower",
+            "bb_pos_01": "bb_pos",
+            "bb_width_norm": "bb_width",
+        }
+        for src_field, dst_field in field_map.items():
+            if dst_field in bb_fields_present and src_field in bb_result.columns:
+                # NaN → None（前端 JSON 序列化 null）
+                vals = bb_result[src_field].where(
+                    bb_result[src_field].notna(), None
+                ).tolist()
+                result[dst_field] = vals
         result["time"] = macd_time_list
         return result
 

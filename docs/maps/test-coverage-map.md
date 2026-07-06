@@ -96,6 +96,9 @@
 | DSA overlay source alignment：`indicator_service` 在 15m/1h 使用 macd_bars 计算 source_bar_times/hash，与 chart bars 同源 | `backend/tests/test_indicator_service.py`（新增 3 个 macd_bars 同源测试） |
 | DSA overlay source alignment：15m/1h `bars.trade_time` 返回 aware datetime（Asia/Shanghai tzinfo，序列化为 `+08:00`），1d trade_date 仍为 date 对象 | `backend/tests/test_bars_vectorization.py`（新增 3 个 tzinfo 测试） |
 | DSA overlay source alignment：`normalizeChartTime` naive 与 aware ISO 产生相同 canonical key / 15m K线 aware 与 source_bar_times naive 全部匹配不误报 mismatch / 故意构造 source mismatch 仍触发暂停 / `timeTicks` 15m aware 时间显示北京交易时间不显示 03:00 | `frontend/src/components/__tests__/dsaSourceAlignment.test.ts`（新增 14 个 contract 测试，纯 .ts 模块 `frontend/src/utils/chartTime.ts`） |
+| Indicator overlay alignment：`indicator_cache.ALGORITHM_VERSION == "v4"` 且旧 v3 cache key 不匹配新 `build_cache_key`（旧缓存自然失效） | `backend/tests/test_indicator_cache.py`（新增 2 个 cache schema 版本测试） |
+| Indicator overlay alignment：`_adapt_watchlist_bb` 15m/1h 用 `macd_bars` 调用 `compute_bollinger` 计算 BB（非日线阶梯线），BB 长度与 macd_bars 对齐，数值与 `compute_bollinger(macd_bars)` 一致 | `backend/tests/test_indicator_service.py`（新增 3 个 BB overlay 计算测试，删除 1 个旧日线阶梯线测试） |
+| Indicator overlay alignment：`DSA_DISABLED_HINT` 提示文案 / `shouldCheckDsaMismatch` 15m/1h 返回 false 不校验 mismatch / 1d 仍校验 | `frontend/src/components/__tests__/dsaSourceAlignment.test.ts`（新增 4 个 DSA overlay policy contract 测试） |
 
 
 ## 6. 文档和工程治理

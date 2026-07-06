@@ -3,6 +3,14 @@
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
 ## 2026-07-07
+- CHANGE-20260707-041: Indicator Overlay Final Alignment
+  - 修复 DSA VWAP 15m/1h 误禁用根因：Redis cache `ALGORITHM_VERSION` 未 bump（v3→v4），旧缓存命中返回旧格式 source_bar_times + 日线阶梯线 BB
+  - 修复 15m/1h BB 图层错位根因：`_adapt_watchlist_bb` 15m/1h 用 `_map_daily_to_intraday` 映射日线 BB（阶梯线），改用 `compute_bollinger(macd_bars)` 重新计算当前周期 BB
+  - DSA overlay 周期策略：DSA 是日线级别结构锚，仅 1d 渲染；15m/1h DSA 按钮 disabled + 提示 "DSA VWAP 当前仅支持日线结构锚；15m/1h 请使用 Swing、BB、SQZMOM。"
+  - `shouldCheckDsaMismatch(timeframe)` 仅 1d 返回 true，15m/1h 不校验 mismatch，避免误报 "DSA 数据源不一致"
+  - 新增 `?debugIndicatorAlignment=1` 诊断工具：console.table 输出 bars/dsa_mismatch/layers 对齐信息
+  - 新增 `frontend/src/utils/dsaOverlayPolicy.ts` 纯 .ts 模块（DSA_DISABLED_HINT + shouldCheckDsaMismatch）
+  - 后端新增 5 个测试（cache schema 2 + BB overlay 3），前端新增 4 个 DSA overlay policy contract 测试
 - CHANGE-20260707-040: DSA Overlay Source Alignment
   - 修复 15m/1h 图表误报 "DSA 数据源不一致，已暂停渲染" 根因（source_bar_times 永远用日线日期格式）
   - 修复 15m 图顶部显示 2026-07-07 03:00 时区错误根因（trade_time 返回 naive datetime 被前端时区误判）

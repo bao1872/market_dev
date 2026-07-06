@@ -444,8 +444,17 @@ def test_adapt_watchlist_bb_daily_preserved() -> None:
     assert result["upper_node"] == {"price_mid": 10.0}
 
 
-def test_adapt_watchlist_bb_intraday_maps_to_macd_time() -> None:
-    """15m/1h timeframe 将日线 BB 映射为日内阶梯线，time 用 macd_time_list。"""
+def test_adapt_watchlist_bb_15m_uses_macd_bars_not_daily_staircase() -> None:
+    """[PR #31] - 15m BB 必须用 macd_bars 计算，不再映射日线阶梯线。
+
+    修复根因：之前 _adapt_watchlist_bb 在 15m 路径下调用 _map_daily_to_intraday，
+    把日线 BB 映射到 15m 时间轴，导致 15m BB 全部相同（阶梯线），
+    不是真正的 15m 周期 BB。
+
+    新行为：15m/1h 用 macd_bars 重新计算 BB（length=20, mult=2.0），
+    bb_upper/bb_mid/bb_lower 反映 15m close 的波动，而非日线 BB 阶梯线。
+    """
+    # 日线 BB（watchlist_monitor 返回，长度=3）
     indicators = {
         "bb_upper": [10.0, 11.0, 12.0],
         "bb_mid": [9.0, 10.0, 11.0],
@@ -456,19 +465,126 @@ def test_adapt_watchlist_bb_intraday_maps_to_macd_time() -> None:
         "2026-06-02T15:00:00+08:00",
         "2026-06-03T15:00:00+08:00",
     ]
-    macd_times = [
-        "2026-06-02T09:30:00+08:00",
-        "2026-06-02T09:45:00+08:00",
-        "2026-06-03T09:30:00+08:00",
-    ]
-    macd_bars = pd.DataFrame({"close": [1.0, 1.1, 1.2]}, index=pd.to_datetime(macd_times))
+    # 25 根 15m bars（close 逐根变化，足够计算 BB length=20）
+    macd_times = pd.date_range("2026-06-02 09:30", periods=25, freq="15min").astype(str).tolist()
+    closes = [10.0 + i * 0.05 for i in range(25)]  # 10.00 → 11.20 递增
+    macd_bars = pd.DataFrame({
+        "open": closes,
+        "high": [c + 0.1 for c in closes],
+        "low": [c - 0.1 for c in closes],
+        "close": closes,
+        "volume": [100000] * 25,
+    }, index=pd.to_datetime(macd_times))
+
     result = indicator_service._adapt_watchlist_bb(
         indicators, "15m", macd_bars, macd_times, daily_time_list,
     )
+
+    # 1. time 用 macd_time_list（与 15m bars 对齐）
+    assert result["time"] == macd_times, "15m BB time 应与 macd_time_list 一致"
+
+    # 2. bb_upper 长度 == macd_bars 长度（25）
+    assert len(result["bb_upper"]) == len(macd_times), (
+        f"15m bb_upper 长度应等于 macd_bars 长度({len(macd_times)}), "
+        f"实际={len(result['bb_upper'])}"
+    )
+
+    # 3. bb_upper 不是全部相同（非日线阶梯线）
+    bbu = result["bb_upper"]
+    last_5 = bbu[-5:]
+    unique_last_5 = set(last_5)
+    assert len(unique_last_5) > 1, (
+        f"15m bb_upper 最后 5 根不应全部相同（非日线阶梯线）: {last_5}"
+    )
+
+    # 4. bb_upper 最后一个值 != 日线 BB 最后一个值（12.0）
+    #    应该是基于 15m close 计算的 BB upper
+    assert bbu[-1] != 12.0, (
+        f"15m bb_upper 最后值不应等于日线 BB 最后值(12.0): {bbu[-1]}"
+    )
+
+    # 5. bb_mid / bb_lower 也应基于 15m bars 计算
+    assert len(result["bb_mid"]) == len(macd_times)
+    assert len(result["bb_lower"]) == len(macd_times)
+
+
+def test_adapt_watchlist_bb_1h_uses_macd_bars_not_daily_staircase() -> None:
+    """[PR #31] - 1h BB 同样用 macd_bars 计算，不映射日线阶梯线。"""
+    indicators = {
+        "bb_upper": [10.0, 11.0, 12.0],
+        "bb_mid": [9.0, 10.0, 11.0],
+        "bb_lower": [8.0, 9.0, 10.0],
+    }
+    daily_time_list = [
+        "2026-06-01T15:00:00+08:00",
+        "2026-06-02T15:00:00+08:00",
+        "2026-06-03T15:00:00+08:00",
+    ]
+    # 25 根 1h bars
+    macd_times = pd.date_range("2026-06-02 10:00", periods=25, freq="1h").astype(str).tolist()
+    closes = [20.0 + i * 0.1 for i in range(25)]
+    macd_bars = pd.DataFrame({
+        "open": closes,
+        "high": [c + 0.2 for c in closes],
+        "low": [c - 0.2 for c in closes],
+        "close": closes,
+        "volume": [100000] * 25,
+    }, index=pd.to_datetime(macd_times))
+
+    result = indicator_service._adapt_watchlist_bb(
+        indicators, "1h", macd_bars, macd_times, daily_time_list,
+    )
+
     assert result["time"] == macd_times
     assert len(result["bb_upper"]) == len(macd_times)
-    # 06-02 盘中取 06-01 收盘后的 BB；06-03 盘中取 06-02 收盘后的 BB
-    assert result["bb_upper"] == [10.0, 10.0, 11.0]
+    # 1h bb_upper 最后值不应等于日线 BB 最后值（12.0）
+    assert result["bb_upper"][-1] != 12.0, (
+        f"1h bb_upper 最后值不应等于日线 BB 最后值(12.0): {result['bb_upper'][-1]}"
+    )
+
+
+def test_adapt_watchlist_bb_15m_bb_matches_compute_bollinger() -> None:
+    """[PR #31] - 15m BB 与 compute_bollinger(macd_bars) 计算结果一致。
+
+    验证 _adapt_watchlist_bb 内部调用了 compute_bollinger(macd_bars)，
+    而不是 _map_daily_to_intraday(daily_bb)。
+    """
+    from app.strategy_assets.algorithms.features.merged_dsa_atr_rope_bb_factors import (
+        compute_bollinger,
+    )
+
+    indicators = {
+        "bb_upper": [10.0, 11.0, 12.0],
+        "bb_mid": [9.0, 10.0, 11.0],
+        "bb_lower": [8.0, 9.0, 10.0],
+    }
+    daily_time_list = ["2026-06-01", "2026-06-02", "2026-06-03"]
+    macd_times = pd.date_range("2026-06-02 09:30", periods=25, freq="15min").astype(str).tolist()
+    closes = [10.0 + i * 0.05 for i in range(25)]
+    macd_bars = pd.DataFrame({
+        "open": closes,
+        "high": [c + 0.1 for c in closes],
+        "low": [c - 0.1 for c in closes],
+        "close": closes,
+        "volume": [100000] * 25,
+    }, index=pd.to_datetime(macd_times))
+
+    result = indicator_service._adapt_watchlist_bb(
+        indicators, "15m", macd_bars, macd_times, daily_time_list,
+    )
+
+    # 用 compute_bollinger 直接计算期望值
+    expected = compute_bollinger(macd_bars, length=20, mult=2.0)
+    expected_upper = expected["bb_upper"].tolist()
+
+    # 最后一个非 NaN 值应与 _adapt_watchlist_bb 返回的最后值一致
+    last_valid_pos = expected["bb_upper"].reset_index(drop=True).last_valid_index()
+    expected_last = expected_upper[last_valid_pos]
+    actual_last = result["bb_upper"][-1]
+    assert abs(actual_last - expected_last) < 1e-6, (
+        f"15m bb_upper 最后值应与 compute_bollinger 一致: "
+        f"expected={expected_last}, actual={actual_last}"
+    )
 
 
 def test_adapt_watchlist_bb_weekly_removes_bb() -> None:
