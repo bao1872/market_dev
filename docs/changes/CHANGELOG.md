@@ -2,6 +2,16 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-05: Admin 监控资格修复 + 个股详情实时行情可信化
+
+- 修复 admin 自选股被监控过滤：新增 `eligible_user_service.filter_monitor_eligible_recipients`/`is_user_eligible_for_monitor`，active admin 与 active member + 有效 subscription 进入监控，disabled admin / 无订阅普通用户排除；`monitor_batch_service`/`event_recipient_service`/`outbox_relay` 三处统一口径。
+- 修复个股详情实时行情伪实时：`/api/v1/instruments/{id}/quote` 返回 `source`/`is_realtime`/`update_time`/`freshness_seconds`/`degraded`/`degraded_reason`；pytdx 成功才标实时，非交易时段 fallback 不降级，交易时段 pytdx 失败才降级并记录原因；`mergeRealtimeQuoteIntoBars` 仅当 `quote.is_realtime && source==="pytdx" && freshness_seconds<=60` 才合并；`StockDetailPage` 显示行情状态徽章与 K 线状态条，不再固定显示“实时行情”；删除 1m 配置；午休统一复用 `market_status_service.compute_market_session`；quote 10s、bars/indicators 30s 轮询，页面 hidden 停止后台轮询；pytdx 单例+线程锁+Redis 10s 缓存，带断线重连与超时保护。
+- 新增后端测试 10 个（`test_monitor_eligible.py` 5 + `test_quote_trustworthy.py` 5）、前端 chart 测试 8 个、本地 ASGI 验证脚本 `scripts/verify_quote_trustworthy.py`。
+- 更新 `docs/current/02-data-api-contracts.md`、`03-jobs-integrations-operations.md`、`04-frontend-ux.md`、`05-testing-acceptance.md`、`MANIFEST.md`、`code-doc-alignment.md`；更新 `docs/maps/api-route-map.md`、`backend-module-map.md`、`frontend-route-map.md`。
+- 新增 ALIGN-034（admin monitor 资格待生产验证）、ALIGN-035（quote 可信化与 pytdx 连接保护待生产验证）。
+- 新增 CHANGE-20260705-034。
+- 本次不部署生产，待用户确认 diff、测试结果与验证证据后授权 build/restart。
+
 ## 2026-07-05: 时序特征 V1 + 个股详情页结构状态面板隐藏开关
 
 - 后端新增 `app.services.temporal_feature_service.compute_temporal_features`：双周期（1d+15m）时序特征，补变化量/持续度/派生关系；daily_context 9 字段 + m15_response 9 字段 + derived_relation 3 字段；复用 V1.8 `compute_structural_factors` 获取 primary/secondary factors；point-in-time 重算 SQZMOM/BB bandwidth/volume_percentile，无未来函数；V1 只支持 `as_of=latest`；组级异常隔离（daily/m15/derived 独立 try/except，单组失败返回 null dict + degraded_reasons）。

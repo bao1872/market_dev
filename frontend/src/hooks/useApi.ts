@@ -682,10 +682,11 @@ export function useBars(instrumentId: string | undefined, params?: BarQueryParam
     enabled: !!instrumentId,
     staleTime: STALE_WATCHLIST,
     refetchInterval: options?.refetchInterval ?? (() => isInTradingHours() ? 30000 : false),
+    refetchIntervalInBackground: false,
   })
 }
 
-/** 查询指定标的的所有策略图表指标（交易时段内 30s 轮询，响应式检测交易时段） */
+/** 查询指定标的的所有策略图表指标（交易时段内 30s 轮询，响应式检测交易时段；页面隐藏时停止轮询） */
 export function useIndicators(
   instrumentId: string | undefined,
   params?: IndicatorQueryParams,
@@ -699,10 +700,11 @@ export function useIndicators(
     enabled: !!instrumentId,
     staleTime: STALE_WATCHLIST,
     refetchInterval: options?.refetchInterval ?? (() => isInTradingHours() ? 30000 : false),
+    refetchIntervalInBackground: false,
   })
 }
 
-/** 查询指定标的的实时报价（交易时段内 10s 轮询，响应式检测交易时段） */
+/** 查询指定标的的实时报价（交易时段内 10s 轮询，响应式检测交易时段；页面隐藏时停止轮询） */
 export function useRealtimeQuote(instrumentId: string | undefined) {
   return useQuery({
     queryKey: ['quote', instrumentId],
@@ -710,6 +712,7 @@ export function useRealtimeQuote(instrumentId: string | undefined) {
     enabled: !!instrumentId,
     staleTime: STALE_REALTIME,
     refetchInterval: () => isInTradingHours() ? 10000 : false,
+    refetchIntervalInBackground: false,
   })
 }
 

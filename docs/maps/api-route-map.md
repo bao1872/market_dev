@@ -12,7 +12,7 @@
 | instruments | `app/api/instruments.py` | 股票主数据 |
 | calendar | `app/api/calendar.py` | 交易日历 |
 | market | `app/api/market.py` | 市场状态 |
-| bars | `app/api/bars.py` | 行情查询；`page_size` 最大 4000，与 Node Cluster 15m=4000/1h=1200 契约对齐 |
+| bars | `app/api/bars.py` | 行情查询；`GET /api/v1/instruments/{instrument_id}/quote` 返回实时报价可信状态（`source`/`is_realtime`/`freshness_seconds`/`degraded`/`degraded_reason`）；`GET /api/v1/instruments/{instrument_id}/bars` 返回 K 线并携带 `data_source`/`as_of`/`is_partial`/`degraded`/`degraded_reason`；`page_size` 最大 4000，与 Node Cluster 15m=4000/1h=1200 契约对齐 |
 | capture | `app/api/capture.py` | Capture Snapshot 专用 API |
 | indicators | `app/api/indicators.py` | 策略指标实时计算；`bars` 最大 4000，与 bars API 及 Node Cluster 契约对齐；响应 `data.sqzmom_lb` 为全局技术指标，由 `app.strategy_assets.algorithms.features.sqzmom_lb.compute_sqzmom_lb` 计算，前端只渲染不计算 |
 | structural_factors | `app/api/structural_factors.py` | 双周期结构状态因子 V1.8（约 50 字段，含 dsa_segment 段收益/斜率/效率/段级成交量、swing_range/price_position、price_vs_poc_atr/value_area_position、distance_to_bb_*_atr/sqz_on/sqz_off、客观 relation primary_dir/secondary_dir/trend_alignment 等）；`GET /api/v1/instruments/{id}/structural-factors`，由 `app.services.structural_factor_service.compute_structural_factors` 计算，前端只渲染不计算；无认证要求；250-500 bar lookback；契约详见 `docs/current/02-data-api-contracts.md` 第 10 节 |

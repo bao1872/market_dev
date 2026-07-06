@@ -7,9 +7,34 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
+
+
+class QuoteResponse(BaseModel):
+    """实时行情报价响应（可信来源与新鲜度）。"""
+
+    instrument_id: UUID = Field(..., description="标的 ID")
+    symbol: str = Field(..., description="股票代码")
+    name: str = Field(..., description="股票名称")
+    current_price: float = Field(..., description="最新价")
+    open: float = Field(..., description="开盘价")
+    high: float = Field(..., description="最高价")
+    low: float = Field(..., description="最低价")
+    close: float = Field(..., description="收盘价")
+    volume: float = Field(..., description="成交量")
+    prev_close: float = Field(..., description="昨收")
+    change_pct: float = Field(..., description="涨跌幅(%)")
+    update_time: datetime | None = Field(None, description="数据更新时间（ISO 8601）")
+    source: Literal["pytdx", "daily_fallback"] = Field(
+        ..., description="数据来源: pytdx 实时 | daily_fallback 日线回退"
+    )
+    is_realtime: bool = Field(..., description="是否为实时行情")
+    freshness_seconds: float = Field(..., description="数据新鲜度（秒）")
+    degraded: bool = Field(..., description="是否降级")
+    degraded_reason: str | None = Field(None, description="降级原因")
 
 
 class BarResponse(BaseModel):

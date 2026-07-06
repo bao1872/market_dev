@@ -24,9 +24,19 @@ worker-strategy-batch 的 run 级总超时由 STRATEGY_RUN_TOTAL_TIMEOUT_SECONDS
 - 日历刷新：约 02:00 Asia/Shanghai；
 - 盘后行情：交易日约 16:00；
 - DSA 兜底：交易日约 18:30；
-- 盘中监控：09:30–11:30、13:00–15:00 按配置轮询；
+- 盘中监控：09:30–11:30、13:00–15:00 按配置轮询；监控资格判定使用 `app.services.eligible_user_service.filter_monitor_eligible_recipients`，active admin 与 active member + 有效 subscription 进入监控，disabled admin 与无订阅普通用户排除；
 - Outbox/Delivery：短轮询；
 - Worker 心跳：持续更新。
+
+### 2.1 实时行情与 pytdx 接入
+
+`/api/v1/instruments/{instrument_id}/quote` 仅在 `market_status_service.compute_market_session` 返回 `MORNING_SESSION` 或 `AFTERNOON_SESSION` 时尝试 pytdx 实时拉取；午休、盘前、盘后、非交易日均不尝试 pytdx，直接读 DB 日线 fallback。
+
+- pytdx 使用模块级单例适配器 + 线程锁，防止多线程同时操作同步 socket；
+- 连接异常时支持断线重连，超时可控；
+- 使用 Redis 短缓存（10s TTL）削峰，缓存命中时直接返回缓存结果；
+- 同步 pytdx 调用通过线程池提交到 async event loop，避免阻塞主循环；
+- 日志必须区分 `pytdx 成功`、`pytdx 失败 fallback`、`非交易时段 fallback` 三种场景。
 
 行情调度与盘后编排中的覆盖率检查统一复用 `BarsCoverageService`，禁止复制 SQL。`worker-bars-scheduler` 与 `worker-after-close` 均以 `shanghai_business_date()` 作为业务日期，避免服务器时区偏差。所有覆盖率门禁（`bars_scheduler` 自动触发 DSA、`dsa-only`、系统概览 `WAITING_DSA` 判定）均使用 `BarsCoverageService.compute_daily_coverage` 返回的 `coverage_raw` 原始值进行阈值判断，`coverage` 仅用于展示。`/admin/after-close-runs/dsa-only` 在当日无数据时 fallback 到最新可用交易日再校验覆盖率。
 
@@ -97,13 +107,32 @@ text_outbox
 
 ```text
 确认 main + 工作区干净
-→ 备份数据库
+→ 备份数据库（本次任务暂不部署，不执行）
 → 构建 backend/frontend/capture
 → postgres/redis healthy
 → Alembic upgrade head
 → 启动 backend/frontend/workers
 → 验证版本、健康、心跳、任务、行情、发布和投递
 ```
+
+部署前性能基线采集（物理单机）：
+
+```text
+docker stats --no-stream
+free -h
+df -h
+uptime
+```
+
+实时行情部署验证项：
+
+- `GET /api/v1/instruments/{instrument_id}/quote` 返回字段包含 `source`/`is_realtime`/`update_time`/`freshness_seconds`/`degraded`/`degraded_reason`；
+- 交易时段 pytdx 成功时 `source="pytdx"`、`is_realtime=true`、`degraded=false`；
+- 交易时段 pytdx 失败时 `source="daily_fallback"`、`degraded=true`；
+- 非交易时段 fallback 时 `source="daily_fallback"`、`degraded=false`；
+- `GET /api/v1/instruments/{instrument_id}/bars` 返回 `data_source`/`as_of`/`is_partial`/`degraded`/`degraded_reason`；
+- StockDetailPage 状态徽章显示“实时行情 / 日线回退 / 数据延迟 / 行情降级”之一，不再固定显示“实时行情”；
+- 容器日志可见 `pytdx 成功`、`pytdx 失败 fallback`、`非交易时段 fallback` 区分日志。
 
 `CORE_ONLY=1` 只用于受控恢复。需要完整业务能力时必须运行对应 worker：趋势选股需要 strategy_batch/scheduler，飞书图片需要 capture/outbox/delivery。
 

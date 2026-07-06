@@ -109,14 +109,13 @@ export default function StockDetailPage() {
   const instrumentId = instrumentQuery.data?.id
 
   // [Chart] - 按 timeframe 请求对应根数，与 Node Cluster / indicator_contract 对齐
-  // 1d=250, 15m=4000, 1h=1200, 1w=260, 1mo=120, 1m=2
+  // 当前后端 bars API 支持 1d/15m/1h/1w/1mo；1m 不在工具栏暴露
   const barsCountByTimeframe: Record<string, number> = {
     '1d': 250,
     '15m': 4000,
     '1h': 1200,
     '1w': 260,
     '1mo': 120,
-    '1m': 2,
   }
   const barsCount = barsCountByTimeframe[timeframe] ?? 250
 
@@ -254,6 +253,27 @@ export default function StockDetailPage() {
     ? ((lastBar.close - barsQuery.data.items[barsQuery.data.items.length - 2].close) / barsQuery.data.items[barsQuery.data.items.length - 2].close * 100)
     : null)
   const isUp = changePercent !== null ? changePercent >= 0 : true
+
+  // [QuoteTrust] - 行情状态：根据 quote 来源/实时性/新鲜度/降级状态展示真实数据状态
+  const quoteStatus = useMemo(() => {
+    if (!quote) return { label: '加载中', badgeClass: 'status-pill neutral' }
+    if (quote.degraded) return { label: '行情降级', badgeClass: 'status-pill warn' }
+    if (quote.is_realtime && quote.source === 'pytdx' && quote.freshness_seconds <= 60) {
+      return { label: '实时行情', badgeClass: 'status-pill ok' }
+    }
+    if (quote.source === 'daily_fallback') {
+      return { label: '日线回退', badgeClass: 'status-pill neutral' }
+    }
+    return { label: '数据延迟', badgeClass: 'status-pill warn' }
+  }, [quote])
+
+  const barsStatus = useMemo(() => {
+    if (barsQuery.isLoading || !barsQuery.data) return null
+    const data = barsQuery.data
+    if (data.degraded) return { label: 'K线降级', reason: data.degraded_reason }
+    if (data.is_partial) return { label: 'K线含未完成 bar', reason: null }
+    return { label: `K线来源: ${data.data_source}`, reason: null }
+  }, [barsQuery.data, barsQuery.isLoading])
 
   // 加载状态：股票信息加载中
   const isInstrumentLoading = instrumentQuery.isLoading
@@ -463,11 +483,13 @@ export default function StockDetailPage() {
   }
 
   const inst = instrumentQuery.data
-  // 元信息：市场 · 人民币 · 实时行情
+  // [QuoteTrust] - 元信息：市场 · 人民币 · 行情状态 · update_time · K线状态
   const metaParts = [
     MARKET_LABELS[inst.market] || inst.market,
     '人民币',
-    '实时行情',
+    quoteStatus.label,
+    quote?.update_time ? `更新 ${formatShanghaiTimeShort(quote.update_time)}` : null,
+    barsStatus ? barsStatus.label : null,
   ].filter(Boolean)
 
   return (
@@ -750,12 +772,21 @@ export default function StockDetailPage() {
                 onViewportChange={handleViewportChange}
                 isCaptureMode={isCaptureMode}
               />
-              {/* 状态栏：行情延迟/复权/时区/策略计算时间 */}
+              {/* [QuoteTrust] - 状态栏：行情来源/实时性/新鲜度、K线数据源/as_of/is_partial/degraded */}
               <div className="tv-chart-status">
-                <span><i className={quoteQuery.data ? 'dot ok' : 'dot warn'}></i>{quoteQuery.data ? `行情延迟 ${((Date.now() - quoteQuery.dataUpdatedAt) / 1000).toFixed(0)}s` : '行情延迟 --'}</span>
+                <span className={quoteStatus.badgeClass}>{quoteStatus.label}</span>
+                {quote?.update_time && <span>quote更新: {formatShanghaiTimeShort(quote.update_time)}</span>}
+                {quote?.freshness_seconds !== undefined && (
+                  <span>新鲜度: {quote.freshness_seconds.toFixed(1)}s</span>
+                )}
+                {barsStatus && (
+                  <span title={barsStatus.reason ?? undefined}>
+                    {barsStatus.label}
+                    {barsStatus.reason ? ` · ${barsStatus.reason}` : ''}
+                  </span>
+                )}
                 <span>复权：前复权</span>
                 <span>时区：Asia/Shanghai</span>
-                <span>策略计算：{formatShanghaiTimeShort(new Date())}</span>
               </div>
             </>
           )}

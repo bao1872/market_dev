@@ -44,6 +44,11 @@ from app.repositories.bar_repository import (
     convert_kline_frequency,
 )
 from app.services.calendar_service import is_trading_day_async
+from app.services.market_status_service import (
+    MARKET_SESSION_AFTERNOON,
+    MARKET_SESSION_MORNING,
+    compute_market_session,
+)
 
 logger = logging.getLogger("services.market_data_aggregation_service")
 
@@ -90,12 +95,17 @@ class BarAggregationResult:
 
 
 def _is_trading_hours(now: datetime | None = None) -> bool:
-    """判断当前是否在 A 股交易时段（周一至周五 9:30-15:00，上海时间）。"""
+    """判断当前是否在 A 股实时交易时段（上午盘/下午盘，午休不算）。
+
+    复用 market_status_service.compute_market_session，与 /market/status 口径一致，
+    不再自行写 9:30-15:00 连续判断。
+    """
     if now is None:
         now = now_shanghai()
-    if now.weekday() >= 5:
-        return False
-    return dt_time(9, 30) <= now.time() <= _DAILY_CLOSE_TIME
+    # 这里只做 weekday 快速判断；节假日场景由调用方按需使用 is_trading_day_async
+    is_trading_day = now.weekday() < 5
+    session_name = compute_market_session(now, is_trading_day)
+    return session_name in (MARKET_SESSION_MORNING, MARKET_SESSION_AFTERNOON)
 
 
 async def _is_trading_hours_async(now: datetime | None = None) -> bool:

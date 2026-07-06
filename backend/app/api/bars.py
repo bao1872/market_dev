@@ -28,10 +28,15 @@ GET /api/v1/bars/health
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import threading
 import time
 import uuid
 from datetime import date, datetime, timedelta
+from datetime import time as dt_time
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -41,10 +46,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.indicator_contract import INDICATOR_BARS
 from app.core.deps import get_db, require_roles
+from app.core.pytdx_adapter import get_pytdx_adapter
 from app.core.redis_client import get_redis
+from app.core.time import now_shanghai
 from app.models.bar import Bar15Min, Bar60Min, BarDaily, BarMinute, BarMonthly, BarWeekly
-from app.schemas.bar import BarListResponse, BarResponse
+from app.schemas.bar import BarListResponse, BarResponse, QuoteResponse
+from app.services.calendar_service import is_trading_day_async
 from app.services.market_data_aggregation_service import MarketDataAggregationService
+from app.services.market_status_service import (
+    MARKET_SESSION_AFTERNOON,
+    MARKET_SESSION_MORNING,
+    compute_market_session,
+)
 
 logger = logging.getLogger("api.bars")
 
@@ -63,6 +76,179 @@ _PAGE_SIZE_LIMITS = {
     "15m": INDICATOR_BARS["15m"],
     "1h": INDICATOR_BARS["1h"],
 }
+
+
+# ===== /quote 实时行情可信化 helpers =====
+
+# pytdx 模块级单例连接锁，防止多线程同时操作同一个同步 socket
+_quote_adapter_lock = threading.Lock()
+_quote_redis_cache_ttl_seconds = 10
+_quote_redis_cache_prefix = "quote"
+
+
+async def _is_quote_realtime_session(session: AsyncSession, now: datetime | None = None) -> bool:
+    """判断当前是否应尝试 pytdx 实时行情（仅上午盘/下午盘）。
+
+    使用 market_status_service.compute_market_session 统一午休口径，
+    不再自行写 9:30-15:00 连续判断。
+    """
+    if now is None:
+        now = now_shanghai()
+    is_trading_day = await is_trading_day_async(session, now.date())
+    session_name = compute_market_session(now, is_trading_day)
+    return session_name in (MARKET_SESSION_MORNING, MARKET_SESSION_AFTERNOON)
+
+
+def _quote_cache_key(instrument_id: uuid.UUID) -> str:
+    return f"{_quote_redis_cache_prefix}:{instrument_id}"
+
+
+async def _quote_cache_get(instrument_id: uuid.UUID) -> dict[str, Any] | None:
+    """从 Redis 读取 quote 短缓存（失败时静默降级，不阻塞请求）。"""
+    try:
+        redis_client = get_redis()
+        raw = await redis_client.get(_quote_cache_key(instrument_id))
+        if not raw:
+            return None
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return None
+        return data
+    except Exception as exc:
+        logger.debug("quote cache get 失败 instrument_id=%s: %s", instrument_id, exc)
+        return None
+
+
+async def _quote_cache_set(instrument_id: uuid.UUID, payload: dict[str, Any]) -> None:
+    """写入 Redis quote 短缓存（失败时静默降级）。"""
+    try:
+        redis_client = get_redis()
+        await redis_client.set(
+            _quote_cache_key(instrument_id),
+            json.dumps(payload, default=str),
+            ex=_quote_redis_cache_ttl_seconds,
+        )
+    except Exception as exc:
+        logger.debug("quote cache set 失败 instrument_id=%s: %s", instrument_id, exc)
+
+
+async def _fetch_pytdx_quote(symbol: str) -> dict[str, Any] | None:
+    """在线程锁保护下调用 pytdx 实时行情，10s 超时。
+
+    失败时返回 None；由调用方决定降级策略，不在本函数伪装实时数据。
+    """
+    adapter = get_pytdx_adapter()
+
+    def _call() -> dict[str, Any] | None:
+        with _quote_adapter_lock:
+            return adapter.get_realtime_quote(symbol)
+
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_call), timeout=10.0)
+    except Exception as exc:
+        logger.warning("pytdx 实时行情失败 symbol=%s: %s", symbol, exc)
+        return None
+
+
+def _quote_freshness_seconds(update_time_str: str) -> float:
+    """根据 update_time 计算行情新鲜度（秒）。"""
+    try:
+        dt = datetime.fromisoformat(update_time_str)
+    except (ValueError, TypeError):
+        return 0.0
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    delta = now_shanghai() - dt
+    return max(0.0, delta.total_seconds())
+
+
+def _daily_fallback_as_of(trade_date: date) -> datetime:
+    """日线 fallback 的默认时间戳为交易日收盘 15:00（上海时间）。"""
+    return datetime.combine(trade_date, dt_time(15, 0), tzinfo=ZoneInfo("Asia/Shanghai"))
+
+
+async def _build_daily_fallback_quote(
+    session: AsyncSession,
+    instrument,
+) -> tuple[dict[str, Any], str | None] | None:
+    """从 DB 最新 2 根日线构造 fallback quote。
+
+    Returns:
+        (quote_dict, degraded_reason) 或 None（无数据）
+    """
+    stmt = (
+        select(BarDaily)
+        .where(BarDaily.instrument_id == instrument.id)
+        .order_by(BarDaily.trade_date.desc())
+        .limit(2)
+    )
+    result = await session.execute(stmt)
+    daily_bars = list(result.scalars().all())
+
+    if not daily_bars:
+        return None
+
+    latest = daily_bars[0]
+    current_price = float(latest.close or 0)
+    prev_close = float(daily_bars[1].close or 0) if len(daily_bars) >= 2 and daily_bars[1].close else current_price
+    if prev_close == 0:
+        change_pct = 0.0
+    else:
+        change_pct = (current_price - prev_close) / prev_close * 100
+
+    as_of = _daily_fallback_as_of(latest.trade_date)
+    update_time = as_of.isoformat()
+
+    return {
+        "instrument_id": instrument.id,
+        "symbol": instrument.symbol,
+        "name": instrument.name,
+        "current_price": round(current_price, 4),
+        "open": round(float(latest.open or 0), 4),
+        "high": round(float(latest.high or 0), 4),
+        "low": round(float(latest.low or 0), 4),
+        "close": round(current_price, 4),
+        "volume": round(float(latest.volume or 0), 2),
+        "prev_close": round(prev_close, 4),
+        "change_pct": round(change_pct, 2),
+        "update_time": update_time,
+        "is_realtime": False,
+        "source": "daily_fallback",
+        "freshness_seconds": _quote_freshness_seconds(update_time),
+        "degraded": False,
+        "degraded_reason": None,
+    }, None
+
+
+def _build_pytdx_quote_response(
+    instrument,
+    pytdx_quote: dict[str, Any],
+) -> dict[str, Any]:
+    """将 pytdx 原始 quote 包装为统一响应字典。"""
+    update_time = pytdx_quote.get("update_time")
+    return {
+        "instrument_id": instrument.id,
+        "symbol": instrument.symbol,
+        "name": instrument.name,
+        "current_price": pytdx_quote.get("current_price"),
+        "open": pytdx_quote.get("open"),
+        "high": pytdx_quote.get("high"),
+        "low": pytdx_quote.get("low"),
+        "close": pytdx_quote.get("close"),
+        "volume": pytdx_quote.get("volume"),
+        "prev_close": pytdx_quote.get("prev_close"),
+        "change_pct": pytdx_quote.get("change_pct"),
+        "update_time": update_time,
+        "is_realtime": True,
+        "source": "pytdx",
+        "freshness_seconds": _quote_freshness_seconds(update_time) if update_time else 0.0,
+        "degraded": False,
+        "degraded_reason": None,
+    }
+
+
+# ===== /bars helpers =====
 
 
 def _parse_date_range(
@@ -332,23 +518,23 @@ async def get_bars(
 
 @router.get(
     "/instruments/{instrument_id}/quote",
-    response_model=dict,
-    summary="获取标的实时报价",
+    response_model=QuoteResponse,
+    summary="获取标的实时报价（可信来源与新鲜度）",
 )
 async def get_instrument_quote(
     instrument_id: uuid.UUID,
     session: AsyncSession = Depends(get_db),
-) -> dict:
-    """获取标的实时报价。
+) -> QuoteResponse:
+    """获取标的实时报价，明确返回数据来源、实时性、新鲜度与降级状态。
 
-    优先从 pytdx 获取实时 1 分钟线数据（is_realtime=True），
-    pytdx 不可用时回退到数据库最新日线（is_realtime=False），
-    两者均无数据返回 404。
+    行为：
+    - 仅上午盘/下午盘尝试 pytdx；pytdx 成功 -> source="pytdx", is_realtime=true。
+    - 非交易时段或 pytdx 失败 -> source="daily_fallback", is_realtime=false。
+    - 交易时段 pytdx 失败会标记 degraded=true 并记录原因；非交易时段 fallback 不算降级。
+    - 使用 Redis 短缓存（10s）削峰，pytdx 单例连接 + 线程锁防止每请求建连。
     """
-    from app.core.pytdx_adapter import connect_pytdx
     from app.models.instrument import Instrument
 
-    # 1. 查询标的（获取 symbol 用于 pytdx 调用）
     stmt = select(Instrument).where(Instrument.id == instrument_id)
     result = await session.execute(stmt)
     instrument = result.scalar_one_or_none()
@@ -358,67 +544,49 @@ async def get_instrument_quote(
             detail="标的不存在",
         )
 
-    symbol = instrument.symbol
+    now = now_shanghai()
+    realtime_session = await _is_quote_realtime_session(session, now)
 
-    # 2. 尝试 pytdx 实时行情（per-request 连接，线程安全）
-    try:
-        import asyncio
+    # 1. 尝试实时行情（仅在交易时段）
+    if realtime_session:
+        cached = await _quote_cache_get(instrument_id)
+        if cached and cached.get("source") == "pytdx":
+            logger.debug("quote cache hit instrument_id=%s", instrument_id)
+            return QuoteResponse(**cached)
 
-        def _fetch_quote() -> dict | None:
-            with connect_pytdx() as adapter:
-                return adapter.get_realtime_quote(symbol)
+        pytdx_quote = await _fetch_pytdx_quote(instrument.symbol)
+        if pytdx_quote is not None:
+            payload = _build_pytdx_quote_response(instrument, pytdx_quote)
+            await _quote_cache_set(instrument_id, payload)
+            logger.info("pytdx quote 成功 instrument_id=%s symbol=%s", instrument_id, instrument.symbol)
+            return QuoteResponse(**payload)
 
-        quote = await asyncio.to_thread(_fetch_quote)
-        if quote is not None:
-            quote["instrument_id"] = str(instrument_id)
-            quote["symbol"] = symbol
-            quote["name"] = instrument.name
-            return quote
-    except Exception as exc:
-        logger.warning("pytdx 实时行情失败 instrument_id=%s: %s", instrument_id, exc)
-
-    # 3. 回退：查询数据库最新 2 根日线
-    stmt_daily = (
-        select(BarDaily)
-        .where(BarDaily.instrument_id == instrument_id)
-        .order_by(BarDaily.trade_date.desc())
-        .limit(2)
-    )
-    result_daily = await session.execute(stmt_daily)
-    daily_bars = list(result_daily.scalars().all())
-
-    if not daily_bars:
+    # 2. 回退到 DB 日线
+    fallback = await _build_daily_fallback_quote(session, instrument)
+    if fallback is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="无行情数据",
         )
 
-    latest = daily_bars[0]
-    current_price = float(latest.close or 0)
-    prev_close = float(daily_bars[1].close or 0) if len(daily_bars) >= 2 and daily_bars[1].close else current_price
-
-    if prev_close == 0:
-        change_pct = 0.0
+    payload, _ = fallback
+    if realtime_session:
+        # 交易时段 pytdx 失败才标记降级
+        payload["degraded"] = True
+        payload["degraded_reason"] = "pytdx 实时行情失败，已降级到日线 fallback"
+        logger.warning(
+            "pytdx quote 失败，降级到日线 fallback instrument_id=%s symbol=%s",
+            instrument_id,
+            instrument.symbol,
+        )
     else:
-        change_pct = (current_price - prev_close) / prev_close * 100
+        logger.debug(
+            "非交易时段，使用日线 fallback instrument_id=%s symbol=%s",
+            instrument_id,
+            instrument.symbol,
+        )
 
-    update_time = latest.trade_date.isoformat() if latest.trade_date else None
-
-    return {
-        "instrument_id": str(instrument_id),
-        "symbol": symbol,
-        "name": instrument.name,
-        "current_price": round(current_price, 4),
-        "open": round(float(latest.open or 0), 4),
-        "high": round(float(latest.high or 0), 4),
-        "low": round(float(latest.low or 0), 4),
-        "close": round(current_price, 4),
-        "volume": round(float(latest.volume or 0), 2),
-        "prev_close": round(prev_close, 4),
-        "change_pct": round(change_pct, 2),
-        "update_time": update_time,
-        "is_realtime": False,
-    }
+    return QuoteResponse(**payload)
 
 # ===== 健康检查 =====
 
