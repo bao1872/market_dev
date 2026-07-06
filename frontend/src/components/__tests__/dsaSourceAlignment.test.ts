@@ -262,3 +262,169 @@ test('DSA_TITLE_HINT: 非 1d 含"当前周期验证图层"', () => {
     )
   }
 })
+
+// ===== 5. Overlay Render/Toggle/Y-Axis Decisions：彻底移除 1d-only / 1w-1mo skip 硬编码 =====
+//
+// [PR #33] - 修 PR #32 遗留：StrategyChart 仍有 4 处硬编码 skip
+//   L1661: if (layer.layer_id === 'dsa_vwap' && timeframe !== '1d') return
+//   L1666: if (layer.layer_id === 'bb' && (timeframe === '1w' || timeframe === '1mo')) return
+//   L2226: if (groupId === 'dsa' && timeframe !== '1d') return
+//   L1503: if (layer.layer_id === 'dsa_vwap' && layers.dsa && timeframe === '1d')
+//
+// 修复：提取为纯函数 shouldRenderDsaLayer / shouldRenderBbLayer / shouldToggleDsa / shouldIncludeDsaInPriceRange
+// 决策只受 layers / mismatch / capture 模式控制，不受 timeframe 跳过
+
+import {
+  shouldAllowBbOverlay,
+  shouldIncludeDsaInPriceRange,
+  shouldRenderBbLayer,
+  shouldRenderDsaLayer,
+  shouldToggleDsa,
+} from '../../utils/dsaOverlayPolicy.ts'
+
+const FEISHU_CAPTURE_LAYERS = ['dsa', 'bb', 'profile', 'node', 'poc'] as const
+
+// --- shouldRenderDsaLayer ---
+
+test('shouldRenderDsaLayer: layer_id 非 dsa_vwap 返回 false', () => {
+  assert.equal(
+    shouldRenderDsaLayer('bb', { dsa: true }, false, '1d'),
+    false,
+    '非 dsa_vwap layer 不应渲染 DSA',
+  )
+})
+
+test('shouldRenderDsaLayer: layers.dsa=false 时全周期 false（开关关闭）', () => {
+  for (const tf of ['1d', '15m', '1h', '1w', '1mo']) {
+    assert.equal(
+      shouldRenderDsaLayer('dsa_vwap', { dsa: false }, false, tf),
+      false,
+      `${tf} layers.dsa=false 不应渲染 DSA`,
+    )
+  }
+})
+
+test('shouldRenderDsaLayer: dsaSourceMismatch=true 时全周期 false（source 不对齐时跳过）', () => {
+  for (const tf of ['1d', '15m', '1h', '1w', '1mo']) {
+    assert.equal(
+      shouldRenderDsaLayer('dsa_vwap', { dsa: true }, true, tf),
+      false,
+      `${tf} dsaSourceMismatch=true 不应渲染 DSA（保留 source mismatch 保护）`,
+    )
+  }
+})
+
+test('shouldRenderDsaLayer: layers.dsa=true + dsaSourceMismatch=false 时全周期 true（不再 1d-only）', () => {
+  // [PR #33] - 修复 L1661: 之前 if (layer.layer_id === 'dsa_vwap' && timeframe !== '1d') return
+  // 现在非 1d 周期 DSA 也可渲染
+  for (const tf of ['1d', '15m', '1h', '1w', '1mo']) {
+    assert.equal(
+      shouldRenderDsaLayer('dsa_vwap', { dsa: true }, false, tf),
+      true,
+      `${tf} layers.dsa=true + matched 应渲染 DSA`,
+    )
+  }
+})
+
+// --- shouldRenderBbLayer ---
+
+test('shouldAllowBbOverlay: 1d/15m/1h/1w/1mo 全部允许 BB overlay', () => {
+  // [PR #33] - BB 全周期支持，1w/1mo 不再被 skip
+  for (const tf of ['1d', '15m', '1h', '1w', '1mo']) {
+    assert.equal(
+      shouldAllowBbOverlay(tf),
+      true,
+      `${tf} 应允许 BB overlay`,
+    )
+  }
+})
+
+test('shouldRenderBbLayer: layer_id 非 bb 返回 false', () => {
+  assert.equal(
+    shouldRenderBbLayer('dsa_vwap', { bb: true }, '1d'),
+    false,
+    '非 bb layer 不应渲染 BB',
+  )
+})
+
+test('shouldRenderBbLayer: layers.bb=false 时全周期 false（开关关闭）', () => {
+  for (const tf of ['1d', '15m', '1h', '1w', '1mo']) {
+    assert.equal(
+      shouldRenderBbLayer('bb', { bb: false }, tf),
+      false,
+      `${tf} layers.bb=false 不应渲染 BB`,
+    )
+  }
+})
+
+test('shouldRenderBbLayer: layers.bb=true 时 1w/1mo 也 true（不再 skip）', () => {
+  // [PR #33] - 修复 L1666: 之前 if (layer.layer_id === 'bb' && (timeframe === '1w' || timeframe === '1mo')) return
+  // 现在 1w/1mo BB 正常渲染
+  assert.equal(shouldRenderBbLayer('bb', { bb: true }, '1w'), true, '1w BB 应渲染')
+  assert.equal(shouldRenderBbLayer('bb', { bb: true }, '1mo'), true, '1mo BB 应渲染')
+  assert.equal(shouldRenderBbLayer('bb', { bb: true }, '1d'), true, '1d BB 应渲染')
+  assert.equal(shouldRenderBbLayer('bb', { bb: true }, '15m'), true, '15m BB 应渲染')
+  assert.equal(shouldRenderBbLayer('bb', { bb: true }, '1h'), true, '1h BB 应渲染')
+})
+
+// --- shouldToggleDsa ---
+
+test('shouldToggleDsa: capture 模式锁定 dsa 时返回 false（保留 capture 锁定）', () => {
+  // [feishu-capture] - 截图模式下 DSA 不可关闭
+  assert.equal(
+    shouldToggleDsa('dsa', true, FEISHU_CAPTURE_LAYERS),
+    false,
+    'capture 模式 DSA 不可 toggle',
+  )
+})
+
+test('shouldToggleDsa: 非 capture 模式 groupId 非 dsa 时返回 true（不归此函数管）', () => {
+  // 非 dsa group 的 toggle 由其他逻辑控制（保留 bb/profile/node/poc 的 toggle）
+  assert.equal(
+    shouldToggleDsa('bb', false, FEISHU_CAPTURE_LAYERS),
+    true,
+    '非 dsa group 不归此函数管，应返回 true 不阻塞',
+  )
+})
+
+test('shouldToggleDsa: 非 capture 模式 + groupId=dsa 返回 true（不再 1d-only）', () => {
+  // [PR #33] - 修复 L2226: 之前 if (groupId === 'dsa' && timeframe !== '1d') return
+  // 现在 DSA toggle 全周期可切换（timeframe 不再参与决策）
+  assert.equal(
+    shouldToggleDsa('dsa', false, FEISHU_CAPTURE_LAYERS),
+    true,
+    '非 capture 模式 DSA toggle 应可切换',
+  )
+})
+
+// --- shouldIncludeDsaInPriceRange ---
+
+test('shouldIncludeDsaInPriceRange: layer_id 非 dsa_vwap 返回 false', () => {
+  assert.equal(
+    shouldIncludeDsaInPriceRange('bb', { dsa: true }, '1d'),
+    false,
+    '非 dsa_vwap layer 不参与 y-axis range',
+  )
+})
+
+test('shouldIncludeDsaInPriceRange: layers.dsa=false 时全周期 false（开关关闭）', () => {
+  for (const tf of ['1d', '15m', '1h', '1w', '1mo']) {
+    assert.equal(
+      shouldIncludeDsaInPriceRange('dsa_vwap', { dsa: false }, tf),
+      false,
+      `${tf} layers.dsa=false 不参与 y-axis range`,
+    )
+  }
+})
+
+test('shouldIncludeDsaInPriceRange: layers.dsa=true 时全周期 true（不再仅 1d 纳入）', () => {
+  // [PR #33] - 修复 L1503: 之前 if (layer.layer_id === 'dsa_vwap' && layers.dsa && timeframe === '1d')
+  // 现在 DSA 全周期参与 y-axis range，避免非 1d DSA 被轴范围挤掉
+  for (const tf of ['1d', '15m', '1h', '1w', '1mo']) {
+    assert.equal(
+      shouldIncludeDsaInPriceRange('dsa_vwap', { dsa: true }, tf),
+      true,
+      `${tf} DSA 应参与 y-axis range`,
+    )
+  }
+})

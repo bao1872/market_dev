@@ -205,6 +205,22 @@ node --experimental-strip-types --test src/components/__tests__/dsaSourceAlignme
 - `DSA_TITLE_HINT('1d')` 含 "日线结构锚"；
 - `DSA_TITLE_HINT('15m'/'1h'/'1w'/'1mo')` 含 "当前周期验证图层" 且不含 "日线结构锚"。
 
+前端 overlay 渲染/toggle/y-axis 决策回归（PR #33 前端硬编码清理，`src/components/__tests__/dsaSourceAlignment.test.ts` 第 5 节）：
+- `shouldRenderDsaLayer('dsa_vwap', {dsa:true}, false, tf)` 在 1d/15m/1h/1w/1mo 全部返回 `true`（不再 `timeframe !== '1d'` 跳过）；
+- `shouldRenderDsaLayer('dsa_vwap', {dsa:false}, false, tf)` 全周期 `false`（开关关闭）；
+- `shouldRenderDsaLayer('dsa_vwap', {dsa:true}, true, tf)` 全周期 `false`（dsaSourceMismatch=true 跳过，保留 source mismatch 保护）；
+- `shouldRenderDsaLayer('bb', {dsa:true}, false, tf)` 返回 `false`（layer_id 非 dsa_vwap 不归此函数管）；
+- `shouldAllowBbOverlay('1d'/'15m'/'1h'/'1w'/'1mo')` 全部返回 `true`（BB 全周期支持，1w/1mo 不再被 skip）；
+- `shouldRenderBbLayer('bb', {bb:true}, '1w'/'1mo')` 返回 `true`（不再 `timeframe === '1w' || '1mo'` 跳过）；
+- `shouldRenderBbLayer('bb', {bb:false}, tf)` 全周期 `false`（开关关闭）；
+- `shouldRenderBbLayer('dsa_vwap', {bb:true}, '1d')` 返回 `false`（layer_id 非 bb 不归此函数管）；
+- `shouldToggleDsa('dsa', true, FEISHU_CAPTURE_LAYERS)` 返回 `false`（capture 模式锁定 DSA 不可关闭，保留截图模式锁定）；
+- `shouldToggleDsa('dsa', false, FEISHU_CAPTURE_LAYERS)` 返回 `true`（非 capture 模式 DSA 全周期可切换，不再 `timeframe !== '1d'` disable）；
+- `shouldToggleDsa('bb', false, FEISHU_CAPTURE_LAYERS)` 返回 `true`（非 dsa group 不归此函数管，不阻塞）；
+- `shouldIncludeDsaInPriceRange('dsa_vwap', {dsa:true}, tf)` 在 1d/15m/1h/1w/1mo 全部返回 `true`（不再 `timeframe === '1d'` 限制，DSA 全周期参与 y-axis range）；
+- `shouldIncludeDsaInPriceRange('dsa_vwap', {dsa:false}, tf)` 全周期 `false`（开关关闭）；
+- `shouldIncludeDsaInPriceRange('bb', {dsa:true}, '1d')` 返回 `false`（layer_id 非 dsa_vwap 不归此函数管）。
+
 回归命令：
 
 ```bash

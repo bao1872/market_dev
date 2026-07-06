@@ -3,6 +3,18 @@
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
 ## 2026-07-07
+- CHANGE-20260707-043: Indicator Overlay Frontend Hardcode Cleanup
+  - 修 PR #32 遗留：StrategyChart 仍有 4 处 1d-only / 1w-1mo skip 硬编码
+  - L2226 `if (groupId === 'dsa' && timeframe !== '1d') return` → `shouldToggleDsa(groupId, isCaptureMode, captureLayers)`
+  - L1661 `if (layer.layer_id === 'dsa_vwap' && timeframe !== '1d') return` → `shouldRenderDsaLayer(layerId, layers, dsaSourceMismatch, timeframe)`
+  - L1666 `if (layer.layer_id === 'bb' && (timeframe === '1w' || timeframe === '1mo')) return` → `shouldRenderBbLayer(layerId, layers, timeframe)`
+  - L1503 `if (layer.layer_id === 'dsa_vwap' && layers.dsa && timeframe === '1d')` → `shouldIncludeDsaInPriceRange(layerId, layers, timeframe)`
+  - 新增 5 个纯函数到 `dsaOverlayPolicy.ts`：`shouldAllowBbOverlay` / `shouldRenderDsaLayer` / `shouldRenderBbLayer` / `shouldToggleDsa` / `shouldIncludeDsaInPriceRange`
+  - DSA toggle 全周期可切换（非 capture 模式），DSA/BB 渲染不再按 timeframe 跳过，DSA 全周期参与 y-axis range
+  - 保留 source mismatch 保护（shouldRenderDsaLayer 在 mismatch=true 时全周期 false）
+  - 保留 capture 锁定（shouldToggleDsa 在 capture 模式锁定 DSA 不可关闭）
+  - 前端新增 14 个 contract 测试（dsaSourceAlignment.test.ts 第 5 节），后端 42 测试不变（PR #32 修复仍有效）
+  - 不改 DSA/BB 数学公式，不改后端 API 契约，不改 cache version（仍 v5）
 - CHANGE-20260707-042: Indicator Overlay All Timeframes
   - 修复 PR #31 的两个错误规则：DSA 1d-only 误禁用 + 1w/1mo BB 字段被直接 pop
   - DSA overlay 全周期支持（1d/15m/1h/1w/1mo），不再 1d-only by design
