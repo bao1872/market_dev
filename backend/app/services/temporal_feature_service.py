@@ -78,6 +78,13 @@ _NULL_DAILY_CONTEXT: dict[str, Any] = {
     # V1.9 confirmed raw alias（可能 <0 或 >1，反映突破 confirmed pivot）
     "daily_price_position_in_confirmed_swing_raw": None,
     "daily_confirmed_swing_breakout_state": None,
+    # V1.10 developing swing 字段（当前正在发生的回落/反弹结构）
+    "daily_developing_swing_dir": None,
+    "daily_developing_swing_high": None,
+    "daily_developing_swing_low": None,
+    "daily_price_position_in_developing_swing_0_1": None,
+    "daily_distance_to_developing_swing_high_atr": None,
+    "daily_distance_to_developing_swing_low_atr": None,
 }
 _NULL_M15_RESPONSE: dict[str, Any] = {
     "m15_price_position_in_swing_0_1": None,
@@ -95,6 +102,13 @@ _NULL_M15_RESPONSE: dict[str, Any] = {
     "m15_active_swing_low": None,
     "m15_distance_to_active_swing_high_atr": None,
     "m15_distance_to_active_swing_low_atr": None,
+    # V1.10 developing swing 字段（当前正在发生的回落/反弹结构）
+    "m15_developing_swing_dir": None,
+    "m15_developing_swing_high": None,
+    "m15_developing_swing_low": None,
+    "m15_price_position_in_developing_swing_0_1": None,
+    "m15_distance_to_developing_swing_high_atr": None,
+    "m15_distance_to_developing_swing_low_atr": None,
 }
 _NULL_DERIVED_RELATION: dict[str, Any] = {
     "m15_position_relative_to_daily": None,
@@ -350,6 +364,19 @@ def _compute_daily_context(
     result["daily_confirmed_swing_breakout_state"] = swing_pos.get(
         "confirmed_swing_breakout_state"
     )
+    # V1.10 developing swing 字段（当前正在发生的回落/反弹结构）
+    result["daily_developing_swing_dir"] = swing_pos.get("developing_swing_dir")
+    result["daily_developing_swing_high"] = swing_pos.get("developing_swing_high")
+    result["daily_developing_swing_low"] = swing_pos.get("developing_swing_low")
+    result["daily_price_position_in_developing_swing_0_1"] = swing_pos.get(
+        "price_position_in_developing_swing_0_1"
+    )
+    result["daily_distance_to_developing_swing_high_atr"] = swing_pos.get(
+        "distance_to_developing_swing_high_atr"
+    )
+    result["daily_distance_to_developing_swing_low_atr"] = swing_pos.get(
+        "distance_to_developing_swing_low_atr"
+    )
 
     # 7. cost position
     result["daily_distance_to_node_above_atr"] = cost_pos.get(
@@ -466,6 +493,19 @@ def _compute_m15_response(
     result["m15_distance_to_active_swing_low_atr"] = swing_pos.get(
         "distance_to_active_swing_low_atr"
     )
+    # V1.10 developing swing 字段（当前正在发生的回落/反弹结构）
+    result["m15_developing_swing_dir"] = swing_pos.get("developing_swing_dir")
+    result["m15_developing_swing_high"] = swing_pos.get("developing_swing_high")
+    result["m15_developing_swing_low"] = swing_pos.get("developing_swing_low")
+    result["m15_price_position_in_developing_swing_0_1"] = swing_pos.get(
+        "price_position_in_developing_swing_0_1"
+    )
+    result["m15_distance_to_developing_swing_high_atr"] = swing_pos.get(
+        "distance_to_developing_swing_high_atr"
+    )
+    result["m15_distance_to_developing_swing_low_atr"] = swing_pos.get(
+        "distance_to_developing_swing_low_atr"
+    )
 
     # 5. m15_sqzmom_change_since_swing_anchor
     sqzmom_now = vol_mom.get("sqzmom_val")
@@ -533,9 +573,10 @@ def _compute_derived_relation(
     }
 
     # 1. m15_position_relative_to_daily
-    # V1.9: 改用 active swing（clip [0,1]），避免 confirmed raw 出现 -1.755 极端值
-    daily_pos = daily_context.get("daily_price_position_in_active_swing_0_1")
-    m15_pos = m15_response.get("m15_price_position_in_active_swing_0_1")
+    # V1.10: 改用 developing swing（当前正在发生的回落/反弹结构，clip [0,1]）
+    # 不回退 active major leg 或 confirmed raw
+    daily_pos = daily_context.get("daily_price_position_in_developing_swing_0_1")
+    m15_pos = m15_response.get("m15_price_position_in_developing_swing_0_1")
     if daily_pos is not None and m15_pos is not None:
         result["m15_position_relative_to_daily"] = float(m15_pos) - float(daily_pos)
 

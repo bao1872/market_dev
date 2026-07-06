@@ -79,11 +79,11 @@ APP_ENV=test TEST_DATABASE_URL=postgresql+asyncpg://bz:bz@localhost:5432/bz_stoc
 pytest tests/test_delivery_worker_monitor_eligible.py tests/test_monitor_batch_live_minute.py tests/test_market_data_aggregation_partial_daily.py tests/test_quote_timezone.py -q
 ```
 
-## 3.3 V1.9 active swing + capture + auto-trigger 回归（blocking）
+## 3.3 V1.9 + V1.10 swing + capture + auto-trigger 回归（blocking）
 
-任何修改 `backend/app/services/structural_factor_service.py`、`backend/app/services/temporal_feature_service.py`、`backend/app/worker.py`、`frontend/src/components/StockStructuralStatePanel.tsx`、`frontend/src/pages/StockDetailPage.tsx`、`frontend/src/pages/CaptureStockPage.tsx`、`frontend/src/styles/global.scss` 必须跑 V1.9 回归测试。
+任何修改 `backend/app/services/structural_factor_service.py`、`backend/app/services/temporal_feature_service.py`、`backend/app/worker.py`、`frontend/src/components/StockStructuralStatePanel.tsx`、`frontend/src/pages/StockDetailPage.tsx`、`frontend/src/pages/CaptureStockPage.tsx`、`frontend/src/styles/global.scss` 必须跑 V1.9 + V1.10 回归测试。
 
-后端 active swing 计算回归：
+后端 active swing 计算回归（V1.9）：
 - 上涨突破场景：close > confirmed_swing_high 时 `price_position_in_confirmed_swing_raw > 1` 且 `price_position_in_active_swing_0_1 in [0, 1]`；
 - 下跌破位场景：close < confirmed_swing_low 时 `price_position_in_confirmed_swing_raw < 0` 且 `price_position_in_active_swing_0_1 in [0, 1]`；
 - 单边上涨场景：`active_swing_high` 跟随最新高点更新，`active_swing_dir == 1`；
@@ -92,15 +92,26 @@ pytest tests/test_delivery_worker_monitor_eligible.py tests/test_monitor_batch_l
 - `confirmed_swing_breakout_state` 三态分类正确（inside/above_confirmed_high/below_confirmed_low/null）；
 - fallback 模式（无 confirmed pivot）使用最近 120 根 bar high/low，`active_swing_dir is None`。
 
+后端 developing swing 计算回归（V1.10）：
+- major up leg + active_high_bar_idx < current_idx（回落场景）：`developing_swing_dir == -1`，`developing_swing_high == active_swing_high`，`developing_swing_low == min(lows[active_high_bar_idx:now])`，**不得等于 active_swing_low**（active_swing_low 仍是大段起点，developing_swing_low 是从 active_high 起回落段的最低 low）；
+- major down leg + active_low_bar_idx < current_idx（反弹场景）：`developing_swing_dir == 1`，`developing_swing_low == active_swing_low`，`developing_swing_high == max(highs[active_low_bar_idx:now])`，**不得等于 active_swing_high**；
+- major up leg + active_high_bar_idx == current_idx（继续创新高）：`developing_swing_dir == 1`，`developing_swing_high == active_swing_high`，`developing_swing_low == active_swing_low`；
+- major down leg + active_low_bar_idx == current_idx（继续创新低）：`developing_swing_dir == -1`，`developing_swing_high == active_swing_high`，`developing_swing_low == active_swing_low`；
+- 000100 类似 case（4.45 → 6.26 → 5.19 回落）：`developing_swing_low` 接近当前回落 low（如 5.0），**不得等于 4.45**（4.45 是大段起点，不是从 6.26 回落后的当前 developing low）；
+- fallback 模式（无 confirmed pivot）：`developing_swing_dir is None`，developing = active；
+- `bars_since_developing_swing_high`/`bars_since_developing_swing_low` 与 bar 索引对齐；
+- `developing_swing_range <= 0` 或 high/low 缺失时所有 developing 比例字段为 null。
+
 DSA age 一致性回归：
 - `age_bars` == `current_dsa_segment_age_bars`（+1 口径，含起始 bar）；
 - `segment_duration_ratio` 等段间对比字段使用统一 +1 口径；
 - 不再出现 V1.7 `age_bars` 与 V1.8 `current_dsa_segment_age_bars` 相差 1 或 2 的情况。
 
-Temporal relation active swing 回归：
-- `m15_position_relative_to_daily` == `m15_price_position_in_active_swing_0_1 - daily_price_position_in_active_swing_0_1`；
-- 强趋势段不再出现 -1.755 等极端值（位置差值范围 [-1, 1]）；
-- V1.8 `daily_price_position_in_swing_0_1`/`m15_price_position_in_swing_0_1` 仍保留在响应中（向后兼容）但 derived_relation 不再使用。
+Temporal relation developing swing 回归（V1.10）：
+- `m15_position_relative_to_daily` == `m15_price_position_in_developing_swing_0_1 - daily_price_position_in_developing_swing_0_1`；
+- 任一 developing 字段缺失返回 null，**不回退 active major leg 或 confirmed raw**；
+- V1.8 `daily_price_position_in_swing_0_1`/`m15_price_position_in_swing_0_1` 仍保留在响应中（向后兼容）但 derived_relation 不再使用；
+- V1.9 active swing 字段仍保留在响应中（向后兼容）但 derived_relation 不再使用。
 
 盘后 publish auto-trigger 回归：
 - DSA `scheduled + completed` run 完成后自动调用 `create_after_close_run(trade_date, run_id)`；
@@ -109,10 +120,11 @@ Temporal relation active swing 回归：
 - `create_after_close_run` 失败不传播异常，仅记录日志，不影响 `strategy_batch_worker` 主流程；
 - 同 `trade_date` 已有 after_close 任务时返回已有任务（幂等）。
 
-前端契约回归：
-- Swing 摘要卡只显示 active 标签字段（`active_swing_high`/`active_swing_low`/`bars_since_active_swing_high`/`bars_since_active_swing_low`/`price_position_in_active_swing_0_1`/`distance_to_active_swing_high_atr`/`distance_to_active_swing_low_atr`）；
-- 禁止模糊标签「最近 swing high/low」「Swing 位置[0,1]」；时序位置标签必须含 `active` 或 `confirmed` 前缀；
-- confirmed pivot 字段只在明细卡显示，不在摘要卡；
+前端契约回归（V1.10）：
+- Swing 摘要卡只显示 developing 标签字段（`developing_swing_dir`/`developing_swing_high`/`developing_swing_low`/`bars_since_developing_swing_high`/`bars_since_developing_swing_low`/`price_position_in_developing_swing_0_1`/`distance_to_developing_swing_high_atr`/`distance_to_developing_swing_low_atr`）；
+- 摘要卡不得出现 `Active high`/`Active low`/`Active 位置` 作为主字段（active major leg 在明细 JSON 中查看）；
+- 禁止模糊标签「最近 swing high/low」「Swing 位置[0,1]」；时序位置标签必须含 `developing` 或 `confirmed` 前缀；
+- active major leg 字段、confirmed pivot 字段只在明细卡显示，不在摘要卡；
 - capture 模式（`capture=feishu` 或 `capture=1` 或 `hideStructuralState=1`）不渲染结构按钮、右侧结构列、Temporal Features；
 - capture 模式 `.tv-side-column { display: none; }` 且 `.tv-chart-column { width: 100%; }`；
 - capture 模式 `data-testid="tv-chart-column"` 挂在 `.tv-chart-column` 元素（不在 `.tv-content`）；
