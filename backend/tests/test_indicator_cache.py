@@ -65,6 +65,44 @@ def test_cache_key_construction() -> None:
     assert key_none_adj != key, "不同 adj 应生成不同键"
 
 
+def test_cache_algorithm_version_bumped_to_v4() -> None:
+    """[PR #31] - ALGORITHM_VERSION 必须 bump 到 v4。
+
+    修复根因：PR #30 修改了 source_bar_times 格式（从日线日期→按 timeframe），
+    但 ALGORITHM_VERSION 仍是 v3，导致旧缓存（v3，旧格式 source_bar_times）被命中，
+    返回旧格式数据，触发 DSA mismatch。
+
+    bump 到 v4 后，旧 v3 缓存键自然不匹配，强制重算。
+    """
+    assert indicator_cache.ALGORITHM_VERSION == "v4", (
+        f"ALGORITHM_VERSION 应为 v4（PR #31 source_bar_times 格式变更后 bump），"
+        f"实际为 {indicator_cache.ALGORITHM_VERSION}"
+    )
+
+    # 验证新 key 包含 v4，不包含 v3
+    key = indicator_cache.build_cache_key(
+        TEST_INSTRUMENT_ID, "1d", "qfq", "2026-07-06",
+    )
+    assert ":v4" in key, f"新缓存键应含 v4: {key}"
+    assert ":v3" not in key, f"新缓存键不应含 v3: {key}"
+
+
+def test_old_v3_cache_key_not_matched() -> None:
+    """[PR #31] - 旧 v3 缓存键不会被新版本命中。
+
+    构造一个 v3 key，验证与当前 build_cache_key 生成的 key 不同。
+    """
+    new_key = indicator_cache.build_cache_key(
+        TEST_INSTRUMENT_ID, "15m", "qfq", "2026-07-06",
+    )
+    old_v3_key = (
+        f"indicator:{TEST_INSTRUMENT_ID}:15m:qfq:2026-07-06:v3"
+    )
+    assert new_key != old_v3_key, (
+        f"新版本 key 不应等于旧 v3 key: new={new_key}, old_v3={old_v3_key}"
+    )
+
+
 # ============================================================
 # 测试 2: 缓存命中
 # ============================================================

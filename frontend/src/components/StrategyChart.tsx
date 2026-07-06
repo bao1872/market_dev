@@ -260,6 +260,9 @@ function formatTime(timeStr: string): string {
 // [chartViewport] - 时间键规范化和时间轴刻度函数已迁移至 src/utils/chartTime.ts
 //   纯 .ts 文件便于 Node --experimental-strip-types 单元测试（DSA source alignment contract test）
 import { normalizeChartTime, timeTicks } from '@/utils/chartTime'
+// [DSA Overlay Policy] - DSA 周期策略与禁用提示文案（PR #31）
+//   15m/1h 下 DSA 不渲染也不校验 mismatch，避免误报"DSA 数据源不一致"
+import { DSA_DISABLED_HINT, shouldCheckDsaMismatch } from '@/utils/dsaOverlayPolicy'
 
 // ===== 指标计算模块（从 charts.js 迁移）=====
 
@@ -1589,8 +1592,9 @@ function drawTrading(
   // 7. 通用渲染器：渲染后端返回的策略指标图层（DSA VWAP 等）
   // [DSA 数据源校验] - 检测 K 线时间与 indicators.source_bar_times 一致性，
   //   不一致则跳过 DSA 渲染并在控制台输出诊断信息（避免指标与 K 线错位）
+  //   [PR #31] - 仅在 1d 校验 mismatch（DSA 不在 15m/1h 渲染，校验无意义且会误报）
   let dsaSourceMismatch = false
-  if (indicators?.source_bar_times && displayTimes.length > 0) {
+  if (shouldCheckDsaMismatch(timeframe) && indicators?.source_bar_times && displayTimes.length > 0) {
     const klineKeys = new Set<string>()
     displayTimes.forEach(t => {
       const key = normalizeChartTime(t, timeframe)
@@ -1615,6 +1619,40 @@ function drawTrading(
   }
   // [DSA 数据源校验] - 同步到 state 供组件 useEffect 读取并渲染页面 UI 提示横幅
   state.dsaSourceMismatch = dsaSourceMismatch
+
+  // [PR #31] - ?debugIndicatorAlignment=1 诊断输出（默认不打印，不刷日志）
+  //   输出 bars/indicators 对齐信息：timeframe, count, first/last, matched ratio
+  if (typeof window !== 'undefined' && window.location.search.includes('debugIndicatorAlignment=1')) {
+    const barsFirst = displayTimes[0] ?? 'N/A'
+    const barsLast = displayTimes[displayTimes.length - 1] ?? 'N/A'
+    console.table({
+      bars: {
+        timeframe,
+        count: displayTimes.length,
+        first: barsFirst,
+        last: barsLast,
+        canonical_first: normalizeChartTime(barsFirst, timeframe) ?? 'N/A',
+        canonical_last: normalizeChartTime(barsLast, timeframe) ?? 'N/A',
+      },
+      dsa_mismatch: {
+        check_enabled: shouldCheckDsaMismatch(timeframe),
+        mismatched: dsaSourceMismatch,
+        source_bar_hash: indicators?.source_bar_hash ?? 'N/A',
+        source_bar_times_count: indicators?.source_bar_times?.length ?? 0,
+      },
+    })
+    if (indicators?.layers) {
+      console.table(
+        indicators.layers.map(l => ({
+          layer_id: l.layer_id,
+          renderer: l.renderer,
+          fields: l.fields?.join(','),
+          time_count: indicators.data?.[l.strategy_id ?? '']?.time?.length ?? 0,
+        })),
+      )
+    }
+  }
+
   if (indicators && indicators.layers && indicators.data) {
     indicators.layers.forEach(layer => {
       // DSA VWAP 指标受 dsa 图层开关控制
@@ -2295,7 +2333,7 @@ export function StrategyChart({
             <label
               key={g.id}
               className={clsx('tv-strategy-legend-item', !active && 'off', dsaDisabled && 'disabled')}
-              title={dsaDisabled ? '趋势参考价仅支持日线' : undefined}
+              title={dsaDisabled ? DSA_DISABLED_HINT : undefined}
               onClick={() => handleToggleGroup(g.id)}
             >
               <i className="tv-legend-dot" style={{ '--legend-color': g.color } as React.CSSProperties} />

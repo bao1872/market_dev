@@ -178,6 +178,39 @@ cd /root/web_dev/frontend
 node --experimental-strip-types --test src/components/__tests__/dsaSourceAlignment.test.ts
 ```
 
+## 3.5 Indicator overlay alignment 回归（blocking）
+
+任何修改 `backend/app/services/indicator_cache.py`（`ALGORITHM_VERSION`）、`backend/app/services/indicator_service.py::_adapt_watchlist_bb`、`frontend/src/utils/dsaOverlayPolicy.ts`、`frontend/src/components/StrategyChart.tsx`（DSA disabled / BB overlay 对齐 / debug 工具）必须跑 indicator overlay alignment 回归测试。
+
+后端 cache schema 版本回归：
+- `indicator_cache.ALGORITHM_VERSION == "v4"`（PR #31 bump）；
+- 旧 v3 cache key 与新 `build_cache_key` 生成的 key 不相等（旧缓存自然失效）；
+- 修改 indicator 计算逻辑、`source_bar_times` 格式、BB/SQZMOM/MACD 计算路径必须 bump `ALGORITHM_VERSION`。
+
+后端 BB overlay 计算回归：
+- `_adapt_watchlist_bb` 在 15m 用 `macd_bars` 调用 `compute_bollinger(macd_bars, length=20, mult=2.0)` 计算 BB，不再用日线阶梯线映射；
+- 15m BB 长度与 `macd_bars` 长度对齐（非日线长度）；
+- 15m BB 与 `compute_bollinger(macd_bars)` 计算结果一致（数值近似相等）；
+- 1h 同理；
+- `len(macd_bars) < 20` 时 BB 字段填 `None`，`time` 数组仍与 `macd_bars` 对齐。
+
+前端 DSA overlay policy 回归（`src/components/__tests__/dsaSourceAlignment.test.ts`）：
+- `DSA_DISABLED_HINT` 包含 "DSA.*日线结构锚" 与 "Swing|BB|SQZMOM"；
+- `shouldCheckDsaMismatch('15m')` 返回 `false`（不校验 mismatch）；
+- `shouldCheckDsaMismatch('1h')` 返回 `false`；
+- `shouldCheckDsaMismatch('1d')` 返回 `true`（仍校验）。
+
+回归命令：
+
+```bash
+cd /root/web_dev/backend
+APP_ENV=test TEST_DATABASE_URL=postgresql+asyncpg://bz:bz@127.0.0.1:5432/bz_stock_test \
+pytest tests/test_indicator_cache.py tests/test_indicator_service.py -v
+
+cd /root/web_dev/frontend
+node --experimental-strip-types --test src/components/__tests__/dsaSourceAlignment.test.ts
+```
+
 ## 4. CI 门禁
 
 阻断项：

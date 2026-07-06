@@ -675,3 +675,46 @@ DSA overlay（`indicators.source_bar_times` / `indicators.source_bar_hash`）必
 - 1d 时间轴刻度仅显示 `MM-DD`。
 - 不应在 15m 图表显示 `03:00` 这类非 A 股交易时间（naive datetime 在非亚洲时区浏览器中的时区误判）。
 
+### 12.5 Indicator overlay 周期策略与 cache schema 版本契约
+
+#### 12.5.1 DSA overlay 周期策略（1d-only by design）
+
+DSA（Pine 标签 + VWAP）是日线级别结构锚，**仅支持 1d 周期渲染**。15m/1h 下 DSA overlay 按钮必须 disabled，并提示：
+
+> DSA VWAP 当前仅支持日线结构锚；15m/1h 请使用 Swing、BB、SQZMOM。
+
+约束：
+
+- DSA overlay 按钮在 15m/1h 下 `disabled=true`，提示文案来自 `frontend/src/utils/dsaOverlayPolicy.ts::DSA_DISABLED_HINT`；
+- DSA source mismatch 校验由 `shouldCheckDsaMismatch(timeframe)` 控制：仅 1d 返回 `true`，15m/1h 返回 `false`，避免 15m/1h 误报 "DSA 数据源不一致"；
+- 右侧 `StockStructuralStatePanel` 仍可显示 daily DSA 背景和 m15 response（结构状态因子不受图层禁用影响）；
+- 不得通过关闭 mismatch 保护或伪造 source 数据让 15m/1h 渲染 DSA。
+
+#### 12.5.2 BB/MACD/SQZMOM overlay 跟随当前周期
+
+BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars 计算，不允许用日线阶梯线伪装成 15m/1h BB：
+
+- `indicator_service._adapt_watchlist_bb` 在 15m/1h 必须用 `macd_bars`（当前 timeframe bars）调用 `compute_bollinger(macd_bars, length=20, mult=2.0)` 重新计算 BB upper/mid/lower/pos/width；
+- 字段映射：`bb_pos_01` → `bb_pos`，`bb_width_norm` → `bb_width`；NaN 转 `None` 以保证 JSON 可序列化；
+- 当 `len(macd_bars) < 20`（BB 计算窗口不足）时，BB 字段填 `None`，但 `time` 数组仍与 `macd_bars` 对齐；
+- MACD / SQZMOM 同理：必须用 `macd_bars`（当前 timeframe）计算，不允许串日线；
+- BB overlay 时间轴必须用 `buildDisplayIndexMap` 按 canonical time 对齐，禁止尾部截取（tail slice）。
+
+#### 12.5.3 Indicator cache schema 版本契约
+
+`backend/app/services/indicator_cache.py::ALGORITHM_VERSION` 是 indicator 缓存的 schema 版本号。任何修改 indicator 计算逻辑、`source_bar_times` 格式、BB/SQZMOM/MACD 计算路径的变更**必须 bump `ALGORITHM_VERSION`**，使旧缓存自然失效：
+
+- cache key 格式：`indicator:{algorithm_version}:{timeframe}:{adj}:{bars}:{symbol}`；
+- 旧版本 cache key 与新版本不匹配，强制重算，避免旧格式 `source_bar_times` 或日线阶梯线 BB 污染渲染；
+- 禁止通过手动 `DEL` 单只股票 key 修复缓存问题（不可扩展，且无法覆盖所有时间周期）；
+- 当前 `ALGORITHM_VERSION = "v4"`（PR #31：source_bar_times 按 timeframe 格式化 + 15m/1h BB 改用 macd_bars 计算）。
+
+#### 12.5.4 ?debugIndicatorAlignment=1 诊断工具
+
+`StrategyChart` 支持通过 URL 参数 `?debugIndicatorAlignment=1` 输出 overlay 对齐诊断，默认不打印，不刷日志：
+
+- `console.table` 输出 `bars`（timeframe/count/first/last/canonical_first/canonical_last）；
+- `console.table` 输出 `dsa_mismatch`（check_enabled/mismatched/source_bar_hash/source_bar_times_count）；
+- `console.table` 输出 `indicators.layers`（layer_id/renderer/fields/time_count）；
+- 仅用于诊断 15m/1h overlay 对齐问题，不影响生产渲染逻辑。
+
