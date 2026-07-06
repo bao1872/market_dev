@@ -207,8 +207,6 @@ def test_df_to_responses_intraday_trade_time_has_shanghai_tzinfo() -> None:
     错误时间（如 2026-07-07 03:00）。返回 aware datetime(+08:00) 后，
     前端 new Date(...) 正确解析为 UTC 时刻，再转 Asia/Shanghai 显示正确。
     """
-    from zoneinfo import ZoneInfo
-
     dates = pd.date_range("2026-06-16 09:30", periods=3, freq="15min")
     df = pd.DataFrame({
         "open": [10.0] * 3,
