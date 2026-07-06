@@ -113,6 +113,9 @@ class MonitorCycleResult:
     total_events_detected: int = 0
     total_events_written: int = 0  # after cooldown filter
     total_notifications_created: int = 0
+    last_minute_bar_time: datetime | None = None
+    last_minute_data_source: str | None = None
+    last_minute_is_partial: bool = False
     errors: list[str] = field(default_factory=list)
 
 
@@ -207,11 +210,16 @@ class MonitorBatchService:
             )
 
         logger.info(
-            "监控周期完成: instruments=%d states=%d events_detected=%d "
-            "events_written=%d recipients=%d notifications=%d errors=%d",
+            "[monitor_batch] cycle done instruments=%d states=%d "
+            "events_detected=%d events_written=%d notifications=%d "
+            "minute_last_bar_time=%s minute_data_source=%s minute_is_partial=%s errors=%d",
             result.total_instruments, result.total_states_computed,
             result.total_events_detected, result.total_events_written,
-            total_recipients, result.total_notifications_created, len(result.errors),
+            result.total_notifications_created,
+            result.last_minute_bar_time,
+            result.last_minute_data_source or "unknown",
+            result.last_minute_is_partial,
+            len(result.errors),
         )
         return result
 
@@ -288,7 +296,7 @@ class MonitorBatchService:
             rows = [
                 (inst_id, uid) for inst_id, uid in rows
                 if uid in eligible_user_ids
-            ]
+            ]  # type: ignore[misc]
 
         # 收集所有 instrument_id，批量查询排除指数
         instrument_ids_set = {row[0] for row in rows}
@@ -343,6 +351,30 @@ class MonitorBatchService:
         数据源和新鲜度诊断；返回 df 按原语义升序排列。若传入 limit，则取最后 N 根，
         保持 Node Cluster 输入根数不变。
         """
+        df, _, _ = await self._fetch_md_bars_with_meta(
+            db, instrument_id, timeframe,
+            adj=adj, limit=limit, include_realtime=include_realtime,
+            start_date=start_date, end_date=end_date,
+        )
+        return df
+
+    async def _fetch_md_bars_with_meta(
+        self,
+        db: AsyncSession,
+        instrument_id: uuid.UUID,
+        timeframe: str,
+        *,
+        adj: str = "qfq",
+        limit: int | None = None,
+        include_realtime: bool = True,
+        start_date: date | datetime | None = None,
+        end_date: date | datetime | None = None,
+    ) -> tuple[pd.DataFrame, str, bool]:
+        """通过 MarketDataAggregationService 统一获取行情，并返回数据源与 partial 状态。
+
+        返回：
+            (bars_df, data_source, is_partial)
+        """
         result = await MarketDataAggregationService().get_bars(
             session=db,
             instrument_id=instrument_id,
@@ -355,7 +387,7 @@ class MonitorBatchService:
         df = result.bars
         if limit is not None and not df.empty:
             df = df.tail(limit)
-        return df
+        return df, result.data_source, result.is_partial
 
     async def _process_instrument_evaluation(
         self,
@@ -388,15 +420,17 @@ class MonitorBatchService:
             logger.warning("标的不存在: instrument_id=%s", instrument_id)
             return []
 
-        # a. 获取最新已完成 1m bar
+        # a. 获取最新已完成 1m bar（交易时段从实时源拉，仍剔除最后一根未完成 bar）
         now = datetime.now(UTC)
         today = now.date()
+        minute_data_source = "unknown"
+        minute_is_partial = False
         try:
-            bars_minute = await self._fetch_md_bars(
+            bars_minute, minute_data_source, minute_is_partial = await self._fetch_md_bars_with_meta(
                 db, instrument_id,
                 timeframe="1m",
                 adj="qfq",
-                include_realtime=False,
+                include_realtime=True,
                 start_date=today,
                 end_date=today,
             )
@@ -420,6 +454,15 @@ class MonitorBatchService:
             source_bar_time = raw_dt.replace(second=0, microsecond=0)
         else:
             source_bar_time = now.replace(second=0, microsecond=0)
+
+        # 跟踪本轮最新 completed 1m bar 时间、数据源与 partial 状态（用于整体日志输出）
+        if (
+            result.last_minute_bar_time is None
+            or source_bar_time > result.last_minute_bar_time
+        ):
+            result.last_minute_bar_time = source_bar_time
+            result.last_minute_data_source = minute_data_source
+            result.last_minute_is_partial = minute_is_partial
 
         # b. [eval_recovery] INSERT 评估占位（含租约/心跳），冲突时按状态判断是否可重入
         evaluation_id: uuid.UUID | None = None
@@ -699,7 +742,16 @@ class MonitorBatchService:
             result.total_events_written += 1
             written_events.append(event_orm)
 
-        # h. 保存结果：更新 MonitorEvaluation 为 SUCCEEDED（放在最后，确保 State/Event 写入成功后再标记）
+        # h. 单标的处理日志（必须包含 instrument/symbol/minute 状态与事件计数）
+        logger.info(
+            "[monitor_batch] instrument_done instrument_id=%s symbol=%s "
+            "source_bar_time=%s minute_data_source=%s minute_is_partial=%s "
+            "events_detected=%d events_written=%d",
+            instrument_id, symbol, source_bar_time, minute_data_source,
+            minute_is_partial, len(event_drafts), len(written_events),
+        )
+
+        # i. 保存结果：更新 MonitorEvaluation 为 SUCCEEDED（放在最后，确保 State/Event 写入成功后再标记）
         metrics_output: dict[str, Any] = {
             "state": curr_state.state,
             "events_detected": len(event_drafts),

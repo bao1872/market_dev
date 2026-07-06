@@ -37,6 +37,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants.monitor_source_types import MONITOR_SOURCE_TYPES
 from app.core.redis_client import get_redis
 from app.models.notification import MessageDelivery, NotificationChannel, NotificationMessage
 from app.models.outbox import Outbox
@@ -58,9 +59,6 @@ _NOTIFICATION_EVENT_TYPE = "notification.message.created"
 # 管理员内测申请通知专用事件类型：由本模块专用分支扩张为 MessageDelivery
 # 与 beta_application_notifier.BETA_APPLICATION_ADMIN_EVENT 保持一致
 _BETA_APPLICATION_ADMIN_EVENT = "beta_application.admin_notification.created"
-
-# [monitor] - 监控自动通知 source_type 集合：对 admin 用户放行（无需 subscription）
-_MONITOR_SOURCE_TYPES = frozenset({"monitor_event", "strategy_event", "monitor_chart"})
 
 
 async def write_outbox(
@@ -169,7 +167,7 @@ async def _expand_notification_message_created(
         # 查询消息 source_type 以判断是否为监控通知
         message = await db.get(NotificationMessage, message_id)
         source_type = getattr(message, "source_type", None) if message else None
-        monitor_source = source_type in _MONITOR_SOURCE_TYPES
+        monitor_source = source_type in MONITOR_SOURCE_TYPES
 
         from app.services.eligible_user_service import (
             is_user_eligible,

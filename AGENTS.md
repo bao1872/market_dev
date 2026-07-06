@@ -546,6 +546,35 @@ Capture Token 只能访问 Capture API。\
 除非明确升级 Node 版本或镜像损坏，否则不要删除 `node:20-alpine`。\
 普通清理只允许 `docker builder prune -f`、`docker image prune -f`、`docker container prune -f`。
 
+### 13. 个股详情 K线实时契约
+
+个股详情 K线实时属于后端 `/api/v1/instruments/{id}/bars` 契约，不得只靠 `/quote` 或前端 `mergeRealtimeQuoteIntoBars()` 伪装。
+
+1. `/quote` 实时只代表顶部行情卡片实时，不等价于 K线实时。
+2. 交易时段内，`/bars?timeframe=1d&include_realtime=true` 必须返回今日 partial daily bar：
+   - `data_source=hybrid`
+   - `is_partial=true`
+   - `last_live_bar_time` 非空
+   - 最后一根 bar 日期为今日
+   - close 来自最新已完成 1m bar。
+3. 收盘后或非交易时段，不得伪装实时：
+   - `is_partial=false`
+   - 1d 最后一根应为完整日线
+   - quote 可为 `daily_fallback`。
+4. 前端 `mergeRealtimeQuoteIntoBars()` 只能作为兜底视觉增强，不能替代后端 partial bar。
+5. 任何修改以下文件必须跑 K线实时契约测试：
+   - `backend/app/api/bars.py`
+   - `backend/app/services/market_data_aggregation_service.py`
+   - `backend/app/core/pytdx_adapter.py`
+   - `frontend/src/pages/StockDetailPage.tsx`
+   - `frontend/src/utils/chart.ts`
+6. PR 描述必须回答：
+   - quote 是否实时？
+   - 1d K线是否有 partial bar？
+   - 15m/1h/1m 是否受影响？
+   - 前端是否只是展示，是否存在伪造实时？
+   - 交易时段和收盘后分别如何验证？
+
 ***
 
 ## 十三、质量门禁

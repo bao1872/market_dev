@@ -13,6 +13,22 @@
 
 partial 实时 Bar 不写入完成 Bar 表，只存在于请求快照或短缓存。
 
+### 个股详情 K线实时契约
+
+- `/quote` 实时 **只代表顶部行情卡片实时**，不等价于 K线实时；
+- `/bars?timeframe=1d&include_realtime=true` 是个股详情 1d K线实时的唯一后端契约；
+- 交易时段（`MORNING_SESSION`/`AFTERNOON_SESSION`）内，`/bars?timeframe=1d&include_realtime=true` 必须返回今日 partial daily bar：
+  - `data_source=hybrid`
+  - `is_partial=true`
+  - `last_live_bar_time` 非空
+  - 最后一根 bar 日期为今日
+  - close 来自最新已完成 1m bar；
+- 收盘后或非交易时段，`/bars?timeframe=1d` 不得伪装实时：
+  - `is_partial=false`
+  - 最后一根为完整日线
+  - `/quote` 可为 `daily_fallback`；
+- 前端 `mergeRealtimeQuoteIntoBars()` 只能作为兜底视觉增强，不能替代后端 partial bar，不参与指标计算，不写入库。
+
 strategy_run_items.reason_code 标准编码：
 - failed: timeout（单股超时）、runtime_error、data_error、run_timeout_budget_exhausted（run 级总超时预算耗尽）
 - skipped: insufficient_data、insufficient_history（历史日线 < 60 根）、suspended、delisted、new_listing
@@ -38,7 +54,7 @@ strategy_run_items.reason_code 标准编码：
 | 行情 | `/instruments`, `/calendar`, `/market`, `/bars` | 数据新鲜度、partial/degraded 标识；`/instruments/{id}/bars` page_size 按 timeframe 限制：`15m` 最大 4000，`1h` 最大 1200，其他最大 1000；`/instruments/{id}/indicators` 的 `bars` 参数最大 4000；`indicators` 响应含 `sqzmom_lb` 全局技术指标数据，后端逐行复刻 Pine 代码，前端只渲染不计算 |
 | 结构状态因子 | `/instruments/{id}/structural-factors` | 双周期（1d+15m）5 组结构因子（DSA 段/Swing/成本节点/动量波动/成交参与）；前端只渲染后端 DTO，禁止重新计算；无认证要求（与 indicators API 一致）；250-500 bar lookback，15m 仅已完成 bar，Swing 仅已确认 pivot（无未来函数） |
 | 策略 | `/strategies`, `/strategy-runs` | 只读 released/published 结果；`/strategy-runs/{run_id}/results` 以 `strategy_run_items` 为主表 LEFT JOIN `strategy_results` + `instruments`，返回全量 universe（含 succeeded/skipped/failed），skipped/failed 行 `id`/`payload` 为 null；新增 `item_status`/`reason_code`/`error_message` 字段；默认无筛选时 `source_total = run.total_instruments`。JOIN 策略：因 `strategy_run_items.result_id` 当前未回填（ALIGN-033 P2），`strategy_results` 关联统一改用 `(run_id, instrument_id)`，包括批量加载、metric_filter 子查询、sort LEFT JOIN 三处 |
-| 监控 | `/monitor-states`, `/strategy-events` | 只处理完成 Bar，按用户资格过滤 |
+| 监控 | `/monitor-states`, `/strategy-events` | 只处理完成 Bar，按用户资格过滤；monitor_event 在 `delivery_worker.py` 投递前再次用 `is_user_eligible_for_monitor` 复核，active admin 放行，disabled admin / 无订阅普通用户排除 |
 | 通知 | `/messages`, `/notification-channels` | 用户只能操作自己的消息和渠道 |
 | 自选 | `/watchlist` | active subscription + monitor_limit |
 | 个股详情分享 | `/stock-detail-feishu` | target_channel_id 支持手动指定渠道 |

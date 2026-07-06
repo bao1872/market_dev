@@ -958,6 +958,9 @@ class PytdxAdapter(Exchange):
 
             update_time = latest["datetime"]
             if hasattr(update_time, "isoformat"):
+                # [QuoteTrust] - 明确附加 Asia/Shanghai 时区，避免前端按本地时区解析成纽约时间
+                if hasattr(update_time, "tzinfo") and update_time.tzinfo is None:
+                    update_time = update_time.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
                 update_time = update_time.isoformat()
             else:
                 update_time = str(update_time)

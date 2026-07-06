@@ -164,12 +164,18 @@ def _resolve_date_range(
     # [mdas] - 描述: 统一使用上海业务日期，避免服务器本地时区跨日误判
     today = shanghai_business_date()
     if timeframe in ("1d", "1w", "1mo"):
-        end = end_date if isinstance(end_date, date) else (end_date.date() if isinstance(end_date, datetime) else today)
-        start = (
-            start_date
-            if isinstance(start_date, date)
-            else (start_date.date() if isinstance(start_date, datetime) else end - timedelta(days=_DEFAULT_DAILY_LOOKBACK_DAYS))
-        )
+        if isinstance(end_date, date):
+            end = end_date
+        elif isinstance(end_date, datetime):
+            end = end_date.date()
+        else:
+            end = today
+        if isinstance(start_date, date):
+            start = start_date
+        elif isinstance(start_date, datetime):
+            start = start_date.date()
+        else:
+            start = end - timedelta(days=_DEFAULT_DAILY_LOOKBACK_DAYS)
         return start, end
 
     # 15m / 1h
@@ -280,6 +286,47 @@ def _aggregate_minute_to_target(minute_df: pd.DataFrame, timeframe: str) -> pd.D
     })
     agg = agg.dropna(subset=["close"])
     return agg
+
+
+def _aggregate_minute_to_daily(
+    minute_df: pd.DataFrame,
+    adj_factor: float | None = None,
+) -> pd.DataFrame:
+    """将当日 1 分钟线聚合成一根 partial daily bar。
+
+    规则：
+    - open = 第一根 1m open
+    - high = max(high)
+    - low = min(low)
+    - close = 最后一根 1m close
+    - volume/amount = sum
+    - adj_factor = 最后一根 adj_factor（或传入的复权因子）
+    - index = 最后一根 1m 时间（表示 last_live_bar_time）
+
+    调用方需保证 minute_df 只含已完成 1m bar。
+
+    Args:
+        minute_df: 已完成 1m bar DataFrame
+        adj_factor: 若指定，对 open/high/low/close 应用该复权因子；
+                    用于 qfq 场景，保证 partial daily bar 与复权后的历史日线连续。
+    """
+    if minute_df.empty:
+        return minute_df
+    # [mdas] - partial daily 的索引使用 pd.Timestamp(date)，与 DB 日线表（trade_date）保持一致，
+    # 同时保证索引类型为 DatetimeIndex，避免与 date 对象混合导致 sort_index 失败。
+    trade_date = minute_df.index[-1].date() if hasattr(minute_df.index[-1], "date") else pd.Timestamp(minute_df.index[-1]).date()
+    factor = adj_factor if adj_factor is not None else float(minute_df["adj_factor"].iloc[-1])
+    partial = pd.DataFrame({
+        "open": [float(minute_df["open"].iloc[0]) * factor],
+        "high": [float(minute_df["high"].max()) * factor],
+        "low": [float(minute_df["low"].min()) * factor],
+        "close": [float(minute_df["close"].iloc[-1]) * factor],
+        "volume": [float(minute_df["volume"].sum())],
+        "amount": [float(minute_df["amount"].sum())],
+        "adj_factor": [factor],
+    }, index=[pd.Timestamp(trade_date)])
+    partial.index.name = "trade_date"
+    return partial
 
 
 def _filter_unfinished_daily_bars(
@@ -618,6 +665,52 @@ class MarketDataAggregationService:
                 last_live_bar_time = None
         elif bars_df.empty:
             last_live_bar_time = None
+
+        # [mdas] - 描述: 1d 交易时段合成今日 partial daily bar（不写库，仅响应）
+        # 放在 _finalize_bars 之后，避免被过滤未完成日线逻辑误删
+        if timeframe == "1d" and include_realtime:
+            try:
+                is_trading_day = await is_trading_day_async(session, now.date())
+                session_name = compute_market_session(now, is_trading_day)
+                if session_name in (MARKET_SESSION_MORNING, MARKET_SESSION_AFTERNOON):
+                    live_start = datetime.combine(now.date(), dt_time(9, 30))
+                    live_end = now
+                    live_1m = await fetch_minute_bars(
+                        session, instrument_id, live_start, live_end
+                    )
+                    if not live_1m.empty:
+                        # 只使用已完成 1m bar：剔除最后一根可能未完成的 bar
+                        if len(live_1m) > 1:
+                            live_1m = live_1m.iloc[:-1]
+                        # [mdas] - qfq 场景下，partial daily bar 需与复权后的历史日线连续。
+                        # 1m 数据本身不含复权调整，使用当日最新 adj_factor 整体乘到价格列。
+                        partial_adj_factor: float | None = None
+                        if adj == "qfq":
+                            try:
+                                adj_factor_df = await _get_adj_factor_df(session, instrument_id)
+                                if not adj_factor_df.empty:
+                                    partial_adj_factor = float(adj_factor_df["adj_factor"].iloc[-1])
+                            except Exception as exc:
+                                logger.warning(
+                                    "partial daily 获取复权因子失败 instrument_id=%s: %s",
+                                    instrument_id, exc,
+                                )
+                        partial_daily = _aggregate_minute_to_daily(live_1m, partial_adj_factor)
+                        if not partial_daily.empty:
+                            bars_df = _merge_bars(bars_df, partial_daily)
+                            if data_source == "db":
+                                data_source = "hybrid"
+                            is_partial = True
+                            # last_live_bar_time 保留完整 datetime，便于前端展示精确到分钟
+                            last_live_bar_time = pd.Timestamp(live_1m.index[-1])
+            except Exception as exc:
+                logger.warning(
+                    "1d partial daily 合成失败 instrument_id=%s: %s",
+                    instrument_id, exc,
+                )
+                degraded = True
+                degraded_reason = f"pytdx partial daily failed: {exc}"
+                data_source = "degraded"
 
         result = BarAggregationResult(
             bars=bars_df,

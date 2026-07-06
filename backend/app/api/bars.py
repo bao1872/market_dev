@@ -227,6 +227,12 @@ def _build_pytdx_quote_response(
 ) -> dict[str, Any]:
     """将 pytdx 原始 quote 包装为统一响应字典。"""
     update_time = pytdx_quote.get("update_time")
+    # [QuoteTrust] - 防御性校验：若上游仍返回 naive 时间，按 Asia/Shanghai 解释
+    if isinstance(update_time, datetime) and update_time.tzinfo is None:
+        update_time = update_time.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    elif isinstance(update_time, str) and update_time.endswith("+00:00"):
+        # 防止被误标为 UTC：替换为 +08:00（pytdx 数据本质为上海时间）
+        update_time = update_time[:-6] + "+08:00"
     return {
         "instrument_id": instrument.id,
         "symbol": instrument.symbol,
@@ -672,6 +678,7 @@ async def bars_health(session: AsyncSession = Depends(get_db)) -> dict:
                 else:
                     # 分钟类：latest 为 datetime
                     latest_dt = latest
+                    assert isinstance(latest_dt, datetime), f"分钟类 latest 应为 datetime， got {type(latest)}"
                     if latest_dt.tzinfo is not None:
                         latest_dt = latest_dt.astimezone(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
 
