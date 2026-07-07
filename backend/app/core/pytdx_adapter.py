@@ -614,8 +614,15 @@ class PytdxAdapter(Exchange):
             return df
 
         # 按时间范围过滤
+        # [pytdx-timezone] - _fetch_with_retry 已将 1m 数据 datetime 列显式 tz_localize(None)，
+        # 因此传入 aware start/end 时需先统一为 naive（按 Asia/Shanghai 解释），避免
+        # aware Timestamp 与 datetime64[us] 比较抛出 TypeError。
         start_ts = pd.Timestamp(start)
         end_ts = pd.Timestamp(end)
+        if start_ts.tzinfo is not None:
+            start_ts = start_ts.tz_convert("Asia/Shanghai").tz_localize(None)
+        if end_ts.tzinfo is not None:
+            end_ts = end_ts.tz_convert("Asia/Shanghai").tz_localize(None)
         mask = (df["datetime"] >= start_ts) & (df["datetime"] <= end_ts)
         return df.loc[mask].reset_index(drop=True)
 

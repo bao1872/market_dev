@@ -61,6 +61,7 @@
   - `test_monitor_batch_live_minute.py` 覆盖 `monitor_batch_service.execute_monitor_cycle` 使用 `include_realtime=True` 拉取 1m、剔除最后一根未完成 bar、记录 `last_minute_bar_time`/`last_minute_data_source`；
   - `test_market_data_aggregation_partial_daily.py` 覆盖交易时段 1d 合成 partial daily bar（`data_source=hybrid`、`is_partial=true`、`last_live_bar_time` 非空）、非交易时段不合成；
   - `test_market_data_aggregation_partial_daily.py::test_partial_daily_fetch_minute_bars_uses_aware_datetime` 与 `test_market_data_aggregation_partial_daily.py::test_intraday_1m_fetch_minute_bars_uses_aware_datetime` 覆盖 `MarketDataAggregationService` 调用 `fetch_minute_bars` 时 `start_time`/`end_time` 必须同为 `Asia/Shanghai` aware datetime，禁止 naive/aware 混用；
+  - `test_pytdx_adapter_minute_aware.py` 覆盖 `pytdx_adapter.get_minute_bars` 接收 aware `Asia/Shanghai` start/end 时，能正确与 pytdx 返回的 naive `datetime` 列比较过滤，不再抛出 `Invalid comparison between dtype=datetime64[us] and Timestamp`；
   - `test_monitor_batch_live_minute.py::test_monitor_cycle_1m_uses_include_realtime` 覆盖 `monitor_batch_service` 调用 MDAS 1m 时必须带 `include_realtime=True`；
   - `test_quote_timezone.py` 覆盖 `/quote` 返回 `update_time` 带 `+08:00`、UTC 字符串被修正为 `+08:00`。
 
@@ -78,7 +79,7 @@
 ```bash
 cd /root/web_dev/backend
 APP_ENV=test TEST_DATABASE_URL=postgresql+asyncpg://bz:bz@localhost:5432/bz_stock_test \
-pytest tests/test_delivery_worker_monitor_eligible.py tests/test_monitor_batch_live_minute.py tests/test_market_data_aggregation_partial_daily.py tests/test_quote_timezone.py -q
+pytest tests/test_delivery_worker_monitor_eligible.py tests/test_monitor_batch_live_minute.py tests/test_market_data_aggregation_partial_daily.py tests/test_pytdx_adapter_minute_aware.py tests/test_quote_timezone.py -q
 ```
 
 ## 3.3 V1.9 + V1.10 swing + capture + auto-trigger 回归（blocking）
