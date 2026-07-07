@@ -38,7 +38,6 @@ htmlcov
 dist
 build
 README.md
-scripts/
 tools/
 
 # Docker 文件本身
