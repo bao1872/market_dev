@@ -7,7 +7,7 @@
 | worker-bars-scheduler | bars_scheduler | bars*, strategy_runs, scheduler_job_runs | 行情覆盖不足影响 DSA；复用 `BarsCoverageService` 统一口径，业务日期使用 `shanghai_business_date()` |
 | worker-strategy-scheduler | strategy_scheduler | strategy_runs | 重复创建 run |
 | worker-calendar | calendar_scheduler | trading_calendar | 交易日错误导致调度错误 |
-| worker-monitor | monitor_scheduler | watchlist, monitor_evaluations, strategy_events, outbox | 未完成 Bar 触发正式事件；通知时间使用 `format_shanghai_datetime` |
+| worker-monitor | monitor_scheduler | watchlist, monitor_evaluations, strategy_events, outbox | 未完成 Bar 触发正式事件；链路为 `worker-monitor` → `monitor_batch_service.execute_monitor_cycle()` → `MarketDataAggregationService.get_bars(timeframe="1m", include_realtime=True)` → `pytdx_adapter.get_minute_bars`；通知时间使用 `format_shanghai_datetime` |
 | worker-strategy-batch | strategy_batch | strategy_runs, strategy_results | 发布残缺结果；run 级总超时 7200s（STRATEGY_RUN_TOTAL_TIMEOUT_SECONDS 可配置），历史不足标的标记 skipped/insufficient_history |
 | worker-outbox | outbox | outbox, message_deliveries | 资格过滤或渠道扩张错误 |
 | worker-delivery | delivery | message_deliveries, notification_channels | 假成功、吞错误 |

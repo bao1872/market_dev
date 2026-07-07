@@ -3,6 +3,13 @@
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
 ## 2026-07-07
+
+- CHANGE-20260707-045: 修复 MDAS live 1m 时区不一致导致 monitor 无事件
+  - 根因：`MarketDataAggregationService` 构造 `live_start` 为 naive datetime、`live_end` 为 aware Asia/Shanghai datetime，传入 `pytdx_adapter.get_minute_bars` 后触发 `can't subtract offset-naive and offset-aware datetimes`
+  - 修复：两处实时 1m 拉取统一使用 aware `Asia/Shanghai` `live_start`/`live_end`
+  - 新增测试：`test_partial_daily_fetch_minute_bars_uses_aware_datetime`、`test_intraday_1m_fetch_minute_bars_uses_aware_datetime`、`test_monitor_cycle_1m_uses_include_realtime`
+  - 更新 `02-data-api-contracts.md`、`03-jobs-integrations-operations.md`、`05-testing-acceptance.md`、maps、ALIGN-037
+  - 后端 6/6 测试通过，ruff 零错误
 - CHANGE-20260707-044: DSA visual_segments 时间格式按 timeframe 序列化
   - 修 PR #33 遗留：15m/1h DSA 开关可打开但 canvas 看不到线
   - 根因：`_make_segment` / `compute_dsa_bundle.anchor` / `compute_indicators.time` 写死 `strftime("%Y-%m-%d")`，15m/1h segment time 丢失时间信息，`normalizeChartTime('15m'/'1h')` 返回 null，renderer matched=0
