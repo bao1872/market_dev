@@ -1,4 +1,4 @@
-"""盘后编排服务 - 串联日线刷新 → DSA 选股 → 质量门禁 → 发布的全流水线。
+"""盘后编排服务 - 串联日线刷新 → DSA 选股 → 质量门禁 → 特征快照 → 发布的全流水线。
 
 核心函数：
 - create_after_close_run(db, trade_date): 创建盘后编排任务（幂等）
@@ -12,12 +12,13 @@
 - 每个步骤切换时写 job_run_event（step=状态名），便于前端时间线展示
 - execute_after_close_run 使用独立 AsyncSessionLocal，不依赖 HTTP 请求 session
 - 调用现有服务不重新实现：BarsSchedulerService.refresh_all_instruments /
-  StrategyBatchService._check_quality_gates / StrategyBatchService.publish_run
+  StrategyBatchService._check_quality_gates / StrategyBatchService.publish_run /
+  feature_snapshot_service.compute_for_trade_date
 - DSA Worker 异步执行，编排层轮询 StrategyRun.status 直到 completed/failed/超时
 
 状态机：
 queued → refreshing_daily → checking_coverage → creating_dsa
-  → waiting_dsa_worker → quality_gate → publishing → succeeded
+  → waiting_dsa_worker → quality_gate → feature_snapshot → publishing → succeeded
 任意步骤异常 → failed
 
 禁异常吞没：所有异常补充上下文后 re-raise 或写入 ERROR 事件后标记 failed。
@@ -41,6 +42,10 @@ from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.strategy_run import StrategyRun
 from app.repositories import strategy_result_repository
 from app.services.bars_scheduler_service import BarsSchedulerService
+from app.services.feature_snapshot_service import (
+    compute_for_trade_date,
+    get_active_a_share_instruments,
+)
 from app.services.idempotency_service import acquire_job_run_lock
 from app.services.job_run_event_service import append_event, list_events
 from app.services.strategy_batch_service import StrategyBatchService
@@ -65,7 +70,7 @@ class AfterCloseRunStatus(StrEnum):
 
     状态流转：
     queued → refreshing_daily → checking_coverage → creating_dsa
-      → waiting_dsa_worker → quality_gate → publishing → succeeded
+      → waiting_dsa_worker → quality_gate → feature_snapshot → publishing → succeeded
     任意步骤异常 → failed
     """
 
@@ -75,6 +80,7 @@ class AfterCloseRunStatus(StrEnum):
     CREATING_DSA = "creating_dsa"
     WAITING_DSA_WORKER = "waiting_dsa_worker"
     QUALITY_GATE = "quality_gate"
+    FEATURE_SNAPSHOT = "feature_snapshot"
     PUBLISHING = "publishing"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
@@ -419,15 +425,26 @@ async def execute_after_close_run(
                 dsa_run_id = uuid.UUID(dsa_run_id_str)
 
         # [Phase5] - 根据last_completed_step 计算各阶段跳过标志
-        # 阶段顺序：refreshing_daily → waiting_dsa_worker → quality_gate → publishing → succeeded
+        # 阶段顺序：refreshing_daily → waiting_dsa_worker → quality_gate
+        #   → feature_snapshot → publishing → succeeded
         _completed_steps = {
             None: set(),
             "queued": set(),
             "refreshing_daily": {"refreshing_daily"},
             "waiting_dsa_worker": {"refreshing_daily", "waiting_dsa_worker"},
             "quality_gate": {"refreshing_daily", "waiting_dsa_worker", "quality_gate"},
-            "publishing": {"refreshing_daily", "waiting_dsa_worker", "quality_gate", "publishing"},
-            "succeeded": {"refreshing_daily", "waiting_dsa_worker", "quality_gate", "publishing", "succeeded"},
+            "feature_snapshot": {
+                "refreshing_daily", "waiting_dsa_worker", "quality_gate",
+                "feature_snapshot",
+            },
+            "publishing": {
+                "refreshing_daily", "waiting_dsa_worker", "quality_gate",
+                "feature_snapshot", "publishing",
+            },
+            "succeeded": {
+                "refreshing_daily", "waiting_dsa_worker", "quality_gate",
+                "feature_snapshot", "publishing", "succeeded",
+            },
         }
         completed = _completed_steps.get(last_completed_step, set())
         if "succeeded" in completed:
@@ -449,12 +466,15 @@ async def execute_after_close_run(
         skip_refresh = "refreshing_daily" in completed
         skip_wait = "waiting_dsa_worker" in completed
         skip_quality = "quality_gate" in completed
+        skip_snapshot = "feature_snapshot" in completed
         skip_publish = "publishing" in completed
 
         logger.info(
             "[AfterClose] 断点恢复: last_completed_step=%s, "
-            "skip_refresh=%s, skip_wait=%s, skip_quality=%s, skip_publish=%s",
-            last_completed_step, skip_refresh, skip_wait, skip_quality, skip_publish,
+            "skip_refresh=%s, skip_wait=%s, skip_quality=%s, "
+            "skip_snapshot=%s, skip_publish=%s",
+            last_completed_step, skip_refresh, skip_wait, skip_quality,
+            skip_snapshot, skip_publish,
         )
 
         # ---- 步骤 1: refreshing_daily ----
@@ -670,6 +690,44 @@ async def execute_after_close_run(
                 job_run = await db.get(SchedulerJobRun, job_run_id)
                 await _update_heartbeat_and_step(
                     db, job_run, AfterCloseRunStatus.QUALITY_GATE.value, worker_id,
+                )
+                await db.commit()
+
+        # ---- 步骤 3.5: feature_snapshot ----
+        # 生成特征快照供 /watchlist/monitor-status 读取，不再走实时 fallback。
+        # snapshot 失败比例超过阈值时抛 RuntimeError，编排标记 failed。
+        # 单股失败由 compute_for_trade_date 内部记录到 degraded_reasons，不阻塞其他股票。
+        if not skip_snapshot:
+            async with AsyncSessionLocal() as db:
+                job_run = await db.get(SchedulerJobRun, job_run_id)
+                await _update_orchestrator_status(
+                    db=db,
+                    job_run=job_run,
+                    status=AfterCloseRunStatus.FEATURE_SNAPSHOT,
+                    message=f"开始生成特征快照: trade_date={trade_date}",
+                )
+                await db.commit()
+
+            async with AsyncSessionLocal() as db:
+                instrument_ids = await get_active_a_share_instruments(db)
+                snapshot_result = await compute_for_trade_date(
+                    db, trade_date, instrument_ids,
+                )
+                await db.commit()
+
+            logger.info(
+                "[AfterClose] 特征快照生成完成: trade_date=%s, "
+                "snapshot_count=%s, failed_count=%s",
+                trade_date,
+                snapshot_result.get("snapshot_count"),
+                snapshot_result.get("failed_count"),
+            )
+
+            # [Phase5] - feature_snapshot 完成，更新心跳 + 检查点
+            async with AsyncSessionLocal() as db:
+                job_run = await db.get(SchedulerJobRun, job_run_id)
+                await _update_heartbeat_and_step(
+                    db, job_run, AfterCloseRunStatus.FEATURE_SNAPSHOT.value, worker_id,
                 )
                 await db.commit()
 
@@ -1025,7 +1083,8 @@ if __name__ == "__main__":
     # 验证 AfterCloseRunStatus 枚举
     expected_statuses = {
         "queued", "refreshing_daily", "checking_coverage", "creating_dsa",
-        "waiting_dsa_worker", "quality_gate", "publishing", "succeeded", "failed",
+        "waiting_dsa_worker", "quality_gate", "feature_snapshot",
+        "publishing", "succeeded", "failed",
     }
     actual_statuses = {s.value for s in AfterCloseRunStatus}
     assert actual_statuses == expected_statuses, (

@@ -43,6 +43,7 @@ published run 不可变。partial_failed 不得自动发布。
 | `monitor_evaluations` | 策略版本、股票、源 Bar 的唯一评估 |
 | `strategy_events` | 稳定事件 |
 | `event_recipients` | 事件与有效用户收件人关系 |
+| `stock_feature_snapshots` | 盘后特征快照（结构/时序因子 + 前端列表用 summary）；唯一键 `(instrument_id, trade_date, primary_timeframe, secondary_timeframe, adj, schema_version)`；3 个 btree 索引；无 GIN 索引；`/watchlist/monitor-status` 的 metrics 唯一来源 |
 
 ## 5. 消息、投递、截图
 

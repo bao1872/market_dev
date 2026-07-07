@@ -350,6 +350,12 @@ async def test_execute_writes_status_events(db_session) -> None:
     ), patch.object(
         StrategyBatchService, "publish_run",
         new=AsyncMock(return_value=fake_published_run),
+    ), patch(
+        "app.services.after_close_orchestrator.get_active_a_share_instruments",
+        new=AsyncMock(return_value=[uuid.uuid4()]),
+    ), patch(
+        "app.services.after_close_orchestrator.compute_for_trade_date",
+        new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -358,7 +364,8 @@ async def test_execute_writes_status_events(db_session) -> None:
             dsa_poll_timeout=1,
         )
 
-    # 验证事件序列：应包含 refreshing_daily → waiting_dsa_worker → quality_gate → publishing → succeeded
+    # 验证事件序列：应包含 refreshing_daily → waiting_dsa_worker → quality_gate
+    #   → feature_snapshot → publishing → succeeded
     from app.services.job_run_event_service import list_events
     events = await list_events(db_session, job_run.id, limit=20)
     steps = [e.step for e in events]
@@ -366,6 +373,7 @@ async def test_execute_writes_status_events(db_session) -> None:
     assert AfterCloseRunStatus.REFRESHING_DAILY.value in steps, f"缺少 refreshing_daily 事件: {steps}"
     assert AfterCloseRunStatus.WAITING_DSA_WORKER.value in steps, f"缺少 waiting_dsa_worker 事件: {steps}"
     assert AfterCloseRunStatus.QUALITY_GATE.value in steps, f"缺少 quality_gate 事件: {steps}"
+    assert AfterCloseRunStatus.FEATURE_SNAPSHOT.value in steps, f"缺少 feature_snapshot 事件: {steps}"
     assert AfterCloseRunStatus.PUBLISHING.value in steps, f"缺少 publishing 事件: {steps}"
     assert AfterCloseRunStatus.SUCCEEDED.value in steps, f"缺少 succeeded 事件: {steps}"
 

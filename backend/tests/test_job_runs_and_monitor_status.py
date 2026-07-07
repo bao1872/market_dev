@@ -1,8 +1,8 @@
 """Task 6-11 测试：监控状态语义拆分与任务可观察性可靠化。
 
 覆盖：
-- watchlist monitor-status 返回 market_session / calculation_status / freshness_seconds / last_bar_time
-- 盘后时间 calculation_status 不因 30 分钟规则变成 STALE
+- watchlist monitor-status 返回 market_session / freshness_seconds / last_bar_time
+- _compute_market_status 6 值枚举（calculation_status 已迁移至 snapshot-based，见 test_watchlist_monitor_status_snapshot.py）
 - SchedulerJobRun 心跳、租约、worker_instance_id、last_cycle_at
 - strategy_scheduler 找不到策略时正确结束 job_run 并记录 strategy_run_id
 - monitor_scheduler 按交易时段聚合 session
@@ -17,16 +17,13 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from app.api.watchlist import (
-    _compute_calculation_status,
-    _compute_market_status,
-)
+from app.api.watchlist import _compute_market_status
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.worker import (
     _create_job_run,
@@ -106,88 +103,13 @@ def test_compute_market_session_boundary_times() -> None:
 
 
 def test_calculation_status_after_market_old_data_is_succeeded() -> None:
-    """盘后 19:01 且数据为 14:59，calculation_status 应为 SUCCEEDED 而非 STALE。"""
+    """盘后 19:01 且数据为 14:59，calculation_status 应为 SUCCEEDED 而非 STALE。
+
+    注意：calculation_status 现在由 snapshot-based 逻辑决定（SUCCEEDED/WAITING_SNAPSHOT/NO_SNAPSHOT），
+    此测试保留用于验证 _compute_market_status 的 MARKET_CLOSED 判定。
+    """
     now = datetime(2026, 6, 24, 19, 1, tzinfo=ZoneInfo("Asia/Shanghai"))
-    market_session = "MARKET_CLOSED"
-    updated_at = datetime(2026, 6, 24, 14, 59, tzinfo=ZoneInfo("Asia/Shanghai"))
-
-    # 构造一个模拟的 ms 对象，只有 updated_at 属性
-    ms_updated_at = updated_at
-
-    class FakeMS:
-        updated_at = ms_updated_at
-
-    calc_status = _compute_calculation_status(
-        now_cst=now,
-        market_session=market_session,
-        eval_row=None,
-        ms=FakeMS(),
-    )
-    assert calc_status == "SUCCEEDED"
-
-
-def test_calculation_status_trading_stale_when_old() -> None:
-    """盘中数据超过 180 秒，calculation_status 应为 STALE。"""
-    now = datetime(2026, 6, 24, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
-    market_session = "MORNING_SESSION"
-    ms_updated_at = now - timedelta(seconds=300)
-
-    class FakeMS:
-        updated_at = ms_updated_at
-
-    calc_status = _compute_calculation_status(
-        now_cst=now,
-        market_session=market_session,
-        eval_row=None,
-        ms=FakeMS(),
-    )
-    assert calc_status == "STALE"
-
-
-def test_calculation_status_trading_fresh_when_recent() -> None:
-    """盘中数据 60 秒内，calculation_status 应为 SUCCEEDED。"""
-    now = datetime(2026, 6, 24, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
-    market_session = "MORNING_SESSION"
-    ms_updated_at = now - timedelta(seconds=60)
-
-    class FakeMS:
-        updated_at = ms_updated_at
-
-    calc_status = _compute_calculation_status(
-        now_cst=now,
-        market_session=market_session,
-        eval_row=None,
-        ms=FakeMS(),
-    )
-    assert calc_status == "SUCCEEDED"
-
-
-def test_calculation_status_failed_evaluation() -> None:
-    """评估状态 FAILED 时 calculation_status 应为 FAILED。"""
-    now = datetime(2026, 6, 24, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
-
-    class FakeEval:
-        evaluation_status = "FAILED"
-
-    calc_status = _compute_calculation_status(
-        now_cst=now,
-        market_session="MORNING_SESSION",
-        eval_row=FakeEval(),
-        ms=None,
-    )
-    assert calc_status == "FAILED"
-
-
-def test_calculation_status_waiting_first_run_in_trading() -> None:
-    """盘中无评估记录时 calculation_status 应为 WAITING_FIRST_RUN。"""
-    now = datetime(2026, 6, 24, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
-    calc_status = _compute_calculation_status(
-        now_cst=now,
-        market_session="MORNING_SESSION",
-        eval_row=None,
-        ms=None,
-    )
-    assert calc_status == "WAITING_FIRST_RUN"
+    assert _compute_market_status(now, is_trading_day=True) == "MARKET_CLOSED"
 
 
 # ==================== Task 7/8/9: SchedulerJobRun 生命周期 ====================

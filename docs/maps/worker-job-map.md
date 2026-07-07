@@ -11,7 +11,7 @@
 | worker-strategy-batch | strategy_batch | strategy_runs, strategy_results | 发布残缺结果；run 级总超时 7200s（STRATEGY_RUN_TOTAL_TIMEOUT_SECONDS 可配置），历史不足标的标记 skipped/insufficient_history |
 | worker-outbox | outbox | outbox, message_deliveries | 资格过滤或渠道扩张错误 |
 | worker-delivery | delivery | message_deliveries, notification_channels | 假成功、吞错误 |
-| worker-after-close | after_close_orchestrator | scheduler_job_runs | 盘后链路断点恢复；覆盖率检查复用 `BarsCoverageService`；dsa-only 支持 fallback 到最新交易日 |
+| worker-after-close | after_close_orchestrator | scheduler_job_runs, stock_feature_snapshots | 盘后链路断点恢复；状态机新增 `feature_snapshot` 步骤（`quality_gate → feature_snapshot → publishing`），调用 `feature_snapshot_service.compute_for_trade_date` 为当日 active A 股全集生成 `stock_feature_snapshots` 行；单股失败写 `degraded_reasons` 不阻断其他股票；失败比例超 30% 抛 `RuntimeError` 标记 `failed`；覆盖率检查复用 `BarsCoverageService`；dsa-only 支持 fallback 到最新交易日 |
 | worker-watchdog | watchdog | scheduler_job_runs, worker_heartbeats | 看门狗未运行导致僵尸残留 |
 | worker-capture | capture service | capture_jobs, notification_messages | 截图失败但状态不可见 |
 
