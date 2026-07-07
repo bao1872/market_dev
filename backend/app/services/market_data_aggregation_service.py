@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.pytdx_adapter import get_pytdx_adapter
 from app.core.redis_client import get_sync_redis
-from app.core.time import now_shanghai, shanghai_business_date
+from app.core.time import SHANGHAI_TZ, now_shanghai, shanghai_business_date
 from app.repositories.bar_repository import (
     _get_adj_factor_df,
     _get_symbol,
@@ -622,8 +622,10 @@ class MarketDataAggregationService:
                 last_persisted_bar_time = pd.Timestamp(bars_df.index[-1])
 
             if include_realtime and _is_trading_hours(now):
-                live_start = datetime.combine(now.date(), dt_time(9, 30))
-                live_end = now
+                # [mdas-timezone] - live_start/live_end 必须同为 Asia/Shanghai aware datetime
+                now_cst = now if now.tzinfo else now.replace(tzinfo=SHANGHAI_TZ)
+                live_start = now_cst.replace(hour=9, minute=30, second=0, microsecond=0)
+                live_end = now_cst
                 try:
                     live_1m = await fetch_minute_bars(
                         session, instrument_id, live_start, live_end
@@ -673,8 +675,10 @@ class MarketDataAggregationService:
                 is_trading_day = await is_trading_day_async(session, now.date())
                 session_name = compute_market_session(now, is_trading_day)
                 if session_name in (MARKET_SESSION_MORNING, MARKET_SESSION_AFTERNOON):
-                    live_start = datetime.combine(now.date(), dt_time(9, 30))
-                    live_end = now
+                    # [mdas-timezone] - live_start/live_end 必须同为 Asia/Shanghai aware datetime
+                    now_cst = now if now.tzinfo else now.replace(tzinfo=SHANGHAI_TZ)
+                    live_start = now_cst.replace(hour=9, minute=30, second=0, microsecond=0)
+                    live_end = now_cst
                     live_1m = await fetch_minute_bars(
                         session, instrument_id, live_start, live_end
                     )

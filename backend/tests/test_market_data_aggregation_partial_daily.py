@@ -167,3 +167,109 @@ async def test_no_partial_daily_bar_outside_trading_session(
 
     assert result.is_partial is False
     assert result.last_live_bar_time is None
+
+
+@pytest.mark.asyncio
+async def test_partial_daily_fetch_minute_bars_uses_aware_datetime(
+    db_session: AsyncSession,
+    instrument_factory,
+    monkeypatch,
+    _reset_cache,
+):
+    """1d partial daily 拉取实时 1m 时，start/end 必须同为 aware datetime。"""
+    instrument = await instrument_factory(symbol="600519", market="SH", status="active")
+    today = date(2026, 7, 6)
+
+    daily_df = _build_daily_df(today, count=3)
+
+    monkeypatch.setattr(mdas, "_query_daily_bars", AsyncMock(return_value=daily_df))
+    monkeypatch.setattr(mdas, "fetch_daily_bars", AsyncMock(return_value=pd.DataFrame()))
+    monkeypatch.setattr(mdas, "is_trading_day_async", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        mdas,
+        "compute_market_session",
+        lambda _now, _is_trading: mdas.MARKET_SESSION_MORNING,
+    )
+
+    fixed_now = datetime.combine(today, datetime.min.time().replace(hour=10, minute=0))
+    fixed_now = fixed_now.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    monkeypatch.setattr(mdas, "now_shanghai", lambda: fixed_now)
+
+    captured: dict[str, Any] = {}
+
+    async def _capture_fetch_minute_bars(
+        _session: AsyncSession,
+        _instrument_id: uuid.UUID,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> pd.DataFrame:
+        captured["start_time"] = start_time
+        captured["end_time"] = end_time
+        return _build_minute_df(today, count=5)
+
+    monkeypatch.setattr(mdas, "fetch_minute_bars", _capture_fetch_minute_bars)
+
+    await MarketDataAggregationService().get_bars(
+        session=db_session,
+        instrument_id=instrument.id,
+        timeframe="1d",
+        adj="none",
+        include_realtime=True,
+    )
+
+    assert "start_time" in captured, f"未捕获到 start_time，captured={captured}"
+    assert "end_time" in captured, f"未捕获到 end_time，captured={captured}"
+    assert captured["start_time"].tzinfo is not None
+    assert captured["end_time"].tzinfo is not None
+    # [mdas-timezone] - 必须能正常相减，不触发 offset-naive/offset-aware 异常
+    delta = captured["end_time"] - captured["start_time"]
+    assert delta.total_seconds() > 0
+
+
+@pytest.mark.asyncio
+async def test_intraday_1m_fetch_minute_bars_uses_aware_datetime(
+    db_session: AsyncSession,
+    instrument_factory,
+    monkeypatch,
+    _reset_cache,
+):
+    """timeframe=1m 拉取实时 1m 时，start/end 必须同为 aware datetime。"""
+    instrument = await instrument_factory(symbol="600519", market="SH", status="active")
+    today = date(2026, 7, 6)
+
+    monkeypatch.setattr(mdas, "_query_minute_bars", AsyncMock(return_value=pd.DataFrame()))
+    monkeypatch.setattr(mdas, "_is_trading_hours", lambda _now: True)
+
+    fixed_now = datetime.combine(today, datetime.min.time().replace(hour=10, minute=0))
+    fixed_now = fixed_now.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    monkeypatch.setattr(mdas, "now_shanghai", lambda: fixed_now)
+
+    captured: dict[str, Any] = {}
+
+    async def _capture_fetch_minute_bars(
+        _session: AsyncSession,
+        _instrument_id: uuid.UUID,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> pd.DataFrame:
+        captured["start_time"] = start_time
+        captured["end_time"] = end_time
+        return _build_minute_df(today, count=5)
+
+    monkeypatch.setattr(mdas, "fetch_minute_bars", _capture_fetch_minute_bars)
+
+    await MarketDataAggregationService().get_bars(
+        session=db_session,
+        instrument_id=instrument.id,
+        timeframe="1m",
+        adj="none",
+        include_realtime=True,
+    )
+
+    assert "start_time" in captured, f"未捕获到 start_time，captured={captured}"
+    assert "end_time" in captured, f"未捕获到 end_time，captured={captured}"
+    assert captured["start_time"].tzinfo is not None
+    assert captured["end_time"].tzinfo is not None
+    # [mdas-timezone] - 必须能正常相减，不触发 offset-naive/offset-aware 异常
+    delta = captured["end_time"] - captured["start_time"]
+    assert delta.total_seconds() > 0

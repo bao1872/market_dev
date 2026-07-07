@@ -170,3 +170,63 @@ async def test_monitor_cycle_uses_live_minute_bars(
         actual_time = actual_time.replace(tzinfo=expected_time.tzinfo)
     assert actual_time == expected_time
     assert result.total_states_computed >= 1
+
+
+@pytest.mark.asyncio
+async def test_monitor_cycle_1m_uses_include_realtime(
+    db_session: AsyncSession,
+    user_factory,
+    subscription_factory,
+    instrument_factory,
+    monkeypatch,
+):
+    """execute_monitor_cycle 调用 1m 时必须带 include_realtime=True。"""
+    active_admin = await user_factory(roles=["admin"], status="active")
+    instrument = await instrument_factory(symbol="600519", market="SH", status="active")
+
+    await _create_watchlist_monitor_version(db_session)
+
+    await db_session.execute(delete(UserWatchlistItem).where(UserWatchlistItem.active.is_(True)))
+    await db_session.flush()
+
+    db_session.add(UserWatchlistItem(
+        user_id=active_admin.id,
+        instrument_id=instrument.id,
+        active=True,
+        source="manual",
+    ))
+    await db_session.flush()
+
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    minute_df = _build_minute_df(today, count=5)
+    daily_df = _build_daily_df(today, count=30)
+
+    captured_calls: list[dict[str, Any]] = []
+
+    async def _mock_fetch_md_bars_with_meta(
+        self,
+        db: AsyncSession,
+        instrument_id: uuid.UUID,
+        timeframe: str,
+        *,
+        adj: str = "qfq",
+        limit: int | None = None,
+        include_realtime: bool = True,
+        start_date=None,
+        end_date=None,
+    ) -> tuple[pd.DataFrame, str, bool]:
+        captured_calls.append({"timeframe": timeframe, "include_realtime": include_realtime})
+        if timeframe == "1m":
+            return minute_df, "hybrid", True
+        if timeframe == "1d":
+            return daily_df, "db", False
+        return pd.DataFrame(), "db", False
+
+    monkeypatch.setattr(MonitorBatchService, "_fetch_md_bars_with_meta", _mock_fetch_md_bars_with_meta)
+
+    service = MonitorBatchService()
+    await service.execute_monitor_cycle(db_session)
+
+    calls_1m = [c for c in captured_calls if c["timeframe"] == "1m"]
+    assert calls_1m, "应该调用 timeframe=1m"
+    assert all(c["include_realtime"] is True for c in calls_1m)
