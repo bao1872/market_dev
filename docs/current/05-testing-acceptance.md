@@ -270,13 +270,14 @@ node --experimental-strip-types --test src/components/__tests__/dsaSourceAlignme
 - `backfill_single_date` `--dry-run` 不调用 `compute_for_trade_date`，输出 `missing_instruments` 数量；正常模式调用 `compute_for_trade_date`；**`--resume` 真正跳过已存在 instrument（不重新计算）**；`--resume` 无已存在时调用 compute 处理全部；`--resume` 全部已存在时不调用 compute，返回 `skipped_existing`；
 - `main` `--dry-run` 端到端不写库；**单日失败 `rollback` 半成品不阻断其他日期**（验证 `rollback_count==1` + `commit_count==1`）；`--end=latest` 解析为 `bars_daily` 表最新 trade_date；`start > end` 直接 `sys.exit(1)`。
 
-API 契约回归（`tests/test_watchlist_monitor_status_snapshot.py`，6 个用例）：
+API 契约回归（`tests/test_watchlist_monitor_status_snapshot.py`，7 个用例）：
 - `SUCCEEDED`：交易日已收盘且 snapshot 存在，`calculation_status='SUCCEEDED'`，`metrics` 来自 `summary_payload` 且 `_source='feature_snapshot'`，`freshness_seconds` 为整数；
 - `NO_SNAPSHOT`：非交易日，`calculation_status='NO_SNAPSHOT'`，`metrics` 为空 dict，`freshness_seconds=None`；
 - `WAITING_SNAPSHOT`：交易日已收盘但 snapshot 缺失，`calculation_status='WAITING_SNAPSHOT'`，`metrics` 为空 dict；
 - **[盘中读上一交易日] 交易日 10:00 + 有昨日 snapshot → `SUCCEEDED` + 昨日 metrics**；
 - **[非交易日读最近交易日] 非交易日 + 有最近交易日 snapshot → `SUCCEEDED`**；
 - **[非交易日无历史] 非交易日 + 无历史 snapshot → `NO_SNAPSHOT`**；
+- **[盘中缺上一交易日 snapshot] 交易日 10:00 + trading_calendar 存在上一交易日 + 无昨日 snapshot → `NO_SNAPSHOT`（不是 `WAITING_SNAPSHOT`）+ `metrics={}`**；防止盘中历史快照缺失被误报 WAITING_SNAPSHOT；
 - `_resolve_expected_snapshot_trade_date` 复用 `calendar_service.get_previous_trading_day_async` / `get_most_recent_trading_day_async`，禁止硬编码周末。
 
 orchestrator 状态机回归（`tests/test_after_close_orchestrator.py`，9 个用例）：
@@ -312,7 +313,7 @@ ruff check app/services/feature_snapshot_service.py \
 mypy app/services/feature_snapshot_service.py
 ```
 
-预期：46 passed、ruff 零错误、mypy 零错误。
+预期：47 passed、ruff 零错误、mypy 零错误。
 
 小范围 dry-run 验证命令（不写库，仅打印计划）：
 

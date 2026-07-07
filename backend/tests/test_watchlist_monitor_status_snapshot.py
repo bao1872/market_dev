@@ -382,3 +382,53 @@ async def test_monitor_status_non_trading_day_no_history_returns_no_snapshot(
     item = data["items"][0]
     # 非交易日无历史 snapshot → NO_SNAPSHOT（不是 WAITING_SNAPSHOT）
     assert item["calculation_status"] == "NO_SNAPSHOT"
+
+
+@pytest.mark.asyncio
+async def test_monitor_status_intraday_no_yesterday_snapshot_returns_no_snapshot(
+    db_session, snapshot_user, client
+):
+    """交易日盘中（10:00），trading_calendar 存在上一交易日，但上一交易日无 snapshot。
+
+    应返回 NO_SNAPSHOT（不是 WAITING_SNAPSHOT），metrics={}。
+
+    防止盘中历史快照缺失被误报 WAITING_SNAPSHOT：
+    WAITING_SNAPSHOT 仅用于"交易日已收盘但 snapshot 尚未生成"的场景。
+    盘中读取昨日 snapshot 缺失时，应返回 NO_SNAPSHOT。
+    """
+    user, instrument = snapshot_user
+    _version = await _create_watchlist_monitor_version(db_session)
+
+    from datetime import date
+    today = date(2026, 7, 7)  # 周二
+    yesterday = date(2026, 7, 6)  # 周一
+
+    # 插入 TradingCalendar：昨天和今天均为交易日（但无任何 snapshot）
+    db_session.add(_make_calendar_row(yesterday, is_trading=True))
+    db_session.add(_make_calendar_row(today, is_trading=True))
+    await db_session.flush()
+
+    with patch(
+        "app.api.watchlist.is_trading_day_async",
+        new_callable=AsyncMock,
+        return_value=True,
+    ), patch(
+        "app.api.watchlist.shanghai_business_date",
+        return_value=today,
+    ), patch(
+        "app.api.watchlist.now_shanghai",
+        return_value=datetime(2026, 7, 7, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    ):
+        response = await client.get("/watchlist/monitor-status")
+
+    assert response.status_code == 200, f"响应体: {response.text}"
+    data = response.json()
+    assert len(data["items"]) == 1
+    item = data["items"][0]
+    # 盘中 + 上一交易日存在但无 snapshot → NO_SNAPSHOT（不是 WAITING_SNAPSHOT）
+    assert item["calculation_status"] == "NO_SNAPSHOT", (
+        f"盘中缺昨日 snapshot 应返回 NO_SNAPSHOT，实际: {item['calculation_status']}"
+    )
+    assert item["metrics"] == {}, (
+        f"NO_SNAPSHOT 时 metrics 应为空 dict，实际: {item['metrics']}"
+    )

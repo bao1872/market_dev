@@ -277,12 +277,20 @@ async def get_watchlist_monitor_status(
     状态语义：
     - market_session: 市场阶段（NON_TRADING_DAY/PRE_OPEN/MORNING_SESSION/LUNCH_BREAK/AFTERNOON_SESSION/MARKET_CLOSED）
     - calculation_status: 计算状态（SUCCEEDED/WAITING_SNAPSHOT/NO_SNAPSHOT）
-      * SUCCEEDED: 当日 feature snapshot 已生成，metrics 来自 snapshot.summary_payload
-      * WAITING_SNAPSHOT: 交易日已收盘但 snapshot 尚未生成（orchestrator 未跑或失败）
-      * NO_SNAPSHOT: 非交易日或交易日内（snapshot 不应存在）
+      * SUCCEEDED: expected_trade_date 对应的 snapshot 存在，metrics 来自 snapshot.summary_payload
+      * WAITING_SNAPSHOT: 交易日已收盘（MARKET_CLOSED）但当日 snapshot 尚未生成
+        （orchestrator 未跑或失败；仅在 MARKET_CLOSED 时出现，盘中不出现）
+      * NO_SNAPSHOT: 盘中无昨日 snapshot / 非交易日无历史 snapshot / 无法解析交易日
+        （盘中 expected_trade_date 为上一交易日，缺失时返回 NO_SNAPSHOT，不是 WAITING_SNAPSHOT）
     - monitor_status: 兼容字段，SUCCEEDED 时回落到 market_session，否则与 calculation_status 一致
     - freshness_seconds: 基于 snapshot.updated_at 的数据新鲜度（秒）
     - last_bar_time: 最新评估对应的 bar 时间（来自 MonitorEvaluation）
+
+    expected_snapshot_trade_date 规则（_resolve_expected_snapshot_trade_date）：
+    - 交易日未收盘 → 上一交易日（盘中读昨日 snapshot）
+    - 交易日已收盘 → today（读当日 snapshot）
+    - 非交易日 → 最近交易日
+    - 无法解析 → None（NO_SNAPSHOT）
 
     metrics 数据源：
     - 来自 StockFeatureSnapshot.summary_payload（_source='feature_snapshot'）

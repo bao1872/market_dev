@@ -794,9 +794,9 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 
 | 状态 | 触发条件 | metrics 内容 | `freshness_seconds` |
 |---|---|---|---|
-| `SUCCEEDED` | 交易日已收盘（`MARKET_CLOSED`）且 snapshot 存在 | 来自 `summary_payload` | `now_cst - snapshot.updated_at`（秒） |
-| `WAITING_SNAPSHOT` | 交易日已收盘（`MARKET_CLOSED`）但 snapshot 缺失（orchestrator 未跑或失败） | 空 dict | `None` |
-| `NO_SNAPSHOT` | 非交易日或交易日内（`PRE_OPEN`/`MORNING_SESSION`/`LUNCH_BREAK`/`AFTERNOON_SESSION`） | 空 dict | `None` |
+| `SUCCEEDED` | `expected_snapshot_trade_date` 对应的 snapshot 存在（含盘中读昨日、收盘后读今日、非交易日读最近交易日） | 来自 `summary_payload` | `now_cst - snapshot.updated_at`（秒） |
+| `WAITING_SNAPSHOT` | 交易日已收盘（`MARKET_CLOSED`）但当日 snapshot 缺失（orchestrator 未跑或失败）；**仅在 `MARKET_CLOSED` 时出现，盘中不出现** | 空 dict | `None` |
+| `NO_SNAPSHOT` | 盘中无昨日 snapshot / 非交易日无历史 snapshot / 无法解析交易日 | 空 dict | `None` |
 
 **`_resolve_expected_snapshot_trade_date` 规则**（`/watchlist/monitor-status` 内部 helper）：
 
