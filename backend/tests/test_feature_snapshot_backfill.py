@@ -14,12 +14,22 @@
    - 成功创建 succeeded run
    - 失败比例超阈值创建 failed run（不抛异常）
 8. main: end=latest 解析、start>end 退出、--symbols 小样本
+9. multiprocessing:
+   - --workers 参数解析（默认 1，自定义 N）
+   - _worker_process_instruments: per-instrument commit、resume 跳过、单股失败不阻塞
+   - backfill_instrument_first_parallel: 创建/finish run records、scope 传播、空输入返回
 
 [instrument-first 事务边界]：
 - backfill_instrument_first 不内部 commit，由 main 控制
 - 失败比例超阈值的 trade_date 标 run.status='failed'（不抛 RuntimeError）
 - 单股失败不阻塞其他股票
 - watchlist 只读取 run.status='succeeded' 的 snapshot（Phase 5 run gate）
+
+[multiprocessing 事务边界]：
+- backfill_instrument_first_parallel 主进程创建/finish run records
+- _worker_process_instruments per-instrument commit（被 kill 不丢已完成，resume 可续）
+- 单 worker 失败不阻塞其他 workers
+- run scope 传播到 metadata_['scope']
 
 用法：
     cd backend && APP_ENV=test TEST_DATABASE_URL=postgresql+psycopg://... \
@@ -29,9 +39,10 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import uuid
 from datetime import date, datetime
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -43,7 +54,9 @@ from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
 from scripts.feature_snapshot_backfill import (
     _resolve_run_scope,
+    _worker_process_instruments,
     backfill_instrument_first,
+    backfill_instrument_first_parallel,
     get_existing_instrument_ids,
     get_instruments_for_backfill,
     get_latest_bar_date,
@@ -1054,4 +1067,488 @@ async def test_backfill_instrument_first_propagates_sample_scope_to_run_metadata
     finish_metadata = finish_kwargs.get("metadata", {})
     assert finish_metadata.get("scope") == "sample", (
         f"finish_snapshot_run 的 metadata 应含 scope='sample'，实际: {finish_metadata}"
+    )
+
+
+# =============================================================================
+# multiprocessing 测试
+# =============================================================================
+
+
+def _make_snapshot(
+    instrument_id: uuid.UUID, trade_date: date,
+) -> StockFeatureSnapshot:
+    """测试辅助：构造 StockFeatureSnapshot。"""
+    return StockFeatureSnapshot(
+        instrument_id=instrument_id,
+        trade_date=trade_date,
+        primary_timeframe="1d",
+        secondary_timeframe="15m",
+        adj="qfq",
+        schema_version=1,
+        source_primary_bar_time=datetime(
+            trade_date.year, trade_date.month, trade_date.day,
+            15, 0, tzinfo=ZoneInfo("Asia/Shanghai"),
+        ),
+        source_secondary_bar_time=datetime(
+            trade_date.year, trade_date.month, trade_date.day,
+            15, 0, tzinfo=ZoneInfo("Asia/Shanghai"),
+        ),
+        structural_payload={},
+        temporal_payload={},
+        summary_payload={"_source": "feature_snapshot"},
+        degraded_reasons=[],
+    )
+
+
+class _FakeWorkerSession:
+    """worker 测试用的 fake async session（支持 commit/rollback + async ctx）。"""
+
+    def __init__(self) -> None:
+        self.commits = 0
+        self.rollbacks = 0
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+    async def rollback(self) -> None:
+        self.rollbacks += 1
+
+    async def __aenter__(self) -> _FakeWorkerSession:
+        return self
+
+    async def __aexit__(self, *args: object) -> bool:
+        return False
+
+
+class _FakeWorkerEngine:
+    """worker 测试用的 fake async engine。"""
+
+    async def dispose(self) -> None:
+        pass
+
+
+def _patch_worker_deps(
+    fake_session: _FakeWorkerSession,
+    fake_load,
+    fake_compute,
+    fake_upsert,
+):
+    """返回 patch context，统一处理 worker 内部 import 的依赖。"""
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    stack.enter_context(patch(
+        "sqlalchemy.ext.asyncio.create_async_engine",
+        return_value=_FakeWorkerEngine(),
+    ))
+    # async_sessionmaker(*args, **kwargs) → factory; factory() → session
+    stack.enter_context(patch(
+        "sqlalchemy.ext.asyncio.async_sessionmaker",
+        return_value=lambda *a, **kw: fake_session,
+    ))
+    stack.enter_context(patch(
+        "scripts.feature_snapshot_backfill.load_instrument_bars",
+        new=fake_load,
+    ))
+    stack.enter_context(patch(
+        "scripts.feature_snapshot_backfill.compute_feature_snapshot_for_date",
+        new=fake_compute,
+    ))
+    stack.enter_context(patch(
+        "scripts.feature_snapshot_backfill.upsert_snapshot",
+        new=fake_upsert,
+    ))
+    return stack
+
+
+# ===== 15. parse_args: --workers =====
+
+
+def test_parse_args_workers_default_is_1() -> None:
+    """--workers 默认为 1（单进程模式）。"""
+    with patch("sys.argv", ["feature_snapshot_backfill", "--start", "2026-01-01"]):
+        args = parse_args()
+    assert args.workers == 1
+
+
+def test_parse_args_workers_custom() -> None:
+    """--workers 4 启用 multiprocessing 并行模式。"""
+    with patch("sys.argv", [
+        "feature_snapshot_backfill",
+        "--start", "2026-01-01",
+        "--workers", "4",
+    ]):
+        args = parse_args()
+    assert args.workers == 4
+
+
+# ===== 16. _worker_process_instruments: per-instrument commit =====
+
+
+def test_worker_process_instruments_per_instrument_commit() -> None:
+    """_worker_process_instruments: 每只 instrument commit 一次（resume 安全）。
+
+    场景：2 instruments × 2 trade_dates。
+    要求：
+    - commit 调用 2 次（每 instrument 一次）
+    - 4 个 snapshot 全部成功
+    - failed=0
+    """
+    inst1_id = uuid.uuid4()
+    inst2_id = uuid.uuid4()
+    trade_dates = [date(2026, 1, 5), date(2026, 1, 6)]
+    fake_session = _FakeWorkerSession()
+
+    async def _fake_load(db, instrument_id, **kwargs):
+        return (None, None)
+
+    async def _fake_compute(db, instrument_id, trade_date, **kwargs):
+        return _make_snapshot(instrument_id, trade_date)
+
+    async def _fake_upsert(db, snapshot):
+        pass
+
+    with _patch_worker_deps(fake_session, _fake_load, _fake_compute, _fake_upsert):
+        result = _worker_process_instruments(
+            instrument_ids=[inst1_id, inst2_id],
+            trade_dates=trade_dates,
+            db_url="postgresql+psycopg://user:pass@localhost/db",
+            primary_timeframe="1d",
+            secondary_timeframe="15m",
+            adj="qfq",
+            resume=False,
+            existing_per_date_str={},
+            worker_id=0,
+        )
+
+    # 2 instruments → 2 commits
+    assert fake_session.commits == 2, (
+        f"per-instrument commit 应调用 2 次，实际 {fake_session.commits} 次"
+    )
+    # 4 snapshots total (2 instruments × 2 dates)
+    total_success = sum(stats["success"] for stats in result.values())
+    assert total_success == 4
+    assert all(stats["failed"] == 0 for stats in result.values())
+
+
+# ===== 17. _worker_process_instruments: resume 跳过已存在 =====
+
+
+def test_worker_process_instruments_resume_skips_existing() -> None:
+    """_worker_process_instruments: resume 跳过已存在的 (instrument, date) 组合。
+
+    场景：2 instruments × 1 trade_date，inst1 已存在。
+    要求：只计算 inst2，inst1 计入 skipped。
+    """
+    inst1_id = uuid.uuid4()
+    inst2_id = uuid.uuid4()
+    trade_dates = [date(2026, 1, 5)]
+    fake_session = _FakeWorkerSession()
+
+    compute_calls: list[tuple[uuid.UUID, date]] = []
+
+    async def _fake_load(db, instrument_id, **kwargs):
+        return (None, None)
+
+    async def _fake_compute(db, instrument_id, trade_date, **kwargs):
+        compute_calls.append((instrument_id, trade_date))
+        return _make_snapshot(instrument_id, trade_date)
+
+    async def _fake_upsert(db, snapshot):
+        pass
+
+    existing = {"2026-01-05": {str(inst1_id)}}
+
+    with _patch_worker_deps(fake_session, _fake_load, _fake_compute, _fake_upsert):
+        result = _worker_process_instruments(
+            instrument_ids=[inst1_id, inst2_id],
+            trade_dates=trade_dates,
+            db_url="postgresql+psycopg://user:pass@localhost/db",
+            primary_timeframe="1d",
+            secondary_timeframe="15m",
+            adj="qfq",
+            resume=True,
+            existing_per_date_str=existing,
+            worker_id=0,
+        )
+
+    assert len(compute_calls) == 1, (
+        f"resume 应跳过 inst1，只计算 inst2，实际调用 {len(compute_calls)} 次"
+    )
+    assert compute_calls[0] == (inst2_id, date(2026, 1, 5))
+    assert result["2026-01-05"]["skipped"] == 1
+    assert result["2026-01-05"]["success"] == 1
+
+
+# ===== 18. _worker_process_instruments: 单 instrument 失败不阻塞其他 =====
+
+
+def test_worker_process_instruments_single_failure_doesnt_block() -> None:
+    """_worker_process_instruments: 单 instrument 失败触发 rollback，不阻塞其他。
+
+    场景：2 instruments × 1 trade_date，inst1 load 失败。
+    要求：
+    - inst1 失败（failed=1），inst2 成功（success=1）
+    - inst1 触发 rollback
+    - inst2 仍能正常 commit
+    """
+    inst1_id = uuid.uuid4()
+    inst2_id = uuid.uuid4()
+    trade_dates = [date(2026, 1, 5)]
+    fake_session = _FakeWorkerSession()
+
+    async def _fake_load(db, instrument_id, **kwargs):
+        if instrument_id == inst1_id:
+            raise ValueError("模拟 inst1 加载失败")
+        return (None, None)
+
+    async def _fake_compute(db, instrument_id, trade_date, **kwargs):
+        return _make_snapshot(instrument_id, trade_date)
+
+    async def _fake_upsert(db, snapshot):
+        pass
+
+    with _patch_worker_deps(fake_session, _fake_load, _fake_compute, _fake_upsert):
+        result = _worker_process_instruments(
+            instrument_ids=[inst1_id, inst2_id],
+            trade_dates=trade_dates,
+            db_url="postgresql+psycopg://user:pass@localhost/db",
+            primary_timeframe="1d",
+            secondary_timeframe="15m",
+            adj="qfq",
+            resume=False,
+            existing_per_date_str={},
+            worker_id=0,
+        )
+
+    # inst1 失败（load 抛异常 → rollback），inst2 成功
+    assert result["2026-01-05"]["failed"] == 1
+    assert result["2026-01-05"]["success"] == 1
+    # inst1 触发 rollback
+    assert fake_session.rollbacks == 1
+    # inst2 仍能 commit
+    assert fake_session.commits == 1
+
+
+# ===== 19. backfill_instrument_first_parallel: 空输入返回 =====
+
+
+@pytest.mark.asyncio
+async def test_backfill_instrument_first_parallel_empty_inputs() -> None:
+    """backfill_instrument_first_parallel: 空 trade_dates 或 instruments 返回 0。"""
+    fake_db = MagicMock()
+    fake_db.commit = AsyncMock()
+
+    # 空 trade_dates
+    result = await backfill_instrument_first_parallel(
+        fake_db,
+        trade_dates=[],
+        instruments=[uuid.uuid4()],
+        workers=4,
+        db_url="postgresql+psycopg://user:pass@localhost/db",
+    )
+    assert result["total_snapshots"] == 0
+
+    # 空 instruments
+    result = await backfill_instrument_first_parallel(
+        fake_db,
+        trade_dates=[date(2026, 1, 5)],
+        instruments=[],
+        workers=4,
+        db_url="postgresql+psycopg://user:pass@localhost/db",
+    )
+    assert result["total_snapshots"] == 0
+
+
+# ===== 20. backfill_instrument_first_parallel: 创建 + finalize run records =====
+
+
+@pytest.mark.asyncio
+async def test_backfill_instrument_first_parallel_creates_and_finalizes_run() -> None:
+    """backfill_instrument_first_parallel: 创建 run records + finalize succeeded。
+
+    使用 ThreadPoolExecutor 替代 ProcessPoolExecutor（in-process，可 mock worker）。
+    场景：2 instruments × 1 trade_date，全部成功。
+    """
+    inst1_id = uuid.uuid4()
+    inst2_id = uuid.uuid4()
+    trade_dates = [date(2026, 1, 5)]
+
+    fake_db = MagicMock()
+    fake_db.commit = AsyncMock()
+
+    def _fake_worker(instrument_ids, trade_dates, *args, **kwargs):
+        return {
+            td.isoformat(): {
+                "success": len(instrument_ids),
+                "failed": 0,
+                "skipped": 0,
+            }
+            for td in trade_dates
+        }
+
+    with patch(
+        "scripts.feature_snapshot_backfill._worker_process_instruments",
+        new=_fake_worker,
+    ), patch(
+        "concurrent.futures.ProcessPoolExecutor",
+        concurrent.futures.ThreadPoolExecutor,
+    ), patch(
+        "scripts.feature_snapshot_backfill.create_snapshot_run",
+        new=AsyncMock(),
+    ) as mock_create, patch(
+        "scripts.feature_snapshot_backfill.finish_snapshot_run",
+        new=AsyncMock(),
+    ) as mock_finish, patch(
+        "scripts.feature_snapshot_backfill._get_succeeded_trade_dates",
+        new=AsyncMock(return_value=set()),
+    ), patch(
+        "scripts.feature_snapshot_backfill.get_existing_instrument_ids",
+        new=AsyncMock(return_value=set()),
+    ):
+        result = await backfill_instrument_first_parallel(
+            fake_db,
+            trade_dates=trade_dates,
+            instruments=[inst1_id, inst2_id],
+            workers=2,
+            failure_threshold=0.3,
+            resume=False,
+            db_url="postgresql+psycopg://user:pass@localhost/db",
+        )
+
+    # 创建 1 个 run record（每个 trade_date 1 个）
+    assert mock_create.await_count == 1
+    # finish 为 succeeded（failure_rate=0）
+    assert mock_finish.await_count == 1
+    finish_kwargs = mock_finish.await_args.kwargs
+    assert finish_kwargs["status"] == "succeeded"
+    assert finish_kwargs["snapshot_count"] == 2
+    assert finish_kwargs["failed_count"] == 0
+    assert result["total_snapshots"] == 2
+
+
+# ===== 21. backfill_instrument_first_parallel: 高失败率标 failed =====
+
+
+@pytest.mark.asyncio
+async def test_backfill_instrument_first_parallel_high_failure_marks_failed() -> None:
+    """backfill_instrument_first_parallel: failure_rate > 阈值 → run.status='failed'。
+
+    场景：3 instruments，1 成功 2 失败（failure_rate=0.67 > 0.3）。
+    使用 workers=1 确保 3 instruments 在同一 chunk，fake_worker 返回固定 1+2。
+    """
+    inst1_id = uuid.uuid4()
+    inst2_id = uuid.uuid4()
+    inst3_id = uuid.uuid4()
+    trade_dates = [date(2026, 1, 5)]
+
+    fake_db = MagicMock()
+    fake_db.commit = AsyncMock()
+
+    def _fake_worker(instrument_ids, trade_dates, *args, **kwargs):
+        return {
+            td.isoformat(): {"success": 1, "failed": 2, "skipped": 0}
+            for td in trade_dates
+        }
+
+    with patch(
+        "scripts.feature_snapshot_backfill._worker_process_instruments",
+        new=_fake_worker,
+    ), patch(
+        "concurrent.futures.ProcessPoolExecutor",
+        concurrent.futures.ThreadPoolExecutor,
+    ), patch(
+        "scripts.feature_snapshot_backfill.create_snapshot_run",
+        new=AsyncMock(),
+    ), patch(
+        "scripts.feature_snapshot_backfill.finish_snapshot_run",
+        new=AsyncMock(),
+    ) as mock_finish, patch(
+        "scripts.feature_snapshot_backfill._get_succeeded_trade_dates",
+        new=AsyncMock(return_value=set()),
+    ), patch(
+        "scripts.feature_snapshot_backfill.get_existing_instrument_ids",
+        new=AsyncMock(return_value=set()),
+    ):
+        await backfill_instrument_first_parallel(
+            fake_db,
+            trade_dates=trade_dates,
+            instruments=[inst1_id, inst2_id, inst3_id],
+            workers=1,  # 单 chunk 确保 fake_worker 固定 1+2 生效
+            failure_threshold=0.3,
+            resume=False,
+            db_url="postgresql+psycopg://user:pass@localhost/db",
+        )
+
+    assert mock_finish.await_count == 1
+    finish_kwargs = mock_finish.await_args.kwargs
+    assert finish_kwargs["status"] == "failed"
+    assert finish_kwargs["snapshot_count"] == 1
+    assert finish_kwargs["failed_count"] == 2
+
+
+# ===== 22. backfill_instrument_first_parallel: scope 传播到 run metadata =====
+
+
+@pytest.mark.asyncio
+async def test_backfill_instrument_first_parallel_propagates_scope() -> None:
+    """backfill_instrument_first_parallel: scope='sample' 传播到 create/finish metadata。
+
+    防止小样本验证产生的 run 污染 watchlist SUCCEEDED 状态。
+    """
+    inst1_id = uuid.uuid4()
+    trade_dates = [date(2026, 1, 5)]
+
+    fake_db = MagicMock()
+    fake_db.commit = AsyncMock()
+
+    def _fake_worker(instrument_ids, trade_dates, *args, **kwargs):
+        return {
+            td.isoformat(): {
+                "success": len(instrument_ids),
+                "failed": 0,
+                "skipped": 0,
+            }
+            for td in trade_dates
+        }
+
+    with patch(
+        "scripts.feature_snapshot_backfill._worker_process_instruments",
+        new=_fake_worker,
+    ), patch(
+        "concurrent.futures.ProcessPoolExecutor",
+        concurrent.futures.ThreadPoolExecutor,
+    ), patch(
+        "scripts.feature_snapshot_backfill.create_snapshot_run",
+        new=AsyncMock(),
+    ) as mock_create, patch(
+        "scripts.feature_snapshot_backfill.finish_snapshot_run",
+        new=AsyncMock(),
+    ) as mock_finish, patch(
+        "scripts.feature_snapshot_backfill._get_succeeded_trade_dates",
+        new=AsyncMock(return_value=set()),
+    ), patch(
+        "scripts.feature_snapshot_backfill.get_existing_instrument_ids",
+        new=AsyncMock(return_value=set()),
+    ):
+        await backfill_instrument_first_parallel(
+            fake_db,
+            trade_dates=trade_dates,
+            instruments=[inst1_id],
+            workers=2,
+            scope="sample",  # 关键：传入 sample scope
+            db_url="postgresql+psycopg://user:pass@localhost/db",
+        )
+
+    # create_snapshot_run 收到 scope='sample'
+    create_kwargs = mock_create.call_args.kwargs
+    assert create_kwargs.get("scope") == "sample", (
+        f"create_snapshot_run 应收到 scope='sample'，实际: {create_kwargs}"
+    )
+    # finish_snapshot_run 的 metadata 含 scope='sample'
+    finish_kwargs = mock_finish.call_args.kwargs
+    finish_metadata = finish_kwargs.get("metadata", {})
+    assert finish_metadata.get("scope") == "sample", (
+        f"finish_snapshot_run metadata 应含 scope='sample'，实际: {finish_metadata}"
     )

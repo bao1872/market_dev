@@ -1,18 +1,24 @@
 """特征快照历史回补脚本 - instrument-first 优化版。
 
 用法：
+    # 单进程模式（默认）
     cd /root/web_dev/backend && .venv/bin/python -m scripts.feature_snapshot_backfill \\
         --start 2026-01-01 --end latest --batch-size 20
+
+    # 多进程模式（--workers > 1）
+    cd /root/web_dev/backend && .venv/bin/python -m scripts.feature_snapshot_backfill \\
+        --start 2026-01-01 --end latest --workers 4 --resume
 
 参数：
     --start: 起始日期（YYYY-MM-DD，必填）
     --end: 结束日期（YYYY-MM-DD 或 "latest"，默认 "latest" 表示最新 bars_daily 日期）
-    --batch-size: 每批 instrument 数（默认 20，保守内存）
+    --batch-size: 每批 instrument 数（默认 20，保守内存；仅单进程模式生效）
     --symbols: 只处理指定股票代码（逗号分隔，如 000100,603303）
     --limit-instruments: 限制处理的 instrument 数量（用于小样本验证）
     --resume: 跳过已存在 snapshot 且所属 trade_date 的 run.status='succeeded' 的行
     --dry-run: 只打印计划与 missing 统计，不执行写入
     --failure-threshold: 失败比例阈值（默认 0.3，超过则该 trade_date 标 run.status='failed'）
+    --workers: 并行进程数（默认 1 单进程，>1 启用 multiprocessing；建议 = CPU 核数）
 
 [instrument-first 优化]：
     旧 date-first 实现已废弃（每只 instrument 每个 trade_date 重复 fetch bars）。
@@ -24,17 +30,25 @@
             compute_feature_snapshot_for_date(primary_bars=..., secondary_bars=...)
             upsert
 
+[multiprocessing 优化]（--workers > 1）：
+    - 主进程创建 run records + 分发 instrument chunks
+    - 每个 worker 独立 async engine + session
+    - per-instrument commit（被 kill 不丢已完成，resume 可续）
+    - 单 worker 失败不阻塞其他
+    - 预期 4-8x 提速（取决于 CPU 核数）
+
 [事务边界 + run gate]：
-    - backfill_instrument_first 不内部 commit，由 main 控制
+    - 单进程：backfill_instrument_first 不内部 commit，由 main 控制
+    - 多进程：backfill_instrument_first_parallel 创建 run records 后 commit，
+      每个 worker per-instrument commit，主进程 finalize run records
     - 失败比例超阈值的 trade_date 标 run.status='failed'（不抛 RuntimeError）
     - 单股失败不阻塞其他股票
-    - watchlist 只读取 run.status='succeeded' 的 snapshot（Phase 5 run gate）
+    - watchlist 只读取 run.status='succeeded' + published_at IS NOT NULL + metadata_.scope='full' 的 snapshot
 
 约束：
     - 不修改 DSA/BB/swing/temporal 数学公式
     - 复用 feature_snapshot_service.compute_feature_snapshot_for_date
     - 单股失败记录到日志，不阻塞其他股票
-    - 不并发，先保证稳定和低内存
 """
 
 from __future__ import annotations
@@ -518,6 +532,340 @@ async def backfill_instrument_first(
     }
 
 
+# =============================================================================
+# [multiprocessing] - 并行回补
+# =============================================================================
+
+
+def _worker_process_instruments(
+    instrument_ids: list[uuid.UUID],
+    trade_dates: list[date],
+    db_url: str,
+    primary_timeframe: str,
+    secondary_timeframe: str,
+    adj: str,
+    resume: bool,
+    existing_per_date_str: dict[str, set[str]],
+    worker_id: int,
+) -> dict[str, dict[str, int]]:
+    """Worker 进程：处理一批 instruments（top-level，可 pickle）。
+
+    [multiprocessing] - 每个 worker 进程独立创建 async engine + session，
+    逐 instrument 加载 bars + 计算 + upsert + commit。
+
+    事务边界：
+    - per-instrument commit（被 kill 不丢已完成，resume 可续）
+    - 单 instrument 失败 rollback，不阻塞其他
+
+    Args:
+        instrument_ids: 本 worker 负责的 instrument UUID 列表
+        trade_dates: 交易日列表
+        db_url: 数据库连接串（postgresql+psycopg://，内部转 asyncpg）
+        primary_timeframe: 主周期
+        secondary_timeframe: 次周期
+        adj: 复权方式
+        resume: 是否跳过已存在
+        existing_per_date_str: 已存在 snapshot 的 {td_iso: set(instrument_id_str)}
+        worker_id: worker 编号（日志用）
+
+    Returns:
+        per-date stats: {td_iso: {"success": N, "failed": N, "skipped": N}}
+    """
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    async def _run() -> dict[str, dict[str, int]]:
+        # worker 进程独立 engine（不能共享主进程的连接池）
+        async_url = db_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
+        engine = create_async_engine(
+            async_url, pool_pre_ping=True, pool_size=5, max_overflow=10,
+        )
+        session_factory = async_sessionmaker(
+            bind=engine, expire_on_commit=False, autoflush=False,
+        )
+
+        per_date_stats: dict[str, dict[str, int]] = {
+            td.isoformat(): {"success": 0, "failed": 0, "skipped": 0}
+            for td in trade_dates
+        }
+
+        try:
+            async with session_factory() as db:
+                for idx, instrument_id in enumerate(instrument_ids):
+                    instr_id_str = str(instrument_id)
+                    # 1. 加载 bars（失败 → 所有 trade_dates 标 failed）
+                    try:
+                        primary_bars, secondary_bars = await load_instrument_bars(
+                            db, instrument_id,
+                            primary_timeframe=primary_timeframe,
+                            secondary_timeframe=secondary_timeframe,
+                            adj=adj,
+                        )
+                    except Exception as exc:
+                        await db.rollback()
+                        logger.error(
+                            "[worker-%d] instrument %s load_bars 失败: %s",
+                            worker_id, instrument_id, exc,
+                        )
+                        for td in trade_dates:
+                            per_date_stats[td.isoformat()]["failed"] += 1
+                        continue
+
+                    # 2. 逐 trade_date 计算 + upsert
+                    for td in trade_dates:
+                        td_str = td.isoformat()
+                        if resume and instr_id_str in existing_per_date_str.get(td_str, set()):
+                            per_date_stats[td_str]["skipped"] += 1
+                            continue
+                        try:
+                            snapshot = await compute_feature_snapshot_for_date(
+                                db, instrument_id, td,
+                                primary_timeframe=primary_timeframe,
+                                secondary_timeframe=secondary_timeframe,
+                                adj=adj,
+                                primary_bars=primary_bars,
+                                secondary_bars=secondary_bars,
+                            )
+                            await upsert_snapshot(db, snapshot)
+                            per_date_stats[td_str]["success"] += 1
+                        except Exception as exc:
+                            per_date_stats[td_str]["failed"] += 1
+                            logger.error(
+                                "[worker-%d] snapshot 失败 instrument=%s date=%s: %s",
+                                worker_id, instrument_id, td, exc,
+                            )
+
+                    # 3. per-instrument commit（resume 安全）
+                    try:
+                        await db.commit()
+                    except Exception as exc:
+                        await db.rollback()
+                        logger.error(
+                            "[worker-%d] instrument %s commit 失败: %s",
+                            worker_id, instrument_id, exc,
+                        )
+                    if (idx + 1) % 10 == 0:
+                        logger.info(
+                            "[worker-%d] 进度: %d/%d instruments",
+                            worker_id, idx + 1, len(instrument_ids),
+                        )
+        finally:
+            await engine.dispose()
+
+        return per_date_stats
+
+    return asyncio.run(_run())
+
+
+async def backfill_instrument_first_parallel(
+    db: AsyncSession,
+    trade_dates: list[date],
+    instruments: list[uuid.UUID],
+    *,
+    workers: int = 4,
+    failure_threshold: float = 0.3,
+    resume: bool = False,
+    run_type: str = "backfill",
+    primary_timeframe: str = _DEFAULT_PRIMARY_TF,
+    secondary_timeframe: str = _DEFAULT_SECONDARY_TF,
+    adj: str = _DEFAULT_ADJ,
+    schema_version: int = _DEFAULT_SCHEMA_VERSION,
+    scope: str = SCOPE_FULL,
+    db_url: str = "",
+) -> dict[str, Any]:
+    """Multiprocessing 版 instrument-first 回补。
+
+    [multiprocessing] - 使用 ProcessPoolExecutor 并行处理 instruments。
+    每个 worker 独立 DB session，per-instrument commit。
+
+    事务边界：
+    - run records 在主进程创建 + finalize
+    - 每个 worker 独立 commit per-instrument（resume 安全）
+    - 单 worker 失败不阻塞其他 workers
+
+    Args:
+        db: 主进程 DB 会话（用于创建/finalize run records）
+        trade_dates: 交易日列表
+        instruments: instrument_id 列表
+        workers: 并行进程数
+        failure_threshold: 失败比例阈值
+        resume: 跳过已存在 snapshot
+        run_type: run 记录类型
+        primary_timeframe: 主周期
+        secondary_timeframe: 次周期
+        adj: 复权方式
+        schema_version: 快照 schema 版本
+        scope: run 范围（'full' 或 'sample'）
+        db_url: 数据库连接串（传给 worker 进程）
+
+    Returns:
+        统计信息 dict
+    """
+    from concurrent.futures import ProcessPoolExecutor
+
+    total_instruments = len(instruments)
+    total_dates = len(trade_dates)
+
+    if total_instruments == 0 or total_dates == 0:
+        logger.info(
+            "[parallel] 无需处理: trade_dates=%d, instruments=%d",
+            total_dates, total_instruments,
+        )
+        return {
+            "trade_dates": total_dates,
+            "instruments": total_instruments,
+            "total_snapshots": 0,
+            "total_failed": 0,
+            "skipped_existing": 0,
+        }
+
+    # 1. 主进程创建 run records（status=running）
+    run_records: dict[date, StockFeatureSnapshotRun] = {}
+    for td in trade_dates:
+        run = await create_snapshot_run(
+            db, td, run_type,
+            schema_version=schema_version,
+            primary_timeframe=primary_timeframe,
+            secondary_timeframe=secondary_timeframe,
+            adj=adj,
+            expected_count=total_instruments,
+            metadata={"source": "backfill", "workers": workers},
+            scope=scope,
+        )
+        run_records[td] = run
+    await db.commit()  # commit run records，让 workers 可见
+
+    # 2. resume: 查询已 succeeded 的 trade_date + 已存在的 (instrument, date)
+    succeeded_dates: set[date] = set()
+    if resume:
+        succeeded_dates = await _get_succeeded_trade_dates(db, trade_dates, schema_version=schema_version)
+
+    existing_per_date: dict[date, set[uuid.UUID]] = {}
+    if resume:
+        for td in trade_dates:
+            if td in succeeded_dates:
+                existing_per_date[td] = await get_existing_instrument_ids(
+                    db, td,
+                    primary_timeframe=primary_timeframe,
+                    secondary_timeframe=secondary_timeframe,
+                    adj=adj,
+                    schema_version=schema_version,
+                )
+            else:
+                existing_per_date[td] = set()
+
+    # 转为 picklable 格式（str keys/sets）
+    existing_per_date_str: dict[str, set[str]] = {
+        td.isoformat(): {str(uid) for uid in uids}
+        for td, uids in existing_per_date.items()
+    }
+
+    # 3. 分发 instruments 到 workers
+    chunk_size = max(1, total_instruments // workers)
+    chunks: list[list[uuid.UUID]] = []
+    for i in range(0, total_instruments, chunk_size):
+        chunk = instruments[i : i + chunk_size]
+        if chunk:
+            chunks.append(chunk)
+
+    logger.info(
+        "[parallel] 启动 %d workers, %d instruments 分 %d chunks (chunk_size=%d)",
+        workers, total_instruments, len(chunks), chunk_size,
+    )
+
+    per_date_stats: dict[date, dict[str, int]] = {
+        td: {"success": 0, "failed": 0, "skipped": 0} for td in trade_dates
+    }
+
+    loop = asyncio.get_event_loop()
+
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        futures = []
+        for worker_id, chunk in enumerate(chunks):
+            future = loop.run_in_executor(
+                executor,
+                _worker_process_instruments,
+                chunk,
+                trade_dates,
+                db_url,
+                primary_timeframe,
+                secondary_timeframe,
+                adj,
+                resume,
+                existing_per_date_str,
+                worker_id,
+            )
+            futures.append(future)
+
+        # 收集结果
+        for future in asyncio.as_completed(futures):
+            try:
+                worker_stats = await future
+                # 合并 stats
+                for td_str, stats in worker_stats.items():
+                    td = date.fromisoformat(td_str)
+                    per_date_stats[td]["success"] += stats["success"]
+                    per_date_stats[td]["failed"] += stats["failed"]
+                    per_date_stats[td]["skipped"] += stats["skipped"]
+            except Exception as exc:
+                logger.error("[parallel] worker 失败: %s", exc, exc_info=True)
+
+    # 4. finalize run records
+    total_snapshots = 0
+    total_failed = 0
+    total_skipped = 0
+    for td in trade_dates:
+        stats = per_date_stats[td]
+        snapshots = stats["success"]
+        failed = stats["failed"]
+        skipped = stats["skipped"]
+        total_snapshots += snapshots
+        total_failed += failed
+        total_skipped += skipped
+
+        processed = snapshots + failed
+        failure_rate = failed / processed if processed > 0 else 0.0
+        run_status = STATUS_FAILED if failure_rate > failure_threshold else STATUS_SUCCEEDED
+
+        await finish_snapshot_run(
+            db, run_records[td],
+            status=run_status,
+            snapshot_count=snapshots,
+            failed_count=failed,
+            skipped_count=skipped,
+            expected_count=total_instruments,
+            failure_rate=failure_rate,
+            metadata={
+                "source": "backfill",
+                "workers": workers,
+                "failure_threshold": failure_threshold,
+                "scope": scope,
+            },
+        )
+        logger.info(
+            "[parallel] trade_date=%s run finalized: status=%s, "
+            "snapshots=%d, failed=%d, skipped=%d, failure_rate=%.2f",
+            td, run_status, snapshots, failed, skipped, failure_rate,
+        )
+
+    await db.commit()
+    logger.info(
+        "[parallel] 全部完成: trade_dates=%d, instruments=%d, "
+        "total_snapshots=%d, total_failed=%d, total_skipped=%d",
+        total_dates, total_instruments,
+        total_snapshots, total_failed, total_skipped,
+    )
+
+    return {
+        "trade_dates": total_dates,
+        "instruments": total_instruments,
+        "total_snapshots": total_snapshots,
+        "total_failed": total_failed,
+        "skipped_existing": total_skipped,
+    }
+
+
 async def main(args: argparse.Namespace) -> None:
     """主入口：解析参数，加载 trade_dates / instruments，调用 instrument-first 回补。
 
@@ -594,32 +942,66 @@ async def main(args: argparse.Namespace) -> None:
 
     # 非干跑模式：新开 session 执行回补
     if not args.dry_run:
-        async with AsyncSessionLocal() as db:
-            try:
-                result = await backfill_instrument_first(
-                    db,
-                    trade_dates=trade_dates,
-                    instruments=instruments,
-                    batch_size=args.batch_size,
-                    failure_threshold=args.failure_threshold,
-                    resume=args.resume,
-                    dry_run=False,
-                    scope=scope,
-                )
-                await db.commit()
-                logger.info(
-                    "[backfill] 提交完成: total_snapshots=%d, total_failed=%d, "
-                    "skipped_existing=%d",
-                    result.get("total_snapshots", 0),
-                    result.get("total_failed", 0),
-                    result.get("skipped_existing", 0),
-                )
-            except Exception as exc:
-                await db.rollback()
-                logger.error(
-                    "[backfill] 回补失败，已 rollback: %s", exc, exc_info=True,
-                )
-                raise
+        # [multiprocessing] workers > 1 时使用并行模式
+        if args.workers > 1:
+            from app.config import get_settings
+
+            db_url = get_settings().database_url
+            logger.info(
+                "[backfill] 并行模式: workers=%d, db_url=%s",
+                args.workers, db_url.split("@")[-1] if "@" in db_url else "(masked)",
+            )
+            async with AsyncSessionLocal() as db:
+                try:
+                    result = await backfill_instrument_first_parallel(
+                        db,
+                        trade_dates=trade_dates,
+                        instruments=instruments,
+                        workers=args.workers,
+                        failure_threshold=args.failure_threshold,
+                        resume=args.resume,
+                        scope=scope,
+                        db_url=db_url,
+                    )
+                    logger.info(
+                        "[backfill][parallel] 完成: total_snapshots=%d, "
+                        "total_failed=%d, skipped_existing=%d",
+                        result.get("total_snapshots", 0),
+                        result.get("total_failed", 0),
+                        result.get("skipped_existing", 0),
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "[backfill][parallel] 失败: %s", exc, exc_info=True,
+                    )
+                    raise
+        else:
+            async with AsyncSessionLocal() as db:
+                try:
+                    result = await backfill_instrument_first(
+                        db,
+                        trade_dates=trade_dates,
+                        instruments=instruments,
+                        batch_size=args.batch_size,
+                        failure_threshold=args.failure_threshold,
+                        resume=args.resume,
+                        dry_run=False,
+                        scope=scope,
+                    )
+                    await db.commit()
+                    logger.info(
+                        "[backfill] 提交完成: total_snapshots=%d, total_failed=%d, "
+                        "skipped_existing=%d",
+                        result.get("total_snapshots", 0),
+                        result.get("total_failed", 0),
+                        result.get("skipped_existing", 0),
+                    )
+                except Exception as exc:
+                    await db.rollback()
+                    logger.error(
+                        "[backfill] 回补失败，已 rollback: %s", exc, exc_info=True,
+                    )
+                    raise
 
 
 def parse_args() -> argparse.Namespace:
@@ -669,6 +1051,12 @@ def parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="只打印计划与统计，不执行写入",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="并行进程数（默认 1 单进程，>1 启用 multiprocessing；建议 = CPU 核数）",
     )
     args = parser.parse_args()
     # 解析 --symbols 为 list[str]

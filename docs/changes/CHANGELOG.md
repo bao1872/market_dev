@@ -4,6 +4,13 @@
 
 ## 2026-07-07
 
+- CHANGE-20260707-049: Backfill Multiprocessing 优化
+  - `feature_snapshot_backfill.py` 新增 `--workers N` 参数（默认 1 单进程，>1 启用 multiprocessing）
+  - 新增 `_worker_process_instruments()`：top-level 可 pickle worker 函数，per-instrument commit（被 kill 不丢已完成）
+  - 新增 `backfill_instrument_first_parallel()`：ProcessPoolExecutor + `loop.run_in_executor` + `asyncio.as_completed` 编排
+  - worker 循环重构为三阶段（load_bars / compute / commit 分离），load 失败时正确标 failed
+  - 测试：65 passed（9 新增 multiprocessing + 56 原有），ruff clean，mypy 0 新增错误
+  - 部署边界：未执行生产部署，需部署后验证 multiprocessing 实际提速
 - CHANGE-20260707-048: Snapshot Run Gate + Instrument-first Backfill
   - 新增 `stock_feature_snapshot_runs` 表（partial unique index 仅约束 `status='running'`，3 btree 索引）
   - 新增 `backend/app/models/stock_feature_snapshot_run.py` + migration `057_stock_feature_snapshot_runs`
