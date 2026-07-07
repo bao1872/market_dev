@@ -61,6 +61,7 @@ from app.strategy_assets.algorithms.features.atr_rope_event_factor_lab_v4 import
 from app.strategy_assets.algorithms.features.dynamic_swing_anchored_vwap import (  # noqa: E402
     DSAConfig,
     dynamic_swing_anchored_vwap,
+    format_dsa_time,
 )
 
 # 策略常量
@@ -649,9 +650,10 @@ def compute_dsa_bundle(bars: pd.DataFrame, config: dict[str, Any]) -> dict[str, 
     per_bar["anchor_time"] = anchor_time
 
     # 5. 构建 anchor：从 pivot_labels 提取锚点信息（每个 dir 翻转点 = 一个锚点）
-    # time 使用 YYYY-MM-DD 格式，与 visual_segments 契约保持一致
+    # time 通过 format_dsa_time 序列化（PR #34）：
+    #   1d/1w/1mo 为 YYYY-MM-DD，15m/1h 含 THH:MM:SS，与 visual_segments 同口径。
     anchor = {
-        "time": [pd.Timestamp(lab["x"]).strftime("%Y-%m-%d") for lab in pivot_labels],
+        "time": [format_dsa_time(lab["x"]) for lab in pivot_labels],
         "price": [float(lab["y"]) if np.isfinite(lab["y"]) else None for lab in pivot_labels],
         "direction": [int(lab["dir"]) for lab in pivot_labels],
         "type": [lab["text"] or None for lab in pivot_labels],
@@ -867,10 +869,11 @@ class DSASelector(StrategyRuntime):
 
         # [DSA 图表数组] - 从 factor_per_bar 提取为 list，NaN -> None
         # pivot_type/anchor_time/pivot_price 经 DataFrame 中转后 None 可能被转为 NaN，需还原
-        # time 从 factor_time 转为 ISO 日期字符串，与 source_bar_times 对齐
+        # time 通过 format_dsa_time 序列化（PR #34）：
+        #   1d/1w/1mo 为 YYYY-MM-DD，15m/1h 含 THH:MM:SS，与 source_bar_times 同口径对齐。
         # visual_segments 直接透传 bundle 返回的 Pine polyline 契约
         return {
-            "time": [idx.strftime("%Y-%m-%d") for idx in bundle["factor_time"]],
+            "time": [format_dsa_time(idx) for idx in bundle["factor_time"]],
             "visual_segments": bundle["visual_segments"],
             "dsa_vwap": [None if pd.isna(v) else float(v) for v in factor_per_bar["dsa_vwap"]],
             "dsa_dir": [int(d) for d in factor_per_bar["dsa_dir"]],

@@ -3,6 +3,15 @@
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
 ## 2026-07-07
+- CHANGE-20260707-044: DSA visual_segments 时间格式按 timeframe 序列化
+  - 修 PR #33 遗留：15m/1h DSA 开关可打开但 canvas 看不到线
+  - 根因：`_make_segment` / `compute_dsa_bundle.anchor` / `compute_indicators.time` 写死 `strftime("%Y-%m-%d")`，15m/1h segment time 丢失时间信息，`normalizeChartTime('15m'/'1h')` 返回 null，renderer matched=0
+  - 新增 `format_dsa_time(x)`：1d/1w/1mo（无时间部分）→ `strftime("%Y-%m-%d")`；15m/1h（含时间部分）→ `isoformat()`
+  - 替换 4 处 strftime：`_make_segment` / `_show_segments` / `compute_dsa_bundle.anchor` / `compute_indicators.time`
+  - 前端新增 `frontend/src/utils/dsaSegmentMatch.ts::computeDsaSegmentMatchStats` 纯函数，renderDsaPolyline 在 `?debugIndicatorAlignment=1` 时输出 segment matched 诊断（total/matched/ratio/degradedReason/first-last segment time/first-last display time）
+  - 不改 DSA 数学公式（`dsa_vwap` / `dsa_dir` / `regime_id` / `visual_segments.direction` / `points.value` 不变）
+  - 后端测试 9/9 通过（`test_dsa_visual_segments_time_format.py`），既有 63 个 DSA 测试无回归
+  - 前端 contract 39/39 通过（`dsaSourceAlignment.test.ts`，原 32 + 新增 7 个 PR #34 测试）
 - CHANGE-20260707-043: Indicator Overlay Frontend Hardcode Cleanup
   - 修 PR #32 遗留：StrategyChart 仍有 4 处 1d-only / 1w-1mo skip 硬编码
   - L2226 `if (groupId === 'dsa' && timeframe !== '1d') return` → `shouldToggleDsa(groupId, isCaptureMode, captureLayers)`

@@ -114,10 +114,17 @@ Node Cluster 算法
   - BB 渲染决策由 `shouldRenderBbLayer(layerId, layers, timeframe)` 集中控制（PR #33 修复 PR #32 遗留 `if (layer.layer_id === 'bb' && (timeframe === '1w' || timeframe === '1mo')) return` 硬编码 skip）：1w/1mo 不再被前端跳过，开关 / 周期支持两要素全周期判断；
   - BB overlay 时间轴必须用 `buildDisplayIndexMap` 按 canonical time 对齐，禁止尾部截取（tail slice）；
   - MACD / SQZMOM 同理：必须用 `macd_bars`（当前 timeframe）计算，不允许串日线；
-- **?debugIndicatorAlignment=1 诊断工具（PR #31）**：
+- **?debugIndicatorAlignment=1 诊断工具（PR #31 + PR #34 DSA segment matched）**：
   - `StrategyChart` 支持通过 URL 参数 `?debugIndicatorAlignment=1` 输出 overlay 对齐诊断到 console.table；
   - 输出 `bars`（timeframe/count/first/last/canonical_first/canonical_last）、`dsa_mismatch`（check_enabled/mismatched/source_bar_hash/source_bar_times_count）、`indicators.layers`（layer_id/renderer/fields/time_count）；
-  - 默认不打印，不刷日志，仅用于诊断 15m/1h overlay 对齐问题。
+  - `renderDsaPolyline` 额外调用 `computeDsaSegmentMatchStats(segments, displayTimes, timeframe)`（`frontend/src/utils/dsaSegmentMatch.ts`，PR #34）输出 `console.warn('[DSA segment match]', { timeframe, total, matched, ratio, degradedReason, firstSegTime, lastSegTime, firstDisplayTime, lastDisplayTime })`；
+  - `degradedReason` 取值：`null`（正常匹配 ratio > 0.5）/ `no_segments`（segments 为空）/ `no_points`（segments 非空但 points 总数 0）/ `no_display_times`（displayTimes 空）/ `segment_time_no_match`（ratio ≤ 0.5，含 15m 旧 YYYY-MM-DD segment times 退化为日期场景）；
+  - 默认不打印，不刷日志，仅用于诊断 15m/1h DSA 开关打开但 canvas 看不到线的问题。
+- **DSA overlay 依赖 visual_segments 时间与 K 线 canonical 对齐（PR #34）**：
+  - `dsa_polyline` renderer 不直接画 `dsa_vwap` 数组，而是画 `visual_segments.points`；
+  - 每段 `points[].time` 经 `normalizeChartTime(pt.time, timeframe)` 产生 canonical key，再与 K 线 `displayTimes` 的 canonical key 集合匹配；
+  - 后端 `format_dsa_time(x)` 必须按 timeframe 序列化（15m/1h 含 `THH:MM:SS`，1d/1w/1mo 为 `YYYY-MM-DD`），否则 15m/1h 下 `normalizeChartTime` 返回 `null`，renderer matched=0，开关打开也画不出线；
+  - `computeDsaSegmentMatchStats` 提供独立的 matched ratio 计算（pure function），用于回归测试与 debug 诊断，不替代 source mismatch 校验（source mismatch 校验 top-level `source_bar_times`，segment matched 校验 `visual_segments.points.time`，两者互补）。
 
 ### 消息与飞书
 
