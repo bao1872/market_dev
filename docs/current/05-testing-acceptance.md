@@ -221,6 +221,19 @@ node --experimental-strip-types --test src/components/__tests__/dsaSourceAlignme
 - `shouldIncludeDsaInPriceRange('dsa_vwap', {dsa:false}, tf)` 全周期 `false`（开关关闭）；
 - `shouldIncludeDsaInPriceRange('bb', {dsa:true}, '1d')` 返回 `false`（layer_id 非 dsa_vwap 不归此函数管）。
 
+DSA visual_segments time alignment 回归（PR #34，`backend/tests/test_dsa_visual_segments_time_format.py` + `frontend/src/components/__tests__/dsaSourceAlignment.test.ts` 第 6 节）：
+- 后端 `format_dsa_time(x)`：1d（hour/minute/second/microsecond 全 0）返回 `YYYY-MM-DD`；15m/1h（含非零时间部分）返回 `isoformat()`（含 `T`）；
+- `compute_dsa_bundle` 15m `visual_segments.points.time` 全部匹配 `^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}`，不再退化为纯日期；
+- `compute_dsa_bundle` 15m `anchor.time` 全部匹配 `^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}`；
+- `DSASelector.compute_indicators` 15m `time` / `visual_segments.points.time` 全部含 `HH:MM`；
+- `compute_dsa_bundle` 1d `visual_segments.points.time` / `anchor.time` / `compute_indicators.time` 全部为 `YYYY-MM-DD`（向后兼容）；
+- 15m `visual_segments.points.time` 与 `source_bar_times` canonical 匹配率 > 0.5（模拟前端 `normalizeChartTime('15m')` 行为）；
+- 前端 `computeDsaSegmentMatchStats(segments, displayTimes, '15m')`：segment points 含 `THH:MM` 时 `ratio > 0.5`；
+- 前端 `computeDsaSegmentMatchStats(segments, displayTimes, '1h')`：segment points 含 `THH:MM` 时 `ratio > 0.5`；
+- 前端 `computeDsaSegmentMatchStats` 旧 YYYY-MM-DD segment times 在 15m 下 `matched=0` / `ratio=0` / `degradedReason='segment_time_no_match'`（防御性：若后端回退到旧 strftime 实现，必须触发诊断）；
+- 前端 `computeDsaSegmentMatchStats` 空 segments 返回 `degradedReason='no_segments'`；
+- 前端 `computeDsaSegmentMatchStats` 多 segment 累计 matched（段间不连线时仍正确累计 total/matched）。
+
 回归命令：
 
 ```bash

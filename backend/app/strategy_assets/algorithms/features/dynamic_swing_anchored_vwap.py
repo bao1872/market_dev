@@ -219,11 +219,40 @@ def alpha_from_apt(apt: float) -> float:
 # =========================
 
 
+def format_dsa_time(x) -> str:
+    """统一 DSA 时间序列化（PR #34）。
+
+    [DSA 时间契约] - 描述: 按 Timestamp 是否含时间部分选择序列化格式。
+    - 1d/1w/1mo（hour/minute/second/microsecond 全 0）：返回 strftime("%Y-%m-%d")，
+      保持与历史 1d 契约一致，前端 normalizeChartTime('1d') 可直接匹配。
+    - 15m/1h（含非零时间部分）：返回 isoformat()（含 "T"），
+      前端 normalizeChartTime('15m') 提取 "YYYY-MM-DD HH:MM" canonical key。
+      旧实现统一 strftime("%Y-%m-%d") 导致 15m/1h segment time 丢失时间信息，
+      与 K 线 displayTimes 无法匹配，dsa_polyline renderer matched=0。
+
+    Args:
+        x: pd.Timestamp / datetime64 / np.datetime64 / str
+
+    Returns:
+        str: "YYYY-MM-DD" 或 "YYYY-MM-DDTHH:MM:SS..."
+    """
+    ts = pd.Timestamp(x)
+    if (
+        ts.hour == 0
+        and ts.minute == 0
+        and ts.second == 0
+        and ts.microsecond == 0
+    ):
+        return ts.strftime("%Y-%m-%d")
+    return ts.isoformat()
+
+
 def _make_segment(direction: int, points_x: list, points_y: list) -> dict:
     """构建可视化 segment（Pine polyline 契约格式，JSON 可序列化）。
 
-    [DSA 可视化契约] - 描述: 将内部 (x, y) 数组转为 {direction, points:[{time,value}]} 格式，
-    time 为 ISO 日期字符串（YYYY-MM-DD），value 为有限 float。跳过 NaN 值以保证 JSON 合法。
+    [DSA 可视化契约] - 描述: 将内部 (x, y) 数组转为 {direction, points:[{time,value}]} 格式。
+    time 通过 format_dsa_time 序列化：1d/1w/1mo 为 YYYY-MM-DD，15m/1h 含 THH:MM:SS。
+    value 为有限 float。跳过 NaN 值以保证 JSON 合法。
 
     Args:
         direction: 方向（1 上行 / -1 下行）
@@ -231,10 +260,10 @@ def _make_segment(direction: int, points_x: list, points_y: list) -> dict:
         points_y: 值列表（float，可能含 NaN）
 
     Returns:
-        {"direction": int, "points": [{"time": "YYYY-MM-DD", "value": float}, ...]}
+        {"direction": int, "points": [{"time": str, "value": float}, ...]}
     """
     points = [
-        {"time": pd.Timestamp(x).strftime("%Y-%m-%d"), "value": float(y)}
+        {"time": format_dsa_time(x), "value": float(y)}
         for x, y in zip(points_x, points_y)
         if pd.notna(y)
     ]
@@ -734,7 +763,7 @@ def main() -> None:
             segments_show.append({
                 "direction": seg["direction"],
                 "points": [
-                    {"time": seg_times[i].strftime("%Y-%m-%d"), "value": float(seg_values[i])}
+                    {"time": format_dsa_time(seg_times[i]), "value": float(seg_values[i])}
                     for i in range(len(seg_times)) if mask[i]
                 ],
             })

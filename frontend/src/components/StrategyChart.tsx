@@ -270,6 +270,9 @@ import {
   shouldRenderDsaLayer,
   shouldToggleDsa,
 } from '@/utils/dsaOverlayPolicy'
+// [DSA Segment Match] - visual_segments 与 K线 displayTimes 匹配统计（PR #34）
+//   纯函数模块，便于 Node --experimental-strip-types 单元测试
+import { computeDsaSegmentMatchStats } from '@/utils/dsaSegmentMatch'
 
 // ===== 指标计算模块（从 charts.js 迁移）=====
 
@@ -859,6 +862,26 @@ function renderDsaPolyline(
   if (!segments || segments.length === 0) return
   // 后续按 Record 索引访问 anchor_time / pivot_type / pivot_price / time 等数组字段
   const recordData = data as Record<string, (number | string | null)[]>
+
+  // [PR #34] - DSA visual_segments matched 诊断：
+  //   后端 format_dsa_time 修复后，15m/1h segment.points.time 含 THH:MM:SS，
+  //   normalizeChartTime 可与 K线 displayTimes canonical 匹配。
+  //   若回退到旧 strftime("%Y-%m-%d")，ratio=0，开关打开也画不出线。
+  //   默认不打印，仅 ?debugIndicatorAlignment=1 时 console.warn 输出 stats。
+  if (typeof window !== 'undefined' && window.location.search.includes('debugIndicatorAlignment=1')) {
+    const stats = computeDsaSegmentMatchStats(segments, displayTimes, timeframe)
+    console.warn('[DSA segment match]', {
+      timeframe,
+      total: stats.total,
+      matched: stats.matched,
+      ratio: stats.ratio,
+      degradedReason: stats.degradedReason,
+      firstSegTime: stats.firstSegTime,
+      lastSegTime: stats.lastSegTime,
+      firstDisplayTime: stats.firstDisplayTime,
+      lastDisplayTime: stats.lastDisplayTime,
+    })
+  }
 
   // K 线时间 → display index 映射（segment point time 经 normalizeChartTime 匹配）
   const klineTimeIndex = new Map<string, number>()
