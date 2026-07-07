@@ -4,6 +4,17 @@
 
 ## 2026-07-07
 
+- CHANGE-20260707-048: Snapshot Run Gate + Instrument-first Backfill
+  - 新增 `stock_feature_snapshot_runs` 表（partial unique index 仅约束 `status='running'`，3 btree 索引）
+  - 新增 `backend/app/models/stock_feature_snapshot_run.py` + migration `057_stock_feature_snapshot_runs`
+  - `feature_snapshot_service` 新增 `create_snapshot_run` / `finish_snapshot_run` run lifecycle（running → succeeded/failed）
+  - `after_close_orchestrator` feature_snapshot 步骤前后写 run lifecycle（独立 session 保证 run 记录持久化，snapshot rollback 不影响）
+  - `watchlist` 新增 `_has_succeeded_snapshot_run` helper，只读 `status='succeeded'`（且 `published_at` 非空）的 snapshot
+  - `feature_snapshot_backfill` 重构为 instrument-first（每只股票每周期只调用一次 `load_instrument_bars`，内存中按 `trade_date` slice）
+  - backfill 新增 `--symbols` / `--limit-instruments` 小样本参数；run gate：每个 trade_date 创建 `succeeded`/`failed` run
+  - `backend/Dockerfile` 新增 `COPY scripts ./scripts`
+  - 测试：49 passed（21 backfill + 11 orchestrator + 11 watchlist + 6 run service），ruff clean，mypy 0 新增错误
+  - 部署边界：未执行生产库 migration、未全量 backfill、未 merge/部署；test DB 已验证 alembic upgrade/downgrade/upgrade 链路
 - CHANGE-20260707-047: Feature Snapshot 持久化（自选股监控指标从实时计算切换为盘后快照）
   - 新增 `stock_feature_snapshots` 表（JSONB payload + 唯一约束 + 3 btree 索引，无 GIN 索引）
   - 新增 `backend/app/services/feature_snapshot_service.py`：复用 `_compute_all_factors_for_bars` / `_compute_relation` / `_compute_daily_context` / `_compute_m15_response` / `_compute_derived_relation` / `bollinger()` 不复制公式；point-in-time 截断 `index.date <= trade_date`；upsert 幂等；单股失败写 `degraded_reasons` 不阻断批次；`compute_for_trade_date` 不内部 commit，caller 控制 commit/rollback

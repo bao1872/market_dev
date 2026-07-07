@@ -551,6 +551,219 @@ async def test_execute_feature_snapshot_failure_skips_publishing(db_session) -> 
 
 
 @pytest.mark.asyncio
+async def test_execute_feature_snapshot_success_creates_succeeded_run(db_session) -> None:
+    """[Phase7 测试 6] after_close feature_snapshot 成功写 run.status='succeeded'。
+
+    场景：compute_for_trade_date 成功返回 snapshot_count=1, failed_count=0。
+    要求：
+    1. 创建 StockFeatureSnapshotRun 记录
+    2. run.status='succeeded'
+    3. run.published_at 非空
+    4. run.snapshot_count=1, run.failed_count=0
+    """
+    dsa_run, _ = await _create_dsa_strategy_run(db_session, status="completed")
+    job_run = await _create_after_close_job_run(db_session)
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return db_session
+        async def __aexit__(self, *args):
+            return False
+
+    fake_session_local = MagicMock(return_value=_FakeSessionContext())
+
+    fake_batch_result = BatchResult(total=100, succeeded=95)
+    fake_batch_result.dsa_run_id = dsa_run.id
+    fake_batch_result.daily_covered = 95
+    fake_batch_result.daily_total = 100
+    fake_batch_result.daily_coverage = 0.95
+
+    fake_published_run = MagicMock()
+    fake_published_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+
+    # [Phase7] mock db.get：已知 ID 返回 mock 对象，StockFeatureSnapshotRun 走真实 DB 查询
+    original_get = db_session.get
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+
+    async def _fake_get(model, id, *args, **kwargs):
+        if model is SchedulerJobRun and id == job_run.id:
+            return job_run
+        if model is StrategyRun and id == dsa_run.id:
+            return dsa_run
+        # StockFeatureSnapshotRun 走真实 DB 查询
+        if model is StockFeatureSnapshotRun:
+            return await original_get(model, id, *args, **kwargs)
+        return None
+
+    target_trade_date = date(2026, 6, 25)
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        new=fake_session_local,
+    ), patch.object(
+        db_session, "commit", new=db_session.flush,
+    ), patch.object(
+        db_session, "get",
+        new=_fake_get,
+    ), patch.object(
+        BarsSchedulerService, "refresh_all_instruments",
+        new=AsyncMock(return_value=fake_batch_result),
+    ), patch(
+        "app.services.after_close_orchestrator._poll_dsa_run_status",
+        new=AsyncMock(return_value="completed"),
+    ), patch.object(
+        StrategyBatchService, "_check_quality_gates",
+        new=AsyncMock(return_value=True),
+    ), patch.object(
+        StrategyBatchService, "publish_run",
+        new=AsyncMock(return_value=fake_published_run),
+    ), patch(
+        "app.services.after_close_orchestrator.get_active_a_share_instruments",
+        new=AsyncMock(return_value=[uuid.uuid4()]),
+    ), patch(
+        "app.services.after_close_orchestrator.compute_for_trade_date",
+        new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
+    ):
+        await execute_after_close_run(
+            job_run_id=job_run.id,
+            trade_date=target_trade_date,
+            dsa_poll_interval=0,
+            dsa_poll_timeout=1,
+        )
+
+    # 验证 StockFeatureSnapshotRun 记录已创建且 succeeded
+    from sqlalchemy import select
+    stmt = select(StockFeatureSnapshotRun).where(
+        StockFeatureSnapshotRun.trade_date == target_trade_date,
+        StockFeatureSnapshotRun.run_type == "after_close",
+    )
+    result = await db_session.execute(stmt)
+    runs = result.scalars().all()
+    assert len(runs) >= 1, f"应创建至少 1 个 snapshot run，实际 {len(runs)}"
+    run = runs[0]
+    assert run.status == "succeeded", f"run.status 应为 succeeded，实际 {run.status}"
+    assert run.published_at is not None, "succeeded run 应写 published_at"
+    assert run.snapshot_count == 1
+    assert run.failed_count == 0
+
+
+@pytest.mark.asyncio
+async def test_execute_feature_snapshot_failure_creates_failed_run(db_session) -> None:
+    """[Phase7 测试 7] after_close feature_snapshot 失败写 run.status='failed' 且不 publishing。
+
+    场景：compute_for_trade_date 抛 RuntimeError（失败比例超阈值）。
+    要求：
+    1. 创建 StockFeatureSnapshotRun 记录
+    2. run.status='failed'
+    3. run.published_at 为 None（failed 不发布）
+    4. publish_run 不被调用（不 publishing）
+    5. orchestrator 状态更新为 failed
+    """
+    dsa_run, _ = await _create_dsa_strategy_run(db_session, status="completed")
+    job_run = await _create_after_close_job_run(db_session)
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return db_session
+        async def __aexit__(self, *args):
+            return False
+
+    fake_session_local = MagicMock(return_value=_FakeSessionContext())
+
+    fake_batch_result = BatchResult(total=100, succeeded=95)
+    fake_batch_result.dsa_run_id = dsa_run.id
+    fake_batch_result.daily_covered = 95
+    fake_batch_result.daily_total = 100
+    fake_batch_result.daily_coverage = 0.95
+
+    snapshot_exc = RuntimeError(
+        "feature_snapshot 失败比例 40.0% 超过阈值 30% (failed=2, total=5)"
+    )
+
+    publish_call_count = 0
+
+    async def _fake_publish_run(*args, **kwargs):
+        nonlocal publish_call_count
+        publish_call_count += 1
+        return MagicMock()
+
+    target_trade_date = date(2026, 6, 25)
+
+    # [Phase7] mock db.get：已知 ID 返回 mock 对象，StockFeatureSnapshotRun 走真实 DB 查询
+    # （finish_snapshot_run 需要真实查询 run 记录以更新 status='failed'）
+    original_get = db_session.get
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+
+    async def _fake_get(model, id, *args, **kwargs):
+        if model is SchedulerJobRun and id == job_run.id:
+            return job_run
+        if model is StrategyRun and id == dsa_run.id:
+            return dsa_run
+        # StockFeatureSnapshotRun 走真实 DB 查询
+        if model is StockFeatureSnapshotRun:
+            return await original_get(model, id, *args, **kwargs)
+        return None
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        new=fake_session_local,
+    ), patch.object(
+        db_session, "commit", new=db_session.flush,
+    ), patch.object(
+        db_session, "rollback", new=AsyncMock(return_value=None),
+    ), patch.object(
+        db_session, "get",
+        new=_fake_get,
+    ), patch.object(
+        BarsSchedulerService, "refresh_all_instruments",
+        new=AsyncMock(return_value=fake_batch_result),
+    ), patch(
+        "app.services.after_close_orchestrator._poll_dsa_run_status",
+        new=AsyncMock(return_value="completed"),
+    ), patch.object(
+        StrategyBatchService, "_check_quality_gates",
+        new=AsyncMock(return_value=True),
+    ), patch.object(
+        StrategyBatchService, "publish_run",
+        new=_fake_publish_run,
+    ), patch(
+        "app.services.after_close_orchestrator.get_active_a_share_instruments",
+        new=AsyncMock(return_value=[uuid.uuid4()]),
+    ), patch(
+        "app.services.after_close_orchestrator.compute_for_trade_date",
+        new=AsyncMock(side_effect=snapshot_exc),
+    ):
+        with pytest.raises(RuntimeError, match="失败比例"):
+            await execute_after_close_run(
+                job_run_id=job_run.id,
+                trade_date=target_trade_date,
+                dsa_poll_interval=0,
+                dsa_poll_timeout=1,
+            )
+
+    # 验证 publish_run 未被调用
+    assert publish_call_count == 0, (
+        f"feature_snapshot 失败时不应进入 publishing，但 publish_run 被调用了 {publish_call_count} 次"
+    )
+
+    # 验证 StockFeatureSnapshotRun 记录已创建且 failed
+    from sqlalchemy import select
+    stmt = select(StockFeatureSnapshotRun).where(
+        StockFeatureSnapshotRun.trade_date == target_trade_date,
+        StockFeatureSnapshotRun.run_type == "after_close",
+    )
+    result = await db_session.execute(stmt)
+    runs = result.scalars().all()
+    assert len(runs) >= 1, f"应创建至少 1 个 snapshot run，实际 {len(runs)}"
+    run = runs[0]
+    assert run.status == "failed", f"run.status 应为 failed，实际 {run.status}"
+    assert run.published_at is None, "failed run 不应写 published_at"
+
+    # 验证 job_run 状态为 failed
+    assert job_run.status == "failed"
+
+
+@pytest.mark.asyncio
 async def test_execute_starts_heartbeat_loop_during_long_refresh(db_session) -> None:
     """测试 6：长阶段（refresh_all_instruments）执行期间应启动后台心跳任务，防止 watchdog 误判 stale。
 

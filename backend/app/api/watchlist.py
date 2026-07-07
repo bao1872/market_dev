@@ -157,6 +157,46 @@ async def _resolve_expected_snapshot_trade_date(
     return await get_most_recent_trading_day_async(db, today)
 
 
+async def _has_succeeded_snapshot_run(
+    db: AsyncSession,
+    trade_date: date,
+    *,
+    schema_version: int = 1,
+) -> bool:
+    """[RunGate] - 检查指定 trade_date 是否存在 succeeded + published + full scope 的 snapshot run。
+
+    publish gate 规则（[Blocker Fix] 严格化）：
+    - 必须 status='succeeded'
+    - 必须 published_at IS NOT NULL（finish_snapshot_run 在 succeeded 时写入）
+    - 必须 metadata_['scope']='full'（after_close / 全市场 backfill 才允许 watchlist 读取）
+    - running/failed run 对应的 snapshot 即使存在也不得被读取
+    - 无 run 记录的 snapshot（如 smoke test 残留）也不得被读取
+    - sample scope run（--symbols / --limit-instruments 小样本验证产生）不得被读取，
+      避免小样本数据污染 watchlist SUCCEEDED 状态
+
+    Args:
+        db: 异步数据库会话
+        trade_date: 预期快照交易日
+        schema_version: 快照 schema 版本（默认 1）
+
+    Returns:
+        True 表示存在可读的 succeeded run，可读取 snapshot；False 表示不可读取
+    """
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+
+    stmt = select(StockFeatureSnapshotRun.id).where(
+        StockFeatureSnapshotRun.trade_date == trade_date,
+        StockFeatureSnapshotRun.schema_version == schema_version,
+        StockFeatureSnapshotRun.status == "succeeded",
+        StockFeatureSnapshotRun.published_at.is_not(None),
+        # [Blocker Fix] - 仅 full scope run 可读（after_close / 全市场 backfill）
+        # sample scope run（--symbols/--limit-instruments）即使 succeeded + published 也不可读
+        StockFeatureSnapshotRun.metadata_["scope"].astext == "full",
+    ).limit(1)
+    result = await db.execute(stmt)
+    return result.scalar_one_or_none() is not None
+
+
 @router.get("", response_model=WatchlistListResponse)
 async def list_watchlist(
     db: AsyncSession = Depends(get_db),
@@ -331,24 +371,28 @@ async def get_watchlist_monitor_status(
     rows = items_result.all()
 
     # 3. 批量查询当日 feature snapshot（唯一键：instrument_id + expected_trade_date）
-    # snapshot 是 metrics 的唯一数据源，不再走 MonitorState.payload 或实时 fallback
+    # [RunGate] - publish gate：仅当 expected_trade_date 存在 succeeded run 时才读取 snapshot 行
+    # failed/running run 对应的 snapshot 即使存在也不得被读取，避免半成品被显示为 SUCCEEDED
     snapshot_map: dict[UUID, StockFeatureSnapshot] = {}
     expected_trade_date = await _resolve_expected_snapshot_trade_date(
         db, today, market_status, is_trading_day,
     )
     if expected_trade_date is not None and rows:
-        instrument_ids = [row[1].id for row in rows]
-        snapshot_stmt = (
-            select(StockFeatureSnapshot)
-            .where(
-                StockFeatureSnapshot.instrument_id.in_(instrument_ids),
-                StockFeatureSnapshot.trade_date == expected_trade_date,
-                StockFeatureSnapshot.schema_version == 1,
+        # [RunGate] - 先检查是否存在 succeeded run，无则跳过 snapshot 查询
+        has_succeeded_run = await _has_succeeded_snapshot_run(db, expected_trade_date)
+        if has_succeeded_run:
+            instrument_ids = [row[1].id for row in rows]
+            snapshot_stmt = (
+                select(StockFeatureSnapshot)
+                .where(
+                    StockFeatureSnapshot.instrument_id.in_(instrument_ids),
+                    StockFeatureSnapshot.trade_date == expected_trade_date,
+                    StockFeatureSnapshot.schema_version == 1,
+                )
             )
-        )
-        snapshot_result = await db.execute(snapshot_stmt)
-        for snap in snapshot_result.scalars():
-            snapshot_map[snap.instrument_id] = snap
+            snapshot_result = await db.execute(snapshot_stmt)
+            for snap in snapshot_result.scalars():
+                snapshot_map[snap.instrument_id] = snap
 
     # 4. 批量查询每个 instrument 的最新 MonitorEvaluation（窗口函数取 rn=1）
     # MonitorEvaluation 仅用于展示评估状态（evaluation_status/retry_count/error_code/source_bar_time），
