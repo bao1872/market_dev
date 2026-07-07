@@ -40,8 +40,10 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import os
 import uuid
 from datetime import date, datetime
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
@@ -1187,11 +1189,11 @@ def test_parse_args_workers_custom() -> None:
 
 
 def test_worker_process_instruments_per_instrument_commit() -> None:
-    """_worker_process_instruments: 每只 instrument commit 一次（resume 安全）。
+    """_worker_process_instruments: per-date commit 全成功（resume 安全）。
 
     场景：2 instruments × 2 trade_dates。
     要求：
-    - commit 调用 2 次（每 instrument 一次）
+    - commit 调用 4 次（每 instrument × date 一次，per-date commit 策略）
     - 4 个 snapshot 全部成功
     - failed=0
     """
@@ -1222,9 +1224,9 @@ def test_worker_process_instruments_per_instrument_commit() -> None:
             worker_id=0,
         )
 
-    # 2 instruments → 2 commits
-    assert fake_session.commits == 2, (
-        f"per-instrument commit 应调用 2 次，实际 {fake_session.commits} 次"
+    # per-date commit：2 instruments × 2 dates = 4 commits
+    assert fake_session.commits == 4, (
+        f"per-date commit 应调用 4 次，实际 {fake_session.commits} 次"
     )
     # 4 snapshots total (2 instruments × 2 dates)
     total_success = sum(stats["success"] for stats in result.values())
@@ -1552,3 +1554,335 @@ async def test_backfill_instrument_first_parallel_propagates_scope() -> None:
     assert finish_metadata.get("scope") == "sample", (
         f"finish_snapshot_run metadata 应含 scope='sample'，实际: {finish_metadata}"
     )
+
+
+# =============================================================================
+# Blocker Fix 测试（multiprocessing 事务与统计安全）
+# =============================================================================
+
+
+# ===== Blocker 1: worker future 异常 → chunk 计入 failed =====
+
+
+@pytest.mark.asyncio
+async def test_backfill_parallel_worker_exception_counts_as_failed() -> None:
+    """[Blocker 1] worker future 异常时，该 chunk 的 instruments × trade_dates 全部计 failed。
+
+    场景：1 chunk 含 2 instruments × 1 trade_date，worker 抛 RuntimeError。
+    要求：run.status='failed'，failed_count=2，snapshot_count=0。
+    """
+    inst1_id = uuid.uuid4()
+    inst2_id = uuid.uuid4()
+    trade_dates = [date(2026, 1, 5)]
+
+    fake_db = MagicMock()
+    fake_db.commit = AsyncMock()
+
+    def _exploding_worker(*args, **kwargs):
+        raise RuntimeError("worker 进程崩溃")
+
+    with patch(
+        "scripts.feature_snapshot_backfill._worker_process_instruments",
+        new=_exploding_worker,
+    ), patch(
+        "concurrent.futures.ProcessPoolExecutor",
+        concurrent.futures.ThreadPoolExecutor,
+    ), patch(
+        "scripts.feature_snapshot_backfill.create_snapshot_run",
+        new=AsyncMock(),
+    ), patch(
+        "scripts.feature_snapshot_backfill.finish_snapshot_run",
+        new=AsyncMock(),
+    ) as mock_finish, patch(
+        "scripts.feature_snapshot_backfill._get_succeeded_trade_dates",
+        new=AsyncMock(return_value=set()),
+    ), patch(
+        "scripts.feature_snapshot_backfill.get_existing_instrument_ids",
+        new=AsyncMock(return_value=set()),
+    ):
+        await backfill_instrument_first_parallel(
+            fake_db,
+            trade_dates=trade_dates,
+            instruments=[inst1_id, inst2_id],
+            workers=1,  # 单 chunk 确保 2 instruments 都在爆炸 worker 内
+            failure_threshold=0.3,
+            resume=False,
+            db_url="postgresql+psycopg://user:pass@localhost/db",
+        )
+
+    assert mock_finish.await_count == 1
+    finish_kwargs = mock_finish.await_args.kwargs
+    # worker 崩溃 → 2 instruments 全部 failed
+    assert finish_kwargs["status"] == "failed", (
+        f"worker 异常应标 failed，实际: {finish_kwargs['status']}"
+    )
+    assert finish_kwargs["failed_count"] == 2, (
+        f"2 instruments × 1 date 应计 failed=2，实际: {finish_kwargs['failed_count']}"
+    )
+    assert finish_kwargs["snapshot_count"] == 0
+
+
+# ===== Blocker 2: commit 失败 → success 不增加，failed 增加 =====
+
+
+def test_worker_commit_failure_doesnt_count_as_success() -> None:
+    """[Blocker 2] per-date commit 失败时 success 不增加，failed 增加。
+
+    场景：1 instrument × 1 trade_date，upsert 成功但 commit 抛异常。
+    要求：success=0，failed=1，rollback 被调用。
+    """
+    inst1_id = uuid.uuid4()
+    trade_dates = [date(2026, 1, 5)]
+    fake_session = _FakeWorkerSession()
+
+    # 让 commit 抛异常
+    async def _failing_commit() -> None:
+        fake_session.commits += 1
+        raise RuntimeError("commit 失败")
+
+    fake_session.commit = _failing_commit  # type: ignore[method-assign]
+
+    async def _fake_load(db, instrument_id, **kwargs):
+        return (None, None)
+
+    async def _fake_compute(db, instrument_id, trade_date, **kwargs):
+        return _make_snapshot(instrument_id, trade_date)
+
+    async def _fake_upsert(db, snapshot):
+        pass
+
+    with _patch_worker_deps(fake_session, _fake_load, _fake_compute, _fake_upsert):
+        result = _worker_process_instruments(
+            instrument_ids=[inst1_id],
+            trade_dates=trade_dates,
+            db_url="postgresql+psycopg://user:pass@localhost/db",
+            primary_timeframe="1d",
+            secondary_timeframe="15m",
+            adj="qfq",
+            resume=False,
+            existing_per_date_str={},
+            worker_id=0,
+        )
+
+    # commit 被尝试但失败
+    assert fake_session.commits == 1
+    # success 不增加（commit 失败 → DB 无写入）
+    assert result["2026-01-05"]["success"] == 0, (
+        f"commit 失败时 success 应为 0，实际: {result['2026-01-05']['success']}"
+    )
+    # failed 增加
+    assert result["2026-01-05"]["failed"] == 1
+    # rollback 被调用（清理事务）
+    assert fake_session.rollbacks == 1
+
+
+# ===== Blocker 3: upsert 异常 → rollback，后续 date 继续 =====
+
+
+def test_worker_upsert_exception_rollback_continues() -> None:
+    """[Blocker 3] per-date upsert 异常 → rollback，后续 trade_date 仍可成功。
+
+    场景：1 instrument × 2 trade_dates，date1 upsert 抛异常。
+    要求：
+    - date1 failed=1, success=0（upsert 异常 → rollback）
+    - date2 success=1, failed=0（rollback 后继续，per-date 独立事务）
+    - rollback 调用 1 次（date1），commit 调用 1 次（date2）
+    """
+    inst1_id = uuid.uuid4()
+    trade_dates = [date(2026, 1, 5), date(2026, 1, 6)]
+    fake_session = _FakeWorkerSession()
+
+    upsert_calls: list[date] = []
+
+    async def _fake_load(db, instrument_id, **kwargs):
+        return (None, None)
+
+    async def _fake_compute(db, instrument_id, trade_date, **kwargs):
+        return _make_snapshot(instrument_id, trade_date)
+
+    async def _fake_upsert(db, snapshot):
+        upsert_calls.append(snapshot.trade_date)
+        if snapshot.trade_date == date(2026, 1, 5):
+            raise RuntimeError("第一个 date upsert 失败")
+
+    with _patch_worker_deps(fake_session, _fake_load, _fake_compute, _fake_upsert):
+        result = _worker_process_instruments(
+            instrument_ids=[inst1_id],
+            trade_dates=trade_dates,
+            db_url="postgresql+psycopg://user:pass@localhost/db",
+            primary_timeframe="1d",
+            secondary_timeframe="15m",
+            adj="qfq",
+            resume=False,
+            existing_per_date_str={},
+            worker_id=0,
+        )
+
+    # date1 失败（upsert 异常 → rollback）
+    assert result["2026-01-05"]["failed"] == 1
+    assert result["2026-01-05"]["success"] == 0
+    # date2 成功（rollback 后继续，per-date 独立事务）
+    assert result["2026-01-06"]["success"] == 1, (
+        "date1 异常 rollback 后，date2 应继续成功"
+    )
+    assert result["2026-01-06"]["failed"] == 0
+    # rollback 1 次（date1），commit 1 次（date2）
+    assert fake_session.rollbacks == 1
+    assert fake_session.commits == 1
+    # upsert 被调用 2 次（date1 + date2）
+    assert len(upsert_calls) == 2
+
+
+# ===== Blocker 4: worker pool_size=1, max_overflow=0 =====
+
+
+def test_worker_pool_config_size_1_overflow_0() -> None:
+    """[Blocker 4] worker create_async_engine 使用 pool_size=1, max_overflow=0。
+
+    每个 worker 只需要 1 个 session，避免连接池过大（4 workers × 15 = 60 连接）。
+    """
+    inst1_id = uuid.uuid4()
+    fake_session = _FakeWorkerSession()
+
+    captured_kwargs: dict[str, Any] = {}
+
+    class _FakeEngine:
+        async def dispose(self) -> None:
+            pass
+
+    def _capture_engine(*args: Any, **kwargs: Any) -> _FakeEngine:
+        captured_kwargs.update(kwargs)
+        return _FakeEngine()
+
+    async def _fake_load(db, instrument_id, **kwargs):
+        return (None, None)
+
+    async def _fake_compute(db, instrument_id, trade_date, **kwargs):
+        return _make_snapshot(instrument_id, trade_date)
+
+    async def _fake_upsert(db, snapshot):
+        pass
+
+    with patch(
+        "sqlalchemy.ext.asyncio.create_async_engine",
+        side_effect=_capture_engine,
+    ), patch(
+        "sqlalchemy.ext.asyncio.async_sessionmaker",
+        return_value=lambda *a, **kw: fake_session,
+    ), patch(
+        "scripts.feature_snapshot_backfill.load_instrument_bars",
+        new=_fake_load,
+    ), patch(
+        "scripts.feature_snapshot_backfill.compute_feature_snapshot_for_date",
+        new=_fake_compute,
+    ), patch(
+        "scripts.feature_snapshot_backfill.upsert_snapshot",
+        new=_fake_upsert,
+    ):
+        _worker_process_instruments(
+            instrument_ids=[inst1_id],
+            trade_dates=[date(2026, 1, 5)],
+            db_url="postgresql+psycopg://user:pass@localhost/db",
+            primary_timeframe="1d",
+            secondary_timeframe="15m",
+            adj="qfq",
+            resume=False,
+            existing_per_date_str={},
+            worker_id=0,
+        )
+
+    assert captured_kwargs.get("pool_size") == 1, (
+        f"pool_size 应为 1，实际: {captured_kwargs.get('pool_size')}"
+    )
+    assert captured_kwargs.get("max_overflow") == 0, (
+        f"max_overflow 应为 0，实际: {captured_kwargs.get('max_overflow')}"
+    )
+    assert captured_kwargs.get("pool_pre_ping") is True
+
+
+# ===== Blocker 5: workers 参数保护 =====
+
+
+def test_parse_args_workers_zero_rejected() -> None:
+    """[Blocker 5] --workers 0 被 argparse 拒绝（SystemExit）。"""
+    with patch("sys.argv", [
+        "feature_snapshot_backfill",
+        "--start", "2026-01-01",
+        "--workers", "0",
+    ]):
+        with pytest.raises(SystemExit):
+            parse_args()
+
+
+def test_parse_args_workers_negative_rejected() -> None:
+    """[Blocker 5] --workers -1 被 argparse 拒绝（SystemExit）。"""
+    with patch("sys.argv", [
+        "feature_snapshot_backfill",
+        "--start", "2026-01-01",
+        "--workers", "-1",
+    ]):
+        with pytest.raises(SystemExit):
+            parse_args()
+
+
+def test_parse_args_workers_cap_to_cpu_count() -> None:
+    """[Blocker 5] --workers > os.cpu_count() 时 cap 到 cpu_count 并 warning。
+
+    防止用户误设过大值导致进程调度抖动。
+    """
+    cpu = os.cpu_count() or 1
+    large = cpu + 10
+    with patch("sys.argv", [
+        "feature_snapshot_backfill",
+        "--start", "2026-01-01",
+        "--workers", str(large),
+    ]):
+        args = parse_args()
+    assert args.workers <= cpu, (
+        f"workers={args.workers} 应被 cap 到 cpu_count={cpu}"
+    )
+
+
+# ===== 回归测试：per-date commit 全成功 =====
+
+
+def test_worker_per_date_commit_all_succeed() -> None:
+    """[回归] per-date commit 全成功：2 instruments × 2 dates = 4 commits。
+
+    验证 per-date commit 策略下的事务边界。
+    """
+    inst1_id = uuid.uuid4()
+    inst2_id = uuid.uuid4()
+    trade_dates = [date(2026, 1, 5), date(2026, 1, 6)]
+    fake_session = _FakeWorkerSession()
+
+    async def _fake_load(db, instrument_id, **kwargs):
+        return (None, None)
+
+    async def _fake_compute(db, instrument_id, trade_date, **kwargs):
+        return _make_snapshot(instrument_id, trade_date)
+
+    async def _fake_upsert(db, snapshot):
+        pass
+
+    with _patch_worker_deps(fake_session, _fake_load, _fake_compute, _fake_upsert):
+        result = _worker_process_instruments(
+            instrument_ids=[inst1_id, inst2_id],
+            trade_dates=trade_dates,
+            db_url="postgresql+psycopg://user:pass@localhost/db",
+            primary_timeframe="1d",
+            secondary_timeframe="15m",
+            adj="qfq",
+            resume=False,
+            existing_per_date_str={},
+            worker_id=0,
+        )
+
+    # per-date commit：2 instruments × 2 dates = 4 commits
+    assert fake_session.commits == 4, (
+        f"per-date commit 应调用 4 次，实际 {fake_session.commits} 次"
+    )
+    # 4 snapshots 全部成功
+    total_success = sum(stats["success"] for stats in result.values())
+    assert total_success == 4
+    assert all(stats["failed"] == 0 for stats in result.values())

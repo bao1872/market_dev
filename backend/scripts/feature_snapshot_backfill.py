@@ -56,6 +56,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 import uuid
 from datetime import date
@@ -553,9 +554,14 @@ def _worker_process_instruments(
     [multiprocessing] - 每个 worker 进程独立创建 async engine + session，
     逐 instrument 加载 bars + 计算 + upsert + commit。
 
-    事务边界：
-    - per-instrument commit（被 kill 不丢已完成，resume 可续）
-    - 单 instrument 失败 rollback，不阻塞其他
+    [Blocker Fix] 事务边界（per-date commit）：
+    - 每个 (instrument, trade_date) 是独立事务：upsert → commit → success++
+    - upsert 异常 → rollback → failed++，后续 date 继续用干净事务
+    - commit 失败 → rollback → failed++（success 不增加，DB 无写入）
+    - load_bars 失败 → rollback → 该 instrument 所有 dates 标 failed
+
+    [Blocker Fix] DB pool：
+    - pool_size=1, max_overflow=0（每 worker 只需 1 session，避免 60 连接）
 
     Args:
         instrument_ids: 本 worker 负责的 instrument UUID 列表
@@ -577,9 +583,10 @@ def _worker_process_instruments(
 
     async def _run() -> dict[str, dict[str, int]]:
         # worker 进程独立 engine（不能共享主进程的连接池）
+        # [Blocker Fix] pool_size=1, max_overflow=0：每 worker 只需 1 session
         async_url = db_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
         engine = create_async_engine(
-            async_url, pool_pre_ping=True, pool_size=5, max_overflow=10,
+            async_url, pool_pre_ping=True, pool_size=1, max_overflow=0,
         )
         session_factory = async_sessionmaker(
             bind=engine, expire_on_commit=False, autoflush=False,
@@ -594,7 +601,7 @@ def _worker_process_instruments(
             async with session_factory() as db:
                 for idx, instrument_id in enumerate(instrument_ids):
                     instr_id_str = str(instrument_id)
-                    # 1. 加载 bars（失败 → 所有 trade_dates 标 failed）
+                    # 1. 加载 bars（失败 → rollback + 所有 dates 标 failed）
                     try:
                         primary_bars, secondary_bars = await load_instrument_bars(
                             db, instrument_id,
@@ -612,7 +619,10 @@ def _worker_process_instruments(
                             per_date_stats[td.isoformat()]["failed"] += 1
                         continue
 
-                    # 2. 逐 trade_date 计算 + upsert
+                    # 2. 逐 trade_date 计算 + upsert + per-date commit
+                    # [Blocker Fix] per-date 独立事务：
+                    #   - upsert 异常 → rollback → failed++，后续 date 继续
+                    #   - commit 失败 → rollback → failed++（success 不增加）
                     for td in trade_dates:
                         td_str = td.isoformat()
                         if resume and instr_id_str in existing_per_date_str.get(td_str, set()):
@@ -628,23 +638,20 @@ def _worker_process_instruments(
                                 secondary_bars=secondary_bars,
                             )
                             await upsert_snapshot(db, snapshot)
+                            # per-date commit：upsert 成功后立即 commit
+                            # 失败时 rollback，success 不增加
+                            await db.commit()
                             per_date_stats[td_str]["success"] += 1
                         except Exception as exc:
+                            # [Blocker Fix] per-date rollback：
+                            # 清理事务污染，后续 date 可继续
+                            await db.rollback()
                             per_date_stats[td_str]["failed"] += 1
                             logger.error(
                                 "[worker-%d] snapshot 失败 instrument=%s date=%s: %s",
                                 worker_id, instrument_id, td, exc,
                             )
 
-                    # 3. per-instrument commit（resume 安全）
-                    try:
-                        await db.commit()
-                    except Exception as exc:
-                        await db.rollback()
-                        logger.error(
-                            "[worker-%d] instrument %s commit 失败: %s",
-                            worker_id, instrument_id, exc,
-                        )
                     if (idx + 1) % 10 == 0:
                         logger.info(
                             "[worker-%d] 进度: %d/%d instruments",
@@ -798,18 +805,28 @@ async def backfill_instrument_first_parallel(
             )
             futures.append(future)
 
-        # 收集结果
-        for future in asyncio.as_completed(futures):
-            try:
-                worker_stats = await future
+        # [Blocker Fix] 使用 gather(return_exceptions=True) 保留顺序
+        # worker 异常时，该 chunk 的 instruments × trade_dates 全部计 failed
+        # （不能用 as_completed，Python 3.12 返回 wrapper future，无法映射回 chunk）
+        results = await asyncio.gather(*futures, return_exceptions=True)
+        for idx, result in enumerate(results):
+            chunk = chunks[idx]
+            if isinstance(result, BaseException):
+                # worker 异常 → 该 chunk 的 instruments × dates 全部 failed
+                chunk_size = len(chunk)
+                logger.error(
+                    "[parallel] worker-%d 失败 (chunk %d instruments): %s",
+                    idx, chunk_size, result, exc_info=result,
+                )
+                for td in trade_dates:
+                    per_date_stats[td]["failed"] += chunk_size
+            else:
                 # 合并 stats
-                for td_str, stats in worker_stats.items():
+                for td_str, stats in result.items():
                     td = date.fromisoformat(td_str)
                     per_date_stats[td]["success"] += stats["success"]
                     per_date_stats[td]["failed"] += stats["failed"]
                     per_date_stats[td]["skipped"] += stats["skipped"]
-            except Exception as exc:
-                logger.error("[parallel] worker 失败: %s", exc, exc_info=True)
 
     # 4. finalize run records
     total_snapshots = 0
@@ -1059,6 +1076,21 @@ def parse_args() -> argparse.Namespace:
         help="并行进程数（默认 1 单进程，>1 启用 multiprocessing；建议 = CPU 核数）",
     )
     args = parser.parse_args()
+    # [Blocker Fix] workers 参数保护
+    # 1. workers < 1 → 拒绝（argparse error → SystemExit）
+    if args.workers < 1:
+        parser.error(f"--workers 必须 >= 1，实际: {args.workers}")
+    # 2. workers > cpu_count → cap + warning
+    #    防止用户误设过大值导致进程调度抖动
+    cpu_count = os.cpu_count() or 1
+    if args.workers > cpu_count:
+        import warnings
+
+        warnings.warn(
+            f"--workers={args.workers} > cpu_count={cpu_count}，自动 cap 到 {cpu_count}",
+            stacklevel=2,
+        )
+        args.workers = cpu_count
     # 解析 --symbols 为 list[str]
     if args.symbols is not None:
         args.symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]

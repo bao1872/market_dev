@@ -6,11 +6,13 @@
 
 - CHANGE-20260707-049: Backfill Multiprocessing 优化
   - `feature_snapshot_backfill.py` 新增 `--workers N` 参数（默认 1 单进程，>1 启用 multiprocessing）
-  - 新增 `_worker_process_instruments()`：top-level 可 pickle worker 函数，per-instrument commit（被 kill 不丢已完成）
-  - 新增 `backfill_instrument_first_parallel()`：ProcessPoolExecutor + `loop.run_in_executor` + `asyncio.as_completed` 编排
+  - 新增 `_worker_process_instruments()`：top-level 可 pickle worker 函数，独立 `async_engine`（pool_size=1/max_overflow=0/pool_pre_ping=True）
+  - 新增 `backfill_instrument_first_parallel()`：ProcessPoolExecutor + `asyncio.gather(return_exceptions=True)` 编排（按 chunk 顺序映射，避免 Python 3.12 `as_completed` wrapper future 不可回溯）
   - worker 循环重构为三阶段（load_bars / compute / commit 分离），load 失败时正确标 failed
-  - 测试：65 passed（9 新增 multiprocessing + 56 原有），ruff clean，mypy 0 新增错误
-  - 部署边界：未执行生产部署，需部署后验证 multiprocessing 实际提速
+  - **[Blocker Fix v2]** per-instrument commit 改为 per-date commit（`upsert → db.commit() → success++`，异常 `rollback + failed++`，commit 失败不计 success）；worker future 异常整个 chunk 计 failed（避免 worker 崩溃仍 finalized succeeded）；pool_size 5→1, max_overflow 10→0；`--workers < 1` 拒绝、`> cpu_count` 自动 cap
+  - 测试：73 passed（v1 9 + v2 8 Blocker Fix + 56 原有），ruff clean，mypy 0 新增错误
+  - 文档：03-jobs / 05-testing / backend-module-map / worker-job-map / test-coverage-map 随 PR 更新
+  - 部署边界：未执行生产部署，需部署后 `--workers 2 --dry-run` + 小样本 `--symbols` 验证，再扩大到 `--workers 4`
 - CHANGE-20260707-048: Snapshot Run Gate + Instrument-first Backfill
   - 新增 `stock_feature_snapshot_runs` 表（partial unique index 仅约束 `status='running'`，3 btree 索引）
   - 新增 `backend/app/models/stock_feature_snapshot_run.py` + migration `057_stock_feature_snapshot_runs`

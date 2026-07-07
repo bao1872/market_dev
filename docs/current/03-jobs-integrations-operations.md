@@ -134,16 +134,49 @@ CLI 参数：
 | `--failure-threshold` | 0.3 | 单日失败比例阈值，超过则该日 run 标 `failed` |
 | `--symbols` | None | 只处理指定股票代码（逗号分隔，如 `000100,603303`），用于小样本验证；触发 `scope='sample'` |
 | `--limit-instruments` | None | 只处理前 N 只股票（整数），用于小样本验证；触发 `scope='sample'` |
+| `--workers` | 1 | 并行进程数（1=单进程，>1 启用 multiprocessing）；建议生产先用 2 验证，再 4；超过 `os.cpu_count()` 自动 cap 并 warning |
 
 **Instrument-first 优势**：
 - 每只股票每周期（1d / 15m）只调用一次 `load_instrument_bars`，不为每个 trade_date 重复查询；
 - bars 在内存中按 `trade_date` slice（`_truncate_bars_to_trade_date`），复用 `compute_feature_snapshot_for_date` 已有的 `primary_bars` / `secondary_bars` 入参；
-- 不并发，先保证稳定和低内存。
+- 单进程模式不并发，保证稳定和低内存；multiprocessing 见 2.4.1。
 
-**事务边界（单 session，main 控制 commit/rollback）**：
-- `backfill_instrument_first` 不内部 commit，由 `main` 在结束时统一 commit；
+**事务边界（单进程 / 多进程 不同）**：
+- 单进程（`--workers 1`，默认）：`backfill_instrument_first` 不内部 commit，由 `main` 在结束时统一 commit；
+- 多进程（`--workers N`，N>1）：worker 内 per-date commit（详见 2.4.1），主进程创建/finalize run records；
 - 失败比例超阈值的 trade_date 标 run.status='failed'（不抛 RuntimeError，不阻断其他日期）；
 - 单股失败不阻断其他股票。
+
+### 2.4.1 Multiprocessing 模式（`--workers N`，N>1）
+
+`--workers > 1` 时启用 multiprocessing，主进程通过 `ProcessPoolExecutor` + `asyncio.gather(return_exceptions=True)` 分发 instrument chunks 到独立 worker 进程。
+
+**worker 函数**：`_worker_process_instruments(chunk, trade_dates, db_url, ...)` 为 top-level 可 pickle 函数，每个 worker 进程独立创建 `async_engine` + `async_sessionmaker`。
+
+**worker DB pool 配置（[Blocker Fix] 已收紧）**：
+- `pool_size=1, max_overflow=0, pool_pre_ping=True`（每个 worker 只需 1 个 session，避免 4 workers × 15 = 60 连接打满 PG）；
+- 不复用主进程 engine（子进程不能共享父进程的 event loop / connection pool）。
+
+**worker 事务边界（per-date commit）**：
+- 每个 `(instrument, trade_date)` 是独立事务：`upsert → db.commit() → success++`；
+- 异常时 `await db.rollback()`，`failed++`，下一个 trade_date 继续用干净事务；
+- `load_instrument_bars` 失败时该 instrument 所有 trade_dates 都标 `failed` 并 `continue`（不影响其他 instrument）；
+- **[Blocker Fix] 严格语义**：`success++` 只在 `db.commit()` 成功后执行（commit 失败 → rollback → `failed++`，DB 写入与 stats 一致）。
+
+**worker future 异常统计（[Blocker Fix]）**：
+- 主进程用 `asyncio.gather(*futures, return_exceptions=True)` 收集结果，保留 chunk 顺序映射（替代 `as_completed`，因 Python 3.12 `as_completed` 返回 wrapper future 无法回溯原 chunk）；
+- worker 抛 `BaseException`（含 `KeyboardInterrupt`/`SystemExit`）时，对该 chunk 的每个 instrument × 每个 trade_date 增加 `failed`，避免 worker 崩溃但 run 仍 finalized 为 `succeeded`；
+- worker 正常返回时合并 `per_date_stats`（success/failed/skipped）。
+
+**`--workers` 参数保护（[Blocker Fix]）**：
+- `--workers < 1` 直接 `parser.error()` 抛 `SystemExit`（拒绝 0 / 负数）；
+- `--workers > os.cpu_count()` 时 `warnings.warn()` + 自动 cap 到 `cpu_count`；
+- 生产默认仍 1（不自动并发）；建议先 `--workers 2` 小样本验证，再 `--workers 4`。
+
+**kill/resume 策略**：
+- per-date commit 保证被 kill 时不丢已完成行；
+- `--resume` 跳过已存在 snapshot 且所属 trade_date 有 `succeeded` run 的行（双重过滤）；
+- 被中断后重启 `--workers N --resume` 即可续跑，已 commit 的行不会重复计算。
 
 **Run gate（Phase 8 新增，[Blocker Fix] 增加 scope 区分）**：
 - 每个 trade_date 开始时创建 `running` run（`run_type='backfill'`）；
