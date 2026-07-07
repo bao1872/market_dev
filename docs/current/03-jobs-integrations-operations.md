@@ -74,7 +74,11 @@ queued → refreshing_daily → checking_coverage → creating_dsa
 
 - 使用独立 `AsyncSessionLocal`，不依赖 HTTP 请求 session；
 - 单股失败写 `degraded_reasons` 不阻断其他股票；
-- 失败比例超过 `failure_threshold`（默认 0.3）抛 `RuntimeError`，编排标记 `failed`，`publishing` 步骤不执行；
+- 失败比例超过 `failure_threshold`（默认 0.3）抛 `RuntimeError`；
+- **事务边界**：`compute_for_trade_date` 不内部 commit，只 upsert（flush）+ 检查阈值；caller（`after_close_orchestrator`）显式控制：
+  - 成功（`failure_rate <= threshold`）→ `db.commit()`，进入 `publishing`；
+  - `RuntimeError`（超阈值）→ 显式 `db.rollback()` 丢弃半成品行 → 异常向上传播 → orchestrator 写 `failed` 事件 → **不进入 publishing**；
+- `feature_snapshot` 失败时 `last_completed_step` 不推进，重试从 `quality_gate` 之后重新进入；
 - 完成后更新心跳与 `last_completed_step='feature_snapshot'`。
 
 断点恢复路径（`last_completed_step` → 已完成步骤集合）：
@@ -99,7 +103,7 @@ queued → refreshing_daily → checking_coverage → creating_dsa
 
 ```bash
 cd /root/web_dev/backend && .venv/bin/python -m scripts.feature_snapshot_backfill \
-    --start 2026-06-01 --end latest --batch-size 20 --commit-every 500
+    --start 2026-06-01 --end latest --batch-size 20 --resume --dry-run
 ```
 
 CLI 参数：
@@ -109,17 +113,37 @@ CLI 参数：
 | `--start` | 必填 | 起始日期 YYYY-MM-DD |
 | `--end` | `latest` | 结束日期或 `latest`（解析为 `bars_daily` 表最新 trade_date） |
 | `--batch-size` | 20 | 每批 instrument 数 |
-| `--commit-every` | 500 | 每 N rows commit 一次 |
-| `--resume` | False | 跳过已有 snapshot 的 (instrument_id, trade_date) 组合 |
-| `--dry-run` | False | 只打印计划，不执行写入 |
-| `--failure-threshold` | 0.3 | 单日失败比例阈值，超过则抛异常 |
+| `--resume` | False | **真正跳过**已存在 snapshot 的 instrument（按完整唯一键过滤，不重新计算） |
+| `--dry-run` | False | 只打印计划与 missing 统计，不执行写入 |
+| `--failure-threshold` | 0.3 | 单日失败比例阈值，超过则该日 rollback |
+
+**事务边界（每个交易日独立事务）**：
+- 成功（`failure_rate <= threshold`）→ `db.commit()`；
+- `RuntimeError`（超阈值）或其他异常 → `db.rollback()` 丢弃半成品 → 继续下一日；
+- 单日失败不阻断其他日期；失败日期不留半成品行。
+
+**`--resume` 真正跳过**：
+- `get_existing_instrument_ids(db, trade_date, primary_timeframe, secondary_timeframe, adj, schema_version)` 查询已存在 instrument_id 集合（按完整唯一键）；
+- 从 active instrument 列表中过滤掉已存在；
+- 只对 missing instrument 调用 `compute_for_trade_date`；
+- **不**为已存在 row 重新计算（旧实现 "仍会 upsert 覆盖" 已废弃）。
+
+**`--dry-run` 输出**：
+- 每个 trade_date 的 active instruments、missing instruments、skipped_existing；
+- 汇总：trade_dates 数量、active instruments、missing_snapshots（估计 rows）；
+- 不写库。
+
+**[Known Gap] 全量 instrument-first 优化未实现**：
+- 当前仍是 date-first：每个交易日遍历全市场，每只股票重复 fetch 1d/15m bars；
+- 全量回补 2026-01-01 到当前会非常重；
+- **禁止全量生产 backfill**，仅用于小范围 resume / dry-run；
+- 全量 instrument-first 优化（按 instrument batch 获取 bars，内存中按 trade_date slice）拆下一 PR。
 
 约束：
 - 不修改 DSA/BB/swing/temporal 数学公式；
 - 复用 `feature_snapshot_service.compute_for_trade_date`；
 - 单股失败记录到 `degraded_reasons`，不阻塞其他股票；
 - upsert 幂等，可重复执行；
-- 单日失败不阻断其他日期；
 - `start > end` 直接 `sys.exit(1)`。
 
 ## 3. 任务状态与可观察性

@@ -251,6 +251,69 @@ def is_trading_day(target_date: DateLike = None) -> bool:
     return _check_weekday(target)
 
 
+# =============================================================================
+# 交易日查询辅助：previous / most_recent
+# =============================================================================
+
+
+async def get_previous_trading_day_async(
+    session: AsyncSession,
+    ref_date: date,
+) -> date | None:
+    """[Calendar] - 获取 ref_date 之前最近的交易日（严格 < ref_date）。
+
+    复用 trading_calendar 表（market='A', is_trading_day=True），
+    禁止硬编码周末判断。
+
+    Args:
+        session: 异步数据库会话
+        ref_date: 参考日期
+
+    Returns:
+        前一交易日 date，或 None（无历史交易日记录）
+    """
+    result = await session.scalar(
+        select(TradingCalendar.trade_date)
+        .where(
+            TradingCalendar.trade_date < ref_date,
+            TradingCalendar.is_trading_day.is_(True),
+            TradingCalendar.market == "A",
+        )
+        .order_by(TradingCalendar.trade_date.desc())
+        .limit(1)
+    )
+    return result
+
+
+async def get_most_recent_trading_day_async(
+    session: AsyncSession,
+    ref_date: date,
+) -> date | None:
+    """[Calendar] - 获取 ref_date 当日或之前最近的交易日（<= ref_date）。
+
+    复用 trading_calendar 表（market='A', is_trading_day=True），
+    禁止硬编码周末判断。
+
+    Args:
+        session: 异步数据库会话
+        ref_date: 参考日期
+
+    Returns:
+        最近交易日 date（<= ref_date），或 None（无历史交易日记录）
+    """
+    result = await session.scalar(
+        select(TradingCalendar.trade_date)
+        .where(
+            TradingCalendar.trade_date <= ref_date,
+            TradingCalendar.is_trading_day.is_(True),
+            TradingCalendar.market == "A",
+        )
+        .order_by(TradingCalendar.trade_date.desc())
+        .limit(1)
+    )
+    return result
+
+
 if __name__ == "__main__":
     # 自测入口：验证日期解析与降级链（不写库表）
     print("=== calendar_service 自测 ===")

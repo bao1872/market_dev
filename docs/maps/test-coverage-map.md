@@ -48,9 +48,9 @@
 
 | 规则 | 测试 |
 |---|---|
-| monitor-status `metrics` 唯一来自 `stock_feature_snapshots.summary_payload`（`_source='feature_snapshot'`），不再走 `MonitorSnapshotService` 实时计算或 `MonitorState.payload` fallback | `test_watchlist_monitor_status_snapshot.py`（3 个用例：SUCCEEDED/WAITING_SNAPSHOT/NO_SNAPSHOT） |
-| `calculation_status` 三态语义：SUCCEEDED（snapshot 存在）/ WAITING_SNAPSHOT（交易日已收盘但 snapshot 缺失）/ NO_SNAPSHOT（非交易日或交易日内） | `test_watchlist_monitor_status_snapshot.py` |
-| `_get_expected_snapshot_trade_date` 规则：非交易日 → None；交易日但未收盘 → None；交易日已收盘 → today | `test_watchlist_monitor_status_snapshot.py` |
+| monitor-status `metrics` 唯一来自 `stock_feature_snapshots.summary_payload`（`_source='feature_snapshot'`），不再走 `MonitorSnapshotService` 实时计算或 `MonitorState.payload` fallback | `test_watchlist_monitor_status_snapshot.py`（6 个用例：SUCCEEDED/WAITING_SNAPSHOT/NO_SNAPSHOT + 盘中读昨日 + 非交易日读最近交易日 + 非交易日无历史） |
+| `calculation_status` 三态语义：SUCCEEDED（snapshot 存在）/ WAITING_SNAPSHOT（交易日已收盘但 snapshot 缺失）/ NO_SNAPSHOT（非交易日或交易日内无历史） | `test_watchlist_monitor_status_snapshot.py` |
+| `_resolve_expected_snapshot_trade_date` 规则：交易日未收盘 → 上一交易日；交易日已收盘 → today；非交易日 → 最近交易日；无法解析 → None（复用 `calendar_service`，禁止硬编码周末） | `test_watchlist_monitor_status_snapshot.py` |
 | `freshness_seconds` 基于 `snapshot.updated_at` | `test_watchlist_monitor_status_snapshot.py::test_succeeded` |
 | 自选监控页无每行状态栏、页眉全局状态、数据列可过滤、compact-table 对齐 | `frontend/src/features/watchlist-monitor/__tests__/columns.test.ts` |
 | admin monitor 资格：active admin 与 active member + 有效 subscription 放行，disabled admin / 无订阅普通用户排除 | `test_monitor_eligible.py` |
@@ -70,13 +70,16 @@
 | `source_primary_bar_time` 与 `source_secondary_bar_time` 必须为 `Asia/Shanghai` aware datetime；1d 规范化为 `trade_date 15:00+08:00` | `test_feature_snapshot_service.py::test_compute_snapshot_source_bar_time_timezone_aware` |
 | `upsert_snapshot` 幂等：同唯一键重复 upsert 只生成一行，第二次覆盖第一次 | `test_feature_snapshot_service.py::test_upsert_snapshot_idempotent` |
 | `compute_for_trade_date` 单股失败不阻断其他股票；失败比例超 30% 抛 `RuntimeError` | `test_feature_snapshot_service.py::test_compute_for_trade_date_single_failure_does_not_block` |
-| `parse_args` 默认值（end=latest/batch_size=20/commit_every=500/failure_threshold=0.3）+ 自定义值 + 缺失 `--start` 报 `SystemExit` | `test_feature_snapshot_backfill.py::test_parse_args_*` |
+| [half-baked rollback] `compute_for_trade_date` 不内部 commit；超阈值抛 `RuntimeError` 后 caller rollback，DB 无半成品残留 | `test_feature_snapshot_service.py::test_compute_for_trade_date_over_threshold_no_partial_after_rollback` |
+| `structural_payload` 必须包含 `primary`/`secondary`/`relation`/`meta` 4 key；`relation` 来自 `_compute_relation` | `test_feature_snapshot_service.py::test_compute_snapshot_structural_payload_contains_relation` |
+| `parse_args` 默认值（end=latest/batch_size=20/failure_threshold=0.3）+ 自定义值 + 缺失 `--start` 报 `SystemExit`；**`commit_every` 已移除** | `test_feature_snapshot_backfill.py::test_parse_args_*` |
 | `get_trade_dates_from_bars` 升序 trade_dates + 空表返回空列表 | `test_feature_snapshot_backfill.py::test_get_trade_dates_from_bars*` |
 | `get_latest_bar_date` 返回 `bars_daily.trade_date` 最大值；空表返回 `None` | `test_feature_snapshot_backfill.py::test_get_latest_bar_date*` |
-| `count_existing_snapshots` 统计某日已有 snapshot 数 | `test_feature_snapshot_backfill.py::test_count_existing_snapshots` |
-| `backfill_single_date` `--dry-run` 不调用 `compute_for_trade_date`；正常模式调用；`--resume` 仍调用 compute（upsert 覆盖） | `test_feature_snapshot_backfill.py::test_backfill_single_date_*` |
-| `main` `--dry-run` 端到端不写库；单日失败不阻断其他日期；`--end=latest` 解析为 `bars_daily` 表最新 trade_date；`start > end` 直接 `sys.exit(1)` | `test_feature_snapshot_backfill.py::test_main_*` |
-| 盘后编排状态机新增 `feature_snapshot` 步骤（`quality_gate → feature_snapshot → publishing`） | `test_after_close_orchestrator.py`（8 个用例） |
+| `get_existing_instrument_ids` 返回某日已存在 snapshot 的 instrument_id 集合；按完整唯一键过滤；按 schema_version 严格过滤 | `test_feature_snapshot_backfill.py::test_get_existing_instrument_ids_*` |
+| `backfill_single_date` `--dry-run` 输出 missing 数量不写库；正常模式调用 compute；`--resume` 真正跳过已存在 instrument（不重新计算）；全部已存在时跳过 compute | `test_feature_snapshot_backfill.py::test_backfill_single_date_*` |
+| `main` `--dry-run` 端到端不写库；单日失败 rollback 半成品不阻断其他日期（验证 rollback/commit 计数）；`--end=latest` 解析；`start > end` 直接 `sys.exit(1)` | `test_feature_snapshot_backfill.py::test_main_*` |
+| 盘后编排状态机新增 `feature_snapshot` 步骤（`quality_gate → feature_snapshot → publishing`） | `test_after_close_orchestrator.py`（9 个用例） |
+| [feature_snapshot 失败不进入 publishing] `compute_for_trade_date` 抛 `RuntimeError` → `publish_run` 未被调用 + `job_run.status='failed'` + 不应有 publishing/succeeded 事件 | `test_after_close_orchestrator.py::test_execute_feature_snapshot_failure_skips_publishing` |
 | 断点恢复：`last_completed_step='quality_gate'` → `skip_snapshot=False`；`'feature_snapshot'` → `skip_snapshot=True` | `test_after_close_orchestrator.py` |
 | 迁移幂等：`alembic upgrade head` / `downgrade -1` / `upgrade head` 链路不报错；表含唯一约束与 3 个 btree 索引 | 手动验证（test DB） |
 

@@ -440,6 +440,117 @@ async def test_execute_failure_writes_failed_event(db_session) -> None:
 
 
 @pytest.mark.asyncio
+async def test_execute_feature_snapshot_failure_skips_publishing(db_session) -> None:
+    """测试 5.1：feature_snapshot 失败比例超阈值时不应进入 publishing。
+
+    [Blocker2] 场景：compute_for_trade_date 抛 RuntimeError（失败比例超阈值），
+    要求：
+    1. publish_run 不被调用（不发布失败日期结果）
+    2. orchestrator 状态更新为 failed
+    3. failed 事件写入，消息中包含 feature_snapshot 失败上下文
+    """
+    dsa_run, _ = await _create_dsa_strategy_run(db_session, status="completed")
+    job_run = await _create_after_close_job_run(db_session)
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return db_session
+        async def __aexit__(self, *args):
+            return False
+
+    fake_session_local = MagicMock(return_value=_FakeSessionContext())
+
+    fake_batch_result = BatchResult(total=100, succeeded=95)
+    fake_batch_result.dsa_run_id = dsa_run.id
+    fake_batch_result.daily_covered = 95
+    fake_batch_result.daily_total = 100
+    fake_batch_result.daily_coverage = 0.95
+
+    fake_published_run = MagicMock()
+    fake_published_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+
+    # [Blocker2] 模拟 feature_snapshot 失败比例超阈值
+    snapshot_exc = RuntimeError(
+        "feature_snapshot 失败比例 40.0% 超过阈值 30% (failed=2, total=5)"
+    )
+
+    publish_call_count = 0
+
+    async def _fake_publish_run(*args, **kwargs):
+        nonlocal publish_call_count
+        publish_call_count += 1
+        return fake_published_run
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        new=fake_session_local,
+    ), patch.object(
+        db_session, "commit", new=db_session.flush,
+    ), patch.object(
+        # [Blocker2] 测试 fixture 使用 savepoint 隔离，显式 rollback 会回滚 fixture 数据；
+        # mock 为 no-op，由 fixture 退出时统一回滚（生产中由 async with 自动 rollback）。
+        db_session, "rollback", new=AsyncMock(return_value=None),
+    ), patch.object(
+        db_session, "get",
+        new=AsyncMock(side_effect=lambda model, id: {
+            (SchedulerJobRun, job_run.id): job_run,
+            (StrategyRun, dsa_run.id): dsa_run,
+        }.get((model, id))),
+    ), patch.object(
+        BarsSchedulerService, "refresh_all_instruments",
+        new=AsyncMock(return_value=fake_batch_result),
+    ), patch(
+        "app.services.after_close_orchestrator._poll_dsa_run_status",
+        new=AsyncMock(return_value="completed"),
+    ), patch.object(
+        StrategyBatchService, "_check_quality_gates",
+        new=AsyncMock(return_value=True),
+    ), patch.object(
+        StrategyBatchService, "publish_run",
+        new=_fake_publish_run,
+    ), patch(
+        "app.services.after_close_orchestrator.get_active_a_share_instruments",
+        new=AsyncMock(return_value=[uuid.uuid4()]),
+    ), patch(
+        "app.services.after_close_orchestrator.compute_for_trade_date",
+        new=AsyncMock(side_effect=snapshot_exc),
+    ):
+        with pytest.raises(RuntimeError, match="失败比例"):
+            await execute_after_close_run(
+                job_run_id=job_run.id,
+                trade_date=date(2026, 6, 25),
+                dsa_poll_interval=0,
+                dsa_poll_timeout=1,
+            )
+
+    # [Blocker2] 验证 1：publish_run 未被调用
+    assert publish_call_count == 0, (
+        f"feature_snapshot 失败时不应进入 publishing，但 publish_run 被调用了 {publish_call_count} 次"
+    )
+
+    # [Blocker2] 验证 2：job_run 状态为 failed
+    assert job_run.status == "failed"
+    assert job_run.error_message is not None
+    assert "失败比例" in job_run.error_message
+
+    # [Blocker2] 验证 3：failed 事件写入
+    from app.services.job_run_event_service import list_events
+    events = await list_events(db_session, job_run.id, limit=20)
+    failed_events = [e for e in events if e.step == AfterCloseRunStatus.FAILED.value]
+    assert len(failed_events) >= 1
+    assert "失败比例" in failed_events[0].message
+
+    # [Blocker2] 验证 4：不应有 publishing / succeeded 事件
+    steps = [e.step for e in events]
+    assert AfterCloseRunStatus.PUBLISHING.value not in steps, (
+        f"feature_snapshot 失败不应有 publishing 事件: {steps}"
+    )
+    assert AfterCloseRunStatus.SUCCEEDED.value not in steps, (
+        f"feature_snapshot 失败不应有 succeeded 事件: {steps}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_execute_starts_heartbeat_loop_during_long_refresh(db_session) -> None:
     """测试 6：长阶段（refresh_all_instruments）执行期间应启动后台心跳任务，防止 watchdog 误判 stale。
 
@@ -453,7 +564,6 @@ async def test_execute_starts_heartbeat_loop_during_long_refresh(db_session) -> 
 
     dsa_run, _ = await _create_dsa_strategy_run(db_session, status="completed")
     job_run = await _create_after_close_job_run(db_session)
-    initial_heartbeat = job_run.heartbeat_at
 
     class _FakeSessionContext:
         async def __aenter__(self):

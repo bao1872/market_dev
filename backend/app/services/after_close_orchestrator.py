@@ -710,9 +710,22 @@ async def execute_after_close_run(
 
             async with AsyncSessionLocal() as db:
                 instrument_ids = await get_active_a_share_instruments(db)
-                snapshot_result = await compute_for_trade_date(
-                    db, trade_date, instrument_ids,
-                )
+                try:
+                    snapshot_result = await compute_for_trade_date(
+                        db, trade_date, instrument_ids,
+                    )
+                except RuntimeError as snapshot_exc:
+                    # [Blocker2] 失败比例超阈值：显式 rollback 半成品行，
+                    # 防止 watchlist 读取失败日期的部分 snapshot。
+                    # 异常向上传播触发 orchestrator FAILED 状态写入，
+                    # publishing 步骤被跳过。
+                    await db.rollback()
+                    logger.error(
+                        "[AfterClose] feature_snapshot 失败比例超阈值，"
+                        "已 rollback 半成品: trade_date=%s, error=%s",
+                        trade_date, snapshot_exc,
+                    )
+                    raise
                 await db.commit()
 
             logger.info(

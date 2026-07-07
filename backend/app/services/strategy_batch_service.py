@@ -1357,19 +1357,11 @@ class StrategyBatchService:
         Returns:
             前一交易日 date，或 None（无历史交易日）
         """
-        from app.models.calendar import TradingCalendar
+        # [Blocker1] - 委托给 calendar_service.get_previous_trading_day_async，
+        # 消除重复实现（同一业务规则只允许一个权威实现）。
+        from app.services.calendar_service import get_previous_trading_day_async
 
-        result = await db.scalar(
-            select(TradingCalendar.trade_date)
-            .where(
-                TradingCalendar.trade_date < trade_date,
-                TradingCalendar.is_trading_day.is_(True),
-                TradingCalendar.market == "A",
-            )
-            .order_by(TradingCalendar.trade_date.desc())
-            .limit(1)
-        )
-        return result
+        return await get_previous_trading_day_async(db, trade_date)
 
     async def _get_latest_released_version(
         self, db: AsyncSession, strategy_key: str

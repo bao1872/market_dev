@@ -61,7 +61,11 @@ from app.services.access_control_service import (
     require_active_subscription,
     require_quota,
 )
-from app.services.calendar_service import is_trading_day_async
+from app.services.calendar_service import (
+    get_most_recent_trading_day_async,
+    get_previous_trading_day_async,
+    is_trading_day_async,
+)
 from app.services.market_status_service import compute_market_session
 
 logger = logging.getLogger("watchlist_api")
@@ -117,33 +121,40 @@ def _compute_market_status(now_cst: datetime, is_trading_day: bool) -> str:
     return compute_market_session(now_cst, is_trading_day)
 
 
-def _get_expected_snapshot_trade_date(
+async def _resolve_expected_snapshot_trade_date(
+    db: AsyncSession,
     today: date,
     market_session: str,
     is_trading_day: bool,
 ) -> date | None:
-    """获取当日预期的 feature snapshot 交易日。
+    """[Blocker1] - 解析当日应读取的 feature snapshot 交易日。
 
     规则（与 after_close_orchestrator 生成快照的时点对齐）：
-    - 非交易日（NON_TRADING_DAY）：返回 None（无当日快照预期，前端展示 NO_SNAPSHOT）
-    - 交易日但未收盘（PRE_OPEN/MORNING_SESSION/LUNCH_BREAK/AFTERNOON_SESSION）：
-      返回 None（当日快照尚未由 orchestrator 生成，前端展示 NO_SNAPSHOT）
-    - 交易日且已收盘（MARKET_CLOSED）：返回 today（orchestrator 应已生成当日快照，
-      缺失时前端展示 WAITING_SNAPSHOT）
+    1. 交易日且未收盘（PRE_OPEN/MORNING_SESSION/LUNCH_BREAK/AFTERNOON_SESSION）：
+       返回上一个已完成交易日（盘中读昨日 snapshot）。
+    2. 交易日且已收盘（MARKET_CLOSED）：返回 today（orchestrator 应已生成当日快照）。
+    3. 非交易日（NON_TRADING_DAY）：返回最近一个交易日（读最近交易日 snapshot）。
+    4. 若无法解析最近交易日（trading_calendar 表无记录），返回 None。
+
+    复用 calendar_service.get_previous_trading_day_async /
+    get_most_recent_trading_day_async，禁止硬编码周末。
 
     Args:
+        db: 异步数据库会话
         today: 上海业务日期
         market_session: 6 值枚举的市场状态
         is_trading_day: 是否为交易日
 
     Returns:
-        预期的快照交易日；None 表示当前时段不期望存在当日快照。
+        预期的快照交易日；None 表示无法解析（前端展示 NO_SNAPSHOT）。
     """
-    if not is_trading_day:
-        return None
-    if market_session == "MARKET_CLOSED":
-        return today
-    return None
+    if is_trading_day:
+        if market_session == "MARKET_CLOSED":
+            return today
+        # 盘中：读取上一个已完成交易日 snapshot
+        return await get_previous_trading_day_async(db, today)
+    # 非交易日：读取最近一个交易日 snapshot
+    return await get_most_recent_trading_day_async(db, today)
 
 
 @router.get("", response_model=WatchlistListResponse)
@@ -314,8 +325,8 @@ async def get_watchlist_monitor_status(
     # 3. 批量查询当日 feature snapshot（唯一键：instrument_id + expected_trade_date）
     # snapshot 是 metrics 的唯一数据源，不再走 MonitorState.payload 或实时 fallback
     snapshot_map: dict[UUID, StockFeatureSnapshot] = {}
-    expected_trade_date = _get_expected_snapshot_trade_date(
-        today, market_status, is_trading_day,
+    expected_trade_date = await _resolve_expected_snapshot_trade_date(
+        db, today, market_status, is_trading_day,
     )
     if expected_trade_date is not None and rows:
         instrument_ids = [row[1].id for row in rows]
@@ -427,14 +438,18 @@ async def get_watchlist_monitor_status(
                 )
             else:
                 freshness_seconds = None
-        elif expected_trade_date is not None:
-            # 交易日已收盘但 snapshot 缺失 → orchestrator 未生成
+        elif (
+            expected_trade_date is not None
+            and is_trading_day
+            and market_status == "MARKET_CLOSED"
+        ):
+            # 交易日已收盘但 snapshot 缺失 → orchestrator 未生成（等待 after_close 生成）
             calculation_status = "WAITING_SNAPSHOT"
             metrics = {}
             updated_at = None
             freshness_seconds = None
         else:
-            # 非交易日或交易日内 → 不期望存在当日 snapshot
+            # 盘中无昨日 snapshot / 非交易日无历史 snapshot → NO_SNAPSHOT
             calculation_status = "NO_SNAPSHOT"
             metrics = {}
             updated_at = None

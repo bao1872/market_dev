@@ -39,7 +39,10 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
-from app.services.structural_factor_service import _compute_all_factors_for_bars
+from app.services.structural_factor_service import (
+    _compute_all_factors_for_bars,
+    _compute_relation,
+)
 from app.services.temporal_feature_service import (
     _compute_daily_context,
     _compute_derived_relation,
@@ -262,10 +265,16 @@ async def compute_feature_snapshot_for_date(
         daily_context, m15_response, degraded_reasons
     )
 
+    # [Blocker4] - 复用 structural_factor_service._compute_relation 计算 primary vs secondary
+    # 客观关系（trend_alignment / secondary_vs_primary_position_delta 等），
+    # 禁止在 feature_snapshot_service 内复制关系计算公式。
+    relation = _compute_relation(primary_factors, secondary_factors)
+
     # 构造 structural_payload（与 compute_structural_factors 输出格式对齐）
     structural_payload: dict[str, Any] = {
         "primary": {primary_timeframe: primary_factors},
         "secondary": {secondary_timeframe: secondary_factors},
+        "relation": relation,
         "meta": {
             "degraded_reasons": degraded_reasons,
             "warmup_notes": warmup_notes,
@@ -497,14 +506,18 @@ async def compute_for_trade_date(
     trade_date: date,
     instrument_ids: Sequence[uuid.UUID],
     batch_size: int = 20,
-    commit_every: int = 500,
     failure_threshold: float = 0.3,
 ) -> dict[str, Any]:
-    """为给定 instrument 列表批量计算并写入快照。
+    """为给定 instrument 列表批量计算并 upsert 快照（不内部 commit）。
+
+    [Blocker2] 事务边界变更：
+    - 本函数只负责 upsert（flush）+ 返回统计，不调用 session.commit()。
+    - 失败比例超过 failure_threshold 时抛 RuntimeError，由 caller 决定 rollback。
+    - caller（after_close / backfill）负责：成功时 commit，超阈值时 rollback。
+    - 这样保证失败日期不会留下部分已 commit 行（half-baked）。
 
     - 按 batch_size 分批遍历
     - 单股失败记录，不阻塞其他股票
-    - 每满 commit_every rows 执行一次 commit
     - 失败比例超过 failure_threshold 时整体抛异常
 
     Args:
@@ -512,19 +525,17 @@ async def compute_for_trade_date(
         trade_date: 交易日
         instrument_ids: 标的 ID 列表
         batch_size: 每批 instrument 数（默认 20）
-        commit_every: 每 N rows commit 一次（默认 500）
         failure_threshold: 失败比例阈值（默认 0.3）
 
     Returns:
         统计信息 dict：snapshot_count, failed_count, schema_version, trade_date
 
     Raises:
-        RuntimeError: 失败比例超过 failure_threshold
+        RuntimeError: 失败比例超过 failure_threshold（caller 应 rollback）
     """
     total = len(instrument_ids)
     snapshot_count = 0
     failed_count = 0
-    rows_since_commit = 0
 
     for i in range(0, total, batch_size):
         batch = instrument_ids[i : i + batch_size]
@@ -535,7 +546,6 @@ async def compute_for_trade_date(
                 )
                 await upsert_snapshot(session, snapshot)
                 snapshot_count += 1
-                rows_since_commit += 1
             except Exception as exc:
                 failed_count += 1
                 logger.error(
@@ -543,15 +553,7 @@ async def compute_for_trade_date(
                     instrument_id, trade_date, exc, exc_info=True,
                 )
 
-            if rows_since_commit >= commit_every:
-                await session.commit()
-                rows_since_commit = 0
-
-    # 提交剩余
-    if rows_since_commit > 0:
-        await session.commit()
-
-    # 检查失败阈值
+    # 检查失败阈值（不 commit，由 caller 决定 commit/rollback）
     if total > 0:
         failure_rate = failed_count / total
         if failure_rate > failure_threshold:

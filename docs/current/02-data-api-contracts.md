@@ -749,7 +749,7 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 | `schema_version` | INT | NOT NULL, default `1` | schema 版本（变更需 bump） |
 | `source_primary_bar_time` | TIMESTAMPTZ | NULL | 主周期数据源截止时间；1d 规范化为 `trade_date 15:00+08:00` |
 | `source_secondary_bar_time` | TIMESTAMPTZ | NULL | 15m 数据源截止时间（最后一根 15m bar 的实际 trade_time） |
-| `structural_payload` | JSONB | NOT NULL | `_compute_all_factors_for_bars` 完整输出（primary + secondary + meta） |
+| `structural_payload` | JSONB | NOT NULL | `_compute_all_factors_for_bars` 完整输出（primary + secondary + relation + meta） |
 | `temporal_payload` | JSONB | NOT NULL | `_compute_daily_context` / `_compute_m15_response` / `_compute_derived_relation` 完整输出 |
 | `summary_payload` | JSONB | NOT NULL | 前端列表用摘要，含 `_source='feature_snapshot'` |
 | `degraded_reasons` | JSONB | NOT NULL, default `'[]'` | 单股降级原因列表（不阻断其他股票） |
@@ -798,7 +798,16 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 | `WAITING_SNAPSHOT` | 交易日已收盘（`MARKET_CLOSED`）但 snapshot 缺失（orchestrator 未跑或失败） | 空 dict | `None` |
 | `NO_SNAPSHOT` | 非交易日或交易日内（`PRE_OPEN`/`MORNING_SESSION`/`LUNCH_BREAK`/`AFTERNOON_SESSION`） | 空 dict | `None` |
 
-**`_get_expected_snapshot_trade_date` 规则**：非交易日 → `None`；交易日但未收盘 → `None`；交易日已收盘 → `today`。
+**`_resolve_expected_snapshot_trade_date` 规则**（`/watchlist/monitor-status` 内部 helper）：
+
+| 今日类型 | 市场状态 | `expected_snapshot_trade_date` | 说明 |
+|---|---|---|---|
+| 交易日 | 未收盘（PRE_OPEN / MORNING_SESSION / LUNCH_BREAK / AFTERNOON_SESSION） | 上一已完成交易日（`calendar_service.get_previous_trading_day_async`，严格 `< today`） | 盘中读昨日 snapshot，前端展示 SUCCEEDED + 昨日 metrics |
+| 交易日 | MARKET_CLOSED | `today` | 收盘后等待当日 snapshot；缺失时返回 WAITING_SNAPSHOT |
+| 非交易日 | NON_TRADING_DAY | 最近交易日（`calendar_service.get_most_recent_trading_day_async`，`<= today`） | 周末/节假日读最近交易日 snapshot |
+| 任一 | 任一 | 无法解析最近交易日（如日历表为空） | `None`，前端展示 NO_SNAPSHOT |
+
+复用 `calendar_service` / `trading_calendar` 表，禁止硬编码周末。
 
 **`monitor_status` 兼容字段**：`calculation_status != 'SUCCEEDED'` 时与 `calculation_status` 一致；`SUCCEEDED` 时回落到 `market_session`（保持前端旧字段兼容）。
 
@@ -808,11 +817,31 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 - 禁止使用 `trade_date` 之后数据；
 - `include_realtime=False`，只取已完成 bar。
 
-### 13.4 计算约束
+### 13.4 `structural_payload.relation` 字段
 
-- 复用 `_compute_all_factors_for_bars` / `_compute_daily_context` / `_compute_m15_response` / `_compute_derived_relation` / `bollinger()`，**不复制 DSA/BB/swing/temporal 数学公式**；
+`structural_payload` 包含 4 个 top-level key：`primary` / `secondary` / `relation` / `meta`。
+
+- `primary`：`{primary_timeframe: _compute_all_factors_for_bars(df_1d)}` 完整输出
+- `secondary`：`{secondary_timeframe: _compute_all_factors_for_bars(df_15m)}` 完整输出
+- `relation`：`_compute_relation(primary_factors, secondary_factors)` 输出，包含 `trend_alignment` / `secondary_vs_primary_position_delta` / `primary_dir` / `secondary_dir` 等 V1.8 客观关系字段（值可能为 `null`，由数据充分性决定）
+- `meta`：`degraded_reasons` + `warmup_notes`
+
+**禁止**在 `feature_snapshot_service` 内复制 `_compute_relation` 公式，必须复用 `structural_factor_service._compute_relation`。
+
+### 13.5 计算约束与事务边界
+
+- 复用 `_compute_all_factors_for_bars` / `_compute_relation` / `_compute_daily_context` / `_compute_m15_response` / `_compute_derived_relation` / `bollinger()`，**不复制 DSA/BB/swing/temporal 数学公式**；
 - 单股失败写 `degraded_reasons`，不阻断批次其他股票；
-- 失败比例超过 `failure_threshold`（默认 0.3）抛 `RuntimeError`，orchestrator 标记 `failed`；
+- 失败比例超过 `failure_threshold`（默认 0.3）抛 `RuntimeError`，由 caller 决定 rollback；
 - upsert 按唯一键 `ON CONFLICT DO UPDATE`，`structural_payload` / `temporal_payload` / `summary_payload` / `source_*_bar_time` / `degraded_reasons` 覆盖，`updated_at = now()`；
 - 1d bar 时间规范化为 `trade_date 15:00+08:00` aware datetime；15m bar 时间取最后一根 15m bar 实际 trade_time，转 `Asia/Shanghai` aware datetime。
+
+### 13.6 事务边界与不可读取失败半成品
+
+- `compute_for_trade_date` 只负责 upsert（flush）+ 返回统计，**不内部 commit**；
+- caller（`after_close_orchestrator` / `feature_snapshot_backfill`）决定 commit / rollback：
+  - 成功（`failure_rate <= threshold`）→ commit；
+  - `RuntimeError`（失败比例超阈值）→ rollback 半成品 → 标记 `failed`；
+- `/watchlist/monitor-status` 只读取已 commit 的 snapshot 行；失败日期不应有部分已 commit 行（half-baked）；
+- backfill 单日失败时该日所有半成品 rollback，不影响其他日期。
 

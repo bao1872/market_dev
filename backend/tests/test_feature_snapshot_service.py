@@ -271,6 +271,41 @@ async def test_compute_snapshot_source_bar_time_timezone_aware() -> None:
     assert snapshot.source_primary_bar_time.utcoffset() is not None
 
 
+@pytest.mark.asyncio
+async def test_compute_snapshot_structural_payload_contains_relation() -> None:
+    """structural_payload 必须包含 relation 字段（复用 _compute_relation）。
+
+    relation 复用 structural_factor_service._compute_relation(primary, secondary)，
+    禁止在 feature_snapshot_service 内复制关系计算公式。
+    """
+    bars = _build_daily_bars(n=250)
+    target_date = bars.index[200].date()
+
+    mock_session = MagicMock()
+    mock_result = MagicMock()
+    mock_result.first.return_value = ("000001",)
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    snapshot = await compute_feature_snapshot_for_date(
+        mock_session,
+        uuid.uuid4(),
+        target_date,
+        primary_bars=bars,
+        secondary_bars=bars,
+    )
+
+    # structural_payload 必须含 primary/secondary/relation/meta 四个顶层 key
+    sp = snapshot.structural_payload
+    assert set(sp.keys()) >= {"primary", "secondary", "relation", "meta"}
+    # relation 必须含 V1.8 客观关系字段（值可为 None，但 key 必须存在）
+    relation = sp["relation"]
+    assert isinstance(relation, dict)
+    assert "trend_alignment" in relation
+    assert "secondary_vs_primary_position_delta" in relation
+    assert "primary_dir" in relation
+    assert "secondary_dir" in relation
+
+
 # ===== 4. upsert_snapshot =====
 
 
@@ -347,7 +382,7 @@ async def test_upsert_snapshot_idempotent(db_session: AsyncSession) -> None:
 async def test_compute_for_trade_date_single_failure_does_not_block(
     db_session: AsyncSession,
 ) -> None:
-    """单股失败不阻断批次。"""
+    """单股失败不阻断批次：成功行落库，失败行不写，返回 failed_count。"""
     from app.models.instrument import Instrument
     from app.services.feature_snapshot_service import compute_for_trade_date
 
@@ -397,13 +432,99 @@ async def test_compute_for_trade_date_single_failure_does_not_block(
             date(2026, 1, 10),
             inst_ids,
             batch_size=10,
-            commit_every=100,
             failure_threshold=0.5,
         )
+        # [Blocker2] - compute_for_trade_date 不再内部 commit，caller flush 使行可见
+        await db_session.flush()
 
     assert result["snapshot_count"] == 2
     assert result["failed_count"] == 1
     assert result["trade_date"] == "2026-01-10"
+
+    # [Blocker2] - 成功行已落库（flush），失败行不写
+    rows = (
+        await db_session.execute(
+            select(StockFeatureSnapshot).where(
+                StockFeatureSnapshot.trade_date == date(2026, 1, 10),
+            )
+        )
+    ).scalars().all()
+    assert len(rows) == 2
+
+
+@pytest.mark.asyncio
+async def test_compute_for_trade_date_over_threshold_no_partial_after_rollback(
+    db_session: AsyncSession,
+) -> None:
+    """[Blocker2] 失败率超阈值时 compute_for_trade_date 抛错，caller rollback 后无部分 snapshots。
+
+    构造 40% 单股失败（5 只中 2 只失败），failure_threshold=0.3。
+    compute_for_trade_date 不内部 commit，caller rollback 清除所有已 flush 行。
+    """
+    from app.models.instrument import Instrument
+    from app.services.feature_snapshot_service import compute_for_trade_date
+
+    # 创建 5 个测试 instrument
+    inst_ids = []
+    for i in range(5):
+        inst = Instrument(
+            id=uuid.uuid4(),
+            symbol=f"HALF{i:03d}",
+            name=f"半成品{i}",
+            market="SH",
+            status="active",
+        )
+        db_session.add(inst)
+        inst_ids.append(inst.id)
+    await db_session.flush()
+
+    # mock compute：第 3、4 个失败（40%）
+    call_count = 0
+
+    async def mock_compute(session, instrument_id, trade_date, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count in (3, 4):  # 2 of 5 fail = 40%
+            raise ValueError("mock failure for 40% case")
+        return StockFeatureSnapshot(
+            instrument_id=instrument_id,
+            trade_date=trade_date,
+            primary_timeframe="1d",
+            secondary_timeframe="15m",
+            adj="qfq",
+            schema_version=1,
+            source_primary_bar_time=datetime(2026, 1, 10, 15, 0, tzinfo=_SHANGHAI_TZ),
+            source_secondary_bar_time=datetime(2026, 1, 10, 15, 0, tzinfo=_SHANGHAI_TZ),
+            structural_payload={},
+            temporal_payload={},
+            summary_payload={"_source": "feature_snapshot"},
+            degraded_reasons=[],
+        )
+
+    with patch(
+        "app.services.feature_snapshot_service.compute_feature_snapshot_for_date",
+        side_effect=mock_compute,
+    ):
+        with pytest.raises(RuntimeError, match="失败比例.*阈值"):
+            await compute_for_trade_date(
+                db_session,
+                date(2026, 1, 10),
+                inst_ids,
+                batch_size=10,
+                failure_threshold=0.3,
+            )
+        # [Blocker2] - caller 负责 rollback（compute_for_trade_date 不内部 commit）
+        await db_session.rollback()
+
+    # rollback 后 DB 不存在该 trade_date 的部分 snapshots
+    rows = (
+        await db_session.execute(
+            select(StockFeatureSnapshot).where(
+                StockFeatureSnapshot.trade_date == date(2026, 1, 10),
+            )
+        )
+    ).scalars().all()
+    assert len(rows) == 0
 
 
 @pytest.mark.asyncio
@@ -440,6 +561,5 @@ async def test_compute_for_trade_date_failure_threshold_raises(
                 date(2026, 1, 10),
                 inst_ids,
                 batch_size=10,
-                commit_every=100,
                 failure_threshold=0.3,
             )
