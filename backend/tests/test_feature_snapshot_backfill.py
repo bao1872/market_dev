@@ -16,7 +16,7 @@
 8. main: end=latest 解析、start>end 退出、--symbols 小样本
 9. multiprocessing:
    - --workers 参数解析（默认 1，自定义 N）
-   - _worker_process_instruments: per-instrument commit、resume 跳过、单股失败不阻塞
+   - _worker_process_instruments: per-date commit、resume 跳过、单股失败不阻塞
    - backfill_instrument_first_parallel: 创建/finish run records、scope 传播、空输入返回
 
 [instrument-first 事务边界]：
@@ -27,7 +27,7 @@
 
 [multiprocessing 事务边界]：
 - backfill_instrument_first_parallel 主进程创建/finish run records
-- _worker_process_instruments per-instrument commit（被 kill 不丢已完成，resume 可续）
+- _worker_process_instruments per-date commit（被 kill 不丢已完成，resume 可续）
 - 单 worker 失败不阻塞其他 workers
 - run scope 传播到 metadata_['scope']
 
@@ -1185,10 +1185,10 @@ def test_parse_args_workers_custom() -> None:
     assert args.workers == 4
 
 
-# ===== 16. _worker_process_instruments: per-instrument commit =====
+# ===== 16. _worker_process_instruments: per-date commit =====
 
 
-def test_worker_process_instruments_per_instrument_commit() -> None:
+def test_worker_process_instruments_per_date_commit() -> None:
     """_worker_process_instruments: per-date commit 全成功（resume 安全）。
 
     场景：2 instruments × 2 trade_dates。

@@ -33,14 +33,14 @@
 [multiprocessing 优化]（--workers > 1）：
     - 主进程创建 run records + 分发 instrument chunks
     - 每个 worker 独立 async engine + session
-    - per-instrument commit（被 kill 不丢已完成，resume 可续）
+    - per-date commit（被 kill 不丢已完成，resume 可续）
     - 单 worker 失败不阻塞其他
     - 预期 4-8x 提速（取决于 CPU 核数）
 
 [事务边界 + run gate]：
     - 单进程：backfill_instrument_first 不内部 commit，由 main 控制
     - 多进程：backfill_instrument_first_parallel 创建 run records 后 commit，
-      每个 worker per-instrument commit，主进程 finalize run records
+      每个 worker per-date commit，主进程 finalize run records
     - 失败比例超阈值的 trade_date 标 run.status='failed'（不抛 RuntimeError）
     - 单股失败不阻塞其他股票
     - watchlist 只读取 run.status='succeeded' + published_at IS NOT NULL + metadata_.scope='full' 的 snapshot
@@ -59,6 +59,7 @@ import logging
 import os
 import sys
 import uuid
+import warnings
 from datetime import date
 from typing import Any
 
@@ -684,11 +685,12 @@ async def backfill_instrument_first_parallel(
     """Multiprocessing 版 instrument-first 回补。
 
     [multiprocessing] - 使用 ProcessPoolExecutor 并行处理 instruments。
-    每个 worker 独立 DB session，per-instrument commit。
+    每个 worker 独立 DB session，per-date commit。
 
     事务边界：
     - run records 在主进程创建 + finalize
-    - 每个 worker 独立 commit per-instrument（resume 安全）
+    - 每个 worker per-date commit：upsert → db.commit() → success++（commit 成功后才计 success）
+    - 异常时 await db.rollback() + failed++，下一 trade_date 继续用干净事务（resume 安全）
     - 单 worker 失败不阻塞其他 workers
 
     Args:
@@ -785,7 +787,7 @@ async def backfill_instrument_first_parallel(
         td: {"success": 0, "failed": 0, "skipped": 0} for td in trade_dates
     }
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     with ProcessPoolExecutor(max_workers=workers) as executor:
         futures = []
@@ -1084,8 +1086,6 @@ def parse_args() -> argparse.Namespace:
     #    防止用户误设过大值导致进程调度抖动
     cpu_count = os.cpu_count() or 1
     if args.workers > cpu_count:
-        import warnings
-
         warnings.warn(
             f"--workers={args.workers} > cpu_count={cpu_count}，自动 cap 到 {cpu_count}",
             stacklevel=2,

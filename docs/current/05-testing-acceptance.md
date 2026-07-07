@@ -283,7 +283,7 @@ node --experimental-strip-types --test src/components/__tests__/dsaSourceAlignme
   - `backfill_instrument_first(scope='sample')` → `create_snapshot_run` 收到 `scope='sample'` kwarg + `finish_snapshot_run` 的 metadata 含 `'scope': 'sample'`，防止小样本 run 污染 watchlist SUCCEEDED。
 - **multiprocessing 测试（9 个新增，CHANGE-049）**：
   - `test_parse_args_workers_default_is_1` / `test_parse_args_workers_custom`：参数解析（默认 1，自定义 N）；
-  - `test_worker_process_instruments_per_instrument_commit`：per-date commit 全成功（2 instruments × 2 dates = 4 commits）；
+  - `test_worker_process_instruments_per_date_commit`：per-date commit 全成功（2 instruments × 2 dates = 4 commits）；
   - `test_worker_process_instruments_resume_skips_existing`：worker resume 跳过已存在行；
   - `test_worker_process_instruments_single_failure_doesnt_block`：load 失败 → failed + rollback，不阻塞其他 instrument；
   - `test_backfill_instrument_first_parallel_empty_inputs`：空输入返回；
