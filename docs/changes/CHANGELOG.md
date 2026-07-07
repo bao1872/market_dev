@@ -4,6 +4,12 @@
 
 ## 2026-07-07
 
+- CHANGE-20260707-046: 修复 pytdx_adapter 对 aware 1m start/end 的比较异常
+  - 根因：PR #35 后 `MarketDataAggregationService` 传入 aware `Asia/Shanghai` start/end，但 `pytdx_adapter.get_minute_bars` 内部 pytdx 数据 `datetime` 列为 naive，比较时触发 `Invalid comparison between dtype=datetime64[us] and Timestamp`
+  - 修复：`get_minute_bars` 过滤前将 aware start/end 按 `Asia/Shanghai` 解释后转为 naive
+  - 新增测试：`test_pytdx_adapter_minute_aware.py`（aware 过滤 + naive 兼容）
+  - 更新 `02-data-api-contracts.md`、`05-testing-acceptance.md`、`test-coverage-map.md`、ALIGN-037
+  - 后端 8/8 测试通过，ruff 零错误
 - CHANGE-20260707-045: 修复 MDAS live 1m 时区不一致导致 monitor 无事件
   - 根因：`MarketDataAggregationService` 构造 `live_start` 为 naive datetime、`live_end` 为 aware Asia/Shanghai datetime，传入 `pytdx_adapter.get_minute_bars` 后触发 `can't subtract offset-naive and offset-aware datetimes`
   - 修复：两处实时 1m 拉取统一使用 aware `Asia/Shanghai` `live_start`/`live_end`
