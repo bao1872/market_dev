@@ -7,7 +7,7 @@
 | 账户权限 | `users`, `roles`, `user_roles`, `plans`, `subscriptions`, `invite_codes`, `access_audit_logs` |
 | 股票行情 | `instruments`, `trading_calendar`, `bars_daily`, `bars_15min`, `bars_60min`, `bars_minute` |
 | 策略发布 | `strategy_definitions`, `strategy_versions`, `strategy_runs`, `strategy_run_items`, `strategy_results`, `strategy_result_metrics` |
-| 自选监控 | `user_watchlist_items`, `monitor_states`, `monitor_evaluations`, `strategy_events`, `event_recipients`, `stock_feature_snapshots` |
+| 自选监控 | `user_watchlist_items`, `monitor_states`, `monitor_evaluations`, `strategy_events`, `event_recipients`, `stock_feature_snapshots`, `stock_feature_snapshot_runs` |
 | 消息投递 | `notification_channels`, `notification_messages`, `outbox`, `message_deliveries`, `capture_jobs` |
 | 任务运行 | `scheduler_job_runs`, `job_run_events`, `worker_heartbeats` |
 
@@ -790,6 +790,8 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 
 `GET /api/v1/watchlist/monitor-status` 响应的 `metrics` 字段唯一来自 `stock_feature_snapshots.summary_payload`，不再走 `MonitorSnapshotService` 实时计算或 `MonitorState.payload` fallback。`MonitorEvaluation` 仅用于展示评估状态字段（`evaluation_status` / `retry_count` / `error_code` / `source_bar_time`），不作为 metrics 数据源。
 
+**Run gate（Phase 8 新增）**：`/watchlist/monitor-status` 只读取 `expected_snapshot_trade_date` 对应存在 `stock_feature_snapshot_runs.status='succeeded'`（且 `published_at` 非空）的 snapshot 行。run 状态为 `running` / `failed` / 不存在时，watchlist 不得读取该日期的 snapshot，应返回 `WAITING_SNAPSHOT` 或 `NO_SNAPSHOT`。
+
 **`calculation_status` 三态语义**：
 
 | 状态 | 触发条件 | metrics 内容 | `freshness_seconds` |
@@ -844,4 +846,49 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
   - `RuntimeError`（失败比例超阈值）→ rollback 半成品 → 标记 `failed`；
 - `/watchlist/monitor-status` 只读取已 commit 的 snapshot 行；失败日期不应有部分已 commit 行（half-baked）；
 - backfill 单日失败时该日所有半成品 rollback，不影响其他日期。
+
+### 13.7 `stock_feature_snapshot_runs` 表契约
+
+`stock_feature_snapshot_runs` 是 snapshot 计算 run 级别的成功标记表。`/watchlist/monitor-status` 只读取 `status='succeeded'`（且 `published_at` 非空）的 run 对应日期的 snapshot 行，避免读取半成品或失败日期的 snapshot。
+
+| 字段 | 类型 | 约束 | 语义 |
+|---|---|---|---|
+| `id` | UUID | PK, default `gen_random_uuid()` | run ID |
+| `trade_date` | DATE | NOT NULL | 业务交易日 |
+| `schema_version` | INT | NOT NULL | snapshot schema 版本（与 `stock_feature_snapshots.schema_version` 对齐） |
+| `primary_timeframe` | TEXT | NOT NULL, default `'1d'` | 主周期 |
+| `secondary_timeframe` | TEXT | NOT NULL, default `'15m'` | 次周期 |
+| `adj` | TEXT | NOT NULL, default `'qfq'` | 复权方式 |
+| `run_type` | TEXT | NOT NULL | `after_close` / `backfill` / `manual` |
+| `status` | TEXT | NOT NULL | `running` / `succeeded` / `failed` |
+| `expected_count` | INT | NULL | 预期 snapshot 数（active A 股数） |
+| `snapshot_count` | INT | NULL | 实际成功写入数 |
+| `failed_count` | INT | NULL | 失败数 |
+| `skipped_count` | INT | NULL | 跳过数（resume 场景） |
+| `failure_rate` | FLOAT | NULL | 失败率 = `failed_count / expected_count` |
+| `started_at` | TIMESTAMPTZ | NOT NULL, default `now()` | run 开始时间 |
+| `finished_at` | TIMESTAMPTZ | NULL | run 结束时间（succeeded/failed） |
+| `published_at` | TIMESTAMPTZ | NULL | 发布时间（仅 `status='succeeded'` 时写入） |
+| `metadata_` | JSONB | NOT NULL, default `'{}'` | 审计元数据（source / error / 等） |
+
+**唯一约束**：`uq_snapshot_runs_active_key (trade_date, schema_version, primary_timeframe, secondary_timeframe, adj, run_type) WHERE status = 'running'`（partial unique index，仅约束 running 状态，允许 failed run 与新 retry 并存）。
+
+**索引**：
+- `ix_snapshot_runs_trade_date (trade_date)`：按日查询。
+- `ix_snapshot_runs_status (status)`：按状态过滤。
+- `ix_snapshot_runs_schema_version (schema_version)`：按版本过滤。
+
+**Run lifecycle 规则**：
+
+| 阶段 | status | published_at | 说明 |
+|---|---|---|---|
+| 开始 | `running` | NULL | `create_snapshot_run` 幂等创建（已有 running 则返回已有） |
+| 成功 | `succeeded` | 非空 | `finish_snapshot_run(status='succeeded')` 写 `published_at = now()` |
+| 失败 | `failed` | NULL | `finish_snapshot_run(status='failed')` 不写 `published_at` |
+
+- `after_close` / `backfill` 开始时创建 `running` run（独立 session + commit），保证 run 记录持久化；
+- snapshot 计算在独立 session 中进行，失败时 session 自动 rollback 半成品行；
+- run finalization 在独立 session 中进行（`succeeded` / `failed`），保证 run 状态不受 snapshot rollback 影响；
+- `/watchlist/monitor-status` 通过 `_has_succeeded_snapshot_run` 判断 `expected_snapshot_trade_date` 是否有 `succeeded` run；
+- failed run 允许新 retry（partial unique index 仅约束 running）。
 

@@ -51,6 +51,9 @@ COPY app ./app
 COPY alembic.ini ./
 COPY alembic ./alembic
 
+# [回补] - 复制 scripts 目录，容器内可直接运行 python -m scripts.feature_snapshot_backfill
+COPY scripts ./scripts
+
 EXPOSE 8000
 
 # 启动 uvicorn ASGI 服务

@@ -44,6 +44,7 @@ published run 不可变。partial_failed 不得自动发布。
 | `strategy_events` | 稳定事件 |
 | `event_recipients` | 事件与有效用户收件人关系 |
 | `stock_feature_snapshots` | 盘后特征快照（结构/时序因子 + 前端列表用 summary）；唯一键 `(instrument_id, trade_date, primary_timeframe, secondary_timeframe, adj, schema_version)`；3 个 btree 索引；无 GIN 索引；`/watchlist/monitor-status` 的 metrics 唯一来源 |
+| `stock_feature_snapshot_runs` | snapshot 计算 run 级成功标记；唯一键 `(trade_date, schema_version, primary_timeframe, secondary_timeframe, adj, run_type) WHERE status='running'`（partial unique index）；3 个 btree 索引；watchlist 只读 `status='succeeded'` 的 run 对应日期 snapshot |
 
 ## 5. 消息、投递、截图
 

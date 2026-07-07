@@ -44,6 +44,8 @@ from app.repositories import strategy_result_repository
 from app.services.bars_scheduler_service import BarsSchedulerService
 from app.services.feature_snapshot_service import (
     compute_for_trade_date,
+    create_snapshot_run,
+    finish_snapshot_run,
     get_active_a_share_instruments,
 )
 from app.services.idempotency_service import acquire_job_run_lock
@@ -697,9 +699,20 @@ async def execute_after_close_run(
         # 生成特征快照供 /watchlist/monitor-status 读取，不再走实时 fallback。
         # snapshot 失败比例超过阈值时抛 RuntimeError，编排标记 failed。
         # 单股失败由 compute_for_trade_date 内部记录到 degraded_reasons，不阻塞其他股票。
+        #
+        # [Phase7] Run lifecycle：
+        # - 开始时创建 status='running' 的 StockFeatureSnapshotRun（独立 session + commit）
+        # - 成功时 finish_snapshot_run(status='succeeded') + 写 published_at
+        # - 失败时 finish_snapshot_run(status='failed') + 不写 published_at
+        # - watchlist 通过 _has_succeeded_snapshot_run 判断是否可读 snapshot
+        # - run 记录在独立 session 中提交，保证失败时 run.status='failed' 持久化
         if not skip_snapshot:
             async with AsyncSessionLocal() as db:
                 job_run = await db.get(SchedulerJobRun, job_run_id)
+                if job_run is None:
+                    raise RuntimeError(
+                        f"SchedulerJobRun not found: job_run_id={job_run_id}"
+                    )
                 await _update_orchestrator_status(
                     db=db,
                     job_run=job_run,
@@ -708,37 +721,89 @@ async def execute_after_close_run(
                 )
                 await db.commit()
 
+            # [Phase7] 创建 running run + commit（独立 session，避免 snapshot rollback 影响）
             async with AsyncSessionLocal() as db:
                 instrument_ids = await get_active_a_share_instruments(db)
-                try:
-                    snapshot_result = await compute_for_trade_date(
-                        db, trade_date, instrument_ids,
-                    )
-                except RuntimeError as snapshot_exc:
-                    # [Blocker2] 失败比例超阈值：显式 rollback 半成品行，
-                    # 防止 watchlist 读取失败日期的部分 snapshot。
-                    # 异常向上传播触发 orchestrator FAILED 状态写入，
-                    # publishing 步骤被跳过。
-                    await db.rollback()
-                    logger.error(
-                        "[AfterClose] feature_snapshot 失败比例超阈值，"
-                        "已 rollback 半成品: trade_date=%s, error=%s",
-                        trade_date, snapshot_exc,
-                    )
-                    raise
+                snapshot_run = await create_snapshot_run(
+                    db, trade_date, "after_close",
+                    expected_count=len(instrument_ids),
+                    metadata={"source": "after_close_orchestrator"},
+                )
                 await db.commit()
+                snapshot_run_id = snapshot_run.id
+                # instrument_ids 复用，避免下个 session 重复查询
+                cached_instrument_ids = instrument_ids
+
+            # 计算 snapshots（独立 session）
+            snapshot_result: dict[str, Any] | None = None
+            snapshot_error: Exception | None = None
+            try:
+                async with AsyncSessionLocal() as db:
+                    snapshot_result = await compute_for_trade_date(
+                        db, trade_date, cached_instrument_ids,
+                    )
+                    await db.commit()
+            except RuntimeError as snapshot_exc:
+                # [Blocker2] 失败比例超阈值：snapshot session 已自动 rollback 半成品行。
+                # 异常暂存，先 finalize run 为 failed，再向上传播触发 orchestrator FAILED。
+                snapshot_error = snapshot_exc
+                logger.error(
+                    "[AfterClose] feature_snapshot 失败比例超阈值，"
+                    "snapshot session 已 rollback: trade_date=%s, error=%s",
+                    trade_date, snapshot_exc,
+                )
+            except Exception as snapshot_exc:
+                # 其他异常同样暂存，先 finalize run 为 failed
+                snapshot_error = snapshot_exc
+                logger.error(
+                    "[AfterClose] feature_snapshot 异常: trade_date=%s, error=%s",
+                    trade_date, snapshot_exc, exc_info=True,
+                )
+
+            # [Phase7] Finalize run（独立 session，保证 run 状态持久化）
+            async with AsyncSessionLocal() as db:
+                from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+                run_to_finish = await db.get(StockFeatureSnapshotRun, snapshot_run_id)
+                if run_to_finish is not None:
+                    if snapshot_error is not None:
+                        await finish_snapshot_run(
+                            db, run_to_finish,
+                            status="failed",
+                            metadata={
+                                "source": "after_close_orchestrator",
+                                "error": str(snapshot_error),
+                            },
+                        )
+                    else:
+                        await finish_snapshot_run(
+                            db, run_to_finish,
+                            status="succeeded",
+                            snapshot_count=snapshot_result.get("snapshot_count", 0) if snapshot_result else 0,
+                            failed_count=snapshot_result.get("failed_count", 0) if snapshot_result else 0,
+                            expected_count=len(cached_instrument_ids),
+                            metadata={"source": "after_close_orchestrator"},
+                        )
+                    await db.commit()
+
+            # 失败时向上传播 RuntimeError，触发 orchestrator FAILED 状态写入，跳过 publishing
+            if snapshot_error is not None:
+                raise snapshot_error
 
             logger.info(
                 "[AfterClose] 特征快照生成完成: trade_date=%s, "
                 "snapshot_count=%s, failed_count=%s",
                 trade_date,
-                snapshot_result.get("snapshot_count"),
-                snapshot_result.get("failed_count"),
+                snapshot_result.get("snapshot_count") if snapshot_result else 0,
+                snapshot_result.get("failed_count") if snapshot_result else 0,
             )
 
             # [Phase5] - feature_snapshot 完成，更新心跳 + 检查点
             async with AsyncSessionLocal() as db:
                 job_run = await db.get(SchedulerJobRun, job_run_id)
+                if job_run is None:
+                    raise RuntimeError(
+                        f"SchedulerJobRun not found: job_run_id={job_run_id}"
+                    )
                 await _update_heartbeat_and_step(
                     db, job_run, AfterCloseRunStatus.FEATURE_SNAPSHOT.value, worker_id,
                 )

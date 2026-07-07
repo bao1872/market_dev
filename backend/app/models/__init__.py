@@ -42,6 +42,7 @@ from app.models.outbox import Outbox
 from app.models.plan import Plan
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
+from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
 from app.models.subscription import Subscription
 from app.models.stock_memo import StockMemo
 from app.models.strategy import StrategyDefinition, StrategyVersion
@@ -80,6 +81,7 @@ __all__ = [
     "Role",
     "SchedulerJobRun",
     "StockFeatureSnapshot",
+    "StockFeatureSnapshotRun",
     "StockMemo",
     "StrategyEventRecipient",
     "StrategyDefinition",

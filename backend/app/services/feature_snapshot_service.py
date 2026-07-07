@@ -5,6 +5,7 @@
 2. upsert_snapshot: 按唯一键幂等写入。
 3. compute_for_trade_date: 批量计算多个 instrument 的快照。
 4. build_summary_payload: 从完整 payload 抽取前端列表用摘要。
+5. create_snapshot_run / finish_snapshot_run: run 级别生命周期管理（publish gate）。
 
 设计原则：
 - 复用 structural_factor_service._compute_all_factors_for_bars 和
@@ -13,6 +14,8 @@
 - point-in-time：1d bars 只用 <= trade_date，15m bars 只用 <= trade_date 当日。
 - 单股失败写 degraded_reasons，不抛全局失败。
 - 不建 EAV 表，不给 full payload 加 GIN 索引。
+- run 级 publish gate：watchlist 只读取 succeeded run 对应的 snapshot 行，
+  failed/running run 对应的 snapshot 即使存在也不得被读取。
 
 用法：
     from app.services.feature_snapshot_service import compute_feature_snapshot_for_date
@@ -29,7 +32,7 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Sequence
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -39,6 +42,12 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
+from app.models.stock_feature_snapshot_run import (
+    STATUS_FAILED,
+    STATUS_RUNNING,
+    STATUS_SUCCEEDED,
+    StockFeatureSnapshotRun,
+)
 from app.services.structural_factor_service import (
     _compute_all_factors_for_bars,
     _compute_relation,
@@ -573,6 +582,151 @@ async def compute_for_trade_date(
         "schema_version": _SCHEMA_VERSION,
         "trade_date": trade_date.isoformat(),
     }
+
+
+# =============================================================================
+# Run 生命周期管理：publish gate
+# =============================================================================
+
+
+async def create_snapshot_run(
+    session: AsyncSession,
+    trade_date: date,
+    run_type: str,
+    *,
+    schema_version: int = _SCHEMA_VERSION,
+    primary_timeframe: str = "1d",
+    secondary_timeframe: str = "15m",
+    adj: str = "qfq",
+    expected_count: int | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> StockFeatureSnapshotRun:
+    """创建或复用 running 状态的 snapshot run 记录。
+
+    幂等设计：
+    - 如果已存在 status='running' 的同 key run（部分唯一索引约束），返回该记录。
+    - 否则创建新 running run。
+    - 失败/已完成的 run 不影响新 run 创建（部分唯一索引仅约束 status='running'）。
+
+    Args:
+        session: 异步 DB 会话
+        trade_date: 业务交易日
+        run_type: 触发方式（after_close/backfill/manual）
+        schema_version: 快照 schema 版本（默认 _SCHEMA_VERSION）
+        primary_timeframe: 主周期（默认 1d）
+        secondary_timeframe: 次周期（默认 15m）
+        adj: 复权方式（默认 qfx）
+        expected_count: 预期快照数（active A 股总数）
+        metadata: 额外元数据（如 failure_threshold、source）
+
+    Returns:
+        StockFeatureSnapshotRun ORM 对象（status='running'）
+    """
+    # 查找已存在的 running run（幂等复用）
+    stmt = select(StockFeatureSnapshotRun).where(
+        StockFeatureSnapshotRun.trade_date == trade_date,
+        StockFeatureSnapshotRun.schema_version == schema_version,
+        StockFeatureSnapshotRun.primary_timeframe == primary_timeframe,
+        StockFeatureSnapshotRun.secondary_timeframe == secondary_timeframe,
+        StockFeatureSnapshotRun.adj == adj,
+        StockFeatureSnapshotRun.run_type == run_type,
+        StockFeatureSnapshotRun.status == STATUS_RUNNING,
+    )
+    existing = (await session.execute(stmt)).scalar_one_or_none()
+    if existing is not None:
+        logger.info(
+            "复用已存在 running snapshot run: trade_date=%s run_type=%s run_id=%s",
+            trade_date, run_type, existing.id,
+        )
+        return existing
+
+    # 创建新 running run
+    run = StockFeatureSnapshotRun(
+        trade_date=trade_date,
+        schema_version=schema_version,
+        primary_timeframe=primary_timeframe,
+        secondary_timeframe=secondary_timeframe,
+        adj=adj,
+        run_type=run_type,
+        status=STATUS_RUNNING,
+        expected_count=expected_count,
+        started_at=datetime.now(UTC),
+        metadata_=metadata,
+    )
+    session.add(run)
+    await session.flush()
+    logger.info(
+        "创建 snapshot run: trade_date=%s run_type=%s run_id=%s expected_count=%s",
+        trade_date, run_type, run.id, expected_count,
+    )
+    return run
+
+
+async def finish_snapshot_run(
+    session: AsyncSession,
+    run: StockFeatureSnapshotRun,
+    *,
+    status: str,
+    snapshot_count: int | None = None,
+    failed_count: int | None = None,
+    skipped_count: int | None = None,
+    expected_count: int | None = None,
+    failure_rate: float | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> StockFeatureSnapshotRun:
+    """更新 run 状态为 succeeded/failed，写入统计与时间戳。
+
+    - succeeded: 写 published_at（watchlist 据此判断是否可读 snapshot）
+    - failed: 不写 published_at（watchlist 不读取该 run 的 snapshot）
+    - 两者都写 finished_at
+
+    metadata 覆盖语义：finish 时传入的 metadata 完全替换 create 时的 metadata。
+
+    Args:
+        session: 异步 DB 会话
+        run: 待更新的 StockFeatureSnapshotRun 对象
+        status: 目标状态（succeeded/failed）
+        snapshot_count: 实际写入快照数
+        failed_count: 失败股票数
+        skipped_count: 跳过股票数
+        expected_count: 预期快照数（覆盖 create 时的值）
+        failure_rate: 失败率 0.0-1.0
+        metadata: 额外元数据（覆盖 create 时的 metadata）
+
+    Returns:
+        更新后的 StockFeatureSnapshotRun ORM 对象
+    """
+    if status not in (STATUS_SUCCEEDED, STATUS_FAILED):
+        raise ValueError(
+            f"finish_snapshot_run 仅接受 status='{STATUS_SUCCEEDED}' 或 '{STATUS_FAILED}'，"
+            f"实际='{status}'"
+        )
+
+    now = datetime.now(UTC)
+    run.status = status
+    run.finished_at = now
+    if snapshot_count is not None:
+        run.snapshot_count = snapshot_count
+    if failed_count is not None:
+        run.failed_count = failed_count
+    if skipped_count is not None:
+        run.skipped_count = skipped_count
+    if expected_count is not None:
+        run.expected_count = expected_count
+    if failure_rate is not None:
+        run.failure_rate = failure_rate
+    if metadata is not None:
+        run.metadata_ = metadata
+    # [RunGate] - succeeded 时写 published_at，failed 时保持 None
+    if status == STATUS_SUCCEEDED:
+        run.published_at = now
+
+    await session.flush()
+    logger.info(
+        "完成 snapshot run: run_id=%s status=%s snapshot_count=%s failed_count=%s",
+        run.id, status, snapshot_count, failed_count,
+    )
+    return run
 
 
 # =============================================================================

@@ -79,7 +79,12 @@ queued → refreshing_daily → checking_coverage → creating_dsa
   - 成功（`failure_rate <= threshold`）→ `db.commit()`，进入 `publishing`；
   - `RuntimeError`（超阈值）→ 显式 `db.rollback()` 丢弃半成品行 → 异常向上传播 → orchestrator 写 `failed` 事件 → **不进入 publishing**；
 - `feature_snapshot` 失败时 `last_completed_step` 不推进，重试从 `quality_gate` 之后重新进入；
-- 完成后更新心跳与 `last_completed_step='feature_snapshot'`。
+- 完成后更新心跳与 `last_completed_step='feature_snapshot'`；
+- **Run lifecycle（Phase 8 新增）**：feature_snapshot 步骤前后写 `stock_feature_snapshot_runs`：
+  - 开始时 `create_snapshot_run(trade_date, 'after_close')` 创建 `running` run（独立 session + commit）；
+  - 成功时 `finish_snapshot_run(status='succeeded')` 写 `published_at`（独立 session + commit）；
+  - 失败时 `finish_snapshot_run(status='failed')` 不写 `published_at`（独立 session + commit），再向上传播异常触发 orchestrator FAILED；
+  - run 记录在独立 session 中提交，保证 snapshot session rollback 不影响 run 状态持久化。
 
 断点恢复路径（`last_completed_step` → 已完成步骤集合）：
 
@@ -99,6 +104,17 @@ queued → refreshing_daily → checking_coverage → creating_dsa
 
 `backend/scripts/feature_snapshot_backfill.py` 为历史交易日批量生成 `stock_feature_snapshots`。**核心计算逻辑在 `backend/app/services/feature_snapshot_service.py`，脚本只做 CLI 参数解析、dry-run 标记、resume 跳过、批量调用 service。**
 
+**Instrument-first 架构（Phase 8 新增）**：脚本从 date-first 重构为 instrument-first，避免为每个 instrument/date 重复查询 bars：
+
+```
+for instrument_batch in active instruments:
+    一次性拉该 batch 每只股票从 start 前足够 warmup 到 end 的 1d/15m bars
+    for trade_date in trade_dates:
+        在内存 slice 到 trade_date
+        compute_feature_snapshot_for_date(primary_bars=..., secondary_bars=...)
+        upsert
+```
+
 调用方式：
 
 ```bash
@@ -112,32 +128,38 @@ CLI 参数：
 |---|---|---|
 | `--start` | 必填 | 起始日期 YYYY-MM-DD |
 | `--end` | `latest` | 结束日期或 `latest`（解析为 `bars_daily` 表最新 trade_date） |
-| `--batch-size` | 20 | 每批 instrument 数 |
-| `--resume` | False | **真正跳过**已存在 snapshot 的 instrument（按完整唯一键过滤，不重新计算） |
+| `--batch-size` | 20 | 每批 instrument 数（保守内存） |
+| `--resume` | False | 跳过已存在 snapshot 且所属日期有 `succeeded` run 的行 |
 | `--dry-run` | False | 只打印计划与 missing 统计，不执行写入 |
-| `--failure-threshold` | 0.3 | 单日失败比例阈值，超过则该日 rollback |
+| `--failure-threshold` | 0.3 | 单日失败比例阈值，超过则该日 run 标 `failed` |
+| `--symbols` | None | 只处理指定股票代码（逗号分隔，如 `000100,603303`），用于小样本验证 |
+| `--limit-instruments` | None | 只处理前 N 只股票（整数），用于小样本验证 |
 
-**事务边界（每个交易日独立事务）**：
-- 成功（`failure_rate <= threshold`）→ `db.commit()`；
-- `RuntimeError`（超阈值）或其他异常 → `db.rollback()` 丢弃半成品 → 继续下一日；
-- 单日失败不阻断其他日期；失败日期不留半成品行。
+**Instrument-first 优势**：
+- 每只股票每周期（1d / 15m）只调用一次 `load_instrument_bars`，不为每个 trade_date 重复查询；
+- bars 在内存中按 `trade_date` slice（`_truncate_bars_to_trade_date`），复用 `compute_feature_snapshot_for_date` 已有的 `primary_bars` / `secondary_bars` 入参；
+- 不并发，先保证稳定和低内存。
 
-**`--resume` 真正跳过**：
-- `get_existing_instrument_ids(db, trade_date, primary_timeframe, secondary_timeframe, adj, schema_version)` 查询已存在 instrument_id 集合（按完整唯一键）；
-- 从 active instrument 列表中过滤掉已存在；
-- 只对 missing instrument 调用 `compute_for_trade_date`；
-- **不**为已存在 row 重新计算（旧实现 "仍会 upsert 覆盖" 已废弃）。
+**事务边界（单 session，main 控制 commit/rollback）**：
+- `backfill_instrument_first` 不内部 commit，由 `main` 在结束时统一 commit；
+- 失败比例超阈值的 trade_date 标 run.status='failed'（不抛 RuntimeError，不阻断其他日期）；
+- 单股失败不阻断其他股票。
+
+**Run gate（Phase 8 新增）**：
+- 每个 trade_date 开始时创建 `running` run（`run_type='backfill'`）；
+- 成功时 `finish_snapshot_run(status='succeeded')` 写 `published_at`；
+- 失败时 `finish_snapshot_run(status='failed')` 不写 `published_at`；
+- `--resume` 跳过已存在 snapshot 且所属日期有 `succeeded` run 的行（双重过滤）。
 
 **`--dry-run` 输出**：
-- 每个 trade_date 的 active instruments、missing instruments、skipped_existing；
-- 汇总：trade_dates 数量、active instruments、missing_snapshots（估计 rows）；
+- trade_dates 列表、active instruments、missing rows、预计 batch 数；
 - 不写库。
 
-**[Known Gap] 全量 instrument-first 优化未实现**：
-- 当前仍是 date-first：每个交易日遍历全市场，每只股票重复 fetch 1d/15m bars；
-- 全量回补 2026-01-01 到当前会非常重；
-- **禁止全量生产 backfill**，仅用于小范围 resume / dry-run；
-- 全量 instrument-first 优化（按 instrument batch 获取 bars，内存中按 trade_date slice）拆下一 PR。
+**生产小样本验证流程**：
+1. `--dry-run` 查看 missing rows 和预计批次数；
+2. `--symbols 000100,603303` 或 `--limit-instruments 20` 跑最近 1 个交易日；
+3. 验证 `stock_feature_snapshot_runs.status='succeeded'`、snapshot row count、`/watchlist/monitor-status` 返回 SUCCEEDED；
+4. 禁止直接全量回补，需小样本验证后再逐步扩大。
 
 约束：
 - 不修改 DSA/BB/swing/temporal 数学公式；
