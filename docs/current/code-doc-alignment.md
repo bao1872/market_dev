@@ -17,7 +17,6 @@
 | ALIGN-034 | admin monitor 资格修复待生产验证 | 代码已实现 `filter_monitor_eligible_recipients`/`is_user_eligible_for_monitor`，monitor_batch/event_recipient/outbox_relay 三处已切到监控资格过滤；测试覆盖 active admin、active member+subscription、disabled admin、无订阅普通用户。生产环境尚未重新 build/restart 验证真实监控 universe 与投递链路。 | 部署后检查 monitor_batch universe 包含 admin 自选股，monitor 日志无 admin 被过滤，outbox/delivery 为 admin 生成 MessageDelivery | P1 |
 | ALIGN-035 | quote 可信化与 pytdx 连接保护待生产验证 | 代码已实现 QuoteResponse 可信字段、午休统一口径、Redis 短缓存、pytdx 单例+线程锁；测试与本地 ASGI 验证通过。生产环境尚未验证真实 pytdx 连接在交易时段的成功/fallback 行为、断线重连、以及容器日志的可观测性。 | 部署后在交易时段 curl /quote，确认 pytdx 成功/降级字段正确，日志可见区分日志，页面状态徽章非固定“实时行情” | P1 |
 | ALIGN-036 | delivery_worker monitor 资格修复待生产验证 | 代码已实现 `MONITOR_SOURCE_TYPES`（`app/constants/monitor_source_types.py` 单点真源）与 `is_user_eligible_for_monitor` 在 `delivery_worker.py` 投递前复核；`outbox_relay.py` 与 `delivery_worker.py` 共享同一 source_type 集合；测试覆盖 active admin/active member/disabled admin/plain user。生产环境尚未验证真实 monitor_event 能生成 MessageDelivery 并实际投递。 | 部署后检查 monitor_event 来源的 MessageDelivery 为 active admin 与 active member 生成，disabled admin/plain user 被标记 dead/USER_INELIGIBLE | P1 |
-| ALIGN-037 | 1d partial daily bar 与 live 1m monitor 待生产验证 | 代码已实现 `MarketDataAggregationService` 交易时段合成 partial daily bar、`monitor_batch_service` 使用 live 1m 输入；测试覆盖交易/非交易场景。生产诊断已确认 2026-07-07 盘中 `MarketDataAggregationService` 构造的 `live_start` 为 naive datetime、`live_end` 为 aware Asia/Shanghai datetime，传入 `pytdx_adapter.get_minute_bars` 后触发 `can't subtract offset-naive and offset-aware datetimes`，导致 worker-monitor 全天无法获得 1m 数据、无 monitor_evaluations/strategy_events/通知。PR #35 修复后部署验证，发现 `pytdx_adapter.get_minute_bars` 内部将拉取到的 1m 数据 `datetime` 列显式 `tz_localize(None)`，但 aware 输入未同步转为 naive，导致比较时抛出 `Invalid comparison between dtype=datetime64[us] and Timestamp`。新增 `fix/pytdx-adapter-aware-minute-comparison` 修复并重新部署验证。 | 部署后交易时段 curl `/instruments/{id}/bars?timeframe=1d`，确认最后一根为当日 partial bar；查看 monitor worker 日志包含 `minute_last_bar_time` 与 `minute_is_partial`，且无 offset-naive/offset-aware 或 datetime64/Timestamp 比较异常 | P1 |
 
 ## CLOSED 摘要
 
@@ -33,6 +32,7 @@
 | ALIGN-023 | worker-watchdog 生产服务已部署(67105c2)，38 条 stale running 已自动清理为 stopped，stale running=0 |
 | ALIGN-024 | docs v2 结构已通过 PR #5 合并落库（cafbdc4），旧 00-18 归档，check 已适配 |
 | ALIGN-032 | 趋势选股页全量 universe 展示已生产验证通过。PR #15 部署后 run_id=f0c15e1c: source_total=5293, filtered_total=5293, succeeded 行正确显示 35 个 DSA 指标，skipped 行显示股票但指标为空。修复 commit: cc025e0 (JOIN by run_id+instrument_id) |
+| ALIGN-037 | 1d partial daily bar 与 live 1m monitor 已生产验证通过。修复分两步：PR #35 `a3fb630` 统一 `MarketDataAggregationService` 的 `live_start`/`live_end` 为 Asia/Shanghai aware datetime；PR #36 `12c8e52` 让 `pytdx_adapter.get_minute_bars` 在过滤前将 aware start/end 按 Asia/Shanghai 转为 naive，避免与 `datetime64[us]` 列比较异常。部署后 worker-monitor 日志无 offset-naive/offset-aware 或 datetime64/Timestamp 比较异常，`monitor_evaluations`/`monitor_states` 正常更新，`/bars?timeframe=1d&include_realtime=true` 返回 `data_source=hybrid`、`is_partial=true`、`last_live_bar_time` 非空。详见 CHANGE-20260707-045、CHANGE-20260707-046 |
 
 ## 关闭要求
 
