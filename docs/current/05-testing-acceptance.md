@@ -262,8 +262,8 @@ node --experimental-strip-types --test src/components/__tests__/dsaSourceAlignme
 - `compute_for_trade_date` 单股失败不阻断其他股票，失败比例超过 `failure_threshold`（默认 0.3）抛 `RuntimeError`；
 - **[half-baked rollback] `compute_for_trade_date` 不内部 commit**：超阈值抛 `RuntimeError` 后 caller rollback，DB 中不应残留该 trade_date 的部分 snapshot 行。
 
-后端 backfill 脚本回归（`tests/test_feature_snapshot_backfill.py`，25 个用例）：
-- `parse_args` 默认值：`end='latest'`、`batch_size=20`、`failure_threshold=0.3`、`resume=False`、`dry_run=False`、`symbols=None`、`limit_instruments=None`；自定义值正确解析；缺失 `--start` 报 `SystemExit`；
+后端 backfill 脚本回归（`tests/test_feature_snapshot_backfill.py`，42 个用例，含 multiprocessing + [Blocker Fix] 事务/统计修正）：
+- `parse_args` 默认值：`end='latest'`、`batch_size=20`、`failure_threshold=0.3`、`resume=False`、`dry_run=False`、`symbols=None`、`limit_instruments=None`、`workers=1`；自定义值正确解析；缺失 `--start` 报 `SystemExit`；
 - `get_trade_dates_from_bars` 返回升序 trade_dates；空表返回空列表；
 - `get_latest_bar_date` 返回 `bars_daily.trade_date` 最大值；空表返回 `None`；
 - **`get_existing_instrument_ids`** 返回某日已存在 snapshot 的 instrument_id 集合，按完整唯一键 `(instrument_id, trade_date, primary_timeframe, secondary_timeframe, adj, schema_version)` 过滤；按 `schema_version` 严格过滤；
@@ -281,6 +281,27 @@ node --experimental-strip-types --test src/components/__tests__/dsaSourceAlignme
   - `_resolve_run_scope(symbols=None, limit_instruments=20)` 返回 `'sample'`；
   - `_resolve_run_scope(symbols=None, limit_instruments=None)` 返回 `'full'`；
   - `backfill_instrument_first(scope='sample')` → `create_snapshot_run` 收到 `scope='sample'` kwarg + `finish_snapshot_run` 的 metadata 含 `'scope': 'sample'`，防止小样本 run 污染 watchlist SUCCEEDED。
+- **multiprocessing 测试（9 个新增，CHANGE-049）**：
+  - `test_parse_args_workers_default_is_1` / `test_parse_args_workers_custom`：参数解析（默认 1，自定义 N）；
+  - `test_worker_process_instruments_per_date_commit`：per-date commit 全成功（2 instruments × 2 dates = 4 commits）；
+  - `test_worker_process_instruments_resume_skips_existing`：worker resume 跳过已存在行；
+  - `test_worker_process_instruments_single_failure_doesnt_block`：load 失败 → failed + rollback，不阻塞其他 instrument；
+  - `test_backfill_instrument_first_parallel_empty_inputs`：空输入返回；
+  - `test_backfill_instrument_first_parallel_creates_and_finalizes_run`：主进程创建 + finish succeeded run；
+  - `test_backfill_instrument_first_parallel_high_failure_marks_failed`：高失败率 → run.status='failed'；
+  - `test_backfill_instrument_first_parallel_propagates_scope`：scope='sample' 传播到 create/finish metadata。
+- **multiprocessing Blocker Fix 测试（8 个新增，CHANGE-049 v2）**：
+  - `test_backfill_parallel_worker_exception_counts_as_failed`：worker future 抛 `RuntimeError` → run.status='failed' + chunk 内每个 instrument × 每个 trade_date 计入 `failed_count`，不能 finalized 为 `succeeded`；
+  - `test_worker_commit_failure_doesnt_count_as_success`：`db.commit()` 抛异常 → `success=0`、`failed=1`、`rollbacks=1`（DB 写入与 stats 严格一致，不允许 commit 失败仍计 success）；
+  - `test_worker_upsert_exception_rollback_continues`：第一个 date upsert 抛异常 → `rollback + failed++`，第二个 date 仍可继续成功 `commit + success++`，stats 正确（per-date 独立事务）；
+  - `test_worker_pool_config_size_1_overflow_0`：mock `create_async_engine` 断言 `pool_size=1, max_overflow=0, pool_pre_ping=True`（避免 4 workers × 15 = 60 连接打满 PG）；
+  - `test_parse_args_workers_zero_rejected`：`--workers 0` → `SystemExit`（argparse error）；
+  - `test_parse_args_workers_negative_rejected`：`--workers -1` → `SystemExit`（argparse error）；
+  - `test_parse_args_workers_cap_to_cpu_count`：`--workers > cpu_count` → `warnings.warn()` + 自动 cap；
+  - `test_worker_per_date_commit_all_succeed`：回归 per-date commit 路径，2 instruments × 2 dates = 4 commits 全部 success。
+- **multiprocessing Blocker Fix 非回归测试（已有，未修改）**：
+  - sample scope 仍不污染 watchlist（`test_backfill_instrument_first_parallel_propagates_scope`）；
+  - full scope gate 不回归（`test_backfill_instrument_first_parallel_creates_and_finalizes_run`）。
 
 API 契约回归（`tests/test_watchlist_monitor_status_snapshot.py`，14 个用例）：
 - `SUCCEEDED`：交易日已收盘且 snapshot 存在，`calculation_status='SUCCEEDED'`，`metrics` 来自 `summary_payload` 且 `_source='feature_snapshot'`，`freshness_seconds` 为整数；
