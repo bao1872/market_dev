@@ -132,8 +132,8 @@ CLI 参数：
 | `--resume` | False | 跳过已存在 snapshot 且所属日期有 `succeeded` run 的行 |
 | `--dry-run` | False | 只打印计划与 missing 统计，不执行写入 |
 | `--failure-threshold` | 0.3 | 单日失败比例阈值，超过则该日 run 标 `failed` |
-| `--symbols` | None | 只处理指定股票代码（逗号分隔，如 `000100,603303`），用于小样本验证 |
-| `--limit-instruments` | None | 只处理前 N 只股票（整数），用于小样本验证 |
+| `--symbols` | None | 只处理指定股票代码（逗号分隔，如 `000100,603303`），用于小样本验证；触发 `scope='sample'` |
+| `--limit-instruments` | None | 只处理前 N 只股票（整数），用于小样本验证；触发 `scope='sample'` |
 
 **Instrument-first 优势**：
 - 每只股票每周期（1d / 15m）只调用一次 `load_instrument_bars`，不为每个 trade_date 重复查询；
@@ -145,11 +145,17 @@ CLI 参数：
 - 失败比例超阈值的 trade_date 标 run.status='failed'（不抛 RuntimeError，不阻断其他日期）；
 - 单股失败不阻断其他股票。
 
-**Run gate（Phase 8 新增）**：
+**Run gate（Phase 8 新增，[Blocker Fix] 增加 scope 区分）**：
 - 每个 trade_date 开始时创建 `running` run（`run_type='backfill'`）；
-- 成功时 `finish_snapshot_run(status='succeeded')` 写 `published_at`；
-- 失败时 `finish_snapshot_run(status='failed')` 不写 `published_at`；
-- `--resume` 跳过已存在 snapshot 且所属日期有 `succeeded` run 的行（双重过滤）。
+- 成功时 `finish_snapshot_run(status='succeeded', metadata={'scope': scope})` 写 `published_at`；
+- 失败时 `finish_snapshot_run(status='failed', metadata={'scope': scope})` 不写 `published_at`；
+- `--resume` 跳过已存在 snapshot 且所属日期有 `succeeded` run 的行（双重过滤）；
+- **[Blocker Fix] scope 区分 full / sample**：
+  - `_resolve_run_scope(symbols, limit_instruments)` 决定 scope：任一过滤启用 → `sample`，都未启用 → `full`；
+  - 普通 backfill（不带 `--symbols`/`--limit-instruments`）→ `metadata_.scope='full'`（watchlist 可读）；
+  - 小样本 backfill（带 `--symbols` 或 `--limit-instruments`）→ `metadata_.scope='sample'`（watchlist 不可读，即使 succeeded + published_at 非空）；
+  - `scope` 同时传入 `create_snapshot_run(scope=...)` 和 `finish_snapshot_run(metadata={'scope': ...})`，因 `finish_snapshot_run` 的 metadata 完全替换 create 时的 metadata；
+  - `--dry-run` 不创建 run 记录。
 
 **`--dry-run` 输出**：
 - trade_dates 列表、active instruments、missing rows、预计 batch 数；
@@ -158,8 +164,9 @@ CLI 参数：
 **生产小样本验证流程**：
 1. `--dry-run` 查看 missing rows 和预计批次数；
 2. `--symbols 000100,603303` 或 `--limit-instruments 20` 跑最近 1 个交易日；
-3. 验证 `stock_feature_snapshot_runs.status='succeeded'`、snapshot row count、`/watchlist/monitor-status` 返回 SUCCEEDED；
-4. 禁止直接全量回补，需小样本验证后再逐步扩大。
+3. 验证 `stock_feature_snapshot_runs.status='succeeded'`、`metadata_.scope='sample'`、snapshot row count；
+4. **[Blocker Fix] 小样本 run 不得发布到 watchlist**：因 `scope='sample'`，`/watchlist/monitor-status` 不读取该日 snapshot，`calculation_status` 保持 `WAITING_SNAPSHOT` / `NO_SNAPSHOT`，避免污染生产 watchlist SUCCEEDED 状态；
+5. 禁止直接全量回补，需小样本验证后再逐步扩大。
 
 约束：
 - 不修改 DSA/BB/swing/temporal 数学公式；

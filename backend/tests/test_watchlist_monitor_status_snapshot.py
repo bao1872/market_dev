@@ -145,7 +145,11 @@ def _make_snapshot_record(instrument_id: uuid.UUID, trade_date) -> StockFeatureS
 
 
 def _make_succeeded_run(trade_date, run_type: str = "after_close") -> StockFeatureSnapshotRun:
-    """构造一个 status='succeeded' 的 StockFeatureSnapshotRun 记录（已 published）。"""
+    """构造一个 status='succeeded' 的 StockFeatureSnapshotRun 记录（已 published）。
+
+    [Blocker Fix] 默认带 metadata_['scope']='full'，匹配 watchlist gate 严格检查。
+    sample scope 场景由具体测试用例覆盖。
+    """
     now = datetime.now(UTC)
     return StockFeatureSnapshotRun(
         trade_date=trade_date,
@@ -163,6 +167,7 @@ def _make_succeeded_run(trade_date, run_type: str = "after_close") -> StockFeatu
         started_at=now,
         finished_at=now,
         published_at=now,
+        metadata_={"scope": "full"},
     )
 
 
@@ -672,5 +677,200 @@ async def test_monitor_status_no_run_blocks_snapshot_read(
     # 无 run → 不得返回 SUCCEEDED
     assert item["calculation_status"] != "SUCCEEDED", (
         f"无 run 记录时不得返回 SUCCEEDED，实际: {item['calculation_status']}"
+    )
+    assert item["metrics"] == {}
+
+
+# ===== Blocker Fix: published_at + scope 校验 =====
+
+
+@pytest.mark.asyncio
+async def test_monitor_status_succeeded_run_null_published_at_blocks_read(
+    db_session, snapshot_user, client
+):
+    """[Blocker] succeeded run 但 published_at=None → watchlist 不得读取 snapshot。
+
+    场景：run.status='succeeded' 但 published_at 未写入（异常状态）。
+    期望：calculation_status != 'SUCCEEDED'，metrics 为空。
+    """
+    user, instrument = snapshot_user
+    _version = await _create_watchlist_monitor_version(db_session)
+
+    from datetime import date
+    today = date(2026, 7, 7)
+
+    # 构造 succeeded run 但 published_at=None（异常状态）
+    now = datetime.now(UTC)
+    run_with_null_published = StockFeatureSnapshotRun(
+        trade_date=today,
+        schema_version=1,
+        primary_timeframe="1d",
+        secondary_timeframe="15m",
+        adj="qfq",
+        run_type="after_close",
+        status="succeeded",
+        expected_count=1,
+        snapshot_count=1,
+        failed_count=0,
+        failure_rate=0.0,
+        started_at=now,
+        finished_at=now,
+        published_at=None,  # 关键：published_at 未写入
+        metadata_={"scope": "full"},
+    )
+
+    snapshot = _make_snapshot_record(instrument.id, today)
+    db_session.add(snapshot)
+    db_session.add(run_with_null_published)
+    await db_session.flush()
+
+    with patch(
+        "app.api.watchlist.is_trading_day_async",
+        new_callable=AsyncMock,
+        return_value=True,
+    ), patch(
+        "app.api.watchlist.shanghai_business_date",
+        return_value=today,
+    ), patch(
+        "app.api.watchlist.now_shanghai",
+        return_value=datetime(2026, 7, 7, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    ):
+        response = await client.get("/watchlist/monitor-status")
+
+    assert response.status_code == 200, f"响应体: {response.text}"
+    data = response.json()
+    item = data["items"][0]
+    # succeeded 但 published_at=None → 不得返回 SUCCEEDED
+    assert item["calculation_status"] != "SUCCEEDED", (
+        f"published_at=None 时不得返回 SUCCEEDED，实际: {item['calculation_status']}"
+    )
+    assert item["metrics"] == {}
+
+
+@pytest.mark.asyncio
+async def test_monitor_status_backfill_full_scope_run_allows_read(
+    db_session, snapshot_user, client
+):
+    """[Blocker] backfill full scope run + published_at → watchlist 可读 snapshot。
+
+    全量 backfill（不带 --symbols/--limit-instruments）succeeded + published_at 非空 + scope='full'
+    → watchlist 可读取 snapshot。
+    """
+    user, instrument = snapshot_user
+    _version = await _create_watchlist_monitor_version(db_session)
+
+    from datetime import date
+    today = date(2026, 7, 7)
+
+    # 构造 backfill full scope succeeded run
+    now = datetime.now(UTC)
+    run_full = StockFeatureSnapshotRun(
+        trade_date=today,
+        schema_version=1,
+        primary_timeframe="1d",
+        secondary_timeframe="15m",
+        adj="qfq",
+        run_type="backfill",
+        status="succeeded",
+        expected_count=5000,
+        snapshot_count=4999,
+        failed_count=1,
+        failure_rate=0.0002,
+        started_at=now,
+        finished_at=now,
+        published_at=now,  # 关键：published_at 非空
+        metadata_={"scope": "full", "source": "backfill"},  # 关键：scope='full'
+    )
+
+    snapshot = _make_snapshot_record(instrument.id, today)
+    snapshot.summary_payload["current_price"] = 55.55
+    db_session.add(snapshot)
+    db_session.add(run_full)
+    await db_session.flush()
+
+    with patch(
+        "app.api.watchlist.is_trading_day_async",
+        new_callable=AsyncMock,
+        return_value=True,
+    ), patch(
+        "app.api.watchlist.shanghai_business_date",
+        return_value=today,
+    ), patch(
+        "app.api.watchlist.now_shanghai",
+        return_value=datetime(2026, 7, 7, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    ):
+        response = await client.get("/watchlist/monitor-status")
+
+    assert response.status_code == 200, f"响应体: {response.text}"
+    data = response.json()
+    item = data["items"][0]
+    # backfill full scope + published_at → SUCCEEDED
+    assert item["calculation_status"] == "SUCCEEDED", (
+        f"backfill full scope + published_at 应返回 SUCCEEDED，实际: {item['calculation_status']}"
+    )
+    assert item["metrics"]["current_price"] == 55.55
+    assert item["metrics"]["_source"] == "feature_snapshot"
+
+
+@pytest.mark.asyncio
+async def test_monitor_status_backfill_sample_scope_run_blocks_read(
+    db_session, snapshot_user, client
+):
+    """[Blocker] backfill sample scope run（--symbols/--limit-instruments）→ watchlist 不得读取 snapshot。
+
+    小样本 backfill 即使 succeeded + published_at 非空，因 scope='sample' 也不得被 watchlist 读取。
+    防止小样本验证数据污染生产 watchlist SUCCEEDED 状态。
+    """
+    user, instrument = snapshot_user
+    _version = await _create_watchlist_monitor_version(db_session)
+
+    from datetime import date
+    today = date(2026, 7, 7)
+
+    # 构造 backfill sample scope succeeded run（小样本验证产生）
+    now = datetime.now(UTC)
+    run_sample = StockFeatureSnapshotRun(
+        trade_date=today,
+        schema_version=1,
+        primary_timeframe="1d",
+        secondary_timeframe="15m",
+        adj="qfq",
+        run_type="backfill",
+        status="succeeded",
+        expected_count=2,  # 小样本
+        snapshot_count=2,
+        failed_count=0,
+        failure_rate=0.0,
+        started_at=now,
+        finished_at=now,
+        published_at=now,  # published_at 非空
+        metadata_={"scope": "sample", "source": "backfill", "symbols": ["000100", "603303"]},  # 关键：scope='sample'
+    )
+
+    snapshot = _make_snapshot_record(instrument.id, today)
+    snapshot.summary_payload["current_price"] = 99.99
+    db_session.add(snapshot)
+    db_session.add(run_sample)
+    await db_session.flush()
+
+    with patch(
+        "app.api.watchlist.is_trading_day_async",
+        new_callable=AsyncMock,
+        return_value=True,
+    ), patch(
+        "app.api.watchlist.shanghai_business_date",
+        return_value=today,
+    ), patch(
+        "app.api.watchlist.now_shanghai",
+        return_value=datetime(2026, 7, 7, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    ):
+        response = await client.get("/watchlist/monitor-status")
+
+    assert response.status_code == 200, f"响应体: {response.text}"
+    data = response.json()
+    item = data["items"][0]
+    # sample scope 即使 succeeded + published_at 非空，也不得被 watchlist 读取
+    assert item["calculation_status"] != "SUCCEEDED", (
+        f"sample scope 不得返回 SUCCEEDED，实际: {item['calculation_status']}"
     )
     assert item["metrics"] == {}

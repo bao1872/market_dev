@@ -48,11 +48,12 @@
 
 | 规则 | 测试 |
 |---|---|
-| monitor-status `metrics` 唯一来自 `stock_feature_snapshots.summary_payload`（`_source='feature_snapshot'`），不再走 `MonitorSnapshotService` 实时计算或 `MonitorState.payload` fallback | `test_watchlist_monitor_status_snapshot.py`（11 个用例：SUCCEEDED/WAITING_SNAPSHOT/NO_SNAPSHOT + 盘中读昨日 + 非交易日读最近交易日 + 非交易日无历史 + 盘中缺上一交易日 snapshot + run gate 4 用例：running/failed/succeeded/no_run） |
-| **[Run gate - Phase 8 新增]** watchlist 只读 `stock_feature_snapshot_runs.status='succeeded'`（且 `published_at` 非空）的 snapshot；running/failed/无 run 时不读 snapshot | `test_watchlist_monitor_status_snapshot.py`（run gate 4 用例） |
+| monitor-status `metrics` 唯一来自 `stock_feature_snapshots.summary_payload`（`_source='feature_snapshot'`），不再走 `MonitorSnapshotService` 实时计算或 `MonitorState.payload` fallback | `test_watchlist_monitor_status_snapshot.py`（14 个用例：SUCCEEDED/WAITING_SNAPSHOT/NO_SNAPSHOT + 盘中读昨日 + 非交易日读最近交易日 + 非交易日无历史 + 盘中缺上一交易日 snapshot + run gate 4 用例：running/failed/succeeded/no_run + [Blocker Fix] publish gate 严格化 3 用例：published_at=null / full scope / sample scope） |
+| **[Run gate - Phase 8 新增，[Blocker Fix] 严格化]** watchlist 只读 `stock_feature_snapshot_runs.status='succeeded'` + `published_at IS NOT NULL` + `metadata_['scope']='full'` 的 snapshot；running/failed/无 run/published_at=null/scope='sample' 时不读 snapshot | `test_watchlist_monitor_status_snapshot.py`（run gate 4 + [Blocker Fix] 3 = 7 用例） |
 | **[Run lifecycle - Phase 8 新增]** after_close feature_snapshot 成功写 `run.status='succeeded'` + `published_at`；失败写 `run.status='failed'` + 不 publishing | `test_after_close_orchestrator.py`（2 个用例：success_creates_succeeded_run / failure_creates_failed_run） |
 | **[Run service - Phase 8 新增]** `create_snapshot_run` 幂等创建 running run；`finish_snapshot_run` succeeded 写 published_at、failed 不写；failed run 允许新 retry | `test_feature_snapshot_run_service.py`（6 个用例） |
-| **[Instrument-first backfill - Phase 8 新增]** 每只股票每周期只调用一次 `load_instrument_bars`；`--symbols`/`--limit-instruments` 小样本过滤；`--resume` 跳过已存在 + succeeded run；失败比例超阈值创建 failed run（不抛异常） | `test_feature_snapshot_backfill.py`（21 个用例） |
+| **[Instrument-first backfill - Phase 8 新增]** 每只股票每周期只调用一次 `load_instrument_bars`；`--symbols`/`--limit-instruments` 小样本过滤；`--resume` 跳过已存在 + succeeded run；失败比例超阈值创建 failed run（不抛异常） | `test_feature_snapshot_backfill.py`（25 个用例） |
+| **[Blocker Fix - scope 区分]** `_resolve_run_scope(symbols, limit_instruments)` 决定 run scope：任一过滤启用 → `sample`，都未启用 → `full`；`backfill_instrument_first(scope=...)` 传播到 `create_snapshot_run(scope=...)` + `finish_snapshot_run(metadata={'scope': ...})`；sample run 即使 succeeded + published_at 也不被 watchlist 读取 | `test_feature_snapshot_backfill.py`（[Blocker Fix] scope 4 用例） |
 | `calculation_status` 三态语义：SUCCEEDED（snapshot 存在）/ WAITING_SNAPSHOT（交易日已收盘但 snapshot 缺失，仅 MARKET_CLOSED）/ NO_SNAPSHOT（盘中无昨日 / 非交易日无历史 / 无法解析交易日） | `test_watchlist_monitor_status_snapshot.py` |
 | `_resolve_expected_snapshot_trade_date` 规则：交易日未收盘 → 上一交易日；交易日已收盘 → today；非交易日 → 最近交易日；无法解析 → None（复用 `calendar_service`，禁止硬编码周末） | `test_watchlist_monitor_status_snapshot.py` |
 | `freshness_seconds` 基于 `snapshot.updated_at` | `test_watchlist_monitor_status_snapshot.py::test_succeeded` |

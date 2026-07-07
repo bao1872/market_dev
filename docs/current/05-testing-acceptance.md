@@ -262,7 +262,7 @@ node --experimental-strip-types --test src/components/__tests__/dsaSourceAlignme
 - `compute_for_trade_date` 单股失败不阻断其他股票，失败比例超过 `failure_threshold`（默认 0.3）抛 `RuntimeError`；
 - **[half-baked rollback] `compute_for_trade_date` 不内部 commit**：超阈值抛 `RuntimeError` 后 caller rollback，DB 中不应残留该 trade_date 的部分 snapshot 行。
 
-后端 backfill 脚本回归（`tests/test_feature_snapshot_backfill.py`，21 个用例）：
+后端 backfill 脚本回归（`tests/test_feature_snapshot_backfill.py`，25 个用例）：
 - `parse_args` 默认值：`end='latest'`、`batch_size=20`、`failure_threshold=0.3`、`resume=False`、`dry_run=False`、`symbols=None`、`limit_instruments=None`；自定义值正确解析；缺失 `--start` 报 `SystemExit`；
 - `get_trade_dates_from_bars` 返回升序 trade_dates；空表返回空列表；
 - `get_latest_bar_date` 返回 `bars_daily.trade_date` 最大值；空表返回 `None`；
@@ -276,8 +276,13 @@ node --experimental-strip-types --test src/components/__tests__/dsaSourceAlignme
   - 成功创建 `succeeded` run（写 `published_at`）；
   - 失败比例超阈值创建 `failed` run（不抛 RuntimeError，不阻断其他日期）；
 - `main` `--end=latest` 解析为 `bars_daily` 表最新 trade_date；`start > end` 直接 `sys.exit(1)`；`--symbols` 小样本过滤正确。
+- **[Blocker Fix] scope 区分测试（4 个新增）**：
+  - `_resolve_run_scope(symbols=['000100','603303'], limit_instruments=None)` 返回 `'sample'`；
+  - `_resolve_run_scope(symbols=None, limit_instruments=20)` 返回 `'sample'`；
+  - `_resolve_run_scope(symbols=None, limit_instruments=None)` 返回 `'full'`；
+  - `backfill_instrument_first(scope='sample')` → `create_snapshot_run` 收到 `scope='sample'` kwarg + `finish_snapshot_run` 的 metadata 含 `'scope': 'sample'`，防止小样本 run 污染 watchlist SUCCEEDED。
 
-API 契约回归（`tests/test_watchlist_monitor_status_snapshot.py`，11 个用例）：
+API 契约回归（`tests/test_watchlist_monitor_status_snapshot.py`，14 个用例）：
 - `SUCCEEDED`：交易日已收盘且 snapshot 存在，`calculation_status='SUCCEEDED'`，`metrics` 来自 `summary_payload` 且 `_source='feature_snapshot'`，`freshness_seconds` 为整数；
 - `NO_SNAPSHOT`：非交易日，`calculation_status='NO_SNAPSHOT'`，`metrics` 为空 dict，`freshness_seconds=None`；
 - `WAITING_SNAPSHOT`：交易日已收盘但 snapshot 缺失，`calculation_status='WAITING_SNAPSHOT'`，`metrics` 为空 dict；
@@ -291,6 +296,10 @@ API 契约回归（`tests/test_watchlist_monitor_status_snapshot.py`，11 个用
   - `failed` run 存在时 watchlist 不读 snapshot；
   - `succeeded` run 存在时 watchlist 读 snapshot 返回 `SUCCEEDED`；
   - 无 run 记录时 watchlist 不读 snapshot。
+- **[Blocker Fix - publish gate 严格化测试（3 个新增）]**：
+  - `succeeded` run 但 `published_at=NULL`（异常状态）→ watchlist 不得返回 `SUCCEEDED`（`calculation_status != 'SUCCEEDED'` + `metrics={}`）；
+  - `backfill` full scope run（`scope='full'` + `published_at` 非空）→ watchlist 返回 `SUCCEEDED` + 可读 snapshot；
+  - `backfill` sample scope run（`scope='sample'` + `published_at` 非空）→ watchlist 不得读 snapshot（`calculation_status != 'SUCCEEDED'` + `metrics={}`），防止小样本验证数据污染生产 watchlist SUCCEEDED 状态。
 
 orchestrator 状态机回归（`tests/test_after_close_orchestrator.py`，11 个用例）：
 - `AfterCloseRunStatus` 枚举包含 `FEATURE_SNAPSHOT`；

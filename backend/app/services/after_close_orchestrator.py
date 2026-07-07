@@ -724,10 +724,12 @@ async def execute_after_close_run(
             # [Phase7] 创建 running run + commit（独立 session，避免 snapshot rollback 影响）
             async with AsyncSessionLocal() as db:
                 instrument_ids = await get_active_a_share_instruments(db)
+                # [Blocker Fix] after_close 处理全市场 A 股，scope='full'（watchlist 可读）
                 snapshot_run = await create_snapshot_run(
                     db, trade_date, "after_close",
                     expected_count=len(instrument_ids),
                     metadata={"source": "after_close_orchestrator"},
+                    scope="full",
                 )
                 await db.commit()
                 snapshot_run_id = snapshot_run.id
@@ -766,22 +768,30 @@ async def execute_after_close_run(
                 run_to_finish = await db.get(StockFeatureSnapshotRun, snapshot_run_id)
                 if run_to_finish is not None:
                     if snapshot_error is not None:
+                        # [Blocker Fix] failed run 也写入 scope='full'（虽不发布，
+                        # 但保持 metadata 一致性，便于追溯）
                         await finish_snapshot_run(
                             db, run_to_finish,
                             status="failed",
                             metadata={
                                 "source": "after_close_orchestrator",
                                 "error": str(snapshot_error),
+                                "scope": "full",
                             },
                         )
                     else:
+                        # [Blocker Fix] succeeded run 必须写入 scope='full'，
+                        # watchlist gate 据此判断可读
                         await finish_snapshot_run(
                             db, run_to_finish,
                             status="succeeded",
                             snapshot_count=snapshot_result.get("snapshot_count", 0) if snapshot_result else 0,
                             failed_count=snapshot_result.get("failed_count", 0) if snapshot_result else 0,
                             expected_count=len(cached_instrument_ids),
-                            metadata={"source": "after_close_orchestrator"},
+                            metadata={
+                                "source": "after_close_orchestrator",
+                                "scope": "full",
+                            },
                         )
                     await db.commit()
 

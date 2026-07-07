@@ -42,6 +42,7 @@ from app.models.instrument import Instrument
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
 from scripts.feature_snapshot_backfill import (
+    _resolve_run_scope,
     backfill_instrument_first,
     get_existing_instrument_ids,
     get_instruments_for_backfill,
@@ -957,3 +958,100 @@ async def test_main_symbols_small_sample(db_session) -> None:
     result = await db_session.execute(select(Instrument.symbol))
     symbols_in_db = set(result.scalars().all())
     assert {"000100", "603303", "600519"}.issubset(symbols_in_db)
+
+
+# ===== Blocker Fix: scope 区分 full / sample =====
+
+
+def test_resolve_run_scope_returns_sample_when_symbols_set() -> None:
+    """[Blocker] --symbols 启用时 scope='sample'。"""
+    assert _resolve_run_scope(symbols=["000100", "603303"], limit_instruments=None) == "sample"
+
+
+def test_resolve_run_scope_returns_sample_when_limit_instruments_set() -> None:
+    """[Blocker] --limit-instruments 启用时 scope='sample'。"""
+    assert _resolve_run_scope(symbols=None, limit_instruments=20) == "sample"
+
+
+def test_resolve_run_scope_returns_full_when_no_filter() -> None:
+    """[Blocker] 无 --symbols 且无 --limit-instruments 时 scope='full'。"""
+    assert _resolve_run_scope(symbols=None, limit_instruments=None) == "full"
+
+
+@pytest.mark.asyncio
+async def test_backfill_instrument_first_propagates_sample_scope_to_run_metadata(
+    db_session,
+) -> None:
+    """[Blocker] backfill_instrument_first(scope='sample') → create_snapshot_run + finish_snapshot_run 收到 scope。
+
+    验证：
+    - create_snapshot_run 被调用时含 scope='sample' kwarg
+    - finish_snapshot_run 被调用时 metadata 含 'scope': 'sample'
+    防止小样本验证产生的 run 污染 watchlist SUCCEEDED 状态。
+    """
+    inst = Instrument(
+        id=uuid.uuid4(), symbol="600000", name="测试", market="SH", status="active",
+    )
+    db_session.add(inst)
+    await db_session.flush()
+
+    async def _fake_compute(session, instrument_id, trade_date, **kwargs):
+        return StockFeatureSnapshot(
+            instrument_id=instrument_id,
+            trade_date=trade_date,
+            primary_timeframe="1d",
+            secondary_timeframe="15m",
+            adj="qfq",
+            schema_version=1,
+            source_primary_bar_time=datetime(
+                trade_date.year, trade_date.month, trade_date.day,
+                15, 0, tzinfo=ZoneInfo("Asia/Shanghai"),
+            ),
+            source_secondary_bar_time=datetime(
+                trade_date.year, trade_date.month, trade_date.day,
+                15, 0, tzinfo=ZoneInfo("Asia/Shanghai"),
+            ),
+            structural_payload={},
+            temporal_payload={},
+            summary_payload={"_source": "feature_snapshot"},
+            degraded_reasons=[],
+        )
+
+    with patch(
+        "scripts.feature_snapshot_backfill.load_instrument_bars",
+        new=AsyncMock(return_value=(None, None)),
+    ), patch(
+        "scripts.feature_snapshot_backfill.compute_feature_snapshot_for_date",
+        new=_fake_compute,
+    ), patch(
+        "scripts.feature_snapshot_backfill.upsert_snapshot",
+        new=AsyncMock(),
+    ), patch(
+        "scripts.feature_snapshot_backfill.create_snapshot_run",
+        new=AsyncMock(),
+    ) as mock_create, patch(
+        "scripts.feature_snapshot_backfill.finish_snapshot_run",
+        new=AsyncMock(),
+    ) as mock_finish:
+        await backfill_instrument_first(
+            db_session,
+            trade_dates=[date(2026, 1, 5)],
+            instruments=[inst.id],
+            batch_size=20,
+            scope="sample",  # 关键：传入 sample scope
+        )
+
+    # 验证 create_snapshot_run 收到 scope='sample' kwarg
+    assert mock_create.called, "create_snapshot_run 应被调用"
+    create_kwargs = mock_create.call_args.kwargs
+    assert create_kwargs.get("scope") == "sample", (
+        f"create_snapshot_run 应收到 scope='sample'，实际 kwargs: {create_kwargs}"
+    )
+
+    # 验证 finish_snapshot_run 收到的 metadata 含 scope='sample'
+    assert mock_finish.called, "finish_snapshot_run 应被调用"
+    finish_kwargs = mock_finish.call_args.kwargs
+    finish_metadata = finish_kwargs.get("metadata", {})
+    assert finish_metadata.get("scope") == "sample", (
+        f"finish_snapshot_run 的 metadata 应含 scope='sample'，实际: {finish_metadata}"
+    )

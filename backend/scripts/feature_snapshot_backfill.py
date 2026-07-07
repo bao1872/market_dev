@@ -81,6 +81,33 @@ _DEFAULT_SECONDARY_TF = "15m"
 _DEFAULT_ADJ = "qfq"
 _DEFAULT_SCHEMA_VERSION = 1
 
+# [Blocker Fix] - run scope 枚举
+SCOPE_FULL = "full"  # 全市场 backfill / after_close，watchlist 可读
+SCOPE_SAMPLE = "sample"  # --symbols / --limit-instruments 小样本，watchlist 不可读
+
+
+def _resolve_run_scope(
+    symbols: list[str] | None,
+    limit_instruments: int | None,
+) -> str:
+    """根据 --symbols / --limit-instruments 决定 run scope。
+
+    - 任一过滤条件启用 → 'sample'（小样本验证，不发布到 watchlist）
+    - 都未启用 → 'full'（全市场，发布到 watchlist）
+
+    Args:
+        symbols: --symbols 参数（已解析为 list[str]），None 表示未设置
+        limit_instruments: --limit-instruments 参数，None 表示未设置
+
+    Returns:
+        'sample' 或 'full'
+    """
+    if symbols and len(symbols) > 0:
+        return SCOPE_SAMPLE
+    if limit_instruments is not None and limit_instruments > 0:
+        return SCOPE_SAMPLE
+    return SCOPE_FULL
+
 
 async def get_trade_dates_from_bars(
     db: AsyncSession,
@@ -266,6 +293,7 @@ async def backfill_instrument_first(
     secondary_timeframe: str = _DEFAULT_SECONDARY_TF,
     adj: str = _DEFAULT_ADJ,
     schema_version: int = _DEFAULT_SCHEMA_VERSION,
+    scope: str = SCOPE_FULL,
 ) -> dict[str, Any]:
     """Instrument-first 回补：每只 instrument 加载 bars 一次，遍历 trade_dates 切片。
 
@@ -279,6 +307,12 @@ async def backfill_instrument_first(
     - 失败比例超阈值的 trade_date 标 run.status='failed'（不抛 RuntimeError）
     - 单股失败不阻塞其他股票
     - 每个 trade_date 创建独立 run 记录（status=running → succeeded/failed）
+
+    [Blocker Fix] scope 传播：
+    - scope 注入到每个 run 的 metadata_['scope']（create_snapshot_run + finish_snapshot_run）
+    - 'full'：watchlist 可读（默认）
+    - 'sample'：watchlist 不可读（--symbols / --limit-instruments 小样本验证）
+    - main() 通过 _resolve_run_scope 决定，本函数不重新计算
 
     dry-run 模式：
     - 只统计 trade_dates / instruments / expected_batches
@@ -298,6 +332,7 @@ async def backfill_instrument_first(
         secondary_timeframe: 次周期
         adj: 复权方式
         schema_version: 快照 schema 版本
+        scope: run 范围（'full' 或 'sample'），默认 'full'
 
     Returns:
         统计信息 dict
@@ -336,6 +371,7 @@ async def backfill_instrument_first(
         }
 
     # 为每个 trade_date 创建 running run（publish gate）
+    # [Blocker Fix] scope 传入 create_snapshot_run，写入 metadata_['scope']
     run_records: dict[date, StockFeatureSnapshotRun] = {}
     for td in trade_dates:
         run = await create_snapshot_run(
@@ -346,6 +382,7 @@ async def backfill_instrument_first(
             adj=adj,
             expected_count=total_instruments,
             metadata={"source": "backfill", "batch_size": batch_size},
+            scope=scope,
         )
         run_records[td] = run
 
@@ -440,6 +477,8 @@ async def backfill_instrument_first(
         else:
             run_status = STATUS_SUCCEEDED
 
+        # [Blocker Fix] finish 时 metadata 完全替换 create 时的 metadata，
+        # 必须再次包含 scope，否则 watchlist gate 会因缺失 scope 而拒绝读取
         await finish_snapshot_run(
             db, run_records[td],
             status=run_status,
@@ -452,6 +491,7 @@ async def backfill_instrument_first(
                 "source": "backfill",
                 "batch_size": batch_size,
                 "failure_threshold": failure_threshold,
+                "scope": scope,
             },
         )
         logger.info(
@@ -521,19 +561,24 @@ async def main(args: argparse.Namespace) -> None:
             limit=args.limit_instruments,
         )
 
+        # [Blocker Fix] 根据 --symbols / --limit-instruments 决定 run scope：
+        # - 任一过滤条件启用 → 'sample'（小样本验证，watchlist 不可读）
+        # - 都未启用 → 'full'（全市场，watchlist 可读）
+        scope = _resolve_run_scope(args.symbols, args.limit_instruments)
+
         logger.info(
             "[backfill] 计划回补: trade_dates=%d (%s ~ %s), instruments=%d "
             "(batch_size=%d, resume=%s, dry_run=%s, failure_threshold=%s, "
-            "symbols=%s, limit_instruments=%s)",
+            "symbols=%s, limit_instruments=%s, scope=%s)",
             len(trade_dates),
             trade_dates[0], trade_dates[-1],
             len(instruments),
             args.batch_size,
             args.resume, args.dry_run, args.failure_threshold,
-            args.symbols, args.limit_instruments,
+            args.symbols, args.limit_instruments, scope,
         )
 
-        # dry-run 在临时 session 内完成统计（不写库）
+        # dry-run 在临时 session 内完成统计（不写库、不创建 run）
         if args.dry_run:
             await backfill_instrument_first(
                 db,
@@ -543,6 +588,7 @@ async def main(args: argparse.Namespace) -> None:
                 failure_threshold=args.failure_threshold,
                 resume=args.resume,
                 dry_run=True,
+                scope=scope,
             )
             return
 
@@ -558,6 +604,7 @@ async def main(args: argparse.Namespace) -> None:
                     failure_threshold=args.failure_threshold,
                     resume=args.resume,
                     dry_run=False,
+                    scope=scope,
                 )
                 await db.commit()
                 logger.info(

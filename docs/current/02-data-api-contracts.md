@@ -869,7 +869,7 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 | `started_at` | TIMESTAMPTZ | NOT NULL, default `now()` | run 开始时间 |
 | `finished_at` | TIMESTAMPTZ | NULL | run 结束时间（succeeded/failed） |
 | `published_at` | TIMESTAMPTZ | NULL | 发布时间（仅 `status='succeeded'` 时写入） |
-| `metadata_` | JSONB | NOT NULL, default `'{}'` | 审计元数据（source / error / 等） |
+| `metadata_` | JSONB | NOT NULL, default `'{}'` | 审计元数据（`source` / `error` / `scope` / `batch_size` 等）；`scope` 字段为 watchlist gate 必查键，取值 `full`（可读）或 `sample`（不可读） |
 
 **唯一约束**：`uq_snapshot_runs_active_key (trade_date, schema_version, primary_timeframe, secondary_timeframe, adj, run_type) WHERE status = 'running'`（partial unique index，仅约束 running 状态，允许 failed run 与新 retry 并存）。
 
@@ -880,15 +880,19 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 
 **Run lifecycle 规则**：
 
-| 阶段 | status | published_at | 说明 |
-|---|---|---|---|
-| 开始 | `running` | NULL | `create_snapshot_run` 幂等创建（已有 running 则返回已有） |
-| 成功 | `succeeded` | 非空 | `finish_snapshot_run(status='succeeded')` 写 `published_at = now()` |
-| 失败 | `failed` | NULL | `finish_snapshot_run(status='failed')` 不写 `published_at` |
+| 阶段 | status | published_at | metadata_.scope | 说明 |
+|---|---|---|---|---|
+| 开始 | `running` | NULL | `full` 或 `sample` | `create_snapshot_run(scope=...)` 幂等创建（已有 running 则返回已有） |
+| 成功 | `succeeded` | 非空 | `full` 或 `sample` | `finish_snapshot_run(status='succeeded', metadata={'scope': ...})` 写 `published_at = now()` |
+| 失败 | `failed` | NULL | `full` 或 `sample` | `finish_snapshot_run(status='failed', metadata={'scope': ...})` 不写 `published_at` |
 
 - `after_close` / `backfill` 开始时创建 `running` run（独立 session + commit），保证 run 记录持久化；
 - snapshot 计算在独立 session 中进行，失败时 session 自动 rollback 半成品行；
 - run finalization 在独立 session 中进行（`succeeded` / `failed`），保证 run 状态不受 snapshot rollback 影响；
-- `/watchlist/monitor-status` 通过 `_has_succeeded_snapshot_run` 判断 `expected_snapshot_trade_date` 是否有 `succeeded` run；
+- `/watchlist/monitor-status` 通过 `_has_succeeded_snapshot_run` 判断 `expected_snapshot_trade_date` 是否存在 `status='succeeded' + published_at IS NOT NULL + metadata_['scope']='full'` 的 run；
+- **[Blocker Fix] scope 必传**：`create_snapshot_run(scope=...)` 和 `finish_snapshot_run(metadata={'scope': ...})` 都必须传入 scope。`finish_snapshot_run` 的 metadata 完全替换 create 时的 metadata，调用方必须在 finish 时再次包含 scope，否则 watchlist gate 会因缺失 scope 而拒绝读取；
+- `after_close` 固定 `scope='full'`（处理全市场 A 股）；
+- 普通 `backfill` 不带 `--symbols`/`--limit-instruments` 时 `scope='full'`；
+- 小样本 `backfill` 带 `--symbols` 或 `--limit-instruments` 时 `scope='sample'`（watchlist 不可读）；
 - failed run 允许新 retry（partial unique index 仅约束 running）。
 

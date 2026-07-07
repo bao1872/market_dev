@@ -600,6 +600,7 @@ async def create_snapshot_run(
     adj: str = "qfq",
     expected_count: int | None = None,
     metadata: dict[str, Any] | None = None,
+    scope: str | None = None,
 ) -> StockFeatureSnapshotRun:
     """创建或复用 running 状态的 snapshot run 记录。
 
@@ -607,6 +608,12 @@ async def create_snapshot_run(
     - 如果已存在 status='running' 的同 key run（部分唯一索引约束），返回该记录。
     - 否则创建新 running run。
     - 失败/已完成的 run 不影响新 run 创建（部分唯一索引仅约束 status='running'）。
+
+    [Blocker Fix] scope 参数：
+    - 'full'：全市场 backfill / after_close，watchlist 可读对应 snapshot
+    - 'sample'：--symbols / --limit-instruments 小样本，watchlist 不可读
+    - 注入到 metadata_['scope']，watchlist gate 据此过滤
+    - finish_snapshot_run 的 metadata 完全替换 create 时的 metadata，调用方需在 finish 时再次传入 scope
 
     Args:
         session: 异步 DB 会话
@@ -618,6 +625,7 @@ async def create_snapshot_run(
         adj: 复权方式（默认 qfx）
         expected_count: 预期快照数（active A 股总数）
         metadata: 额外元数据（如 failure_threshold、source）
+        scope: run 范围（'full' 或 'sample'），注入到 metadata_['scope']
 
     Returns:
         StockFeatureSnapshotRun ORM 对象（status='running'）
@@ -640,6 +648,11 @@ async def create_snapshot_run(
         )
         return existing
 
+    # [Blocker Fix] 注入 scope 到 metadata_（如未在 metadata 中显式设置）
+    final_metadata: dict[str, Any] = dict(metadata) if metadata else {}
+    if scope is not None and "scope" not in final_metadata:
+        final_metadata["scope"] = scope
+
     # 创建新 running run
     run = StockFeatureSnapshotRun(
         trade_date=trade_date,
@@ -651,13 +664,13 @@ async def create_snapshot_run(
         status=STATUS_RUNNING,
         expected_count=expected_count,
         started_at=datetime.now(UTC),
-        metadata_=metadata,
+        metadata_=final_metadata if final_metadata else None,
     )
     session.add(run)
     await session.flush()
     logger.info(
-        "创建 snapshot run: trade_date=%s run_type=%s run_id=%s expected_count=%s",
-        trade_date, run_type, run.id, expected_count,
+        "创建 snapshot run: trade_date=%s run_type=%s run_id=%s expected_count=%s scope=%s",
+        trade_date, run_type, run.id, expected_count, scope,
     )
     return run
 
