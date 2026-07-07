@@ -7,7 +7,7 @@
 | 账户权限 | `users`, `roles`, `user_roles`, `plans`, `subscriptions`, `invite_codes`, `access_audit_logs` |
 | 股票行情 | `instruments`, `trading_calendar`, `bars_daily`, `bars_15min`, `bars_60min`, `bars_minute` |
 | 策略发布 | `strategy_definitions`, `strategy_versions`, `strategy_runs`, `strategy_run_items`, `strategy_results`, `strategy_result_metrics` |
-| 自选监控 | `user_watchlist_items`, `monitor_states`, `monitor_evaluations`, `strategy_events`, `event_recipients` |
+| 自选监控 | `user_watchlist_items`, `monitor_states`, `monitor_evaluations`, `strategy_events`, `event_recipients`, `stock_feature_snapshots` |
 | 消息投递 | `notification_channels`, `notification_messages`, `outbox`, `message_deliveries`, `capture_jobs` |
 | 任务运行 | `scheduler_job_runs`, `job_run_events`, `worker_heartbeats` |
 
@@ -731,4 +731,117 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 - `console.table` 输出 `dsa_mismatch`（check_enabled/mismatched/source_bar_hash/source_bar_times_count）；
 - `console.table` 输出 `indicators.layers`（layer_id/renderer/fields/time_count）；
 - 仅用于诊断 15m/1h overlay 对齐问题，不影响生产渲染逻辑。
+
+## 13. Feature Snapshot 持久化契约
+
+### 13.1 `stock_feature_snapshots` 表契约
+
+`stock_feature_snapshots` 是自选股监控指标与历史特征因子探索的唯一持久化事实源。盘后 orchestrator 生成当日快照，`/watchlist/monitor-status` 只读不写。
+
+| 字段 | 类型 | 约束 | 语义 |
+|---|---|---|---|
+| `id` | UUID | PK, default `gen_random_uuid()` | 快照 ID |
+| `instrument_id` | UUID | FK→`instruments.id`, NOT NULL | 股票 ID |
+| `trade_date` | DATE | NOT NULL | 业务交易日 |
+| `primary_timeframe` | TEXT | NOT NULL, default `'1d'` | 主周期 |
+| `secondary_timeframe` | TEXT | NOT NULL, default `'15m'` | 次周期 |
+| `adj` | TEXT | NOT NULL, default `'qfq'` | 复权方式 |
+| `schema_version` | INT | NOT NULL, default `1` | schema 版本（变更需 bump） |
+| `source_primary_bar_time` | TIMESTAMPTZ | NULL | 主周期数据源截止时间；1d 规范化为 `trade_date 15:00+08:00` |
+| `source_secondary_bar_time` | TIMESTAMPTZ | NULL | 15m 数据源截止时间（最后一根 15m bar 的实际 trade_time） |
+| `structural_payload` | JSONB | NOT NULL | `_compute_all_factors_for_bars` 完整输出（primary + secondary + relation + meta） |
+| `temporal_payload` | JSONB | NOT NULL | `_compute_daily_context` / `_compute_m15_response` / `_compute_derived_relation` 完整输出 |
+| `summary_payload` | JSONB | NOT NULL | 前端列表用摘要，含 `_source='feature_snapshot'` |
+| `degraded_reasons` | JSONB | NOT NULL, default `'[]'` | 单股降级原因列表（不阻断其他股票） |
+| `created_at` | TIMESTAMPTZ | NOT NULL, default `now()` | 创建时间 |
+| `updated_at` | TIMESTAMPTZ | NOT NULL, default `now()` | 更新时间（upsert 覆盖） |
+
+**唯一约束**：`uq_feature_snapshot_instrument_date_tf_adj_schema (instrument_id, trade_date, primary_timeframe, secondary_timeframe, adj, schema_version)`，支持 upsert 幂等写入。
+
+**索引**：
+- `ix_feature_snapshot_trade_date_schema (trade_date, schema_version)`：按日查询。
+- `ix_feature_snapshot_instrument_date (instrument_id, trade_date DESC)`：单股历史回溯。
+- `ix_feature_snapshot_date_instrument (trade_date, instrument_id)`：按日批量扫描。
+
+**不给 full payload 加 GIN 索引**（节省磁盘，5000 股 × 250 天 JSONB 体积约 25-50 GB）。
+
+### 13.2 `summary_payload` 字段契约
+
+`summary_payload` 是 `/watchlist/monitor-status` 响应 `metrics` 字段的唯一来源。所有字段缺失时填 `None`，不抛异常。
+
+| 字段 | 来源 | 语义 |
+|---|---|---|
+| `_source` | 固定 `'feature_snapshot'` | 数据源标识（前端区分 snapshot vs fallback） |
+| `as_of` | `trade_date.isoformat()` | 业务交易日 |
+| `source_bar_time` | `source_secondary_bar_time.isoformat()` 或 `source_primary_bar_time.isoformat()` | 数据源截止时间 |
+| `current_price` | `df_1d.close[-1]` | 当前价（最后一根日线 close） |
+| `change_pct` | `(close[-1] - close[-2]) / close[-2] * 100` | 涨跌幅（4 位小数） |
+| `bb_upper` / `bb_mid` / `bb_lower` | `bollinger(df_1d, 20, 2.0)` | BB 绝对值（最后一根） |
+| `poc_price` | `structural.primary.1d.cost_position.poc_price` | 成本 POC |
+| `nearest_node_above` / `nearest_node_below` | `cost_position.nearest_node_above_price` / `nearest_node_below_price` | 上下方节点 |
+| `distance_to_node_above_atr` / `distance_to_node_below_atr` | `cost_position.distance_to_node_*_atr` | ATR 距离 |
+| `node_interval_position_0_1` | `cost_position.node_interval_position_0_1` | 节点区间位置 [0,1] |
+| `cost_position_zone` / `value_area_zone` | `cost_position.cost_position_zone` / `value_area_zone` | 区域枚举 |
+| `daily_developing_swing_dir` / `daily_developing_swing_high` / `daily_developing_swing_low` | `structural.primary.1d.swing_position.developing_swing_*` | 日线 developing swing |
+| `m15_developing_swing_dir` / `m15_developing_swing_high` / `m15_developing_swing_low` | `structural.secondary.15m.swing_position.developing_swing_*` | 15m developing swing |
+| `m15_position_relative_to_daily` | `temporal.derived_relation.m15_position_relative_to_daily` | 派生关系 |
+
+### 13.3 `/watchlist/monitor-status` 数据源契约
+
+`GET /api/v1/watchlist/monitor-status` 响应的 `metrics` 字段唯一来自 `stock_feature_snapshots.summary_payload`，不再走 `MonitorSnapshotService` 实时计算或 `MonitorState.payload` fallback。`MonitorEvaluation` 仅用于展示评估状态字段（`evaluation_status` / `retry_count` / `error_code` / `source_bar_time`），不作为 metrics 数据源。
+
+**`calculation_status` 三态语义**：
+
+| 状态 | 触发条件 | metrics 内容 | `freshness_seconds` |
+|---|---|---|---|
+| `SUCCEEDED` | `expected_snapshot_trade_date` 对应的 snapshot 存在（含盘中读昨日、收盘后读今日、非交易日读最近交易日） | 来自 `summary_payload` | `now_cst - snapshot.updated_at`（秒） |
+| `WAITING_SNAPSHOT` | 交易日已收盘（`MARKET_CLOSED`）但当日 snapshot 缺失（orchestrator 未跑或失败）；**仅在 `MARKET_CLOSED` 时出现，盘中不出现** | 空 dict | `None` |
+| `NO_SNAPSHOT` | 盘中无昨日 snapshot / 非交易日无历史 snapshot / 无法解析交易日 | 空 dict | `None` |
+
+**`_resolve_expected_snapshot_trade_date` 规则**（`/watchlist/monitor-status` 内部 helper）：
+
+| 今日类型 | 市场状态 | `expected_snapshot_trade_date` | 说明 |
+|---|---|---|---|
+| 交易日 | 未收盘（PRE_OPEN / MORNING_SESSION / LUNCH_BREAK / AFTERNOON_SESSION） | 上一已完成交易日（`calendar_service.get_previous_trading_day_async`，严格 `< today`） | 盘中读昨日 snapshot，前端展示 SUCCEEDED + 昨日 metrics |
+| 交易日 | MARKET_CLOSED | `today` | 收盘后等待当日 snapshot；缺失时返回 WAITING_SNAPSHOT |
+| 非交易日 | NON_TRADING_DAY | 最近交易日（`calendar_service.get_most_recent_trading_day_async`，`<= today`） | 周末/节假日读最近交易日 snapshot |
+| 任一 | 任一 | 无法解析最近交易日（如日历表为空） | `None`，前端展示 NO_SNAPSHOT |
+
+复用 `calendar_service` / `trading_calendar` 表，禁止硬编码周末。
+
+**`monitor_status` 兼容字段**：`calculation_status != 'SUCCEEDED'` 时与 `calculation_status` 一致；`SUCCEEDED` 时回落到 `market_session`（保持前端旧字段兼容）。
+
+**point-in-time 约束**：
+- 1d bars 截断到 `index.date <= trade_date`；
+- 15m bars 截断到 `index.date <= trade_date`；
+- 禁止使用 `trade_date` 之后数据；
+- `include_realtime=False`，只取已完成 bar。
+
+### 13.4 `structural_payload.relation` 字段
+
+`structural_payload` 包含 4 个 top-level key：`primary` / `secondary` / `relation` / `meta`。
+
+- `primary`：`{primary_timeframe: _compute_all_factors_for_bars(df_1d)}` 完整输出
+- `secondary`：`{secondary_timeframe: _compute_all_factors_for_bars(df_15m)}` 完整输出
+- `relation`：`_compute_relation(primary_factors, secondary_factors)` 输出，包含 `trend_alignment` / `secondary_vs_primary_position_delta` / `primary_dir` / `secondary_dir` 等 V1.8 客观关系字段（值可能为 `null`，由数据充分性决定）
+- `meta`：`degraded_reasons` + `warmup_notes`
+
+**禁止**在 `feature_snapshot_service` 内复制 `_compute_relation` 公式，必须复用 `structural_factor_service._compute_relation`。
+
+### 13.5 计算约束与事务边界
+
+- 复用 `_compute_all_factors_for_bars` / `_compute_relation` / `_compute_daily_context` / `_compute_m15_response` / `_compute_derived_relation` / `bollinger()`，**不复制 DSA/BB/swing/temporal 数学公式**；
+- 单股失败写 `degraded_reasons`，不阻断批次其他股票；
+- 失败比例超过 `failure_threshold`（默认 0.3）抛 `RuntimeError`，由 caller 决定 rollback；
+- upsert 按唯一键 `ON CONFLICT DO UPDATE`，`structural_payload` / `temporal_payload` / `summary_payload` / `source_*_bar_time` / `degraded_reasons` 覆盖，`updated_at = now()`；
+- 1d bar 时间规范化为 `trade_date 15:00+08:00` aware datetime；15m bar 时间取最后一根 15m bar 实际 trade_time，转 `Asia/Shanghai` aware datetime。
+
+### 13.6 事务边界与不可读取失败半成品
+
+- `compute_for_trade_date` 只负责 upsert（flush）+ 返回统计，**不内部 commit**；
+- caller（`after_close_orchestrator` / `feature_snapshot_backfill`）决定 commit / rollback：
+  - 成功（`failure_rate <= threshold`）→ commit；
+  - `RuntimeError`（失败比例超阈值）→ rollback 半成品 → 标记 `failed`；
+- `/watchlist/monitor-status` 只读取已 commit 的 snapshot 行；失败日期不应有部分已 commit 行（half-baked）；
+- backfill 单日失败时该日所有半成品 rollback，不影响其他日期。
 

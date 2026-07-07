@@ -16,7 +16,10 @@
 - 移除采用软删除（active=false + removed_at），保留历史，支持重新加入
 - (user_id, instrument_id) 唯一约束：重复加入返回 409 Conflict
 - 重新加入已软删除的记录：恢复 active=true 并清空 removed_at
-- monitor-status 端点 JOIN Instrument + MonitorState(最新 released watchlist_monitor 版本) + MonitorEvaluation(最新评估记录)
+- monitor-status 端点 metrics 数据源：
+  - 来自 StockFeatureSnapshot.summary_payload（盘后 orchestrator 生成）
+  - 不再走 MonitorState.payload 或 MonitorSnapshotService 实时 fallback
+  - MonitorEvaluation 仅用于展示评估状态（evaluation_status/retry_count/error_code）
 
 套餐权限（plans 表，通过 AccessContext 统一读取）：
 - POST /watchlist 及恢复软删除前校验 active count < monitor_limit
@@ -29,8 +32,7 @@
 from __future__ import annotations
 
 import logging
-import math
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -43,7 +45,7 @@ from app.core.time import now_shanghai, shanghai_business_date
 from app.db import get_db
 from app.models.instrument import Instrument
 from app.models.monitor_evaluation import MonitorEvaluation
-from app.models.monitor_state import MonitorState
+from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.strategy_event import StrategyEvent
 from app.models.watchlist import UserWatchlistItem
@@ -59,9 +61,12 @@ from app.services.access_control_service import (
     require_active_subscription,
     require_quota,
 )
-from app.services.calendar_service import is_trading_day_async
-from app.services.market_status_service import TRADING_SESSIONS, compute_market_session
-from app.services.monitor_snapshot_service import MonitorSnapshot, MonitorSnapshotService
+from app.services.calendar_service import (
+    get_most_recent_trading_day_async,
+    get_previous_trading_day_async,
+    is_trading_day_async,
+)
+from app.services.market_status_service import compute_market_session
 
 logger = logging.getLogger("watchlist_api")
 
@@ -116,145 +121,40 @@ def _compute_market_status(now_cst: datetime, is_trading_day: bool) -> str:
     return compute_market_session(now_cst, is_trading_day)
 
 
-# 盘中交易时段内数据延迟判定阈值（秒）
-_IN_TRADING_STALE_SECONDS = 180
-
-
-def _compute_calculation_status(
-    now_cst: datetime,
+async def _resolve_expected_snapshot_trade_date(
+    db: AsyncSession,
+    today: date,
     market_session: str,
-    eval_row: object | None,
-    ms: MonitorState | None,
-) -> str:
-    """根据评估记录与市场状态计算 calculation_status。
+    is_trading_day: bool,
+) -> date | None:
+    """[Blocker1] - 解析当日应读取的 feature snapshot 交易日。
 
-    优先级：FAILED > STALE > SUCCEEDED > WAITING_FIRST_RUN
-    - 盘后/非交易日/盘前/午休不判定 STALE，避免 30 分钟规则误报
-    - 盘中交易时段内使用 180 秒阈值判定数据延迟
-    - market_session 为 6 值枚举；TRADING_SESSIONS={MORNING_SESSION,AFTERNOON_SESSION}
+    规则（与 after_close_orchestrator 生成快照的时点对齐）：
+    1. 交易日且未收盘（PRE_OPEN/MORNING_SESSION/LUNCH_BREAK/AFTERNOON_SESSION）：
+       返回上一个已完成交易日（盘中读昨日 snapshot）。
+    2. 交易日且已收盘（MARKET_CLOSED）：返回 today（orchestrator 应已生成当日快照）。
+    3. 非交易日（NON_TRADING_DAY）：返回最近一个交易日（读最近交易日 snapshot）。
+    4. 若无法解析最近交易日（trading_calendar 表无记录），返回 None。
+
+    复用 calendar_service.get_previous_trading_day_async /
+    get_most_recent_trading_day_async，禁止硬编码周末。
+
+    Args:
+        db: 异步数据库会话
+        today: 上海业务日期
+        market_session: 6 值枚举的市场状态
+        is_trading_day: 是否为交易日
+
+    Returns:
+        预期的快照交易日；None 表示无法解析（前端展示 NO_SNAPSHOT）。
     """
-    if eval_row is None:
-        # 无评估记录：按 MonitorState 新鲜度判定（若存在）
-        # 盘中无 MonitorState → WAITING_FIRST_RUN；其他时段或数据新鲜 → SUCCEEDED
-        if ms is not None and ms.updated_at and market_session in TRADING_SESSIONS:
-            updated_at_cst = ms.updated_at.astimezone(ZoneInfo("Asia/Shanghai"))
-            age_seconds = (now_cst - updated_at_cst).total_seconds()
-            if age_seconds > _IN_TRADING_STALE_SECONDS:
-                return "STALE"
-            return "SUCCEEDED"
-        return "WAITING_FIRST_RUN" if market_session in TRADING_SESSIONS else "SUCCEEDED"
-
-    evaluation_status = eval_row.evaluation_status
-
-    if evaluation_status in ("FAILED", "DEAD"):
-        return "FAILED"
-
-    if evaluation_status == "PENDING":
-        # PENDING 且租约过期 → STALE
-        if eval_row.next_retry_at and now_cst > eval_row.next_retry_at.astimezone(ZoneInfo("Asia/Shanghai")):
-            return "STALE"
-        return "SUCCEEDED"
-
-    if evaluation_status == "SUCCEEDED":
-        # 仅在盘中交易时段根据 MonitorState.updated_at 判定 STALE
-        if market_session in TRADING_SESSIONS and ms is not None and ms.updated_at:
-            updated_at_cst = ms.updated_at.astimezone(ZoneInfo("Asia/Shanghai"))
-            age_seconds = (now_cst - updated_at_cst).total_seconds()
-            if age_seconds > _IN_TRADING_STALE_SECONDS:
-                return "STALE"
-        return "SUCCEEDED"
-
-    # 其他未知状态默认 SUCCEEDED
-    return "SUCCEEDED"
-
-
-def _flatten_node_metrics(metrics: dict | None) -> dict:
-    """将 metrics 中的节点对象转为扁平字段，适合前端直接使用。
-
-    输入: {"upper_node": {"price_mid": 72.35, "price_low": 72.10, "price_high": 72.60}, ...}
-    输出: {"upper_node_price": 72.35, "upper_node_low": 72.10, "upper_node_high": 72.60, ...}
-    """
-    if not metrics:
-        return {}
-
-    flat = {}
-    # Fields that are node objects (have price_mid/price_low/price_high)
-    node_keys = ["upper_node", "lower_node", "last_touched_node"]
-    for key in node_keys:
-        val = metrics.get(key)
-        if isinstance(val, dict):
-            flat[f"{key}_price"] = val.get("price_mid") or val.get("price") or None
-            flat[f"{key}_low"] = val.get("price_low") or None
-            flat[f"{key}_high"] = val.get("price_high") or None
-        elif val is not None:
-            # Already a number, pass through
-            flat[f"{key}_price"] = val
-
-    # poc_price: may be object or number
-    poc = metrics.get("poc_price")
-    if isinstance(poc, dict):
-        flat["poc_price"] = poc.get("price_mid") or poc.get("price") or None
-    elif poc is not None:
-        flat["poc_price"] = poc
-
-    # Copy non-node fields as-is (bb_upper, bb_mid, bb_lower, current_price, etc.)
-    skip_keys = set(node_keys) | {"poc_price"}
-    for k, v in metrics.items():
-        if k not in skip_keys:
-            flat[k] = v
-
-    return flat
-
-
-def _snapshot_to_metrics(snapshot: MonitorSnapshot) -> dict:
-    """将 MonitorSnapshotService 输出映射为 _flatten_node_metrics 输入格式。
-
-    复用 MonitorSnapshotService 的计算结果，不复制 BB/VN 算法。
-    只读 fallback：不生成事件、不写 MonitorState。
-    """
-    return {
-        "current_price": snapshot.current_price,
-        "bb_upper": snapshot.range_upper,
-        "bb_mid": snapshot.range_center,
-        "bb_lower": snapshot.range_lower,
-        "upper_node": snapshot.upper_volume_zone,
-        "lower_node": snapshot.lower_volume_zone,
-        "poc_price": snapshot.most_traded_price,
-        "position_0_1": snapshot.range_position,
-        "previous_close": snapshot.previous_close,
-        "change_pct": snapshot.change_pct,
-        "_source": "fallback_snapshot",
-    }
-
-
-def _is_payload_valid(payload: dict | None) -> bool:
-    """判定 MonitorState.payload 是否包含有效的监控指标字段。
-
-    关键字段缺失、为 None 或 NaN 时视为无效，应触发 fallback。
-    """
-    if not payload:
-        return False
-
-    required_fields = [
-        "current_price",
-        "bb_upper",
-        "bb_mid",
-        "bb_lower",
-        "upper_node",
-        "lower_node",
-        "poc_price",
-        "position_0_1",
-    ]
-    for field in required_fields:
-        value = payload.get(field)
-        if value is None:
-            return False
-        try:
-            if isinstance(value, float) and math.isnan(value):
-                return False
-        except (TypeError, ValueError):
-            return False
-    return True
+    if is_trading_day:
+        if market_session == "MARKET_CLOSED":
+            return today
+        # 盘中：读取上一个已完成交易日 snapshot
+        return await get_previous_trading_day_async(db, today)
+    # 非交易日：读取最近一个交易日 snapshot
+    return await get_most_recent_trading_day_async(db, today)
 
 
 @router.get("", response_model=WatchlistListResponse)
@@ -372,16 +272,29 @@ async def get_watchlist_monitor_status(
     """查询当前用户自选股+监控状态聚合数据。
 
     返回当前用户所有 active 自选股，附带最新 released watchlist_monitor 版本的
-    MonitorState 与 MonitorEvaluation。
+    MonitorEvaluation（评估状态）与 StockFeatureSnapshot（指标数据）。
 
     状态语义：
     - market_session: 市场阶段（NON_TRADING_DAY/PRE_OPEN/MORNING_SESSION/LUNCH_BREAK/AFTERNOON_SESSION/MARKET_CLOSED）
-    - calculation_status: 计算状态（SUCCEEDED/FAILED/STALE/WAITING_FIRST_RUN）
-    - monitor_status: 兼容字段，由 calculation_status 推导，SUCCEEDED 时回落到 market_session
-    - freshness_seconds: 基于 MonitorState.updated_at 的数据新鲜度（秒）
-    - last_bar_time: 最新评估对应的 bar 时间
+    - calculation_status: 计算状态（SUCCEEDED/WAITING_SNAPSHOT/NO_SNAPSHOT）
+      * SUCCEEDED: expected_trade_date 对应的 snapshot 存在，metrics 来自 snapshot.summary_payload
+      * WAITING_SNAPSHOT: 交易日已收盘（MARKET_CLOSED）但当日 snapshot 尚未生成
+        （orchestrator 未跑或失败；仅在 MARKET_CLOSED 时出现，盘中不出现）
+      * NO_SNAPSHOT: 盘中无昨日 snapshot / 非交易日无历史 snapshot / 无法解析交易日
+        （盘中 expected_trade_date 为上一交易日，缺失时返回 NO_SNAPSHOT，不是 WAITING_SNAPSHOT）
+    - monitor_status: 兼容字段，SUCCEEDED 时回落到 market_session，否则与 calculation_status 一致
+    - freshness_seconds: 基于 snapshot.updated_at 的数据新鲜度（秒）
+    - last_bar_time: 最新评估对应的 bar 时间（来自 MonitorEvaluation）
 
-    STALE 判定：仅在盘中交易时段使用 180 秒阈值；盘后/非交易日不因 30 分钟规则误判。
+    expected_snapshot_trade_date 规则（_resolve_expected_snapshot_trade_date）：
+    - 交易日未收盘 → 上一交易日（盘中读昨日 snapshot）
+    - 交易日已收盘 → today（读当日 snapshot）
+    - 非交易日 → 最近交易日
+    - 无法解析 → None（NO_SNAPSHOT）
+
+    metrics 数据源：
+    - 来自 StockFeatureSnapshot.summary_payload（_source='feature_snapshot'）
+    - 无 snapshot 时 metrics 为空 dict
     """
     # 0. 计算市场状态
     # 统一使用上海业务日期/时间作为唯一事实源，避免服务器本地时区跨日误判
@@ -417,22 +330,29 @@ async def get_watchlist_monitor_status(
     items_result = await db.execute(items_stmt)
     rows = items_result.all()
 
-    # 3. 若有 released 版本，批量查询所有相关 MonitorState
-    monitor_states_map: dict[UUID, MonitorState] = {}
-    if monitor_version_id is not None and rows:
+    # 3. 批量查询当日 feature snapshot（唯一键：instrument_id + expected_trade_date）
+    # snapshot 是 metrics 的唯一数据源，不再走 MonitorState.payload 或实时 fallback
+    snapshot_map: dict[UUID, StockFeatureSnapshot] = {}
+    expected_trade_date = await _resolve_expected_snapshot_trade_date(
+        db, today, market_status, is_trading_day,
+    )
+    if expected_trade_date is not None and rows:
         instrument_ids = [row[1].id for row in rows]
-        states_stmt = (
-            select(MonitorState)
+        snapshot_stmt = (
+            select(StockFeatureSnapshot)
             .where(
-                MonitorState.strategy_version_id == monitor_version_id,
-                MonitorState.instrument_id.in_(instrument_ids),
+                StockFeatureSnapshot.instrument_id.in_(instrument_ids),
+                StockFeatureSnapshot.trade_date == expected_trade_date,
+                StockFeatureSnapshot.schema_version == 1,
             )
         )
-        states_result = await db.execute(states_stmt)
-        for state in states_result.scalars():
-            monitor_states_map[state.instrument_id] = state
+        snapshot_result = await db.execute(snapshot_stmt)
+        for snap in snapshot_result.scalars():
+            snapshot_map[snap.instrument_id] = snap
 
     # 4. 批量查询每个 instrument 的最新 MonitorEvaluation（窗口函数取 rn=1）
+    # MonitorEvaluation 仅用于展示评估状态（evaluation_status/retry_count/error_code/source_bar_time），
+    # 不再作为 metrics 数据源
     eval_map: dict[UUID, object] = {}
     if monitor_version_id is not None and rows:
         instrument_ids = [row[1].id for row in rows]
@@ -498,10 +418,10 @@ async def get_watchlist_monitor_status(
     # 5. 组装响应
     response_items: list[WatchlistMonitorStatusItem] = []
     for watchlist_item, instrument in rows:
-        ms = monitor_states_map.get(instrument.id)
         eval_row = eval_map.get(instrument.id)
+        snapshot = snapshot_map.get(instrument.id)
 
-        # 从 MonitorEvaluation 获取评估字段
+        # 从 MonitorEvaluation 获取评估字段（仅用于展示，不影响 metrics）
         if eval_row is not None:
             evaluation_status = eval_row.evaluation_status
             retry_count = eval_row.retry_count
@@ -513,50 +433,42 @@ async def get_watchlist_monitor_status(
             error_code = None
             source_bar_time = None
 
-        # [monitor_status] - 拆分为 market_session 与 calculation_status
+        # [snapshot-based] - metrics 与 calculation_status 统一来自 feature snapshot
         market_session = market_status
-        calculation_status = _compute_calculation_status(
-            now_cst, market_session, eval_row, ms,
-        )
-        # 兼容字段：FAILED/STALE/WAITING_FIRST_RUN 保留计算语义，SUCCEEDED 时使用市场状态
-        if calculation_status in ("FAILED", "STALE", "WAITING_FIRST_RUN"):
+        if snapshot is not None:
+            calculation_status = "SUCCEEDED"
+            metrics = dict(snapshot.summary_payload or {})
+            updated_at = snapshot.updated_at
+            # 数据新鲜度基于 snapshot.updated_at
+            if updated_at is not None:
+                freshness_seconds = int(
+                    (now_cst - updated_at.astimezone(ZoneInfo("Asia/Shanghai"))).total_seconds()
+                )
+            else:
+                freshness_seconds = None
+        elif (
+            expected_trade_date is not None
+            and is_trading_day
+            and market_status == "MARKET_CLOSED"
+        ):
+            # 交易日已收盘但 snapshot 缺失 → orchestrator 未生成（等待 after_close 生成）
+            calculation_status = "WAITING_SNAPSHOT"
+            metrics = {}
+            updated_at = None
+            freshness_seconds = None
+        else:
+            # 盘中无昨日 snapshot / 非交易日无历史 snapshot → NO_SNAPSHOT
+            calculation_status = "NO_SNAPSHOT"
+            metrics = {}
+            updated_at = None
+            freshness_seconds = None
+
+        # 兼容字段：非 SUCCEEDED 时保留计算语义，SUCCEEDED 时使用市场状态
+        if calculation_status != "SUCCEEDED":
             monitor_status = calculation_status
         else:
             monitor_status = market_session
 
-        # 数据新鲜度
-        freshness_seconds = None
-        if ms is not None and ms.updated_at:
-            freshness_seconds = int(
-                (now_cst - ms.updated_at.astimezone(ZoneInfo("Asia/Shanghai"))).total_seconds()
-            )
-
-        # metrics 仍从 MonitorState.payload 获取（价格/指标数据），节点对象扁平化
-        # [Bugfix] - 描述: MonitorState 不存在或 payload 无效时，基于已有 bars fallback 计算
-        # 复用 MonitorSnapshotService.get_snapshot（只读，不生成事件/不写 MonitorState）
-        fallback_error_code: str | None = None
-        if ms is not None and _is_payload_valid(ms.payload):
-            metrics = _flatten_node_metrics(ms.payload)
-            updated_at = ms.updated_at
-        else:
-            try:
-                snapshot = await MonitorSnapshotService().get_snapshot(
-                    db, str(instrument.id), timeframe="1d"
-                )
-                metrics = _flatten_node_metrics(_snapshot_to_metrics(snapshot))
-                updated_at = None
-            except Exception as exc:
-                # 单行降级：不阻断整个自选列表，记录 error 并返回空 metrics
-                logger.exception(
-                    "[watchlist.monitor-status] fallback 计算失败 instrument_id=%s: %s",
-                    instrument.id,
-                    exc,
-                )
-                metrics = {}
-                updated_at = None
-                fallback_error_code = "FALLBACK_FAILED"
-        if fallback_error_code:
-            error_code = fallback_error_code
         latest_event = latest_event_map.get(instrument.id)
 
         response_items.append(

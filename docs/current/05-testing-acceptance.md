@@ -46,7 +46,7 @@
 - `BarsCoverageService` 统一 A 股口径，排除指数/ETF，默认使用 `shanghai_business_date`，返回 `coverage`（展示）与 `coverage_raw`（阈值判断）；
 - `/admin/after-close-runs/dsa-only`、`bars_scheduler`、系统概览 `WAITING_DSA` 判定等覆盖率门禁使用 `coverage_raw` 原始值；
 - `/admin/after-close-runs/dsa-only` 当日无数据时 fallback 到最新交易日，覆盖率不足返回 409；
-- `/watchlist/monitor-status` 无 `MonitorState` 或 `payload` 无效时通过 `MonitorSnapshotService` fallback 返回指标，单只失败单行降级；
+- `/watchlist/monitor-status` 无 `MonitorState` 或 `payload` 无效时通过 `MonitorSnapshotService` fallback 返回指标，单只失败单行降级（**已废弃，见 3.6 节**：fallback 已删除，metrics 改为读 `stock_feature_snapshots.summary_payload`）；
 - 飞书消息时间统一格式化为 Asia/Shanghai，文本中触发时间显示 CST；
 - 前端 `mergeRealtimeQuoteIntoBars` 不修改原数组、1d 保留日期语义、intraday 使用 `quote.update_time`。
 - admin monitor 资格：
@@ -246,6 +246,80 @@ pytest tests/test_indicator_cache.py tests/test_indicator_service.py -v
 
 cd /root/web_dev/frontend
 node --experimental-strip-types --test src/components/__tests__/dsaSourceAlignment.test.ts
+```
+
+## 3.6 Feature Snapshot 持久化回归（blocking）
+
+任何修改 `backend/app/services/feature_snapshot_service.py`、`backend/app/api/watchlist.py::get_watchlist_monitor_status`、`backend/app/services/after_close_orchestrator.py`（状态机或 `feature_snapshot` 步骤）、`backend/scripts/feature_snapshot_backfill.py`、`backend/app/models/stock_feature_snapshot.py` 必须跑 Feature Snapshot 持久化回归测试。
+
+后端 service 回归（`tests/test_feature_snapshot_service.py`，13 个用例）：
+- `build_summary_payload` 必须返回所有前端列表必需字段（`poc_price` / `nearest_node_above` / `nearest_node_below` / `distance_to_node_*_atr` / `node_interval_position_0_1` / `cost_position_zone` / `value_area_zone` / `daily/m15_developing_swing_*` / `m15_position_relative_to_daily` / `_source='feature_snapshot'` / `as_of` / `source_bar_time`）；
+- `build_summary_payload` 缺字段时填 `None`，不抛异常；
+- `_truncate_bars_to_trade_date` 必须按 `index.date <= trade_date` 截断，禁止未来数据；`None` 输入返回 `None`；15m bars 截断到当日；
+- `compute_feature_snapshot_for_date` 必须使用 `<= trade_date` 数据；数据不足时写 `degraded_reasons` 不抛异常；`source_primary_bar_time` 与 `source_secondary_bar_time` 必须为 `Asia/Shanghai` aware datetime；1d bar 时间规范化为 `trade_date 15:00+08:00`；
+- **`structural_payload` 必须包含 4 个 top-level key：`primary` / `secondary` / `relation` / `meta`**；`relation` 来自 `_compute_relation(primary_factors, secondary_factors)`；
+- `upsert_snapshot` 必须幂等：同 `(instrument_id, trade_date, primary_timeframe, secondary_timeframe, adj, schema_version)` 重复 upsert 只生成一行，`structural_payload`/`temporal_payload`/`summary_payload` 被第二次覆盖；
+- `compute_for_trade_date` 单股失败不阻断其他股票，失败比例超过 `failure_threshold`（默认 0.3）抛 `RuntimeError`；
+- **[half-baked rollback] `compute_for_trade_date` 不内部 commit**：超阈值抛 `RuntimeError` 后 caller rollback，DB 中不应残留该 trade_date 的部分 snapshot 行。
+
+后端 backfill 脚本回归（`tests/test_feature_snapshot_backfill.py`，18 个用例）：
+- `parse_args` 默认值：`end='latest'`、`batch_size=20`、`failure_threshold=0.3`、`resume=False`、`dry_run=False`；**`commit_every` 已移除**；自定义值正确解析；缺失 `--start` 报 `SystemExit`；
+- `get_trade_dates_from_bars` 返回升序 trade_dates；空表返回空列表；
+- `get_latest_bar_date` 返回 `bars_daily.trade_date` 最大值；空表返回 `None`；
+- **`get_existing_instrument_ids`** 返回某日已存在 snapshot 的 instrument_id 集合，按完整唯一键 `(instrument_id, trade_date, primary_timeframe, secondary_timeframe, adj, schema_version)` 过滤；按 `schema_version` 严格过滤；
+- `backfill_single_date` `--dry-run` 不调用 `compute_for_trade_date`，输出 `missing_instruments` 数量；正常模式调用 `compute_for_trade_date`；**`--resume` 真正跳过已存在 instrument（不重新计算）**；`--resume` 无已存在时调用 compute 处理全部；`--resume` 全部已存在时不调用 compute，返回 `skipped_existing`；
+- `main` `--dry-run` 端到端不写库；**单日失败 `rollback` 半成品不阻断其他日期**（验证 `rollback_count==1` + `commit_count==1`）；`--end=latest` 解析为 `bars_daily` 表最新 trade_date；`start > end` 直接 `sys.exit(1)`。
+
+API 契约回归（`tests/test_watchlist_monitor_status_snapshot.py`，7 个用例）：
+- `SUCCEEDED`：交易日已收盘且 snapshot 存在，`calculation_status='SUCCEEDED'`，`metrics` 来自 `summary_payload` 且 `_source='feature_snapshot'`，`freshness_seconds` 为整数；
+- `NO_SNAPSHOT`：非交易日，`calculation_status='NO_SNAPSHOT'`，`metrics` 为空 dict，`freshness_seconds=None`；
+- `WAITING_SNAPSHOT`：交易日已收盘但 snapshot 缺失，`calculation_status='WAITING_SNAPSHOT'`，`metrics` 为空 dict；
+- **[盘中读上一交易日] 交易日 10:00 + 有昨日 snapshot → `SUCCEEDED` + 昨日 metrics**；
+- **[非交易日读最近交易日] 非交易日 + 有最近交易日 snapshot → `SUCCEEDED`**；
+- **[非交易日无历史] 非交易日 + 无历史 snapshot → `NO_SNAPSHOT`**；
+- **[盘中缺上一交易日 snapshot] 交易日 10:00 + trading_calendar 存在上一交易日 + 无昨日 snapshot → `NO_SNAPSHOT`（不是 `WAITING_SNAPSHOT`）+ `metrics={}`**；防止盘中历史快照缺失被误报 WAITING_SNAPSHOT；
+- `_resolve_expected_snapshot_trade_date` 复用 `calendar_service.get_previous_trading_day_async` / `get_most_recent_trading_day_async`，禁止硬编码周末。
+
+orchestrator 状态机回归（`tests/test_after_close_orchestrator.py`，9 个用例）：
+- `AfterCloseRunStatus` 枚举包含 `FEATURE_SNAPSHOT`；
+- 状态机流转顺序：`quality_gate → feature_snapshot → publishing`；
+- 断点恢复：`last_completed_step='quality_gate'` 时 `skip_snapshot=False`；`last_completed_step='feature_snapshot'` 时 `skip_snapshot=True`；
+- `feature_snapshot` 步骤使用独立 `AsyncSessionLocal`，不依赖请求 session；
+- **[feature_snapshot 失败不进入 publishing] `compute_for_trade_date` 抛 `RuntimeError` → `publish_run` 不被调用 + `job_run.status='failed'` + 不应有 publishing/succeeded 事件**。
+
+迁移幂等回归：
+- `alembic upgrade head` 在 test DB 上能成功创建 `stock_feature_snapshots` 表；
+- `alembic downgrade -1` 能删除表；
+- `alembic upgrade head` 再升级不报错（幂等）；
+- 表结构含唯一约束 `uq_feature_snapshot_instrument_date_tf_adj_schema` 与 3 个 btree 索引。
+
+回归命令：
+
+```bash
+cd /root/web_dev/backend
+APP_ENV=test TEST_DATABASE_URL=postgresql+asyncpg://bz:bz@localhost:5433/bz_stock_test \
+pytest tests/test_feature_snapshot_service.py tests/test_feature_snapshot_backfill.py \
+       tests/test_watchlist_monitor_status_snapshot.py tests/test_after_close_orchestrator.py \
+       tests/test_job_runs_and_monitor_status.py -q
+
+ruff check app/services/feature_snapshot_service.py \
+  app/api/watchlist.py \
+  app/services/after_close_orchestrator.py \
+  scripts/feature_snapshot_backfill.py \
+  tests/test_feature_snapshot_service.py \
+  tests/test_feature_snapshot_backfill.py \
+  tests/test_watchlist_monitor_status_snapshot.py
+
+mypy app/services/feature_snapshot_service.py
+```
+
+预期：47 passed、ruff 零错误、mypy 零错误。
+
+小范围 dry-run 验证命令（不写库，仅打印计划）：
+
+```bash
+cd /root/web_dev/backend && .venv/bin/python -m scripts.feature_snapshot_backfill \
+    --start 2026-07-04 --end 2026-07-07 --dry-run
 ```
 
 ## 4. CI 门禁

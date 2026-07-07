@@ -57,7 +57,16 @@ Node Cluster 算法
 - 桌面端表格不显示每行状态栏，交易/非交易日状态统一在页眉用 `MonitorStatusBadge` 全局展示；
 - 移动端卡片头不显示每行状态徽章；
 - 数据列开启表头过滤（`filterable=true`）；
-- 表格使用 `compact-table` 与趋势选股页字体/布局对齐。
+- 表格使用 `compact-table` 与趋势选股页字体/布局对齐；
+- **指标数据源 = `stock_feature_snapshots.summary_payload`（不再走实时计算 fallback）**：
+  - 后端 `GET /api/v1/watchlist/monitor-status` 响应每项包含 `calculation_status` 三态字段与 `metrics` 对象；
+  - 前端按 `calculation_status` 三态展示：
+    - `SUCCEEDED`：`metrics` 来自 `summary_payload`，正常渲染指标列；页眉可基于 `freshness_seconds` 显示数据新鲜度；
+    - `WAITING_SNAPSHOT`：交易日已收盘但盘后 orchestrator 未生成 snapshot，`metrics` 为空 dict，前端指标列展示占位符（如 `—`）并提示「盘后快照生成中」；
+    - `NO_SNAPSHOT`：非交易日或交易日内，`metrics` 为空 dict，前端指标列展示占位符（如 `—`），不提示错误；
+  - 前端只渲染后端返回的 `metrics` 字段（`poc_price` / `nearest_node_above` / `nearest_node_below` / `daily_developing_swing_dir` / `m15_developing_swing_dir` / `current_price` / `change_pct` 等），**不重新计算**任何 DSA/BB/swing/temporal 因子；
+  - 前端不调用 `MonitorSnapshotService` 实时计算路径，不依赖 `MonitorState.payload` fallback；
+  - `MonitorEvaluation` 的 `evaluation_status` / `retry_count` / `error_code` / `source_bar_time` 仅用于展示评估状态徽章，不作为 metrics 数据源。
 
 ### 个股详情
 

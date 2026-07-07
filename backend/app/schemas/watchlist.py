@@ -65,16 +65,16 @@ class WatchlistMonitorStatusItem(BaseModel):
     market: str = Field(..., description="市场（SH/SZ/BJ）")
     watchlist_created_at: datetime = Field(..., description="加入自选时间")
     monitor_status: str = Field(
-        ..., description="兼容字段：FAILED/STALE/SUCCEEDED/WAITING_FIRST_RUN/PRE_MARKET/LUNCH_BREAK/AFTER_MARKET/NON_TRADING_DAY"
+        ..., description="兼容字段：SUCCEEDED 时回落到 market_session，否则与 calculation_status 一致"
     )
     market_session: str = Field(
-        ..., description="市场状态：TRADING/AFTER_MARKET/LUNCH_BREAK/PRE_MARKET/NON_TRADING_DAY"
+        ..., description="市场状态：NON_TRADING_DAY/PRE_OPEN/MORNING_SESSION/LUNCH_BREAK/AFTERNOON_SESSION/MARKET_CLOSED"
     )
     calculation_status: str = Field(
-        ..., description="计算状态：SUCCEEDED/FAILED/STALE/WAITING_FIRST_RUN"
+        ..., description="计算状态：SUCCEEDED/WAITING_SNAPSHOT/NO_SNAPSHOT"
     )
     freshness_seconds: int | None = Field(
-        None, description="数据新鲜度（秒），基于 MonitorState.updated_at 计算"
+        None, description="数据新鲜度（秒），基于 StockFeatureSnapshot.updated_at 计算"
     )
     last_bar_time: str | None = Field(
         None, description="最新评估对应的 bar 时间"
@@ -92,10 +92,10 @@ class WatchlistMonitorStatusItem(BaseModel):
         None, description="评估对应的 bar 时间"
     )
     metrics: dict[str, Any] | None = Field(
-        None, description="监控状态 metrics（MonitorState payload，无状态时为 null）"
+        None, description="监控指标（来自 StockFeatureSnapshot.summary_payload，无 snapshot 时为空 dict）"
     )
     updated_at: datetime | None = Field(
-        None, description="监控状态更新时间"
+        None, description="snapshot 更新时间"
     )
     latest_event: dict[str, Any] | None = Field(
         None, description="最新策略事件（event_type/event_time/boundary）"

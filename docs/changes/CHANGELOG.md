@@ -4,6 +4,15 @@
 
 ## 2026-07-07
 
+- CHANGE-20260707-047: Feature Snapshot 持久化（自选股监控指标从实时计算切换为盘后快照）
+  - 新增 `stock_feature_snapshots` 表（JSONB payload + 唯一约束 + 3 btree 索引，无 GIN 索引）
+  - 新增 `backend/app/services/feature_snapshot_service.py`：复用 `_compute_all_factors_for_bars` / `_compute_relation` / `_compute_daily_context` / `_compute_m15_response` / `_compute_derived_relation` / `bollinger()` 不复制公式；point-in-time 截断 `index.date <= trade_date`；upsert 幂等；单股失败写 `degraded_reasons` 不阻断批次；`compute_for_trade_date` 不内部 commit，caller 控制 commit/rollback
+  - 修改 `backend/app/services/after_close_orchestrator.py` 状态机：`quality_gate → feature_snapshot → publishing`，断点恢复路径更新；feature_snapshot 失败显式 rollback 不进入 publishing
+  - 修改 `backend/app/api/watchlist.py::get_watchlist_monitor_status`：metrics 唯一来自 `summary_payload`，新增 `calculation_status` 三态（SUCCEEDED/WAITING_SNAPSHOT/NO_SNAPSHOT），`_resolve_expected_snapshot_trade_date`（async）复用 `calendar_service`，删除 `MonitorSnapshotService` 实时 fallback 与 `MonitorState.payload` fallback
+  - 新增 `backend/scripts/feature_snapshot_backfill.py` 历史回补 CLI 脚本（核心计算复用 service，脚本只做 CLI/dry-run/resume 真正跳过/批量调用/per-date 事务）
+  - 删除 `backend/tests/test_watchlist_monitor_status_fallback.py`（278 行旧 fallback 测试），新增 4 个新测试文件（service + backfill + API 契约 + orchestrator 调整）
+  - **PR #38 Review Blocker 修复**：6 个 blocker（`_resolve_expected_snapshot_trade_date` 规则、半成品 rollback、backfill resume 真正跳过、`structural_payload.relation` 字段、PR/docs 历史表述更正、test DB 验证）详见 `records/CHANGE-20260707-047.md` Blocker 修复章节
+  - 部署边界：未执行生产库 migration、未全量 backfill、未 merge/部署；test DB 已验证 alembic upgrade/downgrade/upgrade 链路
 - CHANGE-20260707-046: 修复 pytdx_adapter 对 aware 1m start/end 的比较异常
   - 根因：PR #35 后 `MarketDataAggregationService` 传入 aware `Asia/Shanghai` start/end，但 `pytdx_adapter.get_minute_bars` 内部 pytdx 数据 `datetime` 列为 naive，比较时触发 `Invalid comparison between dtype=datetime64[us] and Timestamp`
   - 修复：`get_minute_bars` 过滤前将 aware start/end 按 `Asia/Shanghai` 解释后转为 naive

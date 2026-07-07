@@ -25,7 +25,7 @@
 | admin_subscription | `app/api/admin_subscription.py` | 订阅/邀请码/调度任务/Worker 心跳/消息投递管理 |
 | admin_beta_applications | `app/api/admin_beta_applications.py` | 内测申请管理 |
 | admin_after_close | `app/api/admin_after_close.py` | 盘后编排管理；`/after-close-runs/dsa-only` 支持 fallback 到最新可用交易日，覆盖率门禁使用 `coverage_raw` 原始值 |
-| watchlist | `app/api/watchlist.py` | 用户自选股；`/watchlist/monitor-status` 无 MonitorState 或 payload 无效时通过 `MonitorSnapshotService` fallback 返回指标，单只失败单行降级 |
+| watchlist | `app/api/watchlist.py` | 用户自选股；`GET /watchlist/monitor-status` 响应 `metrics` 唯一来自 `stock_feature_snapshots.summary_payload`（`_source='feature_snapshot'`），不再走 `MonitorSnapshotService` 实时计算或 `MonitorState.payload` fallback；新增 `calculation_status` 三态（SUCCEEDED/WAITING_SNAPSHOT/NO_SNAPSHOT）；`MonitorEvaluation` 仅展示评估状态字段（evaluation_status/retry_count/error_code/source_bar_time），不作为 metrics 数据源；`freshness_seconds` 基于 `snapshot.updated_at` |
 | stock_memos | `app/api/stock_memos.py` | 个股备忘录 |
 | stock_detail_feishu | `app/api/stock_detail_feishu.py` | 个股详情发送飞书 |
 | public_beta | `app/api/public_beta.py` | 公开内测申请 |
