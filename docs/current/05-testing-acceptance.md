@@ -377,6 +377,43 @@ cd /root/web_dev/backend && .venv/bin/python -m scripts.feature_snapshot_backfil
     --start 2026-07-04 --end 2026-07-07 --dry-run
 ```
 
+## 3.6.1 盘后流水线聚合 API 回归（blocking）
+
+任何修改 `backend/app/services/after_close_pipeline_service.py`、`backend/app/api/admin_after_close.py`（pipeline 端点部分）、`backend/app/schemas/after_close_pipeline.py` 必须跑盘后流水线聚合 API 回归测试。
+
+后端回归（`tests/test_admin_after_close_pipeline.py`，8 个用例）：
+- 无 after_close run 时返回 `overall_status='not_started'` + `watchlist_ready=false`；
+- 运行中 run（status=running）时返回 `overall_status='running'` + 当前步骤 status='running'；
+- 成功 run + snapshot succeeded + scope=full → `overall_status='succeeded'` + `watchlist_ready=true`；
+- `watchlist_ready` 严格判定：snapshot `scope='sample'` 时 `watchlist_ready=false`（sample backfill 不计入）；
+- 失败 run（status=failed）时返回 `overall_status='failed'` + error_message 非空；
+- POST `/after-close/pipeline/run` 幂等：同 trade_date 已有 queued/running/succeeded run 时返回 existing（`is_new=false`）；
+- events 列表限制 100 条；
+- 非 admin 用户访问返回 403。
+
+前端构建验证：
+- `tsc --noEmit` 零错误；
+- `npm run build` 成功（含新页面 `AdminAfterClosePipelinePage` 和摘要卡改造）。
+
+回归命令：
+
+```bash
+cd /root/web_dev/backend
+APP_ENV=test TEST_DATABASE_URL=postgresql+asyncpg://bz:bz@localhost:5433/bz_stock_test \
+pytest tests/test_admin_after_close_pipeline.py -q
+
+ruff check app/schemas/after_close_pipeline.py \
+  app/services/after_close_pipeline_service.py \
+  app/api/admin_after_close.py \
+  tests/test_admin_after_close_pipeline.py
+
+mypy app/schemas/after_close_pipeline.py app/services/after_close_pipeline_service.py app/api/admin_after_close.py
+
+cd /root/web_dev/frontend && npm run build
+```
+
+预期：8 passed、ruff 零错误、mypy 零错误、前端 build 成功。
+
 ## 3.7 Monitor Image Capture Token 回归（blocking）
 
 任何修改 `backend/app/services/monitor_batch_service.py`、

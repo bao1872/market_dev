@@ -1,14 +1,14 @@
-// 盘后流水线状态卡片 - 7 阶段进度 + WAITING_DSA 提示 + 操作按钮
+// 盘后流水线摘要卡 - 系统概览第二层入口卡
 //
 // 用法：
 // 1. 在 AdminIndexPage 中嵌入，数据来自 useAdminSystemOverview().after_close_pipeline
-// 2. 显示 7 阶段进度条（NOT_STARTED → BARS_RUNNING → WAITING_DSA → DSA_QUEUED → DSA_RUNNING → DSA_COMPLETED → PUBLISHED）
-// 3. WAITING_DSA 状态时展示细分原因 + 人类可读建议
-// 4. 操作按钮（[Phase6] 拆分为 4 个独立入口）：
+// 2. 摘要展示：状态 pill / 业务日期 / 编排阶段 / watchlist_ready / Worker 心跳
+// 3. 操作按钮（4 个独立入口）：
 //    - 更新今日日线并计算选股（POST /admin/after-close-runs，原 create）
 //    - 仅重算今日选股（POST /admin/after-close-runs/dsa-only，要求覆盖率 ≥ 90%）
 //    - 从失败步骤继续（POST /admin/after-close-runs/{id}/resume，仅失败状态显示）
 //    - 强制执行（POST /admin/after-close-runs/{id}/force，二次确认）
+// 4. 进入详情页链接 → /admin/after-close（8 步骤时间线 + 数据新鲜度 + 运行列表 + 事件抽屉）
 //
 // 依赖 hooks：
 // - useCreateAfterCloseRun：创建盘后编排（POST /admin/after-close-runs）
@@ -16,8 +16,10 @@
 // - useRetryAfterCloseRun：重试失败任务（POST /admin/after-close-runs/{id}/retry）
 // - useResumeAfterCloseRun：从失败步骤继续（POST /admin/after-close-runs/{id}/resume）
 // - useForceAfterCloseRun：强制重新执行（POST /admin/after-close-runs/{id}/force）
+// - useAfterCloseRunStatus：轮询编排详情（worker/心跳/租约/检查点）
 
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import {
   useCreateAfterCloseRun,
   useDsaOnlyRun,
@@ -30,43 +32,37 @@ import { useToast } from '@/store/toast'
 import { shanghaiBusinessDate, formatShanghaiTime } from '@/utils/datetime'
 import type { SystemOverview } from '@/api/endpoints'
 
-// [AfterClosePipelineCard] - 7 阶段定义（顺序即流水线推进顺序）
-const PIPELINE_STAGES = [
-  { key: 'NOT_STARTED', label: '未开始' },
-  { key: 'BARS_RUNNING', label: '行情更新' },
-  { key: 'WAITING_DSA', label: '等待DSA' },
-  { key: 'DSA_QUEUED', label: 'DSA排队' },
-  { key: 'DSA_RUNNING', label: 'DSA计算' },
-  { key: 'DSA_COMPLETED', label: 'DSA完成' },
-  { key: 'PUBLISHED', label: '已发布' },
-] as const
-
-// [AfterClosePipelineCard] - 状态 → 阶段索引 + 状态样式映射
-function statusToStage(status: string | undefined): {
-  index: number
-  state: 'done' | 'active' | 'error'
-} {
-  if (!status) return { index: 0, state: 'active' }
+// [AfterClosePipelineCard] - 状态 → pill 样式映射
+function statusPillClass(status: string | undefined): string {
+  if (!status) return 'off'
+  if (status === 'PUBLISHED') return 'ok'
   const failedStates = ['BARS_FAILED', 'DSA_FAILED', 'STALE']
-  if (failedStates.includes(status)) {
-    // BARS_FAILED → 阶段 1（行情更新失败）
-    // DSA_FAILED → 阶段 4（DSA 计算失败）
-    // STALE → 阶段 0（整体过期）
-    if (status === 'BARS_FAILED') return { index: 1, state: 'error' }
-    if (status === 'DSA_FAILED') return { index: 4, state: 'error' }
-    return { index: 0, state: 'error' }
+  if (failedStates.includes(status)) return 'error'
+  const runningStates = ['BARS_RUNNING', 'DSA_RUNNING']
+  if (runningStates.includes(status)) return 'warn'
+  return 'off'
+}
+
+// [AfterClosePipelineCard] - 状态中文标签
+function statusLabel(status: string | undefined): string {
+  switch (status) {
+    case 'NOT_STARTED': return '未开始'
+    case 'BARS_RUNNING': return '行情更新中'
+    case 'BARS_FAILED': return '行情失败'
+    case 'WAITING_DSA': return '等待DSA'
+    case 'DSA_QUEUED': return 'DSA排队'
+    case 'DSA_RUNNING': return 'DSA计算中'
+    case 'DSA_COMPLETED': return 'DSA完成'
+    case 'DSA_FAILED': return 'DSA失败'
+    case 'PUBLISHED': return '已发布'
+    case 'STALE': return '过期'
+    default: return '-'
   }
-  const idx = PIPELINE_STAGES.findIndex((s) => s.key === status)
-  if (idx < 0) return { index: 0, state: 'active' }
-  // PUBLISHED 是终态，所有阶段标记为 done
-  if (status === 'PUBLISHED') return { index: PIPELINE_STAGES.length - 1, state: 'done' }
-  return { index: idx, state: 'active' }
 }
 
 // [AfterClose] - 创建盘后编排 409 detail → 人类可读消息（透明化真实失败原因）
 // 后端 409 来源：NON_TRADING_DAY（非交易日）/ DUPLICATE_RUN（同日已有 queued/running 任务）/
 // DATA_COVERAGE_INSUFFICIENT（覆盖率不足，dsa-only 复用此 formatter）
-// 不再统一显示"请稍后重试或检查权限"，丢失真实原因
 function formatAfterCloseCreate409Message(detail: unknown): string {
   if (typeof detail === 'string') return detail
   if (detail && typeof detail === 'object') {
@@ -77,21 +73,14 @@ function formatAfterCloseCreate409Message(detail: unknown): string {
       orchestrator_status?: string
       started_at?: string
     }
-    // 非交易日
     if (d.error_code === 'NON_TRADING_DAY' || d.reason === 'NON_TRADING_DAY') {
       return d.message ?? '非交易日无需执行'
     }
-    // 同日已有盘后任务正在运行：展示当前阶段 + 开始时间
     if (d.error_code === 'DUPLICATE_RUN') {
-      const stage = d.orchestrator_status
-        ? `（当前阶段: ${d.orchestrator_status}）`
-        : ''
-      const start = d.started_at
-        ? `，开始于 ${formatShanghaiTime(d.started_at)}`
-        : ''
+      const stage = d.orchestrator_status ? `（当前阶段: ${d.orchestrator_status}）` : ''
+      const start = d.started_at ? `，开始于 ${formatShanghaiTime(d.started_at)}` : ''
       return `当天已有盘后任务正在运行${stage}${start}`
     }
-    // 覆盖率不足
     if (d.reason === 'DATA_COVERAGE_INSUFFICIENT') {
       return d.message ?? '行情覆盖率不足，暂无法执行'
     }
@@ -130,11 +119,6 @@ export function AfterClosePipelineCard({
   const [confirmingForce, setConfirmingForce] = useState(false)
 
   const status = pipeline?.status
-  const { index: currentIndex, state: currentState } = statusToStage(status)
-
-  // WAITING_DSA 提示
-  const waitingReason = pipeline?.waiting_dsa_reason
-  const waitingSuggestion = pipeline?.waiting_dsa_suggestion
 
   // [Phase6] - 失败状态：BARS_FAILED/DSA_FAILED/STALE 时显示重试 + resume 按钮
   const isFailedState = status === 'BARS_FAILED' || status === 'DSA_FAILED' || status === 'STALE'
@@ -143,13 +127,10 @@ export function AfterClosePipelineCard({
   const canForce = !!jobRunId
 
   // [AfterClose] - 当天已有 queued/running 编排任务时禁用创建按钮（避免触发 409 DUPLICATE_RUN）
-  // afterCloseDetail.status 为编排任务 SchedulerJobRun.status（queued/running/succeeded/failed/interrupted）
   const orchestratorJobStatus = afterCloseDetail?.status
   const hasActiveAfterCloseRun =
     orchestratorJobStatus === 'queued' || orchestratorJobStatus === 'running'
 
-  // 创建盘后编排（更新今日日线并计算选股）
-  // [AfterClose] - 409 时透传后端真实 detail（已有任务/非交易日/覆盖率不足），不再统一"检查权限"
   const handleCreate = async () => {
     const date = tradeDate || shanghaiBusinessDate()
     try {
@@ -169,9 +150,6 @@ export function AfterClosePipelineCard({
     }
   }
 
-  // [Phase6] 仅重算今日 DSA（要求当日日线覆盖率 ≥ 90%）
-  // [AfterClose] - 409 时复用 formatAfterCloseCreate409Message 透传真实原因
-  // （覆盖率不足 / 同日已有任务），不再统一"检查权限"
   const handleDsaOnly = async () => {
     const date = tradeDate || shanghaiBusinessDate()
     try {
@@ -189,7 +167,6 @@ export function AfterClosePipelineCard({
     }
   }
 
-  // 重试失败任务（从头执行，与 resume 区别：retry 重置 last_completed_step）
   const handleRetry = async () => {
     if (!jobRunId) return
     try {
@@ -200,7 +177,6 @@ export function AfterClosePipelineCard({
     }
   }
 
-  // [Phase6] 从失败步骤继续（保留断点检查点，不重复拉行情）
   const handleResume = async () => {
     if (!jobRunId) return
     try {
@@ -213,7 +189,6 @@ export function AfterClosePipelineCard({
     }
   }
 
-  // 强制重新执行（带二次确认）
   const handleForce = async () => {
     if (!jobRunId) return
     if (!confirmingForce) {
@@ -235,11 +210,10 @@ export function AfterClosePipelineCard({
         <div>
           <div className="card-title">盘后流水线</div>
           <div className="card-sub">
-            {loading ? '加载中…' : `状态: ${status ?? '-'}`}
+            {loading ? '加载中…' : `状态: ${statusLabel(status)}`}
           </div>
         </div>
         <div className="actions after-close-actions">
-          {/* [Phase6] - 4 个独立入口：更新日线+选股 / 仅重算选股 / 从断点继续 / 强制执行 */}
           <button
             className="btn small primary"
             onClick={handleCreate}
@@ -297,217 +271,73 @@ export function AfterClosePipelineCard({
         </div>
       </div>
       <div className="card-body">
-        {/* 7 阶段进度条 */}
-        <div className="pipeline-steps">
-          {PIPELINE_STAGES.map((stage, i) => {
-            let cls = ''
-            if (currentState === 'error' && i === currentIndex) {
-              cls = 'error'
-            } else if (i < currentIndex || (currentState === 'done' && i === currentIndex)) {
-              cls = 'done'
-            } else if (i === currentIndex) {
-              cls = 'active'
-            }
-            return (
-              <div key={stage.key} className={`pipeline-step ${cls}`}>
-                <b>{stage.label}</b>
-                {stage.key === status && <span>{stage.key === status ? '●' : ''}</span>}
-              </div>
-            )
-          })}
+        {/* 摘要行：状态 pill + 编排阶段 + Worker 心跳 + 进入详情链接 */}
+        <div className="toggle-row">
+          <span>流水线状态</span>
+          <b>
+            <span className={`status-pill ${statusPillClass(status)}`}>
+              {statusLabel(status)}
+            </span>
+          </b>
         </div>
-
-        {/* bars_job / dsa_run 摘要 */}
-        {pipeline?.bars_job && (
-          <div className="toggle-row">
-            <span>bars_scheduler</span>
-            <b className="num">
-              {pipeline.bars_job.status ?? '-'}
-              {pipeline.bars_job.finished_at
-                ? ` · ${formatShanghaiTime(pipeline.bars_job.finished_at)}`
-                : ''}
-            </b>
-          </div>
-        )}
-        {pipeline?.dsa_run && (
-          <div className="toggle-row">
-            <span>DSA 状态</span>
-            <b className="num">
-              {pipeline.dsa_run.status ?? '-'}
-              {pipeline.dsa_run.error_message ? ` · ${pipeline.dsa_run.error_message}` : ''}
-            </b>
-          </div>
-        )}
-
-        {/* WAITING_DSA 提示 */}
-        {waitingReason && (
+        <div className="toggle-row">
+          <span>编排阶段</span>
+          <b className="num">
+            {loading ? '-' : (pipeline?.orchestrator_status ?? '-')}
+          </b>
+        </div>
+        <div className="toggle-row">
+          <span>Worker 心跳</span>
+          <b className="num">
+            {loading
+              ? '-'
+              : afterCloseDetail?.heartbeat_at
+                ? `${formatShanghaiTime(afterCloseDetail.heartbeat_at)}${
+                    afterCloseDetail.heartbeat_stale ? '（超时）' : ''
+                  }`
+                : '无记录'}
+          </b>
+        </div>
+        <div className="toggle-row">
+          <span>最后成功步骤</span>
+          <b className="num">
+            {loading ? '-' : (afterCloseDetail?.last_completed_step ?? '-')}
+          </b>
+        </div>
+        <div className="toggle-row">
+          <span>行情更新至</span>
+          <b className="num">
+            {loading
+              ? '-'
+              : pipeline?.data_freshness?.bars?.latest_daily_trade_date ?? '-'}
+          </b>
+        </div>
+        <div className="toggle-row">
+          <span>选股发布至</span>
+          <b className="num">
+            {loading
+              ? '-'
+              : pipeline?.data_freshness?.strategy?.latest_published_trade_date ?? '-'}
+          </b>
+        </div>
+        {/* WAITING_DSA 提示（保留，便于管理员快速发现阻塞原因） */}
+        {pipeline?.waiting_dsa_reason && (
           <div className="pipeline-waiting-notice">
-            <b>等待 DSA: {waitingReason}</b>
-            {waitingSuggestion && <span>建议: {waitingSuggestion}</span>}
+            <b>等待 DSA: {pipeline.waiting_dsa_reason}</b>
+            {pipeline.waiting_dsa_suggestion && (
+              <span>建议: {pipeline.waiting_dsa_suggestion}</span>
+            )}
           </div>
         )}
-
-        {/* 错误信息 */}
-        {currentState === 'error' && pipeline?.dsa_run?.error_message && (
+        {/* 错误信息（失败状态时展示） */}
+        {isFailedState && pipeline?.dsa_run?.error_message && (
           <div className="notice error" style={{ marginTop: '10px' }}>
             {pipeline.dsa_run.error_message}
           </div>
         )}
-
-        {/* [Phase7] 编排状态详情：当前阶段/心跳/租约/最后成功步骤/中断原因
-            数据来源：useAfterCloseRunStatus(jobRunId) 轮询 GET /admin/after-close-runs/{id}
-            展示条件：jobRunId 存在且查询返回数据
-            心跳超时（heartbeat_stale=true）红色高亮，中断原因红色文字 */}
-        {afterCloseDetail && (
-          <div className="orchestrator-detail">
-            <div className="detail-title">编排状态详情</div>
-            <div className="detail-grid">
-              <div className="toggle-row">
-                <span>当前阶段</span>
-                <b className="num">{afterCloseDetail.orchestrator_status ?? '-'}</b>
-              </div>
-              <div className="toggle-row">
-                <span>Worker</span>
-                <b className="num">{afterCloseDetail.worker_instance_id ?? '-'}</b>
-              </div>
-              <div className={`toggle-row${afterCloseDetail.heartbeat_stale ? ' stale' : ''}`}>
-                <span>最后心跳</span>
-                <b className="num">
-                  {afterCloseDetail.heartbeat_at
-                    ? formatShanghaiTime(afterCloseDetail.heartbeat_at)
-                    : '-'}
-                  {afterCloseDetail.heartbeat_stale && '（超时）'}
-                </b>
-              </div>
-              <div className="toggle-row">
-                <span>租约到期</span>
-                <b className="num">
-                  {afterCloseDetail.lease_expires_at
-                    ? formatShanghaiTime(afterCloseDetail.lease_expires_at)
-                    : '-'}
-                </b>
-              </div>
-              <div className="toggle-row">
-                <span>最后成功步骤</span>
-                <b className="num">{afterCloseDetail.last_completed_step ?? '-'}</b>
-              </div>
-              {afterCloseDetail.interrupt_reason && (
-                <div className="toggle-row interrupt-reason">
-                  <span>中断原因</span>
-                  <b className="num">{afterCloseDetail.interrupt_reason}</b>
-                </div>
-              )}
-            </div>
-            {/* [AfterClose] - 非交易日等跳过原因提示（黄色警告） */}
-            {afterCloseDetail.skip_reason === 'NON_TRADING_DAY' && (
-              <div className="notice warn" style={{ marginTop: '10px' }}>
-                因非交易日跳过，未执行行情更新和选股
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* [Phase 9] 数据新鲜度：行情数据 + 选股策略两个独立区块 */}
-        {pipeline?.data_freshness && (
-          <div className="data-freshness-grid">
-            {/* 行情数据区块（6 项，is_behind=true 红色高亮）*/}
-            <div
-              className={`data-freshness-block${
-                pipeline.data_freshness.bars.is_behind_latest_trade_date ? ' behind' : ''
-              }`}
-            >
-              <div className="data-freshness-title">行情数据</div>
-              <div className="toggle-row">
-                <span>最新日线交易日</span>
-                <b className="num">
-                  {pipeline.data_freshness.bars.latest_daily_trade_date ?? '-'}
-                </b>
-              </div>
-              <div className="toggle-row">
-                <span>日线覆盖率</span>
-                <b className="num">
-                  {pipeline.data_freshness.bars.daily_coverage != null
-                    ? `${(pipeline.data_freshness.bars.daily_coverage * 100).toFixed(1)}%`
-                    : '-'}
-                </b>
-              </div>
-              <div className="toggle-row">
-                <span>最新 15m Bar</span>
-                <b className="num">
-                  {pipeline.data_freshness.bars.latest_15m_bar_time
-                    ? formatShanghaiTime(pipeline.data_freshness.bars.latest_15m_bar_time)
-                    : '-'}
-                </b>
-              </div>
-              <div className="toggle-row">
-                <span>最新 60m Bar</span>
-                <b className="num">
-                  {pipeline.data_freshness.bars.latest_60m_bar_time
-                    ? formatShanghaiTime(pipeline.data_freshness.bars.latest_60m_bar_time)
-                    : '-'}
-                </b>
-              </div>
-              <div className="toggle-row">
-                <span>最后成功任务</span>
-                <b className="num">
-                  {pipeline.data_freshness.bars.last_success_job_id
-                    ? pipeline.data_freshness.bars.last_success_job_id.slice(0, 8)
-                    : '-'}
-                </b>
-              </div>
-              {pipeline.data_freshness.bars.is_behind_latest_trade_date && (
-                <div className="data-freshness-warn">行情落后最近交易日</div>
-              )}
-            </div>
-
-            {/* 选股策略区块（7 项）*/}
-            <div className="data-freshness-block">
-              <div className="data-freshness-title">选股策略</div>
-              <div className="toggle-row">
-                <span>最新计算交易日</span>
-                <b className="num">
-                  {pipeline.data_freshness.strategy.latest_compute_trade_date ?? '-'}
-                </b>
-              </div>
-              <div className="toggle-row">
-                <span>最新发布交易日</span>
-                <b className="num">
-                  {pipeline.data_freshness.strategy.latest_published_trade_date ?? '-'}
-                </b>
-              </div>
-              <div className="toggle-row">
-                <span>运行状态</span>
-                <b className="num">{pipeline.data_freshness.strategy.status ?? '-'}</b>
-              </div>
-              <div className="toggle-row">
-                <span>标的总数</span>
-                <b className="num">
-                  {pipeline.data_freshness.strategy.total_instruments ?? '-'}
-                </b>
-              </div>
-              <div className="toggle-row">
-                <span>失败数</span>
-                <b className="num">{pipeline.data_freshness.strategy.failed_count ?? '-'}</b>
-              </div>
-              <div className="toggle-row">
-                <span>发布时间</span>
-                <b className="num">
-                  {pipeline.data_freshness.strategy.published_at
-                    ? formatShanghaiTime(pipeline.data_freshness.strategy.published_at)
-                    : '-'}
-                </b>
-              </div>
-              <div className="toggle-row">
-                <span>运行 ID</span>
-                <b className="num">
-                  {pipeline.data_freshness.strategy.strategy_run_id
-                    ? pipeline.data_freshness.strategy.strategy_run_id.slice(0, 8)
-                    : '-'}
-                </b>
-              </div>
-            </div>
-          </div>
-        )}
+        <Link className="btn small card-body-action" to="/admin/after-close">
+          查看流水线详情 →
+        </Link>
       </div>
     </section>
   )

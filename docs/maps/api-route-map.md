@@ -24,7 +24,7 @@
 | notifications | `app/api/notifications.py` | 消息与通知渠道 |
 | admin_subscription | `app/api/admin_subscription.py` | 订阅/邀请码/调度任务/Worker 心跳/消息投递管理 |
 | admin_beta_applications | `app/api/admin_beta_applications.py` | 内测申请管理 |
-| admin_after_close | `app/api/admin_after_close.py` | 盘后编排管理；`/after-close-runs/dsa-only` 支持 fallback 到最新可用交易日，覆盖率门禁使用 `coverage_raw` 原始值 |
+| admin_after_close | `app/api/admin_after_close.py` | 盘后编排管理；`/after-close-runs/dsa-only` 支持 fallback 到最新可用交易日，覆盖率门禁使用 `coverage_raw` 原始值；新增 `/after-close/pipeline/latest`、`/after-close/pipeline?trade_date=`、`/after-close/pipeline/runs?limit=`、`POST /after-close/pipeline/run`（admin，幂等：同 trade_date 已有 queued/running/succeeded 返回 existing）4 个聚合状态端点，响应模型 `AfterClosePipelineResponse` 含 8 步骤时间线 + watchlist_ready 严格判定（`status='succeeded' AND published_at IS NOT NULL AND metadata_.scope='full'`，sample backfill 不计入）+ data_freshness + 最近 100 条 events |
 | watchlist | `app/api/watchlist.py` | 用户自选股；`GET /watchlist/monitor-status` 响应 `metrics` 唯一来自 `stock_feature_snapshots.summary_payload`（`_source='feature_snapshot'`），不再走 `MonitorSnapshotService` 实时计算或 `MonitorState.payload` fallback；新增 `calculation_status` 三态（SUCCEEDED/WAITING_SNAPSHOT/NO_SNAPSHOT）；`MonitorEvaluation` 仅展示评估状态字段（evaluation_status/retry_count/error_code/source_bar_time），不作为 metrics 数据源；`freshness_seconds` 基于 `snapshot.updated_at` |
 | stock_memos | `app/api/stock_memos.py` | 个股备忘录 |
 | stock_detail_feishu | `app/api/stock_detail_feishu.py` | 个股详情发送飞书 |

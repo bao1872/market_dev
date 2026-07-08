@@ -40,6 +40,7 @@ import type {
   PaginationParams,
   StructuralFactorQueryParams,
   TemporalFeaturesQueryParams,
+  AfterClosePipelineRunRequest,
 } from '../api/endpoints'
 
 // ============================================================
@@ -1100,6 +1101,103 @@ export function useForceAfterCloseRun() {
     mutationFn: (runId: string) => api.forceAfterCloseRun(runId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['after-close-runs'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'system-overview'] })
+    },
+  })
+}
+
+// ============================================================
+// ===== AfterClose Pipeline 聚合状态 hooks（/admin/after-close/pipeline/*）=====
+// ============================================================
+//
+// 轮询策略（遵循用户规范）：
+// - running 状态 10 秒轮询
+// - 非 running 状态 60 秒轮询
+// - 页面不可见暂停轮询（refetchIntervalInBackground=false）
+// - queryKey 与 useAdminSystemOverview / useAfterCloseRunStatus 隔离，避免缓存串扰
+
+// [AfterClosePipeline] - 轮询间隔常量
+const PIPELINE_POLL_RUNNING = 10_000 // running 状态 10s
+const PIPELINE_POLL_IDLE = 60_000 // 非 running 状态 60s
+
+/**
+ * 查询最近交易日的盘后流水线聚合状态（admin）。
+ * overall_status==='running' 时 10s 轮询，其余 60s 轮询，页面不可见暂停。
+ * @param enabled 是否启用查询（默认 true，可用于页面卸载或权限不足时停止）
+ */
+export function useAfterClosePipelineLatest(enabled: boolean = true) {
+  return useQuery({
+    queryKey: ['after-close-pipeline', 'latest'],
+    queryFn: api.getAfterClosePipelineLatest,
+    enabled,
+    staleTime: STALE_REALTIME,
+    refetchInterval: (query) => {
+      const status = query.state.data?.overall_status
+      return status === 'running' ? PIPELINE_POLL_RUNNING : PIPELINE_POLL_IDLE
+    },
+    refetchIntervalInBackground: false,
+  })
+}
+
+/**
+ * 查询指定交易日的盘后流水线聚合状态（admin）。
+ * overall_status==='running' 时 10s 轮询，其余 60s 轮询，页面不可见暂停。
+ * @param tradeDate 交易日（YYYY-MM-DD），undefined/null 时不启用查询
+ * @param enabled 是否启用查询（默认 true）
+ */
+export function useAfterClosePipelineByDate(
+  tradeDate: string | null | undefined,
+  enabled: boolean = true,
+) {
+  return useQuery({
+    queryKey: ['after-close-pipeline', 'by-date', tradeDate],
+    queryFn: () => api.getAfterClosePipelineByDate(tradeDate!),
+    enabled: !!tradeDate && enabled,
+    staleTime: STALE_REALTIME,
+    refetchInterval: (query) => {
+      const status = query.state.data?.overall_status
+      return status === 'running' ? PIPELINE_POLL_RUNNING : PIPELINE_POLL_IDLE
+    },
+    refetchIntervalInBackground: false,
+  })
+}
+
+/**
+ * 查询最近 N 次运行列表（after_close_orchestrator + snapshot_run 混合）。
+ * 60s 轮询，页面不可见暂停（列表非实时关键数据，统一 60s）。
+ * @param limit 最多返回条数（默认 20，后端上限 100）
+ * @param enabled 是否启用查询
+ */
+export function useAfterClosePipelineRuns(
+  limit: number = 20,
+  enabled: boolean = true,
+) {
+  return useQuery({
+    queryKey: ['after-close-pipeline', 'runs', limit],
+    queryFn: () => api.getAfterClosePipelineRuns(limit),
+    enabled,
+    staleTime: STALE_REALTIME,
+    refetchInterval: PIPELINE_POLL_IDLE,
+    refetchIntervalInBackground: false,
+  })
+}
+
+/**
+ * 管理员触发指定交易日的 after_close 编排任务（admin，幂等）。
+ * 同 trade_date 已有 queued/running/succeeded 时返回 existing，不重复创建。
+ * 成功后失效 pipeline latest/by-date/runs 与 system-overview 缓存。
+ */
+export function useCreateAfterClosePipelineRun() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (payload: AfterClosePipelineRunRequest) =>
+      api.createAfterClosePipelineRun(payload),
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['after-close-pipeline', 'latest'] })
+      queryClient.invalidateQueries({
+        queryKey: ['after-close-pipeline', 'by-date', variables.trade_date],
+      })
+      queryClient.invalidateQueries({ queryKey: ['after-close-pipeline', 'runs'] })
       queryClient.invalidateQueries({ queryKey: ['admin', 'system-overview'] })
     },
   })
