@@ -460,6 +460,59 @@ ruff check app/constants/capture.py app/core/deps.py app/core/security.py \
 
 预期：6 passed、ruff 零错误。
 
+## 3.8 研究特征矩阵因果口径回归（blocking）
+
+任何修改 `backend/app/research/feature_causality_registry.py`、`backend/scripts/research_feature_matrix_backfill.py` 必须跑研究特征矩阵因果口径回归测试。
+
+后端 registry 回归（`tests/test_feature_causality_registry.py`，24 个用例）：
+- `FeatureSpec` 必填 `namespace` / `source` / `compute_policy`，缺一抛 `ValueError`；
+- `key` 必须以 `{namespace}.` 开头（如 `causal.atr`），不匹配抛 `ValueError`；
+- `hindsight.*` 的 `allowed_for_backtest` 必须 `False`；
+- `label.*` 的 `allowed_for_backtest` 必须 `False`；
+- `causal.*` 的 `allowed_for_backtest` 必须 `True`；
+- `confirmed_delay.*` 的 `allowed_for_backtest` 必须 `True`；
+- DSA 必须同时存在 `causal.dsa_confirmed_*` 与 `hindsight.dsa_finalized_*` 两类（缺一视为口径不完整）；
+- Node Cluster 只能是 `hindsight.node_cluster_*`，不得出现在 causal；
+- `confirmed_swing_*` 必须是 `confirmed_delay`，不得作为 hindsight 默认回填；
+- `FeatureCausalityRegistry.register` 重复 key 抛 `ValueError`；
+- `build_default_registry()` 返回 27 个字段（causal 10 + confirmed_delay 4 + hindsight 6 + label 7）。
+
+后端脚本骨架回归（`tests/test_research_feature_matrix_backfill.py`，17 个用例）：
+- `parse_args` 默认值：`end='latest'`、`symbols=None`、`limit_instruments=None`、`dry_run=False`、`output=None`、`include_hindsight=True`、`include_labels=True`；
+- `parse_args` 自定义值正确解析；`--symbols` 逗号分隔解析为 list；缺 `--start` 报 `SystemExit`；
+- `build_plan` 返回字段分类统计（causal/confirmed_delay/hindsight/label）与 total_fields；
+- `_resolve_scope(symbols, limit_instruments)`：任一过滤启用 → `sample`，都未启用 → `full`；
+- `--include-hindsight=false` 时 hindsight 字段数为 0；`--include-labels=false` 时 label 字段数为 0；
+- `--dry-run` 打印计划，不写 DB，不写文件；
+- 非 dry-run 无 `--output` 只打印计划（骨架阶段不实际计算）；
+- `--output` 必须配合 sample scope，否则 `_validate_output_scope` 抛 `ValueError`（禁止无过滤全市场输出文件）；
+- `build_plan` 字段分类总数与 registry 字段数一致。
+
+回归命令：
+
+```bash
+cd /root/web_dev/backend
+APP_ENV=test TEST_DATABASE_URL=postgresql+asyncpg://bz:bz@localhost:5433/bz_stock_test \
+pytest tests/test_feature_causality_registry.py tests/test_research_feature_matrix_backfill.py -q
+
+ruff check app/research/feature_causality_registry.py \
+  scripts/research_feature_matrix_backfill.py \
+  tests/test_feature_causality_registry.py \
+  tests/test_research_feature_matrix_backfill.py
+
+mypy app/research/feature_causality_registry.py \
+  scripts/research_feature_matrix_backfill.py
+```
+
+预期：41 passed、ruff 零错误、mypy 零错误。
+
+dry-run 验证命令（不写库，仅打印计划）：
+
+```bash
+cd /root/web_dev/backend && .venv/bin/python -m scripts.research_feature_matrix_backfill \
+    --start 2026-01-01 --end 2026-01-31 --symbols 000001,600000 --dry-run
+```
+
 ## 4. CI 门禁
 
 阻断项：

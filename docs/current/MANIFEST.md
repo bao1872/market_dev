@@ -30,6 +30,7 @@
 | Worker、任务、飞书、Capture、部署 | `03-jobs-integrations-operations.md` |
 | 前端路由、页面、UI 状态 | `04-frontend-ux.md` |
 | 测试、CI、验收 | `05-testing-acceptance.md` |
+| 研究特征矩阵与因果口径 | `06-research-feature-matrix.md` |
 | 未决问题 | `open-decisions.md` |
 | 当前差异 | `code-doc-alignment.md` |
 | 真实代码入口 | `../maps/*.md` |

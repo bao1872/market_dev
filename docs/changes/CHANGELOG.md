@@ -4,6 +4,19 @@
 
 ## 2026-07-08
 
+- CHANGE-20260708-054: research feature matrix causality registry
+  - 新增 `backend/app/research/feature_causality_registry.py`（`FeatureSpec` + `FeatureCausalityRegistry` + `build_default_registry`，登记 27 字段：causal 10 + confirmed_delay 4 + hindsight 6 + label 7）
+  - 新增 `backend/scripts/research_feature_matrix_backfill.py`（CLI 骨架：`--start/--end/--symbols/--limit-instruments/--dry-run/--output/--include-hindsight/--include-labels`，默认 dry-run 不写 DB 不写文件，`--output` 必须配合 sample scope）
+  - 新增 `backend/app/research/__init__.py`（包初始化）
+  - 新增测试 41 个：`test_feature_causality_registry.py`（24 个）+ `test_research_feature_matrix_backfill.py`（17 个），pytest 41 passed、ruff/mypy/docs checks 通过
+  - DSA 双轨：`causal.dsa_confirmed_*`（当时可知）vs `hindsight.dsa_finalized_*`（未来确认后回标注），registry 必须同时登记
+  - Node Cluster 只 `hindsight.node_cluster_*`，不得进入 causal；`hindsight.*`/`label.*` 禁止进入回测 feature
+  - `confirmed_delay.confirmed_swing_*` 只能在确认 bar 生效，不回填 anchor date
+  - 新增 `docs/current/06-research-feature-matrix.md`，更新 MANIFEST/03-jobs/05-testing + 3 个 maps
+  - 与生产 `stock_feature_snapshots` 严格分离：不接入 watchlist_ready，不修改 production snapshot，不新增数据库表
+  - 未跑历史回补、未跑 production full backfill、未写大文件、未生成 coverage/截图/大日志、未备份数据库
+  - 历史 full snapshot 回补仍 BLOCKED（PR #41 126min），研究回补改走 research matrix 小样本 + 默认 dry-run
+
 - CHANGE-20260708-053: feature_snapshot_backfill 轻量 profile-summary 性能诊断模式
   - 新增 `--profile-summary` CLI 参数（默认 False，不启用），新增 `ProfileCollector` 类（record/merge/compute_stats/format_summary）
   - 单进程 `backfill_instrument_first`：传入 profile 时对 load_bars_ms / compute_ms / upsert_ms / total_ms_per_instrument 计时
