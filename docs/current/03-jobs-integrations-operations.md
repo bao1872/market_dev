@@ -248,6 +248,34 @@ CLI 参数：
 - upsert 幂等，可重复执行；
 - `start > end` 直接 `sys.exit(1)`。
 
+### 2.4.2 研究特征矩阵脚本骨架（research_feature_matrix_backfill）
+
+`backend/scripts/research_feature_matrix_backfill.py` 是研究特征矩阵 CLI 骨架，与生产 `feature_snapshot_backfill` 严格分离：
+
+- 不接入 `watchlist_ready`，不修改 production snapshot；
+- 不新增数据库表，不写 DB（骨架阶段）；
+- 默认 `--dry-run`，无 `--output` 不落盘；
+- `--output` 必须配合 sample scope（`--symbols` 或 `--limit-instruments`），禁止无过滤全市场输出文件；
+- 字段因果口径由 `backend/app/research/feature_causality_registry.py` 统一登记，分 4 个命名空间：`causal` / `confirmed_delay` / `hindsight` / `label`；
+- `hindsight.*` 与 `label.*` 禁止进入回测 feature；
+- DSA 双轨：`causal.dsa_confirmed_*`（当时可知）vs `hindsight.dsa_finalized_*`（未来确认后回标注）；
+- Node Cluster 只能是 `hindsight.node_cluster_*`，不得进入 causal；
+- 详见 `06-research-feature-matrix.md`。
+
+调用方式：
+
+```bash
+cd /root/web_dev/backend && .venv/bin/python -m scripts.research_feature_matrix_backfill \
+    --start 2026-01-01 --end 2026-01-31 --symbols 000001,600000 --dry-run
+```
+
+本 PR 只完成骨架 + dry-run，不实现实际计算。后续实现顺序：
+1. causal rolling features（ATR/BB/SQZMOM/volume）；
+2. confirmed_delay swing（按确认 bar 生效，不回填 anchor）；
+3. DSA 双轨；
+4. Node Cluster（只输出 `hindsight.node_cluster_*`）；
+5. labels（用未来 close/high/low 生成 `label.future_*`）。
+
 ## 2.5 监控图片通知链路
 
 盘中监控触发后，文字通知与图片通知是**两段独立链路**。文字通知成功不代表图片通知一定成功。

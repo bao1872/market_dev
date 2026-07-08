@@ -29,6 +29,7 @@
 | capture | `api/capture.py` | `stock_capture_service.py` | `capture_jobs` | Capture Token 隔离 |
 | jobs/admin | `api/admin_after_close.py`, admin APIs | scheduler recovery, job services, `after_close_pipeline_service.py`（聚合 pipeline 状态：8 步骤时间线 + watchlist_ready + data_freshness + events） | `scheduler_job_runs`, `worker_heartbeats`, `stock_feature_snapshot_runs`, `job_run_events` | 管理任务与可观察性 |
 | beta/admin | `api/public_beta.py`, `api/admin_beta_applications.py` | `beta_application_service.py`, `beta_application_notifier.py` | beta application models | 管理员通知特殊路径 |
+| research | - | `app/research/feature_causality_registry.py`（`FeatureSpec` + `FeatureCausalityRegistry` + `build_default_registry`）, `scripts/research_feature_matrix_backfill.py`（CLI 骨架） | - | 研究特征矩阵因果口径，不写 DB，不接入 watchlist；4 命名空间 `causal`/`confirmed_delay`/`hindsight`/`label`；`hindsight.*`/`label.*` 禁止进入回测；DSA 双轨 `causal.dsa_confirmed_*` vs `hindsight.dsa_finalized_*`；Node Cluster 只 `hindsight.node_cluster_*`；详见 `current/06-research-feature-matrix.md` |
 
 ## 3. 高风险热点
 
