@@ -20,7 +20,7 @@ from sqlalchemy import select
 
 from app.core.deps import CAPTURE_SCOPE_STOCK_DETAIL
 from app.core.security import decode_token
-from app.models.capture_job import CAPTURE_STATUS_FAILED, CaptureJob
+from app.models.capture_job import CAPTURE_STATUS_FAILED, CAPTURE_STATUS_SUCCEEDED, CaptureJob
 from app.models.outbox import Outbox
 from app.services.monitor_batch_service import MonitorBatchService
 
@@ -223,6 +223,45 @@ class TestMonitorBatchCaptureTokenClaims:
         )
         result_img = await db_session.execute(stmt_img)
         assert result_img.scalar_one_or_none() is None
+
+    @pytest.mark.asyncio
+    async def test_capture_success_writes_capture_job_succeeded(
+        self, db_session, test_user, test_instrument,
+    ) -> None:
+        """截图成功时应写入 capture_jobs=SUCCEEDED 并记录 image_url。"""
+        inst_id = test_instrument.id
+        user_id = test_user.id
+        event = _make_event(inst_id)
+        group_id = str(uuid4())
+        image_url = "/static/captures/monitor-test.png"
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"image_url": image_url}
+        mock_resp.raise_for_status.return_value = None
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_resp)
+
+        service = MonitorBatchService()
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await service._send_chart_images_via_outbox(
+                db=db_session,
+                instrument_events={inst_id: [event]},
+                instrument_info_cache={inst_id: (test_instrument.symbol, test_instrument.name)},
+                instrument_user_map={inst_id: [user_id]},
+                message_group_id=group_id,
+            )
+
+        stmt = select(CaptureJob).where(CaptureJob.event_id == event.id)
+        result = await db_session.execute(stmt)
+        job = result.scalar_one_or_none()
+        assert job is not None
+        assert job.status == CAPTURE_STATUS_SUCCEEDED
+        assert job.image_url == image_url
+        assert job.message_group_id == group_id
 
 
 if __name__ == "__main__":
