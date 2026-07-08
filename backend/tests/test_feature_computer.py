@@ -293,29 +293,57 @@ class TestDSADualTrack:
             err_msg="causal DSA segment 存在前视偏差",
         )
 
-    def test_hindsight_may_differ_from_causal(self, bars_500: pd.DataFrame) -> None:
-        """hindsight DSA 可能与 causal 不同（未来确认后修正）。"""
+    def test_hindsight_phase1_all_null(self, bars_500: pd.DataFrame) -> None:
+        """[Blocker 1] Phase 1 hindsight DSA 未实现，必须全 NULL。
+
+        禁止用 causal 近似冒充 hindsight 写入 DB。
+        """
+        result = compute_dsa_dual_track_features(bars_500)
+        # causal 应有非 NaN 值
+        assert result["causal_dsa_confirmed_segment"].notna().any(), (
+            "causal DSA segment 不应全 NaN"
+        )
+        # [Blocker 1] hindsight 必须 3 列全 NaN
+        assert result["hindsight_dsa_finalized_segment"].isna().all(), (
+            "Phase 1 hindsight_dsa_finalized_segment 必须全 NULL"
+        )
+        assert result["hindsight_dsa_finalized_direction"].isna().all(), (
+            "Phase 1 hindsight_dsa_finalized_direction 必须全 NULL"
+        )
+        assert result["hindsight_dsa_finalized_age_bars"].isna().all(), (
+            "Phase 1 hindsight_dsa_finalized_age_bars 必须全 NULL"
+        )
+
+    def test_hindsight_not_equals_causal_approx(
+        self, bars_500: pd.DataFrame
+    ) -> None:
+        """[Blocker 1] hindsight 不得等于 causal 近似值。
+
+        如果未实现，必须全 NULL，不能用 causal segment 复制冒充。
+        """
         result = compute_dsa_dual_track_features(bars_500)
         causal_seg = result["causal_dsa_confirmed_segment"]
         hindsight_seg = result["hindsight_dsa_finalized_segment"]
 
-        # 两列应存在（非全 NaN）
-        assert causal_seg.notna().any(), "causal DSA segment 不应全 NaN"
-        assert hindsight_seg.notna().any(), "hindsight DSA segment 不应全 NaN"
+        # hindsight 必须 NOT 等于 causal（要么全 NaN，要么真的不同）
+        # Phase 1: hindsight 全 NaN，所以与 causal（有非 NaN 值）不相等
+        assert not hindsight_seg.equals(causal_seg), (
+            "hindsight 不得等于 causal 近似（Phase 1 应全 NULL）"
+        )
+        # 额外验证：hindsight 全 NaN，causal 有值
+        assert hindsight_seg.isna().all()
+        assert causal_seg.notna().any()
 
     def test_direction_values_are_valid(self, bars_500: pd.DataFrame) -> None:
         """DSA direction 值应为 1, 0, 或 -1。"""
         result = compute_dsa_dual_track_features(bars_500)
-        for col in [
-            "causal_dsa_confirmed_direction",
-            "hindsight_dsa_finalized_direction",
-        ]:
-            valid_vals = result[col].dropna()
-            if len(valid_vals) > 0:
-                unique_vals = set(valid_vals.unique())
-                assert unique_vals.issubset({1, 0, -1}), (
-                    f"{col} direction 值超出 {{1,0,-1}}: {unique_vals}"
-                )
+        # 只测 causal（hindsight Phase 1 全 NULL）
+        valid_vals = result["causal_dsa_confirmed_direction"].dropna()
+        if len(valid_vals) > 0:
+            unique_vals = set(valid_vals.unique())
+            assert unique_vals.issubset({1, 0, -1}), (
+                f"causal direction 值超出 {{1,0,-1}}: {unique_vals}"
+            )
 
 
 # ===== 4. label features =====
@@ -415,3 +443,21 @@ class TestComputeAllFeatures:
         result = compute_all_features(bars_500)
         assert len(result) == len(bars_500)
         assert result.index.equals(bars_500.index)
+
+    def test_node_cluster_phase1_all_null(self, bars_500: pd.DataFrame) -> None:
+        """[Blocker 2] Phase 1 Node Cluster 未实现，3 列全 NULL。
+
+        run metadata 必须标记 feature_version=phase1_no_node_cluster。
+        """
+        result = compute_all_features(bars_500)
+        node_cols = [
+            "hindsight_node_cluster_label",
+            "hindsight_node_cluster_support",
+            "hindsight_node_cluster_resistance",
+        ]
+        for col in node_cols:
+            assert col in result.columns, f"缺少 {col}"
+            assert result[col].isna().all(), (
+                f"[Blocker 2] Phase 1 {col} 必须全 NULL，"
+                f"实际非 NaN 数={result[col].notna().sum()}"
+            )

@@ -301,6 +301,88 @@ class TestRunLifecycle:
         assert updated.status == STATUS_FAILED
         assert updated.failed_count == 1500
 
+    async def test_finalize_run_records_failed_instruments_and_rows(
+        self, db_session
+    ) -> None:
+        """[Blocker 3] finalize_run 在 metadata_json 记录 failed_instruments 和 failed_rows。
+
+        failed_count 列存 failed_rows（行级失败数），
+        metadata_json 额外记录 failed_instruments（股票级失败数）。
+        """
+        run = await create_or_resume_run(
+            db_session,
+            month="2026-03",
+            start_date=date(2026, 3, 1),
+            end_date=date(2026, 3, 31),
+            scope="full",
+        )
+        await finalize_run(
+            db_session,
+            run,
+            status=STATUS_FAILED,
+            instruments_count=5000,
+            trade_dates_count=22,
+            rows_count=100000,
+            failed_count=10000,  # failed_rows
+            duration_seconds=600.0,
+            metadata={"feature_version": "phase1_no_node_cluster"},
+            failed_instruments=500,  # 500 只股票失败
+        )
+        stmt = select(ResearchFeatureMatrixRun).where(
+            ResearchFeatureMatrixRun.id == run.id
+        )
+        result = await db_session.execute(stmt)
+        updated = result.scalar_one()
+        # failed_count 列 = failed_rows
+        assert updated.failed_count == 10000
+        # metadata_json 记录 failed_instruments 和 failed_rows
+        assert updated.metadata_json is not None
+        assert updated.metadata_json["failed_instruments"] == 500
+        assert updated.metadata_json["failed_rows"] == 10000
+        assert updated.metadata_json["feature_version"] == "phase1_no_node_cluster"
+
+    async def test_resume_does_not_reset_completed_run(self, db_session) -> None:
+        """[Blocker 7] resume 不应破坏已完成 full run 的统计。
+
+        create_or_resume_run 对已 succeeded 的 run 只返回引用，
+        不重置 status/rows_count/failed_count 等统计字段。
+        """
+        # 1. 创建并 finalize 一个 succeeded run
+        run = await create_or_resume_run(
+            db_session,
+            month="2026-04",
+            start_date=date(2026, 4, 1),
+            end_date=date(2026, 4, 30),
+            scope="full",
+        )
+        await finalize_run(
+            db_session,
+            run,
+            status=STATUS_SUCCEEDED,
+            instruments_count=5000,
+            trade_dates_count=22,
+            rows_count=110000,
+            failed_count=0,
+            duration_seconds=3600.0,
+            failed_instruments=0,
+        )
+
+        # 2. resume：相同 run_key 再次调用
+        run_resumed = await create_or_resume_run(
+            db_session,
+            month="2026-04",
+            start_date=date(2026, 4, 1),
+            end_date=date(2026, 4, 30),
+            scope="full",
+        )
+        # 应返回同一个 run
+        assert run_resumed.id == run.id
+        # [Blocker 7] 统计字段不应被重置
+        assert run_resumed.status == STATUS_SUCCEEDED
+        assert run_resumed.rows_count == 110000
+        assert run_resumed.failed_count == 0
+        assert run_resumed.instruments_count == 5000
+
 
 # =============================================================================
 # 5. 批量 upsert rows（DB）

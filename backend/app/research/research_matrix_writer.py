@@ -26,11 +26,14 @@
 from __future__ import annotations
 
 import calendar
+import hashlib
+import os
 import shutil
+import tempfile
 from datetime import UTC, date, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -222,8 +225,14 @@ async def finalize_run(
     failed_count: int,
     duration_seconds: float,
     metadata: dict[str, Any] | None = None,
+    failed_instruments: int = 0,
 ) -> None:
     """终结 run：更新 status/统计/duration/finished_at。
+
+    [Blocker Fix] 失败率统计修正：
+    - failed_count = failed_rows（行级失败数，用于失败率 = failed_rows / expected_rows）
+    - failed_instruments = 股票级失败数（一个股票失败 = 多个 trade_date 行失败）
+    - metadata_json 同时记录 failed_instruments 和 failed_rows
 
     Args:
         db: 异步会话
@@ -232,9 +241,10 @@ async def finalize_run(
         instruments_count: 实际处理的 instrument 数
         trade_dates_count: 实际处理的交易日数
         rows_count: 成功写入行数
-        failed_count: 失败行数
+        failed_count: 失败行数（= failed_rows，用于失败率计算）
         duration_seconds: 总耗时秒
         metadata: 可选附加 metadata（合并到现有）
+        failed_instruments: 失败股票数（一个股票对应多 trade_date 行）
     """
     run.status = status
     run.instruments_count = instruments_count
@@ -243,8 +253,11 @@ async def finalize_run(
     run.failed_count = failed_count
     run.duration_seconds = duration_seconds
     run.finished_at = datetime.now(UTC)
-    if metadata is not None:
-        run.metadata_json = metadata
+    # [Blocker Fix] metadata 同时记录 failed_instruments 和 failed_rows
+    final_metadata = dict(metadata) if metadata else {}
+    final_metadata["failed_instruments"] = failed_instruments
+    final_metadata["failed_rows"] = failed_count
+    run.metadata_json = final_metadata
     await db.flush()
 
 
@@ -299,6 +312,103 @@ async def upsert_rows_batch(
         total += len(batch)
     await db.flush()
     return total
+
+
+# =============================================================================
+# 5. 进程锁（pg_advisory_lock + lock file 双保险）
+# =============================================================================
+
+# advisory lock key 命名空间（避免与其他业务冲突）
+# PostgreSQL advisory lock key 是 int64，用两个 int32 组合：(namespace, key)
+# namespace 固定 0x5245534d = "RESM"（Research Matrix）
+_ADVISORY_LOCK_NAMESPACE = 0x5245534D
+
+
+def _advisory_lock_key(month: str, scope: str) -> tuple[int, int]:
+    """从 month + scope 生成 advisory lock key (namespace, key)。
+
+    Args:
+        month: YYYY-MM
+        scope: 'full' / 'sample_N' / 'sample_symbols'
+
+    Returns:
+        (namespace, key) 用于 pg_advisory_lock(namespace, key)
+    """
+    # key 用 month+scope 的稳定 hash（同一输入跨进程一致）
+    h = hashlib.sha1(f"{month}_{scope}".encode()).digest()
+    key = int.from_bytes(h[:4], "big", signed=False) & 0x7FFFFFFF
+    return (_ADVISORY_LOCK_NAMESPACE, key)
+
+
+async def acquire_run_lock(
+    db: AsyncSession,
+    *,
+    month: str,
+    scope: str,
+) -> bool:
+    """尝试获取 run 级 advisory lock。
+
+    [Blocker Fix] 防止同 month/scope 重复启动后台任务。
+    使用 pg_try_advisory_lock：获取成功返回 True，已被占用返回 False。
+    lock 是 session-level，session 关闭自动释放。
+
+    Args:
+        db: 异步会话
+        month: YYYY-MM
+        scope: 'full' / 'sample_N'
+
+    Returns:
+        True if 获取成功（调用方负责在结束时关闭 session 释放锁）
+        False if 已被占用（调用方应退出）
+    """
+    ns, key = _advisory_lock_key(month, scope)
+    stmt = text("SELECT pg_try_advisory_lock(:ns, :key)")
+    result = await db.execute(stmt, {"ns": ns, "key": key})
+    acquired = result.scalar_one()
+    return bool(acquired)
+
+
+def acquire_lock_file(month: str, scope: str) -> str | None:
+    """尝试创建 lock file（文件系统级双保险）。
+
+    [Blocker Fix] 即使 DB session 异常，lock file 也能防止重复启动。
+    lock file 路径：/tmp/research_matrix_backfill_{month}_{scope}.lock
+
+    Args:
+        month: YYYY-MM
+        scope: 'full' / 'sample_N'
+
+    Returns:
+        lock file 路径 if 创建成功
+        None if 已存在（调用方应退出）
+    """
+    lock_path = os.path.join(
+        tempfile.gettempdir(), f"research_matrix_backfill_{month}_{scope}.lock"
+    )
+    try:
+        # O_EXCL：文件已存在则失败
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        os.write(fd, f"pid={os.getpid()}\n".encode())
+        os.write(
+            fd,
+            f"started_at={datetime.now(UTC).isoformat()}\n".encode(),
+        )
+        os.close(fd)
+        return lock_path
+    except FileExistsError:
+        return None
+
+
+def release_lock_file(lock_path: str) -> None:
+    """删除 lock file（结束时调用）。
+
+    Args:
+        lock_path: acquire_lock_file 返回的路径
+    """
+    try:
+        os.remove(lock_path)
+    except FileNotFoundError:
+        pass
 
 
 # =============================================================================

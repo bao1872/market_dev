@@ -81,12 +81,15 @@ from app.research.feature_causality_registry import (
 )
 from app.research.feature_computer import compute_all_features
 from app.research.research_matrix_writer import (
+    acquire_lock_file,
+    acquire_run_lock,
     check_disk_threshold,
     check_failure_rate,
     check_month_size_threshold,
     create_or_resume_run,
     estimate_month_size,
     finalize_run,
+    release_lock_file,
     resolve_month_range,
     upsert_rows_batch,
 )
@@ -306,9 +309,18 @@ async def _process_instrument(
 ) -> tuple[int, int]:
     """处理单只 instrument：load bars → compute → upsert。
 
+    [Blocker Fix] 失败率统计修正：
+    - 单股失败时 failed_rows = len(trade_dates)（该股对应的所有交易日行）
+    - 不再只计 1 行
+
+    [Blocker Fix] DB 异常 rollback：
+    - upsert 失败时 await db.rollback()，防止事务污染后续股票
+    - rollback 后继续下一只
+
     Returns:
         (rows_written, rows_failed)
     """
+    expected_rows = len(trade_dates)
     try:
         # load bars with warmup（start - 400 天 到 end）
         warmup_start = start - timedelta(days=_WARMUP_DAYS)
@@ -318,13 +330,13 @@ async def _process_instrument(
                 "bars 不足 instrument_id=%s symbol=%s len=%d",
                 instrument_id, symbol, len(bars) if bars is not None else 0,
             )
-            return 0, 1
+            return 0, expected_rows
 
         # compute all features (per-bar full series)
         features_df = compute_all_features(bars)
         if features_df.empty:
             logger.warning("features 为空 symbol=%s", symbol)
-            return 0, 1
+            return 0, expected_rows
 
         # build row dicts (只保留目标 trade_dates)
         rows = _build_row_dicts(
@@ -332,18 +344,26 @@ async def _process_instrument(
         )
         if not rows:
             logger.warning("无目标 trade_date 行 symbol=%s", symbol)
-            return 0, 1
+            return 0, expected_rows
 
         # upsert to DB
         count = await upsert_rows_batch(db, rows)
         return count, 0
 
     except Exception as exc:
+        # [Blocker Fix] 异常时 rollback，防止同一 session 后续 upsert 因事务污染失败
         logger.error(
             "处理失败 instrument_id=%s symbol=%s: %s",
             instrument_id, symbol, exc,
         )
-        return 0, 1
+        try:
+            await db.rollback()
+        except Exception as rollback_exc:
+            logger.error(
+                "rollback 失败 instrument_id=%s symbol=%s: %s",
+                instrument_id, symbol, rollback_exc,
+            )
+        return 0, expected_rows
 
 
 async def _run_backfill(args: argparse.Namespace) -> None:
@@ -430,103 +450,160 @@ async def _run_backfill(args: argparse.Namespace) -> None:
         print("[dry-run] 不写 DB，不写文件，只打印计划")
         return
 
-    # 7. 创建/resume run
-    async with AsyncSessionLocal() as db:
-        run = await create_or_resume_run(
-            db,
-            month=month_label,
-            start_date=start,
-            end_date=end,
-            scope=scope,
-            metadata={"symbols": args.symbols, "limit": args.limit_instruments},
+    # [Blocker Fix] 7. 获取进程锁（pg_advisory_lock + lock file 双保险）
+    #    防止同 month/scope 重复启动后台任务
+    lock_file_path = acquire_lock_file(month_label, scope)
+    if lock_file_path is None:
+        print(
+            f"[BLOCKED] lock file 已存在，同 month={month_label} scope={scope} "
+            f"已有任务运行"
         )
-        await db.commit()
-        print(f"[run] run_id={run.id} run_key={run.run_key} status={run.status}")
+        return
 
-    # 8. instrument-first 回补
-    trade_dates_set = set(trade_dates)
-    total_rows = 0
-    total_failed = 0
+    # advisory lock 需要一个长生命周期 session（lock 跟随 session）
+    lock_session = AsyncSessionLocal()
+    acquired = await acquire_run_lock(lock_session, month=month_label, scope=scope)
+    if not acquired:
+        release_lock_file(lock_file_path)
+        print(
+            f"[BLOCKED] pg_advisory_lock 已被占用，同 month={month_label} "
+            f"scope={scope} 已有任务运行"
+        )
+        return
+    print(f"[lock] advisory_lock + lock_file 获取成功 path={lock_file_path}")
 
-    _tqdm: Any = None
     try:
-        from tqdm import tqdm as _tqdm
-    except ImportError:
-        pass
-
-    instruments_iter: Iterable[tuple[uuid.UUID, str]] = instruments
-    if _tqdm is not None:
-        instruments_iter = _tqdm(instruments, desc="instruments", unit="stock")
-
-    # 每 100 只 instrument commit 一次
-    commit_batch = 100
-    processed = 0
-
-    async with AsyncSessionLocal() as db:
-        for instrument_id, symbol in instruments_iter:
-            rows, failed = await _process_instrument(
-                db, run.id, instrument_id, symbol, trade_dates_set, start, end
+        # 8. 创建/resume run
+        # [Blocker Fix] metadata 标记 Phase 1 字段范围 + DSA hindsight 未实现
+        run_metadata = {
+            "symbols": args.symbols,
+            "limit": args.limit_instruments,
+            "feature_version": "phase1_no_node_cluster",
+            "dsa_hindsight_status": "not_implemented",
+            "node_cluster_status": "not_implemented",
+        }
+        async with AsyncSessionLocal() as db:
+            run = await create_or_resume_run(
+                db,
+                month=month_label,
+                start_date=start,
+                end_date=end,
+                scope=scope,
+                metadata=run_metadata,
             )
-            total_rows += rows
-            total_failed += failed
-            processed += 1
+            await db.commit()
+            print(f"[run] run_id={run.id} run_key={run.run_key} status={run.status}")
 
-            # 每 commit_batch 只 commit 一次
-            if processed % commit_batch == 0:
-                await db.commit()
-                logger.info(
-                    "checkpoint: processed=%d rows=%d failed=%d",
-                    processed, total_rows, total_failed,
+        # 8. instrument-first 回补
+        # [Blocker Fix] 失败率统计：failed_rows 用 expected_rows 计算
+        trade_dates_set = set(trade_dates)
+        total_rows = 0
+        total_failed_rows = 0
+        total_failed_instruments = 0
+
+        # 条件 import tqdm（可选依赖，缺失时无进度条）
+        try:
+            from tqdm import tqdm as _tqdm_iter
+        except ImportError:
+            _tqdm_iter = None  # type: ignore[assignment]
+
+        instruments_iter: Iterable[tuple[uuid.UUID, str]] = instruments
+        if _tqdm_iter is not None:
+            instruments_iter = _tqdm_iter(instruments, desc="instruments", unit="stock")
+
+        # 每 100 只 instrument commit 一次
+        commit_batch = 100
+        processed = 0
+
+        async with AsyncSessionLocal() as db:
+            for instrument_id, symbol in instruments_iter:
+                rows, failed = await _process_instrument(
+                    db, run.id, instrument_id, symbol, trade_dates_set, start, end
                 )
+                total_rows += rows
+                total_failed_rows += failed
+                if failed > 0:
+                    total_failed_instruments += 1
+                processed += 1
 
-        # 最终 commit
-        await db.commit()
+                # 每 commit_batch 只 commit 一次
+                if processed % commit_batch == 0:
+                    await db.commit()
+                    logger.info(
+                        "checkpoint: processed=%d rows=%d failed_rows=%d "
+                        "failed_instruments=%d",
+                        processed, total_rows, total_failed_rows,
+                        total_failed_instruments,
+                    )
 
-    # 9. 检查失败率
-    duration = time.time() - start_time
-    total = total_rows + total_failed
-    final_status = STATUS_SUCCEEDED
-    if not check_failure_rate(total_failed, total):
-        print(f"[BLOCKED] 失败率 {total_failed}/{total} = {total_failed/max(total,1)*100:.1f}% > 5%，标 failed")
-        final_status = STATUS_FAILED
+            # 最终 commit
+            await db.commit()
 
-    # 10. finalize run
-    from app.models.research_feature_matrix import ResearchFeatureMatrixRun
+        # 9. 检查失败率（[Blocker Fix] 用 failed_rows / expected_rows）
+        duration = time.time() - start_time
+        final_status = STATUS_SUCCEEDED
+        if not check_failure_rate(total_failed_rows, expected_rows):
+            print(
+                f"[BLOCKED] 失败率 {total_failed_rows}/{expected_rows} = "
+                f"{total_failed_rows/max(expected_rows,1)*100:.1f}% > 5%，标 failed"
+            )
+            final_status = STATUS_FAILED
 
-    async with AsyncSessionLocal() as db:
-        # 重新加载 run（跨 session）
-        stmt = select(ResearchFeatureMatrixRun).where(ResearchFeatureMatrixRun.id == run.id)
-        result = await db.execute(stmt)
-        run_fresh = result.scalar_one()
-        await finalize_run(
-            db,
-            run_fresh,
-            status=final_status,
-            instruments_count=instruments_count,
-            trade_dates_count=trade_dates_count,
-            rows_count=total_rows,
-            failed_count=total_failed,
-            duration_seconds=duration,
-        )
-        await db.commit()
+        # 10. finalize run
+        from app.models.research_feature_matrix import ResearchFeatureMatrixRun
 
-    print("=" * 60)
-    print(f"[done] status={final_status}")
-    print(f"  instruments: {instruments_count}")
-    print(f"  trade_dates: {trade_dates_count}")
-    print(f"  rows_written: {total_rows}")
-    print(f"  rows_failed: {total_failed}")
-    print(f"  duration: {duration:.1f}s")
-    print(f"  run_id: {run.id}")
-    print("=" * 60)
+        async with AsyncSessionLocal() as db:
+            # 重新加载 run（跨 session）
+            stmt = select(ResearchFeatureMatrixRun).where(
+                ResearchFeatureMatrixRun.id == run.id
+            )
+            result = await db.execute(stmt)
+            run_fresh = result.scalar_one()
+            # [Blocker Fix] metadata 合并 Phase 1 标记 + failed_instruments/failed_rows
+            final_metadata = dict(run_metadata)
+            final_metadata["phase"] = "phase1"
+            await finalize_run(
+                db,
+                run_fresh,
+                status=final_status,
+                instruments_count=instruments_count,
+                trade_dates_count=trade_dates_count,
+                rows_count=total_rows,
+                failed_count=total_failed_rows,
+                duration_seconds=duration,
+                metadata=final_metadata,
+                failed_instruments=total_failed_instruments,
+            )
+            await db.commit()
 
-    # 11. 可选 debug 导出 parquet
-    if args.export_parquet:
-        # 校验 sample scope
-        if scope == "full":
-            print("[WARN] --export-parquet 在 full scope 下跳过（禁止全市场导出文件）")
-        else:
-            await _export_parquet(args.export_parquet, run.id)
+        print("=" * 60)
+        print(f"[done] status={final_status}")
+        print(f"  instruments: {instruments_count}")
+        print(f"  trade_dates: {trade_dates_count}")
+        print(f"  rows_written: {total_rows}")
+        print(f"  rows_failed: {total_failed_rows}")
+        print(f"  failed_instruments: {total_failed_instruments}")
+        print(f"  duration: {duration:.1f}s")
+        print(f"  run_id: {run.id}")
+        print("=" * 60)
+
+        # 11. 可选 debug 导出 parquet
+        if args.export_parquet:
+            # 校验 sample scope
+            if scope == "full":
+                print("[WARN] --export-parquet 在 full scope 下跳过（禁止全市场导出文件）")
+            else:
+                await _export_parquet(args.export_parquet, run.id)
+
+    finally:
+        # [Blocker Fix] 释放锁：advisory lock 随 session 关闭自动释放，
+        # lock file 需手动删除
+        try:
+            await lock_session.close()
+        except Exception as exc:
+            logger.error("关闭 lock_session 失败: %s", exc)
+        release_lock_file(lock_file_path)
+        print(f"[lock] advisory_lock + lock_file 已释放 path={lock_file_path}")
 
 
 async def _export_parquet(path: str, run_id: uuid.UUID) -> None:

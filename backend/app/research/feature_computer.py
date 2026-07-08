@@ -253,18 +253,23 @@ def compute_dsa_dual_track_features(bars: pd.DataFrame) -> pd.DataFrame:
     - causal_dsa_confirmed_segment: DSA 段编号（当时已确认，_remove_dsa_lookahead）
     - causal_dsa_confirmed_direction: DSA 方向（1/0/-1）
     - causal_dsa_confirmed_age_bars: 段内已持续 bar 数
-    - hindsight_dsa_finalized_segment: DSA 段编号（未来确认后，raw）
-    - hindsight_dsa_finalized_direction: DSA 方向（raw）
-    - hindsight_dsa_finalized_age_bars: 段内最终 bar 数（raw）
+    - hindsight_dsa_finalized_segment: DSA 段编号（未来确认后，raw）— Phase 1 暂 NULL
+    - hindsight_dsa_finalized_direction: DSA 方向（raw）— Phase 1 暂 NULL
+    - hindsight_dsa_finalized_age_bars: 段内最终 bar 数（raw）— Phase 1 暂 NULL
 
     causal = _remove_dsa_lookahead 后的 DSA（无前视偏差）
-    hindsight = 原始 DSA（允许未来修正）
+    hindsight = 原始 DSA（允许未来修正）— **Phase 1 未实现，全 NULL**
+
+    [Blocker Fix] hindsight 不得用 causal 近似冒充：
+    真正 hindsight 需要绕过 _remove_dsa_lookahead 直接取 raw DSA full series。
+    本 PR 不实现 raw DSA，故 hindsight_dsa_finalized_* 全部保持 NaN。
+    run metadata 必须记录 dsa_hindsight_status=not_implemented。
 
     Args:
         bars: 日线 DataFrame，需 >= 60 行
 
     Returns:
-        DataFrame indexed same as bars, 6 DSA columns
+        DataFrame indexed same as bars, 6 DSA columns（hindsight 3 列全 NaN）
     """
     n = len(bars)
     result = pd.DataFrame(
@@ -273,6 +278,7 @@ def compute_dsa_dual_track_features(bars: pd.DataFrame) -> pd.DataFrame:
             "causal_dsa_confirmed_segment": np.nan,
             "causal_dsa_confirmed_direction": np.nan,
             "causal_dsa_confirmed_age_bars": np.nan,
+            # [Blocker Fix] hindsight Phase 1 未实现，保持 NaN，不写入近似值
             "hindsight_dsa_finalized_segment": np.nan,
             "hindsight_dsa_finalized_direction": np.nan,
             "hindsight_dsa_finalized_age_bars": np.nan,
@@ -303,15 +309,10 @@ def compute_dsa_dual_track_features(bars: pd.DataFrame) -> pd.DataFrame:
     result["causal_dsa_confirmed_direction"] = directions
     result["causal_dsa_confirmed_age_bars"] = age_bars
 
-    # --- hindsight DSA: 原始 DSA（不应用 _remove_dsa_lookahead）---
-    # 直接用 compute_dsa_history 的结果作为 hindsight（它已经是 raw full-series）
-    # 注：compute_dsa_history 内部调用 _remove_dsa_lookahead，
-    # 但 hindsight 需要的是 raw。为避免重实现，我们用 causal 作为 hindsight 的近似。
-    # 真正的 hindsight 区别在翻转点，之后会修正。
-    # TODO: 后续 PR 实现真正 raw DSA 计算
-    result["hindsight_dsa_finalized_segment"] = segment_ids
-    result["hindsight_dsa_finalized_direction"] = directions
-    result["hindsight_dsa_finalized_age_bars"] = age_bars
+    # [Blocker Fix] hindsight_dsa_finalized_* 保持 NaN（Phase 1 未实现 raw DSA）
+    # 真正 hindsight 需要 compute_dsa_history 绕过 _remove_dsa_lookahead，
+    # 取翻转点修正后的 full series。本 PR 不实现，留待后续 PR。
+    # 禁止用 causal 近似冒充 hindsight 写入 DB。
 
     return result
 
