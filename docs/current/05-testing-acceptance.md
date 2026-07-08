@@ -377,6 +377,21 @@ cd /root/web_dev/backend && .venv/bin/python -m scripts.feature_snapshot_backfil
     --start 2026-07-04 --end 2026-07-07 --dry-run
 ```
 
+### 3.6 前端"数据加载失败"部署排查验收
+
+WatchlistPage 等页面提示"数据加载失败，请刷新重试"时，必须按以下顺序只读排查，确认根因后再修复：
+
+1. **服务在线**：`docker ps` 确认 `trading-backend`、`trading-frontend`、`trading-postgres`、`trading-redis` 均为 `Up`/`healthy`；
+2. **backend 直接健康**：`curl http://localhost:8000/health` 必须返回 200；
+3. **frontend 静态可达**：`curl -I http://localhost` 必须返回 200；
+4. **定位失败 API**：`grep -R "数据加载失败\|请刷新重试" frontend/src` 找到错误提示组件，向上追溯 `queryFn` 对应端点（如 `/watchlist/monitor-status`）；
+5. **复现 API**：
+   - 生成 fresh token（避免过期 401）；
+   - 直接 curl backend：`curl http://localhost:8000/<endpoint>` 必须 200；
+   - 通过 frontend nginx curl：`curl http://localhost/api/<endpoint>` 必须 200；
+6. **nginx upstream 错误**：frontend 日志若出现 `connect() failed (111: Connection refused) while connecting to upstream`，且 upstream IP 与当前 `trading-backend` 容器 IP 不一致，说明 nginx 缓存了旧 backend IP；
+7. **验收标准**：修复后 `curl http://localhost/api/health`、`curl http://localhost/api/watchlist/monitor-status`、`curl http://localhost/api/market/status` 均 200，frontend 日志无 502/503/ upstream refused。
+
 ## 4. CI 门禁
 
 阻断项：

@@ -201,6 +201,27 @@ CLI 参数：
 4. **[Blocker Fix] 小样本 run 不得发布到 watchlist**：因 `scope='sample'`，`/watchlist/monitor-status` 不读取该日 snapshot，`calculation_status` 保持 `WAITING_SNAPSHOT` / `NO_SNAPSHOT`，避免污染生产 watchlist SUCCEEDED 状态；
 5. 禁止直接全量回补，需小样本验证后再逐步扩大。
 
+**生产验证结果（PR #41 部署后，2026-07-08）**：
+- 最近交易日（2026-07-07）full scope 回补：`status='succeeded'`、`scope='full'`、`published_at` 非空；
+- `snapshot_count=4791`、`skipped_count=502`、`failed_count=0`、`failure_rate=0.00`；
+- `/watchlist/monitor-status` 对有 snapshot 的自选股返回 `calculation_status='SUCCEEDED'`、`metrics._source='feature_snapshot'`；
+- 表大小：`stock_feature_snapshots=39MB`（5293 行）、`stock_feature_snapshot_runs=80kB`、avg payload=6252 bytes；
+- **耗时 126 分钟（> 2 小时阈值），历史回补 BLOCKED**；
+- 禁止在单日常规耗时降到 120 分钟以内前启动 2026-01 第一批历史回补。
+
+**性能 profile 计划（下一步）**：
+- 新增轻量 `--profile-summary` 模式，每 20/50 instruments 输出聚合统计，不写文件、不新增表、不生成大日志；
+- 维度：`load_bars_ms`、`truncate_bars_ms`、`compute_structural_primary_ms`、`compute_structural_secondary_ms`、`compute_temporal_ms`、`upsert_ms`、`commit_ms`、`total_per_instrument_ms`；
+- 对比 `--limit-instruments 100 --workers 1/2/4`；
+- 同步查 PG 等待事件（`pg_stat_activity.wait_event_type`）；
+- 在定位真实瓶颈前禁止凭假设重构（如“load_bars 重复查询”）。
+
+**禁止全量回补条件（硬停止）**：
+- 剩余磁盘 < 15GB；
+- 预估历史新增 > 8GB；
+- 最近 1 日 full scope 耗时 > 120 分钟；
+- 出现未定位的 backend 500、worker 异常或 PG 长事务/锁等待。
+
 约束：
 - 不修改 DSA/BB/swing/temporal 数学公式；
 - 复用 `feature_snapshot_service.compute_for_trade_date`；
@@ -292,9 +313,20 @@ df -h
 uptime
 ```
 
+前端 nginx 部署注意事项：
+
+- frontend 容器通过 Docker 内部 DNS 把 `backend` 解析为 backend 容器 IP；nginx 默认只在启动时解析一次 upstream，backend 容器重建（如 `docker compose build backend` 或 `--force-recreate`）后 IP 可能变化，导致 frontend nginx 仍连接旧 IP，所有 `/api/*` 请求 502；
+- 生产 nginx 配置已修复：在 `server` 块中声明 `resolver 127.0.0.11 valid=10s;`，并在 `/api/` location 中使用变量 `set $backend_url backend:8000;` + `proxy_pass http://$backend_url;` + `rewrite ^/api/(.*) /$1 break;`，强制 nginx 每次请求重新解析 `backend`；
+- 部署 backend 后若前端出现“数据加载失败，请刷新重试”，优先检查 frontend 日志是否有 `connect() failed (111: Connection refused) while connecting to upstream`，upstream IP 是否不是当前 backend 容器 IP；
+- 验证命令：
+  - `docker inspect trading-backend --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'` 查看当前 backend IP；
+  - `docker logs trading-frontend 2>&1 | grep "upstream"` 查看 upstream IP；
+  - `curl http://localhost:8000/health` 直接验证 backend 是否健康；
+  - `curl http://localhost/api/health` 验证 nginx 代理是否恢复。
+
 实时行情部署验证项：
 
-- `GET /api/v1/instruments/{instrument_id}/quote` 返回字段包含 `source`/`is_realtime`/`update_time`/`freshness_seconds`/`degraded`/`degraded_reason`；
+- `GET /api/v1/instruments/{instrument_id}/quote` 返回字段包含 `source`/`is_realtime`/`update_time`/`freshness_seconds`/`degraded`/`degraded_reason`;
 - 交易时段 pytdx 成功时 `source="pytdx"`、`is_realtime=true`、`degraded=false`；
 - 交易时段 pytdx 失败时 `source="daily_fallback"`、`degraded=true`；
 - 非交易时段 fallback 时 `source="daily_fallback"`、`degraded=false`；

@@ -2,6 +2,15 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-08
+
+- CHANGE-20260708-050: 修复 frontend nginx 缓存 backend 旧 IP 导致 API 502
+  - 根因：nginx 默认只在启动时解析一次 `backend` 主机名，backend 容器重建后 frontend nginx 仍连接旧 IP，所有 `/api/*` 请求 502，WatchlistPage 显示"数据加载失败，请刷新重试"
+  - 修复：`frontend/nginx.conf` 新增 `resolver 127.0.0.11 valid=10s;`，`/api/` location 改用变量 `set $backend_url backend:8000;` + `proxy_pass http://$backend_url;` + `rewrite ^/api/(.*) /$1 break;`
+  - 验证：backend/frontend 服务均 Up，/health、/openapi.json、/api/watchlist/monitor-status 均 200，前端页面正常渲染，30m 日志无 5xx / upstream refused
+  - 文档：更新 `03-jobs-integrations-operations.md`（生产验证、profile 计划、禁止全量回补条件、nginx 部署注意事项）、`05-testing-acceptance.md`（3.6 排查验收）、`worker-job-map.md`、追加 `CHANGE-20260707-049.md` 生产验证结果
+  - 风险与遗留：历史回补仍因 126min > 120min 阈值 BLOCKED；下一步需 `--profile-summary` 定位瓶颈
+
 ## 2026-07-07
 
 - CHANGE-20260707-049: Backfill Multiprocessing 优化
