@@ -32,6 +32,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import indicator_contract
+from app.constants.capture import CAPTURE_SCOPE_STOCK_DETAIL
 from app.constants.strategy_keys import WATCHLIST_MONITOR
 from app.constants.user_facing_labels import get_event_label, get_field_label
 from app.core.time import format_shanghai_datetime
@@ -1490,10 +1491,14 @@ class MonitorBatchService:
                     continue
 
                 # [飞书两段式投递] - 生成短期 capture token
+                # 必须携带 scope/instrument_id/user_id，否则 capture API 会 401/403
                 token = create_capture_token(
                     subject=str(user_ids[0]),
                     event_id=str(first_event.id),
                     expires_delta=timedelta(seconds=capture_token_ttl),
+                    scope=CAPTURE_SCOPE_STOCK_DETAIL,
+                    instrument_id=str(inst_id),
+                    user_id=str(user_ids[0]),
                 )
 
                 # 调用 capture worker 截图

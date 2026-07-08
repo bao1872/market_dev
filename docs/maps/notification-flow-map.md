@@ -2,20 +2,48 @@
 
 ## 1. 自动监控通知
 
+自动监控通知分为**文字/卡片**和**图片**两段独立链路，通过 `message_group_id` 关联成同一事件的图文消息组。文字通知成功不代表图片通知一定成功。
+
+### 1.1 文字/卡片链路
+
 ```text
 MonitorEvaluation
 → StrategyEvent
 → EventRecipient
-→ NotificationMessage
+→ NotificationMessage (source_type=monitor_event / strategy_event)
 → Outbox(notification.message.created)
 → outbox_relay
 → eligible_user_service 资格过滤（`filter_monitor_eligible_recipients`/`is_user_eligible_for_monitor`，MONITOR_SOURCE_TYPES 真源见 `app/constants/monitor_source_types.py`）
 → active NotificationChannel
-→ MessageDelivery
+→ MessageDelivery(delivery_type=text/card)
 → delivery_worker
-  → 对 monitor_event / strategy_event / monitor_chart 再次调用 `is_user_eligible_for_monitor` 复核
-→ FeishuPlatformAppAdapter
+  → 对 monitor_event / strategy_event 再次调用 `is_user_eligible_for_monitor` 复核
+→ FeishuPlatformAppAdapter 发送文字/卡片
 ```
+
+### 1.2 图片链路
+
+```text
+worker-monitor
+→ monitor_batch_service._send_chart_images_via_outbox()
+  → 生成短期 capture token（必须含 scope=stock_detail_capture / user_id / instrument_id / event_id）
+  → HTTP POST worker-capture /capture
+  → capture_jobs (status=succeeded/failed)
+→ NotificationMessage (source_type=monitor_chart)
+→ Outbox(notification.message.created) payload:
+     { delivery_type: "image", image_url: "...", message_group_id: "..." }
+→ outbox_relay
+→ eligible_user_service 资格过滤
+→ active NotificationChannel
+→ MessageDelivery(delivery_type=image)
+→ delivery_worker
+  → 对 monitor_chart 调用 `is_user_eligible_for_monitor` 复核
+→ FeishuPlatformAppAdapter 上传/发送图片
+```
+
+- `message_group_id` 与文字/卡片链路共享，用于图文状态机关联；
+- capture token 字段缺失会导致 worker-capture 返回 401/403，`image_url` 为空，不写 image Outbox，但**不阻塞文字通知**；
+- 图片截图失败时整体消息组可能标记为 `partial_failed`。
 
 无 `target_channel_id` 的自动通知必须走 eligible_user_service；delivery_worker 是 monitor source 的最后资格防线。
 

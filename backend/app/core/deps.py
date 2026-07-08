@@ -29,6 +29,7 @@ from jose import JWTError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants.capture import CAPTURE_SCOPE_STOCK_DETAIL
 from app.core.security import decode_token
 from app.db import get_db
 from app.models.user import Role, User, UserRole
@@ -220,9 +221,6 @@ def require_roles(*required_roles: str) -> Callable[..., object]:
 
     return _check_roles
 
-
-# [Capture] - 描述: stock_detail_capture 作用域常量（advice.md 第六节）
-CAPTURE_SCOPE_STOCK_DETAIL = "stock_detail_capture"
 
 
 async def get_capture_token_payload(

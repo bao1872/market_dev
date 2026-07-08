@@ -100,6 +100,9 @@
 | beta admin 通知 | `test_beta_application_notifier.py` |
 | `_notify_monitor_status` 直接发送路径 | **无测试**（缺口，ALIGN-025） |
 | 飞书消息时间显示中国时区 | `test_feishu_timezone_format.py` |
+| **[Monitor 图片 Capture Token]** `monitor_batch_service._send_chart_images_via_outbox()` 生成的 capture token 含 `type=capture`、`scope=stock_detail_capture`、`user_id`、`instrument_id`、`event_id`，且 `instrument_id` 与触发股票一致；capture 成功写 `capture_jobs=SUCCEEDED` 并生成 `delivery_type=image` / `image_url` / `message_group_id` Outbox；capture 401/403/无 image_url 写 `capture_jobs=FAILED` 且不阻塞文字通知 | `test_monitor_batch_capture_image.py`（5 个用例） |
+| **[Notification latest-event Capture Token]** `notification_service.test_channel_latest_event()` 生成的 capture token 含完整 claims，`instrument_id` 与事件标的一致 | `test_notification_latest_event_capture.py`（2 个用例） |
+| **[Image Outbox / MessageDelivery]** monitor 图片链路通过 `message_group_id` 与文字通知关联；`delivery_type=image` 的 MessageDelivery 由 outbox_relay 生成 | 集成于 `test_monitor_batch_capture_image.py` + `test_outbox_relay_monitor_eligibility_consistency.py` |
 
 ## 5. 前端
 
