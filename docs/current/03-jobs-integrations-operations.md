@@ -248,33 +248,186 @@ CLI 参数：
 - upsert 幂等，可重复执行；
 - `start > end` 直接 `sys.exit(1)`。
 
-### 2.4.2 研究特征矩阵脚本骨架（research_feature_matrix_backfill）
+### 2.4.2 研究特征矩阵回补（research_feature_matrix_backfill）
 
-`backend/scripts/research_feature_matrix_backfill.py` 是研究特征矩阵 CLI 骨架，与生产 `feature_snapshot_backfill` 严格分离：
+`backend/scripts/research_feature_matrix_backfill.py` 是研究矩阵 CLI 入口，**DB 为主存储**（parquet 仅可选 debug 导出），与生产 `feature_snapshot_backfill` 严格分离：
 
 - 不接入 `watchlist_ready`，不修改 production snapshot；
-- 不新增数据库表，不写 DB（骨架阶段）；
-- 默认 `--dry-run`，无 `--output` 不落盘；
-- `--output` 必须配合 sample scope（`--symbols` 或 `--limit-instruments`），禁止无过滤全市场输出文件；
-- 字段因果口径由 `backend/app/research/feature_causality_registry.py` 统一登记，分 4 个命名空间：`causal` / `confirmed_delay` / `hindsight` / `label`；
+- 不写 `stock_feature_snapshots`，只写专用 research 表（`research_feature_matrix_runs` + `research_feature_matrix_rows`）；
+- 写入由 `backend/app/research/research_matrix_writer.py` 提供（三道硬阈值 + monthly run 生命周期 + 批量 upsert）；
+- 计算由 `backend/app/research/feature_computer.py` 提供（per-bar full series，复用现有算法 SSOT：ATR/BB/SQZMOM/swing/DSA）；
+- 字段因果口径由 `backend/app/research/feature_causality_registry.py` 统一登记，分 4 命名空间：`causal`（16）/ `confirmed_delay`（4）/ `hindsight`（6）/ `label`（7）= 33 字段；
 - `hindsight.*` 与 `label.*` 禁止进入回测 feature；
 - DSA 双轨：`causal.dsa_confirmed_*`（当时可知）vs `hindsight.dsa_finalized_*`（未来确认后回标注）；
 - Node Cluster 只能是 `hindsight.node_cluster_*`，不得进入 causal；
+- registry 仍保留 dotted key（`causal.atr`），写 DB 时映射成下划线列名（`causal_atr`）；
 - 详见 `06-research-feature-matrix.md`。
 
-调用方式：
+#### 2.4.2.1 CLI 参数
+
+| 参数 | 必填 | 语义 |
+|---|---|---|
+| `--month YYYY-MM` | 与 `--start` 互斥必填其一 | 单月回补（推荐用法） |
+| `--start YYYY-MM-DD` | 与 `--month` 互斥必填其一 | 起始日期（与 `--end` 配合用于跨月 sample 验证） |
+| `--end YYYY-MM-DD` / `latest` | 可选，默认 `latest` | 结束日期 |
+| `--symbols` | 可选 | 只处理指定股票代码（逗号分隔，触发 sample scope） |
+| `--limit-instruments N` | 可选 | 限制处理 instrument 数（触发 sample scope） |
+| `--dry-run` | 可选 | 只打印计划与估算，不写 DB，不写文件 |
+| `--resume` | 可选 | 续跑模式：已存在 run 复用，已存在 instrument/date 幂等 upsert |
+| `--export-parquet PATH` | 可选 | 可选 debug 导出 parquet 路径（仅 sample scope，不作为主存储） |
+
+#### 2.4.2.2 三道硬阈值
+
+任一不通过即停止：
+
+| 阈值 | 触发条件 | 行为 |
+|---|---|---|
+| 磁盘剩余 | `df -h /` 剩余 < 15GB | 停止（不创建 run） |
+| 单月预估 | `estimate_month_size > 3GB`（rows × 2KB） | 停止（不创建 run） |
+| 失败率 | [Blocker Fix] `failed_rows / expected_rows > 5%` | run 标 `failed`，不继续后续月份 |
+
+设计原因：磁盘约 61GB 可用，数据库在 `/` 分区上，写数据库也会占用磁盘。
+
+**失败率口径（Blocker Fix）**：
+- `failed_rows` = 失败行数（一个股票失败对应多 trade_date 行失败）；
+- `expected_rows` = `instruments_count × trade_dates_count`；
+- `metadata_json.failed_instruments` = 失败股票数（仅查询用，不参与失败率计算）；
+- 单只股票失败时 `_process_instrument` 返回 `(0, expected_rows)`，主流程累加 `total_failed_rows` + `total_failed_instruments`。
+
+#### 2.4.2.3 进程锁（Blocker Fix）
+
+防止同 `month/scope` 重复启动后台任务，使用双保险：
+
+| 锁类型 | 实现 | 释放 |
+|---|---|---|
+| `pg_advisory_lock` | `acquire_run_lock(db, month, scope)` 调用 `pg_try_advisory_lock(namespace, key)`，namespace=`0x5245534D`（"RESM"），key=`sha1(month_scope)[:4]` 稳定 hash | session close 自动释放（session-level） |
+| lock file | `acquire_lock_file(month, scope)` 用 `os.open(O_CREAT \| O_EXCL \| O_WRONLY)` 原子创建 `/tmp/research_matrix_backfill_{month}_{scope}.lock` | `release_lock_file(path)` 显式删除 |
+
+**CLI 主流程约束**：
+- dry-run 不获取锁（不写 DB）；
+- 非 dry-run 必须先 `acquire_lock_file` 再 `acquire_run_lock`，任一失败打印 `[BLOCKED]` 退出；
+- 主循环 + finalize 包在 `try`，`finally` 先 `await lock_session.close()` 再 `release_lock_file(lock_path)`；
+- 同 `month/scope` 已有 running run 或 lock 存在时拒绝启动。
+
+#### 2.4.2.4 分阶段验证
+
+禁止直接全量跑到当前。必须按以下顺序逐阶段验证，每阶段验收通过后才进入下一阶段：
+
+| 阶段 | 命令 | 验收点 |
+|---|---|---|
+| A. dry-run | `--month 2026-01 --dry-run` | 打印计划，`expected_rows` / `estimated_db_size` 合理 |
+| B. 2 symbols | `--month 2026-01 --symbols 000001,600000` | run succeeded，rows 写入正确 |
+| C. 100 stocks × 1 month | `--month 2026-01 --limit-instruments 100` | run succeeded，failed_rate < 5% |
+| D. 全市场 2026-01 | `--month 2026-01` | run succeeded，磁盘占用合理 |
+| E. 后台逐月回补到当前 | nohup 串行跑 `2026-02` 到当前 | 每月 run succeeded，磁盘监控 |
+
+> 阶段 B/C/D 必须在 PR merge + migration 058 应用后才能执行。
+
+**关键约束**：
+- 阶段 A/B/C/D 必须前台执行（前台跑完才能跑下一阶段），不允许 nohup；
+- **只有 D 阶段通过后，才允许启动后台逐月回补（阶段 E）**；
+- 每阶段必须检查：`df -h /` / `rows_count` / `failed_rows` / `failed_rate` / `run.status` / 表大小 / 日志是否有 traceback。
+
+#### 2.4.2.5 调用方式
 
 ```bash
-cd /root/web_dev/backend && .venv/bin/python -m scripts.research_feature_matrix_backfill \
-    --start 2026-01-01 --end 2026-01-31 --symbols 000001,600000 --dry-run
+# dry-run 查看计划
+cd /root/web_dev/backend && python -m scripts.research_feature_matrix_backfill \
+    --month 2026-01 --dry-run
+
+# 2 symbols 验证
+cd /root/web_dev/backend && python -m scripts.research_feature_matrix_backfill \
+    --month 2026-01 --symbols 000001,600000
+
+# 全市场 2026-01
+cd /root/web_dev/backend && python -m scripts.research_feature_matrix_backfill \
+    --month 2026-01
+
+# --resume 续跑（幂等 upsert）
+cd /root/web_dev/backend && python -m scripts.research_feature_matrix_backfill \
+    --month 2026-01 --resume
 ```
 
-本 PR 只完成骨架 + dry-run，不实现实际计算。后续实现顺序：
-1. causal rolling features（ATR/BB/SQZMOM/volume）；
-2. confirmed_delay swing（按确认 bar 生效，不回填 anchor）；
-3. DSA 双轨；
-4. Node Cluster（只输出 `hindsight.node_cluster_*`）；
-5. labels（用未来 close/high/low 生成 `label.future_*`）。
+#### 2.4.2.6 数据模型
+
+由 `backend/alembic/versions/058_research_feature_matrix.py` 创建两张表：
+
+- `research_feature_matrix_runs`：按月分批的 run 级元数据，唯一键 `run_key`（如 `2026-01_full`），记录状态机与统计摘要；`metadata_json` 只放小摘要（scope/notes/thresholds），不存完整 payload，不建 GIN 索引；[Blocker Fix] `failed_count` 列存 `failed_rows`，`metadata_json.failed_instruments` 存股票级失败数；
+- `research_feature_matrix_rows`：扁平宽表 39 列（5 metadata + 33 feature + 1 created_at），唯一键 `(instrument_id, trade_date)` 跨 run 幂等 upsert；3 个 btree 索引（`trade_date` / `instrument_id` / `run_id`），不给单个 feature 列建索引。
+
+详见 `06-research-feature-matrix.md` 第 7 节。
+
+#### 2.4.2.7 后台逐月回补 runbook
+
+**前置条件**：阶段 D（全市场 2026-01）前台验收通过。
+
+**启动方式**（nohup 串行，不并行）：
+
+```bash
+cat > /tmp/run_research_matrix_backfill.sh <<'EOF'
+set -e
+MONTHS="2026-02 2026-03 2026-04 2026-05 2026-06 2026-07"
+for m in $MONTHS; do
+  free=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+  if [ "$free" -lt 15 ]; then echo "STOP disk free ${free}GB"; exit 1; fi
+  echo "RUN $m $(date)"
+  docker exec trading-backend python -m scripts.research_feature_matrix_backfill --month "$m" --resume
+  echo "DONE $m $(date)"
+done
+EOF
+
+nohup bash /tmp/run_research_matrix_backfill.sh > /tmp/research_matrix_backfill.log 2>&1 &
+echo $! > /tmp/research_matrix_backfill.pid
+```
+
+**停止条件**（任一触发即停止）：
+- `df -h /` 剩余 < 15GB（脚本内联检查 + 手动检查）；
+- 单月 run 标 `failed`（CLI 自动停止后续月份）；
+- `failed_rate > 5%`（CLI 自动标 failed）；
+- 日志出现 traceback（人工检查）。
+
+**监控命令**：
+```bash
+# 查看后台进度
+tail -f /tmp/research_matrix_backfill.log
+ps -p $(cat /tmp/research_matrix_backfill.pid) && echo "running" || echo "exited"
+
+# 查看当前月份 run 状态
+docker exec trading-backend python -c "
+import asyncio
+from app.db import AsyncSessionLocal
+from app.models.research_feature_matrix import ResearchFeatureMatrixRun
+from sqlalchemy import select
+async def main():
+    async with AsyncSessionLocal() as db:
+        r = await db.execute(select(ResearchFeatureMatrixRun).order_by(ResearchFeatureMatrixRun.started_at.desc()).limit(5))
+        for run in r.scalars():
+            print(f'{run.run_key} {run.status} rows={run.rows_count} failed={run.failed_count}')
+asyncio.run(main())
+"
+
+# 查看表大小
+docker exec trading-postgres psql -U bz -d bz_stock -c "
+SELECT relname, pg_size_pretty(pg_total_relation_size(relid))
+FROM pg_catalog.pg_statio_user_tables
+WHERE relname LIKE 'research_feature_matrix%'
+ORDER BY pg_total_relation_size(relid) DESC;
+"
+```
+
+**停止后台任务**：
+```bash
+kill $(cat /tmp/research_matrix_backfill.pid)
+# 清理 lock file（如异常退出残留）
+rm -f /tmp/research_matrix_backfill_*.lock
+```
+
+**禁止项**：
+- 不要并行多月回补（每月串行，前一个月完成才跑下一个月）；
+- 不要写 parquet/export（仅 sample scope 可选，full 回补不允许）；
+- 不要跑 production `stock_feature_snapshots` 历史回补（仍 BLOCKED）；
+- 不要生成 coverage/截图/DB 备份/大日志；
+- 不要删除数据库卷或运行中镜像。
 
 ## 2.5 监控图片通知链路
 

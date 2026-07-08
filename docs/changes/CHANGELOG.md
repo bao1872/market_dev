@@ -2,6 +2,32 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-09
+
+- CHANGE-20260709-001: research feature matrix DB 主存储 + compute + writer + CLI + 5 个 Blocker 修复
+  - registry 从 27 扩展到 33 字段（causal 16 + confirmed_delay 4 + hindsight 6 + label 7），新增 `FeatureSpec.db_column` 把 dotted key 映射为下划线列名（`causal.atr` → `causal_atr`）
+  - 新增 `backend/app/models/research_feature_matrix.py`：`ResearchFeatureMatrixRun`（16 列，`run_key` 唯一）+ `ResearchFeatureMatrixRow`（39 列扁平宽表，`(instrument_id, trade_date)` 唯一）ORM
+  - 新增 `backend/alembic/versions/058_research_feature_matrix.py`：创建两张表 + 索引（**本 PR 不应用 migration**，留到 PR merge 后）
+  - 新增 `backend/app/research/feature_computer.py`：`compute_all_features(bars)` per-bar full series，复用 ATR/BB/SQZMOM/swing/DSA SSOT
+  - 新增 `backend/app/research/research_matrix_writer.py`：三道硬阈值（磁盘 < 15GB / 单月 > 3GB / 失败率 > 5%）+ monthly run 生命周期 + 批量 upsert（`ON CONFLICT (instrument_id, trade_date) DO UPDATE`）
+  - 重写 `backend/scripts/research_feature_matrix_backfill.py`：`--month YYYY-MM` 单月回补 + `--resume` 幂等 + `--export-parquet` 可选 debug 导出；instrument-first 架构；每 100 只 instrument commit 一次；tqdm 进度条
+  - 移除 `--output` / `--include-hindsight` / `--include-labels`（始终计算全部 33 字段，DB 主存储）
+  - 新增 5 个测试文件：`test_feature_computer.py`（~26 用例）+ `test_research_matrix_writer.py`（~32 用例，async DB savepoint）+ `test_research_feature_matrix_model.py`（model 自测）+ `test_research_feature_matrix_backfill.py`（~13 用例）+ 更新 `test_feature_causality_registry.py`（33 字段）；pytest 119 passed
+  - 重写 `docs/current/06-research-feature-matrix.md` + `03-jobs` 2.4.2 节 + `05-testing` 3.8 节；更新 4 个 maps（backend-module / worker-job / database-model / test-coverage）
+  - 生产 dry-run 验证：5293 股 × 20 交易日 = 105860 行，0.20GB 估算（远低于 3GB 阈值）
+  - 与生产 `stock_feature_snapshots` 严格分离：不接入 watchlist_ready，不写生产 snapshot；不写大 JSONB/GIN 索引（扁平宽表）；不生成中间文件/DB 备份
+  - **Blocker Fix（用户 review 反馈）**：
+    - Blocker 1：DSA hindsight 不用 causal 近似冒充，`hindsight_dsa_finalized_*` 3 列 Phase 1 全 NULL，metadata 标记 `dsa_hindsight_status=not_implemented`
+    - Blocker 2：Node Cluster 全 NULL，metadata 标记 `feature_version=phase1_no_node_cluster` + `node_cluster_status=not_implemented`，PR body 不得说已完成
+    - Blocker 3：失败率统计改 `failed_rows / expected_rows`，`failed_count` 列存 `failed_rows`，`metadata_json.failed_instruments` 存股票级失败数
+    - Blocker 4：`_process_instrument` upsert 异常 `await db.rollback()` 后继续下一只股票
+    - Blocker 5：进程锁双保险 `pg_advisory_lock` + lock file，同 month/scope 拒绝重复启动
+  - 新增 7 个 blocker 测试：DSA hindsight 全 NULL / 不等于 causal 近似 / Node Cluster 全 NULL / failed_rows==trade_dates_count / rollback 被调用 / 锁拒绝 / resume 不破坏已完成 run
+  - 更新 `docs/current/06-research-feature-matrix.md`（§4.1/5.1/5.2 + §8/10.3/11/12/14 加 Blocker Fix 说明）
+  - 更新 `docs/current/03-jobs-integrations-operations.md`（§2.4.2.2 失败率口径 + §2.4.2.3 进程锁 + §2.4.2.7 后台逐月回补 runbook）
+  - 更新 `docs/current/05-testing-acceptance.md`（§3.8 加 Blocker Fix 测试 + §3.9 production staged validation A-E 阶段）
+  - 分阶段验证延后到 PR merge + migration 应用：A(dry-run)→B(2 symbols)→C(100 stocks)→D(全市场 2026-01)→E(后台逐月回补 2026-02 到当前)
+
 ## 2026-07-08
 
 - CHANGE-20260708-054: research feature matrix causality registry

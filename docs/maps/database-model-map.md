@@ -45,6 +45,8 @@ published run 不可变。partial_failed 不得自动发布。
 | `event_recipients` | 事件与有效用户收件人关系 |
 | `stock_feature_snapshots` | 盘后特征快照（结构/时序因子 + 前端列表用 summary）；唯一键 `(instrument_id, trade_date, primary_timeframe, secondary_timeframe, adj, schema_version)`；3 个 btree 索引；无 GIN 索引；`/watchlist/monitor-status` 的 metrics 唯一来源 |
 | `stock_feature_snapshot_runs` | snapshot 计算 run 级成功标记；唯一键 `(trade_date, schema_version, primary_timeframe, secondary_timeframe, adj, run_type) WHERE status='running'`（partial unique index）；3 个 btree 索引；watchlist 只读 `status='succeeded'` 的 run 对应日期 snapshot |
+| `research_feature_matrix_runs` | 研究特征矩阵按月分批 run 级元数据；唯一键 `run_key`（如 `2026-01_full`）；2 个 btree 索引（`month`/`status`）；状态机 `running` → `succeeded`/`failed`；`metadata_json` 只放小摘要，不存完整 payload，不建 GIN 索引；与生产 snapshot 严格分离，不接入 watchlist |
+| `research_feature_matrix_rows` | 研究特征矩阵扁平宽表，一只股票一个交易日的 33 个 feature 值；唯一键 `(instrument_id, trade_date)` 跨 run 幂等 upsert；3 个 btree 索引（`trade_date`/`instrument_id`/`run_id`）；不存 JSON payload，不建 GIN 索引；33 feature 列与 `feature_causality_registry.db_column()` 1:1 对应；总列数 39（5 metadata + 33 feature + 1 created_at） |
 
 ## 5. 消息、投递、截图
 

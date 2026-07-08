@@ -462,11 +462,12 @@ ruff check app/constants/capture.py app/core/deps.py app/core/security.py \
 
 ## 3.8 研究特征矩阵因果口径回归（blocking）
 
-任何修改 `backend/app/research/feature_causality_registry.py`、`backend/scripts/research_feature_matrix_backfill.py` 必须跑研究特征矩阵因果口径回归测试。
+任何修改 `backend/app/research/feature_causality_registry.py`、`backend/app/research/research_matrix_writer.py`、`backend/app/research/feature_computer.py`、`backend/app/models/research_feature_matrix.py`、`backend/scripts/research_feature_matrix_backfill.py` 必须跑研究特征矩阵因果口径回归测试。
 
-后端 registry 回归（`tests/test_feature_causality_registry.py`，24 个用例）：
+后端 registry 回归（`tests/test_feature_causality_registry.py`，~30 个用例）：
 - `FeatureSpec` 必填 `namespace` / `source` / `compute_policy`，缺一抛 `ValueError`；
 - `key` 必须以 `{namespace}.` 开头（如 `causal.atr`），不匹配抛 `ValueError`；
+- `FeatureSpec.db_column` 把 dotted key 映射为下划线列名（`causal.atr` → `causal_atr`）；
 - `hindsight.*` 的 `allowed_for_backtest` 必须 `False`；
 - `label.*` 的 `allowed_for_backtest` 必须 `False`；
 - `causal.*` 的 `allowed_for_backtest` 必须 `True`；
@@ -475,43 +476,170 @@ ruff check app/constants/capture.py app/core/deps.py app/core/security.py \
 - Node Cluster 只能是 `hindsight.node_cluster_*`，不得出现在 causal；
 - `confirmed_swing_*` 必须是 `confirmed_delay`，不得作为 hindsight 默认回填；
 - `FeatureCausalityRegistry.register` 重复 key 抛 `ValueError`；
-- `build_default_registry()` 返回 27 个字段（causal 10 + confirmed_delay 4 + hindsight 6 + label 7）。
+- 默认 registry 必须包含关键 causal/label 字段（`causal.atr` / `causal.bb_percent_b` / `causal.sqzmom_val` / `causal.volume_ratio_20` / `causal.active_swing_dir` / `causal.developing_swing_dir` / `causal.dsa_confirmed_*` / `label.future_return_*` / `label.future_max_drawdown_*` / `label.breakout_success_10d` / `label.failure_breakdown_10d`）；
+- `build_default_registry()` 返回 33 个字段（causal 16 + confirmed_delay 4 + hindsight 6 + label 7）。
 
-后端脚本骨架回归（`tests/test_research_feature_matrix_backfill.py`，17 个用例）：
-- `parse_args` 默认值：`end='latest'`、`symbols=None`、`limit_instruments=None`、`dry_run=False`、`output=None`、`include_hindsight=True`、`include_labels=True`；
-- `parse_args` 自定义值正确解析；`--symbols` 逗号分隔解析为 list；缺 `--start` 报 `SystemExit`；
-- `build_plan` 返回字段分类统计（causal/confirmed_delay/hindsight/label）与 total_fields；
-- `_resolve_scope(symbols, limit_instruments)`：任一过滤启用 → `sample`，都未启用 → `full`；
-- `--include-hindsight=false` 时 hindsight 字段数为 0；`--include-labels=false` 时 label 字段数为 0；
-- `--dry-run` 打印计划，不写 DB，不写文件；
-- 非 dry-run 无 `--output` 只打印计划（骨架阶段不实际计算）；
-- `--output` 必须配合 sample scope，否则 `_validate_output_scope` 抛 `ValueError`（禁止无过滤全市场输出文件）；
-- `build_plan` 字段分类总数与 registry 字段数一致。
+后端 writer 回归（`tests/test_research_matrix_writer.py`，~32 个用例，async DB savepoint 模式）：
+- 三道硬阈值（`TestDiskThreshold` / `TestMonthSizeThreshold` / `TestFailureRateThreshold`）：
+  - 磁盘边界 `15 * (1024**3)` 字节（用 1024^3 而非 10^9，与 `check_disk_threshold` 的 GB 计算一致）；
+  - 单月大小边界 `MONTH_SIZE_MAX_GB`（3.0GB）；
+  - 失败率边界 5%（5/100 通过，6/100 不通过，total=0 通过）；
+- 月份解析（`TestResolveMonthRange`）：1月/2月非闰/2月闰年/12月/非法格式抛 `ValueError`；
+- 单月大小估算（`TestEstimateMonthSize`）：小样本/全月/零；
+- monthly run 生命周期（`TestRunLifecycle`，async DB）：
+  - `create_or_resume_run` 首次创建返回 `running`；
+  - 相同 `run_key` 第二次调用返回已存在 run（不重复创建）；
+  - 不同 scope（`full` / `sample_100`）→ 不同 `run_key`；
+  - `finalize_run(succeeded)` 更新 status/统计/duration/finished_at；
+  - `finalize_run(failed)` status=failed；
+  - **[Blocker Fix] `test_finalize_run_records_failed_instruments_and_rows`**：`finalize_run(failed_instruments=500, failed_count=10000)` 后 `metadata_json.failed_instruments=500` + `metadata_json.failed_rows=10000`；
+  - **[Blocker Fix] `test_resume_does_not_reset_completed_run`**：先 `finalize_run(succeeded)`，再 `create_or_resume_run` 同 `run_key`，验证 status/统计/duration 不被重置（resume 不破坏已完成 full run 的统计）；
+- 批量 upsert rows（`TestUpsertRowsBatch`，async DB）：
+  - 首次 upsert 写入新行；
+  - 相同 `(instrument_id, trade_date)` → `ON CONFLICT DO UPDATE` 覆盖旧值；
+  - 空 list 返回 0；
+  - 1050 行分批（UPSERT_BATCH_SIZE=1000）；
+- **[Blocker Fix] 进程锁（`TestProcessLock`，~5 个用例，纯函数 + tmp_path）**：
+  - `test_advisory_lock_key_stable`：同 `month+scope` 跨进程生成相同 `(namespace, key)`；
+  - `test_advisory_lock_key_diff_scope`：不同 scope 生成不同 key；
+  - `test_lock_file_create`：`acquire_lock_file` 创建 `/tmp/research_matrix_backfill_{month}_{scope}.lock`，写入 pid + started_at；
+  - `test_lock_file_reject_when_exists`：lock file 已存在时返回 None（拒绝启动）；
+  - `test_release_lock_file_idempotent`：删除不存在 lock file 不抛异常；
+- dry-run 估算（`TestDryRunEstimation`）：全月估算/极端场景。
+
+后端计算模块回归（`tests/test_feature_computer.py`，~26 个用例）：
+- `compute_all_features(bars)` 返回 DataFrame 含 33 个 feature 列；
+- per-bar 计算 vs single-snapshot 区分（每根 bar 都有值，warmup 期 NaN）；
+- causal rolling 字段（ATR/BB/SQZMOM/volume）复用现有算法 SSOT；
+- DSA 双轨（`causal.dsa_confirmed_*` vs `hindsight.dsa_finalized_*`）；
+- confirmed_delay swing（只在确认 bar 生效，不回填 anchor）；
+- label 字段（未来收益/最大回撤/突破成功/破位失败）；
+- 空输入/数据不足不抛异常（返回空 DataFrame）；
+- **[Blocker Fix] `test_hindsight_phase1_all_null`**：`hindsight_dsa_finalized_*` 3 列在 Phase 1 必须全 NaN（不得用 causal 近似冒充）；
+- **[Blocker Fix] `test_hindsight_not_equals_causal_approx`**：验证 hindsight 不等于 causal segment_ids/directions/age（确保没有偷懒复用）；
+- **[Blocker Fix] `test_node_cluster_phase1_all_null`**：`hindsight_node_cluster_*` 3 列在 Phase 1 必须全 NaN。
+
+后端 model 回归（`tests/test_research_feature_matrix_model.py`）：
+- `ResearchFeatureMatrixRun` 16 列结构 + `run_key` 唯一约束 + month/status 索引；
+- `ResearchFeatureMatrixRow` 39 列结构（5 metadata + 33 feature + 1 created_at）+ `(instrument_id, trade_date)` 唯一约束 + 3 btree 索引；
+- 状态枚举常量 `STATUS_RUNNING` / `STATUS_SUCCEEDED` / `STATUS_FAILED`。
+
+后端 CLI backfill 回归（`tests/test_research_feature_matrix_backfill.py`，~13 个用例，mock + tmp_path）：
+- **[Blocker Fix] 参数解析（`TestParseArgs`，5 个用例）**：
+  - `--month YYYY-MM` 解析正确；
+  - `--month` 与 `--start` 互斥（同时给抛错）；
+  - `--resume` flag 解析为 True；
+  - `--export-parquet PATH` 解析正确；
+  - 旧 `--output` 参数已移除（传入抛 `SystemExit`）；
+- **[Blocker Fix] 失败行数统计（`TestProcessInstrumentFailureRows`，2 个用例）**：
+  - bars 不足时 `_process_instrument` 返回 `(0, expected_rows)` 而非 `(0, 1)`，验证 `failed_rows == trade_dates_count`；
+  - features 空时同样返回 `(0, expected_rows)`；
+- **[Blocker Fix] rollback（`TestProcessInstrumentRollback`，2 个用例）**：
+  - upsert 异常时 `db.rollback()` 被调用（用 AsyncMock 验证）；
+  - rollback 失败时只记日志不 crash（继续下一只股票）；
+- **[Blocker Fix] 锁拒绝（`TestLockRejection`，4 个用例）**：
+  - `_advisory_lock_key(month, scope)` 稳定 hash（同输入跨进程一致）；
+  - `acquire_lock_file` 已存在时返回 None（拒绝启动）；
+  - 不同 scope 可同时持有 lock（不互斥）；
+  - `release_lock_file` 释放不存在的 lock file 不报错。
 
 回归命令：
 
 ```bash
 cd /root/web_dev/backend
 APP_ENV=test TEST_DATABASE_URL=postgresql+asyncpg://bz:bz@localhost:5433/bz_stock_test \
-pytest tests/test_feature_causality_registry.py tests/test_research_feature_matrix_backfill.py -q
+  pytest tests/test_feature_causality_registry.py \
+         tests/test_research_matrix_writer.py \
+         tests/test_feature_computer.py \
+         tests/test_research_feature_matrix_model.py \
+         tests/test_research_feature_matrix_backfill.py -q
 
 ruff check app/research/feature_causality_registry.py \
+  app/research/research_matrix_writer.py \
+  app/research/feature_computer.py \
+  app/models/research_feature_matrix.py \
   scripts/research_feature_matrix_backfill.py \
   tests/test_feature_causality_registry.py \
+  tests/test_research_matrix_writer.py \
+  tests/test_feature_computer.py \
+  tests/test_research_feature_matrix_model.py \
   tests/test_research_feature_matrix_backfill.py
 
 mypy app/research/feature_causality_registry.py \
+  app/research/research_matrix_writer.py \
+  app/research/feature_computer.py \
+  app/models/research_feature_matrix.py \
   scripts/research_feature_matrix_backfill.py
 ```
 
-预期：41 passed、ruff 零错误、mypy 零错误。
+预期：所有测试 passed、ruff 零错误、mypy 零错误。
 
 dry-run 验证命令（不写库，仅打印计划）：
 
 ```bash
-cd /root/web_dev/backend && .venv/bin/python -m scripts.research_feature_matrix_backfill \
-    --start 2026-01-01 --end 2026-01-31 --symbols 000001,600000 --dry-run
+cd /root/web_dev/backend && python -m scripts.research_feature_matrix_backfill \
+    --month 2026-01 --dry-run
 ```
+
+## 3.9 研究特征矩阵生产分阶段验收（production staged validation）
+
+PR merge + migration 058 应用后，必须按 A → B → C → D → E 顺序逐阶段验收，前阶段未通过禁止进入下一阶段：
+
+| 阶段 | 命令（前台执行） | 验收点 | 失败处理 |
+|---|---|---|---|
+| A. dry-run | `docker exec trading-backend python -m scripts.research_feature_matrix_backfill --month 2026-01 --dry-run` | 打印 `expected_rows` / `estimated_db_size` 合理，不写 DB | 不影响后续 |
+| B. 2 symbols | `docker exec trading-backend python -m scripts.research_feature_matrix_backfill --month 2026-01 --symbols 000001,600000` | run.status=succeeded，rows_count 正确，failed_rows=0 | 检查日志 traceback，修复后重跑 |
+| C. 100 stocks × 1 month | `docker exec trading-backend python -m scripts.research_feature_matrix_backfill --month 2026-01 --limit-instruments 100` | run.status=succeeded，failed_rate < 5% | 检查失败股票，修复后 `--resume` 重跑 |
+| D. 全市场 2026-01 | `docker exec trading-backend python -m scripts.research_feature_matrix_backfill --month 2026-01` | run.status=succeeded，磁盘占用合理，表大小合理 | 检查磁盘/失败率，修复后 `--resume` 重跑 |
+| E. 后台逐月回补 | nohup 串行跑 `2026-02` 到当前（见 03-jobs §2.4.2.7 runbook） | 每月 run.status=succeeded，磁盘监控 | 检查日志，停止后台任务，修复后重跑 |
+
+**每阶段必须检查项**：
+```bash
+# 磁盘剩余（必须 >= 15GB）
+df -h /
+
+# 最新 run 状态
+docker exec trading-backend python -c "
+import asyncio
+from app.db import AsyncSessionLocal
+from app.models.research_feature_matrix import ResearchFeatureMatrixRun
+from sqlalchemy import select
+async def main():
+    async with AsyncSessionLocal() as db:
+        r = await db.execute(select(ResearchFeatureMatrixRun).order_by(ResearchFeatureMatrixRun.started_at.desc()).limit(1))
+        run = r.scalar_one_or_none()
+        if run:
+            print(f'run_key={run.run_key} status={run.status} rows={run.rows_count} failed_rows={run.failed_count} failed_instruments={run.metadata_json.get(\"failed_instruments\") if run.metadata_json else None}')
+asyncio.run(main())
+"
+
+# 表大小
+docker exec trading-postgres psql -U bz -d bz_stock -c "
+SELECT relname, pg_size_pretty(pg_total_relation_size(relid))
+FROM pg_catalog.pg_statio_user_tables
+WHERE relname LIKE 'research_feature_matrix%';"
+
+# 日志 traceback 检查
+docker logs trading-backend --tail 200 2>&1 | grep -i traceback
+```
+
+**验收通过标准**：
+- `run.status = succeeded`；
+- `failed_rate = failed_rows / expected_rows <= 5%`；
+- `df -h /` 剩余 >= 15GB；
+- 表大小合理（单月 < 3GB）；
+- 日志无 traceback。
+
+**阶段 E 后台逐月回补启动前置条件**：
+- 阶段 D（全市场 2026-01）前台验收通过；
+- 磁盘剩余 >= 15GB；
+- 无其他 research matrix backfill 后台任务运行（lock file 不存在）。
+
+**禁止项**：
+- 不要跳过任何阶段（A→B→C→D→E 必须顺序执行）；
+- 不要在阶段 D 未通过时启动后台逐月回补；
+- 不要并行多月回补（每月串行）；
+- 不要在后台任务运行时启动新的同 month/scope 任务（进程锁拒绝）。
 
 ## 4. CI 门禁
 
