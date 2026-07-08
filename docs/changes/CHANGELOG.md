@@ -14,6 +14,7 @@
   - 新增测试 `backend/tests/test_monitor_batch_capture_image.py`（5 用例）与 `backend/tests/test_notification_latest_event_capture.py`（2 用例）
   - 更新 `03-jobs-integrations-operations.md`、`05-testing-acceptance.md`、notification-flow-map、worker-job-map、test-coverage-map
   - 新增 ALIGN-038：monitor 文字成功但图片缺失待部署后 smoke 验证
+  - 部署验证完成：构造 `[SMOKE_IMAGE]` 单标的事件，capture_jobs.succeeded、image outbox processed、image delivery success、飞书图片投递成功，ALIGN-038 已关闭
   - 不修改 MDAS、前端 K线、monitor 触发、文字通知、outbox_relay、delivery_worker、feishu adapter
 
 ## 2026-07-07
