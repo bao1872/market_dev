@@ -58,6 +58,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 import uuid
 import warnings
 from datetime import date
@@ -123,6 +124,97 @@ def _resolve_run_scope(
     if limit_instruments is not None and limit_instruments > 0:
         return SCOPE_SAMPLE
     return SCOPE_FULL
+
+
+class ProfileCollector:
+    """轻量性能诊断收集器：记录各步骤耗时并输出聚合统计。
+
+    设计原则：
+    - 不写文件、不输出逐 instrument 明细
+    - 只在 stdout 输出聚合统计（total/avg/p50/p95）
+    - 支持多进程 merge（worker 返回 ProfileCollector，主进程合并）
+    - 默认不启用，只有 --profile-summary 才实例化
+    """
+
+    def __init__(self) -> None:
+        # {step_name: [ms_sample1, ms_sample2, ...]}
+        self._samples: dict[str, list[float]] = {}
+
+    def record(self, step: str, ms: float) -> None:
+        """记录单个步骤的单次耗时（毫秒）。"""
+        self._samples.setdefault(step, []).append(ms)
+
+    def merge(self, other: ProfileCollector) -> None:
+        """合并另一个 ProfileCollector 的样本（多进程模式）。"""
+        for step, samples in other._samples.items():
+            self._samples.setdefault(step, []).extend(samples)
+
+    def compute_stats(self) -> dict[str, dict[str, float]]:
+        """计算每个步骤的聚合统计：count/total/avg/p50/p95。"""
+        import statistics
+
+        stats: dict[str, dict[str, float]] = {}
+        for step, samples in self._samples.items():
+            if not samples:
+                continue
+            sorted_samples = sorted(samples)
+            n = len(sorted_samples)
+            total = sum(sorted_samples)
+            # p50 = median
+            p50 = statistics.median(sorted_samples)
+            # p95 = 95th percentile（线性插值）
+            if n == 1:
+                p95 = sorted_samples[0]
+            else:
+                idx = 0.95 * (n - 1)
+                lo = int(idx)
+                hi = min(lo + 1, n - 1)
+                frac = idx - lo
+                p95 = sorted_samples[lo] * (1 - frac) + sorted_samples[hi] * frac
+            stats[step] = {
+                "count": n,
+                "total": total,
+                "avg": total / n,
+                "p50": p50,
+                "p95": p95,
+            }
+        return stats
+
+    def format_summary(
+        self,
+        instruments_total: int,
+        trade_dates_total: int,
+        rows_new: int,
+        rows_skipped: int,
+        rows_failed: int,
+        worker_count: int,
+    ) -> str:
+        """格式化聚合统计为可读字符串（stdout 输出）。"""
+        stats = self.compute_stats()
+        lines: list[str] = []
+        lines.append("=" * 60)
+        lines.append("[PROFILE-SUMMARY] 聚合性能统计")
+        lines.append("=" * 60)
+        lines.append(f"instruments_total: {instruments_total}")
+        lines.append(f"trade_dates_total: {trade_dates_total}")
+        lines.append(f"rows_new: {rows_new}")
+        lines.append(f"rows_skipped: {rows_skipped}")
+        lines.append(f"rows_failed: {rows_failed}")
+        lines.append(f"worker_count: {worker_count}")
+        lines.append("-" * 60)
+        for step in sorted(stats.keys()):
+            s = stats[step]
+            lines.append(
+                f"{step}: total={s['total']:.1f}ms avg={s['avg']:.1f}ms "
+                f"p50={s['p50']:.1f}ms p95={s['p95']:.1f}ms count={s['count']}"
+            )
+        # estimated_full_day_time：基于 avg per instrument × 全市场 instruments × trade_dates
+        total_per_inst = stats.get("total_ms_per_instrument")
+        if total_per_inst and instruments_total > 0 and trade_dates_total > 0:
+            est = total_per_inst["avg"] * instruments_total * trade_dates_total / 1000
+            lines.append(f"estimated_full_day_time: {est:.1f}s")
+        lines.append("=" * 60)
+        return "\n".join(lines)
 
 
 async def get_trade_dates_from_bars(
@@ -310,6 +402,7 @@ async def backfill_instrument_first(
     adj: str = _DEFAULT_ADJ,
     schema_version: int = _DEFAULT_SCHEMA_VERSION,
     scope: str = SCOPE_FULL,
+    profile: ProfileCollector | None = None,
 ) -> dict[str, Any]:
     """Instrument-first 回补：每只 instrument 加载 bars 一次，遍历 trade_dates 切片。
 
@@ -429,16 +522,22 @@ async def backfill_instrument_first(
                 existing_per_date[td] = set()
 
     # instrument-first 主循环
+    _processed_count = 0
     for i in range(0, total_instruments, batch_size):
         batch = instruments[i : i + batch_size]
         for instrument_id in batch:
+            _inst_start = time.perf_counter() if profile else None
+
             # 每只 instrument 只加载一次 bars
+            _load_start = time.perf_counter() if profile else None
             primary_bars, secondary_bars = await load_instrument_bars(
                 db, instrument_id,
                 primary_timeframe=primary_timeframe,
                 secondary_timeframe=secondary_timeframe,
                 adj=adj,
             )
+            if profile and _load_start is not None:
+                profile.record("load_bars_ms", (time.perf_counter() - _load_start) * 1000)
 
             for td in trade_dates:
                 # resume 跳过：snapshot 已存在 AND run.status='succeeded'
@@ -446,6 +545,8 @@ async def backfill_instrument_first(
                     per_date_stats[td]["skipped"] += 1
                     continue
 
+                _compute_start = time.perf_counter() if profile else None
+                _compute_recorded = False
                 try:
                     snapshot = await compute_feature_snapshot_for_date(
                         db, instrument_id, td,
@@ -455,14 +556,56 @@ async def backfill_instrument_first(
                         primary_bars=primary_bars,
                         secondary_bars=secondary_bars,
                     )
+                    if profile and _compute_start is not None:
+                        profile.record(
+                            "compute_ms",
+                            (time.perf_counter() - _compute_start) * 1000,
+                        )
+                        _compute_recorded = True
+                    _upsert_start = time.perf_counter() if profile else None
                     await upsert_snapshot(db, snapshot)
+                    if profile and _upsert_start is not None:
+                        profile.record(
+                            "upsert_ms",
+                            (time.perf_counter() - _upsert_start) * 1000,
+                        )
                     per_date_stats[td]["success"] += 1
                 except Exception as exc:
+                    # [profile-summary] 失败路径也记录 compute_ms 耗时
+                    # 仅当 compute_ms 未被记录（compute 失败而非 upsert 失败）
+                    if profile and _compute_start is not None and not _compute_recorded:
+                        profile.record(
+                            "compute_ms",
+                            (time.perf_counter() - _compute_start) * 1000,
+                        )
                     per_date_stats[td]["failed"] += 1
                     logger.error(
                         "[backfill] snapshot 计算失败 instrument_id=%s trade_date=%s: %s",
                         instrument_id, td, exc, exc_info=True,
                     )
+
+            if profile and _inst_start is not None:
+                profile.record(
+                    "total_ms_per_instrument",
+                    (time.perf_counter() - _inst_start) * 1000,
+                )
+
+            # [profile-summary] 每 50 instruments 输出进度摘要
+            _processed_count += 1
+            if profile and _processed_count % 50 == 0:
+                _progress_stats = profile.compute_stats()
+                _load_avg = _progress_stats.get("load_bars_ms", {}).get("avg", 0.0)
+                _compute_avg = _progress_stats.get("compute_ms", {}).get("avg", 0.0)
+                _upsert_avg = _progress_stats.get("upsert_ms", {}).get("avg", 0.0)
+                _total_avg = _progress_stats.get(
+                    "total_ms_per_instrument", {}
+                ).get("avg", 0.0)
+                logger.info(
+                    "[profile-progress] %d/%d instruments | "
+                    "load_avg=%.1fms compute_avg=%.1fms upsert_avg=%.1fms total_avg=%.1fms",
+                    _processed_count, total_instruments,
+                    _load_avg, _compute_avg, _upsert_avg, _total_avg,
+                )
 
         # 每个 batch 后 flush（不 commit，由 main 控制）
         await db.flush()
@@ -549,7 +692,8 @@ def _worker_process_instruments(
     resume: bool,
     existing_per_date_str: dict[str, set[str]],
     worker_id: int,
-) -> dict[str, dict[str, int]]:
+    profile: ProfileCollector | None = None,
+) -> dict[str, dict[str, int]] | tuple[dict[str, dict[str, int]], ProfileCollector]:
     """Worker 进程：处理一批 instruments（top-level，可 pickle）。
 
     [multiprocessing] - 每个 worker 进程独立创建 async engine + session，
@@ -564,6 +708,11 @@ def _worker_process_instruments(
     [Blocker Fix] DB pool：
     - pool_size=1, max_overflow=0（每 worker 只需 1 session，避免 60 连接）
 
+    [profile-summary] 当传入 profile 时：
+    - 对 load_bars / compute / upsert / total_per_instrument 计时
+    - 返回 (stats, profile) 元组，主进程 merge 各 worker 的 profile
+    - 不传 profile 时返回 dict（向后兼容）
+
     Args:
         instrument_ids: 本 worker 负责的 instrument UUID 列表
         trade_dates: 交易日列表
@@ -574,15 +723,17 @@ def _worker_process_instruments(
         resume: 是否跳过已存在
         existing_per_date_str: 已存在 snapshot 的 {td_iso: set(instrument_id_str)}
         worker_id: worker 编号（日志用）
+        profile: 可选 ProfileCollector，传入时收集 timing 并随返回值传回主进程
 
     Returns:
-        per-date stats: {td_iso: {"success": N, "failed": N, "skipped": N}}
+        - profile is None: per-date stats dict（向后兼容）
+        - profile is not None: (per-date stats dict, ProfileCollector) 元组
     """
     import asyncio
 
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    async def _run() -> dict[str, dict[str, int]]:
+    async def _run() -> tuple[dict[str, dict[str, int]], ProfileCollector | None]:
         # worker 进程独立 engine（不能共享主进程的连接池）
         # [Blocker Fix] pool_size=1, max_overflow=0：每 worker 只需 1 session
         async_url = db_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
@@ -602,7 +753,10 @@ def _worker_process_instruments(
             async with session_factory() as db:
                 for idx, instrument_id in enumerate(instrument_ids):
                     instr_id_str = str(instrument_id)
+                    _inst_start = time.perf_counter() if profile else None
+
                     # 1. 加载 bars（失败 → rollback + 所有 dates 标 failed）
+                    _load_start = time.perf_counter() if profile else None
                     try:
                         primary_bars, secondary_bars = await load_instrument_bars(
                             db, instrument_id,
@@ -611,6 +765,11 @@ def _worker_process_instruments(
                             adj=adj,
                         )
                     except Exception as exc:
+                        if profile and _load_start is not None:
+                            profile.record(
+                                "load_bars_ms",
+                                (time.perf_counter() - _load_start) * 1000,
+                            )
                         await db.rollback()
                         logger.error(
                             "[worker-%d] instrument %s load_bars 失败: %s",
@@ -618,7 +777,17 @@ def _worker_process_instruments(
                         )
                         for td in trade_dates:
                             per_date_stats[td.isoformat()]["failed"] += 1
+                        if profile and _inst_start is not None:
+                            profile.record(
+                                "total_ms_per_instrument",
+                                (time.perf_counter() - _inst_start) * 1000,
+                            )
                         continue
+                    if profile and _load_start is not None:
+                        profile.record(
+                            "load_bars_ms",
+                            (time.perf_counter() - _load_start) * 1000,
+                        )
 
                     # 2. 逐 trade_date 计算 + upsert + per-date commit
                     # [Blocker Fix] per-date 独立事务：
@@ -630,6 +799,7 @@ def _worker_process_instruments(
                             per_date_stats[td_str]["skipped"] += 1
                             continue
                         try:
+                            _compute_start = time.perf_counter() if profile else None
                             snapshot = await compute_feature_snapshot_for_date(
                                 db, instrument_id, td,
                                 primary_timeframe=primary_timeframe,
@@ -638,7 +808,18 @@ def _worker_process_instruments(
                                 primary_bars=primary_bars,
                                 secondary_bars=secondary_bars,
                             )
+                            if profile and _compute_start is not None:
+                                profile.record(
+                                    "compute_ms",
+                                    (time.perf_counter() - _compute_start) * 1000,
+                                )
+                            _upsert_start = time.perf_counter() if profile else None
                             await upsert_snapshot(db, snapshot)
+                            if profile and _upsert_start is not None:
+                                profile.record(
+                                    "upsert_ms",
+                                    (time.perf_counter() - _upsert_start) * 1000,
+                                )
                             # per-date commit：upsert 成功后立即 commit
                             # 失败时 rollback，success 不增加
                             await db.commit()
@@ -653,6 +834,12 @@ def _worker_process_instruments(
                                 worker_id, instrument_id, td, exc,
                             )
 
+                    if profile and _inst_start is not None:
+                        profile.record(
+                            "total_ms_per_instrument",
+                            (time.perf_counter() - _inst_start) * 1000,
+                        )
+
                     if (idx + 1) % 10 == 0:
                         logger.info(
                             "[worker-%d] 进度: %d/%d instruments",
@@ -661,9 +848,15 @@ def _worker_process_instruments(
         finally:
             await engine.dispose()
 
-        return per_date_stats
+        return per_date_stats, profile
 
-    return asyncio.run(_run())
+    stats, returned_profile = asyncio.run(_run())
+    if profile is not None:
+        # profile is not None 时 _run() 返回 (stats, ProfileCollector)
+        # assert 帮助 mypy 收窄 returned_profile 类型
+        assert returned_profile is not None
+        return (stats, returned_profile)
+    return stats
 
 
 async def backfill_instrument_first_parallel(
@@ -681,6 +874,7 @@ async def backfill_instrument_first_parallel(
     schema_version: int = _DEFAULT_SCHEMA_VERSION,
     scope: str = SCOPE_FULL,
     db_url: str = "",
+    profile: ProfileCollector | None = None,
 ) -> dict[str, Any]:
     """Multiprocessing 版 instrument-first 回补。
 
@@ -692,6 +886,11 @@ async def backfill_instrument_first_parallel(
     - 每个 worker per-date commit：upsert → db.commit() → success++（commit 成功后才计 success）
     - 异常时 await db.rollback() + failed++，下一 trade_date 继续用干净事务（resume 安全）
     - 单 worker 失败不阻塞其他 workers
+
+    [profile-summary] 当传入 profile 时：
+    - 为每个 chunk 创建独立 ProfileCollector 传给 worker
+    - worker 返回 (stats, profile) 元组，主进程 merge 到主 profile
+    - 不传 profile 时 worker 返回 dict（向后兼容）
 
     Args:
         db: 主进程 DB 会话（用于创建/finalize run records）
@@ -707,6 +906,7 @@ async def backfill_instrument_first_parallel(
         schema_version: 快照 schema 版本
         scope: run 范围（'full' 或 'sample'）
         db_url: 数据库连接串（传给 worker 进程）
+        profile: 可选 ProfileCollector，传入时合并各 worker 的 timing 样本
 
     Returns:
         统计信息 dict
@@ -787,6 +987,12 @@ async def backfill_instrument_first_parallel(
         td: {"success": 0, "failed": 0, "skipped": 0} for td in trade_dates
     }
 
+    # [profile-summary] 为每个 chunk 创建独立 ProfileCollector（pickle 传给 worker）
+    chunk_profiles: list[ProfileCollector | None] = [
+        ProfileCollector() if profile is not None else None
+        for _ in chunks
+    ]
+
     loop = asyncio.get_running_loop()
 
     with ProcessPoolExecutor(max_workers=workers) as executor:
@@ -804,6 +1010,7 @@ async def backfill_instrument_first_parallel(
                 resume,
                 existing_per_date_str,
                 worker_id,
+                chunk_profiles[worker_id],
             )
             futures.append(future)
 
@@ -815,16 +1022,24 @@ async def backfill_instrument_first_parallel(
             chunk = chunks[idx]
             if isinstance(result, BaseException):
                 # worker 异常 → 该 chunk 的 instruments × dates 全部 failed
-                chunk_size = len(chunk)
+                chunk_len = len(chunk)
                 logger.error(
                     "[parallel] worker-%d 失败 (chunk %d instruments): %s",
-                    idx, chunk_size, result, exc_info=result,
+                    idx, chunk_len, result, exc_info=result,
                 )
                 for td in trade_dates:
-                    per_date_stats[td]["failed"] += chunk_size
+                    per_date_stats[td]["failed"] += chunk_len
             else:
+                # [profile-summary] worker 可能返回 (stats, profile) 元组或 dict
+                worker_stats: dict[str, dict[str, int]]
+                if isinstance(result, tuple):
+                    worker_stats, worker_profile = result
+                    if profile is not None and worker_profile is not None:
+                        profile.merge(worker_profile)
+                else:
+                    worker_stats = result
                 # 合并 stats
-                for td_str, stats in result.items():
+                for td_str, stats in worker_stats.items():
                     td = date.fromisoformat(td_str)
                     per_date_stats[td]["success"] += stats["success"]
                     per_date_stats[td]["failed"] += stats["failed"]
@@ -959,6 +1174,9 @@ async def main(args: argparse.Namespace) -> None:
             )
             return
 
+    # [profile-summary] 启用时创建 ProfileCollector，传给 backfill，结束时打印聚合统计
+    profile = ProfileCollector() if args.profile_summary else None
+
     # 非干跑模式：新开 session 执行回补
     if not args.dry_run:
         # [multiprocessing] workers > 1 时使用并行模式
@@ -981,6 +1199,7 @@ async def main(args: argparse.Namespace) -> None:
                         resume=args.resume,
                         scope=scope,
                         db_url=db_url,
+                        profile=profile,
                     )
                     logger.info(
                         "[backfill][parallel] 完成: total_snapshots=%d, "
@@ -1006,6 +1225,7 @@ async def main(args: argparse.Namespace) -> None:
                         resume=args.resume,
                         dry_run=False,
                         scope=scope,
+                        profile=profile,
                     )
                     await db.commit()
                     logger.info(
@@ -1021,6 +1241,17 @@ async def main(args: argparse.Namespace) -> None:
                         "[backfill] 回补失败，已 rollback: %s", exc, exc_info=True,
                     )
                     raise
+
+    # [profile-summary] 结束时打印聚合统计到 stdout
+    if profile is not None:
+        print(profile.format_summary(
+            instruments_total=len(instruments),
+            trade_dates_total=len(trade_dates),
+            rows_new=result.get("total_snapshots", 0),
+            rows_skipped=result.get("skipped_existing", 0),
+            rows_failed=result.get("total_failed", 0),
+            worker_count=args.workers,
+        ))
 
 
 def parse_args() -> argparse.Namespace:
@@ -1076,6 +1307,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="并行进程数（默认 1 单进程，>1 启用 multiprocessing；建议 = CPU 核数）",
+    )
+    parser.add_argument(
+        "--profile-summary",
+        action="store_true",
+        default=False,
+        help="启用轻量性能诊断：只在 stdout 输出聚合统计（total/avg/p50/p95），不写文件、不输出逐股票明细",
     )
     args = parser.parse_args()
     # [Blocker Fix] workers 参数保护

@@ -4,6 +4,16 @@
 
 ## 2026-07-08
 
+- CHANGE-20260708-053: feature_snapshot_backfill 轻量 profile-summary 性能诊断模式
+  - 新增 `--profile-summary` CLI 参数（默认 False，不启用），新增 `ProfileCollector` 类（record/merge/compute_stats/format_summary）
+  - 单进程 `backfill_instrument_first`：传入 profile 时对 load_bars_ms / compute_ms / upsert_ms / total_ms_per_instrument 计时
+  - 多进程 `_worker_process_instruments` + `backfill_instrument_first_parallel`：每 chunk 创建独立 ProfileCollector 传给 worker，worker 返回 (stats, profile) 元组，主进程 merge
+  - 失败路径也计入 compute_ms（compute 失败时记录，upsert 失败时不重复记录）
+  - dry-run 不收集 timing；每 50 instruments 输出进度摘要；结束时 stdout 输出 total/avg/p50/p95 聚合统计 + estimated_full_day_time
+  - 不新增表、不写文件、不输出逐股票明细、不改变 success/failed/skipped 统计口径
+  - 新增 8 个测试（参数解析 2 + ProfileCollector 3 + worker 2 + parallel merge 1 + dry-run 1 + 失败路径 1）：pytest 53 passed、ruff/mypy/docs checks 通过
+  - 不重构公式、不跑历史回补；历史回补仍 BLOCKED，待生产 profile 验证后决定是否进入 compute-once-extract 优化
+
 - CHANGE-20260708-052: 盘后流水线可视化面板（已部署验证）
   - 新增 admin-only 聚合 API：`GET /admin/after-close/pipeline/latest`、`GET /admin/after-close/pipeline?trade_date=`、`GET /admin/after-close/pipeline/runs?limit=`、`POST /admin/after-close/pipeline/run`
   - 新增 `backend/app/services/after_close_pipeline_service.py` 与 `backend/app/schemas/after_close_pipeline.py`，复用 `system_overview_service` 的 data_freshness 与 after_close_orchestrator 状态机

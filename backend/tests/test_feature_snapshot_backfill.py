@@ -1185,6 +1185,179 @@ def test_parse_args_workers_custom() -> None:
     assert args.workers == 4
 
 
+# ===== 15b. parse_args: --profile-summary =====
+
+
+def test_parse_args_profile_summary_default_is_false() -> None:
+    """--profile-summary 默认为 False（不启用性能诊断）。"""
+    with patch("sys.argv", ["feature_snapshot_backfill", "--start", "2026-01-01"]):
+        args = parse_args()
+    assert args.profile_summary is False
+
+
+def test_parse_args_profile_summary_enabled() -> None:
+    """--profile-summary 启用轻量性能诊断模式。"""
+    with patch("sys.argv", [
+        "feature_snapshot_backfill",
+        "--start", "2026-01-01",
+        "--profile-summary",
+    ]):
+        args = parse_args()
+    assert args.profile_summary is True
+
+
+# ===== 15c. ProfileCollector: 聚合统计 =====
+
+
+def test_profile_collector_records_and_aggregates() -> None:
+    """ProfileCollector 收集 timing 样本并输出聚合统计（total/avg/p50/p95）。
+
+    场景：3 个 instrument，每个记录 load_bars_ms 和 compute_ms。
+    要求：
+    - total = sum(samples)
+    - avg = total / count
+    - p50 = median
+    - p95 = 95th percentile
+    - 不输出逐 instrument 明细
+    """
+    from scripts.feature_snapshot_backfill import ProfileCollector
+
+    pc = ProfileCollector()
+    pc.record("load_bars_ms", 100.0)
+    pc.record("load_bars_ms", 200.0)
+    pc.record("load_bars_ms", 300.0)
+    pc.record("compute_ms", 50.0)
+    pc.record("compute_ms", 150.0)
+    pc.record("compute_ms", 250.0)
+
+    stats = pc.compute_stats()
+    assert "load_bars_ms" in stats
+    assert "compute_ms" in stats
+
+    load_stats = stats["load_bars_ms"]
+    assert load_stats["count"] == 3
+    assert load_stats["total"] == 600.0
+    assert load_stats["avg"] == 200.0
+    assert load_stats["p50"] == 200.0  # median of [100, 200, 300]
+
+    compute_stats = stats["compute_ms"]
+    assert compute_stats["count"] == 3
+    assert compute_stats["total"] == 450.0
+
+
+def test_profile_collector_merge() -> None:
+    """ProfileCollector.merge 合并多个 worker 的 profile（多进程模式）。
+
+    场景：worker1 有 2 个样本，worker2 有 3 个样本。
+    合并后 count=5，total=worker1.total + worker2.total。
+    """
+    from scripts.feature_snapshot_backfill import ProfileCollector
+
+    pc1 = ProfileCollector()
+    pc1.record("load_bars_ms", 100.0)
+    pc1.record("load_bars_ms", 200.0)
+
+    pc2 = ProfileCollector()
+    pc2.record("load_bars_ms", 300.0)
+    pc2.record("load_bars_ms", 400.0)
+    pc2.record("load_bars_ms", 500.0)
+
+    pc1.merge(pc2)
+    stats = pc1.compute_stats()
+    assert stats["load_bars_ms"]["count"] == 5
+    assert stats["load_bars_ms"]["total"] == 1500.0
+
+
+def test_profile_collector_no_per_instrument_details() -> None:
+    """ProfileCollector 输出只包含聚合统计，不包含逐 instrument 明细。"""
+    from scripts.feature_snapshot_backfill import ProfileCollector
+
+    pc = ProfileCollector()
+    for i in range(10):
+        pc.record("load_bars_ms", float(i * 100))
+
+    output = pc.format_summary(
+        instruments_total=10,
+        trade_dates_total=1,
+        rows_new=10,
+        rows_skipped=0,
+        rows_failed=0,
+        worker_count=1,
+    )
+    # 输出是字符串，包含聚合统计
+    assert "instruments_total" in output
+    assert "load_bars_ms" in output
+    # 不包含逐 instrument 明细（如 instrument_0, instrument_1 等）
+    assert "instrument_0" not in output
+    assert "instrument_5" not in output
+
+
+# ===== 15d. backfill_instrument_first + profile: 不影响结果 =====
+
+
+@pytest.mark.asyncio
+async def test_backfill_profile_does_not_affect_results(db_session) -> None:
+    """--profile-summary 启用时 backfill 结果不受影响，且 ProfileCollector 收集到 timing。
+
+    场景：1 instrument × 1 trade_date，compute 成功。
+    要求：
+    - result 和不传 profile 时一致（total_snapshots=1, total_failed=0）
+    - ProfileCollector 有 load_bars_ms / compute_ms / upsert_ms / total_ms_per_instrument 样本
+    """
+    from scripts.feature_snapshot_backfill import ProfileCollector
+
+    inst = Instrument(
+        id=uuid.uuid4(), symbol="600000", name="测试", market="SH", status="active",
+    )
+    db_session.add(inst)
+    await db_session.flush()
+
+    pc = ProfileCollector()
+
+    async def _fake_load(session, instrument_id, **kwargs):
+        return (None, None)
+
+    async def _fake_compute(session, instrument_id, trade_date, **kwargs):
+        return _make_snapshot(instrument_id, trade_date)
+
+    async def _fake_upsert(session, snapshot):
+        pass
+
+    with patch(
+        "scripts.feature_snapshot_backfill.load_instrument_bars", new=_fake_load,
+    ), patch(
+        "scripts.feature_snapshot_backfill.compute_feature_snapshot_for_date", new=_fake_compute,
+    ), patch(
+        "scripts.feature_snapshot_backfill.upsert_snapshot", new=_fake_upsert,
+    ), patch(
+        "scripts.feature_snapshot_backfill.create_snapshot_run", new=AsyncMock(),
+    ), patch(
+        "scripts.feature_snapshot_backfill.finish_snapshot_run", new=AsyncMock(),
+    ):
+        result = await backfill_instrument_first(
+            db_session,
+            trade_dates=[date(2026, 1, 5)],
+            instruments=[inst.id],
+            batch_size=20,
+            failure_threshold=0.3,
+            resume=False,
+            dry_run=False,
+            profile=pc,
+        )
+
+    # 结果不受影响
+    assert result["total_snapshots"] == 1
+    assert result["total_failed"] == 0
+    # ProfileCollector 收集到 timing
+    stats = pc.compute_stats()
+    assert "load_bars_ms" in stats
+    assert "compute_ms" in stats
+    assert "upsert_ms" in stats
+    assert "total_ms_per_instrument" in stats
+    assert stats["load_bars_ms"]["count"] == 1
+    assert stats["compute_ms"]["count"] == 1
+
+
 # ===== 16. _worker_process_instruments: per-date commit =====
 
 
@@ -1886,3 +2059,346 @@ def test_worker_per_date_commit_all_succeed() -> None:
     total_success = sum(stats["success"] for stats in result.values())
     assert total_success == 4
     assert all(stats["failed"] == 0 for stats in result.values())
+
+
+# =============================================================================
+# profile-summary: 多进程 worker profile 汇总
+# =============================================================================
+
+
+# ===== P1. _worker_process_instruments 接受 profile 参数并收集 timing =====
+
+
+def test_worker_process_instruments_with_profile_returns_tuple_with_timing() -> None:
+    """[profile-summary] _worker_process_instruments 接受 profile 参数，返回 (stats, profile) 元组。
+
+    场景：1 instrument × 1 trade_date，全部成功。
+    要求：
+    - 传入 profile=ProfileCollector() 时，worker 返回 (stats, profile) 元组
+    - profile 包含 load_bars_ms / compute_ms / upsert_ms / total_ms_per_instrument 样本
+    - 统计口径不变（success=1, failed=0）
+    """
+    from scripts.feature_snapshot_backfill import ProfileCollector
+
+    inst1_id = uuid.uuid4()
+    trade_dates = [date(2026, 1, 5)]
+    fake_session = _FakeWorkerSession()
+    pc = ProfileCollector()
+
+    async def _fake_load(db, instrument_id, **kwargs):
+        return (None, None)
+
+    async def _fake_compute(db, instrument_id, trade_date, **kwargs):
+        return _make_snapshot(instrument_id, trade_date)
+
+    async def _fake_upsert(db, snapshot):
+        pass
+
+    with _patch_worker_deps(fake_session, _fake_load, _fake_compute, _fake_upsert):
+        result = _worker_process_instruments(
+            instrument_ids=[inst1_id],
+            trade_dates=trade_dates,
+            db_url="postgresql+psycopg://user:pass@localhost/db",
+            primary_timeframe="1d",
+            secondary_timeframe="15m",
+            adj="qfq",
+            resume=False,
+            existing_per_date_str={},
+            worker_id=0,
+            profile=pc,
+        )
+
+    # worker 返回 (stats, profile) 元组
+    assert isinstance(result, tuple), (
+        f"传入 profile 时应返回 (stats, profile) 元组，实际类型: {type(result)}"
+    )
+    stats, returned_profile = result
+    # 统计口径不变
+    assert stats["2026-01-05"]["success"] == 1
+    assert stats["2026-01-05"]["failed"] == 0
+    # profile 包含 timing 样本
+    profile_stats = returned_profile.compute_stats()
+    assert "load_bars_ms" in profile_stats, "profile 应收集 load_bars_ms"
+    assert "compute_ms" in profile_stats, "profile 应收集 compute_ms"
+    assert "upsert_ms" in profile_stats, "profile 应收集 upsert_ms"
+    assert "total_ms_per_instrument" in profile_stats, (
+        "profile 应收集 total_ms_per_instrument"
+    )
+    assert profile_stats["load_bars_ms"]["count"] == 1
+    assert profile_stats["compute_ms"]["count"] == 1
+
+
+def test_worker_process_instruments_without_profile_returns_dict_only() -> None:
+    """[profile-summary] _worker_process_instruments 不传 profile 时返回 dict（向后兼容）。
+
+    防止新增 profile 参数破坏现有 multiprocessing 调用链。
+    """
+    inst1_id = uuid.uuid4()
+    trade_dates = [date(2026, 1, 5)]
+    fake_session = _FakeWorkerSession()
+
+    async def _fake_load(db, instrument_id, **kwargs):
+        return (None, None)
+
+    async def _fake_compute(db, instrument_id, trade_date, **kwargs):
+        return _make_snapshot(instrument_id, trade_date)
+
+    async def _fake_upsert(db, snapshot):
+        pass
+
+    with _patch_worker_deps(fake_session, _fake_load, _fake_compute, _fake_upsert):
+        result = _worker_process_instruments(
+            instrument_ids=[inst1_id],
+            trade_dates=trade_dates,
+            db_url="postgresql+psycopg://user:pass@localhost/db",
+            primary_timeframe="1d",
+            secondary_timeframe="15m",
+            adj="qfq",
+            resume=False,
+            existing_per_date_str={},
+            worker_id=0,
+            # 不传 profile
+        )
+
+    # 不传 profile 时返回 dict（向后兼容）
+    assert isinstance(result, dict), (
+        f"不传 profile 时应返回 dict，实际类型: {type(result)}"
+    )
+    assert result["2026-01-05"]["success"] == 1
+
+
+# ===== P2. backfill_instrument_first_parallel 合并多 worker profile =====
+
+
+@pytest.mark.asyncio
+async def test_backfill_parallel_merges_worker_profiles() -> None:
+    """[profile-summary] backfill_instrument_first_parallel 合并多 worker 的 profile。
+
+    场景：2 workers，每个 worker 处理 1 instrument × 1 trade_date。
+    mock _worker_process_instruments 返回 (stats, ProfileCollector_with_samples)。
+    要求：
+    - 主 profile 合并了所有 worker 的样本
+    - stats 统计口径不变
+    """
+    from scripts.feature_snapshot_backfill import ProfileCollector
+
+    inst1_id = uuid.uuid4()
+    inst2_id = uuid.uuid4()
+    trade_dates = [date(2026, 1, 5)]
+
+    fake_db = MagicMock()
+    fake_db.commit = AsyncMock()
+
+    call_count = {"n": 0}
+
+    def _fake_worker(instrument_ids, trade_dates, *args, **kwargs):
+        call_count["n"] += 1
+        # 每个 worker 返回 (stats, ProfileCollector)
+        worker_pc = ProfileCollector()
+        worker_pc.record("load_bars_ms", 100.0 * call_count["n"])
+        worker_pc.record("compute_ms", 50.0 * call_count["n"])
+        worker_pc.record("upsert_ms", 20.0 * call_count["n"])
+        worker_pc.record("total_ms_per_instrument", 200.0 * call_count["n"])
+        stats = {
+            td.isoformat(): {
+                "success": len(instrument_ids),
+                "failed": 0,
+                "skipped": 0,
+            }
+            for td in trade_dates
+        }
+        return (stats, worker_pc)
+
+    main_pc = ProfileCollector()
+
+    with patch(
+        "scripts.feature_snapshot_backfill._worker_process_instruments",
+        new=_fake_worker,
+    ), patch(
+        "concurrent.futures.ProcessPoolExecutor",
+        concurrent.futures.ThreadPoolExecutor,
+    ), patch(
+        "scripts.feature_snapshot_backfill.create_snapshot_run",
+        new=AsyncMock(),
+    ), patch(
+        "scripts.feature_snapshot_backfill.finish_snapshot_run",
+        new=AsyncMock(),
+    ), patch(
+        "scripts.feature_snapshot_backfill._get_succeeded_trade_dates",
+        new=AsyncMock(return_value=set()),
+    ), patch(
+        "scripts.feature_snapshot_backfill.get_existing_instrument_ids",
+        new=AsyncMock(return_value=set()),
+    ):
+        result = await backfill_instrument_first_parallel(
+            fake_db,
+            trade_dates=trade_dates,
+            instruments=[inst1_id, inst2_id],
+            workers=2,
+            failure_threshold=0.3,
+            resume=False,
+            db_url="postgresql+psycopg://user:pass@localhost/db",
+            profile=main_pc,
+        )
+
+    # 统计口径不变
+    assert result["total_snapshots"] == 2
+    assert result["total_failed"] == 0
+    # 2 个 worker 都被调用
+    assert call_count["n"] == 2
+    # 主 profile 合并了 2 个 worker 的样本
+    stats = main_pc.compute_stats()
+    assert "load_bars_ms" in stats
+    assert stats["load_bars_ms"]["count"] == 2, (
+        f"2 个 worker 各贡献 1 个 load_bars_ms 样本，count 应为 2，实际: {stats['load_bars_ms']['count']}"
+    )
+    # worker1: 100, worker2: 200 → total=300
+    assert stats["load_bars_ms"]["total"] == 300.0
+    # compute_ms: worker1=50, worker2=100 → total=150
+    assert stats["compute_ms"]["total"] == 150.0
+
+
+# ===== P3. dry-run + profile 不写库、不收集 timing =====
+
+
+@pytest.mark.asyncio
+async def test_backfill_dry_run_with_profile_does_not_write_or_collect(db_session) -> None:
+    """[profile-summary] dry-run + profile 不写库、不收集 timing 样本。
+
+    dry-run 模式只统计计划，不进入主循环：
+    - 不调用 load_instrument_bars / compute / upsert / create_run / finish_run
+    - ProfileCollector 无样本（compute_stats() 返回空 dict）
+    - 不创建 run 记录
+    """
+    from scripts.feature_snapshot_backfill import ProfileCollector
+
+    inst = Instrument(
+        id=uuid.uuid4(), symbol="600000", name="测试", market="SH", status="active",
+    )
+    db_session.add(inst)
+    await db_session.flush()
+
+    pc = ProfileCollector()
+
+    load_calls = []
+    compute_calls = []
+    upsert_calls = []
+
+    async def _fake_load(session, instrument_id, **kwargs):
+        load_calls.append(instrument_id)
+        return (None, None)
+
+    async def _fake_compute(session, instrument_id, trade_date, **kwargs):
+        compute_calls.append((instrument_id, trade_date))
+        return _make_snapshot(instrument_id, trade_date)
+
+    async def _fake_upsert(session, snapshot):
+        upsert_calls.append(snapshot)
+
+    with patch(
+        "scripts.feature_snapshot_backfill.load_instrument_bars", new=_fake_load,
+    ), patch(
+        "scripts.feature_snapshot_backfill.compute_feature_snapshot_for_date", new=_fake_compute,
+    ), patch(
+        "scripts.feature_snapshot_backfill.upsert_snapshot", new=_fake_upsert,
+    ), patch(
+        "scripts.feature_snapshot_backfill.create_snapshot_run", new=AsyncMock(),
+    ) as mock_create, patch(
+        "scripts.feature_snapshot_backfill.finish_snapshot_run", new=AsyncMock(),
+    ) as mock_finish:
+        result = await backfill_instrument_first(
+            db_session,
+            trade_dates=[date(2026, 1, 5)],
+            instruments=[inst.id],
+            batch_size=20,
+            failure_threshold=0.3,
+            resume=False,
+            dry_run=True,
+            profile=pc,
+        )
+
+    # dry-run 标记
+    assert result["dry_run"] is True
+    # 不写库：无 load/compute/upsert/create/finish 调用
+    assert load_calls == [], f"dry-run 不应调用 load_instrument_bars，实际: {load_calls}"
+    assert compute_calls == [], f"dry-run 不应调用 compute，实际: {compute_calls}"
+    assert upsert_calls == [], f"dry-run 不应调用 upsert，实际: {upsert_calls}"
+    assert mock_create.await_count == 0, "dry-run 不应创建 run 记录"
+    assert mock_finish.await_count == 0, "dry-run 不应 finish run 记录"
+    # profile 无样本（dry-run 不进入主循环）
+    stats = pc.compute_stats()
+    assert stats == {}, f"dry-run + profile 不应收集 timing，实际 stats: {stats}"
+
+
+# ===== P4. profile 失败路径计入 failed 和耗时 =====
+
+
+@pytest.mark.asyncio
+async def test_backfill_profile_failure_path_records_failed_and_timing(db_session) -> None:
+    """[profile-summary] compute 失败时，failed++ 且 profile 记录 compute_ms / total_ms_per_instrument。
+
+    场景：1 instrument × 1 trade_date，compute 抛异常。
+    要求：
+    - result["total_failed"] == 1
+    - profile 有 compute_ms 样本（失败前的 compute 调用耗时）
+    - profile 有 total_ms_per_instrument 样本（包含失败时间）
+    - 无 upsert_ms 样本（compute 失败，未到 upsert）
+    """
+    from scripts.feature_snapshot_backfill import ProfileCollector
+
+    inst = Instrument(
+        id=uuid.uuid4(), symbol="600000", name="测试", market="SH", status="active",
+    )
+    db_session.add(inst)
+    await db_session.flush()
+
+    pc = ProfileCollector()
+
+    async def _fake_load(session, instrument_id, **kwargs):
+        return (None, None)
+
+    async def _failing_compute(session, instrument_id, trade_date, **kwargs):
+        raise RuntimeError("compute 故意失败")
+
+    async def _fake_upsert(session, snapshot):
+        pass
+
+    with patch(
+        "scripts.feature_snapshot_backfill.load_instrument_bars", new=_fake_load,
+    ), patch(
+        "scripts.feature_snapshot_backfill.compute_feature_snapshot_for_date", new=_failing_compute,
+    ), patch(
+        "scripts.feature_snapshot_backfill.upsert_snapshot", new=_fake_upsert,
+    ), patch(
+        "scripts.feature_snapshot_backfill.create_snapshot_run", new=AsyncMock(),
+    ), patch(
+        "scripts.feature_snapshot_backfill.finish_snapshot_run", new=AsyncMock(),
+    ):
+        result = await backfill_instrument_first(
+            db_session,
+            trade_dates=[date(2026, 1, 5)],
+            instruments=[inst.id],
+            batch_size=20,
+            failure_threshold=0.3,
+            resume=False,
+            dry_run=False,
+            profile=pc,
+        )
+
+    # 失败计入 failed
+    assert result["total_failed"] == 1
+    assert result["total_snapshots"] == 0
+    # profile 记录了 compute_ms（失败前的调用耗时）
+    stats = pc.compute_stats()
+    assert "compute_ms" in stats, "失败路径应记录 compute_ms 耗时"
+    assert stats["compute_ms"]["count"] == 1
+    # profile 记录了 load_bars_ms（load 成功）
+    assert "load_bars_ms" in stats
+    assert stats["load_bars_ms"]["count"] == 1
+    # profile 记录了 total_ms_per_instrument（包含失败时间）
+    assert "total_ms_per_instrument" in stats
+    assert stats["total_ms_per_instrument"]["count"] == 1
+    # 无 upsert_ms（compute 失败，未到 upsert）
+    assert "upsert_ms" not in stats, (
+        f"compute 失败时不应记录 upsert_ms，实际 stats: {list(stats.keys())}"
+    )
