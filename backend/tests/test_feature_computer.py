@@ -335,14 +335,15 @@ class TestDSADualTrack:
         assert causal_seg.notna().any()
 
     def test_direction_values_are_valid(self, bars_500: pd.DataFrame) -> None:
-        """DSA direction 值应为 1, 0, 或 -1。"""
+        """DSA direction 值应为 '1', '0', 或 '-1'（DB VARCHAR 列）。"""
         result = compute_dsa_dual_track_features(bars_500)
         # 只测 causal（hindsight Phase 1 全 NULL）
         valid_vals = result["causal_dsa_confirmed_direction"].dropna()
         if len(valid_vals) > 0:
             unique_vals = set(valid_vals.unique())
-            assert unique_vals.issubset({1, 0, -1}), (
-                f"causal direction 值超出 {{1,0,-1}}: {unique_vals}"
+            # [类型修复] direction 现在是 str（DB VARCHAR），不是 int
+            assert unique_vals.issubset({"1", "0", "-1"}), (
+                f"causal direction 值超出 {{'1','0','-1'}}: {unique_vals}"
             )
 
 
