@@ -61,7 +61,7 @@ strategy_run_items.reason_code 标准编码：
 | 自选 | `/watchlist` | active subscription + monitor_limit |
 | 个股详情分享 | `/stock-detail-feishu` | target_channel_id 支持手动指定渠道 |
 | Capture | `/api/v1/capture/*` | 只接受 Capture Token |
-| Admin | `/admin/*` | Admin 角色 + 审计；含 `GET /admin/worker-heartbeats` 只读心跳视图（health_state 后端计算：fresh<120s / stale 120-600s / stopped≥600s 或 status=stopped） |
+| Admin | `/admin/*` | Admin 角色 + 审计；含 `GET /admin/worker-heartbeats` 只读心跳视图（health_state 后端计算：fresh<120s / stale 120-600s / stopped≥600s 或 status=stopped）；新增盘后流水线聚合状态端点 `/admin/after-close/pipeline/latest`、`/admin/after-close/pipeline?trade_date=`、`/admin/after-close/pipeline/runs?limit=`、`POST /admin/after-close/pipeline/run`（admin，幂等），响应 `AfterClosePipelineResponse` 含 8 步骤时间线 + watchlist_ready 严格判定 + data_freshness + 最近 100 条 events |
 | Metrics | `/metrics` | Prometheus 指标，无需认证 |
 
 ## 4. Capture Token 契约

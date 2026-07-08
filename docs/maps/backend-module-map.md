@@ -27,7 +27,7 @@
 | notifications | `api/notifications.py`, `api/stock_detail_feishu.py` | `outbox_relay.py`, `delivery_worker.py`, `stock_detail_feishu_service.py`, `channel_adapter.py`, `feishu_card_builder.py`, `message_builder.py` | notification/outbox/delivery models | 飞书、图文、重试；消息时间使用 `format_shanghai_datetime`；`delivery_worker.py` 对 `monitor_event`/`strategy_event`/`monitor_chart` 投递前用 `is_user_eligible_for_monitor` 复核 |
 | coverage | - | `bars_coverage_service.py` | `bars_daily`, `instruments` | 统一 A 股覆盖率口径，返回 `coverage`（展示）与 `coverage_raw`（阈值判断），供 scheduler/orchestrator/overview 使用 |
 | capture | `api/capture.py` | `stock_capture_service.py` | `capture_jobs` | Capture Token 隔离 |
-| jobs/admin | `api/admin_after_close.py`, admin APIs | scheduler recovery, job services | `scheduler_job_runs`, `worker_heartbeats` | 管理任务与可观察性 |
+| jobs/admin | `api/admin_after_close.py`, admin APIs | scheduler recovery, job services, `after_close_pipeline_service.py`（聚合 pipeline 状态：8 步骤时间线 + watchlist_ready + data_freshness + events） | `scheduler_job_runs`, `worker_heartbeats`, `stock_feature_snapshot_runs`, `job_run_events` | 管理任务与可观察性 |
 | beta/admin | `api/public_beta.py`, `api/admin_beta_applications.py` | `beta_application_service.py`, `beta_application_notifier.py` | beta application models | 管理员通知特殊路径 |
 
 ## 3. 高风险热点

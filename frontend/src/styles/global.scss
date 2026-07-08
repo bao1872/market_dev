@@ -2556,6 +2556,93 @@ textarea.input { height: auto; min-height: 80px; padding: 9px; resize: vertical;
   font-weight: 600;
 }
 
+// [AfterClosePipelinePage] - 描述: 8 步骤垂直时间线（详情页专用）
+// 每个步骤一行：左侧索引圆点 + 右侧主内容（标签/状态/时间/计数/错误）
+.pipeline-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.pipeline-timeline-item {
+  display: grid;
+  grid-template-columns: 32px 1fr;
+  gap: 12px;
+  padding: 10px 0;
+  border-left: 2px solid transparent;
+  padding-left: 8px;
+  margin-left: 8px;
+  position: relative;
+  // 左侧索引圆点
+  .pipeline-timeline-index {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: #11151d;
+    border: 1px solid v.$color-border-soft;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 600;
+    color: v.$color-muted;
+  }
+  &.done .pipeline-timeline-index {
+    background: rgba(38, 166, 154, .12);
+    border-color: rgba(38, 166, 154, .4);
+    color: #62d0c5;
+  }
+  &.active .pipeline-timeline-index {
+    background: rgba(41, 98, 255, .12);
+    border-color: rgba(41, 98, 255, .4);
+    color: #8facff;
+  }
+  &.error .pipeline-timeline-index {
+    background: rgba(239, 83, 80, .12);
+    border-color: rgba(239, 83, 80, .4);
+    color: #ff7774;
+  }
+  // 左侧连接线（除最后一项外）
+  &:not(:last-child)::before {
+    content: '';
+    position: absolute;
+    left: 21px;
+    top: 40px;
+    bottom: -10px;
+    width: 2px;
+    background: v.$color-border-soft;
+  }
+  &.done:not(:last-child)::before { background: rgba(38, 166, 154, .3); }
+  &.error:not(:last-child)::before { background: rgba(239, 83, 80, .3); }
+}
+.pipeline-timeline-main {
+  min-width: 0;
+}
+.pipeline-timeline-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  b { font-size: 13px; color: #d0d8e6; }
+}
+.pipeline-timeline-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: v.$color-muted;
+  span { white-space: nowrap; }
+}
+.pipeline-timeline-error {
+  margin-top: 6px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: rgba(239, 83, 80, .08);
+  border: 1px solid rgba(239, 83, 80, .3);
+  color: #ff7774;
+  font-size: 11px;
+}
+
 // [JobRunEventTimeline] - 描述: 任务事件时间线
 .job-event-timeline {
   display: flex;

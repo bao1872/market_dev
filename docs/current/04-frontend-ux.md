@@ -30,11 +30,23 @@ Node Cluster 算法
 | `/stock/:symbol` | Subscriber/Admin | 个股详情 |
 | `/messages` | Authenticated | 历史消息 |
 | `/settings` | Authenticated | 账户和通知渠道 |
-| `/admin/*` | Admin | 管理页面 |
+| `/admin/*` | Admin | 管理页面（含 `/admin/overview`、`/admin/users`、`/admin/strategies`、`/admin/jobs`、`/admin/beta-applications`、`/admin/after-close`） |
 
 刷新后必须重新调用 `/me/access`，不能永久相信本地缓存。
 
 ## 3. 页面职责
+
+### 盘后流水线详情（/admin/after-close）
+
+- 顶部状态卡：整体状态（not_started/running/succeeded/failed/blocked/skipped）+ 交易日 + 市场时段 + watchlist_ready + 不可用原因 + 是否已有完整回补；
+- 8 步骤垂直时间线：refreshing_daily → checking_coverage → creating_dsa → waiting_dsa_worker → quality_gate → feature_snapshot → publishing → watchlist_ready，每步显示 status/started_at/finished_at/duration/counts/error_message；
+- 数据新鲜度卡：行情数据（latest_daily_trade_date / daily_coverage / 15m / 60m / is_behind）+ 选股策略（latest_compute_trade_date / latest_published_trade_date / status / total / failed / published_at）；
+- 编排状态详情：after_close_orchestrator job_run 摘要（status/orchestrator_status/started_at/finished_at/worker/heartbeat/lease_expires/last_completed_step/error）+ feature_snapshot_run 摘要（run_type/scope/snapshot_count/failed_count/published_at）；
+- 最近 20 次运行列表：after_close_orchestrator + snapshot_run 混合，显示类型/交易日/状态/编排阶段/快照数/失败/开始/结束/ID；
+- 事件日志抽屉：展示最近 100 条 job_run_events（来自 pipeline.events，含 step/level/message/payload/created_at）；
+- 轮询策略：running 状态 10s 轮询，非 running 60s 轮询，页面不可见暂停（refetchIntervalInBackground=false）；
+- 操作按钮：触发当日 after_close 编排（POST /admin/after-close/pipeline/run，幂等，已有任务返回 existing）；
+- 系统概览（/admin/overview）中的 AfterClosePipelineCard 改造为摘要卡，提供进入 /admin/after-close 的链接。
 
 ### 趋势选股
 

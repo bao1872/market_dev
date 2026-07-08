@@ -100,6 +100,35 @@ queued → refreshing_daily → checking_coverage → creating_dsa
 
 `feature_snapshot` 失败时 `last_completed_step` 不会推进到 `feature_snapshot`，重试会从 `quality_gate` 之后重新进入 `feature_snapshot`。
 
+### 2.3.1 盘后流水线可视化面板（admin）
+
+`backend/app/services/after_close_pipeline_service.py` 为管理员提供盘后流水线聚合状态视图，复用现有 after_close_orchestrator 状态机、job_run_events、stock_feature_snapshot_runs run gate，不引入新的状态定义。
+
+**4 个 admin API 端点（prefix=/admin）**：
+
+| 端点 | 方法 | 说明 |
+|---|---|---|
+| `/after-close/pipeline/latest` | GET | 查询最近交易日的流水线聚合状态（交易日始终返回 today，非交易日回退最近有记录的交易日） |
+| `/after-close/pipeline?trade_date=YYYY-MM-DD` | GET | 查询指定交易日的流水线聚合状态 |
+| `/after-close/pipeline/runs?limit=20` | GET | 查询最近 N 次 after_close_orchestrator + snapshot_run 混合列表 |
+| `/after-close/pipeline/run` | POST | 触发当日 after_close 编排（幂等：同 trade_date 已有 queued/running/succeeded 返回 existing） |
+
+**响应结构 `AfterClosePipelineResponse`**：
+- `overall_status`：not_started / running / succeeded / failed / blocked / skipped（交易日收盘后超过 30 分钟阈值仍无 run → blocked；非交易日无 run 且无 backfill_full → skipped）；
+- `latest` 策略：交易日（含今日）始终以 today 为目标 trade_date，即使无 run 也返回 today 的 not_started/blocked，不回退历史 run 掩盖"今天未执行"；非交易日回退到最近有记录的交易日；
+- `feature_snapshot_run` 摘要优先返回 succeeded+published+full run（即 watchlist_ready 的实际数据源），若不存在再 fallback 到最新任意 run；
+- `watchlist_ready`：严格复用 `feature_snapshot_service.has_succeeded_snapshot_run`（`status='succeeded' AND published_at IS NOT NULL AND metadata_.scope='full'`），sample backfill 不计入；
+- `steps`：8 步骤时间线（refreshing_daily → checking_coverage → creating_dsa → waiting_dsa_worker → quality_gate → feature_snapshot → publishing → watchlist_ready），每步 status 为 pending/running/completed/failed/skipped；
+- `after_close_run`：job_run 摘要（status/orchestrator_status/heartbeat/lease_expires/last_completed_step/error）；
+- `feature_snapshot_run`：snapshot_run 摘要（run_type/scope/snapshot_count/failed_count/published_at）；
+- `data_freshness`：复用 `system_overview_service._compute_data_freshness`；
+- `events`：最近 100 条 job_run_events（来自 `job_run_event_service.list_events`）。
+
+**前端页面**：
+- `/admin/after-close` 详情页：顶部状态卡 + 8 步骤垂直时间线 + 数据新鲜度卡 + 编排状态详情 + 最近 20 次运行列表 + 事件日志抽屉；
+- `/admin/overview` 中的 `AfterClosePipelineCard` 改造为摘要卡（状态 pill + 编排阶段 + Worker 心跳 + 行情/选股发布至 + 进入详情链接）；
+- 轮询策略：running 状态 10s，非 running 60s，页面不可见暂停。
+
 ### 2.4 Feature Snapshot 历史回补脚本
 
 `backend/scripts/feature_snapshot_backfill.py` 为历史交易日批量生成 `stock_feature_snapshots`。**核心计算逻辑在 `backend/app/services/feature_snapshot_service.py`，脚本只做 CLI 参数解析、dry-run 标记、resume 跳过、批量调用 service。**

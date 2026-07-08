@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -23,6 +24,12 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db, require_roles
+from app.schemas.after_close_pipeline import (
+    AfterClosePipelineResponse,
+    AfterClosePipelineRunListResponse,
+    AfterClosePipelineRunRequest,
+    AfterClosePipelineRunResponse,
+)
 from app.schemas.scheduler_job_run import (
     AfterCloseRunCreateResponse,
     AfterCloseRunStatusResponse,
@@ -34,6 +41,12 @@ from app.services.after_close_orchestrator import (
     create_after_close_run,
     get_after_close_run_status,
     retry_after_close_run,
+)
+from app.services.after_close_pipeline_service import (
+    create_pipeline_run,
+    get_latest_pipeline,
+    get_pipeline_by_trade_date,
+    list_pipeline_runs,
 )
 from app.services.calendar_service import is_trading_day_async
 from app.services.job_run_event_service import list_events
@@ -696,6 +709,86 @@ async def list_job_run_events_endpoint(
     )
 
 
+@router.get(
+    "/after-close/pipeline/latest",
+    response_model=AfterClosePipelineResponse,
+)
+async def get_after_close_pipeline_latest(
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles("admin")),
+) -> AfterClosePipelineResponse:
+    """查询最近交易日（含今日）的盘后流水线聚合状态。"""
+    data = await get_latest_pipeline(db)
+    return AfterClosePipelineResponse(**data)
+
+
+@router.get(
+    "/after-close/pipeline",
+    response_model=AfterClosePipelineResponse,
+)
+async def get_after_close_pipeline_by_date(
+    trade_date: str,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles("admin")),
+) -> AfterClosePipelineResponse:
+    """查询指定交易日的盘后流水线聚合状态。"""
+    date_obj = _parse_trade_date(trade_date)
+    data = await get_pipeline_by_trade_date(db, date_obj)
+    return AfterClosePipelineResponse(**data)
+
+
+@router.get(
+    "/after-close/pipeline/runs",
+    response_model=AfterClosePipelineRunListResponse,
+)
+async def get_after_close_pipeline_runs(
+    limit: int = Query(default=20, ge=1, le=100, description="最多返回运行数"),
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles("admin")),
+) -> AfterClosePipelineRunListResponse:
+    """查询最近 N 次 after_close_orchestrator 与 snapshot run 摘要。"""
+    items = await list_pipeline_runs(db, limit=limit)
+    return AfterClosePipelineRunListResponse(items=items, total=len(items))
+
+
+@router.post(
+    "/after-close/pipeline/run",
+    response_model=AfterClosePipelineRunResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_after_close_pipeline_run(
+    payload: AfterClosePipelineRunRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles("admin")),
+) -> AfterClosePipelineRunResponse:
+    """管理员触发指定交易日的 after_close 编排任务。
+
+    同 trade_date 已有 queued/running/succeeded 时返回 existing，不重复创建。
+    """
+    trade_date = _parse_trade_date(payload.trade_date)
+    job_run, is_new = await create_pipeline_run(db, trade_date)
+    meta = _parse_metadata_for_new_endpoint(job_run)
+    return AfterClosePipelineRunResponse(
+        job_run_id=str(job_run.id),
+        trade_date=meta.get("trade_date", trade_date.isoformat()),
+        status=job_run.status,
+        orchestrator_status=meta.get("orchestrator_status"),
+        is_new=is_new,
+    )
+
+
+def _parse_metadata_for_new_endpoint(job_run: Any) -> dict[str, Any]:
+    """解析新端点返回所需的 metadata_json（与 orchestrator 的 _parse_metadata 对齐）。"""
+    import json
+
+    if not job_run.metadata_json:
+        return {}
+    try:
+        return json.loads(job_run.metadata_json)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
 if __name__ == "__main__":
     # 自测入口：验证路由端点注册（不启动服务）
     routes = [(r.path, list(r.methods)) for r in router.routes if hasattr(r, "methods")]
@@ -712,6 +805,10 @@ if __name__ == "__main__":
     assert "/admin/after-close-runs/{run_id}/resume" in paths, "缺少 resume 端点"
     assert "/admin/after-close-runs/{run_id}/force" in paths, "缺少 force 端点"
     assert "/admin/job-runs/{run_id}/events" in paths, "缺少 events 端点"
+    assert "/admin/after-close/pipeline/latest" in paths, "缺少 pipeline latest 端点"
+    assert "/admin/after-close/pipeline" in paths, "缺少 pipeline by date 端点"
+    assert "/admin/after-close/pipeline/runs" in paths, "缺少 pipeline runs 端点"
+    assert "/admin/after-close/pipeline/run" in paths, "缺少 pipeline run 端点"
     print("端点验证 ✓")
 
     # 验证 AfterCloseRunCreateRequest schema

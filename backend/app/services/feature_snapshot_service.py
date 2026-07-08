@@ -742,6 +742,45 @@ async def finish_snapshot_run(
     return run
 
 
+async def has_succeeded_snapshot_run(
+    session: AsyncSession,
+    trade_date: date,
+    *,
+    schema_version: int = _SCHEMA_VERSION,
+) -> bool:
+    """[RunGate] - 检查指定 trade_date 是否存在 succeeded + published + full scope 的 snapshot run。
+
+    publish gate 规则（严格化）：
+    - 必须 status='succeeded'
+    - 必须 published_at IS NOT NULL
+    - 必须 metadata_['scope']='full'（after_close / 全市场 backfill 才允许 watchlist 读取）
+    - running/failed run 对应的 snapshot 即使存在也不得被读取
+    - 无 run 记录的 snapshot（如 smoke test 残留）也不得被读取
+    - sample scope run（--symbols / --limit-instruments 小样本验证产生）不得被读取
+
+    Args:
+        session: 异步 DB 会话
+        trade_date: 预期快照交易日
+        schema_version: 快照 schema 版本（默认与 _SCHEMA_VERSION 一致）
+
+    Returns:
+        True 表示存在可读的 succeeded run，watchlist 可读取 snapshot；False 表示不可读取
+    """
+    stmt = (
+        select(StockFeatureSnapshotRun.id)
+        .where(
+            StockFeatureSnapshotRun.trade_date == trade_date,
+            StockFeatureSnapshotRun.schema_version == schema_version,
+            StockFeatureSnapshotRun.status == STATUS_SUCCEEDED,
+            StockFeatureSnapshotRun.published_at.is_not(None),
+            StockFeatureSnapshotRun.metadata_["scope"].astext == "full",
+        )
+        .limit(1)
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none() is not None
+
+
 # =============================================================================
 # 辅助：获取需要快照的 instrument 列表
 # =============================================================================

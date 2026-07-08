@@ -2270,6 +2270,189 @@ export async function forceAfterCloseRun(
 }
 
 // ============================================================
+// ===== AfterClose Pipeline 聚合状态端点（/admin/after-close/pipeline/*）=====
+// ============================================================
+//
+// 与 backend/app/schemas/after_close_pipeline.py 严格对齐：
+// - AfterClosePipelineResponse / PipelineStep / AfterCloseRunSummary
+// - FeatureSnapshotRunSummary / PipelineEventItem / PipelineRunItem
+// - AfterClosePipelineRunListResponse / AfterClosePipelineRunRequest / AfterClosePipelineRunResponse
+//
+// 复用已有类型：
+// - DataFreshness / BarsFreshness / StrategyFreshness（同文件上方）
+// - JobRunEvent（与 PipelineEventItem 字段完全一致，事件时间线条目）
+
+/** 盘后流水线单步骤状态（对齐后端 PipelineStep） */
+export interface PipelineStep {
+  step: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
+  started_at: string | null
+  finished_at: string | null
+  duration_seconds: number | null
+  counts: Record<string, unknown>
+  error_message: string | null
+}
+
+/** after_close_orchestrator job_run 摘要（对齐后端 AfterCloseRunSummary） */
+export interface AfterCloseRunSummary {
+  job_run_id: string
+  status: string
+  orchestrator_status: string | null
+  started_at: string | null
+  finished_at: string | null
+  heartbeat_at: string | null
+  lease_expires_at: string | null
+  last_completed_step: string | null
+  error_message: string | null
+  worker_instance_id: string | null
+  trade_date: string | null
+}
+
+/** stock_feature_snapshot_run 摘要（对齐后端 FeatureSnapshotRunSummary） */
+export interface FeatureSnapshotRunSummary {
+  run_id: string
+  run_type: string
+  status: string
+  scope: string
+  snapshot_count: number | null
+  failed_count: number | null
+  skipped_count: number | null
+  expected_count: number | null
+  published_at: string | null
+  started_at: string | null
+  finished_at: string | null
+}
+
+/**
+ * 盘后流水线聚合状态响应（对齐后端 AfterClosePipelineResponse）。
+ *
+ * overall_status 枚举：
+ * - not_started：当日尚无 after_close_orchestrator 运行
+ * - running：编排任务正在运行
+ * - succeeded：编排成功且 watchlist_ready=true
+ * - failed：编排失败
+ * - blocked：收盘后超过 30 分钟仍无运行（含 has_backfill_full 时不计入 blocked）
+ * - skipped：非交易日跳过
+ *
+ * watchlist_ready 严格判定：status='succeeded' AND published_at IS NOT NULL AND metadata_.scope='full'
+ * （sample backfill 不计入 watchlist_ready，仅作为参考展示）
+ */
+export interface AfterClosePipelineResponse {
+  trade_date: string
+  market_session: string
+  overall_status:
+    | 'not_started'
+    | 'running'
+    | 'succeeded'
+    | 'failed'
+    | 'blocked'
+    | 'skipped'
+  watchlist_ready: boolean
+  watchlist_reason: string
+  has_backfill_full: boolean
+  after_close_run: AfterCloseRunSummary | null
+  steps: PipelineStep[]
+  data_freshness: DataFreshness
+  feature_snapshot_run: FeatureSnapshotRunSummary | null
+  events: JobRunEvent[]
+}
+
+/** 最近运行列表单条记录（after_close_orchestrator 或 snapshot_run，对齐后端 PipelineRunItem） */
+export interface PipelineRunItem {
+  kind: 'after_close_orchestrator' | 'snapshot_run'
+  job_run_id: string | null
+  run_id: string | null
+  trade_date: string | null
+  status: string
+  orchestrator_status: string | null
+  run_type: string | null
+  scope: string | null
+  snapshot_count: number | null
+  failed_count: number | null
+  published_at: string | null
+  started_at: string | null
+  finished_at: string | null
+  error_message: string | null
+  worker_instance_id: string | null
+  last_completed_step: string | null
+}
+
+/** 最近运行列表响应（对齐后端 AfterClosePipelineRunListResponse） */
+export interface AfterClosePipelineRunListResponse {
+  items: PipelineRunItem[]
+  total: number
+}
+
+/** POST /admin/after-close/pipeline/run 请求体（对齐后端 AfterClosePipelineRunRequest） */
+export interface AfterClosePipelineRunRequest {
+  trade_date: string
+}
+
+/** POST /admin/after-close/pipeline/run 响应（对齐后端 AfterClosePipelineRunResponse）。
+ * is_new=false 表示同 trade_date 已有 queued/running/succeeded 任务，返回已存在记录。 */
+export interface AfterClosePipelineRunResponse {
+  job_run_id: string
+  trade_date: string
+  status: string
+  orchestrator_status: string | null
+  is_new: boolean
+}
+
+/**
+ * 查询最近交易日的盘后流水线聚合状态（admin）。
+ * 后端自动定位最近交易日（含今日）：GET /admin/after-close/pipeline/latest
+ */
+export async function getAfterClosePipelineLatest(): Promise<AfterClosePipelineResponse> {
+  const { data } = await apiClient.get<AfterClosePipelineResponse>(
+    '/admin/after-close/pipeline/latest',
+  )
+  return data
+}
+
+/**
+ * 查询指定交易日的盘后流水线聚合状态（admin）。
+ * GET /admin/after-close/pipeline?trade_date=YYYY-MM-DD
+ */
+export async function getAfterClosePipelineByDate(
+  tradeDate: string,
+): Promise<AfterClosePipelineResponse> {
+  const { data } = await apiClient.get<AfterClosePipelineResponse>(
+    '/admin/after-close/pipeline',
+    { params: { trade_date: tradeDate } },
+  )
+  return data
+}
+
+/**
+ * 查询最近 N 次运行（after_close_orchestrator + snapshot_run 混合列表，admin）。
+ * GET /admin/after-close/pipeline/runs?limit=20
+ */
+export async function getAfterClosePipelineRuns(
+  limit: number = 20,
+): Promise<AfterClosePipelineRunListResponse> {
+  const { data } = await apiClient.get<AfterClosePipelineRunListResponse>(
+    '/admin/after-close/pipeline/runs',
+    { params: { limit } },
+  )
+  return data
+}
+
+/**
+ * 管理员触发指定交易日的 after_close 编排任务（admin，幂等）。
+ * POST /admin/after-close/pipeline/run
+ * 同 trade_date 已有 queued/running/succeeded 时返回 existing，不重复创建。
+ */
+export async function createAfterClosePipelineRun(
+  payload: AfterClosePipelineRunRequest,
+): Promise<AfterClosePipelineRunResponse> {
+  const { data } = await apiClient.post<AfterClosePipelineRunResponse>(
+    '/admin/after-close/pipeline/run',
+    payload,
+  )
+  return data
+}
+
+// ============================================================
 // ===== Structural Factors 端点 =====
 // ============================================================
 

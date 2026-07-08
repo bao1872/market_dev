@@ -4,6 +4,17 @@
 
 ## 2026-07-08
 
+- CHANGE-20260708-052: 盘后流水线可视化面板
+  - 新增 admin-only 聚合 API：`GET /admin/after-close/pipeline/latest`、`GET /admin/after-close/pipeline?trade_date=`、`GET /admin/after-close/pipeline/runs?limit=`、`POST /admin/after-close/pipeline/run`
+  - 新增 `backend/app/services/after_close_pipeline_service.py` 与 `backend/app/schemas/after_close_pipeline.py`，复用 `system_overview_service` 的 data_freshness 与 after_close_orchestrator 状态机
+  - `watchlist_ready` 严格复用 `status='succeeded' AND published_at IS NOT NULL AND metadata_.scope='full'`，sample backfill 不显示为前台可读
+  - 新增前端 `/admin/after-close` 详情页（顶部状态卡、8 步骤时间线、数据新鲜度、最近运行列表、事件日志抽屉）
+  - 系统概览 `AfterClosePipelineCard` 改为摘要卡，提供进入 `/admin/after-close` 链接
+  - running 状态 10 秒轮询，非 running 60 秒轮询，页面不可见暂停轮询
+  - 后端 8 种场景测试、前端 5 种场景测试；ruff/mypy/docs checks 通过
+  - 更新 `02-data-api-contracts.md`、`03-jobs-integrations-operations.md`、`04-frontend-ux.md`、`05-testing-acceptance.md`、maps
+  - PR #42 未合并，本 PR 只提交不部署
+
 - CHANGE-20260708-051: 修复 capture worker 偶发 502（page.goto networkidle 超时）导致 monitor 图片缺失
   - 根因：`stock_capture_service.capture_stock_chart` 使用 `page.goto(..., wait_until="networkidle")`，前端 capture 页面存在长连接/持续轮询时 `networkidle` 永不触发，30s 超时返回 502
   - 修复：`wait_until` 改为 `"load"`，保留 `wait_for_selector('[data-render-ready="true"]')` 等待 bars + indicators 就绪后再截图
