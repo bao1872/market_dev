@@ -158,7 +158,11 @@ async def capture_stock_chart(
 
             try:
                 logger.info("截图服务访问页面: symbol=%s event_id=%s", symbol, event_id)
-                await page.goto(url, wait_until="networkidle", timeout=render_timeout_ms)
+                # [capture-worker] - 描述: page.goto 使用 wait_until="load"
+                # 历史根因：wait_until="networkidle" 在前端存在长连接/持续轮询时永远不会触发，
+                # 导致 30s 超时返回 502。后续通过 wait_for_selector 等待 data-render-ready
+                # 确保业务数据加载完成即可，不依赖网络完全空闲。
+                await page.goto(url, wait_until="load", timeout=render_timeout_ms)
 
                 # 等待截图区域渲染完成（data-render-ready="true"）
                 try:

@@ -4,6 +4,13 @@
 
 ## 2026-07-08
 
+- CHANGE-20260708-051: 修复 capture worker 偶发 502（page.goto networkidle 超时）导致 monitor 图片缺失
+  - 根因：`stock_capture_service.capture_stock_chart` 使用 `page.goto(..., wait_until="networkidle")`，前端 capture 页面存在长连接/持续轮询时 `networkidle` 永不触发，30s 超时返回 502
+  - 修复：`wait_until` 改为 `"load"`，保留 `wait_for_selector('[data-render-ready="true"]')` 等待 bars + indicators 就绪后再截图
+  - 新增 `backend/tests/test_stock_capture_service.py`（2 用例）：验证 `page.goto` 使用 `wait_until="load"`、截图成功后写入缓存
+  - 更新 `03-jobs-integrations-operations.md`、`worker-job-map.md`、ALIGN-039
+  - 部署边界：部署后观察 monitor 事件图片成功率，连续多条 capture_jobs failed 占比应接近 0%；未执行生产部署
+
 - CHANGE-20260708-050: 修复 Monitor 与 Notification latest-event 图片 Capture Token Claims
   - 新增 `backend/app/constants/capture.py` 定义 `CAPTURE_SCOPE_STOCK_DETAIL`，避免服务层 import `app.core.deps` 导致循环依赖
   - `backend/app/core/deps.py` 改为从常量模块导入 `CAPTURE_SCOPE_STOCK_DETAIL`

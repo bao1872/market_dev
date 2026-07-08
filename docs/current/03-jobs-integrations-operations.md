@@ -318,6 +318,10 @@ Business Event / Manual Share
 
 Capture Worker 使用短期 Capture Token 访问 `/capture/stock/:symbol`。截图页面不经过普通 ProtectedLayout，不污染普通 Access Token。
 
+截图页面渲染就绪判定：
+- `page.goto` 使用 `wait_until="load"`（历史根因：`networkidle` 在前端存在长连接/持续轮询时永远不会触发，导致 30s 超时返回 502）。
+- 页面 load 后通过 `wait_for_selector('[data-testid="stock-detail-capture"][data-render-ready="true"]')` 等待 bars + indicators 就绪，再执行截图。
+
 文字和图片分开投递，状态分别记录。状态必须可查询，支持仅重试图片。
 
 失败阶段包括：
