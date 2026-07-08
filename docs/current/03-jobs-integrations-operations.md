@@ -108,13 +108,15 @@ queued → refreshing_daily → checking_coverage → creating_dsa
 
 | 端点 | 方法 | 说明 |
 |---|---|---|
-| `/after-close/pipeline/latest` | GET | 查询最近交易日（含今日）的流水线聚合状态 |
+| `/after-close/pipeline/latest` | GET | 查询最近交易日的流水线聚合状态（交易日始终返回 today，非交易日回退最近有记录的交易日） |
 | `/after-close/pipeline?trade_date=YYYY-MM-DD` | GET | 查询指定交易日的流水线聚合状态 |
 | `/after-close/pipeline/runs?limit=20` | GET | 查询最近 N 次 after_close_orchestrator + snapshot_run 混合列表 |
 | `/after-close/pipeline/run` | POST | 触发当日 after_close 编排（幂等：同 trade_date 已有 queued/running/succeeded 返回 existing） |
 
 **响应结构 `AfterClosePipelineResponse`**：
-- `overall_status`：not_started / running / succeeded / failed / blocked / skipped（收盘后超过 30 分钟仍无 run 且无 backfill_full 时为 blocked）；
+- `overall_status`：not_started / running / succeeded / failed / blocked / skipped（交易日收盘后超过 30 分钟阈值仍无 run → blocked；非交易日无 run 且无 backfill_full → skipped）；
+- `latest` 策略：交易日（含今日）始终以 today 为目标 trade_date，即使无 run 也返回 today 的 not_started/blocked，不回退历史 run 掩盖"今天未执行"；非交易日回退到最近有记录的交易日；
+- `feature_snapshot_run` 摘要优先返回 succeeded+published+full run（即 watchlist_ready 的实际数据源），若不存在再 fallback 到最新任意 run；
 - `watchlist_ready`：严格复用 `feature_snapshot_service.has_succeeded_snapshot_run`（`status='succeeded' AND published_at IS NOT NULL AND metadata_.scope='full'`），sample backfill 不计入；
 - `steps`：8 步骤时间线（refreshing_daily → checking_coverage → creating_dsa → waiting_dsa_worker → quality_gate → feature_snapshot → publishing → watchlist_ready），每步 status 为 pending/running/completed/failed/skipped；
 - `after_close_run`：job_run 摘要（status/orchestrator_status/heartbeat/lease_expires/last_completed_step/error）；

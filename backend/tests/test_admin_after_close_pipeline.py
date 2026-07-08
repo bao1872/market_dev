@@ -133,17 +133,16 @@ def _make_snapshot_run(
     )
 
 
-# ==================== 1. 无 run → not_started ====================
-
+# ==================== 1. 盘前/盘中无 run → not_started ====================
 
 @pytest.mark.asyncio
-async def test_pipeline_not_started_no_run(
+async def test_pipeline_not_started_pre_market(
     client: AsyncClient,
     admin_user: User,
     db_session: AsyncSession,
 ):
-    """收盘后无 after_close run → overall_status=not_started。"""
-    now = datetime(2026, 6, 24, 16, 5, tzinfo=SHANGHAI)
+    """交易日盘前（09:00）无 after_close run → overall_status=not_started。"""
+    now = datetime(2026, 6, 24, 9, 0, tzinfo=SHANGHAI)
 
     with _mock_trading_day(is_trading=True), patch(
         "app.services.after_close_pipeline_service.now_shanghai",
@@ -162,6 +161,100 @@ async def test_pipeline_not_started_no_run(
     assert data["watchlist_ready"] is False
     assert data["after_close_run"] is None
     assert all(step["status"] == "pending" for step in data["steps"])
+
+
+# ==================== 1b. 收盘后超过阈值无 run → blocked ====================
+
+@pytest.mark.asyncio
+async def test_pipeline_blocked_after_close(
+    client: AsyncClient,
+    admin_user: User,
+    db_session: AsyncSession,
+):
+    """交易日收盘后（16:05）超过 30 分钟阈值无 after_close run → overall_status=blocked。"""
+    now = datetime(2026, 6, 24, 16, 5, tzinfo=SHANGHAI)
+
+    with _mock_trading_day(is_trading=True), patch(
+        "app.services.after_close_pipeline_service.now_shanghai",
+        return_value=now,
+    ):
+        resp = await client.get(
+            "/admin/after-close/pipeline",
+            params={"trade_date": TEST_DATE_STR},
+            headers=_auth_headers(admin_user.id),
+        )
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["trade_date"] == TEST_DATE_STR
+    assert data["overall_status"] == "blocked"
+    assert data["watchlist_ready"] is False
+    assert data["after_close_run"] is None
+    assert all(step["status"] == "pending" for step in data["steps"])
+
+
+# ==================== 1c. latest 在交易日不回退历史 run ====================
+
+@pytest.mark.asyncio
+async def test_pipeline_latest_no_fallback_on_trading_day(
+    client: AsyncClient,
+    admin_user: User,
+    db_session: AsyncSession,
+):
+    """交易日收盘后 today 无 run 但昨天有 succeeded → latest 必须返回 today 的 blocked，不得返回昨天。"""
+    today = datetime(2026, 6, 24, 16, 5, tzinfo=SHANGHAI)
+    yesterday_str = "2026-06-23"
+    yesterday_finished = today - timedelta(days=1, minutes=-10)
+
+    # 昨天有 succeeded after_close run + full published snapshot
+    yesterday_meta = {
+        "orchestrator_status": AfterCloseRunStatus.SUCCEEDED.value,
+        "trade_date": yesterday_str,
+        "last_completed_step": AfterCloseRunStatus.SUCCEEDED.value,
+    }
+    yesterday_run = SchedulerJobRun(
+        id=uuid.uuid4(),
+        job_name="after_close_orchestrator",
+        business_date=yesterday_str,
+        run_key=f"after_close_orchestrator:{yesterday_str}",
+        status=STATUS_SUCCEEDED,
+        started_at=yesterday_finished - timedelta(minutes=30),
+        finished_at=yesterday_finished,
+        metadata_json=json.dumps(yesterday_meta),
+    )
+    db_session.add(yesterday_run)
+
+    yesterday_snapshot = StockFeatureSnapshotRun(
+        id=uuid.uuid4(),
+        trade_date=date(2026, 6, 23),
+        run_type=RUN_TYPE_AFTER_CLOSE,
+        status=STATUS_SUCCEEDED,
+        metadata_={"scope": "full"},
+        snapshot_count=10,
+        failed_count=0,
+        expected_count=10,
+        published_at=yesterday_finished,
+        finished_at=yesterday_finished,
+    )
+    db_session.add(yesterday_snapshot)
+    await db_session.flush()
+
+    with _mock_trading_day(is_trading=True), patch(
+        "app.services.after_close_pipeline_service.now_shanghai",
+        return_value=today,
+    ):
+        resp = await client.get(
+            "/admin/after-close/pipeline/latest",
+            headers=_auth_headers(admin_user.id),
+        )
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    # 关键断言：latest 必须返回 today（2026-06-24），不得回退到昨天
+    assert data["trade_date"] == "2026-06-24"
+    assert data["overall_status"] == "blocked"
+    assert data["watchlist_ready"] is False
+    assert data["after_close_run"] is None
 
 
 # ==================== 2. running → 当前 step 正确 ====================
@@ -326,6 +419,67 @@ async def test_pipeline_sample_snapshot_not_readable(
 
     steps = {step["step"]: step for step in data["steps"]}
     assert steps["watchlist_ready"]["status"] == "pending"
+
+
+# ==================== 4b. watchlist_ready=true 时 feature_snapshot_run 优先显示 full run ====================
+
+@pytest.mark.asyncio
+async def test_pipeline_full_snapshot_preferred_over_sample(
+    client: AsyncClient,
+    admin_user: User,
+    db_session: AsyncSession,
+):
+    """同一 trade_date 同时存在 full succeeded published 和后来的 sample succeeded published，
+    watchlist_ready=true 时页面摘要应显示 full run，不显示 sample 作为主 run。"""
+    now = datetime(2026, 6, 24, 20, 0, tzinfo=SHANGHAI)
+    full_finished = now - timedelta(minutes=20)
+    sample_finished = now - timedelta(minutes=5)  # sample 更晚创建
+
+    job_run = _make_after_close_job_run(
+        status=STATUS_SUCCEEDED,
+        orchestrator_status=AfterCloseRunStatus.SUCCEEDED.value,
+        last_completed_step=AfterCloseRunStatus.SUCCEEDED.value,
+        started_at=full_finished - timedelta(minutes=30),
+        finished_at=full_finished,
+    )
+    db_session.add(job_run)
+
+    # full run（先创建）
+    full_run = _make_snapshot_run(
+        run_type=RUN_TYPE_AFTER_CLOSE,
+        status=STATUS_SUCCEEDED,
+        scope="full",
+        published=True,
+        finished_at=full_finished,
+    )
+    db_session.add(full_run)
+
+    # sample run（后创建，created_at 更新）
+    sample_run = _make_snapshot_run(
+        run_type=RUN_TYPE_BACKFILL,
+        status=STATUS_SUCCEEDED,
+        scope="sample",
+        published=True,
+        finished_at=sample_finished,
+    )
+    db_session.add(sample_run)
+    await db_session.flush()
+
+    with _mock_trading_day(is_trading=True), patch(
+        "app.services.after_close_pipeline_service.now_shanghai",
+        return_value=now,
+    ):
+        resp = await client.get(
+            f"/admin/after-close/pipeline?trade_date={TEST_DATE_STR}",
+            headers=_auth_headers(admin_user.id),
+        )
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["watchlist_ready"] is True
+    # 关键断言：feature_snapshot_run 必须是 full run，不是 sample
+    assert data["feature_snapshot_run"]["scope"] == "full"
+    assert data["feature_snapshot_run"]["run_id"] == str(full_run.id)
 
 
 # ==================== 5. failed run → overall_status=failed + error ====================

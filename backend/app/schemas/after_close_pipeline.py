@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.system_overview import DataFreshness
 
@@ -17,7 +17,7 @@ class PipelineStep(BaseModel):
     started_at: str | None = None
     finished_at: str | None = None
     duration_seconds: float | None = None
-    counts: dict[str, Any] = {}
+    counts: dict[str, Any] = Field(default_factory=dict)
     error_message: str | None = None
 
 
@@ -135,7 +135,7 @@ if __name__ == "__main__":
 
     response = AfterClosePipelineResponse(
         trade_date="2026-07-08",
-        market_session="AFTER_HOURS",
+        market_session="MARKET_CLOSED",
         overall_status="not_started",
         watchlist_ready=False,
         watchlist_reason="test",

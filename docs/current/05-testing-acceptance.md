@@ -412,7 +412,7 @@ mypy app/schemas/after_close_pipeline.py app/services/after_close_pipeline_servi
 cd /root/web_dev/frontend && npm run build
 ```
 
-预期：8 passed、ruff 零错误、mypy 零错误、前端 build 成功。
+预期：11 passed、ruff 零错误、mypy 零错误、前端 build 成功。
 
 ## 3.7 Monitor Image Capture Token 回归（blocking）
 

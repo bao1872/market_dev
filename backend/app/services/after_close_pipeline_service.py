@@ -27,6 +27,7 @@ from app.models.job_run_event import JobRunEvent
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.stock_feature_snapshot_run import (
     RUN_TYPE_BACKFILL,
+    STATUS_SUCCEEDED,
     StockFeatureSnapshotRun,
 )
 from app.services.after_close_orchestrator import (
@@ -36,7 +37,11 @@ from app.services.after_close_orchestrator import (
 from app.services.calendar_service import is_trading_day_async
 from app.services.feature_snapshot_service import has_succeeded_snapshot_run
 from app.services.job_run_event_service import list_events
-from app.services.market_status_service import compute_market_session
+from app.services.market_status_service import (
+    MARKET_SESSION_CLOSED,
+    MARKET_SESSION_NON_TRADING_DAY,
+    compute_market_session,
+)
 from app.services.system_overview_service import _compute_data_freshness
 
 logger = logging.getLogger("after_close_pipeline_service")
@@ -114,15 +119,35 @@ async def _get_snapshot_run_summary(
     db: AsyncSession,
     trade_date: date,
 ) -> dict[str, Any] | None:
-    """查询指定交易日最新的 feature_snapshot_run 摘要（任意 run_type）。"""
-    stmt = (
+    """查询指定交易日的 feature_snapshot_run 摘要。
+
+    优先返回可读的 full/published/succeeded run（即 watchlist_ready 的实际数据源）；
+    若不存在，fallback 到最新任意 run（用于展示 sample/running/failed 等参考信息）。
+    避免出现 watchlist_ready=true 但页面展示 sample run 的误导。
+    """
+    # 优先：succeeded + published + scope=full
+    preferred_stmt = (
         select(StockFeatureSnapshotRun)
         .where(StockFeatureSnapshotRun.trade_date == trade_date)
+        .where(StockFeatureSnapshotRun.status == STATUS_SUCCEEDED)
+        .where(StockFeatureSnapshotRun.published_at.is_not(None))
         .order_by(desc(StockFeatureSnapshotRun.created_at))
         .limit(1)
     )
-    result = await db.execute(stmt)
-    run = result.scalar_one_or_none()
+    preferred_result = await db.execute(preferred_stmt)
+    run = preferred_result.scalar_one_or_none()
+
+    if run is None:
+        # fallback：最新任意 run
+        fallback_stmt = (
+            select(StockFeatureSnapshotRun)
+            .where(StockFeatureSnapshotRun.trade_date == trade_date)
+            .order_by(desc(StockFeatureSnapshotRun.created_at))
+            .limit(1)
+        )
+        fallback_result = await db.execute(fallback_stmt)
+        run = fallback_result.scalar_one_or_none()
+
     if run is None:
         return None
     meta = run.metadata_ or {}
@@ -302,12 +327,12 @@ def _compute_overall_status(
     has_backfill_full: bool,
 ) -> str:
     """overall_status: not_started/running/succeeded/failed/blocked/skipped。"""
-    if market_session == "NON_TRADING_DAY":
+    if market_session == MARKET_SESSION_NON_TRADING_DAY:
         if job_run is None and not has_backfill_full:
             return "skipped"
     if job_run is None:
         # 收盘后超过阈值仍无 run -> blocked
-        if market_session == "AFTER_HOURS":
+        if market_session == MARKET_SESSION_CLOSED:
             market_close = now.replace(hour=15, minute=0, second=0, microsecond=0)
             if now >= market_close + timedelta(minutes=_BLOCKED_AFTER_CLOSE_MINUTES):
                 return "blocked"
@@ -442,27 +467,38 @@ async def get_latest_pipeline(
     db: AsyncSession,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """返回最近交易日（含今日）的 after_close pipeline 聚合状态。"""
+    """返回最近交易日（含今日）的 after_close pipeline 聚合状态。
+
+    策略：
+    - 交易日（含今日）：始终以 today 为目标 trade_date，即使无 after_close run
+      也返回 today 的 not_started/blocked，避免回退历史 run 掩盖"今天未执行"。
+    - 非交易日：回退到最近一个有 after_close run 记录的交易日，展示历史状态。
+    """
     if now is None:
         now = now_shanghai()
-    # 优先取今日；若今日无 after_close run 且非交易日，取最近一个有记录的交易日
     today = now.date()
-    job_run = await _get_after_close_run_for_trade_date(db, today)
-    trade_date = today
-    if job_run is None:
-        stmt = (
-            select(SchedulerJobRun)
-            .where(SchedulerJobRun.job_name == _AFTER_CLOSE_JOB_NAME)
-            .order_by(desc(SchedulerJobRun.business_date))
-            .limit(1)
-        )
-        result = await db.execute(stmt)
-        latest = result.scalar_one_or_none()
-        if latest is not None and latest.business_date:
-            try:
-                trade_date = date.fromisoformat(latest.business_date)
-            except ValueError:
-                trade_date = today
+    is_trading_day = await is_trading_day_async(db, today)
+
+    if is_trading_day:
+        # 交易日：始终以 today 为目标，不回退历史
+        return await _build_pipeline_response(db, today, now)
+
+    # 非交易日：回退到最近一个有 after_close run 记录的交易日
+    stmt = (
+        select(SchedulerJobRun)
+        .where(SchedulerJobRun.job_name == _AFTER_CLOSE_JOB_NAME)
+        .order_by(desc(SchedulerJobRun.business_date))
+        .limit(1)
+    )
+    result = await db.execute(stmt)
+    latest = result.scalar_one_or_none()
+    if latest is not None and latest.business_date:
+        try:
+            trade_date = date.fromisoformat(latest.business_date)
+        except ValueError:
+            trade_date = today
+    else:
+        trade_date = today
     return await _build_pipeline_response(db, trade_date, now)
 
 
