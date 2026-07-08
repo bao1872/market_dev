@@ -381,15 +381,27 @@ cd /root/web_dev/backend && .venv/bin/python -m scripts.feature_snapshot_backfil
 
 任何修改 `backend/app/services/after_close_pipeline_service.py`、`backend/app/api/admin_after_close.py`（pipeline 端点部分）、`backend/app/schemas/after_close_pipeline.py` 必须跑盘后流水线聚合 API 回归测试。
 
-后端回归（`tests/test_admin_after_close_pipeline.py`，8 个用例）：
-- 无 after_close run 时返回 `overall_status='not_started'` + `watchlist_ready=false`；
+后端回归（`tests/test_admin_after_close_pipeline.py`，11 个用例）：
+- 盘前无 run 时返回 `overall_status='not_started'` + `watchlist_ready=false`；
+- 收盘后超过 30 分钟阈值无 run → `overall_status='blocked'`；
+- latest 在交易日不回退历史 run（today 无 run 必须返回 today 的 blocked，不返回昨天 succeeded）；
 - 运行中 run（status=running）时返回 `overall_status='running'` + 当前步骤 status='running'；
 - 成功 run + snapshot succeeded + scope=full → `overall_status='succeeded'` + `watchlist_ready=true`；
 - `watchlist_ready` 严格判定：snapshot `scope='sample'` 时 `watchlist_ready=false`（sample backfill 不计入）；
+- full+sample 同日共存：watchlist_ready=true 时 feature_snapshot_run 主摘要必须为 full run（显式 created_at，不依赖 DB 默认顺序）；
 - 失败 run（status=failed）时返回 `overall_status='failed'` + error_message 非空；
 - POST `/after-close/pipeline/run` 幂等：同 trade_date 已有 queued/running/succeeded run 时返回 existing（`is_new=false`）；
 - events 列表限制 100 条；
 - 非 admin 用户访问返回 403。
+
+生产 smoke 验收（部署后执行，不阻塞 CI）：
+- `/health` → 200；
+- `/admin/after-close/pipeline/latest` → 200；
+- `/admin/after-close/pipeline?trade_date=<today>` → 200；
+- `/admin/after-close/pipeline/runs?limit=20` → 200；
+- `/admin/overview` → 200（摘要卡可见）；
+- `/admin/after-close` → 200（详情页可见）；
+- backend/frontend 20m 日志无 5xx/502/timeout。
 
 前端构建验证：
 - `tsc --noEmit` 零错误；

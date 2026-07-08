@@ -129,7 +129,18 @@ queued → refreshing_daily → checking_coverage → creating_dsa
 - `/admin/overview` 中的 `AfterClosePipelineCard` 改造为摘要卡（状态 pill + 编排阶段 + Worker 心跳 + 行情/选股发布至 + 进入详情链接）；
 - 轮询策略：running 状态 10s，非 running 60s，页面不可见暂停。
 
+**生产验收路径（PR #47 已部署验证）**：
+- `/health` → 200；
+- `/admin/after-close/pipeline/latest` → 200（交易日 today 无 run 返回 today 的 not_started/blocked，非交易日回退最近有记录的交易日）；
+- `/admin/after-close/pipeline?trade_date=YYYY-MM-DD` → 200；
+- `/admin/after-close/pipeline/runs?limit=20` → 200；
+- `/admin/overview` 与 `/admin/after-close` → 200；
+- backend/frontend 20m 日志无 5xx/502/timeout；
+- 文案校验：盘前无 run → not_started；收盘后 30 分钟无 run → blocked；sample run 不显示为前台可读；full/published/succeeded → watchlist_ready=true；手动 backfill full 与正式 after_close succeeded 通过 has_backfill_full 区分。
+
 ### 2.4 Feature Snapshot 历史回补脚本
+
+> **历史回补仍 BLOCKED**：PR #41 生产验证 full scope 耗时 126 分钟，超过 120 分钟阈值。下一步进入 `--profile-summary` 轻量性能诊断（不重构公式、不跑历史回补），定位瓶颈后再决定是否进入 compute-once-extract 优化。
 
 `backend/scripts/feature_snapshot_backfill.py` 为历史交易日批量生成 `stock_feature_snapshots`。**核心计算逻辑在 `backend/app/services/feature_snapshot_service.py`，脚本只做 CLI 参数解析、dry-run 标记、resume 跳过、批量调用 service。**
 
