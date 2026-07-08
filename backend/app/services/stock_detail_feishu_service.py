@@ -37,6 +37,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants.capture import CAPTURE_SCOPE_STOCK_DETAIL
 from app.core.security import create_capture_token
 from app.core.time import format_shanghai_datetime, now_utc, to_shanghai_iso
 from app.models.capture_job import (
@@ -274,7 +275,7 @@ async def send_stock_detail_to_feishu(
             subject=str(user_id),
             event_id=str(instrument_id),
             expires_delta=timedelta(seconds=capture_token_ttl_seconds),
-            scope="stock_detail_capture",
+            scope=CAPTURE_SCOPE_STOCK_DETAIL,
             instrument_id=str(instrument_id),
             user_id=str(user_id),
         )

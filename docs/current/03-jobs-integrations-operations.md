@@ -208,6 +208,71 @@ CLI 参数：
 - upsert 幂等，可重复执行；
 - `start > end` 直接 `sys.exit(1)`。
 
+## 2.5 监控图片通知链路
+
+盘中监控触发后，文字通知与图片通知是**两段独立链路**。文字通知成功不代表图片通知一定成功。
+
+### 2.5.1 文字/卡片链路
+
+```text
+worker-monitor → monitor_batch_service.execute_monitor_cycle()
+  → StrategyEvent / MonitorEvaluation
+  → EventRecipient
+  → NotificationMessage (source_type=monitor_event / strategy_event)
+  → Outbox(notification.message.created)
+  → outbox_relay
+  → eligible_user_service 资格过滤
+  → MessageDelivery(delivery_type=text/card)
+  → delivery_worker
+  → FeishuPlatformAppAdapter.send()
+```
+
+### 2.5.2 图片链路
+
+```text
+worker-monitor → monitor_batch_service._send_chart_images_via_outbox()
+  → 生成短期 capture token
+  → 调用 worker-capture HTTP /capture
+  → capture_jobs (status=succeeded/failed)
+  → NotificationMessage (source_type=monitor_chart)
+  → Outbox(notification.message.created) payload:
+       { delivery_type: "image", image_url: "...", message_group_id: "..." }
+  → outbox_relay
+  → MessageDelivery(delivery_type=image)
+  → delivery_worker
+  → FeishuPlatformAppAdapter 上传/发送图片
+```
+
+图片链路通过 `message_group_id` 与文字/卡片链路关联，形成同一事件的图文消息组。
+
+### 2.5.3 Capture Token 字段要求
+
+调用 `worker-capture` 时必须使用 `app.core.security.create_capture_token` 生成短期 token，且必须携带以下字段：
+
+| 字段 | 要求 | 说明 |
+|---|---|---|
+| `type` | 固定为 `"capture"` | 由 `create_capture_token` 内部写入 |
+| `scope` | 必须为 `"stock_detail_capture"` | 常量见 `app.constants.capture.CAPTURE_SCOPE_STOCK_DETAIL` |
+| `user_id` | 必填 | 接收图片通知的用户 ID |
+| `instrument_id` | 必填 | 截图标的 ID，必须与请求路径中的 `instrument_id` 一致 |
+| `event_id` | 必填 | 关联的 StrategyEvent / MonitorEvaluation ID |
+| `exp` | 短期有效 | 默认使用 `jwt_capture_ttl_seconds` |
+
+`/api/v1/capture/stocks/{instrument_id}/snapshot` 通过 `get_capture_token_payload` 校验：
+- `type == "capture"`；
+- `scope == "stock_detail_capture"`；
+- `user_id`、`instrument_id`、`event_id` 均存在；
+- 否则返回 401/403。
+
+capture worker 在截图时还会校验 token 中的 `instrument_id` 与路径参数 `instrument_id` 一致。字段缺失会导致截图请求 401/403，`image_url` 为空，后续图片 Outbox / MessageDelivery 不会生成，但**不影响文字通知**。
+
+### 2.5.4 截图失败不阻塞文字通知
+
+`monitor_batch_service._send_chart_images_via_outbox()` 对每只股票单独捕获：
+- capture worker 返回 401/403/异常或无 `image_url` 时，写 `capture_jobs` 记录（`status=failed`，`error_code=CAPTURE_REQUEST_FAILED` / `NO_IMAGE_URL`），然后 `continue`；
+- 文字通知链路在此之前已经写入 Outbox，因此截图失败不会回滚或阻塞文字通知；
+- 同一 `message_group_id` 下可能出现文字已发送但图片缺失的情况，整体状态由 delivery_worker 根据文字/图片结果标记为 `partial_failed`。
+
 ## 3. 任务状态与可观察性
 
 重要任务必须记录：

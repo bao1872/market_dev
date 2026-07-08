@@ -1,8 +1,8 @@
 {
-  "baseline_commit": "64ed75cce80f5b3f2b5ab95f96b52aac11475e3e",
+  "baseline_commit": "a8481c7e98e11dd570e340de606a0d8e38c4dd64",
   "policy": "new-files-zero-baseline-non-regression-full-report",
-  "captured_at": "2026-07-03T02:58:06Z",
-  "total": 930,
+  "captured_at": "2026-07-08T04:03:50Z",
+  "total": 889,
   "diagnostics": [
     {
       "filename": "alembic/versions/022_monitor_evaluations.py",
@@ -47,67 +47,19 @@
       "count": 1
     },
     {
-      "filename": "app/api/admin_subscription.py",
-      "code": "F401",
-      "message": "`app.models.notification.MessageDelivery` imported but unused",
-      "count": 1
-    },
-    {
-      "filename": "app/api/admin_subscription.py",
-      "code": "F401",
-      "message": "`app.models.notification.NotificationChannel` imported but unused",
-      "count": 1
-    },
-    {
-      "filename": "app/api/admin_subscription.py",
-      "code": "F401",
-      "message": "`app.models.notification.NotificationMessage` imported but unused",
-      "count": 1
-    },
-    {
-      "filename": "app/api/admin_subscription.py",
-      "code": "F401",
-      "message": "`math` imported but unused",
-      "count": 1
-    },
-    {
-      "filename": "app/api/admin_subscription.py",
+      "filename": "alembic/versions/056_stock_feature_snapshots.py",
       "code": "I001",
       "message": "Import block is un-sorted or un-formatted",
       "count": 1
     },
     {
-      "filename": "app/api/bars.py",
-      "code": "F401",
-      "message": "`datetime.time` imported but unused",
-      "count": 1
-    },
-    {
-      "filename": "app/api/bars.py",
-      "code": "F821",
-      "message": "Undefined name `get_redis`",
+      "filename": "alembic/versions/057_stock_feature_snapshot_runs.py",
+      "code": "I001",
+      "message": "Import block is un-sorted or un-formatted",
       "count": 1
     },
     {
       "filename": "app/api/instruments.py",
-      "code": "I001",
-      "message": "Import block is un-sorted or un-formatted",
-      "count": 1
-    },
-    {
-      "filename": "app/api/strategy_runs.py",
-      "code": "F401",
-      "message": "`app.services.access_control_service.require_authenticated` imported but unused",
-      "count": 1
-    },
-    {
-      "filename": "app/api/watchlist.py",
-      "code": "F401",
-      "message": "`app.models.user.User` imported but unused",
-      "count": 1
-    },
-    {
-      "filename": "app/api/watchlist.py",
       "code": "I001",
       "message": "Import block is un-sorted or un-formatted",
       "count": 1
@@ -137,18 +89,6 @@
       "count": 1
     },
     {
-      "filename": "app/services/after_close_orchestrator.py",
-      "code": "I001",
-      "message": "Import block is un-sorted or un-formatted",
-      "count": 1
-    },
-    {
-      "filename": "app/services/after_close_orchestrator.py",
-      "code": "UP042",
-      "message": "Class AfterCloseRunStatus inherits from both `str` and `enum.Enum`",
-      "count": 1
-    },
-    {
       "filename": "app/services/chart_bars_service.py",
       "code": "F821",
       "message": "Undefined name `SHANGHAI_TZ`",
@@ -164,78 +104,6 @@
       "filename": "app/services/instrument_seed.py",
       "code": "N806",
       "message": "Variable `BATCH_SIZE` in function should be lowercase",
-      "count": 1
-    },
-    {
-      "filename": "app/services/market_data_aggregation_service.py",
-      "code": "F401",
-      "message": "`app.core.time.SHANGHAI_TZ` imported but unused",
-      "count": 1
-    },
-    {
-      "filename": "app/services/market_data_aggregation_service.py",
-      "code": "F401",
-      "message": "`zoneinfo.ZoneInfo` imported but unused",
-      "count": 1
-    },
-    {
-      "filename": "app/services/market_data_aggregation_service.py",
-      "code": "I001",
-      "message": "Import block is un-sorted or un-formatted",
-      "count": 1
-    },
-    {
-      "filename": "app/services/message_builder.py",
-      "code": "N806",
-      "message": "Variable `_CST` in function should be lowercase",
-      "count": 1
-    },
-    {
-      "filename": "app/services/monitor_batch_service.py",
-      "code": "N812",
-      "message": "Lowercase `indicator_contract` imported as non-lowercase `IC`",
-      "count": 1
-    },
-    {
-      "filename": "app/services/notification_service.py",
-      "code": "E402",
-      "message": "Module level import not at top of file",
-      "count": 8
-    },
-    {
-      "filename": "app/services/strategy_batch_service.py",
-      "code": "N818",
-      "message": "Exception name `InvalidStrategyResult` should be named with an Error suffix",
-      "count": 1
-    },
-    {
-      "filename": "app/services/strategy_batch_service.py",
-      "code": "UP041",
-      "message": "Replace aliased errors with `TimeoutError`",
-      "count": 1
-    },
-    {
-      "filename": "app/services/system_overview_service.py",
-      "code": "I001",
-      "message": "Import block is un-sorted or un-formatted",
-      "count": 2
-    },
-    {
-      "filename": "app/services/system_overview_service.py",
-      "code": "N814",
-      "message": "Camelcase `StrategyDefinition` imported as constant `_SD`",
-      "count": 1
-    },
-    {
-      "filename": "app/services/system_overview_service.py",
-      "code": "N814",
-      "message": "Camelcase `StrategyVersion` imported as constant `_SV`",
-      "count": 1
-    },
-    {
-      "filename": "app/services/system_overview_service.py",
-      "code": "UP009",
-      "message": "UTF-8 encoding declaration is unnecessary",
       "count": 1
     },
     {
@@ -1907,42 +1775,6 @@
       "count": 1
     },
     {
-      "filename": "tests/test_access_audit_log.py",
-      "code": "F401",
-      "message": "`datetime.UTC` imported but unused",
-      "count": 1
-    },
-    {
-      "filename": "tests/test_access_audit_log.py",
-      "code": "F401",
-      "message": "`datetime.datetime` imported but unused",
-      "count": 1
-    },
-    {
-      "filename": "tests/test_admin_subscription_users.py",
-      "code": "F401",
-      "message": "`app.models.user.Role` imported but unused",
-      "count": 1
-    },
-    {
-      "filename": "tests/test_admin_subscription_users.py",
-      "code": "F401",
-      "message": "`app.models.user.UserRole` imported but unused",
-      "count": 1
-    },
-    {
-      "filename": "tests/test_after_close_idempotent_dsa_pipeline.py",
-      "code": "F401",
-      "message": "`app.constants.strategy_keys.DSA_SELECTOR` imported but unused",
-      "count": 1
-    },
-    {
-      "filename": "tests/test_after_close_orchestrator.py",
-      "code": "F841",
-      "message": "Local variable `initial_heartbeat` is assigned to but never used",
-      "count": 1
-    },
-    {
       "filename": "tests/test_bar_repository_get_recent_bars.py",
       "code": "N812",
       "message": "Lowercase `indicator_contract` imported as non-lowercase `IC`",
@@ -1979,51 +1811,21 @@
       "count": 2
     },
     {
-      "filename": "tests/test_eligible_user_service.py",
-      "code": "UP035",
-      "message": "Import from `collections.abc` instead: `Callable`",
-      "count": 1
+      "filename": "tests/test_market_data_aggregation_partial_daily.py",
+      "code": "F821",
+      "message": "Undefined name `Any`",
+      "count": 2
     },
     {
-      "filename": "tests/test_feishu_platform_app_only.py",
-      "code": "F401",
-      "message": "`os` imported but unused",
-      "count": 1
+      "filename": "tests/test_market_data_aggregation_partial_daily.py",
+      "code": "F821",
+      "message": "Undefined name `uuid`",
+      "count": 2
     },
     {
-      "filename": "tests/test_feishu_platform_app_only.py",
-      "code": "F401",
-      "message": "`uuid.uuid4` imported but unused",
-      "count": 1
-    },
-    {
-      "filename": "tests/test_feishu_platform_app_only.py",
-      "code": "F841",
-      "message": "Local variable `mock_create_index` is assigned to but never used",
-      "count": 1
-    },
-    {
-      "filename": "tests/test_feishu_platform_app_only.py",
-      "code": "F841",
-      "message": "Local variable `mock_drop_index` is assigned to but never used",
-      "count": 1
-    },
-    {
-      "filename": "tests/test_feishu_platform_app_only.py",
-      "code": "I001",
-      "message": "Import block is un-sorted or un-formatted",
-      "count": 1
-    },
-    {
-      "filename": "tests/test_indicator_contract.py",
-      "code": "N812",
-      "message": "Lowercase `indicator_contract` imported as non-lowercase `IC`",
-      "count": 1
-    },
-    {
-      "filename": "tests/test_node_cluster_contract.py",
-      "code": "I001",
-      "message": "Import block is un-sorted or un-formatted",
+      "filename": "tests/test_monitor_batch_live_minute.py",
+      "code": "F821",
+      "message": "Undefined name `Any`",
       "count": 1
     },
     {
@@ -2123,12 +1925,6 @@
       "count": 1
     },
     {
-      "filename": "tests/test_subscription_expired_e2e.py",
-      "code": "I001",
-      "message": "Import block is un-sorted or un-formatted",
-      "count": 1
-    },
-    {
       "filename": "tests/test_volume_node_monitor.py",
       "code": "F841",
       "message": "Local variable `curr_state` is assigned to but never used",
@@ -2145,12 +1941,6 @@
       "code": "E402",
       "message": "Module level import not at top of file",
       "count": 4
-    },
-    {
-      "filename": "tools/dsa_benchmark.py",
-      "code": "I001",
-      "message": "Import block is un-sorted or un-formatted",
-      "count": 1
     }
   ]
 }

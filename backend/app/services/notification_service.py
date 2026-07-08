@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 import app.services.feishu_platform_app_adapter  # noqa: F401
+from app.constants.capture import CAPTURE_SCOPE_STOCK_DETAIL
 from app.core.time import format_shanghai_datetime
 from app.models.notification import (
     MessageDelivery,
@@ -1184,6 +1185,9 @@ async def test_channel_latest_event(
         subject=str(channel.user_id),
         event_id=str(event.id),
         expires_delta=timedelta(seconds=capture_token_ttl_seconds),
+        scope=CAPTURE_SCOPE_STOCK_DETAIL,
+        instrument_id=str(event.instrument_id),
+        user_id=str(channel.user_id),
     )
 
     # 6. 调用截图 Worker 获取图片本地静态 URL

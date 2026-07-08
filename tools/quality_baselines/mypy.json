@@ -1,7 +1,7 @@
 {
-  "baseline_commit": "64ed75cce80f5b3f2b5ab95f96b52aac11475e3e",
-  "total": 242,
-  "unique": 175,
+  "baseline_commit": "a8481c7e98e11dd570e340de606a0d8e38c4dd64",
+  "total": 228,
+  "unique": 163,
   "diagnostics": [
     {
       "filename": "app/api/admin_after_close.py",
@@ -13,18 +13,6 @@
       "filename": "app/api/admin_beta_applications.py",
       "error_code": "attr-defined",
       "message": "\"BaseRoute\" has no attribute \"path\"",
-      "count": 1
-    },
-    {
-      "filename": "app/api/admin_subscription.py",
-      "error_code": "attr-defined",
-      "message": "\"BaseRoute\" has no attribute \"path\"",
-      "count": 1
-    },
-    {
-      "filename": "app/api/admin_subscription.py",
-      "error_code": "return-value",
-      "message": "Incompatible return value type (got \"dict[str, Any]\", expected \"SystemOverviewResponse\")",
       "count": 1
     },
     {
@@ -46,19 +34,7 @@
       "count": 5
     },
     {
-      "filename": "app/api/bars.py",
-      "error_code": "name-defined",
-      "message": "Name \"get_redis\" is not defined",
-      "count": 1
-    },
-    {
       "filename": "app/api/calendar.py",
-      "error_code": "attr-defined",
-      "message": "\"BaseRoute\" has no attribute \"path\"",
-      "count": 1
-    },
-    {
-      "filename": "app/api/capture.py",
       "error_code": "attr-defined",
       "message": "\"BaseRoute\" has no attribute \"path\"",
       "count": 1
@@ -136,12 +112,6 @@
       "count": 1
     },
     {
-      "filename": "app/api/stock_detail_feishu.py",
-      "error_code": "attr-defined",
-      "message": "\"BaseRoute\" has no attribute \"path\"",
-      "count": 1
-    },
-    {
       "filename": "app/api/stock_memos.py",
       "error_code": "attr-defined",
       "message": "\"BaseRoute\" has no attribute \"path\"",
@@ -181,12 +151,6 @@
       "filename": "app/api/watchlist.py",
       "error_code": "attr-defined",
       "message": "\"object\" has no attribute \"evaluation_status\"",
-      "count": 2
-    },
-    {
-      "filename": "app/api/watchlist.py",
-      "error_code": "attr-defined",
-      "message": "\"object\" has no attribute \"next_retry_at\"",
       "count": 1
     },
     {
@@ -229,12 +193,6 @@
       "filename": "app/core/pytdx_adapter.py",
       "error_code": "union-attr",
       "message": "Item \"None\" of \"Any | None\" has no attribute \"get_xdxr_info\"",
-      "count": 1
-    },
-    {
-      "filename": "app/models/access_audit_log.py",
-      "error_code": "attr-defined",
-      "message": "\"FromClause\" has no attribute \"indexes\"",
       "count": 1
     },
     {
@@ -335,6 +293,24 @@
     },
     {
       "filename": "app/models/scheduler_job_run.py",
+      "error_code": "attr-defined",
+      "message": "\"FromClause\" has no attribute \"indexes\"",
+      "count": 1
+    },
+    {
+      "filename": "app/models/stock_feature_snapshot.py",
+      "error_code": "attr-defined",
+      "message": "\"FromClause\" has no attribute \"constraints\"",
+      "count": 1
+    },
+    {
+      "filename": "app/models/stock_feature_snapshot.py",
+      "error_code": "attr-defined",
+      "message": "\"FromClause\" has no attribute \"indexes\"",
+      "count": 1
+    },
+    {
+      "filename": "app/models/stock_feature_snapshot_run.py",
       "error_code": "attr-defined",
       "message": "\"FromClause\" has no attribute \"indexes\"",
       "count": 1
@@ -457,12 +433,6 @@
       "filename": "app/repositories/monitor_state_repository.py",
       "error_code": "assignment",
       "message": "Incompatible types in assignment (expression has type \"ReturningInsert[tuple[MonitorState]]\", variable has type \"Insert\")",
-      "count": 1
-    },
-    {
-      "filename": "app/scripts/fix_instruments_remove_indices.py",
-      "error_code": "attr-defined",
-      "message": "\"Result[Any]\" has no attribute \"rowcount\"",
       "count": 1
     },
     {
@@ -634,12 +604,6 @@
       "count": 1
     },
     {
-      "filename": "app/services/market_data_aggregation_service.py",
-      "error_code": "arg-type",
-      "message": "Argument 1 to \"_deserialize_result\" has incompatible type \"bytes | str\"; expected \"str\"",
-      "count": 1
-    },
-    {
       "filename": "app/services/monitor_batch_service.py",
       "error_code": "arg-type",
       "message": "Argument 1 to \"_build_merged_card_dto\" of \"MonitorBatchService\" has incompatible type \"list[_FakeEvent]\"; expected \"list[StrategyEvent]\"",
@@ -721,42 +685,6 @@
       "filename": "app/services/strategy_batch_service.py",
       "error_code": "union-attr",
       "message": "Item \"None\" of \"date | None\" has no attribute \"isoformat\"",
-      "count": 1
-    },
-    {
-      "filename": "app/services/subscription_service.py",
-      "error_code": "return-value",
-      "message": "Incompatible return value type (got \"tuple[Subscription | None, datetime | None, datetime]\", expected \"tuple[Subscription, datetime | None, datetime]\")",
-      "count": 1
-    },
-    {
-      "filename": "app/services/subscription_service.py",
-      "error_code": "union-attr",
-      "message": "Item \"None\" of \"Subscription | None\" has no attribute \"entitlement_snapshot\"",
-      "count": 1
-    },
-    {
-      "filename": "app/services/subscription_service.py",
-      "error_code": "union-attr",
-      "message": "Item \"None\" of \"Subscription | None\" has no attribute \"expires_at\"",
-      "count": 2
-    },
-    {
-      "filename": "app/services/subscription_service.py",
-      "error_code": "union-attr",
-      "message": "Item \"None\" of \"Subscription | None\" has no attribute \"plan_code\"",
-      "count": 1
-    },
-    {
-      "filename": "app/services/subscription_service.py",
-      "error_code": "union-attr",
-      "message": "Item \"None\" of \"Subscription | None\" has no attribute \"status\"",
-      "count": 1
-    },
-    {
-      "filename": "app/services/subscription_service.py",
-      "error_code": "union-attr",
-      "message": "Item \"None\" of \"Subscription | None\" has no attribute \"updated_at\"",
       "count": 1
     },
     {

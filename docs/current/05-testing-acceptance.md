@@ -377,6 +377,40 @@ cd /root/web_dev/backend && .venv/bin/python -m scripts.feature_snapshot_backfil
     --start 2026-07-04 --end 2026-07-07 --dry-run
 ```
 
+## 3.7 Monitor Image Capture Token 回归（blocking）
+
+任何修改 `backend/app/services/monitor_batch_service.py`、
+`backend/app/services/notification_service.py::test_channel_latest_event`、
+`backend/app/core/security.py::create_capture_token`、
+`backend/app/core/deps.py::get_capture_token_payload`、
+`backend/app/constants/capture.py` 必须跑 Monitor Image Capture Token 回归测试。
+
+后端 `tests/test_monitor_batch_capture_image.py`：
+- `test_capture_token_contains_required_claims`：`_send_chart_images_via_outbox` 生成的 capture token 解码后必须包含 `type="capture"`、`scope="stock_detail_capture"`、`user_id`、`instrument_id`、`event_id`；
+- `test_capture_token_instrument_id_matches_trigger_stock`：token 的 `instrument_id` 必须等于触发股票的 `inst_id`；
+- `test_capture_success_writes_image_outbox`：capture worker 返回 `image_url` 时，必须写入 `delivery_type="image"` 的 Outbox payload，且 `image_url` 非空、`message_group_id` 与文字通知同组；
+- `test_capture_failure_does_not_block_text_notification`：capture worker 返回 401/403 或无 `image_url` 时，必须写 `capture_jobs.status=FAILED`，且**不写** image Outbox，文字通知不受影响；
+- `test_capture_success_writes_capture_job_succeeded`：截图成功写 `capture_jobs.status=SUCCEEDED` 并记录 `image_url`。
+
+后端 `tests/test_notification_latest_event_capture.py`：
+- `test_channel_latest_event_capture_token_has_full_claims`：`test_channel_latest_event` 生成的 capture token 解码后必须包含 `type="capture"`、`scope="stock_detail_capture"`、`user_id`、`instrument_id`、`event_id`；
+- `test_channel_latest_event_token_instrument_id_matches_event_instrument`：token 的 `instrument_id` 必须等于事件对应标的 ID。
+
+回归命令：
+
+```bash
+cd /root/web_dev/backend
+APP_ENV=test TEST_DATABASE_URL=postgresql+asyncpg://bz:bz@localhost:5433/bz_stock_test \
+  pytest tests/test_monitor_batch_capture_image.py tests/test_notification_latest_event_capture.py -q
+
+ruff check app/constants/capture.py app/core/deps.py app/core/security.py \
+  app/services/monitor_batch_service.py app/services/notification_service.py \
+  app/services/stock_detail_feishu_service.py \
+  tests/test_monitor_batch_capture_image.py tests/test_notification_latest_event_capture.py
+```
+
+预期：6 passed、ruff 零错误。
+
 ## 4. CI 门禁
 
 阻断项：

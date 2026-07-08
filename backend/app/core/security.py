@@ -170,9 +170,9 @@ def create_capture_token(
     [Capture] - 描述: 仅用于 /api/v1/capture/stocks/{instrument_id}/snapshot 场景，
     token 类型为 capture，不可用于常规 API 认证（advice.md 第六节 + Capture 专用链路）。
 
-    新增 scope/instrument_id/user_id 关键字参数（向后兼容，monitor_batch_service 等旧
-    调用方不传新参数时仍可工作）。stock_detail 链路必须传递 scope=stock_detail_capture
-    与 instrument_id，由 get_capture_token_payload 依赖校验。
+    scope/instrument_id/user_id 为 stock_detail 截图链路必填字段；所有调用 capture
+    worker 的代码（monitor_batch_service / notification_service / stock_detail_feishu_service）
+    都必须传递，否则 get_capture_token_payload 会返回 401/403。
 
     Args:
         subject: 用户标识（user_id 字符串）
@@ -194,8 +194,8 @@ def create_capture_token(
         "type": "capture",
         "event_id": event_id,
     }
-    # [Capture] - 描述: scope/instrument_id/user_id 为 stock_detail 专用链路字段
-    # 旧调用方（monitor_batch_service）不传，保持向后兼容；新链路必须传以通过校验
+    # [Capture] - 描述: scope/instrument_id/user_id 为 stock_detail 截图链路必填字段
+    # 所有 capture worker 调用方都必须传递，用于 get_capture_token_payload 与 path 一致性校验
     if scope is not None:
         payload["scope"] = scope
     if instrument_id is not None:

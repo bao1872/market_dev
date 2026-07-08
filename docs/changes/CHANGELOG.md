@@ -2,6 +2,20 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-08
+
+- CHANGE-20260708-050: 修复 Monitor 与 Notification latest-event 图片 Capture Token Claims
+  - 新增 `backend/app/constants/capture.py` 定义 `CAPTURE_SCOPE_STOCK_DETAIL`，避免服务层 import `app.core.deps` 导致循环依赖
+  - `backend/app/core/deps.py` 改为从常量模块导入 `CAPTURE_SCOPE_STOCK_DETAIL`
+  - 修复 `backend/app/services/monitor_batch_service.py::_send_chart_images_via_outbox()` 生成 capture token 时缺失 `scope/user_id/instrument_id` 的问题
+  - 修复 `backend/app/services/notification_service.py::test_channel_latest_event()` 生成 capture token 时缺失 `scope/user_id/instrument_id` 的问题
+  - `backend/app/services/stock_detail_feishu_service.py` 硬编码 `"stock_detail_capture"` 改为常量（业务逻辑不变）
+  - 更新 `backend/app/core/security.py::create_capture_token` 文档：明确所有 capture worker 调用方必须传递 `scope/user_id/instrument_id/event_id`
+  - 新增测试 `backend/tests/test_monitor_batch_capture_image.py`（5 用例）与 `backend/tests/test_notification_latest_event_capture.py`（2 用例）
+  - 更新 `03-jobs-integrations-operations.md`、`05-testing-acceptance.md`、notification-flow-map、worker-job-map、test-coverage-map
+  - 新增 ALIGN-038：monitor 文字成功但图片缺失待部署后 smoke 验证
+  - 不修改 MDAS、前端 K线、monitor 触发、文字通知、outbox_relay、delivery_worker、feishu adapter
+
 ## 2026-07-07
 
 - CHANGE-20260707-049: Backfill Multiprocessing 优化
