@@ -2,6 +2,22 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-09
+
+- CHANGE-20260709-001: research feature matrix DB 主存储 + compute + writer + CLI
+  - registry 从 27 扩展到 33 字段（causal 16 + confirmed_delay 4 + hindsight 6 + label 7），新增 `FeatureSpec.db_column` 把 dotted key 映射为下划线列名（`causal.atr` → `causal_atr`）
+  - 新增 `backend/app/models/research_feature_matrix.py`：`ResearchFeatureMatrixRun`（16 列，`run_key` 唯一）+ `ResearchFeatureMatrixRow`（39 列扁平宽表，`(instrument_id, trade_date)` 唯一）ORM
+  - 新增 `backend/alembic/versions/058_research_feature_matrix.py`：创建两张表 + 索引（**本 PR 不应用 migration**，留到 PR merge 后）
+  - 新增 `backend/app/research/feature_computer.py`：`compute_all_features(bars)` per-bar full series，复用 ATR/BB/SQZMOM/swing/DSA SSOT
+  - 新增 `backend/app/research/research_matrix_writer.py`：三道硬阈值（磁盘 < 15GB / 单月 > 3GB / 失败率 > 5%）+ monthly run 生命周期 + 批量 upsert（`ON CONFLICT (instrument_id, trade_date) DO UPDATE`）
+  - 重写 `backend/scripts/research_feature_matrix_backfill.py`：`--month YYYY-MM` 单月回补 + `--resume` 幂等 + `--export-parquet` 可选 debug 导出；instrument-first 架构；每 100 只 instrument commit 一次；tqdm 进度条
+  - 移除 `--output` / `--include-hindsight` / `--include-labels`（始终计算全部 33 字段，DB 主存储）
+  - 新增 4 个测试文件：`test_feature_computer.py`（~23 用例）+ `test_research_matrix_writer.py`（30 用例，async DB savepoint）+ `test_research_feature_matrix_model.py`（model 自测）+ 更新 `test_feature_causality_registry.py`（33 字段）
+  - 重写 `docs/current/06-research-feature-matrix.md` + `03-jobs` 2.4.2 节 + `05-testing` 3.8 节；更新 4 个 maps（backend-module / worker-job / database-model / test-coverage）
+  - 生产 dry-run 验证：5293 股 × 20 交易日 = 105860 行，0.20GB 估算（远低于 3GB 阈值）
+  - 与生产 `stock_feature_snapshots` 严格分离：不接入 watchlist_ready，不写生产 snapshot；不写大 JSONB/GIN 索引（扁平宽表）；不生成中间文件/DB 备份
+  - 分阶段验证延后到 PR merge + migration 应用：dry-run（已通过）→ 2 symbols → 100 stocks × 1 month → 全市场 2026-01 → 逐月回补
+
 ## 2026-07-08
 
 - CHANGE-20260708-054: research feature matrix causality registry

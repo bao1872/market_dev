@@ -248,33 +248,88 @@ CLI 参数：
 - upsert 幂等，可重复执行；
 - `start > end` 直接 `sys.exit(1)`。
 
-### 2.4.2 研究特征矩阵脚本骨架（research_feature_matrix_backfill）
+### 2.4.2 研究特征矩阵回补（research_feature_matrix_backfill）
 
-`backend/scripts/research_feature_matrix_backfill.py` 是研究特征矩阵 CLI 骨架，与生产 `feature_snapshot_backfill` 严格分离：
+`backend/scripts/research_feature_matrix_backfill.py` 是研究矩阵 CLI 入口，**DB 为主存储**（parquet 仅可选 debug 导出），与生产 `feature_snapshot_backfill` 严格分离：
 
 - 不接入 `watchlist_ready`，不修改 production snapshot；
-- 不新增数据库表，不写 DB（骨架阶段）；
-- 默认 `--dry-run`，无 `--output` 不落盘；
-- `--output` 必须配合 sample scope（`--symbols` 或 `--limit-instruments`），禁止无过滤全市场输出文件；
-- 字段因果口径由 `backend/app/research/feature_causality_registry.py` 统一登记，分 4 个命名空间：`causal` / `confirmed_delay` / `hindsight` / `label`；
+- 不写 `stock_feature_snapshots`，只写专用 research 表（`research_feature_matrix_runs` + `research_feature_matrix_rows`）；
+- 写入由 `backend/app/research/research_matrix_writer.py` 提供（三道硬阈值 + monthly run 生命周期 + 批量 upsert）；
+- 计算由 `backend/app/research/feature_computer.py` 提供（per-bar full series，复用现有算法 SSOT：ATR/BB/SQZMOM/swing/DSA）；
+- 字段因果口径由 `backend/app/research/feature_causality_registry.py` 统一登记，分 4 命名空间：`causal`（16）/ `confirmed_delay`（4）/ `hindsight`（6）/ `label`（7）= 33 字段；
 - `hindsight.*` 与 `label.*` 禁止进入回测 feature；
 - DSA 双轨：`causal.dsa_confirmed_*`（当时可知）vs `hindsight.dsa_finalized_*`（未来确认后回标注）；
 - Node Cluster 只能是 `hindsight.node_cluster_*`，不得进入 causal；
+- registry 仍保留 dotted key（`causal.atr`），写 DB 时映射成下划线列名（`causal_atr`）；
 - 详见 `06-research-feature-matrix.md`。
 
-调用方式：
+#### 2.4.2.1 CLI 参数
+
+| 参数 | 必填 | 语义 |
+|---|---|---|
+| `--month YYYY-MM` | 与 `--start` 互斥必填其一 | 单月回补（推荐用法） |
+| `--start YYYY-MM-DD` | 与 `--month` 互斥必填其一 | 起始日期（与 `--end` 配合用于跨月 sample 验证） |
+| `--end YYYY-MM-DD` / `latest` | 可选，默认 `latest` | 结束日期 |
+| `--symbols` | 可选 | 只处理指定股票代码（逗号分隔，触发 sample scope） |
+| `--limit-instruments N` | 可选 | 限制处理 instrument 数（触发 sample scope） |
+| `--dry-run` | 可选 | 只打印计划与估算，不写 DB，不写文件 |
+| `--resume` | 可选 | 续跑模式：已存在 run 复用，已存在 instrument/date 幂等 upsert |
+| `--export-parquet PATH` | 可选 | 可选 debug 导出 parquet 路径（仅 sample scope，不作为主存储） |
+
+#### 2.4.2.2 三道硬阈值
+
+任一不通过即停止：
+
+| 阈值 | 触发条件 | 行为 |
+|---|---|---|
+| 磁盘剩余 | `df -h /` 剩余 < 15GB | 停止（不创建 run） |
+| 单月预估 | `estimate_month_size > 3GB`（rows × 2KB） | 停止（不创建 run） |
+| 失败率 | `failed / total > 5%` | run 标 `failed`，不继续后续月份 |
+
+设计原因：磁盘约 61GB 可用，数据库在 `/` 分区上，写数据库也会占用磁盘。
+
+#### 2.4.2.3 分阶段验证
+
+禁止直接全量跑到当前。必须按以下顺序逐阶段验证，每阶段验收通过后才进入下一阶段：
+
+| 阶段 | 命令 | 验收点 |
+|---|---|---|
+| A. dry-run | `--month 2026-01 --dry-run` | 打印计划，`expected_rows` / `estimated_db_size` 合理 |
+| B. 2 symbols | `--month 2026-01 --symbols 000001,600000` | run succeeded，rows 写入正确 |
+| C. 100 stocks × 1 month | `--month 2026-01 --limit-instruments 100` | run succeeded，failed_rate < 5% |
+| D. 全市场 2026-01 | `--month 2026-01` | run succeeded，磁盘占用合理 |
+| E. 逐月回补到当前 | `--month 2026-02` / `--month 2026-03` ... | 每月 run succeeded |
+
+> 阶段 B/C/D 必须在 PR merge + migration 058 应用后才能执行。
+
+#### 2.4.2.4 调用方式
 
 ```bash
-cd /root/web_dev/backend && .venv/bin/python -m scripts.research_feature_matrix_backfill \
-    --start 2026-01-01 --end 2026-01-31 --symbols 000001,600000 --dry-run
+# dry-run 查看计划
+cd /root/web_dev/backend && python -m scripts.research_feature_matrix_backfill \
+    --month 2026-01 --dry-run
+
+# 2 symbols 验证
+cd /root/web_dev/backend && python -m scripts.research_feature_matrix_backfill \
+    --month 2026-01 --symbols 000001,600000
+
+# 全市场 2026-01
+cd /root/web_dev/backend && python -m scripts.research_feature_matrix_backfill \
+    --month 2026-01
+
+# --resume 续跑（幂等 upsert）
+cd /root/web_dev/backend && python -m scripts.research_feature_matrix_backfill \
+    --month 2026-01 --resume
 ```
 
-本 PR 只完成骨架 + dry-run，不实现实际计算。后续实现顺序：
-1. causal rolling features（ATR/BB/SQZMOM/volume）；
-2. confirmed_delay swing（按确认 bar 生效，不回填 anchor）；
-3. DSA 双轨；
-4. Node Cluster（只输出 `hindsight.node_cluster_*`）；
-5. labels（用未来 close/high/low 生成 `label.future_*`）。
+#### 2.4.2.5 数据模型
+
+由 `backend/alembic/versions/058_research_feature_matrix.py` 创建两张表：
+
+- `research_feature_matrix_runs`：按月分批的 run 级元数据，唯一键 `run_key`（如 `2026-01_full`），记录状态机与统计摘要；`metadata_json` 只放小摘要（scope/notes/thresholds），不存完整 payload，不建 GIN 索引；
+- `research_feature_matrix_rows`：扁平宽表 39 列（5 metadata + 33 feature + 1 created_at），唯一键 `(instrument_id, trade_date)` 跨 run 幂等 upsert；3 个 btree 索引（`trade_date` / `instrument_id` / `run_id`），不给单个 feature 列建索引。
+
+详见 `06-research-feature-matrix.md` 第 7 节。
 
 ## 2.5 监控图片通知链路
 

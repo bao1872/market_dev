@@ -294,17 +294,17 @@ def test_registry_by_namespace_filters_correctly() -> None:
 
 
 def test_default_registry_has_required_causal_features() -> None:
-    """默认 registry 必须包含关键 causal 字段。"""
+    """默认 registry 必须包含关键 causal 字段（individual specs）。"""
     reg = build_default_registry()
     keys = {s.key for s in reg.all()}
     required = {
         "causal.atr",
-        "causal.bb",
-        "causal.sqzmom",
+        "causal.bb_percent_b",
+        "causal.sqzmom_val",
         "causal.volume_ratio_20",
         "causal.volume_percentile_120",
-        "causal.active_swing",
-        "causal.developing_swing",
+        "causal.active_swing_dir",
+        "causal.developing_swing_dir",
     }
     missing = required - keys
     assert not missing, f"缺少 causal 字段: {missing}"
@@ -334,3 +334,107 @@ def test_label_compute_policy_is_future_label() -> None:
         assert spec.compute_policy == "future_label", (
             f"label {spec.key} compute_policy 应为 future_label"
         )
+
+
+# ===== 9. db_column 映射（dotted key → underscore DB column）=====
+
+
+def test_feature_spec_db_column_property() -> None:
+    """db_column 属性将 dotted key 映射为 underscore 列名。
+
+    causal.atr → causal_atr
+    hindsight.dsa_finalized_segment → hindsight_dsa_finalized_segment
+    """
+    spec = FeatureSpec(
+        key="causal.atr",
+        namespace=NS_CAUSAL,
+        source="structural_factor_service",
+        allowed_for_backtest=True,
+        compute_policy="series_once",
+    )
+    assert spec.db_column == "causal_atr"
+
+    spec2 = FeatureSpec(
+        key="hindsight.dsa_finalized_segment",
+        namespace=NS_HINDSIGHT,
+        source="dsa_selector",
+        allowed_for_backtest=False,
+        compute_policy="hindsight_once",
+    )
+    assert spec2.db_column == "hindsight_dsa_finalized_segment"
+
+
+def test_registry_db_columns_all_unique() -> None:
+    """所有 db_column 必须唯一（不能有两个 key 映射到同一列名）。"""
+    reg = build_default_registry()
+    columns = [s.db_column for s in reg.all()]
+    assert len(columns) == len(set(columns)), (
+        f"db_column 存在重复: {[c for c in columns if columns.count(c) > 1]}"
+    )
+
+
+def test_registry_db_columns_match_namespace_prefix() -> None:
+    """每个 db_column 必须以 namespace + '_' 开头。"""
+    reg = build_default_registry()
+    for spec in reg.all():
+        expected_prefix = f"{spec.namespace}_"
+        assert spec.db_column.startswith(expected_prefix), (
+            f"db_column {spec.db_column} 应以 '{expected_prefix}' 开头"
+        )
+
+
+def test_registry_db_columns_method() -> None:
+    """registry.db_columns() 返回所有列名列表。"""
+    reg = build_default_registry()
+    cols = reg.db_columns()
+    assert isinstance(cols, list)
+    assert len(cols) > 0
+    assert "causal_atr" in cols
+    assert "hindsight_node_cluster_label" in cols
+    assert "label_future_return_10d" in cols
+
+
+# ===== 10. 扩展为 individual field specs（DB 1:1 列映射）=====
+
+
+def test_default_registry_has_individual_causal_fields() -> None:
+    """默认 registry 必须包含 individual causal 字段（非 group 级）。
+
+    causal.bb → causal.bb_percent_b / causal.bb_bandwidth_pct
+    causal.sqzmom → causal.sqzmom_val / causal.sqzmom_delta_1
+    causal.active_swing → causal.active_swing_dir / high / low
+    causal.developing_swing → causal.developing_swing_dir / high / low
+    """
+    reg = build_default_registry()
+    keys = {s.key for s in reg.all()}
+    required_individual = {
+        "causal.atr",
+        "causal.bb_percent_b",
+        "causal.bb_bandwidth_pct",
+        "causal.sqzmom_val",
+        "causal.sqzmom_delta_1",
+        "causal.volume_ratio_20",
+        "causal.volume_percentile_120",
+        "causal.active_swing_dir",
+        "causal.active_swing_high",
+        "causal.active_swing_low",
+        "causal.developing_swing_dir",
+        "causal.developing_swing_high",
+        "causal.developing_swing_low",
+    }
+    missing = required_individual - keys
+    assert not missing, f"缺少 individual causal 字段: {missing}"
+
+
+def test_default_registry_total_is_33_fields() -> None:
+    """扩展为 individual specs 后共 33 字段。
+
+    causal 16 + confirmed_delay 4 + hindsight 6 + label 7 = 33
+    """
+    reg = build_default_registry()
+    total = len(reg.all())
+    assert total == 33, f"expected 33 fields, got {total}"
+    assert len(reg.by_namespace(NS_CAUSAL)) == 16
+    assert len(reg.by_namespace(NS_CONFIRMED_DELAY)) == 4
+    assert len(reg.by_namespace(NS_HINDSIGHT)) == 6
+    assert len(reg.by_namespace(NS_LABEL)) == 7

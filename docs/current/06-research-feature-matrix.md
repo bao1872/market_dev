@@ -2,20 +2,20 @@
 
 ## 1. 目的与边界
 
-研究特征矩阵（research feature matrix）用于探索因子组合规律，与生产 `stock_feature_snapshots` 严格分离。
+研究特征矩阵（research feature matrix）用于探索因子组合规律，与生产 `stock_feature_snapshots` 严格分离。**DB 是研究矩阵的主存储**，parquet 只作为可选 debug 导出。
 
 | 矩阵 | 数据载体 | 服务对象 | 因果口径 |
 |---|---|---|---|
 | production snapshot | `stock_feature_snapshots` 表 | 最近交易日、自选股、前端展示、`watchlist_ready` | 必须 point-in-time，禁止 hindsight/label |
-| research feature matrix | 研究脚本输出（默认不落盘） | 因子探索、回测实验、研究脚本 | 可同时包含 causal/confirmed_delay/hindsight/label，但严格分命名空间 |
+| research feature matrix | `research_feature_matrix_runs` + `research_feature_matrix_rows` 两张表 | 因子探索、回测实验、研究脚本 | 可同时包含 causal/confirmed_delay/hindsight/label，但严格分命名空间 |
 
 约束：
 - 研究矩阵不接入 `watchlist_ready`；
 - 研究矩阵不修改 production snapshot；
-- 研究矩阵不新增数据库表；
-- 研究矩阵脚本默认 `--dry-run`，无 `--output` 不落盘；
-- `--output` 必须配合 sample scope（`--symbols` 或 `--limit-instruments`），禁止无过滤全市场输出文件；
-- 历史 full snapshot 回补仍 BLOCKED（见 `03-jobs-integrations-operations.md` 2.4 节），研究回补改走 research matrix，小样本 + 默认 dry-run。
+- 研究矩阵只写入专用 research 表，不写 `stock_feature_snapshots`；
+- parquet 只作为可选 debug 导出（`--export-parquet`，仅 sample scope），不作为主存储；
+- 不生成中间 parquet/CSV/coverage/截图/大日志/DB 备份；
+- 历史 full snapshot 回补仍 BLOCKED（见 `03-jobs-integrations-operations.md` 2.4 节），研究回补改走 research matrix，按月分批 + 三道硬阈值 + 分阶段验证。
 
 ## 2. 因果口径命名空间
 
@@ -32,62 +32,69 @@
 - `hindsight.*` 禁止作为 feature 进入回测；
 - `label.*` 禁止作为 feature 进入回测；
 - `key` 必须以 `{namespace}.` 开头（如 `causal.atr`、`hindsight.dsa_finalized_segment`）；
-- `FeatureSpec` 必填 `namespace` / `source` / `compute_policy`，缺一抛 `ValueError`。
+- `FeatureSpec` 必填 `namespace` / `source` / `compute_policy`，缺一抛 `ValueError`；
+- registry 仍保留 dotted key（`causal.atr`），写 DB 时由 `FeatureSpec.db_column` 映射成下划线列名（`causal_atr`）。
 
 ## 3. 因果口径登记表
 
-`build_default_registry()` 当前登记 27 个字段：
+`build_default_registry()` 当前登记 **33 个字段**（causal 16 + confirmed_delay 4 + hindsight 6 + label 7）：
 
-### 3.1 causal（10 个，允许回测）
+### 3.1 causal（16 个，允许回测）
 
-| key | source | 说明 |
-|---|---|---|
-| `causal.atr` | structural_factor_service | ATR 波动率 |
-| `causal.bb` | structural_factor_service | Bollinger Bands 上下轨 |
-| `causal.sqzmom` | structural_factor_service | SQZMOM 动量 |
-| `causal.volume_ratio_20` | structural_factor_service | 20 日成交量比率 |
-| `causal.volume_percentile_120` | structural_factor_service | 120 日成交量百分位 |
-| `causal.active_swing` | structural_factor_service | 已确认 swing（当时可知的 active 段） |
-| `causal.developing_swing` | structural_factor_service | 发展中 swing（未确认但当前可见） |
-| `causal.dsa_confirmed_segment` | structural_factor_service | DSA 段（当时已确认状态） |
-| `causal.dsa_confirmed_direction` | structural_factor_service | DSA 方向（当时已确认） |
-| `causal.dsa_confirmed_age_bars` | structural_factor_service | DSA 段已持续 bar 数（当时已确认） |
+| key | DB 列名 | source | 说明 |
+|---|---|---|---|
+| `causal.atr` | `causal_atr` | structural_factor_service | ATR 波动率 |
+| `causal.bb_percent_b` | `causal_bb_percent_b` | structural_factor_service | BB %B（close 在 band 中的位置） |
+| `causal.bb_bandwidth_pct` | `causal_bb_bandwidth_pct` | structural_factor_service | BB 带宽百分比 |
+| `causal.sqzmom_val` | `causal_sqzmom_val` | structural_factor_service | SQZMOM 动量值 |
+| `causal.sqzmom_delta_1` | `causal_sqzmom_delta_1` | structural_factor_service | SQZMOM 一阶差分 |
+| `causal.volume_ratio_20` | `causal_volume_ratio_20` | structural_factor_service | 20 日成交量比率 |
+| `causal.volume_percentile_120` | `causal_volume_percentile_120` | structural_factor_service | 120 日成交量百分位 |
+| `causal.active_swing_dir` | `causal_active_swing_dir` | structural_factor_service | active swing 方向（当时可知） |
+| `causal.active_swing_high` | `causal_active_swing_high` | structural_factor_service | active swing 高点 |
+| `causal.active_swing_low` | `causal_active_swing_low` | structural_factor_service | active swing 低点 |
+| `causal.developing_swing_dir` | `causal_developing_swing_dir` | structural_factor_service | developing swing 方向 |
+| `causal.developing_swing_high` | `causal_developing_swing_high` | structural_factor_service | developing swing 高点 |
+| `causal.developing_swing_low` | `causal_developing_swing_low` | structural_factor_service | developing swing 低点 |
+| `causal.dsa_confirmed_segment` | `causal_dsa_confirmed_segment` | structural_factor_service | DSA 段（当时已确认状态） |
+| `causal.dsa_confirmed_direction` | `causal_dsa_confirmed_direction` | structural_factor_service | DSA 方向（当时已确认） |
+| `causal.dsa_confirmed_age_bars` | `causal_dsa_confirmed_age_bars` | structural_factor_service | DSA 段已持续 bar 数（当时已确认） |
 
 ### 3.2 confirmed_delay（4 个，允许回测，不回填 anchor）
 
-| key | source | 说明 |
-|---|---|---|
-| `confirmed_delay.confirmed_swing_high` | structural_factor_service.swing | 已确认 swing 高点 anchor |
-| `confirmed_delay.confirmed_swing_low` | structural_factor_service.swing | 已确认 swing 低点 anchor |
-| `confirmed_delay.bars_since_confirmed_swing_high` | structural_factor_service.swing | 距上次确认 swing 高点的 bar 数 |
-| `confirmed_delay.bars_since_confirmed_swing_low` | structural_factor_service.swing | 距上次确认 swing 低点的 bar 数 |
+| key | DB 列名 | source | 说明 |
+|---|---|---|---|
+| `confirmed_delay.confirmed_swing_high` | `confirmed_delay_confirmed_swing_high` | structural_factor_service.swing | 已确认 swing 高点 anchor |
+| `confirmed_delay.confirmed_swing_low` | `confirmed_delay_confirmed_swing_low` | structural_factor_service.swing | 已确认 swing 低点 anchor |
+| `confirmed_delay.bars_since_confirmed_swing_high` | `confirmed_delay_bars_since_confirmed_swing_high` | structural_factor_service.swing | 距上次确认 swing 高点的 bar 数 |
+| `confirmed_delay.bars_since_confirmed_swing_low` | `confirmed_delay_bars_since_confirmed_swing_low` | structural_factor_service.swing | 距上次确认 swing 低点的 bar 数 |
 
 口径约束：只能在确认 bar 生效，不得回填 anchor date（否则会引入未来信息）。
 
 ### 3.3 hindsight（6 个，禁止回测）
 
-| key | source | 说明 |
-|---|---|---|
-| `hindsight.dsa_finalized_segment` | dsa_selector | DSA 段（未来确认后回标注） |
-| `hindsight.dsa_finalized_direction` | dsa_selector | DSA 方向（未来确认后） |
-| `hindsight.dsa_finalized_age_bars` | dsa_selector | DSA 段最终持续 bar 数 |
-| `hindsight.node_cluster_label` | volume_node_monitor | Node Cluster 结构标注（允许未来信息） |
-| `hindsight.node_cluster_support` | volume_node_monitor | Node Cluster 支撑结构（后验标注） |
-| `hindsight.node_cluster_resistance` | volume_node_monitor | Node Cluster 阻力结构（后验标注） |
+| key | DB 列名 | source | 说明 |
+|---|---|---|---|
+| `hindsight.dsa_finalized_segment` | `hindsight_dsa_finalized_segment` | dsa_selector | DSA 段（未来确认后回标注） |
+| `hindsight.dsa_finalized_direction` | `hindsight_dsa_finalized_direction` | dsa_selector | DSA 方向（未来确认后） |
+| `hindsight.dsa_finalized_age_bars` | `hindsight_dsa_finalized_age_bars` | dsa_selector | DSA 段最终持续 bar 数 |
+| `hindsight.node_cluster_label` | `hindsight_node_cluster_label` | volume_node_monitor | Node Cluster 结构标注（允许未来信息） |
+| `hindsight.node_cluster_support` | `hindsight_node_cluster_support` | volume_node_monitor | Node Cluster 支撑结构（后验标注） |
+| `hindsight.node_cluster_resistance` | `hindsight_node_cluster_resistance` | volume_node_monitor | Node Cluster 阻力结构（后验标注） |
 
 口径约束：允许未来信息，只做结构标注，不可用于真实回测。
 
 ### 3.4 label（7 个，禁止作为 feature）
 
-| key | source | 说明 |
-|---|---|---|
-| `label.future_return_5d` | research_label_service | 未来 5 日收益率 |
-| `label.future_return_10d` | research_label_service | 未来 10 日收益率 |
-| `label.future_return_20d` | research_label_service | 未来 20 日收益率 |
-| `label.future_max_drawdown_10d` | research_label_service | 未来 10 日最大回撤 |
-| `label.future_max_drawdown_20d` | research_label_service | 未来 20 日最大回撤 |
-| `label.breakout_success_10d` | research_label_service | 未来 10 日是否突破成功 |
-| `label.failure_breakdown_10d` | research_label_service | 未来 10 日是否破位失败 |
+| key | DB 列名 | source | 说明 |
+|---|---|---|---|
+| `label.future_return_5d` | `label_future_return_5d` | research_label_service | 未来 5 日收益率 |
+| `label.future_return_10d` | `label_future_return_10d` | research_label_service | 未来 10 日收益率 |
+| `label.future_return_20d` | `label_future_return_20d` | research_label_service | 未来 20 日收益率 |
+| `label.future_max_drawdown_10d` | `label_future_max_drawdown_10d` | research_label_service | 未来 10 日最大回撤 |
+| `label.future_max_drawdown_20d` | `label_future_max_drawdown_20d` | research_label_service | 未来 20 日最大回撤 |
+| `label.breakout_success_10d` | `label_breakout_success_10d` | research_label_service | 未来 10 日是否突破成功 |
+| `label.failure_breakdown_10d` | `label_failure_breakdown_10d` | research_label_service | 未来 10 日是否破位失败 |
 
 口径约束：只能作为 y，不得作为 X。
 
@@ -123,74 +130,225 @@ Node Cluster 字段只能是 hindsight，不得是 causal：
 - 只能在确认 bar 生效，不回填 anchor date；
 - 不得作为 hindsight 默认回填；
 - 允许回测，但必须遵守 confirmed_only 计算策略；
-- 与 `causal.active_swing` / `causal.developing_swing` 区分清楚：
-  - `causal.active_swing` 是当时可知的 active 段（已确认 major leg）；
-  - `causal.developing_swing` 是未确认但当前可见的回落/反弹；
+- 与 `causal.active_swing_*` / `causal.developing_swing_*` 区分清楚：
+  - `causal.active_swing_*` 是当时可知的 active 段（已确认 major leg）；
+  - `causal.developing_swing_*` 是未确认但当前可见的回落/反弹；
   - `confirmed_delay.confirmed_swing_*` 是已确认的 swing 高/低点 anchor。
 
-## 7. 研究矩阵脚本骨架
+## 7. 数据模型（DB 主存储）
 
-`backend/scripts/research_feature_matrix_backfill.py` 是研究矩阵 CLI 骨架，本 PR 只完成骨架 + dry-run：
+研究矩阵写入两张专用表，由 `backend/alembic/versions/058_research_feature_matrix.py` 创建：
 
-### 7.1 CLI 参数
+### 7.1 `research_feature_matrix_runs`（run 级元数据）
 
-| 参数 | 默认 | 语义 |
+按月分批的 run 级元数据，记录状态机与统计摘要。
+
+| 列 | 类型 | 说明 |
 |---|---|---|
-| `--start` | 必填 | 起始日期 YYYY-MM-DD |
-| `--end` | `latest` | 结束日期 YYYY-MM-DD 或 `latest` |
-| `--symbols` | None | 只处理指定股票代码（逗号分隔，触发 sample scope） |
-| `--limit-instruments` | None | 限制 instrument 数量（触发 sample scope） |
-| `--dry-run` | False | 只打印计划与字段分类统计，不写 DB，不写文件 |
-| `--output` | None | 输出文件路径（必须配合 sample scope） |
-| `--include-hindsight` | `true` | 是否包含 hindsight 命名空间字段 |
-| `--include-labels` | `true` | 是否包含 label 命名空间字段 |
+| `id` | UUID PK | 运行 ID |
+| `run_key` | Text UNIQUE | 运行唯一键（如 `2026-01_full`） |
+| `month` | Text | 月份 YYYY-MM |
+| `start_date` | Date | 起始日期 |
+| `end_date` | Date | 结束日期 |
+| `status` | Text | 运行状态：`running` / `succeeded` / `failed` |
+| `instruments_count` | Integer | 实际处理股票数 |
+| `trade_dates_count` | Integer | 实际处理交易日数 |
+| `rows_count` | Integer | 写入行数 |
+| `failed_count` | Integer | 失败行数 |
+| `duration_seconds` | Float | 总耗时秒 |
+| `started_at` | DateTime(tz) | 开始时间 |
+| `finished_at` | DateTime(tz) | 完成时间 |
+| `metadata_json` | JSONB | 小摘要 JSONB（scope/notes/thresholds），**不存完整 payload，不建 GIN 索引** |
+| `created_at` | DateTime(tz) | 创建时间 |
+| `updated_at` | DateTime(tz) | 更新时间 |
 
-### 7.2 scope 规则
+唯一约束：`run_key` 全局唯一，支持 `--resume` 通过 `run_key` 查找已有 run。
 
-- `_resolve_scope(symbols, limit_instruments)`：任一过滤启用 → `sample`，都未启用 → `full`；
-- `--output` 必须配合 sample scope，禁止无过滤全市场输出文件（`_validate_output_scope` 抛 `ValueError`）；
-- dry-run 也要校验 scope（避免误用）。
+### 7.2 `research_feature_matrix_rows`（扁平宽表）
 
-### 7.3 默认行为
+一只股票一个交易日的 33 个 feature 值，扁平宽表设计（非 EAV）。
 
-- dry-run：打印计划 + 字段分类统计，不写 DB，不写文件；
-- 非 dry-run 无 `--output`：只打印计划（骨架阶段不实际计算）；
-- 非 dry-run 有 `--output`：校验 sample scope 通过后，骨架阶段不实际写文件（仅打印计划写入提示）。
+| 列分类 | 列数 | 说明 |
+|---|---|---|
+| metadata | 5 | `id` / `run_id` / `instrument_id` / `symbol` / `trade_date` |
+| causal feature | 16 | `causal_atr` / `causal_bb_percent_b` / `causal_bb_bandwidth_pct` / `causal_sqzmom_val` / `causal_sqzmom_delta_1` / `causal_volume_ratio_20` / `causal_volume_percentile_120` / `causal_active_swing_*` (3) / `causal_developing_swing_*` (3) / `causal_dsa_confirmed_*` (3) |
+| confirmed_delay feature | 4 | `confirmed_delay_confirmed_swing_high/low` / `confirmed_delay_bars_since_confirmed_swing_high/low` |
+| hindsight feature | 6 | `hindsight_dsa_finalized_*` (3) / `hindsight_node_cluster_*` (3) |
+| label feature | 7 | `label_future_return_*` (3) / `label_future_max_drawdown_*` (2) / `label_breakout_success_10d` / `label_failure_breakdown_10d` |
+| created_at | 1 | 创建时间 |
+| **合计** | **39** | 5 metadata + 33 feature + 1 created_at |
 
-### 7.4 字段分类统计
+设计原则：
+- 33 个 feature 列与 `feature_causality_registry.db_column()` 1:1 对应；
+- **不存完整 JSON payload，不写大 JSONB，不建 GIN 索引**；
+- 所有 feature 列允许 NULL（warmup 期、未来 label 未到计算期等）；
+- 唯一约束 `(instrument_id, trade_date)` 全局唯一，跨 run 幂等 upsert。
 
-`build_plan()` 基于 `build_default_registry()` 统计各命名空间字段数，根据 `--include-hindsight` / `--include-labels` 开关调整 hindsight/label 计数（关闭时为 0）。
+索引（精简，不每个 feature 建索引）：
 
-### 7.5 后续实现顺序（不在本 PR 范围）
+| 索引名 | 字段 | 类型 |
+|---|---|---|
+| `uq_research_matrix_rows_inst_date` | `(instrument_id, trade_date)` | unique |
+| `ix_research_matrix_rows_trade_date` | `trade_date` | btree |
+| `ix_research_matrix_rows_instrument_id` | `instrument_id` | btree |
+| `ix_research_matrix_rows_run_id` | `run_id` | btree |
 
-1. causal rolling features：ATR / BB / SQZMOM / volume；
-2. confirmed_delay swing：按确认 bar 生效，不回填 anchor；
-3. DSA 双轨：
-   - `causal.dsa_confirmed_*`：当时可知
-   - `hindsight.dsa_finalized_*`：未来确认后回标注
-4. Node Cluster：只输出 `hindsight.node_cluster_*`，允许未来信息，不得进入 causal；
-5. labels：用未来 close/high/low 生成 `label.future_*`。
+> 后续确认哪些 feature 字段常查，再加单独索引。
 
-计算设计原则：单只股票只 load bars 一次，内存中按 `trade_date` slice。
+## 8. 写入模块（research_matrix_writer）
 
-## 8. 与 production snapshot 的区别
+`backend/app/research/research_matrix_writer.py` 提供研究矩阵 DB 写入与 run 生命周期管理：
+
+| 函数 | 作用 |
+|---|---|
+| `check_disk_threshold(path="/")` | 磁盘剩余空间 >= 15GB → True |
+| `check_month_size_threshold(estimated_gb)` | 单月预估 <= 3GB → True |
+| `check_failure_rate(failed, total)` | 失败率 <= 5% → True |
+| `resolve_month_range(month)` | `YYYY-MM` → `(start_date, end_date)`，用 `calendar.monthrange` 处理闰年 |
+| `estimate_month_size(instruments_count, trade_dates_count)` | 估算单月 DB 占用 GB（rows × 2KB / 1024³） |
+| `create_or_resume_run(db, *, month, start_date, end_date, scope, metadata)` | 创建或恢复 monthly run（`run_key = f"{month}_{scope}"`，相同 run_key 返回已存在 run） |
+| `finalize_run(db, run, *, status, instruments_count, ...)` | 终结 run：更新 status/统计/duration/finished_at |
+| `upsert_rows_batch(db, rows)` | 批量 upsert 到 `research_feature_matrix_rows`，使用 `INSERT ... ON CONFLICT (instrument_id, trade_date) DO UPDATE` 幂等覆盖；自动分批 1000 行 |
+
+常量：
+- `DISK_MIN_GB = 15`
+- `MONTH_SIZE_MAX_GB = 3.0`
+- `FAILURE_RATE_MAX = 0.05`
+- `UPSERT_BATCH_SIZE = 1000`（asyncpg 参数上限保守值）
+- `_BYTES_PER_ROW = 2048`（39 列平均 ~50 字节）
+
+## 9. 计算模块（feature_computer）
+
+`backend/app/research/feature_computer.py` 提供 per-bar 因果口径特征计算：
+
+- **与生产 `structural_factor_service` 的区别**：
+  - 生产 snapshot: 只计算最后一根 bar 的 single-snapshot 值；
+  - 研究矩阵: 计算每根 bar 的 per-bar 值（full series），用于按月回补。
+- **入口**：`compute_all_features(bars)` 返回 DataFrame，index 为 trade_date，包含 33 个 feature 列。
+- **底层复用现有算法 SSOT**（不重写公式）：
+  - `compute_atr` (ATR 14, RMA)
+  - `bollinger` (BB 20, 2σ)
+  - `compute_sqzmom_lb` (SQZMOM)
+  - `_tv_pivots_confirmed` (swing pivot)
+  - `compute_dsa_history` (DSA 段历史)
+- **warmup**：调用方需加载 `start_date - 400 天` 的 bars 作为 warmup（约 16 个月，足够 250 日 BB/ATR + 120 日 percentile）。
+
+## 10. CLI（research_feature_matrix_backfill）
+
+`backend/scripts/research_feature_matrix_backfill.py` 是研究矩阵 CLI 入口，整合 universe/date resolver + feature_computer + writer + 三道硬阈值。
+
+### 10.1 CLI 参数
+
+| 参数 | 必填 | 语义 |
+|---|---|---|
+| `--month YYYY-MM` | 与 `--start` 互斥必填其一 | 单月回补（推荐用法） |
+| `--start YYYY-MM-DD` | 与 `--month` 互斥必填其一 | 起始日期（与 `--end` 配合用于跨月 sample 验证） |
+| `--end YYYY-MM-DD` / `latest` | 可选，默认 `latest` | 结束日期 |
+| `--symbols` | 可选 | 只处理指定股票代码（逗号分隔，触发 sample scope） |
+| `--limit-instruments N` | 可选 | 限制处理 instrument 数（触发 sample scope） |
+| `--dry-run` | 可选 | 只打印计划与估算，不写 DB，不写文件 |
+| `--resume` | 可选 | 续跑模式：已存在 run 复用，已存在 instrument/date 幂等 upsert |
+| `--export-parquet PATH` | 可选 | 可选 debug 导出 parquet 路径（仅 sample scope） |
+
+> 已移除 `--output` / `--include-hindsight` / `--include-labels`：始终计算全部 33 字段，DB 主存储。
+
+### 10.2 scope 规则
+
+- `_resolve_scope(symbols, limit_instruments)`：
+  - 有 `--symbols` → `sample_symbols`
+  - 有 `--limit-instruments` → `sample_N`
+  - 都无 → `full`
+- `run_key = f"{month}_{scope}"`（如 `2026-01_full` / `2026-01_sample_100`）。
+
+### 10.3 主流程
+
+1. 解析日期范围（`--month` → `resolve_month_range`；`--start/--end` → 直接 `date.fromisoformat`）；
+2. 检查磁盘阈值（`df -h /` 剩余 < 15GB 停止）；
+3. 获取 universe（symbols/limit/full，默认只取 A 股 6 位数字 symbol）+ trade_dates（从 `bars_daily` 查询）；
+4. 估算单月大小（rows × 2KB，> 3GB 停止）；
+5. `--dry-run` 退出（只打印计划）；
+6. 创建/resume run（`status=running`，`started_at=now`）；
+7. instrument-first 循环：每只股票 `load bars 1 次（含 warmup） → compute_all_features → 按月份 trade_date 切片 → upsert`；tqdm 进度条；每 100 只 instrument commit 一次；
+8. 检查失败率（> 5% 标 `failed`）；
+9. finalize run（更新 status/统计/duration/finished_at）；
+10. 可选 `--export-parquet`（仅 sample scope）。
+
+### 10.4 用法示例
+
+```bash
+# dry-run 查看计划
+cd /root/web_dev/backend && python -m scripts.research_feature_matrix_backfill \
+    --month 2026-01 --dry-run
+
+# 2 symbols 验证
+cd /root/web_dev/backend && python -m scripts.research_feature_matrix_backfill \
+    --month 2026-01 --symbols 000001,600000
+
+# 100 stocks × 1 month
+cd /root/web_dev/backend && python -m scripts.research_feature_matrix_backfill \
+    --month 2026-01 --limit-instruments 100
+
+# 全市场 2026-01
+cd /root/web_dev/backend && python -m scripts.research_feature_matrix_backfill \
+    --month 2026-01
+
+# --resume 续跑（幂等 upsert）
+cd /root/web_dev/backend && python -m scripts.research_feature_matrix_backfill \
+    --month 2026-01 --resume
+
+# 可选 debug 导出 parquet（不作为主存储）
+cd /root/web_dev/backend && python -m scripts.research_feature_matrix_backfill \
+    --month 2026-01 --symbols 000001 --export-parquet /tmp/debug.parquet
+```
+
+## 11. 三道硬阈值
+
+研究矩阵回补必须遵守三道硬阈值，任一不通过即停止：
+
+| 阈值 | 检查函数 | 触发条件 | 行为 |
+|---|---|---|---|
+| 磁盘剩余 | `check_disk_threshold` | `df -h /` 剩余 < 15GB | 停止（不创建 run） |
+| 单月预估 | `check_month_size_threshold` | `estimate_month_size > 3GB` | 停止（不创建 run） |
+| 失败率 | `check_failure_rate` | `failed / total > 5%` | run 标 `failed`，不继续后续月份 |
+
+设计原因：磁盘约 61GB 可用，数据库在 `/` 分区上，写数据库也会占用磁盘。
+
+## 12. 分阶段验证
+
+禁止直接全量跑到当前。必须按以下顺序逐阶段验证：
+
+| 阶段 | 命令 | 验收点 |
+|---|---|---|
+| A. dry-run | `--month 2026-01 --dry-run` | 打印计划，`expected_rows` / `estimated_db_size` 合理 |
+| B. 2 symbols | `--month 2026-01 --symbols 000001,600000` | run succeeded，rows 写入正确 |
+| C. 100 stocks × 1 month | `--month 2026-01 --limit-instruments 100` | run succeeded，failed_rate < 5% |
+| D. 全市场 2026-01 | `--month 2026-01` | run succeeded，磁盘占用合理 |
+| E. 逐月回补到当前 | `--month 2026-02` / `--month 2026-03` ... | 每月 run succeeded |
+
+> 阶段 B/C/D 必须在 PR merge + migration 058 应用后才能执行。
+
+## 13. 与 production snapshot 的区别
 
 | 维度 | production snapshot | research matrix |
 |---|---|---|
-| 数据载体 | `stock_feature_snapshots` 表 | 研究脚本输出（默认不落盘） |
+| 数据载体 | `stock_feature_snapshots` 表 | `research_feature_matrix_runs` + `research_feature_matrix_rows` 两张表 |
 | 时效 | 最近交易日 + 自选股 | 任意历史日期范围 |
 | 因果口径 | 必须 point-in-time | 可同时包含 causal/hindsight/label |
 | watchlist_ready | 是 | 否（不接入） |
 | 字段登记 | 不强制 namespace 前缀 | 必须带 namespace 前缀 |
-| 写库 | 是（upsert 幂等） | 否（骨架阶段不写 DB） |
-| 全市场回补 | BLOCKED（PR #41 126min > 120min 阈值） | 禁止无过滤输出文件 |
+| 写库 | upsert 幂等 | upsert 幂等（`ON CONFLICT (instrument_id, trade_date) DO UPDATE`） |
+| 全市场回补 | BLOCKED（PR #41 126min > 120min 阈值） | 按月分批 + 三道硬阈值 |
+| 计算 | single-snapshot（最后一根 bar） | per-bar full series |
+| 数据载体设计 | JSONB summary + 结构化字段 | 扁平宽表 33 列 |
 
-## 9. 禁止项
+## 14. 禁止项
 
 - 不要把 hindsight 或 label 字段当成 causal feature；
 - 不要把 hindsight/label 接入 watchlist 或生产筛选；
-- 不要新增数据库表（research matrix 不写 DB）；
-- 不要写大 CSV/parquet（骨架阶段不写任何文件）；
-- 不要跑历史回补或 production full backfill；
-- 不要生成 coverage/截图/大日志/DB 备份；
+- 不要把 research matrix 写入 `stock_feature_snapshots`（只写专用 research 表）；
+- 不要写大 JSONB payload 或建 GIN 索引（扁平宽表设计）；
+- 不要写大 CSV/coverage/截图/大日志/DB 备份；
+- 不要把 parquet 作为主存储（仅可选 debug 导出）；
+- 不要在无 sample scope 下导出 parquet（`--export-parquet` 只允许 sample scope）；
+- 不要直接全量跑到当前（必须分阶段验证）；
 - 不要删除数据库卷或运行中镜像。

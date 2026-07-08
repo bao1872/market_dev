@@ -75,6 +75,16 @@ class FeatureSpec:
                 f"key prefix 必须匹配 namespace: key={self.key} 应以 '{prefix}' 开头"
             )
 
+    @property
+    def db_column(self) -> str:
+        """将 dotted key 映射为 DB 下划线列名。
+
+        causal.atr → causal_atr
+        hindsight.dsa_finalized_segment → hindsight_dsa_finalized_segment
+        label.future_return_10d → label_future_return_10d
+        """
+        return self.key.replace(".", "_")
+
 
 class FeatureCausalityRegistry:
     """特征因果口径注册表。
@@ -107,6 +117,10 @@ class FeatureCausalityRegistry:
         """返回所有已登记的 key。"""
         return list(self._specs.keys())
 
+    def db_columns(self) -> list[str]:
+        """返回所有字段的 DB 下划线列名。"""
+        return [spec.db_column for spec in self._specs.values()]
+
 
 def build_default_registry() -> FeatureCausalityRegistry:
     """构建默认因果口径 registry，登记所有规范字段。
@@ -119,16 +133,22 @@ def build_default_registry() -> FeatureCausalityRegistry:
     """
     reg = FeatureCausalityRegistry()
 
-    # ===== causal: 当时可知的滚动特征 =====
+    # ===== causal: 当时可知的滚动特征（individual DB columns）=====
     causal_source = "structural_factor_service"
     causal_fields = [
         ("causal.atr", "ATR 波动率"),
-        ("causal.bb", "Bollinger Bands 上下轨"),
-        ("causal.sqzmom", "SQZMOM 动量"),
+        ("causal.bb_percent_b", "BB %B（close 在 band 中的位置）"),
+        ("causal.bb_bandwidth_pct", "BB 带宽百分比"),
+        ("causal.sqzmom_val", "SQZMOM 动量值"),
+        ("causal.sqzmom_delta_1", "SQZMOM 一阶差分"),
         ("causal.volume_ratio_20", "20 日成交量比率"),
         ("causal.volume_percentile_120", "120 日成交量百分位"),
-        ("causal.active_swing", "已确认 swing（当时可知的 active 段）"),
-        ("causal.developing_swing", "发展中 swing（未确认但当前可见）"),
+        ("causal.active_swing_dir", "active swing 方向（当时可知）"),
+        ("causal.active_swing_high", "active swing 高点"),
+        ("causal.active_swing_low", "active swing 低点"),
+        ("causal.developing_swing_dir", "developing swing 方向"),
+        ("causal.developing_swing_high", "developing swing 高点"),
+        ("causal.developing_swing_low", "developing swing 低点"),
         ("causal.dsa_confirmed_segment", "DSA 段（当时已确认状态）"),
         ("causal.dsa_confirmed_direction", "DSA 方向（当时已确认）"),
         ("causal.dsa_confirmed_age_bars", "DSA 段已持续 bar 数（当时已确认）"),

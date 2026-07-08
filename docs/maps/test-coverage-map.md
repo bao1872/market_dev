@@ -91,28 +91,32 @@
 | 盘后流水线聚合 API（11 场景）：盘前 not_started/收盘后 blocked/latest 不回退历史/运行中/成功/watchlist_ready 判定/sample 不计入/full 优先展示/失败带 error/POST 幂等/events 限 100 条/非 admin 403 | `test_admin_after_close_pipeline.py`（11 个用例） |
 | 迁移幂等：`alembic upgrade head` / `downgrade -1` / `upgrade head` 链路不报错；表含唯一约束与 3 个 btree 索引 | 手动验证（test DB） |
 
-## 3.8 研究特征矩阵因果口径
+## 3.8 研究特征矩阵因果口径与 DB 写入
 
 | 规则 | 测试 |
 |---|---|
 | `FeatureSpec` 必填 `namespace`/`source`/`compute_policy`，缺一抛 `ValueError` | `test_feature_causality_registry.py`（3 个用例：empty namespace/source/compute_policy） |
 | `key` 必须以 `{namespace}.` 开头，不匹配抛 `ValueError` | `test_feature_causality_registry.py`（2 个用例：key 前缀匹配/不匹配） |
+| `FeatureSpec.db_column` 把 dotted key 映射为下划线列名（`causal.atr` → `causal_atr`） | `test_feature_causality_registry.py`（db_column 映射） |
 | `hindsight.*` 的 `allowed_for_backtest` 必须 `False` | `test_feature_causality_registry.py`（hindsight namespace backtest=False） |
 | `label.*` 的 `allowed_for_backtest` 必须 `False` | `test_feature_causality_registry.py`（label namespace backtest=False） |
 | `causal.*` 的 `allowed_for_backtest` 必须 `True` | `test_feature_causality_registry.py`（causal namespace backtest=True） |
 | `confirmed_delay.*` 的 `allowed_for_backtest` 必须 `True` | `test_feature_causality_registry.py`（confirmed_delay namespace backtest=True） |
-| DSA 必须同时存在 `causal.dsa_confirmed_*` 与 `hindsight.dsa_finalized_*` 两类 | `test_feature_causality_registry.py`（3 个用例：causal.dsa_confirmed_* 存在 + hindsight.dsa_finalized_* 存在 + 双轨并存） |
+| DSA 必须同时存在 `causal.dsa_confirmed_*` 与 `hindsight.dsa_finalized_*` 两类 | `test_feature_causality_registry.py`（3 个用例：causal.dsa_confirmed_* 存在 + hindsight.dsa_finalized_* 存在 + 双轨并存 + 各自 compute_policy 正确） |
 | Node Cluster 只能是 `hindsight.node_cluster_*`，不得出现在 causal | `test_feature_causality_registry.py`（2 个用例：hindsight.node_cluster_* 存在 + causal 中无 node_cluster） |
 | `confirmed_swing_*` 必须是 `confirmed_delay`，不得作为 hindsight 默认回填 | `test_feature_causality_registry.py`（2 个用例：confirmed_delay.confirmed_swing_* 存在 + hindsight 无 confirmed_swing） |
-| `FeatureCausalityRegistry.register` 重复 key 抛 `ValueError` | `test_feature_causality_registry.py`（duplicate key） |
-| `build_default_registry()` 返回 27 个字段（causal 10 + confirmed_delay 4 + hindsight 6 + label 7） | `test_feature_causality_registry.py`（4 个用例：总数 + 各 namespace 计数） |
-| `parse_args` 默认值（end=latest/symbols=None/limit_instruments=None/dry_run=False/output=None/include_hindsight=True/include_labels=True）+ 自定义值 + `--symbols` 逗号分隔 list + 缺 `--start` 报 `SystemExit` | `test_research_feature_matrix_backfill.py`（3 个用例） |
-| `build_plan` 字段分类统计（causal/confirmed_delay/hindsight/label）+ total_fields + scope | `test_research_feature_matrix_backfill.py`（3 个用例） |
-| `--include-hindsight=false` 时 hindsight 字段数为 0；`--include-labels=false` 时 label 字段数为 0 | `test_research_feature_matrix_backfill.py`（3 个用例） |
-| `--dry-run` 打印计划，不写 DB，不写文件 | `test_research_feature_matrix_backfill.py`（2 个用例） |
-| `--output` 必须配合 sample scope，`_validate_output_scope` 抛 `ValueError` | `test_research_feature_matrix_backfill.py`（3 个用例：sample scope 通过 + full scope 抛 ValueError + 无 output 不校验） |
-| 非 dry-run 无 `--output` 只打印计划（骨架阶段不实际计算） | `test_research_feature_matrix_backfill.py`（2 个用例） |
-| `build_plan` 字段分类总数与 registry 字段数一致 | `test_research_feature_matrix_backfill.py`（1 个用例） |
+| `FeatureCausalityRegistry.register` 重复 key 抛 `ValueError`；`get`/`all`/`by_namespace`/`keys`/`db_columns` 基础操作 | `test_feature_causality_registry.py`（Registry CRUD + db_columns） |
+| `build_default_registry()` 返回 33 个字段（causal 16 + confirmed_delay 4 + hindsight 6 + label 7）；包含关键 causal/label 字段 | `test_feature_causality_registry.py`（默认 registry 完整性 + 关键字段存在） |
+| 磁盘阈值边界 `15 * (1024**3)` 字节（< 15GB 停止，= 15GB 通过，> 15GB 通过） | `test_research_matrix_writer.py::TestDiskThreshold`（3 个用例，mock `shutil.disk_usage`，用 1024^3 而非 10^9） |
+| 单月大小阈值边界 3.0GB（> 3GB 停止，= 3GB 通过，< 3GB 通过，0 通过） | `test_research_matrix_writer.py::TestMonthSizeThreshold`（4 个用例） |
+| 失败率阈值边界 5%（6% 停止，5% 通过，3% 通过，total=0 通过） | `test_research_matrix_writer.py::TestFailureRateThreshold`（4 个用例） |
+| 月份解析（1月/2月非闰/2月闰年/12月/非法格式抛 `ValueError`） | `test_research_matrix_writer.py::TestResolveMonthRange`（5 个用例，`calendar.monthrange` 处理闰年） |
+| 单月 DB 占用估算（rows × 2KB / 1024³） | `test_research_matrix_writer.py::TestEstimateMonthSize`（3 个用例：小样本/全月/零） |
+| `create_or_resume_run` 首次创建返回 `running`；相同 `run_key` 第二次返回已存在 run；不同 scope → 不同 `run_key` | `test_research_matrix_writer.py::TestRunLifecycle`（3 个用例，async DB savepoint） |
+| `finalize_run(succeeded/failed)` 更新 status/统计/duration/finished_at | `test_research_matrix_writer.py::TestRunLifecycle`（2 个用例，async DB） |
+| `upsert_rows_batch` 首次 upsert 写入新行；相同 `(instrument_id, trade_date)` → `ON CONFLICT DO UPDATE` 覆盖旧值；空 list 返回 0；1050 行分批（UPSERT_BATCH_SIZE=1000） | `test_research_matrix_writer.py::TestUpsertRowsBatch`（4 个用例，async DB） |
+| `ResearchFeatureMatrixRun` 16 列结构 + `run_key` 唯一约束 + month/status 索引；`ResearchFeatureMatrixRow` 39 列（5 metadata + 33 feature + 1 created_at）+ `(instrument_id, trade_date)` 唯一约束 + 3 btree 索引 | `test_research_feature_matrix_model.py`（model 自测入口，无 DB） |
+| `compute_all_features(bars)` 返回 DataFrame 含 33 个 feature 列；per-bar 计算 vs single-snapshot 区分；causal rolling/DSA 双轨/confirmed_delay swing/label 字段；空输入不抛异常 | `test_feature_computer.py`（~23 个用例） |
 
 ## 4. 飞书与通知
 
