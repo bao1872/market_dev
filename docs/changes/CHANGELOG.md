@@ -9,7 +9,7 @@
   - 修复：`wait_until` 改为 `"load"`，保留 `wait_for_selector('[data-render-ready="true"]')` 等待 bars + indicators 就绪后再截图
   - 新增 `backend/tests/test_stock_capture_service.py`（2 用例）：验证 `page.goto` 使用 `wait_until="load"`、截图成功后写入缓存
   - 更新 `03-jobs-integrations-operations.md`、`worker-job-map.md`、ALIGN-039
-  - 部署边界：部署后观察 monitor 事件图片成功率，连续多条 capture_jobs failed 占比应接近 0%；未执行生产部署
+  - 部署验证：PR #45 (commit 8c1f9c4) 部署后通过 `test_channel_latest_event` 触发单条图片链路，capture_jobs.succeeded、image_url 非空；Outbox delivery_type=image 已 processed；message_deliveries delivery_type=image status=success、image_upload_status=success、image_key 非空；delivery_worker 日志确认“飞书图片消息投递成功”；ALIGN-039 已关闭
 
 - CHANGE-20260708-050: 修复 Monitor 与 Notification latest-event 图片 Capture Token Claims
   - 新增 `backend/app/constants/capture.py` 定义 `CAPTURE_SCOPE_STOCK_DETAIL`，避免服务层 import `app.core.deps` 导致循环依赖
