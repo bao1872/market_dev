@@ -125,12 +125,13 @@ async def _get_snapshot_run_summary(
     若不存在，fallback 到最新任意 run（用于展示 sample/running/failed 等参考信息）。
     避免出现 watchlist_ready=true 但页面展示 sample run 的误导。
     """
-    # 优先：succeeded + published + scope=full
+    # 优先：succeeded + published + scope=full（与 has_succeeded_snapshot_run 筛选条件一致）
     preferred_stmt = (
         select(StockFeatureSnapshotRun)
         .where(StockFeatureSnapshotRun.trade_date == trade_date)
         .where(StockFeatureSnapshotRun.status == STATUS_SUCCEEDED)
         .where(StockFeatureSnapshotRun.published_at.is_not(None))
+        .where(StockFeatureSnapshotRun.metadata_["scope"].astext == "full")
         .order_by(desc(StockFeatureSnapshotRun.created_at))
         .limit(1)
     )

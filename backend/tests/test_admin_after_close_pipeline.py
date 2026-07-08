@@ -1,14 +1,17 @@
 """盘后流水线可视化面板 API 测试。
 
-覆盖 /admin/after-close/pipeline/* 四个端点的 8 种后端场景：
-1. 无 run → not_started
-2. running + 当前 step 正确
-3. succeeded after_close + full published snapshot → watchlist_ready=true
-4. sample snapshot run → watchlist_ready=false
-5. failed run → overall_status=failed + error
-6. POST run 幂等
-7. events limit=100
-8. 非 admin 403
+覆盖 /admin/after-close/pipeline/* 四个端点的 11 种后端场景：
+1. 盘前无 run → not_started
+2. 收盘后超过阈值无 run → blocked
+3. latest 在交易日不回退历史 run（today 无 run 必须返回 today 的 blocked）
+4. running + 当前 step 正确
+5. succeeded after_close + full published snapshot → watchlist_ready=true
+6. sample snapshot run → watchlist_ready=false
+7. full+sample 同日共存：watchlist_ready=true 时 feature_snapshot_run 主摘要必须为 full run
+8. failed run → overall_status=failed + error
+9. POST run 幂等
+10. events limit=100
+11. 非 admin 403
 
 测试策略：
 - 复用 conftest client fixture，覆盖 get_db 为测试 session
@@ -16,6 +19,7 @@
 - 使用 create_access_token 生成 Authorization header
 - mock is_trading_day_async 控制交易日判定
 - 注入固定 now 时间，避免测试时市场阶段漂移
+- 显式设置 created_at，不依赖 DB 默认顺序（full/sample 同日共存场景）
 """
 
 from __future__ import annotations
@@ -114,6 +118,7 @@ def _make_snapshot_run(
     scope: str = "full",
     published: bool = False,
     finished_at: datetime | None = None,
+    created_at: datetime | None = None,
 ) -> StockFeatureSnapshotRun:
     """构造 stock_feature_snapshot_run 测试记录。"""
     published_at: datetime | None = None
@@ -130,6 +135,7 @@ def _make_snapshot_run(
         expected_count=10,
         published_at=published_at,
         finished_at=finished_at,
+        created_at=created_at or datetime.now(SHANGHAI),
     )
 
 
@@ -430,37 +436,49 @@ async def test_pipeline_full_snapshot_preferred_over_sample(
     db_session: AsyncSession,
 ):
     """同一 trade_date 同时存在 full succeeded published 和后来的 sample succeeded published，
-    watchlist_ready=true 时页面摘要应显示 full run，不显示 sample 作为主 run。"""
-    now = datetime(2026, 6, 24, 20, 0, tzinfo=SHANGHAI)
-    full_finished = now - timedelta(minutes=20)
-    sample_finished = now - timedelta(minutes=5)  # sample 更晚创建
+    watchlist_ready=true 时页面摘要应显示 full run，不显示 sample 作为主 run。
+
+    关键：显式设置 created_at，不依赖 DB 默认顺序。
+    - full run: created_at=20:00, scope=full
+    - sample run: created_at=20:10, scope=sample（更晚创建）
+    - 两者都 succeeded + published
+    期望：watchlist_ready=true, feature_snapshot_run.run_id == full_run.id, scope == full
+    """
+    # now 必须晚于两个 run 的 created_at，避免时序漂移
+    now = datetime(2026, 6, 24, 20, 30, tzinfo=SHANGHAI)
+    full_created = datetime(2026, 6, 24, 20, 0, tzinfo=SHANGHAI)
+    sample_created = datetime(2026, 6, 24, 20, 10, tzinfo=SHANGHAI)
+    full_finished = full_created + timedelta(minutes=5)
+    sample_finished = sample_created + timedelta(minutes=5)
 
     job_run = _make_after_close_job_run(
         status=STATUS_SUCCEEDED,
         orchestrator_status=AfterCloseRunStatus.SUCCEEDED.value,
         last_completed_step=AfterCloseRunStatus.SUCCEEDED.value,
-        started_at=full_finished - timedelta(minutes=30),
+        started_at=full_created - timedelta(minutes=30),
         finished_at=full_finished,
     )
     db_session.add(job_run)
 
-    # full run（先创建）
+    # full run（先创建，created_at=20:00）
     full_run = _make_snapshot_run(
         run_type=RUN_TYPE_AFTER_CLOSE,
         status=STATUS_SUCCEEDED,
         scope="full",
         published=True,
         finished_at=full_finished,
+        created_at=full_created,
     )
     db_session.add(full_run)
 
-    # sample run（后创建，created_at 更新）
+    # sample run（后创建，created_at=20:10，更晚但 scope=sample）
     sample_run = _make_snapshot_run(
         run_type=RUN_TYPE_BACKFILL,
         status=STATUS_SUCCEEDED,
         scope="sample",
         published=True,
         finished_at=sample_finished,
+        created_at=sample_created,
     )
     db_session.add(sample_run)
     await db_session.flush()
