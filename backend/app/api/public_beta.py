@@ -21,6 +21,7 @@ import logging
 from fastapi import APIRouter, Depends, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.route_utils import get_route_paths
 from app.db import get_db
 from app.schemas.beta_application import (
     BetaApplicationCreate,
@@ -114,7 +115,7 @@ async def create_beta_application(
 
 if __name__ == "__main__":
     # 自测入口：验证路由注册
-    print(f"router.routes={[r.path for r in router.routes]}")
+    print(f"router.routes={get_route_paths(router.routes)}")
     # 验证 IP 哈希函数
     assert _hash_ip("192.168.1.1") == _hash_ip("192.168.1.1")
     assert _hash_ip("192.168.1.1") != _hash_ip("192.168.1.2")

@@ -657,3 +657,20 @@ uptime
 - `quality_gate` 阶段的 `dsa_run` 赋值使用 `_get_strategy_run_or_raise`，消除 `StrategyRun | None` 赋值冲突；
 - 不使用 `cast` / `type: ignore` 掩盖 None；所有 None 分支显式 raise；
 - 不改变 heartbeat、lease、repair、feature_snapshot 业务流程；只把"本来假设一定存在"的对象变成显式校验。
+
+## 9. API 路由类型债务治理
+
+`app/api/*` 和 `app/capture_main.py` 原有 20 个 mypy baseline 错误，根因是 `router.routes` 类型为 `list[BaseRoute]`，`BaseRoute` 没有 `path`/`methods` 属性，直接访问 `r.path` 触发 `[attr-defined]` 错误。
+
+当前治理方式：
+
+- 新增 `app/core/route_utils.py`，提供 `iter_api_routes(routes) -> Iterator[APIRoute]` 和 `get_route_paths(routes) -> list[str]` 类型收窄 helper；
+- 所有 `app/api/*` 和 `capture_main.py` 中的 `[r.path for r in router.routes]` 替换为 `get_route_paths(router.routes)`；
+- 需要同时访问 `r.path` 和 `r.methods` 的位置使用 `iter_api_routes` 收窄后迭代，并显式过滤 `r.methods is not None`；
+- 不使用 `type: ignore` / `cast`；不改变 API 行为。
+
+## 10. 债务治理工具通道规则
+
+- mypy 使用 `MYPY_CACHE_DIR=/tmp/mypy_debt_cache` 单独检查目标文件，跑完删除 cache，不全仓库反复生成；
+- 长命令（mypy 冷启动、大批量 pytest）使用 `nohup` + `/tmp/<name>.log` + `/tmp/<name>.pid` 后台执行，用 `ps`/`tail` 轮询，不依赖 Trae 交互式长连接；
+- 单 PR 只处理一类债务，不混入业务逻辑修改。

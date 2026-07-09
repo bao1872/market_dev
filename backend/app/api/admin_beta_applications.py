@@ -34,6 +34,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db, require_roles
+from app.core.route_utils import get_route_paths
 from app.models.beta_application import BetaApplication
 from app.schemas.beta_application import (
     BetaApplicationAdminResponse,
@@ -446,7 +447,7 @@ async def retry_beta_application_feishu(
 
 if __name__ == "__main__":
     # 自测入口：验证路由注册
-    paths = [r.path for r in router.routes]
+    paths = get_route_paths(router.routes)
     print(f"router.routes={paths}")
     assert "/admin/beta-applications" in paths
     assert "/admin/beta-applications/stats" in paths

@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db
+from app.core.route_utils import get_route_paths
 from app.models.calendar import TradingCalendar
 from app.schemas.calendar import CalendarListResponse, CalendarResponse, TradingDayResponse
 from app.services.calendar_service import is_trading_day_async
@@ -68,5 +69,5 @@ async def check_trading_day(
 
 if __name__ == "__main__":
     # 自测入口：验证路由注册
-    print(f"router.routes={[r.path for r in router.routes]}")
+    print(f"router.routes={get_route_paths(router.routes)}")
     print("OK")

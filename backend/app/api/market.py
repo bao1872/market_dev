@@ -24,6 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db
+from app.core.route_utils import get_route_paths
 from app.core.time import now_shanghai, shanghai_business_date, to_shanghai_iso
 from app.models.calendar import TradingCalendar
 from app.services.calendar_service import is_trading_day_async
@@ -133,5 +134,5 @@ async def get_market_status(db: AsyncSession = Depends(get_db)):
 
 if __name__ == "__main__":
     # 自测入口：验证路由注册
-    print(f"router.routes={[r.path for r in router.routes]}")
+    print(f"router.routes={get_route_paths(router.routes)}")
     print("OK")

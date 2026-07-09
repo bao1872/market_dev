@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.strategy_keys import DSA_SELECTOR
 from app.core.deps import get_db, require_roles
+from app.core.route_utils import get_route_paths
 from app.models.strategy import StrategyVersion
 from app.models.strategy_run import StrategyRun
 from app.repositories import strategy_result_repository
@@ -809,7 +810,7 @@ async def get_run_result_detail(
 
 if __name__ == "__main__":
     # 自测入口：验证路由注册
-    paths = [r.path for r in router.routes]
+    paths = get_route_paths(router.routes)
     print(f"router.routes={paths}")
     assert any("/admin/strategies" in p and "/run" in p for p in paths)
     assert any("/admin/strategies" in p and "/runs" in p for p in paths)

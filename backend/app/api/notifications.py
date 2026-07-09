@@ -23,12 +23,12 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.core.deps import _get_user_roles, get_current_active_user, get_db
+from app.core.route_utils import get_route_paths
 from app.models.user import User
 from app.schemas.notification import (
     ChannelLatestEventTestResponse,
@@ -414,7 +414,7 @@ async def preview_message(
 
 if __name__ == "__main__":
     # 自测入口：验证路由注册
-    paths = [r.path for r in router.routes if isinstance(r, APIRoute)]
+    paths = get_route_paths(router.routes)
     print(f"router.routes={paths}")
     assert "/messages" in paths
     assert "/messages/unread-count" in paths
