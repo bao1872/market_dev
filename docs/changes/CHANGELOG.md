@@ -20,6 +20,21 @@
     - config 深度校验加强：`_validate_config_keys` 补 filters 每项 dict + 含 key/op/value + op 白名单（contains/eq/gt/gte/lt/lte/between/empty/not_empty）、hiddenColumns 每项 string、sort.key 非空 string；`TableViewPresetConfig` 同时用 `model_validator(mode="after")` 双保险
     - 新增 10 个测试：4 个 NULL strategy_key 唯一约束场景（同 user+table_id+NULL+name 重复→409、不同 table_id 允许、不同 user 允许、PATCH 重命名冲突）+ 6 个 config 深度校验（filters 元素非 dict→422、缺 key→422、op="regex" 非白名单→422、9 个合法 op 全通过→201、hiddenColumns 含非 string→422、sort.key 空串→422）
     - 文档同步：CHANGE-20260709-002 补 partial unique index + config 深度校验描述 + 47 用例；02-data-api-contracts、database-model-map、test-coverage-map、05-testing-acceptance 同步
+
+## 2026-07-09
+
+- CHANGE-20260709-003: research matrix Phase 1 回补完成 + DSA direction 类型 hotfix
+  - PR #51 squash merge commit=59d2ae7；migration 058 已在生产应用
+  - 前台 A/B/C/D 验证全部通过：D full Jan rows=102603，failed_rate=2.90%，表大小 38MB
+  - 后台 E 阶段串行完成 2026-02 到 2026-07 逐月回补，全量 7 个月共写入 621,769 行
+  - 覆盖日期 2026-01-05 到 2026-07-08（122 个交易日），表总大小 223MB
+  - 全部 9 个 run status=succeeded，failed_rate 最高 4.11%（2026-02）
+  - 发现并修复 DSA direction 类型 bug（float→str）：PR #53 / commit=3c22a22
+  - backend 镜像重建并重启：market-dev-backend:3c22a22
+  - hindsight / Node Cluster 列全 NULL，符合 Phase 1 约束
+  - 无 parquet/CSV/export/DB 备份，仅新增 research_feature_matrix_* 两张表
+  - 临时 lock file / pid 文件已清理
+
 - CHANGE-20260709-001: research feature matrix DB 主存储 + compute + writer + CLI + 5 个 Blocker 修复
   - registry 从 27 扩展到 33 字段（causal 16 + confirmed_delay 4 + hindsight 6 + label 7），新增 `FeatureSpec.db_column` 把 dotted key 映射为下划线列名（`causal.atr` → `causal_atr`）
   - 新增 `backend/app/models/research_feature_matrix.py`：`ResearchFeatureMatrixRun`（16 列，`run_key` 唯一）+ `ResearchFeatureMatrixRow`（39 列扁平宽表，`(instrument_id, trade_date)` 唯一）ORM
