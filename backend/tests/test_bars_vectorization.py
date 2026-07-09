@@ -225,7 +225,9 @@ def test_df_to_responses_intraday_trade_time_has_shanghai_tzinfo() -> None:
             "15m trade_time 必须带 tzinfo（Asia/Shanghai），避免前端时区误判"
         )
         # 验证时区为 Asia/Shanghai（UTC+8）
-        assert r.trade_time.utcoffset().total_seconds() == 8 * 3600
+        offset = r.trade_time.utcoffset()
+        assert offset is not None
+        assert offset.total_seconds() == 8 * 3600
 
 
 def test_df_to_responses_1h_trade_time_has_shanghai_tzinfo() -> None:

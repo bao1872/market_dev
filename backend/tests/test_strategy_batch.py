@@ -171,7 +171,7 @@ if __name__ == "__main__":
         print("\n=== DB 集成测试 ===")
         import os
 
-        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
         test_database_url = os.environ.get(
             "TEST_DATABASE_URL",

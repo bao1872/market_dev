@@ -34,7 +34,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,6 +44,7 @@ from app.models.bar import BarDaily
 from app.models.instrument import Instrument
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.user import Role, User, UserRole
+from tests.conftest import make_asgi_transport
 
 # ============================================================
 # 测试 fixtures
@@ -209,7 +210,7 @@ class TestDsaOnlyEndpoint:
         with patch(
             "app.core.time.shanghai_business_date", return_value=date(2099, 1, 1)
         ):
-            transport = ASGITransport(app=app)
+            transport = make_asgi_transport(app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.post(
                     "/admin/after-close-runs/dsa-only",
@@ -237,7 +238,7 @@ class TestDsaOnlyEndpoint:
         """
         _override_get_db(db_session)
 
-        transport = ASGITransport(app=app)
+        transport = make_asgi_transport(app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
                 "/admin/after-close-runs/dsa-only",
@@ -293,7 +294,7 @@ class TestDsaOnlyEndpoint:
         with patch(
             "app.core.time.shanghai_business_date", return_value=date(2099, 1, 1)
         ):
-            transport = ASGITransport(app=app)
+            transport = make_asgi_transport(app)
             async with AsyncClient(
                 transport=transport, base_url="http://test"
             ) as client:
@@ -313,6 +314,7 @@ class TestDsaOnlyEndpoint:
         # 验证数据库中 metadata 含 mode=dsa_only + last_completed_step=daily_ready
         job_run = await db_session.get(SchedulerJobRun, uuid.UUID(job_run_id))
         assert job_run is not None
+        assert job_run.metadata_json is not None
         meta = json.loads(job_run.metadata_json)
         assert meta["mode"] == "dsa_only"
         assert meta["last_completed_step"] == "daily_ready"
@@ -346,7 +348,7 @@ class TestResumeEndpoint:
         )
         await db_session.flush()
 
-        transport = ASGITransport(app=app)
+        transport = make_asgi_transport(app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
                 f"/admin/after-close-runs/{job_run.id}/resume",
@@ -382,7 +384,7 @@ class TestResumeEndpoint:
         job_run.error_message = "模拟失败"
         await db_session.flush()
 
-        transport = ASGITransport(app=app)
+        transport = make_asgi_transport(app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
                 f"/admin/after-close-runs/{job_run.id}/resume",
@@ -422,7 +424,7 @@ class TestResumeEndpoint:
         )
         await db_session.flush()
 
-        transport = ASGITransport(app=app)
+        transport = make_asgi_transport(app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
                 f"/admin/after-close-runs/{job_run.id}/resume",
@@ -433,6 +435,7 @@ class TestResumeEndpoint:
         data = response.json()
         assert data["status"] == "queued"
         await db_session.refresh(job_run)
+        assert job_run.metadata_json is not None
         meta = json.loads(job_run.metadata_json)
         assert meta["last_completed_step"] == "waiting_dsa_worker"
 
@@ -444,7 +447,7 @@ class TestResumeEndpoint:
         _override_get_db(db_session)
         fake_id = uuid.uuid4()
 
-        transport = ASGITransport(app=app)
+        transport = make_asgi_transport(app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
                 f"/admin/after-close-runs/{fake_id}/resume",
@@ -474,7 +477,7 @@ class TestResumeEndpoint:
         db_session.add(other_job)
         await db_session.flush()
 
-        transport = ASGITransport(app=app)
+        transport = make_asgi_transport(app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
                 f"/admin/after-close-runs/{other_job.id}/resume",
@@ -540,7 +543,7 @@ class TestCreateAfterCloseRunEndpoint:
             new_callable=AsyncMock,
             return_value=True,
         ):
-            transport = ASGITransport(app=app)
+            transport = make_asgi_transport(app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.post(
                     "/admin/after-close-runs",
@@ -577,7 +580,7 @@ class TestCreateAfterCloseRunEndpoint:
             new_callable=AsyncMock,
             return_value=True,
         ):
-            transport = ASGITransport(app=app)
+            transport = make_asgi_transport(app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.post(
                     "/admin/after-close-runs",
@@ -617,7 +620,7 @@ class TestDsaHistoricalDateRejection:
         """
         _override_get_db(db_session)
 
-        transport = ASGITransport(app=app)
+        transport = make_asgi_transport(app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
                 "/admin/strategies/dsa_selector/run",

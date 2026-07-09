@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +27,7 @@ from app.models.notification import MessageDelivery, NotificationChannel, Notifi
 from app.models.stock_memo import StockMemo
 from app.models.user import User
 from app.services.outbox_relay import relay_outbox
+from tests.conftest import make_asgi_transport
 
 # ============================================================
 # 测试 fixtures
@@ -161,7 +162,7 @@ class TestStockDetailFeishuManualSend:
                 mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
                 mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
 
-                transport = ASGITransport(app=app)
+                transport = make_asgi_transport(app)
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
                     response = await client.post(
                         f"/instruments/{test_instrument.id}/send-feishu",
@@ -198,7 +199,7 @@ class TestStockDetailFeishuManualSend:
         _override_get_db(db_session)
 
         try:
-            transport = ASGITransport(app=app)
+            transport = make_asgi_transport(app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.post(
                     f"/instruments/{test_instrument.id}/send-feishu",
@@ -215,7 +216,7 @@ class TestStockDetailFeishuManualSend:
     @pytest.mark.asyncio
     async def test_endpoint_requires_auth(self, db_session, test_instrument) -> None:
         """未认证访问应返回 401。"""
-        transport = ASGITransport(app=app)
+        transport = make_asgi_transport(app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
                 f"/instruments/{test_instrument.id}/send-feishu",
@@ -233,7 +234,7 @@ class TestStockDetailFeishuManualSend:
 
         try:
             fake_instrument_id = uuid.uuid4()
-            transport = ASGITransport(app=app)
+            transport = make_asgi_transport(app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.post(
                     f"/instruments/{fake_instrument_id}/send-feishu",
@@ -286,7 +287,7 @@ class TestStockDetailFeishuMemoAndTargetChannel:
                 mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
                 mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
 
-                transport = ASGITransport(app=app)
+                transport = make_asgi_transport(app)
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
                     response = await client.post(
                         f"/instruments/{test_instrument.id}/send-feishu",
@@ -356,7 +357,7 @@ class TestStockDetailFeishuMemoAndTargetChannel:
                 mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
                 mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
 
-                transport = ASGITransport(app=app)
+                transport = make_asgi_transport(app)
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
                     response = await client.post(
                         f"/instruments/{test_instrument.id}/send-feishu",
@@ -429,7 +430,7 @@ class TestStockDetailFeishuStatus:
                 mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
                 mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
 
-                transport = ASGITransport(app=app)
+                transport = make_asgi_transport(app)
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
                     create_resp = await client.post(
                         f"/instruments/{test_instrument.id}/send-feishu",

@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -31,6 +30,7 @@ from app.services.eligible_user_service import (
     is_user_eligible,
     list_eligible_user_ids,
 )
+from tests.conftest import AsyncFactory
 
 # 测试用默认权益快照（满足 entitlement_snapshot NOT NULL 约束，不依赖 plans 表）
 _DEFAULT_SNAPSHOT: dict[str, Any] = {
@@ -79,7 +79,7 @@ async def _make_subscription(
 @pytest.mark.asyncio
 async def test_active_member_with_active_subscription_is_eligible(
     db_session: AsyncSession,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
 ) -> None:
     """active member + 有效 subscription → eligible。"""
     user = await user_factory(status="active", roles=["member"])
@@ -92,7 +92,7 @@ async def test_active_member_with_active_subscription_is_eligible(
 @pytest.mark.asyncio
 async def test_disabled_member_not_eligible(
     db_session: AsyncSession,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
 ) -> None:
     """User.status='disabled' → not eligible。"""
     user = await user_factory(status="disabled", roles=["member"])
@@ -105,7 +105,7 @@ async def test_disabled_member_not_eligible(
 @pytest.mark.asyncio
 async def test_pending_member_not_eligible(
     db_session: AsyncSession,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
 ) -> None:
     """User.status='pending' → not eligible。"""
     user = await user_factory(status="pending", roles=["member"])
@@ -118,7 +118,7 @@ async def test_pending_member_not_eligible(
 @pytest.mark.asyncio
 async def test_expired_subscription_not_eligible(
     db_session: AsyncSession,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
 ) -> None:
     """subscription.expires_at < now → not eligible。"""
     user = await user_factory(status="active", roles=["member"])
@@ -136,7 +136,7 @@ async def test_expired_subscription_not_eligible(
 @pytest.mark.asyncio
 async def test_revoked_subscription_not_eligible(
     db_session: AsyncSession,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
 ) -> None:
     """subscription.status='revoked' → not eligible。"""
     user = await user_factory(status="active", roles=["member"])
@@ -149,7 +149,7 @@ async def test_revoked_subscription_not_eligible(
 @pytest.mark.asyncio
 async def test_future_subscription_not_eligible(
     db_session: AsyncSession,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
 ) -> None:
     """subscription.starts_at > now（尚未生效）→ not eligible。"""
     user = await user_factory(status="active", roles=["member"])
@@ -167,7 +167,7 @@ async def test_future_subscription_not_eligible(
 @pytest.mark.asyncio
 async def test_member_without_subscription_not_eligible(
     db_session: AsyncSession,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
 ) -> None:
     """member 无 subscription 记录 → not eligible。"""
     user = await user_factory(status="active", roles=["member"])
@@ -179,7 +179,7 @@ async def test_member_without_subscription_not_eligible(
 @pytest.mark.asyncio
 async def test_admin_not_eligible(
     db_session: AsyncSession,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
 ) -> None:
     """admin 不进入 universe（admin 不是普通会员监控对象）。
 
@@ -194,7 +194,7 @@ async def test_admin_not_eligible(
 @pytest.mark.asyncio
 async def test_admin_with_member_role_still_not_eligible(
     db_session: AsyncSession,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
 ) -> None:
     """同时拥有 admin + member 角色 + 有效 subscription → 仍 not eligible。
 
@@ -211,7 +211,7 @@ async def test_admin_with_member_role_still_not_eligible(
 @pytest.mark.asyncio
 async def test_user_without_any_role_not_eligible(
     db_session: AsyncSession,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
 ) -> None:
     """无任何角色的 active 用户 + 有效 subscription → not eligible（必须有 member 角色）。"""
     user = await user_factory(status="active", roles=[])
@@ -229,7 +229,7 @@ async def test_user_without_any_role_not_eligible(
 @pytest.mark.asyncio
 async def test_list_eligible_user_ids_excludes_admin(
     db_session: AsyncSession,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
 ) -> None:
     """admin 不在 list_eligible_user_ids 返回列表中。"""
     member_user = await user_factory(status="active", roles=["member"])
@@ -246,7 +246,7 @@ async def test_list_eligible_user_ids_excludes_admin(
 @pytest.mark.asyncio
 async def test_list_eligible_user_ids_only_returns_eligible(
     db_session: AsyncSession,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
 ) -> None:
     """list_eligible_user_ids 只返回有资格的用户。"""
     # eligible 用户
@@ -285,7 +285,7 @@ async def test_list_eligible_user_ids_only_returns_eligible(
 @pytest.mark.asyncio
 async def test_filter_eligible_recipients_returns_only_eligible(
     db_session: AsyncSession,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
 ) -> None:
     """filter_eligible_recipients 批量过滤混合用户列表，只返回 eligible 的。"""
     eligible1 = await user_factory(status="active", roles=["member"])
@@ -327,7 +327,7 @@ async def test_filter_eligible_recipients_empty_input(db_session: AsyncSession) 
 @pytest.mark.asyncio
 async def test_filter_eligible_recipients_preserves_eligible_order(
     db_session: AsyncSession,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
 ) -> None:
     """filter_eligible_recipients 返回有资格用户（顺序由数据库查询决定）。"""
     u1 = await user_factory(status="active", roles=["member"])
@@ -348,7 +348,7 @@ async def test_filter_eligible_recipients_preserves_eligible_order(
 @pytest.mark.asyncio
 async def test_renewal_restores_eligibility(
     db_session: AsyncSession,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
 ) -> None:
     """续期后自动恢复监控：expired → not eligible，更新为 active → eligible。"""
     user = await user_factory(status="active", roles=["member"])

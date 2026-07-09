@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from unittest.mock import MagicMock
+from uuid import UUID
 
 import numpy as np
 import pandas as pd
@@ -75,6 +76,7 @@ def test_percentile_rank_basic() -> None:
     series = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
     # value=3 在 [1,2,3,4,5] 中排名 = 3/5 = 0.6
     result = percentile_rank(3.0, series, lookback=5)
+    assert result is not None
     assert abs(result - 0.6) < 1e-9
 
 
@@ -82,6 +84,7 @@ def test_percentile_rank_max_value() -> None:
     """最大值排名 = 1.0。"""
     series = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
     result = percentile_rank(5.0, series, lookback=5)
+    assert result is not None
     assert abs(result - 1.0) < 1e-9
 
 
@@ -89,6 +92,7 @@ def test_percentile_rank_min_value() -> None:
     """最小值排名 = 0.2（1/5）。"""
     series = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
     result = percentile_rank(1.0, series, lookback=5)
+    assert result is not None
     assert abs(result - 0.2) < 1e-9
 
 
@@ -98,6 +102,7 @@ def test_percentile_rank_lookback_truncates() -> None:
     series = np.array([100, 200, 300, 400, 500, 1, 2, 3, 4, 5], dtype=float)
     # value=5, lookback=5 -> 只看 [1,2,3,4,5]，排名=5/5=1.0
     result = percentile_rank(5.0, series, lookback=5)
+    assert result is not None
     assert abs(result - 1.0) < 1e-9
 
 
@@ -785,7 +790,7 @@ def test_compute_structural_factors_exception_isolation() -> None:
     mock_session = MagicMock()
     result = asyncio_run(compute_structural_factors(
         session=mock_session,
-        instrument_id="00000000-0000-0000-0000-000000000001",
+        instrument_id=UUID("00000000-0000-0000-0000-000000000001"),
         primary_timeframe="1d",
         secondary_timeframe="15m",
     ))
@@ -802,7 +807,7 @@ def test_compute_structural_factors_meta_structure() -> None:
     mock_session = MagicMock()
     result = asyncio_run(compute_structural_factors(
         session=mock_session,
-        instrument_id="00000000-0000-0000-0000-000000000001",
+        instrument_id=UUID("00000000-0000-0000-0000-000000000001"),
     ))
     meta = result["meta"]
     assert "as_of" in meta

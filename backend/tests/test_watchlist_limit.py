@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,6 +33,7 @@ from app.models.subscription import Subscription
 from app.models.user import Role, User, UserRole
 from app.models.watchlist import UserWatchlistItem
 from app.services.subscription_service import generate_invite_codes, register_with_invite_code
+from tests.conftest import make_asgi_transport
 
 
 async def _ensure_role(db: AsyncSession, name: str) -> Role:
@@ -137,7 +138,7 @@ async def watchlist_client(db_session: AsyncSession) -> AsyncGenerator[tuple[Asy
     app.dependency_overrides[deps_get_db] = get_test_db
     app.dependency_overrides[db_get_db] = get_test_db
 
-    transport = ASGITransport(app=app)
+    transport = make_asgi_transport(app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client, db_session
 

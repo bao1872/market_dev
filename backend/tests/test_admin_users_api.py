@@ -20,7 +20,6 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -33,6 +32,7 @@ from app.core.security import create_access_token, get_password_hash
 from app.models.access_audit_log import AccessAuditLog
 from app.models.subscription import Subscription
 from app.models.user import User
+from tests.conftest import AsyncFactory
 
 
 def _auth_headers(user_id: uuid.UUID) -> dict[str, str]:
@@ -48,7 +48,7 @@ async def _db_session_flush(obj, db_session: AsyncSession) -> None:
 
 
 @pytest_asyncio.fixture
-async def admin_user(user_factory: Callable[..., User]) -> User:
+async def admin_user(user_factory: AsyncFactory[User]) -> User:
     """创建管理员测试用户。"""
     return await user_factory(
         email="admin@example.com",
@@ -58,7 +58,7 @@ async def admin_user(user_factory: Callable[..., User]) -> User:
 
 
 @pytest_asyncio.fixture
-async def member_user(user_factory: Callable[..., User]) -> User:
+async def member_user(user_factory: AsyncFactory[User]) -> User:
     """创建普通会员测试用户（无订阅）。"""
     return await user_factory(
         email="member@example.com",
@@ -271,7 +271,7 @@ async def test_admin_renew_subscription_endpoint(
     client: AsyncClient,
     admin_user: User,
     member_user: User,
-    subscription_factory: Callable[..., Subscription],
+    subscription_factory: AsyncFactory[Subscription],
     db_session: AsyncSession,
 ) -> None:
     """管理员可通过新端点续期 subscription。"""
@@ -309,7 +309,7 @@ async def test_admin_revoke_subscription_endpoint(
     client: AsyncClient,
     admin_user: User,
     member_user: User,
-    subscription_factory: Callable[..., Subscription],
+    subscription_factory: AsyncFactory[Subscription],
     db_session: AsyncSession,
 ) -> None:
     """管理员可通过新端点撤销 subscription。"""
@@ -338,7 +338,7 @@ async def test_admin_change_plan_endpoint(
     client: AsyncClient,
     admin_user: User,
     member_user: User,
-    subscription_factory: Callable[..., Subscription],
+    subscription_factory: AsyncFactory[Subscription],
     db_session: AsyncSession,
 ) -> None:
     """管理员可通过新端点切换用户套餐。"""

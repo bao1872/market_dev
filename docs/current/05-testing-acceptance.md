@@ -895,6 +895,20 @@ mypy baseline 已清零（total=0, unique=0）。清理历程：
 - **ruff baseline 更新**：只有实际修复代码或添加合法 noqa 后，才能从 `tools/quality_baselines/ruff.json` 删除对应条目；
 - **剩余 ruff 债务**：N815/W293/F841/E741/B905 等其他规则由后续 PR 分批处理。
 
+### 5.1.4 tests mypy 清零规则
+
+`backend/tests/` 目录的 mypy 错误已清零（CHANGE-20260709-011），与 `backend/app/` 一样不得新增错误。
+
+- **mypy app 和 mypy tests 都不得新增错误**：CI 阻断 `Mypy New Files` 检查 `app/`，`tests/` 错误不得通过 `type: ignore` / `cast` / `Any` 掩盖；
+- **禁止用 Any/cast/type:ignore 掩盖测试错误**：所有 None 分支必须显式 `assert x is not None` 或 `if x is None: raise`；类型不匹配必须用 `isinstance` 或 Protocol/TypedDict/dataclass 收窄；
+- **fixture/mock 必须结构化 typed**：
+  - 异步工厂 fixture 返回类型使用 `AsyncFactory[T]`（`Callable[..., Coroutine[Any, Any, T]]`），不得用裸 `Callable[..., T]`；
+  - mock 对象使用 `Protocol`、`dataclass`、`TypedDict`、`NamedTuple` 或真实 ORM 最小构造，不得用 `SimpleNamespace` 假装成真实 ORM；
+  - `httpx.ASGITransport` 第三方存根缺口用单点 `make_asgi_transport(app)` helper 桥接，不得在每个测试里重复 cast；
+- **每个测试债务 PR 必须 before/after**：PR 描述必须列出 tests mypy 修改前后错误数量（如 `tests mypy: 300 → 0`）；
+- **不改变测试覆盖**：禁止为过 mypy 删除测试或降低断言强度；历史废弃测试必须证明对应功能已删除且测试不再被引用后才可移除；
+- **app 类型声明阻碍测试时**：若 `app/` 类型声明过窄导致测试无法通过且 `mypy app` 仍需 0，允许收紧 app 类型（如 `require_feature` 返回 `Coroutine` 而非 `object`），但必须保证无运行时行为变化并在 PR 中说明。
+
 ## 6. 完成标准
 
 一次变更完成必须满足：

@@ -687,3 +687,16 @@ Ruff 债务清理属于纯样式修复，不需要构建镜像、部署或重启
 - N806 仅允许两种处理方式：普通局部变量安全重命名为 snake_case；算法对齐变量（TradingView/PineScript/SMC 原命名）使用最小范围 `# noqa: N806` 并在旁注释 "kept to match upstream algorithm naming"；
 - `strategy_assets` 虽是算法资产，但存在生产 import，不得从质量门禁中整体排除；
 - 禁止全文件无说明的 blanket ignore；若使用 per-file ignore，必须在文件头注释说明原因，并在本节登记。
+
+## 12. tests mypy 债务治理
+
+`backend/tests/` mypy 债务清理属于纯类型修复，不需要构建镜像、部署或重启任何服务：
+
+- 不构建 Docker、不重启 backend / worker、不启动 research backfill、不动生产调度逻辑；
+- 不跑 coverage、不生成截图/DB 备份/大日志；
+- mypy 使用 `MYPY_CACHE_DIR=/tmp/mypy_tests_cache` 单独检查 `tests/` 目录，跑完删除 cache，不全仓库反复生成；
+- 长命令（mypy tests 冷启动、大批量 pytest）使用 `nohup` + `/tmp/<name>.log` + `/tmp/<name>.pid` 后台执行，用 `ps`/`tail` 轮询，不依赖 Trae 交互式长连接；
+- 磁盘可用空间 < 15GB 时立即停止 tests mypy 治理工作，优先保障生产服务运行；
+- 临时日志和 cache（`/tmp/mypy_tests_*.log`、`/tmp/pytest_*.log` 等）只允许放在 `/tmp`，不得 commit；
+- 修复原则：typed fixtures（Protocol/dataclass/TypedDict）、显式 Optional 收窄（`assert x is not None`）、不大面积 Any/cast/type:ignore；
+- 单 PR 只处理 tests mypy 债务，不混入业务逻辑修改或 app 行为变化。

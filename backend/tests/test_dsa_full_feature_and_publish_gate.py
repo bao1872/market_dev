@@ -68,6 +68,7 @@ class FakeRuntime(StrategyRuntime):
             return None
         if behavior == "timeout":
             raise BudgetExceededError("模拟单股超时", timeout_ms=10)
+        assert context.trade_date is not None
         return StrategyResult(
             instrument_id=context.instrument_id,
             strategy_version_id=self._version_id or uuid.uuid4(),

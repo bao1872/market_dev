@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -34,6 +33,7 @@ from app.services.subscription_service import (
     renew_subscription,
     revoke_subscription,
 )
+from tests.conftest import AsyncFactory
 
 
 def _auth_headers(user_id: uuid.UUID) -> dict[str, str]:
@@ -43,7 +43,7 @@ def _auth_headers(user_id: uuid.UUID) -> dict[str, str]:
 
 
 @pytest_asyncio.fixture
-async def admin_user(user_factory: Callable[..., User]) -> User:
+async def admin_user(user_factory: AsyncFactory[User]) -> User:
     """创建管理员测试用户。"""
     return await user_factory(
         email="admin@example.com",
@@ -53,7 +53,7 @@ async def admin_user(user_factory: Callable[..., User]) -> User:
 
 
 @pytest_asyncio.fixture
-async def member_user(user_factory: Callable[..., User]) -> User:
+async def member_user(user_factory: AsyncFactory[User]) -> User:
     """创建普通会员测试用户（无订阅）。"""
     return await user_factory(
         email="member@example.com",
@@ -93,7 +93,7 @@ async def test_grant_subscription_to_user_creates_subscription(
 async def test_grant_subscription_to_user_already_exists_fails(
     db_session: AsyncSession,
     member_user: User,
-    subscription_factory: Callable[..., Subscription],
+    subscription_factory: AsyncFactory[Subscription],
 ) -> None:
     """用户已存在 subscription 时再次 grant 应失败。"""
     await subscription_factory(user_id=member_user.id)
@@ -126,7 +126,7 @@ async def test_grant_subscription_to_admin_fails(
 async def test_renew_subscription_extends_expires_at(
     db_session: AsyncSession,
     member_user: User,
-    subscription_factory: Callable[..., Subscription],
+    subscription_factory: AsyncFactory[Subscription],
 ) -> None:
     """未到期续期从当前到期日顺延自然月。"""
     now = datetime.now(UTC)
@@ -152,7 +152,7 @@ async def test_renew_subscription_extends_expires_at(
 async def test_renew_subscription_after_expiry(
     db_session: AsyncSession,
     member_user: User,
-    subscription_factory: Callable[..., Subscription],
+    subscription_factory: AsyncFactory[Subscription],
 ) -> None:
     """已到期续期从当前时间重新计算。"""
     now = datetime.now(UTC)
@@ -192,7 +192,7 @@ async def test_renew_subscription_no_subscription_fails(
 async def test_revoke_subscription_marks_revoked(
     db_session: AsyncSession,
     member_user: User,
-    subscription_factory: Callable[..., Subscription],
+    subscription_factory: AsyncFactory[Subscription],
 ) -> None:
     """revoke_subscription 将 subscription 标记为 revoked。"""
     await subscription_factory(user_id=member_user.id)
@@ -206,7 +206,7 @@ async def test_revoke_subscription_marks_revoked(
 async def test_change_subscription_plan_updates_plan_code(
     db_session: AsyncSession,
     member_user: User,
-    subscription_factory: Callable[..., Subscription],
+    subscription_factory: AsyncFactory[Subscription],
 ) -> None:
     """change_subscription_plan 更新套餐并顺延到期日。"""
     now = datetime.now(UTC)
@@ -329,7 +329,7 @@ async def test_admin_renew_subscription_endpoint(
     client: AsyncClient,
     admin_user: User,
     member_user: User,
-    subscription_factory: Callable[..., Subscription],
+    subscription_factory: AsyncFactory[Subscription],
     db_session: AsyncSession,
 ) -> None:
     """管理员可通过端点为用户续期 subscription。"""
@@ -357,7 +357,7 @@ async def test_admin_revoke_subscription_endpoint(
     client: AsyncClient,
     admin_user: User,
     member_user: User,
-    subscription_factory: Callable[..., Subscription],
+    subscription_factory: AsyncFactory[Subscription],
     db_session: AsyncSession,
 ) -> None:
     """管理员可通过端点撤销用户 subscription。"""
@@ -376,7 +376,7 @@ async def test_admin_change_plan_endpoint(
     client: AsyncClient,
     admin_user: User,
     member_user: User,
-    subscription_factory: Callable[..., Subscription],
+    subscription_factory: AsyncFactory[Subscription],
 ) -> None:
     """管理员可通过端点切换用户套餐。"""
     now = datetime.now(UTC)
@@ -400,7 +400,7 @@ async def test_admin_change_role_to_admin_revokes_subscription(
     client: AsyncClient,
     admin_user: User,
     member_user: User,
-    subscription_factory: Callable[..., Subscription],
+    subscription_factory: AsyncFactory[Subscription],
     db_session: AsyncSession,
 ) -> None:
     """将用户改为 admin 角色后应撤销其 subscription。"""
@@ -427,7 +427,7 @@ async def test_admin_change_role_to_admin_revokes_subscription(
 async def test_admin_change_role_to_member(
     client: AsyncClient,
     admin_user: User,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
 ) -> None:
     """将用户改为 member 角色。"""
     user = await user_factory(roles=["admin"])
@@ -523,7 +523,7 @@ async def test_admin_audit_logs_target_user_filter(
     client: AsyncClient,
     admin_user: User,
     member_user: User,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
     db_session: AsyncSession,
 ) -> None:
     """审计日志支持按 target_user_id 筛选。"""

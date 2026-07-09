@@ -415,6 +415,7 @@ class TestVolumeNodeMonitorEvents:
         context = _make_context(daily_bars, minute_bars)
         curr_state = await monitor.calculate_state(context)
 
+        assert monitor._last_vp_result is not None
         peak_prices = monitor._last_vp_result.all_peak_prices
         assert peak_prices, "需要至少一个 peak_price 才能构造穿越"
         crossover_price = float(peak_prices[len(peak_prices) // 2])
@@ -443,6 +444,7 @@ class TestVolumeNodeMonitorEvents:
         context = _make_context(daily_bars, minute_bars)
         curr_state = await monitor.calculate_state(context)
 
+        assert monitor._last_vp_result is not None
         peak_prices = monitor._last_vp_result.all_peak_prices
         assert peak_prices
         crossover_price = float(peak_prices[len(peak_prices) // 2])
@@ -466,6 +468,7 @@ class TestVolumeNodeMonitorEvents:
         context = _make_context(daily_bars, minute_bars)
         curr_state = await monitor.calculate_state(context)
 
+        assert monitor._last_vp_result is not None
         peak_prices = monitor._last_vp_result.all_peak_prices
         assert len(peak_prices) >= 2, "需要至少 2 个 peak_price"
         price_a = float(peak_prices[0])

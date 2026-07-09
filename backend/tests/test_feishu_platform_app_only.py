@@ -170,7 +170,9 @@ def test_migration_fails_when_feishu_webhook_rows_exist() -> None:
     spec = importlib.util.spec_from_file_location(
         "migration_055", migration_path,
     )
+    assert spec is not None
     module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
     spec.loader.exec_module(module)
 
     # mock op.get_bind() 返回有 feishu_webhook 行的连接
@@ -199,7 +201,9 @@ def test_migration_passes_when_no_feishu_webhook_rows() -> None:
     spec = importlib.util.spec_from_file_location(
         "migration_055_pass", migration_path,
     )
+    assert spec is not None
     module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
     spec.loader.exec_module(module)
 
     # mock op.get_bind() 返回无 feishu_webhook 行的连接

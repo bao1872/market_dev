@@ -738,6 +738,7 @@ async def test_backfill_instrument_first_creates_succeeded_run(db_session) -> No
     assert mock_create.await_count == 1
     # 应 finish 为 succeeded（失败率 0）
     assert mock_finish.await_count == 1
+    assert mock_finish.await_args is not None
     finish_kwargs = mock_finish.await_args.kwargs
     assert finish_kwargs["status"] == "succeeded"
     assert finish_kwargs["snapshot_count"] == 1
@@ -826,6 +827,7 @@ async def test_backfill_instrument_first_creates_failed_run(db_session) -> None:
     assert result["total_failed"] == 2
     # run.status='failed'（failure_rate=0.67 > 0.3）
     assert mock_finish.await_count == 1
+    assert mock_finish.await_args is not None
     finish_kwargs = mock_finish.await_args.kwargs
     assert finish_kwargs["status"] == "failed"
     assert finish_kwargs["snapshot_count"] == 1
@@ -1396,6 +1398,7 @@ def test_worker_process_instruments_per_date_commit() -> None:
             existing_per_date_str={},
             worker_id=0,
         )
+        assert isinstance(result, dict)
 
     # per-date commit：2 instruments × 2 dates = 4 commits
     assert fake_session.commits == 4, (
@@ -1447,6 +1450,7 @@ def test_worker_process_instruments_resume_skips_existing() -> None:
             existing_per_date_str=existing,
             worker_id=0,
         )
+        assert isinstance(result, dict)
 
     assert len(compute_calls) == 1, (
         f"resume 应跳过 inst1，只计算 inst2，实际调用 {len(compute_calls)} 次"
@@ -1496,6 +1500,7 @@ def test_worker_process_instruments_single_failure_doesnt_block() -> None:
             existing_per_date_str={},
             worker_id=0,
         )
+        assert isinstance(result, dict)
 
     # inst1 失败（load 抛异常 → rollback），inst2 成功
     assert result["2026-01-05"]["failed"] == 1
@@ -1596,6 +1601,7 @@ async def test_backfill_instrument_first_parallel_creates_and_finalizes_run() ->
     assert mock_create.await_count == 1
     # finish 为 succeeded（failure_rate=0）
     assert mock_finish.await_count == 1
+    assert mock_finish.await_args is not None
     finish_kwargs = mock_finish.await_args.kwargs
     assert finish_kwargs["status"] == "succeeded"
     assert finish_kwargs["snapshot_count"] == 2
@@ -1657,6 +1663,7 @@ async def test_backfill_instrument_first_parallel_high_failure_marks_failed() ->
         )
 
     assert mock_finish.await_count == 1
+    assert mock_finish.await_args is not None
     finish_kwargs = mock_finish.await_args.kwargs
     assert finish_kwargs["status"] == "failed"
     assert finish_kwargs["snapshot_count"] == 1
@@ -1784,6 +1791,7 @@ async def test_backfill_parallel_worker_exception_counts_as_failed() -> None:
         )
 
     assert mock_finish.await_count == 1
+    assert mock_finish.await_args is not None
     finish_kwargs = mock_finish.await_args.kwargs
     # worker 崩溃 → 2 instruments 全部 failed
     assert finish_kwargs["status"] == "failed", (
@@ -1836,6 +1844,7 @@ def test_worker_commit_failure_doesnt_count_as_success() -> None:
             existing_per_date_str={},
             worker_id=0,
         )
+        assert isinstance(result, dict)
 
     # commit 被尝试但失败
     assert fake_session.commits == 1
@@ -1890,6 +1899,7 @@ def test_worker_upsert_exception_rollback_continues() -> None:
             existing_per_date_str={},
             worker_id=0,
         )
+        assert isinstance(result, dict)
 
     # date1 失败（upsert 异常 → rollback）
     assert result["2026-01-05"]["failed"] == 1
@@ -2050,6 +2060,7 @@ def test_worker_per_date_commit_all_succeed() -> None:
             existing_per_date_str={},
             worker_id=0,
         )
+        assert isinstance(result, dict)
 
     # per-date commit：2 instruments × 2 dates = 4 commits
     assert fake_session.commits == 4, (

@@ -165,6 +165,7 @@ async def test_create_after_close_run_writes_queued_event(db_session) -> None:
     assert result.status == "running"
 
     # 验证 metadata_json 含 orchestrator_status=queued
+    assert result.metadata_json is not None
     meta = json.loads(result.metadata_json)
     assert meta["orchestrator_status"] == AfterCloseRunStatus.QUEUED.value
     assert meta["trade_date"] == "2026-06-25"
@@ -293,6 +294,7 @@ async def test_retry_after_close_run_writes_event(db_session) -> None:
     assert result.error_message is None
     assert result.finished_at is None
 
+    assert result.metadata_json is not None
     meta = json.loads(result.metadata_json)
     assert meta["orchestrator_status"] == AfterCloseRunStatus.QUEUED.value
 
@@ -438,6 +440,7 @@ async def test_execute_failure_writes_failed_event(db_session) -> None:
     assert len(failed_events) >= 1, f"缺少 failed 事件: {[e.step for e in events]}"
     assert failed_events[0].level == "error"
     assert "pytdx 连接超时" in failed_events[0].message
+    assert failed_events[0].payload is not None
     assert failed_events[0].payload["error_type"] == "RuntimeError"
     assert "traceback" in failed_events[0].payload
 
@@ -911,6 +914,7 @@ async def test_update_orchestrator_status_preserves_mode_field(db_session) -> No
     await db_session.flush()
 
     # 验证：mode 字段应保留
+    assert job_run.metadata_json is not None
     meta = json.loads(job_run.metadata_json)
     assert meta["orchestrator_status"] == "queued", (
         f"orchestrator_status 应为 queued，实际 {meta.get('orchestrator_status')}"
@@ -1097,11 +1101,14 @@ async def test_feature_snapshot_progress_callback_updates_heartbeat_and_metadata
 
     # 验证心跳与 lease 被更新
     assert job_run.heartbeat_at is not None
+    assert original_heartbeat_at is not None
     assert job_run.heartbeat_at > original_heartbeat_at
     assert job_run.lease_expires_at is not None
+    assert original_lease is not None
     assert job_run.lease_expires_at > original_lease
 
     # 验证 metadata 含进度
+    assert job_run.metadata_json is not None
     meta = json.loads(job_run.metadata_json)
     assert "feature_snapshot_progress" in meta
     progress = meta["feature_snapshot_progress"]
@@ -1188,6 +1195,7 @@ async def test_repair_stale_snapshot_run_marks_failed_when_orchestrator_interrup
     await db_session.refresh(snapshot_run)
     assert snapshot_run.status == STATUS_FAILED
     assert snapshot_run.published_at is None
+    assert snapshot_run.metadata_ is not None
     assert snapshot_run.metadata_.get("reason") == "orchestrator_interrupted_or_lease_expired"
 
 

@@ -203,6 +203,7 @@ class TestDSASelector:
         # 验证 StrategyResult 结构
         assert isinstance(result, StrategyResult)
         assert result.instrument_id == bullish_context.instrument_id
+        assert dsa_selector._version is not None
         assert result.strategy_version_id == dsa_selector._version.id
         assert result.trade_date == bullish_context.trade_date
         assert result.calculation_id is not None

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from sqlalchemy import UniqueConstraint
 
+from app.models._table_meta import table_indexes
 from app.models.research_feature_matrix import (
     ALL_STATUSES,
     STATUS_FAILED,
@@ -63,7 +64,7 @@ def test_run_table_required_columns() -> None:
 
 def test_run_table_indexes() -> None:
     """run 表索引：unique(run_key) + index(month) + index(status)。"""
-    idx_names = {i.name for i in ResearchFeatureMatrixRun.__table__.indexes if i.name}
+    idx_names = {i.name for i in table_indexes(ResearchFeatureMatrixRun) if i.name}
     assert "ix_research_matrix_runs_month" in idx_names
     assert "ix_research_matrix_runs_status" in idx_names
 
@@ -109,7 +110,7 @@ def test_row_table_has_33_feature_columns() -> None:
 
 def test_row_table_indexes() -> None:
     """row 表索引：3 个 btree index (trade_date, instrument_id, run_id)。"""
-    idx_names = {i.name for i in ResearchFeatureMatrixRow.__table__.indexes if i.name}
+    idx_names = {i.name for i in table_indexes(ResearchFeatureMatrixRow) if i.name}
     assert "ix_research_matrix_rows_trade_date" in idx_names
     assert "ix_research_matrix_rows_instrument_id" in idx_names
     assert "ix_research_matrix_rows_run_id" in idx_names
@@ -205,7 +206,7 @@ def test_status_constants() -> None:
 
 def test_no_gin_index_on_metadata_json() -> None:
     """metadata_json 不得有 GIN 索引（轻量宽表设计）。"""
-    for idx in ResearchFeatureMatrixRun.__table__.indexes:
+    for idx in table_indexes(ResearchFeatureMatrixRun):
         for col in idx.columns:
             assert col.name != "metadata_json", (
                 f"metadata_json 不应出现在索引 {idx.name} 中"

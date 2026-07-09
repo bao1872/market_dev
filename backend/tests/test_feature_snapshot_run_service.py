@@ -181,6 +181,7 @@ async def test_finish_snapshot_run_failed_does_not_write_published_at(
     assert finished.failure_rate == pytest.approx(0.8)
     assert finished.finished_at is not None
     assert finished.published_at is None  # failed 不写 published_at
+    assert finished.metadata_ is not None
     assert finished.metadata_["reason"] == "failure_threshold_exceeded"
 
 
@@ -198,6 +199,7 @@ async def test_finish_snapshot_run_accepts_metadata_for_audit(
     )
 
     # create 时 metadata 已写入
+    assert run.metadata_ is not None
     assert run.metadata_["batch_size"] == 20
 
     await finish_snapshot_run(
@@ -210,5 +212,7 @@ async def test_finish_snapshot_run_accepts_metadata_for_audit(
     stmt = select(StockFeatureSnapshotRun).where(StockFeatureSnapshotRun.id == run.id)
     finished = (await db_session.execute(stmt)).scalar_one()
     # finish 时的 metadata 覆盖 create 时的 metadata
+    assert finished.metadata_ is not None
     assert finished.metadata_["duration_sec"] == 120.5
+    assert finished.metadata_ is not None
     assert finished.metadata_["rollback_reason"] is None

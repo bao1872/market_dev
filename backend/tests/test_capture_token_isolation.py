@@ -32,13 +32,14 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import create_access_token, create_capture_token, get_password_hash
 from app.main import app
 from app.models.user import Role, User, UserRole
+from tests.conftest import make_asgi_transport
 
 
 async def _ensure_role(db: AsyncSession, name: str) -> Role:
@@ -89,7 +90,7 @@ async def isolation_client(
     app.dependency_overrides[deps_get_db] = get_test_db
     app.dependency_overrides[db_get_db] = get_test_db
 
-    transport = ASGITransport(app=app)
+    transport = make_asgi_transport(app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client, db_session
 

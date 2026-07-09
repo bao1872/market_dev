@@ -4,6 +4,16 @@
 
 ## 2026-07-09
 
+- CHANGE-20260709-011: tests mypy 债务清零
+  - `backend/tests/` mypy 300 errors → 0 errors（133 source files），`mypy app` 仍 0 errors（249 source files）
+  - conftest.py 新增 `AsyncFactory[T]` 类型别名 + `make_asgi_transport(app)` helper（桥接 httpx/Starlette 第三方存根缺口）
+  - 54 个测试文件：异步工厂 fixture 改用 `AsyncFactory[T]`、Optional 分支显式 `assert x is not None` 收窄、mock 改用真实 ORM/Protocol
+  - `app/services/access_control_service.py`：`require_feature`/`require_quota` 返回类型收紧为 `Coroutine`（类型-only，无运行时行为变化）
+  - `app/strategy/runtime.py`：`execute` 返回类型 `StrategyResult` → `StrategyResult | None`（诚实 typing，batch service 已处理 None）
+  - 1 处 `cast`（make_asgi_transport 第三方存根缺口，集中单点），无 `type: ignore` / `Any` 掩盖
+  - 不构建/部署/重启服务、不跑 coverage
+  - 更新 `docs/current/05-testing-acceptance.md`（§5.1.4 tests mypy 清零规则）、`docs/current/03-jobs-integrations-operations.md`（§12 tests mypy 债务治理）
+
 - CHANGE-20260709-010: ruff strategy_assets C408/N806 债务清零
   - ruff baseline total 889→274，删除 615 个 C408/N806 条目（440 C408 + 174 N806 + 1 N806）
   - C408 全部 `ruff --fix --unsafe-fixes` 自动修复（`dict()` → `{}`）

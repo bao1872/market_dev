@@ -344,6 +344,7 @@ async def test_pipeline_interrupted_with_running_snapshot(
         error_message="后台进程在任务执行期间重启，任务租约过期或心跳超时，系统自动中断",
     )
     # 补充 feature_snapshot_run_id / progress 到 metadata
+    assert job_run.metadata_json is not None
     meta = json.loads(job_run.metadata_json)
     meta["feature_snapshot_run_id"] = str(uuid.uuid4())
     meta["feature_snapshot_progress"] = {

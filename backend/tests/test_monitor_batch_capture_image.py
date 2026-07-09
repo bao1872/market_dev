@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
@@ -22,16 +21,20 @@ from app.core.deps import CAPTURE_SCOPE_STOCK_DETAIL
 from app.core.security import decode_token
 from app.models.capture_job import CAPTURE_STATUS_FAILED, CAPTURE_STATUS_SUCCEEDED, CaptureJob
 from app.models.outbox import Outbox
+from app.models.strategy_event import StrategyEvent
 from app.services.monitor_batch_service import MonitorBatchService
 
 
-def _make_event(instrument_id: UUID) -> SimpleNamespace:
+def _make_event(instrument_id: UUID) -> StrategyEvent:
     """构造最小 mock StrategyEvent（不依赖 DB）。"""
-    return SimpleNamespace(
+    return StrategyEvent(
         id=uuid4(),
+        event_key=f"test-event-{uuid4().hex}",
+        strategy_version_id=uuid4(),
         instrument_id=instrument_id,
         event_type="bb_upper_touch",
         event_time=datetime(2026, 7, 7, 10, 30, tzinfo=UTC),
+        schema_version=1,
         payload={"price": 100.0},
         snapshot={},
     )

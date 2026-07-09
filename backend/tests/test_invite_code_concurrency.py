@@ -21,11 +21,13 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ClauseElement, Executable
 
 from app.core.security import get_password_hash
 from app.models.user import Role, User, UserRole
@@ -67,13 +69,13 @@ async def _create_admin(db: AsyncSession) -> User:
     return admin
 
 
-def _is_invite_code_select_with_for_update(stmt: object) -> bool:
+def _is_invite_code_select_with_for_update(stmt: ClauseElement) -> bool:
     """判断语句是否为 InviteCode 表的 SELECT 且包含 FOR UPDATE。
 
     通过编译为 PostgreSQL 方言检查 SQL 文本，避免依赖 SQLAlchemy 内部属性。
     """
     try:
-        compiled = stmt.compile(dialect=postgresql.dialect())  # type: ignore[attr-defined]
+        compiled = stmt.compile(dialect=postgresql.dialect())
     except Exception:
         return False
     sql = str(compiled).upper()
@@ -101,12 +103,13 @@ async def test_register_with_invite_code_uses_pessimistic_lock(db_session: Async
     raw_code = results[0][1]
 
     # 包装 db.execute 捕获所有传入的语句
-    captured: list[object] = []
+    captured: list[ClauseElement] = []
     original_execute = db_session.execute
 
-    async def capture_execute(stmt: object, *args: object, **kwargs: object) -> object:
+    async def capture_execute(stmt: ClauseElement, *args: Any, **kwargs: Any) -> Any:
         captured.append(stmt)
-        return await original_execute(stmt, *args, **kwargs)  # type: ignore[arg-type]
+        assert isinstance(stmt, Executable)
+        return await original_execute(stmt, *args, **kwargs)
 
     db_session.execute = capture_execute  # type: ignore[assignment]
 
@@ -126,10 +129,10 @@ async def test_register_with_invite_code_uses_pessimistic_lock(db_session: Async
     )
 
 
-def _is_invite_code_select(stmt: object) -> bool:
+def _is_invite_code_select(stmt: ClauseElement) -> bool:
     """判断语句是否为 InviteCode 表的 SELECT（不检查 FOR UPDATE）。"""
     try:
-        compiled = stmt.compile(dialect=postgresql.dialect())  # type: ignore[attr-defined]
+        compiled = stmt.compile(dialect=postgresql.dialect())
     except Exception:
         return False
     sql = str(compiled).upper()
@@ -166,12 +169,13 @@ async def test_renew_with_invite_code_uses_pessimistic_lock(db_session: AsyncSes
     await db_session.flush()
 
     # 包装 db.execute 捕获 renew 调用中的语句
-    captured: list[object] = []
+    captured: list[ClauseElement] = []
     original_execute = db_session.execute
 
-    async def capture_execute(stmt: object, *args: object, **kwargs: object) -> object:
+    async def capture_execute(stmt: ClauseElement, *args: Any, **kwargs: Any) -> Any:
         captured.append(stmt)
-        return await original_execute(stmt, *args, **kwargs)  # type: ignore[arg-type]
+        assert isinstance(stmt, Executable)
+        return await original_execute(stmt, *args, **kwargs)
 
     db_session.execute = capture_execute  # type: ignore[assignment]
 
@@ -274,7 +278,7 @@ async def test_concurrent_registration_only_one_succeeds() -> None:
 
     session_a = TestAsyncSessionLocal()
     session_b = TestAsyncSessionLocal()
-    results_concurrent: list[object] = []
+    results_concurrent: tuple[tuple[User, object] | BaseException, ...] = ()
     try:
         results_concurrent = await asyncio.gather(
             register_and_commit(session_a, email_a),

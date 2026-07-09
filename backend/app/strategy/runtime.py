@@ -159,7 +159,7 @@ class StrategyRuntime(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def execute(self, context: MarketDataContext) -> StrategyResult:
+    async def execute(self, context: MarketDataContext) -> StrategyResult | None:
         """执行 selector 策略计算。
 
         根据 MarketDataContext 中的市场数据计算指标和状态，
@@ -183,6 +183,7 @@ class StrategyRuntime(ABC):
             指标字典，key=指标名, value=数值或数值列表
         """
         result = await self.execute(context)
+        assert result is not None
         return result.metrics
 
     async def calculate_state(self, context: MarketDataContext) -> MonitorState:

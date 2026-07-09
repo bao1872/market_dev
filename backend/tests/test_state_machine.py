@@ -208,6 +208,7 @@ class TestStateMachineSend:
         assert len(capture_jobs) == 1
         assert capture_jobs[0].status == CAPTURE_STATUS_FAILED
         assert capture_jobs[0].error_code == "CAPTURE_REQUEST_FAILED"
+        assert capture_jobs[0].error_message is not None
         assert "worker 内部截图超时" in capture_jobs[0].error_message
 
     @pytest.mark.asyncio

@@ -11,6 +11,7 @@ How to Run:
 
 from __future__ import annotations
 
+import uuid
 from datetime import date
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -182,8 +183,9 @@ async def test_retention_permanent_tables_not_cleaned() -> None:
 
 def test_reconcile_result_dataclass() -> None:
     """验证 ReconcileResult 数据类字段完整性。"""
+    test_uuid = uuid.uuid4()
     result = ReconcileResult(
-        instrument_id="test-uuid",
+        instrument_id=test_uuid,
         symbol="000001",
         period="d",
         db_count=100,
@@ -193,7 +195,7 @@ def test_reconcile_result_dataclass() -> None:
         mismatch_count=0,
         mismatches=[],
     )
-    assert result.instrument_id == "test-uuid"
+    assert result.instrument_id == test_uuid
     assert result.symbol == "000001"
     assert result.period == "d"
     assert result.db_count == 100
