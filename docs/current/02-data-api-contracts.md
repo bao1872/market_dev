@@ -10,6 +10,7 @@
 | 自选监控 | `user_watchlist_items`, `monitor_states`, `monitor_evaluations`, `strategy_events`, `event_recipients`, `stock_feature_snapshots`, `stock_feature_snapshot_runs` |
 | 消息投递 | `notification_channels`, `notification_messages`, `outbox`, `message_deliveries`, `capture_jobs` |
 | 任务运行 | `scheduler_job_runs`, `job_run_events`, `worker_heartbeats` |
+| 用户偏好 | `user_table_view_presets` |
 
 partial 实时 Bar 不写入完成 Bar 表，只存在于请求快照或短缓存。
 
@@ -44,6 +45,7 @@ strategy_run_items.reason_code 标准编码：
 | 趋势结果 | 是 | 否，403 | 是 |
 | Watchlist 读写和状态 | 是 | 否，403 | 是 |
 | 个股详情和行情研究 | 是 | 否，403 | 是 |
+| 表格视图配置（`/me/table-view-presets`） | 是 | 否，403 | 是 |
 | 管理 API | 否 | 否 | 是 |
 
 后端权限不能只靠前端隐藏。所有私有资源从 JWT 获取 user_id。
@@ -59,6 +61,7 @@ strategy_run_items.reason_code 标准编码：
 | 监控 | `/monitor-states`, `/strategy-events` | 只处理完成 Bar，按用户资格过滤；monitor_event 在 `delivery_worker.py` 投递前再次用 `is_user_eligible_for_monitor` 复核，active admin 放行，disabled admin / 无订阅普通用户排除 |
 | 通知 | `/messages`, `/notification-channels` | 用户只能操作自己的消息和渠道 |
 | 自选 | `/watchlist` | active subscription + monitor_limit |
+| 表格视图配置 | `/me/table-view-presets` | 用户表格视图配置 CRUD；JWT user_id 隔离；active subscription + trend_selection feature（admin 豁免）；config 仅允许 keyword/sort/filters/hiddenColumns/pageSize；每 user+table_id+strategy_key 最多 20 个；`(user_id, table_id, strategy_key, name)` 唯一约束；is_default 同维度互斥 |
 | 个股详情分享 | `/stock-detail-feishu` | target_channel_id 支持手动指定渠道 |
 | Capture | `/api/v1/capture/*` | 只接受 Capture Token |
 | Admin | `/admin/*` | Admin 角色 + 审计；含 `GET /admin/worker-heartbeats` 只读心跳视图（health_state 后端计算：fresh<120s / stale 120-600s / stopped≥600s 或 status=stopped）；新增盘后流水线聚合状态端点 `/admin/after-close/pipeline/latest`、`/admin/after-close/pipeline?trade_date=`、`/admin/after-close/pipeline/runs?limit=`、`POST /admin/after-close/pipeline/run`（admin，幂等），响应 `AfterClosePipelineResponse` 含 8 步骤时间线 + watchlist_ready 严格判定 + data_freshness + 最近 100 条 events |
@@ -895,4 +898,102 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 - 普通 `backfill` 不带 `--symbols`/`--limit-instruments` 时 `scope='full'`；
 - 小样本 `backfill` 带 `--symbols` 或 `--limit-instruments` 时 `scope='sample'`（watchlist 不可读）；
 - failed run 允许新 retry（partial unique index 仅约束 running）。
+
+## 14. 用户表格视图配置 API 契约
+
+### 14.1 `user_table_view_presets` 表契约
+
+`user_table_view_presets` 保存用户在表格（如趋势选股页）的筛选/排序/列设置 preset，支持命名、应用、重命名、删除、设为默认。
+
+| 字段 | 类型 | 约束 | 语义 |
+|---|---|---|---|
+| `id` | UUID | PK, default `gen_random_uuid()` | preset ID |
+| `user_id` | UUID | FK→`users.id`, NOT NULL | 用户 ID（由认证上下文注入，不接受 body 传入） |
+| `table_id` | TEXT | NOT NULL | 表格标识（如 `screener`/`watchlist`，由前端约定） |
+| `strategy_key` | TEXT | NULL | 策略 key（可空，适用于无策略的表格） |
+| `name` | TEXT | NOT NULL | 配置名称（用户自定义，同维度唯一） |
+| `config` | JSONB | NOT NULL | 配置内容（仅允许 keyword/sort/filters/hiddenColumns/pageSize） |
+| `is_default` | BOOLEAN | NOT NULL, default `false` | 是否默认配置（同 user+table_id+strategy_key 至多 1 个 true） |
+| `created_at` | TIMESTAMPTZ | NOT NULL, default `now()` | 创建时间 |
+| `updated_at` | TIMESTAMPTZ | NOT NULL, default `now()`, onupdate `now()` | 更新时间 |
+
+**唯一约束**：`uq_user_table_view_preset_user_table_strategy_name (user_id, table_id, strategy_key, name)`，保证同用户同表同策略下配置名不重复。
+
+**索引**：`ix_user_table_view_presets_user_table_strategy (user_id, table_id, strategy_key)`，用于查询和 quota 检查。
+
+### 14.2 `config` JSONB schema
+
+`config` 字段仅允许以下 5 个 key（Pydantic schema `TableViewPresetConfig` 强制 `extra="forbid"`）：
+
+| 字段 | 类型 | 约束 | 语义 |
+|---|---|---|---|
+| `keyword` | string \| null | max_length=200 | 关键字搜索 |
+| `sort` | dict \| null | 必须含 `key` + `direction`（`asc`/`desc`） | 排序配置 |
+| `filters` | list[dict] \| null | 每元素必须含 `key`/`op`/`value` | 筛选条件列表 |
+| `hiddenColumns` | list[string] \| null | - | 隐藏列 key 列表 |
+| `pageSize` | int \| null | 1-500 | 每页大小 |
+
+**禁止字段**（`_FORBIDDEN_CONFIG_KEYS`，由 `_validate_config_keys` 函数强制拒绝）：
+
+- `selectedKeys`（选中股票是会话态，不持久化）
+- `page`（当前页码是会话态）
+- `activeRunId`（当前批次是会话态）
+- `rows`/`results`/`resultData`（结果数据是业务数据，不持久化）
+
+### 14.3 API 端点
+
+所有端点权限：`require_active_subscription` + `require_feature("trend_selection")`（admin 豁免），与趋势选股一致。
+
+#### GET `/me/table-view-presets`
+
+查询当前用户的 preset 列表（按 `table_id` + `strategy_key` 过滤）。
+
+查询参数：
+- `table_id`（必填，min_length=1, max_length=64）
+- `strategy_key`（可选，max_length=64；传空字符串匹配 NULL，传非空字符串精确匹配）
+
+响应：`TableViewPresetListResponse { items: TableViewPresetResponse[], total: int }`，按 `created_at` 升序。
+
+#### POST `/me/table-view-presets`
+
+创建 preset。
+
+请求体：`TableViewPresetCreate { table_id, strategy_key?, name, config, is_default? }`
+
+业务规则：
+- `user_id` 由 JWT 上下文注入，body 中 `user_id` 字段被忽略（安全约束）；
+- quota 检查：同 `user_id+table_id+strategy_key` 已有 preset 数量 ≥ 20 时返回 422；
+- `is_default=true` 时自动取消同维度其他默认（`_unset_default_for_scope`）；
+- 唯一约束冲突返回 409。
+
+响应：`TableViewPresetResponse`，状态码 201。
+
+#### PATCH `/me/table-view-presets/{preset_id}`
+
+更新 preset（`name`/`config`/`is_default`，`user_id`/`table_id`/`strategy_key` 不可改）。
+
+请求体：`TableViewPresetPatch { name?, config?, is_default? }`（至少一个字段）
+
+业务规则：
+- 只能操作自己的 preset，他人 preset 返回 404（避免泄露存在性）；
+- 重命名冲突返回 409；
+- `is_default=true` 时自动取消同维度其他默认（排除自身）。
+
+响应：`TableViewPresetResponse`。
+
+#### DELETE `/me/table-view-presets/{preset_id}`
+
+删除 preset。
+
+业务规则：
+- 只能删除自己的 preset，他人 preset 返回 404。
+
+响应：204 No Content。
+
+### 14.4 限制
+
+- preset 不接入选股、监控、飞书、消息中心、事件系统；
+- config 不保存业务数据（selectedKeys/page/activeRunId/rows）；
+- preset 不影响后端策略计算，只影响前端表格视图；
+- `is_default` 互斥更新由应用层 `_unset_default_for_scope` 实现（非数据库约束）。
 

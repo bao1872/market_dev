@@ -641,6 +641,128 @@ docker logs trading-backend --tail 200 2>&1 | grep -i traceback
 - 不要并行多月回补（每月串行）；
 - 不要在后台任务运行时启动新的同 month/scope 任务（进程锁拒绝）。
 
+## 3.10 趋势选股批量加入 + change_pct + 表格视图配置 + sticky 表头回归（blocking）
+
+任何修改 `frontend/src/pages/ScreenerPage.tsx`（handleBatchAdd）、`frontend/src/features/trend-selection/columns.tsx`（change_pct 列）、`frontend/src/components/StrategyDataTable.tsx`（preset 集成）、`frontend/src/components/TablePresetMenu.tsx`、`frontend/src/styles/global.scss`（sticky 表头/选择列）、`backend/app/api/me_table_view_presets.py`、`backend/app/schemas/table_view_preset.py`、`backend/app/models/table_view_preset.py`、`backend/alembic/versions/059_user_table_view_presets.py` 必须跑本节回归测试。
+
+### 3.10.1 后端 preset API 回归（`tests/test_table_view_presets_api.py`，37 个用例）
+
+权限矩阵（10 个用例）：
+- 未认证 → 401（GET/POST/PATCH/DELETE 各一）；
+- expired subscription → 403（GET/POST 各一）；
+- no subscription → 403（GET/POST 各一）；
+- active subscription + trend_selection feature → 200/201（GET/POST 各一）；
+- admin → 200/201（GET/POST 各一，admin 豁免 feature 检查）。
+
+CRUD（8 个用例）：
+- GET 按table_id 过滤；
+- GET 按 table_id + strategy_key 过滤（含 NULL strategy_key 匹配空字符串）；
+- POST 创建返回 201 + 完整字段；
+- PATCH 更新 name/config/is_default；
+- DELETE 返回 204；
+- PATCH 他人 preset → 404（避免泄露存在性）；
+- DELETE 他人 preset → 404。
+
+用户隔离（2 个用例）：
+- 用户 A 创建的 preset 用户 B GET 不可见；
+- 用户 B PATCH/DELETE 用户 A 的 preset → 404。
+
+重名冲突（2 个用例）：
+- POST 同维度同名 → 409；
+- PATCH 重命名为同维度已有 name → 409。
+
+quota（2 个用例）：
+- 同维度已有 20 个 preset 时 POST → 422；
+- 不同 strategy_key 不共享 quota。
+
+非法 config（5 个用例）：
+- config 含 `selectedKeys` → 422；
+- config 含 `page` → 422；
+- config 含 `activeRunId` → 422；
+- config 含 `rows` → 422；
+- config 含未知字段 → 422。
+
+is_default 互斥（2 个用例）：
+- POST is_default=true 时同维度旧默认自动取消；
+- PATCH is_default=true 时同维度旧默认自动取消（排除自身）。
+
+必填字段校验（3 个用例）：
+- POST 缺 table_id → 422；
+- POST 缺 name → 422；
+- POST 缺 config → 422。
+
+user_id 注入安全（1 个用例）：
+- POST body 中传 `user_id` 字段被忽略（user_id 由 JWT 上下文注入）。
+
+PATCH 空请求（1 个用例）：
+- PATCH 不传任何字段 → 422（至少一个字段）。
+
+迁移幂等（1 个用例）：
+- `alembic upgrade head` 创建 `user_table_view_presets` 表；
+- `alembic downgrade -1` 删除表；
+- `alembic upgrade head` 再升级不报错。
+
+### 3.10.2 前端 columns.test.ts 回归（6 个用例）
+
+- change_pct 列存在于 trend-selection columns；
+- title=`当日涨跌幅`、shortTitle=`涨跌幅`；
+- dataType=`percent`、sortable=true、filterable=true、width≈86；
+- render 使用 `fmtChange` + `changePctColorClass`（涨红跌绿）；
+- sortValue 读取 payload `change_pct`/`pct_change`/`change_percent`；
+- change_pct 列位于 stock 列之后。
+
+### 3.10.3 前端 ScreenerPage.batch.test.ts 回归（6 个用例）
+
+- handleBatchAdd 按 `r.instrumentId` 匹配 `selectedKeys`（禁止用 `r.resultId`）；
+- 选中后无可加入股票时 toast 提示（非静默）；
+- 成功/失败 toast 真实反映数量；
+- 对 `instrumentId` 去重避免重复加入；
+- rowKey 与 selectedKeys 一致（都是 instrumentId）；
+- 保留 `useAddToWatchlist` 现有缓存失效逻辑。
+
+### 3.10.4 前端 StrategyDataTable preset 集成回归
+
+- `currentConfig` 从内部 state 构建 config 快照（keyword/sort/filters/hiddenColumns/pageSize）；
+- `applyPresetConfig` 从 config 重置内部 state；
+- 默认 preset 自动应用（每个 tableId:strategyKey 只应用一次，useRef 防重复）；
+- `TablePresetMenu` 渲染保存/应用/覆盖/重命名/设默认/删除按钮；
+- 点击外部关闭下拉；
+- 错误处理：catch + toast 显示后端 detail 消息。
+
+### 3.10.5 sticky 表头/选择列回归
+
+- `global.scss` 中 `.interactive-table thead th` sticky top:0 z-index:4；
+- `.interactive-table .sticky-col` sticky left:0 z-index:3；
+- `.interactive-table .table-select-column` sticky left:0 z-index:3；
+- `.interactive-table thead th.sticky-col, thead th.table-select-column` z-index:5（角落单元格最高）；
+- `.interactive-table .table-select-column + th.sticky-col` left:40px（首列偏移选择列宽度）。
+
+回归命令：
+
+```bash
+cd /root/web_dev/backend
+APP_ENV=test TEST_DATABASE_URL=postgresql+asyncpg://bz:bz@localhost:5433/bz_stock_test \
+pytest tests/test_table_view_presets_api.py -q
+
+ruff check app/api/me_table_view_presets.py \
+  app/schemas/table_view_preset.py \
+  app/models/table_view_preset.py \
+  alembic/versions/059_user_table_view_presets.py \
+  tests/test_table_view_presets_api.py
+
+mypy app/api/me_table_view_presets.py \
+  app/schemas/table_view_preset.py \
+  app/models/table_view_preset.py
+
+cd /root/web_dev/frontend
+npx tsc --noEmit
+node --experimental-strip-types --test \
+  src/features/trend-selection/__tests__/columns.test.ts \
+  src/pages/__tests__/ScreenerPage.batch.test.ts
+```
+
+预期：37 passed（后端）+ 12 passed（前端 columns 6 + batch 6）、ruff 零错误、mypy 零错误、tsc 零错误。
+
 ## 4. CI 门禁
 
 阻断项：

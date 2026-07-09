@@ -99,6 +99,21 @@ export function getTrendSelectionColumns(
       render: renderStock,
     },
     {
+      // [趋势选股] - 描述: 当日涨跌幅独立列（后端存储为百分比数值，不 ×100；筛选输入 3% 传 3）
+      key: 'change_pct',
+      title: '当日涨跌幅',
+      shortTitle: '涨跌幅',
+      dataType: 'percent',
+      sortable: true,
+      filterable: true,
+      width: 86,
+      sortValue: (row) => Number(pickPayload(row.payload, CHANGE_PCT_KEYS) ?? 0),
+      render: (row) => {
+        const v = pickPayload(row.payload, CHANGE_PCT_KEYS)
+        return <span className={changePctColorClass(v)}>{fmtChange(v)}</span>
+      },
+    },
+    {
       // [趋势选股] - 描述: 趋势列 key=dsa_dir_bars，筛选直接透传后端 metric_filters（多头>0/空头<0/持续天数）
       key: 'dsa_dir_bars',
       title: '当前趋势',

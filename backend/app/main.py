@@ -44,6 +44,7 @@ from app.api.indicators import router as indicators_router
 from app.api.instruments import router as instruments_router
 from app.api.market import router as market_router
 from app.api.me import router as me_router
+from app.api.me_table_view_presets import router as me_table_view_presets_router
 from app.api.metrics import http_request_duration_seconds, http_requests_total
 from app.api.monitor_states import router as monitor_states_router
 from app.api.notifications import router as notifications_router
@@ -140,6 +141,8 @@ app.include_router(health_router)
 app.include_router(auth_router)
 # 当前用户权益路由（plans 表：套餐/监控上限/已使用/剩余/到期日）
 app.include_router(me_router)
+# 当前用户表格视图配置路由（保存筛选/排序/列设置）
+app.include_router(me_table_view_presets_router)
 # 股票主数据路由（R3）
 app.include_router(instruments_router)
 # 交易日历路由（R4）

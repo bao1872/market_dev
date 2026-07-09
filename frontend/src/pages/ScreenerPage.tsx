@@ -248,7 +248,18 @@ export default function ScreenerPage() {
   /** 批量加入自选 */
   const handleBatchAdd = async () => {
     if (selectedKeys.size === 0) return
-    const selected = rows.filter((r) => selectedKeys.has(r.resultId))
+    // [趋势选股] - 描述: 按 instrumentId 匹配（与 rowKey 一致），并对 instrumentId 去重避免重复加入
+    const seen = new Set<string>()
+    const selected = rows.filter((r) => {
+      if (!selectedKeys.has(r.instrumentId)) return false
+      if (seen.has(r.instrumentId)) return false
+      seen.add(r.instrumentId)
+      return true
+    })
+    if (selected.length === 0) {
+      toast.show('批量加入自选', '无可加入的股票（选中行未包含有效 instrumentId）')
+      return
+    }
     let success = 0
     let fail = 0
     for (const row of selected) {
@@ -573,7 +584,8 @@ export default function ScreenerPage() {
         {/* 数据表 */}
         <StrategyDataTable
           key={activeRunId ? `run-${activeRunId}` : 'run-empty'}
-          tableId={`screener-${activeStrategyKey}`}
+          tableId="screener"
+          strategyKey={activeStrategyKey || undefined}
           activeRunId={activeRunId}
           columns={activeColumns}
           rows={rows}
