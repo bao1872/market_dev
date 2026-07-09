@@ -535,6 +535,8 @@ def compute_amp_timeseries(
                 continue
             lI = min(end_idx + 1, int(period_i))
         else:
+            if fixed_lI is None:
+                continue
             period_i = fixed_lI
             lI = fixed_lI
 

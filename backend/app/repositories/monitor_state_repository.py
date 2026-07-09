@@ -67,7 +67,7 @@ async def upsert_state(
     Raises:
         Exception: 写入失败时补充上下文后 re-raise
     """
-    stmt = pg_insert(MonitorState).values(
+    insert_stmt = pg_insert(MonitorState).values(
         strategy_version_id=strategy_version_id,
         instrument_id=instrument_id,
         bar_time=bar_time,
@@ -75,14 +75,14 @@ async def upsert_state(
         state_schema_version=state_schema_version,
         payload=payload,
     )
-    stmt = stmt.on_conflict_do_update(
+    stmt = insert_stmt.on_conflict_do_update(
         index_elements=["strategy_version_id", "instrument_id"],
         set_={
-            "bar_time": stmt.excluded.bar_time,
-            "calculation_id": stmt.excluded.calculation_id,
-            "state_schema_version": stmt.excluded.state_schema_version,
-            "payload": stmt.excluded.payload,
-            "updated_at": stmt.excluded.updated_at,
+            "bar_time": insert_stmt.excluded.bar_time,
+            "calculation_id": insert_stmt.excluded.calculation_id,
+            "state_schema_version": insert_stmt.excluded.state_schema_version,
+            "payload": insert_stmt.excluded.payload,
+            "updated_at": insert_stmt.excluded.updated_at,
         },
     ).returning(MonitorState)
 

@@ -21,9 +21,9 @@ def _ensure_datasource_mock() -> None:
     if "datasource" not in sys.modules:
         datasource_mock = types.ModuleType("datasource")
         pytdx_client_mock = types.ModuleType("datasource.pytdx_client")
-        pytdx_client_mock.connect_pytdx = lambda *a, **kw: None
-        pytdx_client_mock.PERIOD_MAP = {}
-        datasource_mock.pytdx_client = pytdx_client_mock
+        pytdx_client_mock.__dict__["connect_pytdx"] = lambda *a, **kw: None
+        pytdx_client_mock.__dict__["PERIOD_MAP"] = {}
+        datasource_mock.__dict__["pytdx_client"] = pytdx_client_mock
         sys.modules["datasource"] = datasource_mock
         sys.modules["datasource.pytdx_client"] = pytdx_client_mock
 

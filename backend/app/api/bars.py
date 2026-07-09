@@ -390,7 +390,8 @@ async def get_bars(
     ),
     include_realtime: bool = Query(True, description="是否在交易时段内调用 Pytdx 补充最后一根 Bar"),
     session: AsyncSession = Depends(get_db),
-    response: Response = None,
+    *,
+    response: Response,
 ) -> BarListResponse:
     """查询指定标的的行情数据。
 
@@ -689,8 +690,8 @@ async def bars_health(session: AsyncSession = Depends(get_db)) -> dict:
                         latest_dt = latest
                 else:
                     # 分钟类：latest 为 datetime
+                    assert isinstance(latest, datetime), f"分钟类 latest 应为 datetime， got {type(latest)}"
                     latest_dt = latest
-                    assert isinstance(latest_dt, datetime), f"分钟类 latest 应为 datetime， got {type(latest)}"
                     if latest_dt.tzinfo is not None:
                         latest_dt = latest_dt.astimezone(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
 

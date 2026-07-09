@@ -80,7 +80,7 @@ if __name__ == "__main__":
     assert "current_job_id" in cols
     assert "build_sha" in cols
     # 验证复合主键
-    pk_cols = [c.name for c in WorkerHeartbeat.__table__.primary_key.columns]
+    pk_cols = [c.name for c in WorkerHeartbeat.__table__.primary_key]
     print(f"WorkerHeartbeat PK={pk_cols}")
     assert pk_cols == ["worker_name", "instance_id"]
     print("OK")

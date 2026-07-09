@@ -26,6 +26,7 @@ from sqlalchemy import DateTime, ForeignKey, Index, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.models._table_meta import table_indexes
 from app.models.base import Base
 
 
@@ -97,7 +98,7 @@ if __name__ == "__main__":
     assert "created_at" in cols
 
     # 验证 __table_args__ 中的索引
-    index_names = {idx.name for idx in JobRunEvent.__table__.indexes if idx.name}
+    index_names = {idx.name for idx in table_indexes(JobRunEvent) if idx.name}
     assert "ix_job_run_events_job_run_id_created_at" in index_names, (
         f"缺少复合索引: {index_names}"
     )

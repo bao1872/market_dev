@@ -136,7 +136,8 @@ async def get_indicators(
     adj: str = Query("qfq", description="复权方式: qfq | none"),
     bars: int = Query(250, ge=50, le=4000, description="返回最近 N 根 bar 的指标（最大 4000，与 Node Cluster 15m 契约对齐）"),
     db: AsyncSession = Depends(get_db),
-    response: Response = None,
+    *,
+    response: Response,
 ) -> dict[str, Any]:
     """实时计算所有已注册策略的图表指标。
 

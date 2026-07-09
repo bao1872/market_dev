@@ -631,7 +631,7 @@ def make_volume_profile_figure(
             down_w = down / max_vol * profile_width_bars
 
             if cfg.profile_placement == "right":
-                x1 = profile_anchor
+                x1 = float(profile_anchor)
                 x0 = x1 - bull_w
                 shapes.append(dict(type="rect", xref="x", yref="y", x0=x0, x1=x1, y0=y0, y1=y1, line=dict(width=0), fillcolor=up_color, layer="above"))
                 x1d = x0

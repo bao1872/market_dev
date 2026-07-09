@@ -147,7 +147,7 @@ def _handle_shutdown(signum: int, _frame: object) -> None:
 
 
 async def _create_job_run(
-    db: AsyncSessionLocal,
+    db: AsyncSession,
     job_name: str,
     business_date: str,
     lease_seconds: int = 120,
@@ -212,7 +212,7 @@ async def _create_job_run(
 
 
 async def _finish_job_run(
-    db: AsyncSessionLocal,
+    db: AsyncSession,
     job_run: SchedulerJobRun,
     status: str,
     error_message: str | None = None,
@@ -246,7 +246,7 @@ async def _finish_job_run(
 
 
 async def _update_job_heartbeat(
-    db: AsyncSessionLocal,
+    db: AsyncSession,
     job_run: SchedulerJobRun,
     lease_seconds: int = 120,
 ) -> None:
@@ -547,7 +547,8 @@ async def run_bars_scheduler_worker() -> None:
                 while True:
                     await asyncio.sleep(30)
                     async with AsyncSessionLocal() as db:
-                        await _update_job_heartbeat(db, job_run)
+                        if job_run is not None:
+                            await _update_job_heartbeat(db, job_run)
 
             heartbeat_task_ref = asyncio.create_task(_bars_heartbeat_loop())
             # [JobRunEvent] - 传入 job_run_id 让 service 在日线阶段完成后写 DAILY_DONE/DSA_CREATED
@@ -596,11 +597,11 @@ async def run_bars_scheduler_worker() -> None:
                             logger.debug("查询 latest bar trade_time 失败: %s", exc)
                         if meta:
                             job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
-                    await _finish_job_run(
-                        db, job_run, "succeeded",
-                        success_count=result.succeeded,
-                        failure_count=result.failed,
-                    )
+                        await _finish_job_run(
+                            db, job_run, "succeeded",
+                            success_count=result.succeeded,
+                            failure_count=result.failed,
+                        )
         except Exception as exc:
             logger.exception("定时任务异常: %s", exc)
             if heartbeat_task_ref is not None:
@@ -930,7 +931,7 @@ def _get_monitor_session(
 
 
 async def _find_or_create_monitor_session_job_run(
-    db: AsyncSessionLocal,
+    db: AsyncSession,
     now_cst: datetime,
     business_date: str,
     session_label: str,

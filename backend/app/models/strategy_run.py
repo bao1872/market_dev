@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
     Boolean,
@@ -53,7 +53,11 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.models._table_meta import table_constraints, table_indexes
 from app.models.base import Base
+
+if TYPE_CHECKING:
+    from app.models.instrument import Instrument
 
 # [StrategyRun] - 失败阶段枚举：DSA 运行各阶段异常标记，写入 failure_stage 字段
 FAILURE_STAGE_DATA_READINESS = "DATA_READINESS"
@@ -492,12 +496,12 @@ if __name__ == "__main__":
     assert "bool_value" in metric_cols
 
     # 验证索引
-    metric_indexes = [idx.name for idx in StrategyResultMetric.__table__.indexes]
+    metric_indexes = [idx.name for idx in table_indexes(StrategyResultMetric)]
     print(f"StrategyResultMetric indexes={metric_indexes}")
     assert "ix_metric_numeric" in metric_indexes
 
     # 验证主键
-    metric_pk = [c.name for c in StrategyResultMetric.__table__.primary_key.columns]
+    metric_pk = [c.name for c in StrategyResultMetric.__table__.primary_key]
     print(f"StrategyResultMetric PK={metric_pk}")
     assert metric_pk == ["result_id", "metric_key"]
 
@@ -516,7 +520,7 @@ if __name__ == "__main__":
     assert "finished_at" in item_cols
 
     # 验证 StrategyRunItem 索引
-    item_indexes = [idx.name for idx in StrategyRunItem.__table__.indexes]
+    item_indexes = [idx.name for idx in table_indexes(StrategyRunItem)]
     print(f"StrategyRunItem indexes={item_indexes}")
     assert "ix_run_items_run_status" in item_indexes
     assert "ix_run_items_instrument" in item_indexes
@@ -524,7 +528,7 @@ if __name__ == "__main__":
     # 验证 StrategyRunItem 唯一约束
     item_uqs = [
         c.name
-        for c in StrategyRunItem.__table__.constraints
+        for c in table_constraints(StrategyRunItem)
         if hasattr(c, "name") and c.name and "uq" in c.name.lower()
     ]
     print(f"StrategyRunItem unique constraints={item_uqs}")

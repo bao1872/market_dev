@@ -4,6 +4,17 @@
 
 ## 2026-07-09
 
+- CHANGE-20260709-009: mypy baseline 全量清零
+  - 剩余 186 个 baseline 错误（141 unique）全部清零
+  - Batch A: 小生产文件 19 个（config, pytdx_adapter, chart_bars, calendar_seed 等）
+  - Batch B: repositories + services + worker 61 个（bar_repository, system_overview, worker 等）
+  - Batch C: models SQLAlchemy metadata 31 个（新增 _table_meta.py helper）
+  - Batch D: metrics/plotly_mock/bars_metrics/bars_scheduler 31 个
+  - Batch E: strategy/strategy_assets 34 个（含 indicator_contract Literal 修复）
+  - 新增 `app/models/_table_meta.py`、修改 `app/constants/indicator_contract.py`
+  - `tools/quality_baselines/mypy.json` total=0, unique=0, diagnostics=[]
+  - 新增 §5.1.2 禁止新增 baseline 规则
+
 - CHANGE-20260709-008: API 路由 BaseRoute.path mypy baseline 债务清零
   - `app/api/*` + `capture_main.py` 的 20 个 BaseRoute.path attr-defined 错误降为 0
   - 新增 `app/core/route_utils.py`：`iter_api_routes` / `get_route_paths` 类型收窄 helper

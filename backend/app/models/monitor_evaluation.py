@@ -30,6 +30,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.models._table_meta import table_constraints, table_indexes
 from app.models.base import Base
 
 
@@ -133,7 +134,7 @@ if __name__ == "__main__":
     cols = [c.name for c in MonitorEvaluation.__table__.columns]
     print(f"MonitorEvaluation columns={cols}")
     # 验证主键
-    pk_cols = [c.name for c in MonitorEvaluation.__table__.primary_key.columns]
+    pk_cols = [c.name for c in MonitorEvaluation.__table__.primary_key]
     print(f"MonitorEvaluation primary_key={pk_cols}")
     assert pk_cols == ["id"], f"主键不匹配: {pk_cols}"
     # 验证必需列存在
@@ -145,13 +146,13 @@ if __name__ == "__main__":
     ]:
         assert required in cols, f"缺少列: {required}"
     # 验证唯一约束
-    uq_names = [c.name for c in MonitorEvaluation.__table__.constraints
+    uq_names = [c.name for c in table_constraints(MonitorEvaluation)
                 if hasattr(c, 'name') and isinstance(c, UniqueConstraint)]
     print(f"UniqueConstraint names={uq_names}")
     assert "uq_monitor_evaluations_version_instrument_bar" in uq_names, \
         f"缺少唯一约束 uq_monitor_evaluations_version_instrument_bar: {uq_names}"
     # 验证索引
-    idx_names = [idx.name for idx in MonitorEvaluation.__table__.indexes]
+    idx_names = [idx.name for idx in table_indexes(MonitorEvaluation)]
     print(f"Index names={idx_names}")
     assert "ix_monitor_evaluations_instrument_bar_time" in idx_names, \
         f"缺少索引 ix_monitor_evaluations_instrument_bar_time: {idx_names}"

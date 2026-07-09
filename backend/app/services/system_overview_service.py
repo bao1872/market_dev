@@ -442,8 +442,8 @@ def _determine_monitor_status(
     market_session: str,
     heartbeat_age_seconds: int | None,
     freshness_seconds: int | None,
-    db: AsyncSession,
-    now: datetime,
+    db: AsyncSession | None,
+    now: datetime | None,
     business_date_str: str,
 ) -> str:
     """判定监控运行时状态（非 MARKET_CLOSED 场景）。

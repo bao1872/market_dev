@@ -33,11 +33,16 @@ import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+
+if TYPE_CHECKING:
+    from pytdx.errors import TdxConnectionError
+    from pytdx.hq import TdxHq_API
 
 # 添加项目根目录到路径（支持直接运行脚本）
 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -68,6 +73,9 @@ def _category_from_freq(freq: str) -> int:
 
 
 def _connect_pytdx() -> TdxHq_API:
+    from pytdx.errors import TdxConnectionError
+    from pytdx.hq import TdxHq_API
+
     servers = [
         ("119.147.212.81", 7709),
         ("119.147.164.60", 7709),
@@ -325,8 +333,8 @@ def dynamic_swing_anchored_vwap(df: pd.DataFrame, cfg: DSAConfig):
 
     # --- segment drawing (match Pine polyline behavior) ---
     segments = []
-    cur_points_x = []
-    cur_points_y = []
+    cur_points_x: list[pd.Timestamp] = []
+    cur_points_y: list[float] = []
     cur_dir = None
 
     last_dir = None
@@ -429,11 +437,13 @@ def dynamic_swing_anchored_vwap(df: pd.DataFrame, cfg: DSAConfig):
 
     # finalize last segment
     if len(cur_points_x) >= 2:
-        segments.append(_make_segment(
-            last_dir if last_dir is not None else cur_dir,
-            cur_points_x,
-            cur_points_y,
-        ))
+        direction = last_dir if last_dir is not None else cur_dir
+        if direction is not None:
+            segments.append(_make_segment(
+                direction,
+                cur_points_x,
+                cur_points_y,
+            ))
 
     vwap_series = pd.Series(vwap_out, index=d.index, name="DSA_VWAP")
     dir_series  = pd.Series(dir_out,  index=d.index, name="DSA_DIR")
@@ -467,9 +477,10 @@ def compute_extra_factors(
         x = lab.get("x")
         txt = str(lab.get("text", "")).strip().upper()
         if x in df.index and txt in {"LH", "HH"}:
+            y_val = lab.get("y")
             label_map[x] = {
                 "text": txt,
-                "price": float(lab.get("y")) if pd.notna(lab.get("y")) else np.nan,
+                "price": float(y_val) if (y_val is not None and pd.notna(y_val)) else np.nan,
             }
 
     latest_lh_hh_idx = None
@@ -482,7 +493,11 @@ def compute_extra_factors(
     for ts in df.index:
         if ts in label_map:
             latest_lh_hh_idx = ts
-            latest_lh_hh_price = float(label_map[ts]["price"])
+            price_val = label_map[ts]["price"]
+            if isinstance(price_val, (int, float, np.integer, np.floating)):
+                latest_lh_hh_price = float(price_val)
+            else:
+                latest_lh_hh_price = np.nan
 
         if latest_lh_hh_idx is None or not np.isfinite(latest_lh_hh_price):
             pos_values.append(np.nan)
@@ -722,6 +737,7 @@ def main() -> None:
     end = datetime.now().date()
         # Parse freq
     freq_arg = args.freq.strip().lower()
+    freq: str | int
     if freq_arg in ["d", "day", "daily", "101"]:
         freq = "d"  # qstock supports 'd' / 'D' / 101
         # for daily, 220-day SMA needs ~ 1.2y+ data

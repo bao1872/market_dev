@@ -121,6 +121,8 @@ async def get_bars_cache(
         cached = await client.get(key)
         if cached is not None:
             logger.debug("缓存命中 key=%s", key)
+            if isinstance(cached, bytes):
+                cached = cached.decode("utf-8")
             return _deserialize_response(cached)
         logger.debug("缓存未命中 key=%s", key)
     except aioredis.RedisError as exc:

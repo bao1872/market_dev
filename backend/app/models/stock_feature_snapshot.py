@@ -29,6 +29,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.models._table_meta import table_constraints, table_indexes
 from app.models.base import Base
 
 
@@ -151,14 +152,14 @@ if __name__ == "__main__":
     # 验证唯一约束
     uq_names = {
         c.name
-        for c in StockFeatureSnapshot.__table__.constraints
+        for c in table_constraints(StockFeatureSnapshot)
         if isinstance(c, UniqueConstraint)
     }
     assert "uq_feature_snapshot_instrument_date_tf_adj_schema" in uq_names, \
         f"唯一约束不匹配: {uq_names}"
     print("unique constraint ✓")
     # 验证索引
-    idx_names = {idx.name for idx in StockFeatureSnapshot.__table__.indexes}
+    idx_names = {idx.name for idx in table_indexes(StockFeatureSnapshot)}
     expected_indexes = {
         "ix_feature_snapshot_trade_date_schema",
         "ix_feature_snapshot_instrument_date",

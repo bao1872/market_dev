@@ -398,6 +398,7 @@ class SMCIndicatorPineCloser:
         self.base_x_list = [self.xmap[t] for t in self.times]
 
         self.right_pad_count = max(8, args.fvg_extend + 6)
+        self.right_edge_x: str | None = None
         if self.base_x_list:
             self.pad_x_list = [f"__pad_{i}__" for i in range(self.right_pad_count)]
             self.right_edge_x = self.pad_x_list[min(5, len(self.pad_x_list) - 1)]

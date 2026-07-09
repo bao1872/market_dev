@@ -870,17 +870,21 @@ v2 后 docs consistency 应检查 `current/MANIFEST.md`，而不是要求每个 
 
 ### 5.1.1 债务清理路线图
 
-当前 baseline 剩余 186 个错误（141 unique），按类别分批处理：
+mypy baseline 已清零（total=0, unique=0）。清理历程：
 
 | 阶段 | 目标 | 状态 |
 |------|------|------|
 | 1 | `after_close_orchestrator.py` 22 个 Optional 类型错误 | 已完成（CHANGE-007） |
 | 2 | `app/api/*` + `capture_main.py` 20 个 BaseRoute.path 错误 | 已完成（CHANGE-008） |
-| 3 | `app/worker.py` 15 个 + `app/services/system_overview_service.py` 16 个 | 待处理 |
-| 4 | `app/repositories/bar_repository.py` 13 个 + `app/services/bars_metrics.py` 10 个 | 待处理 |
-| 5 | `app/strategy_assets/*` 生产 import 类型问题 | 待处理 |
-| 6 | `app/models/*` SQLAlchemy typing | 待处理 |
-| 7 | 剩余零散债务 | 待处理 |
+| 3 | Batch A-E 全量清零：models、repositories、services、strategy_assets、worker | 已完成（CHANGE-009） |
+
+### 5.1.2 禁止新增 baseline
+
+- mypy baseline 已清零后，禁止新增 baseline 条目；
+- 新增 `backend/app/` Python 生产文件必须 mypy 零错误；
+- 如遇第三方库 typing 缺陷，必须用局部 wrapper/stub 解决，不得加 `type: ignore` 或写入 baseline；
+- 新增债务必须 PR 中解释原因并不得进入 main；
+- `tests/` 目录的 mypy 错误不在 baseline 管控范围，但鼓励逐步修复。
 
 ## 6. 完成标准
 

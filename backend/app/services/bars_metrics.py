@@ -220,7 +220,10 @@ if __name__ == "__main__":
     # 2. 验证 labelnames（prometheus_client 用 _labelnames，fallback 用 labelnames）
     def _get_labelnames(metric: Any) -> tuple[str, ...]:
         """兼容获取 labelnames（prometheus_client 与 fallback 模式）。"""
-        return getattr(metric, "labelnames", None) or getattr(metric, "_labelnames", ())
+        result = getattr(metric, "labelnames", None) or getattr(metric, "_labelnames", ())
+        if result is None:
+            return ()
+        return result
 
     assert _get_labelnames(bars_fetch_total) == ("period", "status"), \
         f"bars_fetch_total labelnames 不匹配: {_get_labelnames(bars_fetch_total)}"
@@ -262,6 +265,9 @@ if __name__ == "__main__":
 
     # 4. 验证 fallback 模式下的值读取（仅 fallback 模式可读）
     if not _PROMETHEUS_AVAILABLE:
+        assert isinstance(bars_fetch_total, _FallbackMetric)
+        assert isinstance(bars_fetch_duration_seconds, _FallbackMetric)
+        assert isinstance(bars_freshness_age_seconds, _FallbackMetric)
         # fallback 模式下可直接读取内部值
         key_d_success = ("d", "success")
         assert bars_fetch_total._values.get(key_d_success) == 3.0, \

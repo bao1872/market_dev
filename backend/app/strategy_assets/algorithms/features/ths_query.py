@@ -458,7 +458,7 @@ def get_trading_dates(start_date: str, end_date: str) -> list:
         return trading_dates
 
 
-def scan_popularity_rank_for_year(start_date: str = None, end_date: str = None, save_to_db: bool = False, incremental: bool = True):
+def scan_popularity_rank_for_year(start_date: str | None = None, end_date: str | None = None, save_to_db: bool = False, incremental: bool = True):
     """
     遍历指定日期范围内每个交易日的人气排名并打印/保存到数据库
     
@@ -718,7 +718,7 @@ def _save_summary_to_db(df: pd.DataFrame, session) -> int:
     return len(records)
 
 
-def get_quarterly_single(df: pd.DataFrame, ts_code: str = None) -> pd.DataFrame:
+def get_quarterly_single(df: pd.DataFrame, ts_code: str | None = None) -> pd.DataFrame:
     """
     计算单季度财务数据（YTD 差分）
 
@@ -818,7 +818,7 @@ def _validate_saved_data(report_date: str, session, sample_count: int = 5) -> tu
     return True, ""
 
 
-def execute_financial_queries(group_name: str = None, test_mode: bool = False, save_to_db: bool = True, incremental: bool = False):
+def execute_financial_queries(group_name: str | None = None, test_mode: bool = False, save_to_db: bool = True, incremental: bool = False):
     """
     执行财务汇总数据查询并保存到 stock_financial_summary 表
 
@@ -844,6 +844,9 @@ def execute_financial_queries(group_name: str = None, test_mode: bool = False, s
     logger.info(f"预期日期: {expected_date}")
 
     if test_mode:
+        if expected_date is None:
+            logger.error("无法从问句中提取预期日期，中断执行")
+            return
         logger.info("\n========== Step 6.1: 字段映射预检 (loop=False) ==========")
         ok, err, cols = _verify_field_mapping(first_query, expected_date)
         if not ok:
@@ -1030,7 +1033,8 @@ if __name__ == '__main__':
         from datasource.database import get_session
         from sqlalchemy import text
 
-        from app.models import get_create_sql
+        import app.models
+        get_create_sql = app.models.__dict__["get_create_sql"]
         with get_session() as session:
             # 创建人气排名表
             sql = get_create_sql("stock_popularity_rank")

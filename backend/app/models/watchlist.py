@@ -28,6 +28,7 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Text, UniqueConstra
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.models._table_meta import table_constraints, table_indexes
 from app.models.base import Base
 
 
@@ -104,11 +105,11 @@ if __name__ == "__main__":
     assert "removed_at" in cols
     # 验证唯一约束 (user_id, instrument_id)
     uq_constraints = [
-        c for c in UserWatchlistItem.__table__.constraints
+        c for c in table_constraints(UserWatchlistItem)
         if getattr(c, "name", None) and "user_id" in [col.name for col in c.columns]
     ]
     print(f"unique_constraints_count={len(uq_constraints)}")
-    indexes = [idx.name for idx in UserWatchlistItem.__table__.indexes]
+    indexes = [idx.name for idx in table_indexes(UserWatchlistItem)]
     print(f"indexes={indexes}")
     assert "ix_user_watchlist_user_active" in indexes
     print("OK")

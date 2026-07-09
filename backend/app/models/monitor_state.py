@@ -79,7 +79,7 @@ if __name__ == "__main__":
     cols = [c.name for c in MonitorState.__table__.columns]
     print(f"MonitorState columns={cols}")
     # 验证复合主键
-    pk_cols = [c.name for c in MonitorState.__table__.primary_key.columns]
+    pk_cols = [c.name for c in MonitorState.__table__.primary_key]
     print(f"MonitorState primary_key={pk_cols}")
     assert pk_cols == ["strategy_version_id", "instrument_id"], \
         f"复合主键不匹配: {pk_cols}"

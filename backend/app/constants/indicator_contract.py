@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 # ===== 日线根数唯一字面量（advice.md v6 第4条：受控参数禁止散落硬编码）=====
 # DAILY_HISTORY_BARS 是日线回看根数的唯一字面量，所有需要"取 250 根日线"的业务
 # 必须引用本常量，禁止在其它文件再定义 250 字面量作为参数赋值。
@@ -40,7 +42,7 @@ VP_ROWS: int = 100
 VP_VALUE_AREA_PCT: float = 0.70
 VP_PEAK_DETECTION_PCT: float = 0.05
 VP_NODE_THRESHOLD_PCT: float = 0.01
-VP_TROUGHS_SHOW: str = "none"
+VP_TROUGHS_SHOW: Literal["troughs", "clusters", "none"] = "none"
 VP_TROUGHS_DETECTION_PCT: float = 0.07
 VP_HIGHEST_N_NODES: int = 0
 VP_LOWEST_N_NODES: int = 0

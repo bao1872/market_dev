@@ -172,7 +172,8 @@ class VolumeNodeMonitor(StrategyRuntime):
         positions: list[float] = []
         current_prices: list[float] = []
 
-        poc_price = vp_result.poc_node()
+        poc_node = vp_result.poc_node()
+        poc_price: float | None = poc_node["price_mid"] if poc_node is not None else None
 
         for price in close_series:
             state = vp_result.state_for_price(float(price))

@@ -27,6 +27,7 @@ from sqlalchemy import DateTime, ForeignKey, Index, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.models._table_meta import table_constraints, table_indexes
 from app.models.base import Base
 
 
@@ -98,10 +99,10 @@ if __name__ == "__main__":
     ]:
         assert required in cols, f"缺少列: {required}"
     # 验证唯一约束
-    uq_names = [c.name for c in StrategyEventRecipient.__table__.constraints
+    uq_names = [c.name for c in table_constraints(StrategyEventRecipient)
                 if hasattr(c, "name") and isinstance(c, UniqueConstraint)]
     assert "uq_event_recipients_event_user" in uq_names, "缺少唯一约束 uq_event_recipients_event_user"
     # 验证索引
-    idx_names = [idx.name for idx in StrategyEventRecipient.__table__.indexes]
+    idx_names = [idx.name for idx in table_indexes(StrategyEventRecipient)]
     assert "ix_event_recipients_user_id" in idx_names, "缺少索引 ix_event_recipients_user_id"
     print("OK")

@@ -82,7 +82,8 @@ async def enqueue(
     existing_job_id = await redis.get(f"{_IDEM_PREFIX}{idempotency_key}")
     if existing_job_id is not None:
         # 幂等：返回已存在的 JobRun
-        stmt = select(JobRun).where(JobRun.id == UUID(existing_job_id))
+        job_id_str = existing_job_id.decode() if isinstance(existing_job_id, bytes) else existing_job_id
+        stmt = select(JobRun).where(JobRun.id == UUID(job_id_str))
         result = await db.execute(stmt)
         existing = result.scalar_one_or_none()
         if existing is not None:
@@ -114,7 +115,8 @@ async def enqueue(
         await db.rollback()
         existing_job_id = await redis.get(f"{_IDEM_PREFIX}{idempotency_key}")
         if existing_job_id is not None:
-            stmt = select(JobRun).where(JobRun.id == UUID(existing_job_id))
+            job_id_str = existing_job_id.decode() if isinstance(existing_job_id, bytes) else existing_job_id
+            stmt = select(JobRun).where(JobRun.id == UUID(job_id_str))
             result = await db.execute(stmt)
             existing = result.scalar_one_or_none()
             if existing is not None:
@@ -163,8 +165,9 @@ async def dequeue(
     if result is None:
         return None
     # result: (key, value)，key 形如 "job:queue:strategy_run"
-    key_bytes, job_id = result
+    key_bytes, job_id_raw = result
     job_type = key_bytes.removeprefix(_QUEUE_PREFIX) if isinstance(key_bytes, str) else key_bytes.decode().removeprefix(_QUEUE_PREFIX)
+    job_id = job_id_raw if isinstance(job_id_raw, str) else job_id_raw.decode()
     return job_type, job_id
 
 

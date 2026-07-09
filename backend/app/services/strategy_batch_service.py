@@ -565,9 +565,12 @@ class StrategyBatchService:
             strategy_key = definition.strategy_key
 
         # 4. 生成幂等键
+        trade_date_str = (
+            run.trade_date.isoformat() if run.trade_date is not None else "unknown"
+        )
         idempotency_key = (
             f"{strategy_key}:{run.strategy_version_id}:"
-            f"{run.trade_date.isoformat()}:{run.run_type}:{attempt_no}"
+            f"{trade_date_str}:{run.run_type}:{attempt_no}"
         )
 
         # 5. 创建新运行（复制原运行配置）
@@ -1498,6 +1501,11 @@ class StrategyBatchService:
         Raises:
             Exception: 执行失败时 re-raise
         """
+        if run.trade_date is None:
+            raise RuntimeError(
+                f"run.trade_date 为空，无法执行: run_id={run.id} item_id={item.id}"
+            )
+
         # 查询标的 symbol
         inst_stmt = select(Instrument.symbol, Instrument.listing_date).where(
             Instrument.id == item.instrument_id

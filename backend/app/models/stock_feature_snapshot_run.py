@@ -36,6 +36,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.models._table_meta import table_indexes
 from app.models.base import Base
 
 # [RunGate] - 运行类型枚举
@@ -196,7 +197,7 @@ if __name__ == "__main__":
     print("columns ✓")
 
     # 验证索引（含部分唯一索引）
-    idx_names = {idx.name for idx in StockFeatureSnapshotRun.__table__.indexes if idx.name}
+    idx_names = {idx.name for idx in table_indexes(StockFeatureSnapshotRun) if idx.name}
     assert "uq_snapshot_runs_active_key" in idx_names, f"缺少部分唯一索引: {idx_names}"
     assert "ix_snapshot_runs_trade_date_status" in idx_names, f"缺少索引: {idx_names}"
     assert "ix_snapshot_runs_trade_date_schema" in idx_names, f"缺少索引: {idx_names}"

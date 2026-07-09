@@ -37,6 +37,7 @@ from sqlalchemy import text as sa_text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.models._table_meta import table_indexes
 from app.models.base import Base
 
 
@@ -154,7 +155,7 @@ if __name__ == "__main__":
     assert "sensitivity" in cols
     assert "current_value" in cols
     assert ConfigDefinition.__table__.c.config_key.unique is True
-    indexes = [idx.name for idx in ConfigDefinition.__table__.indexes]
+    indexes = [idx.name for idx in table_indexes(ConfigDefinition)]
     print(f"indexes={indexes}")
     assert "ix_config_definitions_key" in indexes
     print("OK")

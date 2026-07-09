@@ -1019,7 +1019,8 @@ class PytdxAdapter(Exchange):
                 client = get_sync_redis()
                 cached = client.get(cache_key)
                 if cached is not None:
-                    df = pd.read_json(io.StringIO(cached), orient="split")
+                    cached_str = cached.decode() if isinstance(cached, bytes) else cached
+                    df = pd.read_json(io.StringIO(cached_str), orient="split")
                     if not df.empty:
                         # 反序列化后恢复 date 列类型
                         if "date" in df.columns:
@@ -1072,7 +1073,7 @@ class PytdxAdapter(Exchange):
             try:
                 if self._api is None:
                     self.connect()
-                raw = self._api.get_xdxr_info(market, symbol)
+                raw = self.api.get_xdxr_info(market, symbol)
                 if not raw:
                     return pd.DataFrame()
                 df = pd.DataFrame(raw)

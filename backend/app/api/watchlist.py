@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, date, datetime
+from typing import NamedTuple
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -73,6 +74,15 @@ from app.services.market_status_service import compute_market_session
 logger = logging.getLogger("watchlist_api")
 
 router = APIRouter(prefix="/watchlist", tags=["watchlist"])
+
+
+class _EvalInfo(NamedTuple):
+    """MonitorEvaluation 查询行的评估字段（仅用于展示）。"""
+
+    evaluation_status: str
+    retry_count: int
+    error_code: str | None
+    source_bar_time: datetime
 
 
 async def _check_limit_if_needed(
@@ -359,7 +369,7 @@ async def get_watchlist_monitor_status(
     # 4. 批量查询每个 instrument 的最新 MonitorEvaluation（窗口函数取 rn=1）
     # MonitorEvaluation 仅用于展示评估状态（evaluation_status/retry_count/error_code/source_bar_time），
     # 不再作为 metrics 数据源
-    eval_map: dict[UUID, object] = {}
+    eval_map: dict[UUID, _EvalInfo] = {}
     if monitor_version_id is not None and rows:
         instrument_ids = [row[1].id for row in rows]
         latest_eval_subq = (
@@ -385,7 +395,12 @@ async def get_watchlist_monitor_status(
         latest_eval_stmt = select(latest_eval_subq).where(latest_eval_subq.c.rn == 1)
         eval_result = await db.execute(latest_eval_stmt)
         for row in eval_result:
-            eval_map[row.instrument_id] = row
+            eval_map[row.instrument_id] = _EvalInfo(
+                evaluation_status=row.evaluation_status,
+                retry_count=row.retry_count,
+                error_code=row.error_code,
+                source_bar_time=row.source_bar_time,
+            )
 
     # 4.5. 批量查询每个 instrument 的最新 StrategyEvent
     latest_event_map: dict[UUID, dict] = {}
