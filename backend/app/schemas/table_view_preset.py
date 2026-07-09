@@ -33,6 +33,11 @@ _FORBIDDEN_CONFIG_KEYS: frozenset[str] = frozenset(
     {"selectedKeys", "page", "activeRunId", "rows", "results", "resultData"}
 )
 
+# filters.op 白名单（与前端 StrategyDataTable 支持的操作符一致）
+_ALLOWED_FILTER_OPS: frozenset[str] = frozenset(
+    {"contains", "eq", "gt", "gte", "lt", "lte", "between", "empty", "not_empty"}
+)
+
 # 每 user+table_id+strategy_key 最多 preset 数量
 MAX_PRESETS_PER_SCOPE: int = 20
 
@@ -66,11 +71,16 @@ class TableViewPresetConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_sort_shape(self) -> TableViewPresetConfig:
-        """sort 必须含 key 与 direction（asc/desc）。"""
+        """sort 必须含 key（非空 string）与 direction（asc/desc）。"""
         if self.sort is None:
             return self
         if "key" not in self.sort or "direction" not in self.sort:
             raise ValueError("sort 必须含 key 与 direction 字段")
+        sort_key = self.sort["key"]
+        if not isinstance(sort_key, str) or not sort_key.strip():
+            raise ValueError(
+                f"sort.key 必须为非空 string，实际: {sort_key!r} (type={type(sort_key).__name__})"
+            )
         direction = self.sort["direction"]
         if direction not in ("asc", "desc"):
             raise ValueError(f"sort.direction 必须为 asc 或 desc，实际: {direction!r}")
@@ -78,12 +88,19 @@ class TableViewPresetConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_filters_shape(self) -> TableViewPresetConfig:
-        """filters 元素必须含 key/op/value。"""
+        """filters 元素必须是 dict 且含 key/op/value，op 限制白名单。"""
         if self.filters is None:
             return self
         for i, f in enumerate(self.filters):
+            if not isinstance(f, dict):
+                raise ValueError(f"filters[{i}] 必须为 dict，实际类型: {type(f).__name__}")
             if "key" not in f or "op" not in f or "value" not in f:
                 raise ValueError(f"filters[{i}] 必须含 key/op/value 字段")
+            if f["op"] not in _ALLOWED_FILTER_OPS:
+                raise ValueError(
+                    f"filters[{i}].op 不在白名单: {f['op']!r}。"
+                    f"允许: {sorted(_ALLOWED_FILTER_OPS)}"
+                )
         return self
 
 
@@ -158,10 +175,13 @@ class TableViewPresetListResponse(BaseModel):
 
 
 def _validate_config_keys(config: dict[str, Any]) -> None:
-    """校验 config 字段只含白名单内的 key。
+    """校验 config 字段只含白名单内的 key，并深度校验 filters/hiddenColumns/sort。
 
     - 拒绝 selectedKeys/page/activeRunId/rows/results/resultData 等业务数据
     - 拒绝未在白名单内的其他 key
+    - filters 每项必须是 dict 且含 key/op/value，op 限制白名单
+    - hiddenColumns 每项必须是 string
+    - sort.key 必须是非空 string
     """
     if not isinstance(config, dict):
         raise ValueError(f"config 必须为 dict，实际类型: {type(config).__name__}")
@@ -195,12 +215,31 @@ def _validate_config_keys(config: dict[str, Any]) -> None:
             raise ValueError(
                 f"config.filters 必须为 list，实际类型: {type(config['filters']).__name__}"
             )
+        # [ConfigValidation] - 描述: filters 每项必须是 dict 且含 key/op/value，op 限制白名单
+        for i, f in enumerate(config["filters"]):
+            if not isinstance(f, dict):
+                raise ValueError(
+                    f"config.filters[{i}] 必须为 dict，实际类型: {type(f).__name__}"
+                )
+            if "key" not in f or "op" not in f or "value" not in f:
+                raise ValueError(f"config.filters[{i}] 必须含 key/op/value 字段")
+            if f["op"] not in _ALLOWED_FILTER_OPS:
+                raise ValueError(
+                    f"config.filters[{i}].op 不在白名单: {f['op']!r}。"
+                    f"允许: {sorted(_ALLOWED_FILTER_OPS)}"
+                )
 
     if "hiddenColumns" in config and config["hiddenColumns"] is not None:
         if not isinstance(config["hiddenColumns"], list):
             raise ValueError(
                 f"config.hiddenColumns 必须为 list，实际类型: {type(config['hiddenColumns']).__name__}"
             )
+        # [ConfigValidation] - 描述: hiddenColumns 每项必须是 string
+        for i, col in enumerate(config["hiddenColumns"]):
+            if not isinstance(col, str):
+                raise ValueError(
+                    f"config.hiddenColumns[{i}] 必须为 string，实际类型: {type(col).__name__}"
+                )
 
     if "keyword" in config and config["keyword"] is not None:
         if not isinstance(config["keyword"], str):
@@ -216,6 +255,12 @@ def _validate_config_keys(config: dict[str, Any]) -> None:
         sort_val = config["sort"]
         if "key" not in sort_val or "direction" not in sort_val:
             raise ValueError("sort 必须含 key 与 direction 字段")
+        # [ConfigValidation] - 描述: sort.key 必须是非空 string
+        sort_key = sort_val["key"]
+        if not isinstance(sort_key, str) or not sort_key.strip():
+            raise ValueError(
+                f"sort.key 必须为非空 string，实际: {sort_key!r} (type={type(sort_key).__name__})"
+            )
         if sort_val["direction"] not in ("asc", "desc"):
             raise ValueError(
                 f"sort.direction 必须为 asc 或 desc，实际: {sort_val['direction']!r}"

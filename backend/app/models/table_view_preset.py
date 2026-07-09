@@ -1,7 +1,7 @@
 """UserTableViewPreset ORM 模型 - 用户表格视图配置。
 
 对应迁移 059_user_table_view_presets：
-- user_table_view_presets: 用户表格视图配置（id 主键，user_id+table_id+strategy_key+name 唯一）
+- user_table_view_presets: 用户表格视图配置（id 主键，partial unique index 保证名称唯一）
 
 字段说明：
 - id: UUID 主键（数据库生成 gen_random_uuid()）
@@ -15,7 +15,9 @@
 - updated_at: 更新时间（由 onupdate 自动维护）
 
 设计要点：
-- (user_id, table_id, strategy_key, name) 唯一约束
+- 唯一约束用两个 partial unique index 实现（解决 PostgreSQL NULL!=NULL 问题）：
+  * strategy_key IS NOT NULL → unique(user_id, table_id, strategy_key, name)
+  * strategy_key IS NULL     → unique(user_id, table_id, name)
 - 每 user+table_id+strategy_key 最多 20 个（由应用层 quota 检查）
 - config 字段类型校验由 Pydantic schema 强制（禁止 selectedKeys/page/activeRunId/rows）
 - user_id 由认证上下文注入（V1.1 安全约束：私有资源 user_id 不接受 body 传入）
@@ -32,8 +34,8 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Text,
-    UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -44,7 +46,9 @@ from app.models.base import Base
 class UserTableViewPreset(Base):
     """用户表格视图配置 - 保存用户在表格（如趋势选股页）的筛选/排序/列设置。
 
-    (user_id, table_id, strategy_key, name) 唯一约束保证同用户同表同策略下配置名不重复。
+    唯一约束用两个 partial unique index 实现：
+    - strategy_key IS NOT NULL → unique(user_id, table_id, strategy_key, name)
+    - strategy_key IS NULL     → unique(user_id, table_id, name)
     config 仅保存视图相关字段（keyword/sort/filters/hiddenColumns/pageSize），
     禁止保存 selectedKeys/page/activeRunId/rows 等会话态或业务数据。
     """
@@ -106,12 +110,24 @@ class UserTableViewPreset(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint(
+        # [UniqueConstraint] - partial unique index：strategy_key 非空时约束 (user, table, strategy, name)
+        Index(
+            "uq_user_table_view_preset_strategy_not_null",
             "user_id",
             "table_id",
             "strategy_key",
             "name",
-            name="uq_user_table_view_preset_user_table_strategy_name",
+            unique=True,
+            postgresql_where=text("strategy_key IS NOT NULL"),
+        ),
+        # [UniqueConstraint] - partial unique index：strategy_key 为 NULL 时约束 (user, table, name)
+        Index(
+            "uq_user_table_view_preset_strategy_null",
+            "user_id",
+            "table_id",
+            "name",
+            unique=True,
+            postgresql_where=text("strategy_key IS NULL"),
         ),
         Index(
             "ix_user_table_view_presets_user_table_strategy",
@@ -143,16 +159,21 @@ if __name__ == "__main__":
     assert "is_default" in cols
     assert "created_at" in cols
     assert "updated_at" in cols
-    # 验证唯一约束
-    uq_constraints = [
-        c for c in UserTableViewPreset.__table__.constraints  # type: ignore[attr-defined]
-        if getattr(c, "name", None) == "uq_user_table_view_preset_user_table_strategy_name"
-    ]
-    print(f"unique_constraints_count={len(uq_constraints)}")
-    assert len(uq_constraints) == 1
+    # 验证 partial unique index
     indexes = [idx.name for idx in UserTableViewPreset.__table__.indexes]  # type: ignore[attr-defined]
     print(f"indexes={indexes}")
+    assert "uq_user_table_view_preset_strategy_not_null" in indexes
+    assert "uq_user_table_view_preset_strategy_null" in indexes
     assert "ix_user_table_view_presets_user_table_strategy" in indexes
+    # 旧的 UniqueConstraint 应已删除
+    uq_constraints = [
+        c
+        for c in UserTableViewPreset.__table__.constraints  # type: ignore[attr-defined]
+        if getattr(c, "name", None)
+        == "uq_user_table_view_preset_user_table_strategy_name"
+    ]
+    print(f"old_unique_constraints_count={len(uq_constraints)}")
+    assert len(uq_constraints) == 0
     # 验证 strategy_key 可空
     strategy_key_col = UserTableViewPreset.__table__.columns["strategy_key"]
     assert strategy_key_col.nullable is True

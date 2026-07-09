@@ -180,8 +180,12 @@ async def create_my_table_view_preset(
         await db.flush()
     except IntegrityError as e:
         await db.rollback()
-        # [UniqueConstraint] - 描述: (user_id, table_id, strategy_key, name) 唯一约束冲突
-        if "uq_user_table_view_preset_user_table_strategy_name" in str(e):
+        # [UniqueConstraint] - 描述: partial unique index 冲突（strategy_key NULL/非NULL 两个索引）
+        err_str = str(e)
+        if (
+            "uq_user_table_view_preset_strategy_not_null" in err_str
+            or "uq_user_table_view_preset_strategy_null" in err_str
+        ):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
@@ -265,7 +269,12 @@ async def update_my_table_view_preset(
         await db.flush()
     except IntegrityError as e:
         await db.rollback()
-        if "uq_user_table_view_preset_user_table_strategy_name" in str(e):
+        # [UniqueConstraint] - 描述: partial unique index 冲突（strategy_key NULL/非NULL 两个索引）
+        err_str = str(e)
+        if (
+            "uq_user_table_view_preset_strategy_not_null" in err_str
+            or "uq_user_table_view_preset_strategy_null" in err_str
+        ):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"同维度下已存在同名 preset: name={payload.name!r}",

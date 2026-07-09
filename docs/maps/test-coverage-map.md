@@ -24,7 +24,7 @@
 | adapter 处理 null id/payload（skipped/failed 行 resultId=''、payload={}） | `frontend/src/features/trend-selection/__tests__/adapter.test.ts` |
 | **批量加入自选按 instrumentId 匹配+去重**：handleBatchAdd 按 `r.instrumentId` 匹配 selectedKeys（禁止 resultId）、instrumentId 去重、空选 toast 提示、成功/失败 toast 真实数量、保留 useAddToWatchlist 缓存失效 | `frontend/src/pages/__tests__/ScreenerPage.batch.test.ts`（6 用例） |
 | **change_pct 独立列**：列存在、title/shortTitle、dataType=percent、sortable/filterable、width≈86、render 用 fmtChange+changePctColorClass、sortValue 读取 payload、位于 stock 列之后 | `frontend/src/features/trend-selection/__tests__/columns.test.ts`（6 用例） |
-| **表格视图配置 preset API**：权限矩阵（401/403/200/201）、CRUD、用户隔离、重名冲突 409、quota 422、非法 config 422、is_default 互斥、必填字段校验、user_id 注入安全、PATCH 空请求 422、迁移幂等 | `backend/tests/test_table_view_presets_api.py`（37 用例） |
+| **表格视图配置 preset API**：权限矩阵（401/403/200/201）、CRUD、用户隔离、重名冲突 409（含 NULL strategy_key 场景）、quota 422、非法 config 422、filters/hiddenColumns/sort 深度校验、op 白名单校验、is_default 互斥、必填字段校验、user_id 注入安全、PATCH 空请求 422、迁移幂等 | `backend/tests/test_table_view_presets_api.py`（47 用例） |
 | 生产验证：run_id=f0c15e1c, source_total=5293, succeeded 行 35 个 DSA 指标正确显示，skipped 行显示股票但指标为空（JOIN 改用 `(run_id, instrument_id)` 绕过 result_id 未回填问题，ALIGN-032 CLOSED, ALIGN-033 P2） | 生产 API + DB 只读核对（CHANGE-20260704-029） |
 
 ## 3. 行情聚合

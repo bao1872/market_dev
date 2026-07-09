@@ -645,7 +645,7 @@ docker logs trading-backend --tail 200 2>&1 | grep -i traceback
 
 任何修改 `frontend/src/pages/ScreenerPage.tsx`（handleBatchAdd）、`frontend/src/features/trend-selection/columns.tsx`（change_pct 列）、`frontend/src/components/StrategyDataTable.tsx`（preset 集成）、`frontend/src/components/TablePresetMenu.tsx`、`frontend/src/styles/global.scss`（sticky 表头/选择列）、`backend/app/api/me_table_view_presets.py`、`backend/app/schemas/table_view_preset.py`、`backend/app/models/table_view_preset.py`、`backend/alembic/versions/059_user_table_view_presets.py` 必须跑本节回归测试。
 
-### 3.10.1 后端 preset API 回归（`tests/test_table_view_presets_api.py`，37 个用例）
+### 3.10.1 后端 preset API 回归（`tests/test_table_view_presets_api.py`，47 个用例）
 
 权限矩阵（10 个用例）：
 - 未认证 → 401（GET/POST/PATCH/DELETE 各一）；
@@ -667,9 +667,15 @@ CRUD（8 个用例）：
 - 用户 A 创建的 preset 用户 B GET 不可见；
 - 用户 B PATCH/DELETE 用户 A 的 preset → 404。
 
-重名冲突（2 个用例）：
-- POST 同维度同名 → 409；
-- PATCH 重命名为同维度已有 name → 409。
+重名冲突（4 个用例）：
+- POST 同维度同名（strategy_key 非空）→ 409；
+- PATCH 重命名为同维度已有 name（strategy_key 非空）→ 409；
+- POST 同维度同名（strategy_key=NULL）→ 409（验证 partial unique index `uq_user_table_view_preset_strategy_null`）；
+- PATCH 重命名为同维度已有 name（strategy_key=NULL）→ 409。
+
+NULL strategy_key 隔离（2 个用例）：
+- 不同 table_id + strategy_key=NULL + 同名 → 允许（201）；
+- 不同 user + 同 table_id + strategy_key=NULL + 同名 → 允许（201）。
 
 quota（2 个用例）：
 - 同维度已有 20 个 preset 时 POST → 422；
@@ -681,6 +687,14 @@ quota（2 个用例）：
 - config 含 `activeRunId` → 422；
 - config 含 `rows` → 422；
 - config 含未知字段 → 422。
+
+config 深度校验（6 个用例）：
+- config.filters 元素不是 dict → 422；
+- config.filters 元素缺 key 字段 → 422；
+- config.filters op 不在白名单（如 `regex`）→ 422；
+- config.filters 所有合法 op（contains/eq/gt/gte/lt/lte/between/empty/not_empty）通过 → 201；
+- config.hiddenColumns 元素不是 string → 422；
+- config.sort.key 为空字符串 → 422。
 
 is_default 互斥（2 个用例）：
 - POST is_default=true 时同维度旧默认自动取消；
@@ -698,7 +712,7 @@ PATCH 空请求（1 个用例）：
 - PATCH 不传任何字段 → 422（至少一个字段）。
 
 迁移幂等（1 个用例）：
-- `alembic upgrade head` 创建 `user_table_view_presets` 表；
+- `alembic upgrade head` 创建 `user_table_view_presets` 表 + 两个 partial unique index；
 - `alembic downgrade -1` 删除表；
 - `alembic upgrade head` 再升级不报错。
 

@@ -61,7 +61,7 @@ strategy_run_items.reason_code 标准编码：
 | 监控 | `/monitor-states`, `/strategy-events` | 只处理完成 Bar，按用户资格过滤；monitor_event 在 `delivery_worker.py` 投递前再次用 `is_user_eligible_for_monitor` 复核，active admin 放行，disabled admin / 无订阅普通用户排除 |
 | 通知 | `/messages`, `/notification-channels` | 用户只能操作自己的消息和渠道 |
 | 自选 | `/watchlist` | active subscription + monitor_limit |
-| 表格视图配置 | `/me/table-view-presets` | 用户表格视图配置 CRUD；JWT user_id 隔离；active subscription + trend_selection feature（admin 豁免）；config 仅允许 keyword/sort/filters/hiddenColumns/pageSize；每 user+table_id+strategy_key 最多 20 个；`(user_id, table_id, strategy_key, name)` 唯一约束；is_default 同维度互斥 |
+| 表格视图配置 | `/me/table-view-presets` | 用户表格视图配置 CRUD；JWT user_id 隔离；active subscription + trend_selection feature（admin 豁免）；config 仅允许 keyword/sort/filters/hiddenColumns/pageSize；每 user+table_id+strategy_key 最多 20 个；`(user_id, table_id, strategy_key, name)` 唯一约束用两个 partial unique index 实现（strategy_key IS NOT NULL / IS NULL 分离，解决 NULL!=NULL 问题）；is_default 同维度互斥 |
 | 个股详情分享 | `/stock-detail-feishu` | target_channel_id 支持手动指定渠道 |
 | Capture | `/api/v1/capture/*` | 只接受 Capture Token |
 | Admin | `/admin/*` | Admin 角色 + 审计；含 `GET /admin/worker-heartbeats` 只读心跳视图（health_state 后端计算：fresh<120s / stale 120-600s / stopped≥600s 或 status=stopped）；新增盘后流水线聚合状态端点 `/admin/after-close/pipeline/latest`、`/admin/after-close/pipeline?trade_date=`、`/admin/after-close/pipeline/runs?limit=`、`POST /admin/after-close/pipeline/run`（admin，幂等），响应 `AfterClosePipelineResponse` 含 8 步骤时间线 + watchlist_ready 严格判定 + data_freshness + 最近 100 条 events |
@@ -917,7 +917,11 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 | `created_at` | TIMESTAMPTZ | NOT NULL, default `now()` | 创建时间 |
 | `updated_at` | TIMESTAMPTZ | NOT NULL, default `now()`, onupdate `now()` | 更新时间 |
 
-**唯一约束**：`uq_user_table_view_preset_user_table_strategy_name (user_id, table_id, strategy_key, name)`，保证同用户同表同策略下配置名不重复。
+**唯一约束**（两个 partial unique index，解决 PostgreSQL NULL!=NULL 问题）：
+- `uq_user_table_view_preset_strategy_not_null (user_id, table_id, strategy_key, name) WHERE strategy_key IS NOT NULL`
+- `uq_user_table_view_preset_strategy_null (user_id, table_id, name) WHERE strategy_key IS NULL`
+
+保证同用户同表同策略下配置名不重复（含 strategy_key 为 NULL 的无策略表格场景）。
 
 **索引**：`ix_user_table_view_presets_user_table_strategy (user_id, table_id, strategy_key)`，用于查询和 quota 检查。
 
@@ -928,9 +932,9 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 | 字段 | 类型 | 约束 | 语义 |
 |---|---|---|---|
 | `keyword` | string \| null | max_length=200 | 关键字搜索 |
-| `sort` | dict \| null | 必须含 `key` + `direction`（`asc`/`desc`） | 排序配置 |
-| `filters` | list[dict] \| null | 每元素必须含 `key`/`op`/`value` | 筛选条件列表 |
-| `hiddenColumns` | list[string] \| null | - | 隐藏列 key 列表 |
+| `sort` | dict \| null | 必须含 `key`（非空 string）+ `direction`（`asc`/`desc`） | 排序配置 |
+| `filters` | list[dict] \| null | 每元素必须是 dict 且含 `key`/`op`/`value`；`op` 限制白名单：`contains`/`eq`/`gt`/`gte`/`lt`/`lte`/`between`/`empty`/`not_empty` | 筛选条件列表 |
+| `hiddenColumns` | list[string] \| null | 每元素必须是 string | 隐藏列 key 列表 |
 | `pageSize` | int \| null | 1-500 | 每页大小 |
 
 **禁止字段**（`_FORBIDDEN_CONFIG_KEYS`，由 `_validate_config_keys` 函数强制拒绝）：

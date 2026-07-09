@@ -1211,5 +1211,285 @@ async def test_user_id_in_body_ignored(
     assert data["user_id"] != str(fake_user_id)
 
 
+# ============================================================
+# NULL strategy_key 唯一约束测试（partial unique index）
+#
+# 背景：PostgreSQL 普通 UNIQUE 允许多个 NULL，当 strategy_key 为 NULL 时
+# 同一 user+table_id+name 可重复插入。改用 partial unique index 修复：
+#   - strategy_key IS NOT NULL → unique(user_id, table_id, strategy_key, name)
+#   - strategy_key IS NULL     → unique(user_id, table_id, name)
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_duplicate_name_with_null_strategy_key_conflict(
+    perm_client: tuple[AsyncClient, AsyncSession],
+) -> None:
+    """同一 user + table_id + strategy_key=NULL + name 重复创建 → 409。
+
+    普通 UNIQUE 约束因 NULL != NULL 不会拦截，必须用 partial unique index。
+    """
+    client, db = perm_client
+    user, _ = await _create_member_with_plan(db, "observe_20")
+    await db.flush()
+
+    payload = {
+        "table_id": "watchlist",
+        "strategy_key": None,
+        "name": "default-view",
+        "config": {"pageSize": 30},
+    }
+    resp1 = await client.post(
+        "/me/table-view-presets", json=payload, headers=_auth_headers(user.id),
+    )
+    assert resp1.status_code == 201, resp1.text
+
+    resp2 = await client.post(
+        "/me/table-view-presets", json=payload, headers=_auth_headers(user.id),
+    )
+    assert resp2.status_code == 409, resp2.text
+
+
+@pytest.mark.asyncio
+async def test_duplicate_name_null_strategy_key_different_table_allowed(
+    perm_client: tuple[AsyncClient, AsyncSession],
+) -> None:
+    """不同 table_id + strategy_key=NULL + 同名 → 允许（201）。"""
+    client, db = perm_client
+    user, _ = await _create_member_with_plan(db, "observe_20")
+    await db.flush()
+
+    for table_id in ("watchlist", "screener"):
+        resp = await client.post(
+            "/me/table-view-presets",
+            json={
+                "table_id": table_id,
+                "strategy_key": None,
+                "name": "same-name",
+                "config": {"pageSize": 30},
+            },
+            headers=_auth_headers(user.id),
+        )
+        assert resp.status_code == 201, resp.text
+
+
+@pytest.mark.asyncio
+async def test_duplicate_name_null_strategy_key_different_user_allowed(
+    perm_client: tuple[AsyncClient, AsyncSession],
+) -> None:
+    """不同 user + 同一 table_id + strategy_key=NULL + 同名 → 允许（201）。"""
+    client, db = perm_client
+    user_a, _ = await _create_member_with_plan(db, "observe_20")
+    user_b, _ = await _create_member_with_plan(db, "observe_20")
+    await db.flush()
+
+    for user in (user_a, user_b):
+        resp = await client.post(
+            "/me/table-view-presets",
+            json={
+                "table_id": "watchlist",
+                "strategy_key": None,
+                "name": "same-name",
+                "config": {"pageSize": 30},
+            },
+            headers=_auth_headers(user.id),
+        )
+        assert resp.status_code == 201, resp.text
+
+
+@pytest.mark.asyncio
+async def test_rename_to_existing_name_null_strategy_key_conflict(
+    perm_client: tuple[AsyncClient, AsyncSession],
+) -> None:
+    """PATCH 重命名时与 NULL strategy_key 维度其他 preset 同名 → 409。"""
+    client, db = perm_client
+    user, _ = await _create_member_with_plan(db, "observe_20")
+    await db.flush()
+
+    ids = []
+    for name in ("view-a", "view-b"):
+        resp = await client.post(
+            "/me/table-view-presets",
+            json={
+                "table_id": "watchlist",
+                "strategy_key": None,
+                "name": name,
+                "config": {"pageSize": 30},
+            },
+            headers=_auth_headers(user.id),
+        )
+        assert resp.status_code == 201, resp.text
+        ids.append(resp.json()["id"])
+
+    # 把 view-a 重命名为 view-b → 409
+    resp = await client.patch(
+        f"/me/table-view-presets/{ids[0]}",
+        json={"name": "view-b"},
+        headers=_auth_headers(user.id),
+    )
+    assert resp.status_code == 409, resp.text
+
+
+# ============================================================
+# config 校验加强测试（filters/hiddenColumns/sort 深度校验）
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_config_filters_element_must_be_dict(
+    perm_client: tuple[AsyncClient, AsyncSession],
+) -> None:
+    """config.filters 元素不是 dict → 422。"""
+    client, db = perm_client
+    user, _ = await _create_member_with_plan(db, "observe_20")
+    await db.flush()
+
+    bad_config = _valid_config()
+    bad_config["filters"] = ["not-a-dict"]
+    resp = await client.post(
+        "/me/table-view-presets",
+        json={
+            "table_id": "screener",
+            "strategy_key": "dsa_selector",
+            "name": "view",
+            "config": bad_config,
+        },
+        headers=_auth_headers(user.id),
+    )
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+async def test_config_filters_element_missing_key(
+    perm_client: tuple[AsyncClient, AsyncSession],
+) -> None:
+    """config.filters 元素缺 key 字段 → 422。"""
+    client, db = perm_client
+    user, _ = await _create_member_with_plan(db, "observe_20")
+    await db.flush()
+
+    bad_config = _valid_config()
+    bad_config["filters"] = [{"op": "gt", "value": 3.0}]  # 缺 key
+    resp = await client.post(
+        "/me/table-view-presets",
+        json={
+            "table_id": "screener",
+            "strategy_key": "dsa_selector",
+            "name": "view",
+            "config": bad_config,
+        },
+        headers=_auth_headers(user.id),
+    )
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+async def test_config_filters_invalid_op(
+    perm_client: tuple[AsyncClient, AsyncSession],
+) -> None:
+    """config.filters op 不在白名单 → 422。
+
+    白名单：contains/eq/gt/gte/lt/lte/between/empty/not_empty
+    """
+    client, db = perm_client
+    user, _ = await _create_member_with_plan(db, "observe_20")
+    await db.flush()
+
+    bad_config = _valid_config()
+    bad_config["filters"] = [{"key": "change_pct", "op": "regex", "value": 3.0}]
+    resp = await client.post(
+        "/me/table-view-presets",
+        json={
+            "table_id": "screener",
+            "strategy_key": "dsa_selector",
+            "name": "view",
+            "config": bad_config,
+        },
+        headers=_auth_headers(user.id),
+    )
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+async def test_config_filters_valid_ops_accepted(
+    perm_client: tuple[AsyncClient, AsyncSession],
+) -> None:
+    """config.filters 所有合法 op 都应通过（contains/eq/gt/gte/lt/lte/between/empty/not_empty）。"""
+    client, db = perm_client
+    user, _ = await _create_member_with_plan(db, "observe_20")
+    await db.flush()
+
+    valid_ops = [
+        {"key": "stock", "op": "contains", "value": "茅台"},
+        {"key": "change_pct", "op": "eq", "value": 3.0},
+        {"key": "change_pct", "op": "gt", "value": 3.0},
+        {"key": "change_pct", "op": "gte", "value": 3.0},
+        {"key": "change_pct", "op": "lt", "value": 3.0},
+        {"key": "change_pct", "op": "lte", "value": 3.0},
+        {"key": "change_pct", "op": "between", "value": 1.0, "value2": 5.0},
+        {"key": "stock", "op": "empty", "value": ""},
+        {"key": "stock", "op": "not_empty", "value": ""},
+    ]
+    resp = await client.post(
+        "/me/table-view-presets",
+        json={
+            "table_id": "screener",
+            "strategy_key": "dsa_selector",
+            "name": "all-ops",
+            "config": {"filters": valid_ops},
+        },
+        headers=_auth_headers(user.id),
+    )
+    assert resp.status_code == 201, resp.text
+
+
+@pytest.mark.asyncio
+async def test_config_hidden_columns_element_must_be_string(
+    perm_client: tuple[AsyncClient, AsyncSession],
+) -> None:
+    """config.hiddenColumns 元素不是 string → 422。"""
+    client, db = perm_client
+    user, _ = await _create_member_with_plan(db, "observe_20")
+    await db.flush()
+
+    bad_config = _valid_config()
+    bad_config["hiddenColumns"] = ["symbol", 123]  # 第二个不是 string
+    resp = await client.post(
+        "/me/table-view-presets",
+        json={
+            "table_id": "screener",
+            "strategy_key": "dsa_selector",
+            "name": "view",
+            "config": bad_config,
+        },
+        headers=_auth_headers(user.id),
+    )
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+async def test_config_sort_key_must_be_nonempty_string(
+    perm_client: tuple[AsyncClient, AsyncSession],
+) -> None:
+    """config.sort.key 为空字符串 → 422。"""
+    client, db = perm_client
+    user, _ = await _create_member_with_plan(db, "observe_20")
+    await db.flush()
+
+    bad_config = _valid_config()
+    bad_config["sort"] = {"key": "", "direction": "desc"}
+    resp = await client.post(
+        "/me/table-view-presets",
+        json={
+            "table_id": "screener",
+            "strategy_key": "dsa_selector",
+            "name": "view",
+            "config": bad_config,
+        },
+        headers=_auth_headers(user.id),
+    )
+    assert resp.status_code == 422, resp.text
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

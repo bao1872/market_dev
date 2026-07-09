@@ -7,7 +7,9 @@ Create Date: 2026-07-09
 变更内容：
 - 新增 user_table_view_presets 表（用户表格视图配置）
 - 字段：id/user_id/table_id/strategy_key/name/config/is_default/created_at/updated_at
-- 唯一约束：(user_id, table_id, strategy_key, name)
+- 唯一约束：两个 partial unique index 解决 NULL strategy_key 重复问题
+  * strategy_key IS NOT NULL → unique(user_id, table_id, strategy_key, name)
+  * strategy_key IS NULL     → unique(user_id, table_id, name)
 - 索引：(user_id, table_id, strategy_key) 用于查询和 quota 检查
 
 设计说明：
@@ -16,6 +18,7 @@ Create Date: 2026-07-09
 - 每 user+table_id+strategy_key 最多 20 个（由应用层 quota 检查）
 - is_default 同维度至多 1 个 true（由应用层互斥更新）
 - user_id 由认证上下文注入，不接受 body 传入
+- strategy_key 可空：PostgreSQL 普通 UNIQUE 允许多个 NULL，故改用 partial unique index
 
 用法：
     cd backend && alembic upgrade head
@@ -38,7 +41,13 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    """创建 user_table_view_presets 表。"""
+    """创建 user_table_view_presets 表。
+
+    唯一约束用两个 partial unique index 实现：
+    - strategy_key IS NOT NULL 时 unique(user_id, table_id, strategy_key, name)
+    - strategy_key IS NULL 时 unique(user_id, table_id, name)
+    这样 NULL strategy_key 场景下同名也会被拦截（普通 UNIQUE 因 NULL!=NULL 无法拦截）。
+    """
     op.create_table(
         "user_table_view_presets",
         sa.Column(
@@ -100,23 +109,44 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
             comment="更新时间（由 onupdate 自动维护）",
         ),
-        sa.UniqueConstraint(
-            "user_id",
-            "table_id",
-            "strategy_key",
-            "name",
-            name="uq_user_table_view_preset_user_table_strategy_name",
-        ),
-        sa.Index(
-            "ix_user_table_view_presets_user_table_strategy",
-            "user_id",
-            "table_id",
-            "strategy_key",
-        ),
         comment="用户表格视图配置（保存筛选/排序/列设置，禁止保存业务数据）",
+    )
+    # [UniqueConstraint] - partial unique index：strategy_key 非空时约束 (user, table, strategy, name)
+    op.create_index(
+        "uq_user_table_view_preset_strategy_not_null",
+        "user_table_view_presets",
+        ["user_id", "table_id", "strategy_key", "name"],
+        unique=True,
+        postgresql_where=sa.text("strategy_key IS NOT NULL"),
+    )
+    # [UniqueConstraint] - partial unique index：strategy_key 为 NULL 时约束 (user, table, name)
+    op.create_index(
+        "uq_user_table_view_preset_strategy_null",
+        "user_table_view_presets",
+        ["user_id", "table_id", "name"],
+        unique=True,
+        postgresql_where=sa.text("strategy_key IS NULL"),
+    )
+    # 查询/quota 检查辅助索引
+    op.create_index(
+        "ix_user_table_view_presets_user_table_strategy",
+        "user_table_view_presets",
+        ["user_id", "table_id", "strategy_key"],
     )
 
 
 def downgrade() -> None:
     """删除 user_table_view_presets 表。"""
+    op.drop_index(
+        "ix_user_table_view_presets_user_table_strategy",
+        table_name="user_table_view_presets",
+    )
+    op.drop_index(
+        "uq_user_table_view_preset_strategy_null",
+        table_name="user_table_view_presets",
+    )
+    op.drop_index(
+        "uq_user_table_view_preset_strategy_not_null",
+        table_name="user_table_view_presets",
+    )
     op.drop_table("user_table_view_presets")
