@@ -601,6 +601,7 @@ export default function ScreenerPage() {
           onSelectionChange={setSelectedKeys}
           initialPageSize={PAGE_SIZE}
           tableClassName="compact-table"
+          stickyHeaderMode="viewport"
         />
       </div>
     </div>
