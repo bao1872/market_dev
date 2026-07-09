@@ -41,6 +41,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.strategy_keys import WATCHLIST_MONITOR
+from app.core.route_utils import get_route_paths
 from app.core.time import now_shanghai, shanghai_business_date
 from app.db import get_db
 from app.models.instrument import Instrument
@@ -532,5 +533,5 @@ async def remove_from_watchlist(
 
 if __name__ == "__main__":
     # 自测入口：验证路由注册
-    print(f"router.routes={[r.path for r in router.routes]}")
+    print(f"router.routes={get_route_paths(router.routes)}")
     print("OK")

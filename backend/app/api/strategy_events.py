@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db
+from app.core.route_utils import get_route_paths
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.repositories.strategy_event_repository import get_event, query_events
 from app.schemas.strategy_event import (
@@ -152,7 +153,7 @@ async def get_strategy_event_detail(
 
 if __name__ == "__main__":
     # 自测入口：验证路由注册
-    paths = [r.path for r in router.routes]
+    paths = get_route_paths(router.routes)
     print(f"router.routes={paths}")
     assert any("/events" in p for p in paths)
     assert any("/strategy-events/" in p for p in paths)

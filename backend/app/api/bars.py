@@ -48,6 +48,7 @@ from app.constants.indicator_contract import INDICATOR_BARS
 from app.core.deps import get_db, require_roles
 from app.core.pytdx_adapter import get_pytdx_adapter
 from app.core.redis_client import get_redis
+from app.core.route_utils import get_route_paths
 from app.core.time import now_shanghai
 from app.models.bar import Bar15Min, Bar60Min, BarDaily, BarMinute, BarMonthly, BarWeekly
 from app.schemas.bar import BarListResponse, BarResponse, QuoteResponse
@@ -780,10 +781,10 @@ async def trigger_bars_backfill(
 
 if __name__ == "__main__":
     # 自测入口：验证路由注册（无副作用）
-    print(f"router.routes={[r.path for r in router.routes]}")
-    assert any("/instruments/" in r.path for r in router.routes), "应包含 instruments bars 路由"
-    assert any("/admin/bars/refresh" in r.path for r in router.routes), "应包含 admin refresh 路由"
-    assert any("/admin/bars/backfill" in r.path for r in router.routes), "应包含 admin backfill 路由"
-    assert any("/bars/health" in r.path for r in router.routes), "应包含 bars health 路由"
+    print(f"router.routes={get_route_paths(router.routes)}")
+    assert any("/instruments/" in p for p in get_route_paths(router.routes)), "应包含 instruments bars 路由"
+    assert any("/admin/bars/refresh" in p for p in get_route_paths(router.routes)), "应包含 admin refresh 路由"
+    assert any("/admin/bars/backfill" in p for p in get_route_paths(router.routes)), "应包含 admin backfill 路由"
+    assert any("/bars/health" in p for p in get_route_paths(router.routes)), "应包含 bars health 路由"
     print("所有路由注册验证 ✓（含 /bars/health）")
     print("OK")

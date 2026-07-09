@@ -1,20 +1,8 @@
 {
   "baseline_commit": "a8481c7e98e11dd570e340de606a0d8e38c4dd64",
-  "total": 206,
-  "unique": 156,
+  "total": 186,
+  "unique": 141,
   "diagnostics": [
-    {
-      "filename": "app/api/admin_after_close.py",
-      "error_code": "attr-defined",
-      "message": "\"BaseRoute\" has no attribute \"path\"",
-      "count": 2
-    },
-    {
-      "filename": "app/api/admin_beta_applications.py",
-      "error_code": "attr-defined",
-      "message": "\"BaseRoute\" has no attribute \"path\"",
-      "count": 1
-    },
     {
       "filename": "app/api/bars.py",
       "error_code": "assignment",
@@ -28,33 +16,9 @@
       "count": 1
     },
     {
-      "filename": "app/api/bars.py",
-      "error_code": "attr-defined",
-      "message": "\"BaseRoute\" has no attribute \"path\"",
-      "count": 5
-    },
-    {
-      "filename": "app/api/calendar.py",
-      "error_code": "attr-defined",
-      "message": "\"BaseRoute\" has no attribute \"path\"",
-      "count": 1
-    },
-    {
-      "filename": "app/api/health.py",
-      "error_code": "attr-defined",
-      "message": "\"BaseRoute\" has no attribute \"path\"",
-      "count": 1
-    },
-    {
       "filename": "app/api/indicators.py",
       "error_code": "assignment",
       "message": "Incompatible default for parameter \"response\" (default has type \"None\", parameter has type \"Response\")",
-      "count": 1
-    },
-    {
-      "filename": "app/api/market.py",
-      "error_code": "attr-defined",
-      "message": "\"BaseRoute\" has no attribute \"path\"",
       "count": 1
     },
     {
@@ -94,54 +58,6 @@
       "count": 1
     },
     {
-      "filename": "app/api/monitor_states.py",
-      "error_code": "attr-defined",
-      "message": "\"BaseRoute\" has no attribute \"path\"",
-      "count": 1
-    },
-    {
-      "filename": "app/api/notifications.py",
-      "error_code": "attr-defined",
-      "message": "\"BaseRoute\" has no attribute \"path\"",
-      "count": 1
-    },
-    {
-      "filename": "app/api/public_beta.py",
-      "error_code": "attr-defined",
-      "message": "\"BaseRoute\" has no attribute \"path\"",
-      "count": 1
-    },
-    {
-      "filename": "app/api/stock_memos.py",
-      "error_code": "attr-defined",
-      "message": "\"BaseRoute\" has no attribute \"path\"",
-      "count": 1
-    },
-    {
-      "filename": "app/api/strategies.py",
-      "error_code": "attr-defined",
-      "message": "\"BaseRoute\" has no attribute \"path\"",
-      "count": 1
-    },
-    {
-      "filename": "app/api/strategy_events.py",
-      "error_code": "attr-defined",
-      "message": "\"BaseRoute\" has no attribute \"path\"",
-      "count": 1
-    },
-    {
-      "filename": "app/api/strategy_runs.py",
-      "error_code": "attr-defined",
-      "message": "\"BaseRoute\" has no attribute \"path\"",
-      "count": 1
-    },
-    {
-      "filename": "app/api/watchlist.py",
-      "error_code": "attr-defined",
-      "message": "\"BaseRoute\" has no attribute \"path\"",
-      "count": 1
-    },
-    {
       "filename": "app/api/watchlist.py",
       "error_code": "attr-defined",
       "message": "\"object\" has no attribute \"error_code\"",
@@ -163,12 +79,6 @@
       "filename": "app/api/watchlist.py",
       "error_code": "attr-defined",
       "message": "\"object\" has no attribute \"source_bar_time\"",
-      "count": 1
-    },
-    {
-      "filename": "app/capture_main.py",
-      "error_code": "attr-defined",
-      "message": "\"BaseRoute\" has no attribute \"path\"",
       "count": 1
     },
     {

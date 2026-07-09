@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db, require_roles
+from app.core.route_utils import get_route_paths
 from app.schemas.strategy import (
     CreateStrategyRequest,
     StrategyListResponse,
@@ -232,7 +233,7 @@ async def archive_strategy_version_endpoint(
 
 if __name__ == "__main__":
     # 自测入口：验证路由注册
-    paths = [r.path for r in router.routes]
+    paths = get_route_paths(router.routes)
     print(f"router.routes={paths}")
     assert "/strategies" in paths
     assert any("/admin/strategies" in p for p in paths)

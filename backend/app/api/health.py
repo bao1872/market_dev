@@ -15,6 +15,7 @@ from fastapi import APIRouter, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from app.core.route_utils import get_route_paths
 from app.db import AsyncSessionLocal
 
 logger = logging.getLogger("health")
@@ -131,6 +132,6 @@ async def version() -> JSONResponse:
 
 if __name__ == "__main__":
     # 自测入口：验证路由注册
-    print(f"router.routes={[r.path for r in router.routes]}")
+    print(f"router.routes={get_route_paths(router.routes)}")
     check_strategy_assets()
     print(f"_strategy_assets_ready={_strategy_assets_ready}")

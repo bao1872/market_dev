@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db
+from app.core.route_utils import get_route_paths
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.repositories.monitor_state_repository import (
     list_states_by_instrument,
@@ -118,7 +119,7 @@ async def get_strategy_monitor_states(
 
 if __name__ == "__main__":
     # 自测入口：验证路由注册
-    paths = [r.path for r in router.routes]
+    paths = get_route_paths(router.routes)
     print(f"router.routes={paths}")
     assert any("/monitor-states" in p for p in paths)
     print("OK")

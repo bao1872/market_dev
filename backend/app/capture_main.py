@@ -51,6 +51,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from app.core.route_utils import get_route_paths
 from app.services.stock_capture_service import StockCaptureError, capture_stock_chart
 
 app = FastAPI(title="Capture Worker")
@@ -168,5 +169,5 @@ if __name__ == "__main__":
 
     print(f"capture_main loaded: host={CAPTURE_HOST}, port={CAPTURE_PORT}")
     print(f"static_dir={CAPTURE_STATIC_DIR}, prefix={CAPTURE_STATIC_URL_PREFIX}")
-    print(f"routes={[r.path for r in app.routes]}")
+    print(f"routes={get_route_paths(app.routes)}")
     uvicorn.run(app, host=CAPTURE_HOST, port=CAPTURE_PORT)

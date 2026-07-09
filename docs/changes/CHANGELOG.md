@@ -4,6 +4,14 @@
 
 ## 2026-07-09
 
+- CHANGE-20260709-008: API 路由 BaseRoute.path mypy baseline 债务清零
+  - `app/api/*` + `capture_main.py` 的 20 个 BaseRoute.path attr-defined 错误降为 0
+  - 新增 `app/core/route_utils.py`：`iter_api_routes` / `get_route_paths` 类型收窄 helper
+  - 15 个文件中的 `[r.path for r in router.routes]` 替换为 `get_route_paths(router.routes)`
+  - 不使用 type:ignore/cast；不改变 API 行为
+  - 更新 `tools/quality_baselines/mypy.json`（total 206→186, unique 156→141）
+  - 更新 `docs/current/03-jobs-integrations-operations.md`（§9 API 路由治理、§10 工具通道规则）、`docs/current/05-testing-acceptance.md`（§5.1 验收规则、§5.1.1 路线图）
+
 - CHANGE-20260709-007: after_close_orchestrator mypy baseline 债务清零
   - `after_close_orchestrator.py` 的 22 个 mypy baseline 错误降为 0
   - 新增 `_get_job_run_or_raise` / `_get_strategy_run_or_raise` 类型收窄 helper，替换所有裸 `db.get` 调用

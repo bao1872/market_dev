@@ -22,6 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_active_user
+from app.core.route_utils import get_route_paths
 from app.db import get_db
 from app.models.instrument import Instrument
 from app.models.stock_memo import StockMemo
@@ -175,5 +176,5 @@ async def toggle_notify(
 
 if __name__ == "__main__":
     # 自测入口：验证路由注册
-    print(f"router.routes={[r.path for r in router.routes]}")
+    print(f"router.routes={get_route_paths(router.routes)}")
     print("OK")

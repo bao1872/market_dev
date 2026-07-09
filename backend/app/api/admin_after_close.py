@@ -24,6 +24,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db, require_roles
+from app.core.route_utils import get_route_paths, iter_api_routes
 from app.schemas.after_close_pipeline import (
     AfterClosePipelineResponse,
     AfterClosePipelineRunListResponse,
@@ -791,13 +792,13 @@ def _parse_metadata_for_new_endpoint(job_run: Any) -> dict[str, Any]:
 
 if __name__ == "__main__":
     # 自测入口：验证路由端点注册（不启动服务）
-    routes = [(r.path, list(r.methods)) for r in router.routes if hasattr(r, "methods")]
+    routes = [(r.path, list(r.methods)) for r in iter_api_routes(router.routes) if r.methods]
     print(f"注册端点数: {len(routes)}")
     for path, methods in routes:
         print(f"  {methods} {path}")
 
     # 验证必要端点存在
-    paths = {r.path for r in router.routes}
+    paths = set(get_route_paths(router.routes))
     assert "/admin/after-close-runs" in paths, "缺少 POST /admin/after-close-runs"
     assert "/admin/after-close-runs/dsa-only" in paths, "缺少 dsa-only 端点"
     assert "/admin/after-close-runs/{run_id}" in paths, "缺少 GET /admin/after-close-runs/{run_id}"
