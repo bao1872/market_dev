@@ -322,7 +322,7 @@ API 契约回归（`tests/test_watchlist_monitor_status_snapshot.py`，14 个用
   - `backfill` full scope run（`scope='full'` + `published_at` 非空）→ watchlist 返回 `SUCCEEDED` + 可读 snapshot；
   - `backfill` sample scope run（`scope='sample'` + `published_at` 非空）→ watchlist 不得读 snapshot（`calculation_status != 'SUCCEEDED'` + `metrics={}`），防止小样本验证数据污染生产 watchlist SUCCEEDED 状态。
 
-orchestrator 状态机回归（`tests/test_after_close_orchestrator.py`，11 个用例）：
+orchestrator 状态机回归（`tests/test_after_close_orchestrator.py`，17 个用例）：
 - `AfterCloseRunStatus` 枚举包含 `FEATURE_SNAPSHOT`；
 - 状态机流转顺序：`quality_gate → feature_snapshot → publishing`；
 - 断点恢复：`last_completed_step='quality_gate'` 时 `skip_snapshot=False`；`last_completed_step='feature_snapshot'` 时 `skip_snapshot=True`；
@@ -331,6 +331,13 @@ orchestrator 状态机回归（`tests/test_after_close_orchestrator.py`，11 个
 - **[Run lifecycle - Phase 8 新增]**：
   - feature_snapshot 成功写 `stock_feature_snapshot_runs.status='succeeded'` + `published_at` 非空 + `snapshot_count` / `failed_count` 正确；
   - feature_snapshot 失败写 `stock_feature_snapshot_runs.status='failed'` + `published_at` 为 None + 不进入 publishing。
+- **[Heartbeat 保活 - CHANGE-20260709-006]**：
+  - `feature_snapshot` 阶段启动 `_job_run_heartbeat_loop`（间隔 30s），长计算期间持续刷新 `heartbeat_at` 与 `lease_expires_at`；
+  - `compute_for_trade_date` 每处理完一个 batch 调用 `progress_callback`，回调写入 `metadata.feature_snapshot_progress` 并按每 500 只股票采样生成 `job_run_events`；
+- **[Repair 修复 - CHANGE-20260709-006]**：
+  - `repair_stale_after_close_snapshot_runs`：存在 `status='interrupted'/'failed'` 的 after_close job_run 且同 trade_date 的 `feature_snapshot_run.status='running'` 超阈值时，实际 snapshot 行数 ≥ 95% 标 `succeeded` 并写 `published_at`，否则标 `failed`；
+  - `execute_after_close_run` 启动前自动调用 repair，避免 stuck running snapshot_run 阻塞新任务；
+  - running orchestrator 或未达到 stale 阈值的 running snapshot_run 不被误修复。
 
 Run service 回归（`tests/test_feature_snapshot_run_service.py`，6 个用例 - Phase 8 新增）：
 - `create_snapshot_run` 创建 `running` 记录；
@@ -360,12 +367,19 @@ pytest tests/test_feature_snapshot_service.py tests/test_feature_snapshot_backfi
 ruff check app/services/feature_snapshot_service.py \
   app/api/watchlist.py \
   app/services/after_close_orchestrator.py \
+  app/services/after_close_pipeline_service.py \
+  app/schemas/after_close_pipeline.py \
   scripts/feature_snapshot_backfill.py \
   tests/test_feature_snapshot_service.py \
   tests/test_feature_snapshot_backfill.py \
-  tests/test_watchlist_monitor_status_snapshot.py
+  tests/test_watchlist_monitor_status_snapshot.py \
+  tests/test_after_close_orchestrator.py \
+  tests/test_admin_after_close_pipeline.py
 
-mypy app/services/feature_snapshot_service.py
+mypy app/services/feature_snapshot_service.py \
+  app/services/after_close_orchestrator.py \
+  app/services/after_close_pipeline_service.py \
+  app/schemas/after_close_pipeline.py
 ```
 
 预期：47 passed、ruff 零错误、mypy 零错误。
@@ -381,7 +395,7 @@ cd /root/web_dev/backend && .venv/bin/python -m scripts.feature_snapshot_backfil
 
 任何修改 `backend/app/services/after_close_pipeline_service.py`、`backend/app/api/admin_after_close.py`（pipeline 端点部分）、`backend/app/schemas/after_close_pipeline.py` 必须跑盘后流水线聚合 API 回归测试。
 
-后端回归（`tests/test_admin_after_close_pipeline.py`，11 个用例）：
+后端回归（`tests/test_admin_after_close_pipeline.py`，12 个用例）：
 - 盘前无 run 时返回 `overall_status='not_started'` + `watchlist_ready=false`；
 - 收盘后超过 30 分钟阈值无 run → `overall_status='blocked'`；
 - latest 在交易日不回退历史 run（today 无 run 必须返回 today 的 blocked，不返回昨天 succeeded）；
@@ -390,6 +404,7 @@ cd /root/web_dev/backend && .venv/bin/python -m scripts.feature_snapshot_backfil
 - `watchlist_ready` 严格判定：snapshot `scope='sample'` 时 `watchlist_ready=false`（sample backfill 不计入）；
 - full+sample 同日共存：watchlist_ready=true 时 feature_snapshot_run 主摘要必须为 full run（显式 created_at，不依赖 DB 默认顺序）；
 - 失败 run（status=failed）时返回 `overall_status='failed'` + error_message 非空；
+- **中断后 UI 展示（CHANGE-20260709-006）**：`orchestrator_status='interrupted'` 且 `feature_snapshot_run.status='running'` 时，第 6 步 `feature_snapshot` 显示 `running`，`feature_snapshot_lost_contact=true`，`after_close_run` 摘要暴露 `feature_snapshot_run_id` 与 `feature_snapshot_progress`；
 - POST `/after-close/pipeline/run` 幂等：同 trade_date 已有 queued/running/succeeded run 时返回 existing（`is_new=false`）；
 - events 列表限制 100 条；
 - 非 admin 用户访问返回 403。

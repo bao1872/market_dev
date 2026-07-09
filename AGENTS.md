@@ -706,3 +706,93 @@ Head Commit：
 如果只是代码变了，文档没变，不算完成。\
 如果只是文档变了，代码没核对，不算完成。\
 如果 maps 过期，新对话会误解项目，也不算完成。
+
+***
+
+## 十七、提交安全与 Trae 工具通道规则
+
+### 1. 禁止默认 git add -A / git add .
+
+禁止使用 `git add -A`、`git add .`、`git add -u` 批量暂存。\
+必须用精确文件列表逐个 `git add <file>`。
+
+### 2. 提交前必须验证工作区
+
+提交前必须执行并检查：
+
+```
+git status --short -uno
+git status --short
+git diff --name-only
+git diff --stat
+```
+
+如果出现未预期文件、日志、csv/parquet、coverage、node_modules、venv、缓存，必须先汇报，不得 add。
+
+### 3. 不得提交的文件
+
+不得提交以下文件（已在 .gitignore / .git/info/exclude 排除）：
+
+```
+.vscode/settings.json
+.traeignore
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+coverage/
+dist/
+build/
+*.log
+*.csv
+*.parquet
+```
+
+### 4. 长命令执行规则
+
+Trae 前台 RunCommand 不适合等待长命令（mypy 冷启动、大批量测试、research backfill）。
+
+长命令必须用后台日志方式：
+
+```
+nohup bash -lc '<command>' > /tmp/<name>.log 2>&1 &
+echo $! > /tmp/<name>.pid
+```
+
+然后用 `ps -p $(cat /tmp/<name>.pid)` 和 `tail /tmp/<name>.log` 轮询，不依赖 check_command_status 等待长连接。
+
+### 5. 禁止删除
+
+未经用户明确授权，禁止删除：
+
+```
+数据库卷
+运行中容器
+postgres/redis 数据目录
+node_modules
+.venv
+.git
+源码
+生产数据
+```
+
+### 6. 磁盘与缓存维护
+
+定期清理安全缓存以降低 Trae watcher/索引压力：
+
+```
+__pycache__、*.pyc
+.mypy_cache、.pytest_cache、.ruff_cache
+.coverage、coverage.xml、htmlcov、coverage
+/tmp 下的诊断/日志临时文件
+```
+
+不得删除 `node:20-alpine` 镜像、不得 `docker image prune -a`。\
+普通清理只允许 `docker builder prune -f`、`docker image prune -f`、`docker container prune -f`。

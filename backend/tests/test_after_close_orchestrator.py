@@ -17,19 +17,28 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from app.models.scheduler_job_run import SchedulerJobRun
+from app.models.stock_feature_snapshot import StockFeatureSnapshot
+from app.models.stock_feature_snapshot_run import (
+    RUN_TYPE_AFTER_CLOSE,
+    STATUS_FAILED,
+    STATUS_RUNNING,
+    STATUS_SUCCEEDED,
+    StockFeatureSnapshotRun,
+)
 from app.models.strategy_run import StrategyRun
 from app.services.after_close_orchestrator import (
     AfterCloseRunStatus,
     create_after_close_run,
     execute_after_close_run,
     get_after_close_run_status,
+    repair_stale_after_close_snapshot_runs,
     retry_after_close_run,
 )
 from app.services.bars_scheduler_service import BarsSchedulerService, BatchResult
@@ -912,6 +921,599 @@ async def test_update_orchestrator_status_preserves_mode_field(db_session) -> No
     assert meta.get("last_completed_step") == "daily_ready", (
         f"last_completed_step 应保留，实际 {meta.get('last_completed_step')}"
     )
+
+
+@pytest.mark.asyncio
+async def test_feature_snapshot_stage_starts_heartbeat_loop(db_session) -> None:
+    """[Heartbeat] feature_snapshot 阶段应启动后台心跳任务，防止租约过期。
+
+    场景：compute_for_trade_date 执行期间耗时较长，需有 _job_run_heartbeat_loop 保活。
+    """
+    import asyncio as _asyncio
+
+    dsa_run, _ = await _create_dsa_strategy_run(db_session, status="completed")
+    job_run = await _create_after_close_job_run(db_session)
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return db_session
+        async def __aexit__(self, *args):
+            return False
+
+    fake_session_local = MagicMock(return_value=_FakeSessionContext())
+
+    fake_batch_result = BatchResult(total=100, succeeded=95)
+    fake_batch_result.dsa_run_id = dsa_run.id
+    fake_batch_result.daily_covered = 95
+    fake_batch_result.daily_total = 100
+    fake_batch_result.daily_coverage = 0.95
+
+    fake_published_run = MagicMock()
+    fake_published_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+
+    heartbeat_calls = []
+
+    async def _fake_heartbeat_loop(*args, **kwargs):
+        heartbeat_calls.append({"args": args, "kwargs": kwargs})
+        try:
+            await _asyncio.sleep(100)
+        except _asyncio.CancelledError:
+            pass
+
+    # 模拟 compute_for_trade_date 耗时，期间心跳任务应已启动
+    snapshot_started = _asyncio.Event()
+
+    async def _fake_compute(*args, **kwargs):
+        snapshot_started.set()
+        # 让心跳任务有机会被创建
+        await _asyncio.sleep(0.05)
+        return {"snapshot_count": 1, "failed_count": 0}
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        new=fake_session_local,
+    ), patch.object(
+        db_session, "commit", new=db_session.flush,
+    ), patch.object(
+        db_session, "get",
+        new=AsyncMock(side_effect=lambda model, id: {
+            (SchedulerJobRun, job_run.id): job_run,
+            (StrategyRun, dsa_run.id): dsa_run,
+        }.get((model, id))),
+    ), patch(
+        "app.services.after_close_orchestrator._job_run_heartbeat_loop",
+        new=_fake_heartbeat_loop,
+    ), patch.object(
+        BarsSchedulerService, "refresh_all_instruments",
+        new=AsyncMock(return_value=fake_batch_result),
+    ), patch(
+        "app.services.after_close_orchestrator._poll_dsa_run_status",
+        new=AsyncMock(return_value="completed"),
+    ), patch.object(
+        StrategyBatchService, "_check_quality_gates",
+        new=AsyncMock(return_value=True),
+    ), patch.object(
+        StrategyBatchService, "publish_run",
+        new=AsyncMock(return_value=fake_published_run),
+    ), patch(
+        "app.services.after_close_orchestrator.get_active_a_share_instruments",
+        new=AsyncMock(return_value=[uuid.uuid4()]),
+    ), patch(
+        "app.services.after_close_orchestrator.compute_for_trade_date",
+        new=_fake_compute,
+    ):
+        await execute_after_close_run(
+            job_run_id=job_run.id,
+            trade_date=date(2026, 6, 25),
+            dsa_poll_interval=0,
+            dsa_poll_timeout=1,
+        )
+
+    # 验证 feature_snapshot 阶段心跳任务被启动 1 次
+    assert len(heartbeat_calls) == 1, (
+        f"应启动 1 次 feature_snapshot 后台心跳任务，实际 {len(heartbeat_calls)} 次"
+    )
+    assert heartbeat_calls[0]["args"][0] == job_run.id
+    assert snapshot_started.is_set(), "compute_for_trade_date 应被调用"
+
+
+@pytest.mark.asyncio
+async def test_feature_snapshot_progress_callback_updates_heartbeat_and_metadata(
+    db_session,
+) -> None:
+    """[Heartbeat] feature_snapshot 进度回调应更新 heartbeat/lease/metadata 进度。
+
+    场景：compute_for_trade_date 调用 progress_callback，验证 job_run 心跳与 metadata 被更新。
+    """
+    dsa_run, _ = await _create_dsa_strategy_run(db_session, status="completed")
+    job_run = await _create_after_close_job_run(db_session)
+    original_heartbeat_at = job_run.heartbeat_at
+    original_lease = job_run.lease_expires_at
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return db_session
+        async def __aexit__(self, *args):
+            return False
+
+    fake_session_local = MagicMock(return_value=_FakeSessionContext())
+
+    fake_batch_result = BatchResult(total=100, succeeded=95)
+    fake_batch_result.dsa_run_id = dsa_run.id
+    fake_batch_result.daily_covered = 95
+    fake_batch_result.daily_total = 100
+    fake_batch_result.daily_coverage = 0.95
+
+    fake_published_run = MagicMock()
+    fake_published_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+
+    async def _fake_compute(*args, **kwargs):
+        progress_callback = kwargs.get("progress_callback")
+        if progress_callback is not None:
+            await progress_callback(
+                processed=1000, total=1000, snapshot_count=999, failed_count=1
+            )
+        return {"snapshot_count": 999, "failed_count": 1}
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        new=fake_session_local,
+    ), patch.object(
+        db_session, "commit", new=db_session.flush,
+    ), patch.object(
+        db_session, "get",
+        new=AsyncMock(side_effect=lambda model, id: {
+            (SchedulerJobRun, job_run.id): job_run,
+            (StrategyRun, dsa_run.id): dsa_run,
+        }.get((model, id))),
+    ), patch(
+        "app.services.after_close_orchestrator._job_run_heartbeat_loop",
+        new=AsyncMock(),
+    ), patch.object(
+        BarsSchedulerService, "refresh_all_instruments",
+        new=AsyncMock(return_value=fake_batch_result),
+    ), patch(
+        "app.services.after_close_orchestrator._poll_dsa_run_status",
+        new=AsyncMock(return_value="completed"),
+    ), patch.object(
+        StrategyBatchService, "_check_quality_gates",
+        new=AsyncMock(return_value=True),
+    ), patch.object(
+        StrategyBatchService, "publish_run",
+        new=AsyncMock(return_value=fake_published_run),
+    ), patch(
+        "app.services.after_close_orchestrator.get_active_a_share_instruments",
+        new=AsyncMock(return_value=[uuid.uuid4()]),
+    ), patch(
+        "app.services.after_close_orchestrator.compute_for_trade_date",
+        new=_fake_compute,
+    ):
+        await execute_after_close_run(
+            job_run_id=job_run.id,
+            trade_date=date(2026, 6, 25),
+            dsa_poll_interval=0,
+            dsa_poll_timeout=1,
+        )
+
+    # 验证心跳与 lease 被更新
+    assert job_run.heartbeat_at is not None
+    assert job_run.heartbeat_at > original_heartbeat_at
+    assert job_run.lease_expires_at is not None
+    assert job_run.lease_expires_at > original_lease
+
+    # 验证 metadata 含进度
+    meta = json.loads(job_run.metadata_json)
+    assert "feature_snapshot_progress" in meta
+    progress = meta["feature_snapshot_progress"]
+    assert progress["processed"] == 1000
+    assert progress["total"] == 1000
+    assert progress["snapshot_count"] == 999
+    assert progress["failed_count"] == 1
+    assert "feature_snapshot_run_id" in meta
+    assert meta["last_started_step"] == AfterCloseRunStatus.FEATURE_SNAPSHOT.value
+
+
+@pytest.mark.asyncio
+async def test_repair_stale_snapshot_run_marks_failed_when_orchestrator_interrupted(
+    db_session,
+) -> None:
+    """[Repair] orchestrator interrupted + snapshot_run running + 快照不足 → 标记 failed。"""
+    from app.models.instrument import Instrument
+
+    trade_date = date(2026, 6, 25)
+    target_trade_date = trade_date
+
+    # 创建中断的 orchestrator job_run
+    job_run = await _create_after_close_job_run(
+        db_session,
+        status="interrupted",
+        orchestrator_status=AfterCloseRunStatus.FEATURE_SNAPSHOT.value,
+        trade_date=target_trade_date,
+    )
+    job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+    await db_session.flush()
+
+    # 创建 stuck running snapshot run（started_at 很久以前）
+    snapshot_run = StockFeatureSnapshotRun(
+        trade_date=target_trade_date,
+        run_type=RUN_TYPE_AFTER_CLOSE,
+        status=STATUS_RUNNING,
+        expected_count=100,
+        snapshot_count=0,
+        failed_count=0,
+        started_at=datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(minutes=30),
+        metadata_={"scope": "full", "source": "after_close_orchestrator"},
+    )
+    db_session.add(snapshot_run)
+    await db_session.flush()
+
+    # 写入少量 snapshots（不足 95%）
+    for i in range(3):
+        inst = Instrument(
+            id=uuid.uuid4(),
+            symbol=f"REPAIR{i:03d}",
+            name=f"修复测试{i}",
+            market="SH",
+            status="active",
+        )
+        db_session.add(inst)
+        await db_session.flush()
+        db_session.add(
+            StockFeatureSnapshot(
+                instrument_id=inst.id,
+                trade_date=target_trade_date,
+                primary_timeframe="1d",
+                secondary_timeframe="15m",
+                adj="qfq",
+                schema_version=1,
+                structural_payload={},
+                temporal_payload={},
+                summary_payload={"_source": "feature_snapshot"},
+                degraded_reasons=[],
+            )
+        )
+    await db_session.flush()
+
+    repaired = await repair_stale_after_close_snapshot_runs(
+        db_session,
+        stale_threshold_seconds=60,
+        success_rate_threshold=0.95,
+    )
+
+    assert len(repaired) == 1, f"应修复 1 个 stuck run，实际 {repaired}"
+    assert repaired[0]["snapshot_run_id"] == str(snapshot_run.id)
+    assert repaired[0]["action"] == "failed"
+
+    # 验证 DB 状态
+    await db_session.refresh(snapshot_run)
+    assert snapshot_run.status == STATUS_FAILED
+    assert snapshot_run.published_at is None
+    assert snapshot_run.metadata_.get("reason") == "orchestrator_interrupted_or_lease_expired"
+
+
+@pytest.mark.asyncio
+async def test_repair_stale_snapshot_run_succeeds_when_enough_snapshots(
+    db_session,
+) -> None:
+    """[Repair] orchestrator interrupted + snapshot_run running + 快照足够 → 标记 succeeded。"""
+    from app.models.instrument import Instrument
+
+    trade_date = date(2026, 6, 25)
+    expected_count = 100
+
+    job_run = await _create_after_close_job_run(
+        db_session,
+        status="interrupted",
+        orchestrator_status=AfterCloseRunStatus.FEATURE_SNAPSHOT.value,
+        trade_date=trade_date,
+    )
+    job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+    await db_session.flush()
+
+    snapshot_run = StockFeatureSnapshotRun(
+        trade_date=trade_date,
+        run_type=RUN_TYPE_AFTER_CLOSE,
+        status=STATUS_RUNNING,
+        expected_count=expected_count,
+        snapshot_count=expected_count,
+        failed_count=0,
+        started_at=datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(minutes=30),
+        metadata_={"scope": "full", "source": "after_close_orchestrator"},
+    )
+    db_session.add(snapshot_run)
+    await db_session.flush()
+
+    # 写入 96 个 snapshots（>= 95%）
+    for i in range(96):
+        inst = Instrument(
+            id=uuid.uuid4(),
+            symbol=f"OK{i:03d}",
+            name=f"足够{i}",
+            market="SH",
+            status="active",
+        )
+        db_session.add(inst)
+        await db_session.flush()
+        db_session.add(
+            StockFeatureSnapshot(
+                instrument_id=inst.id,
+                trade_date=trade_date,
+                primary_timeframe="1d",
+                secondary_timeframe="15m",
+                adj="qfq",
+                schema_version=1,
+                structural_payload={},
+                temporal_payload={},
+                summary_payload={"_source": "feature_snapshot"},
+                degraded_reasons=[],
+            )
+        )
+    await db_session.flush()
+
+    repaired = await repair_stale_after_close_snapshot_runs(
+        db_session,
+        stale_threshold_seconds=60,
+        success_rate_threshold=0.95,
+    )
+
+    assert len(repaired) == 1
+    assert repaired[0]["action"] == "succeeded"
+
+    await db_session.refresh(snapshot_run)
+    assert snapshot_run.status == STATUS_SUCCEEDED
+    assert snapshot_run.published_at is not None
+
+
+@pytest.mark.asyncio
+async def test_repair_skips_running_orchestrator(db_session) -> None:
+    """[Repair] orchestrator 仍在 running 时不应修复 snapshot_run。"""
+    trade_date = date(2026, 6, 25)
+
+    await _create_after_close_job_run(
+        db_session,
+        status="running",
+        orchestrator_status=AfterCloseRunStatus.FEATURE_SNAPSHOT.value,
+        trade_date=trade_date,
+    )
+    await db_session.flush()
+
+    snapshot_run = StockFeatureSnapshotRun(
+        trade_date=trade_date,
+        run_type=RUN_TYPE_AFTER_CLOSE,
+        status=STATUS_RUNNING,
+        expected_count=100,
+        started_at=datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(minutes=30),
+        metadata_={"scope": "full"},
+    )
+    db_session.add(snapshot_run)
+    await db_session.flush()
+
+    repaired = await repair_stale_after_close_snapshot_runs(
+        db_session,
+        stale_threshold_seconds=60,
+    )
+
+    assert len(repaired) == 0
+    await db_session.refresh(snapshot_run)
+    assert snapshot_run.status == STATUS_RUNNING
+
+
+@pytest.mark.asyncio
+async def test_repair_skips_fresh_running_snapshot_run(db_session) -> None:
+    """[Repair] 刚启动的 running snapshot_run 不应被修复（未超过 stale 阈值）。"""
+    trade_date = date(2026, 6, 25)
+
+    job_run = await _create_after_close_job_run(
+        db_session,
+        status="interrupted",
+        orchestrator_status=AfterCloseRunStatus.FEATURE_SNAPSHOT.value,
+        trade_date=trade_date,
+    )
+    job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+    await db_session.flush()
+
+    snapshot_run = StockFeatureSnapshotRun(
+        trade_date=trade_date,
+        run_type=RUN_TYPE_AFTER_CLOSE,
+        status=STATUS_RUNNING,
+        expected_count=100,
+        started_at=datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(seconds=10),
+        metadata_={"scope": "full"},
+    )
+    db_session.add(snapshot_run)
+    await db_session.flush()
+
+    repaired = await repair_stale_after_close_snapshot_runs(
+        db_session,
+        stale_threshold_seconds=60,
+    )
+
+    assert len(repaired) == 0
+    await db_session.refresh(snapshot_run)
+    assert snapshot_run.status == STATUS_RUNNING
+
+
+@pytest.mark.asyncio
+async def test_repair_clears_stuck_run_before_new_after_close(db_session) -> None:
+    """[Repair] stuck running snapshot_run 不应阻塞新的 after_close 执行。
+
+    验证 repair 后，execute_after_close_run 能正常创建新的 snapshot run 并完成。
+    """
+    trade_date = date(2026, 6, 25)
+
+    # 先制造一个 stuck running snapshot run
+    stuck_run = StockFeatureSnapshotRun(
+        trade_date=trade_date,
+        run_type=RUN_TYPE_AFTER_CLOSE,
+        status=STATUS_RUNNING,
+        expected_count=100,
+        started_at=datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(minutes=30),
+        metadata_={"scope": "full", "source": "after_close_orchestrator"},
+    )
+    db_session.add(stuck_run)
+
+    job_run = await _create_after_close_job_run(
+        db_session,
+        status="interrupted",
+        orchestrator_status=AfterCloseRunStatus.FEATURE_SNAPSHOT.value,
+        trade_date=trade_date,
+    )
+    job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+    await db_session.flush()
+
+    # 先 repair
+    repaired = await repair_stale_after_close_snapshot_runs(
+        db_session,
+        stale_threshold_seconds=60,
+    )
+    assert len(repaired) == 1
+
+    # 再执行新的 after_close
+    dsa_run, _ = await _create_dsa_strategy_run(db_session, status="completed")
+    new_job_run = await _create_after_close_job_run(
+        db_session,
+        status="running",
+        orchestrator_status=AfterCloseRunStatus.QUEUED.value,
+        trade_date=trade_date,
+    )
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return db_session
+        async def __aexit__(self, *args):
+            return False
+
+    fake_session_local = MagicMock(return_value=_FakeSessionContext())
+
+    fake_batch_result = BatchResult(total=100, succeeded=95)
+    fake_batch_result.dsa_run_id = dsa_run.id
+    fake_batch_result.daily_covered = 95
+    fake_batch_result.daily_total = 100
+    fake_batch_result.daily_coverage = 0.95
+
+    fake_published_run = MagicMock()
+    fake_published_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        new=fake_session_local,
+    ), patch.object(
+        db_session, "commit", new=db_session.flush,
+    ), patch(
+        "app.services.after_close_orchestrator._job_run_heartbeat_loop",
+        new=AsyncMock(),
+    ), patch.object(
+        BarsSchedulerService, "refresh_all_instruments",
+        new=AsyncMock(return_value=fake_batch_result),
+    ), patch(
+        "app.services.after_close_orchestrator._poll_dsa_run_status",
+        new=AsyncMock(return_value="completed"),
+    ), patch.object(
+        StrategyBatchService, "_check_quality_gates",
+        new=AsyncMock(return_value=True),
+    ), patch.object(
+        StrategyBatchService, "publish_run",
+        new=AsyncMock(return_value=fake_published_run),
+    ), patch(
+        "app.services.after_close_orchestrator.get_active_a_share_instruments",
+        new=AsyncMock(return_value=[uuid.uuid4()]),
+    ), patch(
+        "app.services.after_close_orchestrator.compute_for_trade_date",
+        new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
+    ):
+        await execute_after_close_run(
+            job_run_id=new_job_run.id,
+            trade_date=trade_date,
+            dsa_poll_interval=0,
+            dsa_poll_timeout=1,
+        )
+
+    assert new_job_run.status == "succeeded"
+
+    # 验证新 snapshot run 被创建
+    from sqlalchemy import select
+    runs = (
+        (await db_session.execute(
+            select(StockFeatureSnapshotRun).where(
+                StockFeatureSnapshotRun.trade_date == trade_date,
+                StockFeatureSnapshotRun.run_type == RUN_TYPE_AFTER_CLOSE,
+            )
+        )).scalars().all()
+    )
+    assert len(runs) == 2
+    succeeded_runs = [r for r in runs if r.status == STATUS_SUCCEEDED]
+    assert len(succeeded_runs) == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_calls_repair_at_start(db_session) -> None:
+    """[Repair] execute_after_close_run 启动时会先调用 repair_stale_after_close_snapshot_runs。"""
+    trade_date = date(2026, 6, 25)
+    dsa_run, _ = await _create_dsa_strategy_run(db_session, status="completed")
+    job_run = await _create_after_close_job_run(
+        db_session,
+        status="running",
+        orchestrator_status=AfterCloseRunStatus.QUEUED.value,
+        trade_date=trade_date,
+    )
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return db_session
+        async def __aexit__(self, *args):
+            return False
+
+    fake_session_local = MagicMock(return_value=_FakeSessionContext())
+    fake_batch_result = BatchResult(total=100, succeeded=95)
+    fake_batch_result.dsa_run_id = dsa_run.id
+    fake_batch_result.daily_covered = 95
+    fake_batch_result.daily_total = 100
+    fake_batch_result.daily_coverage = 0.95
+
+    fake_published_run = MagicMock()
+    fake_published_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+
+    repair_mock = AsyncMock(return_value=[])
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        new=fake_session_local,
+    ), patch.object(
+        db_session, "commit", new=db_session.flush,
+    ), patch(
+        "app.services.after_close_orchestrator._job_run_heartbeat_loop",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.after_close_orchestrator.repair_stale_after_close_snapshot_runs",
+        new=repair_mock,
+    ), patch.object(
+        BarsSchedulerService, "refresh_all_instruments",
+        new=AsyncMock(return_value=fake_batch_result),
+    ), patch(
+        "app.services.after_close_orchestrator._poll_dsa_run_status",
+        new=AsyncMock(return_value="completed"),
+    ), patch.object(
+        StrategyBatchService, "_check_quality_gates",
+        new=AsyncMock(return_value=True),
+    ), patch.object(
+        StrategyBatchService, "publish_run",
+        new=AsyncMock(return_value=fake_published_run),
+    ), patch(
+        "app.services.after_close_orchestrator.get_active_a_share_instruments",
+        new=AsyncMock(return_value=[uuid.uuid4()]),
+    ), patch(
+        "app.services.after_close_orchestrator.compute_for_trade_date",
+        new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
+    ):
+        await execute_after_close_run(
+            job_run_id=job_run.id,
+            trade_date=trade_date,
+            dsa_poll_interval=0,
+            dsa_poll_timeout=1,
+        )
+
+    repair_mock.assert_awaited_once()
+    assert job_run.status == "succeeded"
 
 
 if __name__ == "__main__":

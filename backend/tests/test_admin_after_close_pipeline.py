@@ -321,6 +321,71 @@ async def test_pipeline_running_current_step(
     assert steps["watchlist_ready"]["status"] == "pending"
 
 
+# ==================== 2b. interrupted + running snapshot → feature_snapshot running ====================
+
+
+@pytest.mark.asyncio
+async def test_pipeline_interrupted_with_running_snapshot(
+    client: AsyncClient,
+    admin_user: User,
+    db_session: AsyncSession,
+):
+    """orchestrator 已中断但 snapshot_run 仍在 running，第 6 步应显示 running 并标记失联。"""
+    now = datetime(2026, 6, 24, 18, 0, tzinfo=SHANGHAI)
+    started_at = now - timedelta(minutes=60)
+
+    job_run = _make_after_close_job_run(
+        status="interrupted",
+        orchestrator_status="interrupted",
+        last_completed_step=AfterCloseRunStatus.QUALITY_GATE.value,
+        started_at=started_at,
+        finished_at=now - timedelta(minutes=30),
+        heartbeat_at=now - timedelta(minutes=35),
+        error_message="后台进程在任务执行期间重启，任务租约过期或心跳超时，系统自动中断",
+    )
+    # 补充 feature_snapshot_run_id / progress 到 metadata
+    meta = json.loads(job_run.metadata_json)
+    meta["feature_snapshot_run_id"] = str(uuid.uuid4())
+    meta["feature_snapshot_progress"] = {
+        "processed": 1000, "total": 5293,
+        "snapshot_count": 900, "failed_count": 10,
+        "updated_at": now.isoformat(),
+    }
+    job_run.metadata_json = json.dumps(meta)
+    db_session.add(job_run)
+
+    snapshot_run = _make_snapshot_run(
+        run_type=RUN_TYPE_AFTER_CLOSE,
+        status=STATUS_RUNNING,
+        scope="full",
+    )
+    snapshot_run.started_at = started_at + timedelta(minutes=20)
+    db_session.add(snapshot_run)
+    await db_session.flush()
+
+    with _mock_trading_day(is_trading=True), patch(
+        "app.services.after_close_pipeline_service.now_shanghai",
+        return_value=now,
+    ):
+        resp = await client.get(
+            f"/admin/after-close/pipeline?trade_date={TEST_DATE_STR}",
+            headers=_auth_headers(admin_user.id),
+        )
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["after_close_run"]["status"] == "interrupted"
+    assert data["after_close_run"]["feature_snapshot_run_id"] == meta["feature_snapshot_run_id"]
+    assert data["after_close_run"]["feature_snapshot_progress"]["processed"] == 1000
+    assert data["feature_snapshot_lost_contact"] is True
+
+    steps = {step["step"]: step for step in data["steps"]}
+    assert steps[AfterCloseRunStatus.FEATURE_SNAPSHOT.value]["status"] == "running"
+    assert steps[AfterCloseRunStatus.QUALITY_GATE.value]["status"] == "completed"
+    assert steps[AfterCloseRunStatus.PUBLISHING.value]["status"] == "pending"
+    assert steps["watchlist_ready"]["status"] == "pending"
+
+
 # ==================== 3. succeeded + full published → watchlist_ready=true ====================
 
 

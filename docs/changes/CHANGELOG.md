@@ -4,6 +4,16 @@
 
 ## 2026-07-09
 
+- CHANGE-20260709-006: after_close feature_snapshot 心跳保活 + stuck running snapshot run 修复
+  - 修复 `feature_snapshot` 阶段无独立心跳导致 orchestrator 被误标 `interrupted`，但 `stock_feature_snapshot_run` 仍卡在 `running` 的问题
+  - `feature_snapshot_service.compute_for_trade_date` 新增 `progress_callback`，每 batch 汇报进度；`after_close_orchestrator` 在 feature_snapshot 阶段启动 `_job_run_heartbeat_loop` 并写入 `metadata.feature_snapshot_progress`
+  - 新增 `repair_stale_after_close_snapshot_runs`：orchestrator `interrupted`/`failed` 且 snapshot run 超时后，按实际 snapshot 行数 / `expected_count` 比例（≥95% 标 `succeeded`，否则标 `failed`）收口 running run
+  - `execute_after_close_run` 启动前自动调用 repair，避免 stuck running snapshot_run 阻塞新任务
+  - `/admin/after-close/pipeline` 在 `interrupted + snapshot_run running` 时第 6 步显示 `running`，返回 `feature_snapshot_lost_contact=true`，摘要暴露 `feature_snapshot_run_id` 与 `feature_snapshot_progress`
+  - 更新 `docs/current/03-jobs-integrations-operations.md`（§2.3 heartbeat 机制、§2.3.2 修复 runbook、§2.3.3 盘后任务优先级）、`docs/current/05-testing-acceptance.md`（§3.6/§3.6.1 回归用例）
+  - 新增/更新测试：`test_after_close_orchestrator.py`（heartbeat/progress/repair）、`test_admin_after_close_pipeline.py`（中断后 UI）、`test_feature_snapshot_service.py`（progress callback）
+  - 无 migration、不删库卷镜像、不生成 coverage/截图/DB 备份；生产修复通过 repair + 重跑 after_close 完成
+
 - CHANGE-20260709-005: 飞书配置权限隔离 + 趋势选股返回状态恢复
   - 修复 `SettingsPage` 普通用户可见 admin-only「发送最近事件实测」按钮的问题：引入 `useAuthStore` 按 `user?.is_admin` 渲染，普通用户隐藏该按钮，admin 显示文案改为「管理员实测最近事件」
   - 所有飞书渠道卡片增加「发送测试消息」/「测试并启用」按钮，调用 `POST /notification-channels/{id}/test`；测试成功后 toast「测试成功，飞书渠道已启用」并刷新渠道列表；失败展示 `delivery.error_code` / `error_message`

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
@@ -563,3 +564,74 @@ async def test_compute_for_trade_date_failure_threshold_raises(
                 batch_size=10,
                 failure_threshold=0.3,
             )
+
+
+@pytest.mark.asyncio
+async def test_compute_for_trade_date_progress_callback_per_batch(
+    db_session: AsyncSession,
+) -> None:
+    """[Heartbeat] 每处理一个 batch 后调用 progress_callback，携带当前进度。
+
+    场景：5 只 instrument，batch_size=2，期望 callback 在 batch 0/1/2 后被调用 3 次，
+    且最后一次 processed=5 / total=5。
+    """
+    from app.models.instrument import Instrument
+    from app.services.feature_snapshot_service import compute_for_trade_date
+
+    inst_ids = []
+    for i in range(5):
+        inst = Instrument(
+            id=uuid.uuid4(),
+            symbol=f"PROG{i:03d}",
+            name=f"进度{i}",
+            market="SH",
+            status="active",
+        )
+        db_session.add(inst)
+        inst_ids.append(inst.id)
+    await db_session.flush()
+
+    progress_calls: list[dict[str, Any]] = []
+
+    async def mock_compute(session, instrument_id, trade_date, **kwargs):
+        return StockFeatureSnapshot(
+            instrument_id=instrument_id,
+            trade_date=trade_date,
+            primary_timeframe="1d",
+            secondary_timeframe="15m",
+            adj="qfq",
+            schema_version=1,
+            source_primary_bar_time=datetime(2026, 1, 10, 15, 0, tzinfo=_SHANGHAI_TZ),
+            source_secondary_bar_time=datetime(2026, 1, 10, 15, 0, tzinfo=_SHANGHAI_TZ),
+            structural_payload={},
+            temporal_payload={},
+            summary_payload={"_source": "feature_snapshot"},
+            degraded_reasons=[],
+        )
+
+    async def progress_callback(**kwargs):
+        progress_calls.append(dict(kwargs))
+
+    with patch(
+        "app.services.feature_snapshot_service.compute_feature_snapshot_for_date",
+        side_effect=mock_compute,
+    ):
+        result = await compute_for_trade_date(
+            db_session,
+            date(2026, 1, 10),
+            inst_ids,
+            batch_size=2,
+            failure_threshold=0.3,
+            progress_callback=progress_callback,
+        )
+        await db_session.flush()
+
+    assert result["snapshot_count"] == 5
+    assert result["failed_count"] == 0
+    # batch_size=2, total=5 -> 3 batches
+    assert len(progress_calls) == 3, f"应调用 3 次 progress_callback，实际 {len(progress_calls)}"
+    assert progress_calls[0]["processed"] == 2
+    assert progress_calls[0]["total"] == 5
+    assert progress_calls[2]["processed"] == 5
+    assert progress_calls[2]["snapshot_count"] == 5
+    assert progress_calls[2]["failed_count"] == 0

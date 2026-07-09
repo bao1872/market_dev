@@ -27,6 +27,20 @@ venv/
 env/
 *.egg
 
+# ===== Python 类型/测试/lint 缓存 =====
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# ===== 覆盖率产物 =====
+.coverage
+coverage.xml
+htmlcov/
+coverage/
+
+# ===== 构建产物 =====
+build/
+
 # ===== Node.js 临时文件与构建产物 =====
 node_modules/
 dist/
