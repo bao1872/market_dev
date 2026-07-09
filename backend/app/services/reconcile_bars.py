@@ -61,7 +61,8 @@ _15MIN_COUNT_LIMIT = 15000
 _60MIN_COUNT_LIMIT = 4000
 
 # period -> (Model, 时间字段名, 是否日线类)
-_PERIOD_CONFIG: dict[str, tuple[type, str, bool]] = {
+_BarModel = type[BarDaily] | type[BarWeekly] | type[BarMonthly] | type[Bar15Min] | type[Bar60Min] | type[BarMinute]
+_PERIOD_CONFIG: dict[str, tuple[_BarModel, str, bool]] = {
     "d": (BarDaily, "trade_date", True),
     "w": (BarWeekly, "trade_date", True),
     "m": (BarMonthly, "trade_date", True),
@@ -101,7 +102,7 @@ class ReconcileResult:
 async def _query_db_bars(
     session: AsyncSession,
     instrument_id: uuid.UUID,
-    model_cls: type,
+    model_cls: _BarModel,
     time_col: str,
     start: date | datetime,
     end: date | datetime,
@@ -161,8 +162,16 @@ async def _fetch_source_bars(
                 pytdx.get_daily_bars, symbol, start, end
             )
         elif period == "minute":
+            minute_start = (
+                start if isinstance(start, datetime)
+                else datetime.combine(start, datetime.min.time())
+            )
+            minute_end = (
+                end if isinstance(end, datetime)
+                else datetime.combine(end, datetime.min.time())
+            )
             raw_df = await asyncio.to_thread(
-                pytdx.get_minute_bars, symbol, start, end
+                pytdx.get_minute_bars, symbol, minute_start, minute_end
             )
         elif period == "w":
             # 周线按 count 拉取，估算条数
@@ -407,11 +416,11 @@ async def reconcile_batch(
     results: list[ReconcileResult] = []
     for instrument_id, symbol in zip(instrument_ids, symbols, strict=True):
         try:
-            result = await reconcile_instrument(
+            reconcile_result = await reconcile_instrument(
                 session, instrument_id, symbol, period,
                 start_date, end_date, adapter,
             )
-            results.append(result)
+            results.append(reconcile_result)
         except Exception as exc:
             logger.error(
                 "对账单只股票失败 symbol=%s period=%s: %s",

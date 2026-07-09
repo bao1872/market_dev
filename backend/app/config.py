@@ -41,7 +41,7 @@ import importlib.util
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urlparse, urlunparse
 
 from pydantic import Field
@@ -218,7 +218,19 @@ def _validate_worker_urls(frontend_base_url: str, capture_worker_url: str, app_e
         )
 
 
-def _validate_security_settings(settings: Settings) -> None:
+class _SecuritySettings(Protocol):
+    """生产环境安全校验所需的最小配置协议（结构化类型）。
+
+    允许 Settings 实例与 __main__ 自测中的 mock settings 类通过结构匹配传入
+    _validate_security_settings，无需继承 Settings。
+    """
+
+    app_env: str
+    jwt_secret: str
+    secret_master_key: str
+
+
+def _validate_security_settings(settings: _SecuritySettings) -> None:
     """启动硬校验生产环境密钥安全性。
 
     校验规则：

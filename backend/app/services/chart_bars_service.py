@@ -25,13 +25,15 @@ from __future__ import annotations
 import hashlib
 import logging
 import uuid
-from datetime import date, datetime, time as dt_time
+from datetime import date, datetime
+from datetime import time as dt_time
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.indicator_contract import CHART_BARS_COUNT
+from app.core.time import SHANGHAI_TZ
 
 logger = logging.getLogger("services.chart_bars_service")
 

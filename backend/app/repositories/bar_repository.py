@@ -32,7 +32,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 from sqlalchemy import text
@@ -45,6 +45,30 @@ from app.core.time import SHANGHAI_TZ
 from app.models.bar import Bar15Min, Bar60Min, BarDaily, BarMinute, BarMonthly, BarWeekly
 from app.services.adj_factor import apply_adj_factor, apply_adj_factor_intraday
 from app.services.bars_validator import validate_bars
+
+if TYPE_CHECKING:
+    from typing import Protocol
+
+    from sqlalchemy.sql.expression import Executable
+
+    class _AdjFactorAdapterLike(Protocol):
+        """_calculate_adj_factor 所需的 pytdx 适配器接口（结构化类型）。"""
+
+        def get_xdxr_info(self, symbol: str) -> pd.DataFrame: ...
+
+        def get_daily_bars(
+            self, symbol: str, start: date, end: date
+        ) -> pd.DataFrame: ...
+
+    class _ResultLike(Protocol):
+        """session.execute 返回结果的最小接口（结构化类型）。"""
+
+        def all(self) -> list: ...
+
+    class _SessionLike(Protocol):
+        """_map_adj_factor_from_daily 所需的 session 接口（结构化类型）。"""
+
+        async def execute(self, statement: Executable) -> _ResultLike: ...
 
 logger = logging.getLogger("bar_repository")
 
@@ -473,7 +497,7 @@ async def _upsert_minute_bars(
 def _calculate_adj_factor(
     symbol: str,
     raw_df: pd.DataFrame,
-    adapter: PytdxAdapter | None = None,
+    adapter: _AdjFactorAdapterLike | None = None,
     use_raw_close: bool = True,
     min_date: date | None = None,
 ) -> list[float]:
@@ -1230,7 +1254,7 @@ async def _query_15min_bars(
 
 
 async def _map_adj_factor_from_daily(
-    session: AsyncSession,
+    session: AsyncSession | _SessionLike,
     instrument_id: uuid.UUID,
     raw_df: pd.DataFrame,
 ) -> list[float]:
@@ -1775,7 +1799,10 @@ async def get_bars(
 
 
 # [行情] - 描述: period → (ORM 模型, 时间列, 是否日线类) 映射，供 get_recent_bars 使用
-_PERIOD_MODEL_MAP: dict[str, tuple[type, str, bool]] = {
+_PERIOD_MODEL_MAP: dict[
+    str,
+    tuple[type[BarDaily] | type[Bar15Min] | type[BarMinute], str, bool],
+] = {
     "1d": (BarDaily, "trade_date", True),
     "15m": (Bar15Min, "trade_time", False),
     "1m": (BarMinute, "trade_time", False),

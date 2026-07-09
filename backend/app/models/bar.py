@@ -200,7 +200,7 @@ if __name__ == "__main__":
     # 自测入口：验证 ORM 模型映射（无副作用，不连接数据库）
     for cls in (BarDaily, BarMinute, BarWeekly, BarMonthly, Bar15Min, Bar60Min):
         cols = [c.name for c in cls.__table__.columns]
-        pk = [c.name for c in cls.__table__.primary_key.columns]
+        pk = [c.name for c in cls.__table__.primary_key]
         print(f"{cls.__tablename__}: PK={pk}, columns={cols}")
         assert "instrument_id" in cols
         assert "adj_factor" in cols

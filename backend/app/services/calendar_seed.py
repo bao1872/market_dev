@@ -24,6 +24,7 @@ from typing import Any
 
 import pandas as pd
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.time import now_utc
@@ -137,7 +138,10 @@ async def seed_calendar_from_mootdx(
             f"交易日历写入失败：year={year}, records={len(records)}"
         ) from exc
 
-    affected = result.rowcount or 0
+    if isinstance(result, CursorResult):
+        affected = result.rowcount or 0
+    else:
+        affected = 0
     logger.info("交易日历写入完成：影响 %d 条", affected)
     return affected
 

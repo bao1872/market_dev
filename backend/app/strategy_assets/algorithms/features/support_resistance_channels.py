@@ -587,6 +587,7 @@ def main() -> None:
 
     end = datetime.now().date()
     freq_arg = args.freq.strip().lower()
+    freq: str | int
     if freq_arg in ["d", "day", "daily", "101"]:
         freq = "d"
         start = end - timedelta(days=max(1200, int(args.bars * 5)))

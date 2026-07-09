@@ -798,6 +798,9 @@ class DSASelector(StrategyRuntime):
         if self._version is None:
             raise RuntimeError("DSASelector 未初始化，请先调用 initialize()")
 
+        if context.trade_date is None:
+            raise ValueError("DSASelector 需要 context.trade_date，但收到 None")
+
         metrics = await asyncio.to_thread(self._compute_metrics_sync, context)
 
         matched = True

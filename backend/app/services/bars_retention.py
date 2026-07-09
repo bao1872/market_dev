@@ -63,7 +63,14 @@ class RetentionResult:
 
 # 保留策略配置：(模型类, 时间字段名, 保留天数, 是否永久保留)
 # 永久保留的表（daily）不参与清理；周线/月线不存储在 DB，从日线动态合成
-_RETENTION_CONFIG: list[tuple[type, str, int | None, bool]] = [
+_RETENTION_CONFIG: list[
+    tuple[
+        type[BarDaily] | type[Bar15Min] | type[Bar60Min] | type[BarMinute],
+        str,
+        int | None,
+        bool,
+    ]
+] = [
     (BarDaily, "trade_date", None, True),      # 永久保留
     (Bar15Min, "trade_time", _RETENTION_15MIN_DAYS, False),  # 保留 2 年
     (Bar60Min, "trade_time", _RETENTION_60MIN_DAYS, False),  # 保留 2 年

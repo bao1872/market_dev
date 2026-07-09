@@ -30,6 +30,7 @@ from uuid import UUID
 from sqlalchemy import Boolean, Date, DateTime, Index, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.models._table_meta import table_constraints, table_indexes
 from app.models.base import Base
 from app.services.mootdx_calendar_provider import (
     CALENDAR_STATUS_UNKNOWN,
@@ -83,8 +84,8 @@ if __name__ == "__main__":
     # 自测入口：验证模型定义（不写库表）
     print(f"__tablename__={TradingCalendar.__tablename__}")
     print(f"columns={list(TradingCalendar.__table__.columns.keys())}")
-    print(f"indexes={[idx.name for idx in TradingCalendar.__table__.indexes]}")
-    print(f"constraints={[c.name for c in TradingCalendar.__table__.constraints if c.name]}")
+    print(f"indexes={[idx.name for idx in table_indexes(TradingCalendar)]}")
+    print(f"constraints={[c.name for c in table_constraints(TradingCalendar) if c.name]}")
     # 验证新增字段
     cols = list(TradingCalendar.__table__.columns.keys())
     assert "source" in cols, "缺少 source 字段"

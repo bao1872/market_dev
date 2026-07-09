@@ -25,6 +25,7 @@ import logging
 from uuid import UUID
 
 from sqlalchemy import select, text
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.user_facing_labels import get_event_label
@@ -84,12 +85,12 @@ async def expand_event_recipients(db: AsyncSession, event_id: UUID) -> int:
 
     all_user_ids = [uid for _, uid in watchlist_rows]
     eligible_user_ids = set(await filter_monitor_eligible_recipients(db, all_user_ids))
-    watchlist_rows = [
+    eligible_rows = [
         (wid, uid) for wid, uid in watchlist_rows
         if uid in eligible_user_ids
     ]
 
-    if not watchlist_rows:
+    if not eligible_rows:
         logger.info(
             "事件自选股用户均无资格，跳过接收人扩展: event_id=%s instrument_id=%s",
             event_id, event.instrument_id,
@@ -98,7 +99,7 @@ async def expand_event_recipients(db: AsyncSession, event_id: UUID) -> int:
 
     # 3. 逐用户插入接收人（ON CONFLICT DO NOTHING）
     created_count = 0
-    for watchlist_item_id, user_id in watchlist_rows:
+    for watchlist_item_id, user_id in eligible_rows:
         insert_stmt = text(
             """
             INSERT INTO strategy_event_recipients (event_id, user_id, watchlist_item_id)
@@ -114,7 +115,7 @@ async def expand_event_recipients(db: AsyncSession, event_id: UUID) -> int:
                 "watchlist_item_id": str(watchlist_item_id),
             },
         )
-        if insert_result.rowcount > 0:
+        if isinstance(insert_result, CursorResult) and insert_result.rowcount > 0:
             created_count += 1
 
     await db.flush()
@@ -122,7 +123,7 @@ async def expand_event_recipients(db: AsyncSession, event_id: UUID) -> int:
     logger.info(
         "事件接收人扩展完成: event_id=%s instrument_id=%s "
         "watchlist_users=%d created=%d",
-        event_id, event.instrument_id, len(watchlist_rows), created_count,
+        event_id, event.instrument_id, len(eligible_rows), created_count,
     )
     return created_count
 

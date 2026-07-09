@@ -617,8 +617,10 @@ def _format_factor_hover(df: pd.DataFrame) -> list[str]:
                 parts.append(f"{c}={v}")
             elif pd.isna(v):
                 parts.append(f"{c}=nan")
-            else:
+            elif isinstance(v, (int, float, np.integer, np.floating)):
                 parts.append(f"{c}={float(v):.6f}")
+            else:
+                parts.append(f"{c}={v}")
         texts.append("<br>".join(parts))
     return texts
 

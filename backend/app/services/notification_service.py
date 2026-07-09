@@ -29,6 +29,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -863,7 +864,9 @@ async def mark_all_messages_read(db: AsyncSession, user_id: UUID) -> int:
         .execution_options(synchronize_session=False)
     )
     result = await db.execute(stmt)
-    return int(result.rowcount or 0)
+    if isinstance(result, CursorResult):
+        return int(result.rowcount or 0)
+    return 0
 
 
 async def list_user_channels(

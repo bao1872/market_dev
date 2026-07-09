@@ -118,7 +118,7 @@ async def _check_mootdx_online_async(target: date) -> bool | None:
         return None
 
 
-async def _check_database_async(session: AsyncSession, target: date) -> tuple[bool | None, str, str | None]:
+async def _check_database_async(session: AsyncSession, target: date) -> tuple[bool | None, str | None, str | None]:
     """通过 DB trading_calendar 表检查是否为交易日（异步）。
 
     Returns:
@@ -340,13 +340,13 @@ if __name__ == "__main__":
     # 测试 Mootdx 在线判断
     print("\nMootdx 在线判断测试：")
     for d in [date(2026, 6, 29), date(2026, 6, 27), date(2026, 1, 1)]:
-        result = _check_mootdx_online(d)
-        print(f"  {d}: {'交易日' if result else '非交易日'}")
+        online_result = _check_mootdx_online(d)
+        print(f"  {d}: {'交易日' if online_result else '非交易日'}")
 
     # 测试完整 is_trading_day（DB 不可用，将降级到 Mootdx -> weekday）
     print("\nis_trading_day 完整测试（预期使用 Mootdx）：")
-    for d in ["2026-04-03", "2026-04-04", "2026-04-05", "2026-04-06"]:
-        result = is_trading_day(d)
-        print(f"  {d}: {'交易日' if result else '非交易日'}")
+    for date_str in ["2026-04-03", "2026-04-04", "2026-04-05", "2026-04-06"]:
+        full_result = is_trading_day(date_str)
+        print(f"  {date_str}: {'交易日' if full_result else '非交易日'}")
 
     print("=== 自测结束 ===")

@@ -25,11 +25,16 @@ import asyncio
 import logging
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 from app.core.pytdx_adapter import get_pytdx_adapter
 from app.core.time import shanghai_business_date
@@ -123,7 +128,7 @@ class BarsSchedulerService:
 
     # 周期 → refresh 函数映射
     # 日线使用日期范围接口，15min/60min 使用 count 接口
-    _REFRESH_FUNCS = {
+    _REFRESH_FUNCS: dict[str, Callable[..., Awaitable[pd.DataFrame]]] = {
         "d": refresh_daily_bars,
         "15m": refresh_15min_bars,
         "60m": refresh_60min_bars,
@@ -801,12 +806,10 @@ if __name__ == "__main__":
     print("缓存初始状态为空 ✓")
 
     # 模拟缓存填充与命中（不连 DB，直接操作模块级变量）
-    import sys
-    _mod = sys.modules[__name__]
-    _mod._instruments_cache = []  # 模拟空列表（非 None）
-    _mod._instruments_cache_ts = time.time()
+    _instruments_cache = []  # 模拟空列表（非 None）
+    _instruments_cache_ts = time.time()
     # 验证缓存命中条件：非 None 且未过期
-    age = time.time() - _mod._instruments_cache_ts
+    age = time.time() - _instruments_cache_ts
     assert age < _INSTRUMENTS_CACHE_TTL, "刚写入的缓存应未过期"
     print(f"缓存命中条件验证 ✓（age={age:.3f}s < TTL={_INSTRUMENTS_CACHE_TTL}s）")
 
@@ -817,9 +820,9 @@ if __name__ == "__main__":
     print("clear_instruments_cache 清空验证 ✓")
 
     # 验证缓存过期逻辑（模拟过期）
-    _mod._instruments_cache = []
-    _mod._instruments_cache_ts = time.time() - (_INSTRUMENTS_CACHE_TTL + 1)  # 过期 1 秒
-    age = time.time() - _mod._instruments_cache_ts
+    _instruments_cache = []
+    _instruments_cache_ts = time.time() - (_INSTRUMENTS_CACHE_TTL + 1)  # 过期 1 秒
+    age = time.time() - _instruments_cache_ts
     assert age > _INSTRUMENTS_CACHE_TTL, "模拟过期后 age 应大于 TTL"
     print(f"缓存过期条件验证 ✓（age={age:.0f}s > TTL={_INSTRUMENTS_CACHE_TTL}s)")
 

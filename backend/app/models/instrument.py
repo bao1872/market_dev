@@ -24,6 +24,7 @@ from uuid import UUID
 from sqlalchemy import Date, DateTime, Index, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.models._table_meta import table_indexes
 from app.models.base import Base
 
 
@@ -61,5 +62,5 @@ if __name__ == "__main__":
     # 自测入口：验证模型定义（不写库表）
     print(f"__tablename__={Instrument.__tablename__}")
     print(f"columns={list(Instrument.__table__.columns.keys())}")
-    print(f"indexes={[idx.name for idx in Instrument.__table__.indexes]}")
+    print(f"indexes={[idx.name for idx in table_indexes(Instrument)]}")
     print("OK")

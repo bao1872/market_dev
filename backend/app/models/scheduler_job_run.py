@@ -20,6 +20,7 @@ from sqlalchemy import DateTime, Float, Index, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.models._table_meta import table_constraints, table_indexes
 from app.models.base import Base
 
 
@@ -129,8 +130,8 @@ if __name__ == "__main__":
     assert "error_code" in cols
     assert "error_message" in cols
     # 验证 __table_args__ 中的约束与索引
-    constraint_names = {c.name for c in SchedulerJobRun.__table__.constraints if hasattr(c, "name") and c.name}
-    index_names = {idx.name for idx in SchedulerJobRun.__table__.indexes if idx.name}
+    constraint_names = {c.name for c in table_constraints(SchedulerJobRun) if hasattr(c, "name") and c.name}
+    index_names = {idx.name for idx in table_indexes(SchedulerJobRun) if idx.name}
     assert "uq_scheduler_job_runs_run_key" not in constraint_names, (
         f"应已移除全局唯一约束: {constraint_names}"
     )

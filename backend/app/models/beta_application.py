@@ -35,6 +35,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.constants.beta_application import (
     BETA_APPLICATION_STATUSES_DEFAULT,
 )
+from app.models._table_meta import table_indexes
 from app.models.base import Base
 
 
@@ -177,11 +178,11 @@ if __name__ == "__main__":
 
     # 验证索引
     all_indexed_cols: set[str] = set()
-    for idx in BetaApplication.__table__.indexes:
+    for idx in table_indexes(BetaApplication):
         for col in idx.columns:
             all_indexed_cols.add(col.name)
     for required_col in ["status", "submitted_at", "ip_hash", "phone", "wechat"]:
         assert required_col in all_indexed_cols, f"缺少 {required_col} 索引"
 
-    print(f"indexes={[idx.name for idx in BetaApplication.__table__.indexes]}")
+    print(f"indexes={[idx.name for idx in table_indexes(BetaApplication)]}")
     print("OK")

@@ -21,6 +21,7 @@ from sqlalchemy import DateTime, Index, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.models._table_meta import table_indexes
 from app.models.base import Base
 
 
@@ -87,6 +88,6 @@ if __name__ == "__main__":
     assert "payload" in cols
     assert "result" in cols
     assert "error" in cols
-    idxs = [idx.name for idx in JobRun.__table__.indexes]
+    idxs = [idx.name for idx in table_indexes(JobRun)]
     print(f"JobRun indexes={idxs}")
     print("OK")

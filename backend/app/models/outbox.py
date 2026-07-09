@@ -27,6 +27,7 @@ from sqlalchemy import DateTime, Index, Integer, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.models._table_meta import table_indexes
 from app.models.base import Base
 
 
@@ -101,6 +102,6 @@ if __name__ == "__main__":
     assert "status" in cols
     assert "retry_count" in cols
     assert "next_attempt_at" in cols
-    idxs = [idx.name for idx in Outbox.__table__.indexes]
+    idxs = [idx.name for idx in table_indexes(Outbox)]
     print(f"Outbox indexes={idxs}")
     print("OK")

@@ -26,13 +26,17 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from datasource.pytdx_client import connect_pytdx
 from plotly.subplots import make_subplots
+
+if TYPE_CHECKING:
+    from pytdx.errors import TdxConnectionError
+    from pytdx.hq import TdxHq_API
 
 # =========================
 # pytdx data fetch (same style as your attached script)
@@ -55,6 +59,9 @@ def _category_from_freq(freq: str | int) -> int:
     raise ValueError(f"不支持的频率: {freq}")
 
 def _connect_pytdx() -> TdxHq_API:
+    from pytdx.errors import TdxConnectionError
+    from pytdx.hq import TdxHq_API
+
     servers = [
         ("119.147.212.81", 7709),
         ("119.147.164.60", 7709),
@@ -667,6 +674,7 @@ def main() -> None:
     # We'll compute using full df but then keep zones that intersect display window.
     idx0 = df_show.index[0]
     idx1 = df_show.index[-1]
+    offset = len(df) - len(df_show)
 
     zones_kept = []
     for z in payload_full["zones"]:

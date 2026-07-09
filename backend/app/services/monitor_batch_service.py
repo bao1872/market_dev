@@ -21,9 +21,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -43,7 +44,6 @@ from app.models.capture_job import (
 )
 from app.models.instrument import Instrument
 from app.models.monitor_evaluation import MonitorEvaluation
-from app.models.monitor_state import MonitorState as MonitorStateORM
 from app.models.stock_memo import StockMemo
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.strategy_event import StrategyEvent
@@ -56,6 +56,29 @@ from app.services.notification_service import create_message
 from app.services.outbox_relay import write_outbox
 from app.strategy.monitors.watchlist_monitor import WatchlistMonitor
 from app.strategy.runtime import MarketDataContext, MonitorState
+
+if TYPE_CHECKING:
+    from typing import Protocol
+
+    class _MonitorStateLike(Protocol):
+        """_orm_to_runtime_state 所需的 MonitorState 接口（结构化类型）。"""
+
+        instrument_id: uuid.UUID
+        strategy_version_id: uuid.UUID
+        payload: dict[str, Any]
+        state_schema_version: int
+        bar_time: datetime
+        calculation_id: str
+
+    class _StrategyEventLike(Protocol):
+        """_build_merged_card_dto 所需的 StrategyEvent 接口（结构化类型）。"""
+
+        id: uuid.UUID
+        event_type: str
+        instrument_id: uuid.UUID
+        event_time: datetime
+        payload: dict[str, Any]
+        snapshot: dict[str, Any]
 
 logger = logging.getLogger("monitor_batch_service")
 
@@ -287,7 +310,7 @@ class MonitorBatchService:
             .where(UserWatchlistItem.active.is_(True))
         )
         result = await db.execute(stmt)
-        rows = result.all()
+        rows = [(row[0], row[1]) for row in result.all()]
 
         # [eligible_user_service] - 批量过滤监控有资格用户
         # 普通会员需要 active subscription；管理员无需 subscription 也可进入监控 universe
@@ -297,7 +320,7 @@ class MonitorBatchService:
             rows = [
                 (inst_id, uid) for inst_id, uid in rows
                 if uid in eligible_user_ids
-            ]  # type: ignore[misc]
+            ]
 
         # 收集所有 instrument_id，批量查询排除指数
         instrument_ids_set = {row[0] for row in rows}
@@ -1015,7 +1038,7 @@ class MonitorBatchService:
 
     def _build_merged_card_dto(
         self,
-        user_events: list[StrategyEvent],
+        user_events: Sequence[_StrategyEventLike],
         total_instruments: int,
         instrument_info_cache: dict[uuid.UUID, tuple[str, str]],
         change_pct_map: dict[uuid.UUID, float] | None = None,
@@ -1053,7 +1076,7 @@ class MonitorBatchService:
         from app.schemas.notification import NotificationMessageDTO
 
         # 按标的分组
-        instrument_events: dict[uuid.UUID, list[StrategyEvent]] = {}
+        instrument_events: dict[uuid.UUID, list[_StrategyEventLike]] = {}
         for ev in user_events:
             instrument_events.setdefault(ev.instrument_id, []).append(ev)
 
@@ -1784,7 +1807,7 @@ class MonitorBatchService:
             ) from e
 
     @staticmethod
-    def _orm_to_runtime_state(orm: MonitorStateORM) -> MonitorState:
+    def _orm_to_runtime_state(orm: _MonitorStateLike) -> MonitorState:
         """将 MonitorState ORM 转换为 runtime.MonitorState。
 
         Args:

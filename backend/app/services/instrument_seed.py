@@ -28,6 +28,7 @@ from typing import Any
 import pandas as pd
 from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.pytdx_adapter import PytdxAdapter
@@ -205,7 +206,8 @@ async def seed_instruments_from_pytdx(
             },
         )
         result = await session.execute(stmt)
-        total_inserted += result.rowcount or 0
+        if isinstance(result, CursorResult):
+            total_inserted += result.rowcount or 0
 
     await session.commit()
 
