@@ -4,6 +4,18 @@
 
 ## 2026-07-09
 
+- CHANGE-20260709-005: 飞书配置权限隔离 + 趋势选股返回状态恢复
+  - 修复 `SettingsPage` 普通用户可见 admin-only「发送最近事件实测」按钮的问题：引入 `useAuthStore` 按 `user?.is_admin` 渲染，普通用户隐藏该按钮，admin 显示文案改为「管理员实测最近事件」
+  - 所有飞书渠道卡片增加「发送测试消息」/「测试并启用」按钮，调用 `POST /notification-channels/{id}/test`；测试成功后 toast「测试成功，飞书渠道已启用」并刷新渠道列表；失败展示 `delivery.error_code` / `error_message`
+  - 飞书配置表单 `receive_id_type` 下拉补充 `chat_id`/`union_id`，帮助文案区分个人/群；「验证并保存」改为「保存配置」，保存后状态仍为 `pending`
+  - 后端 `POST /notification-channels/{channel_id}/test-latest-event` 保持 admin-only，普通用户调用返回 403 detail「最近事件实测仅管理员可用，普通用户请使用发送测试消息」
+  - 趋势选股页 URL 状态持久化：`ScreenerPage` 同步 strategy key，`StrategyDataTable` 抽出 `screenerUrlState.ts` 纯函数同步 keyword/sort/filters/page/pageSize；filters 用 compact JSON 只保存 key/op/value/value2；decode 丢弃当前 columns 中不存在的陈旧 key；切换策略时重置 page=1
+  - `ScreenerPage.goDetail` 将当前 `location.pathname + location.search` 作为 `returnTo` 通过 `navigate(..., { state: { returnTo } })` 传入个股详情；`StockDetailPage` 返回按钮优先使用 `location.state.returnTo`，没有时按 source fallback 到 `/screener` 或 `/watchlist`
+  - 新增 `frontend/src/pages/detailNavigation.ts` 纯函数抽离 URL/state 构建与返回路径解析
+  - 新增前端 node tests：`settingsFeishuActions.test.ts`（5 用例）、`screenerUrlState.test.ts`（5 用例）、`detailNavigation.test.ts`（3 用例）
+  - 文档更新：`docs/current/02-data-api-contracts.md`、`04-frontend-ux.md`，`docs/maps/api-route-map.md`、`frontend-route-map.md`、`test-coverage-map.md`
+  - 无 migration、无数据回补、无新依赖
+
 - CHANGE-20260709-004: PR #52 真实端到端问题 hotfix（preset 持久化 + sticky 表头）
   - 修复 `backend/app/api/me_table_view_presets.py` create/update/delete 只 `flush()` 不 `commit()` 导致生产 preset 丢失的问题：POST/PATCH/DELETE 成功后均 `await db.commit()`，异常分支 `await db.rollback()` 后 re-raise
   - 新增 3 个跨 session 持久化测试：create/update/delete 后用独立 `TestAsyncSessionLocal` 验证真实持久化

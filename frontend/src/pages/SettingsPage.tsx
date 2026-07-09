@@ -29,7 +29,9 @@ import {
   useTestNotificationChannelLatestEvent,
 } from '@/hooks/useApi'
 import { useToast } from '@/store/toast'
+import { useAuthStore } from '@/store/auth'
 import type { NotificationChannel, ChannelLatestEventTestResponse } from '@/api/endpoints'
+import { getFeishuChannelActions } from './settingsFeishuActions'
 
 // ===== 工具函数 =====
 
@@ -369,8 +371,12 @@ function FeishuModal({
                 type="text"
                 value={form.receiveId}
                 onChange={(e) => handleField('receiveId', e.target.value)}
-                placeholder="如 bg332537"
+                placeholder="如 bg332537 或 oc_xxx"
               />
+              <div className="help">
+                发给个人：选择 user_id / open_id / union_id 并填写对应 ID；
+                发给群：选择 chat_id 并填写群 chat_id。
+              </div>
             </div>
             <div className="form-row full">
               <label className="form-label">接收者类型</label>
@@ -379,9 +385,18 @@ function FeishuModal({
                 value={form.receiveIdType}
                 onChange={(e) => handleField('receiveIdType', e.target.value)}
               >
-                <option value="user_id">User ID</option>
-                <option value="open_id">Open ID</option>
+                <option value="user_id">user_id（个人）</option>
+                <option value="open_id">open_id（个人）</option>
+                <option value="chat_id">chat_id（群）</option>
+                <option value="union_id">union_id（个人，跨租户）</option>
               </select>
+              <div className="help">平台将 receive_id_type 原样透传给飞书接口。</div>
+            </div>
+            <div className="form-row full">
+              <div className="notice">
+                普通用户不要使用"最近事件实测"，该功能仅用于管理员诊断真实事件投递链路；
+                保存配置后渠道状态为"未验证"，点击"发送测试消息"成功后自动变为"可用"。
+              </div>
             </div>
           </div>
         </div>
@@ -401,7 +416,7 @@ function FeishuModal({
             onClick={handleSave}
             disabled={createChannel.isPending || updateChannel.isPending}
           >
-            {createChannel.isPending || updateChannel.isPending ? '保存中...' : '验证并保存'}
+            {createChannel.isPending || updateChannel.isPending ? '保存中...' : '保存配置'}
           </button>
         </div>
       </div>
@@ -482,7 +497,10 @@ export default function SettingsPage() {
   const membershipQuery = useMyMembership()
   const channelsQuery = useNotificationChannels()
   const deleteChannel = useDeleteNotificationChannel()
+  const testChannel = useTestNotificationChannel()
   const latestEventTest = useTestNotificationChannelLatestEvent()
+  const currentUser = useAuthStore((s) => s.user)
+  const isAdmin = currentUser?.is_admin ?? false
 
   const [showRenewModal, setShowRenewModal] = useState(false)
   const [showFeishuModal, setShowFeishuModal] = useState(false)
@@ -515,7 +533,7 @@ export default function SettingsPage() {
     setShowFeishuModal(true)
   }
 
-  // 发送最近事件实测
+  // 发送最近事件实测（admin only）
   const handleTestLatestEvent = (channel: NotificationChannel) => {
     setLatestEventChannel(channel)
     setLatestEventResult(null)
@@ -527,6 +545,27 @@ export default function SettingsPage() {
       onError: (err: unknown) => {
         const axiosErr = err as { response?: { data?: { detail?: string } } }
         setLatestEventError(axiosErr.response?.data?.detail ?? '实测请求失败，请稍后重试')
+      },
+    })
+  }
+
+  // 发送测试消息到渠道（普通用户可用），成功后将渠道置为 active
+  const handleTestChannel = (channel: NotificationChannel) => {
+    testChannel.mutate(channel.id, {
+      onSuccess: (data) => {
+        if (data.delivery.success) {
+          toast.show('测试成功', '测试成功，飞书渠道已启用')
+        } else {
+          const message = [data.delivery.error_code, data.delivery.error_message]
+            .filter(Boolean)
+            .join(' · ')
+          toast.show('测试失败', message || '发送失败，请检查配置')
+        }
+      },
+      onError: (err: unknown) => {
+        const axiosErr = err as { response?: { data?: { detail?: string } } }
+        const message = axiosErr.response?.data?.detail ?? '测试请求失败，请稍后重试'
+        toast.show('测试失败', message)
       },
     })
   }
@@ -657,28 +696,56 @@ export default function SettingsPage() {
                   <span className={`status-pill ${c.status === 'active' ? 'ok' : 'off'}`}>
                     {c.status === 'active' ? '可用' : '未验证'}
                   </span>
-                  <button className="icon-btn" onClick={() => handleOpenEditFeishu(c)}>编辑</button>
-                  <button
-                    className="btn small"
-                    onClick={() => handleTestLatestEvent(c)}
-                    disabled={latestEventTest.isPending}
-                  >
-                    {latestEventTest.isPending && latestEventChannel?.id === c.id ? '实测中...' : '发送最近事件实测'}
-                  </button>
-                  <button
-                    className="btn small danger"
-                    onClick={() => {
-                      if (confirm('确定要删除此飞书通知渠道吗？')) {
-                        deleteChannel.mutate(c.id, {
-                          onSuccess: () => {
-                            toast.show('已删除', '飞书通知渠道已删除')
-                          },
-                        })
-                      }
-                    }}
-                  >
-                    删除
-                  </button>
+                  {getFeishuChannelActions(isAdmin, c.status).map((action) => {
+                    if (action.id === 'edit') {
+                      return (
+                        <button key={action.id} className="icon-btn" onClick={() => handleOpenEditFeishu(c)}>
+                          {action.label}
+                        </button>
+                      )
+                    }
+                    if (action.id === 'test') {
+                      return (
+                        <button
+                          key={action.id}
+                          className="btn small"
+                          onClick={() => handleTestChannel(c)}
+                          disabled={testChannel.isPending}
+                        >
+                          {testChannel.isPending ? '测试中...' : action.label}
+                        </button>
+                      )
+                    }
+                    if (action.id === 'latest-event') {
+                      return (
+                        <button
+                          key={action.id}
+                          className="btn small"
+                          onClick={() => handleTestLatestEvent(c)}
+                          disabled={latestEventTest.isPending}
+                        >
+                          {latestEventTest.isPending && latestEventChannel?.id === c.id ? '实测中...' : action.label}
+                        </button>
+                      )
+                    }
+                    return (
+                      <button
+                        key={action.id}
+                        className="btn small danger"
+                        onClick={() => {
+                          if (confirm('确定要删除此飞书通知渠道吗？')) {
+                            deleteChannel.mutate(c.id, {
+                              onSuccess: () => {
+                                toast.show('已删除', '飞书通知渠道已删除')
+                              },
+                            })
+                          }
+                        }}
+                      >
+                        {action.label}
+                      </button>
+                    )
+                  })}
                 </div>
               ))}
             </div>

@@ -63,6 +63,7 @@ Node Cluster 算法
 - **当日涨跌幅独立列**：`change_pct` 作为独立列展示（key=`change_pct`、title=当日涨跌幅、shortTitle=涨跌幅、dataType=percent、sortable=true、filterable=true、width≈86），render 使用 `fmtChange` + A股涨红跌绿颜色（`changePctColorClass`）；后端 `dsa_selector.yaml` manifest 已支持 `change_pct` filterable/sortable，无需改后端白名单；`change_pct` 是已为百分比数值的字段，筛选输入 3% 传 3，不要乘除错；
 - **表格视图配置 preset**：`StrategyDataTable` 元信息栏新增"配置"入口（`TablePresetMenu` 组件），支持保存当前配置为新 preset、应用已有 preset、覆盖已有 preset config、重命名、设为默认、删除；默认配置进入页面后自动应用（每个 `tableId:strategyKey` 组合只应用一次，`useRef` 防重复）；保存成功后通过 `presetsQuery.refetch()` 立即刷新列表，保持下拉打开并清空输入框，失败时在下拉内显示后端错误并 toast；切换策略/批次时清空选中股票（`selectedKeys`），不保留选中状态；config 只保存 `keyword/sort/filters/hiddenColumns/pageSize`，禁止保存 `selectedKeys/page/activeRunId/rows/resultData`（后端 Pydantic schema 强制白名单）；preset API 按 JWT `user_id` 隔离，普通用户只能操作自己的配置；权限与趋势选股一致（active subscription + trend_selection feature，admin 豁免）；每 `user+table_id+strategy_key` 最多 20 个 preset；`is_default` 同维度至多 1 个 true（设置新默认时旧默认自动取消）；
 - **sticky 表头与选择列**：`StrategyDataTable` 支持 `stickyHeaderMode` prop（`container` 默认 / `viewport`）；趋势选股页使用 `stickyHeaderMode="viewport"`，页面滚动时表头吸附在 topbar 下方（`.table-wrap.viewport-sticky { overflow: visible }` + `.table-wrap.viewport-sticky .data-table th { top: var(--topbar); z-index: 18 }`），不抢占局部滚动容器；普通表格保留 `container` 模式，`thead th` sticky top:0 z-index:4；sticky 首列/选择列 sticky left:0 z-index:3；角落单元格（表头+sticky 列）z-index:5（最高）；选择列存在时首列通过相邻兄弟选择器 `.table-select-column + th.sticky-col { left: 40px }` 偏移选择列宽度，避免 sticky 重叠；`box-sizing: border-box` 确保选择列宽度含 padding。
+- **URL 状态持久化**：趋势选股页将当前策略 key、keyword、sort、filters、page、pageSize 同步到 URL query；`StrategyDataTable` 负责 keyword/sort/filters/page/pageSize 的 encode/decode，`ScreenerPage` 负责 strategy key 的同步与切换；filters 使用 compact JSON 只保存 `key/op/value/value2`，不保存 rows/selectedKeys/activeRunId/resultData；decode 时按当前有效列 key 集合丢弃陈旧 filter/sort key；切换策略时更新 `strategy=` 并重置 `page=1`；从趋势选股进入个股详情时，将当前 `location.pathname + location.search` 作为 `returnTo` 通过 `navigate(..., { state: { returnTo } })` 传入；个股详情页返回按钮优先使用 `location.state.returnTo`，没有时按 `source` fallback 到 `/screener` 或 `/watchlist`。
 
 ### 我的自选
 
@@ -157,6 +158,15 @@ Node Cluster 算法
 - 文字和图片显示独立状态；
 - partial_failed 展示失败步骤和仅重试图片；
 - Worker 不可用时不显示整体成功。
+
+#### 飞书渠道配置（SettingsPage）
+
+- 普通用户与管理员均可在 `/settings` 配置自己的 `feishu_platform_app` 渠道；
+- 表单字段：配置名称、App ID、App Secret、接收者 ID、接收者类型（`user_id`/`open_id`/`chat_id`/`union_id`），平台将 `receive_id_type` 原样透传给飞书接口；
+- 保存按钮文案为「保存配置」，保存后渠道状态为 `pending`（未验证），不会自动变为 `active`；
+- 渠道卡片对所有人显示「发送测试消息」（`active` 状态）或「测试并启用」（`pending` 状态），调用 `POST /notification-channels/{id}/test`；
+- 测试成功 toast 显示「测试成功，飞书渠道已启用」，并刷新渠道列表使状态变为 `active`；测试失败展示后端返回的 `delivery.error_code` / `error_message`；
+- 「管理员实测最近事件」按钮仅管理员可见，调用 `POST /notification-channels/{channel_id}/test-latest-event`，普通用户点击会收到 403 并提示使用普通测试接口。
 
 ### 管理页面
 

@@ -23,11 +23,12 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.core.deps import get_current_active_user, get_db, require_roles
+from app.core.deps import _get_user_roles, get_current_active_user, get_db
 from app.models.user import User
 from app.schemas.notification import (
     ChannelLatestEventTestResponse,
@@ -316,9 +317,12 @@ async def test_channel_endpoint(
 async def test_channel_latest_event_endpoint(
     channel_id: UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles("admin")),
+    current_user: User = Depends(get_current_active_user),
 ) -> ChannelLatestEventTestResponse:
     """使用最新真实事件测试渠道图片投递链路（admin only）。
+
+    权限：
+    - 仅管理员可调用；普通用户会收到 403，提示使用普通"发送测试消息"接口。
 
     流程：
     1. 查询渠道与用户
@@ -335,6 +339,12 @@ async def test_channel_latest_event_endpoint(
     - message_id: 创建的通知消息 ID
     - delivery_status: 投递状态（pending）
     """
+    if "admin" not in _get_user_roles(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="最近事件实测仅管理员可用，普通用户请使用发送测试消息",
+        )
+
     settings = get_settings()
     try:
         channel, message, meta = await test_channel_latest_event(
@@ -404,7 +414,7 @@ async def preview_message(
 
 if __name__ == "__main__":
     # 自测入口：验证路由注册
-    paths = [r.path for r in router.routes]
+    paths = [r.path for r in router.routes if isinstance(r, APIRoute)]
     print(f"router.routes={paths}")
     assert "/messages" in paths
     assert "/messages/unread-count" in paths

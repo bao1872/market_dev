@@ -10,7 +10,7 @@
 // V1.6.3 精简：无"策略当前计算结果"模块、无"事件时间轴"模块
 
 import { useState, useMemo, useRef, useEffect, useCallback } from 'react'
-import { useParams, useSearchParams, useNavigate } from 'react-router-dom'
+import { useParams, useSearchParams, useNavigate, useLocation } from 'react-router-dom'
 import clsx from 'clsx'
 import StrategyChart from '@/components/StrategyChart'
 import { StockStructuralStatePanel } from '@/components/StockStructuralStatePanel'
@@ -19,6 +19,7 @@ import type { ChartViewport } from '@/components/chartViewport'
 import type { IndicatorResponse } from '@/api/endpoints'
 import { formatShanghaiTimeShort } from '@/utils/datetime'
 import { MARKET_LABELS, formatAmount } from '@/utils/market'
+import { resolveBackPath } from './detailNavigation'
 import { mapBarsToBarData, mergeRealtimeQuoteIntoBars } from '@/utils/chart'
 import {
   useInstrumentBySymbol,
@@ -45,6 +46,7 @@ export default function StockDetailPage() {
   const { symbol } = useParams<{ symbol: string }>()
   const [searchParams] = useSearchParams()
   const navigate = useNavigate()
+  const location = useLocation()
   const showToast = useToast((s) => s.show)
 
   // 解析 URL 参数
@@ -319,7 +321,12 @@ export default function StockDetailPage() {
 
   // 来源徽章与返回链接
   const sourceBadge = source === 'selection' ? '选股结果' : '自选监控'
-  const backPath = source === 'selection' ? '/screener' : '/watchlist'
+
+  /** 统一返回按钮：优先使用导航时传入的 returnTo，否则按 source fallback */
+  const handleBack = useCallback(() => {
+    const returnTo = (location.state as { returnTo?: string } | undefined)?.returnTo
+    navigate(resolveBackPath(returnTo, source))
+  }, [location.state, navigate, source])
 
   // 操作：加入/移出自选
   const handleToggleWatchlist = () => {
@@ -437,7 +444,7 @@ export default function StockDetailPage() {
       >
         <div className="tv-symbol-bar">
           <div className="tv-symbol-left">
-            <button className="icon-btn tv-back" onClick={() => navigate(backPath)} title="返回">←</button>
+            <button className="icon-btn tv-back" onClick={handleBack} title="返回">←</button>
             <div>
               <div className="tv-symbol-title">
                 <span>加载中...</span>
@@ -467,7 +474,7 @@ export default function StockDetailPage() {
       >
         <div className="tv-symbol-bar">
           <div className="tv-symbol-left">
-            <button className="icon-btn tv-back" onClick={() => navigate(backPath)} title="返回">←</button>
+            <button className="icon-btn tv-back" onClick={handleBack} title="返回">←</button>
             <div>
               <div className="tv-symbol-title">
                 <span>未找到股票</span>
@@ -501,7 +508,7 @@ export default function StockDetailPage() {
       {/* ===== 股票信息栏 ===== */}
       <div className="tv-symbol-bar">
         <div className="tv-symbol-left">
-          <button className="icon-btn tv-back" onClick={() => navigate(backPath)} title="返回">←</button>
+          <button className="icon-btn tv-back" onClick={handleBack} title="返回">←</button>
           <div>
             <div className="tv-symbol-title">
               <span>{inst.name}</span>
