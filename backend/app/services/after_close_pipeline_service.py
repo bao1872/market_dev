@@ -219,8 +219,9 @@ def _compute_step_states(
     job_run: SchedulerJobRun | None,
     events: list[JobRunEvent],
     watchlist_ready: bool,
+    snapshot_summary: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """根据 job_run 状态、事件、watchlist_ready 计算 8 步骤状态。"""
+    """根据 job_run 状态、事件、watchlist_ready、snapshot_summary 计算 8 步骤状态。"""
     if job_run is None:
         return [
             {
@@ -289,6 +290,19 @@ def _compute_step_states(
             step_status = "completed"
         elif job_run.status == "running":
             if idx == current_idx:
+                step_status = "running"
+            elif idx <= completed_idx:
+                step_status = "completed"
+            else:
+                step_status = "pending"
+        elif job_run.status == "interrupted":
+            # [Repair] orchestrator 已中断但 snapshot 仍在 running，
+            # feature_snapshot 步骤应显示 running，提示“快照计算失联/待修复”。
+            if (
+                step == AfterCloseRunStatus.FEATURE_SNAPSHOT.value
+                and snapshot_summary is not None
+                and snapshot_summary.get("status") == "running"
+            ):
                 step_status = "running"
             elif idx <= completed_idx:
                 step_status = "completed"
@@ -418,8 +432,18 @@ async def _build_pipeline_response(
         watchlist_ready, job_run, snapshot_summary, has_backfill_full
     )
 
+    # [Repair] 判断 orchestrator 中断但 snapshot 仍在 running 的失联状态
+    feature_snapshot_lost_contact = (
+        job_run is not None
+        and job_run.status == "interrupted"
+        and snapshot_summary is not None
+        and snapshot_summary.get("status") == "running"
+    )
+
     data_freshness = await _compute_data_freshness(db, now)
-    steps = _compute_step_states(job_run, events, watchlist_ready)
+    steps = _compute_step_states(
+        job_run, events, watchlist_ready, snapshot_summary,
+    )
 
     after_close_run_summary: dict[str, Any] | None = None
     if job_run is not None:
@@ -436,6 +460,8 @@ async def _build_pipeline_response(
             "error_message": job_run.error_message,
             "worker_instance_id": job_run.worker_instance_id,
             "trade_date": meta.get("trade_date"),
+            "feature_snapshot_run_id": meta.get("feature_snapshot_run_id"),
+            "feature_snapshot_progress": meta.get("feature_snapshot_progress"),
         }
 
     return {
@@ -449,6 +475,7 @@ async def _build_pipeline_response(
         "steps": steps,
         "data_freshness": data_freshness,
         "feature_snapshot_run": snapshot_summary,
+        "feature_snapshot_lost_contact": feature_snapshot_lost_contact,
         "events": [
             {
                 "id": str(e.id),

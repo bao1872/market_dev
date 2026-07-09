@@ -80,8 +80,9 @@ queued → refreshing_daily → checking_coverage → creating_dsa
   - `RuntimeError`（超阈值）→ 显式 `db.rollback()` 丢弃半成品行 → 异常向上传播 → orchestrator 写 `failed` 事件 → **不进入 publishing**；
 - `feature_snapshot` 失败时 `last_completed_step` 不推进，重试从 `quality_gate` 之后重新进入；
 - 完成后更新心跳与 `last_completed_step='feature_snapshot'`；
+- **Heartbeat 保活（CHANGE-20260709-003）**：feature_snapshot 阶段启动后台 `_job_run_heartbeat_loop`（间隔 30s），并在 `compute_for_trade_date` 每批完成后通过 `_build_feature_snapshot_progress_callback` 刷新 `heartbeat_at`、`lease_expires_at` 与 `metadata.feature_snapshot_progress`，防止长计算被 watchdog/recovery 误判为 stale；进度事件按每 500 只股票采样写入 `job_run_events`，避免事件表膨胀；
 - **Run lifecycle（Phase 8 新增）**：feature_snapshot 步骤前后写 `stock_feature_snapshot_runs`：
-  - 开始时 `create_snapshot_run(trade_date, 'after_close')` 创建 `running` run（独立 session + commit）；
+  - 开始时 `create_snapshot_run(trade_date, 'after_close')` 创建 `running` run（独立 session + commit），并立即把 `feature_snapshot_run_id` / `last_started_step=feature_snapshot` 写回 orchestrator metadata；
   - 成功时 `finish_snapshot_run(status='succeeded')` 写 `published_at`（独立 session + commit）；
   - 失败时 `finish_snapshot_run(status='failed')` 不写 `published_at`（独立 session + commit），再向上传播异常触发 orchestrator FAILED；
   - run 记录在独立 session 中提交，保证 snapshot session rollback 不影响 run 状态持久化。
@@ -137,6 +138,40 @@ queued → refreshing_daily → checking_coverage → creating_dsa
 - `/admin/overview` 与 `/admin/after-close` → 200；
 - backend/frontend 20m 日志无 5xx/502/timeout；
 - 文案校验：盘前无 run → not_started；收盘后 30 分钟无 run → blocked；sample run 不显示为前台可读；full/published/succeeded → watchlist_ready=true；手动 backfill full 与正式 after_close succeeded 通过 has_backfill_full 区分。
+- **中断后 UI 展示（CHANGE-20260709-003）**：`orchestrator_status='interrupted'` 且存在 `feature_snapshot_run.status='running'` 时，`steps[5]`（feature_snapshot）显示 `running`，并在 `after_close_run` 摘要中暴露 `feature_snapshot_run_id` / `feature_snapshot_progress`，页面提示“快照计算失联/待修复”。
+
+### 2.3.2 feature_snapshot 心跳失联修复 Runbook
+
+**触发场景**：`after_close_orchestrator` 因 Worker 重启、租约过期或心跳超时被标记为 `interrupted`，但同 trade_date 的 `stock_feature_snapshot_runs` 仍卡在 `running`。
+
+**修复入口**：`app.services.after_close_orchestrator.repair_stale_after_close_snapshot_runs`。
+
+**修复策略**：
+- 仅当存在 `status='interrupted'/'failed'` 的 after_close job_run 且同 trade_date 存在 `run_type='after_close' + status='running'` 的 snapshot run 时才触发；
+- 若 snapshot run 已运行时间超过 `stale_threshold_seconds`（默认 300s）则进入修复；
+- 统计 `stock_feature_snapshots` 中该 trade_date 实际行数：
+  - `actual_count >= expected_count * 0.95` → `finish_snapshot_run(status='succeeded')` 并写 `published_at`，允许 watchlist 读取；
+  - 否则 → `finish_snapshot_run(status='failed')`，metadata 写入 `reason='orchestrator_interrupted_or_lease_expired'`；
+- 修复后不会自动重试 after_close，需要管理员手动触发 retry 或调用 execute_after_close_run 断点恢复。
+
+**生产操作步骤**：
+1. 确认 `trading-worker-after-close` 已停止或已部署修复版本；
+2. 在 backend 容器或管理脚本中调用 `repair_stale_after_close_snapshot_runs`；
+3. 检查返回结果中 `action` 为 `succeeded` 或 `failed`；
+4. 若 repair 为 `failed`，通过 admin 页面或 API 重试当日 after_close，利用 `last_completed_step='quality_gate'` 断点恢复，仅重跑 `feature_snapshot`；
+5. 验证 `watchlist_ready=true` 且 `/admin/after-close` 第 6-8 步状态正确。
+
+**禁止操作**：
+- 不要直接删除 `stock_feature_snapshot_runs`；
+- 不要手工修改 `published_at` 冒充成功；
+- 不要清空 `stock_feature_snapshots`；
+- 不要在修复前启动新的 research matrix 全量回补。
+
+### 2.3.3 正式盘后任务 vs research matrix 回补优先级
+
+- 正式 `after_close_orchestrator` 优先级高于 `research_matrix_backfill`；
+- research 回补不会自动触发 after_close，两者仅共享 CPU/内存资源，不互相改状态；
+- 若 after_close 处于 `running`/`interrupted` 且 research 回补仍在运行，应让 research 跑完当前月份后停止，不继续下个月，待盘后任务恢复正常后再决定是否继续 research 收尾。
 
 ### 2.4 Feature Snapshot 历史回补脚本
 

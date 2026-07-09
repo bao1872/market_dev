@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -516,6 +516,7 @@ async def compute_for_trade_date(
     instrument_ids: Sequence[uuid.UUID],
     batch_size: int = 20,
     failure_threshold: float = 0.3,
+    progress_callback: Callable[..., Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """为给定 instrument 列表批量计算并 upsert 快照（不内部 commit）。
 
@@ -528,6 +529,7 @@ async def compute_for_trade_date(
     - 按 batch_size 分批遍历
     - 单股失败记录，不阻塞其他股票
     - 失败比例超过 failure_threshold 时整体抛异常
+    - 每处理完一批调用 progress_callback（如提供），用于长任务心跳保活
 
     Args:
         session: 异步 DB 会话
@@ -535,6 +537,7 @@ async def compute_for_trade_date(
         instrument_ids: 标的 ID 列表
         batch_size: 每批 instrument 数（默认 20）
         failure_threshold: 失败比例阈值（默认 0.3）
+        progress_callback: 可选的进度回调，接收关键字参数 processed/total/snapshot_count/failed_count
 
     Returns:
         统计信息 dict：snapshot_count, failed_count, schema_version, trade_date
@@ -560,6 +563,21 @@ async def compute_for_trade_date(
                 logger.error(
                     "snapshot 计算失败 instrument_id=%s trade_date=%s: %s",
                     instrument_id, trade_date, exc, exc_info=True,
+                )
+
+        # [Heartbeat] 每批完成后回调进度，供长任务更新心跳/lease 与 metadata
+        if progress_callback is not None:
+            try:
+                await progress_callback(
+                    processed=min(i + len(batch), total),
+                    total=total,
+                    snapshot_count=snapshot_count,
+                    failed_count=failed_count,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "progress_callback 失败 trade_date=%s: %s",
+                    trade_date, exc,
                 )
 
     # 检查失败阈值（不 commit，由 caller 决定 commit/rollback）

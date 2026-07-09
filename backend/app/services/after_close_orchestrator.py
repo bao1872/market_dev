@@ -30,11 +30,13 @@ import asyncio
 import json
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import date, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import AsyncSessionLocal
@@ -151,20 +153,13 @@ async def _update_orchestrator_status(
     if trade_date_str is None and extra and "trade_date" in extra:
         trade_date_str = extra["trade_date"]
 
-    # 构造新 metadata
-    new_meta: dict[str, Any] = {
-        "orchestrator_status": status.value,
-    }
+    # 构造新 metadata：保留已有字段，只更新本次涉及的字段
+    new_meta: dict[str, Any] = dict(existing_meta)
+    new_meta["orchestrator_status"] = status.value
     if trade_date_str is not None:
         new_meta["trade_date"] = trade_date_str
     if dsa_run_id is not None:
         new_meta["dsa_run_id"] = str(dsa_run_id)
-    # [Phase5] - 保留 last_completed_step 用于断点恢复
-    if "last_completed_step" in existing_meta:
-        new_meta["last_completed_step"] = existing_meta["last_completed_step"]
-    # [Phase6] - 保留 mode 字段用于 dsa_only 模式识别（Worker 根据此字段跳过 refreshing_daily）
-    if "mode" in existing_meta:
-        new_meta["mode"] = existing_meta["mode"]
     if extra:
         for k, v in extra.items():
             if k not in ("orchestrator_status", "trade_date", "dsa_run_id"):
@@ -313,6 +308,8 @@ async def _update_heartbeat_and_step(
     if worker_id is not None:
         job_run.worker_instance_id = worker_id
     meta = _parse_metadata(job_run)
+    # 保留已有 metadata（含 feature_snapshot_progress / feature_snapshot_run_id 等），
+    # 仅更新 last_completed_step。
     meta["last_completed_step"] = last_completed_step
     job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
     await db.flush()
@@ -355,6 +352,230 @@ async def _job_run_heartbeat_loop(
                 "[AfterClose] 心跳更新失败 job_run_id=%s: %s",
                 job_run_id, exc,
             )
+
+
+# [Heartbeat] - feature_snapshot 进度事件采样间隔（instrument 数）
+_FEATURE_SNAPSHOT_PROGRESS_EVENT_INTERVAL = 500
+
+
+def _build_feature_snapshot_progress_callback(
+    job_run_id: uuid.UUID,
+    worker_id: str | None = None,
+) -> Callable[..., Awaitable[None]]:
+    """[Heartbeat] - 构造 feature_snapshot 阶段进度回调。
+
+    每处理完一个 batch 调用，更新 orchestrator job_run 的心跳、lease 与 metadata 进度。
+    每 _FEATURE_SNAPSHOT_PROGRESS_EVENT_INTERVAL 只股票写一次 info 事件，避免事件表膨胀。
+    """
+    last_event_processed = 0
+
+    async def _callback(*, processed: int, total: int, snapshot_count: int, failed_count: int) -> None:
+        nonlocal last_event_processed
+        try:
+            async with AsyncSessionLocal() as db:
+                now = datetime.now(ZoneInfo("Asia/Shanghai"))
+                job_run = await db.get(SchedulerJobRun, job_run_id)
+                if job_run is None or job_run.status != "running":
+                    return
+                job_run.heartbeat_at = now
+                job_run.lease_expires_at = now + timedelta(
+                    seconds=_ORCHESTRATOR_LEASE_SECONDS,
+                )
+                if worker_id is not None:
+                    job_run.worker_instance_id = worker_id
+
+                # 更新 metadata 中的进度（保留其他字段）
+                meta = _parse_metadata(job_run)
+                meta["feature_snapshot_progress"] = {
+                    "processed": processed,
+                    "total": total,
+                    "snapshot_count": snapshot_count,
+                    "failed_count": failed_count,
+                    "updated_at": now.isoformat(),
+                }
+                job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+                await db.commit()
+
+                # 每阈值只股票写一次事件，避免每只股票都写事件
+                if processed - last_event_processed >= _FEATURE_SNAPSHOT_PROGRESS_EVENT_INTERVAL:
+                    await append_event(
+                        db=db,
+                        job_run_id=job_run_id,
+                        step=AfterCloseRunStatus.FEATURE_SNAPSHOT.value,
+                        level="info",
+                        message=(
+                            f"feature_snapshot 进度: processed={processed}/{total}, "
+                            f"snapshot_count={snapshot_count}, failed_count={failed_count}"
+                        ),
+                        payload={
+                            "processed": processed,
+                            "total": total,
+                            "snapshot_count": snapshot_count,
+                            "failed_count": failed_count,
+                        },
+                    )
+                    last_event_processed = processed
+        except Exception as exc:
+            logger.warning(
+                "[AfterClose] feature_snapshot 进度回调失败 job_run_id=%s: %s",
+                job_run_id, exc,
+            )
+
+    return _callback
+
+
+# [Repair] - 修复因 orchestrator 中断/失败而 stuck 的 running snapshot run
+_REPAIR_STALE_THRESHOLD_SECONDS = 300
+_REPAIR_SUCCESS_RATE_THRESHOLD = 0.95
+
+
+async def repair_stale_after_close_snapshot_runs(
+    db: AsyncSession,
+    *,
+    stale_threshold_seconds: int = _REPAIR_STALE_THRESHOLD_SECONDS,
+    success_rate_threshold: float = _REPAIR_SUCCESS_RATE_THRESHOLD,
+) -> list[dict[str, Any]]:
+    """[Repair] 修复因 after_close_orchestrator 中断或失败而 stuck 的 running snapshot run。
+
+    触发条件：
+    - 存在 status='interrupted' 或 'failed' 的 after_close_orchestrator job_run
+    - 同 trade_date 存在 run_type='after_close' 且 status='running' 的 snapshot run
+    - 该 snapshot run 的 started_at 距离 now 超过 stale_threshold_seconds
+
+    修复策略：
+    - 若 stock_feature_snapshots 中该 trade_date 的实际行数 >= expected_count * success_rate_threshold，
+      则标记 snapshot run 为 succeeded 并写入 published_at（允许 watchlist 读取）。
+    - 否则标记为 failed，metadata 写入 reason='orchestrator_interrupted_or_lease_expired'。
+
+    返回：
+        被修复的 snapshot run 列表，每项含 snapshot_run_id / trade_date / action / reason。
+    """
+    from app.models.stock_feature_snapshot import StockFeatureSnapshot
+    from app.models.stock_feature_snapshot_run import (
+        RUN_TYPE_AFTER_CLOSE,
+        STATUS_FAILED,
+        STATUS_RUNNING,
+        STATUS_SUCCEEDED,
+        StockFeatureSnapshotRun,
+    )
+
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    repaired: list[dict[str, Any]] = []
+
+    # 1. 找出近期中断/失败的 after_close_orchestrator job_run
+    job_run_stmt = select(SchedulerJobRun).where(
+        SchedulerJobRun.job_name == _AFTER_CLOSE_JOB_NAME,
+        SchedulerJobRun.status.in_(("interrupted", "failed")),
+    )
+    job_runs_result = await db.execute(job_run_stmt)
+    broken_job_runs = job_runs_result.scalars().all()
+
+    for job_run in broken_job_runs:
+        meta = _parse_metadata(job_run)
+        trade_date_str = meta.get("trade_date")
+        if not trade_date_str:
+            continue
+        try:
+            trade_date = date.fromisoformat(trade_date_str)
+        except ValueError:
+            logger.warning(
+                "[Repair] metadata 中 trade_date 格式非法: job_run_id=%s, value=%r",
+                job_run.id, trade_date_str,
+            )
+            continue
+
+        # 2. 查找同 trade_date 的 running after_close snapshot run
+        snapshot_stmt = select(StockFeatureSnapshotRun).where(
+            StockFeatureSnapshotRun.trade_date == trade_date,
+            StockFeatureSnapshotRun.run_type == RUN_TYPE_AFTER_CLOSE,
+            StockFeatureSnapshotRun.status == STATUS_RUNNING,
+        )
+        snapshot_result = await db.execute(snapshot_stmt)
+        snapshot_runs = snapshot_result.scalars().all()
+
+        for snapshot_run in snapshot_runs:
+            started_at = snapshot_run.started_at or snapshot_run.created_at
+            if started_at is None:
+                continue
+            # 统一时区后再比较（created_at 可能为 tz-aware）
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+            stale_seconds = (now - started_at).total_seconds()
+            if stale_seconds < stale_threshold_seconds:
+                logger.info(
+                    "[Repair] snapshot run 未超时，跳过: run_id=%s, stale_seconds=%s",
+                    snapshot_run.id, stale_seconds,
+                )
+                continue
+
+            # 3. 统计实际 snapshot 行数
+            count_stmt = select(func.count()).select_from(StockFeatureSnapshot).where(
+                StockFeatureSnapshot.trade_date == trade_date,
+            )
+            actual_count = (await db.execute(count_stmt)).scalar() or 0
+            expected_count = snapshot_run.expected_count or 0
+            success_rate = actual_count / expected_count if expected_count > 0 else 0.0
+
+            if expected_count > 0 and success_rate >= success_rate_threshold:
+                # 足够多的 snapshots：标记 succeeded 并发布
+                await finish_snapshot_run(
+                    db, snapshot_run,
+                    status=STATUS_SUCCEEDED,
+                    snapshot_count=actual_count,
+                    failed_count=expected_count - actual_count,
+                    expected_count=expected_count,
+                    metadata={
+                        "source": "after_close_orchestrator",
+                        "scope": "full",
+                        "repair_reason": "orchestrator_interrupted_or_lease_expired",
+                        "repaired_at": now.isoformat(),
+                    },
+                )
+                repaired.append({
+                    "snapshot_run_id": str(snapshot_run.id),
+                    "trade_date": trade_date.isoformat(),
+                    "action": "succeeded",
+                    "reason": "orchestrator_interrupted_or_lease_expired",
+                    "actual_count": actual_count,
+                    "expected_count": expected_count,
+                    "success_rate": success_rate,
+                })
+                logger.info(
+                    "[Repair] snapshot run 修复为 succeeded: run_id=%s, "
+                    "actual=%s, expected=%s, rate=%.2f",
+                    snapshot_run.id, actual_count, expected_count, success_rate,
+                )
+            else:
+                # snapshots 不足：标记 failed
+                await finish_snapshot_run(
+                    db, snapshot_run,
+                    status=STATUS_FAILED,
+                    snapshot_count=actual_count,
+                    failed_count=expected_count - actual_count,
+                    expected_count=expected_count,
+                    metadata={
+                        "source": "after_close_orchestrator",
+                        "scope": "full",
+                        "reason": "orchestrator_interrupted_or_lease_expired",
+                        "repaired_at": now.isoformat(),
+                    },
+                )
+                repaired.append({
+                    "snapshot_run_id": str(snapshot_run.id),
+                    "trade_date": trade_date.isoformat(),
+                    "action": "failed",
+                    "reason": "orchestrator_interrupted_or_lease_expired",
+                    "actual_count": actual_count,
+                    "expected_count": expected_count,
+                    "success_rate": success_rate,
+                })
+                logger.info(
+                    "[Repair] snapshot run 修复为 failed: run_id=%s, "
+                    "actual=%s, expected=%s, rate=%.2f",
+                    snapshot_run.id, actual_count, expected_count, success_rate,
+                )
+
+    return repaired
 
 
 async def execute_after_close_run(
@@ -426,10 +647,25 @@ async def execute_after_close_run(
             if dsa_run_id_str:
                 dsa_run_id = uuid.UUID(dsa_run_id_str)
 
+        # [Repair] - 启动前修复上一次中断留下的 stuck running snapshot run，
+        # 避免同 trade_date 的 running run 触发 partial unique index 冲突。
+        try:
+            async with AsyncSessionLocal() as db:
+                repaired = await repair_stale_after_close_snapshot_runs(db)
+                if repaired:
+                    logger.info(
+                        "[AfterClose] 启动前修复 %s 个 stuck snapshot run: %s",
+                        len(repaired), repaired,
+                    )
+        except Exception as exc:
+            logger.warning(
+                "[AfterClose] 启动前 repair 失败，继续执行: %s", exc,
+            )
+
         # [Phase5] - 根据last_completed_step 计算各阶段跳过标志
         # 阶段顺序：refreshing_daily → waiting_dsa_worker → quality_gate
         #   → feature_snapshot → publishing → succeeded
-        _completed_steps = {
+        _completed_steps: dict[str | None, set[str]] = {
             None: set(),
             "queued": set(),
             "refreshing_daily": {"refreshing_daily"},
@@ -448,7 +684,7 @@ async def execute_after_close_run(
                 "feature_snapshot", "publishing", "succeeded",
             },
         }
-        completed = _completed_steps.get(last_completed_step, set())
+        completed: set[str] = _completed_steps.get(last_completed_step, set())
         if "succeeded" in completed:
             logger.info(
                 "[AfterClose] 断点恢复: 已完成 succeeded，直接返回: job_run_id=%s",
@@ -736,13 +972,40 @@ async def execute_after_close_run(
                 # instrument_ids 复用，避免下个 session 重复查询
                 cached_instrument_ids = instrument_ids
 
-            # 计算 snapshots（独立 session）
+            # [Heartbeat] feature_snapshot 开始后立即写入 run_id 与 last_started_step，
+            # 这样 UI 不会显示 feature_snapshot 待执行，且中断后知道从哪一步恢复。
+            async with AsyncSessionLocal() as db:
+                job_run = await db.get(SchedulerJobRun, job_run_id)
+                if job_run is None:
+                    raise RuntimeError(
+                        f"SchedulerJobRun not found: job_run_id={job_run_id}"
+                    )
+                await _update_orchestrator_status(
+                    db=db,
+                    job_run=job_run,
+                    status=AfterCloseRunStatus.FEATURE_SNAPSHOT,
+                    message=f"开始生成特征快照: trade_date={trade_date}, run_id={snapshot_run_id}",
+                    extra={
+                        "feature_snapshot_run_id": str(snapshot_run_id),
+                        "last_started_step": AfterCloseRunStatus.FEATURE_SNAPSHOT.value,
+                    },
+                )
+                await db.commit()
+
+            # 计算 snapshots（独立 session + 后台心跳保活 + 进度回调）
             snapshot_result: dict[str, Any] | None = None
             snapshot_error: Exception | None = None
+            heartbeat_task = asyncio.create_task(
+                _job_run_heartbeat_loop(job_run_id, worker_id, interval=30)
+            )
             try:
+                progress_callback = _build_feature_snapshot_progress_callback(
+                    job_run_id, worker_id
+                )
                 async with AsyncSessionLocal() as db:
                     snapshot_result = await compute_for_trade_date(
                         db, trade_date, cached_instrument_ids,
+                        progress_callback=progress_callback,
                     )
                     await db.commit()
             except RuntimeError as snapshot_exc:
@@ -761,6 +1024,13 @@ async def execute_after_close_run(
                     "[AfterClose] feature_snapshot 异常: trade_date=%s, error=%s",
                     trade_date, snapshot_exc, exc_info=True,
                 )
+            finally:
+                # [Heartbeat] 取消后台心跳任务，安静忽略 CancelledError
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
 
             # [Phase7] Finalize run（独立 session，保证 run 状态持久化）
             async with AsyncSessionLocal() as db:
