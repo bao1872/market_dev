@@ -142,20 +142,20 @@ def add_feature_table(fig: go.Figure, d: pd.DataFrame, cfg: BBcfg) -> None:
 
     fig.add_trace(
         go.Table(
-            header=dict(
-                values=["Feature", "Value"],
-                fill_color="rgba(0,0,0,0.75)",
-                font=dict(color="white", size=12, family="Consolas, monospace"),
-                align=["left", "left"],
-            ),
-            cells=dict(
-                values=[[r[0] for r in rows], [r[1] for r in rows]],
-                fill_color="rgba(0,0,0,0.45)",
-                font=dict(color="white", size=11, family="Consolas, monospace"),
-                align=["left", "left"],
-                height=22,
-            ),
-            domain=dict(x=[0.02, 0.32], y=[0.68, 0.98]),
+            header={
+                'values': ["Feature", "Value"],
+                'fill_color': "rgba(0,0,0,0.75)",
+                'font': {'color': "white", 'size': 12, 'family': "Consolas, monospace"},
+                'align': ["left", "left"],
+            },
+            cells={
+                'values': [[r[0] for r in rows], [r[1] for r in rows]],
+                'fill_color': "rgba(0,0,0,0.45)",
+                'font': {'color': "white", 'size': 11, 'family': "Consolas, monospace"},
+                'align': ["left", "left"],
+                'height': 22,
+            },
+            domain={'x': [0.02, 0.32], 'y': [0.68, 0.98]},
         ),
         row=None,
         col=None
@@ -187,24 +187,24 @@ def build_plot(d: pd.DataFrame, cfg: BBcfg, title: str, out_html: str) -> None:
         row=1, col=1
     )
 
-    fig.add_trace(go.Scatter(x=x, y=d["bb_mid"], mode="lines", line=dict(width=1.2), name="bb_mid"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=x, y=d["bb_upper"], mode="lines", line=dict(width=1.0), name="bb_upper"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=x, y=d["bb_lower"], mode="lines", line=dict(width=1.0), name="bb_lower"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x, y=d["bb_mid"], mode="lines", line={'width': 1.2}, name="bb_mid"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x, y=d["bb_upper"], mode="lines", line={'width': 1.0}, name="bb_upper"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x, y=d["bb_lower"], mode="lines", line={'width': 1.0}, name="bb_lower"), row=1, col=1)
 
     fig.add_trace(
-        go.Scatter(x=x, y=d["bb_width_z_255"], mode="lines", line=dict(width=1.6), name="bb_width_z_255"),
+        go.Scatter(x=x, y=d["bb_width_z_255"], mode="lines", line={'width': 1.6}, name="bb_width_z_255"),
         row=2, col=1
     )
     for y0 in [0, 1, -1, 2, -2]:
         fig.add_hline(y=y0, row=2, col=1, line_width=1, opacity=0.30)
 
     fig.add_trace(
-        go.Scatter(x=x, y=d["bb_width"], mode="lines", line=dict(width=1.0, dash="dot"), name="bb_width"),
+        go.Scatter(x=x, y=d["bb_width"], mode="lines", line={'width': 1.0, 'dash': "dot"}, name="bb_width"),
         row=2, col=1
     )
 
     fig.add_trace(
-        go.Scatter(x=x, y=d["bb_pos"], mode="lines", line=dict(width=1.6), name="bb_pos (0=lower,1=upper)"),
+        go.Scatter(x=x, y=d["bb_pos"], mode="lines", line={'width': 1.6}, name="bb_pos (0=lower,1=upper)"),
         row=3, col=1
     )
     fig.add_hline(y=0, row=3, col=1, line_width=1, opacity=0.25)
@@ -214,10 +214,10 @@ def build_plot(d: pd.DataFrame, cfg: BBcfg, title: str, out_html: str) -> None:
         title=title,
         plot_bgcolor="#0b0f14",
         paper_bgcolor="#0b0f14",
-        font=dict(color="#c9d1d9"),
+        font={'color': "#c9d1d9"},
         height=980,
-        margin=dict(l=40, r=40, t=60, b=40),
-        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0.0),
+        margin={'l': 40, 'r': 40, 't': 60, 'b': 40},
+        legend={'orientation': "h", 'yanchor': "bottom", 'y': 1.01, 'xanchor': "left", 'x': 0.0},
     )
 
     if cfg.x_as_category:

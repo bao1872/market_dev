@@ -388,7 +388,7 @@ def plot_indicator(df: pd.DataFrame, symbol: str, freq: str, cfg: TLBConfig, out
             y=df["upper_plot"],
             mode="lines",
             name="Upper",
-            line=dict(color=cfg.up_color, width=2),
+            line={"color": cfg.up_color, "width": 2},
             connectgaps=False,
         )
     )
@@ -398,7 +398,7 @@ def plot_indicator(df: pd.DataFrame, symbol: str, freq: str, cfg: TLBConfig, out
             y=df["lower_plot"],
             mode="lines",
             name="Lower",
-            line=dict(color=cfg.down_color, width=2),
+            line={"color": cfg.down_color, "width": 2},
             connectgaps=False,
         )
     )
@@ -412,7 +412,7 @@ def plot_indicator(df: pd.DataFrame, symbol: str, freq: str, cfg: TLBConfig, out
                 mode="lines",
                 name="Ext" if idx == 0 else None,
                 showlegend=(idx == 0),
-                line=dict(color=col, width=1, dash="dash"),
+                line={"color": col, "width": 1, "dash": "dash"},
                 opacity=0.45,
                 hoverinfo="skip",
             )
@@ -429,8 +429,8 @@ def plot_indicator(df: pd.DataFrame, symbol: str, freq: str, cfg: TLBConfig, out
                 mode="markers+text",
                 text=["B"] * len(up_break),
                 textposition="top center",
-                marker=dict(symbol="triangle-up", size=10, color=cfg.up_color),
-                textfont=dict(color="white"),
+                marker={"symbol": "triangle-up", "size": 10, "color": cfg.up_color},
+                textfont={"color": "white"},
                 name="Upper Break",
             )
         )
@@ -442,8 +442,8 @@ def plot_indicator(df: pd.DataFrame, symbol: str, freq: str, cfg: TLBConfig, out
                 mode="markers+text",
                 text=["B"] * len(dn_break),
                 textposition="bottom center",
-                marker=dict(symbol="triangle-down", size=10, color=cfg.down_color),
-                textfont=dict(color="white"),
+                marker={"symbol": "triangle-down", "size": 10, "color": cfg.down_color},
+                textfont={"color": "white"},
                 name="Lower Break",
             )
         )
@@ -452,12 +452,12 @@ def plot_indicator(df: pd.DataFrame, symbol: str, freq: str, cfg: TLBConfig, out
         title=f"Trendlines with Breaks [LuxAlgo] - {symbol}",
         plot_bgcolor=bg,
         paper_bgcolor=bg,
-        font=dict(color=font_col),
-        xaxis=dict(type="category", rangeslider=dict(visible=False), showgrid=True, gridcolor=grid),
-        yaxis=dict(title="Price", showgrid=True, gridcolor=grid),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        font={"color": font_col},
+        xaxis={"type": "category", "rangeslider": {"visible": False}, "showgrid": True, "gridcolor": grid},
+        yaxis={"title": "Price", "showgrid": True, "gridcolor": grid},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0},
         hovermode="x unified",
-        margin=dict(l=50, r=30, t=70, b=40),
+        margin={"l": 50, "r": 30, "t": 70, "b": 40},
     )
 
     fig.write_html(out_html, include_plotlyjs="cdn")

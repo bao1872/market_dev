@@ -1055,24 +1055,24 @@ def build_html(df_full: pd.DataFrame, df_plot: pd.DataFrame, out_html: str, titl
 
     colors = _volume_weighted_bar_colors(df_plot)
     for i, (op, hi, lo, cl, clr) in enumerate(zip(df_plot["open"], df_plot["high"], df_plot["low"], df_plot["close"], colors)):
-        fig.add_trace(go.Scatter(x=[i, i], y=[lo, hi], mode="lines", line=dict(color=clr, width=1), hoverinfo="skip", showlegend=False), row=1, col=1)
+        fig.add_trace(go.Scatter(x=[i, i], y=[lo, hi], mode="lines", line={"color": clr, "width": 1}, hoverinfo="skip", showlegend=False), row=1, col=1)
         body_low = min(op, cl)
         body_high = max(op, cl)
         fig.add_shape(type="rect", x0=i - 0.32, x1=i + 0.32, y0=body_low, y1=(body_high if body_high > body_low else body_low + 1e-9),
-                      line=dict(color=clr, width=1), fillcolor=clr, xref="x1", yref="y1")
+                      line={"color": clr, "width": 1}, fillcolor=clr, xref="x1", yref="y1")
 
     # 支撑/压力阶梯线
-    fig.add_trace(go.Scatter(x=x_num, y=df_plot["resistance_ref"], mode="lines", line=dict(width=1.4, dash="dot", color="#00e676"), name="resistance_ref"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=x_num, y=df_plot["support_ref"], mode="lines", line=dict(width=1.4, dash="dot", color="#ff5252"), name="support_ref"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df_plot["resistance_ref"], mode="lines", line={"width": 1.4, "dash": "dot", "color": "#00e676"}, name="resistance_ref"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df_plot["support_ref"], mode="lines", line={"width": 1.4, "dash": "dot", "color": "#ff5252"}, name="support_ref"), row=1, col=1)
     if "flipped_support_ref" in df_plot.columns:
-        fig.add_trace(go.Scatter(x=x_num, y=df_plot["flipped_support_ref"], mode="lines", line=dict(width=1.2, dash="dash", color="#2196f3"), name="flipped_support_ref"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=x_num, y=df_plot["flipped_support_ref"], mode="lines", line={"width": 1.2, "dash": "dash", "color": "#2196f3"}, name="flipped_support_ref"), row=1, col=1)
     for col, nm, color in [("support_zone_low", "support_zone_low", "#ff8a80"), ("support_zone_high", "support_zone_high", "#ff8a80"), ("resistance_zone_low", "resistance_zone_low", "#69f0ae"), ("resistance_zone_high", "resistance_zone_high", "#69f0ae")]:
         if col in df_plot.columns:
-            fig.add_trace(go.Scatter(x=x_num, y=df_plot[col], mode="lines", line=dict(width=0.8, dash="dash", color=color), name=nm, opacity=0.65), row=1, col=1)
+            fig.add_trace(go.Scatter(x=x_num, y=df_plot[col], mode="lines", line={"width": 0.8, "dash": "dash", "color": color}, name=nm, opacity=0.65), row=1, col=1)
     if "ma20" in df_plot.columns:
-        fig.add_trace(go.Scatter(x=x_num, y=df_plot["ma20"], mode="lines", line=dict(width=1.0, color="#ffd54f"), name="ma20"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=x_num, y=df_plot["ma20"], mode="lines", line={"width": 1.0, "color": "#ffd54f"}, name="ma20"), row=1, col=1)
     if "ma60" in df_plot.columns:
-        fig.add_trace(go.Scatter(x=x_num, y=df_plot["ma60"], mode="lines", line=dict(width=1.0, color="#ab47bc"), name="ma60"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=x_num, y=df_plot["ma60"], mode="lines", line={"width": 1.0, "color": "#ab47bc"}, name="ma60"), row=1, col=1)
 
     def _event_scatter(mask_col: str, y_col: str, name: str, symbol: str, size: int, color: str, y_shift: float = 0.0):
         if mask_col not in df_plot.columns:
@@ -1089,7 +1089,7 @@ def build_html(df_full: pd.DataFrame, df_plot: pd.DataFrame, out_html: str, titl
         fig.add_trace(
             go.Scatter(
                 x=x_num[mask], y=y[mask], mode="markers",
-                marker=dict(symbol=symbol, size=size, color=color, line=dict(width=1, color="#ffffff")),
+                marker={"symbol": symbol, "size": size, "color": color, "line": {"width": 1, "color": "#ffffff"}},
                 name=name,
                 customdata=custom,
                 hovertemplate=(
@@ -1127,24 +1127,24 @@ def build_html(df_full: pd.DataFrame, df_plot: pd.DataFrame, out_html: str, titl
             if 0 <= anchor < len(df_plot):
                 fig.add_annotation(x=anchor, y=float(ph), text=f"R {float(ph):.2f}", showarrow=True, arrowhead=2, arrowsize=1,
                                    arrowwidth=1, arrowcolor="#00e676", ax=0, ay=-24, bgcolor="rgba(0,230,118,0.35)",
-                                   font=dict(color="white", size=10), xref="x1", yref="y1")
+                                   font={"color": "white", "size": 10}, xref="x1", yref="y1")
         pl = df_full["pvt_low_confirm"].iloc[full_i]
         if np.isfinite(pl):
             anchor = int(df_full["pvt_low_anchor_index"].iloc[full_i]) - plot_start
             if 0 <= anchor < len(df_plot):
                 fig.add_annotation(x=anchor, y=float(pl), text=f"S {float(pl):.2f}", showarrow=True, arrowhead=2, arrowsize=1,
                                    arrowwidth=1, arrowcolor="#ff5252", ax=0, ay=24, bgcolor="rgba(255,82,82,0.35)",
-                                   font=dict(color="white", size=10), xref="x1", yref="y1")
+                                   font={"color": "white", "size": 10}, xref="x1", yref="y1")
 
     # 位置因子
-    fig.add_trace(go.Scatter(x=x_num, y=df_plot["sr_pos_01"], mode="lines", name="sr_pos_01", line=dict(width=2, color="#40c4ff")), row=2, col=1)
-    fig.add_trace(go.Scatter(x=x_num, y=df_plot["sr_pos_raw"], mode="lines", name="sr_pos_raw", line=dict(width=1, color="#b0bec5", dash="dot")), row=2, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df_plot["sr_pos_01"], mode="lines", name="sr_pos_01", line={"width": 2, "color": "#40c4ff"}), row=2, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df_plot["sr_pos_raw"], mode="lines", name="sr_pos_raw", line={"width": 1, "color": "#b0bec5", "dash": "dot"}), row=2, col=1)
     for yv, col in [(0.0, "#ff5252"), (0.25, "#78909c"), (0.35, "#78909c"), (0.5, "#78909c"), (1.0, "#00e676")]:
         fig.add_hline(y=yv, line_width=1, line_dash="dot", line_color=col, row=2, col=1)
 
     # 量能
     fig.add_trace(go.Bar(x=x_num, y=df_plot["volume_ratio_20"], name="volume_ratio_20", opacity=0.55), row=3, col=1)
-    fig.add_trace(go.Scatter(x=x_num, y=df_plot["volume_z_20"], mode="lines", name="volume_z_20", line=dict(width=1.4, color="#ffd740")), row=3, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df_plot["volume_z_20"], mode="lines", name="volume_z_20", line={"width": 1.4, "color": "#ffd740"}), row=3, col=1)
     fig.add_hline(y=1.5, line_width=1, line_dash="dot", line_color="#ffd740", row=3, col=1)
     fig.add_hline(y=0.7, line_width=1, line_dash="dot", line_color="#78909c", row=3, col=1)
 
@@ -1166,7 +1166,7 @@ def build_html(df_full: pd.DataFrame, df_plot: pd.DataFrame, out_html: str, titl
             continue
         mask = df_plot[col].fillna(False).astype(bool).to_numpy()
         if mask.any():
-            fig.add_trace(go.Scatter(x=x_num[mask], y=np.full(mask.sum(), base), mode="markers", marker=dict(size=10), name=name), row=4, col=1)
+            fig.add_trace(go.Scatter(x=x_num[mask], y=np.full(mask.sum(), base), mode="markers", marker={"size": 10}, name=name), row=4, col=1)
     fig.update_yaxes(tickmode="array", tickvals=[x[1] for x in event_rows], ticktext=[x[2] for x in event_rows], row=4, col=1)
 
     tick_step = max(1, len(df_plot) // 10)
@@ -1177,8 +1177,8 @@ def build_html(df_full: pd.DataFrame, df_plot: pd.DataFrame, out_html: str, titl
 
     fig.update_layout(
         template="plotly_dark", xaxis_rangeslider_visible=False, hovermode="x unified",
-        margin=dict(l=50, r=30, t=90, b=40), height=1350,
-        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0.0),
+        margin={"l": 50, "r": 30, "t": 90, "b": 40}, height=1350,
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.01, "xanchor": "left", "x": 0.0},
     )
     for r in [1, 2, 3, 4]:
         fig.update_xaxes(tickmode="array", tickvals=tickvals, ticktext=ticktext, showgrid=True, zeroline=False, row=r, col=1)

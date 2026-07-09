@@ -372,7 +372,7 @@ class ATRRopeEngine:
             fig.add_trace(
                 go.Scatter(
                     x=x, y=hi_y, mode="lines",
-                    line=dict(width=1.25, color=RANGE_LINE_COL),
+                    line={"width": 1.25, "color": RANGE_LINE_COL},
                     name="range",
                     legendgroup="range",
                     showlegend=first,
@@ -383,7 +383,7 @@ class ATRRopeEngine:
             fig.add_trace(
                 go.Scatter(
                     x=x, y=lo_y, mode="lines",
-                    line=dict(width=1.25, color=RANGE_LINE_COL),
+                    line={"width": 1.25, "color": RANGE_LINE_COL},
                     fill="tonexty",
                     fillcolor=RANGE_FILL_COL,
                     name="range_fill",
@@ -424,7 +424,7 @@ class ATRRopeEngine:
             fig.add_trace(
                 go.Scatter(
                     x=self.x_numeric, y=self.df[col_name], mode="lines",
-                    line=dict(width=3.0, color=color),
+                    line={"width": 3.0, "color": color},
                     connectgaps=False, name=name, legendgroup="rope", showlegend=lg,
                     hovertemplate="rope=%{y:.4f}<extra></extra>",
                 ), row=main_row, col=1
@@ -434,7 +434,7 @@ class ATRRopeEngine:
             fig.add_trace(
                 go.Scatter(
                     x=self.x_numeric, y=self.df["upper"], mode="lines",
-                    line=dict(width=1.8, color=CHANNEL_LINE_COL),
+                    line={"width": 1.8, "color": CHANNEL_LINE_COL},
                     name="upper", showlegend=False, connectgaps=False,
                     hovertemplate="upper=%{y:.4f}<extra></extra>",
                 ), row=main_row, col=1
@@ -442,7 +442,7 @@ class ATRRopeEngine:
             fig.add_trace(
                 go.Scatter(
                     x=self.x_numeric, y=self.df["lower"], mode="lines",
-                    line=dict(width=1.8, color=CHANNEL_LINE_COL),
+                    line={"width": 1.8, "color": CHANNEL_LINE_COL},
                     fill="tonexty", fillcolor=CHANNEL_FILL_COL,
                     name="lower", showlegend=False, connectgaps=False,
                     hovertemplate="lower=%{y:.4f}<extra></extra>",
@@ -456,8 +456,8 @@ class ATRRopeEngine:
         if self.args.show_break_markers:
             up_mask = self.df["range_break_up"] == 1
             dn_mask = self.df["range_break_down"] == 1
-            fig.add_trace(go.Scatter(x=self.x_numeric[up_mask.to_numpy()], y=self.df.loc[up_mask, "close"], mode="markers", marker=dict(symbol="circle-open", size=9, color="#2f7cff", line=dict(width=1.5)), name="range_break_up", showlegend=False), row=main_row, col=1)
-            fig.add_trace(go.Scatter(x=self.x_numeric[dn_mask.to_numpy()], y=self.df.loc[dn_mask, "close"], mode="markers", marker=dict(symbol="circle-open", size=9, color="#2f7cff", line=dict(width=1.5)), name="range_break_down", showlegend=False), row=main_row, col=1)
+            fig.add_trace(go.Scatter(x=self.x_numeric[up_mask.to_numpy()], y=self.df.loc[up_mask, "close"], mode="markers", marker={"symbol": "circle-open", "size": 9, "color": "#2f7cff", "line": {"width": 1.5}}, name="range_break_up", showlegend=False), row=main_row, col=1)
+            fig.add_trace(go.Scatter(x=self.x_numeric[dn_mask.to_numpy()], y=self.df.loc[dn_mask, "close"], mode="markers", marker={"symbol": "circle-open", "size": 9, "color": "#2f7cff", "line": {"width": 1.5}}, name="range_break_down", showlegend=False), row=main_row, col=1)
 
         if self.args.show_factor_panels:
             state_factors = [
@@ -470,7 +470,7 @@ class ATRRopeEngine:
                 fig.add_trace(
                     go.Scatter(
                         x=self.x_numeric, y=self.df[nm], mode=mode, name=nm,
-                        line=dict(width=1.35), connectgaps=False, showlegend=False
+                        line={"width": 1.35}, connectgaps=False, showlegend=False
                     ), row=2, col=1
                 )
 
@@ -484,7 +484,7 @@ class ATRRopeEngine:
                 fig.add_trace(
                     go.Scatter(
                         x=self.x_numeric, y=self.df[nm], mode="lines", name=nm,
-                        line=dict(width=1.35), connectgaps=False, showlegend=False
+                        line={"width": 1.35}, connectgaps=False, showlegend=False
                     ), row=3, col=1
                 )
 
@@ -496,7 +496,7 @@ class ATRRopeEngine:
                 fig.add_trace(
                     go.Scatter(
                         x=self.x_numeric, y=self.df[nm], mode="lines", name=nm,
-                        line=dict(width=1.35), connectgaps=False, showlegend=False
+                        line={"width": 1.35}, connectgaps=False, showlegend=False
                     ), row=4, col=1
                 )
 
@@ -515,8 +515,8 @@ class ATRRopeEngine:
             template="plotly_dark",
             xaxis_rangeslider_visible=False,
             hovermode="x unified",
-            margin=dict(l=40, r=20, t=70, b=40),
-            legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0.01),
+            margin={"l": 40, "r": 20, "t": 70, "b": 40},
+            legend={"orientation": "h", "yanchor": "bottom", "y": 1.01, "xanchor": "left", "x": 0.01},
         )
         rows = (1, 2, 3, 4) if self.args.show_factor_panels else (1,)
         for r in rows:

@@ -315,8 +315,8 @@ def dynamic_swing_anchored_vwap(df: pd.DataFrame, cfg: DSAConfig):
     # --- Pine swing tracking vars ---
     ph = np.nan
     pl = np.nan
-    phL = 0
-    plL = 0
+    phL = 0  # noqa: N806  # kept to match upstream algorithm naming
+    plL = 0  # noqa: N806  # kept to match upstream algorithm naming
 
     # label helper var
     prev = np.nan
@@ -347,10 +347,10 @@ def dynamic_swing_anchored_vwap(df: pd.DataFrame, cfg: DSAConfig):
 
         if np.isfinite(high[t]) and high[t] == np.nanmax(win_h):
             ph = high[t]
-            phL = t
+            phL = t  # noqa: N806  # kept to match upstream algorithm naming
         if np.isfinite(low[t]) and low[t] == np.nanmin(win_l):
             pl = low[t]
-            plL = t
+            plL = t  # noqa: N806  # kept to match upstream algorithm naming
 
         dir_ = 1 if phL > plL else -1
         dir_out[t] = dir_
@@ -593,24 +593,24 @@ def add_feature_table(fig: go.Figure, df: pd.DataFrame, vwap: pd.Series, dir_ser
 
     fig.add_trace(
         go.Table(
-            header=dict(
-                values=["Feature", "Value"],
-                fill_color="rgba(0,0,0,0.65)",
-                font=dict(color="white", size=12, family="Consolas, monospace"),
-                line_color="rgba(255,255,255,0.25)",
-                align=["left", "left"],
-            ),
-            cells=dict(
-                values=[[r[0] for r in rows], [r[1] for r in rows]],
-                fill_color="rgba(0,0,0,0.45)",
-                font=dict(color="white", size=12, family="Consolas, monospace"),
-                line_color="rgba(255,255,255,0.18)",
-                align=["left", "left"],
-                height=22,
-            ),
+            header={
+                "values": ["Feature", "Value"],
+                "fill_color": "rgba(0,0,0,0.65)",
+                "font": {"color": "white", "size": 12, "family": "Consolas, monospace"},
+                "line_color": "rgba(255,255,255,0.25)",
+                "align": ["left", "left"],
+            },
+            cells={
+                "values": [[r[0] for r in rows], [r[1] for r in rows]],
+                "fill_color": "rgba(0,0,0,0.45)",
+                "font": {"color": "white", "size": 12, "family": "Consolas, monospace"},
+                "line_color": "rgba(255,255,255,0.18)",
+                "align": ["left", "left"],
+                "height": 22,
+            },
             columnwidth=[0.42, 0.58],
             # domain uses paper coords: put table on the left-top
-            domain=dict(x=[0.02, 0.30], y=[0.73, 0.98]),
+            domain={"x": [0.02, 0.30], "y": [0.73, 0.98]},
         )
     )
 
@@ -652,7 +652,7 @@ def build_plot(df, vwap, dir_series, pivot_labels, segments, out_html, title, sm
         seg_values = [pt["value"] for pt in seg["points"]]
         fig.add_trace(
             go.Scatter(x=seg_times, y=seg_values, mode="lines",
-                       line=dict(width=2, color=color),
+                       line={"width": 2, "color": color},
                        hoverinfo="skip", showlegend=False),
             row=1, col=1
         )
@@ -662,7 +662,7 @@ def build_plot(df, vwap, dir_series, pivot_labels, segments, out_html, title, sm
 
     fig.add_trace(
         go.Scatter(x=df.index, y=df["SMA220D"], mode="lines",
-                   line=dict(width=1, dash="dot"),
+                   line={"width": 1, "dash": "dot"},
                    hoverinfo="skip", showlegend=False),
         row=1, col=1
     )
@@ -685,7 +685,7 @@ def build_plot(df, vwap, dir_series, pivot_labels, segments, out_html, title, sm
             text=txt,
             showarrow=True, arrowhead=2, ax=0, ay=ay,
             bgcolor=bgcolor,
-            font=dict(color="white", size=12),
+            font={"color": "white", "size": 12},
             bordercolor=bgcolor, borderwidth=1,
             row=1, col=1
         )
@@ -697,9 +697,9 @@ def build_plot(df, vwap, dir_series, pivot_labels, segments, out_html, title, sm
     fig.update_layout(
         title=title,
         plot_bgcolor="#0b0f14", paper_bgcolor="#0b0f14",
-        font=dict(color="#c9d1d9"),
+        font={"color": "#c9d1d9"},
         height=950,
-        margin=dict(l=40, r=40, t=60, b=40),
+        margin={"l": 40, "r": 40, "t": 60, "b": 40},
     )
     fig.update_xaxes(showgrid=True, gridcolor="rgba(255,255,255,0.06)", rangeslider_visible=False)
     fig.update_yaxes(showgrid=True, gridcolor="rgba(255,255,255,0.06)", row=1, col=1)

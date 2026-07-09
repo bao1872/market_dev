@@ -674,3 +674,16 @@ uptime
 - mypy 使用 `MYPY_CACHE_DIR=/tmp/mypy_debt_cache` 单独检查目标文件，跑完删除 cache，不全仓库反复生成；
 - 长命令（mypy 冷启动、大批量 pytest）使用 `nohup` + `/tmp/<name>.log` + `/tmp/<name>.pid` 后台执行，用 `ps`/`tail` 轮询，不依赖 Trae 交互式长连接；
 - 单 PR 只处理一类债务，不混入业务逻辑修改。
+
+## 11. Ruff baseline 债务治理
+
+Ruff 债务清理属于纯样式修复，不需要构建镜像、部署或重启任何服务：
+
+- 不构建 Docker、不重启 backend / worker、不启动 research backfill、不动生产调度逻辑；
+- 长命令（ruff 全量检查、pytest 回归）写入 `/tmp/<name>.log`，结束后清理 `/tmp` 下的日志和 cache，不进入仓库；
+- 磁盘可用空间 < 15GB 时立即停止债务治理工作，优先保障生产服务运行；
+- 临时日志和 cache（`/tmp/ruff_*.log`、`/tmp/mypy_ruff_cleanup`、`.ruff_cache` 等）只允许放在 `/tmp` 或已 `.gitignore` 的位置，不得 commit；
+- C408（`dict()` → `{}`）可用 `ruff --fix --unsafe-fixes` 自动修复，修后必须人工 diff 确认不改变语义；
+- N806 仅允许两种处理方式：普通局部变量安全重命名为 snake_case；算法对齐变量（TradingView/PineScript/SMC 原命名）使用最小范围 `# noqa: N806` 并在旁注释 "kept to match upstream algorithm naming"；
+- `strategy_assets` 虽是算法资产，但存在生产 import，不得从质量门禁中整体排除；
+- 禁止全文件无说明的 blanket ignore；若使用 per-file ignore，必须在文件头注释说明原因，并在本节登记。

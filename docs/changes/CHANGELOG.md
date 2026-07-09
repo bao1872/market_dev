@@ -4,6 +4,13 @@
 
 ## 2026-07-09
 
+- CHANGE-20260709-010: ruff strategy_assets C408/N806 债务清零
+  - ruff baseline total 889→274，删除 615 个 C408/N806 条目（440 C408 + 174 N806 + 1 N806）
+  - C408 全部 `ruff --fix --unsafe-fixes` 自动修复（`dict()` → `{}`）
+  - N806：`instrument_seed.py` `BATCH_SIZE`→`batch_size` 重命名；3 个大量算法变量文件 per-file `# ruff: noqa: N806`；4 个少量算法变量文件 inline `# noqa: N806`，均注释 "kept to match upstream algorithm naming"
+  - 不改变算法输出、默认参数、返回结构；不构建/部署/重启服务
+  - 更新 `docs/current/05-testing-acceptance.md`（§5.1.3 Ruff baseline 规则）、`docs/current/03-jobs-integrations-operations.md`（§11 Ruff baseline 债务治理）
+
 - CHANGE-20260709-009: mypy baseline 全量清零
   - 剩余 186 个 baseline 错误（141 unique）全部清零
   - Batch A: 小生产文件 19 个（config, pytdx_adapter, chart_bars, calendar_seed 等）

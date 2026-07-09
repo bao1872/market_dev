@@ -783,12 +783,12 @@ def build_plot(df: pd.DataFrame, cfg: DivConfig, title: str, out_html: str, out_
         ma50 = df["close"].rolling(50, min_periods=50).mean()
         ma200 = df["close"].rolling(200, min_periods=200).mean()
         fig.add_trace(
-            go.Scatter(x=xcat, y=ma50, mode="lines", line=dict(color=cfg.ma50_col, width=1.2), hoverinfo="skip", showlegend=False),
+            go.Scatter(x=xcat, y=ma50, mode="lines", line={"color": cfg.ma50_col, "width": 1.2}, hoverinfo="skip", showlegend=False),
             row=1,
             col=1,
         )
         fig.add_trace(
-            go.Scatter(x=xcat, y=ma200, mode="lines", line=dict(color=cfg.ma200_col, width=1.2), hoverinfo="skip", showlegend=False),
+            go.Scatter(x=xcat, y=ma200, mode="lines", line={"color": cfg.ma200_col, "width": 1.2}, hoverinfo="skip", showlegend=False),
             row=1,
             col=1,
         )
@@ -807,7 +807,7 @@ def build_plot(df: pd.DataFrame, cfg: DivConfig, title: str, out_html: str, out_
                     x=ln["x"],
                     y=ln["y"],
                     mode="lines",
-                    line=dict(color=ln["color"], width=ln["width"], dash=ln["dash"]),
+                    line={"color": ln["color"], "width": ln["width"], "dash": ln["dash"]},
                     hoverinfo="skip",
                     showlegend=False,
                 ),
@@ -833,13 +833,13 @@ def build_plot(df: pd.DataFrame, cfg: DivConfig, title: str, out_html: str, out_
         if xs_h:
             fig.add_trace(
                 go.Scatter(x=xs_h, y=ys_h, mode="markers+text", text=["H"] * len(xs_h), textposition="top center",
-                           marker=dict(size=5, color="rgba(255,90,90,0.85)"), hoverinfo="skip", showlegend=False),
+                           marker={"size": 5, "color": "rgba(255,90,90,0.85)"}, hoverinfo="skip", showlegend=False),
                 row=1, col=1,
             )
         if xs_l:
             fig.add_trace(
                 go.Scatter(x=xs_l, y=ys_l, mode="markers+text", text=["L"] * len(xs_l), textposition="bottom center",
-                           marker=dict(size=5, color="rgba(0,220,120,0.85)"), hoverinfo="skip", showlegend=False),
+                           marker={"size": 5, "color": "rgba(0,220,120,0.85)"}, hoverinfo="skip", showlegend=False),
                 row=1, col=1,
             )
 
@@ -859,7 +859,7 @@ def build_plot(df: pd.DataFrame, cfg: DivConfig, title: str, out_html: str, out_
             bordercolor=bg,
             borderwidth=1,
             borderpad=6,
-            font=dict(color=tc, size=11),
+            font={"color": tc, "size": 11},
             row=1,
             col=1,
         )
@@ -879,7 +879,7 @@ def build_plot(df: pd.DataFrame, cfg: DivConfig, title: str, out_html: str, out_
             bordercolor=bg,
             borderwidth=1,
             borderpad=6,
-            font=dict(color=tc, size=11),
+            font={"color": tc, "size": 11},
             row=1,
             col=1,
         )
@@ -888,9 +888,9 @@ def build_plot(df: pd.DataFrame, cfg: DivConfig, title: str, out_html: str, out_
         title=title,
         plot_bgcolor="#0b0f14",
         paper_bgcolor="#0b0f14",
-        font=dict(color="#d6dde5"),
+        font={"color": "#d6dde5"},
         height=940,
-        margin=dict(l=35, r=28, t=48, b=32),
+        margin={"l": 35, "r": 28, "t": 48, "b": 32},
         hovermode="x unified",
     )
     fig.update_xaxes(

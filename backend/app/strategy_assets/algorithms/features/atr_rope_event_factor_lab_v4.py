@@ -659,7 +659,7 @@ def build_html(df_full: pd.DataFrame, df_plot: pd.DataFrame, out_html: str, titl
         fig.add_trace(
             go.Scatter(
                 x=x[s:e + 1], y=rope[s:e + 1], mode="lines",
-                line=dict(color=col, width=3),
+                line={"color": col, "width": 3},
                 name="Rope" if s == 0 else "Rope",
                 showlegend=s == 0,
                 hovertemplate="Rope=%{y:.3f}<extra></extra>",
@@ -671,10 +671,10 @@ def build_html(df_full: pd.DataFrame, df_plot: pd.DataFrame, out_html: str, titl
     if cfg.show_atr_channel:
         for s, e, col in _segment_by_color(x, upper, colors):
             fig.add_trace(go.Scatter(x=x[s:e + 1], y=upper[s:e + 1], mode="lines",
-                                     line=dict(color=col, width=1), name="Upper", showlegend=False), row=1, col=1)
+                                     line={"color": col, "width": 1}, name="Upper", showlegend=False), row=1, col=1)
         for s, e, col in _segment_by_color(x, lower, colors):
             fig.add_trace(go.Scatter(x=x[s:e + 1], y=lower[s:e + 1], mode="lines",
-                                     line=dict(color=col, width=1), name="Lower", showlegend=False), row=1, col=1)
+                                     line={"color": col, "width": 1}, name="Lower", showlegend=False), row=1, col=1)
 
     # Consolidation Ranges：Pine 用 ff 在两组 plot/fill 间切换，离线图用连续区间填充表达同等效果。
     if cfg.show_ranges:
@@ -691,7 +691,7 @@ def build_html(df_full: pd.DataFrame, df_plot: pd.DataFrame, out_html: str, titl
                     y=np.concatenate([hi, lo[::-1]]),
                     fill="toself",
                     fillcolor=cfg.range_color,
-                    line=dict(color="rgba(0,77,146,0.45)", width=1),
+                    line={"color": "rgba(0,77,146,0.45)", "width": 1},
                     mode="lines",
                     name="Consolidation Range",
                     showlegend=False,
@@ -700,10 +700,10 @@ def build_html(df_full: pd.DataFrame, df_plot: pd.DataFrame, out_html: str, titl
                 row=1, col=1,
             )
             fig.add_trace(go.Scatter(x=xs, y=hi, mode="lines",
-                                     line=dict(color="rgba(0,77,146,0.70)", width=1), showlegend=False,
+                                     line={"color": "rgba(0,77,146,0.70)", "width": 1}, showlegend=False,
                                      name="Range High"), row=1, col=1)
             fig.add_trace(go.Scatter(x=xs, y=lo, mode="lines",
-                                     line=dict(color="rgba(0,77,146,0.70)", width=1), showlegend=False,
+                                     line={"color": "rgba(0,77,146,0.70)", "width": 1}, showlegend=False,
                                      name="Range Low"), row=1, col=1)
 
     # 事件标记
@@ -726,7 +726,7 @@ def build_html(df_full: pd.DataFrame, df_plot: pd.DataFrame, out_html: str, titl
         fig.add_trace(
             go.Scatter(
                 x=x[mask], y=y, mode="markers",
-                marker=dict(symbol=symbol, size=11, color=color, line=dict(color="#ffffff", width=1)),
+                marker={"symbol": symbol, "size": 11, "color": color, "line": {"color": "#ffffff", "width": 1}},
                 name=label,
                 customdata=cd,
                 hovertemplate=(
@@ -794,7 +794,7 @@ def build_html(df_full: pd.DataFrame, df_plot: pd.DataFrame, out_html: str, titl
             if mask.any():
                 fig.add_trace(
                     go.Scatter(x=x[mask], y=np.full(mask.sum(), yv), mode="markers",
-                               marker=dict(size=9, color=color), name=nm, showlegend=False),
+                               marker={"size": 9, "color": color}, name=nm, showlegend=False),
                     row=3, col=1,
                 )
 
@@ -809,7 +809,7 @@ def build_html(df_full: pd.DataFrame, df_plot: pd.DataFrame, out_html: str, titl
     if "factor_atr_rope_line_dev_pct" in df_plot.columns:
         fig.add_trace(
             go.Scatter(x=x, y=df_plot["factor_atr_rope_line_dev_pct"] * 100, mode="lines",
-                       line=dict(width=1.4), name="Rope dev %",
+                       line={"width": 1.4}, name="Rope dev %",
                        hovertemplate="Rope dev=%{y:.2f}%<extra></extra>"),
             row=4, col=1,
         )
@@ -819,7 +819,7 @@ def build_html(df_full: pd.DataFrame, df_plot: pd.DataFrame, out_html: str, titl
     if "factor_atr_rope_regime" in df_plot.columns:
         fig.add_trace(
             go.Scatter(x=x, y=df_plot["factor_atr_rope_regime"], mode="lines",
-                       line=dict(width=1.2, dash="dash"), name="Regime 1/0/-1",
+                       line={"width": 1.2, "dash": "dash"}, name="Regime 1/0/-1",
                        hovertemplate="Regime=%{y:.0f}<extra></extra>"),
             row=4, col=1,
         )
@@ -829,13 +829,13 @@ def build_html(df_full: pd.DataFrame, df_plot: pd.DataFrame, out_html: str, titl
     if "factor_atr_rope_range_pos_01" in df_plot.columns:
         fig.add_trace(
             go.Scatter(x=x, y=df_plot["factor_atr_rope_range_pos_01"], mode="lines",
-                       line=dict(width=1.4), name="Range pos 0-1",
+                       line={"width": 1.4}, name="Range pos 0-1",
                        hovertemplate="Range pos=%{y:.3f}<extra></extra>"),
             row=5, col=1,
         )
         fig.add_trace(
             go.Scatter(x=x, y=df_plot["factor_atr_rope_range_width_pct"] * 100, mode="lines",
-                       line=dict(width=1.2, dash="dot"), name="Range width %",
+                       line={"width": 1.2, "dash": "dot"}, name="Range width %",
                        hovertemplate="Range width=%{y:.2f}%<extra></extra>"),
             row=5, col=1,
         )
@@ -850,9 +850,9 @@ def build_html(df_full: pd.DataFrame, df_plot: pd.DataFrame, out_html: str, titl
         height=1120,
         hovermode="x unified",
         xaxis_rangeslider_visible=False,
-        title=dict(text=title, x=0.5),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        margin=dict(l=50, r=30, t=70, b=40),
+        title={"text": title, "x": 0.5},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0},
+        margin={"l": 50, "r": 30, "t": 70, "b": 40},
     )
     fig.write_html(out_html, include_plotlyjs="cdn")
 

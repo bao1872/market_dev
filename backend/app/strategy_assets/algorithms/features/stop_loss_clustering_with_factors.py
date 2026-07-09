@@ -755,32 +755,32 @@ class StopLossClusteringEngine:
         self._add_cluster_overlays(fig)
 
         # Pressure panel
-        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["buy_stop_pressure"], mode="lines", line=dict(color=BUY_COL, width=1.6), name="buy_stop_pressure", showlegend=False), row=2, col=1)
-        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["sell_stop_pressure"], mode="lines", line=dict(color=SELL_COL, width=1.6), name="sell_stop_pressure", showlegend=False), row=2, col=1)
-        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["sum_buys_active"], mode="lines", line=dict(color=BUY_WEAK, width=1.1), name="sum_buys_active", showlegend=False), row=2, col=1)
-        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["sum_sells_active"], mode="lines", line=dict(color=SELL_WEAK, width=1.1), name="sum_sells_active", showlegend=False), row=2, col=1)
+        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["buy_stop_pressure"], mode="lines", line={"color": BUY_COL, "width": 1.6}, name="buy_stop_pressure", showlegend=False), row=2, col=1)
+        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["sell_stop_pressure"], mode="lines", line={"color": SELL_COL, "width": 1.6}, name="sell_stop_pressure", showlegend=False), row=2, col=1)
+        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["sum_buys_active"], mode="lines", line={"color": BUY_WEAK, "width": 1.1}, name="sum_buys_active", showlegend=False), row=2, col=1)
+        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["sum_sells_active"], mode="lines", line={"color": SELL_WEAK, "width": 1.1}, name="sum_sells_active", showlegend=False), row=2, col=1)
 
         # Pulse panel - closer to Pine layered glow
-        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["buy_stops_avg_50"], mode="lines", line=dict(color="rgba(85,255,218,0.20)", width=10), showlegend=False, hoverinfo="skip"), row=3, col=1)
-        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["buy_stops_avg_50"], mode="lines", line=dict(color="rgba(85,255,218,0.30)", width=6), showlegend=False, hoverinfo="skip"), row=3, col=1)
-        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["buy_stops_avg_50"], mode="lines", line=dict(color=BUY_COL, width=2), name="buyStopsAvg", showlegend=False), row=3, col=1)
-        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["sell_stops_avg_50"], mode="lines", line=dict(color="rgba(255,101,251,0.20)", width=10), showlegend=False, hoverinfo="skip"), row=3, col=1)
-        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["sell_stops_avg_50"], mode="lines", line=dict(color="rgba(255,101,251,0.30)", width=6), showlegend=False, hoverinfo="skip"), row=3, col=1)
-        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["sell_stops_avg_50"], mode="lines", line=dict(color=SELL_COL, width=2), name="sellStopsAvg", showlegend=False), row=3, col=1)
+        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["buy_stops_avg_50"], mode="lines", line={"color": "rgba(85,255,218,0.20)", "width": 10}, showlegend=False, hoverinfo="skip"), row=3, col=1)
+        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["buy_stops_avg_50"], mode="lines", line={"color": "rgba(85,255,218,0.30)", "width": 6}, showlegend=False, hoverinfo="skip"), row=3, col=1)
+        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["buy_stops_avg_50"], mode="lines", line={"color": BUY_COL, "width": 2}, name="buyStopsAvg", showlegend=False), row=3, col=1)
+        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["sell_stops_avg_50"], mode="lines", line={"color": "rgba(255,101,251,0.20)", "width": 10}, showlegend=False, hoverinfo="skip"), row=3, col=1)
+        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["sell_stops_avg_50"], mode="lines", line={"color": "rgba(255,101,251,0.30)", "width": 6}, showlegend=False, hoverinfo="skip"), row=3, col=1)
+        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["sell_stops_avg_50"], mode="lines", line={"color": SELL_COL, "width": 2}, name="sellStopsAvg", showlegend=False), row=3, col=1)
 
-        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["buy_stops_pulse"], mode="markers", marker=dict(color=BUY_COL, size=6), name="buy_stops_pulse", showlegend=False), row=3, col=1)
-        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["sell_stops_pulse"], mode="markers", marker=dict(color=SELL_COL, size=6), name="sell_stops_pulse", showlegend=False), row=3, col=1)
+        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["buy_stops_pulse"], mode="markers", marker={"color": BUY_COL, "size": 6}, name="buy_stops_pulse", showlegend=False), row=3, col=1)
+        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["sell_stops_pulse"], mode="markers", marker={"color": SELL_COL, "size": 6}, name="sell_stops_pulse", showlegend=False), row=3, col=1)
 
         buy_rad = self.df["buy_stop_pulse_radiate"] > 0
         sell_rad = self.df["sell_stop_pulse_radiate"] > 0
         for size, alpha in [(10, 0.06), (7, 0.10), (5, 0.15), (3, 0.22)]:
-            fig.add_trace(go.Scatter(x=self.x_numeric[buy_rad.to_numpy()], y=self.df.loc[buy_rad, "buy_stops_pulse"], mode="markers", marker=dict(color=f"rgba(85,255,218,{alpha})", size=size), showlegend=False, hoverinfo="skip"), row=3, col=1)
-            fig.add_trace(go.Scatter(x=self.x_numeric[sell_rad.to_numpy()], y=self.df.loc[sell_rad, "sell_stops_pulse"], mode="markers", marker=dict(color=f"rgba(255,101,251,{alpha})", size=size), showlegend=False, hoverinfo="skip"), row=3, col=1)
+            fig.add_trace(go.Scatter(x=self.x_numeric[buy_rad.to_numpy()], y=self.df.loc[buy_rad, "buy_stops_pulse"], mode="markers", marker={"color": f"rgba(85,255,218,{alpha})", "size": size}, showlegend=False, hoverinfo="skip"), row=3, col=1)
+            fig.add_trace(go.Scatter(x=self.x_numeric[sell_rad.to_numpy()], y=self.df.loc[sell_rad, "sell_stops_pulse"], mode="markers", marker={"color": f"rgba(255,101,251,{alpha})", "size": size}, showlegend=False, hoverinfo="skip"), row=3, col=1)
 
         # Distance / ratio panel
-        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["dist_to_nearest_buy_stop_atr"], mode="lines", line=dict(color=BUY_COL, width=1.3), name="dist_to_nearest_buy_stop_atr", showlegend=False), row=4, col=1)
-        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["dist_to_nearest_sell_stop_atr"], mode="lines", line=dict(color=SELL_COL, width=1.3), name="dist_to_nearest_sell_stop_atr", showlegend=False), row=4, col=1)
-        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["stop_cluster_ratio"], mode="lines", line=dict(color="#f5d742", width=1.2), name="stop_cluster_ratio", showlegend=False), row=4, col=1)
+        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["dist_to_nearest_buy_stop_atr"], mode="lines", line={"color": BUY_COL, "width": 1.3}, name="dist_to_nearest_buy_stop_atr", showlegend=False), row=4, col=1)
+        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["dist_to_nearest_sell_stop_atr"], mode="lines", line={"color": SELL_COL, "width": 1.3}, name="dist_to_nearest_sell_stop_atr", showlegend=False), row=4, col=1)
+        fig.add_trace(go.Scatter(x=self.x_numeric, y=self.df["stop_cluster_ratio"], mode="lines", line={"color": "#f5d742", "width": 1.2}, name="stop_cluster_ratio", showlegend=False), row=4, col=1)
 
         for row in (2, 3, 4):
             fig.add_hline(y=0, line_width=1, line_dash="dot", line_color=ZERO_COL, row=row, col=1)
@@ -796,8 +796,8 @@ class StopLossClusteringEngine:
             template="plotly_dark",
             xaxis_rangeslider_visible=False,
             hovermode="x unified",
-            margin=dict(l=40, r=30, t=90, b=70),
-            legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0.01),
+            margin={"l": 40, "r": 30, "t": 90, "b": 70},
+            legend={"orientation": "h", "yanchor": "bottom", "y": 1.01, "xanchor": "left", "x": 0.01},
             annotations=list(fig.layout.annotations),
         )
         self._add_dashboard_annotations(fig)
@@ -832,7 +832,7 @@ class StopLossClusteringEngine:
                             x=[start, end],
                             y=[obj.price, obj.price],
                             mode="lines",
-                            line=dict(color=color if a >= 0.9 else f"rgba({85 if color==BUY_COL else 255},{255 if color==BUY_COL else 101},{218 if color==BUY_COL else 251},{a})", width=w, dash=d),
+                            line={"color": color if a >= 0.9 else f"rgba({85 if color==BUY_COL else 255},{255 if color==BUY_COL else 101},{218 if color==BUY_COL else 251},{a})", "width": w, "dash": d},
                             opacity=1.0,
                             name=name,
                             showlegend=(not shown and a >= 0.9),
@@ -883,7 +883,7 @@ class StopLossClusteringEngine:
         fig.add_annotation(xref="paper", yref="paper", x=0.995, y=0.995, xanchor="right", yanchor="top",
                            text=text, showarrow=False, align="left",
                            bordercolor="#363843", borderwidth=1, borderpad=8,
-                           bgcolor="#20222C", font=dict(color="white", size=11))
+                           bgcolor="#20222C", font={"color": "white", "size": 11})
 
         # ratio meter
         buy_active = abs(float(last.get("sum_buys_active", 0.0) or 0.0))
@@ -897,7 +897,7 @@ class StopLossClusteringEngine:
             fig.add_annotation(xref="paper", yref="paper", x=0.5, y=-0.12, xanchor="center", yanchor="top",
                                text=f"<b>Cluster Ratio Meter</b><br>{meter}<br>Buy {buy_ratio:.1%} | Sell {sell_ratio:.1%}",
                                showarrow=False, align="center", bgcolor="#181b27",
-                               bordercolor="#363843", borderwidth=1, borderpad=6, font=dict(color="white", size=11))
+                               bordercolor="#363843", borderwidth=1, borderpad=6, font={"color": "white", "size": 11})
 
 
 def fetch_data(symbol: str, freq: str, bars: int) -> pd.DataFrame:

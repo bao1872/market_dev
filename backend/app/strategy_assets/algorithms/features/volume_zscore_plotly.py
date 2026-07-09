@@ -248,7 +248,7 @@ def build_plot(df: pd.DataFrame, cfg: VolZCfg, title: str, out_html: str, out_pn
             bgcolor="rgba(0,0,0,0.55)",
             bordercolor="rgba(255,255,255,0.25)",
             borderwidth=1,
-            font=dict(color="white", size=12, family="Consolas, monospace"),
+            font={"color": "white", "size": 12, "family": "Consolas, monospace"},
         )
 
     # 统一外观（深色 TV 风）
@@ -256,9 +256,9 @@ def build_plot(df: pd.DataFrame, cfg: VolZCfg, title: str, out_html: str, out_pn
         title=title,
         plot_bgcolor="#0b0f14",
         paper_bgcolor="#0b0f14",
-        font=dict(color="#c9d1d9"),
+        font={"color": "#c9d1d9"},
         height=980,
-        margin=dict(l=40, r=40, t=60, b=40),
+        margin={"l": 40, "r": 40, "t": 60, "b": 40},
         bargap=0.0,
     )
 

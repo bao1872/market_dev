@@ -1,3 +1,4 @@
+# ruff: noqa: N806  # kept to match upstream algorithm naming (Pine Script / SMC conventions)
 # smc_probability_expo_pytdx.py
 """
 Smart Money Concepts Probability (Expo) — Python复刻版（pytdx + Plotly）
@@ -466,21 +467,21 @@ def plot_expo(
 
     for ev in events:
         col = bull_col if ev.is_bull else bear_col
-        shapes.append(dict(
-            type="line", xref="x", yref="y",
-            x0=ev.x0, x1=ev.x1, y0=ev.y, y1=ev.y,
-            line=dict(color=col, width=2),
-            layer="above",
-        ))
-        annotations.append(dict(
-            x=ev.x_label, y=ev.y, xref="x", yref="y",
-            text=ev.kind,
-            showarrow=False,
-            font=dict(size=12, color=col),
-            bgcolor="rgba(0,0,0,0)",
-            xanchor="center",
-            yanchor="bottom" if ev.is_bull else "top",
-        ))
+        shapes.append({
+            "type": "line", "xref": "x", "yref": "y",
+            "x0": ev.x0, "x1": ev.x1, "y0": ev.y, "y1": ev.y,
+            "line": {"color": col, "width": 2},
+            "layer": "above",
+        })
+        annotations.append({
+            "x": ev.x_label, "y": ev.y, "xref": "x", "yref": "y",
+            "text": ev.kind,
+            "showarrow": False,
+            "font": {"size": 12, "color": col},
+            "bgcolor": "rgba(0,0,0,0)",
+            "xanchor": "center",
+            "yanchor": "bottom" if ev.is_bull else "top",
+        })
 
     if show_pd and n >= 2:
         Up_last = float(Up[-1])
@@ -498,37 +499,37 @@ def plot_expo(
             else:
                 loc_guess = max(0, n - 200)
 
-            shapes.append(dict(
-                type="line", xref="x", yref="y",
-                x0=loc_guess, x1=n - 1, y0=Up_last, y1=Up_last,
-                line=dict(color=bear_col, width=1),
-                layer="above",
-            ))
-            shapes.append(dict(
-                type="line", xref="x", yref="y",
-                x0=loc_guess, x1=n - 1, y0=Dn_last, y1=Dn_last,
-                line=dict(color=bull_col, width=1),
-                layer="above",
-            ))
+            shapes.append({
+                "type": "line", "xref": "x", "yref": "y",
+                "x0": loc_guess, "x1": n - 1, "y0": Up_last, "y1": Up_last,
+                "line": {"color": bear_col, "width": 1},
+                "layer": "above",
+            })
+            shapes.append({
+                "type": "line", "xref": "x", "yref": "y",
+                "x0": loc_guess, "x1": n - 1, "y0": Dn_last, "y1": Dn_last,
+                "line": {"color": bull_col, "width": 1},
+                "layer": "above",
+            })
 
-            shapes.append(dict(
-                type="rect", xref="x", yref="y",
-                x0=loc_guess, x1=n - 1, y0=PremiumBot, y1=PremiumTop,
-                fillcolor=prem_col, line=dict(color="rgba(0,0,0,0)", width=0),
-                layer="below",
-            ))
-            shapes.append(dict(
-                type="rect", xref="x", yref="y",
-                x0=loc_guess, x1=n - 1, y0=MidBot, y1=MidTop,
-                fillcolor="rgba(128,128,128,0.25)", line=dict(color="rgba(0,0,0,0)", width=0),
-                layer="below",
-            ))
-            shapes.append(dict(
-                type="rect", xref="x", yref="y",
-                x0=loc_guess, x1=n - 1, y0=DiscountBot, y1=DiscountTop,
-                fillcolor=disc_col, line=dict(color="rgba(0,0,0,0)", width=0),
-                layer="below",
-            ))
+            shapes.append({
+                "type": "rect", "xref": "x", "yref": "y",
+                "x0": loc_guess, "x1": n - 1, "y0": PremiumBot, "y1": PremiumTop,
+                "fillcolor": prem_col, "line": {"color": "rgba(0,0,0,0)", "width": 0},
+                "layer": "below",
+            })
+            shapes.append({
+                "type": "rect", "xref": "x", "yref": "y",
+                "x0": loc_guess, "x1": n - 1, "y0": MidBot, "y1": MidTop,
+                "fillcolor": "rgba(128,128,128,0.25)", "line": {"color": "rgba(0,0,0,0)", "width": 0},
+                "layer": "below",
+            })
+            shapes.append({
+                "type": "rect", "xref": "x", "yref": "y",
+                "x0": loc_guess, "x1": n - 1, "y0": DiscountBot, "y1": DiscountTop,
+                "fillcolor": disc_col, "line": {"color": "rgba(0,0,0,0)", "width": 0},
+                "layer": "below",
+            })
 
             # Pine 的 str1/str2
             # str1 = pos<0?txt[0]:txt[1] ; str2 = pos>0?txt[0]:txt[1]
@@ -545,39 +546,39 @@ def plot_expo(
             str1 = choch_line if pos < 0 else bms_line
             str2 = choch_line if pos > 0 else bms_line
 
-            annotations.append(dict(
-                x=n - 1, y=Up_last, xref="x", yref="y",
-                text=str1, showarrow=False,
-                font=dict(size=12, color="#e6edf3"),
-                bgcolor="rgba(0,0,0,0.55)",
-                bordercolor="rgba(255,255,255,0.18)",
-                borderwidth=1,
-                xanchor="left", yanchor="middle",
-            ))
-            annotations.append(dict(
-                x=n - 1, y=Dn_last, xref="x", yref="y",
-                text=str2, showarrow=False,
-                font=dict(size=12, color="#e6edf3"),
-                bgcolor="rgba(0,0,0,0.55)",
-                bordercolor="rgba(255,255,255,0.18)",
-                borderwidth=1,
-                xanchor="left", yanchor="middle",
-            ))
+            annotations.append({
+                "x": n - 1, "y": Up_last, "xref": "x", "yref": "y",
+                "text": str1, "showarrow": False,
+                "font": {"size": 12, "color": "#e6edf3"},
+                "bgcolor": "rgba(0,0,0,0.55)",
+                "bordercolor": "rgba(255,255,255,0.18)",
+                "borderwidth": 1,
+                "xanchor": "left", "yanchor": "middle",
+            })
+            annotations.append({
+                "x": n - 1, "y": Dn_last, "xref": "x", "yref": "y",
+                "text": str2, "showarrow": False,
+                "font": {"size": 12, "color": "#e6edf3"},
+                "bgcolor": "rgba(0,0,0,0.55)",
+                "bordercolor": "rgba(255,255,255,0.18)",
+                "borderwidth": 1,
+                "xanchor": "left", "yanchor": "middle",
+            })
 
     # Win/Loss 面板
     W = float(vals[8, 2])
     Ls = float(vals[8, 3])
     WR = (W / (W + Ls) * 100) if (W + Ls) > 0 else 0.0
     panel_txt = f"WIN: {int(W)}<br>LOSS: {int(Ls)}<br>Profitability: {WR:.2f}%"
-    annotations.append(dict(
-        x=0.99, y=0.99, xref="paper", yref="paper",
-        text=panel_txt, showarrow=False, align="left",
-        font=dict(size=12, color="#e6edf3"),
-        bgcolor="rgba(0,0,0,0.55)",
-        bordercolor="rgba(255,255,255,0.18)",
-        borderwidth=1,
-        xanchor="right", yanchor="top",
-    ))
+    annotations.append({
+        "x": 0.99, "y": 0.99, "xref": "paper", "yref": "paper",
+        "text": panel_txt, "showarrow": False, "align": "left",
+        "font": {"size": 12, "color": "#e6edf3"},
+        "bgcolor": "rgba(0,0,0,0.55)",
+        "bordercolor": "rgba(255,255,255,0.18)",
+        "borderwidth": 1,
+        "xanchor": "right", "yanchor": "top",
+    })
 
     dates = df.index.tz_convert(SH_TZ).to_pydatetime()
     tick_step = max(1, len(dates) // 10)
@@ -590,13 +591,13 @@ def plot_expo(
         annotations=annotations,
         plot_bgcolor="#0b0f14",
         paper_bgcolor="#0b0f14",
-        font=dict(color="#c9d1d9"),
+        font={"color": "#c9d1d9"},
         height=900,
-        margin=dict(l=40, r=40, t=60, b=40),
-        xaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.06)", rangeslider_visible=False),
-        yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.06)"),
-        xaxis2=dict(showgrid=True, gridcolor="rgba(255,255,255,0.06)"),
-        yaxis2=dict(showgrid=True, gridcolor="rgba(255,255,255,0.06)"),
+        margin={"l": 40, "r": 40, "t": 60, "b": 40},
+        xaxis={"showgrid": True, "gridcolor": "rgba(255,255,255,0.06)", "rangeslider_visible": False},
+        yaxis={"showgrid": True, "gridcolor": "rgba(255,255,255,0.06)"},
+        xaxis2={"showgrid": True, "gridcolor": "rgba(255,255,255,0.06)"},
+        yaxis2={"showgrid": True, "gridcolor": "rgba(255,255,255,0.06)"},
     )
     fig.update_xaxes(tickmode="array", tickvals=tickvals, ticktext=ticktext, row=2, col=1)
 

@@ -886,6 +886,15 @@ mypy baseline 已清零（total=0, unique=0）。清理历程：
 - 新增债务必须 PR 中解释原因并不得进入 main；
 - `tests/` 目录的 mypy 错误不在 baseline 管控范围，但鼓励逐步修复。
 
+### 5.1.3 Ruff baseline 债务治理规则
+
+- **C408（dict/list literal）**：可用 `ruff --fix --unsafe-fixes` 自动修复，修复后从 baseline 删除；
+- **N806（变量命名）**：只允许在算法对齐变量上使用局部 `# noqa: N806` 并加注释 "kept to match upstream algorithm naming"；
+- **禁止无说明 blanket ignore**：如需 per-file `# ruff: noqa: N806`，必须在文件头注释说明原因（如 "Pine Script replica" / "SMC standard naming"）；
+- **strategy_assets 虽是算法资产，但存在生产 import**，不得从质量门禁中整体排除；
+- **ruff baseline 更新**：只有实际修复代码或添加合法 noqa 后，才能从 `tools/quality_baselines/ruff.json` 删除对应条目；
+- **剩余 ruff 债务**：N815/W293/F841/E741/B905 等其他规则由后续 PR 分批处理。
+
 ## 6. 完成标准
 
 一次变更完成必须满足：

@@ -619,7 +619,7 @@ def build_html(df_full: pd.DataFrame, objects: dict[str, list], df_plot: pd.Data
             if clipped is None:
                 continue
             x1, y1, x2, y2 = clipped
-            fig.add_trace(go.Scatter(x=[x1, x2], y=[y1, y2], mode="lines", line=dict(color="#9e9e9e", width=1.2), name="Market Structure", showlegend=False), row=1, col=1)
+            fig.add_trace(go.Scatter(x=[x1, x2], y=[y1, y2], mode="lines", line={"color": "#9e9e9e", "width": 1.2}, name="Market Structure", showlegend=False), row=1, col=1)
 
         for line in objects.get("structure_lines", []):
             clipped = _clamp_line(line, plot_start, plot_end)
@@ -627,9 +627,9 @@ def build_html(df_full: pd.DataFrame, objects: dict[str, list], df_plot: pd.Data
                 continue
             x1, y1, x2, y2 = clipped
             color = "#00bfa5" if line["side"] == "up" else "#ff5252"
-            fig.add_trace(go.Scatter(x=[x1, x2], y=[y1, y2], mode="lines", line=dict(color=color, width=1.4), name=line["label"], showlegend=False), row=1, col=1)
+            fig.add_trace(go.Scatter(x=[x1, x2], y=[y1, y2], mode="lines", line={"color": color, "width": 1.4}, name=line["label"], showlegend=False), row=1, col=1)
             midx = (x1 + x2) / 2
-            fig.add_annotation(x=midx, y=y1, text=line["label"], showarrow=False, font=dict(size=10, color=color), xref="x1", yref="y1")
+            fig.add_annotation(x=midx, y=y1, text=line["label"], showarrow=False, font={"size": 10, "color": color}, xref="x1", yref="y1")
 
     # Liquidity lines and sweeps.
     for line in objects.get("liquidity_lines", []):
@@ -640,14 +640,14 @@ def build_html(df_full: pd.DataFrame, objects: dict[str, list], df_plot: pd.Data
         color = "#ff5252" if line["side"] == "upper" else "#00bfa5"
         dash = "dash" if line.get("broken") else "solid"
         opacity = 0.28 if line.get("hidden_by_limit") else 0.75
-        fig.add_trace(go.Scatter(x=[x1, x2], y=[y1, y2], mode="lines", line=dict(color=color, width=1, dash=dash), opacity=opacity, name="Liquidity", showlegend=False), row=1, col=1)
+        fig.add_trace(go.Scatter(x=[x1, x2], y=[y1, y2], mode="lines", line={"color": color, "width": 1, "dash": dash}, opacity=opacity, name="Liquidity", showlegend=False), row=1, col=1)
         if line.get("sweep") and line.get("sweep_at") is not None:
             si = int(line["sweep_at"])
             if plot_start <= si < plot_end:
                 lx = si - plot_start
                 ly = df_full["high"].iloc[si] if line["side"] == "upper" else df_full["low"].iloc[si]
                 sym = "x"
-                fig.add_trace(go.Scatter(x=[lx], y=[ly], mode="markers+text", text=["x"], textposition="middle center", marker=dict(symbol=sym, size=11, color="#7e57c2" if line["side"] == "upper" else "#00bfa5"), name="Sweep", showlegend=False), row=1, col=1)
+                fig.add_trace(go.Scatter(x=[lx], y=[ly], mode="markers+text", text=["x"], textposition="middle center", marker={"symbol": sym, "size": 11, "color": "#7e57c2" if line["side"] == "upper" else "#00bfa5"}, name="Sweep", showlegend=False), row=1, col=1)
 
     # Order blocks: show active/unbroken last N by default, and recently broken if inside plotting window.
     def add_ob(ob: dict, color: str, name: str) -> None:
@@ -660,9 +660,9 @@ def build_html(df_full: pd.DataFrame, objects: dict[str, list], df_plot: pd.Data
         opacity = 0.18 if not ob.get("broken") else 0.07
         fig.add_shape(
             type="rect", x0=x0, x1=x1, y0=float(ob["bottom"]), y1=float(ob["top"]),
-            xref="x1", yref="y1", line=dict(color=color, width=1), fillcolor=color, opacity=opacity,
+            xref="x1", yref="y1", line={"color": color, "width": 1}, fillcolor=color, opacity=opacity,
         )
-        fig.add_trace(go.Scatter(x=[x0, x1], y=[float(ob["value"]), float(ob["value"])], mode="lines", line=dict(color=color, width=0.8, dash="dot"), name=name, showlegend=False), row=1, col=1)
+        fig.add_trace(go.Scatter(x=[x0, x1], y=[float(ob["value"]), float(ob["value"])], mode="lines", line={"color": color, "width": 0.8, "dash": "dot"}, name=name, showlegend=False), row=1, col=1)
 
     if cfg.show_order_blocks:
         for ob in [x for x in objects.get("bullish_ob", []) if not x.get("broken")][-int(cfg.number_ob_show):]:
@@ -682,7 +682,7 @@ def build_html(df_full: pd.DataFrame, objects: dict[str, list], df_plot: pd.Data
             y1 = float(tl["y1"] + tl["slope"] * (cx1 - x1))
             y2 = float(tl["y1"] + tl["slope"] * (cx2 - x1))
             color = "#26a69a" if tl["side"] == "bull" else "#ef5350"
-            fig.add_trace(go.Scatter(x=[cx1 - plot_start, cx2 - plot_start], y=[y1, y2], mode="lines", line=dict(color=color, width=2), name=f"{tl['side']} trendline", showlegend=False), row=1, col=1)
+            fig.add_trace(go.Scatter(x=[cx1 - plot_start, cx2 - plot_start], y=[y1, y2], mode="lines", line={"color": color, "width": 2}, name=f"{tl['side']} trendline", showlegend=False), row=1, col=1)
 
     # Event scatter helpers.
     price_pad = float((df_plot["high"].max() - df_plot["low"].min()) * 0.018) if len(df_plot) else 0.0
@@ -702,7 +702,7 @@ def build_html(df_full: pd.DataFrame, objects: dict[str, list], df_plot: pd.Data
         ])
         fig.add_trace(
             go.Scatter(
-                x=x[mask], y=y, mode="markers", marker=dict(symbol=symbol, size=12, color=color, line=dict(color="#ffffff", width=1)),
+                x=x[mask], y=y, mode="markers", marker={"symbol": symbol, "size": 12, "color": color, "line": {"color": "#ffffff", "width": 1}},
                 name=label, customdata=cd,
                 hovertemplate=(
                     f"{label}<br>%{{customdata[0]}}<br>close=%{{customdata[1]:.3f}}"
@@ -741,7 +741,7 @@ def build_html(df_full: pd.DataFrame, objects: dict[str, list], df_plot: pd.Data
         if col in df_plot.columns:
             mask = df_plot[col].fillna(False).to_numpy(bool)
             if mask.any():
-                fig.add_trace(go.Scatter(x=x[mask], y=np.full(mask.sum(), yv), mode="markers", marker=dict(size=10, color=color), name=nm), row=3, col=1)
+                fig.add_trace(go.Scatter(x=x[mask], y=np.full(mask.sum(), yv), mode="markers", marker={"size": 10, "color": color}, name=nm), row=3, col=1)
     fig.update_yaxes(tickmode="array", tickvals=[1, 2, 3, 4, 5, 6, 7, 8], ticktext=["BoS↓", "CHoCH↓", "扫低失败↓", "扫高", "扫低", "扫高失败↑", "BoS↑", "CHoCH↑"], row=3, col=1)
 
     # Axis/layout.
@@ -752,9 +752,9 @@ def build_html(df_full: pd.DataFrame, objects: dict[str, list], df_plot: pd.Data
         height=950,
         hovermode="x unified",
         xaxis_rangeslider_visible=False,
-        title=dict(text=title, x=0.5),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        margin=dict(l=50, r=30, t=70, b=40),
+        title={"text": title, "x": 0.5},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0},
+        margin={"l": 50, "r": 30, "t": 70, "b": 40},
     )
     fig.write_html(out_html, include_plotlyjs="cdn")
 

@@ -383,23 +383,23 @@ def add_feature_table(fig: go.Figure, df: pd.DataFrame, final_channels: list[dic
 
     fig.add_trace(
         go.Table(
-            header=dict(
-                values=["Feature", "Value"],
-                fill_color="rgba(0,0,0,0.65)",
-                font=dict(color="white", size=12, family="Consolas, monospace"),
-                line_color="rgba(255,255,255,0.25)",
-                align=["left", "left"],
-            ),
-            cells=dict(
-                values=[[r[0] for r in rows], [r[1] for r in rows]],
-                fill_color="rgba(0,0,0,0.45)",
-                font=dict(color="white", size=12, family="Consolas, monospace"),
-                line_color="rgba(255,255,255,0.18)",
-                align=["left", "left"],
-                height=22,
-            ),
+            header={
+                "values": ["Feature", "Value"],
+                "fill_color": "rgba(0,0,0,0.65)",
+                "font": {"color": "white", "size": 12, "family": "Consolas, monospace"},
+                "line_color": "rgba(255,255,255,0.25)",
+                "align": ["left", "left"],
+            },
+            cells={
+                "values": [[r[0] for r in rows], [r[1] for r in rows]],
+                "fill_color": "rgba(0,0,0,0.45)",
+                "font": {"color": "white", "size": 12, "family": "Consolas, monospace"},
+                "line_color": "rgba(255,255,255,0.18)",
+                "align": ["left", "left"],
+                "height": 22,
+            },
             columnwidth=[0.42, 0.58],
-            domain=dict(x=[0.02, 0.28], y=[0.74, 0.98]),
+            domain={"x": [0.02, 0.28], "y": [0.74, 0.98]},
         )
     )
 
@@ -466,9 +466,9 @@ def build_plot(df: pd.DataFrame, final_channels: list[dict], out_html: str, titl
     )
 
     if cfg.show_ma1:
-        fig.add_trace(go.Scatter(x=x, y=plot_df["ma1"], mode="lines", line=dict(color="#2962ff", width=2), name=f"MA1 {cfg.ma1_type}({cfg.ma1_len})"))
+        fig.add_trace(go.Scatter(x=x, y=plot_df["ma1"], mode="lines", line={"color": "#2962ff", "width": 2}, name=f"MA1 {cfg.ma1_type}({cfg.ma1_len})"))
     if cfg.show_ma2:
-        fig.add_trace(go.Scatter(x=x, y=plot_df["ma2"], mode="lines", line=dict(color="#ff1744", width=2), name=f"MA2 {cfg.ma2_type}({cfg.ma2_len})"))
+        fig.add_trace(go.Scatter(x=x, y=plot_df["ma2"], mode="lines", line={"color": "#ff1744", "width": 2}, name=f"MA2 {cfg.ma2_type}({cfg.ma2_len})"))
 
     if cfg.showpp:
         ph_mask = plot_df["ph"].notna()
@@ -481,7 +481,7 @@ def build_plot(df: pd.DataFrame, final_channels: list[dict], out_html: str, titl
                     mode="text",
                     text=["H"] * int(ph_mask.sum()),
                     textposition="top center",
-                    textfont=dict(color="#ff5252", size=11),
+                    textfont={"color": "#ff5252", "size": 11},
                     hovertemplate="%{x}<br>Pivot High: %{y:.2f}<extra></extra>",
                     showlegend=False,
                 )
@@ -494,7 +494,7 @@ def build_plot(df: pd.DataFrame, final_channels: list[dict], out_html: str, titl
                     mode="text",
                     text=["L"] * int(pl_mask.sum()),
                     textposition="bottom center",
-                    textfont=dict(color="#69f0ae", size=11),
+                    textfont={"color": "#69f0ae", "size": 11},
                     hovertemplate="%{x}<br>Pivot Low: %{y:.2f}<extra></extra>",
                     showlegend=False,
                 )
@@ -509,7 +509,7 @@ def build_plot(df: pd.DataFrame, final_channels: list[dict], out_html: str, titl
                     x=plot_df.loc[rb, "x"],
                     y=plot_df.loc[rb, "low"] * 0.995,
                     mode="markers",
-                    marker=dict(symbol="triangle-up", size=9, color="#69f0ae"),
+                    marker={"symbol": "triangle-up", "size": 9, "color": "#69f0ae"},
                     hovertemplate="%{x}<br>Resistance Broken<extra></extra>",
                     showlegend=False,
                 )
@@ -520,7 +520,7 @@ def build_plot(df: pd.DataFrame, final_channels: list[dict], out_html: str, titl
                     x=plot_df.loc[sb, "x"],
                     y=plot_df.loc[sb, "high"] * 1.005,
                     mode="markers",
-                    marker=dict(symbol="triangle-down", size=9, color="#ff5252"),
+                    marker={"symbol": "triangle-down", "size": 9, "color": "#ff5252"},
                     hovertemplate="%{x}<br>Support Broken<extra></extra>",
                     showlegend=False,
                 )
@@ -534,14 +534,14 @@ def build_plot(df: pd.DataFrame, final_channels: list[dict], out_html: str, titl
         title=title,
         plot_bgcolor=bg,
         paper_bgcolor=bg,
-        font=dict(color="#c9d1d9"),
+        font={"color": "#c9d1d9"},
         height=880,
-        margin=dict(l=40, r=40, t=60, b=40),
+        margin={"l": 40, "r": 40, "t": 60, "b": 40},
         hovermode="x unified",
         bargap=0.08,
         bargroupgap=0.0,
         xaxis_rangeslider_visible=False,
-        legend=dict(bgcolor="rgba(0,0,0,0.0)", orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1.0),
+        legend={"bgcolor": "rgba(0,0,0,0.0)", "orientation": "h", "yanchor": "bottom", "y": 1.01, "xanchor": "right", "x": 1.0},
     )
     fig.update_xaxes(
         type="category",

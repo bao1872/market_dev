@@ -406,7 +406,7 @@ class DynamicMoneyFlowWithFactors:
                         mode="lines",
                         name=name if start == 0 else None,
                         showlegend=(start == 0),
-                        line=dict(color=curr, width=width),
+                        line={"color": curr, "width": width},
                         hovertemplate=f"{name}=%{{y:.4f}}<extra></extra>",
                         connectgaps=False,
                     ),
@@ -430,14 +430,14 @@ class DynamicMoneyFlowWithFactors:
                 sseg = slow.iloc[s:e + 1]
                 fig.add_trace(
                     go.Scatter(
-                        x=xseg, y=fseg, mode="lines", line=dict(color='rgba(0,0,0,0)', width=0.1),
+                        x=xseg, y=fseg, mode="lines", line={"color": 'rgba(0,0,0,0)', "width": 0.1},
                         showlegend=False, hoverinfo='skip'
                     ),
                     row=row, col=col,
                 )
                 fig.add_trace(
                     go.Scatter(
-                        x=xseg, y=sseg, mode="lines", line=dict(color='rgba(0,0,0,0)', width=0.1),
+                        x=xseg, y=sseg, mode="lines", line={"color": 'rgba(0,0,0,0)', "width": 0.1},
                         fill='tonexty', fillcolor=fill_color,
                         showlegend=False, hoverinfo='skip'
                     ),
@@ -457,14 +457,14 @@ class DynamicMoneyFlowWithFactors:
                 zseg = np.zeros(len(xseg))
                 fig.add_trace(
                     go.Scatter(
-                        x=xseg, y=yseg, mode="lines", line=dict(color='rgba(0,0,0,0)', width=0.1),
+                        x=xseg, y=yseg, mode="lines", line={"color": 'rgba(0,0,0,0)', "width": 0.1},
                         showlegend=False, hoverinfo='skip'
                     ),
                     row=row, col=col,
                 )
                 fig.add_trace(
                     go.Scatter(
-                        x=xseg, y=zseg, mode="lines", line=dict(color='rgba(0,0,0,0)', width=0.1),
+                        x=xseg, y=zseg, mode="lines", line={"color": 'rgba(0,0,0,0)', "width": 0.1},
                         fill='tonexty', fillcolor=fill_color,
                         showlegend=False, hoverinfo='skip'
                     ),
@@ -515,7 +515,7 @@ class DynamicMoneyFlowWithFactors:
                 y=df["dmf_fast_ma"],
                 mode="lines",
                 name="Fast MA",
-                line=dict(color=FAST_MA_COLOR, width=1),
+                line={"color": FAST_MA_COLOR, "width": 1},
                 hovertemplate="Fast MA=%{y:.4f}<extra></extra>",
                 connectgaps=False,
             ),
@@ -528,7 +528,7 @@ class DynamicMoneyFlowWithFactors:
                 y=df["dmf_slow_ma"],
                 mode="lines",
                 name="Slow MA",
-                line=dict(color=SLOW_MA_COLOR, width=1),
+                line={"color": SLOW_MA_COLOR, "width": 1},
                 hovertemplate="Slow MA=%{y:.4f}<extra></extra>",
                 connectgaps=False,
             ),
@@ -558,7 +558,7 @@ class DynamicMoneyFlowWithFactors:
                     y=df[col_name],
                     mode="lines",
                     name=display_name,
-                    line=dict(width=1.2),
+                    line={"width": 1.2},
                     hovertemplate=f"{display_name}=%{{y:.4f}}<extra></extra>",
                     connectgaps=False,
                 ),
@@ -578,8 +578,8 @@ class DynamicMoneyFlowWithFactors:
             template="plotly_dark",
             xaxis_rangeslider_visible=False,
             hovermode="x unified",
-            margin=dict(l=40, r=70, t=90, b=40),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.01),
+            margin={"l": 40, "r": 70, "t": 90, "b": 40},
+            legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.01},
             bargap=0.0,
             plot_bgcolor='#131722',
             paper_bgcolor='#131722',

@@ -316,8 +316,8 @@ def compute_dsa(df: pd.DataFrame, cfg: DSAConfig) -> tuple[pd.DataFrame, list[Pi
 
     ph = np.nan
     pl = np.nan
-    phL = 0
-    plL = 0
+    phL = 0  # noqa: N806  # kept to match upstream algorithm naming
+    plL = 0  # noqa: N806  # kept to match upstream algorithm naming
     prev = np.nan
     ph_prev_store = np.nan
     pl_prev_store = np.nan
@@ -340,10 +340,10 @@ def compute_dsa(df: pd.DataFrame, cfg: DSAConfig) -> tuple[pd.DataFrame, list[Pi
 
         if np.isfinite(high[t]) and high[t] == np.nanmax(win_h):
             ph = high[t]
-            phL = t
+            phL = t  # noqa: N806  # kept to match upstream algorithm naming
         if np.isfinite(low[t]) and low[t] == np.nanmin(win_l):
             pl = low[t]
-            plL = t
+            plL = t  # noqa: N806  # kept to match upstream algorithm naming
 
         dir_ = 1 if phL > plL else -1
         dir_out[t] = dir_
@@ -676,7 +676,7 @@ def build_figure(df: pd.DataFrame, dsa_segments: list[dict], dsa_labels: list[Pi
         fig.add_trace(
             go.Scatter(
                 x=np.array(seg_idx, dtype=float), y=np.array(seg_y, dtype=float),
-                mode="lines", line=dict(width=2.2, color=color),
+                mode="lines", line={"width": 2.2, "color": color},
                 name="DSA_VWAP", showlegend=False, hoverinfo="skip",
             ),
             row=1, col=1,
@@ -691,13 +691,13 @@ def build_figure(df: pd.DataFrame, dsa_segments: list[dict], dsa_labels: list[Pi
             x=idx, y=lab.y, xref="x", yref="y", text=lab.text,
             showarrow=True, arrowhead=2, ax=0, ay=25 if is_up else -25,
             bgcolor="rgba(0,230,118,0.85)" if is_up else "rgba(255,23,68,0.85)",
-            font=dict(color="white", size=11), row=1, col=1,
+            font={"color": "white", "size": 11}, row=1, col=1,
         )
 
     # 价格轨迹上的因子hover锚点
     fig.add_trace(
         go.Scatter(
-            x=x_num, y=df["close"], mode="lines", line=dict(color="rgba(0,0,0,0)", width=8),
+            x=x_num, y=df["close"], mode="lines", line={"color": "rgba(0,0,0,0)", "width": 8},
             name="factor_hover", showlegend=False, text=hover_text,
             hovertemplate="%{text}<extra></extra>",
         ),
@@ -705,9 +705,9 @@ def build_figure(df: pd.DataFrame, dsa_segments: list[dict], dsa_labels: list[Pi
     )
 
     # BBMacd panel
-    fig.add_trace(go.Scatter(x=x_num, y=df["bbmacd_upper"], mode="lines", line=dict(color="rgba(0,191,255,0.95)", width=1), name="上轨", showlegend=False), row=2, col=1)
-    fig.add_trace(go.Scatter(x=x_num, y=df["bbmacd_lower"], mode="lines", line=dict(color="rgba(0,191,255,0.95)", width=1), fill="tonexty", fillcolor="rgba(0,191,255,0.16)", name="下轨", showlegend=False), row=2, col=1)
-    fig.add_trace(go.Scatter(x=x_num, y=df["bbmacd_avg"], mode="lines", line=dict(color="#ffd54f", width=1.0, dash="dot"), name="avg", showlegend=False), row=2, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df["bbmacd_upper"], mode="lines", line={"color": "rgba(0,191,255,0.95)", "width": 1}, name="上轨", showlegend=False), row=2, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df["bbmacd_lower"], mode="lines", line={"color": "rgba(0,191,255,0.95)", "width": 1}, fill="tonexty", fillcolor="rgba(0,191,255,0.16)", name="下轨", showlegend=False), row=2, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df["bbmacd_avg"], mode="lines", line={"color": "#ffd54f", "width": 1.0, "dash": "dot"}, name="avg", showlegend=False), row=2, col=1)
 
     state = df["bbmacd_state"].fillna(0).astype(int)
     start = 0
@@ -721,7 +721,7 @@ def build_figure(df: pd.DataFrame, dsa_segments: list[dict], dsa_labels: list[Pi
             ys = df["bbmacd"].iloc[s:e + 1]
             color = {1: "#008000", -1: "#FF0000", 0: "#1e88e5"}[st]
             name = {1: "BBMacd>上轨", -1: "BBMacd<下轨", 0: "BBMacd带内"}[st]
-            fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color=color, width=2), name=name, showlegend=name not in shown), row=2, col=1)
+            fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line={"color": color, "width": 2}, name=name, showlegend=name not in shown), row=2, col=1)
             shown.add(name)
     if len(df) > 0:
         s, e, st = start, len(df) - 1, int(state.iloc[-1])
@@ -729,28 +729,28 @@ def build_figure(df: pd.DataFrame, dsa_segments: list[dict], dsa_labels: list[Pi
         ys = df["bbmacd"].iloc[s:e + 1]
         color = {1: "#008000", -1: "#FF0000", 0: "#1e88e5"}[st]
         name = {1: "BBMacd>上轨", -1: "BBMacd<下轨", 0: "BBMacd带内"}[st]
-        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color=color, width=2), name=name, showlegend=name not in shown), row=2, col=1)
+        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line={"color": color, "width": 2}, name=name, showlegend=name not in shown), row=2, col=1)
 
     buy_mask = df["bbmacd_cross_upper"] == 1
     sell_mask = df["bbmacd_cross_lower"] == 1
-    fig.add_trace(go.Scatter(x=x_num[buy_mask.to_numpy()], y=df.loc[buy_mask, "bbmacd"], mode="markers", marker=dict(symbol="triangle-up", size=10, color="#00e676"), name="cross_upper", showlegend=False), row=2, col=1)
-    fig.add_trace(go.Scatter(x=x_num[sell_mask.to_numpy()], y=df.loc[sell_mask, "bbmacd"], mode="markers", marker=dict(symbol="triangle-down", size=10, color="#ff4d5a"), name="cross_lower", showlegend=False), row=2, col=1)
+    fig.add_trace(go.Scatter(x=x_num[buy_mask.to_numpy()], y=df.loc[buy_mask, "bbmacd"], mode="markers", marker={"symbol": "triangle-up", "size": 10, "color": "#00e676"}, name="cross_upper", showlegend=False), row=2, col=1)
+    fig.add_trace(go.Scatter(x=x_num[sell_mask.to_numpy()], y=df.loc[sell_mask, "bbmacd"], mode="markers", marker={"symbol": "triangle-down", "size": 10, "color": "#ff4d5a"}, name="cross_lower", showlegend=False), row=2, col=1)
     fig.add_hline(y=0.0, line_width=1, line_dash="dot", line_color="#90a4ae", row=2, col=1)
 
     # structure / position
     for nm in ["dsa_dir", "prev_pivot_code", "dsa_pivot_pos_01", "bbmacd_band_pos_01"]:
-        fig.add_trace(go.Scatter(x=x_num, y=df[nm], mode="lines", line=dict(width=1.35), name=nm, showlegend=False), row=3, col=1)
+        fig.add_trace(go.Scatter(x=x_num, y=df[nm], mode="lines", line={"width": 1.35}, name=nm, showlegend=False), row=3, col=1)
     fig.add_hline(y=0.0, line_width=1, line_dash="dot", line_color="#888888", row=3, col=1)
     fig.add_hline(y=1.0, line_width=1, line_dash="dot", line_color="#888888", row=3, col=1)
 
     # time / amplitude
     for nm in ["current_stage_bars", "prev_stage_bars", "bars_since_last_high", "bars_since_last_low", "prev_stage_amp_pct", "current_stage_ret_pct", "current_stage_amp_pct", "current_pullback_from_stage_extreme_pct"]:
-        fig.add_trace(go.Scatter(x=x_num, y=df[nm], mode="lines", line=dict(width=1.25), name=nm, showlegend=False), row=4, col=1)
+        fig.add_trace(go.Scatter(x=x_num, y=df[nm], mode="lines", line={"width": 1.25}, name=nm, showlegend=False), row=4, col=1)
     fig.add_hline(y=0.0, line_width=1, line_dash="dot", line_color="#888888", row=4, col=1)
 
     # combo / momentum state
     for nm in ["bbmacd_minus_avg", "bbmacd_bandwidth_zscore", "price_vs_dsa_vwap_pct", "ret_to_last_high_pct", "ret_to_last_low_pct", "trend_align_momo"]:
-        fig.add_trace(go.Scatter(x=x_num, y=df[nm], mode="lines", line=dict(width=1.35), name=nm, showlegend=False), row=5, col=1)
+        fig.add_trace(go.Scatter(x=x_num, y=df[nm], mode="lines", line={"width": 1.35}, name=nm, showlegend=False), row=5, col=1)
     fig.add_hline(y=0.0, line_width=1, line_dash="dot", line_color="#888888", row=5, col=1)
 
     tick_step = max(1, len(df) // 10)
@@ -763,8 +763,8 @@ def build_figure(df: pd.DataFrame, dsa_segments: list[dict], dsa_labels: list[Pi
         template="plotly_dark",
         xaxis_rangeslider_visible=False,
         hovermode="x unified",
-        margin=dict(l=40, r=20, t=80, b=40),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.01),
+        margin={"l": 40, "r": 20, "t": 80, "b": 40},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.01},
         height=1700,
     )
     for r in [1, 2, 3, 4, 5]:
