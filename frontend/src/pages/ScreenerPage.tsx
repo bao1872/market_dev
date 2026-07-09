@@ -2,8 +2,8 @@
 // 数据流：选择 selector 策略 → 加载该策略的 published runs → 选择 run_id → 服务端筛选/排序/分页
 // 路由：/screener
 // 依赖 hooks：useStrategies / usePublishedRuns / useStrategyRunResults / useAddToWatchlist
-import { useState, useMemo, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useState, useMemo, useCallback, useEffect } from 'react'
+import { useNavigate, useLocation, useSearchParams } from 'react-router-dom'
 import clsx from 'clsx'
 import { useToast } from '@/store/toast'
 import {
@@ -26,6 +26,7 @@ import {
   getStockDisplay,
   type TrendSelectionRow,
 } from '@/features/trend-selection'
+import { buildStockDetailUrl, buildStockDetailState } from './detailNavigation'
 
 // ===== 常量 =====
 const PAGE_SIZE = 50
@@ -94,15 +95,25 @@ function normalizeMetricValue(
 // ===== 主组件 =====
 export default function ScreenerPage() {
   const navigate = useNavigate()
+  const location = useLocation()
+  const [searchParams, setSearchParams] = useSearchParams()
   const toast = useToast.getState()
 
   // --- 策略目录（kind=selector） ---
   const strategiesQuery = useStrategies('selector')
   const selectorStrategies = strategiesQuery.data?.items ?? []
 
-  // --- 当前选中的策略（默认第一个） ---
-  const [selectedStrategyKey, setSelectedStrategyKey] = useState<string>('')
-  const activeStrategyKey = selectedStrategyKey || selectorStrategies[0]?.strategy_key || ''
+  // --- 当前选中的策略：优先 URL ?strategy=，否则默认第一个 ---
+  const activeStrategyKey = searchParams.get('strategy') || selectorStrategies[0]?.strategy_key || ''
+
+  // 初始加载：将默认策略同步到 URL，使返回/刷新后状态一致
+  useEffect(() => {
+    if (!searchParams.get('strategy') && selectorStrategies.length > 0) {
+      const params = new URLSearchParams(searchParams)
+      params.set('strategy', selectorStrategies[0].strategy_key)
+      setSearchParams(params, { replace: true })
+    }
+  }, [selectorStrategies, searchParams, setSearchParams])
 
   // --- 已发布的运行批次（仅最新一个快照） ---
   const runsQuery = usePublishedRuns(activeStrategyKey || undefined, { limit: 1 })
@@ -224,19 +235,24 @@ export default function ScreenerPage() {
 
   // ===== 事件处理 =====
 
-  /** 跳转个股详情 */
+  /** 跳转个股详情；携带当前 screener URL 作为 returnTo，返回后恢复筛选状态 */
   const goDetail = useCallback(
     (row: TrendSelectionRow) => {
       const { symbol } = getStockDisplay(row)
-      navigate(`/stock/${symbol}?source=selection&strategy=${activeStrategyKey}`)
+      const returnTo = `${location.pathname}${location.search}`
+      navigate(buildStockDetailUrl(symbol, 'selection', activeStrategyKey), {
+        state: buildStockDetailState(returnTo),
+      })
     },
-    [navigate, activeStrategyKey],
+    [navigate, activeStrategyKey, location.pathname, location.search],
   )
 
-  /** 切换策略：重置分页、选中行 */
+  /** 切换策略：更新 URL strategy= 并重置 page=1，保留其他筛选/排序状态 */
   const handleStrategyChange = (key: string) => {
-    setSelectedStrategyKey(key)
-    setQuery({ page: 1, pageSize: PAGE_SIZE, filters: [] })
+    const params = new URLSearchParams(searchParams)
+    params.set('strategy', key)
+    params.delete('page')
+    setSearchParams(params, { replace: true })
     setSelectedKeys(new Set())
   }
 

@@ -397,17 +397,45 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
   }, [activeRunId])
 
   // ===== URL 状态同步 =====
-  // 从 URL 恢复状态
+  // 从 URL 恢复状态（mount 时执行一次）；丢弃当前 columns 中不存在的陈旧 key
   useEffect(() => {
     const urlSort = searchParams.get('sort')
     const urlDir = searchParams.get('dir')
     const urlPage = searchParams.get('page')
     const urlPageSize = searchParams.get('page_size')
-    if (urlSort && urlDir) {
+    const urlKeyword = searchParams.get('keyword')
+    const urlFilters = searchParams.get('filters')
+    const validKeys = new Set(columns.map((c) => c.key))
+    if (urlSort && urlDir && validKeys.has(urlSort)) {
       const idx = columns.findIndex((c) => c.key === urlSort)
       if (idx >= 0) {
         setSortColumn(idx)
         setSortDirection(urlDir as 'asc' | 'desc')
+      }
+    }
+    if (urlKeyword) setGlobalQuery(urlKeyword)
+    if (urlFilters) {
+      try {
+        const parsed: unknown = JSON.parse(urlFilters)
+        if (Array.isArray(parsed)) {
+          const next: Record<number, DataTableFilter> = {}
+          for (const item of parsed) {
+            if (!item || typeof item !== 'object' || !validKeys.has(String(item.key))) continue
+            const idx = columns.findIndex((c) => c.key === String(item.key))
+            if (idx < 0) continue
+            const op = String(item.op)
+            if (!operatorsForDataType(columns[idx].dataType).includes(op as FilterOperator)) continue
+            next[idx] = {
+              key: String(item.key),
+              operator: op as FilterOperator,
+              value: item.value,
+              ...(item.value2 !== undefined ? { value2: item.value2 } : {}),
+            }
+          }
+          setFilters(next)
+        }
+      } catch {
+        // ignore malformed filters JSON
       }
     }
     if (urlPage) setPage(parseInt(urlPage, 10))
@@ -601,13 +629,29 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
       params.delete('sort')
       params.delete('dir')
     }
+    if (globalQuery.trim()) {
+      params.set('keyword', globalQuery.trim())
+    } else {
+      params.delete('keyword')
+    }
+    const filterList = Object.values(filters).map((f) => ({
+      key: f.key,
+      op: f.operator,
+      value: f.value,
+      ...(f.value2 !== undefined ? { value2: f.value2 } : {}),
+    }))
+    if (filterList.length > 0) {
+      params.set('filters', JSON.stringify(filterList))
+    } else {
+      params.delete('filters')
+    }
     if (page > 1) params.set('page', String(page))
     else params.delete('page')
     // [StrategyDataTable] - 描述: URL 同步基准值为 initialPageSize（非默认值时写入 URL）
     if (pageSize !== initialPageSize) params.set('page_size', String(pageSize))
     else params.delete('page_size')
     setSearchParams(params, { replace: true })
-  }, [sortColumn, sortDirection, page, pageSize, columns, searchParams, setSearchParams, initialPageSize])
+  }, [sortColumn, sortDirection, page, pageSize, columns, searchParams, setSearchParams, initialPageSize, globalQuery, filters])
 
   // ===== 服务端查询回调 =====
   useEffect(() => {

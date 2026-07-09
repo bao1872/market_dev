@@ -21,7 +21,7 @@
 | strategy_runs | `app/api/strategy_runs.py` | 策略运行/结果；`/strategy-runs/{run_id}/results` 以 `strategy_run_items` 为主表 LEFT JOIN `strategy_results` + `instruments`，返回全量 universe（含 succeeded/skipped/failed），新增 `item_status`/`reason_code`/`error_message` 字段。JOIN 策略：因 `strategy_run_items.result_id` 当前未回填（ALIGN-033 P2），统一改用 `(run_id, instrument_id)` 关联 `strategy_results`，包括 `selectinload` 替代批量加载、metric_filter 子查询、sort LEFT JOIN 三处 |
 | monitor_states | `app/api/monitor_states.py` | 监控状态 |
 | strategy_events | `app/api/strategy_events.py` | 策略事件 |
-| notifications | `app/api/notifications.py` | 消息与通知渠道 |
+| notifications | `app/api/notifications.py` | 消息与通知渠道；`POST /notification-channels/{channel_id}/test-latest-event` 仅管理员可用，普通用户 403 detail 提示使用普通测试接口；`POST /notification-channels/{id}/test` 对所有用户可用，测试成功后渠道置为 active |
 | admin_subscription | `app/api/admin_subscription.py` | 订阅/邀请码/调度任务/Worker 心跳/消息投递管理 |
 | admin_beta_applications | `app/api/admin_beta_applications.py` | 内测申请管理 |
 | admin_after_close | `app/api/admin_after_close.py` | 盘后编排管理；`/after-close-runs/dsa-only` 支持 fallback 到最新可用交易日，覆盖率门禁使用 `coverage_raw` 原始值；新增 `/after-close/pipeline/latest`、`/after-close/pipeline?trade_date=`、`/after-close/pipeline/runs?limit=`、`POST /after-close/pipeline/run`（admin，幂等：同 trade_date 已有 queued/running/succeeded 返回 existing）4 个聚合状态端点，响应模型 `AfterClosePipelineResponse` 含 8 步骤时间线 + watchlist_ready 严格判定（`status='succeeded' AND published_at IS NOT NULL AND metadata_.scope='full'`，sample backfill 不计入）+ data_freshness + 最近 100 条 events |

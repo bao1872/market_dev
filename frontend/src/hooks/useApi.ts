@@ -499,8 +499,12 @@ export function useVerifyNotificationChannel() {
 
 /** 测试渠道投递变更 */
 export function useTestNotificationChannel() {
+  const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (channelId: string) => api.testNotificationChannel(channelId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['notification-channels'] })
+    },
   })
 }
 
