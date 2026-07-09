@@ -305,9 +305,18 @@ def compute_dsa_dual_track_features(bars: pd.DataFrame) -> pd.DataFrame:
     dir_changes[1:] = directions[1:] != directions[:-1]
     segment_ids = np.cumsum(dir_changes).astype(float)
 
-    result["causal_dsa_confirmed_segment"] = segment_ids
-    result["causal_dsa_confirmed_direction"] = directions
-    result["causal_dsa_confirmed_age_bars"] = age_bars
+    # [类型修复] DB 列类型：segment=INTEGER, direction=VARCHAR, age_bars=INTEGER
+    # asyncpg 严格类型检查：VARCHAR 不接受 float，需要 str
+    # 用 pandas nullable 类型（Int64 / string）避免 float 污染
+    result["causal_dsa_confirmed_segment"] = pd.Series(
+        segment_ids, index=bars.index, dtype="Int64"
+    )
+    result["causal_dsa_confirmed_direction"] = (
+        pd.Series(directions, index=bars.index, dtype="Int64").astype("string")
+    )
+    result["causal_dsa_confirmed_age_bars"] = pd.Series(
+        age_bars, index=bars.index, dtype="Int64"
+    )
 
     # [Blocker Fix] hindsight_dsa_finalized_* 保持 NaN（Phase 1 未实现 raw DSA）
     # 真正 hindsight 需要 compute_dsa_history 绕过 _remove_dsa_lookahead，
