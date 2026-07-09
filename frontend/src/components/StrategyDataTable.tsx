@@ -2,9 +2,12 @@
 // 对应原型 app.js InteractiveTable 类
 // 必需能力：三态排序、逐列筛选、服务端分页、固定表头首列、列设置、空态/错误态/过期态
 // 所有用户端和管理员端数据表必须使用同一表格组件
-import { useState, useMemo, useCallback, useEffect, type ReactNode } from 'react'
+import { useState, useMemo, useCallback, useEffect, useRef, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import clsx from 'clsx'
+import { TablePresetMenu } from './TablePresetMenu'
+import { useTableViewPresets } from '@/hooks/useApi'
+import type { TableViewPresetConfig } from '@/api/endpoints'
 
 // ===== 类型定义（对应 UI_DEVELOPMENT_SPEC.md 3.3 推荐组件输入）=====
 export type DataType = 'text' | 'number' | 'percent' | 'datetime' | 'enum' | 'range'
@@ -79,6 +82,8 @@ export interface DataTableProps<Row> {
   initialPageSize?: number
   // [StrategyDataTable] - 描述: 附加到 <table> 的 className（用于紧凑布局等场景）
   tableClassName?: string
+  // [Presets] - 描述: 策略 key（提供时启用视图配置保存/应用功能）
+  strategyKey?: string | null
 }
 
 // [StrategyDataTable] - 描述: 按字段类型返回可选操作符列表（默认操作符为数组首项）
@@ -362,6 +367,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     emptyText = '没有符合筛选条件的数据',
     initialPageSize = 10,
     tableClassName,
+    strategyKey,
   } = props
 
   const [searchParams, setSearchParams] = useSearchParams()
@@ -504,6 +510,81 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     setGlobalQuery('')
     setPage(1)
   }, [])
+
+  // ===== 视图配置 Preset =====
+  // [Presets] - 描述: 从内部 state 构建当前配置快照（仅 keyword/sort/filters/hiddenColumns/pageSize）
+  const currentConfig: TableViewPresetConfig = useMemo(() => ({
+    keyword: globalQuery.trim() || null,
+    sort: sortColumn !== null && sortDirection
+      ? { key: columns[sortColumn]?.key ?? '', direction: sortDirection }
+      : null,
+    filters: Object.values(filters).map((f) => ({
+      key: f.key,
+      op: f.operator,
+      value: f.value ?? '',
+      ...(f.value2 !== undefined ? { value2: f.value2 } : {}),
+    })),
+    hiddenColumns: [...hiddenColumns],
+    pageSize,
+  }), [globalQuery, sortColumn, sortDirection, filters, hiddenColumns, pageSize, columns])
+
+  // [Presets] - 描述: 应用 preset 配置到内部 state（重置所有筛选/排序/分页/隐藏列）
+  const applyPresetConfig = useCallback((config: TableViewPresetConfig) => {
+    setGlobalQuery(config.keyword ?? '')
+    if (config.sort) {
+      const idx = columns.findIndex((c) => c.key === config.sort!.key)
+      setSortColumn(idx >= 0 ? idx : null)
+      setSortDirection(config.sort.direction)
+    } else {
+      setSortColumn(null)
+      setSortDirection(null)
+    }
+    if (config.filters) {
+      const next: Record<number, DataTableFilter> = {}
+      for (const f of config.filters) {
+        const idx = columns.findIndex((c) => c.key === f.key)
+        if (idx >= 0) {
+          next[idx] = {
+            key: f.key,
+            operator: f.op as FilterOperator,
+            value: f.value,
+            ...(f.value2 !== undefined ? { value2: f.value2 } : {}),
+          }
+        }
+      }
+      setFilters(next)
+    } else {
+      setFilters({})
+    }
+    if (config.hiddenColumns) {
+      setHiddenColumns(new Set(config.hiddenColumns))
+    } else {
+      setHiddenColumns(new Set())
+    }
+    if (config.pageSize != null) setPageSize(config.pageSize)
+    setPage(1)
+  }, [columns])
+
+  // [Presets] - 描述: 自动应用默认配置（进入页面时，每个 strategyKey 只应用一次）
+  const presetsQuery = useTableViewPresets(strategyKey ? tableId : undefined, strategyKey ?? undefined)
+  const defaultAppliedRef = useRef<string>('')
+  useEffect(() => {
+    if (!strategyKey || !presetsQuery.data) return
+    const appliedKey = `${tableId}:${strategyKey}`
+    if (defaultAppliedRef.current === appliedKey) return
+    const defaultPreset = presetsQuery.data.items.find((p) => p.is_default)
+    if (defaultPreset) {
+      const cfg = defaultPreset.config as Record<string, unknown>
+      applyPresetConfig({
+        keyword: (cfg.keyword as string | null | undefined) ?? null,
+        sort: (cfg.sort as TableViewPresetConfig['sort']) ?? null,
+        filters: (cfg.filters as TableViewPresetConfig['filters']) ?? null,
+        hiddenColumns: (cfg.hiddenColumns as string[] | null | undefined) ?? null,
+        pageSize: (cfg.pageSize as number | null | undefined) ?? null,
+      })
+    }
+    defaultAppliedRef.current = appliedKey
+  }, [strategyKey, tableId, presetsQuery.data, applyPresetConfig])
 
   // ===== URL 同步 =====
   useEffect(() => {
@@ -651,6 +732,14 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
           {stale && <span className="tag warn" style={{ marginLeft: 8 }}>数据过期</span>}
         </div>
         <div className="table-meta-actions">
+          {strategyKey && (
+            <TablePresetMenu
+              tableId={tableId}
+              strategyKey={strategyKey}
+              currentConfig={currentConfig}
+              onApply={applyPresetConfig}
+            />
+          )}
           <button
             className="table-columns-btn"
             onClick={(e) => setColumnManagerAnchor(e.currentTarget)}

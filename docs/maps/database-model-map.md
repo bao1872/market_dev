@@ -60,6 +60,12 @@ published run 不可变。partial_failed 不得自动发布。
 
 文字和图片通过 message_group 关联，状态独立。
 
+## 5.5 用户偏好
+
+| 表 | 语义 |
+|---|---|
+| `user_table_view_presets` | 用户表格视图配置（保存筛选/排序/列设置 preset）；唯一键用两个 partial unique index 实现：`uq_user_table_view_preset_strategy_not_null (user_id, table_id, strategy_key, name) WHERE strategy_key IS NOT NULL` + `uq_user_table_view_preset_strategy_null (user_id, table_id, name) WHERE strategy_key IS NULL`（解决 PostgreSQL NULL!=NULL 问题）；索引 `(user_id, table_id, strategy_key)` 用于查询和 quota 检查；config 为 JSONB 仅允许 keyword/sort/filters/hiddenColumns/pageSize（禁止 selectedKeys/page/activeRunId/rows；filters 每项 dict 含 key/op/value 且 op 限制白名单 contains/eq/gt/gte/lt/lte/between/empty/not_empty；hiddenColumns 每项 string；sort.key 非空 string）；每 user+table_id+strategy_key 最多 20 个（应用层 quota）；is_default 同维度至多 1 个 true（应用层互斥更新）；user_id 由认证上下文注入不接受 body 传入；migration 059 创建 |
+
 ## 6. 任务与运行
 
 | 表 | 语义 |

@@ -41,6 +41,8 @@ import type {
   StructuralFactorQueryParams,
   TemporalFeaturesQueryParams,
   AfterClosePipelineRunRequest,
+  TableViewPresetCreateRequest,
+  TableViewPresetPatchRequest,
 } from '../api/endpoints'
 
 // ============================================================
@@ -1244,6 +1246,59 @@ export function useTemporalFeatures(
     enabled: !!instrumentId,
     staleTime: STALE_WATCHLIST,
     refetchInterval: () => isInTradingHours() ? 60000 : false,
+  })
+}
+
+// ============================================================
+// ===== Table View Presets hooks =====
+// ============================================================
+// [Presets] - 描述: 用户表格视图配置 CRUD hooks（/me/table-view-presets）
+// 缓存 key: ['table-view-presets', tableId, strategyKey]
+// 变更后自动失效同维度缓存
+
+/** 查询当前用户的 preset 列表（按 table_id + strategy_key 过滤） */
+export function useTableViewPresets(tableId: string | undefined, strategyKey?: string | null) {
+  return useQuery({
+    queryKey: ['table-view-presets', tableId, strategyKey ?? null],
+    queryFn: () => api.getTableViewPresets(tableId!, strategyKey ?? undefined),
+    enabled: !!tableId,
+    staleTime: 30000,
+  })
+}
+
+/** 创建 preset（自动失效同维度缓存） */
+export function useCreateTableViewPreset() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (payload: TableViewPresetCreateRequest) => api.createTableViewPreset(payload),
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({
+        queryKey: ['table-view-presets', variables.table_id, variables.strategy_key ?? null],
+      })
+    },
+  })
+}
+
+/** 更新 preset（自动失效同维度缓存） */
+export function useUpdateTableViewPreset() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, payload }: { id: string; payload: TableViewPresetPatchRequest }) =>
+      api.updateTableViewPreset(id, payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['table-view-presets'] })
+    },
+  })
+}
+
+/** 删除 preset（自动失效同维度缓存） */
+export function useDeleteTableViewPreset() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => api.deleteTableViewPreset(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['table-view-presets'] })
+    },
   })
 }
 

@@ -1150,11 +1150,47 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 .table-columns-btn, .table-reset-btn { height: 26px; border: 1px solid #30394c; border-radius: 5px; background: #171d28; color: #9ba7bb; font-size: 9px; cursor: pointer; &:hover { color: #fff; border-color: #536483; } }
 .table-pager { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 8px 10px; border-top: 1px solid v.$color-border-soft; background: #11161e; color: #7f8ba0; font-size: 9px; }
 .table-page-size { height: 27px; min-width: 56px; padding: 0 5px; }
+// [StrategyDataTable] - 描述: sticky 表头（z-index 4）+ sticky 首列/选择列（z-index 3）+ 角落单元格（z-index 5）
 .interactive-table thead th { position: sticky; top: 0; z-index: 4; background: #151a23; }
 .interactive-table .sticky-col { position: sticky; left: 0; z-index: 3; background: #151a23; box-shadow: 1px 0 0 #2a3242; }
 .interactive-table tbody td.sticky-col { background: #11161e; z-index: 2; }
 .interactive-table tr:hover td.sticky-col { background: #171e29; }
+// [StrategyDataTable] - 描述: 选择列也 sticky（与首列同级），避免横向滚动时复选框消失；固定宽度 40px（border-box 含 padding）
+.interactive-table .table-select-column { position: sticky; left: 0; z-index: 3; background: #151a23; width: 40px; min-width: 40px; }
+.interactive-table tbody td.table-select-column { background: #11161e; z-index: 2; }
+.interactive-table tr:hover td.table-select-column { background: #171e29; }
+// [StrategyDataTable] - 描述: 角落单元格（表头 + sticky 列）需最高 z-index，避免表头与首列重叠时错乱
+.interactive-table thead th.sticky-col,
+.interactive-table thead th.table-select-column { z-index: 5; }
+// [StrategyDataTable] - 描述: 选择列存在时，首列偏移 40px（选择列宽度），避免 sticky 重叠
+.interactive-table .table-select-column + th.sticky-col,
+.interactive-table .table-select-column + td.sticky-col { left: 40px; }
 .table-action-column { min-width: 86px; }
+// [Presets] - 描述: 表格视图配置菜单下拉样式
+.table-preset-menu { position: relative; display: inline-block; }
+.table-preset-dropdown {
+  position: absolute; top: 100%; right: 0; z-index: 100;
+  min-width: 280px; max-width: 380px;
+  background: #121720; border: 1px solid #30394c; border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.4);
+  padding: 8px; font-size: 10px; color: #b8c2d2;
+}
+.table-preset-save-row { display: flex; gap: 4px; margin-bottom: 8px; }
+.table-preset-save-row .input { flex: 1; height: 26px; font-size: 10px; }
+.table-preset-empty { padding: 12px 4px; text-align: center; color: #667086; }
+.table-preset-list { display: flex; flex-direction: column; gap: 4px; max-height: 280px; overflow: auto; }
+.table-preset-item {
+  padding: 6px 8px; border-radius: 4px; background: #171d28;
+  &.default { border-left: 2px solid v.$color-blue; }
+  &:hover { background: #1d2433; }
+}
+.table-preset-item-info { margin-bottom: 4px; }
+.table-preset-item-name { cursor: pointer; font-weight: 500; color: #d6deea; &:hover { color: #fff; } }
+.table-preset-item-actions { display: flex; gap: 3px; flex-wrap: wrap; }
+.table-preset-item-actions .btn { height: 20px; padding: 0 6px; font-size: 9px; }
+.table-preset-rename-row { display: flex; gap: 4px; align-items: center; }
+.table-preset-rename-row .input { flex: 1; height: 24px; font-size: 10px; }
+.table-preset-error { padding: 8px 4px; text-align: center; color: v.$color-red; }
 .column-manager-popover { width: 230px; }
 .column-manager-list { display: grid; gap: 4px; max-height: 220px; overflow: auto; padding: 4px 0 9px; }
 .column-manager-item { display: flex; align-items: center; gap: 8px; padding: 6px; border-radius: 4px; font-size: 10px; color: #b8c2d2; &:hover { background: #202735; } }

@@ -4,6 +4,22 @@
 
 ## 2026-07-09
 
+- CHANGE-20260709-002: 趋势选股批量加入修复 + change_pct 独立列 + 表格视图配置预设 + sticky 表头
+  - 修复 `ScreenerPage.handleBatchAdd` 按 `r.resultId` 匹配导致 selected 永远为空的 bug：rowKey 是 `instrumentId`，selectedKeys 保存 instrumentId，handleBatchAdd 改用 `r.instrumentId` 匹配 + 去重；选中后无可加入股票 toast 提示而非静默；成功/失败 toast 真实反映数量；保留 `useAddToWatchlist` 缓存失效逻辑
+  - 新增趋势选股表头"当日涨跌幅"独立列：key=`change_pct`、title=当日涨跌幅、shortTitle=涨跌幅、dataType=percent、sortable=true、filterable=true、width≈86，render 用 `fmtChange` + A股涨红跌绿（`changePctColorClass`）；后端 `dsa_selector.yaml` manifest 已支持 filterable/sortable（无需改后端白名单）；`change_pct` 已为百分比数值，筛选输入 3% 传 3 不乘除
+  - 新增 `user_table_view_presets` 表 + `/me/table-view-presets` API（GET/POST/PATCH/DELETE），JWT user_id 隔离，权限与趋势选股一致（active subscription + trend_selection feature，admin 豁免），每 user+table_id+strategy_key 最多 20 个，config 只保存 keyword/sort/filters/hiddenColumns/pageSize（禁止 selectedKeys/page/activeRunId/rows），is_default 同维度互斥
+  - 新增 `backend/app/models/table_view_preset.py`（UserTableViewPreset ORM）、`backend/app/schemas/table_view_preset.py`（Pydantic schemas，extra="forbid" 白名单校验）、`backend/app/api/me_table_view_presets.py`（4 个端点）、`backend/alembic/versions/059_user_table_view_presets.py`（migration 059）
+  - 新增前端 `TablePresetMenu` 组件 + `StrategyDataTable` preset 集成（currentConfig/applyPresetConfig/默认 preset 自动应用 useRef 防重复）+ `useApi` 4 个 preset hooks + `endpoints` preset API 类型与函数；`tableId="screener"` + `strategyKey` 分离传递用于 preset 隔离
+  - `global.scss` 补充 sticky 表头/选择列 z-index 层级：表头 z-index 4、sticky 列 z-index 3、角落单元格 z-index 5、选择列 sticky left:0、首列通过相邻兄弟选择器偏移 40px
+  - 新增测试：后端 `test_table_view_presets_api.py`（**47 用例**：权限矩阵/CRUD/用户隔离/重名冲突/quota/非法 config/is_default 互斥/必填校验/user_id 注入/PATCH 空请求/迁移幂等/NULL strategy_key 唯一约束/config 深度校验）、前端 `columns.test.ts`（6 用例：change_pct 列）、`ScreenerPage.batch.test.ts`（6 用例：handleBatchAdd 修复）
+  - 文档更新：04-frontend-ux（趋势选股页规则）、02-data-api-contracts（第 14 章 preset API 契约）、frontend-route-map、api-route-map、database-model-map、05-testing-acceptance（3.10 节回归门禁）、test-coverage-map
+  - 未跑回补、未生成 coverage/html/screenshot/大日志、未增加磁盘占用；未删除受保护镜像 node:20-alpine
+  - **Review Fix（PR #52 用户 review 反馈）**：
+    - 唯一约束改为两个 partial unique index（解决 PostgreSQL NULL!=NULL 问题）：原普通 `UniqueConstraint(user_id, table_id, strategy_key, name)` 在 `strategy_key IS NULL` 时无法拦截重复；migration 059 改为 `uq_user_table_view_preset_strategy_not_null (user_id, table_id, strategy_key, name) WHERE strategy_key IS NOT NULL` + `uq_user_table_view_preset_strategy_null (user_id, table_id, name) WHERE strategy_key IS NULL`，model 同步用 `Index(..., postgresql_where=text(...))`
+    - API IntegrityError 匹配更新为检查两个新索引名（create + update 两处）
+    - config 深度校验加强：`_validate_config_keys` 补 filters 每项 dict + 含 key/op/value + op 白名单（contains/eq/gt/gte/lt/lte/between/empty/not_empty）、hiddenColumns 每项 string、sort.key 非空 string；`TableViewPresetConfig` 同时用 `model_validator(mode="after")` 双保险
+    - 新增 10 个测试：4 个 NULL strategy_key 唯一约束场景（同 user+table_id+NULL+name 重复→409、不同 table_id 允许、不同 user 允许、PATCH 重命名冲突）+ 6 个 config 深度校验（filters 元素非 dict→422、缺 key→422、op="regex" 非白名单→422、9 个合法 op 全通过→201、hiddenColumns 含非 string→422、sort.key 空串→422）
+    - 文档同步：CHANGE-20260709-002 补 partial unique index + config 深度校验描述 + 47 用例；02-data-api-contracts、database-model-map、test-coverage-map、05-testing-acceptance 同步
 - CHANGE-20260709-001: research feature matrix DB 主存储 + compute + writer + CLI + 5 个 Blocker 修复
   - registry 从 27 扩展到 33 字段（causal 16 + confirmed_delay 4 + hindsight 6 + label 7），新增 `FeatureSpec.db_column` 把 dotted key 映射为下划线列名（`causal.atr` → `causal_atr`）
   - 新增 `backend/app/models/research_feature_matrix.py`：`ResearchFeatureMatrixRun`（16 列，`run_key` 唯一）+ `ResearchFeatureMatrixRow`（39 列扁平宽表，`(instrument_id, trade_date)` 唯一）ORM

@@ -15,6 +15,7 @@ V1.1 各阶段模型统一继承 Base：
 - Phase2: Plan（套餐定义表 plans，套餐契约唯一真源，替代 plan_contract.py 字典）
 - Phase4.5: AccessAuditLog（访问审计日志表 access_audit_logs，记录 admin 关键操作）
 - Research: ResearchFeatureMatrixRun/Row（研究特征矩阵轻量宽表，按月分批回补）
+- ViewPresets: UserTableViewPreset（用户表格视图配置，保存筛选/排序/列设置）
 """
 
 from __future__ import annotations
@@ -48,7 +49,6 @@ from app.models.research_feature_matrix import (
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
-from app.models.subscription import Subscription
 from app.models.stock_memo import StockMemo
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.strategy_event import StrategyEvent
@@ -58,6 +58,8 @@ from app.models.strategy_run import (
     StrategyRun,
     StrategyRunItem,
 )
+from app.models.subscription import Subscription
+from app.models.table_view_preset import UserTableViewPreset
 from app.models.user import Role, User, UserRole
 from app.models.watchlist import UserWatchlistItem
 from app.models.worker_heartbeat import WorkerHeartbeat
@@ -102,6 +104,7 @@ __all__ = [
     "TradingCalendar",
     "User",
     "UserRole",
+    "UserTableViewPreset",
     "UserWatchlistItem",
     "WorkerHeartbeat",
 ]
