@@ -122,6 +122,28 @@ def _parse_metadata(job_run: SchedulerJobRun) -> dict[str, Any]:
         return {}
 
 
+async def _get_job_run_or_raise(
+    db: AsyncSession,
+    job_run_id: uuid.UUID,
+) -> SchedulerJobRun:
+    """获取 SchedulerJobRun，不存在则抛 RuntimeError（类型收窄 helper）。"""
+    job_run = await db.get(SchedulerJobRun, job_run_id)
+    if job_run is None:
+        raise RuntimeError(f"SchedulerJobRun not found: {job_run_id}")
+    return job_run
+
+
+async def _get_strategy_run_or_raise(
+    db: AsyncSession,
+    run_id: uuid.UUID,
+) -> StrategyRun:
+    """获取 StrategyRun，不存在则抛 ValueError（类型收窄 helper）。"""
+    run = await db.get(StrategyRun, run_id)
+    if run is None:
+        raise ValueError(f"StrategyRun not found: {run_id}")
+    return run
+
+
 async def _update_orchestrator_status(
     db: AsyncSession,
     job_run: SchedulerJobRun,
@@ -239,6 +261,12 @@ async def create_after_close_run(
             f"acquire_job_run_lock 抢锁失败且未返回已有记录: run_key={run_key}"
         )
 
+    # is_new=True 时 job_run 必须存在，显式收窄类型
+    if job_run is None:
+        raise RuntimeError(
+            f"acquire_job_run_lock 返回 is_new=True 但 job_run=None: run_key={run_key}"
+        )
+
     # 写入初始 metadata + START 事件
     await _update_orchestrator_status(
         db=db,
@@ -335,7 +363,7 @@ async def _job_run_heartbeat_loop(
             await asyncio.sleep(interval)
             async with AsyncSessionLocal() as db:
                 now = datetime.now(ZoneInfo("Asia/Shanghai"))
-                job_run = await db.get(SchedulerJobRun, job_run_id)
+                job_run = await _get_job_run_or_raise(db, job_run_id)
                 if job_run is None or job_run.status != "running":
                     return
                 job_run.heartbeat_at = now
@@ -374,7 +402,7 @@ def _build_feature_snapshot_progress_callback(
         try:
             async with AsyncSessionLocal() as db:
                 now = datetime.now(ZoneInfo("Asia/Shanghai"))
-                job_run = await db.get(SchedulerJobRun, job_run_id)
+                job_run = await _get_job_run_or_raise(db, job_run_id)
                 if job_run is None or job_run.status != "running":
                     return
                 job_run.heartbeat_at = now
@@ -634,7 +662,7 @@ async def execute_after_close_run(
     try:
         # [Phase5] - 读取断点恢复信息：last_completed_step + dsa_run_id
         async with AsyncSessionLocal() as db:
-            job_run = await db.get(SchedulerJobRun, job_run_id)
+            job_run = await _get_job_run_or_raise(db, job_run_id)
             if job_run is None:
                 raise ValueError(f"编排任务不存在: job_run_id={job_run_id}")
             if job_run.status == "succeeded":
@@ -718,7 +746,7 @@ async def execute_after_close_run(
         # ---- 步骤 1: refreshing_daily ----
         if not skip_refresh:
             async with AsyncSessionLocal() as db:
-                job_run = await db.get(SchedulerJobRun, job_run_id)
+                job_run = await _get_job_run_or_raise(db, job_run_id)
                 await _update_orchestrator_status(
                     db=db,
                     job_run=job_run,
@@ -771,7 +799,7 @@ async def execute_after_close_run(
                     success_extra = None
 
                 async with AsyncSessionLocal() as db:
-                    job_run = await db.get(SchedulerJobRun, job_run_id)
+                    job_run = await _get_job_run_or_raise(db, job_run_id)
                     await _update_orchestrator_status(
                         db=db,
                         job_run=job_run,
@@ -795,7 +823,7 @@ async def execute_after_close_run(
 
             # [Phase5] - refreshing_daily 完成，更新心跳 + 检查点
             async with AsyncSessionLocal() as db:
-                job_run = await db.get(SchedulerJobRun, job_run_id)
+                job_run = await _get_job_run_or_raise(db, job_run_id)
                 await _update_heartbeat_and_step(
                     db, job_run, AfterCloseRunStatus.REFRESHING_DAILY.value, worker_id,
                 )
@@ -823,7 +851,7 @@ async def execute_after_close_run(
                         await db.commit()
                         dsa_run_id = dsa_run.id
                         # 更新 metadata 记录 dsa_run_id
-                        job_run = await db.get(SchedulerJobRun, job_run_id)
+                        job_run = await _get_job_run_or_raise(db, job_run_id)
                         await _update_orchestrator_status(
                             db=db,
                             job_run=job_run,
@@ -845,7 +873,7 @@ async def execute_after_close_run(
         # ---- 步骤 2: waiting_dsa_worker ----
         if not skip_wait:
             async with AsyncSessionLocal() as db:
-                job_run = await db.get(SchedulerJobRun, job_run_id)
+                job_run = await _get_job_run_or_raise(db, job_run_id)
                 await _update_orchestrator_status(
                     db=db,
                     job_run=job_run,
@@ -876,7 +904,7 @@ async def execute_after_close_run(
 
             # [Phase5] - waiting_dsa_worker 完成，更新心跳 + 检查点
             async with AsyncSessionLocal() as db:
-                job_run = await db.get(SchedulerJobRun, job_run_id)
+                job_run = await _get_job_run_or_raise(db, job_run_id)
                 await _update_heartbeat_and_step(
                     db, job_run, AfterCloseRunStatus.WAITING_DSA_WORKER.value, worker_id,
                 )
@@ -885,10 +913,8 @@ async def execute_after_close_run(
         # ---- 步骤 3: quality_gate ----
         if not skip_quality:
             async with AsyncSessionLocal() as db:
-                job_run = await db.get(SchedulerJobRun, job_run_id)
-                dsa_run = await db.get(StrategyRun, dsa_run_id)
-                if dsa_run is None:
-                    raise ValueError(f"DSA 运行记录不存在: dsa_run_id={dsa_run_id}")
+                job_run = await _get_job_run_or_raise(db, job_run_id)
+                dsa_run = await _get_strategy_run_or_raise(db, dsa_run_id)
 
                 result_count = await strategy_result_repository.count_by_run(
                     db, dsa_run_id
@@ -925,7 +951,7 @@ async def execute_after_close_run(
 
             # [Phase5] - quality_gate 完成，更新心跳 + 检查点
             async with AsyncSessionLocal() as db:
-                job_run = await db.get(SchedulerJobRun, job_run_id)
+                job_run = await _get_job_run_or_raise(db, job_run_id)
                 await _update_heartbeat_and_step(
                     db, job_run, AfterCloseRunStatus.QUALITY_GATE.value, worker_id,
                 )
@@ -944,7 +970,7 @@ async def execute_after_close_run(
         # - run 记录在独立 session 中提交，保证失败时 run.status='failed' 持久化
         if not skip_snapshot:
             async with AsyncSessionLocal() as db:
-                job_run = await db.get(SchedulerJobRun, job_run_id)
+                job_run = await _get_job_run_or_raise(db, job_run_id)
                 if job_run is None:
                     raise RuntimeError(
                         f"SchedulerJobRun not found: job_run_id={job_run_id}"
@@ -975,7 +1001,7 @@ async def execute_after_close_run(
             # [Heartbeat] feature_snapshot 开始后立即写入 run_id 与 last_started_step，
             # 这样 UI 不会显示 feature_snapshot 待执行，且中断后知道从哪一步恢复。
             async with AsyncSessionLocal() as db:
-                job_run = await db.get(SchedulerJobRun, job_run_id)
+                job_run = await _get_job_run_or_raise(db, job_run_id)
                 if job_run is None:
                     raise RuntimeError(
                         f"SchedulerJobRun not found: job_run_id={job_run_id}"
@@ -1079,7 +1105,7 @@ async def execute_after_close_run(
 
             # [Phase5] - feature_snapshot 完成，更新心跳 + 检查点
             async with AsyncSessionLocal() as db:
-                job_run = await db.get(SchedulerJobRun, job_run_id)
+                job_run = await _get_job_run_or_raise(db, job_run_id)
                 if job_run is None:
                     raise RuntimeError(
                         f"SchedulerJobRun not found: job_run_id={job_run_id}"
@@ -1092,7 +1118,7 @@ async def execute_after_close_run(
         # ---- 步骤 4: publishing ----
         if not skip_publish:
             async with AsyncSessionLocal() as db:
-                job_run = await db.get(SchedulerJobRun, job_run_id)
+                job_run = await _get_job_run_or_raise(db, job_run_id)
                 await _update_orchestrator_status(
                     db=db,
                     job_run=job_run,
@@ -1109,7 +1135,7 @@ async def execute_after_close_run(
 
             # [Phase5] - publishing 完成，更新心跳 + 检查点
             async with AsyncSessionLocal() as db:
-                job_run = await db.get(SchedulerJobRun, job_run_id)
+                job_run = await _get_job_run_or_raise(db, job_run_id)
                 await _update_heartbeat_and_step(
                     db, job_run, AfterCloseRunStatus.PUBLISHING.value, worker_id,
                 )
@@ -1117,7 +1143,7 @@ async def execute_after_close_run(
 
         # ---- 步骤 5: succeeded ----
         async with AsyncSessionLocal() as db:
-            job_run = await db.get(SchedulerJobRun, job_run_id)
+            job_run = await _get_job_run_or_raise(db, job_run_id)
             # published_run 可能为 None（断点恢复跳过 publishing 时）
             published_at_str = (
                 published_run.published_at.isoformat()
@@ -1159,7 +1185,7 @@ async def execute_after_close_run(
         import traceback as tb_mod
         try:
             async with AsyncSessionLocal() as db:
-                job_run = await db.get(SchedulerJobRun, job_run_id)
+                job_run = await _get_job_run_or_raise(db, job_run_id)
                 if job_run is not None:
                     await _update_orchestrator_status(
                         db=db,
@@ -1233,7 +1259,7 @@ async def _poll_dsa_run_status(
         if job_run_id is not None:
             try:
                 async with AsyncSessionLocal() as db:
-                    job_run = await db.get(SchedulerJobRun, job_run_id)
+                    job_run = await _get_job_run_or_raise(db, job_run_id)
                     if job_run is not None:
                         await _update_heartbeat_and_step(
                             db, job_run,
@@ -1292,7 +1318,7 @@ async def get_after_close_run_status(
     Raises:
         ValueError: job_run_id 不存在或非编排任务
     """
-    job_run = await db.get(SchedulerJobRun, job_run_id)
+    job_run = await _get_job_run_or_raise(db, job_run_id)
     if job_run is None:
         raise ValueError(f"编排任务不存在: job_run_id={job_run_id}")
     if job_run.job_name != _AFTER_CLOSE_JOB_NAME:
@@ -1400,7 +1426,7 @@ async def retry_after_close_run(
     Raises:
         ValueError: 任务不存在/非编排任务/状态非 failed
     """
-    job_run = await db.get(SchedulerJobRun, job_run_id)
+    job_run = await _get_job_run_or_raise(db, job_run_id)
     if job_run is None:
         raise ValueError(f"编排任务不存在: job_run_id={job_run_id}")
     if job_run.job_name != _AFTER_CLOSE_JOB_NAME:

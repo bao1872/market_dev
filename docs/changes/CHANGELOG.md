@@ -4,6 +4,14 @@
 
 ## 2026-07-09
 
+- CHANGE-20260709-007: after_close_orchestrator mypy baseline 债务清零
+  - `after_close_orchestrator.py` 的 22 个 mypy baseline 错误降为 0
+  - 新增 `_get_job_run_or_raise` / `_get_strategy_run_or_raise` 类型收窄 helper，替换所有裸 `db.get` 调用
+  - `_get_or_create_job_run` 在 `is_new=True` 后显式校验 `job_run is not None`
+  - 不改变状态机语义、不增减异常类型、不使用 cast/type:ignore
+  - 更新 `tools/quality_baselines/mypy.json`（total 228→206, unique 163→156）
+  - 更新 `docs/current/03-jobs-integrations-operations.md`（§8 类型债务治理）、`docs/current/05-testing-acceptance.md`（§5.1 债务治理验收规则）
+
 - CHANGE-20260709-006: after_close feature_snapshot 心跳保活 + stuck running snapshot run 修复
   - 修复 `feature_snapshot` 阶段无独立心跳导致 orchestrator 被误标 `interrupted`，但 `stock_feature_snapshot_run` 仍卡在 `running` 的问题
   - `feature_snapshot_service.compute_for_trade_date` 新增 `progress_callback`，每 batch 汇报进度；`after_close_orchestrator` 在 feature_snapshot 阶段启动 `_job_run_heartbeat_loop` 并写入 `metadata.feature_snapshot_progress`

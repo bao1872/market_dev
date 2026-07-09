@@ -855,6 +855,18 @@ Mypy Full Repository Report
 
 v2 后 docs consistency 应检查 `current/MANIFEST.md`，而不是要求每个 current 文件重复基线头。应用本包时必须同步改脚本和测试。
 
+## 5.1 Mypy baseline 债务治理验收规则
+
+逐文件清理 mypy baseline 债务时，每个债务 PR 必须满足：
+
+- **Before/After 数量**：PR 描述必须列出目标文件修改前后的 mypy 错误数量（如 `after_close_orchestrator.py: 22 → 0`）；
+- **只跑目标文件**：使用 `MYPY_CACHE_DIR=/tmp/mypy_debt_cache .venv/bin/mypy <target_file>` 单独检查，不全仓库反复生成 cache；跑完删除 `/tmp/mypy_debt_cache`；
+- **不新增运行时行为变化**：只做类型收窄（get-or-raise helper、显式 None 检查），不改状态机语义、不增减异常类型、不改 heartbeat/lease/repair 流程；
+- **禁止 `cast` / `type: ignore` 掩盖**：所有 None 分支必须显式 raise 或 return；
+- **baseline JSON 同步更新**：修复后从 `tools/quality_baselines/mypy.json` 删除对应 diagnostic 条目，并更新 `total` / `unique` 计数；
+- **测试通过**：目标文件相关 pytest 全部 passed、ruff 零错误、docs checks 通过；
+- **长命令用 nohup/log/pid**：mypy 冷启动可能超 60s，使用 `nohup` 后台执行，不依赖 Trae 交互式长连接，不污染磁盘。
+
 ## 6. 完成标准
 
 一次变更完成必须满足：

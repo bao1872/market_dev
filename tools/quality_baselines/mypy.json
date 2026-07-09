@@ -1,7 +1,7 @@
 {
   "baseline_commit": "a8481c7e98e11dd570e340de606a0d8e38c4dd64",
-  "total": 228,
-  "unique": 163,
+  "total": 206,
+  "unique": 156,
   "diagnostics": [
     {
       "filename": "app/api/admin_after_close.py",
@@ -434,48 +434,6 @@
       "error_code": "assignment",
       "message": "Incompatible types in assignment (expression has type \"ReturningInsert[tuple[MonitorState]]\", variable has type \"Insert\")",
       "count": 1
-    },
-    {
-      "filename": "app/services/after_close_orchestrator.py",
-      "error_code": "arg-type",
-      "message": "Argument \"job_run\" to \"_update_orchestrator_status\" has incompatible type \"SchedulerJobRun | None\"; expected \"SchedulerJobRun\"",
-      "count": 8
-    },
-    {
-      "filename": "app/services/after_close_orchestrator.py",
-      "error_code": "arg-type",
-      "message": "Argument 2 to \"_update_heartbeat_and_step\" has incompatible type \"SchedulerJobRun | None\"; expected \"SchedulerJobRun\"",
-      "count": 7
-    },
-    {
-      "filename": "app/services/after_close_orchestrator.py",
-      "error_code": "assignment",
-      "message": "Incompatible types in assignment (expression has type \"StrategyRun | None\", variable has type \"StrategyRun\")",
-      "count": 1
-    },
-    {
-      "filename": "app/services/after_close_orchestrator.py",
-      "error_code": "return-value",
-      "message": "Incompatible return value type (got \"tuple[SchedulerJobRun | None, bool]\", expected \"tuple[SchedulerJobRun, bool]\")",
-      "count": 1
-    },
-    {
-      "filename": "app/services/after_close_orchestrator.py",
-      "error_code": "union-attr",
-      "message": "Item \"None\" of \"SchedulerJobRun | None\" has no attribute \"finished_at\"",
-      "count": 2
-    },
-    {
-      "filename": "app/services/after_close_orchestrator.py",
-      "error_code": "union-attr",
-      "message": "Item \"None\" of \"SchedulerJobRun | None\" has no attribute \"id\"",
-      "count": 1
-    },
-    {
-      "filename": "app/services/after_close_orchestrator.py",
-      "error_code": "union-attr",
-      "message": "Item \"None\" of \"SchedulerJobRun | None\" has no attribute \"status\"",
-      "count": 2
     },
     {
       "filename": "app/services/bars_cache.py",
