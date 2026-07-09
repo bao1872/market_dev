@@ -4,8 +4,9 @@
 // 覆盖：
 //   1. StrategyDataTable 源码必须 import/use decodeScreenerUrlState 和 encodeScreenerUrlState
 //   2. StrategyDataTable 源码必须有 hydration guard
-//   3. decodeScreenerUrlState 对 malformed filters 不抛错并返回 filters=[]
-//   4. encodeScreenerUrlState 不写 selectedKeys/activeRunId/rows/results
+//   3. StrategyDataTable 源码必须有 skip first sync 机制（skipNextUrlSyncRef 或等价逻辑）
+//   4. decodeScreenerUrlState 对 malformed filters 不抛错并返回 filters=[]
+//   5. encodeScreenerUrlState 不写 selectedKeys/activeRunId/rows/results
 
 import { strict as assert } from 'node:assert'
 import { readFileSync } from 'node:fs'
@@ -35,6 +36,13 @@ test('StrategyDataTable 源码必须有 hydration guard', () => {
     source.includes('urlHydratedRef') ||
     /isHydrated|hydratedRef|hasHydrated/i.test(source)
   assert.ok(hasGuard, '应有 hydration guard 防止首屏用默认 state 覆盖 URL')
+})
+
+test('StrategyDataTable 源码必须有 skip first sync 机制', () => {
+  const hasSkip =
+    source.includes('skipNextUrlSyncRef') ||
+    /skipNext|skipFirst|skipUrlSync|skip.*sync/i.test(source)
+  assert.ok(hasSkip, '应有跳过 mount 后首次 URL sync 的机制，避免 restore 后默认 state 覆盖 URL')
 })
 
 test('decodeScreenerUrlState 对 malformed filters 不抛错，并返回 filters=[]', () => {

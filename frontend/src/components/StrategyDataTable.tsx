@@ -400,9 +400,12 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
   // ===== URL 状态同步 =====
   const urlHydratedRef = useRef(false)
   const urlHadStateRef = useRef(false)
+  const skipNextUrlSyncRef = useRef(false)
 
   // 从 URL 恢复状态（mount 时执行一次）；丢弃当前 columns 中不存在的陈旧 key
   useEffect(() => {
+    // [StrategyDataTable] - 描述: 跳过 mount 后同一轮 render 的 URL sync，避免默认 state 覆盖 URL
+    skipNextUrlSyncRef.current = true
     const validKeys = new Set(columns.map((c) => c.key))
     const state = decodeScreenerUrlState(searchParams, validKeys, {
       defaultPageSize: initialPageSize,
@@ -630,6 +633,10 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
   // ===== URL 同步 =====
   useEffect(() => {
     if (!urlHydratedRef.current) return
+    if (skipNextUrlSyncRef.current) {
+      skipNextUrlSyncRef.current = false
+      return
+    }
     const state = {
       keyword: globalQuery.trim() || undefined,
       sort:
