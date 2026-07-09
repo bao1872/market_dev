@@ -630,6 +630,15 @@ docker logs trading-backend --tail 200 2>&1 | grep -i traceback
 - 表大小合理（单月 < 3GB）；
 - 日志无 traceback。
 
+**Phase 1 实际验收数据（2026-07-09）**：
+- A dry-run：5293 股 × 20 交易日，expected_rows=105860，estimated_db_size=0.20GB；
+- B 2 symbols：rows=40，failed=0，duration=0.6s；
+- C 100 stocks：rows=1992，failed=0，duration=19.3s；
+- D full Jan：rows=102603，failed=3060，failed_rate=2.90%，duration=1088.8s，表大小 38MB；
+- E 后台 6 个月：rows 合计 621,769（2026-01 到 2026-07），覆盖 2026-01-05 到 2026-07-08，表大小 223MB；
+- 全部 9 个 run 均 succeeded，failed_rate 最高 4.11%（2026-02），未超过 5% 阈值；
+- hindsight / Node Cluster 列全 NULL（Phase 1 未实现）。
+
 **阶段 E 后台逐月回补启动前置条件**：
 - 阶段 D（全市场 2026-01）前台验收通过；
 - 磁盘剩余 >= 15GB；

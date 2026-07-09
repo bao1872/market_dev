@@ -386,28 +386,27 @@ echo $! > /tmp/research_matrix_backfill.pid
 - `failed_rate > 5%`（CLI 自动标 failed）；
 - 日志出现 traceback（人工检查）。
 
+**Phase 1 实际运行结果（2026-07-09）**：
+- 后台串行 6 个月（2026-02 到 2026-07）全部 succeeded；
+- 全量 7 个月（含 2026-01 前台 D）共写入 621,769 行，覆盖 2026-01-05 到 2026-07-08；
+- 表大小 223 MB，磁盘占用可控；
+- 最高 failed_rate 为 2026-02 的 4.11%（主要由北交所/新股 bars 不足导致），未超过 5% 阈值。
+
 **监控命令**：
 ```bash
 # 查看后台进度
 tail -f /tmp/research_matrix_backfill.log
-ps -p $(cat /tmp/research_matrix_backfill.pid) && echo "running" || echo "exited"
+ps -p $(cat /tmp/research_matrix_backfill.pid) -o pid,etime,cmd --no-headers 2>/dev/null || echo "exited"
 
 # 查看当前月份 run 状态
-docker exec trading-backend python -c "
-import asyncio
-from app.db import AsyncSessionLocal
-from app.models.research_feature_matrix import ResearchFeatureMatrixRun
-from sqlalchemy import select
-async def main():
-    async with AsyncSessionLocal() as db:
-        r = await db.execute(select(ResearchFeatureMatrixRun).order_by(ResearchFeatureMatrixRun.started_at.desc()).limit(5))
-        for run in r.scalars():
-            print(f'{run.run_key} {run.status} rows={run.rows_count} failed={run.failed_count}')
-asyncio.run(main())
+docker compose --env-file /etc/market-dev/market.env -f docker-compose.prod.yml exec -T postgres psql -U bz -d bz_stock -c "
+select run_key,status,rows_count,failed_count,duration_seconds
+from research_feature_matrix_runs
+order by created_at desc limit 10;
 "
 
 # 查看表大小
-docker exec trading-postgres psql -U bz -d bz_stock -c "
+docker compose --env-file /etc/market-dev/market.env -f docker-compose.prod.yml exec -T postgres psql -U bz -d bz_stock -c "
 SELECT relname, pg_size_pretty(pg_total_relation_size(relid))
 FROM pg_catalog.pg_statio_user_tables
 WHERE relname LIKE 'research_feature_matrix%'
@@ -420,6 +419,15 @@ ORDER BY pg_total_relation_size(relid) DESC;
 kill $(cat /tmp/research_matrix_backfill.pid)
 # 清理 lock file（如异常退出残留）
 rm -f /tmp/research_matrix_backfill_*.lock
+```
+
+**清理临时文件**：
+```bash
+rm -f /tmp/research_matrix_backfill_*.lock
+rm -f /tmp/research_matrix_backfill.pid
+# 保留日志最后 300 行
+tail -300 /tmp/research_matrix_backfill.log > /tmp/research_matrix_backfill.final.log
+mv /tmp/research_matrix_backfill.final.log /tmp/research_matrix_backfill.log
 ```
 
 **禁止项**：
