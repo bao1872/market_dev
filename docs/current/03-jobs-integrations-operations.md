@@ -644,3 +644,16 @@ uptime
 - 部署脚本不回显完整连接串或飞书密钥；
 - 日志保留 service、git_sha、run_id、run_key、instrument、source_bar_time、error_code、request_id；
 - 发现泄露先轮换，再处理历史。
+
+## 8. after_close_orchestrator 类型债务治理
+
+`after_close_orchestrator.py` 原有 22 个 mypy baseline 错误，根因是 `db.get(SchedulerJobRun, ...)` 返回 `SchedulerJobRun | None`，但调用方直接传给 `_update_orchestrator_status` / `_update_heartbeat_and_step`（参数要求非 Optional）。
+
+当前治理方式：
+
+- 新增 `_get_job_run_or_raise(db, job_run_id) -> SchedulerJobRun` 和 `_get_strategy_run_or_raise(db, run_id) -> StrategyRun` 类型收窄 helper，不存在时显式 raise；
+- `execute_after_close_run` 中所有 `db.get(SchedulerJobRun, job_run_id)` 替换为 `_get_job_run_or_raise`，不再依赖 Optional 传递；
+- `_get_or_create_job_run` 在 `acquire_job_run_lock` 返回 `is_new=True` 后显式校验 `job_run is not None`；
+- `quality_gate` 阶段的 `dsa_run` 赋值使用 `_get_strategy_run_or_raise`，消除 `StrategyRun | None` 赋值冲突；
+- 不使用 `cast` / `type: ignore` 掩盖 None；所有 None 分支显式 raise；
+- 不改变 heartbeat、lease、repair、feature_snapshot 业务流程；只把"本来假设一定存在"的对象变成显式校验。
