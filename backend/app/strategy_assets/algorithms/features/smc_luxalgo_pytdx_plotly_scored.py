@@ -301,11 +301,11 @@ class DrawBuffer:
                 y0=ln["y0"],
                 x1=ln["x1"],
                 y1=ln["y1"],
-                line=dict(
-                    color=ln["color"],
-                    width=ln.get("width", 1.5),
-                    dash=ln.get("dash", "solid"),
-                ),
+                line={
+                    "color": ln["color"],
+                    "width": ln.get("width", 1.5),
+                    "dash": ln.get("dash", "solid"),
+                },
                 layer=ln.get("layer", "above"),
             )
         for _, bx in self.boxes.items():
@@ -315,10 +315,10 @@ class DrawBuffer:
                 x1=bx["x1"],
                 y0=bx["y0"],
                 y1=bx["y1"],
-                line=dict(
-                    color=bx.get("line_color", bx["fillcolor"]),
-                    width=bx.get("line_width", 0),
-                ),
+                line={
+                    "color": bx.get("line_color", bx["fillcolor"]),
+                    "width": bx.get("line_width", 0),
+                },
                 fillcolor=bx["fillcolor"],
                 opacity=bx.get("opacity", 0.25),
                 layer=bx.get("layer", "below"),
@@ -329,7 +329,7 @@ class DrawBuffer:
                 y=lb["y"],
                 text=lb["text"],
                 showarrow=False,
-                font=dict(color=lb["color"], size=lb.get("size", 11)),
+                font={"color": lb["color"], "size": lb.get("size", 11)},
                 xanchor=lb.get("xanchor", "center"),
                 yanchor=lb.get("yanchor", "middle"),
                 xshift=lb.get("xshift", 0),
@@ -1495,11 +1495,11 @@ class SMCIndicatorPineCloser:
 
         if not factor_df.empty:
             cand_y = factor_df["score_total"].fillna(0).tolist()
-            fig.add_trace(go.Scatter(x=x_vals, y=cand_y, mode="lines", name="总分", line=dict(width=2.4)), row=2, col=1)
-            fig.add_trace(go.Scatter(x=x_vals, y=factor_df["score_trend"].fillna(0), mode="lines", name="趋势分", line=dict(width=1.5, dash="solid")), row=2, col=1)
-            fig.add_trace(go.Scatter(x=x_vals, y=factor_df["score_ob"].fillna(0), mode="lines", name="OB分", line=dict(width=1.5, dash="dash")), row=2, col=1)
-            fig.add_trace(go.Scatter(x=x_vals, y=factor_df["score_trigger"].fillna(0), mode="lines", name="触发分", line=dict(width=1.5, dash="dot")), row=2, col=1)
-            fig.add_trace(go.Scatter(x=x_vals, y=factor_df["score_risk"].fillna(0), mode="lines", name="风险分", line=dict(width=1.5, dash="dashdot")), row=2, col=1)
+            fig.add_trace(go.Scatter(x=x_vals, y=cand_y, mode="lines", name="总分", line={"width": 2.4}), row=2, col=1)
+            fig.add_trace(go.Scatter(x=x_vals, y=factor_df["score_trend"].fillna(0), mode="lines", name="趋势分", line={"width": 1.5, "dash": "solid"}), row=2, col=1)
+            fig.add_trace(go.Scatter(x=x_vals, y=factor_df["score_ob"].fillna(0), mode="lines", name="OB分", line={"width": 1.5, "dash": "dash"}), row=2, col=1)
+            fig.add_trace(go.Scatter(x=x_vals, y=factor_df["score_trigger"].fillna(0), mode="lines", name="触发分", line={"width": 1.5, "dash": "dot"}), row=2, col=1)
+            fig.add_trace(go.Scatter(x=x_vals, y=factor_df["score_risk"].fillna(0), mode="lines", name="风险分", line={"width": 1.5, "dash": "dashdot"}), row=2, col=1)
 
             candidate_x = [x_vals[i] for i, v in enumerate(factor_df["is_candidate"].fillna(0).tolist()) if int(v) == 1]
             candidate_y = [float(factor_df.iloc[i]["score_total"]) for i, v in enumerate(factor_df["is_candidate"].fillna(0).tolist()) if int(v) == 1]
@@ -1510,7 +1510,7 @@ class SMCIndicatorPineCloser:
                         y=candidate_y,
                         mode="markers",
                         name="候选",
-                        marker=dict(symbol="star", size=10),
+                        marker={"symbol": "star", "size": 10},
                     ),
                     row=2,
                     col=1,
@@ -1521,11 +1521,11 @@ class SMCIndicatorPineCloser:
             template="plotly_dark",
             xaxis_rangeslider_visible=False,
             hovermode="x unified",
-            margin=dict(l=40, r=110, t=80, b=40),
+            margin={"l": 40, "r": 110, "t": 80, "b": 40},
             xaxis_title="时间",
             yaxis_title="价格",
             yaxis2_title="分值",
-            legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0.0),
+            legend={"orientation": "h", "yanchor": "bottom", "y": 1.01, "xanchor": "left", "x": 0.0},
             showlegend=True,
         )
         fig.update_xaxes(

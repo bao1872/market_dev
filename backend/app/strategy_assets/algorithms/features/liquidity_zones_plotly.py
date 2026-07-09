@@ -259,8 +259,8 @@ def build_liquidity_zones(df: pd.DataFrame, cfg: LZConfig) -> dict[str, Any]:
     if n == 0:
         raise ValueError("空数据")
 
-    leftBars = int(cfg.leftBars)
-    rightBars = leftBars - 2
+    leftBars = int(cfg.leftBars)  # noqa: N806  # kept to match upstream algorithm naming
+    rightBars = leftBars - 2  # noqa: N806  # kept to match upstream algorithm naming
     if rightBars < 1:
         raise ValueError("leftBars太小，导致 rightBars<1；请调大 leftBars")
 
@@ -278,7 +278,7 @@ def build_liquidity_zones(df: pd.DataFrame, cfg: LZConfig) -> dict[str, Any]:
     color_intense = (normalized_vol.round() * 15.0).clip(lower=0.0, upper=100.0)
 
     # Pine: aTR = ta.atr(200)
-    aTR = atr_wilder(d, cfg.atr_len)
+    aTR = atr_wilder(d, cfg.atr_len)  # noqa: N806  # kept to match upstream algorithm naming
 
     # Pine pivots (confirmed at t)
     ph_conf = pivothigh(high, leftBars, rightBars)  # array aligned with t (confirmation bar)
@@ -315,25 +315,25 @@ def build_liquidity_zones(df: pd.DataFrame, cfg: LZConfig) -> dict[str, Any]:
                 # Pine gradient: upper uses color.new(upper_col,60) -> alpha ~0.40; to alpha 1.0
                 col = _gradient_color(ci_pivot, cfg.upper_col, alpha_lo=0.40, alpha_hi=1.00)
 
-                zone = dict(
-                    kind="upper",
-                    pivot_i=pivot_i,
-                    pivot_time=d.index[pivot_i],
-                    base=float(high[pivot_i]),
-                    y=float(high[pivot_i] + distance),
-                    x1=pivot_i,
-                    x2=t,  # extend to current, will be updated
-                    grabbed=False,
-                    grabbed_i=None,
-                    line_style="solid",
-                    line_width=2,
-                    color=col,
-                    text=f"Volume:\n{(round(av_pivot, 2) if np.isfinite(av_pivot) else 'n/a')}",
-                )
+                zone = {
+                    "kind": "upper",
+                    "pivot_i": pivot_i,
+                    "pivot_time": d.index[pivot_i],
+                    "base": float(high[pivot_i]),
+                    "y": float(high[pivot_i] + distance),
+                    "x1": pivot_i,
+                    "x2": t,  # extend to current, will be updated
+                    "grabbed": False,
+                    "grabbed_i": None,
+                    "line_style": "solid",
+                    "line_width": 2,
+                    "color": col,
+                    "text": f"Volume:\n{(round(av_pivot, 2) if np.isfinite(av_pivot) else 'n/a')}",
+                }
                 zones.append(zone)
 
                 if cfg.hidePivot:
-                    pivot_pts.append(dict(i=pivot_i, time=d.index[pivot_i], y=float(high[pivot_i]), kind="ph"))
+                    pivot_pts.append({"i": pivot_i, "time": d.index[pivot_i], "y": float(high[pivot_i]), "kind": "ph"})
 
             # pivot low
             if np.isfinite(pl_conf[t]):
@@ -344,25 +344,25 @@ def build_liquidity_zones(df: pd.DataFrame, cfg: LZConfig) -> dict[str, Any]:
                 # lower uses color.new(lower,80) -> alpha ~0.20; to alpha 1.0
                 col = _gradient_color(ci_pivot, cfg.lower_col, alpha_lo=0.20, alpha_hi=1.00)
 
-                zone = dict(
-                    kind="lower",
-                    pivot_i=pivot_i,
-                    pivot_time=d.index[pivot_i],
-                    base=float(low[pivot_i]),
-                    y=float(low[pivot_i] - distance),
-                    x1=pivot_i,
-                    x2=t,
-                    grabbed=False,
-                    grabbed_i=None,
-                    line_style="solid",
-                    line_width=2,
-                    color=col,
-                    text=f"Volume:\n{(round(av_pivot, 2) if np.isfinite(av_pivot) else 'n/a')}",
-                )
+                zone = {
+                    "kind": "lower",
+                    "pivot_i": pivot_i,
+                    "pivot_time": d.index[pivot_i],
+                    "base": float(low[pivot_i]),
+                    "y": float(low[pivot_i] - distance),
+                    "x1": pivot_i,
+                    "x2": t,
+                    "grabbed": False,
+                    "grabbed_i": None,
+                    "line_style": "solid",
+                    "line_width": 2,
+                    "color": col,
+                    "text": f"Volume:\n{(round(av_pivot, 2) if np.isfinite(av_pivot) else 'n/a')}",
+                }
                 zones.append(zone)
 
                 if cfg.hidePivot:
-                    pivot_pts.append(dict(i=pivot_i, time=d.index[pivot_i], y=float(low[pivot_i]), kind="pl"))
+                    pivot_pts.append({"i": pivot_i, "time": d.index[pivot_i], "y": float(low[pivot_i]), "kind": "pl"})
 
             # Keep only the most recent qty_pivots zones (Pine deletes oldest boxes/lines globally)
             if len(zones) > cfg.qty_pivots:
@@ -396,7 +396,7 @@ def build_liquidity_zones(df: pd.DataFrame, cfg: LZConfig) -> dict[str, Any]:
                 # extend line forward by 1 bar (we'll just set x2=t for final draw)
                 z["x2"] = t
 
-    return dict(zones=zones, pivot_points=pivot_pts, rightBars=rightBars)
+    return {"zones": zones, "pivot_points": pivot_pts, "rightBars": rightBars}
 
 
 # =========================
@@ -434,27 +434,27 @@ def _add_dashboard(fig: go.Figure, cfg: LZConfig, zones: list[dict], df: pd.Data
 
     fig.add_trace(
         go.Table(
-            header=dict(
-                values=["Liquidity Zones", ""],
-                fill_color="rgba(0,0,0,0.65)",
-                line_color="rgba(255,255,255,0.25)",
-                font=dict(color="white", size=12, family="Consolas, monospace"),
-                align=["left", "left"],
-                height=22,
-            ),
-            cells=dict(
-                values=[
+            header={
+                "values": ["Liquidity Zones", ""],
+                "fill_color": "rgba(0,0,0,0.65)",
+                "line_color": "rgba(255,255,255,0.25)",
+                "font": {"color": "white", "size": 12, "family": "Consolas, monospace"},
+                "align": ["left", "left"],
+                "height": 22,
+            },
+            cells={
+                "values": [
                     ["Qty", "Mode", "Close", "卖方流动性", "距卖方", "买方流动性", "距买方", "盈亏比"],
                     [str(qty), mode_txt, f"{last_close:.2f}", upper_price_str, upper_dist, lower_price_str, lower_dist, risk_reward_str],
                 ],
-                fill_color=[["rgba(0,0,0,0.45)"] * 8, ["rgba(0,0,0,0.35)"] * 8],
-                line_color="rgba(255,255,255,0.12)",
-                font=dict(color=["white", "#2370a3", "white", "#2370a3", "#2370a3", "#23a372", "#23a372", "#f0b90b"], size=11),
-                align=["left", "left"],
-                height=20,
-            ),
+                "fill_color": [["rgba(0,0,0,0.45)"] * 8, ["rgba(0,0,0,0.35)"] * 8],
+                "line_color": "rgba(255,255,255,0.12)",
+                "font": {"color": ["white", "#2370a3", "white", "#2370a3", "#2370a3", "#23a372", "#23a372", "#f0b90b"], "size": 11},
+                "align": ["left", "left"],
+                "height": 20,
+            },
             columnwidth=[0.45, 0.55],
-            domain=dict(x=[0.02, 0.28], y=[0.80, 0.98]),
+            domain={"x": [0.02, 0.28], "y": [0.80, 0.98]},
         )
     )
 
@@ -463,7 +463,7 @@ def build_plot(df: pd.DataFrame, zones_payload: dict[str, Any], cfg: LZConfig, o
     zones = zones_payload["zones"]
     pivot_pts = zones_payload["pivot_points"]
     offset = int(zones_payload.get("offset", 0))  # global->local index shift when plotting tail window
-    rightBars = zones_payload["rightBars"]
+    rightBars = zones_payload["rightBars"]  # noqa: N806  # kept to match upstream algorithm naming
 
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
@@ -505,27 +505,27 @@ def build_plot(df: pd.DataFrame, zones_payload: dict[str, Any], cfg: LZConfig, o
             y1 = z["base"]
 
         # Rectangle
-        shapes.append(dict(
-            type="rect",
-            xref="x", yref="y",
-            x0=x_left, x1=x_right,
-            y0=y0, y1=y1,
-            line=dict(color=z["color"], width=2 if not z["grabbed"] else 1),
-            fillcolor=z["color"] if not z["grabbed"] else "rgba(0,0,0,0)",
-            layer="below",
-        ))
+        shapes.append({
+            "type": "rect",
+            "xref": "x", "yref": "y",
+            "x0": x_left, "x1": x_right,
+            "y0": y0, "y1": y1,
+            "line": {"color": z["color"], "width": 2 if not z["grabbed"] else 1},
+            "fillcolor": z["color"] if not z["grabbed"] else "rgba(0,0,0,0)",
+            "layer": "below",
+        })
 
         # Box text annotation near center of box
         x_mid = d.index[min(pivot_i + cfg.box_width_bars//2, len(d)-1)]
         y_mid = (y0 + y1) / 2.0
-        annotations.append(dict(
-            x=x_mid, y=y_mid, xref="x", yref="y",
-            text=z["text"].replace("\n", "<br>"),
-            showarrow=False,
-            font=dict(color="#c9d1d9", size=10),
-            bgcolor="rgba(0,0,0,0.0)",
-            align="left",
-        ))
+        annotations.append({
+            "x": x_mid, "y": y_mid, "xref": "x", "yref": "y",
+            "text": z["text"].replace("\n", "<br>"),
+            "showarrow": False,
+            "font": {"color": "#c9d1d9", "size": 10},
+            "bgcolor": "rgba(0,0,0,0.0)",
+            "align": "left",
+        })
 
         # Horizontal line from pivot_i to x2
         x2_i = int(z["x2"]) - offset
@@ -535,7 +535,7 @@ def build_plot(df: pd.DataFrame, zones_payload: dict[str, Any], cfg: LZConfig, o
         fig.add_trace(
             go.Scatter(
                 x=xs, y=ys, mode="lines",
-                line=dict(color=z["color"], width=int(z["line_width"]), dash=z["line_style"]),
+                line={"color": z["color"], "width": int(z["line_width"]), "dash": z["line_style"]},
                 hoverinfo="skip",
                 showlegend=False,
             ),
@@ -554,7 +554,7 @@ def build_plot(df: pd.DataFrame, zones_payload: dict[str, Any], cfg: LZConfig, o
                 x=grabbed_x, y=grabbed_y,
                 mode="text",
                 text=["〇"] * len(grabbed_x),
-                textfont=dict(color="#df1c1c", size=16),
+                textfont={"color": "#df1c1c", "size": 16},
                 hovertemplate="Claim Liquidity Point<extra></extra>",
                 showlegend=False,
             ),
@@ -572,23 +572,23 @@ def build_plot(df: pd.DataFrame, zones_payload: dict[str, Any], cfg: LZConfig, o
         if ph_x:
             fig.add_trace(go.Scatter(
                 x=ph_x, y=ph_y, mode="markers",
-                marker=dict(size=10, color="rgba(35,112,163,0.4)"),
+                marker={"size": 10, "color": "rgba(35,112,163,0.4)"},
                 hoverinfo="skip", showlegend=False
             ), row=1, col=1)
             fig.add_trace(go.Scatter(
                 x=ph_x, y=ph_y, mode="markers",
-                marker=dict(size=4, color="rgba(35,112,163,1.0)"),
+                marker={"size": 4, "color": "rgba(35,112,163,1.0)"},
                 hoverinfo="skip", showlegend=False
             ), row=1, col=1)
         if pl_x:
             fig.add_trace(go.Scatter(
                 x=pl_x, y=pl_y, mode="markers",
-                marker=dict(size=10, color="rgba(35,163,114,0.4)"),
+                marker={"size": 10, "color": "rgba(35,163,114,0.4)"},
                 hoverinfo="skip", showlegend=False
             ), row=1, col=1)
             fig.add_trace(go.Scatter(
                 x=pl_x, y=pl_y, mode="markers",
-                marker=dict(size=4, color="rgba(35,163,114,1.0)"),
+                marker={"size": 4, "color": "rgba(35,163,114,1.0)"},
                 hoverinfo="skip", showlegend=False
             ), row=1, col=1)
 
@@ -601,9 +601,9 @@ def build_plot(df: pd.DataFrame, zones_payload: dict[str, Any], cfg: LZConfig, o
         title=title,
         plot_bgcolor="#0b0f14",
         paper_bgcolor="#0b0f14",
-        font=dict(color="#c9d1d9"),
+        font={"color": "#c9d1d9"},
         height=950,
-        margin=dict(l=40, r=40, t=60, b=40),
+        margin={"l": 40, "r": 40, "t": 60, "b": 40},
         shapes=shapes,
         annotations=annotations,
     )
@@ -689,7 +689,7 @@ def main() -> None:
                 zones_kept.append(z)
 
     pivot_kept = [p for p in payload_full["pivot_points"] if (p["time"] >= idx0 and p["time"] <= idx1)]
-    payload_show = dict(zones=zones_kept, pivot_points=pivot_kept, rightBars=payload_full["rightBars"], offset=(len(df) - len(df_show)))
+    payload_show = {"zones": zones_kept, "pivot_points": pivot_kept, "rightBars": payload_full["rightBars"], "offset": (len(df) - len(df_show))}
 
     title = f"{args.symbol} Liquidity Zones (leftBars={cfg.leftBars}, flt={cfg.flt}, dynamic={cfg.dynamic})"
     build_plot(df_show, payload_show, cfg, out_html=args.out, title=title)

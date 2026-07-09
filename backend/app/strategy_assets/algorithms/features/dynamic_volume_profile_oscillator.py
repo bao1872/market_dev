@@ -287,23 +287,23 @@ def add_feature_table(fig: go.Figure, df: pd.DataFrame) -> None:
 
     fig.add_trace(
         go.Table(
-            header=dict(
-                values=["Feature", "Value"],
-                fill_color="rgba(0,0,0,0.65)",
-                font=dict(color="white", size=12, family="Consolas, monospace"),
-                line_color="rgba(255,255,255,0.25)",
-                align=["left", "left"],
-            ),
-            cells=dict(
-                values=[[r[0] for r in rows], [r[1] for r in rows]],
-                fill_color="rgba(0,0,0,0.45)",
-                font=dict(color="white", size=12, family="Consolas, monospace"),
-                line_color="rgba(255,255,255,0.18)",
-                align=["left", "left"],
-                height=22,
-            ),
+            header={
+                "values": ["Feature", "Value"],
+                "fill_color": "rgba(0,0,0,0.65)",
+                "font": {"color": "white", "size": 12, "family": "Consolas, monospace"},
+                "line_color": "rgba(255,255,255,0.25)",
+                "align": ["left", "left"],
+            },
+            cells={
+                "values": [[r[0] for r in rows], [r[1] for r in rows]],
+                "fill_color": "rgba(0,0,0,0.45)",
+                "font": {"color": "white", "size": 12, "family": "Consolas, monospace"},
+                "line_color": "rgba(255,255,255,0.18)",
+                "align": ["left", "left"],
+                "height": 22,
+            },
             columnwidth=[0.42, 0.58],
-            domain=dict(x=[0.02, 0.28], y=[0.73, 0.98]),
+            domain={"x": [0.02, 0.28], "y": [0.73, 0.98]},
         )
     )
 
@@ -415,7 +415,7 @@ def build_plot(df: pd.DataFrame, out_html: str, title: str, color_bars: bool = T
         fig.add_trace(
             go.Scatter(
                 x=x, y=y_top, mode="lines",
-                line=dict(color=f"rgba(255,1,154,{upper_line_alphas[i]:.3f})", width=1),
+                line={"color": f"rgba(255,1,154,{upper_line_alphas[i]:.3f})", "width": 1},
                 hoverinfo="skip", showlegend=False,
                 name=f"UG{i+1}",
             ),
@@ -424,7 +424,7 @@ def build_plot(df: pd.DataFrame, out_html: str, title: str, color_bars: bool = T
         fig.add_trace(
             go.Scatter(
                 x=x, y=y_bot, mode="lines",
-                line=dict(color=f"rgba(255,1,154,{upper_line_alphas[min(i+1, 9)]:.3f})", width=1),
+                line={"color": f"rgba(255,1,154,{upper_line_alphas[min(i+1, 9)]:.3f})", "width": 1},
                 fill="tonexty",
                 fillcolor=f"rgba(255,1,154,{upper_fill_alphas[i]:.3f})",
                 hoverinfo="skip", showlegend=False,
@@ -440,7 +440,7 @@ def build_plot(df: pd.DataFrame, out_html: str, title: str, color_bars: bool = T
         fig.add_trace(
             go.Scatter(
                 x=x, y=y_bot, mode="lines",
-                line=dict(color=f"rgba(0,241,255,{lower_line_alphas[i]:.3f})", width=1),
+                line={"color": f"rgba(0,241,255,{lower_line_alphas[i]:.3f})", "width": 1},
                 hoverinfo="skip", showlegend=False,
                 name=f"LG{i+1}",
             ),
@@ -449,7 +449,7 @@ def build_plot(df: pd.DataFrame, out_html: str, title: str, color_bars: bool = T
         fig.add_trace(
             go.Scatter(
                 x=x, y=y_top, mode="lines",
-                line=dict(color=f"rgba(0,241,255,{lower_line_alphas[min(i+1, 9)]:.3f})", width=1),
+                line={"color": f"rgba(0,241,255,{lower_line_alphas[min(i+1, 9)]:.3f})", "width": 1},
                 fill="tonexty",
                 fillcolor=f"rgba(0,241,255,{lower_fill_alphas[i]:.3f})",
                 hoverinfo="skip", showlegend=False,
@@ -469,17 +469,17 @@ def build_plot(df: pd.DataFrame, out_html: str, title: str, color_bars: bool = T
     slow_bear = _mask_series(plot_df["slow_signal"], bear_mask)
 
     fig.add_trace(
-        go.Scatter(x=x, y=plot_df["adaptive_midline"], mode="lines", line=dict(color=mid_gray, width=1), showlegend=False, name="Adaptive Midline"),
+        go.Scatter(x=x, y=plot_df["adaptive_midline"], mode="lines", line={"color": mid_gray, "width": 1}, showlegend=False, name="Adaptive Midline"),
         row=3, col=1,
     )
 
-    fig.add_trace(go.Scatter(x=x, y=osc_bull, mode="lines", line=dict(color=bull, width=2), showlegend=False, name="Volume Profile Oscillator"), row=3, col=1)
-    fig.add_trace(go.Scatter(x=x, y=osc_bear, mode="lines", line=dict(color=bear, width=2), showlegend=False, name="Volume Profile Oscillator"), row=3, col=1)
+    fig.add_trace(go.Scatter(x=x, y=osc_bull, mode="lines", line={"color": bull, "width": 2}, showlegend=False, name="Volume Profile Oscillator"), row=3, col=1)
+    fig.add_trace(go.Scatter(x=x, y=osc_bear, mode="lines", line={"color": bear, "width": 2}, showlegend=False, name="Volume Profile Oscillator"), row=3, col=1)
 
-    fig.add_trace(go.Scatter(x=x, y=fast_bull, mode="lines", line=dict(color="rgba(0,241,255,0.60)", width=1), showlegend=False, name="Fast Signal"), row=3, col=1)
-    fig.add_trace(go.Scatter(x=x, y=fast_bear, mode="lines", line=dict(color="rgba(255,1,154,0.60)", width=1), showlegend=False, name="Fast Signal"), row=3, col=1)
-    fig.add_trace(go.Scatter(x=x, y=slow_bull, mode="lines", line=dict(color="rgba(0,241,255,0.30)", width=1), showlegend=False, name="Slow Signal"), row=3, col=1)
-    fig.add_trace(go.Scatter(x=x, y=slow_bear, mode="lines", line=dict(color="rgba(255,1,154,0.30)", width=1), showlegend=False, name="Slow Signal"), row=3, col=1)
+    fig.add_trace(go.Scatter(x=x, y=fast_bull, mode="lines", line={"color": "rgba(0,241,255,0.60)", "width": 1}, showlegend=False, name="Fast Signal"), row=3, col=1)
+    fig.add_trace(go.Scatter(x=x, y=fast_bear, mode="lines", line={"color": "rgba(255,1,154,0.60)", "width": 1}, showlegend=False, name="Fast Signal"), row=3, col=1)
+    fig.add_trace(go.Scatter(x=x, y=slow_bull, mode="lines", line={"color": "rgba(0,241,255,0.30)", "width": 1}, showlegend=False, name="Slow Signal"), row=3, col=1)
+    fig.add_trace(go.Scatter(x=x, y=slow_bear, mode="lines", line={"color": "rgba(255,1,154,0.30)", "width": 1}, showlegend=False, name="Slow Signal"), row=3, col=1)
 
     # Crossovers.
     up_mask = plot_df["crossover_up"].fillna(False)
@@ -488,7 +488,7 @@ def build_plot(df: pd.DataFrame, out_html: str, title: str, color_bars: bool = T
         fig.add_trace(
             go.Scatter(
                 x=plot_df.loc[up_mask, "x"], y=plot_df.loc[up_mask, "oscillator"], mode="markers",
-                marker=dict(symbol="triangle-up", size=8, color=bull, line=dict(width=0)),
+                marker={"symbol": "triangle-up", "size": 8, "color": bull, "line": {"width": 0}},
                 hovertemplate="%{x}<br>CrossUp: %{y:.2f}<extra></extra>",
                 showlegend=False,
             ),
@@ -498,7 +498,7 @@ def build_plot(df: pd.DataFrame, out_html: str, title: str, color_bars: bool = T
         fig.add_trace(
             go.Scatter(
                 x=plot_df.loc[dn_mask, "x"], y=plot_df.loc[dn_mask, "oscillator"], mode="markers",
-                marker=dict(symbol="triangle-down", size=8, color=bear, line=dict(width=0)),
+                marker={"symbol": "triangle-down", "size": 8, "color": bear, "line": {"width": 0}},
                 hovertemplate="%{x}<br>CrossDown: %{y:.2f}<extra></extra>",
                 showlegend=False,
             ),
@@ -514,9 +514,9 @@ def build_plot(df: pd.DataFrame, out_html: str, title: str, color_bars: bool = T
         title=title,
         plot_bgcolor=bg,
         paper_bgcolor=bg,
-        font=dict(color="#c9d1d9"),
+        font={"color": "#c9d1d9"},
         height=980,
-        margin=dict(l=40, r=40, t=60, b=40),
+        margin={"l": 40, "r": 40, "t": 60, "b": 40},
         hovermode="x unified",
         bargap=0.08,
         bargroupgap=0.0,

@@ -619,14 +619,14 @@ def build_figure(df: pd.DataFrame, zigzag_lines: list[dict], zigzag_labels: list
 
     up_mask = df["supertrend_dir"] > 0
     dn_mask = df["supertrend_dir"] < 0
-    fig.add_trace(go.Scatter(x=x_num, y=df["buy_stop"].where(up_mask), mode="lines", line=dict(width=2, color="#00e676"), name="Supertrend BuyStop", showlegend=True), row=1, col=1)
-    fig.add_trace(go.Scatter(x=x_num, y=df["sell_stop"].where(dn_mask), mode="lines", line=dict(width=2, color="#ffaa00"), name="Supertrend SellStop", showlegend=True), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df["buy_stop"].where(up_mask), mode="lines", line={"width": 2, "color": "#00e676"}, name="Supertrend BuyStop", showlegend=True), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df["sell_stop"].where(dn_mask), mode="lines", line={"width": 2, "color": "#ffaa00"}, name="Supertrend SellStop", showlegend=True), row=1, col=1)
 
     for ln in reversed(zigzag_lines):
         fig.add_trace(
             go.Scatter(
                 x=[ln["x1"], ln["x2"]], y=[ln["y1"], ln["y2"]], mode="lines",
-                line=dict(width=1.8, color="rgba(251, 192, 45, 1)"),
+                line={"width": 1.8, "color": "rgba(251, 192, 45, 1)"},
                 name="Zigzag", showlegend=False,
                 hovertemplate=(
                     f"{ln['divergence_id']} | div={ln['divergence']} | bias={ln['bias']} | "
@@ -642,34 +642,34 @@ def build_figure(df: pd.DataFrame, zigzag_lines: list[dict], zigzag_labels: list
             x=lb["x"], y=lb["y"], xref="x", yref="y1",
             text=lb["text"], showarrow=True, arrowhead=2, ax=0, ay=ay,
             bgcolor=lb["sentiment_color"],
-            font=dict(color="black", size=11),
+            font={"color": "black", "size": 11},
         )
 
     # MACD
     fig.add_trace(go.Bar(x=x_num, y=df["macd_hist"], name="MACD Hist", showlegend=False), row=2, col=1)
-    fig.add_trace(go.Scatter(x=x_num, y=df["macd_line"], mode="lines", line=dict(width=1.6), name="MACD", showlegend=False), row=2, col=1)
-    fig.add_trace(go.Scatter(x=x_num, y=df["macd_signal"], mode="lines", line=dict(width=1.2), name="Signal", showlegend=False), row=2, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df["macd_line"], mode="lines", line={"width": 1.6}, name="MACD", showlegend=False), row=2, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df["macd_signal"], mode="lines", line={"width": 1.2}, name="Signal", showlegend=False), row=2, col=1)
     fig.add_hline(y=0.0, line_width=1, line_dash="dot", line_color="#90a4ae", row=2, col=1)
 
     # ADX / DI
-    fig.add_trace(go.Scatter(x=x_num, y=df["di_plus"], mode="lines", line=dict(width=1.4, color="#00e676"), name="DI+", showlegend=False), row=3, col=1)
-    fig.add_trace(go.Scatter(x=x_num, y=df["di_minus"], mode="lines", line=dict(width=1.4, color="#ff4d5a"), name="DI-", showlegend=False), row=3, col=1)
-    fig.add_trace(go.Scatter(x=x_num, y=df["adx"], mode="lines", line=dict(width=1.6, color="#5c6bc0"), name="ADX", showlegend=False), row=3, col=1)
-    fig.add_trace(go.Scatter(x=x_num, y=df["adx_threshold"], mode="lines", line=dict(width=1.0, dash="dot", color="#ffffff"), name="ADX阈值20", showlegend=False), row=3, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df["di_plus"], mode="lines", line={"width": 1.4, "color": "#00e676"}, name="DI+", showlegend=False), row=3, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df["di_minus"], mode="lines", line={"width": 1.4, "color": "#ff4d5a"}, name="DI-", showlegend=False), row=3, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df["adx"], mode="lines", line={"width": 1.6, "color": "#5c6bc0"}, name="ADX", showlegend=False), row=3, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df["adx_threshold"], mode="lines", line={"width": 1.0, "dash": "dot", "color": "#ffffff"}, name="ADX阈值20", showlegend=False), row=3, col=1)
 
     # pivot/divergence/bias
-    fig.add_trace(go.Scatter(x=x_num, y=df["price_pivot_dir"], mode="lines+markers", line=dict(width=1.2), marker=dict(size=4), name="price_pivot_dir", showlegend=False), row=4, col=1)
-    fig.add_trace(go.Scatter(x=x_num, y=df["osc_pivot_dir"], mode="lines+markers", line=dict(width=1.2), marker=dict(size=4), name="osc_pivot_dir", showlegend=False), row=4, col=1)
-    fig.add_trace(go.Scatter(x=x_num, y=df["divergence"], mode="lines+markers", line=dict(width=1.2), marker=dict(size=4), name="divergence", showlegend=False), row=4, col=1)
-    fig.add_trace(go.Scatter(x=x_num, y=df["bias"], mode="lines+markers", line=dict(width=1.2), marker=dict(size=4), name="bias", showlegend=False), row=4, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df["price_pivot_dir"], mode="lines+markers", line={"width": 1.2}, marker={"size": 4}, name="price_pivot_dir", showlegend=False), row=4, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df["osc_pivot_dir"], mode="lines+markers", line={"width": 1.2}, marker={"size": 4}, name="osc_pivot_dir", showlegend=False), row=4, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df["divergence"], mode="lines+markers", line={"width": 1.2}, marker={"size": 4}, name="divergence", showlegend=False), row=4, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df["bias"], mode="lines+markers", line={"width": 1.2}, marker={"size": 4}, name="bias", showlegend=False), row=4, col=1)
     fig.add_hline(y=0.0, line_width=1, line_dash="dot", line_color="#90a4ae", row=4, col=1)
     fig.update_yaxes(range=[-2.4, 2.4], tickmode="array", tickvals=[-2, -1, 0, 1, 2], ticktext=["-2", "-1", "0", "1", "2"], row=4, col=1)
 
     # supertrend/trigger
-    fig.add_trace(go.Scatter(x=x_num, y=df["supertrend_dir"], mode="lines", line=dict(width=1.4), name="supertrend_dir", showlegend=False), row=5, col=1)
-    fig.add_trace(go.Scatter(x=x_num, y=df["pzg_event"], mode="lines", line=dict(width=1.2), name="pzg_event", showlegend=False), row=5, col=1)
-    fig.add_trace(go.Scatter(x=x_num, y=df["pzg_double"], mode="lines", line=dict(width=1.2, dash="dot"), name="pzg_double", showlegend=False), row=5, col=1)
-    fig.add_trace(go.Scatter(x=x_num, y=df["sentiment_code"], mode="lines+markers", line=dict(width=1.2), marker=dict(size=4), name="sentiment_code", showlegend=False), row=5, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df["supertrend_dir"], mode="lines", line={"width": 1.4}, name="supertrend_dir", showlegend=False), row=5, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df["pzg_event"], mode="lines", line={"width": 1.2}, name="pzg_event", showlegend=False), row=5, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df["pzg_double"], mode="lines", line={"width": 1.2, "dash": "dot"}, name="pzg_double", showlegend=False), row=5, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df["sentiment_code"], mode="lines+markers", line={"width": 1.2}, marker={"size": 4}, name="sentiment_code", showlegend=False), row=5, col=1)
     fig.add_hline(y=0.0, line_width=1, line_dash="dot", line_color="#90a4ae", row=5, col=1)
 
     # 右上角模拟表格
@@ -678,19 +678,19 @@ def build_figure(df: pd.DataFrame, zigzag_lines: list[dict], zigzag_labels: list
         table_df = table_df.copy()
         table_df["pivot_time"] = pd.to_datetime(table_df["pivot_time"]).dt.strftime("%Y-%m-%d %H:%M" if intraday else "%Y-%m-%d")
         table = go.Table(
-            domain=dict(x=[0.73, 0.995], y=[0.74, 0.995]),
-            header=dict(values=["Bar Time", "Price", "Osc", "Trend", "Sentiment"], fill_color="black", font=dict(color="white", size=10), align="left"),
-            cells=dict(
-                values=[
+            domain={"x": [0.73, 0.995], "y": [0.74, 0.995]},
+            header={"values": ["Bar Time", "Price", "Osc", "Trend", "Sentiment"], "fill_color": "black", "font": {"color": "white", "size": 10}, "align": "left"},
+            cells={
+                "values": [
                     table_df["pivot_time"],
                     table_df["p_dir"],
                     table_df["o_dir"],
                     table_df["s_dir"],
                     table_df["divergence_id"].astype(str) + " " + table_df["sentiment"].astype(str),
                 ],
-                align="left",
-                font=dict(size=10),
-            ),
+                "align": "left",
+                "font": {"size": 10},
+            },
         )
         fig.add_trace(table)
 
@@ -704,8 +704,8 @@ def build_figure(df: pd.DataFrame, zigzag_lines: list[dict], zigzag_labels: list
         template="plotly_dark",
         xaxis_rangeslider_visible=False,
         hovermode="x unified",
-        margin=dict(l=40, r=20, t=80, b=40),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.01),
+        margin={"l": 40, "r": 20, "t": 80, "b": 40},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.01},
         height=1750,
     )
     for r in [1, 2, 3, 4, 5]:

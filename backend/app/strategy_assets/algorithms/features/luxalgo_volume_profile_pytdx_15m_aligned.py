@@ -582,33 +582,33 @@ def make_volume_profile_figure(
 
     if cfg.profile_background:
         shapes.append(
-            dict(
-                type="rect",
-                xref="x",
-                yref="y",
-                x0=0,
-                x1=last_x,
-                y0=result.lowest_price,
-                y1=result.highest_price,
-                line=dict(color=cfg.profile_background_color, dash="dot"),
-                fillcolor=cfg.profile_background_color,
-                layer="below",
-            )
+            {
+                "type": "rect",
+                "xref": "x",
+                "yref": "y",
+                "x0": 0,
+                "x1": last_x,
+                "y0": result.lowest_price,
+                "y1": result.highest_price,
+                "line": {"color": cfg.profile_background_color, "dash": "dot"},
+                "fillcolor": cfg.profile_background_color,
+                "layer": "below",
+            }
         )
     if cfg.value_area_background:
         shapes.append(
-            dict(
-                type="rect",
-                xref="x",
-                yref="y",
-                x0=0,
-                x1=last_x,
-                y0=result.val_price,
-                y1=result.vah_price,
-                line=dict(color=cfg.value_area_background_color, dash="dot"),
-                fillcolor=cfg.value_area_background_color,
-                layer="below",
-            )
+            {
+                "type": "rect",
+                "xref": "x",
+                "yref": "y",
+                "x0": 0,
+                "x1": last_x,
+                "y0": result.val_price,
+                "y1": result.vah_price,
+                "line": {"color": cfg.value_area_background_color, "dash": "dot"},
+                "fillcolor": cfg.value_area_background_color,
+                "layer": "below",
+            }
         )
 
     # Profile bars: bullish part and remaining/down part, stacked horizontally like TV boxes.
@@ -633,18 +633,18 @@ def make_volume_profile_figure(
             if cfg.profile_placement == "right":
                 x1 = float(profile_anchor)
                 x0 = x1 - bull_w
-                shapes.append(dict(type="rect", xref="x", yref="y", x0=x0, x1=x1, y0=y0, y1=y1, line=dict(width=0), fillcolor=up_color, layer="above"))
+                shapes.append({"type": "rect", "xref": "x", "yref": "y", "x0": x0, "x1": x1, "y0": y0, "y1": y1, "line": {"width": 0}, "fillcolor": up_color, "layer": "above"})
                 x1d = x0
                 x0d = x1d - down_w
-                shapes.append(dict(type="rect", xref="x", yref="y", x0=x0d, x1=x1d, y0=y0, y1=y1, line=dict(width=0), fillcolor=down_color, layer="above"))
+                shapes.append({"type": "rect", "xref": "x", "yref": "y", "x0": x0d, "x1": x1d, "y0": y0, "y1": y1, "line": {"width": 0}, "fillcolor": down_color, "layer": "above"})
                 end_x = x0d
             else:
                 x0 = profile_anchor
                 x1 = x0 + bull_w
-                shapes.append(dict(type="rect", xref="x", yref="y", x0=x0, x1=x1, y0=y0, y1=y1, line=dict(width=0), fillcolor=up_color, layer="above"))
+                shapes.append({"type": "rect", "xref": "x", "yref": "y", "x0": x0, "x1": x1, "y0": y0, "y1": y1, "line": {"width": 0}, "fillcolor": up_color, "layer": "above"})
                 x0d = x1
                 x1d = x0d + down_w
-                shapes.append(dict(type="rect", xref="x", yref="y", x0=x0d, x1=x1d, y0=y0, y1=y1, line=dict(width=0), fillcolor=down_color, layer="above"))
+                shapes.append({"type": "rect", "xref": "x", "yref": "y", "x0": x0d, "x1": x1d, "y0": y0, "y1": y1, "line": {"width": 0}, "fillcolor": down_color, "layer": "above"})
                 end_x = x1d
 
             # Node overlays follow Pine's full-span overlay behavior.
@@ -659,14 +659,14 @@ def make_volume_profile_figure(
                 overlay_color = cfg.lowest_volume_color
             if overlay_color:
                 if cfg.profile_placement == "right":
-                    shapes.append(dict(type="rect", xref="x", yref="y", x0=0, x1=end_x, y0=y0, y1=y1, line=dict(width=0), fillcolor=overlay_color, layer="above"))
+                    shapes.append({"type": "rect", "xref": "x", "yref": "y", "x0": 0, "x1": end_x, "y0": y0, "y1": y1, "line": {"width": 0}, "fillcolor": overlay_color, "layer": "above"})
                 else:
-                    shapes.append(dict(type="rect", xref="x", yref="y", x0=end_x, x1=last_x, y0=y0, y1=y1, line=dict(width=0), fillcolor=overlay_color, layer="above"))
+                    shapes.append({"type": "rect", "xref": "x", "yref": "y", "x0": end_x, "x1": last_x, "y0": y0, "y1": y1, "line": {"width": 0}, "fillcolor": overlay_color, "layer": "above"})
 
     # POC/VAH/VAL lines.
     def add_hline(y: float, color: str, width: int = 1, name: str = "") -> None:
-        shapes.append(dict(type="line", xref="x", yref="y", x0=0, x1=profile_anchor, y0=y, y1=y, line=dict(color=color, width=width), layer="above"))
-        annotations.append(dict(x=profile_anchor, y=y, text=name, showarrow=False, xanchor="left", font=dict(color=color, size=11), bgcolor="rgba(19,23,34,0.75)"))
+        shapes.append({"type": "line", "xref": "x", "yref": "y", "x0": 0, "x1": profile_anchor, "y0": y, "y1": y, "line": {"color": color, "width": width}, "layer": "above"})
+        annotations.append({"x": profile_anchor, "y": y, "text": name, "showarrow": False, "xanchor": "left", "font": {"color": color, "size": 11}, "bgcolor": "rgba(19,23,34,0.75)"})
 
     if cfg.vah_show:
         add_hline(result.vah_price, cfg.vah_color, 1, f"VAH {result.vah_price:.4g}")
@@ -681,7 +681,7 @@ def make_volume_profile_figure(
                 x=result.developing_poc["x"] - result.start_index,
                 y=result.developing_poc["poc"],
                 mode="lines",
-                line=dict(color=cfg.poc_color, width=cfg.poc_width),
+                line={"color": cfg.poc_color, "width": cfg.poc_width},
                 name="Developing POC",
             )
         )
@@ -696,32 +696,32 @@ def make_volume_profile_figure(
             (result.val_price, f"VAL {result.val_price:.4g}", cfg.val_color),
             (result.lowest_price, f"Low {result.lowest_price:.4g}", "#d1d4dc"),
         ]:
-            annotations.append(dict(x=label_x, y=y, text=label, showarrow=False, xanchor="left", font=dict(color=color, size=11), bgcolor="rgba(19,23,34,0.85)"))
+            annotations.append({"x": label_x, "y": y, "text": label, "showarrow": False, "xanchor": "left", "font": {"color": color, "size": 11}, "bgcolor": "rgba(19,23,34,0.85)"})
 
     fig.update_layout(
-        title=dict(text=title, x=0.01, font=dict(color="#d1d4dc", size=18)),
+        title={"text": title, "x": 0.01, "font": {"color": "#d1d4dc", "size": 18}},
         template="plotly_dark",
         paper_bgcolor="#131722",
         plot_bgcolor="#131722",
-        font=dict(color="#d1d4dc", family="Arial, sans-serif"),
-        xaxis=dict(
-            rangeslider=dict(visible=False),
-            showgrid=True,
-            gridcolor="rgba(120,123,134,0.18)",
-            zeroline=False,
-            tickmode="array",
-            tickvals=list(np.linspace(0, max(0, len(window) - 1), min(8, len(window))).astype(int)),
-            ticktext=[str(window.loc[i, "datetime"])[:16] for i in list(np.linspace(0, max(0, len(window) - 1), min(8, len(window))).astype(int))],
-            range=[-2, profile_anchor + max(4, profile_width_bars * 0.08)],
-        ),
-        yaxis=dict(
-            side="right",
-            showgrid=True,
-            gridcolor="rgba(120,123,134,0.18)",
-            zeroline=False,
-            fixedrange=False,
-        ),
-        margin=dict(l=24, r=84, t=52, b=34),
+        font={"color": "#d1d4dc", "family": "Arial, sans-serif"},
+        xaxis={
+            "rangeslider": {"visible": False},
+            "showgrid": True,
+            "gridcolor": "rgba(120,123,134,0.18)",
+            "zeroline": False,
+            "tickmode": "array",
+            "tickvals": list(np.linspace(0, max(0, len(window) - 1), min(8, len(window))).astype(int)),
+            "ticktext": [str(window.loc[i, "datetime"])[:16] for i in list(np.linspace(0, max(0, len(window) - 1), min(8, len(window))).astype(int))],
+            "range": [-2, profile_anchor + max(4, profile_width_bars * 0.08)],
+        },
+        yaxis={
+            "side": "right",
+            "showgrid": True,
+            "gridcolor": "rgba(120,123,134,0.18)",
+            "zeroline": False,
+            "fixedrange": False,
+        },
+        margin={"l": 24, "r": 84, "t": 52, "b": 34},
         height=820,
         showlegend=False,
         shapes=shapes,

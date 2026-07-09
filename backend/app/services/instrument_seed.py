@@ -190,10 +190,10 @@ async def seed_instruments_from_pytdx(
     records: list[dict[str, Any]] = df.to_dict(orient="records")
 
     # 分批插入（避免 PostgreSQL 参数数量限制，每批 1000 条）
-    BATCH_SIZE = 1000
+    batch_size = 1000
     total_inserted = 0
-    for i in range(0, len(records), BATCH_SIZE):
-        batch = records[i : i + BATCH_SIZE]
+    for i in range(0, len(records), batch_size):
+        batch = records[i : i + batch_size]
         stmt = pg_insert(Instrument).values(batch)
         stmt = stmt.on_conflict_do_update(
             index_elements=["symbol"],

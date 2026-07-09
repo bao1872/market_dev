@@ -467,7 +467,7 @@ class BreakoutVolumeDeltaEngine:
                     x=self.x[lv.source_index:end_idx + 1],
                     y=[lv.price] * (end_idx - lv.source_index + 1),
                     mode="lines",
-                    line=dict(color=BRK_HI_COL if lv.mitigated else UNMIT_HI_COL, width=1.4, dash="solid" if lv.mitigated else "dot"),
+                    line={"color": BRK_HI_COL if lv.mitigated else UNMIT_HI_COL, "width": 1.4, "dash": "solid" if lv.mitigated else "dot"},
                     name="high_level",
                     legendgroup="levels",
                     showlegend=False,
@@ -482,7 +482,7 @@ class BreakoutVolumeDeltaEngine:
                     x=self.x[lv.source_index:end_idx + 1],
                     y=[lv.price] * (end_idx - lv.source_index + 1),
                     mode="lines",
-                    line=dict(color=BRK_LO_COL if lv.mitigated else UNMIT_LO_COL, width=1.4, dash="solid" if lv.mitigated else "dot"),
+                    line={"color": BRK_LO_COL if lv.mitigated else UNMIT_LO_COL, "width": 1.4, "dash": "solid" if lv.mitigated else "dot"},
                     name="low_level",
                     legendgroup="levels",
                     showlegend=False,
@@ -501,7 +501,7 @@ class BreakoutVolumeDeltaEngine:
                     mode="markers+text",
                     text=[f"↑{int(v)}" for v in self.df.loc[up_mask, "n_high_levels_broken"]],
                     textposition="top center",
-                    marker=dict(symbol="triangle-up", size=11, color=BULL_COL),
+                    marker={"symbol": "triangle-up", "size": 11, "color": BULL_COL},
                     name="high_break",
                     showlegend=False,
                 ), row=1, col=1
@@ -514,7 +514,7 @@ class BreakoutVolumeDeltaEngine:
                     mode="markers+text",
                     text=[f"↓{int(v)}" for v in self.df.loc[dn_mask, "n_low_levels_broken"]],
                     textposition="bottom center",
-                    marker=dict(symbol="triangle-down", size=11, color=BEAR_COL),
+                    marker={"symbol": "triangle-down", "size": 11, "color": BEAR_COL},
                     name="low_break",
                     showlegend=False,
                 ), row=1, col=1
@@ -527,7 +527,7 @@ class BreakoutVolumeDeltaEngine:
                 x=self.x[ev.index], y=y,
                 text=f"{self._fmt(ev.bull_vol)} ({self._pct_str(ev.bull_pct)}) | {self._fmt(ev.bear_vol)} ({self._pct_str(ev.bear_pct)})",
                 showarrow=False,
-                font=dict(size=9, color=BULL_COL if ev.direction == "up" else BEAR_COL),
+                font={"size": 9, "color": BULL_COL if ev.direction == "up" else BEAR_COL},
                 bgcolor="rgba(0,0,0,0.0)",
                 row=1, col=1,
             )
@@ -535,7 +535,7 @@ class BreakoutVolumeDeltaEngine:
         # panel 2: delta / breakout info
         for col_name in ["bull_pct", "bear_pct", "delta_pct", "n_high_levels_broken", "n_low_levels_broken"]:
             fig.add_trace(
-                go.Scatter(x=self.x, y=self.df[col_name], mode="lines", name=col_name, line=dict(width=1.4), showlegend=False),
+                go.Scatter(x=self.x, y=self.df[col_name], mode="lines", name=col_name, line={"width": 1.4}, showlegend=False),
                 row=2, col=1
             )
         fig.add_hline(y=0, line_width=1, line_dash="dot", line_color=ZERO_COL, row=2, col=1)
@@ -543,7 +543,7 @@ class BreakoutVolumeDeltaEngine:
         # panel 3: structure info
         for col_name in ["dist_to_nearest_high", "dist_to_nearest_low", "position_in_structure"]:
             fig.add_trace(
-                go.Scatter(x=self.x, y=self.df[col_name], mode="lines", name=col_name, line=dict(width=1.4), showlegend=False),
+                go.Scatter(x=self.x, y=self.df[col_name], mode="lines", name=col_name, line={"width": 1.4}, showlegend=False),
                 row=3, col=1
             )
         fig.add_hline(y=0, line_width=1, line_dash="dot", line_color=ZERO_COL, row=3, col=1)
@@ -560,8 +560,8 @@ class BreakoutVolumeDeltaEngine:
             template="plotly_dark",
             xaxis_rangeslider_visible=False,
             hovermode="x unified",
-            margin=dict(l=40, r=20, t=70, b=40),
-            legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0.01),
+            margin={"l": 40, "r": 20, "t": 70, "b": 40},
+            legend={"orientation": "h", "yanchor": "bottom", "y": 1.01, "xanchor": "left", "x": 0.01},
         )
         for r in (1, 2, 3):
             fig.update_xaxes(tickmode="array", tickvals=tickvals, ticktext=ticktext, showgrid=True, zeroline=False, row=r, col=1)

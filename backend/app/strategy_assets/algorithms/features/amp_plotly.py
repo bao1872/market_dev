@@ -1,3 +1,4 @@
+# ruff: noqa: N806  # kept to match upstream algorithm naming (Pine Script / SMC conventions)
 # amp_plotly.py
 """
 AMP 自适应移动通道算法及可视化（含逐 bar 时序特征副图）
@@ -592,36 +593,36 @@ def build_plot(payload: dict, ts: pd.DataFrame, symbol: str = "", stock_name: st
         row=2, col=1,
     )
 
-    fig.add_trace(go.Scatter(x=ch["x"], y=ch["upper"], mode="lines", line=dict(color=cfg.regColor, width=1), hoverinfo="skip", showlegend=False), row=1, col=1)
-    fig.add_trace(go.Scatter(x=ch["x"], y=ch["lower"], mode="lines", line=dict(color=cfg.regColor, width=1), hoverinfo="skip", showlegend=False), row=1, col=1)
-    fig.add_trace(go.Scatter(x=ch["x"], y=ch["upper"], mode="lines", line=dict(color="rgba(0,0,0,0)"), hoverinfo="skip", showlegend=False), row=1, col=1)
-    fig.add_trace(go.Scatter(x=ch["x"], y=ch["lower"], mode="lines", fill="tonexty", fillcolor=cfg.channelFill, line=dict(color="rgba(0,0,0,0)"), hoverinfo="skip", showlegend=False), row=1, col=1)
+    fig.add_trace(go.Scatter(x=ch["x"], y=ch["upper"], mode="lines", line={"color": cfg.regColor, "width": 1}, hoverinfo="skip", showlegend=False), row=1, col=1)
+    fig.add_trace(go.Scatter(x=ch["x"], y=ch["lower"], mode="lines", line={"color": cfg.regColor, "width": 1}, hoverinfo="skip", showlegend=False), row=1, col=1)
+    fig.add_trace(go.Scatter(x=ch["x"], y=ch["upper"], mode="lines", line={"color": "rgba(0,0,0,0)"}, hoverinfo="skip", showlegend=False), row=1, col=1)
+    fig.add_trace(go.Scatter(x=ch["x"], y=ch["lower"], mode="lines", fill="tonexty", fillcolor=cfg.channelFill, line={"color": "rgba(0,0,0,0)"}, hoverinfo="skip", showlegend=False), row=1, col=1)
 
     if ch["showMid"]:
-        fig.add_trace(go.Scatter(x=ch["x"], y=ch["mid"], mode="lines", line=dict(color="rgba(180,180,180,0.7)", width=1, dash="dash"), hoverinfo="skip", showlegend=False), row=1, col=1)
+        fig.add_trace(go.Scatter(x=ch["x"], y=ch["mid"], mode="lines", line={"color": "rgba(180,180,180,0.7)", "width": 1, "dash": "dash"}, hoverinfo="skip", showlegend=False), row=1, col=1)
 
     for al in payload["activityLines"]:
-        fig.add_trace(go.Scatter(x=al["x"], y=al["y"], mode="lines", line=dict(color=al["color"], width=1), hoverinfo="skip", showlegend=False), row=1, col=1)
+        fig.add_trace(go.Scatter(x=al["x"], y=al["y"], mode="lines", line={"color": al["color"], "width": 1}, hoverinfo="skip", showlegend=False), row=1, col=1)
 
     shapes = []
     for poly in payload["profilePolys"]:
-        shapes.append(dict(
-            type="path",
-            xref="x", yref="y",
-            path=f"M {poly['x0']} {poly['y0_top']} L {poly['x0']} {poly['y0_bot']} L {poly['x1']} {poly['y1_bot']} L {poly['x1']} {poly['y1_top']} Z",
-            fillcolor=poly["fill"],
-            line=dict(width=0),
-            layer="below",
-            opacity=1.0,
-        ))
+        shapes.append({
+            "type": "path",
+            "xref": "x", "yref": "y",
+            "path": f"M {poly['x0']} {poly['y0_top']} L {poly['x0']} {poly['y0_bot']} L {poly['x1']} {poly['y1_bot']} L {poly['x1']} {poly['y1_top']} Z",
+            "fillcolor": poly["fill"],
+            "line": {"width": 0},
+            "layer": "below",
+            "opacity": 1.0,
+        })
 
-    fig.add_trace(go.Scatter(x=ts.index, y=ts["amp_strength_t"], mode="lines", name="AMP Strength", line=dict(width=1.8, color="#00d1b2")), row=3, col=1, secondary_y=False)
-    fig.add_trace(go.Scatter(x=ts.index, y=ts["close_pos_t"], mode="lines", name="Close Pos", line=dict(width=1.5, color="#ffd400")), row=3, col=1, secondary_y=False)
-    fig.add_trace(go.Scatter(x=ts.index, y=ts["channel_width_t"], mode="lines", name="Channel Width", line=dict(width=1.5, color="#ff9800")), row=3, col=1, secondary_y=True)
+    fig.add_trace(go.Scatter(x=ts.index, y=ts["amp_strength_t"], mode="lines", name="AMP Strength", line={"width": 1.8, "color": "#00d1b2"}), row=3, col=1, secondary_y=False)
+    fig.add_trace(go.Scatter(x=ts.index, y=ts["close_pos_t"], mode="lines", name="Close Pos", line={"width": 1.5, "color": "#ffd400"}), row=3, col=1, secondary_y=False)
+    fig.add_trace(go.Scatter(x=ts.index, y=ts["channel_width_t"], mode="lines", name="Channel Width", line={"width": 1.5, "color": "#ff9800"}), row=3, col=1, secondary_y=True)
 
-    fig.add_trace(go.Scatter(x=ts.index, y=ts["upper_slope_t"], mode="lines", name="Upper Slope", line=dict(width=1.4, color="#40c4ff")), row=4, col=1)
-    fig.add_trace(go.Scatter(x=ts.index, y=ts["lower_slope_t"], mode="lines", name="Lower Slope", line=dict(width=1.4, color="#ff5252")), row=4, col=1)
-    fig.add_trace(go.Scatter(x=ts.index, y=ts["mid_slope_t"], mode="lines", name="Mid Slope", line=dict(width=1.6, color="#b388ff")), row=4, col=1)
+    fig.add_trace(go.Scatter(x=ts.index, y=ts["upper_slope_t"], mode="lines", name="Upper Slope", line={"width": 1.4, "color": "#40c4ff"}), row=4, col=1)
+    fig.add_trace(go.Scatter(x=ts.index, y=ts["lower_slope_t"], mode="lines", name="Lower Slope", line={"width": 1.4, "color": "#ff5252"}), row=4, col=1)
+    fig.add_trace(go.Scatter(x=ts.index, y=ts["mid_slope_t"], mode="lines", name="Mid Slope", line={"width": 1.6, "color": "#b388ff"}), row=4, col=1)
     fig.add_hline(y=0.0, line_width=1, line_dash="dash", line_color="rgba(255,255,255,0.35)", row=4, col=1)
 
     stock_display = stock_name if stock_name else symbol
@@ -632,10 +633,10 @@ def build_plot(payload: dict, ts: pd.DataFrame, symbol: str = "", stock_name: st
         shapes=shapes,
         plot_bgcolor="#0b0f14",
         paper_bgcolor="#0b0f14",
-        font=dict(color="#c9d1d9"),
+        font={"color": "#c9d1d9"},
         height=900,
-        margin=dict(l=40, r=55, t=60, b=35),
-        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1.0),
+        margin={"l": 40, "r": 55, "t": 60, "b": 35},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.01, "xanchor": "right", "x": 1.0},
         hovermode="x unified",
     )
 
@@ -684,14 +685,14 @@ def build_plot(payload: dict, ts: pd.DataFrame, symbol: str = "", stock_name: st
     fig.add_annotation(
         xref="paper", yref="paper", x=0.012, y=0.988,
         xanchor="left", yanchor="top", text=info_html, align="left",
-        showarrow=False, font=dict(size=11, color="#c9d1d9"),
+        showarrow=False, font={"size": 11, "color": "#c9d1d9"},
         bgcolor="rgba(0,0,0,0.35)", bordercolor="rgba(255,255,255,0.15)", borderwidth=1, borderpad=7,
     )
 
     fig.add_annotation(
         x=ch["x"][0], y=m["lower_start"], xref="x", yref="y",
         text=f"{m['strength_pR_cD']:.3f}", showarrow=False,
-        font=dict(size=12, color="rgba(200,200,200,0.9)"),
+        font={"size": 12, "color": "rgba(200,200,200,0.9)"},
         bgcolor="rgba(0,0,0,0.25)", bordercolor="rgba(255,255,255,0.15)", borderwidth=1, borderpad=4, yshift=18,
     )
 

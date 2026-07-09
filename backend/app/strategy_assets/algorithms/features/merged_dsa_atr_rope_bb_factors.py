@@ -245,8 +245,8 @@ def compute_dsa(df: pd.DataFrame, cfg: DSAConfig) -> tuple[pd.DataFrame, list[di
 
     ph = np.nan
     pl = np.nan
-    phL = 0
-    plL = 0
+    phL = 0  # noqa: N806  # kept to match upstream algorithm naming
+    plL = 0  # noqa: N806  # kept to match upstream algorithm naming
     prev = np.nan
     ph_prev_store = np.nan
     pl_prev_store = np.nan
@@ -286,12 +286,12 @@ def compute_dsa(df: pd.DataFrame, cfg: DSAConfig) -> tuple[pd.DataFrame, list[di
 
         if np.isfinite(high[t]) and high[t] == np.nanmax(win_h):
             ph = high[t]
-            phL = t
+            phL = t  # noqa: N806  # kept to match upstream algorithm naming
             recent_pivot_high_price = ph
             recent_pivot_high_idx = t
         if np.isfinite(low[t]) and low[t] == np.nanmin(win_l):
             pl = low[t]
-            plL = t
+            plL = t  # noqa: N806  # kept to match upstream algorithm naming
             recent_pivot_low_price = pl
             recent_pivot_low_idx = t
 
@@ -814,8 +814,8 @@ def add_range_segments(fig: go.Figure, x_num: np.ndarray, df: pd.DataFrame, hi_c
         x = x_num[st:ed + 1]
         hi_y = df[hi_col].iloc[st:ed + 1]
         lo_y = df[lo_col].iloc[st:ed + 1]
-        fig.add_trace(go.Scatter(x=x, y=hi_y, mode="lines", line=dict(width=1.2, color=RANGE_LINE_COL), name="range", legendgroup="range", showlegend=first, connectgaps=False, hovertemplate="range_high=%{y:.4f}<extra></extra>"), row=row, col=1)
-        fig.add_trace(go.Scatter(x=x, y=lo_y, mode="lines", line=dict(width=1.2, color=RANGE_LINE_COL), fill="tonexty", fillcolor=RANGE_FILL_COL, name="range_fill", legendgroup="range", showlegend=False, connectgaps=False, hovertemplate="range_low=%{y:.4f}<extra></extra>"), row=row, col=1)
+        fig.add_trace(go.Scatter(x=x, y=hi_y, mode="lines", line={"width": 1.2, "color": RANGE_LINE_COL}, name="range", legendgroup="range", showlegend=first, connectgaps=False, hovertemplate="range_high=%{y:.4f}<extra></extra>"), row=row, col=1)
+        fig.add_trace(go.Scatter(x=x, y=lo_y, mode="lines", line={"width": 1.2, "color": RANGE_LINE_COL}, fill="tonexty", fillcolor=RANGE_FILL_COL, name="range_fill", legendgroup="range", showlegend=False, connectgaps=False, hovertemplate="range_low=%{y:.4f}<extra></extra>"), row=row, col=1)
         first = False
 
 
@@ -851,59 +851,59 @@ def build_figure(df: pd.DataFrame, dsa_segments: list[dict], dsa_labels: list[di
             continue
         seg_y = np.asarray(seg["y"])[mask]
         color = "#ff1744" if seg["dir"] > 0 else "#00e676"
-        fig.add_trace(go.Scatter(x=np.array(seg_idx, dtype=float), y=seg_y[:len(seg_idx)], mode="lines", line=dict(width=2, color=color), name="DSA_VWAP", showlegend=False, hoverinfo="skip"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=np.array(seg_idx, dtype=float), y=seg_y[:len(seg_idx)], mode="lines", line={"width": 2, "color": color}, name="DSA_VWAP", showlegend=False, hoverinfo="skip"), row=1, col=1)
 
     for col_name, color, name, lg in [("rope_up", UP_COL, "ATR Rope", True), ("rope_down", DOWN_COL, "ATR Rope", False), ("rope_flat", FLAT_COL, "ATR Rope", False)]:
-        fig.add_trace(go.Scatter(x=x_num, y=df[col_name], mode="lines", line=dict(width=2.4, color=color), connectgaps=False, name=name, legendgroup="rope", showlegend=lg), row=1, col=1)
+        fig.add_trace(go.Scatter(x=x_num, y=df[col_name], mode="lines", line={"width": 2.4, "color": color}, connectgaps=False, name=name, legendgroup="rope", showlegend=lg), row=1, col=1)
 
-    fig.add_trace(go.Scatter(x=x_num, y=df["bb_upper"], mode="lines", line=dict(width=1.0, color=BB_COL, dash="dot"), name="BB", legendgroup="bb", showlegend=True), row=1, col=1)
-    fig.add_trace(go.Scatter(x=x_num, y=df["bb_lower"], mode="lines", line=dict(width=1.0, color=BB_COL, dash="dot"), fill="tonexty", fillcolor="rgba(245,197,66,0.08)", name="BB", legendgroup="bb", showlegend=False), row=1, col=1)
-    fig.add_trace(go.Scatter(x=x_num, y=df["bb_mid"], mode="lines", line=dict(width=1.0, color=BB_COL), name="BB_mid", showlegend=False), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df["bb_upper"], mode="lines", line={"width": 1.0, "color": BB_COL, "dash": "dot"}, name="BB", legendgroup="bb", showlegend=True), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df["bb_lower"], mode="lines", line={"width": 1.0, "color": BB_COL, "dash": "dot"}, fill="tonexty", fillcolor="rgba(245,197,66,0.08)", name="BB", legendgroup="bb", showlegend=False), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df["bb_mid"], mode="lines", line={"width": 1.0, "color": BB_COL}, name="BB_mid", showlegend=False), row=1, col=1)
 
     add_range_segments(fig, x_num, df, "range_high_1", "range_low_1", 1)
     add_range_segments(fig, x_num, df, "range_high_2", "range_low_2", 1)
 
     up_mask = df["range_break_up"] == 1
     dn_mask = df["range_break_down"] == 1
-    fig.add_trace(go.Scatter(x=x_num[up_mask.to_numpy()], y=df.loc[up_mask, "close"], mode="markers", marker=dict(symbol="circle-open", size=8, color="#2f7cff", line=dict(width=1.5)), name="break_up", showlegend=True), row=1, col=1)
-    fig.add_trace(go.Scatter(x=x_num[dn_mask.to_numpy()], y=df.loc[dn_mask, "close"], mode="markers", marker=dict(symbol="circle-open", size=8, color="#ffaa00", line=dict(width=1.5)), name="break_down", showlegend=True), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x_num[up_mask.to_numpy()], y=df.loc[up_mask, "close"], mode="markers", marker={"symbol": "circle-open", "size": 8, "color": "#2f7cff", "line": {"width": 1.5}}, name="break_up", showlegend=True), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x_num[dn_mask.to_numpy()], y=df.loc[dn_mask, "close"], mode="markers", marker={"symbol": "circle-open", "size": 8, "color": "#ffaa00", "line": {"width": 1.5}}, name="break_down", showlegend=True), row=1, col=1)
 
     for lab in dsa_labels:
         if lab["x"] not in df.index or not lab.get("text"):
             continue
         idx = df.index.get_loc(lab["x"])
         is_up = lab["dir"] > 0
-        fig.add_annotation(x=idx, y=lab["y"], xref="x", yref="y", text=lab["text"], showarrow=True, arrowhead=2, ax=0, ay=25 if is_up else -25, bgcolor="rgba(0,230,118,0.85)" if is_up else "rgba(255,23,68,0.85)", font=dict(color="white", size=11), row=1, col=1)
+        fig.add_annotation(x=idx, y=lab["y"], xref="x", yref="y", text=lab["text"], showarrow=True, arrowhead=2, ax=0, ay=25 if is_up else -25, bgcolor="rgba(0,230,118,0.85)" if is_up else "rgba(255,23,68,0.85)", font={"color": "white", "size": 11}, row=1, col=1)
 
     # state panel
     for nm in ["DSA_DIR", "rope_dir", "bars_since_dir_change", "is_consolidating", "consolidation_bars"]:
-        fig.add_trace(go.Scatter(x=x_num, y=df[nm], mode="lines", line=dict(width=1.3), name=nm, showlegend=False), row=2, col=1)
+        fig.add_trace(go.Scatter(x=x_num, y=df[nm], mode="lines", line={"width": 1.3}, name=nm, showlegend=False), row=2, col=1)
 
     # positions panel
     for nm in ["dsa_pivot_pos_01", "lh_hh_low_pos", "channel_pos_01", "range_pos_01", "rope_pivot_pos_01", "bb_pos_01"]:
-        fig.add_trace(go.Scatter(x=x_num, y=df[nm], mode="lines", line=dict(width=1.35), name=nm, showlegend=False), row=3, col=1)
+        fig.add_trace(go.Scatter(x=x_num, y=df[nm], mode="lines", line={"width": 1.35}, name=nm, showlegend=False), row=3, col=1)
     fig.add_hline(y=0.0, line_width=1, line_dash="dot", line_color=ZERO_COL, row=3, col=1)
     fig.add_hline(y=0.5, line_width=1, line_dash="dot", line_color=ZERO_COL, row=3, col=1)
     fig.add_hline(y=1.0, line_width=1, line_dash="dot", line_color=ZERO_COL, row=3, col=1)
 
     # deviations panel
     for nm in ["signed_vwap_dev_pct", "bull_vwap_dev_pct", "bear_vwap_dev_pct", "trend_aligned_vwap_dev_pct", "dist_to_rope_atr"]:
-        fig.add_trace(go.Scatter(x=x_num, y=df[nm], mode="lines", line=dict(width=1.35), name=nm, showlegend=False), row=4, col=1)
+        fig.add_trace(go.Scatter(x=x_num, y=df[nm], mode="lines", line={"width": 1.35}, name=nm, showlegend=False), row=4, col=1)
     fig.add_hline(y=0.0, line_width=1, line_dash="dot", line_color=ZERO_COL, row=4, col=1)
 
     # volatility panel
     for nm in ["range_width_atr_ffill", "bb_width_norm", "bb_width_percentile", "bb_width_change_5", "bb_width_vs_ma", "bb_expand_streak", "bb_contract_streak"]:
-        fig.add_trace(go.Scatter(x=x_num, y=df[nm], mode="lines", line=dict(width=1.35), name=nm, showlegend=False), row=5, col=1)
+        fig.add_trace(go.Scatter(x=x_num, y=df[nm], mode="lines", line={"width": 1.35}, name=nm, showlegend=False), row=5, col=1)
     fig.add_hline(y=0.0, line_width=1, line_dash="dot", line_color=ZERO_COL, row=5, col=1)
     fig.add_hline(y=0.5, line_width=1, line_dash="dot", line_color=ZERO_COL, row=5, col=1)
     fig.add_hline(y=1.0, line_width=1, line_dash="dot", line_color=ZERO_COL, row=5, col=1)
-    fig.add_trace(go.Scatter(x=x_num, y=df["bb_expanding"], mode="lines", line=dict(width=1.1, dash="dot"), name="bb_expanding", showlegend=False), row=5, col=1)
-    fig.add_trace(go.Scatter(x=x_num, y=df["bb_contracting"], mode="lines", line=dict(width=1.1, dash="dot"), name="bb_contracting", showlegend=False), row=5, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df["bb_expanding"], mode="lines", line={"width": 1.1, "dash": "dot"}, name="bb_expanding", showlegend=False), row=5, col=1)
+    fig.add_trace(go.Scatter(x=x_num, y=df["bb_contracting"], mode="lines", line={"width": 1.1, "dash": "dot"}, name="bb_contracting", showlegend=False), row=5, col=1)
 
     # trigger/stage panel
     trigger_cols = ["rope_slope_atr_5", "range_break_up", "range_break_up_strength"]
     for nm in trigger_cols:
-        fig.add_trace(go.Scatter(x=x_num, y=df[nm], mode="lines", line=dict(width=1.35), name=nm, showlegend=False), row=6, col=1)
+        fig.add_trace(go.Scatter(x=x_num, y=df[nm], mode="lines", line={"width": 1.35}, name=nm, showlegend=False), row=6, col=1)
     pivot_code_map = {"": np.nan, "HH": 2.0, "HL": 1.0, "LH": -1.0, "LL": -2.0}
     pivot_code = df["last_pivot_type"].map(pivot_code_map).astype(float)
     hover_text = [f"last_pivot_type={v}" if isinstance(v, str) and v else "last_pivot_type=" for v in df["last_pivot_type"].tolist()]
@@ -912,8 +912,8 @@ def build_figure(df: pd.DataFrame, dsa_segments: list[dict], dsa_labels: list[di
             x=x_num,
             y=pivot_code,
             mode="lines+markers",
-            line=dict(width=1.1, dash="dot"),
-            marker=dict(size=5),
+            line={"width": 1.1, "dash": "dot"},
+            marker={"size": 5},
             name="last_pivot_type",
             showlegend=False,
             text=hover_text,
@@ -930,7 +930,7 @@ def build_figure(df: pd.DataFrame, dsa_segments: list[dict], dsa_labels: list[di
         tickvals.append(len(df) - 1)
     ticktext = [tick_text[i] for i in tickvals]
 
-    fig.update_layout(template="plotly_dark", xaxis_rangeslider_visible=False, hovermode="x unified", margin=dict(l=40, r=20, t=80, b=40), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.01), height=1750)
+    fig.update_layout(template="plotly_dark", xaxis_rangeslider_visible=False, hovermode="x unified", margin={"l": 40, "r": 20, "t": 80, "b": 40}, legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.01}, height=1750)
     for r in [1, 2, 3, 4, 5, 6]:
         fig.update_xaxes(tickmode="array", tickvals=tickvals, ticktext=ticktext, showgrid=True, zeroline=False, row=r, col=1)
         fig.update_yaxes(showgrid=True, zeroline=False, row=r, col=1)

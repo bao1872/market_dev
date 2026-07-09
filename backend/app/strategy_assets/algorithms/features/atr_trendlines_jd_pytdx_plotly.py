@@ -393,7 +393,7 @@ class ATRTrendlinesJDWithFactors:
                 y1=y1,
                 xref="x1",
                 yref="y1",
-                line=dict(color=color, width=1, dash="dot"),
+                line={"color": color, "width": 1, "dash": "dot"},
                 layer="above",
             )
 
@@ -412,7 +412,7 @@ class ATRTrendlinesJDWithFactors:
                     y=self.df[col_name],
                     mode="lines",
                     name=display_name,
-                    line=dict(width=1.4),
+                    line={"width": 1.4},
                     hovertemplate=f"{display_name}=%{{y:.4f}}<extra></extra>",
                 ),
                 row=2,
@@ -433,8 +433,8 @@ class ATRTrendlinesJDWithFactors:
             template="plotly_dark",
             xaxis_rangeslider_visible=False,
             hovermode="x unified",
-            margin=dict(l=40, r=80, t=90, b=40),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.01),
+            margin={"l": 40, "r": 80, "t": 90, "b": 40},
+            legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.01},
         )
         fig.update_xaxes(
             range=[-1, self.right_x + 1],

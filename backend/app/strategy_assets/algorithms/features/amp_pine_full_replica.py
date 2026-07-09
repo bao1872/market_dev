@@ -1,3 +1,4 @@
+# ruff: noqa: N806  # kept to match upstream algorithm naming (Pine Script / SMC conventions)
 """
 Adaptive Market Profile (AMP) - Pine strict replica + factor extraction
 
@@ -548,25 +549,25 @@ def build_plot(payload: dict, symbol: str) -> go.Figure:
     fig.add_trace(go.Bar(x=df_all.index, y=df_all["volume"], marker_color=vol_colors, showlegend=False, name="Volume"), row=2, col=1)
 
     ch_x = [df_win.index[0], df_win.index[-1]]
-    fig.add_trace(go.Scatter(x=ch_x, y=[m["upper_start"], m["upper_end"]], mode="lines", line=dict(color=cfg.regColor, width=1), hoverinfo="skip", showlegend=False), row=1, col=1)
-    fig.add_trace(go.Scatter(x=ch_x, y=[m["lower_start"], m["lower_end"]], mode="lines", line=dict(color=cfg.regColor, width=1), hoverinfo="skip", showlegend=False), row=1, col=1)
-    fig.add_trace(go.Scatter(x=ch_x, y=[m["upper_start"], m["upper_end"]], mode="lines", line=dict(color="rgba(0,0,0,0)"), hoverinfo="skip", showlegend=False), row=1, col=1)
-    fig.add_trace(go.Scatter(x=ch_x, y=[m["lower_start"], m["lower_end"]], mode="lines", fill="tonexty", fillcolor=cfg.channelFill, line=dict(color="rgba(0,0,0,0)"), hoverinfo="skip", showlegend=False), row=1, col=1)
+    fig.add_trace(go.Scatter(x=ch_x, y=[m["upper_start"], m["upper_end"]], mode="lines", line={"color": cfg.regColor, "width": 1}, hoverinfo="skip", showlegend=False), row=1, col=1)
+    fig.add_trace(go.Scatter(x=ch_x, y=[m["lower_start"], m["lower_end"]], mode="lines", line={"color": cfg.regColor, "width": 1}, hoverinfo="skip", showlegend=False), row=1, col=1)
+    fig.add_trace(go.Scatter(x=ch_x, y=[m["upper_start"], m["upper_end"]], mode="lines", line={"color": "rgba(0,0,0,0)"}, hoverinfo="skip", showlegend=False), row=1, col=1)
+    fig.add_trace(go.Scatter(x=ch_x, y=[m["lower_start"], m["lower_end"]], mode="lines", fill="tonexty", fillcolor=cfg.channelFill, line={"color": "rgba(0,0,0,0)"}, hoverinfo="skip", showlegend=False), row=1, col=1)
 
     if cfg.showRegLine:
-        fig.add_trace(go.Scatter(x=ch_x, y=[m["mid_start"], m["mid_end"]], mode="lines", line=dict(color="rgba(180,180,180,0.7)", width=1, dash="dash"), hoverinfo="skip", showlegend=False), row=1, col=1)
+        fig.add_trace(go.Scatter(x=ch_x, y=[m["mid_start"], m["mid_end"]], mode="lines", line={"color": "rgba(180,180,180,0.7)", "width": 1, "dash": "dash"}, hoverinfo="skip", showlegend=False), row=1, col=1)
 
     for al in payload["activityLines"]:
-        fig.add_trace(go.Scatter(x=al["x"], y=al["y"], mode="lines", line=dict(color=al["color"], width=1), hoverinfo="skip", showlegend=False), row=1, col=1)
+        fig.add_trace(go.Scatter(x=al["x"], y=al["y"], mode="lines", line={"color": al["color"], "width": 1}, hoverinfo="skip", showlegend=False), row=1, col=1)
 
     shapes = []
     for poly in payload["profilePolys"]:
-        shapes.append(dict(
-            type="path",
-            xref="x", yref="y",
-            path=f"M {poly['x0']} {poly['y0_top']} L {poly['x0']} {poly['y0_bot']} L {poly['x1']} {poly['y1_bot']} L {poly['x1']} {poly['y1_top']} Z",
-            fillcolor=poly["fill"], line=dict(width=0), layer="below", opacity=1.0,
-        ))
+        shapes.append({
+            "type": "path",
+            "xref": "x", "yref": "y",
+            "path": f"M {poly['x0']} {poly['y0_top']} L {poly['x0']} {poly['y0_bot']} L {poly['x1']} {poly['y1_bot']} L {poly['x1']} {poly['y1_top']} Z",
+            "fillcolor": poly["fill"], "line": {"width": 0}, "layer": "below", "opacity": 1.0,
+        })
 
     info_html = (
         f"<b>AMP (strict Pine replica on last bar)</b><br>"
@@ -585,14 +586,14 @@ def build_plot(payload: dict, symbol: str) -> go.Figure:
     fig.add_annotation(
         xref="paper", yref="paper", x=0.012, y=0.988,
         xanchor="left", yanchor="top", text=info_html, align="left",
-        showarrow=False, font=dict(size=11, color="#c9d1d9"),
+        showarrow=False, font={"size": 11, "color": "#c9d1d9"},
         bgcolor="rgba(0,0,0,0.35)", bordercolor="rgba(255,255,255,0.15)", borderwidth=1, borderpad=7,
     )
 
     fig.add_annotation(
         x=df_win.index[0], y=m["lower_start"], xref="x", yref="y",
         text=f"{m['strength']:.3f}", showarrow=False,
-        font=dict(size=12, color="rgba(200,200,200,0.9)"),
+        font={"size": 12, "color": "rgba(200,200,200,0.9)"},
         bgcolor="rgba(0,0,0,0.25)", bordercolor="rgba(255,255,255,0.15)", borderwidth=1, borderpad=4, yshift=18,
     )
 
@@ -601,9 +602,9 @@ def build_plot(payload: dict, symbol: str) -> go.Figure:
         template="plotly_dark",
         xaxis_rangeslider_visible=False,
         hovermode="x unified",
-        margin=dict(l=40, r=20, t=80, b=40),
+        margin={"l": 40, "r": 20, "t": 80, "b": 40},
         height=950,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.01),
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.01},
     )
     for r in [1, 2]:
         fig.update_xaxes(showgrid=True, zeroline=False, row=r, col=1)

@@ -501,7 +501,7 @@ def build_plot(
         fig.add_shape(
             type="rect",
             x0=x0, x1=x1, y0=ch.bottom, y1=ch.top,
-            line=dict(color="rgba(0,0,0,0)"),
+            line={"color": "rgba(0,0,0,0)"},
             fillcolor="rgba(201,209,217,0.10)",
             layer="below",
         )
@@ -509,7 +509,7 @@ def build_plot(
         fig.add_shape(
             type="rect",
             x0=x0, x1=x1, y0=ch.upper_zone_bottom, y1=ch.top,
-            line=dict(color="rgba(0,0,0,0)"),
+            line={"color": "rgba(0,0,0,0)"},
             fillcolor=alpha_color(red, 0.28),
             layer="below",
         )
@@ -517,34 +517,34 @@ def build_plot(
         fig.add_shape(
             type="rect",
             x0=x0, x1=x1, y0=ch.bottom, y1=ch.lower_zone_top,
-            line=dict(color="rgba(0,0,0,0)"),
+            line={"color": "rgba(0,0,0,0)"},
             fillcolor=alpha_color(green, 0.28),
             layer="below",
         )
         # center line + zone boundaries
         fig.add_trace(go.Scatter(
             x=[x0, x1], y=[ch.center_y, ch.center_y],
-            mode="lines", line=dict(color="rgba(201,209,217,0.55)", width=1, dash="dash"),
+            mode="lines", line={"color": "rgba(201,209,217,0.55)", "width": 1, "dash": "dash"},
             hoverinfo="skip", showlegend=False
         ))
         fig.add_trace(go.Scatter(
             x=[x0, x1], y=[ch.top, ch.top],
-            mode="lines", line=dict(color=red, width=2),
+            mode="lines", line={"color": red, "width": 2},
             hoverinfo="skip", showlegend=False
         ))
         fig.add_trace(go.Scatter(
             x=[x0, x1], y=[ch.upper_zone_bottom, ch.upper_zone_bottom],
-            mode="lines", line=dict(color=alpha_color(red, 0.65), width=1, dash="dot"),
+            mode="lines", line={"color": alpha_color(red, 0.65), "width": 1, "dash": "dot"},
             hoverinfo="skip", showlegend=False
         ))
         fig.add_trace(go.Scatter(
             x=[x0, x1], y=[ch.lower_zone_top, ch.lower_zone_top],
-            mode="lines", line=dict(color=alpha_color(green, 0.65), width=1, dash="dot"),
+            mode="lines", line={"color": alpha_color(green, 0.65), "width": 1, "dash": "dot"},
             hoverinfo="skip", showlegend=False
         ))
         fig.add_trace(go.Scatter(
             x=[x0, x1], y=[ch.bottom, ch.bottom],
-            mode="lines", line=dict(color=green, width=2),
+            mode="lines", line={"color": green, "width": 2},
             hoverinfo="skip", showlegend=False
         ))
 
@@ -565,7 +565,7 @@ def build_plot(
                 fig.add_shape(
                     type="rect",
                     x0=left, x1=profile_right, y0=bot_b, y1=top_b,
-                    line=dict(color=col, width=1),
+                    line={"color": col, "width": 1},
                     fillcolor=col,
                     layer="above",
                 )
@@ -577,7 +577,7 @@ def build_plot(
             fig.add_annotation(
                 x=x1, y=text_y1,
                 text=ch.current_sentiment_text,
-                font=dict(color=ch.current_sentiment_color or fg, size=11),
+                font={"color": ch.current_sentiment_color or fg, "size": 11},
                 bgcolor="rgba(0,0,0,0.35)",
                 bordercolor="rgba(255,255,255,0.10)",
                 xanchor="right",
@@ -587,7 +587,7 @@ def build_plot(
             fig.add_annotation(
                 x=x1, y=text_y2,
                 text=ch.overall_sentiment_text,
-                font=dict(color=fg, size=11),
+                font={"color": fg, "size": 11},
                 bgcolor="rgba(0,0,0,0.35)",
                 bordercolor="rgba(255,255,255,0.10)",
                 xanchor="right",
@@ -600,12 +600,12 @@ def build_plot(
 
     fig.add_trace(go.Scatter(
         x=df.index, y=bull_line, mode="lines",
-        line=dict(color=green, width=2), name="Bullish Trend",
+        line={"color": green, "width": 2}, name="Bullish Trend",
         connectgaps=False
     ))
     fig.add_trace(go.Scatter(
         x=df.index, y=bear_line, mode="lines",
-        line=dict(color=red, width=2), name="Bearish Trend",
+        line={"color": red, "width": 2}, name="Bearish Trend",
         connectgaps=False
     ))
 
@@ -613,20 +613,20 @@ def build_plot(
     midp = (df["close"] + df["open"]) / 2.0
 
     fig.add_trace(go.Scatter(
-        x=df.index, y=midp, mode="lines", line=dict(color="rgba(0,0,0,0)"),
+        x=df.index, y=midp, mode="lines", line={"color": "rgba(0,0,0,0)"},
         hoverinfo="skip", showlegend=False
     ))
     fig.add_trace(go.Scatter(
-        x=df.index, y=bull_line, mode="lines", line=dict(color="rgba(0,0,0,0)"),
+        x=df.index, y=bull_line, mode="lines", line={"color": "rgba(0,0,0,0)"},
         fill="tonexty", fillcolor=alpha_color(green, 0.15),
         hoverinfo="skip", showlegend=False
     ))
     fig.add_trace(go.Scatter(
-        x=df.index, y=midp, mode="lines", line=dict(color="rgba(0,0,0,0)"),
+        x=df.index, y=midp, mode="lines", line={"color": "rgba(0,0,0,0)"},
         hoverinfo="skip", showlegend=False
     ))
     fig.add_trace(go.Scatter(
-        x=df.index, y=bear_line, mode="lines", line=dict(color="rgba(0,0,0,0)"),
+        x=df.index, y=bear_line, mode="lines", line={"color": "rgba(0,0,0,0)"},
         fill="tonexty", fillcolor=alpha_color(red, 0.15),
         hoverinfo="skip", showlegend=False
     ))
@@ -639,7 +639,7 @@ def build_plot(
         y = [float(np.min(df["low"].iloc[max(0, i - 2): i + 1])) for i in bull_idx]
         fig.add_trace(go.Scatter(
             x=df.index[bull_idx], y=y, mode="markers+text",
-            marker=dict(symbol="triangle-up", size=10, color=green),
+            marker={"symbol": "triangle-up", "size": 10, "color": green},
             text=["▲"] * len(bull_idx), textposition="top center",
             name="Bullish Breakout"
         ))
@@ -647,7 +647,7 @@ def build_plot(
         y = [float(np.max(df["high"].iloc[max(0, i - 2): i + 1])) for i in bear_idx]
         fig.add_trace(go.Scatter(
             x=df.index[bear_idx], y=y, mode="markers+text",
-            marker=dict(symbol="triangle-down", size=10, color=red),
+            marker={"symbol": "triangle-down", "size": 10, "color": red},
             text=["▼"] * len(bear_idx), textposition="bottom center",
             name="Bearish Breakout"
         ))
@@ -656,12 +656,12 @@ def build_plot(
         title=title,
         plot_bgcolor=bg,
         paper_bgcolor=bg,
-        font=dict(color=fg),
+        font={"color": fg},
         height=900,
-        margin=dict(l=50, r=50, t=60, b=40),
-        xaxis=dict(showgrid=True, gridcolor=grid, rangeslider_visible=False),
-        yaxis=dict(showgrid=True, gridcolor=grid, title="Price"),
-        legend=dict(orientation="h", x=0.01, y=1.03),
+        margin={"l": 50, "r": 50, "t": 60, "b": 40},
+        xaxis={"showgrid": True, "gridcolor": grid, "rangeslider_visible": False},
+        yaxis={"showgrid": True, "gridcolor": grid, "title": "Price"},
+        legend={"orientation": "h", "x": 0.01, "y": 1.03},
     )
 
     fig.write_html(out_html, include_plotlyjs="cdn")
