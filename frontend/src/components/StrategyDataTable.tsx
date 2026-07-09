@@ -7,6 +7,7 @@ import { useSearchParams } from 'react-router-dom'
 import clsx from 'clsx'
 import { TablePresetMenu } from './TablePresetMenu'
 import { useTableViewPresets } from '@/hooks/useApi'
+import { decodeScreenerUrlState, encodeScreenerUrlState } from './screenerUrlState'
 import type { TableViewPresetConfig } from '@/api/endpoints'
 
 // ===== 类型定义（对应 UI_DEVELOPMENT_SPEC.md 3.3 推荐组件输入）=====
@@ -397,49 +398,51 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
   }, [activeRunId])
 
   // ===== URL 状态同步 =====
+  const urlHydratedRef = useRef(false)
+  const urlHadStateRef = useRef(false)
+
   // 从 URL 恢复状态（mount 时执行一次）；丢弃当前 columns 中不存在的陈旧 key
   useEffect(() => {
-    const urlSort = searchParams.get('sort')
-    const urlDir = searchParams.get('dir')
-    const urlPage = searchParams.get('page')
-    const urlPageSize = searchParams.get('page_size')
-    const urlKeyword = searchParams.get('keyword')
-    const urlFilters = searchParams.get('filters')
     const validKeys = new Set(columns.map((c) => c.key))
-    if (urlSort && urlDir && validKeys.has(urlSort)) {
-      const idx = columns.findIndex((c) => c.key === urlSort)
+    const state = decodeScreenerUrlState(searchParams, validKeys, {
+      defaultPageSize: initialPageSize,
+    })
+    if (
+      state.keyword ||
+      (state.filters && state.filters.length > 0) ||
+      state.sort ||
+      (state.page !== undefined && state.page !== 1) ||
+      (state.pageSize !== undefined && state.pageSize !== initialPageSize)
+    ) {
+      urlHadStateRef.current = true
+    }
+    if (state.sort) {
+      const idx = columns.findIndex((c) => c.key === state.sort!.key)
       if (idx >= 0) {
         setSortColumn(idx)
-        setSortDirection(urlDir as 'asc' | 'desc')
+        setSortDirection(state.sort.direction)
       }
     }
-    if (urlKeyword) setGlobalQuery(urlKeyword)
-    if (urlFilters) {
-      try {
-        const parsed: unknown = JSON.parse(urlFilters)
-        if (Array.isArray(parsed)) {
-          const next: Record<number, DataTableFilter> = {}
-          for (const item of parsed) {
-            if (!item || typeof item !== 'object' || !validKeys.has(String(item.key))) continue
-            const idx = columns.findIndex((c) => c.key === String(item.key))
-            if (idx < 0) continue
-            const op = String(item.op)
-            if (!operatorsForDataType(columns[idx].dataType).includes(op as FilterOperator)) continue
-            next[idx] = {
-              key: String(item.key),
-              operator: op as FilterOperator,
-              value: item.value,
-              ...(item.value2 !== undefined ? { value2: item.value2 } : {}),
-            }
-          }
-          setFilters(next)
+    if (state.keyword) setGlobalQuery(state.keyword)
+    if (state.filters && state.filters.length > 0) {
+      const next: Record<number, DataTableFilter> = {}
+      for (const f of state.filters) {
+        const idx = columns.findIndex((c) => c.key === f.key)
+        if (idx < 0) continue
+        const ops = operatorsForDataType(columns[idx].dataType)
+        if (!ops.includes(f.op as FilterOperator)) continue
+        next[idx] = {
+          key: f.key,
+          operator: f.op as FilterOperator,
         }
-      } catch {
-        // ignore malformed filters JSON
+        if (f.value !== undefined) next[idx].value = f.value as string | number
+        if (f.value2 !== undefined) next[idx].value2 = f.value2 as string | number
       }
+      if (Object.keys(next).length > 0) setFilters(next)
     }
-    if (urlPage) setPage(parseInt(urlPage, 10))
-    if (urlPageSize) setPageSize(parseInt(urlPageSize, 10))
+    if (state.page !== undefined) setPage(state.page)
+    if (state.pageSize !== undefined) setPageSize(state.pageSize)
+    urlHydratedRef.current = true
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ===== localStorage 恢复（按 column key 持久化，列顺序变化后不会错列）=====
@@ -605,6 +608,11 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     if (!strategyKey || !presetsQuery.data) return
     const appliedKey = `${tableId}:${strategyKey}`
     if (defaultAppliedRef.current === appliedKey) return
+    // [StrategyDataTable] - 描述: URL 中已有排序/筛选/关键词/页码时，不覆盖为默认 preset
+    if (urlHadStateRef.current) {
+      defaultAppliedRef.current = appliedKey
+      return
+    }
     const defaultPreset = presetsQuery.data.items.find((p) => p.is_default)
     if (defaultPreset) {
       const cfg = defaultPreset.config as Record<string, unknown>
@@ -621,36 +629,33 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
 
   // ===== URL 同步 =====
   useEffect(() => {
-    const params = new URLSearchParams(searchParams)
-    if (sortColumn !== null && sortDirection) {
-      params.set('sort', columns[sortColumn]?.key || '')
-      params.set('dir', sortDirection)
-    } else {
-      params.delete('sort')
-      params.delete('dir')
+    if (!urlHydratedRef.current) return
+    const state = {
+      keyword: globalQuery.trim() || undefined,
+      sort:
+        sortColumn !== null && sortDirection
+          ? { key: columns[sortColumn]?.key || '', direction: sortDirection }
+          : undefined,
+      filters: Object.values(filters).map((f) => ({
+        key: f.key,
+        op: f.operator,
+        ...(f.value !== undefined ? { value: f.value } : {}),
+        ...(f.value2 !== undefined ? { value2: f.value2 } : {}),
+      })),
+      page,
+      pageSize,
     }
-    if (globalQuery.trim()) {
-      params.set('keyword', globalQuery.trim())
-    } else {
-      params.delete('keyword')
+    const encoded = encodeScreenerUrlState(state, { defaultPageSize: initialPageSize })
+    const nextParams = new URLSearchParams(searchParams)
+    const managedKeys = ['sort', 'dir', 'keyword', 'filters', 'page', 'page_size']
+    for (const key of managedKeys) {
+      if (encoded.has(key)) {
+        nextParams.set(key, encoded.get(key)!)
+      } else {
+        nextParams.delete(key)
+      }
     }
-    const filterList = Object.values(filters).map((f) => ({
-      key: f.key,
-      op: f.operator,
-      value: f.value,
-      ...(f.value2 !== undefined ? { value2: f.value2 } : {}),
-    }))
-    if (filterList.length > 0) {
-      params.set('filters', JSON.stringify(filterList))
-    } else {
-      params.delete('filters')
-    }
-    if (page > 1) params.set('page', String(page))
-    else params.delete('page')
-    // [StrategyDataTable] - 描述: URL 同步基准值为 initialPageSize（非默认值时写入 URL）
-    if (pageSize !== initialPageSize) params.set('page_size', String(pageSize))
-    else params.delete('page_size')
-    setSearchParams(params, { replace: true })
+    setSearchParams(nextParams, { replace: true })
   }, [sortColumn, sortDirection, page, pageSize, columns, searchParams, setSearchParams, initialPageSize, globalQuery, filters])
 
   // ===== 服务端查询回调 =====

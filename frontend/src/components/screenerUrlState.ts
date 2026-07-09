@@ -30,8 +30,18 @@ export interface ScreenerUrlState {
 const DEFAULT_PAGE = 1
 const DEFAULT_PAGE_SIZE = 50
 
+export interface ScreenerUrlStateOptions {
+  defaultPage?: number
+  defaultPageSize?: number
+}
+
 /** 将趋势选股状态编码为 URLSearchParams */
-export function encodeScreenerUrlState(state: ScreenerUrlState): URLSearchParams {
+export function encodeScreenerUrlState(
+  state: ScreenerUrlState,
+  options?: ScreenerUrlStateOptions,
+): URLSearchParams {
+  const defaultPage = options?.defaultPage ?? DEFAULT_PAGE
+  const defaultPageSize = options?.defaultPageSize ?? DEFAULT_PAGE_SIZE
   const params = new URLSearchParams()
   if (state.strategy) {
     params.set('strategy', state.strategy)
@@ -52,10 +62,10 @@ export function encodeScreenerUrlState(state: ScreenerUrlState): URLSearchParams
     })
     params.set('filters', JSON.stringify(compact))
   }
-  if (state.page !== undefined && state.page !== DEFAULT_PAGE) {
+  if (state.page !== undefined && state.page !== defaultPage) {
     params.set('page', String(state.page))
   }
-  if (state.pageSize !== undefined && state.pageSize !== DEFAULT_PAGE_SIZE) {
+  if (state.pageSize !== undefined && state.pageSize !== defaultPageSize) {
     params.set('page_size', String(state.pageSize))
   }
   return params
@@ -65,7 +75,10 @@ export function encodeScreenerUrlState(state: ScreenerUrlState): URLSearchParams
 export function decodeScreenerUrlState(
   params: URLSearchParams,
   validKeys: Set<string>,
+  options?: ScreenerUrlStateOptions,
 ): ScreenerUrlState {
+  const defaultPage = options?.defaultPage ?? DEFAULT_PAGE
+  const defaultPageSize = options?.defaultPageSize ?? DEFAULT_PAGE_SIZE
   const state: ScreenerUrlState = {}
 
   const strategy = params.get('strategy')
@@ -103,6 +116,8 @@ export function decodeScreenerUrlState(
             if (item.value2 !== undefined) filter.value2 = item.value2
             return filter
           })
+      } else {
+        state.filters = []
       }
     } catch {
       state.filters = []
@@ -127,10 +142,10 @@ export function decodeScreenerUrlState(
 
   // 往返一致：缺失时填充默认值
   if (state.page === undefined) {
-    state.page = DEFAULT_PAGE
+    state.page = defaultPage
   }
   if (state.pageSize === undefined) {
-    state.pageSize = DEFAULT_PAGE_SIZE
+    state.pageSize = defaultPageSize
   }
 
   return state
