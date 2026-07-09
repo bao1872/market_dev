@@ -84,6 +84,10 @@ export interface DataTableProps<Row> {
   tableClassName?: string
   // [Presets] - 描述: 策略 key（提供时启用视图配置保存/应用功能）
   strategyKey?: string | null
+  // [StickyHeader] - 描述: 表头 sticky 模式
+  // - container: 在 .table-wrap 局部滚动容器内吸附（默认，兼容历史行为）
+  // - viewport: 在页面滚动时吸附到 topbar 下方（趋势选股页使用）
+  stickyHeaderMode?: 'viewport' | 'container'
 }
 
 // [StrategyDataTable] - 描述: 按字段类型返回可选操作符列表（默认操作符为数组首项）
@@ -368,6 +372,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     initialPageSize = 10,
     tableClassName,
     strategyKey,
+    stickyHeaderMode = 'container',
   } = props
 
   const [searchParams, setSearchParams] = useSearchParams()
@@ -711,7 +716,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
   let stickyAssigned = false
 
   return (
-    <div className="table-wrap">
+    <div className={clsx('table-wrap', stickyHeaderMode === 'viewport' && 'viewport-sticky')}>
       {/* 元信息栏 */}
       <div className="table-meta-bar">
         <div>

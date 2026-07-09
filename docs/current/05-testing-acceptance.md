@@ -654,7 +654,7 @@ docker logs trading-backend --tail 200 2>&1 | grep -i traceback
 
 任何修改 `frontend/src/pages/ScreenerPage.tsx`（handleBatchAdd）、`frontend/src/features/trend-selection/columns.tsx`（change_pct 列）、`frontend/src/components/StrategyDataTable.tsx`（preset 集成）、`frontend/src/components/TablePresetMenu.tsx`、`frontend/src/styles/global.scss`（sticky 表头/选择列）、`backend/app/api/me_table_view_presets.py`、`backend/app/schemas/table_view_preset.py`、`backend/app/models/table_view_preset.py`、`backend/alembic/versions/059_user_table_view_presets.py` 必须跑本节回归测试。
 
-### 3.10.1 后端 preset API 回归（`tests/test_table_view_presets_api.py`，47 个用例）
+### 3.10.1 后端 preset API 回归（`tests/test_table_view_presets_api.py`，50 个用例）
 
 权限矩阵（10 个用例）：
 - 未认证 → 401（GET/POST/PATCH/DELETE 各一）；
@@ -725,6 +725,11 @@ PATCH 空请求（1 个用例）：
 - `alembic downgrade -1` 删除表；
 - `alembic upgrade head` 再升级不报错。
 
+跨 session 持久化（3 个用例）：
+- `test_create_persists_across_sessions`：POST 创建 preset 后，使用新 `AsyncSession` 重新查询，确认记录已持久化；
+- `test_update_persists_across_sessions`：PATCH 更新 name/config/is_default 后，使用新 `AsyncSession` 确认字段已持久化；
+- `test_delete_persists_across_sessions`：DELETE preset 后，使用新 `AsyncSession` 确认记录不存在。
+
 ### 3.10.2 前端 columns.test.ts 回归（6 个用例）
 
 - change_pct 列存在于 trend-selection columns；
@@ -760,6 +765,21 @@ PATCH 空请求（1 个用例）：
 - `.interactive-table thead th.sticky-col, thead th.table-select-column` z-index:5（角落单元格最高）；
 - `.interactive-table .table-select-column + th.sticky-col` left:40px（首列偏移选择列宽度）。
 
+### 3.10.6 前端 tablePresetMenu.test.ts 回归（4 个用例）
+
+- `savePreset` 空名称时提示输入名称并直接返回，不调用 mutation；
+- `savePreset` 成功时 trimmed 名称、清空输入框、清除下拉错误、toast 成功、并调用 `presetsQuery.refetch()` 刷新列表；
+- `savePreset` 失败时在下拉内显示后端 detail 并 toast 错误；
+- `savePreset` 失败且无 detail 时使用默认文案“保存失败”。
+
+### 3.10.7 前端 stickyHeader.test.ts 回归（4 个用例）
+
+- `StrategyDataTable` 支持 `stickyHeaderMode?: "viewport" | "container"` prop；
+- `stickyHeaderMode === "viewport"` 时为 `.table-wrap` 附加 `viewport-sticky` class；
+- `ScreenerPage` 对 `StrategyDataTable` 传入 `stickyHeaderMode="viewport"`；
+- `global.scss` 中 `.table-wrap.viewport-sticky` 不抢占滚动容器（`overflow: visible`）；
+- `.table-wrap.viewport-sticky .data-table th` 的 `top` 使用 `var(--topbar)`，`z-index` 为 18。
+
 回归命令：
 
 ```bash
@@ -781,10 +801,12 @@ cd /root/web_dev/frontend
 npx tsc --noEmit
 node --experimental-strip-types --test \
   src/features/trend-selection/__tests__/columns.test.ts \
-  src/pages/__tests__/ScreenerPage.batch.test.ts
+  src/pages/__tests__/ScreenerPage.batch.test.ts \
+  src/components/__tests__/tablePresetMenu.test.ts \
+  src/components/__tests__/stickyHeader.test.ts
 ```
 
-预期：37 passed（后端）+ 12 passed（前端 columns 6 + batch 6）、ruff 零错误、mypy 零错误、tsc 零错误。
+预期：50 passed（后端）+ 20 passed（前端 columns 6 + batch 6 + tablePresetMenu 4 + stickyHeader 4）、ruff 零错误、mypy 零错误、tsc 零错误。
 
 ## 4. CI 门禁
 

@@ -24,17 +24,20 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import create_access_token, get_password_hash
 from app.main import app
+from app.models.invitation import InviteCode
 from app.models.subscription import Subscription
+from app.models.table_view_preset import UserTableViewPreset
 from app.models.user import Role, User, UserRole
 from app.services.subscription_service import (
     generate_invite_codes,
     register_with_invite_code,
 )
+from tests.conftest import TestAsyncSessionLocal
 
 # ============================================================
 # 测试辅助函数（复用 test_trend_selection_api_permissions 模式）
@@ -1489,6 +1492,225 @@ async def test_config_sort_key_must_be_nonempty_string(
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 422, resp.text
+
+
+# ============================================================
+# 跨 session 持久化测试（真实端到端：验证 API 内部 commit）
+#
+# 背景：原实现 create/update/delete 只 flush() 不 commit()，测试 fixture 复用
+# 同一个 db_session，读到了未提交数据，导致生产请求结束后事务回滚、数据丢失。
+# 以下测试使用独立的 TestAsyncSessionLocal session 模拟不同请求，验证写操作
+# 提交后新 session 可见。
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_create_persists_across_sessions(client: AsyncClient) -> None:
+    """POST 创建 preset 后，新 AsyncSession 必须能读到持久化记录。"""
+    from app.core.deps import get_db as deps_get_db
+    from app.db import get_db as db_get_db
+
+    async with TestAsyncSessionLocal() as session_a:
+        user, _ = await _create_member_with_plan(session_a, "observe_20")
+        await session_a.commit()
+
+        async def _get_db_a() -> AsyncGenerator[AsyncSession, None]:
+            yield session_a
+
+        app.dependency_overrides[deps_get_db] = _get_db_a
+        app.dependency_overrides[db_get_db] = _get_db_a
+
+        resp = await client.post(
+            "/me/table-view-presets",
+            json={
+                "table_id": "screener",
+                "strategy_key": "dsa_selector",
+                "name": "跨会话测试",
+                "config": _valid_config(),
+            },
+            headers=_auth_headers(user.id),
+        )
+        assert resp.status_code == 201, resp.text
+        preset_id = resp.json()["id"]
+
+    # 新 session 模拟新请求，验证持久化
+    async with TestAsyncSessionLocal() as session_b:
+        async def _get_db_b() -> AsyncGenerator[AsyncSession, None]:
+            yield session_b
+
+        app.dependency_overrides[deps_get_db] = _get_db_b
+        app.dependency_overrides[db_get_db] = _get_db_b
+
+        resp = await client.get(
+            "/me/table-view-presets",
+            params={"table_id": "screener", "strategy_key": "dsa_selector"},
+            headers=_auth_headers(user.id),
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["total"] == 1, f"期望查到 1 条，实际 {data}"
+        assert data["items"][0]["id"] == preset_id
+        assert data["items"][0]["name"] == "跨会话测试"
+
+        # 清理（独立 transaction 已真正提交，必须主动删除）
+        await session_b.execute(
+            delete(UserTableViewPreset).where(UserTableViewPreset.id == preset_id)
+        )
+        await session_b.execute(
+            delete(InviteCode).where(InviteCode.used_by == user.id)
+        )
+        await session_b.execute(
+            delete(Subscription).where(Subscription.user_id == user.id)
+        )
+        await session_b.execute(delete(UserRole).where(UserRole.user_id == user.id))
+        await session_b.execute(delete(User).where(User.id == user.id))
+        await session_b.commit()
+
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_update_persists_across_sessions(client: AsyncClient) -> None:
+    """PATCH 更新 preset 后，新 AsyncSession 必须读到更新后的 name/config/is_default。"""
+    from app.core.deps import get_db as deps_get_db
+    from app.db import get_db as db_get_db
+
+    async with TestAsyncSessionLocal() as session_a:
+        user, _ = await _create_member_with_plan(session_a, "observe_20")
+        await session_a.commit()
+
+        async def _get_db_a() -> AsyncGenerator[AsyncSession, None]:
+            yield session_a
+
+        app.dependency_overrides[deps_get_db] = _get_db_a
+        app.dependency_overrides[db_get_db] = _get_db_a
+
+        create_resp = await client.post(
+            "/me/table-view-presets",
+            json={
+                "table_id": "screener",
+                "strategy_key": "dsa_selector",
+                "name": "更新前",
+                "config": {"pageSize": 20},
+                "is_default": False,
+            },
+            headers=_auth_headers(user.id),
+        )
+        assert create_resp.status_code == 201, create_resp.text
+        preset_id = create_resp.json()["id"]
+
+        patch_resp = await client.patch(
+            f"/me/table-view-presets/{preset_id}",
+            json={
+                "name": "更新后",
+                "config": {"pageSize": 100, "keyword": "新能源"},
+                "is_default": True,
+            },
+            headers=_auth_headers(user.id),
+        )
+        assert patch_resp.status_code == 200, patch_resp.text
+
+    async with TestAsyncSessionLocal() as session_b:
+        async def _get_db_b() -> AsyncGenerator[AsyncSession, None]:
+            yield session_b
+
+        app.dependency_overrides[deps_get_db] = _get_db_b
+        app.dependency_overrides[db_get_db] = _get_db_b
+
+        resp = await client.get(
+            "/me/table-view-presets",
+            params={"table_id": "screener", "strategy_key": "dsa_selector"},
+            headers=_auth_headers(user.id),
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["total"] == 1, data
+        item = data["items"][0]
+        assert item["id"] == preset_id
+        assert item["name"] == "更新后"
+        assert item["config"]["pageSize"] == 100
+        assert item["config"]["keyword"] == "新能源"
+        assert item["is_default"] is True
+
+        await session_b.execute(
+            delete(UserTableViewPreset).where(UserTableViewPreset.id == preset_id)
+        )
+        await session_b.execute(
+            delete(InviteCode).where(InviteCode.used_by == user.id)
+        )
+        await session_b.execute(
+            delete(Subscription).where(Subscription.user_id == user.id)
+        )
+        await session_b.execute(delete(UserRole).where(UserRole.user_id == user.id))
+        await session_b.execute(delete(User).where(User.id == user.id))
+        await session_b.commit()
+
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_delete_persists_across_sessions(client: AsyncClient) -> None:
+    """DELETE preset 后，新 AsyncSession 必须查不到该记录。"""
+    from app.core.deps import get_db as deps_get_db
+    from app.db import get_db as db_get_db
+
+    async with TestAsyncSessionLocal() as session_a:
+        user, _ = await _create_member_with_plan(session_a, "observe_20")
+        await session_a.commit()
+
+        async def _get_db_a() -> AsyncGenerator[AsyncSession, None]:
+            yield session_a
+
+        app.dependency_overrides[deps_get_db] = _get_db_a
+        app.dependency_overrides[db_get_db] = _get_db_a
+
+        create_resp = await client.post(
+            "/me/table-view-presets",
+            json={
+                "table_id": "screener",
+                "strategy_key": "dsa_selector",
+                "name": "待删除",
+                "config": {"pageSize": 20},
+            },
+            headers=_auth_headers(user.id),
+        )
+        assert create_resp.status_code == 201, create_resp.text
+        preset_id = create_resp.json()["id"]
+
+        del_resp = await client.delete(
+            f"/me/table-view-presets/{preset_id}",
+            headers=_auth_headers(user.id),
+        )
+        assert del_resp.status_code == 204, del_resp.text
+
+    async with TestAsyncSessionLocal() as session_b:
+        async def _get_db_b() -> AsyncGenerator[AsyncSession, None]:
+            yield session_b
+
+        app.dependency_overrides[deps_get_db] = _get_db_b
+        app.dependency_overrides[db_get_db] = _get_db_b
+
+        resp = await client.get(
+            "/me/table-view-presets",
+            params={"table_id": "screener", "strategy_key": "dsa_selector"},
+            headers=_auth_headers(user.id),
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["total"] == 0, f"期望删除后 0 条，实际 {data}"
+
+        # 清理用户（preset 已删除）
+        await session_b.execute(
+            delete(InviteCode).where(InviteCode.used_by == user.id)
+        )
+        await session_b.execute(
+            delete(Subscription).where(Subscription.user_id == user.id)
+        )
+        await session_b.execute(delete(UserRole).where(UserRole.user_id == user.id))
+        await session_b.execute(delete(User).where(User.id == user.id))
+        await session_b.commit()
+
+    app.dependency_overrides.clear()
 
 
 if __name__ == "__main__":

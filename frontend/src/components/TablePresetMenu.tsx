@@ -11,6 +11,7 @@ import {
   useDeleteTableViewPreset,
 } from '@/hooks/useApi'
 import type { TableViewPresetConfig } from '@/api/endpoints'
+import { savePreset } from './tablePresetMenuLogic'
 
 export interface TablePresetMenuProps {
   tableId: string
@@ -47,6 +48,7 @@ export function TablePresetMenu({ tableId, strategyKey, currentConfig, onApply }
   const toast = useToast.getState()
   const [open, setOpen] = useState(false)
   const [editingName, setEditingName] = useState('')
+  const [saveError, setSaveError] = useState<string | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const containerRef = useRef<HTMLDivElement>(null)
@@ -72,26 +74,19 @@ export function TablePresetMenu({ tableId, strategyKey, currentConfig, onApply }
   }, [open])
 
   /** 保存当前配置为新 preset */
-  const handleSave = async () => {
-    const name = editingName.trim()
-    if (!name) {
-      toast.show('保存配置', '请输入配置名称')
-      return
-    }
-    try {
-      await createMutation.mutateAsync({
-        table_id: tableId,
-        strategy_key: strategyKey ?? null,
-        name,
-        config: configToPayload(currentConfig),
-        is_default: presets.length === 0,
-      })
-      toast.show('保存配置', `已保存「${name}」`)
-      setEditingName('')
-    } catch (e: unknown) {
-      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? '保存失败'
-      toast.show('保存配置失败', msg)
-    }
+  const handleSave = () => {
+    savePreset({
+      name: editingName,
+      tableId,
+      strategyKey,
+      payload: configToPayload(currentConfig),
+      isDefault: presets.length === 0,
+      createMutation,
+      presetsQuery,
+      toast,
+      setEditingName,
+      setSaveError,
+    })
   }
 
   /** 覆盖已有 preset 的 config */
@@ -182,6 +177,9 @@ export function TablePresetMenu({ tableId, strategyKey, currentConfig, onApply }
               保存
             </button>
           </div>
+          {saveError && (
+            <div className="table-preset-error">{saveError}</div>
+          )}
 
           {/* 已保存配置列表 */}
           {presets.length === 0 ? (

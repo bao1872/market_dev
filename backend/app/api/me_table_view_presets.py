@@ -178,6 +178,7 @@ async def create_my_table_view_preset(
     db.add(preset)
     try:
         await db.flush()
+        await db.commit()
     except IntegrityError as e:
         await db.rollback()
         # [UniqueConstraint] - 描述: partial unique index 冲突（strategy_key NULL/非NULL 两个索引）
@@ -267,6 +268,7 @@ async def update_my_table_view_preset(
 
     try:
         await db.flush()
+        await db.commit()
     except IntegrityError as e:
         await db.rollback()
         # [UniqueConstraint] - 描述: partial unique index 冲突（strategy_key NULL/非NULL 两个索引）
@@ -325,8 +327,13 @@ async def delete_my_table_view_preset(
             detail="preset 不存在或不属于当前用户",
         )
 
-    await db.delete(preset)
-    await db.flush()
+    try:
+        await db.delete(preset)
+        await db.flush()
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
 
 
 async def _unset_default_for_scope(

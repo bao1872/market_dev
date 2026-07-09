@@ -4,6 +4,16 @@
 
 ## 2026-07-09
 
+- CHANGE-20260709-004: PR #52 真实端到端问题 hotfix（preset 持久化 + sticky 表头）
+  - 修复 `backend/app/api/me_table_view_presets.py` create/update/delete 只 `flush()` 不 `commit()` 导致生产 preset 丢失的问题：POST/PATCH/DELETE 成功后均 `await db.commit()`，异常分支 `await db.rollback()` 后 re-raise
+  - 新增 3 个跨 session 持久化测试：create/update/delete 后用独立 `TestAsyncSessionLocal` 验证真实持久化
+  - 修复前端 `TablePresetMenu` 保存后列表不刷新：抽出 `tablePresetMenuLogic.ts::savePreset`，成功后 `presetsQuery.refetch()` 并清空输入框，失败时在下拉内显示后端 detail 并 toast
+  - 新增 `frontend/src/components/__tests__/tablePresetMenu.test.ts`（4 用例）覆盖空名提示/成功刷新/失败显示 detail/默认错误文案
+  - 修复趋势选股页 sticky 表头：`StrategyDataTable` 新增 `stickyHeaderMode="viewport"`，ScreenerPage 传入 viewport，`.table-wrap.viewport-sticky { overflow: visible }`，表头 `top: var(--topbar)`、`z-index: 18`
+  - 新增 `frontend/src/components/__tests__/stickyHeader.test.ts`（4 用例）覆盖 prop/class/overflow/top/z-index 契约
+  - 文档更新：`docs/current/02-data-api-contracts.md`、`04-frontend-ux.md`、`05-testing-acceptance.md`，`docs/maps/frontend-route-map.md`、`api-route-map.md`、`test-coverage-map.md`
+  - 无 migration、无数据回补、无新依赖
+
 - CHANGE-20260709-002: 趋势选股批量加入修复 + change_pct 独立列 + 表格视图配置预设 + sticky 表头
   - 修复 `ScreenerPage.handleBatchAdd` 按 `r.resultId` 匹配导致 selected 永远为空的 bug：rowKey 是 `instrumentId`，selectedKeys 保存 instrumentId，handleBatchAdd 改用 `r.instrumentId` 匹配 + 去重；选中后无可加入股票 toast 提示而非静默；成功/失败 toast 真实反映数量；保留 `useAddToWatchlist` 缓存失效逻辑
   - 新增趋势选股表头"当日涨跌幅"独立列：key=`change_pct`、title=当日涨跌幅、shortTitle=涨跌幅、dataType=percent、sortable=true、filterable=true、width≈86，render 用 `fmtChange` + A股涨红跌绿（`changePctColorClass`）；后端 `dsa_selector.yaml` manifest 已支持 filterable/sortable（无需改后端白名单）；`change_pct` 已为百分比数值，筛选输入 3% 传 3 不乘除

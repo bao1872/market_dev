@@ -449,6 +449,15 @@ button { cursor: pointer; }
 
 // ===== Data Table =====
 .table-wrap { overflow: auto; border-radius: 0 0 v.$radius-base v.$radius-base; }
+// [StickyHeader] - 描述: viewport sticky 模式下 .table-wrap 不抢占滚动容器，
+// 表头随页面滚动吸附在 topbar 下方（top: var(--topbar)；z-index 低于 topbar 的 20）
+.table-wrap.viewport-sticky { overflow: visible; }
+// [StickyHeader] - 描述: viewport sticky 模式下表头吸附在 topbar 下方，
+// z-index 高于表格内容但低于 topbar（topbar z-index=20）
+.table-wrap.viewport-sticky .data-table th {
+  top: var(--topbar);
+  z-index: 18;
+}
 
 .data-table {
   width: 100%;
