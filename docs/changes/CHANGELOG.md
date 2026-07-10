@@ -11,6 +11,7 @@
   - 不引入 DB migration、不重启 postgres/redis、仅单次飞书实测
   - 更新 `docs/current/02/03/04/05`
   - 测试：pytest 173 passed、mypy 0 errors、ruff 改动文件 0 errors、前端 build 通过
+  - Follow-up（第二轮，阻断修复，仅修阻断不 merge/部署）：`capture.py` 的 `get_bars`/`_df_to_responses`/`compute_all_indicators` 此前回退 `_CAPTURE_TIMEFRAME` 且 `include_realtime=False`，截图仍是 1d 非实时；修复为透传 URL `timeframe` + `include_realtime=True`，新增 15m 透传阻断测试；前端 `CaptureStockPage` 实时状态改从 `snapshot.bars.last_live_bar_time` 读取，`endpoints.ts` 删除 `CaptureSnapshotResponse` 顶层 `last_live_bar_time` 并补 `BarListResponse` 对应字段
 
 ## 2026-07-09
 

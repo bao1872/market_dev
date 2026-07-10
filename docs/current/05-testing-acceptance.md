@@ -482,11 +482,15 @@ ruff check app/constants/capture.py app/core/deps.py app/core/security.py \
 后端：
 
 - `tests/test_stock_capture_service.py`：`capture_stock_chart` 返回 `CaptureResult`（png_bytes + width/height/device_scale_factor/cache_hit）；缓存 key 维度含 `timeframe` / `source_bar_time` / `capture_run_id` / `device_scale_factor`；`disable_cache=True` 跳过读缓存但写最新；
-- `tests/test_capture_snapshot.py`：Capture Snapshot 端点 `include_realtime=True`、周期透传、`bars_limit` 按 `INDICATOR_BARS` 对齐；
+- `tests/test_capture_snapshot.py`：Capture Snapshot 端点 `include_realtime=True`、周期透传、`bars_limit` 按 `INDICATOR_BARS` 对齐；**阻断验收**：请求 `timeframe=15m` 时，`get_bars` 必须收到 `timeframe="15m"` 且 `include_realtime=True`，`compute_all_indicators` 必须收到 `timeframe="15m"` 且 `bars=INDICATOR_BARS["15m"]`，`_df_to_responses` 必须使用 `15m`；响应 `bars.timeframe`、items 时间格式（15m 用 `trade_time`、1d 用 `trade_date`）、indicators timeframe 三者必须一致，禁止回退 `_CAPTURE_TIMEFRAME`；
 - `tests/test_indicator_contract.py`：禁止散落硬编码受控字面量（250/4000 等），`INDICATOR_BARS` 为唯一真源；
 - `tests/test_indicator_cache.py`：`force_refresh` / `capture` 跳过 Redis 读缓存但写最新；
 - `tests/test_monitor_batch_capture_image.py` / `tests/test_notification_latest_event_capture.py`：capture_payload 含 `timeframe=15m` / `capture_run_id` / `source_bar_time` / `disable_cache=True`；
 - `tests/test_bars.py`：K线实时契约（partial daily bar 为真，前端不伪造）。
+
+前端：
+
+- `frontend/src/pages/CaptureStockPage.tsx`：实时状态（`last_live_bar_time` / `is_partial` / `data_source`）必须从 `snapshot.bars` 读取（`barsResponse.last_live_bar_time`），禁止从 `snapshot` 顶层读取（后端 `last_live_bar_time` 只存在于 `bars` 内）；`endpoints.ts` 的 `BarListResponse` 必须包含 `last_live_bar_time` / `last_persisted_bar_time` 字段，且 `CaptureSnapshotResponse` 顶层不得放 `last_live_bar_time`。
 
 回归命令：
 

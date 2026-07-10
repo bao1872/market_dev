@@ -249,8 +249,8 @@ export default function CaptureStockPage() {
                   <span>K线来源: {barsResponse.data_source}</span>
                 )}
                 {barsResponse?.is_partial && <span>含未完成 bar</span>}
-                {snapshot?.last_live_bar_time && (
-                  <span>实时bar: {formatShanghaiTimeShort(snapshot.last_live_bar_time)}</span>
+                {barsResponse?.last_live_bar_time && (
+                  <span>实时bar: {formatShanghaiTimeShort(barsResponse.last_live_bar_time)}</span>
                 )}
                 <span>复权：前复权</span>
                 <span>时区：Asia/Shanghai</span>

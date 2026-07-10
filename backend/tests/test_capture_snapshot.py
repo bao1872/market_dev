@@ -187,6 +187,79 @@ class TestCaptureSnapshot:
         assert data["capture"]["event_id"] == str(test_instrument.id)
 
     @pytest.mark.asyncio
+    async def test_capture_snapshot_realtime_timeframe_passthrough(
+        self, capture_client: tuple[AsyncClient, AsyncSession], test_instrument,
+    ) -> None:
+        """请求 timeframe=15m 时，get_bars/include_realtime/_df_to_responses/compute_all_indicators 全部透传 15m。
+
+        阻断验收：截图链路不得回退 _CAPTURE_TIMEFRAME（1d），必须保持盘中实时多周期一致。
+        """
+        from app.api.bars import _df_to_responses as real_df_to_responses
+        from app.constants.indicator_contract import INDICATOR_BARS
+        from app.models.user import User
+
+        client, db = capture_client
+        user = User(
+            id=uuid.uuid4(),
+            email=f"capture_{uuid.uuid4().hex[:8]}@test.com",
+            password_hash="$2b$12$dummyhash",
+            status="active",
+        )
+        db.add(user)
+        await db.flush()
+
+        headers = _capture_token_headers(user.id, test_instrument.id)
+        bars_result = _make_bars_result_with_data(test_instrument.id)
+        indicators_data = {
+            "layers": [{"key": "watchlist_monitor", "name": "监控指标"}],
+            "data": {"watchlist_monitor": {"current_price": [10.2]}},
+            "errors": {},
+        }
+
+        spy_get_bars = AsyncMock(return_value=bars_result)
+        spy_compute = AsyncMock(return_value=indicators_data)
+        spy_df = MagicMock(side_effect=real_df_to_responses)
+
+        with patch(
+            "app.api.capture.MarketDataAggregationService.get_bars",
+            new=spy_get_bars,
+        ), patch(
+            "app.api.capture.compute_all_indicators",
+            new=spy_compute,
+        ), patch(
+            "app.api.capture._df_to_responses",
+            new=spy_df,
+        ):
+            resp = await client.get(
+                f"/api/v1/capture/stocks/{test_instrument.id}/snapshot"
+                "?timeframe=15m&force_refresh=1&capture=1",
+                headers=headers,
+            )
+
+        assert resp.status_code == 200, f"响应体: {resp.text}"
+        data = resp.json()
+
+        # get_bars 必须透传 timeframe=15m 且 include_realtime=True（硬规则）
+        assert spy_get_bars.await_count == 1
+        get_kwargs = spy_get_bars.call_args.kwargs
+        assert get_kwargs.get("timeframe") == "15m"
+        assert get_kwargs.get("include_realtime") is True
+
+        # compute_all_indicators 必须透传 timeframe=15m 且 bars=INDICATOR_BARS["15m"]
+        assert spy_compute.await_count == 1
+        compute_kwargs = spy_compute.call_args.kwargs
+        assert compute_kwargs.get("timeframe") == "15m"
+        assert compute_kwargs.get("bars") == INDICATOR_BARS["15m"]
+
+        # _df_to_responses 必须按 15m 格式化（位置参数第 3 个为 timeframe）
+        assert spy_df.call_count == 1
+        df_args, _ = spy_df.call_args
+        assert df_args[2] == "15m"
+
+        # 响应 bars.timeframe 必须与请求一致（禁止回退 1d）
+        assert data["bars"]["timeframe"] == "15m"
+
+    @pytest.mark.asyncio
     async def test_capture_snapshot_instrument_id_mismatch_403(
         self, capture_client: tuple[AsyncClient, AsyncSession], test_instrument,
     ) -> None:
