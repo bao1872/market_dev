@@ -1,8 +1,8 @@
 {
-  "baseline_commit": "a8481c7e98e11dd570e340de606a0d8e38c4dd64",
+  "baseline_commit": "a26651a0d00bbcb9f5bec1745bd817b2a4ccd815",
   "policy": "new-files-zero-baseline-non-regression-full-report",
-  "captured_at": "2026-07-08T04:03:50Z",
-  "total": 274,
+  "captured_at": "2026-07-10T00:15:39Z",
+  "total": 265,
   "diagnostics": [
     {
       "filename": "alembic/versions/022_monitor_evaluations.py",
@@ -71,33 +71,9 @@
       "count": 1
     },
     {
-      "filename": "app/models/__init__.py",
-      "code": "I001",
-      "message": "Import block is un-sorted or un-formatted",
-      "count": 1
-    },
-    {
-      "filename": "app/models/strategy_run.py",
-      "code": "F821",
-      "message": "Undefined name `Instrument`",
-      "count": 1
-    },
-    {
       "filename": "app/repositories/strategy_result_repository.py",
       "code": "B011",
       "message": "Do not `assert False` (`python -O` removes these calls), raise `AssertionError()`",
-      "count": 1
-    },
-    {
-      "filename": "app/services/chart_bars_service.py",
-      "code": "F821",
-      "message": "Undefined name `SHANGHAI_TZ`",
-      "count": 1
-    },
-    {
-      "filename": "app/services/chart_bars_service.py",
-      "code": "I001",
-      "message": "Import block is un-sorted or un-formatted",
       "count": 1
     },
     {
@@ -486,15 +462,9 @@
     },
     {
       "filename": "app/strategy_assets/algorithms/features/dynamic_swing_anchored_vwap.py",
-      "code": "F821",
-      "message": "Undefined name `TdxConnectionError`",
+      "code": "F401",
+      "message": "`pytdx.errors.TdxConnectionError` imported but unused",
       "count": 1
-    },
-    {
-      "filename": "app/strategy_assets/algorithms/features/dynamic_swing_anchored_vwap.py",
-      "code": "F821",
-      "message": "Undefined name `TdxHq_API`",
-      "count": 2
     },
     {
       "filename": "app/strategy_assets/algorithms/features/dynamic_swing_anchored_vwap.py",
@@ -534,20 +504,8 @@
     },
     {
       "filename": "app/strategy_assets/algorithms/features/liquidity_zones_plotly.py",
-      "code": "F821",
-      "message": "Undefined name `TdxConnectionError`",
-      "count": 1
-    },
-    {
-      "filename": "app/strategy_assets/algorithms/features/liquidity_zones_plotly.py",
-      "code": "F821",
-      "message": "Undefined name `TdxHq_API`",
-      "count": 2
-    },
-    {
-      "filename": "app/strategy_assets/algorithms/features/liquidity_zones_plotly.py",
-      "code": "F821",
-      "message": "Undefined name `offset`",
+      "code": "F401",
+      "message": "`pytdx.errors.TdxConnectionError` imported but unused",
       "count": 1
     },
     {
