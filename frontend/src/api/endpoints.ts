@@ -2288,9 +2288,18 @@ export async function forceAfterCloseRun(
 // - DataFreshness / BarsFreshness / StrategyFreshness（同文件上方）
 // - JobRunEvent（与 PipelineEventItem 字段完全一致，事件时间线条目）
 
+/** 盘后流水线 5 个面向用户的真实业务阶段 key（与后端 _PHASE_KEYS 严格对齐）。
+ * 禁止出现 checking_coverage/creating_dsa/watchlist_ready 等旧 8 步骤 key。 */
+export type PipelinePhaseKey =
+  | 'market_prep'
+  | 'dsa_compute'
+  | 'quality_gate'
+  | 'feature_snapshot'
+  | 'publishing'
+
 /** 盘后流水线单步骤状态（对齐后端 PipelineStep） */
 export interface PipelineStep {
-  step: string
+  step: PipelinePhaseKey
   status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
   started_at: string | null
   finished_at: string | null

@@ -56,7 +56,29 @@ _BLOCKED_AFTER_CLOSE_MINUTES = 30
 # 编排处于 feature_snapshot 且心跳新鲜，但 progress.updated_at 超过该值未更新。
 _FEATURE_SNAPSHOT_STALL_SECONDS = 300
 
+# 心跳新鲜度阈值（秒）：overall_status 的 blocked 判定与 feature_snapshot stalled
+# 必须共用同一阈值，禁止复制不同常量（原 10 分钟阈值统一为单一常量）。
+_HEARTBEAT_FRESH_SECONDS = 600
+
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _is_heartbeat_fresh(
+    job_run: SchedulerJobRun | None,
+    now: datetime,
+    threshold_seconds: int = _HEARTBEAT_FRESH_SECONDS,
+) -> bool:
+    """统一心跳新鲜度判定：job_run 非空且心跳存在且在阈值内。
+
+    overall_status（blocked 判定）与 feature_snapshot stalled 共用本函数与同一阈值，
+    禁止在两侧各复制一个常量或字面量。心跳缺失（None）一律视为不新鲜。
+    """
+    if job_run is None or job_run.heartbeat_at is None:
+        return False
+    hb = job_run.heartbeat_at
+    if hb.tzinfo is None:
+        hb = hb.replace(tzinfo=_SHANGHAI_TZ)
+    return (now - hb).total_seconds() <= threshold_seconds
 
 # 5 个面向用户的真实业务阶段（合并内部细粒度状态）：
 #   行情准备(market_prep)      = refreshing_daily + checking_coverage + creating_dsa
@@ -298,20 +320,29 @@ def _infer_failed_phase(
     events: list[JobRunEvent],
     last_completed_step: str | None,
 ) -> int:
-    """推断失败所处的 5 阶段下标。"""
+    """推断失败所处的 5 阶段下标。
+
+    优先级：
+    1. 错误事件显式提供 step（payload.step）→ 以事件为准（最高优先级）；
+    2. orchestrator_status 处于某真实阶段（异常态）→ 该阶段即失败点；
+    3. 回退：最后完成阶段 + 1（off-by-one 修正：失败阶段是“已完成阶段的下一阶段”）。
+    """
     failed_step: str | None = None
-    if orchestrator_status in _PHASE_REPRESENTATIVE_STATUS:
+    # 1. 错误事件显式提供 step → 以事件为准
+    for event in events:
+        if event.level == "error" and isinstance(event.payload, dict) and event.payload.get("step"):
+            failed_step = event.payload["step"]
+            break
+    # 2. orchestrator_status 处于某真实阶段（异常态）→ 该阶段即失败点
+    if failed_step is None and orchestrator_status in _PHASE_REPRESENTATIVE_STATUS:
         failed_step = orchestrator_status
-    else:
-        for event in events:
-            if event.level == "error" and isinstance(event.payload, dict) and event.payload.get("step"):
-                failed_step = event.payload["step"]
-                break
-    if failed_step is None and last_completed_step is not None:
-        # 失败阶段 = 最后完成阶段之后的那一阶段
+    # 3. 回退：失败阶段 = 最后完成阶段 + 1（off-by-one 修正）。
+    # last_completed_step=None 视为“无阶段完成”，失败阶段取第 0 阶段（market_prep）。
+    if failed_step is None:
         completed_idx = _COMPLETED_PHASE_INDEX.get(last_completed_step, -1)
-        if 0 <= completed_idx < len(_PHASE_KEYS):
-            failed_step = _PHASE_REPRESENTATIVE_STATUS[completed_idx]
+        next_idx = completed_idx + 1
+        if 0 <= next_idx < len(_PHASE_REPRESENTATIVE_STATUS):
+            failed_step = _PHASE_REPRESENTATIVE_STATUS[next_idx]
     if failed_step is not None:
         return _STATUS_TO_PHASE.get(failed_step, -1)
     return -1
@@ -447,14 +478,21 @@ def _compute_feature_snapshot_stalled(
 ) -> bool:
     """判断 feature_snapshot 阶段是否“疑似停滞”。
 
-    条件：编排处于 feature_snapshot 且心跳新鲜（未触发 blocked），
-    但 metadata.feature_snapshot_progress.updated_at 距今超过阈值
-    （默认 _FEATURE_SNAPSHOT_STALL_SECONDS=300s）。
+    条件（全部满足才为 True）：
+    1. 编排 job 处于 running（failed/interrupted/succeeded/非 running 一律 False）；
+    2. 心跳新鲜（复用 _is_heartbeat_fresh 同一阈值，缺失/过期均为 False）；
+    3. orchestrator_status == feature_snapshot；
+    4. metadata.feature_snapshot_progress.updated_at 距今超过阈值
+       （默认 _FEATURE_SNAPSHOT_STALL_SECONDS=300s）。
 
     返回 True 仅表示“心跳新鲜但进度长时间未推进”，供前端提示“疑似停滞”，
     不替代 blocked（心跳已超时由 _compute_overall_status 判定）。
     """
     if job_run is None:
+        return False
+    if job_run.status != "running":
+        return False
+    if not _is_heartbeat_fresh(job_run, now):
         return False
     if meta.get("orchestrator_status") != AfterCloseRunStatus.FEATURE_SNAPSHOT.value:
         return False
@@ -492,10 +530,10 @@ def _compute_overall_status(
                 return "blocked"
         return "not_started"
     if job_run.status == "running":
-        # 心跳/租约超时判定为 blocked（简化：超过 10 分钟无心跳）
-        if job_run.heartbeat_at is not None:
-            if now - job_run.heartbeat_at > timedelta(minutes=10):
-                return "blocked"
+        # 心跳/租约超时（缺失或超阈值）判定为 blocked，
+        # 阈值与 feature_snapshot stalled 共用 _is_heartbeat_fresh。
+        if not _is_heartbeat_fresh(job_run, now):
+            return "blocked"
         return "running"
     if job_run.status == "failed":
         return "failed"

@@ -27,6 +27,7 @@ from app.services.after_close_pipeline_service import (
     AfterCloseRunStatus,
     _compute_feature_snapshot_stalled,
     _compute_step_states,
+    _infer_failed_phase,
 )
 
 _SH = ZoneInfo("Asia/Shanghai")
@@ -46,10 +47,10 @@ class FakeEvent:
 class FakeJobRun:
     """最小 SchedulerJobRun 替身，仅暴露步骤状态所需字段。"""
 
-    def __init__(self, status, meta):
+    def __init__(self, status, meta, heartbeat_at=None):
         self.status = status
         self.metadata_json = json.dumps(meta)
-        self.heartbeat_at = None
+        self.heartbeat_at = heartbeat_at
 
 
 def _ts(micro):
@@ -146,59 +147,128 @@ def test_virtual_steps_merged_into_market_prep():
 
 # ---------------------------------------------------------------------------
 # 5. feature_snapshot 疑似停滞判定
+# 语义（P0-2 修正）：必须 job.status==running 且心跳新鲜（复用 _is_heartbeat_fresh
+# 同一 10 分钟阈值）且 orchestrator_status==feature_snapshot 且进度超过 300s 未更新。
 # ---------------------------------------------------------------------------
-def test_feature_snapshot_stalled_true_when_progress_stale():
+def _make_snapshot_job_run(progress_delta_seconds, *, status="running",
+                            orchestrator_status=AfterCloseRunStatus.FEATURE_SNAPSHOT.value,
+                            heartbeat_delta_seconds=10):
     now = datetime(2026, 7, 10, 19, 57, 45, tzinfo=_SH)
-    old_progress = now - timedelta(seconds=400)
+    progress = now - timedelta(seconds=progress_delta_seconds)
     job_run = FakeJobRun(
-        "running",
+        status,
         {
-            "orchestrator_status": AfterCloseRunStatus.FEATURE_SNAPSHOT.value,
+            "orchestrator_status": orchestrator_status,
             "feature_snapshot_progress": {
                 "processed": 3600,
                 "total": 5293,
-                "updated_at": old_progress.isoformat(),
+                "updated_at": progress.isoformat(),
             },
         },
+        heartbeat_at=now - timedelta(seconds=heartbeat_delta_seconds),
     )
+    return job_run, now
+
+
+def test_feature_snapshot_stalled_true_when_progress_stale_and_heartbeat_fresh():
+    # 进度超过 300s 未更新 + 心跳新鲜（10s 前）→ 疑似停滞
+    job_run, now = _make_snapshot_job_run(progress_delta_seconds=400, heartbeat_delta_seconds=10)
     meta = json.loads(job_run.metadata_json)
     assert _compute_feature_snapshot_stalled(job_run, meta, now) is True
 
 
 def test_feature_snapshot_stalled_false_when_progress_fresh():
-    now = datetime(2026, 7, 10, 19, 57, 45, tzinfo=_SH)
-    fresh_progress = now - timedelta(seconds=30)
-    job_run = FakeJobRun(
-        "running",
-        {
-            "orchestrator_status": AfterCloseRunStatus.FEATURE_SNAPSHOT.value,
-            "feature_snapshot_progress": {
-                "processed": 3600,
-                "total": 5293,
-                "updated_at": fresh_progress.isoformat(),
-            },
-        },
-    )
+    # 进度 30s 前更新 + 心跳新鲜 → 未停滞
+    job_run, now = _make_snapshot_job_run(progress_delta_seconds=30, heartbeat_delta_seconds=10)
     meta = json.loads(job_run.metadata_json)
     assert _compute_feature_snapshot_stalled(job_run, meta, now) is False
 
 
 def test_feature_snapshot_stalled_false_when_not_snapshot_step():
-    now = datetime(2026, 7, 10, 19, 57, 45, tzinfo=_SH)
-    old_progress = now - timedelta(seconds=400)
-    job_run = FakeJobRun(
-        "running",
-        {
-            "orchestrator_status": AfterCloseRunStatus.PUBLISHING.value,
-            "feature_snapshot_progress": {
-                "processed": 3600,
-                "total": 5293,
-                "updated_at": old_progress.isoformat(),
-            },
-        },
+    # orchestrator_status 不是 feature_snapshot → False（即使进度陈旧、心跳新鲜）
+    job_run, now = _make_snapshot_job_run(
+        progress_delta_seconds=400,
+        orchestrator_status=AfterCloseRunStatus.PUBLISHING.value,
     )
     meta = json.loads(job_run.metadata_json)
     assert _compute_feature_snapshot_stalled(job_run, meta, now) is False
+
+
+def test_feature_snapshot_stalled_false_when_heartbeat_missing():
+    # 心跳缺失 → 不新鲜 → False（即使进度陈旧、阶段正确）
+    job_run, now = _make_snapshot_job_run(progress_delta_seconds=400, heartbeat_delta_seconds=10)
+    job_run.heartbeat_at = None
+    meta = json.loads(job_run.metadata_json)
+    assert _compute_feature_snapshot_stalled(job_run, meta, now) is False
+
+
+def test_feature_snapshot_stalled_false_when_heartbeat_stale():
+    # 心跳过期（超过 10 分钟）→ 不新鲜 → False（由 blocked 覆盖，不属于 stalled）
+    job_run, now = _make_snapshot_job_run(
+        progress_delta_seconds=400, heartbeat_delta_seconds=700
+    )
+    meta = json.loads(job_run.metadata_json)
+    assert _compute_feature_snapshot_stalled(job_run, meta, now) is False
+
+
+def test_feature_snapshot_stalled_false_when_job_not_running():
+    # job 非 running（failed/interrupted/succeeded）→ False
+    for status in ("failed", "interrupted", "succeeded", "queued"):
+        job_run, now = _make_snapshot_job_run(
+            progress_delta_seconds=400, status=status
+        )
+        meta = json.loads(job_run.metadata_json)
+        assert _compute_feature_snapshot_stalled(job_run, meta, now) is False, status
+
+
+# ---------------------------------------------------------------------------
+# 5b. _infer_failed_phase 失败阶段推断（P0-3 off-by-one 修正）
+# 无显式错误事件 step 时，失败阶段 = 最后完成阶段 + 1。
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "last_completed_step,expected_phase_key",
+    [
+        (None, "market_prep"),
+        (AfterCloseRunStatus.REFRESHING_DAILY.value, "dsa_compute"),
+        (AfterCloseRunStatus.WAITING_DSA_WORKER.value, "quality_gate"),
+        (AfterCloseRunStatus.QUALITY_GATE.value, "feature_snapshot"),
+        (AfterCloseRunStatus.FEATURE_SNAPSHOT.value, "publishing"),
+    ],
+)
+def test_infer_failed_phase_fallback_completed_plus_one(
+    last_completed_step, expected_phase_key
+):
+    """回退路径（无错误事件 step）：失败阶段 = 最后完成阶段 + 1。"""
+    phase_idx = _infer_failed_phase(
+        AfterCloseRunStatus.FAILED.value, [], last_completed_step
+    )
+    assert phase_idx == _PHASE_KEYS.index(expected_phase_key)
+
+
+def test_infer_failed_phase_error_event_step_wins():
+    """错误事件显式提供 step 时以事件为准，覆盖 last_completed_step 回退。"""
+    events = [
+        FakeEvent(
+            AfterCloseRunStatus.QUALITY_GATE.value,
+            _ts(0),
+            level="error",
+            payload={"step": AfterCloseRunStatus.FEATURE_SNAPSHOT.value},
+        )
+    ]
+    idx = _infer_failed_phase(
+        AfterCloseRunStatus.FAILED.value, events,
+        AfterCloseRunStatus.REFRESHING_DAILY.value,
+    )
+    # 事件 step=feature_snapshot → 阶段 3，而非 refreshing_daily 的 +1（dsa_compute=1）
+    assert idx == 3
+
+
+def test_infer_failed_phase_orchestrator_phase_used_when_no_event():
+    """无错误事件时，orchestrator_status 处于真实阶段直接作为失败点。"""
+    idx = _infer_failed_phase(
+        AfterCloseRunStatus.FEATURE_SNAPSHOT.value, [], None
+    )
+    assert idx == 3
 
 
 # ---------------------------------------------------------------------------

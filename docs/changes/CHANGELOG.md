@@ -11,6 +11,9 @@
   - 新增 `feature_snapshot_stalled` 停滞判定（顶层 + `after_close_run` 均暴露），前端提示"疑似停滞"
   - 新增 `tools/check_build_traceability.py` 只读校验构建可追溯性（GIT_SHA / worker_heartbeat.build_sha 与 HEAD 一致、运行镜像非 unknown）；不重建/重启
   - 文件：after_close_pipeline_service.py / after_close_orchestrator.py / schemas/after_close_pipeline.py / tests/test_after_close_pipeline_service.py / tests/test_admin_after_close_pipeline.py / frontend endpoints.ts + AdminAfterClosePipelinePage；ruff 0 / mypy 0（仅存量 bar_repository 债务）/ tsc 0 / 20 passed
+  - P0 正确性硬化（f450159 后 fixup）：① 前端真实 5 阶段落地——抽出 `afterClosePipelinePhases.ts`（`buildPipelineSteps`/`findPhaseStartedAt`），`endpoints.ts` 新增 `PipelinePhaseKey` 联合类型防错位，删除页面内联旧 8 步骤与 `watchlist_ready` 步骤；② stalled 语义修复 + 统一心跳新鲜度 helper（`_is_heartbeat_fresh`，阈值 600s，与 overall_status 共用），仅 running+snapshot 阶段+心跳新鲜+进度 >300s 停更时为 True；③ `_infer_failed_phase` off-by-one 修正为 `last_completed+1`；④ `tools/check_build_traceability.py` 重写（`worker_heartbeats` 复数表、按 worker 取最新、tag/OCI label 校验、`--strict`/`--allow-skip`）+ 33 单测；⑤ 进度展示 ETA 用 feature_snapshot 阶段 started_at + 数值防御 + 停滞告警去重；⑥ 新增真实事务测试 `test_after_close_orchestrator_transaction.py`（3 passed，真实库验证 metadata/事件同 commit 可见 + rollback 都不可见）
+  - **API 契约变更（非向后兼容）**：`AfterClosePipelineResponse.steps[].step` 由旧 8 内部 key 变为 5 phase key（`market_prep|dsa_compute|quality_gate|feature_snapshot|publishing`），内部状态机/events 兼容但前后端须同版本原子部署
+  - CI 证据：run 29093550825 唯一阻塞失败为存量 flaky 墙钟基准 `test_bars_vectorization::test_performance_df_to_responses`（与本 PR 无关，main 通过、本地 5/5 通过）；两个 Full Repository Report 为 continue-on-error 报告任务，非门禁；未采用掩盖手段
 
 - CHANGE-20260710-002: 恢复飞书盘中截图 1d 业务契约，分离截图实时性与监控计算口径
   - 修复 PR #65 业务语义偏差：飞书截图（手动分享 `stock_detail_feishu_service` + 自动盘中监控 `_send_chart_images_via_outbox`）capture_payload 由 15m 改为业务默认 1d（常量 `FEISHU_CAPTURE_TIMEFRAME`）

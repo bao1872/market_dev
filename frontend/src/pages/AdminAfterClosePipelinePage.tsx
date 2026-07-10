@@ -6,7 +6,7 @@
 //    - running 状态 10s 轮询，非 running 60s 轮询，页面不可见暂停（hook 内实现）
 // 3. 页面结构（5 个区块）：
 //    - 顶部状态卡：trade_date / market_session / overall_status / watchlist_ready / watchlist_reason
-//    - 8 步骤时间线（垂直，每步显示 status/started_at/finished_at/duration/counts/error）
+//    - 5 阶段时间线（垂直，每步显示 status/started_at/finished_at/duration/counts/error）
 //    - 数据新鲜度卡：行情 + 选股（复用 .data-freshness-grid 样式）
 //    - 编排状态详情：当前阶段/Worker/心跳/租约/检查点/中断原因（来自 after_close_run 摘要）
 //    - 最近 20 次运行列表（after_close_orchestrator + snapshot_run 混合）
@@ -28,19 +28,11 @@ import {
 import { useToast } from '@/store/toast'
 import { shanghaiBusinessDate, formatShanghaiTime } from '@/utils/datetime'
 import type { PipelineStep, PipelineRunItem } from '@/api/endpoints'
+import { buildPipelineSteps, findPhaseStartedAt } from './afterClosePipelinePhases'
 
-// ===== 8 步骤定义（与后端 _PIPELINE_STEPS 严格对齐）=====
-// [AfterClosePipelinePage] - 描述: 8 个展示步骤（前 7 个来自 after_close_orchestrator 状态机，最后一个是 watchlist gate）
-const PIPELINE_STEPS: { key: string; label: string }[] = [
-  { key: 'refreshing_daily', label: '刷新日线' },
-  { key: 'checking_coverage', label: '检查覆盖率' },
-  { key: 'creating_dsa', label: '创建DSA任务' },
-  { key: 'waiting_dsa_worker', label: '等待DSA计算' },
-  { key: 'quality_gate', label: '质量门禁' },
-  { key: 'feature_snapshot', label: '特征快照' },
-  { key: 'publishing', label: '发布结果' },
-  { key: 'watchlist_ready', label: '自选可用' },
-]
+// ===== 5 阶段时间线定义（与后端 _PHASE_KEYS 严格对齐）=====
+// 由 ./afterClosePipelinePhases 提供 buildPipelineSteps()，此处不再内联旧 8 步骤常量。
+// 旧内部细状态（已归并到 5 阶段）已废弃；watchlist_ready 仅为发布门禁(gate)，不作为执行步骤。
 
 // ===== overall_status → 中文标签 + pill 样式 =====
 function overallStatusLabel(status: string | undefined): string {
@@ -131,14 +123,14 @@ function formatDurationSeconds(seconds: number | null | undefined): string {
   return `${m}m ${s}s`
 }
 
-// ===== 8 步骤时间线组件 =====
+// ===== 5 阶段时间线组件 =====
 function PipelineTimeline({ steps }: { steps: PipelineStep[] }) {
-  // 构建步骤索引映射，处理 watchlist_ready 不在 steps 中的情况
   const stepMap = new Map<string, PipelineStep>(steps.map((s) => [s.step, s]))
+  const stages = buildPipelineSteps()
 
   return (
     <div className="pipeline-timeline">
-      {PIPELINE_STEPS.map((stage, idx) => {
+      {stages.map((stage, idx) => {
         const step = stepMap.get(stage.key)
         const status = step?.status ?? 'pending'
         const cls = stepStatusClass(status)
@@ -185,6 +177,8 @@ function PipelineTimeline({ steps }: { steps: PipelineStep[] }) {
 }
 
 // ===== feature_snapshot 进度 + 速度/ETA =====
+// 数值防御：processed/total/snapshot_count/failed_count 必须 Number.isFinite 且非负，
+// percent 限制在 0-100；ETA 以 feature_snapshot 阶段 started_at 为基准（非整个 run）。
 function FeatureSnapshotProgress({
   progress,
   startedAt,
@@ -192,22 +186,29 @@ function FeatureSnapshotProgress({
   progress: Record<string, unknown>
   startedAt: string | null
 }) {
-  const processed = Number(progress['processed'] ?? 0)
-  const total = Number(progress['total'] ?? 0)
-  const snapshotCount = Number(progress['snapshot_count'] ?? 0)
-  const failedCount = Number(progress['failed_count'] ?? 0)
+  const toNonNegInt = (v: unknown): number => {
+    const n = Number(v)
+    if (!Number.isFinite(n) || n < 0) return 0
+    return Math.floor(n)
+  }
+  const processed = toNonNegInt(progress['processed'])
+  const total = toNonNegInt(progress['total'])
+  const snapshotCount = toNonNegInt(progress['snapshot_count'])
+  const failedCount = toNonNegInt(progress['failed_count'])
   const updatedAt =
     typeof progress['updated_at'] === 'string' ? (progress['updated_at'] as string) : null
 
-  const percent = total > 0 ? (processed / total) * 100 : 0
+  // percent 限制在 0-100（防御 total<=0 或脏数据导致越界）
+  const rawPercent = total > 0 ? (processed / total) * 100 : 0
+  const percent = Math.min(100, Math.max(0, rawPercent))
 
-  // 速度/ETA：以整体 run 开始时间为基准估算（仅展示参考值）
+  // 速度/ETA：以 feature_snapshot 阶段 started_at 为基准估算（仅展示参考值）
   let speedPerSec: number | null = null
   let etaSeconds: number | null = null
   if (startedAt && processed > 0) {
     const startMs = new Date(startedAt).getTime()
     const elapsed = (Date.now() - startMs) / 1000
-    if (elapsed > 0) {
+    if (Number.isFinite(startMs) && elapsed > 0) {
       speedPerSec = processed / elapsed
       const remain = total - processed
       if (remain > 0 && speedPerSec > 0) {
@@ -392,10 +393,9 @@ export default function AdminAfterClosePipelinePage() {
         <section className="card">
           <div className="card-head">
             <div>
-              <div className="card-title">8 步骤时间线</div>
+              <div className="card-title">5 阶段时间线</div>
               <div className="card-sub">
-                refreshing_daily → checking_coverage → creating_dsa → waiting_dsa_worker →
-                quality_gate → feature_snapshot → publishing → watchlist_ready
+                market_prep → dsa_compute → quality_gate → feature_snapshot → publishing
               </div>
             </div>
           </div>
@@ -583,15 +583,10 @@ export default function AdminAfterClosePipelinePage() {
                     {afterCloseRun.error_message}
                   </div>
                 )}
-                {afterCloseRun.feature_snapshot_stalled && (
-                  <div className="notice error" style={{ marginTop: '10px' }}>
-                    特征快照阶段疑似停滞（心跳正常，进度长时间未推进）
-                  </div>
-                )}
                 {afterCloseRun.feature_snapshot_progress && (
                   <FeatureSnapshotProgress
                     progress={afterCloseRun.feature_snapshot_progress}
-                    startedAt={afterCloseRun.started_at}
+                    startedAt={findPhaseStartedAt(pipeline?.steps, 'feature_snapshot')}
                   />
                 )}
               </>
