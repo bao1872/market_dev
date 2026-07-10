@@ -1203,6 +1203,12 @@ async def test_channel_latest_event(
         "output_filename": f"test-{channel_id}-{test_run_id}",
         "instrument_id": str(event.instrument_id),
         "chart_version": "v1",
+        # [capture-realtime] - 扩展字段：周期透传 + 实时来源 + 运行ID + 缓存旁路
+        "timeframe": "15m",
+        "capture_run_id": str(test_run_id),
+        "test_run_id": str(test_run_id),
+        "source_bar_time": event.event_time.isoformat(),
+        "disable_cache": True,
     }
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -1217,6 +1223,12 @@ async def test_channel_latest_event(
             f"截图服务调用失败: capture_worker={capture_worker_url}, symbol={symbol}: {e}"
         ) from e
 
+    # [capture-realtime] - 日志输出实时截图上下文（便于核对不复用旧图）
+    logger.info(
+        "实时截图请求参数 timeframe=15m source_bar_time=%s capture_run_id=%s "
+        "disable_cache=true cache_hit=%s",
+        event.event_time.isoformat(), str(test_run_id), capture_data.get("cache_hit"),
+    )
     image_url = capture_data.get("image_url")
     if not image_url:
         raise NotificationServiceError("截图服务未返回 image_url")

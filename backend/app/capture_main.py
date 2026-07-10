@@ -18,13 +18,24 @@
         "frontend_base_url": "http://frontend",
         "output_filename": "optional-prefix",  // 可选，默认使用 uuid
         "instrument_id": "<uuid>",            // 可选，启用截图缓存（任务 6.1）
-        "chart_version": "v1"                  // 可选，默认 v1
+        "chart_version": "v1",                 // 可选，默认 v1
+        "timeframe": "15m",                    // 可选，透传 Capture 页面周期
+        "source_bar_time": "2026-07-10T14:30:00", // 可选，实时 bar 时间（防旧图）
+        "capture_run_id": "run-1",             // 可选，截图运行 ID（防旧图）
+        "disable_cache": true,                 // 可选，默认 false（跳过读缓存仍写新缓存）
+        "viewport_width": 1920,                // 可选，覆盖 env 默认
+        "viewport_height": 1200,               // 可选，覆盖 env 默认
+        "device_scale_factor": 2               // 可选，默认 2（严禁 4）
     }
     -> {
         "symbol": "600519",
         "event_id": "...",
         "image_url": "/static/captures/xxx.png",
-        "size": 12345
+        "size": 12345,
+        "width": 3840,
+        "height": 2400,
+        "device_scale_factor": 2,
+        "cache_hit": false
     }
 
 错误响应（advice.md 第十一节遗留清理：技术错误返回三字段）：
@@ -52,7 +63,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.core.route_utils import get_route_paths
-from app.services.stock_capture_service import StockCaptureError, capture_stock_chart
+from app.services.stock_capture_service import (
+    StockCaptureError,
+    capture_stock_chart,
+)
 
 app = FastAPI(title="Capture Worker")
 
@@ -91,6 +105,28 @@ class CaptureRequest(BaseModel):
         None, description="标的 ID（可选）。提供时启用截图缓存（任务 6.1）"
     )
     chart_version: str = Field("v1", description="图表版本号，默认 v1")
+    # [capture-realtime] - 扩展字段：透传周期/实时来源/运行ID/缓存旁路/高清参数
+    timeframe: str | None = Field(
+        None, description="K线周期（透传 Capture 页面；默认由页面决定）"
+    )
+    source_bar_time: str | None = Field(
+        None, description="实时 bar 时间（扩展缓存 key，防旧图/旧指标）"
+    )
+    capture_run_id: str | None = Field(
+        None, description="本次截图运行 ID（扩展缓存 key，防旧图）"
+    )
+    disable_cache: bool = Field(
+        False, description="True 时跳过读缓存但允许写新缓存（飞书实时截图默认 True）"
+    )
+    viewport_width: int | None = Field(
+        None, description="高清视口宽（覆盖 env CAPTURE_VIEWPORT_WIDTH，默认 1920）"
+    )
+    viewport_height: int | None = Field(
+        None, description="高清视口高（覆盖 env CAPTURE_VIEWPORT_HEIGHT，默认 1200）"
+    )
+    device_scale_factor: int | None = Field(
+        None, description="设备像素比（覆盖 env CAPTURE_DEVICE_SCALE_FACTOR，默认 2，严禁 4）"
+    )
 
 
 class CaptureResponse(BaseModel):
@@ -100,6 +136,10 @@ class CaptureResponse(BaseModel):
     event_id: str = Field(..., description="事件 ID")
     image_url: str = Field(..., description="图片本地静态 URL")
     size: int = Field(..., description="图片字节数")
+    width: int | None = Field(None, description="截图像素宽（viewport_width * device_scale_factor）")
+    height: int | None = Field(None, description="截图像素高（viewport_height * device_scale_factor）")
+    device_scale_factor: int | None = Field(None, description="设备像素比")
+    cache_hit: bool = Field(False, description="是否命中文件缓存（仅读缓存命中为 True）")
 
 
 # [capture-worker] - 确保静态目录存在，并挂载静态文件服务
@@ -116,13 +156,20 @@ async def capture(request: CaptureRequest) -> CaptureResponse:
     image_url = f"{CAPTURE_STATIC_URL_PREFIX}/{filename}"
 
     try:
-        png_bytes = await capture_stock_chart(
+        result = await capture_stock_chart(
             symbol=request.symbol,
             event_id=request.event_id,
             token=request.token,
             frontend_base_url=request.frontend_base_url,
             instrument_id=request.instrument_id,
             chart_version=request.chart_version,
+            timeframe=request.timeframe,
+            source_bar_time=request.source_bar_time,
+            capture_run_id=request.capture_run_id,
+            disable_cache=request.disable_cache,
+            viewport_width=request.viewport_width,
+            viewport_height=request.viewport_height,
+            device_scale_factor=request.device_scale_factor,
         )
     except StockCaptureError as e:
         # [capture-worker] - 区分超时与失败：错误消息含"超时"归为 CAPTURE_TIMEOUT
@@ -139,6 +186,7 @@ async def capture(request: CaptureRequest) -> CaptureResponse:
             detail=_error_detail("CAPTURE_FAILED", f"截图异常: {e}", "capture"),
         ) from e
 
+    png_bytes = result.png_bytes
     try:
         with open(local_path, "wb") as f:
             f.write(png_bytes)
@@ -154,6 +202,10 @@ async def capture(request: CaptureRequest) -> CaptureResponse:
         event_id=str(request.event_id),
         image_url=image_url,
         size=len(png_bytes),
+        width=result.width,
+        height=result.height,
+        device_scale_factor=result.device_scale_factor,
+        cache_hit=result.cache_hit,
     )
 
 

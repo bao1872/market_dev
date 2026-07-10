@@ -475,7 +475,40 @@ ruff check app/constants/capture.py app/core/deps.py app/core/security.py \
 
 预期：6 passed、ruff 零错误。
 
-## 3.8 研究特征矩阵因果口径回归（blocking）
+## 3.8 飞书盘中高清实时截图回归（blocking）
+
+任何修改 `backend/app/services/stock_capture_service.py`、`backend/app/capture_main.py`、`backend/app/api/capture.py`、`backend/app/services/monitor_snapshot_service.py`、`backend/app/api/indicators.py`、`backend/app/services/stock_detail_feishu_service.py`、`backend/app/services/notification_service.py`、`frontend/src/pages/CaptureStockPage.tsx`、`frontend/src/pages/StockDetailPage.tsx`、`frontend/src/components/StrategyChart.tsx` 必须跑以下回归，覆盖三件事：高清截图、不复用旧图/旧指标、K线标题显示股票名称。
+
+后端：
+
+- `tests/test_stock_capture_service.py`：`capture_stock_chart` 返回 `CaptureResult`（png_bytes + width/height/device_scale_factor/cache_hit）；缓存 key 维度含 `timeframe` / `source_bar_time` / `capture_run_id` / `device_scale_factor`；`disable_cache=True` 跳过读缓存但写最新；
+- `tests/test_capture_snapshot.py`：Capture Snapshot 端点 `include_realtime=True`、周期透传、`bars_limit` 按 `INDICATOR_BARS` 对齐；
+- `tests/test_indicator_contract.py`：禁止散落硬编码受控字面量（250/4000 等），`INDICATOR_BARS` 为唯一真源；
+- `tests/test_indicator_cache.py`：`force_refresh` / `capture` 跳过 Redis 读缓存但写最新；
+- `tests/test_monitor_batch_capture_image.py` / `tests/test_notification_latest_event_capture.py`：capture_payload 含 `timeframe=15m` / `capture_run_id` / `source_bar_time` / `disable_cache=True`；
+- `tests/test_bars.py`：K线实时契约（partial daily bar 为真，前端不伪造）。
+
+回归命令：
+
+```bash
+cd /root/web_dev/backend
+APP_ENV=test TEST_DATABASE_URL=postgresql+asyncpg://bz:bz@localhost:5433/bz_stock_test \
+  pytest tests/test_stock_capture_service.py tests/test_capture_snapshot.py \
+        tests/test_indicator_contract.py tests/test_indicator_cache.py \
+        tests/test_monitor_batch_capture_image.py tests/test_notification_latest_event_capture.py \
+        tests/test_bars.py -q
+
+ruff check app/services/stock_capture_service.py app/capture_main.py app/api/capture.py \
+  app/services/monitor_snapshot_service.py app/api/indicators.py \
+  app/services/stock_detail_feishu_service.py app/services/notification_service.py \
+  app/services/monitor_batch_service.py tests/test_stock_capture_service.py
+```
+
+预期：全部 passed、ruff 零错误。验收要点：① 截图 PNG 清晰度提升（viewport 1920×1200 + dsf=2）；② 连续两次盘中截图不复用上一轮旧图/旧指标（cache key 含实时 source_bar_time）；③ K线主标题显示 `名称（代码）`。
+
+**K线实时契约门禁延伸**：本次修改 `StockDetailPage.tsx` / `StrategyChart.tsx` 同时受 §3.2 K线实时契约门禁约束，必须保留后端 partial daily bar 为真、前端 `mergeRealtimeQuoteIntoBars()` 仅作兜底。
+
+## 3.9 研究特征矩阵因果口径回归（blocking）
 
 任何修改 `backend/app/research/feature_causality_registry.py`、`backend/app/research/research_matrix_writer.py`、`backend/app/research/feature_computer.py`、`backend/app/models/research_feature_matrix.py`、`backend/scripts/research_feature_matrix_backfill.py` 必须跑研究特征矩阵因果口径回归测试。
 

@@ -471,6 +471,7 @@ export interface CaptureSnapshotResponse {
   indicators: IndicatorResponse
   events: StrategyEventListResponse
   snapshot_time: string
+  last_live_bar_time?: string | null
   capture: {
     user_id: string
     event_id: string
@@ -1567,6 +1568,7 @@ export interface IndicatorQueryParams {
   timeframe?: string  // 1d | 15m | 1h | 1w | 1mo
   adj?: string        // qfq | none
   bars?: number       // 返回最近 N 根 bar 的指标
+  force_refresh?: number  // 1 时跳过 Redis 指标缓存强制实时计算（截图链路使用）
 }
 
 /** 指标 API 响应 */

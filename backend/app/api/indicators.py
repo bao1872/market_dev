@@ -135,6 +135,8 @@ async def get_indicators(
     timeframe: str = Query("1d", description="K线周期: 1d | 15m | 1h | 1w | 1mo"),
     adj: str = Query("qfq", description="复权方式: qfq | none"),
     bars: int = Query(250, ge=50, le=4000, description="返回最近 N 根 bar 的指标（最大 4000，与 Node Cluster 15m 契约对齐）"),
+    force_refresh: bool = Query(False, description="跳过 Redis 指标缓存强制实时计算（截图链路使用）"),
+    capture: bool = Query(False, description="截图模式标记（等价 force_refresh）"),
     db: AsyncSession = Depends(get_db),
     *,
     response: Response,
@@ -169,8 +171,11 @@ async def get_indicators(
     # [指标缓存] - 获取 last_bar_time 用于缓存键
     last_bar_time = await _get_last_bar_time(db, instrument_id)
 
-    # [指标缓存] - 1. 查询 Redis 缓存
-    cached = await indicator_cache.get(instrument_id, timeframe, adj, last_bar_time)
+    # [指标缓存] - 1. 查询 Redis 缓存（force_refresh/capture 跳过读取，但仍写回最新结果）
+    bypass_cache = force_refresh or capture
+    cached = None
+    if not bypass_cache:
+        cached = await indicator_cache.get(instrument_id, timeframe, adj, last_bar_time)
     if cached is not None:
         total_ms = int((time.time() - start_ms) * 1000)
         if response is not None:
@@ -182,6 +187,11 @@ async def get_indicators(
             instrument_id, timeframe, last_bar_time,
         )
         return cached
+    if bypass_cache:
+        logger.info(
+            "指标缓存跳过读取(force_refresh/capture) instrument_id=%s timeframe=%s last_bar=%s",
+            instrument_id, timeframe, last_bar_time,
+        )
 
     # [指标缓存] - 2. 缓存未命中：实时计算（_try_monitor_evaluation 已禁用，结构不兼容）
     data_source = "computed"
