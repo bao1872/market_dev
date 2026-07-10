@@ -52,7 +52,7 @@ starts_at <= now < expires_at
 - 不创建 MonitoringPlan；
 - 到期后自选数据保留，但不读取、不监控、不产生新消息；
 - 续期后恢复；
-- 盘中监控只处理已完成 1m Bar；
+- 盘中监控只处理已完成 1m Bar；`source_bar_time` 必须来自最新已完成 1m bar（剔除最后一根可能未完成的 bar），禁止用日线/15m/partial daily 作为监控触发口径；
 - 同一策略版本、股票、源 Bar 只评估一次。
 
 ### 个股详情
@@ -71,6 +71,7 @@ starts_at <= now < expires_at
 - 飞书渠道唯一方式为 `feishu_platform_app`；
 - `feishu_webhook` 已永久删除，禁止恢复；
 - 手动指定 `target_channel_id` 的用户主动通知跳过 `eligible_user_service`，自动通知仍过滤资格。
+- 飞书盘中截图业务默认展示 1d（日线）：实时性由 Capture Snapshot `1d + include_realtime=True` 的 partial daily 合成保证；15m 不是默认飞书图周期（15m 仅作为 Capture API 能力或策略明确声明的辅助上下文）。
 
 ## 4. 策略与指标
 

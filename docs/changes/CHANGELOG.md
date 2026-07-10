@@ -4,6 +4,14 @@
 
 ## 2026-07-10
 
+- CHANGE-20260710-002: 恢复飞书盘中截图 1d 业务契约，分离截图实时性与监控计算口径
+  - 修复 PR #65 业务语义偏差：飞书截图（手动分享 `stock_detail_feishu_service` + 自动盘中监控 `_send_chart_images_via_outbox`）capture_payload 由 15m 改为业务默认 1d（常量 `FEISHU_CAPTURE_TIMEFRAME`）
+  - `monitor_batch_service` 计算输入 `bars_daily`/`bars_15min` 恢复 `include_realtime=False`，不被截图实时性污染；盘中监控触发仍只基于最新已完成 1m bar
+  - Capture Snapshot API 多周期能力（15m 透传等）保留，明确“API 能力 ≠ 飞书业务默认 15m”
+  - 不引入 DB migration、不重启 postgres/redis、不部署、不跑 research backfill
+  - 测试：pytest 指定文件 38 passed、mypy 0 errors、ruff 改动文件 0 errors、`check_docs_consistency`/`check_architecture`/`check_test_allowlist`/`update_docs --check` 全 PASS
+  - 纠正 docs/current/AGENTS.md/docs/maps 中把 15m 写成飞书业务默认/验收的错误
+
 - CHANGE-20260710-001: 飞书盘中高清实时截图（高清 + 不复用旧图/旧指标 + K线标题股票名称）
   - 三件事：① 高清截图 viewport 1920×1200 + dsf=2（env，默认非 4）；② cache key 扩展 + disable_cache + force_refresh + 实时 source_bar_time，不复用旧图/旧指标；③ K线主标题显示 `名称（代码）`
   - 修改 `stock_capture_service` / `capture_main` / `capture.py` / `monitor_snapshot_service` / `indicators.py` / `stock_detail_feishu_service` / `notification_service` / `monitor_batch_service` + 前端 `CaptureStockPage` / `StockDetailPage` / `StrategyChart` / `endpoints`

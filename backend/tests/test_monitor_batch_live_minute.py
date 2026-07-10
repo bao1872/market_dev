@@ -231,3 +231,86 @@ async def test_monitor_cycle_1m_uses_include_realtime(
     calls_1m = [c for c in captured_calls if c["timeframe"] == "1m"]
     assert calls_1m, "应该调用 timeframe=1m"
     assert all(c["include_realtime"] is True for c in calls_1m)
+
+
+@pytest.mark.asyncio
+async def test_monitor_calc_inputs_daily_15m_non_realtime(
+    db_session: AsyncSession,
+    user_factory,
+    subscription_factory,
+    instrument_factory,
+    monkeypatch,
+):
+    """watchlist_monitor 计算输入口径（CHANGE-20260710-002）：
+
+    - 1m 必须 include_realtime=True 且剔除最后一根未完成 bar；
+    - daily/15m 计算输入必须 include_realtime=False（保守口径，不得被截图实时性污染）；
+    - source_bar_time 仍来自最新已完成 1m bar（剔除最后一根）。
+    """
+    active_admin = await user_factory(roles=["admin"], status="active")
+    instrument = await instrument_factory(symbol="600519", market="SH", status="active")
+
+    await _create_watchlist_monitor_version(db_session)
+
+    await db_session.execute(delete(UserWatchlistItem).where(UserWatchlistItem.active.is_(True)))
+    await db_session.flush()
+
+    db_session.add(UserWatchlistItem(
+        user_id=active_admin.id,
+        instrument_id=instrument.id,
+        active=True,
+        source="manual",
+    ))
+    await db_session.flush()
+
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    minute_df = _build_minute_df(today, count=5)
+    daily_df = _build_daily_df(today, count=30)
+
+    captured_calls: list[dict[str, Any]] = []
+
+    async def _mock_fetch_md_bars_with_meta(
+        self,
+        db: AsyncSession,
+        instrument_id: uuid.UUID,
+        timeframe: str,
+        *,
+        adj: str = "qfq",
+        limit: int | None = None,
+        include_realtime: bool = True,
+        start_date=None,
+        end_date=None,
+    ) -> tuple[pd.DataFrame, str, bool]:
+        captured_calls.append({"timeframe": timeframe, "include_realtime": include_realtime})
+        if timeframe == "1m":
+            return minute_df, "hybrid", True
+        if timeframe == "1d":
+            return daily_df, "db", False
+        if timeframe == "15m":
+            return pd.DataFrame(), "db", False
+        return pd.DataFrame(), "db", False
+
+    monkeypatch.setattr(MonitorBatchService, "_fetch_md_bars_with_meta", _mock_fetch_md_bars_with_meta)
+
+    service = MonitorBatchService()
+    result = await service.execute_monitor_cycle(db_session)
+
+    calls_1m = [c for c in captured_calls if c["timeframe"] == "1m"]
+    calls_daily = [c for c in captured_calls if c["timeframe"] == "1d"]
+    calls_15m = [c for c in captured_calls if c["timeframe"] == "15m"]
+
+    # 1m：实时 + 剔除最后一根未完成 bar → source_bar_time 为倒数第二根
+    assert calls_1m, "必须调用 timeframe=1m"
+    assert all(c["include_realtime"] is True for c in calls_1m), "1m 必须 include_realtime=True"
+    assert result.last_minute_bar_time is not None
+    expected_time = minute_df.index[-2].floor("1min").to_pydatetime().replace(second=0, microsecond=0)
+    actual_time = result.last_minute_bar_time
+    if actual_time.tzinfo is None and expected_time.tzinfo is not None:
+        actual_time = actual_time.replace(tzinfo=expected_time.tzinfo)
+    assert actual_time == expected_time
+
+    # daily/15m 计算输入：非实时（保守口径，不被截图实时性污染）
+    assert calls_daily, "必须调用 daily 计算输入"
+    assert all(c["include_realtime"] is False for c in calls_daily), "daily 计算输入不得 include_realtime=True"
+    assert calls_15m, "必须调用 15m 计算输入（Node Cluster 筹码分布）"
+    assert all(c["include_realtime"] is False for c in calls_15m), "15m 计算输入不得 include_realtime=True"

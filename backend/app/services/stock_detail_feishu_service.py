@@ -37,7 +37,10 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants.capture import CAPTURE_SCOPE_STOCK_DETAIL
+from app.constants.capture import (
+    CAPTURE_SCOPE_STOCK_DETAIL,
+    FEISHU_CAPTURE_TIMEFRAME,
+)
 from app.core.security import create_capture_token
 from app.core.time import format_shanghai_datetime, now_utc, to_shanghai_iso
 from app.models.capture_job import (
@@ -287,8 +290,9 @@ async def send_stock_detail_to_feishu(
             "output_filename": f"stock-detail-{instrument_id}-{test_run_id}",
             "instrument_id": str(instrument_id),
             "chart_version": "v1",
-            # [capture-realtime] - 扩展字段：周期透传 + 实时来源 + 运行ID + 缓存旁路
-            "timeframe": "15m",
+            # [Feishu] - 飞书盘中截图业务默认 1d（日线）：实时性由 Capture Snapshot
+            # 1d + include_realtime=True 的 partial daily 合成保证，不依赖 15m。
+            "timeframe": FEISHU_CAPTURE_TIMEFRAME,
             "capture_run_id": str(test_run_id),
             "source_bar_time": snapshot.as_of.isoformat(),
             "disable_cache": True,
@@ -317,11 +321,11 @@ async def send_stock_detail_to_feishu(
                     f"截图服务返回 {capture_resp.status_code}: {err_msg}"
                 ) from http_err
             capture_data = capture_resp.json()
-        # [capture-realtime] - 日志输出实时截图上下文（便于核对不复用旧图）
+        # [Feishu] - 日志输出截图上下文（1d 业务默认 + 实时 partial daily 合成）
         logger.info(
-            "实时截图请求参数 timeframe=15m source_bar_time=%s capture_run_id=%s "
+            "实时截图请求参数 timeframe=%s source_bar_time=%s capture_run_id=%s "
             "disable_cache=true cache_hit=%s",
-            snapshot.as_of.isoformat(), str(test_run_id),
+            FEISHU_CAPTURE_TIMEFRAME, snapshot.as_of.isoformat(), str(test_run_id),
             capture_data.get("cache_hit"),
         )
         image_url = capture_data.get("image_url")

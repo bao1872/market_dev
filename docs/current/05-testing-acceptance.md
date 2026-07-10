@@ -485,7 +485,9 @@ ruff check app/constants/capture.py app/core/deps.py app/core/security.py \
 - `tests/test_capture_snapshot.py`：Capture Snapshot 端点 `include_realtime=True`、周期透传、`bars_limit` 按 `INDICATOR_BARS` 对齐；**阻断验收**：请求 `timeframe=15m` 时，`get_bars` 必须收到 `timeframe="15m"` 且 `include_realtime=True`，`compute_all_indicators` 必须收到 `timeframe="15m"` 且 `bars=INDICATOR_BARS["15m"]`，`_df_to_responses` 必须使用 `15m`；响应 `bars.timeframe`、items 时间格式（15m 用 `trade_time`、1d 用 `trade_date`）、indicators timeframe 三者必须一致，禁止回退 `_CAPTURE_TIMEFRAME`；
 - `tests/test_indicator_contract.py`：禁止散落硬编码受控字面量（250/4000 等），`INDICATOR_BARS` 为唯一真源；
 - `tests/test_indicator_cache.py`：`force_refresh` / `capture` 跳过 Redis 读缓存但写最新；
-- `tests/test_monitor_batch_capture_image.py` / `tests/test_notification_latest_event_capture.py`：capture_payload 含 `timeframe=15m` / `capture_run_id` / `source_bar_time` / `disable_cache=True`；
+- 飞书业务 payload 周期断言（CHANGE-20260710-002）：`tests/test_monitor_batch_capture_image.py` / `tests/test_stock_detail_feishu.py` 中 `capture_payload["timeframe"]` 必须是 `1d` / `capture_run_id` / `source_bar_time` / `disable_cache=True`；`test_notification_latest_event_capture.py` 仅校验 selector latest-event 截图的 capture token claims（其 timeframe 由 selector 链路决定，是独立路径，不属于 watchlist_monitor 飞书 1d 业务默认约束）；
+- `tests/test_monitor_batch_live_minute.py::test_monitor_calc_inputs_daily_15m_non_realtime`：watchlist_monitor 计算输入 `bars_daily`/`bars_15min` 必须 `include_realtime=False`（不被截图实时性污染），1m 必须 `include_realtime=True` 且剔除最后一根未完成 bar，`source_bar_time` 来自最新已完成 1m；
+- Capture Snapshot API 多周期能力测试保留（见上方 `test_capture_snapshot.py` 15m 透传阻断验收）：API 支持 15m 是能力，不等于飞书业务默认 15m；
 - `tests/test_bars.py`：K线实时契约（partial daily bar 为真，前端不伪造）。
 
 前端：

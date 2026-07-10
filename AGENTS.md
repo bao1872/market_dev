@@ -513,6 +513,14 @@ FEISHU_WEBHOOK
 
 管理员内测申请通知必须复用管理员用户自己的 active `feishu_platform_app` NotificationChannel。
 
+### 6.1 飞书盘中截图与盘中监控口径（CHANGE-20260710-002 确立）
+
+- 盘中监控触发只依赖**最新已完成 1m bar**：`source_bar_time` 必须来自最新已完成 1m bar（剔除最后一根可能未完成的 bar），禁止用 1d/15m/partial daily 作为监控触发口径；
+- 飞书盘中截图业务默认 `timeframe=1d`（日线）：实时性由 Capture Snapshot `1d + include_realtime=True` 的 partial daily 合成保证；
+- Capture API 支持多周期（1d/15m/1h/1w/1mo）是**能力**，不等于飞书业务默认 15m；业务调用方（手动飞书分享 `stock_detail_feishu_service`、自动盘中监控 `monitor_batch_service._send_chart_images_via_outbox`）默认传 1d；
+- 修截图、清晰度、缓存（`device_scale_factor` / `disable_cache` / `force_refresh` / `source_bar_time` cache key）**不得改变 `watchlist_monitor` 事件计算口径**；`monitor_batch_service` 计算输入 `bars_daily` / `bars_15min` 必须 `include_realtime=False`；
+- `15m` 只作为 API 能力或策略明确声明的辅助上下文（`dsa_selector` latest-event 截图等），不得成为 watchlist_monitor 飞书业务默认周期。
+
 ### 7. Capture Token
 
 Capture Token 只能访问 Capture API。\
