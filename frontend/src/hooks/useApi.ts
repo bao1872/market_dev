@@ -106,7 +106,7 @@ function isInTradingHoursShanghaiFallback(): boolean {
  * 判断当前是否在 A 股交易时段（周一至周五 9:30-11:30 / 13:00-15:00，上海时间）
  *
  * 优先级：
- * 1. 后端 /market/status 缓存（由 AppShell 30s 轮询更新，包含交易日判断）
+ * 1. 后端 /market/status 缓存（由 UserAppShell/AdminAppShell 30s 轮询更新，包含交易日判断）
  * 2. Intl.DateTimeFormat 固定 Asia/Shanghai 时区的本地 fallback（仅 weekday+时间，不含节假日）
  */
 export function isInTradingHours(): boolean {

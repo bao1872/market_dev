@@ -2,6 +2,16 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-11
+
+- CHANGE-20260711-001: 用户/管理员壳层与导航路由拆分（阶段二）
+  - 普通用户主入口 `/market`（复用 WatchlistPage）；`/overview`→`/market`、`/watchlist`→`/market?scope=watchlist` 兼容重定向
+  - `UserAppShell`（顶栏品牌+一级导航行情/趋势选股+账户菜单；无左侧栏）；`AdminAppShell`（独立管理导航+账户菜单）；`ProtectedLayout` 只返回 Outlet
+  - `AccountMenu` 下拉（消息/设置/管理后台仅admin/退出）；`appNavigation.ts` 集中路由常量
+  - 登录/续期/兜底/AdminRoute 重定向 `/overview`→`/market`；Capture 路由不变
+  - 新增 6 项导航阻断测试；tsc 0 errors；eslint 0 errors；vite build 通过
+  - 不改后端/API/数据模型/Worker；不删除 IndexPage/WatchlistPage/ScreenerPage/StockDetailPage
+
 ## 2026-07-10
 
 - CHANGE-20260710-002: 恢复飞书盘中截图 1d 业务契约，分离截图实时性与监控计算口径

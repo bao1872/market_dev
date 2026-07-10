@@ -10,8 +10,8 @@
 // 交互：
 // - 邀请码输入时自动大写化，清洁长度（仅字母数字）≥8 时显示"✓ 邀请码格式正确"
 // - 点击"兑换并恢复全部功能"调用 useRenew hook，成功后隐藏表单并显示内联成功提示
-// - [Auth] - 描述: 续期成功后调用 /me/access 刷新 AuthUser.subscription_active，再跳转 /overview
-// - 成功提示中"进入服务台"按钮跳转 /overview；"返回登录"链接跳转 /login
+// - [Auth] - 描述: 续期成功后调用 /me/access 刷新 AuthUser.subscription_active，再跳转 /market
+// - 成功提示中"进入服务台"按钮跳转 /market；"返回登录"链接跳转 /login
 import { useState } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { useRenew } from '@/hooks/useApi'
@@ -72,7 +72,7 @@ export default function SubscriptionExpiredPage() {
         setSuccess(data)
         toast.show('续期成功', `会员有效期已更新至 ${formatDate(data.new_expires_at)}`)
         // [Auth] - 描述: 续期成功后异步刷新 AuthUser.subscription_active 等字段
-        // 避免用户进入 /overview 时被 SubscriberRoute 拦回 /subscription-expired
+        // 避免用户进入 /market 时被 SubscriberRoute 拦回 /subscription-expired
         getMyAccess()
           .then((access) => {
             const currentUser = useAuthStore.getState().user
@@ -104,9 +104,9 @@ export default function SubscriptionExpiredPage() {
     })
   }
 
-  // [Auth] - 描述: 进入服务台 - 续期成功后跳转 /overview（SubscriberRoute 校验已刷新的 subscription_active）
+  // [Auth] - 描述: 进入服务台 - 续期成功后跳转 /market（SubscriberRoute 校验已刷新的 subscription_active）
   const handleEnter = () => {
-    navigate('/overview')
+    navigate('/market')
   }
 
   // 返回登录

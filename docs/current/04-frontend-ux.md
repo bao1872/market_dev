@@ -17,22 +17,42 @@ Node Cluster 算法
 
 ## 2. 路由与守卫
 
-| 路由 | 守卫 | 页面 |
-|---|---|---|
-| `/` | Public | 门户 |
-| `/login` | Public | 登录/注册 |
-| `/subscription-expired` | Authenticated | 续期 |
-| `/membership-expired` | Redirect | 兼容跳转 |
-| `/capture/stock/:symbol` | Capture Token | 截图专用页面 |
-| `/overview` | Subscriber/Admin | 服务总览 |
-| `/screener` | Subscriber/Admin | 趋势选股 |
-| `/watchlist` | Subscriber/Admin | 我的自选 |
-| `/stock/:symbol` | Subscriber/Admin | 个股详情 |
-| `/messages` | Authenticated | 历史消息 |
-| `/settings` | Authenticated | 账户和通知渠道 |
-| `/admin/*` | Admin | 管理页面（含 `/admin/overview`、`/admin/users`、`/admin/strategies`、`/admin/jobs`、`/admin/beta-applications`、`/admin/after-close`） |
+| 路由 | 守卫 | 壳层 | 页面 |
+|---|---|---|---|
+| `/` | Public | — | 门户 |
+| `/login` | Public | — | 登录/注册 |
+| `/subscription-expired` | Authenticated | — | 续期 |
+| `/membership-expired` | Redirect | — | 兼容跳转 |
+| `/capture/stock/:symbol` | Capture Token | **无壳层** | 截图专用页面 |
+| `/market` | Subscriber/Admin | UserAppShell | 行情（本阶段复用 WatchlistPage） |
+| `/screener` | Subscriber/Admin | UserAppShell | 趋势选股 |
+| `/stock/:symbol` | Subscriber/Admin | UserAppShell | 个股详情 |
+| `/messages` | Authenticated | UserAppShell | 历史消息 |
+| `/settings` | Authenticated | UserAppShell | 账户和通知渠道 |
+| `/admin/*` | Admin | AdminAppShell | 管理页面（含 `/admin/overview`、`/admin/users`、`/admin/strategies`、`/admin/jobs`、`/admin/beta-applications`、`/admin/after-close`） |
+| `/overview` | Redirect | — | 兼容重定向 → `/market` |
+| `/watchlist` | Redirect | — | 兼容重定向 → `/market?scope=watchlist` |
 
-刷新后必须重新调用 `/me/access`，不能永久相信本地缓存。
+### 2.1 壳层拆分（阶段二确立）
+
+- `UserAppShell`（`frontend/src/layouts/UserAppShell.tsx`）：普通用户布局壳，顶部品牌 + 一级导航（行情 `/market`、趋势选股 `/screener`）+ 右上角账户菜单；**无左侧栏**。
+- `AdminAppShell`（`frontend/src/layouts/AdminAppShell.tsx`）：管理员独立布局壳，侧栏管理导航 + 顶栏账户菜单；仅承载 `/admin/*`。
+- `AccountMenu`（`frontend/src/components/AccountMenu.tsx`）：右上角下拉菜单，包含消息、设置、管理后台（仅 `is_admin`）、退出；支持点击外部关闭、Escape 关闭、基本 ARIA。
+- `ProtectedLayout` 只负责认证和 access profile，不再固定渲染同一壳层；`UserAppShell`/`AdminAppShell` 由各自路由组在 `ProtectedLayout` 之下作为 layout element 挂载。
+- `/capture/stock/:symbol` 位于两套壳层之外，只使用 `captureClient`。
+- 导航/路由常量集中于 `frontend/src/navigation/appNavigation.ts`，避免路径散落。
+
+### 2.2 兼容重定向
+
+旧地址保留重定向，避免书签/旧链接 404：
+- `/overview` → `/market`
+- `/watchlist` → `/market?scope=watchlist`
+
+### 2.3 尚未完成（下一阶段）
+
+- 三栏统一行情工作区（左列表 + 中K线 + 右事件解释）尚未实现；当前 `/market` 直接复用 `WatchlistPage` 作为阶段性真实内容。
+- `StockDetailPage` 的 `event_id` 消费、`useStockResearchData` 抽取、`StockResearchWorkspace` 组件均放下一阶段。
+- 复盘模式本轮不开发。
 
 ## 3. 页面职责
 

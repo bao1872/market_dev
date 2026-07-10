@@ -64,7 +64,7 @@ export default function LoginPage() {
 
   // [Auth] - 描述: 登录成功后的统一处理 - 直接使用 login 响应的 AccessProfile 字段构造 AuthUser
   // 不再调用 getMe 二次请求（login 响应已含 is_admin/roles/subscription_active 等权限上下文）
-  // 跳转目标由后端权威计算的 next_route 决定（admin→/admin/overview；member active→/overview；expired→/subscription-expired）
+  // 跳转目标由后端权威计算的 next_route 决定（admin→/admin/overview；member active→/market；expired→/subscription-expired）
   async function handleLoginSuccess(data: LoginResponse, keepLogin: boolean) {
     setAuthenticating(true)
     try {
@@ -206,8 +206,8 @@ export default function LoginPage() {
         })
       useAuthStore.getState().setUser(user)
       useToast.getState().show('登录成功', '已进入盘迹')
-      // [Auth] - 描述: 注册后默认跳转 /overview（新注册订阅已激活，无 next_route 字段）
-      navigate('/overview')
+      // [Auth] - 描述: 注册后默认跳转 /market（新注册订阅已激活，无 next_route 字段）
+      navigate('/market')
     } catch (err) {
       useAuthStore.getState().logout()
       useToast.getState().show('获取权限信息失败', getErrorMessage(err))

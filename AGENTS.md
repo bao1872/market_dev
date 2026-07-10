@@ -583,6 +583,17 @@ Capture Token 只能访问 Capture API。\
    - 前端是否只是展示，是否存在伪造实时？
    - 交易时段和收盘后分别如何验证？
 
+### 14. 用户/管理员壳层与导航拆分（阶段二确立）
+
+1. 普通用户主入口为 `/market`（行情）；趋势选股 `/screener` 保持独立一级页面。
+2. 行情与自选合并：`/market` 复用 `WatchlistPage` 作为阶段性真实内容；旧 `/overview` 重定向到 `/market`，`/watchlist` 重定向到 `/market?scope=watchlist`。
+3. 普通用户使用 `UserAppShell`（顶栏品牌 + 一级导航行情/趋势选股 + 右上角账户菜单；无左侧栏）；消息、设置、管理后台入口、退出收拢到 `AccountMenu`。
+4. 管理后台使用独立 `AdminAppShell`（侧栏管理导航 + 账户菜单），仅承载 `/admin/*`；不得套用普通用户导航。
+5. `ProtectedLayout` 只负责认证与 access profile，不再固定渲染同一壳层。
+6. `/capture/stock/:symbol` 位于两套壳层之外，只使用 `captureClient`。
+7. 导航/路由常量集中于 `frontend/src/navigation/appNavigation.ts`，禁止路径散落。
+8. 三栏统一行情工作区、`StockDetailPage` 抽取、`event_id` 消费放下一阶段，本阶段不实现。
+
 ***
 
 ## 十三、质量门禁

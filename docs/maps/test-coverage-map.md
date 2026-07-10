@@ -10,6 +10,7 @@
 | AccessContext | `test_eligible_user_service.py`, access control tests |
 | Capture Token 隔离 | `test_capture_token_isolation.py`, auth tests |
 | Worker 心跳 admin API（admin/non-admin/unauthenticated + status 筛选 + health_state 分类） | `test_admin_worker_heartbeats_api.py` |
+| **壳层与导航拆分（阶段二）**：用户导航仅行情/趋势选股、admin 入口仅管理员可见、旧路由兼容重定向、admin 路由独立壳层、capture 路由不渲染任一壳层、默认入口 `/market` | `frontend/src/navigation/__tests__/appNavigation.test.ts`（6 用例） |
 
 ## 2. 趋势选股
 

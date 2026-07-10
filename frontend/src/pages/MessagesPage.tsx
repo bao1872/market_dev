@@ -218,7 +218,7 @@ function parseDelivery(message: NotificationMessage): { label: string; pill: Del
 export default function MessagesPage() {
   const navigate = useNavigate()
   const toast = useToast.getState()
-  // [Messages] - 描述: 过程事件仅管理员可见（与 AppShell 管理员控制台导航同款判断）
+  // [Messages] - 描述: 过程事件仅管理员可见（与 AdminAppShell 管理员控制台导航同款判断）
   const isAdmin = useRoleStore((s) => s.isAdmin)
   // [Messages] - 描述: 支持 ?filter=unread 从角标进入未读筛选
   const [searchParams] = useSearchParams()

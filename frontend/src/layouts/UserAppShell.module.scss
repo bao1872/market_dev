@@ -1,0 +1,48 @@
+// [UserAppShell] - 描述: 普通用户壳层局部样式（CSS Module）
+// 关键布局修正：用户壳层无侧栏，需覆盖全局 .topbar（left 由侧栏宽度改为 0）
+// 与全局 .main（margin-left 由侧栏宽度改为 0），内容区占满宽度。
+// 其余视觉（品牌、账户菜单、状态文字）沿用 global.scss 既有类，避免重复堆样式。
+
+.userShell {
+  :global(.topbar) {
+    left: 0;
+  }
+
+  :global(.main) {
+    margin-left: 0;
+  }
+}
+
+.brandLink {
+  display: flex;
+  align-items: center;
+  height: 100%;
+}
+
+.nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+}
+
+.navLink {
+  padding: 7px 14px;
+  border-radius: 8px;
+  color: #aab0bf;
+  font-weight: 600;
+  font-size: 14px;
+  text-decoration: none;
+  transition: 0.16s;
+
+  &:hover {
+    background: #1c202b;
+    color: #fff;
+  }
+}
+
+.navLinkActive {
+  background: rgba(41, 98, 255, 0.17);
+  color: #fff;
+  box-shadow: inset 0 -2px 0 #2962ff;
+}

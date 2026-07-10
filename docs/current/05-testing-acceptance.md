@@ -65,6 +65,19 @@
   - `test_monitor_batch_live_minute.py::test_monitor_cycle_1m_uses_include_realtime` 覆盖 `monitor_batch_service` 调用 MDAS 1m 时必须带 `include_realtime=True`；
   - `test_quote_timezone.py` 覆盖 `/quote` 返回 `update_time` 带 `+08:00`、UTC 字符串被修正为 `+08:00`。
 
+### 壳层与导航拆分（阶段二阻断验收）
+
+- 前端 `src/navigation/__tests__/appNavigation.test.ts` 覆盖：
+  1. 用户一级导航仅含 `/market`（行情）和 `/screener`（趋势选股），不含消息/设置/总览/自选入口；
+  2. 账户菜单中管理后台入口仅 `is_admin=true` 可见（`getAccountMenuItems(isAdmin)` 过滤）；
+  3. 旧路由兼容重定向：`/overview` → `/market`、`/watchlist` → `/market?scope=watchlist`；
+  4. 管理员路由集中于 `/admin/*`（`ADMIN_NAV_ITEMS` 全部以 `/admin` 开头）；
+  5. Capture 路由 `/capture/stock/:symbol` 不在用户/管理员导航或账户菜单中；
+  6. 默认登录/兜底入口为 `/market`（`DEFAULT_ENTRY`）。
+- 运行命令：`node --experimental-strip-types --test src/navigation/__tests__/appNavigation.test.ts`
+- 回归要求：修改 `App.tsx`、`navigation/appNavigation.ts`、`UserAppShell.tsx`、`AdminAppShell.tsx`、`AccountMenu.tsx` 或路由结构时必须跑此测试。
+- `tsc --noEmit` 零错误；改动文件 eslint 零错误（既有 warnings 不计）。
+
 ## 3.2 K线实时契约门禁（blocking）
 
 - 任何修改 `backend/app/api/bars.py`、`backend/app/services/market_data_aggregation_service.py`、`backend/app/core/pytdx_adapter.py`、`frontend/src/pages/StockDetailPage.tsx`、`frontend/src/utils/chart.ts` 必须跑 K线实时契约测试；
