@@ -451,3 +451,71 @@ class TestStockDetailFeishuStatus:
             assert status_data["card_status"] == "pending"
         finally:
             app.dependency_overrides.clear()
+
+
+class TestStockDetailFeishuCapturePayload:
+    """飞书盘中截图业务默认周期断言（CHANGE-20260710-002）。
+
+    手动飞书截图 capture_payload 的 timeframe 必须是业务默认 '1d'（日线），
+    实时性由 Capture Snapshot 1d + include_realtime=True 的 partial daily 合成保证，
+    不得回退为 15m。
+    """
+
+    @pytest.mark.asyncio
+    async def test_manual_send_capture_payload_timeframe_is_daily(
+        self, db_session, test_instrument, user_with_feishu_channel,
+    ) -> None:
+        """手动飞书截图 capture_payload 的 timeframe 必须是业务默认 '1d'（非 15m）。"""
+        user, _ = user_with_feishu_channel
+        _override_get_db(db_session)
+
+        try:
+            capture_resp = _make_capture_response()
+            image_fetch_resp = _make_image_fetch_response()
+
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=capture_resp)
+            mock_client.get = AsyncMock(return_value=image_fetch_resp)
+
+            with patch(
+                "app.services.monitor_snapshot_service.compute_all_indicators",
+                new=AsyncMock(return_value={
+                    "layers": [],
+                    "data": {
+                        "watchlist_monitor": {
+                            "current_price": [25.50],
+                            "bb_upper": [27.00],
+                            "bb_mid": [25.00],
+                            "bb_lower": [23.00],
+                            "upper_node": [{"price_mid": 26.00}],
+                            "lower_node": [{"price_mid": 24.00}],
+                            "poc_price": [25.00],
+                            "position_0_1": [0.50],
+                        },
+                    },
+                }),
+            ), patch("httpx.AsyncClient") as mock_client_cls:
+                mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+                transport = make_asgi_transport(app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    response = await client.post(
+                        f"/instruments/{test_instrument.id}/send-feishu",
+                        headers=_auth_headers(user.id),
+                        json={},
+                    )
+
+            assert response.status_code == 200, f"响应体: {response.text}"
+
+            # 校验 capture worker 收到的 payload timeframe 为业务默认 1d
+            assert mock_client.post.call_args is not None
+            captured_payload = mock_client.post.call_args.kwargs.get("json")
+            assert captured_payload is not None
+            assert captured_payload.get("timeframe") == "1d"
+            # 截图修复保留的字段不得丢失
+            assert captured_payload.get("capture_run_id") is not None
+            assert captured_payload.get("source_bar_time") is not None
+            assert captured_payload.get("disable_cache") is True
+        finally:
+            app.dependency_overrides.clear()

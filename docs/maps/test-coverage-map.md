@@ -69,6 +69,8 @@
 | monitor_batch / event_recipient / outbox_relay / delivery_worker 监控资格口径一致 | `test_outbox_relay_monitor_eligibility_consistency.py`, `test_delivery_worker_monitor_eligible.py` |
 | monitor_batch 使用 live 1m 输入（`include_realtime=True`）并剔除最后一根未完成 bar | `test_monitor_batch_live_minute.py` |
 | monitor_batch 调用 MDAS 1m 时必须带 `include_realtime=True` | `test_monitor_batch_live_minute.py::test_monitor_cycle_1m_uses_include_realtime` |
+| monitor_batch 计算输入 daily/15m `include_realtime=False`（不被截图实时性污染），1m `include_realtime=True` 且剔除最后未完成 bar，`source_bar_time` 来自最新已完成 1m | `test_monitor_batch_live_minute.py::test_monitor_calc_inputs_daily_15m_non_realtime` |
+| 飞书业务 payload（手动分享 `stock_detail_feishu_service` + 自动盘中监控截图 `_send_chart_images_via_outbox`）`timeframe=1d`，保留 `capture_run_id`/`source_bar_time`/`disable_cache` | `test_stock_detail_feishu.py::TestStockDetailFeishuCapturePayload`、`test_monitor_batch_capture_image.py::TestMonitorBatchCaptureTimeframe` |
 
 ### 3.5.1 Feature Snapshot 持久化
 

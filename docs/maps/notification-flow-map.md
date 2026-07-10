@@ -44,6 +44,7 @@ worker-monitor
 - `message_group_id` 与文字/卡片链路共享，用于图文状态机关联；
 - capture token 字段缺失会导致 worker-capture 返回 401/403，`image_url` 为空，不写 image Outbox，但**不阻塞文字通知**；
 - 图片截图失败时整体消息组可能标记为 `partial_failed`。
+- 飞书截图 `capture_payload["timeframe"]` 业务默认 `1d`（常量 `FEISHU_CAPTURE_TIMEFRAME`）；实时性由 Capture Snapshot `1d + include_realtime=True` 的 partial daily 合成保证，15m 仅 Capture API 能力，非飞书业务默认。
 
 无 `target_channel_id` 的自动通知必须走 eligible_user_service；delivery_worker 是 monitor source 的最后资格防线。
 

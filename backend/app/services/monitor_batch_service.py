@@ -33,7 +33,10 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import indicator_contract
-from app.constants.capture import CAPTURE_SCOPE_STOCK_DETAIL
+from app.constants.capture import (
+    CAPTURE_SCOPE_STOCK_DETAIL,
+    FEISHU_CAPTURE_TIMEFRAME,
+)
 from app.constants.strategy_keys import WATCHLIST_MONITOR
 from app.constants.user_facing_labels import get_event_label, get_field_label
 from app.core.time import format_shanghai_datetime
@@ -631,7 +634,10 @@ class MonitorBatchService:
             timeframe="1d",
             adj="qfq",
             limit=_DAILY_LOOKBACK_BARS,
-            include_realtime=True,  # [capture-realtime] daily 用于 current_price/position，允许实时 partial daily
+            # [Feishu/Monitor] - 恢复保守规则（CHANGE-20260710-002）：watchlist_monitor 计算输入
+            # 不得因截图实时性需求而使用实时日线，避免污染事件计算口径；当前价实时展示
+            # 由 card 的 change_pct（pytdx live）与 capture snapshot 1d partial daily 负责。
+            include_realtime=False,
         )
 
         bars_15min = pd.DataFrame()
@@ -641,7 +647,8 @@ class MonitorBatchService:
                 timeframe="15m",
                 adj="qfq",
                 limit=_15MIN_LOOKBACK_BARS,
-                include_realtime=True,  # [capture-realtime] 15m 使用实时聚合，避免复用旧图
+                # [Feishu/Monitor] - 恢复保守规则：15m 计算输入非实时，仅用已完成 bar。
+                include_realtime=False,
             )
         except Exception as exc:
             logger.warning("15min行情拉取失败 %s: %s", symbol, exc)
@@ -1535,8 +1542,9 @@ class MonitorBatchService:
                     "output_filename": f"monitor-{inst_id}-{first_event.id}",
                     "instrument_id": str(inst_id),
                     "chart_version": "v1",
-                    # [capture-realtime] - 扩展字段：周期透传 + 实时来源 + 运行ID + 缓存旁路
-                    "timeframe": "15m",
+                    # [Feishu] - 飞书盘中截图业务默认 1d（日线）：实时性由 Capture Snapshot
+                    # 1d + include_realtime=True 的 partial daily 合成保证，不依赖 15m。
+                    "timeframe": FEISHU_CAPTURE_TIMEFRAME,
                     "capture_run_id": f"monitor-{inst_id}-{first_event.id}",
                     "source_bar_time": first_event.event_time.isoformat(),
                     "disable_cache": True,

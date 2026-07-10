@@ -24,7 +24,7 @@ worker-strategy-batch 的 run 级总超时由 STRATEGY_RUN_TOTAL_TIMEOUT_SECONDS
 - 日历刷新：约 02:00 Asia/Shanghai；
 - 盘后行情：交易日约 16:00；
 - DSA 兜底：交易日约 18:30；
-- 盘中监控：09:30–11:30、13:00–15:00 按配置轮询；监控资格判定使用 `app.services.eligible_user_service.filter_monitor_eligible_recipients`，active admin 与 active member + 有效 subscription 进入监控，disabled admin 与无订阅普通用户排除；`monitor_batch_service` 拉取 1m 行情使用 `include_realtime=True` 并剔除最后一根未完成 1m，日线/15m 输入使用 `include_realtime=True`（盘中合成 partial daily / 最新 15m，供 current_price 与截图实时数据源）；
+- 盘中监控：09:30–11:30、13:00–15:00 按配置轮询；监控资格判定使用 `app.services.eligible_user_service.filter_monitor_eligible_recipients`，active admin 与 active member + 有效 subscription 进入监控，disabled admin 与无订阅普通用户排除；`monitor_batch_service` 拉取 1m 行情使用 `include_realtime=True` 并剔除最后一根未完成 1m，`source_bar_time` 始终来自最新已完成 1m bar；日线/15m **计算输入**使用 `include_realtime=False`（仅已完成 bar，watchlist_monitor 事件计算口径不得因截图实时性需求而变更）；飞书盘中截图展示默认 1d，实时性由 Capture Snapshot `1d + include_realtime=True` 的 partial daily 合成保证，与监控计算链路分离；
 - Outbox/Delivery：短轮询；`delivery_worker.py` 对 `monitor_event`/`strategy_event`/`monitor_chart` 投递前再次调用 `is_user_eligible_for_monitor` 复核，与 monitor_batch/event_recipient/outbox_relay 口径一致；
 - Worker 心跳：持续更新。
 
@@ -604,6 +604,7 @@ text_outbox
 
 飞书盘中监控截图必须满足三件事：高清、不复用上一轮旧图/旧指标、K线标题显示股票名称。
 
+- **业务默认周期 = 1d（日线）**：`stock_detail_feishu_service`（手动飞书分享）与 `monitor_batch_service._send_chart_images_via_outbox`（自动盘中监控截图）向 capture worker 发送的 `capture_payload["timeframe"]` 固定为 `1d`（常量 `FEISHU_CAPTURE_TIMEFRAME`，见 `app/constants/capture.py`）；实时性由 Capture Snapshot `1d + include_realtime=True` 的 partial daily 合成保证；Capture API 支持 15m/1h 等多周期是**能力**，`15m` 只用于显式请求 / 调试 / 未来策略声明，不得成为飞书业务默认周期。截图修复（高清/缓存/清晰度）**不得改变 `watchlist_monitor` 事件计算口径**。
 - **高清截图**：capture worker 浏览器上下文使用 `viewport=1920x1200` + `device_scale_factor=2`（env `CAPTURE_VIEWPORT_WIDTH/HEIGHT` / `CAPTURE_DEVICE_SCALE_FACTOR`，默认 1920/1200/2，严禁 4 倍），提升 PNG 清晰度；截图为单张、不落库、不存 base64。
 - **不复用旧图/旧指标**：
   - 截图缓存 key 维度扩展为 `event_id + instrument_id + chart_version + timeframe + source_bar_time + capture_run_id + device_scale_factor`，不同时间点/周期天然区分；

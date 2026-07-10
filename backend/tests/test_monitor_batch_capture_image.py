@@ -267,5 +267,58 @@ class TestMonitorBatchCaptureTokenClaims:
         assert job.message_group_id == group_id
 
 
+class TestMonitorBatchCaptureTimeframe:
+    """飞书盘中截图业务默认周期断言（CHANGE-20260710-002）。"""
+
+    @pytest.mark.asyncio
+    async def test_capture_payload_timeframe_is_daily(
+        self, db_session, test_user, test_instrument,
+    ) -> None:
+        """自动盘中监控截图 capture_payload 的 timeframe 必须是业务默认 '1d'（非 15m）。
+
+        实时性由 Capture Snapshot 1d + include_realtime=True 的 partial daily 合成保证，
+        截图修复不得改变 watchlist_monitor 事件计算口径。
+        """
+        inst_id = test_instrument.id
+        user_id = test_user.id
+        event = _make_event(inst_id)
+        group_id = str(uuid4())
+
+        captured_payload: dict | None = None
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"image_url": "/static/captures/monitor-test.png"}
+        mock_resp.raise_for_status.return_value = None
+
+        mock_client = AsyncMock()
+
+        async def _capture_post(url: str, json: dict | None = None, **kwargs: object) -> MagicMock:
+            nonlocal captured_payload
+            captured_payload = json
+            return mock_resp
+
+        mock_client.post = _capture_post
+
+        service = MonitorBatchService()
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await service._send_chart_images_via_outbox(
+                db=db_session,
+                instrument_events={inst_id: [event]},
+                instrument_info_cache={inst_id: (test_instrument.symbol, test_instrument.name)},
+                instrument_user_map={inst_id: [user_id]},
+                message_group_id=group_id,
+            )
+
+        assert captured_payload is not None
+        assert captured_payload["timeframe"] == "1d"
+        # 截图修复保留的字段不得丢失
+        assert captured_payload["capture_run_id"] is not None
+        assert captured_payload["source_bar_time"] is not None
+        assert captured_payload["disable_cache"] is True
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
