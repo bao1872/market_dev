@@ -111,16 +111,16 @@ const CARDS: Array<{ title: string; group: FactorGroup; rows: FactorRow[] }> = [
     title: 'Swing 结构位置',
     group: 'swing_position',
     rows: [
-      // [V1.10] developing swing 摘要：当前正在发生的回落/反弹结构
-      // active major leg 和 confirmed pivot 字段在"结构因子明细"折叠卡片 JSON 中查看
-      { label: 'Developing 方向', key: 'developing_swing_dir', format: fmtDir },
-      { label: 'Developing high', key: 'developing_swing_high', format: fmtPrice },
-      { label: 'Developing low', key: 'developing_swing_low', format: fmtPrice },
-      { label: '距 developing high bar', key: 'bars_since_developing_swing_high', format: fmtInt },
-      { label: '距 developing low bar', key: 'bars_since_developing_swing_low', format: fmtInt },
-      { label: 'Developing 位置[0,1]', key: 'price_position_in_developing_swing_0_1', format: (v) => fmt(v, 3) },
-      { label: '距 developing high / ATR', key: 'distance_to_developing_swing_high_atr', format: (v) => fmt(v, 3) },
-      { label: '距 developing low / ATR', key: 'distance_to_developing_swing_low_atr', format: (v) => fmt(v, 3) },
+      // [V1.9] active swing 摘要：当前正在发展的结构区间，跟随最新价格
+      // confirmed pivot 字段在"结构因子明细"折叠卡片 JSON 中查看
+      { label: 'Active 方向', key: 'active_swing_dir', format: fmtDir },
+      { label: 'Active high', key: 'active_swing_high', format: fmtPrice },
+      { label: 'Active low', key: 'active_swing_low', format: fmtPrice },
+      { label: '距 active high bar', key: 'bars_since_active_swing_high', format: fmtInt },
+      { label: '距 active low bar', key: 'bars_since_active_swing_low', format: fmtInt },
+      { label: 'Active 位置[0,1]', key: 'price_position_in_active_swing_0_1', format: (v) => fmt(v, 3) },
+      { label: '距 active high / ATR', key: 'distance_to_active_swing_high_atr', format: (v) => fmt(v, 3) },
+      { label: '距 active low / ATR', key: 'distance_to_active_swing_low_atr', format: (v) => fmt(v, 3) },
     ],
   },
   {
@@ -272,8 +272,8 @@ const TEMPORAL_M15_ROWS: FactorRow[] = [
 ]
 
 const TEMPORAL_DERIVED_ROWS: FactorRow[] = [
-  // [V1.10] derived_relation 改用 developing swing 计算（不回退 active/confirmed raw）
-  { label: 'm15 vs daily Developing 位置差', key: 'm15_position_relative_to_daily', format: (v) => fmt(v, 3) },
+  // [V1.9] derived_relation 使用 active swing 位置差（避免 confirmed raw 污染）
+  { label: 'm15 vs daily Active 位置差', key: 'm15_position_relative_to_daily', format: (v) => fmt(v, 3) },
   { label: '响应方向', key: 'm15_response_direction_relative_to_daily', format: (v) => fmt(v, 0) },
   { label: '响应强度', key: 'm15_response_intensity', format: (v) => fmt(v, 3) },
 ]

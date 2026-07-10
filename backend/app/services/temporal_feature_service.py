@@ -573,10 +573,9 @@ def _compute_derived_relation(
     }
 
     # 1. m15_position_relative_to_daily
-    # V1.10: 改用 developing swing（当前正在发生的回落/反弹结构，clip [0,1]）
-    # 不回退 active major leg 或 confirmed raw
-    daily_pos = daily_context.get("daily_price_position_in_developing_swing_0_1")
-    m15_pos = m15_response.get("m15_price_position_in_developing_swing_0_1")
+    # V1.9: 使用 active swing 的 clip [0,1] 位置，避免 confirmed raw 可能 <0/>1 污染派生关系
+    daily_pos = daily_context.get("daily_price_position_in_active_swing_0_1")
+    m15_pos = m15_response.get("m15_price_position_in_active_swing_0_1")
     if daily_pos is not None and m15_pos is not None:
         result["m15_position_relative_to_daily"] = float(m15_pos) - float(daily_pos)
 

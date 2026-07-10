@@ -105,13 +105,12 @@ Node Cluster 算法
   - **截图模式**：盘中监控截图发送飞书默认必须隐藏结构状态面板（`capture=feishu` 自动命中强制隐藏规则），截图默认只包含 K 线和基础信息；
   - **时序特征 V1 卡片**：`StockStructuralStatePanel` 末尾折叠卡片渲染 `temporal-features` API DTO（daily_context 9 字段 + m15_response 9 字段 + derived_relation 3 字段 + meta），前端只渲染 DTO 不重算，null 显示「-」，`warmup_notes`/`degraded_reasons` 有内容时显示提示；卡片受同一个结构状态开关控制（默认随面板隐藏，用户打开面板后显示）；
   - 窄屏（≤1250px）保持现有单列行为。
-- **Swing 摘要卡 V1.10 developing swing 字段**（修复 active swing 仍不代表当前状态的问题）：
-  - 摘要卡只显示 Developing swing 字段：`developing_swing_dir`、`developing_swing_high`、`developing_swing_low`、`bars_since_developing_swing_high`、`bars_since_developing_swing_low`、`price_position_in_developing_swing_0_1`、`distance_to_developing_swing_high_atr`、`distance_to_developing_swing_low_atr`；
-  - active major leg 字段（`active_swing_high`/`active_swing_low`/`bars_since_active_swing_high`/`bars_since_active_swing_low`/`price_position_in_active_swing_0_1`/`distance_to_active_swing_high_atr`/`distance_to_active_swing_low_atr`）只放在 Swing 结构位置明细 JSON 中，不放在摘要卡；
+- **Swing 摘要卡 V1.9 active swing 字段**（当前正在发展的结构区间，跟随最新价格）：
+  - 摘要卡只显示 Active swing 字段：`active_swing_dir`、`active_swing_high`、`active_swing_low`、`bars_since_active_swing_high`、`bars_since_active_swing_low`、`price_position_in_active_swing_0_1`、`distance_to_active_swing_high_atr`、`distance_to_active_swing_low_atr`；
   - confirmed pivot 字段（`confirmed_swing_high`/`confirmed_swing_low`/`bars_since_confirmed_swing_high`/`bars_since_confirmed_swing_low`/`price_position_in_confirmed_swing_raw`/`confirmed_swing_breakout_state`）只放在 Swing 结构位置明细 JSON 中，不放在摘要卡；
-  - 禁止使用模糊标签「最近 swing high/low」「Swing 位置[0,1]」；摘要卡位置标签必须明确「Developing 位置[0,1]」，明细卡位置标签必须明确「Confirmed raw 位置」或「Active 位置[0,1]」；
-  - 时序特征卡片中位置字段标签必须含 `developing` 或 `confirmed` 前缀，禁止使用无前缀的「Swing 位置」标签，禁止使用 `Active high`/`Active low` 作为主字段；
-  - 摘要卡 `developing_swing_dir` 显示方向：`1` → "上涨段"，`-1` → "下跌段"，`None` → "fallback"。
+  - 禁止使用模糊标签「最近 swing high/low」「Swing 位置[0,1]」；摘要卡位置标签必须明确「Active 位置[0,1]」；
+  - 时序特征卡片中位置字段标签必须含 `developing` 或 `confirmed` 前缀，禁止使用无前缀的「Swing 位置」标签；
+  - 摘要卡 `active_swing_dir` 显示方向：`1` → "上升"，`-1` → "下降"，`None` → "-"。
 - **capture 布局 V1.9 单列修复**（修复 capture 模式右侧空白问题）：
   - `isCaptureMode` 判定：URL 参数 `capture=feishu` 或 `capture=1` 或 `hideStructuralState=1` 任一命中即 `isCaptureMode=true`；
   - capture 模式下不渲染：结构状态开关按钮、右侧结构状态列（`StockStructuralStatePanel`）、Temporal Features 折叠卡片；

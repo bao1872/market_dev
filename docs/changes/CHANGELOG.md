@@ -4,6 +4,14 @@
 
 ## 2026-07-09
 
+- CHANGE-20260709-012: Swing 当前状态语义修正 + Temporal V1 位置污染修复 + capture/飞书右侧空白修复
+  - `temporal_feature_service._compute_derived_relation` 改用 `daily/m15_price_position_in_active_swing_0_1`，避免 confirmed raw 越界污染派生关系
+  - `StockStructuralStatePanel` Swing 摘要卡改回 V1.9 active swing 字段，confirmed pivot 仅保留在明细 JSON
+  - `capture=feishu` / `capture=1` / `hideStructuralState=1` 强制单列布局，隐藏 `.tv-side-column`，`.tv-chart-column` 占宽 100%
+  - 更新测试：`test_temporal_feature_service.py` 25 passed，`structural-state-panel.test.ts` active 摘要断言
+  - 更新 `docs/current/02-data-api-contracts.md`、`docs/current/04-frontend-ux.md`、`docs/maps/test-coverage-map.md`
+  - 无 migration、不构建/部署/重启服务
+
 - CHANGE-20260709-011: tests mypy 债务清零
   - `backend/tests/` mypy 300 errors → 0 errors（133 source files），`mypy app` 仍 0 errors（249 source files）
   - conftest.py 新增 `AsyncFactory[T]` 类型别名 + `make_asgi_transport(app)` helper（桥接 httpx/Starlette 第三方存根缺口）
