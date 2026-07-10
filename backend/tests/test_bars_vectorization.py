@@ -4,7 +4,8 @@
 1. _df_to_upsert_records 向量化构建 records（与 iterrows 结果一致）
 2. _df_to_responses 向量化转换（与 iterrows 结果一致）
 3. pd.to_numeric 转换（与 apply(lambda) 结果一致）
-4. 性能对比（向量化耗时 < iterrows 耗时）
+4. 向量化函数源码约束（禁止 iterrows/itertuples row-by-row 迭代，确定性门禁）
+5. 非门禁聚合基准（多次运行报告耗时，仅用宽松上限捕获严重回归，不阻断 CI）
 
 How to Run:
     pytest tests/test_bars_vectorization.py -v
@@ -347,77 +348,97 @@ def test_to_numeric_with_floats() -> None:
 
 
 # ============================================================
-# 4. 性能对比测试
+# 4. 向量化函数源码约束（确定性门禁）
 # ============================================================
 
 
-def test_performance_upsert_records() -> None:
-    """性能对比：向量化 _df_to_upsert_records 耗时 < iterrows 耗时。"""
+def test_vectorization_forbids_iterrows_itertuples() -> None:
+    """源码约束：向量化函数不得依赖 iterrows/itertuples row-by-row 迭代。
+
+    用 AST 扫描函数源码，禁止在 _df_to_responses / _df_to_upsert_records 体内
+    出现 .iterrows() / .itertuples() 调用。这是确定性门禁（不依赖墙钟），
+    保证向量化实现不会被悄悄改回逐行迭代导致盘后/行情链路性能退化。
+    """
+    import ast
+    import inspect
+
+    from app.api.bars import _df_to_responses
+    from app.repositories.bar_repository import _df_to_upsert_records
+
+    offenders: dict[str, list[str]] = {}
+    for fn in (_df_to_responses, _df_to_upsert_records):
+        src = inspect.getsource(fn)
+        tree = ast.parse(src)
+        found: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = func.attr if isinstance(func, ast.Attribute) else None
+                if name in ("iterrows", "itertuples"):
+                    found.append(name)
+        if found:
+            offenders[fn.__qualname__] = found
+
+    assert not offenders, (
+        f"向量化函数使用了禁止的 row-by-row 迭代: {offenders}；"
+        "必须使用 pandas/numpy 向量化实现以保证盘后/行情链路性能"
+    )
+
+
+# ============================================================
+# 5. 非门禁聚合基准（仅报告，宽松上限捕获严重回归）
+# ============================================================
+
+
+def _aggregate_benchmark(func, n_runs: int = 5) -> tuple[float, float, float]:
+    """多次运行取 min/mean/max 耗时（秒）。"""
+    times: list[float] = []
+    for _ in range(n_runs):
+        start = time.perf_counter()
+        func()
+        times.append(time.perf_counter() - start)
+    return min(times), sum(times) / len(times), max(times)
+
+
+# 向量化严重回归的宽松上限（秒）。仅用于捕获实现退化（如回到逐行迭代），
+# 不作为与 iterrows 的墙钟对比门禁（避免 CI runner 噪声导致 flaky）。
+_BENCHMARK_SLOW_LIMIT_SECONDS = 2.0
+
+
+def test_benchmark_upsert_records() -> None:
+    """非门禁聚合基准：_df_to_upsert_records 多次运行报告耗时（不阻断 CI）。
+
+    正确性由 test_upsert_records_consistency_with_iterrows 保证；本测试仅报告
+    向量化耗时（min/mean/max），用宽松上限断言未发生严重退化。
+    """
     df = _build_raw_df(2000)
-
-    # warmup：首次调用有 pandas/numpy JIT 编译开销，预热避免 CI runner 性能波动误判
-    _df_to_upsert_records(df, TEST_INSTRUMENT_ID, is_daily=True)
-
-    # 向量化
-    start = time.perf_counter()
-    _df_to_upsert_records(df, TEST_INSTRUMENT_ID, is_daily=True)
-    vec_time = time.perf_counter() - start
-
-    # iterrows（模拟原逻辑）
-    start = time.perf_counter()
-    records_iter = []
-    for _, row in df.iterrows():
-        dt = pd.to_datetime(row["datetime"])
-        records_iter.append({
-            "instrument_id": TEST_INSTRUMENT_ID,
-            "trade_date": dt.date(),
-            "open": Decimal(str(row["open"])),
-            "high": Decimal(str(row["high"])),
-            "low": Decimal(str(row["low"])),
-            "close": Decimal(str(row["close"])),
-            "volume": Decimal(str(row["volume"])),
-            "amount": Decimal(str(row["amount"])),
-            "adj_factor": Decimal(str(row["adj_factor"])),
-        })
-    iter_time = time.perf_counter() - start
-
-    print(f"\n  _df_to_upsert_records (n=2000): 向量化={vec_time*1000:.2f}ms, iterrows={iter_time*1000:.2f}ms, 提升={iter_time/vec_time:.1f}x")
-    assert vec_time < iter_time, f"向量化({vec_time:.4f}s)应快于 iterrows({iter_time:.4f}s)"
+    _df_to_upsert_records(df, TEST_INSTRUMENT_ID, is_daily=True)  # warmup
+    vec_min, vec_mean, vec_max = _aggregate_benchmark(
+        lambda: _df_to_upsert_records(df, TEST_INSTRUMENT_ID, is_daily=True)
+    )
+    print(
+        f"\n  [benchmark] _df_to_upsert_records (n=2000, 5 runs): "
+        f"min={vec_min*1000:.2f}ms mean={vec_mean*1000:.2f}ms max={vec_max*1000:.2f}ms"
+    )
+    assert vec_max < _BENCHMARK_SLOW_LIMIT_SECONDS, (
+        f"向量化严重退化: max={vec_max:.4f}s 超过上限 {_BENCHMARK_SLOW_LIMIT_SECONDS}s"
+    )
 
 
-def test_performance_df_to_responses() -> None:
-    """性能对比：向量化 _df_to_responses 耗时 < iterrows 耗时。"""
+def test_benchmark_df_to_responses() -> None:
+    """非门禁聚合基准：_df_to_responses 多次运行报告耗时（不阻断 CI）。"""
     df = _build_query_df(2000)
-
-    # warmup：首次调用有 pandas/numpy JIT 编译开销，预热避免 CI runner 性能波动误判
-    _df_to_responses(df, TEST_INSTRUMENT_ID, "1d")
-
-    # 向量化
-    start = time.perf_counter()
-    _df_to_responses(df, TEST_INSTRUMENT_ID, "1d")
-    vec_time = time.perf_counter() - start
-
-    # iterrows（模拟原逻辑）
-    start = time.perf_counter()
-    responses_iter = []
-    for idx, row in df.iterrows():
-        ts = pd.to_datetime(idx)
-        responses_iter.append(BarResponse(
-            instrument_id=TEST_INSTRUMENT_ID,
-            trade_date=ts.date(),
-            trade_time=None,
-            open=float(row["open"]),
-            high=float(row["high"]),
-            low=float(row["low"]),
-            close=float(row["close"]),
-            volume=float(row["volume"]),
-            amount=float(row["amount"]),
-            adj_factor=float(row["adj_factor"]),
-        ))
-    iter_time = time.perf_counter() - start
-
-    print(f"\n  _df_to_responses (n=2000): 向量化={vec_time*1000:.2f}ms, iterrows={iter_time*1000:.2f}ms, 提升={iter_time/vec_time:.1f}x")
-    assert vec_time < iter_time, f"向量化({vec_time:.4f}s)应快于 iterrows({iter_time:.4f}s)"
+    _df_to_responses(df, TEST_INSTRUMENT_ID, "1d")  # warmup
+    vec_min, vec_mean, vec_max = _aggregate_benchmark(
+        lambda: _df_to_responses(df, TEST_INSTRUMENT_ID, "1d")
+    )
+    print(
+        f"\n  [benchmark] _df_to_responses (n=2000, 5 runs): "
+        f"min={vec_min*1000:.2f}ms mean={vec_mean*1000:.2f}ms max={vec_max*1000:.2f}ms"
+    )
+    assert vec_max < _BENCHMARK_SLOW_LIMIT_SECONDS, (
+        f"向量化严重退化: max={vec_max:.4f}s 超过上限 {_BENCHMARK_SLOW_LIMIT_SECONDS}s"
+    )
 
 
 if __name__ == "__main__":

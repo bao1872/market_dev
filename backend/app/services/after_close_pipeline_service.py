@@ -1,7 +1,7 @@
 """盘后流水线可视化聚合服务。
 
 为 /admin/after-close/pipeline/* 端点提供只读聚合：
-- 按 trade_date 聚合 after_close_orchestrator 状态 + 8 步骤时间线
+- 按 trade_date 聚合 after_close_orchestrator 状态 + 5 阶段时间线
 - 复用 system_overview_service._compute_data_freshness 计算数据新鲜度
 - 复用 feature_snapshot_service.has_succeeded_snapshot_run 判定 watchlist_ready
 - 复用 after_close_orchestrator 状态机与 job_run_event_service.list_events
@@ -338,11 +338,17 @@ def _infer_failed_phase(
         failed_step = orchestrator_status
     # 3. 回退：失败阶段 = 最后完成阶段 + 1（off-by-one 修正）。
     # last_completed_step=None 视为“无阶段完成”，失败阶段取第 0 阶段（market_prep）。
+    # 若 last_completed_step 已是最后阶段（publishing，idx=4），则失败发生在该阶段自身
+    # （如 publishing 完成但 succeeded 终态化失败），next_idx 越界时回落到最后一阶段，
+    # 禁止返回 -1（否则前端无法定位失败阶段）。
     if failed_step is None:
         completed_idx = _COMPLETED_PHASE_INDEX.get(last_completed_step, -1)
         next_idx = completed_idx + 1
         if 0 <= next_idx < len(_PHASE_REPRESENTATIVE_STATUS):
             failed_step = _PHASE_REPRESENTATIVE_STATUS[next_idx]
+        else:
+            # 越界（含 last_completed_step=publishing）：失败落在最后一阶段。
+            failed_step = _PHASE_REPRESENTATIVE_STATUS[-1]
     if failed_step is not None:
         return _STATUS_TO_PHASE.get(failed_step, -1)
     return -1

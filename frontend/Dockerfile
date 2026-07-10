@@ -33,6 +33,16 @@ RUN npm run build
 # ===== Stage 2: runtime - nginx 托管静态资源 =====
 FROM nginx:alpine
 
+# 运行时阶段重新声明构建版本参数，供 OCI label 使用（与 builder 阶段解耦）
+ARG GIT_SHA=unknown
+ARG BUILD_TIME=unknown
+ARG VITE_GIT_SHA=unknown
+ARG VITE_BUILD_TIME=unknown
+
+# OCI 镜像元数据：revision=构建 SHA，created=构建时间（构建可追溯性校验用）
+LABEL org.opencontainers.image.revision=${GIT_SHA} \
+      org.opencontainers.image.created=${BUILD_TIME}
+
 # 复制自定义 nginx 配置（API 反向代理 + SPA 路由回退）
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 

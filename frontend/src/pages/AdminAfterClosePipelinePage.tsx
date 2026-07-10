@@ -178,13 +178,16 @@ function PipelineTimeline({ steps }: { steps: PipelineStep[] }) {
 
 // ===== feature_snapshot 进度 + 速度/ETA =====
 // 数值防御：processed/total/snapshot_count/failed_count 必须 Number.isFinite 且非负，
-// percent 限制在 0-100；ETA 以 feature_snapshot 阶段 started_at 为基准（非整个 run）。
+// percent 限制在 0-100；速度/ETA 用后端上报的 progress.updated_at 计算（禁止用 Date.now()
+// 伪造实时），且仅在任务仍 running 时展示动态 ETA，已完成任务只显示最终进度与更新时间。
 function FeatureSnapshotProgress({
   progress,
   startedAt,
+  running,
 }: {
   progress: Record<string, unknown>
   startedAt: string | null
+  running: boolean
 }) {
   const toNonNegInt = (v: unknown): number => {
     const n = Number(v)
@@ -202,13 +205,16 @@ function FeatureSnapshotProgress({
   const rawPercent = total > 0 ? (processed / total) * 100 : 0
   const percent = Math.min(100, Math.max(0, rawPercent))
 
-  // 速度/ETA：以 feature_snapshot 阶段 started_at 为基准估算（仅展示参考值）
+  // 速度/ETA：用后端上报的 progress.updated_at 减 feature_snapshot 阶段 started_at
+  // 估算已耗时（禁止用 Date.now() 伪造实时）；仅在任务仍 running 时展示动态 ETA，
+  // 已完成任务只显示最终进度与更新时间。
   let speedPerSec: number | null = null
   let etaSeconds: number | null = null
-  if (startedAt && processed > 0) {
+  if (running && startedAt && updatedAt && processed > 0) {
     const startMs = new Date(startedAt).getTime()
-    const elapsed = (Date.now() - startMs) / 1000
-    if (Number.isFinite(startMs) && elapsed > 0) {
+    const updatedMs = new Date(updatedAt).getTime()
+    const elapsed = (updatedMs - startMs) / 1000
+    if (Number.isFinite(startMs) && Number.isFinite(updatedMs) && elapsed > 0) {
       speedPerSec = processed / elapsed
       const remain = total - processed
       if (remain > 0 && speedPerSec > 0) {
@@ -587,6 +593,7 @@ export default function AdminAfterClosePipelinePage() {
                   <FeatureSnapshotProgress
                     progress={afterCloseRun.feature_snapshot_progress}
                     startedAt={findPhaseStartedAt(pipeline?.steps, 'feature_snapshot')}
+                    running={afterCloseRun?.status === 'running'}
                   />
                 )}
               </>

@@ -40,6 +40,10 @@ WORKDIR /app
 ENV GIT_SHA=${GIT_SHA}
 ENV BUILD_TIME=${BUILD_TIME}
 
+# OCI 镜像元数据：revision=构建 SHA，created=构建时间（构建可追溯性校验用）
+LABEL org.opencontainers.image.revision=${GIT_SHA} \
+      org.opencontainers.image.created=${BUILD_TIME}
+
 # 从 builder 复制已安装好依赖的虚拟环境
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"

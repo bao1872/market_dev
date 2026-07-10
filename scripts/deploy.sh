@@ -95,6 +95,13 @@ else
   docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --no-build --force-recreate --remove-orphans
 fi
 
+# [deploy] - 描述: 构建可追溯性门禁（--strict 生产必填）。
+# build/up 后运行，校验宿主机 GIT_SHA / worker 心跳 build_sha / 容器镜像 tag·OCI label·容器 GIT_SHA
+# 与当前 HEAD 一致，且每个运行中的 WORKER_TYPE 都有心跳记录。
+# 任一检查失败立即非零退出，停止后续验收（门禁失败不掩盖）。
+echo "=== 执行构建可追溯性检查（--strict）==="
+python "$(dirname "$0")/../tools/check_build_traceability.py" --strict
+
 # 部署后输出磁盘与镜像状态，确认新镜像已生成、旧镜像保留情况
 echo "=== 部署后磁盘与镜像状态 ==="
 docker system df

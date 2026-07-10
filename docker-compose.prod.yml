@@ -46,9 +46,9 @@ services:
     build:
       context: ./backend
       args:
-        GIT_SHA: ${GIT_SHA:-unknown}
-        BUILD_TIME: ${BUILD_TIME:-unknown}
-    image: market-dev-backend:${GIT_SHA:-unknown}
+        GIT_SHA: ${GIT_SHA}
+        BUILD_TIME: ${BUILD_TIME}
+    image: market-dev-backend:${GIT_SHA}
     container_name: trading-backend
     restart: unless-stopped
     environment:
@@ -76,7 +76,7 @@ services:
 
   # ===== 行情调度 Worker =====
   worker-bars-scheduler:
-    image: market-dev-backend:${GIT_SHA:-unknown}
+    image: market-dev-backend:${GIT_SHA}
     container_name: trading-worker-bars-scheduler
     restart: unless-stopped
     environment:
@@ -100,7 +100,7 @@ services:
 
   # ===== 选股策略调度 Worker =====
   worker-strategy-scheduler:
-    image: market-dev-backend:${GIT_SHA:-unknown}
+    image: market-dev-backend:${GIT_SHA}
     container_name: trading-worker-strategy-scheduler
     restart: unless-stopped
     environment:
@@ -124,7 +124,7 @@ services:
 
   # ===== 日历调度 Worker =====
   worker-calendar:
-    image: market-dev-backend:${GIT_SHA:-unknown}
+    image: market-dev-backend:${GIT_SHA}
     container_name: trading-worker-calendar
     restart: unless-stopped
     environment:
@@ -148,7 +148,7 @@ services:
 
   # ===== 盘中监控 Worker =====
   worker-monitor:
-    image: market-dev-backend:${GIT_SHA:-unknown}
+    image: market-dev-backend:${GIT_SHA}
     container_name: trading-worker-monitor
     restart: unless-stopped
     environment:
@@ -175,7 +175,7 @@ services:
 
   # ===== 策略批量计算 Worker =====
   worker-strategy-batch:
-    image: market-dev-backend:${GIT_SHA:-unknown}
+    image: market-dev-backend:${GIT_SHA}
     container_name: trading-worker-strategy-batch
     restart: unless-stopped
     environment:
@@ -201,7 +201,7 @@ services:
 
   # ===== Outbox 扩张 Worker =====
   worker-outbox:
-    image: market-dev-backend:${GIT_SHA:-unknown}
+    image: market-dev-backend:${GIT_SHA}
     container_name: trading-worker-outbox
     restart: unless-stopped
     environment:
@@ -225,7 +225,7 @@ services:
 
   # ===== 投递 Worker =====
   worker-delivery:
-    image: market-dev-backend:${GIT_SHA:-unknown}
+    image: market-dev-backend:${GIT_SHA}
     container_name: trading-worker-delivery
     restart: unless-stopped
     environment:
@@ -249,7 +249,7 @@ services:
 
   # ===== 盘后编排 Worker（Phase5: 领取 queued 任务，断点恢复+心跳租约）=====
   worker-after-close:
-    image: market-dev-backend:${GIT_SHA:-unknown}
+    image: market-dev-backend:${GIT_SHA}
     container_name: trading-worker-after-close
     restart: unless-stopped
     environment:
@@ -277,7 +277,7 @@ services:
 
   # ===== 恢复看门狗 Worker =====
   worker-watchdog:
-    image: market-dev-backend:${GIT_SHA:-unknown}
+    image: market-dev-backend:${GIT_SHA}
     container_name: trading-worker-watchdog
     restart: unless-stopped
     environment:
@@ -305,9 +305,9 @@ services:
       context: ./backend
       dockerfile: Dockerfile.capture
       args:
-        GIT_SHA: ${GIT_SHA:-unknown}
-        BUILD_TIME: ${BUILD_TIME:-unknown}
-    image: market-dev-capture:${GIT_SHA:-unknown}
+        GIT_SHA: ${GIT_SHA}
+        BUILD_TIME: ${BUILD_TIME}
+    image: market-dev-capture:${GIT_SHA}
     container_name: trading-worker-capture
     restart: unless-stopped
     environment:
@@ -343,11 +343,11 @@ services:
     build:
       context: ./frontend
       args:
-        GIT_SHA: ${GIT_SHA:-dev}
-        BUILD_TIME: ${BUILD_TIME:-unknown}
-        VITE_GIT_SHA: ${VITE_GIT_SHA:-dev}
-        VITE_BUILD_TIME: ${VITE_BUILD_TIME:-unknown}
-    image: market-dev-frontend:${GIT_SHA:-dev}
+        GIT_SHA: ${GIT_SHA}
+        BUILD_TIME: ${BUILD_TIME}
+        VITE_GIT_SHA: ${VITE_GIT_SHA}
+        VITE_BUILD_TIME: ${VITE_BUILD_TIME}
+    image: market-dev-frontend:${GIT_SHA}
     container_name: trading-frontend
     restart: unless-stopped
     environment:

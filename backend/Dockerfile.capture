@@ -13,6 +13,10 @@ WORKDIR /app
 ENV GIT_SHA=${GIT_SHA}
 ENV BUILD_TIME=${BUILD_TIME}
 ENV PYTHONUNBUFFERED=1
+
+# OCI 镜像元数据：revision=构建 SHA，created=构建时间（构建可追溯性校验用）
+LABEL org.opencontainers.image.revision=${GIT_SHA} \
+      org.opencontainers.image.created=${BUILD_TIME}
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 # 配置清华 PyPI 镜像源

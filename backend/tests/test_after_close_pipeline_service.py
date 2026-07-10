@@ -233,12 +233,15 @@ def test_feature_snapshot_stalled_false_when_job_not_running():
         (AfterCloseRunStatus.WAITING_DSA_WORKER.value, "quality_gate"),
         (AfterCloseRunStatus.QUALITY_GATE.value, "feature_snapshot"),
         (AfterCloseRunStatus.FEATURE_SNAPSHOT.value, "publishing"),
+        # P0 收口 Fix #2：last_completed_step 已为最后阶段 publishing 时，
+        # 失败落在 publishing 自身（idx=4），禁止回退越界返回 -1。
+        (AfterCloseRunStatus.PUBLISHING.value, "publishing"),
     ],
 )
 def test_infer_failed_phase_fallback_completed_plus_one(
     last_completed_step, expected_phase_key
 ):
-    """回退路径（无错误事件 step）：失败阶段 = 最后完成阶段 + 1。"""
+    """回退路径（无错误事件 step）：失败阶段 = 最后完成阶段 + 1（publishing 为最后阶段时回落到自身，非 -1）。"""
     phase_idx = _infer_failed_phase(
         AfterCloseRunStatus.FAILED.value, [], last_completed_step
     )
