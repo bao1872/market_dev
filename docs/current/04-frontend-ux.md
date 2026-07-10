@@ -39,7 +39,7 @@ Node Cluster 算法
 ### 盘后流水线详情（/admin/after-close）
 
 - 顶部状态卡：整体状态（not_started/running/succeeded/failed/blocked/skipped）+ 交易日 + 市场时段 + watchlist_ready + 不可用原因 + 是否已有完整回补；
-- 8 步骤垂直时间线：refreshing_daily → checking_coverage → creating_dsa → waiting_dsa_worker → quality_gate → feature_snapshot → publishing → watchlist_ready，每步显示 status/started_at/finished_at/duration/counts/error_message；
+- 5 阶段垂直时间线：行情准备(market_prep) → DSA计算(dsa_compute) → 质量校验(quality_gate) → 特征快照(feature_snapshot) → 发布结果(publishing)，每步显示 status/started_at/finished_at/duration/counts/error_message；特征快照阶段额外展示进度（processed/total、snapshot 成功/失败、速度、ETA）与"疑似停滞"提示；
 - 数据新鲜度卡：行情数据（latest_daily_trade_date / daily_coverage / 15m / 60m / is_behind）+ 选股策略（latest_compute_trade_date / latest_published_trade_date / status / total / failed / published_at）；
 - 编排状态详情：after_close_orchestrator job_run 摘要（status/orchestrator_status/started_at/finished_at/worker/heartbeat/lease_expires/last_completed_step/error）+ feature_snapshot_run 摘要（run_type/scope/snapshot_count/failed_count/published_at）；
 - 最近 20 次运行列表：after_close_orchestrator + snapshot_run 混合，显示类型/交易日/状态/编排阶段/快照数/失败/开始/结束/ID；

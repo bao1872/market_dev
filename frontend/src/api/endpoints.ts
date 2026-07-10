@@ -2312,6 +2312,8 @@ export interface AfterCloseRunSummary {
   error_message: string | null
   worker_instance_id: string | null
   trade_date: string | null
+  feature_snapshot_progress: Record<string, unknown> | null
+  feature_snapshot_stalled: boolean
 }
 
 /** stock_feature_snapshot_run 摘要（对齐后端 FeatureSnapshotRunSummary） */
@@ -2360,6 +2362,7 @@ export interface AfterClosePipelineResponse {
   steps: PipelineStep[]
   data_freshness: DataFreshness
   feature_snapshot_run: FeatureSnapshotRunSummary | null
+  feature_snapshot_stalled: boolean
   events: JobRunEvent[]
 }
 

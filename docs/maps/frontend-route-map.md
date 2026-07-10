@@ -22,7 +22,7 @@
 | `/admin/beta-applications` | `AdminBetaApplicationsPage` | Admin | 内测申请 |
 | `/admin/strategies` | `AdminStrategiesPage` | Admin | 策略管理 |
 | `/admin/jobs` | `AdminJobsPage` | Admin | 定时任务/策略计算/Worker 心跳（worker_heartbeats 实时视图，health_state fresh/stale/stopped）/投递 |
-| `/admin/after-close` | `AdminAfterClosePipelinePage` | Admin | 盘后流水线详情：8 步骤时间线（refreshing_daily→checking_coverage→creating_dsa→waiting_dsa_worker→quality_gate→feature_snapshot→publishing→watchlist_ready）+ 数据新鲜度 + 编排状态详情 + 最近 20 次运行列表 + 事件日志抽屉（100 events）；running 10s 轮询、非 running 60s 轮询、页面不可见暂停 |
+| `/admin/after-close` | `AdminAfterClosePipelinePage` | Admin | 盘后流水线详情：5 阶段时间线（行情准备 market_prep → DSA计算 dsa_compute → 质量校验 quality_gate → 特征快照 feature_snapshot → 发布结果 publishing）+ 数据新鲜度 + 编排状态详情 + 最近 20 次运行列表 + 事件日志抽屉（100 events）；特征快照阶段展示进度（processed/total/速度/ETA）与“疑似停滞”提示；running 10s 轮询、非 running 60s 轮询、页面不可见暂停 |
 
 ## 2. 守卫语义
 

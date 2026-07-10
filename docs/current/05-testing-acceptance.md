@@ -403,8 +403,9 @@ cd /root/web_dev/backend && .venv/bin/python -m scripts.feature_snapshot_backfil
 - 成功 run + snapshot succeeded + scope=full → `overall_status='succeeded'` + `watchlist_ready=true`；
 - `watchlist_ready` 严格判定：snapshot `scope='sample'` 时 `watchlist_ready=false`（sample backfill 不计入）；
 - full+sample 同日共存：watchlist_ready=true 时 feature_snapshot_run 主摘要必须为 full run（显式 created_at，不依赖 DB 默认顺序）；
+- `feature_snapshot_stalled`：编排处于 `feature_snapshot` 且心跳新鲜但 `feature_snapshot_progress.updated_at` 超过 300s 未更新时为 true（顶层 `feature_snapshot_stalled` 与 `after_close_run.feature_snapshot_stalled` 均返回），前端据此提示"疑似停滞"；该标志不替代心跳超时 blocked 判定；
 - 失败 run（status=failed）时返回 `overall_status='failed'` + error_message 非空；
-- **中断后 UI 展示（CHANGE-20260709-006）**：`orchestrator_status='interrupted'` 且 `feature_snapshot_run.status='running'` 时，第 6 步 `feature_snapshot` 显示 `running`，`feature_snapshot_lost_contact=true`，`after_close_run` 摘要暴露 `feature_snapshot_run_id` 与 `feature_snapshot_progress`；
+- **中断后 UI 展示（CHANGE-20260709-006）**：`orchestrator_status='interrupted'` 且 `feature_snapshot_run.status='running'` 时，`feature_snapshot` 阶段（5 阶段模型下下标 3）显示 `running`，`feature_snapshot_lost_contact=true`，`after_close_run` 摘要暴露 `feature_snapshot_run_id` 与 `feature_snapshot_progress`；
 - POST `/after-close/pipeline/run` 幂等：同 trade_date 已有 queued/running/succeeded run 时返回 existing（`is_new=false`）；
 - events 列表限制 100 条；
 - 非 admin 用户访问返回 403。
@@ -427,19 +428,21 @@ cd /root/web_dev/backend && .venv/bin/python -m scripts.feature_snapshot_backfil
 ```bash
 cd /root/web_dev/backend
 APP_ENV=test TEST_DATABASE_URL=postgresql+asyncpg://bz:bz@localhost:5433/bz_stock_test \
-pytest tests/test_admin_after_close_pipeline.py -q
+pytest tests/test_admin_after_close_pipeline.py tests/test_after_close_pipeline_service.py -q
 
 ruff check app/schemas/after_close_pipeline.py \
   app/services/after_close_pipeline_service.py \
+  app/services/after_close_orchestrator.py \
   app/api/admin_after_close.py \
-  tests/test_admin_after_close_pipeline.py
+  tests/test_admin_after_close_pipeline.py \
+  tests/test_after_close_pipeline_service.py
 
-mypy app/schemas/after_close_pipeline.py app/services/after_close_pipeline_service.py app/api/admin_after_close.py
+mypy app/schemas/after_close_pipeline.py app/services/after_close_pipeline_service.py app/services/after_close_orchestrator.py app/api/admin_after_close.py
 
 cd /root/web_dev/frontend && npm run build
 ```
 
-预期：11 passed、ruff 零错误、mypy 零错误、前端 build 成功。
+预期：12 passed（admin）+ 8 passed（service）= 20 passed、ruff 零错误、mypy 零错误、前端 build 成功。
 
 ## 3.7 Monitor Image Capture Token 回归（blocking）
 

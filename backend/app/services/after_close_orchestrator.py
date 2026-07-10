@@ -193,6 +193,9 @@ async def _update_orchestrator_status(
     # 写事件（step=状态名，便于前端按步骤展示）
     event_payload = dict(payload) if payload else {}
     event_payload["orchestrator_status"] = status.value
+    # [Fix] event_type 标记事件语义：状态切换事件均为该状态的“开始”事件
+    # （阶段完成由下一状态开始事件推导），便于后续聚合与排查。
+    event_payload["event_type"] = "started"
     await append_event(
         db=db,
         job_run_id=job_run.id,
@@ -422,7 +425,6 @@ def _build_feature_snapshot_progress_callback(
                     "updated_at": now.isoformat(),
                 }
                 job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
-                await db.commit()
 
                 # 每阈值只股票写一次事件，避免每只股票都写事件
                 if processed - last_event_processed >= _FEATURE_SNAPSHOT_PROGRESS_EVENT_INTERVAL:
@@ -436,6 +438,7 @@ def _build_feature_snapshot_progress_callback(
                             f"snapshot_count={snapshot_count}, failed_count={failed_count}"
                         ),
                         payload={
+                            "event_type": "progress",
                             "processed": processed,
                             "total": total,
                             "snapshot_count": snapshot_count,
@@ -443,6 +446,11 @@ def _build_feature_snapshot_progress_callback(
                         },
                     )
                     last_event_processed = processed
+
+                # [Fix] metadata 与进度事件同一次 commit，避免 append_event(flush) 在
+                # commit 之后执行导致进度事件被会话关闭丢弃（此前进度仅在 metadata 可见，
+                # 事件日志中缺失进度条目）。
+                await db.commit()
         except Exception as exc:
             logger.warning(
                 "[AfterClose] feature_snapshot 进度回调失败 job_run_id=%s: %s",
@@ -969,19 +977,9 @@ async def execute_after_close_run(
         # - watchlist 通过 _has_succeeded_snapshot_run 判断是否可读 snapshot
         # - run 记录在独立 session 中提交，保证失败时 run.status='failed' 持久化
         if not skip_snapshot:
-            async with AsyncSessionLocal() as db:
-                job_run = await _get_job_run_or_raise(db, job_run_id)
-                if job_run is None:
-                    raise RuntimeError(
-                        f"SchedulerJobRun not found: job_run_id={job_run_id}"
-                    )
-                await _update_orchestrator_status(
-                    db=db,
-                    job_run=job_run,
-                    status=AfterCloseRunStatus.FEATURE_SNAPSHOT,
-                    message=f"开始生成特征快照: trade_date={trade_date}",
-                )
-                await db.commit()
+            # [Fix] feature_snapshot 的“开始”事件只写一次，且必须携带 snapshot_run_id。
+            # 因此不在创建 run 之前单独写 FEATURE_SNAPSHOT started 事件，避免重复事件。
+            # （下方创建 run 后统一通过 _update_orchestrator_status 写入一次 started 事件）
 
             # [Phase7] 创建 running run + commit（独立 session，避免 snapshot rollback 影响）
             async with AsyncSessionLocal() as db:

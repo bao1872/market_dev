@@ -4,6 +4,14 @@
 
 ## 2026-07-10
 
+- CHANGE-20260710-003: 盘后流水线 5 阶段时间线与进度可观测性修复
+  - 面向用户合并为 5 真实阶段（行情准备/DSA计算/质量校验/特征快照/发布结果），虚拟步骤 `checking_coverage`/`creating_dsa` 归并到 行情准备（保持内部状态机与事件不变，向后兼容）
+  - 修复 `_compute_step_states` 运行中阶段 `finished_at=None` 且耗时=now-started（不为负），已完成阶段耗时下限归零
+  - 修复进度回调 `commit` 早于 `append_event` 导致进度事件丢失（metadata 与进度事件同一次 commit）；删除 `feature_snapshot` 重复"开始"事件（仅保留带 run_id 的一次）；状态切换事件带 `event_type=started`、进度事件带 `event_type=progress`
+  - 新增 `feature_snapshot_stalled` 停滞判定（顶层 + `after_close_run` 均暴露），前端提示"疑似停滞"
+  - 新增 `tools/check_build_traceability.py` 只读校验构建可追溯性（GIT_SHA / worker_heartbeat.build_sha 与 HEAD 一致、运行镜像非 unknown）；不重建/重启
+  - 文件：after_close_pipeline_service.py / after_close_orchestrator.py / schemas/after_close_pipeline.py / tests/test_after_close_pipeline_service.py / tests/test_admin_after_close_pipeline.py / frontend endpoints.ts + AdminAfterClosePipelinePage；ruff 0 / mypy 0（仅存量 bar_repository 债务）/ tsc 0 / 20 passed
+
 - CHANGE-20260710-002: 恢复飞书盘中截图 1d 业务契约，分离截图实时性与监控计算口径
   - 修复 PR #65 业务语义偏差：飞书截图（手动分享 `stock_detail_feishu_service` + 自动盘中监控 `_send_chart_images_via_outbox`）capture_payload 由 15m 改为业务默认 1d（常量 `FEISHU_CAPTURE_TIMEFRAME`）
   - `monitor_batch_service` 计算输入 `bars_daily`/`bars_15min` 恢复 `include_realtime=False`，不被截图实时性污染；盘中监控触发仍只基于最新已完成 1m bar

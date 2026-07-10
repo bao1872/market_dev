@@ -18,6 +18,7 @@ import json
 import logging
 from datetime import date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,28 +52,81 @@ _AFTER_CLOSE_JOB_NAME = "after_close_orchestrator"
 # 收盘后超过该阈值（分钟）仍无 after_close run，视为 blocked
 _BLOCKED_AFTER_CLOSE_MINUTES = 30
 
-# 8 个展示步骤（前 7 个来自 after_close_orchestrator 状态机，最后一个是 watchlist gate）
-_PIPELINE_STEPS = [
+# feature_snapshot 阶段“疑似停滞”判定阈值（秒）：
+# 编排处于 feature_snapshot 且心跳新鲜，但 progress.updated_at 超过该值未更新。
+_FEATURE_SNAPSHOT_STALL_SECONDS = 300
+
+_SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+# 5 个面向用户的真实业务阶段（合并内部细粒度状态）：
+#   行情准备(market_prep)      = refreshing_daily + checking_coverage + creating_dsa
+#   DSA 计算(dsa_compute)      = waiting_dsa_worker
+#   质量校验(quality_gate)      = quality_gate
+#   特征快照(feature_snapshot) = feature_snapshot
+#   发布结果(publishing)        = publishing
+# “自选可用”(watchlist_ready) 作为最终发布门禁(gate)，不作为执行步骤。
+# 内部原始细事件仍保留在 events 抽屉中，向后兼容，不删数据库历史。
+_PHASE_KEYS = [
+    "market_prep",
+    "dsa_compute",
+    "quality_gate",
+    "feature_snapshot",
+    "publishing",
+]
+
+_PHASE_LABELS = {
+    "market_prep": "行情准备",
+    "dsa_compute": "DSA计算",
+    "quality_gate": "质量校验",
+    "feature_snapshot": "特征快照",
+    "publishing": "发布结果",
+}
+
+# 内部 orchestrator_status → 5 阶段下标
+_STATUS_TO_PHASE = {
+    AfterCloseRunStatus.REFRESHING_DAILY.value: 0,
+    AfterCloseRunStatus.CHECKING_COVERAGE.value: 0,
+    AfterCloseRunStatus.CREATING_DSA.value: 0,
+    AfterCloseRunStatus.WAITING_DSA_WORKER.value: 1,
+    AfterCloseRunStatus.QUALITY_GATE.value: 2,
+    AfterCloseRunStatus.FEATURE_SNAPSHOT.value: 3,
+    AfterCloseRunStatus.PUBLISHING.value: 4,
+    AfterCloseRunStatus.SUCCEEDED.value: 4,
+}
+
+# 内部状态 → 其所属 5 阶段的代表状态（虚拟状态 checking_coverage/creating_dsa 归并到 market_prep 代表 refreshing_daily）
+_PHASE_REP_FOR_STATUS = {
+    AfterCloseRunStatus.REFRESHING_DAILY.value: AfterCloseRunStatus.REFRESHING_DAILY.value,
+    AfterCloseRunStatus.CHECKING_COVERAGE.value: AfterCloseRunStatus.REFRESHING_DAILY.value,
+    AfterCloseRunStatus.CREATING_DSA.value: AfterCloseRunStatus.REFRESHING_DAILY.value,
+    AfterCloseRunStatus.WAITING_DSA_WORKER.value: AfterCloseRunStatus.WAITING_DSA_WORKER.value,
+    AfterCloseRunStatus.QUALITY_GATE.value: AfterCloseRunStatus.QUALITY_GATE.value,
+    AfterCloseRunStatus.FEATURE_SNAPSHOT.value: AfterCloseRunStatus.FEATURE_SNAPSHOT.value,
+    AfterCloseRunStatus.PUBLISHING.value: AfterCloseRunStatus.PUBLISHING.value,
+    AfterCloseRunStatus.SUCCEEDED.value: AfterCloseRunStatus.SUCCEEDED.value,
+}
+
+# 每个阶段的主代表内部状态（用于从 events 取该阶段 started 时间）
+_PHASE_REPRESENTATIVE_STATUS = [
     AfterCloseRunStatus.REFRESHING_DAILY.value,
-    AfterCloseRunStatus.CHECKING_COVERAGE.value,
-    AfterCloseRunStatus.CREATING_DSA.value,
     AfterCloseRunStatus.WAITING_DSA_WORKER.value,
     AfterCloseRunStatus.QUALITY_GATE.value,
     AfterCloseRunStatus.FEATURE_SNAPSHOT.value,
     AfterCloseRunStatus.PUBLISHING.value,
-    "watchlist_ready",
 ]
 
-# last_completed_step -> 已完成步骤索引（含 checking_coverage/creating_dsa 的隐式完成）
-_COMPLETED_STEP_INDEX = {
+# last_completed_step（内部状态）→ 已完成阶段数（含该阶段）。
+# 注意 checking_coverage/creating_dsa 仅是 refresh_all_instruments 内部虚拟步骤，
+# 不会作为 orchestrator_status 出现，因此这里不单列。
+_COMPLETED_PHASE_INDEX = {
     None: -1,
     AfterCloseRunStatus.QUEUED.value: -1,
     AfterCloseRunStatus.REFRESHING_DAILY.value: 0,
-    AfterCloseRunStatus.WAITING_DSA_WORKER.value: 3,
-    AfterCloseRunStatus.QUALITY_GATE.value: 4,
-    AfterCloseRunStatus.FEATURE_SNAPSHOT.value: 5,
-    AfterCloseRunStatus.PUBLISHING.value: 6,
-    AfterCloseRunStatus.SUCCEEDED.value: 7,
+    AfterCloseRunStatus.WAITING_DSA_WORKER.value: 1,
+    AfterCloseRunStatus.QUALITY_GATE.value: 2,
+    AfterCloseRunStatus.FEATURE_SNAPSHOT.value: 3,
+    AfterCloseRunStatus.PUBLISHING.value: 4,
+    AfterCloseRunStatus.SUCCEEDED.value: 5,
 }
 
 
@@ -167,52 +221,100 @@ async def _get_snapshot_run_summary(
     }
 
 
-def _aggregate_step_events(
+def _collect_phase_started_at(
     events: list[JobRunEvent],
-) -> dict[str, dict[str, Any]]:
-    """按 step 聚合事件，得到每个步骤的启停时间、count、错误信息。"""
-    stats: dict[str, dict[str, Any]] = {}
+) -> tuple[dict[str, datetime], datetime | None]:
+    """从事件收集每个内部代表状态的首个事件时间，以及 succeeded 事件时间。
+
+    返回 (status_started_at, succeeded_at)：
+    - status_started_at[status] = 该内部状态最早事件时间（即该阶段开始时间）；
+    - succeeded_at = step=="succeeded" 的最早事件时间（用于推导最后一阶段结束）。
+
+    兼容历史数据：旧事件无 event_type 时，首事件时间即开始时间（推导结束用下一阶段开始）。
+    """
+    status_started_at: dict[str, datetime] = {}
+    succeeded_at: datetime | None = None
     for event in events:
         step = event.step
-        # 只关注状态机步骤或 ERROR 事件
-        if step not in _PIPELINE_STEPS and step not in {
-            AfterCloseRunStatus.QUEUED.value,
-            AfterCloseRunStatus.FAILED.value,
-            "ERROR",
-            "START",
-        }:
-            continue
-        # ERROR 事件没有固定 step，尝试从 payload 取 step；否则归为当前 orchestrator_status
+        # ERROR/START 事件从 payload.step 归并到真实阶段
         if step in ("ERROR", "START"):
             payload_step = (
                 event.payload.get("step")
                 if isinstance(event.payload, dict)
                 else None
             )
-            if not isinstance(payload_step, str):
-                continue
-            step = payload_step
-        step_stats = stats.setdefault(step, {
-            "started_at": None,
-            "finished_at": None,
-            "error_message": None,
-            "counts": {},
-            "event_count": 0,
-        })
-        if step_stats["started_at"] is None:
-            step_stats["started_at"] = event.created_at
-        step_stats["finished_at"] = event.created_at
-        step_stats["event_count"] += 1
+            if isinstance(payload_step, str):
+                step = payload_step
+        if step in _PHASE_REPRESENTATIVE_STATUS:
+            cur = status_started_at.get(step)
+            if cur is None or event.created_at < cur:
+                status_started_at[step] = event.created_at
+        elif step == AfterCloseRunStatus.SUCCEEDED.value:
+            if succeeded_at is None or event.created_at < succeeded_at:
+                succeeded_at = event.created_at
+    return status_started_at, succeeded_at
+
+
+def _phase_counts_error(
+    events: list[JobRunEvent],
+    status: str,
+) -> tuple[dict[str, Any], str | None]:
+    """从某内部状态的事件中提取计数与错误信息（用于阶段详情）。
+
+    status 为 5 阶段代表状态（如 refreshing_daily）；内部虚拟状态
+    checking_coverage/creating_dsa 的事件会被归一化到 refreshing_daily 阶段。
+    """
+    counts: dict[str, Any] = {}
+    error_message: str | None = None
+    for event in events:
+        step = event.step
+        if step in ("ERROR", "START"):
+            payload_step = (
+                event.payload.get("step")
+                if isinstance(event.payload, dict)
+                else None
+            )
+            if isinstance(payload_step, str):
+                step = payload_step
+        # 归一化虚拟状态到阶段代表状态
+        norm_step = _PHASE_REP_FOR_STATUS.get(step, step)
+        if norm_step != status:
+            continue
         if event.level == "error":
-            step_stats["error_message"] = event.message or step_stats["error_message"]
+            error_message = event.message or error_message
         if isinstance(event.payload, dict):
             for key in (
                 "coverage", "covered", "total", "succeeded_count", "failed_count",
                 "snapshot_count", "partial_failed_count", "expected_count",
+                "processed", "failed",
             ):
-                if key in event.payload:
-                    step_stats["counts"][key] = event.payload[key]
-    return stats
+                if key in event.payload and key not in counts:
+                    counts[key] = event.payload[key]
+    return counts, error_message
+
+
+def _infer_failed_phase(
+    orchestrator_status: str | None,
+    events: list[JobRunEvent],
+    last_completed_step: str | None,
+) -> int:
+    """推断失败所处的 5 阶段下标。"""
+    failed_step: str | None = None
+    if orchestrator_status in _PHASE_REPRESENTATIVE_STATUS:
+        failed_step = orchestrator_status
+    else:
+        for event in events:
+            if event.level == "error" and isinstance(event.payload, dict) and event.payload.get("step"):
+                failed_step = event.payload["step"]
+                break
+    if failed_step is None and last_completed_step is not None:
+        # 失败阶段 = 最后完成阶段之后的那一阶段
+        completed_idx = _COMPLETED_PHASE_INDEX.get(last_completed_step, -1)
+        if 0 <= completed_idx < len(_PHASE_KEYS):
+            failed_step = _PHASE_REPRESENTATIVE_STATUS[completed_idx]
+    if failed_step is not None:
+        return _STATUS_TO_PHASE.get(failed_step, -1)
+    return -1
 
 
 def _compute_step_states(
@@ -220,12 +322,23 @@ def _compute_step_states(
     events: list[JobRunEvent],
     watchlist_ready: bool,
     snapshot_summary: dict[str, Any] | None = None,
+    now: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    """根据 job_run 状态、事件、watchlist_ready、snapshot_summary 计算 8 步骤状态。"""
+    """根据 job_run 状态、事件、watchlist_ready、snapshot_summary 计算 5 阶段状态。
+
+    now 用于运行中阶段的耗时计算：运行中阶段 finished_at 必须为 None，
+    耗时按 now - started_at 计算，不得用事件最大时间冒充结束时间。
+
+    阶段结束时间推导（兼容历史数据）：
+    - 已完成阶段 i 的结束时间 = 阶段 i+1 的开始时间；
+    - 最后一阶段（publishing）结束时间 = succeeded 事件时间；
+    - 若无法推导（如运行中的最后阶段），finished_at=None，耗时按 now 计算；
+    - 任何耗时不得为负（duration<0 归零）。
+    """
     if job_run is None:
         return [
             {
-                "step": step,
+                "step": phase,
                 "status": "pending",
                 "started_at": None,
                 "finished_at": None,
@@ -233,105 +346,131 @@ def _compute_step_states(
                 "counts": {},
                 "error_message": None,
             }
-            for step in _PIPELINE_STEPS
+            for phase in _PHASE_KEYS
         ]
 
     meta = _parse_metadata(job_run)
     orchestrator_status = meta.get("orchestrator_status")
     last_completed_step = meta.get("last_completed_step")
-    completed_idx = _COMPLETED_STEP_INDEX.get(last_completed_step, -1)
-    step_events = _aggregate_step_events(events)
+    completed_phase_idx = _COMPLETED_PHASE_INDEX.get(last_completed_step, -1)
 
-    # 失败时定位失败步骤
-    failed_step: str | None = None
-    if job_run.status == "failed":
-        if orchestrator_status in _PIPELINE_STEPS:
-            failed_step = orchestrator_status
-        else:
-            # 从 ERROR 事件 payload 或最近非 pending 步骤推断
-            for event in events:
-                if event.level == "error" and isinstance(event.payload, dict) and event.payload.get("step"):
-                    failed_step = event.payload["step"]
-                    break
-            if failed_step is None and last_completed_step is not None:
-                failed_step = _step_after(last_completed_step)
+    status_started_at, succeeded_at = _collect_phase_started_at(events)
 
-    # 当前运行步骤
-    current_idx = -1
-    if orchestrator_status in _PIPELINE_STEPS:
-        current_idx = _PIPELINE_STEPS.index(orchestrator_status)
+    def _phase_start(idx: int) -> datetime | None:
+        return status_started_at.get(_PHASE_REPRESENTATIVE_STATUS[idx])
+
+    def _phase_finish(idx: int) -> datetime | None:
+        if idx + 1 < len(_PHASE_KEYS):
+            return _phase_start(idx + 1)
+        return succeeded_at
+
+    # 当前运行阶段（SUCCEEDED 表示全部完成，无当前运行阶段）
+    current_phase = -1
+    if orchestrator_status and orchestrator_status != AfterCloseRunStatus.SUCCEEDED.value:
+        current_phase = _STATUS_TO_PHASE.get(orchestrator_status, -1)
+
+    failed_phase = (
+        _infer_failed_phase(orchestrator_status, events, last_completed_step)
+        if job_run.status == "failed"
+        else -1
+    )
 
     steps: list[dict[str, Any]] = []
-    for idx, step in enumerate(_PIPELINE_STEPS):
-        stats = step_events.get(step, {})
-        started_at = stats.get("started_at")
-        finished_at = stats.get("finished_at")
-        duration = None
-        if started_at is not None and finished_at is not None:
-            duration = (finished_at - started_at).total_seconds()
+    for idx, phase in enumerate(_PHASE_KEYS):
+        started_at = _phase_start(idx)
+        finished_at = _phase_finish(idx)
+        counts, error_message = _phase_counts_error(
+            events, _PHASE_REPRESENTATIVE_STATUS[idx]
+        )
 
-        if step == "watchlist_ready":
-            if job_run.status == "succeeded":
-                step_status = "completed" if watchlist_ready else "pending"
-            elif current_idx == idx:
-                step_status = "running"
-            elif watchlist_ready:
-                step_status = "completed"
-            else:
-                step_status = "pending"
-        elif job_run.status == "failed":
-            if step == failed_step:
-                step_status = "failed"
-            elif idx <= completed_idx or (current_idx >= 0 and idx < current_idx):
-                step_status = "completed"
-            else:
-                step_status = "pending"
-        elif job_run.status == "succeeded":
+        if job_run.status == "succeeded":
             step_status = "completed"
+        elif job_run.status == "failed":
+            if failed_phase >= 0 and idx == failed_phase:
+                step_status = "failed"
+            elif idx <= completed_phase_idx:
+                step_status = "completed"
+            else:
+                step_status = "pending"
         elif job_run.status == "running":
-            if idx == current_idx:
+            if current_phase >= 0 and idx == current_phase:
                 step_status = "running"
-            elif idx <= completed_idx:
+            elif idx < current_phase:
                 step_status = "completed"
             else:
                 step_status = "pending"
         elif job_run.status == "interrupted":
             # [Repair] orchestrator 已中断但 snapshot 仍在 running，
-            # feature_snapshot 步骤应显示 running，提示“快照计算失联/待修复”。
+            # 特征快照阶段显示 running，提示“快照计算失联/待修复”。
             if (
-                step == AfterCloseRunStatus.FEATURE_SNAPSHOT.value
+                idx == 3
                 and snapshot_summary is not None
                 and snapshot_summary.get("status") == "running"
             ):
                 step_status = "running"
-            elif idx <= completed_idx:
+            elif idx <= completed_phase_idx:
                 step_status = "completed"
             else:
                 step_status = "pending"
         else:
-            # queued 或其他：已完成步骤显示 completed，当前及之后 pending
-            step_status = "completed" if idx <= completed_idx else "pending"
+            # queued 或其他：已完成阶段显示 completed，当前及之后 pending
+            step_status = "completed" if idx <= completed_phase_idx else "pending"
+
+        # 耗时计算：运行中 finished_at 必须为 None，按 now - started_at；
+        # 已完成阶段 finished>=started，任何负耗时归零。
+        duration: float | None = None
+        if step_status == "running":
+            finished_at = None
+            if now is not None and started_at is not None:
+                duration = (now - started_at).total_seconds()
+        elif started_at is not None and finished_at is not None:
+            duration = (finished_at - started_at).total_seconds()
+            if duration < 0:
+                duration = 0.0
 
         steps.append({
-            "step": step,
+            "step": phase,
             "status": step_status,
             "started_at": _format_dt(started_at),
             "finished_at": _format_dt(finished_at),
             "duration_seconds": duration,
-            "counts": stats.get("counts", {}),
-            "error_message": stats.get("error_message"),
+            "counts": counts,
+            "error_message": error_message,
         })
     return steps
 
 
-def _step_after(last_completed_step: str | None) -> str | None:
-    """根据 last_completed_step 返回下一个可能步骤。"""
-    idx = _COMPLETED_STEP_INDEX.get(last_completed_step, -1)
-    if idx < 0:
-        return AfterCloseRunStatus.REFRESHING_DAILY.value
-    if idx + 1 < len(_PIPELINE_STEPS):
-        return _PIPELINE_STEPS[idx + 1]
-    return None
+def _compute_feature_snapshot_stalled(
+    job_run: SchedulerJobRun | None,
+    meta: dict[str, Any],
+    now: datetime,
+) -> bool:
+    """判断 feature_snapshot 阶段是否“疑似停滞”。
+
+    条件：编排处于 feature_snapshot 且心跳新鲜（未触发 blocked），
+    但 metadata.feature_snapshot_progress.updated_at 距今超过阈值
+    （默认 _FEATURE_SNAPSHOT_STALL_SECONDS=300s）。
+
+    返回 True 仅表示“心跳新鲜但进度长时间未推进”，供前端提示“疑似停滞”，
+    不替代 blocked（心跳已超时由 _compute_overall_status 判定）。
+    """
+    if job_run is None:
+        return False
+    if meta.get("orchestrator_status") != AfterCloseRunStatus.FEATURE_SNAPSHOT.value:
+        return False
+    progress = meta.get("feature_snapshot_progress")
+    if not isinstance(progress, dict):
+        return False
+    updated_at = progress.get("updated_at")
+    if not isinstance(updated_at, str):
+        return False
+    try:
+        prog_time = datetime.fromisoformat(updated_at)
+    except ValueError:
+        return False
+    if prog_time.tzinfo is None:
+        prog_time = prog_time.replace(tzinfo=_SHANGHAI_TZ)
+    return (now - prog_time).total_seconds() > _FEATURE_SNAPSHOT_STALL_SECONDS
 
 
 def _compute_overall_status(
@@ -440,9 +579,15 @@ async def _build_pipeline_response(
         and snapshot_summary.get("status") == "running"
     )
 
+    # [Fix] feature_snapshot 阶段疑似停滞判定（心跳新鲜但进度长时间未推进）
+    feature_snapshot_stalled = False
+    if job_run is not None:
+        _meta = _parse_metadata(job_run)
+        feature_snapshot_stalled = _compute_feature_snapshot_stalled(job_run, _meta, now)
+
     data_freshness = await _compute_data_freshness(db, now)
     steps = _compute_step_states(
-        job_run, events, watchlist_ready, snapshot_summary,
+        job_run, events, watchlist_ready, snapshot_summary, now=now,
     )
 
     after_close_run_summary: dict[str, Any] | None = None
@@ -462,6 +607,7 @@ async def _build_pipeline_response(
             "trade_date": meta.get("trade_date"),
             "feature_snapshot_run_id": meta.get("feature_snapshot_run_id"),
             "feature_snapshot_progress": meta.get("feature_snapshot_progress"),
+            "feature_snapshot_stalled": feature_snapshot_stalled,
         }
 
     return {
@@ -476,6 +622,7 @@ async def _build_pipeline_response(
         "data_freshness": data_freshness,
         "feature_snapshot_run": snapshot_summary,
         "feature_snapshot_lost_contact": feature_snapshot_lost_contact,
+        "feature_snapshot_stalled": feature_snapshot_stalled,
         "events": [
             {
                 "id": str(e.id),
@@ -615,10 +762,19 @@ async def create_pipeline_run(
 
 
 if __name__ == "__main__":
-    # 自测入口：验证常量与映射一致性（不连 DB）
-    assert "refreshing_daily" in _PIPELINE_STEPS
-    assert "watchlist_ready" in _PIPELINE_STEPS
-    assert len(_PIPELINE_STEPS) == 8
-    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.WAITING_DSA_WORKER.value] == 3
-    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.SUCCEEDED.value] == 7
-    print("after_close_pipeline_service 常量与映射自测通过")
+    # 自测入口：验证 5 阶段常量与映射一致性（不连 DB）
+    assert "market_prep" in _PHASE_KEYS
+    assert "publishing" in _PHASE_KEYS
+    assert len(_PHASE_KEYS) == 5
+    # SUCCEEDED 表示全部 5 阶段完成，completed index = 5
+    assert _COMPLETED_PHASE_INDEX[AfterCloseRunStatus.SUCCEEDED.value] == 5
+    assert _COMPLETED_PHASE_INDEX[AfterCloseRunStatus.FEATURE_SNAPSHOT.value] == 3
+    # 内部状态 → 阶段下标 映射正确
+    assert _STATUS_TO_PHASE[AfterCloseRunStatus.FEATURE_SNAPSHOT.value] == 3
+    assert _STATUS_TO_PHASE[AfterCloseRunStatus.PUBLISHING.value] == 4
+    # 5 阶段映射覆盖全部代表性内部状态
+    assert all(
+        s in _STATUS_TO_PHASE
+        for s in _PHASE_REPRESENTATIVE_STATUS
+    )
+    print("after_close_pipeline_service 5 阶段常量与映射自测通过")

@@ -184,6 +184,75 @@ function PipelineTimeline({ steps }: { steps: PipelineStep[] }) {
   )
 }
 
+// ===== feature_snapshot 进度 + 速度/ETA =====
+function FeatureSnapshotProgress({
+  progress,
+  startedAt,
+}: {
+  progress: Record<string, unknown>
+  startedAt: string | null
+}) {
+  const processed = Number(progress['processed'] ?? 0)
+  const total = Number(progress['total'] ?? 0)
+  const snapshotCount = Number(progress['snapshot_count'] ?? 0)
+  const failedCount = Number(progress['failed_count'] ?? 0)
+  const updatedAt =
+    typeof progress['updated_at'] === 'string' ? (progress['updated_at'] as string) : null
+
+  const percent = total > 0 ? (processed / total) * 100 : 0
+
+  // 速度/ETA：以整体 run 开始时间为基准估算（仅展示参考值）
+  let speedPerSec: number | null = null
+  let etaSeconds: number | null = null
+  if (startedAt && processed > 0) {
+    const startMs = new Date(startedAt).getTime()
+    const elapsed = (Date.now() - startMs) / 1000
+    if (elapsed > 0) {
+      speedPerSec = processed / elapsed
+      const remain = total - processed
+      if (remain > 0 && speedPerSec > 0) {
+        etaSeconds = remain / speedPerSec
+      }
+    }
+  }
+
+  return (
+    <div className="feature-snapshot-progress" style={{ marginTop: '10px' }}>
+      <div className="detail-title">特征快照进度</div>
+      <div className="toggle-row">
+        <span>处理进度</span>
+        <b className="num">
+          {processed} / {total}（{percent.toFixed(1)}%）
+        </b>
+      </div>
+      <div className="toggle-row">
+        <span>快照成功 / 失败</span>
+        <b className="num">
+          {snapshotCount} / {failedCount}
+        </b>
+      </div>
+      {updatedAt && (
+        <div className="toggle-row">
+          <span>进度更新时间</span>
+          <b className="num">{formatShanghaiTime(updatedAt)}</b>
+        </div>
+      )}
+      {speedPerSec != null && (
+        <div className="toggle-row">
+          <span>估算速度</span>
+          <b className="num">{speedPerSec.toFixed(2)} 股/秒</b>
+        </div>
+      )}
+      {etaSeconds != null && (
+        <div className="toggle-row">
+          <span>预计剩余</span>
+          <b className="num">{formatDurationSeconds(etaSeconds)}</b>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ===== 主页面 =====
 export default function AdminAfterClosePipelinePage() {
   const toast = useToast.getState()
@@ -229,7 +298,7 @@ export default function AdminAfterClosePipelinePage() {
         <div>
           <h1 className="page-title">盘后流水线详情</h1>
           <div className="page-desc">
-            交易日 {tradeDate} · 8 步骤时间线 · 数据新鲜度 · 最近运行
+            交易日 {tradeDate} · 5 阶段时间线 · 数据新鲜度 · 最近运行
           </div>
         </div>
         <div className="actions">
@@ -309,7 +378,16 @@ export default function AdminAfterClosePipelinePage() {
         </section>
       </div>
 
-      {/* ===== 8 步骤时间线 ===== */}
+      {/* ===== feature_snapshot 疑似停滞告警 ===== */}
+      {pipeline?.feature_snapshot_stalled && (
+        <div className="grid section-gap">
+          <div className="notice error">
+            特征快照阶段疑似停滞：心跳正常，但进度超过 5 分钟未推进。请检查 after_close worker 进程是否存活。
+          </div>
+        </div>
+      )}
+
+      {/* ===== 5 阶段时间线 ===== */}
       <div className="grid section-gap">
         <section className="card">
           <div className="card-head">
@@ -504,6 +582,17 @@ export default function AdminAfterClosePipelinePage() {
                   <div className="notice error" style={{ marginTop: '10px' }}>
                     {afterCloseRun.error_message}
                   </div>
+                )}
+                {afterCloseRun.feature_snapshot_stalled && (
+                  <div className="notice error" style={{ marginTop: '10px' }}>
+                    特征快照阶段疑似停滞（心跳正常，进度长时间未推进）
+                  </div>
+                )}
+                {afterCloseRun.feature_snapshot_progress && (
+                  <FeatureSnapshotProgress
+                    progress={afterCloseRun.feature_snapshot_progress}
+                    startedAt={afterCloseRun.started_at}
+                  />
                 )}
               </>
             ) : (

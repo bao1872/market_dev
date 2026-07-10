@@ -315,10 +315,9 @@ async def test_pipeline_running_current_step(
     assert data["after_close_run"]["orchestrator_status"] == AfterCloseRunStatus.FEATURE_SNAPSHOT.value
 
     steps = {step["step"]: step for step in data["steps"]}
-    assert steps[AfterCloseRunStatus.FEATURE_SNAPSHOT.value]["status"] == "running"
-    assert steps[AfterCloseRunStatus.REFRESHING_DAILY.value]["status"] == "completed"
-    assert steps[AfterCloseRunStatus.PUBLISHING.value]["status"] == "pending"
-    assert steps["watchlist_ready"]["status"] == "pending"
+    assert steps["feature_snapshot"]["status"] == "running"
+    assert steps["market_prep"]["status"] == "completed"
+    assert steps["publishing"]["status"] == "pending"
 
 
 # ==================== 2b. interrupted + running snapshot → feature_snapshot running ====================
@@ -381,10 +380,9 @@ async def test_pipeline_interrupted_with_running_snapshot(
     assert data["feature_snapshot_lost_contact"] is True
 
     steps = {step["step"]: step for step in data["steps"]}
-    assert steps[AfterCloseRunStatus.FEATURE_SNAPSHOT.value]["status"] == "running"
-    assert steps[AfterCloseRunStatus.QUALITY_GATE.value]["status"] == "completed"
-    assert steps[AfterCloseRunStatus.PUBLISHING.value]["status"] == "pending"
-    assert steps["watchlist_ready"]["status"] == "pending"
+    assert steps["feature_snapshot"]["status"] == "running"
+    assert steps["quality_gate"]["status"] == "completed"
+    assert steps["publishing"]["status"] == "pending"
 
 
 # ==================== 3. succeeded + full published → watchlist_ready=true ====================
@@ -436,9 +434,7 @@ async def test_pipeline_succeeded_watchlist_ready(
     assert data["feature_snapshot_run"]["scope"] == "full"
     assert data["feature_snapshot_run"]["published_at"] is not None
 
-    steps = {step["step"]: step for step in data["steps"]}
     assert all(step["status"] == "completed" for step in data["steps"])
-    assert steps["watchlist_ready"]["status"] == "completed"
 
 
 # ==================== 4. sample snapshot run → watchlist_ready=false ====================
@@ -489,8 +485,7 @@ async def test_pipeline_sample_snapshot_not_readable(
     assert data["feature_snapshot_run"]["scope"] == "sample"
     assert "非 full，不可读" in data["watchlist_reason"]
 
-    steps = {step["step"]: step for step in data["steps"]}
-    assert steps["watchlist_ready"]["status"] == "pending"
+    assert all(step["status"] == "completed" for step in data["steps"])
 
 
 # ==================== 4b. watchlist_ready=true 时 feature_snapshot_run 优先显示 full run ====================
@@ -618,9 +613,10 @@ async def test_pipeline_failed_with_error(
     assert data["after_close_run"]["error_message"] == "daily bars download failed"
 
     steps = {step["step"]: step for step in data["steps"]}
-    assert steps[AfterCloseRunStatus.CHECKING_COVERAGE.value]["status"] == "failed"
-    assert steps[AfterCloseRunStatus.CHECKING_COVERAGE.value]["error_message"] == "daily bars download failed"
-    assert steps[AfterCloseRunStatus.REFRESHING_DAILY.value]["status"] == "completed"
+    # checking_coverage 在 5 阶段模型中归并到 market_prep，失败应显示在该阶段
+    assert steps["market_prep"]["status"] == "failed"
+    assert steps["market_prep"]["error_message"] == "daily bars download failed"
+    assert steps["dsa_compute"]["status"] == "pending"
 
 
 # ==================== 6. POST run 幂等 ====================
@@ -732,15 +728,13 @@ async def test_pipeline_non_admin_forbidden(
 
 if __name__ == "__main__":
     # 自测入口：验证常量与导入（不连 DB）
+    # 面向用户仅 5 个真实阶段（虚拟步骤 checking_coverage/creating_dsa 归并到 market_prep，watchlist_ready 为门禁）
     assert AfterCloseRunStatus.FEATURE_SNAPSHOT.value in [
-        "refreshing_daily",
-        "checking_coverage",
-        "creating_dsa",
-        "waiting_dsa_worker",
+        "market_prep",
+        "dsa_compute",
         "quality_gate",
         "feature_snapshot",
         "publishing",
-        "watchlist_ready",
     ]
     assert STATUS_SUCCEEDED != STATUS_FAILED
     print("test_admin_after_close_pipeline 自测通过")

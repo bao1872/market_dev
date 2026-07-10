@@ -118,15 +118,16 @@ queued → refreshing_daily → checking_coverage → creating_dsa
 - `overall_status`：not_started / running / succeeded / failed / blocked / skipped（交易日收盘后超过 30 分钟阈值仍无 run → blocked；非交易日无 run 且无 backfill_full → skipped）；
 - `latest` 策略：交易日（含今日）始终以 today 为目标 trade_date，即使无 run 也返回 today 的 not_started/blocked，不回退历史 run 掩盖"今天未执行"；非交易日回退到最近有记录的交易日；
 - `feature_snapshot_run` 摘要优先返回 succeeded+published+full run（即 watchlist_ready 的实际数据源），若不存在再 fallback 到最新任意 run；
-- `watchlist_ready`：严格复用 `feature_snapshot_service.has_succeeded_snapshot_run`（`status='succeeded' AND published_at IS NOT NULL AND metadata_.scope='full'`），sample backfill 不计入；
-- `steps`：8 步骤时间线（refreshing_daily → checking_coverage → creating_dsa → waiting_dsa_worker → quality_gate → feature_snapshot → publishing → watchlist_ready），每步 status 为 pending/running/completed/failed/skipped；
-- `after_close_run`：job_run 摘要（status/orchestrator_status/heartbeat/lease_expires/last_completed_step/error）；
+- `watchlist_ready`：严格复用 `feature_snapshot_service.has_succeeded_snapshot_run`（`status='succeeded' AND published_at IS NOT NULL AND metadata_.scope='full'`），sample backfill 不计入；"自选可用"是发布后的最终门禁，不作为执行步骤；
+- `steps`：面向用户 **5 个真实阶段**（内部细粒度状态归并）：`market_prep`(行情准备=refreshing_daily+checking_coverage+creating_dsa) → `dsa_compute`(DSA计算=waiting_dsa_worker) → `quality_gate`(质量校验) → `feature_snapshot`(特征快照) → `publishing`(发布结果)；每步 status 为 pending/running/completed/failed/skipped，运行中阶段 `finished_at=null` 且耗时=now-started（不为负）；
+- `after_close_run`：job_run 摘要（status/orchestrator_status/heartbeat/lease_expires/last_completed_step/error/`feature_snapshot_progress`/`feature_snapshot_stalled`）；
+- `feature_snapshot_stalled`：顶层与 `after_close_run` 均暴露；编排处于 feature_snapshot 且心跳新鲜，但 `feature_snapshot_progress.updated_at` 距今 > 300s 时为 true，供前端提示"疑似停滞"（不替代心跳超时 blocked 判定）；
 - `feature_snapshot_run`：snapshot_run 摘要（run_type/scope/snapshot_count/failed_count/published_at）；
 - `data_freshness`：复用 `system_overview_service._compute_data_freshness`；
-- `events`：最近 100 条 job_run_events（来自 `job_run_event_service.list_events`）。
+- `events`：最近 100 条 job_run_events（来自 `job_run_event_service.list_events`）；状态切换事件带 `payload.event_type="started"`，feature_snapshot 进度事件带 `payload.event_type="progress"`。
 
 **前端页面**：
-- `/admin/after-close` 详情页：顶部状态卡 + 8 步骤垂直时间线 + 数据新鲜度卡 + 编排状态详情 + 最近 20 次运行列表 + 事件日志抽屉；
+- `/admin/after-close` 详情页：顶部状态卡 + 5 阶段垂直时间线（行情准备/DSA计算/质量校验/特征快照/发布结果）+ 数据新鲜度卡 + 编排状态详情 + 最近 20 次运行列表 + 事件日志抽屉；特征快照阶段展示进度（processed/total、snapshot 成功/失败、速度、ETA）与"疑似停滞"横幅；
 - `/admin/overview` 中的 `AfterClosePipelineCard` 改造为摘要卡（状态 pill + 编排阶段 + Worker 心跳 + 行情/选股发布至 + 进入详情链接）；
 - 轮询策略：running 状态 10s，非 running 60s，页面不可见暂停。
 
@@ -159,7 +160,7 @@ queued → refreshing_daily → checking_coverage → creating_dsa
 2. 在 backend 容器或管理脚本中调用 `repair_stale_after_close_snapshot_runs`；
 3. 检查返回结果中 `action` 为 `succeeded` 或 `failed`；
 4. 若 repair 为 `failed`，通过 admin 页面或 API 重试当日 after_close，利用 `last_completed_step='quality_gate'` 断点恢复，仅重跑 `feature_snapshot`；
-5. 验证 `watchlist_ready=true` 且 `/admin/after-close` 第 6-8 步状态正确。
+5. 验证 `watchlist_ready=true` 且 `/admin/after-close` 特征快照阶段状态正确。
 
 **禁止操作**：
 - 不要直接删除 `stock_feature_snapshot_runs`；

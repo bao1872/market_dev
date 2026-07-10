@@ -37,6 +37,7 @@ class AfterCloseRunSummary(BaseModel):
     trade_date: str | None = None
     feature_snapshot_run_id: str | None = None
     feature_snapshot_progress: dict[str, Any] | None = None
+    feature_snapshot_stalled: bool = False
 
 
 class FeatureSnapshotRunSummary(BaseModel):
@@ -83,6 +84,7 @@ class AfterClosePipelineResponse(BaseModel):
     data_freshness: DataFreshness
     feature_snapshot_run: FeatureSnapshotRunSummary | None = None
     feature_snapshot_lost_contact: bool = False
+    feature_snapshot_stalled: bool = False
     events: list[PipelineEventItem]
 
 
