@@ -592,14 +592,15 @@ Capture Token 只能访问 Capture API。\
 5. `ProtectedLayout` 只负责认证与 access profile，不再固定渲染同一壳层。
 6. `/capture/stock/:symbol` 位于两套壳层之外，只使用 `captureClient`。
 7. 导航/路由常量集中于 `frontend/src/navigation/appNavigation.ts`，禁止路径散落。
-8. 三栏统一行情工作区（阶段三）：`/market` 渲染 `MarketWorkspacePage`（左列表 `MarketInstrumentPane` + 中K线 `StockResearchWorkspace` + 右结构状态 `StockStructuralStatePanel` 可收起）；`useStockResearchData` 只保留 bars/indicators/quote/events 核心查询，自选操作/上下切换/memo 继续留在 `StockDetailPage`；`MarketWorkspacePage` 使用 `StockResearchWorkspace`，`StockDetailPage` 仍保留独立实现（下一独立 PR 迁移复用）。
-9. `timeframe` 单一真源：URL → `useStockResearchData`（bars/indicators 请求参数）→ `StockResearchWorkspace`（图表渲染）三者始终使用同一 `DisplayTimeframe`；工具栏切换必须通过 `onTimeframeChange` 回调写回 URL，禁止子组件 `useState` 维护独立 timeframe；图表显示周期不得改变 1d+15m 监控配置或 1m 事件触发口径。
+8. 三栏统一行情工作区（阶段三+阶段四）：`/market` 渲染 `MarketWorkspacePage`（左列表 `MarketInstrumentPane` + 中K线 `StockResearchWorkspace` + 右结构状态 `StockStructuralStatePanel` 可收起）；`/stock/:symbol` 渲染 `StockDetailPage`（路由适配器，复用 `useStockResearchData` + `StockResearchWorkspace`）；`useStockResearchData` 只保留 bars/indicators/quote/events 核心查询，详情页专属能力（自选/上下切换/memo/飞书）拆到 `useStockDetailActions`/`useStockDetailFeishu`。
+9. `timeframe` 单一真源：URL → `useStockResearchData`（bars/indicators 请求参数）→ `StockResearchWorkspace`（图表渲染）三者始终使用同一 `DisplayTimeframe`；工具栏切换必须通过 `onTimeframeChange` 回调写回 URL，禁止子组件 `useState` 维护独立 timeframe；图表显示周期不得改变 1d+15m 监控配置或 1m 事件触发口径；`/stock/:symbol` 的 timeframe 也从 URL 解析。
 10. 请求门控：`useWatchlistMonitorStatus` 和 `useInstruments` 必须通过 `enabled` 参数按 scope 互斥启用（watchlist scope 只启用 monitor-status，market scope 且搜索词 trim 后 ≥2 字符才启用 instruments）；`useStockResearchData` 不得请求 `MarketWorkspace` 未使用的 watchlist/batchInstruments/stockMemo。
 11. URL 状态保留：`/market` URL 的 scope/symbol/timeframe/source/strategy/event_id 进入 URL（可分享、刷新恢复）；切换周期、切换 scope、选择新股票时必须保留其他字段；选择新股票时清除旧 `event_id`；`event_id` 本轮仅解析、保留并传递，尚未被工作区消费（不实现自然语言事件解释）。
 12. 左栏选择上下文重置（阶段三最终验收确立）：从 `MarketInstrumentPane` 选择任意股票时必须写 `source='watchlist'`、`strategy='watchlist_monitor'`、`eventId=null`（退出 selection 上下文）；用户切换 scope（watchlist 或 market）时也必须退出 selection 上下文并清除旧 `event_id`；timeframe 在上述操作中继续保留。状态转换必须通过纯函数 `selectInstrumentFromMarketPane(state, newSymbol)` 和 `changeMarketScope(state, newScope)` 处理，禁止在多个 callback 中重复拼对象。
 13. 搜索结果渲染门控：`MarketInstrumentPane` 中仅在 `scope==='market' && canSearch`（关键词 trim 后 ≥2 字符）时渲染 `searchResults`；关键词不足 2 字符、清空输入或切换 scope 时不得显示缓存结果。Query 仍通过 `enabled` 门控，不条件调用 Hook。
 14. 行情状态文案：`StockResearchWorkspace` 不得在 15m/1h/1w/1mo 显示"日线回退"；非实时非降级时统一显示"行情回退"；partial 文案必须包含当前周期（如"盘中 partial bar（15m）"），禁止所有周期统一显示"日线"。
-15. `StockDetailPage` 的 `event_id` 消费放下一阶段统一。
+15. 共享研究核心（阶段四确立）：`DisplayTimeframe`/`ResearchSource`/`ALLOWED_TIMEFRAMES`/`BARS_COUNT_BY_TIMEFRAME`/`defaultStrategyForSource`/`normalizeDisplayTimeframe`/`normalizeResearchSource` 权威定义在 `frontend/src/features/stock-research/stockResearchTypes.ts`；`marketWorkspaceUrlState.ts` 从该文件导入并重新导出，依赖方向为 market-workspace → stock-research（禁止反向依赖）；`StockResearchWorkspace` 通过 `toolbar`/`rightPanel`/`showRightPanel`/`chartColumnProps` 可选 props 支持详情页结构面板开关和截图模式属性；`/capture/stock/:symbol` 完全独立，不使用 `useStockResearchData`/`StockResearchWorkspace`/`apiClient`。
+16. `StockDetailPage` 的 `event_id` 消费放下一阶段统一。
 
 ***
 

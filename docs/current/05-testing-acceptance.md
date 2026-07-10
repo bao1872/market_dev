@@ -111,6 +111,43 @@
 - 运行命令：`node --experimental-strip-types --test src/features/market-workspace/__tests__/marketWorkspaceUrlState.test.ts src/navigation/__tests__/appNavigation.test.ts src/navigation/__tests__/routeStructure.test.ts src/pages/__tests__/detailNavigation.test.ts`
 - 回归要求：修改 `MarketWorkspacePage`、`marketWorkspaceUrlState.ts`、`StockResearchWorkspace.tsx`、`useStockResearchData.ts`、`MarketInstrumentPane.tsx`、`appNavigation.ts`、`AccountMenu.tsx`、`detailNavigation.ts` 或路由结构时必须跑此测试。
 
+### 共享研究核心（阶段四阻断验收）
+
+- 前端 `src/features/stock-research/__tests__/stockResearchTypes.test.ts` 覆盖（13 个用例）：
+  1. `ALLOWED_TIMEFRAMES` 包含 `1d`/`15m`/`1h`/`1w`/`1mo` 五个值且顺序固定；
+  2. `DEFAULT_TIMEFRAME === '1d'`；
+  3. `DEFAULT_SOURCE === 'watchlist'`；
+  4. `BARS_COUNT_BY_TIMEFRAME` 各周期取值与 Node Cluster 契约一致（1d=250、15m=4000、1h=1200、1w=500、1mo=500）；
+  5. `defaultStrategyForSource('watchlist') === 'watchlist_monitor'`；
+  6. `defaultStrategyForSource('selection') === 'dsa_selector'`；
+  7. `defaultStrategyForSource` 对未知 source 抛错；
+  8. `normalizeDisplayTimeframe('1d')` 原样返回合法值；
+  9. `normalizeDisplayTimeframe('15m')` 原样返回合法值；
+  10. `normalizeDisplayTimeframe('2h')` 回退为 `1d`（非法值回退）；
+  11. `normalizeDisplayTimeframe(undefined)` 回退为 `1d`（缺省回退）；
+  12. `normalizeResearchSource('watchlist')` 原样返回合法值；
+  13. `normalizeResearchSource(undefined)` 回退为 `watchlist`（缺省回退）。
+- 运行命令：`node --experimental-strip-types --test src/features/stock-research/__tests__/stockResearchTypes.test.ts`
+- 回归要求：修改 `stockResearchTypes.ts`、`marketWorkspaceUrlState.ts`、`useStockResearchData.ts`、`StockDetailPage.tsx` 时必须跑此测试。
+- 测试实现说明：因 `marketWorkspaceUrlState.ts` 直接被 `node --experimental-strip-types --test` 执行，导入 `stockResearchTypes` 必须带 `.ts` 扩展名（相对路径），不得使用 `@/` 别名。
+
+### /market 和 /stock 共享研究核心 E2E（阶段四阻断验收）
+
+- 浏览器 E2E（CDP，禁止安装 Playwright）：复用阶段三 CDP 工具链（Node 22 `fetch`/`WebSocket` + DevTools Protocol），临时脚本 `/tmp/stock-detail-e2e.mjs`，profile `/tmp/panji-cdp-profile-stage4`，通过后端 `create_access_token` 生成 JWT 并注入完整 Zustand persist `auth-store` 状态。
+- 必须验证 9 类场景，共 39 项断言，每项输出 PASS/FAIL：
+  1. `/market?symbol=<X>&timeframe=15m` 与 `/stock/<X>?timeframe=15m` 的 bars/indicators 请求参数一致（同 symbol、同 timeframe、同 bars_count）；
+  2. `/stock/:symbol` 切换 1h 后 URL 写入 `timeframe=1h`，bars/indicators 请求切为 1h，图表渲染 1h；
+  3. `/stock/:symbol` 仅一组 instrument/bars/indicators/quote/events 请求（无重复请求链路）；
+  4. 详情页 header、返回按钮、价格卡片、上一只/下一只、加入/移出自选、备忘录（保存/删除）、结构面板开关、全屏按钮均存在且可交互；
+  5. 飞书分享按钮存在，点击触发 `POST /capture/snapshot` 创建任务，轮询 `GET /capture/snapshot/:id` 直至 succeeded/failed 或超时（mock 链路验证）；
+  6. `/capture/stock/:symbol` 无 `UserAppShell`/`AdminAppShell`（无 topbar、无 sidebar、无账户菜单），请求契约不变（仅 `captureClient`）；
+  7. `/stock/:symbol` 非实时非降级状态文案为"行情回退"（非"日线回退"），partial 文案含当前周期；
+  8. 阶段三 `/market` 22 项回归继续通过（timeframe 单一真源、scope 互斥、selection 上下文重置、搜索渲染门控、capture 隔离）；
+  9. `StockDetailPage` 不再包含独立的 `useBars`/`useIndicators`/`useRealtimeQuote`/`useInstrumentEvents`/`barsCount` 映射/`StrategyChart` 重复实现。
+- E2E 结果（2026-07-11）：39 项断言全部 PASS，覆盖 9 个场景。
+- 回归要求：修改 `StockDetailPage.tsx`、`useStockResearchData.ts`、`useStockDetailActions.ts`、`useStockDetailFeishu.ts`、`StockResearchWorkspace.tsx`、`stockResearchTypes.ts` 或路由结构时必须跑此 E2E。
+- 临时文件约束：脚本/profile/日志/vite build 输出仅放 `/tmp`，验证结束后必须删除；不得保存截图/video/trace。
+
 ## 3.2 K线实时契约门禁（blocking）
 
 - 任何修改 `backend/app/api/bars.py`、`backend/app/services/market_data_aggregation_service.py`、`backend/app/core/pytdx_adapter.py`、`frontend/src/pages/StockDetailPage.tsx`、`frontend/src/utils/chart.ts` 必须跑 K线实时契约测试；

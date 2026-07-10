@@ -1,16 +1,15 @@
-// [StockResearchWorkspace] - 描述: 中栏 K 线研究区组件（从 StockDetailPage 抽取）
+// [StockResearchWorkspace] - 描述: K 线研究区组件（/market 和 /stock/:symbol 共用）
 // 接收 useStockResearchData 返回的已组装数据，渲染 StrategyChart + 行情状态条。
-// 当前仅由 MarketWorkspacePage 使用；StockDetailPage 仍保留独立实现，下一独立 PR 迁移复用。
-// 右栏（StockStructuralStatePanel）的显示/隐藏由父组件控制，本组件只渲染中栏。
-// timeframe 为受控状态：由父组件（MarketWorkspacePage）从 URL 解析并传入，工具栏切换通过 onTimeframeChange 回调写回 URL。
+// timeframe 为受控状态：由父组件从 URL 解析并传入，工具栏切换通过 onTimeframeChange 回调写回 URL。
 // viewport 按 timeframe 本地保存（不进 URL 避免噪音），切换周期时各周期 viewport 独立不串台。
-import { useState, useCallback } from 'react'
+// 可选 toolbar/rightPanel/chartColumnProps 支持 StockDetailPage 的结构面板开关和截图模式属性。
+import { useState, useCallback, type ReactNode } from 'react'
 import StrategyChart from '@/components/StrategyChart'
 import { createDefaultViewport, type ChartViewport } from '@/components/chartViewport'
 import { formatShanghaiTimeShort } from '@/utils/datetime'
 import { resolveStrategy } from '@/lib/strategy-manifest'
-import type { ResearchSource, DisplayTimeframe } from '@/features/market-workspace/marketWorkspaceUrlState'
-import { ALLOWED_TIMEFRAMES } from '@/features/market-workspace/marketWorkspaceUrlState'
+import type { ResearchSource, DisplayTimeframe } from './stockResearchTypes'
+import { ALLOWED_TIMEFRAMES } from './stockResearchTypes'
 import clsx from 'clsx'
 import type { StockResearchData } from './useStockResearchData'
 
@@ -24,30 +23,25 @@ export interface StockResearchWorkspaceProps {
   source: ResearchSource
   // 策略 key（由父组件根据 URL 传入；watchlist→watchlist_monitor, selection→dsa_selector）
   strategyKey: string
-  // 是否截图模式（CaptureStockPage 独立，不经过本组件；但保留兼容）
+  // 是否截图模式（CaptureStockPage 独立，不经过本组件；StockDetailPage capture=feishu 时传入）
   isCaptureMode?: boolean
   // 右栏是否收起（收起时中栏扩展）
   rightPanelCollapsed?: boolean
   // 图表高度
   height?: number
+  // 可选 toolbar 渲染在图表上方（如结构状态开关按钮）
+  toolbar?: ReactNode
+  // 可选右栏内容渲染为 tv-chart-column 的兄弟（如 StockStructuralStatePanel）
+  rightPanel?: ReactNode
+  // 是否显示右栏
+  showRightPanel?: boolean
+  // chart column 的额外 data 属性（如 data-testid, data-render-ready）
+  chartColumnProps?: Record<string, string>
 }
 
 // 默认视口状态（按 timeframe 存储，本地 state，不进 URL）
 function makeDefaultViewport(): ChartViewport {
   return createDefaultViewport(0)
-}
-
-// 根据 timeframe 生成 K线状态文案（partial 文案包含当前周期，避免所有周期都显示"日线"）
-function barsStatusLabel(tf: DisplayTimeframe, isPartial: boolean): string {
-  const labelMap: Record<DisplayTimeframe, string> = {
-    '1d': '日线',
-    '15m': '15分钟K线',
-    '1h': '1小时K线',
-    '1w': '周线',
-    '1mo': '月线',
-  }
-  const period = labelMap[tf] ?? '周期数据'
-  return isPartial ? `盘中 partial bar（${tf}）` : `完整${period}`
 }
 
 export function StockResearchWorkspace({
@@ -59,6 +53,10 @@ export function StockResearchWorkspace({
   isCaptureMode = false,
   rightPanelCollapsed = false,
   height = 655,
+  toolbar,
+  rightPanel,
+  showRightPanel = false,
+  chartColumnProps,
 }: StockResearchWorkspaceProps) {
   // viewport 按 timeframe 存储（本地 state，不进 URL 避免噪音）
   const [viewportByTimeframe, setViewportByTimeframe] = useState<Record<string, ChartViewport>>({})
@@ -86,25 +84,34 @@ export function StockResearchWorkspace({
     barsQuery,
     indicatorsQuery,
     isBarsLoading,
-    backendIsPartial,
+    isRenderReady,
+    quoteStatus,
+    barsStatus,
   } = data
 
   const inst = instrumentQuery.data
   const quote = quoteQuery.data
 
-  // 行情状态（简化版，完整状态条逻辑保留在 StockDetailPage 中）
-  // 非实时非降级时统一显示"行情回退"，避免在 15m/1h/1w/1mo 下误显示"日线回退"
-  const quoteStatus = {
-    label: quote?.is_realtime ? '实时行情' : quote?.degraded ? '行情降级' : '行情回退',
-    badgeClass: quote?.is_realtime ? 'tag ok' : quote?.degraded ? 'tag warn' : 'tag',
-  }
+  // 截图模式：飞书图层就绪校验（bb_upper + visual_segments 非空数组）
+  const feishuLayersReady = isCaptureMode
+    ? (() => {
+        const indicatorData = indicatorsQuery.data?.data
+        if (!indicatorData) return false
+        const watchlist = indicatorData.watchlist_monitor as
+          | Record<string, (number | string | null)[]>
+          | undefined
+        if (!watchlist) return false
+        const bbUpper = watchlist.bb_upper
+        if (!Array.isArray(bbUpper) || bbUpper.length === 0) return false
+        const dsaSelector = indicatorData.dsa_selector
+        if (!dsaSelector || typeof dsaSelector !== 'object') return false
+        const segments = (dsaSelector as { visual_segments?: unknown[] }).visual_segments
+        if (!Array.isArray(segments)) return false
+        return true
+      })()
+    : true
 
-  const barsStatus = barsQuery.data
-    ? {
-        label: barsStatusLabel(timeframe, backendIsPartial),
-        reason: barsQuery.data.degraded_reason ?? undefined,
-      }
-    : null
+  const captureRenderReady = isCaptureMode && isRenderReady && feishuLayersReady
 
   // 错误状态：instrument/bars/indicators 失败时显示明确错误，不伪装为空图
   if (instrumentQuery.isError) {
@@ -143,8 +150,13 @@ export function StockResearchWorkspace({
   }
 
   return (
-    <div className={clsx('tv-workspace', rightPanelCollapsed && 'hide-structural-state')}>
-      <div className="tv-chart-column">
+    <div className={clsx('tv-workspace', rightPanelCollapsed && 'hide-structural-state', isCaptureMode && 'capture-mode')}>
+      <section
+        className="tv-chart-column"
+        data-testid={chartColumnProps?.['data-testid']}
+        data-render-ready={isCaptureMode ? (captureRenderReady ? 'true' : 'false') : undefined}
+      >
+        {toolbar}
         {isBarsLoading ? (
           <div className="tv-chart-loading">行情数据加载中...</div>
         ) : (
@@ -181,7 +193,8 @@ export function StockResearchWorkspace({
             </div>
           </>
         )}
-      </div>
+      </section>
+      {showRightPanel && rightPanel}
     </div>
   )
 }

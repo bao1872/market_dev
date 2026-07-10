@@ -4,17 +4,23 @@
 // 非法 timeframe 回退 1d；source 默认 watchlist；strategy 默认根据 source 推导（watchlist→watchlist_monitor, selection→dsa_selector）。
 // event_id 本轮仅解析、保留与传递，尚未被工作区消费（不实现自然语言事件解释）。
 // 本文件为纯 TS（无 React 依赖，无 @/ 别名依赖），可被 node --test 直接运行。
-// 策略 key 常量与 @/constants/strategyKeys 的 STRATEGY_KEYS 对齐（'dsa_selector' / 'watchlist_monitor'）。
+// 共享类型（DisplayTimeframe/ResearchSource 等）从 stockResearchTypes 导入，避免 stock-research 反向依赖 market-workspace。
+
+import {
+  type DisplayTimeframe,
+  type ResearchSource,
+  DEFAULT_TIMEFRAME,
+  DEFAULT_SOURCE,
+  defaultStrategyForSource,
+  normalizeDisplayTimeframe,
+  normalizeResearchSource,
+} from '../stock-research/stockResearchTypes.ts'
+
+// 重新导出共享类型，保持 marketWorkspaceUrlState 现有导入兼容
+export type { DisplayTimeframe, ResearchSource } from '../stock-research/stockResearchTypes.ts'
+export { ALLOWED_TIMEFRAMES, DEFAULT_TIMEFRAME, DEFAULT_SOURCE, defaultStrategyForSource } from '../stock-research/stockResearchTypes.ts'
 
 export type MarketScope = 'watchlist' | 'market'
-
-// 图表工具栏允许的显示周期（与 Node Cluster 输入契约对齐：1d=250/15m=4000/1h=1200/1w=260/1mo=120）
-export type DisplayTimeframe = '15m' | '1h' | '1d' | '1w' | '1mo'
-
-export const ALLOWED_TIMEFRAMES: readonly DisplayTimeframe[] = ['15m', '1h', '1d', '1w', '1mo']
-
-// 研究来源（watchlist=自选/市场搜索；selection=趋势选股结果进入）
-export type ResearchSource = 'watchlist' | 'selection'
 
 export interface MarketWorkspaceUrlState {
   scope: MarketScope
@@ -26,35 +32,14 @@ export interface MarketWorkspaceUrlState {
 }
 
 export const DEFAULT_MARKET_SCOPE: MarketScope = 'watchlist'
-export const DEFAULT_TIMEFRAME: DisplayTimeframe = '1d'
-export const DEFAULT_SOURCE: ResearchSource = 'watchlist'
-
-// 根据 source 推导默认策略 key（watchlist/market → watchlist_monitor；selection → dsa_selector）
-// 值与 @/constants/strategyKeys 的 STRATEGY_KEYS 对齐
-export function defaultStrategyForSource(source: ResearchSource): string {
-  return source === 'selection' ? 'dsa_selector' : 'watchlist_monitor'
-}
-
-// 校验 timeframe 是否为允许值，非法回退 1d
-function normalizeTimeframe(raw: string | null): DisplayTimeframe {
-  if (raw && (ALLOWED_TIMEFRAMES as readonly string[]).includes(raw)) {
-    return raw as DisplayTimeframe
-  }
-  return DEFAULT_TIMEFRAME
-}
-
-// 校验 source 是否为允许值，非法回退 watchlist
-function normalizeSource(raw: string | null): ResearchSource {
-  return raw === 'selection' ? 'selection' : 'watchlist'
-}
 
 // 从 URLSearchParams 解析工作区状态
 export function decodeMarketWorkspaceUrl(params: URLSearchParams): MarketWorkspaceUrlState {
   const rawScope = params.get('scope')
   const scope: MarketScope = rawScope === 'market' ? 'market' : 'watchlist'
   const symbol = params.get('symbol') || null
-  const timeframe = normalizeTimeframe(params.get('timeframe'))
-  const source = normalizeSource(params.get('source'))
+  const timeframe = normalizeDisplayTimeframe(params.get('timeframe'))
+  const source = normalizeResearchSource(params.get('source'))
   const strategy = params.get('strategy') || defaultStrategyForSource(source)
   const eventId = params.get('event_id') || null
   return { scope, symbol, timeframe, source, strategy, eventId }

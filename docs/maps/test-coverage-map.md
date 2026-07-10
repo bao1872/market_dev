@@ -14,6 +14,8 @@
 | **路由层级契约（阶段二 fixup）**：Capture 位于 ProtectedLayout 之外、/market+/screener+/stock/:symbol 经 UserAppShell+SubscriberRoute、/messages+/settings 经 UserAppShell 不经 SubscriberRoute、/admin/* 经 AdminRoute+AdminAppShell | `frontend/src/navigation/__tests__/routeStructure.test.ts`（10 用例） |
 | **行情工作区 URL 状态（阶段三最终验收）**：URL parse/serialize 往返（scope/symbol/timeframe/source/strategy/event_id）、非法 timeframe 回退 1d、非法 source 回退 watchlist、source→strategy 默认推导、strategy 等于默认值时省略、event_id=null 不写入、选择新股清除 event_id、buildMarketWorkspaceUrl 含/省略 strategy、`selectInstrumentFromMarketPane` 选股重置 source/strategy/event_id、`changeMarketScope` 切 scope 退出 selection 上下文、选股后 timeframe 保留 | `frontend/src/features/market-workspace/__tests__/marketWorkspaceUrlState.test.ts`（21 用例） |
 | **timeframe 单一真源与请求门控（阶段三最终验收）**：URL 15m→请求15m→图表15m、工具栏切换写回 URL、scope 查询互斥、右栏收起不请求、Capture 和 StockDetail 回归、selection 上下文重置、搜索结果渲染门控 | 浏览器 E2E（CDP，22 项断言全部 PASS） |
+| **StockDetailPage 共享研究核心（阶段四）**：stockResearchTypes 纯函数（ALLOWED_TIMEFRAMES/DEFAULT_TIMEFRAME/DEFAULT_SOURCE/BARS_COUNT_BY_TIMEFRAME/defaultStrategyForSource/normalizeDisplayTimeframe/normalizeResearchSource） | `frontend/src/features/stock-research/__tests__/stockResearchTypes.test.ts`（13 用例） |
+| **/market 和 /stock 共享研究核心（阶段四 E2E）**：market 和 stock 同 symbol/timeframe 的 bars/indicators 参数一致、stock 仅一组 instrument/bars/indicators/quote/events 请求、stock 15m/1h 请求与图表一致、详情页 UI 元素（返回/自选/上下只/全屏/备忘录/飞书/结构状态/图表/状态条/无"日线回退"文案）、capture 隔离（无 topbar/sidebar）、market 阶段三回归 | 浏览器 E2E（CDP，39 项断言全部 PASS） |
 
 ## 2. 趋势选股
 

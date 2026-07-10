@@ -4,6 +4,15 @@
 
 ## 2026-07-11
 
+- CHANGE-20260711-003: StockDetailPage 共享研究核心重构（阶段四）
+  - `StockDetailPage` 降为路由适配器（813→453 行），复用 `useStockResearchData` + `StockResearchWorkspace`
+  - 新建 `stockResearchTypes.ts` 共享类型；依赖方向修正为 market-workspace → stock-research
+  - 新建 `useStockDetailActions.ts`（自选/上下切换/memo）+ `useStockDetailFeishu.ts`（截图轮询/超时/清理）
+  - `StockResearchWorkspace` 新增 toolbar/rightPanel/chartColumnProps 可选 props
+  - `quoteStatus`/`barsStatus` 统一：不显示"日线回退"，partial 含当前周期
+  - 13 项纯函数测试 + 21 项回归测试 + 39 项 CDP E2E 全 PASS
+  - 不改后端/API/DB/Worker/CaptureStockPage
+
 - CHANGE-20260711-002: 统一行情工作区第一版（阶段三）
   - `/market` 渲染 `MarketWorkspacePage`（三栏：左列表+中K线+右结构状态可收起）
   - `useStockResearchData` 集中 bars/indicators/quote/events/memo 请求；`StockResearchWorkspace` 复用组件
