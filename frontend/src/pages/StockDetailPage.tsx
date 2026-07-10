@@ -95,8 +95,7 @@ export default function StockDetailPage() {
   // [chartViewport] - 周期切换：清空目标周期的 viewport 记录，
   //   让 StrategyChart 回退到默认末尾视区（advice.md 第三节问题 3）
   const handleTimeframeChange = useCallback((tf: string) => {
-    // [feishu-capture] - 描述: 截图模式锁定日线，禁用周期切换（advice.md v6 第 2 条）
-    if (isCaptureMode) return
+    // [capture-realtime] - 截图模式不再锁定日线，支持 URL 指定周期（如 15m）实时截图
     setViewportByTimeframe(prev => {
       if (!(tf in prev)) return prev  // 目标周期未保存，无需清空
       const next = { ...prev }
@@ -770,6 +769,7 @@ export default function StockDetailPage() {
               {/* StrategyChart 内部渲染：工具栏 + 策略图示区 + 画布区 */}
               <StrategyChart
                 symbol={inst.symbol}
+                displayName={inst.name}
                 bars={displayBars}
                 events={events}
                 indicators={indicators}

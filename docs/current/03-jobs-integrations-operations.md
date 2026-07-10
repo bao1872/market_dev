@@ -24,7 +24,7 @@ worker-strategy-batch 的 run 级总超时由 STRATEGY_RUN_TOTAL_TIMEOUT_SECONDS
 - 日历刷新：约 02:00 Asia/Shanghai；
 - 盘后行情：交易日约 16:00；
 - DSA 兜底：交易日约 18:30；
-- 盘中监控：09:30–11:30、13:00–15:00 按配置轮询；监控资格判定使用 `app.services.eligible_user_service.filter_monitor_eligible_recipients`，active admin 与 active member + 有效 subscription 进入监控，disabled admin 与无订阅普通用户排除；`monitor_batch_service` 拉取 1m 行情使用 `include_realtime=True` 并剔除最后一根未完成 1m，日线/15m 输入使用 `include_realtime=False`；
+- 盘中监控：09:30–11:30、13:00–15:00 按配置轮询；监控资格判定使用 `app.services.eligible_user_service.filter_monitor_eligible_recipients`，active admin 与 active member + 有效 subscription 进入监控，disabled admin 与无订阅普通用户排除；`monitor_batch_service` 拉取 1m 行情使用 `include_realtime=True` 并剔除最后一根未完成 1m，日线/15m 输入使用 `include_realtime=True`（盘中合成 partial daily / 最新 15m，供 current_price 与截图实时数据源）；
 - Outbox/Delivery：短轮询；`delivery_worker.py` 对 `monitor_event`/`strategy_event`/`monitor_chart` 投递前再次调用 `is_user_eligible_for_monitor` 复核，与 monitor_batch/event_recipient/outbox_relay 口径一致；
 - Worker 心跳：持续更新。
 
@@ -599,6 +599,23 @@ image_delivery
 card
 text_outbox
 ```
+
+### 5.1 飞书盘中截图实时链路（高清 + 不复用旧图/旧指标）
+
+飞书盘中监控截图必须满足三件事：高清、不复用上一轮旧图/旧指标、K线标题显示股票名称。
+
+- **高清截图**：capture worker 浏览器上下文使用 `viewport=1920x1200` + `device_scale_factor=2`（env `CAPTURE_VIEWPORT_WIDTH/HEIGHT` / `CAPTURE_DEVICE_SCALE_FACTOR`，默认 1920/1200/2，严禁 4 倍），提升 PNG 清晰度；截图为单张、不落库、不存 base64。
+- **不复用旧图/旧指标**：
+  - 截图缓存 key 维度扩展为 `event_id + instrument_id + chart_version + timeframe + source_bar_time + capture_run_id + device_scale_factor`，不同时间点/周期天然区分；
+  - `disable_cache=True` 跳过读文件缓存但允许写最新缓存（飞书实时截图默认 True）；
+  - `MonitorSnapshotService.get_snapshot(force_refresh=True)` 跳过内存缓存但写回最新；indicator 链路 `force_refresh=1&capture=1` 跳过 Redis 读缓存但写最新；
+  - `source_bar_time` 优先取最新 `MonitorEvaluation.source_bar_time`（SUCCEEDED），兜底 `now_shanghai()` 分钟级；
+  - Capture Snapshot 端点 `include_realtime=True` 且周期透传，盘中 K线为当前实时数据。
+- **范围与爆炸半径**：不引入 DB schema/migration、不重启 postgres/redis、不批量删除 captures/cache；部署仅重建 capture-worker / backend / frontend；仅单次飞书实测，不批量。
+
+### 5.2 K线实时状态展示（前端 CaptureStockPage）
+
+`CaptureStockPage` 按 URL `timeframe` 初始化（无则 1d），截图模式不锁定日线；请求 snapshot 携带 `force_refresh=1&source_bar_time=...`；状态栏展示 `data_source` / `is_partial` / `last_live_bar_time` / quote status；K线主标题优先显示股票名称 `名称（代码）`，URL 仍用 symbol。
 
 ## 6. 部署与健康检查
 

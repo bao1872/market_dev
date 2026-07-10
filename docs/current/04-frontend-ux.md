@@ -152,6 +152,15 @@ Node Cluster 算法
   - 后端 `format_dsa_time(x)` 必须按 timeframe 序列化（15m/1h 含 `THH:MM:SS`，1d/1w/1mo 为 `YYYY-MM-DD`），否则 15m/1h 下 `normalizeChartTime` 返回 `null`，renderer matched=0，开关打开也画不出线；
   - `computeDsaSegmentMatchStats` 提供独立的 matched ratio 计算（pure function），用于回归测试与 debug 诊断，不替代 source mismatch 校验（source mismatch 校验 top-level `source_bar_times`，segment matched 校验 `visual_segments.points.time`，两者互补）。
 
+### K线主标题与截图页实时状态
+
+- **K线主标题显示股票名称**：`StrategyChart` 主标题优先显示股票名称，格式 `名称（代码）`（如 `宁德时代（300750）`），名称缺失时回退为代码；`displayName` 由页面传入（`StockDetailPage` / `CaptureStockPage` 传 `inst.name || symbol`）。
+- **截图页（CaptureStockPage）实时链路**：
+  - 按 URL `timeframe` 初始化（无则 1d）；截图模式不锁定日线，支持 15m 等周期；
+  - 请求 snapshot 携带 `force_refresh=1` 与 `source_bar_time=...`，确保指标/行情为当前实时数据，不复用旧指标；
+  - 状态栏展示 K线 `data_source` / `is_partial` / `last_live_bar_time` 与 quote status，供人工核对图片为实时数据；
+  - 后端 partial daily bar 为真（`/bars?timeframe=1d&include_realtime=true` 返回 `is_partial=true`），前端 `mergeRealtimeQuoteIntoBars()` 仅作兜底视觉增强，不替代后端 partial bar。
+
 ### 消息与飞书
 
 - 消息显示股票、事件时间、详情入口；

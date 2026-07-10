@@ -2,6 +2,17 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-10
+
+- CHANGE-20260710-001: 飞书盘中高清实时截图（高清 + 不复用旧图/旧指标 + K线标题股票名称）
+  - 三件事：① 高清截图 viewport 1920×1200 + dsf=2（env，默认非 4）；② cache key 扩展 + disable_cache + force_refresh + 实时 source_bar_time，不复用旧图/旧指标；③ K线主标题显示 `名称（代码）`
+  - 修改 `stock_capture_service` / `capture_main` / `capture.py` / `monitor_snapshot_service` / `indicators.py` / `stock_detail_feishu_service` / `notification_service` / `monitor_batch_service` + 前端 `CaptureStockPage` / `StockDetailPage` / `StrategyChart` / `endpoints`
+  - Capture Snapshot 端点 `include_realtime=True` + 周期透传；`monitor_batch` daily/15m `include_realtime=True`
+  - 不引入 DB migration、不重启 postgres/redis、仅单次飞书实测
+  - 更新 `docs/current/02/03/04/05`
+  - 测试：pytest 173 passed、mypy 0 errors、ruff 改动文件 0 errors、前端 build 通过
+  - Follow-up（第二轮，阻断修复，仅修阻断不 merge/部署）：`capture.py` 的 `get_bars`/`_df_to_responses`/`compute_all_indicators` 此前回退 `_CAPTURE_TIMEFRAME` 且 `include_realtime=False`，截图仍是 1d 非实时；修复为透传 URL `timeframe` + `include_realtime=True`，新增 15m 透传阻断测试；前端 `CaptureStockPage` 实时状态改从 `snapshot.bars.last_live_bar_time` 读取，`endpoints.ts` 删除 `CaptureSnapshotResponse` 顶层 `last_live_bar_time` 并补 `BarListResponse` 对应字段
+
 ## 2026-07-09
 
 - CHANGE-20260709-011: tests mypy 债务清零

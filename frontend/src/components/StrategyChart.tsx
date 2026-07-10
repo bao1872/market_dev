@@ -91,6 +91,7 @@ export interface StrategyChartProps {
   indicators?: IndicatorResponse | undefined
   strategyId?: string
   source?: string
+  displayName?: string
   height?: number
   timeframe?: string
   onTimeframeChange?: (tf: string) => void
@@ -1840,6 +1841,7 @@ export function StrategyChart({
   indicators,
   strategyId = 'default',
   source = 'watchlist',
+  displayName,
   height = 660,
   timeframe = '1d',
   onTimeframeChange,
@@ -2293,7 +2295,7 @@ export function StrategyChart({
     <div className="strategy-chart-wrap">
       {/* 工具栏 */}
       <div className="tv-chart-toolbar">
-        <b className="tv-symbol-code">{symbol}</b>
+        <b className="tv-symbol-code">{displayName ? `${displayName}（${symbol}）` : symbol}</b>
         {legendData && (
           <div className="chart-ohlc">
             <span>{formatTime(legendData.d.time)}</span>

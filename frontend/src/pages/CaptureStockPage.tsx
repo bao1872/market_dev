@@ -25,6 +25,7 @@ import { resolveStrategy } from '@/lib/strategy-manifest'
 import { STRATEGY_KEYS } from '@/constants/strategyKeys'
 import { MARKET_LABELS, formatAmount } from '@/utils/market'
 import { mapBarsToBarData } from '@/utils/chart'
+import { formatShanghaiTimeShort } from '@/utils/datetime'
 
 export default function CaptureStockPage() {
   const { symbol } = useParams<{ symbol: string }>()
@@ -48,8 +49,10 @@ export default function CaptureStockPage() {
   // 策略定义（复用 StockDetailPage 的策略解析逻辑）
   const strategyDef = useMemo(() => resolveStrategy(source, strategy), [source, strategy])
 
-  // 截图模式锁定日线（与 StockDetailPage capture 模式行为一致）
-  const [timeframe] = useState<string>('1d')
+  // [capture-realtime] - 截图周期优先使用 URL 传入的 timeframe（默认 1d），支持盘中 15m 等
+  const timeframeParam = searchParams.get('timeframe') || '1d'
+  const [timeframe] = useState<string>(timeframeParam)
+  const sourceBarTime = searchParams.get('source_bar_time') || undefined
   // [chartViewport] - 每个周期独立保存 viewport（截图模式仅日线，保留结构以复用 StrategyChart 受控 viewport）
   const [viewportByTimeframe, setViewportByTimeframe] = useState<Record<string, ChartViewport>>({})
   const handleViewportChange = useCallback((vp: ChartViewport) => {
@@ -64,6 +67,15 @@ export default function CaptureStockPage() {
       if (!instrumentId) throw new Error('缺少 instrument_id 参数')
       const { data } = await captureClient.get<CaptureSnapshotResponse>(
         `/api/v1/capture/stocks/${instrumentId}/snapshot`,
+        {
+          params: {
+            timeframe,
+            ...(sourceBarTime ? { source_bar_time: sourceBarTime } : {}),
+            // 截图链路固定强制实时计算，跳过 Redis 指标缓存，不复用旧指标
+            force_refresh: 1,
+            capture: 1,
+          },
+        },
       )
       return data
     },
@@ -169,10 +181,9 @@ export default function CaptureStockPage() {
       <div className="tv-symbol-bar">
         <div className="tv-symbol-left">
           <div>
-            <div className="tv-symbol-title">
-              <span>{inst.name}</span>
-              <span className="tv-code">{inst.symbol}</span>
-            </div>
+              <div className="tv-symbol-title">
+                <span>{inst.name}（{inst.symbol}）</span>
+              </div>
             <div className="tv-symbol-meta">{metaParts.join(' · ')}</div>
           </div>
         </div>
@@ -221,6 +232,7 @@ export default function CaptureStockPage() {
               {/* StrategyChart 内部渲染：工具栏 + 策略图示区 + 画布区 */}
               <StrategyChart
                 symbol={inst.symbol}
+                displayName={inst.name}
                 bars={bars}
                 indicators={indicatorsResponse}
                 strategyId={strategyDef.id}
@@ -233,6 +245,13 @@ export default function CaptureStockPage() {
               />
               {/* 状态栏：复权/时区（不依赖运行时数据，精简展示） */}
               <div className="tv-chart-status">
+                {barsResponse?.data_source && (
+                  <span>K线来源: {barsResponse.data_source}</span>
+                )}
+                {barsResponse?.is_partial && <span>含未完成 bar</span>}
+                {barsResponse?.last_live_bar_time && (
+                  <span>实时bar: {formatShanghaiTimeShort(barsResponse.last_live_bar_time)}</span>
+                )}
                 <span>复权：前复权</span>
                 <span>时区：Asia/Shanghai</span>
               </div>

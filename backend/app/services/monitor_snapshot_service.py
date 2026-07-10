@@ -6,7 +6,7 @@ MUST 调用本服务，禁止各自解析 compute_all_indicators() 内部结构�
 数据来源：compute_all_indicators() 返回 data["watchlist_monitor"]（BB+VN 合并字段）
 缓存键：instrument_id + timeframe + algorithm_version + last_bar_time
     - algorithm_version: watchlist_monitor 策略最新 released StrategyVersion.version
-    - last_bar_time: bars_daily 最新 trade_date（DB MAX 查询，cheap）
+    - last_bar_time: 盘中优先最新 MonitorEvaluation.source_bar_time（SUCCEEDED），兜底 now_shanghai 分钟级
     - 兜底：任一查询失败时用 as_of 分钟级时间戳，保证缓存键仍可生成
 
 用法（模块自测）：
@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.constants.indicator_contract import DAILY_HISTORY_BARS
 from app.core.time import now_shanghai
 from app.models.instrument import Instrument
+from app.models.monitor_evaluation import MonitorEvaluation
 from app.services.indicator_service import compute_all_indicators
 
 logger = logging.getLogger("services.monitor_snapshot_service")
@@ -162,7 +163,6 @@ class MonitorSnapshotService:
         Returns:
             (algorithm_version, last_bar_time) 元组
         """
-        from app.models.bar import BarDaily
         from app.models.strategy import StrategyDefinition, StrategyVersion
 
         # algorithm_version: 查 watchlist_monitor 最新 released 版本号
@@ -193,23 +193,31 @@ class MonitorSnapshotService:
             )
             algo_version = now_shanghai().strftime("%Y%m%d%H%M")
 
-        # last_bar_time: 查 bars_daily 最新 trade_date
+        # last_bar_time: [capture-realtime] 盘中优先最新 MonitorEvaluation.source_bar_time（SUCCEEDED），
+        # 拿不到用 now_shanghai 分钟级兜底；不再仅依赖 BarDaily.trade_date
         last_bar_time = now_shanghai().strftime("%Y-%m-%dT%H:%M")
         try:
-            bar_stmt = (
-                select(BarDaily.trade_date)
-                .where(BarDaily.instrument_id == inst_uuid)
-                .order_by(BarDaily.trade_date.desc())
+            eval_stmt = (
+                select(MonitorEvaluation.source_bar_time)
+                .where(
+                    MonitorEvaluation.instrument_id == inst_uuid,
+                    MonitorEvaluation.status == "SUCCEEDED",
+                )
+                .order_by(MonitorEvaluation.source_bar_time.desc())
                 .limit(1)
             )
-            bar_result = await db.execute(bar_stmt)
-            bar_row = bar_result.first()
-            if bar_row is not None:
-                last_bar_time = str(bar_row[0])
+            eval_result = await db.execute(eval_stmt)
+            eval_row = eval_result.first()
+            if eval_row is not None and eval_row[0] is not None:
+                last_bar_time = (
+                    eval_row[0].isoformat()
+                    if hasattr(eval_row[0], "isoformat")
+                    else str(eval_row[0])
+                )
         except Exception as exc:
             # 不吞异常：记录上下文，用 as_of 分钟级兜底
             logger.warning(
-                "查询 last_bar_time 失败，用 as_of 分钟级兜底 instrument_id=%s: %s",
+                "查询 MonitorEvaluation source_bar_time 失败，用 as_of 分钟级兜底 instrument_id=%s: %s",
                 inst_uuid, exc,
             )
             last_bar_time = now_shanghai().strftime("%Y-%m-%dT%H:%M")
@@ -310,6 +318,8 @@ class MonitorSnapshotService:
         db: AsyncSession,
         instrument_id: str,
         timeframe: str = "1d",
+        *,
+        force_refresh: bool = False,
     ) -> MonitorSnapshot:
         """获取监控快照。
 
@@ -367,8 +377,10 @@ class MonitorSnapshotService:
         )
         key_ms = (time.time() - key_start) * 1000
 
-        # 3. 缓存检查
-        cached = self._cache.get(cache_key)
+        # 3. 缓存检查（force_refresh 跳过内存缓存读取，但仍写回最新结果）
+        cached = None
+        if not force_refresh:
+            cached = self._cache.get(cache_key)
         if cached is not None:
             snapshot, ts = cached
             if time.time() - ts < _CACHE_TTL_SECONDS:
@@ -382,6 +394,12 @@ class MonitorSnapshotService:
                     db_ms, key_ms, total_ms,
                 )
                 return snapshot
+        if force_refresh:
+            logger.info(
+                "[MonitorSnapshot] force_refresh=true 跳过内存缓存 instrument_id=%s "
+                "symbol=%s timeframe=%s",
+                instrument_id, symbol, timeframe,
+            )
 
         # 4. 调用 compute_all_indicators（复用 SSOT，不重新实现指标计算）
         indicator_start = time.time()
@@ -546,7 +564,7 @@ if __name__ == "__main__":
     sig = inspect.signature(svc.get_snapshot)
     params = list(sig.parameters.keys())
     # bound method 的 signature 不含 self
-    assert params == ["db", "instrument_id", "timeframe"], \
+    assert params == ["db", "instrument_id", "timeframe", "force_refresh"], \
         f"get_snapshot 参数不匹配: {params}"
     assert sig.parameters["timeframe"].default == "1d", \
         "timeframe 默认值应为 1d"

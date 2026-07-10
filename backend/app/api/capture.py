@@ -27,11 +27,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.bars import _df_to_responses
-from app.constants.indicator_contract import CHART_BARS_COUNT
+from app.constants.indicator_contract import CHART_BARS_COUNT, INDICATOR_BARS
 from app.core.deps import get_capture_token_payload, get_db
 from app.models.instrument import Instrument
 from app.repositories.strategy_event_repository import query_events
@@ -51,6 +51,10 @@ _CAPTURE_TIMEFRAME = "1d"
 _CAPTURE_ADJ = "qfq"
 _CAPTURE_EVENTS_LIMIT = 20
 
+# [capture-realtime] - 截图支持多周期，bars 根数按周期对齐（与 StockDetailPage barsCountByTimeframe 一致）
+# 周期 bars 根数直接复用 indicator_contract.INDICATOR_BARS 唯一真源，禁止散落硬编码 250/4000
+_CAPTURE_ALLOWED_TIMEFRAMES = {"1d", "15m", "1h", "1w", "1mo"}
+
 
 @router.get(
     "/capture/stocks/{instrument_id}/snapshot",
@@ -60,6 +64,10 @@ async def get_capture_snapshot(
     instrument_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     capture_payload: dict[str, Any] = Depends(get_capture_token_payload),
+    timeframe: str = Query("1d", description="K线周期：1d|15m|1h|1w|1mo"),
+    source_bar_time: str | None = Query(None, description="实时 bar 时间（防旧图，用于日志/cache key）"),
+    force_refresh: bool = Query(False, description="跳过指标缓存强制实时计算（截图链路默认 True）"),
+    capture: bool = Query(False, description="截图模式标记（等价 force_refresh）"),
 ) -> dict[str, Any]:
     """一次返回截图所需完整数据（行情、指标、事件）。
 
@@ -89,6 +97,21 @@ async def get_capture_snapshot(
             ),
         )
 
+    # [capture-realtime] - 周期校验 + 实时聚合开关（截图始终实时，杜绝复用旧图）
+    if timeframe not in _CAPTURE_ALLOWED_TIMEFRAMES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"不支持的周期: {timeframe}, 允许: {sorted(_CAPTURE_ALLOWED_TIMEFRAMES)}",
+        )
+    bars_limit = INDICATOR_BARS.get(timeframe, CHART_BARS_COUNT)
+    # 截图场景始终使用实时聚合（include_realtime=True 为硬规则），保证 K线为当前盘中数据
+    logger.info(
+        "[Capture] 快照请求 instrument_id=%s timeframe=%s bars_limit=%s source_bar_time=%s "
+        "force_refresh=%s capture=%d",
+        instrument_id, timeframe, bars_limit, source_bar_time, force_refresh,
+        1 if capture else 0,
+    )
+
     snapshot_start = datetime.now(UTC)
 
     # 2. 查询 instrument 基本信息
@@ -105,9 +128,9 @@ async def get_capture_snapshot(
         bars_result = await bars_service.get_bars(
             db,
             instrument_id,
-            timeframe=_CAPTURE_TIMEFRAME,
+            timeframe=timeframe,
             adj=_CAPTURE_ADJ,
-            include_realtime=False,  # 截图场景无需实时聚合
+            include_realtime=True,  # 截图硬规则：始终实时聚合，保证盘中 K线为当前实时数据
         )
     except ValueError as exc:
         raise HTTPException(
@@ -123,20 +146,32 @@ async def get_capture_snapshot(
             detail=f"行情聚合失败: {exc}",
         ) from exc
 
-    # 截取最近 CHART_BARS_COUNT 根（与页面显示一致，引用 indicator_contract 唯一真源）
+    # 截取最近 bars_limit 根（与页面显示一致，引用 indicator_contract 唯一真源 INDICATOR_BARS）
     df: pd.DataFrame = bars_result.bars
     if not df.empty:
-        df = df.tail(CHART_BARS_COUNT)
-    bars_items = _df_to_responses(df, instrument_id, _CAPTURE_TIMEFRAME)
+        df = df.tail(bars_limit)
 
-    # 4. 指标：复用 compute_all_indicators（与 /indicators API 同款）
+    # [capture-realtime] - 实时聚合日志：timeframe/data_source/is_partial/last_live_bar_time
+    logger.info(
+        "[Capture] 实时行情聚合 instrument_id=%s timeframe=%s data_source=%s "
+        "is_partial=%s last_live_bar_time=%s",
+        instrument_id, timeframe, bars_result.data_source, bars_result.is_partial,
+        bars_result.last_live_bar_time.to_pydatetime().isoformat()
+        if bars_result.last_live_bar_time is not None else None,
+    )
+
+    # [capture-realtime] - 周期透传：_df_to_responses 必须按 URL timeframe 格式化
+    # （15m/1h 用 trade_time，1d/1w/1mo 用 trade_date，禁止回退 _CAPTURE_TIMEFRAME）
+    bars_items = _df_to_responses(df, instrument_id, timeframe)
+
+    # 4. 指标：复用 compute_all_indicators（与 /indicators API 同款），周期与 bars 根数按 timeframe 透传
     try:
         indicators = await compute_all_indicators(
             session=db,
             instrument_id=instrument_id,
-            timeframe=_CAPTURE_TIMEFRAME,
+            timeframe=timeframe,
             adj=_CAPTURE_ADJ,
-            bars=CHART_BARS_COUNT,
+            bars=bars_limit,
         )
     except Exception as exc:
         logger.warning(
@@ -174,7 +209,7 @@ async def get_capture_snapshot(
         "bars": {
             "items": [b.model_dump(mode="json") for b in bars_items],
             "total": len(bars_items),
-            "timeframe": _CAPTURE_TIMEFRAME,
+            "timeframe": timeframe,
             "adj": _CAPTURE_ADJ,
             "data_source": bars_result.data_source,
             "as_of": bars_result.as_of.isoformat() if bars_result.as_of else None,

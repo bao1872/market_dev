@@ -102,7 +102,7 @@ async def test_capture_returns_bytes_and_writes_cache(
             "app.services.stock_capture_service._CACHE_DIR",
             tmpdir,
         ):
-            png = await capture_stock_chart(
+            result = await capture_stock_chart(
                 symbol="000032",
                 event_id=event_id,
                 token="fake-token",
@@ -111,7 +111,7 @@ async def test_capture_returns_bytes_and_writes_cache(
                 chart_version="v1",
             )
 
-        assert png == b"fake-png-bytes" * 10
+        assert result.png_bytes == b"fake-png-bytes" * 10
         cache_files = [f for f in os.listdir(tmpdir) if f.endswith(".png")]
         assert len(cache_files) == 1
 

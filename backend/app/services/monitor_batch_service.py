@@ -631,7 +631,7 @@ class MonitorBatchService:
             timeframe="1d",
             adj="qfq",
             limit=_DAILY_LOOKBACK_BARS,
-            include_realtime=False,
+            include_realtime=True,  # [capture-realtime] daily 用于 current_price/position，允许实时 partial daily
         )
 
         bars_15min = pd.DataFrame()
@@ -641,7 +641,7 @@ class MonitorBatchService:
                 timeframe="15m",
                 adj="qfq",
                 limit=_15MIN_LOOKBACK_BARS,
-                include_realtime=False,
+                include_realtime=True,  # [capture-realtime] 15m 使用实时聚合，避免复用旧图
             )
         except Exception as exc:
             logger.warning("15min行情拉取失败 %s: %s", symbol, exc)
@@ -1535,6 +1535,11 @@ class MonitorBatchService:
                     "output_filename": f"monitor-{inst_id}-{first_event.id}",
                     "instrument_id": str(inst_id),
                     "chart_version": "v1",
+                    # [capture-realtime] - 扩展字段：周期透传 + 实时来源 + 运行ID + 缓存旁路
+                    "timeframe": "15m",
+                    "capture_run_id": f"monitor-{inst_id}-{first_event.id}",
+                    "source_bar_time": first_event.event_time.isoformat(),
+                    "disable_cache": True,
                 }
                 try:
                     async with httpx.AsyncClient(timeout=60.0) as client:

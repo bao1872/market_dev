@@ -19,13 +19,19 @@
 - 返回 PNG bytes
 - 失败时抛出 StockCaptureError，不吞没异常
 
-截图缓存（任务 6.1）：
-- 缓存 key：event_id + instrument_id + chart_version
+截图缓存（任务 6.1 + 盘中实时升级）：
+- 缓存 key：event_id + instrument_id + chart_version + tf{timeframe} + sbt{source_bar_time}
+  + run{capture_run_id} + dsf{device_scale_factor}
 - 缓存 TTL：600 秒（_CACHE_TTL_SECONDS）
 - 缓存存储：本地文件系统（CAPTURE_CACHE_DIR，默认 /app/static/captures/cache）
 - 缓存命中且未过期：直接读取文件返回 bytes，不启动浏览器
 - 缓存未命中或已过期：重新截图并写入缓存文件
+- disable_cache=True：跳过读缓存，但仍写新缓存（飞书实时截图默认 True，杜绝复用旧图）
 - 仅当提供 instrument_id 时启用缓存（向后兼容）
+
+高清渲染（飞书清晰度升级）：
+- viewport 默认 1920x1200（CAPTURE_VIEWPORT_WIDTH/HEIGHT），device_scale_factor 默认 2
+- device_scale_factor 严禁 4（避免超大图/OOM）；截图 PNG 不落库、不存 base64
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from dataclasses import dataclass
 from uuid import UUID
 
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -54,18 +61,78 @@ _CACHE_DIR = os.getenv(
 # 缓存 TTL（秒）：10 分钟
 _CACHE_TTL_SECONDS = 600
 
+# [capture-hd] - 高清截图渲染参数（提升飞书图片清晰度，不落库/base64）
+# 默认 1920x1200 viewport + device_scale_factor=2；device_scale_factor 严禁 4（避免超大图/OOM）
+_CAPTURE_VIEWPORT_WIDTH = int(os.getenv("CAPTURE_VIEWPORT_WIDTH", "1920"))
+_CAPTURE_VIEWPORT_HEIGHT = int(os.getenv("CAPTURE_VIEWPORT_HEIGHT", "1200"))
+_CAPTURE_DEVICE_SCALE_FACTOR = int(os.getenv("CAPTURE_DEVICE_SCALE_FACTOR", "2"))
+
+
+@dataclass
+class CaptureResult:
+    """截图结果（含渲染元数据，供 CaptureResponse 透传）。
+
+    Attributes:
+        png_bytes: PNG 图片字节
+        width: 截图像素宽（= viewport_width * device_scale_factor）
+        height: 截图像素高（= viewport_height * device_scale_factor）
+        device_scale_factor: 设备像素比
+        cache_hit: 是否命中文件缓存（仅读缓存命中为 True）
+        source_bar_time: 透传的实时 bar 时间（可选，用于日志）
+    """
+
+    png_bytes: bytes
+    width: int
+    height: int
+    device_scale_factor: int
+    cache_hit: bool
+    source_bar_time: str | None = None
+
+
+def get_capture_render_config() -> dict[str, int]:
+    """返回当前高清渲染配置（viewport 宽高 + device_scale_factor）。
+
+    供 capture_main 在 CaptureResponse 中回传实际渲染尺寸。
+    """
+    return {
+        "viewport_width": _CAPTURE_VIEWPORT_WIDTH,
+        "viewport_height": _CAPTURE_VIEWPORT_HEIGHT,
+        "device_scale_factor": _CAPTURE_DEVICE_SCALE_FACTOR,
+    }
+
 
 class StockCaptureError(RuntimeError):
     """截图失败异常。"""
 
 
-def _build_cache_key(event_id: UUID | str, instrument_id: str, chart_version: str) -> str:
+def _build_cache_key(
+    event_id: UUID | str,
+    instrument_id: str,
+    chart_version: str,
+    *,
+    timeframe: str | None = None,
+    source_bar_time: str | None = None,
+    capture_run_id: str | None = None,
+    device_scale_factor: int | None = None,
+) -> str:
     """构建截图缓存 key。
 
-    key = {event_id}_{instrument_id}_{chart_version}
-    使用下划线分隔，避免与文件系统路径冲突。
+    [capture-realtime] - 扩展缓存维度，使不同时间点的盘中截图天然区分，
+    避免复用旧图/旧指标：
+        event_id + instrument_id + chart_version
+        + tf={timeframe} + sbt={source_bar_time}
+        + run={capture_run_id} + dsf={device_scale_factor}
+    source_bar_time/capture_run_id 变化即视为新图，禁止跨时间点复用。
     """
-    return f"{event_id}_{instrument_id}_{chart_version}"
+    parts = [str(event_id), str(instrument_id), str(chart_version)]
+    if timeframe is not None:
+        parts.append(f"tf={timeframe}")
+    if source_bar_time is not None:
+        parts.append(f"sbt={source_bar_time}")
+    if capture_run_id is not None:
+        parts.append(f"run={capture_run_id}")
+    parts.append(f"dsf={device_scale_factor}")
+    return "_".join(parts)
 
 
 def _read_cache(cache_path: str) -> bytes | None:
@@ -112,8 +179,16 @@ async def capture_stock_chart(
     screenshot_timeout_ms: int = _DEFAULT_SCREENSHOT_TIMEOUT,
     instrument_id: str | None = None,
     chart_version: str = "v1",
-) -> bytes:
-    """截取个股详情页指定区域，返回 PNG bytes。
+    *,
+    timeframe: str | None = None,
+    source_bar_time: str | None = None,
+    capture_run_id: str | None = None,
+    disable_cache: bool = False,
+    viewport_width: int | None = None,
+    viewport_height: int | None = None,
+    device_scale_factor: int | None = None,
+) -> CaptureResult:
+    """截取个股详情页指定区域，返回 PNG bytes 与渲染元数据。
 
     Args:
         symbol: 股票代码
@@ -122,42 +197,96 @@ async def capture_stock_chart(
         frontend_base_url: 前端 base URL（如 http://localhost:5173）
         render_timeout_ms: 等待 data-render-ready="true" 的超时（毫秒）
         screenshot_timeout_ms: 截图操作超时（毫秒）
-        instrument_id: 标的 ID（可选）。提供时启用截图缓存（任务 6.1）
+        instrument_id: 标的 ID（可选）。提供时启用截图缓存
         chart_version: 图表版本号（默认 v1）。版本变更时强制刷新缓存
+        timeframe: 截图 K线周期（透传到 Capture 页面，默认由页面决定）
+        source_bar_time: 实时 bar 时间（扩展缓存 key，防旧图）
+        capture_run_id: 本次截图运行 ID（扩展缓存 key，防旧图）
+        disable_cache: True 时跳过读缓存但允许写新缓存（飞书实时截图默认 True）
+        viewport_width/height/device_scale_factor: 高清渲染参数（默认 env 1920x1200 dsf=2）
 
     Returns:
-        PNG 图片 bytes
+        CaptureResult（png_bytes + 渲染元数据）
 
     Raises:
         StockCaptureError: 截图失败（页面不可达、渲染超时、元素不存在等）
     """
-    # [screenshot-cache] - 缓存命中检查（任务 6.1）
+    # [capture-hd] - 解析渲染参数（请求覆盖优先，否则 env 默认）
+    vw = viewport_width or _CAPTURE_VIEWPORT_WIDTH
+    vh = viewport_height or _CAPTURE_VIEWPORT_HEIGHT
+    dsf = device_scale_factor or _CAPTURE_DEVICE_SCALE_FACTOR
+
+    # [screenshot-cache] - 缓存命中检查（扩展 key 维度）
     # 仅当提供 instrument_id 时启用缓存，向后兼容无 instrument_id 的调用
     cache_path: str | None = None
+    cache_hit = False
     if instrument_id:
-        cache_key = _build_cache_key(event_id, instrument_id, chart_version)
+        cache_key = _build_cache_key(
+            event_id, instrument_id, chart_version,
+            timeframe=timeframe,
+            source_bar_time=source_bar_time,
+            capture_run_id=capture_run_id,
+            device_scale_factor=dsf,
+        )
         cache_path = os.path.join(_CACHE_DIR, f"{cache_key}.png")
-        cached = _read_cache(cache_path)
-        if cached is not None:
-            return cached
+        if not disable_cache:
+            cached = _read_cache(cache_path)
+            if cached is not None:
+                cache_hit = True
+                logger.info(
+                    "截图命中缓存: symbol=%s event_id=%s cache_hit=true "
+                    "size=%d viewport=%dx%d dsf=%d",
+                    symbol, event_id, len(cached), vw, vh, dsf,
+                )
+                return CaptureResult(
+                    png_bytes=cached,
+                    width=vw * dsf,
+                    height=vh * dsf,
+                    device_scale_factor=dsf,
+                    cache_hit=cache_hit,
+                    source_bar_time=source_bar_time,
+                )
+        else:
+            logger.info(
+                "disable_cache=true 跳过读缓存: symbol=%s event_id=%s "
+                "viewport=%dx%d dsf=%d",
+                symbol, event_id, vw, vh, dsf,
+            )
 
     # [capture-route] - 描述: 使用专用 /capture/stock/{symbol} 路由（不经过 ProtectedLayout/AppShell）
-    # 整个路由即为 capture 专用，无需 capture=feishu 参数；token 由页面写入 CAPTURE_TOKEN_KEY
-    # instrument_id 必须传入，前端从 URL 读取后调用 Snapshot API
+    # 整个路由即为 capture 专用；token 由页面写入 CAPTURE_TOKEN_KEY
+    # instrument_id 必须传入，前端从 URL 读取后调用 Snapshot API；timeframe 透传周期
     url = (
         f"{frontend_base_url.rstrip('/')}/capture/stock/{symbol}?"
         f"source=watchlist&strategy=watchlist_monitor&event_id={event_id}&"
         f"token={token}&instrument_id={instrument_id}"
     )
+    if timeframe is not None:
+        url += f"&timeframe={timeframe}"
+    if source_bar_time is not None:
+        url += f"&source_bar_time={source_bar_time}"
+    if capture_run_id is not None:
+        url += f"&capture_run_id={capture_run_id}"
+    if disable_cache:
+        url += "&disable_cache=true"
+    # [capture-realtime] - 截图页面始终强制实时指标/行情（等价 force_refresh）
+    url += "&force_refresh=1&capture=1"
 
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch()
-            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            # [capture-hd] - 高清视口 + device_scale_factor（提升清晰度，不落库）
+            context = await browser.new_context(
+                viewport={"width": vw, "height": vh},
+                device_scale_factor=dsf,
+            )
             page = await context.new_page()
 
             try:
-                logger.info("截图服务访问页面: symbol=%s event_id=%s", symbol, event_id)
+                logger.info(
+                    "截图服务访问页面: symbol=%s event_id=%s viewport=%dx%d dsf=%d",
+                    symbol, event_id, vw, vh, dsf,
+                )
                 # [capture-worker] - 描述: page.goto 使用 wait_until="load"
                 # 历史根因：wait_until="networkidle" 在前端存在长连接/持续轮询时永远不会触发，
                 # 导致 30s 超时返回 502。后续通过 wait_for_selector 等待 data-render-ready
@@ -194,15 +323,23 @@ async def capture_stock_chart(
                     )
 
                 logger.info(
-                    "截图成功: symbol=%s event_id=%s size=%d bytes",
-                    symbol, event_id, len(png_bytes),
+                    "截图成功: symbol=%s event_id=%s cache_hit=false "
+                    "size=%d viewport=%dx%d dsf=%d",
+                    symbol, event_id, len(png_bytes), vw, vh, dsf,
                 )
 
-                # [screenshot-cache] - 截图成功后写入缓存（任务 6.1）
+                # [screenshot-cache] - 截图成功后写入缓存（disable_cache 仍允许写新缓存）
                 if cache_path is not None:
                     _write_cache(cache_path, png_bytes)
 
-                return png_bytes
+                return CaptureResult(
+                    png_bytes=png_bytes,
+                    width=vw * dsf,
+                    height=vh * dsf,
+                    device_scale_factor=dsf,
+                    cache_hit=False,
+                    source_bar_time=source_bar_time,
+                )
             finally:
                 await context.close()
                 await browser.close()
@@ -222,10 +359,21 @@ if __name__ == "__main__":
     print(f"capture_stock_chart={capture_stock_chart}")
     assert inspect.iscoroutinefunction(capture_stock_chart)
 
-    # 测试 _build_cache_key
-    key = _build_cache_key("evt-123", "inst-456", "v1")
-    assert key == "evt-123_inst-456_v1", f"cache key 异常: {key}"
+    # 测试 _build_cache_key（扩展 key 维度）
+    key = _build_cache_key("evt-123", "inst-456", "v1", device_scale_factor=2)
+    assert key == "evt-123_inst-456_v1_dsf=2", f"cache key 异常: {key}"
     print(f"cache_key={key}")
+
+    # 扩展维度：timeframe/source_bar_time/capture_run_id 变化应产生不同 key
+    key_full = _build_cache_key(
+        "evt-123", "inst-456", "v1",
+        timeframe="15m", source_bar_time="2026-07-10T14:30:00",
+        capture_run_id="run-1", device_scale_factor=2,
+    )
+    assert "tf=15m" in key_full and "sbt=2026-07-10T14:30:00" in key_full \
+        and "run=run-1" in key_full, f"扩展 key 维度缺失: {key_full}"
+    assert key_full != key, "不同维度应产生不同 key"
+    print(f"cache_key_ext={key_full}")
 
     # 测试 _write_cache / _read_cache（TTL 内命中）
     with tempfile.TemporaryDirectory() as tmpdir:

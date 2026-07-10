@@ -471,6 +471,8 @@ export interface CaptureSnapshotResponse {
   indicators: IndicatorResponse
   events: StrategyEventListResponse
   snapshot_time: string
+  // 注意：last_live_bar_time / is_partial / data_source 只在 bars (BarListResponse) 内，
+  // 前端实时状态必须从 snapshot.bars.xxx 读取，禁止从 snapshot 顶层读取
   capture: {
     user_id: string
     event_id: string
@@ -604,6 +606,9 @@ export interface BarListResponse {
   data_source: string
   as_of: string | null
   is_partial: boolean
+  // [bars] - 实时 bar 时间（对齐后端 BarListResponse schema）
+  last_persisted_bar_time?: string | null
+  last_live_bar_time?: string | null
   freshness_seconds: number
   degraded: boolean
   degraded_reason: string | null
@@ -1567,6 +1572,7 @@ export interface IndicatorQueryParams {
   timeframe?: string  // 1d | 15m | 1h | 1w | 1mo
   adj?: string        // qfq | none
   bars?: number       // 返回最近 N 根 bar 的指标
+  force_refresh?: number  // 1 时跳过 Redis 指标缓存强制实时计算（截图链路使用）
 }
 
 /** 指标 API 响应 */
