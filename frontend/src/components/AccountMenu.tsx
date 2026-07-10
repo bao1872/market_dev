@@ -7,7 +7,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
 import { useUnreadCount } from '@/hooks/useApi'
 import { useToast } from '@/store/toast'
-import { APP_ROUTES, type AccountMenuItem } from '@/navigation/appNavigation'
+import { getAccountMenuItemsForVariant, type AccountMenuItem, type AccountMenuVariant } from '@/navigation/appNavigation'
 import styles from './AccountMenu.module.scss'
 
 // displayName 优先 user.name，其次 user.email，最后通用"用户"
@@ -30,7 +30,7 @@ function getInitials(name?: string, email?: string): string {
 
 interface AccountMenuProps {
   /** 'user' = UserAppShell 上下文（管理员额外显示管理后台入口）；'admin' = AdminAppShell 上下文（显示返回行情） */
-  variant?: 'user' | 'admin'
+  variant?: AccountMenuVariant
 }
 
 export default function AccountMenu({ variant = 'user' }: AccountMenuProps) {
@@ -49,18 +49,8 @@ export default function AccountMenu({ variant = 'user' }: AccountMenuProps) {
   const displayName = getDisplayName(user?.name, user?.email)
   const initials = getInitials(user?.name, user?.email)
 
-  // 构建菜单项：消息 + 设置 始终显示；第三项根据 variant 决定
-  const items: AccountMenuItem[] = [
-    { path: APP_ROUTES.messages, label: '消息中心', adminOnly: false },
-    { path: APP_ROUTES.settings, label: '通知与设置', adminOnly: false },
-  ]
-  if (variant === 'user' && isAdmin) {
-    // UserAppShell 中管理员显示"管理后台"入口
-    items.push({ path: APP_ROUTES.admin, label: '管理后台', adminOnly: true })
-  } else if (variant === 'admin') {
-    // AdminAppShell 中显示"返回行情"，不重复"管理后台"
-    items.push({ path: APP_ROUTES.market, label: '返回行情', adminOnly: false })
-  }
+  // 构建菜单项：复用 appNavigation 单一真源（消息 + 设置 + variant 决定的第三项）
+  const items: AccountMenuItem[] = getAccountMenuItemsForVariant(isAdmin, variant)
 
   // 点击外部 / Escape 关闭
   useEffect(() => {

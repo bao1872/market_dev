@@ -183,11 +183,15 @@ export function useRefreshToken() {
 // ============================================================
 
 /** 查询股票列表 */
-export function useInstruments(params?: InstrumentQueryParams) {
+export function useInstruments(
+  params?: InstrumentQueryParams,
+  options?: { enabled?: boolean },
+) {
   return useQuery({
     queryKey: ['instruments', params],
     queryFn: () => api.getInstruments(params),
     staleTime: STALE_PLANS,
+    enabled: options?.enabled ?? true,
   })
 }
 
@@ -560,12 +564,13 @@ export function useWatchlist() {
 }
 
 /** 查询自选股+监控状态聚合数据（交易时段 30s 自动刷新） */
-export function useWatchlistMonitorStatus() {
+export function useWatchlistMonitorStatus(options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ['watchlist', 'monitor-status'],
     queryFn: api.getWatchlistMonitorStatus,
     staleTime: STALE_REALTIME,
     refetchInterval: () => isInTradingHours() ? 30000 : false,
+    enabled: options?.enabled ?? true,
   })
 }
 

@@ -21,8 +21,10 @@ export interface MarketInstrumentPaneProps {
 }
 
 export function MarketInstrumentPane({ scope, selectedSymbol, onSelectSymbol }: MarketInstrumentPaneProps) {
-  // watchlist scope：聚合监控状态
-  const monitorStatusQuery = useWatchlistMonitorStatus()
+  // watchlist scope：聚合监控状态（仅 watchlist scope 启用，market scope 不请求）
+  const monitorStatusQuery = useWatchlistMonitorStatus({
+    enabled: scope === 'watchlist',
+  })
   const watchlistRows: WatchlistMonitorRow[] = useMemo(
     () => (monitorStatusQuery.data?.items ?? []).map((item: WatchlistMonitorStatusItem) =>
       adaptWatchlistMonitorStatusItem(item),
@@ -31,6 +33,7 @@ export function MarketInstrumentPane({ scope, selectedSymbol, onSelectSymbol }: 
   )
 
   // market scope：搜索（至少 2 字符，限制 50 条，不为每行发实时行情请求）
+  // 仅 market scope 且搜索词 trim 后 ≥2 字符才启用 instruments 查询
   const [keyword, setKeyword] = useState('')
   const [debouncedKeyword, setDebouncedKeyword] = useState('')
   useEffect(() => {
@@ -39,10 +42,13 @@ export function MarketInstrumentPane({ scope, selectedSymbol, onSelectSymbol }: 
   }, [keyword])
 
   const canSearch = debouncedKeyword.trim().length >= 2
-  const instrumentsQuery = useInstruments({
-    keyword: canSearch ? debouncedKeyword.trim() : undefined,
-    page_size: 50,
-  })
+  const instrumentsQuery = useInstruments(
+    {
+      keyword: canSearch ? debouncedKeyword.trim() : undefined,
+      page_size: 50,
+    },
+    { enabled: scope === 'market' && canSearch },
+  )
   const searchResults: Instrument[] = instrumentsQuery.data?.items ?? []
 
   const handleSelect = useCallback(

@@ -18,6 +18,7 @@ import {
   ADMIN_NAV_ITEMS,
   ACCOUNT_MENU_ITEMS,
   getAccountMenuItems,
+  getAccountMenuItemsForVariant,
   LEGACY_REDIRECTS,
   legacyRedirectEntries,
 } from '../appNavigation.ts'
@@ -76,4 +77,35 @@ test('Capture 路由位于两套壳层之外（不在用户/管理员导航中�
 
 test('默认登录/兜底入口为 /market', () => {
   assert.equal(DEFAULT_ENTRY, '/market')
+})
+
+test('getAccountMenuItemsForVariant: variant=user + isAdmin=false → 只有消息+设置', () => {
+  const items = getAccountMenuItemsForVariant(false, 'user')
+  const paths = items.map((i) => i.path)
+  assert.deepStrictEqual(paths, ['/messages', '/settings'])
+  assert.ok(!paths.includes('/admin'))
+  assert.ok(!paths.includes('/market'))
+})
+
+test('getAccountMenuItemsForVariant: variant=user + isAdmin=true → 消息+设置+管理后台', () => {
+  const items = getAccountMenuItemsForVariant(true, 'user')
+  const paths = items.map((i) => i.path)
+  assert.deepStrictEqual(paths, ['/messages', '/settings', '/admin'])
+})
+
+test('getAccountMenuItemsForVariant: variant=admin → 消息+设置+返回行情（无管理后台）', () => {
+  const items = getAccountMenuItemsForVariant(false, 'admin')
+  const paths = items.map((i) => i.path)
+  assert.deepStrictEqual(paths, ['/messages', '/settings', '/market'])
+  assert.ok(!paths.includes('/admin'))
+  // 最后一项标签应为"返回行情"
+  assert.equal(items[items.length - 1].label, '返回行情')
+})
+
+test('getAccountMenuItemsForVariant: variant=admin + isAdmin=true 仍不显示管理后台', () => {
+  const items = getAccountMenuItemsForVariant(true, 'admin')
+  const paths = items.map((i) => i.path)
+  assert.ok(!paths.includes('/admin'))
+  assert.ok(paths.includes('/market'))
+  assert.equal(items[items.length - 1].label, '返回行情')
 })

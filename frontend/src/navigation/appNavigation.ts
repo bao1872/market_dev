@@ -73,6 +73,29 @@ export function getAccountMenuItems(isAdmin: boolean): AccountMenuItem[] {
   return ACCOUNT_MENU_ITEMS.filter((item) => !item.adminOnly || isAdmin)
 }
 
+// 账户菜单 variant：决定第三项是"管理后台"还是"返回行情"
+export type AccountMenuVariant = 'user' | 'admin'
+
+// 根据 isAdmin + variant 构建账户菜单项（AccountMenu 唯一真源）
+// - 基础项：消息 + 设置（对所有用户可见）
+// - variant='user' + isAdmin：追加"管理后台"
+// - variant='admin'：追加"返回行情"（不重复"管理后台"）
+export function getAccountMenuItemsForVariant(
+  isAdmin: boolean,
+  variant: AccountMenuVariant,
+): AccountMenuItem[] {
+  const baseItems = getAccountMenuItems(isAdmin)
+  if (variant === 'admin') {
+    // AdminAppShell 上下文：移除"管理后台"项，追加"返回行情"
+    return [
+      ...baseItems.filter((item) => item.path !== APP_ROUTES.admin),
+      { path: APP_ROUTES.market, label: '返回行情', adminOnly: false },
+    ]
+  }
+  // UserAppShell 上下文：直接返回基础项（已含 isAdmin 时的"管理后台"）
+  return baseItems
+}
+
 // 旧路由兼容重定向映射
 export const LEGACY_REDIRECTS: Record<string, string> = {
   '/overview': APP_ROUTES.market,

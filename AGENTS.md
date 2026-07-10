@@ -592,8 +592,11 @@ Capture Token 只能访问 Capture API。\
 5. `ProtectedLayout` 只负责认证与 access profile，不再固定渲染同一壳层。
 6. `/capture/stock/:symbol` 位于两套壳层之外，只使用 `captureClient`。
 7. 导航/路由常量集中于 `frontend/src/navigation/appNavigation.ts`，禁止路径散落。
-8. 三栏统一行情工作区（阶段三）：`/market` 渲染 `MarketWorkspacePage`（左列表 `MarketInstrumentPane` + 中K线 `StockResearchWorkspace` + 右结构状态 `StockStructuralStatePanel` 可收起）；`useStockResearchData` 集中 bars/indicators/quote/events/memo 请求，`MarketWorkspacePage` 与 `StockDetailPage` 复用同一研究组件；图表 `timeframe` 仅展示，不改变 1d+15m 监控配置或 1m 事件触发口径；`event_id` 保留在 URL 但本阶段不实现自然语言事件解释。
-9. `StockDetailPage` 的 `event_id` 消费放下一阶段统一。
+8. 三栏统一行情工作区（阶段三）：`/market` 渲染 `MarketWorkspacePage`（左列表 `MarketInstrumentPane` + 中K线 `StockResearchWorkspace` + 右结构状态 `StockStructuralStatePanel` 可收起）；`useStockResearchData` 只保留 bars/indicators/quote/events 核心查询，自选操作/上下切换/memo 继续留在 `StockDetailPage`；`MarketWorkspacePage` 使用 `StockResearchWorkspace`，`StockDetailPage` 仍保留独立实现（下一独立 PR 迁移复用）。
+9. `timeframe` 单一真源：URL → `useStockResearchData`（bars/indicators 请求参数）→ `StockResearchWorkspace`（图表渲染）三者始终使用同一 `DisplayTimeframe`；工具栏切换必须通过 `onTimeframeChange` 回调写回 URL，禁止子组件 `useState` 维护独立 timeframe；图表显示周期不得改变 1d+15m 监控配置或 1m 事件触发口径。
+10. 请求门控：`useWatchlistMonitorStatus` 和 `useInstruments` 必须通过 `enabled` 参数按 scope 互斥启用（watchlist scope 只启用 monitor-status，market scope 且搜索词 trim 后 ≥2 字符才启用 instruments）；`useStockResearchData` 不得请求 `MarketWorkspace` 未使用的 watchlist/batchInstruments/stockMemo。
+11. URL 状态保留：`/market` URL 的 scope/symbol/timeframe/source/strategy/event_id 进入 URL（可分享、刷新恢复）；切换周期、切换 scope、选择新股票时必须保留其他字段；选择新股票时清除旧 `event_id`；`event_id` 本轮仅解析、保留并传递，尚未被工作区消费（不实现自然语言事件解释）。
+12. `StockDetailPage` 的 `event_id` 消费放下一阶段统一。
 
 ***
 

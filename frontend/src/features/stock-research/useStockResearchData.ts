@@ -1,7 +1,7 @@
 // [useStockResearchData] - 描述: 个股研究数据组装 hook（从 StockDetailPage 抽取）
-// 集中 bars/indicators/quote/events/monitor states/memo 的数据请求与组装，
-// 供 StockResearchWorkspace 和 MarketWorkspacePage 复用，禁止复制请求链路。
+// 集中 bars/indicators/quote/events 的数据请求与组装，供 StockResearchWorkspace 复用。
 // 只有当前选中股票（instrumentId 非空）才发起请求；instrumentId 为空时所有查询 disabled。
+// 本 hook 只保留图表核心查询；自选操作、上下切换、memo 继续留在 StockDetailPage（下一独立 PR 迁移）。
 import { useMemo } from 'react'
 import {
   useInstrumentBySymbol,
@@ -9,16 +9,14 @@ import {
   useIndicators,
   useInstrumentEvents,
   useRealtimeQuote,
-  useWatchlist,
-  useBatchInstruments,
-  useStockMemo,
 } from '@/hooks/useApi'
 import { mapBarsToBarData, mergeRealtimeQuoteIntoBars } from '@/utils/chart'
 import type { ChartEvent } from '@/components/StrategyChart'
 import type { IndicatorResponse } from '@/api/endpoints'
+import type { DisplayTimeframe } from '@/features/market-workspace/marketWorkspaceUrlState'
 
 // 按 timeframe 映射请求根数（与 Node Cluster / indicator_contract 对齐）
-const BARS_COUNT_BY_TIMEFRAME: Record<string, number> = {
+const BARS_COUNT_BY_TIMEFRAME: Record<DisplayTimeframe, number> = {
   '1d': 250,
   '15m': 4000,
   '1h': 1200,
@@ -28,7 +26,7 @@ const BARS_COUNT_BY_TIMEFRAME: Record<string, number> = {
 
 export interface StockResearchDataParams {
   symbol: string | null
-  timeframe: string
+  timeframe: DisplayTimeframe
 }
 
 export interface StockResearchData {
@@ -38,15 +36,11 @@ export interface StockResearchData {
   indicatorsQuery: ReturnType<typeof useIndicators>
   quoteQuery: ReturnType<typeof useRealtimeQuote>
   eventsQuery: ReturnType<typeof useInstrumentEvents>
-  watchlistQuery: ReturnType<typeof useWatchlist>
-  stockMemoQuery: ReturnType<typeof useStockMemo>
   // 组装后的数据
   baseBars: ReturnType<typeof mapBarsToBarData>
   displayBars: ReturnType<typeof mapBarsToBarData>
   indicators: IndicatorResponse | undefined
   events: ChartEvent[]
-  // 监控状态（批量查询自选 instrument 信息）
-  batchInstrumentsQuery: ReturnType<typeof useBatchInstruments>
   // 行情状态
   isBarsLoading: boolean
   backendIsPartial: boolean
@@ -59,7 +53,7 @@ export function useStockResearchData({ symbol, timeframe }: StockResearchDataPar
 
   const barsCount = BARS_COUNT_BY_TIMEFRAME[timeframe] ?? 250
 
-  // 2. 行情/指标/事件/quote/memo 查询（instrumentId 为空时由 hook 内部 disabled）
+  // 2. 行情/指标/事件/quote 查询（instrumentId 为空时由 hook 内部 disabled）
   const barsQuery = useBars(instrumentId, {
     timeframe,
     adj: 'qfq',
@@ -73,18 +67,7 @@ export function useStockResearchData({ symbol, timeframe }: StockResearchDataPar
   const quoteQuery = useRealtimeQuote(instrumentId)
   const eventsQuery = useInstrumentEvents(instrumentId, { limit: 100 })
 
-  // 3. 自选列表（用于判断当前股票是否在自选中）
-  const watchlistQuery = useWatchlist()
-  const watchlistInstrumentIds = useMemo(
-    () => watchlistQuery.data?.items.map((item) => item.instrument_id) ?? [],
-    [watchlistQuery.data],
-  )
-  const batchInstrumentsQuery = useBatchInstruments(watchlistInstrumentIds)
-
-  // 4. 备忘录
-  const stockMemoQuery = useStockMemo(instrumentId)
-
-  // 5. 数据组装：bars → BarData + quote 合并
+  // 3. 数据组装：bars → BarData + quote 合并
   const baseBars = useMemo(() => mapBarsToBarData(barsQuery.data?.items), [barsQuery.data])
   const backendIsPartial = barsQuery.data?.is_partial === true
   const displayBars = useMemo(
@@ -92,7 +75,7 @@ export function useStockResearchData({ symbol, timeframe }: StockResearchDataPar
     [baseBars, quoteQuery.data, timeframe, backendIsPartial],
   )
 
-  // 6. events → ChartEvent
+  // 4. events → ChartEvent
   const events: ChartEvent[] = useMemo(() => {
     if (!eventsQuery.data?.items) return []
     return eventsQuery.data.items.map((e) => ({
@@ -110,13 +93,10 @@ export function useStockResearchData({ symbol, timeframe }: StockResearchDataPar
     indicatorsQuery,
     quoteQuery,
     eventsQuery,
-    watchlistQuery,
-    stockMemoQuery,
     baseBars,
     displayBars,
     indicators: indicatorsQuery.data,
     events,
-    batchInstrumentsQuery,
     isBarsLoading: barsQuery.isLoading,
     backendIsPartial,
   }

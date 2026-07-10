@@ -50,18 +50,24 @@ Node Cluster 算法
 
 ### 2.3 尚未完成（下一阶段）
 
-- `StockDetailPage` 的 `useStockResearchData` 抽取已完成（阶段三），但 `StockDetailPage` 自身仍直接调用 hooks，未切换到复用 `StockResearchWorkspace`——下一阶段统一。
-- `event_id` URL 参数已保留并传入工作区状态，但自然语言事件解释未实现。
+- `StockDetailPage` 仍保留独立实现（直接调用 useInstrumentBySymbol/useBars/useIndicators 等 hooks 自行组装数据），未切换到复用 `StockResearchWorkspace`/`useStockResearchData`——下一独立 PR 统一迁移。
+- `event_id` URL 参数已解析、保留并传递到 `MarketWorkspacePage`，但工作区尚未消费（不实现自然语言事件解释）。
 - 复盘模式本轮不开发。
 
 ### 2.4 统一行情工作区（阶段三确立）
 
 - `/market` 渲染 `MarketWorkspacePage`（`frontend/src/features/market-workspace/MarketWorkspacePage.tsx`），三栏布局：
-  - 左栏 `MarketInstrumentPane`：`scope=watchlist` 使用 `useWatchlistMonitorStatus`；`scope=market` 使用 `useInstruments` 搜索（≥2 字符，限制 50 条，不发 N+1 请求）。
-  - 中栏 `StockResearchWorkspace`（`frontend/src/features/stock-research/StockResearchWorkspace.tsx`）：唯一 K 线研究区，复用 `useStockResearchData` hook。
+  - 左栏 `MarketInstrumentPane`：`scope=watchlist` 使用 `useWatchlistMonitorStatus`（enabled=scope==='watchlist'）；`scope=market` 使用 `useInstruments` 搜索（enabled=scope==='market' && 搜索词 trim 后 ≥2 字符，限制 50 条，不发 N+1 请求）。两个查询按 scope 互斥启用，未激活的 scope 不发请求。
+  - 中栏 `StockResearchWorkspace`（`frontend/src/features/stock-research/StockResearchWorkspace.tsx`）：K 线研究区，由 `MarketWorkspacePage` 使用；`StockDetailPage` 仍保留独立实现（下一独立 PR 迁移）。
   - 右栏 `StockStructuralStatePanel`：可收起；收起时不挂载、不请求 structural/temporal 数据，中栏自动扩展。
-- URL 状态：`/market?scope=watchlist|market&symbol=xxx&timeframe=1d`；scope/symbol/timeframe 进 URL，右栏折叠和 viewport 留本地。切换股票不整页刷新。
-- 图表 `timeframe` 仅展示层，不改变 1d+15m 监控配置或 1m 事件触发口径。
+- `useStockResearchData` 只保留图表核心查询：instrument/bars/indicators/quote/events；自选操作、上下切换、memo 继续留在 `StockDetailPage`。
+- URL 状态：`/market?scope=watchlist|market&symbol=xxx&timeframe=1d&source=watchlist|selection&strategy=xxx&event_id=xxx`；scope/symbol/timeframe/source/strategy/event_id 进 URL，右栏折叠和 viewport 留本地。切换股票不整页刷新。非法 timeframe 回退 1d。
+- `timeframe` 受控单一真源：URL → `useStockResearchData`（bars/indicators 请求参数）→ `StockResearchWorkspace`（图表渲染）三者始终使用同一 `DisplayTimeframe`（'15m'|'1h'|'1d'|'1w'|'1mo'）；工具栏切换通过 `onTimeframeChange` 回调写回 URL，禁止子组件 `useState` 维护独立 timeframe。
+- URL 状态保留：切换周期/切换 scope/选择新股票时必须保留其他字段；选择新股票时清除旧 `event_id`。
+- 图表显示周期不改变 1d+15m 监控配置或 1m 事件触发口径。
+- 错误状态：instrument/bars/indicators 加载失败时显示明确错误状态（含重试按钮），不伪装为空图。
+- 周期文案：根据 timeframe 显示真实周期（1d=完整日线、15m=完整15分钟K线、1h=完整1小时K线、1w=完整周线、1mo=完整月线；partial 时显示"盘中 partial bar"）。
+- `AccountMenu` 复用 `appNavigation.getAccountMenuItemsForVariant(isAdmin, variant)` 单一真源构建菜单项。
 
 ## 3. 页面职责
 

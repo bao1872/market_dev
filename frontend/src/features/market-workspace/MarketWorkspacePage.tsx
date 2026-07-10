@@ -2,9 +2,10 @@
 // 左栏：股票列表/搜索（MarketInstrumentPane）
 // 中栏：唯一 K 线研究区（StockResearchWorkspace，复用 useStockResearchData）
 // 右栏：StockStructuralStatePanel（可收起；收起时不挂载、不请求 structural/temporal 数据）
-// URL 状态：scope/symbol/timeframe 进 URL；右栏折叠和 viewport 留本地。
-// 切换股票不整页刷新（改 URL symbol 参数，React Query 缓存复用）。
-// 只有当前选中股票请求 bars/indicators/quote/events；左栏不发 N+1 请求。
+// URL 状态：scope/symbol/timeframe/source/strategy/event_id 进 URL；右栏折叠和 viewport 留本地。
+// timeframe 为唯一真源：URL → useStockResearchData（bars/indicators）→ StockResearchWorkspace（图表）三者始终使用同一值。
+// 工具栏切换写回 URL；选择新股票清除旧 event_id；切换股票不整页刷新（改 URL symbol 参数，React Query 缓存复用）。
+// 只有当前选中股票请求 bars/indicators/quote/events；左栏不发 N+1 请求；scope 互斥请求门控。
 import { useState, useCallback, useMemo } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { MarketInstrumentPane } from './MarketInstrumentPane'
@@ -15,6 +16,8 @@ import {
   decodeMarketWorkspaceUrl,
   encodeMarketWorkspaceUrl,
   type MarketScope,
+  type DisplayTimeframe,
+  type ResearchSource,
 } from './marketWorkspaceUrlState'
 import clsx from 'clsx'
 import styles from './MarketWorkspace.module.scss'
@@ -22,31 +25,50 @@ import styles from './MarketWorkspace.module.scss'
 export default function MarketWorkspacePage() {
   const [searchParams, setSearchParams] = useSearchParams()
 
-  // 从 URL 解析状态
+  // 从 URL 解析状态（唯一真源）
   const urlState = useMemo(() => decodeMarketWorkspaceUrl(searchParams), [searchParams])
   const scope: MarketScope = urlState.scope
   const symbol = urlState.symbol
-  const timeframe = urlState.timeframe
+  const timeframe: DisplayTimeframe = urlState.timeframe
+  const source: ResearchSource = urlState.source
+  const strategy = urlState.strategy
+  const eventId = urlState.eventId
 
   // 右栏折叠状态（本地，不进 URL）
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false)
 
-  // 选中股票改变时更新 URL（不整页刷新）
+  // 选中股票改变时更新 URL（清除旧 event_id，保留 scope/timeframe/source/strategy）
   const handleSelectSymbol = useCallback(
     (newSymbol: string, _instrumentId: string) => {
-      const newState = { scope, symbol: newSymbol, timeframe }
+      const newState = {
+        scope,
+        symbol: newSymbol,
+        timeframe,
+        source,
+        strategy,
+        eventId: null, // 选择新股票时清除旧 event_id
+      }
       setSearchParams(encodeMarketWorkspaceUrl(newState), { replace: false })
     },
-    [scope, timeframe, setSearchParams],
+    [scope, timeframe, source, strategy, setSearchParams],
   )
 
-  // 切换 scope
+  // 切换 scope（保留 symbol/timeframe/source/strategy/event_id）
   const handleScopeChange = useCallback(
     (newScope: MarketScope) => {
-      const newState = { scope: newScope, symbol, timeframe }
+      const newState = { scope: newScope, symbol, timeframe, source, strategy, eventId }
       setSearchParams(encodeMarketWorkspaceUrl(newState), { replace: false })
     },
-    [symbol, timeframe, setSearchParams],
+    [symbol, timeframe, source, strategy, eventId, setSearchParams],
+  )
+
+  // 工具栏切换周期：写回 URL（保留 scope/symbol/source/strategy/event_id）
+  const handleTimeframeChange = useCallback(
+    (newTimeframe: DisplayTimeframe) => {
+      const newState = { scope, symbol, timeframe: newTimeframe, source, strategy, eventId }
+      setSearchParams(encodeMarketWorkspaceUrl(newState), { replace: false })
+    },
+    [scope, symbol, source, strategy, eventId, setSearchParams],
   )
 
   // 研究数据 hook（只有 symbol 非空时才发请求）
@@ -91,7 +113,10 @@ export default function MarketWorkspacePage() {
             <div className={styles.centerPane}>
               <StockResearchWorkspace
                 data={researchData}
-                source="watchlist"
+                timeframe={timeframe}
+                onTimeframeChange={handleTimeframeChange}
+                source={source}
+                strategyKey={strategy}
                 rightPanelCollapsed={rightPanelCollapsed}
               />
             </div>

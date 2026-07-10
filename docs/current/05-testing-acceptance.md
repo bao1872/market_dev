@@ -81,16 +81,23 @@
 ### 统一行情工作区（阶段三阻断验收）
 
 - 前端 `src/features/market-workspace/__tests__/marketWorkspaceUrlState.test.ts` 覆盖：
-  1. URL parse/serialize 往返一致（scope/symbol/timeframe）；
-  2. scope 切换（watchlist↔market）；
-  3. 选股更新 URL（symbol 写入）；
-  4. 无选股空状态（symbol=null 时 encode 不含 symbol 参数）；
-  5. timeframe=1d 默认时省略；
-  6. buildMarketWorkspaceUrl 生成完整 URL。
+  1. URL parse/serialize 往返一致（scope/symbol/timeframe/source/strategy/event_id）；
+  2. 非法 timeframe 回退 1d；
+  3. 非法 source 回退 watchlist；
+  4. source=watchlist 默认 strategy=watchlist_monitor，source=selection 默认 strategy=dsa_selector；
+  5. strategy 等于 source 默认值时 encode 省略 strategy；
+  6. event_id=null 时 encode 不含 event_id（选择新股票清除旧 event_id）；
+  7. buildMarketWorkspaceUrl 生成完整 URL（含/省略 strategy 场景）。
+- 前端 `src/navigation/__tests__/appNavigation.test.ts` 覆盖 `getAccountMenuItemsForVariant`：
+  1. variant=user + isAdmin=false → 只有消息+设置；
+  2. variant=user + isAdmin=true → 消息+设置+管理后台；
+  3. variant=admin → 消息+设置+返回行情（无管理后台）；
+  4. variant=admin + isAdmin=true 仍不显示管理后台。
 - 前端 `src/navigation/__tests__/routeStructure.test.ts` 覆盖 Capture 路由回归（位于 ProtectedLayout 之外，不渲染任一壳层）。
 - 前端 `src/pages/__tests__/detailNavigation.test.ts` 覆盖 watchlist fallback 改为 `/market?scope=watchlist`。
-- 运行命令：`node --experimental-strip-types --test src/features/market-workspace/__tests__/marketWorkspaceUrlState.test.ts src/navigation/__tests__/routeStructure.test.ts src/pages/__tests__/detailNavigation.test.ts`
-- 回归要求：修改 `MarketWorkspacePage`、`marketWorkspaceUrlState.ts`、`detailNavigation.ts` 或路由结构时必须跑此测试。
+- 浏览器烟测（若环境可用）：打开 `/market?timeframe=15m` 验证工具栏/bars/indicators 均为 15m；切换 1h 后 URL 和两个请求均变 1h；market scope 不足 2 字符无 instruments 请求且无 monitor-status 请求；收起右栏后无 structural/temporal 请求；`/capture/stock/:symbol` 不出现 User/Admin 壳层；`/stock/:symbol` 原功能可打开。
+- 运行命令：`node --experimental-strip-types --test src/features/market-workspace/__tests__/marketWorkspaceUrlState.test.ts src/navigation/__tests__/appNavigation.test.ts src/navigation/__tests__/routeStructure.test.ts src/pages/__tests__/detailNavigation.test.ts`
+- 回归要求：修改 `MarketWorkspacePage`、`marketWorkspaceUrlState.ts`、`StockResearchWorkspace.tsx`、`useStockResearchData.ts`、`MarketInstrumentPane.tsx`、`appNavigation.ts`、`AccountMenu.tsx`、`detailNavigation.ts` 或路由结构时必须跑此测试。
 
 ## 3.2 K线实时契约门禁（blocking）
 
