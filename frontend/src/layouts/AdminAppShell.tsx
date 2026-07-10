@@ -83,7 +83,7 @@ export default function AdminAppShell({ children }: { children?: ReactNode }) {
           <div className="page-crumb">管理后台</div>
         </div>
         <div className="top-right">
-          <AccountMenu />
+          <AccountMenu variant="admin" />
         </div>
       </header>
 

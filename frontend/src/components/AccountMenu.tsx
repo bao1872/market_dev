@@ -1,26 +1,39 @@
-// [AccountMenu] - 描述: 右上角账户菜单（消息 / 设置 / 管理后台 / 退出）
+// [AccountMenu] - 描述: 右上角账户菜单（消息 / 设置 / 管理后台或返回行情 / 退出）
 // 复用现有未读数、用户信息、logout 逻辑；支持点击外部关闭、Escape 关闭、基本 ARIA。
-// 删除原普通用户左侧栏中的消息/设置入口后，二者统一收拢到此处。
+// variant='user'（UserAppShell）：管理员额外显示"管理后台"入口
+// variant='admin'（AdminAppShell）：显示"返回行情"入口，不重复显示"管理后台"
 import { useState, useRef, useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
 import { useUnreadCount } from '@/hooks/useApi'
 import { useToast } from '@/store/toast'
-import { getAccountMenuItems, type AccountMenuItem } from '@/navigation/appNavigation'
+import { APP_ROUTES, type AccountMenuItem } from '@/navigation/appNavigation'
 import styles from './AccountMenu.module.scss'
 
-// 由用户名抽取首字母作为头像（与 AuthUser.name = email 约定一致）
-function getInitials(name?: string): string {
-  if (!name) return 'DL'
-  return name
-    .split(' ')
-    .map((w) => w[0])
-    .join('')
-    .slice(0, 2)
-    .toUpperCase()
+// displayName 优先 user.name，其次 user.email，最后通用"用户"
+function getDisplayName(name?: string, email?: string): string {
+  return name || email || '用户'
 }
 
-export default function AccountMenu() {
+// initials 优先 name 首字母，其次 email 用户名首字母，最后通用字符
+function getInitials(name?: string, email?: string): string {
+  if (name) {
+    const initials = name.split(' ').map((w) => w[0]).join('').slice(0, 2).toUpperCase()
+    if (initials) return initials
+  }
+  if (email) {
+    const username = email.split('@')[0]
+    if (username) return username.slice(0, 2).toUpperCase()
+  }
+  return 'U'
+}
+
+interface AccountMenuProps {
+  /** 'user' = UserAppShell 上下文（管理员额外显示管理后台入口）；'admin' = AdminAppShell 上下文（显示返回行情） */
+  variant?: 'user' | 'admin'
+}
+
+export default function AccountMenu({ variant = 'user' }: AccountMenuProps) {
   const user = useAuthStore((s) => s.user)
   const logout = useAuthStore((s) => s.logout)
   const navigate = useNavigate()
@@ -33,7 +46,21 @@ export default function AccountMenu() {
   const unread = unreadQuery.data?.unread_count ?? 0
 
   const isAdmin = user?.is_admin === true
-  const items = getAccountMenuItems(isAdmin)
+  const displayName = getDisplayName(user?.name, user?.email)
+  const initials = getInitials(user?.name, user?.email)
+
+  // 构建菜单项：消息 + 设置 始终显示；第三项根据 variant 决定
+  const items: AccountMenuItem[] = [
+    { path: APP_ROUTES.messages, label: '消息中心', adminOnly: false },
+    { path: APP_ROUTES.settings, label: '通知与设置', adminOnly: false },
+  ]
+  if (variant === 'user' && isAdmin) {
+    // UserAppShell 中管理员显示"管理后台"入口
+    items.push({ path: APP_ROUTES.admin, label: '管理后台', adminOnly: true })
+  } else if (variant === 'admin') {
+    // AdminAppShell 中显示"返回行情"，不重复"管理后台"
+    items.push({ path: APP_ROUTES.market, label: '返回行情', adminOnly: false })
+  }
 
   // 点击外部 / Escape 关闭
   useEffect(() => {
@@ -70,7 +97,7 @@ export default function AccountMenu() {
         aria-label="账户菜单"
         onClick={() => setOpen((v) => !v)}
       >
-        <span className={styles.avatar}>{getInitials(user?.name)}</span>
+        <span className={styles.avatar}>{initials}</span>
         {unread > 0 && (
           <span className={styles.badge} aria-hidden>
             {unread > 99 ? '99+' : unread}
@@ -80,7 +107,7 @@ export default function AccountMenu() {
       {open && (
         <div className={styles.menu} role="menu">
           <div className={styles.head}>
-            <div className={styles.name}>{user?.name || 'dan lu'}</div>
+            <div className={styles.name}>{displayName}</div>
             {user?.email && <div className={styles.email}>{user?.email}</div>}
           </div>
           {items.map((item: AccountMenuItem) => (

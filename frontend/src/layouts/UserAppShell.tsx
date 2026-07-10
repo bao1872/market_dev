@@ -80,7 +80,7 @@ export default function UserAppShell({ children }: { children?: ReactNode }) {
               {isAdmin ? '切换普通用户视图' : '返回管理员视图'}
             </button>
           )}
-          <AccountMenu />
+          <AccountMenu variant="user" />
         </div>
       </header>
       <main className="main">
