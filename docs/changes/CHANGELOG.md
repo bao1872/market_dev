@@ -2,6 +2,15 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-11
+
+- CHANGE-20260711-001: 盘后特征快照性能改造收尾（两阶段 compute/write + 短事务原子发布 + 后端速度/ETA）
+  - 分支 `refactor/after-close-snapshot-perf`（base `fix/after-close-pipeline-display`），Commit `d6ea58f`
+  - feature_snapshot 两阶段 compute(只读)/write(同 session 单次 commit) 原子发布；loader DB-only 批量查询常数次不逐股 pytdx/MDAS；progress 速度/ETA 全后端计算，前端移除 Date.now() 估算；RSS 门禁 1800MB
+  - 新增 `test_feature_snapshot_consistency.py` 9 用例关键链路验收（旧/新 10 股×4 场景等价 + compute 只读 + write 原子 + 批量边界 + 50 股 smoke）
+  - 文件：after_close_orchestrator.py / AdminAfterClosePipelinePage.tsx / test_feature_snapshot_consistency.py / current/03 / current/05 / worker-job-map / test-coverage-map
+  - 验证：pytest 9+3 passed、ruff 0、mypy 0、eslint/tsc 0、docs consistency/architecture 通过
+
 ## 2026-07-10
 
 - CHANGE-20260710-003: 盘后流水线 5 阶段时间线与进度可观测性修复
