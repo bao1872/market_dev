@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +28,7 @@ from app.models.user import User
 from app.schemas.notification import DeliveryResult
 from app.services.delivery_worker import process_pending_deliveries
 from app.services.outbox_relay import relay_outbox
+from tests.conftest import make_asgi_transport
 
 # ============================================================
 # 测试 fixtures / helpers
@@ -178,7 +179,7 @@ class TestStockDetailFeishuStatusAggregation:
         _override_get_db(db_session)
 
         try:
-            transport = ASGITransport(app=app)
+            transport = make_asgi_transport(app)
             async with AsyncClient(
                 transport=transport, base_url="http://test"
             ) as client:
@@ -204,15 +205,14 @@ class TestStockDetailFeishuStatusAggregation:
             assert all(d.channel_id == channel.id for d in deliveries), "投递应指向同一渠道"
 
             # 状态查询端点返回 10 字段
-            transport = ASGITransport(app=app)
+            transport = make_asgi_transport(app)
             async with AsyncClient(
                 transport=transport, base_url="http://test"
             ) as client:
-                status_resp = client.get(
+                status_resp = await client.get(
                     f"/stock-detail-feishu/{test_run_id}/status",
                     headers=_auth_headers(user.id),
                 )
-                status_resp = await status_resp
 
             assert status_resp.status_code == 200, f"状态查询失败: {status_resp.text}"
             status_data = status_resp.json()
@@ -252,7 +252,7 @@ class TestStockDetailFeishuStatusAggregation:
         _override_get_db(db_session)
 
         try:
-            transport = ASGITransport(app=app)
+            transport = make_asgi_transport(app)
             async with AsyncClient(
                 transport=transport, base_url="http://test"
             ) as client:
@@ -284,7 +284,7 @@ class TestStockDetailFeishuStatusAggregation:
             await db_session.flush()
 
             # 查询状态应为 partial_failed
-            transport = ASGITransport(app=app)
+            transport = make_asgi_transport(app)
             async with AsyncClient(
                 transport=transport, base_url="http://test"
             ) as client:
@@ -332,7 +332,7 @@ class TestStockDetailFeishuImageRetry:
         _override_get_db(db_session)
 
         try:
-            transport = ASGITransport(app=app)
+            transport = make_asgi_transport(app)
             async with AsyncClient(
                 transport=transport, base_url="http://test"
             ) as client:
@@ -389,7 +389,7 @@ class TestStockDetailFeishuImageRetry:
             assert image_deliveries[0].status == "retrying"
             assert image_deliveries[0].image_upload_status == "failed"
 
-            transport = ASGITransport(app=app)
+            transport = make_asgi_transport(app)
             async with AsyncClient(
                 transport=transport, base_url="http://test"
             ) as client:
@@ -417,7 +417,7 @@ class TestStockDetailFeishuImageRetry:
                     )
                 ),
             ):
-                transport = ASGITransport(app=app)
+                transport = make_asgi_transport(app)
                 async with AsyncClient(
                     transport=transport, base_url="http://test"
                 ) as client:
@@ -433,7 +433,7 @@ class TestStockDetailFeishuImageRetry:
             assert len(retry_data["deliveries"]) == 1
 
             # 重试后状态变为 success
-            transport = ASGITransport(app=app)
+            transport = make_asgi_transport(app)
             async with AsyncClient(
                 transport=transport, base_url="http://test"
             ) as client:
@@ -480,7 +480,7 @@ class TestStockDetailFeishuStatusOwnership:
         _override_get_db(db_session)
 
         try:
-            transport = ASGITransport(app=app)
+            transport = make_asgi_transport(app)
             async with AsyncClient(
                 transport=transport, base_url="http://test"
             ) as client:

@@ -385,9 +385,7 @@ async def test_execute_with_checkpoint_skips_refresh_daily(db_session) -> None:
         )
 
     # 验证 refresh_all_instruments 未被调用（断点恢复跳过）
-    mock_refresh.assert_not_called(), (
-        "断点恢复时应跳过 refresh_all_instruments"
-    )
+    mock_refresh.assert_not_called()
 
     # 验证后续阶段正常执行
     from app.services.job_run_event_service import list_events
@@ -412,6 +410,7 @@ async def test_execute_with_checkpoint_skips_refresh_daily(db_session) -> None:
     assert job_run.finished_at is not None
 
     # 验证 last_completed_step 更新为 succeeded
+    assert job_run.metadata_json is not None
     final_meta = json.loads(job_run.metadata_json)
     assert final_meta.get("last_completed_step") == "succeeded", (
         f"last_completed_step 应为 succeeded, 实际: {final_meta.get('last_completed_step')}"
@@ -502,6 +501,8 @@ async def test_execute_updates_heartbeat_each_step(db_session) -> None:
         )
 
     # 验证最终 heartbeat_at 已更新（不再是初始旧值）
+    assert initial_heartbeat is not None
+    assert job_run.heartbeat_at is not None
     assert job_run.heartbeat_at > initial_heartbeat, (
         f"heartbeat_at 应已更新: {job_run.heartbeat_at} > {initial_heartbeat}"
     )
@@ -510,8 +511,10 @@ async def test_execute_updates_heartbeat_each_step(db_session) -> None:
     now = datetime.now(_TZ)
     # lease_expires_at 可能带时区也可能不带（PG 返回），统一比较
     lease = job_run.lease_expires_at
+    assert lease is not None
     if lease.tzinfo is None:
         lease = lease.replace(tzinfo=_TZ)
+    assert lease is not None
     assert lease > now, (
         f"lease_expires_at 应在未来: {lease} > {now}"
     )
@@ -522,6 +525,7 @@ async def test_execute_updates_heartbeat_each_step(db_session) -> None:
     )
 
     # 验证 last_completed_step 最终为 succeeded
+    assert job_run.metadata_json is not None
     final_meta = json.loads(job_run.metadata_json)
     assert final_meta.get("last_completed_step") == "succeeded", (
         f"last_completed_step 应为 succeeded, 实际: {final_meta.get('last_completed_step')}"

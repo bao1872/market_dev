@@ -16,12 +16,14 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine
 from datetime import UTC, date, datetime, timedelta
+from typing import Any, TypeVar
 from urllib.parse import urlparse
 
 import httpx
 import pytest_asyncio
+from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
     AsyncSession,
@@ -33,6 +35,29 @@ from app.models.instrument import Instrument
 from app.models.invitation import InviteCode
 from app.models.subscription import Subscription
 from app.models.user import Role, User
+
+# 异步工厂 fixture 返回类型：Callable[..., Coroutine[Any, Any, T]]
+# conftest 中的 *_factory / make_user_eligible 等 fixture 返回的是 async 函数，
+# 调用方需 `await factory(...)`，因此返回类型必须是 Coroutine 包装而非裸同步 Callable。
+T = TypeVar("T")
+AsyncFactory = Callable[..., Coroutine[Any, Any, T]]
+
+
+def make_asgi_transport(app: FastAPI) -> httpx.ASGITransport:
+    """构造 ASGITransport。
+
+    httpx ASGITransport 存根用 dict[str, Any] 描述 ASGI scope/receive/send，
+    而 Starlette/FastAPI __call__ 存根用 MutableMapping[str, Any]，结构子类型
+    不兼容导致 mypy [arg-type]。这是第三方存根缺口，非测试错误；此处用单点
+    cast 桥接（运行时 FastAPI 本就是合法 ASGI3 app）。
+    """
+    from typing import cast
+
+    _asgi_app = Callable[
+        [dict[str, Any], Callable[[], Awaitable[dict[str, Any]]], Callable[[dict[str, Any]], Awaitable[None]]],
+        Coroutine[None, None, None],
+    ]
+    return httpx.ASGITransport(app=cast(_asgi_app, app))
 
 # ---------------------------------------------------------------------------
 # 测试库连接配置
@@ -173,7 +198,7 @@ async def db_session(
 
 
 @pytest_asyncio.fixture
-async def role_factory(db_session: AsyncSession) -> Callable[..., Role]:
+async def role_factory(db_session: AsyncSession) -> AsyncFactory[Role]:
     """创建或复用指定名称的角色。"""
     async def _create_role(name: str = "member", description: str | None = None) -> Role:
         from sqlalchemy import select
@@ -192,8 +217,8 @@ async def role_factory(db_session: AsyncSession) -> Callable[..., Role]:
 @pytest_asyncio.fixture
 async def user_factory(
     db_session: AsyncSession,
-    role_factory: Callable[..., Role],
-) -> Callable[..., User]:
+    role_factory: AsyncFactory[Role],
+) -> AsyncFactory[User]:
     """创建测试用户，可选分配角色。"""
     async def _create_user(
         email: str | None = None,
@@ -229,7 +254,7 @@ async def user_factory(
 
 
 @pytest_asyncio.fixture
-async def instrument_factory(db_session: AsyncSession) -> Callable[..., Instrument]:
+async def instrument_factory(db_session: AsyncSession) -> AsyncFactory[Instrument]:
     """创建测试标的。"""
     async def _create_instrument(
         symbol: str | None = None,
@@ -254,7 +279,7 @@ async def instrument_factory(db_session: AsyncSession) -> Callable[..., Instrume
 
 
 @pytest_asyncio.fixture
-async def subscription_factory(db_session: AsyncSession) -> Callable[..., Subscription]:
+async def subscription_factory(db_session: AsyncSession) -> AsyncFactory[Subscription]:
     """创建测试订阅记录，entitlement_snapshot 从 plans 表查询构造。"""
     async def _create_subscription(
         user_id: uuid.UUID,
@@ -299,9 +324,9 @@ async def subscription_factory(db_session: AsyncSession) -> Callable[..., Subscr
 @pytest_asyncio.fixture
 async def make_user_eligible(
     db_session: AsyncSession,
-    role_factory: Callable[..., Role],
-    subscription_factory: Callable[..., Subscription],
-) -> Callable[..., User]:
+    role_factory: AsyncFactory[Role],
+    subscription_factory: AsyncFactory[Subscription],
+) -> AsyncFactory[User]:
     """为用户添加 member 角色 + active subscription，使其有资格进入监控 universe。
 
     [eligible_user_service] - 资格条件：active member + 有效 subscription
@@ -326,7 +351,7 @@ async def make_user_eligible(
 @pytest_asyncio.fixture
 async def invite_code_factory(
     db_session: AsyncSession,
-) -> Callable[..., tuple[InviteCode, str]]:
+) -> AsyncFactory[tuple[InviteCode, str]]:
     """创建测试邀请码，code_hash 使用 subscription_service.hash_invite_code 生成。"""
     async def _create_invite_code(
         created_by: uuid.UUID,
@@ -391,7 +416,7 @@ async def client(
     app.dependency_overrides[deps_get_db] = _get_db
     app.dependency_overrides[db_get_db] = _get_db
 
-    transport = httpx.ASGITransport(app=app)
+    transport = make_asgi_transport(app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
 

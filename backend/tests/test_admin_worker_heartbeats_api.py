@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -29,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import create_access_token, get_password_hash
 from app.models.user import User
 from app.models.worker_heartbeat import WorkerHeartbeat
+from tests.conftest import AsyncFactory
 
 
 def _auth_headers(user_id: uuid.UUID) -> dict[str, str]:
@@ -60,7 +60,7 @@ def _make_heartbeat(
 
 
 @pytest_asyncio.fixture
-async def admin_user(user_factory: Callable[..., User]) -> User:
+async def admin_user(user_factory: AsyncFactory[User]) -> User:
     """创建管理员测试用户。"""
     return await user_factory(
         email="admin-hb@example.com",
@@ -70,7 +70,7 @@ async def admin_user(user_factory: Callable[..., User]) -> User:
 
 
 @pytest_asyncio.fixture
-async def member_user(user_factory: Callable[..., User]) -> User:
+async def member_user(user_factory: AsyncFactory[User]) -> User:
     """创建普通会员测试用户（无 admin 角色）。"""
     return await user_factory(
         email="member-hb@example.com",

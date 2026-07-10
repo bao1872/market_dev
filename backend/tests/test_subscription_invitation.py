@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -31,6 +30,7 @@ from app.core.security import create_access_token, get_password_hash
 from app.models.subscription import Subscription
 from app.models.user import User
 from app.services.subscription_service import hash_invite_code
+from tests.conftest import AsyncFactory
 
 
 def _auth_headers(user_id: uuid.UUID) -> dict[str, str]:
@@ -40,7 +40,7 @@ def _auth_headers(user_id: uuid.UUID) -> dict[str, str]:
 
 
 @pytest_asyncio.fixture
-async def admin_user(user_factory: Callable[..., User]) -> User:
+async def admin_user(user_factory: AsyncFactory[User]) -> User:
     """创建管理员测试用户。"""
     return await user_factory(
         email="admin@example.com",
@@ -99,7 +99,7 @@ async def test_generate_invite_codes_batch(
 async def test_generate_invite_codes_normal_user_forbidden(
     client: AsyncClient,
     admin_user: User,
-    invite_code_factory: Callable[..., tuple],
+    invite_code_factory: AsyncFactory[tuple],
 ) -> None:
     """测试普通用户不能生成邀请码。"""
     invite, raw_code = await invite_code_factory(created_by=admin_user.id, note="for register")
@@ -132,7 +132,7 @@ async def test_generate_invite_codes_normal_user_forbidden(
 async def test_register_success(
     client: AsyncClient,
     admin_user: User,
-    invite_code_factory: Callable[..., tuple],
+    invite_code_factory: AsyncFactory[tuple],
 ) -> None:
     """测试邀请码注册成功。"""
     invite, raw_code = await invite_code_factory(created_by=admin_user.id, note="for register")
@@ -171,7 +171,7 @@ async def test_register_invalid_invite_code(client: AsyncClient) -> None:
 async def test_register_used_invite_code(
     client: AsyncClient,
     admin_user: User,
-    invite_code_factory: Callable[..., tuple],
+    invite_code_factory: AsyncFactory[tuple],
 ) -> None:
     """测试已使用邀请码注册失败。"""
     invite, raw_code = await invite_code_factory(created_by=admin_user.id)
@@ -202,7 +202,7 @@ async def test_register_used_invite_code(
 async def test_register_revoked_invite_code(
     client: AsyncClient,
     admin_user: User,
-    invite_code_factory: Callable[..., tuple],
+    invite_code_factory: AsyncFactory[tuple],
 ) -> None:
     """测试已作废邀请码注册失败。"""
     invite, raw_code = await invite_code_factory(created_by=admin_user.id)
@@ -232,7 +232,7 @@ async def test_register_revoked_invite_code(
 async def test_register_duplicate_email(
     client: AsyncClient,
     admin_user: User,
-    invite_code_factory: Callable[..., tuple],
+    invite_code_factory: AsyncFactory[tuple],
 ) -> None:
     """测试邮箱已注册时注册失败。"""
     invite1, raw_code1 = await invite_code_factory(created_by=admin_user.id)
@@ -269,7 +269,7 @@ async def test_register_duplicate_email(
 async def test_login_membership_active(
     client: AsyncClient,
     admin_user: User,
-    invite_code_factory: Callable[..., tuple],
+    invite_code_factory: AsyncFactory[tuple],
 ) -> None:
     """测试会员有效时登录返回 subscription_active=True（替代旧 membership_expired=false）。"""
     invite, raw_code = await invite_code_factory(created_by=admin_user.id)
@@ -298,7 +298,7 @@ async def test_login_membership_active(
 async def test_login_membership_expired(
     client: AsyncClient,
     admin_user: User,
-    invite_code_factory: Callable[..., tuple],
+    invite_code_factory: AsyncFactory[tuple],
     db_session: AsyncSession,
 ) -> None:
     """测试会员到期后登录返回 subscription_active=False（替代旧 membership_expired=true）。"""
@@ -346,7 +346,7 @@ async def test_login_membership_expired(
 async def test_get_subscription_status(
     client: AsyncClient,
     admin_user: User,
-    invite_code_factory: Callable[..., tuple],
+    invite_code_factory: AsyncFactory[tuple],
 ) -> None:
     """测试查询会员状态。"""
     invite, raw_code = await invite_code_factory(created_by=admin_user.id)
@@ -394,7 +394,7 @@ async def test_get_membership_no_record(
 async def test_renew_membership_active(
     client: AsyncClient,
     admin_user: User,
-    invite_code_factory: Callable[..., tuple],
+    invite_code_factory: AsyncFactory[tuple],
 ) -> None:
     """测试未到期续期 - 从当前到期日顺延 30 天。"""
     invite1, raw_code1 = await invite_code_factory(created_by=admin_user.id)
@@ -436,7 +436,7 @@ async def test_renew_membership_active(
 async def test_renew_membership_expired(
     client: AsyncClient,
     admin_user: User,
-    invite_code_factory: Callable[..., tuple],
+    invite_code_factory: AsyncFactory[tuple],
     db_session: AsyncSession,
 ) -> None:
     """测试已到期续期 - 从兑换当天重新计算 30 天。"""
@@ -487,7 +487,7 @@ async def test_renew_membership_expired(
 async def test_revoke_invite_code(
     client: AsyncClient,
     admin_user: User,
-    invite_code_factory: Callable[..., tuple],
+    invite_code_factory: AsyncFactory[tuple],
 ) -> None:
     """测试作废未使用邀请码。"""
     invite, raw_code = await invite_code_factory(created_by=admin_user.id)
@@ -504,7 +504,7 @@ async def test_revoke_invite_code(
 async def test_revoke_used_invite_code_fails(
     client: AsyncClient,
     admin_user: User,
-    invite_code_factory: Callable[..., tuple],
+    invite_code_factory: AsyncFactory[tuple],
 ) -> None:
     """测试作废已使用邀请码失败。"""
     invite, raw_code = await invite_code_factory(created_by=admin_user.id)
@@ -536,7 +536,7 @@ async def test_revoke_used_invite_code_fails(
 async def test_list_invite_codes(
     client: AsyncClient,
     admin_user: User,
-    invite_code_factory: Callable[..., tuple],
+    invite_code_factory: AsyncFactory[tuple],
 ) -> None:
     """测试查询邀请码列表。"""
     for _ in range(3):
@@ -554,7 +554,7 @@ async def test_list_invite_codes(
 async def test_list_invite_codes_by_status(
     client: AsyncClient,
     admin_user: User,
-    invite_code_factory: Callable[..., tuple],
+    invite_code_factory: AsyncFactory[tuple],
 ) -> None:
     """测试按状态筛选邀请码列表。"""
     for _ in range(2):
@@ -573,7 +573,7 @@ async def test_list_invite_codes_by_status(
 async def test_list_subscribers(
     client: AsyncClient,
     admin_user: User,
-    invite_code_factory: Callable[..., tuple],
+    invite_code_factory: AsyncFactory[tuple],
 ) -> None:
     """测试查询会员账户列表。"""
     invite, raw_code = await invite_code_factory(created_by=admin_user.id)
@@ -603,7 +603,7 @@ async def test_list_subscribers(
 async def test_get_member_redemptions(
     client: AsyncClient,
     admin_user: User,
-    invite_code_factory: Callable[..., tuple],
+    invite_code_factory: AsyncFactory[tuple],
     db_session: AsyncSession,
 ) -> None:
     """测试查询用户兑换记录。"""

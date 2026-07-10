@@ -17,16 +17,18 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 import pytest
 import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import create_access_token, create_capture_token
 from app.main import app
+from tests.conftest import make_asgi_transport
 
 
 def _capture_token_headers(
@@ -106,7 +108,7 @@ async def capture_client(
     app.dependency_overrides[deps_get_db] = get_test_db
     app.dependency_overrides[db_get_db] = get_test_db
 
-    transport = ASGITransport(app=app)
+    transport = make_asgi_transport(app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client, db_session
 
@@ -283,7 +285,7 @@ class TestCaptureSnapshot:
             user_id=str(user.id),
         )
         bars_result = _make_empty_bars_result()
-        indicators_data = {"layers": [], "data": {}, "errors": {}}
+        indicators_data: dict[str, Any] = {"layers": [], "data": {}, "errors": {}}
 
         with patch(
             "app.api.capture.MarketDataAggregationService.get_bars",

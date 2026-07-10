@@ -20,7 +20,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
@@ -32,12 +31,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.core.security import get_password_hash
 from app.models.subscription import Subscription
 from app.models.user import Role, User
+from tests.conftest import AsyncFactory
 
 
 @pytest_asyncio.fixture
 async def admin_user(
-    user_factory: Callable[..., User],
-    role_factory: Callable[..., Role],
+    user_factory: AsyncFactory[User],
+    role_factory: AsyncFactory[Role],
 ) -> User:
     """创建 admin 角色与 admin@example.com 测试用户。"""
     await role_factory(name="admin", description="管理员")
@@ -69,7 +69,7 @@ _ACCESS_PROFILE_FIELDS = {
 @pytest.mark.asyncio
 async def test_login_success(
     client: httpx.AsyncClient,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
 ) -> None:
     """正确账号密码登录成功，返回 token。"""
     await user_factory(
@@ -93,7 +93,7 @@ async def test_login_success(
 @pytest.mark.asyncio
 async def test_login_wrong_password(
     client: httpx.AsyncClient,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
 ) -> None:
     """错误密码登录失败（401）。"""
     await user_factory(
@@ -124,7 +124,7 @@ async def test_login_nonexistent_user(client: httpx.AsyncClient) -> None:
 @pytest.mark.asyncio
 async def test_login_disabled_user(
     client: httpx.AsyncClient,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
 ) -> None:
     """disabled 用户登录失败（401）。"""
     await user_factory(
@@ -145,7 +145,7 @@ async def test_login_disabled_user(
 @pytest.mark.asyncio
 async def test_login_without_membership_subscription_active_false(
     client: httpx.AsyncClient,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
 ) -> None:
     """无 subscription 用户可登录，且 subscription_active=False（无订阅记录）。"""
     await user_factory(
@@ -169,8 +169,8 @@ async def test_login_without_membership_subscription_active_false(
 async def test_login_expired_subscription_not_modify_status(
     client: httpx.AsyncClient,
     db_session,
-    user_factory: Callable[..., User],
-    subscription_factory: Callable[..., Subscription],
+    user_factory: AsyncFactory[User],
+    subscription_factory: AsyncFactory[Subscription],
 ) -> None:
     """过期订阅登录返回 subscription_active=False，且不修改 DB status。"""
     user = await user_factory(
@@ -203,7 +203,7 @@ async def test_login_expired_subscription_not_modify_status(
 @pytest.mark.asyncio
 async def test_login_db_error_returns_500(
     client: httpx.AsyncClient,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
     caplog,
 ) -> None:
     """数据库异常返回 500，并记录日志。"""
@@ -232,7 +232,7 @@ async def test_login_db_error_returns_500(
 async def test_login_invalid_password_hash_returns_401(
     client: httpx.AsyncClient,
     db_session,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
 ) -> None:
     """密码 hash 格式异常返回 401。"""
     user = await user_factory(
@@ -293,8 +293,8 @@ async def test_login_response_admin_next_route(
 @pytest.mark.asyncio
 async def test_login_response_member_active_next_route(
     client: httpx.AsyncClient,
-    user_factory: Callable[..., User],
-    subscription_factory: Callable[..., Subscription],
+    user_factory: AsyncFactory[User],
+    subscription_factory: AsyncFactory[Subscription],
     db_session,
 ) -> None:
     """member 有效订阅 next_route='/overview'。"""
@@ -321,8 +321,8 @@ async def test_login_response_member_active_next_route(
 @pytest.mark.asyncio
 async def test_login_response_member_expired_next_route(
     client: httpx.AsyncClient,
-    user_factory: Callable[..., User],
-    subscription_factory: Callable[..., Subscription],
+    user_factory: AsyncFactory[User],
+    subscription_factory: AsyncFactory[Subscription],
     db_session,
 ) -> None:
     """member 订阅过期 next_route='/subscription-expired'。"""
@@ -379,8 +379,8 @@ async def test_login_response_admin_subscription_required_false(
 @pytest.mark.asyncio
 async def test_login_response_member_subscription_required_true(
     client: httpx.AsyncClient,
-    user_factory: Callable[..., User],
-    subscription_factory: Callable[..., Subscription],
+    user_factory: AsyncFactory[User],
+    subscription_factory: AsyncFactory[Subscription],
     db_session,
 ) -> None:
     """member 的 subscription_required=True（member 需要订阅）。"""

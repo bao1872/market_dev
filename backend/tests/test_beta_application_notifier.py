@@ -58,8 +58,8 @@ async def notifier_db_session() -> AsyncGenerator[AsyncSession, None]:
     created_user_ids: list[uuid.UUID] = []
     created_channel_ids: list[uuid.UUID] = []
 
-    session.created_user_ids = created_user_ids
-    session.created_channel_ids = created_channel_ids
+    object.__setattr__(session, "created_user_ids", created_user_ids)
+    object.__setattr__(session, "created_channel_ids", created_channel_ids)
     try:
         yield session
     finally:

@@ -67,8 +67,11 @@ async def test_daily_done_event_payload(db_session) -> None:
     assert event.level == "info"
     assert "9/10" in event.message
     assert "90.0%" in event.message
+    assert event.payload is not None
     assert event.payload["covered"] == 9
+    assert event.payload is not None
     assert event.payload["total"] == 10
+    assert event.payload is not None
     assert event.payload["coverage"] == 0.9
 
 
@@ -97,6 +100,7 @@ async def test_dsa_created_event(db_session) -> None:
     assert event.step == "DSA_CREATED"
     assert event.level == "info"
     assert str(fake_run_id) in event.message
+    assert event.payload is not None
     assert event.payload["run_id"] == str(fake_run_id)
 
 
@@ -153,6 +157,7 @@ async def test_coverage_below_threshold_fills_result(db_session) -> None:
     assert "COVERAGE_INSUFFICIENT" in steps
     cov_event = next(e for e in events if e.step == "COVERAGE_INSUFFICIENT")
     assert cov_event.level == "warn"
+    assert cov_event.payload is not None
     assert cov_event.payload["coverage"] == result.daily_coverage
 
 
@@ -201,6 +206,7 @@ async def test_worker_error_event(db_session) -> None:
     assert events[0].step == "ERROR"
     assert events[0].level == "error"
     assert events[0].message == "pytdx 连接超时"
+    assert events[0].payload is not None
     assert events[0].payload["error_type"] == "RuntimeError"
     assert "traceback" in events[0].payload
 

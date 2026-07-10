@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import patch
@@ -25,6 +24,7 @@ from app.models.subscription import Subscription
 from app.models.user import User
 from app.models.watchlist import UserWatchlistItem
 from app.services.monitor_batch_service import MonitorBatchService
+from tests.conftest import AsyncFactory
 
 # 测试用默认权益快照（满足 entitlement_snapshot NOT NULL 约束）
 _DEFAULT_SNAPSHOT: dict[str, Any] = {
@@ -82,8 +82,8 @@ async def _make_watchlist(
 @pytest.mark.asyncio
 async def test_resolve_watchlist_instruments_eligibility_filter(
     db_session: AsyncSession,
-    user_factory: Callable[..., User],
-    instrument_factory: Callable[..., Instrument],
+    user_factory: AsyncFactory[User],
+    instrument_factory: AsyncFactory[Instrument],
 ) -> None:
     """4 类用户添加同一只股票，仅 active member + active subscription 进入 universe。"""
     instrument = await instrument_factory(symbol="600000", market="SH", name="浦发银行")
@@ -125,8 +125,8 @@ async def test_resolve_watchlist_instruments_eligibility_filter(
 @pytest.mark.asyncio
 async def test_resolve_watchlist_instruments_dedups_user_id(
     db_session: AsyncSession,
-    user_factory: Callable[..., User],
-    instrument_factory: Callable[..., Instrument],
+    user_factory: AsyncFactory[User],
+    instrument_factory: AsyncFactory[Instrument],
 ) -> None:
     """同一 user_id 在 instrument_user_map 中只出现一次（防御重复 subscription）。
 
@@ -156,7 +156,7 @@ async def test_resolve_watchlist_instruments_dedups_user_id(
 @pytest.mark.asyncio
 async def test_eligible_user_service_distinct_user_id(
     db_session: AsyncSession,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
 ) -> None:
     """filter_eligible_recipients 返回的用户 ID 列表元素唯一。
 

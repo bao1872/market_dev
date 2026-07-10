@@ -118,6 +118,7 @@ async def test_append_event_error_level(db_session) -> None:
 
     assert event.level == "error"
     assert event.step == "ERROR"
+    assert event.payload is not None
     assert event.payload["error_code"] == "TIMEOUT"
 
     # 验证可按 level 查询

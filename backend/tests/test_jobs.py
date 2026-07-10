@@ -18,6 +18,8 @@ from uuid import uuid4
 
 import pytest
 
+from app.models._table_meta import table_indexes
+
 # ==================== ORM 模型元数据测试 ====================
 
 
@@ -42,7 +44,7 @@ class TestJobRunModel:
     def test_indexes(self) -> None:
         from app.models.job import JobRun
 
-        idx_names = {idx.name for idx in JobRun.__table__.indexes}
+        idx_names = {idx.name for idx in table_indexes(JobRun)}
         assert "ix_job_runs_type_status" in idx_names
 
 
@@ -68,7 +70,7 @@ class TestOutboxModel:
     def test_indexes(self) -> None:
         from app.models.outbox import Outbox
 
-        idx_names = {idx.name for idx in Outbox.__table__.indexes}
+        idx_names = {idx.name for idx in table_indexes(Outbox)}
         assert "ix_outbox_status_created" in idx_names
 
 

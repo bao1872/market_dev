@@ -119,6 +119,7 @@ def test_calculation_status_after_market_old_data_is_succeeded() -> None:
 async def test_create_job_run_sets_lease_and_heartbeat(db_session) -> None:
     """创建 job_run 时应设置 worker_instance_id、scheduled_at、heartbeat_at、lease_expires_at。"""
     job_run = await _create_job_run(db_session, "test_job", "2026-06-24")
+    assert job_run is not None
 
     assert job_run.worker_instance_id is not None
     assert job_run.scheduled_at is not None
@@ -132,6 +133,7 @@ async def test_create_job_run_sets_lease_and_heartbeat(db_session) -> None:
 async def test_finish_job_run_updates_status_and_counts(db_session) -> None:
     """结束 job_run 时应更新状态、完成时间、成功/失败计数。"""
     job_run = await _create_job_run(db_session, "test_job", "2026-06-24")
+    assert job_run is not None
     await _finish_job_run(db_session, job_run, "succeeded", success_count=3, failure_count=1)
 
     attached = await db_session.get(SchedulerJobRun, job_run.id)
@@ -146,6 +148,7 @@ async def test_finish_job_run_updates_status_and_counts(db_session) -> None:
 async def test_update_job_heartbeat_renews_lease(db_session) -> None:
     """心跳更新应刷新 heartbeat_at 与 lease_expires_at。"""
     job_run = await _create_job_run(db_session, "test_job", "2026-06-24")
+    assert job_run is not None
     old_lease = job_run.lease_expires_at
     await asyncio.sleep(0.1)
     await _update_job_heartbeat(db_session, job_run)
@@ -168,6 +171,7 @@ async def test_strategy_scheduler_no_selector_finishes_failed(db_session) -> Non
 
     trade_date = date_cls(2026, 6, 24)
     job_run = await _create_job_run(db_session, "strategy_scheduler", str(trade_date))
+    assert job_run is not None
     # 模拟未找到 selector 策略的分支
     await _finish_job_run(
         db_session,
@@ -186,6 +190,7 @@ async def test_strategy_scheduler_no_selector_finishes_failed(db_session) -> Non
 async def test_strategy_scheduler_metadata_contains_strategy_run_id(db_session) -> None:
     """strategy_scheduler 应在 metadata_json 中记录 strategy_run_id。"""
     job_run = await _create_job_run(db_session, "strategy_scheduler", "2026-06-24")
+    assert job_run is not None
     strategy_run_id = uuid.uuid4()
     job_run.metadata_json = json.dumps({"strategy_run_id": str(strategy_run_id)})
     await db_session.commit()
@@ -204,7 +209,9 @@ def test_monitor_session_label_morning() -> None:
     from app.worker import _get_monitor_session
 
     now = datetime(2026, 6, 24, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
-    label, start, end = _get_monitor_session(now)
+    session = _get_monitor_session(now)
+    assert session is not None
+    label, start, end = session
     assert label == "morning"
     assert start == datetime(2026, 6, 24, 9, 30, tzinfo=ZoneInfo("Asia/Shanghai")).time()
     assert end == datetime(2026, 6, 24, 11, 30, tzinfo=ZoneInfo("Asia/Shanghai")).time()
@@ -215,7 +222,9 @@ def test_monitor_session_label_afternoon() -> None:
     from app.worker import _get_monitor_session
 
     now = datetime(2026, 6, 24, 14, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
-    label, start, end = _get_monitor_session(now)
+    session = _get_monitor_session(now)
+    assert session is not None
+    label, start, end = session
     assert label == "afternoon"
     assert start == datetime(2026, 6, 24, 13, 0, tzinfo=ZoneInfo("Asia/Shanghai")).time()
     assert end == datetime(2026, 6, 24, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai")).time()
@@ -282,6 +291,8 @@ async def test_monitor_scheduler_different_sessions_create_separate_runs(db_sess
     )
     await db_session.commit()
 
+    assert job_run_morning is not None
+    assert job_run_afternoon is not None
     assert job_run_morning.id != job_run_afternoon.id
 
 

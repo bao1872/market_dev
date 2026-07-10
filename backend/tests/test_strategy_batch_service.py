@@ -298,6 +298,7 @@ async def test_run_timeout_budget_exhausted_reason_code(
     )
     for item in timeout_items:
         assert item.status == "failed"
+        assert item.error_message is not None
         assert "总超时" in item.error_message
 
 
@@ -381,6 +382,7 @@ async def test_execute_run_preserves_pre_skipped_count(
         runtime: Any,
         item: StrategyRunItem,
     ) -> StrategyResult:
+        assert run_obj.trade_date is not None
         return StrategyResult(
             instrument_id=item.instrument_id,
             strategy_version_id=run_obj.strategy_version_id,
@@ -391,12 +393,12 @@ async def test_execute_run_preserves_pre_skipped_count(
         )
 
     original_execute = service._execute_single_instrument
-    service._execute_single_instrument = _mock_execute  # type: ignore[method-assign]
+    service._execute_single_instrument = _mock_execute  # type: ignore[method-assign, assignment]
 
     try:
         await service.execute_run(db_session, run.id)
     finally:
-        service._execute_single_instrument = original_execute  # type: ignore[method-assign]
+        service._execute_single_instrument = original_execute  # type: ignore[method-assign, assignment]
 
     await db_session.refresh(run)
 

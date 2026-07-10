@@ -20,6 +20,7 @@ import asyncio
 import json
 import uuid
 from datetime import datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -190,7 +191,7 @@ async def test_acquire_lock_concurrent_only_one_wins() -> None:
     from tests.conftest import TestAsyncSessionLocal
 
     run_key = f"test_concurrent:{uuid.uuid4().hex[:8]}"
-    results: dict[str, tuple] = {}
+    results: dict[str, dict[str, Any]] = {}
 
     # 用 asyncio.Event 同步保证 worker_a 先 commit 释放 advisory lock，
     # worker_b 后开始（避免 asyncio 调度时序导致 worker_b 先执行并 rollback，
@@ -210,6 +211,7 @@ async def test_acquire_lock_concurrent_only_one_wins() -> None:
             # commit 释放 advisory_xact_lock，让 worker_b 能获取锁
             await session.commit()
             # 在 session 关闭前提取 id（expire_on_commit=False 让 commit 后属性仍可用）
+            assert job_run is not None, "worker_a 应创建新记录"
             results["a"] = {"id": job_run.id, "is_new": is_new}
             a_done.set()
 

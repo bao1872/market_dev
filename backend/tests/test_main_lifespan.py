@@ -21,6 +21,7 @@ from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import pytest
+from fastapi import FastAPI
 from sqlalchemy import select
 
 from app.models.scheduler_job_run import SchedulerJobRun
@@ -101,7 +102,7 @@ async def test_lifespan_calls_recovery_on_startup(db_session) -> None:
          patch("app.api.health.check_strategy_assets", _no_op_check_strategy_assets), \
          patch("app.services.strategy_seed.seed_strategies", _no_op_seed_strategies), \
          patch("app.services.calendar_seed.seed_calendar_from_mootdx", _no_op_seed_calendar):
-        async with lifespan(None):
+        async with lifespan(FastAPI()):
             pass  # yield 被到达，lifespan 正常运行
 
     # 验证 stale job 被恢复为 interrupted（证明 lifespan 调用了恢复函数）
@@ -140,7 +141,7 @@ async def test_lifespan_recovery_failure_does_not_block_startup(db_session) -> N
              "app.services.scheduler_job_run_recovery_service.recover_stale_scheduler_job_runs",
              failing_recover,
          ):
-        async with lifespan(None):
+        async with lifespan(FastAPI()):
             yield_reached = True
 
     assert yield_reached, (

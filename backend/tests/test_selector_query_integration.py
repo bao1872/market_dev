@@ -372,13 +372,13 @@ async def _create_test_data(db) -> dict:
 
     # 9. 用户自选股（前 3 个 instrument）
     for inst_id in instrument_ids[:3]:
-        item = UserWatchlistItem(
+        watchlist_item = UserWatchlistItem(
             user_id=user.id,
             instrument_id=inst_id,
             source="manual",
             active=True,
         )
-        db.add(item)
+        db.add(watchlist_item)
     await db.flush()
 
     return {
@@ -690,7 +690,7 @@ if __name__ == "__main__":
 
     if "--db" in sys.argv:
         print("=== 数据库集成测试 ===")
-        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
         test_database_url = os.environ.get(
             "TEST_DATABASE_URL",
@@ -705,8 +705,6 @@ if __name__ == "__main__":
         TestSessionLocal = async_sessionmaker(
             bind=test_engine, class_=AsyncSession, expire_on_commit=False,
         )
-
-        test_data = None
 
         async def setup_run_and_cleanup():
             async with TestSessionLocal() as db:

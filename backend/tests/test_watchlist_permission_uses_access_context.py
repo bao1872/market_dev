@@ -33,7 +33,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -47,6 +47,7 @@ from app.services.subscription_service import (
     generate_invite_codes,
     register_with_invite_code,
 )
+from tests.conftest import make_asgi_transport
 
 # ============================================================
 # 测试辅助函数
@@ -185,7 +186,7 @@ async def watchlist_perm_client(
     app.dependency_overrides[deps_get_db] = get_test_db
     app.dependency_overrides[db_get_db] = get_test_db
 
-    transport = ASGITransport(app=app)
+    transport = make_asgi_transport(app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client, db_session
 

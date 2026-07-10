@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
@@ -128,12 +129,12 @@ class TestElementsToTextHelper:
 
     def test_markdown_element(self) -> None:
         """markdown 元素取 content 字段。"""
-        elements = [{"tag": "markdown", "content": "hello world"}]
+        elements: list[dict[str, Any]] = [{"tag": "markdown", "content": "hello world"}]
         assert elements_to_text(elements) == "hello world"
 
     def test_hr_element(self) -> None:
         """hr 元素转成 --- 分隔线。"""
-        elements = [
+        elements: list[dict[str, Any]] = [
             {"tag": "markdown", "content": "第一段"},
             {"tag": "hr"},
             {"tag": "markdown", "content": "第二段"},
@@ -145,7 +146,7 @@ class TestElementsToTextHelper:
 
     def test_note_element(self) -> None:
         """note 元素取内部 plain_text content。"""
-        elements = [
+        elements: list[dict[str, Any]] = [
             {"tag": "markdown", "content": "概览"},
             {
                 "tag": "note",

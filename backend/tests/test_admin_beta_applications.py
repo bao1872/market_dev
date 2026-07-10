@@ -30,7 +30,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,6 +39,7 @@ from app.main import app
 from app.models.beta_application import BetaApplication
 from app.models.outbox import Outbox
 from app.models.user import Role, User, UserRole
+from tests.conftest import make_asgi_transport
 
 # ============================================================
 # 测试 fixtures
@@ -164,7 +165,7 @@ async def admin_beta_client(
     admin_user = admin_beta_db_session._test_admin_user  # type: ignore[attr-defined]
     normal_user = admin_beta_db_session._test_normal_user  # type: ignore[attr-defined]
 
-    transport = ASGITransport(app=app)
+    transport = make_asgi_transport(app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client, admin_user, normal_user
 

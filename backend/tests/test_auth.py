@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
 
 import httpx
 import pytest
@@ -25,12 +24,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import create_access_token, create_refresh_token, get_password_hash
 from app.models.user import User
+from tests.conftest import AsyncFactory
 
 
 @pytest_asyncio.fixture
 async def auth_users(
     db_session: AsyncSession,
-    user_factory: Callable[..., User],
+    user_factory: AsyncFactory[User],
 ) -> dict[str, User]:
     """创建认证测试所需的三类用户：admin、normal、disabled。
 

@@ -26,8 +26,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from datetime import datetime
+from typing import Any
 
 from fastapi import Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
@@ -268,7 +269,7 @@ async def require_active_subscription(
     return ctx
 
 
-def require_feature(feature_name: str) -> Callable[..., object]:
+def require_feature(feature_name: str) -> Callable[..., Coroutine[Any, Any, AccessContext]]:
     """功能特性检查依赖工厂（admin 豁免）。
 
     返回一个 FastAPI 依赖函数，检查 ctx.features 是否包含指定 feature。
@@ -304,7 +305,7 @@ def require_feature(feature_name: str) -> Callable[..., object]:
     return _check_feature
 
 
-def require_quota(quota_name: str) -> Callable[..., object]:
+def require_quota(quota_name: str) -> Callable[..., Coroutine[Any, Any, int | None]]:
     """额度检查依赖工厂（admin 豁免，返回限额值）。
 
     返回一个 FastAPI 依赖函数，返回限额值供调用方比较实际使用量。

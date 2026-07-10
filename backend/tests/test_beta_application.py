@@ -26,7 +26,7 @@ from collections.abc import AsyncGenerator
 
 import pytest
 import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,6 +41,7 @@ from app.schemas.beta_application import (
     BetaApplicationCreate,
 )
 from app.services.beta_application_service import create_application
+from tests.conftest import make_asgi_transport
 
 # ============================================================
 # 测试 fixtures
@@ -86,7 +87,7 @@ async def beta_api_client(beta_db_session: AsyncSession) -> AsyncGenerator[Async
         yield beta_db_session
 
     app.dependency_overrides[db_get_db] = get_test_db
-    transport = ASGITransport(app=app)
+    transport = make_asgi_transport(app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
     app.dependency_overrides.clear()
@@ -267,7 +268,6 @@ def test_beta_application_model_has_all_required_fields():
 
 def test_beta_application_model_has_indexes():
     """BetaApplication 必须包含 status/submitted_at/ip_hash/phone/wechat 索引。"""
-    idx_names = [idx.name for idx in BetaApplication.__table__.indexes]
     # 至少有覆盖这些列的索引
     all_indexed_cols: set[str] = set()
     for idx in BetaApplication.__table__.indexes:

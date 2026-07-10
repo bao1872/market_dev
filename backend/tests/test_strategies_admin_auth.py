@@ -23,13 +23,14 @@ from collections.abc import AsyncGenerator
 
 import pytest
 import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import create_access_token
 from app.main import app
 from app.models.user import Role, User, UserRole
+from tests.conftest import make_asgi_transport
 
 
 async def _ensure_role(db: AsyncSession, name: str) -> Role:
@@ -80,7 +81,7 @@ async def strategies_auth_client(
     normal_user = await _create_normal_user(db_session)
     await db_session.flush()
 
-    transport = ASGITransport(app=app)
+    transport = make_asgi_transport(app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client, normal_user
 

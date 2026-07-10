@@ -17,16 +17,17 @@ from collections.abc import AsyncGenerator
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 
 # Import the app after env setup
 from app.main import app
+from tests.conftest import make_asgi_transport
 
 
 @pytest.fixture
 async def client() -> AsyncGenerator[AsyncClient, None]:
     """HTTP 客户端 fixture。"""
-    transport = ASGITransport(app=app)
+    transport = make_asgi_transport(app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
 
