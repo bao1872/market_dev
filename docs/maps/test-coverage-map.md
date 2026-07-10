@@ -12,8 +12,8 @@
 | Worker 心跳 admin API（admin/non-admin/unauthenticated + status 筛选 + health_state 分类） | `test_admin_worker_heartbeats_api.py` |
 | **壳层与导航拆分（阶段二）**：用户导航仅行情/趋势选股、admin 入口仅管理员可见、旧路由兼容重定向、admin 路由独立壳层、capture 路由不渲染任一壳层、默认入口 `/market`、getAccountMenuItemsForVariant variant=user/admin 菜单项 | `frontend/src/navigation/__tests__/appNavigation.test.ts`（10 用例） |
 | **路由层级契约（阶段二 fixup）**：Capture 位于 ProtectedLayout 之外、/market+/screener+/stock/:symbol 经 UserAppShell+SubscriberRoute、/messages+/settings 经 UserAppShell 不经 SubscriberRoute、/admin/* 经 AdminRoute+AdminAppShell | `frontend/src/navigation/__tests__/routeStructure.test.ts`（10 用例） |
-| **行情工作区 URL 状态（阶段三收口）**：URL parse/serialize 往返（scope/symbol/timeframe/source/strategy/event_id）、非法 timeframe 回退 1d、非法 source 回退 watchlist、source→strategy 默认推导、strategy 等于默认值时省略、event_id=null 不写入、选择新股清除 event_id、buildMarketWorkspaceUrl 含/省略 strategy | `frontend/src/features/market-workspace/__tests__/marketWorkspaceUrlState.test.ts`（16 用例） |
-| **timeframe 单一真源与请求门控（阶段三收口）**：URL 15m→请求15m→图表15m、工具栏切换写回 URL、scope 查询互斥、右栏收起不请求、Capture 和 StockDetail 回归 | 浏览器烟测（若环境可用） |
+| **行情工作区 URL 状态（阶段三最终验收）**：URL parse/serialize 往返（scope/symbol/timeframe/source/strategy/event_id）、非法 timeframe 回退 1d、非法 source 回退 watchlist、source→strategy 默认推导、strategy 等于默认值时省略、event_id=null 不写入、选择新股清除 event_id、buildMarketWorkspaceUrl 含/省略 strategy、`selectInstrumentFromMarketPane` 选股重置 source/strategy/event_id、`changeMarketScope` 切 scope 退出 selection 上下文、选股后 timeframe 保留 | `frontend/src/features/market-workspace/__tests__/marketWorkspaceUrlState.test.ts`（21 用例） |
+| **timeframe 单一真源与请求门控（阶段三最终验收）**：URL 15m→请求15m→图表15m、工具栏切换写回 URL、scope 查询互斥、右栏收起不请求、Capture 和 StockDetail 回归、selection 上下文重置、搜索结果渲染门控 | 浏览器 E2E（CDP，22 项断言全部 PASS） |
 
 ## 2. 趋势选股
 

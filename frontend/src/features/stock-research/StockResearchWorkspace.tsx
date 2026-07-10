@@ -37,17 +37,17 @@ function makeDefaultViewport(): ChartViewport {
   return createDefaultViewport(0)
 }
 
-// 根据 timeframe 生成 K线状态文案
+// 根据 timeframe 生成 K线状态文案（partial 文案包含当前周期，避免所有周期都显示"日线"）
 function barsStatusLabel(tf: DisplayTimeframe, isPartial: boolean): string {
-  if (isPartial) return '盘中 partial bar'
   const labelMap: Record<DisplayTimeframe, string> = {
-    '1d': '完整日线',
-    '15m': '完整15分钟K线',
-    '1h': '完整1小时K线',
-    '1w': '完整周线',
-    '1mo': '完整月线',
+    '1d': '日线',
+    '15m': '15分钟K线',
+    '1h': '1小时K线',
+    '1w': '周线',
+    '1mo': '月线',
   }
-  return labelMap[tf] ?? '完整周期数据'
+  const period = labelMap[tf] ?? '周期数据'
+  return isPartial ? `盘中 partial bar（${tf}）` : `完整${period}`
 }
 
 export function StockResearchWorkspace({
@@ -93,8 +93,9 @@ export function StockResearchWorkspace({
   const quote = quoteQuery.data
 
   // 行情状态（简化版，完整状态条逻辑保留在 StockDetailPage 中）
+  // 非实时非降级时统一显示"行情回退"，避免在 15m/1h/1w/1mo 下误显示"日线回退"
   const quoteStatus = {
-    label: quote?.is_realtime ? '实时行情' : quote?.degraded ? '行情降级' : '日线回退',
+    label: quote?.is_realtime ? '实时行情' : quote?.degraded ? '行情降级' : '行情回退',
     badgeClass: quote?.is_realtime ? 'tag ok' : quote?.degraded ? 'tag warn' : 'tag',
   }
 

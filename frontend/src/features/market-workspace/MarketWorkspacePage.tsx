@@ -15,6 +15,8 @@ import { StockStructuralStatePanel } from '@/components/StockStructuralStatePane
 import {
   decodeMarketWorkspaceUrl,
   encodeMarketWorkspaceUrl,
+  selectInstrumentFromMarketPane,
+  changeMarketScope,
   type MarketScope,
   type DisplayTimeframe,
   type ResearchSource,
@@ -37,29 +39,24 @@ export default function MarketWorkspacePage() {
   // 右栏折叠状态（本地，不进 URL）
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false)
 
-  // 选中股票改变时更新 URL（清除旧 event_id，保留 scope/timeframe/source/strategy）
+  // 从左栏选择股票：重置 source=watchlist、strategy=watchlist_monitor、eventId=null（退出 selection 上下文）。
+  // 保留 scope 和 timeframe。状态转换由纯函数 selectInstrumentFromMarketPane 处理，避免散落拼对象。
   const handleSelectSymbol = useCallback(
     (newSymbol: string, _instrumentId: string) => {
-      const newState = {
-        scope,
-        symbol: newSymbol,
-        timeframe,
-        source,
-        strategy,
-        eventId: null, // 选择新股票时清除旧 event_id
-      }
+      const newState = selectInstrumentFromMarketPane(urlState, newSymbol)
       setSearchParams(encodeMarketWorkspaceUrl(newState), { replace: false })
     },
-    [scope, timeframe, source, strategy, setSearchParams],
+    [urlState, setSearchParams],
   )
 
-  // 切换 scope（保留 symbol/timeframe/source/strategy/event_id）
+  // 切换 scope：退出 selection 上下文，重置 source=watchlist、strategy=watchlist_monitor、eventId=null。
+  // 保留 symbol 和 timeframe。状态转换由纯函数 changeMarketScope 处理。
   const handleScopeChange = useCallback(
     (newScope: MarketScope) => {
-      const newState = { scope: newScope, symbol, timeframe, source, strategy, eventId }
+      const newState = changeMarketScope(urlState, newScope)
       setSearchParams(encodeMarketWorkspaceUrl(newState), { replace: false })
     },
-    [symbol, timeframe, source, strategy, eventId, setSearchParams],
+    [urlState, setSearchParams],
   )
 
   // 工具栏切换周期：写回 URL（保留 scope/symbol/source/strategy/event_id）

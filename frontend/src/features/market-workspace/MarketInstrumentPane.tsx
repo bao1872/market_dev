@@ -121,7 +121,7 @@ export function MarketInstrumentPane({ scope, selectedSymbol, onSelectSymbol }: 
             {!canSearch && (
               <div className={styles.empty}>输入关键词搜索股票</div>
             )}
-            {searchResults.map((inst: Instrument) => (
+            {canSearch && searchResults.map((inst: Instrument) => (
               <button
                 key={inst.id}
                 className={clsx(

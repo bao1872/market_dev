@@ -15,6 +15,10 @@
 //  11. event_id=null 时 encode 不包含 event_id
 //  12. buildMarketWorkspaceUrl 生成完整 URL
 //  13. defaultStrategyForSource：watchlist→watchlist_monitor, selection→dsa_selector
+//  14. selectInstrumentFromMarketPane：从 selection 上下文选股后重置 source/strategy/eventId
+//  15. selectInstrumentFromMarketPane：保留 scope 和 timeframe
+//  16. changeMarketScope：切换 scope 后重置 source/strategy/eventId
+//  17. changeMarketScope：保留 symbol 和 timeframe
 
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
@@ -23,6 +27,8 @@ import {
   encodeMarketWorkspaceUrl,
   buildMarketWorkspaceUrl,
   defaultStrategyForSource,
+  selectInstrumentFromMarketPane,
+  changeMarketScope,
   DEFAULT_MARKET_SCOPE,
   DEFAULT_TIMEFRAME,
   DEFAULT_SOURCE,
@@ -157,4 +163,104 @@ test('选择新股票时清除旧 event_id（encode eventId=null 不写入 event
   })
   assert.ok(!params.has('event_id'))
   assert.equal(params.get('symbol'), '600519.SH')
+})
+
+// ===== 状态转换纯函数测试（selectInstrumentFromMarketPane / changeMarketScope）=====
+
+test('selectInstrumentFromMarketPane：从 selection 上下文选股后重置 source/strategy/eventId', () => {
+  // 场景：从趋势选股进入工作区（source=selection, strategy=dsa_selector, event_id=evt-1），
+  // 随后点击左栏自选中的另一只股票 → 必须重置为 watchlist/watchlist_monitor/null
+  const selectionState: MarketWorkspaceUrlState = {
+    scope: 'watchlist',
+    symbol: '000001.SZ',
+    timeframe: '15m',
+    source: 'selection',
+    strategy: 'dsa_selector',
+    eventId: 'evt-1',
+  }
+  const next = selectInstrumentFromMarketPane(selectionState, '600519.SH')
+  assert.equal(next.symbol, '600519.SH')
+  assert.equal(next.source, 'watchlist')
+  assert.equal(next.strategy, 'watchlist_monitor')
+  assert.equal(next.eventId, null)
+  // scope 和 timeframe 保留
+  assert.equal(next.scope, 'watchlist')
+  assert.equal(next.timeframe, '15m')
+})
+
+test('selectInstrumentFromMarketPane：保留 scope 和 timeframe（market scope + 1h）', () => {
+  // 场景：market scope 下 1h 周期，选择搜索结果中的股票 → scope=market、timeframe=1h 保留
+  const state: MarketWorkspaceUrlState = {
+    scope: 'market',
+    symbol: null,
+    timeframe: '1h',
+    source: 'selection',
+    strategy: 'dsa_selector',
+    eventId: 'evt-2',
+  }
+  const next = selectInstrumentFromMarketPane(state, '000002.SZ')
+  assert.equal(next.scope, 'market')
+  assert.equal(next.timeframe, '1h')
+  assert.equal(next.source, 'watchlist')
+  assert.equal(next.strategy, 'watchlist_monitor')
+  assert.equal(next.eventId, null)
+})
+
+test('changeMarketScope：切换 scope 后重置 source/strategy/eventId（从 selection 切 watchlist）', () => {
+  // 场景：从趋势选股进入（source=selection, strategy=dsa_selector, event_id=evt-3），
+  // 切换到 watchlist scope → 退出 selection 上下文
+  const selectionState: MarketWorkspaceUrlState = {
+    scope: 'market',
+    symbol: '000001.SZ',
+    timeframe: '1d',
+    source: 'selection',
+    strategy: 'dsa_selector',
+    eventId: 'evt-3',
+  }
+  const next = changeMarketScope(selectionState, 'watchlist')
+  assert.equal(next.scope, 'watchlist')
+  assert.equal(next.source, 'watchlist')
+  assert.equal(next.strategy, 'watchlist_monitor')
+  assert.equal(next.eventId, null)
+  // symbol 和 timeframe 保留
+  assert.equal(next.symbol, '000001.SZ')
+  assert.equal(next.timeframe, '1d')
+})
+
+test('changeMarketScope：切到 market scope 也退出 selection 上下文', () => {
+  // 场景：selection 上下文下切到 market scope → 仍重置为 watchlist/watchlist_monitor/null
+  const selectionState: MarketWorkspaceUrlState = {
+    scope: 'watchlist',
+    symbol: '600519.SH',
+    timeframe: '1w',
+    source: 'selection',
+    strategy: 'dsa_selector',
+    eventId: 'evt-4',
+  }
+  const next = changeMarketScope(selectionState, 'market')
+  assert.equal(next.scope, 'market')
+  assert.equal(next.source, 'watchlist')
+  assert.equal(next.strategy, 'watchlist_monitor')
+  assert.equal(next.eventId, null)
+  assert.equal(next.symbol, '600519.SH')
+  assert.equal(next.timeframe, '1w')
+})
+
+test('selectInstrumentFromMarketPane 后 encode URL 不含 source/strategy/event_id', () => {
+  // 验证状态转换后 encode 的 URL 干净：source=watchlist（默认省略）、strategy=watchlist_monitor（默认省略）、event_id=null（省略）
+  const selectionState: MarketWorkspaceUrlState = {
+    scope: 'watchlist',
+    symbol: '000001.SZ',
+    timeframe: '1d',
+    source: 'selection',
+    strategy: 'dsa_selector',
+    eventId: 'evt-5',
+  }
+  const next = selectInstrumentFromMarketPane(selectionState, '600519.SH')
+  const params = encodeMarketWorkspaceUrl(next)
+  assert.ok(!params.has('source'))
+  assert.ok(!params.has('strategy'))
+  assert.ok(!params.has('event_id'))
+  assert.equal(params.get('symbol'), '600519.SH')
+  assert.equal(params.get('scope'), 'watchlist')
 })

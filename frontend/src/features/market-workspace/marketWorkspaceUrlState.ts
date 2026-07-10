@@ -91,3 +91,37 @@ export function buildMarketWorkspaceUrl(state: MarketWorkspaceUrlState): string 
   const qs = params.toString()
   return qs ? `/market?${qs}` : '/market'
 }
+
+// 从左栏（MarketInstrumentPane）选择股票时的状态转换（纯函数）。
+// 选择自选/市场搜索结果中的股票属于 watchlist 上下文：重置 source=watchlist、strategy=watchlist_monitor、eventId=null。
+// 保留 scope 和 timeframe（scope 可能是 watchlist 或 market，timeframe 不受选股影响）。
+export function selectInstrumentFromMarketPane(
+  state: MarketWorkspaceUrlState,
+  newSymbol: string,
+): MarketWorkspaceUrlState {
+  return {
+    scope: state.scope,
+    symbol: newSymbol,
+    timeframe: state.timeframe,
+    source: 'watchlist',
+    strategy: defaultStrategyForSource('watchlist'),
+    eventId: null,
+  }
+}
+
+// 切换 scope 时的状态转换（纯函数）。
+// 切换到 watchlist/market scope 即退出 selection 上下文：重置 source=watchlist、strategy=watchlist_monitor、eventId=null。
+// 保留 symbol 和 timeframe。
+export function changeMarketScope(
+  state: MarketWorkspaceUrlState,
+  newScope: MarketScope,
+): MarketWorkspaceUrlState {
+  return {
+    scope: newScope,
+    symbol: state.symbol,
+    timeframe: state.timeframe,
+    source: 'watchlist',
+    strategy: defaultStrategyForSource('watchlist'),
+    eventId: null,
+  }
+}

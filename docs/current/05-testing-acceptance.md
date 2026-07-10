@@ -80,14 +80,17 @@
 
 ### 统一行情工作区（阶段三阻断验收）
 
-- 前端 `src/features/market-workspace/__tests__/marketWorkspaceUrlState.test.ts` 覆盖：
+- 前端 `src/features/market-workspace/__tests__/marketWorkspaceUrlState.test.ts` 覆盖（21 个用例）：
   1. URL parse/serialize 往返一致（scope/symbol/timeframe/source/strategy/event_id）；
   2. 非法 timeframe 回退 1d；
   3. 非法 source 回退 watchlist；
   4. source=watchlist 默认 strategy=watchlist_monitor，source=selection 默认 strategy=dsa_selector；
   5. strategy 等于 source 默认值时 encode 省略 strategy；
   6. event_id=null 时 encode 不含 event_id（选择新股票清除旧 event_id）；
-  7. buildMarketWorkspaceUrl 生成完整 URL（含/省略 strategy 场景）。
+  7. buildMarketWorkspaceUrl 生成完整 URL（含/省略 strategy 场景）；
+  8. `selectInstrumentFromMarketPane(state, newSymbol)`：从 selection+dsa_selector+event_id 上下文选股后，source 重置为 watchlist、strategy 重置为 watchlist_monitor、eventId 清为 null，scope/symbol/timeframe 正确更新；
+  9. `changeMarketScope(state, 'watchlist')` 和 `changeMarketScope(state, 'market')`：切换 scope 时退出 selection 上下文（source→watchlist、strategy→watchlist_monitor、eventId→null），保留 timeframe；
+  10. 选择股票后 timeframe 不变（timeframe 在选股和切 scope 时必须保留）。
 - 前端 `src/navigation/__tests__/appNavigation.test.ts` 覆盖 `getAccountMenuItemsForVariant`：
   1. variant=user + isAdmin=false → 只有消息+设置；
   2. variant=user + isAdmin=true → 消息+设置+管理后台；
@@ -95,7 +98,16 @@
   4. variant=admin + isAdmin=true 仍不显示管理后台。
 - 前端 `src/navigation/__tests__/routeStructure.test.ts` 覆盖 Capture 路由回归（位于 ProtectedLayout 之外，不渲染任一壳层）。
 - 前端 `src/pages/__tests__/detailNavigation.test.ts` 覆盖 watchlist fallback 改为 `/market?scope=watchlist`。
-- 浏览器烟测（若环境可用）：打开 `/market?timeframe=15m` 验证工具栏/bars/indicators 均为 15m；切换 1h 后 URL 和两个请求均变 1h；market scope 不足 2 字符无 instruments 请求且无 monitor-status 请求；收起右栏后无 structural/temporal 请求；`/capture/stock/:symbol` 不出现 User/Admin 壳层；`/stock/:symbol` 原功能可打开。
+- 浏览器 E2E（CDP，禁止安装 Playwright）：使用现有 Chromium + Node 22 `fetch`/`WebSocket` 通过 DevTools Protocol 执行，临时脚本 `/tmp/market-workspace-e2e.mjs`，profile `/tmp/panji-cdp-profile`，无法登录时用 `Fetch.enable` 域 mock 必要 API（mock 和脚本只能放 `/tmp`）。必须验证 8 项场景，每项输出 PASS/FAIL 和实际请求 URL：
+  1. 打开 `/market?scope=market&symbol=<有效股票>&timeframe=15m`：工具栏选中 15m，bars 请求含 `timeframe=15m`，indicators 请求含 `timeframe=15m`；
+  2. 点击工具栏 1h 按钮：URL 写入 `timeframe=1h`，bars 请求切为 `timeframe=1h`，indicators 请求切为 `timeframe=1h`，source/strategy/event_id 按规则保留；
+  3. market scope 空关键词和 1 字符：0 次 instruments 请求、0 次 monitor-status 请求；2 字符后仅发 1 次 instruments 请求（不发 monitor-status）；
+  4. 切 watchlist scope：只发 monitor-status 请求，不发 instruments 搜索请求；
+  5. 从 `source=selection&strategy=dsa_selector&event_id=x` 进入后，点击左栏股票：URL 变为 `source=watchlist`、`strategy=watchlist_monitor`、`event_id` 消失；
+  6. 收起右栏后选择另一只股票：新股票 0 次 structural-factors 请求、0 次 temporal-features 请求；
+  7. `/capture/stock/:symbol` 不出现 UserAppShell 和 AdminAppShell（无导航、无账户菜单）；
+  8. `/stock/:symbol` 原详情页可加载（body 有内容）。
+- E2E 结果（2026-07-11）：22 项断言全部 PASS，覆盖 8 个场景；mock 数据形状对齐后端 DTO（`StructuralFactorResponse`/`TemporalFeaturesResponse`/`IndicatorResponse`/`BarListResponse`/`WatchlistMonitorStatusItem`），`navigateAndWait` 采用 800ms 延迟 + 连续 2 次条件为真防 stale DOM。
 - 运行命令：`node --experimental-strip-types --test src/features/market-workspace/__tests__/marketWorkspaceUrlState.test.ts src/navigation/__tests__/appNavigation.test.ts src/navigation/__tests__/routeStructure.test.ts src/pages/__tests__/detailNavigation.test.ts`
 - 回归要求：修改 `MarketWorkspacePage`、`marketWorkspaceUrlState.ts`、`StockResearchWorkspace.tsx`、`useStockResearchData.ts`、`MarketInstrumentPane.tsx`、`appNavigation.ts`、`AccountMenu.tsx`、`detailNavigation.ts` 或路由结构时必须跑此测试。
 

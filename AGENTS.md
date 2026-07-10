@@ -596,7 +596,10 @@ Capture Token 只能访问 Capture API。\
 9. `timeframe` 单一真源：URL → `useStockResearchData`（bars/indicators 请求参数）→ `StockResearchWorkspace`（图表渲染）三者始终使用同一 `DisplayTimeframe`；工具栏切换必须通过 `onTimeframeChange` 回调写回 URL，禁止子组件 `useState` 维护独立 timeframe；图表显示周期不得改变 1d+15m 监控配置或 1m 事件触发口径。
 10. 请求门控：`useWatchlistMonitorStatus` 和 `useInstruments` 必须通过 `enabled` 参数按 scope 互斥启用（watchlist scope 只启用 monitor-status，market scope 且搜索词 trim 后 ≥2 字符才启用 instruments）；`useStockResearchData` 不得请求 `MarketWorkspace` 未使用的 watchlist/batchInstruments/stockMemo。
 11. URL 状态保留：`/market` URL 的 scope/symbol/timeframe/source/strategy/event_id 进入 URL（可分享、刷新恢复）；切换周期、切换 scope、选择新股票时必须保留其他字段；选择新股票时清除旧 `event_id`；`event_id` 本轮仅解析、保留并传递，尚未被工作区消费（不实现自然语言事件解释）。
-12. `StockDetailPage` 的 `event_id` 消费放下一阶段统一。
+12. 左栏选择上下文重置（阶段三最终验收确立）：从 `MarketInstrumentPane` 选择任意股票时必须写 `source='watchlist'`、`strategy='watchlist_monitor'`、`eventId=null`（退出 selection 上下文）；用户切换 scope（watchlist 或 market）时也必须退出 selection 上下文并清除旧 `event_id`；timeframe 在上述操作中继续保留。状态转换必须通过纯函数 `selectInstrumentFromMarketPane(state, newSymbol)` 和 `changeMarketScope(state, newScope)` 处理，禁止在多个 callback 中重复拼对象。
+13. 搜索结果渲染门控：`MarketInstrumentPane` 中仅在 `scope==='market' && canSearch`（关键词 trim 后 ≥2 字符）时渲染 `searchResults`；关键词不足 2 字符、清空输入或切换 scope 时不得显示缓存结果。Query 仍通过 `enabled` 门控，不条件调用 Hook。
+14. 行情状态文案：`StockResearchWorkspace` 不得在 15m/1h/1w/1mo 显示"日线回退"；非实时非降级时统一显示"行情回退"；partial 文案必须包含当前周期（如"盘中 partial bar（15m）"），禁止所有周期统一显示"日线"。
+15. `StockDetailPage` 的 `event_id` 消费放下一阶段统一。
 
 ***
 
