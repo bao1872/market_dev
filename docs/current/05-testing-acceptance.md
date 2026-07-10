@@ -338,6 +338,7 @@ orchestrator 状态机回归（`tests/test_after_close_orchestrator.py`，17 个
   - `repair_stale_after_close_snapshot_runs`：存在 `status='interrupted'/'failed'` 的 after_close job_run 且同 trade_date 的 `feature_snapshot_run.status='running'` 超阈值时，实际 snapshot 行数 ≥ 95% 标 `succeeded` 并写 `published_at`，否则标 `failed`；
   - `execute_after_close_run` 启动前自动调用 repair，避免 stuck running snapshot_run 阻塞新任务；
   - running orchestrator 或未达到 stale 阈值的 running snapshot_run 不被误修复。
+- **[两阶段 compute/write 一致性 - CHANGE-20260711-001]** `tests/test_feature_snapshot_consistency.py`（9 个用例）覆盖四类关键验收：① 旧路径 `compute_for_trade_date` 与新路径 `compute_records_for_trade_date` 逐字段深比较等价（正常 / 日线不足 / 缺 15m / 复权变化 4 场景 × 10 股）；② compute 阶段只读（monkeypatch `upsert_snapshot`/`bulk_upsert_records` 调即抛错，外部 reader session 查 0 行）；③ write 原子性（成功 commit 后一次性可见；第 2 批人为抛异常 rollback 后 0 条新数据，旧 `published` 数据仍完整）；④ loader 批量查询边界（`loader_batch_size=20` 时 20 股=3 次批量查询、40 股=6 次，常数次不逐股调 MDAS/pytdx）+ 50 股 compute-only smoke（RSS<1800MB 且无失控增长）；测试冻结业务时钟（`TRADE_DATE=2026-06-25`、monkeypatch `mdas.now_shanghai` 等）、禁用 pytdx 与 Redis cache，任何外部行情触达立即失败。
 
 Run service 回归（`tests/test_feature_snapshot_run_service.py`，6 个用例 - Phase 8 新增）：
 - `create_snapshot_run` 创建 `running` 记录；

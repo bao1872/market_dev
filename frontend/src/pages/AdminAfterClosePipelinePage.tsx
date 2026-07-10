@@ -32,7 +32,7 @@ import type {
   PipelineRunItem,
   FeatureSnapshotProgress,
 } from '@/api/endpoints'
-import { buildPipelineSteps, findPhaseStartedAt } from './afterClosePipelinePhases'
+import { buildPipelineSteps } from './afterClosePipelinePhases'
 
 // ===== 5 阶段时间线定义（与后端 _PHASE_KEYS 严格对齐）=====
 // 由 ./afterClosePipelinePhases 提供 buildPipelineSteps()，此处不再内联旧 8 步骤常量。
@@ -183,17 +183,13 @@ function PipelineTimeline({ steps }: { steps: PipelineStep[] }) {
 // ===== feature_snapshot 进度 + 速度/ETA =====
 // 数值防御：processed/total/computed_count/written_count/snapshot_count/failed_count
 // 必须 Number.isFinite 且非负，percent 限制在 0-100。
-// 速度/ETA 由后端基于 started_at / updated_at 计算并通过 progress 上报（speed_per_minute /
-// eta_seconds），前端只展示，禁止用 Date.now() 伪造实时；仅在后端缺失这些字段时回退到基于
-// 服务器时间戳（effectiveStart + updated_at）的客户端估算，且仅在任务仍 running 时展示动态 ETA。
+// 速度/ETA 完全由后端基于 started_at / updated_at 计算并通过 progress 上报
+// （speed_per_minute / eta_seconds）；前端只展示，禁止用 Date.now() 或任何客户端估算伪造实时。
+// 完成状态后端不再上报 eta_seconds，故前端自然不显示 ETA。
 function FeatureSnapshotProgress({
   progress,
-  startedAt,
-  running,
 }: {
   progress: FeatureSnapshotProgress
-  startedAt: string | null
-  running: boolean
 }) {
   const toNonNegInt = (v: unknown): number => {
     const n = Number(v)
@@ -210,16 +206,11 @@ function FeatureSnapshotProgress({
   const updatedAt =
     typeof progress['updated_at'] === 'string' ? (progress['updated_at'] as string) : null
 
-  // 后端 progress 内带 started_at 优先，否则用 run 级 startedAt
-  const backendStartedAt =
-    typeof progress['started_at'] === 'string' ? (progress['started_at'] as string) : null
-  const effectiveStart = backendStartedAt ?? startedAt
-
   // percent 限制在 0-100（防御 total<=0 或脏数据导致越界）
   const rawPercent = total > 0 ? (processed / total) * 100 : 0
   const percent = Math.min(100, Math.max(0, rawPercent))
 
-  // 优先用后端上报的 speed_per_minute / eta_seconds；缺失时回退客户端估算（仍基于服务器时间戳）。
+  // 仅使用后端上报的 speed_per_minute / eta_seconds；不回退任何客户端估算。
   let speedPerMinute: number | null = null
   let etaSeconds: number | null = null
   if (
@@ -233,25 +224,6 @@ function FeatureSnapshotProgress({
     Number.isFinite(progress['eta_seconds'])
   ) {
     etaSeconds = progress['eta_seconds'] as number
-  }
-  if (
-    (speedPerMinute == null || etaSeconds == null) &&
-    running &&
-    effectiveStart &&
-    updatedAt &&
-    processed > 0
-  ) {
-    const startMs = new Date(effectiveStart).getTime()
-    const updatedMs = new Date(updatedAt).getTime()
-    const elapsed = (updatedMs - startMs) / 1000
-    if (Number.isFinite(startMs) && Number.isFinite(updatedMs) && elapsed > 0) {
-      const speedPerSec = processed / elapsed
-      if (speedPerMinute == null && speedPerSec > 0) speedPerMinute = speedPerSec * 60
-      const remain = total - processed
-      if (etaSeconds == null && remain > 0 && speedPerSec > 0) {
-        etaSeconds = remain / speedPerSec
-      }
-    }
   }
 
   return (
@@ -635,8 +607,6 @@ export default function AdminAfterClosePipelinePage() {
                 {afterCloseRun.feature_snapshot_progress && (
                   <FeatureSnapshotProgress
                     progress={afterCloseRun.feature_snapshot_progress}
-                    startedAt={findPhaseStartedAt(pipeline?.steps, 'feature_snapshot')}
-                    running={afterCloseRun?.status === 'running'}
                   />
                 )}
               </>

@@ -1074,12 +1074,12 @@ async def execute_after_close_run(
                     job_run_id, worker_id
                 )
                 async with AsyncSessionLocal() as db:
-                    # compute 阶段：逐批 DB-only 加载 -> 纯计算 -> records（只读）
+                    # compute 阶段：逐批 DB-only 加载 -> 纯计算 -> records（只读，不写库）
                     records, compute_stats = await compute_records_for_trade_date(
                         db, trade_date, cached_instrument_ids,
                         progress_callback=progress_callback,
                     )
-                    # write 阶段：短事务 bulk upsert（只 flush，caller 单次 commit）
+                    # write 阶段：短事务 bulk upsert（只 flush，未 commit）
                     written_count = await bulk_upsert_records(db, records)
                     # write 阶段进度回调（phase=write），前端展示后端已写数量
                     try:
@@ -1099,10 +1099,31 @@ async def execute_after_close_run(
                         failed_count=compute_stats.get("failed_count", 0),
                         started_at=started_at_dt,
                     )
+                    # [原子性] bulk upsert + finish_snapshot_run(published_at) 同一短事务，
+                    # 仅此处 commit 一次。compute/upsert/finish 任一步失败则 session 退出
+                    # 自动 rollback，不进入成功 commit，保证旧 published run 下无新旧混合。
+                    from app.models.stock_feature_snapshot_run import (
+                        StockFeatureSnapshotRun,
+                    )
+                    run_to_finish = await db.get(
+                        StockFeatureSnapshotRun, snapshot_run_id
+                    )
+                    if run_to_finish is not None:
+                        await finish_snapshot_run(
+                            db, run_to_finish,
+                            status="succeeded",
+                            snapshot_count=written_count,
+                            failed_count=compute_stats.get("failed_count", 0) if compute_stats else 0,
+                            expected_count=len(cached_instrument_ids),
+                            metadata={
+                                "source": "after_close_orchestrator",
+                                "scope": "full",
+                            },
+                        )
                     await db.commit()
             except RuntimeError as snapshot_exc:
-                # [Blocker2] 失败比例超阈值 / RSS 超限：session 退出自动 rollback 半成品行。
-                # 异常暂存，先 finalize run 为 failed，再向上传播触发 orchestrator FAILED。
+                # [Blocker2] 失败比例超阈值 / RSS 超限：write session 退出自动 rollback
+                # 半成品行；异常暂存，下方失败分支独立事务标记 run 为 failed。
                 snapshot_error = snapshot_exc
                 logger.error(
                     "[AfterClose] feature_snapshot 失败比例超阈值或 RSS 超限，"
@@ -1110,7 +1131,7 @@ async def execute_after_close_run(
                     trade_date, snapshot_exc,
                 )
             except Exception as snapshot_exc:
-                # 其他异常同样暂存，先 finalize run 为 failed
+                # 其他异常同样暂存，下方失败分支标记 run 为 failed
                 snapshot_error = snapshot_exc
                 logger.error(
                     "[AfterClose] feature_snapshot 异常: trade_date=%s, error=%s",
@@ -1124,14 +1145,18 @@ async def execute_after_close_run(
                 except asyncio.CancelledError:
                     pass
 
-            # [Phase7] Finalize run（独立 session，保证 run 状态持久化）
-            async with AsyncSessionLocal() as db:
-                from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
-                run_to_finish = await db.get(StockFeatureSnapshotRun, snapshot_run_id)
-                if run_to_finish is not None:
-                    if snapshot_error is not None:
-                        # [Blocker Fix] failed run 也写入 scope='full'（虽不发布，
-                        # 但保持 metadata 一致性，便于追溯）
+            # 失败路径：write session 已随异常退出（未 commit，半成品 rollback）。
+            # 在独立事务将 running run 标记为 failed（published_at 保持 None，watchlist
+            # 不可读），再向上传播异常触发 orchestrator FAILED，跳过 publishing。
+            if snapshot_error is not None:
+                async with AsyncSessionLocal() as db:
+                    from app.models.stock_feature_snapshot_run import (
+                        StockFeatureSnapshotRun,
+                    )
+                    run_to_finish = await db.get(
+                        StockFeatureSnapshotRun, snapshot_run_id
+                    )
+                    if run_to_finish is not None:
                         await finish_snapshot_run(
                             db, run_to_finish,
                             status="failed",
@@ -1141,24 +1166,7 @@ async def execute_after_close_run(
                                 "scope": "full",
                             },
                         )
-                    else:
-                        # [Blocker Fix] succeeded run 必须写入 scope='full'，
-                        # watchlist gate 据此判断可读
-                        await finish_snapshot_run(
-                            db, run_to_finish,
-                            status="succeeded",
-                            snapshot_count=written_count,
-                            failed_count=compute_stats.get("failed_count", 0) if compute_stats else 0,
-                            expected_count=len(cached_instrument_ids),
-                            metadata={
-                                "source": "after_close_orchestrator",
-                                "scope": "full",
-                            },
-                        )
                     await db.commit()
-
-            # 失败时向上传播 RuntimeError，触发 orchestrator FAILED 状态写入，跳过 publishing
-            if snapshot_error is not None:
                 raise snapshot_error
 
             logger.info(

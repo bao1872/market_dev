@@ -70,22 +70,22 @@ queued → refreshing_daily → checking_coverage → creating_dsa
 任意步骤异常 → failed
 ```
 
-`feature_snapshot` 步骤位于 `quality_gate` 与 `publishing` 之间，调用 `feature_snapshot_service.compute_for_trade_date` 为当日 active A 股全集生成 `stock_feature_snapshots` 行：
+`feature_snapshot` 步骤位于 `quality_gate` 与 `publishing` 之间，调用 `feature_snapshot_service.compute_records_for_trade_date` 为当日 active A 股全集生成 `stock_feature_snapshots` 行。当前采用 **两阶段 compute / write** 架构（CHANGE-20260711-001）：
 
 - 使用独立 `AsyncSessionLocal`，不依赖 HTTP 请求 session；
-- 单股失败写 `degraded_reasons` 不阻断其他股票；
-- 失败比例超过 `failure_threshold`（默认 0.3）抛 `RuntimeError`；
-- **事务边界**：`compute_for_trade_date` 不内部 commit，只 upsert（flush）+ 检查阈值；caller（`after_close_orchestrator`）显式控制：
-  - 成功（`failure_rate <= threshold`）→ `db.commit()`，进入 `publishing`；
-  - `RuntimeError`（超阈值）→ 显式 `db.rollback()` 丢弃半成品行 → 异常向上传播 → orchestrator 写 `failed` 事件 → **不进入 publishing**；
+- **compute 阶段（只读）**：`compute_records_for_trade_date` 仅做 DB-only 批量加载 + 纯函数计算 → 返回 `list[dict]` records，**不 upsert / 不 flush / 不 commit snapshot**，不持写事务；
+- **write 阶段（短事务原子）**：`bulk_upsert_records`（每批 100 只 `flush`，不 commit）与 `finish_snapshot_run`（写 `published_at`）在**同一 `db` session 内，仅 `feature_snapshot` 步骤末尾 `await db.commit()` 一次**；
+- 单股失败写 `degraded_reasons` 不阻断其他股票；失败比例超过 `failure_threshold`（默认 0.3）或 RSS 超过 `_FEATURE_SNAPSHOT_MAX_RSS_MB`（默认 1800MB）抛 `RuntimeError`：write session 异常退出自动 rollback（半成品行不落库），异常暂存后由失败分支处理；
+- **原子性保证**：`bulk_upsert_records` + `finish_snapshot_run(published_at)` 同一短事务单次 commit，任一写入失败整体 rollback，避免旧 `published` run 下新旧混合；`compute` / `upsert` / `finish` 任一步失败均无部分可见的新数据；
 - `feature_snapshot` 失败时 `last_completed_step` 不推进，重试从 `quality_gate` 之后重新进入；
 - 完成后更新心跳与 `last_completed_step='feature_snapshot'`；
-- **Heartbeat 保活（CHANGE-20260709-003）**：feature_snapshot 阶段启动后台 `_job_run_heartbeat_loop`（间隔 30s），并在 `compute_for_trade_date` 每批完成后通过 `_build_feature_snapshot_progress_callback` 刷新 `heartbeat_at`、`lease_expires_at` 与 `metadata.feature_snapshot_progress`，防止长计算被 watchdog/recovery 误判为 stale；进度事件按每 500 只股票采样写入 `job_run_events`，避免事件表膨胀；
-- **Run lifecycle（Phase 8 新增）**：feature_snapshot 步骤前后写 `stock_feature_snapshot_runs`：
+- **Heartbeat 保活（CHANGE-20260709-003）**：feature_snapshot 阶段启动后台 `_job_run_heartbeat_loop`（间隔 30s），并在 compute / write 每批完成后通过 `_build_feature_snapshot_progress_callback`（**独立短 session**，只提交 job metadata/events，不提交主事务）刷新 `heartbeat_at`、`lease_expires_at` 与 `metadata.feature_snapshot_progress`；速度/ETA 全由后端基于 `started_at`/`updated_at` 计算并通过 progress 上报（`speed_per_minute` / `eta_seconds`），前端只展示、禁止用 `Date.now()` 估算，完成状态后端不再上报 `eta_seconds` 故前端自然不显示 ETA；进度事件按每 500 只股票采样写入 `job_run_events`，避免事件表膨胀；
+- **Run lifecycle**：feature_snapshot 步骤前后写 `stock_feature_snapshot_runs`：
   - 开始时 `create_snapshot_run(trade_date, 'after_close')` 创建 `running` run（独立 session + commit），并立即把 `feature_snapshot_run_id` / `last_started_step=feature_snapshot` 写回 orchestrator metadata；
-  - 成功时 `finish_snapshot_run(status='succeeded')` 写 `published_at`（独立 session + commit）；
-  - 失败时 `finish_snapshot_run(status='failed')` 不写 `published_at`（独立 session + commit），再向上传播异常触发 orchestrator FAILED；
-  - run 记录在独立 session 中提交，保证 snapshot session rollback 不影响 run 状态持久化。
+  - 成功时 `bulk_upsert_records` + `finish_snapshot_run(status='succeeded')` 写 `published_at` 在**同一 write session 单次 commit**（非独立 session）；
+  - 失败时 write session 已随异常退出（未 commit，半成品 rollback），在**独立短 session** 将 run 标记 `finish_snapshot_run(status='failed')`（不写 `published_at`），再向上传播异常触发 orchestrator FAILED；
+  - run 失败记录在独立 session 中提交，保证 write session rollback 不影响 run 状态持久化；
+- **性能边界（CHANGE-20260711-001）**：loader 采用 DB-only 批量查询（daily / 15min / adj-factor 一次批量拉全市场，调用次数为常数，不逐股调 MDAS/pytdx）；生产默认单进程内 compute+write，无 multiprocessing、无持久缓存、无新表/索引/migration。
 
 断点恢复路径（`last_completed_step` → 已完成步骤集合）：
 
