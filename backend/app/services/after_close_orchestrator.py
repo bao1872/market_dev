@@ -31,7 +31,7 @@ import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -45,7 +45,8 @@ from app.models.strategy_run import StrategyRun
 from app.repositories import strategy_result_repository
 from app.services.bars_scheduler_service import BarsSchedulerService
 from app.services.feature_snapshot_service import (
-    compute_for_trade_date,
+    bulk_upsert_records,
+    compute_records_for_trade_date,
     create_snapshot_run,
     finish_snapshot_run,
     get_active_a_share_instruments,
@@ -397,10 +398,24 @@ def _build_feature_snapshot_progress_callback(
 
     每处理完一个 batch 调用，更新 orchestrator job_run 的心跳、lease 与 metadata 进度。
     每 _FEATURE_SNAPSHOT_PROGRESS_EVENT_INTERVAL 只股票写一次 info 事件，避免事件表膨胀。
+
+    metadata.feature_snapshot_progress 由后端计算全部展示字段（前端只读取，不再自行
+    用 Date.now() 推算）：phase / processed / total / computed_count / written_count /
+    failed_count / started_at / updated_at / speed_per_minute / eta_seconds。
+    速度与 ETA 用 updated_at - started_at 计算，只在 phase='compute' 且有进度时给出。
     """
     last_event_processed = 0
 
-    async def _callback(*, processed: int, total: int, snapshot_count: int, failed_count: int) -> None:
+    async def _callback(
+        *,
+        phase: str = "compute",
+        processed: int,
+        total: int,
+        computed_count: int = 0,
+        written_count: int = 0,
+        failed_count: int = 0,
+        started_at: datetime | None = None,
+    ) -> None:
         nonlocal last_event_processed
         try:
             async with AsyncSessionLocal() as db:
@@ -415,14 +430,38 @@ def _build_feature_snapshot_progress_callback(
                 if worker_id is not None:
                     job_run.worker_instance_id = worker_id
 
+                # 后端计算 speed_per_minute / eta_seconds（前端只展示）
+                speed_per_minute: float | None = None
+                eta_seconds: float | None = None
+                started_iso: str | None = None
+                if started_at is not None:
+                    started_iso = started_at.isoformat()
+                    elapsed = (
+                        datetime.now(UTC) - started_at
+                    ).total_seconds()
+                    # 仅 compute 阶段进行中且已有进度时给出速度/ETA
+                    if phase == "compute" and elapsed > 0 and processed > 0:
+                        speed_per_sec = processed / elapsed
+                        speed_per_minute = round(speed_per_sec * 60, 2)
+                        remain = total - processed
+                        if remain > 0 and speed_per_sec > 0:
+                            eta_seconds = round(remain / speed_per_sec, 1)
+
                 # 更新 metadata 中的进度（保留其他字段）
                 meta = _parse_metadata(job_run)
                 meta["feature_snapshot_progress"] = {
+                    "phase": phase,
                     "processed": processed,
                     "total": total,
-                    "snapshot_count": snapshot_count,
+                    "computed_count": computed_count,
+                    "written_count": written_count,
                     "failed_count": failed_count,
+                    # 兼容旧字段：snapshot_count = 已写入数（write 阶段）或已计算数（compute 阶段）
+                    "snapshot_count": written_count if phase == "write" else computed_count,
+                    "started_at": started_iso,
                     "updated_at": now.isoformat(),
+                    "speed_per_minute": speed_per_minute,
+                    "eta_seconds": eta_seconds,
                 }
                 job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
 
@@ -434,14 +473,17 @@ def _build_feature_snapshot_progress_callback(
                         step=AfterCloseRunStatus.FEATURE_SNAPSHOT.value,
                         level="info",
                         message=(
-                            f"feature_snapshot 进度: processed={processed}/{total}, "
-                            f"snapshot_count={snapshot_count}, failed_count={failed_count}"
+                            f"feature_snapshot 进度[{phase}]: processed={processed}/{total}, "
+                            f"computed={computed_count}, written={written_count}, "
+                            f"failed={failed_count}"
                         ),
                         payload={
                             "event_type": "progress",
+                            "phase": phase,
                             "processed": processed,
                             "total": total,
-                            "snapshot_count": snapshot_count,
+                            "computed_count": computed_count,
+                            "written_count": written_count,
                             "failed_count": failed_count,
                         },
                     )
@@ -1017,7 +1059,12 @@ async def execute_after_close_run(
                 await db.commit()
 
             # 计算 snapshots（独立 session + 后台心跳保活 + 进度回调）
-            snapshot_result: dict[str, Any] | None = None
+            # [性能] 两阶段：compute（只读，纯计算 -> records，不写库、不持写事务）
+            # -> 失败率/RSS 超阈值则 session 退出自动 rollback，不进入 write；
+            # write（短事务 bulk upsert，每批 100 只 flush，与 finish_run 同事务仅
+            # commit 一次；任一写入失败整体 rollback，避免旧 published run 下新旧混合）。
+            compute_stats: dict[str, Any] | None = None
+            written_count: int = 0
             snapshot_error: Exception | None = None
             heartbeat_task = asyncio.create_task(
                 _job_run_heartbeat_loop(job_run_id, worker_id, interval=30)
@@ -1027,17 +1074,38 @@ async def execute_after_close_run(
                     job_run_id, worker_id
                 )
                 async with AsyncSessionLocal() as db:
-                    snapshot_result = await compute_for_trade_date(
+                    # compute 阶段：逐批 DB-only 加载 -> 纯计算 -> records（只读）
+                    records, compute_stats = await compute_records_for_trade_date(
                         db, trade_date, cached_instrument_ids,
                         progress_callback=progress_callback,
                     )
+                    # write 阶段：短事务 bulk upsert（只 flush，caller 单次 commit）
+                    written_count = await bulk_upsert_records(db, records)
+                    # write 阶段进度回调（phase=write），前端展示后端已写数量
+                    try:
+                        started_at_dt = (
+                            datetime.fromisoformat(compute_stats["started_at"])
+                            if compute_stats.get("started_at")
+                            else None
+                        )
+                    except (ValueError, KeyError):
+                        started_at_dt = None
+                    await progress_callback(
+                        phase="write",
+                        processed=len(cached_instrument_ids),
+                        total=len(cached_instrument_ids),
+                        computed_count=compute_stats.get("computed_count", 0),
+                        written_count=written_count,
+                        failed_count=compute_stats.get("failed_count", 0),
+                        started_at=started_at_dt,
+                    )
                     await db.commit()
             except RuntimeError as snapshot_exc:
-                # [Blocker2] 失败比例超阈值：snapshot session 已自动 rollback 半成品行。
+                # [Blocker2] 失败比例超阈值 / RSS 超限：session 退出自动 rollback 半成品行。
                 # 异常暂存，先 finalize run 为 failed，再向上传播触发 orchestrator FAILED。
                 snapshot_error = snapshot_exc
                 logger.error(
-                    "[AfterClose] feature_snapshot 失败比例超阈值，"
+                    "[AfterClose] feature_snapshot 失败比例超阈值或 RSS 超限，"
                     "snapshot session 已 rollback: trade_date=%s, error=%s",
                     trade_date, snapshot_exc,
                 )
@@ -1079,8 +1147,8 @@ async def execute_after_close_run(
                         await finish_snapshot_run(
                             db, run_to_finish,
                             status="succeeded",
-                            snapshot_count=snapshot_result.get("snapshot_count", 0) if snapshot_result else 0,
-                            failed_count=snapshot_result.get("failed_count", 0) if snapshot_result else 0,
+                            snapshot_count=written_count,
+                            failed_count=compute_stats.get("failed_count", 0) if compute_stats else 0,
                             expected_count=len(cached_instrument_ids),
                             metadata={
                                 "source": "after_close_orchestrator",
@@ -1097,8 +1165,8 @@ async def execute_after_close_run(
                 "[AfterClose] 特征快照生成完成: trade_date=%s, "
                 "snapshot_count=%s, failed_count=%s",
                 trade_date,
-                snapshot_result.get("snapshot_count") if snapshot_result else 0,
-                snapshot_result.get("failed_count") if snapshot_result else 0,
+                written_count,
+                compute_stats.get("failed_count") if compute_stats else 0,
             )
 
             # [Phase5] - feature_snapshot 完成，更新心跳 + 检查点

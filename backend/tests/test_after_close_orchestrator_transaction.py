@@ -84,7 +84,12 @@ async def test_progress_callback_commits_metadata_and_event_atomically():
     try:
         callback = _build_feature_snapshot_progress_callback(job_run_id)
         # processed=500 达到 _FEATURE_SNAPSHOT_PROGRESS_EVENT_INTERVAL 阈值，触发事件写入
-        await callback(processed=500, total=1000, snapshot_count=480, failed_count=20)
+        await callback(
+            phase="compute",
+            processed=500, total=1000,
+            computed_count=480, written_count=0, failed_count=20,
+            started_at=None,
+        )
 
         # 换新 session 验证 metadata_json 与 job_run_events 同时可见
         async with AsyncSessionLocal() as verify_db:
@@ -93,8 +98,10 @@ async def test_progress_callback_commits_metadata_and_event_atomically():
             meta = _parse_metadata(job_run)
             progress = meta.get("feature_snapshot_progress")
             assert progress is not None, "metadata 未写入 feature_snapshot_progress"
+            assert progress["phase"] == "compute"
             assert progress["processed"] == 500
             assert progress["total"] == 1000
+            assert progress["computed_count"] == 480
             assert progress["snapshot_count"] == 480
             assert progress["failed_count"] == 20
 
@@ -120,7 +127,12 @@ async def test_progress_callback_below_threshold_writes_metadata_only():
     try:
         callback = _build_feature_snapshot_progress_callback(job_run_id)
         # processed=100 < 500 阈值：只更新 metadata，不写事件
-        await callback(processed=100, total=1000, snapshot_count=95, failed_count=5)
+        await callback(
+            phase="compute",
+            processed=100, total=1000,
+            computed_count=95, written_count=0, failed_count=5,
+            started_at=None,
+        )
 
         async with AsyncSessionLocal() as verify_db:
             job_run = await verify_db.get(SchedulerJobRun, job_run_id)

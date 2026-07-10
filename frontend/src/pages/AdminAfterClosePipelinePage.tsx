@@ -27,7 +27,11 @@ import {
 } from '@/hooks/useApi'
 import { useToast } from '@/store/toast'
 import { shanghaiBusinessDate, formatShanghaiTime } from '@/utils/datetime'
-import type { PipelineStep, PipelineRunItem } from '@/api/endpoints'
+import type {
+  PipelineStep,
+  PipelineRunItem,
+  FeatureSnapshotProgress,
+} from '@/api/endpoints'
 import { buildPipelineSteps, findPhaseStartedAt } from './afterClosePipelinePhases'
 
 // ===== 5 阶段时间线定义（与后端 _PHASE_KEYS 严格对齐）=====
@@ -177,15 +181,17 @@ function PipelineTimeline({ steps }: { steps: PipelineStep[] }) {
 }
 
 // ===== feature_snapshot 进度 + 速度/ETA =====
-// 数值防御：processed/total/snapshot_count/failed_count 必须 Number.isFinite 且非负，
-// percent 限制在 0-100；速度/ETA 用后端上报的 progress.updated_at 计算（禁止用 Date.now()
-// 伪造实时），且仅在任务仍 running 时展示动态 ETA，已完成任务只显示最终进度与更新时间。
+// 数值防御：processed/total/computed_count/written_count/snapshot_count/failed_count
+// 必须 Number.isFinite 且非负，percent 限制在 0-100。
+// 速度/ETA 由后端基于 started_at / updated_at 计算并通过 progress 上报（speed_per_minute /
+// eta_seconds），前端只展示，禁止用 Date.now() 伪造实时；仅在后端缺失这些字段时回退到基于
+// 服务器时间戳（effectiveStart + updated_at）的客户端估算，且仅在任务仍 running 时展示动态 ETA。
 function FeatureSnapshotProgress({
   progress,
   startedAt,
   running,
 }: {
-  progress: Record<string, unknown>
+  progress: FeatureSnapshotProgress
   startedAt: string | null
   running: boolean
 }) {
@@ -196,28 +202,53 @@ function FeatureSnapshotProgress({
   }
   const processed = toNonNegInt(progress['processed'])
   const total = toNonNegInt(progress['total'])
+  const computedCount = toNonNegInt(progress['computed_count'])
+  const writtenCount = toNonNegInt(progress['written_count'])
   const snapshotCount = toNonNegInt(progress['snapshot_count'])
   const failedCount = toNonNegInt(progress['failed_count'])
+  const phase = typeof progress['phase'] === 'string' ? (progress['phase'] as string) : null
   const updatedAt =
     typeof progress['updated_at'] === 'string' ? (progress['updated_at'] as string) : null
+
+  // 后端 progress 内带 started_at 优先，否则用 run 级 startedAt
+  const backendStartedAt =
+    typeof progress['started_at'] === 'string' ? (progress['started_at'] as string) : null
+  const effectiveStart = backendStartedAt ?? startedAt
 
   // percent 限制在 0-100（防御 total<=0 或脏数据导致越界）
   const rawPercent = total > 0 ? (processed / total) * 100 : 0
   const percent = Math.min(100, Math.max(0, rawPercent))
 
-  // 速度/ETA：用后端上报的 progress.updated_at 减 feature_snapshot 阶段 started_at
-  // 估算已耗时（禁止用 Date.now() 伪造实时）；仅在任务仍 running 时展示动态 ETA，
-  // 已完成任务只显示最终进度与更新时间。
-  let speedPerSec: number | null = null
+  // 优先用后端上报的 speed_per_minute / eta_seconds；缺失时回退客户端估算（仍基于服务器时间戳）。
+  let speedPerMinute: number | null = null
   let etaSeconds: number | null = null
-  if (running && startedAt && updatedAt && processed > 0) {
-    const startMs = new Date(startedAt).getTime()
+  if (
+    typeof progress['speed_per_minute'] === 'number' &&
+    Number.isFinite(progress['speed_per_minute'])
+  ) {
+    speedPerMinute = progress['speed_per_minute'] as number
+  }
+  if (
+    typeof progress['eta_seconds'] === 'number' &&
+    Number.isFinite(progress['eta_seconds'])
+  ) {
+    etaSeconds = progress['eta_seconds'] as number
+  }
+  if (
+    (speedPerMinute == null || etaSeconds == null) &&
+    running &&
+    effectiveStart &&
+    updatedAt &&
+    processed > 0
+  ) {
+    const startMs = new Date(effectiveStart).getTime()
     const updatedMs = new Date(updatedAt).getTime()
     const elapsed = (updatedMs - startMs) / 1000
     if (Number.isFinite(startMs) && Number.isFinite(updatedMs) && elapsed > 0) {
-      speedPerSec = processed / elapsed
+      const speedPerSec = processed / elapsed
+      if (speedPerMinute == null && speedPerSec > 0) speedPerMinute = speedPerSec * 60
       const remain = total - processed
-      if (remain > 0 && speedPerSec > 0) {
+      if (etaSeconds == null && remain > 0 && speedPerSec > 0) {
         etaSeconds = remain / speedPerSec
       }
     }
@@ -232,6 +263,18 @@ function FeatureSnapshotProgress({
           {processed} / {total}（{percent.toFixed(1)}%）
         </b>
       </div>
+      {phase && (
+        <div className="toggle-row">
+          <span>阶段</span>
+          <b className="num">{phase}</b>
+        </div>
+      )}
+      <div className="toggle-row">
+        <span>已计算 / 已写入</span>
+        <b className="num">
+          {computedCount} / {writtenCount}
+        </b>
+      </div>
       <div className="toggle-row">
         <span>快照成功 / 失败</span>
         <b className="num">
@@ -244,10 +287,10 @@ function FeatureSnapshotProgress({
           <b className="num">{formatShanghaiTime(updatedAt)}</b>
         </div>
       )}
-      {speedPerSec != null && (
+      {speedPerMinute != null && (
         <div className="toggle-row">
           <span>估算速度</span>
-          <b className="num">{speedPerSec.toFixed(2)} 股/秒</b>
+          <b className="num">{speedPerMinute.toFixed(1)} 股/分钟</b>
         </div>
       )}
       {etaSeconds != null && (

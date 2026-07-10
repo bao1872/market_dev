@@ -2309,6 +2309,22 @@ export interface PipelineStep {
 }
 
 /** after_close_orchestrator job_run 摘要（对齐后端 AfterCloseRunSummary） */
+/** feature_snapshot 进度（对齐后端 _build_feature_snapshot_progress_callback 写入的 metadata.feature_snapshot_progress）。
+ *  速度/ETA 由后端按 started_at / updated_at 计算并随进度上报，前端只展示，禁止用 Date.now() 伪造实时。 */
+export interface FeatureSnapshotProgress {
+  phase?: 'compute' | 'write' | string
+  processed?: number
+  total?: number
+  computed_count?: number
+  written_count?: number
+  failed_count?: number
+  snapshot_count?: number
+  started_at?: string | null
+  updated_at?: string | null
+  speed_per_minute?: number | null
+  eta_seconds?: number | null
+}
+
 export interface AfterCloseRunSummary {
   job_run_id: string
   status: string
@@ -2321,7 +2337,7 @@ export interface AfterCloseRunSummary {
   error_message: string | null
   worker_instance_id: string | null
   trade_date: string | null
-  feature_snapshot_progress: Record<string, unknown> | null
+  feature_snapshot_progress: FeatureSnapshotProgress | null
   feature_snapshot_stalled: boolean
 }
 

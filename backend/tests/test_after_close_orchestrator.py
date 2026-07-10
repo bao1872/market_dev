@@ -365,8 +365,14 @@ async def test_execute_writes_status_events(db_session) -> None:
         "app.services.after_close_orchestrator.get_active_a_share_instruments",
         new=AsyncMock(return_value=[uuid.uuid4()]),
     ), patch(
-        "app.services.after_close_orchestrator.compute_for_trade_date",
-        new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
+        "app.services.after_close_orchestrator.compute_records_for_trade_date",
+        new=AsyncMock(return_value=(
+            [{"instrument_id": uuid.uuid4()}],
+            {"computed_count": 1, "failed_count": 0, "total": 1},
+        )),
+    ), patch(
+        "app.services.after_close_orchestrator.bulk_upsert_records",
+        new=AsyncMock(return_value=1),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -524,8 +530,11 @@ async def test_execute_feature_snapshot_failure_skips_publishing(db_session) -> 
         "app.services.after_close_orchestrator.get_active_a_share_instruments",
         new=AsyncMock(return_value=[uuid.uuid4()]),
     ), patch(
-        "app.services.after_close_orchestrator.compute_for_trade_date",
+        "app.services.after_close_orchestrator.compute_records_for_trade_date",
         new=AsyncMock(side_effect=snapshot_exc),
+    ), patch(
+        "app.services.after_close_orchestrator.bulk_upsert_records",
+        new=AsyncMock(return_value=0),
     ):
         with pytest.raises(RuntimeError, match="失败比例"):
             await execute_after_close_run(
@@ -633,8 +642,14 @@ async def test_execute_feature_snapshot_success_creates_succeeded_run(db_session
         "app.services.after_close_orchestrator.get_active_a_share_instruments",
         new=AsyncMock(return_value=[uuid.uuid4()]),
     ), patch(
-        "app.services.after_close_orchestrator.compute_for_trade_date",
-        new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
+        "app.services.after_close_orchestrator.compute_records_for_trade_date",
+        new=AsyncMock(return_value=(
+            [{"instrument_id": uuid.uuid4()}],
+            {"computed_count": 1, "failed_count": 0, "total": 1},
+        )),
+    ), patch(
+        "app.services.after_close_orchestrator.bulk_upsert_records",
+        new=AsyncMock(return_value=1),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -742,8 +757,11 @@ async def test_execute_feature_snapshot_failure_creates_failed_run(db_session) -
         "app.services.after_close_orchestrator.get_active_a_share_instruments",
         new=AsyncMock(return_value=[uuid.uuid4()]),
     ), patch(
-        "app.services.after_close_orchestrator.compute_for_trade_date",
+        "app.services.after_close_orchestrator.compute_records_for_trade_date",
         new=AsyncMock(side_effect=snapshot_exc),
+    ), patch(
+        "app.services.after_close_orchestrator.bulk_upsert_records",
+        new=AsyncMock(return_value=0),
     ):
         with pytest.raises(RuntimeError, match="失败比例"):
             await execute_after_close_run(
@@ -861,9 +879,9 @@ async def test_execute_starts_heartbeat_loop_during_long_refresh(db_session) -> 
             dsa_poll_timeout=1,
         )
 
-    # 验证心跳任务被启动 1 次
-    assert len(heartbeat_calls) == 1, (
-        f"应启动 1 次后台心跳任务，实际 {len(heartbeat_calls)} 次"
+    # 验证心跳任务被启动（refresh 与 feature_snapshot 阶段各启动一次，故 >= 1）
+    assert len(heartbeat_calls) >= 1, (
+        f"应至少启动 1 次后台心跳任务，实际 {len(heartbeat_calls)} 次"
     )
     # 验证 refresh_all_instruments 被调用（事件已 set）
     assert refresh_started.is_set(), "refresh_all_instruments 应被调用"
@@ -964,14 +982,17 @@ async def test_feature_snapshot_stage_starts_heartbeat_loop(db_session) -> None:
         except _asyncio.CancelledError:
             pass
 
-    # 模拟 compute_for_trade_date 耗时，期间心跳任务应已启动
+    # 模拟 compute_records_for_trade_date 耗时，期间心跳任务应已启动
     snapshot_started = _asyncio.Event()
 
     async def _fake_compute(*args, **kwargs):
         snapshot_started.set()
         # 让心跳任务有机会被创建
         await _asyncio.sleep(0.05)
-        return {"snapshot_count": 1, "failed_count": 0}
+        return (
+            [{"instrument_id": uuid.uuid4()}],
+            {"computed_count": 1, "failed_count": 0, "total": 1},
+        )
 
     with patch(
         "app.services.after_close_orchestrator.AsyncSessionLocal",
@@ -1003,8 +1024,11 @@ async def test_feature_snapshot_stage_starts_heartbeat_loop(db_session) -> None:
         "app.services.after_close_orchestrator.get_active_a_share_instruments",
         new=AsyncMock(return_value=[uuid.uuid4()]),
     ), patch(
-        "app.services.after_close_orchestrator.compute_for_trade_date",
+        "app.services.after_close_orchestrator.compute_records_for_trade_date",
         new=_fake_compute,
+    ), patch(
+        "app.services.after_close_orchestrator.bulk_upsert_records",
+        new=AsyncMock(return_value=1),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -1013,12 +1037,12 @@ async def test_feature_snapshot_stage_starts_heartbeat_loop(db_session) -> None:
             dsa_poll_timeout=1,
         )
 
-    # 验证 feature_snapshot 阶段心跳任务被启动 1 次
-    assert len(heartbeat_calls) == 1, (
-        f"应启动 1 次 feature_snapshot 后台心跳任务，实际 {len(heartbeat_calls)} 次"
+    # 验证 feature_snapshot 阶段心跳任务被启动（refresh 与 feature_snapshot 各一次，故 >= 1）
+    assert len(heartbeat_calls) >= 1, (
+        f"应至少启动 1 次 feature_snapshot 后台心跳任务，实际 {len(heartbeat_calls)} 次"
     )
     assert heartbeat_calls[0]["args"][0] == job_run.id
-    assert snapshot_started.is_set(), "compute_for_trade_date 应被调用"
+    assert snapshot_started.is_set(), "compute_records_for_trade_date 应被调用"
 
 
 @pytest.mark.asyncio
@@ -1055,9 +1079,15 @@ async def test_feature_snapshot_progress_callback_updates_heartbeat_and_metadata
         progress_callback = kwargs.get("progress_callback")
         if progress_callback is not None:
             await progress_callback(
-                processed=1000, total=1000, snapshot_count=999, failed_count=1
+                phase="compute",
+                processed=1000, total=1000,
+                computed_count=999, written_count=0, failed_count=1,
+                started_at=None,
             )
-        return {"snapshot_count": 999, "failed_count": 1}
+        return (
+            [{"instrument_id": uuid.uuid4()}],
+            {"computed_count": 999, "failed_count": 1, "total": 1000},
+        )
 
     with patch(
         "app.services.after_close_orchestrator.AsyncSessionLocal",
@@ -1089,8 +1119,11 @@ async def test_feature_snapshot_progress_callback_updates_heartbeat_and_metadata
         "app.services.after_close_orchestrator.get_active_a_share_instruments",
         new=AsyncMock(return_value=[uuid.uuid4()]),
     ), patch(
-        "app.services.after_close_orchestrator.compute_for_trade_date",
+        "app.services.after_close_orchestrator.compute_records_for_trade_date",
         new=_fake_compute,
+    ), patch(
+        "app.services.after_close_orchestrator.bulk_upsert_records",
+        new=AsyncMock(return_value=999),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -1107,13 +1140,17 @@ async def test_feature_snapshot_progress_callback_updates_heartbeat_and_metadata
     assert original_lease is not None
     assert job_run.lease_expires_at > original_lease
 
-    # 验证 metadata 含进度
+    # 验证 metadata 含进度（最终为 write 阶段：computed/written 来自 stats，
+    # processed/total 来自真实 instrument 数，phase=write）
     assert job_run.metadata_json is not None
     meta = json.loads(job_run.metadata_json)
     assert "feature_snapshot_progress" in meta
     progress = meta["feature_snapshot_progress"]
-    assert progress["processed"] == 1000
-    assert progress["total"] == 1000
+    assert progress["phase"] == "write"
+    assert progress["processed"] == 1
+    assert progress["total"] == 1
+    assert progress["computed_count"] == 999
+    assert progress["written_count"] == 999
     assert progress["snapshot_count"] == 999
     assert progress["failed_count"] == 1
     assert "feature_snapshot_run_id" in meta
@@ -1426,8 +1463,14 @@ async def test_repair_clears_stuck_run_before_new_after_close(db_session) -> Non
         "app.services.after_close_orchestrator.get_active_a_share_instruments",
         new=AsyncMock(return_value=[uuid.uuid4()]),
     ), patch(
-        "app.services.after_close_orchestrator.compute_for_trade_date",
-        new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
+        "app.services.after_close_orchestrator.compute_records_for_trade_date",
+        new=AsyncMock(return_value=(
+            [{"instrument_id": uuid.uuid4()}],
+            {"computed_count": 1, "failed_count": 0, "total": 1},
+        )),
+    ), patch(
+        "app.services.after_close_orchestrator.bulk_upsert_records",
+        new=AsyncMock(return_value=1),
     ):
         await execute_after_close_run(
             job_run_id=new_job_run.id,
@@ -1510,8 +1553,14 @@ async def test_execute_calls_repair_at_start(db_session) -> None:
         "app.services.after_close_orchestrator.get_active_a_share_instruments",
         new=AsyncMock(return_value=[uuid.uuid4()]),
     ), patch(
-        "app.services.after_close_orchestrator.compute_for_trade_date",
-        new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
+        "app.services.after_close_orchestrator.compute_records_for_trade_date",
+        new=AsyncMock(return_value=(
+            [{"instrument_id": uuid.uuid4()}],
+            {"computed_count": 1, "failed_count": 0, "total": 1},
+        )),
+    ), patch(
+        "app.services.after_close_orchestrator.bulk_upsert_records",
+        new=AsyncMock(return_value=1),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,

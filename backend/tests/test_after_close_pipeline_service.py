@@ -334,7 +334,10 @@ async def test_progress_callback_emits_event_per_interval(monkeypatch):
     invocations = 0
     while processed <= total:
         await callback(
-            processed=processed, total=total, snapshot_count=processed, failed_count=0
+            phase="compute",
+            processed=processed, total=total,
+            computed_count=processed, written_count=0, failed_count=0,
+            started_at=None,
         )
         invocations += 1
         processed += interval
