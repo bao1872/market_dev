@@ -1,0 +1,138 @@
+// [MarketWorkspace] - 描述: 统一行情工作区三栏布局样式（CSS Module）
+
+.workspace {
+  display: flex;
+  height: calc(100vh - 56px); // topbar 高度
+  overflow: hidden;
+}
+
+.leftPane {
+  width: 280px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid #232838;
+  background: #131722;
+}
+
+.scopeTabs {
+  display: flex;
+  border-bottom: 1px solid #232838;
+}
+
+.scopeTab {
+  flex: 1;
+  padding: 10px 0;
+  border: 0;
+  background: transparent;
+  color: #8ea0b7;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: 0.12s;
+
+  &:hover {
+    color: #d7e3f2;
+  }
+}
+
+.scopeTabActive {
+  color: #fff;
+  box-shadow: inset 0 -2px 0 #2962ff;
+}
+
+.leftPaneContent {
+  flex: 1;
+  overflow: hidden;
+}
+
+.centerRight {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+.centerPane {
+  flex: 1;
+  overflow: auto;
+  min-width: 0;
+}
+
+.rightPane {
+  width: 340px;
+  flex-shrink: 0;
+  border-left: 1px solid #232838;
+  background: #131722;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.rightPaneHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid #232838;
+}
+
+.rightPaneTitle {
+  font-weight: 650;
+  font-size: 13px;
+  color: #d7e3f2;
+}
+
+.collapseBtn {
+  width: 26px;
+  height: 26px;
+  border: 1px solid #2a2f3c;
+  background: #1a1e28;
+  color: #b7bdca;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 16px;
+  display: grid;
+  place-items: center;
+
+  &:hover {
+    border-color: #46516b;
+    color: #fff;
+  }
+}
+
+.expandBtn {
+  width: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-left: 1px solid #232838;
+  background: #131722;
+  color: #8ea0b7;
+  cursor: pointer;
+  font-size: 16px;
+
+  &:hover {
+    color: #fff;
+    background: #1c202b;
+  }
+}
+
+.emptyCenter {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: #687083;
+}
+
+.emptyIcon {
+  font-size: 48px;
+  margin-bottom: 12px;
+  opacity: 0.4;
+}
+
+.emptyText {
+  font-size: 14px;
+}

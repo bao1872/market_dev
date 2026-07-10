@@ -78,6 +78,20 @@
 - 回归要求：修改 `App.tsx`、`navigation/appNavigation.ts`、`UserAppShell.tsx`、`AdminAppShell.tsx`、`AccountMenu.tsx` 或路由结构时必须跑此测试。
 - `tsc --noEmit` 零错误；改动文件 eslint 零错误（既有 warnings 不计）。
 
+### 统一行情工作区（阶段三阻断验收）
+
+- 前端 `src/features/market-workspace/__tests__/marketWorkspaceUrlState.test.ts` 覆盖：
+  1. URL parse/serialize 往返一致（scope/symbol/timeframe）；
+  2. scope 切换（watchlist↔market）；
+  3. 选股更新 URL（symbol 写入）；
+  4. 无选股空状态（symbol=null 时 encode 不含 symbol 参数）；
+  5. timeframe=1d 默认时省略；
+  6. buildMarketWorkspaceUrl 生成完整 URL。
+- 前端 `src/navigation/__tests__/routeStructure.test.ts` 覆盖 Capture 路由回归（位于 ProtectedLayout 之外，不渲染任一壳层）。
+- 前端 `src/pages/__tests__/detailNavigation.test.ts` 覆盖 watchlist fallback 改为 `/market?scope=watchlist`。
+- 运行命令：`node --experimental-strip-types --test src/features/market-workspace/__tests__/marketWorkspaceUrlState.test.ts src/navigation/__tests__/routeStructure.test.ts src/pages/__tests__/detailNavigation.test.ts`
+- 回归要求：修改 `MarketWorkspacePage`、`marketWorkspaceUrlState.ts`、`detailNavigation.ts` 或路由结构时必须跑此测试。
+
 ## 3.2 K线实时契约门禁（blocking）
 
 - 任何修改 `backend/app/api/bars.py`、`backend/app/services/market_data_aggregation_service.py`、`backend/app/core/pytdx_adapter.py`、`frontend/src/pages/StockDetailPage.tsx`、`frontend/src/utils/chart.ts` 必须跑 K线实时契约测试；

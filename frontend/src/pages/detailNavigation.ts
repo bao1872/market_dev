@@ -14,5 +14,5 @@ export function buildStockDetailState(returnTo: string): { returnTo: string } {
 /** 解析返回路径：优先使用导航时传入的 returnTo，否则按 source fallback */
 export function resolveBackPath(returnTo: string | undefined, source: string): string {
   if (returnTo) return returnTo
-  return source === 'selection' ? '/screener' : '/watchlist'
+  return source === 'selection' ? '/screener' : '/market?scope=watchlist'
 }

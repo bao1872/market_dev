@@ -592,7 +592,8 @@ Capture Token 只能访问 Capture API。\
 5. `ProtectedLayout` 只负责认证与 access profile，不再固定渲染同一壳层。
 6. `/capture/stock/:symbol` 位于两套壳层之外，只使用 `captureClient`。
 7. 导航/路由常量集中于 `frontend/src/navigation/appNavigation.ts`，禁止路径散落。
-8. 三栏统一行情工作区、`StockDetailPage` 抽取、`event_id` 消费放下一阶段，本阶段不实现。
+8. 三栏统一行情工作区（阶段三）：`/market` 渲染 `MarketWorkspacePage`（左列表 `MarketInstrumentPane` + 中K线 `StockResearchWorkspace` + 右结构状态 `StockStructuralStatePanel` 可收起）；`useStockResearchData` 集中 bars/indicators/quote/events/memo 请求，`MarketWorkspacePage` 与 `StockDetailPage` 复用同一研究组件；图表 `timeframe` 仅展示，不改变 1d+15m 监控配置或 1m 事件触发口径；`event_id` 保留在 URL 但本阶段不实现自然语言事件解释。
+9. `StockDetailPage` 的 `event_id` 消费放下一阶段统一。
 
 ***
 

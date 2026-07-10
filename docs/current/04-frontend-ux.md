@@ -24,7 +24,7 @@ Node Cluster 算法
 | `/subscription-expired` | Authenticated | — | 续期 |
 | `/membership-expired` | Redirect | — | 兼容跳转 |
 | `/capture/stock/:symbol` | Capture Token | **无壳层** | 截图专用页面 |
-| `/market` | Subscriber/Admin | UserAppShell | 行情（本阶段复用 WatchlistPage） |
+| `/market` | Subscriber/Admin | UserAppShell | 行情工作区（三栏：左列表+中K线+右结构状态，`MarketWorkspacePage`） |
 | `/screener` | Subscriber/Admin | UserAppShell | 趋势选股 |
 | `/stock/:symbol` | Subscriber/Admin | UserAppShell | 个股详情 |
 | `/messages` | Authenticated | UserAppShell | 历史消息 |
@@ -50,9 +50,18 @@ Node Cluster 算法
 
 ### 2.3 尚未完成（下一阶段）
 
-- 三栏统一行情工作区（左列表 + 中K线 + 右事件解释）尚未实现；当前 `/market` 直接复用 `WatchlistPage` 作为阶段性真实内容。
-- `StockDetailPage` 的 `event_id` 消费、`useStockResearchData` 抽取、`StockResearchWorkspace` 组件均放下一阶段。
+- `StockDetailPage` 的 `useStockResearchData` 抽取已完成（阶段三），但 `StockDetailPage` 自身仍直接调用 hooks，未切换到复用 `StockResearchWorkspace`——下一阶段统一。
+- `event_id` URL 参数已保留并传入工作区状态，但自然语言事件解释未实现。
 - 复盘模式本轮不开发。
+
+### 2.4 统一行情工作区（阶段三确立）
+
+- `/market` 渲染 `MarketWorkspacePage`（`frontend/src/features/market-workspace/MarketWorkspacePage.tsx`），三栏布局：
+  - 左栏 `MarketInstrumentPane`：`scope=watchlist` 使用 `useWatchlistMonitorStatus`；`scope=market` 使用 `useInstruments` 搜索（≥2 字符，限制 50 条，不发 N+1 请求）。
+  - 中栏 `StockResearchWorkspace`（`frontend/src/features/stock-research/StockResearchWorkspace.tsx`）：唯一 K 线研究区，复用 `useStockResearchData` hook。
+  - 右栏 `StockStructuralStatePanel`：可收起；收起时不挂载、不请求 structural/temporal 数据，中栏自动扩展。
+- URL 状态：`/market?scope=watchlist|market&symbol=xxx&timeframe=1d`；scope/symbol/timeframe 进 URL，右栏折叠和 viewport 留本地。切换股票不整页刷新。
+- 图表 `timeframe` 仅展示层，不改变 1d+15m 监控配置或 1m 事件触发口径。
 
 ## 3. 页面职责
 

@@ -15,7 +15,7 @@ import AdminAppShell from './layouts/AdminAppShell'
 import { legacyRedirectEntries, DEFAULT_ENTRY } from './navigation/appNavigation'
 import LoginPage from './pages/LoginPage'
 import SubscriptionExpiredPage from './pages/SubscriptionExpiredPage'
-import WatchlistPage from './pages/WatchlistPage'
+import MarketWorkspacePage from './features/market-workspace/MarketWorkspacePage'
 import ScreenerPage from './pages/ScreenerPage'
 import StockDetailPage from './pages/StockDetailPage'
 import CaptureStockPage from './pages/CaptureStockPage'
@@ -117,7 +117,7 @@ export const routeConfig: RouteObject[] = [
           {
             element: <SubscriberRoute />,
             children: [
-              { path: '/market', element: <WatchlistPage /> },
+              { path: '/market', element: <MarketWorkspacePage /> },
               { path: '/screener', element: <ScreenerPage /> },
               { path: '/stock/:symbol', element: <StockDetailPage /> },
             ],

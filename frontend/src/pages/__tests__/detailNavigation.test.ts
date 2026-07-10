@@ -34,7 +34,7 @@ test('StockDetail 返回优先使用 location.state.returnTo', () => {
 
 test('StockDetail 无 returnTo 时按 source fallback', () => {
   assert.equal(resolveBackPath(undefined, 'selection'), '/screener')
-  assert.equal(resolveBackPath(undefined, 'watchlist'), '/watchlist')
+  assert.equal(resolveBackPath(undefined, 'watchlist'), '/market?scope=watchlist')
   assert.equal(resolveBackPath('', 'selection'), '/screener')
-  assert.equal(resolveBackPath('', 'watchlist'), '/watchlist')
+  assert.equal(resolveBackPath('', 'watchlist'), '/market?scope=watchlist')
 })

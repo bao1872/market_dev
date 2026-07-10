@@ -4,6 +4,15 @@
 
 ## 2026-07-11
 
+- CHANGE-20260711-002: 统一行情工作区第一版（阶段三）
+  - `/market` 渲染 `MarketWorkspacePage`（三栏：左列表+中K线+右结构状态可收起）
+  - `useStockResearchData` 集中 bars/indicators/quote/events/memo 请求；`StockResearchWorkspace` 复用组件
+  - URL 状态 `scope=watchlist|market&symbol=xxx&timeframe=1d`；切换股票不整页刷新
+  - `detailNavigation` watchlist fallback 改为 `/market?scope=watchlist`
+  - 图表 timeframe 仅展示，不改 1d+15m 监控配置或 1m 事件触发
+  - 7 项 URL 状态测试 + 32 项总测试全通过；tsc/eslint 0 errors；vite build 通过
+  - 不改后端/API/数据模型/Worker；不删除 IndexPage/ScreenerPage/CaptureStockPage
+
 - CHANGE-20260711-001: 用户/管理员壳层与导航路由拆分（阶段二）
   - 普通用户主入口 `/market`（复用 WatchlistPage）；`/overview`→`/market`、`/watchlist`→`/market?scope=watchlist` 兼容重定向
   - `UserAppShell`（顶栏品牌+一级导航行情/趋势选股+账户菜单；无左侧栏）；`AdminAppShell`（独立管理导航+账户菜单）；`ProtectedLayout` 只返回 Outlet
