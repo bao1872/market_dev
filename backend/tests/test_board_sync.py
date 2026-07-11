@@ -6,7 +6,9 @@
 3. 事务回滚：异常时不修改现有数据
 4. 保留旧快照：校验失败时不删除旧关系
 5. 按板块筛选：industry/concept 筛选
-6. migration upgrade/downgrade/upgrade 循环
+
+注：migration upgrade/downgrade/upgrade 循环由 CI 的 alembic-cycle job 覆盖，
+不在本文件重复测试（避免 env.py 在 pytest 环境下的 sync/async 驱动冲突）。
 """
 
 from __future__ import annotations
@@ -294,55 +296,3 @@ class TestAtomicSwap:
         # 旧数据仍存在
         board_count, _ = await get_current_counts(board_test_session)
         assert board_count >= 1
-
-
-# =============================================================================
-# 3. Migration 循环测试
-# =============================================================================
-
-
-class TestMigrationCycle:
-    """PRD: migration upgrade → downgrade → upgrade 循环。"""
-
-    @pytest.mark.asyncio
-    async def test_migration_upgrade_downgrade_upgrade(self) -> None:
-        """062 migration upgrade → downgrade → upgrade 循环。"""
-        import os
-        from pathlib import Path
-
-        from alembic.config import Config
-
-        from alembic import command
-
-        db_url = os.environ.get("TEST_DATABASE_URL", "")
-        if not db_url:
-            pytest.skip("TEST_DATABASE_URL not set")
-
-        # 使用相对于测试文件的路径，避免硬编码绝对路径
-        backend_dir = Path(__file__).resolve().parent.parent
-        alembic_cfg = Config(str(backend_dir / "alembic.ini"))
-        alembic_cfg.set_main_option("sqlalchemy.url", db_url)
-
-        # Upgrade to 062
-        command.upgrade(alembic_cfg, "062_market_boards")
-
-        # Downgrade back to 061
-        command.downgrade(alembic_cfg, "061_snapshot_source_run_id")
-
-        # Upgrade to 062 again
-        command.upgrade(alembic_cfg, "062_market_boards")
-
-        # 验证表存在（使用 async engine + run_sync，避免 sync create_engine 与 psycopg v3 async 冲突）
-        from sqlalchemy import inspect
-        from sqlalchemy.ext.asyncio import create_async_engine
-
-        async_engine = create_async_engine(db_url)
-        try:
-            async with async_engine.connect() as conn:
-                tables = await conn.run_sync(
-                    lambda sync_conn: inspect(sync_conn).get_table_names()
-                )
-                assert "market_boards" in tables
-                assert "market_board_memberships" in tables
-        finally:
-            await async_engine.dispose()
