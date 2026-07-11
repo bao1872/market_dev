@@ -57,16 +57,16 @@ Node Cluster 算法
 - `/market` 渲染 `MarketWorkspacePage`（`frontend/src/features/market-workspace/MarketWorkspacePage.tsx`），三栏布局：
   - 左栏 `MarketInstrumentPane`：`scope=watchlist` 使用 `useWatchlistMonitorStatus`（enabled=scope==='watchlist'）；`scope=market` 使用 `useInstruments` 搜索（enabled=scope==='market' && 搜索词 trim 后 ≥2 字符，限制 50 条，不发 N+1 请求）。两个查询按 scope 互斥启用，未激活的 scope 不发请求。搜索结果列表仅在 `scope==='market' && canSearch` 时渲染；关键词不足 2 字符、清空输入或切换 scope 时不得显示缓存结果（Query 仍通过 `enabled` 门控，不条件调用 Hook，只门控渲染）。
   - 中栏 `StockResearchWorkspace`（`frontend/src/features/stock-research/StockResearchWorkspace.tsx`）：K 线研究区，由 `MarketWorkspacePage` 和 `StockDetailPage` 共用。
-  - 右栏 `ResearchContextPanel`（`frontend/src/features/research-context/ResearchContextPanel.tsx`）：可收起；收起时不挂载、不请求 event/structural/temporal 数据，中栏自动扩展。面板只渲染 `EventExplanationCard`（`event_id` 存在时，事件时间/通俗解释/关联价格/关键证据）、`LatestEventCard`（无 `event_id` 但 `useStockResearchData` 已有 events 时取最新事件）、`StructureSummaryCard`（结构状态人类可读总结）、`KeyRangeCard`（关键价格区间）；不挂载 `StockStructuralStatePanel`；普通用户不显示内部字段名、算法参数、JSON 或商业机密；原始 factor/feature/JSON 仅在 `/admin/stock-debug` 展示。
-- `/stock/:symbol` 渲染 `StockDetailPage`（`frontend/src/pages/StockDetailPage.tsx`），降为路由适配器：
+  - 右栏 `EventStatePanel`（`frontend/src/features/research-context/EventStatePanel.tsx`）：可收起；收起时不挂载、不请求数据，中栏自动扩展。面板使用 `useStockContext` 单一接口（`GET /api/v1/stocks/{symbol}/context`），展示数据日期/质量、当前价格结构、成交密集区关系、SQZMOM 动量、波动位置、最近状态变化时间线；普通用户不显示内部字段名（`sourceField`）、算法参数、`idempotencyKey`、JSON 或商业机密；原始 factor/feature/JSON 仅在 `/admin/stocks/:symbol/debug` 展示。
+- `/stock/:symbol` 是唯一个股详情和 K线入口（PRD V1.1），渲染 `StockDetailPage`（`frontend/src/pages/StockDetailPage.tsx`）：
   - 使用共享 `useStockResearchData` + `StockResearchWorkspace` 渲染图表区，不再独立调用 useBars/useIndicators/useRealtimeQuote/useInstrumentEvents。
-  - 详情页专属能力拆到 `useStockDetailActions`（自选/上下切换/memo）和 `useStockDetailFeishu`（飞书截图/轮询/超时）。
-  - 保留 header、价格条、返回、上下只、watchlist、memo、飞书、全屏、结构面板开关。
-  - `StockResearchWorkspace` 通过 `toolbar`/`rightPanel`/`showRightPanel`/`chartColumnProps` 可选 props 支持详情页的结构面板开关和截图模式属性。
-- `/admin/stock-debug` 和 `/admin/stock-debug/:symbol` 渲染 `AdminStockDebugPage`（`frontend/src/pages/AdminStockDebugPage.tsx`），位于 `AdminRoute` + `AdminAppShell` 下，普通用户不可访问：
-  - 复用 `MarketInstrumentPane`（股票搜索）、`useStockResearchData`（bars/indicators/quote/events）、`StockResearchWorkspace`（K线研究区）、`useResearchContext`（event/structural/temporal）、`AdminFactorDebugPanel`（原始 factor/feature/JSON）、`StockStructuralStatePanel`（`debug=true`，详细因子卡片 + 可折叠 JSON）。
+  - 详情页专属能力拆到 `useStockDetailActions`（自选/上下切换/memo + returnTo 上下文恢复左栏列表）和 `useStockDetailFeishu`（飞书截图/轮询/超时）。
+  - 保留 header、价格条、返回、上下只、watchlist、memo、飞书、全屏、事件状态面板开关。
+  - `StockResearchWorkspace` 通过 `toolbar`/`rightPanel`/`showRightPanel`/`chartColumnProps` 可选 props 支持详情页的事件状态面板开关和截图模式属性。
+  - **禁止重定向到 `/market`**（PRD V1.1 硬性规定）。
+- `/admin/stocks/:symbol/debug` 渲染 `AdminStockDebugPage`（`frontend/src/pages/AdminStockDebugPage.tsx`），位于 `AdminRoute` + `AdminAppShell` 下，普通用户不可访问（403）：
+  - 复用 `MarketInstrumentPane`（股票搜索）、`useStockResearchData`（bars/indicators/quote/events）、`StockResearchWorkspace`（K线研究区）、`useAdminStockDebug`（含原始 payload 的管理员调试接口）。
   - 管理员调试能力独立于 `/market`，`/market` 不承载任何原始因子或 JSON。
-  - `/market?debug=1` 管理员访问时重定向到 `/admin/stock-debug/:symbol`，普通用户忽略并清除 `debug` 参数。
 - 共享类型（`DisplayTimeframe`/`ResearchSource`/`ALLOWED_TIMEFRAMES`/`BARS_COUNT_BY_TIMEFRAME`/`defaultStrategyForSource`/`normalizeDisplayTimeframe`/`normalizeResearchSource`）权威定义在 `frontend/src/features/stock-research/stockResearchTypes.ts`；`marketWorkspaceUrlState.ts` 从该文件导入并重新导出，依赖方向为 market-workspace → stock-research（禁止反向依赖）。
 - `useStockResearchData` 只保留图表核心查询：instrument/bars/indicators/quote/events + priceSummary/quoteStatus/barsStatus/isRenderReady；自选操作、上下切换、memo、飞书由 `useStockDetailActions`/`useStockDetailFeishu` 负责（禁止加入核心 hook）。
 - URL 状态：`/market?scope=watchlist|market&symbol=xxx&timeframe=1d&source=watchlist|selection&strategy=xxx&event_id=xxx&returnTo=...`；scope/symbol/timeframe/source/strategy/event_id/returnTo 进 URL，右栏折叠和 viewport 留本地。切换股票不整页刷新。非法 timeframe 回退 1d。`/stock/:symbol` 的 timeframe 也从 URL 解析（单一真源），工具栏切换写回 URL。`returnTo` 为来源页 URL，必须经 `normalizeInternalReturnTo`（`frontend/src/features/market-workspace/marketWorkspaceUrlState.ts`）校验——仅允许 `/screener`、`/market`、`/messages` 前缀（含 query/hash），拒绝外部 URL（http/https）、`javascript:`、双斜杠、非白名单前缀（如 `/admin`、`/login`、`/capture/stock`）、超长字符串（>2000 字符）；左栏选股或切 scope 时清除 `returnTo`。

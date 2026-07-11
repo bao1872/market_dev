@@ -55,7 +55,7 @@ strategy_run_items.reason_code 标准编码：
 | 能力 | 端点/路由组 | 关键规则 |
 |---|---|---|
 | Auth | `/auth`, `/me`, `/plans` | 登录、注册、刷新、AccessContext |
-| 行情 | `/instruments`, `/calendar`, `/market`, `/bars` | 数据新鲜度、partial/degraded 标识；`/instruments/{id}/bars` page_size 按 timeframe 限制：`15m` 最大 4000，`1h` 最大 1200，其他最大 1000；`/instruments/{id}/indicators` 的 `bars` 参数最大 4000；`indicators` 响应含 `sqzmom_lb` 全局技术指标数据，后端逐行复刻 Pine 代码，前端只渲染不计算 |
+| 行情 | `/instruments`, `/calendar`, `/market`, `/bars` | 数据新鲜度、partial/degraded 标识；`/instruments/{id}/bars` page_size 按 timeframe 限制：`15m` 最大 4000，`1h` 最大 1200，其他最大 1000；`/instruments/{id}/indicators` 的 `bars` 参数最大 4000；`indicators` 响应含 `sqzmom_lb` 全局技术指标数据，后端逐行复刻 Pine 代码，前端只渲染不计算；**`GET /market/stocks` 行业/概念筛选**（PRD §7.5 qstock 同步后）：`industry`/`concept` 参数按板块名称筛选，通过 `filter_instruments_by_board()` 查询 `market_boards` 表实现；未同步板块数据时返回空列表（不报 422）；`industry` + `concept` 同时传时取交集（AND 语义） |
 | 结构状态因子 | `/instruments/{id}/structural-factors` | 双周期（1d+15m）5 组结构因子（DSA 段/Swing/成本节点/动量波动/成交参与）；前端只渲染后端 DTO，禁止重新计算；无认证要求（与 indicators API 一致）；250-500 bar lookback，15m 仅已完成 bar，Swing 仅已确认 pivot（无未来函数） |
 | 策略 | `/strategies`, `/strategy-runs` | 只读 released/published 结果；`/strategy-runs/{run_id}/results` 以 `strategy_run_items` 为主表 LEFT JOIN `strategy_results` + `instruments`，返回全量 universe（含 succeeded/skipped/failed），skipped/failed 行 `id`/`payload` 为 null；新增 `item_status`/`reason_code`/`error_message` 字段；默认无筛选时 `source_total = run.total_instruments`。JOIN 策略：因 `strategy_run_items.result_id` 当前未回填（ALIGN-033 P2），`strategy_results` 关联统一改用 `(run_id, instrument_id)`，包括批量加载、metric_filter 子查询、sort LEFT JOIN 三处 |
 | 监控 | `/monitor-states`, `/strategy-events` | 只处理完成 Bar，按用户资格过滤；monitor_event 在 `delivery_worker.py` 投递前再次用 `is_user_eligible_for_monitor` 复核，active admin 放行，disabled admin / 无订阅普通用户排除 |
@@ -1036,4 +1036,51 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 - config 不保存业务数据（selectedKeys/page/activeRunId/rows）；
 - preset 不影响后端策略计算，只影响前端表格视图；
 - `is_default` 互斥更新由应用层 `_unset_default_for_scope` 实现（非数据库约束）。
+
+## 15. ConsensusZone 筹码共识区 DTO 契约
+
+ConsensusZone 是基于成交量分布的筹码共识区算法（PRD V1.1 §7.4），由 `app.services.consensus_zone_service` 提供。核心流程：因果性过滤（`timestamp <= as_of`）→ 价格分箱 + 成交量分布 → 局部峰识别 → 谷底分割为独立峰簇 → 簇内成交量加权 P10/P50/P90。算法版本 `CONSENSUS_ALGORITHM_VERSION = "v1"`，修改计算逻辑/参数/分箱方式必须 bump 版本。
+
+### 15.1 `ConsensusCluster` DTO
+
+单个成交密集区峰簇。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `lower` | float | P10 下界（成交量加权） |
+| `upper` | float | P90 上界（成交量加权） |
+| `center` | float | P50 中位（成交量加权） |
+| `peakPrice` | float | 峰值价格（最大成交量价位） |
+| `volumeRatio` | float | 该簇成交量占总成交量比例（0-1） |
+| `strength` | float | 簇强度（0-1，峰度归一化） |
+
+### 15.2 `ConsensusZoneResult` DTO
+
+ConsensusZone 计算结果。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `symbol` | str | 股票代码 |
+| `timeframe` | str | 来源周期（1d 主结构 / 15m 细化） |
+| `asOf` | str | 截止时间 ISO（因果性保证：`timestamp <= as_of`） |
+| `algorithmVersion` | str | 算法版本 |
+| `clusters` | list[ConsensusCluster] | 识别的峰簇列表（按 `volumeRatio` 降序） |
+| `totalVolume` | float | 总成交量 |
+| `binCount` | int | 价格分箱数 |
+| `isAvailable` | bool | 是否可用（数据不足/无显著峰时为 False） |
+| `unavailableReason` | str \| None | 不可用原因（`isAvailable=False` 时填写，如 `insufficient bars (need >= 10)` / `zero total volume` / `no significant peaks detected`） |
+
+### 15.3 计算约束与缓存
+
+- 因果性：`filter_bars_by_as_of` 过滤 `timestamp <= as_of`，杜绝未来数据泄漏；
+- 数据不足（<10 根 bar 或全零成交量）返回 `isAvailable=False`，不抛异常；
+- 默认参数：`num_bins=50`、`min_volume_ratio=0.05`、`peak_prominence=0.10`（不暴露给用户）；
+- Redis 缓存键包含 `symbol/as_of/timeframe/algo_version/data_version`，TTL 1 小时；缓存失败不影响主流程；
+- 纯函数 `compute_consensus_zones` 接受 pandas DataFrame，返回 `ConsensusZoneResult`，无 DB/Redis 依赖，可直接单元测试。
+
+### 15.4 限制
+
+- ConsensusZone 当前作为 DTO/服务能力存在，不直接接入选股、监控、飞书、消息中心、事件系统；
+- 不新增数据库表（纯实时计算 + Redis 缓存）；
+- 主结构使用日线，细化分布使用 15 分钟数据。
 

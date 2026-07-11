@@ -18,8 +18,12 @@
 | `instruments` | 股票主数据 |
 | `trading_calendar` | 交易日和开闭市 |
 | `bars_daily`, `bars_15min`, `bars_60min`, `bars_minute` | 已完成正式 Bar |
+| `market_boards` | qstock 板块目录（行业/概念），只存最新态；字段：`id`/`external_code`/`name`/`type`/`updated_at`；唯一约束 `uq_market_boards_code_type (external_code, type)`；索引 `ix_market_boards_type`；migration 062 |
+| `market_board_memberships` | 板块成分股关系，只存最新态；复合主键 `(board_id, instrument_id)`；字段含 `updated_at`；FK `board_id`→`market_boards.id`（CASCADE）/`instrument_id`→`instruments.id`（CASCADE）；索引 `ix_market_board_memberships_instrument`；migration 062 |
 
 周线/月线由日线聚合，不作为独立业务源。partial Bar 不写入完成 Bar 表。
+
+`market_boards`/`market_board_memberships` 只保存最新关系，不增加历史日期维度，不存板块行情/资金流。`/market/stocks` 的 `industry`/`concept` 筛选通过 `filter_instruments_by_board()` 查询 `market_boards` 表实现；未同步板块数据时筛选返回空列表。
 
 ## 3. 策略与发布
 
@@ -43,7 +47,7 @@ published run 不可变。partial_failed 不得自动发布。
 | `monitor_evaluations` | 策略版本、股票、源 Bar 的唯一评估 |
 | `strategy_events` | 稳定事件 |
 | `event_recipients` | 事件与有效用户收件人关系 |
-| `stock_feature_snapshots` | 盘后特征快照（结构/时序因子 + 前端列表用 summary）；唯一键 `(instrument_id, trade_date, primary_timeframe, secondary_timeframe, adj, schema_version)`；3 个 btree 索引；无 GIN 索引；`/watchlist/monitor-status` 的 metrics 唯一来源 |
+| `stock_feature_snapshots` | 盘后特征快照（结构/时序因子 + 前端列表用 summary）；唯一键 `(instrument_id, trade_date, primary_timeframe, secondary_timeframe, adj, schema_version)`；3 个 btree 索引；无 GIN 索引；`/watchlist/monitor-status` 的 metrics 唯一来源；**`source_run_id` FK → `stock_feature_snapshot_runs.id`**（migration 061，nullable，仅新数据填写，不全量回填；upsert ON CONFLICT DO UPDATE 不覆盖 source_run_id；`GET /stocks/{symbol}/context` 按 `source_run_id == run.id` 精确查询）；**migration 061 索引**：只建组合索引 `ix_feature_snapshot_run_instrument(source_run_id, instrument_id)`（最左前缀已覆盖纯 `source_run_id` 查询），不再单独建单列索引 `ix_feature_snapshot_source_run_id`（减少磁盘占用） |
 | `stock_feature_snapshot_runs` | snapshot 计算 run 级成功标记；唯一键 `(trade_date, schema_version, primary_timeframe, secondary_timeframe, adj, run_type) WHERE status='running'`（partial unique index）；3 个 btree 索引；watchlist 只读 `status='succeeded'` 的 run 对应日期 snapshot |
 | `research_feature_matrix_runs` | 研究特征矩阵按月分批 run 级元数据；唯一键 `run_key`（如 `2026-01_full`）；2 个 btree 索引（`month`/`status`）；状态机 `running` → `succeeded`/`failed`；`metadata_json` 只放小摘要，不存完整 payload，不建 GIN 索引；与生产 snapshot 严格分离，不接入 watchlist |
 | `research_feature_matrix_rows` | 研究特征矩阵扁平宽表，一只股票一个交易日的 33 个 feature 值；唯一键 `(instrument_id, trade_date)` 跨 run 幂等 upsert；3 个 btree 索引（`trade_date`/`instrument_id`/`run_id`）；不存 JSON payload，不建 GIN 索引；33 feature 列与 `feature_causality_registry.db_column()` 1:1 对应；总列数 39（5 metadata + 33 feature + 1 created_at） |

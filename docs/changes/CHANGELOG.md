@@ -4,6 +4,25 @@
 
 ## 2026-07-11
 
+- CHANGE-20260711-007: PRD V1.1 §7.4/7.5 — ConsensusZone 真实实现 + qstock 板块同步 + industry/concept 筛选
+  - P2: ConsensusZone 真实算法（峰簇识别 + 谷底分簇 + 成交量加权 P10/P50/P90 + 因果性过滤 + Redis 版本化缓存），22 tests pass
+  - P2: qstock 板块同步服务（暂存集合 + 完整性校验 + 事务原子切换 + 失败保留旧数据），11 tests pass
+  - P2: migration 062 新增 market_boards + market_board_memberships 表（只存最新态）
+  - P2: market API industry/concept 筛选接入（移除 422，通过 market_boards 表过滤）
+  - P2: migration 061 冗余索引修复（删除单列索引，组合索引最左前缀覆盖）
+  - P2: sourceField/idempotencyKey 字段完全排除（dict + 递归 pop，JSON 中字段消失不是 null）
+  - 遗留：qstock 每日任务未接入 scheduler；ConsensusZone 前端图层未启用；生产未部署
+
+- CHANGE-20260711-006: PRD V1.1 纠偏 — 路由恢复 + EventStatePanel + StockState 字段剥离 + state 筛选
+  - P0: 恢复 `/stock/:symbol` 为 StockDetailPage（删除 StockDetailRedirect），新增 3 个路由契约测试
+  - P0: source_run_id migration 061 审计完成（保留，upsert 不覆盖已发布快照来源）
+  - P0: 权限测试改为 7 个真实 HTTP 集成测试（0 skip），44 tests pass
+  - P1: EventStatePanel 替代 ResearchContextPanel，删除 12 个 orphan 文件
+  - P1: StateValue.sourceField 和 StateEventDTO.idempotencyKey 改为 Optional，用户接口通过 strip_internal_fields_for_user 剥离
+  - P1: state 筛选实现（up/down/sideways），industry/concept 保持 422（后在 CHANGE-007 中实现）
+  - P1: DISTINCT ON 替换为标准 SQL 子查询 + JOIN
+  - 28 market tests + 141 contract tests pass；ruff/mypy/tsc 无新增错误
+
 - CHANGE-20260711-005: 统一行情工作区 P0/P1 收口修正
   - P0：`/admin/stock-debug` 独立管理员调试路由；`debug` 从 `/market` URL 契约移除；`ResearchContextPanel` 只渲染 4 张用户卡
   - P1：新建 `buildStructureSummary`/`buildUserEventExplanation` 纯函数（DTO 路径修正 + instrument mismatch 校验）；`normalizeInternalReturnTo` returnTo 安全校验

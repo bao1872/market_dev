@@ -133,6 +133,27 @@
 | `ResearchFeatureMatrixRun` 16 列结构 + `run_key` 唯一约束 + month/status 索引；`ResearchFeatureMatrixRow` 39 列（5 metadata + 33 feature + 1 created_at）+ `(instrument_id, trade_date)` 唯一约束 + 3 btree 索引 | `test_research_feature_matrix_model.py`（model 自测入口，无 DB） |
 | `compute_all_features(bars)` 返回 DataFrame 含 33 个 feature 列；per-bar 计算 vs single-snapshot 区分；causal rolling/DSA 双轨/confirmed_delay swing/label 字段；空输入不抛异常 | `test_feature_computer.py`（~23 个用例） |
 
+## 3.9 筹码共识区（ConsensusZone）
+
+| 规则 | 测试 |
+|---|---|
+| **因果性**：`filter_bars_by_as_of` 过滤 `timestamp <= as_of`；`as_of=None` 返回全部；未来数据不影响历史结果（添加未来 bar 后历史 as_of 结果不变） | `test_consensus_zone.py::TestCausality`（3 个用例） |
+| **单峰识别**：单峰分布产生一个簇；`peakPrice` 接近成交量最集中价位；`lower <= center <= upper` | `test_consensus_zone.py::TestSinglePeak`（2 个用例） |
+| **多峰识别 + 谷底分割**：双峰分布产生 ≥2 个簇；簇按 `volumeRatio` 降序排列 | `test_consensus_zone.py::TestMultiPeak`（2 个用例） |
+| **空分布处理**：空 bars 返回 `isAvailable=False`；<10 根 bar 返回不可用；全零成交量返回不可用 | `test_consensus_zone.py::TestEmptyDistribution`（3 个用例） |
+| **重叠簇处理**：重叠簇 `lower <= center <= upper` 边界有效 | `test_consensus_zone.py::TestOverlapClusters`（1 个用例） |
+| **成交量加权百分位**：`P10 <= P50 <= P90`；高成交量价位使 P50 更接近该价位；空价格返回 0 | `test_consensus_zone.py::TestWeightedPercentiles`（3 个用例） |
+| **缓存键版本化**：缓存键含 `symbol/as_of/timeframe/algo_version/data_version`；不同 `as_of`/`timeframe` 产生不同 key | `test_consensus_zone.py::TestCacheKey`（3 个用例） |
+| **纯函数单元测试**：`identify_peaks` 识别局部最大值 + 空数组；`segment_clusters_by_valleys` 单峰/双峰边界；`compute_volume_distribution` 基本计算 + 总量守恒 | `test_consensus_zone.py::TestPureFunctions`（5 个用例） |
+
+## 3.10 qstock 板块同步（board sync）
+
+| 规则 | 测试 |
+|---|---|
+| **完整性校验（V1.1 门禁）**：空板块目录拒绝 / 空成分关系拒绝 / 板块数不足拒绝（<100）/ 成分数不足拒绝（<3000）/ 异常降幅拒绝（>20%）/ 正常降幅通过（<20%）/ 首次同步不做降幅检查（prev=0） | `test_board_sync.py::TestStagingValidation`（7 个用例） |
+| **原子切换 + 事务回滚**：成功同步后数据写入 + 计数一致；校验失败时保持旧数据不删除；异常时不修改现有数据 | `test_board_sync.py::TestAtomicSwap`（3 个用例，async DB） |
+| **Migration 循环**：062 migration `upgrade → downgrade → upgrade` 循环不报错；表 `market_boards`/`market_board_memberships` 存在 | `test_board_sync.py::TestMigrationCycle`（1 个用例） |
+
 ## 4. 飞书与通知
 
 | 规则 | 测试 |
