@@ -3,20 +3,9 @@
 // 功能上线后替换本占位为真实复盘工作区。
 export default function ReplayPage() {
   return (
-    <div
-      style={{
-        minHeight: '100vh',
-        background: '#030915',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        color: '#e6edf3',
-        gap: '12px',
-      }}
-    >
-      <h1 style={{ fontSize: '24px', margin: 0 }}>复盘功能规划中</h1>
-      <p style={{ margin: 0, color: '#8b949e' }}>该功能尚未上线，敬请期待</p>
+    <div className="replay-placeholder">
+      <h1>复盘功能规划中</h1>
+      <p>该功能尚未上线，敬请期待</p>
     </div>
   )
 }

@@ -2861,3 +2861,18 @@ textarea.input { height: auto; min-height: 80px; padding: 9px; resize: vertical;
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+// ===== ReplayPage 占位页（复盘功能规划中）=====
+// 复用设计变量，不使用内联 style；正文 ≥14px，辅助文本 ≥12px。
+.replay-placeholder {
+  min-height: calc(100vh - v.$topbar-height);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: v.$color-text;
+
+  h1 { font-size: 24px; margin: 0; }
+  p { margin: 0; color: v.$color-muted; font-size: 14px; }
+}
