@@ -1061,7 +1061,7 @@ ConsensusZone 计算结果。
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `symbol` | str | 股票代码 |
-| `timeframe` | str | 来源周期（1d 主结构 / 15m 细化） |
+| `timeframe` | str | 来源周期；V1 固定 `"1d"`（日线成交分布），15m 细化为未来工作 |
 | `asOf` | str | 截止时间 ISO（因果性保证：`timestamp <= as_of`） |
 | `algorithmVersion` | str | 算法版本 |
 | `clusters` | list[ConsensusCluster] | 识别的峰簇列表（按 `volumeRatio` 降序） |
@@ -1082,5 +1082,5 @@ ConsensusZone 计算结果。
 
 - ConsensusZone 当前作为 DTO/服务能力存在，不直接接入选股、监控、飞书、消息中心、事件系统；
 - 不新增数据库表（纯实时计算 + Redis 缓存）；
-- 主结构使用日线，细化分布使用 15 分钟数据。
+- V1 算法只做日线成交分布；15 分钟细化分布是未来工作，bump 算法版本后才启用。
 

@@ -584,11 +584,12 @@ board_sync_service.sync_boards()
 - qstock 拉取设置连接/读取超时（`FETCH_TIMEOUT_SECONDS = 30`）和有限重试（`FETCH_RETRY_COUNT = 2`）；
 - 失败重试后继续沿用上次成功快照并告警。
 
-### 2.6.5 调度集成 TODO
+### 2.6.5 调度集成
 
-- 当前未接入 scheduler/compose，需手动触发；
-- 计划每日收盘后或次日开盘前执行一次；
-- 接入调度后需在 `docker-compose.prod.yml` 新增对应 worker 服务或在现有 scheduler 中注册任务。
+- board_sync 已注册在 `run_bars_scheduler_worker()` 内的 `AsyncIOScheduler`，与 `bars_refresh`（16:00）共用同一 scheduler；
+- 每日 17:00（Asia/Shanghai）`CronTrigger` 触发，`max_instances=1` 单并发；
+- 两个 job 独立调度，失败互不影响（board_sync 失败保留旧板块数据）；
+- board_sync 不是独立 `WORKER_TYPE`，不新增 Docker 服务，复用 `worker-bars-scheduler` 容器。
 
 ## 3. 任务状态与可观察性
 

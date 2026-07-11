@@ -8,7 +8,7 @@
 | redis | trading-redis | 内网 | Redis 7，volume `trading-redisdata` |
 | backend | trading-backend | 8000 | FastAPI |
 | frontend | trading-frontend | 80 | Nginx + React build |
-| worker-bars-scheduler | trading-worker-bars-scheduler | 无 | 行情调度 |
+| worker-bars-scheduler | trading-worker-bars-scheduler | 无 | 行情调度（16:00 bars_refresh + 17:00 board_sync，同一 AsyncIOScheduler） |
 | worker-strategy-scheduler | trading-worker-strategy-scheduler | 无 | DSA 调度 |
 | worker-calendar | trading-worker-calendar | 无 | 交易日历 |
 | worker-monitor | trading-worker-monitor | 无 | 盘中监控 |

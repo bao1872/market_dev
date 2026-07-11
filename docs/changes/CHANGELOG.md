@@ -2,6 +2,14 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-12
+
+- CHANGE-20260712-001: PR #74 两项架构纠偏 — board_sync 合并进 bars_scheduler + ConsensusZone 数据源修正
+  - arch1: `worker-board-sync` Docker 服务移除；`run_board_sync_scheduler_worker()` 函数删除；`board_sync_scheduler` 不再是有效 WORKER_TYPE；board_sync job 注册进 `run_bars_scheduler_worker()`（同一 AsyncIOScheduler，17:00 CronTrigger，max_instances=1）；qstock 同步调用通过 `asyncio.to_thread()` 包装
+  - arch2: `indicator_service` ConsensusZone 数据源从 `macd_bars` 改为 `daily_bars`（固定 250 根日线窗口）；`timeframe` 固定 `"1d"`；`as_of` 取最后一根日线 bar 时间；缓存键 `consensus_zone:{symbol}:{as_of}:1d:{algo_version}:{data_version}` 显示周期切换时稳定；V1 仅日线成交分布，15m 细化为未来工作
+  - 测试：`test_board_sync_registered_in_bars_scheduler`、`test_board_sync_not_separate_worker_type`、`test_consensus_zone_independent_of_display_count`、`test_consensus_zone_independent_of_display_timeframe`
+  - 文档：03-jobs、02-data-api-contracts、worker-job-map、deployment-runtime-map、test-coverage-map 更新
+
 ## 2026-07-11
 
 - CHANGE-20260711-007: PRD V1.1 §7.4/7.5 — ConsensusZone 真实实现 + qstock 板块同步 + industry/concept 筛选

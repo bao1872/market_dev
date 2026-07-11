@@ -145,6 +145,8 @@
 | **成交量加权百分位**：`P10 <= P50 <= P90`；高成交量价位使 P50 更接近该价位；空价格返回 0 | `test_consensus_zone.py::TestWeightedPercentiles`（3 个用例） |
 | **缓存键版本化**：缓存键含 `symbol/as_of/timeframe/algo_version/data_version`；不同 `as_of`/`timeframe` 产生不同 key | `test_consensus_zone.py::TestCacheKey`（3 个用例） |
 | **纯函数单元测试**：`identify_peaks` 识别局部最大值 + 空数组；`segment_clusters_by_valleys` 单峰/双峰边界；`compute_volume_distribution` 基本计算 + 总量守恒 | `test_consensus_zone.py::TestPureFunctions`（5 个用例） |
+| **数据源独立性**：ConsensusZone 使用 `daily_bars`（固定 250 根日线），不随显示 `count` 变化；不同 bars count 产出相同共识区 | `test_indicator_service.py::test_consensus_zone_independent_of_display_count` |
+| **显示周期独立性**：ConsensusZone `timeframe` 固定 `"1d"`，切换显示周期（1d/15m/1h/1w/1mo）不改变共识区定义；缓存键稳定 | `test_indicator_service.py::test_consensus_zone_independent_of_display_timeframe` |
 
 ## 3.10 qstock 板块同步（board sync）
 
@@ -153,6 +155,8 @@
 | **完整性校验（V1.1 门禁）**：空板块目录拒绝 / 空成分关系拒绝 / 板块数不足拒绝（<100）/ 成分数不足拒绝（<3000）/ 异常降幅拒绝（>20%）/ 正常降幅通过（<20%）/ 首次同步不做降幅检查（prev=0） | `test_board_sync.py::TestStagingValidation`（7 个用例） |
 | **原子切换 + 事务回滚**：成功同步后数据写入 + 计数一致；校验失败时保持旧数据不删除；异常时不修改现有数据 | `test_board_sync.py::TestAtomicSwap`（3 个用例，async DB） |
 | **Migration 循环**：062 migration `upgrade → downgrade → upgrade` 循环不报错；表 `market_boards`/`market_board_memberships` 存在 | `test_board_sync.py::TestMigrationCycle`（1 个用例） |
+| **board_sync 注册在 bars_scheduler**：`run_bars_scheduler_worker` 内的 `AsyncIOScheduler` 注册了 `board_sync_daily` job（17:00 CronTrigger，max_instances=1）；board_sync 与 bars_refresh 共用同一 scheduler | `test_worker_idempotency.py::test_board_sync_registered_in_bars_scheduler` |
+| **board_sync 不是独立 WORKER_TYPE**：`board_sync_scheduler` 不在 WORKER_TYPE dispatch 列表中；无 `run_board_sync_scheduler_worker` 函数；`worker-board-sync` Docker 服务已移除 | `test_worker_idempotency.py::test_board_sync_not_separate_worker_type` |
 
 ## 4. 飞书与通知
 
