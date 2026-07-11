@@ -81,6 +81,48 @@
   }
 }
 
+.filters {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.filterInput {
+  width: 100px;
+  padding: 7px 10px;
+  border: 1px solid #2a2f3c;
+  background: #0d1117;
+  color: #d7e3f2;
+  border-radius: 6px;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.12s;
+
+  &::placeholder {
+    color: #687083;
+  }
+
+  &:focus {
+    border-color: #2962ff;
+  }
+}
+
+.filterSelect {
+  padding: 7px 10px;
+  border: 1px solid #2a2f3c;
+  background: #0d1117;
+  color: #d7e3f2;
+  border-radius: 6px;
+  font-size: 13px;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.12s;
+
+  &:focus {
+    border-color: #2962ff;
+  }
+}
+
 // ===== 表格区域 =====
 .tableArea {
   flex: 1;

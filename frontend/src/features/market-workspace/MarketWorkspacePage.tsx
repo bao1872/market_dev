@@ -14,6 +14,7 @@ import {
   encodeMarketWorkspaceUrl,
   selectInstrumentInTable,
   changeMarketScope,
+  changeMarketFilter,
   type MarketScope,
   type MarketWorkspaceUrlState,
 } from './marketWorkspaceUrlState'
@@ -37,6 +38,9 @@ export default function MarketWorkspacePage() {
     page: urlState.page,
     page_size: urlState.pageSize,
     sort: urlState.sort ?? undefined,
+    industry: urlState.industry ?? undefined,
+    concept: urlState.concept ?? undefined,
+    state: urlState.state ?? undefined,
   })
 
   // selected symbol 直接用于右栏 StockContext API（PRD V1.1 §7.3）
@@ -62,6 +66,14 @@ export default function MarketWorkspacePage() {
   const handleQueryChange = useCallback(
     (query: string) => {
       updateUrl({ ...urlState, query, page: 1, selected: null })
+    },
+    [urlState, updateUrl],
+  )
+
+  // 筛选变化：重置 page=1、清除 selected
+  const handleFilterChange = useCallback(
+    (patch: { industry?: string | null; concept?: string | null; state?: MarketWorkspaceUrlState['state'] }) => {
+      updateUrl(changeMarketFilter(urlState, patch))
     },
     [urlState, updateUrl],
   )
@@ -92,8 +104,12 @@ export default function MarketWorkspacePage() {
       <MarketToolbar
         scope={scope}
         query={urlState.query}
+        industry={urlState.industry}
+        concept={urlState.concept}
+        state={urlState.state}
         onScopeChange={handleScopeChange}
         onQueryChange={handleQueryChange}
+        onFilterChange={handleFilterChange}
       />
       <div className={styles.tableArea}>
         <div className={styles.tableWrapper}>

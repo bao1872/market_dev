@@ -1,11 +1,12 @@
 // [MarketWorkspaceUrlState] - 描述: /market URL 状态 encode/decode 纯函数
-// URL 格式：/market?scope=watchlist|market&query=xxx&page=1&page_size=<DEFAULT_PAGE_SIZE>&sort=symbol:asc&selected=xxx
-// scope/query/page/page_size/sort/selected 进入 URL（可分享、刷新恢复）；右栏折叠和 viewport 留本地 state。
+// URL 格式：/market?scope=watchlist|market&query=xxx&page=1&page_size=<DEFAULT_PAGE_SIZE>&sort=symbol:asc&selected=xxx&industry=xxx&concept=xxx&state=up
+// scope/query/page/page_size/sort/selected/industry/concept/state 进入 URL（可分享、刷新恢复）；右栏折叠和 viewport 留本地 state。
 // PRD §6.1：排序、筛选、分页均由服务端执行；浏览器前进/后退应恢复 scope、筛选、排序、页码和选中股票。
 // 单击非链接区域更新 selected 并刷新右栏，不进入详情；点击股票名称进入 /stock/:symbol?returnTo=<编码后的当前URL>。
 // 本文件为纯 TS（无 React 依赖，无 @/ 别名依赖），可被 node --test 直接运行。
 
 export type MarketScope = 'watchlist' | 'market'
+export type MarketStateFilter = 'up' | 'down' | 'sideways' | null
 
 export interface MarketWorkspaceUrlState {
   scope: MarketScope
@@ -14,12 +15,17 @@ export interface MarketWorkspaceUrlState {
   pageSize: number
   sort: string | null
   selected: string | null
+  industry: string | null
+  concept: string | null
+  state: MarketStateFilter
 }
 
 export const DEFAULT_MARKET_SCOPE: MarketScope = 'watchlist'
 export const DEFAULT_PAGE = 1
 export const DEFAULT_PAGE_SIZE = 50
 export const MAX_PAGE_SIZE = 100
+
+const VALID_STATE_FILTERS = new Set(['up', 'down', 'sideways'])
 
 // 从 URLSearchParams 解析工作区状态
 export function decodeMarketWorkspaceUrl(params: URLSearchParams): MarketWorkspaceUrlState {
@@ -35,12 +41,17 @@ export function decodeMarketWorkspaceUrl(params: URLSearchParams): MarketWorkspa
       : DEFAULT_PAGE_SIZE
   const sort = params.get('sort') ?? null
   const selected = params.get('selected') ?? null
-  return { scope, query, page, pageSize, sort, selected }
+  const industry = params.get('industry') || null
+  const concept = params.get('concept') || null
+  const rawState = params.get('state')
+  const state: MarketStateFilter = rawState && VALID_STATE_FILTERS.has(rawState) ? rawState as MarketStateFilter : null
+  return { scope, query, page, pageSize, sort, selected, industry, concept, state }
 }
 
 // 将工作区状态编码为 URLSearchParams（用于 setSearchParams）
 // 规则：scope 始终写入；query 非空才写入；page 非默认才写入；
-//       page_size 非默认才写入；sort 存在才写入；selected 存在才写入。
+//       page_size 非默认才写入；sort 存在才写入；selected 存在才写入；
+//       industry/concept 非空才写入；state 非空才写入。
 export function encodeMarketWorkspaceUrl(state: MarketWorkspaceUrlState): URLSearchParams {
   const params = new URLSearchParams()
   params.set('scope', state.scope)
@@ -58,6 +69,15 @@ export function encodeMarketWorkspaceUrl(state: MarketWorkspaceUrlState): URLSea
   }
   if (state.selected) {
     params.set('selected', state.selected)
+  }
+  if (state.industry) {
+    params.set('industry', state.industry)
+  }
+  if (state.concept) {
+    params.set('concept', state.concept)
+  }
+  if (state.state) {
+    params.set('state', state.state)
   }
   return params
 }
@@ -91,6 +111,21 @@ export function changeMarketScope(
   return {
     ...state,
     scope: newScope,
+    page: DEFAULT_PAGE,
+    selected: null,
+  }
+}
+
+// 筛选条件变化时的状态转换（纯函数）。
+// 筛选变化后重置 page=1、清除 selected（PRD §6.1：筛选变化重置分页）。
+// 保留 scope/query/sort 和其他筛选字段。
+export function changeMarketFilter(
+  state: MarketWorkspaceUrlState,
+  patch: Partial<Pick<MarketWorkspaceUrlState, 'industry' | 'concept' | 'state'>>,
+): MarketWorkspaceUrlState {
+  return {
+    ...state,
+    ...patch,
     page: DEFAULT_PAGE,
     selected: null,
   }

@@ -67,8 +67,16 @@ export function MarketStockTable({
   // 星标切换：更新自选并保持当前筛选/分页
   const handleToggleWatchlist = useCallback(
     (row: MarketStockRow) => {
-      const mutateParams = { scope, query: urlState.query, page: urlState.page, pageSize: urlState.pageSize, sort: urlState.sort }
-      const queryKey = ['market-stocks', { scope: mutateParams.scope, query: mutateParams.query, page: mutateParams.page, page_size: mutateParams.pageSize, sort: mutateParams.sort }]
+      const queryKey = ['market-stocks', {
+        scope,
+        query: urlState.query || undefined,
+        page: urlState.page,
+        page_size: urlState.pageSize,
+        sort: urlState.sort ?? undefined,
+        industry: urlState.industry ?? undefined,
+        concept: urlState.concept ?? undefined,
+        state: urlState.state ?? undefined,
+      }]
       if (row.is_watchlisted) {
         removeWatchlist.mutate(row.instrument_id, {
           onSuccess: () => {
