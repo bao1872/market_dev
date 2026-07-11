@@ -332,13 +332,17 @@ class TestMigrationCycle:
         # Upgrade to 062 again
         command.upgrade(alembic_cfg, "062_market_boards")
 
-        # 验证表存在（psycopg v3 支持 sync 模式，保留 +psycopg driver）
-        from sqlalchemy import create_engine, inspect
-        sync_engine = create_engine(db_url)
+        # 验证表存在（使用 async engine + run_sync，避免 sync create_engine 与 psycopg v3 async 冲突）
+        from sqlalchemy import inspect
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        async_engine = create_async_engine(db_url)
         try:
-            inspector = inspect(sync_engine)
-            tables = inspector.get_table_names()
-            assert "market_boards" in tables
-            assert "market_board_memberships" in tables
+            async with async_engine.connect() as conn:
+                tables = await conn.run_sync(
+                    lambda sync_conn: inspect(sync_conn).get_table_names()
+                )
+                assert "market_boards" in tables
+                assert "market_board_memberships" in tables
         finally:
-            sync_engine.dispose()
+            await async_engine.dispose()
