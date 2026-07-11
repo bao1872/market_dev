@@ -1631,6 +1631,60 @@ export async function getMarketStatus(): Promise<MarketStatus> {
 }
 
 // ============================================================
+// ===== Market Stocks 端点（PRD §8.1 行情列表）=====
+// ============================================================
+
+/** 行情列表单行（对齐后端 MarketStockRow） */
+export interface MarketStockRow {
+  instrument_id: string
+  symbol: string
+  name: string
+  latest_price: number | null
+  change_pct: number | null
+  industry: string | null
+  concepts: string[]
+  dsa_state: string | null
+  structure_state: string | null
+  latest_event_title: string | null
+  latest_event_time: string | null
+  is_watchlisted: boolean
+}
+
+/** 行情列表分页响应（对齐后端 MarketStocksResponse） */
+export interface MarketStocksResponse {
+  items: MarketStockRow[]
+  page: number
+  page_size: number
+  total: number
+  as_of: string
+}
+
+/** 行情列表查询参数 */
+export interface MarketStocksQueryParams {
+  scope: 'market' | 'watchlist'
+  query?: string
+  page?: number
+  page_size?: number
+  sort?: string
+  industry?: string
+  concept?: string
+  state?: string
+}
+
+/**
+ * 查询行情列表（服务端分页 + 批量加载，禁止 N+1）。
+ * GET /market/stocks?scope&query&page&page_size&sort&industry&concept&state
+ * 每行一次返回页面所需全部字段（价格/涨跌幅/DSA状态/事件/自选）。
+ */
+export async function getMarketStocks(
+  params: MarketStocksQueryParams,
+): Promise<MarketStocksResponse> {
+  const { data } = await apiClient.get<MarketStocksResponse>('/market/stocks', { params })
+  return data
+}
+
+
+// ============================================================
 // ===== Admin Membership 端点 =====
 // ============================================================
 

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from datetime import date as dt_date
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -136,3 +136,44 @@ if __name__ == "__main__":
     # 自测入口：验证路由注册
     print(f"router.routes={get_route_paths(router.routes)}")
     print("OK")
+
+
+# ===== 行情列表 API（PRD §8.1）=====
+
+from uuid import UUID  # noqa: E402
+
+from app.schemas.market_stocks import MarketStocksResponse  # noqa: E402
+from app.services.access_control_service import AccessContext, require_authenticated  # noqa: E402
+from app.services.market_stocks_service import get_market_stocks  # noqa: E402
+
+
+@router.get("/stocks", response_model=MarketStocksResponse)
+async def list_market_stocks(
+    scope: str = Query("market", description="范围：market | watchlist"),
+    query: str | None = Query(None, description="搜索关键词（代码/名称/拼音首字母）"),
+    page: int = Query(1, ge=1, description="页码（从 1 开始）"),
+    page_size: int = Query(50, ge=1, le=100, description="每页大小（最大 100）"),
+    sort: str | None = Query(None, description="排序字段:方向（如 symbol:asc）"),
+    industry: str | None = Query(None, description="行业筛选（Phase 6）"),
+    concept: str | None = Query(None, description="概念筛选（Phase 6）"),
+    state: str | None = Query(None, description="状态筛选（Phase 4）"),
+    db: AsyncSession = Depends(get_db),
+    ctx: AccessContext = Depends(require_authenticated),
+) -> MarketStocksResponse:
+    """查询行情列表（服务端分页 + 批量加载，禁止 N+1）。
+
+    返回每行页面所需全部字段（价格/涨跌幅/DSA状态/事件/自选），不再追加单股请求。
+    scope=watchlist 在数据库查询阶段关联当前用户自选（INNER JOIN）。
+    industry/concept/state 参数当前阶段预留（Phase 4/6 实现筛选）。
+    """
+    # 规范化 scope
+    normalized_scope = "watchlist" if scope == "watchlist" else "market"
+    return await get_market_stocks(
+        db=db,
+        user_id=UUID(ctx.user_id),
+        scope=normalized_scope,
+        query=query,
+        page=page,
+        page_size=page_size,
+        sort=sort,
+    )

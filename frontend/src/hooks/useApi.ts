@@ -30,6 +30,7 @@ import type {
   IndicatorQueryParams,
   StockMemoUpsertRequest,
   MarketStatus,
+  MarketStocksQueryParams,
   DeliveryStatus,
   BetaApplicationQueryParams,
   BetaApplicationPatchRequest,
@@ -202,6 +203,20 @@ export function useBatchInstruments(ids: string[] | undefined) {
     queryFn: () => api.batchGetInstruments(ids!),
     enabled: !!ids && ids.length > 0,
     staleTime: STALE_PLANS,
+  })
+}
+
+/**
+ * 查询行情列表（服务端分页 + 批量加载，禁止 N+1）。
+ * scope/query/page/page_size/sort 进 URL，selected 独立管理。
+ * staleTime 30s（实时行情数据），placeholderData 保留上次成功数据避免闪烁。
+ */
+export function useMarketStocks(params: MarketStocksQueryParams) {
+  return useQuery({
+    queryKey: ['market-stocks', params],
+    queryFn: () => api.getMarketStocks(params),
+    staleTime: STALE_REALTIME,
+    placeholderData: (prev) => prev,
   })
 }
 

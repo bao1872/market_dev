@@ -1,122 +1,98 @@
 // [MarketWorkspaceUrlState] - 描述: /market URL 状态 encode/decode 纯函数
-// URL 格式：/market?scope=watchlist|market&symbol=xxx&timeframe=1d&source=watchlist|selection&strategy=xxx&event_id=xxx&returnTo=xxx
-// scope/symbol/timeframe/source/strategy/event_id/returnTo 进入 URL（可分享、刷新恢复）；右栏折叠和 viewport 留本地 state。
-// 非法 timeframe 回退 1d；source 默认 watchlist；strategy 默认根据 source 推导（watchlist→watchlist_monitor, selection→dsa_selector）。
-// returnTo 为来源页 URL（如 /screener?... ），左栏选股或切 scope 时清除；仅允许 /screener /market /messages 前缀（normalizeInternalReturnTo 校验）。
-// debug 已从普通 market URL 移除：管理员调试使用独立 /admin/stock-debug/:symbol 路由。
+// URL 格式：/market?scope=watchlist|market&query=xxx&page=1&page_size=50&sort=symbol:asc&selected=xxx
+// scope/query/page/page_size/sort/selected 进入 URL（可分享、刷新恢复）；右栏折叠和 viewport 留本地 state。
+// PRD §6.1：排序、筛选、分页均由服务端执行；浏览器前进/后退应恢复 scope、筛选、排序、页码和选中股票。
+// 单击非链接区域更新 selected 并刷新右栏，不进入详情；点击股票名称进入 /stock/:symbol?returnTo=<编码后的当前URL>。
 // 本文件为纯 TS（无 React 依赖，无 @/ 别名依赖），可被 node --test 直接运行。
-// 共享类型（DisplayTimeframe/ResearchSource 等）从 stockResearchTypes 导入，避免 stock-research 反向依赖 market-workspace。
-
-import {
-  type DisplayTimeframe,
-  type ResearchSource,
-  DEFAULT_TIMEFRAME,
-  DEFAULT_SOURCE,
-  defaultStrategyForSource,
-  normalizeDisplayTimeframe,
-  normalizeResearchSource,
-} from '../stock-research/stockResearchTypes.ts'
-
-// 重新导出共享类型，保持 marketWorkspaceUrlState 现有导入兼容
-export type { DisplayTimeframe, ResearchSource } from '../stock-research/stockResearchTypes.ts'
-export { ALLOWED_TIMEFRAMES, DEFAULT_TIMEFRAME, DEFAULT_SOURCE, defaultStrategyForSource } from '../stock-research/stockResearchTypes.ts'
 
 export type MarketScope = 'watchlist' | 'market'
 
 export interface MarketWorkspaceUrlState {
   scope: MarketScope
-  symbol: string | null
-  timeframe: DisplayTimeframe
-  source: ResearchSource
-  strategy: string
-  eventId: string | null
-  returnTo: string | null
+  query: string
+  page: number
+  pageSize: number
+  sort: string | null
+  selected: string | null
 }
 
 export const DEFAULT_MARKET_SCOPE: MarketScope = 'watchlist'
+export const DEFAULT_PAGE = 1
+export const DEFAULT_PAGE_SIZE = 50
+export const MAX_PAGE_SIZE = 100
 
 // 从 URLSearchParams 解析工作区状态
 export function decodeMarketWorkspaceUrl(params: URLSearchParams): MarketWorkspaceUrlState {
   const rawScope = params.get('scope')
   const scope: MarketScope = rawScope === 'market' ? 'market' : 'watchlist'
-  const symbol = params.get('symbol') || null
-  const timeframe = normalizeDisplayTimeframe(params.get('timeframe'))
-  const source = normalizeResearchSource(params.get('source'))
-  const strategy = params.get('strategy') || defaultStrategyForSource(source)
-  const eventId = params.get('event_id') || null
-  const returnTo = params.get('returnTo') || null
-  return { scope, symbol, timeframe, source, strategy, eventId, returnTo }
+  const query = params.get('query') ?? ''
+  const rawPage = parseInt(params.get('page') ?? '1', 10)
+  const page = Number.isFinite(rawPage) && rawPage >= 1 ? rawPage : DEFAULT_PAGE
+  const rawPageSize = parseInt(params.get('page_size') ?? String(DEFAULT_PAGE_SIZE), 10)
+  const pageSize =
+    Number.isFinite(rawPageSize) && rawPageSize >= 1 && rawPageSize <= MAX_PAGE_SIZE
+      ? rawPageSize
+      : DEFAULT_PAGE_SIZE
+  const sort = params.get('sort') ?? null
+  const selected = params.get('selected') ?? null
+  return { scope, query, page, pageSize, sort, selected }
 }
 
 // 将工作区状态编码为 URLSearchParams（用于 setSearchParams）
-// 规则：scope 始终写入；symbol 存在才写入；timeframe 非默认才写入；
-//       source 非默认才写入；strategy 非默认（不等于 source 对应默认）才写入；event_id 存在才写入；
-//       returnTo 存在才写入。
+// 规则：scope 始终写入；query 非空才写入；page 非默认才写入；
+//       page_size 非默认才写入；sort 存在才写入；selected 存在才写入。
 export function encodeMarketWorkspaceUrl(state: MarketWorkspaceUrlState): URLSearchParams {
   const params = new URLSearchParams()
   params.set('scope', state.scope)
-  if (state.symbol) {
-    params.set('symbol', state.symbol)
+  if (state.query) {
+    params.set('query', state.query)
   }
-  if (state.timeframe && state.timeframe !== DEFAULT_TIMEFRAME) {
-    params.set('timeframe', state.timeframe)
+  if (state.page !== DEFAULT_PAGE) {
+    params.set('page', String(state.page))
   }
-  if (state.source !== DEFAULT_SOURCE) {
-    params.set('source', state.source)
+  if (state.pageSize !== DEFAULT_PAGE_SIZE) {
+    params.set('page_size', String(state.pageSize))
   }
-  const defaultStrategy = defaultStrategyForSource(state.source)
-  if (state.strategy && state.strategy !== defaultStrategy) {
-    params.set('strategy', state.strategy)
+  if (state.sort) {
+    params.set('sort', state.sort)
   }
-  if (state.eventId) {
-    params.set('event_id', state.eventId)
-  }
-  if (state.returnTo) {
-    params.set('returnTo', state.returnTo)
+  if (state.selected) {
+    params.set('selected', state.selected)
   }
   return params
 }
 
-// 将工作区状态编码为完整 URL query string（用于 navigate）
+// 将工作区状态编码为完整 URL query string（用于 navigate / returnTo）
 export function buildMarketWorkspaceUrl(state: MarketWorkspaceUrlState): string {
   const params = encodeMarketWorkspaceUrl(state)
   const qs = params.toString()
   return qs ? `/market?${qs}` : '/market'
 }
 
-// 从左栏（MarketInstrumentPane）选择股票时的状态转换（纯函数）。
-// 选择自选/市场搜索结果中的股票属于 watchlist 上下文：重置 source=watchlist、strategy=watchlist_monitor、eventId=null、returnTo=null。
-// 保留 scope 和 timeframe。
-export function selectInstrumentFromMarketPane(
+// 从列表中单击非链接区域选择股票时的状态转换（纯函数）。
+// 设置 selected，保留 scope/query/page/pageSize/sort（PRD §6.1：单击不进入详情，只更新右栏）。
+export function selectInstrumentInTable(
   state: MarketWorkspaceUrlState,
-  newSymbol: string,
+  symbol: string,
 ): MarketWorkspaceUrlState {
   return {
-    scope: state.scope,
-    symbol: newSymbol,
-    timeframe: state.timeframe,
-    source: 'watchlist',
-    strategy: defaultStrategyForSource('watchlist'),
-    eventId: null,
-    returnTo: null,
+    ...state,
+    selected: symbol,
   }
 }
 
 // 切换 scope 时的状态转换（纯函数）。
-// 切换到 watchlist/market scope 即退出 selection 上下文：重置 source=watchlist、strategy=watchlist_monitor、eventId=null、returnTo=null。
-// 保留 symbol 和 timeframe。
+// 切换 scope 后重置 page=1、清除 selected（PRD §6.1：筛选变化重置分页）。
+// 保留 query 和 sort。
 export function changeMarketScope(
   state: MarketWorkspaceUrlState,
   newScope: MarketScope,
 ): MarketWorkspaceUrlState {
   return {
+    ...state,
     scope: newScope,
-    symbol: state.symbol,
-    timeframe: state.timeframe,
-    source: 'watchlist',
-    strategy: defaultStrategyForSource('watchlist'),
-    eventId: null,
-    returnTo: null,
+    page: DEFAULT_PAGE,
+    selected: null,
   }
 }
 
