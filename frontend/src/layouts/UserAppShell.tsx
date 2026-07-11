@@ -1,5 +1,5 @@
 // [UserAppShell] - 描述: 普通用户布局壳（顶栏品牌 + 一级导航 + 账户菜单；无左侧栏）
-// 承载：/market（行情，本阶段复用 WatchlistPage）、/screener、/stock/:symbol、/messages、/settings
+// 承载：/market（行情，渲染 MarketWorkspacePage）、/screener、/stock/:symbol、/messages、/settings
 // 不再渲染旧 AppShell 的统一侧栏；消息/设置已收拢到 AccountMenu。
 // 市场状态 30s 轮询 + 上海时区实时钟（原 AppShell 职责迁移至此）。
 // Capture 路由不经过本壳层（由 App.tsx 独立路由处理）。

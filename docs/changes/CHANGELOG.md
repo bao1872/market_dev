@@ -4,6 +4,15 @@
 
 ## 2026-07-11
 
+- CHANGE-20260711-004: 统一行情工作区原型最终对齐（阶段五）
+  - ScreenerPage/MessagesPage 查看详情改进入 `/market`（含 returnTo/event_id）；`/market` URL 扩展 debug/returnTo
+  - 新建 `features/research-context/`：ResearchContextPanel/EventExplanationCard/StructureSummaryCard/AdminFactorDebugPanel/useResearchContext
+  - 普通用户看事件通俗解释和结构状态人类可读总结；管理员 `debug=1` 看原始 factor/feature/JSON
+  - `StockStructuralStatePanel` 新增 debug props；按三张原型 PNG 重做 CSS（响应式+focus-visible）
+  - 删除旧 WatchlistPage.tsx 和 IndexPage.tsx（死代码）及对应契约测试
+  - 181 tests pass、tsc/eslint 0 errors、vite build PASS、4 docs checks PASS
+  - 不改后端/API/DB/Worker/CaptureStockPage
+
 - CHANGE-20260711-003: StockDetailPage 共享研究核心重构（阶段四）
   - `StockDetailPage` 降为路由适配器（813→453 行），复用 `useStockResearchData` + `StockResearchWorkspace`
   - 新建 `stockResearchTypes.ts` 共享类型；依赖方向修正为 market-workspace → stock-research

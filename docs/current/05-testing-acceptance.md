@@ -80,7 +80,7 @@
 
 ### 统一行情工作区（阶段三阻断验收）
 
-- 前端 `src/features/market-workspace/__tests__/marketWorkspaceUrlState.test.ts` 覆盖（21 个用例）：
+- 前端 `src/features/market-workspace/__tests__/marketWorkspaceUrlState.test.ts` 覆盖（25 个用例）：
   1. URL parse/serialize 往返一致（scope/symbol/timeframe/source/strategy/event_id）；
   2. 非法 timeframe 回退 1d；
   3. 非法 source 回退 watchlist；
@@ -91,13 +91,19 @@
   8. `selectInstrumentFromMarketPane(state, newSymbol)`：从 selection+dsa_selector+event_id 上下文选股后，source 重置为 watchlist、strategy 重置为 watchlist_monitor、eventId 清为 null，scope/symbol/timeframe 正确更新；
   9. `changeMarketScope(state, 'watchlist')` 和 `changeMarketScope(state, 'market')`：切换 scope 时退出 selection 上下文（source→watchlist、strategy→watchlist_monitor、eventId→null），保留 timeframe；
   10. 选择股票后 timeframe 不变（timeframe 在选股和切 scope 时必须保留）。
+  11. `debug=1` 解码为 true，`debug=0`/缺失解码为 false；
+  12. `debug=true` 时 encode 写入 `debug=1`，`debug=false` 时省略；
+  13. `returnTo` 参数解码（URL 编码的路径含 `&` 字符正确解析）；
+  14. `returnTo` 非 null 时 encode 写入，null 时省略；
+  15. `selectInstrumentFromMarketPane` 选股后清除 `returnTo`（保留 `debug`）；
+  16. `changeMarketScope` 切 scope 后清除 `returnTo`（保留 `debug`）。
 - 前端 `src/navigation/__tests__/appNavigation.test.ts` 覆盖 `getAccountMenuItemsForVariant`：
   1. variant=user + isAdmin=false → 只有消息+设置；
   2. variant=user + isAdmin=true → 消息+设置+管理后台；
   3. variant=admin → 消息+设置+返回行情（无管理后台）；
   4. variant=admin + isAdmin=true 仍不显示管理后台。
 - 前端 `src/navigation/__tests__/routeStructure.test.ts` 覆盖 Capture 路由回归（位于 ProtectedLayout 之外，不渲染任一壳层）。
-- 前端 `src/pages/__tests__/detailNavigation.test.ts` 覆盖 watchlist fallback 改为 `/market?scope=watchlist`。
+- 前端 `src/pages/__tests__/detailNavigation.test.ts` 覆盖（7 个用例）：watchlist fallback 改为 `/market?scope=watchlist`、`buildMarketEntryFromScreener` 生成含 scope/symbol/source/strategy/returnTo 的 URL、`buildMarketEntryFromMessage` 生成含 symbol/event_id 的 URL、`/stock/:symbol` 兼容路由 URL、`buildStockDetailState` 携带 returnTo、`resolveBackPath` 优先 returnTo、`resolveBackPath` 无 returnTo 时按 source fallback。
 - 浏览器 E2E（CDP，禁止安装 Playwright）：使用现有 Chromium + Node 22 `fetch`/`WebSocket` 通过 DevTools Protocol 执行，临时脚本 `/tmp/market-workspace-e2e.mjs`，profile `/tmp/panji-cdp-profile`，无法登录时用 `Fetch.enable` 域 mock 必要 API（mock 和脚本只能放 `/tmp`）。必须验证 8 项场景，每项输出 PASS/FAIL 和实际请求 URL：
   1. 打开 `/market?scope=market&symbol=<有效股票>&timeframe=15m`：工具栏选中 15m，bars 请求含 `timeframe=15m`，indicators 请求含 `timeframe=15m`；
   2. 点击工具栏 1h 按钮：URL 写入 `timeframe=1h`，bars 请求切为 `timeframe=1h`，indicators 请求切为 `timeframe=1h`，source/strategy/event_id 按规则保留；
@@ -146,6 +152,14 @@
   9. `StockDetailPage` 不再包含独立的 `useBars`/`useIndicators`/`useRealtimeQuote`/`useInstrumentEvents`/`barsCount` 映射/`StrategyChart` 重复实现。
 - E2E 结果（2026-07-11）：39 项断言全部 PASS，覆盖 9 个场景。
 - 回归要求：修改 `StockDetailPage.tsx`、`useStockResearchData.ts`、`useStockDetailActions.ts`、`useStockDetailFeishu.ts`、`StockResearchWorkspace.tsx`、`stockResearchTypes.ts` 或路由结构时必须跑此 E2E。
+- 临时文件约束：脚本/profile/日志/vite build 输出仅放 `/tmp`，验证结束后必须删除；不得保存截图/video/trace。
+
+### 原型最终对齐阻断验收（阶段五）
+
+- 前端 `src/features/market-workspace/__tests__/marketWorkspaceUrlState.test.ts` 扩展至 25 个用例（新增 debug/returnTo 解码/编码/保留/清除 6 项）。
+- 前端 `src/pages/__tests__/detailNavigation.test.ts` 扩展至 7 个用例（新增 `buildMarketEntryFromScreener`/`buildMarketEntryFromMessage`/`buildStockDetailState`/`resolveBackPath` 4 项）。
+- 浏览器 E2E（CDP）：使用现有 Chromium + DevTools Protocol，临时脚本 `/tmp/prototype-alignment-e2e.mjs`，profile `/tmp/panji-cdp-profile-final`。必须验证：Screener/Messages 跳转 URL 含 returnTo/event_id；event 详情成功/404/错误状态；普通用户不显示 debug，管理员 debug=1 显示原始数据；右栏关闭后 event/structural/temporal 新请求为 0；market/stock 同周期请求一致无重复；指标开关/全屏/自选/memo/飞书/上下只正常；capture 隔离；1024/1440/1920 无横向溢出、左右栏折叠和中心扩展正确；旧 /overview、/watchlist、/stock 链接可用。
+- 回归要求：修改 `ResearchContextPanel`/`EventExplanationCard`/`StructureSummaryCard`/`AdminFactorDebugPanel`/`useResearchContext`/`marketWorkspaceUrlState.ts`/`detailNavigation.ts`/`MarketWorkspacePage.tsx`/`ScreenerPage.tsx`/`MessagesPage.tsx`/`StockStructuralStatePanel.tsx` 或删除页面时必须跑此组测试。
 - 临时文件约束：脚本/profile/日志/vite build 输出仅放 `/tmp`，验证结束后必须删除；不得保存截图/video/trace。
 
 ## 3.2 K线实时契约门禁（blocking）

@@ -1,11 +1,12 @@
 // [Navigation] - 描述: 单一导航/路由常量真源（避免路径散落在各页面）
 // 阶段二（壳层与导航拆分）确立：
-//   普通用户主入口 = /market（行情，本阶段直接复用 WatchlistPage）
+//   普通用户主入口 = /market（行情，渲染 MarketWorkspacePage）
 //   趋势选股保持独立一级页面 /screener
 //   消息 /messages、设置 /settings 进入右上角账户菜单
 //   管理后台独立壳层 AdminAppShell，承载 /admin/*
 //   Capture 路由 /capture/stock/:symbol 位于两套壳层之外
 //   旧路由 /overview → /market、/watchlist → /market?scope=watchlist 仅作兼容重定向
+//   旧 WatchlistPage.tsx 和 IndexPage.tsx 已删除（统一行情工作区改造）
 // 本文件为纯 TS（无 React 依赖），可被 node --test 直接运行，便于路由契约测试。
 
 export const APP_ROUTES = {
