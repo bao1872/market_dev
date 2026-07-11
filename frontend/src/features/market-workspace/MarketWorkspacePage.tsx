@@ -141,6 +141,7 @@ export default function MarketWorkspacePage() {
             {selectedSymbol && (
               <EventStatePanel
                 symbol={selectedSymbol}
+                eventId={urlState.eventId}
               />
             )}
             {!selectedSymbol && (

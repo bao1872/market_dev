@@ -103,26 +103,77 @@
   background: rgba(255, 255, 255, 0.02);
   border-radius: 6px;
   border-left: 3px solid rgba(96, 165, 250, 0.4);
+  transition: background 0.2s;
 }
 
-.eventTime {
+.eventItemHighlighted {
+  background: rgba(96, 165, 250, 0.08);
+  border-left-color: rgba(96, 165, 250, 0.9);
+  box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.2);
+}
+
+.eventHeader {
+  cursor: pointer;
+
+  &:focus-visible {
+    outline: 2px solid rgba(96, 165, 250, 0.5);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+}
+
+.eventExpandHint {
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.5);
+  color: rgba(96, 165, 250, 0.6);
+  margin-top: 4px;
+  user-select: none;
+}
+
+.eventEvidence {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.evidenceItem {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 12px;
+}
+
+.evidenceField {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.evidenceChange {
+  color: rgba(255, 255, 255, 0.75);
   font-family: monospace;
 }
 
-.eventTitle {
-  font-size: 14px;
-  font-weight: 600;
-  color: rgba(255, 255, 255, 0.85);
-  margin-top: 2px;
+.temporalSummary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
-.eventDesc {
+.retryBtn {
+  margin-top: 8px;
+  padding: 4px 12px;
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.65);
-  margin-top: 2px;
-  line-height: 1.4;
+  color: rgba(96, 165, 250, 0.9);
+  background: rgba(96, 165, 250, 0.1);
+  border: 1px solid rgba(96, 165, 250, 0.3);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.2s;
+
+  &:hover {
+    background: rgba(96, 165, 250, 0.2);
+  }
 }
 
 .emptyEvents {

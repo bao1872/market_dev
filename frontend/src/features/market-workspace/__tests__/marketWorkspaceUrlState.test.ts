@@ -103,6 +103,7 @@ test('encode→decode 往返一致（含 industry/concept/state）', () => {
     industry: '银行',
     concept: '新能源',
     state: 'up',
+    eventId: null,
   }
   const encoded = encodeMarketWorkspaceUrl(original)
   const decoded = decodeMarketWorkspaceUrl(encoded)
@@ -110,29 +111,29 @@ test('encode→decode 往返一致（含 industry/concept/state）', () => {
 })
 
 test('query="" 时 encode 不包含 query', () => {
-  const params = encodeMarketWorkspaceUrl({ scope: 'market', query: '', page: 1, pageSize: 50, sort: null, selected: null, industry: null, concept: null, state: null })
+  const params = encodeMarketWorkspaceUrl({ scope: 'market', query: '', page: 1, pageSize: 50, sort: null, selected: null, industry: null, concept: null, state: null, eventId: null })
   assert.equal(params.has('query'), false)
 })
 
 test('page=1（默认）时 encode 省略 page', () => {
-  const params = encodeMarketWorkspaceUrl({ scope: 'market', query: '', page: 1, pageSize: 50, sort: null, selected: null, industry: null, concept: null, state: null })
+  const params = encodeMarketWorkspaceUrl({ scope: 'market', query: '', page: 1, pageSize: 50, sort: null, selected: null, industry: null, concept: null, state: null, eventId: null })
   assert.equal(params.has('page'), false)
 })
 
 test('selected=null 时 encode 不包含 selected', () => {
-  const params = encodeMarketWorkspaceUrl({ scope: 'market', query: '', page: 1, pageSize: 50, sort: null, selected: null, industry: null, concept: null, state: null })
+  const params = encodeMarketWorkspaceUrl({ scope: 'market', query: '', page: 1, pageSize: 50, sort: null, selected: null, industry: null, concept: null, state: null, eventId: null })
   assert.equal(params.has('selected'), false)
 })
 
 test('industry=null 时 encode 不包含 industry', () => {
-  const params = encodeMarketWorkspaceUrl({ scope: 'market', query: '', page: 1, pageSize: 50, sort: null, selected: null, industry: null, concept: null, state: null })
+  const params = encodeMarketWorkspaceUrl({ scope: 'market', query: '', page: 1, pageSize: 50, sort: null, selected: null, industry: null, concept: null, state: null, eventId: null })
   assert.equal(params.has('industry'), false)
   assert.equal(params.has('concept'), false)
   assert.equal(params.has('state'), false)
 })
 
 test('buildMarketWorkspaceUrl 生成完整 URL', () => {
-  const url = buildMarketWorkspaceUrl({ scope: 'market', query: '茅台', page: 2, pageSize: 50, sort: null, selected: '600519', industry: null, concept: null, state: null })
+  const url = buildMarketWorkspaceUrl({ scope: 'market', query: '茅台', page: 2, pageSize: 50, sort: null, selected: '600519', industry: null, concept: null, state: null, eventId: null })
   assert.ok(url.startsWith('/market?'))
   assert.ok(url.includes('scope=market'))
   assert.ok(url.includes('query='))
@@ -150,6 +151,7 @@ test('selectInstrumentInTable：设置 selected，保留 scope/query/page/pageSi
     industry: '银行',
     concept: '新能源',
     state: 'up',
+    eventId: null,
   }
   const newState = selectInstrumentInTable(state, '000001')
   assert.equal(newState.selected, '000001')
@@ -174,6 +176,7 @@ test('changeMarketScope：切换 scope 后重置 page=1、清除 selected', () =
     industry: '银行',
     concept: '新能源',
     state: 'up',
+    eventId: null,
   }
   const newState = changeMarketScope(state, 'watchlist')
   assert.equal(newState.scope, 'watchlist')
@@ -192,6 +195,7 @@ test('changeMarketScope：保留 query 和 sort', () => {
     industry: null,
     concept: null,
     state: null,
+    eventId: null,
   }
   const newState = changeMarketScope(state, 'watchlist')
   assert.equal(newState.query, '银行')
@@ -209,6 +213,7 @@ test('changeMarketFilter：重置 page=1、清除 selected，保留其他筛选'
     industry: '银行',
     concept: '新能源',
     state: 'up',
+    eventId: null,
   }
   const newState = changeMarketFilter(state, { state: 'down' })
   assert.equal(newState.page, 1)
@@ -231,6 +236,7 @@ test('changeMarketFilter：清除 industry 时设为 null', () => {
     industry: '银行',
     concept: null,
     state: null,
+    eventId: null,
   }
   const newState = changeMarketFilter(state, { industry: null })
   assert.equal(newState.industry, null)
@@ -257,4 +263,54 @@ test('normalizeInternalReturnTo: 拒绝外部 URL/双斜杠/javascript/超长值
   assert.equal(normalizeInternalReturnTo('/unknown'), null)
   assert.equal(normalizeInternalReturnTo(null), null)
   assert.equal(normalizeInternalReturnTo(''), null)
+})
+
+test('decode event_id 从 URL 解析', () => {
+  const state = decodeMarketWorkspaceUrl(new URLSearchParams('event_id=abc-123'))
+  assert.equal(state.eventId, 'abc-123')
+})
+
+test('encode event_id 非空时写入 URL', () => {
+  const params = encodeMarketWorkspaceUrl({ scope: 'market', query: '', page: 1, pageSize: 50, sort: null, selected: '000001', industry: null, concept: null, state: null, eventId: 'evt-456' })
+  assert.equal(params.get('event_id'), 'evt-456')
+})
+
+test('encode event_id 为 null 时省略', () => {
+  const params = encodeMarketWorkspaceUrl({ scope: 'market', query: '', page: 1, pageSize: 50, sort: null, selected: null, industry: null, concept: null, state: null, eventId: null })
+  assert.equal(params.has('event_id'), false)
+})
+
+test('selectInstrumentInTable：清除 eventId（退出事件定位上下文）', () => {
+  const state: MarketWorkspaceUrlState = {
+    scope: 'market',
+    query: '银行',
+    page: 3,
+    pageSize: 20,
+    sort: 'symbol:asc',
+    selected: null,
+    industry: '银行',
+    concept: '新能源',
+    state: 'up',
+    eventId: 'evt-from-messages',
+  }
+  const newState = selectInstrumentInTable(state, '000001')
+  assert.equal(newState.selected, '000001')
+  assert.equal(newState.eventId, null)
+})
+
+test('changeMarketScope：清除 eventId', () => {
+  const state: MarketWorkspaceUrlState = {
+    scope: 'market',
+    query: '银行',
+    page: 3,
+    pageSize: 20,
+    sort: 'symbol:asc',
+    selected: '000001',
+    industry: '银行',
+    concept: '新能源',
+    state: 'up',
+    eventId: 'evt-from-messages',
+  }
+  const newState = changeMarketScope(state, 'watchlist')
+  assert.equal(newState.eventId, null)
 })

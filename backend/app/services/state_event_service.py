@@ -26,6 +26,8 @@ PRD V1.1 §7.3 核心实现：
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -48,6 +50,8 @@ logger = logging.getLogger(__name__)
 
 _CLEANUP_DAYS = 90
 _EVENT_TYPE_TRANSITION = "state_transition"
+# 状态提取算法版本（build_stock_state 逻辑变更时 bump）
+_STATE_ALGORITHM_VERSION = "state_v1"
 
 # 状态字段路径（用于比较 code）
 _STATE_FIELD_PATHS = [
@@ -192,8 +196,11 @@ async def _batch_get_previous_snapshots(
     primary_timeframe: str,
     secondary_timeframe: str,
     adj: str,
-) -> dict[UUID, StockFeatureSnapshot]:
-    """批量获取每个 instrument 的前一兼容快照（子查询 + JOIN，标准 SQL）。
+) -> dict[UUID, tuple[StockFeatureSnapshot, StockFeatureSnapshotRun]]:
+    """批量获取每个 instrument 的前一兼容快照 + 其所属成功 run（JOIN，标准 SQL）。
+
+    PRD V1.1 P1: 前一状态只能来自前一成功发布且算法兼容的 run。
+    JOIN StockFeatureSnapshotRun 过滤 status='succeeded'。
 
     使用 MAX(trade_date) 子查询取每个 instrument 的最近一条快照，
     避免使用 PostgreSQL 特有的 DISTINCT ON，保证跨方言兼容。
@@ -221,9 +228,9 @@ async def _batch_get_previous_snapshots(
         .group_by(StockFeatureSnapshot.instrument_id)
     ).subquery()
 
-    # 主查询：JOIN 回 snapshots 表取完整行
+    # 主查询：JOIN 回 snapshots 表 + JOIN run 表（过滤 succeeded）
     stmt = (
-        select(StockFeatureSnapshot)
+        select(StockFeatureSnapshot, StockFeatureSnapshotRun)
         .join(
             max_date_subq,
             and_(
@@ -231,17 +238,26 @@ async def _batch_get_previous_snapshots(
                 StockFeatureSnapshot.trade_date == max_date_subq.c.max_date,
             ),
         )
+        .outerjoin(
+            StockFeatureSnapshotRun,
+            StockFeatureSnapshot.source_run_id == StockFeatureSnapshotRun.id,
+        )
         .where(
             and_(
                 StockFeatureSnapshot.schema_version == schema_version,
                 StockFeatureSnapshot.primary_timeframe == primary_timeframe,
                 StockFeatureSnapshot.secondary_timeframe == secondary_timeframe,
                 StockFeatureSnapshot.adj == adj,
+                # P1: 前一状态必须来自成功发布的 run
+                StockFeatureSnapshotRun.status == STATUS_SUCCEEDED,
             )
         )
     )
     result = await session.execute(stmt)
-    return {snap.instrument_id: snap for snap in result.scalars().all()}
+    return {
+        snap.instrument_id: (snap, run)
+        for snap, run in result.all()
+    }
 
 
 # =============================================================================
@@ -277,21 +293,42 @@ async def generate_events_for_run(
     run = await session.get(StockFeatureSnapshotRun, run_id)
     if run is None:
         logger.warning("run 不存在: run_id=%s", run_id)
-        return {"event_count": 0, "skipped_count": 0, "failed_count": 0, "run_id": str(run_id)}
+        return {
+            "event_count": 0,
+            "candidate_count": 0,
+            "inserted_count": 0,
+            "skipped_count": 0,
+            "failed_count": 0,
+            "run_id": str(run_id),
+        }
 
     if run.status != STATUS_SUCCEEDED:
         logger.warning("run 未 succeeded，跳过事件生成: run_id=%s status=%s", run_id, run.status)
-        return {"event_count": 0, "skipped_count": 0, "failed_count": 0, "run_id": str(run_id)}
+        return {
+            "event_count": 0,
+            "candidate_count": 0,
+            "inserted_count": 0,
+            "skipped_count": 0,
+            "failed_count": 0,
+            "run_id": str(run_id),
+        }
 
     # Query 2: 批量获取快照 + symbol
     snapshots_with_symbol = await _batch_get_run_snapshots_with_symbol(session, run)
     if not snapshots_with_symbol:
         logger.info("run 无快照: run_id=%s", run_id)
-        return {"event_count": 0, "skipped_count": 0, "failed_count": 0, "run_id": str(run_id)}
+        return {
+            "event_count": 0,
+            "candidate_count": 0,
+            "inserted_count": 0,
+            "skipped_count": 0,
+            "failed_count": 0,
+            "run_id": str(run_id),
+        }
 
-    # Query 3: 批量获取前一兼容快照
+    # Query 3: 批量获取前一兼容快照 + 其所属成功 run
     instrument_ids = [snap.instrument_id for snap, _ in snapshots_with_symbol]
-    prev_snapshots = await _batch_get_previous_snapshots(
+    prev_data = await _batch_get_previous_snapshots(
         session,
         instrument_ids,
         run.trade_date,
@@ -301,13 +338,13 @@ async def generate_events_for_run(
         run.adj,
     )
 
-    # 构建 prev run（用于 build_stock_state 的 version 字段）
-    # prev 快照可能属于不同的 run，但我们用当前 run 的 schema_version
-    # 因为 _batch_get_previous_snapshots 已按 schema_version 过滤
-
     # 检测时间：run.published_at 或 finished_at
     detected_at = run.published_at or run.finished_at or datetime.now(UTC)
 
+    # P1: algorithm_version 使用真实算法版本（schema + state extraction）
+    algorithm_version = f"schema_v{run.schema_version}+{_STATE_ALGORITHM_VERSION}"
+
+    candidate_count = 0
     event_count = 0
     skipped_count = 0
     failed_count = 0
@@ -318,11 +355,13 @@ async def generate_events_for_run(
             # 构建当前 StockState
             curr_state = build_stock_state(curr_snapshot, run, symbol)
 
-            # 构建前一 StockState
-            prev_snapshot = prev_snapshots.get(curr_snapshot.instrument_id)
+            # 构建前一 StockState — P1: 使用前一成功 run（非当前 run）
+            prev_entry = prev_data.get(curr_snapshot.instrument_id)
             prev_state: StockState | None = None
-            if prev_snapshot is not None:
-                prev_state = build_stock_state(prev_snapshot, run, symbol)
+            prev_snapshot: StockFeatureSnapshot | None = None
+            if prev_entry is not None:
+                prev_snapshot, prev_run = prev_entry
+                prev_state = build_stock_state(prev_snapshot, prev_run, symbol)
 
             # 比较 code
             prev_codes = extract_state_codes(prev_state) if prev_state else {}
@@ -334,11 +373,22 @@ async def generate_events_for_run(
                 skipped_count += 1
                 continue
 
+            candidate_count += 1
+
             # 构建事件
             title, description = build_event_title_and_description(changed_fields)
             evidence = build_event_evidence(prev_state, curr_state, changed_fields)
-            algorithm_version = f"v{run.schema_version}"
-            idempotency_key = f"{symbol}:{run.id}:{algorithm_version}"
+
+            # P1: 幂等键 = symbol:current_as_of:algorithm_version:hash(changed_fields)
+            # 同日重跑（相同 changed_fields）产生相同 key → ON CONFLICT DO NOTHING
+            changed_fields_sorted = sorted(changed_fields)
+            changes_hash = hashlib.sha256(
+                json.dumps(changed_fields_sorted, ensure_ascii=False).encode("utf-8")
+            ).hexdigest()[:8]
+            idempotency_key = (
+                f"{symbol}:{curr_snapshot.trade_date.isoformat()}:"
+                f"{algorithm_version}:{changes_hash}"
+            )
 
             events_to_insert.append({
                 "instrument_id": curr_snapshot.instrument_id,
@@ -364,18 +414,24 @@ async def generate_events_for_run(
             )
 
     # Query 4: 批量 INSERT ON CONFLICT DO NOTHING
+    inserted_count = 0
     if events_to_insert:
         stmt = pg_insert(StockStateEvent).values(events_to_insert).on_conflict_do_nothing(
             constraint="uq_state_events_idempotency_key",
         )
-        await session.execute(stmt)
+        result = await session.execute(stmt)
+        # rowcount 可能 None（某些驱动），fallback 为 candidates 数量
+        rc = getattr(result, "rowcount", None)
+        inserted_count = rc if rc is not None and rc >= 0 else len(events_to_insert)
 
     logger.info(
-        "事件生成完成 run_id=%s event_count=%d skipped=%d failed=%d",
-        run_id, event_count, skipped_count, failed_count,
+        "事件生成完成 run_id=%s candidate=%d inserted=%d event_count=%d skipped=%d failed=%d",
+        run_id, candidate_count, inserted_count, event_count, skipped_count, failed_count,
     )
     return {
         "event_count": event_count,
+        "candidate_count": candidate_count,
+        "inserted_count": inserted_count,
         "skipped_count": skipped_count,
         "failed_count": failed_count,
         "run_id": str(run_id),

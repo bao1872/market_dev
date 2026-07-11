@@ -18,6 +18,7 @@ export interface MarketWorkspaceUrlState {
   industry: string | null
   concept: string | null
   state: MarketStateFilter
+  eventId: string | null
 }
 
 export const DEFAULT_MARKET_SCOPE: MarketScope = 'watchlist'
@@ -45,7 +46,8 @@ export function decodeMarketWorkspaceUrl(params: URLSearchParams): MarketWorkspa
   const concept = params.get('concept') || null
   const rawState = params.get('state')
   const state: MarketStateFilter = rawState && VALID_STATE_FILTERS.has(rawState) ? rawState as MarketStateFilter : null
-  return { scope, query, page, pageSize, sort, selected, industry, concept, state }
+  const eventId = params.get('event_id') || null
+  return { scope, query, page, pageSize, sort, selected, industry, concept, state, eventId }
 }
 
 // 将工作区状态编码为 URLSearchParams（用于 setSearchParams）
@@ -79,6 +81,9 @@ export function encodeMarketWorkspaceUrl(state: MarketWorkspaceUrlState): URLSea
   if (state.state) {
     params.set('state', state.state)
   }
+  if (state.eventId) {
+    params.set('event_id', state.eventId)
+  }
   return params
 }
 
@@ -90,7 +95,7 @@ export function buildMarketWorkspaceUrl(state: MarketWorkspaceUrlState): string 
 }
 
 // 从列表中单击非链接区域选择股票时的状态转换（纯函数）。
-// 设置 selected，保留 scope/query/page/pageSize/sort（PRD §6.1：单击不进入详情，只更新右栏）。
+// 设置 selected，清除 eventId（退出事件定位上下文），保留 scope/query/page/pageSize/sort。
 export function selectInstrumentInTable(
   state: MarketWorkspaceUrlState,
   symbol: string,
@@ -98,11 +103,12 @@ export function selectInstrumentInTable(
   return {
     ...state,
     selected: symbol,
+    eventId: null,
   }
 }
 
 // 切换 scope 时的状态转换（纯函数）。
-// 切换 scope 后重置 page=1、清除 selected（PRD §6.1：筛选变化重置分页）。
+// 切换 scope 后重置 page=1、清除 selected 和 eventId（PRD §6.1：筛选变化重置分页）。
 // 保留 query 和 sort。
 export function changeMarketScope(
   state: MarketWorkspaceUrlState,
@@ -113,11 +119,12 @@ export function changeMarketScope(
     scope: newScope,
     page: DEFAULT_PAGE,
     selected: null,
+    eventId: null,
   }
 }
 
 // 筛选条件变化时的状态转换（纯函数）。
-// 筛选变化后重置 page=1、清除 selected（PRD §6.1：筛选变化重置分页）。
+// 筛选变化后重置 page=1、清除 selected 和 eventId（PRD §6.1：筛选变化重置分页）。
 // 保留 scope/query/sort 和其他筛选字段。
 export function changeMarketFilter(
   state: MarketWorkspaceUrlState,
@@ -128,6 +135,7 @@ export function changeMarketFilter(
     ...patch,
     page: DEFAULT_PAGE,
     selected: null,
+    eventId: null,
   }
 }
 

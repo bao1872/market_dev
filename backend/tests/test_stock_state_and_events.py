@@ -430,8 +430,10 @@ async def test_generate_events_for_run_idempotent_write() -> None:
     V1.1 架构：4 条固定 SQL（不随股票数增长）
     1. session.get(run) - 读取当前 run
     2. _batch_get_run_snapshots_with_symbol - JOIN 批量查询快照+symbol
-    3. _batch_get_previous_snapshots - DISTINCT ON 批量取前一快照
+    3. _batch_get_previous_snapshots - MAX 子查询 + JOIN run（过滤 succeeded）
     4. pg_insert.on_conflict_do_nothing - 批量幂等写入
+
+    P1: Query 3 返回 (snapshot, run) 元组，前一状态来自前一成功 run。
     """
     from app.services.state_event_service import generate_events_for_run
 
@@ -464,6 +466,7 @@ async def test_generate_events_for_run_idempotent_write() -> None:
         # 批量 INSERT（on_conflict_do_nothing）
         if stmt_type == "Insert":
             mock_result = MagicMock()
+            mock_result.rowcount = 1
             return mock_result
 
         compiled = str(stmt)
@@ -475,11 +478,13 @@ async def test_generate_events_for_run_idempotent_write() -> None:
             mock_result.all.return_value = [(curr_snapshot, "000001")]
             return mock_result
 
-        # Query 3: _batch_get_previous_snapshots（子查询 MAX + JOIN）
-        # 返回 scalars().all()
+        # Query 3: _batch_get_previous_snapshots（子查询 MAX + JOIN run）
+        # P1: 返回 list of (snapshot, run) tuples via result.all()
+        #     run 必须 status='succeeded'（SQL 层过滤）
         if "stock_feature_snapshots" in compiled and "max" in compiled.lower():
+            prev_run = _make_mock_run(trade_date=date(2026, 7, 9))
             mock_result = MagicMock()
-            mock_result.scalars.return_value.all.return_value = [prev_snapshot]
+            mock_result.all.return_value = [(prev_snapshot, prev_run)]
             return mock_result
 
         # 默认返回空结果
@@ -505,9 +510,10 @@ async def test_generate_events_for_run_batch_sql_count_constant() -> None:
     无论股票数量多少，generate_events_for_run 只执行固定 4 条 SQL：
     1. session.get(run)
     2. _batch_get_run_snapshots_with_symbol (1 条 JOIN)
-    3. _batch_get_previous_snapshots (1 条 DISTINCT ON)
+    3. _batch_get_previous_snapshots (1 条 MAX 子查询 + JOIN run)
     4. batch INSERT (1 条 ON CONFLICT DO NOTHING)
 
+    P1: Query 3 返回 (snapshot, run) 元组，前一状态来自前一成功 run。
     禁止逐股查询形成 N+1。
     """
     from app.services.state_event_service import generate_events_for_run
@@ -547,7 +553,9 @@ async def test_generate_events_for_run_batch_sql_count_constant() -> None:
             execute_count += 1
 
             if type(stmt).__name__ == "Insert":
-                return MagicMock()
+                mock_result = MagicMock()
+                mock_result.rowcount = 1
+                return mock_result
 
             compiled = str(stmt)
             if "instruments" in compiled:
@@ -556,9 +564,13 @@ async def test_generate_events_for_run_batch_sql_count_constant() -> None:
                 mock_result.all.return_value = snapshots_with_symbol
                 return mock_result
             if "max" in compiled.lower():
-                # Query 3: batch previous snapshots (subquery MAX + JOIN)
+                # Query 3: batch previous snapshots (subquery MAX + JOIN run)
+                # P1: 返回 list of (snapshot, run) tuples
+                prev_run = _make_mock_run(trade_date=date(2026, 7, 9))
                 mock_result = MagicMock()
-                mock_result.scalars.return_value.all.return_value = prev_snapshots
+                mock_result.all.return_value = [
+                    (prev, prev_run) for prev in prev_snapshots
+                ]
                 return mock_result
             mock_result = MagicMock()
             mock_result.all.return_value = []
