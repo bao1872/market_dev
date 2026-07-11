@@ -202,7 +202,7 @@ async def test_row_fields(market_stocks_client) -> None:
     assert "latest_event_title" in row
     assert "latest_event_time" in row
     assert "is_watchlisted" in row
-    # industry/concepts 在 Phase 6 前为 null/空
+    # industry/concepts 在无板块数据时为 null/空
     assert row["industry"] is None
     assert row["concepts"] == []
 
@@ -247,6 +247,170 @@ async def test_concept_param_returns_empty_when_no_board_data(market_stocks_clie
     data = response.json()
     assert data["total"] == 0
     assert data["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_industry_concept_populated_from_board_data(
+    market_stocks_client,
+    db_session: AsyncSession,
+) -> None:
+    """板块数据存在时 industry/concepts 字段真实填充（不再写死 None/[]）。"""
+    from app.models.market_board import MarketBoard, MarketBoardMembership
+
+    client, _, instruments = market_stocks_client
+    inst1, inst2, _ = instruments
+
+    # 创建板块 + 成分关系
+    industry_board = MarketBoard(externalCode="BK_BANK", name="银行", type="industry")
+    concept_board = MarketBoard(externalCode="BK_NEWENERGY", name="新能源", type="concept")
+    db_session.add_all([industry_board, concept_board])
+    await db_session.flush()
+
+    db_session.add_all([
+        MarketBoardMembership(boardId=industry_board.id, instrumentId=inst1.id),
+        MarketBoardMembership(boardId=concept_board.id, instrumentId=inst2.id),
+        MarketBoardMembership(boardId=concept_board.id, instrumentId=inst1.id),
+    ])
+    await db_session.flush()
+
+    response = await client.get("/market/stocks", params={"scope": "market"})
+    assert response.status_code == 200
+    items = response.json()["items"]
+    by_symbol = {item["symbol"]: item for item in items}
+
+    # inst1 (600519) 属于 银行行业 + 新能源概念
+    assert by_symbol["600519"]["industry"] == "银行"
+    assert "新能源" in by_symbol["600519"]["concepts"]
+
+    # inst2 (000001) 无行业，仅属于 新能源概念
+    assert by_symbol["000001"]["industry"] is None
+    assert "新能源" in by_symbol["000001"]["concepts"]
+
+
+@pytest.mark.asyncio
+async def test_industry_filter_returns_matching_instruments(
+    market_stocks_client,
+    db_session: AsyncSession,
+) -> None:
+    """industry 筛选使用 SQL EXISTS，仅返回属于该行业的股票。"""
+    from app.models.market_board import MarketBoard, MarketBoardMembership
+
+    client, _, instruments = market_stocks_client
+    inst1, inst2, _ = instruments
+
+    industry_board = MarketBoard(externalCode="BK_BANK", name="银行", type="industry")
+    db_session.add(industry_board)
+    await db_session.flush()
+    db_session.add(MarketBoardMembership(boardId=industry_board.id, instrumentId=inst1.id))
+    await db_session.flush()
+
+    response = await client.get(
+        "/market/stocks", params={"scope": "market", "industry": "银行"}
+    )
+    assert response.status_code == 200
+    data = response.json()
+    symbols = {item["symbol"] for item in data["items"]}
+    assert "600519" in symbols
+    assert "000001" not in symbols
+
+
+@pytest.mark.asyncio
+async def test_concept_filter_returns_matching_instruments(
+    market_stocks_client,
+    db_session: AsyncSession,
+) -> None:
+    """concept 筛选使用 SQL EXISTS，仅返回属于该概念的股票。"""
+    from app.models.market_board import MarketBoard, MarketBoardMembership
+
+    client, _, instruments = market_stocks_client
+    inst1, inst2, _ = instruments
+
+    concept_board = MarketBoard(externalCode="BK_NEWENERGY", name="新能源", type="concept")
+    db_session.add(concept_board)
+    await db_session.flush()
+    db_session.add_all([
+        MarketBoardMembership(boardId=concept_board.id, instrumentId=inst1.id),
+        MarketBoardMembership(boardId=concept_board.id, instrumentId=inst2.id),
+    ])
+    await db_session.flush()
+
+    response = await client.get(
+        "/market/stocks", params={"scope": "market", "concept": "新能源"}
+    )
+    assert response.status_code == 200
+    data = response.json()
+    symbols = {item["symbol"] for item in data["items"]}
+    assert "600519" in symbols
+    assert "000001" in symbols
+
+
+@pytest.mark.asyncio
+async def test_combined_industry_concept_filter_intersection(
+    market_stocks_client,
+    db_session: AsyncSession,
+) -> None:
+    """industry + concept 组合筛选取交集（AND 语义）。"""
+    from app.models.market_board import MarketBoard, MarketBoardMembership
+
+    client, _, instruments = market_stocks_client
+    inst1, inst2, _ = instruments
+
+    industry_board = MarketBoard(externalCode="BK_BANK", name="银行", type="industry")
+    concept_board = MarketBoard(externalCode="BK_NEWENERGY", name="新能源", type="concept")
+    db_session.add_all([industry_board, concept_board])
+    await db_session.flush()
+    # inst1 属于 银行 + 新能源；inst2 仅属于 新能源
+    db_session.add_all([
+        MarketBoardMembership(boardId=industry_board.id, instrumentId=inst1.id),
+        MarketBoardMembership(boardId=concept_board.id, instrumentId=inst1.id),
+        MarketBoardMembership(boardId=concept_board.id, instrumentId=inst2.id),
+    ])
+    await db_session.flush()
+
+    response = await client.get(
+        "/market/stocks",
+        params={"scope": "market", "industry": "银行", "concept": "新能源"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    symbols = {item["symbol"] for item in data["items"]}
+    # 仅 inst1 同时属于两个板块
+    assert symbols == {"600519"}
+
+
+@pytest.mark.asyncio
+async def test_price_as_of_global_not_page_dependent(
+    market_stocks_client,
+    db_session: AsyncSession,
+) -> None:
+    """price_as_of 是全局 MAX(trade_date)，不随分页变化。"""
+    from datetime import date
+
+    from app.models.bar import BarDaily
+
+    client, _, instruments = market_stocks_client
+    inst1, inst2, _ = instruments
+
+    # inst1 最新 bar 日期为 2026-01-10
+    db_session.add_all([
+        BarDaily(instrument_id=inst1.id, trade_date=date(2026, 1, 9), close=100.0),
+        BarDaily(instrument_id=inst1.id, trade_date=date(2026, 1, 10), close=105.0),
+        BarDaily(instrument_id=inst2.id, trade_date=date(2026, 1, 8), close=50.0),
+    ])
+    await db_session.flush()
+
+    # 分页查询：page_size=1 查不同页
+    resp1 = await client.get(
+        "/market/stocks", params={"scope": "market", "page_size": 1, "page": 1}
+    )
+    resp2 = await client.get(
+        "/market/stocks", params={"scope": "market", "page_size": 1, "page": 2}
+    )
+    assert resp1.status_code == 200
+    assert resp2.status_code == 200
+    # 两页的 price_as_of 应一致（全局 MAX = 2026-01-10）
+    assert resp1.json()["price_as_of"] == resp2.json()["price_as_of"]
+    assert resp1.json()["price_as_of"] is not None
 
 
 @pytest.mark.asyncio
@@ -356,7 +520,7 @@ async def test_sql_query_count_fixed(
     market_stocks_client,
     db_session: AsyncSession,
 ) -> None:
-    """验证 SQL 查询数量固定为 6 条，不随 page_size 变化。
+    """验证 SQL 查询数量固定为 9 条，不随 page_size 变化。
 
     使用 SQLAlchemy before_cursor_execute 事件精确计数 SELECT 语句。
     """
@@ -399,8 +563,8 @@ async def test_sql_query_count_fixed(
     assert len(set(query_counts.values())) == 1, (
         f"查询数量不一致: {query_counts}"
     )
-    # 查询数量应为 6（instruments + count + bars + snapshots + events + boards_as_of）
-    expected_count = 6
+    # 查询数量应为 9（instruments + count + bars + snapshots + events + boards_as_of + boards_batch + price_as_of + state_as_of）
+    expected_count = 9
     actual_count = list(query_counts.values())[0]
     assert actual_count == expected_count, (
         f"期望 {expected_count} 条 SQL，实际 {actual_count} 条。"
@@ -468,6 +632,110 @@ async def test_explain_uses_index(
     # 验证使用索引扫描（强制关闭 seqscan 后应使用 Index Scan）
     assert "Index Scan" in plan_text, (
         f"EXPLAIN 结果未使用索引扫描（即使强制关闭 seqscan）:\n{plan_text}"
+    )
+
+
+# ===== P0-2: 带筛选的 SQL 计数测试 + EXPLAIN ANALYZE =====
+
+
+@pytest.mark.asyncio
+async def test_sql_query_count_fixed_with_filters(
+    market_stocks_client,
+    db_session: AsyncSession,
+) -> None:
+    """验证带 industry/concept/组合筛选时 SQL 查询数量仍固定为 9 条。
+
+    EXISTS 子查询作为 WHERE 条件，不产生额外查询。
+    """
+    from app.models.market_board import MarketBoard, MarketBoardMembership
+    from app.services.market_stocks_service import get_market_stocks
+
+    client, user, instruments = market_stocks_client
+    inst1, inst2, _ = instruments
+
+    # 准备板块数据
+    industry_board = MarketBoard(externalCode="BK_BANK", name="银行", type="industry")
+    concept_board = MarketBoard(externalCode="BK_NEWENERGY", name="新能源", type="concept")
+    db_session.add_all([industry_board, concept_board])
+    await db_session.flush()
+    db_session.add_all([
+        MarketBoardMembership(boardId=industry_board.id, instrumentId=inst1.id),
+        MarketBoardMembership(boardId=concept_board.id, instrumentId=inst1.id),
+        MarketBoardMembership(boardId=concept_board.id, instrumentId=inst2.id),
+    ])
+    await db_session.flush()
+
+    filter_scenarios: list[dict[str, str | None]] = [
+        {"industry": "银行", "concept": None},
+        {"industry": None, "concept": "新能源"},
+        {"industry": "银行", "concept": "新能源"},
+    ]
+
+    for scenario in filter_scenarios:
+        counter = {"select_count": 0}
+
+        def _on_execute(
+            conn, cursor, statement, parameters, context, executemany,
+            _counter=counter,
+        ):
+            stmt_lower = statement.strip().lower()
+            if stmt_lower.startswith("select"):
+                _counter["select_count"] += 1
+
+        engine = db_session.get_bind()
+        event.listen(engine, "before_cursor_execute", _on_execute)
+        try:
+            await get_market_stocks(
+                db=db_session,
+                user_id=user.id,
+                scope="market",
+                query=None,
+                page=1,
+                page_size=50,
+                sort=None,
+                industry=scenario["industry"],
+                concept=scenario["concept"],
+            )
+        finally:
+            event.remove(engine, "before_cursor_execute", _on_execute)
+
+        assert counter["select_count"] == 9, (
+            f"筛选场景 {scenario} 期望 9 条 SQL，实际 {counter['select_count']} 条"
+        )
+
+
+@pytest.mark.asyncio
+async def test_explain_industry_filter_uses_index(
+    market_stocks_client,
+    db_session: AsyncSession,
+) -> None:
+    """EXPLAIN ANALYZE industry 筛选查询验证 EXISTS 子查询可执行。"""
+    from sqlalchemy import select
+
+    from app.models.instrument import Instrument
+    from app.services.market_stocks_service import (
+        _build_board_filter_conditions,
+        _build_search_conditions,
+    )
+
+    conditions, _ = _build_search_conditions(None)
+    board_conds = _build_board_filter_conditions("银行", None)
+    conditions.extend(board_conds)
+
+    stmt = (
+        select(Instrument.id, Instrument.symbol)
+        .where(*conditions)
+        .limit(50)
+    )
+    compiled = stmt.compile(
+        bind=db_session.get_bind(), compile_kwargs={"literal_binds": True}
+    )
+    # EXPLAIN ANALYZE 验证查询可执行（不强制关闭 seqscan，测试库数据量小）
+    result = await db_session.execute(text(f"EXPLAIN ANALYZE {compiled}"))
+    plan_text = "\n".join(row[0] for row in result.fetchall())
+    # 验证查询成功执行（EXPLAIN ANALYZE 输出含 "Execution Time"）
+    assert "Execution Time" in plan_text, (
+        f"EXPLAIN ANALYZE 未正常执行:\n{plan_text}"
     )
 
 

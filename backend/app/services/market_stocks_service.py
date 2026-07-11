@@ -6,13 +6,16 @@
 
 查询策略（固定 SQL 数量，无逐行查询）：
 1. instruments + is_watchlisted + 分页（scope=market 用 EXISTS，scope=watchlist 用 INNER JOIN）
-2. count 查询（相同 WHERE 条件）
+2. count 查询（相同 WHERE 条件，含 industry/concept EXISTS 子查询）
 3. 最新 2 根日线（rn <= 2）批量按 instrument_ids 查询 → latest_price + change_pct
 4. 最新 stock_feature_snapshot（rn = 1）批量 → dsa_state + structure_state
-5. 最新 strategy_event（rn = 1）批量 → latest_event_title + latest_event_time
+5. 最新 stock_state_event（rn = 1）批量 → latest_event_title + latest_event_time
 6. boards_as_of — MAX(market_boards.updated_at) 标量查询
+7. 板块归属批量查询 → industry + concepts
+8. price_as_of — MAX(bar_daily.trade_date) 全局标量（不随分页变化）
+9. state_as_of — MAX(stock_feature_snapshot.created_at) 全局标量（不随分页变化）
 
-总计 6 条固定 SQL，不随 page_size 增长。
+总计 9 条固定 SQL，不随 page_size 增长。
 """
 
 from __future__ import annotations
@@ -29,11 +32,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.time import to_shanghai_iso
 from app.models.bar import BarDaily
 from app.models.instrument import Instrument
-from app.models.market_board import MarketBoard
+from app.models.market_board import MarketBoard, MarketBoardMembership
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
-from app.models.strategy_event import StrategyEvent
+from app.models.stock_state_event import StockStateEvent
 from app.models.watchlist import UserWatchlistItem
 from app.schemas.market_stocks import MarketStockRow, MarketStocksResponse
+from app.services.board_sync_service import get_instrument_boards_batch
 from app.services.instrument_maintenance_service import stock_symbol_sql_filter
 
 logger = logging.getLogger("market_stocks_service")
@@ -150,8 +154,8 @@ def _build_sort_expression(field: str) -> ColumnElement:
 
     if field == "latest_event_time":
         return (
-            select(func.max(StrategyEvent.event_time))
-            .where(StrategyEvent.instrument_id == Instrument.id)
+            select(func.max(StockStateEvent.occurred_at))
+            .where(StockStateEvent.instrument_id == Instrument.id)
             .scalar_subquery()
         )
 
@@ -243,6 +247,44 @@ def _build_state_filter(state: str | None) -> ColumnElement[bool] | None:
     return None
 
 
+def _build_board_filter_conditions(
+    industry: str | None, concept: str | None
+) -> list[ColumnElement[bool]]:
+    """构建行业/概念筛选 EXISTS 条件（PRD §7.5）。
+
+    使用 SQL EXISTS 子查询，避免先加载全量 UUID 再 IN 的 N+1 模式。
+    industry/concept 参数为板块名称，通过 market_boards.name 匹配。
+    """
+    conditions: list[ColumnElement[bool]] = []
+    if industry:
+        industry_exists = (
+            select(1)
+            .select_from(MarketBoardMembership)
+            .join(MarketBoard, MarketBoard.id == MarketBoardMembership.boardId)
+            .where(
+                MarketBoardMembership.instrumentId == Instrument.id,
+                MarketBoard.type == "industry",
+                MarketBoard.name == industry,
+            )
+            .exists()
+        )
+        conditions.append(industry_exists)
+    if concept:
+        concept_exists = (
+            select(1)
+            .select_from(MarketBoardMembership)
+            .join(MarketBoard, MarketBoard.id == MarketBoardMembership.boardId)
+            .where(
+                MarketBoardMembership.instrumentId == Instrument.id,
+                MarketBoard.type == "concept",
+                MarketBoard.name == concept,
+            )
+            .exists()
+        )
+        conditions.append(concept_exists)
+    return conditions
+
+
 async def get_market_stocks(
     db: AsyncSession,
     user_id: UUID,
@@ -275,37 +317,8 @@ async def get_market_stocks(
     search_conditions, rank_expr = _build_search_conditions(query)
     sort_spec = _parse_sort(sort)
     state_cond = _build_state_filter(state)
+    board_conditions = _build_board_filter_conditions(industry, concept)
     offset = (page - 1) * page_size
-
-    # PRD §7.5: industry/concept 筛选 - 通过 market_boards 表过滤 instrument_ids
-    board_filter_ids: set[UUID] | None = None
-    if industry or concept:
-        from app.services.board_sync_service import filter_instruments_by_board
-
-        matching_ids: set[UUID] = set()
-        if industry:
-            ids = await filter_instruments_by_board(db, board_type="industry", board_name=industry)
-            matching_ids.update(ids)
-        if concept:
-            ids = await filter_instruments_by_board(db, board_type="concept", board_name=concept)
-            # 多次筛选取交集（industry AND concept）
-            if industry:
-                matching_ids &= set(ids)
-            else:
-                matching_ids.update(ids)
-
-        if not matching_ids:
-            # 无匹配股票，直接返回空结果（避免无意义查询）
-            return MarketStocksResponse(
-                items=[],
-                page=page,
-                page_size=page_size,
-                total=0,
-                price_as_of=None,
-                state_as_of=None,
-                boards_as_of=None,
-            )
-        board_filter_ids = matching_ids
 
     # ===== Query 1: instruments + is_watchlisted + 分页 =====
     if scope == "watchlist":
@@ -331,8 +344,8 @@ async def get_market_stocks(
             base_stmt = base_stmt.where(cond)
         if state_cond is not None:
             base_stmt = base_stmt.where(state_cond)
-        if board_filter_ids is not None:
-            base_stmt = base_stmt.where(Instrument.id.in_(board_filter_ids))
+        for cond in board_conditions:
+            base_stmt = base_stmt.where(cond)
     else:
         # market scope: 全市场 A 股，EXISTS 标记自选
         watched_exists = (
@@ -355,8 +368,8 @@ async def get_market_stocks(
             base_stmt = base_stmt.where(cond)
         if state_cond is not None:
             base_stmt = base_stmt.where(state_cond)
-        if board_filter_ids is not None:
-            base_stmt = base_stmt.where(Instrument.id.in_(board_filter_ids))
+        for cond in board_conditions:
+            base_stmt = base_stmt.where(cond)
 
     # 排序：有搜索关键词时按命中优先级，否则按 sort 参数（默认 symbol asc）
     order_by_cols = _build_order_by(sort_spec, has_query=bool(query), rank_expr=rank_expr)
@@ -399,8 +412,8 @@ async def get_market_stocks(
         count_stmt = count_stmt.where(cond)
     if state_cond is not None:
         count_stmt = count_stmt.where(state_cond)
-    if board_filter_ids is not None:
-        count_stmt = count_stmt.where(Instrument.id.in_(board_filter_ids))
+    for cond in board_conditions:
+        count_stmt = count_stmt.where(cond)
     count_result = await db.execute(count_stmt)
     total = count_result.scalar_one()
 
@@ -424,14 +437,9 @@ async def get_market_stocks(
     bars_result = await db.execute(bars_stmt)
 
     price_map: dict[UUID, tuple[float | None, float | None]] = {}
-    price_as_of_date: date | None = None
     for bar_row in bars_result:
         inst_id = bar_row.instrument_id
         close_val = float(bar_row.close) if bar_row.close is not None else None
-        # 追踪最新 bar trade_date（price_as_of）
-        if bar_row.trade_date is not None:
-            if price_as_of_date is None or bar_row.trade_date > price_as_of_date:
-                price_as_of_date = bar_row.trade_date
         existing = price_map.get(inst_id)
         if existing is None:
             # rn=1 (latest)
@@ -464,7 +472,6 @@ async def get_market_stocks(
     snap_result = await db.execute(snap_stmt)
 
     state_map: dict[UUID, tuple[str | None, str | None]] = {}
-    state_as_of_dt: datetime | None = None
     for snap_row in snap_result:
         payload = snap_row.summary_payload or {}
         dsa_state = _map_dsa_state(payload.get("daily_developing_swing_dir"))
@@ -473,25 +480,21 @@ async def get_market_stocks(
             dsa_state,
             str(structure_state) if structure_state else None,
         )
-        # 追踪最新 snapshot created_at（state_as_of）
-        if snap_row.created_at is not None:
-            if state_as_of_dt is None or snap_row.created_at > state_as_of_dt:
-                state_as_of_dt = snap_row.created_at
 
-    # ===== Query 5: 最新 strategy_event（批量） =====
+    # ===== Query 5: 最新 stock_state_event（批量） =====
     event_subq = (
         select(
-            StrategyEvent.instrument_id,
-            StrategyEvent.event_type,
-            StrategyEvent.event_time,
+            StockStateEvent.instrument_id,
+            StockStateEvent.title,
+            StockStateEvent.occurred_at,
             func.row_number()
             .over(
-                partition_by=StrategyEvent.instrument_id,
-                order_by=StrategyEvent.event_time.desc(),
+                partition_by=StockStateEvent.instrument_id,
+                order_by=StockStateEvent.occurred_at.desc(),
             )
             .label("rn"),
         )
-        .where(StrategyEvent.instrument_id.in_(instrument_ids))
+        .where(StockStateEvent.instrument_id.in_(instrument_ids))
         .subquery()
     )
     event_stmt = select(event_subq).where(event_subq.c.rn == 1)
@@ -500,9 +503,12 @@ async def get_market_stocks(
     event_map: dict[UUID, tuple[str | None, str | None]] = {}
     for ev_row in event_result:
         event_map[ev_row.instrument_id] = (
-            ev_row.event_type,
-            ev_row.event_time.isoformat() if ev_row.event_time else None,
+            ev_row.title,
+            ev_row.occurred_at.isoformat() if ev_row.occurred_at else None,
         )
+
+    # ===== Query 7: 板块归属（批量，industry/concepts） =====
+    boards_map = await get_instrument_boards_batch(db, instrument_ids)
 
     # ===== 组装响应 =====
     items: list[MarketStockRow] = []
@@ -517,6 +523,13 @@ async def get_market_stocks(
         dsa_state, structure_state = state_map.get(inst_id, (None, None))
         event_title, event_time = event_map.get(inst_id, (None, None))
 
+        # 板块归属：industry 取首个行业，concepts 取全部概念
+        inst_boards = boards_map.get(inst_id, [])
+        industry_name = next(
+            (b["name"] for b in inst_boards if b["type"] == "industry"), None
+        )
+        concept_names = [b["name"] for b in inst_boards if b["type"] == "concept"]
+
         items.append(
             MarketStockRow(
                 instrument_id=inst_id,
@@ -524,8 +537,8 @@ async def get_market_stocks(
                 name=base.name,
                 latest_price=latest_price,
                 change_pct=change_pct,
-                industry=None,
-                concepts=[],
+                industry=industry_name,
+                concepts=concept_names,
                 dsa_state=dsa_state,
                 structure_state=structure_state,
                 latest_event_title=event_title,
@@ -537,6 +550,16 @@ async def get_market_stocks(
     # ===== Query 6: boards_as_of — 最近一次板块同步时间 =====
     boards_as_of_dt: datetime | None = await db.scalar(
         select(func.max(MarketBoard.updatedAt))
+    )
+
+    # ===== Query 8: price_as_of — 全局最新日线 trade_date（不随分页变化） =====
+    price_as_of_date: date | None = await db.scalar(select(func.max(BarDaily.trade_date)))
+
+    # ===== Query 9: state_as_of — 全局最新特征快照 created_at（不随分页变化） =====
+    state_as_of_dt: datetime | None = await db.scalar(
+        select(func.max(StockFeatureSnapshot.created_at)).where(
+            StockFeatureSnapshot.schema_version == 1
+        )
     )
 
     return MarketStocksResponse(
