@@ -346,3 +346,20 @@
   margin: 0;
   line-height: 1.4;
 }
+
+.collapseToggle {
+  background: none;
+  border: none;
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  cursor: pointer;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+
+  &:hover {
+    color: rgba(252, 165, 165, 0.95);
+  }
+}

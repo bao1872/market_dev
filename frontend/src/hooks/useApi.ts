@@ -211,12 +211,16 @@ export function useBatchInstruments(ids: string[] | undefined) {
  * scope/query/page/page_size/sort 进 URL，selected 独立管理。
  * staleTime 30s（实时行情数据），placeholderData 保留上次成功数据避免闪烁。
  */
-export function useMarketStocks(params: MarketStocksQueryParams) {
+export function useMarketStocks(
+  params: MarketStocksQueryParams,
+  options?: { enabled?: boolean },
+) {
   return useQuery({
     queryKey: ['market-stocks', params],
     queryFn: ({ signal }) => api.getMarketStocks(params, { signal }),
     staleTime: STALE_REALTIME,
     placeholderData: (prev) => prev,
+    enabled: options?.enabled ?? true,
   })
 }
 

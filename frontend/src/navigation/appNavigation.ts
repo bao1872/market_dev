@@ -54,11 +54,11 @@ export const USER_NAV_ITEMS: AppNavItem[] = [
 ]
 
 // 管理员控制台导航（仅 AdminAppShell 侧栏使用）
+// P1: 移除"策略目录"（多策略组合已废弃，只保留 dsa_selector + watchlist_monitor）
 export const ADMIN_NAV_ITEMS: AppNavItem[] = [
   { path: APP_ROUTES.admin, label: '系统概览' },
   { path: APP_ROUTES.adminUsers, label: '用户与套餐' },
   { path: APP_ROUTES.adminBeta, label: '内测申请' },
-  { path: APP_ROUTES.adminStrategies, label: '策略目录' },
   { path: APP_ROUTES.adminJobs, label: '任务与事件' },
   { path: APP_ROUTES.adminAfterClose, label: '盘后流水线' },
   { path: APP_ROUTES.adminStockDebug, label: '个股调试' },

@@ -275,9 +275,8 @@ import {
   shouldRenderDsaLayer,
   shouldToggleDsa,
 } from '@/utils/dsaOverlayPolicy'
-// [DSA Segment Match] - visual_segments 与 K线 displayTimes 匹配统计（PR #34）
-//   纯函数模块，便于 Node --experimental-strip-types 单元测试
-import { computeDsaSegmentMatchStats } from '@/utils/dsaSegmentMatch'
+// [DSA Segment Match] - debugIndicatorAlignment 诊断已移除（P1 清理）
+//   computeDsaSegmentMatchStats 工具函数保留在 utils/dsaSegmentMatch.ts
 
 // ===== 指标计算模块（从 charts.js 迁移）=====
 
@@ -940,25 +939,9 @@ function renderDsaPolyline(
   // 后续按 Record 索引访问 anchor_time / pivot_type / pivot_price / time 等数组字段
   const recordData = data as Record<string, (number | string | null)[]>
 
-  // [PR #34] - DSA visual_segments matched 诊断：
+  // [PR #34] - DSA visual_segments matched 诊断已移除（debugIndicatorAlignment 清理）
   //   后端 format_dsa_time 修复后，15m/1h segment.points.time 含 THH:MM:SS，
   //   normalizeChartTime 可与 K线 displayTimes canonical 匹配。
-  //   若回退到旧 strftime("%Y-%m-%d")，ratio=0，开关打开也画不出线。
-  //   默认不打印，仅 ?debugIndicatorAlignment=1 时 console.warn 输出 stats。
-  if (typeof window !== 'undefined' && window.location.search.includes('debugIndicatorAlignment=1')) {
-    const stats = computeDsaSegmentMatchStats(segments, displayTimes, timeframe)
-    console.warn('[DSA segment match]', {
-      timeframe,
-      total: stats.total,
-      matched: stats.matched,
-      ratio: stats.ratio,
-      degradedReason: stats.degradedReason,
-      firstSegTime: stats.firstSegTime,
-      lastSegTime: stats.lastSegTime,
-      firstDisplayTime: stats.firstDisplayTime,
-      lastDisplayTime: stats.lastDisplayTime,
-    })
-  }
 
   // K 线时间 → display index 映射（segment point time 经 normalizeChartTime 匹配）
   const klineTimeIndex = new Map<string, number>()
@@ -1737,38 +1720,7 @@ function drawTrading(
   // [DSA 数据源校验] - 同步到 state 供组件 useEffect 读取并渲染页面 UI 提示横幅
   state.dsaSourceMismatch = dsaSourceMismatch
 
-  // [PR #31] - ?debugIndicatorAlignment=1 诊断输出（默认不打印，不刷日志）
-  //   输出 bars/indicators 对齐信息：timeframe, count, first/last, matched ratio
-  if (typeof window !== 'undefined' && window.location.search.includes('debugIndicatorAlignment=1')) {
-    const barsFirst = displayTimes[0] ?? 'N/A'
-    const barsLast = displayTimes[displayTimes.length - 1] ?? 'N/A'
-    console.table({
-      bars: {
-        timeframe,
-        count: displayTimes.length,
-        first: barsFirst,
-        last: barsLast,
-        canonical_first: normalizeChartTime(barsFirst, timeframe) ?? 'N/A',
-        canonical_last: normalizeChartTime(barsLast, timeframe) ?? 'N/A',
-      },
-      dsa_mismatch: {
-        check_enabled: shouldCheckDsaMismatch(timeframe),
-        mismatched: dsaSourceMismatch,
-        source_bar_hash: indicators?.source_bar_hash ?? 'N/A',
-        source_bar_times_count: indicators?.source_bar_times?.length ?? 0,
-      },
-    })
-    if (indicators?.layers) {
-      console.table(
-        indicators.layers.map(l => ({
-          layer_id: l.layer_id,
-          renderer: l.renderer,
-          fields: l.fields?.join(','),
-          time_count: indicators.data?.[l.strategy_id ?? '']?.time?.length ?? 0,
-        })),
-      )
-    }
-  }
+  // [PR #31] - debugIndicatorAlignment 诊断输出已移除（P1 清理）
 
   if (indicators && indicators.layers && indicators.data) {
     indicators.layers.forEach(layer => {

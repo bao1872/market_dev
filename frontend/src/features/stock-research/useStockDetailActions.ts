@@ -108,13 +108,16 @@ export function useStockDetailActions({
   // 左栏展示该搜索结果列表（点击返回时回到来源页的同一上下文）
   const marketParams = useMemo(() => parseMarketParamsFromReturnTo(returnTo), [returnTo])
   const hasMarketContext = marketParams !== null
-  const marketStocksQuery = useMarketStocks({
-    scope: 'market',
-    query: marketParams?.query,
-    page: marketParams?.page,
-    sort: marketParams?.sort,
-    page_size: 50,
-  })
+  const marketStocksQuery = useMarketStocks(
+    {
+      scope: 'market',
+      query: marketParams?.query,
+      page: marketParams?.page,
+      sort: marketParams?.sort,
+      page_size: 50,
+    },
+    { enabled: hasMarketContext },
+  )
 
   // 自选列表查询（用于判断当前股票是否在自选 + 上下切换 + returnTo 缺失时回退左栏）
   const watchlistQuery = useWatchlist()
