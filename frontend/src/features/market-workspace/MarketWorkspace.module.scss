@@ -1,0 +1,246 @@
+// [MarketWorkspace] - 描述: 统一行情工作区三栏布局样式（CSS Module）
+// 视觉真源：ref/详情.png（普通用户三栏）、ref/调试.png（管理员调试模式右栏加宽）
+// 布局：CSS Flexbox，左栏固定宽 280px（1024 时缩至 240px），右栏 340px（调试模式 380px），中间 flex-grow + min-width 保护。
+// 响应式：1920/1440 正常展示；1024 左栏缩窄、右栏可折叠；不出现横向溢出。
+// a11y：所有可交互元素 focus-visible 轮廓可见；aria-label 覆盖。
+
+// ===== 面板宽度变量 =====
+:export {
+  leftPaneWidth: 280px;
+  rightPaneWidth: 340px;
+  rightPaneDebugWidth: 380px;
+}
+
+.workspace {
+  display: flex;
+  height: calc(100vh - 56px); // topbar 高度
+  overflow: hidden;
+  background: #0d1117;
+}
+
+// ===== 左栏：自选/搜索列表 =====
+.leftPane {
+  width: 280px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid #232838;
+  background: #131722;
+  transition: width 0.15s ease;
+
+  @media (max-width: 1024px) {
+    width: 240px;
+  }
+}
+
+.scopeTabs {
+  display: flex;
+  border-bottom: 1px solid #232838;
+}
+
+.scopeTab {
+  flex: 1;
+  padding: 10px 0;
+  border: 0;
+  background: transparent;
+  color: #8ea0b7;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.12s, box-shadow 0.12s;
+
+  &:hover {
+    color: #d7e3f2;
+  }
+
+  &:focus-visible {
+    outline: 2px solid #2962ff;
+    outline-offset: -2px;
+  }
+}
+
+.scopeTabActive {
+  color: #fff;
+  box-shadow: inset 0 -2px 0 #2962ff;
+}
+
+.leftPaneContent {
+  flex: 1;
+  overflow: hidden;
+}
+
+// ===== 中栏 + 右栏容器 =====
+.centerRight {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  min-width: 0; // 允许 flex 子项收缩
+}
+
+// ===== 中栏：K 线研究区 =====
+.centerPane {
+  flex: 1;
+  overflow: auto;
+  min-width: 480px; // 中心最小宽度保护，防止 K 线被压扁
+
+  @media (max-width: 1024px) {
+    min-width: 360px;
+  }
+}
+
+// 返回按钮（returnTo 存在时显示）
+.backBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  margin: 8px 0 0 8px;
+  border: 1px solid #2a2f3c;
+  background: #1a1e28;
+  color: #b7bdca;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s;
+
+  &:hover {
+    border-color: #46516b;
+    color: #fff;
+  }
+
+  &:focus-visible {
+    outline: 2px solid #2962ff;
+    outline-offset: 2px;
+  }
+}
+
+// ===== 右栏：研究上下文面板 =====
+.rightPane {
+  width: 340px;
+  flex-shrink: 0;
+  border-left: 1px solid #232838;
+  background: #131722;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: width 0.15s ease;
+
+  @media (max-width: 1024px) {
+    width: 300px;
+  }
+
+  @media (min-width: 1920px) {
+    width: 380px;
+  }
+}
+
+// 调试模式（管理员 debug=1）右栏加宽，对齐 ref/调试.png 因子面板占比
+// 与 .rightPane 同时应用于同一元素，后者覆盖宽度
+.debugMode {
+  width: 380px;
+
+  @media (max-width: 1024px) {
+    width: 320px;
+  }
+}
+
+.rightPaneHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid #232838;
+}
+
+.rightPaneTitle {
+  font-weight: 650;
+  font-size: 13px;
+  color: #d7e3f2;
+  flex: 1;
+}
+
+// 调试模式徽章（仅管理员 debug=1 时显示）
+.debugBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  background: rgba(239, 68, 68, 0.12);
+  color: #fca5a5;
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.collapseBtn {
+  width: 26px;
+  height: 26px;
+  border: 1px solid #2a2f3c;
+  background: #1a1e28;
+  color: #b7bdca;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 16px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+
+  &:hover {
+    border-color: #46516b;
+    color: #fff;
+  }
+
+  &:focus-visible {
+    outline: 2px solid #2962ff;
+    outline-offset: 2px;
+  }
+}
+
+// 右栏收起后的展开按钮（贴右边框）
+.expandBtn {
+  width: 22px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-left: 1px solid #232838;
+  background: #131722;
+  color: #8ea0b7;
+  cursor: pointer;
+  font-size: 16px;
+
+  &:hover {
+    color: #fff;
+    background: #1c202b;
+  }
+
+  &:focus-visible {
+    outline: 2px solid #2962ff;
+    outline-offset: -2px;
+  }
+}
+
+// ===== 空状态（未选择股票时） =====
+.emptyCenter {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: #687083;
+  padding: 24px;
+  text-align: center;
+}
+
+.emptyIcon {
+  font-size: 48px;
+  margin-bottom: 12px;
+  opacity: 0.4;
+}
+
+.emptyText {
+  font-size: 14px;
+  line-height: 1.5;
+}

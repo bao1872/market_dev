@@ -3,9 +3,12 @@
 // 覆盖：
 //   1. 桌面端表格不再包含 status 列（每行状态栏移除）
 //   2. 数据列开启表头过滤（filterable=true）
-//   3. 全局市场状态显示在 WatchlistPage 页眉
+//   3. MonitorStatusBadge 支持 UNKNOWN 占位
 //   4. 移动端卡片不再显示每行状态徽章
 //   5. WatchlistMonitorTable 使用 compact-table 与趋势选股页对齐
+//
+// 注意：WatchlistPage.tsx 已删除（统一行情工作区改造），
+//   原 WatchlistPage 页眉市场状态测试已移除。
 
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
@@ -18,7 +21,6 @@ const __dirname = dirname(__filename)
 const COLUMNS_PATH = join(__dirname, '..', 'columns.tsx')
 const CARDS_PATH = join(__dirname, '..', 'WatchlistMonitorCards.tsx')
 const TABLE_PATH = join(__dirname, '..', 'WatchlistMonitorTable.tsx')
-const PAGE_PATH = join(__dirname, '..', '..', '..', 'pages', 'WatchlistPage.tsx')
 
 function readSource(p: string): string {
   return readFileSync(p, 'utf-8')
@@ -70,24 +72,7 @@ test('MonitorStatusBadge 支持 UNKNOWN 占位状态', () => {
   assert.ok(src.includes("case 'UNKNOWN':"), 'MonitorStatusBadge switch 应处理 UNKNOWN')
 })
 
-// ===== 4. WatchlistPage 在页眉显示全局市场状态 =====
-test('WatchlistPage 页眉显示全局市场状态', () => {
-  const src = readSource(PAGE_PATH)
-  assert.ok(
-    src.includes('globalMarketStatus'),
-    'WatchlistPage 应计算 globalMarketStatus',
-  )
-  assert.ok(
-    src.includes('MonitorStatusBadge status={globalMarketStatus}'),
-    'WatchlistPage 应在页眉渲染 MonitorStatusBadge',
-  )
-  assert.ok(
-    src.includes("from '@/features/watchlist-monitor/columns'"),
-    'WatchlistPage 应从共享列模块导入 MonitorStatusBadge',
-  )
-})
-
-// ===== 5. 移动端卡片不再显示每行状态徽章 =====
+// ===== 4. 移动端卡片不再显示每行状态徽章 =====
 test('WatchlistMonitorCards 不再渲染每行状态徽章', () => {
   const src = readSource(CARDS_PATH)
   assert.ok(
@@ -96,7 +81,7 @@ test('WatchlistMonitorCards 不再渲染每行状态徽章', () => {
   )
 })
 
-// ===== 6. WatchlistMonitorTable 使用 compact-table 对齐趋势选股页 =====
+// ===== 5. WatchlistMonitorTable 使用 compact-table 对齐趋势选股页 =====
 test('WatchlistMonitorTable 使用 compact-table', () => {
   const src = readSource(TABLE_PATH)
   assert.ok(

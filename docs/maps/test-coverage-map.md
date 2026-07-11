@@ -10,6 +10,14 @@
 | AccessContext | `test_eligible_user_service.py`, access control tests |
 | Capture Token 隔离 | `test_capture_token_isolation.py`, auth tests |
 | Worker 心跳 admin API（admin/non-admin/unauthenticated + status 筛选 + health_state 分类） | `test_admin_worker_heartbeats_api.py` |
+| **壳层与导航拆分（阶段二）**：用户导航仅行情/趋势选股、admin 入口仅管理员可见、旧路由兼容重定向、admin 路由独立壳层、capture 路由不渲染任一壳层、默认入口 `/market`、getAccountMenuItemsForVariant variant=user/admin 菜单项 | `frontend/src/navigation/__tests__/appNavigation.test.ts`（10 用例） |
+| **路由层级契约（阶段二 fixup）**：Capture 位于 ProtectedLayout 之外、/market+/screener+/stock/:symbol 经 UserAppShell+SubscriberRoute、/messages+/settings 经 UserAppShell 不经 SubscriberRoute、/admin/* 经 AdminRoute+AdminAppShell | `frontend/src/navigation/__tests__/routeStructure.test.ts`（10 用例） |
+| **行情工作区 URL 状态（阶段三+最终对齐验收）**：URL parse/serialize 往返（scope/symbol/timeframe/source/strategy/event_id/debug/returnTo）、非法 timeframe 回退 1d、非法 source 回退 watchlist、source→strategy 默认推导、strategy 等于默认值时省略、event_id=null 不写入、选择新股清除 event_id/returnTo、buildMarketWorkspaceUrl 含/省略 strategy、`selectInstrumentFromMarketPane` 选股重置 source/strategy/event_id/returnTo（保留 debug）、`changeMarketScope` 切 scope 退出 selection 上下文（保留 debug）、选股后 timeframe 保留、debug=1 解码/编码、returnTo URL 编码解码 | `frontend/src/features/market-workspace/__tests__/marketWorkspaceUrlState.test.ts`（25 用例） |
+| **timeframe 单一真源与请求门控（阶段三最终验收）**：URL 15m→请求15m→图表15m、工具栏切换写回 URL、scope 查询互斥、右栏收起不请求、Capture 和 StockDetail 回归、selection 上下文重置、搜索结果渲染门控 | 浏览器 E2E（CDP，22 项断言全部 PASS） |
+| **StockDetailPage 共享研究核心（阶段四）**：stockResearchTypes 纯函数（ALLOWED_TIMEFRAMES/DEFAULT_TIMEFRAME/DEFAULT_SOURCE/BARS_COUNT_BY_TIMEFRAME/defaultStrategyForSource/normalizeDisplayTimeframe/normalizeResearchSource） | `frontend/src/features/stock-research/__tests__/stockResearchTypes.test.ts`（13 用例） |
+| **/market 和 /stock 共享研究核心（阶段四 E2E）**：market 和 stock 同 symbol/timeframe 的 bars/indicators 参数一致、stock 仅一组 instrument/bars/indicators/quote/events 请求、stock 15m/1h 请求与图表一致、详情页 UI 元素（返回/自选/上下只/全屏/备忘录/飞书/结构状态/图表/状态条/无"日线回退"文案）、capture 隔离（无 topbar/sidebar）、market 阶段三回归 | 浏览器 E2E（CDP，39 项断言全部 PASS） |
+| **原型最终对齐（阶段五）**：Screener/Messages 跳转 URL 含 returnTo/event_id（`buildMarketEntryFromScreener`/`buildMarketEntryFromMessage`）、`buildStockDetailState` 携带 returnTo、`resolveBackPath` 优先 returnTo/按 source fallback | `frontend/src/pages/__tests__/detailNavigation.test.ts`（7 用例） |
+| **原型最终对齐 E2E（阶段五）**：event 详情成功/404/错误、普通用户不显示 debug/管理员 debug=1 显示原始数据、右栏关闭后 event/structural/temporal 新请求为 0、market/stock 同周期请求一致无重复、指标开关/全屏/自选/memo/飞书/上下只正常、capture 隔离、1024/1440/1920 无横向溢出、旧 /overview//watchlist//stock 链接可用 | 浏览器 E2E（CDP） |
 
 ## 2. 趋势选股
 
@@ -161,7 +169,7 @@
 | 结构状态面板隐藏开关契约（默认隐藏/开关/localStorage/强制隐藏参数/禁用 toggle/toggle 在 tv-chart-column 内部） | `frontend/scripts/contract-tests/structural-state-toggle.test.ts` |
 | **飞书渠道操作按钮权限**：member 不显示 admin 最近事件实测按钮；member 渠道卡显示「测试并启用」/「发送测试消息」；admin 才显示「管理员实测最近事件」；编辑/删除对两者都可见 | `frontend/src/pages/__tests__/settingsFeishuActions.test.ts`（5 用例） |
 | **趋势选股 URL 状态 encode/decode**：strategy/keyword/sort/filters/page/pageSize 往返一致；默认 page/pageSize 省略；非法 filters JSON 回退为空数组；陈旧 filter/sort key 丢弃；不保存 selectedKeys/activeRunId/rows/results | `frontend/src/components/__tests__/screenerUrlState.test.ts`（5 用例） |
-| **个股详情返回按钮**：优先使用 `location.state.returnTo`，没有时按 source fallback 到 `/screener` 或 `/watchlist` | `frontend/src/pages/__tests__/detailNavigation.test.ts`（3 用例） |
+| **个股详情返回按钮**：优先使用 URL `returnTo` 参数，其次 `location.state.returnTo`，没有时按 source fallback 到 `/screener` 或 `/market?scope=watchlist`；`buildMarketEntryFromScreener`/`buildMarketEntryFromMessage` 生成 `/market` 入口 URL | `frontend/src/pages/__tests__/detailNavigation.test.ts`（7 用例） |
 | 结构状态因子 V1.9 active swing + confirmed pivot 别名 + DSA age 统一（上涨突破 raw>1 且 active in [0,1] / 下跌破位 raw<0 且 active in [0,1] / 单边上涨 active high 跟随 / 单边下跌 active low 跟随 / bars_since_active 正确 / confirmed_swing_breakout_state 三态 / fallback 模式 / DSA age +1 口径 / age_bars == current_dsa_segment_age_bars） | `backend/tests/test_structural_factor_service.py`（新增 9 个 V1.9 测试） |
 | 时序特征 V1.9 active swing 字段 + derived_relation 改用 active swing（daily/m15 active swing 字段存在性 + m15_position_relative_to_daily == active - active + 强趋势段不再 -1.755） | `backend/tests/test_temporal_feature_service.py`（新增 3 个 V1.9 测试） |
 | 结构状态因子 V1.10 developing swing（major up leg 回落 developing_low = min(lows[active_high_bar:now]) 不得等于 active_low / major down leg 反弹 developing_high = max(highs[active_low_bar:now]) 不得等于 active_high / 继续创新高 dev=active dir=1 / 继续创新低 dev=active dir=-1 / 000100 类似 case developing_low 不得等于 4.45） | `backend/tests/test_structural_factor_service.py`（新增 5 个 V1.10 测试） |

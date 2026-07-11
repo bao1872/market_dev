@@ -10,6 +10,8 @@ import type { StructuralFactorResponse, TemporalFeaturesResponse } from '../api/
 
 interface StockStructuralStatePanelProps {
   instrumentId: string
+  /** debug=1 时展示原始 JSON 和调试字段（仅管理员，由父组件校验） */
+  debug?: boolean
 }
 
 // 因子组键名（与后端 _compute_all_factors_for_bars 返回结构对齐）
@@ -328,6 +330,7 @@ function TemporalFeaturesCard({
 // ===== 主组件 =====
 export function StockStructuralStatePanel({
   instrumentId,
+  debug = false,
 }: StockStructuralStatePanelProps): ReactNode {
   const [activeTab, setActiveTab] = useState<'primary' | 'secondary'>('primary')
   const query = useStructuralFactors(instrumentId)
@@ -461,6 +464,16 @@ export function StockStructuralStatePanel({
 
       {/* 时序特征 V1 折叠卡片：渲染 temporal-features API DTO，受同一个结构状态开关控制 */}
       <TemporalFeaturesCard instrumentId={instrumentId} />
+
+      {/* 管理员调试：原始 JSON（debug=1 且 is_admin 时由父组件传入 debug=true） */}
+      {debug && (
+        <details className="ssp-detail ssp-debug">
+          <summary>原始 structural-factors JSON</summary>
+          <pre className="ssp-detail-pre">
+            {JSON.stringify(data, null, 2)}
+          </pre>
+        </details>
+      )}
     </div>
   )
 }

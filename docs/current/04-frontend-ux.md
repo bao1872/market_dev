@@ -17,22 +17,63 @@ Node Cluster 算法
 
 ## 2. 路由与守卫
 
-| 路由 | 守卫 | 页面 |
-|---|---|---|
-| `/` | Public | 门户 |
-| `/login` | Public | 登录/注册 |
-| `/subscription-expired` | Authenticated | 续期 |
-| `/membership-expired` | Redirect | 兼容跳转 |
-| `/capture/stock/:symbol` | Capture Token | 截图专用页面 |
-| `/overview` | Subscriber/Admin | 服务总览 |
-| `/screener` | Subscriber/Admin | 趋势选股 |
-| `/watchlist` | Subscriber/Admin | 我的自选 |
-| `/stock/:symbol` | Subscriber/Admin | 个股详情 |
-| `/messages` | Authenticated | 历史消息 |
-| `/settings` | Authenticated | 账户和通知渠道 |
-| `/admin/*` | Admin | 管理页面（含 `/admin/overview`、`/admin/users`、`/admin/strategies`、`/admin/jobs`、`/admin/beta-applications`、`/admin/after-close`） |
+| 路由 | 守卫 | 壳层 | 页面 |
+|---|---|---|---|
+| `/` | Public | — | 门户 |
+| `/login` | Public | — | 登录/注册 |
+| `/subscription-expired` | Authenticated | — | 续期 |
+| `/membership-expired` | Redirect | — | 兼容跳转 |
+| `/capture/stock/:symbol` | Capture Token | **无壳层** | 截图专用页面 |
+| `/market` | Subscriber/Admin | UserAppShell | 行情工作区（三栏：左列表+中K线+右结构状态，`MarketWorkspacePage`） |
+| `/screener` | Subscriber/Admin | UserAppShell | 趋势选股 |
+| `/stock/:symbol` | Subscriber/Admin | UserAppShell | 个股详情 |
+| `/messages` | Authenticated | UserAppShell | 历史消息 |
+| `/settings` | Authenticated | UserAppShell | 账户和通知渠道 |
+| `/admin/*` | Admin | AdminAppShell | 管理页面（含 `/admin/overview`、`/admin/users`、`/admin/strategies`、`/admin/jobs`、`/admin/beta-applications`、`/admin/after-close`） |
+| `/overview` | Redirect | — | 兼容重定向 → `/market` |
+| `/watchlist` | Redirect | — | 兼容重定向 → `/market?scope=watchlist` |
 
-刷新后必须重新调用 `/me/access`，不能永久相信本地缓存。
+### 2.1 壳层拆分（阶段二确立）
+
+- `UserAppShell`（`frontend/src/layouts/UserAppShell.tsx`）：普通用户布局壳，顶部品牌 + 一级导航（行情 `/market`、趋势选股 `/screener`）+ 右上角账户菜单；**无左侧栏**。
+- `AdminAppShell`（`frontend/src/layouts/AdminAppShell.tsx`）：管理员独立布局壳，侧栏管理导航 + 顶栏账户菜单；仅承载 `/admin/*`。
+- `AccountMenu`（`frontend/src/components/AccountMenu.tsx`）：右上角下拉菜单，包含消息、设置、管理后台（仅 `is_admin`）、退出；支持点击外部关闭、Escape 关闭、基本 ARIA。
+- `ProtectedLayout` 只负责认证和 access profile，不再固定渲染同一壳层；`UserAppShell`/`AdminAppShell` 由各自路由组在 `ProtectedLayout` 之下作为 layout element 挂载。
+- `/capture/stock/:symbol` 位于两套壳层之外，只使用 `captureClient`。
+- 导航/路由常量集中于 `frontend/src/navigation/appNavigation.ts`，避免路径散落。
+
+### 2.2 兼容重定向
+
+旧地址保留重定向，避免书签/旧链接 404：
+- `/overview` → `/market`
+- `/watchlist` → `/market?scope=watchlist`
+
+### 2.3 尚未完成（下一阶段）
+
+- 复盘模式本轮不开发。
+
+### 2.4 统一行情工作区（阶段三+阶段四+最终对齐确立）
+
+- `/market` 渲染 `MarketWorkspacePage`（`frontend/src/features/market-workspace/MarketWorkspacePage.tsx`），三栏布局：
+  - 左栏 `MarketInstrumentPane`：`scope=watchlist` 使用 `useWatchlistMonitorStatus`（enabled=scope==='watchlist'）；`scope=market` 使用 `useInstruments` 搜索（enabled=scope==='market' && 搜索词 trim 后 ≥2 字符，限制 50 条，不发 N+1 请求）。两个查询按 scope 互斥启用，未激活的 scope 不发请求。搜索结果列表仅在 `scope==='market' && canSearch` 时渲染；关键词不足 2 字符、清空输入或切换 scope 时不得显示缓存结果（Query 仍通过 `enabled` 门控，不条件调用 Hook，只门控渲染）。
+  - 中栏 `StockResearchWorkspace`（`frontend/src/features/stock-research/StockResearchWorkspace.tsx`）：K 线研究区，由 `MarketWorkspacePage` 和 `StockDetailPage` 共用。
+  - 右栏 `ResearchContextPanel`（`frontend/src/features/research-context/ResearchContextPanel.tsx`）：可收起；收起时不挂载、不请求 event/structural/temporal 数据，中栏自动扩展。`event_id` 存在时调用 `useStrategyEventDetail` 显示事件时间、类型（通俗解释）、关联价格、关键证据；无 `event_id` 时展示 `useStructuralFactors`/`useTemporalFeatures` 的人类可读总结；普通用户不显示内部字段名、算法参数、JSON 或商业机密；管理员 `debug=1` 时额外渲染 `AdminFactorDebugPanel` 原始 factor/feature/JSON。
+- `/stock/:symbol` 渲染 `StockDetailPage`（`frontend/src/pages/StockDetailPage.tsx`），降为路由适配器：
+  - 使用共享 `useStockResearchData` + `StockResearchWorkspace` 渲染图表区，不再独立调用 useBars/useIndicators/useRealtimeQuote/useInstrumentEvents。
+  - 详情页专属能力拆到 `useStockDetailActions`（自选/上下切换/memo）和 `useStockDetailFeishu`（飞书截图/轮询/超时）。
+  - 保留 header、价格条、返回、上下只、watchlist、memo、飞书、全屏、结构面板开关。
+  - `StockResearchWorkspace` 通过 `toolbar`/`rightPanel`/`showRightPanel`/`chartColumnProps` 可选 props 支持详情页的结构面板开关和截图模式属性。
+- 共享类型（`DisplayTimeframe`/`ResearchSource`/`ALLOWED_TIMEFRAMES`/`BARS_COUNT_BY_TIMEFRAME`/`defaultStrategyForSource`/`normalizeDisplayTimeframe`/`normalizeResearchSource`）权威定义在 `frontend/src/features/stock-research/stockResearchTypes.ts`；`marketWorkspaceUrlState.ts` 从该文件导入并重新导出，依赖方向为 market-workspace → stock-research（禁止反向依赖）。
+- `useStockResearchData` 只保留图表核心查询：instrument/bars/indicators/quote/events + priceSummary/quoteStatus/barsStatus/isRenderReady；自选操作、上下切换、memo、飞书由 `useStockDetailActions`/`useStockDetailFeishu` 负责（禁止加入核心 hook）。
+- URL 状态：`/market?scope=watchlist|market&symbol=xxx&timeframe=1d&source=watchlist|selection&strategy=xxx&event_id=xxx&debug=1&returnTo=...`；scope/symbol/timeframe/source/strategy/event_id/debug/returnTo 进 URL，右栏折叠和 viewport 留本地。切换股票不整页刷新。非法 timeframe 回退 1d。`/stock/:symbol` 的 timeframe 也从 URL 解析（单一真源），工具栏切换写回 URL。`debug=1` 仅 `accessProfile.is_admin` 生效（普通用户即使手工加也不可见）；`returnTo` 为来源页 URL，左栏选股或切 scope 时清除（保留 `debug`）。
+- `timeframe` 受控单一真源：URL → `useStockResearchData`（bars/indicators 请求参数）→ `StockResearchWorkspace`（图表渲染）三者始终使用同一 `DisplayTimeframe`（'15m'|'1h'|'1d'|'1w'|'1mo'）；工具栏切换通过 `onTimeframeChange` 回调写回 URL，禁止子组件 `useState` 维护独立 timeframe。
+- URL 状态保留：切换周期/切换 scope/选择新股票时必须保留其他字段；选择新股票时清除旧 `event_id` 和 `returnTo`（保留 `debug`）。
+- 左栏选择上下文重置：从 `MarketInstrumentPane` 选择任意股票时必须写 `source='watchlist'`、`strategy='watchlist_monitor'`、`eventId=null`（退出 selection 上下文）；用户切换 scope（watchlist 或 market）时也必须退出 selection 上下文并清除旧 `event_id`；timeframe 在上述操作中继续保留。状态转换必须通过纯函数 `selectInstrumentFromMarketPane(state, newSymbol)` 和 `changeMarketScope(state, newScope)` 处理，禁止在多个 callback 中重复拼对象。
+- 图表显示周期不改变 1d+15m 监控配置或 1m 事件触发口径。
+- 错误状态：instrument/bars/indicators 加载失败时显示明确错误状态（含重试按钮），不伪装为空图。
+- 周期文案：根据 timeframe 显示真实周期（1d=完整日线、15m=完整15分钟K线、1h=完整1小时K线、1w=完整周线、1mo=完整月线）；非实时非降级时统一显示"行情回退"（禁止所有非 1d 周期显示"日线回退"）；partial 文案必须包含当前周期（如"K线含未完成 bar（15m）"），禁止所有周期统一显示"日线"。
+- `/capture/stock/:symbol` 完全独立，不使用 `useStockResearchData`/`StockResearchWorkspace`/`apiClient`，只使用 `captureClient`。
+- `AccountMenu` 复用 `appNavigation.getAccountMenuItemsForVariant(isAdmin, variant)` 单一真源构建菜单项。
 
 ## 3. 页面职责
 
@@ -63,7 +104,7 @@ Node Cluster 算法
 - **当日涨跌幅独立列**：`change_pct` 作为独立列展示（key=`change_pct`、title=当日涨跌幅、shortTitle=涨跌幅、dataType=percent、sortable=true、filterable=true、width≈86），render 使用 `fmtChange` + A股涨红跌绿颜色（`changePctColorClass`）；后端 `dsa_selector.yaml` manifest 已支持 `change_pct` filterable/sortable，无需改后端白名单；`change_pct` 是已为百分比数值的字段，筛选输入 3% 传 3，不要乘除错；
 - **表格视图配置 preset**：`StrategyDataTable` 元信息栏新增"配置"入口（`TablePresetMenu` 组件），支持保存当前配置为新 preset、应用已有 preset、覆盖已有 preset config、重命名、设为默认、删除；默认配置进入页面后自动应用（每个 `tableId:strategyKey` 组合只应用一次，`useRef` 防重复）；保存成功后通过 `presetsQuery.refetch()` 立即刷新列表，保持下拉打开并清空输入框，失败时在下拉内显示后端错误并 toast；切换策略/批次时清空选中股票（`selectedKeys`），不保留选中状态；config 只保存 `keyword/sort/filters/hiddenColumns/pageSize`，禁止保存 `selectedKeys/page/activeRunId/rows/resultData`（后端 Pydantic schema 强制白名单）；preset API 按 JWT `user_id` 隔离，普通用户只能操作自己的配置；权限与趋势选股一致（active subscription + trend_selection feature，admin 豁免）；每 `user+table_id+strategy_key` 最多 20 个 preset；`is_default` 同维度至多 1 个 true（设置新默认时旧默认自动取消）；
 - **sticky 表头与选择列**：`StrategyDataTable` 支持 `stickyHeaderMode` prop（`container` 默认 / `viewport`）；趋势选股页使用 `stickyHeaderMode="viewport"`，页面滚动时表头吸附在 topbar 下方（`.table-wrap.viewport-sticky { overflow: visible }` + `.table-wrap.viewport-sticky .data-table th { top: var(--topbar); z-index: 18 }`），不抢占局部滚动容器；普通表格保留 `container` 模式，`thead th` sticky top:0 z-index:4；sticky 首列/选择列 sticky left:0 z-index:3；角落单元格（表头+sticky 列）z-index:5（最高）；选择列存在时首列通过相邻兄弟选择器 `.table-select-column + th.sticky-col { left: 40px }` 偏移选择列宽度，避免 sticky 重叠；`box-sizing: border-box` 确保选择列宽度含 padding。
-- **URL 状态持久化**：趋势选股页将当前策略 key、keyword、sort、filters、page、pageSize 同步到 URL query；`StrategyDataTable` 负责 keyword/sort/filters/page/pageSize 的 encode/decode，`ScreenerPage` 负责 strategy key 的同步与切换；filters 使用 compact JSON 只保存 `key/op/value/value2`，不保存 rows/selectedKeys/activeRunId/resultData；decode 时按当前有效列 key 集合丢弃陈旧 filter/sort key；切换策略时更新 `strategy=` 并重置 `page=1`；从趋势选股进入个股详情时，将当前 `location.pathname + location.search` 作为 `returnTo` 通过 `navigate(..., { state: { returnTo } })` 传入；个股详情页返回按钮优先使用 `location.state.returnTo`，没有时按 `source` fallback 到 `/screener` 或 `/watchlist`。
+- **URL 状态持久化**：趋势选股页将当前策略 key、keyword、sort、filters、page、pageSize 同步到 URL query；`StrategyDataTable` 负责 keyword/sort/filters/page/pageSize 的 encode/decode，`ScreenerPage` 负责 strategy key 的同步与切换；filters 使用 compact JSON 只保存 `key/op/value/value2`，不保存 rows/selectedKeys/activeRunId/resultData；decode 时按当前有效列 key 集合丢弃陈旧 filter/sort key；切换策略时更新 `strategy=` 并重置 `page=1`；从趋势选股查看详情改进入 `/market?scope=market&symbol=...&source=selection&strategy=dsa_selector&returnTo=<当前 ScreenerPage URL>`（`buildMarketEntryFromScreener`），不再进入 `/stock/:symbol`；`/market` 和 `/stock/:symbol` 返回按钮优先使用 URL `returnTo` 参数，其次 `location.state.returnTo`，没有时按 `source` fallback 到 `/screener` 或 `/market?scope=watchlist`。
 
 ### 我的自选
 
@@ -162,7 +203,7 @@ Node Cluster 算法
 
 ### 消息与飞书
 
-- 消息显示股票、事件时间、详情入口；
+- 消息显示股票、事件时间、详情入口；单只股票消息点击进入 `/market?symbol=...&event_id=...`（`buildMarketEntryFromMessage`），多只股票抽屉"查看"按钮同样进入 `/market?symbol=...&event_id=...`；无股票消息保持在消息页；
 - 文字和图片显示独立状态；
 - partial_failed 展示失败步骤和仅重试图片；
 - Worker 不可用时不显示整体成功。
