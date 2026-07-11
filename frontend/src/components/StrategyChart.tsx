@@ -83,6 +83,7 @@ export interface LayerVisibility {
   delta: boolean
   events: boolean
   sqzmom: boolean
+  consensus_zone: boolean
 }
 
 export interface StrategyChartProps {
@@ -645,6 +646,75 @@ function renderVolume(
   drawPaneTicks(ctx, g, 'volume', 0, vmax, 'VOL', data[data.length - 1].volume, C.text)
 }
 
+// [ConsensusZone] - 筹码共识区 P10-P90 半透明水平区带（PRD V1.1 §7.4）
+// 后端注入 consensus_zone 图层，data 包含 clusters 数组和 isAvailable 标志
+// 无数据/错误时只跳过渲染，不影响 K线
+interface ConsensusClusterData {
+  lower: number
+  upper: number
+  center: number
+  peakPrice: number
+  volumeRatio: number
+  strength: number
+}
+
+interface ConsensusZoneLayerData {
+  clusters: ConsensusClusterData[]
+  isAvailable: boolean
+  algorithmVersion?: string
+  unavailableReason?: string | null
+}
+
+function renderConsensusZone(
+  ctx: CanvasRenderingContext2D,
+  g: Geometry,
+  _layer: ChartLayer,
+  data: Record<string, (number | string | null)[]>,
+  py: (v: number) => number,
+): void {
+  // Cast data to ConsensusZoneLayerData（后端返回的嵌套结构）
+  const zoneData = data as unknown as ConsensusZoneLayerData
+  if (!zoneData || !zoneData.isAvailable || !zoneData.clusters || zoneData.clusters.length === 0) {
+    return
+  }
+
+  const plotWidth = g.plotRight - g.l
+  const bandColor = 'rgba(156, 39, 176, 0.10)'
+  const borderColor = 'rgba(156, 39, 176, 0.35)'
+  const centerColor = 'rgba(156, 39, 176, 0.55)'
+
+  for (const cluster of zoneData.clusters) {
+    const yLower = py(cluster.lower)
+    const yUpper = py(cluster.upper)
+    const yTop = Math.min(yLower, yUpper)
+    const bandHeight = Math.abs(yUpper - yLower)
+
+    // P10-P90 半透明填充
+    ctx.fillStyle = bandColor
+    ctx.fillRect(g.l, yTop, plotWidth, Math.max(bandHeight, 1))
+
+    // P10/P90 边界线
+    ctx.strokeStyle = borderColor
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    ctx.moveTo(g.l, yLower)
+    ctx.lineTo(g.plotRight, yLower)
+    ctx.moveTo(g.l, yUpper)
+    ctx.lineTo(g.plotRight, yUpper)
+    ctx.stroke()
+
+    // P50 中位线（虚线）
+    const yCenter = py(cluster.center)
+    ctx.strokeStyle = centerColor
+    ctx.setLineDash([4, 4])
+    ctx.beginPath()
+    ctx.moveTo(g.l, yCenter)
+    ctx.lineTo(g.plotRight, yCenter)
+    ctx.stroke()
+    ctx.setLineDash([])
+  }
+}
+
 // 突破压力区
 function renderBreakout(
   ctx: CanvasRenderingContext2D,
@@ -691,6 +761,9 @@ function renderIndicatorLayer(
       break
     case 'sqzmom':
       renderIndicatorSqzmom(ctx, g, layer, data, barsCount, step, displayTimes, timeframe)
+      break
+    case 'consensus_zone':
+      renderConsensusZone(ctx, g, layer, data, py)
       break
   }
 }
@@ -1700,6 +1773,8 @@ function drawTrading(
       if (layer.layer_id === 'macd' && !layers.macd) return
       // [SQZMOM_LB 副图] - 受 sqzmom 图层开关控制
       if (layer.layer_id === 'sqzmom_lb' && !layers.sqzmom) return
+      // [ConsensusZone 主图] - 受 consensus_zone 图层开关控制
+      if (layer.layer_id === 'consensus_zone' && !layers.consensus_zone) return
       // [DSA 数据契约] - union 类型（DsaSelectorData | Record）按 Record 索引访问，dsa_polyline 渲染器内部再 cast 到 DsaSelectorData
       const layerData = indicators.data![layer.strategy_id] as Record<string, (number | string | null)[]>
       if (layerData) {
@@ -1809,6 +1884,7 @@ function getDefaultLayers(strategyId?: string): LayerVisibility {
     delta: false,
     events: false,
     sqzmom: false,
+    consensus_zone: true,
   }
   if (strategyId && STRATEGIES[strategyId]) {
     STRATEGIES[strategyId].defaultLayers.forEach(id => {
@@ -1902,15 +1978,14 @@ export function StrategyChart({
   })
 
   // [indicatorLayerManifest] - 当父组件传入 indicatorVisibility 时，覆盖对应图层的可见性
-  // 映射：consensus_zone→profile+node+poc, price_structure→dsa+selection, boll→bb, volume→volume, macd→macd
+  // 映射：consensus_zone→consensus_zone(新), price_structure→dsa+selection, boll→bb, volume→volume, macd→macd
+  // 旧 VolumeProfile(profile/node/poc)不再由 consensus_zone 控制，保留默认 false
   const effectiveLayers: LayerVisibility = useMemo(() => {
     // 截图模式强制 FEISHU_CAPTURE_LAYERS，不受 indicatorVisibility 覆盖
     if (isCaptureMode || !indicatorVisibility) return layers
     return {
       ...layers,
-      profile: indicatorVisibility.consensus_zone ?? layers.profile,
-      node: indicatorVisibility.consensus_zone ?? layers.node,
-      poc: indicatorVisibility.consensus_zone ?? layers.poc,
+      consensus_zone: indicatorVisibility.consensus_zone ?? layers.consensus_zone,
       dsa: indicatorVisibility.price_structure ?? layers.dsa,
       selection: indicatorVisibility.price_structure ?? layers.selection,
       bb: indicatorVisibility.boll ?? layers.bb,

@@ -4,14 +4,14 @@
 // 覆盖：
 //  1. INDICATOR_LAYER_MANIFEST 包含 5 个条目
 //  2. manifest 条目字段完整（id/name/kind/defaultVisible/enabled/dependencies/renderOrder）
-//  3. 默认可见性：consensus_zone=false (Phase 3 纠偏，禁用), price_structure=true, volume=true, boll=false, macd=false
+//  3. 默认可见性：consensus_zone=true (Phase 5 已实现), price_structure=true, volume=true, boll=false, macd=false
 //  4. 主图/副图分组正确（3 主图 + 2 副图）
 //  5. defaultIndicatorVisibility() 返回与 manifest 默认值一致
 //  6. loadIndicatorVisibility 空存储返回默认值
 //  7. saveIndicatorVisibility/loadIndicatorVisibility 往返一致
 //  8. 版本不匹配时重置为默认值
 //  9. 存储损坏（非 JSON）时回退默认值
-// 10. consensus_zone 在 Phase 5 前禁用（enabled=false, defaultVisible=false, name="成交量分布"）
+// 10. consensus_zone 在 Phase 5 后启用（enabled=true, defaultVisible=true, name="筹码共识区"）
 
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
@@ -53,28 +53,26 @@ test('manifest 条目字段完整', () => {
 })
 
 // ===== 3. 默认可见性 =====
-test('默认可见性：consensus_zone=false (Phase 3 禁用), price_structure=true, volume=true, boll=false, macd=false', () => {
+test('默认可见性：consensus_zone=true (Phase 5 已实现), price_structure=true, volume=true, boll=false, macd=false', () => {
   const byId = Object.fromEntries(INDICATOR_LAYER_MANIFEST.map((e) => [e.id, e]))
-  // Phase 3 纠偏：consensus_zone 在 Phase 5 实现真实筹码共识区前禁用
-  // defaultVisible=false（不默认显示），enabled=false（开关不可点击）
-  assert.equal(byId.consensus_zone.defaultVisible, false)
+  // Phase 5 落地：ConsensusZone 算法已实现，默认开启
+  assert.equal(byId.consensus_zone.defaultVisible, true)
   assert.equal(byId.price_structure.defaultVisible, true)
   assert.equal(byId.volume.defaultVisible, true)
   assert.equal(byId.boll.defaultVisible, false)
   assert.equal(byId.macd.defaultVisible, false)
 })
 
-// ===== 10. consensus_zone 在 Phase 5 前禁用 =====
-test('consensus_zone 在 Phase 5 前禁用（enabled=false, name="成交量分布"）', () => {
+// ===== 10. consensus_zone 在 Phase 5 后启用 =====
+test('consensus_zone 在 Phase 5 后启用（enabled=true, name="筹码共识区"）', () => {
   const byId = Object.fromEntries(INDICATOR_LAYER_MANIFEST.map((e) => [e.id, e]))
   const cz = byId.consensus_zone
-  assert.equal(cz.enabled, false, 'consensus_zone enabled 必须为 false（Phase 5 前禁用开关）')
-  assert.equal(cz.defaultVisible, false, 'consensus_zone defaultVisible 必须为 false（不默认显示）')
-  assert.equal(cz.name, '成交量分布', 'consensus_zone name 必须为"成交量分布"（非"筹码共识区"，避免误导用户）')
-  // 其他图层 enabled 必须为 true（可正常开关）
+  assert.equal(cz.enabled, true, 'consensus_zone enabled 必须为 true（Phase 5 已实现）')
+  assert.equal(cz.defaultVisible, true, 'consensus_zone defaultVisible 必须为 true（默认开启）')
+  assert.equal(cz.name, '筹码共识区', 'consensus_zone name 必须为"筹码共识区"')
+  // 所有图层 enabled 必须为 true（可正常开关）
   for (const entry of INDICATOR_LAYER_MANIFEST) {
-    if (entry.id === 'consensus_zone') continue
-    assert.equal(entry.enabled, true, `${entry.id} enabled 必须为 true（仅 consensus_zone 禁用）`)
+    assert.equal(entry.enabled, true, `${entry.id} enabled 必须为 true`)
   }
 })
 

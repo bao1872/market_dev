@@ -640,6 +640,53 @@ async def compute_all_indicators(
     })
     data["sqzmom_lb"] = _to_json_safe(_truncate_lists(sqzmom_renamed, bars))
 
+    # [ConsensusZone 主图] - 将筹码共识区作为全局图层注入 layers/data
+    # PRD V1.1 §7.4: 峰簇识别 + 成交量加权百分位 P10/P50/P90
+    # 数据源独立性（PRD 纠偏）：使用固定窗口日线（daily_bars, 250根），
+    # 不使用 macd_bars（随显示 timeframe/count 变化）。
+    # V1 算法版本：仅日线成交分布；15m 细化为未来版本，不宣称已实现。
+    # 缓存键含 symbol/as_of/"1d"/algo_version/data_version，显示周期切换不改变共识定义。
+    # 无数据/错误时只记录错误，不影响其他图层和 K线
+    try:
+        from app.services.consensus_zone_service import (
+            compute_and_cache_consensus_zone,
+        )
+
+        # as_of 取最后一根日线时间（因果性锚点，不随显示周期变化）
+        if not daily_bars.empty:
+            last_daily_idx = daily_bars.index[-1]
+            as_of_str = (
+                last_daily_idx.isoformat()
+                if hasattr(last_daily_idx, "isoformat")
+                else str(last_daily_idx)
+            )
+        else:
+            as_of_str = today.isoformat()
+
+        # timeframe 固定 "1d"：ConsensusZone 定义不随用户切换显示周期而改变
+        consensus_result = await compute_and_cache_consensus_zone(
+            daily_bars, symbol, "1d", as_of_str,
+        )
+
+        layers.append({
+            "strategy_id": "consensus_zone",
+            "strategy_name": "筹码共识区",
+            "layer_id": "consensus_zone",
+            "layer_name": "筹码共识区",
+            "renderer": "consensus_zone",
+            "pane": "price",
+            "color": "#9c27b0",
+            "direction_colored": False,
+            "fields": ["clusters"],
+            "hover_fields": ["lower", "upper", "center", "peakPrice", "volumeRatio", "strength"],
+        })
+        data["consensus_zone"] = _to_json_safe(consensus_result.model_dump())
+    except Exception as exc:
+        errors["consensus_zone"] = str(exc)
+        logger.warning(
+            "ConsensusZone 计算失败 instrument_id=%s: %s", instrument_id, exc,
+        )
+
     # [指标服务] - 返回计算窗口元信息，前端据此决定显示范围，不硬编码
     calculation_window = INDICATOR_BARS.get(timeframe, 800)
     warmup_bars = INDICATOR_WARMUP_BARS.get(timeframe, 60)

@@ -10,8 +10,9 @@
 3. 最新 2 根日线（rn <= 2）批量按 instrument_ids 查询 → latest_price + change_pct
 4. 最新 stock_feature_snapshot（rn = 1）批量 → dsa_state + structure_state
 5. 最新 strategy_event（rn = 1）批量 → latest_event_title + latest_event_time
+6. boards_as_of — MAX(market_boards.updated_at) 标量查询
 
-总计 5 条固定 SQL，不随 page_size 增长。
+总计 6 条固定 SQL，不随 page_size 增长。
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.time import to_shanghai_iso
 from app.models.bar import BarDaily
 from app.models.instrument import Instrument
+from app.models.market_board import MarketBoard
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.strategy_event import StrategyEvent
 from app.models.watchlist import UserWatchlistItem
@@ -532,6 +534,11 @@ async def get_market_stocks(
             )
         )
 
+    # ===== Query 6: boards_as_of — 最近一次板块同步时间 =====
+    boards_as_of_dt: datetime | None = await db.scalar(
+        select(func.max(MarketBoard.updatedAt))
+    )
+
     return MarketStocksResponse(
         items=items,
         page=page,
@@ -539,5 +546,5 @@ async def get_market_stocks(
         total=total,
         price_as_of=price_as_of_date.isoformat() if price_as_of_date else None,
         state_as_of=to_shanghai_iso(state_as_of_dt) if state_as_of_dt else None,
-        boards_as_of=None,
+        boards_as_of=to_shanghai_iso(boards_as_of_dt) if boards_as_of_dt else None,
     )

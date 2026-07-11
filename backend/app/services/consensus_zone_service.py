@@ -7,8 +7,14 @@
 4. 在每个峰簇内部，以各价位成交量为权重计算价格 P10、P50、P90
 5. 输出 lower=P10, upper=P90, center=P50, peakPrice, volumeRatio, strength
 
-主结构使用日线，细化分布使用15分钟数据。
+V1 算法版本（CONSENSUS_ALGORITHM_VERSION="v1"）：
+- 数据源：固定窗口日线（250根），由调用方传入 bars DataFrame
+- timeframe：固定 "1d"（由 indicator_service 传入，不随显示周期变化）
+- 产品含义：日线成交分布共识区，不包含 15 分钟细化分布
+- 未来版本将增加 15m 细化（日线主结构 + 15m 分布），届时 bump 算法版本
+
 缓存键包含 symbol/as_of/timeframe/algorithm_version/data_version，Redis TTL。
+显示周期切换（1d/15m/1h/1w/1mo）不改变 ConsensusZone 定义。
 
 纯函数设计：compute_consensus_zones 接受 numpy 数组，返回结果列表，
 无 DB/Redis 依赖，可直接单元测试。

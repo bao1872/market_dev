@@ -356,7 +356,7 @@ async def test_sql_query_count_fixed(
     market_stocks_client,
     db_session: AsyncSession,
 ) -> None:
-    """验证 SQL 查询数量固定为 5 条，不随 page_size 变化。
+    """验证 SQL 查询数量固定为 6 条，不随 page_size 变化。
 
     使用 SQLAlchemy before_cursor_execute 事件精确计数 SELECT 语句。
     """
@@ -399,8 +399,8 @@ async def test_sql_query_count_fixed(
     assert len(set(query_counts.values())) == 1, (
         f"查询数量不一致: {query_counts}"
     )
-    # 查询数量应为 5（instruments + count + bars + snapshots + events）
-    expected_count = 5
+    # 查询数量应为 6（instruments + count + bars + snapshots + events + boards_as_of）
+    expected_count = 6
     actual_count = list(query_counts.values())[0]
     assert actual_count == expected_count, (
         f"期望 {expected_count} 条 SQL，实际 {actual_count} 条。"

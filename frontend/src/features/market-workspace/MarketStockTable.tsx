@@ -129,7 +129,7 @@ export function MarketStockTable({
                       color: '#888',
                       fontWeight: 'normal',
                     }}
-                    title={`数据截止：${priceAsOf}`}
+                    title={priceAsOf ? `截至${priceAsOf.slice(0, 10)}收盘` : '收盘快照'}
                   >
                     收盘快照
                   </span>

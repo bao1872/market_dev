@@ -67,12 +67,13 @@ export interface IndicatorLayerManifestEntry {
   renderOrder: number
 }
 
-// [consensus_zone-disabled] - Phase 3 纠偏：真实筹码共识区尚未实现（Phase 5），
-// 当前 consensus_zone 映射的 VolumeProfile 不等同于筹码共识区。
-// 在 Phase 5 落地前：name 改为"成交量分布"（实际渲染内容）、defaultVisible=false、enabled=false（禁用开关）。
-// StrategyChart effectiveLayers 中 consensus_zone → profile+node+poc 的映射保留（VolumeProfile 渲染代码不删除）。
+// [consensus_zone-enabled] - Phase 5 落地：真实 ConsensusZone 算法已实现（PRD V1.1 §7.4）。
+// 后端 indicator_service 注入 consensus_zone 图层（renderer=consensus_zone），
+// StrategyChart 绘制 P10-P90 半透明水平区带。
+// 完成后默认开启；无数据/错误时只关闭该图层，不影响 K线。
+// 旧 VolumeProfile（profile/node/poc）渲染代码保留但不再由 consensus_zone 控制。
 export const INDICATOR_LAYER_MANIFEST: IndicatorLayerManifestEntry[] = [
-  { id: 'consensus_zone', name: '成交量分布', kind: 'main', defaultVisible: false, enabled: false, dependencies: ['volume_profile'], renderOrder: 10 },
+  { id: 'consensus_zone', name: '筹码共识区', kind: 'main', defaultVisible: true, enabled: true, dependencies: ['consensus_zone'], renderOrder: 10 },
   { id: 'price_structure', name: '价格结构', kind: 'main', defaultVisible: true, enabled: true, dependencies: ['structural_factors'], renderOrder: 20 },
   { id: 'boll', name: '布林带', kind: 'main', defaultVisible: false, enabled: true, dependencies: ['boll_bands'], renderOrder: 30 },
   { id: 'volume', name: '成交量', kind: 'sub', defaultVisible: true, enabled: true, dependencies: ['bars.volume'], renderOrder: 10 },
