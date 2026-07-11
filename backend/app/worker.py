@@ -1,10 +1,10 @@
-"""统一 Worker 入口 - 支持 Outbox Relay / Delivery Worker / Job 消费者 / 策略批量计算 / 行情调度 / 选股策略调度 / 日历调度 / 监控调度。
+"""统一 Worker 入口 - 支持 Outbox Relay / Delivery Worker / Job 消费者 / 策略批量计算 / 行情调度 / 板块同步 / 选股策略调度 / 日历调度 / 监控调度。
 
 用法：
     WORKER_TYPE=outbox python -m app.worker           # 运行 Outbox Relay：将 Outbox 扩张为 MessageDelivery(pending)
     WORKER_TYPE=delivery python -m app.worker         # 运行投递 Worker：按渠道执行 MessageDelivery 状态机
     WORKER_TYPE=strategy_batch python -m app.worker   # 运行策略批量计算 Worker
-    WORKER_TYPE=bars_scheduler python -m app.worker   # 运行行情调度 Worker（每日 16:00，日线优先+DSA 事件触发）
+    WORKER_TYPE=bars_scheduler python -m app.worker   # 运行行情调度 Worker（每日 16:00 行情刷新 + 17:00 板块同步）
     WORKER_TYPE=strategy_scheduler python -m app.worker   # 运行选股策略调度 Worker（每日 18:30，兜底机制）
     WORKER_TYPE=calendar_scheduler python -m app.worker  # 运行日历调度 Worker（每日 02:00）
     WORKER_TYPE=monitor_scheduler python -m app.worker    # 运行监控调度 Worker（交易时段 9:30-15:00）
@@ -34,6 +34,7 @@ import os
 import signal
 import socket
 from datetime import UTC, datetime, time, timedelta
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -468,15 +469,17 @@ async def run_strategy_batch_worker() -> None:
 
 
 async def run_bars_scheduler_worker() -> None:
-    """行情调度 Worker：每日 16:00 触发全市场多周期行情更新。
+    """行情调度 Worker：每日 16:00 触发全市场多周期行情更新 + 17:00 板块同步。
 
     使用 APScheduler AsyncIOScheduler + CronTrigger：
-    - 每个交易日（周一至周五）16:00 触发
-    - 调用 BarsSchedulerService.refresh_all_instruments()
-    - 串行拉取 3 个周期（d/15m/60m），耗时约 1.8 小时
+    - 每个交易日（周一至周五）16:00 触发行情刷新
+    - 每日 17:00 触发板块同步（qstock，独立 job_name/run_key，不阻塞行情主流水线）
+    - qstock 同步调用通过 asyncio.to_thread 包装，不阻塞事件循环
 
     设计说明：
     - APScheduler 在事件循环中运行，不阻塞
+    - 两个 job 独立调度，失败互不影响（board_sync 失败保留旧板块数据）
+    - board_sync 使用 max_instances=1 实现单并发
     - 信号处理：收到 SIGTERM/SIGINT 后优雅关闭 scheduler
     - 异常不吞：捕获后记录日志，不影响下次触发
     """
@@ -636,8 +639,98 @@ async def run_bars_scheduler_worker() -> None:
         id="bars_refresh_daily",
         replace_existing=True,
     )
+
+    # ===== 板块同步 job（qstock 每日 17:00，独立 job_name/run_key，不阻塞行情主流水线） =====
+    async def _resolve_instruments(symbols: list[str]) -> dict[str, UUID]:
+        """生产级 instrument_resolver：按 symbol 批量查询现有 Instrument。"""
+        from sqlalchemy import select
+
+        from app.models.instrument import Instrument
+
+        if not symbols:
+            return {}
+        async with AsyncSessionLocal() as session:
+            stmt = select(Instrument.id, Instrument.symbol).where(
+                Instrument.symbol.in_(symbols)
+            )
+            result = await session.execute(stmt)
+            return {row.symbol: row.id for row in result}
+
+    async def scheduled_board_sync() -> None:
+        """定时任务：每日 17:00 同步 qstock 板块数据。
+
+        独立于 bars_refresh，失败只记录 SchedulerJobRun 并保留旧板块数据。
+        qstock 同步调用通过 asyncio.to_thread 包装（在 QStockFetcher 内部）。
+        """
+        from datetime import date as date_cls
+
+        from app.services.board_sync_service import sync_boards
+        from app.services.calendar_service import is_trading_day_async
+        from app.services.qstock_fetcher import QStockFetcher
+
+        trade_date = date_cls.today()
+
+        async with AsyncSessionLocal() as session:
+            is_trading = await is_trading_day_async(session, trade_date)
+
+        if not is_trading:
+            logger.info("非交易日 %s，跳过板块同步", trade_date)
+            return
+
+        logger.info("交易日 %s，开始板块同步", trade_date)
+        job_run = None
+        try:
+            async with AsyncSessionLocal() as db:
+                scheduled_at = datetime.combine(
+                    trade_date, time(17, 0), tzinfo=ZoneInfo("Asia/Shanghai")
+                )
+                job_run = await _create_job_run(
+                    db, "board_sync_scheduler", str(trade_date),
+                    scheduled_at=scheduled_at,
+                    run_key=f"board_sync:{trade_date}",
+                )
+                if job_run is None:
+                    logger.info("board_sync SKIPPED_DUPLICATE business_date=%s", trade_date)
+                    return
+                await db.commit()
+
+            # 执行同步（独立 session，不阻塞 bars_refresh）
+            async with AsyncSessionLocal() as db:
+                result = await sync_boards(
+                    db,
+                    QStockFetcher(),
+                    instrument_resolver=_resolve_instruments,
+                )
+                await db.commit()
+
+            logger.info(
+                "板块同步完成: status=%s boards=%d memberships=%d",
+                result["status"], result["board_count"], result["membership_count"],
+            )
+            if job_run is not None:
+                async with AsyncSessionLocal() as db:
+                    await _finish_job_run(
+                        db, job_run,
+                        "succeeded" if result["status"] == "succeeded" else "failed",
+                        success_count=result["board_count"],
+                        error_message=result.get("error"),
+                    )
+        except Exception as exc:
+            logger.exception("板块同步异常: %s", exc)
+            if job_run is not None:
+                async with AsyncSessionLocal() as db:
+                    await _finish_job_run(db, job_run, "failed", error_message=str(exc)[:500])
+
+    scheduler.add_job(
+        scheduled_board_sync,
+        CronTrigger(day_of_week="mon-sun", hour=17, minute=0, timezone=ZoneInfo("Asia/Shanghai")),
+        id="board_sync_daily",
+        replace_existing=True,
+        max_instances=1,  # 单并发
+    )
+
     scheduler.start()
-    logger.info("Bars Scheduler Worker 启动（每日 16:00 刷新行情）")
+    logger.info("Bars Scheduler Worker 启动（16:00 刷新行情 + 17:00 板块同步）")
 
     while not _shutdown:
         await asyncio.sleep(60)

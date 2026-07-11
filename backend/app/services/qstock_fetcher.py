@@ -5,10 +5,14 @@ qstock 只存在于本模块，不成为用户请求链的运行时依赖。
 
 单并发；批量 500～1000；设置连接/读取超时和有限重试。
 失败重试后继续沿用上次成功快照并告警。
+
+qstock 内部使用 requests/pandas 同步调用，通过 asyncio.to_thread 包装
+避免阻塞事件循环（PRD 纠偏：不新增常驻 Docker worker，注册进现有 scheduler）。
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -20,11 +24,79 @@ FETCH_RETRY_COUNT = 2
 BATCH_SIZE = 500
 
 
+def _fetch_boards_sync(qs: Any) -> list[dict[str, str]]:
+    """同步拉取板块目录（行业 + 概念），在 to_thread 中执行。"""
+    boards: list[dict[str, str]] = []
+
+    # 行业板块
+    try:
+        industry_df = qs.ths_index_data("行业")
+        if industry_df is not None and not industry_df.empty:
+            for _, row in industry_df.iterrows():
+                code = str(row.get("code", row.get("板块代码", "")))
+                name = str(row.get("name", row.get("板块名称", "")))
+                if code and name:
+                    boards.append({
+                        "external_code": code,
+                        "name": name,
+                        "type": "industry",
+                    })
+    except Exception as e:
+        logger.warning(f"Failed to fetch industry boards: {e}")
+
+    # 概念板块
+    try:
+        concept_df = qs.ths_index_data("概念")
+        if concept_df is not None and not concept_df.empty:
+            for _, row in concept_df.iterrows():
+                code = str(row.get("code", row.get("板块代码", "")))
+                name = str(row.get("name", row.get("板块名称", "")))
+                if code and name:
+                    boards.append({
+                        "external_code": code,
+                        "name": name,
+                        "type": "concept",
+                    })
+    except Exception as e:
+        logger.warning(f"Failed to fetch concept boards: {e}")
+
+    logger.info(f"Fetched {len(boards)} boards from qstock")
+    return boards
+
+
+def _fetch_memberships_sync(qs: Any, board_external_code: str) -> list[str]:
+    """同步拉取板块成分股，在 to_thread 中执行。"""
+    try:
+        df = qs.ths_index_stock_data(board_external_code)
+        if df is None or df.empty:
+            return []
+
+        symbols: list[str] = []
+        for _, row in df.iterrows():
+            code = str(row.get("code", row.get("股票代码", "")))
+            if code:
+                # 标准化为 6 位代码
+                code = code.zfill(6) if len(code) < 6 else code
+                symbols.append(code)
+
+        logger.info(
+            f"Fetched {len(symbols)} members for board {board_external_code}"
+        )
+        return symbols
+
+    except Exception as e:
+        logger.warning(
+            f"Failed to fetch memberships for board {board_external_code}: {e}"
+        )
+        return []
+
+
 class QStockFetcher:
     """qstock 板块数据拉取适配器。
 
     实现 BoardFetcher 协议。
     不缓存数据，每次调用实时拉取。
+    qstock 同步调用通过 asyncio.to_thread 包装，不阻塞事件循环。
     """
 
     def __init__(self) -> None:
@@ -47,45 +119,11 @@ class QStockFetcher:
 
         返回 [{external_code, name, type}]。
         type: 'industry' | 'concept'
+
+        qstock 同步调用通过 asyncio.to_thread 执行，不阻塞事件循环。
         """
         qs = self._ensure_qstock()
-
-        boards: list[dict[str, str]] = []
-
-        # 行业板块
-        try:
-            industry_df = qs.ths_index_data("行业")
-            if industry_df is not None and not industry_df.empty:
-                for _, row in industry_df.iterrows():
-                    code = str(row.get("code", row.get("板块代码", "")))
-                    name = str(row.get("name", row.get("板块名称", "")))
-                    if code and name:
-                        boards.append({
-                            "external_code": code,
-                            "name": name,
-                            "type": "industry",
-                        })
-        except Exception as e:
-            logger.warning(f"Failed to fetch industry boards: {e}")
-
-        # 概念板块
-        try:
-            concept_df = qs.ths_index_data("概念")
-            if concept_df is not None and not concept_df.empty:
-                for _, row in concept_df.iterrows():
-                    code = str(row.get("code", row.get("板块代码", "")))
-                    name = str(row.get("name", row.get("板块名称", "")))
-                    if code and name:
-                        boards.append({
-                            "external_code": code,
-                            "name": name,
-                            "type": "concept",
-                        })
-        except Exception as e:
-            logger.warning(f"Failed to fetch concept boards: {e}")
-
-        logger.info(f"Fetched {len(boards)} boards from qstock")
-        return boards
+        return await asyncio.to_thread(_fetch_boards_sync, qs)
 
     async def fetch_memberships(
         self, board_external_code: str, board_type: str
@@ -98,29 +136,10 @@ class QStockFetcher:
 
         Returns:
             股票代码列表（如 ['000001', '000002', ...]）
+
+        qstock 同步调用通过 asyncio.to_thread 执行，不阻塞事件循环。
         """
         qs = self._ensure_qstock()
-
-        try:
-            df = qs.ths_index_stock_data(board_external_code)
-            if df is None or df.empty:
-                return []
-
-            symbols: list[str] = []
-            for _, row in df.iterrows():
-                code = str(row.get("code", row.get("股票代码", "")))
-                if code:
-                    # 标准化为 6 位代码
-                    code = code.zfill(6) if len(code) < 6 else code
-                    symbols.append(code)
-
-            logger.info(
-                f"Fetched {len(symbols)} members for board {board_external_code} ({board_type})"
-            )
-            return symbols
-
-        except Exception as e:
-            logger.warning(
-                f"Failed to fetch memberships for board {board_external_code}: {e}"
-            )
-            return []
+        return await asyncio.to_thread(
+            _fetch_memberships_sync, qs, board_external_code
+        )

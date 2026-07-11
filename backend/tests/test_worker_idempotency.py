@@ -130,6 +130,60 @@ async def test_backward_compatible_no_run_key(db_session) -> None:
 
 
 @pytest.mark.asyncio
+async def test_board_sync_scheduler_skipped_duplicate(db_session) -> None:
+    """board_sync_scheduler 同一 business_date 第二次调用应返回 None（SKIPPED_DUPLICATE）。"""
+    run_key = f"board_sync:test:{uuid.uuid4().hex[:8]}"
+
+    # 第一次：成功获取
+    with patch.object(db_session, "commit", new=db_session.flush):
+        job_run_1 = await _create_job_run(
+            db_session, "board_sync_scheduler", "2026-07-11", run_key=run_key,
+        )
+    assert job_run_1 is not None
+    assert job_run_1.run_key == run_key
+
+    # 第二次：应返回 None（SKIPPED_DUPLICATE）
+    with patch.object(db_session, "commit", new=db_session.flush):
+        job_run_2 = await _create_job_run(
+            db_session, "board_sync_scheduler", "2026-07-11", run_key=run_key,
+        )
+    assert job_run_2 is None
+
+
+def test_board_sync_registered_in_bars_scheduler() -> None:
+    """验证 board_sync job 注册在 run_bars_scheduler_worker 内部（非独立 worker）。"""
+    import inspect
+
+    from app.worker import run_bars_scheduler_worker
+
+    source = inspect.getsource(run_bars_scheduler_worker)
+    assert "scheduled_board_sync" in source, \
+        "run_bars_scheduler_worker 应包含 scheduled_board_sync 任务"
+    assert "board_sync_daily" in source, \
+        "run_bars_scheduler_worker 应注册 board_sync_daily job"
+    assert "sync_boards" in source, \
+        "run_bars_scheduler_worker 应调用 sync_boards"
+
+
+def test_board_sync_not_separate_worker_type() -> None:
+    """验证 board_sync_scheduler 不再是独立 WORKER_TYPE（合并进 bars_scheduler）。"""
+    import inspect
+
+    from app.worker import main
+
+    source = inspect.getsource(main)
+    assert "run_board_sync_scheduler_worker" not in source, \
+        "main() 不应再调用已移除的 run_board_sync_scheduler_worker"
+    assert '"board_sync_scheduler"' not in source, \
+        "main() 不应再包含 board_sync_scheduler 分支"
+
+    # 确认独立函数已删除
+    import app.worker as worker_module
+    assert not hasattr(worker_module, "run_board_sync_scheduler_worker"), \
+        "run_board_sync_scheduler_worker 函数应已删除"
+
+
+@pytest.mark.asyncio
 async def test_monitor_scheduler_different_sessions_both_succeed(db_session) -> None:
     """边界：上午和下午 session 互不影响，均能成功创建。"""
     from datetime import date as date_cls
