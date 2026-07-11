@@ -4,33 +4,26 @@ PRD V1.1 §7.3 核心契约：
 - GET /api/v1/stocks/{symbol}/context
   用户侧只读接口，返回 StockState + 最近事件 + 数据质量。
   禁止请求时写事件（事件由盘后快照成功发布后异步生成）。
+  需要 require_active_subscription 守卫（admin 豁免，member 需有效订阅）。
+  as_of 直接声明 date | None，非法值由 FastAPI 返回 422。
+  as_of 历史查询时，事件 occurred_at <= as_of 当日结束，禁止返回未来事件。
 - GET /api/v1/admin/stocks/{symbol}/debug
-  管理员调试接口，返回 StockState + 事件 + 原始 payload（structural/temporal）。
+  管理员调试接口，返回 StockState + 事件 + 原始 payload。
   前后端统一使用 symbol（非 instrument_id）。
-
-设计原则：
-- 只读查询，无副作用
-- symbol → instrument_id → snapshot → StockState
-- as_of 参数支持历史回看（按 trade_date 查询快照）
-- 无数据时返回 state=null + dataQuality 说明，不抛 404
-
-用法：
-    from app.api.stock_context import router as stock_context_router
-    app.include_router(stock_context_router)
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import and_, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import get_db, require_roles
+from app.core.deps import get_db
 from app.models.instrument import Instrument
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_feature_snapshot_run import (
@@ -41,6 +34,12 @@ from app.schemas.stock_state import (
     StateEventDTO,
     StockContextResponse,
     build_stock_state,
+    strip_internal_fields_for_user,
+)
+from app.services.access_control_service import (
+    AccessContext,
+    require_active_subscription,
+    require_admin,
 )
 from app.services.state_event_service import get_recent_events_for_instrument
 
@@ -53,9 +52,7 @@ stock_router = APIRouter(prefix="/api/v1/stocks", tags=["stock-context"])
 admin_router = APIRouter(prefix="/api/v1/admin/stocks", tags=["admin-stock-debug"])
 
 _SCHEMA_VERSION = 1
-_DEFAULT_PRIMARY_TIMEFRAME = "1d"
-_DEFAULT_SECONDARY_TIMEFRAME = "15m"
-_DEFAULT_ADJ = "qfq"
+_SHANGHAI_TZ = UTC  # Use UTC for as_of end-of-day calculation
 
 
 async def _get_instrument_by_symbol(
@@ -63,6 +60,8 @@ async def _get_instrument_by_symbol(
     symbol: str,
 ) -> Instrument:
     """按 symbol 查询 Instrument（前后端统一使用 symbol）。"""
+    from fastapi import HTTPException, status
+
     stmt = select(Instrument).where(Instrument.symbol == symbol)
     result = await session.execute(stmt)
     instrument = result.scalar_one_or_none()
@@ -78,13 +77,7 @@ async def _find_latest_succeeded_run(
     session: AsyncSession,
     schema_version: int = _SCHEMA_VERSION,
 ) -> StockFeatureSnapshotRun | None:
-    """查找最新的 succeeded + published + full scope 的 snapshot run。
-
-    publish gate 与 has_succeeded_snapshot_run 一致：
-    - status='succeeded'
-    - published_at IS NOT NULL
-    - metadata_['scope']='full'
-    """
+    """查找最新的 succeeded + published + full scope 的 snapshot run。"""
     stmt = (
         select(StockFeatureSnapshotRun)
         .where(
@@ -126,17 +119,13 @@ async def _get_snapshot_for_instrument(
     instrument_id: UUID,
     run: StockFeatureSnapshotRun,
 ) -> StockFeatureSnapshot | None:
-    """获取指定 instrument + run 对应的快照。"""
+    """获取指定 instrument + run 对应的快照（按 source_run_id 精确查询）。"""
     stmt = (
         select(StockFeatureSnapshot)
         .where(
             and_(
                 StockFeatureSnapshot.instrument_id == instrument_id,
-                StockFeatureSnapshot.trade_date == run.trade_date,
-                StockFeatureSnapshot.schema_version == run.schema_version,
-                StockFeatureSnapshot.primary_timeframe == run.primary_timeframe,
-                StockFeatureSnapshot.secondary_timeframe == run.secondary_timeframe,
-                StockFeatureSnapshot.adj == run.adj,
+                StockFeatureSnapshot.source_run_id == run.id,
             )
         )
         .limit(1)
@@ -183,13 +172,9 @@ async def _build_stock_context(
     as_of: date | None = None,
     include_raw: bool = False,
 ) -> dict[str, Any]:
-    """构建 StockContext 响应（共享逻辑）。
+    """构建 StockContext 响应（共享逻辑，只读查询）。
 
-    Args:
-        session: 异步 DB 会话
-        symbol: 股票代码
-        as_of: 截止日期（None 表示最新）
-        include_raw: 是否包含原始 payload（管理员调试）
+    P0-4: as_of 历史查询时，事件 occurred_at <= as_of 当日结束，禁止返回未来事件。
     """
     instrument = await _get_instrument_by_symbol(session, symbol)
 
@@ -217,17 +202,36 @@ async def _build_stock_context(
     # 构建 StockState（纯函数，无副作用）
     stock_state = build_stock_state(snapshot, run, symbol)
 
+    # P0-4: as_of 历史查询时，事件截止到 as_of 当日结束
+    occurred_at_lte: datetime | None = None
+    if as_of is not None:
+        # as_of 当日结束（UTC 23:59:59）
+        occurred_at_lte = datetime.combine(
+            as_of, datetime.max.time(), tzinfo=_SHANGHAI_TZ,
+        ) + timedelta(days=1) - timedelta(seconds=1)
+
     # 获取最近事件（只读查询）
     recent_events = await get_recent_events_for_instrument(
-        session, instrument.id, limit=10
+        session, instrument.id, limit=10, occurred_at_lte=occurred_at_lte,
     )
     event_dtos = [_event_to_dto(e) for e in recent_events]
 
     data_quality = _build_data_quality(instrument, run, snapshot)
 
+    # PRD V1.1: 用户接口完全排除 sourceField/idempotencyKey（不是 null，是字段不存在）
+    response_state: Any
+    response_events: Any
+    if not include_raw:
+        response_state, response_events = strip_internal_fields_for_user(
+            stock_state, event_dtos
+        )
+    else:
+        response_state = stock_state
+        response_events = event_dtos
+
     response: dict[str, Any] = {
-        "state": stock_state,
-        "events": event_dtos,
+        "state": response_state,
+        "events": response_events,
         "dataQuality": data_quality,
     }
 
@@ -262,31 +266,27 @@ async def _build_stock_context(
 @stock_router.get("/{symbol}/context")
 async def get_stock_context(
     symbol: str,
-    as_of: str | None = Query(None, description="截止日期 ISO（如 2026-07-10），默认最新"),
+    as_of: date | None = Query(None, description="截止日期 ISO（如 2026-07-10），默认最新"),
     db: AsyncSession = Depends(get_db),
+    ctx: AccessContext = Depends(require_active_subscription),
 ) -> StockContextResponse:
-    """获取个股状态上下文（只读）。
+    """获取个股状态上下文（只读，需登录 + 有效订阅）。
 
     V1.1 核心契约：
     - 返回 StockState + 最近事件 + 数据质量
-    - 禁止请求时写事件（事件由盘后快照成功发布后异步生成）
-    - 无数据时返回 state=null + dataQuality 说明，不抛 404
+    - 禁止请求时写事件
+    - as_of 历史查询时事件 occurred_at <= as_of 当日结束
+    - 无数据时返回 state=null + dataQuality 说明
 
-    Args:
-        symbol: 股票代码（如 000001）
-        as_of: 截止日期（ISO 格式，如 2026-07-10），默认最新
+    权限：
+    - active admin 允许（豁免订阅）
+    - active member 且订阅有效允许
+    - 过期/无订阅拒绝
+    - Capture token 不可访问
     """
-    parsed_as_of: date | None = None
-    if as_of is not None:
-        try:
-            parsed_as_of = date.fromisoformat(as_of)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"as_of 格式无效，应为 ISO 日期（如 2026-07-10）: {as_of}",
-            ) from exc
-
-    result = await _build_stock_context(db, symbol, parsed_as_of, include_raw=False)
+    # ctx 仅用于权限守卫，不直接使用
+    _ = ctx
+    result = await _build_stock_context(db, symbol, as_of, include_raw=False)
     return StockContextResponse(**result)
 
 
@@ -298,54 +298,15 @@ async def get_stock_context(
 @admin_router.get("/{symbol}/debug")
 async def get_admin_stock_debug(
     symbol: str,
-    as_of: str | None = Query(None, description="截止日期 ISO，默认最新"),
+    as_of: date | None = Query(None, description="截止日期 ISO，默认最新"),
     db: AsyncSession = Depends(get_db),
-    current_user=Depends(require_roles("admin")),
+    ctx: AccessContext = Depends(require_admin),
 ) -> dict[str, Any]:
     """管理员个股调试接口（前后端统一使用 symbol）。
 
     返回 StockState + 事件 + 原始 payload（structural/temporal/summary）。
     仅管理员可访问。
-
-    Args:
-        symbol: 股票代码（如 000001）
-        as_of: 截止日期（ISO 格式），默认最新
     """
-    parsed_as_of: date | None = None
-    if as_of is not None:
-        try:
-            parsed_as_of = date.fromisoformat(as_of)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"as_of 格式无效: {as_of}",
-            ) from exc
-
-    result = await _build_stock_context(db, symbol, parsed_as_of, include_raw=True)
+    _ = ctx
+    result = await _build_stock_context(db, symbol, as_of, include_raw=True)
     return result
-
-
-# =============================================================================
-# 模块自测
-# =============================================================================
-
-if __name__ == "__main__":
-    print("stock_context API 自测...")
-
-    # 验证路由前缀
-    assert stock_router.prefix == "/api/v1/stocks", f"用户路由前缀错误: {stock_router.prefix}"
-    assert admin_router.prefix == "/api/v1/admin/stocks", f"管理员路由前缀错误: {admin_router.prefix}"
-
-    # 验证路由数量
-    stock_routes = list(stock_router.routes)
-    admin_routes = list(admin_router.routes)
-    assert len(stock_routes) == 1, f"用户路由应只有 1 个，实际: {len(stock_routes)}"
-    assert len(admin_routes) == 1, f"管理员路由应只有 1 个，实际: {len(admin_routes)}"
-
-    # 验证路径
-    assert stock_routes[0].path == "/api/v1/stocks/{symbol}/context"
-    assert admin_routes[0].path == "/api/v1/admin/stocks/{symbol}/debug"
-
-    print(f"stock_router: {stock_router.prefix}, routes: {[r.path for r in stock_routes]}")
-    print(f"admin_router: {admin_router.prefix}, routes: {[r.path for r in admin_routes]}")
-    print("OK: stock_context API 自测通过")

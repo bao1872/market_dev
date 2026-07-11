@@ -32,6 +32,7 @@ from app.models.instrument import Instrument
 from app.models.invitation import InviteCode, InviteRedemption
 from app.models.job import JobRun
 from app.models.job_run_event import JobRunEvent
+from app.models.market_board import MarketBoard, MarketBoardMembership
 from app.models.monitor_evaluation import MonitorEvaluation
 from app.models.monitor_state import MonitorState
 from app.models.notification import (
@@ -77,6 +78,8 @@ __all__ = [
     "InviteRedemption",
     "JobRun",
     "JobRunEvent",
+    "MarketBoard",
+    "MarketBoardMembership",
     "MessageDelivery",
     "MonitorEvaluation",
     "MonitorState",

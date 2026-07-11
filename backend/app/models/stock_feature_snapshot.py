@@ -69,6 +69,12 @@ class StockFeatureSnapshot(Base):
     schema_version: Mapped[int] = mapped_column(
         Integer(), nullable=False, default=1, comment="快照 schema 版本"
     )
+    source_run_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("stock_feature_snapshot_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        comment="归属的 snapshot run ID（精确关联，消除日期+参数猜归属）",
+    )
     source_primary_bar_time: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
@@ -134,6 +140,15 @@ class StockFeatureSnapshot(Base):
             "trade_date",
             "instrument_id",
         ),
+        Index(
+            "ix_feature_snapshot_source_run_id",
+            "source_run_id",
+        ),
+        Index(
+            "ix_feature_snapshot_run_instrument",
+            "source_run_id",
+            "instrument_id",
+        ),
     )
 
     def __repr__(self) -> str:
@@ -164,6 +179,8 @@ if __name__ == "__main__":
         "ix_feature_snapshot_trade_date_schema",
         "ix_feature_snapshot_instrument_date",
         "ix_feature_snapshot_date_instrument",
+        "ix_feature_snapshot_source_run_id",
+        "ix_feature_snapshot_run_instrument",
     }
     assert expected_indexes.issubset(idx_names), f"索引缺失: {expected_indexes - idx_names}"
     print("indexes ✓")
@@ -176,6 +193,7 @@ if __name__ == "__main__":
         "secondary_timeframe",
         "adj",
         "schema_version",
+        "source_run_id",
         "source_primary_bar_time",
         "source_secondary_bar_time",
         "structural_payload",

@@ -1032,6 +1032,7 @@ async def execute_after_close_run(
                     snapshot_result = await compute_for_trade_date(
                         db, trade_date, cached_instrument_ids,
                         progress_callback=progress_callback,
+                        source_run_id=snapshot_run_id,
                     )
                     await db.commit()
             except RuntimeError as snapshot_exc:
@@ -1095,17 +1096,25 @@ async def execute_after_close_run(
             # 独立 session + try/except：事件生成失败不影响 orchestrator 主流程
             if snapshot_error is None and snapshot_run_id is not None:
                 try:
-                    from app.services.state_event_service import generate_events_for_run
+                    from app.services.state_event_service import (
+                        cleanup_old_events,
+                        generate_events_for_run,
+                    )
                     async with AsyncSessionLocal() as event_db:
                         event_stats = await generate_events_for_run(event_db, snapshot_run_id)
+                        # 90 天清理（P1-2）：事件生成后执行，失败不阻断主发布
+                        cleanup_stats = await cleanup_old_events(event_db)
                         await event_db.commit()
                     logger.info(
                         "[AfterClose] 状态事件生成完成: run_id=%s, "
-                        "event_count=%s, skipped=%s, failed=%s",
+                        "event_count=%s, skipped=%s, failed=%s, "
+                        "cleanup_deleted=%s, cleanup_duration_ms=%s",
                         snapshot_run_id,
                         event_stats.get("event_count", 0),
                         event_stats.get("skipped_count", 0),
                         event_stats.get("failed_count", 0),
+                        cleanup_stats.get("deleted_count", 0),
+                        cleanup_stats.get("duration_ms", 0),
                     )
                 except Exception as event_exc:
                     logger.warning(

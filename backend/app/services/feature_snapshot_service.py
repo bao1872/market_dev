@@ -198,6 +198,7 @@ async def compute_feature_snapshot_for_date(
     *,
     primary_bars: pd.DataFrame | None = None,
     secondary_bars: pd.DataFrame | None = None,
+    source_run_id: uuid.UUID | None = None,
 ) -> StockFeatureSnapshot:
     """为指定 instrument + trade_date 计算 point-in-time 特征快照。
 
@@ -325,6 +326,7 @@ async def compute_feature_snapshot_for_date(
         secondary_timeframe=secondary_timeframe,
         adj=adj,
         schema_version=_SCHEMA_VERSION,
+        source_run_id=source_run_id,
         source_primary_bar_time=source_primary,
         source_secondary_bar_time=source_secondary,
         structural_payload=structural_payload,
@@ -476,6 +478,7 @@ async def upsert_snapshot(
         secondary_timeframe=snapshot.secondary_timeframe,
         adj=snapshot.adj,
         schema_version=snapshot.schema_version,
+        source_run_id=snapshot.source_run_id,
         source_primary_bar_time=snapshot.source_primary_bar_time,
         source_secondary_bar_time=snapshot.source_secondary_bar_time,
         structural_payload=snapshot.structural_payload,
@@ -485,6 +488,7 @@ async def upsert_snapshot(
     )
 
     update_cols = {
+        # PRD V1.1: source_run_id 仅在 INSERT 时写入，冲突时不覆盖已发布快照的来源批次
         "source_primary_bar_time": stmt.excluded.source_primary_bar_time,
         "source_secondary_bar_time": stmt.excluded.source_secondary_bar_time,
         "structural_payload": stmt.excluded.structural_payload,
@@ -517,6 +521,7 @@ async def compute_for_trade_date(
     batch_size: int = 20,
     failure_threshold: float = 0.3,
     progress_callback: Callable[..., Awaitable[None]] | None = None,
+    source_run_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """为给定 instrument 列表批量计算并 upsert 快照（不内部 commit）。
 
@@ -555,6 +560,7 @@ async def compute_for_trade_date(
             try:
                 snapshot = await compute_feature_snapshot_for_date(
                     session, instrument_id, trade_date,
+                    source_run_id=source_run_id,
                 )
                 await upsert_snapshot(session, snapshot)
                 snapshot_count += 1

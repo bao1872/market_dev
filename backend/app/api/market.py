@@ -148,6 +148,9 @@ from app.schemas.market_stocks import MarketStocksResponse  # noqa: E402
 from app.services.access_control_service import AccessContext, require_authenticated  # noqa: E402
 from app.services.market_stocks_service import get_market_stocks  # noqa: E402
 
+# Phase 4: state 筛选合法值（up=上行, down=下行, sideways=震荡）
+_VALID_STATE_FILTERS = {"up", "down", "sideways"}
+
 
 @router.get("/stocks", response_model=MarketStocksResponse)
 async def list_market_stocks(
@@ -159,9 +162,12 @@ async def list_market_stocks(
         None,
         description="排序字段:方向（如 symbol:asc, change_pct:desc, dsa_state:desc, latest_event_time:desc）",
     ),
-    industry: str | None = Query(None, description="行业筛选（Phase 6 未实现，传值返回 422）"),
-    concept: str | None = Query(None, description="概念筛选（Phase 6 未实现，传值返回 422）"),
-    state: str | None = Query(None, description="状态筛选（Phase 4/6 未实现，传值返回 422）"),
+    industry: str | None = Query(None, description="行业筛选（板块名称，qstock 同步后可用）"),
+    concept: str | None = Query(None, description="概念筛选（板块名称，qstock 同步后可用）"),
+    state: str | None = Query(
+        None,
+        description="状态筛选（Phase 4 实现）：up=上行, down=下行, sideways=震荡",
+    ),
     db: AsyncSession = Depends(get_db),
     ctx: AccessContext = Depends(require_authenticated),
 ) -> MarketStocksResponse:
@@ -169,15 +175,17 @@ async def list_market_stocks(
 
     返回每行页面所需全部字段（价格/涨跌幅/DSA状态/事件/自选），不再追加单股请求。
     scope=watchlist 在数据库查询阶段关联当前用户自选（INNER JOIN）。
-    industry/concept/state 参数未实现，传非空值返回 422（Phase 6 qstock 同步后实现）。
+    state 参数已实现（Phase 4）：up/down/sideways。
+    industry/concept 参数已实现（PRD §7.5 qstock 同步后）：通过 market_boards 表筛选。
+    无匹配股票时返回空列表（不报错）。
     sort 白名单：name, symbol, change_pct, dsa_state, latest_event_time。
     """
-    # P0: 未实现的筛选参数返回 422（不静默忽略）
-    if industry or concept or state:
+    # Phase 4: state 参数校验（合法值：up/down/sideways；空字符串视为 None）
+    normalized_state = state or None
+    if normalized_state is not None and normalized_state not in _VALID_STATE_FILTERS:
         raise HTTPException(
             status_code=422,
-            detail="industry/concept/state filtering not yet implemented; "
-            "will be available after qstock sync (Phase 6)",
+            detail=f"Invalid state value: {state}; must be one of: up, down, sideways",
         )
 
     # 规范化 scope
@@ -191,6 +199,9 @@ async def list_market_stocks(
             page=page,
             page_size=page_size,
             sort=sort,
+            state=normalized_state,
+            industry=industry or None,
+            concept=concept or None,
         )
     except ValueError as exc:
         # 排序参数校验失败 → 422

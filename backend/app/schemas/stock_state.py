@@ -48,7 +48,7 @@ class StateValue(BaseModel):
     value: 原始数值（可选）
     unit: 单位（可选）
     timeframe: 来源周期
-    sourceField: 来源字段名（管理员可见，用户接口可省略）
+    sourceField: 来源字段名（管理员可见，用户接口返回 None）
     """
 
     code: str | None = Field(..., description="稳定机器码，用于事件比较")
@@ -56,7 +56,9 @@ class StateValue(BaseModel):
     value: float | None = Field(None, description="原始数值")
     unit: str | None = Field(None, description="单位")
     timeframe: str = Field(..., description="来源周期")
-    sourceField: str = Field(..., description="来源字段名")
+    sourceField: str | None = Field(
+        None, description="来源字段名（管理员可见，用户接口返回 None）"
+    )
 
 
 class Evidence(BaseModel):
@@ -117,7 +119,10 @@ class StockState(BaseModel):
 
 
 class StateEventDTO(BaseModel):
-    """状态变化事件 DTO - 用户可读。"""
+    """状态变化事件 DTO - 用户可读。
+
+    V1.1: idempotencyKey 仅数据库/管理员可见，用户接口返回 None。
+    """
 
     id: str = Field(..., description="事件 ID")
     symbol: str = Field(..., description="股票代码")
@@ -131,7 +136,9 @@ class StateEventDTO(BaseModel):
     )
     previousAsOf: str | None = Field(None, description="前一状态截止时间")
     currentAsOf: str = Field(..., description="当前状态截止时间")
-    idempotencyKey: str = Field(..., description="稳定幂等键")
+    idempotencyKey: str | None = Field(
+        None, description="稳定幂等键（仅数据库/管理员可见，用户接口返回 None）"
+    )
 
 
 class StockContextResponse(BaseModel):
@@ -165,9 +172,12 @@ def _make_state_value(
     value: float | None,
     unit: str | None,
     timeframe: str,
-    source_field: str,
+    source_field: str | None = None,
 ) -> StateValue:
-    """构造 StateValue。"""
+    """构造 StateValue。
+
+    source_field 默认 None（用户接口）；管理员路径可显式传入。
+    """
     return StateValue(
         code=code,
         label=label,
@@ -491,6 +501,45 @@ def build_stock_state(
         evidence=evidence,
         degradedReasons=degraded,
     )
+
+
+def strip_internal_fields_for_user(
+    state: StockState | None,
+    events: list[StateEventDTO],
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """剥离用户接口不应返回的内部字段（PRD V1.1 §7.3）。
+
+    - StateValue.sourceField 完全排除（不是 null，是字段不存在）
+    - StateEventDTO.idempotencyKey 完全排除（不是 null，是字段不存在）
+
+    返回 dict 而非 Pydantic 模型，确保 JSON 序列化后字段完全消失。
+    管理员路径保留完整 Pydantic 模型（含 sourceField/idempotencyKey）。
+    """
+    if state is not None:
+        state_dict = state.model_dump()
+        # 递归移除所有 sourceField 键
+        _remove_field(state_dict, "sourceField")
+    else:
+        state_dict = None
+
+    event_dicts: list[dict[str, Any]] = []
+    for e in events:
+        ed = e.model_dump()
+        ed.pop("idempotencyKey", None)
+        event_dicts.append(ed)
+
+    return state_dict, event_dicts
+
+
+def _remove_field(obj: Any, field: str) -> None:
+    """递归移除 dict 中指定字段（原地修改）。"""
+    if isinstance(obj, dict):
+        obj.pop(field, None)
+        for v in obj.values():
+            _remove_field(v, field)
+    elif isinstance(obj, list):
+        for item in obj:
+            _remove_field(item, field)
 
 
 # =============================================================================

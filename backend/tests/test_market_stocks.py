@@ -214,38 +214,61 @@ async def test_unauthenticated_returns_401(client: AsyncClient) -> None:
     assert response.status_code == 401
 
 
-# ===== P0: industry/concept/state 返回 422 =====
+# ===== P0: industry/concept 已实现（PRD §7.5 qstock 同步后）；state 已实现（Phase 4） =====
 
 
 @pytest.mark.asyncio
-async def test_industry_param_returns_422(market_stocks_client) -> None:
-    """industry 参数非空时返回 422（未实现）。"""
+async def test_industry_param_returns_empty_when_no_board_data(market_stocks_client) -> None:
+    """industry 参数非空但无板块数据时返回空列表（不报 422）。
+
+    qstock 同步前 market_boards 表为空，筛选无匹配 → 空结果。
+    """
     client, _, _ = market_stocks_client
     response = await client.get(
         "/market/stocks", params={"scope": "market", "industry": "银行"}
     )
-    assert response.status_code == 422
-    assert "not yet implemented" in response.json()["detail"].lower()
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 0
+    assert data["items"] == []
 
 
 @pytest.mark.asyncio
-async def test_concept_param_returns_422(market_stocks_client) -> None:
-    """concept 参数非空时返回 422（未实现）。"""
+async def test_concept_param_returns_empty_when_no_board_data(market_stocks_client) -> None:
+    """concept 参数非空但无板块数据时返回空列表（不报 422）。
+
+    qstock 同步前 market_boards 表为空，筛选无匹配 → 空结果。
+    """
     client, _, _ = market_stocks_client
     response = await client.get(
         "/market/stocks", params={"scope": "market", "concept": "新能源"}
     )
-    assert response.status_code == 422
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 0
+    assert data["items"] == []
 
 
 @pytest.mark.asyncio
-async def test_state_param_returns_422(market_stocks_client) -> None:
-    """state 参数非空时返回 422（未实现）。"""
+async def test_state_param_invalid_value_returns_422(market_stocks_client) -> None:
+    """state 参数非法值返回 422（Phase 4：合法值为 up/down/sideways）。"""
     client, _, _ = market_stocks_client
     response = await client.get(
         "/market/stocks", params={"scope": "market", "state": "上行"}
     )
     assert response.status_code == 422
+    assert "Invalid state value" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_state_param_valid_returns_200(market_stocks_client) -> None:
+    """state 参数合法值（up/down/sideways）返回 200（Phase 4 已实现）。"""
+    client, _, _ = market_stocks_client
+    for valid_state in ("up", "down", "sideways"):
+        response = await client.get(
+            "/market/stocks", params={"scope": "market", "state": valid_state}
+        )
+        assert response.status_code == 200, f"state={valid_state} should return 200"
 
 
 @pytest.mark.asyncio

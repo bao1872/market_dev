@@ -205,6 +205,40 @@ def _map_dsa_state(swing_dir: object) -> str | None:
     return "震荡"
 
 
+def _build_state_filter(state: str | None) -> ColumnElement[bool] | None:
+    """构建状态筛选条件（Phase 4 实现）。
+
+    使用标量子查询取最新 snapshot 的 daily_developing_swing_dir，
+    按状态码过滤：up → > 0, down → < 0, sideways → == 0。
+
+    与 _build_sort_expression(dsa_state) 使用相同的子查询模式，
+    确保 filter 和 sort 口径一致。
+    """
+    if state is None:
+        return None
+
+    swing_dir_subq = (
+        select(
+            cast(
+                StockFeatureSnapshot.summary_payload["daily_developing_swing_dir"].astext,
+                Integer,
+            )
+        )
+        .where(StockFeatureSnapshot.instrument_id == Instrument.id)
+        .order_by(StockFeatureSnapshot.trade_date.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
+
+    if state == "up":
+        return swing_dir_subq > 0
+    if state == "down":
+        return swing_dir_subq < 0
+    if state == "sideways":
+        return swing_dir_subq == 0
+    return None
+
+
 async def get_market_stocks(
     db: AsyncSession,
     user_id: UUID,
@@ -213,6 +247,9 @@ async def get_market_stocks(
     page: int,
     page_size: int,
     sort: str | None,
+    state: str | None = None,
+    industry: str | None = None,
+    concept: str | None = None,
 ) -> MarketStocksResponse:
     """查询行情列表（服务端分页 + 批量加载，禁止 N+1）。
 
@@ -224,13 +261,47 @@ async def get_market_stocks(
         page: 页码（从 1 开始）
         page_size: 每页大小
         sort: 排序字段:方向（如 symbol:asc）
+        state: 状态筛选（Phase 4）：up/down/sideways
+        industry: 行业筛选（板块名称，qstock 同步后可用）
+        concept: 概念筛选（板块名称，qstock 同步后可用）
 
     Returns:
         MarketStocksResponse 分页响应
     """
     search_conditions, rank_expr = _build_search_conditions(query)
     sort_spec = _parse_sort(sort)
+    state_cond = _build_state_filter(state)
     offset = (page - 1) * page_size
+
+    # PRD §7.5: industry/concept 筛选 - 通过 market_boards 表过滤 instrument_ids
+    board_filter_ids: set[UUID] | None = None
+    if industry or concept:
+        from app.services.board_sync_service import filter_instruments_by_board
+
+        matching_ids: set[UUID] = set()
+        if industry:
+            ids = await filter_instruments_by_board(db, board_type="industry", board_name=industry)
+            matching_ids.update(ids)
+        if concept:
+            ids = await filter_instruments_by_board(db, board_type="concept", board_name=concept)
+            # 多次筛选取交集（industry AND concept）
+            if industry:
+                matching_ids &= set(ids)
+            else:
+                matching_ids.update(ids)
+
+        if not matching_ids:
+            # 无匹配股票，直接返回空结果（避免无意义查询）
+            return MarketStocksResponse(
+                items=[],
+                page=page,
+                page_size=page_size,
+                total=0,
+                price_as_of=None,
+                state_as_of=None,
+                boards_as_of=None,
+            )
+        board_filter_ids = matching_ids
 
     # ===== Query 1: instruments + is_watchlisted + 分页 =====
     if scope == "watchlist":
@@ -254,6 +325,10 @@ async def get_market_stocks(
         )
         for cond in search_conditions:
             base_stmt = base_stmt.where(cond)
+        if state_cond is not None:
+            base_stmt = base_stmt.where(state_cond)
+        if board_filter_ids is not None:
+            base_stmt = base_stmt.where(Instrument.id.in_(board_filter_ids))
     else:
         # market scope: 全市场 A 股，EXISTS 标记自选
         watched_exists = (
@@ -274,6 +349,10 @@ async def get_market_stocks(
         )
         for cond in search_conditions:
             base_stmt = base_stmt.where(cond)
+        if state_cond is not None:
+            base_stmt = base_stmt.where(state_cond)
+        if board_filter_ids is not None:
+            base_stmt = base_stmt.where(Instrument.id.in_(board_filter_ids))
 
     # 排序：有搜索关键词时按命中优先级，否则按 sort 参数（默认 symbol asc）
     order_by_cols = _build_order_by(sort_spec, has_query=bool(query), rank_expr=rank_expr)
@@ -314,6 +393,10 @@ async def get_market_stocks(
         )
     for cond in search_conditions:
         count_stmt = count_stmt.where(cond)
+    if state_cond is not None:
+        count_stmt = count_stmt.where(state_cond)
+    if board_filter_ids is not None:
+        count_stmt = count_stmt.where(Instrument.id.in_(board_filter_ids))
     count_result = await db.execute(count_stmt)
     total = count_result.scalar_one()
 
