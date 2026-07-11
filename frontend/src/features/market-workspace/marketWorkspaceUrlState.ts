@@ -1,5 +1,5 @@
 // [MarketWorkspaceUrlState] - 描述: /market URL 状态 encode/decode 纯函数
-// URL 格式：/market?scope=watchlist|market&query=xxx&page=1&page_size=50&sort=symbol:asc&selected=xxx
+// URL 格式：/market?scope=watchlist|market&query=xxx&page=1&page_size=<DEFAULT_PAGE_SIZE>&sort=symbol:asc&selected=xxx
 // scope/query/page/page_size/sort/selected 进入 URL（可分享、刷新恢复）；右栏折叠和 viewport 留本地 state。
 // PRD §6.1：排序、筛选、分页均由服务端执行；浏览器前进/后退应恢复 scope、筛选、排序、页码和选中股票。
 // 单击非链接区域更新 selected 并刷新右栏，不进入详情；点击股票名称进入 /stock/:symbol?returnTo=<编码后的当前URL>。

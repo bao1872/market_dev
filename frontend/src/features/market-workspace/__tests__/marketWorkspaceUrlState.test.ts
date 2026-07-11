@@ -2,7 +2,7 @@
 // 用法：node --experimental-strip-types --test src/features/market-workspace/__tests__/marketWorkspaceUrlState.test.ts
 //
 // 覆盖：
-//   1. decode 默认值（无参数时 scope=watchlist, query='', page=1, pageSize=50, sort=null, selected=null）
+//   1. decode 默认值（无参数时 scope=watchlist, query='', page=1, pageSize=DEFAULT_PAGE_SIZE, sort=null, selected=null）
 //   2. decode scope=market
 //   3. decode query + page + page_size + sort + selected
 //   4. 非法 page 回退 1
@@ -33,7 +33,7 @@ import {
   type MarketWorkspaceUrlState,
 } from '../marketWorkspaceUrlState.ts'
 
-test('decode 默认值（无参数时 scope=watchlist, query="", page=1, pageSize=50, sort=null, selected=null）', () => {
+test('decode 默认值（无参数时 scope=watchlist, query="", page=1, pageSize=DEFAULT_PAGE_SIZE, sort=null, selected=null）', () => {
   const state = decodeMarketWorkspaceUrl(new URLSearchParams())
   assert.equal(state.scope, DEFAULT_MARKET_SCOPE)
   assert.equal(state.query, '')

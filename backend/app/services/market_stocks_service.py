@@ -170,10 +170,10 @@ def _build_order_by(
     - change_pct/dsa_state/latest_event_time：使用标量子查询表达式。
     """
     if has_query:
-        return [rank_expr, Instrument.symbol]
+        return [rank_expr, Instrument.symbol.asc()]
 
     if sort_spec is None:
-        return [Instrument.symbol]
+        return [Instrument.symbol.asc()]
 
     field = sort_spec.field
     direction = sort_spec.direction
@@ -181,18 +181,20 @@ def _build_order_by(
     if field in ("name", "symbol"):
         col = getattr(Instrument, field)
         order_col = col.desc().nullslast() if direction == "desc" else col.asc().nullslast()
-        return [order_col, Instrument.symbol]
+        return [order_col, Instrument.symbol.asc()]
 
     sort_expr = _build_sort_expression(field)
     order_col = (
         sort_expr.desc().nullslast() if direction == "desc" else sort_expr.asc().nullslast()
     )
-    return [order_col, Instrument.symbol]
+    return [order_col, Instrument.symbol.asc()]
 
 
 def _map_dsa_state(swing_dir: object) -> str | None:
     """将 daily_developing_swing_dir 映射为可读状态。"""
     if swing_dir is None:
+        return None
+    if isinstance(swing_dir, bool) or not isinstance(swing_dir, (int, float, str)):
         return None
     try:
         val = int(swing_dir)
