@@ -308,6 +308,7 @@ class TestMigrationCycle:
     async def test_migration_upgrade_downgrade_upgrade(self) -> None:
         """062 migration upgrade → downgrade → upgrade 循环。"""
         import os
+        from pathlib import Path
 
         from alembic.config import Config
 
@@ -317,7 +318,9 @@ class TestMigrationCycle:
         if not db_url:
             pytest.skip("TEST_DATABASE_URL not set")
 
-        alembic_cfg = Config("/root/web_dev/backend/alembic.ini")
+        # 使用相对于测试文件的路径，避免硬编码绝对路径
+        backend_dir = Path(__file__).resolve().parent.parent
+        alembic_cfg = Config(str(backend_dir / "alembic.ini"))
         alembic_cfg.set_main_option("sqlalchemy.url", db_url)
 
         # Upgrade to 062
@@ -329,10 +332,9 @@ class TestMigrationCycle:
         # Upgrade to 062 again
         command.upgrade(alembic_cfg, "062_market_boards")
 
-        # 验证表存在
+        # 验证表存在（psycopg v3 支持 sync 模式，保留 +psycopg driver）
         from sqlalchemy import create_engine, inspect
-        sync_url = db_url.replace("+psycopg", "")
-        sync_engine = create_engine(sync_url)
+        sync_engine = create_engine(db_url)
         try:
             inspector = inspect(sync_engine)
             tables = inspector.get_table_names()
