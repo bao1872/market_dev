@@ -1,6 +1,8 @@
 // [个股详情导航] - 描述: 趋势选股/消息中心进入行情工作区的 URL 构建 + 返回路径解析（纯函数）
 // 本文件被 node --experimental-strip-types --test 直接执行，不得使用 @/ 别名导入。
 
+import { normalizeInternalReturnTo } from '../features/market-workspace/marketWorkspaceUrlState.ts'
+
 /** 构建从趋势选股进入行情工作区的 URL
  * /market?scope=market&symbol=xxx&source=selection&strategy=dsa_selector&returnTo=<原screener URL>
  */
@@ -9,13 +11,16 @@ export function buildMarketEntryFromScreener(
   strategyKey: string,
   returnTo: string,
 ): string {
+  const safeReturnTo = normalizeInternalReturnTo(returnTo)
   const params = new URLSearchParams({
     scope: 'market',
     symbol,
     source: 'selection',
     strategy: strategyKey,
-    returnTo,
   })
+  if (safeReturnTo) {
+    params.set('returnTo', safeReturnTo)
+  }
   return `/market?${params.toString()}`
 }
 
@@ -37,8 +42,9 @@ export function buildStockDetailState(returnTo: string): { returnTo: string } {
   return { returnTo }
 }
 
-/** 解析返回路径：优先使用 returnTo（URL 参数或导航 state），否则按 source fallback */
+/** 解析返回路径：优先使用 returnTo（经 normalizeInternalReturnTo 安全校验），否则按 source fallback */
 export function resolveBackPath(returnTo: string | undefined | null, source: string): string {
-  if (returnTo) return returnTo
+  const safe = normalizeInternalReturnTo(returnTo)
+  if (safe) return safe
   return source === 'selection' ? '/screener' : '/market?scope=watchlist'
 }

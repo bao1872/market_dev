@@ -21,6 +21,7 @@ export const APP_ROUTES = {
   adminStrategies: '/admin/strategies',
   adminJobs: '/admin/jobs',
   adminAfterClose: '/admin/after-close',
+  adminStockDebug: '/admin/stock-debug',
   capture: '/capture/stock/:symbol',
   login: '/login',
   subscriptionExpired: '/subscription-expired',
@@ -53,6 +54,7 @@ export const ADMIN_NAV_ITEMS: AppNavItem[] = [
   { path: APP_ROUTES.adminStrategies, label: '策略目录' },
   { path: APP_ROUTES.adminJobs, label: '任务与事件' },
   { path: APP_ROUTES.adminAfterClose, label: '盘后流水线' },
+  { path: APP_ROUTES.adminStockDebug, label: '个股调试' },
 ]
 
 export interface AccountMenuItem {

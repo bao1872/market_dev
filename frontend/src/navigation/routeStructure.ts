@@ -64,6 +64,8 @@ export const ROUTE_STRUCTURE: RouteNode[] = [
               { path: '/admin/strategies', guard: 'admin', shell: 'admin' },
               { path: '/admin/jobs', guard: 'admin', shell: 'admin' },
               { path: '/admin/after-close', guard: 'admin', shell: 'admin' },
+              { path: '/admin/stock-debug', guard: 'admin', shell: 'admin' },
+              { path: '/admin/stock-debug/:symbol', guard: 'admin', shell: 'admin' },
             ],
           },
         ],

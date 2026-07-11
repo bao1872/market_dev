@@ -27,6 +27,7 @@ import AdminStrategiesPage from './pages/AdminStrategiesPage'
 import AdminJobsPage from './pages/AdminJobsPage'
 import AdminBetaApplicationsPage from './pages/AdminBetaApplicationsPage'
 import AdminAfterClosePipelinePage from './pages/AdminAfterClosePipelinePage'
+import AdminStockDebugPage from './pages/AdminStockDebugPage'
 
 // 门户页 lazy 加载，避免门户动画代码进入业务页面首包
 const LandingPage = lazy(() => import('./pages/LandingPage'))
@@ -142,6 +143,8 @@ export const routeConfig: RouteObject[] = [
               { path: '/admin/strategies', element: <AdminStrategiesPage /> },
               { path: '/admin/jobs', element: <AdminJobsPage /> },
               { path: '/admin/after-close', element: <AdminAfterClosePipelinePage /> },
+              { path: '/admin/stock-debug', element: <AdminStockDebugPage /> },
+              { path: '/admin/stock-debug/:symbol', element: <AdminStockDebugPage /> },
             ],
           },
         ],

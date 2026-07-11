@@ -52,28 +52,33 @@ Node Cluster 算法
 
 - 复盘模式本轮不开发。
 
-### 2.4 统一行情工作区（阶段三+阶段四+最终对齐确立）
+### 2.4 统一行情工作区
 
 - `/market` 渲染 `MarketWorkspacePage`（`frontend/src/features/market-workspace/MarketWorkspacePage.tsx`），三栏布局：
   - 左栏 `MarketInstrumentPane`：`scope=watchlist` 使用 `useWatchlistMonitorStatus`（enabled=scope==='watchlist'）；`scope=market` 使用 `useInstruments` 搜索（enabled=scope==='market' && 搜索词 trim 后 ≥2 字符，限制 50 条，不发 N+1 请求）。两个查询按 scope 互斥启用，未激活的 scope 不发请求。搜索结果列表仅在 `scope==='market' && canSearch` 时渲染；关键词不足 2 字符、清空输入或切换 scope 时不得显示缓存结果（Query 仍通过 `enabled` 门控，不条件调用 Hook，只门控渲染）。
   - 中栏 `StockResearchWorkspace`（`frontend/src/features/stock-research/StockResearchWorkspace.tsx`）：K 线研究区，由 `MarketWorkspacePage` 和 `StockDetailPage` 共用。
-  - 右栏 `ResearchContextPanel`（`frontend/src/features/research-context/ResearchContextPanel.tsx`）：可收起；收起时不挂载、不请求 event/structural/temporal 数据，中栏自动扩展。`event_id` 存在时调用 `useStrategyEventDetail` 显示事件时间、类型（通俗解释）、关联价格、关键证据；无 `event_id` 时展示 `useStructuralFactors`/`useTemporalFeatures` 的人类可读总结；普通用户不显示内部字段名、算法参数、JSON 或商业机密；管理员 `debug=1` 时额外渲染 `AdminFactorDebugPanel` 原始 factor/feature/JSON。
+  - 右栏 `ResearchContextPanel`（`frontend/src/features/research-context/ResearchContextPanel.tsx`）：可收起；收起时不挂载、不请求 event/structural/temporal 数据，中栏自动扩展。面板只渲染 `EventExplanationCard`（`event_id` 存在时，事件时间/通俗解释/关联价格/关键证据）、`LatestEventCard`（无 `event_id` 但 `useStockResearchData` 已有 events 时取最新事件）、`StructureSummaryCard`（结构状态人类可读总结）、`KeyRangeCard`（关键价格区间）；不挂载 `StockStructuralStatePanel`；普通用户不显示内部字段名、算法参数、JSON 或商业机密；原始 factor/feature/JSON 仅在 `/admin/stock-debug` 展示。
 - `/stock/:symbol` 渲染 `StockDetailPage`（`frontend/src/pages/StockDetailPage.tsx`），降为路由适配器：
   - 使用共享 `useStockResearchData` + `StockResearchWorkspace` 渲染图表区，不再独立调用 useBars/useIndicators/useRealtimeQuote/useInstrumentEvents。
   - 详情页专属能力拆到 `useStockDetailActions`（自选/上下切换/memo）和 `useStockDetailFeishu`（飞书截图/轮询/超时）。
   - 保留 header、价格条、返回、上下只、watchlist、memo、飞书、全屏、结构面板开关。
   - `StockResearchWorkspace` 通过 `toolbar`/`rightPanel`/`showRightPanel`/`chartColumnProps` 可选 props 支持详情页的结构面板开关和截图模式属性。
+- `/admin/stock-debug` 和 `/admin/stock-debug/:symbol` 渲染 `AdminStockDebugPage`（`frontend/src/pages/AdminStockDebugPage.tsx`），位于 `AdminRoute` + `AdminAppShell` 下，普通用户不可访问：
+  - 复用 `MarketInstrumentPane`（股票搜索）、`useStockResearchData`（bars/indicators/quote/events）、`StockResearchWorkspace`（K线研究区）、`useResearchContext`（event/structural/temporal）、`AdminFactorDebugPanel`（原始 factor/feature/JSON）、`StockStructuralStatePanel`（`debug=true`，详细因子卡片 + 可折叠 JSON）。
+  - 管理员调试能力独立于 `/market`，`/market` 不承载任何原始因子或 JSON。
+  - `/market?debug=1` 管理员访问时重定向到 `/admin/stock-debug/:symbol`，普通用户忽略并清除 `debug` 参数。
 - 共享类型（`DisplayTimeframe`/`ResearchSource`/`ALLOWED_TIMEFRAMES`/`BARS_COUNT_BY_TIMEFRAME`/`defaultStrategyForSource`/`normalizeDisplayTimeframe`/`normalizeResearchSource`）权威定义在 `frontend/src/features/stock-research/stockResearchTypes.ts`；`marketWorkspaceUrlState.ts` 从该文件导入并重新导出，依赖方向为 market-workspace → stock-research（禁止反向依赖）。
 - `useStockResearchData` 只保留图表核心查询：instrument/bars/indicators/quote/events + priceSummary/quoteStatus/barsStatus/isRenderReady；自选操作、上下切换、memo、飞书由 `useStockDetailActions`/`useStockDetailFeishu` 负责（禁止加入核心 hook）。
-- URL 状态：`/market?scope=watchlist|market&symbol=xxx&timeframe=1d&source=watchlist|selection&strategy=xxx&event_id=xxx&debug=1&returnTo=...`；scope/symbol/timeframe/source/strategy/event_id/debug/returnTo 进 URL，右栏折叠和 viewport 留本地。切换股票不整页刷新。非法 timeframe 回退 1d。`/stock/:symbol` 的 timeframe 也从 URL 解析（单一真源），工具栏切换写回 URL。`debug=1` 仅 `accessProfile.is_admin` 生效（普通用户即使手工加也不可见）；`returnTo` 为来源页 URL，左栏选股或切 scope 时清除（保留 `debug`）。
+- URL 状态：`/market?scope=watchlist|market&symbol=xxx&timeframe=1d&source=watchlist|selection&strategy=xxx&event_id=xxx&returnTo=...`；scope/symbol/timeframe/source/strategy/event_id/returnTo 进 URL，右栏折叠和 viewport 留本地。切换股票不整页刷新。非法 timeframe 回退 1d。`/stock/:symbol` 的 timeframe 也从 URL 解析（单一真源），工具栏切换写回 URL。`returnTo` 为来源页 URL，必须经 `normalizeInternalReturnTo`（`frontend/src/features/market-workspace/marketWorkspaceUrlState.ts`）校验——仅允许 `/screener`、`/market`、`/messages` 前缀（含 query/hash），拒绝外部 URL（http/https）、`javascript:`、双斜杠、非白名单前缀（如 `/admin`、`/login`、`/capture/stock`）、超长字符串（>2000 字符）；左栏选股或切 scope 时清除 `returnTo`。
 - `timeframe` 受控单一真源：URL → `useStockResearchData`（bars/indicators 请求参数）→ `StockResearchWorkspace`（图表渲染）三者始终使用同一 `DisplayTimeframe`（'15m'|'1h'|'1d'|'1w'|'1mo'）；工具栏切换通过 `onTimeframeChange` 回调写回 URL，禁止子组件 `useState` 维护独立 timeframe。
-- URL 状态保留：切换周期/切换 scope/选择新股票时必须保留其他字段；选择新股票时清除旧 `event_id` 和 `returnTo`（保留 `debug`）。
+- URL 状态保留：切换周期/切换 scope/选择新股票时必须保留其他字段；选择新股票时清除旧 `event_id` 和 `returnTo`。
 - 左栏选择上下文重置：从 `MarketInstrumentPane` 选择任意股票时必须写 `source='watchlist'`、`strategy='watchlist_monitor'`、`eventId=null`（退出 selection 上下文）；用户切换 scope（watchlist 或 market）时也必须退出 selection 上下文并清除旧 `event_id`；timeframe 在上述操作中继续保留。状态转换必须通过纯函数 `selectInstrumentFromMarketPane(state, newSymbol)` 和 `changeMarketScope(state, newScope)` 处理，禁止在多个 callback 中重复拼对象。
 - 图表显示周期不改变 1d+15m 监控配置或 1m 事件触发口径。
 - 错误状态：instrument/bars/indicators 加载失败时显示明确错误状态（含重试按钮），不伪装为空图。
 - 周期文案：根据 timeframe 显示真实周期（1d=完整日线、15m=完整15分钟K线、1h=完整1小时K线、1w=完整周线、1mo=完整月线）；非实时非降级时统一显示"行情回退"（禁止所有非 1d 周期显示"日线回退"）；partial 文案必须包含当前周期（如"K线含未完成 bar（15m）"），禁止所有周期统一显示"日线"。
 - `/capture/stock/:symbol` 完全独立，不使用 `useStockResearchData`/`StockResearchWorkspace`/`apiClient`，只使用 `captureClient`。
 - `AccountMenu` 复用 `appNavigation.getAccountMenuItemsForVariant(isAdmin, variant)` 单一真源构建菜单项。
+- 研究上下文纯函数：`buildStructureSummary`（`frontend/src/features/research-context/buildStructureSummary.ts`）从 `primary[timeframe].cost_position` 等真实 DTO 路径提取结构状态摘要（合并 degraded_reasons/warmup_notes、日线/15m 摘要、成本位置/节点）；`buildUserEventExplanation`（`frontend/src/features/research-context/buildUserEventExplanation.ts`）只消费白名单字段（event_time/event_type/payload.facts[].text_content/summary）并校验 `event.instrument_id` 与 `currentInstrumentId` 一致性（不一致时隐藏价格，显示"该事件属于其他股票"）。两个纯函数无 React 依赖，可被 `node --test` 直接运行。
 
 ## 3. 页面职责
 
@@ -146,12 +151,13 @@ Node Cluster 算法
   - **截图模式**：盘中监控截图发送飞书默认必须隐藏结构状态面板（`capture=feishu` 自动命中强制隐藏规则），截图默认只包含 K 线和基础信息；
   - **时序特征 V1 卡片**：`StockStructuralStatePanel` 末尾折叠卡片渲染 `temporal-features` API DTO（daily_context 9 字段 + m15_response 9 字段 + derived_relation 3 字段 + meta），前端只渲染 DTO 不重算，null 显示「-」，`warmup_notes`/`degraded_reasons` 有内容时显示提示；卡片受同一个结构状态开关控制（默认随面板隐藏，用户打开面板后显示）；
   - 窄屏（≤1250px）保持现有单列行为。
-- **Swing 摘要卡 V1.9 active swing 字段**（当前正在发展的结构区间，跟随最新价格）：
-  - 摘要卡只显示 Active swing 字段：`active_swing_dir`、`active_swing_high`、`active_swing_low`、`bars_since_active_swing_high`、`bars_since_active_swing_low`、`price_position_in_active_swing_0_1`、`distance_to_active_swing_high_atr`、`distance_to_active_swing_low_atr`；
+- **Swing 摘要卡 V1.10 developing swing 字段**（修复 active swing 仍不代表当前状态的问题）：
+  - 摘要卡只显示 Developing swing 字段：`developing_swing_dir`、`developing_swing_high`、`developing_swing_low`、`bars_since_developing_swing_high`、`bars_since_developing_swing_low`、`price_position_in_developing_swing_0_1`、`distance_to_developing_swing_high_atr`、`distance_to_developing_swing_low_atr`；
+  - active major leg 字段（`active_swing_high`/`active_swing_low`/`bars_since_active_swing_high`/`bars_since_active_swing_low`/`price_position_in_active_swing_0_1`/`distance_to_active_swing_high_atr`/`distance_to_active_swing_low_atr`）只放在 Swing 结构位置明细 JSON 中，不放在摘要卡；
   - confirmed pivot 字段（`confirmed_swing_high`/`confirmed_swing_low`/`bars_since_confirmed_swing_high`/`bars_since_confirmed_swing_low`/`price_position_in_confirmed_swing_raw`/`confirmed_swing_breakout_state`）只放在 Swing 结构位置明细 JSON 中，不放在摘要卡；
-  - 禁止使用模糊标签「最近 swing high/low」「Swing 位置[0,1]」；摘要卡位置标签必须明确「Active 位置[0,1]」；
-  - 时序特征卡片中位置字段标签必须含 `developing` 或 `confirmed` 前缀，禁止使用无前缀的「Swing 位置」标签；
-  - 摘要卡 `active_swing_dir` 显示方向：`1` → "上升"，`-1` → "下降"，`None` → "-"。
+  - 禁止使用模糊标签「最近 swing high/low」「Swing 位置[0,1]」；摘要卡位置标签必须明确「Developing 位置[0,1]」，明细卡位置标签必须明确「Confirmed raw 位置」或「Active 位置[0,1]」；
+  - 时序特征卡片中位置字段标签必须含 `developing` 或 `confirmed` 前缀，禁止使用无前缀的「Swing 位置」标签，禁止使用 `Active high`/`Active low` 作为主字段；
+  - 摘要卡 `developing_swing_dir` 显示方向：`1` → "上涨段"，`-1` → "下跌段"，`None` → "fallback"。
 - **capture 布局 V1.9 单列修复**（修复 capture 模式右侧空白问题）：
   - `isCaptureMode` 判定：URL 参数 `capture=feishu` 或 `capture=1` 或 `hideStructuralState=1` 任一命中即 `isCaptureMode=true`；
   - capture 模式下不渲染：结构状态开关按钮、右侧结构状态列（`StockStructuralStatePanel`）、Temporal Features 折叠卡片；

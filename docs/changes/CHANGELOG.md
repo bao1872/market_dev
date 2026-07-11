@@ -4,6 +4,14 @@
 
 ## 2026-07-11
 
+- CHANGE-20260711-005: 统一行情工作区 P0/P1 收口修正
+  - P0：`/admin/stock-debug` 独立管理员调试路由；`debug` 从 `/market` URL 契约移除；`ResearchContextPanel` 只渲染 4 张用户卡
+  - P1：新建 `buildStructureSummary`/`buildUserEventExplanation` 纯函数（DTO 路径修正 + instrument mismatch 校验）；`normalizeInternalReturnTo` returnTo 安全校验
+  - AGENTS §12.14 重写为长期规则（删除阶段名称/已删除文件引用/debug 矛盾）
+  - docs/current/04/05 更新；code-doc-alignment 新增 ALIGN-040
+  - 119 tests pass、tsc/eslint 0 errors、vite build PASS、4 docs checks PASS
+  - 不改后端/API/DB/Worker
+
 - CHANGE-20260711-004: 统一行情工作区原型最终对齐（阶段五）
   - ScreenerPage/MessagesPage 查看详情改进入 `/market`（含 returnTo/event_id）；`/market` URL 扩展 debug/returnTo
   - 新建 `features/research-context/`：ResearchContextPanel/EventExplanationCard/StructureSummaryCard/AdminFactorDebugPanel/useResearchContext
@@ -59,14 +67,6 @@
   - Follow-up（第二轮，阻断修复，仅修阻断不 merge/部署）：`capture.py` 的 `get_bars`/`_df_to_responses`/`compute_all_indicators` 此前回退 `_CAPTURE_TIMEFRAME` 且 `include_realtime=False`，截图仍是 1d 非实时；修复为透传 URL `timeframe` + `include_realtime=True`，新增 15m 透传阻断测试；前端 `CaptureStockPage` 实时状态改从 `snapshot.bars.last_live_bar_time` 读取，`endpoints.ts` 删除 `CaptureSnapshotResponse` 顶层 `last_live_bar_time` 并补 `BarListResponse` 对应字段
 
 ## 2026-07-09
-
-- CHANGE-20260709-012: Swing 当前状态语义修正 + Temporal V1 位置污染修复 + capture/飞书右侧空白修复
-  - `temporal_feature_service._compute_derived_relation` 改用 `daily/m15_price_position_in_active_swing_0_1`，避免 confirmed raw 越界污染派生关系
-  - `StockStructuralStatePanel` Swing 摘要卡改回 V1.9 active swing 字段，confirmed pivot 仅保留在明细 JSON
-  - `capture=feishu` / `capture=1` / `hideStructuralState=1` 强制单列布局，隐藏 `.tv-side-column`，`.tv-chart-column` 占宽 100%
-  - 更新测试：`test_temporal_feature_service.py` 25 passed，`structural-state-panel.test.ts` active 摘要断言
-  - 更新 `docs/current/02-data-api-contracts.md`、`docs/current/04-frontend-ux.md`、`docs/maps/test-coverage-map.md`
-  - 无 migration、不构建/部署/重启服务
 
 - CHANGE-20260709-011: tests mypy 债务清零
   - `backend/tests/` mypy 300 errors → 0 errors（133 source files），`mypy app` 仍 0 errors（249 source files）

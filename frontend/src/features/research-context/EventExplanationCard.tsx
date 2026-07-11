@@ -2,61 +2,21 @@
 // 当 event_id 存在时展示事件时间、类型（通俗文案）、关键证据、关联价格。
 // 不显示内部字段名、算法参数、JSON 或商业机密。
 // 错误/不存在时明确提示。
+// 数据提取由纯函数 buildUserEventExplanation 负责；本组件只负责渲染。
 import type { UseQueryResult } from '@tanstack/react-query'
 import type { StrategyEventDetail } from '@/api/endpoints'
-import { getEventLabel } from '@/constants/userFacingLabels'
 import { formatShanghaiTime } from '@/utils/datetime'
 import type { ResearchContextStyles } from './ResearchContextPanel'
+import { buildUserEventExplanation } from './buildUserEventExplanation'
 
 interface EventExplanationCardProps {
   query: UseQueryResult<StrategyEventDetail, Error>
   styles: ResearchContextStyles
+  /** 当前查看的 instrumentId，用于校验 event 是否属于当前股票 */
+  currentInstrumentId?: string | null
 }
 
-// 从 payload 中提取关联价格（三级回退：facts → 顶层字段 → 纯文本正则）
-function extractEventPrice(payload: Record<string, unknown>): string | null {
-  // 1. facts 数组按 key 匹配
-  const facts = payload.facts as Array<Record<string, unknown>> | undefined
-  if (Array.isArray(facts)) {
-    for (const f of facts) {
-      const k = String(f.key ?? '').toLowerCase()
-      if (k === 'current_price' || k === 'price' || k === '现价') {
-        const v = f.value
-        if (v !== undefined && v !== null && v !== '') return String(v)
-      }
-    }
-  }
-  // 2. 顶层结构化字段
-  const directKeys = ['current_price', 'price', 'last_price', 'close_price']
-  for (const k of directKeys) {
-    const v = payload[k]
-    if (v !== undefined && v !== null && v !== '') return String(v)
-  }
-  // 3. 纯文本正则
-  const text = payload.text_content as string | undefined
-  if (text) {
-    const m = text.match(/现价[：:]\s*([\d.]+)/)
-    if (m) return m[1]
-  }
-  return null
-}
-
-// 从 payload 中提取关键证据（通俗描述，不暴露内部字段名）
-function extractEvidence(payload: Record<string, unknown>): string[] {
-  const evidence: string[] = []
-  // text_content / summary 通常含人类可读描述
-  const text = payload.text_content as string | undefined
-  if (text) {
-    evidence.push(text)
-  }
-  const summary = payload.summary as string | undefined
-  if (summary && summary !== text) {
-    evidence.push(summary)
-  }
-  return evidence
-}
-
-export function EventExplanationCard({ query, styles }: EventExplanationCardProps) {
+export function EventExplanationCard({ query, styles, currentInstrumentId }: EventExplanationCardProps) {
   if (query.isLoading) {
     return (
       <div className={styles.section}>
@@ -77,8 +37,13 @@ export function EventExplanationCard({ query, styles }: EventExplanationCardProp
     )
   }
 
-  const detail = query.data
-  if (!detail) {
+  // 调用纯函数提取白名单字段（不直接整段输出任意 payload）
+  const explanation = buildUserEventExplanation({
+    eventDetail: query.data,
+    currentInstrumentId,
+  })
+
+  if (!explanation.hasEvent) {
     return (
       <div className={styles.section}>
         <div className={styles.sectionTitle}>事件解释</div>
@@ -87,10 +52,7 @@ export function EventExplanationCard({ query, styles }: EventExplanationCardProp
     )
   }
 
-  const eventLabel = getEventLabel(detail.event_type)
-  const eventTime = formatShanghaiTime(detail.event_time)
-  const price = extractEventPrice(detail.payload)
-  const evidence = extractEvidence(detail.payload)
+  const eventTime = explanation.eventTime ? formatShanghaiTime(explanation.eventTime) : '-'
 
   return (
     <div className={styles.section}>
@@ -102,17 +64,23 @@ export function EventExplanationCard({ query, styles }: EventExplanationCardProp
         </div>
         <div className={styles.eventRow}>
           <span className={styles.eventLabel}>事件类型</span>
-          <span className={styles.eventValue}>{eventLabel}</span>
+          <span className={styles.eventValue}>{explanation.eventLabel}</span>
         </div>
-        {price && (
+        {explanation.price && !explanation.instrumentMismatch && (
           <div className={styles.eventRow}>
             <span className={styles.eventLabel}>当时价格</span>
-            <span className={styles.eventValue}>{price}</span>
+            <span className={styles.eventValue}>{explanation.price}</span>
           </div>
         )}
-        {evidence.length > 0 && (
+        {explanation.instrumentMismatch && (
+          <div className={styles.eventRow}>
+            <span className={styles.eventLabel}>提示</span>
+            <span className={styles.eventValue}>该事件属于其他股票，价格信息已隐藏</span>
+          </div>
+        )}
+        {explanation.evidence.length > 0 && (
           <div className={styles.evidenceBlock}>
-            {evidence.map((text, i) => (
+            {explanation.evidence.map((text, i) => (
               <p key={i} className={styles.evidenceText}>{text}</p>
             ))}
           </div>
