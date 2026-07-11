@@ -45,6 +45,15 @@ export function MarketStockTable({
   const pageSize = data?.page_size ?? urlState.pageSize
   const totalPages = total > 0 ? Math.ceil(total / pageSize) : 0
 
+  // 收盘快照判断：price_as_of 日期早于今天 → 价格来自日线收盘而非实时
+  const priceAsOf = data?.price_as_of ?? null
+  const isClosingSnapshot = (() => {
+    if (!priceAsOf) return false
+    const snapDate = priceAsOf.slice(0, 10)
+    const today = new Date().toISOString().slice(0, 10)
+    return snapDate < today
+  })()
+
   // 点击股票名称：进入 /stock/:symbol?returnTo=<编码后的当前URL>
   const handleNavigateToDetail = useCallback(
     (symbol: string) => {
@@ -110,7 +119,22 @@ export function MarketStockTable({
           <thead>
             <tr>
               <th className={styles.colName}>股票名称/代码</th>
-              <th className={styles.colPrice}>最新价</th>
+              <th className={styles.colPrice}>
+                最新价
+                {isClosingSnapshot && (
+                  <span
+                    style={{
+                      marginLeft: '4px',
+                      fontSize: '11px',
+                      color: '#888',
+                      fontWeight: 'normal',
+                    }}
+                    title={`数据截止：${priceAsOf}`}
+                  >
+                    收盘快照
+                  </span>
+                )}
+              </th>
               <th className={styles.colChange}>涨跌幅</th>
               <th className={styles.colIndustry}>行业</th>
               <th className={styles.colConcept}>概念</th>

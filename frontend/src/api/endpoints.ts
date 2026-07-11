@@ -1192,10 +1192,11 @@ export async function getStrategyMonitorStates(
 export async function getInstrumentEvents(
   instrumentId: string,
   params?: StrategyEventQueryParams,
+  options?: { signal?: AbortSignal },
 ): Promise<StrategyEventListResponse> {
   const { data } = await apiClient.get<StrategyEventListResponse>(
     `/instruments/${instrumentId}/events`,
-    { params },
+    { params, signal: options?.signal },
   )
   return data
 }
@@ -1482,10 +1483,10 @@ export async function toggleMemoNotify(
  * 后端 bars router 自带 prefix="/api/v1"，完整路径为 /api/v1/instruments/{id}/bars
  * apiClient baseURL="/api" 会添加网关前缀，代理层处理后到达后端 /api/v1/instruments/{id}/bars
  */
-export async function getBars(instrumentId: string, params?: BarQueryParams): Promise<BarListResponse> {
+export async function getBars(instrumentId: string, params?: BarQueryParams, options?: { signal?: AbortSignal }): Promise<BarListResponse> {
   const { data } = await apiClient.get<BarListResponse>(
     `/api/v1/instruments/${instrumentId}/bars`,
-    { params },
+    { params, signal: options?.signal },
   )
   return data
 }
@@ -1517,9 +1518,10 @@ export interface QuoteResponse {
 }
 
 /** 查询指定标的的实时报价（交易时段 pytdx 实时，非交易时段降级到数据库最新日线） */
-export async function getQuote(instrumentId: string): Promise<QuoteResponse> {
+export async function getQuote(instrumentId: string, options?: { signal?: AbortSignal }): Promise<QuoteResponse> {
   const { data } = await apiClient.get<QuoteResponse>(
     `/api/v1/instruments/${instrumentId}/quote`,
+    { signal: options?.signal },
   )
   return data
 }
@@ -1596,10 +1598,11 @@ export interface IndicatorResponse {
 export async function getIndicators(
   instrumentId: string,
   params?: IndicatorQueryParams,
+  options?: { signal?: AbortSignal },
 ): Promise<IndicatorResponse> {
   const { data } = await apiClient.get<IndicatorResponse>(
     `/api/v1/instruments/${instrumentId}/indicators`,
-    { params },
+    { params, signal: options?.signal },
   )
   return data
 }
@@ -1656,7 +1659,9 @@ export interface MarketStocksResponse {
   page: number
   page_size: number
   total: number
-  as_of: string
+  price_as_of: string | null
+  state_as_of: string | null
+  boards_as_of: string | null
 }
 
 /** 行情列表查询参数 */
@@ -1678,8 +1683,9 @@ export interface MarketStocksQueryParams {
  */
 export async function getMarketStocks(
   params: MarketStocksQueryParams,
+  options?: { signal?: AbortSignal },
 ): Promise<MarketStocksResponse> {
-  const { data } = await apiClient.get<MarketStocksResponse>('/market/stocks', { params })
+  const { data } = await apiClient.get<MarketStocksResponse>('/market/stocks', { params, signal: options?.signal })
   return data
 }
 

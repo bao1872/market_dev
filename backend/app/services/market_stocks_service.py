@@ -18,12 +18,14 @@ from __future__ import annotations
 
 import logging
 import unicodedata
+from dataclasses import dataclass
+from datetime import date, datetime
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, case, func, literal, or_, select
+from sqlalchemy import ColumnElement, Integer, case, cast, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.time import now_shanghai, to_shanghai_iso
+from app.core.time import to_shanghai_iso
 from app.models.bar import BarDaily
 from app.models.instrument import Instrument
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
@@ -35,7 +37,16 @@ from app.services.instrument_maintenance_service import stock_symbol_sql_filter
 logger = logging.getLogger("market_stocks_service")
 
 # 排序字段白名单（防止 SQL 注入）
-_SORTABLE_FIELDS = {"symbol", "name"}
+_SORTABLE_FIELDS = {"name", "symbol", "change_pct", "dsa_state", "latest_event_time"}
+_SORT_DIRECTIONS = {"asc", "desc"}
+
+
+@dataclass(frozen=True)
+class SortSpec:
+    """排序规格：字段 + 方向。"""
+
+    field: str
+    direction: str
 
 
 def _build_search_conditions(keyword: str | None) -> tuple[list[ColumnElement[bool]], ColumnElement[int]]:
@@ -68,25 +79,115 @@ def _build_search_conditions(keyword: str | None) -> tuple[list[ColumnElement[bo
     return conditions, rank_expr
 
 
-def _parse_sort(sort: str | None) -> tuple[list[ColumnElement], ColumnElement[int]]:
-    """解析 sort=field:direction 参数，返回 (order_by 列表, rank_expr)。
+def _parse_sort(sort: str | None) -> SortSpec | None:
+    """解析 sort=field:direction 参数，返回 SortSpec 或 None。
 
-    支持字段：symbol, name；方向：asc, desc。
-    非法字段或方向回退到 symbol asc。
+    支持字段：name, symbol, change_pct, dsa_state, latest_event_time。
+    方向：asc, desc（默认 asc）。
+    非法字段或方向抛出 ValueError（由 API 层转为 422）。
     """
     if not sort:
-        return [], literal(0)
+        return None
 
     parts = sort.split(":")
     field = parts[0].strip().lower()
     direction = parts[1].strip().lower() if len(parts) > 1 else "asc"
 
     if field not in _SORTABLE_FIELDS:
-        return [], literal(0)
+        raise ValueError(
+            f"Invalid sort field '{field}'. Allowed: {', '.join(sorted(_SORTABLE_FIELDS))}"
+        )
+    if direction not in _SORT_DIRECTIONS:
+        raise ValueError(f"Invalid sort direction '{direction}'. Allowed: asc, desc")
 
-    col = getattr(Instrument, field)
-    order_col = col.desc() if direction == "desc" else col.asc()
-    return [order_col], literal(0)
+    return SortSpec(field=field, direction=direction)
+
+
+def _build_sort_expression(field: str) -> ColumnElement:
+    """构建排序标量表达式（用于 change_pct/dsa_state/latest_event_time）。
+
+    name/symbol 直接使用 Instrument 列，不经过此函数。
+    """
+    if field == "change_pct":
+        latest_close = (
+            select(BarDaily.close)
+            .where(BarDaily.instrument_id == Instrument.id)
+            .order_by(BarDaily.trade_date.desc())
+            .limit(1)
+            .scalar_subquery()
+        )
+        prev_close = (
+            select(BarDaily.close)
+            .where(BarDaily.instrument_id == Instrument.id)
+            .order_by(BarDaily.trade_date.desc())
+            .offset(1)
+            .limit(1)
+            .scalar_subquery()
+        )
+        return case(
+            (
+                (prev_close.isnot(None)) & (prev_close != 0),
+                (latest_close - prev_close) / prev_close * 100.0,
+            ),
+            else_=None,
+        )
+
+    if field == "dsa_state":
+        return (
+            select(
+                cast(
+                    StockFeatureSnapshot.summary_payload["daily_developing_swing_dir"].astext,
+                    Integer,
+                )
+            )
+            .where(StockFeatureSnapshot.instrument_id == Instrument.id)
+            .order_by(StockFeatureSnapshot.trade_date.desc())
+            .limit(1)
+            .scalar_subquery()
+        )
+
+    if field == "latest_event_time":
+        return (
+            select(func.max(StrategyEvent.event_time))
+            .where(StrategyEvent.instrument_id == Instrument.id)
+            .scalar_subquery()
+        )
+
+    # 不应到达此处（_parse_sort 已校验白名单）
+    raise ValueError(f"Unsupported sort field: {field}")
+
+
+def _build_order_by(
+    sort_spec: SortSpec | None,
+    has_query: bool,
+    rank_expr: ColumnElement[int],
+) -> list[ColumnElement]:
+    """构建 ORDER BY 列表。
+
+    - 搜索模式（has_query=True）：按命中优先级排序，忽略 sort_spec。
+    - 无 sort_spec：默认 symbol asc。
+    - name/symbol：直接使用 Instrument 列。
+    - change_pct/dsa_state/latest_event_time：使用标量子查询表达式。
+    """
+    if has_query:
+        return [rank_expr, Instrument.symbol]
+
+    if sort_spec is None:
+        return [Instrument.symbol]
+
+    field = sort_spec.field
+    direction = sort_spec.direction
+
+    if field in ("name", "symbol"):
+        col = getattr(Instrument, field)
+        order_col = col.desc().nullslast() if direction == "desc" else col.asc().nullslast()
+        return [order_col, Instrument.symbol]
+
+    sort_expr = _build_sort_expression(field)
+    order_col = (
+        sort_expr.desc().nullslast() if direction == "desc" else sort_expr.asc().nullslast()
+    )
+    return [order_col, Instrument.symbol]
 
 
 def _map_dsa_state(swing_dir: object) -> str | None:
@@ -128,7 +229,7 @@ async def get_market_stocks(
         MarketStocksResponse 分页响应
     """
     search_conditions, rank_expr = _build_search_conditions(query)
-    sort_cols, _ = _parse_sort(sort)
+    sort_spec = _parse_sort(sort)
     offset = (page - 1) * page_size
 
     # ===== Query 1: instruments + is_watchlisted + 分页 =====
@@ -175,12 +276,8 @@ async def get_market_stocks(
             base_stmt = base_stmt.where(cond)
 
     # 排序：有搜索关键词时按命中优先级，否则按 sort 参数（默认 symbol asc）
-    if query:
-        base_stmt = base_stmt.order_by(rank_expr, Instrument.symbol)
-    elif sort_cols:
-        base_stmt = base_stmt.order_by(*sort_cols, Instrument.symbol)
-    else:
-        base_stmt = base_stmt.order_by(Instrument.symbol)
+    order_by_cols = _build_order_by(sort_spec, has_query=bool(query), rank_expr=rank_expr)
+    base_stmt = base_stmt.order_by(*order_by_cols)
 
     base_stmt = base_stmt.offset(offset).limit(page_size)
     base_result = await db.execute(base_stmt)
@@ -188,7 +285,13 @@ async def get_market_stocks(
 
     if not base_rows:
         return MarketStocksResponse(
-            items=[], page=page, page_size=page_size, total=0, as_of=to_shanghai_iso(now_shanghai())
+            items=[],
+            page=page,
+            page_size=page_size,
+            total=0,
+            price_as_of=None,
+            state_as_of=None,
+            boards_as_of=None,
         )
 
     instrument_ids = [row.id for row in base_rows]
@@ -234,9 +337,14 @@ async def get_market_stocks(
     bars_result = await db.execute(bars_stmt)
 
     price_map: dict[UUID, tuple[float | None, float | None]] = {}
+    price_as_of_date: date | None = None
     for bar_row in bars_result:
         inst_id = bar_row.instrument_id
         close_val = float(bar_row.close) if bar_row.close is not None else None
+        # 追踪最新 bar trade_date（price_as_of）
+        if bar_row.trade_date is not None:
+            if price_as_of_date is None or bar_row.trade_date > price_as_of_date:
+                price_as_of_date = bar_row.trade_date
         existing = price_map.get(inst_id)
         if existing is None:
             # rn=1 (latest)
@@ -251,6 +359,7 @@ async def get_market_stocks(
         select(
             StockFeatureSnapshot.instrument_id,
             StockFeatureSnapshot.summary_payload,
+            StockFeatureSnapshot.created_at,
             func.row_number()
             .over(
                 partition_by=StockFeatureSnapshot.instrument_id,
@@ -268,6 +377,7 @@ async def get_market_stocks(
     snap_result = await db.execute(snap_stmt)
 
     state_map: dict[UUID, tuple[str | None, str | None]] = {}
+    state_as_of_dt: datetime | None = None
     for snap_row in snap_result:
         payload = snap_row.summary_payload or {}
         dsa_state = _map_dsa_state(payload.get("daily_developing_swing_dir"))
@@ -276,6 +386,10 @@ async def get_market_stocks(
             dsa_state,
             str(structure_state) if structure_state else None,
         )
+        # 追踪最新 snapshot created_at（state_as_of）
+        if snap_row.created_at is not None:
+            if state_as_of_dt is None or snap_row.created_at > state_as_of_dt:
+                state_as_of_dt = snap_row.created_at
 
     # ===== Query 5: 最新 strategy_event（批量） =====
     event_subq = (
@@ -338,5 +452,7 @@ async def get_market_stocks(
         page=page,
         page_size=page_size,
         total=total,
-        as_of=to_shanghai_iso(now_shanghai()),
+        price_as_of=price_as_of_date.isoformat() if price_as_of_date else None,
+        state_as_of=to_shanghai_iso(state_as_of_dt) if state_as_of_dt else None,
+        boards_as_of=None,
     )

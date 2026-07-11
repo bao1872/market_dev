@@ -2,7 +2,7 @@
 
 对应 PRD §8.1 行情列表契约：
 - GET /market/stocks?scope&query&page&page_size&sort&industry&concept&state
-- 返回 items + page + page_size + total + as_of
+- 返回 items + page + page_size + total + price_as_of + state_as_of + boards_as_of
 - 每行一次返回页面所需全部字段，不再追加结构因子/时序特征请求
 
 设计说明：
@@ -11,6 +11,9 @@
 - structure_state 来自 summary_payload.cost_position_zone。
 - latest_event_title / latest_event_time 来自最新 strategy_event。
 - is_watchlisted 仅认证用户有意义。
+- price_as_of: 最新日线 trade_date（定价所用最新 bar 的日期）。
+- state_as_of: 最新 stock_feature_snapshot.created_at（特征快照写入时间）。
+- boards_as_of: 板块数据时间戳（qstock 同步前为 null）。
 """
 
 from __future__ import annotations
@@ -44,7 +47,9 @@ class MarketStocksResponse(BaseModel):
     page: int = Field(..., description="当前页码（从 1 开始）")
     page_size: int = Field(..., description="每页大小")
     total: int = Field(..., description="总记录数")
-    as_of: str = Field(..., description="数据截止时间 ISO")
+    price_as_of: str | None = Field(None, description="最新日线 trade_date ISO（定价所用 bar 日期）")
+    state_as_of: str | None = Field(None, description="最新特征快照 created_at ISO")
+    boards_as_of: str | None = Field(None, description="板块数据时间戳 ISO（qstock 同步前 null）")
 
 
 if __name__ == "__main__":
