@@ -141,22 +141,43 @@ test('Force-hide disables toggle (early return in toggle callback)', () => {
 })
 
 // ===== 8. toggle 按钮在 tv-chart-column 内部（定位上下文） =====
+// Phase 3 重构后，toggle 按钮作为 toolbar prop 传递给 StockResearchWorkspace，
+// StockResearchWorkspace 在 <section className="tv-chart-column"> 内部渲染 {toolbar}。
+// 本测试验证：
+//   1. StockDetailPage 定义含 structural-state-toggle-btn 的 toolbar 并传给 StockResearchWorkspace
+//   2. StockResearchWorkspace 在 tv-chart-column section 内部渲染 {toolbar}
+//   3. .tv-chart-column 有 position: relative（在 global.scss 中）
 test('Toggle button is inside tv-chart-column for stable absolute positioning', () => {
   const src = readSource()
 
-  // 源码中可能有多个 tv-chart-column section，用位置检测：
-  // 1. 找到 structural-state-toggle-btn 按钮的位置
-  // 2. 向前查找最近的 <section className="tv-chart-column">
-  // 3. 向后查找最近的 </section>
-  // 4. 验证 toggle 在两者之间
+  // StockDetailPage 必须定义含 structural-state-toggle-btn 的 toolbar 变量
   const toggleIdx = src.indexOf('structural-state-toggle-btn')
   assert.ok(toggleIdx > 0, 'StockDetailPage 必须含 structural-state-toggle-btn')
 
-  const sectionOpenIdx = src.lastIndexOf('<section className="tv-chart-column">', toggleIdx)
-  assert.ok(sectionOpenIdx > 0, 'structural-state-toggle-btn 必须在 <section className="tv-chart-column"> 之后')
+  // toolbar 变量必须作为 toolbar prop 传给 StockResearchWorkspace
+  assert.ok(
+    /toolbar=\{structuralToolbar\}/.test(src),
+    'StockDetailPage 必须将 structuralToolbar 作为 toolbar prop 传给 StockResearchWorkspace',
+  )
 
-  const sectionCloseIdx = src.indexOf('</section>', toggleIdx)
-  assert.ok(sectionCloseIdx > toggleIdx, 'structural-state-toggle-btn 必须在 </section> 之前')
+  // StockResearchWorkspace 必须在 tv-chart-column section 内部渲染 {toolbar}
+  const workspacePath = join(FRONTEND_ROOT, 'src', 'features', 'stock-research', 'StockResearchWorkspace.tsx')
+  const workspaceSrc = readFileSync(workspacePath, 'utf-8')
+  const wsToggleIdx = workspaceSrc.indexOf('{toolbar}')
+  assert.ok(wsToggleIdx > 0, 'StockResearchWorkspace 必须渲染 {toolbar}')
+
+  const wsSectionOpenIdx = workspaceSrc.lastIndexOf('<section', wsToggleIdx)
+  assert.ok(wsSectionOpenIdx > 0, '{toolbar} 必须在 <section> 之后')
+
+  const wsSectionCloseIdx = workspaceSrc.indexOf('</section>', wsToggleIdx)
+  assert.ok(wsSectionCloseIdx > wsToggleIdx, '{toolbar} 必须在 </section> 之前')
+
+  // 确认该 section 含 tv-chart-column className
+  const sectionText = workspaceSrc.slice(wsSectionOpenIdx, wsToggleIdx)
+  assert.ok(
+    /className="tv-chart-column"/.test(sectionText),
+    '{toolbar} 所在的 section 必须含 className="tv-chart-column"',
+  )
 
   // 同时确认 tv-chart-column 有 position: relative（在 global.scss 中）
   const scssPath = join(FRONTEND_ROOT, 'src', 'styles', 'global.scss')
@@ -256,22 +277,29 @@ test('test_capture_mode_hides_panel', () => {
 })
 
 // ===== 14. capture=feishu 无侧列（testid 落在 tv-chart-column，不在 tv-content）=====
+// Phase 3 重构后，主渲染路径的 testid 通过 chartColumnProps prop 传递给 StockResearchWorkspace，
+// StockResearchWorkspace 将其应用到 <section className="tv-chart-column"> 上。
+// 加载/错误状态仍在 StockDetailPage 中直接设置 testid。
 test('test_capture_mode_no_side_column', () => {
   const src = readSource()
 
-  // 主渲染路径中 <section className="tv-chart-column" ... data-testid="stock-detail-capture" ...>
-  // 截图模式 testid 落在图表列（不在 tv-content），capture worker 通过该选择器截图
-  // 注意：加载状态的 <section className="tv-chart-column"> 无 testid，需匹配带 testid 的 section
-  const chartColWithTestid =
-    /<section\s+className="tv-chart-column"[\s\S]{0,200}?data-testid="stock-detail-capture"/.test(src)
+  // StockDetailPage 必须通过 chartColumnProps 传递 data-testid="stock-detail-capture"
   assert.ok(
-    chartColWithTestid,
-    '主渲染路径必须存在 <section className="tv-chart-column" ... data-testid="stock-detail-capture">（testid 落在图表列，不在 tv-content）',
+    /chartColumnProps=\{\{[\s]*['"]data-testid['"]:[\s]*['"]stock-detail-capture['"][\s]*\}\}/.test(src),
+    'StockDetailPage 主渲染路径必须通过 chartColumnProps 传递 data-testid="stock-detail-capture" 给 StockResearchWorkspace',
   )
 
-  // 源码必须包含 data-testid="stock-detail-capture"（capture worker 截图选择器）
+  // 源码必须包含 data-testid="stock-detail-capture"（加载/错误状态 + chartColumnProps）
   assert.ok(
     src.includes('data-testid="stock-detail-capture"'),
     'StockDetailPage 必须设置 data-testid="stock-detail-capture"（capture worker 通过该选择器截图）',
+  )
+
+  // StockResearchWorkspace 必须将 chartColumnProps 的 data-testid 应用到 tv-chart-column section
+  const workspacePath = join(FRONTEND_ROOT, 'src', 'features', 'stock-research', 'StockResearchWorkspace.tsx')
+  const workspaceSrc = readFileSync(workspacePath, 'utf-8')
+  assert.ok(
+    /<section\s+className="tv-chart-column"[\s\S]{0,200}?data-testid=\{chartColumnProps\?\.\[['"]data-testid['"]\]\}/.test(workspaceSrc),
+    'StockResearchWorkspace 必须在 <section className="tv-chart-column"> 上应用 chartColumnProps 的 data-testid（capture worker 截图选择器落在图表列）',
   )
 })

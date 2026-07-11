@@ -121,9 +121,11 @@ test('StockDetailPage 传递 rightPanelCollapsed', () => {
 })
 
 // ===== 11. StockDetailPage 渲染左栏来源列表 =====
+// Phase 3 纠偏后，左栏优先使用 sourceStocks（returnTo 上下文恢复），
+// 回退到 watchlistStocks（自选列表）。两者由 useStockDetailActions 统一提供。
 test('StockDetailPage 渲染左栏来源列表', () => {
   const src = readSrc(DETAIL_PATH)
   assert.ok(src.includes('tv-source-list') || src.includes('detail-source-list'), 'should render source list')
-  assert.ok(src.includes('watchlistStocks'), 'should use watchlistStocks')
+  assert.ok(src.includes('sourceStocks'), 'should use sourceStocks (returnTo context-aware source list)')
   assert.ok(src.includes('tv-detail-layout'), 'should have detail layout wrapper')
 })

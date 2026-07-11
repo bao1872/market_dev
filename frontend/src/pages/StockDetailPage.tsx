@@ -92,12 +92,14 @@ export default function StockDetailPage() {
   const researchData = useStockResearchData({ symbol: symbol ?? null, timeframe })
   const instrumentId = researchData.instrumentId
 
-  // 详情页专属 actions（自选/上下切换/memo）
+  // 详情页专属 actions（自选/上下切换/memo + returnTo 上下文恢复左栏列表）
+  const returnToParam = searchParams.get('returnTo')
   const detailActions = useStockDetailActions({
     instrumentId,
     symbol,
     source,
     strategy,
+    returnTo: returnToParam,
   })
 
   // 详情页专属飞书投递
@@ -436,15 +438,20 @@ export default function StockDetailPage() {
       )}
 
       {/* ===== 工作区：左栏来源股票列表 + 复用 StockResearchWorkspace ===== */}
+      {/* [returnTo 上下文恢复] - 左栏优先展示 returnTo URL 的来源上下文：
+          - returnTo 指向 /market?scope=market&query=xxx 时显示「行情搜索」列表
+          - returnTo 缺失或非市场搜索时回退到「自选列表」 */}
       <div className="tv-detail-layout">
-        {!isCaptureMode && detailActions.watchlistStocks.length > 0 && (
+        {!isCaptureMode && detailActions.sourceStocks.length > 0 && (
           <aside className="tv-source-list" data-testid="detail-source-list">
-            <div className="tv-source-list-header">自选列表</div>
-            {detailActions.watchlistStocks.map((s) => (
+            <div className="tv-source-list-header">
+              {detailActions.sourceListKind === 'market' ? '来源: 行情搜索' : '来源: 自选'}
+            </div>
+            {detailActions.sourceStocks.map((s) => (
               <div
                 key={s.symbol}
                 className={clsx('tv-source-list-item', s.symbol === symbol && 'active')}
-                onClick={() => navigate(`/stock/${s.symbol}?source=watchlist&strategy=${strategy}`)}
+                onClick={() => navigate(`/stock/${s.symbol}?source=${source}&strategy=${strategy}${returnToParam ? `&returnTo=${encodeURIComponent(returnToParam)}` : ''}`)}
               >
                 <span className="tv-source-name">{s.name}</span>
                 <span className="tv-source-symbol">{s.symbol}</span>

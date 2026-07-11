@@ -64,10 +64,13 @@ function extractImports(src: string): ImportInfo[] {
   return result
 }
 
-/** 提取某字符串所在行的前导空格数（用于判断路由嵌套层级） */
+/** 提取某字符串所在行的前导空格数（用于判断路由嵌套层级）
+ * 跳过注释行（// 开头），避免注释中的路径字符串干扰缩进判断
+ */
 function getIndentOfLineContaining(src: string, needle: string): number {
   const lines = src.split('\n')
-  const line = lines.find((l) => l.includes(needle))
+  // 跳过注释行（trim 后以 // 开头），找到第一个非注释的匹配行
+  const line = lines.find((l) => l.includes(needle) && !l.trim().startsWith('//'))
   if (!line) return -1
   const match = line.match(/^(\s*)/)
   return match ? match[1].length : 0

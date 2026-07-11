@@ -214,7 +214,7 @@ export function useBatchInstruments(ids: string[] | undefined) {
 export function useMarketStocks(params: MarketStocksQueryParams) {
   return useQuery({
     queryKey: ['market-stocks', params],
-    queryFn: () => api.getMarketStocks(params),
+    queryFn: ({ signal }) => api.getMarketStocks(params, { signal }),
     staleTime: STALE_REALTIME,
     placeholderData: (prev) => prev,
   })
@@ -382,7 +382,7 @@ export function useStrategyMonitorStates(strategyKey: string | undefined, versio
 export function useInstrumentEvents(instrumentId: string | undefined, params?: StrategyEventQueryParams) {
   return useQuery({
     queryKey: ['instruments', instrumentId, 'events', params],
-    queryFn: () => api.getInstrumentEvents(instrumentId!, params),
+    queryFn: ({ signal }) => api.getInstrumentEvents(instrumentId!, params, { signal }),
     enabled: !!instrumentId,
     staleTime: STALE_REALTIME,
   })
@@ -705,7 +705,7 @@ export function useDeleteStockMemo() {
 export function useBars(instrumentId: string | undefined, params?: BarQueryParams, options?: { refetchInterval?: number | false }) {
   return useQuery({
     queryKey: ['bars', instrumentId, params],
-    queryFn: () => api.getBars(instrumentId!, params),
+    queryFn: ({ signal }) => api.getBars(instrumentId!, params, { signal }),
     enabled: !!instrumentId,
     staleTime: STALE_WATCHLIST,
     refetchInterval: options?.refetchInterval ?? (() => isInTradingHours() ? 30000 : false),
@@ -723,7 +723,7 @@ export function useIndicators(
     // [DSA 数据契约] - queryKey 新增 'v3' 版本标识：后端响应新增 source_bar_times/source_bar_hash/visual_segments，
     //   旧缓存（无版本标识）结构不兼容，强制重新拉取
     queryKey: ['indicators', 'v3', instrumentId, params],
-    queryFn: () => api.getIndicators(instrumentId!, params),
+    queryFn: ({ signal }) => api.getIndicators(instrumentId!, params, { signal }),
     enabled: !!instrumentId,
     staleTime: STALE_WATCHLIST,
     refetchInterval: options?.refetchInterval ?? (() => isInTradingHours() ? 30000 : false),
@@ -735,7 +735,7 @@ export function useIndicators(
 export function useRealtimeQuote(instrumentId: string | undefined) {
   return useQuery({
     queryKey: ['quote', instrumentId],
-    queryFn: () => api.getQuote(instrumentId!),
+    queryFn: ({ signal }) => api.getQuote(instrumentId!, { signal }),
     enabled: !!instrumentId,
     staleTime: STALE_REALTIME,
     refetchInterval: () => isInTradingHours() ? 10000 : false,

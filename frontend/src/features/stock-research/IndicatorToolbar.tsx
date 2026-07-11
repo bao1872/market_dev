@@ -15,17 +15,24 @@ export function IndicatorToolbar({ visibility, onToggle }: IndicatorToolbarProps
 
   const renderToggle = (entry: (typeof INDICATOR_LAYER_MANIFEST)[number]) => {
     const active = visibility[entry.id] ?? entry.defaultVisible
+    // enabled=false 时禁用开关（灰显不可点击），Phase 5 实现后改回 true
+    const disabled = entry.enabled === false
     return (
       <label
         key={entry.id}
-        className={clsx('indicator-toggle-item', !active && 'off')}
-        title={`${entry.name}（${entry.kind === 'main' ? '主图' : '副图'}）`}
+        className={clsx('indicator-toggle-item', !active && 'off', disabled && 'disabled')}
+        title={
+          disabled
+            ? `${entry.name}（${entry.kind === 'main' ? '主图' : '副图'}）- 真实筹码共识区将在后续版本中实现`
+            : `${entry.name}（${entry.kind === 'main' ? '主图' : '副图'}）`
+        }
       >
         <button
           type="button"
           className="indicator-toggle-btn"
-          onClick={() => onToggle(entry.id, !active)}
+          onClick={() => !disabled && onToggle(entry.id, !active)}
           aria-pressed={active}
+          disabled={disabled}
         >
           <span className="indicator-toggle-name">{entry.name}</span>
           <i className={clsx('indicator-toggle-switch', active && 'on')} />
