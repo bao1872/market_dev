@@ -23,7 +23,7 @@ export function IndicatorToolbar({ visibility, onToggle }: IndicatorToolbarProps
         className={clsx('indicator-toggle-item', !active && 'off', disabled && 'disabled')}
         title={
           disabled
-            ? `${entry.name}（${entry.kind === 'main' ? '主图' : '副图'}）- 真实筹码共识区将在后续版本中实现`
+            ? `${entry.name}尚未开放`
             : `${entry.name}（${entry.kind === 'main' ? '主图' : '副图'}）`
         }
       >

@@ -14,7 +14,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { useParams, useSearchParams, useNavigate, useLocation } from 'react-router-dom'
 import clsx from 'clsx'
-import { StockStructuralStatePanel } from '@/components/StockStructuralStatePanel'
+import { EventStatePanel } from '@/features/research-context/EventStatePanel'
 import { StockResearchWorkspace } from '@/features/stock-research/StockResearchWorkspace'
 import { useStockResearchData } from '@/features/stock-research/useStockResearchData'
 import { useStockDetailActions } from '@/features/stock-research/useStockDetailActions'
@@ -217,25 +217,25 @@ export default function StockDetailPage() {
     barsStatus ? barsStatus.label : null,
   ].filter(Boolean)
 
+  // 右栏事件状态面板（PRD V1.1: 使用 EventStatePanel，与 market 共用 query key）
+  const eventStatePanel = shouldShowPanel && symbol ? (
+    <aside className="tv-side-column">
+      <EventStatePanel symbol={symbol} />
+    </aside>
+  ) : null
+
   // 结构状态开关 toolbar（渲染在图表上方）
-  const structuralToolbar = !hideStructuralStateParam && instrumentId ? (
+  const structuralToolbar = !hideStructuralStateParam && symbol ? (
     <div className="structural-state-toolbar">
       <button
         type="button"
         className="structural-state-toggle-btn"
         onClick={toggleStructuralState}
-        aria-label="切换结构状态面板"
+        aria-label="切换事件状态面板"
       >
-        {showStructuralState ? '隐藏结构状态' : '显示结构状态'}
+        {showStructuralState ? '隐藏事件状态' : '显示事件状态'}
       </button>
     </div>
-  ) : null
-
-  // 右栏结构状态面板
-  const structuralPanel = shouldShowPanel && instrumentId ? (
-    <aside className="tv-side-column">
-      <StockStructuralStatePanel instrumentId={instrumentId} />
-    </aside>
   ) : null
 
   return (
@@ -467,10 +467,10 @@ export default function StockDetailPage() {
           source={source}
           strategyKey={strategy}
           isCaptureMode={isCaptureMode}
-          rightPanelCollapsed={!(shouldShowPanel && !!instrumentId)}
+          rightPanelCollapsed={!(shouldShowPanel && !!symbol)}
           toolbar={structuralToolbar}
-          rightPanel={structuralPanel}
-          showRightPanel={shouldShowPanel && !!instrumentId}
+          rightPanel={eventStatePanel}
+          showRightPanel={shouldShowPanel && !!symbol}
           chartColumnProps={{ 'data-testid': 'stock-detail-capture' }}
         />
       </div>

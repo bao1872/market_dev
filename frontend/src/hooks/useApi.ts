@@ -1327,6 +1327,41 @@ export function useDeleteTableViewPreset() {
 }
 
 // ============================================================
+// ===== Stock Context hooks (PRD V1.1 §7.3) =====
+// ============================================================
+// [StockContext] - 描述: 用户侧只读状态向量接口
+// 单一接口替代 structural/temporal/event 多请求链
+// 右栏关闭时通过 enabled=false 停止请求
+
+/** 查询用户侧 StockContext（/api/v1/stocks/{symbol}/context） */
+export function useStockContext(
+  symbol: string | undefined,
+  params?: { as_of?: string },
+  options?: { enabled?: boolean },
+) {
+  return useQuery({
+    queryKey: ['stock-context', symbol, params ?? null],
+    queryFn: ({ signal }) => api.getStockContext(symbol!, params, { signal }),
+    enabled: !!symbol && (options?.enabled ?? true),
+    staleTime: STALE_REALTIME,
+  })
+}
+
+/** 查询管理员 StockDebug（/api/v1/admin/stocks/{symbol}/debug，含原始 payload） */
+export function useAdminStockDebug(
+  symbol: string | undefined,
+  params?: { as_of?: string },
+  options?: { enabled?: boolean },
+) {
+  return useQuery({
+    queryKey: ['admin', 'stock-debug', symbol, params ?? null],
+    queryFn: ({ signal }) => api.getAdminStockDebug(symbol!, params, { signal }),
+    enabled: !!symbol && (options?.enabled ?? true),
+    staleTime: STALE_REALTIME,
+  })
+}
+
+// ============================================================
 // 类型重导出（方便页面直接引用）
 // ============================================================
 
@@ -1334,3 +1369,14 @@ export type { UseQueryOptions }
 export type { QuoteResponse } from '../api/endpoints'
 export type { StructuralFactorQueryParams, StructuralFactorResponse } from '../api/endpoints'
 export type { TemporalFeaturesQueryParams, TemporalFeaturesResponse } from '../api/endpoints'
+export type {
+  StockContextResponse,
+  AdminStockDebugResponse,
+  StockState,
+  StateValue,
+  StateEvidence,
+  StockStructure,
+  StockMomentum,
+  StockVolatility,
+  StateEventDTO,
+} from '../api/endpoints'

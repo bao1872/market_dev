@@ -2738,3 +2738,139 @@ export async function updateTableViewPreset(
 export async function deleteTableViewPreset(id: string): Promise<void> {
   await apiClient.delete(`/me/table-view-presets/${id}`)
 }
+
+// ============================================================
+// ===== Stock Context 端点（PRD V1.1 §7.3）=====
+// ============================================================
+
+/** StateValue - code 与 label 分离的稳定状态值 */
+export interface StateValue {
+  code: string | null
+  label: string
+  value: number | null
+  unit: string | null
+  timeframe: string
+  /** 来源字段名（管理员可见，用户接口为 null） */
+  sourceField: string | null
+}
+
+/** Evidence - 事件证据项 */
+export interface StateEvidence {
+  fieldName: string
+  code: string
+  currentValue: string | null
+  previousValue: string | null
+  unit: string | null
+  timeframe: string
+}
+
+/** StockStructure - 结构状态 */
+export interface StockStructure {
+  price: StateValue
+  consensusRelation: StateValue
+}
+
+/** StockMomentum - 动量状态 */
+export interface StockMomentum {
+  macd: StateValue
+  sqzmom: StateValue
+  temporal: StateValue[]
+}
+
+/** StockVolatility - 波动状态 */
+export interface StockVolatility {
+  bollPosition: StateValue
+}
+
+/** StockState - 统一状态向量 */
+export interface StockState {
+  symbol: string
+  asOf: string
+  sourceRunId: string
+  version: string
+  computedAt: string
+  structure: StockStructure
+  momentum: StockMomentum
+  volatility: StockVolatility
+  evidence: StateEvidence[]
+  degradedReasons: string[]
+}
+
+/** StateEventDTO - 状态变化事件 */
+export interface StateEventDTO {
+  id: string
+  symbol: string
+  occurredAt: string
+  eventType: string
+  title: string
+  description: string
+  evidence: StateEvidence[]
+  changedFields: string[]
+  previousAsOf: string | null
+  currentAsOf: string
+  /** 稳定幂等键（仅数据库/管理员可见，用户接口为 null） */
+  idempotencyKey: string | null
+}
+
+/** StockContext 响应 - 用户侧只读 */
+export interface StockContextResponse {
+  state: StockState | null
+  events: StateEventDTO[]
+  dataQuality: {
+    hasSucceededRun: boolean
+    hasSnapshot: boolean
+    degradedReasons: string[]
+    runTradeDate: string | null
+    runPublishedAt: string | null
+    instrumentStatus: string
+  }
+}
+
+/** Admin StockDebug 响应 - 含原始 payload */
+export interface AdminStockDebugResponse extends StockContextResponse {
+  rawDebug?: {
+    structuralPayload: Record<string, unknown>
+    temporalPayload: Record<string, unknown>
+    summaryPayload: Record<string, unknown>
+    sourcePrimaryBarTime: string | null
+    sourceSecondaryBarTime: string | null
+    runId: string
+    runType: string
+    runStartedAt: string | null
+    runFinishedAt: string | null
+  }
+}
+
+/**
+ * 获取个股状态上下文（只读，需登录 + 有效订阅）。
+ * GET /api/v1/stocks/{symbol}/context?as_of=YYYY-MM-DD
+ * 返回 StockState + 最近事件 + 数据质量。
+ */
+export async function getStockContext(
+  symbol: string,
+  params?: { as_of?: string },
+  options?: { signal?: AbortSignal },
+): Promise<StockContextResponse> {
+  const { data } = await apiClient.get<StockContextResponse>(
+    `/api/v1/stocks/${symbol}/context`,
+    { params, signal: options?.signal },
+  )
+  return data
+}
+
+/**
+ * 管理员个股调试接口（需管理员身份）。
+ * GET /api/v1/admin/stocks/{symbol}/debug?as_of=YYYY-MM-DD
+ * 返回 StockState + 事件 + 原始 payload。
+ */
+export async function getAdminStockDebug(
+  symbol: string,
+  params?: { as_of?: string },
+  options?: { signal?: AbortSignal },
+): Promise<AdminStockDebugResponse> {
+  const { data } = await apiClient.get<AdminStockDebugResponse>(
+    `/api/v1/admin/stocks/${symbol}/debug`,
+    { params, signal: options?.signal },
+  )
+  return data
+}

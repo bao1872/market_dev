@@ -7,7 +7,7 @@ import { useState, useCallback, useMemo } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { MarketToolbar } from './MarketToolbar'
 import { MarketStockTable } from './MarketStockTable'
-import { ResearchContextPanel } from '@/features/research-context/ResearchContextPanel'
+import { EventStatePanel } from '@/features/research-context/EventStatePanel'
 import { useMarketStocks } from '@/hooks/useApi'
 import {
   decodeMarketWorkspaceUrl,
@@ -39,12 +39,8 @@ export default function MarketWorkspacePage() {
     sort: urlState.sort ?? undefined,
   })
 
-  // 从选中 symbol 解析 instrument_id（用于右栏 ResearchContextPanel）
-  const selectedInstrumentId = useMemo(() => {
-    if (!selected) return undefined
-    const row = marketStocksQuery.data?.items?.find((r) => r.symbol === selected)
-    return row?.instrument_id
-  }, [selected, marketStocksQuery.data])
+  // selected symbol 直接用于右栏 StockContext API（PRD V1.1 §7.3）
+  const selectedSymbol = selected || undefined
 
   // 通用 URL 更新函数
   const updateUrl = useCallback(
@@ -126,13 +122,12 @@ export default function MarketWorkspacePage() {
                 ›
               </button>
             </div>
-            {selectedInstrumentId && (
-              <ResearchContextPanel
-                instrumentId={selectedInstrumentId}
-                eventId={null}
+            {selectedSymbol && (
+              <EventStatePanel
+                symbol={selectedSymbol}
               />
             )}
-            {!selectedInstrumentId && (
+            {!selectedSymbol && (
               <div className={styles.rightPaneEmpty}>
                 <div className={styles.emptyIcon}>◎</div>
                 <div className={styles.emptyText}>单击表格中的股票查看事件与状态</div>

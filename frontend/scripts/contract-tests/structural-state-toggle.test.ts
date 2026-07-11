@@ -51,7 +51,7 @@ test('Panel is hidden by default (localStorage only shows on "true")', () => {
 })
 
 // ===== 2. 开关按钮默认渲染 =====
-test('Toggle button is rendered by default (non-capture mode + instrumentId)', () => {
+test('Toggle button is rendered by default (non-capture mode + symbol)', () => {
   const src = readSource()
 
   // 必须含 toggle 按钮 className（V1: structural-state-toggle-btn）
@@ -59,15 +59,15 @@ test('Toggle button is rendered by default (non-capture mode + instrumentId)', (
     /structural-state-toggle-btn/.test(src),
     'StockDetailPage 必须含 "structural-state-toggle-btn" className 的开关按钮',
   )
-  // 必须含「显示结构状态」/「隐藏结构状态」文案
+  // 必须含「显示事件状态」/「隐藏事件状态」文案
   assert.ok(
-    /显示结构状态/.test(src) && /隐藏结构状态/.test(src),
-    'StockDetailPage 开关按钮必须含「显示结构状态」/「隐藏结构状态」文案',
+    /显示事件状态/.test(src) && /隐藏事件状态/.test(src),
+    'StockDetailPage 开关按钮必须含「显示事件状态」/「隐藏事件状态」文案',
   )
-  // 必须在 !hideStructuralStateParam && instrumentId 时渲染按钮
+  // 必须在 !hideStructuralStateParam && symbol 时渲染按钮
   assert.ok(
-    /!hideStructuralStateParam\s*&&\s*instrumentId/.test(src),
-    'StockDetailPage 必须在 !hideStructuralStateParam && instrumentId 时渲染 toggle 按钮',
+    /!hideStructuralStateParam\s*&&\s*symbol/.test(src),
+    'StockDetailPage 必须在 !hideStructuralStateParam && symbol 时渲染 toggle 按钮',
   )
 })
 
@@ -189,19 +189,19 @@ test('Toggle button is inside tv-chart-column for stable absolute positioning', 
   )
 })
 
-// ===== 9. 按钮文案动态切换（显示/隐藏结构状态） =====
-test('Toggle button label switches between "显示结构状态" and "隐藏结构状态"', () => {
+// ===== 9. 按钮文案动态切换（显示/隐藏事件状态） =====
+test('Toggle button label switches between "显示事件状态" and "隐藏事件状态"', () => {
   const src = readSource()
 
-  // 必须含三元表达式：showStructuralState ? '隐藏结构状态' : '显示结构状态'
+  // 必须含三元表达式：showStructuralState ? '隐藏事件状态' : '显示事件状态'
   assert.ok(
-    /showStructuralState\s*\?\s*['"]隐藏结构状态['"]\s*:\s*['"]显示结构状态['"]/.test(src),
-    'StockDetailPage toggle 按钮文案必须根据 showStructuralState 动态切换（隐藏时显示"显示结构状态"，显示时显示"隐藏结构状态"）',
+    /showStructuralState\s*\?\s*['"]隐藏事件状态['"]\s*:\s*['"]显示事件状态['"]/.test(src),
+    'StockDetailPage toggle 按钮文案必须根据 showStructuralState 动态切换（隐藏时显示"显示事件状态"，显示时显示"隐藏事件状态"）',
   )
 })
 
-// ===== 10. 默认不渲染 StockStructuralStatePanel =====
-test('StockStructuralStatePanel is not rendered by default (shouldShowPanel=false)', () => {
+// ===== 10. 默认不渲染 EventStatePanel =====
+test('EventStatePanel is not rendered by default (shouldShowPanel=false)', () => {
   const src = readSource()
 
   // shouldShowPanel 必须基于 showStructuralState && !hideStructuralStateParam
@@ -209,26 +209,26 @@ test('StockStructuralStatePanel is not rendered by default (shouldShowPanel=fals
     /shouldShowPanel\s*=\s*showStructuralState\s*&&\s*!hideStructuralStateParam/.test(src),
     'StockDetailPage 必须有 shouldShowPanel = showStructuralState && !hideStructuralStateParam',
   )
-  // StockStructuralStatePanel 必须在 shouldShowPanel && instrumentId 时渲染
+  // EventStatePanel 必须在 shouldShowPanel && symbol 时渲染
   assert.ok(
-    /shouldShowPanel\s*&&\s*instrumentId/.test(src),
-    'StockStructuralStatePanel 必须在 shouldShowPanel && instrumentId 时渲染（默认不渲染）',
+    /shouldShowPanel\s*&&\s*symbol/.test(src),
+    'EventStatePanel 必须在 shouldShowPanel && symbol 时渲染（默认不渲染）',
   )
 })
 
-// ===== 11. shouldShowPanel=true 时渲染 StockStructuralStatePanel =====
-test('StockStructuralStatePanel is rendered when shouldShowPanel=true', () => {
+// ===== 11. shouldShowPanel=true 时渲染 EventStatePanel =====
+test('EventStatePanel is rendered when shouldShowPanel=true', () => {
   const src = readSource()
 
-  // 必须导入 StockStructuralStatePanel
+  // 必须导入 EventStatePanel
   assert.ok(
-    /import\s*\{[^}]*StockStructuralStatePanel[^}]*\}\s*from\s*['"]@\/components\/StockStructuralStatePanel['"]/.test(src),
-    'StockDetailPage 必须导入 StockStructuralStatePanel',
+    /import\s*\{[^}]*EventStatePanel[^}]*\}\s*from\s*['"]@\/features\/research-context\/EventStatePanel['"]/.test(src),
+    'StockDetailPage 必须导入 EventStatePanel',
   )
-  // 必须渲染 <StockStructuralStatePanel instrumentId={instrumentId} />
+  // 必须渲染 <EventStatePanel symbol={symbol} />
   assert.ok(
-    /<StockStructuralStatePanel\s+instrumentId=\{instrumentId\}\s*\/>/.test(src),
-    'StockDetailPage 必须渲染 <StockStructuralStatePanel instrumentId={instrumentId} />',
+    /<EventStatePanel\s+symbol=\{symbol\}\s*\/>/.test(src),
+    'StockDetailPage 必须渲染 <EventStatePanel symbol={symbol} />',
   )
 })
 

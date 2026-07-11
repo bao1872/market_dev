@@ -108,3 +108,28 @@ test('兜底路由重定向到 /market', () => {
   assert.equal(fallback.node.guard, 'redirect')
   assert.equal(fallback.node.redirectTo, '/market')
 })
+
+// PRD V1.1 纠偏测试：/stock/:symbol 是唯一个股详情 K线入口，不得重定向到 /market
+test('/stock/:symbol 是详情页（非重定向），不是 /market 的别名', () => {
+  const stock = findRouteNode(ROUTE_STRUCTURE, '/stock/:symbol')
+  assert.ok(stock, '/stock/:symbol 路由必须存在')
+  assert.notEqual(stock.node.guard, 'redirect', '/stock/:symbol 不得是重定向')
+  assert.equal(stock.node.shell, 'user')
+  assert.ok(!stock.node.redirectTo, '/stock/:symbol 不得有 redirectTo')
+})
+
+test('/market 不是详情页（guard=subscriber，shell=user，无 redirectTo）', () => {
+  const market = findRouteNode(ROUTE_STRUCTURE, '/market')
+  assert.ok(market)
+  assert.notEqual(market.node.guard, 'redirect')
+  assert.equal(market.node.shell, 'user')
+  assert.ok(!market.node.redirectTo)
+})
+
+// /stock/:symbol 和 /market 是两个独立路由，不能互为别名
+test('/stock/:symbol 与 /market 是两个独立路由节点', () => {
+  const stock = findRouteNode(ROUTE_STRUCTURE, '/stock/:symbol')
+  const market = findRouteNode(ROUTE_STRUCTURE, '/market')
+  assert.ok(stock && market)
+  assert.notEqual(stock.node.path, market.node.path)
+})

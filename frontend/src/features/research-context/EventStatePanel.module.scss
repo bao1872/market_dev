@@ -1,0 +1,297 @@
+// [EventStatePanel] - 描述: 用户侧状态/事件面板样式（market + detail 共用）
+// PRD V1.1 §7.3: 替代旧 ResearchContextPanel
+// 命名前缀：esp（event-state-panel）
+// 深色主题对齐项目整体风格；响应式由父容器控制栏宽
+// PRD V1.1 字号要求：正文≥14px、辅助≥12px
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  overflow-y: auto;
+  height: 100%;
+}
+
+// ===== 通用区块 =====
+.section {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.sectionTitle {
+  font-size: 14px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.85);
+  margin-bottom: 8px;
+  letter-spacing: 0.3px;
+}
+
+.loading {
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 14px;
+  padding: 8px 0;
+}
+
+.error {
+  color: #f87171;
+  font-size: 14px;
+  padding: 8px 0;
+  word-break: break-word;
+}
+
+.empty {
+  color: rgba(255, 255, 255, 0.35);
+  font-size: 14px;
+  padding: 8px 0;
+}
+
+// ===== StockContext 面板（PRD V1.1 §7.3）=====
+.stateRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 14px;
+  padding: 4px 0;
+}
+
+.stateLabel {
+  color: rgba(255, 255, 255, 0.5);
+  flex-shrink: 0;
+}
+
+.stateValue {
+  color: rgba(255, 255, 255, 0.9);
+  text-align: right;
+}
+
+.dataDate {
+  font-size: 14px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.dataMeta {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  margin-top: 4px;
+}
+
+.qualityBanner {
+  background: rgba(251, 191, 36, 0.08);
+  border-radius: 6px;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+
+.qualityReason {
+  font-size: 12px;
+  color: #fbbf24;
+  line-height: 1.5;
+}
+
+.eventTimeline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.eventItem {
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 6px;
+  border-left: 3px solid rgba(96, 165, 250, 0.4);
+}
+
+.eventTime {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  font-family: monospace;
+}
+
+.eventTitle {
+  font-size: 14px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.85);
+  margin-top: 2px;
+}
+
+.eventDesc {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.65);
+  margin-top: 2px;
+  line-height: 1.4;
+}
+
+.emptyEvents {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.4);
+  padding: 8px 0;
+}
+
+.loadingText {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 14px;
+}
+
+.errorText {
+  color: #f87171;
+  font-size: 14px;
+}
+
+.emptyText {
+  color: rgba(255, 255, 255, 0.35);
+  font-size: 14px;
+}
+
+.noState {
+  padding: 16px 0;
+}
+
+.noStateText {
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 14px;
+  text-align: center;
+}
+
+// ===== 管理员调试页面（AdminStockDebugPage）=====
+.adminDebugContainer {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+  overflow-y: auto;
+  height: 100%;
+}
+
+.adminDebugHeader {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.adminDebugTitle {
+  font-size: 16px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+  margin: 0;
+}
+
+.adminDebugStatus {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.adminDebugError {
+  font-size: 12px;
+  color: #f87171;
+}
+
+.adminDebugSection {
+  background: rgba(239, 68, 68, 0.04);
+  border: 1px solid rgba(239, 68, 68, 0.15);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.adminDebugSectionTitle {
+  font-size: 14px;
+  font-weight: 600;
+  color: rgba(252, 165, 165, 0.85);
+  margin-bottom: 8px;
+}
+
+.adminDebugTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-family: monospace;
+
+  th {
+    text-align: left;
+    padding: 4px 8px;
+    color: rgba(255, 255, 255, 0.5);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    font-weight: 500;
+  }
+
+  td {
+    padding: 4px 8px;
+    color: rgba(255, 255, 255, 0.75);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    word-break: break-all;
+  }
+}
+
+.adminDebugEvent {
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 6px;
+  border-left: 3px solid rgba(239, 68, 68, 0.4);
+  margin-bottom: 8px;
+}
+
+.adminDebugEventHeader {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+  font-family: monospace;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.adminDebugEventType {
+  color: rgba(252, 165, 165, 0.8);
+  font-weight: 600;
+}
+
+.adminDebugEventAsOf {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.adminDebugEventTitle {
+  font-size: 14px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.85);
+  margin-top: 4px;
+}
+
+.adminDebugEventDesc {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.65);
+  margin-top: 2px;
+}
+
+.adminDebugChangedFields {
+  font-size: 12px;
+  font-family: monospace;
+  color: rgba(96, 165, 250, 0.7);
+  margin-top: 4px;
+}
+
+.adminDebugEvidence {
+  margin-top: 4px;
+}
+
+.adminDebugEvidenceItem {
+  font-size: 12px;
+  font-family: monospace;
+  color: rgba(255, 255, 255, 0.6);
+  padding: 2px 0;
+}
+
+.adminDebugJson {
+  font-size: 12px;
+  font-family: monospace;
+  color: rgba(255, 255, 255, 0.7);
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 4px;
+  padding: 8px;
+  overflow-x: auto;
+  max-height: 400px;
+  overflow-y: auto;
+  margin: 0;
+  line-height: 1.4;
+}
