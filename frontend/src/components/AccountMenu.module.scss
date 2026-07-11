@@ -1,0 +1,98 @@
+// [AccountMenu] - 描述: 右上角账户菜单样式（CSS Module，局部作用域）
+// 仅承载菜单触发器（头像+未读角标）与下拉面板，不引入全局页面规则。
+
+.wrap {
+  position: relative;
+}
+
+.trigger {
+  position: relative;
+  display: flex;
+  align-items: center;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+.avatar {
+  width: 31px;
+  height: 31px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #344156, #65738f);
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: #eef3fb;
+}
+
+.badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 9px;
+  background: #ef5350;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  box-shadow: 0 0 0 2px #131722;
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 184px;
+  background: #131722;
+  border: 1px solid #2a2f3c;
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  padding: 6px;
+  z-index: 40;
+}
+
+.head {
+  padding: 8px 10px 10px;
+  border-bottom: 1px solid #232838;
+  margin-bottom: 6px;
+}
+
+.name {
+  font-weight: 650;
+  color: #eef3fb;
+  font-size: 13px;
+}
+
+.email {
+  color: #8ea0b7;
+  font-size: 11px;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 9px 10px;
+  border-radius: 7px;
+  color: #c4ccdb;
+  font-size: 13px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  text-decoration: none;
+
+  &:hover {
+    background: #1c202b;
+    color: #fff;
+  }
+}

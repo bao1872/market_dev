@@ -583,6 +583,27 @@ Capture Token 只能访问 Capture API。\
    - 前端是否只是展示，是否存在伪造实时？
    - 交易时段和收盘后分别如何验证？
 
+### 14. 用户/管理员壳层与导航拆分
+
+1. 普通用户主入口为 `/market`（行情）；趋势选股 `/screener` 保持独立一级页面。
+2. 行情与自选合并：`/market` 渲染 `MarketWorkspacePage`；`/overview` 重定向到 `/market`，`/watchlist` 重定向到 `/market?scope=watchlist`。
+3. 普通用户使用 `UserAppShell`（顶栏品牌 + 一级导航行情/趋势选股 + 右上角账户菜单；无左侧栏）；消息、设置、管理后台入口、退出收拢到 `AccountMenu`。
+4. 管理后台使用独立 `AdminAppShell`（侧栏管理导航 + 账户菜单），仅承载 `/admin/*`；不得套用普通用户导航。
+5. `ProtectedLayout` 只负责认证与 access profile，不再固定渲染同一壳层。
+6. `/capture/stock/:symbol` 位于两套壳层之外，只使用 `captureClient`。
+7. 导航/路由常量集中于 `frontend/src/navigation/appNavigation.ts`，禁止路径散落。
+8. 三栏统一行情工作区：`/market` 渲染 `MarketWorkspacePage`（左列表 `MarketInstrumentPane` + 中K线 `StockResearchWorkspace` + 右解释面板 `ResearchContextPanel` 可收起）；`/stock/:symbol` 渲染 `StockDetailPage`（路由适配器，复用 `useStockResearchData` + `StockResearchWorkspace`）；`useStockResearchData` 只保留 bars/indicators/quote/events 核心查询，详情页专属能力（自选/上下切换/memo/飞书）拆到 `useStockDetailActions`/`useStockDetailFeishu`；`/overview`、`/watchlist` 仅保留兼容重定向。
+9. `timeframe` 单一真源：URL → `useStockResearchData`（bars/indicators 请求参数）→ `StockResearchWorkspace`（图表渲染）三者始终使用同一 `DisplayTimeframe`；工具栏切换必须通过 `onTimeframeChange` 回调写回 URL，禁止子组件 `useState` 维护独立 timeframe；图表显示周期不得改变 1d+15m 监控配置或 1m 事件触发口径；`/stock/:symbol` 的 timeframe 也从 URL 解析。
+10. 请求门控：`useWatchlistMonitorStatus` 和 `useInstruments` 必须通过 `enabled` 参数按 scope 互斥启用（watchlist scope 只启用 monitor-status，market scope 且搜索词 trim 后 ≥2 字符才启用 instruments）；`useStockResearchData` 不得请求 `MarketWorkspace` 未使用的 watchlist/batchInstruments/stockMemo。
+11. URL 状态保留：`/market` URL 的 scope/symbol/timeframe/source/strategy/event_id/returnTo 进入 URL（可分享、刷新恢复）；切换周期、切换 scope、选择新股票时必须保留其他字段；选择新股票时清除旧 `event_id` 和 `returnTo`；`event_id` 由 `ResearchContextPanel` 消费（事件详情/通俗解释/关键证据）；`returnTo` 为来源页 URL，返回按钮优先使用，必须经 `normalizeInternalReturnTo` 校验（仅允许 `/screener`、`/market`、`/messages` 前缀，拒绝外部 URL/`javascript:`/双斜杠/非白名单路径）。
+12. 左栏选择上下文重置：从 `MarketInstrumentPane` 选择任意股票时必须写 `source='watchlist'`、`strategy='watchlist_monitor'`、`eventId=null`（退出 selection 上下文）；用户切换 scope（watchlist 或 market）时也必须退出 selection 上下文并清除旧 `event_id`；timeframe 在上述操作中继续保留。状态转换必须通过纯函数 `selectInstrumentFromMarketPane(state, newSymbol)` 和 `changeMarketScope(state, newScope)` 处理，禁止在多个 callback 中重复拼对象。
+13. 搜索结果渲染门控：`MarketInstrumentPane` 中仅在 `scope==='market' && canSearch`（关键词 trim 后 ≥2 字符）时渲染 `searchResults`；关键词不足 2 字符、清空输入或切换 scope 时不得显示缓存结果。Query 仍通过 `enabled` 门控，不条件调用 Hook。
+14. 行情状态文案：`StockResearchWorkspace` 不得在 15m/1h/1w/1mo 显示"日线回退"；非实时非降级时统一显示"行情回退"；partial 文案必须包含当前周期（如"盘中 partial bar（15m）"），禁止所有周期统一显示"日线"。
+15. 共享研究核心：`DisplayTimeframe`/`ResearchSource`/`ALLOWED_TIMEFRAMES`/`BARS_COUNT_BY_TIMEFRAME`/`defaultStrategyForSource`/`normalizeDisplayTimeframe`/`normalizeResearchSource` 权威定义在 `frontend/src/features/stock-research/stockResearchTypes.ts`；`marketWorkspaceUrlState.ts` 从该文件导入并重新导出，依赖方向为 market-workspace → stock-research（禁止反向依赖）；`StockResearchWorkspace` 通过 `toolbar`/`rightPanel`/`showRightPanel`/`chartColumnProps` 可选 props 支持详情页结构面板开关和截图模式属性；`/capture/stock/:symbol` 完全独立，不使用 `useStockResearchData`/`StockResearchWorkspace`/`apiClient`。
+16. 普通用户研究上下文面板：`/market` 右栏 `ResearchContextPanel` 在 `event_id` 存在时调用 `useStrategyEventDetail` 显示事件时间、类型（通俗解释）、关联价格、关键证据；无 `event_id` 时使用 `useStockResearchData` 已有 events 中的最新事件（`LatestEventCard`）；面板只渲染 `EventExplanationCard`/`LatestEventCard`/`StructureSummaryCard`/`KeyRangeCard`，不挂载 `StockStructuralStatePanel`；面板关闭（`rightPanelCollapsed`）时不挂载 hooks、不发请求；普通用户不显示内部字段名、算法参数、JSON 或商业机密。
+17. 管理员调试路由独立：原始 factor/feature/JSON 仅在 `/admin/stock-debug` 和 `/admin/stock-debug/:symbol`（`AdminRoute` + `AdminAppShell` 下）的 `AdminStockDebugPage` 中展示，复用 `MarketInstrumentPane`/`useStockResearchData`/`StockResearchWorkspace`/`useResearchContext`/`AdminFactorDebugPanel`/`StockStructuralStatePanel`（`debug=true`）；`/market` 不得承载管理员调试能力，`debug` 不在 `/market` URL 契约中；`/market?debug=1` 管理员访问时重定向到 `/admin/stock-debug/:symbol`，普通用户忽略并清除。
+18. 研究上下文查询入口与纯函数：`features/research-context/` 含 `ResearchContextPanel`/`EventExplanationCard`/`StructureSummaryCard`/`KeyRangeCard`/`LatestEventCard`/`AdminFactorDebugPanel`/`useResearchContext`/`buildStructureSummary`/`buildUserEventExplanation`；`useResearchContext` 复用现有 `useStrategyEventDetail`/`useStructuralFactors`/`useTemporalFeatures`（React Query 按 queryKey 去重，不产生重复请求）；`buildStructureSummary` 从 `primary[timeframe].cost_position` 等真实 DTO 路径提取结构状态摘要；`buildUserEventExplanation` 只消费白名单字段并校验 `event.instrument_id` 与 `currentInstrumentId` 一致性（不一致时隐藏价格）；不新增后端算法，接口缺失时停止该小项并报告，禁止伪造数据；`ScreenerPage` 查看详情进入 `/market?scope=market&symbol=...&source=selection&strategy=dsa_selector&returnTo=...`，`MessagesPage` 有股票时进入 `/market?...&event_id=...`。
+
 ***
 
 ## 十三、质量门禁

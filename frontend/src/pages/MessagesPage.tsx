@@ -218,7 +218,7 @@ function parseDelivery(message: NotificationMessage): { label: string; pill: Del
 export default function MessagesPage() {
   const navigate = useNavigate()
   const toast = useToast.getState()
-  // [Messages] - 描述: 过程事件仅管理员可见（与 AppShell 管理员控制台导航同款判断）
+  // [Messages] - 描述: 过程事件仅管理员可见（与 AdminAppShell 管理员控制台导航同款判断）
   const isAdmin = useRoleStore((s) => s.isAdmin)
   // [Messages] - 描述: 支持 ?filter=unread 从角标进入未读筛选
   const [searchParams] = useSearchParams()
@@ -329,7 +329,7 @@ export default function MessagesPage() {
       } else if (m.message_type === 'system' || m.message_type === 'SYSTEM_ALERT') {
         navigateTarget = '/settings'
       } else if (instrumentCount === 1 && primary?.symbol) {
-        navigateTarget = `/stock/${primary.symbol}?event_id=${m.source_id || ''}`
+        navigateTarget = `/market?symbol=${primary.symbol}${m.source_id ? `&event_id=${m.source_id}` : ''}`
       }
 
       return {
@@ -612,7 +612,7 @@ export default function MessagesPage() {
                         onClick={() => {
                           setInstrumentDrawerOpen(false)
                           navigate(
-                            `/stock/${inst.symbol}?event_id=${drawerEventId || ''}`,
+                            `/market?symbol=${inst.symbol}${drawerEventId ? `&event_id=${drawerEventId}` : ''}`,
                           )
                         }}
                       >

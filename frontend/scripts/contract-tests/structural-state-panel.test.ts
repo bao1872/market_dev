@@ -292,22 +292,22 @@ test('Cost/Node card uses unambiguous position labels (V1.8 semantic fix)', () =
   )
 })
 
-// ===== 12. Swing 摘要卡使用 developing 标签（V1.10 developing swing 语义）=====
-test('test_swing_summary_uses_developing_labels', () => {
+// ===== 12. Swing 摘要卡使用 active 标签（V1.9 active swing 语义）=====
+test('test_swing_summary_uses_active_labels', () => {
   const src = readSource(PANEL_PATH)
 
-  // 摘要卡必须使用 developing 标签（当前正在发生的回落/反弹结构）
+  // 摘要卡必须使用 active 标签（当前正在发展的结构区间，跟随最新价格）
   assert.ok(
-    src.includes('developing_swing_high') || src.includes('Developing high'),
-    'Swing 摘要卡必须使用 developing_swing_high 或 Developing high 标签（V1.10 developing swing 语义）',
+    src.includes('active_swing_high') || src.includes('Active high'),
+    'Swing 摘要卡必须使用 active_swing_high 或 Active high 标签（V1.9 active swing 语义）',
   )
   assert.ok(
-    src.includes('developing_swing_low') || src.includes('Developing low'),
-    'Swing 摘要卡必须使用 developing_swing_low 或 Developing low 标签（V1.10 developing swing 语义）',
+    src.includes('active_swing_low') || src.includes('Active low'),
+    'Swing 摘要卡必须使用 active_swing_low 或 Active low 标签（V1.9 active swing 语义）',
   )
   assert.ok(
-    src.includes('price_position_in_developing_swing_0_1') || src.includes('Developing 位置'),
-    'Swing 摘要卡必须使用 price_position_in_developing_swing_0_1 或 Developing 位置 标签（V1.10 developing swing 位置）',
+    src.includes('price_position_in_active_swing_0_1') || src.includes('Active 位置'),
+    'Swing 摘要卡必须使用 price_position_in_active_swing_0_1 或 Active 位置 标签（V1.9 active swing 位置）',
   )
 
   // 提取 Swing 摘要卡（CARDS 配置中的 swing_position 部分）
@@ -319,47 +319,43 @@ test('test_swing_summary_uses_developing_labels', () => {
     : src.length
   const swingCardSrc = src.slice(swingStart, swingEnd)
 
-  // 摘要卡不得包含 Active 字段作为主字段（V1.10 改用 developing，active 在明细 JSON）
+  // 摘要卡不得包含 confirmed 字段作为主字段（confirmed pivot 在明细 JSON）
   assert.ok(
-    !/'Active high'/.test(swingCardSrc) && !/'Active low'/.test(swingCardSrc),
-    'Swing 摘要卡不得出现 Active high/Active low 作为主字段（V1.10 改用 developing）',
+    !/'confirmed_swing_high'/.test(swingCardSrc) && !/"confirmed_swing_high"/.test(swingCardSrc),
+    'Swing 摘要卡不得出现 confirmed_swing_high 作为主字段（confirmed pivot 在明细 JSON）',
   )
   assert.ok(
-    !/'Active 位置/.test(swingCardSrc),
-    'Swing 摘要卡不得出现 Active 位置 作为主字段（V1.10 改用 developing）',
+    !/'confirmed_swing_low'/.test(swingCardSrc) && !/"confirmed_swing_low"/.test(swingCardSrc),
+    'Swing 摘要卡不得出现 confirmed_swing_low 作为主字段（confirmed pivot 在明细 JSON）',
   )
 
-  // 禁止模糊标签（与 confirmed / active 混淆）
+  // 禁止模糊标签
   assert.ok(
     !src.includes('最近 swing high'),
-    'Swing 摘要卡不得使用模糊标签「最近 swing high」（应使用 Developing high）',
+    'Swing 摘要卡不得使用模糊标签「最近 swing high」（应使用 Active high）',
   )
   assert.ok(
     !src.includes('最近 swing low'),
-    'Swing 摘要卡不得使用模糊标签「最近 swing low」（应使用 Developing low）',
+    'Swing 摘要卡不得使用模糊标签「最近 swing low」（应使用 Active low）',
   )
 })
 
-// ===== 13. active major leg / confirmed pivot 只在明细（摘要卡不作为显示标签）=====
-test('test_active_confirmed_only_in_detail', () => {
+// ===== 13. confirmed pivot 只在明细（摘要卡不作为显示标签）=====
+test('test_confirmed_only_in_detail', () => {
   const src = readSource(PANEL_PATH)
 
-  // 摘要卡片（CARDS 配置）不得包含 confirmed_swing_high 或 active_swing_high 作为显示标签/键
-  // active major leg / confirmed pivot 字段只在「结构因子明细」折叠卡片的 JSON 中可见
+  // 摘要卡片（CARDS 配置）不得包含 confirmed_swing_high 作为显示标签/键
+  // confirmed pivot 字段只在「结构因子明细」折叠卡片的 JSON 中可见
   assert.ok(
     !src.includes("'confirmed_swing_high'") && !src.includes('"confirmed_swing_high"'),
     'Swing 摘要卡不得包含 confirmed_swing_high 作为显示标签（confirmed pivot 只在 JSON 明细中）',
   )
   assert.ok(
-    !src.includes("'active_swing_high'") && !src.includes('"active_swing_high"'),
-    'Swing 摘要卡不得包含 active_swing_high 作为显示标签（active major leg 只在 JSON 明细中）',
-  )
-  assert.ok(
-    !src.includes("'active_swing_low'") && !src.includes('"active_swing_low"'),
-    'Swing 摘要卡不得包含 active_swing_low 作为显示标签（active major leg 只在 JSON 明细中）',
+    !src.includes("'confirmed_swing_low'") && !src.includes('"confirmed_swing_low"'),
+    'Swing 摘要卡不得包含 confirmed_swing_low 作为显示标签（confirmed pivot 只在 JSON 明细中）',
   )
 
-  // 源码必须包含 confirmed / active 字样（在明细注释/标签中可见）
+  // 源码必须包含 confirmed 字样（在明细注释/标签中可见）
   assert.ok(
     /confirmed/i.test(src),
     '源码必须包含 confirmed 字样（confirmed pivot 在明细部分可见，不在摘要卡）',

@@ -1791,6 +1791,24 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
   background: #0d1118;
 }
 
+// 错误状态：instrument/bars/indicators 加载失败时明确提示，不伪装为空图
+.tv-chart-error {
+  flex-direction: column;
+  gap: 12px;
+  color: #ff6b6b;
+}
+
+.tv-chart-retry {
+  padding: 6px 16px;
+  border: 1px solid #ff6b6b;
+  border-radius: 4px;
+  background: transparent;
+  color: #ff6b6b;
+  font-size: 12px;
+  cursor: pointer;
+  &:hover { background: rgba(255, 107, 107, 0.1); }
+}
+
 // Auth 面板内表单细节样式补充（禁止内联 style，用类名覆盖原型中的内联样式）
 .auth-panel .toggle-row { border: 0; padding: 8px 0; }
 .auth-panel .toggle-row label { display: flex; gap: 7px; align-items: center; color: v.$color-muted; font-size: 11px; cursor: pointer; }

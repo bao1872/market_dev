@@ -2,6 +2,51 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-11
+
+- CHANGE-20260711-005: 统一行情工作区 P0/P1 收口修正
+  - P0：`/admin/stock-debug` 独立管理员调试路由；`debug` 从 `/market` URL 契约移除；`ResearchContextPanel` 只渲染 4 张用户卡
+  - P1：新建 `buildStructureSummary`/`buildUserEventExplanation` 纯函数（DTO 路径修正 + instrument mismatch 校验）；`normalizeInternalReturnTo` returnTo 安全校验
+  - AGENTS §12.14 重写为长期规则（删除阶段名称/已删除文件引用/debug 矛盾）
+  - docs/current/04/05 更新；code-doc-alignment 新增 ALIGN-040
+  - 119 tests pass、tsc/eslint 0 errors、vite build PASS、4 docs checks PASS
+  - 不改后端/API/DB/Worker
+
+- CHANGE-20260711-004: 统一行情工作区原型最终对齐（阶段五）
+  - ScreenerPage/MessagesPage 查看详情改进入 `/market`（含 returnTo/event_id）；`/market` URL 扩展 debug/returnTo
+  - 新建 `features/research-context/`：ResearchContextPanel/EventExplanationCard/StructureSummaryCard/AdminFactorDebugPanel/useResearchContext
+  - 普通用户看事件通俗解释和结构状态人类可读总结；管理员 `debug=1` 看原始 factor/feature/JSON
+  - `StockStructuralStatePanel` 新增 debug props；按三张原型 PNG 重做 CSS（响应式+focus-visible）
+  - 删除旧 WatchlistPage.tsx 和 IndexPage.tsx（死代码）及对应契约测试
+  - 181 tests pass、tsc/eslint 0 errors、vite build PASS、4 docs checks PASS
+  - 不改后端/API/DB/Worker/CaptureStockPage
+
+- CHANGE-20260711-003: StockDetailPage 共享研究核心重构（阶段四）
+  - `StockDetailPage` 降为路由适配器（813→453 行），复用 `useStockResearchData` + `StockResearchWorkspace`
+  - 新建 `stockResearchTypes.ts` 共享类型；依赖方向修正为 market-workspace → stock-research
+  - 新建 `useStockDetailActions.ts`（自选/上下切换/memo）+ `useStockDetailFeishu.ts`（截图轮询/超时/清理）
+  - `StockResearchWorkspace` 新增 toolbar/rightPanel/chartColumnProps 可选 props
+  - `quoteStatus`/`barsStatus` 统一：不显示"日线回退"，partial 含当前周期
+  - 13 项纯函数测试 + 21 项回归测试 + 39 项 CDP E2E 全 PASS
+  - 不改后端/API/DB/Worker/CaptureStockPage
+
+- CHANGE-20260711-002: 统一行情工作区第一版（阶段三）
+  - `/market` 渲染 `MarketWorkspacePage`（三栏：左列表+中K线+右结构状态可收起）
+  - `useStockResearchData` 集中 bars/indicators/quote/events/memo 请求；`StockResearchWorkspace` 复用组件
+  - URL 状态 `scope=watchlist|market&symbol=xxx&timeframe=1d`；切换股票不整页刷新
+  - `detailNavigation` watchlist fallback 改为 `/market?scope=watchlist`
+  - 图表 timeframe 仅展示，不改 1d+15m 监控配置或 1m 事件触发
+  - 7 项 URL 状态测试 + 32 项总测试全通过；tsc/eslint 0 errors；vite build 通过
+  - 不改后端/API/数据模型/Worker；不删除 IndexPage/ScreenerPage/CaptureStockPage
+
+- CHANGE-20260711-001: 用户/管理员壳层与导航路由拆分（阶段二）
+  - 普通用户主入口 `/market`（复用 WatchlistPage）；`/overview`→`/market`、`/watchlist`→`/market?scope=watchlist` 兼容重定向
+  - `UserAppShell`（顶栏品牌+一级导航行情/趋势选股+账户菜单；无左侧栏）；`AdminAppShell`（独立管理导航+账户菜单）；`ProtectedLayout` 只返回 Outlet
+  - `AccountMenu` 下拉（消息/设置/管理后台仅admin/退出）；`appNavigation.ts` 集中路由常量
+  - 登录/续期/兜底/AdminRoute 重定向 `/overview`→`/market`；Capture 路由不变
+  - 新增 6 项导航阻断测试；tsc 0 errors；eslint 0 errors；vite build 通过
+  - 不改后端/API/数据模型/Worker；不删除 IndexPage/WatchlistPage/ScreenerPage/StockDetailPage
+
 ## 2026-07-10
 
 - CHANGE-20260710-002: 恢复飞书盘中截图 1d 业务契约，分离截图实时性与监控计算口径

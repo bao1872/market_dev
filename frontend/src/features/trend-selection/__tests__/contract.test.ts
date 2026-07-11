@@ -3,14 +3,18 @@
 //   覆盖：
 //   1. 主页趋势字段必须是趋势选股字段的子集（visibleColumnKeys 机制）
 //   2. 同 key 的标题、dataType 必须完全一致（源码扫描 columns.tsx）
-//   3. 主页自选字段必须来自 watchlist-monitor 共享定义（IndexPage 不重新定义自选列）
-//   4. 禁止 IndexPage 重新出现 DSA 字段转换和独立列定义（源码扫描）
-//   5. visibleColumnKeys 按 column key 过滤，不依赖数组位置
-//   6. adapter 唯一性：IndexPage 与 ScreenerPage 共用同一 adapter
+//   3. visibleColumnKeys 按 column key 过滤，不依赖数组位置
+//   4. ScreenerPage dsaColumns 必须引用共享列定义
+//   5. 颜色规则一致性：涨红跌绿（.market-up/.market-down）
+//   6. 完整列集每列含必需字段
+//   7. adapter 工具函数完整性与格式正确性
+//
+// 注意：IndexPage.tsx 和 WatchlistPage.tsx 已删除（统一行情工作区改造），
+//   原 IndexPage 专属契约测试已移除，ScreenerPage 契约测试保留。
 //
 // 测试策略：
 // - 运行时测试：直接导入 adapters.ts / config.ts（仅类型导入，Node --experimental-strip-types 可执行）
-// - 源码扫描测试：读取 columns.tsx / IndexPage.tsx / ScreenerPage.tsx 文本，正则验证契约
+// - 源码扫描测试：读取 columns.tsx / ScreenerPage.tsx 文本，正则验证契约
 //   （columns.tsx 含 JSX 无法被 Node 直接执行，改用源码扫描验证列定义契约）
 
 import { strict as assert } from 'node:assert'
@@ -35,7 +39,6 @@ import { INDEX_VISIBLE_COLUMN_KEYS, visibleColumnKeys } from '../config.ts'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 const COLUMNS_PATH = join(__dirname, '..', 'columns.tsx')
-const INDEX_PAGE_PATH = join(__dirname, '..', '..', '..', 'pages', 'IndexPage.tsx')
 const SCREENER_PAGE_PATH = join(__dirname, '..', '..', '..', 'pages', 'ScreenerPage.tsx')
 
 function readSource(p: string): string {
@@ -187,67 +190,7 @@ test('导出唯一的 StrategyResult→TrendSelectionRow adapter', () => {
   assert.equal(row3.watched, false, 'watchedIds 未传时 watched 默认 false')
 })
 
-// ===== 6. 禁止 IndexPage 重新出现 DSA 字段转换和独立列定义 =====
-test('IndexPage 不再包含独立 selectionColumns / toSelectionRow 定义', () => {
-  const src = readSource(INDEX_PAGE_PATH)
-  // [趋势选股] - 描述: spec 第七节明确禁止 IndexPage 重新手写另一套 SelectionRow 和 selectionColumns
-  // 检查 1：禁止手写 selectionColumns 数组（useMemo(() => [ ...列定义对象... ])）
-  // 允许：const selectionColumns = useMemo(() => visibleColumnKeys(...), ...)（引用共享模块）
-  assert.ok(
-    !/const\s+selectionColumns\s*=\s*useMemo\(\s*\(\)\s*=>\s*\[/.test(src),
-    'IndexPage 禁止手写 selectionColumns 数组（应改用 visibleColumnKeys + getTrendSelectionColumns）',
-  )
-  // 检查 2：禁止定义自己的 adapter
-  assert.ok(
-    !/const\s+toSelectionRow\b/.test(src),
-    'IndexPage 禁止重新定义 toSelectionRow（应改用 features/trend-selection adapter）',
-  )
-  // 检查 3：禁止定义自己的行接口
-  assert.ok(
-    !/interface\s+SelectionRow\b/.test(src),
-    'IndexPage 禁止重新定义 SelectionRow 接口（应改用 TrendSelectionRow）',
-  )
-  // 检查 4：禁止出现旧版 IndexPage 专属列 key（direction/duration/avg_return/total_return）
-  // 这些 key 已合并到共享模块的 dsa_dir_bars/vwap_ret_avg/vwap_ret_total
-  assert.ok(
-    !/key:\s*['"]direction['"]/.test(src),
-    'IndexPage 禁止出现旧版 direction 列（已合并到共享模块 dsa_dir_bars）',
-  )
-  assert.ok(
-    !/key:\s*['"]duration['"]/.test(src),
-    'IndexPage 禁止出现旧版 duration 列（已合并到共享模块 dsa_dir_bars）',
-  )
-  assert.ok(
-    !/key:\s*['"]avg_return['"]/.test(src),
-    'IndexPage 禁止出现旧版 avg_return 列（已统一为共享模块 vwap_ret_avg）',
-  )
-})
-
-// ===== 7. IndexPage 必须导入 features/trend-selection =====
-test('IndexPage 导入 features/trend-selection 共享模块', () => {
-  const src = readSource(INDEX_PAGE_PATH)
-  assert.ok(
-    src.includes("from '@/features/trend-selection'") ||
-      src.includes("from '@/features/trend-selection/"),
-    'IndexPage 必须从 @/features/trend-selection 导入共享列定义',
-  )
-})
-
-// ===== 8. IndexPage 不得重复实现 DSA 字段候选 key 列表 =====
-test('IndexPage 不再重复实现 DSA 字段候选 key 列表', () => {
-  const src = readSource(INDEX_PAGE_PATH)
-  // [趋势选股] - 描述: DSA 字段候选 key 列表（如 dsa_dir_bars/dsa_duration 等）属于 adapter 职责
-  assert.ok(
-    !src.includes("'dsa_dir_bars', 'dsa_duration'"),
-    'IndexPage 不应重复出现 DSA 字段候选 key 列表（已迁移到 features/trend-selection/adapters）',
-  )
-  assert.ok(
-    !src.includes("'vwap_ret_avg', 'dsa_avg_return'"),
-    'IndexPage 不应重复出现 vwap_ret_avg 候选 key 列表',
-  )
-})
-
-// ===== 9. ScreenerPage 的 dsaColumns 必须引用共享列定义 =====
+// ===== 6. ScreenerPage 的 dsaColumns 必须引用共享列定义 =====
 test('ScreenerPage dsaColumns 引用 features/trend-selection 共享列定义', () => {
   const src = readSource(SCREENER_PAGE_PATH)
   assert.ok(
@@ -257,21 +200,7 @@ test('ScreenerPage dsaColumns 引用 features/trend-selection 共享列定义', 
   )
 })
 
-// ===== 10. IndexPage 自选字段必须来自 watchlist-monitor 共享定义 =====
-test('IndexPage 自选监控使用 watchlist-monitor 共享组件，不重新定义自选列', () => {
-  const src = readSource(INDEX_PAGE_PATH)
-  // [自选监控] - 描述: IndexPage 必须通过 WatchlistMonitorTable 共享组件引用自选列定义
-  assert.ok(
-    src.includes('WatchlistMonitorTable'),
-    'IndexPage 必须使用 WatchlistMonitorTable 共享组件渲染自选监控',
-  )
-  assert.ok(
-    !/const\s+\w*[Ww]atchlist\w*Columns\b/.test(src),
-    'IndexPage 禁止重新定义 watchlist 列（应通过 WatchlistMonitorTable 共享组件引用）',
-  )
-})
-
-// ===== 11. 颜色规则一致性：涨红跌绿（.market-up/.market-down） =====
+// ===== 7. 颜色规则一致性：涨红跌绿（.market-up/.market-down） =====
 test('列定义颜色规则遵循涨红跌绿（market-up/market-down）', () => {
   const src = readSource(COLUMNS_PATH)
   // [趋势选股] - 描述: 涨红跌绿规则，正数 market-up，负数 market-down，零或未知 market-flat
@@ -280,7 +209,7 @@ test('列定义颜色规则遵循涨红跌绿（market-up/market-down）', () =>
   assert.ok(src.includes('market-flat'), '列渲染必须包含 market-flat（平/未知）')
 })
 
-// ===== 12. 完整列集每列必须含 key/title/dataType/sortable/filterable =====
+// ===== 8. 完整列集每列必须含 key/title/dataType/sortable/filterable =====
 test('完整列集每列含必需字段（key/title/dataType/sortable/filterable）', () => {
   const src = readSource(COLUMNS_PATH)
   const keys = extractColumnKeys(src)
@@ -299,7 +228,7 @@ test('完整列集每列含必需字段（key/title/dataType/sortable/filterable
   }
 })
 
-// ===== 13. adapter 工具函数完整性与格式正确性 =====
+// ===== 9. adapter 工具函数完整性与格式正确性 =====
 test('adapter 工具函数（pickPayload/toNum/fmtNum/fmtPct/fmtRatioAsPct/fmtChange/changePctColorClass）', () => {
   // pickPayload：按候选 key 顺序取第一个非空值
   assert.equal(pickPayload({ a: null, b: '', c: 42 }, ['a', 'b', 'c']), 42)
