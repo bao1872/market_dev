@@ -1,10 +1,10 @@
 // [Navigation] - 描述: 路由/导航常量与兼容重定向契约测试
 // 用法：node --experimental-strip-types --test src/navigation/__tests__/appNavigation.test.ts
 //
-// 覆盖（对应阶段二 6 项阻断验收的纯逻辑部分）：
-//   1. 用户一级导航仅含 行情/趋势选股，不含消息/设置
+// 覆盖（PRD V1.0 阶段一路由与壳层）：
+//   1. 用户一级导航仅含 行情/复盘，不含消息/设置
 //   2. 管理后台入口仅管理员可见（账户菜单按 isAdmin 过滤）
-//   3. 旧路由兼容重定向：/overview → /market，/watchlist → /market?scope=watchlist
+//   3. 旧路由兼容重定向：/overview → /market，/watchlist → /market?scope=watchlist，/screener → /market
 //   4. 管理员路由集中于 /admin/*（ADMIN_NAV_ITEMS）
 //   5. Capture 路由位于两套壳层之外（不在用户/管理员导航中）
 //   6. 默认登录/兜底入口为 /market
@@ -23,13 +23,14 @@ import {
   legacyRedirectEntries,
 } from '../appNavigation.ts'
 
-test('用户一级导航仅含行情与趋势选股，不含消息/设置', () => {
+test('用户一级导航仅含行情与复盘，不含消息/设置', () => {
   const paths = USER_NAV_ITEMS.map((i) => i.path)
-  assert.deepStrictEqual(paths, ['/market', '/screener'])
+  assert.deepStrictEqual(paths, ['/market', '/replay'])
   assert.ok(!paths.includes('/messages'))
   assert.ok(!paths.includes('/settings'))
   assert.ok(!paths.includes('/overview'))
   assert.ok(!paths.includes('/watchlist'))
+  assert.ok(!paths.includes('/screener'))
 })
 
 test('管理后台入口仅管理员可见（账户菜单按 isAdmin 过滤）', () => {
@@ -48,13 +49,15 @@ test('管理后台入口仅管理员可见（账户菜单按 isAdmin 过滤）',
   assert.ok(adminEntry?.adminOnly === true)
 })
 
-test('旧路由兼容重定向：/overview → /market，/watchlist → /market?scope=watchlist', () => {
+test('旧路由兼容重定向：/overview → /market，/watchlist → /market?scope=watchlist，/screener → /market', () => {
   assert.equal(LEGACY_REDIRECTS['/overview'], '/market')
   assert.equal(LEGACY_REDIRECTS['/watchlist'], '/market?scope=watchlist')
+  assert.equal(LEGACY_REDIRECTS['/screener'], '/market')
   const entries = legacyRedirectEntries()
   assert.deepStrictEqual(entries, [
     { path: '/overview', to: '/market' },
     { path: '/watchlist', to: '/market?scope=watchlist' },
+    { path: '/screener', to: '/market' },
   ])
 })
 

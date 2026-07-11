@@ -1,17 +1,18 @@
 // [Navigation] - 描述: 单一导航/路由常量真源（避免路径散落在各页面）
-// 阶段二（壳层与导航拆分）确立：
+// PRD V1.0 阶段一（路由与壳层）确立：
 //   普通用户主入口 = /market（行情，渲染 MarketWorkspacePage）
-//   趋势选股保持独立一级页面 /screener
+//   复盘占位路由 /replay（功能规划中，不伪造业务）
 //   消息 /messages、设置 /settings 进入右上角账户菜单
 //   管理后台独立壳层 AdminAppShell，承载 /admin/*
 //   Capture 路由 /capture/stock/:symbol 位于两套壳层之外
-//   旧路由 /overview → /market、/watchlist → /market?scope=watchlist 仅作兼容重定向
+//   旧路由 /overview → /market、/watchlist → /market?scope=watchlist、/screener → /market 仅作兼容重定向
 //   旧 WatchlistPage.tsx 和 IndexPage.tsx 已删除（统一行情工作区改造）
 // 本文件为纯 TS（无 React 依赖），可被 node --test 直接运行，便于路由契约测试。
 
 export const APP_ROUTES = {
   market: '/market',
   screener: '/screener',
+  replay: '/replay',
   messages: '/messages',
   settings: '/settings',
   admin: '/admin',
@@ -40,10 +41,10 @@ export interface AppNavItem {
   label: string
 }
 
-// 普通用户一级导航（仅行情 + 趋势选股；消息/设置不在此处）
+// 普通用户一级导航（行情 + 复盘；消息/设置不在此处）
 export const USER_NAV_ITEMS: AppNavItem[] = [
   { path: APP_ROUTES.market, label: '行情' },
-  { path: APP_ROUTES.screener, label: '趋势选股' },
+  { path: APP_ROUTES.replay, label: '复盘' },
 ]
 
 // 管理员控制台导航（仅 AdminAppShell 侧栏使用）
@@ -103,6 +104,7 @@ export function getAccountMenuItemsForVariant(
 export const LEGACY_REDIRECTS: Record<string, string> = {
   '/overview': APP_ROUTES.market,
   '/watchlist': `${APP_ROUTES.market}?scope=watchlist`,
+  '/screener': APP_ROUTES.market,
 }
 
 // 生成 react-router 重定向路由项（供 App.tsx 使用，保持单一真源）

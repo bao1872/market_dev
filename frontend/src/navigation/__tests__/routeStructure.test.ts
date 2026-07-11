@@ -1,12 +1,12 @@
 // [RouteStructure] - 描述: 路由层级契约测试（基于纯结构 ROUTE_STRUCTURE 断言）
 // 用法：node --experimental-strip-types --test src/navigation/__tests__/routeStructure.test.ts
 //
-// 覆盖（修复4 真实路由测试）：
+// 覆盖（PRD V1.0 阶段一路由与壳层）：
 //   1. Capture 路由位于 ProtectedLayout 之外（无 protected/subscriber/admin 守卫祖先）
-//   2. /market /screener /stock/:symbol 经过 UserAppShell + SubscriberRoute
+//   2. /market /replay /stock/:symbol 经过 UserAppShell + SubscriberRoute
 //   3. /messages /settings 经过 UserAppShell 但不经过 SubscriberRoute
 //   4. /admin/* 经过 AdminRoute + AdminAppShell
-//   5. /overview /watchlist 为兼容重定向
+//   5. /overview /watchlist /screener 为兼容重定向
 //   6. 兜底重定向到 /market
 //   7. Capture 路由不渲染任何壳层（user/admin 均不在祖先链）
 
@@ -39,9 +39,19 @@ test('/market 经过 UserAppShell + SubscriberRoute', () => {
   assert.ok(hasGuardInChain(ROUTE_STRUCTURE, '/market', 'subscriber'))
 })
 
-test('/screener 经过 UserAppShell + SubscriberRoute', () => {
-  assert.ok(hasShellInChain(ROUTE_STRUCTURE, '/screener', 'user'))
-  assert.ok(hasGuardInChain(ROUTE_STRUCTURE, '/screener', 'subscriber'))
+test('/replay 经过 UserAppShell + SubscriberRoute', () => {
+  assert.ok(hasShellInChain(ROUTE_STRUCTURE, '/replay', 'user'))
+  assert.ok(hasGuardInChain(ROUTE_STRUCTURE, '/replay', 'subscriber'))
+})
+
+test('/screener 为兼容重定向（不再为独立页面）', () => {
+  const screener = findRouteNode(ROUTE_STRUCTURE, '/screener')
+  assert.ok(screener, '/screener 重定向路由必须存在')
+  assert.equal(screener.node.guard, 'redirect')
+  assert.equal(screener.node.redirectTo, '/market')
+  // /screener 不再经过用户壳层或订阅守卫
+  assert.ok(!hasShellInChain(ROUTE_STRUCTURE, '/screener', 'user'))
+  assert.ok(!hasGuardInChain(ROUTE_STRUCTURE, '/screener', 'subscriber'))
 })
 
 test('/stock/:symbol 经过 UserAppShell + SubscriberRoute', () => {

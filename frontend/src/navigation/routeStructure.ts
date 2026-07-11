@@ -39,7 +39,7 @@ export const ROUTE_STRUCTURE: RouteNode[] = [
             shell: 'user',
             children: [
               { path: '/market', guard: 'subscriber', shell: 'user' },
-              { path: '/screener', guard: 'subscriber', shell: 'user' },
+              { path: '/replay', guard: 'subscriber', shell: 'user' },
               { path: '/stock/:symbol', guard: 'subscriber', shell: 'user' },
             ],
           },
@@ -73,6 +73,7 @@ export const ROUTE_STRUCTURE: RouteNode[] = [
       // 兼容重定向
       { path: '/overview', guard: 'redirect', shell: 'none', redirectTo: '/market' },
       { path: '/watchlist', guard: 'redirect', shell: 'none', redirectTo: '/market?scope=watchlist' },
+      { path: '/screener', guard: 'redirect', shell: 'none', redirectTo: '/market' },
     ],
   },
   // 兜底

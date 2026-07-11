@@ -1,8 +1,8 @@
 // [Auth] - 描述: 路由配置 + 受保护路由守卫 + Admin/Subscriber 角色守卫
 // 公开路由：/（门户页，lazy 加载）, /login, /subscription-expired（canonical），/membership-expired（重定向）
 // 受保护路由：认证由 ProtectedLayout 负责（仅校验 auth + access profile，不再固定渲染同一壳层）
-// 布局壳拆分（阶段二）：
-//   UserAppShell   承载普通用户 /market /screener /stock/:symbol /messages /settings
+// 布局壳拆分（PRD V1.0 阶段一）：
+//   UserAppShell   承载普通用户 /market /replay /stock/:symbol /messages /settings
 //   AdminAppShell  承载管理员 /admin/*（继续使用 AdminRoute 后端权限上下文）
 //   /capture/stock/:symbol 位于两套壳层之外（只使用 captureClient，不经过任何壳层）
 // SubscriberRoute：有效订阅或 admin 豁免，否则重定向到 /subscription-expired
@@ -16,7 +16,7 @@ import { legacyRedirectEntries, DEFAULT_ENTRY } from './navigation/appNavigation
 import LoginPage from './pages/LoginPage'
 import SubscriptionExpiredPage from './pages/SubscriptionExpiredPage'
 import MarketWorkspacePage from './features/market-workspace/MarketWorkspacePage'
-import ScreenerPage from './pages/ScreenerPage'
+import ReplayPage from './pages/ReplayPage'
 import StockDetailPage from './pages/StockDetailPage'
 import CaptureStockPage from './pages/CaptureStockPage'
 import SettingsPage from './pages/SettingsPage'
@@ -64,7 +64,7 @@ function ProtectedLayout() {
 
 // [Auth] - 描述: SubscriberRoute 订阅守卫 - 非有效订阅用户重定向到 /subscription-expired（canonical）
 // admin 用户豁免（is_admin=true 直接通过，不强制订阅）
-// 用于 /market /screener /stock/:symbol 等需有效订阅的核心业务路由
+// 用于 /market /replay /stock/:symbol 等需有效订阅的核心业务路由
 function SubscriberRoute() {
   const user = useAuthStore((s) => s.user)
   // admin 豁免：管理员无需有效订阅即可访问所有页面
@@ -88,7 +88,7 @@ function AdminRoute() {
   return <Outlet />
 }
 
-// 旧路由兼容重定向（/overview → /market，/watchlist → /market?scope=watchlist）
+// 旧路由兼容重定向（/overview → /market，/watchlist → /market?scope=watchlist，/screener → /market）
 const redirectRoutes = legacyRedirectEntries().map(({ path, to }) => ({
   path,
   element: <Navigate to={to} replace />,
@@ -119,7 +119,7 @@ export const routeConfig: RouteObject[] = [
             element: <SubscriberRoute />,
             children: [
               { path: '/market', element: <MarketWorkspacePage /> },
-              { path: '/screener', element: <ScreenerPage /> },
+              { path: '/replay', element: <ReplayPage /> },
               { path: '/stock/:symbol', element: <StockDetailPage /> },
             ],
           },
