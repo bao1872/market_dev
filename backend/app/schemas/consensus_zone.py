@@ -10,6 +10,10 @@ Phase 5 实现：基于成交量分布的峰簇识别 + 成交量加权百分位
 - timeframe: 来源周期（1d 主结构 / 15m 细化）
 - asOf: 截止时间（因果性保证：timestamp <= as_of）
 - algorithmVersion: 算法版本
+- dataVersion: 数据版本（真实 bar 版本/hash，缓存键组成部分）
+- overlapRuleVersion: 重叠区合并规则版本
+- refinementTimeframe: 细化分布周期（"15m" 或 None）
+- priceMin/priceMax: 全局价格区间（供前端 Y 轴范围使用）
 """
 
 # ruff: noqa: N815 - camelCase 字段为前端 JSON API 契约
@@ -37,11 +41,22 @@ class ConsensusZoneResult(BaseModel):
     timeframe: str = Field(..., description="来源周期（1d/15m）")
     asOf: str = Field(..., description="截止时间 ISO（因果性：timestamp <= as_of）")
     algorithmVersion: str = Field(..., description="算法版本")
+    dataVersion: str = Field(
+        ..., description="数据版本（真实 bar hash，缓存键组成部分）"
+    )
+    overlapRuleVersion: str = Field(
+        ..., description="重叠区合并规则版本"
+    )
+    refinementTimeframe: str | None = Field(
+        None, description="细化分布周期（15m 表示已应用 15m 细化，None 表示仅日线主结构）"
+    )
     clusters: list[ConsensusCluster] = Field(
         default_factory=list, description="识别的峰簇列表（按成交量降序）"
     )
     totalVolume: float = Field(..., description="总成交量")
     binCount: int = Field(..., description="价格分箱数")
+    priceMin: float = Field(..., description="全局价格下界（供前端 Y 轴范围使用）")
+    priceMax: float = Field(..., description="全局价格上界（供前端 Y 轴范围使用）")
     isAvailable: bool = Field(
         ..., description="是否可用（数据不足时为 False）"
     )

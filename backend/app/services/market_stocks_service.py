@@ -379,15 +379,50 @@ async def get_market_stocks(
     base_result = await db.execute(base_stmt)
     base_rows = base_result.all()
 
+    # 空页边界：page 超出总页数时 base_rows 为空，但仍需返回真实 total 和全局 as_of
     if not base_rows:
+        # 仍执行 count 查询获取真实 total
+        count_stmt_empty = select(func.count()).select_from(Instrument)
+        if scope == "watchlist":
+            count_stmt_empty = (
+                select(func.count())
+                .select_from(Instrument)
+                .join(
+                    UserWatchlistItem,
+                    (
+                        (UserWatchlistItem.instrument_id == Instrument.id)
+                        & (UserWatchlistItem.user_id == user_id)
+                        & (UserWatchlistItem.active.is_(True))
+                    ),
+                )
+            )
+        for cond in search_conditions:
+            count_stmt_empty = count_stmt_empty.where(cond)
+        for cond in board_conditions:
+            count_stmt_empty = count_stmt_empty.where(cond)
+        if state_cond is not None:
+            count_stmt_empty = count_stmt_empty.where(state_cond)
+        real_total = await db.scalar(count_stmt_empty) or 0
+
+        # 全局 as_of 标量查询（不随分页变化）
+        empty_price_as_of = await db.scalar(select(func.max(BarDaily.trade_date)))
+        empty_state_as_of = await db.scalar(
+            select(func.max(StockFeatureSnapshot.created_at)).where(
+                StockFeatureSnapshot.schema_version == 1
+            )
+        )
+        empty_boards_as_of = await db.scalar(
+            select(func.max(MarketBoard.updatedAt))
+        )
+
         return MarketStocksResponse(
             items=[],
             page=page,
             page_size=page_size,
-            total=0,
-            price_as_of=None,
-            state_as_of=None,
-            boards_as_of=None,
+            total=real_total,
+            price_as_of=empty_price_as_of.isoformat() if empty_price_as_of else None,
+            state_as_of=to_shanghai_iso(empty_state_as_of) if empty_state_as_of else None,
+            boards_as_of=to_shanghai_iso(empty_boards_as_of) if empty_boards_as_of else None,
         )
 
     instrument_ids = [row.id for row in base_rows]

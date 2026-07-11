@@ -2,6 +2,8 @@
 // PRD §6.1：行情/复盘、全局股票搜索、行情/自选分段按钮、筛选、通知、头像。
 // 本组件包含 scope 分段按钮 + 搜索输入 + 行业/概念/状态筛选器；通知/头像由 AppShell 顶栏承载。
 // 筛选器进入 URL（可分享、刷新恢复）；筛选变化时重置分页。
+// TODO(P1): 行业/概念筛选当前为文本输入（临时实现），后续应替换为板块目录 API +
+// 自动完成下拉，避免用户必须准确输入完整板块名。
 import { useState, useEffect, useCallback } from 'react'
 import clsx from 'clsx'
 import type { MarketScope, MarketStateFilter } from './marketWorkspaceUrlState'

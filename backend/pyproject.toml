@@ -46,6 +46,8 @@ dependencies = [
     # 仅在 worker 每日 17:00 调度中使用，不进入用户请求链
     # 固定版本 1.3.8（2025-03-16 最新稳定版），Docker 构建时 PIP_NO_CACHE_DIR=1
     "qstock==1.3.8",
+    # [Dependencies] - func_timeout 用于 qstock_fetcher 超时保护（直接 import，非传递依赖）
+    "func-timeout>=4.3.5",
 ]
 
 [project.optional-dependencies]

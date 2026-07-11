@@ -41,7 +41,7 @@ import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants.indicator_contract import INDICATOR_BARS
+from app.constants.indicator_contract import INDICATOR_BARS, NODE_CLUSTER_LOW_BARS
 from app.constants.strategy_keys import DSA_SELECTOR
 from app.models.instrument import Instrument
 from app.repositories.bar_repository import (
@@ -641,11 +641,10 @@ async def compute_all_indicators(
     data["sqzmom_lb"] = _to_json_safe(_truncate_lists(sqzmom_renamed, bars))
 
     # [ConsensusZone 主图] - 将筹码共识区作为全局图层注入 layers/data
-    # PRD V1.1 §7.4: 峰簇识别 + 成交量加权百分位 P10/P50/P90
-    # 数据源独立性（PRD 纠偏）：使用固定窗口日线（daily_bars, 250根），
-    # 不使用 macd_bars（随显示 timeframe/count 变化）。
-    # V1 算法版本：仅日线成交分布；15m 细化为未来版本，不宣称已实现。
-    # 缓存键含 symbol/as_of/"1d"/algo_version/data_version，显示周期切换不改变共识定义。
+    # PRD V1.1 §7.4 V2: 日线主结构（峰簇识别）+ 15m 细化（簇内重算 P10/P50/P90）
+    # 数据源独立性（PRD 纠偏）：日线固定 250 根，15m 固定窗口，不使用 macd_bars。
+    # 服务入口内部执行 filter_bars_by_as_of（因果性），显示周期不改变输入窗口。
+    # 缓存键含 symbol/as_of/"1d"/algo_version/data_version（动态 hash）。
     # 无数据/错误时只记录错误，不影响其他图层和 K线
     try:
         from app.services.consensus_zone_service import (
@@ -663,9 +662,16 @@ async def compute_all_indicators(
         else:
             as_of_str = today.isoformat()
 
-        # timeframe 固定 "1d"：ConsensusZone 定义不随用户切换显示周期而改变
+        # V2: 日线主结构 + 15m 细化
+        # 15m 固定输入窗口 = NODE_CLUSTER_LOW_BARS (4000根)，不随显示周期/count 变化
+        consensus_15m = (
+            bars_15min.tail(NODE_CLUSTER_LOW_BARS)
+            if not bars_15min.empty
+            else None
+        )
         consensus_result = await compute_and_cache_consensus_zone(
-            daily_bars, symbol, "1d", as_of_str,
+            daily_bars, symbol, as_of_str,
+            bars_15min=consensus_15m,
         )
 
         layers.append({

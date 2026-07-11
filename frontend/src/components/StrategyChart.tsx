@@ -1617,6 +1617,15 @@ function drawTrading(
           if (typeof v === 'number') priceCandidates.push(v)
         })
       }
+      // [ConsensusZone Y轴] - PRD V1.1 §7.4: 纵轴纳入 cluster lower/upper，避免裁剪
+      if (layer.layer_id === 'consensus_zone' && layers.consensus_zone) {
+        const zoneData = layerData as unknown as ConsensusZoneLayerData
+        if (zoneData?.isAvailable && zoneData.clusters) {
+          for (const c of zoneData.clusters) {
+            priceCandidates.push(c.lower, c.upper)
+          }
+        }
+      }
     })
   }
 

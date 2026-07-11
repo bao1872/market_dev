@@ -512,6 +512,27 @@ async def test_as_of_fields_null_when_no_data(market_stocks_client) -> None:
     assert data["price_as_of"] is None
 
 
+@pytest.mark.asyncio
+async def test_empty_page_returns_real_total_and_as_of(
+    market_stocks_client,
+) -> None:
+    """超出总页数的空页仍返回真实 total 和全局 as_of（不返回 total=0）。"""
+    client, _, _ = market_stocks_client
+    # 请求第 999 页（超出总页数）
+    response = await client.get(
+        "/market/stocks",
+        params={"scope": "market", "page": 999, "page_size": 20},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    # items 为空但 total 应为真实总数（market_stocks_client 创建了 3 只标的）
+    assert data["items"] == []
+    assert data["total"] >= 3
+    # page 和 page_size 仍为请求值
+    assert data["page"] == 999
+    assert data["page_size"] == 20
+
+
 # ===== P1: SQL 查询数量固定（5 条，不随 page_size 增长） =====
 
 
