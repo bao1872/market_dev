@@ -12,7 +12,7 @@ import { useSearchParams, useNavigate } from 'react-router-dom'
 import { MarketInstrumentPane } from './MarketInstrumentPane'
 import { StockResearchWorkspace } from '@/features/stock-research/StockResearchWorkspace'
 import { useStockResearchData } from '@/features/stock-research/useStockResearchData'
-import { StockStructuralStatePanel } from '@/components/StockStructuralStatePanel'
+import { ResearchContextPanel } from '@/features/research-context/ResearchContextPanel'
 import { useAuthStore } from '@/store/auth'
 import { resolveBackPath } from '@/pages/detailNavigation'
 import {
@@ -140,7 +140,7 @@ export default function MarketWorkspacePage() {
             {!rightPanelCollapsed && instrumentId && (
               <aside className={styles.rightPane}>
                 <div className={styles.rightPaneHeader}>
-                  <span className={styles.rightPaneTitle}>结构状态</span>
+                  <span className={styles.rightPaneTitle}>研究上下文</span>
                   {debug && <span className={styles.debugBadge}>调试模式</span>}
                   <button
                     className={styles.collapseBtn}
@@ -150,7 +150,11 @@ export default function MarketWorkspacePage() {
                     ›
                   </button>
                 </div>
-                <StockStructuralStatePanel instrumentId={instrumentId} debug={debug} />
+                <ResearchContextPanel
+                  instrumentId={instrumentId}
+                  eventId={eventId}
+                  debug={debug}
+                />
               </aside>
             )}
             {rightPanelCollapsed && (
