@@ -138,7 +138,7 @@ export default function MarketWorkspacePage() {
             </div>
             {/* 右栏：结构状态因子面板（可收起；收起时不挂载、不请求 structural/temporal 数据） */}
             {!rightPanelCollapsed && instrumentId && (
-              <aside className={styles.rightPane}>
+              <aside className={clsx(styles.rightPane, debug && styles.debugMode)}>
                 <div className={styles.rightPaneHeader}>
                   <span className={styles.rightPaneTitle}>研究上下文</span>
                   {debug && <span className={styles.debugBadge}>调试模式</span>}
