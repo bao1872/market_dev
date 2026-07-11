@@ -5,7 +5,7 @@
 //   - StructureSummaryCard（结构状态人类可读总结）
 //   - KeyRangeCard（关键价格区间人类可读总结）
 // 不显示内部字段名、算法参数、JSON 或商业机密。
-// 原始 factor/feature/JSON 仅在 /admin/stock-debug 的 AdminStockDebugPage 中展示。
+// 原始 factor/feature/JSON 仅在 /admin/stocks/:symbol/debug 的 AdminStockDebugPage 中展示。
 // 面板关闭时由父组件不渲染本组件，所有查询 enabled=false，不发请求。
 // useResearchContext 是 event/structural/temporal 唯一查询入口；子组件只接收 data/query 状态，不再次调用 hooks。
 import { useResearchContext } from './useResearchContext'

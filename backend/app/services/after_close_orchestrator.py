@@ -1091,6 +1091,29 @@ async def execute_after_close_run(
                         )
                     await db.commit()
 
+            # [Phase4] 事件生成钩子：succeeded run 提交后，比较相邻快照生成状态变化事件
+            # 独立 session + try/except：事件生成失败不影响 orchestrator 主流程
+            if snapshot_error is None and snapshot_run_id is not None:
+                try:
+                    from app.services.state_event_service import generate_events_for_run
+                    async with AsyncSessionLocal() as event_db:
+                        event_stats = await generate_events_for_run(event_db, snapshot_run_id)
+                        await event_db.commit()
+                    logger.info(
+                        "[AfterClose] 状态事件生成完成: run_id=%s, "
+                        "event_count=%s, skipped=%s, failed=%s",
+                        snapshot_run_id,
+                        event_stats.get("event_count", 0),
+                        event_stats.get("skipped_count", 0),
+                        event_stats.get("failed_count", 0),
+                    )
+                except Exception as event_exc:
+                    logger.warning(
+                        "[AfterClose] 状态事件生成失败（不影响主流程）: "
+                        "run_id=%s, error=%s",
+                        snapshot_run_id, event_exc, exc_info=True,
+                    )
+
             # 失败时向上传播 RuntimeError，触发 orchestrator FAILED 状态写入，跳过 publishing
             if snapshot_error is not None:
                 raise snapshot_error

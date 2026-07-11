@@ -1,4 +1,4 @@
-// [AdminStockDebugPage] - 描述: 管理员个股调试页面（独立 /admin/stock-debug 路由）
+// [AdminStockDebugPage] - 描述: 管理员个股调试页面（独立 /admin/stocks/:symbol/debug 路由）
 // 位于 AdminAppShell + AdminRoute 下，普通用户不可访问。
 // 复用 MarketInstrumentPane（股票搜索）、useStockResearchData（bars/indicators/quote/events）、
 // StockResearchWorkspace（K线研究区）、useResearchContext（event/structural/temporal）、

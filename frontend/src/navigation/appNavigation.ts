@@ -22,7 +22,8 @@ export const APP_ROUTES = {
   adminStrategies: '/admin/strategies',
   adminJobs: '/admin/jobs',
   adminAfterClose: '/admin/after-close',
-  adminStockDebug: '/admin/stock-debug',
+  adminStockDebug: '/admin/stocks',
+  adminStockDebugDetail: '/admin/stocks/:symbol/debug',
   capture: '/capture/stock/:symbol',
   login: '/login',
   subscriptionExpired: '/subscription-expired',
@@ -31,6 +32,11 @@ export const APP_ROUTES = {
 // 个股详情路由（动态 symbol）
 export function stockRoute(symbol: string): string {
   return `/stock/${symbol}`
+}
+
+// 管理员个股调试详情路由（动态 symbol）
+export function adminStockDebugRoute(symbol: string): string {
+  return `/admin/stocks/${symbol}/debug`
 }
 
 // 默认登录/兜底入口（替换旧 /overview）
@@ -107,6 +113,8 @@ export const LEGACY_REDIRECTS: Record<string, string> = {
   '/overview': APP_ROUTES.market,
   '/watchlist': `${APP_ROUTES.market}?scope=watchlist`,
   '/screener': APP_ROUTES.market,
+  // [Phase4] 旧管理员调试路由 → 新路由（前后端统一使用 symbol）
+  '/admin/stock-debug': APP_ROUTES.adminStockDebug,
 }
 
 // 生成 react-router 重定向路由项（供 App.tsx 使用，保持单一真源）

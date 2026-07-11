@@ -72,7 +72,7 @@ test('/settings 经过 UserAppShell 但不经过 SubscriberRoute', () => {
 })
 
 test('/admin/* 经过 AdminRoute + AdminAppShell', () => {
-  const adminPaths = ['/admin', '/admin/overview', '/admin/users', '/admin/beta-applications', '/admin/strategies', '/admin/jobs', '/admin/after-close', '/admin/stock-debug', '/admin/stock-debug/:symbol']
+  const adminPaths = ['/admin', '/admin/overview', '/admin/users', '/admin/beta-applications', '/admin/strategies', '/admin/jobs', '/admin/after-close', '/admin/stocks', '/admin/stocks/:symbol/debug']
   for (const p of adminPaths) {
     assert.ok(hasGuardInChain(ROUTE_STRUCTURE, p, 'admin'), `${p} 应经过 AdminRoute`)
     assert.ok(hasShellInChain(ROUTE_STRUCTURE, p, 'admin'), `${p} 应经过 AdminAppShell`)
@@ -80,14 +80,14 @@ test('/admin/* 经过 AdminRoute + AdminAppShell', () => {
   }
 })
 
-test('/admin/stock-debug 调试路由位于管理员壳层（不暴露给普通用户）', () => {
-  // 验证：管理员调试路由独立于普通 /market，普通用户即使手工访问也由 AdminRoute 重定向到 /market
-  assert.ok(hasGuardInChain(ROUTE_STRUCTURE, '/admin/stock-debug', 'admin'))
-  assert.ok(hasGuardInChain(ROUTE_STRUCTURE, '/admin/stock-debug/:symbol', 'admin'))
-  assert.ok(hasShellInChain(ROUTE_STRUCTURE, '/admin/stock-debug', 'admin'))
-  assert.ok(hasShellInChain(ROUTE_STRUCTURE, '/admin/stock-debug/:symbol', 'admin'))
-  assert.ok(!hasShellInChain(ROUTE_STRUCTURE, '/admin/stock-debug', 'user'))
-  assert.ok(!hasShellInChain(ROUTE_STRUCTURE, '/admin/stock-debug/:symbol', 'user'))
+test('/admin/stocks/:symbol/debug 调试路由位于管理员壳层（不暴露给普通用户）', () => {
+  // [Phase4] 路由从 /admin/stock-debug/:symbol 改为 /admin/stocks/:symbol/debug（前后端统一 symbol）
+  assert.ok(hasGuardInChain(ROUTE_STRUCTURE, '/admin/stocks', 'admin'))
+  assert.ok(hasGuardInChain(ROUTE_STRUCTURE, '/admin/stocks/:symbol/debug', 'admin'))
+  assert.ok(hasShellInChain(ROUTE_STRUCTURE, '/admin/stocks', 'admin'))
+  assert.ok(hasShellInChain(ROUTE_STRUCTURE, '/admin/stocks/:symbol/debug', 'admin'))
+  assert.ok(!hasShellInChain(ROUTE_STRUCTURE, '/admin/stocks', 'user'))
+  assert.ok(!hasShellInChain(ROUTE_STRUCTURE, '/admin/stocks/:symbol/debug', 'user'))
 })
 
 test('/overview 和 /watchlist 为兼容重定向', () => {

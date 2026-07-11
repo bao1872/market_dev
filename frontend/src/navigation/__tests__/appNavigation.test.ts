@@ -53,11 +53,14 @@ test('旧路由兼容重定向：/overview → /market，/watchlist → /market?
   assert.equal(LEGACY_REDIRECTS['/overview'], '/market')
   assert.equal(LEGACY_REDIRECTS['/watchlist'], '/market?scope=watchlist')
   assert.equal(LEGACY_REDIRECTS['/screener'], '/market')
+  // [Phase4] 旧管理员调试路由 → 新路由（前后端统一使用 symbol）
+  assert.equal(LEGACY_REDIRECTS['/admin/stock-debug'], '/admin/stocks')
   const entries = legacyRedirectEntries()
   assert.deepStrictEqual(entries, [
     { path: '/overview', to: '/market' },
     { path: '/watchlist', to: '/market?scope=watchlist' },
     { path: '/screener', to: '/market' },
+    { path: '/admin/stock-debug', to: '/admin/stocks' },
   ])
 })
 

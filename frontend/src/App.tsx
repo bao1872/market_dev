@@ -8,7 +8,7 @@
 // SubscriberRoute：有效订阅或 admin 豁免，否则重定向到 /subscription-expired
 // AdminRoute：is_admin=true 才可访问，否则重定向到 /market（替换旧 /overview）
 import { lazy, Suspense, useEffect, useRef } from 'react'
-import { Navigate, Outlet, type RouteObject } from 'react-router-dom'
+import { Navigate, Outlet, type RouteObject, useParams } from 'react-router-dom'
 import { useAuthStore, ACCESS_TOKEN_KEY } from './store/auth'
 import UserAppShell from './layouts/UserAppShell'
 import AdminAppShell from './layouts/AdminAppShell'
@@ -94,6 +94,12 @@ const redirectRoutes = legacyRedirectEntries().map(({ path, to }) => ({
   element: <Navigate to={to} replace />,
 }))
 
+// [Phase4] 旧管理员调试动态路由重定向：/admin/stock-debug/:symbol → /admin/stocks/:symbol/debug
+function OldStockDebugRedirect() {
+  const { symbol } = useParams<{ symbol: string }>()
+  return <Navigate to={`/admin/stocks/${symbol}/debug`} replace />
+}
+
 // 导出纯路由配置结构（供路由契约测试断言，不依赖 React 渲染）
 export const routeConfig: RouteObject[] = [
   // 公开路由
@@ -143,14 +149,16 @@ export const routeConfig: RouteObject[] = [
               { path: '/admin/strategies', element: <AdminStrategiesPage /> },
               { path: '/admin/jobs', element: <AdminJobsPage /> },
               { path: '/admin/after-close', element: <AdminAfterClosePipelinePage /> },
-              { path: '/admin/stock-debug', element: <AdminStockDebugPage /> },
-              { path: '/admin/stock-debug/:symbol', element: <AdminStockDebugPage /> },
+              { path: '/admin/stocks', element: <AdminStockDebugPage /> },
+              { path: '/admin/stocks/:symbol/debug', element: <AdminStockDebugPage /> },
             ],
           },
         ],
       },
       // 旧路由兼容重定向（保留，避免书签/旧链接 404）
       ...redirectRoutes,
+      // [Phase4] 旧管理员调试动态路由重定向
+      { path: '/admin/stock-debug/:symbol', element: <OldStockDebugRedirect /> },
     ],
   },
   // 兜底：未匹配路由重定向到默认入口（替换旧 /overview）
