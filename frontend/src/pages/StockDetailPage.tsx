@@ -106,11 +106,12 @@ export default function StockDetailPage() {
   // 来源徽章与返回链接
   const sourceBadge = source === 'selection' ? '选股结果' : '自选监控'
 
-  /** 统一返回按钮：优先使用导航时传入的 returnTo，否则按 source fallback */
+  /** 统一返回按钮：优先使用 URL returnTo 参数，其次导航 state，否则按 source fallback */
   const handleBack = useCallback(() => {
-    const returnTo = (location.state as { returnTo?: string } | undefined)?.returnTo
-    navigate(resolveBackPath(returnTo, source))
-  }, [location.state, navigate, source])
+    const returnFromUrl = searchParams.get('returnTo')
+    const returnFromState = (location.state as { returnTo?: string } | undefined)?.returnTo
+    navigate(resolveBackPath(returnFromUrl || returnFromState, source))
+  }, [searchParams, location.state, navigate, source])
 
   // 备忘录保存
   const handleSaveMemo = useCallback(() => {

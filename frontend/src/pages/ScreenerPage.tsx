@@ -26,7 +26,7 @@ import {
   getStockDisplay,
   type TrendSelectionRow,
 } from '@/features/trend-selection'
-import { buildStockDetailUrl, buildStockDetailState } from './detailNavigation'
+import { buildMarketEntryFromScreener } from './detailNavigation'
 
 // ===== 常量 =====
 const PAGE_SIZE = 50
@@ -235,14 +235,12 @@ export default function ScreenerPage() {
 
   // ===== 事件处理 =====
 
-  /** 跳转个股详情；携带当前 screener URL 作为 returnTo，返回后恢复筛选状态 */
+  /** 跳转行情工作区；携带当前 screener URL 作为 returnTo，返回后恢复筛选状态 */
   const goDetail = useCallback(
     (row: TrendSelectionRow) => {
       const { symbol } = getStockDisplay(row)
       const returnTo = `${location.pathname}${location.search}`
-      navigate(buildStockDetailUrl(symbol, 'selection', activeStrategyKey), {
-        state: buildStockDetailState(returnTo),
-      })
+      navigate(buildMarketEntryFromScreener(symbol, activeStrategyKey, returnTo))
     },
     [navigate, activeStrategyKey, location.pathname, location.search],
   )

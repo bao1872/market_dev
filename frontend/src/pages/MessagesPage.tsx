@@ -329,7 +329,7 @@ export default function MessagesPage() {
       } else if (m.message_type === 'system' || m.message_type === 'SYSTEM_ALERT') {
         navigateTarget = '/settings'
       } else if (instrumentCount === 1 && primary?.symbol) {
-        navigateTarget = `/stock/${primary.symbol}?event_id=${m.source_id || ''}`
+        navigateTarget = `/market?symbol=${primary.symbol}${m.source_id ? `&event_id=${m.source_id}` : ''}`
       }
 
       return {
@@ -612,7 +612,7 @@ export default function MessagesPage() {
                         onClick={() => {
                           setInstrumentDrawerOpen(false)
                           navigate(
-                            `/stock/${inst.symbol}?event_id=${drawerEventId || ''}`,
+                            `/market?symbol=${inst.symbol}${drawerEventId ? `&event_id=${drawerEventId}` : ''}`,
                           )
                         }}
                       >
