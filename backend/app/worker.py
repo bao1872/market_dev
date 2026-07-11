@@ -694,26 +694,24 @@ async def run_bars_scheduler_worker() -> None:
                     return
                 await db.commit()
 
-            # 执行同步（独立 session，不阻塞 bars_refresh）
+            # 执行同步（事务上下文：成功自动 commit，异常自动 rollback 保留旧快照）
             async with AsyncSessionLocal() as db:
-                result = await sync_boards(
-                    db,
-                    QStockFetcher(),
-                    instrument_resolver=_resolve_instruments,
-                )
-                await db.commit()
+                async with db.begin():
+                    result = await sync_boards(
+                        db,
+                        QStockFetcher(),
+                        instrument_resolver=_resolve_instruments,
+                    )
 
             logger.info(
-                "板块同步完成: status=%s boards=%d memberships=%d",
-                result["status"], result["board_count"], result["membership_count"],
+                "板块同步完成: boards=%d memberships=%d parse_rate=%s",
+                result["board_count"], result["membership_count"], result.get("parse_rate"),
             )
             if job_run is not None:
                 async with AsyncSessionLocal() as db:
                     await _finish_job_run(
-                        db, job_run,
-                        "succeeded" if result["status"] == "succeeded" else "failed",
+                        db, job_run, "succeeded",
                         success_count=result["board_count"],
-                        error_message=result.get("error"),
                     )
         except Exception as exc:
             logger.exception("板块同步异常: %s", exc)
