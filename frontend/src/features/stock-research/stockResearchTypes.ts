@@ -42,3 +42,43 @@ export function normalizeDisplayTimeframe(raw: string | null): DisplayTimeframe 
 export function normalizeResearchSource(raw: string | null): ResearchSource {
   return raw === 'selection' ? 'selection' : 'watchlist'
 }
+
+// ===== 指标图层 Manifest（PRD §6.2）=====
+// 描述 5 个用户可显隐的指标图层：id、名称、主/副图、默认值、依赖数据和渲染顺序。
+// 用户只能显隐，不得修改窗口、阈值等算法参数。
+// 与 StrategyChart 内部 LayerVisibility 的映射关系：
+//   consensus_zone → profile + node + poc（筹码共识区 / Volume Profile）
+//   price_structure → dsa + selection（价格结构 / 趋势参考价）
+//   boll → bb（布林带）
+//   volume → volume（成交量）
+//   macd → macd（MACD 副图）
+
+export type IndicatorLayerKind = 'main' | 'sub'
+
+export interface IndicatorLayerManifestEntry {
+  id: string
+  name: string
+  kind: IndicatorLayerKind
+  defaultVisible: boolean
+  dependencies: string[]
+  renderOrder: number
+}
+
+export const INDICATOR_LAYER_MANIFEST: IndicatorLayerManifestEntry[] = [
+  { id: 'consensus_zone', name: '筹码共识区', kind: 'main', defaultVisible: true, dependencies: ['volume_profile'], renderOrder: 10 },
+  { id: 'price_structure', name: '价格结构', kind: 'main', defaultVisible: true, dependencies: ['structural_factors'], renderOrder: 20 },
+  { id: 'boll', name: '布林带', kind: 'main', defaultVisible: false, dependencies: ['boll_bands'], renderOrder: 30 },
+  { id: 'volume', name: '成交量', kind: 'sub', defaultVisible: true, dependencies: ['bars.volume'], renderOrder: 10 },
+  { id: 'macd', name: 'MACD', kind: 'sub', defaultVisible: false, dependencies: ['macd'], renderOrder: 20 },
+]
+
+export type IndicatorVisibility = Record<string, boolean>
+
+// 从 manifest 默认值生成 IndicatorVisibility
+export function defaultIndicatorVisibility(): IndicatorVisibility {
+  const result: IndicatorVisibility = {}
+  for (const entry of INDICATOR_LAYER_MANIFEST) {
+    result[entry.id] = entry.defaultVisible
+  }
+  return result
+}

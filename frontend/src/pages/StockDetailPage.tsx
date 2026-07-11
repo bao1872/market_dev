@@ -435,19 +435,38 @@ export default function StockDetailPage() {
         </div>
       )}
 
-      {/* ===== 工作区：复用 StockResearchWorkspace（图表 + 状态条） + 结构状态因子面板 ===== */}
-      <StockResearchWorkspace
-        data={researchData}
-        timeframe={timeframe}
-        onTimeframeChange={handleTimeframeChange}
-        source={source}
-        strategyKey={strategy}
-        isCaptureMode={isCaptureMode}
-        toolbar={structuralToolbar}
-        rightPanel={structuralPanel}
-        showRightPanel={shouldShowPanel && !!instrumentId}
-        chartColumnProps={{ 'data-testid': 'stock-detail-capture' }}
-      />
+      {/* ===== 工作区：左栏来源股票列表 + 复用 StockResearchWorkspace ===== */}
+      <div className="tv-detail-layout">
+        {!isCaptureMode && detailActions.watchlistStocks.length > 0 && (
+          <aside className="tv-source-list" data-testid="detail-source-list">
+            <div className="tv-source-list-header">自选列表</div>
+            {detailActions.watchlistStocks.map((s) => (
+              <div
+                key={s.symbol}
+                className={clsx('tv-source-list-item', s.symbol === symbol && 'active')}
+                onClick={() => navigate(`/stock/${s.symbol}?source=watchlist&strategy=${strategy}`)}
+              >
+                <span className="tv-source-name">{s.name}</span>
+                <span className="tv-source-symbol">{s.symbol}</span>
+              </div>
+            ))}
+          </aside>
+        )}
+        {/* 复用 StockResearchWorkspace（图表 + 状态条） + 结构状态因子面板 */}
+        <StockResearchWorkspace
+          data={researchData}
+          timeframe={timeframe}
+          onTimeframeChange={handleTimeframeChange}
+          source={source}
+          strategyKey={strategy}
+          isCaptureMode={isCaptureMode}
+          rightPanelCollapsed={!(shouldShowPanel && !!instrumentId)}
+          toolbar={structuralToolbar}
+          rightPanel={structuralPanel}
+          showRightPanel={shouldShowPanel && !!instrumentId}
+          chartColumnProps={{ 'data-testid': 'stock-detail-capture' }}
+        />
+      </div>
     </div>
   )
 }

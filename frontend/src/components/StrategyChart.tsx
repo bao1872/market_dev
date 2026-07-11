@@ -25,6 +25,7 @@ import {
   panViewport,
   zoomAtAnchor,
 } from './chartViewport'
+import type { IndicatorVisibility } from '../features/stock-research/stockResearchTypes'
 
 // ===== 颜色常量（A 股红涨绿跌，对齐原型 charts.js 的 C 对象）=====
 const C = {
@@ -101,6 +102,8 @@ export interface StrategyChartProps {
   onViewportChange?: (vp: ChartViewport) => void
   // [feishu-capture] - 描述: 飞书截图模式，强制开启 FEISHU_CAPTURE_LAYERS 且不可关闭，不读写 localStorage
   isCaptureMode?: boolean
+  // [indicatorLayerManifest] - 指标图层显隐偏好（PRD §6.2），由父组件从 localStorage 加载传入
+  indicatorVisibility?: IndicatorVisibility
 }
 
 // 计算后的 Bar（含指标字段）
@@ -1848,6 +1851,7 @@ export function StrategyChart({
   viewport: viewportProp,
   onViewportChange,
   isCaptureMode = false,
+  indicatorVisibility,
 }: StrategyChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -1897,6 +1901,24 @@ export function StrategyChart({
     return getDefaultLayers(strategyId)
   })
 
+  // [indicatorLayerManifest] - 当父组件传入 indicatorVisibility 时，覆盖对应图层的可见性
+  // 映射：consensus_zone→profile+node+poc, price_structure→dsa+selection, boll→bb, volume→volume, macd→macd
+  const effectiveLayers: LayerVisibility = useMemo(() => {
+    // 截图模式强制 FEISHU_CAPTURE_LAYERS，不受 indicatorVisibility 覆盖
+    if (isCaptureMode || !indicatorVisibility) return layers
+    return {
+      ...layers,
+      profile: indicatorVisibility.consensus_zone ?? layers.profile,
+      node: indicatorVisibility.consensus_zone ?? layers.node,
+      poc: indicatorVisibility.consensus_zone ?? layers.poc,
+      dsa: indicatorVisibility.price_structure ?? layers.dsa,
+      selection: indicatorVisibility.price_structure ?? layers.selection,
+      bb: indicatorVisibility.boll ?? layers.bb,
+      volume: indicatorVisibility.volume ?? layers.volume,
+      macd: indicatorVisibility.macd ?? layers.macd,
+    }
+  }, [layers, indicatorVisibility, isCaptureMode])
+
   // [chartViewport] - 显示 bar 数量（缩放控制）：保留为内部状态作为 fallback，
   //   当父组件未传入 viewport 时使用；受控时由 viewportProp 驱动
   const [displayBars, setDisplayBars] = useState(MAX_VISIBLE_BARS)
@@ -1945,8 +1967,8 @@ export function StrategyChart({
   }, [events, display, timeframe])
 
   // 最新数据 ref（供 draw 函数读取）
-  const dataRef = useRef({ calc, display, mappedEvents, layers, timeframe })
-  dataRef.current = { calc, display, mappedEvents, layers, timeframe }
+  const dataRef = useRef({ calc, display, mappedEvents, layers: effectiveLayers, timeframe })
+  dataRef.current = { calc, display, mappedEvents, layers: effectiveLayers, timeframe }
 
   // indicators ref（避免 draw 函数依赖 indicators 导致频繁重绘）
   const indicatorsRef = useRef<IndicatorResponse | undefined>(undefined)
@@ -1967,7 +1989,7 @@ export function StrategyChart({
     // [DSA 数据源校验] - drawTrading 将 mismatch 写入 stateRef，此处同步到 React state 驱动横幅渲染
     //   setDsaMismatch 相同值时 React 自动 bailout，不会触发额外重渲染循环
     setDsaMismatch(stateRef.current.dsaSourceMismatch)
-  }, [draw, calc, display, mappedEvents, layers, viewport, indicators])
+  }, [draw, calc, display, mappedEvents, effectiveLayers, viewport, indicators])
 
   // 持久化图层可见性
   useEffect(() => {
@@ -2357,7 +2379,7 @@ export function StrategyChart({
       <div className="tv-strategy-legend">
         <span className="tv-strategy-legend-label">策略图层</span>
         {Object.values(DISPLAY_GROUPS).map((g: DisplayGroupDef) => {
-          const active = isGroupActive(g.id, layers)
+          const active = isGroupActive(g.id, effectiveLayers)
           // [PR #32] - DSA 全周期支持，title 按周期区分（1d 主结构锚，非 1d 验证图层）
           const dsaTitleHint = g.id === 'dsa' ? DSA_TITLE_HINT(timeframe) : undefined
           return (

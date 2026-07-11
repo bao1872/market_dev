@@ -42,6 +42,8 @@ export interface StockDetailActions {
   upsertMemo: ReturnType<typeof useUpsertStockMemo>
   deleteMemo: ReturnType<typeof useDeleteStockMemo>
   hasMemo: boolean
+  // 来源股票列表（用于详情页左栏显示）
+  watchlistStocks: { symbol: string; name: string }[]
 }
 
 export function useStockDetailActions({
@@ -133,6 +135,19 @@ export function useStockDetailActions({
     navigate(`/stock/${targetSymbol}?source=watchlist&strategy=${strategy}`)
   }, [canNavigate, currentIndex, watchlistItems, instrumentSymbolMap, navigate, strategy])
 
+  // 来源股票列表（active 自选，含 symbol + name，用于详情页左栏）
+  const watchlistStocks = useMemo(() => {
+    if (!watchlistQuery.data?.items || !batchInstrumentsQuery.data?.items) return []
+    const instMap = new Map(batchInstrumentsQuery.data.items.map((i) => [i.id, i]))
+    return watchlistQuery.data.items
+      .filter((item) => item.active)
+      .map((item) => {
+        const inst = instMap.get(item.instrument_id)
+        return inst ? { symbol: inst.symbol, name: inst.name } : null
+      })
+      .filter((x): x is { symbol: string; name: string } => x !== null)
+  }, [watchlistQuery.data, batchInstrumentsQuery.data])
+
   return {
     inWatchlist,
     handleToggleWatchlist,
@@ -150,5 +165,6 @@ export function useStockDetailActions({
     upsertMemo,
     deleteMemo,
     hasMemo: !!stockMemoQuery.data,
+    watchlistStocks,
   }
 }

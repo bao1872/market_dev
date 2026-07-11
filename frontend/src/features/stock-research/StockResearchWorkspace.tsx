@@ -3,13 +3,15 @@
 // timeframe 为受控状态：由父组件从 URL 解析并传入，工具栏切换通过 onTimeframeChange 回调写回 URL。
 // viewport 按 timeframe 本地保存（不进 URL 避免噪音），切换周期时各周期 viewport 独立不串台。
 // 可选 toolbar/rightPanel/chartColumnProps 支持 StockDetailPage 的结构面板开关和截图模式属性。
-import { useState, useCallback, type ReactNode } from 'react'
+import { useState, useCallback, useEffect, type ReactNode } from 'react'
 import StrategyChart from '@/components/StrategyChart'
 import { createDefaultViewport, type ChartViewport } from '@/components/chartViewport'
 import { formatShanghaiTimeShort } from '@/utils/datetime'
 import { resolveStrategy } from '@/lib/strategy-manifest'
 import type { ResearchSource, DisplayTimeframe } from './stockResearchTypes'
-import { ALLOWED_TIMEFRAMES } from './stockResearchTypes'
+import { ALLOWED_TIMEFRAMES, type IndicatorVisibility } from './stockResearchTypes'
+import { IndicatorToolbar } from './IndicatorToolbar'
+import { loadIndicatorVisibility, saveIndicatorVisibility } from './indicatorPreferences'
 import clsx from 'clsx'
 import type { StockResearchData } from './useStockResearchData'
 
@@ -60,6 +62,26 @@ export function StockResearchWorkspace({
 }: StockResearchWorkspaceProps) {
   // viewport 按 timeframe 存储（本地 state，不进 URL 避免噪音）
   const [viewportByTimeframe, setViewportByTimeframe] = useState<Record<string, ChartViewport>>({})
+
+  // [indicatorLayerManifest] - 指标图层显隐偏好（PRD §6.2），从 localStorage 加载
+  const [indicatorVisibility, setIndicatorVisibility] = useState<IndicatorVisibility>(() =>
+    loadIndicatorVisibility(),
+  )
+  const handleIndicatorToggle = useCallback((id: string, visible: boolean) => {
+    setIndicatorVisibility((prev) => {
+      const next = { ...prev, [id]: visible }
+      saveIndicatorVisibility(next)
+      return next
+    })
+  }, [])
+
+  // 右栏收起/展开时图表 resize：CSS grid 布局变化触发 ResizeObserver 重绘，
+  // 此处额外在下一帧触发一次 window resize 以确保极端情况下布局已稳定
+  useEffect(() => {
+    if (isCaptureMode) return
+    const raf = requestAnimationFrame(() => window.dispatchEvent(new Event('resize')))
+    return () => cancelAnimationFrame(raf)
+  }, [rightPanelCollapsed, showRightPanel, isCaptureMode])
 
   const handleViewportChange = useCallback((vp: ChartViewport) => {
     setViewportByTimeframe((prev) => ({ ...prev, [timeframe]: vp }))
@@ -156,6 +178,9 @@ export function StockResearchWorkspace({
         data-testid={chartColumnProps?.['data-testid']}
         data-render-ready={isCaptureMode ? (captureRenderReady ? 'true' : 'false') : undefined}
       >
+        {!isCaptureMode && (
+          <IndicatorToolbar visibility={indicatorVisibility} onToggle={handleIndicatorToggle} />
+        )}
         {toolbar}
         {isBarsLoading ? (
           <div className="tv-chart-loading">行情数据加载中...</div>
@@ -175,6 +200,7 @@ export function StockResearchWorkspace({
               viewport={viewportByTimeframe[timeframe] ?? makeDefaultViewport()}
               onViewportChange={handleViewportChange}
               isCaptureMode={isCaptureMode}
+              indicatorVisibility={isCaptureMode ? undefined : indicatorVisibility}
             />
             <div className="tv-chart-status">
               <span className={quoteStatus.badgeClass}>{quoteStatus.label}</span>

@@ -1070,7 +1070,7 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 
 // ===== V1.4 TradingView Style =====
 .tv-main { background: #0d1016; }
-.tv-content { max-width: none; padding: 10px 12px 18px; }
+.tv-content { max-width: none; padding: 10px 12px 18px; display: flex; flex-direction: column; }
 .tv-content:fullscreen {
   width: 100vw;
   height: 100vh;
@@ -1092,6 +1092,16 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 
 // V1.6.2: 删除右侧 268px 策略栏，释放完整图表宽度；Task 2 再删除左侧 38px 绘图工具列
 // V1.7: 新增右侧 340px 结构状态因子面板（StockStructuralStatePanel），双列布局
+// ===== 详情页布局（PRD §6.2 左栏来源列表 + 工作区）=====
+.tv-detail-layout { display: flex; flex: 1; min-height: 0; }
+.tv-source-list { flex: none; width: 200px; min-width: 0; background: #0d1118; border-right: 1px solid #202633; overflow-y: auto; max-height: v.$tv-workspace-min-height; }
+.tv-source-list-header { padding: 8px 10px; font-size: 10px; text-transform: uppercase; letter-spacing: .7px; color: #667287; border-bottom: 1px solid #202633; position: sticky; top: 0; background: #0d1118; z-index: 1; }
+.tv-source-list-item { display: flex; flex-direction: column; gap: 1px; padding: 6px 10px; cursor: pointer; border-bottom: 1px solid #1a202b; transition: .14s ease; }
+.tv-source-list-item:hover { background: #1a202b; }
+.tv-source-list-item.active { background: #1e2a3f; border-left: 3px solid #4f7cff; padding-left: 7px; }
+.tv-source-name { font-size: 12px; color: #c4ccda; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tv-source-symbol { font-size: 11px; color: #778297; }
+
 .tv-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 340px; min-height: v.$tv-workspace-min-height; border: 1px solid v.$color-border; border-top: 0; background: #10141c; }
 .tv-workspace.capture-mode { grid-template-columns: minmax(0, 1fr); } // 截图模式：隐藏右侧面板，恢复单列
 .tv-workspace.hide-structural-state { grid-template-columns: minmax(0, 1fr); } // 结构状态隐藏：恢复单列
@@ -1429,6 +1439,102 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
   .tv-legend-dot { filter: grayscale(1); opacity: .4; box-shadow: none; }
   .tv-mini-switch { background: #313949; }
   .tv-mini-switch:after { right: 11px; background: #929bad; }
+}
+
+// ===== 指标显示工具栏（PRD §6.2）=====
+.indicator-toolbar {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 5px 9px;
+  background: #0f131b;
+  border-bottom: 1px solid #202633;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.indicator-toolbar-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.indicator-toolbar-label {
+  flex: none;
+  color: #667287;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: .7px;
+  margin-right: 2px;
+}
+
+.indicator-toggle-item {
+  flex: none;
+  height: 23px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #30394b;
+  border-radius: 4px;
+  background: #1a202b;
+  color: #c4ccda;
+  cursor: pointer;
+  user-select: none;
+  transition: .14s ease;
+
+  &:hover { border-color: #52627f; background: #202735; }
+}
+
+.indicator-toggle-item.off {
+  opacity: .52;
+  background: #141922;
+  color: #778297;
+  border-color: #252d3b;
+}
+
+.indicator-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 7px;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.indicator-toggle-name {
+  font-size: 9px;
+  font-weight: 620;
+}
+
+.indicator-toggle-switch {
+  position: relative;
+  width: 20px;
+  height: 11px;
+  border-radius: 8px;
+  background: #4f7cff;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .08);
+  flex: none;
+
+  &:after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #fff;
+    transition: .14s ease;
+  }
+}
+
+.indicator-toggle-switch:not(.on) {
+  background: #313949;
+  &:after { right: 11px; background: #929bad; }
 }
 
 // V1.6.2 删除旧版右侧栏：强制隐藏
