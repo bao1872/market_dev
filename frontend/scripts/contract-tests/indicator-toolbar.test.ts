@@ -124,19 +124,20 @@ test('StockDetailPage 渲染左栏来源列表', () => {
   assert.ok(src.includes('tv-detail-layout'), 'should have detail layout wrapper')
 })
 
-// ===== 12. tv-strategy-legend 为只读（无 onClick） =====
-test('tv-strategy-legend 为只读（无 onClick，无 tv-mini-switch）', () => {
-  const src = readSrc(CHART_PATH)
-  assert.ok(src.includes('tv-strategy-legend'), 'should have legend element')
-  // 提取 legend 渲染区块（从 tv-strategy-legend 到下一个闭合 div）
-  const legendStart = src.indexOf('{/* 策略图示区')
-  assert.ok(legendStart > 0, 'should find legend comment')
-  const legendEnd = src.indexOf('</div>', legendStart)
-  assert.ok(legendEnd > legendStart, 'should find legend end')
-  const legendSection = src.substring(legendStart, legendEnd)
-  assert.ok(!legendSection.includes('onClick'), 'legend should not have onClick')
-  assert.ok(!legendSection.includes('tv-mini-switch'), 'legend should not have toggle switch')
-  assert.ok(legendSection.includes('只读'), 'legend should have read-only comment')
+// ===== 12. tv-strategy-legend 已删除（图层开关唯一真源在 IndicatorToolbar） =====
+test('tv-strategy-legend JSX/CSS/imports 已完全删除', () => {
+  const chartSrc = readSrc(CHART_PATH)
+  // StrategyChart 不再渲染 tv-strategy-legend JSX
+  assert.ok(!chartSrc.includes('tv-strategy-legend'), 'should not render tv-strategy-legend')
+  assert.ok(!chartSrc.includes('策略图示区'), 'should not have legend comment')
+  assert.ok(!chartSrc.includes('isGroupActive'), 'should not have isGroupActive function')
+  assert.ok(!chartSrc.includes('DISPLAY_GROUPS'), 'should not import DISPLAY_GROUPS')
+  assert.ok(!chartSrc.includes('DisplayGroupDef'), 'should not import DisplayGroupDef')
+  assert.ok(!chartSrc.includes('DSA_TITLE_HINT'), 'should not import DSA_TITLE_HINT')
+  // strategy-manifest 不再导出 DISPLAY_GROUPS / DisplayGroupDef
+  const manifestSrc = readSrc('src/lib/strategy-manifest.ts')
+  assert.ok(!manifestSrc.includes('export const DISPLAY_GROUPS'), 'should not export DISPLAY_GROUPS')
+  assert.ok(!manifestSrc.includes('export interface DisplayGroupDef'), 'should not export DisplayGroupDef')
 })
 
 // ===== 13. 新 localStorage key =====

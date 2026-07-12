@@ -82,13 +82,15 @@ export const CHART_LAYER_MANIFEST: ChartLayerManifestEntry[] = [
 ]
 
 // 按 source 生成默认 ChartLayerVisibility
-// watchlist（watchlist_monitor 策略）：volume/node/boll/macd 默认开
-// selection（dsa_selector 策略）：volume/trend/macd 默认开
+// watchlist（watchlist_monitor 策略）：volume/node/boll 默认开；macd 默认关（辅助技术指标，按需开启）
+// selection（dsa_selector 策略）：volume/trend 默认开；macd 默认关（辅助技术指标，按需开启）
+// P0-6: MACD 是 feature_snapshot_service 附加的日线辅助指标，不是 bar 因子；
+//   watchlist 和 selection 默认均关闭 MACD 副图，减少噪音；用户可通过 IndicatorToolbar 显式开启。
 export function defaultChartLayerVisibility(source: ResearchSource): ChartLayerVisibility {
   if (source === 'selection') {
-    return { trend: true, node: false, boll: false, volume: true, macd: true, sqzmom: false, breakout: false }
+    return { trend: true, node: false, boll: false, volume: true, macd: false, sqzmom: false, breakout: false }
   }
-  return { trend: false, node: true, boll: true, volume: true, macd: true, sqzmom: false, breakout: false }
+  return { trend: false, node: true, boll: true, volume: true, macd: false, sqzmom: false, breakout: false }
 }
 
 // 返回 source 适用的 manifest 条目（过滤 selectionOnly）

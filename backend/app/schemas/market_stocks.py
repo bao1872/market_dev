@@ -9,7 +9,7 @@
 - industry / concepts 在 Phase 6 qstock 同步后填充，当前阶段固定 null / 空。
 - dsa_state 来自最新 stock_feature_snapshot.summary_payload.daily_developing_swing_dir。
 - structure_state 来自 summary_payload.cost_position_zone。
-- latest_event_title / latest_event_time 来自最新 strategy_event。
+- latest_event_title / latest_event_time 兼容保留，固定 null（事件只在 EventStatePanel 按需展开时加载，列表服务不再执行 stock_state_event 批量查询）。
 - is_watchlisted 仅认证用户有意义。
 - price_as_of: 最新日线 trade_date（定价所用最新 bar 的日期）。
 - state_as_of: 最新 stock_feature_snapshot.created_at（特征快照写入时间）。
@@ -35,8 +35,8 @@ class MarketStockRow(BaseModel):
     concepts: list[str] = Field(default_factory=list, description="概念标签（Phase 6）")
     dsa_state: str | None = Field(None, description="DSA 核心状态（上行/下行）")
     structure_state: str | None = Field(None, description="形态状态（成本区间）")
-    latest_event_title: str | None = Field(None, description="最近客观事件标题")
-    latest_event_time: str | None = Field(None, description="最近客观事件时间 ISO")
+    latest_event_title: str | None = Field(None, description="最近客观事件标题（兼容保留，固定 null；事件在 EventStatePanel 按需加载）")
+    latest_event_time: str | None = Field(None, description="最近客观事件时间 ISO（兼容保留，固定 null）")
     is_watchlisted: bool = Field(False, description="是否在当前用户自选中")
 
 

@@ -52,24 +52,25 @@ test('manifest 条目字段完整', () => {
 })
 
 // ===== 3. 默认可见性 =====
-test('默认可见性：watchlist → node/boll/volume/macd=true', () => {
+// P0-6: MACD 是辅助技术指标，watchlist/selection 默认均关闭
+test('默认可见性：watchlist → node/boll/volume=true, macd=false', () => {
   const vis = defaultChartLayerVisibility('watchlist')
   assert.equal(vis.trend, false)
   assert.equal(vis.node, true)
   assert.equal(vis.boll, true)
   assert.equal(vis.volume, true)
-  assert.equal(vis.macd, true)
+  assert.equal(vis.macd, false)
   assert.equal(vis.sqzmom, false)
   assert.equal(vis.breakout, false)
 })
 
-test('默认可见性：selection → trend/volume/macd=true', () => {
+test('默认可见性：selection → trend/volume=true, macd=false', () => {
   const vis = defaultChartLayerVisibility('selection')
   assert.equal(vis.trend, true)
   assert.equal(vis.node, false)
   assert.equal(vis.boll, false)
   assert.equal(vis.volume, true)
-  assert.equal(vis.macd, true)
+  assert.equal(vis.macd, false)
   assert.equal(vis.sqzmom, false)
   assert.equal(vis.breakout, false)
 })

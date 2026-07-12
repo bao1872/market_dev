@@ -1320,115 +1320,8 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 // ===== V1.6.2 / V1.6.3 样式更新 =====
 // V1.6.2：删除 K 线右侧"策略显示"栏，释放完整图表宽度；开关直接放在 K 线图上方图示区
 // V1.6.3：删除"策略当前计算结果"模块和"事件时间轴"模块
-
-// 图表上方策略图示区容器（横向滚动、flex 布局）
-.tv-strategy-legend {
-  position: relative;
-  z-index: 2;
-  min-height: 34px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 9px;
-  background: #0f131b;
-  border-bottom: 1px solid #202633;
-  overflow-x: auto;
-  white-space: nowrap;
-}
-
-// "策略图层"标签
-.tv-strategy-legend-label {
-  flex: none;
-  color: #667287;
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: .7px;
-  margin-right: 2px;
-}
-
-// 单个策略图例项（含颜色圆点 + 名称 + mini 开关）
-.tv-strategy-legend-item {
-  flex: none;
-  height: 23px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 7px;
-  border: 1px solid #30394b;
-  border-radius: 4px;
-  background: #1a202b;
-  color: #c4ccda;
-  font-size: 12px;
-  cursor: pointer;
-  user-select: none;
-  transition: .14s ease;
-
-  &:hover { border-color: #52627f; background: #202735; }
-
-  input { position: absolute; opacity: 0; pointer-events: none; }
-
-  b { font-size: 12px; font-weight: 620; }
-}
-
-// 颜色圆点
-.tv-legend-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--legend-color);
-  box-shadow: 0 0 6px color-mix(in srgb, var(--legend-color) 45%, transparent);
-}
-
-// mini 开关
-.tv-mini-switch {
-  position: relative;
-  width: 20px;
-  height: 11px;
-  border-radius: 8px;
-  background: #4f7cff;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .08);
-
-  &:after {
-    content: "";
-    position: absolute;
-    top: 2px;
-    right: 2px;
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: #fff;
-    transition: .14s ease;
-  }
-}
-
-// 关闭状态（灰化）
-.tv-strategy-legend-item.off {
-  opacity: .52;
-  background: #141922;
-  color: #778297;
-  border-color: #252d3b;
-
-  // 关闭时圆点灰化
-  .tv-legend-dot { filter: grayscale(1); opacity: .55; box-shadow: none; }
-
-  // 关闭时开关灰化
-  .tv-mini-switch { background: #313949; }
-  .tv-mini-switch:after { right: 11px; background: #929bad; }
-}
-
-// [DSA 周期限制] - 禁用状态（非 1d 周期 DSA 开关不可点，灰化 + 禁止光标）
-.tv-strategy-legend-item.disabled {
-  opacity: .4;
-  cursor: not-allowed;
-  pointer-events: auto;
-  background: #141922;
-  color: #5a647a;
-  border-color: #252d3b;
-
-  .tv-legend-dot { filter: grayscale(1); opacity: .4; box-shadow: none; }
-  .tv-mini-switch { background: #313949; }
-  .tv-mini-switch:after { right: 11px; background: #929bad; }
-}
+// [P0-5] tv-strategy-legend 整行已删除（图层开关唯一真源在 IndicatorToolbar）；
+//   相关 .tv-strategy-legend / .tv-strategy-legend-item / .tv-legend-dot / .tv-mini-switch CSS 一并清理。
 
 // ===== 指标显示工具栏（PRD §6.2）=====
 .indicator-toolbar {
@@ -1558,8 +1451,6 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 // V1.6.2 响应式断点
 @media (max-width: 900px) {
   .tv-workspace { grid-template-columns: minmax(0, 1fr); }
-  .tv-strategy-legend { gap: 4px; }
-  .tv-strategy-legend-item { padding: 0 6px; }
 }
 
 // ===== V1.7 StockStructuralStatePanel 结构状态因子面板 =====
@@ -1692,9 +1583,6 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
   font-size: 12px;
   pointer-events: none;
 }
-
-// 策略图示区使用 CSS 变量传递颜色
-.tv-strategy-legend-item .tv-legend-dot { background: var(--legend-color, #53637e); }
 
 // ===== V1.6.3 会员续期拦截页（membership-expired）=====
 // 对齐原型 membership-expired.html 的 renew-gate-page 系列样式

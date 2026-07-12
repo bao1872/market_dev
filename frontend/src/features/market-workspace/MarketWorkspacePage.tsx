@@ -8,7 +8,7 @@ import { useSearchParams } from 'react-router-dom'
 import { MarketToolbar } from './MarketToolbar'
 import { MarketStockTable } from './MarketStockTable'
 import { EventStatePanel } from '@/features/research-context/EventStatePanel'
-import { useMarketStocks } from '@/hooks/useApi'
+import { useMarketBoards, useMarketStocks } from '@/hooks/useApi'
 import {
   decodeMarketWorkspaceUrl,
   encodeMarketWorkspaceUrl,
@@ -29,7 +29,18 @@ export default function MarketWorkspacePage() {
   const selected = urlState.selected
 
   // 右栏折叠状态（本地，不进 URL）
-  const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false)
+  // 首次访问默认收起，保留用户 localStorage 选择
+  const [rightPanelCollapsed, setRightPanelCollapsed] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return true
+    const saved = window.localStorage.getItem('panji:market-right-panel-collapsed:v1')
+    return saved === null ? true : saved === '1'
+  })
+  const handleToggleRightPanel = useCallback((collapsed: boolean) => {
+    setRightPanelCollapsed(collapsed)
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('panji:market-right-panel-collapsed:v1', collapsed ? '1' : '0')
+    }
+  }, [])
 
   // 行情列表查询（服务端分页 + 批量加载）
   const marketStocksQuery = useMarketStocks({
@@ -42,6 +53,19 @@ export default function MarketWorkspacePage() {
     concept: urlState.concept ?? undefined,
     state: urlState.state ?? undefined,
   })
+
+  // C10 板块目录：MarketWorkspacePage 唯一调用 useMarketBoards，向下传 props
+  // 子组件 MarketToolbar/MarketStockTable 不得再次请求 boards
+  const boardsQuery = useMarketBoards()
+  const boardsAvailable = boardsQuery.data?.available ?? false
+  const industryOptions = useMemo(
+    () => boardsQuery.data?.items.filter((b) => b.type === 'industry').map((b) => b.name) ?? [],
+    [boardsQuery.data],
+  )
+  const conceptOptions = useMemo(
+    () => boardsQuery.data?.items.filter((b) => b.type === 'concept').map((b) => b.name) ?? [],
+    [boardsQuery.data],
+  )
 
   // selected symbol 直接用于右栏 StockContext API（PRD V1.1 §7.3）
   const selectedSymbol = selected || undefined
@@ -110,6 +134,9 @@ export default function MarketWorkspacePage() {
         onScopeChange={handleScopeChange}
         onQueryChange={handleQueryChange}
         onFilterChange={handleFilterChange}
+        boardsAvailable={boardsAvailable}
+        industryOptions={industryOptions}
+        conceptOptions={conceptOptions}
       />
       <div className={styles.tableArea}>
         <div className={styles.tableWrapper}>
@@ -123,6 +150,7 @@ export default function MarketWorkspacePage() {
             scope={scope}
             urlState={urlState}
             onPageChange={handlePageChange}
+            boardsAvailable={boardsAvailable}
           />
         </div>
         {/* 右栏：研究上下文面板（可收起；收起时不挂载、不请求数据） */}
@@ -132,7 +160,7 @@ export default function MarketWorkspacePage() {
               <span className={styles.rightPaneTitle}>事件与状态</span>
               <button
                 className={styles.collapseBtn}
-                onClick={() => setRightPanelCollapsed(true)}
+                onClick={() => handleToggleRightPanel(true)}
                 aria-label="收起右栏"
               >
                 ›
@@ -155,7 +183,7 @@ export default function MarketWorkspacePage() {
         {rightPanelCollapsed && (
           <button
             className={styles.expandBtn}
-            onClick={() => setRightPanelCollapsed(false)}
+            onClick={() => handleToggleRightPanel(false)}
             aria-label="展开右栏"
           >
             ‹

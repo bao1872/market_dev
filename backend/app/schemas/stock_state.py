@@ -9,7 +9,9 @@ PRD V1.1 §7.3 核心契约：
 - StateEvent: 比较相邻有效状态生成幂等客观事件
 
 V1.1 硬性规定：
-1. MACD 只能来自真实 MACD 数据；当前无 MACD 计算，code=null, label="暂不可用"
+1. MACD 是 feature_snapshot_service 附加的日线辅助技术指标（标准 12/26/9），
+   注入日线 primary_factors.macd_state；不是 bar 因子也不是时序特征。
+   structural_factor_service 的 bar 因子只有：DSA 段质量、Swing、成本/节点、BB+SQZMOM、成交参与。
 2. SQZMOM 单独命名，不与 MACD 混淆
 3. value_area_zone 只能叫"成交密集区关系"，Phase 5 前不得叫"筹码共识"
 4. source_run_id 和 algorithm_version 来自真实快照 run，禁止硬编码
@@ -451,7 +453,7 @@ def build_stock_state(
     - as_of 来自 snapshot.trade_date（真实 point-in-time）
     - source_run_id 来自 run.id（真实快照 run，禁止硬编码）
     - algorithm_version 来自 run.schema_version（真实算法版本）
-    - MACD code=null（无真实 MACD 计算）
+    - MACD 来自 primary_factors.macd_state（feature_snapshot_service 附加的日线辅助指标）
     - SQZMOM 独立命名
 
     Args:

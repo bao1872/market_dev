@@ -4,6 +4,14 @@
 
 ## 2026-07-13
 
+- CHANGE-20260713-003: PR #74 阶段三 — 行情列表简化 + 图层/因子语义纠正 + 右栏按需加载
+  - boards 单一真源：MarketWorkspacePage 唯一调用 useMarketBoards，向下传 props
+  - 删除最近事件列：market_stocks_service 删除 stock_state_event 批量查询（SQL 9→8），字段兼容保留 null
+  - 形态状态中文映射：mapStructureStateLabel/mapDsaStateLabel 纯函数 + 数据日期提示
+  - 删除 tv-strategy-legend：StrategyChart JSX + isGroupActive + DISPLAY_GROUPS/DisplayGroupDef + CSS
+  - MACD 语义纠正：feature_snapshot 附加日线辅助指标，watchlist/selection 默认关闭
+  - 右栏默认收起：/market + /stock 首次默认收起，localStorage 持久化
+  - AGENTS.md 规则 8/11/16/17/18 重写 + 新增 19/20/21/22/23
 - CHANGE-20260713-002: PR #74 阶段二 — StockContext reasonCode + 快照归属修复工具 + EventStatePanel 纯函数抽取
   - reasonCode 机制：StockContext API 返回 dataQuality.reasonCode（no_published_full_run/snapshot_missing/snapshot_run_not_linked/legacy_snapshot_ambiguous/null）+ runTradeDate/runPublishedAt/hasSucceededRun/hasSnapshot/degradedReasons
   - 快照归属修复工具：tools/repair_snapshot_run_ownership.py（dry-run + --apply，按 trade_date+schema_version+timeframe+adj 匹配 canonical succeeded+published+full run，幂等 UPDATE source_run_id）

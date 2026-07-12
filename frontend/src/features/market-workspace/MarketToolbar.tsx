@@ -3,10 +3,10 @@
 // 本组件包含 scope 分段按钮 + 搜索输入 + 行业/概念/状态筛选器；通知/头像由 AppShell 顶栏承载。
 // 筛选器进入 URL（可分享、刷新恢复）；筛选变化时重置分页。
 // C9: 行业/概念筛选使用板块目录 API + <datalist> 原生自动完成（qstock 同步前为空列表，输入框仍可自由输入）。
-import { useState, useEffect, useCallback, useMemo } from 'react'
+// boardsAvailable 和 boards items 由 MarketWorkspacePage 统一传入，本组件不再自行调用 useMarketBoards。
+import { useState, useEffect, useCallback } from 'react'
 import clsx from 'clsx'
 import type { MarketScope, MarketStateFilter } from './marketWorkspaceUrlState'
-import { useMarketBoards } from '@/hooks/useApi'
 import styles from './MarketWorkspace.module.scss'
 
 interface MarketToolbarProps {
@@ -18,6 +18,12 @@ interface MarketToolbarProps {
   onScopeChange: (scope: MarketScope) => void
   onQueryChange: (query: string) => void
   onFilterChange: (patch: { industry?: string | null; concept?: string | null; state?: MarketStateFilter }) => void
+  /** 板块目录是否可用（由 MarketWorkspacePage 统一传入） */
+  boardsAvailable: boolean
+  /** 行业选项列表（由 MarketWorkspacePage 统一传入） */
+  industryOptions: string[]
+  /** 概念选项列表（由 MarketWorkspacePage 统一传入） */
+  conceptOptions: string[]
 }
 
 export function MarketToolbar({
@@ -29,24 +35,14 @@ export function MarketToolbar({
   onScopeChange,
   onQueryChange,
   onFilterChange,
+  boardsAvailable,
+  industryOptions,
+  conceptOptions,
 }: MarketToolbarProps) {
   // 本地输入状态，避免每次按键都触发 URL 更新；Enter 或失焦时提交
   const [input, setInput] = useState(query)
   const [industryInput, setIndustryInput] = useState(industry ?? '')
   const [conceptInput, setConceptInput] = useState(concept ?? '')
-
-  // C9: 板块目录（行业/概念），供 <datalist> 自动完成使用
-  // C10 降级保护：available=false 时禁用筛选输入，不制造重复请求
-  const boardsQuery = useMarketBoards()
-  const boardsAvailable = boardsQuery.data?.available ?? false
-  const industryOptions = useMemo(
-    () => boardsQuery.data?.items.filter((b) => b.type === 'industry').map((b) => b.name) ?? [],
-    [boardsQuery.data],
-  )
-  const conceptOptions = useMemo(
-    () => boardsQuery.data?.items.filter((b) => b.type === 'concept').map((b) => b.name) ?? [],
-    [boardsQuery.data],
-  )
 
   useEffect(() => {
     setInput(query)

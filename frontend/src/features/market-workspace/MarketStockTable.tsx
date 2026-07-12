@@ -7,6 +7,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useAddToWatchlist, useRemoveFromWatchlist } from '@/hooks/useApi'
 import type { MarketStockRow, MarketStocksResponse } from '@/api/endpoints'
 import { encodeMarketWorkspaceUrl, type MarketWorkspaceUrlState } from './marketWorkspaceUrlState'
+import { mapStructureStateLabel, mapDsaStateLabel } from './mapStructureStateLabel'
 import clsx from 'clsx'
 import styles from './MarketWorkspace.module.scss'
 
@@ -20,6 +21,8 @@ interface MarketStockTableProps {
   scope: 'market' | 'watchlist'
   urlState: MarketWorkspaceUrlState
   onPageChange: (page: number) => void
+  /** 板块目录是否可用（false 时隐藏行业/概念列） */
+  boardsAvailable: boolean
 }
 
 
@@ -33,6 +36,7 @@ export function MarketStockTable({
   scope,
   urlState,
   onPageChange,
+  boardsAvailable,
 }: MarketStockTableProps) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -47,6 +51,7 @@ export function MarketStockTable({
 
   // 收盘快照判断：price_as_of 日期早于今天 → 价格来自日线收盘而非实时
   const priceAsOf = data?.price_as_of ?? null
+  const stateAsOf = data?.state_as_of ?? null
   const isClosingSnapshot = (() => {
     if (!priceAsOf) return false
     const snapDate = priceAsOf.slice(0, 10)
@@ -139,11 +144,10 @@ export function MarketStockTable({
                 )}
               </th>
               <th className={styles.colChange}>涨跌幅</th>
-              <th className={styles.colIndustry}>行业</th>
-              <th className={styles.colConcept}>概念</th>
+              {boardsAvailable && <th className={styles.colIndustry}>行业</th>}
+              {boardsAvailable && <th className={styles.colConcept}>概念</th>}
               <th className={styles.colState}>形态状态</th>
               <th className={styles.colDsa}>DSA状态</th>
-              <th className={styles.colEvent}>最近事件</th>
               <th className={styles.colStar}>自选</th>
             </tr>
           </thead>
@@ -154,9 +158,8 @@ export function MarketStockTable({
                   <td><div className={styles.skeletonCell} /></td>
                   <td><div className={styles.skeletonCell} /></td>
                   <td><div className={styles.skeletonCell} /></td>
-                  <td><div className={styles.skeletonCell} /></td>
-                  <td><div className={styles.skeletonCell} /></td>
-                  <td><div className={styles.skeletonCell} /></td>
+                  {boardsAvailable && <td><div className={styles.skeletonCell} /></td>}
+                  {boardsAvailable && <td><div className={styles.skeletonCell} /></td>}
                   <td><div className={styles.skeletonCell} /></td>
                   <td><div className={styles.skeletonCell} /></td>
                   <td><div className={styles.skeletonCell} /></td>
@@ -192,35 +195,27 @@ export function MarketStockTable({
                       ? `${row.change_pct > 0 ? '+' : ''}${row.change_pct.toFixed(2)}%`
                       : '—'}
                   </td>
-                  <td className={styles.colIndustry}>
-                    {row.industry ?? '—'}
-                  </td>
-                  <td
-                    className={styles.colConcept}
-                    title={row.concepts.length > 0 ? row.concepts.join(', ') : undefined}
-                  >
-                    {row.concepts.length > 0
-                      ? row.concepts.slice(0, 2).join(', ') +
-                        (row.concepts.length > 2 ? ` +${row.concepts.length - 2}` : '')
-                      : '—'}
-                  </td>
+                  {boardsAvailable && (
+                    <td className={styles.colIndustry}>
+                      {row.industry ?? '—'}
+                    </td>
+                  )}
+                  {boardsAvailable && (
+                    <td
+                      className={styles.colConcept}
+                      title={row.concepts.length > 0 ? row.concepts.join(', ') : undefined}
+                    >
+                      {row.concepts.length > 0
+                        ? row.concepts.slice(0, 2).join(', ') +
+                          (row.concepts.length > 2 ? ` +${row.concepts.length - 2}` : '')
+                        : '—'}
+                    </td>
+                  )}
                   <td className={styles.colState}>
-                    {row.structure_state ?? '—'}
+                    {mapStructureStateLabel(row.structure_state)}
                   </td>
                   <td className={styles.colDsa}>
-                    {row.dsa_state ?? '—'}
-                  </td>
-                  <td className={styles.colEvent}>
-                    {row.latest_event_title ? (
-                      <div className={styles.eventCell}>
-                        <div className={styles.eventTitle}>{row.latest_event_title}</div>
-                        {row.latest_event_time && (
-                          <div className={styles.eventTime}>{row.latest_event_time}</div>
-                        )}
-                      </div>
-                    ) : (
-                      '—'
-                    )}
+                    {mapDsaStateLabel(row.dsa_state)}
                   </td>
                   <td className={styles.colStar}>
                     <button
@@ -276,6 +271,14 @@ export function MarketStockTable({
               ›
             </button>
           </div>
+        </div>
+      )}
+
+      {/* 数据日期提示：price_as_of / state_as_of 放到底部，不逐行重复 */}
+      {(priceAsOf || stateAsOf) && (
+        <div className={styles.dataDateHint}>
+          {priceAsOf && <span>行情日期：{priceAsOf.slice(0, 10)}{isClosingSnapshot ? '（收盘）' : ''}</span>}
+          {stateAsOf && <span>状态日期：{stateAsOf.slice(0, 10)}</span>}
         </div>
       )}
     </div>

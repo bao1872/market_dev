@@ -9,13 +9,16 @@
 2. count 查询（相同 WHERE 条件，含 industry/concept EXISTS 子查询）
 3. 最新 2 根日线（rn <= 2）批量按 instrument_ids 查询 → latest_price + change_pct
 4. 最新 stock_feature_snapshot（rn = 1）批量 → dsa_state + structure_state
-5. 最新 stock_state_event（rn = 1）批量 → latest_event_title + latest_event_time
+5. 板块归属批量查询 → industry + concepts
 6. boards_as_of — MAX(market_boards.updated_at) 标量查询
-7. 板块归属批量查询 → industry + concepts
-8. price_as_of — MAX(bar_daily.trade_date) 全局标量（不随分页变化）
-9. state_as_of — MAX(stock_feature_snapshot.created_at) 全局标量（不随分页变化）
+7. price_as_of — MAX(bar_daily.trade_date) 全局标量（不随分页变化）
+8. state_as_of — MAX(stock_feature_snapshot.created_at) 全局标量（不随分页变化）
 
-总计 9 条固定 SQL，不随 page_size 增长。
+总计 8 条固定 SQL，不随 page_size 增长。
+
+注：latest_event_title / latest_event_time 字段为兼容保留，固定返回 None；
+列表服务不再执行 stock_state_event 批量查询（事件只在 EventStatePanel 按需展开时加载）。
+sort=latest_event_time 仍可用（通过标量子查询 ORDER BY，非批量查询）。
 """
 
 from __future__ import annotations
@@ -521,33 +524,7 @@ async def get_market_stocks(
             str(structure_state) if structure_state else None,
         )
 
-    # ===== Query 5: 最新 stock_state_event（批量） =====
-    event_subq = (
-        select(
-            StockStateEvent.instrument_id,
-            StockStateEvent.title,
-            StockStateEvent.occurred_at,
-            func.row_number()
-            .over(
-                partition_by=StockStateEvent.instrument_id,
-                order_by=StockStateEvent.occurred_at.desc(),
-            )
-            .label("rn"),
-        )
-        .where(StockStateEvent.instrument_id.in_(instrument_ids))
-        .subquery()
-    )
-    event_stmt = select(event_subq).where(event_subq.c.rn == 1)
-    event_result = await db.execute(event_stmt)
-
-    event_map: dict[UUID, tuple[str | None, str | None]] = {}
-    for ev_row in event_result:
-        event_map[ev_row.instrument_id] = (
-            ev_row.title,
-            ev_row.occurred_at.isoformat() if ev_row.occurred_at else None,
-        )
-
-    # ===== Query 7: 板块归属（批量，industry/concepts） =====
+    # ===== Query 5: 板块归属（批量，industry/concepts） =====
     boards_map = await get_instrument_boards_batch(db, instrument_ids)
 
     # ===== 组装响应 =====
@@ -561,7 +538,6 @@ async def get_market_stocks(
             change_pct = round((latest_price - prev_close) / prev_close * 100, 2)
 
         dsa_state, structure_state = state_map.get(inst_id, (None, None))
-        event_title, event_time = event_map.get(inst_id, (None, None))
 
         # 板块归属：industry 取首个行业，concepts 取全部概念
         inst_boards = boards_map.get(inst_id, [])
@@ -581,8 +557,8 @@ async def get_market_stocks(
                 concepts=concept_names,
                 dsa_state=dsa_state,
                 structure_state=structure_state,
-                latest_event_title=event_title,
-                latest_event_time=event_time,
+                latest_event_title=None,
+                latest_event_time=None,
                 is_watchlisted=base.is_watchlisted,
             )
         )
@@ -592,10 +568,10 @@ async def get_market_stocks(
         select(func.max(MarketBoard.updatedAt))
     )
 
-    # ===== Query 8: price_as_of — 全局最新日线 trade_date（不随分页变化） =====
+    # ===== Query 7: price_as_of — 全局最新日线 trade_date（不随分页变化） =====
     price_as_of_date: date | None = await db.scalar(select(func.max(BarDaily.trade_date)))
 
-    # ===== Query 9: state_as_of — 全局最新特征快照 created_at（不随分页变化） =====
+    # ===== Query 8: state_as_of — 全局最新特征快照 created_at（不随分页变化） =====
     state_as_of_dt: datetime | None = await db.scalar(
         select(func.max(StockFeatureSnapshot.created_at)).where(
             StockFeatureSnapshot.schema_version == 1

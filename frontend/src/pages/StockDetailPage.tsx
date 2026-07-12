@@ -47,12 +47,13 @@ export default function StockDetailPage() {
     searchParams.get('capture') === '1' ||
     isCaptureMode
 
-  // [事件面板开关] - 默认展开，用户点击收起，localStorage 持久化；capture 强制隐藏
-  // P0-4: showStructuralState → eventPanelCollapsed（语义反转：默认展开）
+  // [事件面板开关] - 首次默认收起，localStorage 持久化用户选择；capture 强制隐藏
+  // P0-4: showStructuralState → eventPanelCollapsed（语义：true=收起）
   // localStorage key: panji:event-panel:v1
   const [eventPanelCollapsed, setEventPanelCollapsed] = useState<boolean>(() => {
     if (hideStructuralStateParam) return true
-    return localStorage.getItem('panji:event-panel:v1') === 'collapsed'
+    const saved = localStorage.getItem('panji:event-panel:v1')
+    return saved === null ? true : saved === 'collapsed'
   })
   const toggleEventPanel = useCallback(() => {
     if (hideStructuralStateParam) return

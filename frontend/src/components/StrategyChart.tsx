@@ -9,10 +9,8 @@ import { useEffect, useRef, useState, useMemo, useCallback } from 'react'
 import clsx from 'clsx'
 import {
   CALCULATION_WINDOWS,
-  DISPLAY_GROUPS,
   STRATEGIES,
   FEISHU_CAPTURE_LAYERS,
-  type DisplayGroupDef,
 } from '../lib/strategy-manifest'
 import type { ChartLayer, DsaSelectorData, IndicatorResponse } from '../api/endpoints'
 import {
@@ -265,10 +263,9 @@ function formatTime(timeStr: string): string {
 // [chartViewport] - 时间键规范化和时间轴刻度函数已迁移至 src/utils/chartTime.ts
 //   纯 .ts 文件便于 Node --experimental-strip-types 单元测试（DSA source alignment contract test）
 import { normalizeChartTime, timeTicks } from '@/utils/chartTime'
-// [DSA Overlay Policy] - DSA 全周期支持与 title 提示文案（PR #32）
+// [DSA Overlay Policy] - DSA 全周期支持（PR #32）
 //   DSA VWAP 支持 1d/15m/1h/1w/1mo；1d 是主结构锚，非 1d 是验证图层
 import {
-  DSA_TITLE_HINT,
   shouldCheckDsaMismatch,
   shouldIncludeDsaInPriceRange,
   shouldRenderBbLayer,
@@ -1793,13 +1790,6 @@ function chartLayerVisibilityToInternal(
   }
 }
 
-// 判断 display group 是否全部激活（用于只读 legend 显示状态）
-function isGroupActive(groupId: string, layers: LayerVisibility): boolean {
-  const group = DISPLAY_GROUPS[groupId]
-  if (!group) return false
-  return group.layers.every(l => layers[l as keyof LayerVisibility])
-}
-
 export function StrategyChart({
   symbol,
   bars,
@@ -2316,26 +2306,6 @@ export function StrategyChart({
             )
           })}
         </div>
-      </div>
-
-      {/* 策略图示区：只读说明（单一真源 v2 — 图层开关在 IndicatorToolbar，此处不再可点击） */}
-      <div className="tv-strategy-legend">
-        <span className="tv-strategy-legend-label">策略图层</span>
-        {Object.values(DISPLAY_GROUPS).map((g: DisplayGroupDef) => {
-          const active = isGroupActive(g.id, effectiveLayers)
-          // [PR #32] - DSA 全周期支持，title 按周期区分（1d 主结构锚，非 1d 验证图层）
-          const dsaTitleHint = g.id === 'dsa' ? DSA_TITLE_HINT(timeframe) : undefined
-          return (
-            <span
-              key={g.id}
-              className={clsx('tv-strategy-legend-item', !active && 'off')}
-              title={dsaTitleHint}
-            >
-              <i className="tv-legend-dot" style={{ '--legend-color': g.color } as React.CSSProperties} />
-              <b>{g.shortName}</b>
-            </span>
-          )
-        })}
       </div>
 
       {/* 图表画布 */}
