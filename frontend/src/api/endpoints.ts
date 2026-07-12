@@ -1690,6 +1690,38 @@ export async function getMarketStocks(
 }
 
 
+// ===== C9: 板块目录只读 API（行业/概念筛选下拉支持）=====
+
+/** 板块目录单行 */
+export interface MarketBoardItem {
+  id: string
+  name: string
+  type: 'industry' | 'concept'
+  external_code: string
+}
+
+/** 板块目录列表响应 */
+export interface MarketBoardsResponse {
+  items: MarketBoardItem[]
+  available: boolean
+  reason_code: string | null
+  updated_at: string | null
+}
+
+/**
+ * 查询板块目录（只读，C9）。
+ * GET /market/boards?type=industry|concept
+ * qstock 同步前返回空列表（不报错）。
+ */
+export async function getMarketBoards(
+  params?: { type?: 'industry' | 'concept' },
+  options?: { signal?: AbortSignal },
+): Promise<MarketBoardsResponse> {
+  const { data } = await apiClient.get<MarketBoardsResponse>('/market/boards', { params, signal: options?.signal })
+  return data
+}
+
+
 // ============================================================
 // ===== Admin Membership 端点 =====
 // ============================================================

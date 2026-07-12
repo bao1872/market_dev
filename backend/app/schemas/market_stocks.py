@@ -52,8 +52,34 @@ class MarketStocksResponse(BaseModel):
     boards_as_of: str | None = Field(None, description="板块数据时间戳 ISO（qstock 同步前 null）")
 
 
+# ===== 板块目录 API schemas（C9: 行业/概念筛选下拉支持）=====
+
+
+class MarketBoardItem(BaseModel):
+    """板块目录单行。"""
+
+    id: UUID = Field(..., description="板块 ID")
+    name: str = Field(..., description="板块名称")
+    type: str = Field(..., description="板块类型：industry | concept")
+    external_code: str = Field(..., description="外部代码（qstock 原始代码）")
+
+
+class MarketBoardsResponse(BaseModel):
+    """板块目录列表响应（只读，供前端筛选下拉使用）。"""
+
+    items: list[MarketBoardItem] = Field(default_factory=list, description="板块列表")
+    available: bool = Field(False, description="是否有可用板块数据（同步成功后 true）")
+    reason_code: str | None = Field(
+        None,
+        description="不可用原因：board_provider_unavailable=provider 未就绪/被反爬拦截",
+    )
+    updated_at: str | None = Field(None, description="板块数据最后同步时间 ISO")
+
+
 if __name__ == "__main__":
     # 自测入口：验证 schema 字段定义
     print(f"MarketStockRow fields={list(MarketStockRow.model_fields.keys())}")
     print(f"MarketStocksResponse fields={list(MarketStocksResponse.model_fields.keys())}")
+    print(f"MarketBoardItem fields={list(MarketBoardItem.model_fields.keys())}")
+    print(f"MarketBoardsResponse fields={list(MarketBoardsResponse.model_fields.keys())}")
     print("OK")

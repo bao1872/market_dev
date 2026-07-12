@@ -2,11 +2,11 @@
 // PRD §6.1：行情/复盘、全局股票搜索、行情/自选分段按钮、筛选、通知、头像。
 // 本组件包含 scope 分段按钮 + 搜索输入 + 行业/概念/状态筛选器；通知/头像由 AppShell 顶栏承载。
 // 筛选器进入 URL（可分享、刷新恢复）；筛选变化时重置分页。
-// TODO(P1): 行业/概念筛选当前为文本输入（临时实现），后续应替换为板块目录 API +
-// 自动完成下拉，避免用户必须准确输入完整板块名。
-import { useState, useEffect, useCallback } from 'react'
+// C9: 行业/概念筛选使用板块目录 API + <datalist> 原生自动完成（qstock 同步前为空列表，输入框仍可自由输入）。
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import clsx from 'clsx'
 import type { MarketScope, MarketStateFilter } from './marketWorkspaceUrlState'
+import { useMarketBoards } from '@/hooks/useApi'
 import styles from './MarketWorkspace.module.scss'
 
 interface MarketToolbarProps {
@@ -34,6 +34,19 @@ export function MarketToolbar({
   const [input, setInput] = useState(query)
   const [industryInput, setIndustryInput] = useState(industry ?? '')
   const [conceptInput, setConceptInput] = useState(concept ?? '')
+
+  // C9: 板块目录（行业/概念），供 <datalist> 自动完成使用
+  // C10 降级保护：available=false 时禁用筛选输入，不制造重复请求
+  const boardsQuery = useMarketBoards()
+  const boardsAvailable = boardsQuery.data?.available ?? false
+  const industryOptions = useMemo(
+    () => boardsQuery.data?.items.filter((b) => b.type === 'industry').map((b) => b.name) ?? [],
+    [boardsQuery.data],
+  )
+  const conceptOptions = useMemo(
+    () => boardsQuery.data?.items.filter((b) => b.type === 'concept').map((b) => b.name) ?? [],
+    [boardsQuery.data],
+  )
 
   useEffect(() => {
     setInput(query)
@@ -100,27 +113,41 @@ export function MarketToolbar({
         <input
           className={styles.filterInput}
           type="text"
-          placeholder="行业"
+          placeholder={boardsAvailable ? '行业' : '板块未开放'}
           value={industryInput}
+          list="industry-board-options"
           onChange={(e) => setIndustryInput(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter') handleIndustrySubmit()
           }}
           onBlur={handleIndustrySubmit}
           aria-label="行业筛选"
+          disabled={!boardsAvailable}
         />
+        <datalist id="industry-board-options">
+          {industryOptions.map((name) => (
+            <option key={name} value={name} />
+          ))}
+        </datalist>
         <input
           className={styles.filterInput}
           type="text"
-          placeholder="概念"
+          placeholder={boardsAvailable ? '概念' : '板块未开放'}
           value={conceptInput}
+          list="concept-board-options"
           onChange={(e) => setConceptInput(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter') handleConceptSubmit()
           }}
           onBlur={handleConceptSubmit}
           aria-label="概念筛选"
+          disabled={!boardsAvailable}
         />
+        <datalist id="concept-board-options">
+          {conceptOptions.map((name) => (
+            <option key={name} value={name} />
+          ))}
+        </datalist>
         <select
           className={styles.filterSelect}
           value={state ?? ''}

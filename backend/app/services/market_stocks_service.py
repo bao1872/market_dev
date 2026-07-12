@@ -36,7 +36,12 @@ from app.models.market_board import MarketBoard, MarketBoardMembership
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_state_event import StockStateEvent
 from app.models.watchlist import UserWatchlistItem
-from app.schemas.market_stocks import MarketStockRow, MarketStocksResponse
+from app.schemas.market_stocks import (
+    MarketBoardItem,
+    MarketBoardsResponse,
+    MarketStockRow,
+    MarketStocksResponse,
+)
 from app.services.board_sync_service import get_instrument_boards_batch
 from app.services.instrument_maintenance_service import stock_symbol_sql_filter
 
@@ -605,4 +610,47 @@ async def get_market_stocks(
         price_as_of=price_as_of_date.isoformat() if price_as_of_date else None,
         state_as_of=to_shanghai_iso(state_as_of_dt) if state_as_of_dt else None,
         boards_as_of=to_shanghai_iso(boards_as_of_dt) if boards_as_of_dt else None,
+    )
+
+
+# ===== C9: 板块目录只读 API =====
+
+
+async def get_market_boards(
+    db: AsyncSession,
+    board_type: str | None = None,
+) -> MarketBoardsResponse:
+    """读取板块目录（只读），供前端行业/概念筛选下拉使用。
+
+    从 market_boards 表查询全部行业/概念板块，按 name 升序。
+    qstock 同步前返回空列表（不报错）。
+
+    Args:
+        db: 异步 DB 会话
+        board_type: 可选类型过滤（industry | concept），None 返回全部
+    """
+    stmt = select(MarketBoard).order_by(MarketBoard.name.asc())
+    if board_type in ("industry", "concept"):
+        stmt = stmt.where(MarketBoard.type == board_type)
+
+    result = await db.execute(stmt)
+    boards = result.scalars().all()
+
+    updated_at_dt: datetime | None = await db.scalar(
+        select(func.max(MarketBoard.updatedAt))
+    )
+
+    return MarketBoardsResponse(
+        items=[
+            MarketBoardItem(
+                id=b.id,
+                name=b.name,
+                type=b.type,
+                external_code=b.externalCode,
+            )
+            for b in boards
+        ],
+        available=len(boards) > 0,
+        reason_code=None if boards else "board_provider_unavailable",
+        updated_at=to_shanghai_iso(updated_at_dt) if updated_at_dt else None,
     )

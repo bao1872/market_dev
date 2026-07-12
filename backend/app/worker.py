@@ -661,14 +661,42 @@ async def run_bars_scheduler_worker() -> None:
 
         独立于 bars_refresh，失败只记录 SchedulerJobRun 并保留旧板块数据。
         qstock 同步调用通过 asyncio.to_thread 包装（在 QStockFetcher 内部）。
+
+        C10 降级保护：BOARD_SYNC_ENABLED=false 时跳过执行，记录 skipped +
+        reason_code=board_provider_unavailable，不发起 THS 请求。
         """
         from datetime import date as date_cls
 
+        from app.config import get_settings
         from app.services.board_sync_service import sync_boards
         from app.services.calendar_service import is_trading_day_async
         from app.services.qstock_fetcher import QStockFetcher
 
         trade_date = date_cls.today()
+
+        # C10 降级保护：开关关闭时跳过，不发起任何 THS 请求
+        settings = get_settings()
+        if not settings.board_sync_enabled:
+            logger.warning(
+                "board_sync SKIPPED_DISABLED business_date=%s reason_code=board_provider_unavailable",
+                trade_date,
+            )
+            async with AsyncSessionLocal() as db:
+                scheduled_at = datetime.combine(
+                    trade_date, time(17, 0), tzinfo=ZoneInfo("Asia/Shanghai")
+                )
+                job_run = await _create_job_run(
+                    db, "board_sync_scheduler", str(trade_date),
+                    scheduled_at=scheduled_at,
+                    run_key=f"board_sync:{trade_date}",
+                )
+                if job_run is not None:
+                    await _finish_job_run(
+                        db, job_run, "skipped",
+                        error_message="board_provider_unavailable: BOARD_SYNC_ENABLED=false",
+                    )
+                    await db.commit()
+            return
 
         async with AsyncSessionLocal() as session:
             is_trading = await is_trading_day_async(session, trade_date)

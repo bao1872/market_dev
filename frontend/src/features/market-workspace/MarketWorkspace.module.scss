@@ -105,6 +105,11 @@
   &:focus {
     border-color: #2962ff;
   }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
 }
 
 .filterSelect {
