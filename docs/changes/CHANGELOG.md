@@ -4,6 +4,14 @@
 
 ## 2026-07-12
 
+- CHANGE-20260712-003: PR #74 综合修复 — 快照归属/发布原子性/stock_context/前端修复
+  - 快照归属：upsert_snapshot 冲突更新 source_run_id；删除 ORM 冗余索引 ix_feature_snapshot_source_run_id
+  - 发布原子性：快照计算后不提前写 succeeded/published_at；DSA publish_run 成功后才发布 snapshot run
+  - stock_context：_event_to_dto 映射 evidence DTO；ZoneInfo("Asia/Shanghai")；cutoff 次日 00:00 exclusive；run 查询确定性倒序
+  - 幂等键：改为 symbol:source_run_id:algorithm_version（每股票每 run 最多一条事件）
+  - 前端：UserAppShell 删除角色预览；StockDetailPage eventPanelCollapsed 默认展开；EventStatePanel 展示 evidence+MACD；MarketStockTable 名称 sticky+字号修正+来源徽章修复
+  - 部署：CORE_ONLY 模式不构建 worker-capture
+  - 测试：后端 87 测试 + 前端 141 契约测试全部通过
 - CHANGE-20260712-002: C10 收口 — 板块同步降级保护(BOARD_SYNC_ENABLED) + /market/boards available/reason_code + 前端筛选降级 + 废弃CSS清理 + 文档同步
 - CHANGE-20260712-001: PR #74 两项架构纠偏 — board_sync 合并进 bars_scheduler + ConsensusZone 数据源修正
   - arch1: `worker-board-sync` Docker 服务移除；`run_board_sync_scheduler_worker()` 函数删除；`board_sync_scheduler` 不再是有效 WORKER_TYPE；board_sync job 注册进 `run_bars_scheduler_worker()`（同一 AsyncIOScheduler，17:00 CronTrigger，max_instances=1）；qstock 同步调用通过 `asyncio.to_thread()` 包装

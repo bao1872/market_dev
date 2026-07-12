@@ -141,10 +141,6 @@ class StockFeatureSnapshot(Base):
             "instrument_id",
         ),
         Index(
-            "ix_feature_snapshot_source_run_id",
-            "source_run_id",
-        ),
-        Index(
             "ix_feature_snapshot_run_instrument",
             "source_run_id",
             "instrument_id",
@@ -179,7 +175,6 @@ if __name__ == "__main__":
         "ix_feature_snapshot_trade_date_schema",
         "ix_feature_snapshot_instrument_date",
         "ix_feature_snapshot_date_instrument",
-        "ix_feature_snapshot_source_run_id",
         "ix_feature_snapshot_run_instrument",
     }
     assert expected_indexes.issubset(idx_names), f"索引缺失: {expected_indexes - idx_names}"

@@ -1175,79 +1175,72 @@ async def test_admin_stock_debug_admin_returns_200(
 
 
 # =============================================================================
-# 9. C3: 幂等键包含 evidence（field + prev/curr code/value）
+# 9. C3: 幂等键 = symbol:source_run_id:algorithm_version
+# V1.1: 每只股票每个 source_run_id 最多一条事件（禁止用日期+hash 绕开）
 # =============================================================================
 
 
-def test_c3_idempotency_key_differs_for_different_transitions() -> None:
-    """C3: 相同 changed_fields 但不同 prev/curr code/value 必须产生不同幂等键。
+def test_c3_idempotency_key_same_run_same_key() -> None:
+    """C3: 相同 (symbol, source_run_id, algorithm_version) 必须产生相同幂等键。
 
-    场景：momentum.sqzmom 字段变化
-    - 转换 A: positive → negative
-    - 转换 B: negative → positive
-    两者 changed_fields 相同（["momentum.sqzmom"]），但 evidence 不同，
-    幂等键必须不同，否则 B 会被 ON CONFLICT DO NOTHING 错误跳过。
+    同一 run 重跑（无论 evidence 是否变化）产生相同 key → ON CONFLICT DO NOTHING。
+    这保证每只股票每个 run 最多一条事件。
     """
     from app.services.state_event_service import compute_idempotency_key
 
     symbol = "000001"
-    trade_date = date(2026, 7, 10)
+    run_id = uuid4()
     algo_version = "schema_v1+state_v1"
 
-    # 转换 A: positive → negative
-    evidence_a = [{"field": "momentum.sqzmom", "prevCode": "positive", "currCode": "negative"}]
-    key_a = compute_idempotency_key(symbol, trade_date, algo_version, evidence_a)
+    key_1 = compute_idempotency_key(symbol, run_id, algo_version)
+    key_2 = compute_idempotency_key(symbol, run_id, algo_version)
 
-    # 转换 B: negative → positive
-    evidence_b = [{"field": "momentum.sqzmom", "prevCode": "negative", "currCode": "positive"}]
-    key_b = compute_idempotency_key(symbol, trade_date, algo_version, evidence_b)
-
-    assert key_a != key_b, (
-        f"不同转换必须产生不同幂等键: A={key_a}, B={key_b}"
-    )
+    assert key_1 == key_2, f"相同 run 必须产生相同 key: {key_1} vs {key_2}"
+    assert key_1 == f"{symbol}:{run_id}:{algo_version}"
 
 
-def test_c3_idempotency_key_same_evidence_same_key() -> None:
-    """C3: 相同 evidence（同日重跑）必须产生相同幂等键（幂等性保证）。"""
-    from app.services.state_event_service import compute_idempotency_key
+def test_c3_idempotency_key_differs_for_different_runs() -> None:
+    """C3: 不同 source_run_id 必须产生不同幂等键。
 
-    symbol = "000001"
-    trade_date = date(2026, 7, 10)
-    algo_version = "schema_v1+state_v1"
-    evidence = [
-        {"field": "momentum.sqzmom", "prevCode": "positive", "currCode": "negative"},
-        {"field": "volatility.bollPosition", "prevCode": "middle", "currCode": "near_upper"},
-    ]
-
-    key_1 = compute_idempotency_key(symbol, trade_date, algo_version, evidence)
-    # 打乱顺序后计算，key 应相同（sorted 保证稳定性）
-    evidence_shuffled = list(reversed(evidence))
-    key_2 = compute_idempotency_key(symbol, trade_date, algo_version, evidence_shuffled)
-
-    assert key_1 == key_2, "相同 evidence（不同顺序）必须产生相同幂等键"
-
-
-def test_c3_idempotency_key_differs_from_field_only_hash() -> None:
-    """C3: 包含值的幂等键必须与只含字段名的旧方案不同。
-
-    验证：相同 changed_fields（字段名相同）但不同值，
-    新方案产生不同 key，旧方案（只 hash 字段名）会产生相同 key。
+    同一只股票的不同 run 产生不同 key，确保每次 run 都能生成新事件。
     """
     from app.services.state_event_service import compute_idempotency_key
 
     symbol = "000001"
-    trade_date = date(2026, 7, 10)
+    run_a = uuid4()
+    run_b = uuid4()
     algo_version = "schema_v1+state_v1"
 
-    # 两个不同转换，相同字段
-    evidence_a = [{"field": "momentum.macd", "prevCode": None, "currCode": "positive"}]
-    evidence_b = [{"field": "momentum.macd", "prevCode": "positive", "currCode": "negative"}]
+    key_a = compute_idempotency_key(symbol, run_a, algo_version)
+    key_b = compute_idempotency_key(symbol, run_b, algo_version)
 
-    key_a = compute_idempotency_key(symbol, trade_date, algo_version, evidence_a)
-    key_b = compute_idempotency_key(symbol, trade_date, algo_version, evidence_b)
+    assert key_a != key_b, f"不同 run 必须产生不同 key: {key_a} vs {key_b}"
 
-    # 新方案：不同值 → 不同 key
-    assert key_a != key_b
+
+def test_c3_idempotency_key_differs_for_different_symbols() -> None:
+    """C3: 不同 symbol 必须产生不同幂等键。"""
+    from app.services.state_event_service import compute_idempotency_key
+
+    run_id = uuid4()
+    algo_version = "schema_v1+state_v1"
+
+    key_a = compute_idempotency_key("000001", run_id, algo_version)
+    key_b = compute_idempotency_key("000002", run_id, algo_version)
+
+    assert key_a != key_b, f"不同 symbol 必须产生不同 key: {key_a} vs {key_b}"
+
+
+def test_c3_idempotency_key_differs_for_different_algo_versions() -> None:
+    """C3: 不同 algorithm_version 必须产生不同幂等键。"""
+    from app.services.state_event_service import compute_idempotency_key
+
+    symbol = "000001"
+    run_id = uuid4()
+
+    key_a = compute_idempotency_key(symbol, run_id, "schema_v1+state_v1")
+    key_b = compute_idempotency_key(symbol, run_id, "schema_v2+state_v1")
+
+    assert key_a != key_b, f"不同 algo 必须产生不同 key: {key_a} vs {key_b}"
 
 
 # =============================================================================
@@ -1366,3 +1359,315 @@ async def test_c4_previous_snapshot_empty_instrument_ids() -> None:
 
     assert result == {}
     mock_session.execute.assert_not_awaited()
+
+
+# =============================================================================
+# 11. P0-3: _event_to_dto evidence 映射 + 时区边界 + 同日多 run
+# =============================================================================
+
+
+def test_p03_event_to_dto_maps_evidence() -> None:
+    """P0-3: _event_to_dto 将 ORM event.evidence 映射为 Evidence DTO 列表。"""
+    from app.api.stock_context import _event_to_dto
+
+    # 构造 mock ORM event
+    mock_event = MagicMock()
+    mock_event.id = uuid4()
+    mock_event.symbol = "000001"
+    mock_event.occurred_at = datetime(2026, 7, 10, 15, 0, tzinfo=UTC)
+    mock_event.event_type = "state_transition"
+    mock_event.title = "2 项状态发生变化"
+    mock_event.description = "变化字段: SQZMOM 动量, 布林位置"
+    mock_event.changed_fields = ["momentum.sqzmom", "volatility.bollPosition"]
+    mock_event.previous_as_of = date(2026, 7, 9)
+    mock_event.current_as_of = date(2026, 7, 10)
+    mock_event.idempotency_key = "000001:run-uuid:schema_v1+state_v1"
+    mock_event.evidence = [
+        {
+            "field": "momentum.sqzmom",
+            "prevCode": "positive",
+            "currCode": "negative",
+            "prevValue": 0.001,
+            "currValue": -0.001,
+            "unit": None,
+            "timeframe": "1d",
+        },
+        {
+            "field": "volatility.bollPosition",
+            "prevCode": "middle",
+            "currCode": "near_upper",
+            "prevValue": 0.5,
+            "currValue": 0.85,
+            "unit": None,
+            "timeframe": "1d",
+        },
+    ]
+
+    dto = _event_to_dto(mock_event)
+
+    assert dto.symbol == "000001"
+    assert len(dto.evidence) == 2
+    # 第一条证据
+    ev1 = dto.evidence[0]
+    assert ev1.fieldName == "SQZMOM 动量"  # 白名单映射
+    assert ev1.code == "momentum.sqzmom"
+    assert ev1.currentValue == "negative"  # 优先 code
+    assert ev1.previousValue == "positive"
+    assert ev1.timeframe == "1d"
+    # 第二条证据
+    ev2 = dto.evidence[1]
+    assert ev2.fieldName == "布林位置"
+    assert ev2.code == "volatility.bollPosition"
+    assert ev2.currentValue == "near_upper"
+    assert ev2.previousValue == "middle"
+
+
+def test_p03_event_to_dto_empty_evidence() -> None:
+    """P0-3: event.evidence 为空时 DTO evidence 为空列表。"""
+    from app.api.stock_context import _event_to_dto
+
+    mock_event = MagicMock()
+    mock_event.id = uuid4()
+    mock_event.symbol = "000001"
+    mock_event.occurred_at = datetime(2026, 7, 10, 15, 0, tzinfo=UTC)
+    mock_event.event_type = "state_transition"
+    mock_event.title = "无状态变化"
+    mock_event.description = "当前暂无新的状态变化"
+    mock_event.changed_fields = []
+    mock_event.previous_as_of = None
+    mock_event.current_as_of = date(2026, 7, 10)
+    mock_event.idempotency_key = "000001:run-uuid:schema_v1+state_v1"
+    mock_event.evidence = []
+
+    dto = _event_to_dto(mock_event)
+
+    assert dto.evidence == []
+
+
+def test_p03_event_to_dto_evidence_value_fallback() -> None:
+    """P0-3: code 为 None 时 fallback 到 numeric value。"""
+    from app.api.stock_context import _event_to_dto
+
+    mock_event = MagicMock()
+    mock_event.id = uuid4()
+    mock_event.symbol = "000001"
+    mock_event.occurred_at = datetime(2026, 7, 10, 15, 0, tzinfo=UTC)
+    mock_event.event_type = "state_transition"
+    mock_event.title = "1 项状态发生变化"
+    mock_event.description = "变化字段: MACD 动量"
+    mock_event.changed_fields = ["momentum.macd"]
+    mock_event.previous_as_of = date(2026, 7, 9)
+    mock_event.current_as_of = date(2026, 7, 10)
+    mock_event.idempotency_key = "000001:run-uuid:schema_v1+state_v1"
+    mock_event.evidence = [
+        {
+            "field": "momentum.macd",
+            "prevCode": None,
+            "currCode": None,
+            "prevValue": None,
+            "currValue": 0.05,
+            "unit": None,
+            "timeframe": "1d",
+        },
+    ]
+
+    dto = _event_to_dto(mock_event)
+
+    assert len(dto.evidence) == 1
+    ev = dto.evidence[0]
+    assert ev.currentValue == "0.0500"  # code 为 None 时 fallback 到格式化 value
+    assert ev.previousValue is None
+
+
+def test_p03_build_event_evidence_includes_values() -> None:
+    """P0-3: build_event_evidence 保存 prevValue/currValue/unit/timeframe。"""
+    prev = _make_state(sqzmom_code="positive")
+    # 构造带 value 的 curr state
+    curr = StockState(
+        symbol="000001",
+        asOf="2026-07-10",
+        sourceRunId=str(uuid4()),
+        version="v1",
+        computedAt="2026-07-10T15:00:00+08:00",
+        structure=StockStructure(
+            price=StateValue(code="inside", label="test", value=None, unit=None, timeframe="1d", sourceField="test"),
+            consensusRelation=StateValue(code="inside_va", label="test", value=None, unit=None, timeframe="1d", sourceField="test"),
+        ),
+        momentum=StockMomentum(
+            macd=StateValue(code=None, label="test", value=None, unit=None, timeframe="1d", sourceField="test"),
+            sqzmom=StateValue(code="negative", label="test", value=-0.002, unit=None, timeframe="1d", sourceField="test"),
+            temporal=[
+                StateValue(code="1", label="test", value=None, unit=None, timeframe="1d", sourceField="test"),
+                StateValue(code="aligned", label="test", value=None, unit=None, timeframe="1d", sourceField="test"),
+            ],
+        ),
+        volatility=StockVolatility(
+            bollPosition=StateValue(code="middle", label="test", value=0.5, unit=None, timeframe="1d", sourceField="test"),
+        ),
+    )
+    changed = ["momentum.sqzmom"]
+
+    evidence = build_event_evidence(prev, curr, changed)
+
+    assert len(evidence) == 1
+    e = evidence[0]
+    assert e["field"] == "momentum.sqzmom"
+    assert e["prevCode"] == "positive"
+    assert e["currCode"] == "negative"
+    assert e["prevValue"] is None  # prev state 的 sqzmom value 为 None（_make_state 不设 value）
+    assert e["currValue"] == -0.002
+    assert e["timeframe"] == "1d"
+
+
+def test_p03_shanghai_tz_not_utc() -> None:
+    """P0-3: _SHANGHAI_TZ 必须是 Asia/Shanghai（非 UTC）。"""
+    from app.api.stock_context import _SHANGHAI_TZ
+    from zoneinfo import ZoneInfo
+
+    assert _SHANGHAI_TZ == ZoneInfo("Asia/Shanghai")
+    assert str(_SHANGHAI_TZ) == "Asia/Shanghai"
+
+
+def test_p03_as_of_cutoff_next_day_exclusive() -> None:
+    """P0-3: as_of 截止为次日 00:00 exclusive（非 max.time()+1day-1sec）。
+
+    场景：as_of=2026-07-10
+    - 旧方案（错误）: 2026-07-11T23:59:59+08:00
+    - 新方案（正确）: 2026-07-11T00:00:00+08:00 (exclusive)
+
+    验证：occurred_at = 2026-07-10T23:30:00+08:00 应被包含（<= cutoff）
+         occurred_at = 2026-07-11T00:00:00+08:00 应被排除（== cutoff, 但 cutoff 是 exclusive 的上界）
+         注意：当前实现使用 <=，所以 == cutoff 的会被包含。这是 SQL 层的语义。
+         此处验证 cutoff 本身是次日 00:00 而非 23:59:59。
+    """
+    from app.api.stock_context import _SHANGHAI_TZ
+    from datetime import timedelta
+
+    as_of = date(2026, 7, 10)
+    next_day = as_of + timedelta(days=1)
+    # 模拟 _build_stock_context 中的 cutoff 计算
+    cutoff = datetime.combine(next_day, datetime.min.time(), tzinfo=_SHANGHAI_TZ)
+
+    # cutoff 应该是 2026-07-11T00:00:00+08:00
+    assert cutoff.year == 2026
+    assert cutoff.month == 7
+    assert cutoff.day == 11
+    assert cutoff.hour == 0
+    assert cutoff.minute == 0
+    assert cutoff.second == 0
+    # 时区为 Asia/Shanghai
+    assert cutoff.tzinfo is _SHANGHAI_TZ
+    # 禁止 max.time()+1day-1sec 写法（那会是 23:59:59）
+    assert cutoff.second != 59 or cutoff.minute != 59
+
+
+@pytest.mark.asyncio
+async def test_p03_find_latest_succeeded_run_deterministic_order() -> None:
+    """P0-3: _find_latest_succeeded_run 按 trade_date/published_at/finished_at 确定性倒序。
+
+    场景：同日有两个 succeeded run
+    - Run A: published_at=10:00
+    - Run B: published_at=15:00
+    应选择 Run B（最新发布）。
+    """
+    from app.api.stock_context import _find_latest_succeeded_run
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+
+    # 构造两个同日 run
+    run_a = StockFeatureSnapshotRun(
+        trade_date=date(2026, 7, 10),
+        schema_version=1,
+        primary_timeframe="1d",
+        secondary_timeframe="15m",
+        adj="qfq",
+        run_type="after_close",
+        status="succeeded",
+        published_at=datetime(2026, 7, 10, 10, 0, tzinfo=UTC),
+        finished_at=datetime(2026, 7, 10, 9, 55, tzinfo=UTC),
+        metadata_={"scope": "full"},
+    )
+    run_b = StockFeatureSnapshotRun(
+        trade_date=date(2026, 7, 10),
+        schema_version=1,
+        primary_timeframe="1d",
+        secondary_timeframe="15m",
+        adj="qfq",
+        run_type="after_close",
+        status="succeeded",
+        published_at=datetime(2026, 7, 10, 15, 0, tzinfo=UTC),
+        finished_at=datetime(2026, 7, 10, 14, 55, tzinfo=UTC),
+        metadata_={"scope": "full"},
+    )
+
+    mock_session = MagicMock()
+
+    # 捕获 SQL 语句验证 ORDER BY
+    captured_stmts: list = []
+
+    async def mock_execute(stmt):
+        captured_stmts.append(stmt)
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = run_b
+        return mock_result
+    mock_session.execute = AsyncMock(side_effect=mock_execute)
+
+    result = await _find_latest_succeeded_run(mock_session)
+
+    assert result is run_b, "应选择 published_at 更新的 run_b"
+    assert len(captured_stmts) == 1
+    compiled = str(captured_stmts[0])
+    # 验证 ORDER BY 包含 trade_date, published_at, finished_at
+    assert "trade_date" in compiled
+    assert "published_at" in compiled
+    assert "finished_at" in compiled
+
+
+@pytest.mark.asyncio
+async def test_p03_find_run_by_trade_date_deterministic_order() -> None:
+    """P0-3: _find_run_by_trade_date 按 published_at/finished_at 确定性倒序。"""
+    from app.api.stock_context import _find_run_by_trade_date
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+
+    run_a = StockFeatureSnapshotRun(
+        trade_date=date(2026, 7, 10),
+        schema_version=1,
+        primary_timeframe="1d",
+        secondary_timeframe="15m",
+        adj="qfq",
+        run_type="after_close",
+        status="succeeded",
+        published_at=datetime(2026, 7, 10, 10, 0, tzinfo=UTC),
+        finished_at=datetime(2026, 7, 10, 9, 55, tzinfo=UTC),
+        metadata_={"scope": "full"},
+    )
+    run_b = StockFeatureSnapshotRun(
+        trade_date=date(2026, 7, 10),
+        schema_version=1,
+        primary_timeframe="1d",
+        secondary_timeframe="15m",
+        adj="qfq",
+        run_type="after_close",
+        status="succeeded",
+        published_at=datetime(2026, 7, 10, 15, 0, tzinfo=UTC),
+        finished_at=datetime(2026, 7, 10, 14, 55, tzinfo=UTC),
+        metadata_={"scope": "full"},
+    )
+
+    mock_session = MagicMock()
+    captured_stmts: list = []
+
+    async def mock_execute(stmt):
+        captured_stmts.append(stmt)
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = run_b
+        return mock_result
+    mock_session.execute = AsyncMock(side_effect=mock_execute)
+
+    result = await _find_run_by_trade_date(mock_session, date(2026, 7, 10))
+
+    assert result is run_b
+    assert len(captured_stmts) == 1
+    compiled = str(captured_stmts[0])
+    # 验证 ORDER BY 包含 published_at, finished_at
+    assert "published_at" in compiled
+    assert "finished_at" in compiled

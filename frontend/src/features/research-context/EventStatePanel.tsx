@@ -4,16 +4,18 @@
 // 普通用户面板只展示：
 //   - 数据日期与质量
 //   - 当前价格结构（StateValue code/label）
-//   - 成交密集区关系
+//   - 成交密集区关系（真实 ConsensusZone，非筹码共识）
+//   - MACD 动量（真实 MACD，非 SQZMOM 冒充）
 //   - SQZMOM 动量
 //   - DSA 方向 + 趋势对齐（时序摘要）
 //   - 波动位置
-//   - 最近状态变化时间线（event_id 高亮 + 证据展开）
+//   - 当前状态关键证据（state.evidence）
+//   - 最近状态变化时间线（event_id 高亮 + 证据展开含前后值）
 // 不显示原始 key、JSON、MACD 假值或"筹码共识区"。
 // 面板关闭时由父组件不渲染本组件，StockContext 请求 enabled=false。
 import { useState, useRef, useEffect } from 'react'
 import { useStockContext } from '@/hooks/useApi'
-import type { StockContextResponse, StateValue, StateEventDTO } from '@/api/endpoints'
+import type { StockContextResponse, StateValue, StateEventDTO, StateEvidence } from '@/api/endpoints'
 import styles from './EventStatePanel.module.scss'
 
 export type EventStatePanelStyles = typeof styles
@@ -51,7 +53,26 @@ function TemporalSummary({ temporal }: { temporal: StateValue[] }) {
   )
 }
 
-/** 渲染单条事件的证据列表（可展开/收起） */
+/** 渲染当前状态的关键证据列表（state.evidence） */
+function StateEvidenceList({ evidence }: { evidence: StateEvidence[] }) {
+  if (evidence.length === 0) {
+    return null
+  }
+  return (
+    <div className={styles.stateEvidence}>
+      {evidence.map((ev, idx) => (
+        <div key={idx} className={styles.evidenceItem}>
+          <span className={styles.evidenceField}>{ev.fieldName}</span>
+          <span className={styles.evidenceValue}>
+            {ev.currentValue ?? '—'}{ev.unit ? ` ${ev.unit}` : ''}
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/** 渲染单条事件的证据列表（可展开/收起，显示前后值） */
 function EventEvidence({ evidence }: { evidence: StateEventDTO['evidence'] }) {
   if (evidence.length === 0) {
     return null
@@ -233,6 +254,11 @@ export function EventStatePanel({
           </section>
 
           <section className={styles.section}>
+            <h4 className={styles.sectionTitle}>MACD 动量</h4>
+            <StateValueRow label="MACD" value={state.momentum.macd} />
+          </section>
+
+          <section className={styles.section}>
             <h4 className={styles.sectionTitle}>SQZMOM 动量</h4>
             <StateValueRow label="SQZMOM" value={state.momentum.sqzmom} />
           </section>
@@ -248,6 +274,13 @@ export function EventStatePanel({
             <h4 className={styles.sectionTitle}>波动位置</h4>
             <StateValueRow label="布林位置" value={state.volatility.bollPosition} />
           </section>
+
+          {state.evidence.length > 0 && (
+            <section className={styles.section}>
+              <h4 className={styles.sectionTitle}>关键证据</h4>
+              <StateEvidenceList evidence={state.evidence} />
+            </section>
+          )}
 
           <section className={styles.section}>
             <h4 className={styles.sectionTitle}>最近状态变化</h4>

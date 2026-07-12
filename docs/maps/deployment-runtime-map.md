@@ -74,6 +74,10 @@ SELECT job_name, status, business_date, started_at, finished_at FROM scheduler_j
 - expired member 403 verified；
 - admin jobs page shows real state.
 
+## 4.1 `CORE_ONLY` 构建范围
+
+`deploy.sh` 中 `CORE_ONLY=1` 用于受控恢复，只构建 `backend frontend`（不构建 `worker-capture`）。需要完整业务能力时必须运行对应 worker：趋势选股需要 strategy_batch/scheduler，飞书图片需要 capture/outbox/delivery。非 `CORE_ONLY` 模式下 deploy.sh 构建全部服务（含 `worker-capture`）。
+
 ## 5. Docker 镜像保护
 
 - `node:20-alpine` 是受保护基础镜像，拉取很慢，禁止主动删除；

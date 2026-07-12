@@ -154,6 +154,18 @@
   font-family: monospace;
 }
 
+// 当前状态关键证据列表（state.evidence）
+.stateEvidence {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.evidenceValue {
+  color: rgba(255, 255, 255, 0.85);
+  text-align: right;
+}
+
 .temporalSummary {
   display: flex;
   flex-direction: column;

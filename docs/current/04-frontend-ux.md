@@ -24,9 +24,9 @@ Node Cluster 算法
 | `/subscription-expired` | Authenticated | — | 续期 |
 | `/membership-expired` | Redirect | — | 兼容跳转 |
 | `/capture/stock/:symbol` | Capture Token | **无壳层** | 截图专用页面 |
-| `/market` | Subscriber/Admin | UserAppShell | 行情工作区（三栏：左列表+中K线+右结构状态，`MarketWorkspacePage`） |
-| `/screener` | Subscriber/Admin | UserAppShell | 趋势选股 |
-| `/stock/:symbol` | Subscriber/Admin | UserAppShell | 个股详情 |
+| `/market` | Subscriber/Admin | UserAppShell | 行情工作区（工具栏 + 分页表格 `MarketStockTable` + 可收起 `EventStatePanel`，**无 K 线**，`MarketWorkspacePage`） |
+| `/screener` | Redirect | — | 兼容重定向 → `/market` |
+| `/stock/:symbol` | Subscriber/Admin | UserAppShell | **唯一** K 线详情入口（`StockDetailPage`） |
 | `/messages` | Authenticated | UserAppShell | 历史消息 |
 | `/settings` | Authenticated | UserAppShell | 账户和通知渠道 |
 | `/admin/*` | Admin | AdminAppShell | 管理页面（含 `/admin/overview`、`/admin/users`、`/admin/jobs`、`/admin/beta-applications`、`/admin/after-close`、`/admin/stock-debug/:symbol`）；`/admin/strategies` 已废弃为 redirect-only → `/admin/after-close`（无页面加载） |
@@ -35,7 +35,7 @@ Node Cluster 算法
 
 ### 2.1 壳层拆分（阶段二确立）
 
-- `UserAppShell`（`frontend/src/layouts/UserAppShell.tsx`）：普通用户布局壳，顶部品牌 + 一级导航（行情 `/market`、趋势选股 `/screener`）+ 右上角账户菜单；**无左侧栏**。
+- `UserAppShell`（`frontend/src/layouts/UserAppShell.tsx`）：普通用户布局壳，顶部品牌 + 一级导航（行情 `/market`、趋势选股 `/screener`）+ 右上角账户菜单；**无左侧栏**；**无角色预览按钮**（role preview 已移除）。
 - `AdminAppShell`（`frontend/src/layouts/AdminAppShell.tsx`）：管理员独立布局壳，侧栏管理导航 + 顶栏账户菜单；仅承载 `/admin/*`。
 - `AccountMenu`（`frontend/src/components/AccountMenu.tsx`）：右上角下拉菜单，包含消息、设置、管理后台（仅 `is_admin`）、退出；支持点击外部关闭、Escape 关闭、基本 ARIA。
 - `ProtectedLayout` 只负责认证和 access profile，不再固定渲染同一壳层；`UserAppShell`/`AdminAppShell` 由各自路由组在 `ProtectedLayout` 之下作为 layout element 挂载。
@@ -47,6 +47,7 @@ Node Cluster 算法
 旧地址保留重定向，避免书签/旧链接 404：
 - `/overview` → `/market`
 - `/watchlist` → `/market?scope=watchlist`
+- `/screener` → `/market`
 
 ### 2.3 尚未完成（下一阶段）
 
@@ -54,14 +55,15 @@ Node Cluster 算法
 
 ### 2.4 统一行情工作区
 
-- `/market` 渲染 `MarketWorkspacePage`（`frontend/src/features/market-workspace/MarketWorkspacePage.tsx`），三栏布局：
-  - 左栏 `MarketInstrumentPane`：`scope=watchlist` 使用 `useWatchlistMonitorStatus`（enabled=scope==='watchlist'）；`scope=market` 使用 `useInstruments` 搜索（enabled=scope==='market' && 搜索词 trim 后 ≥2 字符，限制 50 条，不发 N+1 请求）。两个查询按 scope 互斥启用，未激活的 scope 不发请求。搜索结果列表仅在 `scope==='market' && canSearch` 时渲染；关键词不足 2 字符、清空输入或切换 scope 时不得显示缓存结果（Query 仍通过 `enabled` 门控，不条件调用 Hook，只门控渲染）。
-  - 中栏 `StockResearchWorkspace`（`frontend/src/features/stock-research/StockResearchWorkspace.tsx`）：K 线研究区，由 `MarketWorkspacePage` 和 `StockDetailPage` 共用。
-  - 右栏 `EventStatePanel`（`frontend/src/features/research-context/EventStatePanel.tsx`）：可收起；收起时不挂载、不请求数据，中栏自动扩展。面板使用 `useStockContext` 单一接口（`GET /api/v1/stocks/{symbol}/context`），展示数据日期/质量、当前价格结构、成交密集区关系、SQZMOM 动量、波动位置、最近状态变化时间线；普通用户不显示内部字段名（`sourceField`）、算法参数、`idempotencyKey`、JSON 或商业机密；原始 factor/feature/JSON 仅在 `/admin/stock-debug` 和 `/admin/stock-debug/:symbol` 展示。
+- `/market` 渲染 `MarketWorkspacePage`（`frontend/src/features/market-workspace/MarketWorkspacePage.tsx`），**无 K 线**，布局为工具栏 + 分页表格 + 可收起事件状态面板：
+  - 工具栏：scope 切换（watchlist/market）、搜索词输入、板块筛选等行业/概念筛选输入门控依赖 `GET /market/boards?type=industry|concept` 返回的 `available` 字段。
+  - `MarketStockTable`（`frontend/src/features/market-workspace/MarketStockTable.tsx`）：分页表格，展示股票列表与 DSA 指标摘要；**名称列 sticky**（`sticky-col` left:0 z-index:3），表头 viewport sticky（top: var(--topbar)）；**字体大小**：主信息（代码/名称/价格）≥14px，辅助信息（指标/标签）≥12px；**来源徽章**（source badge）基于 `sourceListKind` 字段渲染（如 watchlist/selection/market），不依赖 `result_id`；行 key 使用 `instrumentId`；`scope=watchlist` 使用 `useWatchlistMonitorStatus`（enabled=scope==='watchlist'）；`scope=market` 使用 `useInstruments` 搜索（enabled=scope==='market' && 搜索词 trim 后 ≥2 字符，限制 50 条，不发 N+1 请求）。两个查询按 scope 互斥启用，未激活的 scope 不发请求。搜索结果列表仅在 `scope==='market' && canSearch` 时渲染；关键词不足 2 字符、清空输入或切换 scope 时不得显示缓存结果。
+  - `EventStatePanel`（`frontend/src/features/research-context/EventStatePanel.tsx`）：可收起面板；收起时不挂载、不请求数据。面板使用 `useStockContext` 单一接口（`GET /api/v1/stocks/{symbol}/context`），展示 MACD 动量、Evidence（事件证据）、`state.evidence`（状态证据）、数据日期/质量、当前价格结构、成交密集区关系、最近状态变化时间线；普通用户不显示内部字段名（`sourceField`）、算法参数、`idempotencyKey`、JSON 或商业机密；原始 factor/feature/JSON 仅在 `/admin/stock-debug` 和 `/admin/stock-debug/:symbol` 展示。
 - `/stock/:symbol` 是唯一个股详情和 K线入口（PRD V1.1），渲染 `StockDetailPage`（`frontend/src/pages/StockDetailPage.tsx`）：
   - 使用共享 `useStockResearchData` + `StockResearchWorkspace` 渲染图表区，不再独立调用 useBars/useIndicators/useRealtimeQuote/useInstrumentEvents。
   - 详情页专属能力拆到 `useStockDetailActions`（自选/上下切换/memo + returnTo 上下文恢复左栏列表）和 `useStockDetailFeishu`（飞书截图/轮询/超时）。
   - 保留 header、价格条、返回、上下只、watchlist、memo、飞书、全屏、事件状态面板开关。
+  - **事件状态面板折叠状态**：`eventPanelCollapsed` 默认展开（`false`），localStorage key `panji:event-panel:v1` 持久化用户选择；面板展示 MACD、Evidence、`state.evidence`（与 `/market` 的 `EventStatePanel` 一致）。
   - `StockResearchWorkspace` 通过 `toolbar`/`rightPanel`/`showRightPanel`/`chartColumnProps` 可选 props 支持详情页的事件状态面板开关和截图模式属性。
   - **禁止重定向到 `/market`**（PRD V1.1 硬性规定）。
 - `/admin/stock-debug` 和 `/admin/stock-debug/:symbol` 渲染 `AdminStockDebugPage`（`frontend/src/pages/AdminStockDebugPage.tsx`），位于 `AdminRoute` + `AdminAppShell` 下，普通用户不可访问（403）：
@@ -96,6 +98,8 @@ Node Cluster 算法
 - 系统概览（/admin/overview）中的 AfterClosePipelineCard 改造为摘要卡，提供进入 /admin/after-close 的链接。
 
 ### 趋势选股
+
+> `/screener` 现为兼容重定向 → `/market`（无页面加载）；趋势选股相关表格能力由 `/market` 的 `MarketStockTable` 承载。
 
 - 以全量 active 股票 universe 为展示主表（`strategy_run_items`），DSA 指标为 LEFT JOIN 附加字段；
 - 默认无隐式筛选时显示全量股票（succeeded 有指标、skipped/failed 指标为空但仍显示）；

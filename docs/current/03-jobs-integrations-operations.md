@@ -81,10 +81,10 @@ queued → refreshing_daily → checking_coverage → creating_dsa
 - `feature_snapshot` 失败时 `last_completed_step` 不推进，重试从 `quality_gate` 之后重新进入；
 - 完成后更新心跳与 `last_completed_step='feature_snapshot'`；
 - **Heartbeat 保活（CHANGE-20260709-003）**：feature_snapshot 阶段启动后台 `_job_run_heartbeat_loop`（间隔 30s），并在 `compute_for_trade_date` 每批完成后通过 `_build_feature_snapshot_progress_callback` 刷新 `heartbeat_at`、`lease_expires_at` 与 `metadata.feature_snapshot_progress`，防止长计算被 watchdog/recovery 误判为 stale；进度事件按每 500 只股票采样写入 `job_run_events`，避免事件表膨胀；
-- **Run lifecycle（Phase 8 新增）**：feature_snapshot 步骤前后写 `stock_feature_snapshot_runs`：
+- **Run lifecycle（Phase 8 新增，PR #74 发布原子性收紧）**：feature_snapshot 步骤前后写 `stock_feature_snapshot_runs`：
   - 开始时 `create_snapshot_run(trade_date, 'after_close')` 创建 `running` run（独立 session + commit），并立即把 `feature_snapshot_run_id` / `last_started_step=feature_snapshot` 写回 orchestrator metadata；
-  - 成功时 `finish_snapshot_run(status='succeeded')` 写 `published_at`（独立 session + commit）；
-  - 失败时 `finish_snapshot_run(status='failed')` 不写 `published_at`（独立 session + commit），再向上传播异常触发 orchestrator FAILED；
+  - snapshot 计算完成后**不再立即**写 `succeeded`/`published_at`；只有当后续 DSA `publish_run` 成功后才 `finish_snapshot_run(status='succeeded')` 写 `published_at`（独立 session + commit）并生成事件；
+  - 失败时（snapshot 计算超阈值或 `publish_run` 失败）`finish_snapshot_run(status='failed')` 不写 `published_at`（独立 session + commit），不生成事件，再向上传播异常触发 orchestrator FAILED；
   - run 记录在独立 session 中提交，保证 snapshot session rollback 不影响 run 状态持久化。
 
 断点恢复路径（`last_completed_step` → 已完成步骤集合）：
@@ -717,7 +717,7 @@ uptime
 - StockDetailPage 状态徽章显示“实时行情 / 日线回退 / 数据延迟 / 行情降级”之一，不再固定显示“实时行情”；
 - 容器日志可见 `pytdx 成功`、`pytdx 失败 fallback`、`非交易时段 fallback` 区分日志。
 
-`CORE_ONLY=1` 只用于受控恢复。需要完整业务能力时必须运行对应 worker：趋势选股需要 strategy_batch/scheduler，飞书图片需要 capture/outbox/delivery。
+`CORE_ONLY=1` 只用于受控恢复，deploy.sh 中 `CORE_ONLY=1` 只构建 `backend frontend`（不构建 `worker-capture`）。需要完整业务能力时必须运行对应 worker：趋势选股需要 strategy_batch/scheduler，飞书图片需要 capture/outbox/delivery。
 
 ## 7. Secret 与日志
 

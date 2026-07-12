@@ -47,20 +47,22 @@ export default function StockDetailPage() {
     searchParams.get('capture') === '1' ||
     isCaptureMode
 
-  // [结构状态开关] - 默认隐藏，用户点击显示，localStorage 持久化；强制隐藏时忽略 localStorage
-  const [showStructuralState, setShowStructuralState] = useState<boolean>(() => {
-    if (hideStructuralStateParam) return false
-    return localStorage.getItem('showStructuralState') === 'true'
+  // [事件面板开关] - 默认展开，用户点击收起，localStorage 持久化；capture 强制隐藏
+  // P0-4: showStructuralState → eventPanelCollapsed（语义反转：默认展开）
+  // localStorage key: panji:event-panel:v1
+  const [eventPanelCollapsed, setEventPanelCollapsed] = useState<boolean>(() => {
+    if (hideStructuralStateParam) return true
+    return localStorage.getItem('panji:event-panel:v1') === 'collapsed'
   })
-  const toggleStructuralState = useCallback(() => {
+  const toggleEventPanel = useCallback(() => {
     if (hideStructuralStateParam) return
-    setShowStructuralState(prev => {
+    setEventPanelCollapsed(prev => {
       const next = !prev
-      localStorage.setItem('showStructuralState', String(next))
+      localStorage.setItem('panji:event-panel:v1', next ? 'collapsed' : 'expanded')
       return next
     })
   }, [hideStructuralStateParam])
-  const shouldShowPanel = showStructuralState && !hideStructuralStateParam
+  const shouldShowPanel = !eventPanelCollapsed && !hideStructuralStateParam
 
   // timeframe：从 URL 解析（单一真源），工具栏切换写回 URL
   const timeframe: DisplayTimeframe = normalizeDisplayTimeframe(searchParams.get('timeframe'))
@@ -105,8 +107,11 @@ export default function StockDetailPage() {
   // 详情页专属飞书投递
   const feishu = useStockDetailFeishu({ instrumentId })
 
-  // 来源徽章与返回链接
-  const sourceBadge = source === 'selection' ? '选股结果' : '自选监控'
+  // 来源徽章：根据 sourceListKind 显示"行情来源/自选来源/选股结果"
+  // P0-4: 不能从 market 进入却显示"自选监控"
+  const sourceBadge = source === 'selection'
+    ? '选股结果'
+    : (detailActions.sourceListKind === 'market' ? '行情来源' : '自选来源')
 
   /** 统一返回按钮：优先使用 URL returnTo 参数，其次导航 state，否则按 source fallback */
   const handleBack = useCallback(() => {
@@ -224,16 +229,16 @@ export default function StockDetailPage() {
     </aside>
   ) : null
 
-  // 结构状态开关 toolbar（渲染在图表上方）
+  // 事件面板开关 toolbar（渲染在图表上方）
   const structuralToolbar = !hideStructuralStateParam && symbol ? (
     <div className="structural-state-toolbar">
       <button
         type="button"
         className="structural-state-toggle-btn"
-        onClick={toggleStructuralState}
+        onClick={toggleEventPanel}
         aria-label="切换事件状态面板"
       >
-        {showStructuralState ? '隐藏事件状态' : '显示事件状态'}
+        {eventPanelCollapsed ? '显示事件状态' : '隐藏事件状态'}
       </button>
     </div>
   ) : null

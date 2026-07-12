@@ -131,12 +131,7 @@ export function MarketStockTable({
                 最新价
                 {isClosingSnapshot && (
                   <span
-                    style={{
-                      marginLeft: '4px',
-                      fontSize: '11px',
-                      color: '#888',
-                      fontWeight: 'normal',
-                    }}
+                    className={styles.closingSnapshotBadge}
                     title={priceAsOf ? `截至${priceAsOf.slice(0, 10)}收盘` : '收盘快照'}
                   >
                     收盘快照
@@ -200,7 +195,10 @@ export function MarketStockTable({
                   <td className={styles.colIndustry}>
                     {row.industry ?? '—'}
                   </td>
-                  <td className={styles.colConcept}>
+                  <td
+                    className={styles.colConcept}
+                    title={row.concepts.length > 0 ? row.concepts.join(', ') : undefined}
+                  >
                     {row.concepts.length > 0
                       ? row.concepts.slice(0, 2).join(', ') +
                         (row.concepts.length > 2 ? ` +${row.concepts.length - 2}` : '')

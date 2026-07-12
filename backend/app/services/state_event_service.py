@@ -26,8 +26,6 @@ PRD V1.1 §7.3 核心实现：
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -103,6 +101,45 @@ def extract_state_codes(state: StockState) -> dict[str, str | None]:
     }
 
 
+def _extract_state_details(state: StockState) -> dict[str, dict[str, Any]]:
+    """从 StockState 提取每个字段的完整详情（code + value + unit + timeframe）。
+
+    用于构建事件证据时保留前后值，API 层映射为用户 Evidence DTO。
+    """
+    fields: dict[str, StateValue | None] = {
+        "structure.price": state.structure.price,
+        "structure.consensusRelation": state.structure.consensusRelation,
+        "momentum.macd": state.momentum.macd,
+        "momentum.sqzmom": state.momentum.sqzmom,
+        "momentum.temporal.daily_dsa_dir": (
+            state.momentum.temporal[0]
+            if len(state.momentum.temporal) > 0 else None
+        ),
+        "momentum.temporal.trend_alignment": (
+            state.momentum.temporal[1]
+            if len(state.momentum.temporal) > 1 else None
+        ),
+        "volatility.bollPosition": state.volatility.bollPosition,
+    }
+    result: dict[str, dict[str, Any]] = {}
+    for path, sv in fields.items():
+        if sv is not None:
+            result[path] = {
+                "code": sv.code,
+                "value": sv.value,
+                "unit": sv.unit,
+                "timeframe": sv.timeframe,
+            }
+        else:
+            result[path] = {
+                "code": None,
+                "value": None,
+                "unit": None,
+                "timeframe": None,
+            }
+    return result
+
+
 def compare_state_codes(
     prev_codes: dict[str, str | None],
     curr_codes: dict[str, str | None],
@@ -131,39 +168,51 @@ def build_event_evidence(
     curr_state: StockState,
     changed_fields: list[str],
 ) -> list[dict[str, Any]]:
-    """构建事件证据（只保存必要证据，不保存完整状态）。"""
+    """构建事件证据（保存 code + value + unit + timeframe 前后值）。
+
+    DB 保存稳定 code 和原始 value，API 层映射为用户 Evidence DTO。
+    每条证据包含：
+    - field: 稳定字段路径（如 "momentum.sqzmom"）
+    - prevCode/currCode: 前后状态 code
+    - prevValue/currValue: 前后原始数值（可选）
+    - unit: 单位（可选）
+    - timeframe: 来源周期
+    """
     evidence: list[dict[str, Any]] = []
     prev_codes = extract_state_codes(prev_state) if prev_state else {}
     curr_codes = extract_state_codes(curr_state)
+    prev_details = _extract_state_details(prev_state) if prev_state else {}
+    curr_details = _extract_state_details(curr_state)
 
     for path in changed_fields:
+        prev_d = prev_details.get(path, {})
+        curr_d = curr_details.get(path, {})
         evidence.append({
             "field": path,
             "prevCode": prev_codes.get(path),
             "currCode": curr_codes.get(path),
+            "prevValue": prev_d.get("value"),
+            "currValue": curr_d.get("value"),
+            "unit": curr_d.get("unit") or prev_d.get("unit"),
+            "timeframe": curr_d.get("timeframe") or prev_d.get("timeframe"),
         })
     return evidence
 
 
 def compute_idempotency_key(
     symbol: str,
-    trade_date: date,
+    source_run_id: UUID,
     algorithm_version: str,
-    evidence: list[dict[str, Any]],
 ) -> str:
-    """C3: 计算幂等键 — 包含 evidence（field + prev/curr code/value）。
+    """计算幂等键 — symbol:source_run_id:algorithm_version。
 
-    确保不同转换（如 None→positive vs positive→negative）产生不同 key，
-    同日重跑（相同 evidence）产生相同 key → ON CONFLICT DO NOTHING。
+    V1.1 核心约束：每只股票每个 source_run_id 最多一条事件。
+    - 同一 run 重跑（相同 symbol + source_run_id + algorithm_version）产生相同 key
+      → ON CONFLICT DO NOTHING 保证幂等
+    - 不同 run 产生不同 key → 新事件
+    - 禁止用日期+hash 绕开此约束（会导致同 run 多条事件或孤儿事件）
     """
-    evidence_sorted = sorted(evidence, key=lambda e: e["field"])
-    changes_hash = hashlib.sha256(
-        json.dumps(evidence_sorted, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    ).hexdigest()[:8]
-    return (
-        f"{symbol}:{trade_date.isoformat()}:"
-        f"{algorithm_version}:{changes_hash}"
-    )
+    return f"{symbol}:{source_run_id}:{algorithm_version}"
 
 
 def build_event_title_and_description(
@@ -418,12 +467,12 @@ async def generate_events_for_run(
             title, description = build_event_title_and_description(changed_fields)
             evidence = build_event_evidence(prev_state, curr_state, changed_fields)
 
-            # C3: 幂等键 = symbol:current_as_of:algorithm_version:hash(evidence)
-            # evidence 包含 field + prev/curr code/value，
-            # 确保不同转换（如 None→positive vs positive→negative）产生不同 key。
-            # 同日重跑（相同 evidence）产生相同 key → ON CONFLICT DO NOTHING。
+            # C3: 幂等键 = symbol:source_run_id:algorithm_version
+            # 每只股票每个 source_run_id 最多一条事件。
+            # 同一 run 重跑产生相同 key → ON CONFLICT DO NOTHING。
+            # 不同 run 产生不同 key → 新事件。
             idempotency_key = compute_idempotency_key(
-                symbol, curr_snapshot.trade_date, algorithm_version, evidence,
+                symbol, run.id, algorithm_version,
             )
 
             events_to_insert.append({
@@ -632,10 +681,28 @@ if __name__ == "__main__":
     assert "bollPosition" not in desc_text
     print(f"Test 5 ✓: 标题={title}, 描述={desc_text}")
 
-    # Test 6: 证据构建
+    # Test 6: 证据构建（含前后值）
     evidence = build_event_evidence(prev, curr2, changed2)
     assert len(evidence) == 2
-    assert all("field" in e and "prevCode" in e and "currCode" in e for e in evidence)
+    assert all(
+        "field" in e and "prevCode" in e and "currCode" in e
+        and "prevValue" in e and "currValue" in e
+        and "unit" in e and "timeframe" in e
+        for e in evidence
+    )
     print(f"Test 6 ✓: 证据={evidence}")
+
+    # Test 7: 幂等键 = symbol:source_run_id:algorithm_version
+    run_id = uuid4()
+    key1 = compute_idempotency_key("000001", run_id, "schema_v1+state_v1")
+    key2 = compute_idempotency_key("000001", run_id, "schema_v1+state_v1")
+    assert key1 == key2, "相同 (symbol, run, algo) 必须产生相同 key"
+    # 不同 run 产生不同 key
+    key3 = compute_idempotency_key("000001", uuid4(), "schema_v1+state_v1")
+    assert key1 != key3, "不同 run 必须产生不同 key"
+    # 不同 symbol 产生不同 key
+    key4 = compute_idempotency_key("000002", run_id, "schema_v1+state_v1")
+    assert key1 != key4, "不同 symbol 必须产生不同 key"
+    print(f"Test 7 ✓: 幂等键={key1}")
 
     print("OK: state_event_service 自测通过")

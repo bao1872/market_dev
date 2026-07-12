@@ -40,7 +40,7 @@
   border: 0;
   background: transparent;
   color: #8ea0b7;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   cursor: pointer;
   transition: color 0.12s, background 0.12s;
@@ -68,7 +68,7 @@
   background: #0d1117;
   color: #d7e3f2;
   border-radius: 6px;
-  font-size: 13px;
+  font-size: 14px;
   outline: none;
   transition: border-color 0.12s;
 
@@ -94,7 +94,7 @@
   background: #0d1117;
   color: #d7e3f2;
   border-radius: 6px;
-  font-size: 13px;
+  font-size: 14px;
   outline: none;
   transition: border-color 0.12s;
 
@@ -118,7 +118,7 @@
   background: #0d1117;
   color: #d7e3f2;
   border-radius: 6px;
-  font-size: 13px;
+  font-size: 14px;
   outline: none;
   cursor: pointer;
   transition: border-color 0.12s;
@@ -159,7 +159,7 @@
 .stockTable {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: 14px;
 
   thead {
     position: sticky;
@@ -189,6 +189,29 @@
 // 列样式
 .colName {
   min-width: 120px;
+}
+
+// 名称列 sticky：横向滚动时保持可见
+th.colName {
+  position: sticky;
+  left: 0;
+  z-index: 3; // 高于 thead(1) 和 td.colName(2)
+  background: #131722;
+}
+
+td.colName {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: #0d1117;
+}
+
+.dataRow:hover td.colName {
+  background: #161b26;
+}
+
+.dataRowSelected td.colName {
+  background: #1a2138;
 }
 
 .colPrice, .colChange {
@@ -242,7 +265,7 @@
   border: 0;
   background: transparent;
   color: #4a9eff;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   text-align: left;
   padding: 0;
@@ -260,7 +283,7 @@
 }
 
 .symbolText {
-  font-size: 11px;
+  font-size: 12px;
   color: #687083;
 }
 
@@ -282,6 +305,20 @@
   display: flex;
   flex-direction: column;
   gap: 1px;
+}
+
+// 收盘快照徽章（价格来自日线收盘而非实时）
+.closingSnapshotBadge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: #3a2f1a;
+  color: #f5a623;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  vertical-align: middle;
 }
 
 .eventTitle {
@@ -360,7 +397,7 @@
   background: #1a1e28;
   color: #d7e3f2;
   border-radius: 6px;
-  font-size: 13px;
+  font-size: 14px;
   cursor: pointer;
 
   &:hover {
@@ -471,7 +508,7 @@
 
 .rightPaneTitle {
   font-weight: 650;
-  font-size: 13px;
+  font-size: 14px;
   color: #d7e3f2;
   flex: 1;
 }

@@ -1,17 +1,17 @@
-// [结构状态隐藏开关] - 描述: StockDetailPage 结构状态面板隐藏开关契约测试
+// [事件状态面板开关] - 描述: StockDetailPage 事件状态面板开关契约测试
 // 用法：node --experimental-strip-types --test scripts/contract-tests/structural-state-toggle.test.ts
 // 覆盖：
-// 1. 面板默认隐藏（localStorage.getItem 仅在 'true' 时显示）
-// 2. 开关按钮默认渲染（非截图模式 + instrumentId 存在时）
-// 3. localStorage 持久化用户选择
+// 1. 面板默认展开（eventPanelCollapsed 默认 false，localStorage 'collapsed' 时收起）
+// 2. 开关按钮默认渲染（非截图模式 + symbol 存在时）
+// 3. localStorage 持久化用户选择（panji:event-panel:v1）
 // 4. hideStructuralState=1 强制隐藏按钮和面板
 // 5. capture=1 强制隐藏按钮和面板
 // 6. capture=feishu 强制隐藏（保留现有 isCaptureMode 逻辑）
 // 7. 强制隐藏时禁用 toggle 按钮（early return）
 // 8. toggle 按钮在 tv-chart-column 内部（定位上下文）
-// 9. 按钮文案动态切换（显示结构状态 / 隐藏结构状态）
-// 10. 默认不渲染 StockStructuralStatePanel（shouldShowPanel=false）
-// 11. shouldShowPanel=true 时渲染 StockStructuralStatePanel
+// 9. 按钮文案动态切换（显示事件状态 / 隐藏事件状态）
+// 10. 默认渲染 EventStatePanel（shouldShowPanel 默认 true）
+// 11. shouldShowPanel=true 时渲染 EventStatePanel
 // 12. Temporal Features 卡片在 StockStructuralStatePanel 内（useTemporalFeatures 引用）
 
 import { strict as assert } from 'node:assert'
@@ -34,19 +34,19 @@ function readPanelSource(): string {
   return readFileSync(PANEL_PATH, 'utf-8')
 }
 
-// ===== 1. 面板默认隐藏 =====
-test('Panel is hidden by default (localStorage only shows on "true")', () => {
+// ===== 1. 面板默认展开 =====
+test('Panel is expanded by default (eventPanelCollapsed defaults to false)', () => {
   const src = readSource()
 
-  // 必须读取 localStorage，且只在 'true' 时显示（默认 null/其他值时隐藏）
+  // 必须读取 localStorage panji:event-panel:v1
   assert.ok(
-    /localStorage\.getItem\(\s*['"]showStructuralState['"]\s*\)/.test(src),
-    'StockDetailPage 必须读取 localStorage "showStructuralState"',
+    /localStorage\.getItem\(\s*['"]panji:event-panel:v1['"]\s*\)/.test(src),
+    'StockDetailPage 必须读取 localStorage "panji:event-panel:v1"',
   )
-  // 必须显式比较为 'true' 才显示，即默认 falsy
+  // 必须在 'collapsed' 时收起（默认展开）
   assert.ok(
-    /localStorage\.getItem\(\s*['"]showStructuralState['"]\s*\)\s*===?\s*['"]true['"]/.test(src),
-    'showStructuralState 默认 falsy（localStorage 仅在 "true" 时显示）',
+    /localStorage\.getItem\(\s*['"]panji:event-panel:v1['"]\s*\)\s*===?\s*['"]collapsed['"]/.test(src),
+    'eventPanelCollapsed 仅在 localStorage="collapsed" 时为 true（默认展开）',
   )
 })
 
@@ -75,10 +75,10 @@ test('Toggle button is rendered by default (non-capture mode + symbol)', () => {
 test('localStorage persists user choice via setItem', () => {
   const src = readSource()
 
-  // 必须 setItem 写入 localStorage
+  // 必须 setItem 写入 localStorage panji:event-panel:v1
   assert.ok(
-    /localStorage\.setItem\(\s*['"]showStructuralState['"]/.test(src),
-    'StockDetailPage 必须通过 localStorage.setItem 持久化 "showStructuralState" 选择',
+    /localStorage\.setItem\(\s*['"]panji:event-panel:v1['"]/.test(src),
+    'StockDetailPage 必须通过 localStorage.setItem 持久化 "panji:event-panel:v1" 选择',
   )
 })
 
@@ -130,13 +130,13 @@ test('Force-hide disables toggle (early return in toggle callback)', () => {
   const src = readSource()
 
   // toggle 回调必须在 hideStructuralStateParam 为 true 时 early return
-  const toggleBlockMatch = src.match(/toggleStructuralState\s*=\s*useCallback\(\s*\(\)\s*=>\s*\{([\s\S]*?)\},\s*\[hideStructuralStateParam\]\s*\)/)
-  assert.ok(toggleBlockMatch, 'StockDetailPage 必须含 toggleStructuralState useCallback 且依赖 hideStructuralStateParam')
+  const toggleBlockMatch = src.match(/toggleEventPanel\s*=\s*useCallback\(\s*\(\)\s*=>\s*\{([\s\S]*?)\},\s*\[hideStructuralStateParam\]\s*\)/)
+  assert.ok(toggleBlockMatch, 'StockDetailPage 必须含 toggleEventPanel useCallback 且依赖 hideStructuralStateParam')
 
   const toggleBody = toggleBlockMatch![1]
   assert.ok(
     /if\s*\(\s*hideStructuralStateParam\s*\)\s*return/.test(toggleBody),
-    'toggleStructuralState 回调必须在 hideStructuralStateParam=true 时 early return（强制隐藏时禁用 toggle）',
+    'toggleEventPanel 回调必须在 hideStructuralStateParam=true 时 early return（强制隐藏时禁用 toggle）',
   )
 })
 
@@ -193,26 +193,26 @@ test('Toggle button is inside tv-chart-column for stable absolute positioning', 
 test('Toggle button label switches between "显示事件状态" and "隐藏事件状态"', () => {
   const src = readSource()
 
-  // 必须含三元表达式：showStructuralState ? '隐藏事件状态' : '显示事件状态'
+  // 必须含三元表达式：eventPanelCollapsed ? '显示事件状态' : '隐藏事件状态'
   assert.ok(
-    /showStructuralState\s*\?\s*['"]隐藏事件状态['"]\s*:\s*['"]显示事件状态['"]/.test(src),
-    'StockDetailPage toggle 按钮文案必须根据 showStructuralState 动态切换（隐藏时显示"显示事件状态"，显示时显示"隐藏事件状态"）',
+    /eventPanelCollapsed\s*\?\s*['"]显示事件状态['"]\s*:\s*['"]隐藏事件状态['"]/.test(src),
+    'StockDetailPage toggle 按钮文案必须根据 eventPanelCollapsed 动态切换（收起时显示"显示事件状态"，展开时显示"隐藏事件状态"）',
   )
 })
 
-// ===== 10. 默认不渲染 EventStatePanel =====
-test('EventStatePanel is not rendered by default (shouldShowPanel=false)', () => {
+// ===== 10. 默认渲染 EventStatePanel（shouldShowPanel 默认 true）=====
+test('EventStatePanel is rendered by default (shouldShowPanel=!eventPanelCollapsed && !hideStructuralStateParam)', () => {
   const src = readSource()
 
-  // shouldShowPanel 必须基于 showStructuralState && !hideStructuralStateParam
+  // shouldShowPanel 必须基于 !eventPanelCollapsed && !hideStructuralStateParam
   assert.ok(
-    /shouldShowPanel\s*=\s*showStructuralState\s*&&\s*!hideStructuralStateParam/.test(src),
-    'StockDetailPage 必须有 shouldShowPanel = showStructuralState && !hideStructuralStateParam',
+    /shouldShowPanel\s*=\s*!eventPanelCollapsed\s*&&\s*!hideStructuralStateParam/.test(src),
+    'StockDetailPage 必须有 shouldShowPanel = !eventPanelCollapsed && !hideStructuralStateParam',
   )
   // EventStatePanel 必须在 shouldShowPanel && symbol 时渲染
   assert.ok(
     /shouldShowPanel\s*&&\s*symbol/.test(src),
-    'EventStatePanel 必须在 shouldShowPanel && symbol 时渲染（默认不渲染）',
+    'EventStatePanel 必须在 shouldShowPanel && symbol 时渲染',
   )
 })
 
@@ -268,11 +268,11 @@ test('test_capture_mode_hides_panel', () => {
     'hideStructuralStateParam 必须包含 isCaptureMode（capture=feishu 触发结构面板隐藏）',
   )
 
-  // shouldShowPanel 必须基于 !hideStructuralStateParam
+  // shouldShowPanel 必须基于 !eventPanelCollapsed && !hideStructuralStateParam
   // 当 isCaptureMode=true 时 hideStructuralStateParam=true，shouldShowPanel=false（面板不渲染）
   assert.ok(
-    /shouldShowPanel\s*=\s*showStructuralState\s*&&\s*!hideStructuralStateParam/.test(src),
-    'shouldShowPanel 必须基于 !hideStructuralStateParam（capture=feishu 时面板强制隐藏）',
+    /shouldShowPanel\s*=\s*!eventPanelCollapsed\s*&&\s*!hideStructuralStateParam/.test(src),
+    'shouldShowPanel 必须基于 !eventPanelCollapsed && !hideStructuralStateParam（capture=feishu 时面板强制隐藏）',
   )
 })
 

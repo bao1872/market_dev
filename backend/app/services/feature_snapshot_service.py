@@ -629,7 +629,10 @@ async def upsert_snapshot(
     )
 
     update_cols = {
-        # PRD V1.1: source_run_id 仅在 INSERT 时写入，冲突时不覆盖已发布快照的来源批次
+        # [P0 Fix] 冲突时必须更新 source_run_id：同日成功重跑时新 run 应成为快照归属，
+        # 否则 stock_context 按 source_run_id 查询会查不到新快照。
+        # 失败 run 在事务中回滚，不会污染旧归属。
+        "source_run_id": stmt.excluded.source_run_id,
         "source_primary_bar_time": stmt.excluded.source_primary_bar_time,
         "source_secondary_bar_time": stmt.excluded.source_secondary_bar_time,
         "structural_payload": stmt.excluded.structural_payload,

@@ -658,9 +658,14 @@ async def execute_after_close_run(
     batch_service = StrategyBatchService()
     dsa_run_id: uuid.UUID | None = None
     published_run: Any = None
+    # [P0 Atomicity] - snapshot_run_id / snapshot_error 在 try 块顶部初始化，
+    # 保证断点恢复（skip_snapshot=True）时变量已定义，避免 NameError。
+    snapshot_run_id: uuid.UUID | None = None
+    snapshot_error: Exception | None = None
+    snapshot_result: dict[str, Any] | None = None
 
     try:
-        # [Phase5] - 读取断点恢复信息：last_completed_step + dsa_run_id
+        # [Phase5] - 读取断点恢复信息：last_completed_step + dsa_run_id + snapshot_run_id
         async with AsyncSessionLocal() as db:
             job_run = await _get_job_run_or_raise(db, job_run_id)
             if job_run is None:
@@ -674,6 +679,13 @@ async def execute_after_close_run(
             dsa_run_id_str = meta.get("dsa_run_id")
             if dsa_run_id_str:
                 dsa_run_id = uuid.UUID(dsa_run_id_str)
+            # [P0 Atomicity] - 断点恢复时从 metadata 读取 snapshot_run_id
+            snapshot_run_id_str = meta.get("feature_snapshot_run_id")
+            if snapshot_run_id_str:
+                try:
+                    snapshot_run_id = uuid.UUID(snapshot_run_id_str)
+                except (ValueError, TypeError):
+                    snapshot_run_id = None
 
         # [Repair] - 启动前修复上一次中断留下的 stuck running snapshot run，
         # 避免同 trade_date 的 running run 触发 partial unique index 冲突。
@@ -1019,8 +1031,8 @@ async def execute_after_close_run(
                 await db.commit()
 
             # 计算 snapshots（独立 session + 后台心跳保活 + 进度回调）
-            snapshot_result: dict[str, Any] | None = None
-            snapshot_error: Exception | None = None
+            # [P0 Atomicity] snapshot 计算完成后不立即 finalize succeeded，
+            # 等 DSA publish_run 成功后才标记 succeeded/published_at。
             heartbeat_task = asyncio.create_task(
                 _job_run_heartbeat_loop(job_run_id, worker_id, interval=30)
             )
@@ -1059,14 +1071,14 @@ async def execute_after_close_run(
                 except asyncio.CancelledError:
                     pass
 
-            # [Phase7] Finalize run（独立 session，保证 run 状态持久化）
-            async with AsyncSessionLocal() as db:
-                from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
-                run_to_finish = await db.get(StockFeatureSnapshotRun, snapshot_run_id)
-                if run_to_finish is not None:
-                    if snapshot_error is not None:
-                        # [Blocker Fix] failed run 也写入 scope='full'（虽不发布，
-                        # 但保持 metadata 一致性，便于追溯）
+            # [P0 Atomicity] 仅在 snapshot_error 时 finalize 为 failed。
+            # 成功时不立即 finalize succeeded —— 等 DSA publish_run 成功后才标记，
+            # 保证发布失败时 snapshot run=failed、published_at=null、无事件、用户 context 不读取该批次。
+            if snapshot_error is not None:
+                async with AsyncSessionLocal() as db:
+                    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+                    run_to_finish = await db.get(StockFeatureSnapshotRun, snapshot_run_id)
+                    if run_to_finish is not None:
                         await finish_snapshot_run(
                             db, run_to_finish,
                             status="failed",
@@ -1076,29 +1088,12 @@ async def execute_after_close_run(
                                 "scope": "full",
                             },
                         )
-                    else:
-                        # [Blocker Fix] succeeded run 必须写入 scope='full'，
-                        # watchlist gate 据此判断可读
-                        await finish_snapshot_run(
-                            db, run_to_finish,
-                            status="succeeded",
-                            snapshot_count=snapshot_result.get("snapshot_count", 0) if snapshot_result else 0,
-                            failed_count=snapshot_result.get("failed_count", 0) if snapshot_result else 0,
-                            expected_count=len(cached_instrument_ids),
-                            metadata={
-                                "source": "after_close_orchestrator",
-                                "scope": "full",
-                            },
-                        )
-                    await db.commit()
-
-            # 失败时向上传播 RuntimeError，触发 orchestrator FAILED 状态写入，跳过 publishing
-            # C5: 事件生成已移到 publishing 成功之后，此处失败不会生成事件
-            if snapshot_error is not None:
+                        await db.commit()
+                # 失败时向上传播 RuntimeError，触发 orchestrator FAILED 状态写入，跳过 publishing
                 raise snapshot_error
 
             logger.info(
-                "[AfterClose] 特征快照生成完成: trade_date=%s, "
+                "[AfterClose] 特征快照生成完成（待发布后 finalize）: trade_date=%s, "
                 "snapshot_count=%s, failed_count=%s",
                 trade_date,
                 snapshot_result.get("snapshot_count") if snapshot_result else 0,
@@ -1118,6 +1113,9 @@ async def execute_after_close_run(
                 await db.commit()
 
         # ---- 步骤 4: publishing ----
+        # [P0 Atomicity] DSA publish_run 成功后才将 snapshot run 标记 succeeded/published_at。
+        # 失败时 snapshot run 标记 failed（无 published_at，无事件，用户 context 不读取该批次）。
+        publish_failed = False
         if not skip_publish:
             async with AsyncSessionLocal() as db:
                 job_run = await _get_job_run_or_raise(db, job_run_id)
@@ -1131,9 +1129,59 @@ async def execute_after_close_run(
                 await db.commit()
 
             # 调用 publish_run（使用独立 session）
-            async with AsyncSessionLocal() as db:
-                published_run = await batch_service.publish_run(db, dsa_run_id)
-                await db.commit()
+            try:
+                async with AsyncSessionLocal() as db:
+                    published_run = await batch_service.publish_run(db, dsa_run_id)
+                    await db.commit()
+            except Exception as publish_exc:
+                # [P0 Atomicity] DSA 发布失败：snapshot run 标记 failed，不生成事件
+                publish_failed = True
+                logger.error(
+                    "[AfterClose] DSA publish_run 失败，snapshot run 将标记 failed: "
+                    "dsa_run_id=%s, error=%s",
+                    dsa_run_id, publish_exc, exc_info=True,
+                )
+                if snapshot_run_id is not None:
+                    async with AsyncSessionLocal() as db:
+                        from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+                        run_to_fail = await db.get(StockFeatureSnapshotRun, snapshot_run_id)
+                        if run_to_fail is not None:
+                            await finish_snapshot_run(
+                                db, run_to_fail,
+                                status="failed",
+                                metadata={
+                                    "source": "after_close_orchestrator",
+                                    "error": f"DSA publish_run failed: {publish_exc}",
+                                    "scope": "full",
+                                },
+                            )
+                            await db.commit()
+                raise
+
+            # [P0 Atomicity] DSA publish_run 成功 → 此时才将 snapshot run 标记 succeeded/published_at
+            if snapshot_run_id is not None and snapshot_error is None:
+                async with AsyncSessionLocal() as db:
+                    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+                    run_to_finish = await db.get(StockFeatureSnapshotRun, snapshot_run_id)
+                    if run_to_finish is not None and run_to_finish.status != "succeeded":
+                        # 断点恢复时 cached_instrument_ids 可能未定义，用 locals().get 安全取值
+                        _cached = locals().get("cached_instrument_ids")
+                        await finish_snapshot_run(
+                            db, run_to_finish,
+                            status="succeeded",
+                            snapshot_count=snapshot_result.get("snapshot_count", 0) if snapshot_result else 0,
+                            failed_count=snapshot_result.get("failed_count", 0) if snapshot_result else 0,
+                            expected_count=len(_cached) if _cached is not None else None,
+                            metadata={
+                                "source": "after_close_orchestrator",
+                                "scope": "full",
+                            },
+                        )
+                        await db.commit()
+                        logger.info(
+                            "[AfterClose] snapshot run 已标记 succeeded（DSA 发布后）: "
+                            "run_id=%s", snapshot_run_id,
+                        )
 
             # [Phase5] - publishing 完成，更新心跳 + 检查点
             async with AsyncSessionLocal() as db:
@@ -1146,7 +1194,7 @@ async def execute_after_close_run(
         # C5: 事件生成在 publishing 成功之后（或 skip_publish 断点恢复时已发布）
         # publishing 失败会抛异常跳过此处 → 不生成事件
         # 独立 session + try/except：事件生成失败不影响 orchestrator 主流程
-        if snapshot_error is None and snapshot_run_id is not None:
+        if snapshot_error is None and snapshot_run_id is not None and not publish_failed:
             try:
                 from app.services.state_event_service import (
                     cleanup_old_events,

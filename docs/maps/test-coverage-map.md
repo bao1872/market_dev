@@ -12,7 +12,7 @@
 | Worker 心跳 admin API（admin/non-admin/unauthenticated + status 筛选 + health_state 分类） | `test_admin_worker_heartbeats_api.py` |
 | **壳层与导航拆分（阶段二）**：用户导航仅行情/趋势选股、admin 入口仅管理员可见、旧路由兼容重定向、admin 路由独立壳层、capture 路由不渲染任一壳层、默认入口 `/market`、getAccountMenuItemsForVariant variant=user/admin 菜单项 | `frontend/src/navigation/__tests__/appNavigation.test.ts`（10 用例） |
 | **路由层级契约（阶段二 fixup）**：Capture 位于 ProtectedLayout 之外、/market+/screener+/stock/:symbol 经 UserAppShell+SubscriberRoute、/messages+/settings 经 UserAppShell 不经 SubscriberRoute、/admin/* 经 AdminRoute+AdminAppShell | `frontend/src/navigation/__tests__/routeStructure.test.ts`（10 用例） |
-| **行情工作区 URL 状态（阶段三+最终对齐验收）**：URL parse/serialize 往返（scope/symbol/timeframe/source/strategy/event_id/debug/returnTo）、非法 timeframe 回退 1d、非法 source 回退 watchlist、source→strategy 默认推导、strategy 等于默认值时省略、event_id=null 不写入、选择新股清除 event_id/returnTo、buildMarketWorkspaceUrl 含/省略 strategy、`selectInstrumentFromMarketPane` 选股重置 source/strategy/event_id/returnTo（保留 debug）、`changeMarketScope` 切 scope 退出 selection 上下文（保留 debug）、选股后 timeframe 保留、debug=1 解码/编码、returnTo URL 编码解码 | `frontend/src/features/market-workspace/__tests__/marketWorkspaceUrlState.test.ts`（25 用例） |
+| **行情工作区 URL 状态（PR #74 表格视图重构，无 `debug` 参数）**：URL parse/serialize 往返（scope/query/page/page_size/sort/selected/industry/concept/state/event_id）、decode 默认值（scope=watchlist/query=''/page=1/pageSize=DEFAULT_PAGE_SIZE/sort/selected/industry/concept/state=null）、非法 page 回退 1、page_size 超过 100 回退 50、非法 state 回退 null、默认值省略（query=''/page=1/selected=null/industry=null/event_id=null）、buildMarketWorkspaceUrl 生成完整 URL、`selectInstrumentInTable` 设置 selected 并保留 scope/query/page/pageSize/sort/industry/concept/state + 清除 eventId、`changeMarketScope` 重置 page=1 + 清除 selected/eventId + 保留 query/sort、`changeMarketFilter` 重置 page=1 + 清除 selected、`normalizeInternalReturnTo` 白名单校验（仅允许 /screener /market /messages 前缀，拒绝 /stock/外部 URL/双斜杠/javascript/超长/admin/unknown）、event_id 解析/写入/省略 | `frontend/src/features/market-workspace/__tests__/marketWorkspaceUrlState.test.ts`（25 用例） |
 | **timeframe 单一真源与请求门控（阶段三最终验收）**：URL 15m→请求15m→图表15m、工具栏切换写回 URL、scope 查询互斥、右栏收起不请求、Capture 和 StockDetail 回归、selection 上下文重置、搜索结果渲染门控 | 浏览器 E2E（CDP，22 项断言全部 PASS） |
 | **StockDetailPage 共享研究核心（阶段四）**：stockResearchTypes 纯函数（ALLOWED_TIMEFRAMES/DEFAULT_TIMEFRAME/DEFAULT_SOURCE/BARS_COUNT_BY_TIMEFRAME/defaultStrategyForSource/normalizeDisplayTimeframe/normalizeResearchSource） | `frontend/src/features/stock-research/__tests__/stockResearchTypes.test.ts`（13 用例） |
 | **/market 和 /stock 共享研究核心（阶段四 E2E）**：market 和 stock 同 symbol/timeframe 的 bars/indicators 参数一致、stock 仅一组 instrument/bars/indicators/quote/events 请求、stock 15m/1h 请求与图表一致、详情页 UI 元素（返回/自选/上下只/全屏/备忘录/飞书/结构状态/图表/状态条/无"日线回退"文案）、capture 隔离（无 topbar/sidebar）、market 阶段三回归 | 浏览器 E2E（CDP，39 项断言全部 PASS） |
@@ -92,6 +92,8 @@
 | 数据不足时写 `degraded_reasons` 不抛异常 | `test_feature_snapshot_service.py::test_compute_snapshot_degraded_on_insufficient_data` |
 | `source_primary_bar_time` 与 `source_secondary_bar_time` 必须为 `Asia/Shanghai` aware datetime；1d 规范化为 `trade_date 15:00+08:00` | `test_feature_snapshot_service.py::test_compute_snapshot_source_bar_time_timezone_aware` |
 | `upsert_snapshot` 幂等：同唯一键重复 upsert 只生成一行，第二次覆盖第一次 | `test_feature_snapshot_service.py::test_upsert_snapshot_idempotent` |
+| **[PR #74 snapshot ownership]** `upsert_snapshot` ON CONFLICT DO UPDATE 更新 `source_run_id`；`GET /stocks/{symbol}/context` 按 `source_run_id == run.id` 精确查询返回正确 snapshot；`source_run_id` 缺失时不返回半成品 | `test_feature_snapshot_ownership.py`（集成测试） |
+| **[PR #74 idempotency key]** `strategy_events.idempotency_key` 格式 `symbol:source_run_id:algorithm_version`；每只股票每个 run 至多一个事件；旧格式 `symbol:trade_date:algorithm_version:hash(evidence)` 不再生成 | `test_strategy_events_idempotency.py` |
 | `compute_for_trade_date` 单股失败不阻断其他股票；失败比例超 30% 抛 `RuntimeError` | `test_feature_snapshot_service.py::test_compute_for_trade_date_single_failure_does_not_block` |
 | [half-baked rollback] `compute_for_trade_date` 不内部 commit；超阈值抛 `RuntimeError` 后 caller rollback，DB 无半成品残留 | `test_feature_snapshot_service.py::test_compute_for_trade_date_over_threshold_no_partial_after_rollback` |
 | `structural_payload` 必须包含 `primary`/`secondary`/`relation`/`meta` 4 key；`relation` 来自 `_compute_relation` | `test_feature_snapshot_service.py::test_compute_snapshot_structural_payload_contains_relation` |
@@ -103,9 +105,19 @@
 | `main` `--dry-run` 端到端不写库；单日失败 rollback 半成品不阻断其他日期（验证 rollback/commit 计数）；`--end=latest` 解析；`start > end` 直接 `sys.exit(1)` | `test_feature_snapshot_backfill.py::test_main_*` |
 | 盘后编排状态机新增 `feature_snapshot` 步骤（`quality_gate → feature_snapshot → publishing`） | `test_after_close_orchestrator.py`（9 个用例） |
 | [feature_snapshot 失败不进入 publishing] `compute_for_trade_date` 抛 `RuntimeError` → `publish_run` 未被调用 + `job_run.status='failed'` + 不应有 publishing/succeeded 事件 | `test_after_close_orchestrator.py::test_execute_feature_snapshot_failure_skips_publishing` |
+| **[PR #74 发布原子性]** snapshot 计算完成后不立即写 `succeeded`/`published_at`；只有 DSA `publish_run` 成功后才 `finish_snapshot_run(status='succeeded')` 写 `published_at` 并生成事件；`publish_run` 失败时 snapshot run=`failed`、`published_at=null`、不生成事件 | `test_after_close_orchestrator_atomicity.py`（发布原子性测试） |
 | 断点恢复：`last_completed_step='quality_gate'` → `skip_snapshot=False`；`'feature_snapshot'` → `skip_snapshot=True` | `test_after_close_orchestrator.py` |
 | 盘后流水线聚合 API（11 场景）：盘前 not_started/收盘后 blocked/latest 不回退历史/运行中/成功/watchlist_ready 判定/sample 不计入/full 优先展示/失败带 error/POST 幂等/events 限 100 条/非 admin 403 | `test_admin_after_close_pipeline.py`（11 个用例） |
 | 迁移幂等：`alembic upgrade head` / `downgrade -1` / `upgrade head` 链路不报错；表含唯一约束与 3 个 btree 索引 | 手动验证（test DB） |
+
+## 3.6 个股上下文 API（stock_context）
+
+| 规则 | 测试 |
+|---|---|
+| **[PR #74 Evidence DTO 映射]** `_event_to_dto` 将 ORM `event.evidence` 映射为用户面 Evidence DTO；不再从 `event.payload` 拼装证据字段 | `test_stock_context_api.py::test_event_to_dto_evidence_mapping` |
+| **[PR #74 时区]** 时间字段统一使用 `ZoneInfo("Asia/Shanghai")`（不再使用 UTC）；事件时间/发布时间/完成时间均以 CST 返回 | `test_stock_context_api.py::test_timezone_asia_shanghai` |
+| **[PR #74 历史事件截止]** 历史事件 cutoff 使用次日 00:00 exclusive（`trade_date + 1 day, 00:00:00`，不包含该时刻）；不再使用 `max.time + 1 day - 1 second` 口径 | `test_stock_context_api.py::test_historical_event_cutoff_next_day_exclusive` |
+| **[PR #74 Run 查询排序]** Run 查询使用确定性 DESC 排序 `ORDER BY trade_date DESC, published_at DESC, finished_at DESC`；相同 trade_date 下多 run 顺序确定 | `test_stock_context_api.py::test_run_query_deterministic_desc_ordering` |
 
 ## 3.8 研究特征矩阵因果口径与 DB 写入
 
@@ -195,7 +207,7 @@
 | 结构状态因子 V1.8 成本/节点位置语义修复（zone 分类 6 种 + node_interval_position 公式 clip/raw + null + 截图案例 close=147.62→1.000 + position_0_1 保持 VP 全区间语义 + 前端标签修复 VP全区间位置/节点区间位置/VA状态/VAL/VAH） | `backend/tests/test_structural_factor_service.py`（18 个新增） + `frontend/scripts/contract-tests/structural-state-panel.test.ts::Cost/Node card uses unambiguous position labels` |
 | 时序特征 V1 后端服务（daily_context 9 字段 + m15_response 9 字段 + derived_relation 3 字段 + 异常隔离 + 无未来函数 + anchor 规则 bsl<bsh→low / bsh<=bsl→high + position_change 手算 + anchor percentile 不变性 + 组级异常隔离） | `backend/tests/test_temporal_feature_service.py` |
 | 时序特征 V1 API 路由（合法/非法参数/`as_of!=latest` 400/降级/meta 结构） | `backend/tests/test_temporal_features_api.py` |
-| 结构状态面板隐藏开关契约（默认隐藏/开关/localStorage/强制隐藏参数/禁用 toggle/toggle 在 tv-chart-column 内部） | `frontend/scripts/contract-tests/structural-state-toggle.test.ts` |
+| **[PR #74 事件状态面板开关契约]** `eventPanelCollapsed` 默认展开（`false`，localStorage `panji:event-panel:v1` 持久化，`'collapsed'` 时收起）；开关按钮默认渲染（非截图模式 + symbol 存在）；按钮文案动态切换（显示事件状态/隐藏事件状态）；`shouldShowPanel = !eventPanelCollapsed && !hideStructuralStateParam`；`hideStructuralState=1`/`capture=1`/`capture=feishu` 强制隐藏并禁用 toggle（early return）；`EventStatePanel` 在 `shouldShowPanel && symbol` 时渲染；toggle 按钮在 `tv-chart-column` 内部（toolbar prop 传入）；`TemporalFeaturesCard` 在 `StockStructuralStatePanel` 内；capture 模式无侧列（testid 落在 `tv-chart-column`） | `frontend/scripts/contract-tests/structural-state-toggle.test.ts`（14 用例） |
 | **飞书渠道操作按钮权限**：member 不显示 admin 最近事件实测按钮；member 渠道卡显示「测试并启用」/「发送测试消息」；admin 才显示「管理员实测最近事件」；编辑/删除对两者都可见 | `frontend/src/pages/__tests__/settingsFeishuActions.test.ts`（5 用例） |
 | **趋势选股 URL 状态 encode/decode**：strategy/keyword/sort/filters/page/pageSize 往返一致；默认 page/pageSize 省略；非法 filters JSON 回退为空数组；陈旧 filter/sort key 丢弃；不保存 selectedKeys/activeRunId/rows/results | `frontend/src/components/__tests__/screenerUrlState.test.ts`（5 用例） |
 | **个股详情返回按钮**：优先使用 URL `returnTo` 参数，其次 `location.state.returnTo`，没有时按 source fallback 到 `/screener` 或 `/market?scope=watchlist`；`buildMarketEntryFromScreener`/`buildMarketEntryFromMessage` 生成 `/market` 入口 URL | `frontend/src/pages/__tests__/detailNavigation.test.ts`（7 用例） |

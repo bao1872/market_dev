@@ -6,7 +6,7 @@ PRD V1.1 §7.3 核心契约：
   禁止请求时写事件（事件由盘后快照成功发布后异步生成）。
   需要 require_active_subscription 守卫（admin 豁免，member 需有效订阅）。
   as_of 直接声明 date | None，非法值由 FastAPI 返回 422。
-  as_of 历史查询时，事件 occurred_at <= as_of 当日结束，禁止返回未来事件。
+  as_of 历史查询时，事件 occurred_at < as_of 次日 00:00（exclusive），禁止返回未来事件。
 - GET /api/v1/admin/stocks/{symbol}/debug
   管理员调试接口，返回 StockState + 事件 + 原始 payload。
   前后端统一使用 symbol（非 instrument_id）。
@@ -15,9 +15,10 @@ PRD V1.1 §7.3 核心契约：
 from __future__ import annotations
 
 import logging
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import and_, desc, select
@@ -31,6 +32,7 @@ from app.models.stock_feature_snapshot_run import (
     StockFeatureSnapshotRun,
 )
 from app.schemas.stock_state import (
+    Evidence,
     StateEventDTO,
     StockContextResponse,
     build_stock_state,
@@ -52,7 +54,19 @@ stock_router = APIRouter(prefix="/api/v1/stocks", tags=["stock-context"])
 admin_router = APIRouter(prefix="/api/v1/admin/stocks", tags=["admin-stock-debug"])
 
 _SCHEMA_VERSION = 1
-_SHANGHAI_TZ = UTC  # Use UTC for as_of end-of-day calculation
+# P0-3: 使用 Asia/Shanghai 时区计算 as_of 截止边界（非 UTC）
+_SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+# 事件证据 field → 用户可读文案白名单（与 state_event_service._FIELD_LABELS 对齐）
+_EVIDENCE_FIELD_LABELS: dict[str, str] = {
+    "structure.price": "价格位置",
+    "structure.consensusRelation": "成交密集区关系",
+    "momentum.macd": "MACD 动量",
+    "momentum.sqzmom": "SQZMOM 动量",
+    "momentum.temporal.daily_dsa_dir": "日线 DSA 方向",
+    "momentum.temporal.trend_alignment": "趋势对齐",
+    "volatility.bollPosition": "布林位置",
+}
 
 
 async def _get_instrument_by_symbol(
@@ -77,7 +91,11 @@ async def _find_latest_succeeded_run(
     session: AsyncSession,
     schema_version: int = _SCHEMA_VERSION,
 ) -> StockFeatureSnapshotRun | None:
-    """查找最新的 succeeded + published + full scope 的 snapshot run。"""
+    """查找最新的 succeeded + published + full scope 的 snapshot run。
+
+    P0-3: 确定性排序 — trade_date DESC, published_at DESC, finished_at DESC
+    确保同日多 run 时选择最新发布的批次。
+    """
     stmt = (
         select(StockFeatureSnapshotRun)
         .where(
@@ -86,7 +104,11 @@ async def _find_latest_succeeded_run(
             StockFeatureSnapshotRun.published_at.is_not(None),
             StockFeatureSnapshotRun.metadata_["scope"].astext == "full",
         )
-        .order_by(desc(StockFeatureSnapshotRun.trade_date))
+        .order_by(
+            desc(StockFeatureSnapshotRun.trade_date),
+            desc(StockFeatureSnapshotRun.published_at),
+            desc(StockFeatureSnapshotRun.finished_at),
+        )
         .limit(1)
     )
     result = await session.execute(stmt)
@@ -98,7 +120,11 @@ async def _find_run_by_trade_date(
     trade_date: date,
     schema_version: int = _SCHEMA_VERSION,
 ) -> StockFeatureSnapshotRun | None:
-    """按 trade_date 查找 succeeded run（as_of 历史回看）。"""
+    """按 trade_date 查找 succeeded run（as_of 历史回看）。
+
+    P0-3: 确定性排序 — published_at DESC, finished_at DESC
+    确保同日多 run 时选择最新发布的批次。
+    """
     stmt = (
         select(StockFeatureSnapshotRun)
         .where(
@@ -107,6 +133,10 @@ async def _find_run_by_trade_date(
             StockFeatureSnapshotRun.status == STATUS_SUCCEEDED,
             StockFeatureSnapshotRun.published_at.is_not(None),
             StockFeatureSnapshotRun.metadata_["scope"].astext == "full",
+        )
+        .order_by(
+            desc(StockFeatureSnapshotRun.published_at),
+            desc(StockFeatureSnapshotRun.finished_at),
         )
         .limit(1)
     )
@@ -150,8 +180,63 @@ def _build_data_quality(
     }
 
 
+def _format_evidence_value(code: Any, value: Any) -> str | None:
+    """格式化证据值为用户可读字符串。
+
+    优先返回 code（稳定状态码），code 为 None 时格式化 numeric value。
+    """
+    if code is not None:
+        return str(code)
+    if value is not None:
+        if isinstance(value, float):
+            return f"{value:.4f}"
+        return str(value)
+    return None
+
+
+def _map_event_evidence_to_dto(
+    raw_evidence: list[dict[str, Any]] | None,
+) -> list[Evidence]:
+    """将 ORM event.evidence (list[dict]) 映射为用户 Evidence DTO 列表。
+
+    DB evidence 结构：
+    - field: 稳定字段路径（如 "momentum.sqzmom"）
+    - prevCode/currCode: 前后状态 code
+    - prevValue/currValue: 前后原始数值
+    - unit: 单位
+    - timeframe: 来源周期
+
+    API Evidence DTO：
+    - fieldName: 用户可读指标名（白名单映射）
+    - code: 稳定字段路径
+    - currentValue/previousValue: 前后值（优先 code，其次 numeric value）
+    - unit/timeframe
+    """
+    if not raw_evidence:
+        return []
+    result: list[Evidence] = []
+    for item in raw_evidence:
+        field = item.get("field", "")
+        result.append(Evidence(
+            fieldName=_EVIDENCE_FIELD_LABELS.get(field, field.split(".")[-1]),
+            code=field,
+            currentValue=_format_evidence_value(
+                item.get("currCode"), item.get("currValue")
+            ),
+            previousValue=_format_evidence_value(
+                item.get("prevCode"), item.get("prevValue")
+            ),
+            unit=item.get("unit"),
+            timeframe=item.get("timeframe") or "",
+        ))
+    return result
+
+
 def _event_to_dto(event: Any) -> StateEventDTO:
-    """将 StockStateEvent ORM 转为 StateEventDTO。"""
+    """将 StockStateEvent ORM 转为 StateEventDTO。
+
+    P0-3: 映射 event.evidence (list[dict]) 为 Evidence DTO 列表。
+    """
     return StateEventDTO(
         id=str(event.id),
         symbol=event.symbol,
@@ -159,6 +244,7 @@ def _event_to_dto(event: Any) -> StateEventDTO:
         eventType=event.event_type,
         title=event.title,
         description=event.description,
+        evidence=_map_event_evidence_to_dto(event.evidence),
         changedFields=event.changed_fields or [],
         previousAsOf=event.previous_as_of.isoformat() if event.previous_as_of else None,
         currentAsOf=event.current_as_of.isoformat() if event.current_as_of else "",
@@ -202,13 +288,14 @@ async def _build_stock_context(
     # 构建 StockState（纯函数，无副作用）
     stock_state = build_stock_state(snapshot, run, symbol)
 
-    # P0-4: as_of 历史查询时，事件截止到 as_of 当日结束
+    # P0-3: as_of 历史查询时，事件截止到 as_of 次日 00:00 (exclusive)
+    # 使用 Asia/Shanghai 时区，禁止 max.time()+1day-1sec 的旧写法
     occurred_at_lte: datetime | None = None
     if as_of is not None:
-        # as_of 当日结束（UTC 23:59:59）
+        next_day = as_of + timedelta(days=1)
         occurred_at_lte = datetime.combine(
-            as_of, datetime.max.time(), tzinfo=_SHANGHAI_TZ,
-        ) + timedelta(days=1) - timedelta(seconds=1)
+            next_day, datetime.min.time(), tzinfo=_SHANGHAI_TZ,
+        )
 
     # 获取最近事件（只读查询）
     recent_events = await get_recent_events_for_instrument(

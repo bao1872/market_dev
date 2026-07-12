@@ -59,6 +59,7 @@ strategy_run_items.reason_code 标准编码：
 | 结构状态因子 | `/instruments/{id}/structural-factors` | 双周期（1d+15m）5 组结构因子（DSA 段/Swing/成本节点/动量波动/成交参与）；前端只渲染后端 DTO，禁止重新计算；无认证要求（与 indicators API 一致）；250-500 bar lookback，15m 仅已完成 bar，Swing 仅已确认 pivot（无未来函数） |
 | 策略 | `/strategies`, `/strategy-runs` | 只读 released/published 结果；`/strategy-runs/{run_id}/results` 以 `strategy_run_items` 为主表 LEFT JOIN `strategy_results` + `instruments`，返回全量 universe（含 succeeded/skipped/failed），skipped/failed 行 `id`/`payload` 为 null；新增 `item_status`/`reason_code`/`error_message` 字段；默认无筛选时 `source_total = run.total_instruments`。JOIN 策略：因 `strategy_run_items.result_id` 当前未回填（ALIGN-033 P2），`strategy_results` 关联统一改用 `(run_id, instrument_id)`，包括批量加载、metric_filter 子查询、sort LEFT JOIN 三处 |
 | 监控 | `/monitor-states`, `/strategy-events` | 只处理完成 Bar，按用户资格过滤；monitor_event 在 `delivery_worker.py` 投递前再次用 `is_user_eligible_for_monitor` 复核，active admin 放行，disabled admin / 无订阅普通用户排除 |
+| 个股上下文 | `/stocks/{symbol}/context` | 用户面个股状态与事件聚合；Evidence DTO 从 ORM `event.evidence` 映射；时区 `Asia/Shanghai`；历史事件截止为次日 00:00 exclusive；run 查询按 `trade_date, published_at, finished_at` DESC 确定排序；`strategy_events.idempotency_key` 格式 `symbol:source_run_id:algorithm_version`（每只股票每个 run 至多一个事件） |
 | 通知 | `/messages`, `/notification-channels` | 用户只能操作自己的消息和渠道 |
 | 自选 | `/watchlist` | active subscription + monitor_limit |
 | 表格视图配置 | `/me/table-view-presets` | 用户表格视图配置 CRUD；JWT user_id 隔离；active subscription + trend_selection feature（admin 豁免）；config 仅允许 keyword/sort/filters/hiddenColumns/pageSize；每 user+table_id+strategy_key 最多 20 个；`(user_id, table_id, strategy_key, name)` 唯一约束用两个 partial unique index 实现（strategy_key IS NOT NULL / IS NULL 分离，解决 NULL!=NULL 问题）；is_default 同维度互斥；**写操作（POST/PATCH/DELETE）必须在返回前 `await db.commit()`，异常分支 `rollback` 后 re-raise，禁止吞异常；写后读跨请求必须可见** |
@@ -1083,4 +1084,34 @@ ConsensusZone 计算结果。
 - ConsensusZone 当前作为 DTO/服务能力存在，不直接接入选股、监控、飞书、消息中心、事件系统；
 - 不新增数据库表（纯实时计算 + Redis 缓存）；
 - V1 算法只做日线成交分布；15 分钟细化分布是未来工作，bump 算法版本后才启用。
+
+## 16. 个股上下文 API 契约（stock_context）
+
+`GET /api/v1/stocks/{symbol}/context` 是用户面 `EventStatePanel` 单一数据源，返回个股最新状态与历史事件聚合。前端 `useStockContext` hook 调用此端点，禁止前端重新计算或拼接。
+
+### 16.1 Evidence DTO 映射
+
+- `_event_to_dto` 将 ORM `event.evidence` 映射为用户面 Evidence DTO；
+- 不再从 `event.payload` 拼装证据字段，Evidence 以 ORM `event.evidence` 为唯一来源。
+
+### 16.2 时区
+
+- 时间字段统一使用 `ZoneInfo("Asia/Shanghai")`（不再使用 UTC）；
+- 事件时间、发布时间、完成时间均以 CST 返回。
+
+### 16.3 历史事件截止
+
+- 历史事件 cutoff 使用 **次日 00:00 exclusive**（`trade_date + 1 day, 00:00:00`，不包含该时刻）；
+- 不再使用 `max.time + 1 day - 1 second` 口径。
+
+### 16.4 Run 查询排序
+
+- Run 查询使用确定性 DESC 排序：`ORDER BY trade_date DESC, published_at DESC, finished_at DESC`；
+- 保证相同 trade_date 下多 run 的顺序确定，避免分页/缓存抖动。
+
+### 16.5 strategy_events 幂等键
+
+- `idempotency_key` 格式：`symbol:source_run_id:algorithm_version`；
+- 旧格式 `symbol:trade_date:algorithm_version:hash(evidence)` 已废弃；
+- 每只股票每个 run 至多生成一个事件（`source_run_id` 维度幂等）。
 
