@@ -432,3 +432,84 @@ cd /root/web_dev/backend && python -m scripts.research_feature_matrix_backfill \
 - **[Blocker Fix] 不要在无进程锁的情况下启动后台回补**，必须同时持有 `pg_advisory_lock` 与 lock file；
 - **[Blocker Fix] 不要并行多月回补**，每月串行，前一个月完成才跑下一个月；
 - **[Blocker Fix] 不要跑 production `stock_feature_snapshots` 历史回补**（仍 BLOCKED，见 `03-jobs-integrations-operations.md` §2.4）。
+
+## 15. Regime Discovery（无监督候选状态发现 V1）
+
+### 15.1 目的与边界
+
+- 只读 `research_feature_matrix_rows` + `bars_daily`，派生 17 个聚类特征
+- 与生产完全隔离：不改 API/前端/Worker/scheduler/migration/snapshot/watchlist/通知
+- 事务 `READ ONLY` + `statement_timeout=120s`
+- 不强行得出聚类结论
+
+### 15.2 特征清单（17 个）
+
+11 个基础归一化特征（从 causal_* 派生，不重算公式）：
+- `atr_pct` = causal_atr / close
+- `bb_percent_b` = causal_bb_percent_b
+- `bb_bandwidth_log` = log1p(causal_bb_bandwidth_pct)
+- `sqzmom_atr` = causal_sqzmom_val / causal_atr
+- `sqzmom_delta_atr` = causal_sqzmom_delta_1 / causal_atr
+- `volume_ratio_log` = log1p(causal_volume_ratio_20)
+- `volume_percentile_120` = causal_volume_percentile_120
+- `swing_position` = active/developing swing 位置 [0, 1]
+- `dsa_dir` = causal_dsa_confirmed_direction sign（-1/0/1）
+- `dsa_age_log` = log1p(causal_dsa_confirmed_age_bars)
+
+6 个时序差分特征（按 instrument 时间排序派生）：
+- `bb_percent_b_delta_5` / `bandwidth_delta_5` / `sqzmom_atr_delta_5` / `volume_percentile_delta_5`
+- `return_5d` / `realized_vol_10d`
+
+### 15.3 双表示
+
+- **absolute**: RobustScaler（median + IQR）
+- **cross_sectional**: 按 trade_date 横截面 rank（pct=True，输出 [0, 1]）
+- `--representation both` 时分别跑两种，manifest 记录两者结果
+
+### 15.4 模型
+
+- 主模型：MiniBatchKMeans（k=3..8，n_init=10，max_iter=100）
+- 辅助模型：diagonal-covariance GMM（max 60,000 行，仅对比不作为主模型）
+- PCA 降维：相关性剪枝后保留 90% 方差且最多 8 维
+
+### 15.5 拒绝门槛
+
+| 指标 | 门槛 |
+|---|---|
+| silhouette | >= 0.08 |
+| bootstrap ARI | >= 0.60 |
+| centroid cosine | >= 0.85 |
+| 最小簇占比 | >= 3% |
+| 最大簇占比 | <= 60% |
+
+任一不达标则不选 k，报告 "当前样本未发现稳定固定组合"。
+
+### 15.6 簇命名与描述
+
+- 簇只命名 R1…Rk
+- 仅当某特征在 >=80% bootstrap 中方向一致且 |median z|>=0.5 才进入状态描述
+- 禁止直接命名为吸筹/主升/派发
+
+### 15.7 CLI 参数
+
+```
+--dry-run, --start, --end, --sample-rows (150000), --seed (42),
+--k-min (3), --k-max (8), --chunk-size (25000), --max-rss-mb (1500),
+--representation {absolute,cross_sectional,both}, --output-dir
+```
+
+### 15.8 输出文件
+
+默认输出到 `/home/ubuntu/panji_research_outputs/regime_discovery/<run_id>/`：
+- manifest.json（git SHA / data_as_of / SQL row count / 特征清单 / 排除原因 / 种子 / 阈值 / 模型参数 / 资源峰值）
+- distribution_summary.csv / drift_summary.csv / model_selection.csv
+- cluster_profiles.csv / cluster_stability.csv / transition_matrix.csv
+- report.md
+
+### 15.9 资源约束
+
+- float32、chunk 25,000、单进程
+- OMP/OPENBLAS/MKL threads=1
+- RSS ≤ 1.5GB
+- 输出 ≤ 50MB，保留最近 3 次
+- 不导出全量 CSV/Parquet，不复制数据库，原始矩阵不落盘

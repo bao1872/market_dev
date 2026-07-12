@@ -133,6 +133,21 @@
 | `ResearchFeatureMatrixRun` 16 列结构 + `run_key` 唯一约束 + month/status 索引；`ResearchFeatureMatrixRow` 39 列（5 metadata + 33 feature + 1 created_at）+ `(instrument_id, trade_date)` 唯一约束 + 3 btree 索引 | `test_research_feature_matrix_model.py`（model 自测入口，无 DB） |
 | `compute_all_features(bars)` 返回 DataFrame 含 33 个 feature 列；per-bar 计算 vs single-snapshot 区分；causal rolling/DSA 双轨/confirmed_delay swing/label 字段；空输入不抛异常 | `test_feature_computer.py`（~23 个用例） |
 
+### 3.9 Regime Discovery（无监督候选状态发现 V1）
+
+| 规则 | 测试 |
+|---|---|
+| 无 hindsight/label/amount 泄漏（validate_no_leakage 硬阻断） | `test_data_access.py::TestValidateNoLeakage`, `test_feature_builder.py::TestBuildFeatures` |
+| 派生公式（atr_pct/bb_bandwidth_log/swing_position/dsa_dir/时序差分/return_5d/realized_vol_10d） | `test_feature_builder.py::TestFormulas` |
+| winsorize 0.5%/99.5% 截断 + RobustScaler median/IQR + 横截面 rank + PCA 90% 方差 | `test_preprocessing.py` |
+| 分层采样确定性（固定 seed 可复现） | `test_data_access.py` |
+| k 拒绝逻辑（silhouette<0.08 / min<3% / max>60% 不选 k） | `test_models.py::TestSelectBestK` |
+| 簇标签匹配（assign_clusters 与 fit 一致） | `test_models.py::TestAssignClusters` |
+| 转移矩阵（k×k 行和=1）+ dwell time | `test_stability.py::TestTransitionMatrix`, `test_stability.py::TestDwellTime` |
+| 50MB 输出门禁（超限抛 RuntimeError）+ 3 次保留 | `test_reporting.py::TestEnforceOutputSize`, `test_reporting.py::TestEnforceMaxRuns` |
+| 只读 SQL（statement_timeout + default_transaction_read_only） | `test_cli.py::TestReadonlySQLSession` |
+| bootstrap 80% 描述规则（方向一致 + |median z|>=0.5） | `test_stability.py::TestDescribeClustersBootstrap` |
+
 ## 4. 飞书与通知
 
 | 规则 | 测试 |
