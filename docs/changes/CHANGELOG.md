@@ -2,6 +2,27 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-13
+
+- CHANGE-20260713-001: Regime Discovery V1 正确性修复 + 资源优化 + 全量 Phase E
+  - Phase E 重写：`get_all_matrix_rows` 完整横截面读取（严禁 chunk 分割 trade_date）；`SET LOCAL statement_timeout='600s'`
+  - Fit/Transform 分离：`fit_winsorize_bounds` / `transform_winsorize` / `transform_feature_matrix` / `transform_pca`，Phase E 复用 sample 参数
+  - scaler 键修复（`scaler` 与 `scaler_params` 同值）；向量化时序派生（`groupby().shift()`）；内存优化（chunksize 流式 + float32 + gc.collect）
+  - manifest 修复（pca_summary JSON 可序列化）；reporting 参数契约修复；mypy `Sequence[Any] | np.ndarray`
+  - 新增 7 测试：横截面 rank 正确性（4）+ sample vs full-assignment 模式（3）+ fit/transform 分离 + get_all_instrument_ids
+  - 150k 样本 + 全量 Phase E 验证：peak RSS 1242.55 MB < 1.5GB，570,011 有效行，k=3 stable（cross_sectional），输出 0.04 MB
+  - 不改后端/API/DB/Worker；只读 research_feature_matrix_rows + bars_daily
+
+## 2026-07-12
+
+- CHANGE-20260712-001: Bar 因子与时序特征分布审计 + 无监督候选状态发现 V1
+  - 新增 `backend/app/research/regime_discovery/` 模块（8 文件）+ CLI + 8 测试文件（96 用例）
+  - 17 聚类特征（11 基础归一化 + 6 时序差分）+ 双表示（absolute robust + cross-sectional rank）
+  - MiniBatchKMeans k=3..8 + 稳定性门槛（silhouette/ARI/cosine/簇占比）
+  - 输出 manifest + 7 CSV + report.md，≤ 50MB，保留最近 3 次
+  - 只读 research_feature_matrix_rows + bars_daily，事务 READ ONLY + statement_timeout=120s
+  - 不改后端/API/DB/Worker
+
 ## 2026-07-11
 
 - CHANGE-20260711-005: 统一行情工作区 P0/P1 收口修正

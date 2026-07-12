@@ -147,6 +147,10 @@
 | 50MB 输出门禁（超限抛 RuntimeError）+ 3 次保留 | `test_reporting.py::TestEnforceOutputSize`, `test_reporting.py::TestEnforceMaxRuns` |
 | 只读 SQL（statement_timeout + default_transaction_read_only） | `test_cli.py::TestReadonlySQLSession` |
 | bootstrap 80% 描述规则（方向一致 + |median z|>=0.5） | `test_stability.py::TestDescribeClustersBootstrap` |
+| **完整横截面 rank 正确性**（同一 trade_date 下所有 instrument 一起 rank，严禁 chunk 分割） | `test_preprocessing.py::TestCrossSectionalRankFullSection`（4 用例：完整横截面 rank / chunk 分割产生不同 rank 反证 / 按 trade_date 分割结果一致 / transform_feature_matrix 完整横截面） |
+| **sample vs full-assignment 模式区分**（dry-run 提及两阶段 / sample_rows 控制样本量 / full assignment 使用 get_all_matrix_rows） | `test_cli.py::TestSampleVsFullAssignmentMode`（3 用例） |
+| **fit/transform 分离**（fit_winsorize_bounds / transform_winsorize / transform_feature_matrix / transform_pca 复用 sample 参数） | `test_preprocessing.py::TestFitWinsorizeBounds`, `TestTransformWinsorize`, `TestTransformFeatureMatrix` |
+| **get_all_instrument_ids** 返回 distinct list | `test_data_access.py::TestGetAllInstrumentIds` |
 
 ## 4. 飞书与通知
 

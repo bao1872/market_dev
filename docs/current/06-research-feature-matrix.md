@@ -508,8 +508,71 @@ cd /root/web_dev/backend && python -m scripts.research_feature_matrix_backfill \
 
 ### 15.9 资源约束
 
-- float32、chunk 25,000、单进程
+- float32、单进程
 - OMP/OPENBLAS/MKL threads=1
 - RSS ≤ 1.5GB
 - 输出 ≤ 50MB，保留最近 3 次
 - 不导出全量 CSV/Parquet，不复制数据库，原始矩阵不落盘
+
+### 15.10 横截面 rank 正确性（Phase E 修复）
+
+**核心规则**：最终选中的 cross-sectional rank 表示，必须基于同一 `trade_date` 下完整市场横截面计算。
+
+**严禁**：
+- 按股票分块后，在每个股票块内部独立计算横截面 rank；
+- 按任意行 chunk 分割同一交易日后分别 rank；
+- 使用 15 万样本的 transition matrix 冒充全量结果。
+
+**实现**：
+- Phase E 使用 `data_access.get_all_matrix_rows(session, start, end)` 一次性读取全量 621k 行；
+- `pd.read_sql` 配合 `chunksize=50000` 流式读取 + 逐 chunk `astype(np.float32)`，降低峰值 RSS；
+- `SET LOCAL statement_timeout = '600s'` 应对全量读取（默认 120s 不足）；
+- `build_features` 内部 `sort_values(["instrument_id", "trade_date"])` 排序，`transform_feature_matrix` 在完整 DataFrame 上按 `trade_date` 分组 rank；
+- `chunksize` 只控制读取内存峰值，不影响 rank 正确性 — 所有 chunk 合并为完整 DataFrame 后再 rank。
+
+**Fit/Transform 分离**：
+- `fit_winsorize_bounds(features_df, features)` → 返回 bounds dict
+- `transform_winsorize(features_df, features, bounds)` → 截断
+- `transform_feature_matrix(df, features, representation, prep_params)` → 应用 scaler/rank + dropna
+- `transform_pca(X, pca_params)` → PCA 降维
+- Phase E 复用 sample 拟合的 `winsorize_bounds` / `scaler` / `pca_params`，不重新拟合，保证全量 assignment 与 sample 模型一致。
+
+**测试**：
+- `test_preprocessing.py::TestCrossSectionalRankFullSection`（4 测试）：完整横截面 rank 正确性、chunk 分割产生不同 rank（反证）、按 trade_date 分割结果一致、`transform_feature_matrix` 完整横截面；
+- `test_cli.py::TestSampleVsFullAssignmentMode`（3 测试）：dry-run 提及两阶段、`--sample-rows` 控制样本量、full assignment 使用 `get_all_matrix_rows`。
+
+### 15.11 全量 Phase E 验证结果（2026-07-13）
+
+**运行配置**：`--sample-rows 150000 --seed 42 --k-min 3 --k-max 8 --representation both`
+
+**结果**：
+- 数据范围：2026-01-05 ~ 2026-07-08（122 个交易日）
+- SQL 行数：621,769
+- 样本行数：126,292（分层抽样）
+- 全量 assignment 有效行：570,011（dropna 后）
+- 特征数：17 → 16（相关性剪枝丢弃 `developing_swing_position`，与 `active_swing_position` |ρ|=1.0）
+- PCA 维度：8（cross_sectional 累计解释方差 ~92.6%）
+- 候选 k：3（cross_sectional representation 通过）
+- silhouette：0.3675（cross_sectional）/ 0.1619（absolute）
+- bootstrap ARI：0.7843（cross_sectional，>= 0.6 通过）/ 0.4075（absolute，< 0.6 拒绝）
+- cluster 占比：R1=24.0% / R2=55.0% / R3=21.0%
+- peak RSS：1242.55 MB（< 1.5GB 目标）
+- 输出大小：0.04 MB（< 50MB 限制）
+- 无 traceback
+
+**输出文件**（10 个）：
+- manifest.json / distribution_summary.csv / drift_summary.csv / model_selection.csv
+- cluster_profiles.csv / cluster_stability.csv / transition_matrix.csv
+- monthly_prevalence.csv / dwell_time.csv / report.md
+
+### 15.12 候选状态性质说明
+
+**当前数据期约 6 个月（2026-01 至 2026-07），不足以证明长期稳定。**
+
+- 目前寻找的是**候选状态**，不是固定规律；
+- 6 个月数据仅能作为候选，需后续扩展数据期复验；
+- 若没有特征达到 80% bootstrap 描述门槛，**不得强行生成状态解释**；
+- 允许最终结论为"没有发现达到标准的稳定组合"；
+- 当前样本无特征满足 80% bootstrap 一致 + |median z|>=0.5 门槛 — 报告"无特征满足描述门槛"，不强行命名状态；
+- 簇只命名 R1/R2/R3，禁止直接命名为吸筹/主升/派发；
+- `absolute` representation 未通过稳定性门槛（ARI=0.4075 < 0.6），属设计预期，不作为主模型产出。
