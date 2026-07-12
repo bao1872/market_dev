@@ -1215,7 +1215,7 @@ async def _query_15min_bars(
 
     Args:
         limit: 若指定，返回 end_time 之前最近 N 根（DESC + LIMIT + 反转），
-               避免加载全量再截取。用于 ConsensusZone 固定 4000 根窗口。
+               避免加载全量再截取。
 
     Returns:
         DataFrame: index=DatetimeIndex(trade_time), columns=open/high/low/close/volume/amount/adj_factor

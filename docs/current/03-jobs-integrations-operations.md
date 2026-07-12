@@ -86,6 +86,7 @@ queued → refreshing_daily → checking_coverage → creating_dsa
   - snapshot 计算完成后**不再立即**写 `succeeded`/`published_at`；只有当后续 DSA `publish_run` 成功后才 `finish_snapshot_run(status='succeeded')` 写 `published_at`（独立 session + commit）并生成事件；
   - 失败时（snapshot 计算超阈值或 `publish_run` 失败）`finish_snapshot_run(status='failed')` 不写 `published_at`（独立 session + commit），不生成事件，再向上传播异常触发 orchestrator FAILED；
   - run 记录在独立 session 中提交，保证 snapshot session rollback 不影响 run 状态持久化。
+- **Published snapshot 保护（CHANGE-20260713-001）**：`create_snapshot_run(scope='full', allow_republish=False)` 在创建前检查是否已存在 canonical succeeded+published+full run（按 `trade_date+schema_version+primary_timeframe+secondary_timeframe+adj` 完整 key 匹配）；若存在则抛 `PublishedSnapshotRunExistsError`，禁止普通重跑覆盖已发布的快照。`after_close_orchestrator` 捕获该异常后跳过 `compute_for_trade_date`，复用已有 published run 的 ID 继续 publish + events 步骤（优雅降级）。`upsert_snapshot(allow_republish=False)` 在 ON CONFLICT DO UPDATE 时添加 WHERE 子句，保护已归属 published run 的 snapshot 不被覆盖。`feature_snapshot_backfill.py` 新增 `--allow-republish` 标志，管理员强制重跑时传 `True` 绕过双层保护。
 
 断点恢复路径（`last_completed_step` → 已完成步骤集合）：
 
@@ -210,6 +211,7 @@ CLI 参数：
 | `--symbols` | None | 只处理指定股票代码（逗号分隔，如 `000100,603303`），用于小样本验证；触发 `scope='sample'` |
 | `--limit-instruments` | None | 只处理前 N 只股票（整数），用于小样本验证；触发 `scope='sample'` |
 | `--workers` | 1 | 并行进程数（1=单进程，>1 启用 multiprocessing）；建议生产先用 2 验证，再 4；超过 `os.cpu_count()` 自动 cap 并 warning |
+| `--allow-republish` | False | [P0-4] 允许覆盖已归属 published full run 的 snapshot（管理员强制重跑）；默认 False 时 `create_snapshot_run(scope='full')` 检查到已存在 published run 会抛 `PublishedSnapshotRunExistsError` |
 
 **Instrument-first 优势**：
 - 每只股票每周期（1d / 15m）只调用一次 `load_instrument_bars`，不为每个 trade_date 重复查询；

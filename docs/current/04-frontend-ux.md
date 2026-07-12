@@ -141,7 +141,10 @@ Node Cluster 算法
 - K 线、指标和截图共享行情快照；
 - 展示 quote 的 `source`/`is_realtime`/`update_time`/`freshness_seconds`/`degraded`/`degraded_reason`，以及 bars 的 `data_source`/`as_of`/`is_partial`/`degraded`/`degraded_reason`；
 - DSA 与 Node 图层可开关；
+- **图层可见性单一真源（CHANGE-20260713-001）**：所有图层开关状态由 `ChartLayerVisibility` 类型统一管理（7 键：`trend/node/boll/volume/macd/sqzmom/breakout`），localStorage key 为 `panji:chart-layer-visibility:v2`；`IndicatorToolbar` 只 dispatch `onToggleLayer(key)`，`StockResearchWorkspace` 持有唯一 `layerVisibility` state 并通过 `layers` prop 传入 `StrategyChart`；禁止子组件 `useState` 维护独立图层状态、禁止 `indicatorVisibility`/`detail-chart-strategy-groups`/`setLayers` 等旧散落状态源；
 - **SQZMOM_LB 图层开关**：位于技术指标分组，默认关闭；开启后在 K 线下方新增独立副图，使用后端返回的 `val` 渲染 histogram、`bcolor` 渲染柱色、`scolor` 渲染 0 轴 squeeze marker；前端只消费后端 DTO，不重新计算 `val`/`sqzOn`/`sqzOff`/`noSqz`；API 未返回 `sqzmom_lb` 时页面不崩溃；
+- **成交量分布**：Phase 5 前保持禁用，工具栏只显示真实能力；`consensus_zone` 保持禁用并显示"成交量分布尚未开放"，不得实现假筹码共识；
+- **K 线初始 viewport 定位（CHANGE-20260713-001 P0-5）**：个股详情初始进入时，viewport 必须基于真实 `calc.length` 创建，`viewport.toIndex === calc.length`，默认显示最后 N 根 K 线；禁止用 `createDefaultViewport(0)` 构造假 viewport；切换股票时（`symbol` 变化）必须重置到该股票最新 K 线（viewport 复合 key `${symbol}:${timeframe}`）；切换周期时首次进入定位该周期末尾，已在当前股票当前周期内主动平移/缩放时可保留用户视区；新行情追加时，用户位于最右端则自动跟随最新 bar 并保持原可见根数，用户已平移到历史区域则不强制拉回；"复位"/"1月/3月/6月/1年/全部"等范围按钮全部以最新 bar 为右边界；
 - 截图区设置 render-ready 标志；
 - 按 timeframe 请求对应根数（1d=250、15m=4000、1h=1200、1w=260、1mo=120），与 Node Cluster / indicator_contract 对齐；`1m` 不在工具栏暴露；
 - 个股详情 K 线实时状态以 `/bars` 返回的 `data_source/is_partial/last_live_bar_time/as_of` 为准；`mergeRealtimeQuoteIntoBars()` 只做兜底视觉增强，仅当 `quote.is_realtime === true && quote.source === "pytdx" && quote.freshness_seconds <= 60` 时才合并到最后一根 K 线，不参与指标计算，不替代后端 partial bar；daily_fallback / 延迟 / 降级行情只用于顶部报价 fallback/状态提示，不混入 `displayBars`；1d 保留日期语义并跨日追加实时 bar，intraday（15m/1h 等）使用 `quote.update_time`；`baseBars` 仍用于指标计算，避免污染算法输入；

@@ -59,7 +59,6 @@ def _make_mock_snapshot(
     daily_dsa_dir: int | None = 1,
     alignment: str | None = "aligned",
     macd_code: str | None = "bullish_above",
-    consensus_code: str | None = "inside_consensus",
 ) -> StockFeatureSnapshot:
     """构造 mock StockFeatureSnapshot。"""
     return StockFeatureSnapshot(
@@ -92,18 +91,12 @@ def _make_mock_snapshot(
                     "participation": {
                         "volume_percentile_120": 0.3,
                     },
-                    # C6: 真实 MACD 紧凑状态 + 真实 ConsensusZone 关系
+                    # C6: 真实 MACD 紧凑状态
                     "macd_state": {
                         "code": macd_code,
                         "macd_val": 0.15 if macd_code else None,
                         "signal_val": 0.10 if macd_code else None,
                         "histogram": 0.05 if macd_code else None,
-                    },
-                    "consensus_zone_relation": {
-                        "code": consensus_code,
-                        "cluster_lower": 9.5 if consensus_code else None,
-                        "cluster_upper": 10.5 if consensus_code else None,
-                        "cluster_center": 10.0 if consensus_code else None,
                     },
                 }
             }
@@ -139,7 +132,6 @@ def _make_mock_run(
 
 def _make_state(
     price_code: str | None = "inside",
-    consensus_code: str | None = "inside_va",
     macd_code: str | None = None,
     sqzmom_code: str | None = "positive",
     dsa_dir_code: str | None = "1",
@@ -155,7 +147,6 @@ def _make_state(
         computedAt="2026-07-10T15:00:00+08:00",
         structure=StockStructure(
             price=StateValue(code=price_code, label="test", value=None, unit=None, timeframe="1d", sourceField="test"),
-            consensusRelation=StateValue(code=consensus_code, label="test", value=None, unit=None, timeframe="1d", sourceField="test"),
         ),
         momentum=StockMomentum(
             macd=StateValue(code=macd_code, label="test", value=None, unit=None, timeframe="1d", sourceField="test"),
@@ -222,28 +213,6 @@ def test_build_stock_state_source_run_id_from_real_run() -> None:
     assert state.version == "v1", "version 必须来自 schema_version"
 
 
-def test_build_stock_state_consensus_zone_relation() -> None:
-    """C6: ConsensusZone 关系来自真实 consensus_zone_relation，不使用 value_area_zone。"""
-    snapshot = _make_mock_snapshot(consensus_code="inside_consensus")
-    run = _make_mock_run()
-    state = build_stock_state(snapshot, run, symbol="000001")
-
-    assert state.structure.consensusRelation.code == "inside_consensus"
-    assert "成交密集区" in state.structure.consensusRelation.label
-    assert "筹码共识" not in state.structure.consensusRelation.label
-    assert state.structure.consensusRelation.sourceField == "consensus_zone_relation"
-
-
-def test_build_stock_state_consensus_zone_null_when_no_data() -> None:
-    """C6: consensus_zone_relation.code=None 时显示数据不足（不用 value_area_zone 回退）。"""
-    snapshot = _make_mock_snapshot(consensus_code=None, value_area_zone="inside_va")
-    run = _make_mock_run()
-    state = build_stock_state(snapshot, run, symbol="000001")
-
-    assert state.structure.consensusRelation.code is None
-    assert "数据不足" in state.structure.consensusRelation.label
-
-
 def test_build_stock_state_as_of_from_snapshot_trade_date() -> None:
     """V1.1: as_of 来自 snapshot.trade_date（真实 point-in-time）。"""
     snapshot = _make_mock_snapshot(trade_date=date(2026, 7, 9))
@@ -277,12 +246,12 @@ def test_build_stock_state_sqzmom_null() -> None:
 
 
 def test_extract_state_codes_returns_all_paths() -> None:
-    """extract_state_codes 返回所有 7 个字段路径。"""
+    """extract_state_codes 返回所有 6 个字段路径。"""
     state = _make_state()
     codes = extract_state_codes(state)
 
     assert set(codes.keys()) == set(_STATE_FIELD_PATHS)
-    assert len(codes) == 7
+    assert len(codes) == 6
 
 
 def test_compare_state_codes_no_change() -> None:
@@ -784,7 +753,6 @@ def test_strip_internal_fields_for_user_clears_source_field() -> None:
     assert stripped_state is not None
     # sourceField 必须完全不存在（不是 None）
     assert "sourceField" not in stripped_state["structure"]["price"]
-    assert "sourceField" not in stripped_state["structure"]["consensusRelation"]
     assert "sourceField" not in stripped_state["momentum"]["macd"]
     assert "sourceField" not in stripped_state["momentum"]["sqzmom"]
     for t in stripped_state["momentum"]["temporal"]:
@@ -1491,7 +1459,6 @@ def test_p03_build_event_evidence_includes_values() -> None:
         computedAt="2026-07-10T15:00:00+08:00",
         structure=StockStructure(
             price=StateValue(code="inside", label="test", value=None, unit=None, timeframe="1d", sourceField="test"),
-            consensusRelation=StateValue(code="inside_va", label="test", value=None, unit=None, timeframe="1d", sourceField="test"),
         ),
         momentum=StockMomentum(
             macd=StateValue(code=None, label="test", value=None, unit=None, timeframe="1d", sourceField="test"),

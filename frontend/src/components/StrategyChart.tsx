@@ -13,7 +13,6 @@ import {
   STRATEGIES,
   FEISHU_CAPTURE_LAYERS,
   type DisplayGroupDef,
-  type FeishuCaptureLayer,
 } from '../lib/strategy-manifest'
 import type { ChartLayer, DsaSelectorData, IndicatorResponse } from '../api/endpoints'
 import {
@@ -25,7 +24,7 @@ import {
   panViewport,
   zoomAtAnchor,
 } from './chartViewport'
-import type { IndicatorVisibility } from '../features/stock-research/stockResearchTypes'
+import type { ChartLayerVisibility } from '../features/stock-research/stockResearchTypes'
 
 // ===== 颜色常量（A 股红涨绿跌，对齐原型 charts.js 的 C 对象）=====
 const C = {
@@ -83,7 +82,6 @@ export interface LayerVisibility {
   delta: boolean
   events: boolean
   sqzmom: boolean
-  consensus_zone: boolean
 }
 
 export interface StrategyChartProps {
@@ -103,8 +101,10 @@ export interface StrategyChartProps {
   onViewportChange?: (vp: ChartViewport) => void
   // [feishu-capture] - 描述: 飞书截图模式，强制开启 FEISHU_CAPTURE_LAYERS 且不可关闭，不读写 localStorage
   isCaptureMode?: boolean
-  // [indicatorLayerManifest] - 指标图层显隐偏好（PRD §6.2），由父组件从 localStorage 加载传入
-  indicatorVisibility?: IndicatorVisibility
+  // [chartLayerVisibility] - 图表图层显隐偏好（PRD §6.2 单一真源 v2）
+  // 由父组件 StockResearchWorkspace 持有并传入；StrategyChart 作为受控组件，不再内部管理 layers state。
+  // 截图模式时不传（undefined），由 StrategyChart 内部派生 forced layers。
+  layerVisibility?: ChartLayerVisibility
 }
 
 // 计算后的 Bar（含指标字段）
@@ -273,7 +273,6 @@ import {
   shouldIncludeDsaInPriceRange,
   shouldRenderBbLayer,
   shouldRenderDsaLayer,
-  shouldToggleDsa,
 } from '@/utils/dsaOverlayPolicy'
 // [DSA Segment Match] - debugIndicatorAlignment 诊断已移除（P1 清理）
 //   computeDsaSegmentMatchStats 工具函数保留在 utils/dsaSegmentMatch.ts
@@ -645,75 +644,6 @@ function renderVolume(
   drawPaneTicks(ctx, g, 'volume', 0, vmax, 'VOL', data[data.length - 1].volume, C.text)
 }
 
-// [ConsensusZone] - 筹码共识区 P10-P90 半透明水平区带（PRD V1.1 §7.4）
-// 后端注入 consensus_zone 图层，data 包含 clusters 数组和 isAvailable 标志
-// 无数据/错误时只跳过渲染，不影响 K线
-interface ConsensusClusterData {
-  lower: number
-  upper: number
-  center: number
-  peakPrice: number
-  volumeRatio: number
-  strength: number
-}
-
-interface ConsensusZoneLayerData {
-  clusters: ConsensusClusterData[]
-  isAvailable: boolean
-  algorithmVersion?: string
-  unavailableReason?: string | null
-}
-
-function renderConsensusZone(
-  ctx: CanvasRenderingContext2D,
-  g: Geometry,
-  _layer: ChartLayer,
-  data: Record<string, (number | string | null)[]>,
-  py: (v: number) => number,
-): void {
-  // Cast data to ConsensusZoneLayerData（后端返回的嵌套结构）
-  const zoneData = data as unknown as ConsensusZoneLayerData
-  if (!zoneData || !zoneData.isAvailable || !zoneData.clusters || zoneData.clusters.length === 0) {
-    return
-  }
-
-  const plotWidth = g.plotRight - g.l
-  const bandColor = 'rgba(156, 39, 176, 0.10)'
-  const borderColor = 'rgba(156, 39, 176, 0.35)'
-  const centerColor = 'rgba(156, 39, 176, 0.55)'
-
-  for (const cluster of zoneData.clusters) {
-    const yLower = py(cluster.lower)
-    const yUpper = py(cluster.upper)
-    const yTop = Math.min(yLower, yUpper)
-    const bandHeight = Math.abs(yUpper - yLower)
-
-    // P10-P90 半透明填充
-    ctx.fillStyle = bandColor
-    ctx.fillRect(g.l, yTop, plotWidth, Math.max(bandHeight, 1))
-
-    // P10/P90 边界线
-    ctx.strokeStyle = borderColor
-    ctx.lineWidth = 1
-    ctx.beginPath()
-    ctx.moveTo(g.l, yLower)
-    ctx.lineTo(g.plotRight, yLower)
-    ctx.moveTo(g.l, yUpper)
-    ctx.lineTo(g.plotRight, yUpper)
-    ctx.stroke()
-
-    // P50 中位线（虚线）
-    const yCenter = py(cluster.center)
-    ctx.strokeStyle = centerColor
-    ctx.setLineDash([4, 4])
-    ctx.beginPath()
-    ctx.moveTo(g.l, yCenter)
-    ctx.lineTo(g.plotRight, yCenter)
-    ctx.stroke()
-    ctx.setLineDash([])
-  }
-}
-
 // 突破压力区
 function renderBreakout(
   ctx: CanvasRenderingContext2D,
@@ -760,9 +690,6 @@ function renderIndicatorLayer(
       break
     case 'sqzmom':
       renderIndicatorSqzmom(ctx, g, layer, data, barsCount, step, displayTimes, timeframe)
-      break
-    case 'consensus_zone':
-      renderConsensusZone(ctx, g, layer, data, py)
       break
   }
 }
@@ -1600,15 +1527,6 @@ function drawTrading(
           if (typeof v === 'number') priceCandidates.push(v)
         })
       }
-      // [ConsensusZone Y轴] - PRD V1.1 §7.4: 纵轴纳入 cluster lower/upper，避免裁剪
-      if (layer.layer_id === 'consensus_zone' && layers.consensus_zone) {
-        const zoneData = layerData as unknown as ConsensusZoneLayerData
-        if (zoneData?.isAvailable && zoneData.clusters) {
-          for (const c of zoneData.clusters) {
-            priceCandidates.push(c.lower, c.upper)
-          }
-        }
-      }
     })
   }
 
@@ -1734,8 +1652,6 @@ function drawTrading(
       if (layer.layer_id === 'macd' && !layers.macd) return
       // [SQZMOM_LB 副图] - 受 sqzmom 图层开关控制
       if (layer.layer_id === 'sqzmom_lb' && !layers.sqzmom) return
-      // [ConsensusZone 主图] - 受 consensus_zone 图层开关控制
-      if (layer.layer_id === 'consensus_zone' && !layers.consensus_zone) return
       // [DSA 数据契约] - union 类型（DsaSelectorData | Record）按 Record 索引访问，dsa_polyline 渲染器内部再 cast 到 DsaSelectorData
       const layerData = indicators.data![layer.strategy_id] as Record<string, (number | string | null)[]>
       if (layerData) {
@@ -1845,7 +1761,6 @@ function getDefaultLayers(strategyId?: string): LayerVisibility {
     delta: false,
     events: false,
     sqzmom: false,
-    consensus_zone: true,
   }
   if (strategyId && STRATEGIES[strategyId]) {
     STRATEGIES[strategyId].defaultLayers.forEach(id => {
@@ -1855,23 +1770,34 @@ function getDefaultLayers(strategyId?: string): LayerVisibility {
   return layers
 }
 
-// 判断 display group 是否全部激活
+// [chartLayerVisibility] - 将用户侧 7 键 ChartLayerVisibility 映射为内部 12 键 LayerVisibility
+// trend → dsa + selection, node → profile + node + poc, 其余一一对应
+// delta/events 为派生层（非用户可控）：delta 固定 false，events 固定 true（有事件数据时绘制）
+function chartLayerVisibilityToInternal(
+  vis: ChartLayerVisibility,
+  source: string,
+): LayerVisibility {
+  return {
+    volume: vis.volume,
+    dsa: vis.trend,
+    selection: vis.trend,
+    node: vis.node,
+    poc: vis.node,
+    profile: vis.node,
+    bb: vis.boll,
+    macd: vis.macd,
+    sqzmom: vis.sqzmom,
+    breakout: source === 'selection' ? vis.breakout : false,
+    delta: false,
+    events: true,
+  }
+}
+
+// 判断 display group 是否全部激活（用于只读 legend 显示状态）
 function isGroupActive(groupId: string, layers: LayerVisibility): boolean {
   const group = DISPLAY_GROUPS[groupId]
   if (!group) return false
   return group.layers.every(l => layers[l as keyof LayerVisibility])
-}
-
-// 切换 display group
-function toggleGroup(groupId: string, layers: LayerVisibility): LayerVisibility {
-  const group = DISPLAY_GROUPS[groupId]
-  if (!group) return layers
-  const allOn = group.layers.every(l => layers[l as keyof LayerVisibility])
-  const newLayers = { ...layers }
-  group.layers.forEach(l => {
-    newLayers[l as keyof LayerVisibility] = !allOn
-  })
-  return newLayers
 }
 
 export function StrategyChart({
@@ -1888,7 +1814,7 @@ export function StrategyChart({
   viewport: viewportProp,
   onViewportChange,
   isCaptureMode = false,
-  indicatorVisibility,
+  layerVisibility,
 }: StrategyChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -1916,44 +1842,26 @@ export function StrategyChart({
     dsaSourceMismatch: false,
   })
 
-  // 图层可见性（localStorage 持久化，v3 key：DSA 改用 dsa_polyline 渲染器后升级版本，
-  //   旧 v2 缓存不再读取，避免残留的 DSA 配置影响新版本默认值）
-  const storageKey = `detail-chart-strategy-groups-v3:${source}:${strategyId}`
-  const [layers, setLayers] = useState<LayerVisibility>(() => {
-    // [feishu-capture] - 描述: 截图模式强制开启 FEISHU_CAPTURE_LAYERS，忽略 localStorage 与策略默认值
+  // [chartLayerVisibility] - 受控图层可见性（单一真源 v2）
+  // 父组件 StockResearchWorkspace 持有唯一 ChartLayerVisibility state 并传入；
+  // 截图模式时不传（undefined），由此处派生 forced layers（不读写 localStorage）。
+  const effectiveLayers: LayerVisibility = useMemo(() => {
+    // [feishu-capture] - 描述: 截图模式强制开启 FEISHU_CAPTURE_LAYERS，忽略用户偏好
     //   advice.md v6 第 2 条：dsa/bb/profile/node/poc 必须开启
     if (isCaptureMode) {
-      const forced = { ...getDefaultLayers(strategyId) }
+      const forced = getDefaultLayers(strategyId)
       FEISHU_CAPTURE_LAYERS.forEach(layerId => {
         forced[layerId as keyof LayerVisibility] = true
       })
       return forced
     }
-    try {
-      const saved = localStorage.getItem(storageKey)
-      if (saved) return { ...getDefaultLayers(strategyId), ...JSON.parse(saved) }
-    } catch {
-      // ignore
+    // 父组件传入用户偏好 → 映射为内部 12 键 LayerVisibility
+    if (layerVisibility) {
+      return chartLayerVisibilityToInternal(layerVisibility, source)
     }
+    // fallback：无父组件偏好时使用策略默认值（不应出现在正常流程中）
     return getDefaultLayers(strategyId)
-  })
-
-  // [indicatorLayerManifest] - 当父组件传入 indicatorVisibility 时，覆盖对应图层的可见性
-  // 映射：consensus_zone→consensus_zone(新), price_structure→dsa+selection, boll→bb, volume→volume, macd→macd
-  // 旧 VolumeProfile(profile/node/poc)不再由 consensus_zone 控制，保留默认 false
-  const effectiveLayers: LayerVisibility = useMemo(() => {
-    // 截图模式强制 FEISHU_CAPTURE_LAYERS，不受 indicatorVisibility 覆盖
-    if (isCaptureMode || !indicatorVisibility) return layers
-    return {
-      ...layers,
-      consensus_zone: indicatorVisibility.consensus_zone ?? layers.consensus_zone,
-      dsa: indicatorVisibility.price_structure ?? layers.dsa,
-      selection: indicatorVisibility.price_structure ?? layers.selection,
-      bb: indicatorVisibility.boll ?? layers.bb,
-      volume: indicatorVisibility.volume ?? layers.volume,
-      macd: indicatorVisibility.macd ?? layers.macd,
-    }
-  }, [layers, indicatorVisibility, isCaptureMode])
+  }, [layerVisibility, isCaptureMode, strategyId, source])
 
   // [chartViewport] - 显示 bar 数量（缩放控制）：保留为内部状态作为 fallback，
   //   当父组件未传入 viewport 时使用；受控时由 viewportProp 驱动
@@ -1989,6 +1897,26 @@ export function StrategyChart({
       onViewportChange(clamped)
     }
   }, [viewportProp, calc.length, onViewportChange])
+
+  // [chartViewport] - 新行情追加自动跟随：calc.length 增长且用户位于最右端时，
+  //   自动平移到最新 bar 并保持原可见根数；用户已主动平移到历史区域时不强制拉回。
+  //   - viewportProp 为 undefined 时由内部 fallback createDefaultViewport(calc.length) 自动显示末尾，无需处理
+  //   - viewportProp.toIndex >= prevLen 表示用户原来位于最右端
+  const prevCalcLengthRef = useRef(calc.length)
+  useEffect(() => {
+    const prevLen = prevCalcLengthRef.current
+    prevCalcLengthRef.current = calc.length
+    if (calc.length <= prevLen) return
+    if (!viewportProp || !onViewportChange) return
+    // 用户原来位于最右端 → 自动跟随新 bar，保持原可见根数
+    if (viewportProp.toIndex >= prevLen) {
+      const delta = calc.length - prevLen
+      onViewportChange({
+        fromIndex: viewportProp.fromIndex + delta,
+        toIndex: calc.length,
+      })
+    }
+  }, [calc.length]) // eslint-disable-line react-hooks/exhaustive-deps -- viewportProp/onViewportChange 从 ref 读取避免循环
 
   // 可见 bars：基于 viewport 切片 calc（统一 viewport，所有图层共用，advice.md 第三节问题 2）
   const display = useMemo(() => {
@@ -2026,17 +1954,6 @@ export function StrategyChart({
     //   setDsaMismatch 相同值时 React 自动 bailout，不会触发额外重渲染循环
     setDsaMismatch(stateRef.current.dsaSourceMismatch)
   }, [draw, calc, display, mappedEvents, effectiveLayers, viewport, indicators])
-
-  // 持久化图层可见性
-  useEffect(() => {
-    // [feishu-capture] - 描述: 截图模式不写 localStorage，避免污染用户偏好（advice.md v6 第 2 条）
-    if (isCaptureMode) return
-    try {
-      localStorage.setItem(storageKey, JSON.stringify(layers))
-    } catch {
-      // ignore
-    }
-  }, [layers, storageKey, isCaptureMode])
 
   // 交互事件绑定（仅一次）
   useEffect(() => {
@@ -2306,16 +2223,6 @@ export function StrategyChart({
     return { d, change, idx }
   }, [legendIdx, display])
 
-  // 图层切换
-  const handleToggleGroup = (groupId: string) => {
-    // [feishu-capture] - 描述: 截图模式下强制图层不可关闭（advice.md v6 第 2 条）
-    if (isCaptureMode && FEISHU_CAPTURE_LAYERS.includes(groupId as FeishuCaptureLayer)) return
-    // [DSA Overlay Policy] - DSA toggle 决策：capture 锁定 / 全周期可切换
-    // [PR #33] - 移除 `timeframe !== '1d'` 硬编码 disable，全周期按 shouldToggleDsa 决策
-    if (!shouldToggleDsa(groupId, isCaptureMode, FEISHU_CAPTURE_LAYERS)) return
-    setLayers(prev => toggleGroup(groupId, prev))
-  }
-
   // [chartViewport] - 拖动平移状态（Task 16: TradingView 风格缩放）
   const dragRef = useRef<{ startX: number; fromIndex: number } | null>(null)
   // [chartViewport] - 移动端双指缩放状态
@@ -2411,7 +2318,7 @@ export function StrategyChart({
         </div>
       </div>
 
-      {/* 策略图示区：按 DISPLAY_GROUPS 驱动 */}
+      {/* 策略图示区：只读说明（单一真源 v2 — 图层开关在 IndicatorToolbar，此处不再可点击） */}
       <div className="tv-strategy-legend">
         <span className="tv-strategy-legend-label">策略图层</span>
         {Object.values(DISPLAY_GROUPS).map((g: DisplayGroupDef) => {
@@ -2419,16 +2326,14 @@ export function StrategyChart({
           // [PR #32] - DSA 全周期支持，title 按周期区分（1d 主结构锚，非 1d 验证图层）
           const dsaTitleHint = g.id === 'dsa' ? DSA_TITLE_HINT(timeframe) : undefined
           return (
-            <label
+            <span
               key={g.id}
               className={clsx('tv-strategy-legend-item', !active && 'off')}
               title={dsaTitleHint}
-              onClick={() => handleToggleGroup(g.id)}
             >
               <i className="tv-legend-dot" style={{ '--legend-color': g.color } as React.CSSProperties} />
               <b>{g.shortName}</b>
-              <i className="tv-mini-switch" />
-            </label>
+            </span>
           )
         })}
       </div>

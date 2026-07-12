@@ -23,7 +23,7 @@ V1.1 硬性规定：
     python -m app.schemas.stock_state
 """
 
-# ruff: noqa: N815 - camelCase 字段为前端 JSON API 契约（asOf/sourceRunId/consensusRelation 等）
+# ruff: noqa: N815 - camelCase 字段为前端 JSON API 契约（asOf/sourceRunId 等）
 
 from __future__ import annotations
 
@@ -73,12 +73,9 @@ class Evidence(BaseModel):
 
 
 class StockStructure(BaseModel):
-    """结构状态 - 趋势结构 + 成交密集区关系。"""
+    """结构状态 - 趋势结构。"""
 
     price: StateValue = Field(..., description="价格结构状态")
-    consensusRelation: StateValue = Field(
-        ..., description="成交密集区关系（Phase 5 前不得叫筹码共识）"
-    )
 
 
 class StockMomentum(BaseModel):
@@ -141,6 +138,26 @@ class StateEventDTO(BaseModel):
     )
 
 
+class StockContextDataQuality(BaseModel):
+    """数据质量信息 - 含 reasonCode 解释空态原因。
+
+    reasonCode 值：
+    - null: 状态正常返回，有数据
+    - no_published_full_run: 没有 succeeded+published+full 的 run
+    - snapshot_missing: run 存在但该 instrument 没有快照（既无精确匹配也无 legacy 匹配）
+    - snapshot_run_not_linked: 快照存在（legacy 匹配）但 source_run_id 为 NULL，需修复归属
+    - legacy_snapshot_ambiguous: legacy 匹配到多个快照或 source_run_id 指向其他 run
+    """
+
+    hasSucceededRun: bool = Field(..., description="是否有 succeeded+published+full run")
+    hasSnapshot: bool = Field(..., description="是否找到该 instrument 的快照")
+    reasonCode: str | None = Field(None, description="空态原因码（state 非空时为 null）")
+    degradedReasons: list[str] = Field(default_factory=list, description="降级原因")
+    runTradeDate: str | None = Field(None, description="run 的 trade_date（ISO）")
+    runPublishedAt: str | None = Field(None, description="run 的 published_at（ISO）")
+    instrumentStatus: str | None = Field(None, description="instrument 状态")
+
+
 class StockContextResponse(BaseModel):
     """GET /stocks/{symbol}/context 响应 - 只读。"""
 
@@ -148,8 +165,8 @@ class StockContextResponse(BaseModel):
     events: list[StateEventDTO] = Field(
         default_factory=list, description="最近事件列表"
     )
-    dataQuality: dict[str, Any] = Field(
-        default_factory=dict, description="数据质量信息"
+    dataQuality: StockContextDataQuality = Field(
+        ..., description="数据质量信息（含 reasonCode）"
     )
 
 
@@ -213,34 +230,6 @@ def _build_price_structure(
         unit=None,
         timeframe=timeframe,
         source_field="swing_position.confirmed_swing_breakout_state",
-    )
-
-
-def _build_consensus_relation(
-    primary_factors: dict[str, Any], timeframe: str
-) -> StateValue:
-    """C6: 从 consensus_zone_relation 构建结构共识关系。
-
-    真实 ConsensusZone 关系（不使用 value_area_zone 替代）。
-    V1.1: Phase 5 前不得叫筹码共识，使用"成交密集区"。
-    """
-    cz = _safe_get(primary_factors, "consensus_zone_relation", {})
-    code = _safe_get(cz, "code")
-
-    label_map = {
-        "inside_consensus": "位于成交密集区内",
-        "above_consensus": "位于成交密集区上方",
-        "below_consensus": "位于成交密集区下方",
-    }
-    label = label_map.get(code, "成交密集区数据不足")
-
-    return _make_state_value(
-        code=code,
-        label=label,
-        value=_safe_get(cz, "cluster_center"),
-        unit=None,
-        timeframe=timeframe,
-        source_field="consensus_zone_relation",
     )
 
 
@@ -464,7 +453,6 @@ def build_stock_state(
     - algorithm_version 来自 run.schema_version（真实算法版本）
     - MACD code=null（无真实 MACD 计算）
     - SQZMOM 独立命名
-    - value_area_zone → "成交密集区关系"
 
     Args:
         snapshot: 特征快照 ORM 对象
@@ -482,7 +470,6 @@ def build_stock_state(
 
     # 构建各状态字段
     price = _build_price_structure(primary_factors, primary_tf)
-    consensus = _build_consensus_relation(primary_factors, primary_tf)
     macd = _build_macd(primary_factors, primary_tf)
     sqzmom = _build_sqzmom(primary_factors, primary_tf)
     boll = _build_boll_position(primary_factors, primary_tf)
@@ -506,7 +493,7 @@ def build_stock_state(
         sourceRunId=source_run_id,
         version=algorithm_version,
         computedAt=computed_at,
-        structure=StockStructure(price=price, consensusRelation=consensus),
+        structure=StockStructure(price=price),
         momentum=StockMomentum(
             macd=macd, sqzmom=sqzmom, temporal=temporal_states
         ),
@@ -596,18 +583,12 @@ if __name__ == "__main__":
                     "participation": {
                         "volume_percentile_120": 0.3,
                     },
-                    # C6: 真实 MACD 紧凑状态 + 真实 ConsensusZone 关系
+                    # C6: 真实 MACD 紧凑状态
                     "macd_state": {
                         "code": "bullish_above",
                         "macd_val": 0.15,
                         "signal_val": 0.10,
                         "histogram": 0.05,
-                    },
-                    "consensus_zone_relation": {
-                        "code": "inside_consensus",
-                        "cluster_lower": 9.5,
-                        "cluster_upper": 10.5,
-                        "cluster_center": 10.0,
                     },
                 }
             }
@@ -647,11 +628,6 @@ if __name__ == "__main__":
     # SQZMOM 独立命名
     assert state.momentum.sqzmom.code == "positive"
     assert state.momentum.sqzmom.sourceField == "volatility_momentum.sqzmom_val"
-
-    # C6: ConsensusZone 关系来自真实 consensus_zone_relation
-    assert state.structure.consensusRelation.code == "inside_consensus"
-    assert "成交密集区" in state.structure.consensusRelation.label
-    assert "筹码共识" not in state.structure.consensusRelation.label
 
     # 证据列表
     assert len(state.evidence) > 0

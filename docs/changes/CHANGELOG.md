@@ -2,6 +2,16 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-13
+
+- CHANGE-20260713-001: PR #74 补充修复 — ConsensusZone 移除 + 图层单一状态源 + K 线 viewport 修复 + Published snapshot 保护
+  - ConsensusZone 移除：删除 consensus_zone_service.py / consensus_zone.py / test_consensus_zone.py；Phase 5 前成交量分布保持禁用
+  - 图层单一状态源：ChartLayerVisibility 类型（7 键 trend/node/boll/volume/macd/sqzmom/breakout）；localStorage key panji:chart-layer-visibility:v2；删除 indicatorVisibility/detail-chart-strategy-groups/setLayers 旧状态源
+  - K 线 viewport 修复（P0-5）：删除 makeDefaultViewport；viewport 复合 key ${symbol}:${timeframe}；auto-follow effect；初始 toIndex === calc.length 定位到最新 K 线
+  - Published snapshot 保护（P0-4）：PublishedSnapshotRunExistsError + get_published_full_run + upsert_snapshot WHERE 子句 + after_close 优雅降级 + backfill --allow-republish 标志
+  - 测试：后端 121 passed + 前端 177 contract passed + tsc/build/docs consistency 全通过
+  - 文档：02-data-api-contracts/03-jobs/04-frontend-ux/05-testing/test-coverage-map 更新
+
 ## 2026-07-12
 
 - CHANGE-20260712-003: PR #74 综合修复 — 快照归属/发布原子性/stock_context/前端修复

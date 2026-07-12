@@ -164,14 +164,6 @@ export default function AdminStockDebugPage() {
                               <td>{data.state.structure.price.timeframe}</td>
                             </tr>
                             <tr>
-                              <td>structure.consensusRelation</td>
-                              <td>{data.state.structure.consensusRelation.code ?? 'null'}</td>
-                              <td>{data.state.structure.consensusRelation.label}</td>
-                              <td>{data.state.structure.consensusRelation.value ?? 'null'}</td>
-                              <td>{data.state.structure.consensusRelation.unit ?? 'null'}</td>
-                              <td>{data.state.structure.consensusRelation.timeframe}</td>
-                            </tr>
-                            <tr>
                               <td>momentum.macd</td>
                               <td>{data.state.momentum.macd.code ?? 'null'}</td>
                               <td>{data.state.momentum.macd.label}</td>

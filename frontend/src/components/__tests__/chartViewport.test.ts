@@ -159,3 +159,72 @@ test('viewport 切片对齐: 纵轴 min/max 从 display 计算而非 calc', () =
   assert.ok(minFromDisplay > minFromCalc,
     '修复后 display min(100) 应大于 calc min(10)，避免 K 线被压扁')
 })
+
+// ===== 7. P0-5: createDefaultViewport 默认取末尾，toIndex === totalBars =====
+test('P0-5: createDefaultViewport 默认取末尾，toIndex === totalBars', () => {
+  // 数据充足：toIndex 必须等于 totalBars（定位到最新 K 线）
+  const vp1 = createDefaultViewport(250)
+  assert.equal(vp1.toIndex, 250, 'toIndex 必须等于 totalBars（最新 K 线）')
+  assert.ok(vp1.fromIndex < vp1.toIndex, 'fromIndex < toIndex')
+  assert.ok(vp1.toIndex - vp1.fromIndex <= MAX_VISIBLE_BARS, '可见数不超过 MAX')
+
+  // 数据不足 MAX：toIndex 仍等于 totalBars
+  const vp2 = createDefaultViewport(100)
+  assert.equal(vp2.toIndex, 100, '数据不足时 toIndex 仍等于 totalBars')
+  assert.equal(vp2.fromIndex, 0)
+
+  // 空数据：{0, 0}
+  const vp3 = createDefaultViewport(0)
+  assert.deepEqual(vp3, { fromIndex: 0, toIndex: 0 })
+
+  // 大量数据：toIndex === totalBars
+  const vp4 = createDefaultViewport(1000)
+  assert.equal(vp4.toIndex, 1000)
+  assert.equal(vp4.toIndex - vp4.fromIndex, MAX_VISIBLE_BARS)
+})
+
+// ===== 8. P0-5: clampViewport 不改变 toIndex=totalBars 的末尾视区 =====
+test('P0-5: clampViewport 保持末尾视区不向左漂移', () => {
+  // 末尾视区 [220, 250]，totalBars=250 → clamp 后仍为 [220, 250]
+  const vp = clampViewport({ fromIndex: 220, toIndex: 250 }, 250)
+  assert.equal(vp.toIndex, 250, '末尾视区 toIndex 不变')
+  assert.equal(vp.fromIndex, 220, '末尾视区 fromIndex 不变')
+})
+
+// ===== 9. P0-5: 新行情追加自动跟随逻辑（纯函数验证） =====
+// 模拟 StrategyChart 的 auto-follow effect 逻辑：
+//   - calc.length 增长 + viewportProp.toIndex >= prevLen → 自动跟随，保持可见根数
+//   - calc.length 增长 + viewportProp.toIndex < prevLen → 不跟随（用户在历史区域）
+test('P0-5: 新行情追加自动跟随逻辑', () => {
+  // 场景 1：用户位于最右端，追加 1 根 bar → 自动跟随
+  const prevLen = 250
+  const newLen = 251
+  const vpAtRightEdge = { fromIndex: 220, toIndex: 250 }  // toIndex === prevLen
+  const delta = newLen - prevLen
+  const visibleCount = vpAtRightEdge.toIndex - vpAtRightEdge.fromIndex
+  const followedVp = {
+    fromIndex: vpAtRightEdge.fromIndex + delta,
+    toIndex: newLen,
+  }
+  assert.equal(followedVp.toIndex, 251, '自动跟随后 toIndex === newLen')
+  assert.equal(followedVp.toIndex - followedVp.fromIndex, visibleCount, '保持原可见根数')
+
+  // 场景 2：用户已平移到历史区域，追加 1 根 bar → 不跟随
+  const vpInHistory = { fromIndex: 100, toIndex: 130 }  // toIndex < prevLen
+  // auto-follow 条件：viewportProp.toIndex >= prevLen → false → 不跟随
+  assert.ok(vpInHistory.toIndex < prevLen, '用户在历史区域，toIndex < prevLen')
+  // 不调用 onViewportChange，viewport 保持不变
+
+  // 场景 3：追加多根 bar，用户在最右端 → 自动跟随多根
+  const prevLen3 = 250
+  const newLen3 = 253  // 追加 3 根
+  const delta3 = newLen3 - prevLen3
+  const vp3 = { fromIndex: 220, toIndex: 250 }
+  const followedVp3 = {
+    fromIndex: vp3.fromIndex + delta3,
+    toIndex: newLen3,
+  }
+  assert.equal(followedVp3.toIndex, 253)
+  assert.equal(followedVp3.fromIndex, 223)
+  assert.equal(followedVp3.toIndex - followedVp3.fromIndex, 30, '保持原可见根数')
+})

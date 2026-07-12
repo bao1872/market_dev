@@ -43,50 +43,58 @@ export function normalizeResearchSource(raw: string | null): ResearchSource {
   return raw === 'selection' ? 'selection' : 'watchlist'
 }
 
-// ===== 指标图层 Manifest（PRD §6.2）=====
-// 描述 5 个用户可显隐的指标图层：id、名称、主/副图、默认值、依赖数据和渲染顺序。
-// 用户只能显隐，不得修改窗口、阈值等算法参数。
-// 与 StrategyChart 内部 LayerVisibility 的映射关系：
-//   consensus_zone → profile + node + poc（筹码共识区 / Volume Profile）
-//   price_structure → dsa + selection（价格结构 / 趋势参考价）
-//   boll → bb（布林带）
-//   volume → volume（成交量）
-//   macd → macd（MACD 副图）
+// ===== 图表图层 Manifest（PRD §6.2 — 单一真源 v2）=====
+// 用户可显隐的 7 个图表图层开关。StockResearchWorkspace 持有唯一 ChartLayerVisibility state，
+// StrategyChart 作为受控组件接收 layerVisibility prop，不再内部管理 layers state。
+// 与 StrategyChart 内部 LayerVisibility（12 键）的映射在 StrategyChart.chartLayerVisibilityToInternal 完成：
+//   trend    → dsa + selection（趋势参考价 / 选股命中标记）
+//   node     → profile + node + poc（成交量分布 / 节点区间 / POC）
+//   boll     → bb（布林带）
+//   volume   → volume（成交量副图）
+//   macd     → macd（MACD 副图）
+//   sqzmom   → sqzmom（SQZMOM 副图）
+//   breakout → breakout（突破标记，仅 selection 来源可用）
 
-export type IndicatorLayerKind = 'main' | 'sub'
+export type ChartLayerKey = 'trend' | 'node' | 'boll' | 'volume' | 'macd' | 'sqzmom' | 'breakout'
 
-export interface IndicatorLayerManifestEntry {
-  id: string
+export type ChartLayerVisibility = Record<ChartLayerKey, boolean>
+
+export type ChartLayerKind = 'main' | 'sub'
+
+export interface ChartLayerManifestEntry {
+  id: ChartLayerKey
   name: string
-  kind: IndicatorLayerKind
-  defaultVisible: boolean
-  // enabled=false 时图层开关禁用（灰显不可点击），用于尚未实现的图层
-  // Phase 5 实现真实 ConsensusZone 后将 enabled 改回 true
+  kind: ChartLayerKind
   enabled: boolean
-  dependencies: string[]
-  renderOrder: number
+  // selectionOnly=true 时仅 selection 来源显示该开关（breakout）
+  selectionOnly?: boolean
+  description: string
 }
 
-// [consensus_zone-enabled] - Phase 5 落地：真实 ConsensusZone 算法已实现（PRD V1.1 §7.4）。
-// 后端 indicator_service 注入 consensus_zone 图层（renderer=consensus_zone），
-// StrategyChart 绘制 P10-P90 半透明水平区带。
-// 完成后默认开启；无数据/错误时只关闭该图层，不影响 K线。
-// 旧 VolumeProfile（profile/node/poc）渲染代码保留但不再由 consensus_zone 控制。
-export const INDICATOR_LAYER_MANIFEST: IndicatorLayerManifestEntry[] = [
-  { id: 'consensus_zone', name: '筹码共识区', kind: 'main', defaultVisible: true, enabled: true, dependencies: ['consensus_zone'], renderOrder: 10 },
-  { id: 'price_structure', name: '价格结构', kind: 'main', defaultVisible: true, enabled: true, dependencies: ['structural_factors'], renderOrder: 20 },
-  { id: 'boll', name: '布林带', kind: 'main', defaultVisible: false, enabled: true, dependencies: ['boll_bands'], renderOrder: 30 },
-  { id: 'volume', name: '成交量', kind: 'sub', defaultVisible: true, enabled: true, dependencies: ['bars.volume'], renderOrder: 10 },
-  { id: 'macd', name: 'MACD', kind: 'sub', defaultVisible: false, enabled: true, dependencies: ['macd'], renderOrder: 20 },
+export const CHART_LAYER_MANIFEST: ChartLayerManifestEntry[] = [
+  { id: 'trend', name: '趋势', kind: 'main', enabled: true, description: '趋势参考价 · 选股命中标记' },
+  { id: 'node', name: '成交量节点', kind: 'main', enabled: true, description: '成交量分布 · 节点区间 · POC' },
+  { id: 'boll', name: '布林带', kind: 'main', enabled: true, description: '布林带 · SMA(20) ± 2σ' },
+  { id: 'breakout', name: '突破', kind: 'main', enabled: true, selectionOnly: true, description: '压力区 · 突破确认' },
+  { id: 'volume', name: '成交量', kind: 'sub', enabled: true, description: '成交量副图' },
+  { id: 'macd', name: 'MACD', kind: 'sub', enabled: true, description: 'MACD 副图 · DIF/DEA/Histogram' },
+  { id: 'sqzmom', name: 'SQZMOM', kind: 'sub', enabled: true, description: 'Squeeze Momentum · LazyBear Pine 复刻' },
 ]
 
-export type IndicatorVisibility = Record<string, boolean>
-
-// 从 manifest 默认值生成 IndicatorVisibility
-export function defaultIndicatorVisibility(): IndicatorVisibility {
-  const result: IndicatorVisibility = {}
-  for (const entry of INDICATOR_LAYER_MANIFEST) {
-    result[entry.id] = entry.defaultVisible
+// 按 source 生成默认 ChartLayerVisibility
+// watchlist（watchlist_monitor 策略）：volume/node/boll/macd 默认开
+// selection（dsa_selector 策略）：volume/trend/macd 默认开
+export function defaultChartLayerVisibility(source: ResearchSource): ChartLayerVisibility {
+  if (source === 'selection') {
+    return { trend: true, node: false, boll: false, volume: true, macd: true, sqzmom: false, breakout: false }
   }
-  return result
+  return { trend: false, node: true, boll: true, volume: true, macd: true, sqzmom: false, breakout: false }
+}
+
+// 返回 source 适用的 manifest 条目（过滤 selectionOnly）
+export function chartLayersForSource(
+  manifest: ChartLayerManifestEntry[],
+  source: ResearchSource,
+): ChartLayerManifestEntry[] {
+  return manifest.filter((e) => !e.selectionOnly || source === 'selection')
 }

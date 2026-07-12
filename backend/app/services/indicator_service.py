@@ -41,7 +41,7 @@ import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants.indicator_contract import INDICATOR_BARS, NODE_CLUSTER_LOW_BARS
+from app.constants.indicator_contract import INDICATOR_BARS
 from app.constants.strategy_keys import DSA_SELECTOR
 from app.models.instrument import Instrument
 from app.repositories.bar_repository import (
@@ -639,73 +639,6 @@ async def compute_all_indicators(
                           "sqzmom_sqz_on", "sqzmom_sqz_off", "sqzmom_no_sqz"],
     })
     data["sqzmom_lb"] = _to_json_safe(_truncate_lists(sqzmom_renamed, bars))
-
-    # [ConsensusZone 主图] - 将筹码共识区作为全局图层注入 layers/data
-    # PRD V1.1 §7.4 V2: 日线主结构（峰簇识别）+ 15m 细化（簇内重算 P10/P50/P90）
-    # 数据源独立性（PRD 纠偏）：日线固定 250 根，15m 固定窗口，不使用 macd_bars。
-    # 服务入口内部执行 filter_bars_by_as_of（因果性），显示周期不改变输入窗口。
-    # 缓存键含 symbol/as_of/"1d"/algo_version/data_version（动态 hash）。
-    # 无数据/错误时只记录错误，不影响其他图层和 K线
-    try:
-        from app.services.consensus_zone_service import (
-            compute_and_cache_consensus_zone,
-        )
-
-        # as_of 取最后一根日线时间（因果性锚点，不随显示周期变化）
-        if not daily_bars.empty:
-            last_daily_idx = daily_bars.index[-1]
-            as_of_str = (
-                last_daily_idx.isoformat()
-                if hasattr(last_daily_idx, "isoformat")
-                else str(last_daily_idx)
-            )
-        else:
-            as_of_str = today.isoformat()
-
-        # C1: 数据库直接查询 4000 根 15m（DESC + LIMIT），
-        # 禁止先加载约 12000 根再截取。
-        # compute_and_cache_consensus_zone 内部仍会 filter + tail 作为安全保证。
-        consensus_15m: pd.DataFrame | None = None
-        try:
-            consensus_15m = await _query_15min_bars(
-                session, instrument_id,
-                start_time=intraday_start_dt,
-                end_time=intraday_end_dt,
-                limit=NODE_CLUSTER_LOW_BARS,
-            )
-            if adj == "qfq" and not consensus_15m.empty:
-                consensus_15m = apply_adj_factor_to_bars(
-                    consensus_15m, adj_factor_df, intraday=True
-                )
-        except Exception as cz_exc:
-            logger.warning(
-                "ConsensusZone 15m 查询失败，降级为空: %s", cz_exc,
-            )
-            consensus_15m = None
-
-        consensus_result = await compute_and_cache_consensus_zone(
-            daily_bars, symbol, as_of_str,
-            bars_15min=consensus_15m,
-        )
-
-        layers.append({
-            "strategy_id": "consensus_zone",
-            "strategy_name": "筹码共识区",
-            "layer_id": "consensus_zone",
-            "layer_name": "筹码共识区",
-            "renderer": "consensus_zone",
-            "pane": "price",
-            "color": "#9c27b0",
-            "direction_colored": False,
-            "fields": ["clusters"],
-            "hover_fields": ["lower", "upper", "center", "peakPrice", "volumeRatio", "strength"],
-        })
-        data["consensus_zone"] = _to_json_safe(consensus_result.model_dump())
-    except Exception as exc:
-        errors["consensus_zone"] = str(exc)
-        logger.warning(
-            "ConsensusZone 计算失败 instrument_id=%s: %s", instrument_id, exc,
-        )
 
     # [指标服务] - 返回计算窗口元信息，前端据此决定显示范围，不硬编码
     calculation_window = INDICATOR_BARS.get(timeframe, 800)

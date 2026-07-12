@@ -54,7 +54,6 @@ _STATE_ALGORITHM_VERSION = "state_v1"
 # 状态字段路径（用于比较 code）
 _STATE_FIELD_PATHS = [
     "structure.price",
-    "structure.consensusRelation",
     "momentum.macd",
     "momentum.sqzmom",
     "momentum.temporal.daily_dsa_dir",
@@ -65,7 +64,6 @@ _STATE_FIELD_PATHS = [
 # P1-1: 字段路径 → 用户可读文案白名单（API 层映射，DB 只存稳定 code）
 _FIELD_LABELS: dict[str, str] = {
     "structure.price": "价格位置",
-    "structure.consensusRelation": "成交密集区关系",
     "momentum.macd": "MACD 动量",
     "momentum.sqzmom": "SQZMOM 动量",
     "momentum.temporal.daily_dsa_dir": "日线 DSA 方向",
@@ -86,7 +84,6 @@ def extract_state_codes(state: StockState) -> dict[str, str | None]:
     """
     return {
         "structure.price": state.structure.price.code,
-        "structure.consensusRelation": state.structure.consensusRelation.code,
         "momentum.macd": state.momentum.macd.code,
         "momentum.sqzmom": state.momentum.sqzmom.code,
         "momentum.temporal.daily_dsa_dir": (
@@ -108,7 +105,6 @@ def _extract_state_details(state: StockState) -> dict[str, dict[str, Any]]:
     """
     fields: dict[str, StateValue | None] = {
         "structure.price": state.structure.price,
-        "structure.consensusRelation": state.structure.consensusRelation,
         "momentum.macd": state.momentum.macd,
         "momentum.sqzmom": state.momentum.sqzmom,
         "momentum.temporal.daily_dsa_dir": (
@@ -608,7 +604,6 @@ if __name__ == "__main__":
 
     def _make_state(
         price_code: str | None = "inside",
-        consensus_code: str | None = "inside_va",
         macd_code: str | None = None,
         sqzmom_code: str | None = "positive",
         dsa_dir_code: str | None = "1",
@@ -623,7 +618,6 @@ if __name__ == "__main__":
             computedAt="2026-07-10T15:00:00+08:00",
             structure=StockStructure(
                 price=StateValue(code=price_code, label="test", value=None, unit=None, timeframe="1d", sourceField="test"),
-                consensusRelation=StateValue(code=consensus_code, label="test", value=None, unit=None, timeframe="1d", sourceField="test"),
             ),
             momentum=StockMomentum(
                 macd=StateValue(code=macd_code, label="test", value=None, unit=None, timeframe="1d", sourceField="test"),

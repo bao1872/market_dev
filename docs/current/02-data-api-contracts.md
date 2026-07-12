@@ -1038,78 +1038,31 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 - preset 不影响后端策略计算，只影响前端表格视图；
 - `is_default` 互斥更新由应用层 `_unset_default_for_scope` 实现（非数据库约束）。
 
-## 15. ConsensusZone 筹码共识区 DTO 契约
-
-ConsensusZone 是基于成交量分布的筹码共识区算法（PRD V1.1 §7.4），由 `app.services.consensus_zone_service` 提供。核心流程：因果性过滤（`timestamp <= as_of`）→ 价格分箱 + 成交量分布 → 局部峰识别 → 谷底分割为独立峰簇 → 簇内成交量加权 P10/P50/P90。算法版本 `CONSENSUS_ALGORITHM_VERSION = "v1"`，修改计算逻辑/参数/分箱方式必须 bump 版本。
-
-### 15.1 `ConsensusCluster` DTO
-
-单个成交密集区峰簇。
-
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| `lower` | float | P10 下界（成交量加权） |
-| `upper` | float | P90 上界（成交量加权） |
-| `center` | float | P50 中位（成交量加权） |
-| `peakPrice` | float | 峰值价格（最大成交量价位） |
-| `volumeRatio` | float | 该簇成交量占总成交量比例（0-1） |
-| `strength` | float | 簇强度（0-1，峰度归一化） |
-
-### 15.2 `ConsensusZoneResult` DTO
-
-ConsensusZone 计算结果。
-
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| `symbol` | str | 股票代码 |
-| `timeframe` | str | 来源周期；V1 固定 `"1d"`（日线成交分布），15m 细化为未来工作 |
-| `asOf` | str | 截止时间 ISO（因果性保证：`timestamp <= as_of`） |
-| `algorithmVersion` | str | 算法版本 |
-| `clusters` | list[ConsensusCluster] | 识别的峰簇列表（按 `volumeRatio` 降序） |
-| `totalVolume` | float | 总成交量 |
-| `binCount` | int | 价格分箱数 |
-| `isAvailable` | bool | 是否可用（数据不足/无显著峰时为 False） |
-| `unavailableReason` | str \| None | 不可用原因（`isAvailable=False` 时填写，如 `insufficient bars (need >= 10)` / `zero total volume` / `no significant peaks detected`） |
-
-### 15.3 计算约束与缓存
-
-- 因果性：`filter_bars_by_as_of` 过滤 `timestamp <= as_of`，杜绝未来数据泄漏；
-- 数据不足（<10 根 bar 或全零成交量）返回 `isAvailable=False`，不抛异常；
-- 默认参数：`num_bins=50`、`min_volume_ratio=0.05`、`peak_prominence=0.10`（不暴露给用户）；
-- Redis 缓存键包含 `symbol/as_of/timeframe/algo_version/data_version`，TTL 1 小时；缓存失败不影响主流程；
-- 纯函数 `compute_consensus_zones` 接受 pandas DataFrame，返回 `ConsensusZoneResult`，无 DB/Redis 依赖，可直接单元测试。
-
-### 15.4 限制
-
-- ConsensusZone 当前作为 DTO/服务能力存在，不直接接入选股、监控、飞书、消息中心、事件系统；
-- 不新增数据库表（纯实时计算 + Redis 缓存）；
-- V1 算法只做日线成交分布；15 分钟细化分布是未来工作，bump 算法版本后才启用。
-
-## 16. 个股上下文 API 契约（stock_context）
+## 15. 个股上下文 API 契约（stock_context）
 
 `GET /api/v1/stocks/{symbol}/context` 是用户面 `EventStatePanel` 单一数据源，返回个股最新状态与历史事件聚合。前端 `useStockContext` hook 调用此端点，禁止前端重新计算或拼接。
 
-### 16.1 Evidence DTO 映射
+### 15.1 Evidence DTO 映射
 
 - `_event_to_dto` 将 ORM `event.evidence` 映射为用户面 Evidence DTO；
 - 不再从 `event.payload` 拼装证据字段，Evidence 以 ORM `event.evidence` 为唯一来源。
 
-### 16.2 时区
+### 15.2 时区
 
 - 时间字段统一使用 `ZoneInfo("Asia/Shanghai")`（不再使用 UTC）；
 - 事件时间、发布时间、完成时间均以 CST 返回。
 
-### 16.3 历史事件截止
+### 15.3 历史事件截止
 
 - 历史事件 cutoff 使用 **次日 00:00 exclusive**（`trade_date + 1 day, 00:00:00`，不包含该时刻）；
 - 不再使用 `max.time + 1 day - 1 second` 口径。
 
-### 16.4 Run 查询排序
+### 15.4 Run 查询排序
 
 - Run 查询使用确定性 DESC 排序：`ORDER BY trade_date DESC, published_at DESC, finished_at DESC`；
 - 保证相同 trade_date 下多 run 的顺序确定，避免分页/缓存抖动。
 
-### 16.5 strategy_events 幂等键
+### 15.5 strategy_events 幂等键
 
 - `idempotency_key` 格式：`symbol:source_run_id:algorithm_version`；
 - 旧格式 `symbol:trade_date:algorithm_version:hash(evidence)` 已废弃；

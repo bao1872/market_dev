@@ -1,17 +1,20 @@
 // [StockResearchWorkspace] - 描述: K 线研究区组件（/market 和 /stock/:symbol 共用）
 // 接收 useStockResearchData 返回的已组装数据，渲染 StrategyChart + 行情状态条。
 // timeframe 为受控状态：由父组件从 URL 解析并传入，工具栏切换通过 onTimeframeChange 回调写回 URL。
-// viewport 按 timeframe 本地保存（不进 URL 避免噪音），切换周期时各周期 viewport 独立不串台。
+// viewport 按 `${symbol}:${timeframe}` 本地保存（不进 URL 避免噪音）：
+//   - 切换股票时清空所有 viewport，新股票从最新 K 线开始（不继承旧股票横向位置）
+//   - 切换周期时各周期 viewport 独立不串台
+//   - 无保存 viewport 时传 undefined 给 StrategyChart，由其基于真实 calc.length 初始化末尾视区
 // 可选 toolbar/rightPanel/chartColumnProps 支持 StockDetailPage 的结构面板开关和截图模式属性。
 import { useState, useCallback, useEffect, type ReactNode } from 'react'
 import StrategyChart from '@/components/StrategyChart'
-import { createDefaultViewport, type ChartViewport } from '@/components/chartViewport'
+import { type ChartViewport } from '@/components/chartViewport'
 import { formatShanghaiTimeShort } from '@/utils/datetime'
 import { resolveStrategy } from '@/lib/strategy-manifest'
 import type { ResearchSource, DisplayTimeframe } from './stockResearchTypes'
-import { ALLOWED_TIMEFRAMES, type IndicatorVisibility } from './stockResearchTypes'
+import { ALLOWED_TIMEFRAMES, type ChartLayerKey, type ChartLayerVisibility } from './stockResearchTypes'
 import { IndicatorToolbar } from './IndicatorToolbar'
-import { loadIndicatorVisibility, saveIndicatorVisibility } from './indicatorPreferences'
+import { loadChartLayerVisibility, saveChartLayerVisibility } from './indicatorPreferences'
 import clsx from 'clsx'
 import type { StockResearchData } from './useStockResearchData'
 
@@ -41,11 +44,6 @@ export interface StockResearchWorkspaceProps {
   chartColumnProps?: Record<string, string>
 }
 
-// 默认视口状态（按 timeframe 存储，本地 state，不进 URL）
-function makeDefaultViewport(): ChartViewport {
-  return createDefaultViewport(0)
-}
-
 export function StockResearchWorkspace({
   data,
   timeframe,
@@ -60,20 +58,32 @@ export function StockResearchWorkspace({
   showRightPanel = false,
   chartColumnProps,
 }: StockResearchWorkspaceProps) {
-  // viewport 按 timeframe 存储（本地 state，不进 URL 避免噪音）
-  const [viewportByTimeframe, setViewportByTimeframe] = useState<Record<string, ChartViewport>>({})
+  // viewport 按 `${symbol}:${timeframe}` 存储（本地 state，不进 URL 避免噪音）
+  // 切换股票时清空，确保新股票从最新 K 线开始；切换周期时各周期独立不串台
+  const [viewportByKey, setViewportByKey] = useState<Record<string, ChartViewport>>({})
 
-  // [indicatorLayerManifest] - 指标图层显隐偏好（PRD §6.2），从 localStorage 加载
-  const [indicatorVisibility, setIndicatorVisibility] = useState<IndicatorVisibility>(() =>
-    loadIndicatorVisibility(),
+  // [chartLayerVisibility] - 图表图层显隐偏好（PRD §6.2 单一真源 v2）
+  // per-source+strategyKey 持久化到 localStorage；StockResearchWorkspace 持有唯一 state，
+  // StrategyChart 作为受控组件接收 layerVisibility prop，不再内部管理 layers。
+  const [layerVisibility, setLayerVisibility] = useState<ChartLayerVisibility>(() =>
+    loadChartLayerVisibility(source, strategyKey),
   )
-  const handleIndicatorToggle = useCallback((id: string, visible: boolean) => {
-    setIndicatorVisibility((prev) => {
-      const next = { ...prev, [id]: visible }
-      saveIndicatorVisibility(next)
-      return next
-    })
-  }, [])
+
+  // source/strategyKey 变化时重新加载偏好（切换研究来源）
+  useEffect(() => {
+    setLayerVisibility(loadChartLayerVisibility(source, strategyKey))
+  }, [source, strategyKey])
+
+  const handleLayerToggle = useCallback(
+    (id: ChartLayerKey, visible: boolean) => {
+      setLayerVisibility((prev) => {
+        const next = { ...prev, [id]: visible }
+        saveChartLayerVisibility(source, strategyKey, next)
+        return next
+      })
+    },
+    [source, strategyKey],
+  )
 
   // 右栏收起/展开时图表 resize：CSS grid 布局变化触发 ResizeObserver 重绘，
   // 此处额外在下一帧触发一次 window resize 以确保极端情况下布局已稳定
@@ -83,9 +93,20 @@ export function StockResearchWorkspace({
     return () => cancelAnimationFrame(raf)
   }, [rightPanelCollapsed, showRightPanel, isCaptureMode])
 
+  // 当前股票 symbol（用于 viewport 复合 key，确保切换股票时重置到最新 K 线）
+  const symbol = data.instrumentQuery.data?.symbol
+  // viewport 复合 key：`${symbol}:${timeframe}`，切换股票或周期时 key 变化 → 无保存 viewport
+  // → StrategyChart 收到 undefined → 基于 calc.length 初始化末尾视区
+  const viewportKey = symbol ? `${symbol}:${timeframe}` : timeframe
+
+  // symbol 变化时清空所有保存的 viewport，确保新股票从最新 K 线开始（不继承旧股票横向位置）
+  useEffect(() => {
+    setViewportByKey({})
+  }, [symbol])
+
   const handleViewportChange = useCallback((vp: ChartViewport) => {
-    setViewportByTimeframe((prev) => ({ ...prev, [timeframe]: vp }))
-  }, [timeframe])
+    setViewportByKey((prev) => ({ ...prev, [viewportKey]: vp }))
+  }, [viewportKey])
 
   // StrategyChart 工具栏按钮 id 限定为 DisplayTimeframe 允许值；非法值忽略
   const handleChartTimeframeChange = useCallback((tf: string) => {
@@ -179,7 +200,7 @@ export function StockResearchWorkspace({
         data-render-ready={isCaptureMode ? (captureRenderReady ? 'true' : 'false') : undefined}
       >
         {!isCaptureMode && (
-          <IndicatorToolbar visibility={indicatorVisibility} onToggle={handleIndicatorToggle} />
+          <IndicatorToolbar visibility={layerVisibility} onToggle={handleLayerToggle} source={source} />
         )}
         {toolbar}
         {isBarsLoading ? (
@@ -197,10 +218,10 @@ export function StockResearchWorkspace({
               height={height}
               timeframe={timeframe}
               onTimeframeChange={handleChartTimeframeChange}
-              viewport={viewportByTimeframe[timeframe] ?? makeDefaultViewport()}
+              viewport={viewportByKey[viewportKey]}
               onViewportChange={handleViewportChange}
               isCaptureMode={isCaptureMode}
-              indicatorVisibility={isCaptureMode ? undefined : indicatorVisibility}
+              layerVisibility={isCaptureMode ? undefined : layerVisibility}
             />
             <div className="tv-chart-status">
               <span className={quoteStatus.badgeClass}>{quoteStatus.label}</span>

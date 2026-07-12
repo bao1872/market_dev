@@ -93,11 +93,13 @@
 | `source_primary_bar_time` 与 `source_secondary_bar_time` 必须为 `Asia/Shanghai` aware datetime；1d 规范化为 `trade_date 15:00+08:00` | `test_feature_snapshot_service.py::test_compute_snapshot_source_bar_time_timezone_aware` |
 | `upsert_snapshot` 幂等：同唯一键重复 upsert 只生成一行，第二次覆盖第一次 | `test_feature_snapshot_service.py::test_upsert_snapshot_idempotent` |
 | **[PR #74 snapshot ownership]** `upsert_snapshot` ON CONFLICT DO UPDATE 更新 `source_run_id`；`GET /stocks/{symbol}/context` 按 `source_run_id == run.id` 精确查询返回正确 snapshot；`source_run_id` 缺失时不返回半成品 | `test_feature_snapshot_ownership.py`（集成测试） |
+| **[P0-4 published snapshot 保护]** `create_snapshot_run(scope='full', allow_republish=False)` 在已存在 published full run 时抛 `PublishedSnapshotRunExistsError`；`allow_republish=True` 绕过检查；`scope='sample'` 不受限 | `test_feature_snapshot_service.py::test_p0_4_create_snapshot_run_blocks_when_published_full_exists` + `test_p0_4_create_snapshot_run_allow_republish_bypasses_check` + `test_p0_4_create_snapshot_run_sample_scope_not_blocked` |
+| **[P0-4 upsert WHERE 保护]** `upsert_snapshot(allow_republish=False)` ON CONFLICT DO UPDATE 时 WHERE 子句保护已归属 published run 的 snapshot 不被覆盖；`allow_republish=True` 覆盖 | `test_feature_snapshot_service.py::test_p0_4_upsert_snapshot_protects_published_run_ownership` + `test_p0_4_upsert_snapshot_allow_republish_overwrites` |
 | **[PR #74 idempotency key]** `strategy_events.idempotency_key` 格式 `symbol:source_run_id:algorithm_version`；每只股票每个 run 至多一个事件；旧格式 `symbol:trade_date:algorithm_version:hash(evidence)` 不再生成 | `test_strategy_events_idempotency.py` |
 | `compute_for_trade_date` 单股失败不阻断其他股票；失败比例超 30% 抛 `RuntimeError` | `test_feature_snapshot_service.py::test_compute_for_trade_date_single_failure_does_not_block` |
 | [half-baked rollback] `compute_for_trade_date` 不内部 commit；超阈值抛 `RuntimeError` 后 caller rollback，DB 无半成品残留 | `test_feature_snapshot_service.py::test_compute_for_trade_date_over_threshold_no_partial_after_rollback` |
 | `structural_payload` 必须包含 `primary`/`secondary`/`relation`/`meta` 4 key；`relation` 来自 `_compute_relation` | `test_feature_snapshot_service.py::test_compute_snapshot_structural_payload_contains_relation` |
-| `parse_args` 默认值（end=latest/batch_size=20/failure_threshold=0.3）+ 自定义值 + 缺失 `--start` 报 `SystemExit`；**`commit_every` 已移除** | `test_feature_snapshot_backfill.py::test_parse_args_*` |
+| `parse_args` 默认值（end=latest/batch_size=20/failure_threshold=0.3）+ 自定义值 + 缺失 `--start` 报 `SystemExit`；**`commit_every` 已移除**；**`--allow-republish` 默认 False** | `test_feature_snapshot_backfill.py::test_parse_args_*` |
 | `get_trade_dates_from_bars` 升序 trade_dates + 空表返回空列表 | `test_feature_snapshot_backfill.py::test_get_trade_dates_from_bars*` |
 | `get_latest_bar_date` 返回 `bars_daily.trade_date` 最大值；空表返回 `None` | `test_feature_snapshot_backfill.py::test_get_latest_bar_date*` |
 | `get_existing_instrument_ids` 返回某日已存在 snapshot 的 instrument_id 集合；按完整唯一键过滤；按 schema_version 严格过滤 | `test_feature_snapshot_backfill.py::test_get_existing_instrument_ids_*` |
@@ -146,22 +148,7 @@
 | `ResearchFeatureMatrixRun` 16 列结构 + `run_key` 唯一约束 + month/status 索引；`ResearchFeatureMatrixRow` 39 列（5 metadata + 33 feature + 1 created_at）+ `(instrument_id, trade_date)` 唯一约束 + 3 btree 索引 | `test_research_feature_matrix_model.py`（model 自测入口，无 DB） |
 | `compute_all_features(bars)` 返回 DataFrame 含 33 个 feature 列；per-bar 计算 vs single-snapshot 区分；causal rolling/DSA 双轨/confirmed_delay swing/label 字段；空输入不抛异常 | `test_feature_computer.py`（~23 个用例） |
 
-## 3.9 筹码共识区（ConsensusZone）
-
-| 规则 | 测试 |
-|---|---|
-| **因果性**：`filter_bars_by_as_of` 过滤 `timestamp <= as_of`；`as_of=None` 返回全部；未来数据不影响历史结果（添加未来 bar 后历史 as_of 结果不变） | `test_consensus_zone.py::TestCausality`（3 个用例） |
-| **单峰识别**：单峰分布产生一个簇；`peakPrice` 接近成交量最集中价位；`lower <= center <= upper` | `test_consensus_zone.py::TestSinglePeak`（2 个用例） |
-| **多峰识别 + 谷底分割**：双峰分布产生 ≥2 个簇；簇按 `volumeRatio` 降序排列 | `test_consensus_zone.py::TestMultiPeak`（2 个用例） |
-| **空分布处理**：空 bars 返回 `isAvailable=False`；<10 根 bar 返回不可用；全零成交量返回不可用 | `test_consensus_zone.py::TestEmptyDistribution`（3 个用例） |
-| **重叠簇处理**：重叠簇 `lower <= center <= upper` 边界有效 | `test_consensus_zone.py::TestOverlapClusters`（1 个用例） |
-| **成交量加权百分位**：`P10 <= P50 <= P90`；高成交量价位使 P50 更接近该价位；空价格返回 0 | `test_consensus_zone.py::TestWeightedPercentiles`（3 个用例） |
-| **缓存键版本化**：缓存键含 `symbol/as_of/timeframe/algo_version/data_version`；不同 `as_of`/`timeframe` 产生不同 key | `test_consensus_zone.py::TestCacheKey`（3 个用例） |
-| **纯函数单元测试**：`identify_peaks` 识别局部最大值 + 空数组；`segment_clusters_by_valleys` 单峰/双峰边界；`compute_volume_distribution` 基本计算 + 总量守恒 | `test_consensus_zone.py::TestPureFunctions`（5 个用例） |
-| **数据源独立性**：ConsensusZone 使用 `daily_bars`（固定 250 根日线），不随显示 `count` 变化；不同 bars count 产出相同共识区 | `test_indicator_service.py::test_consensus_zone_independent_of_display_count` |
-| **显示周期独立性**：ConsensusZone `timeframe` 固定 `"1d"`，切换显示周期（1d/15m/1h/1w/1mo）不改变共识区定义；缓存键稳定 | `test_indicator_service.py::test_consensus_zone_independent_of_display_timeframe` |
-
-## 3.10 qstock 板块同步（board sync）
+## 3.9 qstock 板块同步（board sync）
 
 | 规则 | 测试 |
 |---|---|
@@ -257,7 +244,6 @@
 | `test_bar_repository_get_recent_bars.py` | 8 tests | BarRepository.get_recent_bars 边界/隔离/排序 |
 | `test_board_sync.py` | 现有用例 | 完整性校验 + 原子切换 + Migration 循环 |
 | `test_market_stocks.py` | 现有用例 | /market/stocks + /market/boards available/reason_code |
-| `test_consensus_zone.py` | 现有用例 | 筹码共识区因果性/单峰/多峰/缓存键 |
 | `test_stock_state_and_events.py` | 现有用例 | 个股状态与事件 |
 | `test_after_close_orchestrator.py` | 现有用例 | 盘后编排状态机 + feature_snapshot 步骤 |
 | 前端 node 测试 | 108 tests | 64 route/url/types + 44 contract |

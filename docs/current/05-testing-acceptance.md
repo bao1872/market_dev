@@ -362,7 +362,7 @@ node --experimental-strip-types --test src/components/__tests__/dsaSourceAlignme
 
 任何修改 `backend/app/services/feature_snapshot_service.py`、`backend/app/api/watchlist.py::get_watchlist_monitor_status`、`backend/app/services/after_close_orchestrator.py`（状态机或 `feature_snapshot` 步骤）、`backend/scripts/feature_snapshot_backfill.py`、`backend/app/models/stock_feature_snapshot.py` 必须跑 Feature Snapshot 持久化回归测试。
 
-后端 service 回归（`tests/test_feature_snapshot_service.py`，13 个用例）：
+后端 service 回归（`tests/test_feature_snapshot_service.py`，18 个用例）：
 - `build_summary_payload` 必须返回所有前端列表必需字段（`poc_price` / `nearest_node_above` / `nearest_node_below` / `distance_to_node_*_atr` / `node_interval_position_0_1` / `cost_position_zone` / `value_area_zone` / `daily/m15_developing_swing_*` / `m15_position_relative_to_daily` / `_source='feature_snapshot'` / `as_of` / `source_bar_time`）；
 - `build_summary_payload` 缺字段时填 `None`，不抛异常；
 - `_truncate_bars_to_trade_date` 必须按 `index.date <= trade_date` 截断，禁止未来数据；`None` 输入返回 `None`；15m bars 截断到当日；
@@ -371,9 +371,10 @@ node --experimental-strip-types --test src/components/__tests__/dsaSourceAlignme
 - `upsert_snapshot` 必须幂等：同 `(instrument_id, trade_date, primary_timeframe, secondary_timeframe, adj, schema_version)` 重复 upsert 只生成一行，`structural_payload`/`temporal_payload`/`summary_payload` 被第二次覆盖；
 - `compute_for_trade_date` 单股失败不阻断其他股票，失败比例超过 `failure_threshold`（默认 0.3）抛 `RuntimeError`；
 - **[half-baked rollback] `compute_for_trade_date` 不内部 commit**：超阈值抛 `RuntimeError` 后 caller rollback，DB 中不应残留该 trade_date 的部分 snapshot 行。
+- **[P0-4 published snapshot 保护]** `create_snapshot_run(scope='full', allow_republish=False)` 在已存在 canonical succeeded+published+full run 时抛 `PublishedSnapshotRunExistsError`；`allow_republish=True` 绕过检查；`scope='sample'` 不受限；`upsert_snapshot(allow_republish=False)` WHERE 子句保护已归属 published run 的 snapshot 不被覆盖；`allow_republish=True` 可覆盖；`after_close_orchestrator` 捕获 `PublishedSnapshotRunExistsError` 后跳过计算复用已有 run。
 
 后端 backfill 脚本回归（`tests/test_feature_snapshot_backfill.py`，42 个用例，含 multiprocessing + [Blocker Fix] 事务/统计修正）：
-- `parse_args` 默认值：`end='latest'`、`batch_size=20`、`failure_threshold=0.3`、`resume=False`、`dry_run=False`、`symbols=None`、`limit_instruments=None`、`workers=1`；自定义值正确解析；缺失 `--start` 报 `SystemExit`；
+- `parse_args` 默认值：`end='latest'`、`batch_size=20`、`failure_threshold=0.3`、`resume=False`、`dry_run=False`、`symbols=None`、`limit_instruments=None`、`workers=1`、`allow_republish=False`；自定义值正确解析；缺失 `--start` 报 `SystemExit`；
 - `get_trade_dates_from_bars` 返回升序 trade_dates；空表返回空列表；
 - `get_latest_bar_date` 返回 `bars_daily.trade_date` 最大值；空表返回 `None`；
 - **`get_existing_instrument_ids`** 返回某日已存在 snapshot 的 instrument_id 集合，按完整唯一键 `(instrument_id, trade_date, primary_timeframe, secondary_timeframe, adj, schema_version)` 过滤；按 `schema_version` 严格过滤；

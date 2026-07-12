@@ -2799,7 +2799,6 @@ export interface StateEvidence {
 /** StockStructure - 结构状态 */
 export interface StockStructure {
   price: StateValue
-  consensusRelation: StateValue
 }
 
 /** StockMomentum - 动量状态 */
@@ -2844,18 +2843,22 @@ export interface StateEventDTO {
   idempotencyKey: string | null
 }
 
+/** StockContext 数据质量 - 含 reasonCode 解释空态原因 */
+export interface StockContextDataQuality {
+  hasSucceededRun: boolean
+  hasSnapshot: boolean
+  reasonCode: string | null
+  degradedReasons: string[]
+  runTradeDate: string | null
+  runPublishedAt: string | null
+  instrumentStatus: string
+}
+
 /** StockContext 响应 - 用户侧只读 */
 export interface StockContextResponse {
   state: StockState | null
   events: StateEventDTO[]
-  dataQuality: {
-    hasSucceededRun: boolean
-    hasSnapshot: boolean
-    degradedReasons: string[]
-    runTradeDate: string | null
-    runPublishedAt: string | null
-    instrumentStatus: string
-  }
+  dataQuality: StockContextDataQuality
 }
 
 /** Admin StockDebug 响应 - 含原始 payload */

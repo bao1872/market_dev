@@ -34,6 +34,7 @@ from app.models.stock_feature_snapshot_run import (
 from app.schemas.stock_state import (
     Evidence,
     StateEventDTO,
+    StockContextDataQuality,
     StockContextResponse,
     build_stock_state,
     strip_internal_fields_for_user,
@@ -60,7 +61,6 @@ _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 # 事件证据 field → 用户可读文案白名单（与 state_event_service._FIELD_LABELS 对齐）
 _EVIDENCE_FIELD_LABELS: dict[str, str] = {
     "structure.price": "价格位置",
-    "structure.consensusRelation": "成交密集区关系",
     "momentum.macd": "MACD 动量",
     "momentum.sqzmom": "SQZMOM 动量",
     "momentum.temporal.daily_dsa_dir": "日线 DSA 方向",
@@ -148,8 +148,17 @@ async def _get_snapshot_for_instrument(
     session: AsyncSession,
     instrument_id: UUID,
     run: StockFeatureSnapshotRun,
-) -> StockFeatureSnapshot | None:
-    """获取指定 instrument + run 对应的快照（按 source_run_id 精确查询）。"""
+) -> tuple[StockFeatureSnapshot | None, str | None]:
+    """获取指定 instrument + run 对应的快照。
+
+    P0-1: 先按 source_run_id 精确查询；失败后按唯一约束字段 legacy 回退查询。
+    返回 (snapshot, reasonCode):
+    - (snapshot, None): 精确匹配成功
+    - (snapshot, "snapshot_run_not_linked"): legacy 匹配，source_run_id=NULL 需修复
+    - (snapshot, "legacy_snapshot_ambiguous"): legacy 匹配但 source_run_id 指向其他 run
+    - (None, None): 未找到任何快照
+    """
+    # 1. 精确查询：source_run_id == run.id
     stmt = (
         select(StockFeatureSnapshot)
         .where(
@@ -161,23 +170,55 @@ async def _get_snapshot_for_instrument(
         .limit(1)
     )
     result = await session.execute(stmt)
-    return result.scalar_one_or_none()
+    snapshot = result.scalar_one_or_none()
+    if snapshot is not None:
+        return snapshot, None
+
+    # 2. Legacy 回退：按唯一约束字段查询（不含 source_run_id）
+    legacy_stmt = (
+        select(StockFeatureSnapshot)
+        .where(
+            and_(
+                StockFeatureSnapshot.instrument_id == instrument_id,
+                StockFeatureSnapshot.trade_date == run.trade_date,
+                StockFeatureSnapshot.schema_version == run.schema_version,
+                StockFeatureSnapshot.primary_timeframe == run.primary_timeframe,
+                StockFeatureSnapshot.secondary_timeframe == run.secondary_timeframe,
+                StockFeatureSnapshot.adj == run.adj,
+            )
+        )
+        .limit(1)
+    )
+    legacy_result = await session.execute(legacy_stmt)
+    legacy_snapshot = legacy_result.scalar_one_or_none()
+    if legacy_snapshot is None:
+        return None, None
+
+    # 3. 判断 legacy 快照的归属状态
+    if legacy_snapshot.source_run_id is None:
+        return legacy_snapshot, "snapshot_run_not_linked"
+    # source_run_id 指向其他 run（数据不一致）
+    return legacy_snapshot, "legacy_snapshot_ambiguous"
 
 
 def _build_data_quality(
     instrument: Instrument,
     run: StockFeatureSnapshotRun | None,
     snapshot: StockFeatureSnapshot | None,
-) -> dict[str, Any]:
-    """构建数据质量信息。"""
-    return {
-        "hasSucceededRun": run is not None,
-        "hasSnapshot": snapshot is not None,
-        "degradedReasons": snapshot.degraded_reasons if snapshot else [],
-        "runTradeDate": run.trade_date.isoformat() if run else None,
-        "runPublishedAt": run.published_at.isoformat() if run and run.published_at else None,
-        "instrumentStatus": instrument.status,
-    }
+    reason_code: str | None = None,
+) -> StockContextDataQuality:
+    """构建数据质量信息（含 reasonCode）。"""
+    # state 非空时 reasonCode 为 None；state 为空时使用传入的 reason_code
+    effective_reason = None if snapshot is not None else reason_code
+    return StockContextDataQuality(
+        hasSucceededRun=run is not None,
+        hasSnapshot=snapshot is not None,
+        reasonCode=effective_reason,
+        degradedReasons=snapshot.degraded_reasons if snapshot else [],
+        runTradeDate=run.trade_date.isoformat() if run else None,
+        runPublishedAt=run.published_at.isoformat() if run and run.published_at else None,
+        instrumentStatus=instrument.status,
+    )
 
 
 def _format_evidence_value(code: Any, value: Any) -> str | None:
@@ -274,15 +315,21 @@ async def _build_stock_context(
         return {
             "state": None,
             "events": [],
-            "dataQuality": _build_data_quality(instrument, None, None),
+            "dataQuality": _build_data_quality(
+                instrument, None, None, reason_code="no_published_full_run",
+            ),
         }
 
-    snapshot = await _get_snapshot_for_instrument(session, instrument.id, run)
+    snapshot, reason_code = await _get_snapshot_for_instrument(
+        session, instrument.id, run,
+    )
     if snapshot is None:
         return {
             "state": None,
             "events": [],
-            "dataQuality": _build_data_quality(instrument, run, None),
+            "dataQuality": _build_data_quality(
+                instrument, run, None, reason_code="snapshot_missing",
+            ),
         }
 
     # 构建 StockState（纯函数，无副作用）
@@ -303,7 +350,7 @@ async def _build_stock_context(
     )
     event_dtos = [_event_to_dto(e) for e in recent_events]
 
-    data_quality = _build_data_quality(instrument, run, snapshot)
+    data_quality = _build_data_quality(instrument, run, snapshot, reason_code)
 
     # PRD V1.1: 用户接口完全排除 sourceField/idempotencyKey（不是 null，是字段不存在）
     response_state: Any

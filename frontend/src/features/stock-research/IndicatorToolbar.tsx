@@ -1,21 +1,29 @@
-// [IndicatorToolbar] - 描述: 指标显示工具栏（PRD §6.2）
-// 渲染 5 个指标图层的显隐开关，按主图/副图分组。
+// [IndicatorToolbar] - 描述: 图表图层显示工具栏（PRD §6.2 — 单一真源 v2）
+// 渲染 7 个图层开关（主图 4 + 副图 3），breakout 仅 selection 来源显示。
+// 这是唯一的交互式图层工具栏；StrategyChart 内部 tv-strategy-legend 改为只读说明。
 // 用户只能显隐，不得修改窗口、阈值等算法参数。
-import { INDICATOR_LAYER_MANIFEST, type IndicatorVisibility } from './stockResearchTypes'
+import {
+  CHART_LAYER_MANIFEST,
+  chartLayersForSource,
+  type ChartLayerKey,
+  type ChartLayerVisibility,
+  type ResearchSource,
+} from './stockResearchTypes'
 import clsx from 'clsx'
 
 export interface IndicatorToolbarProps {
-  visibility: IndicatorVisibility
-  onToggle: (id: string, visible: boolean) => void
+  visibility: ChartLayerVisibility
+  onToggle: (id: ChartLayerKey, visible: boolean) => void
+  source: ResearchSource
 }
 
-export function IndicatorToolbar({ visibility, onToggle }: IndicatorToolbarProps) {
-  const mainLayers = INDICATOR_LAYER_MANIFEST.filter((e) => e.kind === 'main')
-  const subLayers = INDICATOR_LAYER_MANIFEST.filter((e) => e.kind === 'sub')
+export function IndicatorToolbar({ visibility, onToggle, source }: IndicatorToolbarProps) {
+  const layers = chartLayersForSource(CHART_LAYER_MANIFEST, source)
+  const mainLayers = layers.filter((e) => e.kind === 'main')
+  const subLayers = layers.filter((e) => e.kind === 'sub')
 
-  const renderToggle = (entry: (typeof INDICATOR_LAYER_MANIFEST)[number]) => {
-    const active = visibility[entry.id] ?? entry.defaultVisible
-    // enabled=false 时禁用开关（灰显不可点击），Phase 5 实现后改回 true
+  const renderToggle = (entry: (typeof CHART_LAYER_MANIFEST)[number]) => {
+    const active = visibility[entry.id]
     const disabled = entry.enabled === false
     return (
       <label

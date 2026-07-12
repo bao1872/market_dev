@@ -45,6 +45,7 @@ from app.models.strategy_run import StrategyRun
 from app.repositories import strategy_result_repository
 from app.services.bars_scheduler_service import BarsSchedulerService
 from app.services.feature_snapshot_service import (
+    PublishedSnapshotRunExistsError,
     compute_for_trade_date,
     create_snapshot_run,
     finish_snapshot_run,
@@ -996,19 +997,36 @@ async def execute_after_close_run(
                 await db.commit()
 
             # [Phase7] 创建 running run + commit（独立 session，避免 snapshot rollback 影响）
-            async with AsyncSessionLocal() as db:
-                instrument_ids = await get_active_a_share_instruments(db)
-                # [Blocker Fix] after_close 处理全市场 A 股，scope='full'（watchlist 可读）
-                snapshot_run = await create_snapshot_run(
-                    db, trade_date, "after_close",
-                    expected_count=len(instrument_ids),
-                    metadata={"source": "after_close_orchestrator"},
-                    scope="full",
+            # [P0-4] 如已存在 published full run（如手动 backfill 已完成），跳过计算复用已有 run
+            snapshot_already_published = False
+            try:
+                async with AsyncSessionLocal() as db:
+                    instrument_ids = await get_active_a_share_instruments(db)
+                    # [Blocker Fix] after_close 处理全市场 A 股，scope='full'（watchlist 可读）
+                    snapshot_run = await create_snapshot_run(
+                        db, trade_date, "after_close",
+                        expected_count=len(instrument_ids),
+                        metadata={"source": "after_close_orchestrator"},
+                        scope="full",
+                    )
+                    await db.commit()
+                    snapshot_run_id = snapshot_run.id
+                    # instrument_ids 复用，避免下个 session 重复查询
+                    cached_instrument_ids = instrument_ids
+            except PublishedSnapshotRunExistsError as exc:
+                logger.warning(
+                    "[AfterClose] feature_snapshot 已存在 published full run，"
+                    "跳过 snapshot 计算，复用已有 run: trade_date=%s "
+                    "existing_run_id=%s published_at=%s",
+                    trade_date, exc.existing_run.id, exc.existing_run.published_at,
                 )
-                await db.commit()
-                snapshot_run_id = snapshot_run.id
-                # instrument_ids 复用，避免下个 session 重复查询
-                cached_instrument_ids = instrument_ids
+                snapshot_run_id = exc.existing_run.id
+                snapshot_result = {
+                    "snapshot_count": 0, "failed_count": 0,
+                    "schema_version": 1, "trade_date": trade_date.isoformat(),
+                    "skipped_already_published": True,
+                }
+                snapshot_already_published = True
 
             # [Heartbeat] feature_snapshot 开始后立即写入 run_id 与 last_started_step，
             # 这样 UI 不会显示 feature_snapshot 待执行，且中断后知道从哪一步恢复。
@@ -1033,64 +1051,66 @@ async def execute_after_close_run(
             # 计算 snapshots（独立 session + 后台心跳保活 + 进度回调）
             # [P0 Atomicity] snapshot 计算完成后不立即 finalize succeeded，
             # 等 DSA publish_run 成功后才标记 succeeded/published_at。
-            heartbeat_task = asyncio.create_task(
-                _job_run_heartbeat_loop(job_run_id, worker_id, interval=30)
-            )
-            try:
-                progress_callback = _build_feature_snapshot_progress_callback(
-                    job_run_id, worker_id
+            # [P0-4] 已存在 published run 时跳过计算（snapshot_already_published）
+            if not snapshot_already_published:
+                heartbeat_task = asyncio.create_task(
+                    _job_run_heartbeat_loop(job_run_id, worker_id, interval=30)
                 )
-                async with AsyncSessionLocal() as db:
-                    snapshot_result = await compute_for_trade_date(
-                        db, trade_date, cached_instrument_ids,
-                        progress_callback=progress_callback,
-                        source_run_id=snapshot_run_id,
-                    )
-                    await db.commit()
-            except RuntimeError as snapshot_exc:
-                # [Blocker2] 失败比例超阈值：snapshot session 已自动 rollback 半成品行。
-                # 异常暂存，先 finalize run 为 failed，再向上传播触发 orchestrator FAILED。
-                snapshot_error = snapshot_exc
-                logger.error(
-                    "[AfterClose] feature_snapshot 失败比例超阈值，"
-                    "snapshot session 已 rollback: trade_date=%s, error=%s",
-                    trade_date, snapshot_exc,
-                )
-            except Exception as snapshot_exc:
-                # 其他异常同样暂存，先 finalize run 为 failed
-                snapshot_error = snapshot_exc
-                logger.error(
-                    "[AfterClose] feature_snapshot 异常: trade_date=%s, error=%s",
-                    trade_date, snapshot_exc, exc_info=True,
-                )
-            finally:
-                # [Heartbeat] 取消后台心跳任务，安静忽略 CancelledError
-                heartbeat_task.cancel()
                 try:
-                    await heartbeat_task
-                except asyncio.CancelledError:
-                    pass
-
-            # [P0 Atomicity] 仅在 snapshot_error 时 finalize 为 failed。
-            # 成功时不立即 finalize succeeded —— 等 DSA publish_run 成功后才标记，
-            # 保证发布失败时 snapshot run=failed、published_at=null、无事件、用户 context 不读取该批次。
-            if snapshot_error is not None:
-                async with AsyncSessionLocal() as db:
-                    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
-                    run_to_finish = await db.get(StockFeatureSnapshotRun, snapshot_run_id)
-                    if run_to_finish is not None:
-                        await finish_snapshot_run(
-                            db, run_to_finish,
-                            status="failed",
-                            metadata={
-                                "source": "after_close_orchestrator",
-                                "error": str(snapshot_error),
-                                "scope": "full",
-                            },
+                    progress_callback = _build_feature_snapshot_progress_callback(
+                        job_run_id, worker_id
+                    )
+                    async with AsyncSessionLocal() as db:
+                        snapshot_result = await compute_for_trade_date(
+                            db, trade_date, cached_instrument_ids,
+                            progress_callback=progress_callback,
+                            source_run_id=snapshot_run_id,
                         )
                         await db.commit()
-                # 失败时向上传播 RuntimeError，触发 orchestrator FAILED 状态写入，跳过 publishing
-                raise snapshot_error
+                except RuntimeError as snapshot_exc:
+                    # [Blocker2] 失败比例超阈值：snapshot session 已自动 rollback 半成品行。
+                    # 异常暂存，先 finalize run 为 failed，再向上传播触发 orchestrator FAILED。
+                    snapshot_error = snapshot_exc
+                    logger.error(
+                        "[AfterClose] feature_snapshot 失败比例超阈值，"
+                        "snapshot session 已 rollback: trade_date=%s, error=%s",
+                        trade_date, snapshot_exc,
+                    )
+                except Exception as snapshot_exc:
+                    # 其他异常同样暂存，先 finalize run 为 failed
+                    snapshot_error = snapshot_exc
+                    logger.error(
+                        "[AfterClose] feature_snapshot 异常: trade_date=%s, error=%s",
+                        trade_date, snapshot_exc, exc_info=True,
+                    )
+                finally:
+                    # [Heartbeat] 取消后台心跳任务，安静忽略 CancelledError
+                    heartbeat_task.cancel()
+                    try:
+                        await heartbeat_task
+                    except asyncio.CancelledError:
+                        pass
+
+                # [P0 Atomicity] 仅在 snapshot_error 时 finalize 为 failed。
+                # 成功时不立即 finalize succeeded —— 等 DSA publish_run 成功后才标记，
+                # 保证发布失败时 snapshot run=failed、published_at=null、无事件、用户 context 不读取该批次。
+                if snapshot_error is not None:
+                    async with AsyncSessionLocal() as db:
+                        from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+                        run_to_finish = await db.get(StockFeatureSnapshotRun, snapshot_run_id)
+                        if run_to_finish is not None:
+                            await finish_snapshot_run(
+                                db, run_to_finish,
+                                status="failed",
+                                metadata={
+                                    "source": "after_close_orchestrator",
+                                    "error": str(snapshot_error),
+                                    "scope": "full",
+                                },
+                            )
+                            await db.commit()
+                    # 失败时向上传播 RuntimeError，触发 orchestrator FAILED 状态写入，跳过 publishing
+                    raise snapshot_error
 
             logger.info(
                 "[AfterClose] 特征快照生成完成（待发布后 finalize）: trade_date=%s, "
