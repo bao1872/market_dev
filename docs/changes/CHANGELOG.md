@@ -4,6 +4,7 @@
 
 ## 2026-07-12
 
+- CHANGE-20260712-002: C10 收口 — 板块同步降级保护(BOARD_SYNC_ENABLED) + /market/boards available/reason_code + 前端筛选降级 + 废弃CSS清理 + 文档同步
 - CHANGE-20260712-001: PR #74 两项架构纠偏 — board_sync 合并进 bars_scheduler + ConsensusZone 数据源修正
   - arch1: `worker-board-sync` Docker 服务移除；`run_board_sync_scheduler_worker()` 函数删除；`board_sync_scheduler` 不再是有效 WORKER_TYPE；board_sync job 注册进 `run_bars_scheduler_worker()`（同一 AsyncIOScheduler，17:00 CronTrigger，max_instances=1）；qstock 同步调用通过 `asyncio.to_thread()` 包装
   - arch2: `indicator_service` ConsensusZone 数据源从 `macd_bars` 改为 `daily_bars`（固定 250 根日线窗口）；`timeframe` 固定 `"1d"`；`as_of` 取最后一根日线 bar 时间；缓存键 `consensus_zone:{symbol}:{as_of}:1d:{algo_version}:{data_version}` 显示周期切换时稳定；V1 仅日线成交分布，15m 细化为未来工作

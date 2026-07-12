@@ -21,7 +21,7 @@
 | `/admin`, `/admin/overview` | `AdminIndexPage` | Admin | 管理总览；AdminAppShell 壳层 |
 | `/admin/users` | `AdminUsersPage` | Admin | 用户/订阅/邀请码；AdminAppShell 壳层 |
 | `/admin/beta-applications` | `AdminBetaApplicationsPage` | Admin | 内测申请；AdminAppShell 壳层 |
-| `/admin/strategies` | `AdminStrategiesPage` | Admin | 策略管理；AdminAppShell 壳层 |
+| `/admin/strategies` | redirect | Admin | redirect-only → `/admin/after-close`（无页面加载，`AdminStrategiesPage.tsx` 已删除） |
 | `/admin/jobs` | `AdminJobsPage` | Admin | 定时任务/策略计算/Worker 心跳（worker_heartbeats 实时视图，health_state fresh/stale/stopped）/投递；AdminAppShell 壳层 |
 | `/admin/after-close` | `AdminAfterClosePipelinePage` | Admin | 盘后流水线详情：8 步骤时间线（refreshing_daily→checking_coverage→creating_dsa→waiting_dsa_worker→quality_gate→feature_snapshot→publishing→watchlist_ready）+ 数据新鲜度 + 编排状态详情 + 最近 20 次运行列表 + 事件日志抽屉（100 events）；running 10s 轮询、非 running 60s 轮询、页面不可见暂停；AdminAppShell 壳层 |
 | `/admin/stock-debug`, `/admin/stock-debug/:symbol` | `AdminStockDebugPage` | Admin | 管理员个股调试：复用 `MarketInstrumentPane`/`useStockResearchData`/`StockResearchWorkspace`/`useResearchContext`/`AdminFactorDebugPanel`/`StockStructuralStatePanel`（debug=true）；原始 factor/feature/JSON 仅在此路由展示；AdminAppShell 壳层 |

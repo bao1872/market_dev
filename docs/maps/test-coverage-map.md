@@ -56,6 +56,7 @@
 | `/quote` 可信化字段（source/is_realtime/freshness_seconds/degraded/degraded_reason） | `test_quote_trustworthy.py` |
 | K线实时契约（blocking）：交易时段 1d partial、收盘后 non-partial、`/quote` +08:00、前端 bars 状态展示、不可信 quote 不混入 K 线 | `test_market_data_aggregation_partial_daily.py`, `test_quote_timezone.py`, `test_quote_trustworthy.py`, `frontend/src/utils/__tests__/chart.test.ts` |
 | 后端已返回 1d partial bar 时前端不得用 quote 覆盖；后端未返回 partial bar 时 quote 可兜底追加 | `frontend/src/utils/__tests__/chart.test.ts` |
+| **BarRepository.get_recent_bars**：按 instrument/timeframe 查询最近 N 根 bar；空表/不足/边界/多 instrument 隔离/时间排序/limit 截断/字段完整 | `test_bar_repository_get_recent_bars.py`（8 个用例） |
 
 ## 3.5 自选股监控
 
@@ -157,6 +158,9 @@
 | **Migration 循环**：062 migration `upgrade → downgrade → upgrade` 循环不报错；表 `market_boards`/`market_board_memberships` 存在 | `test_board_sync.py::TestMigrationCycle`（1 个用例） |
 | **board_sync 注册在 bars_scheduler**：`run_bars_scheduler_worker` 内的 `AsyncIOScheduler` 注册了 `board_sync_daily` job（17:00 CronTrigger，max_instances=1）；board_sync 与 bars_refresh 共用同一 scheduler | `test_worker_idempotency.py::test_board_sync_registered_in_bars_scheduler` |
 | **board_sync 不是独立 WORKER_TYPE**：`board_sync_scheduler` 不在 WORKER_TYPE dispatch 列表中；无 `run_board_sync_scheduler_worker` 函数；`worker-board-sync` Docker 服务已移除 | `test_worker_idempotency.py::test_board_sync_not_separate_worker_type` |
+| **QStockFetcher adapter**：HTTP 拉取/重试/超时/解析/异常隔离/空响应/缓存键/provider 不可用降级 | `test_qstock_fetcher.py`（47 个用例） |
+| **BOARD_SYNC_ENABLED 开关**：`false` 时 `scheduled_board_sync` 跳过执行记录 `status=skipped` + `reason_code=board_provider_unavailable`，不发 THS 请求；`true` 时正常执行 | `test_board_sync.py`（现有用例） |
+| **/market/boards API**：`available`/`reason_code` 字段；无数据时 `available=false` + `reason_code=board_provider_unavailable`；有数据时 `available=true` | `test_market_stocks.py`（现有用例） |
 
 ## 4. 飞书与通知
 
@@ -231,3 +235,17 @@
 - 新增 maps 必备文件存在性检查；
 - 新增旧 `docs/current/00-18` 不再作为 current 事实源的检查；
 - 新增 local links 覆盖 `maps/`。
+
+## 8. 测试汇总
+
+| 范围 | 数量 | 说明 |
+|---|---|---|
+| 后端 pytest | 225 tests passing | 全量 backend 测试通过基线 |
+| `test_qstock_fetcher.py` | 47 tests | QStockFetcher adapter HTTP/重试/超时/解析/异常 |
+| `test_bar_repository_get_recent_bars.py` | 8 tests | BarRepository.get_recent_bars 边界/隔离/排序 |
+| `test_board_sync.py` | 现有用例 | 完整性校验 + 原子切换 + Migration 循环 |
+| `test_market_stocks.py` | 现有用例 | /market/stocks + /market/boards available/reason_code |
+| `test_consensus_zone.py` | 现有用例 | 筹码共识区因果性/单峰/多峰/缓存键 |
+| `test_stock_state_and_events.py` | 现有用例 | 个股状态与事件 |
+| `test_after_close_orchestrator.py` | 现有用例 | 盘后编排状态机 + feature_snapshot 步骤 |
+| 前端 node 测试 | 108 tests | 64 route/url/types + 44 contract |

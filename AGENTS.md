@@ -527,6 +527,14 @@ Capture Token 只能访问 Capture API。\
 不能访问普通用户 API。\
 不能污染普通 Access Token。
 
+### 7.5 板块同步降级保护
+
+`BOARD_SYNC_ENABLED` 默认 `false`。\
+关闭时 `scheduled_board_sync` 跳过执行，记录 `status=skipped` + `reason_code=board_provider_unavailable`，不发起任何 THS 请求。\
+`/market/boards` 响应含 `available`（bool）和 `reason_code`（str|null）；`available=false` 时前端禁用行业/概念筛选输入。\
+ALIGN-041 OPEN：当前物理机 THS 成分股 403、akshare 无 THS 成分接口；至少一个同花顺语义 provider 真实返回完整目录+成分后方可开启。\
+不得增加 akshare、代理、IP 绕过、东方财富混用或新常驻 worker。保留单 provider、事务失败保留旧快照设计。
+
 ### 8. Outbox target\_channel\_id
 
 `notification.message.created` payload 含 `target_channel_id` 时，属于用户主动触发/手动指定渠道通知，跳过 `eligible_user_service`。

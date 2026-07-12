@@ -29,7 +29,7 @@ Node Cluster 算法
 | `/stock/:symbol` | Subscriber/Admin | UserAppShell | 个股详情 |
 | `/messages` | Authenticated | UserAppShell | 历史消息 |
 | `/settings` | Authenticated | UserAppShell | 账户和通知渠道 |
-| `/admin/*` | Admin | AdminAppShell | 管理页面（含 `/admin/overview`、`/admin/users`、`/admin/strategies`、`/admin/jobs`、`/admin/beta-applications`、`/admin/after-close`） |
+| `/admin/*` | Admin | AdminAppShell | 管理页面（含 `/admin/overview`、`/admin/users`、`/admin/jobs`、`/admin/beta-applications`、`/admin/after-close`、`/admin/stock-debug/:symbol`）；`/admin/strategies` 已废弃为 redirect-only → `/admin/after-close`（无页面加载） |
 | `/overview` | Redirect | — | 兼容重定向 → `/market` |
 | `/watchlist` | Redirect | — | 兼容重定向 → `/market?scope=watchlist` |
 
@@ -57,16 +57,16 @@ Node Cluster 算法
 - `/market` 渲染 `MarketWorkspacePage`（`frontend/src/features/market-workspace/MarketWorkspacePage.tsx`），三栏布局：
   - 左栏 `MarketInstrumentPane`：`scope=watchlist` 使用 `useWatchlistMonitorStatus`（enabled=scope==='watchlist'）；`scope=market` 使用 `useInstruments` 搜索（enabled=scope==='market' && 搜索词 trim 后 ≥2 字符，限制 50 条，不发 N+1 请求）。两个查询按 scope 互斥启用，未激活的 scope 不发请求。搜索结果列表仅在 `scope==='market' && canSearch` 时渲染；关键词不足 2 字符、清空输入或切换 scope 时不得显示缓存结果（Query 仍通过 `enabled` 门控，不条件调用 Hook，只门控渲染）。
   - 中栏 `StockResearchWorkspace`（`frontend/src/features/stock-research/StockResearchWorkspace.tsx`）：K 线研究区，由 `MarketWorkspacePage` 和 `StockDetailPage` 共用。
-  - 右栏 `EventStatePanel`（`frontend/src/features/research-context/EventStatePanel.tsx`）：可收起；收起时不挂载、不请求数据，中栏自动扩展。面板使用 `useStockContext` 单一接口（`GET /api/v1/stocks/{symbol}/context`），展示数据日期/质量、当前价格结构、成交密集区关系、SQZMOM 动量、波动位置、最近状态变化时间线；普通用户不显示内部字段名（`sourceField`）、算法参数、`idempotencyKey`、JSON 或商业机密；原始 factor/feature/JSON 仅在 `/admin/stocks/:symbol/debug` 展示。
+  - 右栏 `EventStatePanel`（`frontend/src/features/research-context/EventStatePanel.tsx`）：可收起；收起时不挂载、不请求数据，中栏自动扩展。面板使用 `useStockContext` 单一接口（`GET /api/v1/stocks/{symbol}/context`），展示数据日期/质量、当前价格结构、成交密集区关系、SQZMOM 动量、波动位置、最近状态变化时间线；普通用户不显示内部字段名（`sourceField`）、算法参数、`idempotencyKey`、JSON 或商业机密；原始 factor/feature/JSON 仅在 `/admin/stock-debug` 和 `/admin/stock-debug/:symbol` 展示。
 - `/stock/:symbol` 是唯一个股详情和 K线入口（PRD V1.1），渲染 `StockDetailPage`（`frontend/src/pages/StockDetailPage.tsx`）：
   - 使用共享 `useStockResearchData` + `StockResearchWorkspace` 渲染图表区，不再独立调用 useBars/useIndicators/useRealtimeQuote/useInstrumentEvents。
   - 详情页专属能力拆到 `useStockDetailActions`（自选/上下切换/memo + returnTo 上下文恢复左栏列表）和 `useStockDetailFeishu`（飞书截图/轮询/超时）。
   - 保留 header、价格条、返回、上下只、watchlist、memo、飞书、全屏、事件状态面板开关。
   - `StockResearchWorkspace` 通过 `toolbar`/`rightPanel`/`showRightPanel`/`chartColumnProps` 可选 props 支持详情页的事件状态面板开关和截图模式属性。
   - **禁止重定向到 `/market`**（PRD V1.1 硬性规定）。
-- `/admin/stocks/:symbol/debug` 渲染 `AdminStockDebugPage`（`frontend/src/pages/AdminStockDebugPage.tsx`），位于 `AdminRoute` + `AdminAppShell` 下，普通用户不可访问（403）：
+- `/admin/stock-debug` 和 `/admin/stock-debug/:symbol` 渲染 `AdminStockDebugPage`（`frontend/src/pages/AdminStockDebugPage.tsx`），位于 `AdminRoute` + `AdminAppShell` 下，普通用户不可访问（403）：
   - 复用 `MarketInstrumentPane`（股票搜索）、`useStockResearchData`（bars/indicators/quote/events）、`StockResearchWorkspace`（K线研究区）、`useAdminStockDebug`（含原始 payload 的管理员调试接口）。
-  - 管理员调试能力独立于 `/market`，`/market` 不承载任何原始因子或 JSON。
+  - 管理员调试能力独立于 `/market`，`/market` 不承载任何原始因子或 JSON；`debug` 不在 `/market` URL 契约中，`/market?debug=1` 管理员访问时重定向到 `/admin/stock-debug/:symbol`。
 - 共享类型（`DisplayTimeframe`/`ResearchSource`/`ALLOWED_TIMEFRAMES`/`BARS_COUNT_BY_TIMEFRAME`/`defaultStrategyForSource`/`normalizeDisplayTimeframe`/`normalizeResearchSource`）权威定义在 `frontend/src/features/stock-research/stockResearchTypes.ts`；`marketWorkspaceUrlState.ts` 从该文件导入并重新导出，依赖方向为 market-workspace → stock-research（禁止反向依赖）。
 - `useStockResearchData` 只保留图表核心查询：instrument/bars/indicators/quote/events + priceSummary/quoteStatus/barsStatus/isRenderReady；自选操作、上下切换、memo、飞书由 `useStockDetailActions`/`useStockDetailFeishu` 负责（禁止加入核心 hook）。
 - URL 状态：`/market?scope=watchlist|market&symbol=xxx&timeframe=1d&source=watchlist|selection&strategy=xxx&event_id=xxx&returnTo=...`；scope/symbol/timeframe/source/strategy/event_id/returnTo 进 URL，右栏折叠和 viewport 留本地。切换股票不整页刷新。非法 timeframe 回退 1d。`/stock/:symbol` 的 timeframe 也从 URL 解析（单一真源），工具栏切换写回 URL。`returnTo` 为来源页 URL，必须经 `normalizeInternalReturnTo`（`frontend/src/features/market-workspace/marketWorkspaceUrlState.ts`）校验——仅允许 `/screener`、`/market`、`/messages` 前缀（含 query/hash），拒绝外部 URL（http/https）、`javascript:`、双斜杠、非白名单前缀（如 `/admin`、`/login`、`/capture/stock`）、超长字符串（>2000 字符）；左栏选股或切 scope 时清除 `returnTo`。
@@ -79,6 +79,7 @@ Node Cluster 算法
 - `/capture/stock/:symbol` 完全独立，不使用 `useStockResearchData`/`StockResearchWorkspace`/`apiClient`，只使用 `captureClient`。
 - `AccountMenu` 复用 `appNavigation.getAccountMenuItemsForVariant(isAdmin, variant)` 单一真源构建菜单项。
 - 研究上下文纯函数：`buildStructureSummary`（`frontend/src/features/research-context/buildStructureSummary.ts`）从 `primary[timeframe].cost_position` 等真实 DTO 路径提取结构状态摘要（合并 degraded_reasons/warmup_notes、日线/15m 摘要、成本位置/节点）；`buildUserEventExplanation`（`frontend/src/features/research-context/buildUserEventExplanation.ts`）只消费白名单字段（event_time/event_type/payload.facts[].text_content/summary）并校验 `event.instrument_id` 与 `currentInstrumentId` 一致性（不一致时隐藏价格，显示"该事件属于其他股票"）。两个纯函数无 React 依赖，可被 `node --test` 直接运行。
+- **板块筛选输入门控**：行业/概念筛选输入依赖 `GET /market/boards?type=industry|concept` 返回的 `available` 字段；当 `available=false`（`reason_code='board_provider_unavailable'`）时，industry/concept 输入必须禁用并显示"板块未开放"占位文案，禁止在禁用状态下发起 `/market/stocks?industry=` / `?concept=` 请求。`available=true` 时正常启用并加载板块目录。
 
 ## 3. 页面职责
 

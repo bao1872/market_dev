@@ -34,6 +34,7 @@
 | CONFIG_FILE | 生产配置 |
 | POSTGRES_USER/PASSWORD/DB | PostgreSQL 容器 |
 | STRATEGY_RUN_TOTAL_TIMEOUT_SECONDS | worker-strategy-batch run 级总超时（默认 7200） |
+| BOARD_SYNC_ENABLED | board_sync 开关（默认 `false`）；`false` 时 scheduled_board_sync 跳过执行并记录 `status=skipped` + `reason_code=board_provider_unavailable`；仅当 THS provider 可用时设置 `true` |
 
 Secret 不写入文档示例，不回显日志。
 
