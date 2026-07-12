@@ -35,6 +35,73 @@ def _split_direction_features(features: list[str]) -> tuple[list[str], list[str]
     return numeric, direction
 
 
+def fit_winsorize_bounds(
+    df: pd.DataFrame,
+    features: list[str],
+    lower: float = 0.005,
+    upper: float = 0.995,
+) -> dict[str, dict[str, float]]:
+    """拟合 winsorize 上下界（分位数），返回可序列化参数。
+
+    方向字段跳过（不进入 bounds）。
+
+    Args:
+        df: 含特征列的 DataFrame
+        features: 待拟合的特征列表
+        lower: 下分位（默认 0.5%）
+        upper: 上分位（默认 99.5%）
+
+    Returns:
+        {feature: {"lo": float, "hi": float}, ...}
+    """
+    numeric, _direction = _split_direction_features(features)
+    bounds: dict[str, dict[str, float]] = {}
+    for feat in numeric:
+        if feat not in df.columns:
+            continue
+        s = pd.to_numeric(df[feat], errors="coerce").replace(
+            [np.inf, -np.inf], np.nan
+        ).dropna()
+        if s.empty:
+            bounds[feat] = {"lo": 0.0, "hi": 1.0}
+            continue
+        lo = float(s.quantile(lower))
+        hi = float(s.quantile(upper))
+        if not (pd.notna(lo) and pd.notna(hi) and hi > lo):
+            bounds[feat] = {"lo": 0.0, "hi": 1.0}
+        else:
+            bounds[feat] = {"lo": lo, "hi": hi}
+    return bounds
+
+
+def transform_winsorize(
+    df: pd.DataFrame,
+    features: list[str],
+    bounds: dict[str, dict[str, float]],
+) -> pd.DataFrame:
+    """用 pre-fitted bounds 做 clip，方向字段跳过。
+
+    Args:
+        df: 含特征列的 DataFrame
+        features: 待处理的特征列表
+        bounds: fit_winsorize_bounds 返回的参数
+
+    Returns:
+        截断后的 DataFrame（副本）
+    """
+    numeric, _direction = _split_direction_features(features)
+    out = df.copy()
+    for feat in numeric:
+        if feat not in out.columns or feat not in bounds:
+            continue
+        b = bounds[feat]
+        lo, hi = b["lo"], b["hi"]
+        if hi > lo:
+            s = pd.to_numeric(out[feat], errors="coerce")
+            out[feat] = s.clip(lower=lo, upper=hi).astype(np.float32)
+    return out
+
+
 def winsorize_features(
     df: pd.DataFrame,
     features: list[str],
@@ -42,6 +109,8 @@ def winsorize_features(
     upper: float = 0.995,
 ) -> pd.DataFrame:
     """对数值特征按分位截断（不改变分布形状），方向字段跳过。
+
+    内部调用 fit_winsorize_bounds + transform_winsorize，保持向后兼容。
 
     Args:
         df: 含特征列的 DataFrame
@@ -52,19 +121,8 @@ def winsorize_features(
     Returns:
         截断后的 DataFrame（副本）
     """
-    numeric, _direction = _split_direction_features(features)
-    out = df.copy()
-    for feat in numeric:
-        if feat not in out.columns:
-            continue
-        s = pd.to_numeric(out[feat], errors="coerce")
-        if s.dropna().empty:
-            continue
-        lo = s.quantile(lower)
-        hi = s.quantile(upper)
-        if pd.notna(lo) and pd.notna(hi) and hi > lo:
-            out[feat] = s.clip(lower=lo, upper=hi).astype(np.float32)
-    return out
+    bounds = fit_winsorize_bounds(df, features, lower, upper)
+    return transform_winsorize(df, features, bounds)
 
 
 def fit_robust_scaler(
@@ -258,7 +316,7 @@ def build_feature_matrix(
     features: list[str],
     representation: str = "absolute",
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """构建聚类输入矩阵 X。
+    """构建聚类输入矩阵 X（fit + transform）。
 
     Args:
         df: 含特征列的 DataFrame（已 winsorize）
@@ -306,3 +364,54 @@ def build_feature_matrix(
     params["n_samples"] = int(X.shape[0])
     params["n_features"] = int(X.shape[1])
     return X, params
+
+
+def transform_feature_matrix(
+    df: pd.DataFrame,
+    features: list[str],
+    representation: str,
+    prep_params: dict[str, Any],
+) -> np.ndarray:
+    """用 pre-fitted 预处理参数 transform 新数据（不 fit）。
+
+    用于 Phase E 全量 chunk assignment：用 sample 拟合的 scaler/PCA params
+    transform 全量 chunk 数据。
+
+    Args:
+        df: 含特征列的 DataFrame（已 winsorize）
+        features: 待使用的特征列表
+        representation: "absolute" 或 "cross_sectional"
+        prep_params: run_representation 返回的 dict，需含 "scaler" 键
+
+    Returns:
+        float32 矩阵 X (n_samples, n_features)
+    """
+    numeric, direction = _split_direction_features(features)
+    all_cols = numeric + direction
+    missing = [c for c in all_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"特征列缺失: {missing}")
+
+    keep_cols = list(all_cols)
+    if representation == "cross_sectional" and "trade_date" in df.columns:
+        keep_cols.append("trade_date")
+    sub = df[keep_cols].copy()
+    for c in all_cols:
+        sub[c] = pd.to_numeric(sub[c], errors="coerce")
+    if "trade_date" in sub.columns:
+        feat_na = sub[all_cols].replace([np.inf, -np.inf], np.nan).isna().any(axis=1)
+        sub = sub[~feat_na].reset_index(drop=True)
+    else:
+        sub = sub.replace([np.inf, -np.inf], np.nan).dropna().reset_index(drop=True)
+    if len(sub) == 0:
+        return np.zeros((0, len(all_cols)), dtype=np.float32)
+
+    if representation == "absolute":
+        scaler_params = prep_params.get("scaler", {})
+        sub = transform_robust(sub, numeric, scaler_params)
+    elif representation == "cross_sectional":
+        sub = transform_cross_sectional_rank(sub, numeric)
+    else:
+        raise ValueError(f"未知 representation: {representation}")
+
+    return sub[all_cols].to_numpy(dtype=np.float32)

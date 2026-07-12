@@ -1,4 +1,4 @@
-"""报告输出 — manifest + 7 CSV + report.md + 50MB 门禁 + 3 run 保留。
+"""报告输出 — manifest + 9 CSV + report.md + 50MB 门禁 + 3 run 保留。
 
 不写原始矩阵、不写 parquet、不写截图。
 所有 CSV 不含 instrument_id / symbol 等可识别行级数据（transition_matrix 是聚合）。
@@ -134,6 +134,8 @@ def generate_report_md(
     stable: bool,
     redundant_pairs: list[tuple[str, str, float]] | None = None,
     described_features: pd.DataFrame | None = None,
+    prevalence: pd.DataFrame | None = None,
+    dwell: pd.DataFrame | None = None,
 ) -> str:
     """生成 Markdown 报告。
 
@@ -296,6 +298,20 @@ def generate_report_md(
         lines.append(transition.to_markdown())
         lines.append("")
 
+    # 9.1 月度占比
+    if prevalence is not None and not prevalence.empty:
+        lines.append("### 9.1 月度占比（前 10 行）")
+        lines.append("")
+        lines.append(prevalence.head(10).to_markdown(index=False))
+        lines.append("")
+
+    # 9.2 Dwell time
+    if dwell is not None and not dwell.empty:
+        lines.append("### 9.2 Dwell time")
+        lines.append("")
+        lines.append(dwell.to_markdown(index=False))
+        lines.append("")
+
     # 10. 资源
     lines.append("## 10. 资源与输出")
     lines.append("")
@@ -351,6 +367,8 @@ def write_all(
     profiles_df: pd.DataFrame,
     stability_df: pd.DataFrame,
     transition_df: pd.DataFrame,
+    prevalence_df: pd.DataFrame | None = None,
+    dwell_df: pd.DataFrame | None = None,
     report_md: str,
 ) -> None:
     """一次性写所有文件 + enforce_output_size。
@@ -364,6 +382,8 @@ def write_all(
         profiles_df: 簇画像
         stability_df: 稳定性
         transition_df: 转移矩阵
+        prevalence_df: 月度占比（可选）
+        dwell_df: dwell time（可选）
         report_md: Markdown 报告内容
     """
     # 写 manifest
@@ -378,6 +398,11 @@ def write_all(
     profiles_df.to_csv(run_dir / "cluster_profiles.csv", index=False, encoding="utf-8")
     stability_df.to_csv(run_dir / "cluster_stability.csv", index=False, encoding="utf-8")
     transition_df.to_csv(run_dir / "transition_matrix.csv", index=True, encoding="utf-8")
+    # 月度占比和 dwell time（若提供）
+    if prevalence_df is not None:
+        prevalence_df.to_csv(run_dir / "monthly_prevalence.csv", index=False, encoding="utf-8")
+    if dwell_df is not None:
+        dwell_df.to_csv(run_dir / "dwell_time.csv", index=False, encoding="utf-8")
     # 写 report.md
     (run_dir / "report.md").write_text(report_md, encoding="utf-8")
     # 门禁

@@ -1,12 +1,15 @@
 """测试 data_access.py — 无泄漏、白名单、dtype。"""
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from app.research.regime_discovery.data_access import (
     FEATURE_MATRIX_COLUMNS,
     FORBIDDEN_PREFIXES,
     _dtype_map,
+    get_all_instrument_ids,
 )
 from app.research.regime_discovery.feature_builder import validate_no_leakage
 
@@ -70,3 +73,16 @@ class TestDtypeMap:
     def test_symbol_is_string(self):
         dtypes = _dtype_map()
         assert dtypes["symbol"] == "string"
+
+
+class TestGetAllInstrumentIds:
+    def test_returns_distinct_list(self):
+        """用 mock session 验证返回 DISTINCT instrument_id 字符串列表。"""
+        mock_session = MagicMock()
+        mock_session.execute.return_value = [("inst-001",), ("inst-002",), ("inst-003",)]
+        result = get_all_instrument_ids(mock_session)
+        assert result == ["inst-001", "inst-002", "inst-003"]
+        assert all(isinstance(r, str) for r in result)
+        # 验证 SQL 含 DISTINCT
+        executed_sql = str(mock_session.execute.call_args[0][0])
+        assert "DISTINCT instrument_id" in executed_sql

@@ -98,6 +98,57 @@ class TestDryRun:
             sys.argv = original
 
 
+class TestSampleVsFullAssignmentMode:
+    """验证 CLI 区分 sample（Phase A-D）和 full-assignment（Phase E）模式。"""
+
+    def test_dry_run_mentions_both_phases(self, caplog):
+        """dry-run 日志应同时提及 sample 阶段和全量 assignment 阶段。"""
+        import sys
+
+        from scripts.research_regime_discovery import main
+        original = sys.argv
+        sys.argv = ["research_regime_discovery", "--dry-run"]
+        try:
+            with caplog.at_level("INFO"):
+                rc = main()
+            assert rc == 0
+            log_text = " ".join(r.message for r in caplog.records)
+            # sample 阶段
+            assert "分层抽样" in log_text or "sample" in log_text.lower()
+            # 全量 assignment 阶段
+            assert "全量 assignment" in log_text or "get_all_matrix_rows" in log_text
+        finally:
+            sys.argv = original
+
+    def test_sample_rows_controls_sample_size(self):
+        """--sample-rows 参数控制抽样行数。"""
+        import sys
+
+        from scripts.research_regime_discovery import parse_args
+        original = sys.argv
+        sys.argv = ["research_regime_discovery", "--sample-rows", "50000"]
+        try:
+            args = parse_args()
+            assert args.sample_rows == 50000
+        finally:
+            sys.argv = original
+
+    def test_full_assignment_uses_get_all_matrix_rows(self, caplog):
+        """dry-run 应说明全量 assignment 使用 get_all_matrix_rows（完整横截面 rank）。"""
+        import sys
+
+        from scripts.research_regime_discovery import main
+        original = sys.argv
+        sys.argv = ["research_regime_discovery", "--dry-run"]
+        try:
+            with caplog.at_level("INFO"):
+                main()
+            log_text = " ".join(r.message for r in caplog.records)
+            assert "get_all_matrix_rows" in log_text or "完整横截面" in log_text
+        finally:
+            sys.argv = original
+
+
 class TestReadonlySQLSession:
     """测试 get_session 设置了 statement_timeout 和 read_only。"""
 

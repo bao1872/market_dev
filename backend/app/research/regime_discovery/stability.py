@@ -149,8 +149,8 @@ def temporal_centroid_similarity(
 
 def compute_transition_matrix(
     labels: np.ndarray,
-    instrument_ids: Sequence[Any],
-    dates: Sequence[Any],
+    instrument_ids: Sequence[Any] | np.ndarray,
+    dates: Sequence[Any] | np.ndarray,
 ) -> pd.DataFrame:
     """按 instrument 时间排序计算 R_i -> R_j 转移矩阵。
 
@@ -249,7 +249,7 @@ def compute_dwell_time(
 
 def monthly_prevalence(
     labels: np.ndarray,
-    dates: Sequence[Any],
+    dates: Sequence[Any] | np.ndarray,
 ) -> pd.DataFrame:
     """按月统计每 cluster 占比。
 
@@ -406,8 +406,13 @@ def check_stability(
         cosine_result = temporal_centroid_similarity(X, model.labels_, dates, k)
         cosine_val = cosine_result["cosine_similarity"]
         cosine_pass = cosine_result["pass"]
-        if not cosine_pass and pd.notna(cosine_val):
-            reasons.append(f"centroid_cosine={cosine_val:.4f} < {REJECTION_THRESHOLDS['centroid_cosine_min']}")
+        if not cosine_pass:
+            if pd.notna(cosine_val):
+                reasons.append(
+                    f"centroid_cosine={cosine_val:.4f} < {REJECTION_THRESHOLDS['centroid_cosine_min']}"
+                )
+            else:
+                reasons.append("centroid_cosine=无法计算（某半段簇为空）")
     pass_all = len(reasons) == 0
     return {
         "k": k,

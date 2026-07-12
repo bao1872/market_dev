@@ -192,43 +192,39 @@ def _compute_base_normalized(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _compute_temporal_derivatives(df: pd.DataFrame) -> pd.DataFrame:
-    """按 instrument 时间排序计算 6 个时序派生特征。"""
+    """按 instrument 时间排序计算 6 个时序派生特征。
+
+    使用 groupby().shift() 向量化计算，避免 per-instrument for 循环
+    和 df.loc[idx, ...] 赋值（5177 个 instrument 的循环会产生大量
+    中间 copy，导致 RSS 峰值过高）。
+    """
     df = df.sort_values(["instrument_id", "trade_date"]).reset_index(drop=True)
+    g = df.groupby("instrument_id")
 
-    for _inst_id, idx in df.groupby("instrument_id").groups.items():
-        s = df.loc[idx]
+    # delta_5 系列：当前值 - 5 行前值（per instrument）
+    df["bb_percent_b_delta_5"] = (
+        df["bb_percent_b"] - g["bb_percent_b"].shift(5)
+    ).astype(np.float32)
+    df["bandwidth_delta_5"] = (
+        df["bb_bandwidth_log"] - g["bb_bandwidth_log"].shift(5)
+    ).astype(np.float32)
+    df["sqzmom_atr_delta_5"] = (
+        df["sqzmom_atr"] - g["sqzmom_atr"].shift(5)
+    ).astype(np.float32)
+    df["volume_percentile_delta_5"] = (
+        df["volume_percentile_120"] - g["volume_percentile_120"].shift(5)
+    ).astype(np.float32)
 
-        # bb_percent_b_delta_5
-        df.loc[idx, "bb_percent_b_delta_5"] = (
-            s["bb_percent_b"] - s["bb_percent_b"].shift(5)
-        ).astype(np.float32)
+    # return_5d = close[i] / close[i-5] - 1
+    close_f64 = df["close"].astype(np.float64)
+    df["return_5d"] = (close_f64 / g["close"].shift(5) - 1.0).astype(np.float32)
 
-        # bandwidth_delta_5
-        df.loc[idx, "bandwidth_delta_5"] = (
-            s["bb_bandwidth_log"] - s["bb_bandwidth_log"].shift(5)
-        ).astype(np.float32)
-
-        # sqzmom_atr_delta_5
-        df.loc[idx, "sqzmom_atr_delta_5"] = (
-            s["sqzmom_atr"] - s["sqzmom_atr"].shift(5)
-        ).astype(np.float32)
-
-        # volume_percentile_delta_5
-        df.loc[idx, "volume_percentile_delta_5"] = (
-            s["volume_percentile_120"] - s["volume_percentile_120"].shift(5)
-        ).astype(np.float32)
-
-        # return_5d = close[i] / close[i-5] - 1
-        close_s = s["close"].astype(np.float64)
-        df.loc[idx, "return_5d"] = (
-            close_s / close_s.shift(5) - 1.0
-        ).astype(np.float32)
-
-        # realized_vol_10d = std(daily_return, 10)
-        daily_ret = close_s / close_s.shift(1) - 1.0
-        df.loc[idx, "realized_vol_10d"] = (
-            daily_ret.rolling(10, min_periods=10).std(ddof=1)
-        ).astype(np.float32)
+    # realized_vol_10d = std(daily_return, 10) per instrument
+    daily_ret = close_f64 / g["close"].shift(1) - 1.0
+    df["realized_vol_10d"] = (
+        daily_ret.groupby(df["instrument_id"]).rolling(10, min_periods=10).std(ddof=1)
+        .reset_index(level=0, drop=True)
+    ).astype(np.float32)
 
     return df
 

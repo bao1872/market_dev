@@ -334,6 +334,94 @@ def iter_chunks(
         offset += chunk_size
 
 
+def get_all_matrix_rows(
+    session: Session,
+    start: date | None = None,
+    end: date | None = None,
+) -> pd.DataFrame:
+    """读取全量研究矩阵行（不分块），用于 Phase E 全量 assignment。
+
+    确保横截面 rank 基于完整市场横截面计算，而非 chunk 子集。
+    全量读取可能超过默认 statement_timeout，因此临时提升至 600s。
+    不在 SQL 中排序（build_features 会排序，避免重复排序）。
+    使用 chunksize 流式读取 + 逐 chunk 转 float32，降低峰值 RSS。
+
+    注意：chunksize 只用于控制读取时的内存峰值，不影响横截面 rank
+    正确性 — 所有 chunk 最终合并为一个完整 DataFrame，rank 在完整
+    横截面上计算。
+
+    Args:
+        session: 只读 SQLAlchemy session
+        start: 可选起始日期
+        end: 可选结束日期
+
+    Returns:
+        全量研究矩阵 DataFrame（未排序，由调用方排序）
+    """
+    conditions: list[str] = []
+    params: dict[str, object] = {}
+    if start:
+        conditions.append("trade_date >= :start")
+        params["start"] = start
+    if end:
+        conditions.append("trade_date <= :end")
+        params["end"] = end
+    where_clause = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    # 全量读取需要更长的 statement_timeout（621k 行 × 23 列）
+    session.execute(text("SET LOCAL statement_timeout = '600s'"))
+    sql = (
+        f"SELECT {', '.join(FEATURE_MATRIX_COLUMNS)} "
+        f"FROM research_feature_matrix_rows{where_clause}"
+    )
+    # 使用 chunksize 流式读取，逐 chunk 转 float32，避免 float64 全量缓冲
+    numeric_cols = [
+        c for c in FEATURE_MATRIX_COLUMNS
+        if c not in ("instrument_id", "symbol", "trade_date")
+    ]
+    chunks: list[pd.DataFrame] = []
+    for chunk in pd.read_sql(
+        text(sql), session.connection(), params=params, chunksize=50000
+    ):
+        for col in numeric_cols:
+            chunk[col] = chunk[col].astype(np.float32)
+        chunks.append(chunk)
+    df = pd.concat(chunks, ignore_index=True)
+    del chunks
+    return df
+
+
+def get_all_instrument_ids(
+    session: Session,
+    start: date | None = None,
+    end: date | None = None,
+) -> list[str]:
+    """返回研究矩阵中所有 distinct instrument_id。
+
+    Args:
+        session: 只读 SQLAlchemy session
+        start: 可选起始日期
+        end: 可选结束日期
+
+    Returns:
+        instrument_id 字符串列表
+    """
+    conditions: list[str] = []
+    params: dict[str, object] = {}
+    if start:
+        conditions.append("trade_date >= :start")
+        params["start"] = start
+    if end:
+        conditions.append("trade_date <= :end")
+        params["end"] = end
+    where_clause = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    sql = text(
+        f"SELECT DISTINCT instrument_id FROM research_feature_matrix_rows{where_clause}"
+    )
+    return [str(r[0]) for r in session.execute(sql, params)]
+
+
 def get_month_instrument_coverage(
     session: Session,
     start: date | None = None,

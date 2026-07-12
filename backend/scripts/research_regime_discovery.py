@@ -32,6 +32,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import logging
 import os
 import resource
@@ -136,16 +137,16 @@ def run_representation(
     Returns:
         {representation, X, labels, k_selected, stable, stability_result,
          model_selection_df, cluster_profiles_df, described_features_df,
-         preprocessing_params}
+         preprocessing_params, winsorize_bounds, model, ...}
     """
     logger.info("=== representation=%s ===", representation)
-    # 1. winsorize
-    winsorized = preprocessing.winsorize_features(features_df, features)
+    # 1. winsorize（fit + transform，保存 bounds 供 Phase E 复用）
+    winsorize_bounds = preprocessing.fit_winsorize_bounds(features_df, features)
+    winsorized = preprocessing.transform_winsorize(features_df, features, winsorize_bounds)
     # 2. 构建矩阵 X
     X, prep_params = preprocessing.build_feature_matrix(winsorized, features, representation)
     logger.info("X shape: %s, n_samples=%d, n_features=%d", X.shape, X.shape[0], X.shape[1])
     # 3. 相关性剪枝（基于 Spearman）
-    _sub_for_corr = winsorized[features].apply(pd.to_numeric, errors="coerce")
     corr_matrix, redundant = distribution_audit.audit_correlation(winsorized, features)
     pruned_features, dropped_pairs = preprocessing.correlation_prune(features, corr_matrix)
     if len(pruned_features) < len(features):
@@ -168,6 +169,7 @@ def run_representation(
     cluster_profiles_df = pd.DataFrame()
     described_features_df = pd.DataFrame()
     labels: np.ndarray | None = None
+    model = None
     if best_k is not None:
         stability_result = stability.check_stability(
             X_pca, best_k, seed=seed,
@@ -232,7 +234,12 @@ def run_representation(
         "pca_params": {
             "n_components": pca_params["n_components"],
             "explained_variance_ratio": pca_params["explained_variance_ratio"],
+            "model": pca_params["model"],
         },
+        "winsorize_bounds": winsorize_bounds,
+        "scaler_params": prep_params.get("scaler", {}),
+        "scaler": prep_params.get("scaler", {}),
+        "model": model,
     }
 
 
@@ -264,8 +271,8 @@ def main() -> int:
         logger.info("  5. representation=%s → winsorize → scaler → PCA → kmeans × %s",
                     args.representation, k_range)
         logger.info("  6. stability（bootstrap ARI + centroid cosine）")
-        logger.info("  7. 若 k 通过：全量 chunk assignment（chunk_size=%d）", args.chunk_size)
-        logger.info("  8. 写 manifest + 7 CSV + report.md")
+        logger.info("  7. 若 k 通过：全量 assignment（get_all_matrix_rows 完整横截面 rank）")
+        logger.info("  8. 写 manifest + 9 CSV + report.md")
         logger.info("  9. enforce_output_size(50MB) + enforce_max_runs(3)")
         logger.info("[dry-run] 退出，不查 DB 不写文件。")
         return 0
@@ -288,10 +295,10 @@ def main() -> int:
         )
         logger.info("抽样完成: %d 行", len(matrix_df))
 
-        # === 获取 close 价格 ===
+        # === 获取 close 价格（用研究矩阵日期范围过滤，避免拉全历史） ===
         inst_ids = matrix_df["instrument_id"].unique().tolist()
         close_df = data_access.fetch_close_prices(
-            session, instrument_ids=inst_ids, start=start, end=end,
+            session, instrument_ids=inst_ids, start=data_min, end=data_max,
         )
         logger.info("close 价格: %d 行", len(close_df))
 
@@ -327,34 +334,108 @@ def main() -> int:
                 features_df, features, rep, k_range, args.seed, dates=dates_series,
             )
 
-        # === 全量 chunk assignment（若任一 representation 通过） ===
+        # === Phase E: 全量 assignment（若任一 representation 通过） ===
+        # 使用 get_all_matrix_rows 读取全量数据，确保横截面 rank 基于
+        # 完整市场横截面计算（而非 chunk 子集）。严禁按行 chunk 分割
+        # 同一交易日后分别 rank。
         transition_df = pd.DataFrame()
+        prevalence_df = pd.DataFrame()
+        dwell_df = pd.DataFrame()
+        full_assignment_rows = 0
         any_stable = any(r["stable"] for r in results.values())
-        if any_stable:
-            logger.info("=== 全量 chunk assignment ===")
-            # 选第一个 stable 的 representation 做全量 assignment
-            chosen_rep = next((r for r in results.values() if r["stable"]), None)
-            if chosen_rep is not None:
-                logger.info("使用 representation=%s 做全量 assignment", chosen_rep["representation"])
-                _all_labels: list[np.ndarray] = []
-                _all_dates: list[pd.Series] = []
-                _all_inst: list[pd.Series] = []
-                # 这里复用 sample 数据（全量 assignment 需要重新走 build_features）
-                # 简化：用 sample 数据做 transition（避免重新跑全量）
-                labels = chosen_rep["labels"]
-                if labels is not None:
-                    sub_df = features_df.dropna(subset=features).reset_index(drop=True)
-                    if len(sub_df) == len(labels):
-                        transition_df = stability.compute_transition_matrix(
-                            labels,
-                            sub_df["instrument_id"].to_numpy(),
-                            sub_df["trade_date"].to_numpy(),
-                        )
-                    else:
-                        logger.warning(
-                            "labels 长度 %d != dropna 后行数 %d，跳过 transition",
-                            len(labels), len(sub_df),
-                        )
+        chosen_rep = next((r for r in results.values() if r["stable"]), None)
+
+        # 保存 sample 行数供 manifest 使用（matrix_df 可能即将被释放）
+        sample_rows_count = len(matrix_df)
+
+        if any_stable and chosen_rep is not None:
+            logger.info("=== Phase E: 全量 assignment（完整横截面 rank） ===")
+            logger.info("使用 representation=%s 做全量 assignment", chosen_rep["representation"])
+
+            # 1. 释放样本数据腾出内存（features 列表后续 manifest 仍需使用）
+            del matrix_df, close_df, features_df
+            # 同时释放 results 中各 representation 的 X 矩阵（Phase E 会重新计算 X_full）
+            for _rep, _r in results.items():
+                _r["X"] = None
+                _r["labels"] = None
+            gc.collect()
+            logger.info("已释放样本数据, RSS=%.0f MB", get_peak_rss_mb())
+
+            # 2. 读取全量研究矩阵（不分块，保证横截面完整）
+            full_matrix_df = data_access.get_all_matrix_rows(session, start, end)
+            logger.info(
+                "全量矩阵: %d 行 × %d 列, RSS=%.0f MB",
+                len(full_matrix_df), full_matrix_df.shape[1], get_peak_rss_mb(),
+            )
+
+            # 3. 全量 close 价格（用 data_min/data_max 过滤日期范围）
+            all_inst_ids = data_access.get_all_instrument_ids(session, start, end)
+            logger.info("全量 instrument 数: %d", len(all_inst_ids))
+            full_close_df = data_access.fetch_close_prices(
+                session, instrument_ids=all_inst_ids,
+                start=data_min, end=data_max,
+            )
+            logger.info("全量 close 价格: %d 行", len(full_close_df))
+
+            # 4. build_features（全量数据，时序派生需要完整历史）
+            full_features_df = feature_builder.build_features(full_matrix_df, full_close_df)
+            del full_matrix_df, full_close_df
+            gc.collect()
+            logger.info(
+                "全量特征构建完成: %d 行, RSS=%.0f MB",
+                len(full_features_df), get_peak_rss_mb(),
+            )
+
+            # 5. winsorize with sample-fitted bounds
+            full_winsorized = preprocessing.transform_winsorize(
+                full_features_df, features, chosen_rep["winsorize_bounds"]
+            )
+
+            # 6. transform_feature_matrix：cross_sectional rank 基于完整市场横截面
+            X_full = preprocessing.transform_feature_matrix(
+                full_winsorized, chosen_rep["pruned_features"],
+                chosen_rep["representation"], chosen_rep,
+            )
+            logger.info(
+                "全量 X: shape=%s, RSS=%.0f MB",
+                X_full.shape, get_peak_rss_mb(),
+            )
+
+            if X_full.shape[0] == 0:
+                logger.warning("全量 assignment 无有效行（X 为空）")
+            else:
+                # 7. PCA transform
+                X_full_pca = preprocessing.transform_pca(X_full, chosen_rep["pca_params"])
+                # 8. predict
+                full_labels = models.assign_clusters(chosen_rep["model"], X_full_pca)
+
+                # 9. 对齐 trade_date/instrument_id 到有效行
+                valid_mask = ~full_features_df[chosen_rep["pruned_features"]].replace(
+                    [np.inf, -np.inf], np.nan
+                ).isna().any(axis=1)
+                valid_idx = valid_mask[valid_mask].index
+                full_dates_arr = full_features_df.loc[valid_idx, "trade_date"].to_numpy()
+                full_inst_arr = full_features_df.loc[valid_idx, "instrument_id"].to_numpy()
+                full_assignment_rows = len(full_labels)
+                logger.info(
+                    "全量 assignment 完成: %d 有效行（原始 %d, SQL 总 %d）",
+                    full_assignment_rows, len(full_features_df), sql_row_count,
+                )
+
+                # 10. 聚合
+                transition_df = stability.compute_transition_matrix(
+                    full_labels, full_inst_arr, full_dates_arr
+                )
+                prevalence_df = stability.monthly_prevalence(
+                    full_labels, full_dates_arr
+                )
+                dwell_df = stability.compute_dwell_time(
+                    full_labels, full_inst_arr, full_dates_arr
+                )
+
+                # 11. 释放全量矩阵
+                del X_full, X_full_pca, full_winsorized, full_features_df
+                gc.collect()
         else:
             logger.info("所有 representation 均未通过稳定性门槛，跳过全量 assignment")
 
@@ -394,7 +475,7 @@ def main() -> int:
             "run_id": run_dir.name,
             "git_sha": git_sha,
             "data_as_of": str(data_as_of),
-            "sample_rows": len(matrix_df),
+            "sample_rows": sample_rows_count,
             "seed": args.seed,
             "representation": args.representation,
             "k_range": list(k_range),
@@ -431,17 +512,27 @@ def main() -> int:
             ),
             "peak_rss_mb": get_peak_rss_mb(),
             "representation": args.representation,
-            "sample_rows": len(matrix_df),
+            "sample_rows": sample_rows_count,
             "k_range": list(k_range),
             "created_at": pd.Timestamp.now().isoformat(),
             "pca_summary": {
-                rep: r["pca_params"] for rep, r in results.items()
+                rep: {
+                    "n_components": r["pca_params"]["n_components"],
+                    "explained_variance_ratio": list(r["pca_params"]["explained_variance_ratio"]),
+                }
+                for rep, r in results.items()
             },
             "redundant_pairs": distribution_audit.summarize_redundant_pairs(redundant_pairs),
             "coverage_summary": coverage_df.to_dict("records") if not coverage_df.empty else [],
             "discrete_summary": discrete_df.to_dict("records") if not discrete_df.empty else [],
             "k_selected": k_selected,
             "stable": stable,
+            "full_assignment": {
+                "rows": full_assignment_rows,
+                "representation": chosen_rep["representation"] if chosen_rep else None,
+                "method": "get_all_matrix_rows",
+                "cross_section_scope": "full_market_per_trade_date",
+            },
         }
         # === 写所有文件 ===
         reporting.write_all(
@@ -453,6 +544,8 @@ def main() -> int:
             profiles_df=profiles_df,
             stability_df=stability_df,
             transition_df=transition_df if not transition_df.empty else pd.DataFrame({"info": ["无 transition（k 未通过或样本不足）"]}),
+            prevalence_df=prevalence_df if not prevalence_df.empty else None,
+            dwell_df=dwell_df if not dwell_df.empty else None,
             report_md=report_md,
         )
         # === 3 run 保留 ===
