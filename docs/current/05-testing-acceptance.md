@@ -43,6 +43,18 @@
 
 ## 3.1 本轮新增回归
 
+- **[PR #74 阶段二 StockContext reasonCode]** `test_stock_state_and_events.py` 新增 6 项 reasonCode API 测试 + 1 项无写副作用测试：
+  - `test_p02_context_no_published_full_run`：无 succeeded+published+full run 时 reasonCode=`no_published_full_run`，state=null
+  - `test_p02_context_snapshot_missing`：run 有但 snapshot 缺失时 reasonCode=`snapshot_missing`，state=null
+  - `test_p02_context_exact_source_run_id`：精确匹配 source_run_id 时 state 非 null，reasonCode=null
+  - `test_p02_context_snapshot_run_not_linked`：legacy snapshot source_run_id=NULL 时 reasonCode=`snapshot_run_not_linked`（内部函数层面），API 层面 state 非 null（legacy 匹配成功）
+  - `test_p02_context_legacy_snapshot_ambiguous`：legacy snapshot 多 run 候选时 reasonCode=`legacy_snapshot_ambiguous`
+  - `test_p02_context_normal_returns_state`：正常场景 state 非 null，reasonCode=null
+  - `test_p02_context_get_no_write_side_effect`：连续 3 次 GET context 后 snapshot/run 行数不变（GET 只读）
+- **[PR #74 阶段二 快照归属修复工具]** `test_repair_snapshot_run_ownership.py` 新增 2 项测试：
+  - `test_repair_dry_run_does_not_write`：dry-run 只查询不写库，source_run_id 仍为 NULL
+  - `test_repair_apply_writes_and_idempotent`：第一次 apply 写入 1 行，第二次 apply 0 行（幂等，WHERE source_run_id IS NULL）
+- **[PR #74 阶段二 EventStatePanel reasonCode 文案]** `frontend/src/features/research-context/__tests__/reasonCodeMessages.test.ts` 新增 8 个子测试覆盖 `getReasonCodeMessage` 纯函数：no_published_full_run / snapshot_missing 含/不含 runTradeDate / snapshot_run_not_linked 含"待修复归属" / legacy_snapshot_ambiguous / null / 未知 code / 所有已知 code 非默认文案
 - `BarsCoverageService` 统一 A 股口径，排除指数/ETF，默认使用 `shanghai_business_date`，返回 `coverage`（展示）与 `coverage_raw`（阈值判断）；
 - `/admin/after-close-runs/dsa-only`、`bars_scheduler`、系统概览 `WAITING_DSA` 判定等覆盖率门禁使用 `coverage_raw` 原始值；
 - `/admin/after-close-runs/dsa-only` 当日无数据时 fallback 到最新交易日，覆盖率不足返回 409；

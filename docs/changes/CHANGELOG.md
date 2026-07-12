@@ -4,6 +4,14 @@
 
 ## 2026-07-13
 
+- CHANGE-20260713-002: PR #74 阶段二 — StockContext reasonCode + 快照归属修复工具 + EventStatePanel 纯函数抽取
+  - reasonCode 机制：StockContext API 返回 dataQuality.reasonCode（no_published_full_run/snapshot_missing/snapshot_run_not_linked/legacy_snapshot_ambiguous/null）+ runTradeDate/runPublishedAt/hasSucceededRun/hasSnapshot/degradedReasons
+  - 快照归属修复工具：tools/repair_snapshot_run_ownership.py（dry-run + --apply，按 trade_date+schema_version+timeframe+adj 匹配 canonical succeeded+published+full run，幂等 UPDATE source_run_id）
+  - EventStatePanel 纯函数抽取：reasonCodeMessages.ts（纯 TypeScript，可测试）
+  - GET context 只读：无写副作用
+  - 测试：9 项 required 测试全通过（6 API + 2 repair + 1 前端）
+  - 生产修复：dry-run 21172 repairable / 100 orphan / 0 ambiguous；--apply 写入 21172 条
+  - 生产验证：10 自选股 + 10 市场股 + 1 异常股 = 21/21 state non-null
 - CHANGE-20260713-001: PR #74 补充修复 — ConsensusZone 移除 + 图层单一状态源 + K 线 viewport 修复 + Published snapshot 保护
   - ConsensusZone 移除：删除 consensus_zone_service.py / consensus_zone.py / test_consensus_zone.py；Phase 5 前成交量分布保持禁用
   - 图层单一状态源：ChartLayerVisibility 类型（7 键 trend/node/boll/volume/macd/sqzmom/breakout）；localStorage key panji:chart-layer-visibility:v2；删除 indicatorVisibility/detail-chart-strategy-groups/setLayers 旧状态源
