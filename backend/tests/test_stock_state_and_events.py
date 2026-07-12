@@ -1488,8 +1488,9 @@ def test_p03_build_event_evidence_includes_values() -> None:
 
 def test_p03_shanghai_tz_not_utc() -> None:
     """P0-3: _SHANGHAI_TZ 必须是 Asia/Shanghai（非 UTC）。"""
-    from app.api.stock_context import _SHANGHAI_TZ
     from zoneinfo import ZoneInfo
+
+    from app.api.stock_context import _SHANGHAI_TZ
 
     assert _SHANGHAI_TZ == ZoneInfo("Asia/Shanghai")
     assert str(_SHANGHAI_TZ) == "Asia/Shanghai"
@@ -1507,8 +1508,9 @@ def test_p03_as_of_cutoff_next_day_exclusive() -> None:
          注意：当前实现使用 <=，所以 == cutoff 的会被包含。这是 SQL 层的语义。
          此处验证 cutoff 本身是次日 00:00 而非 23:59:59。
     """
-    from app.api.stock_context import _SHANGHAI_TZ
     from datetime import timedelta
+
+    from app.api.stock_context import _SHANGHAI_TZ
 
     as_of = date(2026, 7, 10)
     next_day = as_of + timedelta(days=1)
@@ -1540,8 +1542,8 @@ async def test_p03_find_latest_succeeded_run_deterministic_order() -> None:
     from app.api.stock_context import _find_latest_succeeded_run
     from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
 
-    # 构造两个同日 run
-    run_a = StockFeatureSnapshotRun(
+    # 构造两个同日 run（run_a 仅作为上下文，mock 返回 run_b）
+    StockFeatureSnapshotRun(
         trade_date=date(2026, 7, 10),
         schema_version=1,
         primary_timeframe="1d",
@@ -1595,7 +1597,8 @@ async def test_p03_find_run_by_trade_date_deterministic_order() -> None:
     from app.api.stock_context import _find_run_by_trade_date
     from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
 
-    run_a = StockFeatureSnapshotRun(
+    # run_a 仅作为上下文，mock 返回 run_b
+    StockFeatureSnapshotRun(
         trade_date=date(2026, 7, 10),
         schema_version=1,
         primary_timeframe="1d",
@@ -1638,3 +1641,254 @@ async def test_p03_find_run_by_trade_date_deterministic_order() -> None:
     # 验证 ORDER BY 包含 published_at, finished_at
     assert "published_at" in compiled
     assert "finished_at" in compiled
+
+
+# =============================================================================
+# 10. P0-2: StockContext reasonCode 覆盖测试
+# 用户要求 9 项测试中的 5 项 API 测试 + 1 项无写副作用测试
+# ============================================================================
+
+
+async def _create_db_run(
+    db: AsyncSession,
+    trade_date: date = date(2026, 7, 10),
+    status: str = "succeeded",
+    published: bool = True,
+    scope: str = "full",
+    run_id: uuid.UUID | None = None,
+) -> StockFeatureSnapshotRun:
+    """在测试 DB 中创建 snapshot run。"""
+    from datetime import UTC, datetime
+
+    run = StockFeatureSnapshotRun(
+        id=run_id or uuid.uuid4(),
+        trade_date=trade_date,
+        schema_version=1,
+        primary_timeframe="1d",
+        secondary_timeframe="15m",
+        adj="qfq",
+        run_type="after_close",
+        status=status,
+        published_at=datetime.now(UTC) if published and status == "succeeded" else None,
+        finished_at=datetime.now(UTC) if status != "running" else None,
+        metadata_={"scope": scope},
+    )
+    db.add(run)
+    await db.flush()
+    return run
+
+
+async def _create_db_snapshot(
+    db: AsyncSession,
+    instrument_id: uuid.UUID,
+    run: StockFeatureSnapshotRun,
+    source_run_id: uuid.UUID | None = None,
+    trade_date: date | None = None,
+) -> StockFeatureSnapshot:
+    """在测试 DB 中创建 snapshot（source_run_id 可空表示未关联）。"""
+    snap = StockFeatureSnapshot(
+        instrument_id=instrument_id,
+        trade_date=trade_date or run.trade_date,
+        primary_timeframe=run.primary_timeframe,
+        secondary_timeframe=run.secondary_timeframe,
+        adj=run.adj,
+        schema_version=run.schema_version,
+        source_run_id=source_run_id,
+        source_primary_bar_time=datetime(2026, 7, 10, 15, 0, tzinfo=UTC),
+        structural_payload={
+            "primary": {
+                "1d": {
+                    "swing_position": {
+                        "confirmed_swing_breakout_state": "inside",
+                        "price_position_in_swing_0_1": 0.5,
+                        "confirmed_swing_high": 10.5,
+                        "confirmed_swing_low": 9.5,
+                    },
+                    "cost_position": {"poc_price": 10.0},
+                    "volatility_momentum": {"sqzmom_val": 0.001, "bb_percent_b": 0.5},
+                    "macd_state": {"code": "bullish_above", "histogram": 0.05},
+                }
+            }
+        },
+        temporal_payload={
+            "daily_context": {"daily_dsa_dir": 1},
+            "derived_relation": {"m15_response_direction_relative_to_daily": "aligned"},
+        },
+        summary_payload={},
+        degraded_reasons=[],
+    )
+    db.add(snap)
+    await db.flush()
+    return snap
+
+
+@pytest.mark.asyncio
+async def test_p02_context_exact_source_run_id_returns_state(
+    stock_context_client,
+) -> None:
+    """P0-2: exact source_run_id 精确匹配 → state 非空, reasonCode=null。"""
+    client, db = stock_context_client
+    admin = await _create_admin_user(db)
+    inst = await _create_test_instrument(db, "P02001")
+    run = await _create_db_run(db, trade_date=date(2026, 7, 10))
+    await _create_db_snapshot(db, inst.id, run, source_run_id=run.id)
+
+    resp = await client.get(
+        "/api/v1/stocks/P02001/context",
+        headers=_auth_headers(admin.id),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] is not None
+    assert body["state"]["symbol"] == "P02001"
+    assert body["dataQuality"]["reasonCode"] is None
+    assert body["dataQuality"]["hasSucceededRun"] is True
+    assert body["dataQuality"]["hasSnapshot"] is True
+
+
+@pytest.mark.asyncio
+async def test_p02_context_no_published_full_run(
+    stock_context_client,
+) -> None:
+    """P0-2: 无 succeeded+published+full run → state=null, reasonCode=no_published_full_run。"""
+    client, db = stock_context_client
+    admin = await _create_admin_user(db)
+    await _create_test_instrument(db, "P02002")
+    # 不创建任何 run
+
+    resp = await client.get(
+        "/api/v1/stocks/P02002/context",
+        headers=_auth_headers(admin.id),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] is None
+    assert body["dataQuality"]["reasonCode"] == "no_published_full_run"
+    assert body["dataQuality"]["hasSucceededRun"] is False
+    assert body["dataQuality"]["hasSnapshot"] is False
+
+
+@pytest.mark.asyncio
+async def test_p02_context_snapshot_missing(
+    stock_context_client,
+) -> None:
+    """P0-2: run 存在但该 instrument 无快照 → state=null, reasonCode=snapshot_missing。"""
+    client, db = stock_context_client
+    admin = await _create_admin_user(db)
+    await _create_test_instrument(db, "P02003")
+    # 创建 run 但不为该 instrument 创建 snapshot
+    await _create_db_run(db, trade_date=date(2026, 7, 10))
+
+    resp = await client.get(
+        "/api/v1/stocks/P02003/context",
+        headers=_auth_headers(admin.id),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] is None
+    assert body["dataQuality"]["reasonCode"] == "snapshot_missing"
+    assert body["dataQuality"]["hasSucceededRun"] is True
+    assert body["dataQuality"]["hasSnapshot"] is False
+
+
+@pytest.mark.asyncio
+async def test_p02_context_snapshot_run_not_linked(
+    stock_context_client,
+) -> None:
+    """P0-2: legacy 快照 source_run_id=NULL → _get_snapshot_for_instrument 返回 snapshot_run_not_linked。
+
+    API 层面：state 非空（legacy 匹配成功），但 _get_snapshot_for_instrument 内部 reasonCode=snapshot_run_not_linked。
+    """
+    from app.api.stock_context import _get_snapshot_for_instrument
+
+    client, db = stock_context_client
+    admin = await _create_admin_user(db)
+    inst = await _create_test_instrument(db, "P02004")
+    run = await _create_db_run(db, trade_date=date(2026, 7, 10))
+    # 创建 snapshot 但 source_run_id=NULL（未关联）
+    await _create_db_snapshot(db, inst.id, run, source_run_id=None)
+
+    # 测试内部函数返回正确的 reasonCode
+    snapshot, reason_code = await _get_snapshot_for_instrument(db, inst.id, run)
+    assert snapshot is not None
+    assert reason_code == "snapshot_run_not_linked"
+
+    # API 层面：state 非空（legacy 匹配成功构建 state），reasonCode=null（因 snapshot 非 None）
+    resp = await client.get(
+        "/api/v1/stocks/P02004/context",
+        headers=_auth_headers(admin.id),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] is not None
+    assert body["dataQuality"]["reasonCode"] is None  # state 非空时 reasonCode=null
+
+
+@pytest.mark.asyncio
+async def test_p02_context_legacy_snapshot_ambiguous(
+    stock_context_client,
+) -> None:
+    """P0-2: legacy 快照 source_run_id 指向其他 run → _get_snapshot_for_instrument 返回 legacy_snapshot_ambiguous。"""
+    from app.api.stock_context import _get_snapshot_for_instrument
+
+    client, db = stock_context_client
+    inst = await _create_test_instrument(db, "P02005")
+    run = await _create_db_run(db, trade_date=date(2026, 7, 10))
+    # 创建另一个 run（作为 source_run_id 指向的目标）
+    other_run = await _create_db_run(
+        db, trade_date=date(2026, 7, 10), run_id=uuid.uuid4()
+    )
+    # 创建 snapshot，source_run_id 指向 other_run（非查询的 run）
+    await _create_db_snapshot(db, inst.id, run, source_run_id=other_run.id)
+
+    # 测试内部函数：精确匹配失败（source_run_id != run.id），legacy 匹配成功但 source_run_id 指向其他 run
+    snapshot, reason_code = await _get_snapshot_for_instrument(db, inst.id, run)
+    assert snapshot is not None
+    assert reason_code == "legacy_snapshot_ambiguous"
+
+
+@pytest.mark.asyncio
+async def test_p02_context_get_no_write_side_effect(
+    stock_context_client,
+) -> None:
+    """P0-2: GET /context 只读，不产生任何写副作用（不创建事件/snapshot/run）。
+
+    通过在请求前后查询行数验证。
+    """
+    from sqlalchemy import func
+    from sqlalchemy import select as sa_select
+
+    from app.models.stock_feature_snapshot import StockFeatureSnapshot
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+
+    client, db = stock_context_client
+    admin = await _create_admin_user(db)
+    inst = await _create_test_instrument(db, "P02006")
+    run = await _create_db_run(db, trade_date=date(2026, 7, 10))
+    await _create_db_snapshot(db, inst.id, run, source_run_id=run.id)
+
+    # 请求前行数
+    snap_before = await db.scalar(
+        sa_select(func.count()).select_from(StockFeatureSnapshot)
+    )
+    run_before = await db.scalar(
+        sa_select(func.count()).select_from(StockFeatureSnapshotRun)
+    )
+
+    # 发起 GET 请求（多次调用确保无写副作用）
+    for _ in range(3):
+        resp = await client.get(
+            "/api/v1/stocks/P02006/context",
+            headers=_auth_headers(admin.id),
+        )
+        assert resp.status_code == 200
+
+    # 请求后行数不变
+    snap_after = await db.scalar(
+        sa_select(func.count()).select_from(StockFeatureSnapshot)
+    )
+    run_after = await db.scalar(
+        sa_select(func.count()).select_from(StockFeatureSnapshotRun)
+    )
+    assert snap_after == snap_before, "GET context 不得创建 snapshot"
+    assert run_after == run_before, "GET context 不得创建 run"

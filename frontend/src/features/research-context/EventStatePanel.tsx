@@ -15,6 +15,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { useStockContext } from '@/hooks/useApi'
 import type { StockContextResponse, StateValue, StateEventDTO, StateEvidence } from '@/api/endpoints'
+import { getReasonCodeMessage } from './reasonCodeMessages'
 import styles from './EventStatePanel.module.scss'
 
 export type EventStatePanelStyles = typeof styles
@@ -187,6 +188,8 @@ function DataQualityBanner({ response }: { response: StockContextResponse }) {
   )
 }
 
+/** reasonCode 文案映射已抽取到 reasonCodeMessages.ts（纯函数，可测试） */
+
 export function EventStatePanel({
   symbol,
   asOf,
@@ -286,32 +289,16 @@ export function EventStatePanel({
       {!state && (
         <div className={styles.noState}>
           <div className={styles.noStateText}>
-            {dataQuality.reasonCode === 'no_published_full_run' && '尚未有盘后快照发布，状态数据将在下一个交易日盘后生成'}
-            {dataQuality.reasonCode === 'snapshot_missing' && (
-              <>
-                <div>该股票暂无快照数据</div>
-                {dataQuality.runTradeDate && (
-                  <div className={styles.noStateMeta}>最新 run 日期：{dataQuality.runTradeDate}</div>
-                )}
-              </>
-            )}
-            {dataQuality.reasonCode === 'snapshot_run_not_linked' && (
-              <>
-                <div>快照数据存在但尚未关联发布批次</div>
-                {dataQuality.runTradeDate && (
-                  <div className={styles.noStateMeta}>run 日期：{dataQuality.runTradeDate}（待修复归属）</div>
-                )}
-              </>
-            )}
-            {dataQuality.reasonCode === 'legacy_snapshot_ambiguous' && (
-              <>
-                <div>快照数据归属不明确</div>
-                {dataQuality.runTradeDate && (
-                  <div className={styles.noStateMeta}>run 日期：{dataQuality.runTradeDate}</div>
-                )}
-              </>
-            )}
-            {!dataQuality.reasonCode && '暂无可用状态数据'}
+            {(() => {
+              const msg = getReasonCodeMessage(dataQuality.reasonCode, dataQuality.runTradeDate)
+              if (!msg) return null
+              return (
+                <>
+                  <div>{msg.title}</div>
+                  {msg.meta && <div className={styles.noStateMeta}>{msg.meta}</div>}
+                </>
+              )
+            })()}
           </div>
         </div>
       )}
