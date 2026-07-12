@@ -44,10 +44,18 @@ dependencies = [
     "pypinyin>=0.51",
     # [Dependencies] - qstock 用于 board_sync_service 拉取同花顺板块目录和成分（PRD §7.5）
     # 仅在 worker 每日 17:00 调度中使用，不进入用户请求链
-    # 固定版本 1.3.8（2025-03-16 最新稳定版），Docker 构建时 PIP_NO_CACHE_DIR=1
-    "qstock==1.3.8",
-    # [Dependencies] - func_timeout 用于 qstock_fetcher 超时保护（直接 import，非传递依赖）
-    "func-timeout>=4.3.5",
+    # C10 验证：1.3.8 的 __init__.py 导入 bt_backtest（需 backtrader+pyfolio）且 ths_em_pool.py 有
+    # 模块级网络调用；1.3.1 的 __init__.py 不导入 bt_backtest，ths_em_pool 无模块级网络调用，
+    # 且声明了 requests/bs4/jsonpath/multitasking 等全部依赖。经干净容器 build+import 验证。
+    # qstock 1.3.1 import 阶段无顶层网络副作用，但运行时 ths_concept_name_code/ths_index_member
+    # 硬编码 BeautifulSoup(res.text, "lxml") 而 METADATA 未声明 lxml。
+    # pandas.read_html 默认也需要 lxml（pandas.io.html._parser_dispatch 调用
+    # import_optional_dependency("lxml.etree")）。C10 决策：不添加 lxml，
+    # 改为独立实现 QStockTHSAdapter（app/services/ths_adapter.py，用 httpx+bs4[html.parser]
+    # 解析分页/链接/表格，不引入 lxml/backtrader/pyfolio/scikit-learn/pandas.read_html）。
+    # qstock 1.3.1 仅用于 ths_code_name 行业目录 dict（硬编码数据，无网络无依赖）和
+    # get_ths_header() 反爬 cookie 生成（py_mini_racer 执行 qstock/data/ths.js，不复制源码）。
+    "qstock==1.3.1",
 ]
 
 [project.optional-dependencies]

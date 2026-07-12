@@ -58,6 +58,8 @@ def _make_mock_snapshot(
     breakout_state: str | None = "inside",
     daily_dsa_dir: int | None = 1,
     alignment: str | None = "aligned",
+    macd_code: str | None = "bullish_above",
+    consensus_code: str | None = "inside_consensus",
 ) -> StockFeatureSnapshot:
     """构造 mock StockFeatureSnapshot。"""
     return StockFeatureSnapshot(
@@ -89,6 +91,19 @@ def _make_mock_snapshot(
                     },
                     "participation": {
                         "volume_percentile_120": 0.3,
+                    },
+                    # C6: 真实 MACD 紧凑状态 + 真实 ConsensusZone 关系
+                    "macd_state": {
+                        "code": macd_code,
+                        "macd_val": 0.15 if macd_code else None,
+                        "signal_val": 0.10 if macd_code else None,
+                        "histogram": 0.05 if macd_code else None,
+                    },
+                    "consensus_zone_relation": {
+                        "code": consensus_code,
+                        "cluster_lower": 9.5 if consensus_code else None,
+                        "cluster_upper": 10.5 if consensus_code else None,
+                        "cluster_center": 10.0 if consensus_code else None,
                     },
                 }
             }
@@ -161,14 +176,25 @@ def _make_state(
 # =============================================================================
 
 
-def test_build_stock_state_macd_code_is_null() -> None:
-    """V1.1: MACD 只能来自真实 MACD 数据；当前无 MACD 计算，code=null。"""
-    snapshot = _make_mock_snapshot()
+def test_build_stock_state_macd_from_real_data() -> None:
+    """C6: MACD 只能来自真实 MACD 紧凑状态（macd_state），不接受 code=null 作为完成状态。"""
+    snapshot = _make_mock_snapshot(macd_code="bullish_above")
     run = _make_mock_run()
     state = build_stock_state(snapshot, run, symbol="000001")
 
-    assert state.momentum.macd.code is None, "MACD code 必须为 null（无真实 MACD）"
-    assert state.momentum.macd.label == "暂不可用"
+    assert state.momentum.macd.code == "bullish_above", "MACD code 必须来自真实 macd_state"
+    assert "MACD" in state.momentum.macd.label
+    assert state.momentum.macd.sourceField == "macd_state"
+
+
+def test_build_stock_state_macd_null_when_no_data() -> None:
+    """C6: macd_state.code=None 时 MACD 显示数据不足（非'暂不可用'永久状态）。"""
+    snapshot = _make_mock_snapshot(macd_code=None)
+    run = _make_mock_run()
+    state = build_stock_state(snapshot, run, symbol="000001")
+
+    assert state.momentum.macd.code is None
+    assert "数据不足" in state.momentum.macd.label
 
 
 def test_build_stock_state_sqzmom_independent_from_macd() -> None:
@@ -196,14 +222,26 @@ def test_build_stock_state_source_run_id_from_real_run() -> None:
     assert state.version == "v1", "version 必须来自 schema_version"
 
 
-def test_build_stock_state_value_area_zone_not_consensus() -> None:
-    """V1.1: value_area_zone → "成交密集区关系"，Phase 5 前不得叫筹码共识。"""
-    snapshot = _make_mock_snapshot(value_area_zone="inside_va")
+def test_build_stock_state_consensus_zone_relation() -> None:
+    """C6: ConsensusZone 关系来自真实 consensus_zone_relation，不使用 value_area_zone。"""
+    snapshot = _make_mock_snapshot(consensus_code="inside_consensus")
     run = _make_mock_run()
     state = build_stock_state(snapshot, run, symbol="000001")
 
+    assert state.structure.consensusRelation.code == "inside_consensus"
     assert "成交密集区" in state.structure.consensusRelation.label
     assert "筹码共识" not in state.structure.consensusRelation.label
+    assert state.structure.consensusRelation.sourceField == "consensus_zone_relation"
+
+
+def test_build_stock_state_consensus_zone_null_when_no_data() -> None:
+    """C6: consensus_zone_relation.code=None 时显示数据不足（不用 value_area_zone 回退）。"""
+    snapshot = _make_mock_snapshot(consensus_code=None, value_area_zone="inside_va")
+    run = _make_mock_run()
+    state = build_stock_state(snapshot, run, symbol="000001")
+
+    assert state.structure.consensusRelation.code is None
+    assert "数据不足" in state.structure.consensusRelation.label
 
 
 def test_build_stock_state_as_of_from_snapshot_trade_date() -> None:
@@ -1134,3 +1172,197 @@ async def test_admin_stock_debug_admin_returns_200(
         headers=_auth_headers(admin.id),
     )
     assert resp.status_code == 200
+
+
+# =============================================================================
+# 9. C3: 幂等键包含 evidence（field + prev/curr code/value）
+# =============================================================================
+
+
+def test_c3_idempotency_key_differs_for_different_transitions() -> None:
+    """C3: 相同 changed_fields 但不同 prev/curr code/value 必须产生不同幂等键。
+
+    场景：momentum.sqzmom 字段变化
+    - 转换 A: positive → negative
+    - 转换 B: negative → positive
+    两者 changed_fields 相同（["momentum.sqzmom"]），但 evidence 不同，
+    幂等键必须不同，否则 B 会被 ON CONFLICT DO NOTHING 错误跳过。
+    """
+    from app.services.state_event_service import compute_idempotency_key
+
+    symbol = "000001"
+    trade_date = date(2026, 7, 10)
+    algo_version = "schema_v1+state_v1"
+
+    # 转换 A: positive → negative
+    evidence_a = [{"field": "momentum.sqzmom", "prevCode": "positive", "currCode": "negative"}]
+    key_a = compute_idempotency_key(symbol, trade_date, algo_version, evidence_a)
+
+    # 转换 B: negative → positive
+    evidence_b = [{"field": "momentum.sqzmom", "prevCode": "negative", "currCode": "positive"}]
+    key_b = compute_idempotency_key(symbol, trade_date, algo_version, evidence_b)
+
+    assert key_a != key_b, (
+        f"不同转换必须产生不同幂等键: A={key_a}, B={key_b}"
+    )
+
+
+def test_c3_idempotency_key_same_evidence_same_key() -> None:
+    """C3: 相同 evidence（同日重跑）必须产生相同幂等键（幂等性保证）。"""
+    from app.services.state_event_service import compute_idempotency_key
+
+    symbol = "000001"
+    trade_date = date(2026, 7, 10)
+    algo_version = "schema_v1+state_v1"
+    evidence = [
+        {"field": "momentum.sqzmom", "prevCode": "positive", "currCode": "negative"},
+        {"field": "volatility.bollPosition", "prevCode": "middle", "currCode": "near_upper"},
+    ]
+
+    key_1 = compute_idempotency_key(symbol, trade_date, algo_version, evidence)
+    # 打乱顺序后计算，key 应相同（sorted 保证稳定性）
+    evidence_shuffled = list(reversed(evidence))
+    key_2 = compute_idempotency_key(symbol, trade_date, algo_version, evidence_shuffled)
+
+    assert key_1 == key_2, "相同 evidence（不同顺序）必须产生相同幂等键"
+
+
+def test_c3_idempotency_key_differs_from_field_only_hash() -> None:
+    """C3: 包含值的幂等键必须与只含字段名的旧方案不同。
+
+    验证：相同 changed_fields（字段名相同）但不同值，
+    新方案产生不同 key，旧方案（只 hash 字段名）会产生相同 key。
+    """
+    from app.services.state_event_service import compute_idempotency_key
+
+    symbol = "000001"
+    trade_date = date(2026, 7, 10)
+    algo_version = "schema_v1+state_v1"
+
+    # 两个不同转换，相同字段
+    evidence_a = [{"field": "momentum.macd", "prevCode": None, "currCode": "positive"}]
+    evidence_b = [{"field": "momentum.macd", "prevCode": "positive", "currCode": "negative"}]
+
+    key_a = compute_idempotency_key(symbol, trade_date, algo_version, evidence_a)
+    key_b = compute_idempotency_key(symbol, trade_date, algo_version, evidence_b)
+
+    # 新方案：不同值 → 不同 key
+    assert key_a != key_b
+
+
+# =============================================================================
+# 10. C4: 前一成功状态同日多 run 确定性选择最新批次
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_c4_previous_snapshot_picks_latest_run_same_day() -> None:
+    """C4: 同日存在多个成功 run 时，按 published_at DESC 确定性选最新。
+
+    场景：instrument X 在 2026-07-09 有两条成功 run 的快照
+    - Run A: published_at = 10:00
+    - Run B: published_at = 15:00
+    应选择 Run B（最新发布）。
+    """
+    from app.services.state_event_service import _batch_get_previous_snapshots
+
+    inst_id = uuid4()
+    mock_session = MagicMock()
+
+    # 构造两个同日快照 + run
+    snap_a = _make_mock_snapshot(trade_date=date(2026, 7, 9))
+    snap_a.instrument_id = inst_id
+    run_a = _make_mock_run(trade_date=date(2026, 7, 9))
+    run_a.published_at = datetime(2026, 7, 9, 10, 0, tzinfo=UTC)
+
+    snap_b = _make_mock_snapshot(trade_date=date(2026, 7, 9))
+    snap_b.instrument_id = inst_id
+    run_b = _make_mock_run(trade_date=date(2026, 7, 9))
+    run_b.published_at = datetime(2026, 7, 9, 15, 0, tzinfo=UTC)
+
+    # 模拟 SQL 返回（ORDER BY 已确保 B 在前）
+    mock_result = MagicMock()
+    mock_result.all.return_value = [(snap_b, run_b), (snap_a, run_a)]
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    result = await _batch_get_previous_snapshots(
+        mock_session,
+        [inst_id],
+        current_trade_date=date(2026, 7, 10),
+        schema_version=1,
+        primary_timeframe="1d",
+        secondary_timeframe="15m",
+        adj="qfq",
+    )
+
+    assert inst_id in result
+    selected_snap, selected_run = result[inst_id]
+    # C4: 必须选择 published_at 更新的 run_b
+    assert selected_run.published_at == run_b.published_at, (
+        "C4: 同日多 run 必须选最新 published_at"
+    )
+
+
+@pytest.mark.asyncio
+async def test_c4_previous_snapshot_first_row_wins() -> None:
+    """C4: 首行保留逻辑 — 同 instrument 后续行跳过。
+
+    模拟 SQL ORDER BY published_at DESC 返回多行，
+    只有第一行（最新 run）被保留。
+    """
+    from app.services.state_event_service import _batch_get_previous_snapshots
+
+    inst_id = uuid4()
+    mock_session = MagicMock()
+
+    snap_old = _make_mock_snapshot(trade_date=date(2026, 7, 9))
+    snap_old.instrument_id = inst_id
+    run_old = _make_mock_run(trade_date=date(2026, 7, 9))
+    run_old.published_at = datetime(2026, 7, 9, 10, 0, tzinfo=UTC)
+
+    snap_new = _make_mock_snapshot(trade_date=date(2026, 7, 9))
+    snap_new.instrument_id = inst_id
+    run_new = _make_mock_run(trade_date=date(2026, 7, 9))
+    run_new.published_at = datetime(2026, 7, 9, 15, 0, tzinfo=UTC)
+
+    # SQL 已 ORDER BY published_at DESC，new 在前
+    mock_result = MagicMock()
+    mock_result.all.return_value = [(snap_new, run_new), (snap_old, run_old)]
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    result = await _batch_get_previous_snapshots(
+        mock_session,
+        [inst_id],
+        current_trade_date=date(2026, 7, 10),
+        schema_version=1,
+        primary_timeframe="1d",
+        secondary_timeframe="15m",
+        adj="qfq",
+    )
+
+    # 只保留首行（最新 run）
+    assert len(result) == 1
+    _, selected_run = result[inst_id]
+    assert selected_run.published_at == run_new.published_at
+
+
+@pytest.mark.asyncio
+async def test_c4_previous_snapshot_empty_instrument_ids() -> None:
+    """C4: 空 instrument_ids 直接返回空 dict（不发 SQL）。"""
+    from app.services.state_event_service import _batch_get_previous_snapshots
+
+    mock_session = MagicMock()
+    mock_session.execute = AsyncMock()
+
+    result = await _batch_get_previous_snapshots(
+        mock_session,
+        [],
+        current_trade_date=date(2026, 7, 10),
+        schema_version=1,
+        primary_timeframe="1d",
+        secondary_timeframe="15m",
+        adj="qfq",
+    )
+
+    assert result == {}
+    mock_session.execute.assert_not_awaited()

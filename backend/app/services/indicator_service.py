@@ -662,13 +662,27 @@ async def compute_all_indicators(
         else:
             as_of_str = today.isoformat()
 
-        # V2: 日线主结构 + 15m 细化
-        # 15m 固定输入窗口 = NODE_CLUSTER_LOW_BARS (4000根)，不随显示周期/count 变化
-        consensus_15m = (
-            bars_15min.tail(NODE_CLUSTER_LOW_BARS)
-            if not bars_15min.empty
-            else None
-        )
+        # C1: 数据库直接查询 4000 根 15m（DESC + LIMIT），
+        # 禁止先加载约 12000 根再截取。
+        # compute_and_cache_consensus_zone 内部仍会 filter + tail 作为安全保证。
+        consensus_15m: pd.DataFrame | None = None
+        try:
+            consensus_15m = await _query_15min_bars(
+                session, instrument_id,
+                start_time=intraday_start_dt,
+                end_time=intraday_end_dt,
+                limit=NODE_CLUSTER_LOW_BARS,
+            )
+            if adj == "qfq" and not consensus_15m.empty:
+                consensus_15m = apply_adj_factor_to_bars(
+                    consensus_15m, adj_factor_df, intraday=True
+                )
+        except Exception as cz_exc:
+            logger.warning(
+                "ConsensusZone 15m 查询失败，降级为空: %s", cz_exc,
+            )
+            consensus_15m = None
+
         consensus_result = await compute_and_cache_consensus_zone(
             daily_bars, symbol, as_of_str,
             bars_15min=consensus_15m,

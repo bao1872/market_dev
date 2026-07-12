@@ -19,7 +19,7 @@ export const APP_ROUTES = {
   adminOverview: '/admin/overview',
   adminUsers: '/admin/users',
   adminBeta: '/admin/beta-applications',
-  adminStrategies: '/admin/strategies',
+  // C8: adminStrategies 已废弃，重定向到 adminAfterClose（DSA 运行能力保留在盘后流水线）
   adminJobs: '/admin/jobs',
   adminAfterClose: '/admin/after-close',
   adminStockDebug: '/admin/stocks',

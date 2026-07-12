@@ -22,7 +22,7 @@ import pandas as pd
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants import indicator_contract as IC
+from app.constants import indicator_contract as IC  # noqa: N812
 from app.models.bar import Bar15Min, BarDaily, BarMinute
 from app.repositories.bar_repository import get_recent_bars
 
@@ -139,6 +139,71 @@ async def test_get_recent_bars_15min_returns_exactly_node_cluster_low_bars(
     assert df.index.is_monotonic_increasing
     # 最后一根是最新插入的
     assert df.index[-1] == pd.Timestamp(base_ts)
+
+
+# ============================================================
+# 3b. 15m 周期：插入 5000 根，limit=4000 只返回最新 4000 根（丢弃最旧 1000 根）
+#     C10 Step 6: 断言首尾时间，验证 DESC+LIMIT+reverse 语义
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_get_recent_bars_15min_limit_drops_oldest(
+    db_session: AsyncSession, test_instrument,
+):
+    """插入 5000 根 15m bar，limit=4000 只返回最新 4000 根。
+
+    C10 Step 6: 验证 SQL DESC + LIMIT + reverse-to-ASC 语义：
+    - 返回行数 == 4000（不超过 limit，丢弃最旧 1000 根）
+    - index 升序（最早在前，最新在后）
+    - 首尾时间正确：第一根是第 1001 根（ts_1000），最后一根是第 5000 根（ts_4999）
+    - 不包含最旧的 1000 根（ts_0 不在结果中）
+    """
+    inst_id = test_instrument.id
+    base_ts = datetime(2026, 6, 27, 15, 0)
+    total = 5000
+    limit = IC.NODE_CLUSTER_LOW_BARS  # 4000
+    # 生成 5000 根连续 15m bar，close 编码序号便于验证
+    rows = []
+    for i in range(total):
+        ts = base_ts - timedelta(minutes=15 * (total - 1 - i))
+        rows.append(Bar15Min(
+            instrument_id=inst_id,
+            trade_time=ts,
+            open=Decimal("10.00"),
+            high=Decimal("10.50"),
+            low=Decimal("9.80"),
+            close=Decimal(f"{i}.00"),  # close == 序号，便于验证
+            volume=Decimal("100000"),
+            amount=Decimal("1000000"),
+            adj_factor=Decimal("1.0"),
+        ))
+    db_session.add_all(rows)
+    await db_session.flush()
+
+    df = await get_recent_bars(db_session, inst_id, period="15m", limit=limit)
+
+    # 1. 只返回最新 4000 根
+    assert len(df) == limit == 4000
+    # 2. 升序
+    assert df.index.is_monotonic_increasing
+    # 3. 首尾时间断言：第一根是 ts[1000]，最后一根是 ts[4999]
+    expected_first_ts = pd.Timestamp(
+        base_ts - timedelta(minutes=15 * (total - 1 - 1000))
+    )
+    expected_last_ts = pd.Timestamp(base_ts)
+    assert df.index[0] == expected_first_ts, (
+        f"首根时间错误: expected {expected_first_ts}, got {df.index[0]}"
+    )
+    assert df.index[-1] == expected_last_ts, (
+        f"末根时间错误: expected {expected_last_ts}, got {df.index[-1]}"
+    )
+    # 4. 验证丢弃了最旧 1000 根：close=0..999 不在结果中
+    result_closes = set(df["close"].astype(float).astype(int))
+    assert 0 not in result_closes, "最旧根（close=0）不应在结果中"
+    assert 999 not in result_closes, "第 1000 根（close=999）不应在结果中"
+    assert 1000 in result_closes, "第 1001 根（close=1000）应在结果中"
+    assert 4999 in result_closes, "最新根（close=4999）应在结果中"
 
 
 # ============================================================

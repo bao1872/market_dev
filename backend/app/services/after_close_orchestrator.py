@@ -1092,38 +1092,8 @@ async def execute_after_close_run(
                         )
                     await db.commit()
 
-            # [Phase4] 事件生成钩子：succeeded run 提交后，比较相邻快照生成状态变化事件
-            # 独立 session + try/except：事件生成失败不影响 orchestrator 主流程
-            if snapshot_error is None and snapshot_run_id is not None:
-                try:
-                    from app.services.state_event_service import (
-                        cleanup_old_events,
-                        generate_events_for_run,
-                    )
-                    async with AsyncSessionLocal() as event_db:
-                        event_stats = await generate_events_for_run(event_db, snapshot_run_id)
-                        # 90 天清理（P1-2）：事件生成后执行，失败不阻断主发布
-                        cleanup_stats = await cleanup_old_events(event_db)
-                        await event_db.commit()
-                    logger.info(
-                        "[AfterClose] 状态事件生成完成: run_id=%s, "
-                        "event_count=%s, skipped=%s, failed=%s, "
-                        "cleanup_deleted=%s, cleanup_duration_ms=%s",
-                        snapshot_run_id,
-                        event_stats.get("event_count", 0),
-                        event_stats.get("skipped_count", 0),
-                        event_stats.get("failed_count", 0),
-                        cleanup_stats.get("deleted_count", 0),
-                        cleanup_stats.get("duration_ms", 0),
-                    )
-                except Exception as event_exc:
-                    logger.warning(
-                        "[AfterClose] 状态事件生成失败（不影响主流程）: "
-                        "run_id=%s, error=%s",
-                        snapshot_run_id, event_exc, exc_info=True,
-                    )
-
             # 失败时向上传播 RuntimeError，触发 orchestrator FAILED 状态写入，跳过 publishing
+            # C5: 事件生成已移到 publishing 成功之后，此处失败不会生成事件
             if snapshot_error is not None:
                 raise snapshot_error
 
@@ -1172,6 +1142,38 @@ async def execute_after_close_run(
                     db, job_run, AfterCloseRunStatus.PUBLISHING.value, worker_id,
                 )
                 await db.commit()
+
+        # C5: 事件生成在 publishing 成功之后（或 skip_publish 断点恢复时已发布）
+        # publishing 失败会抛异常跳过此处 → 不生成事件
+        # 独立 session + try/except：事件生成失败不影响 orchestrator 主流程
+        if snapshot_error is None and snapshot_run_id is not None:
+            try:
+                from app.services.state_event_service import (
+                    cleanup_old_events,
+                    generate_events_for_run,
+                )
+                async with AsyncSessionLocal() as event_db:
+                    event_stats = await generate_events_for_run(event_db, snapshot_run_id)
+                    # 90 天清理（P1-2）：事件生成后执行，失败不阻断主发布
+                    cleanup_stats = await cleanup_old_events(event_db)
+                    await event_db.commit()
+                logger.info(
+                    "[AfterClose] 状态事件生成完成: run_id=%s, "
+                    "event_count=%s, skipped=%s, failed=%s, "
+                    "cleanup_deleted=%s, cleanup_duration_ms=%s",
+                    snapshot_run_id,
+                    event_stats.get("event_count", 0),
+                    event_stats.get("skipped_count", 0),
+                    event_stats.get("failed_count", 0),
+                    cleanup_stats.get("deleted_count", 0),
+                    cleanup_stats.get("duration_ms", 0),
+                )
+            except Exception as event_exc:
+                logger.warning(
+                    "[AfterClose] 状态事件生成失败（不影响主流程）: "
+                    "run_id=%s, error=%s",
+                    snapshot_run_id, event_exc, exc_info=True,
+                )
 
         # ---- 步骤 5: succeeded ----
         async with AsyncSessionLocal() as db:

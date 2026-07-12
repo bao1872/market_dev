@@ -1524,5 +1524,198 @@ async def test_execute_calls_repair_at_start(db_session) -> None:
     assert job_run.status == "succeeded"
 
 
+# =============================================================================
+# C5: 事件生成在 publishing 成功之后（publishing 失败不生成事件）
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_c5_publishing_failure_skips_event_generation(db_session) -> None:
+    """C5: publishing 失败时不生成状态事件。
+
+    场景：feature_snapshot 成功，但 publish_run 抛 RuntimeError。
+    要求：generate_events_for_run 不被调用（事件只在发布成功后生成）。
+    """
+    dsa_run, _ = await _create_dsa_strategy_run(db_session, status="completed")
+    job_run = await _create_after_close_job_run(db_session)
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return db_session
+        async def __aexit__(self, *args):
+            return False
+
+    fake_session_local = MagicMock(return_value=_FakeSessionContext())
+
+    fake_batch_result = BatchResult(total=100, succeeded=95)
+    fake_batch_result.dsa_run_id = dsa_run.id
+    fake_batch_result.daily_covered = 95
+    fake_batch_result.daily_total = 100
+    fake_batch_result.daily_coverage = 0.95
+
+    fake_published_run = MagicMock()
+    fake_published_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+
+    original_get = db_session.get
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+
+    async def _fake_get(model, id, *args, **kwargs):
+        if model is SchedulerJobRun and id == job_run.id:
+            return job_run
+        if model is StrategyRun and id == dsa_run.id:
+            return dsa_run
+        if model is StockFeatureSnapshotRun:
+            return await original_get(model, id, *args, **kwargs)
+        return None
+
+    event_gen_call_count = 0
+
+    async def _fake_generate_events(*args, **kwargs):
+        nonlocal event_gen_call_count
+        event_gen_call_count += 1
+        return {"event_count": 0}
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        new=fake_session_local,
+    ), patch.object(
+        db_session, "commit", new=db_session.flush,
+    ), patch.object(
+        db_session, "rollback", new=AsyncMock(return_value=None),
+    ), patch.object(
+        db_session, "get",
+        new=_fake_get,
+    ), patch.object(
+        BarsSchedulerService, "refresh_all_instruments",
+        new=AsyncMock(return_value=fake_batch_result),
+    ), patch(
+        "app.services.after_close_orchestrator._poll_dsa_run_status",
+        new=AsyncMock(return_value="completed"),
+    ), patch.object(
+        StrategyBatchService, "_check_quality_gates",
+        new=AsyncMock(return_value=True),
+    ), patch.object(
+        StrategyBatchService, "publish_run",
+        new=AsyncMock(side_effect=RuntimeError("publishing 失败：质量门禁不通过")),
+    ), patch(
+        "app.services.after_close_orchestrator.get_active_a_share_instruments",
+        new=AsyncMock(return_value=[uuid.uuid4()]),
+    ), patch(
+        "app.services.after_close_orchestrator.compute_for_trade_date",
+        new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
+    ), patch(
+        "app.services.state_event_service.generate_events_for_run",
+        new=_fake_generate_events,
+    ), patch(
+        "app.services.state_event_service.cleanup_old_events",
+        new=AsyncMock(return_value={"deleted_count": 0}),
+    ):
+        with pytest.raises(RuntimeError, match="publishing 失败"):
+            await execute_after_close_run(
+                job_run_id=job_run.id,
+                trade_date=date(2026, 6, 25),
+                dsa_poll_interval=0,
+                dsa_poll_timeout=1,
+            )
+
+    # C5 核心断言：publishing 失败时 generate_events_for_run 不被调用
+    assert event_gen_call_count == 0, (
+        f"publishing 失败不应生成事件，但 generate_events_for_run 被调用了 {event_gen_call_count} 次"
+    )
+
+
+@pytest.mark.asyncio
+async def test_c5_publishing_success_generates_events_once(db_session) -> None:
+    """C5: publishing 成功后生成状态事件且仅生成一次。
+
+    场景：feature_snapshot 成功 + publish_run 成功。
+    要求：generate_events_for_run 被调用恰好 1 次。
+    """
+    dsa_run, _ = await _create_dsa_strategy_run(db_session, status="completed")
+    job_run = await _create_after_close_job_run(db_session)
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return db_session
+        async def __aexit__(self, *args):
+            return False
+
+    fake_session_local = MagicMock(return_value=_FakeSessionContext())
+
+    fake_batch_result = BatchResult(total=100, succeeded=95)
+    fake_batch_result.dsa_run_id = dsa_run.id
+    fake_batch_result.daily_covered = 95
+    fake_batch_result.daily_total = 100
+    fake_batch_result.daily_coverage = 0.95
+
+    fake_published_run = MagicMock()
+    fake_published_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+
+    original_get = db_session.get
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+
+    async def _fake_get(model, id, *args, **kwargs):
+        if model is SchedulerJobRun and id == job_run.id:
+            return job_run
+        if model is StrategyRun and id == dsa_run.id:
+            return dsa_run
+        if model is StockFeatureSnapshotRun:
+            return await original_get(model, id, *args, **kwargs)
+        return None
+
+    event_gen_call_count = 0
+
+    async def _fake_generate_events(*args, **kwargs):
+        nonlocal event_gen_call_count
+        event_gen_call_count += 1
+        return {"event_count": 1, "inserted_count": 1}
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        new=fake_session_local,
+    ), patch.object(
+        db_session, "commit", new=db_session.flush,
+    ), patch.object(
+        db_session, "get",
+        new=_fake_get,
+    ), patch.object(
+        BarsSchedulerService, "refresh_all_instruments",
+        new=AsyncMock(return_value=fake_batch_result),
+    ), patch(
+        "app.services.after_close_orchestrator._poll_dsa_run_status",
+        new=AsyncMock(return_value="completed"),
+    ), patch.object(
+        StrategyBatchService, "_check_quality_gates",
+        new=AsyncMock(return_value=True),
+    ), patch.object(
+        StrategyBatchService, "publish_run",
+        new=AsyncMock(return_value=fake_published_run),
+    ), patch(
+        "app.services.after_close_orchestrator.get_active_a_share_instruments",
+        new=AsyncMock(return_value=[uuid.uuid4()]),
+    ), patch(
+        "app.services.after_close_orchestrator.compute_for_trade_date",
+        new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
+    ), patch(
+        "app.services.state_event_service.generate_events_for_run",
+        new=_fake_generate_events,
+    ), patch(
+        "app.services.state_event_service.cleanup_old_events",
+        new=AsyncMock(return_value={"deleted_count": 0}),
+    ):
+        await execute_after_close_run(
+            job_run_id=job_run.id,
+            trade_date=date(2026, 6, 25),
+            dsa_poll_interval=0,
+            dsa_poll_timeout=1,
+        )
+
+    # C5 核心断言：publishing 成功后 generate_events_for_run 恰好调用 1 次
+    assert event_gen_call_count == 1, (
+        f"publishing 成功后应生成事件恰好 1 次，实际调用 {event_gen_call_count} 次"
+    )
+    assert job_run.status == "succeeded"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

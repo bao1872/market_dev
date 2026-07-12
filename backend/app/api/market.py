@@ -144,7 +144,7 @@ from uuid import UUID  # noqa: E402
 
 from fastapi import HTTPException  # noqa: E402
 
-from app.schemas.market_stocks import MarketStocksResponse  # noqa: E402
+from app.schemas.market_stocks import MarketBoardsResponse, MarketStocksResponse  # noqa: E402
 from app.services.access_control_service import AccessContext, require_authenticated  # noqa: E402
 from app.services.market_stocks_service import get_market_stocks  # noqa: E402
 
@@ -206,3 +206,29 @@ async def list_market_stocks(
     except ValueError as exc:
         # 排序参数校验失败 → 422
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+# ===== C9: 板块目录只读 API（行业/概念筛选下拉支持）=====
+
+
+@router.get("/boards", response_model=MarketBoardsResponse)
+async def list_market_boards(
+    type: str | None = Query(
+        None,
+        description="板块类型过滤：industry | concept（不传返回全部）",
+    ),
+    db: AsyncSession = Depends(get_db),
+    ctx: AccessContext = Depends(require_authenticated),
+) -> MarketBoardsResponse:
+    """板块目录只读 API（C9），供前端行业/概念筛选下拉/自动完成使用。
+
+    从 market_boards 表读取板块目录，qstock 同步前返回空列表（不报错）。
+    """
+    if type is not None and type not in ("industry", "concept"):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid type value: {type}; must be one of: industry, concept",
+        )
+    from app.services.market_stocks_service import get_market_boards
+
+    return await get_market_boards(db=db, board_type=type)

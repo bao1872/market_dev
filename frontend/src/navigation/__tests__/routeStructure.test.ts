@@ -72,12 +72,20 @@ test('/settings 经过 UserAppShell 但不经过 SubscriberRoute', () => {
 })
 
 test('/admin/* 经过 AdminRoute + AdminAppShell', () => {
-  const adminPaths = ['/admin', '/admin/overview', '/admin/users', '/admin/beta-applications', '/admin/strategies', '/admin/jobs', '/admin/after-close', '/admin/stocks', '/admin/stocks/:symbol/debug']
+  const adminPaths = ['/admin', '/admin/overview', '/admin/users', '/admin/beta-applications', '/admin/jobs', '/admin/after-close', '/admin/stocks', '/admin/stocks/:symbol/debug']
   for (const p of adminPaths) {
     assert.ok(hasGuardInChain(ROUTE_STRUCTURE, p, 'admin'), `${p} 应经过 AdminRoute`)
     assert.ok(hasShellInChain(ROUTE_STRUCTURE, p, 'admin'), `${p} 应经过 AdminAppShell`)
     assert.ok(!hasShellInChain(ROUTE_STRUCTURE, p, 'user'), `${p} 不应经过 UserAppShell`)
   }
+})
+
+// C8: /admin/strategies 已废弃，重定向到 /admin/after-close
+test('/admin/strategies 重定向到 /admin/after-close', () => {
+  const node = findRouteNode(ROUTE_STRUCTURE, '/admin/strategies')
+  assert.ok(node, '/admin/strategies 路由应存在')
+  assert.strictEqual(node!.node.guard, 'redirect', '/admin/strategies 应为 redirect 守卫')
+  assert.strictEqual(node!.node.redirectTo, '/admin/after-close', '/admin/strategies 应重定向到 /admin/after-close')
 })
 
 test('/admin/stocks/:symbol/debug 调试路由位于管理员壳层（不暴露给普通用户）', () => {

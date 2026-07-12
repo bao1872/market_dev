@@ -219,43 +219,56 @@ def _build_price_structure(
 def _build_consensus_relation(
     primary_factors: dict[str, Any], timeframe: str
 ) -> StateValue:
-    """从 cost_position.value_area_zone 构建 structure.consensusRelation。
+    """C6: 从 consensus_zone_relation 构建结构共识关系。
 
-    V1.1: 只能叫"成交密集区关系"，Phase 5 前不得叫"筹码共识"。
+    真实 ConsensusZone 关系（不使用 value_area_zone 替代）。
+    V1.1: Phase 5 前不得叫筹码共识，使用"成交密集区"。
     """
-    cost = _safe_get(primary_factors, "cost_position", {})
-    va_zone = _safe_get(cost, "value_area_zone")
+    cz = _safe_get(primary_factors, "consensus_zone_relation", {})
+    code = _safe_get(cz, "code")
 
     label_map = {
-        "above_va": "位于成交密集区上方",
-        "below_va": "位于成交密集区下方",
-        "inside_va": "位于成交密集区内",
+        "inside_consensus": "位于成交密集区内",
+        "above_consensus": "位于成交密集区上方",
+        "below_consensus": "位于成交密集区下方",
     }
-    label = label_map.get(va_zone, "成交密集区数据不足")
+    label = label_map.get(code, "成交密集区数据不足")
 
     return _make_state_value(
-        code=va_zone,
+        code=code,
         label=label,
-        value=_safe_get(cost, "value_area_position_0_1"),
+        value=_safe_get(cz, "cluster_center"),
         unit=None,
         timeframe=timeframe,
-        source_field="cost_position.value_area_zone",
+        source_field="consensus_zone_relation",
     )
 
 
-def _build_macd(timeframe: str) -> StateValue:
-    """构建 momentum.macd。
+def _build_macd(
+    primary_factors: dict[str, Any], timeframe: str
+) -> StateValue:
+    """C6: 从 macd_state 构建真实 MACD 紧凑状态。
 
-    V1.1: MACD 只能来自真实 MACD 数据。当前系统无 MACD 计算，
-    code=null, label="暂不可用"。禁止用 SQZMOM 冒充 MACD。
+    V1.1: MACD 只能来自真实 MACD 数据。禁止用 SQZMOM 冒充 MACD。
     """
+    macd_state = _safe_get(primary_factors, "macd_state", {})
+    code = _safe_get(macd_state, "code")
+
+    label_map = {
+        "bullish_above": "MACD 多头增强",
+        "bullish_below": "MACD 多头减弱",
+        "bearish_below": "MACD 空头增强",
+        "bearish_above": "MACD 空头减弱",
+    }
+    label = label_map.get(code, "MACD 数据不足")
+
     return _make_state_value(
-        code=None,
-        label="暂不可用",
-        value=None,
+        code=code,
+        label=label,
+        value=_safe_get(macd_state, "histogram"),
         unit=None,
         timeframe=timeframe,
-        source_field="macd",  # 标识来源字段，但当前无数据
+        source_field="macd_state",
     )
 
 
@@ -470,7 +483,7 @@ def build_stock_state(
     # 构建各状态字段
     price = _build_price_structure(primary_factors, primary_tf)
     consensus = _build_consensus_relation(primary_factors, primary_tf)
-    macd = _build_macd(primary_tf)
+    macd = _build_macd(primary_factors, primary_tf)
     sqzmom = _build_sqzmom(primary_factors, primary_tf)
     boll = _build_boll_position(primary_factors, primary_tf)
     temporal_states = _build_temporal_states(temporal, primary_tf)
@@ -583,6 +596,19 @@ if __name__ == "__main__":
                     "participation": {
                         "volume_percentile_120": 0.3,
                     },
+                    # C6: 真实 MACD 紧凑状态 + 真实 ConsensusZone 关系
+                    "macd_state": {
+                        "code": "bullish_above",
+                        "macd_val": 0.15,
+                        "signal_val": 0.10,
+                        "histogram": 0.05,
+                    },
+                    "consensus_zone_relation": {
+                        "code": "inside_consensus",
+                        "cluster_lower": 9.5,
+                        "cluster_upper": 10.5,
+                        "cluster_center": 10.0,
+                    },
                 }
             }
         },
@@ -614,15 +640,16 @@ if __name__ == "__main__":
     assert state.sourceRunId == str(mock_run.id), "source_run_id 必须来自真实 run"
     assert state.version == "v1", "version 必须来自 schema_version"
 
-    # MACD code=null（无真实 MACD）
-    assert state.momentum.macd.code is None, "MACD code 必须为 null"
-    assert state.momentum.macd.label == "暂不可用"
+    # C6: MACD 来自真实 macd_state（不再 code=null）
+    assert state.momentum.macd.code == "bullish_above", "MACD code 必须来自真实 macd_state"
+    assert "MACD" in state.momentum.macd.label
 
     # SQZMOM 独立命名
     assert state.momentum.sqzmom.code == "positive"
     assert state.momentum.sqzmom.sourceField == "volatility_momentum.sqzmom_val"
 
-    # value_area_zone → "成交密集区关系"（不是筹码共识）
+    # C6: ConsensusZone 关系来自真实 consensus_zone_relation
+    assert state.structure.consensusRelation.code == "inside_consensus"
     assert "成交密集区" in state.structure.consensusRelation.label
     assert "筹码共识" not in state.structure.consensusRelation.label
 

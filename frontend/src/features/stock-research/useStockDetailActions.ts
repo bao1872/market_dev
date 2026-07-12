@@ -13,7 +13,11 @@ import {
   useDeleteStockMemo,
   useMarketStocks,
 } from '@/hooks/useApi'
-import { normalizeInternalReturnTo } from '@/features/market-workspace/marketWorkspaceUrlState'
+import {
+  DEFAULT_PAGE_SIZE,
+  MAX_PAGE_SIZE,
+  normalizeInternalReturnTo,
+} from '@/features/market-workspace/marketWorkspaceUrlState'
 import { useToast } from '@/store/toast'
 import type { ResearchSource } from './stockResearchTypes'
 
@@ -67,9 +71,19 @@ export interface StockDetailActions {
 
 // 从 returnTo URL 解析市场列表查询参数（仅 /market 前缀有效）
 // 返回 null 表示 returnTo 不指向 /market 或无有效查询参数（应回退到自选列表）
+// C7: 恢复 industry/concept/state/page_size，与 marketWorkspaceUrlState URL 契约一致
 function parseMarketParamsFromReturnTo(
   returnTo: string | null | undefined,
-): { scope: 'market'; query?: string; page?: number; sort?: string } | null {
+): {
+  scope: 'market'
+  query?: string
+  page?: number
+  page_size?: number
+  sort?: string
+  industry?: string
+  concept?: string
+  state?: string
+} | null {
   const safe = normalizeInternalReturnTo(returnTo)
   if (!safe) return null
   // 仅处理 /market 前缀（/screener /messages 不含市场列表参数）
@@ -84,18 +98,35 @@ function parseMarketParamsFromReturnTo(
   const pageRaw = params.get('page')
   const page = pageRaw ? parseInt(pageRaw, 10) : undefined
   const sort = params.get('sort') ?? undefined
+  const industry = params.get('industry') ?? undefined
+  const concept = params.get('concept') ?? undefined
+  const state = params.get('state') ?? undefined
+  // C7: page_size 从 URL 恢复（默认 DEFAULT_PAGE_SIZE，上限 MAX_PAGE_SIZE）
+  const rawPageSize = params.get('page_size')
+  let page_size: number | undefined
+  if (rawPageSize) {
+    const parsed = parseInt(rawPageSize, 10)
+    if (Number.isFinite(parsed) && parsed >= 1 && parsed <= MAX_PAGE_SIZE) {
+      page_size = parsed
+    }
+  }
   // 至少有一个可恢复的参数才返回（避免空查询拉全市场）
-  if (!query && !page && !sort) return null
+  if (!query && !page && !sort && !industry && !concept && !state) return null
   return {
     scope: 'market',
     query: query || undefined,
     page: Number.isFinite(page) && (page as number) >= 1 ? page as number : undefined,
+    page_size,
     sort: sort || undefined,
+    industry: industry || undefined,
+    concept: concept || undefined,
+    state: state || undefined,
   }
 }
 
 export function useStockDetailActions({
   instrumentId,
+  symbol,
   source,
   strategy,
   returnTo,
@@ -106,6 +137,7 @@ export function useStockDetailActions({
   // [returnTo 上下文恢复] - 优先解析 returnTo 中的市场搜索参数
   // 当 returnTo 指向 /market?scope=market&query=xxx&page=2&sort=xxx 时，
   // 左栏展示该搜索结果列表（点击返回时回到来源页的同一上下文）
+  // C7: 恢复 industry/concept/state/page_size，与 /market URL 契约一致
   const marketParams = useMemo(() => parseMarketParamsFromReturnTo(returnTo), [returnTo])
   const hasMarketContext = marketParams !== null
   const marketStocksQuery = useMarketStocks(
@@ -113,8 +145,11 @@ export function useStockDetailActions({
       scope: 'market',
       query: marketParams?.query,
       page: marketParams?.page,
+      page_size: marketParams?.page_size ?? DEFAULT_PAGE_SIZE,
       sort: marketParams?.sort,
-      page_size: 50,
+      industry: marketParams?.industry,
+      concept: marketParams?.concept,
+      state: marketParams?.state,
     },
     { enabled: hasMarketContext },
   )
@@ -126,14 +161,6 @@ export function useStockDetailActions({
     [watchlistQuery.data],
   )
   const batchInstrumentsQuery = useBatchInstruments(watchlistInstrumentIds)
-  const instrumentSymbolMap = useMemo(() => {
-    const map = new Map<string, string>()
-    if (!batchInstrumentsQuery.data?.items) return map
-    for (const inst of batchInstrumentsQuery.data.items) {
-      map.set(inst.id, inst.symbol)
-    }
-    return map
-  }, [batchInstrumentsQuery.data])
 
   // 自选变更操作
   const addWatchlist = useAddToWatchlist()
@@ -181,25 +208,6 @@ export function useStockDetailActions({
     }
   }, [instrumentId, inWatchlist, removeWatchlist, addWatchlist, source, showToast])
 
-  // 在自选列表中上下切换股票
-  const watchlistItems = useMemo(
-    () => watchlistQuery.data?.items ?? [],
-    [watchlistQuery.data],
-  )
-  const currentIndex = instrumentId
-    ? watchlistItems.findIndex((item) => item.instrument_id === instrumentId)
-    : -1
-  const canNavigate = watchlistItems.length >= 2 && currentIndex >= 0
-
-  const navigateToStock = useCallback((direction: number) => {
-    if (!canNavigate) return
-    const nextIndex = (currentIndex + direction + watchlistItems.length) % watchlistItems.length
-    const target = watchlistItems[nextIndex]
-    const targetSymbol = instrumentSymbolMap.get(target.instrument_id)
-    if (!targetSymbol) return
-    navigate(`/stock/${targetSymbol}?source=watchlist&strategy=${strategy}`)
-  }, [canNavigate, currentIndex, watchlistItems, instrumentSymbolMap, navigate, strategy])
-
   // 来源股票列表（active 自选，含 symbol + name，用于详情页左栏）
   const watchlistStocks = useMemo(() => {
     if (!watchlistQuery.data?.items || !batchInstrumentsQuery.data?.items) return []
@@ -225,6 +233,23 @@ export function useStockDetailActions({
   // 统一来源列表：优先市场搜索结果，回退自选列表
   const sourceListKind: SourceListKind = hasMarketContext ? 'market' : 'watchlist'
   const sourceStocks = hasMarketContext ? marketStocks : watchlistStocks
+
+  // C7: 上一只/下一只基于 sourceStocks（而非 watchlistItems）
+  // 在来源列表中按 symbol 查找当前位置，支持市场搜索结果和自选列表两种来源
+  const currentIndex = symbol
+    ? sourceStocks.findIndex((s) => s.symbol === symbol)
+    : -1
+  const canNavigate = sourceStocks.length >= 2 && currentIndex >= 0
+
+  const navigateToStock = useCallback((direction: number) => {
+    if (!canNavigate) return
+    const nextIndex = (currentIndex + direction + sourceStocks.length) % sourceStocks.length
+    const target = sourceStocks[nextIndex]
+    if (!target?.symbol) return
+    // 保留 returnTo 上下文，使切换后仍可返回来源列表
+    const returnToParam = returnTo ? `&returnTo=${encodeURIComponent(returnTo)}` : ''
+    navigate(`/stock/${target.symbol}?source=${source}&strategy=${strategy}${returnToParam}`)
+  }, [canNavigate, currentIndex, sourceStocks, navigate, strategy, source, returnTo])
 
   return {
     inWatchlist,

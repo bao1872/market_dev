@@ -16,6 +16,7 @@ sync_boards 是异步服务入口，编排完整流程，失败抛异常。
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -36,6 +37,10 @@ MIN_PARSE_RATE = 0.50  # 最低解析率：resolved_symbols / total_symbols
 
 # 批量操作大小
 BATCH_SIZE = 500
+
+# 同步任务总时限（秒）：700+板块逐个拉取成分，30分钟足够；
+# 超过说明大概率被反爬封锁，继续重试无意义
+SYNC_TOTAL_TIMEOUT_SECONDS = 1800
 
 
 class BoardSyncError(Exception):
@@ -177,12 +182,20 @@ async def sync_boards(
 
     # 3. 拉取成分到暂存集合
     staging = StagingData()
+    sync_start = time.monotonic()
     for board in boards_data:
         ext_code = board.get("external_code", "")
         name = board.get("name", "")
         btype = board.get("type", "")
         if not ext_code or not name or not btype:
             continue
+        # 总时限检查：超过 SYNC_TOTAL_TIMEOUT_SECONDS 放弃整个同步
+        elapsed = time.monotonic() - sync_start
+        if elapsed > SYNC_TOTAL_TIMEOUT_SECONDS:
+            raise BoardSyncError(
+                f"board sync total timeout: {elapsed:.0f}s > {SYNC_TOTAL_TIMEOUT_SECONDS}s, "
+                f"completed {len(staging.boards)}/{len(boards_data)} boards"
+            )
         staging.boards.append({"external_code": ext_code, "name": name, "type": btype})
         symbols = await fetcher.fetch_memberships(ext_code, btype)
         staging.memberships[(ext_code, btype)] = symbols

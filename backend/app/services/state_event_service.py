@@ -145,6 +145,27 @@ def build_event_evidence(
     return evidence
 
 
+def compute_idempotency_key(
+    symbol: str,
+    trade_date: date,
+    algorithm_version: str,
+    evidence: list[dict[str, Any]],
+) -> str:
+    """C3: 计算幂等键 — 包含 evidence（field + prev/curr code/value）。
+
+    确保不同转换（如 None→positive vs positive→negative）产生不同 key，
+    同日重跑（相同 evidence）产生相同 key → ON CONFLICT DO NOTHING。
+    """
+    evidence_sorted = sorted(evidence, key=lambda e: e["field"])
+    changes_hash = hashlib.sha256(
+        json.dumps(evidence_sorted, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:8]
+    return (
+        f"{symbol}:{trade_date.isoformat()}:"
+        f"{algorithm_version}:{changes_hash}"
+    )
+
+
 def build_event_title_and_description(
     changed_fields: list[str],
 ) -> tuple[str, str]:
@@ -202,18 +223,27 @@ async def _batch_get_previous_snapshots(
     PRD V1.1 P1: 前一状态只能来自前一成功发布且算法兼容的 run。
     JOIN StockFeatureSnapshotRun 过滤 status='succeeded'。
 
-    使用 MAX(trade_date) 子查询取每个 instrument 的最近一条快照，
+    C4: 同日存在多个成功 run 时，按 published_at DESC、finished_at DESC
+    确定性选择最新批次（首行保留，后续同 instrument 行跳过）。
+
+    使用 MAX(trade_date) 子查询取每个 instrument 在成功 run 中的最近一条快照，
     避免使用 PostgreSQL 特有的 DISTINCT ON，保证跨方言兼容。
     固定 1 条 SQL，不随股票数增长。
     """
     if not instrument_ids:
         return {}
 
-    # 子查询：每个 instrument 的最大 trade_date
+    # C4: 子查询在每个 instrument 的成功 run 中取最大 trade_date，
+    # 避免失败 run 的高 trade_date 遮蔽成功 run。
     max_date_subq = (
         select(
             StockFeatureSnapshot.instrument_id.label("inst_id"),
             func.max(StockFeatureSnapshot.trade_date).label("max_date"),
+        )
+        .select_from(StockFeatureSnapshot)
+        .outerjoin(
+            StockFeatureSnapshotRun,
+            StockFeatureSnapshot.source_run_id == StockFeatureSnapshotRun.id,
         )
         .where(
             and_(
@@ -223,12 +253,15 @@ async def _batch_get_previous_snapshots(
                 StockFeatureSnapshot.primary_timeframe == primary_timeframe,
                 StockFeatureSnapshot.secondary_timeframe == secondary_timeframe,
                 StockFeatureSnapshot.adj == adj,
+                StockFeatureSnapshotRun.status == STATUS_SUCCEEDED,
             )
         )
         .group_by(StockFeatureSnapshot.instrument_id)
     ).subquery()
 
     # 主查询：JOIN 回 snapshots 表 + JOIN run 表（过滤 succeeded）
+    # C4: ORDER BY published_at DESC NULLS LAST, finished_at DESC NULLS LAST
+    # 确定性选择最新批次，配合首行保留逻辑。
     stmt = (
         select(StockFeatureSnapshot, StockFeatureSnapshotRun)
         .join(
@@ -252,12 +285,18 @@ async def _batch_get_previous_snapshots(
                 StockFeatureSnapshotRun.status == STATUS_SUCCEEDED,
             )
         )
+        .order_by(
+            StockFeatureSnapshotRun.published_at.desc().nulls_last(),
+            StockFeatureSnapshotRun.finished_at.desc().nulls_last(),
+        )
     )
     result = await session.execute(stmt)
-    return {
-        snap.instrument_id: (snap, run)
-        for snap, run in result.all()
-    }
+    # C4: 首行保留（ORDER BY 已确保最新 run 在前，同 instrument 后续行跳过）
+    prev_map: dict[UUID, tuple[StockFeatureSnapshot, StockFeatureSnapshotRun]] = {}
+    for snap, run in result.all():
+        if snap.instrument_id not in prev_map:
+            prev_map[snap.instrument_id] = (snap, run)
+    return prev_map
 
 
 # =============================================================================
@@ -379,15 +418,12 @@ async def generate_events_for_run(
             title, description = build_event_title_and_description(changed_fields)
             evidence = build_event_evidence(prev_state, curr_state, changed_fields)
 
-            # P1: 幂等键 = symbol:current_as_of:algorithm_version:hash(changed_fields)
-            # 同日重跑（相同 changed_fields）产生相同 key → ON CONFLICT DO NOTHING
-            changed_fields_sorted = sorted(changed_fields)
-            changes_hash = hashlib.sha256(
-                json.dumps(changed_fields_sorted, ensure_ascii=False).encode("utf-8")
-            ).hexdigest()[:8]
-            idempotency_key = (
-                f"{symbol}:{curr_snapshot.trade_date.isoformat()}:"
-                f"{algorithm_version}:{changes_hash}"
+            # C3: 幂等键 = symbol:current_as_of:algorithm_version:hash(evidence)
+            # evidence 包含 field + prev/curr code/value，
+            # 确保不同转换（如 None→positive vs positive→negative）产生不同 key。
+            # 同日重跑（相同 evidence）产生相同 key → ON CONFLICT DO NOTHING。
+            idempotency_key = compute_idempotency_key(
+                symbol, curr_snapshot.trade_date, algorithm_version, evidence,
             )
 
             events_to_insert.append({

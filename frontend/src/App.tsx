@@ -23,7 +23,6 @@ import SettingsPage from './pages/SettingsPage'
 import MessagesPage from './pages/MessagesPage'
 import AdminIndexPage from './pages/AdminIndexPage'
 import AdminUsersPage from './pages/AdminUsersPage'
-import AdminStrategiesPage from './pages/AdminStrategiesPage'
 import AdminJobsPage from './pages/AdminJobsPage'
 import AdminBetaApplicationsPage from './pages/AdminBetaApplicationsPage'
 import AdminAfterClosePipelinePage from './pages/AdminAfterClosePipelinePage'
@@ -146,7 +145,8 @@ export const routeConfig: RouteObject[] = [
               { path: '/admin/overview', element: <AdminIndexPage /> },
               { path: '/admin/users', element: <AdminUsersPage /> },
               { path: '/admin/beta-applications', element: <AdminBetaApplicationsPage /> },
-              { path: '/admin/strategies', element: <AdminStrategiesPage /> },
+              // C8: 策略目录页已废弃，重定向到盘后流水线（DSA 运行能力保留在此）
+              { path: '/admin/strategies', element: <Navigate to="/admin/after-close" replace /> },
               { path: '/admin/jobs', element: <AdminJobsPage /> },
               { path: '/admin/after-close', element: <AdminAfterClosePipelinePage /> },
               { path: '/admin/stocks', element: <AdminStockDebugPage /> },

@@ -224,6 +224,19 @@ export function useMarketStocks(
   })
 }
 
+/**
+ * C9: 查询板块目录（只读），供行业/概念筛选下拉/自动完成使用。
+ * staleTime 24 小时（板块目录每日 17:00 才同步一次，变更频率极低），
+ * 不轮询、不增加持久化缓存。
+ */
+export function useMarketBoards(type?: 'industry' | 'concept') {
+  return useQuery({
+    queryKey: ['market-boards', type ?? 'all'],
+    queryFn: ({ signal }) => api.getMarketBoards(type ? { type } : undefined, { signal }),
+    staleTime: 24 * 60 * 60 * 1000,
+  })
+}
+
 /** 按 ID 查询单个股票 */
 export function useInstrument(instrumentId: string | undefined) {
   return useQuery({

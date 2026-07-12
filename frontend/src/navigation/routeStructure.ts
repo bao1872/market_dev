@@ -61,7 +61,8 @@ export const ROUTE_STRUCTURE: RouteNode[] = [
               { path: '/admin/overview', guard: 'admin', shell: 'admin' },
               { path: '/admin/users', guard: 'admin', shell: 'admin' },
               { path: '/admin/beta-applications', guard: 'admin', shell: 'admin' },
-              { path: '/admin/strategies', guard: 'admin', shell: 'admin' },
+              // C8: /admin/strategies 重定向到 /admin/after-close（策略目录页已废弃）
+              { path: '/admin/strategies', guard: 'redirect', shell: 'none', redirectTo: '/admin/after-close' },
               { path: '/admin/jobs', guard: 'admin', shell: 'admin' },
               { path: '/admin/after-close', guard: 'admin', shell: 'admin' },
               { path: '/admin/stocks', guard: 'admin', shell: 'admin' },

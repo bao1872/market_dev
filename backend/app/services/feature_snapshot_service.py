@@ -69,6 +69,140 @@ _SECONDARY_LOOKBACK = 500  # 15m 回看天数
 _BB_WIN = 20
 _BB_K = 2.0
 
+# MACD 参数（标准 12/26/9）
+_MACD_FAST = 12
+_MACD_SLOW = 26
+_MACD_SIGNAL = 9
+
+
+# =============================================================================
+# C6: 紧凑状态计算（MACD + ConsensusZone 关系，不保存完整指标序列）
+# =============================================================================
+
+
+def _compute_macd_state(df_1d: pd.DataFrame | None) -> dict[str, Any]:
+    """C6: 计算MACD紧凑状态（只保存最终值+code，不保存完整序列）。
+
+    调用 indicator_service.compute_macd 真源（A 股 2× 版本），
+    禁止在本模块内复制 EMA/MACD 公式形成第二套实现。
+
+    code 四象限（基于 DIF 和 DEA）：
+    - bullish_above: DIF > 0 且 DIF > DEA（最强多头）
+    - bullish_below: DIF > 0 且 DIF <= DEA（多头减弱）
+    - bearish_below: DIF < 0 且 DIF < DEA（最强空头）
+    - bearish_above: DIF < 0 且 DIF >= DEA（空头减弱）
+    - None: 数据不足或 DIF == 0
+    """
+    empty = {"code": None, "macd_val": None, "signal_val": None, "histogram": None}
+    if df_1d is None or df_1d.empty:
+        return empty
+    min_len = _MACD_SLOW + _MACD_SIGNAL  # 35
+    if len(df_1d) < min_len:
+        return empty
+
+    from app.services.indicator_service import compute_macd
+
+    closes = df_1d["close"].to_numpy(dtype=float)
+    macd_result = compute_macd(
+        closes, fast=_MACD_FAST, slow=_MACD_SLOW, signal=_MACD_SIGNAL,
+    )
+    # 取最后一个非 None 值
+    dif_list = macd_result["macd_dif"]
+    dea_list = macd_result["macd_dea"]
+    hist_list = macd_result["macd_hist"]
+
+    last_dif = dif_list[-1] if dif_list and dif_list[-1] is not None else None
+    last_dea = dea_list[-1] if dea_list and dea_list[-1] is not None else None
+    last_hist = hist_list[-1] if hist_list and hist_list[-1] is not None else None
+
+    if last_dif is None or last_dea is None:
+        return empty
+
+    if last_dif > 0 and last_dif > last_dea:
+        code = "bullish_above"
+    elif last_dif > 0 and last_dif <= last_dea:
+        code = "bullish_below"
+    elif last_dif < 0 and last_dif < last_dea:
+        code = "bearish_below"
+    elif last_dif < 0 and last_dif >= last_dea:
+        code = "bearish_above"
+    else:
+        code = None
+
+    return {
+        "code": code,
+        "macd_val": round(last_dif, 6),
+        "signal_val": round(last_dea, 6),
+        "histogram": round(last_hist, 6) if last_hist is not None else None,
+    }
+
+
+def _compute_consensus_zone_relation(
+    df_1d: pd.DataFrame | None,
+    df_15m: pd.DataFrame | None,
+    trade_date: date,
+    symbol: str,
+) -> dict[str, Any]:
+    """C6: 计算真实ConsensusZone关系（只保存主簇边界+code，不保存完整簇序列）。
+
+    调用 consensus_zone_service.compute_consensus_zones 纯函数获取主簇，
+    比较当前 close 与主簇 [lower, upper] 得到关系 code：
+    - inside_consensus: close 在主簇内
+    - above_consensus: close 在主簇上方
+    - below_consensus: close 在主簇下方
+    - None: 无 ConsensusZone 数据
+    """
+    empty: dict[str, Any] = {
+        "code": None, "cluster_lower": None,
+        "cluster_upper": None, "cluster_center": None,
+    }
+    if df_1d is None or df_1d.empty:
+        return empty
+
+    from app.services.consensus_zone_service import (
+        DAILY_HISTORY_BARS,
+        NODE_CLUSTER_LOW_BARS,
+        compute_consensus_zones,
+        filter_bars_by_as_of,
+    )
+
+    # C1: filter → tail（与 ConsensusZone 服务入口一致）
+    filtered_daily = filter_bars_by_as_of(df_1d, trade_date)
+    if not filtered_daily.empty:
+        filtered_daily = filtered_daily.tail(DAILY_HISTORY_BARS)
+
+    filtered_15m: pd.DataFrame | None = None
+    if df_15m is not None and not df_15m.empty:
+        filtered_15m = filter_bars_by_as_of(df_15m, trade_date)
+        if not filtered_15m.empty:
+            filtered_15m = filtered_15m.tail(NODE_CLUSTER_LOW_BARS)
+
+    result = compute_consensus_zones(
+        filtered_daily, symbol=symbol, as_of=trade_date.isoformat(),
+        bars_15min=filtered_15m,
+    )
+
+    if not result.clusters:
+        return empty
+
+    # 主簇 = volumeRatio 最大（clusters 已按 volumeRatio 降序）
+    primary = result.clusters[0]
+    current_close = float(df_1d["close"].iloc[-1])
+
+    if current_close < primary.lower:
+        code = "below_consensus"
+    elif current_close > primary.upper:
+        code = "above_consensus"
+    else:
+        code = "inside_consensus"
+
+    return {
+        "code": code,
+        "cluster_lower": round(float(primary.lower), 4),
+        "cluster_upper": round(float(primary.upper), 4),
+        "cluster_center": round(float(primary.center), 4),
+    }
+
 
 # =============================================================================
 # 纯函数：point-in-time 截断
@@ -262,6 +396,13 @@ async def compute_feature_snapshot_for_date(
     )
     secondary_factors = _compute_all_factors_for_bars(
         df_15m, secondary_timeframe, degraded_reasons, warmup_notes
+    )
+
+    # C6: 计算真实 MACD 紧凑状态 + 真实 ConsensusZone 关系
+    # 只保存紧凑状态（最终值+code），不保存完整指标序列
+    primary_factors["macd_state"] = _compute_macd_state(df_1d)
+    primary_factors["consensus_zone_relation"] = _compute_consensus_zone_relation(
+        df_1d, df_15m, trade_date, symbol="",
     )
 
     # 计算 temporal features（复用内部函数）
