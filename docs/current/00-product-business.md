@@ -35,7 +35,7 @@ starts_at <= now < expires_at
 
 ### 导航结构（阶段二确立）
 
-- 普通用户主入口为 `/market`（行情工作区，三栏：左列表+中K线+右解释面板）；趋势选股 `/screener` 为独立一级页面。
+- 普通用户主入口为 `/market`（行情工作区，**无 K 线**，布局为工具栏 + 分页表格 + 可收起事件状态面板）；趋势选股 `/screener` 为兼容重定向 → `/market`。
 - 普通用户顶部导航仅含"行情"和"趋势选股"两项；消息、设置、管理后台入口、退出收拢到右上角账户菜单。
 - 普通用户无左侧栏；管理后台使用独立壳层 `AdminAppShell`，承载 `/admin/*`。
 - 旧地址 `/overview` 重定向到 `/market`；`/watchlist` 重定向到 `/market?scope=watchlist`。

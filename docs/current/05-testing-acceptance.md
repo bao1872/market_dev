@@ -132,7 +132,7 @@
   8. `/stock/:symbol` 原详情页可加载（body 有内容）。
 - E2E 结果（2026-07-11）：22 项断言全部 PASS，覆盖 8 个场景；mock 数据形状对齐后端 DTO（`StructuralFactorResponse`/`TemporalFeaturesResponse`/`IndicatorResponse`/`BarListResponse`/`WatchlistMonitorStatusItem`），`navigateAndWait` 采用 800ms 延迟 + 连续 2 次条件为真防 stale DOM。
 - 运行命令：`node --experimental-strip-types --test src/features/market-workspace/__tests__/marketWorkspaceUrlState.test.ts src/navigation/__tests__/appNavigation.test.ts src/navigation/__tests__/routeStructure.test.ts src/pages/__tests__/detailNavigation.test.ts`
-- 回归要求：修改 `MarketWorkspacePage`、`marketWorkspaceUrlState.ts`、`StockResearchWorkspace.tsx`、`useStockResearchData.ts`、`MarketInstrumentPane.tsx`、`appNavigation.ts`、`AccountMenu.tsx`、`detailNavigation.ts` 或路由结构时必须跑此测试。
+- 回归要求：修改 `MarketWorkspacePage`、`marketWorkspaceUrlState.ts`、`StockResearchWorkspace.tsx`、`useStockResearchData.ts`、`MarketToolbar.tsx`、`MarketStockTable.tsx`、`appNavigation.ts`、`AccountMenu.tsx`、`detailNavigation.ts` 或路由结构时必须跑此测试。
 
 ### 共享研究核心
 
