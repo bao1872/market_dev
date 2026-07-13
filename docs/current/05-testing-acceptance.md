@@ -907,14 +907,73 @@ PATCH 空请求（1 个用例）：
 - `test_update_persists_across_sessions`：PATCH 更新 name/config/is_default 后，使用新 `AsyncSession` 确认字段已持久化；
 - `test_delete_persists_across_sessions`：DELETE preset 后，使用新 `AsyncSession` 确认记录不存在。
 
-### 3.10.2 前端 columns.test.ts 回归（6 个用例）
+### 3.10.2 前端 columns.test.ts 回归（13 个用例，CHANGE-20260713-005 扩展）
 
 - change_pct 列存在于 trend-selection columns；
 - title=`当日涨跌幅`、shortTitle=`涨跌幅`；
 - dataType=`percent`、sortable=true、filterable=true、width≈86；
 - render 使用 `fmtChange` + `changePctColorClass`（涨红跌绿）；
 - sortValue 读取 payload `change_pct`/`pct_change`/`change_percent`；
-- change_pct 列位于 stock 列之后。
+- change_pct 列位于 stock 列之后；
+- action 列 onDetail 按钮 onClick 调用 `e.stopPropagation()`；
+- action 列 onAddToWatchlist 按钮 onClick 调用 `e.stopPropagation()`；
+- 股票名称链接 onNavigate 调用 `e.stopPropagation()`（CHANGE-20260713-005）；
+- action 列 onToggleWatchlist 模式按钮 stopPropagation + 显示"加入自选/移除自选"（CHANGE-20260713-005）；
+- action 列 onToggleWatchlist 模式下 title 动态为"自选"（CHANGE-20260713-005）；
+- 股票名称链接使用 `<a>` + `e.preventDefault()`（CHANGE-20260713-005）；
+- renderStock 只显示名称/代码/市场，不渲染行内涨跌幅（CHANGE-20260713-005）。
+
+### 3.10.2a 前端 chartLabels.test.ts 回归（5 个用例，CHANGE-20260713-005 新增）
+
+- 节点价格标签：POC 峰 → "核心共识价"，普通峰 → "共识价"；
+- POC 中心线标签显示"核心共识价"（非裸"POC"）；
+- tooltip 中 POC → "核心共识价"，PEAK → "共识价"；
+- VP 数据缺失提示为"筹码共识价暂不可用"；
+- 内部字段名 `n.poc`/`profile.pocPrice`/`row.is_poc`/`is_poc` 保留（不改 DTO/算法）。
+
+### 3.10.2b 前端 chartDrag.test.ts 回归（7 个用例，CHANGE-20260713-005 新增）
+
+- 使用 Pointer Events（pointerdown/pointermove/pointerup/pointercancel）；
+- 使用 setPointerCapture / releasePointerCapture；
+- dragRef 保存 startClientX + startViewport + pointerId；
+- dragMovedRef 4px 阈值抑制 click；
+- cursor 为 grab/grabbing；
+- 不使用旧 mouse 事件（mousedown/mousemove/mouseup 作为事件监听器）；
+- pointermove 从 startViewport 计算总位移（不在 stale viewport 上累计）。
+
+### 3.10.2c 前端 marketToolbarSearch.test.ts 回归（8 个用例，CHANGE-20260713-005 新增）
+
+- MarketToolbar 接受受控 keyword/onKeywordChange props；
+- placeholder 为"搜索股票代码/名称/拼音首字母"；
+- Enter 提交（onKeyDown Enter 调用 onKeywordChange）；
+- blur 提交（onBlur 调用 onKeywordChange）；
+- 清空立即提交（inputValue 为空时立即调用 onKeywordChange('')）；
+- /market 通过 `searchable={false}` 隐藏 StrategyDataTable 内置搜索；
+- StrategyDataTable 接受 externalKeyword/onKeywordChange 受控模式；
+- 单一搜索状态真源（顶栏 keyword 与 StrategyDataTable URL keyword 一致）。
+
+### 3.10.2d 前端 messagesCounts.test.ts 回归（8 个用例，CHANGE-20260713-005 新增）
+
+- MessagesPage 使用 useUnreadCount 作为未读 SSOT；
+- "全部"计数使用后端 `messagesQuery.data?.total`（非 items.length）；
+- 页头显示"共 X 条 · 未读 Y 条"；
+- selection/price/system/process 不显示误导数字（仅 all/unread 显示计数）；
+- 单只股票消息跳转 `/stock/:symbol?event_id=...&returnTo=/messages`；
+- selection_composite 跳转 `/market`（非 `/screener`）；
+- AccountMenu unread>0 时消息链接为 `/messages?filter=unread`；
+- AccountMenu 消息项显示未读数（itemBadge）。
+
+### 3.10.2e 前端 indicatorManifest.test.ts 回归（12 个用例，CHANGE-20260713-005 扩展）
+
+- 原 10 个用例不变；
+- manifest 用户文案：sqzmom → "挤压动量"，node → "筹码共识价"；
+- 内部 ChartLayerKey 不变：sqzmom/node 仍为内部 id。
+
+### 3.10.2f 后端 test_strategy_results_keyword.py 回归（3 个用例，CHANGE-20260713-005 新增）
+
+- keyword 按股票代码 ILIKE 匹配（如 `600519` 匹配 `贵州茅台`），items 与 total 条件一致；
+- keyword 按中文名称 ILIKE 匹配（如 `茅台` 匹配 `贵州茅台`），items 与 total 条件一致；
+- keyword 按拼音首字母 ILIKE 匹配（如 `gzmt` 匹配 `贵州茅台`），items 与 total 条件一致。
 
 ### 3.10.3 前端 ScreenerPage.batch.test.ts 回归（6 个用例）
 

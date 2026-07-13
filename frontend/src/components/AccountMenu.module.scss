@@ -79,7 +79,10 @@
 }
 
 .item {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   width: 100%;
   text-align: left;
   padding: 9px 10px;
@@ -95,4 +98,19 @@
     background: #1c202b;
     color: #fff;
   }
+}
+
+// [AccountMenu] - 描述: 菜单项内未读数角标（消息项专用）
+.itemBadge {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: #ef5350;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  flex-shrink: 0;
 }

@@ -4,6 +4,18 @@
 
 ## 2026-07-13
 
+- CHANGE-20260713-005: PR #74 阶段五 — DSA 列表产品回归 / 消息数量 SSOT / K 线 Pointer 拖拽 / 用户文案
+  - /market 列表：action 列改名"自选"（加入/移除自选按钮），股票名称改为可点击链接进入 /stock/:symbol?returnTo=，股票单元格不再显示行内涨跌幅（独立 change_pct 列保留），watchlist 单次请求+Set 禁止 N+1，批次信息 admin-only 默认折叠
+  - /market 单一搜索 SSOT：MarketToolbar 顶部唯一搜索框（Enter/blur/清空提交），StrategyDataTable searchable={false} + externalKeyword/onKeywordChange 受控模式
+  - 后端 keyword pinyin_initials 匹配：strategy_result_repository 3 处 or_ 分支同步匹配 symbol/name/pinyin_initials
+  - 消息数量 SSOT：useUnreadCount 作为未读权威，"全部"显示后端 total（非 items.length），页头"共 X 条 · 未读 Y 条"，AccountMenu unread>0 进入 /messages?filter=unread + badge
+  - 消息跳转：单只股票 → /stock/:symbol?event_id=...&returnTo=/messages，selection_composite → /market
+  - K 线 Pointer Events 拖拽：setPointerCapture/releasePointerCapture，dragRef {startClientX,startViewport,pointerId}，4px 阈值抑制 click，grab/grabbing cursor
+  - 用户文案：sqzmom→"挤压动量"，node→"筹码共识价"，POC 峰→"核心共识价"，峰→"共识价"，缺失提示→"筹码共识价暂不可用"；内部字段名不变
+  - 测试：前端 263 contract（columns 13 + chartLabels 5 + chartDrag 7 + marketToolbarSearch 8 + messagesCounts 8 + indicatorManifest 12）+ 后端 3 keyword + 4 universe；tsc/eslint/build/docs checks 全通过
+  - 文档：AGENTS 规则 27-33 + docs/current/02/04/05 + code-doc-alignment + maps + CHANGE
+  - Ruff 基线 1 项（B011 既有债务），本轮 0 新增
+  - Node/monitor/capture 未改动
 - CHANGE-20260713-004: PR #74 阶段四 — /market DSA 列表恢复 + 列对齐修复 + 列设置 CRUD + columnOrder
   - DSA 列表恢复：MarketWorkspacePage 改用 StrategyDataTable + getTrendSelectionColumns，数据来自 usePublishedRuns + useStrategyRunResults
   - P0 列对齐修复：reorderVisibleColumns 纯函数提取到 columnOrdering.ts；thead th/tbody td/colgroup col 三者同源

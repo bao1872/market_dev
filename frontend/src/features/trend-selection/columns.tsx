@@ -41,19 +41,29 @@ export interface TrendSelectionColumnOptions {
   addPending?: boolean
   // 趋势选股页操作列：查看详情（提供时操作列渲染为"详情"按钮）
   onDetail?: (row: TrendSelectionRow) => void
+  // /market 股票名称链接：点击进入 /stock/:symbol?returnTo=...
+  onNavigateToStock?: (row: TrendSelectionRow) => void
+  // /market 自选操作列：加入/移除自选
+  watchlistInstrumentIds?: Set<string>
+  onToggleWatchlist?: (row: TrendSelectionRow, add: boolean) => void
+  watchlistPendingIds?: Set<string>
 }
 
-/** 股票列渲染（复用）：第一行=名称+涨跌幅（涨红跌绿），第二行=代码·市场 */
-function renderStock(row: TrendSelectionRow): ReactNode {
+/** 股票列渲染（复用）：第一行=名称（可点击链接），第二行=代码·市场 */
+function renderStock(row: TrendSelectionRow, onNavigate?: (row: TrendSelectionRow) => void): ReactNode {
   const { name, symbol, market } = getStockDisplay(row)
-  const changePct = pickPayload(row.payload, CHANGE_PCT_KEYS)
   return (
     <div>
       <div className="symbol">
-        {name}
-        <span className={changePctColorClass(changePct)} style={{ marginLeft: 6 }}>
-          {fmtChange(changePct)}
-        </span>
+        {onNavigate ? (
+          <a
+            href="#"
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); onNavigate(row) }}
+            style={{ color: 'inherit', textDecoration: 'none', cursor: 'pointer' }}
+          >
+            {name}
+          </a>
+        ) : name}
       </div>
       <div className="symbol-sub">
         {symbol}
@@ -84,7 +94,7 @@ function renderDirBars(row: TrendSelectionRow): ReactNode {
 export function getTrendSelectionColumns(
   options: TrendSelectionColumnOptions = {},
 ): DataTableColumn<TrendSelectionRow>[] {
-  const { onAddToWatchlist, onDetail, addPending = false } = options
+  const { onAddToWatchlist, onDetail, addPending = false, onNavigateToStock, watchlistInstrumentIds, onToggleWatchlist, watchlistPendingIds } = options
 
   const columns: DataTableColumn<TrendSelectionRow>[] = [
     {
@@ -96,7 +106,7 @@ export function getTrendSelectionColumns(
       width: 150,
       sortValue: (row) => getStockDisplay(row).name,
       filterValue: (row) => `${getStockDisplay(row).name} ${getStockDisplay(row).symbol}`,
-      render: renderStock,
+      render: (row) => renderStock(row, onNavigateToStock),
     },
     {
       // [趋势选股] - 描述: 当日涨跌幅独立列（后端存储为百分比数值，不 ×100；筛选输入 3% 传 3）
@@ -241,32 +251,61 @@ export function getTrendSelectionColumns(
       render: (row) => fmtNum(pickPayload(row.payload, PRICE_KEYS)),
     },
     {
+      // [趋势选股] - 描述: /market 操作列改名"自选"（onToggleWatchlist 模式）
+      // 旧版 onAddToWatchlist（主页）和 onDetail（ScreenerPage）作为兼容保留
+      // stopPropagation 防止按钮点击冒泡到 <tr onClick>，避免行选中副作用
       key: 'action',
-      title: '操作',
+      title: onToggleWatchlist ? '自选' : '操作',
       dataType: 'text',
       sortable: false,
       filterable: false,
-      width: 60,
+      width: 76,
       isAction: true,
       render: (row) => {
-        // [趋势选股] - 描述: 主页操作列=加入自选，ScreenerPage 操作列=查看详情
+        // /market 自选操作：加入/移除自选（按 instrument_id 维护 watched/pending 状态）
+        if (onToggleWatchlist) {
+          const instrumentId = row.instrumentId
+          const watched = watchlistInstrumentIds?.has(instrumentId) ?? false
+          const pending = watchlistPendingIds?.has(instrumentId) ?? false
+          return watched ? (
+            <button
+              className="btn small"
+              onClick={(e) => { e.stopPropagation(); onToggleWatchlist(row, false) }}
+              disabled={pending}
+              title="移除自选"
+            >
+              {pending ? '…' : '移除自选'}
+            </button>
+          ) : (
+            <button
+              className="btn small"
+              onClick={(e) => { e.stopPropagation(); onToggleWatchlist(row, true) }}
+              disabled={pending}
+              title="加入自选"
+            >
+              {pending ? '…' : '加入自选'}
+            </button>
+          )
+        }
+        // 主页兼容：onAddToWatchlist 单按钮模式
         if (onAddToWatchlist) {
           return row.watched ? (
             <span className="tag info">已自选</span>
           ) : (
             <button
               className="btn small"
-              onClick={() => onAddToWatchlist(row)}
+              onClick={(e) => { e.stopPropagation(); onAddToWatchlist(row) }}
               disabled={addPending}
             >
               ＋ 自选
             </button>
           )
         }
+        // ScreenerPage 兼容：onDetail 详情按钮
         if (onDetail) {
           return (
             <div className="actions">
-              <button className="btn small" onClick={() => onDetail(row)}>
+              <button className="btn small" onClick={(e) => { e.stopPropagation(); onDetail(row) }}>
                 详情
               </button>
             </div>

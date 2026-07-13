@@ -647,11 +647,14 @@ export function useAddToWatchlist() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['watchlist'] })
       queryClient.invalidateQueries({ queryKey: ['watchlist', 'monitor-status'] })
+      // CHANGE-20260713-005: watchlist 变化后，universe=watchlist 的 strategy run results 也需失效，
+      // 否则 /market?scope=watchlist 下加入/移除自选后行不会立即出现/消失
+      queryClient.invalidateQueries({ queryKey: ['strategy-runs'] })
     },
   })
 }
 
-/** 移除自选变更（自动失效 watchlist + monitor-status 缓存） */
+/** 移除自选变更（自动失效 watchlist + monitor-status + strategy-runs 缓存） */
 export function useRemoveFromWatchlist() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -659,6 +662,9 @@ export function useRemoveFromWatchlist() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['watchlist'] })
       queryClient.invalidateQueries({ queryKey: ['watchlist', 'monitor-status'] })
+      // CHANGE-20260713-005: watchlist 变化后，universe=watchlist 的 strategy run results 也需失效，
+      // 否则 /market?scope=watchlist 下移除自选后行不会立即消失
+      queryClient.invalidateQueries({ queryKey: ['strategy-runs'] })
     },
   })
 }

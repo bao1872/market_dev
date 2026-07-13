@@ -71,14 +71,18 @@ export interface ChartLayerManifestEntry {
   description: string
 }
 
+// [ChartLayerManifest] - 描述: 用户可见图层名（仅展示文案，不改内部 id/DTO/算法）
+// - node 显示为"筹码共识价"：基于历史成交量分布的估算代理，不是股东真实持仓成本
+// - sqzmom 显示为"挤压动量"：波动收窄后的方向与强弱（LazyBear Pine 复刻）
+// 内部 ChartLayerKey 'node'/'sqzmom' 不变，profile/node/poc 字段名不变
 export const CHART_LAYER_MANIFEST: ChartLayerManifestEntry[] = [
   { id: 'trend', name: '趋势', kind: 'main', enabled: true, description: '趋势参考价 · 选股命中标记' },
-  { id: 'node', name: '成交量节点', kind: 'main', enabled: true, description: '成交量分布 · 节点区间 · POC' },
+  { id: 'node', name: '筹码共识价', kind: 'main', enabled: true, description: '成交量分布估算 · 节点区间 · POC（基于历史成交量分布的估算代理，非股东真实持仓成本）' },
   { id: 'boll', name: '布林带', kind: 'main', enabled: true, description: '布林带 · SMA(20) ± 2σ' },
   { id: 'breakout', name: '突破', kind: 'main', enabled: true, selectionOnly: true, description: '压力区 · 突破确认' },
   { id: 'volume', name: '成交量', kind: 'sub', enabled: true, description: '成交量副图' },
   { id: 'macd', name: 'MACD', kind: 'sub', enabled: true, description: 'MACD 副图 · DIF/DEA/Histogram' },
-  { id: 'sqzmom', name: 'SQZMOM', kind: 'sub', enabled: true, description: 'Squeeze Momentum · LazyBear Pine 复刻' },
+  { id: 'sqzmom', name: '挤压动量', kind: 'sub', enabled: true, description: '波动收窄后的方向与强弱 · LazyBear Pine 复刻' },
 ]
 
 // 按 source 生成默认 ChartLayerVisibility

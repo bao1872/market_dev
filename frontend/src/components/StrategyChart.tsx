@@ -1468,7 +1468,7 @@ function profileTooltip(row: ProfileRow, profile: BackendProfile): string {
   const totalSum = profile.rows.reduce((s, r) => s + r.total_volume, 0)
   const share = row.total_volume / Math.max(1, totalSum) * 100
   const node = profile.nodes.find(n => row.price_mid >= n.lo && row.price_mid <= n.hi)
-  return `<b>${fmt(row.price_low)}–${fmt(row.price_high)}</b><span>\u603b\u6210\u4ea4量 ${(row.total_volume / 10000).toFixed(1)}万 · ${share.toFixed(2)}%</span><span>\u4e70量 ${(row.bullish_volume / 10000).toFixed(1)}万 · \u5356量 ${(row.bearish_volume / 10000).toFixed(1)}万</span><span>价值区 ${row.is_value_area ? '是' : '否'} · 节点 ${node ? node.id : '—'}${row.is_poc ? ' · POC' : ''}${row.is_peak ? ' · PEAK' : ''}</span>`
+  return `<b>${fmt(row.price_low)}–${fmt(row.price_high)}</b><span>\u603b\u6210\u4ea4量 ${(row.total_volume / 10000).toFixed(1)}万 · ${share.toFixed(2)}%</span><span>\u4e70量 ${(row.bullish_volume / 10000).toFixed(1)}万 · \u5356量 ${(row.bearish_volume / 10000).toFixed(1)}万</span><span>价值区 ${row.is_value_area ? '是' : '否'} · 节点 ${node ? node.id : '—'}${row.is_poc ? ' · 核心共识价' : ''}${row.is_peak ? ' · 共识价' : ''}</span>`
 }
 
 // ===== 主绘制函数（对齐原型 drawTrading 渲染管线）=====
@@ -1553,9 +1553,10 @@ function drawTrading(
       renderProfile(ctx, profile, g, py, state, layerSet)
     } else {
       // 后端 VP 数据缺失：在 VP 区域中央显示灰色提示（禁止降级到前端算法）
+      // [筹码共识价] - 描述: 缺失提示文案统一为"筹码共识价暂不可用"（基于历史成交量分布的估算代理）
       const cx = (g.profileStart + g.profileEnd) / 2
       const cy = (g.panes.price.top + g.panes.price.bottom) / 2
-      drawText(ctx, '筹码分布暂不可用', cx, cy, C.text, '11px sans-serif', 'center')
+      drawText(ctx, '筹码共识价暂不可用', cx, cy, C.text, '11px sans-serif', 'center')
     }
   }
 
@@ -1570,8 +1571,9 @@ function drawTrading(
       ctx.fillStyle = n.poc ? 'rgba(255,152,0,.11)' : selected ? 'rgba(156,179,255,.15)' : 'rgba(79,124,255,.075)'
       ctx.fillRect(g.l, y1, plotW, y2 - y1)
       drawLine(ctx, g.l, py(n.mid), g.plotRight, py(n.mid), n.poc ? C.orange : selected ? '#dce6ff' : C.blue, selected ? 2 : 1, n.poc ? [8, 4] : [4, 5])
-      // 峰价格标签
-      const labelText = n.poc ? `POC 峰 ${fmt(n.mid)}` : `峰 ${fmt(n.mid)}`
+      // [筹码共识价] - 描述: 节点价格标签（POC=核心共识价，普通峰=共识价）
+      // 文案仅为展示，内部 n.poc/字段名不变；筹码共识价是基于历史成交量分布的估算代理
+      const labelText = n.poc ? `核心共识价 ${fmt(n.mid)}` : `共识价 ${fmt(n.mid)}`
       drawText(ctx, labelText, g.l + 5, y1 + 10, n.poc ? C.orange : C.blue, '11px sans-serif')
       // 多空量标签 + 迷你多空柱（A 股：多头红色 / 空头绿色）
       if (n.bullish_volume > 0 || n.bearish_volume > 0) {
@@ -1593,10 +1595,11 @@ function drawTrading(
   }
 
   // 4. POC 中心线（从后端 profile_meta.poc_price 读取）
+  // [筹码共识价] - 描述: POC 中心线标签显示"核心共识价"（基于历史成交量分布的估算代理）
   if (layers.poc && profile && profile.pocPrice != null) {
     const pocVal = profile.pocPrice
     drawLine(ctx, g.l, py(pocVal), layers.profile ? g.profileEnd : g.plotRight, py(pocVal), C.orange, 1.35, [9, 4])
-    drawText(ctx, `POC ${fmt(pocVal)}`, g.plotRight - 62, py(pocVal) - 5, C.orange, '9px sans-serif')
+    drawText(ctx, `核心共识价 ${fmt(pocVal)}`, g.plotRight - 80, py(pocVal) - 5, C.orange, '9px sans-serif')
   }
 
   // 5. 突破压力区
@@ -1950,6 +1953,8 @@ export function StrategyChart({
     const canvas = canvasRef.current
     const tip = tipRef.current
     if (!canvas) return
+    // 默认 grab 光标，拖动时切换为 grabbing
+    canvas.style.cursor = 'grab'
 
     const handleMouseMove = (e: MouseEvent) => {
       const s = stateRef.current
@@ -2033,6 +2038,8 @@ export function StrategyChart({
     const handleClick = (e: MouseEvent) => {
       const s = stateRef.current
       if (!s.g) return
+      // 拖动后抑制 click，避免误触发 profile/event 选中
+      if (dragMovedRef.current) return
       const r = canvas.getBoundingClientRect()
       const mx = e.clientX - r.left
       const my = e.clientY - r.top
@@ -2089,36 +2096,52 @@ export function StrategyChart({
       }
     }
 
-    // [Task 16] - 拖动平移：鼠标左键拖动画布，向左查看更早数据，向右回到最近数据
-    const handleMouseDown = (e: MouseEvent) => {
+    // [Task 16] - 拖动平移：指针拖动画布，向左查看更早数据，向右回到最近数据
+    // 使用 Pointer Events + 捕获 + 锚定起始视区，保证拖动稳定不漂移
+    const handlePointerDown = (e: PointerEvent) => {
       if (e.button !== 0) return // 仅左键
       const s = stateRef.current
       if (!s.g) return
       const r = canvas.getBoundingClientRect()
-      dragRef.current = { startX: e.clientX - r.left, fromIndex: viewport.fromIndex }
+      dragRef.current = {
+        startClientX: e.clientX - r.left,
+        startViewport: viewport,
+        pointerId: e.pointerId,
+      }
+      dragMovedRef.current = false
+      try { canvas.setPointerCapture(e.pointerId) } catch { /* ignore */ }
       canvas.style.cursor = 'grabbing'
     }
 
-    const handleDragMove = (e: MouseEvent) => {
+    const handlePointerMove = (e: PointerEvent) => {
       if (!dragRef.current) return
       const s = stateRef.current
       if (!s.g) return
       const r = canvas.getBoundingClientRect()
-      const mx = e.clientX - r.left
       const { step } = s
+      // 始终从起始 clientX 计算总位移，从起始视区平移（不累积，避免漂移）
+      const deltaPx = (e.clientX - r.left) - dragRef.current.startClientX
       // 拖动距离 → bar 数（向左拖动 = 查看更早数据 = fromIndex 减小）
-      const deltaPx = mx - dragRef.current.startX
       const deltaBars = -Math.round(deltaPx / step)
-      if (deltaBars === 0) return
-      const newVp = panViewport(viewport, deltaBars, calc.length)
+      // 点击阈值：移动超过 4px 视为拖动
+      if (Math.abs(deltaPx) > 4) dragMovedRef.current = true
+      const newVp = panViewport(dragRef.current.startViewport, deltaBars, calc.length)
       if (onViewportChange) onViewportChange(newVp)
-      dragRef.current.startX = mx
     }
 
-    const handleMouseUp = () => {
+    const handlePointerUp = (e: PointerEvent) => {
       if (dragRef.current) {
+        try { canvas.releasePointerCapture(e.pointerId) } catch { /* ignore */ }
         dragRef.current = null
-        canvas.style.cursor = ''
+        canvas.style.cursor = 'grab'
+      }
+    }
+
+    const handlePointerCancel = (e: PointerEvent) => {
+      if (dragRef.current) {
+        try { canvas.releasePointerCapture(e.pointerId) } catch { /* ignore */ }
+        dragRef.current = null
+        canvas.style.cursor = 'grab'
       }
     }
 
@@ -2165,9 +2188,10 @@ export function StrategyChart({
     canvas.addEventListener('click', handleClick)
     canvas.addEventListener('mouseleave', handleMouseLeave)
     canvas.addEventListener('wheel', handleWheel, { passive: false })
-    canvas.addEventListener('mousedown', handleMouseDown)
-    window.addEventListener('mousemove', handleDragMove)
-    window.addEventListener('mouseup', handleMouseUp)
+    canvas.addEventListener('pointerdown', handlePointerDown)
+    canvas.addEventListener('pointermove', handlePointerMove)
+    canvas.addEventListener('pointerup', handlePointerUp)
+    canvas.addEventListener('pointercancel', handlePointerCancel)
     canvas.addEventListener('dblclick', handleDoubleClick)
     canvas.addEventListener('touchstart', handleTouchStart, { passive: false })
     canvas.addEventListener('touchmove', handleTouchMove, { passive: false })
@@ -2177,9 +2201,10 @@ export function StrategyChart({
       canvas.removeEventListener('click', handleClick)
       canvas.removeEventListener('mouseleave', handleMouseLeave)
       canvas.removeEventListener('wheel', handleWheel)
-      canvas.removeEventListener('mousedown', handleMouseDown)
-      window.removeEventListener('mousemove', handleDragMove)
-      window.removeEventListener('mouseup', handleMouseUp)
+      canvas.removeEventListener('pointerdown', handlePointerDown)
+      canvas.removeEventListener('pointermove', handlePointerMove)
+      canvas.removeEventListener('pointerup', handlePointerUp)
+      canvas.removeEventListener('pointercancel', handlePointerCancel)
       canvas.removeEventListener('dblclick', handleDoubleClick)
       canvas.removeEventListener('touchstart', handleTouchStart)
       canvas.removeEventListener('touchmove', handleTouchMove)
@@ -2214,7 +2239,10 @@ export function StrategyChart({
   }, [legendIdx, display])
 
   // [chartViewport] - 拖动平移状态（Task 16: TradingView 风格缩放）
-  const dragRef = useRef<{ startX: number; fromIndex: number } | null>(null)
+  // 使用 Pointer Events + 锚定起始视区，避免累积漂移
+  const dragRef = useRef<{ startClientX: number; startViewport: ChartViewport; pointerId: number } | null>(null)
+  // [chartViewport] - 拖动点击阈值：拖动超过 4px 后抑制后续 click
+  const dragMovedRef = useRef(false)
   // [chartViewport] - 移动端双指缩放状态
   const pinchRef = useRef<{ startDist: number; startViewport: ChartViewport | null } | null>(null)
 

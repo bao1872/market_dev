@@ -94,6 +94,9 @@ export interface DataTableProps<Row> {
   onRowClick?: (row: Row) => void
   // [StrategyDataTable] - 描述: 当前选中行 key（用于高亮选中行）
   activeRowKey?: string | null
+  // [StrategyDataTable] - 描述: 外部受控 keyword（提供时覆盖内部 globalQuery，用于 /market 顶部搜索框）
+  externalKeyword?: string
+  onKeywordChange?: (keyword: string) => void
 }
 
 // [StrategyDataTable] - 描述: 按字段类型返回可选操作符列表（默认操作符为数组首项）
@@ -405,6 +408,8 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     stickyHeaderMode = 'container',
     onRowClick,
     activeRowKey,
+    externalKeyword,
+    onKeywordChange,
   } = props
 
   const [searchParams, setSearchParams] = useSearchParams()
@@ -414,6 +419,9 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
   const [sortDirection, setSortDirection] = useState<SortDirection>(null)
   const [filters, setFilters] = useState<Record<number, DataTableFilter>>({})
   const [globalQuery, setGlobalQuery] = useState('')
+
+  // [StrategyDataTable] - 描述: 受控 keyword 模式 — externalKeyword 提供时覆盖内部 globalQuery
+  const effectiveKeyword = externalKeyword !== undefined ? externalKeyword : globalQuery
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(initialPageSize)
   const [hiddenColumns, setHiddenColumns] = useState<Set<string>>(new Set())
@@ -458,7 +466,10 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
         setSortDirection(state.sort.direction)
       }
     }
-    if (state.keyword) setGlobalQuery(state.keyword)
+    if (state.keyword) {
+      setGlobalQuery(state.keyword)
+      if (onKeywordChange) onKeywordChange(state.keyword)
+    }
     if (state.filters && state.filters.length > 0) {
       const next: Record<number, DataTableFilter> = {}
       for (const f of state.filters) {
@@ -616,7 +627,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
   // ===== 视图配置 Preset =====
   // [Presets] - 描述: 从内部 state 构建当前配置快照（keyword/sort/filters/hiddenColumns/columnOrder/pageSize）
   const currentConfig: TableViewPresetConfig = useMemo(() => ({
-    keyword: globalQuery.trim() || null,
+    keyword: effectiveKeyword.trim() || null,
     sort: sortColumn !== null && sortDirection
       ? { key: columns[sortColumn]?.key ?? '', direction: sortDirection }
       : null,
@@ -629,11 +640,12 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     hiddenColumns: [...hiddenColumns],
     columnOrder: columnOrder ?? null,
     pageSize,
-  }), [globalQuery, sortColumn, sortDirection, filters, hiddenColumns, columnOrder, pageSize, columns])
+  }), [effectiveKeyword, sortColumn, sortDirection, filters, hiddenColumns, columnOrder, pageSize, columns])
 
   // [Presets] - 描述: 应用 preset 配置到内部 state（重置所有筛选/排序/分页/隐藏列/列顺序）
   const applyPresetConfig = useCallback((config: TableViewPresetConfig) => {
     setGlobalQuery(config.keyword ?? '')
+    if (onKeywordChange) onKeywordChange(config.keyword ?? '')
     if (config.sort) {
       const idx = columns.findIndex((c) => c.key === config.sort!.key)
       setSortColumn(idx >= 0 ? idx : null)
@@ -674,7 +686,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     }
     if (config.pageSize != null) setPageSize(config.pageSize)
     setPage(1)
-  }, [columns, saveColumnOrder])
+  }, [columns, saveColumnOrder, onKeywordChange])
 
   // [Presets] - 描述: 自动应用默认配置（进入页面时，每个 strategyKey 只应用一次）
   const presetsQuery = useTableViewPresets(strategyKey ? tableId : undefined, strategyKey ?? undefined)
@@ -711,7 +723,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
       return
     }
     const state = {
-      keyword: globalQuery.trim() || undefined,
+      keyword: effectiveKeyword.trim() || undefined,
       sort:
         sortColumn !== null && sortDirection
           ? { key: columns[sortColumn]?.key || '', direction: sortDirection }
@@ -736,7 +748,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
       }
     }
     setSearchParams(nextParams, { replace: true })
-  }, [sortColumn, sortDirection, page, pageSize, columns, searchParams, setSearchParams, initialPageSize, globalQuery, filters])
+  }, [sortColumn, sortDirection, page, pageSize, columns, searchParams, setSearchParams, initialPageSize, effectiveKeyword, filters])
 
   // ===== 服务端查询回调 =====
   useEffect(() => {
@@ -745,7 +757,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
         page,
         pageSize,
         // [StrategyDataTable] - 描述: 透传全文搜索关键词至服务端
-        keyword: globalQuery.trim() || undefined,
+        keyword: effectiveKeyword.trim() || undefined,
         sort:
           sortColumn !== null && sortDirection
             ? { key: columns[sortColumn]?.key || '', direction: sortDirection }
@@ -753,7 +765,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
         filters: Object.values(filters),
       })
     }
-  }, [page, pageSize, sortColumn, sortDirection, filters, serverSide, onQueryChange, columns, globalQuery])
+  }, [page, pageSize, sortColumn, sortDirection, filters, serverSide, onQueryChange, columns, effectiveKeyword])
 
   // ===== 客户端排序和筛选 =====
   const processedRows = useMemo(() => {
@@ -761,9 +773,9 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
 
     let visible = rows.filter((row) => {
       // 全文搜索
-      if (globalQuery) {
+      if (effectiveKeyword) {
         const rowText = JSON.stringify(row).toLocaleLowerCase('zh-CN')
-        if (!rowText.includes(globalQuery.toLocaleLowerCase('zh-CN'))) return false
+        if (!rowText.includes(effectiveKeyword.toLocaleLowerCase('zh-CN'))) return false
       }
       // 列筛选
       return Object.entries(filters).every(([idx, filter]) => {
@@ -793,7 +805,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     }
 
     return visible
-  }, [rows, globalQuery, filters, sortColumn, sortDirection, columns, serverSide])
+  }, [rows, effectiveKeyword, filters, sortColumn, sortDirection, columns, serverSide])
 
   // 分页
   // serverSide 模式：total 来自 API；客户端模式：total 优先取 prop，否则用 processedRows.length
@@ -839,7 +851,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
 
   // ===== 渲染 =====
   const filterCount = Object.keys(filters).length
-  const hasActiveState = filterCount > 0 || sortColumn !== null || globalQuery !== ''
+  const hasActiveState = filterCount > 0 || sortColumn !== null || effectiveKeyword !== ''
 
   // 找到第一个可排序的列作为 sticky-col
   let stickyAssigned = false
@@ -854,7 +866,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
           </span>
           <span className="table-active-state">
             {[
-              globalQuery ? '全文搜索' : null,
+              effectiveKeyword ? '全文搜索' : null,
               filterCount ? `${filterCount} 个列筛选` : null,
               sortColumn !== null
                 ? `按「${columns[sortColumn]?.title}」${sortDirection === 'asc' ? '升序' : '降序'}`
@@ -898,9 +910,11 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
               className="input search"
               style={{ width: 260 }}
               placeholder="全文搜索"
-              value={globalQuery}
+              value={effectiveKeyword}
               onChange={(e) => {
-                setGlobalQuery(e.target.value.trim().toLocaleLowerCase('zh-CN'))
+                const v = e.target.value.trim().toLocaleLowerCase('zh-CN')
+                setGlobalQuery(v)
+                if (onKeywordChange) onKeywordChange(v)
                 setPage(1)
               }}
             />

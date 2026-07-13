@@ -56,8 +56,11 @@ Node Cluster 算法
 ### 2.4 统一行情工作区
 
 - `/market` 渲染 `MarketWorkspacePage`（`frontend/src/features/market-workspace/MarketWorkspacePage.tsx`），**无 K 线**，布局为工具栏 + DSA 列表表格 + 可收起事件状态面板：
-  - 工具栏（`MarketToolbar`）：scope 切换（watchlist/market）分段按钮；搜索词输入和列筛选由 `StrategyDataTable` 内置 UI 承载（URL `keyword`/`filters` 参数）。
+  - 工具栏（`MarketToolbar`）：scope 切换（watchlist/market）分段按钮 + 顶部唯一全文搜索框（CHANGE-20260713-005）；搜索框占位"搜索股票代码/名称/拼音首字母"，Enter/失焦提交，清空立即提交；`StrategyDataTable` 在 `/market` 传 `searchable={false}` 隐藏内置搜索 UI；列筛选仍由 `StrategyDataTable` 内置 UI 承载（URL `filters` 参数）。
+  - 搜索单一真源（CHANGE-20260713-005）：`MarketWorkspacePage` 持有 `keyword` state（初始值从 URL `keyword` 读取）→ `StrategyDataTable` 通过 `externalKeyword`/`onKeywordChange` 受控 props 接收 → URL `keyword` 同步；后端 `strategy_result_repository.query_results` 的 `keyword` 必须 ILIKE 同时匹配 `Instrument.symbol`/`Instrument.name`/`Instrument.pinyin_initials`（3 处分支同步）。
   - `StrategyDataTable`（`frontend/src/components/StrategyDataTable.tsx`）：复用趋势选股的 DSA 列表能力，数据来自 `usePublishedRuns` + `useStrategyRunResults`（最新 published DSA run）；列定义复用 `getTrendSelectionColumns`（`frontend/src/features/trend-selection/columns.tsx`），包含 stock/change_pct/dsa_dir_bars/vwap_ret_avg/vwap_ret_total/offset_mean/offset_std/offset_percentile/dsa_vwap/dsa_vwap_dev_pct/offset_variance_rate/price/action；`scope=market` → `universe=all`，`scope=watchlist` → `universe=watchlist`；**默认不显示**形态状态、DSA状态、最近事件列（事件只在 `EventStatePanel` 按需展开时加载）；行点击（`onRowClick`）更新 URL `selected` 并驱动右栏 `EventStatePanel`。
+  - 行内导航与自选操作（CHANGE-20260713-005）：股票名称/代码为可点击 `<a>` 链接，点击进入 `/stock/:symbol?returnTo=<编码后的当前 /market URL>`；链接 `onClick` 必须 `e.stopPropagation()` + `e.preventDefault()` 防止冒泡到 `<tr onClick>` 和默认跳转；股票单元格只显示名称/代码/市场，不再显示行内涨跌幅（独立 `change_pct` 列保留）；`action` 列改名"自选"，渲染"加入自选/移除自选"按钮（替代旧"详情"按钮），`onClick` 必须 `e.stopPropagation()`；页面只请求一次 `useWatchlist`，按 `instrument_id` 建 Set 判断 watched 状态（禁止 N+1）；`useAddToWatchlist`/`useRemoveFromWatchlist` 成功后 invalidate `['watchlist']` 和 `['watchlist', 'monitor-status']`；`watchlist` scope 移除自选后该行应消失；按 `instrument_id` 维护 `pending` Set 防重复点击。
+  - 批次信息权限（CHANGE-20260713-005）：数据日期/批次/状态属于调试信息，普通用户 DOM 中**完全不渲染**（不是 CSS 隐藏）；仅 `useAuthStore(s => s.user?.is_admin === true)` 为真时渲染，默认折叠为"批次信息"区块，点击展开后显示 `run_trade_date`/`run_published_at`/`run_status` 等字段。
   - 列设置与配置：`StrategyDataTable` 支持列显示/隐藏、调整顺序（`columnOrder`）、恢复默认、刷新保留（localStorage `table-columns:${tableId}` + `table-column-order:${tableId}`）；配置复用 `/me/table-view-presets`（`TablePresetMenu`），保存 `keyword/sort/filters/hiddenColumns/columnOrder/pageSize`；股票名称/代码和操作列不可全部隐藏；旧配置包含已删除字段时忽略未知项。
   - P0 列对齐契约：表头 th、表体 td、colgroup col 三者从同一 `visibleColumns` 派生（`reorderVisibleColumns` 纯函数，`frontend/src/components/columnOrdering.ts`）；每行 td 数 = 可见 th 数；单元格按 `col.key` 取值，禁止依赖数组下标；`columnAlignment.test.ts` 覆盖纯函数 + 源码契约。
   - `EventStatePanel`（`frontend/src/features/research-context/EventStatePanel.tsx`）：可收起面板；P0-4: 首次默认收起，localStorage key `panji:market-right-panel-collapsed:v1` 持久化用户选择；收起时不挂载、不请求数据。面板使用 `useStockContext` 单一接口（`GET /api/v1/stocks/{symbol}/context`），展示 MACD 动量、Evidence（事件证据）、`state.evidence`（状态证据）、数据日期/质量、当前价格结构、成交密集区关系、最近状态变化时间线；普通用户不显示内部字段名（`sourceField`）、算法参数、`idempotencyKey`、JSON 或商业机密；原始 factor/feature/JSON 仅在 `/admin/stock-debug` 和 `/admin/stock-debug/:symbol` 展示。
@@ -81,7 +84,7 @@ Node Cluster 算法
 - 错误状态：instrument/bars/indicators 加载失败时显示明确错误状态（含重试按钮），不伪装为空图。
 - 周期文案：根据 timeframe 显示真实周期（1d=完整日线、15m=完整15分钟K线、1h=完整1小时K线、1w=完整周线、1mo=完整月线）；非实时非降级时统一显示"行情回退"（禁止所有非 1d 周期显示"日线回退"）；partial 文案必须包含当前周期（如"K线含未完成 bar（15m）"），禁止所有周期统一显示"日线"。
 - `/capture/stock/:symbol` 完全独立，不使用 `useStockResearchData`/`StockResearchWorkspace`/`apiClient`，只使用 `captureClient`。
-- `AccountMenu` 复用 `appNavigation.getAccountMenuItemsForVariant(isAdmin, variant)` 单一真源构建菜单项。
+- `AccountMenu` 复用 `appNavigation.getAccountMenuItemsForVariant(isAdmin, variant)` 单一真源构建菜单项；消息项动态化（CHANGE-20260713-005）：`unread>0` 时菜单链接为 `/messages?filter=unread`，否则为 `/messages`；消息项右侧显示未读数 badge（`>99` 显示 `99+`），数据来自 `useUnreadCount`。
 - 研究上下文纯函数：`buildStructureSummary`（`frontend/src/features/research-context/buildStructureSummary.ts`）从 `primary[timeframe].cost_position` 等真实 DTO 路径提取结构状态摘要（合并 degraded_reasons/warmup_notes、日线/15m 摘要、成本位置/节点）；`buildUserEventExplanation`（`frontend/src/features/research-context/buildUserEventExplanation.ts`）只消费白名单字段（event_time/event_type/payload.facts[].text_content/summary）并校验 `event.instrument_id` 与 `currentInstrumentId` 一致性（不一致时隐藏价格，显示"该事件属于其他股票"）。两个纯函数无 React 依赖，可被 `node --test` 直接运行。
 - **板块筛选已移除**：`/market` DSA 列表不再使用行业/概念筛选（DSA API 不支持）；`MarketToolbar` 简化为仅 scope 分段按钮；`MarketStockTable` 已删除，由 `StrategyDataTable` + `getTrendSelectionColumns` 替代；`/market/boards` API 仍保留供其他用途，但 `/market` 列表不消费 boards。
 
@@ -146,7 +149,9 @@ Node Cluster 算法
 - **图层可见性单一真源（CHANGE-20260713-001）**：所有图层开关状态由 `ChartLayerVisibility` 类型统一管理（7 键：`trend/node/boll/volume/macd/sqzmom/breakout`），localStorage key 为 `panji:chart-layer-visibility:v2`；`IndicatorToolbar` 只 dispatch `onToggleLayer(key)`，`StockResearchWorkspace` 持有唯一 `layerVisibility` state 并通过 `layers` prop 传入 `StrategyChart`；禁止子组件 `useState` 维护独立图层状态、禁止 `indicatorVisibility`/`detail-chart-strategy-groups`/`setLayers` 等旧散落状态源；
 - **SQZMOM_LB 图层开关**：位于技术指标分组，默认关闭；开启后在 K 线下方新增独立副图，使用后端返回的 `val` 渲染 histogram、`bcolor` 渲染柱色、`scolor` 渲染 0 轴 squeeze marker；前端只消费后端 DTO，不重新计算 `val`/`sqzOn`/`sqzOff`/`noSqz`；API 未返回 `sqzmom_lb` 时页面不崩溃；
 - **成交量分布**：Phase 5 前保持禁用，工具栏只显示真实能力；`consensus_zone` 保持禁用并显示"成交量分布尚未开放"，不得实现假筹码共识；
+- **图层用户文案契约（CHANGE-20260713-005）**：仅改用户可见文案，不改内部 id/DTO/算法；`CHART_LAYER_MANIFEST`（`frontend/src/features/stock-research/stockResearchTypes.ts`）中 `sqzmom` 显示为"挤压动量"（description 含"波动收窄后的方向与强弱"），`node` 显示为"筹码共识价"（description 注明"基于历史成交量分布的估算代理，非股东真实持仓成本"）；`StrategyChart` 节点价格标签 `POC 峰`→"核心共识价"，`峰`→"共识价"；POC 中心线水平线标签显示"核心共识价"（非裸 `POC`）；tooltip 中 `is_poc`→" · 核心共识价"，`is_peak`→" · 共识价"；数据缺失提示为"筹码共识价暂不可用"；内部字段 `n.poc`/`profile.pocPrice`/`row.is_poc`/`is_peak`/`'poc'` layer key 必须保留（不改 DTO/算法）；不得恢复已删除的 `ConsensusZone`，也不得修改 profile/node/poc 字段名；"筹码共识价"是基于历史成交量分布的估算代理，不是股东真实持仓成本。
 - **K 线初始 viewport 定位（CHANGE-20260713-001 P0-5）**：个股详情初始进入时，viewport 必须基于真实 `calc.length` 创建，`viewport.toIndex === calc.length`，默认显示最后 N 根 K 线；禁止用 `createDefaultViewport(0)` 构造假 viewport；切换股票时（`symbol` 变化）必须重置到该股票最新 K 线（viewport 复合 key `${symbol}:${timeframe}`）；切换周期时首次进入定位该周期末尾，已在当前股票当前周期内主动平移/缩放时可保留用户视区；新行情追加时，用户位于最右端则自动跟随最新 bar 并保持原可见根数，用户已平移到历史区域则不强制拉回；"复位"/"1月/3月/6月/1年/全部"等范围按钮全部以最新 bar 为右边界；
+- **K 线 Pointer Events 拖拽契约（CHANGE-20260713-005）**：`StrategyChart` 使用 Pointer Events（`pointerdown`/`pointermove`/`pointerup`/`pointercancel`）替代旧 mouse 事件；`pointerdown` 调用 `setPointerCapture`，`pointerup`/`pointercancel` 调用 `releasePointerCapture`；`dragRef` 保存 `{startClientX, startViewport, pointerId}`，`pointermove` 从 `startViewport` 计算总位移（禁止在 stale viewport 上累计）；向右拖查看更早数据，向左拖回到最新；`dragMovedRef` 4px 阈值抑制 click（避免拖动误触节点/事件点击）；cursor 为 `grab`/`grabbing`；鼠标移出 canvas 后仍可继续拖动（依赖 setPointerCapture）；保留滚轮锚点缩放、双击复位和移动端双指缩放；`chartDrag.test.ts` 覆盖源码契约。
 - 截图区设置 render-ready 标志；
 - 按 timeframe 请求对应根数（1d=250、15m=4000、1h=1200、1w=260、1mo=120），与 Node Cluster / indicator_contract 对齐；`1m` 不在工具栏暴露；
 - 个股详情 K 线实时状态以 `/bars` 返回的 `data_source/is_partial/last_live_bar_time/as_of` 为准；`mergeRealtimeQuoteIntoBars()` 只做兜底视觉增强，仅当 `quote.is_realtime === true && quote.source === "pytdx" && quote.freshness_seconds <= 60` 时才合并到最后一根 K 线，不参与指标计算，不替代后端 partial bar；daily_fallback / 延迟 / 降级行情只用于顶部报价 fallback/状态提示，不混入 `displayBars`；1d 保留日期语义并跨日追加实时 bar，intraday（15m/1h 等）使用 `quote.update_time`；`baseBars` 仍用于指标计算，避免污染算法输入；
@@ -219,7 +224,9 @@ Node Cluster 算法
 
 ### 消息与飞书
 
-- 消息显示股票、事件时间、详情入口；单只股票消息点击进入 `/market?symbol=...&event_id=...`（`buildMarketEntryFromMessage`），多只股票抽屉"查看"按钮同样进入 `/market?symbol=...&event_id=...`；无股票消息保持在消息页；
+- 消息数量 SSOT（CHANGE-20260713-005）：`MessagesPage` 使用 `useUnreadCount`（`GET /messages/unread-count`，queryKey `['messages', 'unread-count']`）作为未读权威数量；"全部"显示后端列表 `messagesQuery.data?.total`（不用 `items.length`）；页头显示"共 X 条 · 未读 Y 条"；分段按钮仅 `all`/`unread` 显示计数，`selection`/`price`/`system`/`process` 不显示误导数字；标记单条/全部已读后 `useMarkMessageRead`/`useReadAllMessages` 的 `onSuccess` invalidate `['messages']`，自动刷新列表 + unread-count + 菜单角标。
+- 消息跳转目标（CHANGE-20260713-005）：单只股票消息点击进入 `/stock/:symbol?event_id=...&returnTo=/messages`（不再 `/market?symbol=`）；`selection_composite` 类型消息进入 `/market`（不再 `/screener`）；多只股票抽屉"查看"按钮同样进入 `/stock/:symbol?event_id=...&returnTo=/messages`；无股票消息保持在消息页；`returnTo` 必须经 `normalizeInternalReturnTo` 校验。
+- 消息显示股票、事件时间、详情入口；
 - 文字和图片显示独立状态；
 - partial_failed 展示失败步骤和仅重试图片；
 - Worker 不可用时不显示整体成功。

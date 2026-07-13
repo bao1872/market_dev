@@ -158,3 +158,39 @@ test('旧 toolbar key 迁移：4 键 → 7 键', () => {
   // sqzmom 不在旧 toolbar 中，使用默认值
   assert.equal(loaded.sqzmom, false, 'sqzmom should use default (false)')
 })
+
+// ===== 11. 用户文案：sqzmom 显示为"挤压动量"，node 显示为"筹码共识价" =====
+// [文案契约] - 描述: 仅改用户可见文案，不改内部 id/DTO/算法
+// sqzmom 内部 key 不变，但 manifest.name 必须为"挤压动量"
+// node 内部 key 不变，但 manifest.name 必须为"筹码共识价"
+test('manifest 用户文案：sqzmom → "挤压动量"，node → "筹码共识价"', () => {
+  const sqzmom = CHART_LAYER_MANIFEST.find((e) => e.id === 'sqzmom')
+  assert.ok(sqzmom, '必须存在 sqzmom 条目')
+  assert.equal(sqzmom!.name, '挤压动量', 'sqzmom manifest.name 必须为"挤压动量"')
+  assert.ok(
+    sqzmom!.description.includes('波动收窄'),
+    'sqzmom description 应包含"波动收窄"（tooltip: 波动收窄后的方向与强弱）',
+  )
+
+  const node = CHART_LAYER_MANIFEST.find((e) => e.id === 'node')
+  assert.ok(node, '必须存在 node 条目')
+  assert.equal(node!.name, '筹码共识价', 'node manifest.name 必须为"筹码共识价"')
+  assert.ok(
+    node!.description.includes('估算代理'),
+    'node description 应注明"估算代理"（非股东真实持仓成本）',
+  )
+})
+
+// ===== 12. 内部 key 不变（sqzmom/node/poc 字段名保留） =====
+test('内部 ChartLayerKey 不变：sqzmom/node 仍为内部 id', () => {
+  const ids = CHART_LAYER_MANIFEST.map((e) => e.id)
+  assert.ok(ids.includes('sqzmom'), '内部 id "sqzmom" 必须保留（不改 DTO/算法）')
+  assert.ok(ids.includes('node'), '内部 id "node" 必须保留（不改 DTO/算法）')
+  // 不应出现"成交量节点"或"SQZMOM"作为 name（已改为中文文案）
+  for (const entry of CHART_LAYER_MANIFEST) {
+    assert.ok(
+      entry.name !== 'SQZMOM' && entry.name !== '成交量节点',
+      `不应保留旧文案 "${entry.name}"（id=${entry.id}）`,
+    )
+  }
+})

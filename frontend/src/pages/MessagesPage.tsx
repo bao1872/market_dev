@@ -9,7 +9,7 @@ import { useState, useMemo, useCallback } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useToast } from '@/store/toast'
 import { useRoleStore } from '@/store/role'
-import { useMessages, useMarkMessageRead, useReadAllMessages } from '@/hooks/useApi'
+import { useMessages, useMarkMessageRead, useReadAllMessages, useUnreadCount } from '@/hooks/useApi'
 import type { NotificationMessage } from '@/api/endpoints'
 import { StrategyDataTable } from '@/components/StrategyDataTable'
 import type { DataTableColumn } from '@/components/StrategyDataTable'
@@ -237,33 +237,33 @@ export default function MessagesPage() {
     unread_only: activeFilter === 'unread',
     limit: 100,
   })
+  // [Messages] - 描述: 未读数权威来源（角标专用接口，与 AccountMenu 同口径）
+  // useMarkMessageRead/useReadAllMessages 的 onSuccess 已 invalidate ['messages']，自动刷新 unread-count
+  const unreadQuery = useUnreadCount()
   const markReadMutation = useMarkMessageRead()
   // [Messages] - 描述: 全部已读走后端批量 UPDATE，避免前端 N 次并发请求
   const readAllMutation = useReadAllMessages()
 
   const allMessages: NotificationMessage[] = messagesQuery.data?.items ?? []
+  // [Messages] - 描述: "全部"使用后端列表 total（SSOT），不使用 items.length（受 limit/筛选影响）
+  const totalCount = messagesQuery.data?.total ?? 0
+  // [Messages] - 描述: "未读"使用 unread-count API（SSOT），不使用客户端计数
+  const unreadCount = unreadQuery.data?.unread_count ?? 0
 
-  // 各筛选分类的计数（基于当前已加载的全部消息）
+  // 各筛选分类的计数
+  // - all: 后端 total（权威）
+  // - unread: unread-count API（权威）
+  // - selection/price/system/process: 无后端权威总数，不显示误导数字（显示 0 或不显示）
   const filterCounts = useMemo<Record<MessageFilter, number>>(() => {
-    const counts: Record<MessageFilter, number> = {
-      all: allMessages.length,
-      unread: 0,
+    return {
+      all: totalCount,
+      unread: unreadCount,
       selection: 0,
       price: 0,
       system: 0,
       process: 0,
     }
-    for (const m of allMessages) {
-      if (!m.read_at) counts.unread++
-      if (m.message_type === 'selection_composite') counts.selection++
-      else if (m.message_type === 'monitoring_composite' || m.message_type === 'MONITOR_EVENT' || m.message_type === 'MONITOR_MEMBER_EVENT') counts.price++
-      else if (m.message_type === 'process_event') counts.process++
-      else if (m.message_type === 'system' || m.message_type === 'SYSTEM_ALERT') counts.system++
-    }
-    // [advice.md 第二节] - 普通用户不暴露过程事件，计数恒为 0
-    if (!isAdmin) counts.process = 0
-    return counts
-  }, [allMessages, isAdmin])
+  }, [totalCount, unreadCount])
 
   // 时间范围 + 类型过滤（unread 已通过 API 参数过滤）
   const filteredMessages = useMemo(() => {
@@ -323,13 +323,18 @@ export default function MessagesPage() {
             : primary?.symbol || primary?.name || '-'
 
       // 根据消息类型决定查看跳转目标
+      // [Messages] - 描述: 单只股票消息进入 /stock/:symbol?event_id=...&returnTo=/messages
+      // selection_composite 进入 /market（保留筛选来源）
       let navigateTarget = ''
       if (m.message_type === 'selection_composite') {
-        navigateTarget = '/screener'
+        navigateTarget = '/market'
       } else if (m.message_type === 'system' || m.message_type === 'SYSTEM_ALERT') {
         navigateTarget = '/settings'
       } else if (instrumentCount === 1 && primary?.symbol) {
-        navigateTarget = `/market?symbol=${primary.symbol}${m.source_id ? `&event_id=${m.source_id}` : ''}`
+        const params = new URLSearchParams()
+        if (m.source_id) params.set('event_id', m.source_id)
+        params.set('returnTo', '/messages')
+        navigateTarget = `/stock/${primary.symbol}?${params.toString()}`
       }
 
       return {
@@ -516,14 +521,15 @@ export default function MessagesPage() {
         <div>
           <h1 className="page-title">消息中心</h1>
           <div className="page-desc">
-            选股结果、价格提醒与系统通知统一管理，发送情况可追溯
+            {/* [Messages] - 描述: 页头显示权威总数和未读数（同口径：total 来自后端列表，unread 来自 unread-count API） */}
+            共 {totalCount} 条 · 未读 {unreadCount} 条
           </div>
         </div>
         <div className="actions">
           <button
             className="btn"
             onClick={handleMarkAllRead}
-            disabled={isMarkingAll || readAllMutation.isPending}
+            disabled={isMarkingAll || readAllMutation.isPending || unreadCount === 0}
           >
             全部已读
           </button>
@@ -537,15 +543,20 @@ export default function MessagesPage() {
       <div className="toolbar">
         <div className="segmented">
           {/* [advice.md 第二节] - 普通用户 5 类筛选；管理员追加"过程事件" */}
-          {[...FILTER_OPTIONS, ...(isAdmin ? [FILTER_OPTION_PROCESS] : [])].map((opt) => (
-            <button
-              key={opt.value}
-              className={`segment${activeFilter === opt.value ? ' active' : ''}`}
-              onClick={() => setActiveFilter(opt.value)}
-            >
-              {opt.label} {filterCounts[opt.value]}
-            </button>
-          ))}
+          {/* [Messages] - 描述: 仅 all/unread 显示权威计数；selection/price/system/process 无后端权威总数，不显示误导数字 */}
+          {[...FILTER_OPTIONS, ...(isAdmin ? [FILTER_OPTION_PROCESS] : [])].map((opt) => {
+            const count = filterCounts[opt.value]
+            const showCount = opt.value === 'all' || opt.value === 'unread'
+            return (
+              <button
+                key={opt.value}
+                className={`segment${activeFilter === opt.value ? ' active' : ''}`}
+                onClick={() => setActiveFilter(opt.value)}
+              >
+                {opt.label}{showCount ? ` ${count}` : ''}
+              </button>
+            )
+          })}
         </div>
         <div className="toolbar-spacer"></div>
         <select
@@ -611,9 +622,11 @@ export default function MessagesPage() {
                         className="btn small"
                         onClick={() => {
                           setInstrumentDrawerOpen(false)
-                          navigate(
-                            `/market?symbol=${inst.symbol}${drawerEventId ? `&event_id=${drawerEventId}` : ''}`,
-                          )
+                          // [Messages] - 描述: 抽屉内单只标的跳转到个股详情，携带 event_id + returnTo=/messages
+                          const params = new URLSearchParams()
+                          if (drawerEventId) params.set('event_id', drawerEventId)
+                          params.set('returnTo', '/messages')
+                          navigate(`/stock/${inst.symbol}?${params.toString()}`)
                         }}
                       >
                         查看

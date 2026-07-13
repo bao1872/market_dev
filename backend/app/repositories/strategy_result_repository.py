@@ -514,7 +514,7 @@ async def query_results(
                 StrategyResult.instrument_id.in_(watchlist_instrument_ids)
             )
 
-        # keyword 过滤（JOIN instruments 表，symbol/name ILIKE 匹配）
+        # keyword 过滤（JOIN instruments 表，symbol/name/pinyin_initials ILIKE 匹配）
         if keyword is not None:
             kw_pattern = f"%{keyword}%"
             base = base.join(
@@ -523,6 +523,7 @@ async def query_results(
                 or_(
                     Instrument.symbol.ilike(kw_pattern),
                     Instrument.name.ilike(kw_pattern),
+                    Instrument.pinyin_initials.ilike(kw_pattern),
                 )
             )
 
@@ -595,6 +596,7 @@ async def query_results(
                 or_(
                     Instrument.symbol.ilike(kw_pattern),
                     Instrument.name.ilike(kw_pattern),
+                    Instrument.pinyin_initials.ilike(kw_pattern),
                 )
             )
         if filters:
@@ -739,6 +741,7 @@ def _apply_run_item_filters(
             or_(
                 Instrument.symbol.ilike(kw_pattern),
                 Instrument.name.ilike(kw_pattern),
+                Instrument.pinyin_initials.ilike(kw_pattern),
             )
         )
 
