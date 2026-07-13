@@ -4,6 +4,15 @@
 
 ## 2026-07-13
 
+- CHANGE-20260713-004: PR #74 阶段四 — /market DSA 列表恢复 + 列对齐修复 + 列设置 CRUD + columnOrder
+  - DSA 列表恢复：MarketWorkspacePage 改用 StrategyDataTable + getTrendSelectionColumns，数据来自 usePublishedRuns + useStrategyRunResults
+  - P0 列对齐修复：reorderVisibleColumns 纯函数提取到 columnOrdering.ts；thead th/tbody td/colgroup col 三者同源
+  - 列设置 CRUD：columnOrder 支持（localStorage + preset config）；TableViewPresetConfig 白名单新增 columnOrder
+  - URL 状态简化：/market 契约简化为 scope/selected + StrategyDataTable 内置 screenerUrlState
+  - MarketStockTable 删除；MarketToolbar 简化为仅 scope 分段按钮
+  - Node Cluster 边界保护：未修改 indicator_contract/indicator_service/monitor_batch_service/volume_node_monitor/watchlist_monitor/capture
+  - 测试：后端 50 preset + 前端 220 contract（含 31 columnAlignment + 12 marketWorkspaceUrlState）+ docs checks 全通过
+  - 文档：AGENTS 规则 14 全面更新（8/11/12/13/18/22/23 + 新增 24/25/26）+ 04-frontend-ux + code-doc-alignment + maps
 - CHANGE-20260713-003: PR #74 阶段三 — 行情列表简化 + 图层/因子语义纠正 + 右栏按需加载
   - boards 单一真源：MarketWorkspacePage 唯一调用 useMarketBoards，向下传 props
   - 删除最近事件列：market_stocks_service 删除 stock_state_event 批量查询（SQL 9→8），字段兼容保留 null

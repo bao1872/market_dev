@@ -8,6 +8,7 @@ import clsx from 'clsx'
 import { TablePresetMenu } from './TablePresetMenu'
 import { useTableViewPresets } from '@/hooks/useApi'
 import { decodeScreenerUrlState, encodeScreenerUrlState } from './screenerUrlState'
+import { reorderVisibleColumns } from './columnOrdering'
 import type { TableViewPresetConfig } from '@/api/endpoints'
 
 // ===== 类型定义（对应 UI_DEVELOPMENT_SPEC.md 3.3 推荐组件输入）=====
@@ -89,6 +90,10 @@ export interface DataTableProps<Row> {
   // - container: 在 .table-wrap 局部滚动容器内吸附（默认，兼容历史行为）
   // - viewport: 在页面滚动时吸附到 topbar 下方（趋势选股页使用）
   stickyHeaderMode?: 'viewport' | 'container'
+  // [StrategyDataTable] - 描述: 行点击回调（非链接区域点击时触发，用于 /market 选中行驱动右栏）
+  onRowClick?: (row: Row) => void
+  // [StrategyDataTable] - 描述: 当前选中行 key（用于高亮选中行）
+  activeRowKey?: string | null
 }
 
 // [StrategyDataTable] - 描述: 按字段类型返回可选操作符列表（默认操作符为数组首项）
@@ -298,13 +303,15 @@ function FilterPopover({
   )
 }
 
-// 列设置弹窗
+// 列设置弹窗（支持显示/隐藏 + 上下调整顺序）
 function ColumnManager({
   columns,
   hiddenColumns,
   onToggle,
   onReset,
   onClose,
+  onMoveUp,
+  onMoveDown,
   anchor,
 }: {
   columns: DataTableColumn<unknown>[]
@@ -312,19 +319,21 @@ function ColumnManager({
   onToggle: (key: string) => void
   onReset: () => void
   onClose: () => void
+  onMoveUp: (key: string) => void
+  onMoveDown: (key: string) => void
   anchor: HTMLElement
 }) {
   const rect = anchor.getBoundingClientRect()
-  const left = Math.min(window.innerWidth - 260, Math.max(8, rect.left - 100))
-  const top = Math.min(window.innerHeight - 330, rect.bottom + 6)
+  const left = Math.min(window.innerWidth - 300, Math.max(8, rect.left - 100))
+  const top = Math.min(window.innerHeight - 380, rect.bottom + 6)
 
   const manageable = columns.filter((c) => !c.isAction && !c.isSelect)
 
   return (
     <div className="column-filter-popover column-manager-popover" style={{ left, top }}>
-      <div className="filter-pop-title">显示列</div>
+      <div className="filter-pop-title">显示列（可拖动调整顺序）</div>
       <div className="column-manager-list">
-        {manageable.map((col) => (
+        {manageable.map((col, idx) => (
           <div key={col.key} className="column-manager-item">
             <label className="table-checkbox-wrapper" style={{ width: 24, height: 24 }}>
               <input
@@ -334,7 +343,27 @@ function ColumnManager({
                 onChange={() => onToggle(col.key)}
               />
             </label>
-            <span>{col.title}</span>
+            <span className="column-manager-label">{col.title}</span>
+            <span className="column-manager-reorder">
+              <button
+                className="btn small columns-move-up"
+                disabled={idx === 0}
+                onClick={() => onMoveUp(col.key)}
+                aria-label="上移"
+                title="上移"
+              >
+                ↑
+              </button>
+              <button
+                className="btn small columns-move-down"
+                disabled={idx === manageable.length - 1}
+                onClick={() => onMoveDown(col.key)}
+                aria-label="下移"
+                title="下移"
+              >
+                ↓
+              </button>
+            </span>
           </div>
         ))}
       </div>
@@ -374,6 +403,8 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     tableClassName,
     strategyKey,
     stickyHeaderMode = 'container',
+    onRowClick,
+    activeRowKey,
   } = props
 
   const [searchParams, setSearchParams] = useSearchParams()
@@ -386,6 +417,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(initialPageSize)
   const [hiddenColumns, setHiddenColumns] = useState<Set<string>>(new Set())
+  const [columnOrder, setColumnOrder] = useState<string[] | null>(null)
   const [filterPopover, setFilterPopover] = useState<{
     columnIndex: number
     anchor: HTMLElement
@@ -466,6 +498,22 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     } catch {
       // ignore
     }
+    // [StrategyDataTable] - 描述: 恢复列顺序（columnOrder）
+    try {
+      const savedOrder = localStorage.getItem(`table-column-order:${tableId}`)
+      if (savedOrder) {
+        const validKeys = new Set(columns.map((c) => c.key))
+        const parsedOrder: unknown = JSON.parse(savedOrder)
+        if (Array.isArray(parsedOrder)) {
+          const next = parsedOrder.filter(
+            (k): k is string => typeof k === 'string' && validKeys.has(k),
+          )
+          setColumnOrder(next.length > 0 ? next : null)
+        }
+      }
+    } catch {
+      // ignore
+    }
   }, [tableId, columns])
 
   // 保存列设置到 localStorage（按 column key）
@@ -473,6 +521,22 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     (hidden: Set<string>) => {
       try {
         localStorage.setItem(`table-columns:${tableId}`, JSON.stringify([...hidden]))
+      } catch {
+        // ignore
+      }
+    },
+    [tableId],
+  )
+
+  // [StrategyDataTable] - 描述: 保存列顺序到 localStorage
+  const saveColumnOrder = useCallback(
+    (order: string[] | null) => {
+      try {
+        if (order && order.length > 0) {
+          localStorage.setItem(`table-column-order:${tableId}`, JSON.stringify(order))
+        } else {
+          localStorage.removeItem(`table-column-order:${tableId}`)
+        }
       } catch {
         // ignore
       }
@@ -491,12 +555,11 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
 
   // [StrategyDataTable] - 描述: 可见列派生（携带 originalIndex，保留 columns 原始索引用于排序/筛选 state 定位）
   // 说明：sortColumn / filters / filterPopover.columnIndex 均基于 columns 原始索引，故 visibleColumns 必须保留该映射
+  // columnOrder 非空时按其顺序排列列（仅管理列，action/select 列固定在末尾）；否则按 columns 原始顺序
+  // 逻辑提取到 columnOrdering.ts 的 reorderVisibleColumns 纯函数，便于 P0 列对齐测试
   const visibleColumns = useMemo(
-    () =>
-      columns
-        .map((col, originalIndex) => ({ col, originalIndex }))
-        .filter(({ col }) => !hiddenColumns.has(col.key)),
-    [columns, hiddenColumns],
+    () => reorderVisibleColumns(columns, hiddenColumns, columnOrder),
+    [columns, hiddenColumns, columnOrder],
   )
 
   // [StrategyDataTable] - 描述: 可见列宽度之和（用于 table min-width，避免隐藏列后表格被压缩）
@@ -551,7 +614,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
   }, [])
 
   // ===== 视图配置 Preset =====
-  // [Presets] - 描述: 从内部 state 构建当前配置快照（仅 keyword/sort/filters/hiddenColumns/pageSize）
+  // [Presets] - 描述: 从内部 state 构建当前配置快照（keyword/sort/filters/hiddenColumns/columnOrder/pageSize）
   const currentConfig: TableViewPresetConfig = useMemo(() => ({
     keyword: globalQuery.trim() || null,
     sort: sortColumn !== null && sortDirection
@@ -564,10 +627,11 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
       ...(f.value2 !== undefined ? { value2: f.value2 } : {}),
     })),
     hiddenColumns: [...hiddenColumns],
+    columnOrder: columnOrder ?? null,
     pageSize,
-  }), [globalQuery, sortColumn, sortDirection, filters, hiddenColumns, pageSize, columns])
+  }), [globalQuery, sortColumn, sortDirection, filters, hiddenColumns, columnOrder, pageSize, columns])
 
-  // [Presets] - 描述: 应用 preset 配置到内部 state（重置所有筛选/排序/分页/隐藏列）
+  // [Presets] - 描述: 应用 preset 配置到内部 state（重置所有筛选/排序/分页/隐藏列/列顺序）
   const applyPresetConfig = useCallback((config: TableViewPresetConfig) => {
     setGlobalQuery(config.keyword ?? '')
     if (config.sort) {
@@ -600,9 +664,17 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     } else {
       setHiddenColumns(new Set())
     }
+    // [StrategyDataTable] - 描述: 应用列顺序（columnOrder）
+    if (config.columnOrder && config.columnOrder.length > 0) {
+      setColumnOrder(config.columnOrder)
+      saveColumnOrder(config.columnOrder)
+    } else {
+      setColumnOrder(null)
+      saveColumnOrder(null)
+    }
     if (config.pageSize != null) setPageSize(config.pageSize)
     setPage(1)
-  }, [columns])
+  }, [columns, saveColumnOrder])
 
   // [Presets] - 描述: 自动应用默认配置（进入页面时，每个 strategyKey 只应用一次）
   const presetsQuery = useTableViewPresets(strategyKey ? tableId : undefined, strategyKey ?? undefined)
@@ -624,6 +696,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
         sort: (cfg.sort as TableViewPresetConfig['sort']) ?? null,
         filters: (cfg.filters as TableViewPresetConfig['filters']) ?? null,
         hiddenColumns: (cfg.hiddenColumns as string[] | null | undefined) ?? null,
+        columnOrder: (cfg.columnOrder as string[] | null | undefined) ?? null,
         pageSize: (cfg.pageSize as number | null | undefined) ?? null,
       })
     }
@@ -976,7 +1049,11 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
               const isSelected = selectedKeys?.has(key)
               stickyAssigned = false // 重置用于行内 sticky-col
               return (
-                <tr key={key}>
+                <tr
+                  key={key}
+                  onClick={onRowClick ? () => onRowClick(row) : undefined}
+                  className={clsx(activeRowKey === key && 'row-active')}
+                >
                   {selectable && (
                     <td className="table-select-column">
                       <label className="table-checkbox-wrapper">
@@ -1075,8 +1152,36 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
             else next.add(key)
             applyColumnVisibility(next)
           }}
+          onMoveUp={(key) => {
+            // [StrategyDataTable] - 描述: 上移列 — 在当前序列中交换 key 与前一项
+            const manageableKeys = columns
+              .filter((c) => !c.isAction && !c.isSelect)
+              .map((c) => c.key)
+            const currentOrder = columnOrder ?? manageableKeys
+            const idx = currentOrder.indexOf(key)
+            if (idx <= 0) return
+            const next = [...currentOrder]
+            ;[next[idx - 1], next[idx]] = [next[idx], next[idx - 1]]
+            setColumnOrder(next)
+            saveColumnOrder(next)
+          }}
+          onMoveDown={(key) => {
+            // [StrategyDataTable] - 描述: 下移列 — 在当前序列中交换 key 与后一项
+            const manageableKeys = columns
+              .filter((c) => !c.isAction && !c.isSelect)
+              .map((c) => c.key)
+            const currentOrder = columnOrder ?? manageableKeys
+            const idx = currentOrder.indexOf(key)
+            if (idx < 0 || idx >= currentOrder.length - 1) return
+            const next = [...currentOrder]
+            ;[next[idx + 1], next[idx]] = [next[idx], next[idx + 1]]
+            setColumnOrder(next)
+            saveColumnOrder(next)
+          }}
           onReset={() => {
             applyColumnVisibility(new Set())
+            setColumnOrder(null)
+            saveColumnOrder(null)
             setColumnManagerAnchor(null)
           }}
           onClose={() => setColumnManagerAnchor(null)}

@@ -2692,7 +2692,7 @@ export async function getTemporalFeatures(
 // ===== Table View Presets 端点 =====
 // ============================================================
 // [Presets] - 描述: 用户表格视图配置 CRUD（/me/table-view-presets）
-// config 仅保存 keyword/sort/filters/hiddenColumns/pageSize，禁止保存 selectedKeys/page/activeRunId/rows
+// config 仅保存 keyword/sort/filters/hiddenColumns/columnOrder/pageSize，禁止保存 selectedKeys/page/activeRunId/rows
 
 /** 表格视图配置内容（与后端 TableViewPresetConfig 对齐，extra=forbid） */
 export interface TableViewPresetConfig {
@@ -2700,6 +2700,7 @@ export interface TableViewPresetConfig {
   sort?: { key: string; direction: 'asc' | 'desc' } | null
   filters?: Array<{ key: string; op: string; value: string | number; value2?: string | number }> | null
   hiddenColumns?: string[] | null
+  columnOrder?: string[] | null
   pageSize?: number | null
 }
 

@@ -71,7 +71,9 @@ export interface StockDetailActions {
 
 // 从 returnTo URL 解析市场列表查询参数（仅 /market 前缀有效）
 // 返回 null 表示 returnTo 不指向 /market 或无有效查询参数（应回退到自选列表）
-// C7: 恢复 industry/concept/state/page_size，与 marketWorkspaceUrlState URL 契约一致
+// /market URL 契约（CHANGE-20260713-004）：scope/selected 由 MarketWorkspacePage 管理；
+// sort/dir/keyword/filters/page/page_size 由 StrategyDataTable 内置 screenerUrlState 管理。
+// 本函数将 screenerUrlState 的 sort+dir 合成为 useMarketStocks 期望的 "key:dir" 格式。
 function parseMarketParamsFromReturnTo(
   returnTo: string | null | undefined,
 ): {
@@ -80,9 +82,6 @@ function parseMarketParamsFromReturnTo(
   page?: number
   page_size?: number
   sort?: string
-  industry?: string
-  concept?: string
-  state?: string
 } | null {
   const safe = normalizeInternalReturnTo(returnTo)
   if (!safe) return null
@@ -94,14 +93,20 @@ function parseMarketParamsFromReturnTo(
   const scope = params.get('scope')
   // 仅 market scope 的搜索结果有意义恢复（watchlist scope 已由自选列表覆盖）
   if (scope !== 'market') return null
-  const query = params.get('query') ?? undefined
+  // keyword 是 StrategyDataTable 内置搜索参数（screenerUrlState）
+  const keyword = params.get('keyword') ?? undefined
   const pageRaw = params.get('page')
   const page = pageRaw ? parseInt(pageRaw, 10) : undefined
-  const sort = params.get('sort') ?? undefined
-  const industry = params.get('industry') ?? undefined
-  const concept = params.get('concept') ?? undefined
-  const state = params.get('state') ?? undefined
-  // C7: page_size 从 URL 恢复（默认 DEFAULT_PAGE_SIZE，上限 MAX_PAGE_SIZE）
+  // sort + dir 是 StrategyDataTable 内置排序参数（screenerUrlState），合成为 "key:dir"
+  const sortKey = params.get('sort') ?? undefined
+  const sortDir = params.get('dir') ?? undefined
+  let sort: string | undefined
+  if (sortKey && sortDir) {
+    sort = `${sortKey}:${sortDir}`
+  } else if (sortKey) {
+    sort = sortKey
+  }
+  // page_size 从 URL 恢复（默认 DEFAULT_PAGE_SIZE，上限 MAX_PAGE_SIZE）
   const rawPageSize = params.get('page_size')
   let page_size: number | undefined
   if (rawPageSize) {
@@ -111,16 +116,13 @@ function parseMarketParamsFromReturnTo(
     }
   }
   // 至少有一个可恢复的参数才返回（避免空查询拉全市场）
-  if (!query && !page && !sort && !industry && !concept && !state) return null
+  if (!keyword && !page && !sort) return null
   return {
     scope: 'market',
-    query: query || undefined,
+    query: keyword || undefined,
     page: Number.isFinite(page) && (page as number) >= 1 ? page as number : undefined,
     page_size,
     sort: sort || undefined,
-    industry: industry || undefined,
-    concept: concept || undefined,
-    state: state || undefined,
   }
 }
 
@@ -135,9 +137,9 @@ export function useStockDetailActions({
   const showToast = useToast((s) => s.show)
 
   // [returnTo 上下文恢复] - 优先解析 returnTo 中的市场搜索参数
-  // 当 returnTo 指向 /market?scope=market&query=xxx&page=2&sort=xxx 时，
+  // 当 returnTo 指向 /market?scope=market&keyword=xxx&page=2&sort=xxx&dir=desc 时，
   // 左栏展示该搜索结果列表（点击返回时回到来源页的同一上下文）
-  // C7: 恢复 industry/concept/state/page_size，与 /market URL 契约一致
+  // /market URL 契约（CHANGE-20260713-004）：keyword/sort+dir/page/page_size 由 StrategyDataTable 管理
   const marketParams = useMemo(() => parseMarketParamsFromReturnTo(returnTo), [returnTo])
   const hasMarketContext = marketParams !== null
   const marketStocksQuery = useMarketStocks(
@@ -147,9 +149,6 @@ export function useStockDetailActions({
       page: marketParams?.page,
       page_size: marketParams?.page_size ?? DEFAULT_PAGE_SIZE,
       sort: marketParams?.sort,
-      industry: marketParams?.industry,
-      concept: marketParams?.concept,
-      state: marketParams?.state,
     },
     { enabled: hasMarketContext },
   )
