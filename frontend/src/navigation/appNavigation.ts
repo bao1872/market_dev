@@ -88,9 +88,9 @@ export type AccountMenuVariant = 'user' | 'admin'
 
 // 根据 isAdmin + variant 构建账户菜单项（AccountMenu 唯一真源）
 // - 基础项：消息 + 设置（对所有用户可见）
-// - variant='user'：仅消息 + 设置；管理后台入口不从用户壳层暴露，
-//   管理员直接访问 /admin/* URL 进入后台
-// - variant='admin'：追加"返回行情"（不重复"管理后台"）
+// - variant='user' + isAdmin=true：消息 + 设置 + 管理后台（admin 从用户壳层进入后台）
+// - variant='user' + isAdmin=false：仅消息 + 设置
+// - variant='admin'：消息 + 设置 + 返回行情（不重复"管理后台"）
 export function getAccountMenuItemsForVariant(
   isAdmin: boolean,
   variant: AccountMenuVariant,
@@ -103,9 +103,9 @@ export function getAccountMenuItemsForVariant(
       { path: APP_ROUTES.market, label: '返回行情', adminOnly: false },
     ]
   }
-  // UserAppShell 上下文：管理后台入口不从用户壳层暴露；
-  // 管理员直接访问 /admin/* URL 进入后台
-  return baseItems.filter((item) => item.path !== APP_ROUTES.admin)
+  // UserAppShell 上下文：getAccountMenuItems 已按 isAdmin 过滤
+  // admin 用户看到消息+设置+管理后台；普通用户只看到消息+设置
+  return baseItems
 }
 
 // 旧路由兼容重定向映射

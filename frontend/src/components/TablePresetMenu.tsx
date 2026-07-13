@@ -31,6 +31,9 @@ function configToPayload(config: TableViewPresetConfig): Record<string, unknown>
   if (config.hiddenColumns != null) payload.hiddenColumns = config.hiddenColumns
   if (config.columnOrder != null) payload.columnOrder = config.columnOrder
   if (config.pageSize != null) payload.pageSize = config.pageSize
+  // CHANGE-20260713-006: industry/concept 持久化
+  if (config.industry != null && config.industry !== '') payload.industry = config.industry
+  if (config.concept != null && config.concept !== '') payload.concept = config.concept
   return payload
 }
 
@@ -43,6 +46,9 @@ function payloadToConfig(config: Record<string, unknown>): TableViewPresetConfig
     hiddenColumns: (config.hiddenColumns as string[] | null | undefined) ?? null,
     columnOrder: (config.columnOrder as string[] | null | undefined) ?? null,
     pageSize: (config.pageSize as number | null | undefined) ?? null,
+    // CHANGE-20260713-006: industry/concept 恢复（旧 preset 缺字段时为 null）
+    industry: (config.industry as string | null | undefined) ?? null,
+    concept: (config.concept as string | null | undefined) ?? null,
   }
 }
 

@@ -4,6 +4,29 @@
 
 ## 2026-07-13
 
+- CHANGE-20260713-009: 详情页来源上下文修复（P0）
+  - MarketWorkspacePage 根据 scope 传 source/strategy；returnTo 保存完整当前 URL
+  - 新增共享纯函数 decodeMarketListContext/buildStrategyResultQueryParams（任意合法 /market URL 都识别为 market context）
+  - useStockDetailActions 从 useMarketStocks 切换到 DSA published results 链
+  - sourceBadge/左栏标题：scope=market→"行情来源"，scope=watchlist→"自选来源"
+  - normalizeInternalReturnTo 长度限制 200→500（/market URL 含 filters JSON 编码后可能超过 200）
+  - 新增 7 项契约测试；tsc/eslint/contract/build/docs checks 全通过
+  - 文档：AGENTS 规则 40 + maps + current 04 + CHANGE
+
+- CHANGE-20260713-008: K线右侧 18-22% 留白 + 交互坐标同步
+  - StrategyChart 引入 RIGHT_PADDING_RATIO=0.20，step 使用 effectivePlotW，所有交互坐标自动同步；网格线/十字线保持全宽；不修改 Node/Profile/POC 算法
+  - 新增 chartRightPadding.test.ts 7 项契约测试
+  - 文档：04-frontend-ux/05-testing/test-coverage-map 更新
+
+- CHANGE-20260713-007: 管理员后台入口 P0 修复 + 行业/概念 preset 集成 + 数量契约修正 + 批准 Logo PNG + 视觉 V1.0 残留清理
+  - 管理员入口：getAccountMenuItemsForVariant variant='user' + is_admin 显示"管理后台"；AdminRoute accessLoading 防止刷新误判；普通用户 DOM 不渲染入口
+  - 行业/概念 preset：StrategyDataTable/TablePresetMenu 恢复+保存 industry/concept；MarketWorkspacePage boardsValidation + stale toast
+  - 数量契约：source_total/universe_total/filtered_total/items 四层语义文档修正+测试
+  - 批准 Logo：BrandLogo 改用 PNG 资产，停用手绘 SVG
+  - 视觉残留：LandingPage/BetaApplicationModal/global.scss 旧蓝色改为品牌绿
+  - 新增 brandLogo.test.ts/visualTokens.test.ts + 后端 total 语义测试
+  - 文档：AGENTS/current 00/02/04/05/code-doc-alignment/maps 更新
+
 - CHANGE-20260713-006: /market 行业/概念筛选恢复 + 盘迹品牌视觉 V1.0
   - 行业/概念筛选恢复：新建 board_filter_helper 共享 EXISTS 条件构造器（market_stocks_service + strategy_result_repository 共用），/strategy-runs/{run_id}/results 增加 industry/concept Query 参数，AND 语义，items/filtered_total/source_total 一致
   - preset 持久化：TableViewPresetConfig（后端 Pydantic + 前端 TS）增加 industry/concept 可选字段，白名单同步，不新增表/migration，旧 preset 兼容

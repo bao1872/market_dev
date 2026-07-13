@@ -24,6 +24,14 @@ import {
 } from './chartViewport'
 import type { ChartLayerVisibility } from '../features/stock-research/stockResearchTypes'
 
+// [ChartRightPadding] - 描述: K 线绘图区右侧留白比例（CHANGE-20260713-008）
+// 最新 K 线位于绘图区约 80% 位置（留白 20%，落在 18%-22% 要求区间内）。
+// 通过压缩 step（bar 分布宽度）实现：所有坐标映射统一使用 step，
+// 十字线/滚轮锚点/Pointer 拖拽/双击复位/节点/事件命中自动同步。
+// 网格线和十字线水平线仍延伸到 g.plotRight（保持全宽），只压缩 bar 分布区域。
+// 不修改 Node/Profile/POC 算法、indicator_contract、盘中监控或 Capture 口径。
+const RIGHT_PADDING_RATIO = 0.20
+
 // ===== 颜色常量（A 股红涨绿跌，对齐原型 charts.js 的 C 对象）=====
 const C = {
   bg: '#0d1118',
@@ -1541,7 +1549,10 @@ function drawTrading(
   const max = rawMax + padding
   const py = (v: number) => g.panes.price.top + (max - v) / (max - min) * (g.panes.price.bottom - g.panes.price.top)
   const plotW = g.plotRight - g.l
-  const step = plotW / display.length
+  // [ChartRightPadding] - 右侧 20% 留白：bars 只占据绘图区前 80%，最新 bar 位于约 80% 位置
+  // 所有交互坐标映射（十字线/滚轮锚点/Pointer 拖拽/命中）统一使用此 step，自动同步到压缩后的 bar 分布
+  const effectivePlotW = plotW * (1 - RIGHT_PADDING_RATIO)
+  const step = effectivePlotW / display.length
   const barW = Math.max(2.2, step * 0.56)
 
   // 1. 背景 + 网格
@@ -1704,9 +1715,10 @@ function drawTrading(
   if (layers.volume) renderVolume(ctx, g, display, step, barW)
 
   // 11. 时间轴刻度
+  // [ChartRightPadding] - 时间轴标签跟随 bar 分布（使用 effectivePlotW），不延伸到留白区
   const labels = timeTicks(display, 7, timeframe)
   labels.forEach((item, i) => {
-    drawText(ctx, item.label, g.l + plotW * i / (labels.length - 1), h - 7, C.text, '9px sans-serif', i === 0 ? 'left' : i === labels.length - 1 ? 'right' : 'center')
+    drawText(ctx, item.label, g.l + effectivePlotW * i / (labels.length - 1), h - 7, C.text, '9px sans-serif', i === 0 ? 'left' : i === labels.length - 1 ? 'right' : 'center')
   })
 
   // 12. 最新价虚线 + 右侧价格标签

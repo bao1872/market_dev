@@ -56,7 +56,7 @@
   .btn { border-radius: 10px; padding: 12px 24px; border: 1px solid transparent; color: #fff; background: transparent; transition: .22s; display: inline-flex; align-items: center; justify-content: center; gap: 9px; font-weight: 650; }
   .btn:hover { transform: translateY(-1px); }
   .btnGhost { border-color: rgba(255, 255, 255, .18); background: rgba(255, 255, 255, .018); }
-  .btnPrimary { background: linear-gradient(135deg, #633dff, #3656ff); box-shadow: 0 12px 34px rgba(80, 67, 255, .22); }
+  .btnPrimary { background: linear-gradient(135deg, #00F6C2, #00B28A); box-shadow: 0 12px 34px rgba(0, 246, 194, .22); color: #0A0F14; }
   .btnWide { width: 100%; }
 
   // ===== Hero 区 =====

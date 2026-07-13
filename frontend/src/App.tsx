@@ -79,8 +79,14 @@ function SubscriberRoute() {
 
 // [Auth] - 描述: AdminRoute 管理员守卫 - 使用 is_admin 字段判断（替代旧 user.role）
 // 非 admin 用户重定向到默认入口 /market（替换旧 /overview）
+// accessLoading 期间显示轻量 loading，避免 /me/access 未返回时提前判定 false
 function AdminRoute() {
   const user = useAuthStore((s) => s.user)
+  const accessLoading = useAuthStore((s) => s.accessLoading)
+  // access revalidation 进行中时等待结果（防止刷新页面时 user 尚未更新而错误重定向）
+  if (accessLoading && !user?.is_admin) {
+    return <div style={{ minHeight: '100vh', background: '#0A0F14' }} />
+  }
   if (user?.is_admin !== true) {
     return <Navigate to="/market" replace />
   }

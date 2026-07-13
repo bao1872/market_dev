@@ -102,6 +102,14 @@ export interface DataTableProps<Row> {
   onIndustryChange?: (industry: string) => void
   externalConcept?: string
   onConceptChange?: (concept: string) => void
+  // CHANGE-20260713-006: preset 应用时校验 industry/concept 是否仍在当前板块目录中
+  // 提供 boardsValidation 时，applyPresetConfig 会检测失效字段并调用 onPresetStaleField
+  boardsValidation?: {
+    available: boolean
+    industryNames: Set<string>
+    conceptNames: Set<string>
+  } | null
+  onPresetStaleField?: (field: 'industry' | 'concept', value: string) => void
 }
 
 // [StrategyDataTable] - 描述: 按字段类型返回可选操作符列表（默认操作符为数组首项）
@@ -419,6 +427,8 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     onIndustryChange,
     externalConcept,
     onConceptChange,
+    boardsValidation,
+    onPresetStaleField,
   } = props
 
   const [searchParams, setSearchParams] = useSearchParams()
@@ -697,10 +707,31 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     }
     if (config.pageSize != null) setPageSize(config.pageSize)
     // CHANGE-20260713-006: 恢复 industry/concept 到外部受控 state（MarketWorkspacePage URL）
-    if (onIndustryChange) onIndustryChange(config.industry ?? '')
-    if (onConceptChange) onConceptChange(config.concept ?? '')
+    // 同时校验 preset 中的值是否仍在当前板块目录中：
+    // - boardsValidation.available=true 且值不在目录中 → 视为失效字段，跳过应用并通知父组件 toast
+    // - boardsValidation.available=false → 保留 preset 值但禁用输入（父组件处理 disabled 状态）
+    // - 无 boardsValidation → 直接应用（兼容 ScreenerPage 等不传板块校验的场景）
+    const staleFields: Array<{ field: 'industry' | 'concept'; value: string }> = []
+    let effectiveIndustry = config.industry ?? ''
+    let effectiveConcept = config.concept ?? ''
+    if (boardsValidation && boardsValidation.available) {
+      if (effectiveIndustry && !boardsValidation.industryNames.has(effectiveIndustry)) {
+        staleFields.push({ field: 'industry', value: effectiveIndustry })
+        effectiveIndustry = ''
+      }
+      if (effectiveConcept && !boardsValidation.conceptNames.has(effectiveConcept)) {
+        staleFields.push({ field: 'concept', value: effectiveConcept })
+        effectiveConcept = ''
+      }
+    }
+    if (onIndustryChange) onIndustryChange(effectiveIndustry)
+    if (onConceptChange) onConceptChange(effectiveConcept)
+    // 通知父组件显示 toast（每个失效字段 toast 一次）
+    if (onPresetStaleField) {
+      for (const sf of staleFields) onPresetStaleField(sf.field, sf.value)
+    }
     setPage(1)
-  }, [columns, saveColumnOrder, onKeywordChange, onIndustryChange, onConceptChange])
+  }, [columns, saveColumnOrder, onKeywordChange, onIndustryChange, onConceptChange, boardsValidation, onPresetStaleField])
 
   // [Presets] - 描述: 自动应用默认配置（进入页面时，每个 strategyKey 只应用一次）
   const presetsQuery = useTableViewPresets(strategyKey ? tableId : undefined, strategyKey ?? undefined)
@@ -724,6 +755,9 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
         hiddenColumns: (cfg.hiddenColumns as string[] | null | undefined) ?? null,
         columnOrder: (cfg.columnOrder as string[] | null | undefined) ?? null,
         pageSize: (cfg.pageSize as number | null | undefined) ?? null,
+        // CHANGE-20260713-006: 恢复 industry/concept（preset 持久化）
+        industry: (cfg.industry as string | null | undefined) ?? null,
+        concept: (cfg.concept as string | null | undefined) ?? null,
       })
     }
     defaultAppliedRef.current = appliedKey

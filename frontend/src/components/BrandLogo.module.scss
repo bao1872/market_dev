@@ -1,12 +1,14 @@
 // [BrandLogo] - 描述: 品牌标识组件样式（CSS Module）
-// 三种 variant：sidebar（紧凑 32px，深色顶栏）/ landing（48px，深色页眉）/ footer（36px，深色页尾）
-// 三种使用场景背景均为深色，文字统一采用雾白
+// 使用批准 PNG 资产（CHANGE-20260713-007）：
+// - sidebar：logo_symbol_128.png（正方形 symbol）
+// - landing/footer：logo_horizontal_dark.png（含"盘迹"文字 + 标语 horizontal 资产）
+// 三种使用场景背景均为深色，PNG 资产已为深色背景设计
 @use '../styles/variables.scss' as v;
 
 .root {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  justify-content: center;
   font-weight: 800;
   letter-spacing: .2px;
   white-space: nowrap;
@@ -16,32 +18,29 @@
 .mark {
   display: block;
   flex: none;
+  // 保持资产原始比例，不变形
+  object-fit: contain;
+  height: 100%;
+  width: auto;
 }
 
-.text {
-  display: inline-block;
-  color: v.$color-text;
-}
-
-// sidebar：紧凑，仅图形，高度 32px，适配深色顶栏
+// sidebar：紧凑，仅 symbol，高度 32px，适配深色顶栏
 .sidebar {
   height: 32px;
+  width: 32px;
   font-size: 14px;
-  .mark { width: 28px; height: 28px; }
 }
 
-// landing：较大，图形 + 文字，高度 48px，适配深色页眉
+// landing：较大，horizontal 资产（含文字），高度 48px，适配深色页眉
 .landing {
   height: 48px;
+  width: auto;
   font-size: 26px;
-  .mark { width: 38px; height: 38px; }
-  .text { line-height: 1; }
 }
 
-// footer：中等，图形 + 文字，高度 36px，适配深色页尾
+// footer：中等，horizontal 资产（含文字），高度 36px，适配深色页尾
 .footer {
   height: 36px;
+  width: auto;
   font-size: 18px;
-  .mark { width: 30px; height: 30px; }
-  .text { line-height: 1; }
 }

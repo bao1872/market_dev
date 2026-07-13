@@ -1044,6 +1044,66 @@ node --experimental-strip-types --test \
 
 预期：50 passed（后端）+ 20 passed（前端 columns 6 + batch 6 + tablePresetMenu 4 + stickyHeader 4）、ruff 零错误、mypy 零错误、tsc 零错误。
 
+## 3.11 管理员入口 + 批准 Logo + 视觉 V1.0 + K线右侧留白 + 数量契约回归（blocking）
+
+任何修改 `frontend/src/components/AccountMenu.tsx`、`frontend/src/navigation/appNavigation.ts`、`frontend/src/components/AdminRoute.tsx`（或 `ProtectedLayout` 权限判断）、`frontend/src/components/BrandLogo.tsx`、`frontend/src/styles/variables.scss`、`frontend/src/styles/global.scss`、`frontend/src/components/StrategyChart.tsx`（右侧留白相关）、`backend/app/repositories/strategy_result_repository.py`（total 语义相关）、`backend/app/api/strategy_runs.py` 必须跑本节回归测试。
+
+### 3.11.1 前端 appNavigation.test.ts 回归（CHANGE-20260713-007 扩展）
+
+- `getAccountMenuItemsForVariant(false, 'user')` 不含"管理后台"入口（普通用户 DOM 不渲染）；
+- `getAccountMenuItemsForVariant(true, 'user')` 含"管理后台"链接到 `/admin`；
+- `getAccountMenuItemsForVariant(true, 'admin')` 含"返回行情"链接到 `/market`，不含"管理后台"（避免管理员在 AdminAppShell 内重复入口）；
+- `getAccountMenuItemsForVariant(false, 'admin')` 仍不含"管理后台"（is_admin=false 时即使 variant=admin 也不显示管理入口）。
+
+### 3.11.2 前端 brandLogo.test.ts 回归（CHANGE-20260713-007 新增）
+
+- `BrandLogo` 渲染 `<img>` 标签引用 `logo_symbol_128.png`（sidebar variant）或 `logo_horizontal_dark.png`（landing/footer variant）；
+- 不再渲染手绘 SVG（无 `<svg>` 元素或内联 path）；
+- 资产路径位于 `frontend/src/assets/brand/`；
+- ref 路径不作为运行时依赖（`import` 来自 `@/assets/brand/`）。
+
+### 3.11.3 前端 visualTokens.test.ts 回归（CHANGE-20260713-007 新增）
+
+- `variables.scss` 含 `$color-brand: #00F6C2` / `$color-brand-light: #39F5CF` / `$color-brand-dark: #00B28A`；
+- 背景三色 `$color-bg: #0A0F14` / `$color-bg-elevated: #111A23` / `$color-bg-overlay: #161F29`；
+- 文字三色 `$color-text-primary: #F2F6F8` / `$color-text-secondary: #98A1B3` / `$color-text-tertiary: #657281`；
+- 边框 `$color-border: #263440`；
+- 涨跌色 `$color-up: #FF4D4F` / `$color-down: #22C55E`；
+- info/warning `$color-info: #3882F6` / `$color-warning: #F59E0B`；
+- 品牌绿只用于 Logo、主按钮、选中、focus 和关键节点（源码契约：不替代涨跌色或所有信息蓝）。
+
+### 3.11.4 前端 chartRightPadding.test.ts 回归（CHANGE-20260713-008 新增）
+
+- `StrategyChart` 源码含 `RIGHT_PADDING_RATIO = 0.20` 常量（落在 0.18-0.22 区间）；
+- `effectivePlotW = plotW * (1 - RIGHT_PADDING_RATIO)` 计算逻辑存在；
+- `step = effectivePlotW / display.length` 用于交互坐标映射；
+- 十字线/滚轮锚点/Pointer 拖拽/双击复位/节点命中/事件命中统一使用 `step`（源码契约）；
+- 网格线和十字线水平线仍延伸到 `g.plotRight`（保持全宽，不收缩到 effectivePlotW）；
+- 时间轴标签使用 `effectivePlotW`。
+
+### 3.11.5 后端 test_strategy_results_industry_concept.py 回归（CHANGE-20260713-007 扩展）
+
+- provider unavailable 场景：`boards.available=false` 时 industry/concept 筛选返回空结果，`filtered_total=0`，`source_total` 仍为 run 原始总量；
+- nonexistent 板块场景：industry/concept 传入不存在的板块名称时返回空，`filtered_total=0`；
+- **数量契约四层语义**：`source_total`（published run 原始总量，不受业务筛选影响）≥ `universe_total`（all/watchlist 范围总量）≥ `filtered_total`（keyword+industry+concept+metric_filters 后总量）≥ `len(items)`（当前页）；默认无筛选时 `source_total == universe_total == filtered_total`；
+- 禁止 `source_total` 受 keyword/industry/concept/metric_filters 影响。
+
+回归命令：
+
+```bash
+cd /root/web_dev/backend
+APP_ENV=test TEST_DATABASE_URL=postgresql+asyncpg://bz:bz@localhost:5433/bz_stock_test \
+pytest tests/test_strategy_results_industry_concept.py -q
+
+cd /root/web_dev/frontend
+npx tsc --noEmit
+node --experimental-strip-types --test \
+  src/navigation/__tests__/appNavigation.test.ts \
+  src/components/__tests__/brandLogo.test.ts \
+  src/components/__tests__/visualTokens.test.ts \
+  src/components/__tests__/chartRightPadding.test.ts
+```
+
 ## 4. CI 门禁
 
 阻断项：

@@ -679,7 +679,7 @@ button { cursor: pointer; }
   cursor: pointer;
 
   &:hover { border-color: #40517a; }
-  &:focus { outline: none; border-color: #4f7cff; }
+  &:focus { outline: none; border-color: var(--brand); }
   option { background: #0d1118; color: #c4ccda; }
 }
 
@@ -1087,7 +1087,7 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 .tv-source-list-header { padding: 8px 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .7px; color: #667287; border-bottom: 1px solid v.$color-border; position: sticky; top: 0; background: #0d1118; z-index: 1; }
 .tv-source-list-item { display: flex; flex-direction: column; gap: 1px; padding: 6px 10px; cursor: pointer; border-bottom: 1px solid #1a202b; transition: .14s ease; }
 .tv-source-list-item:hover { background: #1a202b; }
-.tv-source-list-item.active { background: #1e2a3f; border-left: 3px solid #4f7cff; padding-left: 7px; }
+.tv-source-list-item.active { background: #1e2a3f; border-left: 3px solid var(--brand); padding-left: 7px; }
 .tv-source-name { font-size: 12px; color: #c4ccda; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tv-source-symbol { font-size: 12px; color: #778297; }
 
@@ -1417,7 +1417,7 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
   width: 20px;
   height: 11px;
   border-radius: 8px;
-  background: #4f7cff;
+  background: var(--brand);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .08);
   flex: none;
 

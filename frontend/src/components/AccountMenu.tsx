@@ -1,7 +1,7 @@
-// [AccountMenu] - 描述: 右上角账户菜单（消息 / 设置 / 返回行情 / 退出）
+// [AccountMenu] - 描述: 右上角账户菜单（消息 / 设置 / 管理后台 / 返回行情 / 退出）
 // 复用现有未读数、用户信息、logout 逻辑；支持点击外部关闭、Escape 关闭、基本 ARIA。
-// variant='user'（UserAppShell）：仅消息 + 设置（管理后台入口不从用户壳层暴露）
-// variant='admin'（AdminAppShell）：显示"返回行情"入口
+// variant='user'（UserAppShell）：消息 + 设置；admin 额外显示"管理后台"
+// variant='admin'（AdminAppShell）：消息 + 设置 + "返回行情"（不重复"管理后台"）
 import { useState, useRef, useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
@@ -32,7 +32,7 @@ function getInitials(name?: string, email?: string): string {
 }
 
 interface AccountMenuProps {
-  /** 'user' = UserAppShell 上下文（仅消息+设置）；'admin' = AdminAppShell 上下文（显示返回行情） */
+  /** 'user' = UserAppShell 上下文（消息+设置；admin 额外显示管理后台）；'admin' = AdminAppShell 上下文（显示返回行情） */
   variant?: AccountMenuVariant
 }
 

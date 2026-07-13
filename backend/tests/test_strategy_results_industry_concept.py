@@ -243,15 +243,44 @@ async def test_nonexistent_board_returns_empty(db_session: AsyncSession) -> None
     assert len(page.items) == page.filtered_total
 
 
-async def test_no_board_data_returns_empty(db_session: AsyncSession) -> None:
-    """无板块数据时（provider unavailable），industry 筛选返回 0 条。"""
+async def test_nonexistent_concept_returns_empty(db_session: AsyncSession) -> None:
+    """不存在的 concept 名称应返回 0 条结果（与 provider unavailable 区分）。"""
     td = await _setup_run_with_boards(db_session)
 
-    # 使用未创建的板块类型名（数据中不存在）
     page = await query_published_selector_results(
         db_session,
         run_id=td["run_id"],
-        industry="新能源车",
+        concept="不存在的概念",
+        page=1,
+        page_size=50,
+    )
+
+    assert page.filtered_total == 0
+    assert len(page.items) == 0
+    assert len(page.items) == page.filtered_total
+
+
+async def test_provider_unavailable_boards_empty(db_session: AsyncSession) -> None:
+    """provider unavailable：MarketBoard 表完全为空，industry 筛选返回 0 条。
+
+    与 "nonexistent name" 区分：
+    - nonexistent name：表中有数据，但查询的名称不在表中
+    - provider unavailable：表中完全没有数据（BOARD_SYNC_ENABLED=false 或同步失败）
+    """
+    td = await _setup_run_with_boards(db_session)
+
+    # 清空 MarketBoard + Membership，模拟 provider unavailable
+    from app.models.market_board import MarketBoard, MarketBoardMembership
+    await db_session.execute(
+        MarketBoardMembership.__table__.delete()
+    )
+    await db_session.execute(MarketBoard.__table__.delete())
+    await db_session.flush()
+
+    page = await query_published_selector_results(
+        db_session,
+        run_id=td["run_id"],
+        industry="银行业",
         page=1,
         page_size=50,
     )
@@ -275,3 +304,75 @@ async def test_no_filter_returns_all(db_session: AsyncSession) -> None:
     assert page.filtered_total == 3
     assert len(page.items) == 3
     assert len(page.items) == page.filtered_total
+
+
+async def test_total_semantics_with_industry_filter(db_session: AsyncSession) -> None:
+    """应用 industry 筛选后 total 四层语义正确。
+
+    - source_total：published run 原始总量（3），不受业务筛选影响
+    - universe_total：universe=all 时等于 source_total（3）
+    - filtered_total：industry 筛选后变化（2）
+    - len(items)：filtered_total 当前页（≤ filtered_total）
+    """
+    td = await _setup_run_with_boards(db_session)
+
+    page = await query_published_selector_results(
+        db_session,
+        run_id=td["run_id"],
+        industry="银行业",
+        page=1,
+        page_size=50,
+        universe="all",
+    )
+
+    # source_total 不受筛选影响
+    assert page.source_total == 3, (
+        f"source_total 应为 published run 原始总量 3, 实际={page.source_total}"
+    )
+    # universe_total = source_total (universe=all)
+    assert page.universe_total == 3, (
+        f"universe_total 应等于 source_total (universe=all), 实际={page.universe_total}"
+    )
+    # filtered_total 受 industry 筛选影响
+    assert page.filtered_total == 2, (
+        f"filtered_total 应为 industry 筛选后 2, 实际={page.filtered_total}"
+    )
+    # len(items) <= filtered_total
+    assert len(page.items) <= page.filtered_total
+    assert len(page.items) == 2
+
+
+async def test_total_semantics_with_keyword_filter(db_session: AsyncSession) -> None:
+    """应用 keyword 筛选后 total 四层语义正确。
+
+    - source_total：published run 原始总量（3），不受 keyword 筛选影响
+    - universe_total：universe=all 时等于 source_total（3）
+    - filtered_total：keyword 筛选后变化
+    - len(items)：filtered_total 当前页（≤ filtered_total）
+    """
+    td = await _setup_run_with_boards(db_session)
+    first_instrument = td["instruments"][0]
+    keyword = first_instrument.symbol
+
+    page = await query_published_selector_results(
+        db_session,
+        run_id=td["run_id"],
+        keyword=keyword,
+        page=1,
+        page_size=50,
+        universe="all",
+    )
+
+    # source_total 不受 keyword 筛选影响
+    assert page.source_total == 3, (
+        f"source_total 应为 published run 原始总量 3, 实际={page.source_total}"
+    )
+    # universe_total = source_total (universe=all)
+    assert page.universe_total == 3
+    # filtered_total 受 keyword 筛选影响（应为 1）
+    assert page.filtered_total == 1, (
+        f"filtered_total 应为 keyword 筛选后 1, 实际={page.filtered_total}"
+    )
+    # len(items) <= filtered_total
+    assert len(page.items) <= page.filtered_total
+    assert len(page.items) == 1

@@ -152,7 +152,7 @@
   width: 16px;
   height: 16px;
   margin-top: 2px;
-  accent-color: #5e7aff;
+  accent-color: #00F6C2;
   cursor: pointer;
   flex: 0 0 auto;
 }
@@ -202,8 +202,9 @@
 }
 
 .btnPrimary {
-  background: linear-gradient(135deg, #633dff, #3656ff);
-  box-shadow: 0 12px 34px rgba(80, 67, 255, 0.22);
+  background: linear-gradient(135deg, #00F6C2, #00B28A);
+  box-shadow: 0 12px 34px rgba(0, 246, 194, 0.22);
+  color: #0A0F14;
 }
 
 .btnPrimary:not(:disabled):hover {

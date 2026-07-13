@@ -8,7 +8,7 @@
 // 单击非链接区域更新 selected 并刷新右栏；股票名称链接进入 /stock/:symbol?returnTo=...。
 // 自选操作列：单次 useWatchlist 请求按 instrument_id 建 Set；加入/移除复用 useAddToWatchlist/useRemoveFromWatchlist；按 instrument_id 维护 pending 防重复点击。
 // 批次信息（数据日期/批次/状态）属调试信息：普通用户 DOM 中完全不渲染；仅 admin 可见，默认折叠为"批次信息"，展开后显示。
-import { useState, useCallback, useMemo } from 'react'
+import { useState, useCallback, useMemo, useRef } from 'react'
 import { useSearchParams, useNavigate, useLocation } from 'react-router-dom'
 import { MarketToolbar } from './MarketToolbar'
 import { EventStatePanel } from '@/features/research-context/EventStatePanel'
@@ -34,46 +34,15 @@ import {
 import {
   decodeMarketWorkspaceUrl,
   changeMarketScope,
+  buildStrategyResultQueryParams,
   type MarketScope,
+  type MarketListContext,
 } from './marketWorkspaceUrlState'
 import styles from './MarketWorkspace.module.scss'
 
 // DSA 生产策略 key（AGENTS §12.2：当前生产只保留 dsa_selector）
 const DSA_STRATEGY_KEY = 'dsa_selector'
 const PAGE_SIZE = 50
-
-// [MarketWorkspacePage] - 描述: 后端存储为小数的收益率/offset 类指标
-const RATIO_METRICS = new Set([
-  'vwap_ret_avg',
-  'vwap_ret_total',
-  'offset_mean',
-  'offset_std',
-  'offset_variance_rate',
-])
-
-// [MarketWorkspacePage] - 描述: 后端存储为 0~1 的百分位类指标
-const PERCENTILE_METRICS = new Set([
-  'offset_percentile',
-  'short_position',
-  'position_short',
-  'short_pos',
-])
-
-/** 将用户输入的筛选值归一化为后端口径（与 ScreenerPage 一致） */
-function normalizeMetricValue(
-  key: string,
-  raw: string | number | undefined,
-): number | undefined {
-  if (raw === undefined || raw === null || raw === '') return undefined
-  const s = String(raw).replace(/,/g, '').trim()
-  const hasPercent = s.includes('%')
-  const n = parseFloat(s.replace(/%/g, ''))
-  if (Number.isNaN(n)) return undefined
-  if (RATIO_METRICS.has(key) || PERCENTILE_METRICS.has(key)) {
-    return hasPercent ? n / 100 : n
-  }
-  return n
-}
 
 export default function MarketWorkspacePage() {
   const [searchParams, setSearchParams] = useSearchParams()
@@ -101,6 +70,38 @@ export default function MarketWorkspacePage() {
   const boards = boardsQuery.data
     ? { items: boardsQuery.data.items, available: boardsQuery.data.available }
     : undefined
+
+  // CHANGE-20260713-006: 板块校验集合（preset 应用时检测失效字段）
+  const boardsValidation = useMemo(() => {
+    if (!boards) return null
+    const industryNames = new Set<string>()
+    const conceptNames = new Set<string>()
+    for (const b of boards.items) {
+      if (b.type === 'industry') industryNames.add(b.name)
+      else if (b.type === 'concept') conceptNames.add(b.name)
+    }
+    return { available: boards.available, industryNames, conceptNames }
+  }, [boards])
+
+  // CHANGE-20260713-006: preset 应用时失效字段 toast（每个字段 toast 一次，不重复）
+  const staleFieldToastShownRef = useRef(false)
+  const handlePresetStaleField = useCallback(
+    (field: 'industry' | 'concept', value: string) => {
+      // 避免同一轮 preset 应用重复 toast（applyPresetConfig 已对每个字段调用一次）
+      if (staleFieldToastShownRef.current) return
+      const label = field === 'industry' ? '行业' : '概念'
+      toast.show(
+        `${label}「${value}」已不在当前板块目录`,
+        '已忽略该筛选条件，请重新选择',
+      )
+      staleFieldToastShownRef.current = true
+      // 下一轮重置（允许后续 preset 再次 toast）
+      setTimeout(() => {
+        staleFieldToastShownRef.current = false
+      }, 0)
+    },
+    [toast],
+  )
 
   // 右栏折叠状态（本地，不进 URL）
   // 首次访问默认收起，保留用户 localStorage 选择
@@ -191,59 +192,28 @@ export default function MarketWorkspacePage() {
     filters: [],
   })
 
-  // scope → universe 映射：scope=market → universe=all, scope=watchlist → universe=watchlist
-  const universe: 'all' | 'watchlist' = scope === 'market' ? 'all' : 'watchlist'
-
   // 运行结果查询参数
+  // CHANGE-20260713-009: 使用共享 buildStrategyResultQueryParams 纯函数
+  // MarketWorkspacePage 和 useStockDetailActions 共用同一转换逻辑，避免筛选口径漂移
+  // scope=market → universe=all；scope=watchlist → universe=watchlist（在 buildStrategyResultQueryParams 内映射）
   const resultParams: StrategyResultQueryParams = useMemo(() => {
-    const params: StrategyResultQueryParams = {
+    const ctx: MarketListContext = {
+      scope,
+      keyword: query.keyword || null,
+      industry: industry || null,
+      concept: concept || null,
+      sort: query.sort ? { key: query.sort.key, direction: query.sort.direction } : null,
+      filters: query.filters.map((f) => ({
+        key: f.key,
+        operator: f.operator,
+        value: f.value,
+        value2: f.value2,
+      })),
       page: query.page,
       page_size: query.pageSize,
-      universe,
     }
-    if (query.sort) {
-      params.sort_by = query.sort.key
-      params.sort_desc = query.sort.direction === 'desc'
-    }
-    if (query.keyword) {
-      params.keyword = query.keyword
-    }
-    // 行业/概念筛选（CHANGE-20260713-006）
-    if (industry) {
-      params.industry = industry
-    }
-    if (concept) {
-      params.concept = concept
-    }
-    // 列筛选转 metric_filters（与 ScreenerPage 一致）
-    const supportedOps = new Set(['gt', 'gte', 'lt', 'lte', 'eq', 'between'])
-    const metricFilters = query.filters
-      .filter((f) => supportedOps.has(f.operator) && f.key !== 'stock' && f.key !== 'action')
-      .map((f) => {
-        const value = normalizeMetricValue(f.key, f.value)
-        if (value === undefined) return null
-        if (f.operator === 'between') {
-          const value2 = normalizeMetricValue(f.key, f.value2)
-          if (value2 === undefined) return null
-          return {
-            metric_key: f.key,
-            operator: f.operator,
-            value1: value,
-            value2,
-          }
-        }
-        return {
-          metric_key: f.key,
-          operator: f.operator,
-          value,
-        }
-      })
-      .filter((f): f is NonNullable<typeof f> => f !== null)
-    if (metricFilters.length > 0) {
-      params.metric_filters = JSON.stringify(metricFilters)
-    }
-    return params
-  }, [query, universe, industry, concept])
+    return buildStrategyResultQueryParams(ctx) as StrategyResultQueryParams
+  }, [query, scope, industry, concept])
 
   const resultsQuery = useStrategyRunResults(activeRunId || undefined, resultParams)
   const totalResults = resultsQuery.data?.total ?? 0
@@ -334,15 +304,23 @@ export default function MarketWorkspacePage() {
     [searchParams, setSearchParams],
   )
 
-  // 股票名称链接：进入 /stock/:symbol?returnTo=<当前 /market URL>
+  // 股票名称链接：进入 /stock/:symbol?source=...&strategy=...&returnTo=<完整当前 /market URL>
+  // CHANGE-20260713-009: 根据 scope 明确传递 source/strategy，避免详情页默认 watchlist
+  // - scope=market: source=selection&strategy=dsa_selector
+  // - scope=watchlist: source=watchlist&strategy=watchlist_monitor
+  // returnTo 保存完整当前 URL（scope/selected/keyword/industry/concept/filters/sort/dir/page/page_size）
   const handleNavigateToStock = useCallback(
     (row: TrendSelectionRow) => {
       const { symbol } = getStockDisplay(row)
       if (!symbol || symbol === '-') return
       const returnTo = `${location.pathname}${location.search}`
-      navigate(`/stock/${symbol}?returnTo=${encodeURIComponent(returnTo)}`)
+      const src = scope === 'market' ? 'selection' : 'watchlist'
+      const strat = scope === 'market' ? DSA_STRATEGY_KEY : 'watchlist_monitor'
+      navigate(
+        `/stock/${symbol}?source=${src}&strategy=${strat}&returnTo=${encodeURIComponent(returnTo)}`,
+      )
     },
-    [navigate, location.pathname, location.search],
+    [navigate, location.pathname, location.search, scope],
   )
 
   // 服务端查询变更
@@ -470,6 +448,9 @@ export default function MarketWorkspacePage() {
             onIndustryChange={handleIndustryChange}
             externalConcept={concept ?? ''}
             onConceptChange={handleConceptChange}
+            // CHANGE-20260713-006: preset 应用时校验失效板块字段并 toast
+            boardsValidation={boardsValidation}
+            onPresetStaleField={handlePresetStaleField}
           />
         </div>
         {/* 右栏：研究上下文面板（可收起；收起时不挂载、不请求数据） */}

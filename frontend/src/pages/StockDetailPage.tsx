@@ -110,9 +110,12 @@ export default function StockDetailPage() {
 
   // 来源徽章：根据 sourceListKind 显示"行情来源/自选来源/选股结果"
   // P0-4: 不能从 market 进入却显示"自选监控"
-  const sourceBadge = source === 'selection'
-    ? '选股结果'
-    : (detailActions.sourceListKind === 'market' ? '行情来源' : '自选来源')
+  // CHANGE-20260713-009: sourceListKind=market → "行情来源"（来自 /market?scope=market）
+  // sourceListKind=watchlist + source=selection → "选股结果"（来自 /screener）
+  // sourceListKind=watchlist + source=watchlist → "自选来源"（来自 /market?scope=watchlist 或直接访问）
+  const sourceBadge = detailActions.sourceListKind === 'market'
+    ? '行情来源'
+    : (source === 'selection' ? '选股结果' : '自选来源')
 
   /** 统一返回按钮：优先使用 URL returnTo 参数，其次导航 state，否则按 source fallback */
   const handleBack = useCallback(() => {
@@ -451,7 +454,7 @@ export default function StockDetailPage() {
         {!isCaptureMode && detailActions.sourceStocks.length > 0 && (
           <aside className="tv-source-list" data-testid="detail-source-list">
             <div className="tv-source-list-header">
-              {detailActions.sourceListKind === 'market' ? '来源: 行情搜索' : '来源: 自选'}
+              {detailActions.sourceListKind === 'market' ? '行情来源' : '自选来源'}
             </div>
             {detailActions.sourceStocks.map((s) => (
               <div

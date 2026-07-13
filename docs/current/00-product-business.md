@@ -38,6 +38,7 @@ starts_at <= now < expires_at
 - 普通用户主入口为 `/market`（行情工作区，**无 K 线**，布局为工具栏 + 分页表格 + 可收起事件状态面板）；趋势选股 `/screener` 为兼容重定向 → `/market`。
 - 普通用户顶部导航仅含"行情"和"趋势选股"两项；消息、设置、管理后台入口、退出收拢到右上角账户菜单。
 - 普通用户无左侧栏；管理后台使用独立壳层 `AdminAppShell`，承载 `/admin/*`。
+- **管理员入口（CHANGE-20260713-007）**：管理员从用户 `AccountMenu`（`variant='user'` + `is_admin=true`）进入 `/admin`（菜单项"管理后台"）；普通用户（`is_admin=false`）DOM 不渲染管理员入口；`AdminRoute` 以 `user.is_admin` 为唯一权限真源，`accessLoading` 状态防止刷新页面时 auth hydration 未完成导致误判。
 - 旧地址 `/overview` 重定向到 `/market`；`/watchlist` 重定向到 `/market?scope=watchlist`。
 - Capture 路由 `/capture/stock/:symbol` 位于两套壳层之外。
 

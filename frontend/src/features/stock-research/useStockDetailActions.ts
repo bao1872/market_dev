@@ -1,6 +1,9 @@
 // [useStockDetailActions] - 描述: StockDetailPage 专属 actions hook
 // 负责自选列表查询、加入/移出自选、上下切换、memo 读取/保存/删除。
 // 这些操作是详情页专属，不得进入 /market 的 useStockResearchData 核心 hook。
+//
+// CHANGE-20260713-009: 来源列表复用 published DSA results 链（usePublishedRuns + useStrategyRunResults），
+// 禁止继续使用 useMarketStocks。MarketWorkspacePage 和本 hook 共用 decodeMarketListContext + buildStrategyResultQueryParams。
 import { useState, useMemo, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -11,15 +14,21 @@ import {
   useStockMemo,
   useUpsertStockMemo,
   useDeleteStockMemo,
-  useMarketStocks,
+  usePublishedRuns,
+  useStrategyRunResults,
 } from '@/hooks/useApi'
 import {
-  DEFAULT_PAGE_SIZE,
-  MAX_PAGE_SIZE,
-  normalizeInternalReturnTo,
+  decodeMarketListContext,
+  buildStrategyResultQueryParams,
+  type MarketListContext,
 } from '@/features/market-workspace/marketWorkspaceUrlState'
+import {
+  adaptStrategyResultToTrendRow,
+  getStockDisplay,
+} from '@/features/trend-selection'
 import { useToast } from '@/store/toast'
 import type { ResearchSource } from './stockResearchTypes'
+import type { StrategyResultQueryParams } from '@/api/endpoints'
 
 export interface StockDetailActionsParams {
   instrumentId: string | undefined
@@ -27,7 +36,7 @@ export interface StockDetailActionsParams {
   source: ResearchSource
   strategy: string
   // returnTo URL（来自详情页 URL 参数），用于恢复来源列表的 scope/query/page/sort 上下文
-  // 当 returnTo 指向 /market?scope=market&query=xxx&page=2&sort=xxx 时，左栏优先展示该市场搜索结果
+  // 当 returnTo 指向 /market?scope=market&keyword=xxx&page=2&sort=xxx 时，左栏优先展示该市场搜索结果
   // returnTo 缺失或非 /market 前缀时回退到自选列表
   returnTo?: string | null
 }
@@ -69,63 +78,6 @@ export interface StockDetailActions {
   watchlistStocks: SourceStockItem[]
 }
 
-// 从 returnTo URL 解析市场列表查询参数（仅 /market 前缀有效）
-// 返回 null 表示 returnTo 不指向 /market 或无有效查询参数（应回退到自选列表）
-// /market URL 契约（CHANGE-20260713-004）：scope/selected 由 MarketWorkspacePage 管理；
-// sort/dir/keyword/filters/page/page_size 由 StrategyDataTable 内置 screenerUrlState 管理。
-// 本函数将 screenerUrlState 的 sort+dir 合成为 useMarketStocks 期望的 "key:dir" 格式。
-function parseMarketParamsFromReturnTo(
-  returnTo: string | null | undefined,
-): {
-  scope: 'market'
-  query?: string
-  page?: number
-  page_size?: number
-  sort?: string
-} | null {
-  const safe = normalizeInternalReturnTo(returnTo)
-  if (!safe) return null
-  // 仅处理 /market 前缀（/screener /messages 不含市场列表参数）
-  if (!safe.startsWith('/market')) return null
-  const qs = safe.split('?')[1]
-  if (!qs) return null
-  const params = new URLSearchParams(qs)
-  const scope = params.get('scope')
-  // 仅 market scope 的搜索结果有意义恢复（watchlist scope 已由自选列表覆盖）
-  if (scope !== 'market') return null
-  // keyword 是 StrategyDataTable 内置搜索参数（screenerUrlState）
-  const keyword = params.get('keyword') ?? undefined
-  const pageRaw = params.get('page')
-  const page = pageRaw ? parseInt(pageRaw, 10) : undefined
-  // sort + dir 是 StrategyDataTable 内置排序参数（screenerUrlState），合成为 "key:dir"
-  const sortKey = params.get('sort') ?? undefined
-  const sortDir = params.get('dir') ?? undefined
-  let sort: string | undefined
-  if (sortKey && sortDir) {
-    sort = `${sortKey}:${sortDir}`
-  } else if (sortKey) {
-    sort = sortKey
-  }
-  // page_size 从 URL 恢复（默认 DEFAULT_PAGE_SIZE，上限 MAX_PAGE_SIZE）
-  const rawPageSize = params.get('page_size')
-  let page_size: number | undefined
-  if (rawPageSize) {
-    const parsed = parseInt(rawPageSize, 10)
-    if (Number.isFinite(parsed) && parsed >= 1 && parsed <= MAX_PAGE_SIZE) {
-      page_size = parsed
-    }
-  }
-  // 至少有一个可恢复的参数才返回（避免空查询拉全市场）
-  if (!keyword && !page && !sort) return null
-  return {
-    scope: 'market',
-    query: keyword || undefined,
-    page: Number.isFinite(page) && (page as number) >= 1 ? page as number : undefined,
-    page_size,
-    sort: sort || undefined,
-  }
-}
-
 export function useStockDetailActions({
   instrumentId,
   symbol,
@@ -136,22 +88,38 @@ export function useStockDetailActions({
   const navigate = useNavigate()
   const showToast = useToast((s) => s.show)
 
-  // [returnTo 上下文恢复] - 优先解析 returnTo 中的市场搜索参数
-  // 当 returnTo 指向 /market?scope=market&keyword=xxx&page=2&sort=xxx&dir=desc 时，
-  // 左栏展示该搜索结果列表（点击返回时回到来源页的同一上下文）
-  // /market URL 契约（CHANGE-20260713-004）：keyword/sort+dir/page/page_size 由 StrategyDataTable 管理
-  const marketParams = useMemo(() => parseMarketParamsFromReturnTo(returnTo), [returnTo])
-  const hasMarketContext = marketParams !== null
-  const marketStocksQuery = useMarketStocks(
-    {
-      scope: 'market',
-      query: marketParams?.query,
-      page: marketParams?.page,
-      page_size: marketParams?.page_size ?? DEFAULT_PAGE_SIZE,
-      sort: marketParams?.sort,
-    },
-    { enabled: hasMarketContext },
+  // CHANGE-20260713-009: 使用共享 decodeMarketListContext 解析 returnTo
+  // 任意合法 /market URL 都识别为市场工作区上下文（不要求 keyword/page/sort 存在）
+  // scope=market → sourceListKind=market；scope=watchlist → sourceListKind=watchlist
+  const marketContext: MarketListContext | null = useMemo(
+    () => decodeMarketListContext(returnTo),
+    [returnTo],
   )
+  const hasMarketContext = marketContext !== null
+
+  // DSA published run（与 MarketWorkspacePage 同一数据链）
+  // scope=market 和 scope=watchlist 都复用 dsa_selector published run
+  const publishedRunsQuery = usePublishedRuns('dsa_selector', { limit: 1 })
+  const activeRunId = publishedRunsQuery.data?.items?.[0]?.id
+
+  // 来源列表查询参数（与 MarketWorkspacePage 共用 buildStrategyResultQueryParams）
+  const sourceListParams: StrategyResultQueryParams | undefined = useMemo(() => {
+    if (!marketContext) return undefined
+    return buildStrategyResultQueryParams(marketContext) as StrategyResultQueryParams
+  }, [marketContext])
+
+  // 来源列表 DSA results 查询（仅当有 marketContext 时启用）
+  const sourceResultsQuery = useStrategyRunResults(activeRunId, sourceListParams)
+
+  // 来源列表行数据（StrategyResult → TrendSelectionRow → SourceStockItem）
+  const marketStocks = useMemo(() => {
+    if (!hasMarketContext || !sourceResultsQuery.data?.items) return []
+    return sourceResultsQuery.data.items.map((r) => {
+      const row = adaptStrategyResultToTrendRow(r)
+      const display = getStockDisplay(row)
+      return { symbol: display.symbol, name: display.name }
+    })
+  }, [hasMarketContext, sourceResultsQuery.data])
 
   // 自选列表查询（用于判断当前股票是否在自选 + 上下切换 + returnTo 缺失时回退左栏）
   const watchlistQuery = useWatchlist()
@@ -220,17 +188,11 @@ export function useStockDetailActions({
       .filter((x): x is SourceStockItem => x !== null)
   }, [watchlistQuery.data, batchInstrumentsQuery.data])
 
-  // 市场搜索结果列表（returnTo 上下文恢复）
-  const marketStocks = useMemo(() => {
-    if (!hasMarketContext || !marketStocksQuery.data?.items) return []
-    return marketStocksQuery.data.items.map((row) => ({
-      symbol: row.symbol,
-      name: row.name,
-    }))
-  }, [hasMarketContext, marketStocksQuery.data])
-
   // 统一来源列表：优先市场搜索结果，回退自选列表
-  const sourceListKind: SourceListKind = hasMarketContext ? 'market' : 'watchlist'
+  // CHANGE-20260713-009: scope=market → sourceListKind=market；scope=watchlist → sourceListKind=watchlist
+  const sourceListKind: SourceListKind = hasMarketContext
+    ? (marketContext!.scope === 'market' ? 'market' : 'watchlist')
+    : 'watchlist'
   const sourceStocks = hasMarketContext ? marketStocks : watchlistStocks
 
   // C7: 上一只/下一只基于 sourceStocks（而非 watchlistItems）
@@ -245,7 +207,7 @@ export function useStockDetailActions({
     const nextIndex = (currentIndex + direction + sourceStocks.length) % sourceStocks.length
     const target = sourceStocks[nextIndex]
     if (!target?.symbol) return
-    // 保留 returnTo 上下文，使切换后仍可返回来源列表
+    // 保留 returnTo 上下文 + source + strategy，使切换后仍可返回来源列表
     const returnToParam = returnTo ? `&returnTo=${encodeURIComponent(returnTo)}` : ''
     navigate(`/stock/${target.symbol}?source=${source}&strategy=${strategy}${returnToParam}`)
   }, [canNavigate, currentIndex, sourceStocks, navigate, strategy, source, returnTo])
