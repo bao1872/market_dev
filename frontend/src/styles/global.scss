@@ -28,7 +28,7 @@ button { cursor: pointer; }
   z-index: 30;
   left: 0; top: 0; bottom: 0;
   width: v.$sidebar-width;
-  background: #131722;
+  background: v.$color-panel;
   border-right: 1px solid v.$color-border;
   display: flex;
   flex-direction: column;
@@ -49,7 +49,7 @@ button { cursor: pointer; }
 .nav-section { padding: 13px 10px 5px; }
 .nav-label {
   font-size: 12px;
-  color: #687083;
+  color: v.$color-text-dim;
   text-transform: uppercase;
   letter-spacing: 1.2px;
   padding: 0 9px 8px;
@@ -65,7 +65,7 @@ button { cursor: pointer; }
   margin-bottom: 3px;
   transition: .16s;
 
-  &:hover { background: #1c202b; color: #fff; }
+  &:hover { background: v.$color-panel-3; color: #fff; }
   &.active {
     background: rgba(41, 98, 255, .17);
     color: #fff;
@@ -78,7 +78,7 @@ button { cursor: pointer; }
 
 .nav-badge {
   margin-left: auto;
-  background: #2b3040;
+  background: v.$color-border;
   color: #b8becb;
   border-radius: 10px;
   padding: 1px 7px;
@@ -138,7 +138,7 @@ button { cursor: pointer; }
   width: v.$sidebar-width;
   transform: translateX(-100%);
   transition: transform .2s ease;
-  background: #131722;
+  background: v.$color-panel;
   border-right: 1px solid v.$color-border;
   display: flex;
   flex-direction: column;
@@ -177,7 +177,7 @@ button { cursor: pointer; }
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 0 0 2px #131722;
+  box-shadow: 0 0 0 2px v.$color-panel;
 }
 
 .watchlist-monitor-table-wrap { display: block; }
@@ -432,7 +432,7 @@ button { cursor: pointer; }
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  background: #202633;
+  background: v.$color-border;
   border: 1px solid #323a4c;
   color: #b8c0d0;
   border-radius: 14px;
@@ -686,7 +686,7 @@ button { cursor: pointer; }
 .feishu-status-box {
   padding: 12px;
   background: #0f131b;
-  border: 1px solid #202633;
+  border: 1px solid v.$color-border;
   border-radius: 5px;
   font-size: 13px;
   color: #aab4c8;
@@ -1071,7 +1071,7 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
   .tv-chart-column { display: flex; flex-direction: column; min-height: 0; }
   .tv-canvas-wrap { flex: 1; min-height: 0; }
 }
-.tv-symbol-bar { display: flex; align-items: center; gap: 18px; min-height: 62px; padding: 8px 12px; background: #131722; border: 1px solid v.$color-border; border-radius: 8px 8px 0 0; }
+.tv-symbol-bar { display: flex; align-items: center; gap: 18px; min-height: 62px; padding: 8px 12px; background: v.$color-panel; border: 1px solid v.$color-border; border-radius: 8px 8px 0 0; }
 .tv-symbol-left { display: flex; align-items: center; gap: 10px; min-width: 265px; }
 .tv-back { display: grid; place-items: center; }
 .tv-symbol-title { display: flex; align-items: center; gap: 8px; font-weight: 750; font-size: 16px; }
@@ -1083,8 +1083,8 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 // V1.7: 新增右侧 340px 结构状态因子面板（StockStructuralStatePanel），双列布局
 // ===== 详情页布局（PRD §6.2 左栏来源列表 + 工作区）=====
 .tv-detail-layout { display: flex; flex: 1; min-height: 0; }
-.tv-source-list { flex: none; width: 200px; min-width: 0; background: #0d1118; border-right: 1px solid #202633; overflow-y: auto; max-height: v.$tv-workspace-min-height; }
-.tv-source-list-header { padding: 8px 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .7px; color: #667287; border-bottom: 1px solid #202633; position: sticky; top: 0; background: #0d1118; z-index: 1; }
+.tv-source-list { flex: none; width: 200px; min-width: 0; background: #0d1118; border-right: 1px solid v.$color-border; overflow-y: auto; max-height: v.$tv-workspace-min-height; }
+.tv-source-list-header { padding: 8px 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .7px; color: #667287; border-bottom: 1px solid v.$color-border; position: sticky; top: 0; background: #0d1118; z-index: 1; }
 .tv-source-list-item { display: flex; flex-direction: column; gap: 1px; padding: 6px 10px; cursor: pointer; border-bottom: 1px solid #1a202b; transition: .14s ease; }
 .tv-source-list-item:hover { background: #1a202b; }
 .tv-source-list-item.active { background: #1e2a3f; border-left: 3px solid #4f7cff; padding-left: 7px; }
@@ -1108,7 +1108,7 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
   align-items: center;
   justify-content: flex-end;
   padding: 0 10px;
-  background: #131722;
+  background: v.$color-panel;
   border-bottom: 1px solid v.$color-border;
 }
 .structural-state-toggle-btn {
@@ -1127,14 +1127,14 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 .tv-chart-column { min-width: 0; background: #0d1118; position: relative; }
 .tv-side-column { min-width: 0; background: #0d1118; border-left: 1px solid v.$color-border; overflow-y: auto; max-height: v.$tv-workspace-min-height; }
 .tv-trading-chart { height: v.$tv-chart-height; border: 0; border-radius: 0; }
-.tv-chart-toolbar { height: 42px; border-radius: 0; border-left: 0; border-right: 0; background: #131722; position: relative; z-index: 3; display: flex; align-items: center; gap: 8px; padding: 0 8px; }
+.tv-chart-toolbar { height: 42px; border-radius: 0; border-left: 0; border-right: 0; background: v.$color-panel; position: relative; z-index: 3; display: flex; align-items: center; gap: 8px; padding: 0 8px; }
 .tv-chart-toolbar .chart-ohlc { min-width: 0; white-space: nowrap; overflow: hidden; }
-.tv-active-indicators { height: 28px; display: flex; align-items: center; gap: 6px; padding: 0 9px; background: #0f131b; border-bottom: 1px solid #202633; overflow: auto; position: relative; z-index: 1; }
+.tv-active-indicators { height: 28px; display: flex; align-items: center; gap: 6px; padding: 0 9px; background: #0f131b; border-bottom: 1px solid v.$color-border; overflow: auto; position: relative; z-index: 1; }
 .tv-indicator-chip { height: 19px; display: inline-flex; align-items: center; gap: 5px; padding: 0 7px; border-radius: 3px; background: #1b2230; border: 1px solid #2c3547; color: #aab4c8; font-size: 12px; white-space: nowrap; pointer-events: none; i { width: 6px; height: 6px; border-radius: 50%; } }
 .tv-canvas-wrap { height: v.$tv-canvas-height; position: relative; min-height: 560px; canvas { width: 100%; height: 100%; display: block; } }
-.tv-chart-status { height: 29px; display: flex; align-items: center; gap: 18px; padding: 0 10px; border-top: 1px solid #202633; background: #11151d; color: #747f92; font-size: 12px; overflow: auto; white-space: nowrap; b { font-weight: 500; color: #9ca9be; } }
+.tv-chart-status { height: 29px; display: flex; align-items: center; gap: 18px; padding: 0 10px; border-top: 1px solid v.$color-border; background: #11151d; color: #747f92; font-size: 12px; overflow: auto; white-space: nowrap; b { font-weight: 500; color: #9ca9be; } }
 
-.tv-layer-panel { background: #131722; border-left: 1px solid v.$color-border; overflow: auto; max-height: v.$tv-layer-panel-max-height; }
+.tv-layer-panel { background: v.$color-panel; border-left: 1px solid v.$color-border; overflow: auto; max-height: v.$tv-layer-panel-max-height; }
 .tv-panel-head { height: 52px; padding: 9px 10px; border-bottom: 1px solid v.$color-border; display: flex; justify-content: space-between; align-items: center; b, span { display: block; } b { font-size: 12px; } span { font-size: 12px; color: v.$color-muted; margin-top: 3px; } }
 .tv-layer-actions { display: flex; gap: 6px; padding: 8px 9px; border-bottom: 1px solid v.$color-border-soft; flex-wrap: wrap; }
 .tv-layer-group { border-bottom: 1px solid v.$color-border-soft; padding: 7px; }
@@ -1343,7 +1343,7 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
   gap: 16px;
   padding: 5px 9px;
   background: #0f131b;
-  border-bottom: 1px solid #202633;
+  border-bottom: 1px solid v.$color-border;
   overflow-x: auto;
   white-space: nowrap;
 }
@@ -1466,23 +1466,23 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 
 // ===== V1.7 StockStructuralStatePanel 结构状态因子面板 =====
 .ssp-panel { display: flex; flex-direction: column; height: 100%; font-size: 12px; color: #c5ccd9; background: #0d1118; }
-.ssp-header { display: flex; justify-content: space-between; align-items: center; padding: 9px 10px; border-bottom: 1px solid #202633; background: #131722; }
+.ssp-header { display: flex; justify-content: space-between; align-items: center; padding: 9px 10px; border-bottom: 1px solid v.$color-border; background: v.$color-panel; }
 .ssp-title { font-weight: 600; font-size: 12px; color: #e1e6f0; }
 .ssp-as-of { font: 12px v.$font-mono; color: v.$color-muted; }
 .ssp-loading, .ssp-empty { padding: 24px 12px; text-align: center; color: v.$color-muted; font-size: 12px; }
 .ssp-degraded { padding: 6px 10px; background: #2a1a0e; color: #ffb74d; font-size: 12px; border-bottom: 1px solid #3a2a1a; cursor: help; }
-.ssp-tabs { display: flex; align-items: center; gap: 4px; padding: 6px 10px; border-bottom: 1px solid #202633; background: #11151d; }
+.ssp-tabs { display: flex; align-items: center; gap: 4px; padding: 6px 10px; border-bottom: 1px solid v.$color-border; background: #11151d; }
 .ssp-tab { background: transparent; border: 1px solid transparent; color: v.$color-muted; font-size: 12px; padding: 3px 8px; border-radius: 3px; cursor: pointer; &.active { background: #1b2230; border-color: #2c3547; color: #c5ccd9; } &:hover { color: #e1e6f0; } }
 .ssp-tab-sep { color: #3a4357; font-size: 12px; }
 .ssp-cards { flex: 1; overflow-y: auto; padding: 6px 8px; display: flex; flex-direction: column; gap: 6px; }
-.ssp-card { background: #11151d; border: 1px solid #202633; border-radius: 4px; overflow: hidden; }
-.ssp-card-title { padding: 5px 8px; font-size: 12px; font-weight: 600; color: #9ca9be; background: #0f131b; border-bottom: 1px solid #202633; text-transform: uppercase; letter-spacing: .5px; }
+.ssp-card { background: #11151d; border: 1px solid v.$color-border; border-radius: 4px; overflow: hidden; }
+.ssp-card-title { padding: 5px 8px; font-size: 12px; font-weight: 600; color: #9ca9be; background: #0f131b; border-bottom: 1px solid v.$color-border; text-transform: uppercase; letter-spacing: .5px; }
 .ssp-card-body { padding: 4px 8px; }
 .ssp-row { display: flex; justify-content: space-between; align-items: center; padding: 2px 0; gap: 8px; }
 .ssp-label { color: v.$color-muted; font-size: 12px; flex-shrink: 0; }
 .ssp-value { color: #c5ccd9; font: 12px v.$font-mono; text-align: right; word-break: break-all; }
-.ssp-relation { padding: 6px 10px; border-top: 1px solid #202633; background: #11151d; }
-.ssp-detail { border-top: 1px solid #202633; background: #0f131b; summary { padding: 5px 10px; font-size: 12px; color: v.$color-muted; cursor: pointer; outline: none; &:hover { color: #c5ccd9; } } }
+.ssp-relation { padding: 6px 10px; border-top: 1px solid v.$color-border; background: #11151d; }
+.ssp-detail { border-top: 1px solid v.$color-border; background: #0f131b; summary { padding: 5px 10px; font-size: 12px; color: v.$color-muted; cursor: pointer; outline: none; &:hover { color: #c5ccd9; } } }
 .ssp-detail-pre { margin: 0; padding: 8px 10px; font: 12px v.$font-mono; color: #707b90; max-height: 200px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
 
 // ===== V1.6.3 StrategyChart 纯 Canvas 2D 补充样式 =====
@@ -1503,7 +1503,7 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
   transition: opacity .08s ease;
   font-family: v.$font-mono;
   b { display: block; font-size: 12px; color: #f0f3fa; margin-bottom: 3px; }
-  span { display: block; font-size: 12px; color: #8b93a7; margin-top: 2px; }
+  span { display: block; font-size: 12px; color: v.$color-muted; margin-top: 2px; }
   &.show { opacity: 1; }
 }
 
@@ -1616,7 +1616,7 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
   place-items: center;
   padding: 28px;
   background: radial-gradient(circle at 20% 10%, rgba(41, 98, 255, .14), transparent 35%),
-              #0f1117;
+              v.$color-bg;
 }
 
 // 续期页外壳：最大宽度 580px
@@ -1963,7 +1963,7 @@ button.switch {
 // 条件表空状态提示文本
 .condition-empty-hint {
   font-size: 12px;
-  color: #8b93a7;
+  color: v.$color-muted;
   padding: 4px 0;
 }
 
@@ -2010,7 +2010,7 @@ button.switch {
   width: 64px;
   height: 64px;
   border-radius: 50%;
-  background: conic-gradient(v.$color-blue var(--ring-pct, 0%), #2b3040 0);
+  background: conic-gradient(v.$color-blue var(--ring-pct, 0%), v.$color-border 0);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -2111,7 +2111,7 @@ button.switch {
   font-size: 12px;
   padding: 2px 6px;
   border-radius: 4px;
-  background: #2b3040;
+  background: v.$color-border;
   color: #858d9d;
   margin-left: 8px;
   vertical-align: middle;
@@ -2137,7 +2137,7 @@ button.switch {
   border-radius: 50%;
   border: 0;
   padding: 0;
-  background: #4b7cff;
+  background: v.$color-brand-hover;
   box-shadow: 0 0 6px rgba(75, 124, 255, .5);
   cursor: pointer;
   transition: transform .14s ease;

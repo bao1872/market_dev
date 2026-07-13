@@ -97,6 +97,11 @@ export interface DataTableProps<Row> {
   // [StrategyDataTable] - 描述: 外部受控 keyword（提供时覆盖内部 globalQuery，用于 /market 顶部搜索框）
   externalKeyword?: string
   onKeywordChange?: (keyword: string) => void
+  // CHANGE-20260713-006: 外部受控 industry/concept（/market 顶部板块筛选，preset 持久化）
+  externalIndustry?: string
+  onIndustryChange?: (industry: string) => void
+  externalConcept?: string
+  onConceptChange?: (concept: string) => void
 }
 
 // [StrategyDataTable] - 描述: 按字段类型返回可选操作符列表（默认操作符为数组首项）
@@ -410,6 +415,10 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     activeRowKey,
     externalKeyword,
     onKeywordChange,
+    externalIndustry,
+    onIndustryChange,
+    externalConcept,
+    onConceptChange,
   } = props
 
   const [searchParams, setSearchParams] = useSearchParams()
@@ -640,7 +649,9 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     hiddenColumns: [...hiddenColumns],
     columnOrder: columnOrder ?? null,
     pageSize,
-  }), [effectiveKeyword, sortColumn, sortDirection, filters, hiddenColumns, columnOrder, pageSize, columns])
+    industry: externalIndustry?.trim() || null,
+    concept: externalConcept?.trim() || null,
+  }), [effectiveKeyword, sortColumn, sortDirection, filters, hiddenColumns, columnOrder, pageSize, columns, externalIndustry, externalConcept])
 
   // [Presets] - 描述: 应用 preset 配置到内部 state（重置所有筛选/排序/分页/隐藏列/列顺序）
   const applyPresetConfig = useCallback((config: TableViewPresetConfig) => {
@@ -685,8 +696,11 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
       saveColumnOrder(null)
     }
     if (config.pageSize != null) setPageSize(config.pageSize)
+    // CHANGE-20260713-006: 恢复 industry/concept 到外部受控 state（MarketWorkspacePage URL）
+    if (onIndustryChange) onIndustryChange(config.industry ?? '')
+    if (onConceptChange) onConceptChange(config.concept ?? '')
     setPage(1)
-  }, [columns, saveColumnOrder, onKeywordChange])
+  }, [columns, saveColumnOrder, onKeywordChange, onIndustryChange, onConceptChange])
 
   // [Presets] - 描述: 自动应用默认配置（进入页面时，每个 strategyKey 只应用一次）
   const presetsQuery = useTableViewPresets(strategyKey ? tableId : undefined, strategyKey ?? undefined)

@@ -4,6 +4,16 @@
 
 ## 2026-07-13
 
+- CHANGE-20260713-006: /market 行业/概念筛选恢复 + 盘迹品牌视觉 V1.0
+  - 行业/概念筛选恢复：新建 board_filter_helper 共享 EXISTS 条件构造器（market_stocks_service + strategy_result_repository 共用），/strategy-runs/{run_id}/results 增加 industry/concept Query 参数，AND 语义，items/filtered_total/source_total 一致
+  - preset 持久化：TableViewPresetConfig（后端 Pydantic + 前端 TS）增加 industry/concept 可选字段，白名单同步，不新增表/migration，旧 preset 兼容
+  - 前端 URL state：marketWorkspaceUrlState 增加 industry/concept，MarketToolbar 恢复"搜索、行业、概念"同一行布局，boards.available=false 时输入禁用+提示
+  - StrategyDataTable 受控 props：externalIndustry/onIndustryChange/externalConcept/onConceptChange，currentConfig/applyPresetConfig 集成
+  - 盘迹品牌视觉 V1.0：variables.scss 更新为莹感绿 token 体系（#00F6C2 主色，#0A0F14 背景，#F2F6F8 文本，红涨绿跌不变），BrandLogo 重写为四节点折线+末端高亮共识节点
+  - 硬编码清理：global.scss 30 处 + MarketWorkspace.module.scss 71 处 + AccountMenu/UserAppShell/MarketInstrumentPane 替换；新增 variables 导入
+  - 品牌资产：复制 logo_symbol_128/256.png + logo_horizontal_dark.png 到 frontend/src/assets/brand/（共 80KB）
+  - 测试：后端 6 industry/concept 测试 + 前端 tsc 0 错误；Ruff 仅 B011 基线
+  - 文档：AGENTS 规则 34-35 + docs/current/00/02/04/05 + maps + code-doc-alignment + CHANGE
 - CHANGE-20260713-005: PR #74 阶段五 — DSA 列表产品回归 / 消息数量 SSOT / K 线 Pointer 拖拽 / 用户文案
   - /market 列表：action 列改名"自选"（加入/移除自选按钮），股票名称改为可点击链接进入 /stock/:symbol?returnTo=，股票单元格不再显示行内涨跌幅（独立 change_pct 列保留），watchlist 单次请求+Set 禁止 N+1，批次信息 admin-only 默认折叠
   - /market 单一搜索 SSOT：MarketToolbar 顶部唯一搜索框（Enter/blur/清空提交），StrategyDataTable searchable={false} + externalKeyword/onKeywordChange 受控模式

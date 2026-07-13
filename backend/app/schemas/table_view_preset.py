@@ -26,7 +26,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # config 允许的字段白名单（其他字段一律拒绝）
 _ALLOWED_CONFIG_KEYS: frozenset[str] = frozenset(
-    {"keyword", "sort", "filters", "hiddenColumns", "columnOrder", "pageSize"}
+    {"keyword", "sort", "filters", "hiddenColumns", "columnOrder", "pageSize",
+     "industry", "concept"}
 )
 
 # config 禁止的字段（业务数据与会话态，冗余防御）
@@ -72,6 +73,12 @@ class TableViewPresetConfig(BaseModel):
     )
     pageSize: int | None = Field(  # noqa: N815
         default=None, ge=1, le=500, description="每页大小（1-500）"
+    )
+    industry: str | None = Field(
+        default=None, max_length=100, description="行业板块名称"
+    )
+    concept: str | None = Field(
+        default=None, max_length=100, description="概念板块名称"
     )
 
     @model_validator(mode="after")

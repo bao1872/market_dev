@@ -628,6 +628,8 @@ async def list_run_results(
         ),
     ),
     keyword: str | None = Query(None, description="关键词（symbol 或 name 模糊匹配）"),
+    industry: str | None = Query(None, description="行业板块名称（qstock 同步后可用）"),
+    concept: str | None = Query(None, description="概念板块名称（qstock 同步后可用）"),
     sort_by: str | None = Query(None, description="排序指标名"),
     sort_desc: bool = Query(False, description="是否降序"),
     universe: str = Query("all", description="股票池: all 全市场 | watchlist 仅自选股"),
@@ -710,6 +712,8 @@ async def list_run_results(
             page_size=page_size,
             universe=universe,
             keyword=keyword,
+            industry=industry,
+            concept=concept,
         )
     except RunNotFoundError as e:
         raise HTTPException(

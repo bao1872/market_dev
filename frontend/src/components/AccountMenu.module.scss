@@ -1,3 +1,5 @@
+@use '../styles/variables.scss' as v;
+
 // [AccountMenu] - 描述: 右上角账户菜单样式（CSS Module，局部作用域）
 // 仅承载菜单触发器（头像+未读角标）与下拉面板，不引入全局页面规则。
 
@@ -41,7 +43,7 @@
   font-weight: 700;
   line-height: 16px;
   text-align: center;
-  box-shadow: 0 0 0 2px #131722;
+  box-shadow: 0 0 0 2px v.$color-panel;
 }
 
 .menu {
@@ -49,7 +51,7 @@
   top: calc(100% + 8px);
   right: 0;
   min-width: 184px;
-  background: #131722;
+  background: v.$color-panel;
   border: 1px solid #2a2f3c;
   border-radius: 10px;
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
@@ -95,7 +97,7 @@
   text-decoration: none;
 
   &:hover {
-    background: #1c202b;
+    background: v.$color-panel-3;
     color: #fff;
   }
 }

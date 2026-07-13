@@ -20,6 +20,7 @@ import {
   useWatchlist,
   useAddToWatchlist,
   useRemoveFromWatchlist,
+  useMarketBoards,
 } from '@/hooks/useApi'
 import { useAuthStore } from '@/store/auth'
 import { useToast } from '@/store/toast'
@@ -90,6 +91,16 @@ export default function MarketWorkspacePage() {
   // 顶部搜索框 keyword（单一真源，通过 externalKeyword 注入表格）
   // 初始值从 URL keyword 读取（表格 mount 时也会 hydration 并通过 onKeywordChange 回调同步）
   const [keyword, setKeyword] = useState<string>(() => searchParams.get('keyword') ?? '')
+
+  // 行业/概念筛选（CHANGE-20260713-006：从 URL 读取，与 scope/selected 同级管理）
+  const industry = urlState.industry ?? ''
+  const concept = urlState.concept ?? ''
+
+  // 板块目录（只请求一次，available=false 时禁用输入）
+  const boardsQuery = useMarketBoards()
+  const boards = boardsQuery.data
+    ? { items: boardsQuery.data.items, available: boardsQuery.data.available }
+    : undefined
 
   // 右栏折叠状态（本地，不进 URL）
   // 首次访问默认收起，保留用户 localStorage 选择
@@ -197,6 +208,13 @@ export default function MarketWorkspacePage() {
     if (query.keyword) {
       params.keyword = query.keyword
     }
+    // 行业/概念筛选（CHANGE-20260713-006）
+    if (industry) {
+      params.industry = industry
+    }
+    if (concept) {
+      params.concept = concept
+    }
     // 列筛选转 metric_filters（与 ScreenerPage 一致）
     const supportedOps = new Set(['gt', 'gte', 'lt', 'lte', 'eq', 'between'])
     const metricFilters = query.filters
@@ -225,7 +243,7 @@ export default function MarketWorkspacePage() {
       params.metric_filters = JSON.stringify(metricFilters)
     }
     return params
-  }, [query, universe])
+  }, [query, universe, industry, concept])
 
   const resultsQuery = useStrategyRunResults(activeRunId || undefined, resultParams)
   const totalResults = resultsQuery.data?.total ?? 0
@@ -238,7 +256,7 @@ export default function MarketWorkspacePage() {
 
   // 通用 URL 更新函数（仅更新 scope + selected，保留 StrategyDataTable 管理的 sort/filters/page 等）
   const updateUrl = useCallback(
-    (newState: { scope: MarketScope; selected: string | null }) => {
+    (newState: { scope: MarketScope; selected: string | null; industry?: string | null; concept?: string | null }) => {
       const params = new URLSearchParams(searchParams)
       // 更新 scope + selected
       params.set('scope', newState.scope)
@@ -246,6 +264,49 @@ export default function MarketWorkspacePage() {
         params.set('selected', newState.selected)
       } else {
         params.delete('selected')
+      }
+      // 行业/概念（可选，不传时保留原值）
+      if (newState.industry !== undefined) {
+        if (newState.industry) {
+          params.set('industry', newState.industry)
+        } else {
+          params.delete('industry')
+        }
+      }
+      if (newState.concept !== undefined) {
+        if (newState.concept) {
+          params.set('concept', newState.concept)
+        } else {
+          params.delete('concept')
+        }
+      }
+      setSearchParams(params, { replace: false })
+    },
+    [searchParams, setSearchParams],
+  )
+
+  // 行业/概念变更：更新 URL + 重置 page=1（CHANGE-20260713-006）
+  const handleIndustryChange = useCallback(
+    (newIndustry: string) => {
+      setQuery((prev) => ({ ...prev, page: 1 }))
+      const params = new URLSearchParams(searchParams)
+      if (newIndustry) {
+        params.set('industry', newIndustry)
+      } else {
+        params.delete('industry')
+      }
+      setSearchParams(params, { replace: false })
+    },
+    [searchParams, setSearchParams],
+  )
+  const handleConceptChange = useCallback(
+    (newConcept: string) => {
+      setQuery((prev) => ({ ...prev, page: 1 }))
+      const params = new URLSearchParams(searchParams)
+      if (newConcept) {
+        params.set('concept', newConcept)
+      } else {
+        params.delete('concept')
       }
       setSearchParams(params, { replace: false })
     },
@@ -329,6 +390,11 @@ export default function MarketWorkspacePage() {
         onScopeChange={handleScopeChange}
         keyword={keyword}
         onKeywordChange={handleKeywordChange}
+        industry={industry}
+        onIndustryChange={handleIndustryChange}
+        concept={concept}
+        onConceptChange={handleConceptChange}
+        boards={boards}
       />
       <div className={styles.tableArea}>
         <div className={styles.tableWrapper}>
@@ -399,6 +465,11 @@ export default function MarketWorkspacePage() {
             // 受控 keyword：顶部搜索框 → externalKeyword → 表格 URL sync + API query
             externalKeyword={keyword}
             onKeywordChange={handleKeywordChange}
+            // CHANGE-20260713-006: 受控 industry/concept（顶部板块筛选 → URL + preset 持久化）
+            externalIndustry={industry ?? ''}
+            onIndustryChange={handleIndustryChange}
+            externalConcept={concept ?? ''}
+            onConceptChange={handleConceptChange}
           />
         </div>
         {/* 右栏：研究上下文面板（可收起；收起时不挂载、不请求数据） */}

@@ -35,10 +35,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.time import to_shanghai_iso
 from app.models.bar import BarDaily
 from app.models.instrument import Instrument
-from app.models.market_board import MarketBoard, MarketBoardMembership
+from app.models.market_board import MarketBoard
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_state_event import StockStateEvent
 from app.models.watchlist import UserWatchlistItem
+from app.repositories.board_filter_helper import build_board_filter_conditions
 from app.schemas.market_stocks import (
     MarketBoardItem,
     MarketBoardsResponse,
@@ -258,39 +259,13 @@ def _build_state_filter(state: str | None) -> ColumnElement[bool] | None:
 def _build_board_filter_conditions(
     industry: str | None, concept: str | None
 ) -> list[ColumnElement[bool]]:
-    """构建行业/概念筛选 EXISTS 条件（PRD §7.5）。
+    """构建行业/概念筛选 EXISTS 条件（委托共享 helper）。
 
-    使用 SQL EXISTS 子查询，避免先加载全量 UUID 再 IN 的 N+1 模式。
-    industry/concept 参数为板块名称，通过 market_boards.name 匹配。
+    保留本地函数签名以兼容现有调用；实际逻辑由
+    app.repositories.board_filter_helper.build_board_filter_conditions 提供，
+    供 market_stocks_service 与 strategy_result_repository 共用同一份 EXISTS 子查询。
     """
-    conditions: list[ColumnElement[bool]] = []
-    if industry:
-        industry_exists = (
-            select(1)
-            .select_from(MarketBoardMembership)
-            .join(MarketBoard, MarketBoard.id == MarketBoardMembership.boardId)
-            .where(
-                MarketBoardMembership.instrumentId == Instrument.id,
-                MarketBoard.type == "industry",
-                MarketBoard.name == industry,
-            )
-            .exists()
-        )
-        conditions.append(industry_exists)
-    if concept:
-        concept_exists = (
-            select(1)
-            .select_from(MarketBoardMembership)
-            .join(MarketBoard, MarketBoard.id == MarketBoardMembership.boardId)
-            .where(
-                MarketBoardMembership.instrumentId == Instrument.id,
-                MarketBoard.type == "concept",
-                MarketBoard.name == concept,
-            )
-            .exists()
-        )
-        conditions.append(concept_exists)
-    return conditions
+    return build_board_filter_conditions(Instrument.id, industry, concept)
 
 
 async def get_market_stocks(

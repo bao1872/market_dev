@@ -891,6 +891,8 @@ export interface StrategyResultQueryParams {
   matched_only?: boolean
   metric_filters?: string
   keyword?: string
+  industry?: string
+  concept?: string
   sort_by?: string
   sort_desc?: boolean
   page?: number
@@ -2702,6 +2704,9 @@ export interface TableViewPresetConfig {
   hiddenColumns?: string[] | null
   columnOrder?: string[] | null
   pageSize?: number | null
+  // CHANGE-20260713-006: /market 行业/概念筛选持久化（旧 preset 缺字段时正常兼容）
+  industry?: string | null
+  concept?: string | null
 }
 
 /** preset 响应（与后端 TableViewPresetResponse 对齐） */

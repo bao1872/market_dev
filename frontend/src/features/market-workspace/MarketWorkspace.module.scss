@@ -1,3 +1,5 @@
+@use '../../styles/variables.scss' as v;
+
 // [MarketWorkspace] - 描述: 行情页样式（工具栏 + 服务端分页表格 + 右栏）
 // PRD §6.1：只由工具栏、服务端分页股票表和可收起右栏组成。不挂载 K线。
 // 布局：CSS Flexbox，marketPage 纵向（toolbar + tableArea），tableArea 横向（table + rightPane）。
@@ -13,7 +15,7 @@
   flex-direction: column;
   height: calc(100vh - 56px); // topbar 高度
   overflow: hidden;
-  background: #0d1117;
+  background: v.$color-bg;
 }
 
 // ===== 顶部工具栏 =====
@@ -22,14 +24,14 @@
   align-items: center;
   gap: 12px;
   padding: 8px 16px;
-  border-bottom: 1px solid #232838;
-  background: #131722;
+  border-bottom: 1px solid v.$color-border;
+  background: v.$color-panel;
   flex-shrink: 0;
 }
 
 .scopeTabs {
   display: flex;
-  border: 1px solid #2a2f3c;
+  border: 1px solid v.$color-border;
   border-radius: 6px;
   overflow: hidden;
   flex-shrink: 0;
@@ -39,45 +41,45 @@
   padding: 6px 16px;
   border: 0;
   background: transparent;
-  color: #8ea0b7;
+  color: v.$color-muted;
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
   transition: color 0.12s, background 0.12s;
 
   &:hover {
-    color: #d7e3f2;
+    color: v.$color-text;
   }
 
   &:focus-visible {
-    outline: 2px solid #2962ff;
+    outline: 2px solid v.$color-brand;
     outline-offset: -2px;
   }
 }
 
 .scopeTabActive {
   color: #fff;
-  background: #1c2440;
+  background: v.$color-panel-3;
 }
 
 .searchInput {
   flex: 1;
   max-width: 480px;
   padding: 7px 12px;
-  border: 1px solid #2a2f3c;
-  background: #0d1117;
-  color: #d7e3f2;
+  border: 1px solid v.$color-border;
+  background: v.$color-bg;
+  color: v.$color-text;
   border-radius: 6px;
   font-size: 14px;
   outline: none;
   transition: border-color 0.12s;
 
   &::placeholder {
-    color: #687083;
+    color: v.$color-text-dim;
   }
 
   &:focus {
-    border-color: #2962ff;
+    border-color: v.$color-brand;
   }
 }
 
@@ -90,20 +92,20 @@
 .filterInput {
   width: 100px;
   padding: 7px 10px;
-  border: 1px solid #2a2f3c;
-  background: #0d1117;
-  color: #d7e3f2;
+  border: 1px solid v.$color-border;
+  background: v.$color-bg;
+  color: v.$color-text;
   border-radius: 6px;
   font-size: 14px;
   outline: none;
   transition: border-color 0.12s;
 
   &::placeholder {
-    color: #687083;
+    color: v.$color-text-dim;
   }
 
   &:focus {
-    border-color: #2962ff;
+    border-color: v.$color-brand;
   }
 
   &:disabled {
@@ -114,9 +116,9 @@
 
 .filterSelect {
   padding: 7px 10px;
-  border: 1px solid #2a2f3c;
-  background: #0d1117;
-  color: #d7e3f2;
+  border: 1px solid v.$color-border;
+  background: v.$color-bg;
+  color: v.$color-text;
   border-radius: 6px;
   font-size: 14px;
   outline: none;
@@ -124,7 +126,7 @@
   transition: border-color 0.12s;
 
   &:focus {
-    border-color: #2962ff;
+    border-color: v.$color-brand;
   }
 }
 
@@ -165,23 +167,23 @@
     position: sticky;
     top: 0;
     z-index: 1;
-    background: #131722;
+    background: v.$color-panel;
   }
 
   th {
     padding: 8px 12px;
     text-align: left;
-    color: #8ea0b7;
+    color: v.$color-muted;
     font-weight: 600;
     font-size: 12px;
-    border-bottom: 1px solid #232838;
+    border-bottom: 1px solid v.$color-border;
     white-space: nowrap;
   }
 
   td {
     padding: 8px 12px;
-    color: #d7e3f2;
-    border-bottom: 1px solid #1a1e28;
+    color: v.$color-text;
+    border-bottom: 1px solid v.$color-border-soft;
     white-space: nowrap;
   }
 }
@@ -196,22 +198,22 @@ th.colName {
   position: sticky;
   left: 0;
   z-index: 3; // 高于 thead(1) 和 td.colName(2)
-  background: #131722;
+  background: v.$color-panel;
 }
 
 td.colName {
   position: sticky;
   left: 0;
   z-index: 2;
-  background: #0d1117;
+  background: v.$color-bg;
 }
 
 .dataRow:hover td.colName {
-  background: #161b26;
+  background: v.$color-panel-2;
 }
 
 .dataRowSelected td.colName {
-  background: #1a2138;
+  background: v.$color-panel-3;
 }
 
 .colPrice, .colChange {
@@ -246,12 +248,12 @@ td.colName {
   transition: background 0.08s;
 
   &:hover {
-    background: #161b26;
+    background: v.$color-panel-2;
   }
 }
 
 .dataRowSelected {
-  background: #1a2138;
+  background: v.$color-panel-3;
 }
 
 // 名称单元格
@@ -264,7 +266,7 @@ td.colName {
 .nameLink {
   border: 0;
   background: transparent;
-  color: #4a9eff;
+  color: v.$color-info;
   font-size: 14px;
   font-weight: 600;
   text-align: left;
@@ -277,27 +279,27 @@ td.colName {
   }
 
   &:focus-visible {
-    outline: 2px solid #2962ff;
+    outline: 2px solid v.$color-brand;
     outline-offset: 2px;
   }
 }
 
 .symbolText {
   font-size: 12px;
-  color: #687083;
+  color: v.$color-text-dim;
 }
 
 // 涨跌幅颜色（A 股：红涨绿跌）
 .priceUp {
-  color: #ef4444;
+  color: v.$color-up;
 }
 
 .priceDown {
-  color: #22c55e;
+  color: v.$color-down;
 }
 
 .priceNeutral {
-  color: #8ea0b7;
+  color: v.$color-muted;
 }
 
 // 事件单元格
@@ -313,7 +315,7 @@ td.colName {
   margin-left: 6px;
   padding: 1px 6px;
   border-radius: 3px;
-  background: #3a2f1a;
+  background: rgba(245, 158, 11, 0.12);
   color: #f5a623;
   font-size: 12px;
   font-weight: 600;
@@ -331,7 +333,7 @@ td.colName {
 
 .eventTime {
   font-size: 12px;
-  color: #687083;
+  color: v.$color-text-dim;
 }
 
 // 星标按钮
@@ -340,7 +342,7 @@ td.colName {
   background: transparent;
   font-size: 16px;
   cursor: pointer;
-  color: #687083;
+  color: v.$color-text-dim;
   padding: 2px;
 
   &:hover {
@@ -348,7 +350,7 @@ td.colName {
   }
 
   &:focus-visible {
-    outline: 2px solid #2962ff;
+    outline: 2px solid v.$color-brand;
     outline-offset: 1px;
   }
 }
@@ -364,7 +366,7 @@ td.colName {
 
 .skeletonCell {
   height: 16px;
-  background: linear-gradient(90deg, #1a1e28 25%, #232838 50%, #1a1e28 75%);
+  background: linear-gradient(90deg, v.$color-border-soft 25%, v.$color-border 50%, v.$color-border-soft 75%);
   background-size: 200% 100%;
   animation: shimmer 1.5s infinite;
   border-radius: 4px;
@@ -388,14 +390,14 @@ td.colName {
 
 .errorText {
   font-size: 14px;
-  color: #8ea0b7;
+  color: v.$color-muted;
 }
 
 .retryBtn {
   padding: 6px 16px;
-  border: 1px solid #2a2f3c;
-  background: #1a1e28;
-  color: #d7e3f2;
+  border: 1px solid v.$color-border;
+  background: v.$color-border-soft;
+  color: v.$color-text;
   border-radius: 6px;
   font-size: 14px;
   cursor: pointer;
@@ -413,7 +415,7 @@ td.colName {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  color: #687083;
+  color: v.$color-text-dim;
   padding: 24px;
   text-align: center;
 }
@@ -435,14 +437,14 @@ td.colName {
   align-items: center;
   justify-content: space-between;
   padding: 8px 16px;
-  border-top: 1px solid #232838;
-  background: #131722;
+  border-top: 1px solid v.$color-border;
+  background: v.$color-panel;
   flex-shrink: 0;
 }
 
 .pageInfo {
   font-size: 12px;
-  color: #8ea0b7;
+  color: v.$color-muted;
 }
 
 .pageControls {
@@ -453,9 +455,9 @@ td.colName {
 .pageBtn {
   width: 32px;
   height: 28px;
-  border: 1px solid #2a2f3c;
-  background: #1a1e28;
-  color: #d7e3f2;
+  border: 1px solid v.$color-border;
+  background: v.$color-border-soft;
+  color: v.$color-text;
   border-radius: 5px;
   cursor: pointer;
   font-size: 14px;
@@ -473,7 +475,7 @@ td.colName {
   }
 
   &:focus-visible {
-    outline: 2px solid #2962ff;
+    outline: 2px solid v.$color-brand;
     outline-offset: 1px;
   }
 }
@@ -482,8 +484,8 @@ td.colName {
 .rightPane {
   width: 340px;
   flex-shrink: 0;
-  border-left: 1px solid #232838;
-  background: #131722;
+  border-left: 1px solid v.$color-border;
+  background: v.$color-panel;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -503,13 +505,13 @@ td.colName {
   align-items: center;
   gap: 8px;
   padding: 10px 14px;
-  border-bottom: 1px solid #232838;
+  border-bottom: 1px solid v.$color-border;
 }
 
 .rightPaneTitle {
   font-weight: 650;
   font-size: 14px;
-  color: #d7e3f2;
+  color: v.$color-text;
   flex: 1;
 }
 
@@ -519,7 +521,7 @@ td.colName {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  color: #687083;
+  color: v.$color-text-dim;
   padding: 24px;
   text-align: center;
 }
@@ -527,8 +529,8 @@ td.colName {
 .collapseBtn {
   width: 26px;
   height: 26px;
-  border: 1px solid #2a2f3c;
-  background: #1a1e28;
+  border: 1px solid v.$color-border;
+  background: v.$color-border-soft;
   color: #b7bdca;
   border-radius: 5px;
   cursor: pointer;
@@ -543,7 +545,7 @@ td.colName {
   }
 
   &:focus-visible {
-    outline: 2px solid #2962ff;
+    outline: 2px solid v.$color-brand;
     outline-offset: 2px;
   }
 }
@@ -555,19 +557,19 @@ td.colName {
   align-items: center;
   justify-content: center;
   border: 0;
-  border-left: 1px solid #232838;
-  background: #131722;
-  color: #8ea0b7;
+  border-left: 1px solid v.$color-border;
+  background: v.$color-panel;
+  color: v.$color-muted;
   cursor: pointer;
   font-size: 16px;
 
   &:hover {
     color: #fff;
-    background: #1c202b;
+    background: v.$color-panel-3;
   }
 
   &:focus-visible {
-    outline: 2px solid #2962ff;
+    outline: 2px solid v.$color-brand;
     outline-offset: -2px;
   }
 }

@@ -56,12 +56,12 @@ Node Cluster 算法
 ### 2.4 统一行情工作区
 
 - `/market` 渲染 `MarketWorkspacePage`（`frontend/src/features/market-workspace/MarketWorkspacePage.tsx`），**无 K 线**，布局为工具栏 + DSA 列表表格 + 可收起事件状态面板：
-  - 工具栏（`MarketToolbar`）：scope 切换（watchlist/market）分段按钮 + 顶部唯一全文搜索框（CHANGE-20260713-005）；搜索框占位"搜索股票代码/名称/拼音首字母"，Enter/失焦提交，清空立即提交；`StrategyDataTable` 在 `/market` 传 `searchable={false}` 隐藏内置搜索 UI；列筛选仍由 `StrategyDataTable` 内置 UI 承载（URL `filters` 参数）。
+  - 工具栏（`MarketToolbar`）：同一行布局 scope 切换（watchlist/market）分段按钮 → 搜索框 → 行业筛选 → 概念筛选（CHANGE-20260713-005/006）；搜索框占位"搜索股票代码/名称/拼音首字母"，Enter/失焦提交，清空立即提交；`StrategyDataTable` 在 `/market` 传 `searchable={false}` 隐藏内置搜索 UI；列筛选仍由 `StrategyDataTable` 内置 UI 承载（URL `filters` 参数）；行业/概念筛选输入在 `boards.available=false` 时禁用但显示（placeholder "板块数据暂不可用"），不直接删除输入。
   - 搜索单一真源（CHANGE-20260713-005）：`MarketWorkspacePage` 持有 `keyword` state（初始值从 URL `keyword` 读取）→ `StrategyDataTable` 通过 `externalKeyword`/`onKeywordChange` 受控 props 接收 → URL `keyword` 同步；后端 `strategy_result_repository.query_results` 的 `keyword` 必须 ILIKE 同时匹配 `Instrument.symbol`/`Instrument.name`/`Instrument.pinyin_initials`（3 处分支同步）。
   - `StrategyDataTable`（`frontend/src/components/StrategyDataTable.tsx`）：复用趋势选股的 DSA 列表能力，数据来自 `usePublishedRuns` + `useStrategyRunResults`（最新 published DSA run）；列定义复用 `getTrendSelectionColumns`（`frontend/src/features/trend-selection/columns.tsx`），包含 stock/change_pct/dsa_dir_bars/vwap_ret_avg/vwap_ret_total/offset_mean/offset_std/offset_percentile/dsa_vwap/dsa_vwap_dev_pct/offset_variance_rate/price/action；`scope=market` → `universe=all`，`scope=watchlist` → `universe=watchlist`；**默认不显示**形态状态、DSA状态、最近事件列（事件只在 `EventStatePanel` 按需展开时加载）；行点击（`onRowClick`）更新 URL `selected` 并驱动右栏 `EventStatePanel`。
   - 行内导航与自选操作（CHANGE-20260713-005）：股票名称/代码为可点击 `<a>` 链接，点击进入 `/stock/:symbol?returnTo=<编码后的当前 /market URL>`；链接 `onClick` 必须 `e.stopPropagation()` + `e.preventDefault()` 防止冒泡到 `<tr onClick>` 和默认跳转；股票单元格只显示名称/代码/市场，不再显示行内涨跌幅（独立 `change_pct` 列保留）；`action` 列改名"自选"，渲染"加入自选/移除自选"按钮（替代旧"详情"按钮），`onClick` 必须 `e.stopPropagation()`；页面只请求一次 `useWatchlist`，按 `instrument_id` 建 Set 判断 watched 状态（禁止 N+1）；`useAddToWatchlist`/`useRemoveFromWatchlist` 成功后 invalidate `['watchlist']` 和 `['watchlist', 'monitor-status']`；`watchlist` scope 移除自选后该行应消失；按 `instrument_id` 维护 `pending` Set 防重复点击。
   - 批次信息权限（CHANGE-20260713-005）：数据日期/批次/状态属于调试信息，普通用户 DOM 中**完全不渲染**（不是 CSS 隐藏）；仅 `useAuthStore(s => s.user?.is_admin === true)` 为真时渲染，默认折叠为"批次信息"区块，点击展开后显示 `run_trade_date`/`run_published_at`/`run_status` 等字段。
-  - 列设置与配置：`StrategyDataTable` 支持列显示/隐藏、调整顺序（`columnOrder`）、恢复默认、刷新保留（localStorage `table-columns:${tableId}` + `table-column-order:${tableId}`）；配置复用 `/me/table-view-presets`（`TablePresetMenu`），保存 `keyword/sort/filters/hiddenColumns/columnOrder/pageSize`；股票名称/代码和操作列不可全部隐藏；旧配置包含已删除字段时忽略未知项。
+  - 列设置与配置：`StrategyDataTable` 支持列显示/隐藏、调整顺序（`columnOrder`）、恢复默认、刷新保留（localStorage `table-columns:${tableId}` + `table-column-order:${tableId}`）；配置复用 `/me/table-view-presets`（`TablePresetMenu`），保存 `keyword/sort/filters/hiddenColumns/columnOrder/pageSize/industry/concept`（CHANGE-20260713-006 新增 industry/concept）；股票名称/代码和操作列不可全部隐藏；旧配置包含已删除字段时忽略未知项。
   - P0 列对齐契约：表头 th、表体 td、colgroup col 三者从同一 `visibleColumns` 派生（`reorderVisibleColumns` 纯函数，`frontend/src/components/columnOrdering.ts`）；每行 td 数 = 可见 th 数；单元格按 `col.key` 取值，禁止依赖数组下标；`columnAlignment.test.ts` 覆盖纯函数 + 源码契约。
   - `EventStatePanel`（`frontend/src/features/research-context/EventStatePanel.tsx`）：可收起面板；P0-4: 首次默认收起，localStorage key `panji:market-right-panel-collapsed:v1` 持久化用户选择；收起时不挂载、不请求数据。面板使用 `useStockContext` 单一接口（`GET /api/v1/stocks/{symbol}/context`），展示 MACD 动量、Evidence（事件证据）、`state.evidence`（状态证据）、数据日期/质量、当前价格结构、成交密集区关系、最近状态变化时间线；普通用户不显示内部字段名（`sourceField`）、算法参数、`idempotencyKey`、JSON 或商业机密；原始 factor/feature/JSON 仅在 `/admin/stock-debug` 和 `/admin/stock-debug/:symbol` 展示。
 - `/stock/:symbol` 是唯一个股详情和 K线入口（PRD V1.1），渲染 `StockDetailPage`（`frontend/src/pages/StockDetailPage.tsx`）：
@@ -76,7 +76,7 @@ Node Cluster 算法
   - 管理员调试能力独立于 `/market`，`/market` 不承载任何原始因子或 JSON；`debug` 不在 `/market` URL 契约中，`/market?debug=1` 管理员访问时重定向到 `/admin/stock-debug/:symbol`。
 - 共享类型（`DisplayTimeframe`/`ResearchSource`/`ALLOWED_TIMEFRAMES`/`BARS_COUNT_BY_TIMEFRAME`/`defaultStrategyForSource`/`normalizeDisplayTimeframe`/`normalizeResearchSource`）权威定义在 `frontend/src/features/stock-research/stockResearchTypes.ts`；`marketWorkspaceUrlState.ts` 从该文件导入并重新导出，依赖方向为 market-workspace → stock-research（禁止反向依赖）。
 - `useStockResearchData` 只保留图表核心查询：instrument/bars/indicators/quote/events + priceSummary/quoteStatus/barsStatus/isRenderReady；自选操作、上下切换、memo、飞书由 `useStockDetailActions`/`useStockDetailFeishu` 负责（禁止加入核心 hook）。
-- URL 状态：`/market` URL 契约简化为 `scope/selected`（由 `MarketWorkspacePage` 管理）；`sort/dir/keyword/filters/page/page_size` 由 `StrategyDataTable` 内置 `screenerUrlState` 管理；`/stock/:symbol` 的 `timeframe/source/strategy/event_id/returnTo` 进 URL，右栏折叠和 viewport 留本地。切换股票不整页刷新。非法 timeframe 回退 1d。`/stock/:symbol` 的 timeframe 也从 URL 解析（单一真源），工具栏切换写回 URL。`returnTo` 为来源页 URL，必须经 `normalizeInternalReturnTo`（`frontend/src/features/market-workspace/marketWorkspaceUrlState.ts`）校验——仅允许 `/screener`、`/market`、`/messages` 前缀（含 query/hash），拒绝外部 URL（http/https）、`javascript:`、双斜杠、非白名单前缀（如 `/admin`、`/login`、`/capture/stock`）、超长字符串（>2000 字符）；左栏选股或切 scope 时清除 `returnTo`。
+- URL 状态：`/market` URL 契约为 `scope/selected/industry/concept`（由 `MarketWorkspacePage` via `marketWorkspaceUrlState` 管理）；`sort/dir/keyword/filters/page/page_size` 由 `StrategyDataTable` 内置 `screenerUrlState` 管理；industry/concept 切 scope/搜索/排序/分页时保留，改变板块筛选重置 page=1；`StrategyDataTable` 通过 `externalIndustry`/`onIndustryChange`/`externalConcept`/`onConceptChange` 受控 props 接收（与 `externalKeyword` 同模式）；preset 配置保存并恢复 industry/concept（`currentConfig`/`applyPresetConfig` 集成）；`/stock/:symbol` 的 `timeframe/source/strategy/event_id/returnTo` 进 URL，右栏折叠和 viewport 留本地。切换股票不整页刷新。非法 timeframe 回退 1d。`/stock/:symbol` 的 timeframe 也从 URL 解析（单一真源），工具栏切换写回 URL。`returnTo` 为来源页 URL，必须经 `normalizeInternalReturnTo`（`frontend/src/features/market-workspace/marketWorkspaceUrlState.ts`）校验——仅允许 `/screener`、`/market`、`/messages` 前缀（含 query/hash），拒绝外部 URL（http/https）、`javascript:`、双斜杠、非白名单前缀（如 `/admin`、`/login`、`/capture/stock`）、超长字符串（>2000 字符）；左栏选股或切 scope 时清除 `returnTo`。
 - `timeframe` 受控单一真源：URL → `useStockResearchData`（bars/indicators 请求参数）→ `StockResearchWorkspace`（图表渲染）三者始终使用同一 `DisplayTimeframe`（'15m'|'1h'|'1d'|'1w'|'1mo'）；工具栏切换通过 `onTimeframeChange` 回调写回 URL，禁止子组件 `useState` 维护独立 timeframe。
 - URL 状态保留：切换周期/切换 scope/选择新股票时必须保留其他字段；选择新股票时清除旧 `event_id` 和 `returnTo`。
 - 左栏选择上下文重置：从 `MarketInstrumentPane` 选择任意股票时必须写 `source='watchlist'`、`strategy='watchlist_monitor'`、`eventId=null`（退出 selection 上下文）；用户切换 scope（watchlist 或 market）时也必须退出 selection 上下文并清除旧 `event_id`；timeframe 在上述操作中继续保留。状态转换必须通过纯函数 `selectInstrumentFromMarketPane(state, newSymbol)` 和 `changeMarketScope(state, newScope)` 处理，禁止在多个 callback 中重复拼对象。
@@ -86,7 +86,7 @@ Node Cluster 算法
 - `/capture/stock/:symbol` 完全独立，不使用 `useStockResearchData`/`StockResearchWorkspace`/`apiClient`，只使用 `captureClient`。
 - `AccountMenu` 复用 `appNavigation.getAccountMenuItemsForVariant(isAdmin, variant)` 单一真源构建菜单项；消息项动态化（CHANGE-20260713-005）：`unread>0` 时菜单链接为 `/messages?filter=unread`，否则为 `/messages`；消息项右侧显示未读数 badge（`>99` 显示 `99+`），数据来自 `useUnreadCount`。
 - 研究上下文纯函数：`buildStructureSummary`（`frontend/src/features/research-context/buildStructureSummary.ts`）从 `primary[timeframe].cost_position` 等真实 DTO 路径提取结构状态摘要（合并 degraded_reasons/warmup_notes、日线/15m 摘要、成本位置/节点）；`buildUserEventExplanation`（`frontend/src/features/research-context/buildUserEventExplanation.ts`）只消费白名单字段（event_time/event_type/payload.facts[].text_content/summary）并校验 `event.instrument_id` 与 `currentInstrumentId` 一致性（不一致时隐藏价格，显示"该事件属于其他股票"）。两个纯函数无 React 依赖，可被 `node --test` 直接运行。
-- **板块筛选已移除**：`/market` DSA 列表不再使用行业/概念筛选（DSA API 不支持）；`MarketToolbar` 简化为仅 scope 分段按钮；`MarketStockTable` 已删除，由 `StrategyDataTable` + `getTrendSelectionColumns` 替代；`/market/boards` API 仍保留供其他用途，但 `/market` 列表不消费 boards。
+- **板块筛选已恢复（CHANGE-20260713-006）**：`/market` DSA 列表支持行业/概念筛选，数据源仍为 published DSA run（`usePublishedRuns` + `useStrategyRunResults`），禁止同时请求 `/market/stocks` 拼接结果；`MarketToolbar` 渲染"搜索、行业、概念"同一行布局；`MarketStockTable` 已删除，由 `StrategyDataTable` + `getTrendSelectionColumns` 替代；`/market/boards` API 提供板块目录，`boards.available=false` 时行业/概念输入禁用但显示（placeholder "板块数据暂不可用"）；后端通过共享 `board_filter_helper.build_board_filter_conditions` 构造 EXISTS 子查询，`strategy_result_repository` 和 `market_stocks_service` 共用；industry+concept 同时提供时为 AND 语义。
 
 ## 3. 页面职责
 
@@ -256,3 +256,15 @@ Node Cluster 算法
 ## 5. 视觉原则
 
 深色、专业、研究型；不夸张承诺收益；上涨红、下跌绿，同时用文字或形状辅助，避免只依赖颜色。图表提供文本摘要，可访问性不能丢。
+
+## 6. 盘迹品牌视觉 V1.0（CHANGE-20260713-006）
+
+- **视觉真源**：`ref/盘迹品牌视觉资产包_v1.0/`（ref 路径不作为运行时依赖，仅供设计参考）。
+- **视觉 token 真源**：`frontend/src/styles/variables.scss` 为唯一视觉 token 真源，禁止在组件中硬编码颜色（必须使用 `v.$color-*` 或 `var(--*)`）。
+- **品牌主色**：莹感绿 `#00F6C2`（`$color-brand`），只承担品牌焦点和关键交互（主按钮、选中 tab、focus 轮廓、Logo 末端节点），不得用于表达涨跌；大面积背景使用深石墨黑 `#0A0F14`（`$color-bg`），避免荧光绿铺满页面。
+- **A 股涨跌色不变**：红涨 `#FF4D4F`（`$color-up`）/ 绿跌 `#22C55E`（`$color-down`），品牌主色不干扰涨跌语义。
+- **BrandLogo**：四节点折线路径 + 末端高亮共识节点（莹感绿圆环），不变形、不旋转、不增减节点、不替换颜色。
+- **品牌资产**：`frontend/src/assets/brand/`（`logo_symbol_128.png` / `logo_symbol_256.png` / `logo_horizontal_dark.png`）。
+- **字体**：中文字体 MiSans/HarmonyOS Sans SC/PingFang SC，fallback Noto Sans CJK SC，数字用等宽字体。
+- **卡片与边框**：圆角 10-14px、1px 边框；禁止重阴影和大面积玻璃拟态。
+- **硬约束**：视觉改造不得改变 DSA、Node Cluster、盘中监控、Capture 计算口径。

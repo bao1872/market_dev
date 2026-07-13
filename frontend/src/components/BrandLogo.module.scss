@@ -1,6 +1,7 @@
 // [BrandLogo] - 描述: 品牌标识组件样式（CSS Module）
-// 三种 variant：sidebar（紧凑 32px，深色侧栏）/ landing（48px，深色页眉）/ footer（36px，深色页尾）
-// 三种使用场景背景均为深色，文字统一采用浅色
+// 三种 variant：sidebar（紧凑 32px，深色顶栏）/ landing（48px，深色页眉）/ footer（36px，深色页尾）
+// 三种使用场景背景均为深色，文字统一采用雾白
+@use '../styles/variables.scss' as v;
 
 .root {
   display: inline-flex;
@@ -9,6 +10,7 @@
   font-weight: 800;
   letter-spacing: .2px;
   white-space: nowrap;
+  font-family: v.$font-sans;
 }
 
 .mark {
@@ -18,9 +20,10 @@
 
 .text {
   display: inline-block;
+  color: v.$color-text;
 }
 
-// sidebar：紧凑，仅图形，高度 32px，适配深色侧栏
+// sidebar：紧凑，仅图形，高度 32px，适配深色顶栏
 .sidebar {
   height: 32px;
   font-size: 14px;
@@ -31,7 +34,6 @@
 .landing {
   height: 48px;
   font-size: 26px;
-  color: #f2f6ff;
   .mark { width: 38px; height: 38px; }
   .text { line-height: 1; }
 }
@@ -40,7 +42,6 @@
 .footer {
   height: 36px;
   font-size: 18px;
-  color: #d6dfef;
   .mark { width: 30px; height: 30px; }
   .text { line-height: 1; }
 }

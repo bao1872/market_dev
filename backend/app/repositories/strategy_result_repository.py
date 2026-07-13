@@ -40,6 +40,7 @@ from app.models.strategy_run import (
     StrategyRun,
     StrategyRunItem,
 )
+from app.repositories.board_filter_helper import build_board_filter_conditions
 from app.strategy.runtime import StrategyResult as RuntimeStrategyResult
 
 logger = logging.getLogger("strategy_result_repository")
@@ -712,6 +713,8 @@ def _apply_run_item_filters(
     filters: list[MetricFilter] | None,
     watchlist_instrument_ids: set[uuid.UUID] | None,
     keyword: str | None,
+    industry: str | None = None,
+    concept: str | None = None,
 ) -> Select:
     """[StrategyResultRepository] - 描述: 对 strategy_run_items 查询应用通用过滤条件
 
@@ -744,6 +747,13 @@ def _apply_run_item_filters(
                 Instrument.pinyin_initials.ilike(kw_pattern),
             )
         )
+
+    # 行业/概念 EXISTS 筛选（CHANGE-20260713-006：与 market_stocks_service 共用 helper）
+    board_conditions = build_board_filter_conditions(
+        StrategyRunItem.instrument_id, industry, concept
+    )
+    for cond in board_conditions:
+        base = base.where(cond)
 
     if filters:
         for f in filters:
@@ -790,6 +800,8 @@ async def query_run_items_with_results(
     sort: SortSpec | None = None,
     watchlist_instrument_ids: set[uuid.UUID] | None = None,
     keyword: str | None = None,
+    industry: str | None = None,
+    concept: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> QueryResultPage:
@@ -824,6 +836,8 @@ async def query_run_items_with_results(
             filters=filters,
             watchlist_instrument_ids=watchlist_instrument_ids,
             keyword=keyword,
+            industry=industry,
+            concept=concept,
         )
 
         # 排序（LEFT JOIN 指标表，通过 instrument_id 关联，NULLS LAST）
@@ -858,6 +872,8 @@ async def query_run_items_with_results(
             filters=filters,
             watchlist_instrument_ids=watchlist_instrument_ids,
             keyword=keyword,
+            industry=industry,
+            concept=concept,
         )
         count_result = await session.execute(
             select(func.count()).select_from(count_base.subquery())

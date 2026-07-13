@@ -57,7 +57,7 @@ strategy_run_items.reason_code 标准编码：
 | Auth | `/auth`, `/me`, `/plans` | 登录、注册、刷新、AccessContext |
 | 行情 | `/instruments`, `/calendar`, `/market`, `/bars` | 数据新鲜度、partial/degraded 标识；`/instruments/{id}/bars` page_size 按 timeframe 限制：`15m` 最大 4000，`1h` 最大 1200，其他最大 1000；`/instruments/{id}/indicators` 的 `bars` 参数最大 4000；`indicators` 响应含 `sqzmom_lb` 全局技术指标数据，后端逐行复刻 Pine 代码，前端只渲染不计算；**`GET /market/stocks` 行业/概念筛选**（PRD §7.5 qstock 同步后）：`industry`/`concept` 参数按板块名称筛选，通过 `filter_instruments_by_board()` 查询 `market_boards` 表实现；未同步板块数据时返回空列表（不报 422）；`industry` + `concept` 同时传时取交集（AND 语义）；**`GET /market/boards?type=industry\|concept`** 返回 `MarketBoardsResponse`：`items`（板块目录列表）+ `available: bool`（items 非空时 true）+ `reason_code: str \| null`（无数据时为 `"board_provider_unavailable"`）+ `updated_at`；前端依据 `available` 决定筛选输入是否禁用 |
 | 结构状态因子 | `/instruments/{id}/structural-factors` | 双周期（1d+15m）5 组结构因子（DSA 段/Swing/成本节点/动量波动/成交参与）；前端只渲染后端 DTO，禁止重新计算；无认证要求（与 indicators API 一致）；250-500 bar lookback，15m 仅已完成 bar，Swing 仅已确认 pivot（无未来函数） |
-| 策略 | `/strategies`, `/strategy-runs` | 只读 released/published 结果；`/strategy-runs/{run_id}/results` 以 `strategy_run_items` 为主表 LEFT JOIN `strategy_results` + `instruments`，返回全量 universe（含 succeeded/skipped/failed），skipped/failed 行 `id`/`payload` 为 null；新增 `item_status`/`reason_code`/`error_message` 字段；默认无筛选时 `source_total = run.total_instruments`。JOIN 策略：因 `strategy_run_items.result_id` 当前未回填（ALIGN-033 P2），`strategy_results` 关联统一改用 `(run_id, instrument_id)`，包括批量加载、metric_filter 子查询、sort LEFT JOIN 三处。**keyword 搜索（CHANGE-20260713-005）**：`strategy_result_repository.query_results` 的 `keyword` 参数（非空时）ILIKE 同时匹配 `Instrument.symbol`/`Instrument.name`/`Instrument.pinyin_initials`（3 处 or_ 分支同步，支持股票代码/中文名称/拼音首字母）；前端不做全量过滤，不增加新表；`total` 字段为该 keyword + filters 下的真实总数（不是 items.length） |
+| 策略 | `/strategies`, `/strategy-runs` | 只读 released/published 结果；`/strategy-runs/{run_id}/results` 以 `strategy_run_items` 为主表 LEFT JOIN `strategy_results` + `instruments`，返回全量 universe（含 succeeded/skipped/failed），skipped/failed 行 `id`/`payload` 为 null；新增 `item_status`/`reason_code`/`error_message` 字段；默认无筛选时 `source_total = run.total_instruments`。JOIN 策略：因 `strategy_run_items.result_id` 当前未回填（ALIGN-033 P2），`strategy_results` 关联统一改用 `(run_id, instrument_id)`，包括批量加载、metric_filter 子查询、sort LEFT JOIN 三处。**keyword 搜索（CHANGE-20260713-005）**：`strategy_result_repository.query_results` 的 `keyword` 参数（非空时）ILIKE 同时匹配 `Instrument.symbol`/`Instrument.name`/`Instrument.pinyin_initials`（3 处 or_ 分支同步，支持股票代码/中文名称/拼音首字母）；前端不做全量过滤，不增加新表；`total` 字段为该 keyword + filters 下的真实总数（不是 items.length）。**industry/concept 筛选（CHANGE-20260713-006）**：`/strategy-runs/{run_id}/results` 支持 `industry`（str \| None, Query）和 `concept`（str \| None, Query）参数，按行业/概念板块名称筛选，通过共享 `backend/app/repositories/board_filter_helper.py::build_board_filter_conditions` 构造 EXISTS 子查询（`MarketBoardMembership` JOIN `MarketBoard`，`type='industry'`/`'concept'`，`name` 匹配）；industry+concept 同时提供时为 AND 语义；`items`/`filtered_total`/`source_total` 三处同步应用相同条件 |
 | 监控 | `/monitor-states`, `/strategy-events` | 只处理完成 Bar，按用户资格过滤；monitor_event 在 `delivery_worker.py` 投递前再次用 `is_user_eligible_for_monitor` 复核，active admin 放行，disabled admin / 无订阅普通用户排除 |
 | 个股上下文 | `/stocks/{symbol}/context` | 用户面个股状态与事件聚合；Evidence DTO 从 ORM `event.evidence` 映射；时区 `Asia/Shanghai`；历史事件截止为次日 00:00 exclusive；run 查询按 `trade_date, published_at, finished_at` DESC 确定排序；`strategy_events.idempotency_key` 格式 `symbol:source_run_id:algorithm_version`（每只股票每个 run 至多一个事件） |
 | 通知 | `/messages`, `/notification-channels` | 用户只能操作自己的消息和渠道 |
@@ -949,7 +949,7 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 | `table_id` | TEXT | NOT NULL | 表格标识（如 `screener`/`watchlist`，由前端约定） |
 | `strategy_key` | TEXT | NULL | 策略 key（可空，适用于无策略的表格） |
 | `name` | TEXT | NOT NULL | 配置名称（用户自定义，同维度唯一） |
-| `config` | JSONB | NOT NULL | 配置内容（仅允许 keyword/sort/filters/hiddenColumns/pageSize） |
+| `config` | JSONB | NOT NULL | 配置内容（仅允许 keyword/sort/filters/hiddenColumns/pageSize/industry/concept） |
 | `is_default` | BOOLEAN | NOT NULL, default `false` | 是否默认配置（同 user+table_id+strategy_key 至多 1 个 true） |
 | `created_at` | TIMESTAMPTZ | NOT NULL, default `now()` | 创建时间 |
 | `updated_at` | TIMESTAMPTZ | NOT NULL, default `now()`, onupdate `now()` | 更新时间 |
@@ -964,7 +964,7 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 
 ### 14.2 `config` JSONB schema
 
-`config` 字段仅允许以下 5 个 key（Pydantic schema `TableViewPresetConfig` 强制 `extra="forbid"`）：
+`config` 字段仅允许以下 7 个 key（Pydantic schema `TableViewPresetConfig` 强制 `extra="forbid"`）：
 
 | 字段 | 类型 | 约束 | 语义 |
 |---|---|---|---|
@@ -973,6 +973,8 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 | `filters` | list[dict] \| null | 每元素必须是 dict 且含 `key`/`op`/`value`；`op` 限制白名单：`contains`/`eq`/`gt`/`gte`/`lt`/`lte`/`between`/`empty`/`not_empty` | 筛选条件列表 |
 | `hiddenColumns` | list[string] \| null | 每元素必须是 string | 隐藏列 key 列表 |
 | `pageSize` | int \| null | 1-500 | 每页大小 |
+| `industry` | string \| null | max_length=100 | 行业板块筛选名称（CHANGE-20260713-006，JSONB 列无新 migration） |
+| `concept` | string \| null | max_length=100 | 概念板块筛选名称（CHANGE-20260713-006，JSONB 列无新 migration） |
 
 **禁止字段**（`_FORBIDDEN_CONFIG_KEYS`，由 `_validate_config_keys` 函数强制拒绝）：
 

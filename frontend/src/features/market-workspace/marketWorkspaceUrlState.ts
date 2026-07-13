@@ -9,6 +9,8 @@ export type MarketScope = 'watchlist' | 'market'
 export interface MarketWorkspaceUrlState {
   scope: MarketScope
   selected: string | null
+  industry: string | null
+  concept: string | null
 }
 
 export const DEFAULT_MARKET_SCOPE: MarketScope = 'watchlist'
@@ -21,7 +23,9 @@ export function decodeMarketWorkspaceUrl(params: URLSearchParams): MarketWorkspa
   const rawScope = params.get('scope')
   const scope: MarketScope = rawScope === 'market' ? 'market' : 'watchlist'
   const selected = params.get('selected') ?? null
-  return { scope, selected }
+  const industry = params.get('industry') ?? null
+  const concept = params.get('concept') ?? null
+  return { scope, selected, industry, concept }
 }
 
 // 将工作区状态编码为 URLSearchParams（仅 scope + selected）
@@ -31,6 +35,12 @@ export function encodeMarketWorkspaceUrl(state: MarketWorkspaceUrlState): URLSea
   params.set('scope', state.scope)
   if (state.selected) {
     params.set('selected', state.selected)
+  }
+  if (state.industry) {
+    params.set('industry', state.industry)
+  }
+  if (state.concept) {
+    params.set('concept', state.concept)
   }
   return params
 }
