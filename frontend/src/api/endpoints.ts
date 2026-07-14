@@ -1517,6 +1517,12 @@ export interface QuoteResponse {
   degraded: boolean
   degraded_reason: string | null
   amount?: number
+  // CHANGE-20260713-010: 总市值/流通市值（数据源不可用时为 null）
+  total_market_cap?: number | null
+  float_market_cap?: number | null
+  market_cap_as_of?: string | null
+  market_cap_source?: string | null
+  market_cap_degraded_reason?: string | null
 }
 
 /** 查询指定标的的实时报价（交易时段 pytdx 实时，非交易时段降级到数据库最新日线） */

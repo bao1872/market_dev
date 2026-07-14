@@ -27,7 +27,7 @@ import logging
 import uuid
 from datetime import date
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,6 +41,7 @@ from app.repositories.strategy_result_repository import (
     SortSpec,
     dict_filters_to_metric_filters,
 )
+from app.schemas.export import ExportRequest
 from app.schemas.strategy_run import (
     StrategyResultListResponse,
     StrategyResultResponse,
@@ -52,6 +53,11 @@ from app.services.access_control_service import (
     AccessContext,
     require_active_subscription,
     require_feature,
+)
+from app.services.excel_export_service import (
+    MAX_EXPORT_ROWS,
+    extract_row_data,
+    generate_xlsx,
 )
 from app.services.selector_query_service import (
     NotSelectorRunError,
@@ -810,6 +816,148 @@ async def get_run_result_detail(
     resp = StrategyResultResponse.model_validate(result)
     resp.item_status = "succeeded"
     return resp
+
+
+@router.post(
+    "/strategy-runs/{run_id}/results/export",
+    summary="导出运行结果为 Excel（CHANGE-20260713-010）",
+)
+async def export_run_results(
+    run_id: uuid.UUID,
+    request: ExportRequest,
+    db: AsyncSession = Depends(get_db),
+    ctx: AccessContext = Depends(require_active_subscription),
+    _feat: AccessContext = Depends(require_feature("trend_selection")),
+) -> Response:
+    """导出已发布运行结果为 .xlsx。
+
+    复用 query_published_selector_results 的筛选/排序构造器（禁止第二套逻辑）。
+    上限 MAX_EXPORT_ROWS=10000，超过返回 422。
+    文件不写永久目录，响应结束即释放。
+    权限：需有效订阅 + trend_selection feature（admin 豁免）。
+
+    Args:
+        run_id: 运行 ID（必须已发布）
+        request: 导出请求（含筛选条件和可见列定义）
+        db: 异步会话
+        ctx: 权限上下文
+
+    Returns:
+        .xlsx 文件流（application/vnd.openxmlformats-officedocument.spreadsheetml.sheet）
+    """
+    # 1. 校验可见列非空
+    if not request.visible_columns:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="visible_columns 不能为空",
+        )
+
+    # 1b. 校验 universe 参数（与 GET results 端点一致）
+    if request.universe not in ("all", "watchlist"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"非法 universe: {request.universe}（合法值: all, watchlist）",
+        )
+
+    # 2. 校验 metric_filters + sort_by（复用 GET results 的校验逻辑）
+    filters = request.metric_filters
+    sort_by = request.sort_by
+    if filters or sort_by is not None:
+        run = await db.get(StrategyRun, run_id)
+        if run is not None:
+            version = await db.get(StrategyVersion, run.strategy_version_id)
+            if version is not None:
+                if filters:
+                    _validate_metric_filters(filters, version)
+                if sort_by is not None:
+                    filterable_keys = _get_filterable_metric_keys(version)
+                    if sort_by not in filterable_keys:
+                        raise HTTPException(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=f"非法 sort_by: {sort_by}（不在 filterable 白名单中）",
+                        )
+
+    # 3. 构造 MetricFilter / SortSpec
+    metric_filter_list = dict_filters_to_metric_filters(filters)
+    sort_spec = SortSpec(field=sort_by, desc=request.sort_desc) if sort_by else None
+
+    # 4. 查询全量结果（page_size=MAX_EXPORT_ROWS+1 用于判断是否超限）
+    try:
+        result_page = await query_published_selector_results(
+            db,
+            run_id=run_id,
+            user_id=uuid.UUID(ctx.user_id),
+            filters=metric_filter_list,
+            sort=sort_spec,
+            page=1,
+            page_size=MAX_EXPORT_ROWS + 1,
+            universe=request.universe,
+            keyword=request.keyword,
+            industry=request.industry,
+            concept=request.concept,
+        )
+    except RunNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        ) from e
+    except NotSelectorRunError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        ) from e
+
+    # 5. 上限校验
+    if len(result_page.items) > MAX_EXPORT_ROWS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"导出行数 {len(result_page.items)} 超过上限 {MAX_EXPORT_ROWS}，"
+                "请缩小筛选范围后再导出"
+            ),
+        )
+
+    # 6. 提取行数据（按 visible_columns 顺序）
+    data_rows = []
+    for row in result_page.items:
+        instrument_symbol = row.instrument.symbol if row.instrument else None
+        instrument_name = row.instrument.name if row.instrument else None
+        instrument_market = row.instrument.market if row.instrument else None
+        payload = row.result.payload if row.result is not None else None
+        data_rows.append(
+            extract_row_data(
+                instrument_symbol=instrument_symbol,
+                instrument_name=instrument_name,
+                instrument_market=instrument_market,
+                payload=payload,
+                columns=request.visible_columns,
+            )
+        )
+
+    # 7. 生成 .xlsx bytes（内存流，不写永久目录）
+    xlsx_bytes = generate_xlsx(request.visible_columns, data_rows)
+
+    # 8. 构造文件名：盘迹_DSA_YYYYMMDD_筛选结果.xlsx
+    trade_date = result_page.trade_date or date.today()
+    filename = f"盘迹_DSA_{trade_date.strftime('%Y%m%d')}_筛选结果.xlsx"
+    # RFC 5987 编码文件名（支持中文）
+    from urllib.parse import quote
+    quoted_filename = quote(filename, safe="")
+
+    return Response(
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename*=UTF-8''{quoted_filename}"
+            ),
+            "Content-Length": str(len(xlsx_bytes)),
+            "X-Source-Total": str(result_page.source_total),
+            "X-Universe-Total": str(result_page.universe_total),
+            "X-Filtered-Total": str(result_page.filtered_total),
+            "X-Export-Rows": str(len(data_rows)),
+        },
+    )
 
 
 if __name__ == "__main__":

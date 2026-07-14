@@ -622,6 +622,11 @@ V1.10 位置语义说明：
 | `freshness_seconds` | float | 相对 `update_time` 的新鲜度（秒） |
 | `degraded` | bool | 是否降级 |
 | `degraded_reason` | string \| null | 降级原因 |
+| `total_market_cap` | float \| null | 总市值（元）；数据缺失时为 `null`，前端显示 `--`（CHANGE-20260713-010） |
+| `float_market_cap` | float \| null | 流通市值（元）；数据缺失时为 `null` |
+| `market_cap_as_of` | string (YYYY-MM-DD) \| null | 股本数据日期（`instruments.share_as_of`），与价格同日 |
+| `market_cap_source` | `"instrument_share_capital_sync" \| null` | 市值数据来源 |
+| `market_cap_degraded_reason` | string \| null | 降级原因；缺失时为 `"market_cap_data_unavailable"` |
 
 行为规则：
 
@@ -631,6 +636,7 @@ V1.10 位置语义说明：
 - 交易时段 pytdx 失败 → `source="daily_fallback"`、`is_realtime=false`、`degraded=true`，`degraded_reason` 记录 pytdx 失败原因。
 - 无 pytdx 数据且无 DB fallback 数据 → 返回 404。
 - Redis 短缓存（10s TTL）用于削峰，缓存命中时直接返回缓存的 pytdx 结果。
+- **市值字段（CHANGE-20260713-010）**：`total_market_cap`/`float_market_cap` 由 `Instrument.total_share`/`float_share` 与当前价格相乘计算；股本数据来自 `InstrumentShareCapitalSyncService.sync_share_capitals`（每日 18:00 通过 `pytdx.get_finance_info` 同步 SH/SZ 标的，BJ 跳过；写 `share_as_of=trade_date`）；价格与股本必须同一 `as_of`；股本缺失时所有 market_cap 字段为 `null`，`market_cap_degraded_reason="market_cap_data_unavailable"`；**禁止用户请求时访问第三方**；前端 `formatMarketCap` 区分万/亿/万亿元，空值显示 `--`；不可把两个永久 `--` 当作完成（必须 `BLOCKED: MARKET_CAP_SOURCE_UNAVAILABLE`）。
 
 ### 12.2 `/api/v1/instruments/{instrument_id}/bars` 数据源诊断
 
@@ -1069,4 +1075,59 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 - `idempotency_key` 格式：`symbol:source_run_id:algorithm_version`；
 - 旧格式 `symbol:trade_date:algorithm_version:hash(evidence)` 已废弃；
 - 每只股票每个 run 至多生成一个事件（`source_run_id` 维度幂等）。
+
+## 16. Excel 导出 API 契约（CHANGE-20260713-010）
+
+### 16.1 端点
+
+`POST /api/v1/strategy-runs/{run_id}/results/export`
+
+权限：`require_active_subscription` + `require_feature("trend_selection")`（admin 豁免），与 `/strategy-runs/{run_id}/results` 一致。
+
+请求体：`ExportRequest`
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `universe` | `Literal["all", "watchlist"]` | 否（默认 `all`） | 股票池范围；`all` = 全市场，`watchlist` = 当前用户自选 |
+| `keyword` | string \| null | 否 | 全文搜索（symbol/name/pinyin_initials 三字段 ILIKE） |
+| `industry` | string \| null | 否 | 行业板块名称 |
+| `concept` | string \| null | 否 | 概念板块名称 |
+| `metric_filters` | array | 否 | 数值筛选（`metric_key`/`operator`/`value`，AND 语义） |
+| `sort_by` | string \| null | 否 | 排序字段（必须在 `filterable`+`sortable` 白名单内） |
+| `sort_desc` | bool | 否 | 是否降序（默认 false） |
+| `visible_columns` | array | 是 | 列定义列表；每项含 `key`/`title`/`data_type`/`payload_key` |
+
+`visible_columns` 字段约束：
+
+- `key`：列 key（白名单：`stock`/`change_pct`/`dsa_dir_bars`/`vwap_ret_avg`/`vwap_ret_total`/`offset_mean`/`offset_std`/`offset_percentile`/`dsa_vwap`/`dsa_vwap_dev_pct`/`offset_variance_rate`/`price`）；非白名单返回 422。
+- `title`：列标题（用于表头单元格）。
+- `data_type`：`text`/`number`/`percent`；决定 Excel 单元格类型与 numFmt（`percent` 使用 `0.00%`）。
+- `payload_key`：从 `StrategyResult.payload` 取值的 key；`stock` 列必须为 `null`（不导出操作列）。
+
+### 16.2 响应
+
+响应体：`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`（MIME）；响应头：
+
+| 响应头 | 说明 |
+|---|---|
+| `Content-Type` | `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` |
+| `Content-Disposition` | `attachment; filename*=UTF-8''<percent-encoded 盘迹_DSA_YYYYMMDD_筛选结果.xlsx>`（RFC 5987） |
+| `X-Source-Total` | published run 原始总量（不受筛选影响，恒等于 `run.total_instruments`） |
+| `X-Universe-Total` | all/watchlist 范围总量（业务筛选前） |
+| `X-Filtered-Total` | keyword+industry+concept+metric_filters 后总量 |
+| `X-Export-Rows` | 实际导出行数 = `filtered_total` |
+
+### 16.3 行为规则
+
+- 复用 `query_published_selector_results` 的同一筛选/排序构造器，禁止复制查询逻辑；
+- 导出完整筛选结果（不是当前页），上限 `MAX_EXPORT_ROWS=10000`；超过返回 422；
+- 真实 `.xlsx`（标准库 `zipfile`+`xml.etree`，OOXML 格式），禁止 `openpyxl`/`xlsxwriter` 依赖，禁止 CSV 改扩展名；
+- 数值字段写入数值单元格（非文本），`percent` 类型使用 `numFmt 0.00%`；
+- **公式注入防护**：以 `=`/`+`/`-`/`@` 开头的文本单元格自动前缀单引号 `'`（不显示在 Excel 显示但保留在共享字符串表）；
+- 内存或 `SpooledTemporaryFile`，响应后释放，不落永久文件；
+- `stock` 列渲染 `"名称(代码)"` 格式（如 `贵州茅台(600519)`），`payload_key=null`；
+- `source_total`/`universe_total`/`filtered_total`/`export_rows` 四层语义与 `/strategy-runs/{run_id}/results` 一致；
+- SQL 数量固定，禁止 N+1（与 `query_published_selector_results` 同一构造器）；
+- 仅允许公共 DSA 列白名单，禁止任意 payload key 透传到列定义；
+- 操作列（`action`）不导出。
 

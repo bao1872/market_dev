@@ -206,13 +206,28 @@ test('action 列 onToggleWatchlist 模式下 title 动态为"自选"', () => {
   )
 })
 
-// ===== 12. onNavigateToStock 链接使用 <a> 标签 + preventDefault =====
-test('股票名称链接使用 <a> 标签并 preventDefault 避免页面跳转', () => {
+// ===== 12. CHANGE-20260713-010: onNavigateToStock 使用 button 语义 + stopPropagation + aria-label =====
+test('股票名称使用 button 语义、stopPropagation 防止行选中、aria-label 无障碍访问', () => {
   const src = readSource(COLUMNS_PATH)
-  // 验证 renderStock 函数中使用 <a 标签
+  // 验证 renderStock 函数中使用 <button 标签（非 <a href="#">）
   assert.ok(
-    src.includes('e.preventDefault()'),
-    '股票名称链接必须调用 e.preventDefault() 防止默认页面跳转',
+    src.includes('<button') && src.includes('type="button"'),
+    '股票名称必须使用 <button type="button"> 提供明确视觉入口（CHANGE-010）',
+  )
+  // 不再使用 href="#" 假链接
+  assert.ok(
+    !src.includes('href="#"'),
+    '股票名称不得使用 href="#" 假链接（CHANGE-010 改用 button 语义）',
+  )
+  // 必须调用 e.stopPropagation() 防止冒泡触发行选择
+  assert.ok(
+    src.includes('e.stopPropagation()'),
+    '股票名称按钮必须调用 e.stopPropagation() 防止冒泡到行选择',
+  )
+  // 必须提供 aria-label 无障碍标签
+  assert.ok(
+    src.includes('aria-label'),
+    '股票名称按钮必须提供 aria-label 无障碍标签',
   )
 })
 

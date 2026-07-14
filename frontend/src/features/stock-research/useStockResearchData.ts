@@ -24,6 +24,7 @@ export interface StockResearchDataParams {
 }
 
 // 行情摘要 ViewModel（供 StockDetailPage 价格条和 StockResearchWorkspace 状态条共用）
+// CHANGE-20260713-010: 新增 totalMarketCap/floatMarketCap/marketCapAsOf
 export interface PriceSummary {
   currentPrice: number | null
   openPrice: number | null
@@ -32,6 +33,9 @@ export interface PriceSummary {
   amountValue: number | null
   changePercent: number | null
   isUp: boolean
+  totalMarketCap: number | null
+  floatMarketCap: number | null
+  marketCapAsOf: string | null
 }
 
 // 行情状态标签（统一 /market 和 /stock 的状态文案）
@@ -120,6 +124,10 @@ export function useStockResearchData({ symbol, timeframe }: StockResearchDataPar
     ? ((lastBar.close - prevBar.close) / prevBar.close * 100)
     : null)
   const isUp = changePercent !== null ? changePercent >= 0 : true
+  // CHANGE-20260713-010: 市值字段来自 quote（DB 无股本数据时为 null）
+  const totalMarketCap = quote?.total_market_cap ?? null
+  const floatMarketCap = quote?.float_market_cap ?? null
+  const marketCapAsOf = quote?.market_cap_as_of ?? null
 
   const priceSummary: PriceSummary = useMemo(() => ({
     currentPrice,
@@ -129,7 +137,10 @@ export function useStockResearchData({ symbol, timeframe }: StockResearchDataPar
     amountValue,
     changePercent,
     isUp,
-  }), [currentPrice, openPrice, highPrice, lowPrice, amountValue, changePercent, isUp])
+    totalMarketCap,
+    floatMarketCap,
+    marketCapAsOf,
+  }), [currentPrice, openPrice, highPrice, lowPrice, amountValue, changePercent, isUp, totalMarketCap, floatMarketCap, marketCapAsOf])
 
   // 6. 行情状态标签（非实时非降级时统一显示"行情回退"，禁止所有非 1d 周期显示"日线回退"）
   const quoteStatus: QuoteStatus = useMemo(() => {

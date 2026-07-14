@@ -15,7 +15,7 @@
 
 | 表 | 语义 |
 |---|---|
-| `instruments` | 股票主数据 |
+| `instruments` | 股票主数据；**市值字段（CHANGE-20260713-010，migration 063）**：新增 `total_share`（BIGINT NULL，总股本，单位：股）、`float_share`（BIGINT NULL，流通股本，单位：股）、`share_as_of`（DATE NULL，股本数据日期，与 `total_share`/`float_share` 同步写入）；每日 18:00（Asia/Shanghai）由 `instrument_share_capital_sync_service.sync_share_capitals` 通过 `pytdx.get_finance_info` 同步 SH/SZ 股本（BJ 跳过），批次 500，`asyncio.to_thread` 包装阻塞调用；只保留最新态不做历史回填；quote 端点从 DB 读取股本 + 当前价格计算 `total_market_cap`/`float_market_cap`，禁止用户请求时第三方联网；数据缺失返回 `market_cap_degraded_reason="market_cap_data_unavailable"` 不伪造 |
 | `trading_calendar` | 交易日和开闭市 |
 | `bars_daily`, `bars_15min`, `bars_60min`, `bars_minute` | 已完成正式 Bar |
 | `market_boards` | qstock 板块目录（行业/概念），只存最新态；字段：`id`/`external_code`/`name`/`type`/`updated_at`；唯一约束 `uq_market_boards_code_type (external_code, type)`；索引 `ix_market_boards_type`；migration 062 |

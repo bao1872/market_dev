@@ -36,6 +36,9 @@ export interface DataTableColumn<Row> {
   helpText?: string
   // [StrategyDataTable] - 描述: 表头缩写（显示用），title 保留完整描述用于 tooltip；缺省时回退到 title
   shortTitle?: string
+  // CHANGE-20260713-010: 列头筛选别名（如 'keyword'），与顶部搜索共用唯一真源
+  // 设置后列头筛选读写 externalKeyword/onKeywordChange，不进入 filters state
+  filterAlias?: 'keyword'
 }
 
 export interface DataTableFilter {
@@ -110,6 +113,19 @@ export interface DataTableProps<Row> {
     conceptNames: Set<string>
   } | null
   onPresetStaleField?: (field: 'industry' | 'concept', value: string) => void
+  // CHANGE-20260713-010: 导出 Excel 回调（提供时显示"导出 Excel"按钮）
+  onExport?: (ctx: ExportContext) => void
+}
+
+// CHANGE-20260713-010: 导出上下文（StrategyDataTable → 外部）
+export interface ExportContext {
+  visibleColumns: DataTableColumn<unknown>[]
+  keyword: string
+  industry: string
+  concept: string
+  metricFilters: DataTableFilter[]
+  sortBy: string | null
+  sortDesc: boolean
 }
 
 // [StrategyDataTable] - 描述: 按字段类型返回可选操作符列表（默认操作符为数组首项）
@@ -319,6 +335,62 @@ function FilterPopover({
   )
 }
 
+// CHANGE-20260713-010: keyword alias 筛选弹窗（与顶部搜索共用唯一 keyword 真源）
+function KeywordFilterPopover({
+  anchor,
+  value,
+  onApply,
+  onClear,
+  onClose,
+}: {
+  anchor: HTMLElement
+  value: string
+  onApply: (v: string) => void
+  onClear: () => void
+  onClose: () => void
+}) {
+  const [localValue, setLocalValue] = useState(value)
+
+  const rect = anchor.getBoundingClientRect()
+  const left = Math.min(window.innerWidth - 250, Math.max(8, rect.left - 150))
+  const top = Math.max(8, Math.min(window.innerHeight - 180, rect.bottom + 6))
+
+  useEffect(() => {
+    const close = (e: MouseEvent) => {
+      const pop = document.querySelector('.column-filter-popover.keyword-popover')
+      if (pop && !pop.contains(e.target as Node) && e.target !== anchor) {
+        onClose()
+      }
+    }
+    setTimeout(() => document.addEventListener('mousedown', close), 0)
+    return () => document.removeEventListener('mousedown', close)
+  }, [anchor, onClose])
+
+  return (
+    <div className="column-filter-popover keyword-popover" style={{ left, top }}>
+      <div className="filter-pop-title">筛选：股票</div>
+      <input
+        className="input filter-value"
+        placeholder="搜索代码/名称/拼音"
+        value={localValue}
+        onChange={(e) => setLocalValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') onApply(localValue.trim())
+        }}
+        autoFocus
+      />
+      <div className="filter-pop-actions">
+        <button className="btn small filter-clear" onClick={onClear}>
+          清除
+        </button>
+        <button className="btn small primary filter-apply" onClick={() => onApply(localValue.trim())}>
+          应用
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // 列设置弹窗（支持显示/隐藏 + 上下调整顺序）
 function ColumnManager({
   columns,
@@ -429,6 +501,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     onConceptChange,
     boardsValidation,
     onPresetStaleField,
+    onExport,
   } = props
 
   const [searchParams, setSearchParams] = useSearchParams()
@@ -448,6 +521,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
   const [filterPopover, setFilterPopover] = useState<{
     columnIndex: number
     anchor: HTMLElement
+    isKeyword?: boolean
   } | null>(null)
   const [columnManagerAnchor, setColumnManagerAnchor] = useState<HTMLElement | null>(null)
 
@@ -947,6 +1021,28 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
           >
             清除排序与筛选
           </button>
+          {onExport && (
+            <button
+              className="btn small secondary export-btn"
+              disabled={!activeRunId}
+              onClick={() => {
+                const exportableColumns = visibleColumns
+                  .filter(({ col }) => !col.isAction && !col.isSelect)
+                  .map(({ col }) => col as DataTableColumn<unknown>)
+                onExport({
+                  visibleColumns: exportableColumns,
+                  keyword: effectiveKeyword,
+                  industry: externalIndustry ?? '',
+                  concept: externalConcept ?? '',
+                  metricFilters: Object.values(filters),
+                  sortBy: sortColumn !== null ? columns[sortColumn]?.key ?? null : null,
+                  sortDesc: sortDirection === 'desc',
+                })
+              }}
+            >
+              导出 Excel
+            </button>
+          )}
         </div>
       </div>
 
@@ -1057,11 +1153,21 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
                     )}
                     {col.filterable && (
                       <button
-                        className={clsx('th-filter', filters[i] && 'active')}
+                        className={clsx(
+                          'th-filter',
+                          // CHANGE-20260713-010: filterAlias='keyword' 时激活状态基于 effectiveKeyword
+                          col.filterAlias === 'keyword'
+                            ? (effectiveKeyword && 'active')
+                            : (filters[i] && 'active'),
+                        )}
                         aria-label={`筛选${col.title}`}
                         title={`筛选${col.title}`}
                         onClick={(e) =>
-                          setFilterPopover({ columnIndex: i, anchor: e.currentTarget })
+                          setFilterPopover({
+                            columnIndex: i,
+                            anchor: e.currentTarget,
+                            isKeyword: col.filterAlias === 'keyword',
+                          })
                         }
                       >
                         ⌁
@@ -1192,7 +1298,26 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
       </div>
 
       {/* 筛选弹窗 */}
-      {filterPopover && (
+      {filterPopover && filterPopover.isKeyword && (
+        <KeywordFilterPopover
+          anchor={filterPopover.anchor}
+          value={effectiveKeyword}
+          onApply={(v) => {
+            setGlobalQuery(v)
+            if (onKeywordChange) onKeywordChange(v)
+            setPage(1)
+            setFilterPopover(null)
+          }}
+          onClear={() => {
+            setGlobalQuery('')
+            if (onKeywordChange) onKeywordChange('')
+            setPage(1)
+            setFilterPopover(null)
+          }}
+          onClose={() => setFilterPopover(null)}
+        />
+      )}
+      {filterPopover && !filterPopover.isKeyword && (
         <FilterPopover
           column={columns[filterPopover.columnIndex] as DataTableColumn<unknown>}
           current={filters[filterPopover.columnIndex]}

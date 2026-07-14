@@ -201,6 +201,7 @@ async def _build_daily_fallback_quote(
     as_of = _daily_fallback_as_of(latest.trade_date)
     update_time = as_of.isoformat()
 
+    market_cap_fields = _compute_market_cap_fields(instrument, current_price)
     return {
         "instrument_id": instrument.id,
         "symbol": instrument.symbol,
@@ -219,7 +220,48 @@ async def _build_daily_fallback_quote(
         "freshness_seconds": _quote_freshness_seconds(update_time),
         "degraded": False,
         "degraded_reason": None,
+        "amount": float(latest.amount) if latest.amount else None,
+        **market_cap_fields,
     }, None
+
+
+def _compute_market_cap_fields(
+    instrument,
+    current_price: float | None,
+) -> dict[str, Any]:
+    """从 Instrument 的股本字段计算市值（CHANGE-20260713-010）。
+
+    市值 = 股本 × 当前价格；market_cap_as_of = instrument.share_as_of（股本数据日期）。
+    股本数据来自每日同步链（instrument_share_sync_service），不在用户请求时联网。
+    股本或价格缺失时返回 null + degraded_reason。
+
+    Args:
+        instrument: Instrument ORM 对象（含 total_share/float_share/share_as_of）
+        current_price: 当前价格（pytdx 实时价或日线 close）
+
+    Returns:
+        dict with keys: total_market_cap, float_market_cap, market_cap_as_of,
+                        market_cap_source, market_cap_degraded_reason
+    """
+    total_share = instrument.total_share
+    float_share = instrument.float_share
+    if total_share is not None and current_price:
+        total_cap = float(total_share) * float(current_price)
+        float_cap = float(float_share) * float(current_price) if float_share is not None else None
+        return {
+            "total_market_cap": round(total_cap, 2),
+            "float_market_cap": round(float_cap, 2) if float_cap is not None else None,
+            "market_cap_as_of": instrument.share_as_of,
+            "market_cap_source": "instrument_share_capital",
+            "market_cap_degraded_reason": None,
+        }
+    return {
+        "total_market_cap": None,
+        "float_market_cap": None,
+        "market_cap_as_of": None,
+        "market_cap_source": None,
+        "market_cap_degraded_reason": "market_cap_data_unavailable",
+    }
 
 
 def _build_pytdx_quote_response(
@@ -234,11 +276,13 @@ def _build_pytdx_quote_response(
     elif isinstance(update_time, str) and update_time.endswith("+00:00"):
         # 防止被误标为 UTC：替换为 +08:00（pytdx 数据本质为上海时间）
         update_time = update_time[:-6] + "+08:00"
+    current_price = pytdx_quote.get("current_price")
+    market_cap_fields = _compute_market_cap_fields(instrument, current_price)
     return {
         "instrument_id": instrument.id,
         "symbol": instrument.symbol,
         "name": instrument.name,
-        "current_price": pytdx_quote.get("current_price"),
+        "current_price": current_price,
         "open": pytdx_quote.get("open"),
         "high": pytdx_quote.get("high"),
         "low": pytdx_quote.get("low"),
@@ -252,6 +296,8 @@ def _build_pytdx_quote_response(
         "freshness_seconds": _quote_freshness_seconds(update_time) if update_time else 0.0,
         "degraded": False,
         "degraded_reason": None,
+        "amount": None,
+        **market_cap_fields,
     }
 
 

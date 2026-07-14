@@ -16,6 +16,7 @@ import { useParams, useSearchParams, useNavigate, useLocation } from 'react-rout
 import clsx from 'clsx'
 import { EventStatePanel } from '@/features/research-context/EventStatePanel'
 import { StockResearchWorkspace } from '@/features/stock-research/StockResearchWorkspace'
+import { StockQuoteStrip } from '@/features/stock-research/StockQuoteStrip'
 import { useStockResearchData } from '@/features/stock-research/useStockResearchData'
 import { useStockDetailActions } from '@/features/stock-research/useStockDetailActions'
 import { useStockDetailFeishu } from '@/features/stock-research/useStockDetailFeishu'
@@ -25,7 +26,7 @@ import {
   normalizeResearchSource,
 } from '@/features/stock-research/stockResearchTypes'
 import { formatShanghaiTimeShort } from '@/utils/datetime'
-import { MARKET_LABELS, formatAmount } from '@/utils/market'
+import { MARKET_LABELS } from '@/utils/market'
 import { resolveBackPath } from './detailNavigation'
 import { STRATEGY_KEYS } from '@/constants/strategyKeys'
 import { useToast } from '@/store/toast'
@@ -262,35 +263,8 @@ export default function StockDetailPage() {
             <div className="tv-symbol-meta">{metaParts.join(' · ')}</div>
           </div>
         </div>
-        {/* 报价条：现价/涨跌/开盘/最高/最低/成交额 */}
-        <div className="tv-quote-strip">
-          <div>
-            <span>现价</span>
-            <b className={priceSummary.isUp ? 'market-up' : 'market-down'}>{priceSummary.currentPrice !== null ? priceSummary.currentPrice.toFixed(2) : '--'}</b>
-          </div>
-          <div>
-            <span>涨跌</span>
-            <b className={priceSummary.isUp ? 'market-up' : 'market-down'}>
-              {priceSummary.changePercent !== null ? `${priceSummary.isUp ? '+' : ''}${priceSummary.changePercent.toFixed(2)}%` : '--'}
-            </b>
-          </div>
-          <div>
-            <span>开盘</span>
-            <b>{priceSummary.openPrice !== null ? priceSummary.openPrice.toFixed(2) : '--'}</b>
-          </div>
-          <div>
-            <span>最高</span>
-            <b>{priceSummary.highPrice !== null ? priceSummary.highPrice.toFixed(2) : '--'}</b>
-          </div>
-          <div>
-            <span>最低</span>
-            <b>{priceSummary.lowPrice !== null ? priceSummary.lowPrice.toFixed(2) : '--'}</b>
-          </div>
-          <div>
-            <span>成交额</span>
-            <b>{priceSummary.amountValue !== null ? formatAmount(priceSummary.amountValue) : '--'}</b>
-          </div>
-        </div>
+        {/* 报价条：现价/涨跌/开盘/最高/最低/成交额/总市值/流通市值（CHANGE-20260713-010） */}
+        <StockQuoteStrip priceSummary={priceSummary} />
         {/* 操作：加入/移出自选、切换、全屏（截图模式隐藏全部按钮） */}
         {!isCaptureMode && (
           <div className="actions">

@@ -19,9 +19,10 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import Date, DateTime, Index, String, func
+from sqlalchemy import Date, DateTime, Index, Numeric, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models._table_meta import table_indexes
@@ -41,6 +42,15 @@ class Instrument(Base):
     market: Mapped[str] = mapped_column(String(8), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     listing_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # CHANGE-20260713-010: 总股本/流通股本（pytdx get_finance_info zongguben/liutongguben）
+    # 每日同步链更新，用户请求时只从 DB 读取，不调用 pytdx
+    total_share: Mapped[Decimal | None] = mapped_column(
+        Numeric(precision=20, scale=0), nullable=True
+    )
+    float_share: Mapped[Decimal | None] = mapped_column(
+        Numeric(precision=20, scale=0), nullable=True
+    )
+    share_as_of: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

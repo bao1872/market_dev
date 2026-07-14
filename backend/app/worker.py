@@ -755,8 +755,77 @@ async def run_bars_scheduler_worker() -> None:
         max_instances=1,  # 单并发
     )
 
+    # ===== 股本同步 job（pytdx get_finance_info，每日 18:00，独立 job_name/run_key） =====
+    async def scheduled_share_capital_sync() -> None:
+        """定时任务：每日 18:00 同步全市场 SH/SZ 股票总股本/流通股本。
+
+        CHANGE-20260713-010: 用于 quote 端点市值计算。
+        - pytdx get_finance_info 获取 zongguben/liutongguben/updated_date
+        - 写入 instruments 表 total_share/float_share/share_as_of
+        - 独立于 bars_refresh，使用独立 pytdx 连接
+        - 失败只记录 SchedulerJobRun，不影响下次触发
+        """
+        from datetime import date as date_cls
+
+        from app.services.calendar_service import is_trading_day_async
+        from app.services.instrument_share_sync_service import sync_share_capitals
+
+        trade_date = date_cls.today()
+
+        async with AsyncSessionLocal() as session:
+            is_trading = await is_trading_day_async(session, trade_date)
+
+        if not is_trading:
+            logger.info("非交易日 %s，跳过股本同步", trade_date)
+            return
+
+        logger.info("交易日 %s，开始股本同步", trade_date)
+        job_run = None
+        try:
+            async with AsyncSessionLocal() as db:
+                scheduled_at = datetime.combine(
+                    trade_date, time(18, 0), tzinfo=ZoneInfo("Asia/Shanghai")
+                )
+                job_run = await _create_job_run(
+                    db, "share_capital_sync", str(trade_date),
+                    scheduled_at=scheduled_at,
+                    run_key=f"share_capital_sync:{trade_date}",
+                )
+                if job_run is None:
+                    logger.info("share_capital_sync SKIPPED_DUPLICATE business_date=%s", trade_date)
+                    return
+                await db.commit()
+
+            async with AsyncSessionLocal() as db:
+                result = await sync_share_capitals(db)
+
+            logger.info(
+                "股本同步完成: total=%d succeeded=%d failed=%d skipped_bj=%d",
+                result["total"], result["succeeded"], result["failed"], result["skipped_bj"],
+            )
+            if job_run is not None:
+                async with AsyncSessionLocal() as db:
+                    await _finish_job_run(
+                        db, job_run, "succeeded",
+                        success_count=result["succeeded"],
+                        failure_count=result["failed"],
+                    )
+        except Exception as exc:
+            logger.exception("股本同步异常: %s", exc)
+            if job_run is not None:
+                async with AsyncSessionLocal() as db:
+                    await _finish_job_run(db, job_run, "failed", error_message=str(exc)[:500])
+
+    scheduler.add_job(
+        scheduled_share_capital_sync,
+        CronTrigger(day_of_week="mon-sun", hour=18, minute=0, timezone=ZoneInfo("Asia/Shanghai")),
+        id="share_capital_sync_daily",
+        replace_existing=True,
+        max_instances=1,  # 单并发
+    )
+
     scheduler.start()
-    logger.info("Bars Scheduler Worker 启动（16:00 刷新行情 + 17:00 板块同步）")
+    logger.info("Bars Scheduler Worker 启动（16:00 刷新行情 + 17:00 板块同步 + 18:00 股本同步）")
 
     while not _shutdown:
         await asyncio.sleep(60)

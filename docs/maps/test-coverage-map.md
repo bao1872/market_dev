@@ -48,6 +48,8 @@
 | **sticky 表头 viewport 模式**：`StrategyDataTable` 支持 `stickyHeaderMode="viewport"`、ScreenerPage 传入 viewport、global.scss 中 `.table-wrap.viewport-sticky` overflow visible + 表头 top `var(--topbar)` z-index 18 | `frontend/src/components/__tests__/stickyHeader.test.ts`（4 用例） |
 | **P0 列对齐契约（CHANGE-20260713-004）**：`reorderVisibleColumns` 纯函数（`columnOrdering.ts`）— 默认顺序/空 columnOrder/hiddenColumns 过滤/columnOrder 重排/action 列固定末尾/columnOrder 不完整/陈旧 key 忽略/组合/select 列固定末尾/空列/全隐藏（10 用例）；明显不同测试值逐列断言（2 用例）；源码契约 — thead th/tbody td/colgroup col 三者从 visibleColumns.map 派生、td 按 col.key 取值、td/th/colgroup key 使用 col.key、action 列 isAction 标记、selectable 列固定 id、colSpan 使用 visibleColumns.length、min-width 使用 visibleColumnsWidthSum（9 用例）；columnOrder 持久化 — state 存在/saveColumnOrder 持久化/onMoveUp/onMoveDown 交换/onReset 清除/currentConfig 包含/applyPresetConfig 应用（6 用例）；onRowClick/activeRowKey props（2 用例） | `frontend/src/components/__tests__/columnAlignment.test.ts`（31 用例） |
 | 生产验证：run_id=f0c15e1c, source_total=5293, succeeded 行 35 个 DSA 指标正确显示，skipped 行显示股票但指标为空（JOIN 改用 `(run_id, instrument_id)` 绕过 result_id 未回填问题，ALIGN-032 CLOSED, ALIGN-033 P2） | 生产 API + DB 只读核对（CHANGE-20260704-029） |
+| **Excel 导出 API 集成（CHANGE-20260713-010）**：权限矩阵（401/403/200）、published run only、all/watchlist universe、keyword/industry/concept/metric_filters 筛选、sort_by/sort_desc 排序、行数=`filtered_total`（非当前页）、列白名单（仅公共 DSA 列）、列顺序（visibleColumnKeys/columnOrder）、stock 列 `payload_key=null`（不导出操作列）、公式注入防护（`=+-@` 前缀加单引号）、MAX_EXPORT_ROWS=10000 超限 422、MIME `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`、Content-Disposition RFC 5987、X-Source-Total/X-Universe-Total/X-Filtered-Total/X-Export-Rows 四层语义响应头、SpooledTemporaryFile 内存释放不落永久文件、admin 豁免、无 N+1（`len(items) <= filtered_total`） | `backend/tests/test_excel_export_api.py`（21 用例） |
+| **Excel 导出 Service 单元（CHANGE-20260713-010）**：`generate_xlsx` 使用标准库 `zipfile + XML`（OOXML），禁止 openpyxl/xlsxwriter；数值单元格为数值类型、比例字段为百分比格式；`_sanitize_formula_injection` 处理 `=+-@` 前缀；`extract_row_data` 按列定义读取 payload；`MAX_EXPORT_ROWS=10000` 常量；空结果生成有效 xlsx（仅表头） | `backend/tests/test_excel_export_service.py`（9 用例） |
 
 ## 3. 行情聚合
 
@@ -69,6 +71,8 @@
 | K线实时契约（blocking）：交易时段 1d partial、收盘后 non-partial、`/quote` +08:00、前端 bars 状态展示、不可信 quote 不混入 K 线 | `test_market_data_aggregation_partial_daily.py`, `test_quote_timezone.py`, `test_quote_trustworthy.py`, `frontend/src/utils/__tests__/chart.test.ts` |
 | 后端已返回 1d partial bar 时前端不得用 quote 覆盖；后端未返回 partial bar 时 quote 可兜底追加 | `frontend/src/utils/__tests__/chart.test.ts` |
 | **BarRepository.get_recent_bars**：按 instrument/timeframe 查询最近 N 根 bar；空表/不足/边界/多 instrument 隔离/时间排序/limit 截断/字段完整 | `test_bar_repository_get_recent_bars.py`（8 个用例） |
+| **个股详情市值字段（CHANGE-20260713-010）**：`/quote` 返回 `total_market_cap`/`float_market_cap`/`market_cap_as_of`/`market_cap_source`/`market_cap_degraded_reason`；价格与股本必须同一 `share_as_of`；股本缺失时 `degraded_reason="market_cap_data_unavailable"` 不伪造；quote 端点不发起第三方联网，从 `instruments.total_share`/`float_share`/`share_as_of` 读取并按当前价格计算 | `test_share_capital.py`（14 用例：migration upgrade/downgrade、字段 nullable、sync_share_capitals 成功/失败/BJ 跳过、quote 端点 market_cap 计算 + 数据缺失降级、单位校验）+ 84 项无截图 E2E 已 PASS |
+| **股本每日同步（CHANGE-20260713-010）**：`instrument_share_capital_sync_service.sync_share_capitals` 通过 `pytdx.get_finance_info` 同步 SH/SZ 股本（BJ 跳过）；批次 500；`asyncio.to_thread` 包装阻塞调用；写 `share_as_of=trade_date`；幂等 upsert；只保留最新态不做历史回填；18:00 触发；失败保留旧值（不更新失败 symbol） | `test_share_capital.py`（14 用例，含失败保留旧值断言）+ 84 项无截图 E2E 已 PASS |
 
 ## 3.5 自选股监控
 
@@ -233,6 +237,7 @@
 | Indicator overlay alignment：PR #33 前端硬编码清理 — `shouldRenderDsaLayer` / `shouldRenderBbLayer` / `shouldToggleDsa` / `shouldIncludeDsaInPriceRange` 全周期决策（不再 `timeframe !== '1d'` skip / `1w \|\| 1mo` skip / `timeframe === '1d'` y-axis 限制） | `frontend/src/components/__tests__/dsaSourceAlignment.test.ts`（PR #33 新增第 5 节，10 个 overlay 渲染/toggle/y-axis 决策测试覆盖全周期 + capture 锁定 + source mismatch 保护） |
 | DSA visual_segments time alignment：PR #34 后端 `format_dsa_time` 按 timeframe 序列化（15m/1h 含 `THH:MM:SS`，1d/1w/1mo 为 `YYYY-MM-DD`）；`compute_dsa_bundle` 15m `visual_segments.points.time` / `anchor.time` 含 `HH:MM`；`DSASelector.compute_indicators` 15m `time` / `visual_segments.points.time` 含 `HH:MM`；1d 仍为 `YYYY-MM-DD`；15m segment times 与 source_bar_times canonical 匹配率 > 0.5 | `backend/tests/test_dsa_visual_segments_time_format.py`（PR #34 新增，9 个测试覆盖 15m/1d 时间格式 + canonical 对齐） |
 | DSA visual_segments matched ratio contract：PR #34 前端 `computeDsaSegmentMatchStats(segments, displayTimes, timeframe)` 计算 segment points 经 `normalizeChartTime` 后与 K线 `displayTimes` canonical key 的匹配率；15m/1h 含 `THH:MM` 时 `ratio > 0.5`；旧 YYYY-MM-DD 在 15m 下 `matched=0` / `degradedReason='segment_time_no_match'`；空 segments `degradedReason='no_segments'`；多 segment 累计 matched | `frontend/src/components/__tests__/dsaSourceAlignment.test.ts`（PR #34 新增第 6 节，7 个 segment matched contract 测试覆盖 15m/1h/1d/empty/多 segment 累计） |
+| **CHANGE-010 前端源码契约（CHANGE-20260713-010）**：49 项断言覆盖五大主题——（1）StockQuoteStrip：8 项指标布局、`formatMarketCap` 万/亿/万亿元格式化、空值显示 `--`、`QuoteMetric` 子组件；（2）MiniKlineCard：lightweight-charts v4 createChart + addCandlestickSeries、`useMiniKlineData` BARS_COUNT {1d:80,1w:60,1mo:48}、`refetchInterval:false`、chart 实例 `useEffect []`、ResizeObserver 卸载清理 `disconnect()`+`chart.remove()`+ref 清空、timeframe 独立于 symbol；（3）MarketRightPanel：组合 `MiniKlineCard` 顶部 + `EventStatePanel` 底部、收起时 0 请求、展开只请求活动周期不预取三周期；（4）filterAlias：`DataTableColumn.filterAlias?:'keyword'`、stock 列 `filterAlias='keyword'`+`filterable=true`、`KeywordFilterPopover` 双向同步、`isKeyword` flag 不进入 `filters` state、URL sync `replace:true`+`skipNextUrlSyncRef`、stock 列不进入 `metric_filters`；（5）Excel 导出：`ExportContext` 暴露 `handleExport`、`convertFiltersToMetricFilters` 与 `buildStrategyResultQueryParams` 同源、`POST /strategy-runs/{run_id}/results/export`、下载真实 .xlsx（MIME `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`）、stock 列 `payload_key=null`（不导出操作列） | `frontend/src/features/market-workspace/__tests__/change010Contract.test.ts`（49 用例） |
 
 
 ## 6. 文档和工程治理
@@ -262,4 +267,8 @@
 | `test_market_stocks.py` | 现有用例 | /market/stocks + /market/boards available/reason_code |
 | `test_stock_state_and_events.py` | 现有用例 | 个股状态与事件 |
 | `test_after_close_orchestrator.py` | 现有用例 | 盘后编排状态机 + feature_snapshot 步骤 |
+| `test_excel_export_api.py` | 21 tests | Excel 导出 API 集成（CHANGE-20260713-010） |
+| `test_excel_export_service.py` | 9 tests | Excel 导出 Service 单元（CHANGE-20260713-010） |
+| `test_share_capital.py` | 14 tests | 股本同步 + migration 063 + quote 市值计算（CHANGE-20260713-010） |
 | 前端 node 测试 | 108 tests | 64 route/url/types + 44 contract |
+| `change010Contract.test.ts` | 49 tests | CHANGE-010 前端源码契约（市值/MiniKline/MarketRightPanel/filterAlias/Excel） |

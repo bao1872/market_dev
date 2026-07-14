@@ -1104,6 +1104,26 @@ node --experimental-strip-types --test \
   src/components/__tests__/chartRightPadding.test.ts
 ```
 
+## 3.12 CHANGE-010 回归（blocking，市值 + Excel 导出 + 小 K 线 + 股票名称筛选）
+
+```bash
+APP_ENV=test TEST_DATABASE_URL=postgresql+asyncpg://bz:bz@localhost:5433/bz_stock_test \
+  pytest backend/tests/test_excel_export_api.py backend/tests/test_excel_export_service.py -q
+
+node --experimental-strip-types --test \
+  src/features/market-workspace/__tests__/change010Contract.test.ts
+```
+
+覆盖规则：
+
+- **市值字段（CHANGE-20260713-010）**：后端 `QuoteResponse` 含 `total_market_cap`/`float_market_cap`/`market_cap_as_of`/`market_cap_source`/`market_cap_degraded_reason` 5 个字段；数据缺失时返回 `market_cap_degraded_reason="market_cap_data_unavailable"` 不伪造；前端 `QuoteResponse` 类型含 5 个可选字段，`PriceSummary` 接口含 `totalMarketCap`/`floatMarketCap`/`marketCapAsOf`；`StockQuoteStrip` 暴露 `formatMarketCap`（区分万/亿/万亿元，空值显示 `--`）+ `QuoteMetric` 子组件；tooltip 显示数据日期。
+- **Excel 导出**：`ExportRequest` schema 含 universe/keyword/industry/concept/metric_filters/sort_by/sort_desc/visible_columns；`excel_export_service` 含 `MAX_EXPORT_ROWS=10000`、`_sanitize_formula_injection`、`zipfile` 生成真实 .xlsx、`numFmt` 百分比格式、禁止 `openpyxl`/`xlsxwriter` import；`strategy_runs` API 含 `POST /strategy-runs/{run_id}/results/export` 端点、`X-Source-Total`/`X-Universe-Total`/`X-Filtered-Total` 响应头、文件名 `盘迹_DSA_YYYYMMDD_筛选结果.xlsx` + RFC 5987 编码、超 10000 行 422；前端 `ExportContext` 类型 + `MarketWorkspacePage.handleExport` 复用 `convertFiltersToMetricFilters`（与 `buildStrategyResultQueryParams` 同源）、`stock` 列 `payload_key=null` 不导出操作列；后端 API 集成测试 21 项覆盖权限（401 未登录/403 无订阅/403 过期/200 admin/200 active member）+ published run 校验（404 不存在/404 未发布）+ universe all/watchlist + keyword/industry/concept/metric_filters/sort 筛选 + 行数 = `filtered_total` + visible_columns 列顺序 + 非法 sort_by 422 + 公式注入防护 + 10000 上限 422 + MIME/Content-Disposition + 无 N+1 + 文件 zip 完整性/XML 解析/workbook 关系/单元格类型。
+- **股票名称筛选 alias**：`DataTableColumn.filterAlias?: 'keyword'` 字段；`StrategyDataTable` 含 `KeywordFilterPopover` 组件 + `isKeyword` flag + `effectiveKeyword`；`stock` 列设置 `filterAlias: 'keyword'`（与顶部搜索共用唯一真源）。
+- **小 K 线**：`useMiniKlineData` 定义 `BARS_COUNT` = `{1d: 80, 1w: 60, 1mo: 48}` + `refetchInterval: false`；`MiniKlineCard` 使用 `lightweight-charts createChart` + `CandlestickSeries` + 三按钮"日线/周线/月线" + 默认 `1d`；不引入 `addVolumeSeries`/`VolumeSeries`/指标/Node/事件依赖；`MarketRightPanel` 组合 `MiniKlineCard` + `EventStatePanel`。
+- **详情来源上下文不回归**：`MarketWorkspacePage.handleExport` 复用 `convertFiltersToMetricFilters`；`marketWorkspaceUrlState` 导出 `convertFiltersToMetricFilters` 并复用 `normalizeMetricValue`。
+
+`change010Contract.test.ts` 49 项源码契约测试覆盖五大主题（市值字段映射 + Excel 导出契约 + 股票名称视觉入口 + 小 K 线 + 详情来源上下文）。
+
 ## 4. CI 门禁
 
 阻断项：

@@ -11,7 +11,7 @@
 import { useState, useCallback, useMemo, useRef } from 'react'
 import { useSearchParams, useNavigate, useLocation } from 'react-router-dom'
 import { MarketToolbar } from './MarketToolbar'
-import { EventStatePanel } from '@/features/research-context/EventStatePanel'
+import { MarketRightPanel } from './MarketRightPanel'
 import { StrategyDataTable } from '@/components/StrategyDataTable'
 import type { DataTableColumn, DataTableQuery } from '@/components/StrategyDataTable'
 import {
@@ -24,6 +24,7 @@ import {
 } from '@/hooks/useApi'
 import { useAuthStore } from '@/store/auth'
 import { useToast } from '@/store/toast'
+import { apiClient } from '@/api/client'
 import type { StrategyResultQueryParams } from '@/api/endpoints'
 import {
   adaptStrategyResultToTrendRow,
@@ -31,10 +32,12 @@ import {
   getStockDisplay,
   type TrendSelectionRow,
 } from '@/features/trend-selection'
+import type { ExportContext } from '@/components/StrategyDataTable'
 import {
   decodeMarketWorkspaceUrl,
   changeMarketScope,
   buildStrategyResultQueryParams,
+  convertFiltersToMetricFilters,
   type MarketScope,
   type MarketListContext,
 } from './marketWorkspaceUrlState'
@@ -125,6 +128,83 @@ export default function MarketWorkspacePage() {
   const runs = runsQuery.data?.items ?? []
   const activeRunId = runs[0]?.id || ''
   const activeRun = runs[0]
+
+  // CHANGE-20260713-010: 导出 Excel（POST /strategy-runs/{run_id}/results/export）
+  // 必须导出当前完整筛选结果（filtered_total），不是当前页；通过 ExportContext 收集可见列与查询状态。
+  // 复用 convertFiltersToMetricFilters 与 buildStrategyResultQueryParams 同口径转换，避免第二套筛选逻辑。
+  const handleExport = useCallback(
+    async (ctx: ExportContext) => {
+      if (!activeRunId) {
+        toast.show('无可导出的批次', '请先选择已发布的运行批次')
+        return
+      }
+      try {
+        const visibleColumns = ctx.visibleColumns.map((col) => ({
+          key: col.key,
+          title: col.title,
+          data_type:
+            col.dataType === 'number' ? 'number' : col.dataType === 'percent' ? 'percent' : 'text',
+          payload_key: col.key === 'stock' ? null : col.key,
+        }))
+        const metricFilters = convertFiltersToMetricFilters(
+          ctx.metricFilters.map((f) => ({
+            key: f.key,
+            operator: f.operator,
+            value: f.value,
+            value2: f.value2,
+          })),
+        )
+        const body = {
+          universe: scope === 'watchlist' ? 'watchlist' : 'all',
+          keyword: ctx.keyword || null,
+          industry: ctx.industry || null,
+          concept: ctx.concept || null,
+          metric_filters: metricFilters.length > 0 ? metricFilters : null,
+          sort_by: ctx.sortBy,
+          sort_desc: ctx.sortDesc,
+          visible_columns: visibleColumns,
+        }
+        const resp = await apiClient.post(
+          `/api/strategy-runs/${activeRunId}/results/export`,
+          body,
+          { responseType: 'blob' },
+        )
+        const contentDisp = resp.headers['content-disposition'] || ''
+        let filename = '导出结果.xlsx'
+        const match = contentDisp.match(/filename\*=UTF-8''([^;]+)/)
+        if (match) {
+          filename = decodeURIComponent(match[1])
+        }
+        const blob = new Blob([resp.data], {
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = filename
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+      } catch (err: unknown) {
+        const e = err as { response?: { status?: number; data?: Blob | unknown }; message?: string }
+        if (e.response?.status === 422) {
+          const detailText = e.response.data instanceof Blob
+            ? await e.response.data.text()
+            : JSON.stringify(e.response.data)
+          try {
+            const parsed = JSON.parse(detailText)
+            toast.show('导出失败', parsed.detail || '筛选结果超过 10000 行上限')
+          } catch {
+            toast.show('导出失败', '筛选结果超过 10000 行上限，请缩小范围')
+          }
+        } else {
+          toast.show('导出失败', e.message || '请稍后重试')
+        }
+      }
+    },
+    [activeRunId, scope, toast],
+  )
 
   // 自选列表（页面只请求一次，按 instrument_id 建 Set）
   // watchlist scope 依赖此数据；market scope 也需要判断行是否已自选
@@ -451,9 +531,11 @@ export default function MarketWorkspacePage() {
             // CHANGE-20260713-006: preset 应用时校验失效板块字段并 toast
             boardsValidation={boardsValidation}
             onPresetStaleField={handlePresetStaleField}
+            // CHANGE-20260713-010: 导出 Excel
+            onExport={handleExport}
           />
         </div>
-        {/* 右栏：研究上下文面板（可收起；收起时不挂载、不请求数据） */}
+        {/* 右栏：小 K 线 + 研究上下文面板（可收起；收起时不挂载、不请求数据） */}
         {!rightPanelCollapsed && (
           <aside className={styles.rightPane}>
             <div className={styles.rightPaneHeader}>
@@ -466,15 +548,7 @@ export default function MarketWorkspacePage() {
                 ›
               </button>
             </div>
-            {selectedSymbol && (
-              <EventStatePanel symbol={selectedSymbol} />
-            )}
-            {!selectedSymbol && (
-              <div className={styles.rightPaneEmpty}>
-                <div className={styles.emptyIcon}>◎</div>
-                <div className={styles.emptyText}>单击表格中的股票查看事件与状态</div>
-              </div>
-            )}
+            <MarketRightPanel symbol={selectedSymbol ?? null} />
           </aside>
         )}
         {rightPanelCollapsed && (

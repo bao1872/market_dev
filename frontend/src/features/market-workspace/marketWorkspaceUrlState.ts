@@ -293,3 +293,26 @@ export function buildStrategyResultQueryParams(
   }
   return params
 }
+
+/**
+ * CHANGE-20260713-010: 将列筛选转换为后端 metric_filters 格式（供 Excel 导出复用）。
+ * 与 buildStrategyResultQueryParams 中的转换逻辑完全一致，避免第二套筛选口径。
+ */
+export function convertFiltersToMetricFilters(
+  filters: MarketListFilter[],
+): Array<{ metric_key: string; operator: string; value?: number; value1?: number; value2?: number }> {
+  const supportedOps = new Set(['gt', 'gte', 'lt', 'lte', 'eq', 'between'])
+  return filters
+    .filter((f) => supportedOps.has(f.operator) && f.key !== 'stock' && f.key !== 'action')
+    .map((f) => {
+      const value = normalizeMetricValue(f.key, f.value)
+      if (value === undefined) return null
+      if (f.operator === 'between') {
+        const value2 = normalizeMetricValue(f.key, f.value2)
+        if (value2 === undefined) return null
+        return { metric_key: f.key, operator: f.operator, value1: value, value2 }
+      }
+      return { metric_key: f.key, operator: f.operator, value }
+    })
+    .filter((f): f is NonNullable<typeof f> => f !== null)
+}

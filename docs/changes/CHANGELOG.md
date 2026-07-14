@@ -4,6 +4,15 @@
 
 ## 2026-07-13
 
+- CHANGE-20260713-010: 个股详情市值 + 列表 Excel 导出 + 右栏小 K 线 + 股票名称筛选 alias + 文档修正
+  - 市值：pytdx get_finance_info → 每日 18:00 同步到 DB → quote 端点从 DB 读取计算；migration 063 新增 total_share/float_share/share_as_of
+  - Excel 导出：POST /strategy-runs/{run_id}/results/export + 标准库 OOXML + MAX_EXPORT_ROWS=10000 + 公式注入防护；9 单元 + 21 集成 + 14 share_capital = 44 项目标 pytest
+  - 小 K 线：MiniKlineCard（lightweight-charts v4）+ useMiniKlineData（1d=80/1w=60/1mo=48）+ MarketRightPanel；收起 0 请求，只请求活动周期
+  - filterAlias：stock 列 filterAlias='keyword' 与顶部搜索共用唯一真源；双向同步（onApply/onClear + URL + preset）；stock/action 不入 metric_filters
+  - 文档修正：source_total/universe_total/filtered_total/items 四层语义；删除"source_total 受 universe 影响"旧描述；AGENTS clause 25 preset 增加 industry/concept
+  - 契约测试：change010Contract.test.ts 49 个 + 全仓 contract 319 个通过；mypy 基线 0 项新增 0 项；84 项无截图 E2E PASS
+  - 文档：AGENTS clause 41 + current 02/04 + maps + CHANGE-005/006 修正 + CHANGE-010
+
 - CHANGE-20260713-009: 详情页来源上下文修复（P0）
   - MarketWorkspacePage 根据 scope 传 source/strategy；returnTo 保存完整当前 URL
   - 新增共享纯函数 decodeMarketListContext/buildStrategyResultQueryParams（任意合法 /market URL 都识别为 market context）
@@ -28,7 +37,7 @@
   - 文档：AGENTS/current 00/02/04/05/code-doc-alignment/maps 更新
 
 - CHANGE-20260713-006: /market 行业/概念筛选恢复 + 盘迹品牌视觉 V1.0
-  - 行业/概念筛选恢复：新建 board_filter_helper 共享 EXISTS 条件构造器（market_stocks_service + strategy_result_repository 共用），/strategy-runs/{run_id}/results 增加 industry/concept Query 参数，AND 语义，items/filtered_total/source_total 一致
+  - 行业/概念筛选恢复：新建 board_filter_helper 共享 EXISTS 条件构造器（market_stocks_service + strategy_result_repository 共用），/strategy-runs/{run_id}/results 增加 industry/concept Query 参数，AND 语义，items/filtered_total 一致（source_total 不受筛选影响）
   - preset 持久化：TableViewPresetConfig（后端 Pydantic + 前端 TS）增加 industry/concept 可选字段，白名单同步，不新增表/migration，旧 preset 兼容
   - 前端 URL state：marketWorkspaceUrlState 增加 industry/concept，MarketToolbar 恢复"搜索、行业、概念"同一行布局，boards.available=false 时输入禁用+提示
   - StrategyDataTable 受控 props：externalIndustry/onIndustryChange/externalConcept/onConceptChange，currentConfig/applyPresetConfig 集成

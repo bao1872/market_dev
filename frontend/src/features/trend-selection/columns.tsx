@@ -49,20 +49,22 @@ export interface TrendSelectionColumnOptions {
   watchlistPendingIds?: Set<string>
 }
 
-/** 股票列渲染（复用）：第一行=名称（可点击链接），第二行=代码·市场 */
+/** 股票列渲染（复用）：第一行=名称（可点击按钮），第二行=代码·市场 */
 function renderStock(row: TrendSelectionRow, onNavigate?: (row: TrendSelectionRow) => void): ReactNode {
   const { name, symbol, market } = getStockDisplay(row)
   return (
     <div>
       <div className="symbol">
         {onNavigate ? (
-          <a
-            href="#"
-            onClick={(e) => { e.preventDefault(); e.stopPropagation(); onNavigate(row) }}
-            style={{ color: 'inherit', textDecoration: 'none', cursor: 'pointer' }}
+          <button
+            type="button"
+            className="stock-name-btn"
+            onClick={(e) => { e.stopPropagation(); onNavigate(row) }}
+            aria-label={`查看${name}详情`}
           >
             {name}
-          </a>
+            <span className="stock-name-arrow" aria-hidden="true">›</span>
+          </button>
         ) : name}
       </div>
       <div className="symbol-sub">
@@ -102,11 +104,13 @@ export function getTrendSelectionColumns(
       title: '股票',
       dataType: 'text',
       sortable: true,
-      filterable: false,
+      filterable: true,
       width: 150,
       sortValue: (row) => getStockDisplay(row).name,
       filterValue: (row) => `${getStockDisplay(row).name} ${getStockDisplay(row).symbol}`,
       render: (row) => renderStock(row, onNavigateToStock),
+      // CHANGE-20260713-010: 列头筛选与顶部搜索共用唯一 keyword 真源
+      filterAlias: 'keyword',
     },
     {
       // [趋势选股] - 描述: 当日涨跌幅独立列（后端存储为百分比数值，不 ×100；筛选输入 3% 传 3）
