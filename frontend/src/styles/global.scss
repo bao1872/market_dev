@@ -76,6 +76,24 @@ button { cursor: pointer; }
 .nav-icon { width: 17px; text-align: center; color: #9098aa; }
 .nav-item.active .nav-icon { color: #7fa2ff; }
 
+// CHANGE-20260714-001: 管理后台"返回行情"入口（侧栏 + 小屏 topbar）
+.admin-back-to-market {
+  color: v.$color-brand;
+  font-weight: 600;
+  &:hover { color: v.$color-brand; background: rgba(0, 246, 194, .08); }
+}
+.admin-back-to-market-topbar {
+  color: v.$color-brand;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(0, 246, 194, .3);
+  &:hover { background: rgba(0, 246, 194, .08); }
+  // 小屏（侧栏隐藏）才显示 topbar 入口；大屏由侧栏承担
+  @media (min-width: 1024px) { display: none; }
+}
+
 .nav-badge {
   margin-left: auto;
   background: v.$color-border;
@@ -490,8 +508,39 @@ button { cursor: pointer; }
   tr:last-child td { border-bottom: 0; }
 }
 
-.symbol { font-weight: 700; color: #e3e6ed; }
-.symbol-sub { font-size: 12px; color: v.$color-muted; margin-top: 2px; }
+// CHANGE-20260714-001: 股票名称入口重设计 — 透明背景、无边框、hover 莹感绿
+.symbol { font-weight: 600; color: v.$color-text; }
+.symbol-sub { font-size: 12px; color: v.$color-text-dim; margin-top: 2px; }
+// 股票名称按钮：默认透明、无边框；hover 名称+箭头变莹感绿、箭头右移 2px、极浅背景 6px 圆角
+.stock-name-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color .14s ease, background .14s ease;
+  &:hover {
+    color: v.$color-brand;
+    background: rgba(0, 246, 194, .06);
+    .stock-name-arrow { color: v.$color-brand; transform: translateX(2px); }
+  }
+  &:focus-visible {
+    outline: 2px solid v.$color-brand;
+    outline-offset: 1px;
+  }
+}
+.stock-name-arrow {
+  color: v.$color-text-dim;
+  font-size: 13px;
+  line-height: 1;
+  transition: color .14s ease, transform .14s ease;
+}
 .num { font-family: v.$font-mono; font-variant-numeric: tabular-nums; }
 .pos { color: #49c1b6; }
 .neg { color: #ff6b68; }
@@ -1090,6 +1139,68 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 .tv-source-list-item.active { background: #1e2a3f; border-left: 3px solid var(--brand); padding-left: 7px; }
 .tv-source-name { font-size: 12px; color: #c4ccda; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tv-source-symbol { font-size: 12px; color: #778297; }
+// CHANGE-20260714-001: 左栏来源行右侧 meta 容器（symbol 靠左 + 涨跌幅靠右）
+.tv-source-meta { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+.tv-source-change-pct { font: 12px v.$font-mono; white-space: nowrap; }
+
+// ===== Mini K 线卡片（右栏五周期小图）CHANGE-20260714-001 =====
+// 紧凑 segmented control：深色背景、统一高度、1px 边框；active 莹感绿文字/边框/轻底色
+// 340px 右栏不裁切：强制 width/max-width:100%、min-width:0、box-sizing、overflow:hidden
+.mini-kline-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px 4px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+.mini-kline-tabs {
+  display: inline-flex;
+  align-self: flex-start;
+  border: 1px solid v.$color-border;
+  border-radius: 7px;
+  overflow: hidden;
+}
+.mini-kline-tab {
+  height: 26px;
+  padding: 0 9px;
+  border: 0;
+  border-right: 1px solid v.$color-border;
+  background: #161a23;
+  color: v.$color-muted;
+  font-size: 12px;
+  cursor: pointer;
+  &:last-child { border-right: 0; }
+  &:hover { color: #d2d6df; }
+  &.active {
+    background: rgba(0, 246, 194, .1);
+    color: v.$color-brand;
+    box-shadow: inset 0 0 0 1px rgba(0, 246, 194, .3);
+  }
+}
+.mini-kline-empty, .mini-kline-loading, .mini-kline-error {
+  display: flex; align-items: center; justify-content: center;
+  height: 200px; font-size: 12px; color: v.$color-muted;
+}
+.mini-kline-chart {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+// CHANGE-20260714-001: 设置页开源组件署名
+.settings-attribution {
+  margin-top: 16px;
+  padding: 10px 14px;
+  font-size: 12px;
+  color: v.$color-muted;
+  a { color: v.$color-brand; &:hover { text-decoration: underline; } }
+}
 
 .tv-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 340px; min-height: v.$tv-workspace-min-height; border: 1px solid v.$color-border; border-top: 0; background: #10141c; }
 .tv-workspace.capture-mode { grid-template-columns: minmax(0, 1fr); } // 截图模式：隐藏右侧面板，恢复单列

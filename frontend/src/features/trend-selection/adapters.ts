@@ -25,6 +25,8 @@ export const OFFSET_PERCENTILE_KEYS = [
   'position_short',
   'short_pos',
 ] as const
+// CHANGE-20260714-001: 当日涨跌幅候选 key（与 columns.tsx 保持一致，供详情左栏复用）
+export const CHANGE_PCT_KEYS = ['change_pct', 'pct_change', 'change_percent'] as const
 
 /** 从 payload 中按候选 key 列表取第一个非空值 */
 export function pickPayload(payload: Record<string, unknown>, keys: readonly string[]): unknown {
@@ -108,6 +110,7 @@ export function adaptStrategyResultToTrendRow(
   watchedIds?: Set<string>,
 ): TrendSelectionRow {
   // [全量 universe] - 描述: skipped/failed 行 result.id 和 payload 为 null，降级为空值
+  // CHANGE-20260714-001: latest_change_pct 来自 bars_daily 最新两根日线，与 payload 分离
   return {
     resultId: result.id ?? '',
     instrumentId: result.instrument_id,
@@ -116,5 +119,7 @@ export function adaptStrategyResultToTrendRow(
     market: result.instrument_market ?? '',
     payload: result.payload ?? {},
     watched: watchedIds ? watchedIds.has(result.instrument_id) : false,
+    latestChangePct: result.latest_change_pct ?? null,
+    latestChangeTradeDate: result.latest_change_trade_date ?? null,
   }
 }

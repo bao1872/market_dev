@@ -11,7 +11,7 @@
 // 详情页专属能力（自选操作、上下切换、memo、飞书）拆到 useStockDetailActions / useStockDetailFeishu。
 // 本页面降为路由适配器：解析 URL → 调用共享 hooks → 渲染 header + StockResearchWorkspace + 结构面板 + modals。
 
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { useParams, useSearchParams, useNavigate, useLocation } from 'react-router-dom'
 import clsx from 'clsx'
 import { EventStatePanel } from '@/features/research-context/EventStatePanel'
@@ -30,6 +30,17 @@ import { MARKET_LABELS } from '@/utils/market'
 import { resolveBackPath } from './detailNavigation'
 import { STRATEGY_KEYS } from '@/constants/strategyKeys'
 import { useToast } from '@/store/toast'
+import { changePctColorClass, fmtChange } from '@/features/trend-selection'
+
+// CHANGE-20260714-001: 左栏来源列表滚动位置 sessionStorage key 前缀
+// key 由 returnTo + scope 生成稳定 hash，避免不同来源上下文串扰
+const SOURCE_LIST_SCROLL_KEY_PREFIX = 'panji:detail-source-scroll:v1'
+
+function makeSourceListScrollKey(returnTo: string | null, scope: string | null): string {
+  // 简单 hash：returnTo + scope 字符串拼接（无需密码学强度，仅做 namespace 隔离）
+  const raw = `${returnTo ?? ''}|${scope ?? ''}`
+  return `${SOURCE_LIST_SCROLL_KEY_PREFIX}:${raw}`
+}
 
 export default function StockDetailPage() {
   const { symbol } = useParams<{ symbol: string }>()
@@ -105,6 +116,69 @@ export default function StockDetailPage() {
     strategy,
     returnTo: returnToParam,
   })
+
+  // CHANGE-20260714-001: 左栏来源列表滚动位置保存/恢复
+  // 切换股票前保存 scrollTop 到 sessionStorage；新股票渲染后恢复
+  // 只有活动行完全离开可视区时才 scrollIntoView({block:'nearest'})，避免每次切换都滚回顶部
+  const sourceListRef = useRef<HTMLDivElement | null>(null)
+  const sourceListScrollKey = useMemo(
+    () => makeSourceListScrollKey(returnToParam, detailActions.sourceListKind),
+    [returnToParam, detailActions.sourceListKind],
+  )
+  const lastSavedScrollRef = useRef<number>(0)
+
+  // 切换股票前保存当前 scrollTop（在 navigate 之前由点击/上一只/下一只触发）
+  // 由于 navigate 后组件会重新渲染，这里在 symbol 变化的 effect 中保存"上一次"的 scrollTop
+  useEffect(() => {
+    const el = sourceListRef.current
+    if (!el) return
+    // 保存当前 scrollTop（用于下次恢复）
+    const saveScroll = () => {
+      const cur = el.scrollTop
+      lastSavedScrollRef.current = cur
+      try {
+        sessionStorage.setItem(sourceListScrollKey, String(cur))
+      } catch {
+        // sessionStorage 不可用时静默降级（隐私模式/配额满）
+      }
+    }
+    // 在卸载或 symbol 变化前保存
+    return () => saveScroll()
+  }, [sourceListScrollKey, symbol])
+
+  // 新股票渲染后恢复 scrollTop（仅在活动行不可见时 scrollIntoView）
+  useEffect(() => {
+    const el = sourceListRef.current
+    if (!el) return
+    // 先尝试恢复保存的 scrollTop
+    let savedScroll: number | null = null
+    try {
+      const raw = sessionStorage.getItem(sourceListScrollKey)
+      if (raw !== null) {
+        const n = Number(raw)
+        if (Number.isFinite(n)) savedScroll = n
+      }
+    } catch {
+      // sessionStorage 不可用
+    }
+    if (savedScroll !== null) {
+      el.scrollTop = savedScroll
+    }
+    // 检查活动行是否在可视区，不可见则最小幅度滚动到可见
+    if (symbol) {
+      const activeEl = el.querySelector<HTMLDivElement>('.tv-source-list-item.active')
+      if (activeEl) {
+        const containerRect = el.getBoundingClientRect()
+        const itemRect = activeEl.getBoundingClientRect()
+        const isVisible =
+          itemRect.top >= containerRect.top &&
+          itemRect.bottom <= containerRect.bottom
+        if (!isVisible) {
+          activeEl.scrollIntoView({ block: 'nearest' })
+        }
+      }
+    }
+  }, [sourceListScrollKey, symbol, detailActions.sourceStocks])
 
   // 详情页专属飞书投递
   const feishu = useStockDetailFeishu({ instrumentId })
@@ -426,7 +500,11 @@ export default function StockDetailPage() {
           - returnTo 缺失或非市场搜索时回退到「自选列表」 */}
       <div className="tv-detail-layout">
         {!isCaptureMode && detailActions.sourceStocks.length > 0 && (
-          <aside className="tv-source-list" data-testid="detail-source-list">
+          <aside
+            className="tv-source-list"
+            data-testid="detail-source-list"
+            ref={sourceListRef}
+          >
             <div className="tv-source-list-header">
               {detailActions.sourceListKind === 'market' ? '行情来源' : '自选来源'}
             </div>
@@ -437,7 +515,15 @@ export default function StockDetailPage() {
                 onClick={() => navigate(`/stock/${s.symbol}?source=${source}&strategy=${strategy}${returnToParam ? `&returnTo=${encodeURIComponent(returnToParam)}` : ''}`)}
               >
                 <span className="tv-source-name">{s.name}</span>
-                <span className="tv-source-symbol">{s.symbol}</span>
+                <div className="tv-source-meta">
+                  <span className="tv-source-symbol">{s.symbol}</span>
+                  {/* CHANGE-20260714-001: 右侧显示最近交易日涨跌幅（两位小数，A股红涨绿跌） */}
+                  {s.changePct !== null && (
+                    <span className={clsx('tv-source-change-pct', changePctColorClass(s.changePct))}>
+                      {fmtChange(s.changePct)}
+                    </span>
+                  )}
+                </div>
               </div>
             ))}
           </aside>

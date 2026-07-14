@@ -57,7 +57,7 @@ strategy_run_items.reason_code 标准编码：
 | Auth | `/auth`, `/me`, `/plans` | 登录、注册、刷新、AccessContext |
 | 行情 | `/instruments`, `/calendar`, `/market`, `/bars` | 数据新鲜度、partial/degraded 标识；`/instruments/{id}/bars` page_size 按 timeframe 限制：`15m` 最大 4000，`1h` 最大 1200，其他最大 1000；`/instruments/{id}/indicators` 的 `bars` 参数最大 4000；`indicators` 响应含 `sqzmom_lb` 全局技术指标数据，后端逐行复刻 Pine 代码，前端只渲染不计算；**`GET /market/stocks` 行业/概念筛选**（PRD §7.5 qstock 同步后）：`industry`/`concept` 参数按板块名称筛选，通过 `filter_instruments_by_board()` 查询 `market_boards` 表实现；未同步板块数据时返回空列表（不报 422）；`industry` + `concept` 同时传时取交集（AND 语义）；**`GET /market/boards?type=industry\|concept`** 返回 `MarketBoardsResponse`：`items`（板块目录列表）+ `available: bool`（items 非空时 true）+ `reason_code: str \| null`（无数据时为 `"board_provider_unavailable"`）+ `updated_at`；前端依据 `available` 决定筛选输入是否禁用 |
 | 结构状态因子 | `/instruments/{id}/structural-factors` | 双周期（1d+15m）5 组结构因子（DSA 段/Swing/成本节点/动量波动/成交参与）；前端只渲染后端 DTO，禁止重新计算；无认证要求（与 indicators API 一致）；250-500 bar lookback，15m 仅已完成 bar，Swing 仅已确认 pivot（无未来函数） |
-| 策略 | `/strategies`, `/strategy-runs` | 只读 released/published 结果；`/strategy-runs/{run_id}/results` 以 `strategy_run_items` 为主表 LEFT JOIN `strategy_results` + `instruments`，返回全量 universe（含 succeeded/skipped/failed），skipped/failed 行 `id`/`payload` 为 null；新增 `item_status`/`reason_code`/`error_message` 字段；默认无筛选时 `source_total = run.total_instruments`。JOIN 策略：因 `strategy_run_items.result_id` 当前未回填（ALIGN-033 P2），`strategy_results` 关联统一改用 `(run_id, instrument_id)`，包括批量加载、metric_filter 子查询、sort LEFT JOIN 三处。**keyword 搜索（CHANGE-20260713-005）**：`strategy_result_repository.query_results` 的 `keyword` 参数（非空时）ILIKE 同时匹配 `Instrument.symbol`/`Instrument.name`/`Instrument.pinyin_initials`（3 处 or_ 分支同步，支持股票代码/中文名称/拼音首字母）；前端不做全量过滤，不增加新表；`total` 字段为该 keyword + filters 下的真实总数（不是 items.length）。**industry/concept 筛选（CHANGE-20260713-006）**：`/strategy-runs/{run_id}/results` 支持 `industry`（str \| None, Query）和 `concept`（str \| None, Query）参数，按行业/概念板块名称筛选，通过共享 `backend/app/repositories/board_filter_helper.py::build_board_filter_conditions` 构造 EXISTS 子查询（`MarketBoardMembership` JOIN `MarketBoard`，`type='industry'`/`'concept'`，`name` 匹配）；industry+concept 同时提供时为 AND 语义。**数量契约四层语义（CHANGE-20260713-007）**：响应包含四层数量：`source_total`（published run 原始总量，不受业务筛选影响）、`universe_total`（all/watchlist 范围总量，业务筛选前）、`filtered_total`（keyword+industry+concept+metric_filters 后总量）、`items`（filtered_total 当前页）；`len(items) <= filtered_total`；`items`/`filtered_total` 必须应用完全相同的 keyword/industry/concept/metric_filters 条件，SQL 数量固定，禁止 N+1；禁止文档描述"source_total 与筛选使用相同条件" |
+| 策略 | `/strategies`, `/strategy-runs` | 只读 released/published 结果；`/strategy-runs/{run_id}/results` 以 `strategy_run_items` 为主表 LEFT JOIN `strategy_results` + `instruments`，返回全量 universe（含 succeeded/skipped/failed），skipped/failed 行 `id`/`payload` 为 null；新增 `item_status`/`reason_code`/`error_message` 字段；默认无筛选时 `source_total = run.total_instruments`。JOIN 策略：因 `strategy_run_items.result_id` 当前未回填（ALIGN-033 P2），`strategy_results` 关联统一改用 `(run_id, instrument_id)`，包括批量加载、metric_filter 子查询、sort LEFT JOIN 三处。**keyword 搜索（CHANGE-20260713-005）**：`strategy_result_repository.query_results` 的 `keyword` 参数（非空时）ILIKE 同时匹配 `Instrument.symbol`/`Instrument.name`/`Instrument.pinyin_initials`（3 处 or_ 分支同步，支持股票代码/中文名称/拼音首字母）；前端不做全量过滤，不增加新表；`total` 字段为该 keyword + filters 下的真实总数（不是 items.length）。**industry/concept 筛选（CHANGE-20260713-006）**：`/strategy-runs/{run_id}/results` 支持 `industry`（str \| None, Query）和 `concept`（str \| None, Query）参数，按行业/概念板块名称筛选，通过共享 `backend/app/repositories/board_filter_helper.py::build_board_filter_conditions` 构造 EXISTS 子查询（`MarketBoardMembership` JOIN `MarketBoard`，`type='industry'`/`'concept'`，`name` 匹配）；industry+concept 同时提供时为 AND 语义。**数量契约四层语义（CHANGE-20260713-007）**：响应包含四层数量：`source_total`（published run 原始总量，不受业务筛选影响）、`universe_total`（all/watchlist 范围总量，业务筛选前）、`filtered_total`（keyword+industry+concept+metric_filters 后总量）、`items`（filtered_total 当前页）；`len(items) <= filtered_total`；`items`/`filtered_total` 必须应用完全相同的 keyword/industry/concept/metric_filters 条件，SQL 数量固定，禁止 N+1；禁止文档描述"source_total 与筛选使用相同条件"。**latest_change_pct/latest_change_trade_date 响应字段 + stock_name/stock_name_op Query 参数 + change_pct 特殊 sort/filter key（CHANGE-20260714-001）**：响应 items 每行新增 `latest_change_pct`（float\|null，最新完成交易日涨跌幅，从 `bars_daily` 表用 window function 计算最新两根日线）和 `latest_change_trade_date`（date\|null，对应的交易日）；`change_pct` 作为 `sort_by` 和 `metric_filters` 的特殊 key 走 `bars_daily` 子查询，不在 manifest `filterable` 白名单中也允许；新增 `stock_name`（str\|None, Query）和 `stock_name_op`（`contains`/`not_contains`/`eq`, Query, 默认 `contains`）Query 参数支持股票名称独立筛选；保留原 `payload` 不可变，DSA 其他列仍绑定 published run 日期；详见第 17 节 |
 | 监控 | `/monitor-states`, `/strategy-events` | 只处理完成 Bar，按用户资格过滤；monitor_event 在 `delivery_worker.py` 投递前再次用 `is_user_eligible_for_monitor` 复核，active admin 放行，disabled admin / 无订阅普通用户排除 |
 | 个股上下文 | `/stocks/{symbol}/context` | 用户面个股状态与事件聚合；Evidence DTO 从 ORM `event.evidence` 映射；时区 `Asia/Shanghai`；历史事件截止为次日 00:00 exclusive；run 查询按 `trade_date, published_at, finished_at` DESC 确定排序；`strategy_events.idempotency_key` 格式 `symbol:source_run_id:algorithm_version`（每只股票每个 run 至多一个事件） |
 | 通知 | `/messages`, `/notification-channels` | 用户只能操作自己的消息和渠道 |
@@ -1130,4 +1130,57 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 - SQL 数量固定，禁止 N+1（与 `query_published_selector_results` 同一构造器）；
 - 仅允许公共 DSA 列白名单，禁止任意 payload key 透传到列定义；
 - 操作列（`action`）不导出。
+
+## 17. strategy-runs results latest_change_pct 契约（CHANGE-20260714-001）
+
+`GET /api/v1/strategy-runs/{run_id}/results` 响应在原四层数量契约基础上，为 `items` 每行新增两个实时行情派生字段，并新增两个股票名称筛选 Query 参数；同时 `change_pct` 作为特殊 sort/filter key 走 `bars_daily` 子查询。
+
+### 17.1 新增响应字段
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `latest_change_pct` | `float \| null` | 最新完成交易日涨跌幅（百分比数值，如 `3.45` 表示 +3.45%）；从 `bars_daily` 表用 window function 计算最新两根日线 `(close - prev_close) / prev_close * 100`；无两根有效日线（含 `close` 为 null 或 `prev_close = 0`）时为 `null` |
+| `latest_change_trade_date` | `date \| null` | `latest_change_pct` 对应的交易日（`bars_daily.trade_date`，最新一根已完成日线日期）；无有效数据时为 `null` |
+
+字段语义约束：
+
+- **数据源**：`bars_daily` 表（已完成日线），**不读 partial daily bar**，不读 `bars_15min`/`bars_minute`；
+- **计算口径**：window function 取每个 `instrument_id` 按交易日 DESC 排序的最新两根，`(latest.close - prev.close) / prev.close * 100`；`close` 为 null 或 `prev.close = 0` 时返回 `null`；
+- **独立性**：`latest_change_pct`/`latest_change_trade_date` 与 DSA `payload` 完全解耦——DSA 其他列（`dsa_dir_bars`/`vwap_ret_*`/`offset_*`/`dsa_vwap*` 等）仍绑定 published run 的 `trade_date`，不受 `latest_change_pct` 实时性影响；
+- **原 payload 不可变**：`strategy_results.payload` 不被修改，`latest_change_pct` 作为响应顶层字段附加到每行 item，不写入 `payload`；
+- **涨跌颜色**：前端按 A 股红涨绿跌渲染（`latest_change_pct > 0` 红、`< 0` 绿、`null` 中性）；
+- **无两根有效日线**：新股/停牌/退市/数据缺失时返回 `null`，前端显示 `--`，**不回退旧 run 值**。
+
+### 17.2 新增 Query 参数
+
+| 参数 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `stock_name` | `str \| None` | `None` | 股票名称独立筛选关键词；与 `keyword`（symbol/name/pinyin_initials 三字段 ILIKE）独立，`stock_name` 只匹配 `Instrument.name` |
+| `stock_name_op` | `Literal["contains", "not_contains", "eq"]` | `contains` | `stock_name` 的匹配操作符；`contains` = ILIKE `%name%`，`not_contains` = NOT ILIKE `%name%`，`eq` = `name =` 精确匹配 |
+
+行为规则：
+
+- `stock_name` 与 `keyword` 可同时提供，两者为 AND 语义（`keyword` 匹配 symbol/name/pinyin_initials，`stock_name` 只匹配 name）；
+- `stock_name` 进入 `filtered_total`/`items` 的同一筛选条件，`source_total` 不受影响（与数量契约四层语义一致）；
+- `stock_name`/`stock_name_op` 进入 `TableViewPresetConfig` 可选字段（`stock_name: str \| null`、`stock_name_op: str \| null`，max_length=100/20），不新增表/migration（JSONB 列）；
+- `stock_name_op` 非 `contains`/`not_contains`/`eq` 时返回 422。
+
+### 17.3 change_pct 特殊 sort/filter key
+
+`change_pct` 作为 `sort_by` 和 `metric_filters` 的 key 时，走 `bars_daily` 子查询，**不在 manifest `filterable`/`sortable` 白名单中也允许**：
+
+- **sort_by=change_pct**：按 `latest_change_pct` 排序（`sort_desc=true` 降序），通过 LEFT JOIN `bars_daily` 子查询计算每只股票最新涨跌幅后排序；`null` 值排在最后（`NULLS LAST`）；
+- **metric_filters 含 `{"key": "change_pct", "op": "gt"/"gte"/"lt"/"lte"/"between", "value": ...}`**：走同一 `bars_daily` 子查询过滤；`op` 限制白名单：`gt`/`gte`/`lt`/`lte`/`between`（不允许 `contains`/`eq`/`empty`/`not_empty`）；
+- **常量 `CHANGE_PCT_METRIC_KEY = "change_pct"`**：`strategy_result_repository` 单点定义，sort 与 metric_filters 两处共用；
+- **性能**：window function 子查询在 `bars_daily` 表上执行，依赖 `(instrument_id, trade_date)` 索引；生产数据量下需验证性能（见 `code-doc-alignment.md` ALIGN-062）；
+- **不污染 manifest**：`dsa_selector.yaml` manifest 的 `filterable`/`sortable` 白名单不新增 `change_pct`，`change_pct` 由 repository 层特殊处理；
+- **前端筛选输入**：用户在 `change_pct` 列输入 3 表示 3%，不要乘除错（与 CHANGE-20260713-005 一致）。
+
+### 17.4 限制
+
+- `latest_change_pct`/`latest_change_trade_date` 只读，不写入 `strategy_results.payload`；
+- 不修改 DSA 算法、Node Cluster、盘中监控、Capture 计算口径；
+- 不新增数据库表/migration；
+- `change_pct` sort/filter 只支持 `bars_daily` 口径，不支持 15m/1h/intraday 涨跌幅；
+- `stock_name`/`stock_name_op` 不进入 `metric_filters`（与 `keyword` 同为独立 Query 参数）。
 

@@ -95,6 +95,7 @@ def test_extract_row_data_stock_column_formats_name_symbol() -> None:
         instrument_market="SH",
         payload={"change_pct": 3.5, "dsa_dir_bars": 5},
         columns=columns,
+        latest_change_pct=3.5,
     )
     assert row_data["stock"] == "贵州茅台(600519)"
     assert row_data["change_pct"] == 3.5
@@ -110,6 +111,7 @@ def test_extract_row_data_stock_column_handles_missing() -> None:
         instrument_market=None,
         payload={"change_pct": 1.0},
         columns=columns,
+        latest_change_pct=1.0,
     )
     assert row_data["stock"] == ""
     assert row_data["change_pct"] == 1.0

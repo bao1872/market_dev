@@ -52,6 +52,7 @@ test('encode→decode 往返一致', () => {
     selected: '000001',
     industry: null,
     concept: null,
+    preset: null,
   }
   const encoded = encodeMarketWorkspaceUrl(original)
   const decoded = decodeMarketWorkspaceUrl(encoded)
@@ -59,24 +60,24 @@ test('encode→decode 往返一致', () => {
 })
 
 test('selected=null 时 encode 不包含 selected', () => {
-  const params = encodeMarketWorkspaceUrl({ scope: 'market', selected: null, industry: null, concept: null })
+  const params = encodeMarketWorkspaceUrl({ scope: 'market', selected: null, industry: null, concept: null, preset: null })
   assert.equal(params.has('selected'), false)
 })
 
 test('scope 始终写入 encode', () => {
-  const params = encodeMarketWorkspaceUrl({ scope: 'watchlist', selected: null, industry: null, concept: null })
+  const params = encodeMarketWorkspaceUrl({ scope: 'watchlist', selected: null, industry: null, concept: null, preset: null })
   assert.equal(params.get('scope'), 'watchlist')
 })
 
 test('buildMarketWorkspaceUrl 生成完整 URL', () => {
-  const url = buildMarketWorkspaceUrl({ scope: 'market', selected: '600519', industry: null, concept: null })
+  const url = buildMarketWorkspaceUrl({ scope: 'market', selected: '600519', industry: null, concept: null, preset: null })
   assert.ok(url.startsWith('/market?'))
   assert.ok(url.includes('scope=market'))
   assert.ok(url.includes('selected=600519'))
 })
 
 test('buildMarketWorkspaceUrl 无 selected 时仍含 scope', () => {
-  const url = buildMarketWorkspaceUrl({ scope: 'watchlist', selected: null, industry: null, concept: null })
+  const url = buildMarketWorkspaceUrl({ scope: 'watchlist', selected: null, industry: null, concept: null, preset: null })
   assert.ok(url.includes('scope=watchlist'))
   assert.ok(!url.includes('selected'))
 })
@@ -87,6 +88,7 @@ test('selectInstrumentInTable：设置 selected，保留 scope', () => {
     selected: null,
     industry: null,
     concept: null,
+    preset: null,
   }
   const newState = selectInstrumentInTable(state, '000001')
   assert.equal(newState.selected, '000001')
@@ -99,6 +101,7 @@ test('changeMarketScope：切换 scope 后清除 selected', () => {
     selected: '000001',
     industry: null,
     concept: null,
+    preset: null,
   }
   const newState = changeMarketScope(state, 'watchlist')
   assert.equal(newState.scope, 'watchlist')
@@ -263,6 +266,7 @@ test('CHANGE-009-7: buildStrategyResultQueryParams 保留完整 keyword/industry
     filters: null,
     page: 2,
     page_size: 50,
+    preset: null,
   }
   const query = buildStrategyResultQueryParams(ctx)
   assert.equal(query.universe, 'all')

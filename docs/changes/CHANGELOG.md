@@ -2,6 +2,20 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-14
+
+- CHANGE-20260714-001: 最新行情涨跌幅与 DSA 日期分离 + preset=none + 股票名称筛选 + 详情左栏滚动 + 五周期小 K 线 + pywencai 探测 + SMC 撤回
+  - latest_change_pct：bars_daily window function（lag+row_number）取最新两根日线计算，与 DSA run payload 分离；API 新增 latest_change_pct/latest_change_trade_date；服务端排序/筛选/Excel/详情左栏统一使用 latest 字段；9 项 pytest（T-1/T/停牌/null/prev_close=0/红涨绿跌/sort/filter/N+1）
+  - preset=none：清除筛选时 URL 写 preset=none，默认 effect 跳过，returnTo 保留，不清列显示/顺序/pageSize
+  - 股票名称筛选：stock_name/stock_name_op 独立于 keyword（contains/not_contains/eq），统一转义 ILIKE
+  - 详情左栏：SourceStockItem 含 changePct，DSA 来源用 latestChangePct，自选 fallback 用 monitor-status 聚合，scrollTop sessionStorage 恢复
+  - AdminAppShell：桌面侧栏+小屏 topbar 始终可见"← 返回行情"
+  - 五周期小 K 线：15m/60m/日/周/月，segmented control，attributionLogo=false，修复外框裁切（.mini-kline-card + .mini-kline-chart 添加 width:100%;max-width:100%;min-width:0;box-sizing:border-box;overflow:hidden）
+  - pywencai 探测：0.13.1 import 成功，5 项查询全部失败（iwencai.com 返回 HTTP 401 + captcha_url，与 THS 反爬同源），不可用，未加入生产依赖
+  - SMC 撤回：因 LuxAlgo CC BY-NC-SA 许可证与 clean-room 条件不满足（智能体已阅读源码），本提交未包含 SMC；ChartLayerVisibility 恢复为 7 键（trend/node/boll/volume/macd/sqzmom/breakout）
+  - 基线对照：contract suite 8 个失败在 149eb09 基线和当前状态完全一致，0 新增失败
+  - 文档：AGENTS clause 42 + CHANGE-001 + CHANGELOG
+
 ## 2026-07-13
 
 - CHANGE-20260713-010: 个股详情市值 + 列表 Excel 导出 + 右栏小 K 线 + 股票名称筛选 alias + 文档修正

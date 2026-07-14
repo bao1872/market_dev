@@ -76,6 +76,18 @@
   - `test_pytdx_adapter_minute_aware.py` 覆盖 `pytdx_adapter.get_minute_bars` 接收 aware `Asia/Shanghai` start/end 时，能正确与 pytdx 返回的 naive `datetime` 列比较过滤，不再抛出 `Invalid comparison between dtype=datetime64[us] and Timestamp`；
   - `test_monitor_batch_live_minute.py::test_monitor_cycle_1m_uses_include_realtime` 覆盖 `monitor_batch_service` 调用 MDAS 1m 时必须带 `include_realtime=True`；
   - `test_quote_timezone.py` 覆盖 `/quote` 返回 `update_time` 带 `+08:00`、UTC 字符串被修正为 `+08:00`。
+- **[CHANGE-20260714-001 latest_change_pct]** `test_latest_change_pct.py` 新增 9 项测试覆盖 `/strategy-runs/{run_id}/results` 响应中 `latest_change_pct`/`latest_change_trade_date` 字段（从 `bars_daily` 表用 window function 计算最新两根完成交易日涨跌幅）：
+  1. `test_latest_change_pct_normal_two_bars`：正常两根有效日线（T-1 close=10、T close=11）→ `latest_change_pct=10.0`、`latest_change_trade_date=T`
+  2. `test_latest_change_pct_after_close_incomplete_bar_excluded`：盘后 T 日 bar 未完成（`is_partial=true` 或未入库）→ 使用 T-1/T-2 两根完成日线计算，`latest_change_trade_date=T-1`
+  3. `test_latest_change_pct_single_bar_returns_null`：只有一根日线（新股）→ `latest_change_pct=null`、`latest_change_trade_date=null`
+  4. `test_latest_change_pct_null_close_returns_null`：最新 bar `close=null`（停牌/数据缺失）→ `latest_change_pct=null`
+  5. `test_latest_change_pct_prev_close_zero_returns_null`：前一日 `close=0`（异常数据）→ `latest_change_pct=null`（避免除零）
+  6. `test_latest_change_pct_color_logic_red_up_green_down`：A 股红涨绿跌——`latest_change_pct > 0` 时前端 `changePctColorClass` 返回红、`< 0` 返回绿、`null` 返回中性（前端 contract test 覆盖）
+  7. `test_latest_change_pct_sort_desc`：`sort_by=change_pct&sort_desc=true` → 结果按 `latest_change_pct` 降序排列（null 排末尾），走 `CHANGE_PCT_METRIC_KEY` 特殊 sort 路径
+  8. `test_latest_change_pct_filter_gt`：`metric_filters=[{key: change_pct, op: gt, value: 3}]` → 只返回 `latest_change_pct > 3` 的行，走 `CHANGE_PCT_METRIC_KEY` 特殊 filter 路径
+  9. `test_latest_change_pct_no_n_plus_1`：一次请求返回 N 只股票的 `latest_change_pct`，SQL 查询数固定（window function 子查询批量计算，不逐行查询 `bars_daily`）；`len(items) <= filtered_total`
+  - 运行命令：`APP_ENV=test TEST_DATABASE_URL=postgresql+psycopg://... pytest backend/tests/test_latest_change_pct.py -q`
+  - 回归要求：修改 `backend/app/repositories/strategy_result_repository.py`（`_build_latest_change_pct_subquery`/`_fetch_latest_change_pct_map`/`CHANGE_PCT_METRIC_KEY`）、`backend/app/api/strategy_runs.py`、`bars_daily` 表结构或索引时必须跑此测试。
 
 ### 壳层与导航拆分
 

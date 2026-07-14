@@ -2,10 +2,13 @@
 // 仅承载 /admin/*，继续使用 AdminRoute 后端权限上下文（is_admin 守卫在 App.tsx）。
 // 与普通用户 UserAppShell 完全独立，不共用导航；保留侧栏以承载管理导航与系统状态。
 // Capture 路由不经过本壳层。
+//
+// CHANGE-20260714-001: 侧栏 + 小屏 topbar 增加显式"← 返回行情"入口（NavLink → /market），
+// 与 AccountMenu 中的"返回行情"共存，提升管理员退出后台的可发现性。
 import { type ReactNode } from 'react'
-import { NavLink, Outlet } from 'react-router-dom'
+import { NavLink, Outlet, Link } from 'react-router-dom'
 import { useHealth, useAdminSystemOverview } from '@/hooks/useApi'
-import { ADMIN_NAV_ITEMS } from '@/navigation/appNavigation'
+import { ADMIN_NAV_ITEMS, APP_ROUTES } from '@/navigation/appNavigation'
 import BrandLogo from '@/components/BrandLogo'
 import AccountMenu from '@/components/AccountMenu'
 import clsx from 'clsx'
@@ -29,6 +32,13 @@ export default function AdminAppShell({ children }: { children?: ReactNode }) {
             <div className="brand-title">盘迹</div>
             <div className="brand-sub">ADMIN CONSOLE</div>
           </div>
+        </div>
+
+        {/* CHANGE-20260714-001: 侧栏始终可见的"返回行情"入口 */}
+        <div className="nav-section">
+          <Link to={APP_ROUTES.market} className="nav-item admin-back-to-market" aria-label="返回行情">
+            <span>← 返回行情</span>
+          </Link>
         </div>
 
         <div className="nav-section">
@@ -80,6 +90,10 @@ export default function AdminAppShell({ children }: { children?: ReactNode }) {
 
       <header className="topbar">
         <div className="top-left">
+          {/* CHANGE-20260714-001: 小屏 topbar 也显示"返回行情"入口（侧栏在小屏隐藏） */}
+          <Link to={APP_ROUTES.market} className="admin-back-to-market-topbar" aria-label="返回行情">
+            ← 返回行情
+          </Link>
           <div className="page-crumb">管理后台</div>
         </div>
         <div className="top-right">

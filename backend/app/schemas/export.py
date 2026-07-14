@@ -33,6 +33,11 @@ class ExportRequest(BaseModel):
     keyword: str | None = Field(None, description="关键词（symbol/name/pinyin 模糊匹配）")
     industry: str | None = Field(None, description="行业板块")
     concept: str | None = Field(None, description="概念板块")
+    # CHANGE-20260714-001: 股票名称独立筛选（与 keyword 独立 AND 语义，与 GET results 一致）
+    stock_name: str | None = Field(None, description="股票名称独立筛选值")
+    stock_name_op: str | None = Field(
+        None, description="股票名称筛选操作符: contains | not_contains | eq"
+    )
     metric_filters: list[dict] | None = Field(
         None, description="指标筛选条件（与 GET results 的 metric_filters 格式一致）"
     )

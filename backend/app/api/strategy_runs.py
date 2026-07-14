@@ -38,6 +38,7 @@ from app.models.strategy import StrategyVersion
 from app.models.strategy_run import StrategyRun
 from app.repositories import strategy_result_repository
 from app.repositories.strategy_result_repository import (
+    CHANGE_PCT_METRIC_KEY,
     SortSpec,
     dict_filters_to_metric_filters,
 )
@@ -153,7 +154,9 @@ def _validate_metric_filters(
         metric_key = f.get("metric_key")
         op = f.get("operator")
 
-        if metric_key not in filterable_keys:
+        # CHANGE-20260714-001: change_pct 是特殊 key，走 bars_daily 子查询而非 metrics 表
+        # 不在 manifest filterable 白名单中也允许，由 repository 特殊处理
+        if metric_key not in filterable_keys and metric_key != CHANGE_PCT_METRIC_KEY:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"非法 metric_key: {metric_key}（不在 filterable 白名单中）",
@@ -583,7 +586,8 @@ async def query_strategy_results(
     # 4.5 校验 sort_by 在 filterable 白名单中
     if sort_by is not None:
         filterable_keys = _get_filterable_metric_keys(version)
-        if sort_by not in filterable_keys:
+        # CHANGE-20260714-001: change_pct 走 bars_daily 子查询，允许作为特殊 sort key
+        if sort_by not in filterable_keys and sort_by != CHANGE_PCT_METRIC_KEY:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"非法 sort_by: {sort_by}（不在 filterable 白名单中）",
@@ -636,6 +640,14 @@ async def list_run_results(
     keyword: str | None = Query(None, description="关键词（symbol 或 name 模糊匹配）"),
     industry: str | None = Query(None, description="行业板块名称（qstock 同步后可用）"),
     concept: str | None = Query(None, description="概念板块名称（qstock 同步后可用）"),
+    stock_name: str | None = Query(
+        None,
+        description="股票名称独立筛选值（CHANGE-20260714-001：与 keyword 独立 AND 语义）",
+    ),
+    stock_name_op: str | None = Query(
+        None,
+        description="股票名称筛选操作符: contains | not_contains | eq（默认 contains）",
+    ),
     sort_by: str | None = Query(None, description="排序指标名"),
     sort_desc: bool = Query(False, description="是否降序"),
     universe: str = Query("all", description="股票池: all 全市场 | watchlist 仅自选股"),
@@ -684,6 +696,15 @@ async def list_run_results(
             detail=f"非法 universe: {universe}（合法值: all, watchlist）",
         )
 
+    # CHANGE-20260714-001: 校验 stock_name_op 合法值
+    if stock_name_op is not None and stock_name_op not in ("contains", "not_contains", "eq"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"非法 stock_name_op: {stock_name_op}（合法值: contains, not_contains, eq）",
+        )
+    # stock_name_op 提供但 stock_name 为空时静默忽略（不报错，等价无筛选）
+    # stock_name 提供但 stock_name_op 为 None 时默认 contains（service 层兜底）
+
     # [StrategyRuns] - 描述: metric_filters + sort_by 共用 run/version 查询，避免重复 DB 调用
     # advice.md 第三节：/strategy-runs/{run_id}/results 应像 /strategies/{key}/results 一样校验 metric_filters
     if filters or sort_by is not None:
@@ -697,7 +718,8 @@ async def list_run_results(
                 # 校验 sort_by 在 filterable 白名单中
                 if sort_by is not None:
                     filterable_keys = _get_filterable_metric_keys(version)
-                    if sort_by not in filterable_keys:
+                    # CHANGE-20260714-001: change_pct 走 bars_daily 子查询，允许作为特殊 sort key
+                    if sort_by not in filterable_keys and sort_by != CHANGE_PCT_METRIC_KEY:
                         raise HTTPException(
                             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail=f"非法 sort_by: {sort_by}（不在 filterable 白名单中）",
@@ -720,6 +742,8 @@ async def list_run_results(
             keyword=keyword,
             industry=industry,
             concept=concept,
+            stock_name=stock_name,
+            stock_name_op=stock_name_op,
         )
     except RunNotFoundError as e:
         raise HTTPException(
@@ -760,6 +784,9 @@ async def list_run_results(
             resp.instrument_symbol = row.instrument.symbol
             resp.instrument_name = row.instrument.name
             resp.instrument_market = row.instrument.market
+        # CHANGE-20260714-001: 最新行情涨跌幅（从 bars_daily 计算，与 DSA run payload 分离）
+        resp.latest_change_pct = row.latest_change_pct
+        resp.latest_change_trade_date = row.latest_change_trade_date
         result_items.append(resp)
 
     return StrategyResultListResponse(
@@ -859,6 +886,16 @@ async def export_run_results(
             detail=f"非法 universe: {request.universe}（合法值: all, watchlist）",
         )
 
+    # 1c. CHANGE-20260714-001: 校验 stock_name_op 合法值（与 GET results 端点一致）
+    if (
+        request.stock_name_op is not None
+        and request.stock_name_op not in ("contains", "not_contains", "eq")
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"非法 stock_name_op: {request.stock_name_op}（合法值: contains, not_contains, eq）",
+        )
+
     # 2. 校验 metric_filters + sort_by（复用 GET results 的校验逻辑）
     filters = request.metric_filters
     sort_by = request.sort_by
@@ -871,7 +908,8 @@ async def export_run_results(
                     _validate_metric_filters(filters, version)
                 if sort_by is not None:
                     filterable_keys = _get_filterable_metric_keys(version)
-                    if sort_by not in filterable_keys:
+                    # CHANGE-20260714-001: change_pct 走 bars_daily 子查询，允许作为特殊 sort key
+                    if sort_by not in filterable_keys and sort_by != CHANGE_PCT_METRIC_KEY:
                         raise HTTPException(
                             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail=f"非法 sort_by: {sort_by}（不在 filterable 白名单中）",
@@ -895,6 +933,8 @@ async def export_run_results(
             keyword=request.keyword,
             industry=request.industry,
             concept=request.concept,
+            stock_name=request.stock_name,
+            stock_name_op=request.stock_name_op,
         )
     except RunNotFoundError as e:
         raise HTTPException(
@@ -931,6 +971,8 @@ async def export_run_results(
                 instrument_market=instrument_market,
                 payload=payload,
                 columns=request.visible_columns,
+                latest_change_pct=row.latest_change_pct,
+                latest_change_trade_date=row.latest_change_trade_date,
             )
         )
 

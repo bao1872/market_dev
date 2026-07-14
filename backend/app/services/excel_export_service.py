@@ -274,10 +274,13 @@ def extract_row_data(
     instrument_market: str | None,
     payload: dict | None,
     columns: list[ExportColumn],
+    latest_change_pct: float | None = None,
+    latest_change_trade_date: Any = None,
 ) -> dict:
     """从结果行提取导出数据。
 
     对于 key="stock" 的列，返回 "名称(代码)" 格式。
+    对于 key="change_pct" 的列，使用 latest_change_pct（CHANGE-20260714-001：从 bars_daily 计算，与 DSA run payload 分离）。
     其他列按 payload_key 从 payload 提取值。
     """
     row_data: dict[str, Any] = {}
@@ -286,6 +289,9 @@ def extract_row_data(
             name = instrument_name or ""
             symbol = instrument_symbol or ""
             row_data[col.key] = f"{name}({symbol})" if name and symbol else name or symbol
+        elif col.key == "change_pct":
+            # CHANGE-20260714-001: 涨跌幅从 bars_daily 最新两根日线计算，不读 payload
+            row_data[col.key] = latest_change_pct
         elif col.payload_key:
             row_data[col.key] = payload.get(col.payload_key) if payload else None
         else:

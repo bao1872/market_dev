@@ -38,6 +38,7 @@ import {
   changeMarketScope,
   buildStrategyResultQueryParams,
   convertFiltersToMetricFilters,
+  extractStockNameFilter,
   type MarketScope,
   type MarketListContext,
 } from './marketWorkspaceUrlState'
@@ -154,12 +155,23 @@ export default function MarketWorkspacePage() {
             value2: f.value2,
           })),
         )
+        // CHANGE-20260713-011: 剥离 stock 列筛选，转为 stock_name + stock_name_op
+        const stockNameFilter = extractStockNameFilter(
+          ctx.metricFilters.map((f) => ({
+            key: f.key,
+            operator: f.operator,
+            value: f.value,
+            value2: f.value2,
+          })),
+        )
         const body = {
           universe: scope === 'watchlist' ? 'watchlist' : 'all',
           keyword: ctx.keyword || null,
           industry: ctx.industry || null,
           concept: ctx.concept || null,
           metric_filters: metricFilters.length > 0 ? metricFilters : null,
+          stock_name: stockNameFilter?.stock_name ?? null,
+          stock_name_op: stockNameFilter?.stock_name_op ?? null,
           sort_by: ctx.sortBy,
           sort_desc: ctx.sortDesc,
           visible_columns: visibleColumns,
@@ -291,9 +303,11 @@ export default function MarketWorkspacePage() {
       })),
       page: query.page,
       page_size: query.pageSize,
+      // CHANGE-20260713-011: preset=none 透传（不影响查询，仅用于默认 preset 自动应用门控）
+      preset: urlState.preset,
     }
     return buildStrategyResultQueryParams(ctx) as StrategyResultQueryParams
-  }, [query, scope, industry, concept])
+  }, [query, scope, industry, concept, urlState.preset])
 
   const resultsQuery = useStrategyRunResults(activeRunId || undefined, resultParams)
   const totalResults = resultsQuery.data?.total ?? 0

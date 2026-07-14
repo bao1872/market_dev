@@ -44,9 +44,9 @@ export function normalizeResearchSource(raw: string | null): ResearchSource {
 }
 
 // ===== 图表图层 Manifest（PRD §6.2 — 单一真源 v2）=====
-// 用户可显隐的 7 个图表图层开关。StockResearchWorkspace 持有唯一 ChartLayerVisibility state，
+// 用户可显隐的 8 个图表图层开关。StockResearchWorkspace 持有唯一 ChartLayerVisibility state，
 // StrategyChart 作为受控组件接收 layerVisibility prop，不再内部管理 layers state。
-// 与 StrategyChart 内部 LayerVisibility（12 键）的映射在 StrategyChart.chartLayerVisibilityToInternal 完成：
+// 与 StrategyChart 内部 LayerVisibility（13 键）的映射在 StrategyChart.chartLayerVisibilityToInternal 完成：
 //   trend    → dsa + selection（趋势参考价 / 选股命中标记）
 //   node     → profile + node + poc（成交量分布 / 节点区间 / POC）
 //   boll     → bb（布林带）

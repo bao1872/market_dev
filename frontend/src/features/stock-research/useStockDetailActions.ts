@@ -4,11 +4,14 @@
 //
 // CHANGE-20260713-009: 来源列表复用 published DSA results 链（usePublishedRuns + useStrategyRunResults），
 // 禁止继续使用 useMarketStocks。MarketWorkspacePage 和本 hook 共用 decodeMarketListContext + buildStrategyResultQueryParams。
+//
+// CHANGE-20260714-001: 无 returnTo 的自选 fallback 改用 useWatchlistMonitorStatus 单次聚合请求
+// （替代旧 useWatchlist + useBatchInstruments 两段查询，避免逐行 quote 和 N+1）。
+// 每行附带 changePct：DSA 来源读 payload.change_pct，自选来源读 metrics.change_pct。
 import { useState, useMemo, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  useWatchlist,
-  useBatchInstruments,
+  useWatchlistMonitorStatus,
   useAddToWatchlist,
   useRemoveFromWatchlist,
   useStockMemo,
@@ -25,6 +28,9 @@ import {
 import {
   adaptStrategyResultToTrendRow,
   getStockDisplay,
+  pickPayload,
+  toNum,
+  CHANGE_PCT_KEYS,
 } from '@/features/trend-selection'
 import { useToast } from '@/store/toast'
 import type { ResearchSource } from './stockResearchTypes'
@@ -42,9 +48,11 @@ export interface StockDetailActionsParams {
 }
 
 // 来源股票列表项（左栏统一渲染结构）
+// CHANGE-20260714-001: 新增 changePct 字段（最近交易日涨跌幅，百分比数值，可空）
 export interface SourceStockItem {
   symbol: string
   name: string
+  changePct: number | null
 }
 
 // 来源列表类型（决定左栏标题与点击导航行为）
@@ -112,22 +120,20 @@ export function useStockDetailActions({
   const sourceResultsQuery = useStrategyRunResults(activeRunId, sourceListParams)
 
   // 来源列表行数据（StrategyResult → TrendSelectionRow → SourceStockItem）
+  // CHANGE-20260714-001: DSA 来源使用 latestChangePct（bars_daily 最新两根日线，与 payload 分离）
   const marketStocks = useMemo(() => {
     if (!hasMarketContext || !sourceResultsQuery.data?.items) return []
     return sourceResultsQuery.data.items.map((r) => {
       const row = adaptStrategyResultToTrendRow(r)
       const display = getStockDisplay(row)
-      return { symbol: display.symbol, name: display.name }
+      return { symbol: display.symbol, name: display.name, changePct: row.latestChangePct }
     })
   }, [hasMarketContext, sourceResultsQuery.data])
 
-  // 自选列表查询（用于判断当前股票是否在自选 + 上下切换 + returnTo 缺失时回退左栏）
-  const watchlistQuery = useWatchlist()
-  const watchlistInstrumentIds = useMemo(
-    () => watchlistQuery.data?.items.map((item) => item.instrument_id) ?? [],
-    [watchlistQuery.data],
-  )
-  const batchInstrumentsQuery = useBatchInstruments(watchlistInstrumentIds)
+  // CHANGE-20260714-001: 自选 fallback 改用 useWatchlistMonitorStatus 单次聚合请求
+  // 替代旧 useWatchlist + useBatchInstruments 两段查询，避免逐行 quote 和 N+1
+  // 同时复用聚合结果判断 inWatchlist（monitor-status 仅返回 active 自选，故命中即 active）
+  const monitorStatusQuery = useWatchlistMonitorStatus()
 
   // 自选变更操作
   const addWatchlist = useAddToWatchlist()
@@ -152,13 +158,13 @@ export function useStockDetailActions({
     }
   }, [stockMemoQuery.data])
 
-  // 判断当前股票是否已在自选（active=true）
+  // 判断当前股票是否已在自选（monitor-status 仅返回 active 自选，命中即 active）
   const inWatchlist = useMemo(() => {
-    if (!instrumentId || !watchlistQuery.data) return false
-    return watchlistQuery.data.items.some(
-      (item) => item.instrument_id === instrumentId && item.active,
+    if (!instrumentId || !monitorStatusQuery.data) return false
+    return monitorStatusQuery.data.items.some(
+      (item) => item.instrument_id === instrumentId,
     )
-  }, [instrumentId, watchlistQuery.data])
+  }, [instrumentId, monitorStatusQuery.data])
 
   // 操作：加入/移出自选
   const handleToggleWatchlist = useCallback(() => {
@@ -175,18 +181,21 @@ export function useStockDetailActions({
     }
   }, [instrumentId, inWatchlist, removeWatchlist, addWatchlist, source, showToast])
 
-  // 来源股票列表（active 自选，含 symbol + name，用于详情页左栏）
+  // 来源股票列表（active 自选 + changePct，单次聚合请求）
+  // CHANGE-20260714-001: 从 monitor-status items 提取 symbol/name/changePct
+  // changePct 来源：item.metrics.change_pct（来自 StockFeatureSnapshot.summary_payload）
   const watchlistStocks = useMemo(() => {
-    if (!watchlistQuery.data?.items || !batchInstrumentsQuery.data?.items) return []
-    const instMap = new Map(batchInstrumentsQuery.data.items.map((i) => [i.id, i]))
-    return watchlistQuery.data.items
-      .filter((item) => item.active)
-      .map((item) => {
-        const inst = instMap.get(item.instrument_id)
-        return inst ? { symbol: inst.symbol, name: inst.name } : null
-      })
-      .filter((x): x is SourceStockItem => x !== null)
-  }, [watchlistQuery.data, batchInstrumentsQuery.data])
+    if (!monitorStatusQuery.data?.items) return []
+    return monitorStatusQuery.data.items.map((item) => {
+      const metrics = (item.metrics ?? {}) as Record<string, unknown>
+      const changePct = toNum(pickPayload(metrics, CHANGE_PCT_KEYS))
+      return {
+        symbol: item.symbol,
+        name: item.name,
+        changePct,
+      }
+    })
+  }, [monitorStatusQuery.data])
 
   // 统一来源列表：优先市场搜索结果，回退自选列表
   // CHANGE-20260713-009: scope=market → sourceListKind=market；scope=watchlist → sourceListKind=watchlist

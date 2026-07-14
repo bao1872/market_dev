@@ -14,7 +14,7 @@ import type { TableViewPresetConfig } from '@/api/endpoints'
 // ===== 类型定义（对应 UI_DEVELOPMENT_SPEC.md 3.3 推荐组件输入）=====
 export type DataType = 'text' | 'number' | 'percent' | 'datetime' | 'enum' | 'range'
 export type SortDirection = 'asc' | 'desc' | null
-export type FilterOperator = 'contains' | 'eq' | 'gt' | 'gte' | 'lt' | 'lte' | 'between' | 'empty' | 'not_empty'
+export type FilterOperator = 'contains' | 'not_contains' | 'eq' | 'gt' | 'gte' | 'lt' | 'lte' | 'between' | 'empty' | 'not_empty'
 
 export interface DataTableColumn<Row> {
   key: string
@@ -36,9 +36,8 @@ export interface DataTableColumn<Row> {
   helpText?: string
   // [StrategyDataTable] - 描述: 表头缩写（显示用），title 保留完整描述用于 tooltip；缺省时回退到 title
   shortTitle?: string
-  // CHANGE-20260713-010: 列头筛选别名（如 'keyword'），与顶部搜索共用唯一真源
-  // 设置后列头筛选读写 externalKeyword/onKeywordChange，不进入 filters state
-  filterAlias?: 'keyword'
+  // CHANGE-20260713-011: filterAlias 已移除——stock 列改用普通筛选（contains/not_contains/eq），
+  // 与顶部 keyword 搜索独立（顶部 keyword 负责 symbol/name/pinyin 正向搜索）
 }
 
 export interface DataTableFilter {
@@ -135,7 +134,8 @@ function operatorsForDataType(dataType: DataTableColumn<unknown>['dataType']): F
     case 'percent':
       return ['gte', 'gt', 'lte', 'lt', 'eq', 'between']
     case 'text':
-      return ['contains', 'eq']
+      // CHANGE-20260713-011: 文本列增加 not_contains（包含/不包含/等于）
+      return ['contains', 'not_contains', 'eq']
     case 'enum':
       return ['eq']
     case 'datetime':
@@ -148,6 +148,7 @@ function operatorsForDataType(dataType: DataTableColumn<unknown>['dataType']): F
 // [StrategyDataTable] - 描述: 操作符下拉框中文标签
 const OPERATOR_LABELS: Record<FilterOperator, string> = {
   contains: '包含',
+  not_contains: '不包含',
   eq: '等于',
   gt: '大于',
   gte: '大于等于',
@@ -213,6 +214,9 @@ function matchFilter(text: string, filter: DataTableFilter): boolean {
     }
     default: // contains
       return t.toLocaleLowerCase('zh-CN').includes(String(filter.value).toLocaleLowerCase('zh-CN'))
+    case 'not_contains':
+      // CHANGE-20260713-011: 文本不包含（大小写不敏感）
+      return !t.toLocaleLowerCase('zh-CN').includes(String(filter.value).toLocaleLowerCase('zh-CN'))
   }
 }
 
@@ -335,61 +339,8 @@ function FilterPopover({
   )
 }
 
-// CHANGE-20260713-010: keyword alias 筛选弹窗（与顶部搜索共用唯一 keyword 真源）
-function KeywordFilterPopover({
-  anchor,
-  value,
-  onApply,
-  onClear,
-  onClose,
-}: {
-  anchor: HTMLElement
-  value: string
-  onApply: (v: string) => void
-  onClear: () => void
-  onClose: () => void
-}) {
-  const [localValue, setLocalValue] = useState(value)
-
-  const rect = anchor.getBoundingClientRect()
-  const left = Math.min(window.innerWidth - 250, Math.max(8, rect.left - 150))
-  const top = Math.max(8, Math.min(window.innerHeight - 180, rect.bottom + 6))
-
-  useEffect(() => {
-    const close = (e: MouseEvent) => {
-      const pop = document.querySelector('.column-filter-popover.keyword-popover')
-      if (pop && !pop.contains(e.target as Node) && e.target !== anchor) {
-        onClose()
-      }
-    }
-    setTimeout(() => document.addEventListener('mousedown', close), 0)
-    return () => document.removeEventListener('mousedown', close)
-  }, [anchor, onClose])
-
-  return (
-    <div className="column-filter-popover keyword-popover" style={{ left, top }}>
-      <div className="filter-pop-title">筛选：股票</div>
-      <input
-        className="input filter-value"
-        placeholder="搜索代码/名称/拼音"
-        value={localValue}
-        onChange={(e) => setLocalValue(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') onApply(localValue.trim())
-        }}
-        autoFocus
-      />
-      <div className="filter-pop-actions">
-        <button className="btn small filter-clear" onClick={onClear}>
-          清除
-        </button>
-        <button className="btn small primary filter-apply" onClick={() => onApply(localValue.trim())}>
-          应用
-        </button>
-      </div>
-    </div>
-  )
-}
+// CHANGE-20260713-011: KeywordFilterPopover 已移除——stock 列改用普通 FilterPopover
+// （支持 contains/not_contains/eq 三种操作符，筛选值只取股票名称）
 
 // 列设置弹窗（支持显示/隐藏 + 上下调整顺序）
 function ColumnManager({
@@ -521,7 +472,6 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
   const [filterPopover, setFilterPopover] = useState<{
     columnIndex: number
     anchor: HTMLElement
-    isKeyword?: boolean
   } | null>(null)
   const [columnManagerAnchor, setColumnManagerAnchor] = useState<HTMLElement | null>(null)
 
@@ -710,12 +660,26 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
   }, [])
 
   const reset = useCallback(() => {
+    // CHANGE-20260713-011: 清除排序与筛选时必须同时清外部受控状态（keyword/industry/concept）
+    // 并在 URL 写入 preset=none，禁止默认 preset 在组件 remount 后自动应用
     setFilters({})
     setSortColumn(null)
     setSortDirection(null)
     setGlobalQuery('')
     setPage(1)
-  }, [])
+    // 同步外部受控 keyword/industry/concept（MarketWorkspacePage 顶部搜索 + 板块筛选）
+    if (onKeywordChange) onKeywordChange('')
+    if (onIndustryChange) onIndustryChange('')
+    if (onConceptChange) onConceptChange('')
+    // URL: 删除 keyword/filters/sort/dir/page/industry/concept，写入 preset=none
+    // managedKeys 由 URL sync effect 自动清理（state 已清空，encoded 不会有这些 key）
+    // industry/concept 不在 managedKeys 中，需手动删除
+    const nextParams = new URLSearchParams(searchParams)
+    nextParams.delete('industry')
+    nextParams.delete('concept')
+    nextParams.set('preset', 'none')
+    setSearchParams(nextParams, { replace: false })
+  }, [onKeywordChange, onIndustryChange, onConceptChange, searchParams, setSearchParams])
 
   // ===== 视图配置 Preset =====
   // [Presets] - 描述: 从内部 state 构建当前配置快照（keyword/sort/filters/hiddenColumns/columnOrder/pageSize）
@@ -738,7 +702,14 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
   }), [effectiveKeyword, sortColumn, sortDirection, filters, hiddenColumns, columnOrder, pageSize, columns, externalIndustry, externalConcept])
 
   // [Presets] - 描述: 应用 preset 配置到内部 state（重置所有筛选/排序/分页/隐藏列/列顺序）
+  // CHANGE-20260713-011: 用户显式点击 preset 时删除 URL 中的 preset=none（解除"清除后不自动应用"门控）
   const applyPresetConfig = useCallback((config: TableViewPresetConfig) => {
+    // 删除 preset=none（用户显式应用，恢复默认 preset 自动应用机制）
+    if (searchParams.get('preset') === 'none') {
+      const nextParams = new URLSearchParams(searchParams)
+      nextParams.delete('preset')
+      setSearchParams(nextParams, { replace: false })
+    }
     setGlobalQuery(config.keyword ?? '')
     if (onKeywordChange) onKeywordChange(config.keyword ?? '')
     if (config.sort) {
@@ -805,7 +776,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
       for (const sf of staleFields) onPresetStaleField(sf.field, sf.value)
     }
     setPage(1)
-  }, [columns, saveColumnOrder, onKeywordChange, onIndustryChange, onConceptChange, boardsValidation, onPresetStaleField])
+  }, [columns, saveColumnOrder, onKeywordChange, onIndustryChange, onConceptChange, boardsValidation, onPresetStaleField, searchParams, setSearchParams])
 
   // [Presets] - 描述: 自动应用默认配置（进入页面时，每个 strategyKey 只应用一次）
   const presetsQuery = useTableViewPresets(strategyKey ? tableId : undefined, strategyKey ?? undefined)
@@ -816,6 +787,13 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     if (defaultAppliedRef.current === appliedKey) return
     // [StrategyDataTable] - 描述: URL 中已有排序/筛选/关键词/页码时，不覆盖为默认 preset
     if (urlHadStateRef.current) {
+      defaultAppliedRef.current = appliedKey
+      return
+    }
+    // CHANGE-20260714-001: 用户显式"清除排序与筛选"后 URL 含 preset=none，
+    // 禁止默认 preset 自动应用（即使 URL 中没有其他状态字段）。
+    // 用户主动点击某个 preset 时由 applyPresetConfig 删除 preset=none 解除门控。
+    if (searchParams.get('preset') === 'none') {
       defaultAppliedRef.current = appliedKey
       return
     }
@@ -835,7 +813,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
       })
     }
     defaultAppliedRef.current = appliedKey
-  }, [strategyKey, tableId, presetsQuery.data, applyPresetConfig])
+  }, [strategyKey, tableId, presetsQuery.data, applyPresetConfig, searchParams])
 
   // ===== URL 同步 =====
   useEffect(() => {
@@ -1155,10 +1133,8 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
                       <button
                         className={clsx(
                           'th-filter',
-                          // CHANGE-20260713-010: filterAlias='keyword' 时激活状态基于 effectiveKeyword
-                          col.filterAlias === 'keyword'
-                            ? (effectiveKeyword && 'active')
-                            : (filters[i] && 'active'),
+                          // CHANGE-20260713-011: filterAlias 已移除，所有列统一用 filters 激活状态
+                          filters[i] && 'active',
                         )}
                         aria-label={`筛选${col.title}`}
                         title={`筛选${col.title}`}
@@ -1166,7 +1142,6 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
                           setFilterPopover({
                             columnIndex: i,
                             anchor: e.currentTarget,
-                            isKeyword: col.filterAlias === 'keyword',
                           })
                         }
                       >
@@ -1298,26 +1273,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
       </div>
 
       {/* 筛选弹窗 */}
-      {filterPopover && filterPopover.isKeyword && (
-        <KeywordFilterPopover
-          anchor={filterPopover.anchor}
-          value={effectiveKeyword}
-          onApply={(v) => {
-            setGlobalQuery(v)
-            if (onKeywordChange) onKeywordChange(v)
-            setPage(1)
-            setFilterPopover(null)
-          }}
-          onClear={() => {
-            setGlobalQuery('')
-            if (onKeywordChange) onKeywordChange('')
-            setPage(1)
-            setFilterPopover(null)
-          }}
-          onClose={() => setFilterPopover(null)}
-        />
-      )}
-      {filterPopover && !filterPopover.isKeyword && (
+      {filterPopover && (
         <FilterPopover
           column={columns[filterPopover.columnIndex] as DataTableColumn<unknown>}
           current={filters[filterPopover.columnIndex]}

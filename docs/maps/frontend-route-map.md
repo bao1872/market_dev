@@ -30,7 +30,7 @@
 
 - `ProtectedLayout`：检查 auth store + localStorage access token，并重新调用 `/me/access`；不再固定渲染壳层，只返回 `<Outlet/>`；
 - `UserAppShell`：普通用户布局壳（顶栏品牌 + 一级导航行情/趋势选股 + 账户菜单；无左侧栏）；
-- `AdminAppShell`：管理员独立布局壳（侧栏管理导航 + 账户菜单）；
+- `AdminAppShell`：管理员独立布局壳（侧栏管理导航 + 账户菜单）；**响应式布局（CHANGE-20260714-001）**：桌面端（≥1024px）显示左侧管理导航侧栏；小屏（<1024px）隐藏侧栏，顶栏左侧显示"← 返回行情"按钮链接到 `/market`（与 `getAccountMenuItemsForVariant(_, 'admin')` "返回行情"入口一致，CHANGE-20260713-007），管理导航收起为顶部菜单或抽屉；
 - `SubscriberRoute`：admin 直接通过；普通用户要求 `subscription_active`；
 - `AdminRoute`：要求 `is_admin === true`，非 admin 重定向到 `/market`；**权限真源（CHANGE-20260713-007）**：以 `user.is_admin` 为唯一权限真源（不依赖任何其他角色/字段判断），新增 `accessLoading` 状态防止 auth hydration 未完成时提前判定 false（刷新页面后 access store 重新拉取 `/me/access` 期间显示 loading，避免 access 未就绪时被误判为非 admin 重定向到 `/market`）；
 - `AccountMenu`（`frontend/src/components/AccountMenu.tsx`）：**管理员入口契约（CHANGE-20260713-007）**——`getAccountMenuItemsForVariant(isAdmin, 'user')` 当 `is_admin=true` 时显示"管理后台"链接到 `/admin`；普通用户（`is_admin=false`）DOM **完全不渲染**管理后台入口（不是 CSS 隐藏）；`getAccountMenuItemsForVariant(_, 'admin')` 显示"返回行情"链接到 `/market`，不重复显示"管理后台"（避免管理员在 `AdminAppShell` 内重复入口）；

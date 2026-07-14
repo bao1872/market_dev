@@ -287,6 +287,10 @@ export interface StrategyResult {
   item_status: string
   reason_code?: string
   error_message?: string
+  // CHANGE-20260714-001: 最新行情涨跌幅（从 bars_daily 最新两根日线计算，与 DSA run 日期分离）
+  // 前端"涨跌幅"列优先且只显示此字段；无两根有效日线时为 null（显示"--"）
+  latest_change_pct?: number | null
+  latest_change_trade_date?: string | null
 }
 
 /** 策略运行结果列表响应（分页） */
