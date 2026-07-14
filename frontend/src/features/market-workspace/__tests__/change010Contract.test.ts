@@ -674,3 +674,61 @@ test('stock 列筛选值通过 keyword 透传到后端 ILIKE（不入 metric_fil
     'buildStrategyResultQueryParams 必须保留 keyword 字段（透传到后端 ILIKE 查询）',
   )
 })
+
+// =================================================================
+// 六、preset=none 契约（CHANGE-20260714-001）
+// =================================================================
+
+test('reset() 清除排序与筛选时写入 URL preset=none', () => {
+  const src = readSource(DATA_TABLE_PATH)
+  // reset 回调必须在 URL 中 set('preset', 'none')
+  assert.ok(
+    /nextParams\.set\(\s*['"]preset['"]\s*,\s*['"]none['"]\s*\)/.test(src),
+    'reset() 必须在 URL 写入 preset=none',
+  )
+})
+
+test('reset() 清除时同步清空外部受控 keyword/industry/concept', () => {
+  const src = readSource(DATA_TABLE_PATH)
+  assert.ok(
+    /onKeywordChange\)\s*onKeywordChange\(['"]['"]\)/.test(src) &&
+    /onIndustryChange\)\s*onIndustryChange\(['"]['"]\)/.test(src) &&
+    /onConceptChange\)\s*onConceptChange\(['"]['"]\)/.test(src),
+    'reset() 必须同步清空外部受控 keyword/industry/concept',
+  )
+})
+
+test('applyPresetConfig 用户显式应用 preset 时删除 URL 中的 preset=none', () => {
+  const src = readSource(DATA_TABLE_PATH)
+  // applyPresetConfig 必须检查 preset === 'none' 并删除
+  assert.ok(
+    /searchParams\.get\(['"]preset['"]\)\s*===\s*['"]none['"]/.test(src) &&
+    /nextParams\.delete\(['"]preset['"]\)/.test(src),
+    'applyPresetConfig 必须在用户显式应用 preset 时删除 URL 中的 preset=none',
+  )
+})
+
+test('默认 preset effect 遇到 preset=none 时跳过自动应用', () => {
+  const src = readSource(DATA_TABLE_PATH)
+  // 默认 preset effect 必须检查 preset=none 并 return（跳过）
+  assert.ok(
+    /searchParams\.get\(['"]preset['"]\)\s*===\s*['"]none['"][\s\S]*?defaultAppliedRef\.current\s*=\s*appliedKey[\s\S]*?return/.test(src),
+    '默认 preset effect 遇到 preset=none 时必须跳过（return）',
+  )
+})
+
+test('decodeMarketWorkspaceUrl 解析 preset=none', () => {
+  const src = readSource(URL_STATE_PATH)
+  assert.ok(
+    /presetRaw\s*===\s*['"]none['"]\s*\?\s*['"]none['"]\s*:\s*null/.test(src),
+    'decodeMarketWorkspaceUrl 必须将 preset=none 解析为 preset: "none"，其他值解析为 null',
+  )
+})
+
+test('encodeMarketWorkspaceUrl 仅当 preset === "none" 时写入 URL', () => {
+  const src = readSource(URL_STATE_PATH)
+  assert.ok(
+    /state\.preset\s*===\s*['"]none['"][\s\S]*?params\.set\(['"]preset['"],\s*['"]none['"]\)/.test(src),
+    'encodeMarketWorkspaceUrl 必须仅在 preset === "none" 时写入 preset 参数',
+  )
+})
