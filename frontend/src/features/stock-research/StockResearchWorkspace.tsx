@@ -43,6 +43,9 @@ export interface StockResearchWorkspaceProps {
   showRightPanel?: boolean
   // chart column 的额外 data 属性（如 data-testid, data-render-ready）
   chartColumnProps?: Record<string, string>
+  // [CHANGE-011 SMC] - smc 开关变化回调（父组件用于触发 useStockResearchData 重新拉取 indicators）。
+  // layerVisibility 仍是 UI 单一真源；此回调仅用于通知父组件 smc 状态变化，以便 refetch。
+  onSmcToggle?: (enabled: boolean) => void
 }
 
 export function StockResearchWorkspace({
@@ -58,6 +61,7 @@ export function StockResearchWorkspace({
   rightPanel,
   showRightPanel = false,
   chartColumnProps,
+  onSmcToggle,
 }: StockResearchWorkspaceProps) {
   // viewport 按 `${symbol}:${timeframe}` 存储（本地 state，不进 URL 避免噪音）
   // 切换股票时清空，确保新股票从最新 K 线开始；切换周期时各周期独立不串台
@@ -82,8 +86,12 @@ export function StockResearchWorkspace({
         saveChartLayerVisibility(source, strategyKey, next)
         return next
       })
+      // [CHANGE-011 SMC] - smc 开关变化时通知父组件，触发 indicators 重新拉取
+      if (id === 'smc' && onSmcToggle) {
+        onSmcToggle(visible)
+      }
     },
-    [source, strategyKey],
+    [source, strategyKey, onSmcToggle],
   )
 
   // 右栏收起/展开时图表 resize：CSS grid 布局变化触发 ResizeObserver 重绘，

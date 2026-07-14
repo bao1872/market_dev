@@ -66,6 +66,7 @@ PostgreSQL / Redis / External Service
 | capture | Capture Token、截图 worker、图片 URL |
 | jobs | SchedulerJobRun、worker heartbeat、任务恢复 |
 | admin | 管理 API、审计、运维页面 |
+| indicator | 全局技术指标（SQZMOM_LB、SMC）纯函数计算；位于 `backend/app/strategy_assets/algorithms/features/`，不是 Service；SMC 按需启用（`include_smc=False` 默认），不进入 DSA/Node/Capture/监控/选股；FVG 完全排除（不计算、不返回、不缓存、不渲染） |
 
 ## 5. 端到端链路
 

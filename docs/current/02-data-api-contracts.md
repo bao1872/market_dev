@@ -55,7 +55,7 @@ strategy_run_items.reason_code 标准编码：
 | 能力 | 端点/路由组 | 关键规则 |
 |---|---|---|
 | Auth | `/auth`, `/me`, `/plans` | 登录、注册、刷新、AccessContext |
-| 行情 | `/instruments`, `/calendar`, `/market`, `/bars` | 数据新鲜度、partial/degraded 标识；`/instruments/{id}/bars` page_size 按 timeframe 限制：`15m` 最大 4000，`1h` 最大 1200，其他最大 1000；`/instruments/{id}/indicators` 的 `bars` 参数最大 4000；`indicators` 响应含 `sqzmom_lb` 全局技术指标数据，后端逐行复刻 Pine 代码，前端只渲染不计算；**`GET /market/stocks` 行业/概念筛选**（PRD §7.5 qstock 同步后）：`industry`/`concept` 参数按板块名称筛选，通过 `filter_instruments_by_board()` 查询 `market_boards` 表实现；未同步板块数据时返回空列表（不报 422）；`industry` + `concept` 同时传时取交集（AND 语义）；**`GET /market/boards?type=industry\|concept`** 返回 `MarketBoardsResponse`：`items`（板块目录列表）+ `available: bool`（items 非空时 true）+ `reason_code: str \| null`（无数据时为 `"board_provider_unavailable"`）+ `updated_at`；前端依据 `available` 决定筛选输入是否禁用 |
+| 行情 | `/instruments`, `/calendar`, `/market`, `/bars` | 数据新鲜度、partial/degraded 标识；`/instruments/{id}/bars` page_size 按 timeframe 限制：`15m` 最大 4000，`1h` 最大 1200，其他最大 1000；`/instruments/{id}/indicators` 的 `bars` 参数最大 4000；`indicators` 响应含 `sqzmom_lb` 全局技术指标数据，后端逐行复刻 Pine 代码，前端只渲染不计算；**SMC 指标按需启用**（`include_smc` 查询参数，默认 `false`，`true` 时返回 `data.smc` 且 cache key 追加 `:smc` 后缀，详见第 9.5 节）；FVG 完全排除；**`GET /market/stocks` 行业/概念筛选**（PRD §7.5 qstock 同步后）：`industry`/`concept` 参数按板块名称筛选，通过 `filter_instruments_by_board()` 查询 `market_boards` 表实现；未同步板块数据时返回空列表（不报 422）；`industry` + `concept` 同时传时取交集（AND 语义）；**`GET /market/boards?type=industry\|concept`** 返回 `MarketBoardsResponse`：`items`（板块目录列表）+ `available: bool`（items 非空时 true）+ `reason_code: str \| null`（无数据时为 `"board_provider_unavailable"`）+ `updated_at`；前端依据 `available` 决定筛选输入是否禁用 |
 | 结构状态因子 | `/instruments/{id}/structural-factors` | 双周期（1d+15m）5 组结构因子（DSA 段/Swing/成本节点/动量波动/成交参与）；前端只渲染后端 DTO，禁止重新计算；无认证要求（与 indicators API 一致）；250-500 bar lookback，15m 仅已完成 bar，Swing 仅已确认 pivot（无未来函数） |
 | 策略 | `/strategies`, `/strategy-runs` | 只读 released/published 结果；`/strategy-runs/{run_id}/results` 以 `strategy_run_items` 为主表 LEFT JOIN `strategy_results` + `instruments`，返回全量 universe（含 succeeded/skipped/failed），skipped/failed 行 `id`/`payload` 为 null；新增 `item_status`/`reason_code`/`error_message` 字段；默认无筛选时 `source_total = run.total_instruments`。JOIN 策略：因 `strategy_run_items.result_id` 当前未回填（ALIGN-033 P2），`strategy_results` 关联统一改用 `(run_id, instrument_id)`，包括批量加载、metric_filter 子查询、sort LEFT JOIN 三处。**keyword 搜索（CHANGE-20260713-005）**：`strategy_result_repository.query_results` 的 `keyword` 参数（非空时）ILIKE 同时匹配 `Instrument.symbol`/`Instrument.name`/`Instrument.pinyin_initials`（3 处 or_ 分支同步，支持股票代码/中文名称/拼音首字母）；前端不做全量过滤，不增加新表；`total` 字段为该 keyword + filters 下的真实总数（不是 items.length）。**industry/concept 筛选（CHANGE-20260713-006）**：`/strategy-runs/{run_id}/results` 支持 `industry`（str \| None, Query）和 `concept`（str \| None, Query）参数，按行业/概念板块名称筛选，通过共享 `backend/app/repositories/board_filter_helper.py::build_board_filter_conditions` 构造 EXISTS 子查询（`MarketBoardMembership` JOIN `MarketBoard`，`type='industry'`/`'concept'`，`name` 匹配）；industry+concept 同时提供时为 AND 语义。**数量契约四层语义（CHANGE-20260713-007）**：响应包含四层数量：`source_total`（published run 原始总量，不受业务筛选影响）、`universe_total`（all/watchlist 范围总量，业务筛选前）、`filtered_total`（keyword+industry+concept+metric_filters 后总量）、`items`（filtered_total 当前页）；`len(items) <= filtered_total`；`items`/`filtered_total` 必须应用完全相同的 keyword/industry/concept/metric_filters 条件，SQL 数量固定，禁止 N+1；禁止文档描述"source_total 与筛选使用相同条件"。**latest_change_pct/latest_change_trade_date 响应字段 + stock_name/stock_name_op Query 参数 + change_pct 特殊 sort/filter key（CHANGE-20260714-001）**：响应 items 每行新增 `latest_change_pct`（float\|null，最新完成交易日涨跌幅，从 `bars_daily` 表用 window function 计算最新两根日线）和 `latest_change_trade_date`（date\|null，对应的交易日）；`change_pct` 作为 `sort_by` 和 `metric_filters` 的特殊 key 走 `bars_daily` 子查询，不在 manifest `filterable` 白名单中也允许；新增 `stock_name`（str\|None, Query）和 `stock_name_op`（`contains`/`not_contains`/`eq`, Query, 默认 `contains`）Query 参数支持股票名称独立筛选；保留原 `payload` 不可变，DSA 其他列仍绑定 published run 日期；详见第 17 节 |
 | 监控 | `/monitor-states`, `/strategy-events` | 只处理完成 Bar，按用户资格过滤；monitor_event 在 `delivery_worker.py` 投递前再次用 `is_user_eligible_for_monitor` 复核，active admin 放行，disabled admin / 无订阅普通用户排除 |
@@ -198,6 +198,33 @@ capture worker 浏览器上下文使用 `viewport=1920x1200` + `device_scale_fac
 - SQZMOM_LB 不接入选股、监控、飞书、消息中心、事件系统；
 - 不新增数据库表；
 - 不改 DSA VWAP、筹码峰、K 线实时行情合并逻辑。
+
+## 9.5 SMC（Smart Money Concepts）指标契约
+
+`/api/v1/instruments/{instrument_id}/indicators` 支持 `include_smc` 查询参数按需返回 `smc` 全局技术指标。SMC 由后端纯函数 `app.strategy_assets.algorithms.features.smc_indicator.compute_smc`（仅依赖 Python 标准库）实现，前端只消费后端 DTO，不重新计算。SMC 基于用户提供的参考实现重写，**不是 LuxAlgo Pine 脚本的翻译**。
+
+### 9.5.1 查询参数
+
+| 参数 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `include_smc` | bool | `false` | 是否计算并返回 SMC 指标；`false` 时响应不含 `smc` 字段且不执行 SMC 计算 |
+
+### 9.5.2 缓存隔离
+
+- `include_smc=true` 时 cache key 追加 `:smc` 后缀，与默认路径（`include_smc=false`）完全隔离；
+- 默认路径缓存不包含 SMC 字段，不因 SMC 上线影响常规请求性能；
+- SMC 计算路径变更同样需要 bump `ALGORITHM_VERSION` 使旧缓存失效。
+
+### 9.5.3 输出字段
+
+`data.smc`（仅 `include_smc=true` 时存在）包含市场结构关键点位序列，长度与当前 timeframe bar 对齐。**FVG（Fair Value Gap）完全排除**——不计算、不返回、不缓存、不渲染。
+
+### 9.5.4 限制
+
+- SMC 只进入 `/stock/:symbol` 个股详情的指标链，不进入 `/market`、DSA、Node、Capture、盘中监控、选股；
+- 不新增数据库表；
+- SMC 不接入选股、监控、飞书、消息中心、事件系统；
+- FVG 完全排除（不计算、不返回、不缓存、不渲染）。
 
 ## 10. 结构状态因子 API 契约 V1.8
 
@@ -756,10 +783,10 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 
 `backend/app/services/indicator_cache.py::ALGORITHM_VERSION` 是 indicator 缓存的 schema 版本号。任何修改 indicator 计算逻辑、`source_bar_times` 格式、BB/SQZMOM/MACD 计算路径的变更**必须 bump `ALGORITHM_VERSION`**，使旧缓存自然失效：
 
-- cache key 格式：`indicator:{algorithm_version}:{timeframe}:{adj}:{bars}:{symbol}`；
+- cache key 格式：`indicator:{algorithm_version}:{timeframe}:{adj}:{bars}:{symbol}`（SMC 按需启用时追加 `:smc` 后缀，与默认路径隔离，避免 SMC 计算结果污染无 SMC 响应缓存）；
 - 旧版本 cache key 与新版本不匹配，强制重算，避免旧格式 `source_bar_times` 或日线阶梯线 BB 污染渲染；
 - 禁止通过手动 `DEL` 单只股票 key 修复缓存问题（不可扩展，且无法覆盖所有时间周期）；
-- 当前 `ALGORITHM_VERSION = "v5"`（PR #32：DSA 全周期支持 + 1w/1mo BB 用 compute_bollinger 计算）。
+- 当前 `ALGORITHM_VERSION = "v6"`（CHANGE-20260715-001：新增 SMC 指标并按需启用，缓存 key 追加 `:smc` 后缀隔离）。
 
 #### 12.5.3.1 `force_refresh` / `capture` 查询参数（旁路缓存）
 

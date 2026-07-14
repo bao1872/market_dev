@@ -88,6 +88,8 @@ export interface LayerVisibility {
   delta: boolean
   events: boolean
   sqzmom: boolean
+  // [CHANGE-011 SMC] - 智能资金图层（BOS/CHoCH/OB/EQH/EQL/trailing），按需计算
+  smc: boolean
 }
 
 export interface StrategyChartProps {
@@ -695,6 +697,10 @@ function renderIndicatorLayer(
       break
     case 'sqzmom':
       renderIndicatorSqzmom(ctx, g, layer, data, barsCount, step, displayTimes, timeframe)
+      break
+    // [CHANGE-011 SMC] - 智能资金概念图层渲染（BOS/CHoCH/OB/EQH/EQL/trailing）
+    case 'smc':
+      renderIndicatorSmc(ctx, g, layer, data, displayTimes, step, py, timeframe)
       break
   }
 }
@@ -1393,6 +1399,238 @@ function renderIndicatorSqzmom(
   }
 }
 
+// [CHANGE-011 SMC] - 智能资金概念图层渲染
+// 描述: 渲染 BOS/CHoCH 线、internal order blocks、EQH/EQL、trailing strong/weak high/low。
+// 视觉规则（盘迹 V1）:
+//   - 上涨结构红 #FF4D4F（bullish bias=1）
+//   - 下跌结构绿 #22C55E（bearish bias=-1）
+//   - internal 虚线（dash=[5,3]）且更淡（alpha 0.7），swing 实线
+//   - BOS 实线，CHoCH 虚线 dash=[4,3]
+//   - OB 同方向低透明度区域（alpha 0.12）
+//   - mitigated OB 进一步降低透明度（alpha 0.05）
+//   - 标签小而克制（8px sans-serif）
+//   - 完全排除 FVG：不渲染任何 Fair Value Gap 元素
+// anchor/confirmed 因果契约:
+//   - BOS/CHoCH/OB/EQH/EQL 都从 anchor_index 画到 confirmed_index
+//   - anchor 时间在数据 time 数组中的索引，confirmed 同理
+//   - 时间通过 normalizeChartTime 与 K 线 displayTimes 匹配
+//   - 未来 bar 不得修改已确认事件（事件一旦写入即不可变，渲染只读取）
+interface SmcEvent {
+  type: 'BOS' | 'CHoCH'
+  bias: number  // 1=bullish, -1=bearish
+  kind?: 'internal' | 'swing'
+  anchor_index: number
+  anchor_time: string | null
+  confirmed_index: number
+  confirmed_time: string | null
+  level?: number | null
+}
+
+interface SmcOrderBlock {
+  bar_high: number
+  bar_low: number
+  bar_time: string
+  bar_index: number
+  bias: number  // 1=bullish, -1=bearish
+  confirmed_index: number
+  confirmed_time: string
+  mitigated: boolean
+  mitigated_index?: number | null
+  mitigated_time?: string | null
+}
+
+interface SmcEqualHighLow {
+  type: 'EQH' | 'EQL'
+  anchor_index: number
+  anchor_time: string | null
+  confirmed_index: number
+  confirmed_time: string | null
+  level: number
+  prev_level: number
+}
+
+interface SmcTrailing {
+  top: number | null
+  bottom: number | null
+  bar_time: string | null
+  bar_index: number | null
+  last_top_time: string | null
+  last_bottom_time: string | null
+}
+
+// SMC 配色（盘迹 V1：A 股上涨结构红，下跌结构绿）
+const SMC_BULL_COLOR = '#FF4D4F'   // 上涨结构（bias=1）
+const SMC_BEAR_COLOR = '#22C55E'   // 下跌结构（bias=-1）
+
+function renderIndicatorSmc(
+  ctx: CanvasRenderingContext2D,
+  g: Geometry,
+  _layer: ChartLayer,
+  data: Record<string, (number | string | null)[]>,
+  displayTimes: string[],
+  step: number,
+  py: (v: number) => number,
+  timeframe: string,
+): void {
+  // [CHANGE-011 SMC] - 数据字段为对象数组（非基本类型数组），按 any 取值后 cast 到内部类型
+  // FVG 完全排除：本函数不渲染任何 Fair Value Gap 元素
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const smcData = data as unknown as Record<string, any>
+  const events: SmcEvent[] = Array.isArray(smcData.events) ? smcData.events : []
+  const orderBlocks: SmcOrderBlock[] = Array.isArray(smcData.order_blocks) ? smcData.order_blocks : []
+  const equalHLs: SmcEqualHighLow[] = Array.isArray(smcData.equal_highs_lows) ? smcData.equal_highs_lows : []
+  const trailing: SmcTrailing | null = smcData.trailing && typeof smcData.trailing === 'object' ? smcData.trailing : null
+  const smcTimes: (string | null)[] = Array.isArray(smcData.time) ? smcData.time : []
+
+  if (!displayTimes.length) return
+
+  // 构造 SMC time 数组索引 → K 线 display 索引的映射
+  // anchor/confirmed_index 是 SMC time 数组的索引，需先转 time 再匹配 K 线
+  const klineTimeIndex = new Map<string, number>()
+  displayTimes.forEach((t, i) => {
+    const key = normalizeChartTime(t, timeframe)
+    if (key != null) klineTimeIndex.set(key, i)
+  })
+
+  // 辅助：SMC time 数组索引 → K 线 display 索引
+  const smcToDisplay = (smcIdx: number | null | undefined): number | undefined => {
+    if (smcIdx == null) return undefined
+    const t = smcTimes[smcIdx]
+    if (t == null) return undefined
+    const key = normalizeChartTime(t, timeframe)
+    if (key == null) return undefined
+    return klineTimeIndex.get(key)
+  }
+
+  // ===== 1. 渲染 Order Blocks（低透明度矩形区域）=====
+  // 从 OB bar_index (anchor) 画到 confirmed_index 或 mitigated_index（取后者更晚的）
+  // bullish OB: 红色低透明度；bearish OB: 绿色低透明度
+  // mitigated OB: 进一步降低透明度
+  for (const ob of orderBlocks) {
+    const anchorDisplayIdx = smcToDisplay(ob.bar_index)
+    // OB 终点：mitigated 时用 mitigated_index，否则用 confirmed_index
+    // 但 OB 区域应该从 anchor 延伸到当前可见的最新 bar（或 mitigation 点）
+    let endDisplayIdx: number | undefined
+    if (ob.mitigated && ob.mitigated_index != null) {
+      endDisplayIdx = smcToDisplay(ob.mitigated_index)
+    } else {
+      // 未 mitigated 的 OB 延伸到当前可见区末尾
+      endDisplayIdx = displayTimes.length - 1
+    }
+    if (anchorDisplayIdx == null) continue
+    if (endDisplayIdx == null || endDisplayIdx < anchorDisplayIdx) continue
+
+    const x1 = g.l + (anchorDisplayIdx + 0.5) * step
+    const x2 = g.l + (endDisplayIdx + 0.5) * step
+    const yHigh = py(ob.bar_high)
+    const yLow = py(ob.bar_low)
+    const yTop = Math.min(yHigh, yLow)
+    const height = Math.max(2, Math.abs(yHigh - yLow))
+
+    // 颜色与透明度
+    const isBull = ob.bias === 1
+    const baseAlpha = ob.mitigated ? 0.05 : 0.12
+    const color = isBull ? SMC_BULL_COLOR : SMC_BEAR_COLOR
+    // 解析 hex 颜色为 rgba
+    ctx.fillStyle = hexToRgba(color, baseAlpha)
+    ctx.fillRect(x1, yTop, Math.max(1, x2 - x1), height)
+
+    // OB 边框（更淡）
+    ctx.strokeStyle = hexToRgba(color, ob.mitigated ? 0.15 : 0.3)
+    ctx.lineWidth = 0.8
+    ctx.strokeRect(x1, yTop, Math.max(1, x2 - x1), height)
+  }
+
+  // ===== 2. 渲染 BOS/CHoCH 线 =====
+  // 从 anchor 到 confirmed 画水平线（在 level 价格处）
+  // BOS: 实线；CHoCH: 虚线 dash=[4,3]
+  // internal: 更淡（alpha 0.7），更细（width 1）；swing: 实色，更粗（width 1.5）
+  for (const ev of events) {
+    const anchorDisplayIdx = smcToDisplay(ev.anchor_index)
+    const confirmedDisplayIdx = smcToDisplay(ev.confirmed_index)
+    if (anchorDisplayIdx == null || confirmedDisplayIdx == null) continue
+    if (confirmedDisplayIdx < anchorDisplayIdx) continue
+    if (ev.level == null) continue
+
+    const x1 = g.l + (anchorDisplayIdx + 0.5) * step
+    const x2 = g.l + (confirmedDisplayIdx + 0.5) * step
+    const y = py(ev.level)
+
+    const isBull = ev.bias === 1
+    const baseColor = isBull ? SMC_BULL_COLOR : SMC_BEAR_COLOR
+    const isInternal = ev.kind === 'internal'
+    const alpha = isInternal ? 0.7 : 1.0
+    const lineWidth = isInternal ? 1 : 1.5
+    const color = hexToRgba(baseColor, alpha)
+
+    if (ev.type === 'CHoCH') {
+      drawLine(ctx, x1, y, x2, y, color, lineWidth, [4, 3])
+    } else {
+      // BOS: 实线
+      drawLine(ctx, x1, y, x2, y, color, lineWidth, [])
+    }
+
+    // 标签（小而克制，8px sans-serif）
+    const label = `${ev.type}${isInternal ? '·I' : ''}`
+    drawText(ctx, label, x1 + 2, y - 3, color, '8px sans-serif', 'left')
+  }
+
+  // ===== 3. 渲染 EQH/EQL =====
+  // 在 level 价格处从 anchor 到 confirmed 画短水平线
+  // EQH/EQL 用蓝色（中性色，因为等高/等低不区分涨跌方向）
+  for (const eq of equalHLs) {
+    const anchorDisplayIdx = smcToDisplay(eq.anchor_index)
+    const confirmedDisplayIdx = smcToDisplay(eq.confirmed_index)
+    if (anchorDisplayIdx == null || confirmedDisplayIdx == null) continue
+    if (confirmedDisplayIdx < anchorDisplayIdx) continue
+
+    const x1 = g.l + (anchorDisplayIdx + 0.5) * step
+    const x2 = g.l + (confirmedDisplayIdx + 0.5) * step
+    const y = py(eq.level)
+
+    drawLine(ctx, x1, y, x2, y, C.blue2, 1, [2, 2])
+    drawText(ctx, eq.type, x1 + 2, y - 3, C.blue2, '8px sans-serif', 'left')
+  }
+
+  // ===== 4. 渲染 trailing strong/weak high/low =====
+  // 在最新可见 bar 处标注 trailing.top（strong/weak high）和 trailing.bottom
+  if (trailing && trailing.top != null) {
+    const lastDisplayIdx = displayTimes.length - 1
+    const x = g.l + (lastDisplayIdx + 0.5) * step
+    const y = py(trailing.top)
+    // strong high 用红色虚线延伸到右侧
+    drawLine(ctx, x, y, g.plotRight, y, hexToRgba(SMC_BULL_COLOR, 0.5), 1, [3, 3])
+    drawText(ctx, `SH ${fmt(trailing.top)}`, g.plotRight - 4, y - 3, SMC_BULL_COLOR, '8px sans-serif', 'right')
+  }
+  if (trailing && trailing.bottom != null) {
+    const lastDisplayIdx = displayTimes.length - 1
+    const x = g.l + (lastDisplayIdx + 0.5) * step
+    const y = py(trailing.bottom)
+    drawLine(ctx, x, y, g.plotRight, y, hexToRgba(SMC_BEAR_COLOR, 0.5), 1, [3, 3])
+    drawText(ctx, `SL ${fmt(trailing.bottom)}`, g.plotRight - 4, y + 9, SMC_BEAR_COLOR, '8px sans-serif', 'right')
+  }
+}
+
+// [CHANGE-011 SMC] - hex 颜色转 rgba（用于 OB 区域透明度控制）
+function hexToRgba(hex: string, alpha: number): string {
+  // 支持 #RRGGBB 和 #RGB 格式
+  const cleaned = hex.replace('#', '')
+  let r: number, g: number, b: number
+  if (cleaned.length === 3) {
+    r = parseInt(cleaned[0] + cleaned[0], 16)
+    g = parseInt(cleaned[1] + cleaned[1], 16)
+    b = parseInt(cleaned[2] + cleaned[2], 16)
+  } else if (cleaned.length === 6) {
+    r = parseInt(cleaned.substring(0, 2), 16)
+    g = parseInt(cleaned.substring(2, 4), 16)
+    b = parseInt(cleaned.substring(4, 6), 16)
+  } else {
+    // 无法解析，返回原始 hex
+    return hex
+  }
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`
+}
+
 // ===== 事件映射与可见性 =====
 
 // 事件类型 -> 颜色
@@ -1663,6 +1901,8 @@ function drawTrading(
       if (layer.layer_id === 'macd' && !layers.macd) return
       // [SQZMOM_LB 副图] - 受 sqzmom 图层开关控制
       if (layer.layer_id === 'sqzmom_lb' && !layers.sqzmom) return
+      // [CHANGE-011 SMC] - SMC 图层受 smc 开关控制
+      if (layer.layer_id === 'smc' && !layers.smc) return
       // [DSA 数据契约] - union 类型（DsaSelectorData | Record）按 Record 索引访问，dsa_polyline 渲染器内部再 cast 到 DsaSelectorData
       const layerData = indicators.data![layer.strategy_id] as Record<string, (number | string | null)[]>
       if (layerData) {
@@ -1773,6 +2013,8 @@ function getDefaultLayers(strategyId?: string): LayerVisibility {
     delta: false,
     events: false,
     sqzmom: false,
+    // [CHANGE-011 SMC] - 默认关闭，用户通过 IndicatorToolbar 显式开启
+    smc: false,
   }
   if (strategyId && STRATEGIES[strategyId]) {
     STRATEGIES[strategyId].defaultLayers.forEach(id => {
@@ -1782,9 +2024,10 @@ function getDefaultLayers(strategyId?: string): LayerVisibility {
   return layers
 }
 
-// [chartLayerVisibility] - 将用户侧 7 键 ChartLayerVisibility 映射为内部 12 键 LayerVisibility
+// [chartLayerVisibility] - 将用户侧 8 键 ChartLayerVisibility 映射为内部 13 键 LayerVisibility
 // trend → dsa + selection, node → profile + node + poc, 其余一一对应
 // delta/events 为派生层（非用户可控）：delta 固定 false，events 固定 true（有事件数据时绘制）
+// [CHANGE-011 SMC] - smc 一一对应，默认 false
 function chartLayerVisibilityToInternal(
   vis: ChartLayerVisibility,
   source: string,
@@ -1802,6 +2045,8 @@ function chartLayerVisibilityToInternal(
     breakout: source === 'selection' ? vis.breakout : false,
     delta: false,
     events: true,
+    // [CHANGE-011 SMC] - smc 开关由用户在 IndicatorToolbar 控制
+    smc: vis.smc,
   }
 }
 

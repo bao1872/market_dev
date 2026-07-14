@@ -65,26 +65,23 @@ def test_cache_key_construction() -> None:
     assert key_none_adj != key, "不同 adj 应生成不同键"
 
 
-def test_cache_algorithm_version_bumped_to_v5() -> None:
-    """[PR #32] - ALGORITHM_VERSION 必须 bump 到 v5。
+def test_cache_algorithm_version_bumped_to_v6() -> None:
+    """[CHANGE-011] - ALGORITHM_VERSION 必须 bump 到 v6。
 
-    修复根因：PR #31 仍把 DSA 限制为 1d-only 且 1w/1mo BB 被移除。
-    PR #32 改为 DSA 全周期支持 + 1w/1mo BB 用 compute_bollinger(macd_bars) 计算，
-    但 ALGORITHM_VERSION 仍是 v4，导致旧缓存（v4，1d-only DSA + 1w/1mo 无 BB）被命中。
-
-    bump 到 v5 后，旧 v4 缓存键自然不匹配，强制重算。
+    v5 → v6 原因：CHANGE-011 新增 SMC 按需计算图层（include_smc 参数 + 缓存键后缀隔离）。
+    bump 到 v6 后，旧 v5 缓存键自然不匹配，强制重算。
     """
-    assert indicator_cache.ALGORITHM_VERSION == "v5", (
-        f"ALGORITHM_VERSION 应为 v5（PR #32 DSA 全周期 + 1w/1mo BB 后 bump），"
+    assert indicator_cache.ALGORITHM_VERSION == "v6", (
+        f"ALGORITHM_VERSION 应为 v6（CHANGE-011 SMC 按需计算后 bump），"
         f"实际为 {indicator_cache.ALGORITHM_VERSION}"
     )
 
-    # 验证新 key 包含 v5，不包含 v4
+    # 验证新 key 包含 v6，不包含 v5
     key = indicator_cache.build_cache_key(
         TEST_INSTRUMENT_ID, "1d", "qfq", "2026-07-06",
     )
-    assert ":v5" in key, f"新缓存键应含 v5: {key}"
-    assert ":v4" not in key, f"新缓存键不应含 v4: {key}"
+    assert ":v6" in key, f"新缓存键应含 v6: {key}"
+    assert ":v5" not in key, f"新缓存键不应含 v5: {key}"
 
 
 def test_old_v4_cache_key_not_matched() -> None:
@@ -308,7 +305,124 @@ if __name__ == "__main__":
     print(f"CACHE_TTL_SECONDS={indicator_cache.CACHE_TTL_SECONDS} OK")
 
     # 验证算法版本
-    assert indicator_cache.ALGORITHM_VERSION == "v5"
+    assert indicator_cache.ALGORITHM_VERSION == "v6"
     print(f"ALGORITHM_VERSION={indicator_cache.ALGORITHM_VERSION} OK")
 
     print("OK")
+
+
+# ============================================================
+# [CHANGE-011 SMC] 测试 6: include_smc 缓存键隔离
+# ============================================================
+
+
+def test_smc_cache_key_suffix_isolation() -> None:
+    """[CHANGE-011] include_smc=True 与 False 生成不同缓存键。
+
+    SMC 与非 SMC 结果独立缓存，互不污染。
+    同一 symbol/timeframe/adj/last_bar_time 下：
+    - include_smc=False → indicator:...:v6
+    - include_smc=True  → indicator:...:v6:smc
+    """
+    key_no_smc = indicator_cache.build_cache_key(
+        TEST_INSTRUMENT_ID, "1d", "qfq", "2026-07-14",
+        include_smc=False,
+    )
+    key_with_smc = indicator_cache.build_cache_key(
+        TEST_INSTRUMENT_ID, "1d", "qfq", "2026-07-14",
+        include_smc=True,
+    )
+    assert key_no_smc != key_with_smc, (
+        f"include_smc=True 与 False 应生成不同键: "
+        f"no_smc={key_no_smc}, with_smc={key_with_smc}"
+    )
+    assert key_with_smc.endswith(":smc"), (
+        f"include_smc=True 应追加 :smc 后缀: {key_with_smc}"
+    )
+    assert not key_no_smc.endswith(":smc"), (
+        f"include_smc=False 不应追加 :smc 后缀: {key_no_smc}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_smc_cache_no_cross_contamination(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[CHANGE-011] 同一 symbol/timeframe 切换 SMC 开关不能返回旧缓存。
+
+    场景：
+    1. include_smc=False 写入缓存（无 SMC layer）
+    2. include_smc=True 查询 → 应未命中（不同 key）
+    3. include_smc=True 写入缓存（有 SMC layer）
+    4. include_smc=False 查询 → 应命中旧的无 SMC 缓存
+    """
+    stored: dict[str, str] = {}
+
+    mock_redis = AsyncMock()
+
+    async def mock_get(key):
+        return stored.get(key)
+
+    async def mock_set(key, value, **kwargs):
+        stored[key] = value
+
+    mock_redis.get = mock_get
+    mock_redis.set = mock_set
+    monkeypatch.setattr(indicator_cache, "get_redis", lambda: mock_redis)
+
+    # 1. 写入无 SMC 缓存
+    data_no_smc = {"layers": [{"layer_id": "macd"}], "data": {}, "errors": {}}
+    await indicator_cache.set(
+        TEST_INSTRUMENT_ID, "1d", "qfq", "2026-07-14", data_no_smc,
+        include_smc=False,
+    )
+
+    # 2. 查询 SMC 版本 → 应未命中
+    result_smc = await indicator_cache.get(
+        TEST_INSTRUMENT_ID, "1d", "qfq", "2026-07-14",
+        include_smc=True,
+    )
+    assert result_smc is None, "include_smc=True 不应命中 False 的缓存"
+
+    # 3. 写入 SMC 缓存
+    data_with_smc = {"layers": [{"layer_id": "macd"}, {"layer_id": "smc"}], "data": {}, "errors": {}}
+    await indicator_cache.set(
+        TEST_INSTRUMENT_ID, "1d", "qfq", "2026-07-14", data_with_smc,
+        include_smc=True,
+    )
+
+    # 4. 查询无 SMC 版本 → 应命中旧缓存（不含 smc layer）
+    result_no_smc = await indicator_cache.get(
+        TEST_INSTRUMENT_ID, "1d", "qfq", "2026-07-14",
+        include_smc=False,
+    )
+    assert result_no_smc is not None, "include_smc=False 应命中自己的缓存"
+    layer_ids = [layer["layer_id"] for layer in result_no_smc["layers"]]
+    assert "smc" not in layer_ids, "无 SMC 缓存不应包含 smc layer"
+
+    # 5. 查询 SMC 版本 → 应命中 SMC 缓存（含 smc layer）
+    result_smc_hit = await indicator_cache.get(
+        TEST_INSTRUMENT_ID, "1d", "qfq", "2026-07-14",
+        include_smc=True,
+    )
+    assert result_smc_hit is not None, "include_smc=True 应命中自己的缓存"
+    smc_layer_ids = [layer["layer_id"] for layer in result_smc_hit["layers"]]
+    assert "smc" in smc_layer_ids, "SMC 缓存应包含 smc layer"
+
+
+def test_smc_default_is_false() -> None:
+    """[CHANGE-011] build_cache_key 的 include_smc 默认值为 False。
+
+    SMC 默认关闭，不计算、不缓存、不渲染。
+    """
+    key_default = indicator_cache.build_cache_key(
+        TEST_INSTRUMENT_ID, "1d", "qfq", "2026-07-14",
+    )
+    key_explicit_false = indicator_cache.build_cache_key(
+        TEST_INSTRUMENT_ID, "1d", "qfq", "2026-07-14",
+        include_smc=False,
+    )
+    assert key_default == key_explicit_false, (
+        "include_smc 默认值应为 False（不追加 :smc 后缀）"
+    )
+    assert not key_default.endswith(":smc"), (
+        "默认缓存键不应含 :smc 后缀（SMC 默认关闭）"
+    )

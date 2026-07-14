@@ -3,7 +3,7 @@
 // PRD V1.1 §7.3 + AGENTS 规则17: 复用 useStockResearchData + StockResearchWorkspace
 // 展示：K线（中栏） + code/label 分离状态 + raw payload（右栏，Raw JSON 默认折叠）
 // 普通用户 /market 不展示任何原始因子或 JSON。
-import { useState, useCallback, useMemo } from 'react'
+import { useState, useCallback, useMemo, useEffect } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { MarketInstrumentPane } from '@/features/market-workspace/MarketInstrumentPane'
 import { StockResearchWorkspace } from '@/features/stock-research/StockResearchWorkspace'
@@ -15,6 +15,8 @@ import {
   normalizeDisplayTimeframe,
   type DisplayTimeframe,
 } from '@/features/stock-research/stockResearchTypes'
+// [CHANGE-011 SMC] - 加载初始 layerVisibility.smc 状态，驱动 indicators 按需重拉
+import { loadChartLayerVisibility } from '@/features/stock-research/indicatorPreferences'
 import workspaceStyles from '@/features/market-workspace/MarketWorkspace.module.scss'
 import debugStyles from '@/features/research-context/EventStatePanel.module.scss'
 import clsx from 'clsx'
@@ -72,10 +74,24 @@ export default function AdminStockDebugPage() {
     setTimeframe(tf)
   }, [])
 
+  // [CHANGE-011 SMC] - smc 开关状态：初始值从 localStorage 读取，与 StockResearchWorkspace 同源；
+  //   用户在 IndicatorToolbar 切换时由 onSmcToggle 回调更新；驱动 useStockResearchData 重拉 indicators。
+  //   AdminStockDebugPage 使用 source='watchlist' strategyKey='watchlist_monitor'，与 StockResearchWorkspace 调用一致。
+  const [smcEnabled, setSmcEnabled] = useState<boolean>(() =>
+    loadChartLayerVisibility('watchlist', 'watchlist_monitor').smc,
+  )
+  useEffect(() => {
+    setSmcEnabled(loadChartLayerVisibility('watchlist', 'watchlist_monitor').smc)
+  }, [])
+  const handleSmcToggle = useCallback((enabled: boolean) => {
+    setSmcEnabled(enabled)
+  }, [])
+
   // K线研究数据（复用 /market 和 /stock/:symbol 共用 hook）
   const researchData = useStockResearchData({
     symbol: symbol ?? null,
     timeframe,
+    includeSmc: smcEnabled,
   })
 
   const debugQuery = useAdminStockDebug(
@@ -132,6 +148,7 @@ export default function AdminStockDebugPage() {
                 strategyKey="watchlist_monitor"
                 rightPanelCollapsed={rightPanelCollapsed}
                 showRightPanel={!rightPanelCollapsed}
+                onSmcToggle={handleSmcToggle}
                 rightPanel={
                   <div className={debugStyles.adminDebugContainer}>
                     <div className={debugStyles.adminDebugHeader}>

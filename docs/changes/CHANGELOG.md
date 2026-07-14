@@ -2,6 +2,20 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-15
+
+- CHANGE-20260715-001: SMC 智能资金指标（ref/smc.py 重写版）+ MiniKline viewport P0 修复 + 图层 7→8
+  - SMC 模块：基于用户提供的 ref/smc.py Python 重写版本（非 LuxAlgo Pine 翻译），纯函数仅依赖 stdlib；默认参数与 ref 一致；BOS/CHoCH/internal OB/EQH/EQL/Strong-Weak High-Low；anchor/confirmed 因果契约；逐 bar 增量=全量；未来 bar 不修改已确认事件
+  - FVG 完全排除：不计算、不返回、不缓存、不渲染，也不暴露 FVG 开关；生产计算路径无 FVG 函数或状态；输出级别断言（keys/events/OB/EQH/EQL/params/state 6 项）
+  - include_smc 按需计算：compute_all_indicators 新增 include_smc=False 默认参数；False 时跳过 SMC 计算（0 CPU）；True 时注入 smc 图层
+  - 缓存隔离：ALGORITHM_VERSION v5→v6（旧缓存自动失效）；include_smc=True 追加 :smc 后缀；同 symbol 切换开关不返回旧缓存
+  - API：/api/v1/instruments/{id}/indicators 新增 include_smc 查询参数（bool，默认 false）
+  - 前端图层 7→8：ChartLayerKey 新增 'smc'；manifest 8 条目；smc 默认关闭（watchlist/selection 均 false）；旧 localStorage 迁移 smc=false；StrategyChart SMC Canvas 渲染
+  - MiniKline viewport P0：纯函数 computeMiniKlineViewport 替代 fitContent；五周期 clamp（15m/60m 50-64，日线 48-58，周线 40-52，月线 30-40）；右侧 3 bar 留白；切周期不沿用旧 range；12 项测试
+  - 测试：SMC 34 + 缓存 10 + 服务 38 + viewport 12 + manifest 15 = 109 项 PASS；ruff/mypy/tsc/eslint 0 error；contract 316 pass/8 fail（与 a9ac03c 基线对照 0 新增失败）；build 248 modules 0 error
+  - 隔离边界：SMC 只进入 /stock 指标链；/market 右栏小 K 线不显示 SMC；Node/DSA/盘中监控/Capture 未修改；不新增表/migration/worker/依赖
+  - 文档：AGENTS clause 43 + current 01/02/04/05 + maps + CHANGE-001 + CHANGELOG
+
 ## 2026-07-14
 
 - CHANGE-20260714-001: 最新行情涨跌幅与 DSA 日期分离 + preset=none + 股票名称筛选 + 详情左栏滚动 + 五周期小 K 线 + pywencai 探测 + SMC 撤回

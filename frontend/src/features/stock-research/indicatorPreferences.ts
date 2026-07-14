@@ -27,8 +27,9 @@ function prefKey(source: ResearchSource, strategyKey: string): string {
   return `${PREF_KEY_PREFIX}:${source}:${strategyKey}`
 }
 
-// 从旧 12 键 LayerVisibility 提取 7 键 ChartLayerVisibility
+// 从旧 12 键 LayerVisibility 提取 8 键 ChartLayerVisibility
 // 分组图层用 OR（任一子图层开启则组开关为开）；单图层用 in 检查尊重显式 false
+// [CHANGE-011 SMC] 旧 chart key 无 smc，迁移时使用 defaults.smc（默认 false）
 function migrateFromLegacyLayers(
   saved: Record<string, boolean>,
   defaults: ChartLayerVisibility,
@@ -42,10 +43,12 @@ function migrateFromLegacyLayers(
     macd: has('macd') ? !!saved.macd : defaults.macd,
     sqzmom: has('sqzmom') ? !!saved.sqzmom : defaults.sqzmom,
     breakout: has('breakout') ? !!saved.breakout : defaults.breakout,
+    smc: defaults.smc, // 旧 chart key 无 smc，使用默认值（CHANGE-011）
   }
 }
 
-// 从旧 4 键 IndicatorVisibility 提取 7 键 ChartLayerVisibility
+// 从旧 4 键 IndicatorVisibility 提取 8 键 ChartLayerVisibility
+// [CHANGE-011 SMC] 旧 toolbar key 无 smc/sqzmom，迁移时使用默认值
 function migrateFromLegacyToolbar(
   saved: Record<string, boolean>,
   defaults: ChartLayerVisibility,
@@ -58,6 +61,7 @@ function migrateFromLegacyToolbar(
     macd: saved.macd ?? defaults.macd,
     sqzmom: defaults.sqzmom,
     breakout: defaults.breakout,
+    smc: defaults.smc, // 旧 toolbar key 无 smc，使用默认值（CHANGE-011）
   }
 }
 

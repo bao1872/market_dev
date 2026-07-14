@@ -63,6 +63,9 @@ from app.strategy.runtime import MarketDataContext, StrategyLoader
 from app.strategy_assets.algorithms.features.merged_dsa_atr_rope_bb_factors import (
     compute_bollinger,
 )
+from app.strategy_assets.algorithms.features.smc_indicator import (
+    compute_smc_indicators,
+)
 from app.strategy_assets.algorithms.features.sqzmom_lb import compute_sqzmom_lb
 
 logger = logging.getLogger("services.indicator_service")
@@ -323,6 +326,7 @@ async def compute_all_indicators(
     timeframe: str,
     adj: str,
     bars: int = 250,
+    include_smc: bool = False,
 ) -> dict[str, Any]:
     """从 StrategyLoader._registry 获取所有策略，实时计算图表指标。
 
@@ -336,6 +340,8 @@ async def compute_all_indicators(
     6. 调用 runtime.compute_indicators(context) 计算指标
     7. 收集 chart_layers 定义 + 计算结果（截取最近 bars 根，转 JSON 可序列化）
     8. 计算 source_bar_times/source_bar_hash 作为数据源诊断字段
+    9. [CHANGE-011 SMC] 当 include_smc=True 时，按需计算 SMC 指标并注入 smc 图层；
+       include_smc=False 时跳过 SMC 计算（不消耗 CPU）。
 
     异常处理：单个策略失败不阻塞其他策略，错误记录到 errors 字典返回给前端。
 
@@ -345,6 +351,9 @@ async def compute_all_indicators(
         timeframe: 周期 1d | 15m | 1h | 1w | 1mo（当前图表指标基于日线）
         adj: 复权方式 qfq | none
         bars: 返回最近 N 根 bar 的指标（默认 250）
+        include_smc: 是否计算 SMC 指标（默认 False，前端通过 ?include_smc=true 显式开启）；
+            SMC 是按需计算的独立图层，不进入 DSA、Node 监控、Capture 或右栏 context；
+            完全排除 FVG（不计算、不返回、不缓存、不渲染）。
 
     Returns:
         dict 包含：
@@ -640,6 +649,68 @@ async def compute_all_indicators(
     })
     data["sqzmom_lb"] = _to_json_safe(_truncate_lists(sqzmom_renamed, bars))
 
+    # [CHANGE-011 SMC] - 按需计算 SMC 指标（include_smc=False 时跳过，不消耗 CPU）
+    # SMC 是独立图层，不进入 DSA、Node 监控、Capture 或右栏 context；
+    # 完全排除 FVG（不计算、不返回、不缓存、不渲染）；
+    # 输入使用当前 timeframe 对应 macd_bars（与 MACD/SQZMOM 同源）；
+    # 输出 BOS/CHoCH/OB/EQH/EQL/trailing，每个事件含 anchor/confirmed 因果契约。
+    if include_smc:
+        try:
+            smc_opens = macd_bars["open"].to_numpy(float).tolist()
+            smc_highs = macd_bars["high"].to_numpy(float).tolist()
+            smc_lows = macd_bars["low"].to_numpy(float).tolist()
+            smc_closes = macd_bars["close"].to_numpy(float).tolist()
+            smc_times = macd_time_list  # 与 MACD/SQZMOM 共用 timeframe bars 时间
+            smc_result = compute_smc_indicators(
+                opens=smc_opens,
+                highs=smc_highs,
+                lows=smc_lows,
+                closes=smc_closes,
+                times=smc_times,
+            )
+            # 截取 time 序列到最后 bars 根（与 MACD/SQZMOM 一致）；
+            # events/order_blocks/equal_highs_lows/pivots 为事件列表（不按 bar 截断）。
+            smc_with_time = {
+                "events": smc_result["events"],
+                "order_blocks": smc_result["order_blocks"],
+                "equal_highs_lows": smc_result["equal_highs_lows"],
+                "trailing": smc_result["trailing"],
+                "pivots": smc_result["pivots"],
+                "time": smc_result["time"],
+                "params": smc_result["params"],
+            }
+            # 注入 smc 图层（main pane，renderer=smc）
+            layers.append({
+                "strategy_id": "smc",
+                "strategy_name": "SMC",
+                "layer_id": "smc",
+                "layer_name": "SMC",
+                "renderer": "smc",
+                "pane": "price",
+                "color": None,  # SMC 颜色由前端按方向决定（A股红涨绿跌）
+                "direction_colored": True,
+                "direction_up_color": "#FF4D4F",  # A 股红涨
+                "direction_down_color": "#22C55E",  # A 股绿跌
+                "fields": [
+                    "events", "order_blocks", "equal_highs_lows",
+                    "trailing", "pivots", "time",
+                ],
+                "hover_fields": [],
+            })
+            data["smc"] = _to_json_safe(_truncate_lists(smc_with_time, bars))
+            logger.info(
+                "SMC 指标计算成功 instrument_id=%s timeframe=%s events=%d obs=%d",
+                instrument_id, timeframe,
+                len(smc_result["events"]),
+                len(smc_result["order_blocks"]),
+            )
+        except Exception as exc:
+            # SMC 失败不阻塞主图（记录错误到 errors，前端显示降级提示）
+            errors["smc"] = str(exc)
+            logger.warning(
+                "SMC 指标计算失败 instrument_id=%s: %s", instrument_id, exc,
+            )
+
     # [指标服务] - 返回计算窗口元信息，前端据此决定显示范围，不硬编码
     calculation_window = INDICATOR_BARS.get(timeframe, 800)
     warmup_bars = INDICATOR_WARMUP_BARS.get(timeframe, 60)
@@ -670,7 +741,7 @@ if __name__ == "__main__":
     assert callable(compute_all_indicators), "compute_all_indicators 应可调用"
     sig = inspect.signature(compute_all_indicators)
     params = list(sig.parameters.keys())
-    expected_params = ["session", "instrument_id", "timeframe", "adj", "bars"]
+    expected_params = ["session", "instrument_id", "timeframe", "adj", "bars", "include_smc"]
     assert params == expected_params, \
         f"compute_all_indicators 参数不匹配: {params} != {expected_params}"
     print(f"compute_all_indicators params={params} ✓")
@@ -779,5 +850,20 @@ if __name__ == "__main__":
         if dif is not None and dea is not None and hist is not None:
             assert abs(hist - 2.0 * (dif - dea)) < 1e-9, "MACD 柱值公式错误"
     print("compute_macd 公式 ✓")
+
+    # 9. [CHANGE-011 SMC] - 验证 compute_smc_indicators 可导入且签名正确
+    assert callable(compute_smc_indicators), "compute_smc_indicators 应可调用"
+    sig_smc = inspect.signature(compute_smc_indicators)
+    smc_params = list(sig_smc.parameters.keys())
+    expected_smc = ["opens", "highs", "lows", "closes", "times", "params"]
+    assert smc_params == expected_smc, \
+        f"compute_smc_indicators 参数不匹配: {smc_params} != {expected_smc}"
+    print(f"compute_smc_indicators params={smc_params} ✓")
+
+    # 10. [CHANGE-011 SMC] - 验证 include_smc=False 不影响计算（默认值）
+    sig_all = inspect.signature(compute_all_indicators)
+    assert sig_all.parameters["include_smc"].default is False, \
+        "include_smc 默认值应为 False（按需计算，前端默认不开启）"
+    print("include_smc 默认值=False ✓")
 
     print("OK")

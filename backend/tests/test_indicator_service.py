@@ -896,5 +896,101 @@ async def test_sqzmom_scolor_only_contains_valid_colors(
         assert c in valid_colors, f"scolor 应是合法颜色，实际 {c}"
 
 
+# ============================================================
+# [CHANGE-011 SMC] include_smc 按需计算测试
+# ============================================================
+
+
+async def test_smc_not_calculated_when_include_smc_false(
+    mock_session: AsyncMock,
+    mock_bars: None,
+    empty_registry: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[CHANGE-011] include_smc=False（默认）时不计算 SMC，响应无 smc layer。
+
+    SMC 默认关闭，不消耗 CPU；前端通过 IndicatorToolbar 显式开启。
+    """
+    # spy: 记录 compute_smc_indicators 是否被调用
+    smc_called = False
+    original_compute = indicator_service.compute_smc_indicators
+
+    def spy_compute(*args, **kwargs):
+        nonlocal smc_called
+        smc_called = True
+        return original_compute(*args, **kwargs)
+
+    monkeypatch.setattr(indicator_service, "compute_smc_indicators", spy_compute)
+
+    # 默认调用（不传 include_smc → 默认 False）
+    result = await indicator_service.compute_all_indicators(
+        mock_session, TEST_INSTRUMENT_ID, "1d", "none", bars=250,
+    )
+
+    # SMC 未被调用
+    assert not smc_called, "include_smc=False 时不应调用 compute_smc_indicators"
+
+    # 响应中无 smc layer
+    layer_ids = [layer["layer_id"] for layer in result["layers"]]
+    assert "smc" not in layer_ids, "include_smc=False 时不应有 smc layer"
+
+    # data 中无 smc 键
+    assert "smc" not in result["data"], "include_smc=False 时 data 不应有 smc 键"
+
+
+async def test_smc_calculated_when_include_smc_true(
+    mock_session: AsyncMock,
+    mock_bars: None,
+    empty_registry: None,
+) -> None:
+    """[CHANGE-011] include_smc=True 时计算 SMC，响应包含 smc layer。
+
+    SMC 按需计算，输出 BOS/CHoCH/OB/EQH/EQL/trailing。
+    """
+    result = await indicator_service.compute_all_indicators(
+        mock_session, TEST_INSTRUMENT_ID, "1d", "none", bars=250,
+        include_smc=True,
+    )
+
+    # 响应中有 smc layer
+    layer_ids = [layer["layer_id"] for layer in result["layers"]]
+    assert "smc" in layer_ids, "include_smc=True 时应有 smc layer"
+
+    # smc layer 结构正确
+    smc_layer = next(layer for layer in result["layers"] if layer["layer_id"] == "smc")
+    assert smc_layer["renderer"] == "smc"
+    assert smc_layer["direction_colored"] is True
+    assert smc_layer["direction_up_color"] == "#FF4D4F"  # A 股红涨
+    assert smc_layer["direction_down_color"] == "#22C55E"  # A 股绿跌
+
+    # data 中有 smc 键，包含必需字段
+    assert "smc" in result["data"]
+    smc_data = result["data"]["smc"]
+    required_fields = {"events", "order_blocks", "equal_highs_lows", "trailing", "pivots", "time"}
+    assert required_fields.issubset(set(smc_data.keys())), (
+        f"smc data 缺少字段: {required_fields - set(smc_data.keys())}"
+    )
+
+    # FVG 不存在于 smc 输出
+    for key in smc_data:
+        assert "fvg" not in str(key).lower(), f"smc data 不得包含 FVG 键: {key}"
+
+
+async def test_smc_default_param_is_false(
+    mock_session: AsyncMock,
+    mock_bars: None,
+    empty_registry: None,
+) -> None:
+    """[CHANGE-011] compute_all_indicators 的 include_smc 参数默认为 False。"""
+    import inspect as _inspect
+
+    sig = _inspect.signature(indicator_service.compute_all_indicators)
+    param = sig.parameters.get("include_smc")
+    assert param is not None, "compute_all_indicators 应有 include_smc 参数"
+    assert param.default is False, (
+        f"include_smc 默认值应为 False（SMC 默认关闭），实际为 {param.default}"
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

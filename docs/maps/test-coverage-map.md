@@ -42,7 +42,7 @@
 | **StrategyChart 右侧留白契约（CHANGE-20260713-008）**：`RIGHT_PADDING_RATIO = 0.20`、`effectivePlotW = plotW * (1 - RIGHT_PADDING_RATIO)`、`step = effectivePlotW / display.length`、最右端有 20% 留白、保留 Pointer Events 拖拽/滚轮锚点缩放/双击复位/移动端双指缩放 | `frontend/src/components/__tests__/chartRightPadding.test.ts` |
 | **MarketToolbar 搜索框契约（CHANGE-20260713-005）**：受控 keyword/onKeywordChange、placeholder 文案、Enter 提交、blur 提交、清空立即提交、searchable={false}、externalKeyword 受控、单一搜索状态 | `frontend/src/features/market-workspace/__tests__/marketToolbarSearch.test.ts`（8 用例） |
 | **MessagesPage 数量一致性与跳转（CHANGE-20260713-005）**：useUnreadCount SSOT、total from backend、页头文案、不显示误导数字、单只股票跳转 /stock/:symbol、selection_composite 跳转 /market、AccountMenu 动态链接、AccountMenu 未读数 badge | `frontend/src/pages/__tests__/messagesCounts.test.ts`（8 用例） |
-| **CHART_LAYER_MANIFEST 用户文案（CHANGE-20260713-005 扩展）**：sqzmom→"挤压动量"、node→"筹码共识价"、内部 ChartLayerKey 不变 | `frontend/src/features/stock-research/__tests__/indicatorManifest.test.ts`（12 用例） |
+| **CHART_LAYER_MANIFEST 用户文案（CHANGE-20260713-005 扩展，CHANGE-20260715-001 新增 3 个 SMC 用例）**：sqzmom→"挤压动量"、node→"筹码共识价"、内部 ChartLayerKey 不变；smc 图层存在（name="智能资金"、kind="main"）、smc 默认关闭、ChartLayerVisibility 含 8 键 | `frontend/src/features/stock-research/__tests__/indicatorManifest.test.ts`（15 用例） |
 | **表格视图配置 preset API**：权限矩阵（401/403/200/201）、CRUD、用户隔离、重名冲突 409（含 NULL strategy_key 场景）、quota 422、非法 config 422、filters/hiddenColumns/sort 深度校验、op 白名单校验、is_default 互斥、必填字段校验、user_id 注入安全、PATCH 空请求 422、迁移幂等、**跨 session 持久化（create/update/delete 真实 commit 验证）** | `backend/tests/test_table_view_presets_api.py`（50 用例） |
 | **preset 保存后前端列表刷新**：成功保存后清空输入/刷新列表/失败显示后端 detail | `frontend/src/components/__tests__/tablePresetMenu.test.ts`（4 用例） |
 | **sticky 表头 viewport 模式**：`StrategyDataTable` 支持 `stickyHeaderMode="viewport"`、ScreenerPage 传入 viewport、global.scss 中 `.table-wrap.viewport-sticky` overflow visible + 表头 top `var(--topbar)` z-index 18 | `frontend/src/components/__tests__/stickyHeader.test.ts`（4 用例） |
@@ -206,6 +206,9 @@
 | SQZMOM_LB 后端算法 Pine 等价 | `backend/tests/test_sqzmom_lb.py` |
 | SQZMOM_LB indicator service 注入 | `backend/tests/test_indicator_service.py` |
 | SQZMOM_LB 前端图层开关/副图/渲染契约 | `frontend/scripts/contract-tests/sqzmom-layer.test.ts` |
+| **SMC 后端算法（CHANGE-20260715-001）**：`compute_smc` 纯函数仅依赖 Python 标准库（无 numpy/pandas）；市场结构关键点位序列长度与输入 bar 对齐；边界用例（bar 不足、全平数据、单调序列）；**FVG 完全排除**（输出不含任何 FVG 字段）；基于用户提供的参考实现重写，不是 LuxAlgo Pine 翻译 | `backend/tests/test_smc_indicator.py`（34 用例） |
+| **SMC 服务层按需启用（CHANGE-20260715-001）**：`compute_all_indicators(include_smc=False)` 默认不计算 SMC；`compute_all_indicators(include_smc=True)` 计算 SMC 且响应含 `data.smc`；`include_smc` 不影响 DSA/Node/BB/MACD/SQZMOM 计算结果 | `backend/tests/test_indicator_service.py`（新增 3 个 SMC 服务层测试） |
+| **MiniKline viewport P0 修复（CHANGE-20260715-001）**：纯函数 `computeMiniKlineViewport`（`frontend/src/features/market-workspace/miniKlineViewport.ts`）按周期 clamp——15m/60m 50-64、日线 48-58、周线 40-52、月线 30-40；右侧留白 3 根 bar；不调用 `fitContent`；bar 不足时 clamp 不越界；各周期 viewport `toIndex - fromIndex` 落在对应区间内 | `frontend/src/features/market-workspace/__tests__/miniKlineViewport.test.ts`（12 用例） |
 | 结构状态因子 ATR SSOT Pine RMA 等价 | `backend/tests/test_atr_utils.py` |
 | 结构状态因子 5 组因子 + 异常隔离 + 无未来函数 | `backend/tests/test_structural_factor_service.py` |
 | 结构状态因子 API 路由（合法/非法参数/降级） | `backend/tests/test_structural_factors_api.py` |
@@ -231,7 +234,7 @@
 | DSA overlay source alignment：`indicator_service` 在 15m/1h 使用 macd_bars 计算 source_bar_times/hash，与 chart bars 同源 | `backend/tests/test_indicator_service.py`（新增 3 个 macd_bars 同源测试） |
 | DSA overlay source alignment：15m/1h `bars.trade_time` 返回 aware datetime（Asia/Shanghai tzinfo，序列化为 `+08:00`），1d trade_date 仍为 date 对象 | `backend/tests/test_bars_vectorization.py`（新增 3 个 tzinfo 测试） |
 | DSA overlay source alignment：`normalizeChartTime` naive 与 aware ISO 产生相同 canonical key / 15m K线 aware 与 source_bar_times naive 全部匹配不误报 mismatch / 故意构造 source mismatch 仍触发暂停 / `timeTicks` 15m aware 时间显示北京交易时间不显示 03:00 | `frontend/src/components/__tests__/dsaSourceAlignment.test.ts`（新增 14 个 contract 测试，纯 .ts 模块 `frontend/src/utils/chartTime.ts`） |
-| Indicator overlay alignment：`indicator_cache.ALGORITHM_VERSION == "v5"`（PR #32：DSA 全周期 + 1w/1mo BB 改变计算路径）且旧 v4 cache key 不匹配新 `build_cache_key`（旧缓存自然失效，避免返回 1d-only DSA + 1w/1mo 无 BB） | `backend/tests/test_indicator_cache.py`（PR #32 修订 2 个 cache schema 版本测试：v4→v5 + 旧 v4 key 不匹配） |
+| Indicator overlay alignment：`indicator_cache.ALGORITHM_VERSION == "v6"`（CHANGE-20260715-001：新增 SMC 指标按需启用，cache key 追加 `:smc` 后缀隔离）且旧 v5 cache key 不匹配新 `build_cache_key`（旧缓存自然失效）；`include_smc=true` cache key 追加 `:smc` 后缀与默认路径隔离，两路径互不污染 | `backend/tests/test_indicator_cache.py`（CHANGE-20260715-001 新增 3 个 SMC 缓存隔离测试 + 2 个 v5→v6 schema 版本测试） |
 | Indicator overlay alignment：`_adapt_watchlist_bb` 1d/15m/1h/1w/1mo 全部用 `macd_bars` 调用 `compute_bollinger` 计算 BB（非日线阶梯线，1w/1mo 不再移除 BB 字段），BB 长度与 macd_bars 对齐，数值与 `compute_bollinger(macd_bars)` 一致 | `backend/tests/test_indicator_service.py`（PR #32 删除 2 个旧 1w/1mo BB 移除测试，新增 2 个 1w/1mo BB 用 macd_bars 计算测试；PR #31 已有 3 个 15m/1h BB overlay 计算测试保留） |
 | Indicator overlay alignment：DSA 全周期支持，`MarketDataContext.bars_daily=macd_bars`（所有周期用当前 timeframe bars），`daily_time_list` 用 `macd_bars.index`，15m DSA `time[0]` 含 `T` 分隔符（非日线 YYYY-MM-DD），15m context.bars_daily 第一根 bar `hour==9`（非 daily 的 0） | `backend/tests/test_indicator_service.py`（PR #32 新增 2 个 DSA 全周期计算测试） |
 | Indicator overlay alignment：`shouldAllowDsaOverlay` 1d/15m/1h/1w/1mo 全部 true / `shouldCheckDsaMismatch` 全周期 true / `DSA_TITLE_HINT('1d')` 含"日线结构锚" / `DSA_TITLE_HINT('15m'/'1h'/'1w'/'1mo')` 含"当前周期验证图层"且不含"日线结构锚" | `frontend/src/components/__tests__/dsaSourceAlignment.test.ts`（PR #32 重写第 4 节，4 个 DSA overlay policy contract 测试覆盖全周期 + title 按周期区分） |
@@ -273,3 +276,6 @@
 | `test_share_capital.py` | 14 tests | 股本同步 + migration 063 + quote 市值计算（CHANGE-20260713-010） |
 | 前端 node 测试 | 108 tests | 64 route/url/types + 44 contract |
 | `change010Contract.test.ts` | 49 tests | CHANGE-010 前端源码契约（市值/MiniKline/MarketRightPanel/filterAlias/Excel） |
+| `test_smc_indicator.py` | 34 tests | SMC 后端算法纯函数 + FVG 排除（CHANGE-20260715-001） |
+| `miniKlineViewport.test.ts` | 12 tests | MiniKline viewport 纯函数按周期 clamp（CHANGE-20260715-001） |
+| `indicatorManifest.test.ts` | 15 tests | CHART_LAYER_MANIFEST 用户文案 + SMC 图层（CHANGE-20260715-001 扩展 3 用例） |

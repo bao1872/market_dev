@@ -1587,6 +1587,9 @@ export interface IndicatorQueryParams {
   adj?: string        // qfq | none
   bars?: number       // 返回最近 N 根 bar 的指标
   force_refresh?: number  // 1 时跳过 Redis 指标缓存强制实时计算（截图链路使用）
+  // [CHANGE-011 SMC] - 1 时计算 SMC 指标（默认关闭；前端通过 IndicatorToolbar 显式开启）
+  // 后端在 include_smc=False 时跳过 SMC 计算，不消耗 CPU
+  include_smc?: number
 }
 
 /** 指标 API 响应 */

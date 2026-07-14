@@ -320,9 +320,10 @@ node --experimental-strip-types --test src/components/__tests__/dsaSourceAlignme
 任何修改 `backend/app/services/indicator_cache.py`（`ALGORITHM_VERSION`）、`backend/app/services/indicator_service.py::_adapt_watchlist_bb`、`frontend/src/utils/dsaOverlayPolicy.ts`、`frontend/src/components/StrategyChart.tsx`（DSA toggle / BB overlay 对齐 / debug 工具）必须跑 indicator overlay alignment 回归测试。
 
 后端 cache schema 版本回归：
-- `indicator_cache.ALGORITHM_VERSION == "v5"`（PR #32 bump：DSA 全周期 + 1w/1mo BB 改变计算路径）；
-- 旧 v4 cache key 与新 `build_cache_key` 生成的 key 不相等（旧缓存自然失效，避免旧 v4 缓存返回 1d-only DSA + 1w/1mo 无 BB）；
-- 修改 indicator 计算逻辑、`source_bar_times` 格式、BB/SQZMOM/MACD 计算路径、DSA 全周期支持、1w/1mo BB 计算必须 bump `ALGORITHM_VERSION`。
+- `indicator_cache.ALGORITHM_VERSION == "v6"`（CHANGE-20260715-001 bump：新增 SMC 指标并按需启用，缓存 key 追加 `:smc` 后缀隔离）；
+- 旧 v5 cache key 与新 `build_cache_key` 生成的 key 不相等（旧缓存自然失效，避免旧 v5 缓存返回无 SMC 数据被误用）；
+- `include_smc=true` 时 cache key 追加 `:smc` 后缀，与默认路径（`include_smc=false`）完全隔离，互不污染；
+- 修改 indicator 计算逻辑、`source_bar_times` 格式、BB/SQZMOM/MACD 计算路径、DSA 全周期支持、1w/1mo BB 计算、SMC 计算路径必须 bump `ALGORITHM_VERSION`。
 
 后端 DSA 全周期计算回归：
 - `MarketDataContext.bars_daily` 在所有周期（1d/15m/1h/1w/1mo）都使用 `macd_bars`（当前 timeframe bars），DSA 不再仅由日线驱动；
@@ -975,11 +976,12 @@ PATCH 空请求（1 个用例）：
 - AccountMenu unread>0 时消息链接为 `/messages?filter=unread`；
 - AccountMenu 消息项显示未读数（itemBadge）。
 
-### 3.10.2e 前端 indicatorManifest.test.ts 回归（12 个用例，CHANGE-20260713-005 扩展）
+### 3.10.2e 前端 indicatorManifest.test.ts 回归（15 个用例，CHANGE-20260713-005 扩展，CHANGE-20260715-001 新增 3 个 SMC 用例）
 
 - 原 10 个用例不变；
 - manifest 用户文案：sqzmom → "挤压动量"，node → "筹码共识价"；
-- 内部 ChartLayerKey 不变：sqzmom/node 仍为内部 id。
+- 内部 ChartLayerKey 不变：sqzmom/node 仍为内部 id；
+- **SMC 图层断言（CHANGE-20260715-001 新增 3 用例）**：`smc` 图层存在于 `CHART_LAYER_MANIFEST`，name="智能资金"，kind="main"；`smc` 默认关闭（`default` 中 `smc: false`）；`ChartLayerVisibility` 类型含 8 键（含 `smc`）。
 
 ### 3.10.2f 后端 test_strategy_results_keyword.py 回归（3 个用例，CHANGE-20260713-005 新增）
 
@@ -1135,6 +1137,29 @@ node --experimental-strip-types --test \
 - **详情来源上下文不回归**：`MarketWorkspacePage.handleExport` 复用 `convertFiltersToMetricFilters`；`marketWorkspaceUrlState` 导出 `convertFiltersToMetricFilters` 并复用 `normalizeMetricValue`。
 
 `change010Contract.test.ts` 49 项源码契约测试覆盖五大主题（市值字段映射 + Excel 导出契约 + 股票名称视觉入口 + 小 K 线 + 详情来源上下文）。
+
+## 3.13 CHANGE-20260715-001 回归（SMC 指标 + MiniKline viewport P0 修复）
+
+```bash
+# SMC 后端算法 + 缓存 + 服务测试
+APP_ENV=test TEST_DATABASE_URL=postgresql+psycopg://bz:bz@localhost:5433/bz_stock_test \
+  pytest backend/tests/test_smc_indicator.py backend/tests/test_indicator_cache.py backend/tests/test_indicator_service.py -q
+
+# SMC + MiniKline viewport 前端契约测试
+node --experimental-strip-types --test \
+  src/features/stock-research/__tests__/indicatorManifest.test.ts \
+  src/features/market-workspace/__tests__/miniKlineViewport.test.ts
+```
+
+覆盖规则：
+
+- **SMC 后端算法（`test_smc_indicator.py`，34 用例）**：`compute_smc` 纯函数仅依赖 Python 标准库（无 numpy/pandas 依赖）；市场结构关键点位序列长度与输入 bar 对齐；边界用例（bar 不足、全平数据、单调序列）；FVG 完全排除（输出不含任何 FVG 字段）。
+- **SMC 缓存隔离（`test_indicator_cache.py` 新增 3 用例）**：`include_smc=true` 时 cache key 追加 `:smc` 后缀；`include_smc=false`（默认）cache key 不含 `:smc` 后缀；两路径互不污染（默认路径缓存不含 SMC 字段）。
+- **SMC 服务层（`test_indicator_service.py` 新增 3 用例）**：`compute_all_indicators(include_smc=False)` 默认不计算 SMC；`compute_all_indicators(include_smc=True)` 计算 SMC 且响应含 `data.smc`；`include_smc` 不影响 DSA/Node/BB/MACD/SQZMOM 计算结果。
+- **前端 manifest（`indicatorManifest.test.ts`，15 用例）**：见 §3.10.2e。
+- **MiniKline viewport（`miniKlineViewport.test.ts`，12 用例）**：纯函数 `computeMiniKlineViewport` 按周期 clamp——15m/60m 50-64、日线 48-58、周线 40-52、月线 30-40；右侧留白 3 根 bar；不调用 `fitContent`；bar 不足时 clamp 不越界；各周期 viewport `toIndex - fromIndex` 落在对应区间内。
+
+SMC 只进入 `/stock/:symbol` 个股详情指标链，不进入 `/market`、DSA、Node、Capture、盘中监控、选股；FVG 完全排除。
 
 ## 4. CI 门禁
 

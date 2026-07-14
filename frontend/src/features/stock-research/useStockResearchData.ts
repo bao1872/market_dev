@@ -21,6 +21,10 @@ import {
 export interface StockResearchDataParams {
   symbol: string | null
   timeframe: DisplayTimeframe
+  // [CHANGE-011 SMC] - 是否请求 SMC 指标（默认 false）。
+  // 父页面持有 smc 开关状态，开启时通过此参数传递给 useIndicators 触发后端按需计算。
+  // 后端 include_smc=False 时跳过 SMC 计算，不消耗 CPU。
+  includeSmc?: boolean
 }
 
 // 行情摘要 ViewModel（供 StockDetailPage 价格条和 StockResearchWorkspace 状态条共用）
@@ -71,7 +75,7 @@ export interface StockResearchData {
   isRenderReady: boolean
 }
 
-export function useStockResearchData({ symbol, timeframe }: StockResearchDataParams): StockResearchData {
+export function useStockResearchData({ symbol, timeframe, includeSmc = false }: StockResearchDataParams): StockResearchData {
   // 1. 按 symbol 查询 instrument（获取 instrumentId）
   const instrumentQuery = useInstrumentBySymbol(symbol ?? '')
   const instrumentId = instrumentQuery.data?.id
@@ -84,10 +88,14 @@ export function useStockResearchData({ symbol, timeframe }: StockResearchDataPar
     adj: 'qfq',
     page_size: barsCount,
   })
+  // [CHANGE-011 SMC] - includeSmc=true 时传 include_smc=1 触发后端按需计算 SMC 指标；
+  //   includeSmc=false 时省略该参数，后端默认 False，跳过 SMC 计算。
+  //   useIndicators 的 queryKey 包含 params，include_smc 字段变化会触发重新拉取。
   const indicatorsQuery = useIndicators(instrumentId, {
     timeframe,
     adj: 'qfq',
     bars: barsCount,
+    ...(includeSmc ? { include_smc: 1 } : {}),
   })
   const quoteQuery = useRealtimeQuote(instrumentId)
   const eventsQuery = useInstrumentEvents(instrumentId, { limit: 100 })

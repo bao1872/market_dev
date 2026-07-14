@@ -2,16 +2,19 @@
 // 用法：node --experimental-strip-types --test src/features/stock-research/__tests__/indicatorManifest.test.ts
 //
 // 覆盖：
-//  1. CHART_LAYER_MANIFEST 包含 7 个条目
+//  1. CHART_LAYER_MANIFEST 包含 8 个条目
 //  2. manifest 条目字段完整（id/name/kind/enabled/description）
-//  3. 默认可见性：watchlist → node/boll/volume/macd=true；selection → trend/volume/macd=true
-//  4. 主图/副图分组正确（主图 4 + 副图 3）
+//  3. 默认可见性：watchlist → node/boll/volume=true, macd/smc=false；selection → trend/volume=true, macd/smc=false
+//  4. 主图/副图分组正确（主图 5 + 副图 3）
 //  5. breakout 为 selectionOnly
 //  6. chartLayersForSource 过滤 selectionOnly
 //  7. loadChartLayerVisibility 空存储返回默认值
 //  8. saveChartLayerVisibility/loadChartLayerVisibility 往返一致
 //  9. 旧 key 迁移（detail-chart-strategy-groups-v3 → 新 key）
 // 10. 旧 key 迁移（panji:indicator-visibility:v1 → 新 key）
+// 11. 用户文案：sqzmom/node/smc
+// 12. 内部 key 不变
+// 13. [CHANGE-011 SMC] smc 默认关闭，include_smc=false 不计算 SMC
 
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
@@ -35,9 +38,9 @@ function createLocalStorageMock() {
   } as unknown as Storage
 }
 
-// ===== 1. manifest 包含 7 个条目 =====
-test('CHART_LAYER_MANIFEST 包含 7 个条目', () => {
-  assert.equal(CHART_LAYER_MANIFEST.length, 7)
+// ===== 1. manifest 包含 8 个条目（CHANGE-011: 新增 smc，7→8）=====
+test('CHART_LAYER_MANIFEST 包含 8 个条目', () => {
+  assert.equal(CHART_LAYER_MANIFEST.length, 8)
 })
 
 // ===== 2. manifest 条目字段完整 =====
@@ -53,7 +56,8 @@ test('manifest 条目字段完整', () => {
 
 // ===== 3. 默认可见性 =====
 // P0-6: MACD 是辅助技术指标，watchlist/selection 默认均关闭
-test('默认可见性：watchlist → node/boll/volume=true, macd=false', () => {
+// [CHANGE-011 SMC] smc 默认关闭，不开启时后端不计算 SMC
+test('默认可见性：watchlist → node/boll/volume=true, macd/smc=false', () => {
   const vis = defaultChartLayerVisibility('watchlist')
   assert.equal(vis.trend, false)
   assert.equal(vis.node, true)
@@ -62,9 +66,10 @@ test('默认可见性：watchlist → node/boll/volume=true, macd=false', () => 
   assert.equal(vis.macd, false)
   assert.equal(vis.sqzmom, false)
   assert.equal(vis.breakout, false)
+  assert.equal(vis.smc, false)
 })
 
-test('默认可见性：selection → trend/volume=true, macd=false', () => {
+test('默认可见性：selection → trend/volume=true, macd/smc=false', () => {
   const vis = defaultChartLayerVisibility('selection')
   assert.equal(vis.trend, true)
   assert.equal(vis.node, false)
@@ -73,14 +78,16 @@ test('默认可见性：selection → trend/volume=true, macd=false', () => {
   assert.equal(vis.macd, false)
   assert.equal(vis.sqzmom, false)
   assert.equal(vis.breakout, false)
+  assert.equal(vis.smc, false)
 })
 
 // ===== 4. 主图/副图分组 =====
-test('主图 4 个 + 副图 3 个', () => {
+// [CHANGE-011 SMC] smc 是主图，主图 4→5，副图仍 3
+test('主图 5 个 + 副图 3 个', () => {
   const main = CHART_LAYER_MANIFEST.filter((e) => e.kind === 'main')
   const sub = CHART_LAYER_MANIFEST.filter((e) => e.kind === 'sub')
-  assert.equal(main.length, 4, 'should have 4 main layers')
-  assert.equal(sub.length, 3, 'should have 3 sub layers')
+  assert.equal(main.length, 5, 'should have 5 main layers (trend/node/boll/breakout/smc)')
+  assert.equal(sub.length, 3, 'should have 3 sub layers (volume/macd/sqzmom)')
 })
 
 // ===== 5. breakout 为 selectionOnly =====
@@ -91,16 +98,21 @@ test('breakout 为 selectionOnly', () => {
 })
 
 // ===== 6. chartLayersForSource 过滤 selectionOnly =====
+// [CHANGE-011 SMC] watchlist 过滤 breakout 后剩 7 个（8-1）
 test('chartLayersForSource watchlist 过滤 breakout', () => {
   const layers = chartLayersForSource(CHART_LAYER_MANIFEST, 'watchlist')
-  assert.equal(layers.length, 6)
+  assert.equal(layers.length, 7)
   assert.ok(!layers.find((e) => e.id === 'breakout'), 'breakout should be hidden for watchlist')
+  // smc 应在 watchlist 中可见（开关存在，但默认关闭）
+  assert.ok(layers.find((e) => e.id === 'smc'), 'smc should be visible for watchlist')
 })
 
+// [CHANGE-011 SMC] selection 包含 breakout 共 8 个
 test('chartLayersForSource selection 包含 breakout', () => {
   const layers = chartLayersForSource(CHART_LAYER_MANIFEST, 'selection')
-  assert.equal(layers.length, 7)
+  assert.equal(layers.length, 8)
   assert.ok(layers.find((e) => e.id === 'breakout'), 'breakout should be visible for selection')
+  assert.ok(layers.find((e) => e.id === 'smc'), 'smc should be visible for selection')
 })
 
 // ===== 7. loadChartLayerVisibility 空存储返回默认值 =====
@@ -121,7 +133,7 @@ test('saveChartLayerVisibility/loadChartLayerVisibility 往返一致', () => {
 })
 
 // ===== 9. 旧 chart key 迁移（detail-chart-strategy-groups-v3 → 新 key） =====
-test('旧 chart key 迁移：12 键 → 7 键', () => {
+test('旧 chart key 迁移：12 键 → 8 键', () => {
   globalThis.localStorage = createLocalStorageMock()
   // 写入旧 chart key（12 键 LayerVisibility）
   globalThis.localStorage.setItem(
@@ -137,10 +149,12 @@ test('旧 chart key 迁移：12 键 → 7 键', () => {
   assert.equal(loaded.volume, false, 'volume should be false')
   assert.equal(loaded.macd, true, 'macd should be true')
   assert.equal(loaded.sqzmom, true, 'sqzmom should be true')
+  // [CHANGE-011 SMC] smc 不在旧 chart key 中，使用默认值 false
+  assert.equal(loaded.smc, false, 'smc should use default (false)')
 })
 
 // ===== 10. 旧 toolbar key 迁移（panji:indicator-visibility:v1 → 新 key） =====
-test('旧 toolbar key 迁移：4 键 → 7 键', () => {
+test('旧 toolbar key 迁移：4 键 → 8 键', () => {
   globalThis.localStorage = createLocalStorageMock()
   // 写入旧 toolbar key（4 键 IndicatorVisibility）
   globalThis.localStorage.setItem(
@@ -157,13 +171,16 @@ test('旧 toolbar key 迁移：4 键 → 7 键', () => {
   assert.equal(loaded.macd, true, 'macd should be true')
   // sqzmom 不在旧 toolbar 中，使用默认值
   assert.equal(loaded.sqzmom, false, 'sqzmom should use default (false)')
+  // [CHANGE-011 SMC] smc 不在旧 toolbar 中，使用默认值 false
+  assert.equal(loaded.smc, false, 'smc should use default (false)')
 })
 
-// ===== 11. 用户文案：sqzmom 显示为"挤压动量"，node 显示为"筹码共识价" =====
+// ===== 11. 用户文案：sqzmom 显示为"挤压动量"，node 显示为"筹码共识价"，smc 显示为"智能资金" =====
 // [文案契约] - 描述: 仅改用户可见文案，不改内部 id/DTO/算法
 // sqzmom 内部 key 不变，但 manifest.name 必须为"挤压动量"
 // node 内部 key 不变，但 manifest.name 必须为"筹码共识价"
-test('manifest 用户文案：sqzmom → "挤压动量"，node → "筹码共识价"', () => {
+// smc 内部 key 不变，但 manifest.name 必须为"智能资金"
+test('manifest 用户文案：sqzmom → "挤压动量"，node → "筹码共识价"，smc → "智能资金"', () => {
   const sqzmom = CHART_LAYER_MANIFEST.find((e) => e.id === 'sqzmom')
   assert.ok(sqzmom, '必须存在 sqzmom 条目')
   assert.equal(sqzmom!.name, '挤压动量', 'sqzmom manifest.name 必须为"挤压动量"')
@@ -179,13 +196,23 @@ test('manifest 用户文案：sqzmom → "挤压动量"，node → "筹码共识
     node!.description.includes('估算代理'),
     'node description 应注明"估算代理"（非股东真实持仓成本）',
   )
+
+  // [CHANGE-011 SMC] smc 文案契约
+  const smc = CHART_LAYER_MANIFEST.find((e) => e.id === 'smc')
+  assert.ok(smc, '必须存在 smc 条目')
+  assert.equal(smc!.name, '智能资金', 'smc manifest.name 必须为"智能资金"')
+  assert.ok(
+    smc!.description.includes('FVG'),
+    'smc description 应注明"完全排除 FVG"（FVG 完全排除契约）',
+  )
 })
 
-// ===== 12. 内部 key 不变（sqzmom/node/poc 字段名保留） =====
-test('内部 ChartLayerKey 不变：sqzmom/node 仍为内部 id', () => {
+// ===== 12. 内部 key 不变（sqzmom/node/smc 字段名保留） =====
+test('内部 ChartLayerKey 不变：sqzmom/node/smc 仍为内部 id', () => {
   const ids = CHART_LAYER_MANIFEST.map((e) => e.id)
   assert.ok(ids.includes('sqzmom'), '内部 id "sqzmom" 必须保留（不改 DTO/算法）')
   assert.ok(ids.includes('node'), '内部 id "node" 必须保留（不改 DTO/算法）')
+  assert.ok(ids.includes('smc'), '内部 id "smc" 必须保留（CHANGE-011 SMC）')
   // 不应出现"成交量节点"或"SQZMOM"作为 name（已改为中文文案）
   for (const entry of CHART_LAYER_MANIFEST) {
     assert.ok(
@@ -193,4 +220,16 @@ test('内部 ChartLayerKey 不变：sqzmom/node 仍为内部 id', () => {
       `不应保留旧文案 "${entry.name}"（id=${entry.id}）`,
     )
   }
+})
+
+// ===== 13. [CHANGE-011 SMC] smc 默认关闭契约 =====
+test('[CHANGE-011 SMC] smc 默认关闭（watchlist 和 selection 均 false）', () => {
+  const watchlistVis = defaultChartLayerVisibility('watchlist')
+  assert.equal(watchlistVis.smc, false, 'watchlist smc 默认应为 false')
+  const selectionVis = defaultChartLayerVisibility('selection')
+  assert.equal(selectionVis.smc, false, 'selection smc 默认应为 false')
+  // smc 不是 selectionOnly（watchlist 和 selection 都能切换）
+  const smcEntry = CHART_LAYER_MANIFEST.find((e) => e.id === 'smc')
+  assert.ok(smcEntry, 'smc entry should exist')
+  assert.notEqual(smcEntry!.selectionOnly, true, 'smc 不应为 selectionOnly')
 })

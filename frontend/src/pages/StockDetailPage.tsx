@@ -25,6 +25,8 @@ import {
   normalizeDisplayTimeframe,
   normalizeResearchSource,
 } from '@/features/stock-research/stockResearchTypes'
+// [CHANGE-011 SMC] - 加载初始 layerVisibility.smc 状态，驱动 indicators 按需重拉
+import { loadChartLayerVisibility } from '@/features/stock-research/indicatorPreferences'
 import { formatShanghaiTimeShort } from '@/utils/datetime'
 import { MARKET_LABELS } from '@/utils/market'
 import { resolveBackPath } from './detailNavigation'
@@ -103,8 +105,22 @@ export default function StockDetailPage() {
     return () => document.removeEventListener('fullscreenchange', handler)
   }, [])
 
+  // [CHANGE-011 SMC] - smc 开关状态：初始值从 localStorage 读取（与 StockResearchWorkspace 同源），
+  //   用户在 IndicatorToolbar 切换 smc 时由 onSmcToggle 回调更新；驱动 useStockResearchData 重拉 indicators。
+  //   默认关闭；后端 include_smc=False 时跳过 SMC 计算，不消耗 CPU。
+  const [smcEnabled, setSmcEnabled] = useState<boolean>(() =>
+    loadChartLayerVisibility(source, strategy).smc,
+  )
+  // source/strategy 变化时重新读取 smc 偏好（与 StockResearchWorkspace useEffect 同步）
+  useEffect(() => {
+    setSmcEnabled(loadChartLayerVisibility(source, strategy).smc)
+  }, [source, strategy])
+  const handleSmcToggle = useCallback((enabled: boolean) => {
+    setSmcEnabled(enabled)
+  }, [])
+
   // 共享研究数据 hook（/market 和 /stock 共用，只含核心查询）
-  const researchData = useStockResearchData({ symbol: symbol ?? null, timeframe })
+  const researchData = useStockResearchData({ symbol: symbol ?? null, timeframe, includeSmc: smcEnabled })
   const instrumentId = researchData.instrumentId
 
   // 详情页专属 actions（自选/上下切换/memo + returnTo 上下文恢复左栏列表）
@@ -541,6 +557,7 @@ export default function StockDetailPage() {
           rightPanel={eventStatePanel}
           showRightPanel={shouldShowPanel && !!symbol}
           chartColumnProps={{ 'data-testid': 'stock-detail-capture' }}
+          onSmcToggle={handleSmcToggle}
         />
       </div>
     </div>
