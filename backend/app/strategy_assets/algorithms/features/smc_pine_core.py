@@ -1,7 +1,7 @@
 """SMC Pine 语义核心模块 — 唯一纯函数核心。
 
-本模块实现用户 Pine SMC 源码（`ref/smc_ref.txt`，SHA256 0bd3d2ad，用户原创并
-授权盘迹商业项目使用）的 Pine 语义原语，作为生产服务和测试参考的唯一调用入口。
+本模块实现用户 Pine SMC 源码（`ref/smc_user_source.pine`，SHA256 0bd3d2ad，843 行，
+用户原创并授权盘迹商业项目使用）的 Pine 语义原语，作为生产服务和测试参考的唯一调用入口。
 用户 Pine 文件为 SMC 算法唯一真源；禁止维护两套近似算法；禁止读取或引用任何
 第三方 LuxAlgo Pine 源码。
 
@@ -727,39 +727,48 @@ class _SMCPineState:
     def run(self) -> None:
         """逐 bar 运行状态机（Pine 执行顺序）。
 
-        1. get_current_structure(swing, length=50)
-        2. get_current_structure(internal, length=5)
-        3. get_current_structure(equal, length=3) if show_equal_hl
-        4. display_structure(internal) if show_internals or show_internal_order_blocks
-        5. display_structure(swing)
-        6. update_trailing_extremes
+        Pine lines 766-807 的固定顺序：
+        1. update_trailing_extremes (FIRST, 在任何 getCurrentStructure 之前)
+        2. get_current_structure(swing, length=50)
+        3. get_current_structure(internal, length=5)
+        4. get_current_structure(equal, length=3) if show_equal_hl
+        5. display_structure(internal) if show_internals or show_internal_order_blocks
+        6. display_structure(swing)
         7. delete_order_blocks(internal) if show_internal_order_blocks
         8. delete_order_blocks(swing) if show_swing_order_blocks
+
+        trailing 必须在最前面：Pine 中 updateTrailingExtremes 用当前 bar 的 high/low
+        更新 trailing.top/bottom，然后 getCurrentStructure 检测到新 swing pivot 时会
+        覆盖 trailing.top/bottom 为新 pivot level。若顺序颠倒，trailing 会被当前 bar
+        的 high/low 二次覆盖，与 Pine 不一致。详见 docs/analysis/smc-user-pine-parity.md 5.3。
         """
         swings_length = self.params["swings_length"]
         equal_length = self.params["equal_length"]
         show_equal_hl = self.params["show_equal_hl"]
+        show_high_low_swings = self.params["show_high_low_swings"]
         show_internal_order_blocks = self.params["show_internal_order_blocks"]
         show_swing_order_blocks = self.params["show_swing_order_blocks"]
 
         for i in range(self.n):
-            # 1. swing pivot
+            # 1. trailing 极值更新（Pine: 在 getCurrentStructure 之前）
+            # Pine 条件: if showHighLowSwingsInput or showPremiumDiscountZonesInput
+            # show_high_low_swings 默认 true，show_premium_discount_zones 默认 false（不实现）
+            if show_high_low_swings and self.trailing.bar_index is not None:
+                self.update_trailing_extremes(i)
+
+            # 2. swing pivot (size=swings_length=50)
             self.get_current_structure(i, swings_length, False, False)
-            # 2. internal pivot (size=5)
+            # 3. internal pivot (size=5)
             self.get_current_structure(i, 5, False, True)
-            # 3. equal H/L pivot
+            # 4. equal H/L pivot (size=equal_length=3)
             if show_equal_hl:
                 self.get_current_structure(i, equal_length, True, False)
 
-            # 4. internal BOS/CHoCH
+            # 5. internal BOS/CHoCH + OB 创建
             if show_internal_order_blocks:
                 self.display_structure(i, True)
-            # 5. swing BOS/CHoCH
+            # 6. swing BOS/CHoCH + OB 创建
             self.display_structure(i, False)
-
-            # 6. trailing
-            if self.trailing.bar_index is not None:
-                self.update_trailing_extremes(i)
 
             # 7. internal OB mitigation
             if show_internal_order_blocks:

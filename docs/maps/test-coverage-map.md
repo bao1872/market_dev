@@ -278,4 +278,5 @@
 | `change010Contract.test.ts` | 49 tests | CHANGE-010 前端源码契约（市值/MiniKline/MarketRightPanel/filterAlias/Excel） |
 | `test_smc_indicator.py` | 34+8+1 tests | SMC Pine 语义核心 + FVG 排除 + Pine 原语 8 用例 + golden fixture skip（CHANGE-20260715-001 → CHANGE-20260715-002） |
 | `miniKlineViewport.test.ts` | 15 tests | MiniKline viewport 彻底重写（目标根数 + barSpacing clamp + autoscale range）（CHANGE-20260715-002） |
+| `miniKlineCardContract.test.ts` | 15 tests | MiniKlineCard 组件源码契约（无 fitContent、setVisibleLogicalRange、autoscaleInfoProvider、ResizeObserver、requestAnimationFrame、五周期按钮、A 股配色）（CHANGE-20260715-003） |
 | `indicatorManifest.test.ts` | 15 tests | CHART_LAYER_MANIFEST 用户文案 + SMC 图层（CHANGE-20260715-001 扩展 3 用例） |

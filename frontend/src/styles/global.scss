@@ -1047,7 +1047,22 @@ button { cursor: pointer; }
 .interactive-table th.sorted .sort-icon { color: #7fa0ff; }
 .th-filter { width: 28px; height: 28px; margin-right: 4px; border: 0; border-radius: 5px; background: transparent; color: #667086; cursor: pointer; &:hover, &.active { background: #27334d; color: #9bb2ff; } }
 .table-select-column { padding: 0 12px !important; }
-.table-meta-bar { height: 34px; display: flex; align-items: center; justify-content: space-between; padding: 0 10px; border-bottom: 1px solid v.$color-border-soft; background: #121720; color: v.$color-muted; font-size: 12px; }
+// CHANGE-20260715-002: 工具栏 sticky left:0，横向滚动时保持可见，右边界与表格可视区一致
+.table-meta-bar {
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  border-bottom: 1px solid v.$color-border-soft;
+  background: #121720;
+  color: v.$color-muted;
+  font-size: 12px;
+  position: sticky;
+  left: 0;
+  width: 100%;
+  z-index: 6;
+}
 .table-active-state { margin-left: 10px; color: #8fa7df; }
 .table-reset-btn { border: 0; background: transparent; color: #7994d9; font-size: 12px; cursor: pointer; &:disabled { opacity: .35; cursor: default; } }
 .column-filter-popover { position: fixed; z-index: 500; width: 238px; padding: 11px; background: #202631; border: 1px solid #3c4659; border-radius: 8px; box-shadow: 0 16px 44px rgba(0, 0, 0, .45); }
@@ -1267,23 +1282,82 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 
 .table-meta-actions { display: flex; gap: 7px; }
 .table-columns-btn, .table-reset-btn { height: 26px; border: 1px solid #30394c; border-radius: 5px; background: #171d28; color: #9ba7bb; font-size: 12px; cursor: pointer; &:hover { color: #fff; border-color: #536483; } }
-.table-pager { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 8px 10px; border-top: 1px solid v.$color-border-soft; background: #11161e; color: #7f8ba0; font-size: 12px; }
+// CHANGE-20260715-002: 分页器 sticky left:0，横向滚动时保持可见
+.table-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid v.$color-border-soft;
+  background: #11161e;
+  color: #7f8ba0;
+  font-size: 12px;
+  position: sticky;
+  left: 0;
+  width: 100%;
+  z-index: 6;
+}
 .table-page-size { height: 27px; min-width: 56px; padding: 0 5px; }
 // [StrategyDataTable] - 描述: sticky 表头（z-index 4）+ sticky 首列/选择列（z-index 3）+ 角落单元格（z-index 5）
+// CHANGE-20260715-002: 股票 sticky 列固定宽度，header/body 共用 CSS 变量，防止横向滚动重叠
+.interactive-table {
+  --stock-col-width: 150px;
+  --select-col-width: 40px;
+}
 .interactive-table thead th { position: sticky; top: 0; z-index: 4; background: #151a23; }
-.interactive-table .sticky-col { position: sticky; left: 0; z-index: 3; background: #151a23; box-shadow: 1px 0 0 #2a3242; }
+.interactive-table .sticky-col {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  background: #151a23;
+  box-shadow: 1px 0 0 #2a3242;
+  // 固定宽度，防止内容撑开导致 sticky 偏移错乱
+  width: var(--stock-col-width);
+  min-width: var(--stock-col-width);
+  max-width: var(--stock-col-width);
+}
 .interactive-table tbody td.sticky-col { background: #11161e; z-index: 2; }
 .interactive-table tr:hover td.sticky-col { background: #171e29; }
+// CHANGE-20260715-002: sticky 列内容溢出处理（防止文本超出列宽与后续列重叠）
+.interactive-table td.sticky-col > div { max-width: 100%; overflow: hidden; }
+.interactive-table td.sticky-col .symbol,
+.interactive-table td.sticky-col .symbol-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.interactive-table td.sticky-col .stock-name-btn {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.interactive-table th.sticky-col .th-shell { max-width: 100%; overflow: hidden; }
 // [StrategyDataTable] - 描述: 选择列也 sticky（与首列同级），避免横向滚动时复选框消失；固定宽度 40px（border-box 含 padding）
-.interactive-table .table-select-column { position: sticky; left: 0; z-index: 3; background: #151a23; width: 40px; min-width: 40px; }
+.interactive-table .table-select-column {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  background: #151a23;
+  width: var(--select-col-width);
+  min-width: var(--select-col-width);
+}
 .interactive-table tbody td.table-select-column { background: #11161e; z-index: 2; }
 .interactive-table tr:hover td.table-select-column { background: #171e29; }
 // [StrategyDataTable] - 描述: 角落单元格（表头 + sticky 列）需最高 z-index，避免表头与首列重叠时错乱
 .interactive-table thead th.sticky-col,
 .interactive-table thead th.table-select-column { z-index: 5; }
-// [StrategyDataTable] - 描述: 选择列存在时，首列偏移 40px（选择列宽度），避免 sticky 重叠
+// [StrategyDataTable] - 描述: 选择列存在时，首列偏移 select 列宽度，避免 sticky 重叠
 .interactive-table .table-select-column + th.sticky-col,
-.interactive-table .table-select-column + td.sticky-col { left: 40px; }
+.interactive-table .table-select-column + td.sticky-col { left: var(--select-col-width); }
+// CHANGE-20260715-002: 涨跌幅列若 sticky，left 偏移股票列宽度（+ 选择列宽度若有）
+.interactive-table .sticky-col-change-pct { left: var(--stock-col-width); }
+.interactive-table .table-select-column + .sticky-col + th.sticky-col-change-pct,
+.interactive-table .table-select-column + .sticky-col + td.sticky-col-change-pct {
+  left: calc(var(--select-col-width) + var(--stock-col-width));
+}
 .table-action-column { min-width: 86px; }
 // [StrategyDataTable] - 描述: 选中行高亮（onRowClick + activeRowKey 驱动，用于 /market 选中行驱动右栏）
 .interactive-table tbody tr.row-active td { background: rgba(79, 124, 255, .10); }

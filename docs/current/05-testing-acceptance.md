@@ -1197,6 +1197,25 @@ node --experimental-strip-types --test \
 - **前端 SMC renderer 对齐 Pine（无截图 E2E）**：internal=虚线 `[4,3]`/tiny 8px、swing=实线/small 11px；标签中点 `(x1+x2)/2`+`'center'`；trailing 文案"强高/弱高/强低/弱低"；OB 半透明 box（active 0.12、mitigated 0.05）；Historical 全事件；颜色多头红 `#FF4D4F`、空头绿 `#22C55E`
 - **SMC 隔离边界**：SMC 仅属于 `/stock` 指标链；`include_smc=false` 时 0 计算；`/market` 右栏不请求 SMC；true/false 缓存键隔离；DSA/Node/监控/Capture/published run 不修改；无新表/migration/worker/历史回填
 
+## 3.15 CHANGE-20260715-003 回归（SMC trailing 顺序修复 + sticky 列 + 工具栏对齐 + MiniKlineCard 契约测试）
+
+```bash
+# SMC trailing 顺序修复后的回归测试
+cd backend && APP_ENV=test TEST_DATABASE_URL=... python -m pytest \
+  tests/test_smc_indicator.py tests/test_indicator_cache.py \
+  tests/test_indicator_service.py tests/test_indicator_contract.py \
+  tests/test_indicators_api.py -q --no-header
+
+# MiniKlineCard 组件契约测试
+cd frontend && node --experimental-strip-types --test \
+  src/features/market-workspace/__tests__/miniKlineCardContract.test.ts
+```
+
+- **SMC trailing 执行顺序（`test_smc_indicator.py`）**：`_SMCPineState.run()` 中 `update_trailing_extremes` 必须在 `get_current_structure` 之前执行（对齐 Pine lines 766-807）；trailing 极值不被当前 bar 的 high/low 二次覆盖；Strong/Weak High-Low 事件输出与 Pine 一致；已有 109 项测试全部通过（含 Pine 语义 8 项 + FVG 排除 + golden fixture skip）
+- **MiniKlineCard 组件契约（`miniKlineCardContract.test.ts` 15 用例）**：不调用 `fitContent`/`resetTimeScale`/`scrollToRealTime`（正则 `\.fitContent\(` 检查实际方法调用）；调用 `setVisibleLogicalRange`；使用 `computeMiniKlineViewport` 纯函数；使用 `computeAutoscaleRange` + `autoscaleInfoProvider`；`ResizeObserver` 响应式 + `disconnect()`；`requestAnimationFrame` 延迟应用 range；五周期按钮（15m/1h/1d/1w/1mo）；`attributionLogo: false`；图表高度 190px + `CHART_HEIGHT` 常量；`minimumWidth=MIN_PRICE_SCALE_WIDTH`；`autoScale: true` + `scaleMargins {0.08, 0.08}`；`shiftVisibleRangeOnNewBar: false`；`chart.remove()` 卸载清理；A 股配色（`#FF4D4F`/`#22C55E`）；容器宽度 `Math.floor` 整数化
+- **sticky 列固定宽度（无截图 E2E）**：`.interactive-table` 定义 CSS 变量 `--stock-col-width: 150px`/`--select-col-width: 40px`；`.sticky-col` 三重固定宽度（width/min-width/max-width）；横向滚动时 sticky 列不与后续列重叠；长名称 ellipsis 截断；背景不透明
+- **工具栏 sticky 对齐（无截图 E2E）**：`.table-meta-bar` + `.table-pager` 添加 `position: sticky; left: 0; width: 100%; z-index: 6`；横向滚动时工具栏和分页器保持可见；右边界与表格可视区一致
+
 ## 4. CI 门禁
 
 阻断项：

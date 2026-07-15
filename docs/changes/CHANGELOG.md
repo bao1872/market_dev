@@ -4,6 +4,16 @@
 
 ## 2026-07-15
 
+- CHANGE-20260715-003: SMC trailing 执行顺序修复 + Pine 真源文件命名 + 行情列表 sticky 修复 + 工具栏对齐 + MiniKlineCard 契约测试
+  - SMC trailing 顺序修复：`smc_pine_core.py` 的 `_SMCPineState.run()` 中 `update_trailing_extremes` 移到循环体最前面（第1步），对齐 Pine lines 766-807 执行顺序（trailing 必须在 getCurrentStructure 之前）
+  - Pine 真源文件命名：`ref/smc_ref.txt` → `ref/smc_user_source.pine`（SHA256 0bd3d2ad，843 行，内容相同）；`smc_pine_core.py` docstring + AGENTS clause 44 更新引用路径
+  - Bug 2 修复（sticky 列横向滚动重叠）：`global.scss` 定义 CSS 变量 `--stock-col-width: 150px`/`--select-col-width: 40px`；`.sticky-col` 固定 width/min-width/max-width；内容溢出 `overflow: hidden` + `text-overflow: ellipsis` + `white-space: nowrap`
+  - Bug 3 修复（工具栏横向滚动消失）：`.table-meta-bar` + `.table-pager` 添加 `position: sticky; left: 0; width: 100%; z-index: 6`，横向滚动时保持可见
+  - MiniKlineCard 契约测试：新增 `miniKlineCardContract.test.ts`（15 项源码契约测试，验证无 fitContent、setVisibleLogicalRange、autoscaleInfoProvider、ResizeObserver、requestAnimationFrame、五周期按钮、A 股配色等）
+  - Parity 文档：新增 `docs/analysis/smc-user-pine-parity.md`（674 行，14 章节，逐项 Pine→Python 对照）
+  - 测试：ruff✅ mypy✅ pytest 109pass/1skip✅ tsc✅ eslint✅ contract 349pass/8fail(baseline一致)✅ 4 docs checks✅
+  - 遗留：Bug 1（详情左栏变自选）未修复；Pine golden fixture PENDING
+
 - CHANGE-20260715-001: SMC 智能资金指标（ref/smc.py 重写版）+ MiniKline viewport P0 修复 + 图层 7→8
   - **SUPERSEDED BY CHANGE-20260715-002**：用户已提供本人原创并授权的 Pine 实现（`ref/smc_ref.txt`），SMC 算法真源从 ref/smc.py 升级为用户 Pine 代码；本条目中"非 LuxAlgo Pine 翻译"和"clean-room 声明"已过时，仅作历史保留
   - SMC 模块：基于用户提供的 `ref/smc_ref.txt` Pine 源码（用户原创，SHA256 0bd3d2ad，授权盘迹商业项目使用），纯函数仅依赖 stdlib；默认参数与 ref 一致；BOS/CHoCH/internal OB/EQH/EQL/Strong-Weak High-Low；anchor/confirmed 因果契约；逐 bar 增量=全量；未来 bar 不修改已确认事件
