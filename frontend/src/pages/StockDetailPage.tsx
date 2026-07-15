@@ -514,8 +514,20 @@ export default function StockDetailPage() {
       {/* [returnTo 上下文恢复] - 左栏优先展示 returnTo URL 的来源上下文：
           - returnTo 指向 /market?scope=market&query=xxx 时显示「行情搜索」列表
           - returnTo 缺失或非市场搜索时回退到「自选列表」 */}
+      {/* CHANGE-20260715-004: 来源列表加载中显示 loading 占位，避免空白后突然出现列表 */}
       <div className="tv-detail-layout">
-        {!isCaptureMode && detailActions.sourceStocks.length > 0 && (
+        {!isCaptureMode && detailActions.sourceListLoading && (
+          <aside
+            className="tv-source-list tv-source-list-loading"
+            data-testid="detail-source-list-loading"
+          >
+            <div className="tv-source-list-header">
+              {detailActions.sourceListKind === 'market' ? '行情来源' : '自选来源'}
+            </div>
+            <div className="tv-source-list-placeholder">加载中…</div>
+          </aside>
+        )}
+        {!isCaptureMode && !detailActions.sourceListLoading && detailActions.sourceStocks.length > 0 && (
           <aside
             className="tv-source-list"
             data-testid="detail-source-list"

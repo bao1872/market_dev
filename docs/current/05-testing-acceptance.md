@@ -1216,6 +1216,25 @@ cd frontend && node --experimental-strip-types --test \
 - **sticky 列固定宽度（无截图 E2E）**：`.interactive-table` 定义 CSS 变量 `--stock-col-width: 150px`/`--select-col-width: 40px`；`.sticky-col` 三重固定宽度（width/min-width/max-width）；横向滚动时 sticky 列不与后续列重叠；长名称 ellipsis 截断；背景不透明
 - **工具栏 sticky 对齐（无截图 E2E）**：`.table-meta-bar` + `.table-pager` 添加 `position: sticky; left: 0; width: 100%; z-index: 6`；横向滚动时工具栏和分页器保持可见；右边界与表格可视区一致
 
+## 3.16 CHANGE-20260715-004 回归（Bug 1 详情左栏 loading 占位 + Pine 真源文件入 Git 跟踪）
+
+```bash
+# 详情页来源列表 loading 占位契约测试
+cd frontend && node --experimental-strip-types --test \
+  src/features/stock-research/__tests__/detailSourceLoadingContract.test.ts
+```
+
+- **`useStockDetailActions.sourceListLoading` 字段（源码契约）**：接口含 `sourceListLoading: boolean`；实现逻辑为 `hasMarketContext ? (publishedRunsQuery.isLoading || !activeRunId || sourceResultsQuery.isLoading) : monitorStatusQuery.isLoading`；返回对象包含 `sourceListLoading`
+- **`StockDetailPage` loading 占位渲染（源码契约）**：包含 `detailActions.sourceListLoading` 条件分支；渲染 `<aside data-testid="detail-source-list-loading"`；占位文案"加载中…"；header 显示 `sourceListKind === 'market'` ? "行情来源" : "自选来源"
+- **列表渲染条件排除 loading（源码契约）**：列表 `<aside data-testid="detail-source-list"` 必须以 `!sourceListLoading && sourceStocks.length > 0` 为前置条件，避免 loading 和列表同时渲染
+- **CSS 占位样式（源码契约）**：`global.scss` 存在 `.tv-source-list-placeholder` 类，含 `padding`/`font-size`/`color`/`text-align` 属性
+- **`MarketWorkspacePage.handleNavigateToStock` 显式传 source/strategy（源码契约）**：`scope === 'market'` 时 `source='selection'` + `strategy=DSA_STRATEGY_KEY`；`scope === 'watchlist'` 时 `source='watchlist'` + `strategy='watchlist_monitor'`
+- **URL 完整性（源码契约）**：`/stock/${symbol}?source=${src}&strategy=${strat}&returnTo=${encodeURIComponent(returnTo)}` 包含 source+strategy+returnTo 三个参数
+- **不使用旧 `useMarketStocks`（源码契约）**：`useStockDetailActions.ts` 不存在 `useMarketStocks(` 函数调用（注释允许）
+- **上一只/下一只保留 returnTo（源码契约）**：`returnToParam = returnTo ? \`&returnTo=${encodeURIComponent(returnTo)}\` : ''` 保留 returnTo 参数
+- **生产 E2E 验证（无截图）**：1) `/market` 设置筛选+排序+页码后点击股票名称进入 `/stock/:symbol`，URL 包含 `source=selection&strategy=dsa_selector&returnTo=...`；2) 详情页左栏先显示 loading 占位（`[data-testid="detail-source-list-loading"]`）再切换到实际列表（`[data-testid="detail-source-list"]`）；3) 左栏 header 显示"行情来源"；4) 上一只/下一只 URL 保留 source/strategy/returnTo/timeframe；5) 返回 `/market` 后筛选/排序/页码完整恢复
+- **Pine 真源文件入 Git 跟踪**：`git ls-files ref/smc_user_source.pine` 返回该文件路径；SHA256 为 `0bd3d2ad8819f2dc7a9399f0e869ca3c9eced8100f190aa131aac5fe8191988f`；843 行；`.gitignore` 仍排除 `ref/` 其他文件
+
 ## 4. CI 门禁
 
 阻断项：

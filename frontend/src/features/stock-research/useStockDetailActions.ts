@@ -82,6 +82,9 @@ export interface StockDetailActions {
   // 优先 returnTo 上下文恢复的市场搜索结果，回退到自选列表
   sourceStocks: SourceStockItem[]
   sourceListKind: SourceListKind
+  // CHANGE-20260715-004: 来源列表加载状态（DSA results 加载中或 published runs 加载中）
+  // 用于 StockDetailPage 渲染 loading 占位，避免空白后突然出现列表
+  sourceListLoading: boolean
   // 兼容旧接口（= sourceStocks，仅当 sourceListKind==='watchlist' 时有值）
   watchlistStocks: SourceStockItem[]
 }
@@ -203,6 +206,12 @@ export function useStockDetailActions({
     ? (marketContext!.scope === 'market' ? 'market' : 'watchlist')
     : 'watchlist'
   const sourceStocks = hasMarketContext ? marketStocks : watchlistStocks
+  // CHANGE-20260715-004: 来源列表加载状态
+  // - hasMarketContext=true 时：published runs 加载中、或 activeRunId 仍缺失、或 DSA results 加载中
+  // - hasMarketContext=false 时：monitorStatusQuery 加载中即为 loading
+  const sourceListLoading = hasMarketContext
+    ? publishedRunsQuery.isLoading || !activeRunId || sourceResultsQuery.isLoading
+    : monitorStatusQuery.isLoading
 
   // C7: 上一只/下一只基于 sourceStocks（而非 watchlistItems）
   // 在来源列表中按 symbol 查找当前位置，支持市场搜索结果和自选列表两种来源
@@ -240,6 +249,7 @@ export function useStockDetailActions({
     hasMemo: !!stockMemoQuery.data,
     sourceStocks,
     sourceListKind,
+    sourceListLoading,
     watchlistStocks,
   }
 }

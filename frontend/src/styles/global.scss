@@ -1149,6 +1149,8 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 .tv-detail-layout { display: flex; flex: 1; min-height: 0; }
 .tv-source-list { flex: none; width: 200px; min-width: 0; background: #0d1118; border-right: 1px solid v.$color-border; overflow-y: auto; max-height: v.$tv-workspace-min-height; }
 .tv-source-list-header { padding: 8px 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .7px; color: #667287; border-bottom: 1px solid v.$color-border; position: sticky; top: 0; background: #0d1118; z-index: 1; }
+// CHANGE-20260715-004: 来源列表加载占位
+.tv-source-list-placeholder { padding: 16px 10px; font-size: 12px; color: #778297; text-align: center; }
 .tv-source-list-item { display: flex; flex-direction: column; gap: 1px; padding: 6px 10px; cursor: pointer; border-bottom: 1px solid #1a202b; transition: .14s ease; }
 .tv-source-list-item:hover { background: #1a202b; }
 .tv-source-list-item.active { background: #1e2a3f; border-left: 3px solid var(--brand); padding-left: 7px; }

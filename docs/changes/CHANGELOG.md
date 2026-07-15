@@ -4,6 +4,13 @@
 
 ## 2026-07-15
 
+- CHANGE-20260715-004: Bug 1 修复（详情左栏 loading 占位）+ Pine 真源文件入 Git 跟踪
+  - Bug 1 修复（详情左栏空白后才出现列表）：`useStockDetailActions` 新增 `sourceListLoading: boolean` 字段（`hasMarketContext` 时为 `publishedRunsQuery.isLoading || !activeRunId || sourceResultsQuery.isLoading`，否则为 `monitorStatusQuery.isLoading`）；`StockDetailPage` 新增 loading 占位渲染分支（`<aside data-testid="detail-source-list-loading">` + `<div class="tv-source-list-placeholder">加载中…</div>`）；`global.scss` 新增 `.tv-source-list-placeholder` 样式
+  - Pine 真源文件入 Git 跟踪：`git add -f ref/smc_user_source.pine`（SHA256 0bd3d2ad，843 行），`.gitignore` 仍排除 `ref/` 其他文件，仅此单文件例外
+  - 9 项源码契约测试：`detailSourceLoadingContract.test.ts`（sourceListLoading 字段、loading 占位渲染、列表渲染条件排除 loading、header 显示、CSS 存在、handleNavigateToStock 显式传 source/strategy、URL 完整性、不使用 useMarketStocks、上一只/下一只保留 returnTo）
+  - 测试：tsc✅ eslint✅ contract 358pass/8fail(baseline一致)✅ 4 docs checks✅
+  - 遗留：Pine golden fixture PENDING；Bug 1 生产 E2E 验证待部署后执行
+
 - CHANGE-20260715-003: SMC trailing 执行顺序修复 + Pine 真源文件命名 + 行情列表 sticky 修复 + 工具栏对齐 + MiniKlineCard 契约测试
   - SMC trailing 顺序修复：`smc_pine_core.py` 的 `_SMCPineState.run()` 中 `update_trailing_extremes` 移到循环体最前面（第1步），对齐 Pine lines 766-807 执行顺序（trailing 必须在 getCurrentStructure 之前）
   - Pine 真源文件命名：`ref/smc_ref.txt` → `ref/smc_user_source.pine`（SHA256 0bd3d2ad，843 行，内容相同）；`smc_pine_core.py` docstring + AGENTS clause 44 更新引用路径
