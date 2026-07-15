@@ -452,7 +452,7 @@ export default function MarketWorkspacePage() {
     }
   }, [activeRun])
 
-  // selected symbol 用于右栏 EventStatePanel
+  // selected symbol 用于右栏 AtomicFactsPanel
   const selectedSymbol = selected || undefined
 
   return (

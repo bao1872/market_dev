@@ -48,6 +48,7 @@ from app.models.stock_feature_snapshot_run import (
     STATUS_SUCCEEDED,
     StockFeatureSnapshotRun,
 )
+from app.services.atomic_fact_contract_service import compute_atomic_facts
 from app.services.structural_factor_service import (
     _compute_all_factors_for_bars,
     _compute_relation,
@@ -265,6 +266,8 @@ def build_summary_payload(
         "as_of": trade_date.isoformat(),
         "source_bar_time": source_bar_time,
         "_source": "feature_snapshot",
+        # Atomic Fact Contract V1（仅新快照写入；旧已发布快照受 upsert WHERE 保护不覆盖）
+        "atomic_fact_contract_v1": compute_atomic_facts(structural_payload, temporal_payload),
     }
 
 

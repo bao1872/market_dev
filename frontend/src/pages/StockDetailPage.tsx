@@ -14,7 +14,7 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { useParams, useSearchParams, useNavigate, useLocation } from 'react-router-dom'
 import clsx from 'clsx'
-import { EventStatePanel } from '@/features/research-context/EventStatePanel'
+import { AtomicFactsPanel } from '@/features/research-context/AtomicFactsPanel'
 import { StockResearchWorkspace } from '@/features/stock-research/StockResearchWorkspace'
 import { StockQuoteStrip } from '@/features/stock-research/StockQuoteStrip'
 import { useStockResearchData } from '@/features/stock-research/useStockResearchData'
@@ -324,23 +324,23 @@ export default function StockDetailPage() {
     barsStatus ? barsStatus.label : null,
   ].filter(Boolean)
 
-  // 右栏事件状态面板（PRD V1.1: 使用 EventStatePanel，与 market 共用 query key）
+  // 右栏状态观察面板（Atomic Fact Contract V1: 使用 AtomicFactsPanel expanded，与 market 共用 query key）
   const eventStatePanel = shouldShowPanel && symbol ? (
     <aside className="tv-side-column">
-      <EventStatePanel symbol={symbol} />
+      <AtomicFactsPanel symbol={symbol} variant="expanded" />
     </aside>
   ) : null
 
-  // 事件面板开关 toolbar（渲染在图表上方）
+  // 状态观察面板开关 toolbar（渲染在图表上方）
   const structuralToolbar = !hideStructuralStateParam && symbol ? (
     <div className="structural-state-toolbar">
       <button
         type="button"
         className="structural-state-toggle-btn"
         onClick={toggleEventPanel}
-        aria-label="切换事件状态面板"
+        aria-label="切换状态观察面板"
       >
-        {eventPanelCollapsed ? '显示事件状态' : '隐藏事件状态'}
+        {eventPanelCollapsed ? '显示状态观察' : '隐藏状态观察'}
       </button>
     </div>
   ) : null

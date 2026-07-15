@@ -1,0 +1,219 @@
+// [AtomicFactsPanel] - 描述: Atomic Fact Contract V1 用户侧状态观察面板样式
+// 深色主题对齐项目整体风格；响应式由父容器控制栏宽
+// 命名前缀：afp（atomic-facts-panel）
+// 品牌莹感绿仅用于焦点/关键值（header 强调），不表达涨跌
+@use '../../styles/variables.scss' as *;
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  color: $color-text;
+  font-family: $font-sans;
+  font-size: 14px;
+}
+
+// compact 形态：在 /market 右栏小 K 线下方，面板内滚动，不压缩小 K 线
+.panelCompact {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid $color-border-soft;
+}
+
+.contractVersion {
+  color: $color-brand;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.denominator {
+  color: $color-muted;
+  font-size: 12px;
+  font-family: $font-mono;
+}
+
+.asOf {
+  color: $color-text-dim;
+  font-size: 12px;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.groupTitle {
+  margin: 0;
+  color: $color-brand;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.groupEmpty {
+  color: $color-text-dim;
+  font-size: 12px;
+}
+
+.factList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.factRow {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid $color-border-soft;
+  border-radius: $radius-base;
+}
+
+.factMissing {
+  opacity: 0.6;
+}
+
+.factLabel {
+  color: $color-muted;
+  font-size: 12px;
+}
+
+.factValue {
+  color: $color-text;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.factCategory {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  color: $color-text-dim;
+  font-size: 11px;
+  border: 1px solid $color-border-soft;
+  border-radius: 999px;
+}
+
+.changeList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.changeItem {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid $color-border-soft;
+  border-radius: $radius-base;
+}
+
+.changeFact {
+  color: $color-muted;
+  font-size: 12px;
+}
+
+.changeArrow {
+  color: $color-text;
+  font-size: 13px;
+}
+
+.changeAsOf {
+  color: $color-text-dim;
+  font-size: 11px;
+  font-family: $font-mono;
+}
+
+.moreToggle {
+  align-self: flex-start;
+  background: transparent;
+  border: 1px solid $color-border;
+  color: $color-muted;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: $radius-base;
+  cursor: pointer;
+
+  &:hover {
+    color: $color-brand;
+    border-color: $color-brand;
+  }
+}
+
+.moreContent {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.moreRow {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: $color-muted;
+
+  span:last-child {
+    color: $color-text;
+    text-align: right;
+  }
+}
+
+.noState {
+  padding: 16px 8px;
+}
+
+.noStateInner {
+  color: $color-muted;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.noStateMeta {
+  margin-top: 4px;
+  color: $color-text-dim;
+  font-size: 12px;
+  font-family: $font-mono;
+}
+
+.empty,
+.loading,
+.error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px 12px;
+  color: $color-muted;
+  font-size: 13px;
+}
+
+.retryBtn {
+  background: transparent;
+  border: 1px solid $color-brand;
+  color: $color-brand;
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: $radius-base;
+  cursor: pointer;
+}

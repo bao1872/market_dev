@@ -4,6 +4,16 @@
 
 ## 2026-07-16
 
+- CHANGE-20260716-002: Atomic Fact Contract V1 个股状态观察（纯函数 + 快照/Context API + 前端面板）
+  - Canonical Registry `atomic_fact_contract_v1.json`（V4.13 冻结，14 Core / 10 Aux / 1 Rejected=V1 累计成交量比；S2 存在；T3/T6 `ui_enabled=false`）
+  - 纯函数 `compute_atomic_facts` / `compute_recent_changes`（新快照与旧 summary fallback 共用同一公式；近期变化非 V4.13 Core Fact）；S3 严格 0.33/0.67；S7/S8 禁止负距离；T5/V3 阈值未确认→仅比值+「分类未启用」
+  - `stock_context.py` 复用接口返回原子事实结构（contractVersion/asOf/core/auxiliary/availability/recentChanges/dataQuality）；GET 零写入、as_of point-in-time、V1 永不进 payload；admin debug 含 `rawDebug` 可追溯底层 feature/factor
+  - `feature_snapshot_service.build_summary_payload` 追加 `atomic_fact_contract_v1`（仅新快照写入，旧已发布快照受 upsert 保护不覆盖）
+  - 前端 `AtomicFactsPanel`（compact=`/market` 右栏 + expanded=`/stock/:symbol`，按钮「显示/隐藏状态观察」）；删除旧 `EventStatePanel`；复用 `useStockContext`（收起 enabled=false → 0 请求）
+  - 测试：后端纯函数 19/19 + API 集成 6/6（独立测试库，非生产库）；前端 contract 58/58、tsc/eslint 0、build 成功；ruff/mypy 0
+  - 文档：07-atomic-fact-contract-v1 + AGENTS + 02/04 + code-doc-alignment + 4 maps + 本 CHANGE
+  - 遗留：生产部署验收待步骤六执行
+
 - CHANGE-20260716-001: 盘后任务历史恢复 API + SMC 逐 Bar 对齐 Pine + MiniKline 真实留白 + indicator_service 按需加载（合并原 001-007）
   - **目标一 盘后 resume**：`POST /admin/after-close-runs/{id}/resume` — SELECT FOR UPDATE、同日 queued/running 互斥（409 SAME_DAY_ACTIVE_RUN）、幂等返回 queued、清 worker/heartbeat/lease、metadata 写 resume_requested_at、唯一 manual_resume 事件
   - **P0 修复**：repair 按 `source_run_id==snapshot_run.id` 统计；DSA 未 published 不标 succeeded（`resume_pending`）；publishing 从 DB 读真实 count（禁止 0/None）；feature_snapshot 复用已有 running run；repair 后补 commit

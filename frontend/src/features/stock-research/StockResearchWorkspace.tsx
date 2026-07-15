@@ -1,5 +1,5 @@
 // [StockResearchWorkspace] - 描述: K 线研究区组件（/stock/:symbol 及 /admin/stock-debug/:symbol 使用）
-// /market 明确禁止挂载本组件（行情页只有表格 + EventStatePanel，无 K 线）。
+// /market 明确禁止挂载本组件（行情页只有表格 + AtomicFactsPanel 小卡，无 K 线）。
 // 接收 useStockResearchData 返回的已组装数据，渲染 StrategyChart + 行情状态条。
 // timeframe 为受控状态：由父组件从 URL 解析并传入，工具栏切换通过 onTimeframeChange 回调写回 URL。
 // viewport 按 `${symbol}:${timeframe}` 本地保存（不进 URL 避免噪音）：

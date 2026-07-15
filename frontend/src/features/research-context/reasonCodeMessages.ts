@@ -1,4 +1,4 @@
-// [reasonCodeMessages] - 描述: EventStatePanel reasonCode → 用户文案映射（纯函数，可测试）
+// [reasonCodeMessages] - 描述: 状态观察面板 reasonCode → 用户文案映射（纯函数，可测试）
 // 测试 9: 前端 reasonCode 文案覆盖
 // 每种 reasonCode 必须返回明确的标题和可选的数据日期 meta，禁止统一显示"暂无可用状态数据"。
 

@@ -59,7 +59,7 @@ strategy_run_items.reason_code 标准编码：
 | 结构状态因子 | `/instruments/{id}/structural-factors` | 双周期（1d+15m）5 组结构因子（DSA 段/Swing/成本节点/动量波动/成交参与）；前端只渲染后端 DTO，禁止重新计算；无认证要求（与 indicators API 一致）；250-500 bar lookback，15m 仅已完成 bar，Swing 仅已确认 pivot（无未来函数） |
 | 策略 | `/strategies`, `/strategy-runs` | 只读 released/published 结果；`/strategy-runs/{run_id}/results` 以 `strategy_run_items` 为主表 LEFT JOIN `strategy_results` + `instruments`，返回全量 universe（含 succeeded/skipped/failed），skipped/failed 行 `id`/`payload` 为 null；新增 `item_status`/`reason_code`/`error_message` 字段；默认无筛选时 `source_total = run.total_instruments`。JOIN 策略：因 `strategy_run_items.result_id` 当前未回填（ALIGN-033 P2），`strategy_results` 关联统一改用 `(run_id, instrument_id)`，包括批量加载、metric_filter 子查询、sort LEFT JOIN 三处。**keyword 搜索（CHANGE-20260713-005）**：`strategy_result_repository.query_results` 的 `keyword` 参数（非空时）ILIKE 同时匹配 `Instrument.symbol`/`Instrument.name`/`Instrument.pinyin_initials`（3 处 or_ 分支同步，支持股票代码/中文名称/拼音首字母）；前端不做全量过滤，不增加新表；`total` 字段为该 keyword + filters 下的真实总数（不是 items.length）。**industry/concept 筛选（CHANGE-20260713-006）**：`/strategy-runs/{run_id}/results` 支持 `industry`（str \| None, Query）和 `concept`（str \| None, Query）参数，按行业/概念板块名称筛选，通过共享 `backend/app/repositories/board_filter_helper.py::build_board_filter_conditions` 构造 EXISTS 子查询（`MarketBoardMembership` JOIN `MarketBoard`，`type='industry'`/`'concept'`，`name` 匹配）；industry+concept 同时提供时为 AND 语义。**数量契约四层语义（CHANGE-20260713-007）**：响应包含四层数量：`source_total`（published run 原始总量，不受业务筛选影响）、`universe_total`（all/watchlist 范围总量，业务筛选前）、`filtered_total`（keyword+industry+concept+metric_filters 后总量）、`items`（filtered_total 当前页）；`len(items) <= filtered_total`；`items`/`filtered_total` 必须应用完全相同的 keyword/industry/concept/metric_filters 条件，SQL 数量固定，禁止 N+1；禁止文档描述"source_total 与筛选使用相同条件"。**latest_change_pct/latest_change_trade_date 响应字段 + stock_name/stock_name_op Query 参数 + change_pct 特殊 sort/filter key（CHANGE-20260714-001）**：响应 items 每行新增 `latest_change_pct`（float\|null，最新完成交易日涨跌幅，从 `bars_daily` 表用 window function 计算最新两根日线）和 `latest_change_trade_date`（date\|null，对应的交易日）；`change_pct` 作为 `sort_by` 和 `metric_filters` 的特殊 key 走 `bars_daily` 子查询，不在 manifest `filterable` 白名单中也允许；新增 `stock_name`（str\|None, Query）和 `stock_name_op`（`contains`/`not_contains`/`eq`, Query, 默认 `contains`）Query 参数支持股票名称独立筛选；保留原 `payload` 不可变，DSA 其他列仍绑定 published run 日期；详见第 17 节 |
 | 监控 | `/monitor-states`, `/strategy-events` | 只处理完成 Bar，按用户资格过滤；monitor_event 在 `delivery_worker.py` 投递前再次用 `is_user_eligible_for_monitor` 复核，active admin 放行，disabled admin / 无订阅普通用户排除 |
-| 个股上下文 | `/stocks/{symbol}/context` | 用户面个股状态与事件聚合；Evidence DTO 从 ORM `event.evidence` 映射；时区 `Asia/Shanghai`；历史事件截止为次日 00:00 exclusive；run 查询按 `trade_date, published_at, finished_at` DESC 确定排序；`strategy_events.idempotency_key` 格式 `symbol:source_run_id:algorithm_version`（每只股票每个 run 至多一个事件） |
+| 个股上下文 | `/stocks/{symbol}/context` | Atomic Fact Contract V1 只读事实层（替换旧 `StockState`/`StateEventDTO` 普通用户表达层）；返回 `contractVersion/asOf/core/auxiliary/availability/recentChanges/dataQuality`；Core 严格 14（趋势4+动量4+结构5+成交1），Auxiliary 10 默认隐藏，Rejected 1（V1 累计成交量比永不进入 payload）；V3/T5 阈值未确认时仅显示比值 +「分类未启用」；T3/T6 `feature_flag` 默认关闭；时区 `Asia/Shanghai`；`as_of` 严格 point-in-time（仅查 `succeeded+published+full` run，禁止未来）；GET 零数据库写入；`recentChanges` 为相邻已发布快照对 14 个 Core 事实的只读对比（非 V4.13 Core Fact） |
 | 通知 | `/messages`, `/notification-channels` | 用户只能操作自己的消息和渠道 |
 | 自选 | `/watchlist` | active subscription + monitor_limit |
 | 表格视图配置 | `/me/table-view-presets` | 用户表格视图配置 CRUD；JWT user_id 隔离；active subscription + trend_selection feature（admin 豁免）；config 仅允许 keyword/sort/filters/hiddenColumns/pageSize；每 user+table_id+strategy_key 最多 20 个；`(user_id, table_id, strategy_key, name)` 唯一约束用两个 partial unique index 实现（strategy_key IS NOT NULL / IS NULL 分离，解决 NULL!=NULL 问题）；is_default 同维度互斥；**写操作（POST/PATCH/DELETE）必须在返回前 `await db.commit()`，异常分支 `rollback` 后 re-raise，禁止吞异常；写后读跨请求必须可见** |
@@ -1104,35 +1104,42 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 - preset 不影响后端策略计算，只影响前端表格视图；
 - `is_default` 互斥更新由应用层 `_unset_default_for_scope` 实现（非数据库约束）。
 
-## 15. 个股上下文 API 契约（stock_context）
+## 15. 个股上下文 API 契约（stock_context — Atomic Fact Contract V1）
 
-`GET /api/v1/stocks/{symbol}/context` 是用户面 `EventStatePanel` 单一数据源，返回个股最新状态与历史事件聚合。前端 `useStockContext` hook 调用此端点，禁止前端重新计算或拼接。
+`GET /api/v1/stocks/{symbol}/context` 是用户面 `AtomicFactsPanel` 单一数据源，返回 Atomic Fact Contract V1 上下文。前端 `useStockContext` hook 调用此端点，禁止前端重新计算或拼接。
 
-### 15.1 Evidence DTO 映射
+- 普通用户响应：`contractVersion / asOf / core / auxiliary / availability / recentChanges / dataQuality`；
+- 管理员调试 `GET /api/v1/admin/stocks/{symbol}/debug`：在用户响应基础上补充 `rawDebug`（structural/temporal/summary payload + run 元数据）+ `atomicFactsDebug`（Fact ID / 真实路径 / raw value / 阈值来源 / feature flag）；
+- 复用既有路由，不新增平行接口；
+- 底层 MACD / SQZMOM / Swing / DSA 计算保留（`state_event_service` 仍被 after-close orchestrator 用于生成 `stock_state_events`，但不再暴露给普通用户 context 接口）。
 
-- `_event_to_dto` 将 ORM `event.evidence` 映射为用户面 Evidence DTO；
-- 不再从 `event.payload` 拼装证据字段，Evidence 以 ORM `event.evidence` 为唯一来源。
+### 15.1 计算与单公式
 
-### 15.2 时区
+- `compute_atomic_facts(structural_payload, temporal_payload)` 是唯一纯函数计算入口；旧已发布快照 fallback 与新 `summary_payload.atomic_fact_contract_v1` 共用同一函数，不存在两套公式；
+- `as_of` 精确按 `trade_date` 查 `succeeded + published + full` run；无 run → 空态（`core` 分母仍固定 14，全部缺失，`reasonCode=no_published_full_run`）；无快照 → `reasonCode=snapshot_missing`；
+- GET 请求零数据库写入（仅 `SELECT`）；`recentChanges` 按 `as_of` 过滤 ≤ 该日期的已发布快照，禁止返回未来变化。
 
-- 时间字段统一使用 `ZoneInfo("Asia/Shanghai")`（不再使用 UTC）；
-- 事件时间、发布时间、完成时间均以 CST 返回。
+### 15.2 事实计数与展示规则
 
-### 15.3 历史事件截止
+- Core 严格 **14**（趋势4 + 动量4 + 结构5 + 成交1），分母 `availability.coreDenominator` 固定 14；S2 存在；
+- Auxiliary **10** 默认隐藏（不在普通用户 UI 展示），`availability.auxiliaryHidden` 为响应中实际返回的 Auxiliary ID；
+- Rejected **1**（V1 累计成交量比），`availability.v1Present` / `rejectedPresent` 恒为 `False`；
+- T3 / T6 `feature_flag` 默认关闭（`FEATURE_FLAGS` 全 `False`），普通用户完全不显示；
+- T5 / V3 阈值 `engineering_confirmation_required=true` 且值为 `null`（THR-001），UI 仅显示比值 +「分类未启用」；
+- S3 严格 0.33 / 0.67 边界（0.63 → 中间）；S7 / S8 禁止负距离显示；M3 零值容差 1e-6；V3 为段均量比（禁用「放量/缩量」）；
+- 缺失事实直接省略（`missing=true`），不伪装。
 
-- 历史事件 cutoff 使用 **次日 00:00 exclusive**（`trade_date + 1 day, 00:00:00`，不包含该时刻）；
-- 不再使用 `max.time + 1 day - 1 second` 口径。
+### 15.3 时区与 Run 查询排序
 
-### 15.4 Run 查询排序
-
+- 时间字段统一使用 `ZoneInfo("Asia/Shanghai")`；
 - Run 查询使用确定性 DESC 排序：`ORDER BY trade_date DESC, published_at DESC, finished_at DESC`；
 - 保证相同 trade_date 下多 run 的顺序确定，避免分页/缓存抖动。
 
-### 15.5 strategy_events 幂等键
+### 15.4 近期变化（recentChanges，非 V4.13 Core Fact）
 
-- `idempotency_key` 格式：`symbol:source_run_id:algorithm_version`；
-- 旧格式 `symbol:trade_date:algorithm_version:hash(evidence)` 已废弃；
-- 每只股票每个 run 至多生成一个事件（`source_run_id` 维度幂等）。
+- `compute_recent_changes` 接收 ≤10 个升序已发布快照，对 14 个 Core 事实逐对对比 `category`/`value` 变化，最多 30 条；
+- 只读计算，不写 `stock_state_events`；
+- 不属于合同定义的事实集，仅作相邻快照对比展示（普通用户 UI 在 `/stock/:symbol` expanded「近期变化」区块）。
 
 ## 16. Excel 导出 API 契约（CHANGE-20260713-010）
 
