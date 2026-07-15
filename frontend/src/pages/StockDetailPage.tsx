@@ -515,6 +515,7 @@ export default function StockDetailPage() {
           - returnTo 指向 /market?scope=market&query=xxx 时显示「行情搜索」列表
           - returnTo 缺失或非市场搜索时回退到「自选列表」 */}
       {/* CHANGE-20260715-004: 来源列表加载中显示 loading 占位，避免空白后突然出现列表 */}
+      {/* CHANGE-20260715-005: 尊重显式 source；拆分 loading/error/empty/invalid 状态 */}
       <div className="tv-detail-layout">
         {!isCaptureMode && detailActions.sourceListLoading && (
           <aside
@@ -527,7 +528,40 @@ export default function StockDetailPage() {
             <div className="tv-source-list-placeholder">加载中…</div>
           </aside>
         )}
-        {!isCaptureMode && !detailActions.sourceListLoading && detailActions.sourceStocks.length > 0 && (
+        {!isCaptureMode && !detailActions.sourceListLoading && detailActions.sourceListError && (
+          <aside
+            className="tv-source-list tv-source-list-error"
+            data-testid="detail-source-list-error"
+          >
+            <div className="tv-source-list-header">
+              {detailActions.sourceListKind === 'market' ? '行情来源' : '自选来源'}
+            </div>
+            <div className="tv-source-list-placeholder">来源数据加载失败</div>
+          </aside>
+        )}
+        {!isCaptureMode && !detailActions.sourceListLoading && !detailActions.sourceListError && detailActions.sourceContextInvalid && (
+          <aside
+            className="tv-source-list tv-source-list-invalid"
+            data-testid="detail-source-list-invalid"
+          >
+            <div className="tv-source-list-header">行情来源</div>
+            <div className="tv-source-list-placeholder">来源上下文失效</div>
+          </aside>
+        )}
+        {!isCaptureMode && !detailActions.sourceListLoading && !detailActions.sourceListError && !detailActions.sourceContextInvalid && detailActions.sourceListEmpty && (
+          <aside
+            className="tv-source-list tv-source-list-empty"
+            data-testid="detail-source-list-empty"
+          >
+            <div className="tv-source-list-header">
+              {detailActions.sourceListKind === 'market' ? '行情来源' : '自选来源'}
+            </div>
+            <div className="tv-source-list-placeholder">
+              {detailActions.sourceListKind === 'market' ? '暂无选股结果' : '暂无自选股票'}
+            </div>
+          </aside>
+        )}
+        {!isCaptureMode && !detailActions.sourceListLoading && !detailActions.sourceListError && !detailActions.sourceContextInvalid && !detailActions.sourceListEmpty && detailActions.sourceStocks.length > 0 && (
           <aside
             className="tv-source-list"
             data-testid="detail-source-list"

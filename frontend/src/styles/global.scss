@@ -466,16 +466,23 @@ button { cursor: pointer; }
 .chip-row { display: flex; gap: 6px; flex-wrap: wrap; }
 
 // ===== Data Table =====
-.table-wrap { overflow: auto; border-radius: 0 0 v.$radius-base v.$radius-base; }
-// [StickyHeader] - 描述: viewport sticky 模式下 .table-wrap 不抢占滚动容器，
+// CHANGE-20260715-005: table-shell 替代 table-wrap，工具栏/分页器移出横向滚动容器
+// 结构：table-shell > meta-bar + search-bar + table-scroll > table + pager
+// table-shell 使用 minmax(0,1fr) 约束宽度，meta-bar/pager 右边界等于 table-scroll 右边界
+.table-shell { display: flex; flex-direction: column; min-width: 0; border-radius: 0 0 v.$radius-base v.$radius-base; }
+// [StickyHeader] - 描述: viewport sticky 模式下 .table-shell 不抢占滚动容器，
 // 表头随页面滚动吸附在 topbar 下方（top: var(--topbar)；z-index 低于 topbar 的 20）
-.table-wrap.viewport-sticky { overflow: visible; }
+.table-shell.viewport-sticky .table-scroll { overflow: visible; }
 // [StickyHeader] - 描述: viewport sticky 模式下表头吸附在 topbar 下方，
 // z-index 高于表格内容但低于 topbar（topbar z-index=20）
-.table-wrap.viewport-sticky .data-table th {
+.table-shell.viewport-sticky .data-table th {
   top: var(--topbar);
   z-index: 18;
 }
+// CHANGE-20260715-005: 只有 table-scroll 设置 overflow-x: auto
+.table-scroll { overflow-x: auto; }
+// CHANGE-20260715-005: 全文搜索栏移出横向滚动容器
+.table-search-bar { padding: 8px 10px; border-bottom: 1px solid v.$color-border-soft; }
 
 .data-table {
   width: 100%;
@@ -1047,7 +1054,7 @@ button { cursor: pointer; }
 .interactive-table th.sorted .sort-icon { color: #7fa0ff; }
 .th-filter { width: 28px; height: 28px; margin-right: 4px; border: 0; border-radius: 5px; background: transparent; color: #667086; cursor: pointer; &:hover, &.active { background: #27334d; color: #9bb2ff; } }
 .table-select-column { padding: 0 12px !important; }
-// CHANGE-20260715-002: 工具栏 sticky left:0，横向滚动时保持可见，右边界与表格可视区一致
+// CHANGE-20260715-005: 工具栏移出横向滚动容器，不再需要 position:sticky;left:0;width:100% 补丁
 .table-meta-bar {
   height: 34px;
   display: flex;
@@ -1058,10 +1065,6 @@ button { cursor: pointer; }
   background: #121720;
   color: v.$color-muted;
   font-size: 12px;
-  position: sticky;
-  left: 0;
-  width: 100%;
-  z-index: 6;
 }
 .table-active-state { margin-left: 10px; color: #8fa7df; }
 .table-reset-btn { border: 0; background: transparent; color: #7994d9; font-size: 12px; cursor: pointer; &:disabled { opacity: .35; cursor: default; } }
@@ -1284,7 +1287,7 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 
 .table-meta-actions { display: flex; gap: 7px; }
 .table-columns-btn, .table-reset-btn { height: 26px; border: 1px solid #30394c; border-radius: 5px; background: #171d28; color: #9ba7bb; font-size: 12px; cursor: pointer; &:hover { color: #fff; border-color: #536483; } }
-// CHANGE-20260715-002: 分页器 sticky left:0，横向滚动时保持可见
+// CHANGE-20260715-005: 分页器移出横向滚动容器，不再需要 position:sticky;left:0;width:100% 补丁
 .table-pager {
   display: flex;
   align-items: center;
@@ -1295,10 +1298,6 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
   background: #11161e;
   color: #7f8ba0;
   font-size: 12px;
-  position: sticky;
-  left: 0;
-  width: 100%;
-  z-index: 6;
 }
 .table-page-size { height: 27px; min-width: 56px; padding: 0 5px; }
 // [StrategyDataTable] - 描述: sticky 表头（z-index 4）+ sticky 首列/选择列（z-index 3）+ 角落单元格（z-index 5）
@@ -1354,12 +1353,7 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 // [StrategyDataTable] - 描述: 选择列存在时，首列偏移 select 列宽度，避免 sticky 重叠
 .interactive-table .table-select-column + th.sticky-col,
 .interactive-table .table-select-column + td.sticky-col { left: var(--select-col-width); }
-// CHANGE-20260715-002: 涨跌幅列若 sticky，left 偏移股票列宽度（+ 选择列宽度若有）
-.interactive-table .sticky-col-change-pct { left: var(--stock-col-width); }
-.interactive-table .table-select-column + .sticky-col + th.sticky-col-change-pct,
-.interactive-table .table-select-column + .sticky-col + td.sticky-col-change-pct {
-  left: calc(var(--select-col-width) + var(--stock-col-width));
-}
+// CHANGE-20260715-005: 涨跌幅保持普通列，删除死 CSS .sticky-col-change-pct
 .table-action-column { min-width: 86px; }
 // [StrategyDataTable] - 描述: 选中行高亮（onRowClick + activeRowKey 驱动，用于 /market 选中行驱动右栏）
 .interactive-table tbody tr.row-active td { background: rgba(79, 124, 255, .10); }

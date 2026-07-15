@@ -1,17 +1,20 @@
-// [DetailSourceLoadingContract] - 描述: 详情页来源列表 loading 占位契约（CHANGE-20260715-004）
+// [DetailSourceLoadingContract] - 描述: 详情页来源列表 loading/error/empty/invalid 占位契约（CHANGE-20260715-004/005）
 // 用法：node --experimental-strip-types --test src/features/stock-research/__tests__/detailSourceLoadingContract.test.ts
 //
-// 覆盖 Bug 1 修复契约：
-//   1. useStockDetailActions 暴露 sourceListLoading 字段
+// 覆盖 Bug 1+2 根治契约：
+//   1. useStockDetailActions 暴露 sourceListLoading/sourceListError/sourceListEmpty/sourceContextInvalid 字段
 //   2. StockDetailPage 在 sourceListLoading=true 时渲染 loading 占位
-//   3. StockDetailPage 在 sourceListLoading=false && sourceStocks.length>0 时渲染列表
-//   4. 不在加载中时直接渲染空列表（避免突然出现）
-//   5. loading 占位包含 data-testid="detail-source-list-loading"
-//   6. loading 占位显示来源类型 header（行情来源/自选来源）
-//   7. CSS .tv-source-list-placeholder 存在
-//   8. MarketWorkspacePage.handleNavigateToStock 显式传 source 和 strategy
-//   9. scope=market → source=selection&strategy=dsa_selector
-//  10. scope=watchlist → source=watchlist&strategy=watchlist_monitor
+//   3. StockDetailPage 在 sourceListError=true 时渲染 error 占位
+//   4. StockDetailPage 在 sourceContextInvalid=true 时渲染 invalid 占位
+//   5. StockDetailPage 在 sourceListEmpty=true 时渲染 empty 占位
+//   6. StockDetailPage 列表渲染条件排除 loading/error/invalid/empty 状态
+//   7. loading 占位包含 data-testid="detail-source-list-loading"
+//   8. loading 占位显示来源类型 header（行情来源/自选来源）
+//   9. CSS .tv-source-list-placeholder 存在
+//  10. MarketWorkspacePage.handleNavigateToStock 显式传 source 和 strategy
+//  11. source=selection → sourceListKind=market（即使 returnTo 无效也不回退 watchlist）
+//  12. sourceListLoading 不再用 !activeRunId 作为永久 loading
+//  13. 上一只/下一只保留 source/strategy/returnTo
 
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
@@ -37,78 +40,101 @@ function readSource(p: string): string {
   return readFileSync(p, 'utf8')
 }
 
-test('CHANGE-004-1: useStockDetailActions 暴露 sourceListLoading 字段', () => {
+test('CHANGE-005-1: useStockDetailActions 暴露 sourceListLoading/Error/Empty/ContextInvalid 字段', () => {
   const src = readSource(USE_DETAIL_ACTIONS)
   // 接口字段
-  assert.ok(/sourceListLoading:\s*boolean/.test(src), 'StockDetailActions 接口必须包含 sourceListLoading: boolean')
+  assert.ok(/sourceListLoading:\s*boolean/.test(src), '接口必须包含 sourceListLoading: boolean')
+  assert.ok(/sourceListError:\s*boolean/.test(src), '接口必须包含 sourceListError: boolean')
+  assert.ok(/sourceListEmpty:\s*boolean/.test(src), '接口必须包含 sourceListEmpty: boolean')
+  assert.ok(/sourceContextInvalid:\s*boolean/.test(src), '接口必须包含 sourceContextInvalid: boolean')
   // 返回值
-  assert.ok(/sourceListLoading,/.test(src), 'useStockDetailActions 返回对象必须包含 sourceListLoading')
-  // 实现逻辑
-  assert.ok(/const sourceListLoading = hasMarketContext/.test(src), 'sourceListLoading 必须基于 hasMarketContext 计算')
-  assert.ok(/publishedRunsQuery\.isLoading \|\| !activeRunId \|\| sourceResultsQuery\.isLoading/.test(src), 'sourceListLoading 必须考虑 publishedRunsQuery.isLoading + activeRunId 缺失 + sourceResultsQuery.isLoading')
-  assert.ok(/monitorStatusQuery\.isLoading/.test(src), '无 marketContext 时使用 monitorStatusQuery.isLoading')
+  assert.ok(/sourceListLoading,/.test(src), '返回对象必须包含 sourceListLoading')
+  assert.ok(/sourceListError,/.test(src), '返回对象必须包含 sourceListError')
+  assert.ok(/sourceListEmpty,/.test(src), '返回对象必须包含 sourceListEmpty')
+  assert.ok(/sourceContextInvalid,/.test(src), '返回对象必须包含 sourceContextInvalid')
 })
 
-test('CHANGE-004-2: StockDetailPage 在 sourceListLoading=true 时渲染 loading 占位', () => {
-  const src = readSource(STOCK_DETAIL_PAGE)
-  assert.ok(/detailActions\.sourceListLoading && \(/.test(src), 'StockDetailPage 必须根据 sourceListLoading 渲染 loading 占位')
-  assert.ok(/data-testid="detail-source-list-loading"/.test(src), 'loading 占位必须含 data-testid="detail-source-list-loading"')
-  assert.ok(/tv-source-list-placeholder/.test(src), 'loading 占位必须含 tv-source-list-placeholder 类')
+test('CHANGE-005-2: sourceListLoading 不再用 !activeRunId 作为永久 loading', () => {
+  const src = readSource(USE_DETAIL_ACTIONS)
+  // 提取 sourceListLoading 赋值行（禁止在该行使用 !activeRunId 作为 loading 条件）
+  const loadingLine = src.match(/const sourceListLoading = [^\n]+/)?.[0] ?? ''
+  assert.ok(loadingLine.length > 0, '必须存在 sourceListLoading 赋值')
+  assert.ok(!/!activeRunId/.test(loadingLine), 'sourceListLoading 不得使用 !activeRunId（会导致永久 loading）')
+  // 必须使用 publishedRunsQuery.isLoading 和 sourceResultsQuery.isLoading
+  assert.ok(/publishedRunsQuery\.isLoading/.test(src), '必须使用 publishedRunsQuery.isLoading')
+  assert.ok(/sourceResultsQuery\.isLoading/.test(src), '必须使用 sourceResultsQuery.isLoading')
 })
 
-test('CHANGE-004-3: StockDetailPage 列表渲染条件排除 loading 状态', () => {
-  const src = readSource(STOCK_DETAIL_PAGE)
-  // 列表渲染必须显式排除 loading 状态，避免同时渲染 loading + 列表
-  assert.ok(/!detailActions\.sourceListLoading && detailActions\.sourceStocks\.length > 0/.test(src), '列表渲染条件必须为 !sourceListLoading && sourceStocks.length > 0')
+test('CHANGE-005-3: 尊重显式 source 参数（source=selection → sourceListKind=market）', () => {
+  const src = readSource(USE_DETAIL_ACTIONS)
+  // source=selection → sourceListKind=market（不依赖 returnTo）
+  assert.ok(/source === 'selection' \? 'market' : 'watchlist'/.test(src), 'sourceListKind 必须基于显式 source 参数')
+  // hasMarketContext 必须包含 source === 'selection' 条件
+  assert.ok(/source === 'selection' && marketContext !== null/.test(src), 'hasMarketContext 必须要求 source === selection && marketContext !== null')
+  // sourceContextInvalid 必须在 source=selection 且 returnTo 无效时为 true
+  assert.ok(/source === 'selection' && marketContext === null && !!returnTo/.test(src), 'sourceContextInvalid 必须在 source=selection 且 returnTo 无效时为 true')
 })
 
-test('CHANGE-004-4: loading 占位显示来源类型 header', () => {
+test('CHANGE-005-4: StockDetailPage 渲染 loading/error/invalid/empty 四种占位', () => {
   const src = readSource(STOCK_DETAIL_PAGE)
-  // loading 占位和列表都应显示 header（行情来源/自选来源）
+  // loading 占位
+  assert.ok(/data-testid="detail-source-list-loading"/.test(src), '必须渲染 loading 占位')
+  // error 占位
+  assert.ok(/data-testid="detail-source-list-error"/.test(src), '必须渲染 error 占位')
+  // invalid 占位
+  assert.ok(/data-testid="detail-source-list-invalid"/.test(src), '必须渲染 invalid 占位')
+  // empty 占位
+  assert.ok(/data-testid="detail-source-list-empty"/.test(src), '必须渲染 empty 占位')
+})
+
+test('CHANGE-005-5: StockDetailPage 列表渲染条件排除所有非正常状态', () => {
+  const src = readSource(STOCK_DETAIL_PAGE)
+  // 列表渲染必须显式排除 loading/error/invalid/empty 状态
+  assert.ok(/!detailActions\.sourceListLoading && !detailActions\.sourceListError && !detailActions\.sourceContextInvalid && !detailActions\.sourceListEmpty && detailActions\.sourceStocks\.length > 0/.test(src), '列表渲染条件必须排除 loading/error/invalid/empty')
+})
+
+test('CHANGE-005-6: loading 占位显示来源类型 header', () => {
+  const src = readSource(STOCK_DETAIL_PAGE)
   const matches = src.match(/sourceListKind === 'market' \? '行情来源' : '自选来源'/g)
   assert.ok(matches && matches.length >= 2, 'loading 占位和列表都需显示 header')
 })
 
-test('CHANGE-004-5: CSS .tv-source-list-placeholder 存在', () => {
+test('CHANGE-005-7: CSS .tv-source-list-placeholder 存在', () => {
   const src = readSource(GLOBAL_SCSS)
   assert.ok(/\.tv-source-list-placeholder\s*\{/.test(src), 'global.scss 必须定义 .tv-source-list-placeholder')
 })
 
-test('CHANGE-004-6: MarketWorkspacePage.handleNavigateToStock 显式传 source/strategy', () => {
+test('CHANGE-005-8: MarketWorkspacePage.handleNavigateToStock 显式传 source/strategy', () => {
   const src = readSource(MARKET_WORKSPACE_PAGE)
-  // 必须包含 handleNavigateToStock 函数
   assert.ok(/handleNavigateToStock/.test(src), 'MarketWorkspacePage 必须实现 handleNavigateToStock')
-  // scope=market → source=selection
   assert.ok(/scope === 'market' \? 'selection' : 'watchlist'/.test(src), '必须根据 scope 显式传 source')
-  // scope=market → strategy=dsa_selector
   assert.ok(/DSA_STRATEGY_KEY/.test(src), 'scope=market 时必须传 DSA_STRATEGY_KEY')
   assert.ok(/'watchlist_monitor'/.test(src), 'scope=watchlist 时必须传 watchlist_monitor')
-  // 必须保留 returnTo 完整 URL
   assert.ok(/returnTo=\$\{encodeURIComponent\(returnTo\)\}/.test(src), '必须编码并保留 returnTo')
 })
 
-test('CHANGE-004-7: 来源 URL 包含完整 source + strategy + returnTo', () => {
+test('CHANGE-005-9: 来源 URL 包含完整 source + strategy + returnTo', () => {
   const src = readSource(MARKET_WORKSPACE_PAGE)
-  // 必须使用模板字符串拼接 URL，包含 source、strategy、returnTo 三个参数
   assert.ok(/\/stock\/\$\{symbol\}\?source=\$\{src\}&strategy=\$\{strat\}&returnTo=/.test(src), '详情 URL 必须包含 source/strategy/returnTo')
 })
 
-test('CHANGE-004-8: useStockDetailActions 不使用 useMarketStocks', () => {
+test('CHANGE-005-10: useStockDetailActions 不使用 useMarketStocks', () => {
   const src = readSource(USE_DETAIL_ACTIONS)
-  // 禁止以函数调用形式使用 useMarketStocks（注释中可以提及）
   assert.ok(!/useMarketStocks\s*\(/.test(src), '禁止使用旧 useMarketStocks 函数调用')
-  // 必须复用 publishedRuns + useStrategyRunResults
   assert.ok(/usePublishedRuns\('dsa_selector'/.test(src), '必须使用 usePublishedRuns("dsa_selector")')
-  assert.ok(/useStrategyRunResults\(activeRunId/.test(src), '必须使用 useStrategyRunResults(activeRunId, sourceListParams)')
-  // 必须使用 decodeMarketListContext + buildStrategyResultQueryParams
+  assert.ok(/useStrategyRunResults\(/.test(src), '必须使用 useStrategyRunResults')
   assert.ok(/decodeMarketListContext\(returnTo\)/.test(src), '必须使用 decodeMarketListContext(returnTo)')
   assert.ok(/buildStrategyResultQueryParams\(marketContext\)/.test(src), '必须使用 buildStrategyResultQueryParams(marketContext)')
 })
 
-test('CHANGE-004-9: 上一只/下一只保留 source/strategy/returnTo', () => {
+test('CHANGE-005-11: 上一只/下一只保留 source/strategy/returnTo', () => {
   const src = readSource(USE_DETAIL_ACTIONS)
-  // navigateToStock 必须保留 source + strategy
   assert.ok(/\/stock\/\$\{target\.symbol\}\?source=\$\{source\}&strategy=\$\{strategy\}/.test(src), '上一只/下一只必须保留 source + strategy')
-  // navigateToStock 必须保留 returnTo（通过 returnToParam 变量拼接）
   assert.ok(/returnToParam = returnTo \? `&returnTo=/.test(src), '上一只/下一只必须保留 returnTo')
+})
+
+test('CHANGE-005-12: normalizeInternalReturnTo 上限为 4096', () => {
+  const src = readSource(join(__dirname, '..', '..', 'market-workspace', 'marketWorkspaceUrlState.ts'))
+  assert.ok(/raw\.length > 4096/.test(src), 'normalizeInternalReturnTo 上限必须为 4096')
+  assert.ok(!/raw\.length > 500/.test(src), '不得再使用 500 字符上限')
 })

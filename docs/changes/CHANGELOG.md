@@ -4,6 +4,24 @@
 
 ## 2026-07-15
 
+- CHANGE-20260715-006: MiniKline 闭包根治 + SMC Pine 对齐（RMA NA 语义 + 首个 pivot off-by-one + EQH/EQL 三时间点）
+  - MiniKline 闭包根治：`MiniKlineCard.tsx` 新增 `barsLengthRef`/`timeframeRef`/`rafIdRef`；`applyViewportRange` 改为 `useCallback([], )` 稳定函数从 refs 读取；新增 `scheduleApplyRange` 稳定函数取消 pending rAF 后调度新 rAF；`ResizeObserver` 回调调用 `scheduleApplyRange`（不直接闭包捕获 bars/timeframe）；卸载清理取消 pending rAF
+  - SMC Pine 对齐 `pine_rma` NA 语义：`smc_pine_core.py` 的 `pine_rma` 在 `bar_index < length-1` 返回 `na`（非逐步 SMA），`bar_index == length-1` 写入 SMA 种子，之后 Wilder 递推；严格复现 Pine v5 `ta.rma`
+  - SMC Pine 对齐首个 pivot off-by-one：`start_of_new_leg`/`start_of_bearish_leg`/`start_of_bullish_leg` 从 `i > size` 改为 `i >= size`；`get_current_structure` 从 `if i <= size: return` 改为 `if i < size: return`；首个 leg/pivot 在 `i == size` 检测（对齐 Pine `ta.change(leg)`）
+  - EQH/EQL DTO 三时间点：EQL 和 EQH 两处新增 `detection_index`/`detection_time`（leg change 确认 bar, i），与 anchor（前一 pivot bar）/confirmed（新 pivot bar, ref_i=i-size）分离
+  - 核对通过：ATR200=`pine_rma(tr,200)`、highest/lowest 窗口 `[ref_i+1, ref_i+length+1]`、crossover/crossunder NaN→False、OB slice `[start:end)` end-exclusive、trailing 顺序 `update_trailing_extremes → swing → internal → equal → display → delete OB`
+  - 测试：`test_smc_indicator.py` 的 `test_pine_rma_min_periods_before_seed` 更新为断言 NaN；`miniKlineCardContract.test.ts` 新增 5 项闭包契约测试（16-20）
+  - 遗留：Pine golden fixture PENDING；生产 E2E 验证待部署后执行
+
+- CHANGE-20260715-005: 详情左栏来源状态拆分 + 表格 sticky 列和工具栏对齐根治
+  - 详情左栏四态拆分：`useStockDetailActions.ts` 新增 `sourceListError`/`sourceListEmpty`/`sourceContextInvalid` 字段；`source` 参数优先级：显式 source > returnTo 推断；source=selection → sourceListKind=market（即使 returnTo 无效也不回退 watchlist）
+  - `normalizeInternalReturnTo` 上限 500 → 4096（复杂筛选 URL 编码后可能超过 500）
+  - 表格结构 `table-wrap` → `table-shell > meta-bar + search-bar + table-scroll > table + pager`：只有 `table-scroll` 设置 `overflow-x: auto`；meta-bar/search-bar/pager 移出横向滚动容器；删除 `position:sticky;left:0;width:100%` 补丁
+  - `isStickyColumn(col)` 统一判断函数：只允许 `col.key === 'stock'` 为 sticky 列；header 和 body 共用；删除死 CSS `.sticky-col-change-pct`
+  - `AdminAfterClosePipelinePage` 迁移到 `table-shell` + `table-scroll` 结构
+  - 测试：`detailSourceLoadingContract.test.ts`、`marketWorkspaceUrlState.test.ts`、`stickyHeader.test.ts` 更新
+  - 遗留：8 项 baseline contract 失败需独立修复；生产 E2E 验证待部署后执行
+
 - CHANGE-20260715-004: Bug 1 修复（详情左栏 loading 占位）+ Pine 真源文件入 Git 跟踪
   - Bug 1 修复（详情左栏空白后才出现列表）：`useStockDetailActions` 新增 `sourceListLoading: boolean` 字段（`hasMarketContext` 时为 `publishedRunsQuery.isLoading || !activeRunId || sourceResultsQuery.isLoading`，否则为 `monitorStatusQuery.isLoading`）；`StockDetailPage` 新增 loading 占位渲染分支（`<aside data-testid="detail-source-list-loading">` + `<div class="tv-source-list-placeholder">加载中…</div>`）；`global.scss` 新增 `.tv-source-list-placeholder` 样式
   - Pine 真源文件入 Git 跟踪：`git add -f ref/smc_user_source.pine`（SHA256 0bd3d2ad，843 行），`.gitignore` 仍排除 `ref/` 其他文件，仅此单文件例外

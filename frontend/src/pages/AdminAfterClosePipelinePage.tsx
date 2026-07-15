@@ -574,8 +574,9 @@ export default function AdminAfterClosePipelinePage() {
             ) : runs.length === 0 ? (
               <div className="notice">暂无运行记录</div>
             ) : (
-              <div className="table-wrap">
-                <table className="data-table">
+              <div className="table-shell">
+                <div className="table-scroll">
+                  <table className="data-table">
                   <thead>
                     <tr>
                       <th>类型</th>
@@ -614,7 +615,8 @@ export default function AdminAfterClosePipelinePage() {
                       </tr>
                     ))}
                   </tbody>
-                </table>
+                  </table>
+                </div>
               </div>
             )}
           </div>

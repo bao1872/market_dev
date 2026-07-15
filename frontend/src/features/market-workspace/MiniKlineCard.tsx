@@ -9,9 +9,14 @@
 //   - rightPriceScale autoScale + scaleMargins {top:0.08, bottom:0.08}，minimumWidth=56
 //   - 图表高度固定 190px，无多余 min-height 或底部空白
 //   - 切周期不复用上一周期 logical range
+// CHANGE-20260715-006: 根治 ResizeObserver/rAF 闭包问题
+//   - 新增 barsLengthRef、timeframeRef 持有最新值，避免 ResizeObserver 捕获首次 render 闭包
+//   - applyViewportRange 改为 useCallback 稳定函数，从 refs 读取最新 bars.length/timeframe
+//   - 新增 rafIdRef 跟踪 pending rAF，symbol/timeframe/bars/width 变化时取消上一个 rAF
+//   - ResizeObserver 回调调用稳定 applyViewportRange，不再持有首次 render 闭包
 // 使用 lightweight-charts v4 渲染简化 K 线（仅 K 线 + 价格轴 + 简化时间轴）。
 // 不显示指标/成交量/Node/事件标记/工具栏。
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   createChart,
   ColorType,
@@ -54,7 +59,45 @@ export function MiniKlineCard({ symbol }: MiniKlineCardProps) {
   // 当前容器宽度（整数 px），用于依赖变化时重新应用 range
   const containerWidthRef = useRef<number>(0)
 
+  // CHANGE-20260715-006: barsLengthRef/timeframeRef 持有最新值
+  // ResizeObserver 在 mount 时创建一次，其回调若直接闭包捕获 bars/timeframe
+  // 将永远使用首次 render 的值（空数组 + '1d'），导致宽度变化时 range 计算错误
+  const barsLengthRef = useRef<number>(0)
+  const timeframeRef = useRef<MiniKlineTimeframe>(timeframe)
+  // CHANGE-20260715-006: rafIdRef 跟踪 pending rAF，deps 变化时取消避免应用 stale range
+  const rafIdRef = useRef<number | null>(null)
+
   const { bars, isLoading, isError } = useMiniKlineData(symbol, timeframe)
+
+  // CHANGE-20260715-006: 每次 render 同步 refs（在 effects 之前，确保 effect 内读到最新值）
+  barsLengthRef.current = bars.length
+  timeframeRef.current = timeframe
+
+  // CHANGE-20260715-006: 稳定的 applyViewportRange——从 refs 读取最新值
+  // useCallback 空依赖：函数引用稳定，ResizeObserver 可安全持有
+  const applyViewportRange = useCallback((width: number) => {
+    const chart = chartRef.current
+    if (!chart) return
+    const vp = computeMiniKlineViewport(barsLengthRef.current, timeframeRef.current, width)
+    if (vp.visibleBars <= 0) return
+    chart.timeScale().setVisibleLogicalRange({
+      from: vp.from,
+      to: vp.to,
+    })
+  }, [])
+
+  // CHANGE-20260715-006: 稳定的 scheduleApplyRange——取消上一个 rAF 后调度新 rAF
+  // 避免快速切换 symbol/timeframe 时 stale rAF 覆盖新 range
+  const scheduleApplyRange = useCallback((width: number) => {
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current)
+      rafIdRef.current = null
+    }
+    rafIdRef.current = requestAnimationFrame(() => {
+      rafIdRef.current = null
+      applyViewportRange(width)
+    })
+  }, [applyViewportRange])
 
   // 创建 chart 实例（仅一次）
   useEffect(() => {
@@ -126,7 +169,8 @@ export function MiniKlineCard({ symbol }: MiniKlineCardProps) {
 
     seriesRef.current = series
 
-    // 响应式调整宽度 + 重新应用 viewport range
+    // CHANGE-20260715-006: ResizeObserver 调用稳定的 scheduleApplyRange
+    // 不再闭包捕获 bars/timeframe（旧代码捕获首次 render 闭包，宽度变化时 range 计算错误）
     const resizeObserver = new ResizeObserver((entries) => {
       for (const entry of entries) {
         // CHANGE-20260715-002: 使用整数 contentRect.width 避免亚像素抖动
@@ -137,9 +181,7 @@ export function MiniKlineCard({ symbol }: MiniKlineCardProps) {
         chart.applyOptions({ width: intWidth })
         containerWidthRef.current = intWidth
         // 宽度变化时在 rAF 中重新应用 range（避免在 ResizeObserver 回调中直接操作引发布局抖动）
-        requestAnimationFrame(() => {
-          applyViewportRange(intWidth)
-        })
+        scheduleApplyRange(intWidth)
       }
     })
     resizeObserver.observe(containerRef.current)
@@ -148,6 +190,11 @@ export function MiniKlineCard({ symbol }: MiniKlineCardProps) {
     containerWidthRef.current = Math.floor(containerRef.current.clientWidth)
 
     return () => {
+      // CHANGE-20260715-006: 卸载时取消 pending rAF
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current)
+        rafIdRef.current = null
+      }
       resizeObserver.disconnect()
       chart.remove()
       chartRef.current = null
@@ -156,19 +203,6 @@ export function MiniKlineCard({ symbol }: MiniKlineCardProps) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-
-  // CHANGE-20260715-002: 应用 viewport range（setData 后只调用一次 setVisibleLogicalRange）
-  // 不调用 fitContent（避免竞态导致 range 被覆盖）
-  function applyViewportRange(width: number) {
-    const chart = chartRef.current
-    if (!chart) return
-    const vp = computeMiniKlineViewport(bars.length, timeframe, width)
-    if (vp.visibleBars <= 0) return
-    chart.timeScale().setVisibleLogicalRange({
-      from: vp.from,
-      to: vp.to,
-    })
-  }
 
   // 更新数据 + 按周期切换时间轴显示（intraday 显示时间，日周月只显示日期）
   // 切周期不复用上一周期 logical range（每次重新计算）
@@ -192,14 +226,12 @@ export function MiniKlineCard({ symbol }: MiniKlineCardProps) {
 
     series.setData(data)
 
-    // CHANGE-20260715-002: setData 后在 rAF 中执行 setVisibleLogicalRange
+    // CHANGE-20260715-006: setData 后在 rAF 中执行 setVisibleLogicalRange
     // 不调用 fitContent（避免先全屏再设 range 的竞态）
+    // 使用 scheduleApplyRange 取消上一个 pending rAF，避免快速切周期时 stale rAF 覆盖
     const width = containerWidthRef.current || Math.floor(containerRef.current?.clientWidth ?? 0)
     if (width > 0) {
-      // 在 rAF 中应用，确保 setData 已完成布局
-      requestAnimationFrame(() => {
-        applyViewportRange(width)
-      })
+      scheduleApplyRange(width)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bars, timeframe])

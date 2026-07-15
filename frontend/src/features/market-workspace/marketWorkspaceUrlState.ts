@@ -88,12 +88,13 @@ export function changeMarketScope(
 }
 
 // returnTo 安全校验：仅允许 /screener /market /messages 前缀的内部路径（含 query/hash）。
-// 拒绝：外部 URL（http:// https:// //）、javascript:、超长字符串（>500）、非白名单前缀。
+// 拒绝：外部 URL（http:// https:// //）、javascript:、非白名单前缀。
 // CHANGE-20260713-009: 限制从 200 提升到 500，因为 /market URL 含 filters JSON 编码后可能超过 200 字符。
-// 500 仍能防止滥用，同时允许真实的 /market?scope=market&filters=[...]&keyword=...&industry=... URL。
+// CHANGE-20260715-005: 限制从 500 提升到 4096，因为复杂筛选 URL（多 filters + industry + concept + keyword + sort）
+//   编码后可能超过 500 字符，导致合法筛选 URL 失效。4096 足以容纳最复杂的筛选场景。
 export function normalizeInternalReturnTo(raw: string | null | undefined): string | null {
   if (!raw) return null
-  if (raw.length > 500) return null
+  if (raw.length > 4096) return null
   const trimmed = raw.trim()
   if (!trimmed) return null
   // 拒绝外部协议

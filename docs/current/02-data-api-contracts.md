@@ -221,6 +221,12 @@ capture worker 浏览器上下文使用 `viewport=1920x1200` + `device_scale_fac
 
 `data.smc`（仅 `include_smc=true` 时存在）包含市场结构关键点位序列，**time 数组保持完整长度对齐 anchor/confirmed 索引**（不调用 `_truncate_lists` 截断 SMC 输出）；前端 `smcToDisplay` 通过时间匹配自动过滤展示区外事件。**FVG（Fair Value Gap）完全排除**——不计算、不返回、不缓存、不渲染，不暴露 FVG 开关；FVG 排除不改变其他逻辑的索引、执行顺序和右侧延伸。
 
+**Pine 语义对齐（CHANGE-20260715-006）**：
+- `pine_rma(src, length)` 严格复现 Pine v5 `ta.rma`：`bar_index < length-1` 返回 `na`（非逐步 SMA），`bar_index == length-1` 写入 SMA 种子，之后 Wilder 递推；ATR(200) 前 199 根为 `na`；
+- 首个 pivot 在 `i == size` 检测（`start_of_new_leg` 使用 `i >= size`，非 `i > size`），对齐 Pine `ta.change(leg)` 在 `bar_index == size` 时可首次非零；
+- EQH/EQL DTO 三时间点：`anchor_index`/`anchor_time`（前一 pivot bar）、`confirmed_index`/`confirmed_time`（新 pivot bar, `ref_i=i-size`）、`detection_index`/`detection_time`（leg change 确认 bar, `i`）；
+- OB slice `[piv.bar_index, current_i)` end-exclusive（Python 切片天然 end-exclusive，对齐 Pine `array.slice()`）。
+
 ### 9.5.4 warmup 契约
 
 - 1d timeframe 使用 `full_daily_bars`（DB 全量日线，≥500 warmup，在 `daily_bars.tail(daily_count)` 截断前保存）；

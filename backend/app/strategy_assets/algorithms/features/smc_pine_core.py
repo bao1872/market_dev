@@ -87,35 +87,36 @@ DEFAULT_PARAMS: dict[str, Any] = {
 def pine_rma(src: list[float], length: int) -> list[float]:
     """Pine ta.rma(src, length) — Wilder's Running Moving Average。
 
-    Pine 语义：
-        - 前 length-1 根：逐步 SMA（min_periods 行为，用可用数据计算）
-        - 第 length-1 根（index=length-1）：完整 SMA 作为种子
-        - 之后：Wilder 递推 rma[i] = (rma[i-1] * (length-1) + src[i]) / length
+    CHANGE-20260715-006: 严格复现 Pine v5 ta.rma 的 NA 和 SMA 种子语义。
+    Pine v5 ta.rma 在 bar_index < length-1 时返回 na（不是逐步 SMA），
+    在 bar_index == length-1 时写入 SMA(src, length) 作为种子，
+    之后使用 Wilder 递推 rma[i] = (rma[i-1] * (length-1) + src[i]) / length。
 
-    注意：Pine 的 ta.rma 在 bar_index < length-1 时返回 SMA(src, bar_index+1)。
+    语义：
+        - bar_index < length-1: na（数据不足以计算 SMA 种子）
+        - bar_index == length-1: SMA(src, length) 种子
+        - bar_index >= length: Wilder 递推
+
+    旧实现错误地在 bar_index < length-1 时返回逐步 SMA（min_periods 行为），
+    导致 ATR(200) 在前 199 根产生非 na 值，与 Pine v5 不一致。
     """
     n = len(src)
     if n == 0 or length <= 0:
         return [float("nan")] * n
 
     result = [float("nan")] * n
-    alpha = 1.0 / length
 
-    # 前 length-1 根：逐步 SMA
-    window_sum = 0.0
-    for i in range(min(length - 1, n)):
-        window_sum += src[i]
-        result[i] = window_sum / (i + 1)
-
-    # 第 length-1 根：完整 SMA 种子
+    # 前 length-1 根：na（Pine v5 ta.rma 语义）
+    # 第 length-1 根：SMA 种子
     if n >= length:
-        if length > 1:
-            window_sum += src[length - 1]
+        if length == 1:
+            result[0] = src[0]
         else:
-            window_sum = src[0]
-        result[length - 1] = window_sum / length
+            sma_seed = sum(src[:length]) / length
+            result[length - 1] = sma_seed
 
         # 之后：Wilder 递推
+        alpha = 1.0 / length
         for i in range(length, n):
             result[i] = alpha * src[i] + (1.0 - alpha) * result[i - 1]
 
@@ -371,13 +372,17 @@ class _SMCPineState:
         return out
 
     def start_of_new_leg(self, i: int, size: int, lane: str) -> bool:
-        return i > size and self.leg(i, size, lane) != self.leg(i - 1, size, lane)
+        # CHANGE-20260715-006: i >= size（非 i > size），首个 leg/pivot 在 i==size 检测
+        # Pine: ta.change(leg) 在 bar_index==size 时可首次非零（leg 从 0 变为 0/1）
+        return i >= size and self.leg(i, size, lane) != self.leg(i - 1, size, lane)
 
     def start_of_bearish_leg(self, i: int, size: int, lane: str) -> bool:
-        return i > size and (self.leg(i, size, lane) - self.leg(i - 1, size, lane) == -1)
+        # CHANGE-20260715-006: i >= size（非 i > size），首个 pivot 在 i==size 检测
+        return i >= size and (self.leg(i, size, lane) - self.leg(i - 1, size, lane) == -1)
 
     def start_of_bullish_leg(self, i: int, size: int, lane: str) -> bool:
-        return i > size and (self.leg(i, size, lane) - self.leg(i - 1, size, lane) == 1)
+        # CHANGE-20260715-006: i >= size（非 i > size），首个 pivot 在 i==size 检测
+        return i >= size and (self.leg(i, size, lane) - self.leg(i - 1, size, lane) == 1)
 
     # ----- pivot 检测（含 EQH/EQL）-----
 
@@ -392,8 +397,9 @@ class _SMCPineState:
 
         anchor = ref_i (i-size)，confirmed = i (leg change 确认 bar)。
         EQH/EQL.anchor = prev piv.barIndex，confirmed = i-size (新 pivot bar)。
+        CHANGE-20260715-006: i < size（非 i <= size），首个 pivot 在 i==size 检测。
         """
-        if i <= size:
+        if i < size:
             return
 
         lane = "equal" if equal_high_low else "internal" if internal else "swing"
@@ -428,6 +434,9 @@ class _SMCPineState:
                     "anchor_time": piv.bar_time,
                     "confirmed_index": ref_i,
                     "confirmed_time": self.times[ref_i],
+                    # CHANGE-20260715-006: 第三时间点——detection bar（leg change 确认 bar）
+                    "detection_index": i,
+                    "detection_time": self.times[i],
                     "level": level,
                     "prev_level": piv.current_level,
                 })
@@ -466,6 +475,9 @@ class _SMCPineState:
                     "anchor_time": piv.bar_time,
                     "confirmed_index": ref_i,
                     "confirmed_time": self.times[ref_i],
+                    # CHANGE-20260715-006: 第三时间点——detection bar（leg change 确认 bar）
+                    "detection_index": i,
+                    "detection_time": self.times[i],
                     "level": level,
                     "prev_level": piv.current_level,
                 })

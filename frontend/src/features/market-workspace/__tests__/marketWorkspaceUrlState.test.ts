@@ -122,9 +122,15 @@ test('normalizeInternalReturnTo: 拒绝外部 URL/双斜杠/javascript/超长值
   assert.equal(normalizeInternalReturnTo('http://evil.com'), null)
   assert.equal(normalizeInternalReturnTo('//evil.com'), null)
   assert.equal(normalizeInternalReturnTo('javascript:alert(1)'), null)
-  // CHANGE-20260713-009: 限制从 200 提升到 500（/market URL 含 filters JSON 编码后可能超过 200）
+  // CHANGE-20260715-005: 限制从 500 提升到 4096（复杂筛选 URL 编码后可能超过 500）
+  // /market 前缀 + 超过 500 但小于 4096 的 URL 应通过
+  const longMarketUrl = '/market?scope=market&filters=' + 'a'.repeat(600)
+  assert.equal(normalizeInternalReturnTo(longMarketUrl), longMarketUrl)
+  // 超过 4096 的 URL 仍被拒绝
+  assert.equal(normalizeInternalReturnTo('/market?' + 'a'.repeat(4090)), null)
+  // 纯 a 仍然被拒绝（不以白名单前缀开头）
   assert.equal(normalizeInternalReturnTo('a'.repeat(501)), null)
-  assert.equal(normalizeInternalReturnTo('a'.repeat(500)), null) // 500 字符以 /market 等前缀开头才有效，纯 a 仍然被拒绝
+  assert.equal(normalizeInternalReturnTo('a'.repeat(500)), null)
   assert.equal(normalizeInternalReturnTo('/admin'), null)
   assert.equal(normalizeInternalReturnTo('/unknown'), null)
   assert.equal(normalizeInternalReturnTo(null), null)

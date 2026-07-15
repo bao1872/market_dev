@@ -554,19 +554,22 @@ class TestPineSemantics:
         assert abs(rma[6] - 4.28) < 1e-10, f"RMA[6] Wilder 应为 4.28，实得 {rma[6]}"
 
     def test_pine_rma_min_periods_before_seed(self) -> None:
-        """ta.rma 前 length-1 根用逐步 SMA（min_periods 行为）。"""
+        """CHANGE-20260715-006: ta.rma 前 length-1 根返回 na（Pine v5 语义）。
+
+        旧实现错误地返回逐步 SMA（min_periods 行为），导致 ATR(200) 在前 199 根
+        产生非 na 值。Pine v5 ta.rma 在 bar_index < length-1 时返回 na。
+        """
+        import math
+
         from app.strategy_assets.algorithms.features.smc_pine_core import pine_rma
 
         src = [2.0, 4.0, 6.0, 8.0, 10.0]
         rma = pine_rma(src, 5)
-        # index 0: 2/1 = 2.0
-        assert abs(rma[0] - 2.0) < 1e-10
-        # index 1: (2+4)/2 = 3.0
-        assert abs(rma[1] - 3.0) < 1e-10
-        # index 2: (2+4+6)/3 = 4.0
-        assert abs(rma[2] - 4.0) < 1e-10
-        # index 3: (2+4+6+8)/4 = 5.0
-        assert abs(rma[3] - 5.0) < 1e-10
+        # index 0-3: na（数据不足以计算 SMA 种子）
+        assert math.isnan(rma[0]), f"RMA[0] 应为 NaN，实得 {rma[0]}"
+        assert math.isnan(rma[1]), f"RMA[1] 应为 NaN，实得 {rma[1]}"
+        assert math.isnan(rma[2]), f"RMA[2] 应为 NaN，实得 {rma[2]}"
+        assert math.isnan(rma[3]), f"RMA[3] 应为 NaN，实得 {rma[3]}"
         # index 4: SMA seed = (2+4+6+8+10)/5 = 6.0
         assert abs(rma[4] - 6.0) < 1e-10
 
@@ -591,6 +594,8 @@ class TestPineSemantics:
 
     def test_pine_atr_equals_rma_of_tr(self) -> None:
         """ta.atr(n) = ta.rma(ta.tr, n)。"""
+        import math
+
         from app.strategy_assets.algorithms.features.smc_pine_core import (
             pine_atr,
             pine_rma,
@@ -604,9 +609,13 @@ class TestPineSemantics:
         tr = pine_true_range(highs, lows, closes)
         rma_tr = pine_rma(tr, 200)
         # ATR should equal RMA(TR, 200)
+        # CHANGE-20260715-006: 前 length-1 根两者均为 NaN（Pine v5 ta.rma NA 语义）
         for i in range(len(atr_result)):
-            assert abs(atr_result[i] - rma_tr[i]) < 1e-10, (
-                f"ATR[{i}] 应等于 RMA(TR,200)[{i}]"
+            a, r = atr_result[i], rma_tr[i]
+            if math.isnan(a) and math.isnan(r):
+                continue
+            assert abs(a - r) < 1e-10, (
+                f"ATR[{i}] 应等于 RMA(TR,200)[{i}]，实得 ATR={a} RMA={r}"
             )
 
     def test_pine_crossover(self) -> None:

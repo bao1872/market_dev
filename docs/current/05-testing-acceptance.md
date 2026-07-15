@@ -1235,6 +1235,45 @@ cd frontend && node --experimental-strip-types --test \
 - **生产 E2E 验证（无截图）**：1) `/market` 设置筛选+排序+页码后点击股票名称进入 `/stock/:symbol`，URL 包含 `source=selection&strategy=dsa_selector&returnTo=...`；2) 详情页左栏先显示 loading 占位（`[data-testid="detail-source-list-loading"]`）再切换到实际列表（`[data-testid="detail-source-list"]`）；3) 左栏 header 显示"行情来源"；4) 上一只/下一只 URL 保留 source/strategy/returnTo/timeframe；5) 返回 `/market` 后筛选/排序/页码完整恢复
 - **Pine 真源文件入 Git 跟踪**：`git ls-files ref/smc_user_source.pine` 返回该文件路径；SHA256 为 `0bd3d2ad8819f2dc7a9399f0e869ca3c9eced8100f190aa131aac5fe8191988f`；843 行；`.gitignore` 仍排除 `ref/` 其他文件
 
+## 3.17 CHANGE-20260715-005 回归（详情左栏来源状态四态拆分 + 表格 sticky 列和工具栏对齐根治）
+
+```bash
+# 详情左栏来源状态四态 + normalizeInternalReturnTo 上限契约测试
+cd frontend && node --experimental-strip-types --test \
+  src/features/stock-research/__tests__/detailSourceLoadingContract.test.ts \
+  src/features/market-workspace/__tests__/marketWorkspaceUrlState.test.ts \
+  src/components/__tests__/stickyHeader.test.ts
+```
+
+- **`useStockDetailActions` 来源状态四态（源码契约）**：接口含 `sourceListLoading`/`sourceListError`/`sourceListEmpty`/`sourceContextInvalid` 四个布尔字段；`sourceListError`=`publishedRunsQuery.isError || sourceResultsQuery.isError`；`sourceListEmpty`=`!sourceListLoading && !sourceListError && sourceStocks.length === 0`；`sourceContextInvalid`=`source === 'selection' && (!decodedMarketContext || !decodedMarketContext.scope)`
+- **source 参数优先级（源码契约）**：显式 `source` 参数 > `returnTo` 推断；`source === 'selection'` → `sourceListKind='market'`（即使 returnTo 无效也不回退 watchlist，仅设置 `sourceContextInvalid=true`）
+- **`normalizeInternalReturnTo` 上限 4096（源码契约）**：`marketWorkspaceUrlState.ts` 的 `normalizeInternalReturnTo` 长度上限为 4096（非 500）；仍仅允许 `/screener`/`/market`/`/messages` 前缀，拒绝外部 URL/`javascript:`/双斜杠/非白名单前缀
+- **表格结构 `table-shell`（源码契约）**：`StrategyDataTable.tsx` 和 `AdminAfterClosePipelinePage.tsx` 使用 `table-shell > meta-bar + search-bar + table-scroll > table + pager` 结构；只有 `table-scroll` 设置 `overflow-x: auto`；meta-bar/search-bar/pager 移出横向滚动容器
+- **`isStickyColumn` 统一判断（源码契约）**：`isStickyColumn(col)` 函数只允许 `col.key === 'stock'` 为 sticky 列；header 和 body 共用同一判断；涨跌幅列保持普通列
+- **删除死 CSS（源码契约）**：`global.scss` 不存在 `.sticky-col-change-pct` 类；不存在 `position:sticky;left:0;width:100%` 工具栏补丁（meta-bar/pager 不再需要 sticky）
+- **viewport-sticky 模式（源码契约）**：`.table-shell.viewport-sticky .table-scroll { overflow: visible; }`（viewport sticky 模式下 table-scroll 不滚动）
+- **生产 E2E 验证（无截图）**：1) `/market` 复杂筛选（keyword+industry+concept+filters+sort+page，URL 编码后 >500 字符）进入详情，returnTo 不被截断；2) returnTo 无效时左栏显示 invalid 引导（不回退 watchlist）；3) 表格横向滚动时配置/列设置/清除/导出和分页器不随滚动消失，右边界对齐；4) 只有 stock 列 sticky，涨跌幅列随滚动；5) `AdminAfterClosePipelinePage` 表格结构与 `/market` 一致
+
+## 3.18 CHANGE-20260715-006 回归（MiniKline 闭包根治 + SMC Pine 对齐 RMA NA 语义 + 首个 pivot off-by-one + EQH/EQL 三时间点）
+
+```bash
+# SMC Pine 语义测试（含 RMA NA 语义 + 首个 pivot off-by-one）
+cd backend && .venv/bin/pytest tests/test_smc_indicator.py -q
+
+# MiniKline 闭包契约测试（含 5 项闭包契约 16-20）
+cd frontend && node --experimental-strip-types --test \
+  src/features/market-workspace/__tests__/miniKlineCardContract.test.ts
+```
+
+- **`pine_rma` NA 语义（后端单元测试）**：`smc_pine_core.py` 的 `pine_rma(src, length)` 在 `bar_index < length-1` 返回 `na`（非逐步 SMA）；`bar_index == length-1` 写入 `SMA(src, length)` 种子；`bar_index >= length` 使用 Wilder 递推 `rma[i] = (rma[i-1]*(length-1) + src[i]) / length`；`test_pine_rma_min_periods_before_seed` 断言前 `length-1` 根为 NaN
+- **首个 pivot off-by-one（后端单元测试）**：`start_of_new_leg`/`start_of_bearish_leg`/`start_of_bullish_leg` 使用 `i >= size`（非 `i > size`）；`get_current_structure` 使用 `if i < size: return`（非 `if i <= size: return`）；首个 leg/pivot 在 `i == size` 检测
+- **EQH/EQL DTO 三时间点（后端单元测试）**：EQL 和 EQH 两处 DTO 含 `anchor_index`/`anchor_time`（前一 pivot bar）、`confirmed_index`/`confirmed_time`（新 pivot bar, `ref_i=i-size`）、`detection_index`/`detection_time`（leg change 确认 bar, `i`）三组时间点
+- **MiniKline 闭包根治（前端源码契约 16-20）**：`MiniKlineCard.tsx` 新增 `barsLengthRef`/`timeframeRef`/`rafIdRef` 持有最新值（每次 render 同步，在 effects 之前）；`applyViewportRange` 改为 `useCallback([], )` 稳定函数从 refs 读取（不再直接闭包捕获 `bars.length`/`timeframe`）；`scheduleApplyRange` 稳定函数取消 pending rAF 后调度新 rAF；`ResizeObserver` 回调调用 `scheduleApplyRange`（不直接闭包捕获 bars/timeframe）；卸载清理取消 pending rAF（`cancelAnimationFrame`）
+- **Pine 语义核对（源码契约）**：ATR200=`pine_rma(tr, 200)`；highest/lowest 窗口 `[ref_i+1, ref_i+length+1]`（不含当前 bar）；crossover/crossunder NaN→False（Python NaN 比较返回 False，匹配 Pine na→falsy）；OB slice `[piv.bar_index, current_i)` end-exclusive（Python 切片天然 end-exclusive）；trailing 顺序 `update_trailing_extremes → getCurrentStructure(50) → getCurrentStructure(5) → getCurrentStructure(3) → displayStructure → deleteOrderBlocks`
+- **Golden fixture**：仍为 `PINE_OUTPUT_GOLDEN_PENDING`（`backend/tests/fixtures/smc_pine/` 只有 README.md），无 fixture 时 `TestPineGoldenFixture` 自动 skip，不得宣称"完全对齐"
+- **SMC 隔离边界不变（源码契约）**：SMC 仅进入 `/stock` 指标链，默认关闭（`include_smc=false` 时 0 计算）；`/market` 右栏小 K 线不请求 SMC；true/false 缓存键隔离（`:smc` 后缀）；不新增表/migration/worker/依赖
+- **生产 E2E 验证（无截图）**：1) MiniKline 切周期/resize 后 viewport 正确（不使用 stale 值，不出现首次 render 的旧 range）；2) SMC `pine_rma` 前 `length-1` 根为 NaN（ATR200 前 199 根为 NaN）；3) 首个 pivot 在 `i==size` 检测（不延迟到 `i==size+1`）；4) EQH/EQL DTO 含 detection_index/detection_time；5) Pine golden fixture 仍 PENDING
+
 ## 4. CI 门禁
 
 阻断项：

@@ -66,7 +66,7 @@ PostgreSQL / Redis / External Service
 | capture | Capture Token、截图 worker、图片 URL |
 | jobs | SchedulerJobRun、worker heartbeat、任务恢复 |
 | admin | 管理 API、审计、运维页面 |
-| indicator | 全局技术指标（SQZMOM_LB、SMC）纯函数计算；位于 `backend/app/strategy_assets/algorithms/features/`，不是 Service；SMC 按需启用（`include_smc=False` 默认），不进入 DSA/Node/Capture/监控/选股；FVG 完全排除（不计算、不返回、不缓存、不渲染）；SMC Pine 语义核心 `smc_pine_core.py`（唯一核心，生产+测试共用），`smc_indicator.py` 为薄包装委托层；Pine 原语（`pine_rma`/`pine_atr`/`pine_cumulative_mean_range`/`pine_highest/lowest`/`pine_crossover/crossunder`）；warmup ≥500 根（1d 用 `full_daily_bars` 全量日线）；SMC 输出不截断（time 数组保持完整长度对齐 anchor/confirmed 索引），前端 `smcToDisplay` 按时间过滤展示区事件 |
+| indicator | 全局技术指标（SQZMOM_LB、SMC）纯函数计算；位于 `backend/app/strategy_assets/algorithms/features/`，不是 Service；SMC 按需启用（`include_smc=False` 默认），不进入 DSA/Node/Capture/监控/选股；FVG 完全排除（不计算、不返回、不缓存、不渲染）；SMC Pine 语义核心 `smc_pine_core.py`（唯一核心，生产+测试共用），`smc_indicator.py` 为薄包装委托层；Pine 原语（`pine_rma`/`pine_atr`/`pine_cumulative_mean_range`/`pine_highest/lowest`/`pine_crossover/crossunder`）；warmup ≥500 根（1d 用 `full_daily_bars` 全量日线）；SMC 输出不截断（time 数组保持完整长度对齐 anchor/confirmed 索引），前端 `smcToDisplay` 按时间过滤展示区事件；**Pine 语义对齐（CHANGE-20260715-006）**：`pine_rma` 严格复现 `ta.rma`（`bar_index < length-1` 返回 `na`，`==length-1` 写 SMA 种子，之后 Wilder 递推）；首个 pivot 在 `i==size` 检测（`i >= size` 非 `i > size`）；EQH/EQL DTO 三时间点（anchor/confirmed/detection）；OB slice `[start:end)` end-exclusive |
 
 ## 5. 端到端链路
 

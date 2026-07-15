@@ -1,4 +1,4 @@
-// [MiniKlineCardContract] - 描述: MiniKlineCard 源码契约测试（CHANGE-20260715-002）
+// [MiniKlineCardContract] - 描述: MiniKlineCard 源码契约测试（CHANGE-20260715-002 + 006）
 // 用法：node --experimental-strip-types --test src/features/market-workspace/__tests__/miniKlineCardContract.test.ts
 //
 // 覆盖：
@@ -14,6 +14,14 @@
 // 10. minimumWidth=MIN_PRICE_SCALE_WIDTH（56px）
 // 11. autoScale=true + scaleMargins {top:0.08, bottom:0.08}
 // 12. shiftVisibleRangeOnNewBar=false（新数据不漂移）
+// 13. chart.remove() 卸载清理
+// 14. A 股配色：红涨绿跌
+// 15. 容器宽度整数化（避免亚像素抖动）
+// 16. CHANGE-006: barsLengthRef/timeframeRef 持有最新值（避免 ResizeObserver 闭包问题）
+// 17. CHANGE-006: applyViewportRange 为 useCallback 稳定函数（从 refs 读取最新值）
+// 18. CHANGE-006: scheduleApplyRange 取消上一个 pending rAF 后再调度
+// 19. CHANGE-006: 卸载时取消 pending rAF
+// 20. CHANGE-006: ResizeObserver 不直接闭包捕获 bars/timeframe
 
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
@@ -170,5 +178,88 @@ test('MiniKlineCard 容器宽度整数化', () => {
   assert.ok(
     src.includes('Math.floor(containerRef.current.clientWidth'),
     '初始化时必须 Math.floor 整数化宽度',
+  )
+})
+
+// ===== 16. CHANGE-006: barsLengthRef/timeframeRef 持有最新值 =====
+test('CHANGE-006: MiniKlineCard 使用 barsLengthRef/timeframeRef 持有最新值', () => {
+  const src = readSource(CARD_PATH)
+  assert.ok(src.includes('barsLengthRef'), '必须声明 barsLengthRef 跟踪最新 bars.length')
+  assert.ok(src.includes('timeframeRef'), '必须声明 timeframeRef 跟踪最新 timeframe')
+  // 每次 render 同步更新 refs（在 effects 之前）
+  assert.ok(
+    /barsLengthRef\.current = bars\.length/.test(src),
+    '必须每次 render 同步 barsLengthRef.current = bars.length',
+  )
+  assert.ok(
+    /timeframeRef\.current = timeframe/.test(src),
+    '必须每次 render 同步 timeframeRef.current = timeframe',
+  )
+})
+
+// ===== 17. CHANGE-006: applyViewportRange 为 useCallback 稳定函数 =====
+test('CHANGE-006: applyViewportRange 为 useCallback 稳定函数，从 refs 读取最新值', () => {
+  const src = readSource(CARD_PATH)
+  // 必须使用 useCallback 包装，空依赖数组确保函数引用稳定
+  assert.ok(
+    /const applyViewportRange = useCallback\(/.test(src),
+    'applyViewportRange 必须使用 useCallback 包装',
+  )
+  // 必须从 refs 读取 bars.length 和 timeframe（不是闭包变量）
+  assert.ok(
+    /computeMiniKlineViewport\(barsLengthRef\.current,\s*timeframeRef\.current/.test(src),
+    'applyViewportRange 必须从 barsLengthRef.current 和 timeframeRef.current 读取最新值',
+  )
+})
+
+// ===== 18. CHANGE-006: scheduleApplyRange 取消上一个 pending rAF =====
+test('CHANGE-006: scheduleApplyRange 取消上一个 pending rAF 后再调度', () => {
+  const src = readSource(CARD_PATH)
+  assert.ok(
+    src.includes('scheduleApplyRange'),
+    '必须声明 scheduleApplyRange 函数',
+  )
+  // 必须在调度新 rAF 前取消上一个 pending rAF
+  assert.ok(
+    src.includes('cancelAnimationFrame(rafIdRef.current)'),
+    'scheduleApplyRange 必须在调度新 rAF 前取消上一个 pending rAF',
+  )
+  assert.ok(
+    src.includes('rafIdRef'),
+    '必须使用 rafIdRef 跟踪 pending rAF id',
+  )
+})
+
+// ===== 19. CHANGE-006: 卸载时取消 pending rAF =====
+test('CHANGE-006: 卸载时取消 pending rAF', () => {
+  const src = readSource(CARD_PATH)
+  // 卸载清理函数中必须取消 pending rAF
+  assert.ok(
+    /return \(\) => \{[\s\S]*?if \(rafIdRef\.current !== null\)[\s\S]*?cancelAnimationFrame/.test(src),
+    '卸载清理函数中必须取消 pending rAF（if rafIdRef.current !== null → cancelAnimationFrame）',
+  )
+})
+
+// ===== 20. CHANGE-006: ResizeObserver 不直接闭包捕获 bars/timeframe =====
+test('CHANGE-006: ResizeObserver 回调调用稳定 scheduleApplyRange，不直接闭包捕获 bars/timeframe', () => {
+  const src = readSource(CARD_PATH)
+  // ResizeObserver 回调块内不应直接引用 bars.length 或 timeframe
+  // 匹配从 new ResizeObserver 到 resizeObserver.observe（避免被 applyOptions({ }) 内的 }) 截断）
+  const observerBlock = src.match(/new ResizeObserver\(\(entries\) => \{[\s\S]*?\}\)\s*\n\s*resizeObserver\.observe/)
+  assert.ok(observerBlock, '必须存在 ResizeObserver 回调块')
+  const observerBody = observerBlock[0]
+  // 回调内不应直接引用 bars.length（应通过 refs）
+  assert.ok(
+    !/bars\.length/.test(observerBody),
+    'ResizeObserver 回调不得直接引用 bars.length（应通过 scheduleApplyRange → refs）',
+  )
+  assert.ok(
+    !/\btimeframe\b/.test(observerBody),
+    'ResizeObserver 回调不得直接引用 timeframe（应通过 scheduleApplyRange → refs）',
+  )
+  // 回调应调用 scheduleApplyRange
+  assert.ok(
+    /scheduleApplyRange\(/.test(observerBody),
+    'ResizeObserver 回调应调用 scheduleApplyRange',
   )
 })

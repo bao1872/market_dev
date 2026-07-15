@@ -28,7 +28,7 @@ test('StrategyDataTable 支持 stickyHeaderMode 并给 viewport 模式附加 vie
   )
   assert.match(
     strategyDataTableSrc,
-    /clsx\(\s*['"]table-wrap['"]\s*,\s*stickyHeaderMode\s*===\s*['"]viewport['"]\s*&&\s*['"]viewport-sticky['"]\s*\)/,
+    /clsx\(\s*['"]table-shell['"]\s*,\s*stickyHeaderMode\s*===\s*['"]viewport['"]\s*&&\s*['"]viewport-sticky['"]\s*\)/,
     '应在 stickyHeaderMode === "viewport" 时附加 viewport-sticky class',
   )
 })
@@ -42,8 +42,9 @@ test('ScreenerPage 使用 stickyHeaderMode="viewport"', () => {
 })
 
 test('viewport-sticky 模式不抢占滚动容器（overflow 不为 auto/scroll/hidden）', () => {
-  const viewportStickyBlock = globalScss.match(/\.table-wrap\.viewport-sticky\s*\{[^}]*\}/s)
-  assert.ok(viewportStickyBlock, '应存在 .table-wrap.viewport-sticky 规则块')
+  // CHANGE-20260715-005: table-wrap → table-shell；规则改为 .table-shell.viewport-sticky .table-scroll
+  const viewportStickyBlock = globalScss.match(/\.table-shell\.viewport-sticky\s+\.table-scroll\s*\{[^}]*\}/s)
+  assert.ok(viewportStickyBlock, '应存在 .table-shell.viewport-sticky .table-scroll 规则块')
   const block = viewportStickyBlock[0]
   const overflowValue = block.match(/overflow\s*:\s*([^;]+)/)?.[1]?.trim()
   assert.ok(
@@ -54,11 +55,11 @@ test('viewport-sticky 模式不抢占滚动容器（overflow 不为 auto/scroll/
 
 test('viewport-sticky 模式下 thead th 的 top 使用 var(--topbar)', () => {
   const viewportStickyThBlock = globalScss.match(
-    /\.table-wrap\.viewport-sticky\s+\.data-table\s+th\s*\{[^}]*\}/s,
+    /\.table-shell\.viewport-sticky\s+\.data-table\s+th\s*\{[^}]*\}/s,
   )
   assert.ok(
     viewportStickyThBlock,
-    '应存在 .table-wrap.viewport-sticky .data-table th 规则块',
+    '应存在 .table-shell.viewport-sticky .data-table th 规则块',
   )
   const block = viewportStickyThBlock[0]
   assert.match(

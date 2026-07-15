@@ -89,7 +89,7 @@ export interface DataTableProps<Row> {
   // [Presets] - 描述: 策略 key（提供时启用视图配置保存/应用功能）
   strategyKey?: string | null
   // [StickyHeader] - 描述: 表头 sticky 模式
-  // - container: 在 .table-wrap 局部滚动容器内吸附（默认，兼容历史行为）
+  // - container: 在 .table-scroll 局部滚动容器内吸附（默认，兼容历史行为）
   // - viewport: 在页面滚动时吸附到 topbar 下方（趋势选股页使用）
   stickyHeaderMode?: 'viewport' | 'container'
   // [StrategyDataTable] - 描述: 行点击回调（非链接区域点击时触发，用于 /market 选中行驱动右栏）
@@ -341,6 +341,12 @@ function FilterPopover({
 
 // CHANGE-20260713-011: KeywordFilterPopover 已移除——stock 列改用普通 FilterPopover
 // （支持 contains/not_contains/eq 三种操作符，筛选值只取股票名称）
+
+// CHANGE-20260715-005: sticky 列判断函数——只允许 col.key==='stock' 为 sticky 列
+// 禁止"第一个可见非操作列"自动 sticky；股票列隐藏时不自动把其他列套用 sticky
+function isStickyColumn<Row>(col: DataTableColumn<Row>): boolean {
+  return col.key === 'stock'
+}
 
 // 列设置弹窗（支持显示/隐藏 + 上下调整顺序）
 function ColumnManager({
@@ -953,12 +959,9 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
   const filterCount = Object.keys(filters).length
   const hasActiveState = filterCount > 0 || sortColumn !== null || effectiveKeyword !== ''
 
-  // 找到第一个可排序的列作为 sticky-col
-  let stickyAssigned = false
-
   return (
-    <div className={clsx('table-wrap', stickyHeaderMode === 'viewport' && 'viewport-sticky')}>
-      {/* 元信息栏 */}
+    <div className={clsx('table-shell', stickyHeaderMode === 'viewport' && 'viewport-sticky')}>
+      {/* 元信息栏（CHANGE-20260715-005: 移出横向滚动容器，右边界等于 table-scroll 右边界） */}
       <div className="table-meta-bar">
         <div>
           <span className="table-result-count">
@@ -1024,9 +1027,9 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
         </div>
       </div>
 
-      {/* 全文搜索 */}
+      {/* 全文搜索（CHANGE-20260715-005: 移出横向滚动容器） */}
       {searchable && (
-        <div style={{ padding: '8px 10px', borderBottom: '1px solid var(--border-soft)' }}>
+        <div className="table-search-bar">
           <div className="field search" style={{ display: 'inline-block' }}>
             <input
               className="input search"
@@ -1044,197 +1047,195 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
         </div>
       )}
 
-      {/* 表格 */}
-      <table
-        className={clsx('data-table interactive-table', tableClassName)}
-        style={{ minWidth: `${visibleColumnsWidthSum + (selectable ? 40 : 0)}px` }}
-      >
-        <colgroup>
-          {selectable && <col />}
-          {visibleColumns.map(({ col }) => (
-            <col
-              key={col.key}
-              style={col.width !== undefined ? { width: `${col.width}px` } : undefined}
-            />
-          ))}
-        </colgroup>
-        <thead>
-          <tr>
-            {selectable && (
-              <th className="table-select-column">
-                <label className="table-checkbox-wrapper">
-                  <input
-                    type="checkbox"
-                    className="table-checkbox"
-                    checked={allChecked}
-                    ref={(el) => {
-                      if (el) el.indeterminate = !allChecked && someChecked
-                    }}
-                    onChange={handleSelectAll}
-                  />
-                </label>
-              </th>
-            )}
-            {visibleColumns.map(({ col, originalIndex: i }) => {
-              // V1.5.1：操作列和选择列不参与排序与筛选
-              if (col.isAction) {
+      {/* 表格滚动容器（CHANGE-20260715-005: 只有 table-scroll 设置 overflow-x: auto） */}
+      <div className="table-scroll">
+        <table
+          className={clsx('data-table interactive-table', tableClassName)}
+          style={{ minWidth: `${visibleColumnsWidthSum + (selectable ? 40 : 0)}px` }}
+        >
+          <colgroup>
+            {selectable && <col />}
+            {visibleColumns.map(({ col }) => (
+              <col
+                key={col.key}
+                style={col.width !== undefined ? { width: `${col.width}px` } : undefined}
+              />
+            ))}
+          </colgroup>
+          <thead>
+            <tr>
+              {selectable && (
+                <th className="table-select-column">
+                  <label className="table-checkbox-wrapper">
+                    <input
+                      type="checkbox"
+                      className="table-checkbox"
+                      checked={allChecked}
+                      ref={(el) => {
+                        if (el) el.indeterminate = !allChecked && someChecked
+                      }}
+                      onChange={handleSelectAll}
+                    />
+                  </label>
+                </th>
+              )}
+              {visibleColumns.map(({ col, originalIndex: i }) => {
+                if (col.isAction) {
+                  return (
+                    <th key={col.key} className="table-action-column">
+                      {col.title}
+                    </th>
+                  )
+                }
+
+                // CHANGE-20260715-005: 只允许 col.key==='stock' 为 sticky 列
+                const isSticky = isStickyColumn(col)
+
                 return (
-                  <th key={col.key} className="table-action-column">
-                    {col.title}
-                  </th>
-                )
-              }
-
-              // 第一个非操作列设为 sticky-col
-              const isSticky = !stickyAssigned
-              if (isSticky) stickyAssigned = true
-
-              return (
-                <th
-                  key={col.key}
-                  className={clsx(
-                    sortColumn === i && 'sorted',
-                    isSticky && 'sticky-col',
-                  )}
-                >
-                  <div className="th-shell">
-                    {col.sortable && (
-                      <button
-                        className="th-sort"
-                        title={`按${col.title}排序`}
-                        onClick={() => toggleSort(i)}
-                      >
+                  <th
+                    key={col.key}
+                    className={clsx(
+                      sortColumn === i && 'sorted',
+                      isSticky && 'sticky-col',
+                    )}
+                  >
+                    <div className="th-shell">
+                      {col.sortable && (
+                        <button
+                          className="th-sort"
+                          title={`按${col.title}排序`}
+                          onClick={() => toggleSort(i)}
+                        >
+                          <span className="th-label" title={col.shortTitle ? col.title : undefined}>
+                            {col.shortTitle ?? col.title}
+                          </span>
+                          <span className="sort-icon">
+                            {sortColumn === i
+                              ? sortDirection === 'asc'
+                                ? '↑'
+                                : sortDirection === 'desc'
+                                  ? '↓'
+                                  : '↕'
+                              : '↕'}
+                          </span>
+                        </button>
+                      )}
+                      {!col.sortable && (
                         <span className="th-label" title={col.shortTitle ? col.title : undefined}>
                           {col.shortTitle ?? col.title}
                         </span>
-                        <span className="sort-icon">
-                          {sortColumn === i
-                            ? sortDirection === 'asc'
-                              ? '↑'
-                              : sortDirection === 'desc'
-                                ? '↓'
-                                : '↕'
-                            : '↕'}
+                      )}
+                      {col.helpText && (
+                        <span className="th-help" title={col.helpText}>
+                          ?
+                          <span className="th-help-tooltip">{col.helpText}</span>
                         </span>
-                      </button>
-                    )}
-                    {!col.sortable && (
-                      <span className="th-label" title={col.shortTitle ? col.title : undefined}>
-                        {col.shortTitle ?? col.title}
-                      </span>
-                    )}
-                    {col.helpText && (
-                      <span className="th-help" title={col.helpText}>
-                        ?
-                        <span className="th-help-tooltip">{col.helpText}</span>
-                      </span>
-                    )}
-                    {col.filterable && (
-                      <button
-                        className={clsx(
-                          'th-filter',
-                          // CHANGE-20260713-011: filterAlias 已移除，所有列统一用 filters 激活状态
-                          filters[i] && 'active',
-                        )}
-                        aria-label={`筛选${col.title}`}
-                        title={`筛选${col.title}`}
-                        onClick={(e) =>
-                          setFilterPopover({
-                            columnIndex: i,
-                            anchor: e.currentTarget,
-                          })
-                        }
-                      >
-                        ⌁
-                      </button>
-                    )}
+                      )}
+                      {col.filterable && (
+                        <button
+                          className={clsx(
+                            'th-filter',
+                            filters[i] && 'active',
+                          )}
+                          aria-label={`筛选${col.title}`}
+                          title={`筛选${col.title}`}
+                          onClick={(e) =>
+                            setFilterPopover({
+                              columnIndex: i,
+                              anchor: e.currentTarget,
+                            })
+                          }
+                        >
+                          ⌁
+                        </button>
+                      )}
+                    </div>
+                  </th>
+                )
+              })}
+            </tr>
+          </thead>
+          <tbody>
+            {loading && (
+              <tr className="table-empty-row">
+                <td colSpan={visibleColumns.length + (selectable ? 1 : 0)}>
+                  <div className="table-empty-state">
+                    <b>加载中…</b>
+                    <span>正在获取数据</span>
                   </div>
-                </th>
-              )
-            })}
-          </tr>
-        </thead>
-        <tbody>
-          {loading && (
-            <tr className="table-empty-row">
-              <td colSpan={visibleColumns.length + (selectable ? 1 : 0)}>
-                <div className="table-empty-state">
-                  <b>加载中…</b>
-                  <span>正在获取数据</span>
-                </div>
-              </td>
-            </tr>
-          )}
-          {!loading && error && (
-            <tr className="table-empty-row">
-              <td colSpan={visibleColumns.length + (selectable ? 1 : 0)}>
-                <div className="table-empty-state">
-                  <b>加载失败</b>
-                  <span>{error}</span>
-                </div>
-              </td>
-            </tr>
-          )}
-          {!loading && !error && pageRows.length === 0 && (
-            <tr className="table-empty-row">
-              <td colSpan={visibleColumns.length + (selectable ? 1 : 0)}>
-                <div className="table-empty-state">
-                  <b>{emptyText}</b>
-                  <span>可清除列筛选或调整条件后重试</span>
-                </div>
-              </td>
-            </tr>
-          )}
-          {!loading &&
-            !error &&
-            pageRows.map((row) => {
-              const key = rowKey(row)
-              const isSelected = selectedKeys?.has(key)
-              stickyAssigned = false // 重置用于行内 sticky-col
-              return (
-                <tr
-                  key={key}
-                  onClick={onRowClick ? () => onRowClick(row) : undefined}
-                  className={clsx(activeRowKey === key && 'row-active')}
-                >
-                  {selectable && (
-                    <td className="table-select-column">
-                      <label className="table-checkbox-wrapper">
-                        <input
-                          type="checkbox"
-                          className="table-checkbox"
-                          checked={isSelected || false}
-                          onChange={() => handleSelectRow(row)}
-                        />
-                      </label>
-                    </td>
-                  )}
-                  {visibleColumns.map(({ col }) => {
-                    const isSticky = !stickyAssigned && !col.isAction
-                    if (isSticky) stickyAssigned = true
-                    return (
-                      <td
-                        key={col.key}
-                        className={clsx(
-                          col.dataType === 'number' ||
-                            col.dataType === 'percent' ||
-                            col.dataType === 'datetime'
-                            ? 'num'
-                            : '',
-                          isSticky && 'sticky-col',
-                        )}
-                      >
-                        {col.render ? col.render(row) : String(row[col.key] ?? '')}
+                </td>
+              </tr>
+            )}
+            {!loading && error && (
+              <tr className="table-empty-row">
+                <td colSpan={visibleColumns.length + (selectable ? 1 : 0)}>
+                  <div className="table-empty-state">
+                    <b>加载失败</b>
+                    <span>{error}</span>
+                  </div>
+                </td>
+              </tr>
+            )}
+            {!loading && !error && pageRows.length === 0 && (
+              <tr className="table-empty-row">
+                <td colSpan={visibleColumns.length + (selectable ? 1 : 0)}>
+                  <div className="table-empty-state">
+                    <b>{emptyText}</b>
+                    <span>可清除列筛选或调整条件后重试</span>
+                  </div>
+                </td>
+              </tr>
+            )}
+            {!loading &&
+              !error &&
+              pageRows.map((row) => {
+                const key = rowKey(row)
+                const isSelected = selectedKeys?.has(key)
+                return (
+                  <tr
+                    key={key}
+                    onClick={onRowClick ? () => onRowClick(row) : undefined}
+                    className={clsx(activeRowKey === key && 'row-active')}
+                  >
+                    {selectable && (
+                      <td className="table-select-column">
+                        <label className="table-checkbox-wrapper">
+                          <input
+                            type="checkbox"
+                            className="table-checkbox"
+                            checked={isSelected || false}
+                            onChange={() => handleSelectRow(row)}
+                          />
+                        </label>
                       </td>
-                    )
-                  })}
-                </tr>
-              )
-            })}
-        </tbody>
-      </table>
+                    )}
+                    {visibleColumns.map(({ col }) => {
+                      // CHANGE-20260715-005: 只允许 col.key==='stock' 为 sticky 列（header 和 body 用同一判断函数）
+                      const isSticky = isStickyColumn(col)
+                      return (
+                        <td
+                          key={col.key}
+                          className={clsx(
+                            col.dataType === 'number' ||
+                              col.dataType === 'percent' ||
+                              col.dataType === 'datetime'
+                              ? 'num'
+                              : '',
+                            isSticky && 'sticky-col',
+                          )}
+                        >
+                          {col.render ? col.render(row) : String(row[col.key] ?? '')}
+                        </td>
+                      )
+                    })}
+                  </tr>
+                )
+              })}
+          </tbody>
+        </table>
+      </div>
 
-      {/* 分页 */}
+      {/* 分页（CHANGE-20260715-005: 移出横向滚动容器，右边界等于 table-scroll 右边界） */}
       <div className="table-pager">
         <span className="table-page-info">
           第 {currentPage} / {totalPages} 页
