@@ -320,8 +320,8 @@ node --experimental-strip-types --test src/components/__tests__/dsaSourceAlignme
 任何修改 `backend/app/services/indicator_cache.py`（`ALGORITHM_VERSION`）、`backend/app/services/indicator_service.py::_adapt_watchlist_bb`、`frontend/src/utils/dsaOverlayPolicy.ts`、`frontend/src/components/StrategyChart.tsx`（DSA toggle / BB overlay 对齐 / debug 工具）必须跑 indicator overlay alignment 回归测试。
 
 后端 cache schema 版本回归：
-- `indicator_cache.ALGORITHM_VERSION == "v6"`（CHANGE-20260715-001 bump：新增 SMC 指标并按需启用，缓存 key 追加 `:smc` 后缀隔离）；
-- 旧 v5 cache key 与新 `build_cache_key` 生成的 key 不相等（旧缓存自然失效，避免旧 v5 缓存返回无 SMC 数据被误用）；
+- `indicator_cache.ALGORITHM_VERSION == "v7"`（CHANGE-20260715-002 bump：SMC 从 SMA 基线升级为 Pine parity 核心 `smc_pine_core.py`，旧 v6 缓存强制失效；CHANGE-20260715-001：新增 SMC 指标并按需启用，缓存 key 追加 `:smc` 后缀隔离）；
+- 旧 v5/v6 cache key 与新 `build_cache_key` 生成的 key 不相等（旧缓存自然失效，避免旧缓存返回无 SMC 数据或 SMA 基线 SMC 结果被误用）；
 - `include_smc=true` 时 cache key 追加 `:smc` 后缀，与默认路径（`include_smc=false`）完全隔离，互不污染；
 - 修改 indicator 计算逻辑、`source_bar_times` 格式、BB/SQZMOM/MACD 计算路径、DSA 全周期支持、1w/1mo BB 计算、SMC 计算路径必须 bump `ALGORITHM_VERSION`。
 
@@ -1160,6 +1160,42 @@ node --experimental-strip-types --test \
 - **MiniKline viewport（`miniKlineViewport.test.ts`，12 用例）**：纯函数 `computeMiniKlineViewport` 按周期 clamp——15m/60m 50-64、日线 48-58、周线 40-52、月线 30-40；右侧留白 3 根 bar；不调用 `fitContent`；bar 不足时 clamp 不越界；各周期 viewport `toIndex - fromIndex` 落在对应区间内。
 
 SMC 只进入 `/stock/:symbol` 个股详情指标链，不进入 `/market`、DSA、Node、Capture、盘中监控、选股；FVG 完全排除。
+
+## 3.14 CHANGE-20260715-002 回归（SMC Pine parity + MiniKline viewport 重写 + SMC renderer 对齐）
+
+```bash
+# SMC Pine 语义测试 + golden fixture skip + 已有测试更新
+APP_ENV=test TEST_DATABASE_URL=postgresql+psycopg://bz:bz@localhost:5433/bz_stock_test \
+  pytest backend/tests/test_smc_indicator.py backend/tests/test_indicator_cache.py backend/tests/test_indicator_service.py -q
+
+# MiniKline viewport 重写后的纯函数测试
+node --experimental-strip-types --test \
+  src/features/market-workspace/__tests__/miniKlineViewport.test.ts
+```
+
+覆盖规则：
+
+- **Pine 语义原语（`test_smc_indicator.py::TestPineSemantics` 8 用例）**：
+  - `pine_rma` Wilder 递推：SMA 播种 + `rma[i]=(rma[i-1]*(length-1)+src[i])/length`，前 `length-1` 个为 NaN
+  - `pine_rma` min_periods：前 `length-1` 个值为 NaN
+  - `pine_cumulative_mean_range` bar0=NaN（除零行为，`ta.cum(ta.tr)/bar_index`）
+  - `pine_atr = pine_rma(pine_true_range, length)`：所有 bar 相等
+  - `pine_crossover`/`pine_crossunder`：穿越检测正确
+  - `pine_highest`/`pine_lowest`：滚动极值不含当前 bar
+- **Pine golden fixture（`test_smc_indicator.py::TestPineGoldenFixture`）**：fixture 不存在时 skip，**没有 Pine golden fixture 不得宣称"完全对齐"**；fixture 路径 `backend/tests/fixtures/smc_pine/`，包含美诺华 603538 日线 1000 根 + 一个 15m 样本
+- **events 字段契约更新**：`test_event_kind_valid` → `test_event_internal_field_valid`（验证 `internal: bool` 替代旧 `kind` 字段）
+- **缓存隔离（`test_indicator_cache.py`）**：`ALGORITHM_VERSION == "v7"`；旧 v6 cache key 与新 key 不相等（旧 SMA 缓存强制失效）
+- **服务层 warmup（`test_indicator_service.py`）**：1d timeframe 使用 `full_daily_bars`（≥500 warmup）；SMC 输出不调用 `_truncate_lists` 截断（time 数组保持完整长度）
+- **MiniKline viewport（`miniKlineViewport.test.ts` 15 用例）**：
+  - 目标根数：15m=48、60m=44、日=40、周=36、月=30
+  - `barSpacing = clamp(contentWidth/visibleBars, 5.5, 8)`
+  - 左侧留白 `from=max(-2, n-visible-1)`
+  - 右侧留白 `to=n-1+3`
+  - `computeAutoscaleRange(minLow, maxHigh)`：上方 12%，下方 15%
+  - 五周期边界验证
+  - 空数据返回零区间
+- **前端 SMC renderer 对齐 Pine（无截图 E2E）**：internal=虚线 `[4,3]`/tiny 8px、swing=实线/small 11px；标签中点 `(x1+x2)/2`+`'center'`；trailing 文案"强高/弱高/强低/弱低"；OB 半透明 box（active 0.12、mitigated 0.05）；Historical 全事件；颜色多头红 `#FF4D4F`、空头绿 `#22C55E`
+- **SMC 隔离边界**：SMC 仅属于 `/stock` 指标链；`include_smc=false` 时 0 计算；`/market` 右栏不请求 SMC；true/false 缓存键隔离；DSA/Node/监控/Capture/published run 不修改；无新表/migration/worker/历史回填
 
 ## 4. CI 门禁
 

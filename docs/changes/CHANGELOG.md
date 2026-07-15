@@ -5,7 +5,8 @@
 ## 2026-07-15
 
 - CHANGE-20260715-001: SMC 智能资金指标（ref/smc.py 重写版）+ MiniKline viewport P0 修复 + 图层 7→8
-  - SMC 模块：基于用户提供的 ref/smc.py Python 重写版本（非 LuxAlgo Pine 翻译），纯函数仅依赖 stdlib；默认参数与 ref 一致；BOS/CHoCH/internal OB/EQH/EQL/Strong-Weak High-Low；anchor/confirmed 因果契约；逐 bar 增量=全量；未来 bar 不修改已确认事件
+  - **SUPERSEDED BY CHANGE-20260715-002**：用户已提供本人原创并授权的 Pine 实现（`ref/smc_ref.txt`），SMC 算法真源从 ref/smc.py 升级为用户 Pine 代码；本条目中"非 LuxAlgo Pine 翻译"和"clean-room 声明"已过时，仅作历史保留
+  - SMC 模块：基于用户提供的 `ref/smc_ref.txt` Pine 源码（用户原创，SHA256 0bd3d2ad，授权盘迹商业项目使用），纯函数仅依赖 stdlib；默认参数与 ref 一致；BOS/CHoCH/internal OB/EQH/EQL/Strong-Weak High-Low；anchor/confirmed 因果契约；逐 bar 增量=全量；未来 bar 不修改已确认事件
   - FVG 完全排除：不计算、不返回、不缓存、不渲染，也不暴露 FVG 开关；生产计算路径无 FVG 函数或状态；输出级别断言（keys/events/OB/EQH/EQL/params/state 6 项）
   - include_smc 按需计算：compute_all_indicators 新增 include_smc=False 默认参数；False 时跳过 SMC 计算（0 CPU）；True 时注入 smc 图层
   - 缓存隔离：ALGORITHM_VERSION v5→v6（旧缓存自动失效）；include_smc=True 追加 :smc 后缀；同 symbol 切换开关不返回旧缓存
@@ -15,6 +16,18 @@
   - 测试：SMC 34 + 缓存 10 + 服务 38 + viewport 12 + manifest 15 = 109 项 PASS；ruff/mypy/tsc/eslint 0 error；contract 316 pass/8 fail（与 a9ac03c 基线对照 0 新增失败）；build 248 modules 0 error
   - 隔离边界：SMC 只进入 /stock 指标链；/market 右栏小 K 线不显示 SMC；Node/DSA/盘中监控/Capture 未修改；不新增表/migration/worker/依赖
   - 文档：AGENTS clause 43 + current 01/02/04/05 + maps + CHANGE-001 + CHANGELOG
+
+- CHANGE-20260715-002: SMC Pine parity 核心 + MiniKline viewport 重写 + SMC renderer 对齐
+  - smc_pine_core.py（新增 852 行）：唯一 Pine 语义核心；Pine 原语 `pine_rma`（Wilder RMA，SMA 播种+递推）、`pine_atr`=RMA(TR,200)、`pine_cumulative_mean_range`（`ta.cum(ta.tr)/bar_index`，bar0=NaN）、`pine_highest/lowest`、`pine_crossover/crossunder`；`_SMCPineState` 状态机完全按 Pine 执行顺序（swing→internal→equal→BOS/CHoCH→trailing→mitigation）；FVG 完全排除；anchor/confirmed 因果契约；events 使用 `internal: bool` 替代旧 `kind` 字段
+  - smc_indicator.py（重构 957→117 行）：薄包装委托 `compute_smc_pine`；`_SMCState = _SMCPineState` 别名；签名不变
+  - warmup 修复：1d timeframe 使用 `full_daily_bars`（DB 全量日线，≥500 warmup）；其他周期复用 macd_bars；不调用 `_truncate_lists` 截断 SMC 输出（time 数组需完整长度对齐 anchor/confirmed）；前端 `smcToDisplay` 按时间过滤展示区事件
+  - 缓存隔离：ALGORITHM_VERSION v6→v7（旧 v6 SMA 缓存强制失效）；`:smc` 后缀不变
+  - StrategyChart SMC renderer 对齐 Pine：SmcEvent `kind?`→`internal?: boolean`；BOS/CHoCH 线型按 scope（internal=虚线 [4,3]/tiny 8px，swing=实线/small 11px）；标签中点 `(x1+x2)/2`+`'center'`；trailing 文案"强高/弱高/强低/弱低"（强高 if bias=-1 else 弱高；强低 if bias=1 else 弱低）；OB 半透明 box（active alpha 0.12，mitigated 0.05）；Historical 全事件
+  - MiniKline viewport 彻底重写：目标根数 15m=48/60m=44/日=40/周=36/月=30；barSpacing clamp 5.5–8px；左侧 1-2 根留白 `from=max(-2,n-visible-1)`；右侧 3 根留白 `to=n-1+3`；不调用 fitContent/resetTimeScale/scrollToRealTime；`autoscaleInfoProvider` 扩展价格范围（上 12% 下 15%）；`rightPriceScale` autoScale=true + scaleMargins {0.08,0.08} + minimumWidth=56；图表高度 190px；切周期不复用旧 logical range；15 项纯函数测试
+  - Pine golden fixture：状态 PENDING（等待 TradingView 导出）；新建 `backend/tests/fixtures/smc_pine/README.md`（TV 导出步骤+隐藏 plot 代码+CSV 格式）；无 fixture 时 `TestPineGoldenFixture` skip，不得宣称"完全对齐"
+  - Pine 语义测试：`TestPineSemantics` 8 项（RMA Wilder 递推、RMA min_periods、CMR bar0=NaN、ATR=RMA(TR)、crossover、crossunder、highest、lowest）；`test_event_kind_valid`→`test_event_internal_field_valid`
+  - 隔离边界：SMC 仅进入 /stock 指标链；/market 右栏不请求 SMC；true/false 缓存键隔离；不新增表/migration/worker/依赖；Node/DSA/监控/Capture/published run 未修改
+  - 文档：AGENTS clause 44 + current 01/02/04/05/code-doc-alignment + maps + analysis/smc-pine-parity.md + CHANGE-002 + CHANGELOG
 
 ## 2026-07-14
 
@@ -26,7 +39,7 @@
   - AdminAppShell：桌面侧栏+小屏 topbar 始终可见"← 返回行情"
   - 五周期小 K 线：15m/60m/日/周/月，segmented control，attributionLogo=false，修复外框裁切（.mini-kline-card + .mini-kline-chart 添加 width:100%;max-width:100%;min-width:0;box-sizing:border-box;overflow:hidden）
   - pywencai 探测：0.13.1 import 成功，5 项查询全部失败（iwencai.com 返回 HTTP 401 + captcha_url，与 THS 反爬同源），不可用，未加入生产依赖
-  - SMC 撤回：因 LuxAlgo CC BY-NC-SA 许可证与 clean-room 条件不满足（智能体已阅读源码），本提交未包含 SMC；ChartLayerVisibility 恢复为 7 键（trend/node/boll/volume/macd/sqzmom/breakout）
+  - SMC 撤回（已 SUPERSEDED BY CHANGE-20260715-002）：用户已提供本人原创并授权的 Pine 实现（`ref/smc_ref.txt`），SMC 不再涉及第三方许可证问题；本记录中 SMC 撤回相关的许可证和 clean-room 结论仅作历史保留
   - 基线对照：contract suite 8 个失败在 149eb09 基线和当前状态完全一致，0 新增失败
   - 文档：AGENTS clause 42 + CHANGE-001 + CHANGELOG
 

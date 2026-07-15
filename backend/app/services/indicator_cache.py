@@ -41,10 +41,12 @@ logger = logging.getLogger("services.indicator_cache")
 CACHE_TTL_SECONDS = 300
 
 # [指标缓存] - 算法版本：指标计算逻辑变更时递增，使旧缓存自动失效
+# v7: CHANGE-20260715-002 - SMC Pine parity（SMA→RMA、CMR 除数修正、1d warmup≥500、
+#     不截断 SMC 输出）；旧 v6 SMC 缓存基于 ref/smc.py SMA 实现，必须强制失效
 # v6: CHANGE-011 - 新增 SMC 按需计算图层（include_smc 参数 + 缓存键后缀隔离）
 # v5: PR #32 - DSA 全周期支持（bars_daily=macd_bars）+ 1w/1mo BB 用 compute_bollinger 计算
 #     v4 旧缓存返回 1d-only DSA + 1w/1mo 无 BB，必须强制失效
-ALGORITHM_VERSION = "v6"
+ALGORITHM_VERSION = "v7"
 
 # 缓存键前缀
 _CACHE_PREFIX = "indicator"

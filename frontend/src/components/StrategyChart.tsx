@@ -1418,7 +1418,7 @@ function renderIndicatorSqzmom(
 interface SmcEvent {
   type: 'BOS' | 'CHoCH'
   bias: number  // 1=bullish, -1=bearish
-  kind?: 'internal' | 'swing'
+  internal?: boolean  // true=internal structure, false/undefined=swing
   anchor_index: number
   anchor_time: string | null
   confirmed_index: number
@@ -1432,6 +1432,7 @@ interface SmcOrderBlock {
   bar_time: string
   bar_index: number
   bias: number  // 1=bullish, -1=bearish
+  internal?: boolean  // true=internal OB, false/undefined=swing OB
   confirmed_index: number
   confirmed_time: string
   mitigated: boolean
@@ -1543,7 +1544,8 @@ function renderIndicatorSmc(
 
   // ===== 2. 渲染 BOS/CHoCH 线 =====
   // 从 anchor 到 confirmed 画水平线（在 level 价格处）
-  // BOS: 实线；CHoCH: 虚线 dash=[4,3]
+  // CHANGE-20260715-002: internal=虚线 dash=[4,3] + tiny(8px)标签；swing=实线 + small(11px)标签
+  // 标签位于结构线中点（非左端）
   // internal: 更淡（alpha 0.7），更细（width 1）；swing: 实色，更粗（width 1.5）
   for (const ev of events) {
     const anchorDisplayIdx = smcToDisplay(ev.anchor_index)
@@ -1558,21 +1560,24 @@ function renderIndicatorSmc(
 
     const isBull = ev.bias === 1
     const baseColor = isBull ? SMC_BULL_COLOR : SMC_BEAR_COLOR
-    const isInternal = ev.kind === 'internal'
+    const isInternal = ev.internal === true
     const alpha = isInternal ? 0.7 : 1.0
     const lineWidth = isInternal ? 1 : 1.5
     const color = hexToRgba(baseColor, alpha)
 
-    if (ev.type === 'CHoCH') {
+    // CHANGE-20260715-002: internal=虚线，swing=实线（不再按 BOS/CHoCH 区分线型）
+    if (isInternal) {
       drawLine(ctx, x1, y, x2, y, color, lineWidth, [4, 3])
     } else {
-      // BOS: 实线
+      // swing: 实线
       drawLine(ctx, x1, y, x2, y, color, lineWidth, [])
     }
 
-    // 标签（小而克制，8px sans-serif）
+    // 标签位于结构线中点（CHANGE-20260715-002）
+    const midX = (x1 + x2) / 2
     const label = `${ev.type}${isInternal ? '·I' : ''}`
-    drawText(ctx, label, x1 + 2, y - 3, color, '8px sans-serif', 'left')
+    const fontSize = isInternal ? '8px sans-serif' : '11px sans-serif'
+    drawText(ctx, label, midX, y - 3, color, fontSize, 'center')
   }
 
   // ===== 3. 渲染 EQH/EQL =====
@@ -1593,21 +1598,35 @@ function renderIndicatorSmc(
   }
 
   // ===== 4. 渲染 trailing strong/weak high/low =====
-  // 在最新可见 bar 处标注 trailing.top（strong/weak high）和 trailing.bottom
+  // CHANGE-20260715-002: 文案使用"强高/弱高/强低/弱低"
+  // 分类规则（Pine 语义）：
+  //   "强高" if swingTrend.bias == BEARISH(-1) else "弱高"
+  //   "强低" if swingTrend.bias == BULLISH(1) else "弱低"
+  // swingTrend.bias 从最后一个 swing 事件（internal=false）的 bias 获取
+  const lastSwingEvent = events.filter((e) => e.internal !== true).pop()
+  const swingBias = lastSwingEvent?.bias ?? 0
+
   if (trailing && trailing.top != null) {
     const lastDisplayIdx = displayTimes.length - 1
     const x = g.l + (lastDisplayIdx + 0.5) * step
     const y = py(trailing.top)
-    // strong high 用红色虚线延伸到右侧
-    drawLine(ctx, x, y, g.plotRight, y, hexToRgba(SMC_BULL_COLOR, 0.5), 1, [3, 3])
-    drawText(ctx, `SH ${fmt(trailing.top)}`, g.plotRight - 4, y - 3, SMC_BULL_COLOR, '8px sans-serif', 'right')
+    // 强高=红色，弱高=绿色（bias=-1 时为强高，否则弱高）
+    const isStrong = swingBias === -1
+    const labelColor = isStrong ? SMC_BULL_COLOR : SMC_BEAR_COLOR
+    const label = `${isStrong ? '强高' : '弱高'} ${fmt(trailing.top)}`
+    drawLine(ctx, x, y, g.plotRight, y, hexToRgba(labelColor, 0.5), 1, [3, 3])
+    drawText(ctx, label, g.plotRight - 4, y - 3, labelColor, '8px sans-serif', 'right')
   }
   if (trailing && trailing.bottom != null) {
     const lastDisplayIdx = displayTimes.length - 1
     const x = g.l + (lastDisplayIdx + 0.5) * step
     const y = py(trailing.bottom)
-    drawLine(ctx, x, y, g.plotRight, y, hexToRgba(SMC_BEAR_COLOR, 0.5), 1, [3, 3])
-    drawText(ctx, `SL ${fmt(trailing.bottom)}`, g.plotRight - 4, y + 9, SMC_BEAR_COLOR, '8px sans-serif', 'right')
+    // 强低=绿色，弱低=红色（bias=1 时为强低，否则弱低）
+    const isStrong = swingBias === 1
+    const labelColor = isStrong ? SMC_BEAR_COLOR : SMC_BULL_COLOR
+    const label = `${isStrong ? '强低' : '弱低'} ${fmt(trailing.bottom)}`
+    drawLine(ctx, x, y, g.plotRight, y, hexToRgba(labelColor, 0.5), 1, [3, 3])
+    drawText(ctx, label, g.plotRight - 4, y + 9, labelColor, '8px sans-serif', 'right')
   }
 }
 

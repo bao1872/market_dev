@@ -396,6 +396,9 @@ async def compute_all_indicators(
         session, instrument_id, timeframe="1d", adj=adj,
     )
     daily_bars = daily_agg.bars
+    # [CHANGE-20260715-002 SMC warmup] 保存完整日线用于 SMC 预热（ATR200 需 200 根，
+    # 用户要求展示区之前至少 500 根 warmup；daily_agg.bars 含 DB 全量日线，约 1000+ 根）
+    full_daily_bars = daily_agg.bars
     if not daily_bars.empty:
         daily_bars = daily_bars.tail(daily_count)
 
@@ -649,18 +652,23 @@ async def compute_all_indicators(
     })
     data["sqzmom_lb"] = _to_json_safe(_truncate_lists(sqzmom_renamed, bars))
 
-    # [CHANGE-011 SMC] - 按需计算 SMC 指标（include_smc=False 时跳过，不消耗 CPU）
+    # [CHANGE-20260715-002 SMC Pine parity] - 按需计算 SMC 指标（include_smc=False 时跳过，0 CPU）
     # SMC 是独立图层，不进入 DSA、Node 监控、Capture 或右栏 context；
     # 完全排除 FVG（不计算、不返回、不缓存、不渲染）；
-    # 输入使用当前 timeframe 对应 macd_bars（与 MACD/SQZMOM 同源）；
     # 输出 BOS/CHoCH/OB/EQH/EQL/trailing，每个事件含 anchor/confirmed 因果契约。
+    # [warmup 契约] 1d 使用 full_daily_bars（DB 全量日线，≥500 warmup）；
+    # 其他周期复用 macd_bars（15m≈12000、1h≈3000、1w≈714、1mo≈166，均为可获得最大历史）。
+    # 不调用 _truncate_lists：SMC time 数组需保持完整长度以对齐 anchor/confirmed 索引，
+    # 前端通过 smcToDisplay 映射自动过滤展示区外事件。
     if include_smc:
         try:
-            smc_opens = macd_bars["open"].to_numpy(float).tolist()
-            smc_highs = macd_bars["high"].to_numpy(float).tolist()
-            smc_lows = macd_bars["low"].to_numpy(float).tolist()
-            smc_closes = macd_bars["close"].to_numpy(float).tolist()
-            smc_times = macd_time_list  # 与 MACD/SQZMOM 共用 timeframe bars 时间
+            # [CHANGE-20260715-002] 1d 使用完整日线 warmup，其他周期复用 macd_bars
+            smc_bars = full_daily_bars if timeframe == "1d" and not full_daily_bars.empty else macd_bars
+            smc_opens = smc_bars["open"].to_numpy(float).tolist()
+            smc_highs = smc_bars["high"].to_numpy(float).tolist()
+            smc_lows = smc_bars["low"].to_numpy(float).tolist()
+            smc_closes = smc_bars["close"].to_numpy(float).tolist()
+            smc_times = [idx.isoformat() for idx in smc_bars.index]
             smc_result = compute_smc_indicators(
                 opens=smc_opens,
                 highs=smc_highs,
@@ -668,8 +676,6 @@ async def compute_all_indicators(
                 closes=smc_closes,
                 times=smc_times,
             )
-            # 截取 time 序列到最后 bars 根（与 MACD/SQZMOM 一致）；
-            # events/order_blocks/equal_highs_lows/pivots 为事件列表（不按 bar 截断）。
             smc_with_time = {
                 "events": smc_result["events"],
                 "order_blocks": smc_result["order_blocks"],
@@ -697,10 +703,13 @@ async def compute_all_indicators(
                 ],
                 "hover_fields": [],
             })
-            data["smc"] = _to_json_safe(_truncate_lists(smc_with_time, bars))
+            # [CHANGE-20260715-002] 不截断 SMC 输出：time 数组需保持完整长度
+            # 前端 smcToDisplay 通过时间匹配自动过滤展示区外事件
+            data["smc"] = _to_json_safe(smc_with_time)
             logger.info(
-                "SMC 指标计算成功 instrument_id=%s timeframe=%s events=%d obs=%d",
+                "SMC 指标计算成功 instrument_id=%s timeframe=%s bars=%d events=%d obs=%d",
                 instrument_id, timeframe,
+                len(smc_bars),
                 len(smc_result["events"]),
                 len(smc_result["order_blocks"]),
             )

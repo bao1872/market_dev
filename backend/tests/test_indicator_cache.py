@@ -65,23 +65,23 @@ def test_cache_key_construction() -> None:
     assert key_none_adj != key, "不同 adj 应生成不同键"
 
 
-def test_cache_algorithm_version_bumped_to_v6() -> None:
-    """[CHANGE-011] - ALGORITHM_VERSION 必须 bump 到 v6。
+def test_cache_algorithm_version_bumped_to_v7() -> None:
+    """[CHANGE-20260715-002] - ALGORITHM_VERSION 必须 bump 到 v7。
 
-    v5 → v6 原因：CHANGE-011 新增 SMC 按需计算图层（include_smc 参数 + 缓存键后缀隔离）。
-    bump 到 v6 后，旧 v5 缓存键自然不匹配，强制重算。
+    v6 → v7 原因：CHANGE-20260715-002 SMC Pine parity 重写（smc_pine_core.py 唯一核心）。
+    bump 到 v7 后，旧 v6 缓存键自然不匹配，强制重算。
     """
-    assert indicator_cache.ALGORITHM_VERSION == "v6", (
-        f"ALGORITHM_VERSION 应为 v6（CHANGE-011 SMC 按需计算后 bump），"
+    assert indicator_cache.ALGORITHM_VERSION == "v7", (
+        f"ALGORITHM_VERSION 应为 v7（CHANGE-20260715-002 SMC Pine parity 后 bump），"
         f"实际为 {indicator_cache.ALGORITHM_VERSION}"
     )
 
-    # 验证新 key 包含 v6，不包含 v5
+    # 验证新 key 包含 v7，不包含 v6
     key = indicator_cache.build_cache_key(
         TEST_INSTRUMENT_ID, "1d", "qfq", "2026-07-06",
     )
-    assert ":v6" in key, f"新缓存键应含 v6: {key}"
-    assert ":v5" not in key, f"新缓存键不应含 v5: {key}"
+    assert ":v7" in key, f"新缓存键应含 v7: {key}"
+    assert ":v6" not in key, f"新缓存键不应含 v6: {key}"
 
 
 def test_old_v4_cache_key_not_matched() -> None:

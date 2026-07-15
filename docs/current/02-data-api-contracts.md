@@ -201,7 +201,7 @@ capture worker 浏览器上下文使用 `viewport=1920x1200` + `device_scale_fac
 
 ## 9.5 SMC（Smart Money Concepts）指标契约
 
-`/api/v1/instruments/{instrument_id}/indicators` 支持 `include_smc` 查询参数按需返回 `smc` 全局技术指标。SMC 由后端纯函数 `app.strategy_assets.algorithms.features.smc_indicator.compute_smc`（仅依赖 Python 标准库）实现，前端只消费后端 DTO，不重新计算。SMC 基于用户提供的参考实现重写，**不是 LuxAlgo Pine 脚本的翻译**。
+`/api/v1/instruments/{instrument_id}/indicators` 支持 `include_smc` 查询参数按需返回 `smc` 全局技术指标。SMC 由后端纯函数 `app.strategy_assets.algorithms.features.smc_pine_core.compute_smc_pine`（Pine 语义核心，仅依赖 Python 标准库）实现，`smc_indicator.py` 为薄包装委托层（`_SMCState = _SMCPineState` 别名）；前端只消费后端 DTO，不重新计算。SMC 实现用户 Pine 代码（`ref/smc_ref.txt`，SHA256 0bd3d2ad，用户原创并授权盘迹使用）的语义原语（`ta.rma` Wilder / `ta.cum(ta.tr)/bar_index` / `ta.atr(200)`）。
 
 ### 9.5.1 查询参数
 
@@ -213,18 +213,33 @@ capture worker 浏览器上下文使用 `viewport=1920x1200` + `device_scale_fac
 
 - `include_smc=true` 时 cache key 追加 `:smc` 后缀，与默认路径（`include_smc=false`）完全隔离；
 - 默认路径缓存不包含 SMC 字段，不因 SMC 上线影响常规请求性能；
-- SMC 计算路径变更同样需要 bump `ALGORITHM_VERSION` 使旧缓存失效。
+- SMC 计算路径变更同样需要 bump `ALGORITHM_VERSION` 使旧缓存失效；
+- 当前 `ALGORITHM_VERSION = "v7"`（CHANGE-20260715-002：SMC 从 SMA 基线升级为 Pine parity，旧 v6 缓存强制失效）；
+- 禁止 Redis FLUSHDB/FLUSHALL，只允许精确 DEL 测试键。
 
 ### 9.5.3 输出字段
 
-`data.smc`（仅 `include_smc=true` 时存在）包含市场结构关键点位序列，长度与当前 timeframe bar 对齐。**FVG（Fair Value Gap）完全排除**——不计算、不返回、不缓存、不渲染。
+`data.smc`（仅 `include_smc=true` 时存在）包含市场结构关键点位序列，**time 数组保持完整长度对齐 anchor/confirmed 索引**（不调用 `_truncate_lists` 截断 SMC 输出）；前端 `smcToDisplay` 通过时间匹配自动过滤展示区外事件。**FVG（Fair Value Gap）完全排除**——不计算、不返回、不缓存、不渲染，不暴露 FVG 开关；FVG 排除不改变其他逻辑的索引、执行顺序和右侧延伸。
 
-### 9.5.4 限制
+### 9.5.4 warmup 契约
+
+- 1d timeframe 使用 `full_daily_bars`（DB 全量日线，≥500 warmup，在 `daily_bars.tail(daily_count)` 截断前保存）；
+- 其他周期复用 `macd_bars`（15m≈12000、1h≈3000、1w≈714、1mo≈166，均为可获得最大历史）；
+- 不得只用展示区可见 bars 初始化状态；至少展示区之前 500 根 warmup；可获得时使用完整历史计算后裁剪输出。
+
+### 9.5.5 限制
 
 - SMC 只进入 `/stock/:symbol` 个股详情的指标链，不进入 `/market`、DSA、Node、Capture、盘中监控、选股；
 - 不新增数据库表；
 - SMC 不接入选股、监控、飞书、消息中心、事件系统；
 - FVG 完全排除（不计算、不返回、不缓存、不渲染）。
+
+### 9.5.6 Pine golden fixture
+
+- 状态 PENDING（等待 TradingView 导出）；`backend/tests/fixtures/smc_pine/README.md` 提供 TV 导出步骤、隐藏 plot 代码、CSV 格式规范；
+- fixture 包含美诺华 603538 日线 1000 根 + 一个 15m 样本；
+- golden 测试比较事件有序序列 `(type,scope,bias,anchor,confirmed,level)` 和 OB 序列 `(bias,anchor,top,bottom,mitigated)` 完全相等（浮点容差 1e-8）；
+- 无 fixture 时 `TestPineGoldenFixture` skip；**没有 Pine golden fixture 不得宣称"完全对齐"**。
 
 ## 10. 结构状态因子 API 契约 V1.8
 
@@ -786,7 +801,7 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 - cache key 格式：`indicator:{algorithm_version}:{timeframe}:{adj}:{bars}:{symbol}`（SMC 按需启用时追加 `:smc` 后缀，与默认路径隔离，避免 SMC 计算结果污染无 SMC 响应缓存）；
 - 旧版本 cache key 与新版本不匹配，强制重算，避免旧格式 `source_bar_times` 或日线阶梯线 BB 污染渲染；
 - 禁止通过手动 `DEL` 单只股票 key 修复缓存问题（不可扩展，且无法覆盖所有时间周期）；
-- 当前 `ALGORITHM_VERSION = "v6"`（CHANGE-20260715-001：新增 SMC 指标并按需启用，缓存 key 追加 `:smc` 后缀隔离）。
+- 当前 `ALGORITHM_VERSION = "v7"`（CHANGE-20260715-002：SMC 从 SMA 基线升级为 Pine parity 核心，旧 v6 缓存强制失效；CHANGE-20260715-001：新增 SMC 指标并按需启用，缓存 key 追加 `:smc` 后缀隔离）。
 
 #### 12.5.3.1 `force_refresh` / `capture` 查询参数（旁路缓存）
 

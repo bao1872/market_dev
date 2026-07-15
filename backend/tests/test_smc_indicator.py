@@ -1,15 +1,15 @@
-"""CHANGE-011 SMC 指标单元测试。
+"""CHANGE-20260715-002 SMC 指标单元测试（Pine parity 核心）。
 
-验证内容（用户任务第三块第 8 点）：
-1. 附件默认参数快照（DEFAULT_PARAMS 与 build_parser() 默认值一致）
+验证内容：
+1. 默认参数快照（DEFAULT_PARAMS 与 Pine 原始参数一致）
 2. 逐 bar 增量 = 全量同 confirmed 时结果（因果契约：未来 bar 不修改已确认事件）
 3. FVG 不计算、不返回、不显示（输出/schema 中不存在 FVG 字段、事件、box 或开关）
-4. 开关关闭 0 计算（include_smc=False 时 indicator_service 不调用 SMC）
-5. OB 创建与 mitigation（internal OB 创建后 mitigation 标记不可变）
-6. BOS/CHoCH、EQH/EQL（事件类型与 anchor/confirmed 字段）
-7. 空数据和不足 lookback（不抛异常，返回空 events）
+4. OB 创建与 mitigation（internal OB 创建后 mitigation 标记不可变）
+5. BOS/CHoCH、EQH/EQL（事件类型与 anchor/confirmed 字段）
+6. 空数据和不足 lookback（不抛异常，返回空 events）
+7. Pine 语义原语验证（ta.rma Wilder 递推、ta.cum/bar_index bar0=NaN、ta.atr=RMA(TR)）
 
-算法真源：用户提供的 ref/smc.py 重写版本（非 LuxAlgo Pine 翻译）。
+算法真源：smc_pine_core.py（Pine 语义核心），生产服务和测试参考的唯一调用入口。
 FVG 完全排除：本测试断言 SMC 输出、API schema 中不存在 FVG 字段、事件或 box，
 而非扫描源码字符串。注释/文档可以正常写"FVG 不计算、不返回、不显示"。
 
@@ -376,15 +376,14 @@ class TestBosChochEvents:
         for ev in result["events"]:
             assert ev["bias"] in (1, -1), f"事件 bias 应为 ±1，实得: {ev['bias']}"
 
-    def test_event_kind_valid(self) -> None:
-        """所有事件 kind 为 internal 或 swing。"""
+    def test_event_internal_field_valid(self) -> None:
+        """所有事件 internal 字段为布尔值（true=internal, false/缺失=swing）。"""
         opens, highs, lows, closes, times = _gen_random_bars(200, seed=333)
         result = compute_smc_indicators(opens, highs, lows, closes, times)
-        valid_kinds = {"internal", "swing"}
         for ev in result["events"]:
-            if "kind" in ev:
-                assert ev["kind"] in valid_kinds, (
-                    f"事件 kind 应为 internal/swing，实得: {ev['kind']}"
+            if "internal" in ev:
+                assert isinstance(ev["internal"], bool), (
+                    f"事件 internal 应为 bool，实得: {type(ev['internal'])}"
                 )
 
 
@@ -526,3 +525,165 @@ class TestModuleLoadable:
     def test_state_class_exists(self) -> None:
         """_SMCState 状态机类存在。"""
         assert _SMCState is not None
+
+
+# ===== 11. Pine 语义原语验证（CHANGE-20260715-002）=====
+
+
+class TestPineSemantics:
+    """验证 smc_pine_core 的 Pine 语义原语。
+
+    Pine 语义原语是 SMC 算法的基础，必须与 TradingView Pine 的 ta.* 函数完全一致。
+    """
+
+    def test_pine_rma_wilder_recursion(self) -> None:
+        """ta.rma(src, length) 使用 Wilder 递推，SMA 播种。
+
+        Pine: rma[length-1] = sma(src, length)
+              rma[i] = (rma[i-1] * (length-1) + src[i]) / length
+        """
+        from app.strategy_assets.algorithms.features.smc_pine_core import pine_rma
+
+        src = [float(i + 1) for i in range(10)]  # 1..10
+        rma = pine_rma(src, 5)
+        # SMA seed at index 4: (1+2+3+4+5)/5 = 3.0
+        assert abs(rma[4] - 3.0) < 1e-10, f"RMA[4] SMA seed 应为 3.0，实得 {rma[4]}"
+        # Wilder recursion: rma[5] = (3.0 * 4 + 6.0) / 5 = 3.6
+        assert abs(rma[5] - 3.6) < 1e-10, f"RMA[5] Wilder 应为 3.6，实得 {rma[5]}"
+        # rma[6] = (3.6 * 4 + 7.0) / 5 = 4.28
+        assert abs(rma[6] - 4.28) < 1e-10, f"RMA[6] Wilder 应为 4.28，实得 {rma[6]}"
+
+    def test_pine_rma_min_periods_before_seed(self) -> None:
+        """ta.rma 前 length-1 根用逐步 SMA（min_periods 行为）。"""
+        from app.strategy_assets.algorithms.features.smc_pine_core import pine_rma
+
+        src = [2.0, 4.0, 6.0, 8.0, 10.0]
+        rma = pine_rma(src, 5)
+        # index 0: 2/1 = 2.0
+        assert abs(rma[0] - 2.0) < 1e-10
+        # index 1: (2+4)/2 = 3.0
+        assert abs(rma[1] - 3.0) < 1e-10
+        # index 2: (2+4+6)/3 = 4.0
+        assert abs(rma[2] - 4.0) < 1e-10
+        # index 3: (2+4+6+8)/4 = 5.0
+        assert abs(rma[3] - 5.0) < 1e-10
+        # index 4: SMA seed = (2+4+6+8+10)/5 = 6.0
+        assert abs(rma[4] - 6.0) < 1e-10
+
+    def test_pine_cumulative_mean_range_bar0_nan(self) -> None:
+        """ta.cum(ta.tr) / bar_index：bar 0 = NaN（除零）。"""
+        import math
+
+        from app.strategy_assets.algorithms.features.smc_pine_core import (
+            pine_cumulative_mean_range,
+        )
+
+        highs = [11.0, 12.0, 10.5]
+        lows = [9.0, 10.0, 8.5]
+        closes = [10.0, 11.0, 9.5]
+        cmr = pine_cumulative_mean_range(highs, lows, closes)
+        # bar 0: tr[0] / 0 = NaN
+        assert math.isnan(cmr[0]), f"CMR[0] 应为 NaN，实得 {cmr[0]}"
+        # bar 1: (tr[0]+tr[1]) / 1
+        assert not math.isnan(cmr[1]), "CMR[1] 不应为 NaN"
+        # bar 2: (tr[0]+tr[1]+tr[2]) / 2
+        assert not math.isnan(cmr[2]), "CMR[2] 不应为 NaN"
+
+    def test_pine_atr_equals_rma_of_tr(self) -> None:
+        """ta.atr(n) = ta.rma(ta.tr, n)。"""
+        from app.strategy_assets.algorithms.features.smc_pine_core import (
+            pine_atr,
+            pine_rma,
+            pine_true_range,
+        )
+
+        highs = [11.0 + i * 0.5 for i in range(250)]
+        lows = [9.0 + i * 0.5 for i in range(250)]
+        closes = [10.0 + i * 0.5 for i in range(250)]
+        atr_result = pine_atr(highs, lows, closes, 200)
+        tr = pine_true_range(highs, lows, closes)
+        rma_tr = pine_rma(tr, 200)
+        # ATR should equal RMA(TR, 200)
+        for i in range(len(atr_result)):
+            assert abs(atr_result[i] - rma_tr[i]) < 1e-10, (
+                f"ATR[{i}] 应等于 RMA(TR,200)[{i}]"
+            )
+
+    def test_pine_crossover(self) -> None:
+        """ta.crossover(a, b) = a[0] > b[0] and a[1] <= b[1]。"""
+        from app.strategy_assets.algorithms.features.smc_pine_core import (
+            pine_crossover,
+        )
+
+        # a 从下方穿越 b
+        assert pine_crossover(11.0, 10.0, 10.5, 10.5) is True
+        # a 未穿越（a 仍 <= b）
+        assert pine_crossover(10.0, 10.5, 11.0, 10.5) is False
+        # a 前一根已 > b（非穿越）
+        assert pine_crossover(12.0, 11.0, 10.0, 10.0) is False
+
+    def test_pine_crossunder(self) -> None:
+        """ta.crossunder(a, b) = a[0] < b[0] and a[1] >= b[1]。
+
+        签名: pine_crossunder(a_curr, a_prev, b_curr, b_prev)
+        """
+        from app.strategy_assets.algorithms.features.smc_pine_core import (
+            pine_crossunder,
+        )
+
+        # a 从上方穿越 b: a_prev=10.5 >= b_prev=10, a_curr=9 < b_curr=10
+        assert pine_crossunder(9.0, 10.5, 10.0, 10.0) is True
+        # a 未穿越（a_curr 仍 >= b_curr）
+        assert pine_crossunder(11.0, 10.5, 10.0, 10.5) is False
+        # a 前一根已 < b（a_prev < b_prev，非穿越）
+        assert pine_crossunder(8.0, 9.0, 10.0, 10.5) is False
+
+    def test_pine_highest_excludes_ref_bar(self) -> None:
+        """ta.highest(src, length) 在 ref_i 之后窗口取 max（不含 ref_i）。"""
+        from app.strategy_assets.algorithms.features.smc_pine_core import (
+            pine_highest,
+        )
+
+        src = [5.0, 3.0, 8.0, 2.0, 7.0, 1.0, 9.0]
+        # ref_i=0, length=3: max(src[1..3]) = max(3,8,2) = 8
+        assert pine_highest(src, 3, 0) == 8.0
+        # ref_i=2, length=3: max(src[3..5]) = max(2,7,1) = 7
+        assert pine_highest(src, 3, 2) == 7.0
+
+    def test_pine_lowest_excludes_ref_bar(self) -> None:
+        """ta.lowest(src, length) 在 ref_i 之后窗口取 min（不含 ref_i）。"""
+        from app.strategy_assets.algorithms.features.smc_pine_core import (
+            pine_lowest,
+        )
+
+        src = [5.0, 3.0, 8.0, 2.0, 7.0, 1.0, 9.0]
+        # ref_i=0, length=3: min(src[1..3]) = min(3,8,2) = 2
+        assert pine_lowest(src, 3, 0) == 2.0
+        # ref_i=2, length=3: min(src[3..5]) = min(2,7,1) = 1
+        assert pine_lowest(src, 3, 2) == 1.0
+
+
+# ===== 12. Pine Golden Fixture 对齐测试（CHANGE-20260715-002）=====
+
+
+class TestPineGoldenFixture:
+    """Pine golden fixture 逐事件对齐测试。
+
+    没有Pine golden fixture不得宣称"完全对齐"。
+    本测试在 fixture 不存在时 skip，存在时进行逐事件比较。
+    """
+
+    def test_pine_golden_fixture_exists_or_skip(self) -> None:
+        """Pine golden fixture 存在时运行对齐测试，否则 skip。"""
+        import os
+        fixture_dir = os.path.join(
+            os.path.dirname(__file__), "fixtures", "smc_pine"
+        )
+        events_csv = os.path.join(fixture_dir, "pine_events_603538_1d.csv")
+        if not os.path.exists(events_csv):
+            import pytest
+            pytest.skip(
+                "Pine golden fixture 不存在（等待 TV 导出）。"
+                "没有 Pine golden fixture 不得宣称'完全对齐'。"
+                "导出指南见 backend/tests/fixtures/smc_pine/README.md"
+            )

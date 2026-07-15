@@ -1,18 +1,13 @@
-// [MiniKlineViewport] - 描述: 右栏小 K 线 viewport 计算纯函数（CHANGE-011 P0）
+// [MiniKlineViewport] - 描述: 右栏小 K 线 viewport 计算纯函数（CHANGE-20260715-002 P0）
 // 解决问题：约 300px 有效绘图区塞入全部 80 根日线，左端低位 K 线被下边界裁切，
 // 最新 K 线贴近右轴，周期/尺寸变化后旧 range 残留。
 //
-// 设计要点：
-// 1. 初始可见根数按宽度动态计算 floor((contentWidth - priceScaleWidth) / 5)，clamp 到 per-timeframe 区间
-// 2. 右侧保留约 3 个 bar 空位（最新 K 线不得紧贴价格轴）
-// 3. 数据可继续多取用于缓存，但初始可见根数由 viewport 决定
-// 4. 切周期不得沿用上一周期 logical range（每次重新计算）
-//
-// per-timeframe clamp（用户指定，全部在 [30, 64] 区间内）：
-//   15m/60m: 50–64
-//   日线:    48–58
-//   周线:    40–52
-//   月线:    30–40
+// 设计要点（CHANGE-20260715-002 用户指定）：
+// 1. 目标根数按周期固定：15m=48、60m=44、日=40、周=36、月=30
+// 2. 按实际宽度计算 barSpacing，clamp 5.5–8px
+// 3. 左侧 1–2 根留白：from=max(-2, n-visible-1)，右侧 3 根留白：to=n-1+3
+// 4. 不调用 fitContent、resetTimeScale 或 scrollToRealTime 覆盖 range
+// 5. 切周期不得沿用上一周期 logical range（每次重新计算）
 //
 // 纯 TS（无 React 依赖，无 @/ 别名依赖），可被 node --test 直接运行。
 
@@ -21,25 +16,28 @@ export type MiniKlineTimeframe = '15m' | '1h' | '1d' | '1w' | '1mo'
 // 右价格轴最小宽度（与 lightweight-charts v4 默认行为对齐）
 export const MIN_PRICE_SCALE_WIDTH = 56
 
-// 每个 bar 占用的最小水平像素数（含间隙）
-const MIN_PX_PER_BAR = 5
+// barSpacing clamp 区间（用户指定 5.5–8px）
+const MIN_BAR_SPACING = 5.5
 
 // 右侧留白 bar 数（最新 K 线与右轴之间保留 3 个空位）
 export const RIGHT_PADDING_BARS = 3
 
-// per-timeframe clamp 区间
-const TIMEFRAME_CLAMP: Record<MiniKlineTimeframe, Readonly<[number, number]>> = {
-  '15m': [50, 64],
-  '1h': [50, 64],
-  '1d': [48, 58],
-  '1w': [40, 52],
-  '1mo': [30, 40],
+// 左侧留白 bar 数（允许 1-2 根空数据保护）
+export const LEFT_PADDING_BARS = 2
+
+// per-timeframe 目标根数（用户指定固定值）
+const TIMEFRAME_TARGET_ROOTS: Readonly<Record<MiniKlineTimeframe, number>> = {
+  '15m': 48,
+  '1h': 44,
+  '1d': 40,
+  '1w': 36,
+  '1mo': 30,
 }
 
 export interface MiniKlineViewport {
-  /** 实际可见 bar 数量（已 clamp） */
+  /** 实际可见 bar 数量（已按 barSpacing clamp 调整） */
   visibleBars: number
-  /** 逻辑 range from 索引（含左侧空数据保护） */
+  /** 逻辑 range from 索引（含左侧 1-2 根留白） */
   from: number
   /** 逻辑 range to 索引（含右侧 3 bar 留白） */
   to: number
@@ -47,21 +45,26 @@ export interface MiniKlineViewport {
   priceScaleWidth: number
   /** 用于 autoscale 的有效绘图宽度（contentWidth - priceScaleWidth） */
   effectivePlotWidth: number
-}
-
-function clamp(value: number, min: number, max: number): number {
-  if (value < min) return min
-  if (value > max) return max
-  return value
+  /** 每根 bar 占用的水平像素（barSpacing） */
+  barSpacing: number
 }
 
 /**
  * 计算小 K 线 viewport 的可见区间与价格轴宽度。
  *
+ * 算法：
+ * 1. 取周期目标根数作为初始 visibleBars
+ * 2. 计算 barSpacing = effectivePlotWidth / visibleBars
+ * 3. 如果 barSpacing < 5.5：减少 visibleBars = floor(effectivePlotWidth / 5.5)
+ * 4. 如果 barSpacing > 8：保持目标根数（更宽的 bar 间距可接受，不强制增加根数）
+ * 5. visibleBars 不超过 dataLength（数据不足时显示全部）
+ * 6. from = max(-LEFT_PADDING_BARS, dataLength - visibleBars - 1)
+ * 7. to = dataLength - 1 + RIGHT_PADDING_BARS
+ *
  * @param dataLength 数据总长度（bars 数组长度）
  * @param timeframe 当前周期
  * @param contentWidth 容器内容宽度（像素，应为 ResizeObserver contentRect.width 的整数值）
- * @returns viewport 信息（visibleBars/from/to/priceScaleWidth/effectivePlotWidth）
+ * @returns viewport 信息
  */
 export function computeMiniKlineViewport(
   dataLength: number,
@@ -73,12 +76,22 @@ export function computeMiniKlineViewport(
   const intWidth = Math.max(0, Math.floor(contentWidth))
   const effectivePlotWidth = Math.max(0, intWidth - priceScaleWidth)
 
-  // 基础可见根数 = floor(effectiveWidth / 5)
-  const rawVisible = Math.floor(effectivePlotWidth / MIN_PX_PER_BAR)
+  // 周期目标根数
+  const targetRoots = TIMEFRAME_TARGET_ROOTS[timeframe]
 
-  // per-timeframe clamp（全部在 [30, 64] 区间内）
-  const [minBars, maxBars] = TIMEFRAME_CLAMP[timeframe]
-  const visibleBars = clamp(rawVisible, minBars, maxBars)
+  // 初始 visibleBars = 目标根数
+  let visibleBars = targetRoots
+
+  // 计算 barSpacing，clamp 5.5-8px
+  if (effectivePlotWidth > 0) {
+    let barSpacing = effectivePlotWidth / visibleBars
+    if (barSpacing < MIN_BAR_SPACING) {
+      // barSpacing 太窄，减少根数
+      visibleBars = Math.max(1, Math.floor(effectivePlotWidth / MIN_BAR_SPACING))
+      barSpacing = effectivePlotWidth / visibleBars
+    }
+    // barSpacing > 8 时不增加根数（保持目标根数，更宽间距可接受）
+  }
 
   // 数据为空时返回零区间
   if (dataLength <= 0) {
@@ -88,15 +101,23 @@ export function computeMiniKlineViewport(
       to: 0,
       priceScaleWidth,
       effectivePlotWidth,
+      barSpacing: 0,
     }
   }
 
-  // from = max(0, dataLength - visibleBars)（左侧数据不足时从头开始）
-  const from = Math.max(0, dataLength - visibleBars)
-  // to = dataLength - 1 + RIGHT_PADDING_BARS（右侧保留 3 bar 空位）
-  // 注意：lightweight-charts logical range 的 to 是开区间右端，但 setVisibleLogicalRange 文档
-  //   实际使用闭区间语义；我们用 dataLength - 1 + 3 让最后一根 K 线出现在约 80% 位置
+  // visibleBars 不超过 dataLength（数据不足时显示全部）
+  visibleBars = Math.min(visibleBars, dataLength)
+
+  // from = max(-LEFT_PADDING_BARS, dataLength - visibleBars - 1)
+  // 左侧 1-2 根留白（允许负值，lightweight-charts 支持显示空数据区）
+  const from = Math.max(-LEFT_PADDING_BARS, dataLength - visibleBars - 1)
+  // to = dataLength - 1 + RIGHT_PADDING_BARS（右侧 3 bar 留白）
   const to = dataLength - 1 + RIGHT_PADDING_BARS
+
+  // 最终 barSpacing
+  const barSpacing = effectivePlotWidth > 0 && visibleBars > 0
+    ? effectivePlotWidth / visibleBars
+    : 0
 
   return {
     visibleBars,
@@ -104,12 +125,13 @@ export function computeMiniKlineViewport(
     to,
     priceScaleWidth,
     effectivePlotWidth,
+    barSpacing,
   }
 }
 
 /**
  * 计算给定数据切片的 autoscale 价格范围（min(low), max(high)）。
- * 用于校验价格轴 scaleMargins 后的可见范围是否覆盖所有可见 K 线的影线。
+ * 用于 autoscaleInfoProvider 扩展可见价格范围。
  *
  * @param bars K 线数据切片（仅可见部分）
  * @returns { minLow, maxHigh } 或 null（数据为空）
@@ -126,4 +148,30 @@ export function computeVisiblePriceRange<T extends { high: number; low: number }
   }
   if (!Number.isFinite(minLow) || !Number.isFinite(maxHigh)) return null
   return { minLow, maxHigh }
+}
+
+/**
+ * 计算 autoscaleInfoProvider 需要的价格范围扩展。
+ * 用户指定：上方 12%，下方 15%。
+ *
+ * @param minLow 可见 K 线最低价
+ * @param maxHigh 可见 K 线最高价
+ * @returns 扩展后的 { min, max } 或 null
+ */
+export function computeAutoscaleRange(
+  minLow: number,
+  maxHigh: number,
+): { min: number; max: number } | null {
+  if (!Number.isFinite(minLow) || !Number.isFinite(maxHigh)) return null
+  if (minLow === maxHigh) {
+    // 价格无波动时，人为扩展 1% 范围
+    const padding = Math.abs(minLow) * 0.01 || 0.01
+    return { min: minLow - padding, max: maxHigh + padding }
+  }
+  const range = maxHigh - minLow
+  // 上方 12%，下方 15%
+  return {
+    min: minLow - range * 0.15,
+    max: maxHigh + range * 0.12,
+  }
 }

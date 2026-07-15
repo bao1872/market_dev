@@ -1,11 +1,13 @@
 // CHANGE-20260713-010: 右栏小 K 线卡片
 // CHANGE-20260714-001: 扩展为五周期（15m/60m/日/周/月），删除标题，移除图内 TV 标志
-// CHANGE-011 P0: 重写 viewport 计算，提取 computeMiniKlineViewport 纯函数
-//   - 动态 visible range：floor((contentWidth - 56) / 5)，clamp 到 per-timeframe 区间
-//   - 右侧保留 3 bar 空位（最新 K 线不紧贴价格轴）
-//   - setData 后只执行一次 setVisibleLogicalRange，不再先 fitContent（避免竞态）
-//   - 价格轴 autoScale + scaleMargins {top:0.12, bottom:0.12}，覆盖可见 K 线影线
-//   - ResizeObserver 使用整数 contentRect.width，宽度变化时 requestAnimationFrame 重应用 range
+// CHANGE-20260715-002 P0: 重写 viewport 计算 + autoscaleInfoProvider
+//   - 目标根数按周期固定：15m=48、60m=44、日=40、周=36、月=30
+//   - barSpacing clamp 5.5–8px
+//   - 左侧 1-2 根留白，右侧 3 根留白
+//   - setData 后 requestAnimationFrame 中调用 setVisibleLogicalRange（不调用 fitContent）
+//   - autoscaleInfoProvider 扩展价格范围：上方 12%，下方 15%
+//   - rightPriceScale autoScale + scaleMargins {top:0.08, bottom:0.08}，minimumWidth=56
+//   - 图表高度固定 190px，无多余 min-height 或底部空白
 //   - 切周期不复用上一周期 logical range
 // 使用 lightweight-charts v4 渲染简化 K 线（仅 K 线 + 价格轴 + 简化时间轴）。
 // 不显示指标/成交量/Node/事件标记/工具栏。
@@ -17,10 +19,12 @@ import {
   type ISeriesApi,
   type CandlestickData,
   type Time,
+  type AutoscaleInfo,
 } from 'lightweight-charts'
 import { useMiniKlineData, type MiniKlineTimeframe } from './useMiniKlineData'
 import {
   computeMiniKlineViewport,
+  computeAutoscaleRange,
   MIN_PRICE_SCALE_WIDTH,
 } from './miniKlineViewport'
 
@@ -39,8 +43,8 @@ const TIMEFRAME_OPTIONS: Array<{ value: MiniKlineTimeframe; label: string }> = [
 
 const INTRADAY_TIMEFRAMES: ReadonlySet<MiniKlineTimeframe> = new Set(['15m', '1h'])
 
-// 图表正文高度（保持在 190-210px 区间）
-const CHART_HEIGHT = 200
+// 图表正文高度（CHANGE-20260715-002: 固定 190px）
+const CHART_HEIGHT = 190
 
 export function MiniKlineCard({ symbol }: MiniKlineCardProps) {
   const [timeframe, setTimeframe] = useState<MiniKlineTimeframe>('1d')
@@ -69,13 +73,13 @@ export function MiniKlineCard({ symbol }: MiniKlineCardProps) {
       },
       rightPriceScale: {
         borderColor: '#263440',
-        // CHANGE-011 P0: 价格轴最小宽度 56px（与 viewport 计算的 priceScaleWidth 对齐）
+        // CHANGE-20260715-002: 价格轴最小宽度 56px（与 viewport 计算的 priceScaleWidth 对齐）
         minimumWidth: MIN_PRICE_SCALE_WIDTH,
-        // CHANGE-011 P0: 启用 autoScale + scaleMargins，覆盖可见 K 线影线
+        // CHANGE-20260715-002: autoScale + scaleMargins {top:0.08, bottom:0.08}
         autoScale: true,
         scaleMargins: {
-          top: 0.12,
-          bottom: 0.12,
+          top: 0.08,
+          bottom: 0.08,
         },
       },
       timeScale: {
@@ -100,13 +104,32 @@ export function MiniKlineCard({ symbol }: MiniKlineCardProps) {
       borderDownColor: '#22C55E',
       wickUpColor: '#FF4D4F',
       wickDownColor: '#22C55E',
+      // CHANGE-20260715-002: autoscaleInfoProvider 扩展价格范围
+      // 在默认可见 priceRange 基础上扩展：上方 12%，下方 15%
+      // 使用 computeAutoscaleRange 纯函数确保逻辑可测试
+      // lightweight-charts v4: autoscaleInfoProvider 是 SeriesOptions 的一部分（不是 ISeriesApi 方法）
+      autoscaleInfoProvider: (baseImpl: () => AutoscaleInfo | null) => {
+        const base = baseImpl()
+        if (!base || !base.priceRange) return base ?? null
+        const { minValue, maxValue } = base.priceRange
+        const extended = computeAutoscaleRange(minValue, maxValue)
+        if (!extended) return base
+        return {
+          ...base,
+          priceRange: {
+            minValue: extended.min,
+            maxValue: extended.max,
+          },
+        }
+      },
     })
+
     seriesRef.current = series
 
     // 响应式调整宽度 + 重新应用 viewport range
     const resizeObserver = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        // CHANGE-011 P0: 使用整数 contentRect.width 避免亚像素抖动
+        // CHANGE-20260715-002: 使用整数 contentRect.width 避免亚像素抖动
         const intWidth = Math.floor(entry.contentRect.width)
         if (intWidth <= 0) continue
         const chart = chartRef.current
@@ -134,8 +157,8 @@ export function MiniKlineCard({ symbol }: MiniKlineCardProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // CHANGE-011 P0: 应用 viewport range（setData 后只调用一次 setVisibleLogicalRange）
-  // 不再先 fitContent 再设 range（避免竞态导致 range 被覆盖）
+  // CHANGE-20260715-002: 应用 viewport range（setData 后只调用一次 setVisibleLogicalRange）
+  // 不调用 fitContent（避免竞态导致 range 被覆盖）
   function applyViewportRange(width: number) {
     const chart = chartRef.current
     if (!chart) return
@@ -169,8 +192,8 @@ export function MiniKlineCard({ symbol }: MiniKlineCardProps) {
 
     series.setData(data)
 
-    // CHANGE-011 P0: setData 后只执行一次 setVisibleLogicalRange
-    // 不再调用 fitContent（避免先全屏再设 range 的竞态）
+    // CHANGE-20260715-002: setData 后在 rAF 中执行 setVisibleLogicalRange
+    // 不调用 fitContent（避免先全屏再设 range 的竞态）
     const width = containerWidthRef.current || Math.floor(containerRef.current?.clientWidth ?? 0)
     if (width > 0) {
       // 在 rAF 中应用，确保 setData 已完成布局
