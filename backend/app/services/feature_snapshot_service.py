@@ -37,7 +37,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,6 +59,24 @@ from app.services.temporal_feature_service import (
 )
 from app.strategy_assets.algorithms.features.bollinger_features_plotly import bollinger
 
+
+class PublishedSnapshotRunExistsError(Exception):
+    """[P0-4] 已存在 canonical succeeded+published+full run，禁止重跑覆盖。
+
+    由 create_snapshot_run 在 scope='full' 时抛出（无条件，无 bypass）。
+    已归属 succeeded+published run 的 snapshot 无条件不可覆盖。
+    未来纠错发布另做 supersede 机制，当前不提供绕过。
+    """
+
+    def __init__(self, existing_run: StockFeatureSnapshotRun) -> None:
+        self.existing_run = existing_run
+        super().__init__(
+            f"已存在 published full snapshot run: "
+            f"trade_date={existing_run.trade_date} run_id={existing_run.id} "
+            f"published_at={existing_run.published_at}。"
+            f"已发布快照无条件不可覆盖；如需纠错请使用 supersede 机制（未实现）。"
+        )
+
 logger = logging.getLogger(__name__)
 
 # 常量
@@ -68,6 +86,73 @@ _PRIMARY_LOOKBACK = 500  # 日线回看天数（与 structural_factor_service �
 _SECONDARY_LOOKBACK = 500  # 15m 回看天数
 _BB_WIN = 20
 _BB_K = 2.0
+
+# MACD 参数（标准 12/26/9）
+_MACD_FAST = 12
+_MACD_SLOW = 26
+_MACD_SIGNAL = 9
+
+
+# =============================================================================
+# C6: 紧凑状态计算（MACD 关系，不保存完整指标序列）
+# =============================================================================
+
+
+def _compute_macd_state(df_1d: pd.DataFrame | None) -> dict[str, Any]:
+    """C6: 计算MACD紧凑状态（只保存最终值+code，不保存完整序列）。
+
+    调用 indicator_service.compute_macd 真源（A 股 2× 版本），
+    禁止在本模块内复制 EMA/MACD 公式形成第二套实现。
+
+    code 四象限（基于 DIF 和 DEA）：
+    - bullish_above: DIF > 0 且 DIF > DEA（最强多头）
+    - bullish_below: DIF > 0 且 DIF <= DEA（多头减弱）
+    - bearish_below: DIF < 0 且 DIF < DEA（最强空头）
+    - bearish_above: DIF < 0 且 DIF >= DEA（空头减弱）
+    - None: 数据不足或 DIF == 0
+    """
+    empty = {"code": None, "macd_val": None, "signal_val": None, "histogram": None}
+    if df_1d is None or df_1d.empty:
+        return empty
+    min_len = _MACD_SLOW + _MACD_SIGNAL  # 35
+    if len(df_1d) < min_len:
+        return empty
+
+    from app.services.indicator_service import compute_macd
+
+    closes = df_1d["close"].to_numpy(dtype=float)
+    macd_result = compute_macd(
+        closes, fast=_MACD_FAST, slow=_MACD_SLOW, signal=_MACD_SIGNAL,
+    )
+    # 取最后一个非 None 值
+    dif_list = macd_result["macd_dif"]
+    dea_list = macd_result["macd_dea"]
+    hist_list = macd_result["macd_hist"]
+
+    last_dif = dif_list[-1] if dif_list and dif_list[-1] is not None else None
+    last_dea = dea_list[-1] if dea_list and dea_list[-1] is not None else None
+    last_hist = hist_list[-1] if hist_list and hist_list[-1] is not None else None
+
+    if last_dif is None or last_dea is None:
+        return empty
+
+    if last_dif > 0 and last_dif > last_dea:
+        code = "bullish_above"
+    elif last_dif > 0 and last_dif <= last_dea:
+        code = "bullish_below"
+    elif last_dif < 0 and last_dif < last_dea:
+        code = "bearish_below"
+    elif last_dif < 0 and last_dif >= last_dea:
+        code = "bearish_above"
+    else:
+        code = None
+
+    return {
+        "code": code,
+        "macd_val": round(last_dif, 6),
+        "signal_val": round(last_dea, 6),
+        "histogram": round(last_hist, 6) if last_hist is not None else None,
+    }
 
 
 # =============================================================================
@@ -198,6 +283,7 @@ async def compute_feature_snapshot_for_date(
     *,
     primary_bars: pd.DataFrame | None = None,
     secondary_bars: pd.DataFrame | None = None,
+    source_run_id: uuid.UUID | None = None,
 ) -> StockFeatureSnapshot:
     """为指定 instrument + trade_date 计算 point-in-time 特征快照。
 
@@ -263,6 +349,10 @@ async def compute_feature_snapshot_for_date(
         df_15m, secondary_timeframe, degraded_reasons, warmup_notes
     )
 
+    # C6: 计算真实 MACD 紧凑状态
+    # 只保存紧凑状态（最终值+code），不保存完整指标序列
+    primary_factors["macd_state"] = _compute_macd_state(df_1d)
+
     # 计算 temporal features（复用内部函数）
     daily_context = _compute_daily_context(
         primary_factors, df_1d, degraded_reasons, warmup_notes
@@ -325,6 +415,7 @@ async def compute_feature_snapshot_for_date(
         secondary_timeframe=secondary_timeframe,
         adj=adj,
         schema_version=_SCHEMA_VERSION,
+        source_run_id=source_run_id,
         source_primary_bar_time=source_primary,
         source_secondary_bar_time=source_secondary,
         structural_payload=structural_payload,
@@ -462,6 +553,12 @@ async def upsert_snapshot(
     存在则更新 payload/source_bar_time/updated_at，不存在则 insert。
     使用 PostgreSQL INSERT ... ON CONFLICT DO UPDATE。
 
+    [P0-4] published run 保护（无条件，无 bypass）：
+    ON CONFLICT DO UPDATE 带 WHERE 子句，
+    仅当现有 snapshot 的 source_run_id IS NULL 或链接的 run 非 succeeded+published 时才更新。
+    已归属 succeeded+published run 的 snapshot 无条件不可覆盖。
+    未来纠错发布另做 supersede 机制，当前不提供绕过。
+
     Args:
         session: 异步 DB 会话
         snapshot: 待写入的 StockFeatureSnapshot 对象
@@ -476,6 +573,7 @@ async def upsert_snapshot(
         secondary_timeframe=snapshot.secondary_timeframe,
         adj=snapshot.adj,
         schema_version=snapshot.schema_version,
+        source_run_id=snapshot.source_run_id,
         source_primary_bar_time=snapshot.source_primary_bar_time,
         source_secondary_bar_time=snapshot.source_secondary_bar_time,
         structural_payload=snapshot.structural_payload,
@@ -485,6 +583,10 @@ async def upsert_snapshot(
     )
 
     update_cols = {
+        # [P0-4] 冲突时更新 source_run_id：新 run 应成为快照归属。
+        # 已归属 published run 的 snapshot 由 WHERE 子句无条件保护，不会被覆盖。
+        # 失败 run 在事务中回滚，不会污染旧归属。
+        "source_run_id": stmt.excluded.source_run_id,
         "source_primary_bar_time": stmt.excluded.source_primary_bar_time,
         "source_secondary_bar_time": stmt.excluded.source_secondary_bar_time,
         "structural_payload": stmt.excluded.structural_payload,
@@ -494,9 +596,19 @@ async def upsert_snapshot(
         "updated_at": func.now(),
     }
 
+    # [P0-4] 无条件保护：不覆盖已归属 published run 的 snapshot
     stmt = stmt.on_conflict_do_update(
         constraint="uq_feature_snapshot_instrument_date_tf_adj_schema",
         set_=update_cols,
+        where=text(
+            "stock_feature_snapshots.source_run_id IS NULL "
+            "OR NOT EXISTS ("
+            "  SELECT 1 FROM stock_feature_snapshot_runs r "
+            "  WHERE r.id = stock_feature_snapshots.source_run_id "
+            "  AND r.status = 'succeeded' "
+            "  AND r.published_at IS NOT NULL"
+            ")"
+        ),
     )
     await session.execute(stmt)
     await session.flush()
@@ -517,6 +629,7 @@ async def compute_for_trade_date(
     batch_size: int = 20,
     failure_threshold: float = 0.3,
     progress_callback: Callable[..., Awaitable[None]] | None = None,
+    source_run_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """为给定 instrument 列表批量计算并 upsert 快照（不内部 commit）。
 
@@ -525,6 +638,10 @@ async def compute_for_trade_date(
     - 失败比例超过 failure_threshold 时抛 RuntimeError，由 caller 决定 rollback。
     - caller（after_close / backfill）负责：成功时 commit，超阈值时 rollback。
     - 这样保证失败日期不会留下部分已 commit 行（half-baked）。
+
+    [P0-4] published run 保护（无条件）：
+    upsert_snapshot 内部 WHERE 子句无条件保护已归属 published run 的 snapshot。
+    无 bypass 参数，未来纠错发布另做 supersede 机制。
 
     - 按 batch_size 分批遍历
     - 单股失败记录，不阻塞其他股票
@@ -538,6 +655,7 @@ async def compute_for_trade_date(
         batch_size: 每批 instrument 数（默认 20）
         failure_threshold: 失败比例阈值（默认 0.3）
         progress_callback: 可选的进度回调，接收关键字参数 processed/total/snapshot_count/failed_count
+        source_run_id: 关联的 snapshot run ID
 
     Returns:
         统计信息 dict：snapshot_count, failed_count, schema_version, trade_date
@@ -555,6 +673,7 @@ async def compute_for_trade_date(
             try:
                 snapshot = await compute_feature_snapshot_for_date(
                     session, instrument_id, trade_date,
+                    source_run_id=source_run_id,
                 )
                 await upsert_snapshot(session, snapshot)
                 snapshot_count += 1
@@ -633,6 +752,12 @@ async def create_snapshot_run(
     - 注入到 metadata_['scope']，watchlist gate 据此过滤
     - finish_snapshot_run 的 metadata 完全替换 create 时的 metadata，调用方需在 finish 时再次传入 scope
 
+    [P0-4] published run 保护（无条件，无 bypass）：
+    - scope='full' 时，如已存在 canonical succeeded+published+full run，
+      抛出 PublishedSnapshotRunExistsError，禁止重跑覆盖已发布数据。
+    - scope='sample' 或 None 时不检查（小样本验证不影响 watchlist 可读的 full run）。
+    - 未来纠错发布另做 supersede 机制，当前不提供绕过。
+
     Args:
         session: 异步 DB 会话
         trade_date: 业务交易日
@@ -647,6 +772,10 @@ async def create_snapshot_run(
 
     Returns:
         StockFeatureSnapshotRun ORM 对象（status='running'）
+
+    Raises:
+        PublishedSnapshotRunExistsError: scope='full' 且已存在
+            canonical succeeded+published+full run
     """
     # 查找已存在的 running run（幂等复用）
     stmt = select(StockFeatureSnapshotRun).where(
@@ -665,6 +794,24 @@ async def create_snapshot_run(
             trade_date, run_type, existing.id,
         )
         return existing
+
+    # [P0-4] 无条件保护：scope='full' 时，
+    # 如已存在 canonical succeeded+published+full run，禁止创建新 run
+    if scope == "full":
+        existing_published = await get_published_full_run(
+            session, trade_date,
+            schema_version=schema_version,
+            primary_timeframe=primary_timeframe,
+            secondary_timeframe=secondary_timeframe,
+            adj=adj,
+        )
+        if existing_published is not None:
+            logger.warning(
+                "[P0-4] 拒绝创建新 full run：已存在 published run "
+                "trade_date=%s run_id=%s published_at=%s",
+                trade_date, existing_published.id, existing_published.published_at,
+            )
+            raise PublishedSnapshotRunExistsError(existing_published)
 
     # [Blocker Fix] 注入 scope 到 metadata_（如未在 metadata 中显式设置）
     final_metadata: dict[str, Any] = dict(metadata) if metadata else {}
@@ -691,6 +838,53 @@ async def create_snapshot_run(
         trade_date, run_type, run.id, expected_count, scope,
     )
     return run
+
+
+async def get_published_full_run(
+    session: AsyncSession,
+    trade_date: date,
+    *,
+    schema_version: int = _SCHEMA_VERSION,
+    primary_timeframe: str = "1d",
+    secondary_timeframe: str = "15m",
+    adj: str = "qfq",
+) -> StockFeatureSnapshotRun | None:
+    """[P0-4] 查询已存在的 canonical succeeded+published+full run。
+
+    用于 create_snapshot_run 的保护检查：禁止普通重跑覆盖已发布的 full scope run。
+
+    与 has_succeeded_snapshot_run 的区别：
+    - has_succeeded_snapshot_run 只按 trade_date+schema_version 过滤（用于 watchlist gate）
+    - 本函数按完整 key（trade_date+schema_version+primary_timeframe+secondary_timeframe+adj）过滤
+      （用于 create_snapshot_run 的精确保护）
+
+    Args:
+        session: 异步 DB 会话
+        trade_date: 业务交易日
+        schema_version: 快照 schema 版本
+        primary_timeframe: 主周期
+        secondary_timeframe: 次周期
+        adj: 复权方式
+
+    Returns:
+        已存在的 published full run，或 None
+    """
+    stmt = (
+        select(StockFeatureSnapshotRun)
+        .where(
+            StockFeatureSnapshotRun.trade_date == trade_date,
+            StockFeatureSnapshotRun.schema_version == schema_version,
+            StockFeatureSnapshotRun.primary_timeframe == primary_timeframe,
+            StockFeatureSnapshotRun.secondary_timeframe == secondary_timeframe,
+            StockFeatureSnapshotRun.adj == adj,
+            StockFeatureSnapshotRun.status == STATUS_SUCCEEDED,
+            StockFeatureSnapshotRun.published_at.is_not(None),
+            StockFeatureSnapshotRun.metadata_["scope"].astext == "full",
+        )
+        .limit(1)
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
 
 
 async def finish_snapshot_run(

@@ -66,7 +66,8 @@ class SchedulerJobRun(Base):
         DateTime(timezone=True), nullable=True, comment="完成时间",
     )
     status: Mapped[str] = mapped_column(
-        String(32), nullable=False, server_default="running", comment="running/succeeded/failed",
+        String(32), nullable=False, server_default="running",
+        comment="running/succeeded/failed/skipped/interrupted",
     )
     heartbeat_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="心跳时间",

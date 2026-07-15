@@ -99,6 +99,8 @@ interface AuthState {
   token: string | null
   refreshToken: string | null
   keepLogin: boolean
+  // [Auth] - 描述: access revalidation 进行中标志（AdminRoute 等守卫据此显示 loading，避免提前判定 false）
+  accessLoading: boolean
   // 登录入口：写入 token + storage（根据 keepLogin 选位置），设 isAuthenticated=true
   // user 允许 null：登录流程通常先 login(token, null, refresh, keepLogin) 写 token
   // 让拦截器可用，再 getMe() 拿 user，最后 setUser(user) 补全
@@ -122,6 +124,7 @@ export const useAuthStore = create<AuthState>()(
       token: null,
       refreshToken: null,
       keepLogin: true,
+      accessLoading: false,
       login: (token, user, refreshToken, keepLogin) => {
         _keepLogin = keepLogin
         writeTokenPair(token, refreshToken)
@@ -151,6 +154,7 @@ export const useAuthStore = create<AuthState>()(
         if (!isAuthenticated || !user) return
         // [capture-mode] 截图模式跳过：capture token 是临时 admin token，无 refresh，不参与订阅校验
         if (new URLSearchParams(window.location.search).get('capture') === 'feishu') return
+        set({ accessLoading: true })
         try {
           const { data } = await apiClient.get<AccessContextResponse>('/me/access')
           // [Auth] - 描述: 用最新 AccessContext 更新 AuthUser 权限字段（防止 persist 的 subscription_active 过期）
@@ -165,7 +169,7 @@ export const useAuthStore = create<AuthState>()(
             features: data.features,
             limits: data.limits,
           }
-          set({ user: updated })
+          set({ user: updated, accessLoading: false })
           // [Auth] - 描述: 后端返回 subscription_active=false 且非 admin → 跳转续期页（canonical /subscription-expired）
           // 场景：persist 的 subscription_active=true 已过期，刷新页面后通过 /me/access 发现已过期
           if (!data.subscription_active && !data.is_admin) {
@@ -176,6 +180,7 @@ export const useAuthStore = create<AuthState>()(
             }
           }
         } catch {
+          set({ accessLoading: false })
           // /me/access 失败（401 等）：不强制 logout，由 client.ts 拦截器统一处理（refresh 或跳转登录页）
         }
       },
@@ -183,7 +188,7 @@ export const useAuthStore = create<AuthState>()(
     {
       name: 'auth-store',
       storage: createJSONStorage(() => dynamicStorage),
-      // 持久化登录态、用户、token、refreshToken、keepLogin（不持久化方法）
+      // 持久化登录态、用户、token、refreshToken、keepLogin（不持久化方法和 accessLoading）
       partialize: (state) => ({
         isAuthenticated: state.isAuthenticated,
         user: state.user,

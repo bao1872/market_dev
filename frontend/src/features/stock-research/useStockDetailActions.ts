@@ -1,26 +1,65 @@
 // [useStockDetailActions] - 描述: StockDetailPage 专属 actions hook
 // 负责自选列表查询、加入/移出自选、上下切换、memo 读取/保存/删除。
 // 这些操作是详情页专属，不得进入 /market 的 useStockResearchData 核心 hook。
+//
+// CHANGE-20260713-009: 来源列表复用 published DSA results 链（usePublishedRuns + useStrategyRunResults），
+// 禁止继续使用 useMarketStocks。MarketWorkspacePage 和本 hook 共用 decodeMarketListContext + buildStrategyResultQueryParams。
+//
+// CHANGE-20260714-001: 无 returnTo 的自选 fallback 改用 useWatchlistMonitorStatus 单次聚合请求
+// （替代旧 useWatchlist + useBatchInstruments 两段查询，避免逐行 quote 和 N+1）。
+// 每行附带 changePct：DSA 来源读 payload.change_pct，自选来源读 metrics.change_pct。
 import { useState, useMemo, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  useWatchlist,
-  useBatchInstruments,
+  useWatchlistMonitorStatus,
   useAddToWatchlist,
   useRemoveFromWatchlist,
   useStockMemo,
   useUpsertStockMemo,
   useDeleteStockMemo,
+  usePublishedRuns,
+  useStrategyRunResults,
 } from '@/hooks/useApi'
+import {
+  buildStrategyResultQueryParams,
+  type MarketListContext,
+} from '@/features/market-workspace/marketWorkspaceUrlState'
+import {
+  adaptStrategyResultToTrendRow,
+  getStockDisplay,
+  pickPayload,
+  toNum,
+  CHANGE_PCT_KEYS,
+} from '@/features/trend-selection'
 import { useToast } from '@/store/toast'
 import type { ResearchSource } from './stockResearchTypes'
+import type { StrategyResultQueryParams } from '@/api/endpoints'
 
 export interface StockDetailActionsParams {
   instrumentId: string | undefined
   symbol: string | undefined
   source: ResearchSource
   strategy: string
+  // CHANGE-20260715-007: marketContext 和 sourceContextInvalid 由 resolveDetailSourceContext 解析后传入
+  // useStockDetailActions 不再自行推导，只消费结果
+  marketContext: MarketListContext | null
+  sourceContextInvalid: boolean
+  // returnTo URL（来自详情页 URL 参数），用于上一只/下一只导航保留来源上下文
+  returnTo?: string | null
+  // CHANGE-20260715-007: 当前 timeframe，用于上一只/下一只导航保留周期
+  timeframe?: string | null
 }
+
+// 来源股票列表项（左栏统一渲染结构）
+// CHANGE-20260714-001: 新增 changePct 字段（最近交易日涨跌幅，百分比数值，可空）
+export interface SourceStockItem {
+  symbol: string
+  name: string
+  changePct: number | null
+}
+
+// 来源列表类型（决定左栏标题与点击导航行为）
+export type SourceListKind = 'market' | 'watchlist'
 
 export interface StockDetailActions {
   // 自选状态
@@ -42,31 +81,72 @@ export interface StockDetailActions {
   upsertMemo: ReturnType<typeof useUpsertStockMemo>
   deleteMemo: ReturnType<typeof useDeleteStockMemo>
   hasMemo: boolean
+  // 来源股票列表（用于详情页左栏显示）
+  // 优先 returnTo 上下文恢复的市场搜索结果，回退到自选列表
+  sourceStocks: SourceStockItem[]
+  sourceListKind: SourceListKind
+  // CHANGE-20260715-004: 来源列表加载状态（DSA results 加载中或 published runs 加载中）
+  // 用于 StockDetailPage 渲染 loading 占位，避免空白后突然出现列表
+  sourceListLoading: boolean
+  // CHANGE-20260715-005: 来源列表错误状态（published runs 或 DSA results 查询失败）
+  sourceListError: boolean
+  // CHANGE-20260715-005: 来源列表空状态（非 loading 非 error 但 sourceStocks 为空）
+  sourceListEmpty: boolean
+  // CHANGE-20260715-005: 来源上下文失效（source=selection 但 returnTo 解析失败或非 /market 前缀）
+  sourceContextInvalid: boolean
+  // 兼容旧接口（= sourceStocks，仅当 sourceListKind==='watchlist' 时有值）
+  watchlistStocks: SourceStockItem[]
 }
 
 export function useStockDetailActions({
   instrumentId,
+  symbol,
   source,
   strategy,
+  marketContext,
+  sourceContextInvalid,
+  returnTo,
+  timeframe,
 }: StockDetailActionsParams): StockDetailActions {
   const navigate = useNavigate()
   const showToast = useToast((s) => s.show)
 
-  // 自选列表查询（用于判断当前股票是否在自选 + 上下切换）
-  const watchlistQuery = useWatchlist()
-  const watchlistInstrumentIds = useMemo(
-    () => watchlistQuery.data?.items.map((item) => item.instrument_id) ?? [],
-    [watchlistQuery.data],
+  // CHANGE-20260715-007: marketContext 和 sourceContextInvalid 由 resolveDetailSourceContext 解析后传入
+  // useStockDetailActions 只消费结果，不再自行推导
+  const hasMarketContext = source === 'selection' && marketContext !== null
+
+  // DSA published run（与 MarketWorkspacePage 同一数据链）
+  // scope=market 和 scope=watchlist 都复用 dsa_selector published run
+  const publishedRunsQuery = usePublishedRuns('dsa_selector', { limit: 1 })
+  const activeRunId = publishedRunsQuery.data?.items?.[0]?.id
+
+  // 来源列表查询参数（与 MarketWorkspacePage 共用 buildStrategyResultQueryParams）
+  const sourceListParams: StrategyResultQueryParams | undefined = useMemo(() => {
+    if (!hasMarketContext) return undefined
+    return buildStrategyResultQueryParams(marketContext) as StrategyResultQueryParams
+  }, [hasMarketContext, marketContext])
+
+  // 来源列表 DSA results 查询（仅当 hasMarketContext 且有 activeRunId 时启用）
+  const sourceResultsQuery = useStrategyRunResults(
+    hasMarketContext ? activeRunId : undefined,
+    sourceListParams,
   )
-  const batchInstrumentsQuery = useBatchInstruments(watchlistInstrumentIds)
-  const instrumentSymbolMap = useMemo(() => {
-    const map = new Map<string, string>()
-    if (!batchInstrumentsQuery.data?.items) return map
-    for (const inst of batchInstrumentsQuery.data.items) {
-      map.set(inst.id, inst.symbol)
-    }
-    return map
-  }, [batchInstrumentsQuery.data])
+
+  // 来源列表行数据（StrategyResult → TrendSelectionRow → SourceStockItem）
+  // CHANGE-20260714-001: DSA 来源使用 latestChangePct（bars_daily 最新两根日线，与 payload 分离）
+  const marketStocks = useMemo(() => {
+    if (!hasMarketContext || !sourceResultsQuery.data?.items) return []
+    return sourceResultsQuery.data.items.map((r) => {
+      const row = adaptStrategyResultToTrendRow(r)
+      const display = getStockDisplay(row)
+      return { symbol: display.symbol, name: display.name, changePct: row.latestChangePct }
+    })
+  }, [hasMarketContext, sourceResultsQuery.data])
+
+  // CHANGE-20260714-001: 自选 fallback 改用 useWatchlistMonitorStatus 单次聚合请求
+  // 替代旧 useWatchlist + useBatchInstruments 两段查询，避免逐行 quote 和 N+1
+  // 同时复用聚合结果判断 inWatchlist（monitor-status 仅返回 active 自选，故命中即 active）
+  const monitorStatusQuery = useWatchlistMonitorStatus()
 
   // 自选变更操作
   const addWatchlist = useAddToWatchlist()
@@ -91,13 +171,13 @@ export function useStockDetailActions({
     }
   }, [stockMemoQuery.data])
 
-  // 判断当前股票是否已在自选（active=true）
+  // 判断当前股票是否已在自选（monitor-status 仅返回 active 自选，命中即 active）
   const inWatchlist = useMemo(() => {
-    if (!instrumentId || !watchlistQuery.data) return false
-    return watchlistQuery.data.items.some(
-      (item) => item.instrument_id === instrumentId && item.active,
+    if (!instrumentId || !monitorStatusQuery.data) return false
+    return monitorStatusQuery.data.items.some(
+      (item) => item.instrument_id === instrumentId,
     )
-  }, [instrumentId, watchlistQuery.data])
+  }, [instrumentId, monitorStatusQuery.data])
 
   // 操作：加入/移出自选
   const handleToggleWatchlist = useCallback(() => {
@@ -114,24 +194,62 @@ export function useStockDetailActions({
     }
   }, [instrumentId, inWatchlist, removeWatchlist, addWatchlist, source, showToast])
 
-  // 在自选列表中上下切换股票
-  const watchlistItems = useMemo(
-    () => watchlistQuery.data?.items ?? [],
-    [watchlistQuery.data],
+  // 来源股票列表（active 自选 + changePct，单次聚合请求）
+  // CHANGE-20260714-001: 从 monitor-status items 提取 symbol/name/changePct
+  // changePct 来源：item.metrics.change_pct（来自 StockFeatureSnapshot.summary_payload）
+  const watchlistStocks = useMemo(() => {
+    if (!monitorStatusQuery.data?.items) return []
+    return monitorStatusQuery.data.items.map((item) => {
+      const metrics = (item.metrics ?? {}) as Record<string, unknown>
+      const changePct = toNum(pickPayload(metrics, CHANGE_PCT_KEYS))
+      return {
+        symbol: item.symbol,
+        name: item.name,
+        changePct,
+      }
+    })
+  }, [monitorStatusQuery.data])
+
+  // 统一来源列表：尊重显式 source 参数
+  // CHANGE-20260713-009: scope=market → sourceListKind=market；scope=watchlist → sourceListKind=watchlist
+  // CHANGE-20260715-005: source=selection → sourceListKind=market（即使 returnTo 无效也不回退 watchlist）
+  //   source=watchlist → sourceListKind=watchlist
+  const sourceListKind: SourceListKind = source === 'selection' ? 'market' : 'watchlist'
+  const sourceStocks = sourceListKind === 'market' ? marketStocks : watchlistStocks
+  // CHANGE-20260715-005: 来源列表加载状态（不再用 !activeRunId 作为永久 loading）
+  // - sourceListKind=market: publishedRunsQuery.isLoading || sourceResultsQuery.isLoading
+  // - sourceListKind=watchlist: monitorStatusQuery.isLoading
+  const sourceListLoading = sourceListKind === 'market'
+    ? (hasMarketContext && (publishedRunsQuery.isLoading || sourceResultsQuery.isLoading))
+    : monitorStatusQuery.isLoading
+  // CHANGE-20260715-005: 来源列表错误状态
+  const sourceListError = sourceListKind === 'market'
+    ? (hasMarketContext && (!!publishedRunsQuery.error || !!sourceResultsQuery.error))
+    : !!monitorStatusQuery.error
+  // CHANGE-20260715-005: 来源列表空状态（非 loading 非 error 但 sourceStocks 为空，或无 published run）
+  const sourceListEmpty = !sourceListLoading && !sourceListError && (
+    sourceListKind === 'market'
+      ? (hasMarketContext && !activeRunId && !publishedRunsQuery.isLoading) || sourceStocks.length === 0
+      : sourceStocks.length === 0
   )
-  const currentIndex = instrumentId
-    ? watchlistItems.findIndex((item) => item.instrument_id === instrumentId)
+
+  // C7: 上一只/下一只基于 sourceStocks（而非 watchlistItems）
+  // 在来源列表中按 symbol 查找当前位置，支持市场搜索结果和自选列表两种来源
+  const currentIndex = symbol
+    ? sourceStocks.findIndex((s) => s.symbol === symbol)
     : -1
-  const canNavigate = watchlistItems.length >= 2 && currentIndex >= 0
+  const canNavigate = sourceStocks.length >= 2 && currentIndex >= 0
 
   const navigateToStock = useCallback((direction: number) => {
     if (!canNavigate) return
-    const nextIndex = (currentIndex + direction + watchlistItems.length) % watchlistItems.length
-    const target = watchlistItems[nextIndex]
-    const targetSymbol = instrumentSymbolMap.get(target.instrument_id)
-    if (!targetSymbol) return
-    navigate(`/stock/${targetSymbol}?source=watchlist&strategy=${strategy}`)
-  }, [canNavigate, currentIndex, watchlistItems, instrumentSymbolMap, navigate, strategy])
+    const nextIndex = (currentIndex + direction + sourceStocks.length) % sourceStocks.length
+    const target = sourceStocks[nextIndex]
+    if (!target?.symbol) return
+    // 保留 returnTo 上下文 + source + strategy + timeframe，使切换后仍可返回来源列表且保持周期
+    const returnToParam = returnTo ? `&returnTo=${encodeURIComponent(returnTo)}` : ''
+    const timeframeParam = timeframe ? `&timeframe=${timeframe}` : ''
+    navigate(`/stock/${target.symbol}?source=${source}&strategy=${strategy}${returnToParam}${timeframeParam}`)
+  }, [canNavigate, currentIndex, sourceStocks, navigate, strategy, source, returnTo, timeframe])
 
   return {
     inWatchlist,
@@ -150,5 +268,12 @@ export function useStockDetailActions({
     upsertMemo,
     deleteMemo,
     hasMemo: !!stockMemoQuery.data,
+    sourceStocks,
+    sourceListKind,
+    sourceListLoading,
+    sourceListError,
+    sourceListEmpty,
+    sourceContextInvalid,
+    watchlistStocks,
   }
 }

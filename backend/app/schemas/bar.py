@@ -35,6 +35,15 @@ class QuoteResponse(BaseModel):
     freshness_seconds: float = Field(..., description="数据新鲜度（秒）")
     degraded: bool = Field(..., description="是否降级")
     degraded_reason: str | None = Field(None, description="降级原因")
+    amount: float | None = Field(None, description="成交额")
+    # CHANGE-20260713-010: 总市值/流通市值（数据源不可用时返回 null）
+    total_market_cap: float | None = Field(None, description="总市值（元）")
+    float_market_cap: float | None = Field(None, description="流通市值（元）")
+    market_cap_as_of: date | None = Field(None, description="市值数据日期")
+    market_cap_source: str | None = Field(None, description="市值数据来源")
+    market_cap_degraded_reason: str | None = Field(
+        None, description="市值降级原因（如 market_cap_data_unavailable）"
+    )
 
 
 class BarResponse(BaseModel):

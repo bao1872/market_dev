@@ -239,15 +239,20 @@ async def _query_minute_bars(
     instrument_id: uuid.UUID,
     start_time: datetime,
     end_time: datetime,
+    limit: int | None = None,
 ) -> pd.DataFrame:
     """从 DB 查询分钟线行情。
+
+    Args:
+        limit: 若指定，返回 end_time 之前最近 N 根（DESC + LIMIT + 反转），
+               避免加载全量再截取。
 
     Returns:
         DataFrame: index=DatetimeIndex(trade_time), columns=open/high/low/close/volume/amount/adj_factor
         无数据时返回空 DataFrame
     """
     try:
-        result = await session.execute(
+        stmt = (
             select(
                 BarMinute.trade_time,
                 BarMinute.open,
@@ -261,8 +266,12 @@ async def _query_minute_bars(
             .where(BarMinute.instrument_id == instrument_id)
             .where(BarMinute.trade_time >= start_time)
             .where(BarMinute.trade_time <= end_time)
-            .order_by(BarMinute.trade_time)
         )
+        if limit is not None:
+            stmt = stmt.order_by(BarMinute.trade_time.desc()).limit(limit)
+        else:
+            stmt = stmt.order_by(BarMinute.trade_time)
+        result = await session.execute(stmt)
         rows = result.all()
     except Exception as exc:
         logger.warning("查询 bars_minute 失败 instrument_id=%s: %s", instrument_id, exc)
@@ -270,6 +279,10 @@ async def _query_minute_bars(
 
     if not rows:
         return pd.DataFrame()
+
+    # limit 模式下 DESC 查询，反转为升序
+    if limit is not None:
+        rows = rows[::-1]
 
     df = pd.DataFrame(rows, columns=["trade_time"] + _BAR_COLUMNS)
     # DB 读取的 timestamptz 返回 UTC 时区感知 datetime，需转为 naive 上海时间与 pytdx 一致
@@ -1209,15 +1222,20 @@ async def _query_15min_bars(
     instrument_id: uuid.UUID,
     start_time: datetime,
     end_time: datetime,
+    limit: int | None = None,
 ) -> pd.DataFrame:
     """从 DB 查询 15 分钟线行情。
+
+    Args:
+        limit: 若指定，返回 end_time 之前最近 N 根（DESC + LIMIT + 反转），
+               避免加载全量再截取。
 
     Returns:
         DataFrame: index=DatetimeIndex(trade_time), columns=open/high/low/close/volume/amount/adj_factor
         无数据时返回空 DataFrame
     """
     try:
-        result = await session.execute(
+        stmt = (
             select(
                 Bar15Min.trade_time,
                 Bar15Min.open,
@@ -1231,8 +1249,12 @@ async def _query_15min_bars(
             .where(Bar15Min.instrument_id == instrument_id)
             .where(Bar15Min.trade_time >= start_time)
             .where(Bar15Min.trade_time <= end_time)
-            .order_by(Bar15Min.trade_time)
         )
+        if limit is not None:
+            stmt = stmt.order_by(Bar15Min.trade_time.desc()).limit(limit)
+        else:
+            stmt = stmt.order_by(Bar15Min.trade_time)
+        result = await session.execute(stmt)
         rows = result.all()
     except Exception as exc:
         logger.warning("查询 bars_15min 失败 instrument_id=%s: %s", instrument_id, exc)
@@ -1240,6 +1262,10 @@ async def _query_15min_bars(
 
     if not rows:
         return pd.DataFrame()
+
+    # limit 模式下 DESC 查询，反转为升序
+    if limit is not None:
+        rows = rows[::-1]
 
     df = pd.DataFrame(rows, columns=["trade_time"] + _BAR_COLUMNS)
     # DB 读取的 timestamptz 返回 UTC 时区感知 datetime，需转为 naive 上海时间与 pytdx 一致

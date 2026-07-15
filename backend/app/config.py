@@ -341,6 +341,15 @@ class Settings(BaseSettings):
         description="Redis 缓存 TTL（秒）",
     )
 
+    # 板块同步开关（C10 降级保护）
+    # 生产默认 false：当前物理机 IP 被 THS 反爬拦截（成分股 403），
+    # akshare 无 THS 成分接口。未配置时不得发起 THS 请求。
+    # ALIGN-041 OPEN：至少一个同花顺语义 provider 真实返回完整目录+成分后方可开启。
+    board_sync_enabled: bool = Field(
+        default_factory=lambda: _load_py_config().get("BOARD_SYNC_ENABLED", False),
+        description="板块同步开关：false 时 scheduled_board_sync 跳过执行",
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

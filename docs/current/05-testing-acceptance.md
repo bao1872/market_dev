@@ -43,6 +43,18 @@
 
 ## 3.1 本轮新增回归
 
+- **[PR #74 阶段二 StockContext reasonCode]** `test_stock_state_and_events.py` 新增 6 项 reasonCode API 测试 + 1 项无写副作用测试：
+  - `test_p02_context_no_published_full_run`：无 succeeded+published+full run 时 reasonCode=`no_published_full_run`，state=null
+  - `test_p02_context_snapshot_missing`：run 有但 snapshot 缺失时 reasonCode=`snapshot_missing`，state=null
+  - `test_p02_context_exact_source_run_id`：精确匹配 source_run_id 时 state 非 null，reasonCode=null
+  - `test_p02_context_snapshot_run_not_linked`：legacy snapshot source_run_id=NULL 时 reasonCode=`snapshot_run_not_linked`（内部函数层面），API 层面 state 非 null（legacy 匹配成功）
+  - `test_p02_context_legacy_snapshot_ambiguous`：legacy snapshot 多 run 候选时 reasonCode=`legacy_snapshot_ambiguous`
+  - `test_p02_context_normal_returns_state`：正常场景 state 非 null，reasonCode=null
+  - `test_p02_context_get_no_write_side_effect`：连续 3 次 GET context 后 snapshot/run 行数不变（GET 只读）
+- **[PR #74 阶段二 快照归属修复工具]** `test_repair_snapshot_run_ownership.py` 新增 2 项测试：
+  - `test_repair_dry_run_does_not_write`：dry-run 只查询不写库，source_run_id 仍为 NULL
+  - `test_repair_apply_writes_and_idempotent`：第一次 apply 写入 1 行，第二次 apply 0 行（幂等，WHERE source_run_id IS NULL）
+- **[PR #74 阶段二 EventStatePanel reasonCode 文案]** `frontend/src/features/research-context/__tests__/reasonCodeMessages.test.ts` 新增 8 个子测试覆盖 `getReasonCodeMessage` 纯函数：no_published_full_run / snapshot_missing 含/不含 runTradeDate / snapshot_run_not_linked 含"待修复归属" / legacy_snapshot_ambiguous / null / 未知 code / 所有已知 code 非默认文案
 - `BarsCoverageService` 统一 A 股口径，排除指数/ETF，默认使用 `shanghai_business_date`，返回 `coverage`（展示）与 `coverage_raw`（阈值判断）；
 - `/admin/after-close-runs/dsa-only`、`bars_scheduler`、系统概览 `WAITING_DSA` 判定等覆盖率门禁使用 `coverage_raw` 原始值；
 - `/admin/after-close-runs/dsa-only` 当日无数据时 fallback 到最新交易日，覆盖率不足返回 409；
@@ -64,6 +76,18 @@
   - `test_pytdx_adapter_minute_aware.py` 覆盖 `pytdx_adapter.get_minute_bars` 接收 aware `Asia/Shanghai` start/end 时，能正确与 pytdx 返回的 naive `datetime` 列比较过滤，不再抛出 `Invalid comparison between dtype=datetime64[us] and Timestamp`；
   - `test_monitor_batch_live_minute.py::test_monitor_cycle_1m_uses_include_realtime` 覆盖 `monitor_batch_service` 调用 MDAS 1m 时必须带 `include_realtime=True`；
   - `test_quote_timezone.py` 覆盖 `/quote` 返回 `update_time` 带 `+08:00`、UTC 字符串被修正为 `+08:00`。
+- **[CHANGE-20260714-001 latest_change_pct]** `test_latest_change_pct.py` 新增 9 项测试覆盖 `/strategy-runs/{run_id}/results` 响应中 `latest_change_pct`/`latest_change_trade_date` 字段（从 `bars_daily` 表用 window function 计算最新两根完成交易日涨跌幅）：
+  1. `test_latest_change_pct_normal_two_bars`：正常两根有效日线（T-1 close=10、T close=11）→ `latest_change_pct=10.0`、`latest_change_trade_date=T`
+  2. `test_latest_change_pct_after_close_incomplete_bar_excluded`：盘后 T 日 bar 未完成（`is_partial=true` 或未入库）→ 使用 T-1/T-2 两根完成日线计算，`latest_change_trade_date=T-1`
+  3. `test_latest_change_pct_single_bar_returns_null`：只有一根日线（新股）→ `latest_change_pct=null`、`latest_change_trade_date=null`
+  4. `test_latest_change_pct_null_close_returns_null`：最新 bar `close=null`（停牌/数据缺失）→ `latest_change_pct=null`
+  5. `test_latest_change_pct_prev_close_zero_returns_null`：前一日 `close=0`（异常数据）→ `latest_change_pct=null`（避免除零）
+  6. `test_latest_change_pct_color_logic_red_up_green_down`：A 股红涨绿跌——`latest_change_pct > 0` 时前端 `changePctColorClass` 返回红、`< 0` 返回绿、`null` 返回中性（前端 contract test 覆盖）
+  7. `test_latest_change_pct_sort_desc`：`sort_by=change_pct&sort_desc=true` → 结果按 `latest_change_pct` 降序排列（null 排末尾），走 `CHANGE_PCT_METRIC_KEY` 特殊 sort 路径
+  8. `test_latest_change_pct_filter_gt`：`metric_filters=[{key: change_pct, op: gt, value: 3}]` → 只返回 `latest_change_pct > 3` 的行，走 `CHANGE_PCT_METRIC_KEY` 特殊 filter 路径
+  9. `test_latest_change_pct_no_n_plus_1`：一次请求返回 N 只股票的 `latest_change_pct`，SQL 查询数固定（window function 子查询批量计算，不逐行查询 `bars_daily`）；`len(items) <= filtered_total`
+  - 运行命令：`APP_ENV=test TEST_DATABASE_URL=postgresql+psycopg://... pytest backend/tests/test_latest_change_pct.py -q`
+  - 回归要求：修改 `backend/app/repositories/strategy_result_repository.py`（`_build_latest_change_pct_subquery`/`_fetch_latest_change_pct_map`/`CHANGE_PCT_METRIC_KEY`）、`backend/app/api/strategy_runs.py`、`bars_daily` 表结构或索引时必须跑此测试。
 
 ### 壳层与导航拆分
 
@@ -120,7 +144,7 @@
   8. `/stock/:symbol` 原详情页可加载（body 有内容）。
 - E2E 结果（2026-07-11）：22 项断言全部 PASS，覆盖 8 个场景；mock 数据形状对齐后端 DTO（`StructuralFactorResponse`/`TemporalFeaturesResponse`/`IndicatorResponse`/`BarListResponse`/`WatchlistMonitorStatusItem`），`navigateAndWait` 采用 800ms 延迟 + 连续 2 次条件为真防 stale DOM。
 - 运行命令：`node --experimental-strip-types --test src/features/market-workspace/__tests__/marketWorkspaceUrlState.test.ts src/navigation/__tests__/appNavigation.test.ts src/navigation/__tests__/routeStructure.test.ts src/pages/__tests__/detailNavigation.test.ts`
-- 回归要求：修改 `MarketWorkspacePage`、`marketWorkspaceUrlState.ts`、`StockResearchWorkspace.tsx`、`useStockResearchData.ts`、`MarketInstrumentPane.tsx`、`appNavigation.ts`、`AccountMenu.tsx`、`detailNavigation.ts` 或路由结构时必须跑此测试。
+- 回归要求：修改 `MarketWorkspacePage`、`marketWorkspaceUrlState.ts`、`StockResearchWorkspace.tsx`、`useStockResearchData.ts`、`MarketToolbar.tsx`、`MarketStockTable.tsx`、`appNavigation.ts`、`AccountMenu.tsx`、`detailNavigation.ts` 或路由结构时必须跑此测试。
 
 ### 共享研究核心
 
@@ -296,9 +320,10 @@ node --experimental-strip-types --test src/components/__tests__/dsaSourceAlignme
 任何修改 `backend/app/services/indicator_cache.py`（`ALGORITHM_VERSION`）、`backend/app/services/indicator_service.py::_adapt_watchlist_bb`、`frontend/src/utils/dsaOverlayPolicy.ts`、`frontend/src/components/StrategyChart.tsx`（DSA toggle / BB overlay 对齐 / debug 工具）必须跑 indicator overlay alignment 回归测试。
 
 后端 cache schema 版本回归：
-- `indicator_cache.ALGORITHM_VERSION == "v5"`（PR #32 bump：DSA 全周期 + 1w/1mo BB 改变计算路径）；
-- 旧 v4 cache key 与新 `build_cache_key` 生成的 key 不相等（旧缓存自然失效，避免旧 v4 缓存返回 1d-only DSA + 1w/1mo 无 BB）；
-- 修改 indicator 计算逻辑、`source_bar_times` 格式、BB/SQZMOM/MACD 计算路径、DSA 全周期支持、1w/1mo BB 计算必须 bump `ALGORITHM_VERSION`。
+- `indicator_cache.ALGORITHM_VERSION == "v7"`（CHANGE-20260715-002 bump：SMC 从 SMA 基线升级为 Pine parity 核心 `smc_pine_core.py`，旧 v6 缓存强制失效；CHANGE-20260715-001：新增 SMC 指标并按需启用，缓存 key 追加 `:smc` 后缀隔离）；
+- 旧 v5/v6 cache key 与新 `build_cache_key` 生成的 key 不相等（旧缓存自然失效，避免旧缓存返回无 SMC 数据或 SMA 基线 SMC 结果被误用）；
+- `include_smc=true` 时 cache key 追加 `:smc` 后缀，与默认路径（`include_smc=false`）完全隔离，互不污染；
+- 修改 indicator 计算逻辑、`source_bar_times` 格式、BB/SQZMOM/MACD 计算路径、DSA 全周期支持、1w/1mo BB 计算、SMC 计算路径必须 bump `ALGORITHM_VERSION`。
 
 后端 DSA 全周期计算回归：
 - `MarketDataContext.bars_daily` 在所有周期（1d/15m/1h/1w/1mo）都使用 `macd_bars`（当前 timeframe bars），DSA 不再仅由日线驱动；
@@ -362,7 +387,7 @@ node --experimental-strip-types --test src/components/__tests__/dsaSourceAlignme
 
 任何修改 `backend/app/services/feature_snapshot_service.py`、`backend/app/api/watchlist.py::get_watchlist_monitor_status`、`backend/app/services/after_close_orchestrator.py`（状态机或 `feature_snapshot` 步骤）、`backend/scripts/feature_snapshot_backfill.py`、`backend/app/models/stock_feature_snapshot.py` 必须跑 Feature Snapshot 持久化回归测试。
 
-后端 service 回归（`tests/test_feature_snapshot_service.py`，13 个用例）：
+后端 service 回归（`tests/test_feature_snapshot_service.py`，18 个用例）：
 - `build_summary_payload` 必须返回所有前端列表必需字段（`poc_price` / `nearest_node_above` / `nearest_node_below` / `distance_to_node_*_atr` / `node_interval_position_0_1` / `cost_position_zone` / `value_area_zone` / `daily/m15_developing_swing_*` / `m15_position_relative_to_daily` / `_source='feature_snapshot'` / `as_of` / `source_bar_time`）；
 - `build_summary_payload` 缺字段时填 `None`，不抛异常；
 - `_truncate_bars_to_trade_date` 必须按 `index.date <= trade_date` 截断，禁止未来数据；`None` 输入返回 `None`；15m bars 截断到当日；
@@ -371,9 +396,10 @@ node --experimental-strip-types --test src/components/__tests__/dsaSourceAlignme
 - `upsert_snapshot` 必须幂等：同 `(instrument_id, trade_date, primary_timeframe, secondary_timeframe, adj, schema_version)` 重复 upsert 只生成一行，`structural_payload`/`temporal_payload`/`summary_payload` 被第二次覆盖；
 - `compute_for_trade_date` 单股失败不阻断其他股票，失败比例超过 `failure_threshold`（默认 0.3）抛 `RuntimeError`；
 - **[half-baked rollback] `compute_for_trade_date` 不内部 commit**：超阈值抛 `RuntimeError` 后 caller rollback，DB 中不应残留该 trade_date 的部分 snapshot 行。
+- **[P0-4 published snapshot 保护]** `create_snapshot_run(scope='full', allow_republish=False)` 在已存在 canonical succeeded+published+full run 时抛 `PublishedSnapshotRunExistsError`；`allow_republish=True` 绕过检查；`scope='sample'` 不受限；`upsert_snapshot(allow_republish=False)` WHERE 子句保护已归属 published run 的 snapshot 不被覆盖；`allow_republish=True` 可覆盖；`after_close_orchestrator` 捕获 `PublishedSnapshotRunExistsError` 后跳过计算复用已有 run。
 
 后端 backfill 脚本回归（`tests/test_feature_snapshot_backfill.py`，42 个用例，含 multiprocessing + [Blocker Fix] 事务/统计修正）：
-- `parse_args` 默认值：`end='latest'`、`batch_size=20`、`failure_threshold=0.3`、`resume=False`、`dry_run=False`、`symbols=None`、`limit_instruments=None`、`workers=1`；自定义值正确解析；缺失 `--start` 报 `SystemExit`；
+- `parse_args` 默认值：`end='latest'`、`batch_size=20`、`failure_threshold=0.3`、`resume=False`、`dry_run=False`、`symbols=None`、`limit_instruments=None`、`workers=1`、`allow_republish=False`；自定义值正确解析；缺失 `--start` 报 `SystemExit`；
 - `get_trade_dates_from_bars` 返回升序 trade_dates；空表返回空列表；
 - `get_latest_bar_date` 返回 `bars_daily.trade_date` 最大值；空表返回 `None`；
 - **`get_existing_instrument_ids`** 返回某日已存在 snapshot 的 instrument_id 集合，按完整唯一键 `(instrument_id, trade_date, primary_timeframe, secondary_timeframe, adj, schema_version)` 过滤；按 `schema_version` 严格过滤；
@@ -894,14 +920,74 @@ PATCH 空请求（1 个用例）：
 - `test_update_persists_across_sessions`：PATCH 更新 name/config/is_default 后，使用新 `AsyncSession` 确认字段已持久化；
 - `test_delete_persists_across_sessions`：DELETE preset 后，使用新 `AsyncSession` 确认记录不存在。
 
-### 3.10.2 前端 columns.test.ts 回归（6 个用例）
+### 3.10.2 前端 columns.test.ts 回归（13 个用例，CHANGE-20260713-005 扩展）
 
 - change_pct 列存在于 trend-selection columns；
 - title=`当日涨跌幅`、shortTitle=`涨跌幅`；
 - dataType=`percent`、sortable=true、filterable=true、width≈86；
 - render 使用 `fmtChange` + `changePctColorClass`（涨红跌绿）；
 - sortValue 读取 payload `change_pct`/`pct_change`/`change_percent`；
-- change_pct 列位于 stock 列之后。
+- change_pct 列位于 stock 列之后；
+- action 列 onDetail 按钮 onClick 调用 `e.stopPropagation()`；
+- action 列 onAddToWatchlist 按钮 onClick 调用 `e.stopPropagation()`；
+- 股票名称链接 onNavigate 调用 `e.stopPropagation()`（CHANGE-20260713-005）；
+- action 列 onToggleWatchlist 模式按钮 stopPropagation + 显示"加入自选/移除自选"（CHANGE-20260713-005）；
+- action 列 onToggleWatchlist 模式下 title 动态为"自选"（CHANGE-20260713-005）；
+- 股票名称链接使用 `<a>` + `e.preventDefault()`（CHANGE-20260713-005）；
+- renderStock 只显示名称/代码/市场，不渲染行内涨跌幅（CHANGE-20260713-005）。
+
+### 3.10.2a 前端 chartLabels.test.ts 回归（5 个用例，CHANGE-20260713-005 新增）
+
+- 节点价格标签：POC 峰 → "核心共识价"，普通峰 → "共识价"；
+- POC 中心线标签显示"核心共识价"（非裸"POC"）；
+- tooltip 中 POC → "核心共识价"，PEAK → "共识价"；
+- VP 数据缺失提示为"筹码共识价暂不可用"；
+- 内部字段名 `n.poc`/`profile.pocPrice`/`row.is_poc`/`is_poc` 保留（不改 DTO/算法）。
+
+### 3.10.2b 前端 chartDrag.test.ts 回归（7 个用例，CHANGE-20260713-005 新增）
+
+- 使用 Pointer Events（pointerdown/pointermove/pointerup/pointercancel）；
+- 使用 setPointerCapture / releasePointerCapture；
+- dragRef 保存 startClientX + startViewport + pointerId；
+- dragMovedRef 4px 阈值抑制 click；
+- cursor 为 grab/grabbing；
+- 不使用旧 mouse 事件（mousedown/mousemove/mouseup 作为事件监听器）；
+- pointermove 从 startViewport 计算总位移（不在 stale viewport 上累计）。
+
+### 3.10.2c 前端 marketToolbarSearch.test.ts 回归（8 个用例，CHANGE-20260713-005 新增）
+
+- MarketToolbar 接受受控 keyword/onKeywordChange props；
+- placeholder 为"搜索股票代码/名称/拼音首字母"；
+- Enter 提交（onKeyDown Enter 调用 onKeywordChange）；
+- blur 提交（onBlur 调用 onKeywordChange）；
+- 清空立即提交（inputValue 为空时立即调用 onKeywordChange('')）；
+- /market 通过 `searchable={false}` 隐藏 StrategyDataTable 内置搜索；
+- StrategyDataTable 接受 externalKeyword/onKeywordChange 受控模式；
+- 单一搜索状态真源（顶栏 keyword 与 StrategyDataTable URL keyword 一致）。
+
+### 3.10.2d 前端 messagesCounts.test.ts 回归（8 个用例，CHANGE-20260713-005 新增）
+
+- MessagesPage 使用 useUnreadCount 作为未读 SSOT；
+- "全部"计数使用后端 `messagesQuery.data?.total`（非 items.length）；
+- 页头显示"共 X 条 · 未读 Y 条"；
+- selection/price/system/process 不显示误导数字（仅 all/unread 显示计数）；
+- 单只股票消息跳转 `/stock/:symbol?event_id=...&returnTo=/messages`；
+- selection_composite 跳转 `/market`（非 `/screener`）；
+- AccountMenu unread>0 时消息链接为 `/messages?filter=unread`；
+- AccountMenu 消息项显示未读数（itemBadge）。
+
+### 3.10.2e 前端 indicatorManifest.test.ts 回归（15 个用例，CHANGE-20260713-005 扩展，CHANGE-20260715-001 新增 3 个 SMC 用例）
+
+- 原 10 个用例不变；
+- manifest 用户文案：sqzmom → "挤压动量"，node → "筹码共识价"；
+- 内部 ChartLayerKey 不变：sqzmom/node 仍为内部 id；
+- **SMC 图层断言（CHANGE-20260715-001 新增 3 用例）**：`smc` 图层存在于 `CHART_LAYER_MANIFEST`，name="智能资金"，kind="main"；`smc` 默认关闭（`default` 中 `smc: false`）；`ChartLayerVisibility` 类型含 8 键（含 `smc`）。
+
+### 3.10.2f 后端 test_strategy_results_keyword.py 回归（3 个用例，CHANGE-20260713-005 新增）
+
+- keyword 按股票代码 ILIKE 匹配（如 `600519` 匹配 `贵州茅台`），items 与 total 条件一致；
+- keyword 按中文名称 ILIKE 匹配（如 `茅台` 匹配 `贵州茅台`），items 与 total 条件一致；
+- keyword 按拼音首字母 ILIKE 匹配（如 `gzmt` 匹配 `贵州茅台`），items 与 total 条件一致。
 
 ### 3.10.3 前端 ScreenerPage.batch.test.ts 回归（6 个用例）
 
@@ -971,6 +1057,227 @@ node --experimental-strip-types --test \
 ```
 
 预期：50 passed（后端）+ 20 passed（前端 columns 6 + batch 6 + tablePresetMenu 4 + stickyHeader 4）、ruff 零错误、mypy 零错误、tsc 零错误。
+
+## 3.11 管理员入口 + 批准 Logo + 视觉 V1.0 + K线右侧留白 + 数量契约回归（blocking）
+
+任何修改 `frontend/src/components/AccountMenu.tsx`、`frontend/src/navigation/appNavigation.ts`、`frontend/src/components/AdminRoute.tsx`（或 `ProtectedLayout` 权限判断）、`frontend/src/components/BrandLogo.tsx`、`frontend/src/styles/variables.scss`、`frontend/src/styles/global.scss`、`frontend/src/components/StrategyChart.tsx`（右侧留白相关）、`backend/app/repositories/strategy_result_repository.py`（total 语义相关）、`backend/app/api/strategy_runs.py` 必须跑本节回归测试。
+
+### 3.11.1 前端 appNavigation.test.ts 回归（CHANGE-20260713-007 扩展）
+
+- `getAccountMenuItemsForVariant(false, 'user')` 不含"管理后台"入口（普通用户 DOM 不渲染）；
+- `getAccountMenuItemsForVariant(true, 'user')` 含"管理后台"链接到 `/admin`；
+- `getAccountMenuItemsForVariant(true, 'admin')` 含"返回行情"链接到 `/market`，不含"管理后台"（避免管理员在 AdminAppShell 内重复入口）；
+- `getAccountMenuItemsForVariant(false, 'admin')` 仍不含"管理后台"（is_admin=false 时即使 variant=admin 也不显示管理入口）。
+
+### 3.11.2 前端 brandLogo.test.ts 回归（CHANGE-20260713-007 新增）
+
+- `BrandLogo` 渲染 `<img>` 标签引用 `logo_symbol_128.png`（sidebar variant）或 `logo_horizontal_dark.png`（landing/footer variant）；
+- 不再渲染手绘 SVG（无 `<svg>` 元素或内联 path）；
+- 资产路径位于 `frontend/src/assets/brand/`；
+- ref 路径不作为运行时依赖（`import` 来自 `@/assets/brand/`）。
+
+### 3.11.3 前端 visualTokens.test.ts 回归（CHANGE-20260713-007 新增）
+
+- `variables.scss` 含 `$color-brand: #00F6C2` / `$color-brand-light: #39F5CF` / `$color-brand-dark: #00B28A`；
+- 背景三色 `$color-bg: #0A0F14` / `$color-bg-elevated: #111A23` / `$color-bg-overlay: #161F29`；
+- 文字三色 `$color-text-primary: #F2F6F8` / `$color-text-secondary: #98A1B3` / `$color-text-tertiary: #657281`；
+- 边框 `$color-border: #263440`；
+- 涨跌色 `$color-up: #FF4D4F` / `$color-down: #22C55E`；
+- info/warning `$color-info: #3882F6` / `$color-warning: #F59E0B`；
+- 品牌绿只用于 Logo、主按钮、选中、focus 和关键节点（源码契约：不替代涨跌色或所有信息蓝）。
+
+### 3.11.4 前端 chartRightPadding.test.ts 回归（CHANGE-20260713-008 新增）
+
+- `StrategyChart` 源码含 `RIGHT_PADDING_RATIO = 0.20` 常量（落在 0.18-0.22 区间）；
+- `effectivePlotW = plotW * (1 - RIGHT_PADDING_RATIO)` 计算逻辑存在；
+- `step = effectivePlotW / display.length` 用于交互坐标映射；
+- 十字线/滚轮锚点/Pointer 拖拽/双击复位/节点命中/事件命中统一使用 `step`（源码契约）；
+- 网格线和十字线水平线仍延伸到 `g.plotRight`（保持全宽，不收缩到 effectivePlotW）；
+- 时间轴标签使用 `effectivePlotW`。
+
+### 3.11.5 后端 test_strategy_results_industry_concept.py 回归（CHANGE-20260713-007 扩展）
+
+- provider unavailable 场景：`boards.available=false` 时 industry/concept 筛选返回空结果，`filtered_total=0`，`source_total` 仍为 run 原始总量；
+- nonexistent 板块场景：industry/concept 传入不存在的板块名称时返回空，`filtered_total=0`；
+- **数量契约四层语义**：`source_total`（published run 原始总量，不受业务筛选影响）≥ `universe_total`（all/watchlist 范围总量）≥ `filtered_total`（keyword+industry+concept+metric_filters 后总量）≥ `len(items)`（当前页）；默认无筛选时 `source_total == universe_total == filtered_total`；
+- 禁止 `source_total` 受 keyword/industry/concept/metric_filters 影响。
+
+回归命令：
+
+```bash
+cd /root/web_dev/backend
+APP_ENV=test TEST_DATABASE_URL=postgresql+asyncpg://bz:bz@localhost:5433/bz_stock_test \
+pytest tests/test_strategy_results_industry_concept.py -q
+
+cd /root/web_dev/frontend
+npx tsc --noEmit
+node --experimental-strip-types --test \
+  src/navigation/__tests__/appNavigation.test.ts \
+  src/components/__tests__/brandLogo.test.ts \
+  src/components/__tests__/visualTokens.test.ts \
+  src/components/__tests__/chartRightPadding.test.ts
+```
+
+## 3.12 CHANGE-010 回归（blocking，市值 + Excel 导出 + 小 K 线 + 股票名称筛选）
+
+```bash
+APP_ENV=test TEST_DATABASE_URL=postgresql+asyncpg://bz:bz@localhost:5433/bz_stock_test \
+  pytest backend/tests/test_excel_export_api.py backend/tests/test_excel_export_service.py -q
+
+node --experimental-strip-types --test \
+  src/features/market-workspace/__tests__/change010Contract.test.ts
+```
+
+覆盖规则：
+
+- **市值字段（CHANGE-20260713-010）**：后端 `QuoteResponse` 含 `total_market_cap`/`float_market_cap`/`market_cap_as_of`/`market_cap_source`/`market_cap_degraded_reason` 5 个字段；数据缺失时返回 `market_cap_degraded_reason="market_cap_data_unavailable"` 不伪造；前端 `QuoteResponse` 类型含 5 个可选字段，`PriceSummary` 接口含 `totalMarketCap`/`floatMarketCap`/`marketCapAsOf`；`StockQuoteStrip` 暴露 `formatMarketCap`（区分万/亿/万亿元，空值显示 `--`）+ `QuoteMetric` 子组件；tooltip 显示数据日期。
+- **Excel 导出**：`ExportRequest` schema 含 universe/keyword/industry/concept/metric_filters/sort_by/sort_desc/visible_columns；`excel_export_service` 含 `MAX_EXPORT_ROWS=10000`、`_sanitize_formula_injection`、`zipfile` 生成真实 .xlsx、`numFmt` 百分比格式、禁止 `openpyxl`/`xlsxwriter` import；`strategy_runs` API 含 `POST /strategy-runs/{run_id}/results/export` 端点、`X-Source-Total`/`X-Universe-Total`/`X-Filtered-Total` 响应头、文件名 `盘迹_DSA_YYYYMMDD_筛选结果.xlsx` + RFC 5987 编码、超 10000 行 422；前端 `ExportContext` 类型 + `MarketWorkspacePage.handleExport` 复用 `convertFiltersToMetricFilters`（与 `buildStrategyResultQueryParams` 同源）、`stock` 列 `payload_key=null` 不导出操作列；后端 API 集成测试 21 项覆盖权限（401 未登录/403 无订阅/403 过期/200 admin/200 active member）+ published run 校验（404 不存在/404 未发布）+ universe all/watchlist + keyword/industry/concept/metric_filters/sort 筛选 + 行数 = `filtered_total` + visible_columns 列顺序 + 非法 sort_by 422 + 公式注入防护 + 10000 上限 422 + MIME/Content-Disposition + 无 N+1 + 文件 zip 完整性/XML 解析/workbook 关系/单元格类型。
+- **股票名称筛选 alias**：`DataTableColumn.filterAlias?: 'keyword'` 字段；`StrategyDataTable` 含 `KeywordFilterPopover` 组件 + `isKeyword` flag + `effectiveKeyword`；`stock` 列设置 `filterAlias: 'keyword'`（与顶部搜索共用唯一真源）。
+- **小 K 线**：`useMiniKlineData` 定义 `BARS_COUNT` = `{1d: 80, 1w: 60, 1mo: 48}` + `refetchInterval: false`；`MiniKlineCard` 使用 `lightweight-charts createChart` + `CandlestickSeries` + 三按钮"日线/周线/月线" + 默认 `1d`；不引入 `addVolumeSeries`/`VolumeSeries`/指标/Node/事件依赖；`MarketRightPanel` 组合 `MiniKlineCard` + `EventStatePanel`。
+- **详情来源上下文不回归**：`MarketWorkspacePage.handleExport` 复用 `convertFiltersToMetricFilters`；`marketWorkspaceUrlState` 导出 `convertFiltersToMetricFilters` 并复用 `normalizeMetricValue`。
+
+`change010Contract.test.ts` 49 项源码契约测试覆盖五大主题（市值字段映射 + Excel 导出契约 + 股票名称视觉入口 + 小 K 线 + 详情来源上下文）。
+
+## 3.13 CHANGE-20260715-001 回归（SMC 指标 + MiniKline viewport P0 修复）
+
+```bash
+# SMC 后端算法 + 缓存 + 服务测试
+APP_ENV=test TEST_DATABASE_URL=postgresql+psycopg://bz:bz@localhost:5433/bz_stock_test \
+  pytest backend/tests/test_smc_indicator.py backend/tests/test_indicator_cache.py backend/tests/test_indicator_service.py -q
+
+# SMC + MiniKline viewport 前端契约测试
+node --experimental-strip-types --test \
+  src/features/stock-research/__tests__/indicatorManifest.test.ts \
+  src/features/market-workspace/__tests__/miniKlineViewport.test.ts
+```
+
+覆盖规则：
+
+- **SMC 后端算法（`test_smc_indicator.py`，34 用例）**：`compute_smc` 纯函数仅依赖 Python 标准库（无 numpy/pandas 依赖）；市场结构关键点位序列长度与输入 bar 对齐；边界用例（bar 不足、全平数据、单调序列）；FVG 完全排除（输出不含任何 FVG 字段）。
+- **SMC 缓存隔离（`test_indicator_cache.py` 新增 3 用例）**：`include_smc=true` 时 cache key 追加 `:smc` 后缀；`include_smc=false`（默认）cache key 不含 `:smc` 后缀；两路径互不污染（默认路径缓存不含 SMC 字段）。
+- **SMC 服务层（`test_indicator_service.py` 新增 3 用例）**：`compute_all_indicators(include_smc=False)` 默认不计算 SMC；`compute_all_indicators(include_smc=True)` 计算 SMC 且响应含 `data.smc`；`include_smc` 不影响 DSA/Node/BB/MACD/SQZMOM 计算结果。
+- **前端 manifest（`indicatorManifest.test.ts`，15 用例）**：见 §3.10.2e。
+- **MiniKline viewport（`miniKlineViewport.test.ts`，12 用例）**：纯函数 `computeMiniKlineViewport` 按周期 clamp——15m/60m 50-64、日线 48-58、周线 40-52、月线 30-40；右侧留白 3 根 bar；不调用 `fitContent`；bar 不足时 clamp 不越界；各周期 viewport `toIndex - fromIndex` 落在对应区间内。
+
+SMC 只进入 `/stock/:symbol` 个股详情指标链，不进入 `/market`、DSA、Node、Capture、盘中监控、选股；FVG 完全排除。
+
+## 3.14 CHANGE-20260715-002 回归（SMC Pine parity + MiniKline viewport 重写 + SMC renderer 对齐）
+
+```bash
+# SMC Pine 语义测试 + golden fixture skip + 已有测试更新
+APP_ENV=test TEST_DATABASE_URL=postgresql+psycopg://bz:bz@localhost:5433/bz_stock_test \
+  pytest backend/tests/test_smc_indicator.py backend/tests/test_indicator_cache.py backend/tests/test_indicator_service.py -q
+
+# MiniKline viewport 重写后的纯函数测试
+node --experimental-strip-types --test \
+  src/features/market-workspace/__tests__/miniKlineViewport.test.ts
+```
+
+覆盖规则：
+
+- **Pine 语义原语（`test_smc_indicator.py::TestPineSemantics` 8 用例）**：
+  - `pine_rma` Wilder 递推：SMA 播种 + `rma[i]=(rma[i-1]*(length-1)+src[i])/length`，前 `length-1` 个为 NaN
+  - `pine_rma` min_periods：前 `length-1` 个值为 NaN
+  - `pine_cumulative_mean_range` bar0=NaN（除零行为，`ta.cum(ta.tr)/bar_index`）
+  - `pine_atr = pine_rma(pine_true_range, length)`：所有 bar 相等
+  - `pine_crossover`/`pine_crossunder`：穿越检测正确
+  - `pine_highest`/`pine_lowest`：滚动极值不含当前 bar
+- **Pine golden fixture（`test_smc_indicator.py::TestPineGoldenFixture`）**：fixture 不存在时 skip，**没有 Pine golden fixture 不得宣称"完全对齐"**；fixture 路径 `backend/tests/fixtures/smc_pine/`，包含美诺华 603538 日线 1000 根 + 一个 15m 样本
+- **TV CSV parity 门禁（`test_smc_tv_parity.py`，CHANGE-20260716-001）**：使用 `ref/smc_user_export.pine`（派生导出副本，真源 `ref/smc_user_source.pine` 不可变）末尾 18 个 `display=display.none` 隐藏 plot 字段从 TV 导出 CSV（含 time/OHLC + Pine 事件布尔值 + bias）；fixture 路径 `backend/tests/fixtures/smc_pine/smc_tv_<symbol>_<tf>.csv`；无 fixture 时 skip（`PINE_PARITY_PENDING`）；3 项测试：
+  - `test_tv_csv_bar_parity`：断言 time/OHLC/bar 数量逐项相等（浮点容差 1e-8），不相等写 `INPUT_BAR_MISMATCH`，**不得调整算法迎合截图**
+  - `test_tv_csv_event_parity`：比较事件有序序列（bar_index ±1 容差）
+  - `test_tv_csv_swing_bias_parity`：比较最后一根 bar 的 swing_bias
+  - **禁止从 DB 重新取另一套 Bar**；产品默认前复权，TV parity fixture 使用与 TV 完全相同的复权方式、数据源和 completed-bar 边界
+- **events 字段契约更新**：`test_event_kind_valid` → `test_event_internal_field_valid`（验证 `internal: bool` 替代旧 `kind` 字段）
+- **缓存隔离（`test_indicator_cache.py`）**：`ALGORITHM_VERSION == "v9"`（CHANGE-20260716-001：v8→v9，crossover/crossunder 修正后旧 v8 缓存强制失效）；SMC/non-SMC 键隔离（`include_smc=true` 追加 `:smc` 后缀）
+- **服务层 warmup（`test_indicator_service.py`）**：1d timeframe 使用 `full_daily_bars`（≥500 warmup）；SMC 输出不调用 `_truncate_lists` 截断（time 数组保持完整长度）；**CHANGE-20260716-001 required_inputs**：`_REQUIRED_INPUTS` 映射 + `_determine_required_bars()`；15min 回看 400 天（limit=4000）、minute 回看 5 天（limit=2）、60min 回看 750 天；`needs_15min = "15min" in required_bars or timeframe == "15m"`、`needs_minute = "minute" in required_bars`；`_query_minute_bars` 新增 `limit` 参数（DESC + LIMIT + 反转）；**SMC source diagnostics（CHANGE-20260716-001）**：`smc_source_bar_hash` 基于 SMC 实际完整输入（1d 用 `full_daily_bars`，其他用 `macd_bars`），不复用截断后的 macd_bars hash
+- **MiniKline viewport（`miniKlineViewport.test.ts`，CHANGE-20260716-001 真实方案）**：
+  - 目标根数：15m=48、60m=44、日=40、周=36、月=30（`bars.slice(-target)` 传给 series）
+  - `setData` 后设置 logical range `{from:-2, to:visibleData.length-1+3}`（真实左 2/右 3 空位）
+  - **删除死 barSpacing 计算**（旧 `barSpacing = clamp(contentWidth/visibleBars, 5.5, 8)` 只计算未应用，是死参数）
+  - `computeAutoscaleRange(minLow, maxHigh)`：上方 12%，下方 15%（只基于 visibleData 的 high/low）
+  - 五周期边界验证
+  - 空数据返回零区间
+  - 真实 mock 测试：setData 根数、range、五周期切换、ResizeObserver cleanup、chart.remove、0 旧数据残留
+- **前端 SMC renderer 对齐 Pine（无截图 E2E，CHANGE-20260715-002 → CHANGE-20260716-001 修正）**：internal=虚线 `[4,3]`/tiny 8px、swing=实线/small 11px；**标签不加 `·I` 后缀**（CHANGE-20260716-001，与 TV 文字一致）；标签中点 `(x1+x2)/2`+`'center'`；trailing 文案"强高/弱高/强低/弱低"，`swing_bias` 直接从 DTO 读取（CHANGE-20260716-001，禁止猜测）；OB 半透明 box（active 0.12、mitigated 0.05）；Historical 全相交事件；颜色多头红 `#FF4D4F`、空头绿 `#22C55E`；**anchor_index 统一**（CHANGE-20260716-001：前端不得读取 `bar_index`）；**viewport 区间求交**（CHANGE-20260716-001：anchor 左侧 clip+clipped_left，confirmed 右侧 clamp 到 plotRight，仅完全不相交跳过）；**OB slice(0,5)**（CHANGE-20260716-001：只显示数组头部最近 5 个 `internal && !mitigated` OB，活动 OB 延伸到右端）；**纵轴候选完整**（CHANGE-20260716-001：event.level、OB high/low、EQH/EQL level、trailing top/bottom）；**EQH/EQL 视觉线端点使用 `second_pivot_index`**（CHANGE-20260716-001）；**纯函数 + Canvas mock 行为测试**（`smcRendering.test.ts`，CHANGE-20260716-001：禁止只用源码正则）
+- **SMC 隔离边界**：SMC 仅属于 `/stock` 指标链；`include_smc=false` 时 0 计算；`/market` 右栏不请求 SMC；true/false 缓存键隔离；DSA/Node/监控/Capture/published run 不修改；无新表/migration/worker/历史回填
+
+## 3.15 CHANGE-20260715-003 回归（SMC trailing 顺序修复 + sticky 列 + 工具栏对齐 + MiniKlineCard 契约测试）
+
+```bash
+# SMC trailing 顺序修复后的回归测试
+cd backend && APP_ENV=test TEST_DATABASE_URL=... python -m pytest \
+  tests/test_smc_indicator.py tests/test_indicator_cache.py \
+  tests/test_indicator_service.py tests/test_indicator_contract.py \
+  tests/test_indicators_api.py -q --no-header
+
+# MiniKlineCard 组件契约测试
+cd frontend && node --experimental-strip-types --test \
+  src/features/market-workspace/__tests__/miniKlineCardContract.test.ts
+```
+
+- **SMC trailing 执行顺序（`test_smc_indicator.py`）**：`_SMCPineState.run()` 中 `update_trailing_extremes` 必须在 `get_current_structure` 之前执行（对齐 Pine lines 766-807）；trailing 极值不被当前 bar 的 high/low 二次覆盖；Strong/Weak High-Low 事件输出与 Pine 一致；已有 109 项测试全部通过（含 Pine 语义 8 项 + FVG 排除 + golden fixture skip）
+- **MiniKlineCard 组件契约（`miniKlineCardContract.test.ts` 15 用例）**：不调用 `fitContent`/`resetTimeScale`/`scrollToRealTime`（正则 `\.fitContent\(` 检查实际方法调用）；调用 `setVisibleLogicalRange`；使用 `computeMiniKlineViewport` 纯函数；使用 `computeAutoscaleRange` + `autoscaleInfoProvider`；`ResizeObserver` 响应式 + `disconnect()`；`requestAnimationFrame` 延迟应用 range；五周期按钮（15m/1h/1d/1w/1mo）；`attributionLogo: false`；图表高度 190px + `CHART_HEIGHT` 常量；`minimumWidth=MIN_PRICE_SCALE_WIDTH`；`autoScale: true` + `scaleMargins {0.08, 0.08}`；`shiftVisibleRangeOnNewBar: false`；`chart.remove()` 卸载清理；A 股配色（`#FF4D4F`/`#22C55E`）；容器宽度 `Math.floor` 整数化
+- **sticky 列固定宽度（无截图 E2E）**：`.interactive-table` 定义 CSS 变量 `--stock-col-width: 150px`/`--select-col-width: 40px`；`.sticky-col` 三重固定宽度（width/min-width/max-width）；横向滚动时 sticky 列不与后续列重叠；长名称 ellipsis 截断；背景不透明
+- **工具栏 sticky 对齐（无截图 E2E）**：`.table-meta-bar` + `.table-pager` 添加 `position: sticky; left: 0; width: 100%; z-index: 6`；横向滚动时工具栏和分页器保持可见；右边界与表格可视区一致
+
+## 3.16 CHANGE-20260715-004 回归（Bug 1 详情左栏 loading 占位 + Pine 真源文件入 Git 跟踪）
+
+```bash
+# 详情页来源列表 loading 占位契约测试
+cd frontend && node --experimental-strip-types --test \
+  src/features/stock-research/__tests__/detailSourceLoadingContract.test.ts
+```
+
+- **`useStockDetailActions.sourceListLoading` 字段（源码契约）**：接口含 `sourceListLoading: boolean`；实现逻辑为 `hasMarketContext ? (publishedRunsQuery.isLoading || !activeRunId || sourceResultsQuery.isLoading) : monitorStatusQuery.isLoading`；返回对象包含 `sourceListLoading`
+- **`StockDetailPage` loading 占位渲染（源码契约）**：包含 `detailActions.sourceListLoading` 条件分支；渲染 `<aside data-testid="detail-source-list-loading"`；占位文案"加载中…"；header 显示 `sourceListKind === 'market'` ? "行情来源" : "自选来源"
+- **列表渲染条件排除 loading（源码契约）**：列表 `<aside data-testid="detail-source-list"` 必须以 `!sourceListLoading && sourceStocks.length > 0` 为前置条件，避免 loading 和列表同时渲染
+- **CSS 占位样式（源码契约）**：`global.scss` 存在 `.tv-source-list-placeholder` 类，含 `padding`/`font-size`/`color`/`text-align` 属性
+- **`MarketWorkspacePage.handleNavigateToStock` 显式传 source/strategy（源码契约）**：`scope === 'market'` 时 `source='selection'` + `strategy=DSA_STRATEGY_KEY`；`scope === 'watchlist'` 时 `source='watchlist'` + `strategy='watchlist_monitor'`
+- **URL 完整性（源码契约）**：`/stock/${symbol}?source=${src}&strategy=${strat}&returnTo=${encodeURIComponent(returnTo)}` 包含 source+strategy+returnTo 三个参数
+- **不使用旧 `useMarketStocks`（源码契约）**：`useStockDetailActions.ts` 不存在 `useMarketStocks(` 函数调用（注释允许）
+- **上一只/下一只保留 returnTo（源码契约）**：`returnToParam = returnTo ? \`&returnTo=${encodeURIComponent(returnTo)}\` : ''` 保留 returnTo 参数
+- **生产 E2E 验证（无截图）**：1) `/market` 设置筛选+排序+页码后点击股票名称进入 `/stock/:symbol`，URL 包含 `source=selection&strategy=dsa_selector&returnTo=...`；2) 详情页左栏先显示 loading 占位（`[data-testid="detail-source-list-loading"]`）再切换到实际列表（`[data-testid="detail-source-list"]`）；3) 左栏 header 显示"行情来源"；4) 上一只/下一只 URL 保留 source/strategy/returnTo/timeframe；5) 返回 `/market` 后筛选/排序/页码完整恢复
+- **Pine 真源文件入 Git 跟踪**：`git ls-files ref/smc_user_source.pine` 返回该文件路径；SHA256 为 `0bd3d2ad8819f2dc7a9399f0e869ca3c9eced8100f190aa131aac5fe8191988f`；843 行；`.gitignore` 仍排除 `ref/` 其他文件
+
+## 3.17 CHANGE-20260715-005 回归（详情左栏来源状态四态拆分 + 表格 sticky 列和工具栏对齐根治）
+
+```bash
+# 详情左栏来源状态四态 + normalizeInternalReturnTo 上限契约测试
+cd frontend && node --experimental-strip-types --test \
+  src/features/stock-research/__tests__/detailSourceLoadingContract.test.ts \
+  src/features/market-workspace/__tests__/marketWorkspaceUrlState.test.ts \
+  src/components/__tests__/stickyHeader.test.ts
+```
+
+- **`useStockDetailActions` 来源状态四态（源码契约）**：接口含 `sourceListLoading`/`sourceListError`/`sourceListEmpty`/`sourceContextInvalid` 四个布尔字段；`sourceListError`=`publishedRunsQuery.isError || sourceResultsQuery.isError`；`sourceListEmpty`=`!sourceListLoading && !sourceListError && sourceStocks.length === 0`；`sourceContextInvalid`=`source === 'selection' && (!decodedMarketContext || !decodedMarketContext.scope)`
+- **source 参数优先级（源码契约）**：显式 `source` 参数 > `returnTo` 推断；`source === 'selection'` → `sourceListKind='market'`（即使 returnTo 无效也不回退 watchlist，仅设置 `sourceContextInvalid=true`）
+- **`normalizeInternalReturnTo` 上限 4096（源码契约）**：`marketWorkspaceUrlState.ts` 的 `normalizeInternalReturnTo` 长度上限为 4096（非 500）；仍仅允许 `/screener`/`/market`/`/messages` 前缀，拒绝外部 URL/`javascript:`/双斜杠/非白名单前缀
+- **表格结构 `table-shell`（源码契约）**：`StrategyDataTable.tsx` 和 `AdminAfterClosePipelinePage.tsx` 使用 `table-shell > meta-bar + search-bar + table-scroll > table + pager` 结构；只有 `table-scroll` 设置 `overflow-x: auto`；meta-bar/search-bar/pager 移出横向滚动容器
+- **`isStickyColumn` 统一判断（源码契约）**：`isStickyColumn(col)` 函数只允许 `col.key === 'stock'` 为 sticky 列；header 和 body 共用同一判断；涨跌幅列保持普通列
+- **删除死 CSS（源码契约）**：`global.scss` 不存在 `.sticky-col-change-pct` 类；不存在 `position:sticky;left:0;width:100%` 工具栏补丁（meta-bar/pager 不再需要 sticky）
+- **viewport-sticky 模式（源码契约）**：`.table-shell.viewport-sticky .table-scroll { overflow: visible; }`（viewport sticky 模式下 table-scroll 不滚动）
+- **生产 E2E 验证（无截图）**：1) `/market` 复杂筛选（keyword+industry+concept+filters+sort+page，URL 编码后 >500 字符）进入详情，returnTo 不被截断；2) returnTo 无效时左栏显示 invalid 引导（不回退 watchlist）；3) 表格横向滚动时配置/列设置/清除/导出和分页器不随滚动消失，右边界对齐；4) 只有 stock 列 sticky，涨跌幅列随滚动；5) `AdminAfterClosePipelinePage` 表格结构与 `/market` 一致
+
+## 3.18 CHANGE-20260715-006 回归（MiniKline 闭包根治 + SMC Pine 对齐 RMA NA 语义 + 首个 pivot off-by-one + EQH/EQL 三时间点）
+
+```bash
+# SMC Pine 语义测试（含 RMA NA 语义 + 首个 pivot off-by-one）
+cd backend && .venv/bin/pytest tests/test_smc_indicator.py -q
+
+# MiniKline 闭包契约测试（含 5 项闭包契约 16-20）
+cd frontend && node --experimental-strip-types --test \
+  src/features/market-workspace/__tests__/miniKlineCardContract.test.ts
+```
+
+- **`pine_rma` NA 语义（后端单元测试）**：`smc_pine_core.py` 的 `pine_rma(src, length)` 在 `bar_index < length-1` 返回 `na`（非逐步 SMA）；`bar_index == length-1` 写入 `SMA(src, length)` 种子；`bar_index >= length` 使用 Wilder 递推 `rma[i] = (rma[i-1]*(length-1) + src[i]) / length`；`test_pine_rma_min_periods_before_seed` 断言前 `length-1` 根为 NaN
+- **首个 pivot off-by-one（后端单元测试）**：`start_of_new_leg`/`start_of_bearish_leg`/`start_of_bullish_leg` 使用 `i >= size`（非 `i > size`）；`get_current_structure` 使用 `if i < size: return`（非 `if i <= size: return`）；首个 leg/pivot 在 `i == size` 检测
+- **EQH/EQL DTO 三时间点（后端单元测试，CHANGE-20260715-006 → CHANGE-20260716-001 统一）**：EQL 和 EQH 两处 DTO 含三组时间点：`anchor_index`/`anchor_time`（前一 pivot bar）、`second_pivot_index`/`second_pivot_time`（新 pivot bar, `ref_i=i-size`，**视觉线端点**）、`confirmed_index`/`confirmed_time`（当前检测 Bar `i`，**因果/回放使用**）；`ref_i` 不得命名为 `confirmed`；CHANGE-20260716-001 新增 `detection_index`/`detection_time`（leg change 确认 bar, `i`，与 confirmed 同义但语义更明确）
+- **MiniKline 闭包根治（前端源码契约 16-20）**：`MiniKlineCard.tsx` 新增 `barsLengthRef`/`timeframeRef`/`rafIdRef` 持有最新值（每次 render 同步，在 effects 之前）；`applyViewportRange` 改为 `useCallback([], )` 稳定函数从 refs 读取（不再直接闭包捕获 `bars.length`/`timeframe`）；`scheduleApplyRange` 稳定函数取消 pending rAF 后调度新 rAF；`ResizeObserver` 回调调用 `scheduleApplyRange`（不直接闭包捕获 bars/timeframe）；卸载清理取消 pending rAF（`cancelAnimationFrame`）
+- **Pine 语义核对（源码契约）**：ATR200=`pine_rma(tr, 200)`；highest/lowest 窗口 `[ref_i+1, ref_i+length+1]`（不含当前 bar）；**crossover/crossunder level_curr/level_prev 快照（CHANGE-20260716-001）**：`displayStructure` 接收 `level_curr`（当前 Bar pivot level）和 `level_prev`（上一 Bar pivot level）独立快照，crossover=`close_curr > level_curr && close_prev <= level_prev`，crossunder=`close_curr < level_curr && close_prev >= level_prev`，NaN→False；每 Bar 快照六个 pivot level（swing/internal 独立，不互相覆盖）；OB slice `[piv.bar_index, current_i)` end-exclusive（Python 切片天然 end-exclusive）；trailing 顺序 `update_trailing_extremes → getCurrentStructure(50) → getCurrentStructure(5) → getCurrentStructure(3) → displayStructure → deleteOrderBlocks`
+- **Golden fixture**：仍为 `PINE_OUTPUT_GOLDEN_PENDING`/`PINE_PARITY_PENDING`（`backend/tests/fixtures/smc_pine/` 只有 README.md），无 fixture 时 `TestPineGoldenFixture`/`test_smc_tv_parity.py` 自动 skip，不得宣称"完全对齐"；CHANGE-20260716-001 已建立 TV CSV parity 测试框架（`ref/smc_user_export.pine` 派生文件末尾 18 个隐藏 plot 字段，真源 `ref/smc_user_source.pine` 不可变），待用户从 TradingView 导出 CSV 后即可完成输出级完全一致断言
+- **SMC 隔离边界不变（源码契约）**：SMC 仅进入 `/stock` 指标链，默认关闭（`include_smc=false` 时 0 计算）；`/market` 右栏小 K 线不请求 SMC；true/false 缓存键隔离（`:smc` 后缀）；不新增表/migration/worker/依赖
+- **生产 E2E 验证（无截图）**：1) MiniKline 切周期/resize 后 viewport 正确（不使用 stale 值，不出现首次 render 的旧 range）；2) SMC `pine_rma` 前 `length-1` 根为 NaN（ATR200 前 199 根为 NaN）；3) 首个 pivot 在 `i==size` 检测（不延迟到 `i==size+1`）；4) EQH/EQL DTO 含 detection_index/detection_time；5) Pine golden fixture 仍 PENDING
 
 ## 4. CI 门禁
 

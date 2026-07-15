@@ -55,10 +55,11 @@ strategy_run_items.reason_code 标准编码：
 | 能力 | 端点/路由组 | 关键规则 |
 |---|---|---|
 | Auth | `/auth`, `/me`, `/plans` | 登录、注册、刷新、AccessContext |
-| 行情 | `/instruments`, `/calendar`, `/market`, `/bars` | 数据新鲜度、partial/degraded 标识；`/instruments/{id}/bars` page_size 按 timeframe 限制：`15m` 最大 4000，`1h` 最大 1200，其他最大 1000；`/instruments/{id}/indicators` 的 `bars` 参数最大 4000；`indicators` 响应含 `sqzmom_lb` 全局技术指标数据，后端逐行复刻 Pine 代码，前端只渲染不计算 |
+| 行情 | `/instruments`, `/calendar`, `/market`, `/bars` | 数据新鲜度、partial/degraded 标识；`/instruments/{id}/bars` page_size 按 timeframe 限制：`15m` 最大 4000，`1h` 最大 1200，其他最大 1000；`/instruments/{id}/indicators` 的 `bars` 参数最大 4000；`indicators` 响应含 `sqzmom_lb` 全局技术指标数据，后端逐行复刻 Pine 代码，前端只渲染不计算；**SMC 指标按需启用**（`include_smc` 查询参数，默认 `false`，`true` 时返回 `data.smc` 且 cache key 追加 `:smc` 后缀，详见第 9.5 节）；FVG 完全排除；**`GET /market/stocks` 行业/概念筛选**（PRD §7.5 qstock 同步后）：`industry`/`concept` 参数按板块名称筛选，通过 `filter_instruments_by_board()` 查询 `market_boards` 表实现；未同步板块数据时返回空列表（不报 422）；`industry` + `concept` 同时传时取交集（AND 语义）；**`GET /market/boards?type=industry\|concept`** 返回 `MarketBoardsResponse`：`items`（板块目录列表）+ `available: bool`（items 非空时 true）+ `reason_code: str \| null`（无数据时为 `"board_provider_unavailable"`）+ `updated_at`；前端依据 `available` 决定筛选输入是否禁用 |
 | 结构状态因子 | `/instruments/{id}/structural-factors` | 双周期（1d+15m）5 组结构因子（DSA 段/Swing/成本节点/动量波动/成交参与）；前端只渲染后端 DTO，禁止重新计算；无认证要求（与 indicators API 一致）；250-500 bar lookback，15m 仅已完成 bar，Swing 仅已确认 pivot（无未来函数） |
-| 策略 | `/strategies`, `/strategy-runs` | 只读 released/published 结果；`/strategy-runs/{run_id}/results` 以 `strategy_run_items` 为主表 LEFT JOIN `strategy_results` + `instruments`，返回全量 universe（含 succeeded/skipped/failed），skipped/failed 行 `id`/`payload` 为 null；新增 `item_status`/`reason_code`/`error_message` 字段；默认无筛选时 `source_total = run.total_instruments`。JOIN 策略：因 `strategy_run_items.result_id` 当前未回填（ALIGN-033 P2），`strategy_results` 关联统一改用 `(run_id, instrument_id)`，包括批量加载、metric_filter 子查询、sort LEFT JOIN 三处 |
+| 策略 | `/strategies`, `/strategy-runs` | 只读 released/published 结果；`/strategy-runs/{run_id}/results` 以 `strategy_run_items` 为主表 LEFT JOIN `strategy_results` + `instruments`，返回全量 universe（含 succeeded/skipped/failed），skipped/failed 行 `id`/`payload` 为 null；新增 `item_status`/`reason_code`/`error_message` 字段；默认无筛选时 `source_total = run.total_instruments`。JOIN 策略：因 `strategy_run_items.result_id` 当前未回填（ALIGN-033 P2），`strategy_results` 关联统一改用 `(run_id, instrument_id)`，包括批量加载、metric_filter 子查询、sort LEFT JOIN 三处。**keyword 搜索（CHANGE-20260713-005）**：`strategy_result_repository.query_results` 的 `keyword` 参数（非空时）ILIKE 同时匹配 `Instrument.symbol`/`Instrument.name`/`Instrument.pinyin_initials`（3 处 or_ 分支同步，支持股票代码/中文名称/拼音首字母）；前端不做全量过滤，不增加新表；`total` 字段为该 keyword + filters 下的真实总数（不是 items.length）。**industry/concept 筛选（CHANGE-20260713-006）**：`/strategy-runs/{run_id}/results` 支持 `industry`（str \| None, Query）和 `concept`（str \| None, Query）参数，按行业/概念板块名称筛选，通过共享 `backend/app/repositories/board_filter_helper.py::build_board_filter_conditions` 构造 EXISTS 子查询（`MarketBoardMembership` JOIN `MarketBoard`，`type='industry'`/`'concept'`，`name` 匹配）；industry+concept 同时提供时为 AND 语义。**数量契约四层语义（CHANGE-20260713-007）**：响应包含四层数量：`source_total`（published run 原始总量，不受业务筛选影响）、`universe_total`（all/watchlist 范围总量，业务筛选前）、`filtered_total`（keyword+industry+concept+metric_filters 后总量）、`items`（filtered_total 当前页）；`len(items) <= filtered_total`；`items`/`filtered_total` 必须应用完全相同的 keyword/industry/concept/metric_filters 条件，SQL 数量固定，禁止 N+1；禁止文档描述"source_total 与筛选使用相同条件"。**latest_change_pct/latest_change_trade_date 响应字段 + stock_name/stock_name_op Query 参数 + change_pct 特殊 sort/filter key（CHANGE-20260714-001）**：响应 items 每行新增 `latest_change_pct`（float\|null，最新完成交易日涨跌幅，从 `bars_daily` 表用 window function 计算最新两根日线）和 `latest_change_trade_date`（date\|null，对应的交易日）；`change_pct` 作为 `sort_by` 和 `metric_filters` 的特殊 key 走 `bars_daily` 子查询，不在 manifest `filterable` 白名单中也允许；新增 `stock_name`（str\|None, Query）和 `stock_name_op`（`contains`/`not_contains`/`eq`, Query, 默认 `contains`）Query 参数支持股票名称独立筛选；保留原 `payload` 不可变，DSA 其他列仍绑定 published run 日期；详见第 17 节 |
 | 监控 | `/monitor-states`, `/strategy-events` | 只处理完成 Bar，按用户资格过滤；monitor_event 在 `delivery_worker.py` 投递前再次用 `is_user_eligible_for_monitor` 复核，active admin 放行，disabled admin / 无订阅普通用户排除 |
+| 个股上下文 | `/stocks/{symbol}/context` | 用户面个股状态与事件聚合；Evidence DTO 从 ORM `event.evidence` 映射；时区 `Asia/Shanghai`；历史事件截止为次日 00:00 exclusive；run 查询按 `trade_date, published_at, finished_at` DESC 确定排序；`strategy_events.idempotency_key` 格式 `symbol:source_run_id:algorithm_version`（每只股票每个 run 至多一个事件） |
 | 通知 | `/messages`, `/notification-channels` | 用户只能操作自己的消息和渠道 |
 | 自选 | `/watchlist` | active subscription + monitor_limit |
 | 表格视图配置 | `/me/table-view-presets` | 用户表格视图配置 CRUD；JWT user_id 隔离；active subscription + trend_selection feature（admin 豁免）；config 仅允许 keyword/sort/filters/hiddenColumns/pageSize；每 user+table_id+strategy_key 最多 20 个；`(user_id, table_id, strategy_key, name)` 唯一约束用两个 partial unique index 实现（strategy_key IS NOT NULL / IS NULL 分离，解决 NULL!=NULL 问题）；is_default 同维度互斥；**写操作（POST/PATCH/DELETE）必须在返回前 `await db.commit()`，异常分支 `rollback` 后 re-raise，禁止吞异常；写后读跨请求必须可见** |
@@ -197,6 +198,64 @@ capture worker 浏览器上下文使用 `viewport=1920x1200` + `device_scale_fac
 - SQZMOM_LB 不接入选股、监控、飞书、消息中心、事件系统；
 - 不新增数据库表；
 - 不改 DSA VWAP、筹码峰、K 线实时行情合并逻辑。
+
+## 9.5 SMC（Smart Money Concepts）指标契约
+
+`/api/v1/instruments/{instrument_id}/indicators` 支持 `include_smc` 查询参数按需返回 `smc` 全局技术指标。SMC 由后端纯函数 `app.strategy_assets.algorithms.features.smc_pine_core.compute_smc_pine`（Pine 语义核心，仅依赖 Python 标准库）实现，`smc_indicator.py` 为薄包装委托层（`_SMCState = _SMCPineState` 别名）；前端只消费后端 DTO，不重新计算。SMC 实现用户 Pine 代码（`ref/smc_ref.txt`，SHA256 0bd3d2ad，用户原创并授权盘迹使用）的语义原语（`ta.rma` Wilder / `ta.cum(ta.tr)/bar_index` / `ta.atr(200)`）。
+
+### 9.5.1 查询参数
+
+| 参数 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `include_smc` | bool | `false` | 是否计算并返回 SMC 指标；`false` 时响应不含 `smc` 字段且不执行 SMC 计算 |
+
+### 9.5.2 缓存隔离
+
+- `include_smc=true` 时 cache key 追加 `:smc` 后缀，与默认路径（`include_smc=false`）完全隔离；
+- 默认路径缓存不包含 SMC 字段，不因 SMC 上线影响常规请求性能；
+- SMC 计算路径变更同样需要 bump `ALGORITHM_VERSION` 使旧缓存失效；
+- 当前 `ALGORITHM_VERSION = "v9"`（CHANGE-20260716-001：crossover/crossunder level_curr/level_prev 快照修正，旧 v8 缓存强制失效；CHANGE-20260715-002：SMC 从 SMA 基线升级为 Pine parity v7；CHANGE-20260715-006：RMA NA 语义 + off-by-one + EQH/EQL 三时间点 v8）；
+- 禁止 Redis FLUSHDB/FLUSHALL，只允许精确 DEL 测试键。
+
+### 9.5.3 输出字段
+
+`data.smc`（仅 `include_smc=true` 时存在）包含市场结构关键点位序列，**time 数组保持完整长度对齐 anchor/confirmed 索引**（不调用 `_truncate_lists` 截断 SMC 输出）；前端 `smcToDisplay` 通过时间匹配自动过滤展示区外事件。**FVG（Fair Value Gap）完全排除**——不计算、不返回、不缓存、不渲染，不暴露 FVG 开关；FVG 排除不改变其他逻辑的索引、执行顺序和右侧延伸。
+
+**SMC source 诊断字段（CHANGE-20260716-001）**：`include_smc=true` 时响应顶层额外返回以下字段，用于验证 SMC 实际计算的输入数据源：
+- `smc_source_bar_hash`：基于 SMC 实际完整输入（`smc_bars`）计算的 hash；1d timeframe 使用 `full_daily_bars`（DB 全量日线），其他周期使用 `macd_bars`；**不得复用截断后的 `source_bar_hash`**（后者基于截断后的 250 根 macd_bars）
+- `smc_source_first_time`：SMC 输入首根 bar 时间
+- `smc_source_last_time`：SMC 输入末根 bar 时间
+- `smc_source_bars`：SMC 输入 bar 数量
+- `smc_adj`：复权方式
+- `include_smc=false` 时所有 `smc_source_*` 字段为 `None`/`0`
+
+**Pine 语义对齐（CHANGE-20260715-006 → CHANGE-20260716-001 crossover 修正）**：
+- `pine_rma(src, length)` 严格复现 Pine v5 `ta.rma`：`bar_index < length-1` 返回 `na`（非逐步 SMA），`bar_index == length-1` 写入 SMA 种子，之后 Wilder 递推；ATR(200) 前 199 根为 `na`；
+- 首个 pivot 在 `i == size` 检测（`start_of_new_leg` 使用 `i >= size`，非 `i > size`），对齐 Pine `ta.change(leg)` 在 `bar_index == size` 时可首次非零；
+- **crossover/crossunder level_curr/level_prev 快照（CHANGE-20260716-001）**：`displayStructure` 接收 `level_curr`（当前 Bar pivot level）和 `level_prev`（上一 Bar pivot level）独立快照——crossover=`close_curr > level_curr && close_prev <= level_prev`，crossunder=`close_curr < level_curr && close_prev >= level_prev`，NaN→False；每 Bar 快照六个 pivot level（swing/internal high/low 及 equal 状态，按 swing/internal 独立，不互相覆盖）；旧实现错误地将 `current_level` 同时作为 curr 和 prev（`pine_crossover(close_curr, close_prev, current_level, current_level)`）；
+- **EQH/EQL DTO 三时间点（CHANGE-20260715-006 → CHANGE-20260716-001 统一）**：`anchor_index`/`anchor_time`（前一 pivot bar）、`second_pivot_index`/`second_pivot_time`（新 pivot bar, `ref_i=i-size`，**视觉线端点**）、`confirmed_index`/`confirmed_time`（当前检测 Bar `i`，**因果/回放使用**）；`ref_i` 不得命名为 `confirmed`；`detection_index`/`detection_time`（leg change 确认 bar, `i`，与 confirmed 同义但语义更明确）；
+- **`swing_bias` 直接返回 `state.swing_trend.bias`（CHANGE-20260716-001）**：值域 {1, -1, 0}；前端从 DTO `swing_bias` 字段读取，禁止从可见事件猜测；
+- OB slice `[piv.bar_index, current_i)` end-exclusive（Python 切片天然 end-exclusive，对齐 Pine `array.slice()`）。
+
+### 9.5.4 warmup 契约
+
+- 1d timeframe 使用 `full_daily_bars`（DB 全量日线，≥500 warmup，在 `daily_bars.tail(daily_count)` 截断前保存）；
+- 其他周期复用 `macd_bars`（15m≈12000、1h≈3000、1w≈714、1mo≈166，均为可获得最大历史）；
+- 不得只用展示区可见 bars 初始化状态；至少展示区之前 500 根 warmup；可获得时使用完整历史计算后裁剪输出。
+
+### 9.5.5 限制
+
+- SMC 只进入 `/stock/:symbol` 个股详情的指标链，不进入 `/market`、DSA、Node、Capture、盘中监控、选股；
+- 不新增数据库表；
+- SMC 不接入选股、监控、飞书、消息中心、事件系统；
+- FVG 完全排除（不计算、不返回、不缓存、不渲染）。
+
+### 9.5.6 Pine golden fixture
+
+- 状态 PENDING（等待 TradingView 导出）；`backend/tests/fixtures/smc_pine/README.md` 提供 TV 导出步骤、隐藏 plot 代码、CSV 格式规范；
+- fixture 包含美诺华 603538 日线 1000 根 + 一个 15m 样本；
+- golden 测试比较事件有序序列 `(type,scope,bias,anchor,confirmed,level)` 和 OB 序列 `(bias,anchor,top,bottom,mitigated)` 完全相等（浮点容差 1e-8）；
+- 无 fixture 时 `TestPineGoldenFixture` skip；**没有 Pine golden fixture 不得宣称"完全对齐"**。
 
 ## 10. 结构状态因子 API 契约 V1.8
 
@@ -621,6 +680,11 @@ V1.10 位置语义说明：
 | `freshness_seconds` | float | 相对 `update_time` 的新鲜度（秒） |
 | `degraded` | bool | 是否降级 |
 | `degraded_reason` | string \| null | 降级原因 |
+| `total_market_cap` | float \| null | 总市值（元）；数据缺失时为 `null`，前端显示 `--`（CHANGE-20260713-010） |
+| `float_market_cap` | float \| null | 流通市值（元）；数据缺失时为 `null` |
+| `market_cap_as_of` | string (YYYY-MM-DD) \| null | 股本数据日期（`instruments.share_as_of`），与价格同日 |
+| `market_cap_source` | `"instrument_share_capital_sync" \| null` | 市值数据来源 |
+| `market_cap_degraded_reason` | string \| null | 降级原因；缺失时为 `"market_cap_data_unavailable"` |
 
 行为规则：
 
@@ -630,6 +694,7 @@ V1.10 位置语义说明：
 - 交易时段 pytdx 失败 → `source="daily_fallback"`、`is_realtime=false`、`degraded=true`，`degraded_reason` 记录 pytdx 失败原因。
 - 无 pytdx 数据且无 DB fallback 数据 → 返回 404。
 - Redis 短缓存（10s TTL）用于削峰，缓存命中时直接返回缓存的 pytdx 结果。
+- **市值字段（CHANGE-20260713-010）**：`total_market_cap`/`float_market_cap` 由 `Instrument.total_share`/`float_share` 与当前价格相乘计算；股本数据来自 `InstrumentShareCapitalSyncService.sync_share_capitals`（每日 18:00 通过 `pytdx.get_finance_info` 同步 SH/SZ 标的，BJ 跳过；写 `share_as_of=trade_date`）；价格与股本必须同一 `as_of`；股本缺失时所有 market_cap 字段为 `null`，`market_cap_degraded_reason="market_cap_data_unavailable"`；**禁止用户请求时访问第三方**；前端 `formatMarketCap` 区分万/亿/万亿元，空值显示 `--`；不可把两个永久 `--` 当作完成（必须 `BLOCKED: MARKET_CAP_SOURCE_UNAVAILABLE`）。
 
 ### 12.2 `/api/v1/instruments/{instrument_id}/bars` 数据源诊断
 
@@ -749,10 +814,10 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 
 `backend/app/services/indicator_cache.py::ALGORITHM_VERSION` 是 indicator 缓存的 schema 版本号。任何修改 indicator 计算逻辑、`source_bar_times` 格式、BB/SQZMOM/MACD 计算路径的变更**必须 bump `ALGORITHM_VERSION`**，使旧缓存自然失效：
 
-- cache key 格式：`indicator:{algorithm_version}:{timeframe}:{adj}:{bars}:{symbol}`；
+- cache key 格式：`indicator:{algorithm_version}:{timeframe}:{adj}:{bars}:{symbol}`（SMC 按需启用时追加 `:smc` 后缀，与默认路径隔离，避免 SMC 计算结果污染无 SMC 响应缓存）；
 - 旧版本 cache key 与新版本不匹配，强制重算，避免旧格式 `source_bar_times` 或日线阶梯线 BB 污染渲染；
 - 禁止通过手动 `DEL` 单只股票 key 修复缓存问题（不可扩展，且无法覆盖所有时间周期）；
-- 当前 `ALGORITHM_VERSION = "v5"`（PR #32：DSA 全周期支持 + 1w/1mo BB 用 compute_bollinger 计算）。
+- 当前 `ALGORITHM_VERSION = "v9"`（CHANGE-20260716-001：crossover/crossunder level_curr/level_prev 快照修正，旧 v8 缓存强制失效；CHANGE-20260715-006：RMA NA 语义 + off-by-one + EQH/EQL 三时间点 v8；CHANGE-20260715-002：SMC 从 SMA 基线升级为 Pine parity 核心 v7，旧 v6 缓存强制失效；CHANGE-20260715-001：新增 SMC 指标并按需启用，缓存 key 追加 `:smc` 后缀隔离）。
 
 #### 12.5.3.1 `force_refresh` / `capture` 查询参数（旁路缓存）
 
@@ -948,7 +1013,7 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 | `table_id` | TEXT | NOT NULL | 表格标识（如 `screener`/`watchlist`，由前端约定） |
 | `strategy_key` | TEXT | NULL | 策略 key（可空，适用于无策略的表格） |
 | `name` | TEXT | NOT NULL | 配置名称（用户自定义，同维度唯一） |
-| `config` | JSONB | NOT NULL | 配置内容（仅允许 keyword/sort/filters/hiddenColumns/pageSize） |
+| `config` | JSONB | NOT NULL | 配置内容（仅允许 keyword/sort/filters/hiddenColumns/pageSize/industry/concept） |
 | `is_default` | BOOLEAN | NOT NULL, default `false` | 是否默认配置（同 user+table_id+strategy_key 至多 1 个 true） |
 | `created_at` | TIMESTAMPTZ | NOT NULL, default `now()` | 创建时间 |
 | `updated_at` | TIMESTAMPTZ | NOT NULL, default `now()`, onupdate `now()` | 更新时间 |
@@ -963,7 +1028,7 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 
 ### 14.2 `config` JSONB schema
 
-`config` 字段仅允许以下 5 个 key（Pydantic schema `TableViewPresetConfig` 强制 `extra="forbid"`）：
+`config` 字段仅允许以下 7 个 key（Pydantic schema `TableViewPresetConfig` 强制 `extra="forbid"`）：
 
 | 字段 | 类型 | 约束 | 语义 |
 |---|---|---|---|
@@ -972,6 +1037,8 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 | `filters` | list[dict] \| null | 每元素必须是 dict 且含 `key`/`op`/`value`；`op` 限制白名单：`contains`/`eq`/`gt`/`gte`/`lt`/`lte`/`between`/`empty`/`not_empty` | 筛选条件列表 |
 | `hiddenColumns` | list[string] \| null | 每元素必须是 string | 隐藏列 key 列表 |
 | `pageSize` | int \| null | 1-500 | 每页大小 |
+| `industry` | string \| null | max_length=100 | 行业板块筛选名称（CHANGE-20260713-006，JSONB 列无新 migration） |
+| `concept` | string \| null | max_length=100 | 概念板块筛选名称（CHANGE-20260713-006，JSONB 列无新 migration） |
 
 **禁止字段**（`_FORBIDDEN_CONFIG_KEYS`，由 `_validate_config_keys` 函数强制拒绝）：
 
@@ -1036,4 +1103,142 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 - config 不保存业务数据（selectedKeys/page/activeRunId/rows）；
 - preset 不影响后端策略计算，只影响前端表格视图；
 - `is_default` 互斥更新由应用层 `_unset_default_for_scope` 实现（非数据库约束）。
+
+## 15. 个股上下文 API 契约（stock_context）
+
+`GET /api/v1/stocks/{symbol}/context` 是用户面 `EventStatePanel` 单一数据源，返回个股最新状态与历史事件聚合。前端 `useStockContext` hook 调用此端点，禁止前端重新计算或拼接。
+
+### 15.1 Evidence DTO 映射
+
+- `_event_to_dto` 将 ORM `event.evidence` 映射为用户面 Evidence DTO；
+- 不再从 `event.payload` 拼装证据字段，Evidence 以 ORM `event.evidence` 为唯一来源。
+
+### 15.2 时区
+
+- 时间字段统一使用 `ZoneInfo("Asia/Shanghai")`（不再使用 UTC）；
+- 事件时间、发布时间、完成时间均以 CST 返回。
+
+### 15.3 历史事件截止
+
+- 历史事件 cutoff 使用 **次日 00:00 exclusive**（`trade_date + 1 day, 00:00:00`，不包含该时刻）；
+- 不再使用 `max.time + 1 day - 1 second` 口径。
+
+### 15.4 Run 查询排序
+
+- Run 查询使用确定性 DESC 排序：`ORDER BY trade_date DESC, published_at DESC, finished_at DESC`；
+- 保证相同 trade_date 下多 run 的顺序确定，避免分页/缓存抖动。
+
+### 15.5 strategy_events 幂等键
+
+- `idempotency_key` 格式：`symbol:source_run_id:algorithm_version`；
+- 旧格式 `symbol:trade_date:algorithm_version:hash(evidence)` 已废弃；
+- 每只股票每个 run 至多生成一个事件（`source_run_id` 维度幂等）。
+
+## 16. Excel 导出 API 契约（CHANGE-20260713-010）
+
+### 16.1 端点
+
+`POST /api/v1/strategy-runs/{run_id}/results/export`
+
+权限：`require_active_subscription` + `require_feature("trend_selection")`（admin 豁免），与 `/strategy-runs/{run_id}/results` 一致。
+
+请求体：`ExportRequest`
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `universe` | `Literal["all", "watchlist"]` | 否（默认 `all`） | 股票池范围；`all` = 全市场，`watchlist` = 当前用户自选 |
+| `keyword` | string \| null | 否 | 全文搜索（symbol/name/pinyin_initials 三字段 ILIKE） |
+| `industry` | string \| null | 否 | 行业板块名称 |
+| `concept` | string \| null | 否 | 概念板块名称 |
+| `metric_filters` | array | 否 | 数值筛选（`metric_key`/`operator`/`value`，AND 语义） |
+| `sort_by` | string \| null | 否 | 排序字段（必须在 `filterable`+`sortable` 白名单内） |
+| `sort_desc` | bool | 否 | 是否降序（默认 false） |
+| `visible_columns` | array | 是 | 列定义列表；每项含 `key`/`title`/`data_type`/`payload_key` |
+
+`visible_columns` 字段约束：
+
+- `key`：列 key（白名单：`stock`/`change_pct`/`dsa_dir_bars`/`vwap_ret_avg`/`vwap_ret_total`/`offset_mean`/`offset_std`/`offset_percentile`/`dsa_vwap`/`dsa_vwap_dev_pct`/`offset_variance_rate`/`price`）；非白名单返回 422。
+- `title`：列标题（用于表头单元格）。
+- `data_type`：`text`/`number`/`percent`；决定 Excel 单元格类型与 numFmt（`percent` 使用 `0.00%`）。
+- `payload_key`：从 `StrategyResult.payload` 取值的 key；`stock` 列必须为 `null`（不导出操作列）。
+
+### 16.2 响应
+
+响应体：`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`（MIME）；响应头：
+
+| 响应头 | 说明 |
+|---|---|
+| `Content-Type` | `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` |
+| `Content-Disposition` | `attachment; filename*=UTF-8''<percent-encoded 盘迹_DSA_YYYYMMDD_筛选结果.xlsx>`（RFC 5987） |
+| `X-Source-Total` | published run 原始总量（不受筛选影响，恒等于 `run.total_instruments`） |
+| `X-Universe-Total` | all/watchlist 范围总量（业务筛选前） |
+| `X-Filtered-Total` | keyword+industry+concept+metric_filters 后总量 |
+| `X-Export-Rows` | 实际导出行数 = `filtered_total` |
+
+### 16.3 行为规则
+
+- 复用 `query_published_selector_results` 的同一筛选/排序构造器，禁止复制查询逻辑；
+- 导出完整筛选结果（不是当前页），上限 `MAX_EXPORT_ROWS=10000`；超过返回 422；
+- 真实 `.xlsx`（标准库 `zipfile`+`xml.etree`，OOXML 格式），禁止 `openpyxl`/`xlsxwriter` 依赖，禁止 CSV 改扩展名；
+- 数值字段写入数值单元格（非文本），`percent` 类型使用 `numFmt 0.00%`；
+- **公式注入防护**：以 `=`/`+`/`-`/`@` 开头的文本单元格自动前缀单引号 `'`（不显示在 Excel 显示但保留在共享字符串表）；
+- 内存或 `SpooledTemporaryFile`，响应后释放，不落永久文件；
+- `stock` 列渲染 `"名称(代码)"` 格式（如 `贵州茅台(600519)`），`payload_key=null`；
+- `source_total`/`universe_total`/`filtered_total`/`export_rows` 四层语义与 `/strategy-runs/{run_id}/results` 一致；
+- SQL 数量固定，禁止 N+1（与 `query_published_selector_results` 同一构造器）；
+- 仅允许公共 DSA 列白名单，禁止任意 payload key 透传到列定义；
+- 操作列（`action`）不导出。
+
+## 17. strategy-runs results latest_change_pct 契约（CHANGE-20260714-001）
+
+`GET /api/v1/strategy-runs/{run_id}/results` 响应在原四层数量契约基础上，为 `items` 每行新增两个实时行情派生字段，并新增两个股票名称筛选 Query 参数；同时 `change_pct` 作为特殊 sort/filter key 走 `bars_daily` 子查询。
+
+### 17.1 新增响应字段
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `latest_change_pct` | `float \| null` | 最新完成交易日涨跌幅（百分比数值，如 `3.45` 表示 +3.45%）；从 `bars_daily` 表用 window function 计算最新两根日线 `(close - prev_close) / prev_close * 100`；无两根有效日线（含 `close` 为 null 或 `prev_close = 0`）时为 `null` |
+| `latest_change_trade_date` | `date \| null` | `latest_change_pct` 对应的交易日（`bars_daily.trade_date`，最新一根已完成日线日期）；无有效数据时为 `null` |
+
+字段语义约束：
+
+- **数据源**：`bars_daily` 表（已完成日线），**不读 partial daily bar**，不读 `bars_15min`/`bars_minute`；
+- **计算口径**：window function 取每个 `instrument_id` 按交易日 DESC 排序的最新两根，`(latest.close - prev.close) / prev.close * 100`；`close` 为 null 或 `prev.close = 0` 时返回 `null`；
+- **独立性**：`latest_change_pct`/`latest_change_trade_date` 与 DSA `payload` 完全解耦——DSA 其他列（`dsa_dir_bars`/`vwap_ret_*`/`offset_*`/`dsa_vwap*` 等）仍绑定 published run 的 `trade_date`，不受 `latest_change_pct` 实时性影响；
+- **原 payload 不可变**：`strategy_results.payload` 不被修改，`latest_change_pct` 作为响应顶层字段附加到每行 item，不写入 `payload`；
+- **涨跌颜色**：前端按 A 股红涨绿跌渲染（`latest_change_pct > 0` 红、`< 0` 绿、`null` 中性）；
+- **无两根有效日线**：新股/停牌/退市/数据缺失时返回 `null`，前端显示 `--`，**不回退旧 run 值**。
+
+### 17.2 新增 Query 参数
+
+| 参数 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `stock_name` | `str \| None` | `None` | 股票名称独立筛选关键词；与 `keyword`（symbol/name/pinyin_initials 三字段 ILIKE）独立，`stock_name` 只匹配 `Instrument.name` |
+| `stock_name_op` | `Literal["contains", "not_contains", "eq"]` | `contains` | `stock_name` 的匹配操作符；`contains` = ILIKE `%name%`，`not_contains` = NOT ILIKE `%name%`，`eq` = `name =` 精确匹配 |
+
+行为规则：
+
+- `stock_name` 与 `keyword` 可同时提供，两者为 AND 语义（`keyword` 匹配 symbol/name/pinyin_initials，`stock_name` 只匹配 name）；
+- `stock_name` 进入 `filtered_total`/`items` 的同一筛选条件，`source_total` 不受影响（与数量契约四层语义一致）；
+- `stock_name`/`stock_name_op` 进入 `TableViewPresetConfig` 可选字段（`stock_name: str \| null`、`stock_name_op: str \| null`，max_length=100/20），不新增表/migration（JSONB 列）；
+- `stock_name_op` 非 `contains`/`not_contains`/`eq` 时返回 422。
+
+### 17.3 change_pct 特殊 sort/filter key
+
+`change_pct` 作为 `sort_by` 和 `metric_filters` 的 key 时，走 `bars_daily` 子查询，**不在 manifest `filterable`/`sortable` 白名单中也允许**：
+
+- **sort_by=change_pct**：按 `latest_change_pct` 排序（`sort_desc=true` 降序），通过 LEFT JOIN `bars_daily` 子查询计算每只股票最新涨跌幅后排序；`null` 值排在最后（`NULLS LAST`）；
+- **metric_filters 含 `{"key": "change_pct", "op": "gt"/"gte"/"lt"/"lte"/"between", "value": ...}`**：走同一 `bars_daily` 子查询过滤；`op` 限制白名单：`gt`/`gte`/`lt`/`lte`/`between`（不允许 `contains`/`eq`/`empty`/`not_empty`）；
+- **常量 `CHANGE_PCT_METRIC_KEY = "change_pct"`**：`strategy_result_repository` 单点定义，sort 与 metric_filters 两处共用；
+- **性能**：window function 子查询在 `bars_daily` 表上执行，依赖 `(instrument_id, trade_date)` 索引；生产数据量下需验证性能（见 `code-doc-alignment.md` ALIGN-062）；
+- **不污染 manifest**：`dsa_selector.yaml` manifest 的 `filterable`/`sortable` 白名单不新增 `change_pct`，`change_pct` 由 repository 层特殊处理；
+- **前端筛选输入**：用户在 `change_pct` 列输入 3 表示 3%，不要乘除错（与 CHANGE-20260713-005 一致）。
+
+### 17.4 限制
+
+- `latest_change_pct`/`latest_change_trade_date` 只读，不写入 `strategy_results.payload`；
+- 不修改 DSA 算法、Node Cluster、盘中监控、Capture 计算口径；
+- 不新增数据库表/migration；
+- `change_pct` sort/filter 只支持 `bars_daily` 口径，不支持 15m/1h/intraday 涨跌幅；
+- `stock_name`/`stock_name_op` 不进入 `metric_filters`（与 `keyword` 同为独立 Query 参数）。
 

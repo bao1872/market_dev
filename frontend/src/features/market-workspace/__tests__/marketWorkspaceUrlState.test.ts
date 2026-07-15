@@ -1,30 +1,17 @@
 // [MarketWorkspaceUrlState] - 描述: /market URL 状态 encode/decode 契约测试
 // 用法：node --experimental-strip-types --test src/features/market-workspace/__tests__/marketWorkspaceUrlState.test.ts
 //
-// 覆盖：
-//   1. decode 默认值（无参数时 scope=watchlist, symbol=null, timeframe=1d, source=watchlist, strategy=watchlist_monitor, eventId=null, returnTo=null）
+// 覆盖（CHANGE-20260713-004：简化为仅 scope + selected）：
+//   1. decode 默认值（无参数时 scope=watchlist, selected=null）
 //   2. decode scope=market
-//   3. decode symbol + timeframe + source + strategy + event_id
-//   4. 非法 timeframe 回退 1d
-//   5. 非法 source 回退 watchlist
-//   6. encode→decode 往返一致（含 source/strategy/event_id/returnTo）
-//   7. symbol=null 时 encode 不包含 symbol 参数
-//   8. timeframe=1d（默认）时 encode 省略 timeframe
-//   9. source=watchlist（默认）时 encode 省略 source
-//  10. strategy 等于 source 默认值时 encode 省略 strategy
-//  11. event_id=null 时 encode 不包含 event_id
-//  12. buildMarketWorkspaceUrl 生成完整 URL
-//  13. defaultStrategyForSource：watchlist→watchlist_monitor, selection→dsa_selector
-//  14. selectInstrumentFromMarketPane：从 selection 上下文选股后重置 source/strategy/eventId/returnTo
-//  15. selectInstrumentFromMarketPane：保留 scope、timeframe
-//  16. changeMarketScope：切换 scope 后重置 source/strategy/eventId/returnTo
-//  17. changeMarketScope：保留 symbol、timeframe
-//  18. decode returnTo 参数
-//  19. encode returnTo 非 null 时写入
-//  20. encode returnTo=null 时不写入
-//  21. normalizeInternalReturnTo: 仅允许 /screener /market /messages 前缀
-//  22. normalizeInternalReturnTo: 拒绝外部 URL/双斜杠/javascript/超长值
-// 注：debug 已从普通 market URL 契约移除（管理员调试使用 /admin/stock-debug 独立路由）
+//   3. decode selected
+//   4. encode→decode 往返一致
+//   5. selected=null 时 encode 不包含 selected
+//   6. buildMarketWorkspaceUrl 生成完整 URL
+//   7. selectInstrumentInTable：设置 selected，保留 scope
+//   8. changeMarketScope：切换 scope 后清除 selected
+//   9. normalizeInternalReturnTo: 仅允许 /screener /market /messages 前缀，拒绝 /stock
+//  10. normalizeInternalReturnTo: 拒绝外部 URL/双斜杠/javascript/超长值
 
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
@@ -32,25 +19,21 @@ import {
   decodeMarketWorkspaceUrl,
   encodeMarketWorkspaceUrl,
   buildMarketWorkspaceUrl,
-  defaultStrategyForSource,
-  selectInstrumentFromMarketPane,
+  selectInstrumentInTable,
   changeMarketScope,
   normalizeInternalReturnTo,
+  decodeMarketListContext,
+  buildStrategyResultQueryParams,
+  resolveDetailSourceContext,
   DEFAULT_MARKET_SCOPE,
-  DEFAULT_TIMEFRAME,
-  DEFAULT_SOURCE,
   type MarketWorkspaceUrlState,
+  type MarketListContext,
 } from '../marketWorkspaceUrlState.ts'
 
-test('decode 默认值（无参数时 scope=watchlist, symbol=null, timeframe=1d, source=watchlist, strategy=watchlist_monitor, eventId=null, returnTo=null）', () => {
+test('decode 默认值（无参数时 scope=watchlist, selected=null）', () => {
   const state = decodeMarketWorkspaceUrl(new URLSearchParams())
   assert.equal(state.scope, DEFAULT_MARKET_SCOPE)
-  assert.equal(state.symbol, null)
-  assert.equal(state.timeframe, DEFAULT_TIMEFRAME)
-  assert.equal(state.source, DEFAULT_SOURCE)
-  assert.equal(state.strategy, 'watchlist_monitor')
-  assert.equal(state.eventId, null)
-  assert.equal(state.returnTo, null)
+  assert.equal(state.selected, null)
 })
 
 test('decode scope=market', () => {
@@ -58,343 +41,367 @@ test('decode scope=market', () => {
   assert.equal(state.scope, 'market')
 })
 
-test('decode symbol + timeframe + source + strategy + event_id', () => {
-  const state = decodeMarketWorkspaceUrl(new URLSearchParams(
-    'scope=watchlist&symbol=000001.SZ&timeframe=15m&source=selection&strategy=dsa_selector&event_id=evt-123',
-  ))
-  assert.equal(state.scope, 'watchlist')
-  assert.equal(state.symbol, '000001.SZ')
-  assert.equal(state.timeframe, '15m')
-  assert.equal(state.source, 'selection')
-  assert.equal(state.strategy, 'dsa_selector')
-  assert.equal(state.eventId, 'evt-123')
+test('decode selected', () => {
+  const state = decodeMarketWorkspaceUrl(new URLSearchParams('scope=market&selected=600519'))
+  assert.equal(state.scope, 'market')
+  assert.equal(state.selected, '600519')
 })
 
-test('非法 timeframe 回退 1d', () => {
-  const state = decodeMarketWorkspaceUrl(new URLSearchParams('timeframe=5min'))
-  assert.equal(state.timeframe, '1d')
-})
-
-test('非法 source 回退 watchlist', () => {
-  const state = decodeMarketWorkspaceUrl(new URLSearchParams('source=invalid'))
-  assert.equal(state.source, 'watchlist')
-})
-
-test('encode→decode 往返一致（含 source/strategy/event_id/returnTo）', () => {
+test('encode→decode 往返一致', () => {
   const original: MarketWorkspaceUrlState = {
     scope: 'market',
-    symbol: '600519.SH',
-    timeframe: '1h',
-    source: 'selection',
-    strategy: 'dsa_selector',
-    eventId: 'evt-456',
-    returnTo: '/screener?strategy=dsa_selector&page=2',
+    selected: '000001',
+    industry: null,
+    concept: null,
+    preset: null,
   }
   const encoded = encodeMarketWorkspaceUrl(original)
   const decoded = decodeMarketWorkspaceUrl(encoded)
-  assert.deepStrictEqual(decoded, original)
+  assert.deepEqual(decoded, original)
 })
 
-test('symbol=null 时 encode 不包含 symbol 参数', () => {
-  const params = encodeMarketWorkspaceUrl({
-    scope: 'watchlist', symbol: null, timeframe: '1d', source: 'watchlist', strategy: 'watchlist_monitor', eventId: null, returnTo: null,
-  })
-  assert.ok(!params.has('symbol'))
+test('selected=null 时 encode 不包含 selected', () => {
+  const params = encodeMarketWorkspaceUrl({ scope: 'market', selected: null, industry: null, concept: null, preset: null })
+  assert.equal(params.has('selected'), false)
 })
 
-test('timeframe=1d（默认）时 encode 省略 timeframe', () => {
-  const params = encodeMarketWorkspaceUrl({
-    scope: 'watchlist', symbol: '000001.SZ', timeframe: '1d', source: 'watchlist', strategy: 'watchlist_monitor', eventId: null, returnTo: null,
-  })
-  assert.ok(!params.has('timeframe'))
-})
-
-test('source=watchlist（默认）时 encode 省略 source', () => {
-  const params = encodeMarketWorkspaceUrl({
-    scope: 'watchlist', symbol: '000001.SZ', timeframe: '1d', source: 'watchlist', strategy: 'watchlist_monitor', eventId: null, returnTo: null,
-  })
-  assert.ok(!params.has('source'))
-})
-
-test('strategy 等于 source 默认值时 encode 省略 strategy', () => {
-  // source=watchlist 默认 strategy=watchlist_monitor → 省略
-  const paramsWatchlist = encodeMarketWorkspaceUrl({
-    scope: 'watchlist', symbol: '000001.SZ', timeframe: '1d', source: 'watchlist', strategy: 'watchlist_monitor', eventId: null, returnTo: null,
-  })
-  assert.ok(!paramsWatchlist.has('strategy'))
-
-  // source=selection 默认 strategy=dsa_selector → 省略
-  const paramsSelection = encodeMarketWorkspaceUrl({
-    scope: 'market', symbol: '000001.SZ', timeframe: '1d', source: 'selection', strategy: 'dsa_selector', eventId: null, returnTo: null,
-  })
-  assert.ok(!paramsSelection.has('strategy'))
-})
-
-test('event_id=null 时 encode 不包含 event_id', () => {
-  const params = encodeMarketWorkspaceUrl({
-    scope: 'watchlist', symbol: '000001.SZ', timeframe: '1d', source: 'watchlist', strategy: 'watchlist_monitor', eventId: null, returnTo: null,
-  })
-  assert.ok(!params.has('event_id'))
-})
-
-test('buildMarketWorkspaceUrl 生成完整 URL（strategy 等于 source 默认值时省略）', () => {
-  const url = buildMarketWorkspaceUrl({
-    scope: 'market', symbol: '000001.SZ', timeframe: '15m', source: 'selection', strategy: 'dsa_selector', eventId: 'evt-789', returnTo: null,
-  })
-  // source=selection 默认 strategy=dsa_selector，等于默认值故省略 strategy 参数
-  assert.equal(url, '/market?scope=market&symbol=000001.SZ&timeframe=15m&source=selection&event_id=evt-789')
-})
-
-test('buildMarketWorkspaceUrl strategy 非默认时写入 URL', () => {
-  const url = buildMarketWorkspaceUrl({
-    scope: 'market', symbol: '000001.SZ', timeframe: '15m', source: 'watchlist', strategy: 'dsa_selector', eventId: 'evt-789', returnTo: null,
-  })
-  // source=watchlist 默认 strategy=watchlist_monitor，传入 dsa_selector 非默认故写入
-  assert.equal(url, '/market?scope=market&symbol=000001.SZ&timeframe=15m&strategy=dsa_selector&event_id=evt-789')
-})
-
-test('buildMarketWorkspaceUrl 无 symbol 时生成简洁 URL', () => {
-  const url = buildMarketWorkspaceUrl({
-    scope: 'watchlist', symbol: null, timeframe: '1d', source: 'watchlist', strategy: 'watchlist_monitor', eventId: null, returnTo: null,
-  })
-  assert.equal(url, '/market?scope=watchlist')
-})
-
-test('defaultStrategyForSource：watchlist→watchlist_monitor, selection→dsa_selector', () => {
-  assert.equal(defaultStrategyForSource('watchlist'), 'watchlist_monitor')
-  assert.equal(defaultStrategyForSource('selection'), 'dsa_selector')
-})
-
-test('选择新股票时清除旧 event_id（encode eventId=null 不写入 event_id）', () => {
-  // 模拟 handleSelectSymbol：新 state eventId=null
-  const params = encodeMarketWorkspaceUrl({
-    scope: 'watchlist', symbol: '600519.SH', timeframe: '1d', source: 'watchlist', strategy: 'watchlist_monitor', eventId: null, returnTo: null,
-  })
-  assert.ok(!params.has('event_id'))
-  assert.equal(params.get('symbol'), '600519.SH')
-})
-
-// ===== 状态转换纯函数测试（selectInstrumentFromMarketPane / changeMarketScope）=====
-
-test('selectInstrumentFromMarketPane：从 selection 上下文选股后重置 source/strategy/eventId/returnTo', () => {
-  // 场景：从趋势选股进入工作区（source=selection, strategy=dsa_selector, event_id=evt-1, returnTo=/screener?...），
-  // 随后点击左栏自选中的另一只股票 → 必须重置为 watchlist/watchlist_monitor/null/null
-  const selectionState: MarketWorkspaceUrlState = {
-    scope: 'watchlist',
-    symbol: '000001.SZ',
-    timeframe: '15m',
-    source: 'selection',
-    strategy: 'dsa_selector',
-    eventId: 'evt-1',
-    returnTo: '/screener?strategy=dsa_selector&page=2',
-  }
-  const next = selectInstrumentFromMarketPane(selectionState, '600519.SH')
-  assert.equal(next.symbol, '600519.SH')
-  assert.equal(next.source, 'watchlist')
-  assert.equal(next.strategy, 'watchlist_monitor')
-  assert.equal(next.eventId, null)
-  assert.equal(next.returnTo, null)
-  // scope、timeframe 保留
-  assert.equal(next.scope, 'watchlist')
-  assert.equal(next.timeframe, '15m')
-})
-
-test('selectInstrumentFromMarketPane：保留 scope、timeframe（market scope + 1h）', () => {
-  // 场景：market scope 下 1h 周期，选择搜索结果中的股票 → scope=market、timeframe=1h
-  const state: MarketWorkspaceUrlState = {
-    scope: 'market',
-    symbol: null,
-    timeframe: '1h',
-    source: 'selection',
-    strategy: 'dsa_selector',
-    eventId: 'evt-2',
-    returnTo: '/screener?page=1',
-  }
-  const next = selectInstrumentFromMarketPane(state, '000002.SZ')
-  assert.equal(next.scope, 'market')
-  assert.equal(next.timeframe, '1h')
-  assert.equal(next.source, 'watchlist')
-  assert.equal(next.strategy, 'watchlist_monitor')
-  assert.equal(next.eventId, null)
-  assert.equal(next.returnTo, null)
-})
-
-test('changeMarketScope：切换 scope 后重置 source/strategy/eventId/returnTo（从 selection 切 watchlist）', () => {
-  // 场景：从趋势选股进入（source=selection, strategy=dsa_selector, event_id=evt-3, returnTo=/screener?...），
-  // 切换到 watchlist scope → 退出 selection 上下文
-  const selectionState: MarketWorkspaceUrlState = {
-    scope: 'market',
-    symbol: '000001.SZ',
-    timeframe: '1d',
-    source: 'selection',
-    strategy: 'dsa_selector',
-    eventId: 'evt-3',
-    returnTo: '/screener?page=2',
-  }
-  const next = changeMarketScope(selectionState, 'watchlist')
-  assert.equal(next.scope, 'watchlist')
-  assert.equal(next.source, 'watchlist')
-  assert.equal(next.strategy, 'watchlist_monitor')
-  assert.equal(next.eventId, null)
-  assert.equal(next.returnTo, null)
-  // symbol、timeframe 保留
-  assert.equal(next.symbol, '000001.SZ')
-  assert.equal(next.timeframe, '1d')
-})
-
-test('changeMarketScope：切到 market scope 也退出 selection 上下文', () => {
-  // 场景：selection 上下文下切到 market scope → 仍重置为 watchlist/watchlist_monitor/null/null
-  const selectionState: MarketWorkspaceUrlState = {
-    scope: 'watchlist',
-    symbol: '600519.SH',
-    timeframe: '1w',
-    source: 'selection',
-    strategy: 'dsa_selector',
-    eventId: 'evt-4',
-    returnTo: '/screener?page=1',
-  }
-  const next = changeMarketScope(selectionState, 'market')
-  assert.equal(next.scope, 'market')
-  assert.equal(next.source, 'watchlist')
-  assert.equal(next.strategy, 'watchlist_monitor')
-  assert.equal(next.eventId, null)
-  assert.equal(next.returnTo, null)
-  assert.equal(next.symbol, '600519.SH')
-  assert.equal(next.timeframe, '1w')
-})
-
-test('selectInstrumentFromMarketPane 后 encode URL 不含 source/strategy/event_id/returnTo', () => {
-  // 验证状态转换后 encode 的 URL 干净：source=watchlist（默认省略）、strategy=watchlist_monitor（默认省略）、event_id=null（省略）、returnTo=null（省略）
-  const selectionState: MarketWorkspaceUrlState = {
-    scope: 'watchlist',
-    symbol: '000001.SZ',
-    timeframe: '1d',
-    source: 'selection',
-    strategy: 'dsa_selector',
-    eventId: 'evt-5',
-    returnTo: '/screener?page=1',
-  }
-  const next = selectInstrumentFromMarketPane(selectionState, '600519.SH')
-  const params = encodeMarketWorkspaceUrl(next)
-  assert.ok(!params.has('source'))
-  assert.ok(!params.has('strategy'))
-  assert.ok(!params.has('event_id'))
-  assert.ok(!params.has('returnTo'))
-  assert.equal(params.get('symbol'), '600519.SH')
+test('scope 始终写入 encode', () => {
+  const params = encodeMarketWorkspaceUrl({ scope: 'watchlist', selected: null, industry: null, concept: null, preset: null })
   assert.equal(params.get('scope'), 'watchlist')
 })
 
-// ===== returnTo 专属测试 =====
-
-test('decode returnTo 参数', () => {
-  // returnTo 值含 & 必须URL编码（浏览器 setSearchParams 会自动编码）
-  const state = decodeMarketWorkspaceUrl(new URLSearchParams('returnTo=%2Fscreener%3Fstrategy%3Ddsa_selector%26page%3D2'))
-  assert.equal(state.returnTo, '/screener?strategy=dsa_selector&page=2')
+test('buildMarketWorkspaceUrl 生成完整 URL', () => {
+  const url = buildMarketWorkspaceUrl({ scope: 'market', selected: '600519', industry: null, concept: null, preset: null })
+  assert.ok(url.startsWith('/market?'))
+  assert.ok(url.includes('scope=market'))
+  assert.ok(url.includes('selected=600519'))
 })
 
-test('decode returnTo 含中文/特殊字符', () => {
-  const state = decodeMarketWorkspaceUrl(new URLSearchParams('returnTo=%2Fscreener%3Fkeyword%3D%E6%96%B0%E8%83%BD%E6%BA%90'))
-  assert.equal(state.returnTo, '/screener?keyword=新能源')
+test('buildMarketWorkspaceUrl 无 selected 时仍含 scope', () => {
+  const url = buildMarketWorkspaceUrl({ scope: 'watchlist', selected: null, industry: null, concept: null, preset: null })
+  assert.ok(url.includes('scope=watchlist'))
+  assert.ok(!url.includes('selected'))
 })
 
-test('encode returnTo 非 null 时写入', () => {
-  const params = encodeMarketWorkspaceUrl({
-    scope: 'watchlist', symbol: '000001.SZ', timeframe: '1d', source: 'watchlist', strategy: 'watchlist_monitor', eventId: null, returnTo: '/screener?page=1',
-  })
-  assert.equal(params.get('returnTo'), '/screener?page=1')
-})
-
-test('encode returnTo=null 时不写入', () => {
-  const params = encodeMarketWorkspaceUrl({
-    scope: 'watchlist', symbol: '000001.SZ', timeframe: '1d', source: 'watchlist', strategy: 'watchlist_monitor', eventId: null, returnTo: null,
-  })
-  assert.ok(!params.has('returnTo'))
-})
-
-test('selectInstrumentFromMarketPane 清除 returnTo', () => {
-  const state: MarketWorkspaceUrlState = {
-    scope: 'watchlist',
-    symbol: '000001.SZ',
-    timeframe: '1d',
-    source: 'selection',
-    strategy: 'dsa_selector',
-    eventId: 'evt-6',
-    returnTo: '/screener?page=1',
-  }
-  const next = selectInstrumentFromMarketPane(state, '600519.SH')
-  assert.equal(next.returnTo, null)
-})
-
-test('changeMarketScope 清除 returnTo', () => {
+test('selectInstrumentInTable：设置 selected，保留 scope', () => {
   const state: MarketWorkspaceUrlState = {
     scope: 'market',
-    symbol: '000001.SZ',
-    timeframe: '1d',
-    source: 'selection',
-    strategy: 'dsa_selector',
-    eventId: 'evt-7',
-    returnTo: '/screener?page=1',
+    selected: null,
+    industry: null,
+    concept: null,
+    preset: null,
   }
-  const next = changeMarketScope(state, 'watchlist')
-  assert.equal(next.returnTo, null)
+  const newState = selectInstrumentInTable(state, '000001')
+  assert.equal(newState.selected, '000001')
+  assert.equal(newState.scope, 'market')
 })
 
-// ===== normalizeInternalReturnTo 安全校验测试 =====
+test('changeMarketScope：切换 scope 后清除 selected', () => {
+  const state: MarketWorkspaceUrlState = {
+    scope: 'market',
+    selected: '000001',
+    industry: null,
+    concept: null,
+    preset: null,
+  }
+  const newState = changeMarketScope(state, 'watchlist')
+  assert.equal(newState.scope, 'watchlist')
+  assert.equal(newState.selected, null)
+})
 
-test('normalizeInternalReturnTo: 允许 /screener /market /messages 纯路径', () => {
-  assert.equal(normalizeInternalReturnTo('/screener'), '/screener')
+test('normalizeInternalReturnTo: 仅允许 /screener /market /messages 前缀，拒绝 /stock', () => {
   assert.equal(normalizeInternalReturnTo('/market'), '/market')
-  assert.equal(normalizeInternalReturnTo('/messages'), '/messages')
-})
-
-test('normalizeInternalReturnTo: 允许带 query 和 hash', () => {
-  assert.equal(normalizeInternalReturnTo('/screener?strategy=dsa_selector&page=2'), '/screener?strategy=dsa_selector&page=2')
   assert.equal(normalizeInternalReturnTo('/market?scope=watchlist'), '/market?scope=watchlist')
-  assert.equal(normalizeInternalReturnTo('/messages#inbox'), '/messages#inbox')
-  assert.equal(normalizeInternalReturnTo('/screener?keyword=新能源'), '/screener?keyword=新能源')
+  assert.equal(normalizeInternalReturnTo('/screener'), '/screener')
+  assert.equal(normalizeInternalReturnTo('/messages'), '/messages')
+  assert.equal(normalizeInternalReturnTo('/stock/600519'), null)
+  assert.equal(normalizeInternalReturnTo('/stock/600519?returnTo=/market'), null)
 })
 
-test('normalizeInternalReturnTo: 拒绝外部 http/https URL', () => {
-  assert.equal(normalizeInternalReturnTo('http://evil.com/screener'), null)
-  assert.equal(normalizeInternalReturnTo('https://evil.com/market'), null)
-  assert.equal(normalizeInternalReturnTo('HTTP://EVIL.COM/screener'), null)
-})
-
-test('normalizeInternalReturnTo: 拒绝双斜杠（协议相对 URL）', () => {
-  assert.equal(normalizeInternalReturnTo('//evil.com/screener'), null)
-  assert.equal(normalizeInternalReturnTo('///screener'), null)
-})
-
-test('normalizeInternalReturnTo: 拒绝 javascript: 协议', () => {
+test('normalizeInternalReturnTo: 拒绝外部 URL/双斜杠/javascript/超长值', () => {
+  assert.equal(normalizeInternalReturnTo('https://evil.com'), null)
+  assert.equal(normalizeInternalReturnTo('http://evil.com'), null)
+  assert.equal(normalizeInternalReturnTo('//evil.com'), null)
   assert.equal(normalizeInternalReturnTo('javascript:alert(1)'), null)
-  assert.equal(normalizeInternalReturnTo('JAVASCRIPT:alert(1)'), null)
-  assert.equal(normalizeInternalReturnTo('javascript:/screener'), null)
-})
-
-test('normalizeInternalReturnTo: 拒绝非白名单前缀', () => {
+  // CHANGE-20260715-005: 限制从 500 提升到 4096（复杂筛选 URL 编码后可能超过 500）
+  // /market 前缀 + 超过 500 但小于 4096 的 URL 应通过
+  const longMarketUrl = '/market?scope=market&filters=' + 'a'.repeat(600)
+  assert.equal(normalizeInternalReturnTo(longMarketUrl), longMarketUrl)
+  // 超过 4096 的 URL 仍被拒绝
+  assert.equal(normalizeInternalReturnTo('/market?' + 'a'.repeat(4090)), null)
+  // 纯 a 仍然被拒绝（不以白名单前缀开头）
+  assert.equal(normalizeInternalReturnTo('a'.repeat(501)), null)
+  assert.equal(normalizeInternalReturnTo('a'.repeat(500)), null)
   assert.equal(normalizeInternalReturnTo('/admin'), null)
-  assert.equal(normalizeInternalReturnTo('/login'), null)
-  assert.equal(normalizeInternalReturnTo('/capture/stock/000001'), null)
-  assert.equal(normalizeInternalReturnTo('/settings'), null)
-  assert.equal(normalizeInternalReturnTo('screener'), null)  // 缺少前导 /
-  assert.equal(normalizeInternalReturnTo('/screenerX'), null)  // 前缀不匹配（X 紧跟）
-})
-
-test('normalizeInternalReturnTo: 拒绝超长字符串（>200）', () => {
-  const long = '/screener?' + 'x'.repeat(200)
-  assert.equal(normalizeInternalReturnTo(long), null)
-})
-
-test('normalizeInternalReturnTo: 处理空/null/undefined', () => {
+  assert.equal(normalizeInternalReturnTo('/unknown'), null)
   assert.equal(normalizeInternalReturnTo(null), null)
-  assert.equal(normalizeInternalReturnTo(undefined), null)
   assert.equal(normalizeInternalReturnTo(''), null)
-  assert.equal(normalizeInternalReturnTo('   '), null)  // 仅空白 trim 后为空
 })
 
-test('normalizeInternalReturnTo: trim 后校验', () => {
-  // 前后空白被 trim 后通过
-  assert.equal(normalizeInternalReturnTo('  /screener?page=1  '), '/screener?page=1')
-  // trim 后为空 → null
-  assert.equal(normalizeInternalReturnTo('   '), null)
+// ===== CHANGE-20260713-009: 详情页来源上下文共享纯函数契约测试 =====
+// 覆盖 7 项关键场景：
+//   1. 任意合法 /market URL 都识别为 market context（不要求 keyword/page/sort 存在）
+//   2. scope=market → universe=all；scope=watchlist → universe=watchlist
+//   3. 仅含 industry/concept 的 /market URL 也识别为 market context
+//   4. filters JSON 字符串正确解码并转换为 metric_filters
+//   5. RATIO/PERCENTILE 类指标百分号自动归一化
+//   6. 非 /market、外部 URL、非法 returnTo 返回 null
+//   7. buildStrategyResultQueryParams 保留完整 keyword/industry/concept/sort/page/page_size
+
+test('CHANGE-009-1: 任意合法 /market URL 都识别为 market context（仅 scope=market，无其他参数）', () => {
+  // 关键场景：旧逻辑要求 keyword/page/sort 才认为是 market context，导致纯 /market?scope=market 被识别为 null
+  // 新逻辑：任意合法 /market URL 都识别为 market context
+  const ctx = decodeMarketListContext('/market?scope=market')
+  assert.notEqual(ctx, null)
+  assert.equal(ctx!.scope, 'market')
+  assert.equal(ctx!.keyword, null)
+  assert.equal(ctx!.industry, null)
+  assert.equal(ctx!.concept, null)
+  assert.equal(ctx!.sort, null)
+  assert.equal(ctx!.filters, null)
+  assert.equal(ctx!.page, null)
+  assert.equal(ctx!.page_size, null)
+})
+
+test('CHANGE-009-2: scope=market → universe=all；scope=watchlist → universe=watchlist', () => {
+  const marketCtx = decodeMarketListContext('/market?scope=market&keyword=600519')
+  const marketQuery = buildStrategyResultQueryParams(marketCtx!)
+  assert.equal(marketQuery.universe, 'all')
+  assert.equal(marketQuery.keyword, '600519')
+
+  const watchlistCtx = decodeMarketListContext('/market?scope=watchlist')
+  const watchlistQuery = buildStrategyResultQueryParams(watchlistCtx!)
+  assert.equal(watchlistQuery.universe, 'watchlist')
+
+  // 无 scope 参数默认 watchlist
+  const defaultCtx = decodeMarketListContext('/market')
+  assert.equal(defaultCtx!.scope, 'watchlist')
+  const defaultQuery = buildStrategyResultQueryParams(defaultCtx!)
+  assert.equal(defaultQuery.universe, 'watchlist')
+})
+
+test('CHANGE-009-3: 仅含 industry/concept 的 /market URL 也识别为 market context', () => {
+  // 关键场景：用户在 /market 页只选了行业/概念筛选，没有 keyword/page/sort
+  // 旧逻辑会返回 null，导致详情页回退到自选列表，与来源不一致
+  const ctx = decodeMarketListContext('/market?scope=market&industry=半导体&concept=芯片')
+  assert.notEqual(ctx, null)
+  assert.equal(ctx!.scope, 'market')
+  assert.equal(ctx!.industry, '半导体')
+  assert.equal(ctx!.concept, '芯片')
+  assert.equal(ctx!.keyword, null)
+
+  const query = buildStrategyResultQueryParams(ctx!)
+  assert.equal(query.universe, 'all')
+  assert.equal(query.industry, '半导体')
+  assert.equal(query.concept, '芯片')
+})
+
+test('CHANGE-009-4: filters JSON 字符串正确解码并转换为 metric_filters', () => {
+  // filters 编码格式与 screenerUrlState 一致：[{key, op, value, value2}, ...]
+  const filters = JSON.stringify([
+    { key: 'vwap_ret_avg', op: 'gt', value: 0.05 },
+    { key: 'offset_percentile', op: 'between', value: 0.2, value2: 0.8 },
+  ])
+  const ctx = decodeMarketListContext(`/market?scope=market&filters=${encodeURIComponent(filters)}`)
+  assert.notEqual(ctx, null)
+  assert.equal(ctx!.filters!.length, 2)
+  assert.equal(ctx!.filters![0].key, 'vwap_ret_avg')
+  assert.equal(ctx!.filters![0].operator, 'gt')
+  assert.equal(ctx!.filters![1].key, 'offset_percentile')
+  assert.equal(ctx!.filters![1].operator, 'between')
+
+  const query = buildStrategyResultQueryParams(ctx!)
+  assert.ok(query.metric_filters, 'metric_filters should be set')
+  const parsed = JSON.parse(query.metric_filters!)
+  assert.equal(parsed.length, 2)
+  assert.equal(parsed[0].metric_key, 'vwap_ret_avg')
+  assert.equal(parsed[0].operator, 'gt')
+  assert.equal(parsed[0].value, 0.05)
+  assert.equal(parsed[1].metric_key, 'offset_percentile')
+  assert.equal(parsed[1].operator, 'between')
+  assert.equal(parsed[1].value1, 0.2)
+  assert.equal(parsed[1].value2, 0.8)
+})
+
+test('CHANGE-009-5: RATIO/PERCENTILE 类指标百分号自动归一化', () => {
+  // 用户输入 5% 应转换为 0.05（vwap_ret_avg 是 RATIO_METRICS）
+  // 用户输入 80% 应转换为 0.8（offset_percentile 是 PERCENTILE_METRICS）
+  const filters = JSON.stringify([
+    { key: 'vwap_ret_avg', op: 'gt', value: '5%' },
+    { key: 'offset_percentile', op: 'lt', value: '80%' },
+  ])
+  const ctx = decodeMarketListContext(`/market?scope=market&filters=${encodeURIComponent(filters)}`)
+  const query = buildStrategyResultQueryParams(ctx!)
+  const parsed = JSON.parse(query.metric_filters!)
+  assert.equal(parsed[0].value, 0.05)
+  assert.equal(parsed[1].value, 0.8)
+
+  // 不带 % 的值保持原样
+  const filters2 = JSON.stringify([{ key: 'vwap_ret_avg', op: 'gt', value: 0.05 }])
+  const ctx2 = decodeMarketListContext(`/market?scope=market&filters=${encodeURIComponent(filters2)}`)
+  const query2 = buildStrategyResultQueryParams(ctx2!)
+  const parsed2 = JSON.parse(query2.metric_filters!)
+  assert.equal(parsed2[0].value, 0.05)
+})
+
+test('CHANGE-009-6: 非 /market、外部 URL、非法 returnTo 返回 null', () => {
+  // 非 /market 前缀
+  assert.equal(decodeMarketListContext('/screener'), null)
+  assert.equal(decodeMarketListContext('/messages'), null)
+  assert.equal(decodeMarketListContext('/admin'), null)
+  assert.equal(decodeMarketListContext('/stock/600519'), null)
+
+  // 外部 URL
+  assert.equal(decodeMarketListContext('https://evil.com'), null)
+  assert.equal(decodeMarketListContext('http://evil.com'), null)
+  assert.equal(decodeMarketListContext('//evil.com'), null)
+  assert.equal(decodeMarketListContext('javascript:alert(1)'), null)
+
+  // 空/null/超长
+  assert.equal(decodeMarketListContext(null), null)
+  assert.equal(decodeMarketListContext(''), null)
+  assert.equal(decodeMarketListContext('a'.repeat(501)), null)
+})
+
+test('CHANGE-009-7: buildStrategyResultQueryParams 保留完整 keyword/industry/concept/sort/page/page_size', () => {
+  const ctx: MarketListContext = {
+    scope: 'market',
+    keyword: '茅台',
+    industry: '白酒',
+    concept: '消费',
+    sort: { key: 'change_pct', direction: 'desc' },
+    filters: null,
+    page: 2,
+    page_size: 50,
+    preset: null,
+  }
+  const query = buildStrategyResultQueryParams(ctx)
+  assert.equal(query.universe, 'all')
+  assert.equal(query.keyword, '茅台')
+  assert.equal(query.industry, '白酒')
+  assert.equal(query.concept, '消费')
+  assert.equal(query.sort_by, 'change_pct')
+  assert.equal(query.sort_desc, true)
+  assert.equal(query.page, 2)
+  assert.equal(query.page_size, 50)
+  assert.equal(query.metric_filters, undefined) // filters 为 null 时不设置
+
+  // 验证 sort=asc 时 sort_desc=false
+  const ctxAsc: MarketListContext = {
+    ...ctx,
+    sort: { key: 'change_pct', direction: 'asc' },
+  }
+  const queryAsc = buildStrategyResultQueryParams(ctxAsc)
+  assert.equal(queryAsc.sort_desc, false)
+})
+
+// ===== CHANGE-20260715-007: resolveDetailSourceContext 契约测试 =====
+// 唯一纯函数：StockDetailPage 和 useStockDetailActions 只消费此结果，禁止各自推导。
+// 优先级：有效 /market returnTo.scope → 合法 source 参数 → 默认 watchlist。
+// 覆盖：
+//   1. 有效 /market returnTo scope=market → source=selection, strategy=dsa_selector
+//   2. 有效 /market returnTo scope=watchlist → source=watchlist, strategy=watchlist_monitor
+//   3. returnTo 优先级高于 rawSource（returnTo=market 但 rawSource=watchlist → 仍 selection）
+//   4. returnTo 优先级高于 rawStrategy（returnTo=market 但 rawStrategy=foo → 仍 dsa_selector）
+//   5. 无有效 returnTo + rawSource=selection → sourceContextInvalid=true（不静默回退自选）
+//   6. 无有效 returnTo + rawSource=watchlist → sourceContextInvalid=false
+//   7. 无有效 returnTo + rawSource 非法 → 归一化为 watchlist
+//   8. 无有效 returnTo + rawStrategy 缺失 → defaultStrategyForSource(finalSource)
+//   9. 无有效 returnTo + rawStrategy 提供 → 使用 rawStrategy
+//  10. 全部为 null → 默认 watchlist / watchlist_monitor / sourceContextInvalid=false
+//  11. returnTo 为 /screener（非 /market）→ marketContext=null，回退 rawSource
+//  12. returnTo 为外部 URL → marketContext=null，回退 rawSource
+
+test('CHANGE-007-1: 有效 /market returnTo scope=market → source=selection, strategy=dsa_selector', () => {
+  const ctx = resolveDetailSourceContext('/market?scope=market&keyword=600519', null, null)
+  assert.equal(ctx.source, 'selection')
+  assert.equal(ctx.strategy, 'dsa_selector')
+  assert.notEqual(ctx.marketContext, null)
+  assert.equal(ctx.marketContext!.scope, 'market')
+  assert.equal(ctx.sourceContextInvalid, false)
+})
+
+test('CHANGE-007-2: 有效 /market returnTo scope=watchlist → source=watchlist, strategy=watchlist_monitor', () => {
+  const ctx = resolveDetailSourceContext('/market?scope=watchlist', null, null)
+  assert.equal(ctx.source, 'watchlist')
+  assert.equal(ctx.strategy, 'watchlist_monitor')
+  assert.notEqual(ctx.marketContext, null)
+  assert.equal(ctx.marketContext!.scope, 'watchlist')
+  assert.equal(ctx.sourceContextInvalid, false)
+})
+
+test('CHANGE-007-3: returnTo 优先级高于 rawSource（returnTo=market 但 rawSource=watchlist → 仍 selection）', () => {
+  const ctx = resolveDetailSourceContext('/market?scope=market', 'watchlist', 'watchlist_monitor')
+  assert.equal(ctx.source, 'selection')
+  assert.equal(ctx.strategy, 'dsa_selector')
+  assert.equal(ctx.sourceContextInvalid, false)
+})
+
+test('CHANGE-007-4: returnTo 优先级高于 rawStrategy（returnTo=market 但 rawStrategy=foo → 仍 dsa_selector）', () => {
+  const ctx = resolveDetailSourceContext('/market?scope=market', 'selection', 'foo')
+  assert.equal(ctx.source, 'selection')
+  assert.equal(ctx.strategy, 'dsa_selector')
+  assert.equal(ctx.sourceContextInvalid, false)
+})
+
+test('CHANGE-007-5: 无有效 returnTo + rawSource=selection → sourceContextInvalid=true（不静默回退自选）', () => {
+  const ctx = resolveDetailSourceContext(null, 'selection', null)
+  assert.equal(ctx.source, 'selection')
+  assert.equal(ctx.marketContext, null)
+  assert.equal(ctx.sourceContextInvalid, true)
+  // strategy 仍按 source=selection 默认为 dsa_selector
+  assert.equal(ctx.strategy, 'dsa_selector')
+})
+
+test('CHANGE-007-6: 无有效 returnTo + rawSource=watchlist → sourceContextInvalid=false', () => {
+  const ctx = resolveDetailSourceContext(null, 'watchlist', null)
+  assert.equal(ctx.source, 'watchlist')
+  assert.equal(ctx.marketContext, null)
+  assert.equal(ctx.sourceContextInvalid, false)
+  assert.equal(ctx.strategy, 'watchlist_monitor')
+})
+
+test('CHANGE-007-7: 无有效 returnTo + rawSource 非法 → 归一化为 watchlist', () => {
+  const ctx = resolveDetailSourceContext(null, 'invalid_source', null)
+  assert.equal(ctx.source, 'watchlist')
+  assert.equal(ctx.sourceContextInvalid, false)
+  assert.equal(ctx.strategy, 'watchlist_monitor')
+})
+
+test('CHANGE-007-8: 无有效 returnTo + rawStrategy 缺失 → defaultStrategyForSource(finalSource)', () => {
+  // source=selection 缺 strategy → dsa_selector
+  const ctxSel = resolveDetailSourceContext(null, 'selection', null)
+  assert.equal(ctxSel.strategy, 'dsa_selector')
+  // source=watchlist 缺 strategy → watchlist_monitor
+  const ctxWl = resolveDetailSourceContext(null, 'watchlist', null)
+  assert.equal(ctxWl.strategy, 'watchlist_monitor')
+})
+
+test('CHANGE-007-9: 无有效 returnTo + rawStrategy 提供 → 使用 rawStrategy', () => {
+  const ctx = resolveDetailSourceContext(null, 'watchlist', 'custom_strategy')
+  assert.equal(ctx.source, 'watchlist')
+  assert.equal(ctx.strategy, 'custom_strategy')
+  assert.equal(ctx.sourceContextInvalid, false)
+})
+
+test('CHANGE-007-10: 全部为 null → 默认 watchlist / watchlist_monitor / sourceContextInvalid=false', () => {
+  const ctx = resolveDetailSourceContext(null, null, null)
+  assert.equal(ctx.source, 'watchlist')
+  assert.equal(ctx.strategy, 'watchlist_monitor')
+  assert.equal(ctx.marketContext, null)
+  assert.equal(ctx.sourceContextInvalid, false)
+})
+
+test('CHANGE-007-11: returnTo 为 /screener（非 /market）→ marketContext=null，回退 rawSource', () => {
+  const ctx = resolveDetailSourceContext('/screener', 'selection', null)
+  assert.equal(ctx.marketContext, null)
+  assert.equal(ctx.source, 'selection')
+  assert.equal(ctx.sourceContextInvalid, true)
+})
+
+test('CHANGE-007-12: returnTo 为外部 URL → marketContext=null，回退 rawSource', () => {
+  const ctx = resolveDetailSourceContext('https://evil.com', 'watchlist', null)
+  assert.equal(ctx.marketContext, null)
+  assert.equal(ctx.source, 'watchlist')
+  assert.equal(ctx.sourceContextInvalid, false)
 })

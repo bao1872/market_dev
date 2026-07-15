@@ -556,7 +556,7 @@ export default function AdminIndexPage() {
                     <span>耗时</span>
                     <b className="num">{dsaDuration}</b>
                   </div>
-                  <Link className="btn small card-body-action" to="/admin/strategies">
+                  <Link className="btn small card-body-action" to="/admin/after-close">
                     查看运行详情
                   </Link>
                 </>

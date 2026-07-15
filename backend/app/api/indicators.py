@@ -137,6 +137,7 @@ async def get_indicators(
     bars: int = Query(250, ge=50, le=4000, description="返回最近 N 根 bar 的指标（最大 4000，与 Node Cluster 15m 契约对齐）"),
     force_refresh: bool = Query(False, description="跳过 Redis 指标缓存强制实时计算（截图链路使用）"),
     capture: bool = Query(False, description="截图模式标记（等价 force_refresh）"),
+    include_smc: bool = Query(False, description="CHANGE-011: 是否计算 SMC 指标（默认 False，前端通过 IndicatorToolbar 显式开启；不开启时后端不计算 SMC，不消耗 CPU）"),
     db: AsyncSession = Depends(get_db),
     *,
     response: Response,
@@ -149,6 +150,8 @@ async def get_indicators(
     3. 结果写入 Redis 缓存（TTL 300s）
 
     注：MonitorEvaluation.metrics 复用路径已禁用（结构不兼容）。
+    注：include_smc=True 时额外计算 SMC 指标（BOS/CHoCH/OB/EQH/EQL/trailing），
+        完全排除 FVG；SMC 是按需计算的独立图层，不进入 DSA、Node 监控、Capture 或右栏 context。
 
     响应头：
         X-Data-Source: redis | computed
@@ -172,10 +175,13 @@ async def get_indicators(
     last_bar_time = await _get_last_bar_time(db, instrument_id)
 
     # [指标缓存] - 1. 查询 Redis 缓存（force_refresh/capture 跳过读取，但仍写回最新结果）
+    # [CHANGE-011 SMC] - include_smc 作为缓存键后缀，SMC 与非 SMC 独立缓存
     bypass_cache = force_refresh or capture
     cached = None
     if not bypass_cache:
-        cached = await indicator_cache.get(instrument_id, timeframe, adj, last_bar_time)
+        cached = await indicator_cache.get(
+            instrument_id, timeframe, adj, last_bar_time, include_smc=include_smc,
+        )
     if cached is not None:
         total_ms = int((time.time() - start_ms) * 1000)
         if response is not None:
@@ -183,14 +189,14 @@ async def get_indicators(
             response.headers["X-Cache-Hit"] = "true"
             response.headers["X-Total-Ms"] = str(total_ms)
         logger.info(
-            "指标缓存命中 instrument_id=%s timeframe=%s last_bar=%s",
-            instrument_id, timeframe, last_bar_time,
+            "指标缓存命中 instrument_id=%s timeframe=%s last_bar=%s include_smc=%s",
+            instrument_id, timeframe, last_bar_time, include_smc,
         )
         return cached
     if bypass_cache:
         logger.info(
-            "指标缓存跳过读取(force_refresh/capture) instrument_id=%s timeframe=%s last_bar=%s",
-            instrument_id, timeframe, last_bar_time,
+            "指标缓存跳过读取(force_refresh/capture) instrument_id=%s timeframe=%s last_bar=%s include_smc=%s",
+            instrument_id, timeframe, last_bar_time, include_smc,
         )
 
     # [指标缓存] - 2. 缓存未命中：实时计算（_try_monitor_evaluation 已禁用，结构不兼容）
@@ -201,6 +207,7 @@ async def get_indicators(
             # 此分支当前不会进入（_try_monitor_evaluation 已禁用，保留以防未来恢复）
             await indicator_cache.set(
                 instrument_id, timeframe, adj, last_bar_time, eval_metrics,
+                include_smc=include_smc,
             )
             total_ms = int((time.time() - start_ms) * 1000)
             if response is not None:
@@ -214,18 +221,22 @@ async def get_indicators(
             return eval_metrics
 
         # [指标缓存] - 3. 实时计算（默认路径）
+        # [CHANGE-011 SMC] - 传递 include_smc 参数；include_smc=False 时后端不计算 SMC
         result = await compute_all_indicators(
             session=db,
             instrument_id=instrument_id,
             timeframe=timeframe,
             adj=adj,
             bars=bars,
+            include_smc=include_smc,
         )
         data_source = "computed"
 
         # [指标缓存] - 4. 写入 Redis 缓存
+        # [CHANGE-011 SMC] - include_smc 作为缓存键后缀，SMC 与非 SMC 独立缓存
         await indicator_cache.set(
             instrument_id, timeframe, adj, last_bar_time, result,
+            include_smc=include_smc,
         )
 
         total_ms = int((time.time() - start_ms) * 1000)
@@ -260,6 +271,10 @@ if __name__ == "__main__":
     assert "bars" in params, "应有 bars 参数"
     assert "db" in params, "应有 db 参数"
     assert "response" in params, "应有 response 参数"
+    # [CHANGE-011 SMC] - 验证 include_smc 参数存在且默认为 False
+    assert "include_smc" in params, "应有 include_smc 参数（CHANGE-011 SMC 按需计算）"
+    assert sig.parameters["include_smc"].default is False, \
+        "include_smc 默认值应为 False（按需计算，前端默认不开启 SMC）"
     print(f"get_indicators params={params} OK")
 
     # 3. 验证常量

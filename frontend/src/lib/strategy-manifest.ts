@@ -1,6 +1,6 @@
 // 策略 UI Manifest（V1.5.2）
 // 对应原型 assets/strategy-manifest.js
-// 定义所有策略图层、策略映射、计算窗口
+// 定义所有图表图层、策略映射、计算窗口
 // 图层面板由 Manifest 动态生成，页面不写死具体策略
 
 export type StrategyKind = 'selection' | 'monitor'
@@ -276,24 +276,5 @@ export function getLayerGroups(layerIds: string[]): Record<string, LayerDef[]> {
   return groups
 }
 
-// ===== 策略图示分组（对应原型 DISPLAY_GROUPS）=====
-// 个股详情页按策略统一控制显示。一个开关统一控制该策略的全部图层
-export interface DisplayGroupDef {
-  id: string
-  name: string
-  shortName: string
-  section: string
-  color: string
-  description: string
-  layers: string[]
-  anchorLayer: string
-}
-
-export const DISPLAY_GROUPS: Record<string, DisplayGroupDef> = {
-  dsa: { id: 'dsa', name: '趋势选股', shortName: '趋势', section: '选股策略', color: '#ff1744', description: '趋势参考价 · 选股命中标记', layers: ['dsa', 'selection'], anchorLayer: 'dsa' },
-  breakout: { id: 'breakout', name: '突破强度', shortName: '突破', section: '选股策略', color: '#ef5350', description: '压力区 · 突破确认 · 选股命中标记', layers: ['breakout', 'selection'], anchorLayer: 'breakout' },
-  node: { id: 'node', name: '成交量节点', shortName: '节点', section: '监控策略', color: '#4f7cff', description: '筹码峰 · 节点区间 · POC · 事件标记', layers: ['profile', 'node', 'poc'], anchorLayer: 'node' },
-  bb: { id: 'bb', name: '布林带', shortName: 'BB', section: '监控策略', color: '#9c27b0', description: '布林带 · SMA(20) ± 2σ', layers: ['bb'], anchorLayer: 'bb' },
-  macd: { id: 'macd', name: 'MACD', shortName: 'MACD', section: '技术指标', color: '#f4c430', description: 'MACD 副图 · DIF/DEA/Histogram', layers: ['macd'], anchorLayer: 'macd' },
-  sqzmom: { id: 'sqzmom', name: 'SQZMOM_LB', shortName: 'SQZMOM', section: '技术指标', color: '#26a69a', description: 'Squeeze Momentum · LazyBear Pine 复刻', layers: ['sqzmom'], anchorLayer: 'sqzmom' },
-}
+// [P0-5] DISPLAY_GROUPS / DisplayGroupDef 已删除（tv-strategy-legend 唯一消费者已移除）。
+//   图层开关唯一真源在 IndicatorToolbar，不再需要"策略图示分组"只读展示。

@@ -8,7 +8,7 @@
 | redis | trading-redis | 内网 | Redis 7，volume `trading-redisdata` |
 | backend | trading-backend | 8000 | FastAPI |
 | frontend | trading-frontend | 80 | Nginx + React build |
-| worker-bars-scheduler | trading-worker-bars-scheduler | 无 | 行情调度 |
+| worker-bars-scheduler | trading-worker-bars-scheduler | 无 | 行情调度（16:00 bars_refresh + 17:00 board_sync，同一 AsyncIOScheduler） |
 | worker-strategy-scheduler | trading-worker-strategy-scheduler | 无 | DSA 调度 |
 | worker-calendar | trading-worker-calendar | 无 | 交易日历 |
 | worker-monitor | trading-worker-monitor | 无 | 盘中监控 |
@@ -34,6 +34,7 @@
 | CONFIG_FILE | 生产配置 |
 | POSTGRES_USER/PASSWORD/DB | PostgreSQL 容器 |
 | STRATEGY_RUN_TOTAL_TIMEOUT_SECONDS | worker-strategy-batch run 级总超时（默认 7200） |
+| BOARD_SYNC_ENABLED | board_sync 开关（默认 `false`）；`false` 时 scheduled_board_sync 跳过执行并记录 `status=skipped` + `reason_code=board_provider_unavailable`；仅当 THS provider 可用时设置 `true` |
 
 Secret 不写入文档示例，不回显日志。
 
@@ -72,6 +73,10 @@ SELECT job_name, status, business_date, started_at, finished_at FROM scheduler_j
 - capture static accessible；
 - expired member 403 verified；
 - admin jobs page shows real state.
+
+## 4.1 `CORE_ONLY` 构建范围
+
+`deploy.sh` 中 `CORE_ONLY=1` 用于受控恢复，只构建 `backend frontend`（不构建 `worker-capture`）。需要完整业务能力时必须运行对应 worker：趋势选股需要 strategy_batch/scheduler，飞书图片需要 capture/outbox/delivery。非 `CORE_ONLY` 模式下 deploy.sh 构建全部服务（含 `worker-capture`）。
 
 ## 5. Docker 镜像保护
 

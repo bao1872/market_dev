@@ -786,6 +786,12 @@ export default function SettingsPage() {
         </section>
       </div>
 
+      {/* CHANGE-20260714-001: 开源组件与版权署名（lightweight-charts 图内 logo 已移除） */}
+      <footer className="settings-attribution">
+        <span>开源组件与版权：</span>
+        <a href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer">TradingView Lightweight Charts</a>
+      </footer>
+
       {/* 续期弹窗 */}
       {showRenewModal && (
         <RenewModal

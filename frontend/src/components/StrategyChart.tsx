@@ -9,11 +9,8 @@ import { useEffect, useRef, useState, useMemo, useCallback } from 'react'
 import clsx from 'clsx'
 import {
   CALCULATION_WINDOWS,
-  DISPLAY_GROUPS,
   STRATEGIES,
   FEISHU_CAPTURE_LAYERS,
-  type DisplayGroupDef,
-  type FeishuCaptureLayer,
 } from '../lib/strategy-manifest'
 import type { ChartLayer, DsaSelectorData, IndicatorResponse } from '../api/endpoints'
 import {
@@ -25,6 +22,15 @@ import {
   panViewport,
   zoomAtAnchor,
 } from './chartViewport'
+import type { ChartLayerVisibility } from '../features/stock-research/stockResearchTypes'
+
+// [ChartRightPadding] - 描述: K 线绘图区右侧留白比例（CHANGE-20260713-008）
+// 最新 K 线位于绘图区约 80% 位置（留白 20%，落在 18%-22% 要求区间内）。
+// 通过压缩 step（bar 分布宽度）实现：所有坐标映射统一使用 step，
+// 十字线/滚轮锚点/Pointer 拖拽/双击复位/节点/事件命中自动同步。
+// 网格线和十字线水平线仍延伸到 g.plotRight（保持全宽），只压缩 bar 分布区域。
+// 不修改 Node/Profile/POC 算法、indicator_contract、盘中监控或 Capture 口径。
+const RIGHT_PADDING_RATIO = 0.20
 
 // ===== 颜色常量（A 股红涨绿跌，对齐原型 charts.js 的 C 对象）=====
 const C = {
@@ -82,6 +88,8 @@ export interface LayerVisibility {
   delta: boolean
   events: boolean
   sqzmom: boolean
+  // [CHANGE-011 SMC] - 智能资金图层（BOS/CHoCH/OB/EQH/EQL/trailing），按需计算
+  smc: boolean
 }
 
 export interface StrategyChartProps {
@@ -101,6 +109,10 @@ export interface StrategyChartProps {
   onViewportChange?: (vp: ChartViewport) => void
   // [feishu-capture] - 描述: 飞书截图模式，强制开启 FEISHU_CAPTURE_LAYERS 且不可关闭，不读写 localStorage
   isCaptureMode?: boolean
+  // [chartLayerVisibility] - 图表图层显隐偏好（PRD §6.2 单一真源 v2）
+  // 由父组件 StockResearchWorkspace 持有并传入；StrategyChart 作为受控组件，不再内部管理 layers state。
+  // 截图模式时不传（undefined），由 StrategyChart 内部派生 forced layers。
+  layerVisibility?: ChartLayerVisibility
 }
 
 // 计算后的 Bar（含指标字段）
@@ -261,19 +273,16 @@ function formatTime(timeStr: string): string {
 // [chartViewport] - 时间键规范化和时间轴刻度函数已迁移至 src/utils/chartTime.ts
 //   纯 .ts 文件便于 Node --experimental-strip-types 单元测试（DSA source alignment contract test）
 import { normalizeChartTime, timeTicks } from '@/utils/chartTime'
-// [DSA Overlay Policy] - DSA 全周期支持与 title 提示文案（PR #32）
+// [DSA Overlay Policy] - DSA 全周期支持（PR #32）
 //   DSA VWAP 支持 1d/15m/1h/1w/1mo；1d 是主结构锚，非 1d 是验证图层
 import {
-  DSA_TITLE_HINT,
   shouldCheckDsaMismatch,
   shouldIncludeDsaInPriceRange,
   shouldRenderBbLayer,
   shouldRenderDsaLayer,
-  shouldToggleDsa,
 } from '@/utils/dsaOverlayPolicy'
-// [DSA Segment Match] - visual_segments 与 K线 displayTimes 匹配统计（PR #34）
-//   纯函数模块，便于 Node --experimental-strip-types 单元测试
-import { computeDsaSegmentMatchStats } from '@/utils/dsaSegmentMatch'
+// [DSA Segment Match] - debugIndicatorAlignment 诊断已移除（P1 清理）
+//   computeDsaSegmentMatchStats 工具函数保留在 utils/dsaSegmentMatch.ts
 
 // ===== 指标计算模块（从 charts.js 迁移）=====
 
@@ -689,6 +698,10 @@ function renderIndicatorLayer(
     case 'sqzmom':
       renderIndicatorSqzmom(ctx, g, layer, data, barsCount, step, displayTimes, timeframe)
       break
+    // [CHANGE-011 SMC] - 智能资金概念图层渲染（BOS/CHoCH/OB/EQH/EQL/trailing）
+    case 'smc':
+      renderIndicatorSmc(ctx, g, layer, data, displayTimes, step, py, timeframe)
+      break
   }
 }
 
@@ -864,25 +877,9 @@ function renderDsaPolyline(
   // 后续按 Record 索引访问 anchor_time / pivot_type / pivot_price / time 等数组字段
   const recordData = data as Record<string, (number | string | null)[]>
 
-  // [PR #34] - DSA visual_segments matched 诊断：
+  // [PR #34] - DSA visual_segments matched 诊断已移除（debugIndicatorAlignment 清理）
   //   后端 format_dsa_time 修复后，15m/1h segment.points.time 含 THH:MM:SS，
   //   normalizeChartTime 可与 K线 displayTimes canonical 匹配。
-  //   若回退到旧 strftime("%Y-%m-%d")，ratio=0，开关打开也画不出线。
-  //   默认不打印，仅 ?debugIndicatorAlignment=1 时 console.warn 输出 stats。
-  if (typeof window !== 'undefined' && window.location.search.includes('debugIndicatorAlignment=1')) {
-    const stats = computeDsaSegmentMatchStats(segments, displayTimes, timeframe)
-    console.warn('[DSA segment match]', {
-      timeframe,
-      total: stats.total,
-      matched: stats.matched,
-      ratio: stats.ratio,
-      degradedReason: stats.degradedReason,
-      firstSegTime: stats.firstSegTime,
-      lastSegTime: stats.lastSegTime,
-      firstDisplayTime: stats.firstDisplayTime,
-      lastDisplayTime: stats.lastDisplayTime,
-    })
-  }
 
   // K 线时间 → display index 映射（segment point time 经 normalizeChartTime 匹配）
   const klineTimeIndex = new Map<string, number>()
@@ -1402,6 +1399,228 @@ function renderIndicatorSqzmom(
   }
 }
 
+// [CHANGE-011 SMC] - 智能资金概念图层渲染
+// 描述: 渲染 BOS/CHoCH 线、internal order blocks、EQH/EQL、trailing strong/weak high/low。
+// 视觉规则（盘迹 V1）:
+//   - 上涨结构红 #FF4D4F（bullish bias=1）
+//   - 下跌结构绿 #22C55E（bearish bias=-1）
+//   - internal 虚线（dash=[5,3]）且更淡（alpha 0.7），swing 实线
+//   - BOS 实线，CHoCH 虚线 dash=[4,3]
+//   - OB 同方向低透明度区域（alpha 0.12）
+//   - mitigated OB 进一步降低透明度（alpha 0.05）
+//   - 标签小而克制（8px sans-serif）
+//   - 完全排除 FVG：不渲染任何 Fair Value Gap 元素
+// [CHANGE-20260715-007] anchor/confirmed 因果契约（view adapter 后）:
+//   - 后端 view adapter 已将索引重基准到展示窗口（offset = max(0, total - display)）
+//   - SMC time 数组与 K 线 displayTimes 应 1:1 对齐（同 timeframe/adj/bars）
+//   - BOS/CHoCH: anchor_index → confirmed_index
+//   - OB: anchor_index → mitigated_index 或右端；clipped_left=True 时左端 clamp 到 plotLeft
+//   - EQH/EQL: 线段画到 second_pivot_index（新 pivot 所在 bar）；
+//     confirmed_index 用于因果确认/回放测试（不作为线段终点）
+//   - swing_bias 字段显式返回，trailing 强/弱高/低直接使用该字段
+//   - 仅渲染最近 5 个未 mitigated 的 internal OB
+// [CHANGE-20260715-008] SMC 类型/配色/纯函数抽离至 ./smcRendering（可独立测试，无 React/Canvas 依赖）
+import {
+  selectVisibleSmcOrderBlocks,
+  collectVisibleSmcPriceCandidates,
+  intersectSmcRangeWithViewport,
+  hexToRgba,
+  SMC_BULL_COLOR,
+  SMC_BEAR_COLOR,
+  type SmcEvent,
+  type SmcOrderBlock,
+  type SmcEqualHighLow,
+  type SmcTrailing,
+  type SmcSwingBias,
+} from './smcRendering'
+
+function renderIndicatorSmc(
+  ctx: CanvasRenderingContext2D,
+  g: Geometry,
+  _layer: ChartLayer,
+  data: Record<string, (number | string | null)[]>,
+  displayTimes: string[],
+  step: number,
+  py: (v: number) => number,
+  timeframe: string,
+): void {
+  // [CHANGE-011 SMC] - 数据字段为对象数组（非基本类型数组），按 any 取值后 cast 到内部类型
+  // FVG 完全排除：本函数不渲染任何 Fair Value Gap 元素
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const smcData = data as unknown as Record<string, any>
+  const events: SmcEvent[] = Array.isArray(smcData.events) ? smcData.events : []
+  const orderBlocks: SmcOrderBlock[] = Array.isArray(smcData.order_blocks) ? smcData.order_blocks : []
+  const equalHLs: SmcEqualHighLow[] = Array.isArray(smcData.equal_highs_lows) ? smcData.equal_highs_lows : []
+  const trailing: SmcTrailing | null = smcData.trailing && typeof smcData.trailing === 'object' ? smcData.trailing : null
+  // CHANGE-20260715-007: swing_bias 为数值（1/-1/0），缺失时默认 0
+  const swingBias: SmcSwingBias = (typeof smcData.swing_bias === 'number'
+    ? smcData.swing_bias
+    : 0) as SmcSwingBias
+  const smcTimes: (string | null)[] = Array.isArray(smcData.time) ? smcData.time : []
+
+  if (!displayTimes.length) return
+
+  // 构造 SMC time 数组索引 → K 线 display 索引的映射
+  // [CHANGE-20260715-007] view adapter 已将索引重基准到展示窗口，
+  // SMC time 数组与 K 线 displayTimes 应 1:1 对齐；时间匹配作为防御性回退
+  const klineTimeIndex = new Map<string, number>()
+  displayTimes.forEach((t, i) => {
+    const key = normalizeChartTime(t, timeframe)
+    if (key != null) klineTimeIndex.set(key, i)
+  })
+
+  // 辅助：SMC time 数组索引 → K 线 display 索引
+  const smcToDisplay = (smcIdx: number | null | undefined): number | undefined => {
+    if (smcIdx == null) return undefined
+    // 负索引（view adapter clipped_left 时 anchor 在窗口左侧）→ clamp 到 0
+    if (smcIdx < 0) return 0
+    // 索引在 SMC time 数组范围内 → 时间匹配
+    if (smcIdx < smcTimes.length) {
+      const t = smcTimes[smcIdx]
+      if (t != null) {
+        const key = normalizeChartTime(t, timeframe)
+        if (key != null) {
+          const klineIdx = klineTimeIndex.get(key)
+          if (klineIdx != null) return klineIdx
+        }
+      }
+    }
+    // 索引超出 SMC time 数组但可能在 K 线范围内 → 直接用作 display 索引（adapter 已重基准）
+    if (smcIdx < displayTimes.length) return smcIdx
+    return undefined
+  }
+
+  // ===== 1. 渲染 Order Blocks（低透明度矩形区域）=====
+  // [CHANGE-20260715-008] OB 选择逻辑抽离至 selectVisibleSmcOrderBlocks（可独立测试）
+  // 规则（PROMPT.md §四.2）：
+  //   - 只画 internal===true && mitigated===false（mitigated OB 不再渲染）
+  //   - 后端最新 OB 在数组头部 → slice(0, 5)
+  //   - clipped_left=True 时左端 clamp 到 plotLeft（g.l）
+  //   - x2 = 可见区右端（OB 未 mitigated → 延伸到当前可见区末尾）
+  //   - 与 viewport 无交集时跳过（由 selectVisibleSmcOrderBlocks 过滤）
+  const visibleObs = selectVisibleSmcOrderBlocks(orderBlocks, { displayCount: displayTimes.length })
+  for (const ob of visibleObs) {
+    const anchorDisplayIdx = smcToDisplay(ob.anchor_index)
+    if (anchorDisplayIdx == null) continue
+    // x2 = 可见区右端（plotRight）：OB 未 mitigated → 延伸到当前可见区末尾
+    const x2 = g.plotRight
+    // x1: clipped_left 时 clamp 到 plotLeft（g.l）；否则取 anchor 位置
+    let x1 = g.l + (anchorDisplayIdx + 0.5) * step
+    // [CHANGE-20260715-007] clipped_left: anchor 在窗口左侧时 clamp 到 plotLeft
+    if (ob.clipped_left === true || ob.anchor_index < 0) {
+      x1 = g.l
+    }
+    // 与 viewport 无交集时跳过（x1 已超出右端）
+    if (x1 > x2) continue
+    const yHigh = py(ob.bar_high)
+    const yLow = py(ob.bar_low)
+    const yTop = Math.min(yHigh, yLow)
+    const height = Math.max(2, Math.abs(yHigh - yLow))
+
+    // 颜色与透明度（仅未 mitigated OB，alpha 0.12）
+    const isBull = ob.bias === 1
+    const color = isBull ? SMC_BULL_COLOR : SMC_BEAR_COLOR
+    ctx.fillStyle = hexToRgba(color, 0.12)
+    ctx.fillRect(x1, yTop, Math.max(1, x2 - x1), height)
+
+    // OB 边框（更淡）
+    ctx.strokeStyle = hexToRgba(color, 0.3)
+    ctx.lineWidth = 0.8
+    ctx.strokeRect(x1, yTop, Math.max(1, x2 - x1), height)
+  }
+
+  // ===== 2. 渲染 BOS/CHoCH 线 =====
+  // [CHANGE-20260716-001] viewport 区间求交（PROMPT.md §三.2）：
+  //   只要区间与viewport相交就绘制，不再要求 anchor 和 confirmed 都在 displayTimes 中。
+  //   anchor 在左侧时 x1=plotLeft（g.l）；confirmed 在右侧时 x2=plotRight。
+  //   仅完全不相交时跳过。
+  // CHANGE-20260715-002: internal=虚线 dash=[4,3] + tiny(8px)标签；swing=实线 + small(11px)标签
+  // 标签位于结构线中点（非左端）
+  // internal: 更淡（alpha 0.7），更细（width 1）；swing: 实色，更粗（width 1.5）
+  // [CHANGE-20260716-001] 标签不加 ·I，与 TV 文字一致（PROMPT.md §三.3）
+  const smcVisCtx = { displayCount: displayTimes.length }
+  for (const ev of events) {
+    if (ev.level == null) continue
+    // viewport 区间求交（使用 view adapter 重基准后的索引，不依赖时间匹配）
+    const range = intersectSmcRangeWithViewport(ev.anchor_index, ev.confirmed_index, smcVisCtx)
+    if (range == null) continue
+
+    const x1 = g.l + (range.startIdx + 0.5) * step
+    const x2 = g.l + (range.endIdx + 0.5) * step
+    const y = py(ev.level)
+
+    const isBull = ev.bias === 1
+    const baseColor = isBull ? SMC_BULL_COLOR : SMC_BEAR_COLOR
+    const isInternal = ev.internal === true
+    const alpha = isInternal ? 0.7 : 1.0
+    const lineWidth = isInternal ? 1 : 1.5
+    const color = hexToRgba(baseColor, alpha)
+
+    // CHANGE-20260715-002: internal=虚线，swing=实线（不再按 BOS/CHoCH 区分线型）
+    if (isInternal) {
+      drawLine(ctx, x1, y, x2, y, color, lineWidth, [4, 3])
+    } else {
+      // swing: 实线
+      drawLine(ctx, x1, y, x2, y, color, lineWidth, [])
+    }
+
+    // 标签位于结构线中点（CHANGE-20260715-002）
+    // [CHANGE-20260716-001] 标签不加 ·I，与 TV 文字一致
+    const midX = (x1 + x2) / 2
+    const label = ev.type
+    const fontSize = isInternal ? '8px sans-serif' : '11px sans-serif'
+    drawText(ctx, label, midX, y - 3, color, fontSize, 'center')
+  }
+
+  // ===== 3. 渲染 EQH/EQL =====
+  // [CHANGE-20260715-007] 线段画到 second_pivot_index（新 pivot 所在 bar）；
+  // confirmed_index 用于因果确认/回放测试（不作为线段终点）
+  // [CHANGE-20260716-001] viewport 区间求交（PROMPT.md §三.2）：
+  //   anchor 在左侧时 x1=plotLeft；second_pivot 在右侧时 x2=plotRight。
+  // EQH/EQL 用蓝色（中性色，因为等高/等低不区分涨跌方向）
+  for (const eq of equalHLs) {
+    // viewport 区间求交（anchor → second_pivot）
+    const range = intersectSmcRangeWithViewport(eq.anchor_index, eq.second_pivot_index, smcVisCtx)
+    if (range == null) continue
+
+    const x1 = g.l + (range.startIdx + 0.5) * step
+    const x2 = g.l + (range.endIdx + 0.5) * step
+    const y = py(eq.level)
+
+    drawLine(ctx, x1, y, x2, y, C.blue2, 1, [2, 2])
+    drawText(ctx, eq.type, x1 + 2, y - 3, C.blue2, '8px sans-serif', 'left')
+  }
+
+  // ===== 4. 渲染 trailing strong/weak high/low =====
+  // CHANGE-20260715-007: Strong/Weak 直接读取 DTO swing_bias（state.swing_trend.bias）
+  // 禁止从最后一个可见 swing 事件猜测
+  // 规则：bias===-1 → 强高（否则弱高）；bias===1 → 强低（否则弱低）
+  if (trailing && trailing.top != null) {
+    const lastDisplayIdx = displayTimes.length - 1
+    const x = g.l + (lastDisplayIdx + 0.5) * step
+    const y = py(trailing.top)
+    // 强高=红色，弱高=绿色（bias=-1 时为强高，否则弱高）
+    const isStrong = swingBias === -1
+    const labelColor = isStrong ? SMC_BULL_COLOR : SMC_BEAR_COLOR
+    const label = `${isStrong ? '强高' : '弱高'} ${fmt(trailing.top)}`
+    drawLine(ctx, x, y, g.plotRight, y, hexToRgba(labelColor, 0.5), 1, [3, 3])
+    drawText(ctx, label, g.plotRight - 4, y - 3, labelColor, '8px sans-serif', 'right')
+  }
+  if (trailing && trailing.bottom != null) {
+    const lastDisplayIdx = displayTimes.length - 1
+    const x = g.l + (lastDisplayIdx + 0.5) * step
+    const y = py(trailing.bottom)
+    // 强低=绿色，弱低=红色（bias=1 时为强低，否则弱低）
+    const isStrong = swingBias === 1
+    const labelColor = isStrong ? SMC_BEAR_COLOR : SMC_BULL_COLOR
+    const label = `${isStrong ? '强低' : '弱低'} ${fmt(trailing.bottom)}`
+    drawLine(ctx, x, y, g.plotRight, y, hexToRgba(labelColor, 0.5), 1, [3, 3])
+    drawText(ctx, label, g.plotRight - 4, y + 9, labelColor, '8px sans-serif', 'right')
+  }
+}
+
+// [CHANGE-011 SMC] - hexToRgba 已抽离至 ./smcRendering（与 SMC 纯函数同居）
+
 // ===== 事件映射与可见性 =====
 
 // 事件类型 -> 颜色
@@ -1485,7 +1704,7 @@ function profileTooltip(row: ProfileRow, profile: BackendProfile): string {
   const totalSum = profile.rows.reduce((s, r) => s + r.total_volume, 0)
   const share = row.total_volume / Math.max(1, totalSum) * 100
   const node = profile.nodes.find(n => row.price_mid >= n.lo && row.price_mid <= n.hi)
-  return `<b>${fmt(row.price_low)}–${fmt(row.price_high)}</b><span>\u603b\u6210\u4ea4量 ${(row.total_volume / 10000).toFixed(1)}万 · ${share.toFixed(2)}%</span><span>\u4e70量 ${(row.bullish_volume / 10000).toFixed(1)}万 · \u5356量 ${(row.bearish_volume / 10000).toFixed(1)}万</span><span>价值区 ${row.is_value_area ? '是' : '否'} · 节点 ${node ? node.id : '—'}${row.is_poc ? ' · POC' : ''}${row.is_peak ? ' · PEAK' : ''}</span>`
+  return `<b>${fmt(row.price_low)}–${fmt(row.price_high)}</b><span>\u603b\u6210\u4ea4量 ${(row.total_volume / 10000).toFixed(1)}万 · ${share.toFixed(2)}%</span><span>\u4e70量 ${(row.bullish_volume / 10000).toFixed(1)}万 · \u5356量 ${(row.bearish_volume / 10000).toFixed(1)}万</span><span>价值区 ${row.is_value_area ? '是' : '否'} · 节点 ${node ? node.id : '—'}${row.is_poc ? ' · 核心共识价' : ''}${row.is_peak ? ' · 共识价' : ''}</span>`
 }
 
 // ===== 主绘制函数（对齐原型 drawTrading 渲染管线）=====
@@ -1550,6 +1769,24 @@ function drawTrading(
     })
   }
 
+  // [CHANGE-011 SMC] - SMC 纵轴价格候选（PROMPT.md §四.3）
+  // 加入当前可见的：event.level / OB bar_high,bar_low / EQH,EQL level / trailing top,bottom
+  // 目的：避免 SMC 元素被画出 Canvas（纵轴范围必须包含所有可见 SMC 价格）
+  if (layers.smc && indicators?.layers && indicators?.data) {
+    const smcLayer = indicators.layers.find(l => l.layer_id === 'smc')
+    if (smcLayer) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const smcLayerData = indicators.data[smcLayer.strategy_id] as any
+      if (smcLayerData && typeof smcLayerData === 'object') {
+        const smcCandidates = collectVisibleSmcPriceCandidates(
+          smcLayerData,
+          { displayCount: displayTimes.length },
+        )
+        priceCandidates.push(...smcCandidates)
+      }
+    }
+  }
+
   const rawMin = priceCandidates.length ? Math.min(...priceCandidates) : Math.min(...display.map(d => d.low))
   const rawMax = priceCandidates.length ? Math.max(...priceCandidates) : Math.max(...display.map(d => d.high))
   const range = Math.max(rawMax - rawMin, rawMin * 0.001)
@@ -1558,7 +1795,10 @@ function drawTrading(
   const max = rawMax + padding
   const py = (v: number) => g.panes.price.top + (max - v) / (max - min) * (g.panes.price.bottom - g.panes.price.top)
   const plotW = g.plotRight - g.l
-  const step = plotW / display.length
+  // [ChartRightPadding] - 右侧 20% 留白：bars 只占据绘图区前 80%，最新 bar 位于约 80% 位置
+  // 所有交互坐标映射（十字线/滚轮锚点/Pointer 拖拽/命中）统一使用此 step，自动同步到压缩后的 bar 分布
+  const effectivePlotW = plotW * (1 - RIGHT_PADDING_RATIO)
+  const step = effectivePlotW / display.length
   const barW = Math.max(2.2, step * 0.56)
 
   // 1. 背景 + 网格
@@ -1570,9 +1810,10 @@ function drawTrading(
       renderProfile(ctx, profile, g, py, state, layerSet)
     } else {
       // 后端 VP 数据缺失：在 VP 区域中央显示灰色提示（禁止降级到前端算法）
+      // [筹码共识价] - 描述: 缺失提示文案统一为"筹码共识价暂不可用"（基于历史成交量分布的估算代理）
       const cx = (g.profileStart + g.profileEnd) / 2
       const cy = (g.panes.price.top + g.panes.price.bottom) / 2
-      drawText(ctx, '筹码分布暂不可用', cx, cy, C.text, '11px sans-serif', 'center')
+      drawText(ctx, '筹码共识价暂不可用', cx, cy, C.text, '11px sans-serif', 'center')
     }
   }
 
@@ -1587,8 +1828,9 @@ function drawTrading(
       ctx.fillStyle = n.poc ? 'rgba(255,152,0,.11)' : selected ? 'rgba(156,179,255,.15)' : 'rgba(79,124,255,.075)'
       ctx.fillRect(g.l, y1, plotW, y2 - y1)
       drawLine(ctx, g.l, py(n.mid), g.plotRight, py(n.mid), n.poc ? C.orange : selected ? '#dce6ff' : C.blue, selected ? 2 : 1, n.poc ? [8, 4] : [4, 5])
-      // 峰价格标签
-      const labelText = n.poc ? `POC 峰 ${fmt(n.mid)}` : `峰 ${fmt(n.mid)}`
+      // [筹码共识价] - 描述: 节点价格标签（POC=核心共识价，普通峰=共识价）
+      // 文案仅为展示，内部 n.poc/字段名不变；筹码共识价是基于历史成交量分布的估算代理
+      const labelText = n.poc ? `核心共识价 ${fmt(n.mid)}` : `共识价 ${fmt(n.mid)}`
       drawText(ctx, labelText, g.l + 5, y1 + 10, n.poc ? C.orange : C.blue, '11px sans-serif')
       // 多空量标签 + 迷你多空柱（A 股：多头红色 / 空头绿色）
       if (n.bullish_volume > 0 || n.bearish_volume > 0) {
@@ -1610,10 +1852,11 @@ function drawTrading(
   }
 
   // 4. POC 中心线（从后端 profile_meta.poc_price 读取）
+  // [筹码共识价] - 描述: POC 中心线标签显示"核心共识价"（基于历史成交量分布的估算代理）
   if (layers.poc && profile && profile.pocPrice != null) {
     const pocVal = profile.pocPrice
     drawLine(ctx, g.l, py(pocVal), layers.profile ? g.profileEnd : g.plotRight, py(pocVal), C.orange, 1.35, [9, 4])
-    drawText(ctx, `POC ${fmt(pocVal)}`, g.plotRight - 62, py(pocVal) - 5, C.orange, '9px sans-serif')
+    drawText(ctx, `核心共识价 ${fmt(pocVal)}`, g.plotRight - 80, py(pocVal) - 5, C.orange, '9px sans-serif')
   }
 
   // 5. 突破压力区
@@ -1652,38 +1895,7 @@ function drawTrading(
   // [DSA 数据源校验] - 同步到 state 供组件 useEffect 读取并渲染页面 UI 提示横幅
   state.dsaSourceMismatch = dsaSourceMismatch
 
-  // [PR #31] - ?debugIndicatorAlignment=1 诊断输出（默认不打印，不刷日志）
-  //   输出 bars/indicators 对齐信息：timeframe, count, first/last, matched ratio
-  if (typeof window !== 'undefined' && window.location.search.includes('debugIndicatorAlignment=1')) {
-    const barsFirst = displayTimes[0] ?? 'N/A'
-    const barsLast = displayTimes[displayTimes.length - 1] ?? 'N/A'
-    console.table({
-      bars: {
-        timeframe,
-        count: displayTimes.length,
-        first: barsFirst,
-        last: barsLast,
-        canonical_first: normalizeChartTime(barsFirst, timeframe) ?? 'N/A',
-        canonical_last: normalizeChartTime(barsLast, timeframe) ?? 'N/A',
-      },
-      dsa_mismatch: {
-        check_enabled: shouldCheckDsaMismatch(timeframe),
-        mismatched: dsaSourceMismatch,
-        source_bar_hash: indicators?.source_bar_hash ?? 'N/A',
-        source_bar_times_count: indicators?.source_bar_times?.length ?? 0,
-      },
-    })
-    if (indicators?.layers) {
-      console.table(
-        indicators.layers.map(l => ({
-          layer_id: l.layer_id,
-          renderer: l.renderer,
-          fields: l.fields?.join(','),
-          time_count: indicators.data?.[l.strategy_id ?? '']?.time?.length ?? 0,
-        })),
-      )
-    }
-  }
+  // [PR #31] - debugIndicatorAlignment 诊断输出已移除（P1 清理）
 
   if (indicators && indicators.layers && indicators.data) {
     indicators.layers.forEach(layer => {
@@ -1697,6 +1909,8 @@ function drawTrading(
       if (layer.layer_id === 'macd' && !layers.macd) return
       // [SQZMOM_LB 副图] - 受 sqzmom 图层开关控制
       if (layer.layer_id === 'sqzmom_lb' && !layers.sqzmom) return
+      // [CHANGE-011 SMC] - SMC 图层受 smc 开关控制
+      if (layer.layer_id === 'smc' && !layers.smc) return
       // [DSA 数据契约] - union 类型（DsaSelectorData | Record）按 Record 索引访问，dsa_polyline 渲染器内部再 cast 到 DsaSelectorData
       const layerData = indicators.data![layer.strategy_id] as Record<string, (number | string | null)[]>
       if (layerData) {
@@ -1749,9 +1963,10 @@ function drawTrading(
   if (layers.volume) renderVolume(ctx, g, display, step, barW)
 
   // 11. 时间轴刻度
+  // [ChartRightPadding] - 时间轴标签跟随 bar 分布（使用 effectivePlotW），不延伸到留白区
   const labels = timeTicks(display, 7, timeframe)
   labels.forEach((item, i) => {
-    drawText(ctx, item.label, g.l + plotW * i / (labels.length - 1), h - 7, C.text, '9px sans-serif', i === 0 ? 'left' : i === labels.length - 1 ? 'right' : 'center')
+    drawText(ctx, item.label, g.l + effectivePlotW * i / (labels.length - 1), h - 7, C.text, '9px sans-serif', i === 0 ? 'left' : i === labels.length - 1 ? 'right' : 'center')
   })
 
   // 12. 最新价虚线 + 右侧价格标签
@@ -1806,6 +2021,8 @@ function getDefaultLayers(strategyId?: string): LayerVisibility {
     delta: false,
     events: false,
     sqzmom: false,
+    // [CHANGE-011 SMC] - 默认关闭，用户通过 IndicatorToolbar 显式开启
+    smc: false,
   }
   if (strategyId && STRATEGIES[strategyId]) {
     STRATEGIES[strategyId].defaultLayers.forEach(id => {
@@ -1815,23 +2032,30 @@ function getDefaultLayers(strategyId?: string): LayerVisibility {
   return layers
 }
 
-// 判断 display group 是否全部激活
-function isGroupActive(groupId: string, layers: LayerVisibility): boolean {
-  const group = DISPLAY_GROUPS[groupId]
-  if (!group) return false
-  return group.layers.every(l => layers[l as keyof LayerVisibility])
-}
-
-// 切换 display group
-function toggleGroup(groupId: string, layers: LayerVisibility): LayerVisibility {
-  const group = DISPLAY_GROUPS[groupId]
-  if (!group) return layers
-  const allOn = group.layers.every(l => layers[l as keyof LayerVisibility])
-  const newLayers = { ...layers }
-  group.layers.forEach(l => {
-    newLayers[l as keyof LayerVisibility] = !allOn
-  })
-  return newLayers
+// [chartLayerVisibility] - 将用户侧 8 键 ChartLayerVisibility 映射为内部 13 键 LayerVisibility
+// trend → dsa + selection, node → profile + node + poc, 其余一一对应
+// delta/events 为派生层（非用户可控）：delta 固定 false，events 固定 true（有事件数据时绘制）
+// [CHANGE-011 SMC] - smc 一一对应，默认 false
+function chartLayerVisibilityToInternal(
+  vis: ChartLayerVisibility,
+  source: string,
+): LayerVisibility {
+  return {
+    volume: vis.volume,
+    dsa: vis.trend,
+    selection: vis.trend,
+    node: vis.node,
+    poc: vis.node,
+    profile: vis.node,
+    bb: vis.boll,
+    macd: vis.macd,
+    sqzmom: vis.sqzmom,
+    breakout: source === 'selection' ? vis.breakout : false,
+    delta: false,
+    events: true,
+    // [CHANGE-011 SMC] - smc 开关由用户在 IndicatorToolbar 控制
+    smc: vis.smc,
+  }
 }
 
 export function StrategyChart({
@@ -1848,6 +2072,7 @@ export function StrategyChart({
   viewport: viewportProp,
   onViewportChange,
   isCaptureMode = false,
+  layerVisibility,
 }: StrategyChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -1875,27 +2100,26 @@ export function StrategyChart({
     dsaSourceMismatch: false,
   })
 
-  // 图层可见性（localStorage 持久化，v3 key：DSA 改用 dsa_polyline 渲染器后升级版本，
-  //   旧 v2 缓存不再读取，避免残留的 DSA 配置影响新版本默认值）
-  const storageKey = `detail-chart-strategy-groups-v3:${source}:${strategyId}`
-  const [layers, setLayers] = useState<LayerVisibility>(() => {
-    // [feishu-capture] - 描述: 截图模式强制开启 FEISHU_CAPTURE_LAYERS，忽略 localStorage 与策略默认值
+  // [chartLayerVisibility] - 受控图层可见性（单一真源 v2）
+  // 父组件 StockResearchWorkspace 持有唯一 ChartLayerVisibility state 并传入；
+  // 截图模式时不传（undefined），由此处派生 forced layers（不读写 localStorage）。
+  const effectiveLayers: LayerVisibility = useMemo(() => {
+    // [feishu-capture] - 描述: 截图模式强制开启 FEISHU_CAPTURE_LAYERS，忽略用户偏好
     //   advice.md v6 第 2 条：dsa/bb/profile/node/poc 必须开启
     if (isCaptureMode) {
-      const forced = { ...getDefaultLayers(strategyId) }
+      const forced = getDefaultLayers(strategyId)
       FEISHU_CAPTURE_LAYERS.forEach(layerId => {
         forced[layerId as keyof LayerVisibility] = true
       })
       return forced
     }
-    try {
-      const saved = localStorage.getItem(storageKey)
-      if (saved) return { ...getDefaultLayers(strategyId), ...JSON.parse(saved) }
-    } catch {
-      // ignore
+    // 父组件传入用户偏好 → 映射为内部 12 键 LayerVisibility
+    if (layerVisibility) {
+      return chartLayerVisibilityToInternal(layerVisibility, source)
     }
+    // fallback：无父组件偏好时使用策略默认值（不应出现在正常流程中）
     return getDefaultLayers(strategyId)
-  })
+  }, [layerVisibility, isCaptureMode, strategyId, source])
 
   // [chartViewport] - 显示 bar 数量（缩放控制）：保留为内部状态作为 fallback，
   //   当父组件未传入 viewport 时使用；受控时由 viewportProp 驱动
@@ -1932,6 +2156,26 @@ export function StrategyChart({
     }
   }, [viewportProp, calc.length, onViewportChange])
 
+  // [chartViewport] - 新行情追加自动跟随：calc.length 增长且用户位于最右端时，
+  //   自动平移到最新 bar 并保持原可见根数；用户已主动平移到历史区域时不强制拉回。
+  //   - viewportProp 为 undefined 时由内部 fallback createDefaultViewport(calc.length) 自动显示末尾，无需处理
+  //   - viewportProp.toIndex >= prevLen 表示用户原来位于最右端
+  const prevCalcLengthRef = useRef(calc.length)
+  useEffect(() => {
+    const prevLen = prevCalcLengthRef.current
+    prevCalcLengthRef.current = calc.length
+    if (calc.length <= prevLen) return
+    if (!viewportProp || !onViewportChange) return
+    // 用户原来位于最右端 → 自动跟随新 bar，保持原可见根数
+    if (viewportProp.toIndex >= prevLen) {
+      const delta = calc.length - prevLen
+      onViewportChange({
+        fromIndex: viewportProp.fromIndex + delta,
+        toIndex: calc.length,
+      })
+    }
+  }, [calc.length]) // eslint-disable-line react-hooks/exhaustive-deps -- viewportProp/onViewportChange 从 ref 读取避免循环
+
   // 可见 bars：基于 viewport 切片 calc（统一 viewport，所有图层共用，advice.md 第三节问题 2）
   const display = useMemo(() => {
     if (!calc.length) return []
@@ -1945,8 +2189,8 @@ export function StrategyChart({
   }, [events, display, timeframe])
 
   // 最新数据 ref（供 draw 函数读取）
-  const dataRef = useRef({ calc, display, mappedEvents, layers, timeframe })
-  dataRef.current = { calc, display, mappedEvents, layers, timeframe }
+  const dataRef = useRef({ calc, display, mappedEvents, layers: effectiveLayers, timeframe })
+  dataRef.current = { calc, display, mappedEvents, layers: effectiveLayers, timeframe }
 
   // indicators ref（避免 draw 函数依赖 indicators 导致频繁重绘）
   const indicatorsRef = useRef<IndicatorResponse | undefined>(undefined)
@@ -1967,24 +2211,15 @@ export function StrategyChart({
     // [DSA 数据源校验] - drawTrading 将 mismatch 写入 stateRef，此处同步到 React state 驱动横幅渲染
     //   setDsaMismatch 相同值时 React 自动 bailout，不会触发额外重渲染循环
     setDsaMismatch(stateRef.current.dsaSourceMismatch)
-  }, [draw, calc, display, mappedEvents, layers, viewport, indicators])
-
-  // 持久化图层可见性
-  useEffect(() => {
-    // [feishu-capture] - 描述: 截图模式不写 localStorage，避免污染用户偏好（advice.md v6 第 2 条）
-    if (isCaptureMode) return
-    try {
-      localStorage.setItem(storageKey, JSON.stringify(layers))
-    } catch {
-      // ignore
-    }
-  }, [layers, storageKey, isCaptureMode])
+  }, [draw, calc, display, mappedEvents, effectiveLayers, viewport, indicators])
 
   // 交互事件绑定（仅一次）
   useEffect(() => {
     const canvas = canvasRef.current
     const tip = tipRef.current
     if (!canvas) return
+    // 默认 grab 光标，拖动时切换为 grabbing
+    canvas.style.cursor = 'grab'
 
     const handleMouseMove = (e: MouseEvent) => {
       const s = stateRef.current
@@ -2068,6 +2303,8 @@ export function StrategyChart({
     const handleClick = (e: MouseEvent) => {
       const s = stateRef.current
       if (!s.g) return
+      // 拖动后抑制 click，避免误触发 profile/event 选中
+      if (dragMovedRef.current) return
       const r = canvas.getBoundingClientRect()
       const mx = e.clientX - r.left
       const my = e.clientY - r.top
@@ -2124,36 +2361,52 @@ export function StrategyChart({
       }
     }
 
-    // [Task 16] - 拖动平移：鼠标左键拖动画布，向左查看更早数据，向右回到最近数据
-    const handleMouseDown = (e: MouseEvent) => {
+    // [Task 16] - 拖动平移：指针拖动画布，向左查看更早数据，向右回到最近数据
+    // 使用 Pointer Events + 捕获 + 锚定起始视区，保证拖动稳定不漂移
+    const handlePointerDown = (e: PointerEvent) => {
       if (e.button !== 0) return // 仅左键
       const s = stateRef.current
       if (!s.g) return
       const r = canvas.getBoundingClientRect()
-      dragRef.current = { startX: e.clientX - r.left, fromIndex: viewport.fromIndex }
+      dragRef.current = {
+        startClientX: e.clientX - r.left,
+        startViewport: viewport,
+        pointerId: e.pointerId,
+      }
+      dragMovedRef.current = false
+      try { canvas.setPointerCapture(e.pointerId) } catch { /* ignore */ }
       canvas.style.cursor = 'grabbing'
     }
 
-    const handleDragMove = (e: MouseEvent) => {
+    const handlePointerMove = (e: PointerEvent) => {
       if (!dragRef.current) return
       const s = stateRef.current
       if (!s.g) return
       const r = canvas.getBoundingClientRect()
-      const mx = e.clientX - r.left
       const { step } = s
+      // 始终从起始 clientX 计算总位移，从起始视区平移（不累积，避免漂移）
+      const deltaPx = (e.clientX - r.left) - dragRef.current.startClientX
       // 拖动距离 → bar 数（向左拖动 = 查看更早数据 = fromIndex 减小）
-      const deltaPx = mx - dragRef.current.startX
       const deltaBars = -Math.round(deltaPx / step)
-      if (deltaBars === 0) return
-      const newVp = panViewport(viewport, deltaBars, calc.length)
+      // 点击阈值：移动超过 4px 视为拖动
+      if (Math.abs(deltaPx) > 4) dragMovedRef.current = true
+      const newVp = panViewport(dragRef.current.startViewport, deltaBars, calc.length)
       if (onViewportChange) onViewportChange(newVp)
-      dragRef.current.startX = mx
     }
 
-    const handleMouseUp = () => {
+    const handlePointerUp = (e: PointerEvent) => {
       if (dragRef.current) {
+        try { canvas.releasePointerCapture(e.pointerId) } catch { /* ignore */ }
         dragRef.current = null
-        canvas.style.cursor = ''
+        canvas.style.cursor = 'grab'
+      }
+    }
+
+    const handlePointerCancel = (e: PointerEvent) => {
+      if (dragRef.current) {
+        try { canvas.releasePointerCapture(e.pointerId) } catch { /* ignore */ }
+        dragRef.current = null
+        canvas.style.cursor = 'grab'
       }
     }
 
@@ -2200,9 +2453,10 @@ export function StrategyChart({
     canvas.addEventListener('click', handleClick)
     canvas.addEventListener('mouseleave', handleMouseLeave)
     canvas.addEventListener('wheel', handleWheel, { passive: false })
-    canvas.addEventListener('mousedown', handleMouseDown)
-    window.addEventListener('mousemove', handleDragMove)
-    window.addEventListener('mouseup', handleMouseUp)
+    canvas.addEventListener('pointerdown', handlePointerDown)
+    canvas.addEventListener('pointermove', handlePointerMove)
+    canvas.addEventListener('pointerup', handlePointerUp)
+    canvas.addEventListener('pointercancel', handlePointerCancel)
     canvas.addEventListener('dblclick', handleDoubleClick)
     canvas.addEventListener('touchstart', handleTouchStart, { passive: false })
     canvas.addEventListener('touchmove', handleTouchMove, { passive: false })
@@ -2212,9 +2466,10 @@ export function StrategyChart({
       canvas.removeEventListener('click', handleClick)
       canvas.removeEventListener('mouseleave', handleMouseLeave)
       canvas.removeEventListener('wheel', handleWheel)
-      canvas.removeEventListener('mousedown', handleMouseDown)
-      window.removeEventListener('mousemove', handleDragMove)
-      window.removeEventListener('mouseup', handleMouseUp)
+      canvas.removeEventListener('pointerdown', handlePointerDown)
+      canvas.removeEventListener('pointermove', handlePointerMove)
+      canvas.removeEventListener('pointerup', handlePointerUp)
+      canvas.removeEventListener('pointercancel', handlePointerCancel)
       canvas.removeEventListener('dblclick', handleDoubleClick)
       canvas.removeEventListener('touchstart', handleTouchStart)
       canvas.removeEventListener('touchmove', handleTouchMove)
@@ -2248,18 +2503,11 @@ export function StrategyChart({
     return { d, change, idx }
   }, [legendIdx, display])
 
-  // 图层切换
-  const handleToggleGroup = (groupId: string) => {
-    // [feishu-capture] - 描述: 截图模式下强制图层不可关闭（advice.md v6 第 2 条）
-    if (isCaptureMode && FEISHU_CAPTURE_LAYERS.includes(groupId as FeishuCaptureLayer)) return
-    // [DSA Overlay Policy] - DSA toggle 决策：capture 锁定 / 全周期可切换
-    // [PR #33] - 移除 `timeframe !== '1d'` 硬编码 disable，全周期按 shouldToggleDsa 决策
-    if (!shouldToggleDsa(groupId, isCaptureMode, FEISHU_CAPTURE_LAYERS)) return
-    setLayers(prev => toggleGroup(groupId, prev))
-  }
-
   // [chartViewport] - 拖动平移状态（Task 16: TradingView 风格缩放）
-  const dragRef = useRef<{ startX: number; fromIndex: number } | null>(null)
+  // 使用 Pointer Events + 锚定起始视区，避免累积漂移
+  const dragRef = useRef<{ startClientX: number; startViewport: ChartViewport; pointerId: number } | null>(null)
+  // [chartViewport] - 拖动点击阈值：拖动超过 4px 后抑制后续 click
+  const dragMovedRef = useRef(false)
   // [chartViewport] - 移动端双指缩放状态
   const pinchRef = useRef<{ startDist: number; startViewport: ChartViewport | null } | null>(null)
 
@@ -2351,28 +2599,6 @@ export function StrategyChart({
             )
           })}
         </div>
-      </div>
-
-      {/* 策略图示区：按 DISPLAY_GROUPS 驱动 */}
-      <div className="tv-strategy-legend">
-        <span className="tv-strategy-legend-label">策略图层</span>
-        {Object.values(DISPLAY_GROUPS).map((g: DisplayGroupDef) => {
-          const active = isGroupActive(g.id, layers)
-          // [PR #32] - DSA 全周期支持，title 按周期区分（1d 主结构锚，非 1d 验证图层）
-          const dsaTitleHint = g.id === 'dsa' ? DSA_TITLE_HINT(timeframe) : undefined
-          return (
-            <label
-              key={g.id}
-              className={clsx('tv-strategy-legend-item', !active && 'off')}
-              title={dsaTitleHint}
-              onClick={() => handleToggleGroup(g.id)}
-            >
-              <i className="tv-legend-dot" style={{ '--legend-color': g.color } as React.CSSProperties} />
-              <b>{g.shortName}</b>
-              <i className="tv-mini-switch" />
-            </label>
-          )
-        })}
       </div>
 
       {/* 图表画布 */}

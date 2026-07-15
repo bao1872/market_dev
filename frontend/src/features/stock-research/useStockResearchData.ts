@@ -21,9 +21,14 @@ import {
 export interface StockResearchDataParams {
   symbol: string | null
   timeframe: DisplayTimeframe
+  // [CHANGE-011 SMC] - 是否请求 SMC 指标（默认 false）。
+  // 父页面持有 smc 开关状态，开启时通过此参数传递给 useIndicators 触发后端按需计算。
+  // 后端 include_smc=False 时跳过 SMC 计算，不消耗 CPU。
+  includeSmc?: boolean
 }
 
 // 行情摘要 ViewModel（供 StockDetailPage 价格条和 StockResearchWorkspace 状态条共用）
+// CHANGE-20260713-010: 新增 totalMarketCap/floatMarketCap/marketCapAsOf
 export interface PriceSummary {
   currentPrice: number | null
   openPrice: number | null
@@ -32,6 +37,9 @@ export interface PriceSummary {
   amountValue: number | null
   changePercent: number | null
   isUp: boolean
+  totalMarketCap: number | null
+  floatMarketCap: number | null
+  marketCapAsOf: string | null
 }
 
 // 行情状态标签（统一 /market 和 /stock 的状态文案）
@@ -67,7 +75,7 @@ export interface StockResearchData {
   isRenderReady: boolean
 }
 
-export function useStockResearchData({ symbol, timeframe }: StockResearchDataParams): StockResearchData {
+export function useStockResearchData({ symbol, timeframe, includeSmc = false }: StockResearchDataParams): StockResearchData {
   // 1. 按 symbol 查询 instrument（获取 instrumentId）
   const instrumentQuery = useInstrumentBySymbol(symbol ?? '')
   const instrumentId = instrumentQuery.data?.id
@@ -80,10 +88,14 @@ export function useStockResearchData({ symbol, timeframe }: StockResearchDataPar
     adj: 'qfq',
     page_size: barsCount,
   })
+  // [CHANGE-011 SMC] - includeSmc=true 时传 include_smc=1 触发后端按需计算 SMC 指标；
+  //   includeSmc=false 时省略该参数，后端默认 False，跳过 SMC 计算。
+  //   useIndicators 的 queryKey 包含 params，include_smc 字段变化会触发重新拉取。
   const indicatorsQuery = useIndicators(instrumentId, {
     timeframe,
     adj: 'qfq',
     bars: barsCount,
+    ...(includeSmc ? { include_smc: 1 } : {}),
   })
   const quoteQuery = useRealtimeQuote(instrumentId)
   const eventsQuery = useInstrumentEvents(instrumentId, { limit: 100 })
@@ -120,6 +132,10 @@ export function useStockResearchData({ symbol, timeframe }: StockResearchDataPar
     ? ((lastBar.close - prevBar.close) / prevBar.close * 100)
     : null)
   const isUp = changePercent !== null ? changePercent >= 0 : true
+  // CHANGE-20260713-010: 市值字段来自 quote（DB 无股本数据时为 null）
+  const totalMarketCap = quote?.total_market_cap ?? null
+  const floatMarketCap = quote?.float_market_cap ?? null
+  const marketCapAsOf = quote?.market_cap_as_of ?? null
 
   const priceSummary: PriceSummary = useMemo(() => ({
     currentPrice,
@@ -129,7 +145,10 @@ export function useStockResearchData({ symbol, timeframe }: StockResearchDataPar
     amountValue,
     changePercent,
     isUp,
-  }), [currentPrice, openPrice, highPrice, lowPrice, amountValue, changePercent, isUp])
+    totalMarketCap,
+    floatMarketCap,
+    marketCapAsOf,
+  }), [currentPrice, openPrice, highPrice, lowPrice, amountValue, changePercent, isUp, totalMarketCap, floatMarketCap, marketCapAsOf])
 
   // 6. 行情状态标签（非实时非降级时统一显示"行情回退"，禁止所有非 1d 周期显示"日线回退"）
   const quoteStatus: QuoteStatus = useMemo(() => {

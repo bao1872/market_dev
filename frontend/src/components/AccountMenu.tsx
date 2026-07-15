@@ -1,14 +1,17 @@
-// [AccountMenu] - 描述: 右上角账户菜单（消息 / 设置 / 管理后台或返回行情 / 退出）
+// [AccountMenu] - 描述: 右上角账户菜单（消息 / 设置 / 管理后台 / 返回行情 / 退出）
 // 复用现有未读数、用户信息、logout 逻辑；支持点击外部关闭、Escape 关闭、基本 ARIA。
-// variant='user'（UserAppShell）：管理员额外显示"管理后台"入口
-// variant='admin'（AdminAppShell）：显示"返回行情"入口，不重复显示"管理后台"
+// variant='user'（UserAppShell）：消息 + 设置；admin 额外显示"管理后台"
+// variant='admin'（AdminAppShell）：消息 + 设置 + "返回行情"（不重复"管理后台"）
 import { useState, useRef, useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
 import { useUnreadCount } from '@/hooks/useApi'
 import { useToast } from '@/store/toast'
-import { getAccountMenuItemsForVariant, type AccountMenuItem, type AccountMenuVariant } from '@/navigation/appNavigation'
+import { getAccountMenuItemsForVariant, APP_ROUTES, type AccountMenuItem, type AccountMenuVariant } from '@/navigation/appNavigation'
 import styles from './AccountMenu.module.scss'
+
+// [AccountMenu] - 描述: 消息路由常量（用于动态化消息项链接）
+const APP_ROUTES_MESSAGES = APP_ROUTES.messages
 
 // displayName 优先 user.name，其次 user.email，最后通用"用户"
 function getDisplayName(name?: string, email?: string): string {
@@ -29,7 +32,7 @@ function getInitials(name?: string, email?: string): string {
 }
 
 interface AccountMenuProps {
-  /** 'user' = UserAppShell 上下文（管理员额外显示管理后台入口）；'admin' = AdminAppShell 上下文（显示返回行情） */
+  /** 'user' = UserAppShell 上下文（消息+设置；admin 额外显示管理后台）；'admin' = AdminAppShell 上下文（显示返回行情） */
   variant?: AccountMenuVariant
 }
 
@@ -100,17 +103,27 @@ export default function AccountMenu({ variant = 'user' }: AccountMenuProps) {
             <div className={styles.name}>{displayName}</div>
             {user?.email && <div className={styles.email}>{user?.email}</div>}
           </div>
-          {items.map((item: AccountMenuItem) => (
-            <Link
-              key={item.path}
-              to={item.path}
-              role="menuitem"
-              className={styles.item}
-              onClick={() => setOpen(false)}
-            >
-              {item.label}
-            </Link>
-          ))}
+          {items.map((item: AccountMenuItem) => {
+            // [AccountMenu] - 描述: 消息项动态化 — unread>0 时进入 /messages?filter=unread 并显示未读数
+            const isMessages = item.path === APP_ROUTES_MESSAGES
+            const linkPath = isMessages && unread > 0 ? `${item.path}?filter=unread` : item.path
+            return (
+              <Link
+                key={item.path}
+                to={linkPath}
+                role="menuitem"
+                className={styles.item}
+                onClick={() => setOpen(false)}
+              >
+                <span>{item.label}</span>
+                {isMessages && unread > 0 && (
+                  <span className={styles.itemBadge} aria-hidden>
+                    {unread > 99 ? '99+' : unread}
+                  </span>
+                )}
+              </Link>
+            )
+          })}
           <button type="button" role="menuitem" className={styles.item} onClick={handleLogout}>
             退出登录
           </button>

@@ -287,6 +287,10 @@ export interface StrategyResult {
   item_status: string
   reason_code?: string
   error_message?: string
+  // CHANGE-20260714-001: 最新行情涨跌幅（从 bars_daily 最新两根日线计算，与 DSA run 日期分离）
+  // 前端"涨跌幅"列优先且只显示此字段；无两根有效日线时为 null（显示"--"）
+  latest_change_pct?: number | null
+  latest_change_trade_date?: string | null
 }
 
 /** 策略运行结果列表响应（分页） */
@@ -891,6 +895,8 @@ export interface StrategyResultQueryParams {
   matched_only?: boolean
   metric_filters?: string
   keyword?: string
+  industry?: string
+  concept?: string
   sort_by?: string
   sort_desc?: boolean
   page?: number
@@ -1192,10 +1198,11 @@ export async function getStrategyMonitorStates(
 export async function getInstrumentEvents(
   instrumentId: string,
   params?: StrategyEventQueryParams,
+  options?: { signal?: AbortSignal },
 ): Promise<StrategyEventListResponse> {
   const { data } = await apiClient.get<StrategyEventListResponse>(
     `/instruments/${instrumentId}/events`,
-    { params },
+    { params, signal: options?.signal },
   )
   return data
 }
@@ -1482,10 +1489,10 @@ export async function toggleMemoNotify(
  * 后端 bars router 自带 prefix="/api/v1"，完整路径为 /api/v1/instruments/{id}/bars
  * apiClient baseURL="/api" 会添加网关前缀，代理层处理后到达后端 /api/v1/instruments/{id}/bars
  */
-export async function getBars(instrumentId: string, params?: BarQueryParams): Promise<BarListResponse> {
+export async function getBars(instrumentId: string, params?: BarQueryParams, options?: { signal?: AbortSignal }): Promise<BarListResponse> {
   const { data } = await apiClient.get<BarListResponse>(
     `/api/v1/instruments/${instrumentId}/bars`,
-    { params },
+    { params, signal: options?.signal },
   )
   return data
 }
@@ -1514,12 +1521,19 @@ export interface QuoteResponse {
   degraded: boolean
   degraded_reason: string | null
   amount?: number
+  // CHANGE-20260713-010: 总市值/流通市值（数据源不可用时为 null）
+  total_market_cap?: number | null
+  float_market_cap?: number | null
+  market_cap_as_of?: string | null
+  market_cap_source?: string | null
+  market_cap_degraded_reason?: string | null
 }
 
 /** 查询指定标的的实时报价（交易时段 pytdx 实时，非交易时段降级到数据库最新日线） */
-export async function getQuote(instrumentId: string): Promise<QuoteResponse> {
+export async function getQuote(instrumentId: string, options?: { signal?: AbortSignal }): Promise<QuoteResponse> {
   const { data } = await apiClient.get<QuoteResponse>(
     `/api/v1/instruments/${instrumentId}/quote`,
+    { signal: options?.signal },
   )
   return data
 }
@@ -1573,6 +1587,9 @@ export interface IndicatorQueryParams {
   adj?: string        // qfq | none
   bars?: number       // 返回最近 N 根 bar 的指标
   force_refresh?: number  // 1 时跳过 Redis 指标缓存强制实时计算（截图链路使用）
+  // [CHANGE-011 SMC] - 1 时计算 SMC 指标（默认关闭；前端通过 IndicatorToolbar 显式开启）
+  // 后端在 include_smc=False 时跳过 SMC 计算，不消耗 CPU
+  include_smc?: number
 }
 
 /** 指标 API 响应 */
@@ -1596,10 +1613,11 @@ export interface IndicatorResponse {
 export async function getIndicators(
   instrumentId: string,
   params?: IndicatorQueryParams,
+  options?: { signal?: AbortSignal },
 ): Promise<IndicatorResponse> {
   const { data } = await apiClient.get<IndicatorResponse>(
     `/api/v1/instruments/${instrumentId}/indicators`,
-    { params },
+    { params, signal: options?.signal },
   )
   return data
 }
@@ -1629,6 +1647,95 @@ export async function getMarketStatus(): Promise<MarketStatus> {
   const { data } = await apiClient.get<MarketStatus>('/market/status')
   return data
 }
+
+// ============================================================
+// ===== Market Stocks 端点（PRD §8.1 行情列表）=====
+// ============================================================
+
+/** 行情列表单行（对齐后端 MarketStockRow） */
+export interface MarketStockRow {
+  instrument_id: string
+  symbol: string
+  name: string
+  latest_price: number | null
+  change_pct: number | null
+  industry: string | null
+  concepts: string[]
+  dsa_state: string | null
+  structure_state: string | null
+  latest_event_title: string | null
+  latest_event_time: string | null
+  is_watchlisted: boolean
+}
+
+/** 行情列表分页响应（对齐后端 MarketStocksResponse） */
+export interface MarketStocksResponse {
+  items: MarketStockRow[]
+  page: number
+  page_size: number
+  total: number
+  price_as_of: string | null
+  state_as_of: string | null
+  boards_as_of: string | null
+}
+
+/** 行情列表查询参数 */
+export interface MarketStocksQueryParams {
+  scope: 'market' | 'watchlist'
+  query?: string
+  page?: number
+  page_size?: number
+  sort?: string
+  industry?: string
+  concept?: string
+  state?: string
+}
+
+/**
+ * 查询行情列表（服务端分页 + 批量加载，禁止 N+1）。
+ * GET /market/stocks?scope&query&page&page_size&sort&industry&concept&state
+ * 每行一次返回页面所需全部字段（价格/涨跌幅/DSA状态/事件/自选）。
+ */
+export async function getMarketStocks(
+  params: MarketStocksQueryParams,
+  options?: { signal?: AbortSignal },
+): Promise<MarketStocksResponse> {
+  const { data } = await apiClient.get<MarketStocksResponse>('/market/stocks', { params, signal: options?.signal })
+  return data
+}
+
+
+// ===== C9: 板块目录只读 API（行业/概念筛选下拉支持）=====
+
+/** 板块目录单行 */
+export interface MarketBoardItem {
+  id: string
+  name: string
+  type: 'industry' | 'concept'
+  external_code: string
+}
+
+/** 板块目录列表响应 */
+export interface MarketBoardsResponse {
+  items: MarketBoardItem[]
+  available: boolean
+  reason_code: string | null
+  updated_at: string | null
+}
+
+/**
+ * 查询板块目录（只读，C9）。
+ * GET /market/boards?type=industry|concept
+ * qstock 同步前返回空列表（不报错）。
+ */
+export async function getMarketBoards(
+  params?: { type?: 'industry' | 'concept' },
+  options?: { signal?: AbortSignal },
+): Promise<MarketBoardsResponse> {
+  const { data } = await apiClient.get<MarketBoardsResponse>('/market/boards', { params, signal: options?.signal })
+  return data
+}
+
 
 // ============================================================
 // ===== Admin Membership 端点 =====
@@ -2600,7 +2707,7 @@ export async function getTemporalFeatures(
 // ===== Table View Presets 端点 =====
 // ============================================================
 // [Presets] - 描述: 用户表格视图配置 CRUD（/me/table-view-presets）
-// config 仅保存 keyword/sort/filters/hiddenColumns/pageSize，禁止保存 selectedKeys/page/activeRunId/rows
+// config 仅保存 keyword/sort/filters/hiddenColumns/columnOrder/pageSize，禁止保存 selectedKeys/page/activeRunId/rows
 
 /** 表格视图配置内容（与后端 TableViewPresetConfig 对齐，extra=forbid） */
 export interface TableViewPresetConfig {
@@ -2608,7 +2715,11 @@ export interface TableViewPresetConfig {
   sort?: { key: string; direction: 'asc' | 'desc' } | null
   filters?: Array<{ key: string; op: string; value: string | number; value2?: string | number }> | null
   hiddenColumns?: string[] | null
+  columnOrder?: string[] | null
   pageSize?: number | null
+  // CHANGE-20260713-006: /market 行业/概念筛选持久化（旧 preset 缺字段时正常兼容）
+  industry?: string | null
+  concept?: string | null
 }
 
 /** preset 响应（与后端 TableViewPresetResponse 对齐） */
@@ -2677,4 +2788,143 @@ export async function updateTableViewPreset(
 /** 删除 preset */
 export async function deleteTableViewPreset(id: string): Promise<void> {
   await apiClient.delete(`/me/table-view-presets/${id}`)
+}
+
+// ============================================================
+// ===== Stock Context 端点（PRD V1.1 §7.3）=====
+// ============================================================
+
+/** StateValue - code 与 label 分离的稳定状态值 */
+export interface StateValue {
+  code: string | null
+  label: string
+  value: number | null
+  unit: string | null
+  timeframe: string
+  /** 来源字段名（管理员可见，用户接口为 null） */
+  sourceField: string | null
+}
+
+/** Evidence - 事件证据项 */
+export interface StateEvidence {
+  fieldName: string
+  code: string
+  currentValue: string | null
+  previousValue: string | null
+  unit: string | null
+  timeframe: string
+}
+
+/** StockStructure - 结构状态 */
+export interface StockStructure {
+  price: StateValue
+}
+
+/** StockMomentum - 动量状态 */
+export interface StockMomentum {
+  macd: StateValue
+  sqzmom: StateValue
+  temporal: StateValue[]
+}
+
+/** StockVolatility - 波动状态 */
+export interface StockVolatility {
+  bollPosition: StateValue
+}
+
+/** StockState - 统一状态向量 */
+export interface StockState {
+  symbol: string
+  asOf: string
+  sourceRunId: string
+  version: string
+  computedAt: string
+  structure: StockStructure
+  momentum: StockMomentum
+  volatility: StockVolatility
+  evidence: StateEvidence[]
+  degradedReasons: string[]
+}
+
+/** StateEventDTO - 状态变化事件 */
+export interface StateEventDTO {
+  id: string
+  symbol: string
+  occurredAt: string
+  eventType: string
+  title: string
+  description: string
+  evidence: StateEvidence[]
+  changedFields: string[]
+  previousAsOf: string | null
+  currentAsOf: string
+  /** 稳定幂等键（仅数据库/管理员可见，用户接口为 null） */
+  idempotencyKey: string | null
+}
+
+/** StockContext 数据质量 - 含 reasonCode 解释空态原因 */
+export interface StockContextDataQuality {
+  hasSucceededRun: boolean
+  hasSnapshot: boolean
+  reasonCode: string | null
+  degradedReasons: string[]
+  runTradeDate: string | null
+  runPublishedAt: string | null
+  instrumentStatus: string
+}
+
+/** StockContext 响应 - 用户侧只读 */
+export interface StockContextResponse {
+  state: StockState | null
+  events: StateEventDTO[]
+  dataQuality: StockContextDataQuality
+}
+
+/** Admin StockDebug 响应 - 含原始 payload */
+export interface AdminStockDebugResponse extends StockContextResponse {
+  rawDebug?: {
+    structuralPayload: Record<string, unknown>
+    temporalPayload: Record<string, unknown>
+    summaryPayload: Record<string, unknown>
+    sourcePrimaryBarTime: string | null
+    sourceSecondaryBarTime: string | null
+    runId: string
+    runType: string
+    runStartedAt: string | null
+    runFinishedAt: string | null
+  }
+}
+
+/**
+ * 获取个股状态上下文（只读，需登录 + 有效订阅）。
+ * GET /api/v1/stocks/{symbol}/context?as_of=YYYY-MM-DD
+ * 返回 StockState + 最近事件 + 数据质量。
+ */
+export async function getStockContext(
+  symbol: string,
+  params?: { as_of?: string },
+  options?: { signal?: AbortSignal },
+): Promise<StockContextResponse> {
+  const { data } = await apiClient.get<StockContextResponse>(
+    `/api/v1/stocks/${symbol}/context`,
+    { params, signal: options?.signal },
+  )
+  return data
+}
+
+/**
+ * 管理员个股调试接口（需管理员身份）。
+ * GET /api/v1/admin/stocks/{symbol}/debug?as_of=YYYY-MM-DD
+ * 返回 StockState + 事件 + 原始 payload。
+ */
+export async function getAdminStockDebug(
+  symbol: string,
+  params?: { as_of?: string },
+  options?: { signal?: AbortSignal },
+): Promise<AdminStockDebugResponse> {
+  const { data } = await apiClient.get<AdminStockDebugResponse>(
+    `/api/v1/admin/stocks/${symbol}/debug`,
+    { params, signal: options?.signal },
+  )
+  return data
 }

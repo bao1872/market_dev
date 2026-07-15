@@ -1124,18 +1124,30 @@ async def test_feature_snapshot_progress_callback_updates_heartbeat_and_metadata
 async def test_repair_stale_snapshot_run_marks_failed_when_orchestrator_interrupted(
     db_session,
 ) -> None:
-    """[Repair] orchestrator interrupted + snapshot_run running + 快照不足 → 标记 failed。"""
+    """[Repair] orchestrator interrupted + snapshot_run running + 快照不足 → 标记 failed。
+
+    [P0-1] snapshots 必须设置 source_run_id=snapshot_run.id 才会被统计。
+    [P0-2] DSA 已 publish 但快照不足 → action='failed'。
+    """
     from app.models.instrument import Instrument
 
     trade_date = date(2026, 6, 25)
     target_trade_date = trade_date
 
-    # 创建中断的 orchestrator job_run
+    # 创建已发布的 DSA run（P0-2: DSA published 前置检查）
+    dsa_run, _ = await _create_dsa_strategy_run(
+        db_session, status="completed", trade_date=target_trade_date,
+    )
+    dsa_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+    await db_session.flush()
+
+    # 创建中断的 orchestrator job_run（含 dsa_run_id）
     job_run = await _create_after_close_job_run(
         db_session,
         status="interrupted",
         orchestrator_status=AfterCloseRunStatus.FEATURE_SNAPSHOT.value,
         trade_date=target_trade_date,
+        dsa_run_id=dsa_run.id,
     )
     job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
     await db_session.flush()
@@ -1154,7 +1166,7 @@ async def test_repair_stale_snapshot_run_marks_failed_when_orchestrator_interrup
     db_session.add(snapshot_run)
     await db_session.flush()
 
-    # 写入少量 snapshots（不足 95%）
+    # [P0-1] 写入少量 snapshots（不足 95%），必须设置 source_run_id
     for i in range(3):
         inst = Instrument(
             id=uuid.uuid4(),
@@ -1177,6 +1189,7 @@ async def test_repair_stale_snapshot_run_marks_failed_when_orchestrator_interrup
                 temporal_payload={},
                 summary_payload={"_source": "feature_snapshot"},
                 degraded_reasons=[],
+                source_run_id=snapshot_run.id,
             )
         )
     await db_session.flush()
@@ -1203,17 +1216,29 @@ async def test_repair_stale_snapshot_run_marks_failed_when_orchestrator_interrup
 async def test_repair_stale_snapshot_run_succeeds_when_enough_snapshots(
     db_session,
 ) -> None:
-    """[Repair] orchestrator interrupted + snapshot_run running + 快照足够 → 标记 succeeded。"""
+    """[Repair] orchestrator interrupted + snapshot_run running + 快照足够 → 标记 succeeded。
+
+    [P0-1] snapshots 必须设置 source_run_id=snapshot_run.id 才会被统计。
+    [P0-2] DSA 必须 published_at 非空才允许标记 snapshot succeeded。
+    """
     from app.models.instrument import Instrument
 
     trade_date = date(2026, 6, 25)
     expected_count = 100
+
+    # [P0-2] 创建已发布的 DSA run
+    dsa_run, _ = await _create_dsa_strategy_run(
+        db_session, status="completed", trade_date=trade_date,
+    )
+    dsa_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+    await db_session.flush()
 
     job_run = await _create_after_close_job_run(
         db_session,
         status="interrupted",
         orchestrator_status=AfterCloseRunStatus.FEATURE_SNAPSHOT.value,
         trade_date=trade_date,
+        dsa_run_id=dsa_run.id,
     )
     job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
     await db_session.flush()
@@ -1231,7 +1256,7 @@ async def test_repair_stale_snapshot_run_succeeds_when_enough_snapshots(
     db_session.add(snapshot_run)
     await db_session.flush()
 
-    # 写入 96 个 snapshots（>= 95%）
+    # [P0-1] 写入 96 个 snapshots（>= 95%），必须设置 source_run_id
     for i in range(96):
         inst = Instrument(
             id=uuid.uuid4(),
@@ -1254,6 +1279,7 @@ async def test_repair_stale_snapshot_run_succeeds_when_enough_snapshots(
                 temporal_payload={},
                 summary_payload={"_source": "feature_snapshot"},
                 degraded_reasons=[],
+                source_run_id=snapshot_run.id,
             )
         )
     await db_session.flush()
@@ -1522,6 +1548,965 @@ async def test_execute_calls_repair_at_start(db_session) -> None:
 
     repair_mock.assert_awaited_once()
     assert job_run.status == "succeeded"
+
+
+# =============================================================================
+# C5: 事件生成在 publishing 成功之后（publishing 失败不生成事件）
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_c5_publishing_failure_skips_event_generation(db_session) -> None:
+    """C5: publishing 失败时不生成状态事件。
+
+    场景：feature_snapshot 成功，但 publish_run 抛 RuntimeError。
+    要求：generate_events_for_run 不被调用（事件只在发布成功后生成）。
+    """
+    dsa_run, _ = await _create_dsa_strategy_run(db_session, status="completed")
+    job_run = await _create_after_close_job_run(db_session)
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return db_session
+        async def __aexit__(self, *args):
+            return False
+
+    fake_session_local = MagicMock(return_value=_FakeSessionContext())
+
+    fake_batch_result = BatchResult(total=100, succeeded=95)
+    fake_batch_result.dsa_run_id = dsa_run.id
+    fake_batch_result.daily_covered = 95
+    fake_batch_result.daily_total = 100
+    fake_batch_result.daily_coverage = 0.95
+
+    fake_published_run = MagicMock()
+    fake_published_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+
+    original_get = db_session.get
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+
+    async def _fake_get(model, id, *args, **kwargs):
+        if model is SchedulerJobRun and id == job_run.id:
+            return job_run
+        if model is StrategyRun and id == dsa_run.id:
+            return dsa_run
+        if model is StockFeatureSnapshotRun:
+            return await original_get(model, id, *args, **kwargs)
+        return None
+
+    event_gen_call_count = 0
+
+    async def _fake_generate_events(*args, **kwargs):
+        nonlocal event_gen_call_count
+        event_gen_call_count += 1
+        return {"event_count": 0}
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        new=fake_session_local,
+    ), patch.object(
+        db_session, "commit", new=db_session.flush,
+    ), patch.object(
+        db_session, "rollback", new=AsyncMock(return_value=None),
+    ), patch.object(
+        db_session, "get",
+        new=_fake_get,
+    ), patch.object(
+        BarsSchedulerService, "refresh_all_instruments",
+        new=AsyncMock(return_value=fake_batch_result),
+    ), patch(
+        "app.services.after_close_orchestrator._poll_dsa_run_status",
+        new=AsyncMock(return_value="completed"),
+    ), patch.object(
+        StrategyBatchService, "_check_quality_gates",
+        new=AsyncMock(return_value=True),
+    ), patch.object(
+        StrategyBatchService, "publish_run",
+        new=AsyncMock(side_effect=RuntimeError("publishing 失败：质量门禁不通过")),
+    ), patch(
+        "app.services.after_close_orchestrator.get_active_a_share_instruments",
+        new=AsyncMock(return_value=[uuid.uuid4()]),
+    ), patch(
+        "app.services.after_close_orchestrator.compute_for_trade_date",
+        new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
+    ), patch(
+        "app.services.state_event_service.generate_events_for_run",
+        new=_fake_generate_events,
+    ), patch(
+        "app.services.state_event_service.cleanup_old_events",
+        new=AsyncMock(return_value={"deleted_count": 0}),
+    ):
+        with pytest.raises(RuntimeError, match="publishing 失败"):
+            await execute_after_close_run(
+                job_run_id=job_run.id,
+                trade_date=date(2026, 6, 25),
+                dsa_poll_interval=0,
+                dsa_poll_timeout=1,
+            )
+
+    # C5 核心断言：publishing 失败时 generate_events_for_run 不被调用
+    assert event_gen_call_count == 0, (
+        f"publishing 失败不应生成事件，但 generate_events_for_run 被调用了 {event_gen_call_count} 次"
+    )
+
+
+@pytest.mark.asyncio
+async def test_c5_publishing_success_generates_events_once(db_session) -> None:
+    """C5: publishing 成功后生成状态事件且仅生成一次。
+
+    场景：feature_snapshot 成功 + publish_run 成功。
+    要求：generate_events_for_run 被调用恰好 1 次。
+    """
+    dsa_run, _ = await _create_dsa_strategy_run(db_session, status="completed")
+    job_run = await _create_after_close_job_run(db_session)
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return db_session
+        async def __aexit__(self, *args):
+            return False
+
+    fake_session_local = MagicMock(return_value=_FakeSessionContext())
+
+    fake_batch_result = BatchResult(total=100, succeeded=95)
+    fake_batch_result.dsa_run_id = dsa_run.id
+    fake_batch_result.daily_covered = 95
+    fake_batch_result.daily_total = 100
+    fake_batch_result.daily_coverage = 0.95
+
+    fake_published_run = MagicMock()
+    fake_published_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+
+    original_get = db_session.get
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+
+    async def _fake_get(model, id, *args, **kwargs):
+        if model is SchedulerJobRun and id == job_run.id:
+            return job_run
+        if model is StrategyRun and id == dsa_run.id:
+            return dsa_run
+        if model is StockFeatureSnapshotRun:
+            return await original_get(model, id, *args, **kwargs)
+        return None
+
+    event_gen_call_count = 0
+
+    async def _fake_generate_events(*args, **kwargs):
+        nonlocal event_gen_call_count
+        event_gen_call_count += 1
+        return {"event_count": 1, "inserted_count": 1}
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        new=fake_session_local,
+    ), patch.object(
+        db_session, "commit", new=db_session.flush,
+    ), patch.object(
+        db_session, "get",
+        new=_fake_get,
+    ), patch.object(
+        BarsSchedulerService, "refresh_all_instruments",
+        new=AsyncMock(return_value=fake_batch_result),
+    ), patch(
+        "app.services.after_close_orchestrator._poll_dsa_run_status",
+        new=AsyncMock(return_value="completed"),
+    ), patch.object(
+        StrategyBatchService, "_check_quality_gates",
+        new=AsyncMock(return_value=True),
+    ), patch.object(
+        StrategyBatchService, "publish_run",
+        new=AsyncMock(return_value=fake_published_run),
+    ), patch(
+        "app.services.after_close_orchestrator.get_active_a_share_instruments",
+        new=AsyncMock(return_value=[uuid.uuid4()]),
+    ), patch(
+        "app.services.after_close_orchestrator.compute_for_trade_date",
+        new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
+    ), patch(
+        "app.services.state_event_service.generate_events_for_run",
+        new=_fake_generate_events,
+    ), patch(
+        "app.services.state_event_service.cleanup_old_events",
+        new=AsyncMock(return_value={"deleted_count": 0}),
+    ):
+        await execute_after_close_run(
+            job_run_id=job_run.id,
+            trade_date=date(2026, 6, 25),
+            dsa_poll_interval=0,
+            dsa_poll_timeout=1,
+        )
+
+    # C5 核心断言：publishing 成功后 generate_events_for_run 恰好调用 1 次
+    assert event_gen_call_count == 1, (
+        f"publishing 成功后应生成事件恰好 1 次，实际调用 {event_gen_call_count} 次"
+    )
+    assert job_run.status == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_p0_publish_failure_marks_snapshot_run_failed_no_events(
+    db_session,
+) -> None:
+    """[P0 Atomicity] DSA publish_run 失败时 snapshot run=failed、published_at=null、无事件。
+
+    场景：
+    1. feature_snapshot 成功（compute_for_trade_date 返回正常结果）
+    2. DSA publish_run 抛异常
+    要求：
+    1. snapshot run 被标记为 failed
+    2. snapshot run.published_at 为 None
+    3. generate_events_for_run 不被调用
+    4. orchestrator 最终状态为 failed
+    """
+    dsa_run, _ = await _create_dsa_strategy_run(db_session, status="completed")
+    job_run = await _create_after_close_job_run(db_session)
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return db_session
+        async def __aexit__(self, *args):
+            return False
+
+    fake_session_local = MagicMock(return_value=_FakeSessionContext())
+
+    fake_batch_result = BatchResult(total=100, succeeded=95)
+    fake_batch_result.dsa_run_id = dsa_run.id
+    fake_batch_result.daily_covered = 95
+    fake_batch_result.daily_total = 100
+    fake_batch_result.daily_coverage = 0.95
+
+    publish_exc = RuntimeError("DSA publish failed: quality gate rejection")
+    event_gen_call_count = 0
+
+    async def _fake_publish_run(*args, **kwargs):
+        raise publish_exc
+
+    async def _fake_generate_events(*args, **kwargs):
+        nonlocal event_gen_call_count
+        event_gen_call_count += 1
+        return {"event_count": 0}
+
+    original_get = db_session.get
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+
+    async def _fake_get(model, id, *args, **kwargs):
+        if model is SchedulerJobRun and id == job_run.id:
+            return job_run
+        if model is StrategyRun and id == dsa_run.id:
+            return dsa_run
+        if model is StockFeatureSnapshotRun:
+            return await original_get(model, id, *args, **kwargs)
+        return None
+
+    target_trade_date = date(2026, 6, 25)
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        new=fake_session_local,
+    ), patch.object(
+        db_session, "commit", new=db_session.flush,
+    ), patch.object(
+        db_session, "rollback", new=AsyncMock(return_value=None),
+    ), patch.object(
+        db_session, "get",
+        new=_fake_get,
+    ), patch.object(
+        BarsSchedulerService, "refresh_all_instruments",
+        new=AsyncMock(return_value=fake_batch_result),
+    ), patch(
+        "app.services.after_close_orchestrator._poll_dsa_run_status",
+        new=AsyncMock(return_value="completed"),
+    ), patch.object(
+        StrategyBatchService, "_check_quality_gates",
+        new=AsyncMock(return_value=True),
+    ), patch.object(
+        StrategyBatchService, "publish_run",
+        new=_fake_publish_run,
+    ), patch(
+        "app.services.after_close_orchestrator.get_active_a_share_instruments",
+        new=AsyncMock(return_value=[uuid.uuid4()]),
+    ), patch(
+        "app.services.after_close_orchestrator.compute_for_trade_date",
+        new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
+    ), patch(
+        "app.services.state_event_service.generate_events_for_run",
+        new=_fake_generate_events,
+    ), patch(
+        "app.services.state_event_service.cleanup_old_events",
+        new=AsyncMock(return_value={"deleted_count": 0}),
+    ):
+        with pytest.raises(RuntimeError, match="DSA publish failed"):
+            await execute_after_close_run(
+                job_run_id=job_run.id,
+                trade_date=target_trade_date,
+                dsa_poll_interval=0,
+                dsa_poll_timeout=1,
+            )
+
+    # 验证 generate_events 未被调用
+    assert event_gen_call_count == 0, (
+        f"publish_run 失败时不应生成事件，但 generate_events 被调用了 {event_gen_call_count} 次"
+    )
+
+    # 验证 snapshot run 被标记为 failed，published_at=None
+    from sqlalchemy import select
+    stmt = select(StockFeatureSnapshotRun).where(
+        StockFeatureSnapshotRun.trade_date == target_trade_date,
+        StockFeatureSnapshotRun.run_type == "after_close",
+    )
+    result = await db_session.execute(stmt)
+    runs = result.scalars().all()
+    assert len(runs) >= 1, f"应创建至少 1 个 snapshot run，实际 {len(runs)}"
+    run = runs[0]
+    assert run.status == "failed", f"run.status 应为 failed，实际 {run.status}"
+    assert run.published_at is None, "failed run 不应写 published_at"
+
+
+@pytest.mark.asyncio
+async def test_p0_publish_success_finalizes_snapshot_run_succeeded(
+    db_session,
+) -> None:
+    """[P0 Atomicity] DSA publish_run 成功后 snapshot run 才标记 succeeded/published_at。
+
+    场景：
+    1. feature_snapshot 成功（compute_for_trade_date 返回正常结果）
+    2. DSA publish_run 成功
+    要求：
+    1. snapshot run 被标记为 succeeded
+    2. snapshot run.published_at 非空
+    3. generate_events_for_run 被调用 1 次
+    """
+    dsa_run, _ = await _create_dsa_strategy_run(db_session, status="completed")
+    job_run = await _create_after_close_job_run(db_session)
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return db_session
+        async def __aexit__(self, *args):
+            return False
+
+    fake_session_local = MagicMock(return_value=_FakeSessionContext())
+
+    fake_batch_result = BatchResult(total=100, succeeded=95)
+    fake_batch_result.dsa_run_id = dsa_run.id
+    fake_batch_result.daily_covered = 95
+    fake_batch_result.daily_total = 100
+    fake_batch_result.daily_coverage = 0.95
+
+    fake_published_run = MagicMock()
+    fake_published_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+
+    event_gen_call_count = 0
+
+    async def _fake_generate_events(*args, **kwargs):
+        nonlocal event_gen_call_count
+        event_gen_call_count += 1
+        return {"event_count": 0}
+
+    original_get = db_session.get
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+
+    async def _fake_get(model, id, *args, **kwargs):
+        if model is SchedulerJobRun and id == job_run.id:
+            return job_run
+        if model is StrategyRun and id == dsa_run.id:
+            return dsa_run
+        if model is StockFeatureSnapshotRun:
+            return await original_get(model, id, *args, **kwargs)
+        return None
+
+    target_trade_date = date(2026, 6, 25)
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        new=fake_session_local,
+    ), patch.object(
+        db_session, "commit", new=db_session.flush,
+    ), patch.object(
+        db_session, "get",
+        new=_fake_get,
+    ), patch.object(
+        BarsSchedulerService, "refresh_all_instruments",
+        new=AsyncMock(return_value=fake_batch_result),
+    ), patch(
+        "app.services.after_close_orchestrator._poll_dsa_run_status",
+        new=AsyncMock(return_value="completed"),
+    ), patch.object(
+        StrategyBatchService, "_check_quality_gates",
+        new=AsyncMock(return_value=True),
+    ), patch.object(
+        StrategyBatchService, "publish_run",
+        new=AsyncMock(return_value=fake_published_run),
+    ), patch(
+        "app.services.after_close_orchestrator.get_active_a_share_instruments",
+        new=AsyncMock(return_value=[uuid.uuid4()]),
+    ), patch(
+        "app.services.after_close_orchestrator.compute_for_trade_date",
+        new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
+    ), patch(
+        "app.services.state_event_service.generate_events_for_run",
+        new=_fake_generate_events,
+    ), patch(
+        "app.services.state_event_service.cleanup_old_events",
+        new=AsyncMock(return_value={"deleted_count": 0}),
+    ):
+        await execute_after_close_run(
+            job_run_id=job_run.id,
+            trade_date=target_trade_date,
+            dsa_poll_interval=0,
+            dsa_poll_timeout=1,
+        )
+
+    # 验证 generate_events 被调用 1 次
+    assert event_gen_call_count == 1, (
+        f"publishing 成功后应生成事件 1 次，实际调用 {event_gen_call_count} 次"
+    )
+
+    # 验证 snapshot run 被标记为 succeeded，published_at 非空
+    from sqlalchemy import select
+    stmt = select(StockFeatureSnapshotRun).where(
+        StockFeatureSnapshotRun.trade_date == target_trade_date,
+        StockFeatureSnapshotRun.run_type == "after_close",
+    )
+    result = await db_session.execute(stmt)
+    runs = result.scalars().all()
+    assert len(runs) >= 1, f"应创建至少 1 个 snapshot run，实际 {len(runs)}"
+    run = runs[0]
+    assert run.status == "succeeded", f"run.status 应为 succeeded，实际 {run.status}"
+    assert run.published_at is not None, "succeeded run 应写 published_at"
+
+
+# =============================================================================
+# [P0-1/P0-2/P0-3] after_close 恢复 P0 逻辑测试
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_repair_counts_by_source_run_id_only(db_session) -> None:
+    """[P0-1] repair 统计实际行数必须限定 source_run_id == snapshot_run.id。
+
+    场景：同 trade_date 存在两个 snapshot run（A 和 B），A 有 96 条 snapshots，
+    B 有 0 条。repair B 时不得统计 A 的 snapshots。
+    """
+    from app.models.instrument import Instrument
+
+    trade_date = date(2026, 6, 25)
+    expected_count = 100
+
+    # 创建已发布的 DSA run
+    dsa_run, _ = await _create_dsa_strategy_run(
+        db_session, status="completed", trade_date=trade_date,
+    )
+    dsa_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+    await db_session.flush()
+
+    job_run = await _create_after_close_job_run(
+        db_session,
+        status="interrupted",
+        orchestrator_status=AfterCloseRunStatus.FEATURE_SNAPSHOT.value,
+        trade_date=trade_date,
+        dsa_run_id=dsa_run.id,
+    )
+    job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+    await db_session.flush()
+
+    # snapshot run A（有 96 条 snapshots，不属于本测试的 repair 对象）
+    snapshot_run_a = StockFeatureSnapshotRun(
+        trade_date=trade_date,
+        run_type=RUN_TYPE_AFTER_CLOSE,
+        status=STATUS_SUCCEEDED,
+        expected_count=expected_count,
+        snapshot_count=96,
+        started_at=datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(minutes=30),
+        metadata_={"scope": "full", "source": "after_close_orchestrator"},
+    )
+    db_session.add(snapshot_run_a)
+    await db_session.flush()
+
+    # snapshot run B（stuck running，0 条 snapshots）—— 本测试的 repair 对象
+    snapshot_run_b = StockFeatureSnapshotRun(
+        trade_date=trade_date,
+        run_type=RUN_TYPE_AFTER_CLOSE,
+        status=STATUS_RUNNING,
+        expected_count=expected_count,
+        started_at=datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(minutes=30),
+        metadata_={"scope": "full", "source": "after_close_orchestrator"},
+    )
+    db_session.add(snapshot_run_b)
+    await db_session.flush()
+
+    # 写入 96 条 snapshots，source_run_id 指向 A（不属于 B）
+    for i in range(96):
+        inst = Instrument(
+            id=uuid.uuid4(),
+            symbol=f"SIDA{i:03d}",
+            name=f"sourceA{i}",
+            market="SH",
+            status="active",
+        )
+        db_session.add(inst)
+        await db_session.flush()
+        db_session.add(
+            StockFeatureSnapshot(
+                instrument_id=inst.id,
+                trade_date=trade_date,
+                primary_timeframe="1d",
+                secondary_timeframe="15m",
+                adj="qfq",
+                schema_version=1,
+                structural_payload={},
+                temporal_payload={},
+                summary_payload={"_source": "feature_snapshot"},
+                degraded_reasons=[],
+                source_run_id=snapshot_run_a.id,
+            )
+        )
+    await db_session.flush()
+
+    repaired = await repair_stale_after_close_snapshot_runs(
+        db_session,
+        stale_threshold_seconds=60,
+        success_rate_threshold=0.95,
+    )
+
+    # 只 repair B（A 是 succeeded 不在 repair 范围）
+    repaired_b = [r for r in repaired if r["snapshot_run_id"] == str(snapshot_run_b.id)]
+    assert len(repaired_b) == 1, f"应只 repair B，实际 {repaired}"
+    # B 的 actual_count 必须为 0（不统计 A 的 snapshots）
+    assert repaired_b[0]["actual_count"] == 0, (
+        f"B 的 actual_count 必须为 0（source_run_id 隔离），"
+        f"实际={repaired_b[0]['actual_count']}"
+    )
+    assert repaired_b[0]["action"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_repair_does_not_succeed_when_dsa_not_published(db_session) -> None:
+    """[P0-2] DSA 未 publish 时不得把 running snapshot run 标记 succeeded。
+
+    场景：DSA run status=completed 但 published_at=None，snapshot 行数足够。
+    要求：action='failed'，不得写 published_at。
+    """
+    from app.models.instrument import Instrument
+
+    trade_date = date(2026, 6, 25)
+    expected_count = 100
+
+    # DSA run status=completed 但 published_at=None（未发布）
+    dsa_run, _ = await _create_dsa_strategy_run(
+        db_session, status="completed", trade_date=trade_date,
+    )
+    # 不设置 published_at（模拟未发布）
+    await db_session.flush()
+
+    job_run = await _create_after_close_job_run(
+        db_session,
+        status="interrupted",
+        orchestrator_status=AfterCloseRunStatus.FEATURE_SNAPSHOT.value,
+        trade_date=trade_date,
+        dsa_run_id=dsa_run.id,
+    )
+    job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+    await db_session.flush()
+
+    snapshot_run = StockFeatureSnapshotRun(
+        trade_date=trade_date,
+        run_type=RUN_TYPE_AFTER_CLOSE,
+        status=STATUS_RUNNING,
+        expected_count=expected_count,
+        started_at=datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(minutes=30),
+        metadata_={"scope": "full", "source": "after_close_orchestrator"},
+    )
+    db_session.add(snapshot_run)
+    await db_session.flush()
+
+    # 写入足够的 snapshots（96 >= 95%）
+    for i in range(96):
+        inst = Instrument(
+            id=uuid.uuid4(),
+            symbol=f"NPD{i:03d}",
+            name=f"未发布{i}",
+            market="SH",
+            status="active",
+        )
+        db_session.add(inst)
+        await db_session.flush()
+        db_session.add(
+            StockFeatureSnapshot(
+                instrument_id=inst.id,
+                trade_date=trade_date,
+                primary_timeframe="1d",
+                secondary_timeframe="15m",
+                adj="qfq",
+                schema_version=1,
+                structural_payload={},
+                temporal_payload={},
+                summary_payload={"_source": "feature_snapshot"},
+                degraded_reasons=[],
+                source_run_id=snapshot_run.id,
+            )
+        )
+    await db_session.flush()
+
+    repaired = await repair_stale_after_close_snapshot_runs(
+        db_session,
+        stale_threshold_seconds=60,
+        success_rate_threshold=0.95,
+    )
+
+    assert len(repaired) == 1
+    assert repaired[0]["action"] == "failed", (
+        f"DSA 未 publish 时不得标记 succeeded，实际 action={repaired[0]['action']}"
+    )
+    assert "dsa_not_published" in repaired[0]["reason"]
+
+    await db_session.refresh(snapshot_run)
+    assert snapshot_run.status == STATUS_FAILED
+    assert snapshot_run.published_at is None, "DSA 未 publish 时不得写 published_at"
+
+
+@pytest.mark.asyncio
+async def test_repair_returns_resume_pending_for_tracked_run(db_session) -> None:
+    """[P0-2] metadata 中 feature_snapshot_run_id 匹配的 running snapshot run →
+
+    返回 action='resume_pending'，保持 run 为 running（不标记 succeeded/failed）。
+    """
+    from app.models.instrument import Instrument
+
+    trade_date = date(2026, 6, 25)
+    expected_count = 100
+
+    # DSA 未 publish（模拟中断在 feature_snapshot 阶段）
+    dsa_run, _ = await _create_dsa_strategy_run(
+        db_session, status="completed", trade_date=trade_date,
+    )
+    await db_session.flush()
+
+    snapshot_run = StockFeatureSnapshotRun(
+        trade_date=trade_date,
+        run_type=RUN_TYPE_AFTER_CLOSE,
+        status=STATUS_RUNNING,
+        expected_count=expected_count,
+        started_at=datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(minutes=30),
+        metadata_={"scope": "full", "source": "after_close_orchestrator"},
+    )
+    db_session.add(snapshot_run)
+    await db_session.flush()
+
+    # job_run metadata 中设置 feature_snapshot_run_id 匹配 snapshot_run.id
+    job_run = await _create_after_close_job_run(
+        db_session,
+        status="interrupted",
+        orchestrator_status=AfterCloseRunStatus.FEATURE_SNAPSHOT.value,
+        trade_date=trade_date,
+        dsa_run_id=dsa_run.id,
+    )
+    job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+    # 在 metadata 中追加 feature_snapshot_run_id
+    meta = json.loads(job_run.metadata_json)
+    meta["feature_snapshot_run_id"] = str(snapshot_run.id)
+    job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+    await db_session.flush()
+
+    # 写入少量 snapshots（source_run_id 匹配）
+    for i in range(3):
+        inst = Instrument(
+            id=uuid.uuid4(),
+            symbol=f"TRK{i:03d}",
+            name=f"tracked{i}",
+            market="SH",
+            status="active",
+        )
+        db_session.add(inst)
+        await db_session.flush()
+        db_session.add(
+            StockFeatureSnapshot(
+                instrument_id=inst.id,
+                trade_date=trade_date,
+                primary_timeframe="1d",
+                secondary_timeframe="15m",
+                adj="qfq",
+                schema_version=1,
+                structural_payload={},
+                temporal_payload={},
+                summary_payload={"_source": "feature_snapshot"},
+                degraded_reasons=[],
+                source_run_id=snapshot_run.id,
+            )
+        )
+    await db_session.flush()
+
+    repaired = await repair_stale_after_close_snapshot_runs(
+        db_session,
+        stale_threshold_seconds=60,
+        success_rate_threshold=0.95,
+    )
+
+    assert len(repaired) == 1
+    assert repaired[0]["action"] == "resume_pending", (
+        f"tracked run 应返回 resume_pending，实际={repaired[0]['action']}"
+    )
+    assert repaired[0]["reason"] == "tracked_run_awaiting_resume"
+
+    # 验证 snapshot run 保持 running（未被修改）
+    await db_session.refresh(snapshot_run)
+    assert snapshot_run.status == STATUS_RUNNING, "tracked run 应保持 running"
+    assert snapshot_run.published_at is None
+
+
+@pytest.mark.asyncio
+async def test_resume_from_feature_snapshot_reads_actual_count(db_session) -> None:
+    """[P0-3] 断点从 last_completed_step='feature_snapshot' 恢复发布时，
+
+    snapshot_result 为 None，finish_snapshot_run 必须从数据库读取实际 snapshot 数量。
+
+    场景：
+    1. job_run 已完成 feature_snapshot（last_completed_step='feature_snapshot'）
+    2. snapshot_run 有 50 条实际 snapshots 在 DB 中
+    3. DSA publish_run 成功
+    4. 要求：snapshot_run.snapshot_count=50（从 DB 读取），不是 0
+    """
+    from app.models.instrument import Instrument
+
+    trade_date = date(2026, 6, 25)
+    expected_count = 100
+
+    # 创建已发布的 DSA run
+    dsa_run, _ = await _create_dsa_strategy_run(
+        db_session, status="completed", trade_date=trade_date,
+    )
+    await db_session.flush()
+
+    # 创建已存在的 snapshot run（running，有 50 条 snapshots）
+    snapshot_run = StockFeatureSnapshotRun(
+        trade_date=trade_date,
+        run_type=RUN_TYPE_AFTER_CLOSE,
+        status=STATUS_RUNNING,
+        expected_count=expected_count,
+        started_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+        metadata_={"scope": "full", "source": "after_close_orchestrator"},
+    )
+    db_session.add(snapshot_run)
+    await db_session.flush()
+
+    # 写入 50 条 snapshots
+    for i in range(50):
+        inst = Instrument(
+            id=uuid.uuid4(),
+            symbol=f"FSR{i:03d}",
+            name=f"resume{i}",
+            market="SH",
+            status="active",
+        )
+        db_session.add(inst)
+        await db_session.flush()
+        db_session.add(
+            StockFeatureSnapshot(
+                instrument_id=inst.id,
+                trade_date=trade_date,
+                primary_timeframe="1d",
+                secondary_timeframe="15m",
+                adj="qfq",
+                schema_version=1,
+                structural_payload={},
+                temporal_payload={},
+                summary_payload={"_source": "feature_snapshot"},
+                degraded_reasons=[],
+                source_run_id=snapshot_run.id,
+            )
+        )
+    await db_session.flush()
+
+    # 创建 job_run，last_completed_step='feature_snapshot'（跳过 snapshot 阶段）
+    job_run = await _create_after_close_job_run(
+        db_session,
+        status="running",
+        orchestrator_status=AfterCloseRunStatus.PUBLISHING.value,
+        trade_date=trade_date,
+        dsa_run_id=dsa_run.id,
+    )
+    meta = json.loads(job_run.metadata_json)
+    meta["last_completed_step"] = "feature_snapshot"
+    meta["feature_snapshot_run_id"] = str(snapshot_run.id)
+    job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+    await db_session.flush()
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return db_session
+        async def __aexit__(self, *args):
+            return False
+
+    fake_session_local = MagicMock(return_value=_FakeSessionContext())
+    fake_published_run = MagicMock()
+    fake_published_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+
+    original_get = db_session.get
+
+    async def _fake_get(model, id, *args, **kwargs):
+        if model is SchedulerJobRun and id == job_run.id:
+            return job_run
+        if model is StrategyRun and id == dsa_run.id:
+            return dsa_run
+        if model is StockFeatureSnapshotRun:
+            return await original_get(model, id, *args, **kwargs)
+        return None
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        new=fake_session_local,
+    ), patch.object(
+        db_session, "commit", new=db_session.flush,
+    ), patch.object(
+        db_session, "get", new=_fake_get,
+    ), patch(
+        "app.services.after_close_orchestrator._poll_dsa_run_status",
+        new=AsyncMock(return_value="completed"),
+    ), patch.object(
+        StrategyBatchService, "publish_run",
+        new=AsyncMock(return_value=fake_published_run),
+    ), patch(
+        "app.services.state_event_service.generate_events_for_run",
+        new=AsyncMock(return_value={"event_count": 0}),
+    ), patch(
+        "app.services.state_event_service.cleanup_old_events",
+        new=AsyncMock(return_value={"deleted_count": 0}),
+    ):
+        await execute_after_close_run(
+            job_run_id=job_run.id,
+            trade_date=trade_date,
+            dsa_poll_interval=0,
+            dsa_poll_timeout=1,
+        )
+
+    # 验证 snapshot_run 被标记 succeeded，snapshot_count 从 DB 读取（50，不是 0）
+    await db_session.refresh(snapshot_run)
+    assert snapshot_run.status == STATUS_SUCCEEDED
+    assert snapshot_run.published_at is not None
+    assert snapshot_run.snapshot_count == 50, (
+        f"snapshot_count 应从 DB 读取为 50，实际={snapshot_run.snapshot_count}"
+    )
+    assert snapshot_run.expected_count == expected_count, "expected_count 应保留"
+
+
+@pytest.mark.asyncio
+async def test_resume_skips_completed_steps_no_new_run(db_session) -> None:
+    """[P0-4/5] queued 同一 job 恢复且不新建 run + 已完成阶段不重复执行。
+
+    场景：last_completed_step='quality_gate' → 跳过 refreshing_daily、
+    waiting_dsa_worker、quality_gate，只执行 feature_snapshot + publishing。
+    不创建新的 SnapshotRun（复用 metadata 中的 feature_snapshot_run_id）。
+    """
+    trade_date = date(2026, 6, 25)
+
+    dsa_run, _ = await _create_dsa_strategy_run(
+        db_session, status="completed", trade_date=trade_date,
+    )
+    dsa_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+    await db_session.flush()
+
+    # 已存在的 snapshot run（running，将在 resume 中被复用）
+    existing_snapshot_run = StockFeatureSnapshotRun(
+        trade_date=trade_date,
+        run_type=RUN_TYPE_AFTER_CLOSE,
+        status=STATUS_RUNNING,
+        expected_count=10,
+        started_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+        metadata_={"scope": "full", "source": "after_close_orchestrator"},
+    )
+    db_session.add(existing_snapshot_run)
+    await db_session.flush()
+
+    job_run = await _create_after_close_job_run(
+        db_session,
+        status="running",
+        orchestrator_status=AfterCloseRunStatus.FEATURE_SNAPSHOT.value,
+        trade_date=trade_date,
+        dsa_run_id=dsa_run.id,
+    )
+    meta = json.loads(job_run.metadata_json)
+    meta["last_completed_step"] = "quality_gate"
+    meta["feature_snapshot_run_id"] = str(existing_snapshot_run.id)
+    job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+    await db_session.flush()
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return db_session
+        async def __aexit__(self, *args):
+            return False
+
+    fake_session_local = MagicMock(return_value=_FakeSessionContext())
+    fake_published_run = MagicMock()
+    fake_published_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+
+    original_get = db_session.get
+
+    async def _fake_get(model, id, *args, **kwargs):
+        if model is SchedulerJobRun and id == job_run.id:
+            return job_run
+        if model is StrategyRun and id == dsa_run.id:
+            return dsa_run
+        if model is StockFeatureSnapshotRun:
+            return await original_get(model, id, *args, **kwargs)
+        return None
+
+    refresh_mock = AsyncMock()
+    fake_batch_result = BatchResult(total=100, succeeded=95)
+    fake_batch_result.dsa_run_id = dsa_run.id
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        new=fake_session_local,
+    ), patch.object(
+        db_session, "commit", new=db_session.flush,
+    ), patch.object(
+        db_session, "get", new=_fake_get,
+    ), patch.object(
+        BarsSchedulerService, "refresh_all_instruments",
+        new=refresh_mock,
+    ), patch(
+        "app.services.after_close_orchestrator._poll_dsa_run_status",
+        new=AsyncMock(return_value="completed"),
+    ), patch.object(
+        StrategyBatchService, "_check_quality_gates",
+        new=AsyncMock(return_value=True),
+    ), patch.object(
+        StrategyBatchService, "publish_run",
+        new=AsyncMock(return_value=fake_published_run),
+    ), patch(
+        "app.services.after_close_orchestrator.get_active_a_share_instruments",
+        new=AsyncMock(return_value=[uuid.uuid4()]),
+    ), patch(
+        "app.services.after_close_orchestrator.compute_for_trade_date",
+        new=AsyncMock(return_value={"snapshot_count": 5, "failed_count": 0}),
+    ), patch(
+        "app.services.state_event_service.generate_events_for_run",
+        new=AsyncMock(return_value={"event_count": 0}),
+    ), patch(
+        "app.services.state_event_service.cleanup_old_events",
+        new=AsyncMock(return_value={"deleted_count": 0}),
+    ), patch(
+        "app.services.after_close_orchestrator._job_run_heartbeat_loop",
+        new=AsyncMock(),
+    ):
+        await execute_after_close_run(
+            job_run_id=job_run.id,
+            trade_date=trade_date,
+            dsa_poll_interval=0,
+            dsa_poll_timeout=1,
+        )
+
+    # [P0-5] 已完成阶段不重复执行
+    assert not refresh_mock.called, (
+        "last_completed_step='quality_gate' 时不应调用 refresh_all_instruments"
+    )
+
+    # 验证 job_run 成功
+    await db_session.refresh(job_run)
+    assert job_run.status == "succeeded", (
+        f"job_run 应为 succeeded，实际={job_run.status}"
+    )
 
 
 if __name__ == "__main__":

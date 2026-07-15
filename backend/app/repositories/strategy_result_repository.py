@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.sql.selectable import Select
 
+from app.models.bar import BarDaily
 from app.models.instrument import Instrument
 from app.models.strategy_run import (
     StrategyResult,
@@ -40,6 +41,8 @@ from app.models.strategy_run import (
     StrategyRun,
     StrategyRunItem,
 )
+from app.repositories.board_filter_helper import build_board_filter_conditions
+from app.repositories.stock_name_filter_helper import build_stock_name_conditions
 from app.strategy.runtime import StrategyResult as RuntimeStrategyResult
 
 logger = logging.getLogger("strategy_result_repository")
@@ -459,6 +462,8 @@ async def query_results(
     matched_only: bool = False,
     watchlist_instrument_ids: set[uuid.UUID] | None = None,
     keyword: str | None = None,
+    stock_name: str | None = None,
+    stock_name_op: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> QueryResultPage:
@@ -514,17 +519,25 @@ async def query_results(
                 StrategyResult.instrument_id.in_(watchlist_instrument_ids)
             )
 
-        # keyword 过滤（JOIN instruments 表，symbol/name ILIKE 匹配）
-        if keyword is not None:
+        # CHANGE-20260714-001: keyword + stock_name 都需要 JOIN instruments，统一只 JOIN 一次
+        # keyword: OR 三字段 ILIKE 正向搜索（symbol/name/pinyin_initials）
+        # stock_name: 单独对 Instrument.name 做 ILIKE/NOT ILIKE/= 过滤（与 keyword 独立 AND 语义）
+        name_conditions = build_stock_name_conditions(Instrument.name, stock_name, stock_name_op)
+        if keyword is not None or name_conditions:
             kw_pattern = f"%{keyword}%"
             base = base.join(
                 Instrument, StrategyResult.instrument_id == Instrument.id
-            ).where(
-                or_(
-                    Instrument.symbol.ilike(kw_pattern),
-                    Instrument.name.ilike(kw_pattern),
-                )
             )
+            if keyword is not None:
+                base = base.where(
+                    or_(
+                        Instrument.symbol.ilike(kw_pattern),
+                        Instrument.name.ilike(kw_pattern),
+                        Instrument.pinyin_initials.ilike(kw_pattern),
+                    )
+                )
+            for cond in name_conditions:
+                base = base.where(cond)
 
         # 指标筛选（通过 EXISTS 子查询，支持 6 种操作符）
         if filters:
@@ -595,6 +608,7 @@ async def query_results(
                 or_(
                     Instrument.symbol.ilike(kw_pattern),
                     Instrument.name.ilike(kw_pattern),
+                    Instrument.pinyin_initials.ilike(kw_pattern),
                 )
             )
         if filters:
@@ -691,6 +705,8 @@ class RunItemResultRow:
     - item_status/reason_code/error_message 来自 strategy_run_items
     - result 为 StrategyResult 或 None（skipped/failed 行为 None）
     - instrument 来自 instruments 表（LEFT JOIN，理论上永不为 None）
+    - latest_change_pct/latest_change_trade_date 来自 bars_daily 最新两根日线
+      （CHANGE-20260714-001：与 DSA run 的 payload.change_pct 分离，反映最新完成交易日行情）
     """
 
     item_id: uuid.UUID
@@ -701,6 +717,121 @@ class RunItemResultRow:
     error_message: str | None
     result: StrategyResult | None
     instrument: Instrument | None
+    latest_change_pct: float | None = None
+    latest_change_trade_date: date | None = None
+
+
+# CHANGE-20260714-001: change_pct 排序/筛选改用 bars_daily 最新涨跌幅，不走 metrics 表
+# 当 sort.field 或 filter.metric_key == CHANGE_PCT_METRIC_KEY 时，使用 _build_latest_change_pct_subquery
+CHANGE_PCT_METRIC_KEY = "change_pct"
+
+
+def _build_latest_change_pct_subquery(run_id: uuid.UUID) -> Any:
+    """构建 latest_change_pct 子查询（覆盖 run 内全部 instrument）。
+
+    从 bars_daily 表用 window function 取每只股票最新两根日线，计算：
+      latest_change_pct = (latest_close / prev_close - 1) * 100
+
+    仅返回有有效 prev_close（非 NULL、非 0）的行；其余 instrument LEFT JOIN 后为 NULL。
+
+    Returns:
+        SQLAlchemy subquery，列为 (instrument_id, latest_trade_date, latest_change_pct)
+    """
+    window_inner = (
+        select(
+            BarDaily.instrument_id,
+            BarDaily.trade_date,
+            BarDaily.close,
+            func.lag(BarDaily.close)
+            .over(
+                partition_by=BarDaily.instrument_id,
+                order_by=BarDaily.trade_date,
+            )
+            .label("prev_close"),
+            func.row_number()
+            .over(
+                partition_by=BarDaily.instrument_id,
+                order_by=BarDaily.trade_date.desc(),
+            )
+            .label("rn"),
+        )
+        .where(
+            BarDaily.instrument_id.in_(
+                select(StrategyRunItem.instrument_id).where(
+                    StrategyRunItem.run_id == run_id
+                )
+            )
+        )
+        .subquery()
+    )
+    return (
+        select(
+            window_inner.c.instrument_id.label("instrument_id"),
+            window_inner.c.trade_date.label("latest_trade_date"),
+            func.round(
+                (window_inner.c.close / window_inner.c.prev_close - 1) * 100,
+                4,
+            ).label("latest_change_pct"),
+        )
+        .where(window_inner.c.rn == 1)
+        .where(window_inner.c.close.isnot(None))
+        .where(window_inner.c.prev_close.isnot(None))
+        .where(window_inner.c.prev_close != 0)
+        .subquery()
+    )
+
+
+async def _fetch_latest_change_pct_map(
+    session: AsyncSession,
+    instrument_ids: set[uuid.UUID],
+) -> dict[uuid.UUID, tuple[float | None, date | None]]:
+    """批量获取 instrument 的最新涨跌幅（仅查页面内 instrument，避免全 run 扫描）。
+
+    Returns:
+        {instrument_id: (latest_change_pct, latest_trade_date)}
+        无有效两根日线的 instrument 不在 map 中（调用方按 None 处理）
+    """
+    if not instrument_ids:
+        return {}
+    window_inner = (
+        select(
+            BarDaily.instrument_id,
+            BarDaily.trade_date,
+            BarDaily.close,
+            func.lag(BarDaily.close)
+            .over(
+                partition_by=BarDaily.instrument_id,
+                order_by=BarDaily.trade_date,
+            )
+            .label("prev_close"),
+            func.row_number()
+            .over(
+                partition_by=BarDaily.instrument_id,
+                order_by=BarDaily.trade_date.desc(),
+            )
+            .label("rn"),
+        )
+        .where(BarDaily.instrument_id.in_(instrument_ids))
+        .subquery()
+    )
+    stmt = (
+        select(
+            window_inner.c.instrument_id,
+            window_inner.c.trade_date,
+            func.round(
+                (window_inner.c.close / window_inner.c.prev_close - 1) * 100,
+                4,
+            ).label("latest_change_pct"),
+        )
+        .where(window_inner.c.rn == 1)
+        .where(window_inner.c.close.isnot(None))
+        .where(window_inner.c.prev_close.isnot(None))
+        .where(window_inner.c.prev_close != 0)
+    )
+    result = await session.execute(stmt)
+    return {
+        row[0]: (float(row[2]), row[1]) for row in result.all()
+    }
 
 
 def _apply_run_item_filters(
@@ -710,6 +841,10 @@ def _apply_run_item_filters(
     filters: list[MetricFilter] | None,
     watchlist_instrument_ids: set[uuid.UUID] | None,
     keyword: str | None,
+    industry: str | None = None,
+    concept: str | None = None,
+    stock_name: str | None = None,
+    stock_name_op: str | None = None,
 ) -> Select:
     """[StrategyResultRepository] - 描述: 对 strategy_run_items 查询应用通用过滤条件
 
@@ -717,7 +852,10 @@ def _apply_run_item_filters(
 
     - run_id: 必填，主过滤
     - watchlist_instrument_ids: IN 过滤 instrument_id
-    - keyword: JOIN instruments ILIKE
+    - keyword: JOIN instruments ILIKE（symbol/name/pinyin_initials 三字段 OR）
+    - stock_name/stock_name_op: JOIN instruments 后对 Instrument.name 做 ILIKE/NOT ILIKE/= 过滤
+      （CHANGE-20260714-001：与 keyword 独立；keyword 是 OR 三字段正向搜索，stock_name 是 name 列独立筛选）
+    - industry/concept: EXISTS 子查询（与 market_stocks_service 共用 helper）
     - filters: metric_filter 通过 (run_id, instrument_id) 子查询过滤（skipped/failed 行无 strategy_results 自动不命中）
 
     注意：strategy_run_items.result_id 在 PR #14 batch service 中未回填（始终为 None），
@@ -731,20 +869,68 @@ def _apply_run_item_filters(
             StrategyRunItem.instrument_id.in_(watchlist_instrument_ids)
         )
 
-    if keyword is not None:
+    # CHANGE-20260714-001: keyword + stock_name 都需要 JOIN instruments，统一只 JOIN 一次
+    # 避免 SQL 重复 JOIN 同一表导致笛卡尔积；conditions 列表累积后追加到 WHERE
+    name_conditions = build_stock_name_conditions(Instrument.name, stock_name, stock_name_op)
+    if keyword is not None or name_conditions:
         kw_pattern = f"%{keyword}%"
         base = base.join(
             Instrument, StrategyRunItem.instrument_id == Instrument.id
-        ).where(
-            or_(
-                Instrument.symbol.ilike(kw_pattern),
-                Instrument.name.ilike(kw_pattern),
-            )
         )
+        if keyword is not None:
+            base = base.where(
+                or_(
+                    Instrument.symbol.ilike(kw_pattern),
+                    Instrument.name.ilike(kw_pattern),
+                    Instrument.pinyin_initials.ilike(kw_pattern),
+                )
+            )
+        for cond in name_conditions:
+            base = base.where(cond)
+
+    # 行业/概念 EXISTS 筛选（CHANGE-20260713-006：与 market_stocks_service 共用 helper）
+    board_conditions = build_board_filter_conditions(
+        StrategyRunItem.instrument_id, industry, concept
+    )
+    for cond in board_conditions:
+        base = base.where(cond)
 
     if filters:
+        # CHANGE-20260714-001: change_pct 筛选改用 bars_daily 最新涨跌幅子查询
+        # 其余 metric_key 继续走 strategy_result_metrics 表
+        latest_pct_sub: Any = None
         for f in filters:
             metric_key = f.metric_key
+            if metric_key == CHANGE_PCT_METRIC_KEY:
+                # change_pct: 从 bars_daily 子查询筛选
+                if latest_pct_sub is None:
+                    latest_pct_sub = _build_latest_change_pct_subquery(run_id)
+                op = f.operator.lower()
+                pct_col = latest_pct_sub.c.latest_change_pct
+                if op == "gt":
+                    cond = pct_col > f.value
+                elif op == "gte":
+                    cond = pct_col >= f.value
+                elif op == "lt":
+                    cond = pct_col < f.value
+                elif op == "lte":
+                    cond = pct_col <= f.value
+                elif op == "eq":
+                    cond = pct_col == f.value
+                elif op == "between":
+                    cond = pct_col.isnot(None)
+                    if f.value1 is not None:
+                        cond = and_(cond, pct_col >= f.value1)
+                    if f.value2 is not None:
+                        cond = and_(cond, pct_col <= f.value2)
+                else:
+                    raise ValueError(f"未知筛选操作符: {op}")
+                base = base.where(
+                    StrategyRunItem.instrument_id.in_(
+                        select(latest_pct_sub.c.instrument_id).where(cond)
+                    )
+                )
+                continue
             # [StrategyResultRepository] - 描述: 通过 (run_id, instrument_id) 关联 metrics
             # batch service 未回填 result_id，必须用 instrument_id 关联
             sub = (
@@ -787,6 +973,10 @@ async def query_run_items_with_results(
     sort: SortSpec | None = None,
     watchlist_instrument_ids: set[uuid.UUID] | None = None,
     keyword: str | None = None,
+    industry: str | None = None,
+    concept: str | None = None,
+    stock_name: str | None = None,
+    stock_name_op: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> QueryResultPage:
@@ -814,38 +1004,59 @@ async def query_run_items_with_results(
         # 构建基础查询（StrategyRunItem 为主表，不使用 selectinload 因 result_id 未回填）
         base = select(StrategyRunItem)
 
-        # 应用通用过滤（run_id + watchlist + keyword + metric_filters）
+        # 应用通用过滤（run_id + watchlist + keyword + stock_name + metric_filters）
         base = _apply_run_item_filters(
             base,
             run_id=run_id,
             filters=filters,
             watchlist_instrument_ids=watchlist_instrument_ids,
             keyword=keyword,
+            industry=industry,
+            concept=concept,
+            stock_name=stock_name,
+            stock_name_op=stock_name_op,
         )
 
         # 排序（LEFT JOIN 指标表，通过 instrument_id 关联，NULLS LAST）
+        # CHANGE-20260714-001: change_pct 排序改用 bars_daily 最新涨跌幅子查询
         if sort is not None:
-            sort_sub = (
-                select(
-                    StrategyResult.instrument_id.label("sort_instrument_id"),
-                    StrategyResultMetric.numeric_value.label("sort_val"),
+            if sort.field == CHANGE_PCT_METRIC_KEY:
+                # change_pct: 从 bars_daily 子查询排序
+                pct_sub = _build_latest_change_pct_subquery(run_id)
+                base = base.outerjoin(
+                    pct_sub,
+                    StrategyRunItem.instrument_id == pct_sub.c.instrument_id,
                 )
-                .join(
-                    StrategyResultMetric,
-                    StrategyResultMetric.result_id == StrategyResult.id,
-                )
-                .where(StrategyResult.run_id == run_id)
-                .where(StrategyResultMetric.metric_key == sort.field)
-                .subquery()
-            )
-            base = base.outerjoin(
-                sort_sub,
-                StrategyRunItem.instrument_id == sort_sub.c.sort_instrument_id,
-            )
-            if sort.desc:
-                base = base.order_by(sort_sub.c.sort_val.desc().nullslast())
+                if sort.desc:
+                    base = base.order_by(
+                        pct_sub.c.latest_change_pct.desc().nullslast()
+                    )
+                else:
+                    base = base.order_by(
+                        pct_sub.c.latest_change_pct.asc().nullsfirst()
+                    )
             else:
-                base = base.order_by(sort_sub.c.sort_val.asc().nullsfirst())
+                sort_sub = (
+                    select(
+                        StrategyResult.instrument_id.label("sort_instrument_id"),
+                        StrategyResultMetric.numeric_value.label("sort_val"),
+                    )
+                    .join(
+                        StrategyResultMetric,
+                        StrategyResultMetric.result_id == StrategyResult.id,
+                    )
+                    .where(StrategyResult.run_id == run_id)
+                    .where(StrategyResultMetric.metric_key == sort.field)
+                    .subquery()
+                )
+                base = base.outerjoin(
+                    sort_sub,
+                    StrategyRunItem.instrument_id == sort_sub.c.sort_instrument_id,
+                )
+                if sort.desc:
+                    base = base.order_by(sort_sub.c.sort_val.desc().nullslast())
+                else:
+                    base = base.order_by(sort_sub.c.sort_val.asc().nullsfirst())
 
         # 总数查询（复用相同过滤条件，不含 limit/offset/sort）
         count_base = select(StrategyRunItem)
@@ -855,6 +1066,10 @@ async def query_run_items_with_results(
             filters=filters,
             watchlist_instrument_ids=watchlist_instrument_ids,
             keyword=keyword,
+            industry=industry,
+            concept=concept,
+            stock_name=stock_name,
+            stock_name_op=stock_name_op,
         )
         count_result = await session.execute(
             select(func.count()).select_from(count_base.subquery())
@@ -888,8 +1103,13 @@ async def query_run_items_with_results(
             for inst in inst_result.scalars().all():
                 instruments_map[inst.id] = inst
 
+        # CHANGE-20260714-001: 批量加载 latest_change_pct（从 bars_daily 最新两根日线计算）
+        # 仅查页面内 instrument（~50 条），避免全 run 扫描；无有效两根日线的 instrument 返回 None
+        latest_pct_map = await _fetch_latest_change_pct_map(session, instrument_ids)
+
         rows: list[RunItemResultRow] = []
         for item in items_orm:
+            pct_tuple = latest_pct_map.get(item.instrument_id)
             rows.append(
                 RunItemResultRow(
                     item_id=item.id,
@@ -900,6 +1120,8 @@ async def query_run_items_with_results(
                     error_message=item.error_message,
                     result=results_map.get(item.instrument_id),
                     instrument=instruments_map.get(item.instrument_id),
+                    latest_change_pct=pct_tuple[0] if pct_tuple else None,
+                    latest_change_trade_date=pct_tuple[1] if pct_tuple else None,
                 )
             )
 
@@ -1139,7 +1361,7 @@ if __name__ == "__main__":
             pass
         else:
             raise ValueError(f"未知筛选操作符: {op}")
-        assert False, "应抛出 ValueError"
+        raise AssertionError("应抛出 ValueError")
     except ValueError as e:
         assert "未知筛选操作符" in str(e)
     print("未知操作符 fail-closed ✓")

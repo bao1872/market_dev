@@ -78,6 +78,7 @@ from app.models.stock_feature_snapshot_run import (
     StockFeatureSnapshotRun,
 )
 from app.services.feature_snapshot_service import (
+    PublishedSnapshotRunExistsError,
     _fetch_bars_from_db,
     compute_feature_snapshot_for_date,
     create_snapshot_run,
@@ -483,17 +484,39 @@ async def backfill_instrument_first(
     # [Blocker Fix] scope 传入 create_snapshot_run，写入 metadata_['scope']
     run_records: dict[date, StockFeatureSnapshotRun] = {}
     for td in trade_dates:
-        run = await create_snapshot_run(
-            db, td, run_type,
-            schema_version=schema_version,
-            primary_timeframe=primary_timeframe,
-            secondary_timeframe=secondary_timeframe,
-            adj=adj,
-            expected_count=total_instruments,
-            metadata={"source": "backfill", "batch_size": batch_size},
-            scope=scope,
-        )
+        try:
+            run = await create_snapshot_run(
+                db, td, run_type,
+                schema_version=schema_version,
+                primary_timeframe=primary_timeframe,
+                secondary_timeframe=secondary_timeframe,
+                adj=adj,
+                expected_count=total_instruments,
+                metadata={"source": "backfill", "batch_size": batch_size},
+                scope=scope,
+            )
+        except PublishedSnapshotRunExistsError as exc:
+            logger.warning(
+                "[backfill] trade_date=%s 已存在 published run，跳过: %s",
+                td, exc,
+            )
+            continue
         run_records[td] = run
+
+    # 过滤掉已跳过的 trade_date（published run 已存在）
+    trade_dates = [td for td in trade_dates if td in run_records]
+    total_dates = len(trade_dates)
+    if not trade_dates:
+        logger.info("[backfill] 所有 trade_date 均已存在 published run，无需处理")
+        return {
+            "dry_run": False,
+            "trade_dates": 0,
+            "instruments": total_instruments,
+            "expected_batches": 0,
+            "total_snapshots": 0,
+            "total_failed": 0,
+            "skipped_existing": 0,
+        }
 
     # resume: 查询已 succeeded 的 trade_date + 已存在的 (instrument, date) snapshot
     succeeded_dates: set[date] = set()
@@ -932,18 +955,38 @@ async def backfill_instrument_first_parallel(
     # 1. 主进程创建 run records（status=running）
     run_records: dict[date, StockFeatureSnapshotRun] = {}
     for td in trade_dates:
-        run = await create_snapshot_run(
-            db, td, run_type,
-            schema_version=schema_version,
-            primary_timeframe=primary_timeframe,
-            secondary_timeframe=secondary_timeframe,
-            adj=adj,
-            expected_count=total_instruments,
-            metadata={"source": "backfill", "workers": workers},
-            scope=scope,
-        )
+        try:
+            run = await create_snapshot_run(
+                db, td, run_type,
+                schema_version=schema_version,
+                primary_timeframe=primary_timeframe,
+                secondary_timeframe=secondary_timeframe,
+                adj=adj,
+                expected_count=total_instruments,
+                metadata={"source": "backfill", "workers": workers},
+                scope=scope,
+            )
+        except PublishedSnapshotRunExistsError as exc:
+            logger.warning(
+                "[parallel] trade_date=%s 已存在 published run，跳过: %s",
+                td, exc,
+            )
+            continue
         run_records[td] = run
     await db.commit()  # commit run records，让 workers 可见
+
+    # 过滤掉已跳过的 trade_date（published run 已存在）
+    trade_dates = [td for td in trade_dates if td in run_records]
+    total_dates = len(trade_dates)
+    if not trade_dates:
+        logger.info("[parallel] 所有 trade_date 均已存在 published run，无需处理")
+        return {
+            "trade_dates": 0,
+            "instruments": total_instruments,
+            "total_snapshots": 0,
+            "total_failed": 0,
+            "skipped_existing": 0,
+        }
 
     # 2. resume: 查询已 succeeded 的 trade_date + 已存在的 (instrument, date)
     succeeded_dates: set[date] = set()

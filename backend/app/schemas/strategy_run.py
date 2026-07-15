@@ -110,6 +110,14 @@ class StrategyResultResponse(BaseModel):
     )
     reason_code: str | None = Field(None, description="跳过/失败原因代码")
     error_message: str | None = Field(None, description="失败错误信息")
+    # CHANGE-20260714-001: 最新行情涨跌幅（从 bars_daily 最新两根日线计算，与 DSA run 日期分离）
+    # 前端"涨跌幅"列优先且只显示此字段；无两根有效日线时为 None（前端显示"--"）
+    latest_change_pct: float | None = Field(
+        None, description="最新完成交易日涨跌幅（百分比数值，如 3.45 表示 +3.45%）"
+    )
+    latest_change_trade_date: date | None = Field(
+        None, description="最新完成交易日日期（对应 latest_change_pct 的交易日）"
+    )
 
 
 class StrategyResultListResponse(BaseModel):

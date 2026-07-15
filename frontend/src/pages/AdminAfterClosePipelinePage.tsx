@@ -22,8 +22,10 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   useAfterClosePipelineLatest,
+  useAfterClosePipelineByDate,
   useAfterClosePipelineRuns,
   useCreateAfterClosePipelineRun,
+  useResumeAfterCloseRun,
 } from '@/hooks/useApi'
 import { useToast } from '@/store/toast'
 import { shanghaiBusinessDate, formatShanghaiTime } from '@/utils/datetime'
@@ -187,18 +189,29 @@ function PipelineTimeline({ steps }: { steps: PipelineStep[] }) {
 // ===== 主页面 =====
 export default function AdminAfterClosePipelinePage() {
   const toast = useToast.getState()
-  const pipelineQuery = useAfterClosePipelineLatest()
+  // selectedDate: '' 表示"最新交易日"，否则按指定日期查询（允许选择历史日期如 2026-07-15）
+  const [selectedDate, setSelectedDate] = useState('')
+  const todayStr = shanghaiBusinessDate()
+
+  // selectedDate === '' 时用 latest（自动定位最近交易日），否则按指定日期查询
+  const pipelineQuery = useAfterClosePipelineLatest(selectedDate === '')
+  const byDateQuery = useAfterClosePipelineByDate(
+    selectedDate !== '' ? selectedDate : null,
+    selectedDate !== '',
+  )
   const runsQuery = useAfterClosePipelineRuns(20)
   const createMutation = useCreateAfterClosePipelineRun()
+  const resumeMutation = useResumeAfterCloseRun()
 
   const [eventDrawerOpen, setEventDrawerOpen] = useState(false)
 
-  const pipeline = pipelineQuery.data
-  const isLoading = pipelineQuery.isLoading
+  // 统一取 pipeline 数据（latest 或 by-date）
+  const pipeline = selectedDate === '' ? pipelineQuery.data : byDateQuery.data
+  const isLoading = selectedDate === '' ? pipelineQuery.isLoading : byDateQuery.isLoading
   const runs = runsQuery.data?.items ?? []
 
   const overallStatus = pipeline?.overall_status
-  const tradeDate = pipeline?.trade_date ?? shanghaiBusinessDate()
+  const tradeDate = pipeline?.trade_date ?? (selectedDate !== '' ? selectedDate : todayStr)
   const afterCloseRun = pipeline?.after_close_run
   const featureRun = pipeline?.feature_snapshot_run
   const events = pipeline?.events ?? []
@@ -222,6 +235,28 @@ export default function AdminAfterClosePipelinePage() {
     }
   }
 
+  // 从失败/中断步骤继续（保留断点检查点，幂等）
+  const handleResumeRun = async () => {
+    if (!afterCloseRun) return
+    try {
+      const result = await resumeMutation.mutateAsync(afterCloseRun.job_run_id)
+      toast.show(
+        '已恢复',
+        `${result.message}（last_completed_step 保留）`,
+      )
+    } catch (err: unknown) {
+      const axiosErr = err as { response?: { status?: number; data?: { detail?: unknown } } }
+      const detail = axiosErr.response?.data?.detail
+      const message = typeof detail === 'string' ? detail : '请稍后重试'
+      toast.show('恢复失败', message)
+    }
+  }
+
+  // 是否可恢复（interrupted/failed 且无同日 queued/running 冲突）
+  const canResume =
+    afterCloseRun != null &&
+    (afterCloseRun.status === 'interrupted' || afterCloseRun.status === 'failed')
+
   return (
     <>
       {/* 页头 */}
@@ -236,6 +271,42 @@ export default function AdminAfterClosePipelinePage() {
           <Link className="btn small" to="/admin/overview">
             ← 返回概览
           </Link>
+          {/* 交易日选择器：默认"最新"（latest），可切换到指定日期（含历史如 2026-07-15）*/}
+          <div className="date-selector-row">
+            <label className="date-selector-label">交易日</label>
+            <select
+              className="date-selector-select"
+              value={selectedDate}
+              onChange={(e) => setSelectedDate(e.target.value)}
+              title="选择交易日查看历史任务（默认最新）"
+            >
+              <option value="">最新</option>
+              {/* 最近 7 个自然日（含今日），供管理员快速选择历史日期 */}
+              {Array.from({ length: 7 }, (_, i) => {
+                const d = new Date()
+                d.setDate(d.getDate() - i)
+                const y = d.getFullYear()
+                const m = String(d.getMonth() + 1).padStart(2, '0')
+                const day = String(d.getDate()).padStart(2, '0')
+                return `${y}-${m}-${day}`
+              })
+                .filter((d) => d !== todayStr)
+                .map((d) => (
+                  <option key={d} value={d}>{d}</option>
+                ))}
+            </select>
+          </div>
+          {/* 继续未完成任务：仅 interrupted/failed 可恢复，保留断点检查点 */}
+          {canResume && (
+            <button
+              className="btn small warning"
+              onClick={handleResumeRun}
+              disabled={resumeMutation.isPending}
+              title={`从断点继续: last_completed_step=${afterCloseRun?.last_completed_step ?? '-'}（跳过已成功阶段，幂等）`}
+            >
+              {resumeMutation.isPending ? '恢复中…' : '继续未完成任务'}
+            </button>
+          )}
           <button
             className="btn small primary"
             onClick={handleCreateRun}
@@ -574,8 +645,9 @@ export default function AdminAfterClosePipelinePage() {
             ) : runs.length === 0 ? (
               <div className="notice">暂无运行记录</div>
             ) : (
-              <div className="table-wrap">
-                <table className="data-table">
+              <div className="table-shell">
+                <div className="table-scroll">
+                  <table className="data-table">
                   <thead>
                     <tr>
                       <th>类型</th>
@@ -614,7 +686,8 @@ export default function AdminAfterClosePipelinePage() {
                       </tr>
                     ))}
                   </tbody>
-                </table>
+                  </table>
+                </div>
               </div>
             )}
           </div>

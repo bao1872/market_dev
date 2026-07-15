@@ -1093,6 +1093,68 @@ class PytdxAdapter(Exchange):
             f"get_xdxr_info 重试 {self.max_retries} 次后仍失败 symbol={symbol}: {last_exc}"
         )
 
+    def get_finance_info(self, symbol: str) -> dict[str, Any] | None:
+        """获取股票财务信息（含总股本/流通股本）。
+
+        CHANGE-20260713-010: 用于每日股本同步链（instrument_share_sync_service）。
+        禁止在用户请求链中调用此方法；仅由定时同步任务调用。
+
+        pytdx get_finance_info 返回字段（单位：股，经抽样验证 5 只股票与公开数据一致）：
+        - zongguben: 总股本（股）
+        - liutongguben: 流通股本（股）
+        - updated_date: 数据更新日期（YYYYMMDD int）
+
+        Args:
+            symbol: 股票代码（如 '000001'）
+
+        Returns:
+            dict with keys: total_share, float_share, share_as_of (date | None)
+            无数据时返回 None
+
+        Raises:
+            RuntimeError: 重试后仍失败
+        """
+        from datetime import date as date_cls
+
+        market = market_from_code(symbol)
+        last_exc: Exception | None = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                if self._api is None:
+                    self.connect()
+                raw = self.api.get_finance_info(market, symbol)
+                if raw is None or not raw:
+                    return None
+                # raw 是 OrderedDict
+                zongguben = raw.get("zongguben")
+                liutongguben = raw.get("liutongguben")
+                updated_date_raw = raw.get("updated_date")
+                # updated_date 是 YYYYMMDD int（如 20260425）
+                share_as_of: date_cls | None = None
+                if updated_date_raw and isinstance(updated_date_raw, (int, float)):
+                    try:
+                        d_int = int(updated_date_raw)
+                        share_as_of = date_cls(d_int // 10000, (d_int // 100) % 100, d_int % 100)
+                    except (ValueError, OverflowError):
+                        share_as_of = None
+                return {
+                    "total_share": float(zongguben) if zongguben else None,
+                    "float_share": float(liutongguben) if liutongguben else None,
+                    "share_as_of": share_as_of,
+                }
+            except (RuntimeError, Exception) as exc:
+                last_exc = exc
+                logger.warning(
+                    "get_finance_info 失败 symbol=%s attempt=%d/%d: %s",
+                    symbol, attempt, self.max_retries, exc,
+                )
+                self.disconnect()
+                if attempt < self.max_retries:
+                    time.sleep(self.retry_delay)
+        raise RuntimeError(
+            f"get_finance_info 重试 {self.max_retries} 次后仍失败 symbol={symbol}: {last_exc}"
+        )
+
     def _fetch_with_retry(
         self,
         symbol: str,

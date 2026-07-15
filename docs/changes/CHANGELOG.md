@@ -2,7 +2,231 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-16
+
+- CHANGE-20260716-001: 盘后任务历史恢复 API + SMC 逐 Bar 对齐 Pine + MiniKline 真实留白 + indicator_service 按需加载（合并原 001-007）
+  - **目标一 盘后 resume**：`POST /admin/after-close-runs/{id}/resume` — SELECT FOR UPDATE、同日 queued/running 互斥（409 SAME_DAY_ACTIVE_RUN）、幂等返回 queued、清 worker/heartbeat/lease、metadata 写 resume_requested_at、唯一 manual_resume 事件
+  - **P0 修复**：repair 按 `source_run_id==snapshot_run.id` 统计；DSA 未 published 不标 succeeded（`resume_pending`）；publishing 从 DB 读真实 count（禁止 0/None）；feature_snapshot 复用已有 running run；repair 后补 commit
+  - **管理页**：交易日选择器（默认最新，可选历史日期如 2026-07-15）+ "继续未完成任务"按钮（interrupted/failed 显示）
+  - **SMC 核心**：`ta.crossover/crossunder` 每 Bar 快照上一 Bar pivot level（`close[i]` 对当前 level，`close[i-1]` 对上一 level，禁止 current_level 传两次）；三个 leg() 独立持久状态（swing50/internal5/equal3）
+  - **EQH/EQL DTO 三时间点**：anchor=前pivot，second_pivot=i-size（视觉端点），confirmed=i（因果）；阈值用确认 Bar 的 `0.1*ATR200` 严格 `<`
+  - **OB 统一**：`anchor_index/time`，slice end-exclusive，unshift 最多 100，新建 OB 参与同 Bar mitigation；前端只画头部最近 5 个 `internal&&!mitigated`
+  - **swing_bias 后端返回**：`swing_bias=self.swing_trend.bias`（1/-1/0），前端从 DTO 读取禁止猜测
+  - **view adapter**（`smc_view_adapter.py` 新增）：核心用完整历史，API 只输出展示窗口有界 DTO 并统一重基准索引；跨左边界 event/EQ/OB 保留并 `clipped_left=true`
+  - **纵轴范围**：加入可见 event.level、OB high/low、EQ level、trailing
+  - **缓存版本**：SMC/non-SMC 隔离，cache key 含算法版本
+  - **输入门禁**：API 返回 `smc_source_bar_hash/first_time/last_time/bars/adj`；输入不一致写 `INPUT_BAR_MISMATCH`，禁止改算法迎合截图
+  - **TV fixture**：`ref/smc_user_export.pine` 保留导出代码；无 TV CSV 时 `PINE_PARITY_PENDING`（不宣称完全对齐）
+  - **FVG 彻底排除**：不计算、不返回、不缓存、不渲染、无 toggle
+  - **MiniKline 真实留白**：visibleData 切片（48/44/40/36/30 根）；`setVisibleLogicalRange({from:-2,to:dataLength-1+3})`；autoscale 基于 visibleData（上 12%/下 15%）；tabs 五等分 grid；chart 190px/价格轴 56px；cleanup 清旧 data/rAF/ResizeObserver
+  - **detailSource 统一**（`detailSourceContext.ts` 新增）：`normalizeResearchSource/defaultStrategyForSource` 唯一定义点
+  - **indicator_service 按需加载**：只加载当前周期和实际可用策略 required_inputs（`_REQUIRED_INPUTS` 映射 + `_determine_required_bars()` 合并）
+  - 测试：after_close pytest 42 passed（含 3 新增 resume 测试）、SMC pytest 75 passed/4 skipped（PINE_PARITY_PENDING）、前端 171 passed、contract 274 passed、ruff/mypy/typecheck/eslint 0 新增错误、前端 build 成功
+  - 约束：`ref/smc_user_source.pine` 保持原 843 行和 SHA256；resume API 禁止手工 SQL 恢复
+  - 遗留：Pine golden fixture PENDING（等待用户从 TradingView 导出 CSV）；生产 E2E 待部署后执行
+
+## 2026-07-15
+
+- CHANGE-20260715-006: MiniKline 闭包根治 + SMC Pine 对齐（RMA NA 语义 + 首个 pivot off-by-one + EQH/EQL 三时间点）
+  - MiniKline 闭包根治：`MiniKlineCard.tsx` 新增 `barsLengthRef`/`timeframeRef`/`rafIdRef`；`applyViewportRange` 改为 `useCallback([], )` 稳定函数从 refs 读取；新增 `scheduleApplyRange` 稳定函数取消 pending rAF 后调度新 rAF；`ResizeObserver` 回调调用 `scheduleApplyRange`（不直接闭包捕获 bars/timeframe）；卸载清理取消 pending rAF
+  - SMC Pine 对齐 `pine_rma` NA 语义：`smc_pine_core.py` 的 `pine_rma` 在 `bar_index < length-1` 返回 `na`（非逐步 SMA），`bar_index == length-1` 写入 SMA 种子，之后 Wilder 递推；严格复现 Pine v5 `ta.rma`
+  - SMC Pine 对齐首个 pivot off-by-one：`start_of_new_leg`/`start_of_bearish_leg`/`start_of_bullish_leg` 从 `i > size` 改为 `i >= size`；`get_current_structure` 从 `if i <= size: return` 改为 `if i < size: return`；首个 leg/pivot 在 `i == size` 检测（对齐 Pine `ta.change(leg)`）
+  - EQH/EQL DTO 三时间点：EQL 和 EQH 两处新增 `detection_index`/`detection_time`（leg change 确认 bar, i），与 anchor（前一 pivot bar）/confirmed（新 pivot bar, ref_i=i-size）分离
+  - 核对通过：ATR200=`pine_rma(tr,200)`、highest/lowest 窗口 `[ref_i+1, ref_i+length+1]`、crossover/crossunder NaN→False、OB slice `[start:end)` end-exclusive、trailing 顺序 `update_trailing_extremes → swing → internal → equal → display → delete OB`
+  - 测试：`test_smc_indicator.py` 的 `test_pine_rma_min_periods_before_seed` 更新为断言 NaN；`miniKlineCardContract.test.ts` 新增 5 项闭包契约测试（16-20）
+  - 遗留：Pine golden fixture PENDING；生产 E2E 验证待部署后执行
+
+- CHANGE-20260715-005: 详情左栏来源状态拆分 + 表格 sticky 列和工具栏对齐根治
+  - 详情左栏四态拆分：`useStockDetailActions.ts` 新增 `sourceListError`/`sourceListEmpty`/`sourceContextInvalid` 字段；`source` 参数优先级：显式 source > returnTo 推断；source=selection → sourceListKind=market（即使 returnTo 无效也不回退 watchlist）
+  - `normalizeInternalReturnTo` 上限 500 → 4096（复杂筛选 URL 编码后可能超过 500）
+  - 表格结构 `table-wrap` → `table-shell > meta-bar + search-bar + table-scroll > table + pager`：只有 `table-scroll` 设置 `overflow-x: auto`；meta-bar/search-bar/pager 移出横向滚动容器；删除 `position:sticky;left:0;width:100%` 补丁
+  - `isStickyColumn(col)` 统一判断函数：只允许 `col.key === 'stock'` 为 sticky 列；header 和 body 共用；删除死 CSS `.sticky-col-change-pct`
+  - `AdminAfterClosePipelinePage` 迁移到 `table-shell` + `table-scroll` 结构
+  - 测试：`detailSourceLoadingContract.test.ts`、`marketWorkspaceUrlState.test.ts`、`stickyHeader.test.ts` 更新
+  - 遗留：8 项 baseline contract 失败需独立修复；生产 E2E 验证待部署后执行
+
+- CHANGE-20260715-004: Bug 1 修复（详情左栏 loading 占位）+ Pine 真源文件入 Git 跟踪
+  - Bug 1 修复（详情左栏空白后才出现列表）：`useStockDetailActions` 新增 `sourceListLoading: boolean` 字段（`hasMarketContext` 时为 `publishedRunsQuery.isLoading || !activeRunId || sourceResultsQuery.isLoading`，否则为 `monitorStatusQuery.isLoading`）；`StockDetailPage` 新增 loading 占位渲染分支（`<aside data-testid="detail-source-list-loading">` + `<div class="tv-source-list-placeholder">加载中…</div>`）；`global.scss` 新增 `.tv-source-list-placeholder` 样式
+  - Pine 真源文件入 Git 跟踪：`git add -f ref/smc_user_source.pine`（SHA256 0bd3d2ad，843 行），`.gitignore` 仍排除 `ref/` 其他文件，仅此单文件例外
+  - 9 项源码契约测试：`detailSourceLoadingContract.test.ts`（sourceListLoading 字段、loading 占位渲染、列表渲染条件排除 loading、header 显示、CSS 存在、handleNavigateToStock 显式传 source/strategy、URL 完整性、不使用 useMarketStocks、上一只/下一只保留 returnTo）
+  - 测试：tsc✅ eslint✅ contract 358pass/8fail(baseline一致)✅ 4 docs checks✅
+  - 遗留：Pine golden fixture PENDING；Bug 1 生产 E2E 验证待部署后执行
+
+- CHANGE-20260715-003: SMC trailing 执行顺序修复 + Pine 真源文件命名 + 行情列表 sticky 修复 + 工具栏对齐 + MiniKlineCard 契约测试
+  - SMC trailing 顺序修复：`smc_pine_core.py` 的 `_SMCPineState.run()` 中 `update_trailing_extremes` 移到循环体最前面（第1步），对齐 Pine lines 766-807 执行顺序（trailing 必须在 getCurrentStructure 之前）
+  - Pine 真源文件命名：`ref/smc_ref.txt` → `ref/smc_user_source.pine`（SHA256 0bd3d2ad，843 行，内容相同）；`smc_pine_core.py` docstring + AGENTS clause 44 更新引用路径
+  - Bug 2 修复（sticky 列横向滚动重叠）：`global.scss` 定义 CSS 变量 `--stock-col-width: 150px`/`--select-col-width: 40px`；`.sticky-col` 固定 width/min-width/max-width；内容溢出 `overflow: hidden` + `text-overflow: ellipsis` + `white-space: nowrap`
+  - Bug 3 修复（工具栏横向滚动消失）：`.table-meta-bar` + `.table-pager` 添加 `position: sticky; left: 0; width: 100%; z-index: 6`，横向滚动时保持可见
+  - MiniKlineCard 契约测试：新增 `miniKlineCardContract.test.ts`（15 项源码契约测试，验证无 fitContent、setVisibleLogicalRange、autoscaleInfoProvider、ResizeObserver、requestAnimationFrame、五周期按钮、A 股配色等）
+  - Parity 文档：新增 `docs/analysis/smc-user-pine-parity.md`（674 行，14 章节，逐项 Pine→Python 对照）
+  - 测试：ruff✅ mypy✅ pytest 109pass/1skip✅ tsc✅ eslint✅ contract 349pass/8fail(baseline一致)✅ 4 docs checks✅
+  - 遗留：Bug 1（详情左栏变自选）未修复；Pine golden fixture PENDING
+
+- CHANGE-20260715-001: SMC 智能资金指标（ref/smc.py 重写版）+ MiniKline viewport P0 修复 + 图层 7→8
+  - **SUPERSEDED BY CHANGE-20260715-002**：用户已提供本人原创并授权的 Pine 实现（`ref/smc_ref.txt`），SMC 算法真源从 ref/smc.py 升级为用户 Pine 代码；本条目中"非 LuxAlgo Pine 翻译"和"clean-room 声明"已过时，仅作历史保留
+  - SMC 模块：基于用户提供的 `ref/smc_ref.txt` Pine 源码（用户原创，SHA256 0bd3d2ad，授权盘迹商业项目使用），纯函数仅依赖 stdlib；默认参数与 ref 一致；BOS/CHoCH/internal OB/EQH/EQL/Strong-Weak High-Low；anchor/confirmed 因果契约；逐 bar 增量=全量；未来 bar 不修改已确认事件
+  - FVG 完全排除：不计算、不返回、不缓存、不渲染，也不暴露 FVG 开关；生产计算路径无 FVG 函数或状态；输出级别断言（keys/events/OB/EQH/EQL/params/state 6 项）
+  - include_smc 按需计算：compute_all_indicators 新增 include_smc=False 默认参数；False 时跳过 SMC 计算（0 CPU）；True 时注入 smc 图层
+  - 缓存隔离：ALGORITHM_VERSION v5→v6（旧缓存自动失效）；include_smc=True 追加 :smc 后缀；同 symbol 切换开关不返回旧缓存
+  - API：/api/v1/instruments/{id}/indicators 新增 include_smc 查询参数（bool，默认 false）
+  - 前端图层 7→8：ChartLayerKey 新增 'smc'；manifest 8 条目；smc 默认关闭（watchlist/selection 均 false）；旧 localStorage 迁移 smc=false；StrategyChart SMC Canvas 渲染
+  - MiniKline viewport P0：纯函数 computeMiniKlineViewport 替代 fitContent；五周期 clamp（15m/60m 50-64，日线 48-58，周线 40-52，月线 30-40）；右侧 3 bar 留白；切周期不沿用旧 range；12 项测试
+  - 测试：SMC 34 + 缓存 10 + 服务 38 + viewport 12 + manifest 15 = 109 项 PASS；ruff/mypy/tsc/eslint 0 error；contract 316 pass/8 fail（与 a9ac03c 基线对照 0 新增失败）；build 248 modules 0 error
+  - 隔离边界：SMC 只进入 /stock 指标链；/market 右栏小 K 线不显示 SMC；Node/DSA/盘中监控/Capture 未修改；不新增表/migration/worker/依赖
+  - 文档：AGENTS clause 43 + current 01/02/04/05 + maps + CHANGE-001 + CHANGELOG
+
+- CHANGE-20260715-002: SMC Pine parity 核心 + MiniKline viewport 重写 + SMC renderer 对齐
+  - smc_pine_core.py（新增 852 行）：唯一 Pine 语义核心；Pine 原语 `pine_rma`（Wilder RMA，SMA 播种+递推）、`pine_atr`=RMA(TR,200)、`pine_cumulative_mean_range`（`ta.cum(ta.tr)/bar_index`，bar0=NaN）、`pine_highest/lowest`、`pine_crossover/crossunder`；`_SMCPineState` 状态机完全按 Pine 执行顺序（swing→internal→equal→BOS/CHoCH→trailing→mitigation）；FVG 完全排除；anchor/confirmed 因果契约；events 使用 `internal: bool` 替代旧 `kind` 字段
+  - smc_indicator.py（重构 957→117 行）：薄包装委托 `compute_smc_pine`；`_SMCState = _SMCPineState` 别名；签名不变
+  - warmup 修复：1d timeframe 使用 `full_daily_bars`（DB 全量日线，≥500 warmup）；其他周期复用 macd_bars；不调用 `_truncate_lists` 截断 SMC 输出（time 数组需完整长度对齐 anchor/confirmed）；前端 `smcToDisplay` 按时间过滤展示区事件
+  - 缓存隔离：ALGORITHM_VERSION v6→v7（旧 v6 SMA 缓存强制失效）；`:smc` 后缀不变
+  - StrategyChart SMC renderer 对齐 Pine：SmcEvent `kind?`→`internal?: boolean`；BOS/CHoCH 线型按 scope（internal=虚线 [4,3]/tiny 8px，swing=实线/small 11px）；标签中点 `(x1+x2)/2`+`'center'`；trailing 文案"强高/弱高/强低/弱低"（强高 if bias=-1 else 弱高；强低 if bias=1 else 弱低）；OB 半透明 box（active alpha 0.12，mitigated 0.05）；Historical 全事件
+  - MiniKline viewport 彻底重写：目标根数 15m=48/60m=44/日=40/周=36/月=30；barSpacing clamp 5.5–8px；左侧 1-2 根留白 `from=max(-2,n-visible-1)`；右侧 3 根留白 `to=n-1+3`；不调用 fitContent/resetTimeScale/scrollToRealTime；`autoscaleInfoProvider` 扩展价格范围（上 12% 下 15%）；`rightPriceScale` autoScale=true + scaleMargins {0.08,0.08} + minimumWidth=56；图表高度 190px；切周期不复用旧 logical range；15 项纯函数测试
+  - Pine golden fixture：状态 PENDING（等待 TradingView 导出）；新建 `backend/tests/fixtures/smc_pine/README.md`（TV 导出步骤+隐藏 plot 代码+CSV 格式）；无 fixture 时 `TestPineGoldenFixture` skip，不得宣称"完全对齐"
+  - Pine 语义测试：`TestPineSemantics` 8 项（RMA Wilder 递推、RMA min_periods、CMR bar0=NaN、ATR=RMA(TR)、crossover、crossunder、highest、lowest）；`test_event_kind_valid`→`test_event_internal_field_valid`
+  - 隔离边界：SMC 仅进入 /stock 指标链；/market 右栏不请求 SMC；true/false 缓存键隔离；不新增表/migration/worker/依赖；Node/DSA/监控/Capture/published run 未修改
+  - 文档：AGENTS clause 44 + current 01/02/04/05/code-doc-alignment + maps + analysis/smc-pine-parity.md + CHANGE-002 + CHANGELOG
+
+## 2026-07-14
+
+- CHANGE-20260714-001: 最新行情涨跌幅与 DSA 日期分离 + preset=none + 股票名称筛选 + 详情左栏滚动 + 五周期小 K 线 + pywencai 探测 + SMC 撤回
+  - latest_change_pct：bars_daily window function（lag+row_number）取最新两根日线计算，与 DSA run payload 分离；API 新增 latest_change_pct/latest_change_trade_date；服务端排序/筛选/Excel/详情左栏统一使用 latest 字段；9 项 pytest（T-1/T/停牌/null/prev_close=0/红涨绿跌/sort/filter/N+1）
+  - preset=none：清除筛选时 URL 写 preset=none，默认 effect 跳过，returnTo 保留，不清列显示/顺序/pageSize
+  - 股票名称筛选：stock_name/stock_name_op 独立于 keyword（contains/not_contains/eq），统一转义 ILIKE
+  - 详情左栏：SourceStockItem 含 changePct，DSA 来源用 latestChangePct，自选 fallback 用 monitor-status 聚合，scrollTop sessionStorage 恢复
+  - AdminAppShell：桌面侧栏+小屏 topbar 始终可见"← 返回行情"
+  - 五周期小 K 线：15m/60m/日/周/月，segmented control，attributionLogo=false，修复外框裁切（.mini-kline-card + .mini-kline-chart 添加 width:100%;max-width:100%;min-width:0;box-sizing:border-box;overflow:hidden）
+  - pywencai 探测：0.13.1 import 成功，5 项查询全部失败（iwencai.com 返回 HTTP 401 + captcha_url，与 THS 反爬同源），不可用，未加入生产依赖
+  - SMC 撤回（已 SUPERSEDED BY CHANGE-20260715-002）：用户已提供本人原创并授权的 Pine 实现（`ref/smc_ref.txt`），SMC 不再涉及第三方许可证问题；本记录中 SMC 撤回相关的许可证和 clean-room 结论仅作历史保留
+  - 基线对照：contract suite 8 个失败在 149eb09 基线和当前状态完全一致，0 新增失败
+  - 文档：AGENTS clause 42 + CHANGE-001 + CHANGELOG
+
+## 2026-07-13
+
+- CHANGE-20260713-010: 个股详情市值 + 列表 Excel 导出 + 右栏小 K 线 + 股票名称筛选 alias + 文档修正
+  - 市值：pytdx get_finance_info → 每日 18:00 同步到 DB → quote 端点从 DB 读取计算；migration 063 新增 total_share/float_share/share_as_of
+  - Excel 导出：POST /strategy-runs/{run_id}/results/export + 标准库 OOXML + MAX_EXPORT_ROWS=10000 + 公式注入防护；9 单元 + 21 集成 + 14 share_capital = 44 项目标 pytest
+  - 小 K 线：MiniKlineCard（lightweight-charts v4）+ useMiniKlineData（1d=80/1w=60/1mo=48）+ MarketRightPanel；收起 0 请求，只请求活动周期
+  - filterAlias：stock 列 filterAlias='keyword' 与顶部搜索共用唯一真源；双向同步（onApply/onClear + URL + preset）；stock/action 不入 metric_filters
+  - 文档修正：source_total/universe_total/filtered_total/items 四层语义；删除"source_total 受 universe 影响"旧描述；AGENTS clause 25 preset 增加 industry/concept
+  - 契约测试：change010Contract.test.ts 49 个 + 全仓 contract 319 个通过；mypy 基线 0 项新增 0 项；84 项无截图 E2E PASS
+  - 文档：AGENTS clause 41 + current 02/04 + maps + CHANGE-005/006 修正 + CHANGE-010
+
+- CHANGE-20260713-009: 详情页来源上下文修复（P0）
+  - MarketWorkspacePage 根据 scope 传 source/strategy；returnTo 保存完整当前 URL
+  - 新增共享纯函数 decodeMarketListContext/buildStrategyResultQueryParams（任意合法 /market URL 都识别为 market context）
+  - useStockDetailActions 从 useMarketStocks 切换到 DSA published results 链
+  - sourceBadge/左栏标题：scope=market→"行情来源"，scope=watchlist→"自选来源"
+  - normalizeInternalReturnTo 长度限制 200→500（/market URL 含 filters JSON 编码后可能超过 200）
+  - 新增 7 项契约测试；tsc/eslint/contract/build/docs checks 全通过
+  - 文档：AGENTS 规则 40 + maps + current 04 + CHANGE
+
+- CHANGE-20260713-008: K线右侧 18-22% 留白 + 交互坐标同步
+  - StrategyChart 引入 RIGHT_PADDING_RATIO=0.20，step 使用 effectivePlotW，所有交互坐标自动同步；网格线/十字线保持全宽；不修改 Node/Profile/POC 算法
+  - 新增 chartRightPadding.test.ts 7 项契约测试
+  - 文档：04-frontend-ux/05-testing/test-coverage-map 更新
+
+- CHANGE-20260713-007: 管理员后台入口 P0 修复 + 行业/概念 preset 集成 + 数量契约修正 + 批准 Logo PNG + 视觉 V1.0 残留清理
+  - 管理员入口：getAccountMenuItemsForVariant variant='user' + is_admin 显示"管理后台"；AdminRoute accessLoading 防止刷新误判；普通用户 DOM 不渲染入口
+  - 行业/概念 preset：StrategyDataTable/TablePresetMenu 恢复+保存 industry/concept；MarketWorkspacePage boardsValidation + stale toast
+  - 数量契约：source_total/universe_total/filtered_total/items 四层语义文档修正+测试
+  - 批准 Logo：BrandLogo 改用 PNG 资产，停用手绘 SVG
+  - 视觉残留：LandingPage/BetaApplicationModal/global.scss 旧蓝色改为品牌绿
+  - 新增 brandLogo.test.ts/visualTokens.test.ts + 后端 total 语义测试
+  - 文档：AGENTS/current 00/02/04/05/code-doc-alignment/maps 更新
+
+- CHANGE-20260713-006: /market 行业/概念筛选恢复 + 盘迹品牌视觉 V1.0
+  - 行业/概念筛选恢复：新建 board_filter_helper 共享 EXISTS 条件构造器（market_stocks_service + strategy_result_repository 共用），/strategy-runs/{run_id}/results 增加 industry/concept Query 参数，AND 语义，items/filtered_total 一致（source_total 不受筛选影响）
+  - preset 持久化：TableViewPresetConfig（后端 Pydantic + 前端 TS）增加 industry/concept 可选字段，白名单同步，不新增表/migration，旧 preset 兼容
+  - 前端 URL state：marketWorkspaceUrlState 增加 industry/concept，MarketToolbar 恢复"搜索、行业、概念"同一行布局，boards.available=false 时输入禁用+提示
+  - StrategyDataTable 受控 props：externalIndustry/onIndustryChange/externalConcept/onConceptChange，currentConfig/applyPresetConfig 集成
+  - 盘迹品牌视觉 V1.0：variables.scss 更新为莹感绿 token 体系（#00F6C2 主色，#0A0F14 背景，#F2F6F8 文本，红涨绿跌不变），BrandLogo 重写为四节点折线+末端高亮共识节点
+  - 硬编码清理：global.scss 30 处 + MarketWorkspace.module.scss 71 处 + AccountMenu/UserAppShell/MarketInstrumentPane 替换；新增 variables 导入
+  - 品牌资产：复制 logo_symbol_128/256.png + logo_horizontal_dark.png 到 frontend/src/assets/brand/（共 80KB）
+  - 测试：后端 6 industry/concept 测试 + 前端 tsc 0 错误；Ruff 仅 B011 基线
+  - 文档：AGENTS 规则 34-35 + docs/current/00/02/04/05 + maps + code-doc-alignment + CHANGE
+- CHANGE-20260713-005: PR #74 阶段五 — DSA 列表产品回归 / 消息数量 SSOT / K 线 Pointer 拖拽 / 用户文案
+  - /market 列表：action 列改名"自选"（加入/移除自选按钮），股票名称改为可点击链接进入 /stock/:symbol?returnTo=，股票单元格不再显示行内涨跌幅（独立 change_pct 列保留），watchlist 单次请求+Set 禁止 N+1，批次信息 admin-only 默认折叠
+  - /market 单一搜索 SSOT：MarketToolbar 顶部唯一搜索框（Enter/blur/清空提交），StrategyDataTable searchable={false} + externalKeyword/onKeywordChange 受控模式
+  - 后端 keyword pinyin_initials 匹配：strategy_result_repository 3 处 or_ 分支同步匹配 symbol/name/pinyin_initials
+  - 消息数量 SSOT：useUnreadCount 作为未读权威，"全部"显示后端 total（非 items.length），页头"共 X 条 · 未读 Y 条"，AccountMenu unread>0 进入 /messages?filter=unread + badge
+  - 消息跳转：单只股票 → /stock/:symbol?event_id=...&returnTo=/messages，selection_composite → /market
+  - K 线 Pointer Events 拖拽：setPointerCapture/releasePointerCapture，dragRef {startClientX,startViewport,pointerId}，4px 阈值抑制 click，grab/grabbing cursor
+  - 用户文案：sqzmom→"挤压动量"，node→"筹码共识价"，POC 峰→"核心共识价"，峰→"共识价"，缺失提示→"筹码共识价暂不可用"；内部字段名不变
+  - 测试：前端 263 contract（columns 13 + chartLabels 5 + chartDrag 7 + marketToolbarSearch 8 + messagesCounts 8 + indicatorManifest 12）+ 后端 3 keyword + 4 universe；tsc/eslint/build/docs checks 全通过
+  - 文档：AGENTS 规则 27-33 + docs/current/02/04/05 + code-doc-alignment + maps + CHANGE
+  - Ruff 基线 1 项（B011 既有债务），本轮 0 新增
+  - Node/monitor/capture 未改动
+- CHANGE-20260713-004: PR #74 阶段四 — /market DSA 列表恢复 + 列对齐修复 + 列设置 CRUD + columnOrder
+  - DSA 列表恢复：MarketWorkspacePage 改用 StrategyDataTable + getTrendSelectionColumns，数据来自 usePublishedRuns + useStrategyRunResults
+  - P0 列对齐修复：reorderVisibleColumns 纯函数提取到 columnOrdering.ts；thead th/tbody td/colgroup col 三者同源
+  - 列设置 CRUD：columnOrder 支持（localStorage + preset config）；TableViewPresetConfig 白名单新增 columnOrder
+  - URL 状态简化：/market 契约简化为 scope/selected + StrategyDataTable 内置 screenerUrlState
+  - MarketStockTable 删除；MarketToolbar 简化为仅 scope 分段按钮
+  - Node Cluster 边界保护：未修改 indicator_contract/indicator_service/monitor_batch_service/volume_node_monitor/watchlist_monitor/capture
+  - 测试：后端 50 preset + 前端 220 contract（含 31 columnAlignment + 12 marketWorkspaceUrlState）+ docs checks 全通过
+  - 文档：AGENTS 规则 14 全面更新（8/11/12/13/18/22/23 + 新增 24/25/26）+ 04-frontend-ux + code-doc-alignment + maps
+- CHANGE-20260713-003: PR #74 阶段三 — 行情列表简化 + 图层/因子语义纠正 + 右栏按需加载
+  - boards 单一真源：MarketWorkspacePage 唯一调用 useMarketBoards，向下传 props
+  - 删除最近事件列：market_stocks_service 删除 stock_state_event 批量查询（SQL 9→8），字段兼容保留 null
+  - 形态状态中文映射：mapStructureStateLabel/mapDsaStateLabel 纯函数 + 数据日期提示
+  - 删除 tv-strategy-legend：StrategyChart JSX + isGroupActive + DISPLAY_GROUPS/DisplayGroupDef + CSS
+  - MACD 语义纠正：feature_snapshot 附加日线辅助指标，watchlist/selection 默认关闭
+  - 右栏默认收起：/market + /stock 首次默认收起，localStorage 持久化
+  - AGENTS.md 规则 8/11/16/17/18 重写 + 新增 19/20/21/22/23
+- CHANGE-20260713-002: PR #74 阶段二 — StockContext reasonCode + 快照归属修复工具 + EventStatePanel 纯函数抽取
+  - reasonCode 机制：StockContext API 返回 dataQuality.reasonCode（no_published_full_run/snapshot_missing/snapshot_run_not_linked/legacy_snapshot_ambiguous/null）+ runTradeDate/runPublishedAt/hasSucceededRun/hasSnapshot/degradedReasons
+  - 快照归属修复工具：tools/repair_snapshot_run_ownership.py（dry-run + --apply，按 trade_date+schema_version+timeframe+adj 匹配 canonical succeeded+published+full run，幂等 UPDATE source_run_id）
+  - EventStatePanel 纯函数抽取：reasonCodeMessages.ts（纯 TypeScript，可测试）
+  - GET context 只读：无写副作用
+  - 测试：9 项 required 测试全通过（6 API + 2 repair + 1 前端）
+  - 生产修复：dry-run 21172 repairable / 100 orphan / 0 ambiguous；--apply 写入 21172 条
+  - 生产验证：10 自选股 + 10 市场股 + 1 异常股 = 21/21 state non-null
+- CHANGE-20260713-001: PR #74 补充修复 — ConsensusZone 移除 + 图层单一状态源 + K 线 viewport 修复 + Published snapshot 保护
+  - ConsensusZone 移除：删除 consensus_zone_service.py / consensus_zone.py / test_consensus_zone.py；Phase 5 前成交量分布保持禁用
+  - 图层单一状态源：ChartLayerVisibility 类型（7 键 trend/node/boll/volume/macd/sqzmom/breakout）；localStorage key panji:chart-layer-visibility:v2；删除 indicatorVisibility/detail-chart-strategy-groups/setLayers 旧状态源
+  - K 线 viewport 修复（P0-5）：删除 makeDefaultViewport；viewport 复合 key ${symbol}:${timeframe}；auto-follow effect；初始 toIndex === calc.length 定位到最新 K 线
+  - Published snapshot 保护（P0-4）：PublishedSnapshotRunExistsError + get_published_full_run + upsert_snapshot WHERE 子句 + after_close 优雅降级 + backfill --allow-republish 标志
+  - 测试：后端 121 passed + 前端 177 contract passed + tsc/build/docs consistency 全通过
+  - 文档：02-data-api-contracts/03-jobs/04-frontend-ux/05-testing/test-coverage-map 更新
+
+## 2026-07-12
+
+- CHANGE-20260712-003: PR #74 综合修复 — 快照归属/发布原子性/stock_context/前端修复
+  - 快照归属：upsert_snapshot 冲突更新 source_run_id；删除 ORM 冗余索引 ix_feature_snapshot_source_run_id
+  - 发布原子性：快照计算后不提前写 succeeded/published_at；DSA publish_run 成功后才发布 snapshot run
+  - stock_context：_event_to_dto 映射 evidence DTO；ZoneInfo("Asia/Shanghai")；cutoff 次日 00:00 exclusive；run 查询确定性倒序
+  - 幂等键：改为 symbol:source_run_id:algorithm_version（每股票每 run 最多一条事件）
+  - 前端：UserAppShell 删除角色预览；StockDetailPage eventPanelCollapsed 默认展开；EventStatePanel 展示 evidence+MACD；MarketStockTable 名称 sticky+字号修正+来源徽章修复
+  - 部署：CORE_ONLY 模式不构建 worker-capture
+  - 测试：后端 87 测试 + 前端 141 契约测试全部通过
+- CHANGE-20260712-002: C10 收口 — 板块同步降级保护(BOARD_SYNC_ENABLED) + /market/boards available/reason_code + 前端筛选降级 + 废弃CSS清理 + 文档同步
+- CHANGE-20260712-001: PR #74 两项架构纠偏 — board_sync 合并进 bars_scheduler + ConsensusZone 数据源修正
+  - arch1: `worker-board-sync` Docker 服务移除；`run_board_sync_scheduler_worker()` 函数删除；`board_sync_scheduler` 不再是有效 WORKER_TYPE；board_sync job 注册进 `run_bars_scheduler_worker()`（同一 AsyncIOScheduler，17:00 CronTrigger，max_instances=1）；qstock 同步调用通过 `asyncio.to_thread()` 包装
+  - arch2: `indicator_service` ConsensusZone 数据源从 `macd_bars` 改为 `daily_bars`（固定 250 根日线窗口）；`timeframe` 固定 `"1d"`；`as_of` 取最后一根日线 bar 时间；缓存键 `consensus_zone:{symbol}:{as_of}:1d:{algo_version}:{data_version}` 显示周期切换时稳定；V1 仅日线成交分布，15m 细化为未来工作
+  - 测试：`test_board_sync_registered_in_bars_scheduler`、`test_board_sync_not_separate_worker_type`、`test_consensus_zone_independent_of_display_count`、`test_consensus_zone_independent_of_display_timeframe`
+  - 文档：03-jobs、02-data-api-contracts、worker-job-map、deployment-runtime-map、test-coverage-map 更新
+
 ## 2026-07-11
+
+- CHANGE-20260711-007: PRD V1.1 §7.4/7.5 — ConsensusZone 真实实现 + qstock 板块同步 + industry/concept 筛选
+  - P2: ConsensusZone 真实算法（峰簇识别 + 谷底分簇 + 成交量加权 P10/P50/P90 + 因果性过滤 + Redis 版本化缓存），22 tests pass
+  - P2: qstock 板块同步服务（暂存集合 + 完整性校验 + 事务原子切换 + 失败保留旧数据），11 tests pass
+  - P2: migration 062 新增 market_boards + market_board_memberships 表（只存最新态）
+  - P2: market API industry/concept 筛选接入（移除 422，通过 market_boards 表过滤）
+  - P2: migration 061 冗余索引修复（删除单列索引，组合索引最左前缀覆盖）
+  - P2: sourceField/idempotencyKey 字段完全排除（dict + 递归 pop，JSON 中字段消失不是 null）
+  - 遗留：qstock 每日任务未接入 scheduler；ConsensusZone 前端图层未启用；生产未部署
+
+- CHANGE-20260711-006: PRD V1.1 纠偏 — 路由恢复 + EventStatePanel + StockState 字段剥离 + state 筛选
+  - P0: 恢复 `/stock/:symbol` 为 StockDetailPage（删除 StockDetailRedirect），新增 3 个路由契约测试
+  - P0: source_run_id migration 061 审计完成（保留，upsert 不覆盖已发布快照来源）
+  - P0: 权限测试改为 7 个真实 HTTP 集成测试（0 skip），44 tests pass
+  - P1: EventStatePanel 替代 ResearchContextPanel，删除 12 个 orphan 文件
+  - P1: StateValue.sourceField 和 StateEventDTO.idempotencyKey 改为 Optional，用户接口通过 strip_internal_fields_for_user 剥离
+  - P1: state 筛选实现（up/down/sideways），industry/concept 保持 422（后在 CHANGE-007 中实现）
+  - P1: DISTINCT ON 替换为标准 SQL 子查询 + JOIN
+  - 28 market tests + 141 contract tests pass；ruff/mypy/tsc 无新增错误
 
 - CHANGE-20260711-005: 统一行情工作区 P0/P1 收口修正
   - P0：`/admin/stock-debug` 独立管理员调试路由；`debug` 从 `/market` URL 契约移除；`ResearchContextPanel` 只渲染 4 张用户卡

@@ -1,6 +1,6 @@
 """指标结果缓存服务 - 基于 Redis。
 
-缓存键格式：indicator:{instrument_id}:{timeframe}:{adj}:{last_bar_time}:{algorithm_version}
+缓存键格式：indicator:{instrument_id}:{timeframe}:{adj}:{last_bar_time}:{algorithm_version}[:smc]
 TTL：300 秒（5 分钟）
 
 核心函数：
@@ -11,6 +11,7 @@ TTL：300 秒（5 分钟）
 设计要点：
 - last_bar_time 作为缓存键组成部分：新 bar 到达时键自动变化，旧缓存自然失效
 - algorithm_version 用于指标算法变更时强制失效（递增版本号）
+- include_smc 作为缓存键后缀：SMC 与非 SMC 结果独立缓存，互不污染
 - Redis 不可用时降级返回 None（不阻塞主流程，但记录 warning）
 - 使用 redis.asyncio（复用 app.core.redis_client 单例）
 
@@ -40,9 +41,16 @@ logger = logging.getLogger("services.indicator_cache")
 CACHE_TTL_SECONDS = 300
 
 # [指标缓存] - 算法版本：指标计算逻辑变更时递增，使旧缓存自动失效
+# v9: CHANGE-20260716-001 - SMC crossover/crossunder 修正（pivot level 上一 bar 快照，
+#     不再将 current_level 同时作为 [0] 和 [1]）；旧 v8 事件数量/位置可能不同，必须强制失效
+# v8: CHANGE-20260715-007 - SMC DTO 重构（EQH/EQL second_pivot/confirmed 重命名、
+#     swing_bias 字段、view adapter 裁窗口）；旧 v7 缓存 EQH/EQL 字段名不兼容，必须强制失效
+# v7: CHANGE-20260715-002 - SMC Pine parity（SMA→RMA、CMR 除数修正、1d warmup≥500、
+#     不截断 SMC 输出）；旧 v6 SMC 缓存基于 ref/smc.py SMA 实现，必须强制失效
+# v6: CHANGE-011 - 新增 SMC 按需计算图层（include_smc 参数 + 缓存键后缀隔离）
 # v5: PR #32 - DSA 全周期支持（bars_daily=macd_bars）+ 1w/1mo BB 用 compute_bollinger 计算
 #     v4 旧缓存返回 1d-only DSA + 1w/1mo 无 BB，必须强制失效
-ALGORITHM_VERSION = "v5"
+ALGORITHM_VERSION = "v9"
 
 # 缓存键前缀
 _CACHE_PREFIX = "indicator"
@@ -54,10 +62,13 @@ def build_cache_key(
     adj: str,
     last_bar_time: str | None,
     algorithm_version: str = ALGORITHM_VERSION,
+    include_smc: bool = False,
 ) -> str:
     """[指标缓存] - 构造缓存键。
 
-    格式：indicator:{instrument_id}:{timeframe}:{adj}:{last_bar_time}:{algorithm_version}
+    格式：
+        include_smc=False: indicator:{instrument_id}:{timeframe}:{adj}:{last_bar_time}:{algorithm_version}
+        include_smc=True:  indicator:{instrument_id}:{timeframe}:{adj}:{last_bar_time}:{algorithm_version}:smc
 
     Args:
         instrument_id: 标的 UUID
@@ -65,13 +76,17 @@ def build_cache_key(
         adj: 复权方式（qfq | none）
         last_bar_time: 最新 bar 时间戳（ISO 字符串）；None 时用 "unknown"
         algorithm_version: 算法版本号
+        include_smc: 是否包含 SMC 图层（CHANGE-011）；True 时缓存键追加 :smc 后缀，
+            使 SMC 与非 SMC 结果独立缓存，互不污染。
 
     Returns:
         Redis 缓存键字符串
     """
     # [指标缓存] - last_bar_time 为 None 时使用 "unknown"（首次查询无数据时）
     safe_last_bar = last_bar_time or "unknown"
-    return f"{_CACHE_PREFIX}:{instrument_id}:{timeframe}:{adj}:{safe_last_bar}:{algorithm_version}"
+    base = f"{_CACHE_PREFIX}:{instrument_id}:{timeframe}:{adj}:{safe_last_bar}:{algorithm_version}"
+    # [CHANGE-011 SMC] - include_smc=True 时追加 :smc 后缀，SMC 与非 SMC 独立缓存
+    return f"{base}:smc" if include_smc else base
 
 
 async def get(
@@ -79,6 +94,7 @@ async def get(
     timeframe: str,
     adj: str,
     last_bar_time: str | None,
+    include_smc: bool = False,
 ) -> dict[str, Any] | None:
     """[指标缓存] - 从 Redis 读取缓存的指标结果。
 
@@ -89,11 +105,12 @@ async def get(
         timeframe: K 线周期
         adj: 复权方式
         last_bar_time: 最新 bar 时间戳（ISO 字符串）
+        include_smc: 是否读取 SMC 版本缓存（CHANGE-011）
 
     Returns:
         dict: 缓存的指标结果；None 表示未命中或读取失败
     """
-    key = build_cache_key(instrument_id, timeframe, adj, last_bar_time)
+    key = build_cache_key(instrument_id, timeframe, adj, last_bar_time, include_smc=include_smc)
     try:
         redis = get_redis()
         raw = await redis.get(key)
@@ -112,6 +129,7 @@ async def set(
     adj: str,
     last_bar_time: str | None,
     value: dict[str, Any],
+    include_smc: bool = False,
 ) -> None:
     """[指标缓存] - 将指标结果写入 Redis 缓存。
 
@@ -121,8 +139,9 @@ async def set(
         adj: 复权方式
         last_bar_time: 最新 bar 时间戳（ISO 字符串）
         value: 指标结果字典
+        include_smc: 是否写入 SMC 版本缓存（CHANGE-011）
     """
-    key = build_cache_key(instrument_id, timeframe, adj, last_bar_time)
+    key = build_cache_key(instrument_id, timeframe, adj, last_bar_time, include_smc=include_smc)
     try:
         redis = get_redis()
         # [指标缓存] - JSON 序列化，default=str 处理不可序列化类型（如 UUID/datetime）
@@ -212,5 +231,11 @@ if __name__ == "__main__":
     # 6. 验证 TTL 常量
     assert CACHE_TTL_SECONDS == 300, f"TTL 应为 300，实得 {CACHE_TTL_SECONDS}"
     print(f"CACHE_TTL_SECONDS={CACHE_TTL_SECONDS} OK")
+
+    # 7. [CHANGE-011 SMC] 验证 include_smc=True 追加 :smc 后缀
+    key_smc = build_cache_key(test_instrument_id, "1d", "qfq", "2026-06-18", include_smc=True)
+    assert key_smc.endswith(":smc"), f"include_smc=True 应追加 :smc 后缀: {key_smc}"
+    assert key_smc != key1, "include_smc=True 与 False 应生成不同键"
+    print(f"include_smc 后缀区分 OK: {key_smc}")
 
     print("OK")

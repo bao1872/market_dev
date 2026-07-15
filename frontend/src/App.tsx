@@ -1,14 +1,14 @@
 // [Auth] - 描述: 路由配置 + 受保护路由守卫 + Admin/Subscriber 角色守卫
 // 公开路由：/（门户页，lazy 加载）, /login, /subscription-expired（canonical），/membership-expired（重定向）
 // 受保护路由：认证由 ProtectedLayout 负责（仅校验 auth + access profile，不再固定渲染同一壳层）
-// 布局壳拆分（阶段二）：
-//   UserAppShell   承载普通用户 /market /screener /stock/:symbol /messages /settings
+// 布局壳拆分（PRD V1.0 阶段一）：
+//   UserAppShell   承载普通用户 /market /replay /stock/:symbol /messages /settings
 //   AdminAppShell  承载管理员 /admin/*（继续使用 AdminRoute 后端权限上下文）
 //   /capture/stock/:symbol 位于两套壳层之外（只使用 captureClient，不经过任何壳层）
 // SubscriberRoute：有效订阅或 admin 豁免，否则重定向到 /subscription-expired
 // AdminRoute：is_admin=true 才可访问，否则重定向到 /market（替换旧 /overview）
 import { lazy, Suspense, useEffect, useRef } from 'react'
-import { Navigate, Outlet, type RouteObject } from 'react-router-dom'
+import { Navigate, Outlet, type RouteObject, useParams } from 'react-router-dom'
 import { useAuthStore, ACCESS_TOKEN_KEY } from './store/auth'
 import UserAppShell from './layouts/UserAppShell'
 import AdminAppShell from './layouts/AdminAppShell'
@@ -16,14 +16,13 @@ import { legacyRedirectEntries, DEFAULT_ENTRY } from './navigation/appNavigation
 import LoginPage from './pages/LoginPage'
 import SubscriptionExpiredPage from './pages/SubscriptionExpiredPage'
 import MarketWorkspacePage from './features/market-workspace/MarketWorkspacePage'
-import ScreenerPage from './pages/ScreenerPage'
+import ReplayPage from './pages/ReplayPage'
 import StockDetailPage from './pages/StockDetailPage'
 import CaptureStockPage from './pages/CaptureStockPage'
 import SettingsPage from './pages/SettingsPage'
 import MessagesPage from './pages/MessagesPage'
 import AdminIndexPage from './pages/AdminIndexPage'
 import AdminUsersPage from './pages/AdminUsersPage'
-import AdminStrategiesPage from './pages/AdminStrategiesPage'
 import AdminJobsPage from './pages/AdminJobsPage'
 import AdminBetaApplicationsPage from './pages/AdminBetaApplicationsPage'
 import AdminAfterClosePipelinePage from './pages/AdminAfterClosePipelinePage'
@@ -64,7 +63,7 @@ function ProtectedLayout() {
 
 // [Auth] - 描述: SubscriberRoute 订阅守卫 - 非有效订阅用户重定向到 /subscription-expired（canonical）
 // admin 用户豁免（is_admin=true 直接通过，不强制订阅）
-// 用于 /market /screener /stock/:symbol 等需有效订阅的核心业务路由
+// 用于 /market /replay /stock/:symbol 等需有效订阅的核心业务路由
 function SubscriberRoute() {
   const user = useAuthStore((s) => s.user)
   // admin 豁免：管理员无需有效订阅即可访问所有页面
@@ -80,19 +79,31 @@ function SubscriberRoute() {
 
 // [Auth] - 描述: AdminRoute 管理员守卫 - 使用 is_admin 字段判断（替代旧 user.role）
 // 非 admin 用户重定向到默认入口 /market（替换旧 /overview）
+// accessLoading 期间显示轻量 loading，避免 /me/access 未返回时提前判定 false
 function AdminRoute() {
   const user = useAuthStore((s) => s.user)
+  const accessLoading = useAuthStore((s) => s.accessLoading)
+  // access revalidation 进行中时等待结果（防止刷新页面时 user 尚未更新而错误重定向）
+  if (accessLoading && !user?.is_admin) {
+    return <div style={{ minHeight: '100vh', background: '#0A0F14' }} />
+  }
   if (user?.is_admin !== true) {
     return <Navigate to="/market" replace />
   }
   return <Outlet />
 }
 
-// 旧路由兼容重定向（/overview → /market，/watchlist → /market?scope=watchlist）
+// 旧路由兼容重定向（/overview → /market，/watchlist → /market?scope=watchlist，/screener → /market）
 const redirectRoutes = legacyRedirectEntries().map(({ path, to }) => ({
   path,
   element: <Navigate to={to} replace />,
 }))
+
+// [Phase4] 旧管理员调试动态路由重定向：/admin/stock-debug/:symbol → /admin/stocks/:symbol/debug
+function OldStockDebugRedirect() {
+  const { symbol } = useParams<{ symbol: string }>()
+  return <Navigate to={`/admin/stocks/${symbol}/debug`} replace />
+}
 
 // 导出纯路由配置结构（供路由契约测试断言，不依赖 React 渲染）
 export const routeConfig: RouteObject[] = [
@@ -119,7 +130,7 @@ export const routeConfig: RouteObject[] = [
             element: <SubscriberRoute />,
             children: [
               { path: '/market', element: <MarketWorkspacePage /> },
-              { path: '/screener', element: <ScreenerPage /> },
+              { path: '/replay', element: <ReplayPage /> },
               { path: '/stock/:symbol', element: <StockDetailPage /> },
             ],
           },
@@ -140,17 +151,20 @@ export const routeConfig: RouteObject[] = [
               { path: '/admin/overview', element: <AdminIndexPage /> },
               { path: '/admin/users', element: <AdminUsersPage /> },
               { path: '/admin/beta-applications', element: <AdminBetaApplicationsPage /> },
-              { path: '/admin/strategies', element: <AdminStrategiesPage /> },
+              // C8: 策略目录页已废弃，重定向到盘后流水线（DSA 运行能力保留在此）
+              { path: '/admin/strategies', element: <Navigate to="/admin/after-close" replace /> },
               { path: '/admin/jobs', element: <AdminJobsPage /> },
               { path: '/admin/after-close', element: <AdminAfterClosePipelinePage /> },
-              { path: '/admin/stock-debug', element: <AdminStockDebugPage /> },
-              { path: '/admin/stock-debug/:symbol', element: <AdminStockDebugPage /> },
+              { path: '/admin/stocks', element: <AdminStockDebugPage /> },
+              { path: '/admin/stocks/:symbol/debug', element: <AdminStockDebugPage /> },
             ],
           },
         ],
       },
       // 旧路由兼容重定向（保留，避免书签/旧链接 404）
       ...redirectRoutes,
+      // [Phase4] 旧管理员调试动态路由重定向
+      { path: '/admin/stock-debug/:symbol', element: <OldStockDebugRedirect /> },
     ],
   },
   // 兜底：未匹配路由重定向到默认入口（替换旧 /overview）

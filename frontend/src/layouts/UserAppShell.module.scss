@@ -1,3 +1,5 @@
+@use '../styles/variables.scss' as v;
+
 // [UserAppShell] - 描述: 普通用户壳层局部样式（CSS Module）
 // 关键布局修正：用户壳层无侧栏，需覆盖全局 .topbar（left 由侧栏宽度改为 0）
 // 与全局 .main（margin-left 由侧栏宽度改为 0），内容区占满宽度。
@@ -36,7 +38,7 @@
   transition: 0.16s;
 
   &:hover {
-    background: #1c202b;
+    background: v.$color-panel-3;
     color: #fff;
   }
 }
@@ -44,5 +46,5 @@
 .navLinkActive {
   background: rgba(41, 98, 255, 0.17);
   color: #fff;
-  box-shadow: inset 0 -2px 0 #2962ff;
+  box-shadow: inset 0 -2px 0 v.$color-brand;
 }

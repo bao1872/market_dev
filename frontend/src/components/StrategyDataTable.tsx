@@ -8,12 +8,13 @@ import clsx from 'clsx'
 import { TablePresetMenu } from './TablePresetMenu'
 import { useTableViewPresets } from '@/hooks/useApi'
 import { decodeScreenerUrlState, encodeScreenerUrlState } from './screenerUrlState'
+import { reorderVisibleColumns } from './columnOrdering'
 import type { TableViewPresetConfig } from '@/api/endpoints'
 
 // ===== 类型定义（对应 UI_DEVELOPMENT_SPEC.md 3.3 推荐组件输入）=====
 export type DataType = 'text' | 'number' | 'percent' | 'datetime' | 'enum' | 'range'
 export type SortDirection = 'asc' | 'desc' | null
-export type FilterOperator = 'contains' | 'eq' | 'gt' | 'gte' | 'lt' | 'lte' | 'between' | 'empty' | 'not_empty'
+export type FilterOperator = 'contains' | 'not_contains' | 'eq' | 'gt' | 'gte' | 'lt' | 'lte' | 'between' | 'empty' | 'not_empty'
 
 export interface DataTableColumn<Row> {
   key: string
@@ -35,6 +36,8 @@ export interface DataTableColumn<Row> {
   helpText?: string
   // [StrategyDataTable] - 描述: 表头缩写（显示用），title 保留完整描述用于 tooltip；缺省时回退到 title
   shortTitle?: string
+  // CHANGE-20260713-011: filterAlias 已移除——stock 列改用普通筛选（contains/not_contains/eq），
+  // 与顶部 keyword 搜索独立（顶部 keyword 负责 symbol/name/pinyin 正向搜索）
 }
 
 export interface DataTableFilter {
@@ -86,9 +89,42 @@ export interface DataTableProps<Row> {
   // [Presets] - 描述: 策略 key（提供时启用视图配置保存/应用功能）
   strategyKey?: string | null
   // [StickyHeader] - 描述: 表头 sticky 模式
-  // - container: 在 .table-wrap 局部滚动容器内吸附（默认，兼容历史行为）
+  // - container: 在 .table-scroll 局部滚动容器内吸附（默认，兼容历史行为）
   // - viewport: 在页面滚动时吸附到 topbar 下方（趋势选股页使用）
   stickyHeaderMode?: 'viewport' | 'container'
+  // [StrategyDataTable] - 描述: 行点击回调（非链接区域点击时触发，用于 /market 选中行驱动右栏）
+  onRowClick?: (row: Row) => void
+  // [StrategyDataTable] - 描述: 当前选中行 key（用于高亮选中行）
+  activeRowKey?: string | null
+  // [StrategyDataTable] - 描述: 外部受控 keyword（提供时覆盖内部 globalQuery，用于 /market 顶部搜索框）
+  externalKeyword?: string
+  onKeywordChange?: (keyword: string) => void
+  // CHANGE-20260713-006: 外部受控 industry/concept（/market 顶部板块筛选，preset 持久化）
+  externalIndustry?: string
+  onIndustryChange?: (industry: string) => void
+  externalConcept?: string
+  onConceptChange?: (concept: string) => void
+  // CHANGE-20260713-006: preset 应用时校验 industry/concept 是否仍在当前板块目录中
+  // 提供 boardsValidation 时，applyPresetConfig 会检测失效字段并调用 onPresetStaleField
+  boardsValidation?: {
+    available: boolean
+    industryNames: Set<string>
+    conceptNames: Set<string>
+  } | null
+  onPresetStaleField?: (field: 'industry' | 'concept', value: string) => void
+  // CHANGE-20260713-010: 导出 Excel 回调（提供时显示"导出 Excel"按钮）
+  onExport?: (ctx: ExportContext) => void
+}
+
+// CHANGE-20260713-010: 导出上下文（StrategyDataTable → 外部）
+export interface ExportContext {
+  visibleColumns: DataTableColumn<unknown>[]
+  keyword: string
+  industry: string
+  concept: string
+  metricFilters: DataTableFilter[]
+  sortBy: string | null
+  sortDesc: boolean
 }
 
 // [StrategyDataTable] - 描述: 按字段类型返回可选操作符列表（默认操作符为数组首项）
@@ -98,7 +134,8 @@ function operatorsForDataType(dataType: DataTableColumn<unknown>['dataType']): F
     case 'percent':
       return ['gte', 'gt', 'lte', 'lt', 'eq', 'between']
     case 'text':
-      return ['contains', 'eq']
+      // CHANGE-20260713-011: 文本列增加 not_contains（包含/不包含/等于）
+      return ['contains', 'not_contains', 'eq']
     case 'enum':
       return ['eq']
     case 'datetime':
@@ -111,6 +148,7 @@ function operatorsForDataType(dataType: DataTableColumn<unknown>['dataType']): F
 // [StrategyDataTable] - 描述: 操作符下拉框中文标签
 const OPERATOR_LABELS: Record<FilterOperator, string> = {
   contains: '包含',
+  not_contains: '不包含',
   eq: '等于',
   gt: '大于',
   gte: '大于等于',
@@ -176,6 +214,9 @@ function matchFilter(text: string, filter: DataTableFilter): boolean {
     }
     default: // contains
       return t.toLocaleLowerCase('zh-CN').includes(String(filter.value).toLocaleLowerCase('zh-CN'))
+    case 'not_contains':
+      // CHANGE-20260713-011: 文本不包含（大小写不敏感）
+      return !t.toLocaleLowerCase('zh-CN').includes(String(filter.value).toLocaleLowerCase('zh-CN'))
   }
 }
 
@@ -298,13 +339,24 @@ function FilterPopover({
   )
 }
 
-// 列设置弹窗
+// CHANGE-20260713-011: KeywordFilterPopover 已移除——stock 列改用普通 FilterPopover
+// （支持 contains/not_contains/eq 三种操作符，筛选值只取股票名称）
+
+// CHANGE-20260715-005: sticky 列判断函数——只允许 col.key==='stock' 为 sticky 列
+// 禁止"第一个可见非操作列"自动 sticky；股票列隐藏时不自动把其他列套用 sticky
+function isStickyColumn<Row>(col: DataTableColumn<Row>): boolean {
+  return col.key === 'stock'
+}
+
+// 列设置弹窗（支持显示/隐藏 + 上下调整顺序）
 function ColumnManager({
   columns,
   hiddenColumns,
   onToggle,
   onReset,
   onClose,
+  onMoveUp,
+  onMoveDown,
   anchor,
 }: {
   columns: DataTableColumn<unknown>[]
@@ -312,19 +364,21 @@ function ColumnManager({
   onToggle: (key: string) => void
   onReset: () => void
   onClose: () => void
+  onMoveUp: (key: string) => void
+  onMoveDown: (key: string) => void
   anchor: HTMLElement
 }) {
   const rect = anchor.getBoundingClientRect()
-  const left = Math.min(window.innerWidth - 260, Math.max(8, rect.left - 100))
-  const top = Math.min(window.innerHeight - 330, rect.bottom + 6)
+  const left = Math.min(window.innerWidth - 300, Math.max(8, rect.left - 100))
+  const top = Math.min(window.innerHeight - 380, rect.bottom + 6)
 
   const manageable = columns.filter((c) => !c.isAction && !c.isSelect)
 
   return (
     <div className="column-filter-popover column-manager-popover" style={{ left, top }}>
-      <div className="filter-pop-title">显示列</div>
+      <div className="filter-pop-title">显示列（可拖动调整顺序）</div>
       <div className="column-manager-list">
-        {manageable.map((col) => (
+        {manageable.map((col, idx) => (
           <div key={col.key} className="column-manager-item">
             <label className="table-checkbox-wrapper" style={{ width: 24, height: 24 }}>
               <input
@@ -334,7 +388,27 @@ function ColumnManager({
                 onChange={() => onToggle(col.key)}
               />
             </label>
-            <span>{col.title}</span>
+            <span className="column-manager-label">{col.title}</span>
+            <span className="column-manager-reorder">
+              <button
+                className="btn small columns-move-up"
+                disabled={idx === 0}
+                onClick={() => onMoveUp(col.key)}
+                aria-label="上移"
+                title="上移"
+              >
+                ↑
+              </button>
+              <button
+                className="btn small columns-move-down"
+                disabled={idx === manageable.length - 1}
+                onClick={() => onMoveDown(col.key)}
+                aria-label="下移"
+                title="下移"
+              >
+                ↓
+              </button>
+            </span>
           </div>
         ))}
       </div>
@@ -374,6 +448,17 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     tableClassName,
     strategyKey,
     stickyHeaderMode = 'container',
+    onRowClick,
+    activeRowKey,
+    externalKeyword,
+    onKeywordChange,
+    externalIndustry,
+    onIndustryChange,
+    externalConcept,
+    onConceptChange,
+    boardsValidation,
+    onPresetStaleField,
+    onExport,
   } = props
 
   const [searchParams, setSearchParams] = useSearchParams()
@@ -383,9 +468,13 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
   const [sortDirection, setSortDirection] = useState<SortDirection>(null)
   const [filters, setFilters] = useState<Record<number, DataTableFilter>>({})
   const [globalQuery, setGlobalQuery] = useState('')
+
+  // [StrategyDataTable] - 描述: 受控 keyword 模式 — externalKeyword 提供时覆盖内部 globalQuery
+  const effectiveKeyword = externalKeyword !== undefined ? externalKeyword : globalQuery
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(initialPageSize)
   const [hiddenColumns, setHiddenColumns] = useState<Set<string>>(new Set())
+  const [columnOrder, setColumnOrder] = useState<string[] | null>(null)
   const [filterPopover, setFilterPopover] = useState<{
     columnIndex: number
     anchor: HTMLElement
@@ -426,7 +515,10 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
         setSortDirection(state.sort.direction)
       }
     }
-    if (state.keyword) setGlobalQuery(state.keyword)
+    if (state.keyword) {
+      setGlobalQuery(state.keyword)
+      if (onKeywordChange) onKeywordChange(state.keyword)
+    }
     if (state.filters && state.filters.length > 0) {
       const next: Record<number, DataTableFilter> = {}
       for (const f of state.filters) {
@@ -466,6 +558,22 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     } catch {
       // ignore
     }
+    // [StrategyDataTable] - 描述: 恢复列顺序（columnOrder）
+    try {
+      const savedOrder = localStorage.getItem(`table-column-order:${tableId}`)
+      if (savedOrder) {
+        const validKeys = new Set(columns.map((c) => c.key))
+        const parsedOrder: unknown = JSON.parse(savedOrder)
+        if (Array.isArray(parsedOrder)) {
+          const next = parsedOrder.filter(
+            (k): k is string => typeof k === 'string' && validKeys.has(k),
+          )
+          setColumnOrder(next.length > 0 ? next : null)
+        }
+      }
+    } catch {
+      // ignore
+    }
   }, [tableId, columns])
 
   // 保存列设置到 localStorage（按 column key）
@@ -473,6 +581,22 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     (hidden: Set<string>) => {
       try {
         localStorage.setItem(`table-columns:${tableId}`, JSON.stringify([...hidden]))
+      } catch {
+        // ignore
+      }
+    },
+    [tableId],
+  )
+
+  // [StrategyDataTable] - 描述: 保存列顺序到 localStorage
+  const saveColumnOrder = useCallback(
+    (order: string[] | null) => {
+      try {
+        if (order && order.length > 0) {
+          localStorage.setItem(`table-column-order:${tableId}`, JSON.stringify(order))
+        } else {
+          localStorage.removeItem(`table-column-order:${tableId}`)
+        }
       } catch {
         // ignore
       }
@@ -491,12 +615,11 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
 
   // [StrategyDataTable] - 描述: 可见列派生（携带 originalIndex，保留 columns 原始索引用于排序/筛选 state 定位）
   // 说明：sortColumn / filters / filterPopover.columnIndex 均基于 columns 原始索引，故 visibleColumns 必须保留该映射
+  // columnOrder 非空时按其顺序排列列（仅管理列，action/select 列固定在末尾）；否则按 columns 原始顺序
+  // 逻辑提取到 columnOrdering.ts 的 reorderVisibleColumns 纯函数，便于 P0 列对齐测试
   const visibleColumns = useMemo(
-    () =>
-      columns
-        .map((col, originalIndex) => ({ col, originalIndex }))
-        .filter(({ col }) => !hiddenColumns.has(col.key)),
-    [columns, hiddenColumns],
+    () => reorderVisibleColumns(columns, hiddenColumns, columnOrder),
+    [columns, hiddenColumns, columnOrder],
   )
 
   // [StrategyDataTable] - 描述: 可见列宽度之和（用于 table min-width，避免隐藏列后表格被压缩）
@@ -543,17 +666,31 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
   }, [])
 
   const reset = useCallback(() => {
+    // CHANGE-20260713-011: 清除排序与筛选时必须同时清外部受控状态（keyword/industry/concept）
+    // 并在 URL 写入 preset=none，禁止默认 preset 在组件 remount 后自动应用
     setFilters({})
     setSortColumn(null)
     setSortDirection(null)
     setGlobalQuery('')
     setPage(1)
-  }, [])
+    // 同步外部受控 keyword/industry/concept（MarketWorkspacePage 顶部搜索 + 板块筛选）
+    if (onKeywordChange) onKeywordChange('')
+    if (onIndustryChange) onIndustryChange('')
+    if (onConceptChange) onConceptChange('')
+    // URL: 删除 keyword/filters/sort/dir/page/industry/concept，写入 preset=none
+    // managedKeys 由 URL sync effect 自动清理（state 已清空，encoded 不会有这些 key）
+    // industry/concept 不在 managedKeys 中，需手动删除
+    const nextParams = new URLSearchParams(searchParams)
+    nextParams.delete('industry')
+    nextParams.delete('concept')
+    nextParams.set('preset', 'none')
+    setSearchParams(nextParams, { replace: false })
+  }, [onKeywordChange, onIndustryChange, onConceptChange, searchParams, setSearchParams])
 
   // ===== 视图配置 Preset =====
-  // [Presets] - 描述: 从内部 state 构建当前配置快照（仅 keyword/sort/filters/hiddenColumns/pageSize）
+  // [Presets] - 描述: 从内部 state 构建当前配置快照（keyword/sort/filters/hiddenColumns/columnOrder/pageSize）
   const currentConfig: TableViewPresetConfig = useMemo(() => ({
-    keyword: globalQuery.trim() || null,
+    keyword: effectiveKeyword.trim() || null,
     sort: sortColumn !== null && sortDirection
       ? { key: columns[sortColumn]?.key ?? '', direction: sortDirection }
       : null,
@@ -564,12 +701,23 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
       ...(f.value2 !== undefined ? { value2: f.value2 } : {}),
     })),
     hiddenColumns: [...hiddenColumns],
+    columnOrder: columnOrder ?? null,
     pageSize,
-  }), [globalQuery, sortColumn, sortDirection, filters, hiddenColumns, pageSize, columns])
+    industry: externalIndustry?.trim() || null,
+    concept: externalConcept?.trim() || null,
+  }), [effectiveKeyword, sortColumn, sortDirection, filters, hiddenColumns, columnOrder, pageSize, columns, externalIndustry, externalConcept])
 
-  // [Presets] - 描述: 应用 preset 配置到内部 state（重置所有筛选/排序/分页/隐藏列）
+  // [Presets] - 描述: 应用 preset 配置到内部 state（重置所有筛选/排序/分页/隐藏列/列顺序）
+  // CHANGE-20260713-011: 用户显式点击 preset 时删除 URL 中的 preset=none（解除"清除后不自动应用"门控）
   const applyPresetConfig = useCallback((config: TableViewPresetConfig) => {
+    // 删除 preset=none（用户显式应用，恢复默认 preset 自动应用机制）
+    if (searchParams.get('preset') === 'none') {
+      const nextParams = new URLSearchParams(searchParams)
+      nextParams.delete('preset')
+      setSearchParams(nextParams, { replace: false })
+    }
     setGlobalQuery(config.keyword ?? '')
+    if (onKeywordChange) onKeywordChange(config.keyword ?? '')
     if (config.sort) {
       const idx = columns.findIndex((c) => c.key === config.sort!.key)
       setSortColumn(idx >= 0 ? idx : null)
@@ -600,9 +748,41 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     } else {
       setHiddenColumns(new Set())
     }
+    // [StrategyDataTable] - 描述: 应用列顺序（columnOrder）
+    if (config.columnOrder && config.columnOrder.length > 0) {
+      setColumnOrder(config.columnOrder)
+      saveColumnOrder(config.columnOrder)
+    } else {
+      setColumnOrder(null)
+      saveColumnOrder(null)
+    }
     if (config.pageSize != null) setPageSize(config.pageSize)
+    // CHANGE-20260713-006: 恢复 industry/concept 到外部受控 state（MarketWorkspacePage URL）
+    // 同时校验 preset 中的值是否仍在当前板块目录中：
+    // - boardsValidation.available=true 且值不在目录中 → 视为失效字段，跳过应用并通知父组件 toast
+    // - boardsValidation.available=false → 保留 preset 值但禁用输入（父组件处理 disabled 状态）
+    // - 无 boardsValidation → 直接应用（兼容 ScreenerPage 等不传板块校验的场景）
+    const staleFields: Array<{ field: 'industry' | 'concept'; value: string }> = []
+    let effectiveIndustry = config.industry ?? ''
+    let effectiveConcept = config.concept ?? ''
+    if (boardsValidation && boardsValidation.available) {
+      if (effectiveIndustry && !boardsValidation.industryNames.has(effectiveIndustry)) {
+        staleFields.push({ field: 'industry', value: effectiveIndustry })
+        effectiveIndustry = ''
+      }
+      if (effectiveConcept && !boardsValidation.conceptNames.has(effectiveConcept)) {
+        staleFields.push({ field: 'concept', value: effectiveConcept })
+        effectiveConcept = ''
+      }
+    }
+    if (onIndustryChange) onIndustryChange(effectiveIndustry)
+    if (onConceptChange) onConceptChange(effectiveConcept)
+    // 通知父组件显示 toast（每个失效字段 toast 一次）
+    if (onPresetStaleField) {
+      for (const sf of staleFields) onPresetStaleField(sf.field, sf.value)
+    }
     setPage(1)
-  }, [columns])
+  }, [columns, saveColumnOrder, onKeywordChange, onIndustryChange, onConceptChange, boardsValidation, onPresetStaleField, searchParams, setSearchParams])
 
   // [Presets] - 描述: 自动应用默认配置（进入页面时，每个 strategyKey 只应用一次）
   const presetsQuery = useTableViewPresets(strategyKey ? tableId : undefined, strategyKey ?? undefined)
@@ -616,6 +796,13 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
       defaultAppliedRef.current = appliedKey
       return
     }
+    // CHANGE-20260714-001: 用户显式"清除排序与筛选"后 URL 含 preset=none，
+    // 禁止默认 preset 自动应用（即使 URL 中没有其他状态字段）。
+    // 用户主动点击某个 preset 时由 applyPresetConfig 删除 preset=none 解除门控。
+    if (searchParams.get('preset') === 'none') {
+      defaultAppliedRef.current = appliedKey
+      return
+    }
     const defaultPreset = presetsQuery.data.items.find((p) => p.is_default)
     if (defaultPreset) {
       const cfg = defaultPreset.config as Record<string, unknown>
@@ -624,11 +811,15 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
         sort: (cfg.sort as TableViewPresetConfig['sort']) ?? null,
         filters: (cfg.filters as TableViewPresetConfig['filters']) ?? null,
         hiddenColumns: (cfg.hiddenColumns as string[] | null | undefined) ?? null,
+        columnOrder: (cfg.columnOrder as string[] | null | undefined) ?? null,
         pageSize: (cfg.pageSize as number | null | undefined) ?? null,
+        // CHANGE-20260713-006: 恢复 industry/concept（preset 持久化）
+        industry: (cfg.industry as string | null | undefined) ?? null,
+        concept: (cfg.concept as string | null | undefined) ?? null,
       })
     }
     defaultAppliedRef.current = appliedKey
-  }, [strategyKey, tableId, presetsQuery.data, applyPresetConfig])
+  }, [strategyKey, tableId, presetsQuery.data, applyPresetConfig, searchParams])
 
   // ===== URL 同步 =====
   useEffect(() => {
@@ -638,7 +829,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
       return
     }
     const state = {
-      keyword: globalQuery.trim() || undefined,
+      keyword: effectiveKeyword.trim() || undefined,
       sort:
         sortColumn !== null && sortDirection
           ? { key: columns[sortColumn]?.key || '', direction: sortDirection }
@@ -663,7 +854,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
       }
     }
     setSearchParams(nextParams, { replace: true })
-  }, [sortColumn, sortDirection, page, pageSize, columns, searchParams, setSearchParams, initialPageSize, globalQuery, filters])
+  }, [sortColumn, sortDirection, page, pageSize, columns, searchParams, setSearchParams, initialPageSize, effectiveKeyword, filters])
 
   // ===== 服务端查询回调 =====
   useEffect(() => {
@@ -672,7 +863,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
         page,
         pageSize,
         // [StrategyDataTable] - 描述: 透传全文搜索关键词至服务端
-        keyword: globalQuery.trim() || undefined,
+        keyword: effectiveKeyword.trim() || undefined,
         sort:
           sortColumn !== null && sortDirection
             ? { key: columns[sortColumn]?.key || '', direction: sortDirection }
@@ -680,7 +871,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
         filters: Object.values(filters),
       })
     }
-  }, [page, pageSize, sortColumn, sortDirection, filters, serverSide, onQueryChange, columns, globalQuery])
+  }, [page, pageSize, sortColumn, sortDirection, filters, serverSide, onQueryChange, columns, effectiveKeyword])
 
   // ===== 客户端排序和筛选 =====
   const processedRows = useMemo(() => {
@@ -688,9 +879,9 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
 
     let visible = rows.filter((row) => {
       // 全文搜索
-      if (globalQuery) {
+      if (effectiveKeyword) {
         const rowText = JSON.stringify(row).toLocaleLowerCase('zh-CN')
-        if (!rowText.includes(globalQuery.toLocaleLowerCase('zh-CN'))) return false
+        if (!rowText.includes(effectiveKeyword.toLocaleLowerCase('zh-CN'))) return false
       }
       // 列筛选
       return Object.entries(filters).every(([idx, filter]) => {
@@ -720,7 +911,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     }
 
     return visible
-  }, [rows, globalQuery, filters, sortColumn, sortDirection, columns, serverSide])
+  }, [rows, effectiveKeyword, filters, sortColumn, sortDirection, columns, serverSide])
 
   // 分页
   // serverSide 模式：total 来自 API；客户端模式：total 优先取 prop，否则用 processedRows.length
@@ -766,14 +957,11 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
 
   // ===== 渲染 =====
   const filterCount = Object.keys(filters).length
-  const hasActiveState = filterCount > 0 || sortColumn !== null || globalQuery !== ''
-
-  // 找到第一个可排序的列作为 sticky-col
-  let stickyAssigned = false
+  const hasActiveState = filterCount > 0 || sortColumn !== null || effectiveKeyword !== ''
 
   return (
-    <div className={clsx('table-wrap', stickyHeaderMode === 'viewport' && 'viewport-sticky')}>
-      {/* 元信息栏 */}
+    <div className={clsx('table-shell', stickyHeaderMode === 'viewport' && 'viewport-sticky')}>
+      {/* 元信息栏（CHANGE-20260715-005: 移出横向滚动容器，右边界等于 table-scroll 右边界） */}
       <div className="table-meta-bar">
         <div>
           <span className="table-result-count">
@@ -781,7 +969,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
           </span>
           <span className="table-active-state">
             {[
-              globalQuery ? '全文搜索' : null,
+              effectiveKeyword ? '全文搜索' : null,
               filterCount ? `${filterCount} 个列筛选` : null,
               sortColumn !== null
                 ? `按「${columns[sortColumn]?.title}」${sortDirection === 'asc' ? '升序' : '降序'}`
@@ -814,20 +1002,44 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
           >
             清除排序与筛选
           </button>
+          {onExport && (
+            <button
+              className="btn small secondary export-btn"
+              disabled={!activeRunId}
+              onClick={() => {
+                const exportableColumns = visibleColumns
+                  .filter(({ col }) => !col.isAction && !col.isSelect)
+                  .map(({ col }) => col as DataTableColumn<unknown>)
+                onExport({
+                  visibleColumns: exportableColumns,
+                  keyword: effectiveKeyword,
+                  industry: externalIndustry ?? '',
+                  concept: externalConcept ?? '',
+                  metricFilters: Object.values(filters),
+                  sortBy: sortColumn !== null ? columns[sortColumn]?.key ?? null : null,
+                  sortDesc: sortDirection === 'desc',
+                })
+              }}
+            >
+              导出 Excel
+            </button>
+          )}
         </div>
       </div>
 
-      {/* 全文搜索 */}
+      {/* 全文搜索（CHANGE-20260715-005: 移出横向滚动容器） */}
       {searchable && (
-        <div style={{ padding: '8px 10px', borderBottom: '1px solid var(--border-soft)' }}>
+        <div className="table-search-bar">
           <div className="field search" style={{ display: 'inline-block' }}>
             <input
               className="input search"
               style={{ width: 260 }}
               placeholder="全文搜索"
-              value={globalQuery}
+              value={effectiveKeyword}
               onChange={(e) => {
-                setGlobalQuery(e.target.value.trim().toLocaleLowerCase('zh-CN'))
+                const v = e.target.value.trim().toLocaleLowerCase('zh-CN')
+                setGlobalQuery(v)
+                if (onKeywordChange) onKeywordChange(v)
                 setPage(1)
               }}
             />
@@ -835,186 +1047,196 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
         </div>
       )}
 
-      {/* 表格 */}
-      <table
-        className={clsx('data-table interactive-table', tableClassName)}
-        style={{ minWidth: `${visibleColumnsWidthSum + (selectable ? 40 : 0)}px` }}
-      >
-        <colgroup>
-          {selectable && <col />}
-          {visibleColumns.map(({ col }) => (
-            <col
-              key={col.key}
-              style={col.width !== undefined ? { width: `${col.width}px` } : undefined}
-            />
-          ))}
-        </colgroup>
-        <thead>
-          <tr>
-            {selectable && (
-              <th className="table-select-column">
-                <label className="table-checkbox-wrapper">
-                  <input
-                    type="checkbox"
-                    className="table-checkbox"
-                    checked={allChecked}
-                    ref={(el) => {
-                      if (el) el.indeterminate = !allChecked && someChecked
-                    }}
-                    onChange={handleSelectAll}
-                  />
-                </label>
-              </th>
-            )}
-            {visibleColumns.map(({ col, originalIndex: i }) => {
-              // V1.5.1：操作列和选择列不参与排序与筛选
-              if (col.isAction) {
+      {/* 表格滚动容器（CHANGE-20260715-005: 只有 table-scroll 设置 overflow-x: auto） */}
+      <div className="table-scroll">
+        <table
+          className={clsx('data-table interactive-table', tableClassName)}
+          style={{ minWidth: `${visibleColumnsWidthSum + (selectable ? 40 : 0)}px` }}
+        >
+          <colgroup>
+            {selectable && <col />}
+            {visibleColumns.map(({ col }) => (
+              <col
+                key={col.key}
+                style={col.width !== undefined ? { width: `${col.width}px` } : undefined}
+              />
+            ))}
+          </colgroup>
+          <thead>
+            <tr>
+              {selectable && (
+                <th className="table-select-column">
+                  <label className="table-checkbox-wrapper">
+                    <input
+                      type="checkbox"
+                      className="table-checkbox"
+                      checked={allChecked}
+                      ref={(el) => {
+                        if (el) el.indeterminate = !allChecked && someChecked
+                      }}
+                      onChange={handleSelectAll}
+                    />
+                  </label>
+                </th>
+              )}
+              {visibleColumns.map(({ col, originalIndex: i }) => {
+                if (col.isAction) {
+                  return (
+                    <th key={col.key} className="table-action-column">
+                      {col.title}
+                    </th>
+                  )
+                }
+
+                // CHANGE-20260715-005: 只允许 col.key==='stock' 为 sticky 列
+                const isSticky = isStickyColumn(col)
+
                 return (
-                  <th key={col.key} className="table-action-column">
-                    {col.title}
-                  </th>
-                )
-              }
-
-              // 第一个非操作列设为 sticky-col
-              const isSticky = !stickyAssigned
-              if (isSticky) stickyAssigned = true
-
-              return (
-                <th
-                  key={col.key}
-                  className={clsx(
-                    sortColumn === i && 'sorted',
-                    isSticky && 'sticky-col',
-                  )}
-                >
-                  <div className="th-shell">
-                    {col.sortable && (
-                      <button
-                        className="th-sort"
-                        title={`按${col.title}排序`}
-                        onClick={() => toggleSort(i)}
-                      >
+                  <th
+                    key={col.key}
+                    className={clsx(
+                      sortColumn === i && 'sorted',
+                      isSticky && 'sticky-col',
+                    )}
+                  >
+                    <div className="th-shell">
+                      {col.sortable && (
+                        <button
+                          className="th-sort"
+                          title={`按${col.title}排序`}
+                          onClick={() => toggleSort(i)}
+                        >
+                          <span className="th-label" title={col.shortTitle ? col.title : undefined}>
+                            {col.shortTitle ?? col.title}
+                          </span>
+                          <span className="sort-icon">
+                            {sortColumn === i
+                              ? sortDirection === 'asc'
+                                ? '↑'
+                                : sortDirection === 'desc'
+                                  ? '↓'
+                                  : '↕'
+                              : '↕'}
+                          </span>
+                        </button>
+                      )}
+                      {!col.sortable && (
                         <span className="th-label" title={col.shortTitle ? col.title : undefined}>
                           {col.shortTitle ?? col.title}
                         </span>
-                        <span className="sort-icon">
-                          {sortColumn === i
-                            ? sortDirection === 'asc'
-                              ? '↑'
-                              : sortDirection === 'desc'
-                                ? '↓'
-                                : '↕'
-                            : '↕'}
+                      )}
+                      {col.helpText && (
+                        <span className="th-help" title={col.helpText}>
+                          ?
+                          <span className="th-help-tooltip">{col.helpText}</span>
                         </span>
-                      </button>
-                    )}
-                    {!col.sortable && (
-                      <span className="th-label" title={col.shortTitle ? col.title : undefined}>
-                        {col.shortTitle ?? col.title}
-                      </span>
-                    )}
-                    {col.helpText && (
-                      <span className="th-help" title={col.helpText}>
-                        ?
-                        <span className="th-help-tooltip">{col.helpText}</span>
-                      </span>
-                    )}
-                    {col.filterable && (
-                      <button
-                        className={clsx('th-filter', filters[i] && 'active')}
-                        aria-label={`筛选${col.title}`}
-                        title={`筛选${col.title}`}
-                        onClick={(e) =>
-                          setFilterPopover({ columnIndex: i, anchor: e.currentTarget })
-                        }
-                      >
-                        ⌁
-                      </button>
-                    )}
+                      )}
+                      {col.filterable && (
+                        <button
+                          className={clsx(
+                            'th-filter',
+                            filters[i] && 'active',
+                          )}
+                          aria-label={`筛选${col.title}`}
+                          title={`筛选${col.title}`}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setFilterPopover({
+                              columnIndex: i,
+                              anchor: e.currentTarget,
+                            })
+                          }}
+                        >
+                          ⌁
+                        </button>
+                      )}
+                    </div>
+                  </th>
+                )
+              })}
+            </tr>
+          </thead>
+          <tbody>
+            {loading && (
+              <tr className="table-empty-row">
+                <td colSpan={visibleColumns.length + (selectable ? 1 : 0)}>
+                  <div className="table-empty-state">
+                    <b>加载中…</b>
+                    <span>正在获取数据</span>
                   </div>
-                </th>
-              )
-            })}
-          </tr>
-        </thead>
-        <tbody>
-          {loading && (
-            <tr className="table-empty-row">
-              <td colSpan={visibleColumns.length + (selectable ? 1 : 0)}>
-                <div className="table-empty-state">
-                  <b>加载中…</b>
-                  <span>正在获取数据</span>
-                </div>
-              </td>
-            </tr>
-          )}
-          {!loading && error && (
-            <tr className="table-empty-row">
-              <td colSpan={visibleColumns.length + (selectable ? 1 : 0)}>
-                <div className="table-empty-state">
-                  <b>加载失败</b>
-                  <span>{error}</span>
-                </div>
-              </td>
-            </tr>
-          )}
-          {!loading && !error && pageRows.length === 0 && (
-            <tr className="table-empty-row">
-              <td colSpan={visibleColumns.length + (selectable ? 1 : 0)}>
-                <div className="table-empty-state">
-                  <b>{emptyText}</b>
-                  <span>可清除列筛选或调整条件后重试</span>
-                </div>
-              </td>
-            </tr>
-          )}
-          {!loading &&
-            !error &&
-            pageRows.map((row) => {
-              const key = rowKey(row)
-              const isSelected = selectedKeys?.has(key)
-              stickyAssigned = false // 重置用于行内 sticky-col
-              return (
-                <tr key={key}>
-                  {selectable && (
-                    <td className="table-select-column">
-                      <label className="table-checkbox-wrapper">
-                        <input
-                          type="checkbox"
-                          className="table-checkbox"
-                          checked={isSelected || false}
-                          onChange={() => handleSelectRow(row)}
-                        />
-                      </label>
-                    </td>
-                  )}
-                  {visibleColumns.map(({ col }) => {
-                    const isSticky = !stickyAssigned && !col.isAction
-                    if (isSticky) stickyAssigned = true
-                    return (
-                      <td
-                        key={col.key}
-                        className={clsx(
-                          col.dataType === 'number' ||
-                            col.dataType === 'percent' ||
-                            col.dataType === 'datetime'
-                            ? 'num'
-                            : '',
-                          isSticky && 'sticky-col',
-                        )}
-                      >
-                        {col.render ? col.render(row) : String(row[col.key] ?? '')}
+                </td>
+              </tr>
+            )}
+            {!loading && error && (
+              <tr className="table-empty-row">
+                <td colSpan={visibleColumns.length + (selectable ? 1 : 0)}>
+                  <div className="table-empty-state">
+                    <b>加载失败</b>
+                    <span>{error}</span>
+                  </div>
+                </td>
+              </tr>
+            )}
+            {!loading && !error && pageRows.length === 0 && (
+              <tr className="table-empty-row">
+                <td colSpan={visibleColumns.length + (selectable ? 1 : 0)}>
+                  <div className="table-empty-state">
+                    <b>{emptyText}</b>
+                    <span>可清除列筛选或调整条件后重试</span>
+                  </div>
+                </td>
+              </tr>
+            )}
+            {!loading &&
+              !error &&
+              pageRows.map((row) => {
+                const key = rowKey(row)
+                const isSelected = selectedKeys?.has(key)
+                return (
+                  <tr
+                    key={key}
+                    onClick={onRowClick ? () => onRowClick(row) : undefined}
+                    className={clsx(activeRowKey === key && 'row-active')}
+                  >
+                    {selectable && (
+                      <td className="table-select-column" onClick={(e) => e.stopPropagation()}>
+                        <label className="table-checkbox-wrapper">
+                          <input
+                            type="checkbox"
+                            className="table-checkbox"
+                            checked={isSelected || false}
+                            onChange={() => handleSelectRow(row)}
+                          />
+                        </label>
                       </td>
-                    )
-                  })}
-                </tr>
-              )
-            })}
-        </tbody>
-      </table>
+                    )}
+                    {visibleColumns.map(({ col }) => {
+                      // CHANGE-20260715-005: 只允许 col.key==='stock' 为 sticky 列（header 和 body 用同一判断函数）
+                      const isSticky = isStickyColumn(col)
+                      return (
+                        <td
+                          key={col.key}
+                          className={clsx(
+                            col.dataType === 'number' ||
+                              col.dataType === 'percent' ||
+                              col.dataType === 'datetime'
+                              ? 'num'
+                              : '',
+                            isSticky && 'sticky-col',
+                          )}
+                        >
+                          {col.render ? col.render(row) : String(row[col.key] ?? '')}
+                        </td>
+                      )
+                    })}
+                  </tr>
+                )
+              })}
+          </tbody>
+        </table>
+      </div>
 
-      {/* 分页 */}
+      {/* 分页（CHANGE-20260715-005: 移出横向滚动容器，右边界等于 table-scroll 右边界） */}
       <div className="table-pager">
         <span className="table-page-info">
           第 {currentPage} / {totalPages} 页
@@ -1075,8 +1297,36 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
             else next.add(key)
             applyColumnVisibility(next)
           }}
+          onMoveUp={(key) => {
+            // [StrategyDataTable] - 描述: 上移列 — 在当前序列中交换 key 与前一项
+            const manageableKeys = columns
+              .filter((c) => !c.isAction && !c.isSelect)
+              .map((c) => c.key)
+            const currentOrder = columnOrder ?? manageableKeys
+            const idx = currentOrder.indexOf(key)
+            if (idx <= 0) return
+            const next = [...currentOrder]
+            ;[next[idx - 1], next[idx]] = [next[idx], next[idx - 1]]
+            setColumnOrder(next)
+            saveColumnOrder(next)
+          }}
+          onMoveDown={(key) => {
+            // [StrategyDataTable] - 描述: 下移列 — 在当前序列中交换 key 与后一项
+            const manageableKeys = columns
+              .filter((c) => !c.isAction && !c.isSelect)
+              .map((c) => c.key)
+            const currentOrder = columnOrder ?? manageableKeys
+            const idx = currentOrder.indexOf(key)
+            if (idx < 0 || idx >= currentOrder.length - 1) return
+            const next = [...currentOrder]
+            ;[next[idx + 1], next[idx]] = [next[idx], next[idx + 1]]
+            setColumnOrder(next)
+            saveColumnOrder(next)
+          }}
           onReset={() => {
             applyColumnVisibility(new Set())
+            setColumnOrder(null)
+            saveColumnOrder(null)
             setColumnManagerAnchor(null)
           }}
           onClose={() => setColumnManagerAnchor(null)}

@@ -2,7 +2,8 @@
 # 交易平台 - 生产环境统一部署脚本
 # 用法: ./scripts/deploy.sh
 #       CORE_ONLY=1 ./scripts/deploy.sh  (仅启动核心服务)
-# 说明: 仅构建 backend/frontend/worker-capture，其它 Python Worker 共享 backend 镜像，
+# 说明: 默认构建 backend/frontend/worker-capture；CORE_ONLY=1 时仅构建 backend/frontend。
+#       其它 Python Worker 共享 backend 镜像。
 #       禁止日常使用 docker image prune / docker builder prune 清理缓存。
 
 set -euo pipefail
@@ -40,7 +41,13 @@ docker images
 find frontend -name "*.tsbuildinfo" -not -path "*/node_modules/*" -delete 2>/dev/null || true
 
 # 构建必要的服务镜像（backend 镜像供所有 Python Worker 复用）
-docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" build backend frontend worker-capture
+# CORE_ONLY=1 时只构建 backend/frontend，不构建 worker-capture
+if [ "${CORE_ONLY:-0}" = "1" ]; then
+  echo "[deploy] CORE_ONLY=1：仅构建 backend/frontend"
+  docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" build backend frontend
+else
+  docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" build backend frontend worker-capture
+fi
 
 # [deploy] - 描述: 先启动基础设施服务并等待 healthy
 echo "=== 启动 PostgreSQL 和 Redis ==="
@@ -83,12 +90,13 @@ docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" run --rm \
   backend alembic upgrade head
 
 # [deploy] - 描述: 启动应用服务（CORE_ONLY 模式仅启动核心服务，含策略与盘后编排链路）
-# CORE_ONLY=1 启动：postgres/redis/backend/frontend/worker-bars-scheduler/worker-strategy-batch/worker-strategy-scheduler/worker-calendar/worker-after-close
-# monitor/outbox/delivery/capture 不加入 CORE_ONLY（按需单独启动）
+# CORE_ONLY=1：postgres/redis 已在上方 up -d 启动，此处只 force-recreate 应用容器
+# force-recreate 范围：backend/frontend/worker-bars-scheduler/worker-strategy-batch/worker-strategy-scheduler/worker-calendar/worker-after-close
+# 不重建：capture/monitor/outbox/delivery（按需单独启动）
 if [ "${CORE_ONLY:-0}" = "1" ]; then
-  echo "=== 启动核心服务（含策略与盘后编排） ==="
+  echo "=== 启动核心应用服务（force-recreate，不含 postgres/redis） ==="
   docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --no-build --force-recreate \
-    postgres redis backend frontend \
+    backend frontend \
     worker-bars-scheduler worker-strategy-batch worker-strategy-scheduler worker-calendar worker-after-close
 else
   echo "=== 启动全部服务 ==="

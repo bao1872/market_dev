@@ -1,53 +1,72 @@
-// 设计变量：从 V1.5.1 原型 assets/styles.css 的 :root 迁移
-// 原型为深色交易终端风格，正式开发须严格沿用此变量体系，禁止引入新色板
-// V1.5.1 相比 V1.3 新增：TradingView 风格统一详情页、Manifest 驱动图层、生产级表格行为
+// 设计变量：盘迹品牌视觉资产包 V1.0（莹感绿体系）
+// 真源：ref/盘迹品牌视觉资产包_v1.0/README.md + 02_色彩系统
+// 原则：莹感绿只承担品牌焦点和关键交互；A股继续红涨绿跌；大面积背景使用深石墨黑
+// 禁止引入新色板；禁止在组件中硬编码颜色，必须使用本文件 token 或 var()
 
-// ===== 颜色 - 背景与面板 =====
-$color-bg: #0f1117;
-$color-panel: #171a22;
-$color-panel-2: #1e222d;
-$color-panel-3: #252a36;
+// ===== 颜色 - 背景与面板（深石墨黑体系）=====
+$color-bg: #0A0F14;          // 深石墨黑（页面主背景）
+$color-panel: #111A23;       // 暗蓝灰（卡片/侧栏背景）
+$color-panel-2: #161F29;     // 卡片背景（次级面板）
+$color-panel-3: #1a2433;     // 三级面板（hover/激活态底色）
 
 // ===== 颜色 - 边框 =====
-$color-border: #2b3040;
-$color-border-soft: #232835;
+$color-border: #263440;      // 边框灰（主边框）
+$color-border-soft: #1d2832; // 软边框（分隔线）
 
 // ===== 颜色 - 文本 =====
-$color-text: #d1d4dc;
-$color-muted: #8b93a7;
+$color-text: #F2F6F8;        // 雾白（主文本）
+$color-muted: #98A1B3;       // 灰蓝（辅助文本）
+$color-text-dim: #657281;    // 次级辅助文本
 
-// ===== 主题色 =====
-$color-blue: #2962ff;
-$color-blue-2: #4b7cff;
-$color-green: #26a69a;
-$color-red: #ef5350;
-$color-orange: #ff9800;
-$color-yellow: #f4c430;
-$color-purple: #8b5cf6;
+// ===== 主题色 - 品牌莹感绿体系（焦点/关键交互）=====
+$color-brand: #00F6C2;       // 莹感绿（品牌主色：焦点、选中、主按钮）
+$color-brand-hover: #39F5CF; // 品牌高亮（hover/focus 增强）
+$color-brand-deep: #00B28A;  // 品牌深绿（按下态/渐变深色）
+
+// ===== 功能色 - 信息状态（非焦点交互）=====
+$color-info: #3882F6;        // 提示蓝（信息提示、链接）
+$color-warning: #F59E0B;     // 预警橙（警告）
+$color-purple: #8B5CF6;      // 辅助紫（特殊标记）
+
+// ===== A股语义色 - 红涨绿跌（不使用品牌绿表达涨跌）=====
+$color-up: #FF4D4F;          // 上涨红
+$color-down: #22C55E;        // 下跌绿
 
 // ===== 阴影 =====
-$shadow-card: 0 14px 40px rgba(0, 0, 0, 0.28);
+$shadow-card: 0 8px 24px rgba(0, 0, 0, 0.32);
 
 // ===== 布局尺寸 =====
 $sidebar-width: 236px;
 $topbar-height: 58px;
 $radius-base: 10px;
+$radius-card: 12px;
 
 // ===== 字体 =====
-$font-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
-$font-sans: Inter, 'PingFang SC', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
+$font-mono: 'SFMono-Regular', 'JetBrains Mono', Consolas, 'Liberation Mono', monospace;
+$font-sans: 'MiSans', 'HarmonyOS Sans SC', 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
 
-// ===== 响应式断点（V1.5.1 完整集合）=====
-$bp-wide: 1100px;       // 通用宽屏断点（侧栏收窄、KPI 2 列）
-$bp-narrow: 760px;      // 通用窄屏断点（侧栏隐藏、单列布局）
-$bp-xlarge: 1250px;     // V1.4/V1.5 新增：TradingView 工作区/编辑器布局降级
-$bp-chart: 1280px;      // V1.4 新增：图表详情布局降级
+// ===== 响应式断点 =====
+$bp-wide: 1100px;
+$bp-narrow: 760px;
+$bp-xlarge: 1250px;
+$bp-chart: 1280px;
 
-// ===== TradingView 工作区尺寸（V1.5.1 新增）=====
+// ===== TradingView 工作区尺寸 =====
 $tv-chart-height: 760px;
 $tv-canvas-height: 660px;
 $tv-workspace-min-height: 760px;
 $tv-layer-panel-max-height: 760px;
+
+
+// ===== 向后兼容别名（V1.0 视觉升级过渡期，旧代码继续可用，新代码须使用新 token）=====
+// 旧 $color-blue 体系映射到品牌莹感绿体系
+$color-blue: $color-brand;        // 旧主色 → 品牌主色
+$color-blue-2: $color-brand-hover;// 旧主色亮 → 品牌高亮
+$color-green: $color-down;        // 旧跌色 → V1.0 跌色
+$color-red: $color-up;            // 旧涨色 → V1.0 涨色
+$color-orange: $color-warning;    // 旧橙 → 预警橙
+$color-yellow: $color-warning;    // 旧黄 → 预警橙（合并）
+// $color-purple 已在上方定义，保持不变
 
 // 同时导出为 CSS 自定义属性，便于在 CSS Modules 中通过 var() 使用，
 // 也保证第三方组件（如 lightweight-charts）可读取同一套主题变量
@@ -60,16 +79,20 @@ $tv-layer-panel-max-height: 760px;
   --border-soft: #{$color-border-soft};
   --text: #{$color-text};
   --muted: #{$color-muted};
-  --blue: #{$color-blue};
-  --blue-2: #{$color-blue-2};
-  --green: #{$color-green};
-  --red: #{$color-red};
-  --orange: #{$color-orange};
-  --yellow: #{$color-yellow};
+  --text-dim: #{$color-text-dim};
+  --brand: #{$color-brand};
+  --brand-hover: #{$color-brand-hover};
+  --brand-deep: #{$color-brand-deep};
+  --info: #{$color-info};
+  --warning: #{$color-warning};
   --purple: #{$color-purple};
+  --up: #{$color-up};
+  --down: #{$color-down};
   --shadow: #{$shadow-card};
   --sidebar: #{$sidebar-width};
   --topbar: #{$topbar-height};
   --radius: #{$radius-base};
+  --radius-card: #{$radius-card};
   --mono: #{$font-mono};
+  --sans: #{$font-sans};
 }

@@ -1,3 +1,5 @@
+@use '../../styles/variables.scss' as v;
+
 // [MarketInstrumentPane] - 描述: 行情工作区左栏局部样式（CSS Module）
 
 .pane {
@@ -34,13 +36,13 @@
   outline: none;
 
   &:focus {
-    border-color: #2962ff;
+    border-color: v.$color-brand;
   }
 }
 
 .hint {
   margin-top: 4px;
-  font-size: 11px;
+  font-size: 12px;
   color: #8ea0b7;
 }
 
@@ -76,13 +78,13 @@
   transition: 0.12s;
 
   &:hover {
-    background: #1c202b;
+    background: v.$color-panel-3;
   }
 }
 
 .rowActive {
   background: rgba(41, 98, 255, 0.17);
-  box-shadow: inset 3px 0 0 #2962ff;
+  box-shadow: inset 3px 0 0 v.$color-brand;
 }
 
 .rowMain {
@@ -101,7 +103,7 @@
 }
 
 .rowSymbol {
-  font-size: 11px;
+  font-size: 12px;
   color: #8ea0b7;
   margin-top: 1px;
 }
@@ -121,7 +123,7 @@
 }
 
 .rowMarket {
-  font-size: 10px;
+  font-size: 12px;
   color: #687083;
   flex-shrink: 0;
 }

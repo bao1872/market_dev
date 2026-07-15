@@ -11,24 +11,37 @@
 // 详情页专属能力（自选操作、上下切换、memo、飞书）拆到 useStockDetailActions / useStockDetailFeishu。
 // 本页面降为路由适配器：解析 URL → 调用共享 hooks → 渲染 header + StockResearchWorkspace + 结构面板 + modals。
 
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { useParams, useSearchParams, useNavigate, useLocation } from 'react-router-dom'
 import clsx from 'clsx'
-import { StockStructuralStatePanel } from '@/components/StockStructuralStatePanel'
+import { EventStatePanel } from '@/features/research-context/EventStatePanel'
 import { StockResearchWorkspace } from '@/features/stock-research/StockResearchWorkspace'
+import { StockQuoteStrip } from '@/features/stock-research/StockQuoteStrip'
 import { useStockResearchData } from '@/features/stock-research/useStockResearchData'
 import { useStockDetailActions } from '@/features/stock-research/useStockDetailActions'
 import { useStockDetailFeishu } from '@/features/stock-research/useStockDetailFeishu'
 import {
   type DisplayTimeframe,
   normalizeDisplayTimeframe,
-  normalizeResearchSource,
 } from '@/features/stock-research/stockResearchTypes'
+// [CHANGE-011 SMC] - 加载初始 layerVisibility.smc 状态，驱动 indicators 按需重拉
+import { loadChartLayerVisibility } from '@/features/stock-research/indicatorPreferences'
 import { formatShanghaiTimeShort } from '@/utils/datetime'
-import { MARKET_LABELS, formatAmount } from '@/utils/market'
+import { MARKET_LABELS } from '@/utils/market'
 import { resolveBackPath } from './detailNavigation'
-import { STRATEGY_KEYS } from '@/constants/strategyKeys'
 import { useToast } from '@/store/toast'
+import { changePctColorClass, fmtChange } from '@/features/trend-selection'
+import { resolveDetailSourceContext } from '@/features/stock-research/detailSourceContext'
+
+// CHANGE-20260714-001: 左栏来源列表滚动位置 sessionStorage key 前缀
+// key 由 returnTo + scope 生成稳定 hash，避免不同来源上下文串扰
+const SOURCE_LIST_SCROLL_KEY_PREFIX = 'panji:detail-source-scroll:v1'
+
+function makeSourceListScrollKey(returnTo: string | null, scope: string | null): string {
+  // 简单 hash：returnTo + scope 字符串拼接（无需密码学强度，仅做 namespace 隔离）
+  const raw = `${returnTo ?? ''}|${scope ?? ''}`
+  return `${SOURCE_LIST_SCROLL_KEY_PREFIX}:${raw}`
+}
 
 export default function StockDetailPage() {
   const { symbol } = useParams<{ symbol: string }>()
@@ -37,9 +50,14 @@ export default function StockDetailPage() {
   const location = useLocation()
   const showToast = useToast((s) => s.show)
 
-  // 解析 URL 参数
-  const source = normalizeResearchSource(searchParams.get('source'))
-  const strategy = searchParams.get('strategy') || STRATEGY_KEYS.WATCHLIST_MONITOR
+  // CHANGE-20260715-007: 统一来源上下文解析——resolveDetailSourceContext 为唯一真源
+  // 优先级：有效 /market returnTo.scope → 合法 source 参数 → 默认 watchlist
+  const returnToParam = searchParams.get('returnTo')
+  const { source, strategy, marketContext, sourceContextInvalid } = resolveDetailSourceContext(
+    returnToParam,
+    searchParams.get('source'),
+    searchParams.get('strategy'),
+  )
   const isCaptureMode = searchParams.get('capture') === 'feishu'
   // [结构状态隐藏开关] - hideStructuralState=1 / capture=1 / capture=feishu 强制隐藏面板
   const hideStructuralStateParam =
@@ -47,20 +65,23 @@ export default function StockDetailPage() {
     searchParams.get('capture') === '1' ||
     isCaptureMode
 
-  // [结构状态开关] - 默认隐藏，用户点击显示，localStorage 持久化；强制隐藏时忽略 localStorage
-  const [showStructuralState, setShowStructuralState] = useState<boolean>(() => {
-    if (hideStructuralStateParam) return false
-    return localStorage.getItem('showStructuralState') === 'true'
+  // [事件面板开关] - 首次默认收起，localStorage 持久化用户选择；capture 强制隐藏
+  // P0-4: showStructuralState → eventPanelCollapsed（语义：true=收起）
+  // localStorage key: panji:event-panel:v1
+  const [eventPanelCollapsed, setEventPanelCollapsed] = useState<boolean>(() => {
+    if (hideStructuralStateParam) return true
+    const saved = localStorage.getItem('panji:event-panel:v1')
+    return saved === null ? true : saved === 'collapsed'
   })
-  const toggleStructuralState = useCallback(() => {
+  const toggleEventPanel = useCallback(() => {
     if (hideStructuralStateParam) return
-    setShowStructuralState(prev => {
+    setEventPanelCollapsed(prev => {
       const next = !prev
-      localStorage.setItem('showStructuralState', String(next))
+      localStorage.setItem('panji:event-panel:v1', next ? 'collapsed' : 'expanded')
       return next
     })
   }, [hideStructuralStateParam])
-  const shouldShowPanel = showStructuralState && !hideStructuralStateParam
+  const shouldShowPanel = !eventPanelCollapsed && !hideStructuralStateParam
 
   // timeframe：从 URL 解析（单一真源），工具栏切换写回 URL
   const timeframe: DisplayTimeframe = normalizeDisplayTimeframe(searchParams.get('timeframe'))
@@ -88,23 +109,111 @@ export default function StockDetailPage() {
     return () => document.removeEventListener('fullscreenchange', handler)
   }, [])
 
+  // [CHANGE-011 SMC] - smc 开关状态：初始值从 localStorage 读取（与 StockResearchWorkspace 同源），
+  //   用户在 IndicatorToolbar 切换 smc 时由 onSmcToggle 回调更新；驱动 useStockResearchData 重拉 indicators。
+  //   默认关闭；后端 include_smc=False 时跳过 SMC 计算，不消耗 CPU。
+  const [smcEnabled, setSmcEnabled] = useState<boolean>(() =>
+    loadChartLayerVisibility(source, strategy).smc,
+  )
+  // source/strategy 变化时重新读取 smc 偏好（与 StockResearchWorkspace useEffect 同步）
+  useEffect(() => {
+    setSmcEnabled(loadChartLayerVisibility(source, strategy).smc)
+  }, [source, strategy])
+  const handleSmcToggle = useCallback((enabled: boolean) => {
+    setSmcEnabled(enabled)
+  }, [])
+
   // 共享研究数据 hook（/market 和 /stock 共用，只含核心查询）
-  const researchData = useStockResearchData({ symbol: symbol ?? null, timeframe })
+  const researchData = useStockResearchData({ symbol: symbol ?? null, timeframe, includeSmc: smcEnabled })
   const instrumentId = researchData.instrumentId
 
-  // 详情页专属 actions（自选/上下切换/memo）
+  // 详情页专属 actions（自选/上下切换/memo + returnTo 上下文恢复左栏列表）
+  // CHANGE-20260715-007: 传入 resolveDetailSourceContext 的解析结果，不再各自推导
   const detailActions = useStockDetailActions({
     instrumentId,
     symbol,
     source,
     strategy,
+    marketContext,
+    sourceContextInvalid,
+    returnTo: returnToParam,
+    timeframe,
   })
+
+  // CHANGE-20260714-001: 左栏来源列表滚动位置保存/恢复
+  // 切换股票前保存 scrollTop 到 sessionStorage；新股票渲染后恢复
+  // 只有活动行完全离开可视区时才 scrollIntoView({block:'nearest'})，避免每次切换都滚回顶部
+  const sourceListRef = useRef<HTMLDivElement | null>(null)
+  const sourceListScrollKey = useMemo(
+    () => makeSourceListScrollKey(returnToParam, detailActions.sourceListKind),
+    [returnToParam, detailActions.sourceListKind],
+  )
+  const lastSavedScrollRef = useRef<number>(0)
+
+  // 切换股票前保存当前 scrollTop（在 navigate 之前由点击/上一只/下一只触发）
+  // 由于 navigate 后组件会重新渲染，这里在 symbol 变化的 effect 中保存"上一次"的 scrollTop
+  useEffect(() => {
+    const el = sourceListRef.current
+    if (!el) return
+    // 保存当前 scrollTop（用于下次恢复）
+    const saveScroll = () => {
+      const cur = el.scrollTop
+      lastSavedScrollRef.current = cur
+      try {
+        sessionStorage.setItem(sourceListScrollKey, String(cur))
+      } catch {
+        // sessionStorage 不可用时静默降级（隐私模式/配额满）
+      }
+    }
+    // 在卸载或 symbol 变化前保存
+    return () => saveScroll()
+  }, [sourceListScrollKey, symbol])
+
+  // 新股票渲染后恢复 scrollTop（仅在活动行不可见时 scrollIntoView）
+  useEffect(() => {
+    const el = sourceListRef.current
+    if (!el) return
+    // 先尝试恢复保存的 scrollTop
+    let savedScroll: number | null = null
+    try {
+      const raw = sessionStorage.getItem(sourceListScrollKey)
+      if (raw !== null) {
+        const n = Number(raw)
+        if (Number.isFinite(n)) savedScroll = n
+      }
+    } catch {
+      // sessionStorage 不可用
+    }
+    if (savedScroll !== null) {
+      el.scrollTop = savedScroll
+    }
+    // 检查活动行是否在可视区，不可见则最小幅度滚动到可见
+    if (symbol) {
+      const activeEl = el.querySelector<HTMLDivElement>('.tv-source-list-item.active')
+      if (activeEl) {
+        const containerRect = el.getBoundingClientRect()
+        const itemRect = activeEl.getBoundingClientRect()
+        const isVisible =
+          itemRect.top >= containerRect.top &&
+          itemRect.bottom <= containerRect.bottom
+        if (!isVisible) {
+          activeEl.scrollIntoView({ block: 'nearest' })
+        }
+      }
+    }
+  }, [sourceListScrollKey, symbol, detailActions.sourceStocks])
 
   // 详情页专属飞书投递
   const feishu = useStockDetailFeishu({ instrumentId })
 
-  // 来源徽章与返回链接
-  const sourceBadge = source === 'selection' ? '选股结果' : '自选监控'
+  // 来源徽章：根据 sourceListKind 显示"行情来源/自选来源/选股结果"
+  // P0-4: 不能从 market 进入却显示"自选监控"
+  // CHANGE-20260713-009: sourceListKind=market → "行情来源"（来自 /market?scope=market）
+  // sourceListKind=watchlist + source=selection → "选股结果"（来自 /screener）
+  // sourceListKind=watchlist + source=watchlist → "自选来源"（来自 /market?scope=watchlist 或直接访问）
+  const sourceBadge = detailActions.sourceListKind === 'market'
+    ? '行情来源'
+    : (source === 'selection' ? '选股结果' : '自选来源')
 
   /** 统一返回按钮：优先使用 URL returnTo 参数，其次导航 state，否则按 source fallback */
   const handleBack = useCallback(() => {
@@ -215,25 +324,25 @@ export default function StockDetailPage() {
     barsStatus ? barsStatus.label : null,
   ].filter(Boolean)
 
-  // 结构状态开关 toolbar（渲染在图表上方）
-  const structuralToolbar = !hideStructuralStateParam && instrumentId ? (
+  // 右栏事件状态面板（PRD V1.1: 使用 EventStatePanel，与 market 共用 query key）
+  const eventStatePanel = shouldShowPanel && symbol ? (
+    <aside className="tv-side-column">
+      <EventStatePanel symbol={symbol} />
+    </aside>
+  ) : null
+
+  // 事件面板开关 toolbar（渲染在图表上方）
+  const structuralToolbar = !hideStructuralStateParam && symbol ? (
     <div className="structural-state-toolbar">
       <button
         type="button"
         className="structural-state-toggle-btn"
-        onClick={toggleStructuralState}
-        aria-label="切换结构状态面板"
+        onClick={toggleEventPanel}
+        aria-label="切换事件状态面板"
       >
-        {showStructuralState ? '隐藏结构状态' : '显示结构状态'}
+        {eventPanelCollapsed ? '显示事件状态' : '隐藏事件状态'}
       </button>
     </div>
-  ) : null
-
-  // 右栏结构状态面板
-  const structuralPanel = shouldShowPanel && instrumentId ? (
-    <aside className="tv-side-column">
-      <StockStructuralStatePanel instrumentId={instrumentId} />
-    </aside>
   ) : null
 
   return (
@@ -251,35 +360,8 @@ export default function StockDetailPage() {
             <div className="tv-symbol-meta">{metaParts.join(' · ')}</div>
           </div>
         </div>
-        {/* 报价条：现价/涨跌/开盘/最高/最低/成交额 */}
-        <div className="tv-quote-strip">
-          <div>
-            <span>现价</span>
-            <b className={priceSummary.isUp ? 'market-up' : 'market-down'}>{priceSummary.currentPrice !== null ? priceSummary.currentPrice.toFixed(2) : '--'}</b>
-          </div>
-          <div>
-            <span>涨跌</span>
-            <b className={priceSummary.isUp ? 'market-up' : 'market-down'}>
-              {priceSummary.changePercent !== null ? `${priceSummary.isUp ? '+' : ''}${priceSummary.changePercent.toFixed(2)}%` : '--'}
-            </b>
-          </div>
-          <div>
-            <span>开盘</span>
-            <b>{priceSummary.openPrice !== null ? priceSummary.openPrice.toFixed(2) : '--'}</b>
-          </div>
-          <div>
-            <span>最高</span>
-            <b>{priceSummary.highPrice !== null ? priceSummary.highPrice.toFixed(2) : '--'}</b>
-          </div>
-          <div>
-            <span>最低</span>
-            <b>{priceSummary.lowPrice !== null ? priceSummary.lowPrice.toFixed(2) : '--'}</b>
-          </div>
-          <div>
-            <span>成交额</span>
-            <b>{priceSummary.amountValue !== null ? formatAmount(priceSummary.amountValue) : '--'}</b>
-          </div>
-        </div>
+        {/* 报价条：现价/涨跌/开盘/最高/最低/成交额/总市值/流通市值（CHANGE-20260713-010） */}
+        <StockQuoteStrip priceSummary={priceSummary} />
         {/* 操作：加入/移出自选、切换、全屏（截图模式隐藏全部按钮） */}
         {!isCaptureMode && (
           <div className="actions">
@@ -435,19 +517,102 @@ export default function StockDetailPage() {
         </div>
       )}
 
-      {/* ===== 工作区：复用 StockResearchWorkspace（图表 + 状态条） + 结构状态因子面板 ===== */}
-      <StockResearchWorkspace
-        data={researchData}
-        timeframe={timeframe}
-        onTimeframeChange={handleTimeframeChange}
-        source={source}
-        strategyKey={strategy}
-        isCaptureMode={isCaptureMode}
-        toolbar={structuralToolbar}
-        rightPanel={structuralPanel}
-        showRightPanel={shouldShowPanel && !!instrumentId}
-        chartColumnProps={{ 'data-testid': 'stock-detail-capture' }}
-      />
+      {/* ===== 工作区：左栏来源股票列表 + 复用 StockResearchWorkspace ===== */}
+      {/* [returnTo 上下文恢复] - 左栏优先展示 returnTo URL 的来源上下文：
+          - returnTo 指向 /market?scope=market&query=xxx 时显示「行情搜索」列表
+          - returnTo 缺失或非市场搜索时回退到「自选列表」 */}
+      {/* CHANGE-20260715-004: 来源列表加载中显示 loading 占位，避免空白后突然出现列表 */}
+      {/* CHANGE-20260715-005: 尊重显式 source；拆分 loading/error/empty/invalid 状态 */}
+      <div className="tv-detail-layout">
+        {!isCaptureMode && detailActions.sourceListLoading && (
+          <aside
+            className="tv-source-list tv-source-list-loading"
+            data-testid="detail-source-list-loading"
+          >
+            <div className="tv-source-list-header">
+              {detailActions.sourceListKind === 'market' ? '行情来源' : '自选来源'}
+            </div>
+            <div className="tv-source-list-placeholder">加载中…</div>
+          </aside>
+        )}
+        {!isCaptureMode && !detailActions.sourceListLoading && detailActions.sourceListError && (
+          <aside
+            className="tv-source-list tv-source-list-error"
+            data-testid="detail-source-list-error"
+          >
+            <div className="tv-source-list-header">
+              {detailActions.sourceListKind === 'market' ? '行情来源' : '自选来源'}
+            </div>
+            <div className="tv-source-list-placeholder">来源数据加载失败</div>
+          </aside>
+        )}
+        {!isCaptureMode && !detailActions.sourceListLoading && !detailActions.sourceListError && detailActions.sourceContextInvalid && (
+          <aside
+            className="tv-source-list tv-source-list-invalid"
+            data-testid="detail-source-list-invalid"
+          >
+            <div className="tv-source-list-header">行情来源</div>
+            <div className="tv-source-list-placeholder">来源上下文失效</div>
+          </aside>
+        )}
+        {!isCaptureMode && !detailActions.sourceListLoading && !detailActions.sourceListError && !detailActions.sourceContextInvalid && detailActions.sourceListEmpty && (
+          <aside
+            className="tv-source-list tv-source-list-empty"
+            data-testid="detail-source-list-empty"
+          >
+            <div className="tv-source-list-header">
+              {detailActions.sourceListKind === 'market' ? '行情来源' : '自选来源'}
+            </div>
+            <div className="tv-source-list-placeholder">
+              {detailActions.sourceListKind === 'market' ? '暂无选股结果' : '暂无自选股票'}
+            </div>
+          </aside>
+        )}
+        {!isCaptureMode && !detailActions.sourceListLoading && !detailActions.sourceListError && !detailActions.sourceContextInvalid && !detailActions.sourceListEmpty && detailActions.sourceStocks.length > 0 && (
+          <aside
+            className="tv-source-list"
+            data-testid="detail-source-list"
+            ref={sourceListRef}
+          >
+            <div className="tv-source-list-header">
+              {detailActions.sourceListKind === 'market' ? '行情来源' : '自选来源'}
+            </div>
+            {detailActions.sourceStocks.map((s) => (
+              <div
+                key={s.symbol}
+                className={clsx('tv-source-list-item', s.symbol === symbol && 'active')}
+                onClick={() => navigate(`/stock/${s.symbol}?source=${source}&strategy=${strategy}${returnToParam ? `&returnTo=${encodeURIComponent(returnToParam)}` : ''}`)}
+              >
+                <span className="tv-source-name">{s.name}</span>
+                <div className="tv-source-meta">
+                  <span className="tv-source-symbol">{s.symbol}</span>
+                  {/* CHANGE-20260714-001: 右侧显示最近交易日涨跌幅（两位小数，A股红涨绿跌） */}
+                  {s.changePct !== null && (
+                    <span className={clsx('tv-source-change-pct', changePctColorClass(s.changePct))}>
+                      {fmtChange(s.changePct)}
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </aside>
+        )}
+        {/* 复用 StockResearchWorkspace（图表 + 状态条） + 结构状态因子面板 */}
+        <StockResearchWorkspace
+          data={researchData}
+          timeframe={timeframe}
+          onTimeframeChange={handleTimeframeChange}
+          source={source}
+          strategyKey={strategy}
+          isCaptureMode={isCaptureMode}
+          rightPanelCollapsed={!(shouldShowPanel && !!symbol)}
+          toolbar={structuralToolbar}
+          rightPanel={eventStatePanel}
+          showRightPanel={shouldShowPanel && !!symbol}
+          chartColumnProps={{ 'data-testid': 'stock-detail-capture' }}
+          onSmcToggle={handleSmcToggle}
+        />
+      </div>
     </div>
   )
 }

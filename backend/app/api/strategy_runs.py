@@ -27,7 +27,7 @@ import logging
 import uuid
 from datetime import date
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,9 +38,11 @@ from app.models.strategy import StrategyVersion
 from app.models.strategy_run import StrategyRun
 from app.repositories import strategy_result_repository
 from app.repositories.strategy_result_repository import (
+    CHANGE_PCT_METRIC_KEY,
     SortSpec,
     dict_filters_to_metric_filters,
 )
+from app.schemas.export import ExportRequest
 from app.schemas.strategy_run import (
     StrategyResultListResponse,
     StrategyResultResponse,
@@ -52,6 +54,11 @@ from app.services.access_control_service import (
     AccessContext,
     require_active_subscription,
     require_feature,
+)
+from app.services.excel_export_service import (
+    MAX_EXPORT_ROWS,
+    extract_row_data,
+    generate_xlsx,
 )
 from app.services.selector_query_service import (
     NotSelectorRunError,
@@ -147,7 +154,9 @@ def _validate_metric_filters(
         metric_key = f.get("metric_key")
         op = f.get("operator")
 
-        if metric_key not in filterable_keys:
+        # CHANGE-20260714-001: change_pct 是特殊 key，走 bars_daily 子查询而非 metrics 表
+        # 不在 manifest filterable 白名单中也允许，由 repository 特殊处理
+        if metric_key not in filterable_keys and metric_key != CHANGE_PCT_METRIC_KEY:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"非法 metric_key: {metric_key}（不在 filterable 白名单中）",
@@ -577,7 +586,8 @@ async def query_strategy_results(
     # 4.5 校验 sort_by 在 filterable 白名单中
     if sort_by is not None:
         filterable_keys = _get_filterable_metric_keys(version)
-        if sort_by not in filterable_keys:
+        # CHANGE-20260714-001: change_pct 走 bars_daily 子查询，允许作为特殊 sort key
+        if sort_by not in filterable_keys and sort_by != CHANGE_PCT_METRIC_KEY:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"非法 sort_by: {sort_by}（不在 filterable 白名单中）",
@@ -628,6 +638,16 @@ async def list_run_results(
         ),
     ),
     keyword: str | None = Query(None, description="关键词（symbol 或 name 模糊匹配）"),
+    industry: str | None = Query(None, description="行业板块名称（qstock 同步后可用）"),
+    concept: str | None = Query(None, description="概念板块名称（qstock 同步后可用）"),
+    stock_name: str | None = Query(
+        None,
+        description="股票名称独立筛选值（CHANGE-20260714-001：与 keyword 独立 AND 语义）",
+    ),
+    stock_name_op: str | None = Query(
+        None,
+        description="股票名称筛选操作符: contains | not_contains | eq（默认 contains）",
+    ),
     sort_by: str | None = Query(None, description="排序指标名"),
     sort_desc: bool = Query(False, description="是否降序"),
     universe: str = Query("all", description="股票池: all 全市场 | watchlist 仅自选股"),
@@ -676,6 +696,15 @@ async def list_run_results(
             detail=f"非法 universe: {universe}（合法值: all, watchlist）",
         )
 
+    # CHANGE-20260714-001: 校验 stock_name_op 合法值
+    if stock_name_op is not None and stock_name_op not in ("contains", "not_contains", "eq"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"非法 stock_name_op: {stock_name_op}（合法值: contains, not_contains, eq）",
+        )
+    # stock_name_op 提供但 stock_name 为空时静默忽略（不报错，等价无筛选）
+    # stock_name 提供但 stock_name_op 为 None 时默认 contains（service 层兜底）
+
     # [StrategyRuns] - 描述: metric_filters + sort_by 共用 run/version 查询，避免重复 DB 调用
     # advice.md 第三节：/strategy-runs/{run_id}/results 应像 /strategies/{key}/results 一样校验 metric_filters
     if filters or sort_by is not None:
@@ -689,7 +718,8 @@ async def list_run_results(
                 # 校验 sort_by 在 filterable 白名单中
                 if sort_by is not None:
                     filterable_keys = _get_filterable_metric_keys(version)
-                    if sort_by not in filterable_keys:
+                    # CHANGE-20260714-001: change_pct 走 bars_daily 子查询，允许作为特殊 sort key
+                    if sort_by not in filterable_keys and sort_by != CHANGE_PCT_METRIC_KEY:
                         raise HTTPException(
                             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail=f"非法 sort_by: {sort_by}（不在 filterable 白名单中）",
@@ -710,6 +740,10 @@ async def list_run_results(
             page_size=page_size,
             universe=universe,
             keyword=keyword,
+            industry=industry,
+            concept=concept,
+            stock_name=stock_name,
+            stock_name_op=stock_name_op,
         )
     except RunNotFoundError as e:
         raise HTTPException(
@@ -750,6 +784,9 @@ async def list_run_results(
             resp.instrument_symbol = row.instrument.symbol
             resp.instrument_name = row.instrument.name
             resp.instrument_market = row.instrument.market
+        # CHANGE-20260714-001: 最新行情涨跌幅（从 bars_daily 计算，与 DSA run payload 分离）
+        resp.latest_change_pct = row.latest_change_pct
+        resp.latest_change_trade_date = row.latest_change_trade_date
         result_items.append(resp)
 
     return StrategyResultListResponse(
@@ -806,6 +843,163 @@ async def get_run_result_detail(
     resp = StrategyResultResponse.model_validate(result)
     resp.item_status = "succeeded"
     return resp
+
+
+@router.post(
+    "/strategy-runs/{run_id}/results/export",
+    summary="导出运行结果为 Excel（CHANGE-20260713-010）",
+)
+async def export_run_results(
+    run_id: uuid.UUID,
+    request: ExportRequest,
+    db: AsyncSession = Depends(get_db),
+    ctx: AccessContext = Depends(require_active_subscription),
+    _feat: AccessContext = Depends(require_feature("trend_selection")),
+) -> Response:
+    """导出已发布运行结果为 .xlsx。
+
+    复用 query_published_selector_results 的筛选/排序构造器（禁止第二套逻辑）。
+    上限 MAX_EXPORT_ROWS=10000，超过返回 422。
+    文件不写永久目录，响应结束即释放。
+    权限：需有效订阅 + trend_selection feature（admin 豁免）。
+
+    Args:
+        run_id: 运行 ID（必须已发布）
+        request: 导出请求（含筛选条件和可见列定义）
+        db: 异步会话
+        ctx: 权限上下文
+
+    Returns:
+        .xlsx 文件流（application/vnd.openxmlformats-officedocument.spreadsheetml.sheet）
+    """
+    # 1. 校验可见列非空
+    if not request.visible_columns:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="visible_columns 不能为空",
+        )
+
+    # 1b. 校验 universe 参数（与 GET results 端点一致）
+    if request.universe not in ("all", "watchlist"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"非法 universe: {request.universe}（合法值: all, watchlist）",
+        )
+
+    # 1c. CHANGE-20260714-001: 校验 stock_name_op 合法值（与 GET results 端点一致）
+    if (
+        request.stock_name_op is not None
+        and request.stock_name_op not in ("contains", "not_contains", "eq")
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"非法 stock_name_op: {request.stock_name_op}（合法值: contains, not_contains, eq）",
+        )
+
+    # 2. 校验 metric_filters + sort_by（复用 GET results 的校验逻辑）
+    filters = request.metric_filters
+    sort_by = request.sort_by
+    if filters or sort_by is not None:
+        run = await db.get(StrategyRun, run_id)
+        if run is not None:
+            version = await db.get(StrategyVersion, run.strategy_version_id)
+            if version is not None:
+                if filters:
+                    _validate_metric_filters(filters, version)
+                if sort_by is not None:
+                    filterable_keys = _get_filterable_metric_keys(version)
+                    # CHANGE-20260714-001: change_pct 走 bars_daily 子查询，允许作为特殊 sort key
+                    if sort_by not in filterable_keys and sort_by != CHANGE_PCT_METRIC_KEY:
+                        raise HTTPException(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=f"非法 sort_by: {sort_by}（不在 filterable 白名单中）",
+                        )
+
+    # 3. 构造 MetricFilter / SortSpec
+    metric_filter_list = dict_filters_to_metric_filters(filters)
+    sort_spec = SortSpec(field=sort_by, desc=request.sort_desc) if sort_by else None
+
+    # 4. 查询全量结果（page_size=MAX_EXPORT_ROWS+1 用于判断是否超限）
+    try:
+        result_page = await query_published_selector_results(
+            db,
+            run_id=run_id,
+            user_id=uuid.UUID(ctx.user_id),
+            filters=metric_filter_list,
+            sort=sort_spec,
+            page=1,
+            page_size=MAX_EXPORT_ROWS + 1,
+            universe=request.universe,
+            keyword=request.keyword,
+            industry=request.industry,
+            concept=request.concept,
+            stock_name=request.stock_name,
+            stock_name_op=request.stock_name_op,
+        )
+    except RunNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        ) from e
+    except NotSelectorRunError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        ) from e
+
+    # 5. 上限校验
+    if len(result_page.items) > MAX_EXPORT_ROWS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"导出行数 {len(result_page.items)} 超过上限 {MAX_EXPORT_ROWS}，"
+                "请缩小筛选范围后再导出"
+            ),
+        )
+
+    # 6. 提取行数据（按 visible_columns 顺序）
+    data_rows = []
+    for row in result_page.items:
+        instrument_symbol = row.instrument.symbol if row.instrument else None
+        instrument_name = row.instrument.name if row.instrument else None
+        instrument_market = row.instrument.market if row.instrument else None
+        payload = row.result.payload if row.result is not None else None
+        data_rows.append(
+            extract_row_data(
+                instrument_symbol=instrument_symbol,
+                instrument_name=instrument_name,
+                instrument_market=instrument_market,
+                payload=payload,
+                columns=request.visible_columns,
+                latest_change_pct=row.latest_change_pct,
+                latest_change_trade_date=row.latest_change_trade_date,
+            )
+        )
+
+    # 7. 生成 .xlsx bytes（内存流，不写永久目录）
+    xlsx_bytes = generate_xlsx(request.visible_columns, data_rows)
+
+    # 8. 构造文件名：盘迹_DSA_YYYYMMDD_筛选结果.xlsx
+    trade_date = result_page.trade_date or date.today()
+    filename = f"盘迹_DSA_{trade_date.strftime('%Y%m%d')}_筛选结果.xlsx"
+    # RFC 5987 编码文件名（支持中文）
+    from urllib.parse import quote
+    quoted_filename = quote(filename, safe="")
+
+    return Response(
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename*=UTF-8''{quoted_filename}"
+            ),
+            "Content-Length": str(len(xlsx_bytes)),
+            "X-Source-Total": str(result_page.source_total),
+            "X-Universe-Total": str(result_page.universe_total),
+            "X-Filtered-Total": str(result_page.filtered_total),
+            "X-Export-Rows": str(len(data_rows)),
+        },
+    )
 
 
 if __name__ == "__main__":

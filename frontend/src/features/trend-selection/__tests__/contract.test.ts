@@ -221,7 +221,8 @@ test('完整列集每列含必需字段（key/title/dataType/sortable/filterable
     const idx = src.indexOf(`key: '${k}'`)
     assert.ok(idx >= 0, `找不到 key="${k}" 的列定义`)
     const block = src.substring(idx, idx + 800)
-    assert.ok(/title:\s*['"]/.test(block), `key="${k}" 列必须含 title`)
+    // title 允许为字面量或三元表达式（如 onToggleWatchlist ? '自选' : '操作'）
+    assert.ok(/title:\s*(['"]|.*\?)/.test(block), `key="${k}" 列必须含 title`)
     assert.ok(/dataType:\s*['"]/.test(block), `key="${k}" 列必须含 dataType`)
     assert.ok(/sortable:\s*(true|false)/.test(block), `key="${k}" 列必须含 sortable`)
     assert.ok(/filterable:\s*(true|false)/.test(block), `key="${k}" 列必须含 filterable`)

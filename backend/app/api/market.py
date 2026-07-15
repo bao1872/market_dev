@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from datetime import date as dt_date
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -136,3 +136,99 @@ if __name__ == "__main__":
     # 自测入口：验证路由注册
     print(f"router.routes={get_route_paths(router.routes)}")
     print("OK")
+
+
+# ===== 行情列表 API（PRD §8.1）=====
+
+from uuid import UUID  # noqa: E402
+
+from fastapi import HTTPException  # noqa: E402
+
+from app.schemas.market_stocks import MarketBoardsResponse, MarketStocksResponse  # noqa: E402
+from app.services.access_control_service import AccessContext, require_authenticated  # noqa: E402
+from app.services.market_stocks_service import get_market_stocks  # noqa: E402
+
+# Phase 4: state 筛选合法值（up=上行, down=下行, sideways=震荡）
+_VALID_STATE_FILTERS = {"up", "down", "sideways"}
+
+
+@router.get("/stocks", response_model=MarketStocksResponse)
+async def list_market_stocks(
+    scope: str = Query("market", description="范围：market | watchlist"),
+    query: str | None = Query(None, description="搜索关键词（代码/名称/拼音首字母）"),
+    page: int = Query(1, ge=1, description="页码（从 1 开始）"),
+    page_size: int = Query(50, ge=1, le=100, description="每页大小（最大 100）"),
+    sort: str | None = Query(
+        None,
+        description="排序字段:方向（如 symbol:asc, change_pct:desc, dsa_state:desc, latest_event_time:desc）",
+    ),
+    industry: str | None = Query(None, description="行业筛选（板块名称，qstock 同步后可用）"),
+    concept: str | None = Query(None, description="概念筛选（板块名称，qstock 同步后可用）"),
+    state: str | None = Query(
+        None,
+        description="状态筛选（Phase 4 实现）：up=上行, down=下行, sideways=震荡",
+    ),
+    db: AsyncSession = Depends(get_db),
+    ctx: AccessContext = Depends(require_authenticated),
+) -> MarketStocksResponse:
+    """查询行情列表（服务端分页 + 批量加载，禁止 N+1）。
+
+    返回每行页面所需全部字段（价格/涨跌幅/DSA状态/事件/自选），不再追加单股请求。
+    scope=watchlist 在数据库查询阶段关联当前用户自选（INNER JOIN）。
+    state 参数已实现（Phase 4）：up/down/sideways。
+    industry/concept 参数已实现（PRD §7.5 qstock 同步后）：通过 market_boards 表筛选。
+    无匹配股票时返回空列表（不报错）。
+    sort 白名单：name, symbol, change_pct, dsa_state, latest_event_time。
+    """
+    # Phase 4: state 参数校验（合法值：up/down/sideways；空字符串视为 None）
+    normalized_state = state or None
+    if normalized_state is not None and normalized_state not in _VALID_STATE_FILTERS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid state value: {state}; must be one of: up, down, sideways",
+        )
+
+    # 规范化 scope
+    normalized_scope = "watchlist" if scope == "watchlist" else "market"
+    try:
+        return await get_market_stocks(
+            db=db,
+            user_id=UUID(ctx.user_id),
+            scope=normalized_scope,
+            query=query,
+            page=page,
+            page_size=page_size,
+            sort=sort,
+            state=normalized_state,
+            industry=industry or None,
+            concept=concept or None,
+        )
+    except ValueError as exc:
+        # 排序参数校验失败 → 422
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+# ===== C9: 板块目录只读 API（行业/概念筛选下拉支持）=====
+
+
+@router.get("/boards", response_model=MarketBoardsResponse)
+async def list_market_boards(
+    type: str | None = Query(
+        None,
+        description="板块类型过滤：industry | concept（不传返回全部）",
+    ),
+    db: AsyncSession = Depends(get_db),
+    ctx: AccessContext = Depends(require_authenticated),
+) -> MarketBoardsResponse:
+    """板块目录只读 API（C9），供前端行业/概念筛选下拉/自动完成使用。
+
+    从 market_boards 表读取板块目录，qstock 同步前返回空列表（不报错）。
+    """
+    if type is not None and type not in ("industry", "concept"):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid type value: {type}; must be one of: industry, concept",
+        )
+    from app.services.market_stocks_service import get_market_boards
+
+    return await get_market_boards(db=db, board_type=type)

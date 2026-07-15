@@ -17,6 +17,8 @@ export {
   VWAP_RET_TOTAL_KEYS,
   OFFSET_MEAN_KEYS,
   OFFSET_PERCENTILE_KEYS,
+  // CHANGE-20260714-001: 涨跌幅候选 key 统一导出（供详情左栏复用，禁止第二套 key 列表）
+  CHANGE_PCT_KEYS,
 } from './adapters'
 export { getTrendSelectionColumns, type TrendSelectionColumnOptions } from './columns'
 export { INDEX_VISIBLE_COLUMN_KEYS, visibleColumnKeys } from './config'

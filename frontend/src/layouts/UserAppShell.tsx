@@ -1,11 +1,10 @@
 // [UserAppShell] - 描述: 普通用户布局壳（顶栏品牌 + 一级导航 + 账户菜单；无左侧栏）
-// 承载：/market（行情，渲染 MarketWorkspacePage）、/screener、/stock/:symbol、/messages、/settings
+// 承载：/market（行情，渲染 MarketWorkspacePage）、/replay（复盘占位）、/stock/:symbol、/messages、/settings
 // 不再渲染旧 AppShell 的统一侧栏；消息/设置已收拢到 AccountMenu。
 // 市场状态 30s 轮询 + 上海时区实时钟（原 AppShell 职责迁移至此）。
 // Capture 路由不经过本壳层（由 App.tsx 独立路由处理）。
 import { type ReactNode, useEffect, useState } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
-import { useRoleStore } from '@/store/role'
 import { getMarketStatus, type MarketStatus } from '@/api/endpoints'
 import { setCachedMarketStatus } from '@/hooks/useApi'
 import { formatShanghaiTimeShort } from '@/utils/datetime'
@@ -18,8 +17,6 @@ import styles from './UserAppShell.module.scss'
 // 作为路由 layout element 时无 children prop，由 <Outlet/> 渲染子路由；
 // 作为普通组件包裹内容时也可传入 children（兼容直接调用场景）。
 export default function UserAppShell({ children }: { children?: ReactNode }) {
-  const { isAdmin, toggleRole } = useRoleStore()
-
   // 市场状态轮询（30s）- 同步更新模块级缓存供 isInTradingHours() 使用
   const [marketStatus, setMarketStatus] = useState<MarketStatus | null>(null)
   useEffect(() => {
@@ -70,16 +67,6 @@ export default function UserAppShell({ children }: { children?: ReactNode }) {
           </div>
         </div>
         <div className="top-right">
-          {/* 角色预览切换（仅测试用，普通用户路径不渲染管理员导航） */}
-          {!isAdmin && (
-            <button
-              className="btn small role-preview-toggle"
-              onClick={toggleRole}
-              title={isAdmin ? '仅用于检查普通用户权限界面' : '恢复默认管理员测试账号'}
-            >
-              {isAdmin ? '切换普通用户视图' : '返回管理员视图'}
-            </button>
-          )}
           <AccountMenu variant="user" />
         </div>
       </header>

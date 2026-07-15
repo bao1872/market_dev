@@ -1,6 +1,13 @@
-// [BrandLogo] - 描述: 唯一品牌标识组件（SVG），页眉/页尾/业务侧栏全部复用
-// variant 控制尺寸与是否显示文字；favicon.svg 与本组件内嵌 SVG 同源
+// [BrandLogo] - 描述: 唯一品牌标识组件（使用批准 PNG 资产），页眉/页尾/业务侧栏全部复用
+// 视觉真源：ref/盘迹品牌视觉资产包_v1.0/01_标志系统（CHANGE-20260713-007）
+// 运行资产位于 frontend/src/assets/brand/，ref 不作为运行时依赖。
+// - sidebar variant：使用 logo_symbol_128.png（批准 symbol 资产，正方形）
+// - landing/footer variant：使用 logo_horizontal_dark.png（批准 horizontal 资产，含"盘迹"文字）
+// 不变形、不旋转、不增减节点、不替换颜色、不共享字体文件
+// 禁止恢复手绘 SVG 或在组件中重新构造标志几何
 import clsx from 'clsx'
+import logoSymbol128 from '@/assets/brand/logo_symbol_128.png'
+import logoHorizontalDark from '@/assets/brand/logo_horizontal_dark.png'
 import styles from './BrandLogo.module.scss'
 
 export type BrandLogoVariant = 'sidebar' | 'landing' | 'footer'
@@ -10,38 +17,24 @@ export interface BrandLogoProps {
   className?: string
 }
 
-// 核心图形：圆形蓝紫渐变背景 + 白色上升趋势折线 + 末端节点（呼应 Node Cluster）
-// sidebar variant 仅渲染图形；landing/footer variant 渲染图形 + "盘迹" 文字
+// sidebar variant 仅渲染 symbol 资产；landing/footer variant 渲染 horizontal 资产（含文字）
+// horizontal 资产本身已含"盘迹"文字 + 标语，无需额外渲染文字 span
 export default function BrandLogo({ variant, className }: BrandLogoProps) {
-  const showText = variant !== 'sidebar'
+  const isSidebar = variant === 'sidebar'
+  const src = isSidebar ? logoSymbol128 : logoHorizontalDark
+  const alt = '盘迹'
   return (
     <span className={clsx(styles.root, styles[variant], className)}>
-      <svg
+      <img
         className={styles.mark}
-        viewBox="0 0 32 32"
+        src={src}
+        alt={alt}
         role="img"
-        aria-label="盘迹"
-        focusable="false"
-      >
-        <defs>
-          <linearGradient id="brandLogoGradient" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0%" stopColor="#2962ff" />
-            <stop offset="100%" stopColor="#8b5cf6" />
-          </linearGradient>
-        </defs>
-        <circle cx="16" cy="16" r="15" fill="url(#brandLogoGradient)" />
-        <polyline
-          points="6,21 12,15 17,18 26,9"
-          fill="none"
-          stroke="#ffffff"
-          strokeWidth="2.2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-        <circle cx="26" cy="9" r="2.4" fill="#ffffff" />
-        <circle cx="6" cy="21" r="1.6" fill="#ffffff" opacity="0.85" />
-      </svg>
-      {showText && <span className={styles.text}>盘迹</span>}
+        // 装饰性标志在 sidebar 场景由相邻 .brand-title 提供"盘迹"文字；
+        // landing/footer 场景 horizontal 资产本身含文字，img alt 兜底
+        aria-label={alt}
+        draggable={false}
+      />
     </span>
   )
 }

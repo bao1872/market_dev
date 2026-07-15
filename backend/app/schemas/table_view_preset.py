@@ -8,11 +8,12 @@
 - TableViewPresetListResponse: 列表响应 schema
 
 服务端校验规则：
-- config 仅允许 keyword/sort/filters/hiddenColumns/pageSize 五个字段
+- config 仅允许 keyword/sort/filters/hiddenColumns/columnOrder/pageSize 六个字段
 - 禁止保存 selectedKeys/page/activeRunId/rows（业务数据与会话态）
 - pageSize 范围 1-500
 - filters 元素必须含 key/op/value
 - sort 必须含 key + direction（asc/desc）
+- columnOrder 每项必须是 string
 """
 
 from __future__ import annotations
@@ -25,7 +26,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # config 允许的字段白名单（其他字段一律拒绝）
 _ALLOWED_CONFIG_KEYS: frozenset[str] = frozenset(
-    {"keyword", "sort", "filters", "hiddenColumns", "pageSize"}
+    {"keyword", "sort", "filters", "hiddenColumns", "columnOrder", "pageSize",
+     "industry", "concept"}
 )
 
 # config 禁止的字段（业务数据与会话态，冗余防御）
@@ -43,7 +45,7 @@ MAX_PRESETS_PER_SCOPE: int = 20
 
 
 class TableViewPresetConfig(BaseModel):
-    """表格视图配置内容 - 仅允许 keyword/sort/filters/hiddenColumns/pageSize。
+    """表格视图配置内容 - 仅允许 keyword/sort/filters/hiddenColumns/columnOrder/pageSize。
 
     额外字段会被拒绝（422），防止前端误传 selectedKeys/page/activeRunId/rows。
     """
@@ -65,8 +67,18 @@ class TableViewPresetConfig(BaseModel):
         default=None,
         description="隐藏列 key 列表",
     )
+    columnOrder: list[str] | None = Field(  # noqa: N815
+        default=None,
+        description="列顺序 key 列表（自定义列排列顺序）",
+    )
     pageSize: int | None = Field(  # noqa: N815
         default=None, ge=1, le=500, description="每页大小（1-500）"
+    )
+    industry: str | None = Field(
+        default=None, max_length=100, description="行业板块名称"
+    )
+    concept: str | None = Field(
+        default=None, max_length=100, description="概念板块名称"
     )
 
     @model_validator(mode="after")
@@ -241,6 +253,18 @@ def _validate_config_keys(config: dict[str, Any]) -> None:
                     f"config.hiddenColumns[{i}] 必须为 string，实际类型: {type(col).__name__}"
                 )
 
+    if "columnOrder" in config and config["columnOrder"] is not None:
+        if not isinstance(config["columnOrder"], list):
+            raise ValueError(
+                f"config.columnOrder 必须为 list，实际类型: {type(config['columnOrder']).__name__}"
+            )
+        # [ConfigValidation] - 描述: columnOrder 每项必须是 string
+        for i, col in enumerate(config["columnOrder"]):
+            if not isinstance(col, str):
+                raise ValueError(
+                    f"config.columnOrder[{i}] 必须为 string，实际类型: {type(col).__name__}"
+                )
+
     if "keyword" in config and config["keyword"] is not None:
         if not isinstance(config["keyword"], str):
             raise ValueError(
@@ -276,7 +300,7 @@ if __name__ == "__main__":
         table_id="screener",
         strategy_key="dsa_selector",
         name="默认",
-        config={"keyword": "茅台", "pageSize": 50},
+        config={"keyword": "茅台", "pageSize": 50, "columnOrder": ["stock", "price"]},
     )
     assert obj.table_id == "screener"
     print(f"合法 payload: {obj}")
@@ -357,6 +381,17 @@ if __name__ == "__main__":
         raise AssertionError("应拒绝非 list filters")
     except ValidationError as e:
         print(f"非 list filters 已拒绝: {str(e)[:80]}")
+
+    # 非法：columnOrder 元素非 string
+    try:
+        TableViewPresetCreate(
+            table_id="screener",
+            name="bad",
+            config={"columnOrder": ["stock", 123]},
+        )
+        raise AssertionError("应拒绝 columnOrder 非 string 元素")
+    except ValidationError as e:
+        print(f"columnOrder 非 string 元素已拒绝: {str(e)[:80]}")
 
     # 合法：空 config
     obj2 = TableViewPresetCreate(

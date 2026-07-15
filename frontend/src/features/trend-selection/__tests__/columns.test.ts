@@ -141,3 +141,110 @@ test('change_pct 列位于 stock 列之后（用户体验：股票-涨跌幅-趋
     `stock 与 change_pct 之间不应有其他列，实际存在: ${JSON.stringify(otherKeyInBetween)}`,
   )
 })
+
+// ===== 7. action 列按钮 stopPropagation 防止行选中副作用 =====
+test('action 列 onDetail 按钮 onClick 调用 e.stopPropagation() 防止冒泡到 tr onClick', () => {
+  const src = readSource(COLUMNS_PATH)
+  // 找到 onDetail 按钮的 onClick
+  const detailBtnMatch = src.match(/onClick=\{[^}]*onDetail[^}]*\}/)
+  assert.ok(detailBtnMatch, '必须存在 onDetail 按钮 onClick')
+  assert.ok(
+    detailBtnMatch![0].includes('stopPropagation'),
+    `onDetail 按钮 onClick 必须调用 e.stopPropagation() 防止冒泡到 <tr onClick>，实际: ${detailBtnMatch![0]}`,
+  )
+})
+
+// ===== 8. action 列 onAddToWatchlist 按钮 stopPropagation =====
+test('action 列 onAddToWatchlist 按钮 onClick 调用 e.stopPropagation() 防止冒泡到 tr onClick', () => {
+  const src = readSource(COLUMNS_PATH)
+  // 找到 onAddToWatchlist 按钮的 onClick
+  const watchlistBtnMatch = src.match(/onClick=\{[^}]*onAddToWatchlist[^}]*\}/)
+  assert.ok(watchlistBtnMatch, '必须存在 onAddToWatchlist 按钮 onClick')
+  assert.ok(
+    watchlistBtnMatch![0].includes('stopPropagation'),
+    `onAddToWatchlist 按钮 onClick 必须调用 e.stopPropagation() 防止冒泡到 <tr onClick>，实际: ${watchlistBtnMatch![0]}`,
+  )
+})
+
+// ===== 9. onNavigateToStock 链接 stopPropagation =====
+test('股票名称链接 onNavigate 调用 e.stopPropagation() 防止冒泡到 tr onClick', () => {
+  const src = readSource(COLUMNS_PATH)
+  // 找到 onNavigate 链接的 onClick
+  const navMatch = src.match(/onClick=\{[^}]*onNavigate[^}]*\}/)
+  assert.ok(navMatch, '必须存在 onNavigate 链接 onClick')
+  assert.ok(
+    navMatch![0].includes('stopPropagation'),
+    `onNavigate 链接 onClick 必须调用 e.stopPropagation() 防止冒泡到 <tr onClick>，实际: ${navMatch![0]}`,
+  )
+})
+
+// ===== 10. onToggleWatchlist 按钮 stopPropagation + 加入/移除自选 =====
+test('action 列 onToggleWatchlist 模式：按钮 onClick 调用 e.stopPropagation()，显示加入/移除自选', () => {
+  const src = readSource(COLUMNS_PATH)
+  // 验证 onToggleWatchlist 按钮存在且 stopPropagation
+  const toggleMatches = src.matchAll(/onClick=\{[^}]*onToggleWatchlist[^}]*\}/g)
+  const toggles = [...toggleMatches]
+  assert.ok(toggles.length > 0, '必须存在 onToggleWatchlist 按钮 onClick')
+  for (const t of toggles) {
+    assert.ok(
+      t[0].includes('stopPropagation'),
+      `onToggleWatchlist 按钮 onClick 必须调用 e.stopPropagation()，实际: ${t[0]}`,
+    )
+  }
+  // 验证显示"加入自选"和"移除自选"文案
+  assert.ok(src.includes('加入自选'), 'action 列必须显示"加入自选"按钮')
+  assert.ok(src.includes('移除自选'), 'action 列必须显示"移除自选"按钮')
+})
+
+// ===== 11. onToggleWatchlist 模式下列标题为"自选" =====
+test('action 列 onToggleWatchlist 模式下 title 动态为"自选"', () => {
+  const src = readSource(COLUMNS_PATH)
+  // 验证 title 根据 onToggleWatchlist 动态切换
+  assert.ok(
+    src.includes("onToggleWatchlist ? '自选' : '操作'"),
+    'action 列 title 必须在 onToggleWatchlist 模式下为"自选"',
+  )
+})
+
+// ===== 12. CHANGE-20260713-010: onNavigateToStock 使用 button 语义 + stopPropagation + aria-label =====
+test('股票名称使用 button 语义、stopPropagation 防止行选中、aria-label 无障碍访问', () => {
+  const src = readSource(COLUMNS_PATH)
+  // 验证 renderStock 函数中使用 <button 标签（非 <a href="#">）
+  assert.ok(
+    src.includes('<button') && src.includes('type="button"'),
+    '股票名称必须使用 <button type="button"> 提供明确视觉入口（CHANGE-010）',
+  )
+  // 不再使用 href="#" 假链接
+  assert.ok(
+    !src.includes('href="#"'),
+    '股票名称不得使用 href="#" 假链接（CHANGE-010 改用 button 语义）',
+  )
+  // 必须调用 e.stopPropagation() 防止冒泡触发行选择
+  assert.ok(
+    src.includes('e.stopPropagation()'),
+    '股票名称按钮必须调用 e.stopPropagation() 防止冒泡到行选择',
+  )
+  // 必须提供 aria-label 无障碍标签
+  assert.ok(
+    src.includes('aria-label'),
+    '股票名称按钮必须提供 aria-label 无障碍标签',
+  )
+})
+
+// ===== 13. 股票单元格不再显示行内涨跌幅（独立涨跌幅列保留） =====
+test('renderStock 函数只显示名称/代码/市场，不渲染行内涨跌幅', () => {
+  const src = readSource(COLUMNS_PATH)
+  // 提取 renderStock 函数体
+  const renderStockMatch = src.match(/function renderStock[\s\S]*?\n\}/)
+  assert.ok(renderStockMatch, '必须存在 renderStock 函数')
+  const body = renderStockMatch![0]
+  // renderStock 不应包含 change_pct / changePct / fmtChange
+  assert.ok(
+    !body.includes('change_pct') && !body.includes('changePct') && !body.includes('fmtChange'),
+    'renderStock 不应渲染行内涨跌幅（独立涨跌幅列已保留）',
+  )
+  // 应包含 name, symbol, market
+  assert.ok(body.includes('name'), 'renderStock 必须显示名称')
+  assert.ok(body.includes('symbol'), 'renderStock 必须显示代码')
+  assert.ok(body.includes('market'), 'renderStock 必须显示市场')
+})
