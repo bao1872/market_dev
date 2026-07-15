@@ -35,6 +35,9 @@ const USE_DETAIL_ACTIONS = join(__dirname, '..', 'useStockDetailActions.ts')
 const STOCK_DETAIL_PAGE = join(__dirname, '..', '..', '..', 'pages', 'StockDetailPage.tsx')
 const MARKET_WORKSPACE_PAGE = join(__dirname, '..', '..', 'market-workspace', 'MarketWorkspacePage.tsx')
 const GLOBAL_SCSS = join(__dirname, '..', '..', '..', 'styles', 'global.scss')
+// CHANGE-20260715-007: resolveDetailSourceContext 唯一真源已移至 detailSourceContext.ts
+const DETAIL_SOURCE_CONTEXT = join(__dirname, '..', 'detailSourceContext.ts')
+const MARKET_WORKSPACE_URL_STATE = join(__dirname, '..', '..', 'market-workspace', 'marketWorkspaceUrlState.ts')
 
 function readSource(p: string): string {
   return readFileSync(p, 'utf8')
@@ -71,8 +74,13 @@ test('CHANGE-005-3: 尊重显式 source 参数（source=selection → sourceList
   assert.ok(/source === 'selection' \? 'market' : 'watchlist'/.test(src), 'sourceListKind 必须基于显式 source 参数')
   // hasMarketContext 必须包含 source === 'selection' 条件
   assert.ok(/source === 'selection' && marketContext !== null/.test(src), 'hasMarketContext 必须要求 source === selection && marketContext !== null')
-  // sourceContextInvalid 必须在 source=selection 且 returnTo 无效时为 true
-  assert.ok(/source === 'selection' && marketContext === null && !!returnTo/.test(src), 'sourceContextInvalid 必须在 source=selection 且 returnTo 无效时为 true')
+  // CHANGE-20260715-007: sourceContextInvalid 推导已移至 resolveDetailSourceContext（detailSourceContext.ts）
+  // useStockDetailActions 不再自行推导，只接收参数；接口必须包含 sourceContextInvalid 字段
+  assert.ok(/sourceContextInvalid:\s*boolean/.test(src), 'StockDetailActionsParams 必须接收 sourceContextInvalid: boolean 参数')
+  // resolveDetailSourceContext 中 sourceContextInvalid 逻辑：source=selection 且 marketContext=null 时为 true
+  // （不再要求 !!returnTo：source=selection 本身声明用户意图来自市场，无上下文即为失效，不静默回退自选）
+  const detailSrc = readSource(DETAIL_SOURCE_CONTEXT)
+  assert.ok(/const sourceContextInvalid = source === 'selection'/.test(detailSrc), 'resolveDetailSourceContext 必须在 source=selection 且无 marketContext 时设置 sourceContextInvalid=true')
 })
 
 test('CHANGE-005-4: StockDetailPage 渲染 loading/error/invalid/empty 四种占位', () => {
@@ -123,18 +131,48 @@ test('CHANGE-005-10: useStockDetailActions 不使用 useMarketStocks', () => {
   assert.ok(!/useMarketStocks\s*\(/.test(src), '禁止使用旧 useMarketStocks 函数调用')
   assert.ok(/usePublishedRuns\('dsa_selector'/.test(src), '必须使用 usePublishedRuns("dsa_selector")')
   assert.ok(/useStrategyRunResults\(/.test(src), '必须使用 useStrategyRunResults')
-  assert.ok(/decodeMarketListContext\(returnTo\)/.test(src), '必须使用 decodeMarketListContext(returnTo)')
+  // CHANGE-20260715-007: decodeMarketListContext 调用已移至 resolveDetailSourceContext（detailSourceContext.ts）
+  // useStockDetailActions 不再自行调用 decodeMarketListContext(returnTo)，改为接收 marketContext 参数
+  assert.ok(!/decodeMarketListContext\(returnTo\)/.test(src), 'useStockDetailActions 不再自行调用 decodeMarketListContext(returnTo)')
+  assert.ok(/marketContext:\s*MarketListContext \| null/.test(src), 'StockDetailActionsParams 必须接收 marketContext: MarketListContext | null')
   assert.ok(/buildStrategyResultQueryParams\(marketContext\)/.test(src), '必须使用 buildStrategyResultQueryParams(marketContext)')
+  // resolveDetailSourceContext 内部必须调用 decodeMarketListContext(returnTo)
+  const detailSrc = readSource(DETAIL_SOURCE_CONTEXT)
+  assert.ok(/decodeMarketListContext\(returnTo\)/.test(detailSrc), 'resolveDetailSourceContext 必须调用 decodeMarketListContext(returnTo)')
 })
 
-test('CHANGE-005-11: 上一只/下一只保留 source/strategy/returnTo', () => {
+test('CHANGE-005-11: 上一只/下一只保留 source/strategy/returnTo/timeframe', () => {
   const src = readSource(USE_DETAIL_ACTIONS)
   assert.ok(/\/stock\/\$\{target\.symbol\}\?source=\$\{source\}&strategy=\$\{strategy\}/.test(src), '上一只/下一只必须保留 source + strategy')
   assert.ok(/returnToParam = returnTo \? `&returnTo=/.test(src), '上一只/下一只必须保留 returnTo')
+  // CHANGE-20260715-007: 上一只/下一只必须保留 timeframe
+  assert.ok(/timeframeParam = timeframe \? `&timeframe=/.test(src), '上一只/下一只必须保留 timeframe')
 })
 
 test('CHANGE-005-12: normalizeInternalReturnTo 上限为 4096', () => {
   const src = readSource(join(__dirname, '..', '..', 'market-workspace', 'marketWorkspaceUrlState.ts'))
   assert.ok(/raw\.length > 4096/.test(src), 'normalizeInternalReturnTo 上限必须为 4096')
   assert.ok(!/raw\.length > 500/.test(src), '不得再使用 500 字符上限')
+})
+
+// CHANGE-20260715-007: 消除重复真源 — detailSourceContext.ts 为唯一权威实现
+test('CHANGE-007-dedup: detailSourceContext.ts 为 normalizeResearchSource/defaultStrategyForSource 唯一定义点', () => {
+  const detailSrc = readSource(DETAIL_SOURCE_CONTEXT)
+  // detailSourceContext.ts 必须定义这两个函数（不是 re-export）
+  assert.ok(/export function normalizeResearchSource\(/.test(detailSrc), 'detailSourceContext.ts 必须定义 normalizeResearchSource')
+  assert.ok(/export function defaultStrategyForSource\(/.test(detailSrc), 'detailSourceContext.ts 必须定义 defaultStrategyForSource')
+  assert.ok(/export function resolveDetailSourceContext\(/.test(detailSrc), 'detailSourceContext.ts 必须定义 resolveDetailSourceContext')
+
+  // marketWorkspaceUrlState.ts 不得再定义本地副本（只能 re-export）
+  const urlStateSrc = readSource(MARKET_WORKSPACE_URL_STATE)
+  assert.ok(!/function normalizeResearchSourceLocal\(/.test(urlStateSrc), 'marketWorkspaceUrlState.ts 不得定义 normalizeResearchSourceLocal')
+  assert.ok(!/function defaultStrategyForSourceLocal\(/.test(urlStateSrc), 'marketWorkspaceUrlState.ts 不得定义 defaultStrategyForSourceLocal')
+  // 必须从 detailSourceContext.ts re-export
+  assert.ok(/from '\.\.\/stock-research\/detailSourceContext\.ts'/.test(urlStateSrc), 'marketWorkspaceUrlState.ts 必须从 detailSourceContext.ts re-export')
+
+  // stockResearchTypes.ts 也不得再定义本地副本（只能 re-export）
+  const typesSrc = readSource(join(__dirname, '..', 'stockResearchTypes.ts'))
+  assert.ok(!/^export function normalizeResearchSource\(/m.test(typesSrc), 'stockResearchTypes.ts 不得定义 normalizeResearchSource（应 re-export）')
+  assert.ok(!/^export function defaultStrategyForSource\(/m.test(typesSrc), 'stockResearchTypes.ts 不得定义 defaultStrategyForSource（应 re-export）')
+  assert.ok(/from '\.\/detailSourceContext\.ts'/.test(typesSrc), 'stockResearchTypes.ts 必须从 detailSourceContext.ts re-export')
 })

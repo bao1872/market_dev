@@ -93,10 +93,10 @@ def mock_bars(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(indicator_service, "MarketDataAggregationService", _MockAggService)
 
-    async def mock_query_15min(session, instrument_id, start, end):
+    async def mock_query_15min(session, instrument_id, start, end, limit=None):
         return _build_bars("15m")
 
-    async def mock_query_minute(session, instrument_id, start, end):
+    async def mock_query_minute(session, instrument_id, start, end, limit=None):
         # 监控策略仅需要 2 根 1 分钟线
         return _build_bars("15m", length=2)
 
@@ -203,10 +203,10 @@ async def test_daily_bars_from_load_chart_bars_not_exchange(
     monkeypatch.setattr(indicator_service, "MarketDataAggregationService", _MockService)
 
     # mock DB 查询（避免连真实 DB）
-    async def mock_query_15min(session, instrument_id, start, end):
+    async def mock_query_15min(session, instrument_id, start, end, limit=None):
         return _build_bars("15m")
 
-    async def mock_query_minute(session, instrument_id, start, end):
+    async def mock_query_minute(session, instrument_id, start, end, limit=None):
         return _build_bars("15m", length=2)
 
     monkeypatch.setattr(indicator_service, "_query_15min_bars", mock_query_15min)
@@ -368,6 +368,12 @@ async def test_strategy_time_not_overridden(
     monkeypatch.setattr(
         indicator_service.StrategyLoader, "_registry", {"mock_strategy": None}
     )
+    # Mock _get_available_strategy_keys（避免查询数据库）
+    monkeypatch.setattr(
+        indicator_service,
+        "_get_available_strategy_keys",
+        AsyncMock(return_value=set()),
+    )
 
     # Mock StrategyBatchService._get_latest_released_version
     mock_version = MagicMock()
@@ -418,6 +424,12 @@ async def test_indicator_time_injected_from_macd_bars_in_15m(
     monkeypatch.setattr(
         indicator_service.StrategyLoader, "_registry", {"mock_strategy": None}
     )
+    # Mock _get_available_strategy_keys（避免查询数据库）
+    monkeypatch.setattr(
+        indicator_service,
+        "_get_available_strategy_keys",
+        AsyncMock(return_value=set()),
+    )
 
     mock_version = MagicMock()
     mock_version.manifest = {"chart_layers": [], "display_name": "Mock"}
@@ -466,6 +478,12 @@ async def test_dsa_context_bars_daily_uses_macd_bars_in_15m(
     """
     monkeypatch.setattr(
         indicator_service.StrategyLoader, "_registry", {"mock_strategy": None}
+    )
+    # Mock _get_available_strategy_keys（避免查询数据库）
+    monkeypatch.setattr(
+        indicator_service,
+        "_get_available_strategy_keys",
+        AsyncMock(return_value=set()),
     )
 
     mock_version = MagicMock()
@@ -966,9 +984,33 @@ async def test_smc_calculated_when_include_smc_true(
     # data 中有 smc 键，包含必需字段
     assert "smc" in result["data"]
     smc_data = result["data"]["smc"]
-    required_fields = {"events", "order_blocks", "equal_highs_lows", "trailing", "pivots", "time"}
+    # CHANGE-20260715-007: 新增 swing_bias + view（adapter 元信息）
+    required_fields = {
+        "events", "order_blocks", "equal_highs_lows", "trailing",
+        "swing_bias", "pivots", "time", "view",
+    }
     assert required_fields.issubset(set(smc_data.keys())), (
         f"smc data 缺少字段: {required_fields - set(smc_data.keys())}"
+    )
+
+    # CHANGE-20260715-007: view 必须包含窗口元信息
+    view = smc_data["view"]
+    for view_key in ("total_bars", "display_bars", "offset", "window_start", "window_end"):
+        assert view_key in view, f"smc view 缺少 {view_key}"
+
+    # CHANGE-20260715-007: swing_bias 必须为合法值（1/-1/0）
+    valid_biases = {1, -1, 0}
+    assert smc_data["swing_bias"] in valid_biases, (
+        f"swing_bias 应为 {valid_biases} 之一，实得: {smc_data['swing_bias']}"
+    )
+    assert isinstance(smc_data["swing_bias"], int), (
+        f"swing_bias 必须为 int 类型，实得 {type(smc_data['swing_bias']).__name__}"
+    )
+
+    # CHANGE-20260715-007: time 数组长度必须 <= display_bars（响应大小与 bars 同阶）
+    assert len(smc_data["time"]) <= smc_data["view"]["display_bars"], (
+        f"SMC time 数组长度 {len(smc_data['time'])} 不得超过 display_bars "
+        f"{smc_data['view']['display_bars']}"
     )
 
     # FVG 不存在于 smc 输出
@@ -989,6 +1031,167 @@ async def test_smc_default_param_is_false(
     assert param is not None, "compute_all_indicators 应有 include_smc 参数"
     assert param.default is False, (
         f"include_smc 默认值应为 False（SMC 默认关闭），实际为 {param.default}"
+    )
+
+
+# ============================================================
+# [CHANGE-20260716-001 required_inputs] 基于实际可用策略加载日内数据
+# 修复根因：静态 _registry 包含 volume_node_monitor/bb_monitor，但数据库无定义，
+# 导致旧逻辑错误地纳入 15min/minute，1d 请求仍执行 2 条不必要的查询。
+# ============================================================
+
+
+def test_determine_required_bars_only_daily_when_empty() -> None:
+    """空策略集合只返回 daily（MACD/DSA 等基础指标始终需要日线）。"""
+    result = indicator_service._determine_required_bars(set())
+    assert result == frozenset({"daily"}), f"空策略应只返回 daily，实得 {result}"
+
+
+def test_determine_required_bars_includes_15min_minute_when_vp_available() -> None:
+    """VP 策略可用时包含 15min/minute（VP profile + crossover）。"""
+    result = indicator_service._determine_required_bars({"volume_node_monitor"})
+    assert "15min" in result, "VP 可用时应包含 15min"
+    assert "minute" in result, "VP 可用时应包含 minute"
+    assert "daily" in result, "VP 可用时应包含 daily"
+
+
+def test_determine_required_bars_excludes_15min_minute_when_vp_unavailable() -> None:
+    """VP 策略不可用时不包含 15min/minute（只有 dsa_selector + watchlist_monitor）。"""
+    result = indicator_service._determine_required_bars({"dsa_selector", "watchlist_monitor"})
+    assert "15min" not in result, "VP 不可用时应不包含 15min"
+    assert "minute" not in result, "VP 不可用时应不包含 minute"
+    assert result == frozenset({"daily"}), f"应只返回 daily，实得 {result}"
+
+
+async def test_1d_skips_15min_minute_queries_when_vp_unavailable(
+    mock_session: AsyncMock,
+    mock_bars: None,
+    empty_registry: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[CHANGE-20260716-001] 1d 请求在 VP 策略不可用时不查询 15min/minute。
+
+    修复根因：静态 _registry 包含 volume_node_monitor，但数据库无定义，
+    导致旧逻辑错误地加载 15min/minute 数据。
+    新逻辑：基于数据库实际可用策略（有 released version）计算 required_bars。
+    """
+    # Mock _get_available_strategy_keys 返回空集合（模拟 VP 不可用）
+    monkeypatch.setattr(
+        indicator_service,
+        "_get_available_strategy_keys",
+        AsyncMock(return_value=set()),
+    )
+
+    # Spy: 记录 _query_15min_bars / _query_minute_bars 是否被调用
+    query_15min_called = False
+    query_minute_called = False
+
+    original_15min = indicator_service._query_15min_bars
+    original_minute = indicator_service._query_minute_bars
+
+    async def spy_15min(*args, **kwargs):
+        nonlocal query_15min_called
+        query_15min_called = True
+        return await original_15min(*args, **kwargs)
+
+    async def spy_minute(*args, **kwargs):
+        nonlocal query_minute_called
+        query_minute_called = True
+        return await original_minute(*args, **kwargs)
+
+    monkeypatch.setattr(indicator_service, "_query_15min_bars", spy_15min)
+    monkeypatch.setattr(indicator_service, "_query_minute_bars", spy_minute)
+
+    await indicator_service.compute_all_indicators(
+        mock_session, TEST_INSTRUMENT_ID, "1d", "none", bars=250,
+    )
+
+    assert not query_15min_called, (
+        "1d 请求在 VP 不可用时应跳过 15min 查询"
+    )
+    assert not query_minute_called, (
+        "1d 请求在 VP 不可用时应跳过 minute 查询"
+    )
+
+
+async def test_1d_loads_15min_minute_queries_when_vp_available(
+    mock_session: AsyncMock,
+    mock_bars: None,
+    empty_registry: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[CHANGE-20260716-001] 1d 请求在 VP 策略可用时查询 15min/minute。"""
+    # Mock _get_available_strategy_keys 返回 volume_node_monitor（模拟 VP 可用）
+    monkeypatch.setattr(
+        indicator_service,
+        "_get_available_strategy_keys",
+        AsyncMock(return_value={"volume_node_monitor"}),
+    )
+
+    # Spy: 记录 _query_15min_bars / _query_minute_bars 是否被调用
+    query_15min_called = False
+    query_minute_called = False
+
+    original_15min = indicator_service._query_15min_bars
+    original_minute = indicator_service._query_minute_bars
+
+    async def spy_15min(*args, **kwargs):
+        nonlocal query_15min_called
+        query_15min_called = True
+        return await original_15min(*args, **kwargs)
+
+    async def spy_minute(*args, **kwargs):
+        nonlocal query_minute_called
+        query_minute_called = True
+        return await original_minute(*args, **kwargs)
+
+    monkeypatch.setattr(indicator_service, "_query_15min_bars", spy_15min)
+    monkeypatch.setattr(indicator_service, "_query_minute_bars", spy_minute)
+
+    await indicator_service.compute_all_indicators(
+        mock_session, TEST_INSTRUMENT_ID, "1d", "none", bars=250,
+    )
+
+    assert query_15min_called, (
+        "1d 请求在 VP 可用时应加载 15min 数据（VP profile）"
+    )
+    assert query_minute_called, (
+        "1d 请求在 VP 可用时应加载 minute 数据（VP crossover）"
+    )
+
+
+async def test_15m_always_loads_15min_regardless_of_vp(
+    mock_session: AsyncMock,
+    mock_bars: None,
+    empty_registry: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[CHANGE-20260716-001] 15m 请求始终加载 15min 数据（macd_bars 用途），独立于策略 registry。"""
+    # Mock _get_available_strategy_keys 返回空集合（模拟 VP 不可用）
+    monkeypatch.setattr(
+        indicator_service,
+        "_get_available_strategy_keys",
+        AsyncMock(return_value=set()),
+    )
+
+    # Spy: 记录 _query_15min_bars 是否被调用
+    query_15min_called = False
+
+    original_15min = indicator_service._query_15min_bars
+
+    async def spy_15min(*args, **kwargs):
+        nonlocal query_15min_called
+        query_15min_called = True
+        return await original_15min(*args, **kwargs)
+
+    monkeypatch.setattr(indicator_service, "_query_15min_bars", spy_15min)
+
+    await indicator_service.compute_all_indicators(
+        mock_session, TEST_INSTRUMENT_ID, "15m", "none", bars=50,
+    )
+
+    assert query_15min_called, (
+        "15m 请求应始终加载 15min 数据（macd_bars 用途），独立于策略 registry"
     )
 
 

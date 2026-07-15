@@ -1139,12 +1139,13 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
                           )}
                           aria-label={`筛选${col.title}`}
                           title={`筛选${col.title}`}
-                          onClick={(e) =>
+                          onClick={(e) => {
+                            e.stopPropagation()
                             setFilterPopover({
                               columnIndex: i,
                               anchor: e.currentTarget,
                             })
-                          }
+                          }}
                         >
                           ⌁
                         </button>
@@ -1198,7 +1199,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
                     className={clsx(activeRowKey === key && 'row-active')}
                   >
                     {selectable && (
-                      <td className="table-select-column">
+                      <td className="table-select-column" onClick={(e) => e.stopPropagation()}>
                         <label className="table-checkbox-wrapper">
                           <input
                             type="checkbox"

@@ -1410,58 +1410,29 @@ function renderIndicatorSqzmom(
 //   - mitigated OB 进一步降低透明度（alpha 0.05）
 //   - 标签小而克制（8px sans-serif）
 //   - 完全排除 FVG：不渲染任何 Fair Value Gap 元素
-// anchor/confirmed 因果契约:
-//   - BOS/CHoCH/OB/EQH/EQL 都从 anchor_index 画到 confirmed_index
-//   - anchor 时间在数据 time 数组中的索引，confirmed 同理
-//   - 时间通过 normalizeChartTime 与 K 线 displayTimes 匹配
-//   - 未来 bar 不得修改已确认事件（事件一旦写入即不可变，渲染只读取）
-interface SmcEvent {
-  type: 'BOS' | 'CHoCH'
-  bias: number  // 1=bullish, -1=bearish
-  internal?: boolean  // true=internal structure, false/undefined=swing
-  anchor_index: number
-  anchor_time: string | null
-  confirmed_index: number
-  confirmed_time: string | null
-  level?: number | null
-}
-
-interface SmcOrderBlock {
-  bar_high: number
-  bar_low: number
-  bar_time: string
-  bar_index: number
-  bias: number  // 1=bullish, -1=bearish
-  internal?: boolean  // true=internal OB, false/undefined=swing OB
-  confirmed_index: number
-  confirmed_time: string
-  mitigated: boolean
-  mitigated_index?: number | null
-  mitigated_time?: string | null
-}
-
-interface SmcEqualHighLow {
-  type: 'EQH' | 'EQL'
-  anchor_index: number
-  anchor_time: string | null
-  confirmed_index: number
-  confirmed_time: string | null
-  level: number
-  prev_level: number
-}
-
-interface SmcTrailing {
-  top: number | null
-  bottom: number | null
-  bar_time: string | null
-  bar_index: number | null
-  last_top_time: string | null
-  last_bottom_time: string | null
-}
-
-// SMC 配色（盘迹 V1：A 股上涨结构红，下跌结构绿）
-const SMC_BULL_COLOR = '#FF4D4F'   // 上涨结构（bias=1）
-const SMC_BEAR_COLOR = '#22C55E'   // 下跌结构（bias=-1）
+// [CHANGE-20260715-007] anchor/confirmed 因果契约（view adapter 后）:
+//   - 后端 view adapter 已将索引重基准到展示窗口（offset = max(0, total - display)）
+//   - SMC time 数组与 K 线 displayTimes 应 1:1 对齐（同 timeframe/adj/bars）
+//   - BOS/CHoCH: anchor_index → confirmed_index
+//   - OB: anchor_index → mitigated_index 或右端；clipped_left=True 时左端 clamp 到 plotLeft
+//   - EQH/EQL: 线段画到 second_pivot_index（新 pivot 所在 bar）；
+//     confirmed_index 用于因果确认/回放测试（不作为线段终点）
+//   - swing_bias 字段显式返回，trailing 强/弱高/低直接使用该字段
+//   - 仅渲染最近 5 个未 mitigated 的 internal OB
+// [CHANGE-20260715-008] SMC 类型/配色/纯函数抽离至 ./smcRendering（可独立测试，无 React/Canvas 依赖）
+import {
+  selectVisibleSmcOrderBlocks,
+  collectVisibleSmcPriceCandidates,
+  intersectSmcRangeWithViewport,
+  hexToRgba,
+  SMC_BULL_COLOR,
+  SMC_BEAR_COLOR,
+  type SmcEvent,
+  type SmcOrderBlock,
+  type SmcEqualHighLow,
+  type SmcTrailing,
+  type SmcSwingBias,
+} from './smcRendering'
 
 function renderIndicatorSmc(
   ctx: CanvasRenderingContext2D,
@@ -1481,12 +1452,17 @@ function renderIndicatorSmc(
   const orderBlocks: SmcOrderBlock[] = Array.isArray(smcData.order_blocks) ? smcData.order_blocks : []
   const equalHLs: SmcEqualHighLow[] = Array.isArray(smcData.equal_highs_lows) ? smcData.equal_highs_lows : []
   const trailing: SmcTrailing | null = smcData.trailing && typeof smcData.trailing === 'object' ? smcData.trailing : null
+  // CHANGE-20260715-007: swing_bias 为数值（1/-1/0），缺失时默认 0
+  const swingBias: SmcSwingBias = (typeof smcData.swing_bias === 'number'
+    ? smcData.swing_bias
+    : 0) as SmcSwingBias
   const smcTimes: (string | null)[] = Array.isArray(smcData.time) ? smcData.time : []
 
   if (!displayTimes.length) return
 
   // 构造 SMC time 数组索引 → K 线 display 索引的映射
-  // anchor/confirmed_index 是 SMC time 数组的索引，需先转 time 再匹配 K 线
+  // [CHANGE-20260715-007] view adapter 已将索引重基准到展示窗口，
+  // SMC time 数组与 K 线 displayTimes 应 1:1 对齐；时间匹配作为防御性回退
   const klineTimeIndex = new Map<string, number>()
   displayTimes.forEach((t, i) => {
     const key = normalizeChartTime(t, timeframe)
@@ -1496,66 +1472,81 @@ function renderIndicatorSmc(
   // 辅助：SMC time 数组索引 → K 线 display 索引
   const smcToDisplay = (smcIdx: number | null | undefined): number | undefined => {
     if (smcIdx == null) return undefined
-    const t = smcTimes[smcIdx]
-    if (t == null) return undefined
-    const key = normalizeChartTime(t, timeframe)
-    if (key == null) return undefined
-    return klineTimeIndex.get(key)
+    // 负索引（view adapter clipped_left 时 anchor 在窗口左侧）→ clamp 到 0
+    if (smcIdx < 0) return 0
+    // 索引在 SMC time 数组范围内 → 时间匹配
+    if (smcIdx < smcTimes.length) {
+      const t = smcTimes[smcIdx]
+      if (t != null) {
+        const key = normalizeChartTime(t, timeframe)
+        if (key != null) {
+          const klineIdx = klineTimeIndex.get(key)
+          if (klineIdx != null) return klineIdx
+        }
+      }
+    }
+    // 索引超出 SMC time 数组但可能在 K 线范围内 → 直接用作 display 索引（adapter 已重基准）
+    if (smcIdx < displayTimes.length) return smcIdx
+    return undefined
   }
 
   // ===== 1. 渲染 Order Blocks（低透明度矩形区域）=====
-  // 从 OB bar_index (anchor) 画到 confirmed_index 或 mitigated_index（取后者更晚的）
-  // bullish OB: 红色低透明度；bearish OB: 绿色低透明度
-  // mitigated OB: 进一步降低透明度
-  for (const ob of orderBlocks) {
-    const anchorDisplayIdx = smcToDisplay(ob.bar_index)
-    // OB 终点：mitigated 时用 mitigated_index，否则用 confirmed_index
-    // 但 OB 区域应该从 anchor 延伸到当前可见的最新 bar（或 mitigation 点）
-    let endDisplayIdx: number | undefined
-    if (ob.mitigated && ob.mitigated_index != null) {
-      endDisplayIdx = smcToDisplay(ob.mitigated_index)
-    } else {
-      // 未 mitigated 的 OB 延伸到当前可见区末尾
-      endDisplayIdx = displayTimes.length - 1
-    }
+  // [CHANGE-20260715-008] OB 选择逻辑抽离至 selectVisibleSmcOrderBlocks（可独立测试）
+  // 规则（PROMPT.md §四.2）：
+  //   - 只画 internal===true && mitigated===false（mitigated OB 不再渲染）
+  //   - 后端最新 OB 在数组头部 → slice(0, 5)
+  //   - clipped_left=True 时左端 clamp 到 plotLeft（g.l）
+  //   - x2 = 可见区右端（OB 未 mitigated → 延伸到当前可见区末尾）
+  //   - 与 viewport 无交集时跳过（由 selectVisibleSmcOrderBlocks 过滤）
+  const visibleObs = selectVisibleSmcOrderBlocks(orderBlocks, { displayCount: displayTimes.length })
+  for (const ob of visibleObs) {
+    const anchorDisplayIdx = smcToDisplay(ob.anchor_index)
     if (anchorDisplayIdx == null) continue
-    if (endDisplayIdx == null || endDisplayIdx < anchorDisplayIdx) continue
-
-    const x1 = g.l + (anchorDisplayIdx + 0.5) * step
-    const x2 = g.l + (endDisplayIdx + 0.5) * step
+    // x2 = 可见区右端（plotRight）：OB 未 mitigated → 延伸到当前可见区末尾
+    const x2 = g.plotRight
+    // x1: clipped_left 时 clamp 到 plotLeft（g.l）；否则取 anchor 位置
+    let x1 = g.l + (anchorDisplayIdx + 0.5) * step
+    // [CHANGE-20260715-007] clipped_left: anchor 在窗口左侧时 clamp 到 plotLeft
+    if (ob.clipped_left === true || ob.anchor_index < 0) {
+      x1 = g.l
+    }
+    // 与 viewport 无交集时跳过（x1 已超出右端）
+    if (x1 > x2) continue
     const yHigh = py(ob.bar_high)
     const yLow = py(ob.bar_low)
     const yTop = Math.min(yHigh, yLow)
     const height = Math.max(2, Math.abs(yHigh - yLow))
 
-    // 颜色与透明度
+    // 颜色与透明度（仅未 mitigated OB，alpha 0.12）
     const isBull = ob.bias === 1
-    const baseAlpha = ob.mitigated ? 0.05 : 0.12
     const color = isBull ? SMC_BULL_COLOR : SMC_BEAR_COLOR
-    // 解析 hex 颜色为 rgba
-    ctx.fillStyle = hexToRgba(color, baseAlpha)
+    ctx.fillStyle = hexToRgba(color, 0.12)
     ctx.fillRect(x1, yTop, Math.max(1, x2 - x1), height)
 
     // OB 边框（更淡）
-    ctx.strokeStyle = hexToRgba(color, ob.mitigated ? 0.15 : 0.3)
+    ctx.strokeStyle = hexToRgba(color, 0.3)
     ctx.lineWidth = 0.8
     ctx.strokeRect(x1, yTop, Math.max(1, x2 - x1), height)
   }
 
   // ===== 2. 渲染 BOS/CHoCH 线 =====
-  // 从 anchor 到 confirmed 画水平线（在 level 价格处）
+  // [CHANGE-20260716-001] viewport 区间求交（PROMPT.md §三.2）：
+  //   只要区间与viewport相交就绘制，不再要求 anchor 和 confirmed 都在 displayTimes 中。
+  //   anchor 在左侧时 x1=plotLeft（g.l）；confirmed 在右侧时 x2=plotRight。
+  //   仅完全不相交时跳过。
   // CHANGE-20260715-002: internal=虚线 dash=[4,3] + tiny(8px)标签；swing=实线 + small(11px)标签
   // 标签位于结构线中点（非左端）
   // internal: 更淡（alpha 0.7），更细（width 1）；swing: 实色，更粗（width 1.5）
+  // [CHANGE-20260716-001] 标签不加 ·I，与 TV 文字一致（PROMPT.md §三.3）
+  const smcVisCtx = { displayCount: displayTimes.length }
   for (const ev of events) {
-    const anchorDisplayIdx = smcToDisplay(ev.anchor_index)
-    const confirmedDisplayIdx = smcToDisplay(ev.confirmed_index)
-    if (anchorDisplayIdx == null || confirmedDisplayIdx == null) continue
-    if (confirmedDisplayIdx < anchorDisplayIdx) continue
     if (ev.level == null) continue
+    // viewport 区间求交（使用 view adapter 重基准后的索引，不依赖时间匹配）
+    const range = intersectSmcRangeWithViewport(ev.anchor_index, ev.confirmed_index, smcVisCtx)
+    if (range == null) continue
 
-    const x1 = g.l + (anchorDisplayIdx + 0.5) * step
-    const x2 = g.l + (confirmedDisplayIdx + 0.5) * step
+    const x1 = g.l + (range.startIdx + 0.5) * step
+    const x2 = g.l + (range.endIdx + 0.5) * step
     const y = py(ev.level)
 
     const isBull = ev.bias === 1
@@ -1574,23 +1565,26 @@ function renderIndicatorSmc(
     }
 
     // 标签位于结构线中点（CHANGE-20260715-002）
+    // [CHANGE-20260716-001] 标签不加 ·I，与 TV 文字一致
     const midX = (x1 + x2) / 2
-    const label = `${ev.type}${isInternal ? '·I' : ''}`
+    const label = ev.type
     const fontSize = isInternal ? '8px sans-serif' : '11px sans-serif'
     drawText(ctx, label, midX, y - 3, color, fontSize, 'center')
   }
 
   // ===== 3. 渲染 EQH/EQL =====
-  // 在 level 价格处从 anchor 到 confirmed 画短水平线
+  // [CHANGE-20260715-007] 线段画到 second_pivot_index（新 pivot 所在 bar）；
+  // confirmed_index 用于因果确认/回放测试（不作为线段终点）
+  // [CHANGE-20260716-001] viewport 区间求交（PROMPT.md §三.2）：
+  //   anchor 在左侧时 x1=plotLeft；second_pivot 在右侧时 x2=plotRight。
   // EQH/EQL 用蓝色（中性色，因为等高/等低不区分涨跌方向）
   for (const eq of equalHLs) {
-    const anchorDisplayIdx = smcToDisplay(eq.anchor_index)
-    const confirmedDisplayIdx = smcToDisplay(eq.confirmed_index)
-    if (anchorDisplayIdx == null || confirmedDisplayIdx == null) continue
-    if (confirmedDisplayIdx < anchorDisplayIdx) continue
+    // viewport 区间求交（anchor → second_pivot）
+    const range = intersectSmcRangeWithViewport(eq.anchor_index, eq.second_pivot_index, smcVisCtx)
+    if (range == null) continue
 
-    const x1 = g.l + (anchorDisplayIdx + 0.5) * step
-    const x2 = g.l + (confirmedDisplayIdx + 0.5) * step
+    const x1 = g.l + (range.startIdx + 0.5) * step
+    const x2 = g.l + (range.endIdx + 0.5) * step
     const y = py(eq.level)
 
     drawLine(ctx, x1, y, x2, y, C.blue2, 1, [2, 2])
@@ -1598,14 +1592,9 @@ function renderIndicatorSmc(
   }
 
   // ===== 4. 渲染 trailing strong/weak high/low =====
-  // CHANGE-20260715-002: 文案使用"强高/弱高/强低/弱低"
-  // 分类规则（Pine 语义）：
-  //   "强高" if swingTrend.bias == BEARISH(-1) else "弱高"
-  //   "强低" if swingTrend.bias == BULLISH(1) else "弱低"
-  // swingTrend.bias 从最后一个 swing 事件（internal=false）的 bias 获取
-  const lastSwingEvent = events.filter((e) => e.internal !== true).pop()
-  const swingBias = lastSwingEvent?.bias ?? 0
-
+  // CHANGE-20260715-007: Strong/Weak 直接读取 DTO swing_bias（state.swing_trend.bias）
+  // 禁止从最后一个可见 swing 事件猜测
+  // 规则：bias===-1 → 强高（否则弱高）；bias===1 → 强低（否则弱低）
   if (trailing && trailing.top != null) {
     const lastDisplayIdx = displayTimes.length - 1
     const x = g.l + (lastDisplayIdx + 0.5) * step
@@ -1630,25 +1619,7 @@ function renderIndicatorSmc(
   }
 }
 
-// [CHANGE-011 SMC] - hex 颜色转 rgba（用于 OB 区域透明度控制）
-function hexToRgba(hex: string, alpha: number): string {
-  // 支持 #RRGGBB 和 #RGB 格式
-  const cleaned = hex.replace('#', '')
-  let r: number, g: number, b: number
-  if (cleaned.length === 3) {
-    r = parseInt(cleaned[0] + cleaned[0], 16)
-    g = parseInt(cleaned[1] + cleaned[1], 16)
-    b = parseInt(cleaned[2] + cleaned[2], 16)
-  } else if (cleaned.length === 6) {
-    r = parseInt(cleaned.substring(0, 2), 16)
-    g = parseInt(cleaned.substring(2, 4), 16)
-    b = parseInt(cleaned.substring(4, 6), 16)
-  } else {
-    // 无法解析，返回原始 hex
-    return hex
-  }
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`
-}
+// [CHANGE-011 SMC] - hexToRgba 已抽离至 ./smcRendering（与 SMC 纯函数同居）
 
 // ===== 事件映射与可见性 =====
 
@@ -1796,6 +1767,24 @@ function drawTrading(
     profile.nodes.forEach(n => {
       priceCandidates.push(n.lo, n.hi)
     })
+  }
+
+  // [CHANGE-011 SMC] - SMC 纵轴价格候选（PROMPT.md §四.3）
+  // 加入当前可见的：event.level / OB bar_high,bar_low / EQH,EQL level / trailing top,bottom
+  // 目的：避免 SMC 元素被画出 Canvas（纵轴范围必须包含所有可见 SMC 价格）
+  if (layers.smc && indicators?.layers && indicators?.data) {
+    const smcLayer = indicators.layers.find(l => l.layer_id === 'smc')
+    if (smcLayer) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const smcLayerData = indicators.data[smcLayer.strategy_id] as any
+      if (smcLayerData && typeof smcLayerData === 'object') {
+        const smcCandidates = collectVisibleSmcPriceCandidates(
+          smcLayerData,
+          { displayCount: displayTimes.length },
+        )
+        priceCandidates.push(...smcCandidates)
+      }
+    }
   }
 
   const rawMin = priceCandidates.length ? Math.min(...priceCandidates) : Math.min(...display.map(d => d.low))

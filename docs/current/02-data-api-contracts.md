@@ -214,17 +214,27 @@ capture worker 浏览器上下文使用 `viewport=1920x1200` + `device_scale_fac
 - `include_smc=true` 时 cache key 追加 `:smc` 后缀，与默认路径（`include_smc=false`）完全隔离；
 - 默认路径缓存不包含 SMC 字段，不因 SMC 上线影响常规请求性能；
 - SMC 计算路径变更同样需要 bump `ALGORITHM_VERSION` 使旧缓存失效；
-- 当前 `ALGORITHM_VERSION = "v7"`（CHANGE-20260715-002：SMC 从 SMA 基线升级为 Pine parity，旧 v6 缓存强制失效）；
+- 当前 `ALGORITHM_VERSION = "v9"`（CHANGE-20260716-001：crossover/crossunder level_curr/level_prev 快照修正，旧 v8 缓存强制失效；CHANGE-20260715-002：SMC 从 SMA 基线升级为 Pine parity v7；CHANGE-20260715-006：RMA NA 语义 + off-by-one + EQH/EQL 三时间点 v8）；
 - 禁止 Redis FLUSHDB/FLUSHALL，只允许精确 DEL 测试键。
 
 ### 9.5.3 输出字段
 
 `data.smc`（仅 `include_smc=true` 时存在）包含市场结构关键点位序列，**time 数组保持完整长度对齐 anchor/confirmed 索引**（不调用 `_truncate_lists` 截断 SMC 输出）；前端 `smcToDisplay` 通过时间匹配自动过滤展示区外事件。**FVG（Fair Value Gap）完全排除**——不计算、不返回、不缓存、不渲染，不暴露 FVG 开关；FVG 排除不改变其他逻辑的索引、执行顺序和右侧延伸。
 
-**Pine 语义对齐（CHANGE-20260715-006）**：
+**SMC source 诊断字段（CHANGE-20260716-001）**：`include_smc=true` 时响应顶层额外返回以下字段，用于验证 SMC 实际计算的输入数据源：
+- `smc_source_bar_hash`：基于 SMC 实际完整输入（`smc_bars`）计算的 hash；1d timeframe 使用 `full_daily_bars`（DB 全量日线），其他周期使用 `macd_bars`；**不得复用截断后的 `source_bar_hash`**（后者基于截断后的 250 根 macd_bars）
+- `smc_source_first_time`：SMC 输入首根 bar 时间
+- `smc_source_last_time`：SMC 输入末根 bar 时间
+- `smc_source_bars`：SMC 输入 bar 数量
+- `smc_adj`：复权方式
+- `include_smc=false` 时所有 `smc_source_*` 字段为 `None`/`0`
+
+**Pine 语义对齐（CHANGE-20260715-006 → CHANGE-20260716-001 crossover 修正）**：
 - `pine_rma(src, length)` 严格复现 Pine v5 `ta.rma`：`bar_index < length-1` 返回 `na`（非逐步 SMA），`bar_index == length-1` 写入 SMA 种子，之后 Wilder 递推；ATR(200) 前 199 根为 `na`；
 - 首个 pivot 在 `i == size` 检测（`start_of_new_leg` 使用 `i >= size`，非 `i > size`），对齐 Pine `ta.change(leg)` 在 `bar_index == size` 时可首次非零；
-- EQH/EQL DTO 三时间点：`anchor_index`/`anchor_time`（前一 pivot bar）、`confirmed_index`/`confirmed_time`（新 pivot bar, `ref_i=i-size`）、`detection_index`/`detection_time`（leg change 确认 bar, `i`）；
+- **crossover/crossunder level_curr/level_prev 快照（CHANGE-20260716-001）**：`displayStructure` 接收 `level_curr`（当前 Bar pivot level）和 `level_prev`（上一 Bar pivot level）独立快照——crossover=`close_curr > level_curr && close_prev <= level_prev`，crossunder=`close_curr < level_curr && close_prev >= level_prev`，NaN→False；每 Bar 快照六个 pivot level（swing/internal high/low 及 equal 状态，按 swing/internal 独立，不互相覆盖）；旧实现错误地将 `current_level` 同时作为 curr 和 prev（`pine_crossover(close_curr, close_prev, current_level, current_level)`）；
+- **EQH/EQL DTO 三时间点（CHANGE-20260715-006 → CHANGE-20260716-001 统一）**：`anchor_index`/`anchor_time`（前一 pivot bar）、`second_pivot_index`/`second_pivot_time`（新 pivot bar, `ref_i=i-size`，**视觉线端点**）、`confirmed_index`/`confirmed_time`（当前检测 Bar `i`，**因果/回放使用**）；`ref_i` 不得命名为 `confirmed`；`detection_index`/`detection_time`（leg change 确认 bar, `i`，与 confirmed 同义但语义更明确）；
+- **`swing_bias` 直接返回 `state.swing_trend.bias`（CHANGE-20260716-001）**：值域 {1, -1, 0}；前端从 DTO `swing_bias` 字段读取，禁止从可见事件猜测；
 - OB slice `[piv.bar_index, current_i)` end-exclusive（Python 切片天然 end-exclusive，对齐 Pine `array.slice()`）。
 
 ### 9.5.4 warmup 契约
@@ -807,7 +817,7 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 - cache key 格式：`indicator:{algorithm_version}:{timeframe}:{adj}:{bars}:{symbol}`（SMC 按需启用时追加 `:smc` 后缀，与默认路径隔离，避免 SMC 计算结果污染无 SMC 响应缓存）；
 - 旧版本 cache key 与新版本不匹配，强制重算，避免旧格式 `source_bar_times` 或日线阶梯线 BB 污染渲染；
 - 禁止通过手动 `DEL` 单只股票 key 修复缓存问题（不可扩展，且无法覆盖所有时间周期）；
-- 当前 `ALGORITHM_VERSION = "v7"`（CHANGE-20260715-002：SMC 从 SMA 基线升级为 Pine parity 核心，旧 v6 缓存强制失效；CHANGE-20260715-001：新增 SMC 指标并按需启用，缓存 key 追加 `:smc` 后缀隔离）。
+- 当前 `ALGORITHM_VERSION = "v9"`（CHANGE-20260716-001：crossover/crossunder level_curr/level_prev 快照修正，旧 v8 缓存强制失效；CHANGE-20260715-006：RMA NA 语义 + off-by-one + EQH/EQL 三时间点 v8；CHANGE-20260715-002：SMC 从 SMA 基线升级为 Pine parity 核心 v7，旧 v6 缓存强制失效；CHANGE-20260715-001：新增 SMC 指标并按需启用，缓存 key 追加 `:smc` 后缀隔离）。
 
 #### 12.5.3.1 `force_refresh` / `capture` 查询参数（旁路缓存）
 

@@ -352,6 +352,63 @@ class TestAnchorConfirmedContract:
             assert "anchor_index" in eq, f"EQH/EQL 缺少 anchor_index: {eq}"
             assert "confirmed_index" in eq, f"EQH/EQL 缺少 confirmed_index: {eq}"
 
+    def test_equal_highs_lows_use_second_pivot_naming(self) -> None:
+        """CHANGE-20260715-007: EQH/EQL DTO 使用 second_pivot/confirmed 三时间点命名。
+
+        - anchor_index/time: 前一 pivot 的 bar 位置
+        - second_pivot_index/time: 新 pivot 所在 bar (= ref_i = i-size)
+        - confirmed_index/time: leg change 检测 bar (= i，因果确认点)
+        禁止继续把 ref_i 命名为 confirmed，或把 i 命名为 detection。
+        """
+        opens, highs, lows, closes, times = _gen_random_bars(300, seed=654)
+        result = compute_smc_indicators(opens, highs, lows, closes, times)
+        eqs = result["equal_highs_lows"]
+        if not eqs:
+            # 数据未触发 EQH/EQL，仅断言字段不存在的旧名（防御性）
+            return
+        for eq in eqs:
+            # 新字段必须存在
+            assert "second_pivot_index" in eq, f"EQH/EQL 缺少 second_pivot_index: {eq}"
+            assert "second_pivot_time" in eq, f"EQH/EQL 缺少 second_pivot_time: {eq}"
+            assert "confirmed_index" in eq, f"EQH/EQL 缺少 confirmed_index: {eq}"
+            assert "confirmed_time" in eq, f"EQH/EQL 缺少 confirmed_time: {eq}"
+            # 旧字段名必须不存在（CHANGE-20260715-007 已重命名）
+            assert "detection_index" not in eq, f"EQH/EQL 不得含旧字段 detection_index: {eq}"
+            assert "detection_time" not in eq, f"EQH/EQL 不得含旧字段 detection_time: {eq}"
+            # 因果顺序：anchor <= second_pivot <= confirmed
+            assert eq["anchor_index"] <= eq["second_pivot_index"], (
+                f"anchor_index ({eq['anchor_index']}) 应 <= second_pivot_index "
+                f"({eq['second_pivot_index']})"
+            )
+            assert eq["second_pivot_index"] <= eq["confirmed_index"], (
+                f"second_pivot_index ({eq['second_pivot_index']}) 应 <= confirmed_index "
+                f"({eq['confirmed_index']})"
+            )
+
+    def test_swing_bias_returned_and_valid(self) -> None:
+        """CHANGE-20260715-007: compute_smc 返回 swing_bias 字段，值合法。
+
+        合法值：1（bullish）、-1（bearish）、0（尚未形成趋势）
+        空数据时返回 0；正常数据时透传 state.swing_trend.bias。
+        禁止根据 trailing 时间、close 位置或最后一个可见事件重新推断。
+        """
+        # 空数据 → 0
+        empty_result = compute_smc_indicators([], [], [], [], [])
+        assert empty_result["swing_bias"] == 0, "空数据 swing_bias 应为 0"
+
+        # 正常数据 → 必须为合法值
+        opens, highs, lows, closes, times = _gen_random_bars(300, seed=987)
+        result = compute_smc_indicators(opens, highs, lows, closes, times)
+        assert "swing_bias" in result, "compute_smc 必须返回 swing_bias 字段"
+        valid_biases = {1, -1, 0}
+        assert result["swing_bias"] in valid_biases, (
+            f"swing_bias 应为 {valid_biases} 之一，实得: {result['swing_bias']}"
+        )
+        # 必须为 int 类型（不是字符串）
+        assert isinstance(result["swing_bias"], int), (
+            f"swing_bias 必须为 int 类型，实得 {type(result['swing_bias']).__name__}"
+        )
+
 
 # ===== 6. BOS/CHoCH 事件 =====
 

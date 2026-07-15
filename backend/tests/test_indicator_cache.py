@@ -65,23 +65,24 @@ def test_cache_key_construction() -> None:
     assert key_none_adj != key, "不同 adj 应生成不同键"
 
 
-def test_cache_algorithm_version_bumped_to_v7() -> None:
-    """[CHANGE-20260715-002] - ALGORITHM_VERSION 必须 bump 到 v7。
+def test_cache_algorithm_version_bumped_to_v9() -> None:
+    """[CHANGE-20260716-001] - ALGORITHM_VERSION 必须 bump 到 v9。
 
-    v6 → v7 原因：CHANGE-20260715-002 SMC Pine parity 重写（smc_pine_core.py 唯一核心）。
-    bump 到 v7 后，旧 v6 缓存键自然不匹配，强制重算。
+    v8 → v9 原因：CHANGE-20260716-001 SMC crossover/crossunder 修正（pivot level
+    上一 bar 快照，不再将 current_level 同时作为 [0] 和 [1]）。旧 v8 事件数量/位置
+    可能不同，必须强制失效。
     """
-    assert indicator_cache.ALGORITHM_VERSION == "v7", (
-        f"ALGORITHM_VERSION 应为 v7（CHANGE-20260715-002 SMC Pine parity 后 bump），"
+    assert indicator_cache.ALGORITHM_VERSION == "v9", (
+        f"ALGORITHM_VERSION 应为 v9（CHANGE-20260716-001 SMC crossover 修正后 bump），"
         f"实际为 {indicator_cache.ALGORITHM_VERSION}"
     )
 
-    # 验证新 key 包含 v7，不包含 v6
+    # 验证新 key 包含 v9，不包含 v8
     key = indicator_cache.build_cache_key(
         TEST_INSTRUMENT_ID, "1d", "qfq", "2026-07-06",
     )
-    assert ":v7" in key, f"新缓存键应含 v7: {key}"
-    assert ":v6" not in key, f"新缓存键不应含 v6: {key}"
+    assert ":v9" in key, f"新缓存键应含 v9: {key}"
+    assert ":v8" not in key, f"新缓存键不应含 v8: {key}"
 
 
 def test_old_v4_cache_key_not_matched() -> None:
@@ -304,8 +305,8 @@ if __name__ == "__main__":
     assert indicator_cache.CACHE_TTL_SECONDS == 300
     print(f"CACHE_TTL_SECONDS={indicator_cache.CACHE_TTL_SECONDS} OK")
 
-    # 验证算法版本
-    assert indicator_cache.ALGORITHM_VERSION == "v6"
+    # 验证算法版本（CHANGE-20260716-001: 已 bump 到 v9）
+    assert indicator_cache.ALGORITHM_VERSION == "v9"
     print(f"ALGORITHM_VERSION={indicator_cache.ALGORITHM_VERSION} OK")
 
     print("OK")

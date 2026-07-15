@@ -487,6 +487,154 @@ class TestResumeEndpoint:
         assert response.status_code == 400, f"响应体: {response.text}"
         assert "非盘后编排" in response.json()["detail"]
 
+    @pytest.mark.asyncio
+    async def test_resume_idempotent_returns_queued_task(
+        self, db_session, admin_user
+    ) -> None:
+        """场景 5：已 queued 任务再次调用 resume，幂等返回同一任务（不报错、不新建事件）。
+
+        given: after_close 任务 status=queued（前一次 resume 已提交）
+        when: POST /admin/after-close-runs/{id}/resume
+        then: 响应 200 + status=queued + 幂等消息
+        """
+        _override_get_db(db_session)
+        job_run = await _create_after_close_job_run(
+            db_session,
+            status="queued",
+            orchestrator_status="queued",
+            last_completed_step="quality_gate",
+        )
+        await db_session.flush()
+
+        transport = make_asgi_transport(app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                f"/admin/after-close-runs/{job_run.id}/resume",
+                headers=_auth_headers(admin_user.id),
+            )
+
+        assert response.status_code == 200, f"响应体: {response.text}"
+        data = response.json()
+        assert data["status"] == "queued"
+        assert "幂等" in data["message"]
+
+    @pytest.mark.asyncio
+    async def test_resume_same_day_active_run_returns_409(
+        self, db_session, admin_user
+    ) -> None:
+        """场景 6：同 trade_date 已有另一 queued/running 任务时返 409 SAME_DAY_ACTIVE_RUN。
+
+        given: 两个同 trade_date 的 after_close 任务，一个 failed，一个 running
+        when: POST /admin/after-close-runs/{failed_id}/resume
+        then: 响应 409 + error_code=SAME_DAY_ACTIVE_RUN
+        """
+        _override_get_db(db_session)
+        trade_date = date(2026, 6, 25)
+
+        # 第一个任务：failed（可 resume）
+        failed_run = await _create_after_close_job_run(
+            db_session,
+            status="failed",
+            orchestrator_status="failed",
+            trade_date=trade_date,
+            last_completed_step="quality_gate",
+        )
+
+        # 第二个任务：running（同日活跃，阻止 resume）
+        running_run = await _create_after_close_job_run(
+            db_session,
+            status="running",
+            orchestrator_status="feature_snapshot",
+            trade_date=trade_date,
+        )
+        # 修正 run_key 避免唯一约束冲突
+        running_run.run_key = f"after_close_orchestrator:test:running:{uuid.uuid4().hex[:8]}"
+        await db_session.flush()
+
+        transport = make_asgi_transport(app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                f"/admin/after-close-runs/{failed_run.id}/resume",
+                headers=_auth_headers(admin_user.id),
+            )
+
+        assert response.status_code == 409, f"响应体: {response.text}"
+        detail = response.json()["detail"]
+        assert detail["error_code"] == "SAME_DAY_ACTIVE_RUN"
+        assert detail["conflicting_run_id"] == str(running_run.id)
+
+    @pytest.mark.asyncio
+    async def test_resume_writes_manual_resume_event_and_metadata(
+        self, db_session, admin_user
+    ) -> None:
+        """场景 7：resume 写入 manual_resume 事件 + metadata 含 resume_requested_at。
+
+        given: after_close 任务 status=interrupted
+        when: POST /admin/after-close-runs/{id}/resume
+        then:
+          - job_run_event 表有一条 step=manual_resume 事件
+          - metadata 含 resume_requested_at（ISO 字符串）
+          - worker_instance_id 被清空
+          - heartbeat_at / lease_expires_at 被清空
+        """
+        from sqlalchemy import select as sa_select
+
+        from app.models.job_run_event import JobRunEvent
+
+        _override_get_db(db_session)
+        job_run = await _create_after_close_job_run(
+            db_session,
+            status="interrupted",
+            orchestrator_status="feature_snapshot",
+            last_completed_step="quality_gate",
+        )
+        # 设置 worker_instance_id 模拟中断前有 worker
+        job_run.worker_instance_id = "worker-abc-123"
+        await db_session.flush()
+
+        transport = make_asgi_transport(app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                f"/admin/after-close-runs/{job_run.id}/resume",
+                headers=_auth_headers(admin_user.id),
+            )
+
+        assert response.status_code == 200, f"响应体: {response.text}"
+
+        # 验证 metadata 含 resume_requested_at
+        await db_session.refresh(job_run)
+        meta = json.loads(job_run.metadata_json)
+        assert "resume_requested_at" in meta, (
+            f"metadata 应含 resume_requested_at: {meta}"
+        )
+        assert meta["orchestrator_status"] == "queued"
+
+        # 验证 worker_instance_id / heartbeat_at / lease_expires_at 清空
+        assert job_run.worker_instance_id is None, (
+            f"worker_instance_id 应被清空: {job_run.worker_instance_id}"
+        )
+        assert job_run.heartbeat_at is None, (
+            f"heartbeat_at 应被清空: {job_run.heartbeat_at}"
+        )
+        assert job_run.lease_expires_at is None, (
+            f"lease_expires_at 应被清空: {job_run.lease_expires_at}"
+        )
+        assert job_run.finished_at is None
+        assert job_run.error_message is None
+        assert job_run.error_code is None
+
+        # 验证 manual_resume 事件
+        event_stmt = sa_select(JobRunEvent).where(
+            JobRunEvent.job_run_id == job_run.id,
+            JobRunEvent.step == "manual_resume",
+        )
+        event_result = await db_session.execute(event_stmt)
+        events = event_result.scalars().all()
+        assert len(events) == 1, (
+            f"应写入 1 条 manual_resume 事件，实际 {len(events)}"
+        )
+        assert events[0].level == "info"
+
 
 # ============================================================
 # Task 8: POST /admin/after-close-runs 创建端点 409 detail 透明化 + 成功文案

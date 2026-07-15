@@ -276,8 +276,11 @@
 | `test_share_capital.py` | 14 tests | 股本同步 + migration 063 + quote 市值计算（CHANGE-20260713-010） |
 | 前端 node 测试 | 108 tests | 64 route/url/types + 44 contract |
 | `change010Contract.test.ts` | 49 tests | CHANGE-010 前端源码契约（市值/MiniKline/MarketRightPanel/filterAlias/Excel） |
-| `test_smc_indicator.py` | 34+8+1 tests | SMC Pine 语义核心 + FVG 排除 + Pine 原语 8 用例 + golden fixture skip（CHANGE-20260715-001 → CHANGE-20260715-002） |
-| `miniKlineViewport.test.ts` | 15 tests | MiniKline viewport 彻底重写（目标根数 + barSpacing clamp + autoscale range）（CHANGE-20260715-002） |
-| `miniKlineCardContract.test.ts` | 15 tests | MiniKlineCard 组件源码契约（无 fitContent、setVisibleLogicalRange、autoscaleInfoProvider、ResizeObserver、requestAnimationFrame、五周期按钮、A 股配色）（CHANGE-20260715-003） |
+| `test_smc_indicator.py` | 34+8+1 tests | SMC Pine 语义核心 + FVG 排除 + Pine 原语 8 用例 + golden fixture skip（CHANGE-20260715-001 → CHANGE-20260715-002 → CHANGE-20260715-006 RMA NA + off-by-one + 三时间点 → CHANGE-20260716-001 crossover level_curr/level_prev 快照） |
+| `test_smc_view_adapter.py` | 31 tests | SMC view adapter 有界 DTO + 重基准索引 + clipped OB（CHANGE-20260716-001） |
+| `test_smc_tv_parity.py` | 3 tests | TV CSV parity（bar/event/swing_bias），无 fixture 时 skip（CHANGE-20260716-001） |
+| `miniKlineViewport.test.ts` | 15 tests | MiniKline viewport（目标根数 + logical range + autoscale range）（CHANGE-20260715-002 → CHANGE-20260716-001 真实方案：slice(-target)、{from:-2,to:len-1+3}、删除死 barSpacing） |
+| `miniKlineCardContract.test.ts` | 20 tests | MiniKlineCard 组件源码契约（无 fitContent、setVisibleLogicalRange、autoscaleInfoProvider、ResizeObserver、requestAnimationFrame、五周期按钮、A 股配色、闭包根治 16-20）（CHANGE-20260715-003 → CHANGE-20260715-006） |
+| `smcRendering.test.ts` | 40 tests | SMC 渲染纯函数（映射/区间求交/OB 选择/价格候选）+ Canvas mock 行为测试（CHANGE-20260716-001） |
 | `detailSourceLoadingContract.test.ts` | 9 tests | 详情页来源列表 loading 占位契约（sourceListLoading 字段、loading 占位渲染、列表渲染条件排除 loading、header 显示、CSS 存在、handleNavigateToStock 显式传 source/strategy、URL 完整性、不使用 useMarketStocks、上一只/下一只保留 returnTo）（CHANGE-20260715-004） |
 | `indicatorManifest.test.ts` | 15 tests | CHART_LAYER_MANIFEST 用户文案 + SMC 图层（CHANGE-20260715-001 扩展 3 用例） |

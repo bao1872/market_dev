@@ -356,6 +356,31 @@ button { cursor: pointer; }
   &.ghost { background: transparent; }
   &.small { height: 28px; padding: 0 9px; font-size: 12px; }
   &.success { background: rgba(38, 166, 154, .14); color: #68d5cc; border-color: rgba(38, 166, 154, .35); }
+  &.warning { background: rgba(255, 152, 0, .14); color: #ffb74d; border-color: rgba(255, 152, 0, .35); &:hover { background: rgba(255, 152, 0, .22); } }
+}
+
+// ===== Date selector (admin after-close page) =====
+.date-selector-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.date-selector-label {
+  font-size: 12px;
+  color: #8b92a7;
+  white-space: nowrap;
+}
+.date-selector-select {
+  height: 28px;
+  border-radius: 7px;
+  padding: 0 8px;
+  font-size: 12px;
+  border: 1px solid v.$color-border;
+  background: #1d222d;
+  color: #d2d6df;
+  cursor: pointer;
+  &:hover { border-color: #49536b; }
+  &:focus { outline: none; border-color: v.$color-blue; }
 }
 
 // ===== Grid / Cards =====
@@ -466,10 +491,10 @@ button { cursor: pointer; }
 .chip-row { display: flex; gap: 6px; flex-wrap: wrap; }
 
 // ===== Data Table =====
-// CHANGE-20260715-005: table-shell 替代 table-wrap，工具栏/分页器移出横向滚动容器
+// CHANGE-20260715-007: table-shell/table-scroll flex 约束，确保 meta-bar/pager 不横滚
 // 结构：table-shell > meta-bar + search-bar + table-scroll > table + pager
-// table-shell 使用 minmax(0,1fr) 约束宽度，meta-bar/pager 右边界等于 table-scroll 右边界
-.table-shell { display: flex; flex-direction: column; min-width: 0; border-radius: 0 0 v.$radius-base v.$radius-base; }
+// table-shell flex:1 1 auto 占满父容器；meta-bar/pager 固定不横滚；table-scroll 唯一横滚容器
+.table-shell { display: flex; flex-direction: column; flex: 1 1 auto; width: 100%; max-width: 100%; min-width: 0; min-height: 0; overflow: hidden; border-radius: 0 0 v.$radius-base v.$radius-base; }
 // [StickyHeader] - 描述: viewport sticky 模式下 .table-shell 不抢占滚动容器，
 // 表头随页面滚动吸附在 topbar 下方（top: var(--topbar)；z-index 低于 topbar 的 20）
 .table-shell.viewport-sticky .table-scroll { overflow: visible; }
@@ -479,14 +504,15 @@ button { cursor: pointer; }
   top: var(--topbar);
   z-index: 18;
 }
-// CHANGE-20260715-005: 只有 table-scroll 设置 overflow-x: auto
-.table-scroll { overflow-x: auto; }
+// CHANGE-20260715-007: table-scroll 唯一横滚容器；scrollbar-gutter:stable 防止内容跳动
+.table-scroll { flex: 1 1 auto; width: 100%; max-width: 100%; min-width: 0; min-height: 0; overflow: auto; scrollbar-gutter: stable; }
 // CHANGE-20260715-005: 全文搜索栏移出横向滚动容器
 .table-search-bar { padding: 8px 10px; border-bottom: 1px solid v.$color-border-soft; }
 
 .data-table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   white-space: nowrap;
 
   th {
@@ -1166,11 +1192,13 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 // ===== Mini K 线卡片（右栏五周期小图）CHANGE-20260714-001 =====
 // 紧凑 segmented control：深色背景、统一高度、1px 边框；active 莹感绿文字/边框/轻底色
 // 340px 右栏不裁切：强制 width/max-width:100%、min-width:0、box-sizing、overflow:hidden
+// [CHANGE-20260716-001] MiniKline CSS 重做（PROMPT.md §四.5）：
+//   tabs 五等分全宽 grid；chart 明确 height:190px；card 无多余空白
 .mini-kline-card {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 8px 10px 4px;
+  gap: 4px;
+  padding: 6px 8px 4px;
   width: 100%;
   max-width: 100%;
   min-width: 0;
@@ -1178,21 +1206,23 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
   overflow: hidden;
 }
 .mini-kline-tabs {
-  display: inline-flex;
-  align-self: flex-start;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  width: 100%;
   border: 1px solid v.$color-border;
   border-radius: 7px;
   overflow: hidden;
 }
 .mini-kline-tab {
   height: 26px;
-  padding: 0 9px;
+  padding: 0 4px;
   border: 0;
   border-right: 1px solid v.$color-border;
   background: #161a23;
   color: v.$color-muted;
   font-size: 12px;
   cursor: pointer;
+  text-align: center;
   &:last-child { border-right: 0; }
   &:hover { color: #d2d6df; }
   &.active {
@@ -1203,12 +1233,13 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 }
 .mini-kline-empty, .mini-kline-loading, .mini-kline-error {
   display: flex; align-items: center; justify-content: center;
-  height: 200px; font-size: 12px; color: v.$color-muted;
+  height: 190px; font-size: 12px; color: v.$color-muted;
 }
 .mini-kline-chart {
   width: 100%;
   max-width: 100%;
   min-width: 0;
+  height: 190px;
   box-sizing: border-box;
   overflow: hidden;
 }
@@ -1356,9 +1387,15 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 // CHANGE-20260715-005: 涨跌幅保持普通列，删除死 CSS .sticky-col-change-pct
 .table-action-column { min-width: 86px; }
 // [StrategyDataTable] - 描述: 选中行高亮（onRowClick + activeRowKey 驱动，用于 /market 选中行驱动右栏）
+// CHANGE-20260715-007: sticky-col 和 table-select-column 四态背景必须完全不透明，
+// 禁止 rgba 透明背景导致横向滚动时后续列文字透出。
+// 四态：normal(#11161e) / hover(#171e29) / row-active(#1a243e) / row-active+hover(#1f2b47)
+// 非sticky 列可使用 rgba（不存在透出问题）
 .interactive-table tbody tr.row-active td { background: rgba(79, 124, 255, .10); }
-.interactive-table tbody tr.row-active td.sticky-col { background: rgba(79, 124, 255, .14); }
-.interactive-table tbody tr.row-active td.table-select-column { background: rgba(79, 124, 255, .14); }
+.interactive-table tbody tr.row-active td.sticky-col { background: #1a243e; }
+.interactive-table tbody tr.row-active td.table-select-column { background: #1a243e; }
+.interactive-table tbody tr.row-active:hover td.sticky-col { background: #1f2b47; }
+.interactive-table tbody tr.row-active:hover td.table-select-column { background: #1f2b47; }
 // [ColumnManager] - 描述: 列设置弹窗中的列顺序调整按钮
 .column-manager-list { display: flex; flex-direction: column; gap: 4px; max-height: 320px; overflow: auto; }
 .column-manager-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 4px; background: #171d28; &:hover { background: #1d2433; } }

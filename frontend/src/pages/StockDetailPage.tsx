@@ -23,16 +23,15 @@ import { useStockDetailFeishu } from '@/features/stock-research/useStockDetailFe
 import {
   type DisplayTimeframe,
   normalizeDisplayTimeframe,
-  normalizeResearchSource,
 } from '@/features/stock-research/stockResearchTypes'
 // [CHANGE-011 SMC] - 加载初始 layerVisibility.smc 状态，驱动 indicators 按需重拉
 import { loadChartLayerVisibility } from '@/features/stock-research/indicatorPreferences'
 import { formatShanghaiTimeShort } from '@/utils/datetime'
 import { MARKET_LABELS } from '@/utils/market'
 import { resolveBackPath } from './detailNavigation'
-import { STRATEGY_KEYS } from '@/constants/strategyKeys'
 import { useToast } from '@/store/toast'
 import { changePctColorClass, fmtChange } from '@/features/trend-selection'
+import { resolveDetailSourceContext } from '@/features/stock-research/detailSourceContext'
 
 // CHANGE-20260714-001: 左栏来源列表滚动位置 sessionStorage key 前缀
 // key 由 returnTo + scope 生成稳定 hash，避免不同来源上下文串扰
@@ -51,9 +50,14 @@ export default function StockDetailPage() {
   const location = useLocation()
   const showToast = useToast((s) => s.show)
 
-  // 解析 URL 参数
-  const source = normalizeResearchSource(searchParams.get('source'))
-  const strategy = searchParams.get('strategy') || STRATEGY_KEYS.WATCHLIST_MONITOR
+  // CHANGE-20260715-007: 统一来源上下文解析——resolveDetailSourceContext 为唯一真源
+  // 优先级：有效 /market returnTo.scope → 合法 source 参数 → 默认 watchlist
+  const returnToParam = searchParams.get('returnTo')
+  const { source, strategy, marketContext, sourceContextInvalid } = resolveDetailSourceContext(
+    returnToParam,
+    searchParams.get('source'),
+    searchParams.get('strategy'),
+  )
   const isCaptureMode = searchParams.get('capture') === 'feishu'
   // [结构状态隐藏开关] - hideStructuralState=1 / capture=1 / capture=feishu 强制隐藏面板
   const hideStructuralStateParam =
@@ -124,13 +128,16 @@ export default function StockDetailPage() {
   const instrumentId = researchData.instrumentId
 
   // 详情页专属 actions（自选/上下切换/memo + returnTo 上下文恢复左栏列表）
-  const returnToParam = searchParams.get('returnTo')
+  // CHANGE-20260715-007: 传入 resolveDetailSourceContext 的解析结果，不再各自推导
   const detailActions = useStockDetailActions({
     instrumentId,
     symbol,
     source,
     strategy,
+    marketContext,
+    sourceContextInvalid,
     returnTo: returnToParam,
+    timeframe,
   })
 
   // CHANGE-20260714-001: 左栏来源列表滚动位置保存/恢复

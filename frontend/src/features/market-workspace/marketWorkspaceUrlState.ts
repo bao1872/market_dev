@@ -3,6 +3,19 @@
 // scope/selected 由本模块管理；sort/dir/keyword/filters/page/page_size 由 StrategyDataTable 内置 screenerUrlState 管理。
 // 右栏折叠和 viewport 留本地 state。
 // 本文件为纯 TS（无 React 依赖，无 @/ 别名依赖），可被 node --test 直接运行。
+//
+// CHANGE-20260715-007: normalizeResearchSource / defaultStrategyForSource / resolveDetailSourceContext
+// 的唯一权威实现已移至 ../stock-research/detailSourceContext.ts。本模块只 re-export 或直接消费，
+// 禁止复制 source/strategy 映射。
+
+// CHANGE-20260715-007: 从 detailSourceContext.ts re-export（消除重复真源）
+export {
+  normalizeResearchSource,
+  defaultStrategyForSource,
+  resolveDetailSourceContext,
+  type ResearchSource,
+  type DetailSourceContext,
+} from '../stock-research/detailSourceContext.ts'
 
 export type MarketScope = 'watchlist' | 'market'
 
@@ -111,6 +124,8 @@ export function normalizeInternalReturnTo(raw: string | null | undefined): strin
 // ===== 详情页来源上下文共享纯函数（CHANGE-20260713-009）=====
 // MarketWorkspacePage 和 useStockDetailActions 共用，避免筛选口径漂移。
 // 任意合法 /market URL 都必须识别为市场工作区上下文（不要求 keyword/page/sort 存在）。
+// CHANGE-20260715-007: resolveDetailSourceContext / DetailSourceContext 已移至
+// ../stock-research/detailSourceContext.ts（唯一真源），本模块仅 re-export。
 
 // 后端存储为小数的收益率/offset 类指标
 const RATIO_METRICS = new Set([

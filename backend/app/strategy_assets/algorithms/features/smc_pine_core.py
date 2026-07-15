@@ -37,7 +37,8 @@ anchor/confirmed 因果契约：
     - OB.anchor = parsed_index (OB bar)
       OB.confirmed = current_i (触发 OB 创建的 BOS/CHoCH bar)
     - EQH/EQL.anchor = prev piv.barIndex (前一 pivot)
-      EQH/EQL.confirmed = i-size (新 pivot bar)
+      EQH/EQL.second_pivot = ref_i (i-size, 新 pivot 所在 bar)
+      EQH/EQL.confirmed = i (leg change 检测 bar, 因果确认点)
     - Mitigation.confirmed = i (close/high/low 穿越 OB 的 bar)
     未来 bar 不得修改已确认事件（事件一旦写入即不可变）。
 
@@ -432,11 +433,12 @@ class _SMCPineState:
                     "type": "EQL",
                     "anchor_index": piv.bar_index,
                     "anchor_time": piv.bar_time,
-                    "confirmed_index": ref_i,
-                    "confirmed_time": self.times[ref_i],
-                    # CHANGE-20260715-006: 第三时间点——detection bar（leg change 确认 bar）
-                    "detection_index": i,
-                    "detection_time": self.times[i],
+                    # CHANGE-20260715-007: ref_i 是新 pivot 所在 bar，命名为 second_pivot
+                    "second_pivot_index": ref_i,
+                    "second_pivot_time": self.times[ref_i],
+                    # CHANGE-20260715-007: i 是 leg change 检测 bar，命名为 confirmed（因果确认点）
+                    "confirmed_index": i,
+                    "confirmed_time": self.times[i],
                     "level": level,
                     "prev_level": piv.current_level,
                 })
@@ -473,11 +475,12 @@ class _SMCPineState:
                     "type": "EQH",
                     "anchor_index": piv.bar_index,
                     "anchor_time": piv.bar_time,
-                    "confirmed_index": ref_i,
-                    "confirmed_time": self.times[ref_i],
-                    # CHANGE-20260715-006: 第三时间点——detection bar（leg change 确认 bar）
-                    "detection_index": i,
-                    "detection_time": self.times[i],
+                    # CHANGE-20260715-007: ref_i 是新 pivot 所在 bar，命名为 second_pivot
+                    "second_pivot_index": ref_i,
+                    "second_pivot_time": self.times[ref_i],
+                    # CHANGE-20260715-007: i 是 leg change 检测 bar，命名为 confirmed（因果确认点）
+                    "confirmed_index": i,
+                    "confirmed_time": self.times[i],
                     "level": level,
                     "prev_level": piv.current_level,
                 })
@@ -527,11 +530,24 @@ class _SMCPineState:
 
     # ----- BOS/CHoCH 检测（Pine crossover/crossunder）-----
 
-    def display_structure(self, i: int, internal: bool = False) -> None:
+    def display_structure(
+        self,
+        i: int,
+        internal: bool = False,
+        prev_levels: dict[str, float] | None = None,
+    ) -> None:
         """BOS/CHoCH 检测（close crossover/crossunder pivot level）。
 
         anchor = pivot.barIndex (被穿越的 pivot bar)
         confirmed = i (close 穿越的 bar)
+
+        Pine ta.crossover(close, p_ivot.currentLevel) 使用：
+            close[0] > currentLevel[0]  (当前 bar close vs 当前 bar pivot level)
+            close[1] <= currentLevel[1]  (上一 bar close vs 上一 bar pivot level)
+
+        prev_levels 是在当前 bar 开始时（getCurrentStructure 之前）快照的 pivot level，
+        代表上一 bar 结束时的 currentLevel。如果为 None 则回退到当前 level（旧行为）。
+        NaN 作为 prev_level 时 crossover/crossunder 结果为 False（Pine 语义）。
         """
         if i <= 0 or i >= self.n:
             return
@@ -552,6 +568,15 @@ class _SMCPineState:
         # Bullish cross (close 上穿 pivot.currentLevel)
         piv_high = self.internal_high if internal else self.swing_high
         trd = self.internal_trend if internal else self.swing_trend
+        # CHANGE-20260716-001: Pine ta.crossover 需要 currentLevel[0] 和 currentLevel[1]。
+        # currentLevel[0] = getCurrentStructure 更新后的当前 level
+        # currentLevel[1] = 上一 bar 结束时的 level（prev_levels 快照）
+        level_curr_high = piv_high.current_level
+        level_prev_high = (
+            prev_levels["internal_high" if internal else "swing_high"]
+            if prev_levels is not None
+            else level_curr_high
+        )
         extra_condition = (
             (piv_high.current_level != self.swing_high.current_level) and bullish_bar
             if internal else True
@@ -559,7 +584,7 @@ class _SMCPineState:
 
         if (
             piv_high.current_level == piv_high.current_level  # not NaN
-            and pine_crossover(close_curr, close_prev, piv_high.current_level, piv_high.current_level)
+            and pine_crossover(close_curr, close_prev, level_curr_high, level_prev_high)
             and not piv_high.crossed
             and extra_condition
         ):
@@ -583,6 +608,12 @@ class _SMCPineState:
 
         # Bearish cross (close 下穿 pivot.currentLevel)
         piv_low = self.internal_low if internal else self.swing_low
+        level_curr_low = piv_low.current_level
+        level_prev_low = (
+            prev_levels["internal_low" if internal else "swing_low"]
+            if prev_levels is not None
+            else level_curr_low
+        )
         extra_condition = (
             (piv_low.current_level != self.swing_low.current_level) and bearish_bar
             if internal else True
@@ -590,7 +621,7 @@ class _SMCPineState:
 
         if (
             piv_low.current_level == piv_low.current_level
-            and pine_crossunder(close_curr, close_prev, piv_low.current_level, piv_low.current_level)
+            and pine_crossunder(close_curr, close_prev, level_curr_low, level_prev_low)
             and not piv_low.crossed
             and extra_condition
         ):
@@ -762,6 +793,17 @@ class _SMCPineState:
         show_swing_order_blocks = self.params["show_swing_order_blocks"]
 
         for i in range(self.n):
+            # 0. 快照上一 bar 结束时的 pivot level（Pine currentLevel[1]）
+            # CHANGE-20260716-001: ta.crossover/crossunder 需要 currentLevel[0] 和 [1]。
+            # [0] = getCurrentStructure 更新后的当前值；[1] = 上一 bar 最终值。
+            # 必须在任何 getCurrentStructure 之前快照，否则新 pivot 会覆盖旧值。
+            prev_levels: dict[str, float] = {
+                "swing_high": self.swing_high.current_level,
+                "swing_low": self.swing_low.current_level,
+                "internal_high": self.internal_high.current_level,
+                "internal_low": self.internal_low.current_level,
+            }
+
             # 1. trailing 极值更新（Pine: 在 getCurrentStructure 之前）
             # Pine 条件: if showHighLowSwingsInput or showPremiumDiscountZonesInput
             # show_high_low_swings 默认 true，show_premium_discount_zones 默认 false（不实现）
@@ -778,9 +820,9 @@ class _SMCPineState:
 
             # 5. internal BOS/CHoCH + OB 创建
             if show_internal_order_blocks:
-                self.display_structure(i, True)
+                self.display_structure(i, True, prev_levels)
             # 6. swing BOS/CHoCH + OB 创建
-            self.display_structure(i, False)
+            self.display_structure(i, False, prev_levels)
 
             # 7. internal OB mitigation
             if show_internal_order_blocks:
@@ -849,6 +891,7 @@ def compute_smc_pine(
                 "last_top_time": None,
                 "last_bottom_time": None,
             },
+            "swing_bias": 0,
             "pivots": [],
             "time": [],
             "params": actual_params,
@@ -869,6 +912,11 @@ def compute_smc_pine(
             "last_top_time": state.trailing.last_top_time,
             "last_bottom_time": state.trailing.last_bottom_time,
         },
+        # CHANGE-20260715-007: swing_bias 直接透传 Pine 核心 swing_trend.bias
+        # 取值：1=bullish, -1=bearish, 0=尚未形成趋势
+        # 前端规则：bias===-1 → Strong High（否则 Weak High）；bias===1 → Strong Low（否则 Weak Low）
+        # 禁止根据 trailing 时间、close 位置或最后一个可见事件重新推断
+        "swing_bias": state.swing_trend.bias,
         "pivots": state.pivots,
         "time": list(times),
         "params": actual_params,

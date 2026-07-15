@@ -660,15 +660,15 @@ for i in range(self.n):
 
 | 维度 | 状态 | 说明 |
 |---|---|---|
-| Pine 语义原语 | ✅ 完全对齐 | RMA/ATR/CMR/highest/lowest/crossover/crossunder 8 项测试 PASS |
-| 默认参数 | ✅ 完全对齐 | 逐项匹配 Pine input 默认值 |
-| 状态变量 | ✅ 完全对齐 | 6 个 pivot + 2 个 trend + trailing + OB 列表 |
-| 执行顺序 | ⚠️ 1 处分歧 | `updateTrailingExtremes` 顺序（本次修复） |
-| anchor/confirmed 契约 | ✅ 完全对齐 | 6 类事件均含 anchor/confirmed，不可变 |
+| Pine 语义原语 | ✅ 单元对齐 | RMA/ATR/CMR/highest/lowest/crossover/crossunder 8 项测试 PASS（**注意**：CHANGE-20260716-001 修正了 `displayStructure` 中 crossover/crossunder 的 level_curr/level_prev 快照语义，旧实现错误地将 `current_level` 同时作为 curr 和 prev） |
+| 默认参数 | ✅ 单元对齐 | 逐项匹配 Pine input 默认值 |
+| 状态变量 | ✅ 结构对齐 | 6 个 pivot + 2 个 trend + trailing + OB 列表 |
+| 执行顺序 | ✅ 已修复 | `updateTrailingExtremes` 顺序（CHANGE-20260715-003 修复） |
+| anchor/confirmed 契约 | ✅ 结构对齐 | 6 类事件均含 anchor/confirmed；CHANGE-20260716-001 统一 EQH/EQL 为 anchor/second_pivot/confirmed 三时间点（second_pivot 为视觉线端点） |
 | FVG 排除 | ✅ 完全排除 | 6 项输出级断言 PASS |
 | warmup | ✅ 满足 | 1d 用 full_daily_bars，其他周期用 macd_bars |
-| 缓存隔离 | ✅ 完全隔离 | ALGORITHM_VERSION v7 + `:smc` 后缀 |
-| 前端渲染 | ✅ 对齐 | internal 虚线/tiny，swing 实线/small，多头红空头绿 |
-| Pine golden fixture | ⏳ PENDING | 等待用户 TV 导出 |
+| 缓存隔离 | ✅ 完全隔离 | ALGORITHM_VERSION v9（CHANGE-20260716-001）+ `:smc` 后缀 |
+| 前端渲染 | ⚠️ 待 golden 验证 | CHANGE-20260716-001 修正：anchor_index 统一、viewport 区间求交、slice(0,5)、标签不加 `·I`、纵轴候选完整、Canvas mock 测试；需 golden fixture 验证 |
+| Pine golden fixture | ⏳ PENDING | 等待用户 TV 导出；CHANGE-20260716-001 已建立 TV CSV parity 测试框架 |
 
-**结论**：Pine 语义原语和默认参数完全对齐；执行顺序有 1 处分歧（本次修复）；Pine golden fixture 待用户提供后进行输出级完全一致断言。**没有 Pine golden fixture 不得宣称"完全对齐"**。
+**结论**：Pine 语义原语和默认参数已单元级对齐；执行顺序和 crossover 语义已修复（CHANGE-20260715-003 + CHANGE-20260716-001）；前端渲染已修正（CHANGE-20260716-001）；**Pine golden fixture 待用户提供后进行输出级完全一致断言**。**没有 Pine golden fixture 不得宣称"完全对齐"**。

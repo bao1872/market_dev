@@ -1183,18 +1183,23 @@ node --experimental-strip-types --test \
   - `pine_crossover`/`pine_crossunder`：穿越检测正确
   - `pine_highest`/`pine_lowest`：滚动极值不含当前 bar
 - **Pine golden fixture（`test_smc_indicator.py::TestPineGoldenFixture`）**：fixture 不存在时 skip，**没有 Pine golden fixture 不得宣称"完全对齐"**；fixture 路径 `backend/tests/fixtures/smc_pine/`，包含美诺华 603538 日线 1000 根 + 一个 15m 样本
+- **TV CSV parity 门禁（`test_smc_tv_parity.py`，CHANGE-20260716-001）**：使用 `ref/smc_user_export.pine`（派生导出副本，真源 `ref/smc_user_source.pine` 不可变）末尾 18 个 `display=display.none` 隐藏 plot 字段从 TV 导出 CSV（含 time/OHLC + Pine 事件布尔值 + bias）；fixture 路径 `backend/tests/fixtures/smc_pine/smc_tv_<symbol>_<tf>.csv`；无 fixture 时 skip（`PINE_PARITY_PENDING`）；3 项测试：
+  - `test_tv_csv_bar_parity`：断言 time/OHLC/bar 数量逐项相等（浮点容差 1e-8），不相等写 `INPUT_BAR_MISMATCH`，**不得调整算法迎合截图**
+  - `test_tv_csv_event_parity`：比较事件有序序列（bar_index ±1 容差）
+  - `test_tv_csv_swing_bias_parity`：比较最后一根 bar 的 swing_bias
+  - **禁止从 DB 重新取另一套 Bar**；产品默认前复权，TV parity fixture 使用与 TV 完全相同的复权方式、数据源和 completed-bar 边界
 - **events 字段契约更新**：`test_event_kind_valid` → `test_event_internal_field_valid`（验证 `internal: bool` 替代旧 `kind` 字段）
-- **缓存隔离（`test_indicator_cache.py`）**：`ALGORITHM_VERSION == "v7"`；旧 v6 cache key 与新 key 不相等（旧 SMA 缓存强制失效）
-- **服务层 warmup（`test_indicator_service.py`）**：1d timeframe 使用 `full_daily_bars`（≥500 warmup）；SMC 输出不调用 `_truncate_lists` 截断（time 数组保持完整长度）
-- **MiniKline viewport（`miniKlineViewport.test.ts` 15 用例）**：
-  - 目标根数：15m=48、60m=44、日=40、周=36、月=30
-  - `barSpacing = clamp(contentWidth/visibleBars, 5.5, 8)`
-  - 左侧留白 `from=max(-2, n-visible-1)`
-  - 右侧留白 `to=n-1+3`
-  - `computeAutoscaleRange(minLow, maxHigh)`：上方 12%，下方 15%
+- **缓存隔离（`test_indicator_cache.py`）**：`ALGORITHM_VERSION == "v9"`（CHANGE-20260716-001：v8→v9，crossover/crossunder 修正后旧 v8 缓存强制失效）；SMC/non-SMC 键隔离（`include_smc=true` 追加 `:smc` 后缀）
+- **服务层 warmup（`test_indicator_service.py`）**：1d timeframe 使用 `full_daily_bars`（≥500 warmup）；SMC 输出不调用 `_truncate_lists` 截断（time 数组保持完整长度）；**CHANGE-20260716-001 required_inputs**：`_REQUIRED_INPUTS` 映射 + `_determine_required_bars()`；15min 回看 400 天（limit=4000）、minute 回看 5 天（limit=2）、60min 回看 750 天；`needs_15min = "15min" in required_bars or timeframe == "15m"`、`needs_minute = "minute" in required_bars`；`_query_minute_bars` 新增 `limit` 参数（DESC + LIMIT + 反转）；**SMC source diagnostics（CHANGE-20260716-001）**：`smc_source_bar_hash` 基于 SMC 实际完整输入（1d 用 `full_daily_bars`，其他用 `macd_bars`），不复用截断后的 macd_bars hash
+- **MiniKline viewport（`miniKlineViewport.test.ts`，CHANGE-20260716-001 真实方案）**：
+  - 目标根数：15m=48、60m=44、日=40、周=36、月=30（`bars.slice(-target)` 传给 series）
+  - `setData` 后设置 logical range `{from:-2, to:visibleData.length-1+3}`（真实左 2/右 3 空位）
+  - **删除死 barSpacing 计算**（旧 `barSpacing = clamp(contentWidth/visibleBars, 5.5, 8)` 只计算未应用，是死参数）
+  - `computeAutoscaleRange(minLow, maxHigh)`：上方 12%，下方 15%（只基于 visibleData 的 high/low）
   - 五周期边界验证
   - 空数据返回零区间
-- **前端 SMC renderer 对齐 Pine（无截图 E2E）**：internal=虚线 `[4,3]`/tiny 8px、swing=实线/small 11px；标签中点 `(x1+x2)/2`+`'center'`；trailing 文案"强高/弱高/强低/弱低"；OB 半透明 box（active 0.12、mitigated 0.05）；Historical 全事件；颜色多头红 `#FF4D4F`、空头绿 `#22C55E`
+  - 真实 mock 测试：setData 根数、range、五周期切换、ResizeObserver cleanup、chart.remove、0 旧数据残留
+- **前端 SMC renderer 对齐 Pine（无截图 E2E，CHANGE-20260715-002 → CHANGE-20260716-001 修正）**：internal=虚线 `[4,3]`/tiny 8px、swing=实线/small 11px；**标签不加 `·I` 后缀**（CHANGE-20260716-001，与 TV 文字一致）；标签中点 `(x1+x2)/2`+`'center'`；trailing 文案"强高/弱高/强低/弱低"，`swing_bias` 直接从 DTO 读取（CHANGE-20260716-001，禁止猜测）；OB 半透明 box（active 0.12、mitigated 0.05）；Historical 全相交事件；颜色多头红 `#FF4D4F`、空头绿 `#22C55E`；**anchor_index 统一**（CHANGE-20260716-001：前端不得读取 `bar_index`）；**viewport 区间求交**（CHANGE-20260716-001：anchor 左侧 clip+clipped_left，confirmed 右侧 clamp 到 plotRight，仅完全不相交跳过）；**OB slice(0,5)**（CHANGE-20260716-001：只显示数组头部最近 5 个 `internal && !mitigated` OB，活动 OB 延伸到右端）；**纵轴候选完整**（CHANGE-20260716-001：event.level、OB high/low、EQH/EQL level、trailing top/bottom）；**EQH/EQL 视觉线端点使用 `second_pivot_index`**（CHANGE-20260716-001）；**纯函数 + Canvas mock 行为测试**（`smcRendering.test.ts`，CHANGE-20260716-001：禁止只用源码正则）
 - **SMC 隔离边界**：SMC 仅属于 `/stock` 指标链；`include_smc=false` 时 0 计算；`/market` 右栏不请求 SMC；true/false 缓存键隔离；DSA/Node/监控/Capture/published run 不修改；无新表/migration/worker/历史回填
 
 ## 3.15 CHANGE-20260715-003 回归（SMC trailing 顺序修复 + sticky 列 + 工具栏对齐 + MiniKlineCard 契约测试）
@@ -1267,10 +1272,10 @@ cd frontend && node --experimental-strip-types --test \
 
 - **`pine_rma` NA 语义（后端单元测试）**：`smc_pine_core.py` 的 `pine_rma(src, length)` 在 `bar_index < length-1` 返回 `na`（非逐步 SMA）；`bar_index == length-1` 写入 `SMA(src, length)` 种子；`bar_index >= length` 使用 Wilder 递推 `rma[i] = (rma[i-1]*(length-1) + src[i]) / length`；`test_pine_rma_min_periods_before_seed` 断言前 `length-1` 根为 NaN
 - **首个 pivot off-by-one（后端单元测试）**：`start_of_new_leg`/`start_of_bearish_leg`/`start_of_bullish_leg` 使用 `i >= size`（非 `i > size`）；`get_current_structure` 使用 `if i < size: return`（非 `if i <= size: return`）；首个 leg/pivot 在 `i == size` 检测
-- **EQH/EQL DTO 三时间点（后端单元测试）**：EQL 和 EQH 两处 DTO 含 `anchor_index`/`anchor_time`（前一 pivot bar）、`confirmed_index`/`confirmed_time`（新 pivot bar, `ref_i=i-size`）、`detection_index`/`detection_time`（leg change 确认 bar, `i`）三组时间点
+- **EQH/EQL DTO 三时间点（后端单元测试，CHANGE-20260715-006 → CHANGE-20260716-001 统一）**：EQL 和 EQH 两处 DTO 含三组时间点：`anchor_index`/`anchor_time`（前一 pivot bar）、`second_pivot_index`/`second_pivot_time`（新 pivot bar, `ref_i=i-size`，**视觉线端点**）、`confirmed_index`/`confirmed_time`（当前检测 Bar `i`，**因果/回放使用**）；`ref_i` 不得命名为 `confirmed`；CHANGE-20260716-001 新增 `detection_index`/`detection_time`（leg change 确认 bar, `i`，与 confirmed 同义但语义更明确）
 - **MiniKline 闭包根治（前端源码契约 16-20）**：`MiniKlineCard.tsx` 新增 `barsLengthRef`/`timeframeRef`/`rafIdRef` 持有最新值（每次 render 同步，在 effects 之前）；`applyViewportRange` 改为 `useCallback([], )` 稳定函数从 refs 读取（不再直接闭包捕获 `bars.length`/`timeframe`）；`scheduleApplyRange` 稳定函数取消 pending rAF 后调度新 rAF；`ResizeObserver` 回调调用 `scheduleApplyRange`（不直接闭包捕获 bars/timeframe）；卸载清理取消 pending rAF（`cancelAnimationFrame`）
-- **Pine 语义核对（源码契约）**：ATR200=`pine_rma(tr, 200)`；highest/lowest 窗口 `[ref_i+1, ref_i+length+1]`（不含当前 bar）；crossover/crossunder NaN→False（Python NaN 比较返回 False，匹配 Pine na→falsy）；OB slice `[piv.bar_index, current_i)` end-exclusive（Python 切片天然 end-exclusive）；trailing 顺序 `update_trailing_extremes → getCurrentStructure(50) → getCurrentStructure(5) → getCurrentStructure(3) → displayStructure → deleteOrderBlocks`
-- **Golden fixture**：仍为 `PINE_OUTPUT_GOLDEN_PENDING`（`backend/tests/fixtures/smc_pine/` 只有 README.md），无 fixture 时 `TestPineGoldenFixture` 自动 skip，不得宣称"完全对齐"
+- **Pine 语义核对（源码契约）**：ATR200=`pine_rma(tr, 200)`；highest/lowest 窗口 `[ref_i+1, ref_i+length+1]`（不含当前 bar）；**crossover/crossunder level_curr/level_prev 快照（CHANGE-20260716-001）**：`displayStructure` 接收 `level_curr`（当前 Bar pivot level）和 `level_prev`（上一 Bar pivot level）独立快照，crossover=`close_curr > level_curr && close_prev <= level_prev`，crossunder=`close_curr < level_curr && close_prev >= level_prev`，NaN→False；每 Bar 快照六个 pivot level（swing/internal 独立，不互相覆盖）；OB slice `[piv.bar_index, current_i)` end-exclusive（Python 切片天然 end-exclusive）；trailing 顺序 `update_trailing_extremes → getCurrentStructure(50) → getCurrentStructure(5) → getCurrentStructure(3) → displayStructure → deleteOrderBlocks`
+- **Golden fixture**：仍为 `PINE_OUTPUT_GOLDEN_PENDING`/`PINE_PARITY_PENDING`（`backend/tests/fixtures/smc_pine/` 只有 README.md），无 fixture 时 `TestPineGoldenFixture`/`test_smc_tv_parity.py` 自动 skip，不得宣称"完全对齐"；CHANGE-20260716-001 已建立 TV CSV parity 测试框架（`ref/smc_user_export.pine` 派生文件末尾 18 个隐藏 plot 字段，真源 `ref/smc_user_source.pine` 不可变），待用户从 TradingView 导出 CSV 后即可完成输出级完全一致断言
 - **SMC 隔离边界不变（源码契约）**：SMC 仅进入 `/stock` 指标链，默认关闭（`include_smc=false` 时 0 计算）；`/market` 右栏小 K 线不请求 SMC；true/false 缓存键隔离（`:smc` 后缀）；不新增表/migration/worker/依赖
 - **生产 E2E 验证（无截图）**：1) MiniKline 切周期/resize 后 viewport 正确（不使用 stale 值，不出现首次 render 的旧 range）；2) SMC `pine_rma` 前 `length-1` 根为 NaN（ATR200 前 199 根为 NaN）；3) 首个 pivot 在 `i==size` 检测（不延迟到 `i==size+1`）；4) EQH/EQL DTO 含 detection_index/detection_time；5) Pine golden fixture 仍 PENDING
 

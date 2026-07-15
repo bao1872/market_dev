@@ -24,6 +24,7 @@ import {
   normalizeInternalReturnTo,
   decodeMarketListContext,
   buildStrategyResultQueryParams,
+  resolveDetailSourceContext,
   DEFAULT_MARKET_SCOPE,
   type MarketWorkspaceUrlState,
   type MarketListContext,
@@ -292,4 +293,115 @@ test('CHANGE-009-7: buildStrategyResultQueryParams 保留完整 keyword/industry
   }
   const queryAsc = buildStrategyResultQueryParams(ctxAsc)
   assert.equal(queryAsc.sort_desc, false)
+})
+
+// ===== CHANGE-20260715-007: resolveDetailSourceContext 契约测试 =====
+// 唯一纯函数：StockDetailPage 和 useStockDetailActions 只消费此结果，禁止各自推导。
+// 优先级：有效 /market returnTo.scope → 合法 source 参数 → 默认 watchlist。
+// 覆盖：
+//   1. 有效 /market returnTo scope=market → source=selection, strategy=dsa_selector
+//   2. 有效 /market returnTo scope=watchlist → source=watchlist, strategy=watchlist_monitor
+//   3. returnTo 优先级高于 rawSource（returnTo=market 但 rawSource=watchlist → 仍 selection）
+//   4. returnTo 优先级高于 rawStrategy（returnTo=market 但 rawStrategy=foo → 仍 dsa_selector）
+//   5. 无有效 returnTo + rawSource=selection → sourceContextInvalid=true（不静默回退自选）
+//   6. 无有效 returnTo + rawSource=watchlist → sourceContextInvalid=false
+//   7. 无有效 returnTo + rawSource 非法 → 归一化为 watchlist
+//   8. 无有效 returnTo + rawStrategy 缺失 → defaultStrategyForSource(finalSource)
+//   9. 无有效 returnTo + rawStrategy 提供 → 使用 rawStrategy
+//  10. 全部为 null → 默认 watchlist / watchlist_monitor / sourceContextInvalid=false
+//  11. returnTo 为 /screener（非 /market）→ marketContext=null，回退 rawSource
+//  12. returnTo 为外部 URL → marketContext=null，回退 rawSource
+
+test('CHANGE-007-1: 有效 /market returnTo scope=market → source=selection, strategy=dsa_selector', () => {
+  const ctx = resolveDetailSourceContext('/market?scope=market&keyword=600519', null, null)
+  assert.equal(ctx.source, 'selection')
+  assert.equal(ctx.strategy, 'dsa_selector')
+  assert.notEqual(ctx.marketContext, null)
+  assert.equal(ctx.marketContext!.scope, 'market')
+  assert.equal(ctx.sourceContextInvalid, false)
+})
+
+test('CHANGE-007-2: 有效 /market returnTo scope=watchlist → source=watchlist, strategy=watchlist_monitor', () => {
+  const ctx = resolveDetailSourceContext('/market?scope=watchlist', null, null)
+  assert.equal(ctx.source, 'watchlist')
+  assert.equal(ctx.strategy, 'watchlist_monitor')
+  assert.notEqual(ctx.marketContext, null)
+  assert.equal(ctx.marketContext!.scope, 'watchlist')
+  assert.equal(ctx.sourceContextInvalid, false)
+})
+
+test('CHANGE-007-3: returnTo 优先级高于 rawSource（returnTo=market 但 rawSource=watchlist → 仍 selection）', () => {
+  const ctx = resolveDetailSourceContext('/market?scope=market', 'watchlist', 'watchlist_monitor')
+  assert.equal(ctx.source, 'selection')
+  assert.equal(ctx.strategy, 'dsa_selector')
+  assert.equal(ctx.sourceContextInvalid, false)
+})
+
+test('CHANGE-007-4: returnTo 优先级高于 rawStrategy（returnTo=market 但 rawStrategy=foo → 仍 dsa_selector）', () => {
+  const ctx = resolveDetailSourceContext('/market?scope=market', 'selection', 'foo')
+  assert.equal(ctx.source, 'selection')
+  assert.equal(ctx.strategy, 'dsa_selector')
+  assert.equal(ctx.sourceContextInvalid, false)
+})
+
+test('CHANGE-007-5: 无有效 returnTo + rawSource=selection → sourceContextInvalid=true（不静默回退自选）', () => {
+  const ctx = resolveDetailSourceContext(null, 'selection', null)
+  assert.equal(ctx.source, 'selection')
+  assert.equal(ctx.marketContext, null)
+  assert.equal(ctx.sourceContextInvalid, true)
+  // strategy 仍按 source=selection 默认为 dsa_selector
+  assert.equal(ctx.strategy, 'dsa_selector')
+})
+
+test('CHANGE-007-6: 无有效 returnTo + rawSource=watchlist → sourceContextInvalid=false', () => {
+  const ctx = resolveDetailSourceContext(null, 'watchlist', null)
+  assert.equal(ctx.source, 'watchlist')
+  assert.equal(ctx.marketContext, null)
+  assert.equal(ctx.sourceContextInvalid, false)
+  assert.equal(ctx.strategy, 'watchlist_monitor')
+})
+
+test('CHANGE-007-7: 无有效 returnTo + rawSource 非法 → 归一化为 watchlist', () => {
+  const ctx = resolveDetailSourceContext(null, 'invalid_source', null)
+  assert.equal(ctx.source, 'watchlist')
+  assert.equal(ctx.sourceContextInvalid, false)
+  assert.equal(ctx.strategy, 'watchlist_monitor')
+})
+
+test('CHANGE-007-8: 无有效 returnTo + rawStrategy 缺失 → defaultStrategyForSource(finalSource)', () => {
+  // source=selection 缺 strategy → dsa_selector
+  const ctxSel = resolveDetailSourceContext(null, 'selection', null)
+  assert.equal(ctxSel.strategy, 'dsa_selector')
+  // source=watchlist 缺 strategy → watchlist_monitor
+  const ctxWl = resolveDetailSourceContext(null, 'watchlist', null)
+  assert.equal(ctxWl.strategy, 'watchlist_monitor')
+})
+
+test('CHANGE-007-9: 无有效 returnTo + rawStrategy 提供 → 使用 rawStrategy', () => {
+  const ctx = resolveDetailSourceContext(null, 'watchlist', 'custom_strategy')
+  assert.equal(ctx.source, 'watchlist')
+  assert.equal(ctx.strategy, 'custom_strategy')
+  assert.equal(ctx.sourceContextInvalid, false)
+})
+
+test('CHANGE-007-10: 全部为 null → 默认 watchlist / watchlist_monitor / sourceContextInvalid=false', () => {
+  const ctx = resolveDetailSourceContext(null, null, null)
+  assert.equal(ctx.source, 'watchlist')
+  assert.equal(ctx.strategy, 'watchlist_monitor')
+  assert.equal(ctx.marketContext, null)
+  assert.equal(ctx.sourceContextInvalid, false)
+})
+
+test('CHANGE-007-11: returnTo 为 /screener（非 /market）→ marketContext=null，回退 rawSource', () => {
+  const ctx = resolveDetailSourceContext('/screener', 'selection', null)
+  assert.equal(ctx.marketContext, null)
+  assert.equal(ctx.source, 'selection')
+  assert.equal(ctx.sourceContextInvalid, true)
+})
+
+test('CHANGE-007-12: returnTo 为外部 URL → marketContext=null，回退 rawSource', () => {
+  const ctx = resolveDetailSourceContext('https://evil.com', 'watchlist', null)
+  assert.equal(ctx.marketContext, null)
+  assert.equal(ctx.source, 'watchlist')
+  assert.equal(ctx.sourceContextInvalid, false)
 })

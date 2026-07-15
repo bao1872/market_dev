@@ -21,7 +21,6 @@ import {
   useStrategyRunResults,
 } from '@/hooks/useApi'
 import {
-  decodeMarketListContext,
   buildStrategyResultQueryParams,
   type MarketListContext,
 } from '@/features/market-workspace/marketWorkspaceUrlState'
@@ -41,10 +40,14 @@ export interface StockDetailActionsParams {
   symbol: string | undefined
   source: ResearchSource
   strategy: string
-  // returnTo URL（来自详情页 URL 参数），用于恢复来源列表的 scope/query/page/sort 上下文
-  // 当 returnTo 指向 /market?scope=market&keyword=xxx&page=2&sort=xxx 时，左栏优先展示该市场搜索结果
-  // returnTo 缺失或非 /market 前缀时回退到自选列表
+  // CHANGE-20260715-007: marketContext 和 sourceContextInvalid 由 resolveDetailSourceContext 解析后传入
+  // useStockDetailActions 不再自行推导，只消费结果
+  marketContext: MarketListContext | null
+  sourceContextInvalid: boolean
+  // returnTo URL（来自详情页 URL 参数），用于上一只/下一只导航保留来源上下文
   returnTo?: string | null
+  // CHANGE-20260715-007: 当前 timeframe，用于上一只/下一只导航保留周期
+  timeframe?: string | null
 }
 
 // 来源股票列表项（左栏统一渲染结构）
@@ -100,25 +103,17 @@ export function useStockDetailActions({
   symbol,
   source,
   strategy,
+  marketContext,
+  sourceContextInvalid,
   returnTo,
+  timeframe,
 }: StockDetailActionsParams): StockDetailActions {
   const navigate = useNavigate()
   const showToast = useToast((s) => s.show)
 
-  // CHANGE-20260713-009: 使用共享 decodeMarketListContext 解析 returnTo
-  // 任意合法 /market URL 都识别为市场工作区上下文（不要求 keyword/page/sort 存在）
-  // scope=market → sourceListKind=market；scope=watchlist → sourceListKind=watchlist
-  // CHANGE-20260715-005: 尊重显式 source 参数
-  //   - source=selection: sourceListKind=market，需要 returnTo 上下文；returnTo 无效时标记 sourceContextInvalid
-  //   - source=watchlist: sourceListKind=watchlist，returnTo 不影响来源类型
-  const marketContext: MarketListContext | null = useMemo(
-    () => decodeMarketListContext(returnTo),
-    [returnTo],
-  )
-  // source=selection 时必须有 marketContext；source=watchlist 时不需要
+  // CHANGE-20260715-007: marketContext 和 sourceContextInvalid 由 resolveDetailSourceContext 解析后传入
+  // useStockDetailActions 只消费结果，不再自行推导
   const hasMarketContext = source === 'selection' && marketContext !== null
-  // source=selection 但 returnTo 提供却解析失败（非 /market 前缀或外部 URL）
-  const sourceContextInvalid = source === 'selection' && marketContext === null && !!returnTo
 
   // DSA published run（与 MarketWorkspacePage 同一数据链）
   // scope=market 和 scope=watchlist 都复用 dsa_selector published run
@@ -250,10 +245,11 @@ export function useStockDetailActions({
     const nextIndex = (currentIndex + direction + sourceStocks.length) % sourceStocks.length
     const target = sourceStocks[nextIndex]
     if (!target?.symbol) return
-    // 保留 returnTo 上下文 + source + strategy，使切换后仍可返回来源列表
+    // 保留 returnTo 上下文 + source + strategy + timeframe，使切换后仍可返回来源列表且保持周期
     const returnToParam = returnTo ? `&returnTo=${encodeURIComponent(returnTo)}` : ''
-    navigate(`/stock/${target.symbol}?source=${source}&strategy=${strategy}${returnToParam}`)
-  }, [canNavigate, currentIndex, sourceStocks, navigate, strategy, source, returnTo])
+    const timeframeParam = timeframe ? `&timeframe=${timeframe}` : ''
+    navigate(`/stock/${target.symbol}?source=${source}&strategy=${strategy}${returnToParam}${timeframeParam}`)
+  }, [canNavigate, currentIndex, sourceStocks, navigate, strategy, source, returnTo, timeframe])
 
   return {
     inWatchlist,

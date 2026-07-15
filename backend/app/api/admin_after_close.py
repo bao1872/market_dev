@@ -471,12 +471,22 @@ async def resume_after_close_run_endpoint(
     - retry 仅允许 status=failed，且重置 last_completed_step（从头执行）
     - resume 允许 failed/interrupted，**保留 last_completed_step**（从断点继续）
 
+    幂等：重复调用返回同一任务，不新建 SchedulerJobRun/StrategyRun/SnapshotRun。
+    同日互斥：同 trade_date 已有 queued/running 任务时返 409。
+
     流程：
-    1. 加载 job_run，校验为 after_close_orchestrator
-    2. 校验 status in ('failed', 'interrupted')，否则返 400
-    3. 重置 status='queued'，保留 metadata.last_completed_step
-    4. 更新 orchestrator_status='queued'
-    5. 返回 queued 任务（Worker 领取后从 last_completed_step 之后继续）
+    1. SELECT FOR UPDATE 锁定 job_run（PostgreSQL 行级锁，SQLite 忽略）
+    2. 校验为 after_close_orchestrator
+    3. 幂等：status=queued 直接返回同一任务
+    4. 校验 status in ('failed', 'interrupted')，否则返 400
+    5. 同日 queued/running 互斥校验（排除自身）
+    6. 保留 run_key/trade_date/dsa_run_id/feature_snapshot_run_id/
+       last_started_step/last_completed_step/snapshot_progress
+    7. 状态改 queued，清 finished_at/error_message/error_code/worker_instance_id
+    8. heartbeat_at=None, lease_expires_at=None（由 Worker 领取后设置）
+    9. metadata 写 resume_requested_at + orchestrator_status=queued
+    10. 写唯一 manual_resume 事件
+    11. commit 并返回
 
     Args:
         run_id: 编排任务 ID
@@ -489,35 +499,39 @@ async def resume_after_close_run_endpoint(
     Raises:
         HTTPException 404: 任务不存在
         HTTPException 400: 任务非盘后编排或状态非 failed/interrupted
+        HTTPException 409: 同日已有 queued/running 任务
     """
-    from datetime import datetime, timedelta
+    from datetime import datetime
     from zoneinfo import ZoneInfo
+
+    from sqlalchemy import select
 
     from app.models.scheduler_job_run import SchedulerJobRun
     from app.services.after_close_orchestrator import (
-        _ORCHESTRATOR_LEASE_SECONDS,
+        _AFTER_CLOSE_JOB_NAME,
         _parse_metadata,
         _update_orchestrator_status,
     )
+    from app.services.job_run_event_service import append_event
 
-    job_run = await db.get(SchedulerJobRun, run_id)
+    # 1. SELECT FOR UPDATE 锁定 job_run（PostgreSQL 行级锁，SQLite 忽略 with_for_update）
+    stmt = (
+        select(SchedulerJobRun)
+        .where(SchedulerJobRun.id == run_id)
+        .with_for_update()
+    )
+    result = await db.execute(stmt)
+    job_run = result.scalar_one_or_none()
+
     if job_run is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"编排任务不存在: job_run_id={run_id}",
         )
-    if job_run.job_name != "after_close_orchestrator":
+    if job_run.job_name != _AFTER_CLOSE_JOB_NAME:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"任务非盘后编排: job_name={job_run.job_name}",
-        )
-    if job_run.status not in _RESUMABLE_STATUSES:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"仅 failed/interrupted 状态可恢复: "
-                f"current_status={job_run.status}"
-            ),
         )
 
     meta = _parse_metadata(job_run)
@@ -528,16 +542,72 @@ async def resume_after_close_run_endpoint(
             detail=f"metadata_json 中缺少 trade_date: job_run_id={run_id}",
         )
 
-    # [Phase6] - 重置为 queued（保留 last_completed_step），由独立 Worker 领取执行
+    # 3. 幂等：已 queued（前一次 resume 已提交，Worker 尚未领取）直接返回同一任务
+    if job_run.status == "queued":
+        logger.info(
+            "[resume] 幂等返回已 queued 任务: run_id=%s, last_completed_step=%s",
+            run_id, meta.get("last_completed_step"),
+        )
+        return AfterCloseRunCreateResponse(
+            job_run_id=str(job_run.id),
+            status=job_run.status,
+            orchestrator_status=AfterCloseRunStatus.QUEUED.value,
+            trade_date=trade_date_str,
+            message=f"[resume] 任务已处于 queued（幂等返回）: job_run_id={job_run.id}",
+        )
+
+    # 4. 校验状态
+    if job_run.status not in _RESUMABLE_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"仅 failed/interrupted 状态可恢复: "
+                f"current_status={job_run.status}"
+            ),
+        )
+
+    # 5. 同日 queued/running 互斥校验（排除自身）
+    conflict_stmt = (
+        select(SchedulerJobRun)
+        .where(
+            SchedulerJobRun.job_name == _AFTER_CLOSE_JOB_NAME,
+            SchedulerJobRun.business_date == trade_date_str,
+            SchedulerJobRun.status.in_(["queued", "running"]),
+            SchedulerJobRun.id != run_id,
+        )
+    )
+    conflict_result = await db.execute(conflict_stmt)
+    conflict_run = conflict_result.scalar_one_or_none()
+    if conflict_run is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": "SAME_DAY_ACTIVE_RUN",
+                "conflicting_run_id": str(conflict_run.id),
+                "trade_date": trade_date_str,
+                "status": conflict_run.status,
+                "message": (
+                    f"同日已有 {conflict_run.status} 任务: "
+                    f"trade_date={trade_date_str}, run_id={conflict_run.id}"
+                ),
+            },
+        )
+
+    # 6-8. 重置为 queued（保留 last_completed_step / dsa_run_id /
+    #      feature_snapshot_run_id / snapshot_progress 等已有 metadata）
+    #      清 finished_at/error_message/error_code/worker_instance_id
+    #      heartbeat_at/lease_expires_at 置 None（由 Worker 领取后设置）
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
     job_run.status = "queued"
     job_run.error_message = None
     job_run.error_code = None
     job_run.finished_at = None
-    job_run.started_at = now
-    job_run.heartbeat_at = now
-    job_run.lease_expires_at = now + timedelta(seconds=_ORCHESTRATOR_LEASE_SECONDS)
+    job_run.worker_instance_id = None
+    job_run.heartbeat_at = None
+    job_run.lease_expires_at = None
 
+    # 9. metadata 写 resume_requested_at + orchestrator_status=queued
+    #    _update_orchestrator_status 保留已有 metadata 字段，仅更新 orchestrator_status
     await _update_orchestrator_status(
         db=db,
         job_run=job_run,
@@ -546,11 +616,35 @@ async def resume_after_close_run_endpoint(
             f"[resume] 从失败步骤继续: job_run_id={run_id}, "
             f"last_completed_step={meta.get('last_completed_step')}"
         ),
+        extra={
+            "resume_requested_at": now.isoformat(),
+        },
     )
+
+    # 10. 写唯一 manual_resume 事件
+    await append_event(
+        db=db,
+        job_run_id=job_run.id,
+        step="manual_resume",
+        level="info",
+        message=(
+            f"管理员手动恢复: job_run_id={run_id}, "
+            f"trade_date={trade_date_str}, "
+            f"last_completed_step={meta.get('last_completed_step')}"
+        ),
+        payload={
+            "resume_requested_at": now.isoformat(),
+            "last_completed_step": meta.get("last_completed_step"),
+            "last_started_step": meta.get("last_started_step"),
+            "trade_date": trade_date_str,
+        },
+    )
+
+    # 11. commit 并返回
     await db.commit()
 
     logger.info(
-        "[Phase6] resume 任务已重置为 queued: run_id=%s, last_completed_step=%s",
+        "[resume] 任务已重置为 queued: run_id=%s, last_completed_step=%s",
         run_id, meta.get("last_completed_step"),
     )
 

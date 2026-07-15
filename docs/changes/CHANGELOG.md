@@ -2,6 +2,29 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-16
+
+- CHANGE-20260716-001: 盘后任务历史恢复 API + SMC 逐 Bar 对齐 Pine + MiniKline 真实留白 + indicator_service 按需加载（合并原 001-007）
+  - **目标一 盘后 resume**：`POST /admin/after-close-runs/{id}/resume` — SELECT FOR UPDATE、同日 queued/running 互斥（409 SAME_DAY_ACTIVE_RUN）、幂等返回 queued、清 worker/heartbeat/lease、metadata 写 resume_requested_at、唯一 manual_resume 事件
+  - **P0 修复**：repair 按 `source_run_id==snapshot_run.id` 统计；DSA 未 published 不标 succeeded（`resume_pending`）；publishing 从 DB 读真实 count（禁止 0/None）；feature_snapshot 复用已有 running run；repair 后补 commit
+  - **管理页**：交易日选择器（默认最新，可选历史日期如 2026-07-15）+ "继续未完成任务"按钮（interrupted/failed 显示）
+  - **SMC 核心**：`ta.crossover/crossunder` 每 Bar 快照上一 Bar pivot level（`close[i]` 对当前 level，`close[i-1]` 对上一 level，禁止 current_level 传两次）；三个 leg() 独立持久状态（swing50/internal5/equal3）
+  - **EQH/EQL DTO 三时间点**：anchor=前pivot，second_pivot=i-size（视觉端点），confirmed=i（因果）；阈值用确认 Bar 的 `0.1*ATR200` 严格 `<`
+  - **OB 统一**：`anchor_index/time`，slice end-exclusive，unshift 最多 100，新建 OB 参与同 Bar mitigation；前端只画头部最近 5 个 `internal&&!mitigated`
+  - **swing_bias 后端返回**：`swing_bias=self.swing_trend.bias`（1/-1/0），前端从 DTO 读取禁止猜测
+  - **view adapter**（`smc_view_adapter.py` 新增）：核心用完整历史，API 只输出展示窗口有界 DTO 并统一重基准索引；跨左边界 event/EQ/OB 保留并 `clipped_left=true`
+  - **纵轴范围**：加入可见 event.level、OB high/low、EQ level、trailing
+  - **缓存版本**：SMC/non-SMC 隔离，cache key 含算法版本
+  - **输入门禁**：API 返回 `smc_source_bar_hash/first_time/last_time/bars/adj`；输入不一致写 `INPUT_BAR_MISMATCH`，禁止改算法迎合截图
+  - **TV fixture**：`ref/smc_user_export.pine` 保留导出代码；无 TV CSV 时 `PINE_PARITY_PENDING`（不宣称完全对齐）
+  - **FVG 彻底排除**：不计算、不返回、不缓存、不渲染、无 toggle
+  - **MiniKline 真实留白**：visibleData 切片（48/44/40/36/30 根）；`setVisibleLogicalRange({from:-2,to:dataLength-1+3})`；autoscale 基于 visibleData（上 12%/下 15%）；tabs 五等分 grid；chart 190px/价格轴 56px；cleanup 清旧 data/rAF/ResizeObserver
+  - **detailSource 统一**（`detailSourceContext.ts` 新增）：`normalizeResearchSource/defaultStrategyForSource` 唯一定义点
+  - **indicator_service 按需加载**：只加载当前周期和实际可用策略 required_inputs（`_REQUIRED_INPUTS` 映射 + `_determine_required_bars()` 合并）
+  - 测试：after_close pytest 42 passed（含 3 新增 resume 测试）、SMC pytest 75 passed/4 skipped（PINE_PARITY_PENDING）、前端 171 passed、contract 274 passed、ruff/mypy/typecheck/eslint 0 新增错误、前端 build 成功
+  - 约束：`ref/smc_user_source.pine` 保持原 843 行和 SHA256；resume API 禁止手工 SQL 恢复
+  - 遗留：Pine golden fixture PENDING（等待用户从 TradingView 导出 CSV）；生产 E2E 待部署后执行
+
 ## 2026-07-15
 
 - CHANGE-20260715-006: MiniKline 闭包根治 + SMC Pine 对齐（RMA NA 语义 + 首个 pivot off-by-one + EQH/EQL 三时间点）

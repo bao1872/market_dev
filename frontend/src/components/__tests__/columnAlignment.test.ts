@@ -280,14 +280,15 @@ test('源码契约：action 列 isAction 标记且 th 渲染跳过 sticky/sort',
 
 test('源码契约：selectable 列 th/td 固定 id table-select-column', () => {
   // 验证 select 列使用固定 className，不偏移
+  // 注：td 可能附加 stopPropagation 等事件处理器，regex 只校验 className 存在
   assert.match(
     strategyDataTableSrc,
-    /<th className="table-select-column">/,
+    /<th className="table-select-column"/,
     'select 列 th 应使用固定 className table-select-column',
   )
   assert.match(
     strategyDataTableSrc,
-    /<td className="table-select-column">/,
+    /<td className="table-select-column"/,
     'select 列 td 应使用固定 className table-select-column',
   )
 })

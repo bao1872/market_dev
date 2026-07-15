@@ -41,9 +41,14 @@ import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants.indicator_contract import INDICATOR_BARS
-from app.constants.strategy_keys import DSA_SELECTOR
+from app.constants.indicator_contract import (
+    INDICATOR_BARS,
+    NODE_CLUSTER_LOW_BARS,
+    NODE_CLUSTER_MINUTE_BARS,
+)
+from app.constants.strategy_keys import DSA_SELECTOR, WATCHLIST_MONITOR
 from app.models.instrument import Instrument
+from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.repositories.bar_repository import (
     _get_adj_factor_df,
     _query_15min_bars,
@@ -58,6 +63,7 @@ from app.services.chart_bars_service import (
     compute_source_bar_times,
 )
 from app.services.market_data_aggregation_service import MarketDataAggregationService
+from app.services.smc_view_adapter import adapt_smc_to_display_dto
 from app.services.strategy_batch_service import StrategyBatchService
 from app.strategy.runtime import MarketDataContext, StrategyLoader
 from app.strategy_assets.algorithms.features.merged_dsa_atr_rope_bb_factors import (
@@ -70,9 +76,81 @@ from app.strategy_assets.algorithms.features.sqzmom_lb import compute_sqzmom_lb
 
 logger = logging.getLogger("services.indicator_service")
 
-# 查询范围常量（日线 5000 天，日内 750 天）
+# 查询范围常量（日线 5000 天，日内按需）
 _DEFAULT_DAILY_LOOKBACK_DAYS = 5000  # 日线默认回看 5000 天（与 bars.py 一致）
-_INDICATOR_INTRADAY_LOOKBACK_DAYS = 750  # 指标计算专用 15min/1min 回看天数（750 天，与 bars.py 的 API 查询回看 180 天不同，指标计算需要更多数据）
+# [CHANGE-20260716-001 required_inputs] 日内回看天数按数据类型独立设定：
+#   15min: 400 天足够覆盖 NODE_CLUSTER_LOW_BARS=4000（4000/16=250 交易日≈350 日历日）
+#   minute: 5 天足够覆盖 NODE_CLUSTER_MINUTE_BARS=2（仅需最后 2 根）
+#   60min: 750 天（1h 指标窗口需要更长历史）
+_15MIN_LOOKBACK_DAYS = 400  # 15min 回看 400 天（VP 需要 4000 根，不再查 750 天 12000 根）
+_MINUTE_LOOKBACK_DAYS = 5  # minute 回看 5 天（VP crossover 仅需 2 根，不再查 750 天 180000 根）
+_60MIN_LOOKBACK_DAYS = 750  # 60min 回看 750 天（1h 指标计算需要完整历史）
+
+# [CHANGE-20260716-001 required_inputs] 策略→所需 bar 类型映射
+# 定义每个注册策略实际需要哪些 bar 类型，避免无条件查询全量日内数据。
+# volume_node_monitor 需要 15min（VP profile）和 minute（crossover 检测），
+# 其他策略仅需 daily。
+_REQUIRED_INPUTS: dict[str, frozenset[str]] = {
+    DSA_SELECTOR: frozenset({"daily"}),
+    "volume_node_monitor": frozenset({"daily", "15min", "minute"}),
+    "bb_monitor": frozenset({"daily"}),
+    WATCHLIST_MONITOR: frozenset({"daily"}),
+}
+
+
+async def _get_available_strategy_keys(
+    session: AsyncSession, strategy_keys: list[str]
+) -> set[str]:
+    """批量查询哪些策略在数据库中有 released version。
+
+    避免为数据库中不存在或无 released version 的策略加载额外数据。
+    一次查询返回所有可用策略 key。
+
+    [CHANGE-20260716-001 required_inputs] 修复优化在生产环境无效的根因：
+    静态 _registry 包含 volume_node_monitor/bb_monitor，但数据库中无定义，
+    导致 _determine_required_bars() 错误地纳入 15min/minute。
+    新逻辑基于实际可用策略（有 released version）计算 required_bars。
+
+    Args:
+        session: 异步 DB 会话
+        strategy_keys: 待检查的策略 key 列表
+
+    Returns:
+        有 released version 的策略 key 集合
+    """
+    if not strategy_keys:
+        return set()
+    stmt = (
+        select(StrategyDefinition.strategy_key)
+        .join(
+            StrategyVersion,
+            StrategyVersion.strategy_definition_id == StrategyDefinition.id,
+        )
+        .where(StrategyDefinition.strategy_key.in_(strategy_keys))
+        .where(StrategyVersion.status == "released")
+        .distinct()
+    )
+    result = await session.execute(stmt)
+    return {row[0] for row in result.all()}
+
+
+def _determine_required_bars(available_keys: set[str]) -> frozenset[str]:
+    """根据实际可用的策略确定需要加载的 bar 类型集合。
+
+    [CHANGE-20260716-001 required_inputs] 不再基于静态 _registry，
+    而是基于数据库中实际有 released version 的策略。
+    当前 timeframe 自身的 macd_bars 完全独立于此函数（由 timeframe 直接决定）。
+
+    Args:
+        available_keys: 数据库中有 released version 的策略 key 集合
+
+    Returns:
+        所需 bar 类型的不可变集合（如 frozenset({"daily", "15min", "minute"})）
+    """
+    needed: set[str] = {"daily"}  # daily 总是需要（MACD/DSA 等基础指标）
+    for strategy_id in available_keys:
+        needed |= _REQUIRED_INPUTS.get(strategy_id, frozenset({"daily"}))
+    return frozenset(needed)
 
 # [DSA/MACD 计算窗口] - 从 indicator_contract 基线读取（advice.md 第一节）
 # INDICATOR_BARS 已从 app.constants.indicator_contract 导入（第44行）
@@ -383,11 +461,20 @@ async def compute_all_indicators(
     #    日内/周线/月线通过 DB 查询获取
     today = date.today()
     daily_start = today - timedelta(days=_DEFAULT_DAILY_LOOKBACK_DAYS)
-    intraday_start_dt = datetime.combine(
-        today - timedelta(days=_INDICATOR_INTRADAY_LOOKBACK_DAYS),
-        datetime.min.time(),
-    )
     intraday_end_dt = datetime.combine(today, datetime.max.time())
+
+    # [CHANGE-20260716-001 required_inputs] 基于实际可用策略（有 released version）
+    #   加载日内数据，避免为数据库中不存在的策略（如 volume_node_monitor 未发布）
+    #   加载 15min/minute 数据。
+    #   当前 timeframe 自身的 macd_bars 完全独立于此逻辑（由 timeframe 直接决定）。
+    #   修复根因：静态 _registry 包含 volume_node_monitor/bb_monitor，但数据库无定义，
+    #   导致旧逻辑错误地纳入 15min/minute，1d 请求仍执行 2 条不必要的查询。
+    available_keys = await _get_available_strategy_keys(
+        session, list(StrategyLoader._registry.keys())
+    )
+    required_bars = _determine_required_bars(available_keys)
+    needs_15min = "15min" in required_bars or timeframe == "15m"
+    needs_minute = "minute" in required_bars
 
     # 日线：MarketDataAggregationService 统一处理 DB 优先 + Pytdx 兜底 +
     # 前复权 + 去重 + 未完成 Bar 过滤；本层再截取最近 N 根
@@ -403,16 +490,35 @@ async def compute_all_indicators(
         daily_bars = daily_bars.tail(daily_count)
 
     # 日内/周线/月线：DB 查询（与原 DB 降级路径一致，SSOT）
-    bars_15min = await _query_15min_bars(
-        session, instrument_id, intraday_start_dt, intraday_end_dt,
-    )
-    bars_minute = await _query_minute_bars(
-        session, instrument_id, intraday_start_dt, intraday_end_dt,
-    )
+    # [CHANGE-20260716-001] 15min 仅在需要时查询，limit=NODE_CLUSTER_LOW_BARS 让 DB 只返回 4000 根
+    if needs_15min:
+        start_15min = datetime.combine(
+            today - timedelta(days=_15MIN_LOOKBACK_DAYS), datetime.min.time(),
+        )
+        bars_15min = await _query_15min_bars(
+            session, instrument_id, start_15min, intraday_end_dt,
+            limit=NODE_CLUSTER_LOW_BARS,
+        )
+    else:
+        bars_15min = pd.DataFrame()
+    # [CHANGE-20260716-001] minute 仅在需要时查询，limit=NODE_CLUSTER_MINUTE_BARS 让 DB 只返回 2 根
+    if needs_minute:
+        start_minute = datetime.combine(
+            today - timedelta(days=_MINUTE_LOOKBACK_DAYS), datetime.min.time(),
+        )
+        bars_minute = await _query_minute_bars(
+            session, instrument_id, start_minute, intraday_end_dt,
+            limit=NODE_CLUSTER_MINUTE_BARS,
+        )
+    else:
+        bars_minute = pd.DataFrame()
     bars_60min: pd.DataFrame | None = None
     if timeframe == "1h":
+        start_60min = datetime.combine(
+            today - timedelta(days=_60MIN_LOOKBACK_DAYS), datetime.min.time(),
+        )
         bars_60min = await _query_60min_bars(
-            session, instrument_id, intraday_start_dt, intraday_end_dt,
+            session, instrument_id, start_60min, intraday_end_dt,
         )
     bars_weekly = pd.DataFrame()
     if timeframe == "1w":
@@ -652,14 +758,20 @@ async def compute_all_indicators(
     })
     data["sqzmom_lb"] = _to_json_safe(_truncate_lists(sqzmom_renamed, bars))
 
-    # [CHANGE-20260715-002 SMC Pine parity] - 按需计算 SMC 指标（include_smc=False 时跳过，0 CPU）
+    # [CHANGE-20260715-007 SMC view adapter] - 按需计算 SMC 指标（include_smc=False 时跳过，0 CPU）
     # SMC 是独立图层，不进入 DSA、Node 监控、Capture 或右栏 context；
     # 完全排除 FVG（不计算、不返回、不缓存、不渲染）；
-    # 输出 BOS/CHoCH/OB/EQH/EQL/trailing，每个事件含 anchor/confirmed 因果契约。
+    # 输出 BOS/CHoCH/OB/EQH/EQL/trailing/swing_bias，每个事件含 anchor/confirmed 因果契约。
     # [warmup 契约] 1d 使用 full_daily_bars（DB 全量日线，≥500 warmup）；
     # 其他周期复用 macd_bars（15m≈12000、1h≈3000、1w≈714、1mo≈166，均为可获得最大历史）。
-    # 不调用 _truncate_lists：SMC time 数组需保持完整长度以对齐 anchor/confirmed 索引，
-    # 前端通过 smcToDisplay 映射自动过滤展示区外事件。
+    # [view adapter] 完整计算结果经 adapt_smc_to_display_dto 裁成展示窗口 DTO：
+    #   - 索引重基准到展示窗口（offset = max(0, total_bars - display_bars)）
+    #   - 与窗口相交的活跃 OB 即使 anchor 在窗口左侧也保留并标记 clipped_left
+    #   - 响应大小与 bars 上限同阶（不再透传 12000 根 time 数组）
+    #   - swing_bias 显式返回，前端不再从事件猜测
+    # [CHANGE-20260716-001 SMC source diagnostics] 新增 smc_source_bar_hash 等诊断字段，
+    #   hash 基于 SMC 实际完整输入（smc_bars），不复用截断后的 macd_bars hash。
+    smc_source_diagnostics: dict[str, Any] | None = None
     if include_smc:
         try:
             # [CHANGE-20260715-002] 1d 使用完整日线 warmup，其他周期复用 macd_bars
@@ -669,6 +781,14 @@ async def compute_all_indicators(
             smc_lows = smc_bars["low"].to_numpy(float).tolist()
             smc_closes = smc_bars["close"].to_numpy(float).tolist()
             smc_times = [idx.isoformat() for idx in smc_bars.index]
+            # [CHANGE-20260716-001] SMC 输入诊断字段（基于完整 smc_bars，非截断 macd_bars）
+            smc_source_diagnostics = {
+                "smc_source_bar_hash": compute_source_bar_hash(smc_bars, timeframe),
+                "smc_source_first_time": smc_times[0] if smc_times else None,
+                "smc_source_last_time": smc_times[-1] if smc_times else None,
+                "smc_source_bars": len(smc_times),
+                "smc_adj": adj,
+            }
             smc_result = compute_smc_indicators(
                 opens=smc_opens,
                 highs=smc_highs,
@@ -676,15 +796,9 @@ async def compute_all_indicators(
                 closes=smc_closes,
                 times=smc_times,
             )
-            smc_with_time = {
-                "events": smc_result["events"],
-                "order_blocks": smc_result["order_blocks"],
-                "equal_highs_lows": smc_result["equal_highs_lows"],
-                "trailing": smc_result["trailing"],
-                "pivots": smc_result["pivots"],
-                "time": smc_result["time"],
-                "params": smc_result["params"],
-            }
+            # [CHANGE-20260715-007] 调用 view adapter 裁成展示窗口 DTO
+            # display_bars = bars（前端可见窗口上限），与 indicators API 的 bars 参数同源
+            smc_dto = adapt_smc_to_display_dto(smc_result, bars)
             # 注入 smc 图层（main pane，renderer=smc）
             layers.append({
                 "strategy_id": "smc",
@@ -699,19 +813,19 @@ async def compute_all_indicators(
                 "direction_down_color": "#22C55E",  # A 股绿跌
                 "fields": [
                     "events", "order_blocks", "equal_highs_lows",
-                    "trailing", "pivots", "time",
+                    "trailing", "swing_bias", "pivots", "time", "view",
                 ],
                 "hover_fields": [],
             })
-            # [CHANGE-20260715-002] 不截断 SMC 输出：time 数组需保持完整长度
-            # 前端 smcToDisplay 通过时间匹配自动过滤展示区外事件
-            data["smc"] = _to_json_safe(smc_with_time)
+            # [CHANGE-20260715-007] 写入展示 DTO（不再透传完整计算结果）
+            data["smc"] = _to_json_safe(smc_dto)
             logger.info(
-                "SMC 指标计算成功 instrument_id=%s timeframe=%s bars=%d events=%d obs=%d",
+                "SMC 指标计算成功 instrument_id=%s timeframe=%s total_bars=%d display_bars=%d "
+                "events=%d obs=%d eqhl=%d swing_bias=%s",
                 instrument_id, timeframe,
-                len(smc_bars),
-                len(smc_result["events"]),
-                len(smc_result["order_blocks"]),
+                smc_dto["view"]["total_bars"], smc_dto["view"]["display_bars"],
+                len(smc_dto["events"]), len(smc_dto["order_blocks"]),
+                len(smc_dto["equal_highs_lows"]), smc_dto["swing_bias"],
             )
         except Exception as exc:
             # SMC 失败不阻塞主图（记录错误到 errors，前端显示降级提示）
@@ -735,6 +849,14 @@ async def compute_all_indicators(
         #   前端据此验证 K 线时间与指标数据源一致性；hash 用于跨场景比对
         "source_bar_times": source_bar_times,
         "source_bar_hash": source_bar_hash,
+        # [CHANGE-20260716-001 SMC source diagnostics] - SMC 实际输入诊断字段
+        #   hash 基于 SMC 完整输入（smc_bars），不复用截断后的 macd_bars hash；
+        #   include_smc=False 时为 None，前端据此判断 SMC 是否计算
+        "smc_source_bar_hash": smc_source_diagnostics["smc_source_bar_hash"] if smc_source_diagnostics else None,
+        "smc_source_first_time": smc_source_diagnostics["smc_source_first_time"] if smc_source_diagnostics else None,
+        "smc_source_last_time": smc_source_diagnostics["smc_source_last_time"] if smc_source_diagnostics else None,
+        "smc_source_bars": smc_source_diagnostics["smc_source_bars"] if smc_source_diagnostics else 0,
+        "smc_adj": smc_source_diagnostics["smc_adj"] if smc_source_diagnostics else None,
     }
 
 
@@ -768,6 +890,18 @@ if __name__ == "__main__":
     assert "bars_15min" in ctx_fields, "MarketDataContext 应有 bars_15min"
     assert "bars_minute" in ctx_fields, "MarketDataContext 应有 bars_minute"
     print(f"MarketDataContext fields={ctx_fields} ✓")
+
+    # 3b. [CHANGE-20260716-001] 验证 required_inputs 映射
+    assert DSA_SELECTOR in _REQUIRED_INPUTS, "dsa_selector 应在 required_inputs"
+    assert "volume_node_monitor" in _REQUIRED_INPUTS, "volume_node_monitor 应在 required_inputs"
+    assert _REQUIRED_INPUTS["volume_node_monitor"] == frozenset({"daily", "15min", "minute"}), \
+        "volume_node_monitor 应需要 daily+15min+minute"
+    assert _REQUIRED_INPUTS[DSA_SELECTOR] == frozenset({"daily"}), \
+        "dsa_selector 应仅需 daily"
+    required = _determine_required_bars(set(StrategyLoader._registry.keys()))
+    assert "15min" in required, "注册了 volume_node_monitor，应需要 15min"
+    assert "minute" in required, "注册了 volume_node_monitor，应需要 minute"
+    print(f"_determine_required_bars()={set(required)} ✓")
 
     # 4. 验证 _to_json_safe 类型转换
     assert _to_json_safe(None) is None, "None 应返回 None"

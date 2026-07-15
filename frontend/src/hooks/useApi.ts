@@ -1131,13 +1131,16 @@ export function useRetryAfterCloseRun() {
   })
 }
 
-/** [Phase6] 从失败步骤继续变更（保留断点检查点） */
+/** [Phase6] 从失败步骤继续变更（保留断点检查点，幂等）。
+ * 成功后失效 after-close-runs / pipeline latest / pipeline by-date / pipeline runs /
+ * system-overview 缓存，确保 UI 立即反映 queued 状态。 */
 export function useResumeAfterCloseRun() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (runId: string) => api.resumeAfterCloseRun(runId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['after-close-runs'] })
+      queryClient.invalidateQueries({ queryKey: ['after-close-pipeline'] })
       queryClient.invalidateQueries({ queryKey: ['admin', 'system-overview'] })
     },
   })
