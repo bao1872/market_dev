@@ -1,0 +1,24 @@
+{
+  "experiment_name": "V4.12 Atomic Fact Contract Correction and Closure Audit",
+  "version": "4.12",
+  "dates": ["2026-07-07", "2026-07-08", "2026-07-09", "2026-07-10", "2026-07-13", "2026-07-14"],
+  "exclude_dates": ["2026-07-06"],
+  "expected_per_day": 5293,
+  "expected_total": 31758,
+  "bin_schemes": {"20/80": [20, 80], "25/75": [25, 75], "33/67": [33, 67]},
+  "coverage_threshold": 0.95,
+  "redundancy_threshold": 0.95,
+  "formula_consistency_target": 1.0,
+  "logic_conflict_target": 0,
+  "output_dir": "/home/ubuntu/panji_research_outputs/scene_state_v3",
+  "report_filename": "final_v4_12_atomic_fact_contract_closure.md",
+  "rng_seed": 42,
+  "n_typical_samples": 20,
+  "n_boundary_samples": 10,
+  "lodo_subset_facts": [
+    "M3_aligned_momentum_delta_raw",
+    "M4_segment_momentum_change",
+    "V3_avg_volume_ratio_raw",
+    "V5_return_per_volume"
+  ]
+}

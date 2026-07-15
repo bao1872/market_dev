@@ -1,0 +1,26 @@
+{
+  "experiment_name": "V4.13 Final Atomic Fact Contract Freeze",
+  "version": "4.13",
+  "dates": ["2026-07-07", "2026-07-08", "2026-07-09", "2026-07-10", "2026-07-13", "2026-07-14"],
+  "exclude_dates": ["2026-07-06"],
+  "expected_per_day": 5293,
+  "expected_total": 31758,
+  "coverage_threshold": 0.95,
+  "redundancy_threshold": 0.95,
+  "formula_consistency_target": 1.0,
+  "logic_conflict_target": 0,
+  "output_dir": "/home/ubuntu/panji_research_outputs/scene_state_v3",
+  "report_filename": "final_v4_13_atomic_fact_contract_freeze.md",
+  "rng_seed": 42,
+  "n_boundary_samples": 50,
+  "n_normal_stratified": 1000,
+  "v412_report_path": "/home/ubuntu/panji_research_outputs/scene_state_v3/final_v4_12_atomic_fact_contract_closure.md",
+  "v412_expected": {
+    "expected_total": 31758,
+    "formula_consistency": 1.0,
+    "logic_conflicts": 0,
+    "efficiency_violations": 137,
+    "cumulative_vs_age_pearson": 0.6405,
+    "avg_vs_age_pearson": -0.0149
+  }
+}
