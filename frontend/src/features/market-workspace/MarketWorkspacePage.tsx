@@ -71,9 +71,14 @@ export default function MarketWorkspacePage() {
 
   // 板块目录（只请求一次，available=false 时禁用输入）
   const boardsQuery = useMarketBoards()
-  const boards = boardsQuery.data
-    ? { items: boardsQuery.data.items, available: boardsQuery.data.available }
-    : undefined
+  const boards = useMemo(() => {
+    if (!boardsQuery.data) return undefined
+    return {
+      items: boardsQuery.data.items,
+      available: boardsQuery.data.available,
+      stale: boardsQuery.data.stale,
+    }
+  }, [boardsQuery.data])
 
   // CHANGE-20260713-006: 板块校验集合（preset 应用时检测失效字段）
   const boardsValidation = useMemo(() => {

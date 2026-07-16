@@ -1,46 +1,59 @@
-"""Board Sync Service - qstock 概念/行业板块同步（PRD §7.5）。
+"""Board Sync Service - 问财板块原子快照同步（PRD §7.5 重构）。
 
-V1.1 完整性门禁：
-1. 先写暂存集合（内存）
-2. 校验：空集合、目录数、成分数、异常降幅（>20%）、解析率
-3. 全部通过后事务原子切换（集合差异 + 批量 upsert/delete）
-4. 失败抛异常，由调用方控制事务回滚，保留上一成功版本
+V1.1 完整性门禁（绝对门禁 + 相对门禁）：
+1. 接收 wencai_board_provider 构建的完整 BoardSnapshot（内存中全部 boards + memberships）
+2. 绝对门禁：原始行≥5000、代码唯一率≥99.9%、行业≥200、概念≥300、关系≥60000、解析率≥95%
+3. 相对门禁：股票/行业/概念/关系任一下降>20% 拒绝切换
+4. 全部通过后单事务差异 upsert/delete（原子切换）
+5. 失败 rollback 保留上一成功版本；成功时刷新有效 board 的 updated_at
 
-调度：每日收盘后或次日开盘前执行一次，单并发。
-qstock 只存在于独立采集适配器，不成为用户请求链的运行时依赖。
+board 同步是软失败：失败不覆盖旧数据、不阻断 DSA/快照/发布。
+状态通过 Redis 记录（record_sync_status / get_sync_status），供 /market/boards API 读取。
 
-纯函数设计：validate_staging_data 是纯函数，可直接单元测试。
+纯函数设计：validate_snapshot 是纯函数，可直接单元测试。
 sync_boards 是异步服务入口，编排完整流程，失败抛异常。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import time
-from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, tuple_
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.redis_client import get_redis
 from app.models.market_board import MarketBoard, MarketBoardMembership
+from app.services.wencai_board_provider import BoardSnapshot
 
 logger = logging.getLogger(__name__)
 
-# 完整性校验阈值
-MIN_BOARD_COUNT = 100  # A 股至少 100+ 行业/概念板块
-MIN_MEMBERSHIP_COUNT = 3000  # 至少 3000 条成分关系
-MAX_DROP_PERCENT = 0.20  # 异常降幅阈值：>20% 拒绝切换
-MIN_PARSE_RATE = 0.50  # 最低解析率：resolved_symbols / total_symbols
+# =============================================================================
+# 绝对门禁阈值（PROMPT §四.2）
+# =============================================================================
+MIN_RAW_ROWS = 5000  # 原始行数下限
+MIN_CODE_UNIQUENESS_RATE = 0.999  # 代码唯一率 ≥ 99.9%
+MIN_INDUSTRY_COUNT = 200  # 完整行业 ≥ 200
+MIN_CONCEPT_COUNT = 300  # 概念 ≥ 300
+MIN_RELATION_COUNT = 60000  # 总关系 ≥ 60000
+MIN_PARSE_RATE = 0.95  # 有效 A 股解析率 ≥ 95%
+MIN_INDUSTRY_COVERAGE = 0.99  # 已解析股票行业覆盖 ≥ 99%
+MAX_CONCEPTS_PER_STOCK = 100  # 单股概念 ≤ 100
 
-# 批量操作大小
+# 相对门禁阈值
+MAX_DROP_PERCENT = 0.20  # 任一指标下降 >20% 拒绝切换
+
+# 批量操作大小（500~1000）
 BATCH_SIZE = 500
 
-# 同步任务总时限（秒）：700+板块逐个拉取成分，30分钟足够；
-# 超过说明大概率被反爬封锁，继续重试无意义
-SYNC_TOTAL_TIMEOUT_SECONDS = 1800
+# Redis 状态键
+_BOARD_SYNC_STATUS_KEY = "board_sync:status"
+_BOARD_SYNC_STATUS_TTL = 7 * 24 * 3600  # 7 天
 
 
 class BoardSyncError(Exception):
@@ -48,85 +61,144 @@ class BoardSyncError(Exception):
 
 
 class StagingValidationError(BoardSyncError):
-    """暂存数据校验失败。"""
+    """暂存数据校验失败（绝对门禁或相对门禁）。"""
 
 
-class BoardFetcher(Protocol):
-    """qstock 数据拉取适配器协议。"""
-
-    async def fetch_boards(self) -> list[dict[str, str]]:
-        """拉取板块目录。返回 [{external_code, name, type}]。"""
-        ...
-
-    async def fetch_memberships(
-        self, board_external_code: str, board_type: str
-    ) -> list[str]:
-        """拉取指定板块的成分股代码列表。返回 [symbol, ...]。"""
-        ...
+class BoardSyncStatusError(BoardSyncError):
+    """板块同步状态读写失败。"""
 
 
-@dataclass
-class StagingData:
-    """暂存数据（内存中的完整快照）。"""
-
-    boards: list[dict[str, str]] = field(default_factory=list)
-    # (external_code, type) -> [symbol, ...]
-    memberships: dict[tuple[str, str], list[str]] = field(default_factory=dict)
-
-    @property
-    def board_count(self) -> int:
-        return len(self.boards)
-
-    @property
-    def membership_count(self) -> int:
-        return sum(len(v) for v in self.memberships.values())
+# =============================================================================
+# 纯函数：绝对门禁校验
+# =============================================================================
 
 
-def validate_staging_data(
-    staging: StagingData,
-    prev_board_count: int = 0,
-    prev_membership_count: int = 0,
-) -> None:
-    """校验暂存数据完整性（PRD V1.1 完整性门禁）。
+def validate_snapshot(
+    snapshot: BoardSnapshot,
+    *,
+    prev_stock_count: int = 0,
+    prev_industry_count: int = 0,
+    prev_concept_count: int = 0,
+    prev_relation_count: int = 0,
+) -> dict[str, Any]:
+    """校验快照完整性（绝对门禁 + 相对门禁）。
 
-    校验项：
-    1. 空集合检查
-    2. 目录数下限检查
-    3. 成分数下限检查
-    4. 异常降幅检查（>20% 拒绝）
+    绝对门禁：
+    1. 原始行数 ≥ 5000
+    2. 代码唯一率 ≥ 99.9%（unique_symbols / total_symbol_refs）
+    3. 行业数 ≥ 200
+    4. 概念数 ≥ 300
+    5. 总关系数 ≥ 60000
+    6. 概念数/股 ≤ 100（已在 provider 截断）
+
+    相对门禁（prev > 0 时检查）：
+    7. 股票/行业/概念/关系任一下降 > 20% 拒绝
+
+    Args:
+        snapshot: wencai_board_provider 构建的 BoardSnapshot
+        prev_stock_count: 上次成功的股票数
+        prev_industry_count: 上次成功的行业数
+        prev_concept_count: 上次成功的概念数
+        prev_relation_count: 上次成功的关系数
+
+    Returns:
+        校验统计 dict（供 metadata 记录）
 
     Raises:
         StagingValidationError: 校验失败
     """
-    if staging.board_count == 0:
-        raise StagingValidationError("staging boards is empty")
-    if staging.membership_count == 0:
-        raise StagingValidationError("staging memberships is empty")
-    if staging.board_count < MIN_BOARD_COUNT:
+    stats = _compute_snapshot_stats(snapshot)
+
+    # 绝对门禁
+    if stats["raw_rows"] < MIN_RAW_ROWS:
         raise StagingValidationError(
-            f"staging board count {staging.board_count} < minimum {MIN_BOARD_COUNT}"
+            f"raw rows {stats['raw_rows']} < minimum {MIN_RAW_ROWS}"
         )
-    if staging.membership_count < MIN_MEMBERSHIP_COUNT:
+    if stats["code_uniqueness_rate"] < MIN_CODE_UNIQUENESS_RATE:
         raise StagingValidationError(
-            f"staging membership count {staging.membership_count} < minimum {MIN_MEMBERSHIP_COUNT}"
+            f"code uniqueness rate {stats['code_uniqueness_rate']:.4f} "
+            f"< minimum {MIN_CODE_UNIQUENESS_RATE}"
+        )
+    if stats["industry_count"] < MIN_INDUSTRY_COUNT:
+        raise StagingValidationError(
+            f"industry count {stats['industry_count']} < minimum {MIN_INDUSTRY_COUNT}"
+        )
+    if stats["concept_count"] < MIN_CONCEPT_COUNT:
+        raise StagingValidationError(
+            f"concept count {stats['concept_count']} < minimum {MIN_CONCEPT_COUNT}"
+        )
+    if stats["relation_count"] < MIN_RELATION_COUNT:
+        raise StagingValidationError(
+            f"relation count {stats['relation_count']} < minimum {MIN_RELATION_COUNT}"
         )
 
-    if prev_board_count > 0:
-        board_drop = 1.0 - (staging.board_count / prev_board_count)
-        if board_drop > MAX_DROP_PERCENT:
+    # 相对门禁
+    if prev_stock_count > 0:
+        drop = 1.0 - (stats["unique_stock_count"] / prev_stock_count)
+        if drop > MAX_DROP_PERCENT:
             raise StagingValidationError(
-                f"board count dropped {board_drop:.1%} (from {prev_board_count} "
-                f"to {staging.board_count}), exceeds {MAX_DROP_PERCENT:.0%} threshold"
+                f"stock count dropped {drop:.1%} (from {prev_stock_count} "
+                f"to {stats['unique_stock_count']}), exceeds {MAX_DROP_PERCENT:.0%}"
+            )
+    if prev_industry_count > 0:
+        drop = 1.0 - (stats["industry_count"] / prev_industry_count)
+        if drop > MAX_DROP_PERCENT:
+            raise StagingValidationError(
+                f"industry count dropped {drop:.1%} (from {prev_industry_count} "
+                f"to {stats['industry_count']}), exceeds {MAX_DROP_PERCENT:.0%}"
+            )
+    if prev_concept_count > 0:
+        drop = 1.0 - (stats["concept_count"] / prev_concept_count)
+        if drop > MAX_DROP_PERCENT:
+            raise StagingValidationError(
+                f"concept count dropped {drop:.1%} (from {prev_concept_count} "
+                f"to {stats['concept_count']}), exceeds {MAX_DROP_PERCENT:.0%}"
+            )
+    if prev_relation_count > 0:
+        drop = 1.0 - (stats["relation_count"] / prev_relation_count)
+        if drop > MAX_DROP_PERCENT:
+            raise StagingValidationError(
+                f"relation count dropped {drop:.1%} (from {prev_relation_count} "
+                f"to {stats['relation_count']}), exceeds {MAX_DROP_PERCENT:.0%}"
             )
 
-    if prev_membership_count > 0:
-        membership_drop = 1.0 - (staging.membership_count / prev_membership_count)
-        if membership_drop > MAX_DROP_PERCENT:
-            raise StagingValidationError(
-                f"membership count dropped {membership_drop:.1%} "
-                f"(from {prev_membership_count} to {staging.membership_count}), "
-                f"exceeds {MAX_DROP_PERCENT:.0%} threshold"
-            )
+    return stats
+
+
+def _compute_snapshot_stats(snapshot: BoardSnapshot) -> dict[str, Any]:
+    """计算快照统计信息（纯函数）。"""
+    industry_count = sum(1 for b in snapshot.boards if b["type"] == "industry")
+    concept_count = sum(1 for b in snapshot.boards if b["type"] == "concept")
+
+    # 统计唯一股票代码和总引用
+    all_symbols: set[str] = set()
+    total_symbol_refs = 0
+    for symbols in snapshot.memberships.values():
+        all_symbols.update(symbols)
+        total_symbol_refs += len(symbols)
+
+    unique_stock_count = len(all_symbols)
+    # 代码唯一率：唯一股票数 / 原始行数（每行应为一个唯一股票，非 membership 引用率）
+    code_uniqueness_rate = (
+        unique_stock_count / snapshot.raw_rows if snapshot.raw_rows > 0 else 0.0
+    )
+
+    return {
+        "raw_rows": snapshot.raw_rows,
+        "industry_count": industry_count,
+        "concept_count": concept_count,
+        "board_count": snapshot.board_count,
+        "relation_count": snapshot.membership_count,
+        "unique_stock_count": unique_stock_count,
+        "total_symbol_refs": total_symbol_refs,
+        "code_uniqueness_rate": round(code_uniqueness_rate, 4),
+        "unresolved_count": len(snapshot.unresolved_symbols),
+    }
+
+
+# =============================================================================
+# 数据库查询：当前计数
+# =============================================================================
 
 
 async def get_current_counts(db: AsyncSession) -> tuple[int, int]:
@@ -138,75 +210,79 @@ async def get_current_counts(db: AsyncSession) -> tuple[int, int]:
     return (board_count or 0, membership_count or 0)
 
 
-async def _batch_delete(db: AsyncSession, model: Any, ids: list, batch_size: int = BATCH_SIZE) -> None:
-    """分批删除，避免单次 SQL 过大。"""
-    for i in range(0, len(ids), batch_size):
-        chunk = ids[i : i + batch_size]
-        await db.execute(delete(model).where(model.id.in_(chunk)))
+async def get_current_detailed_counts(db: AsyncSession) -> dict[str, int]:
+    """获取当前板块详细计数（board/industry/concept/membership/stock）。"""
+    board_count = await db.scalar(select(func.count()).select_from(MarketBoard)) or 0
+    membership_count = await db.scalar(
+        select(func.count()).select_from(MarketBoardMembership)
+    ) or 0
+    industry_count = await db.scalar(
+        select(func.count()).select_from(MarketBoard).where(MarketBoard.type == "industry")
+    ) or 0
+    concept_count = await db.scalar(
+        select(func.count()).select_from(MarketBoard).where(MarketBoard.type == "concept")
+    ) or 0
+    stock_count = await db.scalar(
+        select(func.count(func.distinct(MarketBoardMembership.instrumentId)))
+    ) or 0
+    return {
+        "board_count": board_count,
+        "membership_count": membership_count,
+        "industry_count": industry_count,
+        "concept_count": concept_count,
+        "stock_count": stock_count,
+    }
+
+
+# =============================================================================
+# 原子同步主函数
+# =============================================================================
 
 
 async def sync_boards(
     db: AsyncSession,
-    fetcher: BoardFetcher,
+    snapshot: BoardSnapshot,
     instrument_resolver: Any | None = None,
 ) -> dict[str, Any]:
-    """执行完整的板块同步流程（PRD §7.5）。
+    """执行完整的板块原子同步（PRD §7.5 重构）。
 
     流程：
-    1. 拉取目录和成分到暂存集合
-    2. 校验完整性（空集合/下限/降幅）
-    3. 解析 symbol → instrument_id，校验解析率
-    4. 集合差异 + 批量 upsert/delete（事务内，由调用方控制 commit）
-    5. 失败抛异常，不修改现有数据
+    1. 获取当前计数（相对门禁用）
+    2. 绝对门禁 + 相对门禁校验
+    3. 批量解析 symbol → instrument_id（500~1000 批次）
+    4. 单事务差异 upsert/delete（原子切换）
+    5. 成功时刷新有效 board 的 updated_at
 
     Args:
         db: 异步数据库会话
-        fetcher: qstock 数据拉取适配器
-        instrument_resolver: 将 symbol 解析为 instrument_id 的函数
+        snapshot: wencai_board_provider 构建的完整 BoardSnapshot
+        instrument_resolver: 将 symbol 解析为 instrument_id 的异步函数
 
     Returns:
-        同步结果摘要 {board_count, membership_count, status, ...}
+        同步结果摘要 dict
 
     Raises:
-        StagingValidationError: 暂存数据校验失败
+        StagingValidationError: 门禁校验失败
         BoardSyncError: 解析率过低或写入失败
-        QStockFetchError: qstock 拉取失败
     """
-    # 1. 获取当前计数（用于异常降幅校验）
-    prev_board_count, prev_membership_count = await get_current_counts(db)
+    start_time = time.monotonic()
 
-    # 2. 拉取目录（fetcher 内部失败会抛异常，不返回空列表）
-    boards_data = await fetcher.fetch_boards()
-    if not boards_data:
-        raise StagingValidationError("fetcher returned empty boards")
+    # 1. 获取当前详细计数（相对门禁用）
+    prev_counts = await get_current_detailed_counts(db)
 
-    # 3. 拉取成分到暂存集合
-    staging = StagingData()
-    sync_start = time.monotonic()
-    for board in boards_data:
-        ext_code = board.get("external_code", "")
-        name = board.get("name", "")
-        btype = board.get("type", "")
-        if not ext_code or not name or not btype:
-            continue
-        # 总时限检查：超过 SYNC_TOTAL_TIMEOUT_SECONDS 放弃整个同步
-        elapsed = time.monotonic() - sync_start
-        if elapsed > SYNC_TOTAL_TIMEOUT_SECONDS:
-            raise BoardSyncError(
-                f"board sync total timeout: {elapsed:.0f}s > {SYNC_TOTAL_TIMEOUT_SECONDS}s, "
-                f"completed {len(staging.boards)}/{len(boards_data)} boards"
-            )
-        staging.boards.append({"external_code": ext_code, "name": name, "type": btype})
-        symbols = await fetcher.fetch_memberships(ext_code, btype)
-        staging.memberships[(ext_code, btype)] = symbols
+    # 2. 门禁校验
+    stats = validate_snapshot(
+        snapshot,
+        prev_stock_count=prev_counts["stock_count"],
+        prev_industry_count=prev_counts["industry_count"],
+        prev_concept_count=prev_counts["concept_count"],
+        prev_relation_count=prev_counts["membership_count"],
+    )
 
-    # 4. 校验暂存数据
-    validate_staging_data(staging, prev_board_count, prev_membership_count)
-
-    # 5. 解析 symbol → instrument_id
+    # 3. 批量解析 symbol → instrument_id
     all_symbols = set()
-    for syms in staging.memberships.values():
-        all_symbols.update(syms)
+    for symbols in snapshot.memberships.values():
+        all_symbols.update(symbols)
 
     symbol_to_id: dict[str, UUID] = {}
     total_symbol_count = len(all_symbols)
@@ -221,7 +297,40 @@ async def sync_boards(
             f"({resolved_count}/{total_symbol_count} resolved)"
         )
 
-    # 6. 查询现有 boards → 计算差异
+    # 4. 单事务差异 upsert/delete
+    result = await _atomic_switch(db, snapshot, symbol_to_id)
+
+    duration_ms = int((time.monotonic() - start_time) * 1000)
+
+    return {
+        "status": "succeeded",
+        "board_count": stats["board_count"],
+        "industry_count": stats["industry_count"],
+        "concept_count": stats["concept_count"],
+        "membership_count": stats["relation_count"],
+        "unique_stock_count": stats["unique_stock_count"],
+        "raw_rows": stats["raw_rows"],
+        "resolved": resolved_count,
+        "unresolved": total_symbol_count - resolved_count,
+        "parse_rate": round(parse_rate, 4),
+        "duration_ms": duration_ms,
+        **result,
+    }
+
+
+async def _atomic_switch(
+    db: AsyncSession,
+    snapshot: BoardSnapshot,
+    symbol_to_id: dict[str, UUID],
+) -> dict[str, Any]:
+    """单事务差异 upsert/delete（原子切换）。
+
+    任何异常由调用方的 rollback 保留旧数据。
+    成功时刷新有效 board 的 updated_at（即使内容未变）。
+    """
+    now = datetime.now(UTC)
+
+    # 查询现有 boards
     existing_boards_result = await db.execute(
         select(MarketBoard.id, MarketBoard.externalCode, MarketBoard.type, MarketBoard.name)
     )
@@ -229,26 +338,30 @@ async def sync_boards(
     for row in existing_boards_result:
         existing_board_map[(row.externalCode, row.type)] = {"id": row.id, "name": row.name}
 
-    new_board_keys = {(b["external_code"], b["type"]) for b in staging.boards}
+    new_board_keys = {(b["external_code"], b["type"]) for b in snapshot.boards}
 
     # board 差异
     boards_to_delete_ids = [
         v["id"] for k, v in existing_board_map.items() if k not in new_board_keys
     ]
     boards_to_insert = [
-        b for b in staging.boards if (b["external_code"], b["type"]) not in existing_board_map
+        b for b in snapshot.boards if (b["external_code"], b["type"]) not in existing_board_map
     ]
     boards_to_update = [
         (existing_board_map[k]["id"], b["name"])
-        for b in staging.boards
+        for b in snapshot.boards
         for k in [(b["external_code"], b["type"])]
         if k in existing_board_map and existing_board_map[k]["name"] != b["name"]
     ]
+    # 即使 name 未变也需要刷新 updated_at 的 board ids
+    boards_to_touch = [
+        existing_board_map[k]["id"]
+        for b in snapshot.boards
+        for k in [(b["external_code"], b["type"])]
+        if k in existing_board_map
+    ]
 
-    # 7. 执行 board 变更（事务内，由调用方控制 commit/rollback）
-    now = datetime.now(UTC)
-
-    # 删除旧 boards（先删 memberships 避免 FK 违约，虽然 CASCADE 也会处理）
+    # 删除旧 boards（先删 memberships 避免 FK 违约）
     if boards_to_delete_ids:
         await _batch_delete_mem_by_board(db, boards_to_delete_ids)
         await _batch_delete(db, MarketBoard, boards_to_delete_ids)
@@ -268,21 +381,30 @@ async def sync_boards(
 
     # 更新 board names
     for board_id, new_name in boards_to_update:
-        from sqlalchemy import update as sa_update
         await db.execute(
             sa_update(MarketBoard)
             .where(MarketBoard.id == board_id)
             .values(name=new_name, updatedAt=now)
         )
 
-    # 合并 board_key → id 映射（existing 保留 + 新插入）
+    # 刷新已存在 board 的 updated_at（即使内容未变）
+    if boards_to_touch:
+        for i in range(0, len(boards_to_touch), BATCH_SIZE):
+            chunk = boards_to_touch[i : i + BATCH_SIZE]
+            await db.execute(
+                sa_update(MarketBoard)
+                .where(MarketBoard.id.in_(chunk))
+                .values(updatedAt=now)
+            )
+
+    # 合并 board_key → id 映射
     board_key_to_id: dict[tuple[str, str], UUID] = {}
     for k, v in existing_board_map.items():
         if k in new_board_keys:
             board_key_to_id[k] = v["id"]
     board_key_to_id.update(new_board_id_map)
 
-    # 8. 查询现有 memberships → 计算差异
+    # 查询现有 memberships
     kept_board_ids = list(board_key_to_id.values())
     existing_mem_keys: set[tuple] = set()
     if kept_board_ids:
@@ -295,7 +417,7 @@ async def sync_boards(
 
     # 期望的 membership 集合
     desired_memberships: set[tuple] = set()
-    for (ext_code, btype), symbols in staging.memberships.items():
+    for (ext_code, btype), symbols in snapshot.memberships.items():
         board_id = board_key_to_id.get((ext_code, btype))
         if board_id is None:
             continue
@@ -308,7 +430,7 @@ async def sync_boards(
     memberships_to_delete = existing_mem_keys - desired_memberships
     memberships_to_insert_keys = desired_memberships - existing_mem_keys
 
-    # 批量删除（按 board_id 批次，避免 N+1）
+    # 批量删除
     if memberships_to_delete:
         await _batch_delete_mem_by_keys(db, list(memberships_to_delete))
 
@@ -327,22 +449,32 @@ async def sync_boards(
         memberships_inserted += len(chunk)
 
     logger.info(
-        "board_sync diff: boards delete=%d insert=%d update=%d, memberships delete=%d insert=%d",
-        len(boards_to_delete_ids), len(boards_to_insert), len(boards_to_update),
+        "board_sync diff: boards delete=%d insert=%d update=%d touch=%d, "
+        "memberships delete=%d insert=%d",
+        len(boards_to_delete_ids), len(boards_to_insert),
+        len(boards_to_update), len(boards_to_touch),
         len(memberships_to_delete), memberships_inserted,
     )
 
     return {
-        "board_count": len(staging.boards),
-        "membership_count": len(desired_memberships),
-        "status": "succeeded",
         "boards_deleted": len(boards_to_delete_ids),
         "boards_inserted": len(boards_to_insert),
         "boards_updated": len(boards_to_update),
         "memberships_deleted": len(memberships_to_delete),
         "memberships_inserted": memberships_inserted,
-        "parse_rate": round(parse_rate, 4),
     }
+
+
+# =============================================================================
+# 批量删除辅助
+# =============================================================================
+
+
+async def _batch_delete(db: AsyncSession, model: Any, ids: list, batch_size: int = BATCH_SIZE) -> None:
+    """分批删除，避免单次 SQL 过大。"""
+    for i in range(0, len(ids), batch_size):
+        chunk = ids[i : i + batch_size]
+        await db.execute(delete(model).where(model.id.in_(chunk)))
 
 
 async def _batch_delete_mem_by_board(db: AsyncSession, board_ids: list, batch_size: int = BATCH_SIZE) -> None:
@@ -357,12 +489,7 @@ async def _batch_delete_mem_by_board(db: AsyncSession, board_ids: list, batch_si
 async def _batch_delete_mem_by_keys(
     db: AsyncSession, keys: list[tuple], batch_size: int = BATCH_SIZE
 ) -> None:
-    """按 (board_id, instrument_id) 复合主键批量删除 memberships。
-
-    使用 PostgreSQL tuple IN 语法，避免 N+1 删除查询。
-    """
-    from sqlalchemy import tuple_
-
+    """按 (board_id, instrument_id) 复合主键批量删除 memberships。"""
     for i in range(0, len(keys), batch_size):
         chunk = keys[i : i + batch_size]
         await db.execute(
@@ -373,6 +500,56 @@ async def _batch_delete_mem_by_keys(
                 ).in_(chunk)
             )
         )
+
+
+# =============================================================================
+# Redis 状态跟踪（供 /market/boards API 读取）
+# =============================================================================
+
+
+async def record_sync_status(status: dict[str, Any]) -> None:
+    """记录板块同步状态到 Redis（供 /market/boards API 读取）。
+
+    Args:
+        status: 同步状态 dict，包含：
+            - status: "succeeded" | "failed" | "degraded"
+            - source: "wencai"
+            - completed_at: ISO 时间戳
+            - raw_rows, resolved, unresolved, industry_count, concept_count,
+              membership_count, duration_ms, error_code, reused_previous_snapshot
+    """
+    try:
+        redis = await get_redis()
+        status["completed_at"] = datetime.now(UTC).isoformat()
+        await redis.set(
+            _BOARD_SYNC_STATUS_KEY,
+            json.dumps(status, ensure_ascii=False),
+            ex=_BOARD_SYNC_STATUS_TTL,
+        )
+    except Exception as exc:
+        logger.warning("[BoardSync] 记录同步状态到 Redis 失败: %s", exc)
+
+
+async def get_sync_status() -> dict[str, Any] | None:
+    """读取板块同步状态（从 Redis）。
+
+    Returns:
+        状态 dict 或 None（无记录时）
+    """
+    try:
+        redis = await get_redis()
+        raw = await redis.get(_BOARD_SYNC_STATUS_KEY)
+        if raw is None:
+            return None
+        return json.loads(raw)
+    except Exception as exc:
+        logger.warning("[BoardSync] 读取同步状态从 Redis 失败: %s", exc)
+        return None
+
+
+# =============================================================================
+# 只读查询函数（供 API 和筛选使用）
+# =============================================================================
 
 
 async def get_instrument_boards(

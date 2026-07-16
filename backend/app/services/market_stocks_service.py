@@ -574,12 +574,17 @@ async def get_market_boards(
     """读取板块目录（只读），供前端行业/概念筛选下拉使用。
 
     从 market_boards 表查询全部行业/概念板块，按 name 升序。
-    qstock 同步前返回空列表（不报错）。
+    扩展响应（PROMPT §五.4）：source/stale/last_attempt_status。
+
+    stale 语义：旧数据存在而最新同步失败时 available=true, stale=true，仍允许筛选。
+    从未成功才 available=false。
 
     Args:
         db: 异步 DB 会话
         board_type: 可选类型过滤（industry | concept），None 返回全部
     """
+    from app.services.board_sync_service import get_sync_status
+
     stmt = select(MarketBoard).order_by(MarketBoard.name.asc())
     if board_type in ("industry", "concept"):
         stmt = stmt.where(MarketBoard.type == board_type)
@@ -591,6 +596,15 @@ async def get_market_boards(
         select(func.max(MarketBoard.updatedAt))
     )
 
+    # 读取 Redis 中的最近同步状态
+    sync_status = await get_sync_status()
+    last_attempt_status = sync_status.get("status") if sync_status else None
+    source = sync_status.get("source") if sync_status else None
+
+    # stale: 旧数据存在 + 最新同步失败/降级
+    has_data = len(boards) > 0
+    is_stale = has_data and last_attempt_status in ("failed", "degraded")
+
     return MarketBoardsResponse(
         items=[
             MarketBoardItem(
@@ -601,7 +615,10 @@ async def get_market_boards(
             )
             for b in boards
         ],
-        available=len(boards) > 0,
-        reason_code=None if boards else "board_provider_unavailable",
+        available=has_data,
+        reason_code=None if has_data else "board_provider_unavailable",
         updated_at=to_shanghai_iso(updated_at_dt) if updated_at_dt else None,
+        source=source if has_data else None,
+        stale=is_stale,
+        last_attempt_status=last_attempt_status if has_data else None,
     )

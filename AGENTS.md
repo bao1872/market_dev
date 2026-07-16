@@ -527,12 +527,13 @@ Capture Token 只能访问 Capture API。\
 不能访问普通用户 API。\
 不能污染普通 Access Token。
 
-### 7.5 板块同步降级保护
+### 7.5 板块同步降级保护（pywencai 唯一数据源）
 
-`BOARD_SYNC_ENABLED` 默认 `false`。\
-关闭时 `scheduled_board_sync` 跳过执行，记录 `status=skipped` + `reason_code=board_provider_unavailable`，不发起任何 THS 请求。\
-`/market/boards` 响应含 `available`（bool）和 `reason_code`（str|null）；`available=false` 时前端禁用行业/概念筛选输入。\
-ALIGN-041 OPEN：当前物理机 THS 成分股 403、akshare 无 THS 成分接口；至少一个同花顺语义 provider 真实返回完整目录+成分后方可开启。\
+**数据源**：pywencai（`wencai_board_provider.py`）为唯一板块分类源；固定查询 `同花顺概念，行业分类`；`asyncio.to_thread` 包装同步调用，不阻塞事件循环；不记录 Cookie 或完整原始响应。\
+**请求链禁联网**：`/market/boards` 只读数据库 + Redis 状态，不在用户 API 请求链访问问财。\
+**软降级/原子切换**：`BOARD_SYNC_ENABLED` 默认 `false`；`true` 时盘后编排 `syncing_boards` 步骤执行（`after_close_orchestrator.py`），失败不覆盖旧数据、不阻断 DSA/快照/发布。`BoardSnapshot` 原子快照 + 绝对门禁 + 相对门禁校验后单事务差异 upsert/delete；异常 rollback 保留上次成功数据。\
+**stale 契约**：旧数据存在而最新同步失败时 `/market/boards` 返回 `available=true, stale=true`，仍允许筛选；从未成功才 `available=false`。响应扩展 `source`/`stale`/`last_attempt_status`。\
+**编排**：`syncing_boards` 位于 `refreshing_daily` 之后、`waiting_dsa_worker` 之前；非交易日跳过；`mode=dsa_only` 默认跳过。`worker.py` 17:00 独立 qstock 任务已删除。\
 不得增加 akshare、代理、IP 绕过、东方财富混用或新常驻 worker。保留单 provider、事务失败保留旧快照设计。
 
 ### 8. Outbox target\_channel\_id

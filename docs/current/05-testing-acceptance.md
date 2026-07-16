@@ -1322,6 +1322,64 @@ cd frontend && node --experimental-strip-types --test \
 
 回归要求：修改 `stockDetailNavigation.ts`、`detailNavigation.ts`、`MarketWorkspacePage.tsx`、`useStockDetailActions.ts`、`StockDetailPage.tsx`、`atomic_fact_contract_service.py`、`atomic_fact_product_observations_v1.json`、`stock_context.py`、`AtomicFactsPanel.tsx`、`ConfirmedPositionRow.tsx`、`global.scss`（`.tv-detail-layout` grid）或 `StrategyChart.tsx`（ResizeObserver）时必须跑此组测试。
 
+## 3.20 CHANGE-20260716-007 回归（pywencai 唯一数据源 + BoardSnapshot 原子切换 + 软失败编排 + 陈旧数据契约）
+
+```bash
+# 后端 pywencai 适配器 + BoardSnapshot 门禁 + orchestrator syncing_boards 步骤
+cd backend && APP_ENV=test TEST_DATABASE_URL=postgresql+asyncpg://bz:bz@127.0.0.1:5433/bz_stock_test \
+  .venv/bin/pytest tests/test_wencai_board_provider.py tests/test_board_sync.py tests/test_after_close_board_sync.py -q
+
+# 前端 wencai 板块同步契约（stale 展示 + source/stale/last_attempt_status + 行业 `-` → `/` + Enter/blur 提交）
+cd frontend && node --experimental-strip-types --test \
+  scripts/contract-tests/wencaiBoardSyncContract.test.ts
+```
+
+- **WencaiBoardProvider 适配器测试（后端 `test_wencai_board_provider.py`，53 个用例）**：
+  1. pywencai 查询 `同花顺概念，行业分类` 返回完整目录与成分股关系；
+  2. `asyncio.to_thread` 包装同步调用，不卡事件循环；
+  3. Referer 头注入通过反爬校验；
+  4. 3 次重试：首次失败 → 重试 1 → 重试 2 → 重试 3 后抛出；
+  5. 超时处理：pywencai 长时间无响应时按超时阈值终止并降级；
+  6. 空响应/异常响应隔离，不污染已有数据；
+  7. `WENCAI_COOKIE` 失效时降级返回空结果不抛异常；
+  8. provider 不可用时降级（不阻断 orchestrator）；
+  9. 解析结果字段完整性（board_type/name/code/members）；
+  10. 行业/概念分类计数符合绝对门禁下限（行业≥200/概念≥300）；
+  11. 成分股关系去重与 instrument_code 归一化。
+- **BoardSnapshot 门禁 + 原子切换测试（后端 `test_board_sync.py`，16 个用例重写）**：
+  1. **绝对门禁**：空板块目录拒绝 / 空成分关系拒绝 / raw<5000 拒绝 / 代码唯一性<99.9% 拒绝 / 行业<200 拒绝 / 概念<300 拒绝 / 关系<60000 拒绝 / 解析率<95% 拒绝 / 全部门禁通过；
+  2. **相对门禁**：异常降幅>20% 拒绝（对比上一成功版本），正常降幅≤20% 通过，首次同步不做降幅检查（prev=0）；
+  3. **原子切换**：暂存集合写入 → 门禁校验通过 → 事务内 TRUNCATE+INSERT，中途失败回滚不污染主表；
+  4. **校验失败保留旧数据**：门禁未通过时不删除现有 `market_boards`/`market_board_memberships`（`stale=true`）；
+  5. **异常时不修改现有数据**：同步过程异常保持旧数据不变；
+  6. **Migration 循环**：062 migration `upgrade → downgrade → upgrade` 不报错，表 `market_boards`/`market_board_memberships` 存在；
+  7. **Redis 状态**：`record_sync_status()` 写入 `board_sync:status`（TTL 7 天），`get_sync_status()` 读取 `last_attempt_status`/`last_success_at`/`source`。
+- **after_close_orchestrator `syncing_boards` 步骤测试（后端 `test_after_close_board_sync.py`，10 个用例）**：
+  1. 状态机顺序 `refreshing_daily → syncing_boards → checking_coverage` 正确推进；
+  2. **软失败**：syncing_boards 失败/超时不阻断 DSA/snapshot/publish，仅记录 `degraded_reasons`；
+  3. 非交易日整体不运行（orchestrator 不启动）；
+  4. `mode=dsa_only` 跳过 syncing_boards 步骤；
+  5. `BOARD_SYNC_ENABLED=false` 时跳过（`reason_code=board_sync_disabled`），不发任何 pywencai 请求；`true` 时正常执行；
+  6. 成功后 `last_completed_step` 推进到 syncing_boards；
+  7. 软失败时 `last_completed_step` 仍推进到 syncing_boards（视为已尝试，断点恢复可续）；
+  8. 成功时 `last_attempt_status=success` 写入 Redis；
+  9. 失败时 `last_attempt_status=failed` 写入 Redis，`/market/boards` 返回 `stale=true`；
+  10. `degraded_reasons` 记录失败原因（含超时/校验失败/provider 不可用分类）。
+- **前端 wencai 板块同步契约测试（`wencaiBoardSyncContract.test.ts`，11 个用例）**：
+  1. `/market/boards` 响应含 `source`（str|null）/`stale`（bool）/`last_attempt_status`（str|null）三字段；
+  2. `stale=true` 时工具栏展示"沿用上次板块数据"提示，输入控件仍可用；
+  3. `stale=false` 时不展示提示；
+  4. `boards.available=false` 时输入禁用；
+  5. 行业/概念输入仅 Enter/失焦提交（不再每次按键提交）；
+  6. 清空输入立即提交并重置分页；
+  7. 精确值匹配（不支持模糊匹配）；
+  8. 行业值 `-` 在前端可渲染为 `/`（API 值不变）；
+  9. `last_attempt_status=failed` + 旧数据存在时 `stale=true`；
+  10. `last_attempt_status=success` 时 `stale=false`；
+  11. `source` 字段渲染（pywencai 标识展示）。
+
+回归要求：修改 `wencai_board_provider.py`、`board_sync_service.py`、`after_close_orchestrator.py`（syncing_boards 步骤）、`worker.py`（BOARD_SYNC_ENABLED 开关）、`/market/boards` API 响应、`MarketToolbar`（行业/概念输入 Enter/blur 提交逻辑）、`boards.stale` 展示逻辑或 `board_filter_helper.py` 时必须跑此组测试。
+
 ## 4. CI 门禁
 
 阻断项：

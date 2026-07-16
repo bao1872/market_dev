@@ -4,6 +4,19 @@
 
 ## 2026-07-16
 
+- CHANGE-20260716-007: 板块同步迁移 pywencai 唯一数据源（BoardSnapshot 原子切换 + 软失败编排 + 陈旧数据契约）
+  - **数据源迁移**：删除 `backend/app/services/qstock_fetcher.py`、`backend/app/services/ths_adapter.py`、`backend/tests/test_qstock_fetcher.py`；新增 `backend/app/services/wencai_board_provider.py`（pywencai 作为唯一板块分类数据源，查询 `同花顺概念，行业分类`，通过 `asyncio.to_thread` 包装同步调用，附带 Referer 头，3 次重试）
+  - **board_sync_service 重构**：采用 `BoardSnapshot` 暂存集合 + 事务内原子切换（TRUNCATE+INSERT）；硬门禁（绝对门禁）——原始记录 ≥5000、代码唯一性 ≥99.9%、行业板块 ≥200、概念板块 ≥300、关系数 ≥60000、解析率 ≥95%；相对门禁（与上一成功版本比较降幅 >20% 拒绝）；首次同步不做相对降幅检查
+  - **after_close_orchestrator 新增 syncing_boards 步骤**：位于 `refreshing_daily` 与 `waiting_dsa_worker` 之间；软失败设计（不阻断 DSA/snapshot/publish 链路）；非交易日自动跳过；`mode=dsa_only` 模式跳过
+  - **worker.py**：删除原 17:00 独立 qstock board_sync 任务；`BOARD_SYNC_ENABLED` 环境变量保留并改为 pywencai 语义（默认 `true`，`false` 时 `syncing_boards` 步骤跳过）
+  - **/market/boards 响应扩展**：新增 `source`（str\|null，数据源标识）、`stale`（bool，存在旧数据但最新同步失败时为 true）、`last_attempt_status`（str\|null，最近一次同步状态）；stale=true 时前端展示"沿用上次板块数据"
+  - **前端筛选行为**：行业/概念输入仅 Enter/失焦提交（不再每次按键提交）；精确值校验（不模糊匹配）；清空立即提交并重置分页；`boards.available=false` 时输入禁用；`stale=true` 时输入仍可用但显示"沿用上次板块数据"提示；行业值 `-` 在前端可渲染为 `/`（API 值不变）
+  - **Redis 状态跟踪**：`record_sync_status()`/`get_sync_status()` 写入 key `board_sync:status`，TTL 7 天
+  - **依赖变更**：`pyproject.toml` 移除 `py-mini-racer`，新增 `pywencai==0.13.1`，保留 `qstock==1.3.1`
+  - **测试覆盖**：后端 `test_wencai_board_provider.py`（53 用例）、`test_board_sync.py`（16 用例重写覆盖 BoardSnapshot + 新门禁阈值）、`test_after_close_board_sync.py`（10 用例覆盖软失败/非交易日跳过/dsa_only 跳过）；前端 `wencaiBoardSyncContract.test.ts`（11 用例覆盖 stale/source/last_attempt_status/禁用输入/Enter 提交/精确匹配/`-`→`/` 渲染）
+  - **ALIGN-041 关闭**：pywencai 配合 `WENCAI_COOKIE` 在物理机真实烟测返回完整目录与代表性成分，ALIGN-041 由 KNOWN_GAP 移入 CLOSED
+  - **部署**：仅 `docker compose up -d --no-deps backend frontend`；worker 旧镜像 Known Gap（新 syncing_boards 步骤需 worker 升级后生产验证）
+
 - CHANGE-20260716-005: AFC V1 终审修正（M5 单侧缺失 + per-fact 精度 recentChanges + PersistedAtomicFactsPayload 严格 schema + as_of 截止语义 + legacy degradedReasons + meta 三版本 + presentation secondaryLabel 真源 + 前端布局修正）
   - **后端 M5 单侧缺失**：`_squeeze_state` 改 `if on is None or off is None: return None`（任一缺失即缺失，旧 `and` 改 `or`）；新增四个单侧缺失组合测试均不进入 Core
   - **RecentChanges per-fact 精度**：`_quantize_fact_value` 按 presentation `valuePrecision` 量化（禁止统一 `round(...,4)`）；`FACT_DIMENSION_BY_ID` 从冻结合同导出 fact_id→dimension 映射，事实消失时仍返回正确维度（禁止默认 trend）；`_combine_text` 组合短值和 category（避免丢失 M3 双文本状态）

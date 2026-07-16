@@ -65,7 +65,13 @@ class MarketBoardItem(BaseModel):
 
 
 class MarketBoardsResponse(BaseModel):
-    """板块目录列表响应（只读，供前端筛选下拉使用）。"""
+    """板块目录列表响应（只读，供前端筛选下拉使用）。
+
+    扩展字段（PROMPT §五.4）：
+    - source: 数据源标识（"wencai"）
+    - stale: 旧数据存在而最新同步失败时为 true（仍允许筛选）
+    - last_attempt_status: 最近一次同步尝试状态（succeeded/failed/degraded）
+    """
 
     items: list[MarketBoardItem] = Field(default_factory=list, description="板块列表")
     available: bool = Field(False, description="是否有可用板块数据（同步成功后 true）")
@@ -74,6 +80,12 @@ class MarketBoardsResponse(BaseModel):
         description="不可用原因：board_provider_unavailable=provider 未就绪/被反爬拦截",
     )
     updated_at: str | None = Field(None, description="板块数据最后同步时间 ISO")
+    source: str | None = Field(None, description="数据源标识（wencai）")
+    stale: bool = Field(False, description="旧数据存在而最新同步失败时 true（仍允许筛选）")
+    last_attempt_status: str | None = Field(
+        None,
+        description="最近一次同步尝试状态：succeeded | failed | degraded",
+    )
 
 
 if __name__ == "__main__":

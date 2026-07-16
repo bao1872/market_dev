@@ -1721,6 +1721,9 @@ export interface MarketBoardsResponse {
   available: boolean
   reason_code: string | null
   updated_at: string | null
+  source: string | null
+  stale: boolean
+  last_attempt_status: string | null
 }
 
 /**
