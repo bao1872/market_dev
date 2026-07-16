@@ -1175,8 +1175,12 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 // V1.6.2: 删除右侧 268px 策略栏，释放完整图表宽度；Task 2 再删除左侧 38px 绘图工具列
 // V1.7: 新增右侧 340px 结构状态因子面板（StockStructuralStatePanel），双列布局
 // ===== 详情页布局（PRD §6.2 左栏来源列表 + 工作区）=====
-.tv-detail-layout { display: flex; flex: 1; min-height: 0; }
-.tv-source-list { flex: none; width: 200px; min-width: 0; background: #0d1118; border-right: 1px solid v.$color-border; overflow-y: auto; max-height: v.$tv-workspace-min-height; }
+// CHANGE-20260716-006: flex → grid，右侧 minmax(0,1fr) 防止子元素撑宽
+.tv-detail-layout { display: grid; grid-template-columns: 200px minmax(0, 1fr); width: 100%; min-width: 0; flex: 1; min-height: 0; }
+.tv-detail-layout > .tv-workspace { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; }
+// 统一图表区宽度契约，禁止 Canvas 或子层撑宽
+.strategy-chart-wrap, .tv-chart-column, .tv-canvas-wrap { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; }
+.tv-source-list { width: 200px; min-width: 0; background: #0d1118; border-right: 1px solid v.$color-border; overflow-y: auto; max-height: v.$tv-workspace-min-height; }
 .tv-source-list-header { padding: 8px 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .7px; color: #667287; border-bottom: 1px solid v.$color-border; position: sticky; top: 0; background: #0d1118; z-index: 1; }
 // CHANGE-20260715-004: 来源列表加载占位
 .tv-source-list-placeholder { padding: 16px 10px; font-size: 12px; color: #778297; text-align: center; }

@@ -53,6 +53,7 @@ from app.services.atomic_fact_contract_service import (
     RESEARCH_FREEZE_VERSION,
     compute_atomic_fact_debug,
     compute_atomic_facts,
+    compute_product_observations,
     compute_recent_changes,
 )
 
@@ -293,6 +294,9 @@ def _empty_atomic_response(
             "rejectedPresent": False,
         },
         "recentChanges": [],
+        "latestChangesFrom": None,
+        "latestChangesAsOf": None,
+        "productObservations": {"structure": []},
         "dataQuality": _build_data_quality(
             instrument, None, None, reason_code=reason_code,
         ),
@@ -385,11 +389,17 @@ async def _build_stock_context(
     else:
         facts = compute_atomic_facts(snapshot.structural_payload, snapshot.temporal_payload)
 
-    # 近期变化：一次查询 ≤10 个已发布兼容快照（as_of 时 SQL 直接过滤），升序只读计算
+    # CHANGE-20260716-006: 近期变化只保留最近一个交易日——查询 ≤2 个已发布快照
     recent_snaps = await _find_recent_published_snapshots(
-        session, instrument.id, limit=10, as_of=as_of,
+        session, instrument.id, limit=2, as_of=as_of,
     )
     recent_changes = compute_recent_changes(recent_snaps)
+    # 最近交易日变化日期标注
+    latest_changes_as_of = recent_snaps[-1]["trade_date"] if len(recent_snaps) >= 1 else None
+    latest_changes_from = recent_snaps[0]["trade_date"] if len(recent_snaps) >= 2 else None
+
+    # CHANGE-20260716-006: 产品观察扩展（confirmed_swing_position 等，不计入 Core 14）
+    product_observations = compute_product_observations(snapshot.structural_payload)
 
     data_quality = _build_data_quality(instrument, run, snapshot, reason_code)
     # 数据质量异常（如 M5 双 true）并入 degradedReasons
@@ -412,6 +422,9 @@ async def _build_stock_context(
         "auxiliary": facts["auxiliary"],
         "availability": facts["availability"],
         "recentChanges": recent_changes,
+        "latestChangesFrom": latest_changes_from,
+        "latestChangesAsOf": latest_changes_as_of,
+        "productObservations": product_observations,
         "dataQuality": data_quality,
     }
 

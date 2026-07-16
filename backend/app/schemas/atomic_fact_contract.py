@@ -31,7 +31,7 @@ class PublicAtomicFactItem(BaseModel):
     publicKey: str = Field(..., description="稳定公开键（不随内部 factId 变动）")
     dimension: str = Field(..., description="维度：trend/momentum/structure/volume")
     label: str = Field(..., description="通俗中文短标签")
-    visualKind: Literal["metric", "value_with_category", "relation", "position", "distance", "ratio"] = Field(
+    visualKind: Literal["metric", "value_with_category", "relation", "position", "distance", "ratio", "confirmed_position"] = Field(
         ..., description="前端渲染类型（禁止解析中文推断类型/状态）"
     )
     value: float | None = Field(None, description="原始数值（分类类事实为 None）")
@@ -41,6 +41,39 @@ class PublicAtomicFactItem(BaseModel):
     secondaryText: str | None = Field(None, description="弱说明（单位/补充）")
     unit: str | None = Field(None, description="单位（如 ATR）")
     thresholdEnabled: bool = Field(True, description="分类阈值是否已启用（T5/V3 为 False）")
+
+
+class ProductObservationItem(BaseModel):
+    """产品观察扩展项（CHANGE-20260716-006）。
+
+    不在冻结 Core 14 中，不参与 14/14 统计。基于底层已计算的结构因子生成，
+    用于补充展示（如最近确认区间位置）。scope 恒为 "product"。
+    """
+
+    publicKey: str = Field(..., description="产品观察公开键（如 confirmed_swing_position）")
+    label: str = Field(..., description="通俗中文短标签")
+    visualKind: Literal["confirmed_position"] = Field(
+        ..., description="产品观察渲染类型"
+    )
+    group: str = Field(..., description="所属组（如 structure）")
+    value: float | None = Field(None, description="区间内为 0–1 值，区间外为 None")
+    rawValue: float | None = Field(None, description="原始值（可能 <0 或 >1，不静默 clip）")
+    valueText: str | None = Field(None, description="用户可读短值（区间内）")
+    categoryLabel: str | None = Field(None, description="中文分类标签（含区间外说明）")
+    confirmedHigh: float | None = Field(None, description="已确认区间上沿（调试/UI 参考）")
+    confirmedLow: float | None = Field(None, description="已确认区间下沿（调试/UI 参考）")
+    scope: Literal["product"] = Field("product", description="标记为产品观察，非 V4.13 Core")
+
+
+class ProductObservations(BaseModel):
+    """产品观察扩展集合（CHANGE-20260716-006）。
+
+    按 group 分组（structure 等），不计入 Core 14/14 统计。
+    """
+
+    structure: list[ProductObservationItem] = Field(
+        default_factory=list, description="结构组产品观察项"
+    )
 
 
 class AtomicFactAvailability(BaseModel):
@@ -101,7 +134,17 @@ class AtomicFactsContextResponse(BaseModel):
     )
     availability: AtomicFactAvailability = Field(..., description="可用性统计")
     recentChanges: list[AtomicFactChange] = Field(
-        default_factory=list, description="近期变化（≤10 快照只读计算）"
+        default_factory=list, description="近期变化（仅最近一个交易日发生变化的项）"
+    )
+    latestChangesFrom: str | None = Field(
+        None, description="近期变化起始交易日（前一发布交易日；无对比时为 None）"
+    )
+    latestChangesAsOf: str | None = Field(
+        None, description="近期变化截止交易日（最新发布交易日；无快照时为 None）"
+    )
+    productObservations: ProductObservations = Field(
+        default_factory=ProductObservations,
+        description="产品观察扩展（CHANGE-20260716-006，不计入 Core 14/14）",
     )
     dataQuality: StockContextDataQuality = Field(..., description="数据质量（含 reasonCode）")
 
@@ -282,6 +325,9 @@ if __name__ == "__main__":
             coreDenominator=14, corePresent=0, coreMissing=[]
         ),
         recentChanges=[],
+        latestChangesFrom=None,
+        latestChangesAsOf=None,
+        productObservations=ProductObservations(structure=[]),
         dataQuality=StockContextDataQuality(
             hasSucceededRun=False,
             hasSnapshot=False,

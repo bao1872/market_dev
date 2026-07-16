@@ -1,11 +1,13 @@
 // [AtomicFactsPanel] - 描述: Atomic Fact Contract V1 用户侧状态观察面板（compact /market 右栏；expanded /stock Drawer）
 // 复用 StockContext 单一接口（GET /api/v1/stocks/{symbol}/context），market/detail 共用 query key。
 // 四组固定：趋势运行(info) / 动量配合(brand) / 结构位置(purple) / 成交参与(warning)。
-// 事实行按 visualKind 渲染（metric/value_with_category/relation/position/distance/ratio），
+// 事实行按 visualKind 渲染（metric/value_with_category/relation/position/distance/ratio/confirmed_position），
 // 禁止解析中文推断类型/状态；事实行非卡片（CSS Grid 透明行，仅底部分隔线）。
 // S3/S6 用完整轨道（低位/0.33/0.67/高位 + 圆点 + `0.63 · 中间`）。
+// CHANGE-20260716-006: confirmed_swing_position（产品观察，不计入 14/14）插入结构组 S1 之后，
+// 范围内 0–1 全宽轨道；<0 显示「低于确认区间」；>1 显示「高于确认区间」。
 // Auxiliary 按 动量补充/结构补充/成交补充 分组，默认收起。
-// 近期变化显示中文 label（非 publicKey）。
+// 近期变化仅显示最近一个交易日（latestChangesAsOf），无变化显示「最近交易日无状态变化」。
 // 面板关闭时由父组件不挂载，useStockContext enabled=false（0 请求）。
 // 普通用户 DOM 不得出现内部研究字段或英文术语（如字段路径、研究内部代号等）。
 import { useState } from 'react'
@@ -14,6 +16,7 @@ import type {
   AtomicFactItem,
   AtomicFactsContextResponse,
   AtomicFactChange,
+  ProductObservationItem,
 } from '@/api/endpoints'
 import { getReasonCodeMessage } from './reasonCodeMessages'
 import styles from './AtomicFactsPanel.module.scss'
@@ -140,14 +143,90 @@ export function PositionRail({ fact }: { fact: AtomicFactItem }) {
   )
 }
 
-/** 单个 Core 组卡（固定四组之一） */
-export function CoreFactGroup({ dimension, items }: { dimension: string; items: AtomicFactItem[] }) {
-  if (items.length === 0) return null
+/**
+ * CHANGE-20260716-006: 最近确认区间位置（产品观察，不计入 Core 14/14）。
+ *
+ * 渲染规则：
+ * - 范围内（value != null，0≤原始值≤1）：0–1 全宽轨道 + 0.33/0.67 边界 + 圆点 + `value · categoryLabel`
+ * - 原始值 < 0：badge「低于确认区间」（不静默 clip 到 0）
+ * - 原始值 > 1：badge「高于确认区间」（不静默 clip 到 1）
+ */
+export function ConfirmedPositionRow({ obs }: { obs: ProductObservationItem }) {
+  // 范围外：badge 行（label 左 / badge 右）
+  if (obs.value == null) {
+    return (
+      <div className={styles.factRow}>
+        <span className={styles.factLabel}>{obs.label}</span>
+        <span className={styles.factValue}>
+          <RelationBadge text={obs.categoryLabel} />
+        </span>
+      </div>
+    )
+  }
+  // 范围内：0–1 全宽轨道（与 S3 一致的 0.33/0.67 边界）
+  const pct = Math.max(0, Math.min(1, obs.value)) * 100
+  const valText = obs.valueText ?? '—'
+  return (
+    <div className={styles.positionRow}>
+      <span className={styles.factLabel}>{obs.label}</span>
+      <span className={styles.railCaption}>
+        {valText}
+        {obs.categoryLabel ? ` · ${obs.categoryLabel}` : ''}
+      </span>
+      <div className={styles.railTrackWrap}>
+        <div
+          className={styles.railTrack}
+          role="img"
+          aria-label={`${obs.label}：${valText} · ${obs.categoryLabel ?? ''}`}
+        >
+          <span className={styles.railTick} style={{ left: '33%' }} />
+          <span className={styles.railTick} style={{ left: '67%' }} />
+          <span className={styles.railKnob} style={{ left: `${pct}%` }} />
+        </div>
+        <div className={styles.railScale}>
+          <span>低位</span>
+          <span>0.33</span>
+          <span>0.67</span>
+          <span>高位</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** 单个 Core 组卡（固定四组之一）；structure 组可追加产品观察项（插入 S1 之后） */
+export function CoreFactGroup({
+  dimension,
+  items,
+  productItems,
+  insertAfterPublicKey,
+}: {
+  dimension: string
+  items: AtomicFactItem[]
+  /** 产品观察项（CHANGE-20260716-006，仅 structure 组使用） */
+  productItems?: ProductObservationItem[]
+  /** 产品观察项插入位置：指定 publicKey 之后；未匹配时追加到末尾 */
+  insertAfterPublicKey?: string
+}) {
+  if (items.length === 0 && (!productItems || productItems.length === 0)) return null
+  // 计算插入点：匹配 insertAfterPublicKey 之后；未匹配时追加到末尾
+  const insertIdx =
+    insertAfterPublicKey != null && productItems && productItems.length > 0
+      ? items.findIndex((f) => f.publicKey === insertAfterPublicKey)
+      : -1
+  const before = insertIdx >= 0 ? items.slice(0, insertIdx + 1) : items
+  const after = insertIdx >= 0 ? items.slice(insertIdx + 1) : []
   return (
     <section className={`${styles.group} ${DIMENSION_GROUP_CLASS[dimension] ?? ''}`}>
       <h4 className={styles.groupTitle}>{DIMENSION_LABEL[dimension] ?? dimension}</h4>
       <div className={styles.factList}>
-        {items.map((fact) => (
+        {before.map((fact) => (
+          <FactRow key={fact.publicKey} fact={fact} />
+        ))}
+        {productItems?.map((obs) => (
+          <ConfirmedPositionRow key={`product-${obs.publicKey}`} obs={obs} />
+        ))}
+        {after.map((fact) => (
           <FactRow key={fact.publicKey} fact={fact} />
         ))}
       </div>
@@ -155,10 +234,26 @@ export function CoreFactGroup({ dimension, items }: { dimension: string; items: 
   )
 }
 
-/** 近期变化（显示中文 label、from→to、deltaText 和日期，禁止显示 publicKey） */
-export function RecentChangesStrip({ changes }: { changes: AtomicFactChange[] }) {
+/**
+ * 近期变化（CHANGE-20260716-006：仅最近一个交易日发生变化的项）。
+ *
+ * 显示规则：
+ * - latestChangesAsOf 存在 + changes 非空：标题「最近交易日变化 · {date}」+ 变化列表
+ * - latestChangesAsOf 存在 + changes 空：「最近交易日（{date}）无状态变化」
+ * - latestChangesAsOf 为 null：「暂无近期变化」（无已发布快照）
+ */
+export function RecentChangesStrip({
+  changes,
+  latestChangesAsOf,
+}: {
+  changes: AtomicFactChange[]
+  latestChangesAsOf: string | null
+}) {
   if (changes.length === 0) {
-    return <div className={styles.changesEmpty}>暂无近期变化</div>
+    const emptyText = latestChangesAsOf
+      ? `最近交易日（${latestChangesAsOf}）无状态变化`
+      : '暂无近期变化'
+    return <div className={styles.changesEmpty}>{emptyText}</div>
   }
   return (
     <ul className={styles.changeList}>
@@ -253,9 +348,21 @@ function EmptyState({ data }: { data: AtomicFactsContextResponse }) {
 function GroupCards({ data }: { data: AtomicFactsContextResponse }) {
   return (
     <>
-      {DIMENSION_ORDER.map((dim) => (
-        <CoreFactGroup key={dim} dimension={dim} items={data.core[dim] ?? []} />
-      ))}
+      {DIMENSION_ORDER.map((dim) => {
+        if (dim === 'structure') {
+          // CHANGE-20260716-006: 结构组在 S1 (boundary_relation) 之后插入产品观察项
+          return (
+            <CoreFactGroup
+              key={dim}
+              dimension={dim}
+              items={data.core[dim] ?? []}
+              productItems={data.productObservations?.structure ?? []}
+              insertAfterPublicKey="boundary_relation"
+            />
+          )
+        }
+        return <CoreFactGroup key={dim} dimension={dim} items={data.core[dim] ?? []} />
+      })}
     </>
   )
 }
@@ -294,7 +401,7 @@ export function AtomicFactsPanel({
   }
 
   const data = query.data
-  const { availability, recentChanges, auxiliary } = data
+  const { availability, recentChanges, auxiliary, latestChangesAsOf } = data
   const hasFacts = availability.corePresent > 0
 
   if (variant === 'expanded') {
@@ -307,8 +414,13 @@ export function AtomicFactsPanel({
               <GroupCards data={data} />
             </div>
             <section className={styles.recentSection}>
-              <h4 className={styles.recentTitle}>近期变化</h4>
-              <RecentChangesStrip changes={recentChanges} />
+              <h4 className={styles.recentTitle}>
+                {latestChangesAsOf ? `最近交易日变化 · ${latestChangesAsOf}` : '近期变化'}
+              </h4>
+              <RecentChangesStrip
+                changes={recentChanges}
+                latestChangesAsOf={latestChangesAsOf}
+              />
             </section>
             <AuxiliaryAccordion auxiliary={auxiliary} />
           </>

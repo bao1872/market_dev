@@ -326,3 +326,78 @@ test('Drawer 正向 Tab 也处理焦点离开 drawer 的情况（!drawer.contain
   const shiftBranch = src.match(/if\s*\(e\.shiftKey\)[^{]*\{[^}]*!drawer\.contains\(active\)[^}]*\}/s)
   assert.ok(shiftBranch, 'Shift+Tab 分支必须处理焦点离开 drawer')
 })
+
+// ===== CHANGE-20260716-006：详情页终审修正契约测试 =====
+
+test('CHANGE-006: endpoints.ts 含 productObservations/latestChangesFrom/latestChangesAsOf 字段', () => {
+  const src = readSource(ENDPOINTS_PATH)
+  for (const field of ['productObservations', 'latestChangesFrom', 'latestChangesAsOf']) {
+    assert.ok(
+      new RegExp(`\\b${field}\\b`).test(src),
+      `endpoints.ts 必须包含字段 ${field}（CHANGE-20260716-006）`,
+    )
+  }
+})
+
+test('CHANGE-006: endpoints.ts 定义 ProductObservationItem / ProductObservations 接口', () => {
+  const src = readSource(ENDPOINTS_PATH)
+  assert.ok(/export interface ProductObservationItem/.test(src), '必须定义 ProductObservationItem 接口')
+  assert.ok(/export interface ProductObservations/.test(src), '必须定义 ProductObservations 接口')
+  // ProductObservationItem 必须含 confirmed_position visualKind
+  assert.ok(/'confirmed_position'/.test(src), 'ProductObservationItem visualKind 必须含 confirmed_position')
+  // scope 恒为 product
+  assert.ok(/scope:\s*'product'/.test(src), 'ProductObservationItem scope 必须为 product')
+})
+
+test('CHANGE-006: visualKind 枚举含 confirmed_position（不破坏旧枚举）', () => {
+  const src = readSource(ENDPOINTS_PATH)
+  // 旧枚举仍存在
+  for (const kind of ['metric', 'value_with_category', 'relation', 'position', 'distance', 'ratio']) {
+    assert.ok(src.includes(kind), `endpoints visualKind 必须保留 ${kind}`)
+  }
+  // 新增 confirmed_position
+  assert.ok(src.includes('confirmed_position'), 'endpoints visualKind 必须含 confirmed_position')
+})
+
+test('CHANGE-006: Panel 渲染 ConfirmedPositionRow（confirmed_swing_position 产品观察）', () => {
+  const src = readSource(PANEL_PATH)
+  assert.ok(/ConfirmedPositionRow/.test(src), 'Panel 必须定义 ConfirmedPositionRow 组件')
+  assert.ok(/ProductObservationItem/.test(src), 'Panel 必须导入 ProductObservationItem 类型')
+  // 范围外显示 badge（低于/高于确认区间由后端 categoryLabel 提供，Panel 不硬编码）
+  assert.ok(/obs\.value == null/.test(src), 'ConfirmedPositionRow 必须按 value==null 分支渲染范围外 badge')
+  // 范围内显示 0–1 轨道（与 S3 一致的 0.33/0.67 边界）
+  assert.ok(/railTrack/.test(src), 'ConfirmedPositionRow 范围内必须使用 railTrack')
+})
+
+test('CHANGE-006: 结构组在 S1 (boundary_relation) 之后插入产品观察项', () => {
+  const src = readSource(PANEL_PATH)
+  assert.ok(
+    /insertAfterPublicKey/.test(src),
+    'CoreFactGroup 必须支持 insertAfterPublicKey 参数',
+  )
+  assert.ok(
+    /boundary_relation/.test(src),
+    '结构组必须在 boundary_relation (S1) 之后插入产品观察项',
+  )
+  assert.ok(
+    /productItems/.test(src),
+    'CoreFactGroup 必须接受 productItems 参数',
+  )
+})
+
+test('CHANGE-006: RecentChangesStrip 接受 latestChangesAsOf 并显示「最近交易日无状态变化」', () => {
+  const src = readSource(PANEL_PATH)
+  // 必须接受 latestChangesAsOf 参数
+  assert.ok(/latestChangesAsOf/.test(src), 'RecentChangesStrip 必须接受 latestChangesAsOf 参数')
+  // 无变化时显示「最近交易日无状态变化」（latestChangesAsOf 存在时）
+  assert.ok(/最近交易日/.test(src), 'RecentChangesStrip 必须显示「最近交易日」相关文案')
+  assert.ok(/无状态变化/.test(src), 'RecentChangesStrip 无变化时必须显示「无状态变化」')
+})
+
+test('CHANGE-006: 近期变化标题显示 latestChangesAsOf 日期', () => {
+  const src = readSource(PANEL_PATH)
+  assert.ok(
+    /最近交易日变化/.test(src),
+    '近期变化标题必须显示「最近交易日变化」',
+  )
+})

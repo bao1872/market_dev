@@ -38,6 +38,7 @@ from app.services.atomic_fact_contract_service import (
     REJECTED_FACT_IDS,
     compute_atomic_fact_debug,
     compute_atomic_facts,
+    compute_product_observations,
     compute_recent_changes,
 )
 
@@ -78,6 +79,11 @@ def _base_payload(**overrides) -> dict:
         "price_position_in_developing_swing_0_1": 0.50,
         "distance_to_swing_high_atr": 2.5,
         "distance_to_swing_low_atr": -1.2,
+        # CHANGE-20260716-006: confirmed swing 字段（产品观察扩展）
+        "confirmed_swing_high": 10.5,
+        "confirmed_swing_low": 9.5,
+        "price_position_in_confirmed_swing_raw": 0.63,
+        "price_position_in_confirmed_swing_0_1": 0.63,
     }
     swing.update(overrides.pop("swing", {}))
     sp = {
@@ -591,6 +597,7 @@ def test_recent_changes_dimension_when_fact_disappears():
 def test_response_schema_assembly():
     sp, tp = _base_payload()
     res = compute_atomic_facts(sp, tp)
+    product_obs = compute_product_observations(sp)
     resp = AtomicFactsContextResponse(
         contractVersion=svc.CONTRACT_VERSION,
         meta=AtomicFactsMeta(
@@ -603,6 +610,9 @@ def test_response_schema_assembly():
         auxiliary=res["auxiliary"],
         availability=res["availability"],
         recentChanges=[],
+        latestChangesFrom=None,
+        latestChangesAsOf="2026-07-14",
+        productObservations=product_obs,
         dataQuality=StockContextDataQuality(
             hasSucceededRun=True, hasSnapshot=True, reasonCode=None,
             degradedReasons=[], runTradeDate="2026-07-14", runPublishedAt=None,
@@ -613,9 +623,153 @@ def test_response_schema_assembly():
     assert resp.meta.researchFreezeVersion == "V4.13"
     assert resp.meta.payloadVersion == "1"
     assert resp.availability.coreDenominator == 14
+    # CHANGE-20260716-006: 新字段存在
+    assert resp.latestChangesAsOf == "2026-07-14"
+    assert resp.latestChangesFrom is None
+    assert resp.productObservations is not None
     # 用户响应字段不得含内部 ID/路径
     dumped = resp.model_dump()
     for _dim, items in dumped["core"].items():
         for it in items:
             assert "factId" not in it
             assert "sourcePath" not in it
+
+
+# ---------------------------------------------------------------------------
+# 18. CHANGE-20260716-006: compute_product_observations 产品观察扩展
+# ---------------------------------------------------------------------------
+
+
+def test_product_observations_inside_range():
+    """范围内（0≤raw≤1）：返回 confirmed_swing_position + 0–1 value + categoryLabel。"""
+    sp, _ = _base_payload(swing={"price_position_in_confirmed_swing_raw": 0.63,
+                                 "price_position_in_confirmed_swing_0_1": 0.63})
+    obs = compute_product_observations(sp)
+    assert "structure" in obs
+    assert len(obs["structure"]) == 1
+    item = obs["structure"][0]
+    assert item["publicKey"] == "confirmed_swing_position"
+    assert item["label"] == "最近确认区间位置"
+    assert item["visualKind"] == "confirmed_position"
+    assert item["scope"] == "product"
+    assert item["value"] == 0.63
+    assert item["rawValue"] == 0.63
+    assert item["valueText"] == "0.63"
+    assert item["categoryLabel"] is not None  # 偏低/中间/偏高
+
+
+def test_product_observations_below_range():
+    """rawValue < 0：value=None + categoryLabel='低于确认区间'（不静默 clip 到 0）。"""
+    sp, _ = _base_payload(swing={"price_position_in_confirmed_swing_raw": -0.15,
+                                 "price_position_in_confirmed_swing_0_1": None})
+    obs = compute_product_observations(sp)
+    assert len(obs["structure"]) == 1
+    item = obs["structure"][0]
+    assert item["value"] is None
+    assert item["rawValue"] == -0.15
+    assert item["categoryLabel"] == "低于确认区间"
+    assert item["valueText"] is None
+
+
+def test_product_observations_above_range():
+    """rawValue > 1：value=None + categoryLabel='高于确认区间'（不静默 clip 到 1）。"""
+    sp, _ = _base_payload(swing={"price_position_in_confirmed_swing_raw": 1.25,
+                                 "price_position_in_confirmed_swing_0_1": None})
+    obs = compute_product_observations(sp)
+    assert len(obs["structure"]) == 1
+    item = obs["structure"][0]
+    assert item["value"] is None
+    assert item["rawValue"] == 1.25
+    assert item["categoryLabel"] == "高于确认区间"
+
+
+def test_product_observations_boundary_0_and_1():
+    """边界值 0 和 1 仍为范围内（value=0/1，不缺失）。"""
+    # raw=0
+    sp, _ = _base_payload(swing={"price_position_in_confirmed_swing_raw": 0.0,
+                                 "price_position_in_confirmed_swing_0_1": 0.0})
+    obs = compute_product_observations(sp)
+    assert obs["structure"][0]["value"] == 0.0
+    assert obs["structure"][0]["rawValue"] == 0.0
+    # raw=1
+    sp, _ = _base_payload(swing={"price_position_in_confirmed_swing_raw": 1.0,
+                                 "price_position_in_confirmed_swing_0_1": 1.0})
+    obs = compute_product_observations(sp)
+    assert obs["structure"][0]["value"] == 1.0
+    assert obs["structure"][0]["rawValue"] == 1.0
+
+
+def test_product_observations_missing_raw():
+    """raw 缺失：不返回 confirmed_swing_position（不伪装 0）。"""
+    sp, _ = _base_payload(swing={"price_position_in_confirmed_swing_raw": None,
+                                 "price_position_in_confirmed_swing_0_1": None})
+    obs = compute_product_observations(sp)
+    assert len(obs["structure"]) == 0
+
+
+def test_product_observations_missing_swing():
+    """swing_position 整个缺失：返回空 structure。"""
+    sp = {"primary": {"1d": {}}}
+    obs = compute_product_observations(sp)
+    assert obs == {"structure": []}
+
+
+def test_product_observations_none_payload():
+    """structural_payload=None：返回空 structure。"""
+    obs = compute_product_observations(None)
+    assert obs == {"structure": []}
+
+
+def test_product_observations_confirmed_high_low():
+    """confirmedHigh/confirmedLow 从 payload 透传（UI 参考）。"""
+    sp, _ = _base_payload(swing={"confirmed_swing_high": 11.2,
+                                 "confirmed_swing_low": 9.8,
+                                 "price_position_in_confirmed_swing_raw": 0.5,
+                                 "price_position_in_confirmed_swing_0_1": 0.5})
+    obs = compute_product_observations(sp)
+    item = obs["structure"][0]
+    assert item["confirmedHigh"] == 11.2
+    assert item["confirmedLow"] == 9.8
+
+
+def test_product_observations_not_in_core_availability():
+    """产品观察不进入 core/auxiliary/availability（不计入 14/14）。"""
+    sp, tp = _base_payload()
+    res = compute_atomic_facts(sp, tp)
+    obs = compute_product_observations(sp)
+    # productObservations 不在 core 中
+    for _dim, items in res["core"].items():
+        for it in items:
+            assert it["publicKey"] != "confirmed_swing_position"
+    # availability 分母仍为 14
+    assert res["availability"]["coreDenominator"] == 14
+    # 产品观察项存在但独立
+    assert len(obs["structure"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# 19. CHANGE-20260716-006: recentChanges 仅最近一个交易日（≤2 快照）
+# ---------------------------------------------------------------------------
+
+
+def test_recent_changes_single_snapshot_returns_empty():
+    """仅 1 个快照（无对比）→ 返回空列表。"""
+    sp, tp = _base_payload()
+    snap = {"trade_date": "2026-07-14", "structural_payload": sp, "temporal_payload": tp}
+    changes = compute_recent_changes([snap])
+    assert changes == []
+
+
+def test_recent_changes_two_snapshots_returns_changes():
+    """2 个快照（1 次对比）→ 返回变化列表。"""
+    sp_a, tp_a = _base_payload(dsa={"current_dsa_segment_dir": 1})
+    sp_b, tp_b = _base_payload(dsa={"current_dsa_segment_dir": -1})
+    snap_a = {"trade_date": "2026-07-11", "structural_payload": sp_a, "temporal_payload": tp_a}
+    snap_b = {"trade_date": "2026-07-14", "structural_payload": sp_b, "temporal_payload": tp_b}
+    changes = compute_recent_changes([snap_a, snap_b])
+    # 主趋势方向变化必须被检测
+    t1_changes = [c for c in changes if c["publicKey"] == "trend_direction"]
+    assert len(t1_changes) == 1
+    assert t1_changes[0]["asOf"] == "2026-07-14"
+    assert t1_changes[0]["fromText"] is not None
+    assert t1_changes[0]["toText"] is not None

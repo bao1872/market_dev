@@ -1279,6 +1279,49 @@ cd frontend && node --experimental-strip-types --test \
 - **SMC 隔离边界不变（源码契约）**：SMC 仅进入 `/stock` 指标链，默认关闭（`include_smc=false` 时 0 计算）；`/market` 右栏小 K 线不请求 SMC；true/false 缓存键隔离（`:smc` 后缀）；不新增表/migration/worker/依赖
 - **生产 E2E 验证（无截图）**：1) MiniKline 切周期/resize 后 viewport 正确（不使用 stale 值，不出现首次 render 的旧 range）；2) SMC `pine_rma` 前 `length-1` 根为 NaN（ATR200 前 199 根为 NaN）；3) 首个 pivot 在 `i==size` 检测（不延迟到 `i==size+1`）；4) EQH/EQL DTO 含 detection_index/detection_time；5) Pine golden fixture 仍 PENDING
 
+## 3.19 CHANGE-20260716-006 回归（originScope 唯一来源 + confirmed_swing_position 产品观察 + recentChanges 仅最新交易日 + 详情右边界 grid 布局）
+
+```bash
+# 后端纯函数 + API 集成（含产品观察 + recent_changes limit=2）
+cd backend && APP_ENV=test TEST_DATABASE_URL=postgresql+asyncpg://bz:bz@127.0.0.1:5433/bz_stock_test \
+  .venv/bin/pytest tests/test_atomic_fact_contract_service.py tests/test_stock_context_atomic_facts.py -q
+
+# 前端导航 + AFC contract（含 originScope 优先级 + ConfirmedPositionRow）
+cd frontend && node --experimental-strip-types --test \
+  src/features/stock-research/__tests__/stockDetailNavigation.test.ts \
+  src/features/research-context/__tests__/atomic-facts.test.ts \
+  src/pages/__tests__/detailNavigation.test.ts
+```
+
+- **originScope 优先级测试（前端 `stockDetailNavigation.test.ts`，10 个用例）**：
+  1. 显式 `originScope=market` 优先于 `returnTo.scope=watchlist`（不静默回退自选）；
+  2. 显式 `originScope=watchlist` 优先于 `returnTo.scope=market`；
+  3. 无 `originScope` 时兼容解析 `returnTo.scope`；
+  4. 无 `originScope` 且无 `returnTo.scope` 默认 watchlist；
+  5. `originScope=market` + `returnTo.scope=watchlist` 触发 `contextMismatch=true`；
+  6. `buildStockDetailUrl` 三入口（MarketWorkspacePage/useStockDetailActions/StockDetailPage）输出一致；
+  7. `sourceForOriginScope('market')` 返回 `selection`、`sourceForOriginScope('watchlist')` 返回 `watchlist`；
+  8. `strategyForOriginScope('market')` 返回 `dsa_selector`、`strategyForOriginScope('watchlist')` 返回 `watchlist_monitor`；
+  9. 旧 `detailNavigation.ts:buildStockDetailUrl` 已删除（源码扫描无第二套拼接）；
+  10. returnTo 生成使用 `searchParams` 副本并强制写入 `scope`/`selected`（不直接复制 `location.search`）。
+- **confirmed_swing_position 产品观察边界测试（后端 `test_atomic_fact_contract_service.py`，10 个新增用例）**：
+  1. `raw=-0.2` → `inside=None`，categoryLabel="低于确认区间"，不进入 0–1 轨道；
+  2. `raw=0.0` → `inside=0.0`，轨道左端点；
+  3. `raw=0.33` → 边界归属"中间"（与 S3 一致）；
+  4. `raw=0.67` → 边界归属"中间"（与 S3 一致）；
+  5. `raw=1.0` → `inside=1.0`，轨道右端点；
+  6. `raw=1.2` → `inside=None`，categoryLabel="高于确认区间"；
+  7. `confirmed_high=None` 或 `confirmed_low=None` → 产品观察缺失（不进入 `productObservations`）；
+  8. 产品观察**不计入 Core 14**（`availability.coreDenominator` 仍为 14，core 数组不含 confirmed_swing_position）；
+  9. `scope="product"` 字段标识产品观察（与 Core/Auxiliary 区分）；
+  10. `compute_product_observations` 不调用 `structural_factor_service`，不修改 worker 持久化链（从已存在 `price_position_in_confirmed_swing_raw` 派生 `inside`）。
+- **recentChanges 2-snapshot 对比测试（后端 `test_stock_context_atomic_facts.py`，2 个新增用例）**：
+  1. `_find_recent_published_snapshots` 查询 limit=2（只比较最新交易日与前一发布交易日）；
+  2. 响应含 `latestChangesFrom`（前一发布交易日）/`latestChangesAsOf`（最新发布交易日）顶层字段，无变化时前端使用"最近交易日（{asOf}）无状态变化"空态文案。
+- **详情右边界视觉回归（前端 contract，3 个 viewport）**：1440/1680/1920 三档宽度下 `.tv-detail-layout` 右边界与视口右边界差 ≤1px；`grid-template-columns: 200px minmax(0,1fr)` 生效；`ResizeObserver` raf immediate + 120ms trailing draw 模式下快速切周期/全屏后右边界不错位。
+
+回归要求：修改 `stockDetailNavigation.ts`、`detailNavigation.ts`、`MarketWorkspacePage.tsx`、`useStockDetailActions.ts`、`StockDetailPage.tsx`、`atomic_fact_contract_service.py`、`atomic_fact_product_observations_v1.json`、`stock_context.py`、`AtomicFactsPanel.tsx`、`ConfirmedPositionRow.tsx`、`global.scss`（`.tv-detail-layout` grid）或 `StrategyChart.tsx`（ResizeObserver）时必须跑此组测试。
+
 ## 4. CI 门禁
 
 阻断项：

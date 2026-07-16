@@ -2803,7 +2803,14 @@ export interface AtomicFactItem {
   /** 通俗中文短标签 */
   label: string
   /** 前端渲染类型（禁止解析中文推断类型/状态） */
-  visualKind: 'metric' | 'value_with_category' | 'relation' | 'position' | 'distance' | 'ratio'
+  visualKind:
+    | 'metric'
+    | 'value_with_category'
+    | 'relation'
+    | 'position'
+    | 'distance'
+    | 'ratio'
+    | 'confirmed_position'
   /** 原始数值（分类类事实为 null） */
   value: number | null
   /** 用户可读短原子值（无内部术语）；关系类事实为 null，仅以 categoryLabel 承载 */
@@ -2848,6 +2855,47 @@ export interface AtomicFactChange {
   asOf: string
 }
 
+/**
+ * ProductObservationItem - 产品观察扩展项（CHANGE-20260716-006）。
+ *
+ * 不在冻结 Core 14 中，不参与 14/14 统计。基于底层已计算的结构因子生成，
+ * 用于补充展示（如最近确认区间位置）。scope 恒为 "product"。
+ */
+export interface ProductObservationItem {
+  /** 产品观察公开键（如 confirmed_swing_position） */
+  publicKey: string
+  /** 通俗中文短标签 */
+  label: string
+  /** 产品观察渲染类型（独立于 Core visualKind） */
+  visualKind: 'confirmed_position'
+  /** 所属组（如 structure） */
+  group: string
+  /** 区间内为 0–1 值，区间外为 null */
+  value: number | null
+  /** 原始值（可能 <0 或 >1，不静默 clip） */
+  rawValue: number | null
+  /** 用户可读短值（区间内） */
+  valueText: string | null
+  /** 中文分类标签（含区间外说明） */
+  categoryLabel: string | null
+  /** 已确认区间上沿（UI 参考） */
+  confirmedHigh: number | null
+  /** 已确认区间下沿（UI 参考） */
+  confirmedLow: number | null
+  /** 标记为产品观察，非 V4.13 Core */
+  scope: 'product'
+}
+
+/**
+ * ProductObservations - 产品观察扩展集合（CHANGE-20260716-006）。
+ *
+ * 按 group 分组（structure 等），不计入 Core 14/14 统计。
+ */
+export interface ProductObservations {
+  /** 结构组产品观察项 */
+  structure: ProductObservationItem[]
+}
+
 /** StockContext 数据质量 - 含 reasonCode 解释空态原因（被原子事实响应复用） */
 export interface StockContextDataQuality {
   hasSucceededRun: boolean
@@ -2878,7 +2926,14 @@ export interface AtomicFactsContextResponse {
   core: Record<string, AtomicFactItem[]>
   auxiliary: AtomicFactItem[]
   availability: AtomicFactAvailability
+  /** 近期变化（仅最近一个交易日发生变化的项） */
   recentChanges: AtomicFactChange[]
+  /** 近期变化起始交易日（前一发布交易日；无对比时为 null） */
+  latestChangesFrom: string | null
+  /** 近期变化截止交易日（最新发布交易日；无快照时为 null） */
+  latestChangesAsOf: string | null
+  /** 产品观察扩展（CHANGE-20260716-006，不计入 Core 14/14） */
+  productObservations: ProductObservations
   dataQuality: StockContextDataQuality
 }
 

@@ -1109,10 +1109,87 @@ def _quantize_fact_value(fact_id: str, v: float | None) -> float | None:
     return round(v, prec)
 
 
+# ---------------------------------------------------------------------------
+# 产品观察扩展（CHANGE-20260716-006）
+# 不在冻结 Core 14 中，不参与 14/14 统计；基于底层已计算的结构因子生成
+# ---------------------------------------------------------------------------
+
+
+def _extract_swing(structural_payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    """从 structural_payload 提取原始 swing_position dict（只读，不复制公式）。
+
+    返回 structural_payload.primary.1d.swing_position；不存在时返回 None。
+    """
+    if structural_payload is None:
+        return None
+    primary_1d = _safe_get(structural_payload, "primary", "1d", default={}) or {}
+    swing = primary_1d.get("swing_position")
+    if not isinstance(swing, dict):
+        return None
+    return swing
+
+
+def compute_product_observations(
+    structural_payload: dict[str, Any] | None,
+) -> dict[str, list[dict[str, Any]]]:
+    """从结构因子 payload 生成产品观察扩展项。
+
+    Returns:
+        {"structure": [{publicKey, label, visualKind, value, valueText, categoryLabel, ...}]}
+        不修改冻结 Core 14；confirmed_swing_position 不计入 14/14。
+    """
+    observations: list[dict[str, Any]] = []
+    if structural_payload is None:
+        return {"structure": observations}
+
+    swing = _extract_swing(structural_payload)
+    if swing is None:
+        return {"structure": observations}
+
+    confirmed_high = _safe_float(swing.get("confirmed_swing_high"))
+    confirmed_low = _safe_float(swing.get("confirmed_swing_low"))
+    raw = _safe_float(swing.get("price_position_in_confirmed_swing_raw"))
+    # CHANGE-20260716-006: inside 由 raw 派生（0<=raw<=1 时等于 raw，否则 None）。
+    # 不读取 worker 持久化的 price_position_in_confirmed_swing_0_1，避免修改持久化链。
+    inside = raw if (raw is not None and 0.0 <= raw <= 1.0) else None
+
+    # confirmed_swing_position（最近确认区间位置）
+    if raw is not None:
+        if inside is not None:
+            # 范围内：0–1 轨道
+            cat = _categorize_position(inside)
+            cat_label = _POS_ZH.get(cat, "数据不足")
+            value_text = f"{inside:.2f}"
+        elif raw < 0:
+            cat = "below_range"
+            cat_label = "低于确认区间"
+            value_text = None
+        else:  # raw > 1
+            cat = "above_range"
+            cat_label = "高于确认区间"
+            value_text = None
+
+        observations.append({
+            "publicKey": "confirmed_swing_position",
+            "label": "最近确认区间位置",
+            "visualKind": "confirmed_position",
+            "group": "structure",
+            "value": inside,  # 范围内为 0–1 值，范围外为 None
+            "rawValue": raw,  # 原始值（可能 <0 或 >1）
+            "valueText": value_text,
+            "categoryLabel": cat_label,
+            "confirmedHigh": confirmed_high,
+            "confirmedLow": confirmed_low,
+            "scope": "product",  # 标记为产品观察，非 V4.13 Core
+        })
+
+    return {"structure": observations}
+
+
 def compute_recent_changes(
     snapshots: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """从 ≤10 个已发布兼容快照（按 trade_date 升序）只读计算 Core 事实变化。
+    """从 ≤2 个已发布兼容快照（按 trade_date 升序）只读计算 Core 事实变化。
 
     比较按各事实 presentation 展示精度（valuePrecision）量化 value + categoryLabel，
     返回 fromText / toText / deltaText，明确非 Core 且不解释利好利空。
@@ -1197,9 +1274,8 @@ def compute_recent_changes(
         prev_texts = cur_texts
         prev_values = cur_values
 
-    # 限制体积（最多 30 条，避免超大 payload）
-    if len(changes) > 30:
-        changes = changes[-30:]
+    # CHANGE-20260716-006: 仅 ≤2 个快照（1 次对比），最多 14 条 Core 变化；
+    # 不再保留 30 条上限（旧 10 快照历史表达已删除）。
     return changes
 
 

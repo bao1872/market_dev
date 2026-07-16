@@ -94,13 +94,8 @@ export function StockResearchWorkspace({
     [source, strategyKey, onSmcToggle],
   )
 
-  // 右栏收起/展开时图表 resize：CSS grid 布局变化触发 ResizeObserver 重绘，
-  // 此处额外在下一帧触发一次 window resize 以确保极端情况下布局已稳定
-  useEffect(() => {
-    if (isCaptureMode) return
-    const raf = requestAnimationFrame(() => window.dispatchEvent(new Event('resize')))
-    return () => cancelAnimationFrame(raf)
-  }, [rightPanelCollapsed, showRightPanel, isCaptureMode])
+  // CHANGE-20260716-006: 删除 window resize 补偿——ResizeObserver 已改为下一帧立即 draw + trailing draw，
+  // grid 布局变化由 ResizeObserver 直接捕获，不再需要 window.dispatchEvent('resize') 重复触发
 
   // 当前股票 symbol（用于 viewport 复合 key，确保切换股票时重置到最新 K 线）
   const symbol = data.instrumentQuery.data?.symbol

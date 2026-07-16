@@ -32,6 +32,7 @@ import { resolveBackPath } from './detailNavigation'
 import { useToast } from '@/store/toast'
 import { changePctColorClass, fmtChange } from '@/features/trend-selection'
 import { resolveDetailSourceContext } from '@/features/stock-research/detailSourceContext'
+import { buildStockDetailUrl } from '@/features/stock-research/stockDetailNavigation'
 
 // CHANGE-20260714-001: 左栏来源列表滚动位置 sessionStorage key 前缀
 // key 由 returnTo + scope 生成稳定 hash，避免不同来源上下文串扰
@@ -50,13 +51,15 @@ export default function StockDetailPage() {
   const location = useLocation()
   const showToast = useToast((s) => s.show)
 
-  // CHANGE-20260715-007: 统一来源上下文解析——resolveDetailSourceContext 为唯一真源
-  // 优先级：有效 /market returnTo.scope → 合法 source 参数 → 默认 watchlist
+  // CHANGE-20260716-006: originScope 为来源唯一真源，resolveDetailSourceContext 优先使用
+  // 优先级：显式 originScope > 有效 /market returnTo.scope（兼容旧链接）> 默认 watchlist
   const returnToParam = searchParams.get('returnTo')
+  const originScopeParam = searchParams.get('originScope') as 'market' | 'watchlist' | null
   const { source, strategy, marketContext, sourceContextInvalid } = resolveDetailSourceContext(
     returnToParam,
     searchParams.get('source'),
     searchParams.get('strategy'),
+    originScopeParam,
   )
   const isCaptureMode = searchParams.get('capture') === 'feishu'
   // [结构状态隐藏开关] - hideStructuralState=1 / capture=1 / capture=feishu 强制隐藏面板
@@ -580,7 +583,7 @@ export default function StockDetailPage() {
               <div
                 key={s.symbol}
                 className={clsx('tv-source-list-item', s.symbol === symbol && 'active')}
-                onClick={() => navigate(`/stock/${s.symbol}?source=${source}&strategy=${strategy}${returnToParam ? `&returnTo=${encodeURIComponent(returnToParam)}` : ''}`)}
+                onClick={() => navigate(buildStockDetailUrl(s.symbol, { originScope: source === 'selection' ? 'market' : 'watchlist', returnTo: returnToParam, timeframe }))}
               >
                 <span className="tv-source-name">{s.name}</span>
                 <div className="tv-source-meta">

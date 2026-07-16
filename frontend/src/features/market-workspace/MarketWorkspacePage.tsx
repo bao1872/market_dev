@@ -9,7 +9,7 @@
 // 自选操作列：单次 useWatchlist 请求按 instrument_id 建 Set；加入/移除复用 useAddToWatchlist/useRemoveFromWatchlist；按 instrument_id 维护 pending 防重复点击。
 // 批次信息（数据日期/批次/状态）属调试信息：普通用户 DOM 中完全不渲染；仅 admin 可见，默认折叠为"批次信息"，展开后显示。
 import { useState, useCallback, useMemo, useRef } from 'react'
-import { useSearchParams, useNavigate, useLocation } from 'react-router-dom'
+import { useSearchParams, useNavigate } from 'react-router-dom'
 import { MarketToolbar } from './MarketToolbar'
 import { MarketRightPanel } from './MarketRightPanel'
 import { StrategyDataTable } from '@/components/StrategyDataTable'
@@ -33,6 +33,7 @@ import {
   type TrendSelectionRow,
 } from '@/features/trend-selection'
 import type { ExportContext } from '@/components/StrategyDataTable'
+import { buildStockDetailUrl } from '@/features/stock-research/stockDetailNavigation'
 import {
   decodeMarketWorkspaceUrl,
   changeMarketScope,
@@ -51,7 +52,6 @@ const PAGE_SIZE = 50
 export default function MarketWorkspacePage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const navigate = useNavigate()
-  const location = useLocation()
   const toast = useToast.getState()
   // 批次信息仅管理员可见（使用真实 is_admin，非 role store 视图切换）
   const isAdmin = useAuthStore((s) => s.user?.is_admin === true)
@@ -398,23 +398,26 @@ export default function MarketWorkspacePage() {
     [searchParams, setSearchParams],
   )
 
-  // 股票名称链接：进入 /stock/:symbol?source=...&strategy=...&returnTo=<完整当前 /market URL>
-  // CHANGE-20260713-009: 根据 scope 明确传递 source/strategy，避免详情页默认 watchlist
-  // - scope=market: source=selection&strategy=dsa_selector
-  // - scope=watchlist: source=watchlist&strategy=watchlist_monitor
-  // returnTo 保存完整当前 URL（scope/selected/keyword/industry/concept/filters/sort/dir/page/page_size）
+  // 股票名称链接：进入 /stock/:symbol?originScope=...&source=...&strategy=...&returnTo=...
+  // CHANGE-20260716-006: 使用 buildStockDetailUrl 统一构建，originScope 为来源唯一真源
+  // returnTo 基于当前 searchParams 副本构造（非可能滞后的 location.search），强制写入 scope 和 selected
   const handleNavigateToStock = useCallback(
     (row: TrendSelectionRow) => {
       const { symbol } = getStockDisplay(row)
       if (!symbol || symbol === '-') return
-      const returnTo = `${location.pathname}${location.search}`
-      const src = scope === 'market' ? 'selection' : 'watchlist'
-      const strat = scope === 'market' ? DSA_STRATEGY_KEY : 'watchlist_monitor'
+      // 使用当前 searchParams 副本，强制写入 scope 和 selected（避免 location.search 滞后）
+      const returnToParams = new URLSearchParams(searchParams)
+      returnToParams.set('scope', scope)
+      returnToParams.set('selected', symbol)
+      const returnTo = `/market?${returnToParams.toString()}`
       navigate(
-        `/stock/${symbol}?source=${src}&strategy=${strat}&returnTo=${encodeURIComponent(returnTo)}`,
+        buildStockDetailUrl(symbol, {
+          originScope: scope,
+          returnTo,
+        }),
       )
     },
-    [navigate, location.pathname, location.search, scope],
+    [navigate, searchParams, scope],
   )
 
   // 服务端查询变更

@@ -108,6 +108,11 @@ def _base_payload(
                     "price_position_in_developing_swing_0_1": 0.5,
                     "distance_to_swing_high_atr": 2.5,
                     "distance_to_swing_low_atr": -1.2,
+                    # CHANGE-20260716-006: confirmed swing 字段（产品观察扩展）
+                    "confirmed_swing_high": 10.5,
+                    "confirmed_swing_low": 9.5,
+                    "price_position_in_confirmed_swing_raw": 0.63,
+                    "price_position_in_confirmed_swing_0_1": 0.63,
                 },
             }
         }
@@ -554,9 +559,9 @@ async def test_as_of_sql_filter_before_limit(
         )
         await _make_published_run_and_snapshot(db_session, inst.id, d, sp, tp)
 
-    # as_of = 07-05：SQL 先过滤 trade_date<=07-05（得 5 个），再 DESC LIMIT 10
-    # 旧实现（先取最新 10 个=07-03..07-12 再内存过滤）→ 仅 3 个
-    # 正确实现应得到 07-01..07-05 共 5 个 → 4 条变化记录
+    # CHANGE-20260716-006: as_of = 07-05，SQL 先过滤 trade_date<=07-05，再 DESC LIMIT 2
+    # 正确实现应得到 07-05 和 07-04 两个快照 → 1 个过渡（asOf=07-05）
+    # 旧实现（先取最新 10 个=07-03..07-12 再内存过滤）→ 会得到未来日期的快照
     resp = await client.get(
         f"/api/v1/stocks/{inst.symbol}/context?as_of=2026-07-05",
         headers=_auth_headers(member_with_sub.id),
@@ -568,11 +573,14 @@ async def test_as_of_sql_filter_before_limit(
     asof_set = {c["asOf"] for c in changes}
     for a in asof_set:
         assert a <= "2026-07-05", f"发现未来变化 {a}"
-    # 关键断言：5 个快照（01..05）产生 4 个过渡（每个过渡 T2+T5 两处变化共 8 条）。
-    # 旧实现（先取最新 10 个=07-03..07-12 再内存过滤）→ 仅 3 个快照 → 2 过渡 → 4 条。
-    # 用最早 asOf=07-02 证明 07-01/07-02 被纳入 → SQL 在 LIMIT 前过滤。
-    assert "2026-07-02" in asof_set, f"as_of 过滤应在 SQL LIMIT 前：asOf 集合={asof_set}"
-    assert len(asof_set) == 4, f"应有 4 个过渡日期，实际 {asof_set}"
+    # CHANGE-006: 仅 2 个快照（07-04, 07-05）→ 1 个过渡，asOf=07-05
+    assert asof_set == {"2026-07-05"}, f"应有 1 个过渡日期 07-05，实际 {asof_set}"
+    # latestChangesFrom/AsOf 标注正确
+    assert body["latestChangesAsOf"] == "2026-07-05"
+    assert body["latestChangesFrom"] == "2026-07-04"
+    # productObservations 存在（confirmed_swing_position）
+    assert "productObservations" in body
+    assert "structure" in body["productObservations"]
 
 
 # =============================================================================
