@@ -1,0 +1,234 @@
+{
+  "contract_version": "Atomic Fact Presentation V1",
+  "status": "frozen",
+  "derived_from": "atomic_fact_contract_v1.json (V4.13)",
+  "purpose": "产品文案与 UI 类型映射；不含研究公式/阈值/路径，非研究合同真源",
+  "groups": {
+    "trend": "趋势运行",
+    "momentum": "动量配合",
+    "structure": "结构位置",
+    "volume": "成交参与"
+  },
+  "facts": [
+    {
+      "id": "T1_trend_direction",
+      "level": "core",
+      "publicKey": "trend_direction",
+      "publicLabel": "主趋势方向",
+      "visualKind": "category",
+      "valuePrecision": 0,
+      "groupTitle": "趋势运行",
+      "secondaryLabel": null
+    },
+    {
+      "id": "T2_aligned_slope",
+      "level": "core",
+      "publicKey": "aligned_slope",
+      "publicLabel": "沿主趋势运行速度",
+      "visualKind": "value",
+      "valuePrecision": 4,
+      "groupTitle": "趋势运行",
+      "secondaryLabel": "每根日K"
+    },
+    {
+      "id": "T4_trend_age",
+      "level": "core",
+      "publicKey": "trend_duration",
+      "publicLabel": "本轮趋势持续时间",
+      "visualKind": "value",
+      "valuePrecision": 0,
+      "groupTitle": "趋势运行",
+      "secondaryLabel": "根日K"
+    },
+    {
+      "id": "T5_slope_ratio",
+      "level": "core",
+      "publicKey": "slope_ratio",
+      "publicLabel": "本轮·上一轮速度比",
+      "visualKind": "ratio",
+      "valuePrecision": 4,
+      "groupTitle": "趋势运行",
+      "secondaryLabel": null
+    },
+    {
+      "id": "M1_momentum_alignment",
+      "level": "core",
+      "publicKey": "momentum_alignment",
+      "publicLabel": "推动力与主趋势关系",
+      "visualKind": "relation",
+      "valuePrecision": 0,
+      "groupTitle": "动量配合",
+      "secondaryLabel": null
+    },
+    {
+      "id": "M2_aligned_momentum",
+      "level": "core",
+      "publicKey": "aligned_momentum",
+      "publicLabel": "沿主趋势推动力",
+      "visualKind": "value",
+      "valuePrecision": 4,
+      "groupTitle": "动量配合",
+      "secondaryLabel": null
+    },
+    {
+      "id": "M3_aligned_momentum_delta",
+      "level": "core",
+      "publicKey": "momentum_delta",
+      "publicLabel": "最近一根日K推动力变化",
+      "visualKind": "category",
+      "valuePrecision": 6,
+      "groupTitle": "动量配合",
+      "secondaryLabel": null
+    },
+    {
+      "id": "M5_squeeze_state",
+      "level": "core",
+      "publicKey": "squeeze_state",
+      "publicLabel": "波动收紧状态",
+      "visualKind": "relation",
+      "valuePrecision": 0,
+      "groupTitle": "动量配合",
+      "secondaryLabel": null
+    },
+    {
+      "id": "S1_confirmed_boundary_relation",
+      "level": "core",
+      "publicKey": "boundary_relation",
+      "publicLabel": "价格与已确认区间关系",
+      "visualKind": "relation",
+      "valuePrecision": 0,
+      "groupTitle": "结构位置",
+      "secondaryLabel": null
+    },
+    {
+      "id": "S2_active_dir_relation",
+      "level": "core",
+      "publicKey": "active_dir_relation",
+      "publicLabel": "当前主要波段与主趋势关系",
+      "visualKind": "relation",
+      "valuePrecision": 0,
+      "groupTitle": "结构位置",
+      "secondaryLabel": null
+    },
+    {
+      "id": "S3_active_position",
+      "level": "core",
+      "publicKey": "active_position",
+      "publicLabel": "价格在当前主要波段的位置",
+      "visualKind": "position",
+      "valuePrecision": 4,
+      "groupTitle": "结构位置",
+      "secondaryLabel": null
+    },
+    {
+      "id": "S7_dist_favorable_boundary",
+      "level": "core",
+      "publicKey": "dist_favorable",
+      "publicLabel": "距顺主趋势确认边界",
+      "visualKind": "distance",
+      "valuePrecision": 4,
+      "groupTitle": "结构位置",
+      "secondaryLabel": null
+    },
+    {
+      "id": "S8_dist_adverse_boundary",
+      "level": "core",
+      "publicKey": "dist_adverse",
+      "publicLabel": "距逆主趋势确认边界",
+      "visualKind": "distance",
+      "valuePrecision": 4,
+      "groupTitle": "结构位置",
+      "secondaryLabel": null
+    },
+    {
+      "id": "V3_avg_volume_ratio",
+      "level": "core",
+      "publicKey": "volume_ratio",
+      "publicLabel": "本轮·上一轮每根日K平均成交量比",
+      "visualKind": "ratio",
+      "valuePrecision": 4,
+      "groupTitle": "成交参与",
+      "secondaryLabel": null
+    },
+    {
+      "id": "M4_segment_momentum_change",
+      "level": "auxiliary",
+      "publicKey": "segment_momentum_change",
+      "publicLabel": "段内动量变化",
+      "visualKind": "value",
+      "valuePrecision": 4,
+      "groupTitle": "动量配合",
+      "secondaryLabel": null
+    },
+    {
+      "id": "S4_developing_dir_relation",
+      "level": "auxiliary",
+      "publicKey": "developing_dir_relation",
+      "publicLabel": "形成中波段方向关系",
+      "visualKind": "relation",
+      "valuePrecision": 0,
+      "groupTitle": "结构位置",
+      "secondaryLabel": null
+    },
+    {
+      "id": "S5_active_vs_developing",
+      "level": "auxiliary",
+      "publicKey": "active_vs_developing",
+      "publicLabel": "主波段与形成中波段方向关系",
+      "visualKind": "relation",
+      "valuePrecision": 0,
+      "groupTitle": "结构位置",
+      "secondaryLabel": null
+    },
+    {
+      "id": "S6_developing_position",
+      "level": "auxiliary",
+      "publicKey": "developing_position",
+      "publicLabel": "价格在形成中波段的位置",
+      "visualKind": "position",
+      "valuePrecision": 4,
+      "groupTitle": "结构位置",
+      "secondaryLabel": null
+    },
+    {
+      "id": "V2_current_avg_volume",
+      "level": "auxiliary",
+      "publicKey": "current_avg_volume",
+      "publicLabel": "本轮每根日K平均成交量",
+      "visualKind": "value",
+      "valuePrecision": 2,
+      "groupTitle": "成交参与",
+      "secondaryLabel": null
+    },
+    {
+      "id": "V4_age_ratio_raw",
+      "level": "auxiliary",
+      "publicKey": "age_ratio",
+      "publicLabel": "本轮·上一轮持续时间比",
+      "visualKind": "ratio",
+      "valuePrecision": 4,
+      "groupTitle": "成交参与",
+      "secondaryLabel": null
+    },
+    {
+      "id": "V5_return_per_volume",
+      "level": "auxiliary",
+      "publicKey": "return_per_volume",
+      "publicLabel": "本轮收益率与成交量比",
+      "visualKind": "value",
+      "valuePrecision": 6,
+      "groupTitle": "成交参与",
+      "secondaryLabel": null
+    },
+    {
+      "id": "V5_return_per_volume_ratio",
+      "level": "auxiliary",
+      "publicKey": "return_per_volume_ratio",
+      "publicLabel": "本轮收益率与量比",
+      "visualKind": "ratio",
+      "valuePrecision": 4,
+      "groupTitle": "成交参与",
+      "secondaryLabel": null
+    }
+  ]
+}

@@ -14,7 +14,7 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { useParams, useSearchParams, useNavigate, useLocation } from 'react-router-dom'
 import clsx from 'clsx'
-import { AtomicFactsPanel } from '@/features/research-context/AtomicFactsPanel'
+import { AtomicFactsDrawer } from '@/features/research-context/AtomicFactsDrawer'
 import { StockResearchWorkspace } from '@/features/stock-research/StockResearchWorkspace'
 import { StockQuoteStrip } from '@/features/stock-research/StockQuoteStrip'
 import { useStockResearchData } from '@/features/stock-research/useStockResearchData'
@@ -324,11 +324,10 @@ export default function StockDetailPage() {
     barsStatus ? barsStatus.label : null,
   ].filter(Boolean)
 
-  // 右栏状态观察面板（Atomic Fact Contract V1: 使用 AtomicFactsPanel expanded，与 market 共用 query key）
+  // 右栏状态观察面板（Atomic Fact Contract V1: 点击「显示状态观察」打开右侧 overlay Drawer，
+  // 不压缩主 K 线；与 /market 共用 useStockContext query key）
   const eventStatePanel = shouldShowPanel && symbol ? (
-    <aside className="tv-side-column">
-      <AtomicFactsPanel symbol={symbol} variant="expanded" />
-    </aside>
+    <AtomicFactsDrawer symbol={symbol} open onClose={toggleEventPanel} />
   ) : null
 
   // 状态观察面板开关 toolbar（渲染在图表上方）
@@ -607,12 +606,14 @@ export default function StockDetailPage() {
           isCaptureMode={isCaptureMode}
           rightPanelCollapsed={!(shouldShowPanel && !!symbol)}
           toolbar={structuralToolbar}
-          rightPanel={eventStatePanel}
-          showRightPanel={shouldShowPanel && !!symbol}
+          rightPanel={null}
+          showRightPanel={false}
           chartColumnProps={{ 'data-testid': 'stock-detail-capture' }}
           onSmcToggle={handleSmcToggle}
         />
       </div>
+      {/* 状态观察 Drawer（overlay，不压缩 K 线；开闭由 eventPanelCollapsed 控制） */}
+      {eventStatePanel}
     </div>
   )
 }

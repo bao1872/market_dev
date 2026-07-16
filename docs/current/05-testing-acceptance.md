@@ -1365,6 +1365,57 @@ mypy baseline 已清零（total=0, unique=0）。清理历程：
 - **不改变测试覆盖**：禁止为过 mypy 删除测试或降低断言强度；历史废弃测试必须证明对应功能已删除且测试不再被引用后才可移除；
 - **app 类型声明阻碍测试时**：若 `app/` 类型声明过窄导致测试无法通过且 `mypy app` 仍需 0，允许收紧 app 类型（如 `require_feature` 返回 `Coroutine` 而非 `object`），但必须保证无运行时行为变化并在 PR 中说明。
 
+## 3.7 AFC V1 原子事实契约回归（blocking）
+
+任何修改 `backend/app/contracts/atomic_fact_contract_v1.json`、`backend/app/contracts/atomic_fact_presentation_v1.json`、`backend/app/services/atomic_fact_contract_service.py`、`backend/app/schemas/atomic_fact_contract.py`、`backend/app/api/stock_context.py`、`frontend/src/features/research-context/AtomicFactsPanel.tsx`、`frontend/src/features/research-context/AtomicFactsDrawer.tsx`、`frontend/src/api/endpoints.ts`、`frontend/src/pages/StockDetailPage.tsx` 必须跑 AFC V1 回归测试。
+
+**双合同结构回归（`backend/tests/test_atomic_fact_contracts.py`，5 个用例）：**
+- 冻结研究合同 `atomic_fact_contract_v1.json` **不含**产品层字段（`public_key`/`public_label`/`publicKey`/`publicLabel`/`visualKind`/`valuePrecision`/`secondaryLabel`）；
+- 产品展示合同 `atomic_fact_presentation_v1.json` 恰好 **14 Core + 8 Auxiliary**，排除 `T3_trend_efficiency` / `T6_efficiency_delta` / `V1_cumulative_volume_ratio`；
+- 两份合同 Fact ID 一一对应；`V1_cumulative_volume_ratio` 在 presentation 中无映射。
+
+**后端纯函数回归（`backend/tests/test_atomic_fact_contract_service.py`，25 个用例）：**
+- Registry 严格 14 Core / 10 Aux / 1 Rejected；S2 存在；ID 唯一；顺序正确；
+- T3/T6 `feature_flag=false` 不进用户 payload；V1 永久缺席；
+- M3 不声称 1e-6 已确认（仅 `raw>0→增加 / raw<0→减少 / raw==0→基本不变`，`thresholdEnabled=false`）；
+- T5/V3 阈值未启用（仅比值 + 展示「分类未启用」）；
+- M5 任一输入缺失即省略、双 true → dataQuality 异常；
+- S1 未知枚举省略；S3 越界省略；S7/S8 非负距离；
+- 缺失事实从 Core 数组省略（分母固定 14）；单公式 fallback；compact 完整 14 含 S2；无禁用词；recentChanges 无未来。
+
+**后端 API 集成回归（`backend/tests/test_stock_context_atomic_facts.py`，14 个用例，独立测试库 `bz_stock_test`）：**
+- 用户 DTO 不含 `factId`/`sourcePath`/`formula`/`thresholdRef`；
+- 缺失 Core 从数组省略、分母仍 14；
+- M3 未确认无 1e-6；
+- M5 双 true 进 dataQuality；
+- S1 未知枚举不默认区间内；
+- S3 越界省略；
+- S7/S8 管理员 `sourcePath` 随趋势方向动态变化；
+- summary 优先读取；summary 缺失/旧格式/版本不符 fallback；persisted 与 fallback 一致；
+- `as_of` 在 SQL `LIMIT` 前过滤（`trade_date <= as_of` 再 `DESC LIMIT`）；
+- `recentChanges` 按展示精度过滤浮点噪声；
+- GET 零写入；
+- admin debug 完整追溯、普通用户访问 admin 接口 403。
+
+**前端契约回归（`frontend/src/features/research-context/__tests__/atomic-facts.test.ts`，8 个用例）：**
+- Registry 14/10/1、顺序、ID 唯一、V1 缺席、T3/T6 隐藏、前端类型对齐；
+- presentation 14+8 排除 T3/T6/V1；
+- 冻结合同无产品字段；
+- 普通用户面板源码无内部术语（DSA/SQZMOM/Segment/Active/Developing/factId/rawValue/sourcePath/bar/raw，整词匹配）。
+
+回归命令：
+
+```bash
+cd /root/web_dev/backend
+APP_ENV=test TEST_DATABASE_URL=postgresql+asyncpg://bz:bz@127.0.0.1:5433/bz_stock_test \
+pytest tests/test_atomic_fact_contract_service.py tests/test_atomic_fact_contracts.py tests/test_stock_context_atomic_facts.py -v
+
+cd /root/web_dev/frontend
+node --experimental-strip-types --test src/features/research-context/__tests__/atomic-facts.test.ts
+```
+
+> 部署后验收（已知 worker 旧镜像 Known Gap，ALIGN-073）：当前生产 worker 未升级，不持久化新 `summary_payload.atomic_fact_contract_v1`，页面依赖旧快照 fallback（同纯函数重算）；新 summary 持久化 + persisted-first 直读链路待 worker 镜像升级后在 production 验证。前端 DOM/network/console 验收见 CHANGE-20260716-003。
+
 ## 6. 完成标准
 
 一次变更完成必须满足：

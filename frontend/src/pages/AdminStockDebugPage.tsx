@@ -195,7 +195,7 @@ export default function AdminStockDebugPage() {
                         <table className={debugStyles.adminDebugTable}>
                           <thead>
                             <tr>
-                              <th>Fact ID</th>
+                              <th>publicKey</th>
                               <th>from</th>
                               <th>to</th>
                               <th>as_of</th>
@@ -203,10 +203,10 @@ export default function AdminStockDebugPage() {
                           </thead>
                           <tbody>
                             {data.recentChanges.slice(0, 30).map((c, i) => (
-                              <tr key={`${c.factId}-${i}`}>
-                                <td>{c.factId}</td>
-                                <td>{c.fromCategory ?? c.fromValue ?? 'null'}</td>
-                                <td>{c.toCategory ?? c.toValue ?? 'null'}</td>
+                              <tr key={`${c.publicKey}-${i}`}>
+                                <td>{c.publicKey}</td>
+                                <td>{c.fromText ?? 'null'}</td>
+                                <td>{c.toText ?? 'null'}</td>
                                 <td>{c.asOf}</td>
                               </tr>
                             ))}

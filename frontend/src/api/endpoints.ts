@@ -2794,40 +2794,55 @@ export async function deleteTableViewPreset(id: string): Promise<void> {
 // ===== Stock Context 端点（PRD V1.1 §7.3）=====
 // ============================================================
 
-/** AtomicFactItem - 单个原子事实（Core 或 Auxiliary） */
+/** AtomicFactItem - 普通用户侧单个原子事实（绝不含 factId / sourcePath 等内部字段） */
 export interface AtomicFactItem {
-  factId: string
-  dimension: string
+  /** 稳定公开键（不随内部 factId 变动） */
+  publicKey: string
+  /** 维度：trend / momentum / structure / volume */
+  dimension: 'trend' | 'momentum' | 'structure' | 'volume'
+  /** 通俗中文短标签 */
   label: string
+  /** 前端渲染类型：value / relation / position / distance / ratio / category */
+  visualKind: 'category' | 'value' | 'ratio' | 'relation' | 'position' | 'distance'
+  /** 原始数值（分类类事实为 null） */
   value: number | null
+  /** 用户可读完整文案（无内部术语） */
+  valueText: string
+  /** 机器分类码（UI 可选） */
+  categoryCode: string | null
+  /** 中文分类标签 */
+  categoryLabel: string | null
+  /** 弱说明（单位/补充） */
+  secondaryText: string | null
+  /** 单位（如 ATR） */
   unit: string | null
-  category: string | null
-  displayText: string
+  /** 分类阈值是否已启用（T5/V3 为 false → 展示「分类未启用」） */
   thresholdEnabled: boolean
-  missing: boolean
-  hiddenByDefault: boolean
-  sourcePath: string | null
 }
 
-/** AtomicFactAvailability - 可用性统计（Core 分母固定 14） */
+/** AtomicFactAvailability - 可用性统计（Core 分母固定 14；缺失项从用户数组省略） */
 export interface AtomicFactAvailability {
   coreDenominator: number
   corePresent: number
+  /** 缺失事实 publicKey 列表（事实本身已从 core 数组省略） */
   coreMissing: string[]
   auxiliaryAvailable: string[]
+  /** 默认隐藏（不在用户 UI 展示）的 Auxiliary publicKey */
   auxiliaryHidden: string[]
   v1Present: boolean
   rejectedPresent: boolean
+  /** 数据质量异常（如 m5_inconsistent） */
+  warnings: string[]
 }
 
-/** AtomicFactChange - 近期变化（相邻已发布快照间只读计算） */
+/** AtomicFactChange - 近期变化（相邻已发布快照间只读计算，按展示精度比较） */
 export interface AtomicFactChange {
-  factId: string
+  publicKey: string
   dimension: string
-  fromCategory: string | null
-  toCategory: string | null
-  fromValue: number | null
-  toValue: number | null
+  fromText: string | null
+  toText: string | null
+  /** 变化类型：分类调整 / 数值变动 / 状态更新（不解释利好利空） */
+  deltaText: string
   asOf: string
 }
 
@@ -2853,14 +2868,16 @@ export interface AtomicFactsContextResponse {
   dataQuality: StockContextDataQuality
 }
 
-/** AdminAtomicFactDebugItem - 管理员调试：单事实可追溯信息 */
+/** AdminAtomicFactDebugItem - 管理员调试：单事实可追溯信息（保留内部 ID / 路径） */
 export interface AdminAtomicFactDebugItem {
   factId: string
+  publicKey: string
   sourcePath: string | null
   rawValue: number | null
   thresholdRef: string | null
   thresholdEnabled: boolean
   featureFlag: boolean
+  missing: boolean
 }
 
 /** AdminStockDebugResponse - 在原子事实响应基础上补充原始 payload 与可追溯信息 */

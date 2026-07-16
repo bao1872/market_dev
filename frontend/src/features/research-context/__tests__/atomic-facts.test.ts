@@ -83,3 +83,49 @@ test('前端 endpoints.ts 定义 AtomicFactsContextResponse 契约字段', () =>
   }
   assert.ok(/coreDenominator/.test(src), 'availability 必须含 coreDenominator（固定 14）')
 })
+
+// ===== 双合同分离：frozen research contract vs presentation product contract =====
+
+const PRESENTATION_PATH = join(BACKEND_ROOT, 'app', 'contracts', 'atomic_fact_presentation_v1.json')
+const presentation = JSON.parse(readSource(PRESENTATION_PATH))
+
+test('Presentation 合同：恰好 14 core + 8 auxiliary，排除 T3/T6/V1', () => {
+  const core = presentation.facts.filter((f: { level: string }) => f.level === 'core')
+  const aux = presentation.facts.filter((f: { level: string }) => f.level === 'auxiliary')
+  assert.equal(core.length, 14, 'presentation core 必须 14 项')
+  assert.equal(aux.length, 8, 'presentation auxiliary 必须 8 项（排除 T3/T6/V1）')
+  const ids = presentation.facts.map((f: { id: string }) => f.id)
+  for (const excluded of ['T3_trend_efficiency', 'T6_efficiency_delta', 'V1_cumulative_volume_ratio']) {
+    assert.ok(!ids.includes(excluded), `presentation 不得包含 ${excluded}`)
+  }
+})
+
+test('Frozen 研究合同不得混入产品层字段（public_key/public_label）', () => {
+  const ALL_KEYS = new Set<string>()
+  for (const f of [...contract.core_facts, ...contract.auxiliary_facts, ...contract.rejected_facts]) {
+    for (const k of Object.keys(f)) ALL_KEYS.add(k)
+  }
+  for (const prodField of ['public_key', 'public_label', 'publicKey', 'publicLabel', 'visualKind', 'valuePrecision', 'secondaryLabel']) {
+    assert.ok(!ALL_KEYS.has(prodField), `frozen contract 不得包含产品字段 ${prodField}`)
+  }
+})
+
+// ===== 普通用户面板源码不得出现内部术语（DSA/SQZMOM/Segment/Active/Developing/factId/rawValue/sourcePath/bar/raw）=====
+
+const PANEL_PATH = join(FRONTEND_ROOT, 'features', 'research-context', 'AtomicFactsPanel.tsx')
+const DRAWER_PATH = join(FRONTEND_ROOT, 'features', 'research-context', 'AtomicFactsDrawer.tsx')
+// 整词匹配（避免 Drawer/sidebar 等合法词误伤），区分大小写
+const FORBIDDEN_TERMS = ['DSA', 'SQZMOM', 'Segment', 'Active', 'Developing', 'factId', 'rawValue', 'sourcePath', 'raw', 'bar']
+
+test('普通用户面板源码不含内部术语', () => {
+  for (const p of [PANEL_PATH, DRAWER_PATH]) {
+    const src = readSource(p)
+    for (const term of FORBIDDEN_TERMS) {
+      const re = new RegExp(`\\b${term}\\b`)
+      assert.ok(
+        !re.test(src),
+        `${p} 不得包含内部术语 "${term}"（普通用户 DOM 泄露）`,
+      )
+    }
+  }
+})

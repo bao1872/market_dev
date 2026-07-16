@@ -47,8 +47,7 @@ from app.services.access_control_service import (
 )
 from app.services.atomic_fact_contract_service import (
     CONTRACT_VERSION,
-    CORE_FACT_IDS,
-    FEATURE_FLAGS,
+    CORE_PUBLIC_KEY,
     compute_atomic_facts,
     compute_recent_changes,
 )
@@ -218,31 +217,40 @@ def _build_data_quality(
     )
 
 
-# 事实 → 阈值来源映射（合同 thresholds 键）
-_THRESHOLD_REF: dict[str, str] = {
-    "T5_slope_ratio": "thresholds.t5_slope_ratio",
-    "V3_avg_volume_ratio": "thresholds.v3_ratio",
-    "S3_active_position": "thresholds.s3_position",
-    "M3_aligned_momentum_delta": "thresholds.m3_zero_tolerance",
-}
+def _is_valid_stored_afc(stored: Any) -> bool:
+    """校验 summary_payload.atomic_fact_contract_v1 是否为新结构（含 publicKey）。
+
+    旧结构（含 factId/missing、无 publicKey）或缺失/不可用 → 返回 False，
+    触发纯函数 fallback（不回写旧快照）。
+    """
+    if not isinstance(stored, dict):
+        return False
+    av = stored.get("availability")
+    if not isinstance(av, dict) or av.get("coreDenominator") != 14:
+        return False
+    core = stored.get("core")
+    if not isinstance(core, dict):
+        return False
+    for items in core.values():
+        if items:
+            return isinstance(items[0], dict) and "publicKey" in items[0]
+    # core 全空无法判定，降级 fallback 重算
+    return False
 
 
 def _build_atomic_facts_debug(facts: dict[str, Any]) -> list[AdminAtomicFactDebugItem]:
-    """管理员调试：从已计算结果提取每事实可追溯信息。"""
+    """管理员调试：从计算结果（含 debug 列表）提取每事实可追溯信息。"""
     items: list[AdminAtomicFactDebugItem] = []
-    all_items: list[dict[str, Any]] = []
-    for dim_items in facts["core"].values():
-        all_items.extend(dim_items)
-    all_items.extend(facts["auxiliary"])
-    for it in all_items:
-        fid = it["factId"]
+    for d in facts.get("debug", []):
         items.append(AdminAtomicFactDebugItem(
-            factId=fid,
-            sourcePath=it.get("sourcePath"),
-            rawValue=it.get("value"),
-            thresholdRef=_THRESHOLD_REF.get(fid),
-            thresholdEnabled=it.get("thresholdEnabled", False),
-            featureFlag=FEATURE_FLAGS.get(fid, True),
+            factId=d["factId"],
+            publicKey=d.get("publicKey"),
+            sourcePath=d.get("sourcePath"),
+            rawValue=d.get("rawValue"),
+            thresholdRef=d.get("thresholdRef"),
+            thresholdEnabled=d.get("thresholdEnabled", False),
+            featureFlag=d.get("featureFlag", True),
+            missing=d.get("missing", False),
         ))
     return items
 
@@ -258,9 +266,9 @@ def _empty_atomic_response(
         "core": {dim: [] for dim in ("trend", "momentum", "structure", "volume")},
         "auxiliary": [],
         "availability": {
-            "coreDenominator": len(CORE_FACT_IDS),
+            "coreDenominator": len(CORE_PUBLIC_KEY),
             "corePresent": 0,
-            "coreMissing": list(CORE_FACT_IDS),
+            "coreMissing": list(CORE_PUBLIC_KEY.values()),
             "auxiliaryAvailable": [],
             "auxiliaryHidden": [],
             "v1Present": False,
@@ -277,12 +285,25 @@ async def _find_recent_published_snapshots(
     session: AsyncSession,
     instrument_id: UUID,
     limit: int = 10,
+    as_of: date | None = None,
 ) -> list[dict[str, Any]]:
     """一次查询读取最近 ≤limit 个已发布 full scope 快照（升序），供近期变化计算。
 
-    只读查询，不写 stock_state_events；as_of 受 run 已发布约束天然 point-in-time。
+    只读查询，不写 stock_state_events。
+    as_of 给定时：SQL 直接加 `trade_date <= as_of` 过滤（再 DESC LIMIT，最后升序），
+    禁止先取最新 10 条再在内存过滤（PROMPT 一.8）。
     """
     from app.models.stock_feature_snapshot import StockFeatureSnapshot
+
+    conditions = [
+        StockFeatureSnapshot.instrument_id == instrument_id,
+        StockFeatureSnapshotRun.status == STATUS_SUCCEEDED,
+        StockFeatureSnapshotRun.published_at.is_not(None),
+        StockFeatureSnapshotRun.metadata_["scope"].astext == "full",
+        StockFeatureSnapshotRun.schema_version == _SCHEMA_VERSION,
+    ]
+    if as_of is not None:
+        conditions.append(StockFeatureSnapshotRun.trade_date <= as_of)
 
     stmt = (
         select(StockFeatureSnapshot)
@@ -290,13 +311,7 @@ async def _find_recent_published_snapshots(
             StockFeatureSnapshotRun,
             StockFeatureSnapshot.source_run_id == StockFeatureSnapshotRun.id,
         )
-        .where(
-            StockFeatureSnapshot.instrument_id == instrument_id,
-            StockFeatureSnapshotRun.status == STATUS_SUCCEEDED,
-            StockFeatureSnapshotRun.published_at.is_not(None),
-            StockFeatureSnapshotRun.metadata_["scope"].astext == "full",
-            StockFeatureSnapshotRun.schema_version == _SCHEMA_VERSION,
-        )
+        .where(*conditions)
         .order_by(desc(StockFeatureSnapshot.trade_date))
         .limit(limit)
     )
@@ -343,18 +358,33 @@ async def _build_stock_context(
     if snapshot is None:
         return _empty_atomic_response(instrument, reason_code="snapshot_missing")
 
-    # 纯函数计算（只读 payload，不查库、不回写）
-    facts = compute_atomic_facts(snapshot.structural_payload, snapshot.temporal_payload)
+    # 优先读取已持久化的原子事实（新快照写入 summary_payload.atomic_fact_contract_v1）；
+    # 缺失或版本/结构不匹配 → 同一纯函数 fallback 重算（不回写旧快照）。
+    _summary = snapshot.summary_payload
+    stored = _summary.get("atomic_fact_contract_v1") if isinstance(_summary, dict) else None
+    if _is_valid_stored_afc(stored) and isinstance(stored, dict):
+        facts = stored
+    else:
+        facts = compute_atomic_facts(snapshot.structural_payload, snapshot.temporal_payload)
 
-    # 近期变化：一次查询 ≤10 个已发布兼容快照，升序只读计算
-    recent_snaps = await _find_recent_published_snapshots(session, instrument.id, limit=10)
-    # as_of 严格 point-in-time：近期变化只含 ≤ as_of 的已发布快照，禁止未来变化
-    if as_of is not None:
-        _as_of_str = as_of.isoformat()
-        recent_snaps = [s for s in recent_snaps if s["trade_date"] <= _as_of_str]
+    # 近期变化：一次查询 ≤10 个已发布兼容快照（as_of 时 SQL 直接过滤），升序只读计算
+    recent_snaps = await _find_recent_published_snapshots(
+        session, instrument.id, limit=10, as_of=as_of,
+    )
     recent_changes = compute_recent_changes(recent_snaps)
 
     data_quality = _build_data_quality(instrument, run, snapshot, reason_code)
+    # 数据质量异常（如 M5 双 true）并入 degradedReasons
+    _warnings = (
+        facts.get("availability", {}).get("warnings", [])
+        if isinstance(facts.get("availability"), dict)
+        else []
+    )
+    if "m5_inconsistent" in _warnings:
+        _cur = list(data_quality.degradedReasons or [])
+        if "m5_inconsistent" not in _cur:
+            _cur.append("m5_inconsistent")
+            data_quality.degradedReasons = _cur
 
     response: dict[str, Any] = {
         "contractVersion": CONTRACT_VERSION,

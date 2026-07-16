@@ -7,15 +7,23 @@
 - 生产实现不依赖实验脚本运行；仅以
   backend/app/contracts/atomic_fact_contract_v1.json 为 Canonical Registry
   （计数/顺序/阈值真源），计算公式在本模块以纯函数重写。
+- 用户侧（普通会员）返回项仅含稳定 publicKey / 中文 label / visualKind /
+  value / valueText / categoryCode / categoryLabel / secondaryText / unit /
+  thresholdEnabled，**绝不**含 factId / sourcePath / 公式 / 阈值引用。
+  管理员 debug 单独保留 factId / sourcePath / rawValue / thresholdRef / featureFlag。
+- 缺失事实直接从用户 core/auxiliary 数组省略（不填 0/空串/中性状态伪装）；
+  availability 固定分母 14 并列出缺失 publicKey。
+- 所有普通用户文案不含 DSA / SQZMOM / Segment / Active/Developing Swing / bar / raw
+  等内部术语，仅描述客观状态，不构成买卖建议。
 - T2/M2/M3 显示真实原始值，禁止伪造成 [-1,1] 固定范围。
 - T5/V3 阈值 engineering_confirmation_required=true 且值为 null
-  → 仅显示比值，标记「分类未启用」。
-- M3 零值容差统一（1e-6，对应 sqzmom_delta_1 存储精度，非数据分位数）。
-- S3 严格 0.33/0.67 边界（0.63 → 中间）。
+  → 仅显示比值，标记「分类未启用」（不声称已分类）。
+- M3 零值判定：仅按正/负/精确零（raw==0）显示原始变化；不硬编码任何容差
+  （Registry m3_zero_tolerance.value=null，THR-001 待工程确认）。
+- S3 严格 0.33/0.67 边界（0.63 → 中间）；越界视为缺失，不输出 OUT_OF_RANGE。
 - S7/S8 禁止显示负距离：d>=0「尚未到达 |d| ATR」；d<0「已越过 |d| ATR」。
 - V1 累计成交量比永不进入用户 API/UI/摘要/可用性计数。
-- T3/T6 效率 fact flag 默认关闭，普通用户完全不显示。
-- 缺失事实直接省略（不填 0/空串/中性状态伪装）。
+- T3/T6 效率 fact flag 默认关闭，普通用户完全不显示（expanded 也不渲染）。
 - 不查库、不联网、不复制底层指标公式、不使用未来数据。
 
 用法：
@@ -41,16 +49,6 @@ _CONTRACT_PATH = (
     Path(__file__).resolve().parent.parent / "contracts" / "atomic_fact_contract_v1.json"
 )
 
-# 阈值：S3 来自合同（已确认）。T5/V3 阈值 null + engineering_confirmation_required=true
-# → 分类未启用。M3 零值容差统一（存储精度 1e-6，非数据分位数；THR-001 待确认）。
-M3_ZERO_TOLERANCE = 1e-6
-
-# T3/T6 效率 fact flag：默认关闭（EFF-001/EFF-002 未修复前，普通用户完全不显示）。
-FEATURE_FLAGS: dict[str, bool] = {
-    "T3_trend_efficiency": False,
-    "T6_efficiency_delta": False,
-}
-
 
 def _load_contract() -> dict[str, Any]:
     with open(_CONTRACT_PATH, encoding="utf-8") as f:
@@ -72,6 +70,42 @@ assert "V1_cumulative_volume_ratio" not in CORE_FACT_IDS + AUX_FACT_IDS
 # 全量 ID 唯一
 _ALL_IDS = set(CORE_FACT_IDS) | set(AUX_FACT_IDS) | set(REJECTED_FACT_IDS)
 assert len(_ALL_IDS) == 25, f"fact ID 必须唯一，实际去重后 {len(_ALL_IDS)}"
+
+# 产品文案 / UI 类型 来自 presentation 合同（atomic_fact_presentation_v1.json），
+# 与冻结研究合同分离：冻结合同只含事实/公式/阈值/路径，不含 publicKey 等产品字段。
+_PRES_PATH = (
+    Path(__file__).resolve().parent.parent / "contracts" / "atomic_fact_presentation_v1.json"
+)
+
+
+def _load_presentation() -> dict[str, Any]:
+    with open(_PRES_PATH, encoding="utf-8") as f:
+        return json.load(f)
+
+
+_PRES = _load_presentation()
+_PRES_FACTS = {f["id"]: f for f in _PRES["facts"]}
+
+# publicKey / publicLabel 映射（仅覆盖普通用户展示的 14 Core + 8 Aux；T3/T6/V1 不在内）
+CORE_PUBLIC_KEY: dict[str, str] = {
+    f["id"]: f["publicKey"] for f in _PRES["facts"] if f["level"] == "core"
+}
+CORE_PUBLIC_LABEL: dict[str, str] = {
+    f["id"]: f["publicLabel"] for f in _PRES["facts"] if f["level"] == "core"
+}
+AUX_PUBLIC_KEY: dict[str, str] = {
+    f["id"]: f["publicKey"] for f in _PRES["facts"] if f["level"] == "auxiliary"
+}
+AUX_PUBLIC_LABEL: dict[str, str] = {
+    f["id"]: f["publicLabel"] for f in _PRES["facts"] if f["level"] == "auxiliary"
+}
+
+# 校验：presentation 恰好覆盖 14 Core + 8 Aux（不含 T3/T6/V1）
+assert len(CORE_PUBLIC_KEY) == 14, f"presentation core 必须 14，实际 {len(CORE_PUBLIC_KEY)}"
+assert len(AUX_PUBLIC_KEY) == 8, f"presentation aux 必须 8，实际 {len(AUX_PUBLIC_KEY)}"
+assert "T3_trend_efficiency" not in _PRES_FACTS
+assert "T6_efficiency_delta" not in _PRES_FACTS
+assert "V1_cumulative_volume_ratio" not in _PRES_FACTS
 
 # S3 边界（来自合同 thresholds.s3_position，已确认）
 _S3_LOWER = float(_CONTRACT["thresholds"]["s3_position"]["lower"])
@@ -124,6 +158,15 @@ def _safe_get(d: dict[str, Any] | None, *keys: str, default: Any = None) -> Any:
     return cur
 
 
+def _safe_int(v: Any) -> int | None:
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except (ValueError, TypeError):
+        return None
+
+
 def _extract_inputs(
     structural_payload: dict[str, Any],
     temporal_payload: dict[str, Any],
@@ -165,16 +208,19 @@ def _extract_inputs(
 
 
 # ---------------------------------------------------------------------------
-# 分类辅助
+# 分类辅助（返回中文 label，禁止内部术语）
 # ---------------------------------------------------------------------------
+
+# 事实白名单枚举（仅这些合法值，未知值一律视为缺失）
+_BOUNDARY_WHITELIST = {"above_confirmed_high", "below_confirmed_low", "inside"}
 
 
 def _categorize_position(pos: float | None) -> str | None:
-    """S3/S6 位置分类：严格 0.33/0.67 边界。"""
+    """S3/S6 位置分类：严格 0.33/0.67 边界；越界（不在 [0,1]）返回 None（缺失）。"""
     if pos is None:
         return None
     if pos < 0 or pos > 1:
-        return "OUT_OF_RANGE"
+        return None  # 越界必须缺失，不输出 OUT_OF_RANGE
     if pos < _S3_LOWER:
         return "LOWER"
     if pos <= _S3_UPPER:
@@ -195,7 +241,11 @@ def _momentum_alignment(sqz_val: float | None, dsa_dir: float | None) -> str | N
 def _confirmed_boundary_relation(
     breakout_state: str | None, dsa_dir: float | None
 ) -> str | None:
-    if breakout_state is None or dsa_dir is None or dsa_dir == 0.0:
+    """仅白名单枚举：above_confirmed_high / below_confirmed_low / inside。
+    未知值（非白名单）不得默认为区间内，直接缺失。"""
+    if breakout_state not in _BOUNDARY_WHITELIST:
+        return None
+    if dsa_dir is None or dsa_dir == 0.0:
         return None
     if dsa_dir > 0:
         if breakout_state == "above_confirmed_high":
@@ -224,12 +274,13 @@ def _active_vs_developing(active_dir: float | None, dev_dir: float | None) -> st
 
 
 def _squeeze_state(sqz_on: Any, sqz_off: Any) -> str | None:
+    """波动收紧状态。双 true 为 data-quality 异常（返回 INCONSISTENT，调用方转缺失+告警）。"""
     on = None if sqz_on is None else bool(sqz_on)
     off = None if sqz_off is None else bool(sqz_off)
     if on is None and off is None:
         return None
     if on is True and off is True:
-        return "INCONSISTENT"
+        return "INCONSISTENT"  # 数据质量异常，非事实值
     if on is True:
         return "ON"
     if off is True:
@@ -238,34 +289,35 @@ def _squeeze_state(sqz_on: Any, sqz_off: Any) -> str | None:
 
 
 def _m3_category(raw: float | None) -> str | None:
-    """M3 统一零值容差分类：增加/减少/基本不变。"""
+    """M3 零值判定：仅按正/负/精确零（raw==0）显示原始变化。
+    不硬编码任何容差（THR-001 待工程确认）。"""
     if raw is None:
         return None
-    if abs(raw) <= M3_ZERO_TOLERANCE:
-        return "基本不变"
-    return "增加" if raw > 0 else "减少"
+    if raw > 0:
+        return "INCREASE"
+    if raw < 0:
+        return "DECREASE"
+    return "UNCHANGED"  # 仅精确零
 
 
 # 中文展示映射（通俗，不歪曲事实，禁禁用词）
 _DIR_ZH = {1.0: "上行", -1.0: "下行", 0.0: "中性", None: "中性"}
 _ALIGN_ZH = {"ALIGNED": "同向", "COUNTER": "逆向", "ZERO": "中性", None: "中性"}
 _BOUNDARY_ZH = {
-    "BREAK_FAVORABLE": "顺DSA方向突破确认边界",
+    "BREAK_FAVORABLE": "顺主趋势突破确认边界",
     "INSIDE": "价格在区间内",
-    "BREAK_ADVERSE": "逆DSA方向边界破坏",
+    "BREAK_ADVERSE": "逆主趋势边界破坏",
     None: "结构数据不足",
 }
 _DIRREL_ZH = {"ALIGNED": "一致", "COUNTER": "相反", None: "数据不足"}
-_POS_ZH = {"LOWER": "偏低", "MIDDLE": "中间", "UPPER": "偏高", "OUT_OF_RANGE": "区间外", None: "数据不足"}
+_POS_ZH = {"LOWER": "偏低", "MIDDLE": "中间", "UPPER": "偏高", None: "数据不足"}
 _SQZ_ZH = {"ON": "挤压中", "OFF": "释放中", "NORMAL": "正常", "INCONSISTENT": "数据质量异常", None: "数据不足"}
 _ADV_ZH = {"SAME_DIRECTION": "一致", "OPPOSITE_DIRECTION": "相反", None: "数据不足"}
+_M3_ZH = {"INCREASE": "增加", "DECREASE": "减少", "UNCHANGED": "基本不变", None: "数据不足"}
 
 
 def _fmt_dist(d: float | None) -> str:
-    """S7/S8 距离文案：禁止显示负距离。d>=0 尚未到达；d<0 已越过。
-
-    仅在 d 非 None 时调用（缺失由调用方 fallback 文案处理），故返回 str。
-    """
+    """S7/S8 距离文案：禁止显示负距离。d>=0 尚未到达；d<0 已越过。"""
     if d is None:
         return ""
     if d >= 0:
@@ -274,37 +326,71 @@ def _fmt_dist(d: float | None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 核心计算
+# 事实项发射（用户项 / 管理员 debug 项 分离）
 # ---------------------------------------------------------------------------
 
 
-def _build_fact_item(
+def _emit(
     *,
     fact_id: str,
-    dimension: str,
+    public_key: str,
     label: str,
+    dimension: str,
+    visual_kind: str,
     value: float | None,
-    unit: str | None,
-    category: str | None,
-    display_text: str,
+    value_text: str,
+    source_path: str | None,
+    threshold_ref: str | None = None,
     threshold_enabled: bool = True,
+    feature_flag: bool = True,
+    category_code: str | None = None,
+    category_label: str | None = None,
+    secondary_text: str | None = None,
+    unit: str | None = None,
     missing: bool = False,
-    hidden_by_default: bool = False,
-    source_path: str | None = None,
-) -> dict[str, Any]:
-    return {
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """发射一个事实。
+
+    Returns:
+        (public_item, debug_item)
+        - public_item：None 表示缺失（不进入用户 core/auxiliary 数组）
+        - debug_item：始终构建（管理员可追溯所有事实，含缺失标记）
+    """
+    public_item: dict[str, Any] | None = None
+    if not missing:
+        public_item = {
+            "publicKey": public_key,
+            "dimension": dimension,
+            "label": label,
+            "visualKind": visual_kind,
+            "value": value,
+            "valueText": value_text,
+            "categoryCode": category_code,
+            "categoryLabel": category_label,
+            "secondaryText": secondary_text,
+            "unit": unit,
+            "thresholdEnabled": threshold_enabled,
+        }
+    debug_item = {
         "factId": fact_id,
-        "dimension": dimension,
-        "label": label,
-        "value": value,
-        "unit": unit,
-        "category": category,
-        "displayText": display_text,
-        "thresholdEnabled": threshold_enabled,
-        "missing": missing,
-        "hiddenByDefault": hidden_by_default,
+        "publicKey": public_key,
         "sourcePath": source_path,
+        "rawValue": value,
+        "thresholdRef": threshold_ref,
+        "thresholdEnabled": threshold_enabled,
+        "featureFlag": feature_flag,
+        "missing": missing,
     }
+    return public_item, debug_item
+
+
+# 阈值引用映射（合同 thresholds 键，仅未确认项传 None 引用但 thresholdEnabled=False）
+_THRESHOLD_REF: dict[str, str | None] = {
+    "T5_slope_ratio": "thresholds.t5_slope_ratio",
+    "V3_avg_volume_ratio": "thresholds.v3_ratio",
+    "S3_active_position": "thresholds.s3_position",
+    "M3_aligned_momentum_delta": "thresholds.m3_zero_tolerance",
+}
 
 
 def compute_atomic_facts(
@@ -315,9 +401,14 @@ def compute_atomic_facts(
 
     Returns:
         {
-          "core": {dimension: [fact_item, ...]},  # 固定四组顺序
-          "auxiliary": [fact_item, ...],           # 默认隐藏项（T3/T6 flag 关时不含）
-          "availability": {...},
+          "core": {dimension: [public_item, ...]},  # 仅非缺失项（缺失直接省略）
+          "auxiliary": [public_item, ...],           # 仅非缺失 + flag 开启项
+          "availability": {
+            coreDenominator, corePresent, coreMissing(publicKey),
+            auxiliaryAvailable, auxiliaryHidden, v1Present, rejectedPresent,
+            warnings  # 数据质量异常（如 m5_inconsistent）
+          },
+          "debug": [debug_item, ...],                # 管理员可追溯（factId/sourcePath）
         }
     """
     sp = structural_payload or {}
@@ -328,59 +419,66 @@ def compute_atomic_facts(
 
     core_items: dict[str, dict[str, Any]] = {}
     aux_items: dict[str, dict[str, Any]] = {}
+    debug_items: list[dict[str, Any]] = []
+    warnings: list[str] = []
 
     # ---------------- Core ----------------
-    # T1 趋势方向
+    # T1 主趋势方向
     t1_cat = {1.0: "UP", -1.0: "DOWN", 0.0: "NONE", None: "NONE"}.get(dsa_dir)
-    core_items["T1_trend_direction"] = _build_fact_item(
+    t1_missing = dsa_dir is None
+    p, dbg = _emit(
         fact_id="T1_trend_direction",
+        public_key=CORE_PUBLIC_KEY["T1_trend_direction"],
+        label=CORE_PUBLIC_LABEL["T1_trend_direction"],
         dimension="trend",
-        label="趋势方向",
+        visual_kind="category",
         value=dsa_dir,
-        unit=None,
-        category=t1_cat,
-        display_text=f"DSA当前趋势方向为{_DIR_ZH.get(dsa_dir, '中性')}",
-        missing=dsa_dir is None,
+        value_text=f"主趋势方向为{_DIR_ZH.get(dsa_dir, '中性')}",
         source_path="structural_payload.primary.1d.dsa_segment.current_dsa_segment_dir",
+        category_code=t1_cat,
+        category_label=_DIR_ZH.get(dsa_dir, "中性"),
+        missing=t1_missing,
     )
+    core_items["T1_trend_direction"] = p  # type: ignore[assignment]
+    debug_items.append(dbg)
 
-    # T2 对齐斜率（真实值，单位 ATR/bar）
+    # T2 沿主趋势运行速度
     t2_missing = not (has_dir and d["cur_slope_atr"] is not None)
     t2_val = (dsa_dir * d["cur_slope_atr"]) if not t2_missing else None
-    core_items["T2_aligned_slope"] = _build_fact_item(
+    p, dbg = _emit(
         fact_id="T2_aligned_slope",
+        public_key=CORE_PUBLIC_KEY["T2_aligned_slope"],
+        label=CORE_PUBLIC_LABEL["T2_aligned_slope"],
         dimension="trend",
-        label="方向对齐斜率",
+        visual_kind="value",
         value=t2_val,
-        unit="ATR/bar",
-        category=None,
-        display_text=(
-            f"方向对齐斜率为{t2_val:.4f} ATR/bar" if t2_val is not None else "方向对齐斜率数据不足"
-        ),
-        missing=t2_missing,
+        value_text=f"沿主趋势运行速度为 {t2_val:.4f}" if t2_val is not None else "沿主趋势运行速度数据不足",
         source_path="structural_payload.primary.1d.dsa_segment.current_dsa_segment_slope_atr_per_bar",
+        secondary_text="每根日K",
+        missing=t2_missing,
     )
+    core_items["T2_aligned_slope"] = p  # type: ignore[assignment]
+    debug_items.append(dbg)
 
-    # T4 段龄（int）
-    t4_age = None
-    if d["cur_age_bars"] is not None:
-        try:
-            t4_age = int(d["cur_age_bars"])
-        except (ValueError, TypeError):
-            t4_age = None
-    core_items["T4_trend_age"] = _build_fact_item(
+    # T4 本轮趋势持续时间
+    t4_age = _safe_int(d["cur_age_bars"])
+    t4_missing = t4_age is None
+    p, dbg = _emit(
         fact_id="T4_trend_age",
+        public_key=CORE_PUBLIC_KEY["T4_trend_age"],
+        label=CORE_PUBLIC_LABEL["T4_trend_age"],
         dimension="trend",
-        label="段龄",
+        visual_kind="value",
         value=t4_age,
-        unit="bar",
-        category=None,
-        display_text=f"当前Segment已持续{t4_age}根bar" if t4_age is not None else "段龄数据不足",
-        missing=t4_age is None,
+        value_text=f"本轮趋势已持续 {t4_age} 根" if t4_age is not None else "本轮趋势持续时间数据不足",
         source_path="structural_payload.primary.1d.dsa_segment.current_dsa_segment_age_bars",
+        secondary_text="根日K",
+        missing=t4_missing,
     )
+    core_items["T4_trend_age"] = p  # type: ignore[assignment]
+    debug_items.append(dbg)
 
-    # T5 斜率比（阈值未确认 → 仅比值 + 分类未启用）
+    # T5 本轮·上一轮速度比（阈值未确认 → 仅比值 + 分类未启用）
     t5_missing = not (
         d["cur_slope_atr"] is not None
         and d["prev_slope_atr"] is not None
@@ -389,178 +487,229 @@ def compute_atomic_facts(
     t5_ratio = None
     if not t5_missing:
         t5_ratio = abs(d["cur_slope_atr"]) / abs(d["prev_slope_atr"])
-    core_items["T5_slope_ratio"] = _build_fact_item(
+    p, dbg = _emit(
         fact_id="T5_slope_ratio",
+        public_key=CORE_PUBLIC_KEY["T5_slope_ratio"],
+        label=CORE_PUBLIC_LABEL["T5_slope_ratio"],
         dimension="trend",
-        label="斜率相对前段比",
+        visual_kind="ratio",
         value=t5_ratio,
-        unit=None,
-        category=None,
-        threshold_enabled=False,
-        display_text=(
-            f"斜率相对前段比值为{t5_ratio:.4f}（分类未启用）"
+        value_text=(
+            f"本轮·上一轮速度比为 {t5_ratio:.4f}（分类未启用）"
             if t5_ratio is not None
-            else "斜率比数据不足（前段斜率为0或缺失）"
+            else "本轮·上一轮速度比数据不足"
         ),
-        missing=t5_missing,
         source_path="structural_payload.primary.1d.dsa_segment.prev_dsa_segment_slope_atr_per_bar",
+        threshold_ref=_THRESHOLD_REF["T5_slope_ratio"],
+        threshold_enabled=False,
+        missing=t5_missing,
     )
+    core_items["T5_slope_ratio"] = p  # type: ignore[assignment]
+    debug_items.append(dbg)
 
-    # M1 动量对齐
+    # M1 推动力与主趋势关系
     m1 = _momentum_alignment(d["sqzmom_val"], dsa_dir)
-    core_items["M1_momentum_alignment"] = _build_fact_item(
+    m1_missing = m1 is None
+    p, dbg = _emit(
         fact_id="M1_momentum_alignment",
+        public_key=CORE_PUBLIC_KEY["M1_momentum_alignment"],
+        label=CORE_PUBLIC_LABEL["M1_momentum_alignment"],
         dimension="momentum",
-        label="动量对齐",
+        visual_kind="relation",
         value=None,
-        unit=None,
-        category=m1,
-        display_text=f"SQZMOM动量与趋势{_ALIGN_ZH.get(m1, '中性')}",
-        missing=m1 is None,
+        value_text=f"推动力与主趋势{_ALIGN_ZH.get(m1, '中性')}",
         source_path="structural_payload.primary.1d.volatility_momentum.sqzmom_val",
+        category_code=m1,
+        category_label=_ALIGN_ZH.get(m1, "中性"),
+        missing=m1_missing,
     )
+    core_items["M1_momentum_alignment"] = p  # type: ignore[assignment]
+    debug_items.append(dbg)
 
-    # M2 对齐动量（真实值）
+    # M2 沿主趋势推动力
     m2_missing = not (has_dir and d["sqzmom_val"] is not None)
     m2_val = (dsa_dir * d["sqzmom_val"]) if not m2_missing else None
-    core_items["M2_aligned_momentum"] = _build_fact_item(
+    p, dbg = _emit(
         fact_id="M2_aligned_momentum",
+        public_key=CORE_PUBLIC_KEY["M2_aligned_momentum"],
+        label=CORE_PUBLIC_LABEL["M2_aligned_momentum"],
         dimension="momentum",
-        label="方向对齐动量",
+        visual_kind="value",
         value=m2_val,
-        unit=None,
-        category=None,
-        display_text=(
-            f"方向对齐动量值为{m2_val:.4f}" if m2_val is not None else "方向对齐动量数据不足"
-        ),
-        missing=m2_missing,
+        value_text=f"沿主趋势推动力为 {m2_val:.4f}" if m2_val is not None else "沿主趋势推动力数据不足",
         source_path="structural_payload.primary.1d.volatility_momentum.sqzmom_val",
+        missing=m2_missing,
     )
+    core_items["M2_aligned_momentum"] = p  # type: ignore[assignment]
+    debug_items.append(dbg)
 
-    # M3 对齐动量变化（真实值 + 统一零值容差分类）
+    # M3 最近一根日K推动力变化（仅正/负/精确零；不硬编码容差）
     m3_missing = not (has_dir and d["sqzmom_delta_1"] is not None)
     m3_raw = (dsa_dir * d["sqzmom_delta_1"]) if not m3_missing else None
     m3_cat = _m3_category(m3_raw)
-    core_items["M3_aligned_momentum_delta"] = _build_fact_item(
+    p, dbg = _emit(
         fact_id="M3_aligned_momentum_delta",
+        public_key=CORE_PUBLIC_KEY["M3_aligned_momentum_delta"],
+        label=CORE_PUBLIC_LABEL["M3_aligned_momentum_delta"],
         dimension="momentum",
-        label="对齐动量变化",
+        visual_kind="category",
         value=m3_raw,
-        unit=None,
-        category=m3_cat,
-        display_text=(
-            f"最近一Bar对齐动量变化：{m3_cat}（raw={m3_raw:.6f}）"
+        value_text=(
+            f"最近一根日K推动力变化：{_M3_ZH.get(m3_cat, '数据不足')}"
             if m3_raw is not None
-            else "对齐动量变化数据不足"
+            else "最近一根日K推动力变化数据不足"
         ),
-        missing=m3_missing,
         source_path="structural_payload.primary.1d.volatility_momentum.sqzmom_delta_1",
+        threshold_ref=_THRESHOLD_REF["M3_aligned_momentum_delta"],
+        threshold_enabled=False,
+        category_code=m3_cat,
+        category_label=_M3_ZH.get(m3_cat, "数据不足"),
+        missing=m3_missing,
     )
+    core_items["M3_aligned_momentum_delta"] = p  # type: ignore[assignment]
+    debug_items.append(dbg)
 
-    # M5 挤压状态
+    # M5 波动收紧状态（双 true → 缺失 + 数据质量异常）
     m5 = _squeeze_state(d["sqz_on"], d["sqz_off"])
-    core_items["M5_squeeze_state"] = _build_fact_item(
+    m5_inconsistent = m5 == "INCONSISTENT"
+    m5_missing = m5 is None or m5_inconsistent
+    if m5_inconsistent:
+        warnings.append("m5_inconsistent")
+    p, dbg = _emit(
         fact_id="M5_squeeze_state",
+        public_key=CORE_PUBLIC_KEY["M5_squeeze_state"],
+        label=CORE_PUBLIC_LABEL["M5_squeeze_state"],
         dimension="momentum",
-        label="挤压状态",
+        visual_kind="relation",
         value=None,
-        unit=None,
-        category=m5,
-        display_text=f"波动率挤压状态：{_SQZ_ZH.get(m5, '数据不足')}",
-        missing=m5 is None,
+        value_text=f"波动收紧状态：{_SQZ_ZH.get(m5, '数据不足')}",
         source_path="structural_payload.primary.1d.volatility_momentum.sqz_on",
+        category_code=m5,
+        category_label=_SQZ_ZH.get(m5, "数据不足"),
+        missing=m5_missing,
     )
+    core_items["M5_squeeze_state"] = p  # type: ignore[assignment]
+    debug_items.append(dbg)
 
-    # S1 确认边界关系
+    # S1 价格与已确认区间关系（仅白名单枚举，未知值缺失）
     s1 = _confirmed_boundary_relation(d["breakout_state"], dsa_dir)
-    core_items["S1_confirmed_boundary_relation"] = _build_fact_item(
+    s1_missing = s1 is None
+    p, dbg = _emit(
         fact_id="S1_confirmed_boundary_relation",
+        public_key=CORE_PUBLIC_KEY["S1_confirmed_boundary_relation"],
+        label=CORE_PUBLIC_LABEL["S1_confirmed_boundary_relation"],
         dimension="structure",
-        label="确认边界关系",
+        visual_kind="relation",
         value=None,
-        unit=None,
-        category=s1,
-        display_text=f"{_BOUNDARY_ZH.get(s1, '结构数据不足')}",
-        missing=s1 is None,
+        value_text=f"价格与已确认区间关系：{_BOUNDARY_ZH.get(s1, '结构数据不足')}",
         source_path="structural_payload.primary.1d.swing_position.confirmed_swing_breakout_state",
+        category_code=s1,
+        category_label=_BOUNDARY_ZH.get(s1, "结构数据不足"),
+        missing=s1_missing,
     )
+    core_items["S1_confirmed_boundary_relation"] = p  # type: ignore[assignment]
+    debug_items.append(dbg)
 
-    # S2 active 方向关系
+    # S2 当前主要波段与主趋势关系
     s2 = _dir_relation(d["active_swing_dir"], dsa_dir)
-    core_items["S2_active_dir_relation"] = _build_fact_item(
+    s2_missing = s2 is None
+    p, dbg = _emit(
         fact_id="S2_active_dir_relation",
+        public_key=CORE_PUBLIC_KEY["S2_active_dir_relation"],
+        label=CORE_PUBLIC_LABEL["S2_active_dir_relation"],
         dimension="structure",
-        label="Active方向关系",
+        visual_kind="relation",
         value=None,
-        unit=None,
-        category=s2,
-        display_text=f"Active Swing方向与DSA{_DIRREL_ZH.get(s2, '数据不足')}",
-        missing=s2 is None,
+        value_text=f"当前主要波段与主趋势{_DIRREL_ZH.get(s2, '数据不足')}",
         source_path="structural_payload.primary.1d.swing_position.active_swing_dir",
+        category_code=s2,
+        category_label=_DIRREL_ZH.get(s2, "数据不足"),
+        missing=s2_missing,
     )
+    core_items["S2_active_dir_relation"] = p  # type: ignore[assignment]
+    debug_items.append(dbg)
 
-    # S3 active 位置（0.33/0.67）
+    # S3 价格在当前主要波段的位置（0.33/0.67；越界缺失）
     s3 = _categorize_position(d["price_pos_active"])
-    core_items["S3_active_position"] = _build_fact_item(
+    s3_missing = s3 is None
+    p, dbg = _emit(
         fact_id="S3_active_position",
+        public_key=CORE_PUBLIC_KEY["S3_active_position"],
+        label=CORE_PUBLIC_LABEL["S3_active_position"],
         dimension="structure",
-        label="Active区间位置",
+        visual_kind="position",
         value=d["price_pos_active"],
-        unit=None,
-        category=s3,
-        display_text=(
-            f"价格在Active Swing区间内位置：{_POS_ZH.get(s3, '数据不足')}"
+        value_text=(
+            f"价格在当前主要波段位置：{_POS_ZH.get(s3, '数据不足')}"
             if s3 is not None
-            else "Active区间位置数据不足"
+            else "价格在当前主要波段位置数据不足"
         ),
-        missing=s3 is None,
         source_path="structural_payload.primary.1d.swing_position.price_position_in_active_swing_0_1",
+        threshold_ref=_THRESHOLD_REF["S3_active_position"],
+        category_code=s3,
+        category_label=_POS_ZH.get(s3, "数据不足"),
+        missing=s3_missing,
     )
+    core_items["S3_active_position"] = p  # type: ignore[assignment]
+    debug_items.append(dbg)
 
-    # S7 顺向距离 / S8 逆向距离（禁止负距离显示）
+    # S7 距顺主趋势确认边界（禁止负距离；动态 sourcePath）
     s7_missing = not has_dir
     if not s7_missing:
         if dsa_dir > 0:
             s7_val = d["dist_high_atr"]
+            s7_path = "structural_payload.primary.1d.swing_position.distance_to_swing_high_atr"
         else:
             s7_val = d["dist_low_atr"]
+            s7_path = "structural_payload.primary.1d.swing_position.distance_to_swing_low_atr"
     else:
         s7_val = None
+        s7_path = "structural_payload.primary.1d.swing_position.distance_to_swing_high_atr"
     s7_missing = s7_missing or (s7_val is None)
-    core_items["S7_dist_favorable_boundary"] = _build_fact_item(
+    p, dbg = _emit(
         fact_id="S7_dist_favorable_boundary",
+        public_key=CORE_PUBLIC_KEY["S7_dist_favorable_boundary"],
+        label=CORE_PUBLIC_LABEL["S7_dist_favorable_boundary"],
         dimension="structure",
-        label="顺向边界距离",
+        visual_kind="distance",
         value=s7_val,
+        value_text=_fmt_dist(s7_val) if s7_val is not None else "距顺主趋势确认边界数据不足",
+        source_path=s7_path,
         unit="ATR",
-        category=None,
-        display_text=_fmt_dist(s7_val) if s7_val is not None else "顺向边界距离数据不足",
         missing=s7_missing,
-        source_path="structural_payload.primary.1d.swing_position.distance_to_swing_high_atr",
     )
+    core_items["S7_dist_favorable_boundary"] = p  # type: ignore[assignment]
+    debug_items.append(dbg)
 
+    # S8 距逆主趋势确认边界（禁止负距离；动态 sourcePath）
     s8_missing = not has_dir
     if not s8_missing:
         if dsa_dir > 0:
             s8_val = d["dist_low_atr"]
+            s8_path = "structural_payload.primary.1d.swing_position.distance_to_swing_low_atr"
         else:
             s8_val = d["dist_high_atr"]
+            s8_path = "structural_payload.primary.1d.swing_position.distance_to_swing_high_atr"
     else:
         s8_val = None
+        s8_path = "structural_payload.primary.1d.swing_position.distance_to_swing_low_atr"
     s8_missing = s8_missing or (s8_val is None)
-    core_items["S8_dist_adverse_boundary"] = _build_fact_item(
+    p, dbg = _emit(
         fact_id="S8_dist_adverse_boundary",
+        public_key=CORE_PUBLIC_KEY["S8_dist_adverse_boundary"],
+        label=CORE_PUBLIC_LABEL["S8_dist_adverse_boundary"],
         dimension="structure",
-        label="逆向边界距离",
+        visual_kind="distance",
         value=s8_val,
+        value_text=_fmt_dist(s8_val) if s8_val is not None else "距逆主趋势确认边界数据不足",
+        source_path=s8_path,
         unit="ATR",
-        category=None,
-        display_text=_fmt_dist(s8_val) if s8_val is not None else "逆向边界距离数据不足",
         missing=s8_missing,
-        source_path="structural_payload.primary.1d.swing_position.distance_to_swing_low_atr",
     )
+    core_items["S8_dist_adverse_boundary"] = p  # type: ignore[assignment]
+    debug_items.append(dbg)
 
-    # V3 段均量比（阈值未确认 → 仅比值 + 分类未启用）
+    # V3 本轮·上一轮每根日K平均成交量比（阈值未确认 → 仅比值 + 分类未启用）
     _cur_age = _safe_int(d["cur_age_bars"])
     _prev_age = _safe_int(d["prev_age_bars"])
     v3_missing = not (
@@ -579,236 +728,254 @@ def compute_atomic_facts(
             v3_missing = True
         else:
             v3_ratio = _cur_avg / _prev_avg
-    core_items["V3_avg_volume_ratio"] = _build_fact_item(
+    p, dbg = _emit(
         fact_id="V3_avg_volume_ratio",
+        public_key=CORE_PUBLIC_KEY["V3_avg_volume_ratio"],
+        label=CORE_PUBLIC_LABEL["V3_avg_volume_ratio"],
         dimension="volume",
-        label="段均量比",
+        visual_kind="ratio",
         value=v3_ratio,
-        unit=None,
-        category=None,
-        threshold_enabled=False,
-        display_text=(
-            f"Segment均量与前段比值为{v3_ratio:.4f}（分类未启用）"
+        value_text=(
+            f"本轮·上一轮每根日K平均成交量比为 {v3_ratio:.4f}（分类未启用）"
             if v3_ratio is not None
-            else "段均量比数据不足（前段均量为0或缺失）"
+            else "本轮·上一轮每根日K平均成交量比数据不足"
         ),
-        missing=v3_missing,
         source_path="structural_payload.primary.1d.dsa_segment.current_segment_volume_sum",
+        threshold_ref=_THRESHOLD_REF["V3_avg_volume_ratio"],
+        threshold_enabled=False,
+        missing=v3_missing,
     )
+    core_items["V3_avg_volume_ratio"] = p  # type: ignore[assignment]
+    debug_items.append(dbg)
 
-    # ---------------- Auxiliary（默认隐藏） ----------------
+    # ---------------- Auxiliary（默认隐藏，T3/T6 flag 关时不计算） ----------------
     # T3 趋势效率（flag 关 → 不含）
     if FEATURE_FLAGS.get("T3_trend_efficiency", False):
-        aux_items["T3_trend_efficiency"] = _build_fact_item(
+        t3_missing = d["cur_efficiency"] is None
+        p, dbg = _emit(
             fact_id="T3_trend_efficiency",
-            dimension="trend",
+            public_key="trend_efficiency",
             label="趋势效率",
+            dimension="trend",
+            visual_kind="value",
             value=d["cur_efficiency"],
-            unit=None,
-            category=None,
-            hidden_by_default=True,
-            display_text=(
-                f"趋势效率为{d['cur_efficiency']:.4f}（仅修复后启用）"
+            value_text=(
+                f"趋势效率为 {d['cur_efficiency']:.4f}"
                 if d["cur_efficiency"] is not None
                 else "趋势效率数据不足"
             ),
-            missing=d["cur_efficiency"] is None,
             source_path="structural_payload.primary.1d.dsa_segment.current_dsa_segment_efficiency_0_1",
+            feature_flag=False,
+            missing=t3_missing,
         )
+        aux_items["T3_trend_efficiency"] = p  # type: ignore[assignment]
+        debug_items.append(dbg)
 
     # T6 效率差（flag 关 → 不含）
     if FEATURE_FLAGS.get("T6_efficiency_delta", False):
         t6_delta = None
         if d["cur_efficiency"] is not None and d["prev_efficiency"] is not None:
             t6_delta = d["cur_efficiency"] - d["prev_efficiency"]
-        aux_items["T6_efficiency_delta"] = _build_fact_item(
+        t6_missing = t6_delta is None
+        p, dbg = _emit(
             fact_id="T6_efficiency_delta",
+            public_key="efficiency_delta",
+            label="效率变化",
             dimension="trend",
-            label="效率差",
+            visual_kind="value",
             value=t6_delta,
-            unit=None,
-            category=None,
-            hidden_by_default=True,
-            display_text=(
-                f"效率差为{t6_delta:.4f}（仅修复后启用）"
+            value_text=(
+                f"效率变化为 {t6_delta:.4f}"
                 if t6_delta is not None
-                else "效率差数据不足"
+                else "效率变化数据不足"
             ),
-            missing=t6_delta is None,
             source_path="structural_payload.primary.1d.dsa_segment.prev_dsa_segment_efficiency_0_1",
+            feature_flag=False,
+            missing=t6_missing,
         )
+        aux_items["T6_efficiency_delta"] = p  # type: ignore[assignment]
+        debug_items.append(dbg)
 
-    # M4 Segment 起点动量变化
+    # M4 段内动量变化
     m4_missing = not (has_dir and d["daily_sqzmom_change"] is not None)
     m4_val = (dsa_dir * d["daily_sqzmom_change"]) if not m4_missing else None
-    aux_items["M4_segment_momentum_change"] = _build_fact_item(
+    p, dbg = _emit(
         fact_id="M4_segment_momentum_change",
+        public_key=AUX_PUBLIC_KEY["M4_segment_momentum_change"],
+        label=AUX_PUBLIC_LABEL["M4_segment_momentum_change"],
         dimension="momentum",
-        label="Segment起点动量变化",
+        visual_kind="value",
         value=m4_val,
-        unit=None,
-        category=None,
-        hidden_by_default=True,
-        display_text=(
-            f"Segment起点动量变化：{m4_val:.4f}"
-            if m4_val is not None
-            else "Segment起点动量变化数据不足"
-        ),
-        missing=m4_missing,
+        value_text=f"段内动量变化为 {m4_val:.4f}" if m4_val is not None else "段内动量变化数据不足",
         source_path="temporal_payload.daily_context.daily_sqzmom_change_since_segment_start",
+        feature_flag=False,
+        missing=m4_missing,
     )
+    aux_items["M4_segment_momentum_change"] = p  # type: ignore[assignment]
+    debug_items.append(dbg)
 
-    # S4 developing 方向关系
+    # S4 形成中波段方向关系
     s4 = _dir_relation(d["developing_swing_dir"], dsa_dir)
-    aux_items["S4_developing_dir_relation"] = _build_fact_item(
+    s4_missing = s4 is None
+    p, dbg = _emit(
         fact_id="S4_developing_dir_relation",
+        public_key=AUX_PUBLIC_KEY["S4_developing_dir_relation"],
+        label=AUX_PUBLIC_LABEL["S4_developing_dir_relation"],
         dimension="structure",
-        label="Developing方向关系",
+        visual_kind="relation",
         value=None,
-        unit=None,
-        category=s4,
-        hidden_by_default=True,
-        display_text=f"Developing Swing方向与DSA{_DIRREL_ZH.get(s4, '数据不足')}",
-        missing=s4 is None,
+        value_text=f"形成中波段与主趋势{_DIRREL_ZH.get(s4, '数据不足')}",
         source_path="structural_payload.primary.1d.swing_position.developing_swing_dir",
+        category_code=s4,
+        category_label=_DIRREL_ZH.get(s4, "数据不足"),
+        feature_flag=False,
+        missing=s4_missing,
     )
+    aux_items["S4_developing_dir_relation"] = p  # type: ignore[assignment]
+    debug_items.append(dbg)
 
-    # S5 active vs developing
+    # S5 主波段与形成中波段方向关系
     s5 = _active_vs_developing(d["active_swing_dir"], d["developing_swing_dir"])
-    aux_items["S5_active_vs_developing"] = _build_fact_item(
+    s5_missing = s5 is None
+    p, dbg = _emit(
         fact_id="S5_active_vs_developing",
+        public_key=AUX_PUBLIC_KEY["S5_active_vs_developing"],
+        label=AUX_PUBLIC_LABEL["S5_active_vs_developing"],
         dimension="structure",
-        label="Active/Developing关系",
+        visual_kind="relation",
         value=None,
-        unit=None,
-        category=s5,
-        hidden_by_default=True,
-        display_text=f"Active与Developing{_ADV_ZH.get(s5, '数据不足')}",
-        missing=s5 is None,
+        value_text=f"主波段与形成中波段{_ADV_ZH.get(s5, '数据不足')}",
         source_path="structural_payload.primary.1d.swing_position.developing_swing_dir",
+        category_code=s5,
+        category_label=_ADV_ZH.get(s5, "数据不足"),
+        feature_flag=False,
+        missing=s5_missing,
     )
+    aux_items["S5_active_vs_developing"] = p  # type: ignore[assignment]
+    debug_items.append(dbg)
 
-    # S6 developing 位置
+    # S6 价格在形成中波段的位置
     s6 = _categorize_position(d["price_pos_developing"])
-    aux_items["S6_developing_position"] = _build_fact_item(
+    s6_missing = s6 is None
+    p, dbg = _emit(
         fact_id="S6_developing_position",
+        public_key=AUX_PUBLIC_KEY["S6_developing_position"],
+        label=AUX_PUBLIC_LABEL["S6_developing_position"],
         dimension="structure",
-        label="Developing区间位置",
+        visual_kind="position",
         value=d["price_pos_developing"],
-        unit=None,
-        category=s6,
-        hidden_by_default=True,
-        display_text=(
-            f"价格在Developing区间位置：{_POS_ZH.get(s6, '数据不足')}"
+        value_text=(
+            f"价格在形成中波段位置：{_POS_ZH.get(s6, '数据不足')}"
             if s6 is not None
-            else "Developing区间位置数据不足"
+            else "价格在形成中波段位置数据不足"
         ),
-        missing=s6 is None,
         source_path="structural_payload.primary.1d.swing_position.price_position_in_developing_swing_0_1",
+        category_code=s6,
+        category_label=_POS_ZH.get(s6, "数据不足"),
+        feature_flag=False,
+        missing=s6_missing,
     )
+    aux_items["S6_developing_position"] = p  # type: ignore[assignment]
+    debug_items.append(dbg)
 
-    # V2 当前段平均量
+    # V2 本轮每根日K平均成交量
     _cur_age = _safe_int(d["cur_age_bars"])
-    v2_missing = not (
-        d["cur_vol_sum"] is not None
-        and _cur_age is not None
-        and _cur_age > 0
-    )
+    v2_missing = not (d["cur_vol_sum"] is not None and _cur_age is not None and _cur_age > 0)
     v2_val = (d["cur_vol_sum"] / _cur_age) if (_cur_age is not None and not v2_missing) else None
-    aux_items["V2_current_avg_volume"] = _build_fact_item(
+    p, dbg = _emit(
         fact_id="V2_current_avg_volume",
+        public_key=AUX_PUBLIC_KEY["V2_current_avg_volume"],
+        label=AUX_PUBLIC_LABEL["V2_current_avg_volume"],
         dimension="volume",
-        label="当前段平均量",
+        visual_kind="value",
         value=v2_val,
-        unit=None,
-        category=None,
-        hidden_by_default=True,
-        display_text=(
-            f"当前Segment平均每Bar量：{v2_val:.2f}"
-            if v2_val is not None
-            else "当前段平均量数据不足"
-        ),
-        missing=v2_missing,
+        value_text=f"本轮每根日K平均成交量为 {v2_val:.2f}" if v2_val is not None else "本轮每根日K平均成交量数据不足",
         source_path="structural_payload.primary.1d.dsa_segment.current_segment_volume_sum",
+        feature_flag=False,
+        missing=v2_missing,
     )
+    aux_items["V2_current_avg_volume"] = p  # type: ignore[assignment]
+    debug_items.append(dbg)
 
-    # V4 段年龄比
+    # V4 本轮·上一轮持续时间比
     _cur_age = _safe_int(d["cur_age_bars"])
     _prev_age = _safe_int(d["prev_age_bars"])
-    v4_missing = not (
-        _cur_age is not None and _prev_age is not None and _prev_age > 0
-    )
+    v4_missing = not (_cur_age is not None and _prev_age is not None and _prev_age > 0)
     v4_val = (
         _cur_age / _prev_age
     ) if (_cur_age is not None and _prev_age is not None and not v4_missing) else None
-    aux_items["V4_age_ratio_raw"] = _build_fact_item(
+    p, dbg = _emit(
         fact_id="V4_age_ratio_raw",
+        public_key=AUX_PUBLIC_KEY["V4_age_ratio_raw"],
+        label=AUX_PUBLIC_LABEL["V4_age_ratio_raw"],
         dimension="volume",
-        label="段年龄比",
+        visual_kind="ratio",
         value=v4_val,
-        unit=None,
-        category=None,
-        hidden_by_default=True,
-        display_text=(
-            f"当前段相对前段年龄比：{v4_val:.4f}"
-            if v4_val is not None
-            else "段年龄比数据不足"
-        ),
-        missing=v4_missing,
+        value_text=f"本轮·上一轮持续时间比为 {v4_val:.4f}" if v4_val is not None else "本轮·上一轮持续时间比数据不足",
         source_path="structural_payload.primary.1d.dsa_segment.prev_dsa_segment_age_bars",
+        feature_flag=False,
+        missing=v4_missing,
     )
+    aux_items["V4_age_ratio_raw"] = p  # type: ignore[assignment]
+    debug_items.append(dbg)
 
-    # V5 收益率/量
-    aux_items["V5_return_per_volume"] = _build_fact_item(
+    # V5 本轮收益率与成交量比
+    v5_missing = d["current_segment_return_per_volume"] is None
+    p, dbg = _emit(
         fact_id="V5_return_per_volume",
+        public_key=AUX_PUBLIC_KEY["V5_return_per_volume"],
+        label=AUX_PUBLIC_LABEL["V5_return_per_volume"],
         dimension="volume",
-        label="段收益率/量",
+        visual_kind="value",
         value=d["current_segment_return_per_volume"],
-        unit=None,
-        category=None,
-        hidden_by_default=True,
-        display_text=(
-            f"当前Segment收益率/成交量：{d['current_segment_return_per_volume']:.6f}"
+        value_text=(
+            f"本轮收益率与成交量比为 {d['current_segment_return_per_volume']:.6f}"
             if d["current_segment_return_per_volume"] is not None
-            else "段收益率/量数据不足"
+            else "本轮收益率与成交量比数据不足"
         ),
-        missing=d["current_segment_return_per_volume"] is None,
         source_path="structural_payload.primary.1d.dsa_segment.current_segment_return_per_volume",
+        feature_flag=False,
+        missing=v5_missing,
     )
+    aux_items["V5_return_per_volume"] = p  # type: ignore[assignment]
+    debug_items.append(dbg)
 
-    # V5_ratio 收益率/量比
-    aux_items["V5_return_per_volume_ratio"] = _build_fact_item(
+    # V5_ratio 本轮收益率与量比
+    v5r_missing = d["return_per_volume_ratio"] is None
+    p, dbg = _emit(
         fact_id="V5_return_per_volume_ratio",
+        public_key=AUX_PUBLIC_KEY["V5_return_per_volume_ratio"],
+        label=AUX_PUBLIC_LABEL["V5_return_per_volume_ratio"],
         dimension="volume",
-        label="收益率/量比",
+        visual_kind="ratio",
         value=d["return_per_volume_ratio"],
-        unit=None,
-        category=None,
-        hidden_by_default=True,
-        display_text=(
-            f"收益率/量比：{d['return_per_volume_ratio']:.4f}"
+        value_text=(
+            f"本轮收益率与量比为 {d['return_per_volume_ratio']:.4f}"
             if d["return_per_volume_ratio"] is not None
-            else "收益率/量比数据不足"
+            else "本轮收益率与量比数据不足"
         ),
-        missing=d["return_per_volume_ratio"] is None,
         source_path="structural_payload.primary.1d.dsa_segment.return_per_volume_ratio",
+        feature_flag=False,
+        missing=v5r_missing,
     )
+    aux_items["V5_return_per_volume_ratio"] = p  # type: ignore[assignment]
+    debug_items.append(dbg)
 
-    # ---------------- 分组（固定四组顺序） ----------------
+    # ---------------- 分组（固定四组顺序，仅非缺失项） ----------------
     core_grouped: dict[str, list[dict[str, Any]]] = {dim: [] for dim in _DIMENSION_ORDER}
-    # 按 Canonical Registry 顺序放入对应 dimension 组
     for fid in CORE_FACT_IDS:
         item = core_items[fid]
-        core_grouped.setdefault(item["dimension"], []).append(item)
+        if item is not None:  # 缺失项直接省略
+            core_grouped[item["dimension"]].append(item)
 
-    auxiliary_list = [aux_items[fid] for fid in AUX_FACT_IDS if fid in aux_items]
+    auxiliary_list = [aux_items[fid] for fid in AUX_FACT_IDS if fid in aux_items and aux_items[fid] is not None]
 
     # ---------------- 可用性 ----------------
-    core_present = sum(1 for it in core_items.values() if not it["missing"])
-    core_missing = [fid for fid, it in core_items.items() if it["missing"]]
-    aux_available = [fid for fid, it in aux_items.items() if not it["missing"]]
-    # 默认隐藏：响应中实际返回的 Auxiliary ID（全部 hiddenByDefault=true，不在用户 UI 展示）
-    aux_hidden = [it["factId"] for it in auxiliary_list]
+    core_present = sum(1 for it in core_grouped.values() for _ in it)
+    core_missing = [CORE_PUBLIC_KEY[fid] for fid in CORE_FACT_IDS if core_items[fid] is None]
+    aux_available = [AUX_PUBLIC_KEY[fid] for fid in AUX_FACT_IDS if aux_items.get(fid) is not None]
+    # 默认隐藏：响应中实际返回的 Auxiliary publicKey（全部默认隐藏，不在用户 UI 展示）
+    aux_hidden = [it["publicKey"] for it in auxiliary_list]
 
     availability = {
         "coreDenominator": len(CORE_FACT_IDS),
@@ -818,22 +985,22 @@ def compute_atomic_facts(
         "auxiliaryHidden": aux_hidden,
         "v1Present": False,
         "rejectedPresent": False,
+        "warnings": warnings,
     }
 
     return {
         "core": core_grouped,
         "auxiliary": auxiliary_list,
         "availability": availability,
+        "debug": debug_items,
     }
 
 
-def _safe_int(v: Any) -> int | None:
-    if v is None:
-        return None
-    try:
-        return int(v)
-    except (ValueError, TypeError):
-        return None
+# T3/T6 效率 fact flag：默认关闭（EFF-001/EFF-002 未修复前，普通用户完全不显示）。
+FEATURE_FLAGS: dict[str, bool] = {
+    "T3_trend_efficiency": False,
+    "T6_efficiency_delta": False,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -841,10 +1008,20 @@ def _safe_int(v: Any) -> int | None:
 # ---------------------------------------------------------------------------
 
 
+def _quantize_value(v: float | None) -> float | None:
+    """按公开显示精度量化（4 位小数），避免 float 精确不等制造噪声。"""
+    if v is None:
+        return None
+    return round(v, 4)
+
+
 def compute_recent_changes(
     snapshots: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """从 ≤10 个已发布兼容快照（按 trade_date 升序）只读计算 Core 事实变化。
+
+    比较按各事实公开显示精度（value 量化 4 位小数 + categoryLabel），
+    返回 fromText / toText / deltaText，明确非 Core 且不解释利好利空。
 
     Args:
         snapshots: 每个元素 {trade_date: str(ISO), structural_payload, temporal_payload}
@@ -852,32 +1029,62 @@ def compute_recent_changes(
 
     Returns:
         变化记录列表（按时间升序），每条：
-        {factId, dimension, fromCategory, toCategory, fromValue, toValue, asOf}
+        {publicKey, dimension, fromText, toText, deltaText, asOf}
     """
     if len(snapshots) < 2:
         return []
 
+    def _text_of(result: dict[str, Any], fid: str) -> tuple[str | None, str | None]:
+        """返回 (value_text_or_None, category_label_or_None)。"""
+        for _dim, items in result["core"].items():
+            for it in items:
+                if it["publicKey"] == CORE_PUBLIC_KEY[fid]:
+                    return it.get("valueText"), it.get("categoryLabel")
+        return None, None
+
     changes: list[dict[str, Any]] = []
-    prev = None
-    for snap in snapshots:
-        cur = compute_atomic_facts(snap.get("structural_payload"), snap.get("temporal_payload"))
-        if prev is not None:
-            for fid in CORE_FACT_IDS:
-                p_item = prev["core_items"].get(fid)
-                c_item = cur_core_item(cur, fid)
-                if p_item is None or c_item is None:
-                    continue
-                if p_item["category"] != c_item["category"] or p_item["value"] != c_item["value"]:
-                    changes.append({
-                        "factId": fid,
-                        "dimension": c_item["dimension"],
-                        "fromCategory": p_item["category"],
-                        "toCategory": c_item["category"],
-                        "fromValue": p_item["value"],
-                        "toValue": c_item["value"],
-                        "asOf": snap["trade_date"],
-                    })
-        prev = {"core_items": {fid: cur_core_item(cur, fid) for fid in CORE_FACT_IDS}}
+    # 预计算每个快照的事实结果（只读计算）
+    results = [
+        compute_atomic_facts(s.get("structural_payload"), s.get("temporal_payload"))
+        for s in snapshots
+    ]
+
+    def _texts_of(result: dict[str, Any]) -> dict[str, tuple[str | None, str | None]]:
+        return {fid: _text_of(result, fid) for fid in CORE_FACT_IDS}
+
+    def _values_of(result: dict[str, Any]) -> dict[str, float | None]:
+        return {fid: _value_of(result, fid) for fid in CORE_FACT_IDS}
+
+    prev_texts = _texts_of(results[0])
+    prev_values = _values_of(results[0])
+    for idx in range(1, len(results)):
+        cur = results[idx]
+        cur_texts = _texts_of(cur)
+        cur_values = _values_of(cur)
+        for fid in CORE_FACT_IDS:
+            p_text, p_cat = prev_texts[fid]
+            c_text, c_cat = cur_texts[fid]
+            p_qv = _quantize_value(prev_values[fid])
+            c_qv = _quantize_value(cur_values[fid])
+            if (p_text, p_cat, p_qv) == (c_text, c_cat, c_qv):
+                continue
+            # deltaText 仅描述变化类型，不解释利好利空
+            if p_cat is not None or c_cat is not None:
+                delta_text = "分类调整"
+            elif p_qv is not None or c_qv is not None:
+                delta_text = "数值变动"
+            else:
+                delta_text = "状态更新"
+            changes.append({
+                "publicKey": CORE_PUBLIC_KEY[fid],
+                "dimension": _dim_of(cur, fid),
+                "fromText": p_text or "—",
+                "toText": c_text or "—",
+                "deltaText": delta_text,
+                "asOf": snapshots[idx]["trade_date"],
+            })
+        prev_texts = cur_texts
+        prev_values = cur_values
 
     # 限制体积（最多 30 条，避免超大 payload）
     if len(changes) > 30:
@@ -885,13 +1092,20 @@ def compute_recent_changes(
     return changes
 
 
-def cur_core_item(result: dict[str, Any], fact_id: str) -> dict[str, Any] | None:
-    """从 compute_atomic_facts 结果提取单个 core fact item（跨 dimension 查找）。"""
+def _value_of(result: dict[str, Any], fid: str) -> float | None:
     for _dim, items in result["core"].items():
         for it in items:
-            if it["factId"] == fact_id:
-                return it
+            if it["publicKey"] == CORE_PUBLIC_KEY[fid]:
+                return it.get("value")
     return None
+
+
+def _dim_of(result: dict[str, Any], fid: str) -> str:
+    for _dim, items in result["core"].items():
+        for it in items:
+            if it["publicKey"] == CORE_PUBLIC_KEY[fid]:
+                return _dim
+    return "trend"
 
 
 # ---------------------------------------------------------------------------
@@ -941,24 +1155,36 @@ if __name__ == "__main__":
     res = compute_atomic_facts(sample_sp, sample_tp)
 
     def _get(fid: str) -> dict[str, Any]:
-        item = cur_core_item(res, fid)
-        assert item is not None, fid
-        return item
+        for _dim, items in res["core"].items():
+            for it in items:
+                if it["publicKey"] == CORE_PUBLIC_KEY[fid]:
+                    return it
+        raise AssertionError(fid)
 
     # 计数严格 14/10/1
     assert len(CORE_FACT_IDS) == 14
     assert len(AUX_FACT_IDS) == 10
     assert len(REJECTED_FACT_IDS) == 1
 
+    # 用户项无 factId / sourcePath / missing / hiddenByDefault
+    for _dim, items in res["core"].items():
+        for it in items:
+            assert "factId" not in it
+            assert "sourcePath" not in it
+            assert "missing" not in it
+            assert "hiddenByDefault" not in it
+            assert it["valueText"]
+            assert it["label"]
+
     # S3 0.63 → 中间
     s3 = _get("S3_active_position")
-    assert s3["category"] == "MIDDLE", f"0.63 必须映射中间，实际 {s3['category']}"
+    assert s3["categoryLabel"] == "中间", f"0.63 必须映射中间，实际 {s3['categoryLabel']}"
 
     # S7 顺向（dsa_dir>0 → dist_high=2.5）：尚未到达；S8 逆向（dist_low=-1.2）：已越过
     s7 = _get("S7_dist_favorable_boundary")
-    assert "尚未到达" in s7["displayText"], s7["displayText"]
+    assert "尚未到达" in s7["valueText"], s7["valueText"]
     s8 = _get("S8_dist_adverse_boundary")
-    assert "已越过" in s8["displayText"], s8["displayText"]
+    assert "已越过" in s8["valueText"], s8["valueText"]
 
     # T2/M2/M3 真实值
     t2 = _get("T2_aligned_slope")
@@ -967,15 +1193,27 @@ if __name__ == "__main__":
     assert abs(m2["value"] - 0.002) < 1e-9, m2["value"]
     m3 = _get("M3_aligned_momentum_delta")
     assert abs(m3["value"] - 0.0003) < 1e-9, m3["value"]
-    assert m3["category"] == "增加"
+    assert m3["categoryLabel"] == "增加"
+
+    # M3 无硬编码容差：raw 极小正数仍判"增加"
+    sp2 = json.loads(json.dumps(sample_sp))
+    sp2["primary"]["1d"]["volatility_momentum"]["sqzmom_delta_1"] = 1e-12
+    r2 = compute_atomic_facts(sp2, sample_tp)
+    m3b = None
+    for _dim, items in r2["core"].items():
+        for it in items:
+            if it["publicKey"] == CORE_PUBLIC_KEY["M3_aligned_momentum_delta"]:
+                m3b = it
+    assert m3b is not None
+    assert m3b["categoryLabel"] == "增加", "1e-12 不应被容差吞掉，应判增加"
 
     # T5/V3 分类未启用
     t5 = _get("T5_slope_ratio")
     assert t5["thresholdEnabled"] is False
-    assert "分类未启用" in t5["displayText"]
+    assert "分类未启用" in t5["valueText"]
     v3 = _get("V3_avg_volume_ratio")
     assert v3["thresholdEnabled"] is False
-    assert "分类未启用" in v3["displayText"]
+    assert "分类未启用" in v3["valueText"]
 
     # V1 永不出现
     flat = json.dumps(res, ensure_ascii=False)
@@ -983,16 +1221,28 @@ if __name__ == "__main__":
     assert res["availability"]["v1Present"] is False
 
     # T3/T6 默认隐藏（flag 关 → 不在 auxiliary 中，也不出现在 auxiliaryHidden）
-    aux_ids = [it["factId"] for it in res["auxiliary"]]
-    assert "T3_trend_efficiency" not in aux_ids
-    assert "T6_efficiency_delta" not in aux_ids
-    assert "T3_trend_efficiency" not in res["availability"]["auxiliaryHidden"]
-    assert "T6_efficiency_delta" not in res["availability"]["auxiliaryHidden"]
-    # auxiliaryHidden 为响应中实际返回的 Auxiliary ID（全部默认隐藏）
-    assert set(res["availability"]["auxiliaryHidden"]) == set(aux_ids)
-    assert len(aux_ids) == 8  # 10 aux - T3 - T6
+    aux_keys = [it["publicKey"] for it in res["auxiliary"]]
+    assert "trend_efficiency" not in aux_keys
+    assert "efficiency_delta" not in aux_keys
+    assert "trend_efficiency" not in res["availability"]["auxiliaryHidden"]
+    assert "efficiency_delta" not in res["availability"]["auxiliaryHidden"]
+    assert set(res["availability"]["auxiliaryHidden"]) == set(aux_keys)
+    assert len(aux_keys) == 8  # 10 aux - T3 - T6
 
-    # 分母固定 14
+    # 分母固定 14；core 仅含非缺失项
     assert res["availability"]["coreDenominator"] == 14
+
+    # 文案无内部术语
+    for _dim, items in res["core"].items():
+        for it in items:
+            for bad in ("DSA", "SQZMOM", "Segment", "Active Swing", "raw=", "bar"):
+                assert bad not in it["valueText"], f"{it['publicKey']} 含内部术语: {it['valueText']}"
+            assert bad not in it["label"]
+
+    # 普通用户项无内部术语于 label
+    for _dim, items in res["core"].items():
+        for it in items:
+            for bad in ("DSA", "SQZMOM", "Segment", "Active", "Developing"):
+                assert bad not in it["label"], it["label"]
 
     print("OK: compute_atomic_facts 验证通过")

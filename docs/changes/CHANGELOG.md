@@ -4,6 +4,16 @@
 
 ## 2026-07-16
 
+- CHANGE-20260716-003: AFC V1 双合同分离 + 前端 Compact/Expanded 重构与契约对齐（在 002 基础上继续）
+  - **双合同分离**：`atomic_fact_contract_v1.json`（V4.13 冻结研究合同，移除全部 `public_key`/`public_label`，不含产品层语义）+ 新增 `atomic_fact_presentation_v1.json`（按 Fact ID 映射 `publicKey/publicLabel/visualKind/valuePrecision/groupTitle/secondaryLabel`，**恰好 14 Core + 8 Auxiliary，排除 T3/T6/V1**）；生产服务同时读取两份合同（frozen 决定事实/顺序/公式/阈值/路径，presentation 决定产品文案与 UI 类型）
+  - **DTO 拆分**：`PublicAtomicFactItem`（无 `factId`/`sourcePath`/`formula`/`thresholdRef`）+ `AdminAtomicFactDebugItem`（保留 factId/publicKey/sourcePath/rawValue/thresholdRef/thresholdEnabled/featureFlag/missing）；缺失事实由 `compute_atomic_facts` 从 Core 数组直接省略（分母固定 14，`availability.coreMissing` 用 publicKey）；M3 不声称 1e-6 已确认（仅 raw>0→增加/raw<0→减少/raw==0→基本不变，`thresholdEnabled=false`）；M5 任一输入缺失即省略、双 true→dataQuality 异常；S1 未知枚举省略；S3 越界省略；S7/S8 管理员 `sourcePath` 随趋势方向动态变化；recentChanges 按展示精度比较返回 fromText/toText/deltaText
+  - **persisted-first**：Context API 优先读取已持久化 `summary_payload.atomic_fact_contract_v1`（校验后直接返回），缺失/版本不符/结构不匹配 → 同一纯函数 fallback（不回写旧快照）
+  - **前端重构**：`AtomicFactsPanel` 重写组件树（Header/CoreFactGroup/FactMetricRow/RelationBadge/PositionRail/BoundaryRow/AuxiliaryAccordion/RecentChangesStrip），compact `/market` 右栏四张组卡（趋势 info/动量 brand/结构 purple/成交 warning，每项一行，S3 0–1 轨道 0.33/0.67、T5/V3 比值+「分类未启用」、S7/S8「尚未到达/已越过」）；新增 `AtomicFactsDrawer`（右侧 overlay，宽 `min(1080px, calc(100vw-48px))`，不压 K 线，Escape/遮罩/关闭可关，4/2/1 列响应式，Auxiliary 默认收起展开 8 项，T3/T6/V1 不出现 DOM）；`StockDetailPage` 改用 Drawer 替代内联窄 aside；`AdminStockDebugPage` 近期变化列改用 publicKey/fromText/toText/asOf；scss 仅用 `variables.scss` token 无硬编码十六进制
+  - **测试**：后端纯函数 25 + 双合同结构 5 + API 集成 14 = 44/44（独立测试库 `bz_stock_test`），ruff/mypy 0；前端 contract 8、tsc/eslint/vite build 通过
+  - **文档**：07/02/04/05/MANIFEST/code-doc-alignment（ALIGN-073）/backend+api+frontend+test+deployment maps/AGENTS/本 CHANGE/本 CHANGELOG 全部同步；明确 frozen↔presentation 分离、backend/frontend 早期部署 worker 旧镜像、当前靠 fallback、worker 升级前新 summary 持久化未生产验证、T5/V3/M3 阈值未确认、近期变化非 Core、未证明投资价值
+  - **部署**：仅 `docker compose up -d --no-deps backend frontend`，不重启 worker/capture/PostgreSQL/Redis；worker 旧镜像 Known Gap（ALIGN-073）
+  - **遗留**：全生产链路 E2E（CDP）待补；worker 升级后验证新 summary 持久化 + persisted-first 直读
+
 - CHANGE-20260716-002: Atomic Fact Contract V1 个股状态观察（纯函数 + 快照/Context API + 前端面板）
   - Canonical Registry `atomic_fact_contract_v1.json`（V4.13 冻结，14 Core / 10 Aux / 1 Rejected=V1 累计成交量比；S2 存在；T3/T6 `ui_enabled=false`）
   - 纯函数 `compute_atomic_facts` / `compute_recent_changes`（新快照与旧 summary fallback 共用同一公式；近期变化非 V4.13 Core Fact）；S3 严格 0.33/0.67；S7/S8 禁止负距离；T5/V3 阈值未确认→仅比值+「分类未启用」

@@ -1108,26 +1108,28 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 
 `GET /api/v1/stocks/{symbol}/context` 是用户面 `AtomicFactsPanel` 单一数据源，返回 Atomic Fact Contract V1 上下文。前端 `useStockContext` hook 调用此端点，禁止前端重新计算或拼接。
 
-- 普通用户响应：`contractVersion / asOf / core / auxiliary / availability / recentChanges / dataQuality`；
-- 管理员调试 `GET /api/v1/admin/stocks/{symbol}/debug`：在用户响应基础上补充 `rawDebug`（structural/temporal/summary payload + run 元数据）+ `atomicFactsDebug`（Fact ID / 真实路径 / raw value / 阈值来源 / feature flag）；
+- 普通用户响应：`contractVersion / asOf / core / auxiliary / availability / recentChanges / dataQuality`；用户 DTO `PublicAtomicFactItem`（`publicKey / dimension / label / visualKind / value / valueText / categoryCode / categoryLabel / secondaryText / unit / thresholdEnabled`），**不含 factId / sourcePath / formula / thresholdRef**（普通用户接口完全不泄露内部字段）；
+- 管理员调试 `GET /api/v1/admin/stocks/{symbol}/debug`：在用户响应基础上补充 `rawDebug`（structural/temporal/summary payload + run 元数据）+ `atomicFactsDebug`（每事实 `factId / publicKey / sourcePath / rawValue / thresholdRef / thresholdEnabled / featureFlag / missing` 可追溯）；
 - 复用既有路由，不新增平行接口；
 - 底层 MACD / SQZMOM / Swing / DSA 计算保留（`state_event_service` 仍被 after-close orchestrator 用于生成 `stock_state_events`，但不再暴露给普通用户 context 接口）。
 
-### 15.1 计算与单公式
+### 15.1 双合同与计算
 
+- **双合同分离**：冻结研究合同 `atomic_fact_contract_v1.json`（V4.13 原字段，14 Core / 10 Aux / 1 Rejected，**不含 public_key/public_label 等产品层语义**）+ 产品展示合同 `atomic_fact_presentation_v1.json`（按 Fact ID 映射 `publicKey/publicLabel/visualKind/valuePrecision/groupTitle/secondaryLabel`，**恰好 14 Core + 8 Aux，排除 T3/T6/V1**）；生产服务同时读取两份合同（frozen 决定事实/顺序/公式/阈值/路径，presentation 决定产品文案与 UI 类型）。
 - `compute_atomic_facts(structural_payload, temporal_payload)` 是唯一纯函数计算入口；旧已发布快照 fallback 与新 `summary_payload.atomic_fact_contract_v1` 共用同一函数，不存在两套公式；
+- **persisted-first**：Context API 优先读取已持久化 `summary_payload.atomic_fact_contract_v1`（校验 `contractVersion` + publicKey 结构后直接返回），缺失 / 版本不符 / 结构不匹配 → 同一纯函数 fallback 重算（**不回写旧快照**）；
 - `as_of` 精确按 `trade_date` 查 `succeeded + published + full` run；无 run → 空态（`core` 分母仍固定 14，全部缺失，`reasonCode=no_published_full_run`）；无快照 → `reasonCode=snapshot_missing`；
-- GET 请求零数据库写入（仅 `SELECT`）；`recentChanges` 按 `as_of` 过滤 ≤ 该日期的已发布快照，禁止返回未来变化。
+- GET 请求零数据库写入（仅 `SELECT`）；`recentChanges` 在 SQL 层 `trade_date <= as_of` 过滤后再 `DESC LIMIT`（≤ 该日期的已发布快照，禁止返回未来变化），按各事实**展示精度**比较（T2/M2 4 位、M3 6 位、S3/S7/S8/T5/V3 2 位）返回 `fromText/toText/deltaText`。
 
 ### 15.2 事实计数与展示规则
 
 - Core 严格 **14**（趋势4 + 动量4 + 结构5 + 成交1），分母 `availability.coreDenominator` 固定 14；S2 存在；
-- Auxiliary **10** 默认隐藏（不在普通用户 UI 展示），`availability.auxiliaryHidden` 为响应中实际返回的 Auxiliary ID；
+- 缺失事实由 `compute_atomic_facts` **从 Core 数组直接省略**（非灰显伪装），`availability.coreMissing` 用 publicKey 列出；展示用 Auxiliary 为 8 项（排除 T3/T6/V1），其余 2 项 Aux 默认隐藏（不在普通用户 UI 展示），`availability.auxiliaryHidden` 为响应中实际返回的 Auxiliary ID；
 - Rejected **1**（V1 累计成交量比），`availability.v1Present` / `rejectedPresent` 恒为 `False`；
 - T3 / T6 `feature_flag` 默认关闭（`FEATURE_FLAGS` 全 `False`），普通用户完全不显示；
-- T5 / V3 阈值 `engineering_confirmation_required=true` 且值为 `null`（THR-001），UI 仅显示比值 +「分类未启用」；
-- S3 严格 0.33 / 0.67 边界（0.63 → 中间）；S7 / S8 禁止负距离显示；M3 零值容差 1e-6；V3 为段均量比（禁用「放量/缩量」）；
-- 缺失事实直接省略（`missing=true`），不伪装。
+- T5 / V3 阈值 `engineering_confirmation_required=true` 且值为 `null`（THR-001），UI 仅显示比值 +「分类未启用」（**M3 同样不声称 1e-6 已确认**：仅按 `raw>0→增加 / raw<0→减少 / raw==0→基本不变`，`thresholdEnabled=false`）；
+- S3 严格 0.33 / 0.67 边界（0.63 → 中间）；S7 / S8 禁止负距离显示；V3 为段均量比（禁用「放量/缩量」）；
+- 缺失事实直接省略（不进入数组），不伪装。
 
 ### 15.3 时区与 Run 查询排序
 
