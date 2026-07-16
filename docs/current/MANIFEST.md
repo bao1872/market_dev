@@ -1,8 +1,8 @@
 # Current Docs Manifest
 
 > 文档状态：CURRENT DESIGN BASELINE  
-> 实现核对基线：`d8eda234efb8a37612d3abcf6bd2cedd11e8f289`
-> v2 文档包生成基线：`d8eda234efb8a37612d3abcf6bd2cedd11e8f289`
+> 实现核对基线：`18049da1c0487120c3ebebba711ab37a225b6b37`
+> v2 文档包生成基线：`18049da1c0487120c3ebebba711ab37a225b6b37`
 > 原 current docs 历史基线：`ddca659b8c9d64b6a414da0b4bbd6f80f704aef1`（归档参考，不参与一致性检查）  
 > 设计基线日期：2026-07-05  
 > 当前事实源：代码 + 已合并 PR + 生产只读审计 + 项目负责人确认  
