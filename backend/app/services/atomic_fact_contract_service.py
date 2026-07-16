@@ -116,6 +116,47 @@ CONTRACT_VERSION = _CONTRACT.get("contract_version", "Atomic Fact Contract V1")
 # dimension 分组顺序（用于 UI 固定四组顺序）
 _DIMENSION_ORDER = ["trend", "momentum", "structure", "volume"]
 
+# ---------------------------------------------------------------------------
+# 版本常量（持久化 payload 校验用）
+# ---------------------------------------------------------------------------
+
+# 持久化 payload（summary_payload.atomic_fact_contract_v1）schema 版本
+AFC_PAYLOAD_VERSION = "1"
+# 研究合同冻结版本（V4.13）
+RESEARCH_FREEZE_VERSION = "V4.13"
+# 产品展示合同版本
+PRESENTATION_VERSION = _PRES.get("contract_version", "Atomic Fact Presentation V1")
+
+
+# 数值精度/后缀统一由 _fmt_atomic_value 读取 presentation 的 valuePrecision，
+# 不再分散维护 _presentation_precision / _presentation_secondary。
+
+# 带正负号的事实（沿主趋势值，需显示 +）：T2 / M2 / M3
+_SIGNED_FACTS = {"T2_aligned_slope", "M2_aligned_momentum", "M3_aligned_momentum_delta"}
+
+
+def _fmt_atomic_value(fact_id: str, value: float | None) -> str | None:
+    """统一数值格式器：禁止各处手写 .4f/.6f，精度/后缀均来自 presentation。
+
+    - ratio    → `1.23×`
+    - distance → `1.34 ATR`（绝对值，禁止负距离）
+    - signed   → 正数前加 `+`（T2/M2/M3）
+    - 其余     → 普通定点
+    value 为 None 时返回 None（关系类事实由 categoryLabel 承载）。
+    """
+    if value is None:
+        return None
+    meta = _PRES_FACTS.get(fact_id)
+    prec = int(meta.get("valuePrecision", 4)) if meta else 4
+    kind = meta.get("visualKind") if meta else None
+    if kind == "ratio":
+        return f"{value:.{prec}f}×"
+    if kind == "distance":
+        return f"{abs(value):.{prec}f} ATR"
+    if fact_id in _SIGNED_FACTS:
+        return f"{'+' if value > 0 else ''}{value:.{prec}f}"
+    return f"{value:.{prec}f}"
+
 
 # ---------------------------------------------------------------------------
 # 取值辅助
@@ -311,18 +352,16 @@ _BOUNDARY_ZH = {
 }
 _DIRREL_ZH = {"ALIGNED": "一致", "COUNTER": "相反", None: "数据不足"}
 _POS_ZH = {"LOWER": "偏低", "MIDDLE": "中间", "UPPER": "偏高", None: "数据不足"}
-_SQZ_ZH = {"ON": "挤压中", "OFF": "释放中", "NORMAL": "正常", "INCONSISTENT": "数据质量异常", None: "数据不足"}
+_SQZ_ZH = {"ON": "正在收紧", "OFF": "正在释放", "NORMAL": "正常", "INCONSISTENT": "数据质量异常", None: "数据不足"}
 _ADV_ZH = {"SAME_DIRECTION": "一致", "OPPOSITE_DIRECTION": "相反", None: "数据不足"}
 _M3_ZH = {"INCREASE": "增加", "DECREASE": "减少", "UNCHANGED": "基本不变", None: "数据不足"}
 
 
-def _fmt_dist(d: float | None) -> str:
-    """S7/S8 距离文案：禁止显示负距离。d>=0 尚未到达；d<0 已越过。"""
+def _dist_category(d: float | None) -> str | None:
+    """S7/S8 距离方向分类：d>=0「尚未到达」(正向)；d<0「已越过」(负向)；None→None。"""
     if d is None:
-        return ""
-    if d >= 0:
-        return f"尚未到达 {abs(d):.4f} ATR"
-    return f"已越过 {abs(d):.4f} ATR"
+        return None
+    return "尚未到达" if d >= 0 else "已越过"
 
 
 # ---------------------------------------------------------------------------
@@ -338,7 +377,7 @@ def _emit(
     dimension: str,
     visual_kind: str,
     value: float | None,
-    value_text: str,
+    value_text: str | None = None,
     source_path: str | None,
     threshold_ref: str | None = None,
     threshold_enabled: bool = True,
@@ -346,9 +385,9 @@ def _emit(
     category_code: str | None = None,
     category_label: str | None = None,
     secondary_text: str | None = None,
-    unit: str | None = None,
-    missing: bool = False,
-) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        unit: str | None = None,
+        missing: bool = False,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """发射一个事实。
 
     Returns:
@@ -393,23 +432,20 @@ _THRESHOLD_REF: dict[str, str | None] = {
 }
 
 
-def compute_atomic_facts(
+def _compute_emissions(
     structural_payload: dict[str, Any] | None,
     temporal_payload: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """纯函数：从 payload 只读计算 14 Core + 10 Auxiliary 原子事实。
+    """纯函数实现：从 payload 只读计算 14 Core + 10 Auxiliary 原子事实（含 debug）。
 
     Returns:
         {
           "core": {dimension: [public_item, ...]},  # 仅非缺失项（缺失直接省略）
           "auxiliary": [public_item, ...],           # 仅非缺失 + flag 开启项
-          "availability": {
-            coreDenominator, corePresent, coreMissing(publicKey),
-            auxiliaryAvailable, auxiliaryHidden, v1Present, rejectedPresent,
-            warnings  # 数据质量异常（如 m5_inconsistent）
-          },
+          "availability": {...},
           "debug": [debug_item, ...],                # 管理员可追溯（factId/sourcePath）
         }
+    对外公开接口 compute_atomic_facts 会弹出 debug 仅保留前三项。
     """
     sp = structural_payload or {}
     tp = temporal_payload or {}
@@ -431,12 +467,12 @@ def compute_atomic_facts(
         public_key=CORE_PUBLIC_KEY["T1_trend_direction"],
         label=CORE_PUBLIC_LABEL["T1_trend_direction"],
         dimension="trend",
-        visual_kind="category",
+        visual_kind="value_with_category",
         value=dsa_dir,
-        value_text=f"主趋势方向为{_DIR_ZH.get(dsa_dir, '中性')}",
+        value_text=_DIR_ZH.get(dsa_dir, "中性"),
         source_path="structural_payload.primary.1d.dsa_segment.current_dsa_segment_dir",
         category_code=t1_cat,
-        category_label=_DIR_ZH.get(dsa_dir, "中性"),
+        category_label=None,
         missing=t1_missing,
     )
     core_items["T1_trend_direction"] = p  # type: ignore[assignment]
@@ -450,11 +486,11 @@ def compute_atomic_facts(
         public_key=CORE_PUBLIC_KEY["T2_aligned_slope"],
         label=CORE_PUBLIC_LABEL["T2_aligned_slope"],
         dimension="trend",
-        visual_kind="value",
+        visual_kind="metric",
         value=t2_val,
-        value_text=f"沿主趋势运行速度为 {t2_val:.4f}" if t2_val is not None else "沿主趋势运行速度数据不足",
+        value_text=_fmt_atomic_value("T2_aligned_slope", t2_val) if t2_val is not None else None,
         source_path="structural_payload.primary.1d.dsa_segment.current_dsa_segment_slope_atr_per_bar",
-        secondary_text="每根日K",
+        secondary_text="ATR / 根日K",
         missing=t2_missing,
     )
     core_items["T2_aligned_slope"] = p  # type: ignore[assignment]
@@ -468,11 +504,11 @@ def compute_atomic_facts(
         public_key=CORE_PUBLIC_KEY["T4_trend_age"],
         label=CORE_PUBLIC_LABEL["T4_trend_age"],
         dimension="trend",
-        visual_kind="value",
+        visual_kind="metric",
         value=t4_age,
-        value_text=f"本轮趋势已持续 {t4_age} 根" if t4_age is not None else "本轮趋势持续时间数据不足",
+        value_text=_fmt_atomic_value("T4_trend_age", t4_age) if t4_age is not None else None,
         source_path="structural_payload.primary.1d.dsa_segment.current_dsa_segment_age_bars",
-        secondary_text="根日K",
+        secondary_text="个交易日",
         missing=t4_missing,
     )
     core_items["T4_trend_age"] = p  # type: ignore[assignment]
@@ -494,14 +530,11 @@ def compute_atomic_facts(
         dimension="trend",
         visual_kind="ratio",
         value=t5_ratio,
-        value_text=(
-            f"本轮·上一轮速度比为 {t5_ratio:.4f}（分类未启用）"
-            if t5_ratio is not None
-            else "本轮·上一轮速度比数据不足"
-        ),
+        value_text=_fmt_atomic_value("T5_slope_ratio", t5_ratio) if t5_ratio is not None else None,
         source_path="structural_payload.primary.1d.dsa_segment.prev_dsa_segment_slope_atr_per_bar",
         threshold_ref=_THRESHOLD_REF["T5_slope_ratio"],
         threshold_enabled=False,
+        secondary_text="分类未启用" if t5_ratio is not None else None,
         missing=t5_missing,
     )
     core_items["T5_slope_ratio"] = p  # type: ignore[assignment]
@@ -517,7 +550,7 @@ def compute_atomic_facts(
         dimension="momentum",
         visual_kind="relation",
         value=None,
-        value_text=f"推动力与主趋势{_ALIGN_ZH.get(m1, '中性')}",
+        value_text=None,
         source_path="structural_payload.primary.1d.volatility_momentum.sqzmom_val",
         category_code=m1,
         category_label=_ALIGN_ZH.get(m1, "中性"),
@@ -534,9 +567,9 @@ def compute_atomic_facts(
         public_key=CORE_PUBLIC_KEY["M2_aligned_momentum"],
         label=CORE_PUBLIC_LABEL["M2_aligned_momentum"],
         dimension="momentum",
-        visual_kind="value",
+        visual_kind="metric",
         value=m2_val,
-        value_text=f"沿主趋势推动力为 {m2_val:.4f}" if m2_val is not None else "沿主趋势推动力数据不足",
+        value_text=_fmt_atomic_value("M2_aligned_momentum", m2_val) if m2_val is not None else None,
         source_path="structural_payload.primary.1d.volatility_momentum.sqzmom_val",
         missing=m2_missing,
     )
@@ -552,13 +585,9 @@ def compute_atomic_facts(
         public_key=CORE_PUBLIC_KEY["M3_aligned_momentum_delta"],
         label=CORE_PUBLIC_LABEL["M3_aligned_momentum_delta"],
         dimension="momentum",
-        visual_kind="category",
+        visual_kind="value_with_category",
         value=m3_raw,
-        value_text=(
-            f"最近一根日K推动力变化：{_M3_ZH.get(m3_cat, '数据不足')}"
-            if m3_raw is not None
-            else "最近一根日K推动力变化数据不足"
-        ),
+        value_text=_fmt_atomic_value("M3_aligned_momentum_delta", m3_raw) if m3_raw is not None else None,
         source_path="structural_payload.primary.1d.volatility_momentum.sqzmom_delta_1",
         threshold_ref=_THRESHOLD_REF["M3_aligned_momentum_delta"],
         threshold_enabled=False,
@@ -582,7 +611,7 @@ def compute_atomic_facts(
         dimension="momentum",
         visual_kind="relation",
         value=None,
-        value_text=f"波动收紧状态：{_SQZ_ZH.get(m5, '数据不足')}",
+        value_text=None,
         source_path="structural_payload.primary.1d.volatility_momentum.sqz_on",
         category_code=m5,
         category_label=_SQZ_ZH.get(m5, "数据不足"),
@@ -601,7 +630,7 @@ def compute_atomic_facts(
         dimension="structure",
         visual_kind="relation",
         value=None,
-        value_text=f"价格与已确认区间关系：{_BOUNDARY_ZH.get(s1, '结构数据不足')}",
+        value_text=None,
         source_path="structural_payload.primary.1d.swing_position.confirmed_swing_breakout_state",
         category_code=s1,
         category_label=_BOUNDARY_ZH.get(s1, "结构数据不足"),
@@ -620,7 +649,7 @@ def compute_atomic_facts(
         dimension="structure",
         visual_kind="relation",
         value=None,
-        value_text=f"当前主要波段与主趋势{_DIRREL_ZH.get(s2, '数据不足')}",
+        value_text=None,
         source_path="structural_payload.primary.1d.swing_position.active_swing_dir",
         category_code=s2,
         category_label=_DIRREL_ZH.get(s2, "数据不足"),
@@ -639,11 +668,7 @@ def compute_atomic_facts(
         dimension="structure",
         visual_kind="position",
         value=d["price_pos_active"],
-        value_text=(
-            f"价格在当前主要波段位置：{_POS_ZH.get(s3, '数据不足')}"
-            if s3 is not None
-            else "价格在当前主要波段位置数据不足"
-        ),
+        value_text=_fmt_atomic_value("S3_active_position", d["price_pos_active"]) if d["price_pos_active"] is not None else None,
         source_path="structural_payload.primary.1d.swing_position.price_position_in_active_swing_0_1",
         threshold_ref=_THRESHOLD_REF["S3_active_position"],
         category_code=s3,
@@ -673,8 +698,9 @@ def compute_atomic_facts(
         dimension="structure",
         visual_kind="distance",
         value=s7_val,
-        value_text=_fmt_dist(s7_val) if s7_val is not None else "距顺主趋势确认边界数据不足",
+        value_text=_fmt_atomic_value("S7_dist_favorable_boundary", s7_val) if s7_val is not None else None,
         source_path=s7_path,
+        category_label=_dist_category(s7_val),
         unit="ATR",
         missing=s7_missing,
     )
@@ -701,8 +727,9 @@ def compute_atomic_facts(
         dimension="structure",
         visual_kind="distance",
         value=s8_val,
-        value_text=_fmt_dist(s8_val) if s8_val is not None else "距逆主趋势确认边界数据不足",
+        value_text=_fmt_atomic_value("S8_dist_adverse_boundary", s8_val) if s8_val is not None else None,
         source_path=s8_path,
+        category_label=_dist_category(s8_val),
         unit="ATR",
         missing=s8_missing,
     )
@@ -735,14 +762,11 @@ def compute_atomic_facts(
         dimension="volume",
         visual_kind="ratio",
         value=v3_ratio,
-        value_text=(
-            f"本轮·上一轮每根日K平均成交量比为 {v3_ratio:.4f}（分类未启用）"
-            if v3_ratio is not None
-            else "本轮·上一轮每根日K平均成交量比数据不足"
-        ),
+        value_text=_fmt_atomic_value("V3_avg_volume_ratio", v3_ratio) if v3_ratio is not None else None,
         source_path="structural_payload.primary.1d.dsa_segment.current_segment_volume_sum",
         threshold_ref=_THRESHOLD_REF["V3_avg_volume_ratio"],
         threshold_enabled=False,
+        secondary_text="分类未启用" if v3_ratio is not None else None,
         missing=v3_missing,
     )
     core_items["V3_avg_volume_ratio"] = p  # type: ignore[assignment]
@@ -757,13 +781,9 @@ def compute_atomic_facts(
             public_key="trend_efficiency",
             label="趋势效率",
             dimension="trend",
-            visual_kind="value",
+            visual_kind="metric",
             value=d["cur_efficiency"],
-            value_text=(
-                f"趋势效率为 {d['cur_efficiency']:.4f}"
-                if d["cur_efficiency"] is not None
-                else "趋势效率数据不足"
-            ),
+            value_text=_fmt_atomic_value("T3_trend_efficiency", d["cur_efficiency"]) if d["cur_efficiency"] is not None else None,
             source_path="structural_payload.primary.1d.dsa_segment.current_dsa_segment_efficiency_0_1",
             feature_flag=False,
             missing=t3_missing,
@@ -782,13 +802,9 @@ def compute_atomic_facts(
             public_key="efficiency_delta",
             label="效率变化",
             dimension="trend",
-            visual_kind="value",
+            visual_kind="metric",
             value=t6_delta,
-            value_text=(
-                f"效率变化为 {t6_delta:.4f}"
-                if t6_delta is not None
-                else "效率变化数据不足"
-            ),
+            value_text=_fmt_atomic_value("T6_efficiency_delta", t6_delta) if t6_delta is not None else None,
             source_path="structural_payload.primary.1d.dsa_segment.prev_dsa_segment_efficiency_0_1",
             feature_flag=False,
             missing=t6_missing,
@@ -804,9 +820,9 @@ def compute_atomic_facts(
         public_key=AUX_PUBLIC_KEY["M4_segment_momentum_change"],
         label=AUX_PUBLIC_LABEL["M4_segment_momentum_change"],
         dimension="momentum",
-        visual_kind="value",
+        visual_kind="metric",
         value=m4_val,
-        value_text=f"段内动量变化为 {m4_val:.4f}" if m4_val is not None else "段内动量变化数据不足",
+        value_text=_fmt_atomic_value("M4_segment_momentum_change", m4_val) if m4_val is not None else None,
         source_path="temporal_payload.daily_context.daily_sqzmom_change_since_segment_start",
         feature_flag=False,
         missing=m4_missing,
@@ -824,7 +840,7 @@ def compute_atomic_facts(
         dimension="structure",
         visual_kind="relation",
         value=None,
-        value_text=f"形成中波段与主趋势{_DIRREL_ZH.get(s4, '数据不足')}",
+        value_text=None,
         source_path="structural_payload.primary.1d.swing_position.developing_swing_dir",
         category_code=s4,
         category_label=_DIRREL_ZH.get(s4, "数据不足"),
@@ -844,7 +860,7 @@ def compute_atomic_facts(
         dimension="structure",
         visual_kind="relation",
         value=None,
-        value_text=f"主波段与形成中波段{_ADV_ZH.get(s5, '数据不足')}",
+        value_text=None,
         source_path="structural_payload.primary.1d.swing_position.developing_swing_dir",
         category_code=s5,
         category_label=_ADV_ZH.get(s5, "数据不足"),
@@ -864,11 +880,7 @@ def compute_atomic_facts(
         dimension="structure",
         visual_kind="position",
         value=d["price_pos_developing"],
-        value_text=(
-            f"价格在形成中波段位置：{_POS_ZH.get(s6, '数据不足')}"
-            if s6 is not None
-            else "价格在形成中波段位置数据不足"
-        ),
+        value_text=_fmt_atomic_value("S6_developing_position", d["price_pos_developing"]) if d["price_pos_developing"] is not None else None,
         source_path="structural_payload.primary.1d.swing_position.price_position_in_developing_swing_0_1",
         category_code=s6,
         category_label=_POS_ZH.get(s6, "数据不足"),
@@ -887,9 +899,9 @@ def compute_atomic_facts(
         public_key=AUX_PUBLIC_KEY["V2_current_avg_volume"],
         label=AUX_PUBLIC_LABEL["V2_current_avg_volume"],
         dimension="volume",
-        visual_kind="value",
+        visual_kind="metric",
         value=v2_val,
-        value_text=f"本轮每根日K平均成交量为 {v2_val:.2f}" if v2_val is not None else "本轮每根日K平均成交量数据不足",
+        value_text=_fmt_atomic_value("V2_current_avg_volume", v2_val) if v2_val is not None else None,
         source_path="structural_payload.primary.1d.dsa_segment.current_segment_volume_sum",
         feature_flag=False,
         missing=v2_missing,
@@ -911,7 +923,7 @@ def compute_atomic_facts(
         dimension="volume",
         visual_kind="ratio",
         value=v4_val,
-        value_text=f"本轮·上一轮持续时间比为 {v4_val:.4f}" if v4_val is not None else "本轮·上一轮持续时间比数据不足",
+        value_text=_fmt_atomic_value("V4_age_ratio_raw", v4_val) if v4_val is not None else None,
         source_path="structural_payload.primary.1d.dsa_segment.prev_dsa_segment_age_bars",
         feature_flag=False,
         missing=v4_missing,
@@ -926,13 +938,9 @@ def compute_atomic_facts(
         public_key=AUX_PUBLIC_KEY["V5_return_per_volume"],
         label=AUX_PUBLIC_LABEL["V5_return_per_volume"],
         dimension="volume",
-        visual_kind="value",
+        visual_kind="metric",
         value=d["current_segment_return_per_volume"],
-        value_text=(
-            f"本轮收益率与成交量比为 {d['current_segment_return_per_volume']:.6f}"
-            if d["current_segment_return_per_volume"] is not None
-            else "本轮收益率与成交量比数据不足"
-        ),
+        value_text=_fmt_atomic_value("V5_return_per_volume", d["current_segment_return_per_volume"]) if d["current_segment_return_per_volume"] is not None else None,
         source_path="structural_payload.primary.1d.dsa_segment.current_segment_return_per_volume",
         feature_flag=False,
         missing=v5_missing,
@@ -949,11 +957,7 @@ def compute_atomic_facts(
         dimension="volume",
         visual_kind="ratio",
         value=d["return_per_volume_ratio"],
-        value_text=(
-            f"本轮收益率与量比为 {d['return_per_volume_ratio']:.4f}"
-            if d["return_per_volume_ratio"] is not None
-            else "本轮收益率与量比数据不足"
-        ),
+        value_text=_fmt_atomic_value("V5_return_per_volume_ratio", d["return_per_volume_ratio"]) if d["return_per_volume_ratio"] is not None else None,
         source_path="structural_payload.primary.1d.dsa_segment.return_per_volume_ratio",
         feature_flag=False,
         missing=v5r_missing,
@@ -993,6 +997,49 @@ def compute_atomic_facts(
         "auxiliary": auxiliary_list,
         "availability": availability,
         "debug": debug_items,
+    }
+
+
+def compute_atomic_facts(
+    structural_payload: dict[str, Any] | None,
+    temporal_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """公开纯函数：返回 core / auxiliary / availability（**不含 debug**）。
+
+    debug 仅由 compute_atomic_fact_debug 在管理员请求时按需即时生成，
+    保证持久化 summary_payload 不写入 debug 数组。
+    """
+    result = _compute_emissions(structural_payload, temporal_payload)
+    result.pop("debug", None)
+    return result
+
+
+def compute_atomic_fact_debug(
+    structural_payload: dict[str, Any] | None,
+    temporal_payload: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """管理员调试：仅返回可追溯 debug 列表（factId / sourcePath / rawValue / ...），按需即时生成。"""
+    return _compute_emissions(structural_payload, temporal_payload).get("debug", [])
+
+
+def build_persisted_afc_payload(
+    structural_payload: dict[str, Any] | None,
+    temporal_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """生成可持久化到 summary_payload.atomic_fact_contract_v1 的公开快照。
+
+    含四版本字段 + core/auxiliary/availability，**不含 debug**（debug 仅管理员即时生成）。
+    worker 旧镜像写入的旧格式（缺版本/含 debug）由 API 校验器判定 fallback。
+    """
+    facts = compute_atomic_facts(structural_payload, temporal_payload)
+    return {
+        "payloadVersion": AFC_PAYLOAD_VERSION,
+        "researchContractVersion": CONTRACT_VERSION,
+        "researchFreezeVersion": RESEARCH_FREEZE_VERSION,
+        "presentationVersion": PRESENTATION_VERSION,
+        "core": facts["core"],
+        "auxiliary": facts["auxiliary"],
+        "availability": facts["availability"],
     }
 
 
@@ -1077,9 +1124,10 @@ def compute_recent_changes(
                 delta_text = "状态更新"
             changes.append({
                 "publicKey": CORE_PUBLIC_KEY[fid],
+                "label": CORE_PUBLIC_LABEL[fid],
                 "dimension": _dim_of(cur, fid),
-                "fromText": p_text or "—",
-                "toText": c_text or "—",
+                "fromText": p_text or p_cat or "—",
+                "toText": c_text or c_cat or "—",
                 "deltaText": delta_text,
                 "asOf": snapshots[idx]["trade_date"],
             })
@@ -1173,7 +1221,7 @@ if __name__ == "__main__":
             assert "sourcePath" not in it
             assert "missing" not in it
             assert "hiddenByDefault" not in it
-            assert it["valueText"]
+            assert it['valueText'] or it['categoryLabel'], f"{it['publicKey']} 必须含 valueText 或 categoryLabel"
             assert it["label"]
 
     # S3 0.63 → 中间
@@ -1182,9 +1230,11 @@ if __name__ == "__main__":
 
     # S7 顺向（dsa_dir>0 → dist_high=2.5）：尚未到达；S8 逆向（dist_low=-1.2）：已越过
     s7 = _get("S7_dist_favorable_boundary")
-    assert "尚未到达" in s7["valueText"], s7["valueText"]
+    assert s7["categoryLabel"] == "尚未到达", s7["categoryLabel"]
+    assert s7["valueText"] == "2.50 ATR", s7["valueText"]
     s8 = _get("S8_dist_adverse_boundary")
-    assert "已越过" in s8["valueText"], s8["valueText"]
+    assert s8["categoryLabel"] == "已越过", s8["categoryLabel"]
+    assert s8["valueText"] == "1.20 ATR", s8["valueText"]
 
     # T2/M2/M3 真实值
     t2 = _get("T2_aligned_slope")
@@ -1210,10 +1260,12 @@ if __name__ == "__main__":
     # T5/V3 分类未启用
     t5 = _get("T5_slope_ratio")
     assert t5["thresholdEnabled"] is False
-    assert "分类未启用" in t5["valueText"]
+    assert t5["secondaryText"] == "分类未启用", t5.get("secondaryText")
+    assert t5["valueText"] == "1.23×", t5["valueText"]
     v3 = _get("V3_avg_volume_ratio")
     assert v3["thresholdEnabled"] is False
-    assert "分类未启用" in v3["valueText"]
+    assert v3["secondaryText"] == "分类未启用", v3.get("secondaryText")
+    assert v3["valueText"] == "1.11×", v3["valueText"]
 
     # V1 永不出现
     flat = json.dumps(res, ensure_ascii=False)
@@ -1232,17 +1284,13 @@ if __name__ == "__main__":
     # 分母固定 14；core 仅含非缺失项
     assert res["availability"]["coreDenominator"] == 14
 
-    # 文案无内部术语
+    # 文案无内部术语（valueText 可能为 None；label 始终校验）
+    _BAD_VAL = ("DSA", "SQZMOM", "Segment", "Active Swing", "raw=", "bar")
+    _BAD_LAB = ("DSA", "SQZMOM", "Segment", "Active", "Developing")
     for _dim, items in res["core"].items():
         for it in items:
-            for bad in ("DSA", "SQZMOM", "Segment", "Active Swing", "raw=", "bar"):
-                assert bad not in it["valueText"], f"{it['publicKey']} 含内部术语: {it['valueText']}"
-            assert bad not in it["label"]
-
-    # 普通用户项无内部术语于 label
-    for _dim, items in res["core"].items():
-        for it in items:
-            for bad in ("DSA", "SQZMOM", "Segment", "Active", "Developing"):
-                assert bad not in it["label"], it["label"]
+            vt = it["valueText"]
+            assert vt is None or all(b not in vt for b in _BAD_VAL), f"{it['publicKey']} 含内部术语: {vt}"
+            assert all(b not in it["label"] for b in _BAD_LAB), it["label"]
 
     print("OK: compute_atomic_facts 验证通过")

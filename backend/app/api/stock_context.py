@@ -33,7 +33,6 @@ from app.models.stock_feature_snapshot_run import (
     StockFeatureSnapshotRun,
 )
 from app.schemas.atomic_fact_contract import (
-    AdminAtomicFactDebugItem,
     AdminStockDebugResponse,
     AtomicFactsContextResponse,
 )
@@ -46,8 +45,12 @@ from app.services.access_control_service import (
     require_admin,
 )
 from app.services.atomic_fact_contract_service import (
+    AFC_PAYLOAD_VERSION,
     CONTRACT_VERSION,
     CORE_PUBLIC_KEY,
+    PRESENTATION_VERSION,
+    RESEARCH_FREEZE_VERSION,
+    compute_atomic_fact_debug,
     compute_atomic_facts,
     compute_recent_changes,
 )
@@ -218,41 +221,39 @@ def _build_data_quality(
 
 
 def _is_valid_stored_afc(stored: Any) -> bool:
-    """校验 summary_payload.atomic_fact_contract_v1 是否为新结构（含 publicKey）。
+    """严格校验 summary_payload.atomic_fact_contract_v1 是否为当前持久化结构。
 
-    旧结构（含 factId/missing、无 publicKey）或缺失/不可用 → 返回 False，
-    触发纯函数 fallback（不回写旧快照）。
+    必须包含四个版本字段（且与当前常量一致）、四组（core/auxiliary/
+    availability，core 为四维度分组）、含 publicKey、且不含 debug 数组。
+    任一不满足 → 返回 False，触发纯函数 fallback 重算（不回写旧快照）。
     """
     if not isinstance(stored, dict):
+        return False
+    expected_versions = {
+        "payloadVersion": AFC_PAYLOAD_VERSION,
+        "researchContractVersion": CONTRACT_VERSION,
+        "researchFreezeVersion": RESEARCH_FREEZE_VERSION,
+        "presentationVersion": PRESENTATION_VERSION,
+    }
+    for k, v in expected_versions.items():
+        if stored.get(k) != v:
+            return False
+    if not isinstance(stored.get("core"), dict):
+        return False
+    if not isinstance(stored.get("auxiliary"), list):
         return False
     av = stored.get("availability")
     if not isinstance(av, dict) or av.get("coreDenominator") != 14:
         return False
-    core = stored.get("core")
-    if not isinstance(core, dict):
+    if "debug" in stored:
         return False
-    for items in core.values():
+    for items in stored["core"].values():
         if items:
             return isinstance(items[0], dict) and "publicKey" in items[0]
-    # core 全空无法判定，降级 fallback 重算
     return False
 
 
-def _build_atomic_facts_debug(facts: dict[str, Any]) -> list[AdminAtomicFactDebugItem]:
-    """管理员调试：从计算结果（含 debug 列表）提取每事实可追溯信息。"""
-    items: list[AdminAtomicFactDebugItem] = []
-    for d in facts.get("debug", []):
-        items.append(AdminAtomicFactDebugItem(
-            factId=d["factId"],
-            publicKey=d.get("publicKey"),
-            sourcePath=d.get("sourcePath"),
-            rawValue=d.get("rawValue"),
-            thresholdRef=d.get("thresholdRef"),
-            thresholdEnabled=d.get("thresholdEnabled", False),
-            featureFlag=d.get("featureFlag", True),
-            missing=d.get("missing", False),
-        ))
-    return items
+# 管理员 debug 由 compute_atomic_fact_debug 按需即时生成（见下方 include_raw 分支）。
 
 
 def _empty_atomic_response(
@@ -415,7 +416,7 @@ async def _build_stock_context(
             "runStartedAt": run.started_at.isoformat() if run.started_at else None,
             "runFinishedAt": run.finished_at.isoformat() if run.finished_at else None,
         }
-        response["atomicFactsDebug"] = _build_atomic_facts_debug(facts)
+        response["atomicFactsDebug"] = compute_atomic_fact_debug(snapshot.structural_payload, snapshot.temporal_payload)
 
     return response
 

@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 # ruff: noqa: N815 - camelCase 字段为前端 JSON API 契约（contractVersion/asOf 等）
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -31,11 +31,11 @@ class PublicAtomicFactItem(BaseModel):
     publicKey: str = Field(..., description="稳定公开键（不随内部 factId 变动）")
     dimension: str = Field(..., description="维度：trend/momentum/structure/volume")
     label: str = Field(..., description="通俗中文短标签")
-    visualKind: str = Field(
-        ..., description="前端渲染类型：value/relation/position/distance/ratio/category"
+    visualKind: Literal["metric", "value_with_category", "relation", "position", "distance", "ratio"] = Field(
+        ..., description="前端渲染类型（禁止解析中文推断类型/状态）"
     )
     value: float | None = Field(None, description="原始数值（分类类事实为 None）")
-    valueText: str = Field(..., description="用户可读完整文案（无内部术语）")
+    valueText: str | None = Field(None, description="用户可读短原子值（无内部术语）；关系类事实为 None，仅以 categoryLabel 承载")
     categoryCode: str | None = Field(None, description="机器分类码（UI 可选）")
     categoryLabel: str | None = Field(None, description="中文分类标签")
     secondaryText: str | None = Field(None, description="弱说明（单位/补充）")
@@ -71,6 +71,7 @@ class AtomicFactChange(BaseModel):
     """
 
     publicKey: str = Field(..., description="事实 publicKey")
+    label: str = Field(..., description="通俗中文短标签（前端展示，禁止 publicKey）")
     dimension: str = Field(..., description="维度")
     fromText: str | None = Field(None, description="变化前展示文案")
     toText: str | None = Field(None, description="变化后展示文案")
@@ -149,7 +150,7 @@ if __name__ == "__main__":
         publicKey="trend_direction",
         dimension="trend",
         label="主趋势方向",
-        visualKind="category",
+        visualKind="value_with_category",
         value=1.0,
         valueText="主趋势方向为上行",
         categoryCode="UP",

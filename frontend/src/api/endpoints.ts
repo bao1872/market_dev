@@ -2802,12 +2802,12 @@ export interface AtomicFactItem {
   dimension: 'trend' | 'momentum' | 'structure' | 'volume'
   /** 通俗中文短标签 */
   label: string
-  /** 前端渲染类型：value / relation / position / distance / ratio / category */
-  visualKind: 'category' | 'value' | 'ratio' | 'relation' | 'position' | 'distance'
+  /** 前端渲染类型（禁止解析中文推断类型/状态） */
+  visualKind: 'metric' | 'value_with_category' | 'relation' | 'position' | 'distance' | 'ratio'
   /** 原始数值（分类类事实为 null） */
   value: number | null
-  /** 用户可读完整文案（无内部术语） */
-  valueText: string
+  /** 用户可读短原子值（无内部术语）；关系类事实为 null，仅以 categoryLabel 承载 */
+  valueText: string | null
   /** 机器分类码（UI 可选） */
   categoryCode: string | null
   /** 中文分类标签 */
@@ -2838,6 +2838,8 @@ export interface AtomicFactAvailability {
 /** AtomicFactChange - 近期变化（相邻已发布快照间只读计算，按展示精度比较） */
 export interface AtomicFactChange {
   publicKey: string
+  /** 通俗中文短标签（前端展示，禁止显示 publicKey） */
+  label: string
   dimension: string
   fromText: string | null
   toText: string | null

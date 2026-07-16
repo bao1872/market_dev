@@ -15,7 +15,7 @@
       "level": "core",
       "publicKey": "trend_direction",
       "publicLabel": "主趋势方向",
-      "visualKind": "category",
+      "visualKind": "value_with_category",
       "valuePrecision": 0,
       "groupTitle": "趋势运行",
       "secondaryLabel": null
@@ -25,7 +25,7 @@
       "level": "core",
       "publicKey": "aligned_slope",
       "publicLabel": "沿主趋势运行速度",
-      "visualKind": "value",
+      "visualKind": "metric",
       "valuePrecision": 4,
       "groupTitle": "趋势运行",
       "secondaryLabel": "每根日K"
@@ -35,7 +35,7 @@
       "level": "core",
       "publicKey": "trend_duration",
       "publicLabel": "本轮趋势持续时间",
-      "visualKind": "value",
+      "visualKind": "metric",
       "valuePrecision": 0,
       "groupTitle": "趋势运行",
       "secondaryLabel": "根日K"
@@ -46,7 +46,7 @@
       "publicKey": "slope_ratio",
       "publicLabel": "本轮·上一轮速度比",
       "visualKind": "ratio",
-      "valuePrecision": 4,
+      "valuePrecision": 2,
       "groupTitle": "趋势运行",
       "secondaryLabel": null
     },
@@ -65,7 +65,7 @@
       "level": "core",
       "publicKey": "aligned_momentum",
       "publicLabel": "沿主趋势推动力",
-      "visualKind": "value",
+      "visualKind": "metric",
       "valuePrecision": 4,
       "groupTitle": "动量配合",
       "secondaryLabel": null
@@ -75,7 +75,7 @@
       "level": "core",
       "publicKey": "momentum_delta",
       "publicLabel": "最近一根日K推动力变化",
-      "visualKind": "category",
+      "visualKind": "value_with_category",
       "valuePrecision": 6,
       "groupTitle": "动量配合",
       "secondaryLabel": null
@@ -116,7 +116,7 @@
       "publicKey": "active_position",
       "publicLabel": "价格在当前主要波段的位置",
       "visualKind": "position",
-      "valuePrecision": 4,
+      "valuePrecision": 2,
       "groupTitle": "结构位置",
       "secondaryLabel": null
     },
@@ -126,7 +126,7 @@
       "publicKey": "dist_favorable",
       "publicLabel": "距顺主趋势确认边界",
       "visualKind": "distance",
-      "valuePrecision": 4,
+      "valuePrecision": 2,
       "groupTitle": "结构位置",
       "secondaryLabel": null
     },
@@ -136,7 +136,7 @@
       "publicKey": "dist_adverse",
       "publicLabel": "距逆主趋势确认边界",
       "visualKind": "distance",
-      "valuePrecision": 4,
+      "valuePrecision": 2,
       "groupTitle": "结构位置",
       "secondaryLabel": null
     },
@@ -146,7 +146,7 @@
       "publicKey": "volume_ratio",
       "publicLabel": "本轮·上一轮每根日K平均成交量比",
       "visualKind": "ratio",
-      "valuePrecision": 4,
+      "valuePrecision": 2,
       "groupTitle": "成交参与",
       "secondaryLabel": null
     },
@@ -155,7 +155,7 @@
       "level": "auxiliary",
       "publicKey": "segment_momentum_change",
       "publicLabel": "段内动量变化",
-      "visualKind": "value",
+      "visualKind": "metric",
       "valuePrecision": 4,
       "groupTitle": "动量配合",
       "secondaryLabel": null
@@ -195,7 +195,7 @@
       "level": "auxiliary",
       "publicKey": "current_avg_volume",
       "publicLabel": "本轮每根日K平均成交量",
-      "visualKind": "value",
+      "visualKind": "metric",
       "valuePrecision": 2,
       "groupTitle": "成交参与",
       "secondaryLabel": null
@@ -215,7 +215,7 @@
       "level": "auxiliary",
       "publicKey": "return_per_volume",
       "publicLabel": "本轮收益率与成交量比",
-      "visualKind": "value",
+      "visualKind": "metric",
       "valuePrecision": 6,
       "groupTitle": "成交参与",
       "secondaryLabel": null

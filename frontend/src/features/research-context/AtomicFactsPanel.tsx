@@ -1,8 +1,11 @@
 // [AtomicFactsPanel] - 描述: Atomic Fact Contract V1 用户侧状态观察面板（compact /market 右栏；expanded /stock Drawer）
 // 复用 StockContext 单一接口（GET /api/v1/stocks/{symbol}/context），market/detail 共用 query key。
 // 四组固定：趋势运行(info) / 动量配合(brand) / 结构位置(purple) / 成交参与(warning)。
-// 每项一行：标签左、主值右、弱说明在下；S3 用 0–1 轨道（0.33/0.67），T5/V3 显示「分类未启用」，
-// S7/S8 显示「尚未到达/已越过」。内部滚动，不改变左侧列表与小 K 线高度。
+// 事实行按 visualKind 渲染（metric/value_with_category/relation/position/distance/ratio），
+// 禁止解析中文推断类型/状态；事实行非卡片（CSS Grid 透明行，仅底部分隔线）。
+// S3/S6 用完整轨道（低位/0.33/0.67/高位 + 圆点 + `0.63 · 中间`）。
+// Auxiliary 按 动量补充/结构补充/成交补充 分组，默认收起。
+// 近期变化显示中文 label（非 publicKey）。
 // 面板关闭时由父组件不挂载，useStockContext enabled=false（0 请求）。
 // 普通用户 DOM 不得出现内部研究字段或英文术语（如字段路径、研究内部代号等）。
 import { useState } from 'react'
@@ -34,7 +37,14 @@ const DIMENSION_ORDER = ['trend', 'momentum', 'structure', 'volume'] as const
 
 const DISCLAIMER = '以上为状态描述，不构成买卖建议'
 
-/** 关系/状态中性徽章（不表达涨跌、利好利空） */
+// Auxiliary 分组（按 dimension 归类，展示中文组标题）
+const AUX_GROUP_DEFS: { key: string; title: string }[] = [
+  { key: 'momentum', title: '动量补充' },
+  { key: 'structure', title: '结构补充' },
+  { key: 'volume', title: '成交补充' },
+]
+
+/** 中性关系徽章（不表达涨跌、利好利空） */
 export function RelationBadge({ text, tone }: { text: string | null; tone?: 'neutral' | 'warn' }) {
   if (!text) return null
   return (
@@ -44,55 +54,90 @@ export function RelationBadge({ text, tone }: { text: string | null; tone?: 'neu
   )
 }
 
-/** 通用事实行：标签左 / 主值右 / 弱说明下；relation 用中性徽章，ratio 未启用时附「分类未启用」 */
-export function FactMetricRow({ fact }: { fact: AtomicFactItem }) {
-  const isRatio = fact.visualKind === 'ratio'
-  const showUnclassified = isRatio && fact.thresholdEnabled === false
+/**
+ * 按 visualKind 渲染单个事实行。
+ * - metric: 数值（mono + 高字重）+ secondaryText
+ * - value_with_category: 数值 + categoryLabel 徽章
+ * - relation: 仅 categoryLabel 徽章（一次，不重复）
+ * - position: 完整轨道（PositionRail）
+ * - distance: categoryLabel 徽章 + 数值（各一次）
+ * - ratio: 数值 + secondaryText（未启用分类提示由后端置入，仅一次）
+ */
+export function FactRow({ fact }: { fact: AtomicFactItem }) {
+  if (fact.visualKind === 'position') return <PositionRail fact={fact} />
+  if (fact.visualKind === 'distance') {
+    return (
+      <div className={styles.factRow}>
+        <span className={styles.factLabel}>{fact.label}</span>
+        <span className={styles.factValue}>
+          <RelationBadge text={fact.categoryLabel} tone={fact.categoryLabel === '已越过' ? 'warn' : 'neutral'} />
+          <span className={styles.factValueMetric}>{fact.valueText}</span>
+        </span>
+      </div>
+    )
+  }
+  if (fact.visualKind === 'relation') {
+    return (
+      <div className={styles.factRow}>
+        <span className={styles.factLabel}>{fact.label}</span>
+        <span className={styles.factValue}>
+          <RelationBadge text={fact.categoryLabel} />
+        </span>
+      </div>
+    )
+  }
+  if (fact.visualKind === 'value_with_category') {
+    return (
+      <div className={styles.factRow}>
+        <span className={styles.factLabel}>{fact.label}</span>
+        <span className={styles.factValue}>
+          <span className={styles.factValueMetric}>{fact.valueText}</span>
+          {fact.categoryLabel && <RelationBadge text={fact.categoryLabel} />}
+        </span>
+      </div>
+    )
+  }
+  // metric / ratio：数值 + secondaryText（ratio 的未启用分类提示由后端置入 secondaryText）
   return (
     <div className={styles.factRow}>
       <span className={styles.factLabel}>{fact.label}</span>
       <span className={styles.factValue}>
-        {fact.valueText}
-        {fact.categoryLabel && fact.visualKind === 'relation' && (
-          <RelationBadge text={fact.categoryLabel} />
-        )}
-        {showUnclassified && <span className={styles.unclassified}>分类未启用</span>}
+        <span className={styles.factValueMetric}>{fact.valueText}</span>
       </span>
       {fact.secondaryText && <span className={styles.factSecondary}>{fact.secondaryText}</span>}
     </div>
   )
 }
 
-/** S3/S6 位置轨道：0–1 真实轨道，标注 0.33 / 0.67 边界 */
+/** S3/S6 位置轨道：低位 / 0.33 刻度 / 圆点 / 0.67 刻度 / 高位 + `0.63 · 中间` */
 export function PositionRail({ fact }: { fact: AtomicFactItem }) {
   const v = fact.value
   const pct = v == null ? 0 : Math.max(0, Math.min(1, v)) * 100
+  const valText = fact.valueText ?? '—'
   return (
     <div className={styles.factRow}>
       <span className={styles.factLabel}>{fact.label}</span>
-      <div className={styles.railTrack} role="img" aria-label={`${fact.label}：${fact.valueText}`}>
-        <span className={styles.railTick} style={{ left: '33%' }} />
-        <span className={styles.railTick} style={{ left: '67%' }} />
-        <span className={styles.railKnob} style={{ left: `${pct}%` }} />
+      <div className={styles.railWrap}>
+        <div className={styles.railHead}>
+          <span>低位</span>
+          <span>高位</span>
+        </div>
+        <div
+          className={styles.railTrack}
+          role="img"
+          aria-label={`${fact.label}：${valText} · ${fact.categoryLabel ?? ''}`}
+        >
+          <span className={styles.railTick} style={{ left: '33%' }} />
+          <span className={styles.railTickLabel} style={{ left: '33%' }}>0.33</span>
+          <span className={styles.railTick} style={{ left: '67%' }} />
+          <span className={styles.railTickLabel} style={{ left: '67%' }}>0.67</span>
+          <span className={styles.railKnob} style={{ left: `${pct}%` }} />
+        </div>
+        <span className={styles.railCaption}>
+          {valText}
+          {fact.categoryLabel ? ` · ${fact.categoryLabel}` : ''}
+        </span>
       </div>
-      <span className={styles.factSecondary}>
-        {fact.categoryLabel ? `${fact.categoryLabel} · ` : ''}
-        {fact.valueText}
-      </span>
-    </div>
-  )
-}
-
-/** S7/S8 边界距离：显示「尚未到达 / 已越过」 */
-export function BoundaryRow({ fact }: { fact: AtomicFactItem }) {
-  const crossed = fact.valueText.includes('已越过')
-  return (
-    <div className={styles.factRow}>
-      <span className={styles.factLabel}>{fact.label}</span>
-      <span className={styles.factValue}>
-        {fact.valueText}
-        <RelationBadge text={crossed ? '已越过' : '尚未到达'} tone={crossed ? 'warn' : 'neutral'} />
-      </span>
     </div>
   )
 }
@@ -104,17 +149,15 @@ export function CoreFactGroup({ dimension, items }: { dimension: string; items: 
     <section className={`${styles.group} ${DIMENSION_GROUP_CLASS[dimension] ?? ''}`}>
       <h4 className={styles.groupTitle}>{DIMENSION_LABEL[dimension] ?? dimension}</h4>
       <div className={styles.factList}>
-        {items.map((fact) => {
-          if (fact.visualKind === 'position') return <PositionRail key={fact.publicKey} fact={fact} />
-          if (fact.visualKind === 'distance') return <BoundaryRow key={fact.publicKey} fact={fact} />
-          return <FactMetricRow key={fact.publicKey} fact={fact} />
-        })}
+        {items.map((fact) => (
+          <FactRow key={fact.publicKey} fact={fact} />
+        ))}
       </div>
     </section>
   )
 }
 
-/** 近期变化（全宽） */
+/** 近期变化（显示中文 label，非 publicKey） */
 export function RecentChangesStrip({ changes }: { changes: AtomicFactChange[] }) {
   if (changes.length === 0) {
     return <div className={styles.changesEmpty}>暂无近期变化</div>
@@ -122,12 +165,11 @@ export function RecentChangesStrip({ changes }: { changes: AtomicFactChange[] })
   return (
     <ul className={styles.changeList}>
       {changes.map((c, i) => (
-        <li key={`${c.publicKey}-${i}`} className={styles.changeItem}>
-          <span className={styles.changeFact}>{c.publicKey}</span>
+        <li key={`${c.label}-${c.asOf}-${i}`} className={styles.changeItem}>
+          <span className={styles.changeLabel}>{c.label}</span>
           <span className={styles.changeArrow}>
             {c.fromText ?? '—'} → {c.toText ?? '—'}
           </span>
-          <span className={styles.changeDelta}>{c.deltaText}</span>
           <span className={styles.changeAsOf}>{c.asOf}</span>
         </li>
       ))}
@@ -135,7 +177,7 @@ export function RecentChangesStrip({ changes }: { changes: AtomicFactChange[] })
   )
 }
 
-/** 更多观察（Auxiliary 默认收起，展开真实渲染 8 项；T3/T6/V1 永不出现） */
+/** 更多观察（Auxiliary 按 动量补充/结构补充/成交补充 分组，默认收起） */
 export function AuxiliaryAccordion({ auxiliary }: { auxiliary: AtomicFactItem[] }) {
   const [open, setOpen] = useState(false)
   return (
@@ -149,17 +191,26 @@ export function AuxiliaryAccordion({ auxiliary }: { auxiliary: AtomicFactItem[] 
         {open ? '收起更多观察' : '更多观察'}
       </button>
       {open && (
-        <div className={styles.auxList}>
+        <>
           {auxiliary.length === 0 ? (
             <div className={styles.changesEmpty}>暂无更多观察</div>
           ) : (
-            auxiliary.map((fact) => {
-              if (fact.visualKind === 'position') return <PositionRail key={fact.publicKey} fact={fact} />
-              if (fact.visualKind === 'distance') return <BoundaryRow key={fact.publicKey} fact={fact} />
-              return <FactMetricRow key={fact.publicKey} fact={fact} />
+            AUX_GROUP_DEFS.map((grp) => {
+              const items = auxiliary.filter((f) => f.dimension === grp.key)
+              if (items.length === 0) return null
+              return (
+                <div key={grp.key} className={styles.auxGroup}>
+                  <h5 className={styles.auxGroupTitle}>{grp.title}</h5>
+                  <div className={styles.auxList}>
+                    {items.map((fact) => (
+                      <FactRow key={fact.publicKey} fact={fact} />
+                    ))}
+                  </div>
+                </div>
+              )
             })
           )}
-        </div>
+        </>
       )}
     </section>
   )
@@ -174,14 +225,16 @@ interface AtomicFactsPanelProps {
 function Header({ data }: { data: AtomicFactsContextResponse }) {
   return (
     <div className={styles.header}>
-      <div className={styles.headerTitle}>个股状态观察</div>
-      <div className={styles.headerMeta}>
-        <span className={styles.headerVersion}>日线 · {AFC_RESEARCH_VERSION}</span>
-        {data.asOf && <span className={styles.headerAsOf}>观察日期 {data.asOf}</span>}
-        <span className={styles.headerDenom}>
-          {data.availability.corePresent}/{data.availability.coreDenominator}
-        </span>
+      <div className={styles.headerRow}>
+        <div className={styles.headerTitle}>个股状态观察</div>
+        <div className={styles.headerMeta}>
+          <span className={styles.headerVersion}>日线 · {AFC_RESEARCH_VERSION}</span>
+          <span className={styles.headerDenom}>
+            {data.availability.corePresent}/{data.availability.coreDenominator}
+          </span>
+        </div>
       </div>
+      {data.asOf && <div className={styles.headerAsOf}>观察日期 {data.asOf}</div>}
     </div>
   )
 }

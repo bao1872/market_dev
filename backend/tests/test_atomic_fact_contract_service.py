@@ -32,10 +32,15 @@ from app.schemas.atomic_fact_contract import AtomicFactsContextResponse
 from app.schemas.stock_state import StockContextDataQuality
 from app.services import atomic_fact_contract_service as svc
 from app.services.atomic_fact_contract_service import (
+    AFC_PAYLOAD_VERSION,
     AUX_FACT_IDS,
     CORE_FACT_IDS,
     CORE_PUBLIC_KEY,
+    PRESENTATION_VERSION,
+    RESEARCH_FREEZE_VERSION,
     REJECTED_FACT_IDS,
+    build_persisted_afc_payload,
+    compute_atomic_fact_debug,
     compute_atomic_facts,
     compute_recent_changes,
 )
@@ -109,8 +114,9 @@ def _core_present(res: dict, public_key: str) -> bool:
         return False
 
 
-def _debug_map(res: dict) -> dict[str, dict]:
-    return {d["factId"]: d for d in res.get("debug", [])}
+def _debug_map(sp: dict, tp: dict) -> dict[str, dict]:
+    # 公开结果不再含 debug；管理员 debug 由 compute_atomic_fact_debug 即时生成
+    return {d["factId"]: d for d in compute_atomic_fact_debug(sp, tp)}
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +188,7 @@ def test_t2_m2_m3_real_values():
     res = compute_atomic_facts(sp, tp)
     t2 = _find_core(res, "aligned_slope")
     assert abs(t2["value"] - 0.0123) < 1e-9
-    assert t2["visualKind"] == "value"
+    assert t2["visualKind"] == "metric"
     m2 = _find_core(res, "aligned_momentum")
     assert abs(m2["value"] - 0.002) < 1e-9
     m3 = _find_core(res, "momentum_delta")
@@ -209,11 +215,13 @@ def test_t5_v3_threshold_disabled():
     res = compute_atomic_facts(sp, tp)
     t5 = _find_core(res, "slope_ratio")
     assert t5["thresholdEnabled"] is False
-    assert "分类未启用" in t5["valueText"]
+    assert t5["secondaryText"] == "分类未启用", t5.get("secondaryText")
+    assert t5["valueText"] == "1.23×", t5["valueText"]
     assert abs(t5["value"] - 1.23) < 1e-9  # 0.0123/0.0100
     v3 = _find_core(res, "volume_ratio")
     assert v3["thresholdEnabled"] is False
-    assert "分类未启用" in v3["valueText"]
+    assert v3["secondaryText"] == "分类未启用", v3.get("secondaryText")
+    assert v3["valueText"] == "1.11×", v3["valueText"]
     assert abs(v3["value"] - (100000.0 / 90000.0)) < 1e-9
 
 
@@ -225,10 +233,10 @@ def test_t5_v3_threshold_disabled():
 def test_m5_states_and_inconsistent_missing():
     # ON
     sp, tp = _base_payload(vol={"sqz_on": True, "sqz_off": False})
-    assert _find_core(compute_atomic_facts(sp, tp), "squeeze_state")["categoryLabel"] == "挤压中"
+    assert _find_core(compute_atomic_facts(sp, tp), "squeeze_state")["categoryLabel"] == "正在收紧"
     # OFF
     sp, tp = _base_payload(vol={"sqz_on": False, "sqz_off": True})
-    assert _find_core(compute_atomic_facts(sp, tp), "squeeze_state")["categoryLabel"] == "释放中"
+    assert _find_core(compute_atomic_facts(sp, tp), "squeeze_state")["categoryLabel"] == "正在释放"
     # NORMAL
     sp, tp = _base_payload(vol={"sqz_on": False, "sqz_off": False})
     assert _find_core(compute_atomic_facts(sp, tp), "squeeze_state")["categoryLabel"] == "正常"
@@ -283,13 +291,15 @@ def test_s7_s8_no_negative_distance_and_dynamic_source_path():
     )
     res = compute_atomic_facts(sp, tp)
     s7 = _find_core(res, "dist_favorable")
-    assert "尚未到达" in s7["valueText"]
+    assert s7["categoryLabel"] == "尚未到达", s7["categoryLabel"]
+    assert s7["valueText"] == "2.50 ATR", s7["valueText"]
     assert s7["value"] == 2.5
     s8 = _find_core(res, "dist_adverse")
-    assert "已越过" in s8["valueText"]
+    assert s8["categoryLabel"] == "已越过", s8["categoryLabel"]
+    assert s8["valueText"] == "1.20 ATR", s8["valueText"]
     assert s8["value"] == -1.2  # 原始值保留符号（admin 可追溯），但展示文案不显示负距离
     assert "负" not in s8["valueText"]
-    dbg = _debug_map(res)
+    dbg = _debug_map(sp, tp)
     assert "distance_to_swing_high_atr" in dbg["S7_dist_favorable_boundary"]["sourcePath"]
     assert "distance_to_swing_low_atr" in dbg["S8_dist_adverse_boundary"]["sourcePath"]
 
@@ -300,10 +310,10 @@ def test_s7_s8_no_negative_distance_and_dynamic_source_path():
     )
     res = compute_atomic_facts(sp, tp)
     s7 = _find_core(res, "dist_favorable")
-    assert "已越过" in s7["valueText"]
+    assert s7["categoryLabel"] == "已越过", s7["categoryLabel"]
     s8 = _find_core(res, "dist_adverse")
-    assert "尚未到达" in s8["valueText"]
-    dbg = _debug_map(res)
+    assert s8["categoryLabel"] == "尚未到达", s8["categoryLabel"]
+    dbg = _debug_map(sp, tp)
     # 动态：dsa_dir<0 时 S7 选 low，S8 选 high
     assert "distance_to_swing_low_atr" in dbg["S7_dist_favorable_boundary"]["sourcePath"]
     assert "distance_to_swing_high_atr" in dbg["S8_dist_adverse_boundary"]["sourcePath"]
@@ -487,6 +497,7 @@ def test_recent_changes_precision_and_text():
     assert len(changes) > 0
     for c in changes:
         assert "fromText" in c and "toText" in c and "deltaText" in c
+        assert "label" in c and c["label"], "recentChanges 必须含中文 label"
         assert c["asOf"] in ("2026-07-12", "2026-07-14")
     # 单快照无变化
     assert compute_recent_changes([snap_c]) == []

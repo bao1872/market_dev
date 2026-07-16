@@ -4,6 +4,14 @@
 
 ## 2026-07-16
 
+- CHANGE-20260716-004: AFC V1 原子值 UI 改造（短原子值 + visualKind 统一枚举 + 持久化/调试分离 + 前端状态观察重构）
+  - **后端展示契约**：`valueText` 改短原子值（T1=`上行`、T2=`+0.0123`+`ATR / 根日K`、T4=`18`+`个交易日`、T5=`1.23×`+`分类未启用`、M1/M5/S1/S2=仅 categoryLabel、M3=`+0.000300`+categoryLabel、S3=`0.63`+轨道、S7/S8=`1.23 ATR`+`尚未到达/已越过`、V3=`1.11×`+`分类未启用`）；统一格式器 `_fmt_atomic_value` 读 presentation `valuePrecision`（禁止散落 `.4f/.6f`）；`visualKind` 统一枚举 `metric/value_with_category/relation/position/distance/ratio`；M5 任一缺失即缺失+双true质量异常+文案`正在收紧/正在释放/正常`；`recentChanges` 加中文 `label`（禁止 publicKey 泄露）
+  - **持久化/调试分离**：`compute_atomic_facts()` 仅 core/aux/availability（无 debug）；`compute_atomic_fact_debug()` 管理员即时生成；`build_persisted_afc_payload()` 包装四版本字段（`payloadVersion=1`/`researchContractVersion`/`researchFreezeVersion=V4.13`/`presentationVersion`）+ core/aux/availability，无 debug；`feature_snapshot_service` 改用之；`_is_valid_stored_afc` 严格校验四版本+四组+publicKey+无 debug，不满足→fallback 重算（不回写）；admin debug 走 `compute_atomic_fact_debug(snapshot.payloads)`；persisted-first==fallback；GET 零写入；旧 worker 旧格式由 validator fallback 兼容
+  - **前端重构**：`FactRow` 按 visualKind 渲染去重（relation 仅 categoryLabel 一次、distance 徽章+数值各一次、ratio secondaryText 仅一次）；`.factRow` 改 CSS Grid 透明行（非嵌套卡片）；S3 完整轨道（低位/0.33/0.67/高位+圆点+`0.63 · 中间`）；Auxiliary 按 动量补充/结构补充/成交补充 分组默认收起；RecentChanges 中文 label；Drawer 焦点 trap+关闭恢复焦点+body 滚动锁定+Escape/遮罩/按钮关闭
+  - **测试**：后端 44/44（service 25 + stock_context 14 + contracts 5）+ ruff clean + mypy 仅 pre-existing；前端 contract 21/21 + tsc/eslint clean + vite build 成功；模块自测 OK
+  - **文档**：07/02/04/05/MANIFEST/code-doc-alignment/maps/AGENTS + 本 CHANGE + CHANGELOG；明确 valueText=短、visualKind 渲染、summary 无 debug、M5 任一缺失规则、worker 旧镜像 Known Gap
+  - **部署**：仅 `docker compose up -d --no-deps backend frontend`，不重启 worker/capture/PG/Redis；worker 旧镜像 Known Gap（新 summary 持久化未生产验证）
+
 - CHANGE-20260716-003: AFC V1 双合同分离 + 前端 Compact/Expanded 重构与契约对齐（在 002 基础上继续）
   - **双合同分离**：`atomic_fact_contract_v1.json`（V4.13 冻结研究合同，移除全部 `public_key`/`public_label`，不含产品层语义）+ 新增 `atomic_fact_presentation_v1.json`（按 Fact ID 映射 `publicKey/publicLabel/visualKind/valuePrecision/groupTitle/secondaryLabel`，**恰好 14 Core + 8 Auxiliary，排除 T3/T6/V1**）；生产服务同时读取两份合同（frozen 决定事实/顺序/公式/阈值/路径，presentation 决定产品文案与 UI 类型）
   - **DTO 拆分**：`PublicAtomicFactItem`（无 `factId`/`sourcePath`/`formula`/`thresholdRef`）+ `AdminAtomicFactDebugItem`（保留 factId/publicKey/sourcePath/rawValue/thresholdRef/thresholdEnabled/featureFlag/missing）；缺失事实由 `compute_atomic_facts` 从 Core 数组直接省略（分母固定 14，`availability.coreMissing` 用 publicKey）；M3 不声称 1e-6 已确认（仅 raw>0→增加/raw<0→减少/raw==0→基本不变，`thresholdEnabled=false`）；M5 任一输入缺失即省略、双 true→dataQuality 异常；S1 未知枚举省略；S3 越界省略；S7/S8 管理员 `sourcePath` 随趋势方向动态变化；recentChanges 按展示精度比较返回 fromText/toText/deltaText

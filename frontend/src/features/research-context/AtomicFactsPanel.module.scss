@@ -4,6 +4,8 @@
 //   动量 momentum → $color-brand
 //   结构 structure → $color-purple
 //   成交 volume → $color-warning
+// 事实行采用 CSS Grid（label 左 / value 右 / secondary 跨第二行），行背景透明，
+// 仅底部分隔线；不再是嵌套小卡片。
 // 深色主题对齐项目整体风格；响应式由父容器控制栏宽。
 @use '../../styles/variables.scss' as *;
 
@@ -24,15 +26,20 @@
   overflow-y: auto;
 }
 
-// ===== Header =====
+// ===== Header（两行：标题+版本/N/14；观察日期次行）=====
 .header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid $color-border-soft;
+}
+
+.headerRow {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 6px 10px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid $color-border-soft;
+  gap: 8px;
 }
 
 .headerTitle {
@@ -44,7 +51,7 @@
 .headerMeta {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   color: $color-muted;
   font-size: 12px;
 }
@@ -54,20 +61,21 @@
   font-weight: 600;
 }
 
-.headerAsOf {
-  color: $color-text-dim;
-}
-
 .headerDenom {
   color: $color-muted;
   font-family: $font-mono;
 }
 
-// ===== 维度组卡 =====
+.headerAsOf {
+  color: $color-text-dim;
+  font-size: 12px;
+}
+
+// ===== 维度组卡（四组之一；卡片仅组级，事实行非卡片）=====
 .group {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   padding: 8px 10px;
   background: rgba(255, 255, 255, 0.02);
   border: 1px solid $color-border-soft;
@@ -113,32 +121,52 @@
 .factList {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 0;
 }
 
-// ===== 事实行 =====
+// ===== 事实行：CSS Grid 透明行（非卡片），仅底部分隔线 =====
 .factRow {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 6px 8px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid $color-border-soft;
-  border-radius: $radius-base;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "label value"
+    "secondary secondary";
+  align-items: baseline;
+  gap: 2px 10px;
+  padding: 5px 0;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid $color-border-soft;
+
+  &:last-child {
+    border-bottom: none;
+  }
 }
 
 .factLabel {
+  grid-area: label;
   color: $color-muted;
   font-size: 12px;
 }
 
 .factValue {
+  grid-area: value;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
   color: $color-text;
   font-size: 13px;
   line-height: 1.4;
 }
 
+// metric 数值用等宽字 + 更高字重
+.factValueMetric {
+  font-family: $font-mono;
+  font-weight: 600;
+}
+
 .factSecondary {
+  grid-area: secondary;
   color: $color-text-dim;
   font-size: 11px;
 }
@@ -146,11 +174,11 @@
 // 中性关系徽章（不表达涨跌/利好利空）
 .badge {
   display: inline-block;
-  margin-left: 6px;
   padding: 0 6px;
   font-size: 11px;
   border-radius: 999px;
   border: 1px solid $color-border;
+  white-space: nowrap;
 }
 
 .badgeNeutral {
@@ -162,19 +190,27 @@
   border-color: $color-warning;
 }
 
-// 比值类未启用分类
-.unclassified {
-  display: inline-block;
-  margin-left: 6px;
-  color: $color-text-dim;
-  font-size: 11px;
+// ===== 位置轨道（S3/S6）=====
+// 完整轨道：低位标签 / 0.33 刻度 / 圆点 / 0.67 刻度 / 高位标签
+.railWrap {
+  grid-area: value;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 120px;
 }
 
-// ===== 位置轨道（S3）=====
+.railHead {
+  display: flex;
+  justify-content: space-between;
+  color: $color-text-dim;
+  font-size: 11px;
+  font-family: $font-mono;
+}
+
 .railTrack {
   position: relative;
   height: 8px;
-  margin: 4px 0 2px;
   background: rgba(255, 255, 255, 0.08);
   border-radius: 999px;
 }
@@ -187,6 +223,15 @@
   background: $color-text-dim;
 }
 
+.railTickLabel {
+  position: absolute;
+  top: 10px;
+  transform: translateX(-50%);
+  color: $color-text-dim;
+  font-size: 10px;
+  font-family: $font-mono;
+}
+
 .railKnob {
   position: absolute;
   top: 50%;
@@ -197,7 +242,14 @@
   transform: translate(-50%, -50%);
 }
 
-// ===== Auxiliary 折叠 =====
+// S3 文案：0.63 · 中间（数值 + 分类）
+.railCaption {
+  color: $color-text;
+  font-size: 11px;
+  font-family: $font-mono;
+}
+
+// ===== Auxiliary 分组（动量补充/结构补充/成交补充，默认收起）=====
 .auxSection {
   display: flex;
   flex-direction: column;
@@ -220,10 +272,26 @@
   }
 }
 
+.auxGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 6px 10px;
+  border: 1px solid $color-border-soft;
+  border-radius: $radius-base;
+}
+
+.auxGroupTitle {
+  margin: 0 0 2px;
+  font-size: 12px;
+  font-weight: 600;
+  color: $color-muted;
+  letter-spacing: 0.04em;
+}
+
 .auxList {
   display: flex;
   flex-direction: column;
-  gap: 4px;
 }
 
 // ===== 近期变化 =====
@@ -247,40 +315,43 @@
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
 }
 
 .changeItem {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: baseline;
   gap: 4px 10px;
-  padding: 6px 8px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid $color-border-soft;
-  border-radius: $radius-base;
+  padding: 5px 0;
+  border-bottom: 1px solid $color-border-soft;
+
+  &:last-child {
+    border-bottom: none;
+  }
 }
 
-.changeFact {
+// 中文 label（非 publicKey）
+.changeLabel {
   color: $color-muted;
   font-size: 12px;
 }
 
 .changeArrow {
   color: $color-text;
-  font-size: 13px;
+  font-size: 12px;
+  font-family: $font-mono;
 }
 
 .changeDelta {
   color: $color-text-dim;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .changeAsOf {
   color: $color-text-dim;
   font-size: 11px;
   font-family: $font-mono;
-  margin-left: auto;
 }
 
 .changesEmpty {
@@ -308,6 +379,16 @@
   justify-content: center;
   gap: 8px;
   padding: 24px 12px;
+  color: $color-muted;
+  font-size: 13px;
+}
+
+.errorText {
+  color: $color-warning;
+  font-size: 13px;
+}
+
+.loadingText {
   color: $color-muted;
   font-size: 13px;
 }
