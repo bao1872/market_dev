@@ -3,6 +3,7 @@
   "status": "frozen",
   "derived_from": "atomic_fact_contract_v1.json (V4.13)",
   "purpose": "产品文案与 UI 类型映射；不含研究公式/阈值/路径，非研究合同真源",
+  "unclassifiedLabel": "分类未启用",
   "groups": {
     "trend": "趋势运行",
     "momentum": "动量配合",

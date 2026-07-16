@@ -4,6 +4,23 @@
 
 ## 2026-07-16
 
+- CHANGE-20260716-005: AFC V1 终审修正（M5 单侧缺失 + per-fact 精度 recentChanges + PersistedAtomicFactsPayload 严格 schema + as_of 截止语义 + legacy degradedReasons + meta 三版本 + presentation secondaryLabel 真源 + 前端布局修正）
+  - **后端 M5 单侧缺失**：`_squeeze_state` 改 `if on is None or off is None: return None`（任一缺失即缺失，旧 `and` 改 `or`）；新增四个单侧缺失组合测试均不进入 Core
+  - **RecentChanges per-fact 精度**：`_quantize_fact_value` 按 presentation `valuePrecision` 量化（禁止统一 `round(...,4)`）；`FACT_DIMENSION_BY_ID` 从冻结合同导出 fact_id→dimension 映射，事实消失时仍返回正确维度（禁止默认 trend）；`_combine_text` 组合短值和 category（避免丢失 M3 双文本状态）
+  - **PersistedAtomicFactsPayload Pydantic schema**：`extra="forbid"` + `model_validator` 严格校验四版本/core 键/publicKey 维度/无重复/T3/T6/V1 禁止/availability 一致/无 debug；不兼容必须 fallback 不得 500；7 种损坏类型测试均 fallback
+  - **as_of 截止语义**：`trade_date <= as_of` + DESC 取最新 1 条；周末/无批次日期返回之前最近发布状态
+  - **Legacy degradedReasons**：legacy snapshot 存在但 source_run_id 缺失/歧义时，reasonCode 加入 degradedReasons（不清除原因）；无 snapshot 才用 reasonCode 作空态原因
+  - **meta 三版本**：`AtomicFactsMeta`（payloadVersion/researchFreezeVersion/presentationVersion）加入 `AtomicFactsContextResponse`；前端禁止硬编码 V4.13
+  - **presentation secondaryLabel 真源**：`_secondary_text_for` 统一从 presentation 映射生成 secondaryText；`unclassifiedLabel` 顶层字段；移除散落 `ATR / 根日K`/`个交易日`/`分类未启用` 硬编码常量
+  - **前端 factRow secondary 右列**：`grid-template-areas "label value" / ". secondary"` + `text-align: right`
+  - **前端 PositionRow 独立布局**：`grid-template-areas "label caption" / "track track"`（轨道横跨整组宽度）；`railScale` `space-between` 四刻度；`min-height` 预留刻度高度禁止与 caption 重叠
+  - **前端 RecentChanges deltaText**：渲染 `c.deltaText`（`changeDelta` class）；4 列 grid；禁止 publicKey
+  - **前端 Drawer Tab 双向**：正向 Tab 也检查 `!drawer.contains(active)`，与 Shift+Tab 对称
+  - **前端 Header meta**：移除 `AFC_RESEARCH_VERSION` 常量；从 `data.meta.researchFreezeVersion` 读取
+  - **测试**：后端 56/56（service + stock_context）+ ruff clean + mypy 仅 pre-existing；前端 contract 26/26（新增 5 项）+ tsc/eslint clean + vite build 成功；4 docs 检查全 PASS
+  - **文档**：07/02/04/05/MANIFEST/code-doc-alignment/maps/AGENTS + 本 CHANGE + CHANGELOG；明确 10 个 Aux 中仅 8 个可展开、as_of 截止语义、严格 persisted schema、worker 旧镜像 Known Gap
+  - **部署**：仅 `docker compose up -d --no-deps backend frontend`，不重启 worker/capture/PG/Redis；worker 旧镜像 Known Gap（新 summary 持久化未生产验证）
+
 - CHANGE-20260716-004: AFC V1 原子值 UI 改造（短原子值 + visualKind 统一枚举 + 持久化/调试分离 + 前端状态观察重构）
   - **后端展示契约**：`valueText` 改短原子值（T1=`上行`、T2=`+0.0123`+`ATR / 根日K`、T4=`18`+`个交易日`、T5=`1.23×`+`分类未启用`、M1/M5/S1/S2=仅 categoryLabel、M3=`+0.000300`+categoryLabel、S3=`0.63`+轨道、S7/S8=`1.23 ATR`+`尚未到达/已越过`、V3=`1.11×`+`分类未启用`）；统一格式器 `_fmt_atomic_value` 读 presentation `valuePrecision`（禁止散落 `.4f/.6f`）；`visualKind` 统一枚举 `metric/value_with_category/relation/position/distance/ratio`；M5 任一缺失即缺失+双true质量异常+文案`正在收紧/正在释放/正常`；`recentChanges` 加中文 `label`（禁止 publicKey 泄露）
   - **持久化/调试分离**：`compute_atomic_facts()` 仅 core/aux/availability（无 debug）；`compute_atomic_fact_debug()` 管理员即时生成；`build_persisted_afc_payload()` 包装四版本字段（`payloadVersion=1`/`researchContractVersion`/`researchFreezeVersion=V4.13`/`presentationVersion`）+ core/aux/availability，无 debug；`feature_snapshot_service` 改用之；`_is_valid_stored_afc` 严格校验四版本+四组+publicKey+无 debug，不满足→fallback 重算（不回写）；admin debug 走 `compute_atomic_fact_debug(snapshot.payloads)`；persisted-first==fallback；GET 零写入；旧 worker 旧格式由 validator fallback 兼容

@@ -246,3 +246,83 @@ test('面板收起时不请求 context（enabled=false → 0 请求）', () => {
   assert.ok(/useStockContext/.test(panelSrc), 'Panel 必须使用 useStockContext')
   assert.ok(/enabled/.test(panelSrc), 'useStockContext 必须支持 enabled 门控')
 })
+
+// ===== CHANGE-20260716-005：AFC V1 终审修正契约测试 =====
+
+const SCSS_PATH = join(FRONTEND_ROOT, 'features', 'research-context', 'AtomicFactsPanel.module.scss')
+
+test('factRow secondary 位于第二行右列（grid-template-areas ". secondary" + text-align right）', () => {
+  const scss = readSource(SCSS_PATH)
+  // grid-template-areas 必须为 "label value" ". secondary"（secondary 仅占右列）
+  assert.ok(
+    /"label value"\s*"\.\s*secondary"/.test(scss),
+    '.factRow grid-template-areas 必须为 "label value" / ". secondary"（secondary 仅右列）',
+  )
+  // .factSecondary 必须右对齐
+  const secBlock = scss.match(/\.factSecondary\s*\{[^}]*\}/s)
+  assert.ok(secBlock, '必须定义 .factSecondary')
+  assert.ok(/text-align:\s*right/.test(secBlock[0]), '.factSecondary 必须 text-align: right')
+})
+
+test('PositionRow 使用独立布局：第一行 label/caption，第二行轨道横跨整组宽度', () => {
+  const panelSrc = readSource(PANEL_PATH)
+  const scss = readSource(SCSS_PATH)
+  // Panel 必须使用 positionRow class（非 factRow）
+  assert.ok(/positionRow/.test(panelSrc), 'PositionRail 必须使用 positionRow class（独立布局）')
+  // SCSS 必须定义 .positionRow 且 grid-template-areas 第二行 track track（横跨整组）
+  const posBlock = scss.match(/\.positionRow\s*\{[^}]*\}/s)
+  assert.ok(posBlock, '必须定义 .positionRow')
+  assert.ok(
+    /"label caption"\s*"track track"/.test(posBlock[0]),
+    '.positionRow grid-template-areas 必须为 "label caption" / "track track"（轨道全宽）',
+  )
+  // 必须有 railScale（四刻度 低位/0.33/0.67/高位）和 railTrackWrap（预留刻度高度）
+  assert.ok(/railScale/.test(panelSrc), 'PositionRail 必须含 railScale（四刻度）')
+  assert.ok(/railTrackWrap/.test(panelSrc), 'PositionRail 必须含 railTrackWrap')
+  const wrapBlock = scss.match(/\.railTrackWrap\s*\{[^}]*\}/s)
+  assert.ok(wrapBlock, '必须定义 .railTrackWrap')
+  assert.ok(/min-height/.test(wrapBlock[0]), '.railTrackWrap 必须预留 min-height 防止刻度与 caption 重叠')
+  // railScale 必须用 space-between 均匀分布四刻度
+  const scaleBlock = scss.match(/\.railScale\s*\{[^}]*\}/s)
+  assert.ok(scaleBlock, '必须定义 .railScale')
+  assert.ok(/justify-content:\s*space-between/.test(scaleBlock[0]), '.railScale 必须 space-between 均匀分布')
+})
+
+test('RecentChanges 显示 deltaText（变化类型文案）', () => {
+  const src = readSource(PANEL_PATH)
+  assert.ok(/c\.deltaText/.test(src), 'RecentChanges 必须渲染 c.deltaText')
+  assert.ok(/changeDelta/.test(src), 'RecentChanges 必须使用 changeDelta class')
+  // 不得渲染 publicKey（已有测试覆盖，此处再次断言确保 deltaText 改造未引入回退）
+  assert.ok(!/\{c\.publicKey\}/.test(src), 'RecentChanges 不得渲染 publicKey')
+})
+
+test('Header 从 API meta 读取 researchFreezeVersion，禁止硬编码 V4.13', () => {
+  const panelSrc = readSource(PANEL_PATH)
+  const endpointsSrc = readSource(ENDPOINTS_PATH)
+  // Panel 不得保留硬编码常量
+  assert.ok(!/AFC_RESEARCH_VERSION/.test(panelSrc), 'Panel 不得硬编码 AFC_RESEARCH_VERSION 常量')
+  assert.ok(!/V4\.13/.test(panelSrc), 'Panel 不得硬编码 V4.13 字面量')
+  // 必须从 data.meta.researchFreezeVersion 读取
+  assert.ok(
+    /data\.meta\.researchFreezeVersion/.test(panelSrc),
+    'Header 必须从 data.meta.researchFreezeVersion 读取研究版本',
+  )
+  // endpoints.ts 必须定义 AtomicFactsMeta 且 AtomicFactsContextResponse 含 meta 字段
+  assert.ok(/export interface AtomicFactsMeta/.test(endpointsSrc), 'endpoints.ts 必须定义 AtomicFactsMeta')
+  assert.ok(/meta:\s*AtomicFactsMeta/.test(endpointsSrc), 'AtomicFactsContextResponse 必须含 meta: AtomicFactsMeta')
+})
+
+test('Drawer 正向 Tab 也处理焦点离开 drawer 的情况（!drawer.contains(active) 双向）', () => {
+  const src = readSource(DRAWER_PATH)
+  // 非_shift 分支（正向 Tab）必须也包含 !drawer.contains(active) 条件
+  // 提取 else 分支后断言
+  const elseBranch = src.match(/else\s*\{[^}]*active === last[^}]*\}/s)
+  assert.ok(elseBranch, 'Drawer 必须有正向 Tab 的 else 分支')
+  assert.ok(
+    /!drawer\.contains\(active\)/.test(elseBranch[0]),
+    '正向 Tab 分支必须处理焦点离开 drawer（!drawer.contains(active)）',
+  )
+  // shift 分支也必须有（已有，但再次断言确保未回退）
+  const shiftBranch = src.match(/if\s*\(e\.shiftKey\)[^{]*\{[^}]*!drawer\.contains\(active\)[^}]*\}/s)
+  assert.ok(shiftBranch, 'Shift+Tab 分支必须处理焦点离开 drawer')
+})

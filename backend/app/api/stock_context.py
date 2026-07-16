@@ -35,6 +35,7 @@ from app.models.stock_feature_snapshot_run import (
 from app.schemas.atomic_fact_contract import (
     AdminStockDebugResponse,
     AtomicFactsContextResponse,
+    PersistedAtomicFactsPayload,
 )
 from app.schemas.stock_state import (
     StockContextDataQuality,
@@ -119,21 +120,24 @@ async def _find_run_by_trade_date(
     trade_date: date,
     schema_version: int = _SCHEMA_VERSION,
 ) -> StockFeatureSnapshotRun | None:
-    """按 trade_date 查找 succeeded run（as_of 历史回看）。
+    """按 as_of 截止日期查找 succeeded+published+full run。
 
-    P0-3: 确定性排序 — published_at DESC, finished_at DESC
-    确保同日多 run 时选择最新发布的批次。
+    as_of 为截止日期语义（非当天精确匹配）：
+    - 查 `trade_date <= as_of`，按 trade_date DESC, published_at DESC, finished_at DESC
+      取最新 1 条；
+    - 周末/节假日/无批次日期返回该日期之前最近一次已发布状态（而非空态）。
     """
     stmt = (
         select(StockFeatureSnapshotRun)
         .where(
-            StockFeatureSnapshotRun.trade_date == trade_date,
+            StockFeatureSnapshotRun.trade_date <= trade_date,
             StockFeatureSnapshotRun.schema_version == schema_version,
             StockFeatureSnapshotRun.status == STATUS_SUCCEEDED,
             StockFeatureSnapshotRun.published_at.is_not(None),
             StockFeatureSnapshotRun.metadata_["scope"].astext == "full",
         )
         .order_by(
+            desc(StockFeatureSnapshotRun.trade_date),
             desc(StockFeatureSnapshotRun.published_at),
             desc(StockFeatureSnapshotRun.finished_at),
         )
@@ -206,14 +210,28 @@ def _build_data_quality(
     snapshot: StockFeatureSnapshot | None,
     reason_code: str | None = None,
 ) -> StockContextDataQuality:
-    """构建数据质量信息（含 reasonCode）。"""
-    # state 非空时 reasonCode 为 None；state 为空时使用传入的 reason_code
-    effective_reason = None if snapshot is not None else reason_code
+    """构建数据质量信息（含 reasonCode / degradedReasons）。
+
+    降级原因处理：
+    - 无 snapshot：reasonCode 保留传入的 reason_code（如 snapshot_missing）；
+    - snapshot 存在但 legacy/ambiguous（snapshot_run_not_linked /
+      legacy_snapshot_ambiguous）：不清除 reason，加入 degradedReasons；
+    - 精确匹配（reason_code=None）：无降级原因。
+    """
+    degraded: list[str] = list(snapshot.degraded_reasons) if snapshot else []
+    if snapshot is not None and reason_code is not None:
+        # legacy/ambiguous 快照存在但归属状态异常：加入 degradedReasons（不清除）
+        if reason_code not in degraded:
+            degraded.append(reason_code)
+        effective_reason: str | None = reason_code
+    else:
+        # 无 snapshot：保留传入的 reason_code；精确匹配：None
+        effective_reason = None if snapshot is not None else reason_code
     return StockContextDataQuality(
         hasSucceededRun=run is not None,
         hasSnapshot=snapshot is not None,
         reasonCode=effective_reason,
-        degradedReasons=snapshot.degraded_reasons if snapshot else [],
+        degradedReasons=degraded,
         runTradeDate=run.trade_date.isoformat() if run else None,
         runPublishedAt=run.published_at.isoformat() if run and run.published_at else None,
         instrumentStatus=instrument.status,
@@ -223,37 +241,35 @@ def _build_data_quality(
 def _is_valid_stored_afc(stored: Any) -> bool:
     """严格校验 summary_payload.atomic_fact_contract_v1 是否为当前持久化结构。
 
-    必须包含四个版本字段（且与当前常量一致）、四组（core/auxiliary/
-    availability，core 为四维度分组）、含 publicKey、且不含 debug 数组。
-    任一不满足 → 返回 False，触发纯函数 fallback 重算（不回写旧快照）。
+    委托 PersistedAtomicFactsPayload Pydantic Schema 严格校验：
+    - 四版本字段完全匹配；
+    - core 键恰好 trend/momentum/structure/volume；
+    - 每一项均通过 PublicAtomicFactItem；
+    - publicKey 属于正确维度且无重复/未知；
+    - T3/T6/V1 不存在；
+    - availability 与实际数组及固定分母 14 一致；
+    - 不含 debug（extra=forbid）。
+    任一不满足 → 返回 False，触发纯函数 fallback 重算（不回写旧快照），不得 500。
     """
     if not isinstance(stored, dict):
         return False
-    expected_versions = {
-        "payloadVersion": AFC_PAYLOAD_VERSION,
-        "researchContractVersion": CONTRACT_VERSION,
-        "researchFreezeVersion": RESEARCH_FREEZE_VERSION,
-        "presentationVersion": PRESENTATION_VERSION,
-    }
-    for k, v in expected_versions.items():
-        if stored.get(k) != v:
-            return False
-    if not isinstance(stored.get("core"), dict):
+    try:
+        PersistedAtomicFactsPayload.model_validate(stored)
+        return True
+    except Exception:  # noqa: BLE001 - 任意校验异常均触发 fallback
         return False
-    if not isinstance(stored.get("auxiliary"), list):
-        return False
-    av = stored.get("availability")
-    if not isinstance(av, dict) or av.get("coreDenominator") != 14:
-        return False
-    if "debug" in stored:
-        return False
-    for items in stored["core"].values():
-        if items:
-            return isinstance(items[0], dict) and "publicKey" in items[0]
-    return False
 
 
 # 管理员 debug 由 compute_atomic_fact_debug 按需即时生成（见下方 include_raw 分支）。
+
+
+def _afc_meta() -> dict[str, str]:
+    """公共响应 meta：三版本字段（前端禁止硬编码 V4.13）。"""
+    return {
+        "payloadVersion": AFC_PAYLOAD_VERSION,
+        "researchFreezeVersion": RESEARCH_FREEZE_VERSION,
+        "presentationVersion": PRESENTATION_VERSION,
+    }
 
 
 def _empty_atomic_response(
@@ -263,6 +279,7 @@ def _empty_atomic_response(
     """无 run / 无快照时的空态响应（Core 分母仍固定 14，全部缺失）。"""
     return {
         "contractVersion": CONTRACT_VERSION,
+        "meta": _afc_meta(),
         "asOf": None,
         "core": {dim: [] for dim in ("trend", "momentum", "structure", "volume")},
         "auxiliary": [],
@@ -389,6 +406,7 @@ async def _build_stock_context(
 
     response: dict[str, Any] = {
         "contractVersion": CONTRACT_VERSION,
+        "meta": _afc_meta(),
         "asOf": run.trade_date.isoformat(),
         "core": facts["core"],
         "auxiliary": facts["auxiliary"],

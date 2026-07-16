@@ -2859,9 +2859,21 @@ export interface StockContextDataQuality {
   instrumentStatus: string
 }
 
+/** AtomicFactsMeta - 公共响应 meta：三版本字段（前端禁止硬编码 V4.13） */
+export interface AtomicFactsMeta {
+  /** 持久化 payload schema 版本（当前 1） */
+  payloadVersion: string
+  /** 研究合同冻结版本（V4.13） */
+  researchFreezeVersion: string
+  /** 产品展示合同版本 */
+  presentationVersion: string
+}
+
 /** AtomicFactsContextResponse - GET /stocks/{symbol}/context 用户侧响应（只读） */
 export interface AtomicFactsContextResponse {
   contractVersion: string
+  /** 三版本元数据（前端禁止硬编码 V4.13，必须从 meta 读取） */
+  meta: AtomicFactsMeta
   asOf: string | null
   core: Record<string, AtomicFactItem[]>
   auxiliary: AtomicFactItem[]

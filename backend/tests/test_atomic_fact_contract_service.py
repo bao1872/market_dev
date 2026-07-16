@@ -28,18 +28,14 @@ import json
 
 import pytest
 
-from app.schemas.atomic_fact_contract import AtomicFactsContextResponse
+from app.schemas.atomic_fact_contract import AtomicFactsContextResponse, AtomicFactsMeta
 from app.schemas.stock_state import StockContextDataQuality
 from app.services import atomic_fact_contract_service as svc
 from app.services.atomic_fact_contract_service import (
-    AFC_PAYLOAD_VERSION,
     AUX_FACT_IDS,
     CORE_FACT_IDS,
     CORE_PUBLIC_KEY,
-    PRESENTATION_VERSION,
-    RESEARCH_FREEZE_VERSION,
     REJECTED_FACT_IDS,
-    build_persisted_afc_payload,
     compute_atomic_fact_debug,
     compute_atomic_facts,
     compute_recent_changes,
@@ -245,6 +241,25 @@ def test_m5_states_and_inconsistent_missing():
     res = compute_atomic_facts(sp, tp)
     assert not _core_present(res, "squeeze_state")  # 缺失（不进入用户数组）
     assert "m5_inconsistent" in res["availability"]["warnings"]
+
+
+@pytest.mark.parametrize(
+    "sqz_on,sqz_off",
+    [
+        (None, False),
+        (False, None),
+        (None, True),
+        (True, None),
+    ],
+)
+def test_m5_single_side_missing(sqz_on, sqz_off):
+    """任一输入缺失即缺失，禁止伪装 NORMAL，禁止进入 Core。"""
+    sp, tp = _base_payload(vol={"sqz_on": sqz_on, "sqz_off": sqz_off})
+    res = compute_atomic_facts(sp, tp)
+    assert not _core_present(res, "squeeze_state")
+    assert "squeeze_state" in res["availability"]["coreMissing"]
+    # 单侧缺失不应触发 m5_inconsistent warning
+    assert "m5_inconsistent" not in res["availability"]["warnings"]
 
 
 # ---------------------------------------------------------------------------
@@ -503,6 +518,71 @@ def test_recent_changes_precision_and_text():
     assert compute_recent_changes([snap_c]) == []
 
 
+def test_recent_changes_per_fact_precision_boundaries():
+    """各事实按自身 presentation valuePrecision 量化，禁止统一 round(..., 4)。
+
+    - T5 valuePrecision=2：第 3、4 位差异不应产生变化
+    - M3 valuePrecision=6：第 5、6 位真实差异必须保留（不被 4 位吞掉）
+    """
+    # T5 (slope_ratio) precision=2：1.231 与 1.232 量化到 2 位都为 1.23 → 无变化
+    sp_a, tp_a = _base_payload(dsa={
+        "current_dsa_segment_slope_atr_per_bar": 1.0,
+        "prev_dsa_segment_slope_atr_per_bar": 0.8127,
+    })
+    sp_b, tp_b = _base_payload(dsa={
+        "current_dsa_segment_slope_atr_per_bar": 1.0,
+        "prev_dsa_segment_slope_atr_per_bar": 0.8128,
+    })
+    snap_a = {"trade_date": "2026-07-10", "structural_payload": sp_a, "temporal_payload": tp_a}
+    snap_b = {"trade_date": "2026-07-11", "structural_payload": sp_b, "temporal_payload": tp_b}
+    changes = compute_recent_changes([snap_a, snap_b])
+    slope_changes = [c for c in changes if c["publicKey"] == "slope_ratio"]
+    assert slope_changes == [], "T5 precision=2：1.231/1.232 量化相同不应产生变化"
+
+    # M3 (momentum_delta) precision=6：1e-5 差异必须产生变化（4 位会吞掉）
+    sp_c, tp_c = _base_payload(vol={"sqzmom_delta_1": 0.000100})
+    sp_d, tp_d = _base_payload(vol={"sqzmom_delta_1": 0.000110})
+    snap_c = {"trade_date": "2026-07-12", "structural_payload": sp_c, "temporal_payload": tp_c}
+    snap_d = {"trade_date": "2026-07-13", "structural_payload": sp_d, "temporal_payload": tp_d}
+    changes = compute_recent_changes([snap_c, snap_d])
+    m3_changes = [c for c in changes if c["publicKey"] == "momentum_delta"]
+    assert len(m3_changes) == 1, "M3 precision=6：1e-5 差异必须保留产生变化"
+    # M3 同时有 valueText 与 categoryLabel，组合文本应同时包含两者
+    assert "·" in m3_changes[0]["fromText"]
+    assert "·" in m3_changes[0]["toText"]
+
+
+def test_recent_changes_dimension_when_fact_disappears():
+    """事实由存在变缺失时 dimension 必须来自 FACT_DIMENSION_BY_ID（禁止默认 trend）。"""
+    # S3 存在 → S3 缺失（position 越界）
+    sp_a, tp_a = _base_payload(swing={"price_position_in_active_swing_0_1": 0.50})
+    sp_b, tp_b = _base_payload(swing={"price_position_in_active_swing_0_1": 1.5})  # 越界 → 缺失
+    snap_a = {"trade_date": "2026-07-10", "structural_payload": sp_a, "temporal_payload": tp_a}
+    snap_b = {"trade_date": "2026-07-11", "structural_payload": sp_b, "temporal_payload": tp_b}
+    changes = compute_recent_changes([snap_a, snap_b])
+    s3_changes = [c for c in changes if c["publicKey"] == "active_position"]
+    assert len(s3_changes) == 1, "S3 由存在变缺失应产生变化"
+    assert s3_changes[0]["dimension"] == "structure", (
+        "事实消失时 dimension 必须来自 FACT_DIMENSION_BY_ID，禁止默认 trend"
+    )
+
+    # V3 (volume) 由存在变缺失：dimension 必须是 volume 而非 trend
+    sp_c, tp_c = _base_payload(dsa={
+        "current_segment_volume_sum": 1_000_000.0,
+        "prev_segment_volume_sum": 800_000.0,
+    })
+    sp_d, tp_d = _base_payload(dsa={
+        "current_segment_volume_sum": None,
+        "prev_segment_volume_sum": None,
+    })
+    snap_c = {"trade_date": "2026-07-12", "structural_payload": sp_c, "temporal_payload": tp_c}
+    snap_d = {"trade_date": "2026-07-13", "structural_payload": sp_d, "temporal_payload": tp_d}
+    changes = compute_recent_changes([snap_c, snap_d])
+    v3_changes = [c for c in changes if c["publicKey"] == "volume_ratio"]
+    assert len(v3_changes) == 1
+    assert v3_changes[0]["dimension"] == "volume", "V3 dimension 必须是 volume"
+
+
 # ---------------------------------------------------------------------------
 # 17. schema 装配验证（用户响应无 factId/sourcePath）
 # ---------------------------------------------------------------------------
@@ -513,6 +593,11 @@ def test_response_schema_assembly():
     res = compute_atomic_facts(sp, tp)
     resp = AtomicFactsContextResponse(
         contractVersion=svc.CONTRACT_VERSION,
+        meta=AtomicFactsMeta(
+            payloadVersion=svc.AFC_PAYLOAD_VERSION,
+            researchFreezeVersion=svc.RESEARCH_FREEZE_VERSION,
+            presentationVersion=svc.PRESENTATION_VERSION,
+        ),
         asOf="2026-07-14",
         core=res["core"],
         auxiliary=res["auxiliary"],
@@ -525,6 +610,8 @@ def test_response_schema_assembly():
         ),
     )
     assert resp.contractVersion == "Atomic Fact Contract V1"
+    assert resp.meta.researchFreezeVersion == "V4.13"
+    assert resp.meta.payloadVersion == "1"
     assert resp.availability.coreDenominator == 14
     # 用户响应字段不得含内部 ID/路径
     dumped = resp.model_dump()

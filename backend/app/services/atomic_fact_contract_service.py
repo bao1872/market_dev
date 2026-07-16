@@ -116,6 +116,15 @@ CONTRACT_VERSION = _CONTRACT.get("contract_version", "Atomic Fact Contract V1")
 # dimension 分组顺序（用于 UI 固定四组顺序）
 _DIMENSION_ORDER = ["trend", "momentum", "structure", "volume"]
 
+# Fact ID → dimension（冻结合同级；事实消失时仍返回正确维度，禁止默认 trend）
+FACT_DIMENSION_BY_ID: dict[str, str] = {
+    f["id"]: f["dimension"]
+    for f in _CONTRACT["core_facts"] + _CONTRACT["auxiliary_facts"]
+}
+# 校验：所有事实 ID 都有 dimension
+assert all(fid in FACT_DIMENSION_BY_ID for fid in CORE_FACT_IDS + AUX_FACT_IDS)
+assert set(FACT_DIMENSION_BY_ID.values()) <= set(_DIMENSION_ORDER)
+
 # ---------------------------------------------------------------------------
 # 版本常量（持久化 payload 校验用）
 # ---------------------------------------------------------------------------
@@ -156,6 +165,31 @@ def _fmt_atomic_value(fact_id: str, value: float | None) -> str | None:
     if fact_id in _SIGNED_FACTS:
         return f"{'+' if value > 0 else ''}{value:.{prec}f}"
     return f"{value:.{prec}f}"
+
+
+# 未分类标签（T5/V3 阈值未启用时使用），由 presentation 合同提供，禁止散落常量
+_UNCLASSIFIED_LABEL: str = _PRES.get("unclassifiedLabel", "分类未启用")
+
+
+def _secondary_text_for(fact_id: str, *, value_present: bool, threshold_enabled: bool = True) -> str | None:
+    """统一获取弱说明/单位文本（presentation 为唯一真源，禁止散落常量）。
+
+    - 事实缺失 → None（不显示弱说明）；
+    - presentation.secondaryLabel 非空 → 返回 secondaryLabel（单位/弱说明）；
+    - 阈值未启用（thresholdEnabled=False）且无 secondaryLabel → 返回 unclassifiedLabel；
+    - 其余 → None。
+
+    适用：T2="每根日K"、T4="根日K"、T5/V3=未分类标签。
+    """
+    if not value_present:
+        return None
+    meta = _PRES_FACTS.get(fact_id)
+    secondary_label = meta.get("secondaryLabel") if meta else None
+    if secondary_label:
+        return secondary_label
+    if not threshold_enabled:
+        return _UNCLASSIFIED_LABEL
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -315,10 +349,13 @@ def _active_vs_developing(active_dir: float | None, dev_dir: float | None) -> st
 
 
 def _squeeze_state(sqz_on: Any, sqz_off: Any) -> str | None:
-    """波动收紧状态。双 true 为 data-quality 异常（返回 INCONSISTENT，调用方转缺失+告警）。"""
+    """波动收紧状态。任一输入缺失即缺失（不伪装 NORMAL）。
+
+    双 true 为 data-quality 异常（返回 INCONSISTENT，调用方转缺失+告警）。
+    """
     on = None if sqz_on is None else bool(sqz_on)
     off = None if sqz_off is None else bool(sqz_off)
-    if on is None and off is None:
+    if on is None or off is None:
         return None
     if on is True and off is True:
         return "INCONSISTENT"  # 数据质量异常，非事实值
@@ -490,7 +527,7 @@ def _compute_emissions(
         value=t2_val,
         value_text=_fmt_atomic_value("T2_aligned_slope", t2_val) if t2_val is not None else None,
         source_path="structural_payload.primary.1d.dsa_segment.current_dsa_segment_slope_atr_per_bar",
-        secondary_text="ATR / 根日K",
+        secondary_text=_secondary_text_for("T2_aligned_slope", value_present=not t2_missing),
         missing=t2_missing,
     )
     core_items["T2_aligned_slope"] = p  # type: ignore[assignment]
@@ -508,7 +545,7 @@ def _compute_emissions(
         value=t4_age,
         value_text=_fmt_atomic_value("T4_trend_age", t4_age) if t4_age is not None else None,
         source_path="structural_payload.primary.1d.dsa_segment.current_dsa_segment_age_bars",
-        secondary_text="个交易日",
+        secondary_text=_secondary_text_for("T4_trend_age", value_present=not t4_missing),
         missing=t4_missing,
     )
     core_items["T4_trend_age"] = p  # type: ignore[assignment]
@@ -534,7 +571,9 @@ def _compute_emissions(
         source_path="structural_payload.primary.1d.dsa_segment.prev_dsa_segment_slope_atr_per_bar",
         threshold_ref=_THRESHOLD_REF["T5_slope_ratio"],
         threshold_enabled=False,
-        secondary_text="分类未启用" if t5_ratio is not None else None,
+        secondary_text=_secondary_text_for(
+            "T5_slope_ratio", value_present=t5_ratio is not None, threshold_enabled=False,
+        ),
         missing=t5_missing,
     )
     core_items["T5_slope_ratio"] = p  # type: ignore[assignment]
@@ -766,7 +805,9 @@ def _compute_emissions(
         source_path="structural_payload.primary.1d.dsa_segment.current_segment_volume_sum",
         threshold_ref=_THRESHOLD_REF["V3_avg_volume_ratio"],
         threshold_enabled=False,
-        secondary_text="分类未启用" if v3_ratio is not None else None,
+        secondary_text=_secondary_text_for(
+            "V3_avg_volume_ratio", value_present=v3_ratio is not None, threshold_enabled=False,
+        ),
         missing=v3_missing,
     )
     core_items["V3_avg_volume_ratio"] = p  # type: ignore[assignment]
@@ -1055,11 +1096,17 @@ FEATURE_FLAGS: dict[str, bool] = {
 # ---------------------------------------------------------------------------
 
 
-def _quantize_value(v: float | None) -> float | None:
-    """按公开显示精度量化（4 位小数），避免 float 精确不等制造噪声。"""
+def _quantize_fact_value(fact_id: str, v: float | None) -> float | None:
+    """按该事实的 presentation valuePrecision 量化，避免 float 精确不等制造噪声。
+
+    每个事实的展示精度由 presentation 合同定义（T5/S3/S7/S8/V3=2，T2/M2=4，M3=6，
+    整数类=0），禁止统一 round(..., 4) 吞掉 M3 第 5、6 位真实变化。
+    """
     if v is None:
         return None
-    return round(v, 4)
+    meta = _PRES_FACTS.get(fact_id)
+    prec = int(meta.get("valuePrecision", 4)) if meta else 4
+    return round(v, prec)
 
 
 def compute_recent_changes(
@@ -1067,7 +1114,7 @@ def compute_recent_changes(
 ) -> list[dict[str, Any]]:
     """从 ≤10 个已发布兼容快照（按 trade_date 升序）只读计算 Core 事实变化。
 
-    比较按各事实公开显示精度（value 量化 4 位小数 + categoryLabel），
+    比较按各事实 presentation 展示精度（valuePrecision）量化 value + categoryLabel，
     返回 fromText / toText / deltaText，明确非 Core 且不解释利好利空。
 
     Args:
@@ -1076,7 +1123,7 @@ def compute_recent_changes(
 
     Returns:
         变化记录列表（按时间升序），每条：
-        {publicKey, dimension, fromText, toText, deltaText, asOf}
+        {publicKey, dimension, label, fromText, toText, deltaText, asOf}
     """
     if len(snapshots) < 2:
         return []
@@ -1088,6 +1135,18 @@ def compute_recent_changes(
                 if it["publicKey"] == CORE_PUBLIC_KEY[fid]:
                     return it.get("valueText"), it.get("categoryLabel")
         return None, None
+
+    def _combine_text(text: str | None, cat: str | None) -> str | None:
+        """组合短值与 category，避免丢失 M3（同时有 valueText 与 categoryLabel）状态。
+
+        - 两者都有 → "值 · 分类"
+        - 只有值 → 值
+        - 只有分类 → 分类
+        - 都没有 → None（表示事实缺失）
+        """
+        if text and cat:
+            return f"{text} · {cat}"
+        return text or cat
 
     changes: list[dict[str, Any]] = []
     # 预计算每个快照的事实结果（只读计算）
@@ -1111,9 +1170,13 @@ def compute_recent_changes(
         for fid in CORE_FACT_IDS:
             p_text, p_cat = prev_texts[fid]
             c_text, c_cat = cur_texts[fid]
-            p_qv = _quantize_value(prev_values[fid])
-            c_qv = _quantize_value(cur_values[fid])
-            if (p_text, p_cat, p_qv) == (c_text, c_cat, c_qv):
+            # 按各事实展示精度量化，避免 float 噪声
+            p_qv = _quantize_fact_value(fid, prev_values[fid])
+            c_qv = _quantize_fact_value(fid, cur_values[fid])
+            # 组合文本（保留 M3 同时有值+分类的状态）
+            p_combined = _combine_text(p_text, p_cat)
+            c_combined = _combine_text(c_text, c_cat)
+            if (p_combined, p_qv) == (c_combined, c_qv):
                 continue
             # deltaText 仅描述变化类型，不解释利好利空
             if p_cat is not None or c_cat is not None:
@@ -1125,9 +1188,9 @@ def compute_recent_changes(
             changes.append({
                 "publicKey": CORE_PUBLIC_KEY[fid],
                 "label": CORE_PUBLIC_LABEL[fid],
-                "dimension": _dim_of(cur, fid),
-                "fromText": p_text or p_cat or "—",
-                "toText": c_text or c_cat or "—",
+                "dimension": FACT_DIMENSION_BY_ID.get(fid, "trend"),
+                "fromText": p_combined or "—",
+                "toText": c_combined or "—",
                 "deltaText": delta_text,
                 "asOf": snapshots[idx]["trade_date"],
             })
@@ -1146,14 +1209,6 @@ def _value_of(result: dict[str, Any], fid: str) -> float | None:
             if it["publicKey"] == CORE_PUBLIC_KEY[fid]:
                 return it.get("value")
     return None
-
-
-def _dim_of(result: dict[str, Any], fid: str) -> str:
-    for _dim, items in result["core"].items():
-        for it in items:
-            if it["publicKey"] == CORE_PUBLIC_KEY[fid]:
-                return _dim
-    return "trend"
 
 
 # ---------------------------------------------------------------------------

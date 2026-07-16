@@ -687,3 +687,296 @@ async def test_admin_debug_full_traceability(
     t3 = [d for d in debug if d["factId"] == "T3_trend_efficiency"]
     if t3:
         assert t3[0]["featureFlag"] is False
+
+
+# =============================================================================
+# 15. 公共响应 meta 三版本字段
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_response_meta_versions(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    instrument_factory: AsyncFactory,
+    member_with_sub: User,
+) -> None:
+    """公共响应 meta 必须含三版本字段（前端禁止硬编码 V4.13）。"""
+    inst = await instrument_factory(symbol="ATOMICMETA")
+    sp, tp = _base_payload()
+    await _make_published_run_and_snapshot(db_session, inst.id, date(2026, 7, 14), sp, tp)
+
+    resp = await client.get(
+        f"/api/v1/stocks/{inst.symbol}/context",
+        headers=_auth_headers(member_with_sub.id),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert "meta" in body
+    meta = body["meta"]
+    assert meta["payloadVersion"] == "1"
+    assert meta["researchFreezeVersion"] == "V4.13"
+    assert meta["presentationVersion"] == "Atomic Fact Presentation V1"
+
+    # 空态响应也必须含 meta
+    inst_empty = await instrument_factory(symbol="ATOMICMETA2")
+    r_empty = await client.get(
+        f"/api/v1/stocks/{inst_empty.symbol}/context",
+        headers=_auth_headers(member_with_sub.id),
+    )
+    assert r_empty.status_code == 200
+    b_empty = r_empty.json()
+    assert b_empty["meta"]["researchFreezeVersion"] == "V4.13"
+    assert b_empty["meta"]["payloadVersion"] == "1"
+
+
+# =============================================================================
+# 16. as_of 周末/节假日返回最近批次
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_as_of_weekend_returns_previous_batch(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    instrument_factory: AsyncFactory,
+    member_with_sub: User,
+) -> None:
+    """as_of 截止日期语义：周末/无批次日期返回之前最近一次已发布状态（非空态）。
+
+    构造：07-14（周一）有批次；07-18（周六）无批次。
+    as_of=07-18 应返回 07-14 的状态（asOf='2026-07-14'），而非空态。
+    """
+    inst = await instrument_factory(symbol="ATOMICASOFWK")
+    sp, tp = _base_payload()
+    await _make_published_run_and_snapshot(db_session, inst.id, date(2026, 7, 14), sp, tp)
+
+    # as_of=2026-07-18（周六）应回退到 07-14
+    resp = await client.get(
+        f"/api/v1/stocks/{inst.symbol}/context?as_of=2026-07-18",
+        headers=_auth_headers(member_with_sub.id),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["asOf"] == "2026-07-14", (
+        f"as_of=07-18（周末）应回退到最近 07-14，实际 asOf={body['asOf']}"
+    )
+    assert body["dataQuality"]["hasSucceededRun"] is True
+    assert body["dataQuality"]["hasSnapshot"] is True
+
+    # as_of 早于所有批次（07-10）→ 空态
+    resp_early = await client.get(
+        f"/api/v1/stocks/{inst.symbol}/context?as_of=2026-07-10",
+        headers=_auth_headers(member_with_sub.id),
+    )
+    body_early = resp_early.json()
+    assert body_early["asOf"] is None
+    assert body_early["dataQuality"]["hasSucceededRun"] is False
+
+
+# =============================================================================
+# 17. Legacy snapshot 降级原因进入 degradedReasons
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_legacy_snapshot_reason_in_degraded_reasons(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    instrument_factory: AsyncFactory,
+    member_with_sub: User,
+) -> None:
+    """Legacy snapshot 存在但 source_run_id 缺失/歧义时，原因进入 degradedReasons。
+
+    构造：snapshot.source_run_id = NULL（snapshot_run_not_linked）。
+    期望：dataQuality.hasSnapshot=True, reasonCode='snapshot_run_not_linked',
+          degradedReasons 含 'snapshot_run_not_linked'。
+    """
+    inst = await instrument_factory(symbol="ATOMICLEGACY")
+    sp, tp = _base_payload()
+    # 正常构造 run + snapshot，但人为将 snapshot.source_run_id 置 NULL
+    # legacy 回退查询按 (instrument_id, trade_date, schema_version,
+    # primary_timeframe, secondary_timeframe, adj) 匹配，故 run 与 snapshot 必须一致
+    now = datetime.now(UTC)
+    run = StockFeatureSnapshotRun(
+        schema_version=_SCHEMA_VERSION,
+        status=STATUS_SUCCEEDED,
+        run_type="scheduled",
+        trade_date=date(2026, 7, 14),
+        started_at=now,
+        finished_at=now,
+        published_at=now,
+        metadata_={"scope": "full"},
+        primary_timeframe="1d",
+        secondary_timeframe="15m",
+        adj="hfq",
+    )
+    db_session.add(run)
+    await db_session.flush()
+
+    snapshot = StockFeatureSnapshot(
+        instrument_id=inst.id,
+        trade_date=date(2026, 7, 14),
+        primary_timeframe="1d",
+        secondary_timeframe="15m",
+        adj="hfq",
+        schema_version=_SCHEMA_VERSION,
+        source_run_id=None,  # legacy: 未关联 run
+        structural_payload=sp,
+        temporal_payload=tp,
+        summary_payload=build_summary_payload(sp, tp, date(2026, 7, 14)),
+        source_primary_bar_time=datetime(2026, 7, 14, 15, 0, tzinfo=UTC),
+        source_secondary_bar_time=datetime(2026, 7, 14, 15, 0, tzinfo=UTC),
+    )
+    db_session.add(snapshot)
+    await db_session.flush()
+
+    resp = await client.get(
+        f"/api/v1/stocks/{inst.symbol}/context",
+        headers=_auth_headers(member_with_sub.id),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    dq = body["dataQuality"]
+    assert dq["hasSnapshot"] is True, "legacy snapshot 存在应标记 hasSnapshot=True"
+    assert dq["reasonCode"] == "snapshot_run_not_linked"
+    assert "snapshot_run_not_linked" in dq["degradedReasons"], (
+        f"legacy 原因必须进入 degradedReasons，实际 {dq['degradedReasons']}"
+    )
+
+
+# =============================================================================
+# 18. 持久化 Payload 严格 schema fallback（损坏/未知key/重复key/错维度/错availability）
+# =============================================================================
+
+
+def _make_corrupt_summary(sp: dict, tp: dict, trade_date: date, *, corrupt_type: str) -> dict:
+    """构造各类损坏的 summary_payload.atomic_fact_contract_v1 用于 fallback 测试。"""
+    summary = build_summary_payload(sp, tp, trade_date)
+    afc = summary["atomic_fact_contract_v1"]
+
+    if corrupt_type == "second_item_corrupt":
+        # 第二项损坏：core.trend[1] 缺 publicKey
+        if len(afc["core"]["trend"]) >= 2:
+            del afc["core"]["trend"][1]["publicKey"]
+    elif corrupt_type == "unknown_public_key":
+        # 未知 publicKey
+        if afc["core"]["trend"]:
+            afc["core"]["trend"][0]["publicKey"] = "unknown_key_xyz"
+    elif corrupt_type == "duplicate_public_key":
+        # 重复 publicKey
+        if len(afc["core"]["trend"]) >= 2:
+            afc["core"]["trend"][1]["publicKey"] = afc["core"]["trend"][0]["publicKey"]
+    elif corrupt_type == "wrong_dimension":
+        # 错维度：把 momentum 的 publicKey 放进 trend
+        if afc["core"]["momentum"] and len(afc["core"]["trend"]) >= 1:
+            afc["core"]["trend"][0]["publicKey"] = afc["core"]["momentum"][0]["publicKey"]
+    elif corrupt_type == "wrong_availability":
+        # 错误 availability：corePresent 与实际数组不一致
+        afc["availability"]["corePresent"] = 99
+    elif corrupt_type == "contains_debug":
+        # 含 debug 字段（extra=forbid 拒绝）
+        afc["debug"] = [{"factId": "leaked"}]
+    elif corrupt_type == "forbidden_key_t3":
+        # T3 混入（禁止的 publicKey）
+        if afc["core"]["trend"]:
+            afc["core"]["trend"][0]["publicKey"] = "trend_efficiency"
+
+    return summary
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "corrupt_type",
+    [
+        "second_item_corrupt",
+        "unknown_public_key",
+        "duplicate_public_key",
+        "wrong_dimension",
+        "wrong_availability",
+        "contains_debug",
+        "forbidden_key_t3",
+    ],
+)
+async def test_persisted_schema_strict_fallback(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    instrument_factory: AsyncFactory,
+    member_with_sub: User,
+    corrupt_type: str,
+) -> None:
+    """PersistedAtomicFactsPayload 严格校验：任一损坏 → fallback 重算，不得 500。"""
+    sp, tp = _base_payload()
+    summary = _make_corrupt_summary(sp, tp, date(2026, 7, 14), corrupt_type=corrupt_type)
+    inst = await instrument_factory(symbol=f"ATOMICFB{corrupt_type[:4].upper()}")
+    await _make_published_run_and_snapshot(
+        db_session, inst.id, date(2026, 7, 14), sp, tp, summary_payload=summary,
+    )
+
+    resp = await client.get(
+        f"/api/v1/stocks/{inst.symbol}/context",
+        headers=_auth_headers(member_with_sub.id),
+    )
+    assert resp.status_code == 200, (
+        f"corrupt_type={corrupt_type} 应 fallback 重算而非 500: {resp.text}"
+    )
+    body = resp.json()
+    # fallback 重算后 S3 仍可用（证明走的是纯函数）
+    s3 = next(f for f in body["core"]["structure"] if f["publicKey"] == "active_position")
+    assert s3["categoryLabel"] == "中间"
+
+
+# =============================================================================
+# 19. 全缺失 persisted payload 仍合法（修复旧 bug：全空 core 数组被错误拒绝）
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_persisted_all_missing_is_valid(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    instrument_factory: AsyncFactory,
+    member_with_sub: User,
+) -> None:
+    """全缺失 persisted payload（所有 core 数组为空）应被接受，不触发 fallback。
+
+    旧 _is_valid_stored_afc 在所有 core 数组为空时返回 False（bug），新 schema 应接受。
+    """
+    # 构造全缺失的 sp（所有关键字段 None）
+    sp, tp = _base_payload(
+        dsa_overrides={
+            "current_dsa_segment_dir": None,
+            "current_dsa_segment_slope_atr_per_bar": None,
+            "current_dsa_segment_age_bars": None,
+            "prev_dsa_segment_slope_atr_per_bar": None,
+            "current_segment_volume_sum": None,
+            "prev_segment_volume_sum": None,
+        },
+        vol_overrides={"sqzmom_val": None, "sqzmom_delta_1": None, "sqz_on": None, "sqz_off": None},
+        swing_overrides={
+            "confirmed_swing_breakout_state": None,
+            "active_swing_dir": None,
+            "developing_swing_dir": None,
+            "price_position_in_active_swing_0_1": None,
+            "distance_to_swing_high_atr": None,
+            "distance_to_swing_low_atr": None,
+        },
+    )
+    summary = build_summary_payload(sp, tp, date(2026, 7, 14))
+    inst = await instrument_factory(symbol="ATOMICALLEMPTY")
+    await _make_published_run_and_snapshot(
+        db_session, inst.id, date(2026, 7, 14), sp, tp, summary_payload=summary,
+    )
+
+    resp = await client.get(
+        f"/api/v1/stocks/{inst.symbol}/context",
+        headers=_auth_headers(member_with_sub.id),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # 全缺失：corePresent=0，coreMissing 含全部 14 个 publicKey
+    assert body["availability"]["corePresent"] == 0
+    assert len(body["availability"]["coreMissing"]) == 14
+    # all core arrays empty
+    for dim in ("trend", "momentum", "structure", "volume"):
+        assert body["core"][dim] == [], f"{dim} 应为空"

@@ -18,9 +18,6 @@ import type {
 import { getReasonCodeMessage } from './reasonCodeMessages'
 import styles from './AtomicFactsPanel.module.scss'
 
-// 冻结研究合同版本（V4.13），仅用于 UI 标注，与后端 contractVersion 解耦。
-const AFC_RESEARCH_VERSION = 'V4.13'
-
 const DIMENSION_LABEL: Record<string, string> = {
   trend: '趋势运行',
   momentum: '动量配合',
@@ -109,34 +106,35 @@ export function FactRow({ fact }: { fact: AtomicFactItem }) {
   )
 }
 
-/** S3/S6 位置轨道：低位 / 0.33 刻度 / 圆点 / 0.67 刻度 / 高位 + `0.63 · 中间` */
+/** S3/S6 位置轨道：第一行 label 左 / `0.63 · 中间` 右；第二行轨道横跨整组宽度
+ *  轨道显示 低位 / 0.33 / 0.67 / 高位 四个刻度，预留刻度高度，禁止刻度与 caption 重叠 */
 export function PositionRail({ fact }: { fact: AtomicFactItem }) {
   const v = fact.value
   const pct = v == null ? 0 : Math.max(0, Math.min(1, v)) * 100
   const valText = fact.valueText ?? '—'
   return (
-    <div className={styles.factRow}>
+    <div className={styles.positionRow}>
       <span className={styles.factLabel}>{fact.label}</span>
-      <div className={styles.railWrap}>
-        <div className={styles.railHead}>
-          <span>低位</span>
-          <span>高位</span>
-        </div>
+      <span className={styles.railCaption}>
+        {valText}
+        {fact.categoryLabel ? ` · ${fact.categoryLabel}` : ''}
+      </span>
+      <div className={styles.railTrackWrap}>
         <div
           className={styles.railTrack}
           role="img"
           aria-label={`${fact.label}：${valText} · ${fact.categoryLabel ?? ''}`}
         >
           <span className={styles.railTick} style={{ left: '33%' }} />
-          <span className={styles.railTickLabel} style={{ left: '33%' }}>0.33</span>
           <span className={styles.railTick} style={{ left: '67%' }} />
-          <span className={styles.railTickLabel} style={{ left: '67%' }}>0.67</span>
           <span className={styles.railKnob} style={{ left: `${pct}%` }} />
         </div>
-        <span className={styles.railCaption}>
-          {valText}
-          {fact.categoryLabel ? ` · ${fact.categoryLabel}` : ''}
-        </span>
+        <div className={styles.railScale}>
+          <span>低位</span>
+          <span>0.33</span>
+          <span>0.67</span>
+          <span>高位</span>
+        </div>
       </div>
     </div>
   )
@@ -157,7 +155,7 @@ export function CoreFactGroup({ dimension, items }: { dimension: string; items: 
   )
 }
 
-/** 近期变化（显示中文 label，非 publicKey） */
+/** 近期变化（显示中文 label、from→to、deltaText 和日期，禁止显示 publicKey） */
 export function RecentChangesStrip({ changes }: { changes: AtomicFactChange[] }) {
   if (changes.length === 0) {
     return <div className={styles.changesEmpty}>暂无近期变化</div>
@@ -170,6 +168,7 @@ export function RecentChangesStrip({ changes }: { changes: AtomicFactChange[] })
           <span className={styles.changeArrow}>
             {c.fromText ?? '—'} → {c.toText ?? '—'}
           </span>
+          {c.deltaText && <span className={styles.changeDelta}>{c.deltaText}</span>}
           <span className={styles.changeAsOf}>{c.asOf}</span>
         </li>
       ))}
@@ -228,7 +227,7 @@ function Header({ data }: { data: AtomicFactsContextResponse }) {
       <div className={styles.headerRow}>
         <div className={styles.headerTitle}>个股状态观察</div>
         <div className={styles.headerMeta}>
-          <span className={styles.headerVersion}>日线 · {AFC_RESEARCH_VERSION}</span>
+          <span className={styles.headerVersion}>日线 · {data.meta.researchFreezeVersion}</span>
           <span className={styles.headerDenom}>
             {data.availability.corePresent}/{data.availability.coreDenominator}
           </span>

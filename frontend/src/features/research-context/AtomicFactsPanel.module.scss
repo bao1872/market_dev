@@ -125,12 +125,13 @@
 }
 
 // ===== 事实行：CSS Grid 透明行（非卡片），仅底部分隔线 =====
+// secondary 位于第二行右侧（与 value 列对齐），单位短时可与数值同行
 .factRow {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   grid-template-areas:
     "label value"
-    "secondary secondary";
+    ". secondary";
   align-items: baseline;
   gap: 2px 10px;
   padding: 5px 0;
@@ -169,6 +170,7 @@
   grid-area: secondary;
   color: $color-text-dim;
   font-size: 11px;
+  text-align: right;
 }
 
 // 中性关系徽章（不表达涨跌/利好利空）
@@ -190,22 +192,42 @@
   border-color: $color-warning;
 }
 
-// ===== 位置轨道（S3/S6）=====
-// 完整轨道：低位标签 / 0.33 刻度 / 圆点 / 0.67 刻度 / 高位标签
-.railWrap {
-  grid-area: value;
+// ===== 位置轨道（S3/S6）独立布局 =====
+// 第一行：label 左 / `0.63 · 中间` caption 右
+// 第二行：轨道横跨整组宽度，下方四刻度 低位 / 0.33 / 0.67 / 高位
+// 预留刻度高度，禁止刻度与 caption 重叠
+.positionRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "label caption"
+    "track track";
+  align-items: baseline;
+  gap: 2px 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid $color-border-soft;
+
+  &:last-child {
+    border-bottom: none;
+  }
+}
+
+.railCaption {
+  grid-area: caption;
+  color: $color-text;
+  font-size: 11px;
+  font-family: $font-mono;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.railTrackWrap {
+  grid-area: track;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  min-width: 120px;
-}
-
-.railHead {
-  display: flex;
-  justify-content: space-between;
-  color: $color-text-dim;
-  font-size: 11px;
-  font-family: $font-mono;
+  // 预留刻度高度，避免刻度与 caption 重叠
+  min-height: 28px;
 }
 
 .railTrack {
@@ -223,10 +245,9 @@
   background: $color-text-dim;
 }
 
-.railTickLabel {
-  position: absolute;
-  top: 10px;
-  transform: translateX(-50%);
+.railScale {
+  display: flex;
+  justify-content: space-between;
   color: $color-text-dim;
   font-size: 10px;
   font-family: $font-mono;
@@ -240,13 +261,6 @@
   border-radius: 50%;
   background: $color-brand;
   transform: translate(-50%, -50%);
-}
-
-// S3 文案：0.63 · 中间（数值 + 分类）
-.railCaption {
-  color: $color-text;
-  font-size: 11px;
-  font-family: $font-mono;
 }
 
 // ===== Auxiliary 分组（动量补充/结构补充/成交补充，默认收起）=====
@@ -320,7 +334,7 @@
 
 .changeItem {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   align-items: baseline;
   gap: 4px 10px;
   padding: 5px 0;

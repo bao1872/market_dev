@@ -76,7 +76,8 @@ export function AtomicFactsDrawer({ symbol, open, onClose }: AtomicFactsDrawerPr
           last.focus()
         }
       } else {
-        if (active === last) {
+        // 正向 Tab：焦点在最后一个可聚焦元素或已离开 drawer 时，回到第一个
+        if (active === last || !drawer.contains(active)) {
           e.preventDefault()
           first.focus()
         }
