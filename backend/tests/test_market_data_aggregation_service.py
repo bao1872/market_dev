@@ -186,6 +186,110 @@ async def test_daily_db_missing_tail_calls_pytdx(monkeypatch: pytest.MonkeyPatch
 
 
 # ============================================================
+# 日线去重：pytdx 15:00 与 DB 00:00 同日不产生重复 bar
+# ============================================================
+
+
+def _build_pytdx_daily_bars(
+    dates: list[str],
+    close_start: float = 10.0,
+) -> pd.DataFrame:
+    """构造模拟 pytdx 日线 DataFrame（datetime 列为 15:00 收盘时刻）。
+
+    pytdx get_daily_bars 返回的 datetime 为收盘时刻 15:00，
+    与 DB trade_date（午夜 00:00）不同，需由 fetch_daily_bars 规范化到午夜后才能去重。
+    """
+    closes = [close_start + i * 0.1 for i in range(len(dates))]
+    dt_15h = [pd.Timestamp(d) + pd.Timedelta(hours=15) for d in dates]
+    df = pd.DataFrame({
+        "datetime": dt_15h,
+        "open": [c - 0.05 for c in closes],
+        "high": [c + 0.1 for c in closes],
+        "low": [c - 0.1 for c in closes],
+        "close": closes,
+        "volume": [100000.0 + i for i in range(len(dates))],
+        "amount": [1000000.0 + i * 10 for i in range(len(dates))],
+    })
+    return df
+
+
+async def test_daily_pytdx_15h_dedup_with_db_00h(monkeypatch: pytest.MonkeyPatch) -> None:
+    """pytdx 日线（15:00）与 DB 日线（00:00）同日重叠时不得产生重复 bar。
+
+    回归测试：fetch_daily_bars 必须将 pytdx 的 15:00 datetime 规范化到午夜，
+    使 _merge_bars 的 index.duplicated(keep="last") 能按交易日去重。
+    """
+    service = mdas.MarketDataAggregationService()
+    # DB 有 06-16、06-17（00:00 索引）
+    db_df = _build_daily_bars(["2026-06-16", "2026-06-17"])
+    # pytdx 返回 06-17、06-18（15:00 datetime 列，模拟真实 pytdx）
+    # 06-17 与 DB 重叠 —— 必须去重，只保留 pytdx 版本（keep="last"）
+    pytdx_raw = _build_pytdx_daily_bars(["2026-06-17", "2026-06-18"], close_start=12.0)
+
+    async def fake_fetch(session, instrument_id, start, end):
+        # 模拟真实 fetch_daily_bars 的处理：set_index + normalize
+        df = pytdx_raw.copy()
+        df = df.set_index("datetime")
+        df.index = df.index.normalize()
+        df.index.name = "trade_date"
+        if "adj_factor" not in df.columns:
+            df["adj_factor"] = 1.0
+        return df
+
+    monkeypatch.setattr(
+        mdas, "_query_daily_bars",
+        lambda *a, **kw: _async_return(db_df.copy()),
+    )
+    monkeypatch.setattr(
+        mdas, "_expected_last_completed_daily_bar",
+        lambda session, now: date(2026, 6, 18),
+    )
+    monkeypatch.setattr(mdas, "_is_trading_hours", lambda now: False)
+    monkeypatch.setattr(mdas, "fetch_daily_bars", fake_fetch)
+
+    result = await service.get_bars(
+        _mock_session(), TEST_INSTRUMENT_ID, timeframe="1d", adj="none",
+    )
+
+    assert result.data_source == "hybrid"
+    assert not result.degraded
+    # 必须只有 3 根 bar（06-16, 06-17, 06-18），06-17 不得重复
+    assert len(result.bars) == 3
+    # 验证索引无重复
+    assert not result.bars.index.duplicated().any()
+    # 06-17 应保留 pytdx 版本（close=12.0，keep="last"）
+    bar_0617 = result.bars.loc[pd.Timestamp("2026-06-17")]
+    assert bar_0617["close"] == 12.0
+
+
+async def test_fetch_daily_bars_normalizes_pytdx_15h_to_midnight(monkeypatch: pytest.MonkeyPatch) -> None:
+    """fetch_daily_bars 直接单测：pytdx 15:00 datetime 必须规范化到午夜 00:00。"""
+    pytdx_raw = _build_pytdx_daily_bars(["2026-07-08", "2026-07-09"], close_start=28.0)
+
+    monkeypatch.setattr(
+        mdas, "_get_symbol",
+        lambda session, instrument_id: _async_return("603538"),
+    )
+    monkeypatch.setattr(
+        mdas, "get_pytdx_adapter",
+        lambda: type("FakeAdapter", (), {
+            "get_daily_bars": lambda self, symbol, start, end: pytdx_raw.copy(),
+        })(),
+    )
+
+    result = await mdas.fetch_daily_bars(
+        _mock_session(), TEST_INSTRUMENT_ID, date(2026, 7, 1), date(2026, 7, 10),
+    )
+
+    assert len(result) == 2
+    # 索引必须为午夜 00:00:00，不得保留 15:00
+    for ts in result.index:
+        assert ts.hour == 0, f"索引 {ts} 未规范化到午夜，hour={ts.hour}"
+        assert ts.minute == 0
+    assert result.index.name == "trade_date"
+
+
+# ============================================================
 # Pytdx 失败降级
 # ============================================================
 
