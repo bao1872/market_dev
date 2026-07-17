@@ -18,6 +18,20 @@
   - **ALGORITHM_VERSION v9→v10**：`indicator_cache.py` bump 使旧 SMC 缓存强制失效；`test_indicator_cache.py` 断言 v10
   - **parity 口径**：以已完成 bar 为阻断口径；无真实 TV CSV fixture 时 `PINE_PARITY_PENDING`（代码级修复通过，输出级 parity pending），不伪造 fixture，不声称"完全对齐"
 
+- CHANGE-20260717-002: 市场数据 SSOT 统一出口 + 前复权修复（MDAS 唯一出口 + AdjustmentFactorService + adj_factor 列信任 Bug 修复 + adjustment_as_of point-in-time + factor rebuild 完整重建 + 架构守护 + 603538 真实回归）
+  - **MDAS 唯一行情出口**：`MarketDataAggregationService` 为行情读取 + 复权应用 + 周/月聚合唯一出口；业务层（indicator/strategy_batch/feature_snapshot/chart_bars/structural/capture/monitor/bars API）全部收口走 MDAS，禁止导入 repository 私有 `_query_*`/`_get_adj_factor_df`/`apply_adj_factor_to_bars`/旧 `get_bars`
+  - **adj_factor 列信任 Bug 修复**：`adj_factor.py::_apply_adj_factor_core` 始终使用权威因子序列 `merge_asof` 结果 `_adj`，移除 `if "adj_factor" in merged.columns` 分支；pytdx hybrid bar / 15m/60m/1m 行内自带 `adj_factor=1.0` 不可信，必须由权威日线因子覆盖
+  - **adjustment_as_of point-in-time 复权**：公式 `qfq = raw × factor(bar_date) / factor(as_of)`；`AdjustmentFactorService.get_factor_series(as_of=)` 返回只含 `trade_date <= as_of` 的截断因子序列，禁止未来除权事件泄漏；当前页面锚定请求业务日（None=最新），盘后/历史回算 `as_of=trade_date`
+  - **日内/周/月复权口径统一**：15m/60m/1m 同一交易日映射同一权威日线因子；周/月"日线完成复权后再聚合"（经 `kline_aggregator`，仅 MDAS 导入）；禁止 raw 聚合后再复权
+  - **factor rebuild 完整重建**：公司行为/fingerprint 变化时从最早受影响日期重新计算完整日线 factor 序列并原子 upsert（禁止只更新最近 5 根）；成功后精确失效该股票 MDAS/indicator 缓存；失败不得用 1.0 伪装成功，返回 degraded + 原因
+  - **盘后顺序**：原始日线刷新 → 公司行为/factor 重建（成功）→ 覆盖率门禁/DSA → snapshot 发布；因子未完成不得创建 DSA 或发布 snapshot
+  - **MDAS v2 请求契约**：参数 timeframe/adj/include_realtime/completed_only/start-end/limit/warmup_bars/adjustment_as_of；返回 bars + market_data_contract_version/source_bar_hash/adj_factor_hash/adjustment_as_of/completed_through/degraded 诊断；缓存键含全部参数 + 版本，true/false 隔离
+  - **feature_snapshot schema v2**：盘后调用 MDAS 显式 `include_realtime=False, end_date=trade_date, adjustment_as_of=trade_date`，保存 hash/contract_version/completed_through/as_of 到 run metadata；schema version 递增，禁止新旧语义混用；alembic 063↔064 落库
+  - **strategy_batch SSOT 收口**：从 `bar_repository.get_bars` 迁移到 MDAS，DSA 使用 `timeframe=1d, adj=qfq, include_realtime=False, completed_only=True, adjustment_as_of=run.trade_date`
+  - **架构守护 AST 测试**：`test_market_data_ssot_architecture.py` 5 个测试（禁止业务模块导入 repository 私有查询/直接导入 adj_factor/导入 kline_aggregator/自行 resample 周/月；正向守护 MDAS 导入私有查询）；例外 `strategy_assets/algorithms/` 算法内部特征计算（SMC PDH/PDL）
+  - **603538 真实回归**：验证脚本 `verify_603538_step6.py` 6 步全通过（factor rebuild 856 根/除权日 07-09 factor 0.7115→1.0；1d/15m/1h × none/qfq 价格连续；as_of 三锚点无未来泄漏；对照股 600276 factor 全 1.0；跨调用方 hash 一致 source=48d5bd812528ca42/adj=262a210aea141032；rebuild 幂等）
+  - **SMC parity**：仅验证输入一致和无回归，不宣称 Pine 输出级完全对齐，保留 `PINE_PARITY_PENDING`
+
 ## 2026-07-16
 
 - CHANGE-20260716-007: 板块同步迁移 pywencai 唯一数据源（BoardSnapshot 原子切换 + 软失败编排 + 陈旧数据契约 + 行业关键词 ilike 筛选 + BoardFilterCombobox 自定义下拉 + Dockerfile Node.js + BOARD_SYNC_ENABLED 环境变量注入）

@@ -35,6 +35,7 @@
 | POSTGRES_USER/PASSWORD/DB | PostgreSQL 容器 |
 | STRATEGY_RUN_TOTAL_TIMEOUT_SECONDS | worker-strategy-batch run 级总超时（默认 7200） |
 | BOARD_SYNC_ENABLED | `after_close_orchestrator` 的 `syncing_boards` 步骤开关（默认 `false`，CHANGE-20260716-007 改为 pywencai 语义；PR #77：`config.py` `_resolve_board_sync_enabled()` 优先级「环境变量 > CONFIG_FILE > 默认 False」，`docker-compose.prod.yml` worker-after-close 注入 `BOARD_SYNC_ENABLED: ${BOARD_SYNC_ENABLED:-false}`）；环境变量接受 `1`/`true`/`yes`/`on`（大小写不敏感）为真；`false` 时 `syncing_boards` 步骤跳过执行并记录 `status=skipped` + `reason_code=board_sync_disabled`；`true` 时通过 pywencai 拉取板块目录与成分股关系（`wencai_board_provider.WencaiBoardProvider`，需配置 `WENCAI_COOKIE`，容器需安装 Node.js —— pywencai `get_token()` 需 `subprocess.run(['node', ...])` 执行 `hexin-v.bundle.js`）；生产部署时设为 `true` |
+| MARKET_DATA_CONTRACT_VERSION | MDAS v2 行情契约版本号（CHANGE-20260717-002）；缓存键含该版本号，升级契约时 bump 使旧缓存失效；MDAS 响应 `market_data_contract_version` 字段返回该值；feature_snapshot run metadata 落库该值用于跨调用方一致性校验 |
 
 Secret 不写入文档示例，不回显日志。
 
@@ -73,6 +74,7 @@ SELECT job_name, status, business_date, started_at, finished_at FROM scheduler_j
 - capture static accessible；
 - expired member 403 verified；
 - admin jobs page shows real state.
+- **MDAS v2 SSOT 验收（CHANGE-20260717-002）**：所有导入共享行情代码的容器（backend、worker-bars-scheduler、worker-strategy-scheduler、worker-strategy-batch、worker-after-close、worker-monitor、worker-capture）必须同一分支 SHA；禁止使用 `CORE_ONLY=1` 部分更新留下旧 worker；`/bars` 响应含 `market_data_contract_version`/`source_bar_hash`/`adj_factor_hash` 诊断字段；盘后 run metadata 含 `contract_version`/`source_bar_hash`/`adj_factor_hash`/`completed_through`/`adjustment_as_of`；603538 美诺华 1d/15m/1h 除权日前后无价格断层；600276 恒瑞医药 none/qfq 切换 factor 全 1.0。
 
 ## 4.0 AFC V1 部署状态（CHANGE-20260716-003 Known Gap）
 

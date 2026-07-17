@@ -88,6 +88,14 @@
   9. `test_latest_change_pct_no_n_plus_1`：一次请求返回 N 只股票的 `latest_change_pct`，SQL 查询数固定（window function 子查询批量计算，不逐行查询 `bars_daily`）；`len(items) <= filtered_total`
   - 运行命令：`APP_ENV=test TEST_DATABASE_URL=postgresql+psycopg://... pytest backend/tests/test_latest_change_pct.py -q`
   - 回归要求：修改 `backend/app/repositories/strategy_result_repository.py`（`_build_latest_change_pct_subquery`/`_fetch_latest_change_pct_map`/`CHANGE_PCT_METRIC_KEY`）、`backend/app/api/strategy_runs.py`、`bars_daily` 表结构或索引时必须跑此测试。
+- **[CHANGE-20260717-002 市场数据 SSOT + 前复权]** 架构守护 + 603538 真实回归验收（详见 `docs/analysis/market-data-ssot-adjustment-v2.md` 第七章）：
+  - **架构守护 AST 测试** `test_market_data_ssot_architecture.py`（5 个测试，纯 AST 解析，不需 DB）：禁止业务模块导入 repository 私有 `_query_*`/`_get_adj_factor_df`/`apply_adj_factor_to_bars`/旧 `get_bars`；禁止直接导入 `adj_factor.apply_adj_factor*`；`kline_aggregator` 仅 MDAS 导入；禁止业务层自行 resample 周/月聚合（例外 `strategy_assets/algorithms/` 算法内部特征计算）；正向守护 MDAS 导入私有查询。
+  - **603538 真实回归** `scripts/verify_603538_step6.py`（用生产真实 DB，6 步全通过）：(1) factor rebuild 856 根/除权日 07-09 factor 0.7115→1.0；(2) 1d/15m/1h × none/qfq 价格连续、adj=none 时 adj_factor_hash 为空；(3) adjustment_as_of 三锚点（07-01/07-03 除权前所有 bar qfq=raw 无泄漏；07-15 除权后除权前 bar 下调），公式 `qfq=raw×factor(bar_date)/factor(as_of)` 全通过；(4) 对照股 600276 无公司行为 factor 全 1.0、none=qfq；(5) 跨调用方 hash 一致（`/bars`/indicator/strategy_batch/feature_snapshot 四调用方 `source_bar_hash=48d5bd812528ca42`、`adj_factor_hash=262a210aea141032`）；(6) rebuild 幂等（detect 返回 None，两次 rebuild 一致）。
+  - **无未来泄漏验收**：`adjustment_as_of` 早于除权日时，截断因子序列（`trade_date <= as_of`）不含未来事件，`factor(as_of)` 不得等于除权后因子；截断序列因子数 ≤ 完整序列 ≤as_of 因子数。
+  - **跨调用方 hash 验收**：同一股票/周期/截止日下，`/bars`、indicator/SMC、strategy_batch、feature_snapshot 的时间序列、OHLC、`source_bar_hash`、`adj_factor_hash` 必须一致。
+  - **SMC parity**：仅验证输入一致和无回归，不宣称 Pine 输出级完全对齐，保留 `PINE_PARITY_PENDING`。
+  - 运行命令：架构测试 `APP_ENV=test TEST_DATABASE_URL=postgresql://bz:bz@127.0.0.1:5433/bz_stock_test pytest backend/tests/test_market_data_ssot_architecture.py -q`；真实回归 `docker run --rm --network host -v /root/web_dev/backend:/app -w /app -e DATABASE_URL=postgresql+psycopg://bz:bz@127.0.0.1:5432/bz_stock -e APP_ENV=production -e TZ=Asia/Shanghai market-dev-backend:b4cc65d python scripts/verify_603538_step6.py`。
+  - 回归要求：修改 `market_data_aggregation_service.py`/`adjustment_factor_service.py`/`adj_factor.py`/`bar_repository.py`/`kline_aggregator.py` 或任何业务模块行情读取路径时必须跑架构测试；修改复权逻辑/factor rebuild 时必须跑 603538 真实回归。
 
 ### 壳层与导航拆分
 

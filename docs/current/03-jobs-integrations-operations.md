@@ -72,6 +72,8 @@ queued → refreshing_daily → syncing_boards → checking_coverage → creatin
 
 `syncing_boards` 步骤位于 `refreshing_daily` 之后、`checking_coverage` 之前，调用 `board_sync_service.sync_boards()` 通过 pywencai 同步板块目录与成分股关系（详见 §2.6）。**软失败设计**：`syncing_boards` 失败/校验失败/超时不抛出阻断异常，仅记录 `degraded_reasons` 并保留上一成功版本，after_close_orchestrator 继续执行 `checking_coverage` 及后续步骤；非交易日整体不运行；`mode=dsa_only` 跳过此步骤。
 
+**Factor rebuild 阶段与因子失败门禁（CHANGE-20260717-002）**：盘后顺序为「原始日线刷新（`refreshing_daily`）→ 公司行为/factor 重建（成功）→ 覆盖率门禁/DSA → snapshot 发布」。`AdjustmentFactorService.rebuild_factor_series` 从最早受影响日期完整重建该股票日线 factor 序列并原子 upsert（禁止只更新最近 5 根）；公司行为集合或 fingerprint 变化时触发重建，成功后精确失效该股票 MDAS/indicator 缓存。**因子失败门禁**：因子未完成时不得创建 DSA 或发布 snapshot；rebuild 失败不得用 1.0 伪装成功，必须返回 degraded 状态和原因，受影响结果不发布。**重试/恢复**：factor rebuild 失败时回滚 fingerprint，可重试；`detect_company_action_change` → `earliest_affected` → rebuild → 成功后更新 fingerprint。**feature_snapshot schema v2**：盘后调用 MDAS 显式 `include_realtime=False, end_date=trade_date, adjustment_as_of=trade_date`，保存 `source_bar_hash`/`adj_factor_hash`/`contract_version`/`completed_through`/`adjustment_as_of` 到 run metadata；输入语义变化时 snapshot schema version 递增，禁止新旧语义混用/覆盖（alembic 063↔064 落库）。
+
 `feature_snapshot` 步骤位于 `quality_gate` 与 `publishing` 之间，调用 `feature_snapshot_service.compute_for_trade_date` 为当日 active A 股全集生成 `stock_feature_snapshots` 行：
 
 - 使用独立 `AsyncSessionLocal`，不依赖 HTTP 请求 session；

@@ -173,6 +173,7 @@ Node Cluster 算法
 - 截图区设置 render-ready 标志；
 - 按 timeframe 请求对应根数（1d=250、15m=4000、1h=1200、1w=260、1mo=120），与 Node Cluster / indicator_contract 对齐；`1m` 不在工具栏暴露；
 - 个股详情 K 线实时状态以 `/bars` 返回的 `data_source/is_partial/last_live_bar_time/as_of` 为准；`mergeRealtimeQuoteIntoBars()` 只做兜底视觉增强，仅当 `quote.is_realtime === true && quote.source === "pytdx" && quote.freshness_seconds <= 60` 时才合并到最后一根 K 线，不参与指标计算，不替代后端 partial bar；daily_fallback / 延迟 / 降级行情只用于顶部报价 fallback/状态提示，不混入 `displayBars`；1d 保留日期语义并跨日追加实时 bar，intraday（15m/1h 等）使用 `quote.update_time`；`baseBars` 仍用于指标计算，避免污染算法输入；
+- **主/小 K 线统一 qfq completed bars + quote overlay 边界（CHANGE-20260717-002）**：主 K 线（`/stock/:symbol`）和小 K 线（五周期 15m/60m/日/周/月）均显式请求 completed qfq bars（经 MDAS 唯一出口，复权只应用一次）；`none`/`qfq` 切换由 `/bars?adj=` 参数驱动，除权日前后无异常断层。**quote 只做展示 overlay**：实时价格只由 quote overlay 呈现，**禁止后端 partial bar 与 quote 重复合并**；`/quote` 允许独立实时报价出口，但不得作为历史 K 线或指标输入。跨调用方一致性：同一股票/周期/截止日下，`/bars`、indicator/SMC、strategy_batch、feature_snapshot 的 `source_bar_hash`/`adj_factor_hash` 必须一致。
 - 顶部报价条优先使用实时报价，fallback 到最后一根 bar；
 - **行情状态徽章**：根据 quote 来源/实时性/新鲜度/降级状态显示“实时行情 / 日线回退 / 数据延迟 / 行情降级”，并显示 `update_time`；不再固定显示“实时行情”；
 - **K 线状态条**：显示 bars 的 `data_source`、`as_of`、`is_partial`、`degraded`、`degraded_reason`；交易时段 1d 返回 `is_partial=true` 时，状态条明确提示“盘中 partial bar（未收盘）”；
