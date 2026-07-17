@@ -22,7 +22,6 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pytest
 
-from app.services import chart_bars_service
 from app.services.chart_bars_service import (
     compute_source_bar_hash,
     compute_source_bar_times,
@@ -52,9 +51,14 @@ async def _mock_get_bars(df: pd.DataFrame) -> BarAggregationResult:
 
 
 def _patch_service(monkeypatch: pytest.MonkeyPatch, df: pd.DataFrame) -> None:
-    """patch MarketDataAggregationService.get_bars 返回 df。"""
+    """patch MarketDataAggregationService.get_bars 返回 df（模拟 MDAS limit 截取）。"""
     async def _get_bars(*args, **kwargs):
-        return await _mock_get_bars(df.copy())
+        result_df = df.copy()
+        # [CHANGE-20260717-002 SSOT] - 模拟 MDAS 原生 limit 截取行为
+        limit = kwargs.get("limit")
+        if limit is not None and not result_df.empty:
+            result_df = result_df.tail(limit)
+        return await _mock_get_bars(result_df)
 
     monkeypatch.setattr(
         MarketDataAggregationService, "get_bars", _get_bars,
@@ -417,7 +421,12 @@ async def test_load_chart_bars_passes_adj_to_service(
 
     async def _get_bars(*args, **kwargs):
         captured["adj"] = kwargs.get("adj")
-        return await _mock_get_bars(raw_df.copy())
+        result_df = raw_df.copy()
+        # [CHANGE-20260717-002 SSOT] - 模拟 MDAS 原生 limit 截取行为
+        limit = kwargs.get("limit")
+        if limit is not None and not result_df.empty:
+            result_df = result_df.tail(limit)
+        return await _mock_get_bars(result_df)
 
     monkeypatch.setattr(MarketDataAggregationService, "get_bars", _get_bars)
 
@@ -439,7 +448,12 @@ async def test_load_chart_bars_default_adj_is_qfq(
 
     async def _get_bars(*args, **kwargs):
         captured["adj"] = kwargs.get("adj")
-        return await _mock_get_bars(raw_df.copy())
+        result_df = raw_df.copy()
+        # [CHANGE-20260717-002 SSOT] - 模拟 MDAS 原生 limit 截取行为
+        limit = kwargs.get("limit")
+        if limit is not None and not result_df.empty:
+            result_df = result_df.tail(limit)
+        return await _mock_get_bars(result_df)
 
     monkeypatch.setattr(MarketDataAggregationService, "get_bars", _get_bars)
 

@@ -435,6 +435,11 @@ async def get_bars(
         100, ge=1, le=max(_PAGE_SIZE_LIMITS.values()), description="每页大小（15m 最大 4000，1h 最大 1200，其他最大 1000）"
     ),
     include_realtime: bool = Query(True, description="是否在交易时段内调用 Pytdx 补充最后一根 Bar"),
+    # [CHANGE-20260717-002 SSOT] - MDAS v2 契约参数：completed_only/adjustment_as_of
+    # completed_only=True 强制 include_realtime=False 且过滤未完成 bar（图表/回算场景）
+    # adjustment_as_of 指定 point-in-time 复权锚点（None=最新，历史回算传业务日）
+    completed_only: bool = Query(False, description="只返回已完成 bar（True 时强制 include_realtime=False）"),
+    adjustment_as_of: date | None = Query(None, description="复权锚点 YYYY-MM-DD（None=最新；历史回算传业务日，禁止未来除权事件泄漏）"),
     session: AsyncSession = Depends(get_db),
     *,
     response: Response,
@@ -470,8 +475,10 @@ async def get_bars(
         )
 
     logger.info(
-        "查询行情 instrument_id=%s timeframe=%s adj=%s start=%s end=%s page=%d size=%d realtime=%s",
-        instrument_id, timeframe, adj, start_date, end_date, page, page_size, include_realtime,
+        "查询行情 instrument_id=%s timeframe=%s adj=%s start=%s end=%s page=%d size=%d "
+        "realtime=%s completed_only=%s as_of=%s",
+        instrument_id, timeframe, adj, start_date, end_date, page, page_size,
+        include_realtime, completed_only, adjustment_as_of,
     )
 
     start_ms = time.time()
@@ -485,8 +492,10 @@ async def get_bars(
             timeframe=timeframe,
             adj=adj,
             include_realtime=include_realtime,
+            completed_only=completed_only,
             start_date=start_date,
             end_date=end_date,
+            adjustment_as_of=adjustment_as_of,
         )
     except HTTPException:
         raise
@@ -504,6 +513,14 @@ async def get_bars(
 
     df = result.bars
     total_ms = int((time.time() - start_ms) * 1000)
+
+    # [CHANGE-20260717-002 SSOT] - completed_through 从 MDAS 返回为 pd.Timestamp，
+    # 转换为 tz-aware datetime 便于 BarListResponse 序列化（DateTime 列）
+    _completed_through = result.completed_through
+    if _completed_through is not None and isinstance(_completed_through, pd.Timestamp):
+        if _completed_through.tzinfo is None:
+            _completed_through = _completed_through.tz_localize("Asia/Shanghai")
+        _completed_through = _completed_through.to_pydatetime()
 
     # --- 空数据处理 ---
     if df.empty:
@@ -534,6 +551,12 @@ async def get_bars(
             freshness_seconds=result.freshness_seconds,
             degraded=result.degraded,
             degraded_reason=result.degraded_reason,
+            # [CHANGE-20260717-002 SSOT] - MDAS v2 契约诊断字段
+            source_bar_hash=result.source_bar_hash or None,
+            adj_factor_hash=result.adj_factor_hash or None,
+            market_data_contract_version=result.market_data_contract_version,
+            completed_through=_completed_through,
+            adjustment_as_of=result.adjustment_as_of,
         )
 
     # 服务端分页：返回最新的数据（page=1 返回最新 page_size 条）
@@ -574,6 +597,12 @@ async def get_bars(
         freshness_seconds=result.freshness_seconds,
         degraded=result.degraded,
         degraded_reason=result.degraded_reason,
+        # [CHANGE-20260717-002 SSOT] - MDAS v2 契约诊断字段
+        source_bar_hash=result.source_bar_hash or None,
+        adj_factor_hash=result.adj_factor_hash or None,
+        market_data_contract_version=result.market_data_contract_version,
+        completed_through=_completed_through,
+        adjustment_as_of=result.adjustment_as_of,
     )
 
 
