@@ -1279,6 +1279,49 @@ cd frontend && node --experimental-strip-types --test \
 - **SMC 隔离边界不变（源码契约）**：SMC 仅进入 `/stock` 指标链，默认关闭（`include_smc=false` 时 0 计算）；`/market` 右栏小 K 线不请求 SMC；true/false 缓存键隔离（`:smc` 后缀）；不新增表/migration/worker/依赖
 - **生产 E2E 验证（无截图）**：1) MiniKline 切周期/resize 后 viewport 正确（不使用 stale 值，不出现首次 render 的旧 range）；2) SMC `pine_rma` 前 `length-1` 根为 NaN（ATR200 前 199 根为 NaN）；3) 首个 pivot 在 `i==size` 检测（不延迟到 `i==size+1`）；4) EQH/EQL DTO 含 detection_index/detection_time；5) Pine golden fixture 仍 PENDING
 
+## 3.19 CHANGE-20260716-006 回归（originScope 唯一来源 + confirmed_swing_position 产品观察 + recentChanges 仅最新交易日 + 详情右边界 grid 布局）
+
+```bash
+# 后端纯函数 + API 集成（含产品观察 + recent_changes limit=2）
+cd backend && APP_ENV=test TEST_DATABASE_URL=postgresql+asyncpg://bz:bz@127.0.0.1:5433/bz_stock_test \
+  .venv/bin/pytest tests/test_atomic_fact_contract_service.py tests/test_stock_context_atomic_facts.py -q
+
+# 前端导航 + AFC contract（含 originScope 优先级 + ConfirmedPositionRow）
+cd frontend && node --experimental-strip-types --test \
+  src/features/stock-research/__tests__/stockDetailNavigation.test.ts \
+  src/features/research-context/__tests__/atomic-facts.test.ts \
+  src/pages/__tests__/detailNavigation.test.ts
+```
+
+- **originScope 优先级测试（前端 `stockDetailNavigation.test.ts`，10 个用例）**：
+  1. 显式 `originScope=market` 优先于 `returnTo.scope=watchlist`（不静默回退自选）；
+  2. 显式 `originScope=watchlist` 优先于 `returnTo.scope=market`；
+  3. 无 `originScope` 时兼容解析 `returnTo.scope`；
+  4. 无 `originScope` 且无 `returnTo.scope` 默认 watchlist；
+  5. `originScope=market` + `returnTo.scope=watchlist` 触发 `contextMismatch=true`；
+  6. `buildStockDetailUrl` 三入口（MarketWorkspacePage/useStockDetailActions/StockDetailPage）输出一致；
+  7. `sourceForOriginScope('market')` 返回 `selection`、`sourceForOriginScope('watchlist')` 返回 `watchlist`；
+  8. `strategyForOriginScope('market')` 返回 `dsa_selector`、`strategyForOriginScope('watchlist')` 返回 `watchlist_monitor`；
+  9. 旧 `detailNavigation.ts:buildStockDetailUrl` 已删除（源码扫描无第二套拼接）；
+  10. returnTo 生成使用 `searchParams` 副本并强制写入 `scope`/`selected`（不直接复制 `location.search`）。
+- **confirmed_swing_position 产品观察边界测试（后端 `test_atomic_fact_contract_service.py`，10 个新增用例）**：
+  1. `raw=-0.2` → `inside=None`，categoryLabel="低于确认区间"，不进入 0–1 轨道；
+  2. `raw=0.0` → `inside=0.0`，轨道左端点；
+  3. `raw=0.33` → 边界归属"中间"（与 S3 一致）；
+  4. `raw=0.67` → 边界归属"中间"（与 S3 一致）；
+  5. `raw=1.0` → `inside=1.0`，轨道右端点；
+  6. `raw=1.2` → `inside=None`，categoryLabel="高于确认区间"；
+  7. `confirmed_high=None` 或 `confirmed_low=None` → 产品观察缺失（不进入 `productObservations`）；
+  8. 产品观察**不计入 Core 14**（`availability.coreDenominator` 仍为 14，core 数组不含 confirmed_swing_position）；
+  9. `scope="product"` 字段标识产品观察（与 Core/Auxiliary 区分）；
+  10. `compute_product_observations` 不调用 `structural_factor_service`，不修改 worker 持久化链（从已存在 `price_position_in_confirmed_swing_raw` 派生 `inside`）。
+- **recentChanges 2-snapshot 对比测试（后端 `test_stock_context_atomic_facts.py`，2 个新增用例）**：
+  1. `_find_recent_published_snapshots` 查询 limit=2（只比较最新交易日与前一发布交易日）；
+  2. 响应含 `latestChangesFrom`（前一发布交易日）/`latestChangesAsOf`（最新发布交易日）顶层字段，无变化时前端使用"最近交易日（{asOf}）无状态变化"空态文案。
+- **详情右边界视觉回归（前端 contract，3 个 viewport）**：1440/1680/1920 三档宽度下 `.tv-detail-layout` 右边界与视口右边界差 ≤1px；`grid-template-columns: 200px minmax(0,1fr)` 生效；`ResizeObserver` raf immediate + 120ms trailing draw 模式下快速切周期/全屏后右边界不错位。
+
+回归要求：修改 `stockDetailNavigation.ts`、`detailNavigation.ts`、`MarketWorkspacePage.tsx`、`useStockDetailActions.ts`、`StockDetailPage.tsx`、`atomic_fact_contract_service.py`、`atomic_fact_product_observations_v1.json`、`stock_context.py`、`AtomicFactsPanel.tsx`、`ConfirmedPositionRow.tsx`、`global.scss`（`.tv-detail-layout` grid）或 `StrategyChart.tsx`（ResizeObserver）时必须跑此组测试。
+
 ## 4. CI 门禁
 
 阻断项：
@@ -1364,6 +1407,84 @@ mypy baseline 已清零（total=0, unique=0）。清理历程：
 - **每个测试债务 PR 必须 before/after**：PR 描述必须列出 tests mypy 修改前后错误数量（如 `tests mypy: 300 → 0`）；
 - **不改变测试覆盖**：禁止为过 mypy 删除测试或降低断言强度；历史废弃测试必须证明对应功能已删除且测试不再被引用后才可移除；
 - **app 类型声明阻碍测试时**：若 `app/` 类型声明过窄导致测试无法通过且 `mypy app` 仍需 0，允许收紧 app 类型（如 `require_feature` 返回 `Coroutine` 而非 `object`），但必须保证无运行时行为变化并在 PR 中说明。
+
+## 3.7 AFC V1 原子事实契约回归（blocking）
+
+任何修改 `backend/app/contracts/atomic_fact_contract_v1.json`、`backend/app/contracts/atomic_fact_presentation_v1.json`、`backend/app/services/atomic_fact_contract_service.py`、`backend/app/schemas/atomic_fact_contract.py`、`backend/app/api/stock_context.py`、`frontend/src/features/research-context/AtomicFactsPanel.tsx`、`frontend/src/features/research-context/AtomicFactsDrawer.tsx`、`frontend/src/api/endpoints.ts`、`frontend/src/pages/StockDetailPage.tsx` 必须跑 AFC V1 回归测试。
+
+**双合同结构回归（`backend/tests/test_atomic_fact_contracts.py`，5 个用例）：**
+- 冻结研究合同 `atomic_fact_contract_v1.json` **不含**产品层字段（`public_key`/`public_label`/`publicKey`/`publicLabel`/`visualKind`/`valuePrecision`/`secondaryLabel`）；
+- 产品展示合同 `atomic_fact_presentation_v1.json` 恰好 **14 Core + 8 Auxiliary**，排除 `T3_trend_efficiency` / `T6_efficiency_delta` / `V1_cumulative_volume_ratio`；
+- 两份合同 Fact ID 一一对应；`V1_cumulative_volume_ratio` 在 presentation 中无映射。
+
+**后端纯函数回归（`backend/tests/test_atomic_fact_contract_service.py`，22 个测试函数，含 2 个参数化共 33 个用例）：**
+- Registry 严格 14 Core / 10 Aux / 1 Rejected；S2 存在；ID 唯一；顺序正确；
+- T3/T6 `feature_flag=false` 不进用户 payload；V1 永久缺席；
+- M3 不声称 1e-6 已确认（仅 `raw>0→增加 / raw<0→减少 / raw==0→基本不变`，`thresholdEnabled=false`）；
+- T5/V3 阈值未启用（仅比值 + 展示「分类未启用」）；
+- M5 任一输入缺失即省略（**`or` 非 `and`**）、双 true → dataQuality 异常；`test_m5_single_side_missing` 参数化 4 组合 `(None,False)`/`(False,None)`/`(None,True)`/`(True,None)` 均不得进入 Core、不得触发 `m5_inconsistent` warning；
+- S1 未知枚举省略；`test_s3_boundary_and_out_of_range_missing` 参数化 9 组合覆盖 `0.10→偏低`/`0.33/0.50/0.63/0.67→中间`/`0.68/0.95→偏高`/`-0.2/1.5→越界缺失`；S7/S8 非负距离；
+- 缺失事实从 Core 数组省略（分母固定 14）；单公式 fallback；compact 完整 14 含 S2；无禁用词；recentChanges 无未来；
+- **`test_recent_changes_precision_and_text`**：浮点噪声（差 1e-9）量化后相同不产生变化；方向反转 `fromText`/`toText`/`deltaText` 齐全、含中文 label、`asOf` 正确；单快照无变化；
+- **`test_recent_changes_per_fact_precision_boundaries`**（CHANGE-20260716-005）：T5 `valuePrecision=2` 第 3/4 位差异不产生变化；M3 `valuePrecision=6` 第 5/6 位真实差异必须保留（不被 4 位吞掉）；M3 `fromText`/`toText` 同时含 valueText 与 categoryLabel（`·` 连接）；
+- **`test_recent_changes_dimension_when_fact_disappears`**（CHANGE-20260716-005）：事实由存在变缺失时 `dimension` 必须来自 `FACT_DIMENSION_BY_ID`（结构/成交变化不误归 trend）；
+- **`test_response_schema_assembly`**：响应组装含 `meta`/`contractVersion`/`core`/`auxiliary`/`availability`/`recentChanges`/`dataQuality`。
+
+**后端 API 集成回归（`backend/tests/test_stock_context_atomic_facts.py`，20 个测试函数，含 1 个参数化共 26 个用例，独立测试库 `bz_stock_test`）：**
+- 用户 DTO 不含 `factId`/`sourcePath`/`formula`/`thresholdRef`；
+- 缺失 Core 从数组省略、分母仍 14；
+- M3 未确认无 1e-6；
+- M5 双 true 进 dataQuality；
+- S1 未知枚举不默认区间内；
+- S3 越界省略；
+- S7/S8 管理员 `sourcePath` 随趋势方向动态变化；
+- summary 优先读取；summary 缺失/旧格式/版本不符 fallback；persisted 与 fallback 一致；
+- **`test_as_of_sql_filter_before_limit`**：`as_of` 在 SQL `LIMIT` 前过滤（`trade_date <= as_of` 再 `DESC LIMIT`）；
+- **`test_as_of_weekend_returns_previous_batch`**（CHANGE-20260716-005）：`as_of` 为周末/节假日/无批次日期时返回之前最近一次已发布状态（截止日期语义）；
+- **`test_recent_changes_precision_filters_noise`**：`recentChanges` 按各 Fact 展示精度过滤浮点噪声；
+- **`test_get_context_writes_nothing`**：GET 零写入（连续 3 次 GET 后 snapshot/run 行数不变）；
+- **`test_admin_debug_full_traceability`**：admin debug 完整追溯、普通用户访问 admin 接口 403；
+- **`test_response_meta_versions`**（CHANGE-20260716-005）：响应 `meta` 含 `payloadVersion`/`researchFreezeVersion`/`presentationVersion` 三版本字段；
+- **`test_legacy_snapshot_reason_in_degraded_reasons`**（CHANGE-20260716-005）：legacy 快照 `snapshot_run_not_linked`/`legacy_snapshot_ambiguous` 进入 `dataQuality.degradedReasons`（无 snapshot 才用 `reasonCode`）；
+- **`test_persisted_schema_strict_fallback`**（CHANGE-20260716-005，参数化 7 组合）：`PersistedAtomicFactsPayload` 严格校验——第二项损坏/未知 publicKey/重复 publicKey/错维度/错 availability/含 debug/混入 T3 均必须 fallback（不得 500）；
+- **`test_persisted_all_missing_is_valid`**（CHANGE-20260716-005）：全缺失 core 数组为空时仍为合法 payload（不再错误拒绝）。
+
+**前端契约回归（`frontend/src/features/research-context/__tests__/atomic-facts.test.ts`，26 个用例）：**
+- Registry 14/10/1、顺序、ID 唯一、V1 缺席、T3/T6 隐藏、前端类型对齐；
+- presentation 14+8 排除 T3/T6/V1；
+- 冻结合同无产品字段；
+- 普通用户面板源码无内部术语（DSA/SQZMOM/Segment/Active/Developing/factId/rawValue/sourcePath/bar/raw，整词匹配）；
+- `visualKind` 使用新枚举（metric/value_with_category/relation/position/distance/ratio）；
+- `valueText` 可空（关系类事实为 null，仅 categoryLabel 承载）；
+- `AtomicFactChange` 含 label（**前端禁止显示 publicKey**）；
+- presentation `visualKind` 与 `valuePrecision` 对齐短原子值；
+- FactRow 按 `visualKind` 渲染（无重复 label/状态）；
+- ratio 未分类文案仅出现一次（secondaryText，非 valueText）；
+- distance 状态（尚未到达/已越过）仅出现一次（categoryLabel，非 valueText 解析）；
+- RecentChanges 显示中文 label，不显示 publicKey；
+- factRow 为 CSS Grid 透明行（非嵌套卡片背景）；
+- S3 轨道含 低位/高位/0.33/0.67 刻度 + 圆点 + `数值 · 分类`；
+- Auxiliary 按 动量补充/结构补充/成交补充 分组；
+- Drawer 焦点管理：打开聚焦关闭按钮、焦点 trap、关闭恢复焦点、body 滚动锁定；
+- 面板收起时不请求 context（enabled=false → 0 请求）；
+- **`factRow secondary 位于第二行右列`**（CHANGE-20260716-005）：`grid-template-areas ". secondary"` + `text-align: right`；
+- **`PositionRow 使用独立布局`**（CHANGE-20260716-005）：第一行 label/caption，第二行轨道横跨整组宽度；
+- **`RecentChanges 显示 deltaText`**（CHANGE-20260716-005）：变化类型文案渲染为很弱小标签；
+- **`Header 从 API meta 读取 researchFreezeVersion`**（CHANGE-20260716-005）：禁止硬编码 V4.13；
+- **`Drawer 正向 Tab 也处理焦点离开 drawer`**（CHANGE-20260716-005）：`!drawer.contains(active)` 双向（Tab 和 Shift+Tab 均回环）。
+
+回归命令：
+
+```bash
+cd /root/web_dev/backend
+APP_ENV=test TEST_DATABASE_URL=postgresql+asyncpg://bz:bz@127.0.0.1:5433/bz_stock_test \
+pytest tests/test_atomic_fact_contract_service.py tests/test_atomic_fact_contracts.py tests/test_stock_context_atomic_facts.py -v
+
+cd /root/web_dev/frontend
+node --experimental-strip-types --test src/features/research-context/__tests__/atomic-facts.test.ts
+```
+
+> 部署后验收（已知 worker 旧镜像 Known Gap，ALIGN-073）：当前生产 worker 仍为镜像 `88dd7d1`，未升级本轮 AFC V1 代码，不持久化新 `summary_payload.atomic_fact_contract_v1`，页面依赖旧快照 fallback（同纯函数重算）；新 summary 持久化 + persisted-first 直读链路待 worker 镜像升级后在 production 验证。前端 DOM/network/console 验收见 CHANGE-20260716-003。**10 项 Auxiliary 中仅 8 项可展开（T3/T6 `feature_flag=false`，V1 永久缺席），DOM 中 T3/T6/V1 永不出现。**
 
 ## 6. 完成标准
 

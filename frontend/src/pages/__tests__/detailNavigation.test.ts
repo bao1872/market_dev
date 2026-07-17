@@ -12,10 +12,10 @@
 
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
+import * as detailNav from '../detailNavigation.ts'
 import {
   buildMarketEntryFromScreener,
   buildMarketEntryFromMessage,
-  buildStockDetailUrl,
   buildStockDetailState,
   resolveBackPath,
 } from '../detailNavigation.ts'
@@ -42,9 +42,14 @@ test('Messages → /market URL 含 symbol&event_id', () => {
   assert.equal(params.get('event_id'), 'evt-123')
 })
 
-test('/stock/:symbol 兼容路由 URL', () => {
-  const url = buildStockDetailUrl('000001.SZ', 'selection', 'dsa_selector')
-  assert.equal(url, '/stock/000001.SZ?source=selection&strategy=dsa_selector')
+test('/stock/:symbol URL 构建已迁移至 stockDetailNavigation.ts（CHANGE-20260716-006）', () => {
+  // 旧 buildStockDetailUrl 已删除；详情页 URL 唯一入口为
+  // frontend/src/features/stock-research/stockDetailNavigation.ts:buildStockDetailUrl
+  // 此处仅验证旧 API 不再导出（禁止第二套 URL 拼接）
+  assert.ok(
+    !('buildStockDetailUrl' in detailNav),
+    '旧 buildStockDetailUrl 必须删除（禁止第二套 URL 拼接）',
+  )
 })
 
 test('buildStockDetailState 携带 returnTo', () => {
@@ -107,7 +112,8 @@ test('buildMarketEntryFromScreener: 拒绝非白名单前缀', () => {
 })
 
 test('buildMarketEntryFromScreener: 拒绝超长 returnTo', () => {
-  const long = '/screener?' + 'x'.repeat(300)
+  // CHANGE-20260713-009 将长度限制提升到 4096；CHANGE-20260716-006 修正过时用例
+  const long = '/screener?' + 'x'.repeat(5000)
   const url = buildMarketEntryFromScreener('000001.SZ', 'dsa_selector', long)
   const params = new URLSearchParams(url.slice(7))
   assert.ok(!params.has('returnTo'), 'overly long returnTo should be rejected')

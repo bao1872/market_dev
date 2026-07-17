@@ -74,6 +74,14 @@ SELECT job_name, status, business_date, started_at, finished_at FROM scheduler_j
 - expired member 403 verified；
 - admin jobs page shows real state.
 
+## 4.0 AFC V1 部署状态（CHANGE-20260716-003 Known Gap）
+
+- **backend/frontend 为本轮早期部署验证**：`docker compose up -d --no-deps backend frontend` 仅重建并重启 backend 与 frontend 两个服务，**不重启 worker**（`worker-*` 仍运行旧镜像、旧 Git SHA）。
+- **worker 仍为旧镜像**：当前生产 worker 尚未升级，不会在盘后 `feature_snapshot_service.build_summary_payload` 中持久化新 `summary_payload.atomic_fact_contract_v1` 字段。
+- **当前页面主要依赖旧快照 fallback**：Context API（persisted-first）读不到新持久化 payload 时，回退到同一纯函数 `compute_atomic_facts` 从 `structural_payload`/`temporal_payload` 重算（不回写旧快照），页面功能正常。
+- **新 summary 持久化链路未在生产 worker 验证**：属于明确的早期验证决策（非错误），待 worker 镜像升级后在 production 验证新快照写入 + persisted-first 直读。
+- 部署验收时 `worker_heartbeats.build_sha` 与 backend/frontend 的 `/version` SHA **允许不一致**（worker 旧镜像），这是预期状态，不得据此判部署失败。
+
 ## 4.1 `CORE_ONLY` 构建范围
 
 `deploy.sh` 中 `CORE_ONLY=1` 用于受控恢复，只构建 `backend frontend`（不构建 `worker-capture`）。需要完整业务能力时必须运行对应 worker：趋势选股需要 strategy_batch/scheduler，飞书图片需要 capture/outbox/delivery。非 `CORE_ONLY` 模式下 deploy.sh 构建全部服务（含 `worker-capture`）。

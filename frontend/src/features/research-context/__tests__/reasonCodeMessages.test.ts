@@ -1,4 +1,4 @@
-// [reasonCodeMessages] - 描述: EventStatePanel reasonCode 文案映射契约测试（测试 9）
+// [reasonCodeMessages] - 描述: 状态观察面板 reasonCode 文案映射契约测试（测试 9）
 // 用法：node --experimental-strip-types --test src/features/research-context/__tests__/reasonCodeMessages.test.ts
 //
 // 覆盖：

@@ -1,0 +1,778 @@
+{
+  "contract_version": "Atomic Fact Contract V1",
+  "status": "frozen",
+  "research_grade": "B-FINAL",
+  "research_status": "closed",
+  "research_branch": "experiment/hierarchical-scene-state-v3",
+  "data_scope": {
+    "dates": [
+      "2026-07-07",
+      "2026-07-08",
+      "2026-07-09",
+      "2026-07-10",
+      "2026-07-13",
+      "2026-07-14"
+    ],
+    "exclude_dates": [
+      "2026-07-06"
+    ],
+    "expected_per_day": 5293,
+    "expected_total": 31758,
+    "sample_uniqueness": "(symbol, trade_date)",
+    "source_table": "stock_feature_snapshots",
+    "source_paths_read": [
+      "structural_payload.primary.1d",
+      "temporal_payload.daily_context"
+    ],
+    "source_paths_excluded": [
+      "node_cluster",
+      "cost_position",
+      "15m",
+      "60m",
+      "1m",
+      "industry_concepts",
+      "future_returns",
+      "mfe_mae",
+      "trading_signals"
+    ]
+  },
+  "core_facts": [
+    {
+      "id": "T1_trend_direction",
+      "dimension": "trend",
+      "level": "core",
+      "source_paths": [
+        "structural_payload.primary.1d.dsa_segment.current_dsa_segment_dir"
+      ],
+      "formula": "direct_value (1 -> UP, -1 -> DOWN, 0 -> NONE)",
+      "raw_type": "categorical",
+      "null_policy": "field_missing -> MISSING -> omit_row",
+      "display_order": 1,
+      "display_template": "DSA当前趋势方向为{上行/下行/中性}",
+      "prohibited_interpretations": [
+        "买卖方向",
+        "未来涨跌预测"
+      ],
+      "legacy_aliases": [],
+      "default_ui_enabled": true
+    },
+    {
+      "id": "T2_aligned_slope",
+      "dimension": "trend",
+      "level": "core",
+      "source_paths": [
+        "structural_payload.primary.1d.dsa_segment.current_dsa_segment_slope_atr_per_bar",
+        "structural_payload.primary.1d.dsa_segment.current_dsa_segment_dir"
+      ],
+      "formula": "dsa_dir * current_slope_atr_per_bar",
+      "raw_type": "continuous",
+      "unit": "ATR/bar",
+      "null_policy": "dsa_dir_missing_or_zero -> MISSING; cur_slope_atr_missing -> MISSING -> omit_row",
+      "display_order": 2,
+      "display_template": "方向对齐斜率为{value:.4f} ATR/bar",
+      "prohibited_interpretations": [
+        "斜率大等于确定延续"
+      ],
+      "legacy_aliases": [],
+      "default_ui_enabled": true
+    },
+    {
+      "id": "T4_trend_age",
+      "dimension": "trend",
+      "level": "core",
+      "source_paths": [
+        "structural_payload.primary.1d.dsa_segment.current_dsa_segment_age_bars"
+      ],
+      "formula": "direct_value",
+      "raw_type": "int",
+      "null_policy": "field_missing -> MISSING -> omit_row",
+      "display_order": 3,
+      "display_template": "当前Segment已持续{value}根bar",
+      "prohibited_interpretations": [
+        "成熟",
+        "衰竭",
+        "即将反转"
+      ],
+      "legacy_aliases": [],
+      "default_ui_enabled": true
+    },
+    {
+      "id": "T5_slope_ratio",
+      "dimension": "trend",
+      "level": "core",
+      "source_paths": [
+        "structural_payload.primary.1d.dsa_segment.current_dsa_segment_slope_atr_per_bar",
+        "structural_payload.primary.1d.dsa_segment.prev_dsa_segment_slope_atr_per_bar"
+      ],
+      "formula": "abs(current_slope_atr) / abs(previous_slope_atr); >upper_threshold -> 加速; <lower_threshold -> 减速; else -> 相近",
+      "raw_type": "continuous->categorical",
+      "null_policy": "prev_slope_atr_missing_or_zero -> MISSING -> omit_row",
+      "display_order": 4,
+      "display_template": "斜率相对前段：{加速/减速/相近}",
+      "prohibited_interpretations": [
+        "加速等于买入",
+        "减速等于卖出"
+      ],
+      "legacy_aliases": [],
+      "default_ui_enabled": true,
+      "thresholds_ref": "thresholds.t5_slope_ratio"
+    },
+    {
+      "id": "M1_momentum_alignment",
+      "dimension": "momentum",
+      "level": "core",
+      "source_paths": [
+        "structural_payload.primary.1d.volatility_momentum.sqzmom_val",
+        "structural_payload.primary.1d.dsa_segment.current_dsa_segment_dir"
+      ],
+      "formula": "compare sign(sqzmom_val) with dsa_dir; same -> ALIGNED; opposite -> COUNTER; else -> ZERO",
+      "raw_type": "categorical",
+      "null_policy": "either_missing_or_dsa_dir_zero -> MISSING -> omit_row",
+      "display_order": 5,
+      "display_template": "SQZMOM动量与趋势{同向/逆向/中性}",
+      "prohibited_interpretations": [
+        "同向等于上涨信号"
+      ],
+      "legacy_aliases": [],
+      "default_ui_enabled": true
+    },
+    {
+      "id": "M2_aligned_momentum",
+      "dimension": "momentum",
+      "level": "core",
+      "source_paths": [
+        "structural_payload.primary.1d.volatility_momentum.sqzmom_val",
+        "structural_payload.primary.1d.dsa_segment.current_dsa_segment_dir"
+      ],
+      "formula": "dsa_dir * sqzmom_val",
+      "raw_type": "continuous",
+      "null_policy": "either_missing_or_dsa_dir_zero -> MISSING -> omit_row",
+      "display_order": 6,
+      "display_template": "方向对齐动量值为{value:.4f}",
+      "prohibited_interpretations": [
+        "正值等于上涨信号"
+      ],
+      "legacy_aliases": [],
+      "default_ui_enabled": true
+    },
+    {
+      "id": "M3_aligned_momentum_delta",
+      "dimension": "momentum",
+      "level": "core",
+      "source_paths": [
+        "structural_payload.primary.1d.volatility_momentum.sqzmom_delta_1",
+        "structural_payload.primary.1d.dsa_segment.current_dsa_segment_dir"
+      ],
+      "formula": "dsa_dir * sqzmom_delta_1; output raw + POSITIVE/NEGATIVE/ZERO",
+      "raw_type": "continuous+categorical",
+      "null_policy": "either_missing_or_dsa_dir_zero -> MISSING -> omit_row",
+      "display_order": 7,
+      "display_template": "最近一Bar对齐动量变化：{正/负/零}（raw={value:.6f}）",
+      "prohibited_interpretations": [
+        "正变化等于买入信号",
+        "使用六日中位数或分位数进行产品分类"
+      ],
+      "legacy_aliases": [],
+      "default_ui_enabled": true,
+      "thresholds_ref": "thresholds.m3_zero_tolerance",
+      "classification_rule": "raw + sign only; zero tolerance from field storage precision, NOT from data quantiles"
+    },
+    {
+      "id": "M5_squeeze_state",
+      "dimension": "momentum",
+      "level": "core",
+      "source_paths": [
+        "structural_payload.primary.1d.volatility_momentum.sqz_on",
+        "structural_payload.primary.1d.volatility_momentum.sqz_off"
+      ],
+      "formula": "sqz_on=true -> 挤压中; sqz_off=true -> 释放中; both_false -> 正常; both_true -> INCONSISTENT",
+      "raw_type": "categorical",
+      "null_policy": "either_missing -> MISSING -> omit_row",
+      "display_order": 8,
+      "display_template": "波动率挤压状态：{挤压中/释放中/正常}",
+      "prohibited_interpretations": [
+        "挤压等于即将上涨或下跌",
+        "突破方向解释"
+      ],
+      "legacy_aliases": [],
+      "default_ui_enabled": true
+    },
+    {
+      "id": "S1_confirmed_boundary_relation",
+      "dimension": "structure",
+      "level": "core",
+      "source_paths": [
+        "structural_payload.primary.1d.swing_position.confirmed_swing_breakout_state",
+        "structural_payload.primary.1d.dsa_segment.current_dsa_segment_dir"
+      ],
+      "formula": "map (dsa_dir, breakout_state) -> {顺DSA方向越界, 区间内, 逆DSA方向越界}",
+      "raw_type": "categorical",
+      "null_policy": "either_missing_or_dsa_dir_zero -> MISSING -> omit_row",
+      "display_order": 9,
+      "display_template": "{顺DSA方向突破确认边界/价格在区间内/逆DSA方向边界破坏}",
+      "prohibited_interpretations": [
+        "越界等于交易确认"
+      ],
+      "legacy_aliases": [],
+      "default_ui_enabled": true
+    },
+    {
+      "id": "S2_active_dir_relation",
+      "dimension": "structure",
+      "level": "core",
+      "source_paths": [
+        "structural_payload.primary.1d.swing_position.active_swing_dir",
+        "structural_payload.primary.1d.dsa_segment.current_dsa_segment_dir"
+      ],
+      "formula": "same -> ALIGNED; opposite -> COUNTER",
+      "raw_type": "categorical",
+      "null_policy": "either_missing_or_dsa_dir_zero -> MISSING -> omit_row",
+      "display_order": 10,
+      "display_template": "Active Swing方向与DSA{一致/相反}",
+      "prohibited_interpretations": [
+        "Active方向变化称为新趋势"
+      ],
+      "legacy_aliases": [],
+      "default_ui_enabled": true
+    },
+    {
+      "id": "S3_active_position",
+      "dimension": "structure",
+      "level": "core",
+      "source_paths": [
+        "structural_payload.primary.1d.swing_position.price_position_in_active_swing_0_1"
+      ],
+      "formula": "0-0.33 -> 偏低区间; 0.33-0.67 -> 中间区间; 0.67-1.0 -> 偏高区间",
+      "raw_type": "continuous->categorical",
+      "null_policy": "field_missing_or_not_in_[0,1] -> MISSING -> omit_row",
+      "display_order": 11,
+      "display_template": "价格在Active Swing区间内位置：{偏低/中/高}",
+      "prohibited_interpretations": [
+        "便宜",
+        "昂贵",
+        "买点",
+        "卖点"
+      ],
+      "legacy_aliases": [],
+      "default_ui_enabled": true,
+      "thresholds_ref": "thresholds.s3_position"
+    },
+    {
+      "id": "S7_dist_favorable_boundary",
+      "dimension": "structure",
+      "level": "core",
+      "source_paths": [
+        "structural_payload.primary.1d.dsa_segment.current_dsa_segment_dir",
+        "structural_payload.primary.1d.swing_position.distance_to_swing_high_atr",
+        "structural_payload.primary.1d.swing_position.distance_to_swing_low_atr"
+      ],
+      "formula": "dsa_dir>0 -> distance_to_swing_high_atr; dsa_dir<0 -> distance_to_swing_low_atr",
+      "raw_type": "continuous",
+      "unit": "ATR (signed)",
+      "null_policy": "dsa_dir_zero_or_corresponding_distance_missing -> MISSING -> omit_row",
+      "display_order": 12,
+      "display_template": "距顺DSA方向确认边界：{尚未到达X ATR / 已越过X ATR}",
+      "prohibited_interpretations": [
+        "止损",
+        "安全距离"
+      ],
+      "legacy_aliases": [],
+      "default_ui_enabled": true,
+      "ui_rule": "MUST NOT display negative distance; convert d>=0 -> '尚未到达 |d| ATR'; d<0 -> '已越过 |d| ATR'"
+    },
+    {
+      "id": "S8_dist_adverse_boundary",
+      "dimension": "structure",
+      "level": "core",
+      "source_paths": [
+        "structural_payload.primary.1d.dsa_segment.current_dsa_segment_dir",
+        "structural_payload.primary.1d.swing_position.distance_to_swing_low_atr",
+        "structural_payload.primary.1d.swing_position.distance_to_swing_high_atr"
+      ],
+      "formula": "dsa_dir>0 -> distance_to_swing_low_atr; dsa_dir<0 -> distance_to_swing_high_atr",
+      "raw_type": "continuous",
+      "unit": "ATR (signed)",
+      "null_policy": "dsa_dir_zero_or_corresponding_distance_missing -> MISSING -> omit_row",
+      "display_order": 13,
+      "display_template": "距逆DSA方向确认边界：{尚未到达X ATR / 已越过X ATR}",
+      "prohibited_interpretations": [
+        "止损",
+        "安全距离"
+      ],
+      "legacy_aliases": [],
+      "default_ui_enabled": true,
+      "ui_rule": "MUST NOT display negative distance; convert d>=0 -> '尚未到达 |d| ATR'; d<0 -> '已越过 |d| ATR'"
+    },
+    {
+      "id": "V3_avg_volume_ratio",
+      "dimension": "volume",
+      "level": "core",
+      "source_paths": [
+        "structural_payload.primary.1d.dsa_segment.current_segment_volume_sum",
+        "structural_payload.primary.1d.dsa_segment.current_dsa_segment_age_bars",
+        "structural_payload.primary.1d.dsa_segment.prev_segment_volume_sum",
+        "structural_payload.primary.1d.dsa_segment.prev_dsa_segment_age_bars"
+      ],
+      "formula": "(cur_vol_sum / cur_age) / (prev_vol_sum / prev_age)",
+      "raw_type": "continuous",
+      "null_policy": "any_field_missing_or_age_le_zero_or_prev_avg_zero -> MISSING -> omit_row",
+      "display_order": 14,
+      "display_template": "Segment均量与前段{高/低/相近}（ratio={value:.4f}）",
+      "prohibited_interpretations": [
+        "放量",
+        "缩量",
+        "用累计Segment量比代替"
+      ],
+      "legacy_aliases": [],
+      "default_ui_enabled": true,
+      "thresholds_ref": "thresholds.v3_ratio"
+    }
+  ],
+  "auxiliary_facts": [
+    {
+      "id": "T3_trend_efficiency",
+      "dimension": "trend",
+      "level": "auxiliary",
+      "source_paths": [
+        "structural_payload.primary.1d.dsa_segment.current_dsa_segment_efficiency_0_1"
+      ],
+      "formula": "production: abs(last_close - cur_start_price) / np.nansum(np.abs(np.diff(seg_closes))); shadow: abs(close_end - close_start) / sum(abs(diff(close_path)))",
+      "raw_type": "continuous",
+      "null_policy": "path_contains_nan_or_length_lt_2_or_denominator_le_zero -> NULL",
+      "display_order": null,
+      "display_template": "趋势效率为{value:.4f}（仅修复后启用）",
+      "prohibited_interpretations": [
+        "效率高等于确定延续"
+      ],
+      "legacy_aliases": [],
+      "default_ui_enabled": false,
+      "engineering_debt_ref": "engineering_debt.efficiency_bugs"
+    },
+    {
+      "id": "T6_efficiency_delta",
+      "dimension": "trend",
+      "level": "auxiliary",
+      "source_paths": [
+        "structural_payload.primary.1d.dsa_segment.current_dsa_segment_efficiency_0_1",
+        "structural_payload.primary.1d.dsa_segment.prev_dsa_segment_efficiency_0_1"
+      ],
+      "formula": "cur_efficiency - prev_efficiency",
+      "raw_type": "continuous",
+      "null_policy": "T3_or_prev_efficiency_NULL -> propagate NULL",
+      "display_order": null,
+      "display_template": "效率差为{value:.4f}（仅修复后启用）",
+      "prohibited_interpretations": [
+        "效率差扩大等于趋势加强"
+      ],
+      "legacy_aliases": [],
+      "default_ui_enabled": false,
+      "engineering_debt_ref": "engineering_debt.efficiency_bugs"
+    },
+    {
+      "id": "M4_segment_momentum_change",
+      "dimension": "momentum",
+      "level": "auxiliary",
+      "source_paths": [
+        "temporal_payload.daily_context.daily_sqzmom_change_since_segment_start",
+        "structural_payload.primary.1d.dsa_segment.current_dsa_segment_dir"
+      ],
+      "formula": "dsa_dir * daily_sqzmom_change_since_segment_start",
+      "raw_type": "continuous",
+      "null_policy": "either_missing_or_dsa_dir_zero -> MISSING -> omit_row",
+      "display_order": null,
+      "display_template": "Segment起点动量变化：{value:.4f}",
+      "prohibited_interpretations": [
+        "段内动量变化直接预测延续"
+      ],
+      "legacy_aliases": [],
+      "default_ui_enabled": false
+    },
+    {
+      "id": "S4_developing_dir_relation",
+      "dimension": "structure",
+      "level": "auxiliary",
+      "source_paths": [
+        "structural_payload.primary.1d.swing_position.developing_swing_dir",
+        "structural_payload.primary.1d.dsa_segment.current_dsa_segment_dir"
+      ],
+      "formula": "same -> ALIGNED; opposite -> COUNTER",
+      "raw_type": "categorical",
+      "null_policy": "either_missing_or_dsa_dir_zero -> MISSING -> omit_row",
+      "display_order": null,
+      "display_template": "Developing Swing方向与DSA{一致/相反}",
+      "prohibited_interpretations": [
+        "Developing方向变化称为新趋势"
+      ],
+      "legacy_aliases": [],
+      "default_ui_enabled": false,
+      "developing_swing_role": "auxiliary_only"
+    },
+    {
+      "id": "S5_active_vs_developing",
+      "dimension": "structure",
+      "level": "auxiliary",
+      "source_paths": [
+        "structural_payload.primary.1d.swing_position.active_swing_dir",
+        "structural_payload.primary.1d.swing_position.developing_swing_dir"
+      ],
+      "formula": "same -> ALIGNED; opposite -> COUNTER",
+      "raw_type": "categorical",
+      "null_policy": "either_missing -> MISSING -> omit_row",
+      "display_order": null,
+      "display_template": "Active与Developing{一致/相反}",
+      "prohibited_interpretations": [
+        "Developing反向等于趋势反转"
+      ],
+      "legacy_aliases": [],
+      "default_ui_enabled": false,
+      "developing_swing_role": "auxiliary_only"
+    },
+    {
+      "id": "S6_developing_position",
+      "dimension": "structure",
+      "level": "auxiliary",
+      "source_paths": [
+        "structural_payload.primary.1d.swing_position.price_position_in_developing_swing_0_1"
+      ],
+      "formula": "0-0.33 -> 偏低区间; 0.33-0.67 -> 中间区间; 0.67-1.0 -> 偏高区间",
+      "raw_type": "continuous->categorical",
+      "null_policy": "field_missing_or_not_in_[0,1] -> MISSING -> omit_row",
+      "display_order": null,
+      "display_template": "价格在Developing区间位置：{偏低/中/高}",
+      "prohibited_interpretations": [
+        "便宜",
+        "昂贵",
+        "买点",
+        "卖点"
+      ],
+      "legacy_aliases": [],
+      "default_ui_enabled": false,
+      "developing_swing_role": "auxiliary_only"
+    },
+    {
+      "id": "V2_current_avg_volume",
+      "dimension": "volume",
+      "level": "auxiliary",
+      "source_paths": [
+        "structural_payload.primary.1d.dsa_segment.current_segment_volume_sum",
+        "structural_payload.primary.1d.dsa_segment.current_dsa_segment_age_bars"
+      ],
+      "formula": "current_segment_volume_sum / current_dsa_segment_age_bars",
+      "raw_type": "continuous",
+      "null_policy": "either_missing_or_age_le_zero -> MISSING -> omit_row",
+      "display_order": null,
+      "display_template": "当前Segment平均每Bar量：{value:.2f}",
+      "prohibited_interpretations": [],
+      "legacy_aliases": [],
+      "default_ui_enabled": false
+    },
+    {
+      "id": "V4_age_ratio_raw",
+      "dimension": "volume",
+      "level": "auxiliary",
+      "source_paths": [
+        "structural_payload.primary.1d.dsa_segment.current_dsa_segment_age_bars",
+        "structural_payload.primary.1d.dsa_segment.prev_dsa_segment_age_bars"
+      ],
+      "formula": "cur_age / prev_age",
+      "raw_type": "continuous",
+      "null_policy": "either_missing_or_prev_age_le_zero -> MISSING -> omit_row",
+      "display_order": null,
+      "display_template": "当前段相对前段年龄比：{value:.4f}",
+      "prohibited_interpretations": [],
+      "legacy_aliases": [],
+      "default_ui_enabled": false,
+      "note": "auxiliary_reference_only; not in product summary"
+    },
+    {
+      "id": "V5_return_per_volume",
+      "dimension": "volume",
+      "level": "auxiliary",
+      "source_paths": [
+        "structural_payload.primary.1d.dsa_segment.current_segment_return_per_volume"
+      ],
+      "formula": "direct_value",
+      "raw_type": "continuous",
+      "null_policy": "field_missing -> MISSING -> omit_row",
+      "display_order": null,
+      "display_template": "当前Segment收益率/成交量：{value:.6f}",
+      "prohibited_interpretations": [],
+      "legacy_aliases": [],
+      "default_ui_enabled": false
+    },
+    {
+      "id": "V5_return_per_volume_ratio",
+      "dimension": "volume",
+      "level": "auxiliary",
+      "source_paths": [
+        "structural_payload.primary.1d.dsa_segment.return_per_volume_ratio"
+      ],
+      "formula": "direct_value",
+      "raw_type": "continuous",
+      "null_policy": "field_missing -> MISSING -> omit_row",
+      "display_order": null,
+      "display_template": "收益率/量比：{value:.4f}",
+      "prohibited_interpretations": [],
+      "legacy_aliases": [],
+      "default_ui_enabled": false
+    }
+  ],
+  "rejected_facts": [
+    {
+      "id": "V1_cumulative_volume_ratio",
+      "dimension": "volume",
+      "level": "rejected",
+      "ui_enabled": false,
+      "source_paths": [
+        "structural_payload.primary.1d.dsa_segment.current_vs_prev_volume_ratio"
+      ],
+      "formula": "current_segment_volume_sum / previous_segment_volume_sum",
+      "raw_type": "continuous",
+      "null_policy": "n/a",
+      "display_order": null,
+      "display_template": null,
+      "prohibited_interpretations": [
+        "放量",
+        "缩量"
+      ],
+      "legacy_aliases": [
+        "current_vs_prev_volume_ratio"
+      ],
+      "rejection_reason": "累计成交量比与Segment年龄比高度相关（六日Pearson=0.6405），主要受Segment长度影响，不能直接描述放量或缩量",
+      "retention_policy": "可保留DB调试值；不得进入UI、摘要或状态卡"
+    }
+  ],
+  "rejected_concepts": [
+    "综合趋势分数",
+    "综合动量分数",
+    "综合结构分数",
+    "综合成交量分数",
+    "趋势健康度",
+    "衰竭分数",
+    "反转概率",
+    "买点",
+    "卖点",
+    "加仓",
+    "减仓",
+    "持仓建议",
+    "新旧重复Alignment别名",
+    "累计成交量比（V1同义概念）",
+    "趋势形成",
+    "趋势反转",
+    "成熟",
+    "衰竭",
+    "便宜",
+    "昂贵",
+    "止损",
+    "安全",
+    "突破方向",
+    "放量",
+    "缩量"
+  ],
+  "ui_sections": {
+    "default_order": [
+      "trend",
+      "momentum",
+      "structure",
+      "volume"
+    ],
+    "sections": {
+      "trend": {
+        "display_name": "趋势",
+        "facts": [
+          "T1_trend_direction",
+          "T2_aligned_slope",
+          "T4_trend_age",
+          "T5_slope_ratio"
+        ],
+        "default_row_count": 4
+      },
+      "momentum": {
+        "display_name": "动量",
+        "facts": [
+          "M1_momentum_alignment",
+          "M2_aligned_momentum",
+          "M3_aligned_momentum_delta",
+          "M5_squeeze_state"
+        ],
+        "default_row_count": 4
+      },
+      "structure": {
+        "display_name": "结构",
+        "facts": [
+          "S1_confirmed_boundary_relation",
+          "S2_active_dir_relation",
+          "S3_active_position",
+          "S7_dist_favorable_boundary",
+          "S8_dist_adverse_boundary"
+        ],
+        "default_row_count": 5
+      },
+      "volume": {
+        "display_name": "成交量",
+        "facts": [
+          "V3_avg_volume_ratio"
+        ],
+        "default_row_count": 1
+      }
+    },
+    "global_footer": "以上为状态描述，不构成买卖建议"
+  },
+  "global_display_rules": {
+    "missing_value_handling": "omit_row",
+    "internal_enums_hidden": [
+      "MISSING",
+      "UNCALCULABLE",
+      "NOT_COMPUTABLE",
+      "INCONSISTENT"
+    ],
+    "empty_group_handling": "hide_group_or_show_数据不足_only_one_strategy",
+    "auxiliary_default_hidden": true,
+    "no_probabilities": true,
+    "no_composite_scores": true,
+    "no_trading_advice": true,
+    "objective_description_only": true,
+    "s7_s8_negative_distance_rule": "MUST NOT display negative distance; d>=0 -> '尚未到达 |d| ATR'; d<0 -> '已越过 |d| ATR'",
+    "forbidden_words": [
+      "买入",
+      "卖出",
+      "加仓",
+      "减仓",
+      "止损",
+      "安全",
+      "买点",
+      "卖点",
+      "持仓",
+      "趋势形成",
+      "趋势反转",
+      "成熟",
+      "衰竭",
+      "便宜",
+      "昂贵",
+      "突破方向",
+      "放量",
+      "缩量",
+      "累计成交量比"
+    ]
+  },
+  "thresholds": {
+    "s3_position": {
+      "lower": 0.33,
+      "upper": 0.67,
+      "engineering_confirmation_required": false,
+      "source": "V4.12/V4.13 script constants"
+    },
+    "t5_slope_ratio": {
+      "lower": null,
+      "upper": null,
+      "engineering_confirmation_required": true,
+      "source": "V4.12 candidates q25/q75, q20/q80, q33/q67; not hardcoded in V4.13"
+    },
+    "v3_ratio": {
+      "lower": null,
+      "upper": null,
+      "engineering_confirmation_required": true,
+      "source": "V4.12 candidates q25/q75, q20/q80, q33/q67; not hardcoded in V4.13"
+    },
+    "m3_zero_tolerance": {
+      "value": null,
+      "engineering_confirmation_required": true,
+      "source": "field storage precision of sqzmom_delta_1; NOT from data quantiles; forbidden to use six-day median"
+    }
+  },
+  "engineering_debt": {
+    "efficiency_bugs": {
+      "debt_id": "EFF-001+EFF-002",
+      "severity": "high",
+      "status": "open",
+      "affected_facts": [
+        "T3_trend_efficiency",
+        "T6_efficiency_delta"
+      ],
+      "violation_count": 137,
+      "production_file": "backend/app/services/structural_factor_service.py",
+      "production_function": "_compute_dsa_segment_factors",
+      "bug_1": {
+        "id": "EFF-001",
+        "location_lines": "858-864 (current), 903-910 (previous)",
+        "description": "np.nansum(np.abs(np.diff(seg_closes))) skips NaN, causing path_sum to be underestimated and efficiency > 1",
+        "fix": "replace np.nansum with np.sum; check np.all(np.isfinite(seg_closes)) before computing; return None if any NaN"
+      },
+      "bug_2": {
+        "id": "EFF-002",
+        "location_lines": "810, 864",
+        "description": "net = abs(last_close - cur_start_price) where cur_start_price = float(cur_points[0]['value']) is DSA line value, not close price",
+        "fix": "replace cur_start_price with close_start = float(closes[cur_start_bar_idx]); same for prev_start_price and prev_end_price"
+      },
+      "shadow_formula": "abs(close_end - close_start) / sum(abs(close[t] - close[t-1]));禁止nansum, 禁止clip",
+      "gate_results": {
+        "gate1_finite_in_0_1": "PASS (violations=0)",
+        "gate2_normal_match_le_1e-9": "FAIL (match=40/30771)",
+        "gate3_out_of_range_fixed": "PASS (cur=137/137, prev=0/0)",
+        "gate4_daily_coverage_ge_95pct": "PASS (0.9734-0.9960)",
+        "gate5_t6_null_propagation": "PASS"
+      },
+      "interim_policy": "T3/T6 default_ui_enabled=false; feature_flag required; not in default UI until fixed"
+    },
+    "threshold_confirmation": {
+      "debt_id": "THR-001",
+      "severity": "medium",
+      "status": "open",
+      "description": "T5 slope_ratio, V3 avg_volume_ratio, M3 zero tolerance thresholds need confirmation from V4.12 q20/q80, q25/q75, q33/q67 candidates",
+      "affected_thresholds": [
+        "thresholds.t5_slope_ratio",
+        "thresholds.v3_ratio",
+        "thresholds.m3_zero_tolerance"
+      ]
+    },
+    "v1_length_pollution": {
+      "debt_id": "V1-REJ",
+      "severity": "info",
+      "status": "rejected",
+      "description": "V1 cumulative_volume_ratio highly correlated with age_ratio (Pearson=0.6405); replaced by V3 avg_volume_ratio (Pearson=-0.0149)",
+      "retention": "DB debug value only; never in UI"
+    }
+  },
+  "quality_gates_v4_13": {
+    "six_day_total_31758": "PASS",
+    "formula_consistency_100pct": "PASS",
+    "logic_conflicts_0": "PASS",
+    "efficiency_violations_137": "PASS",
+    "cumulative_vs_age_pearson_0_6405": "PASS (high pollution confirmed)",
+    "avg_vs_age_pearson_minus_0_0149": "PASS (low pollution confirmed)",
+    "shadow_gate1": "PASS",
+    "shadow_gate2": "FAIL (expected; T3/T6 demoted)",
+    "shadow_gate3": "PASS",
+    "shadow_gate4": "PASS",
+    "shadow_gate5": "PASS",
+    "template_forbidden_words_zero": "PASS",
+    "template_logic_conflicts_zero": "PASS",
+    "template_rejected_field_appearance_zero": "PASS",
+    "peak_rss_mb": 233.5,
+    "rss_hard_limit_mb": 400,
+    "rss_soft_limit_mb": 360
+  },
+  "closure_declaration": {
+    "research_phase_closed": true,
+    "v4_14_recommended": false,
+    "next_phase": "engineering_implementation_only",
+    "no_main_modification": true,
+    "no_pr_creation": true,
+    "no_deployment": true
+  },
+  "metadata": {
+    "generated_at": "2026-07-15",
+    "generated_from_branch": "experiment/hierarchical-scene-state-v3",
+    "source_reports": [
+      "/home/ubuntu/panji_research_outputs/scene_state_v3/final_v4_12_atomic_fact_contract_closure.md",
+      "/home/ubuntu/panji_research_outputs/scene_state_v3/final_v4_13_atomic_fact_contract_freeze.md"
+    ],
+    "source_scripts": [
+      "research/experiments/v4_12_atomic_fact_contract_closure.py",
+      "research/experiments/v4_13_atomic_fact_contract_freeze.py"
+    ],
+    "core_count": 14,
+    "auxiliary_count": 10,
+    "rejected_count": 1
+  }
+}

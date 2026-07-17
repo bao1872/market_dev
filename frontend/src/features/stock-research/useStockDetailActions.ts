@@ -34,6 +34,7 @@ import {
 import { useToast } from '@/store/toast'
 import type { ResearchSource } from './stockResearchTypes'
 import type { StrategyResultQueryParams } from '@/api/endpoints'
+import { buildStockDetailUrl, type OriginScope } from './stockDetailNavigation'
 
 export interface StockDetailActionsParams {
   instrumentId: string | undefined
@@ -102,7 +103,7 @@ export function useStockDetailActions({
   instrumentId,
   symbol,
   source,
-  strategy,
+  strategy: _strategy,
   marketContext,
   sourceContextInvalid,
   returnTo,
@@ -245,11 +246,16 @@ export function useStockDetailActions({
     const nextIndex = (currentIndex + direction + sourceStocks.length) % sourceStocks.length
     const target = sourceStocks[nextIndex]
     if (!target?.symbol) return
-    // 保留 returnTo 上下文 + source + strategy + timeframe，使切换后仍可返回来源列表且保持周期
-    const returnToParam = returnTo ? `&returnTo=${encodeURIComponent(returnTo)}` : ''
-    const timeframeParam = timeframe ? `&timeframe=${timeframe}` : ''
-    navigate(`/stock/${target.symbol}?source=${source}&strategy=${strategy}${returnToParam}${timeframeParam}`)
-  }, [canNavigate, currentIndex, sourceStocks, navigate, strategy, source, returnTo, timeframe])
+    // CHANGE-20260716-006: 使用 buildStockDetailUrl 统一构建，保留 originScope/returnTo/timeframe
+    const originScope: OriginScope = source === 'selection' ? 'market' : 'watchlist'
+    navigate(
+      buildStockDetailUrl(target.symbol, {
+        originScope,
+        returnTo,
+        timeframe,
+      }),
+    )
+  }, [canNavigate, currentIndex, sourceStocks, navigate, source, returnTo, timeframe])
 
   return {
     inWatchlist,

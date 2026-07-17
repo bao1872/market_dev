@@ -4,6 +4,51 @@
 
 ## 2026-07-16
 
+- CHANGE-20260716-005: AFC V1 终审修正（M5 单侧缺失 + per-fact 精度 recentChanges + PersistedAtomicFactsPayload 严格 schema + as_of 截止语义 + legacy degradedReasons + meta 三版本 + presentation secondaryLabel 真源 + 前端布局修正）
+  - **后端 M5 单侧缺失**：`_squeeze_state` 改 `if on is None or off is None: return None`（任一缺失即缺失，旧 `and` 改 `or`）；新增四个单侧缺失组合测试均不进入 Core
+  - **RecentChanges per-fact 精度**：`_quantize_fact_value` 按 presentation `valuePrecision` 量化（禁止统一 `round(...,4)`）；`FACT_DIMENSION_BY_ID` 从冻结合同导出 fact_id→dimension 映射，事实消失时仍返回正确维度（禁止默认 trend）；`_combine_text` 组合短值和 category（避免丢失 M3 双文本状态）
+  - **PersistedAtomicFactsPayload Pydantic schema**：`extra="forbid"` + `model_validator` 严格校验四版本/core 键/publicKey 维度/无重复/T3/T6/V1 禁止/availability 一致/无 debug；不兼容必须 fallback 不得 500；7 种损坏类型测试均 fallback
+  - **as_of 截止语义**：`trade_date <= as_of` + DESC 取最新 1 条；周末/无批次日期返回之前最近发布状态
+  - **Legacy degradedReasons**：legacy snapshot 存在但 source_run_id 缺失/歧义时，reasonCode 加入 degradedReasons（不清除原因）；无 snapshot 才用 reasonCode 作空态原因
+  - **meta 三版本**：`AtomicFactsMeta`（payloadVersion/researchFreezeVersion/presentationVersion）加入 `AtomicFactsContextResponse`；前端禁止硬编码 V4.13
+  - **presentation secondaryLabel 真源**：`_secondary_text_for` 统一从 presentation 映射生成 secondaryText；`unclassifiedLabel` 顶层字段；移除散落 `ATR / 根日K`/`个交易日`/`分类未启用` 硬编码常量
+  - **前端 factRow secondary 右列**：`grid-template-areas "label value" / ". secondary"` + `text-align: right`
+  - **前端 PositionRow 独立布局**：`grid-template-areas "label caption" / "track track"`（轨道横跨整组宽度）；`railScale` `space-between` 四刻度；`min-height` 预留刻度高度禁止与 caption 重叠
+  - **前端 RecentChanges deltaText**：渲染 `c.deltaText`（`changeDelta` class）；4 列 grid；禁止 publicKey
+  - **前端 Drawer Tab 双向**：正向 Tab 也检查 `!drawer.contains(active)`，与 Shift+Tab 对称
+  - **前端 Header meta**：移除 `AFC_RESEARCH_VERSION` 常量；从 `data.meta.researchFreezeVersion` 读取
+  - **测试**：后端 56/56（service + stock_context）+ ruff clean + mypy 仅 pre-existing；前端 contract 26/26（新增 5 项）+ tsc/eslint clean + vite build 成功；4 docs 检查全 PASS
+  - **文档**：07/02/04/05/MANIFEST/code-doc-alignment/maps/AGENTS + 本 CHANGE + CHANGELOG；明确 10 个 Aux 中仅 8 个可展开、as_of 截止语义、严格 persisted schema、worker 旧镜像 Known Gap
+  - **部署**：仅 `docker compose up -d --no-deps backend frontend`，不重启 worker/capture/PG/Redis；worker 旧镜像 Known Gap（新 summary 持久化未生产验证）
+
+- CHANGE-20260716-004: AFC V1 原子值 UI 改造（短原子值 + visualKind 统一枚举 + 持久化/调试分离 + 前端状态观察重构）
+  - **后端展示契约**：`valueText` 改短原子值（T1=`上行`、T2=`+0.0123`+`ATR / 根日K`、T4=`18`+`个交易日`、T5=`1.23×`+`分类未启用`、M1/M5/S1/S2=仅 categoryLabel、M3=`+0.000300`+categoryLabel、S3=`0.63`+轨道、S7/S8=`1.23 ATR`+`尚未到达/已越过`、V3=`1.11×`+`分类未启用`）；统一格式器 `_fmt_atomic_value` 读 presentation `valuePrecision`（禁止散落 `.4f/.6f`）；`visualKind` 统一枚举 `metric/value_with_category/relation/position/distance/ratio`；M5 任一缺失即缺失+双true质量异常+文案`正在收紧/正在释放/正常`；`recentChanges` 加中文 `label`（禁止 publicKey 泄露）
+  - **持久化/调试分离**：`compute_atomic_facts()` 仅 core/aux/availability（无 debug）；`compute_atomic_fact_debug()` 管理员即时生成；`build_persisted_afc_payload()` 包装四版本字段（`payloadVersion=1`/`researchContractVersion`/`researchFreezeVersion=V4.13`/`presentationVersion`）+ core/aux/availability，无 debug；`feature_snapshot_service` 改用之；`_is_valid_stored_afc` 严格校验四版本+四组+publicKey+无 debug，不满足→fallback 重算（不回写）；admin debug 走 `compute_atomic_fact_debug(snapshot.payloads)`；persisted-first==fallback；GET 零写入；旧 worker 旧格式由 validator fallback 兼容
+  - **前端重构**：`FactRow` 按 visualKind 渲染去重（relation 仅 categoryLabel 一次、distance 徽章+数值各一次、ratio secondaryText 仅一次）；`.factRow` 改 CSS Grid 透明行（非嵌套卡片）；S3 完整轨道（低位/0.33/0.67/高位+圆点+`0.63 · 中间`）；Auxiliary 按 动量补充/结构补充/成交补充 分组默认收起；RecentChanges 中文 label；Drawer 焦点 trap+关闭恢复焦点+body 滚动锁定+Escape/遮罩/按钮关闭
+  - **测试**：后端 44/44（service 25 + stock_context 14 + contracts 5）+ ruff clean + mypy 仅 pre-existing；前端 contract 21/21 + tsc/eslint clean + vite build 成功；模块自测 OK
+  - **文档**：07/02/04/05/MANIFEST/code-doc-alignment/maps/AGENTS + 本 CHANGE + CHANGELOG；明确 valueText=短、visualKind 渲染、summary 无 debug、M5 任一缺失规则、worker 旧镜像 Known Gap
+  - **部署**：仅 `docker compose up -d --no-deps backend frontend`，不重启 worker/capture/PG/Redis；worker 旧镜像 Known Gap（新 summary 持久化未生产验证）
+
+- CHANGE-20260716-003: AFC V1 双合同分离 + 前端 Compact/Expanded 重构与契约对齐（在 002 基础上继续）
+  - **双合同分离**：`atomic_fact_contract_v1.json`（V4.13 冻结研究合同，移除全部 `public_key`/`public_label`，不含产品层语义）+ 新增 `atomic_fact_presentation_v1.json`（按 Fact ID 映射 `publicKey/publicLabel/visualKind/valuePrecision/groupTitle/secondaryLabel`，**恰好 14 Core + 8 Auxiliary，排除 T3/T6/V1**）；生产服务同时读取两份合同（frozen 决定事实/顺序/公式/阈值/路径，presentation 决定产品文案与 UI 类型）
+  - **DTO 拆分**：`PublicAtomicFactItem`（无 `factId`/`sourcePath`/`formula`/`thresholdRef`）+ `AdminAtomicFactDebugItem`（保留 factId/publicKey/sourcePath/rawValue/thresholdRef/thresholdEnabled/featureFlag/missing）；缺失事实由 `compute_atomic_facts` 从 Core 数组直接省略（分母固定 14，`availability.coreMissing` 用 publicKey）；M3 不声称 1e-6 已确认（仅 raw>0→增加/raw<0→减少/raw==0→基本不变，`thresholdEnabled=false`）；M5 任一输入缺失即省略、双 true→dataQuality 异常；S1 未知枚举省略；S3 越界省略；S7/S8 管理员 `sourcePath` 随趋势方向动态变化；recentChanges 按展示精度比较返回 fromText/toText/deltaText
+  - **persisted-first**：Context API 优先读取已持久化 `summary_payload.atomic_fact_contract_v1`（校验后直接返回），缺失/版本不符/结构不匹配 → 同一纯函数 fallback（不回写旧快照）
+  - **前端重构**：`AtomicFactsPanel` 重写组件树（Header/CoreFactGroup/FactMetricRow/RelationBadge/PositionRail/BoundaryRow/AuxiliaryAccordion/RecentChangesStrip），compact `/market` 右栏四张组卡（趋势 info/动量 brand/结构 purple/成交 warning，每项一行，S3 0–1 轨道 0.33/0.67、T5/V3 比值+「分类未启用」、S7/S8「尚未到达/已越过」）；新增 `AtomicFactsDrawer`（右侧 overlay，宽 `min(1080px, calc(100vw-48px))`，不压 K 线，Escape/遮罩/关闭可关，4/2/1 列响应式，Auxiliary 默认收起展开 8 项，T3/T6/V1 不出现 DOM）；`StockDetailPage` 改用 Drawer 替代内联窄 aside；`AdminStockDebugPage` 近期变化列改用 publicKey/fromText/toText/asOf；scss 仅用 `variables.scss` token 无硬编码十六进制
+  - **测试**：后端纯函数 25 + 双合同结构 5 + API 集成 14 = 44/44（独立测试库 `bz_stock_test`），ruff/mypy 0；前端 contract 8、tsc/eslint/vite build 通过
+  - **文档**：07/02/04/05/MANIFEST/code-doc-alignment（ALIGN-073）/backend+api+frontend+test+deployment maps/AGENTS/本 CHANGE/本 CHANGELOG 全部同步；明确 frozen↔presentation 分离、backend/frontend 早期部署 worker 旧镜像、当前靠 fallback、worker 升级前新 summary 持久化未生产验证、T5/V3/M3 阈值未确认、近期变化非 Core、未证明投资价值
+  - **部署**：仅 `docker compose up -d --no-deps backend frontend`，不重启 worker/capture/PostgreSQL/Redis；worker 旧镜像 Known Gap（ALIGN-073）
+  - **遗留**：全生产链路 E2E（CDP）待补；worker 升级后验证新 summary 持久化 + persisted-first 直读
+
+- CHANGE-20260716-002: Atomic Fact Contract V1 个股状态观察（纯函数 + 快照/Context API + 前端面板）
+  - Canonical Registry `atomic_fact_contract_v1.json`（V4.13 冻结，14 Core / 10 Aux / 1 Rejected=V1 累计成交量比；S2 存在；T3/T6 `ui_enabled=false`）
+  - 纯函数 `compute_atomic_facts` / `compute_recent_changes`（新快照与旧 summary fallback 共用同一公式；近期变化非 V4.13 Core Fact）；S3 严格 0.33/0.67；S7/S8 禁止负距离；T5/V3 阈值未确认→仅比值+「分类未启用」
+  - `stock_context.py` 复用接口返回原子事实结构（contractVersion/asOf/core/auxiliary/availability/recentChanges/dataQuality）；GET 零写入、as_of point-in-time、V1 永不进 payload；admin debug 含 `rawDebug` 可追溯底层 feature/factor
+  - `feature_snapshot_service.build_summary_payload` 追加 `atomic_fact_contract_v1`（仅新快照写入，旧已发布快照受 upsert 保护不覆盖）
+  - 前端 `AtomicFactsPanel`（compact=`/market` 右栏 + expanded=`/stock/:symbol`，按钮「显示/隐藏状态观察」）；删除旧 `EventStatePanel`；复用 `useStockContext`（收起 enabled=false → 0 请求）
+  - 测试：后端纯函数 19/19 + API 集成 6/6（独立测试库，非生产库）；前端 contract 58/58、tsc/eslint 0、build 成功；ruff/mypy 0
+  - 文档：07-atomic-fact-contract-v1 + AGENTS + 02/04 + code-doc-alignment + 4 maps + 本 CHANGE
+  - 遗留：生产部署验收待步骤六执行
+
 - CHANGE-20260716-001: 盘后任务历史恢复 API + SMC 逐 Bar 对齐 Pine + MiniKline 真实留白 + indicator_service 按需加载（合并原 001-007）
   - **目标一 盘后 resume**：`POST /admin/after-close-runs/{id}/resume` — SELECT FOR UPDATE、同日 queued/running 互斥（409 SAME_DAY_ACTIVE_RUN）、幂等返回 queued、清 worker/heartbeat/lease、metadata 写 resume_requested_at、唯一 manual_resume 事件
   - **P0 修复**：repair 按 `source_run_id==snapshot_run.id` 统计；DSA 未 published 不标 succeeded（`resume_pending`）；publishing 从 DB 读真实 count（禁止 0/None）；feature_snapshot 复用已有 running run；repair 后补 commit
@@ -758,6 +803,7 @@
 | CHANGE-20260704-027 | 2026-07-04 | DSA Run 总超时与 Computable Universe 口径修复 | committed | `fix/dsa-run-timeout-and-computable-universe` | 待填写 | 待合并后填写 | `backend/app/services/strategy_batch_service.py`、`backend/tests/test_strategy_batch_service.py`、`docker-compose.prod.yml`、`docs/current/02-data-api-contracts.md`、`docs/current/03-jobs-integrations-operations.md`、`docs/current/code-doc-alignment.md`、`docs/maps/*`、`docs/changes/CHANGELOG.md`、`docs/changes/records/CHANGE-20260704-027.md` |
 | CHANGE-20260704-028 | 2026-07-04 | 趋势选股页全量 universe 展示：主表改 strategy_run_items LEFT JOIN strategy_results，行 key 改 instrumentId，"命中"改名"筛选结果"，AGENTS 写入 node:20-alpine 保护规则 | merged | `fix/screener-full-universe-results` | `d47bb46` | `44d37fd` | `backend/app/repositories/strategy_result_repository.py`、`backend/app/services/selector_query_service.py`、`backend/app/schemas/strategy_run.py`、`backend/app/api/strategy_runs.py`、`backend/app/models/strategy_run.py`、`backend/tests/test_strategy_results_universe.py`、`backend/tests/test_business_integration.py`、`backend/tests/test_selector_query_integration.py`、`frontend/src/api/endpoints.ts`、`frontend/src/features/trend-selection/adapters.ts`、`frontend/src/features/trend-selection/__tests__/adapter.test.ts`、`frontend/src/pages/ScreenerPage.tsx`、`AGENTS.md`、`docs/AI-ONBOARDING.md`、`docs/current/02-data-api-contracts.md`、`docs/current/04-frontend-ux.md`、`docs/current/code-doc-alignment.md`、`docs/maps/api-route-map.md`、`docs/maps/frontend-route-map.md`、`docs/maps/deployment-runtime-map.md`、`docs/maps/test-coverage-map.md`、`docs/changes/CHANGELOG.md`、`docs/changes/records/CHANGE-20260704-028.md` |
 | CHANGE-20260704-029 | 2026-07-04 | 趋势选股 result_id 未回填修复：改用 (run_id, instrument_id) 关联 strategy_results + 历史债务审计 | in_validation | `fix/screener-result-join-by-instrument` | `44d37fd` | 待合并后填写 | `backend/app/repositories/strategy_result_repository.py`、`docs/current/code-doc-alignment.md`、`docs/changes/CHANGELOG.md`、`docs/changes/records/CHANGE-20260704-029.md`、`docs/architecture-audits/AUDIT-20260704-ruff-mypy-debt-triage.md` |
+| CHANGE-20260716-006 | 2026-07-16 | AFC 详情页终审修正（originScope 唯一来源+confirmed_swing_position 产品观察+recentChanges 仅最新交易日+grid 布局） | completed | `feat/next-phase-20260716` | `01266d1` | `18049da` | `backend/app/api/stock_context.py`、`backend/app/schemas/atomic_fact_contract.py`、`backend/app/services/atomic_fact_contract_service.py`、`backend/app/contracts/atomic_fact_product_observations_v1.json`（新增）、`backend/tests/test_atomic_fact_contract_service.py`、`backend/tests/test_stock_context_atomic_facts.py`、`frontend/src/api/endpoints.ts`、`frontend/src/components/StrategyChart.tsx`、`frontend/src/features/market-workspace/MarketWorkspacePage.tsx`、`frontend/src/features/research-context/AtomicFactsPanel.tsx`、`frontend/src/features/research-context/__tests__/atomic-facts.test.ts`、`frontend/src/features/stock-research/StockResearchWorkspace.tsx`、`frontend/src/features/stock-research/detailSourceContext.ts`、`frontend/src/features/stock-research/useStockDetailActions.ts`、`frontend/src/features/stock-research/stockDetailNavigation.ts`（新增）、`frontend/src/features/stock-research/__tests__/stockDetailNavigation.test.ts`（新增）、`frontend/src/pages/StockDetailPage.tsx`、`frontend/src/pages/__tests__/detailNavigation.test.ts`、`frontend/src/pages/detailNavigation.ts`、`frontend/src/styles/global.scss`、`docs/current/02-data-api-contracts.md`、`docs/current/04-frontend-ux.md`、`docs/current/05-testing-acceptance.md`、`docs/current/07-atomic-fact-contract-v1.md`、`docs/current/code-doc-alignment.md`、`AGENTS.md`、`docs/changes/CHANGELOG.md`、`docs/changes/records/CHANGE-20260716-006.md` |
 
 ## 规则
 

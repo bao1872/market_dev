@@ -339,19 +339,19 @@ test('MiniKlineCard 不显示指标/成交量/Node/事件标记/工具栏', () =
   )
 })
 
-test('MarketRightPanel 顺序：MiniKlineCard 顶部 + EventStatePanel 底部', () => {
+test('MarketRightPanel 顺序：MiniKlineCard 顶部 + AtomicFactsPanel 底部', () => {
   const src = readSource(MARKET_RIGHT_PANEL_PATH)
   assert.ok(
-    src.includes('MiniKlineCard') && src.includes('EventStatePanel'),
-    'MarketRightPanel 必须组合 MiniKlineCard 和 EventStatePanel',
+    src.includes('MiniKlineCard') && src.includes('AtomicFactsPanel'),
+    'MarketRightPanel 必须组合 MiniKlineCard 和 AtomicFactsPanel',
   )
-  // MiniKlineCard 在 EventStatePanel 之前（顶部）
+  // MiniKlineCard 在 AtomicFactsPanel 之前（顶部）
   const miniIdx = src.indexOf('MiniKlineCard')
-  const eventIdx = src.indexOf('EventStatePanel')
-  assert.ok(miniIdx > 0 && eventIdx > 0, 'MarketRightPanel 必须引用 MiniKlineCard 和 EventStatePanel')
+  const eventIdx = src.indexOf('AtomicFactsPanel')
+  assert.ok(miniIdx > 0 && eventIdx > 0, 'MarketRightPanel 必须引用 MiniKlineCard 和 AtomicFactsPanel')
   assert.ok(
     miniIdx < eventIdx,
-    'MarketRightPanel 中 MiniKlineCard 必须在 EventStatePanel 之前（顶部）',
+    'MarketRightPanel 中 MiniKlineCard 必须在 AtomicFactsPanel 之前（顶部）',
   )
 })
 
@@ -496,11 +496,10 @@ test('MarketRightPanel 面板收起时不挂载（父组件控制 0 请求）', 
     src.includes('interface MarketRightPanelProps') && src.includes('symbol: string | null'),
     'MarketRightPanel 必须接受 symbol prop（由父组件控制挂载与否）',
   )
-  // symbol 为 null 时 MiniKlineCard 显示提示，EventStatePanel 不渲染（不发起 context 请求）
+  // symbol 为 null 时 MiniKlineCard 显示提示，AtomicFactsPanel 不渲染（不发起 context 请求）
   assert.ok(
-    src.includes('{symbol && <EventStatePanel symbol={symbol} />}') ||
-      /symbol\s*&&\s*<EventStatePanel/.test(src),
-    'MarketRightPanel 必须在 symbol 为 null 时不渲染 EventStatePanel（0 context 请求）',
+    /symbol\s*&&\s*<AtomicFactsPanel/.test(src),
+    'MarketRightPanel 必须在 symbol 为 null 时不渲染 AtomicFactsPanel（0 context 请求）',
   )
 })
 

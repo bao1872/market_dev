@@ -2794,75 +2794,109 @@ export async function deleteTableViewPreset(id: string): Promise<void> {
 // ===== Stock Context 端点（PRD V1.1 §7.3）=====
 // ============================================================
 
-/** StateValue - code 与 label 分离的稳定状态值 */
-export interface StateValue {
-  code: string | null
+/** AtomicFactItem - 普通用户侧单个原子事实（绝不含 factId / sourcePath 等内部字段） */
+export interface AtomicFactItem {
+  /** 稳定公开键（不随内部 factId 变动） */
+  publicKey: string
+  /** 维度：trend / momentum / structure / volume */
+  dimension: 'trend' | 'momentum' | 'structure' | 'volume'
+  /** 通俗中文短标签 */
   label: string
+  /** 前端渲染类型（禁止解析中文推断类型/状态） */
+  visualKind:
+    | 'metric'
+    | 'value_with_category'
+    | 'relation'
+    | 'position'
+    | 'distance'
+    | 'ratio'
+    | 'confirmed_position'
+  /** 原始数值（分类类事实为 null） */
   value: number | null
+  /** 用户可读短原子值（无内部术语）；关系类事实为 null，仅以 categoryLabel 承载 */
+  valueText: string | null
+  /** 机器分类码（UI 可选） */
+  categoryCode: string | null
+  /** 中文分类标签 */
+  categoryLabel: string | null
+  /** 弱说明（单位/补充） */
+  secondaryText: string | null
+  /** 单位（如 ATR） */
   unit: string | null
-  timeframe: string
-  /** 来源字段名（管理员可见，用户接口为 null） */
-  sourceField: string | null
+  /** 分类阈值是否已启用（T5/V3 为 false → 展示「分类未启用」） */
+  thresholdEnabled: boolean
 }
 
-/** Evidence - 事件证据项 */
-export interface StateEvidence {
-  fieldName: string
-  code: string
-  currentValue: string | null
-  previousValue: string | null
-  unit: string | null
-  timeframe: string
+/** AtomicFactAvailability - 可用性统计（Core 分母固定 14；缺失项从用户数组省略） */
+export interface AtomicFactAvailability {
+  coreDenominator: number
+  corePresent: number
+  /** 缺失事实 publicKey 列表（事实本身已从 core 数组省略） */
+  coreMissing: string[]
+  auxiliaryAvailable: string[]
+  /** 默认隐藏（不在用户 UI 展示）的 Auxiliary publicKey */
+  auxiliaryHidden: string[]
+  v1Present: boolean
+  rejectedPresent: boolean
+  /** 数据质量异常（如 m5_inconsistent） */
+  warnings: string[]
 }
 
-/** StockStructure - 结构状态 */
-export interface StockStructure {
-  price: StateValue
-}
-
-/** StockMomentum - 动量状态 */
-export interface StockMomentum {
-  macd: StateValue
-  sqzmom: StateValue
-  temporal: StateValue[]
-}
-
-/** StockVolatility - 波动状态 */
-export interface StockVolatility {
-  bollPosition: StateValue
-}
-
-/** StockState - 统一状态向量 */
-export interface StockState {
-  symbol: string
+/** AtomicFactChange - 近期变化（相邻已发布快照间只读计算，按展示精度比较） */
+export interface AtomicFactChange {
+  publicKey: string
+  /** 通俗中文短标签（前端展示，禁止显示 publicKey） */
+  label: string
+  dimension: string
+  fromText: string | null
+  toText: string | null
+  /** 变化类型：分类调整 / 数值变动 / 状态更新（不解释利好利空） */
+  deltaText: string
   asOf: string
-  sourceRunId: string
-  version: string
-  computedAt: string
-  structure: StockStructure
-  momentum: StockMomentum
-  volatility: StockVolatility
-  evidence: StateEvidence[]
-  degradedReasons: string[]
 }
 
-/** StateEventDTO - 状态变化事件 */
-export interface StateEventDTO {
-  id: string
-  symbol: string
-  occurredAt: string
-  eventType: string
-  title: string
-  description: string
-  evidence: StateEvidence[]
-  changedFields: string[]
-  previousAsOf: string | null
-  currentAsOf: string
-  /** 稳定幂等键（仅数据库/管理员可见，用户接口为 null） */
-  idempotencyKey: string | null
+/**
+ * ProductObservationItem - 产品观察扩展项（CHANGE-20260716-006）。
+ *
+ * 不在冻结 Core 14 中，不参与 14/14 统计。基于底层已计算的结构因子生成，
+ * 用于补充展示（如最近确认区间位置）。scope 恒为 "product"。
+ */
+export interface ProductObservationItem {
+  /** 产品观察公开键（如 confirmed_swing_position） */
+  publicKey: string
+  /** 通俗中文短标签 */
+  label: string
+  /** 产品观察渲染类型（独立于 Core visualKind） */
+  visualKind: 'confirmed_position'
+  /** 所属组（如 structure） */
+  group: string
+  /** 区间内为 0–1 值，区间外为 null */
+  value: number | null
+  /** 原始值（可能 <0 或 >1，不静默 clip） */
+  rawValue: number | null
+  /** 用户可读短值（区间内） */
+  valueText: string | null
+  /** 中文分类标签（含区间外说明） */
+  categoryLabel: string | null
+  /** 已确认区间上沿（UI 参考） */
+  confirmedHigh: number | null
+  /** 已确认区间下沿（UI 参考） */
+  confirmedLow: number | null
+  /** 标记为产品观察，非 V4.13 Core */
+  scope: 'product'
 }
 
-/** StockContext 数据质量 - 含 reasonCode 解释空态原因 */
+/**
+ * ProductObservations - 产品观察扩展集合（CHANGE-20260716-006）。
+ *
+ * 按 group 分组（structure 等），不计入 Core 14/14 统计。
+ */
+export interface ProductObservations {
+  /** 结构组产品观察项 */
+  structure: ProductObservationItem[]
+}
+
+/** StockContext 数据质量 - 含 reasonCode 解释空态原因（被原子事实响应复用） */
 export interface StockContextDataQuality {
   hasSucceededRun: boolean
   hasSnapshot: boolean
@@ -2873,15 +2907,50 @@ export interface StockContextDataQuality {
   instrumentStatus: string
 }
 
-/** StockContext 响应 - 用户侧只读 */
-export interface StockContextResponse {
-  state: StockState | null
-  events: StateEventDTO[]
+/** AtomicFactsMeta - 公共响应 meta：三版本字段（前端禁止硬编码 V4.13） */
+export interface AtomicFactsMeta {
+  /** 持久化 payload schema 版本（当前 1） */
+  payloadVersion: string
+  /** 研究合同冻结版本（V4.13） */
+  researchFreezeVersion: string
+  /** 产品展示合同版本 */
+  presentationVersion: string
+}
+
+/** AtomicFactsContextResponse - GET /stocks/{symbol}/context 用户侧响应（只读） */
+export interface AtomicFactsContextResponse {
+  contractVersion: string
+  /** 三版本元数据（前端禁止硬编码 V4.13，必须从 meta 读取） */
+  meta: AtomicFactsMeta
+  asOf: string | null
+  core: Record<string, AtomicFactItem[]>
+  auxiliary: AtomicFactItem[]
+  availability: AtomicFactAvailability
+  /** 近期变化（仅最近一个交易日发生变化的项） */
+  recentChanges: AtomicFactChange[]
+  /** 近期变化起始交易日（前一发布交易日；无对比时为 null） */
+  latestChangesFrom: string | null
+  /** 近期变化截止交易日（最新发布交易日；无快照时为 null） */
+  latestChangesAsOf: string | null
+  /** 产品观察扩展（CHANGE-20260716-006，不计入 Core 14/14） */
+  productObservations: ProductObservations
   dataQuality: StockContextDataQuality
 }
 
-/** Admin StockDebug 响应 - 含原始 payload */
-export interface AdminStockDebugResponse extends StockContextResponse {
+/** AdminAtomicFactDebugItem - 管理员调试：单事实可追溯信息（保留内部 ID / 路径） */
+export interface AdminAtomicFactDebugItem {
+  factId: string
+  publicKey: string
+  sourcePath: string | null
+  rawValue: number | null
+  thresholdRef: string | null
+  thresholdEnabled: boolean
+  featureFlag: boolean
+  missing: boolean
+}
+
+/** AdminStockDebugResponse - 在原子事实响应基础上补充原始 payload 与可追溯信息 */
+export interface AdminStockDebugResponse extends AtomicFactsContextResponse {
   rawDebug?: {
     structuralPayload: Record<string, unknown>
     temporalPayload: Record<string, unknown>
@@ -2893,19 +2962,20 @@ export interface AdminStockDebugResponse extends StockContextResponse {
     runStartedAt: string | null
     runFinishedAt: string | null
   }
+  atomicFactsDebug?: AdminAtomicFactDebugItem[]
 }
 
 /**
- * 获取个股状态上下文（只读，需登录 + 有效订阅）。
+ * 获取个股原子事实上下文（只读，需登录 + 有效订阅）。
  * GET /api/v1/stocks/{symbol}/context?as_of=YYYY-MM-DD
- * 返回 StockState + 最近事件 + 数据质量。
+ * 返回 Atomic Fact Contract V1 上下文（contractVersion/asOf/core/auxiliary/availability/recentChanges/dataQuality）。
  */
 export async function getStockContext(
   symbol: string,
   params?: { as_of?: string },
   options?: { signal?: AbortSignal },
-): Promise<StockContextResponse> {
-  const { data } = await apiClient.get<StockContextResponse>(
+): Promise<AtomicFactsContextResponse> {
+  const { data } = await apiClient.get<AtomicFactsContextResponse>(
     `/api/v1/stocks/${symbol}/context`,
     { params, signal: options?.signal },
   )
@@ -2915,7 +2985,7 @@ export async function getStockContext(
 /**
  * 管理员个股调试接口（需管理员身份）。
  * GET /api/v1/admin/stocks/{symbol}/debug?as_of=YYYY-MM-DD
- * 返回 StockState + 事件 + 原始 payload。
+ * 返回 Atomic Fact Contract V1 上下文 + 原始 payload 与可追溯信息。
  */
 export async function getAdminStockDebug(
   symbol: string,

@@ -1,8 +1,8 @@
 # Current Docs Manifest
 
 > 文档状态：CURRENT DESIGN BASELINE  
-> 实现核对基线：`f16adba3d440b65acef1961b9befdcbb4263850a`  
-> v2 文档包生成基线：`f16adba3d440b65acef1961b9befdcbb4263850a`  
+> 实现核对基线：`18049da1c0487120c3ebebba711ab37a225b6b37`
+> v2 文档包生成基线：`18049da1c0487120c3ebebba711ab37a225b6b37`
 > 原 current docs 历史基线：`ddca659b8c9d64b6a414da0b4bbd6f80f704aef1`（归档参考，不参与一致性检查）  
 > 设计基线日期：2026-07-05  
 > 当前事实源：代码 + 已合并 PR + 生产只读审计 + 项目负责人确认  
@@ -31,6 +31,7 @@
 | 前端路由、页面、UI 状态 | `04-frontend-ux.md` |
 | 测试、CI、验收 | `05-testing-acceptance.md` |
 | 研究特征矩阵与因果口径 | `06-research-feature-matrix.md` |
+| Atomic Fact Contract V1 个股状态观察 | `07-atomic-fact-contract-v1.md` |
 | 未决问题 | `open-decisions.md` |
 | 当前差异 | `code-doc-alignment.md` |
 | 真实代码入口 | `../maps/*.md` |

@@ -1,21 +1,22 @@
-"""StockContext API - 个股状态上下文只读接口。
+"""StockContext API - 个股状态上下文只读接口（Atomic Fact Contract V1）。
 
-PRD V1.1 §7.3 核心契约：
+核心契约：
 - GET /api/v1/stocks/{symbol}/context
-  用户侧只读接口，返回 StockState + 最近事件 + 数据质量。
-  禁止请求时写事件（事件由盘后快照成功发布后异步生成）。
+  用户侧只读接口，返回 Atomic Fact Contract V1 上下文
+  （contractVersion/asOf/core/auxiliary/availability/recentChanges/dataQuality）。
+  禁止请求时写数据（事实由盘后快照成功发布后异步生成，本接口只做只读查询）。
   需要 require_active_subscription 守卫（admin 豁免，member 需有效订阅）。
   as_of 直接声明 date | None，非法值由 FastAPI 返回 422。
-  as_of 历史查询时，事件 occurred_at < as_of 次日 00:00（exclusive），禁止返回未来事件。
+  as_of 历史查询时严格 point-in-time（仅查 succeeded+published+full run），禁止返回未来快照或未来变化。
 - GET /api/v1/admin/stocks/{symbol}/debug
-  管理员调试接口，返回 StockState + 事件 + 原始 payload。
+  管理员调试接口，在用户响应基础上补充原始 payload + 原子事实可追溯信息。
   前后端统一使用 symbol（非 instrument_id）。
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date
 from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -31,20 +32,30 @@ from app.models.stock_feature_snapshot_run import (
     STATUS_SUCCEEDED,
     StockFeatureSnapshotRun,
 )
+from app.schemas.atomic_fact_contract import (
+    AdminStockDebugResponse,
+    AtomicFactsContextResponse,
+    PersistedAtomicFactsPayload,
+)
 from app.schemas.stock_state import (
-    Evidence,
-    StateEventDTO,
     StockContextDataQuality,
-    StockContextResponse,
-    build_stock_state,
-    strip_internal_fields_for_user,
 )
 from app.services.access_control_service import (
     AccessContext,
     require_active_subscription,
     require_admin,
 )
-from app.services.state_event_service import get_recent_events_for_instrument
+from app.services.atomic_fact_contract_service import (
+    AFC_PAYLOAD_VERSION,
+    CONTRACT_VERSION,
+    CORE_PUBLIC_KEY,
+    PRESENTATION_VERSION,
+    RESEARCH_FREEZE_VERSION,
+    compute_atomic_fact_debug,
+    compute_atomic_facts,
+    compute_product_observations,
+    compute_recent_changes,
+)
 
 logger = logging.getLogger("api.stock_context")
 
@@ -57,16 +68,6 @@ admin_router = APIRouter(prefix="/api/v1/admin/stocks", tags=["admin-stock-debug
 _SCHEMA_VERSION = 1
 # P0-3: 使用 Asia/Shanghai 时区计算 as_of 截止边界（非 UTC）
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
-
-# 事件证据 field → 用户可读文案白名单（与 state_event_service._FIELD_LABELS 对齐）
-_EVIDENCE_FIELD_LABELS: dict[str, str] = {
-    "structure.price": "价格位置",
-    "momentum.macd": "MACD 动量",
-    "momentum.sqzmom": "SQZMOM 动量",
-    "momentum.temporal.daily_dsa_dir": "日线 DSA 方向",
-    "momentum.temporal.trend_alignment": "趋势对齐",
-    "volatility.bollPosition": "布林位置",
-}
 
 
 async def _get_instrument_by_symbol(
@@ -120,21 +121,24 @@ async def _find_run_by_trade_date(
     trade_date: date,
     schema_version: int = _SCHEMA_VERSION,
 ) -> StockFeatureSnapshotRun | None:
-    """按 trade_date 查找 succeeded run（as_of 历史回看）。
+    """按 as_of 截止日期查找 succeeded+published+full run。
 
-    P0-3: 确定性排序 — published_at DESC, finished_at DESC
-    确保同日多 run 时选择最新发布的批次。
+    as_of 为截止日期语义（非当天精确匹配）：
+    - 查 `trade_date <= as_of`，按 trade_date DESC, published_at DESC, finished_at DESC
+      取最新 1 条；
+    - 周末/节假日/无批次日期返回该日期之前最近一次已发布状态（而非空态）。
     """
     stmt = (
         select(StockFeatureSnapshotRun)
         .where(
-            StockFeatureSnapshotRun.trade_date == trade_date,
+            StockFeatureSnapshotRun.trade_date <= trade_date,
             StockFeatureSnapshotRun.schema_version == schema_version,
             StockFeatureSnapshotRun.status == STATUS_SUCCEEDED,
             StockFeatureSnapshotRun.published_at.is_not(None),
             StockFeatureSnapshotRun.metadata_["scope"].astext == "full",
         )
         .order_by(
+            desc(StockFeatureSnapshotRun.trade_date),
             desc(StockFeatureSnapshotRun.published_at),
             desc(StockFeatureSnapshotRun.finished_at),
         )
@@ -207,90 +211,144 @@ def _build_data_quality(
     snapshot: StockFeatureSnapshot | None,
     reason_code: str | None = None,
 ) -> StockContextDataQuality:
-    """构建数据质量信息（含 reasonCode）。"""
-    # state 非空时 reasonCode 为 None；state 为空时使用传入的 reason_code
-    effective_reason = None if snapshot is not None else reason_code
+    """构建数据质量信息（含 reasonCode / degradedReasons）。
+
+    降级原因处理：
+    - 无 snapshot：reasonCode 保留传入的 reason_code（如 snapshot_missing）；
+    - snapshot 存在但 legacy/ambiguous（snapshot_run_not_linked /
+      legacy_snapshot_ambiguous）：不清除 reason，加入 degradedReasons；
+    - 精确匹配（reason_code=None）：无降级原因。
+    """
+    degraded: list[str] = list(snapshot.degraded_reasons) if snapshot else []
+    if snapshot is not None and reason_code is not None:
+        # legacy/ambiguous 快照存在但归属状态异常：加入 degradedReasons（不清除）
+        if reason_code not in degraded:
+            degraded.append(reason_code)
+        effective_reason: str | None = reason_code
+    else:
+        # 无 snapshot：保留传入的 reason_code；精确匹配：None
+        effective_reason = None if snapshot is not None else reason_code
     return StockContextDataQuality(
         hasSucceededRun=run is not None,
         hasSnapshot=snapshot is not None,
         reasonCode=effective_reason,
-        degradedReasons=snapshot.degraded_reasons if snapshot else [],
+        degradedReasons=degraded,
         runTradeDate=run.trade_date.isoformat() if run else None,
         runPublishedAt=run.published_at.isoformat() if run and run.published_at else None,
         instrumentStatus=instrument.status,
     )
 
 
-def _format_evidence_value(code: Any, value: Any) -> str | None:
-    """格式化证据值为用户可读字符串。
+def _is_valid_stored_afc(stored: Any) -> bool:
+    """严格校验 summary_payload.atomic_fact_contract_v1 是否为当前持久化结构。
 
-    优先返回 code（稳定状态码），code 为 None 时格式化 numeric value。
+    委托 PersistedAtomicFactsPayload Pydantic Schema 严格校验：
+    - 四版本字段完全匹配；
+    - core 键恰好 trend/momentum/structure/volume；
+    - 每一项均通过 PublicAtomicFactItem；
+    - publicKey 属于正确维度且无重复/未知；
+    - T3/T6/V1 不存在；
+    - availability 与实际数组及固定分母 14 一致；
+    - 不含 debug（extra=forbid）。
+    任一不满足 → 返回 False，触发纯函数 fallback 重算（不回写旧快照），不得 500。
     """
-    if code is not None:
-        return str(code)
-    if value is not None:
-        if isinstance(value, float):
-            return f"{value:.4f}"
-        return str(value)
-    return None
+    if not isinstance(stored, dict):
+        return False
+    try:
+        PersistedAtomicFactsPayload.model_validate(stored)
+        return True
+    except Exception:  # noqa: BLE001 - 任意校验异常均触发 fallback
+        return False
 
 
-def _map_event_evidence_to_dto(
-    raw_evidence: list[dict[str, Any]] | None,
-) -> list[Evidence]:
-    """将 ORM event.evidence (list[dict]) 映射为用户 Evidence DTO 列表。
+# 管理员 debug 由 compute_atomic_fact_debug 按需即时生成（见下方 include_raw 分支）。
 
-    DB evidence 结构：
-    - field: 稳定字段路径（如 "momentum.sqzmom"）
-    - prevCode/currCode: 前后状态 code
-    - prevValue/currValue: 前后原始数值
-    - unit: 单位
-    - timeframe: 来源周期
 
-    API Evidence DTO：
-    - fieldName: 用户可读指标名（白名单映射）
-    - code: 稳定字段路径
-    - currentValue/previousValue: 前后值（优先 code，其次 numeric value）
-    - unit/timeframe
+def _afc_meta() -> dict[str, str]:
+    """公共响应 meta：三版本字段（前端禁止硬编码 V4.13）。"""
+    return {
+        "payloadVersion": AFC_PAYLOAD_VERSION,
+        "researchFreezeVersion": RESEARCH_FREEZE_VERSION,
+        "presentationVersion": PRESENTATION_VERSION,
+    }
+
+
+def _empty_atomic_response(
+    instrument: Instrument,
+    reason_code: str | None,
+) -> dict[str, Any]:
+    """无 run / 无快照时的空态响应（Core 分母仍固定 14，全部缺失）。"""
+    return {
+        "contractVersion": CONTRACT_VERSION,
+        "meta": _afc_meta(),
+        "asOf": None,
+        "core": {dim: [] for dim in ("trend", "momentum", "structure", "volume")},
+        "auxiliary": [],
+        "availability": {
+            "coreDenominator": len(CORE_PUBLIC_KEY),
+            "corePresent": 0,
+            "coreMissing": list(CORE_PUBLIC_KEY.values()),
+            "auxiliaryAvailable": [],
+            "auxiliaryHidden": [],
+            "v1Present": False,
+            "rejectedPresent": False,
+        },
+        "recentChanges": [],
+        "latestChangesFrom": None,
+        "latestChangesAsOf": None,
+        "productObservations": {"structure": []},
+        "dataQuality": _build_data_quality(
+            instrument, None, None, reason_code=reason_code,
+        ),
+    }
+
+
+async def _find_recent_published_snapshots(
+    session: AsyncSession,
+    instrument_id: UUID,
+    limit: int = 10,
+    as_of: date | None = None,
+) -> list[dict[str, Any]]:
+    """一次查询读取最近 ≤limit 个已发布 full scope 快照（升序），供近期变化计算。
+
+    只读查询，不写 stock_state_events。
+    as_of 给定时：SQL 直接加 `trade_date <= as_of` 过滤（再 DESC LIMIT，最后升序），
+    禁止先取最新 10 条再在内存过滤（PROMPT 一.8）。
     """
-    if not raw_evidence:
-        return []
-    result: list[Evidence] = []
-    for item in raw_evidence:
-        field = item.get("field", "")
-        result.append(Evidence(
-            fieldName=_EVIDENCE_FIELD_LABELS.get(field, field.split(".")[-1]),
-            code=field,
-            currentValue=_format_evidence_value(
-                item.get("currCode"), item.get("currValue")
-            ),
-            previousValue=_format_evidence_value(
-                item.get("prevCode"), item.get("prevValue")
-            ),
-            unit=item.get("unit"),
-            timeframe=item.get("timeframe") or "",
-        ))
-    return result
+    from app.models.stock_feature_snapshot import StockFeatureSnapshot
 
+    conditions = [
+        StockFeatureSnapshot.instrument_id == instrument_id,
+        StockFeatureSnapshotRun.status == STATUS_SUCCEEDED,
+        StockFeatureSnapshotRun.published_at.is_not(None),
+        StockFeatureSnapshotRun.metadata_["scope"].astext == "full",
+        StockFeatureSnapshotRun.schema_version == _SCHEMA_VERSION,
+    ]
+    if as_of is not None:
+        conditions.append(StockFeatureSnapshotRun.trade_date <= as_of)
 
-def _event_to_dto(event: Any) -> StateEventDTO:
-    """将 StockStateEvent ORM 转为 StateEventDTO。
-
-    P0-3: 映射 event.evidence (list[dict]) 为 Evidence DTO 列表。
-    """
-    return StateEventDTO(
-        id=str(event.id),
-        symbol=event.symbol,
-        occurredAt=event.occurred_at.isoformat() if event.occurred_at else "",
-        eventType=event.event_type,
-        title=event.title,
-        description=event.description,
-        evidence=_map_event_evidence_to_dto(event.evidence),
-        changedFields=event.changed_fields or [],
-        previousAsOf=event.previous_as_of.isoformat() if event.previous_as_of else None,
-        currentAsOf=event.current_as_of.isoformat() if event.current_as_of else "",
-        idempotencyKey=event.idempotency_key,
+    stmt = (
+        select(StockFeatureSnapshot)
+        .join(
+            StockFeatureSnapshotRun,
+            StockFeatureSnapshot.source_run_id == StockFeatureSnapshotRun.id,
+        )
+        .where(*conditions)
+        .order_by(desc(StockFeatureSnapshot.trade_date))
+        .limit(limit)
     )
+    result = await session.execute(stmt)
+    rows = result.scalars().all()
+    # 升序（compute_recent_changes 要求按 trade_date 升序）
+    rows_sorted = sorted(rows, key=lambda s: s.trade_date)
+    return [
+        {
+            "trade_date": s.trade_date.isoformat(),
+            "structural_payload": s.structural_payload or {},
+            "temporal_payload": s.temporal_payload or {},
+        }
+        for s in rows_sorted
+    ]
 
 
 async def _build_stock_context(
@@ -299,9 +357,11 @@ async def _build_stock_context(
     as_of: date | None = None,
     include_raw: bool = False,
 ) -> dict[str, Any]:
-    """构建 StockContext 响应（共享逻辑，只读查询）。
+    """构建 Atomic Fact Contract V1 上下文响应（共享逻辑，只读查询）。
 
-    P0-4: as_of 历史查询时，事件 occurred_at <= as_of 当日结束，禁止返回未来事件。
+    普通用户响应替换旧 state/events 为：
+      contractVersion / asOf / core / auxiliary / availability / recentChanges / dataQuality
+    as_of 严格 point-in-time：仅查 succeeded+published+full run，禁止返回未来快照或未来变化。
     """
     instrument = await _get_instrument_by_symbol(session, symbol)
 
@@ -312,65 +372,64 @@ async def _build_stock_context(
         run = await _find_latest_succeeded_run(session)
 
     if run is None:
-        return {
-            "state": None,
-            "events": [],
-            "dataQuality": _build_data_quality(
-                instrument, None, None, reason_code="no_published_full_run",
-            ),
-        }
+        return _empty_atomic_response(instrument, reason_code="no_published_full_run")
 
     snapshot, reason_code = await _get_snapshot_for_instrument(
         session, instrument.id, run,
     )
     if snapshot is None:
-        return {
-            "state": None,
-            "events": [],
-            "dataQuality": _build_data_quality(
-                instrument, run, None, reason_code="snapshot_missing",
-            ),
-        }
+        return _empty_atomic_response(instrument, reason_code="snapshot_missing")
 
-    # 构建 StockState（纯函数，无副作用）
-    stock_state = build_stock_state(snapshot, run, symbol)
+    # 优先读取已持久化的原子事实（新快照写入 summary_payload.atomic_fact_contract_v1）；
+    # 缺失或版本/结构不匹配 → 同一纯函数 fallback 重算（不回写旧快照）。
+    _summary = snapshot.summary_payload
+    stored = _summary.get("atomic_fact_contract_v1") if isinstance(_summary, dict) else None
+    if _is_valid_stored_afc(stored) and isinstance(stored, dict):
+        facts = stored
+    else:
+        facts = compute_atomic_facts(snapshot.structural_payload, snapshot.temporal_payload)
 
-    # P0-3: as_of 历史查询时，事件截止到 as_of 次日 00:00 (exclusive)
-    # 使用 Asia/Shanghai 时区，禁止 max.time()+1day-1sec 的旧写法
-    occurred_at_lte: datetime | None = None
-    if as_of is not None:
-        next_day = as_of + timedelta(days=1)
-        occurred_at_lte = datetime.combine(
-            next_day, datetime.min.time(), tzinfo=_SHANGHAI_TZ,
-        )
-
-    # 获取最近事件（只读查询）
-    recent_events = await get_recent_events_for_instrument(
-        session, instrument.id, limit=10, occurred_at_lte=occurred_at_lte,
+    # CHANGE-20260716-006: 近期变化只保留最近一个交易日——查询 ≤2 个已发布快照
+    recent_snaps = await _find_recent_published_snapshots(
+        session, instrument.id, limit=2, as_of=as_of,
     )
-    event_dtos = [_event_to_dto(e) for e in recent_events]
+    recent_changes = compute_recent_changes(recent_snaps)
+    # 最近交易日变化日期标注
+    latest_changes_as_of = recent_snaps[-1]["trade_date"] if len(recent_snaps) >= 1 else None
+    latest_changes_from = recent_snaps[0]["trade_date"] if len(recent_snaps) >= 2 else None
+
+    # CHANGE-20260716-006: 产品观察扩展（confirmed_swing_position 等，不计入 Core 14）
+    product_observations = compute_product_observations(snapshot.structural_payload)
 
     data_quality = _build_data_quality(instrument, run, snapshot, reason_code)
-
-    # PRD V1.1: 用户接口完全排除 sourceField/idempotencyKey（不是 null，是字段不存在）
-    response_state: Any
-    response_events: Any
-    if not include_raw:
-        response_state, response_events = strip_internal_fields_for_user(
-            stock_state, event_dtos
-        )
-    else:
-        response_state = stock_state
-        response_events = event_dtos
+    # 数据质量异常（如 M5 双 true）并入 degradedReasons
+    _warnings = (
+        facts.get("availability", {}).get("warnings", [])
+        if isinstance(facts.get("availability"), dict)
+        else []
+    )
+    if "m5_inconsistent" in _warnings:
+        _cur = list(data_quality.degradedReasons or [])
+        if "m5_inconsistent" not in _cur:
+            _cur.append("m5_inconsistent")
+            data_quality.degradedReasons = _cur
 
     response: dict[str, Any] = {
-        "state": response_state,
-        "events": response_events,
+        "contractVersion": CONTRACT_VERSION,
+        "meta": _afc_meta(),
+        "asOf": run.trade_date.isoformat(),
+        "core": facts["core"],
+        "auxiliary": facts["auxiliary"],
+        "availability": facts["availability"],
+        "recentChanges": recent_changes,
+        "latestChangesFrom": latest_changes_from,
+        "latestChangesAsOf": latest_changes_as_of,
+        "productObservations": product_observations,
         "dataQuality": data_quality,
     }
 
     if include_raw:
-        # 管理员调试：返回原始 payload
+        # 管理员调试：返回原始 payload + 原子事实可追溯信息
         response["rawDebug"] = {
             "structuralPayload": snapshot.structural_payload,
             "temporalPayload": snapshot.temporal_payload,
@@ -388,6 +447,7 @@ async def _build_stock_context(
             "runStartedAt": run.started_at.isoformat() if run.started_at else None,
             "runFinishedAt": run.finished_at.isoformat() if run.finished_at else None,
         }
+        response["atomicFactsDebug"] = compute_atomic_fact_debug(snapshot.structural_payload, snapshot.temporal_payload)
 
     return response
 
@@ -403,14 +463,14 @@ async def get_stock_context(
     as_of: date | None = Query(None, description="截止日期 ISO（如 2026-07-10），默认最新"),
     db: AsyncSession = Depends(get_db),
     ctx: AccessContext = Depends(require_active_subscription),
-) -> StockContextResponse:
-    """获取个股状态上下文（只读，需登录 + 有效订阅）。
+) -> AtomicFactsContextResponse:
+    """获取个股原子事实上下文（只读，需登录 + 有效订阅）。
 
-    V1.1 核心契约：
-    - 返回 StockState + 最近事件 + 数据质量
-    - 禁止请求时写事件
-    - as_of 历史查询时事件 occurred_at <= as_of 当日结束
-    - 无数据时返回 state=null + dataQuality 说明
+    Atomic Fact Contract V1 核心契约：
+    - 替换旧 state/events 为 contractVersion/asOf/core/auxiliary/availability/recentChanges/dataQuality
+    - 禁止请求时写事件（事实由盘后快照成功发布后异步生成）
+    - as_of 历史查询时事件 occurred_at <= as_of 当日结束，禁止返回未来信息
+    - 无数据时返回 core 全缺失 + dataQuality 说明
 
     权限：
     - active admin 允许（豁免订阅）
@@ -421,7 +481,7 @@ async def get_stock_context(
     # ctx 仅用于权限守卫，不直接使用
     _ = ctx
     result = await _build_stock_context(db, symbol, as_of, include_raw=False)
-    return StockContextResponse(**result)
+    return AtomicFactsContextResponse(**result)
 
 
 # =============================================================================
@@ -435,12 +495,13 @@ async def get_admin_stock_debug(
     as_of: date | None = Query(None, description="截止日期 ISO，默认最新"),
     db: AsyncSession = Depends(get_db),
     ctx: AccessContext = Depends(require_admin),
-) -> dict[str, Any]:
+) -> AdminStockDebugResponse:
     """管理员个股调试接口（前后端统一使用 symbol）。
 
-    返回 StockState + 事件 + 原始 payload（structural/temporal/summary）。
+    在用户响应基础上补充原始 payload（structural/temporal/summary）+ 原子事实可追溯信息
+    （Fact ID / 真实路径 / raw value / 阈值来源 / feature flag）。
     仅管理员可访问。
     """
     _ = ctx
     result = await _build_stock_context(db, symbol, as_of, include_raw=True)
-    return result
+    return AdminStockDebugResponse(**result)

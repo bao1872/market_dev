@@ -157,96 +157,61 @@ export default function AdminStockDebugPage() {
                       {debugQuery.isError && <span className={debugStyles.adminDebugError}>加载失败</span>}
                     </div>
 
-                    {data?.state && (
+                    {data?.atomicFactsDebug && data.atomicFactsDebug.length > 0 && (
                       <section className={debugStyles.adminDebugSection}>
-                        <h3 className={debugStyles.adminDebugSectionTitle}>状态向量（code/label 分离）</h3>
+                        <h3 className={debugStyles.adminDebugSectionTitle}>
+                          原子事实可追溯（Fact ID / 真实路径 / raw value / 阈值来源 / feature flag）
+                        </h3>
                         <table className={debugStyles.adminDebugTable}>
                           <thead>
                             <tr>
-                              <th>字段路径</th>
-                              <th>code</th>
-                              <th>label</th>
-                              <th>value</th>
-                              <th>unit</th>
-                              <th>timeframe</th>
+                              <th>Fact ID</th>
+                              <th>真实路径</th>
+                              <th>raw value</th>
+                              <th>阈值来源</th>
+                              <th>阈值启用</th>
+                              <th>feature flag</th>
                             </tr>
                           </thead>
                           <tbody>
-                            <tr>
-                              <td>structure.price</td>
-                              <td>{data.state.structure.price.code ?? 'null'}</td>
-                              <td>{data.state.structure.price.label}</td>
-                              <td>{data.state.structure.price.value ?? 'null'}</td>
-                              <td>{data.state.structure.price.unit ?? 'null'}</td>
-                              <td>{data.state.structure.price.timeframe}</td>
-                            </tr>
-                            <tr>
-                              <td>momentum.macd</td>
-                              <td>{data.state.momentum.macd.code ?? 'null'}</td>
-                              <td>{data.state.momentum.macd.label}</td>
-                              <td>{data.state.momentum.macd.value ?? 'null'}</td>
-                              <td>{data.state.momentum.macd.unit ?? 'null'}</td>
-                              <td>{data.state.momentum.macd.timeframe}</td>
-                            </tr>
-                            <tr>
-                              <td>momentum.sqzmom</td>
-                              <td>{data.state.momentum.sqzmom.code ?? 'null'}</td>
-                              <td>{data.state.momentum.sqzmom.label}</td>
-                              <td>{data.state.momentum.sqzmom.value ?? 'null'}</td>
-                              <td>{data.state.momentum.sqzmom.unit ?? 'null'}</td>
-                              <td>{data.state.momentum.sqzmom.timeframe}</td>
-                            </tr>
-                            {data.state.momentum.temporal.map((t, i) => (
-                              <tr key={`temporal-${i}`}>
-                                <td>momentum.temporal[{i}]</td>
-                                <td>{t.code ?? 'null'}</td>
-                                <td>{t.label}</td>
-                                <td>{t.value ?? 'null'}</td>
-                                <td>{t.unit ?? 'null'}</td>
-                                <td>{t.timeframe}</td>
+                            {data.atomicFactsDebug.map((d) => (
+                              <tr key={d.factId}>
+                                <td>{d.factId}</td>
+                                <td>{d.sourcePath ?? 'null'}</td>
+                                <td>{d.rawValue ?? 'null'}</td>
+                                <td>{d.thresholdRef ?? 'null'}</td>
+                                <td>{String(d.thresholdEnabled)}</td>
+                                <td>{String(d.featureFlag)}</td>
                               </tr>
                             ))}
-                            <tr>
-                              <td>volatility.bollPosition</td>
-                              <td>{data.state.volatility.bollPosition.code ?? 'null'}</td>
-                              <td>{data.state.volatility.bollPosition.label}</td>
-                              <td>{data.state.volatility.bollPosition.value ?? 'null'}</td>
-                              <td>{data.state.volatility.bollPosition.unit ?? 'null'}</td>
-                              <td>{data.state.volatility.bollPosition.timeframe}</td>
-                            </tr>
                           </tbody>
                         </table>
                       </section>
                     )}
 
-                    {data?.events && data.events.length > 0 && (
+                    {data?.recentChanges && data.recentChanges.length > 0 && (
                       <section className={debugStyles.adminDebugSection}>
-                        <h3 className={debugStyles.adminDebugSectionTitle}>事件证据</h3>
-                        {data.events.slice(0, 20).map((ev) => (
-                          <div key={ev.id} className={debugStyles.adminDebugEvent}>
-                            <div className={debugStyles.adminDebugEventHeader}>
-                              <span className={debugStyles.adminDebugEventTime}>{ev.occurredAt}</span>
-                              <span className={debugStyles.adminDebugEventType}>{ev.eventType}</span>
-                              <span className={debugStyles.adminDebugEventAsOf}>as_of={ev.currentAsOf}</span>
-                            </div>
-                            <div className={debugStyles.adminDebugEventTitle}>{ev.title}</div>
-                            <div className={debugStyles.adminDebugEventDesc}>{ev.description}</div>
-                            {ev.changedFields.length > 0 && (
-                              <div className={debugStyles.adminDebugChangedFields}>
-                                changed_fields: {ev.changedFields.join(', ')}
-                              </div>
-                            )}
-                            {ev.evidence.length > 0 && (
-                              <div className={debugStyles.adminDebugEvidence}>
-                                {ev.evidence.map((e, i) => (
-                                  <div key={i} className={debugStyles.adminDebugEvidenceItem}>
-                                    {e.fieldName}: {e.previousValue ?? 'null'} → {e.currentValue ?? 'null'}
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        ))}
+                        <h3 className={debugStyles.adminDebugSectionTitle}>近期变化（point-in-time）</h3>
+                        <table className={debugStyles.adminDebugTable}>
+                          <thead>
+                            <tr>
+                              <th>publicKey</th>
+                              <th>from</th>
+                              <th>to</th>
+                              <th>as_of</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {data.recentChanges.slice(0, 30).map((c, i) => (
+                              <tr key={`${c.publicKey}-${i}`}>
+                                <td>{c.publicKey}</td>
+                                <td>{c.fromText ?? 'null'}</td>
+                                <td>{c.toText ?? 'null'}</td>
+                                <td>{c.asOf}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
                       </section>
                     )}
 

@@ -1,0 +1,34 @@
+{
+  "contract_version": "Atomic Fact Product Observations V1",
+  "status": "active",
+  "derived_from": "structural_factor_service.py (V1.9+)",
+  "purpose": "产品观察扩展——不在冻结 Core 14 中，不参与 14/14 统计；基于底层已计算的结构因子生成用户侧观察项",
+  "groups": {
+    "structure": "结构位置"
+  },
+  "observations": [
+    {
+      "publicKey": "confirmed_swing_position",
+      "publicLabel": "最近确认区间位置",
+      "visualKind": "confirmed_position",
+      "group": "structure",
+      "valuePrecision": 2,
+      "sourceFields": {
+        "raw": "structural_payload.primary.1d.swing_position.price_position_in_confirmed_swing_raw",
+        "confirmed_high": "structural_payload.primary.1d.swing_position.confirmed_swing_high",
+        "confirmed_low": "structural_payload.primary.1d.swing_position.confirmed_swing_low"
+      },
+      "derivedFields": {
+        "inside": "由 raw 派生：0<=raw<=1 时等于 raw，否则 None（不读取 worker 持久化的 _0_1 字段，避免修改持久化链）"
+      },
+      "rules": {
+        "insideRange": "0 <= raw <= 1 → 显示 0–1 全宽轨道",
+        "belowRange": "raw < 0 → 显示「低于确认区间」",
+        "aboveRange": "raw > 1 → 显示「高于确认区间」",
+        "boundarySegments": "[0, 0.33) 偏低 / [0.33, 0.67] 中间 / (0.67, 1] 偏高",
+        "noSilentClip": "区间外数值不静默裁剪到 0 或 1"
+      },
+      "uiOrder": "在「价格与已确认区间关系」之后，「当前主要波段与主趋势关系」之前"
+    }
+  ]
+}

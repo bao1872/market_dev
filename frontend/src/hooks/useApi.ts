@@ -1396,13 +1396,11 @@ export type { QuoteResponse } from '../api/endpoints'
 export type { StructuralFactorQueryParams, StructuralFactorResponse } from '../api/endpoints'
 export type { TemporalFeaturesQueryParams, TemporalFeaturesResponse } from '../api/endpoints'
 export type {
-  StockContextResponse,
+  AtomicFactsContextResponse,
   AdminStockDebugResponse,
-  StockState,
-  StateValue,
-  StateEvidence,
-  StockStructure,
-  StockMomentum,
-  StockVolatility,
-  StateEventDTO,
+  AtomicFactItem,
+  AtomicFactAvailability,
+  AtomicFactChange,
+  AdminAtomicFactDebugItem,
+  StockContextDataQuality,
 } from '../api/endpoints'

@@ -32,11 +32,6 @@ export function buildMarketEntryFromMessage(symbol: string, eventId: string): st
   return `/market?${params.toString()}`
 }
 
-/** 构建个股详情页 URL（/stock/:symbol 兼容路由，保留旧链接可用） */
-export function buildStockDetailUrl(symbol: string, source: string, strategyKey: string): string {
-  return `/stock/${symbol}?source=${source}&strategy=${strategyKey}`
-}
-
 /** 构建个股详情页导航 state（携带 returnTo，用于 /stock/:symbol 兼容路由） */
 export function buildStockDetailState(returnTo: string): { returnTo: string } {
   return { returnTo }

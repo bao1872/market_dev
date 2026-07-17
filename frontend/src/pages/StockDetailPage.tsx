@@ -14,7 +14,7 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { useParams, useSearchParams, useNavigate, useLocation } from 'react-router-dom'
 import clsx from 'clsx'
-import { EventStatePanel } from '@/features/research-context/EventStatePanel'
+import { AtomicFactsDrawer } from '@/features/research-context/AtomicFactsDrawer'
 import { StockResearchWorkspace } from '@/features/stock-research/StockResearchWorkspace'
 import { StockQuoteStrip } from '@/features/stock-research/StockQuoteStrip'
 import { useStockResearchData } from '@/features/stock-research/useStockResearchData'
@@ -32,6 +32,7 @@ import { resolveBackPath } from './detailNavigation'
 import { useToast } from '@/store/toast'
 import { changePctColorClass, fmtChange } from '@/features/trend-selection'
 import { resolveDetailSourceContext } from '@/features/stock-research/detailSourceContext'
+import { buildStockDetailUrl } from '@/features/stock-research/stockDetailNavigation'
 
 // CHANGE-20260714-001: 左栏来源列表滚动位置 sessionStorage key 前缀
 // key 由 returnTo + scope 生成稳定 hash，避免不同来源上下文串扰
@@ -50,13 +51,15 @@ export default function StockDetailPage() {
   const location = useLocation()
   const showToast = useToast((s) => s.show)
 
-  // CHANGE-20260715-007: 统一来源上下文解析——resolveDetailSourceContext 为唯一真源
-  // 优先级：有效 /market returnTo.scope → 合法 source 参数 → 默认 watchlist
+  // CHANGE-20260716-006: originScope 为来源唯一真源，resolveDetailSourceContext 优先使用
+  // 优先级：显式 originScope > 有效 /market returnTo.scope（兼容旧链接）> 默认 watchlist
   const returnToParam = searchParams.get('returnTo')
+  const originScopeParam = searchParams.get('originScope') as 'market' | 'watchlist' | null
   const { source, strategy, marketContext, sourceContextInvalid } = resolveDetailSourceContext(
     returnToParam,
     searchParams.get('source'),
     searchParams.get('strategy'),
+    originScopeParam,
   )
   const isCaptureMode = searchParams.get('capture') === 'feishu'
   // [结构状态隐藏开关] - hideStructuralState=1 / capture=1 / capture=feishu 强制隐藏面板
@@ -324,23 +327,22 @@ export default function StockDetailPage() {
     barsStatus ? barsStatus.label : null,
   ].filter(Boolean)
 
-  // 右栏事件状态面板（PRD V1.1: 使用 EventStatePanel，与 market 共用 query key）
+  // 右栏状态观察面板（Atomic Fact Contract V1: 点击「显示状态观察」打开右侧 overlay Drawer，
+  // 不压缩主 K 线；与 /market 共用 useStockContext query key）
   const eventStatePanel = shouldShowPanel && symbol ? (
-    <aside className="tv-side-column">
-      <EventStatePanel symbol={symbol} />
-    </aside>
+    <AtomicFactsDrawer symbol={symbol} open onClose={toggleEventPanel} />
   ) : null
 
-  // 事件面板开关 toolbar（渲染在图表上方）
+  // 状态观察面板开关 toolbar（渲染在图表上方）
   const structuralToolbar = !hideStructuralStateParam && symbol ? (
     <div className="structural-state-toolbar">
       <button
         type="button"
         className="structural-state-toggle-btn"
         onClick={toggleEventPanel}
-        aria-label="切换事件状态面板"
+        aria-label="切换状态观察面板"
       >
-        {eventPanelCollapsed ? '显示事件状态' : '隐藏事件状态'}
+        {eventPanelCollapsed ? '显示状态观察' : '隐藏状态观察'}
       </button>
     </div>
   ) : null
@@ -581,7 +583,7 @@ export default function StockDetailPage() {
               <div
                 key={s.symbol}
                 className={clsx('tv-source-list-item', s.symbol === symbol && 'active')}
-                onClick={() => navigate(`/stock/${s.symbol}?source=${source}&strategy=${strategy}${returnToParam ? `&returnTo=${encodeURIComponent(returnToParam)}` : ''}`)}
+                onClick={() => navigate(buildStockDetailUrl(s.symbol, { originScope: source === 'selection' ? 'market' : 'watchlist', returnTo: returnToParam, timeframe }))}
               >
                 <span className="tv-source-name">{s.name}</span>
                 <div className="tv-source-meta">
@@ -607,12 +609,14 @@ export default function StockDetailPage() {
           isCaptureMode={isCaptureMode}
           rightPanelCollapsed={!(shouldShowPanel && !!symbol)}
           toolbar={structuralToolbar}
-          rightPanel={eventStatePanel}
-          showRightPanel={shouldShowPanel && !!symbol}
+          rightPanel={null}
+          showRightPanel={false}
           chartColumnProps={{ 'data-testid': 'stock-detail-capture' }}
           onSmcToggle={handleSmcToggle}
         />
       </div>
+      {/* 状态观察 Drawer（overlay，不压缩 K 线；开闭由 eventPanelCollapsed 控制） */}
+      {eventStatePanel}
     </div>
   )
 }

@@ -2477,18 +2477,28 @@ export function StrategyChart({
     }
   }, [draw, calc.length, viewport, onViewportChange, display.length])
 
-  // ResizeObserver 自动缩放
+  // CHANGE-20260716-006: ResizeObserver 改为下一帧立即 draw + trailing draw
+  // 旧 120ms 纯防抖在快速切周期/全屏时中间宽度绘制导致右边界错位
   useEffect(() => {
     const wrap = wrapRef.current
     if (!wrap) return
-    let timer: ReturnType<typeof setTimeout>
+    let rafId: number | null = null
+    let trailingTimer: ReturnType<typeof setTimeout> | null = null
     const ro = new ResizeObserver(() => {
-      clearTimeout(timer)
-      timer = setTimeout(() => draw(), 120)
+      // 下一帧立即 draw（响应布局变化）
+      if (rafId !== null) cancelAnimationFrame(rafId)
+      rafId = requestAnimationFrame(() => {
+        draw()
+        rafId = null
+      })
+      // 布局稳定后补一次 trailing draw（120ms）
+      if (trailingTimer !== null) clearTimeout(trailingTimer)
+      trailingTimer = setTimeout(() => draw(), 120)
     })
     ro.observe(wrap)
     return () => {
-      clearTimeout(timer)
+      if (rafId !== null) cancelAnimationFrame(rafId)
+      if (trailingTimer !== null) clearTimeout(trailingTimer)
       ro.disconnect()
     }
   }, [draw])
