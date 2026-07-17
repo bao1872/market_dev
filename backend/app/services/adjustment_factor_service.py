@@ -266,6 +266,23 @@ class AdjustmentFactorService:
                 "存储 fingerprint 失败 instrument_id=%s: %s", instrument_id, exc
             )
 
+    def _delete_fingerprint(self, instrument_id: uuid.UUID) -> None:
+        """[CHANGE-20260717-002 SSOT] 删除存储的 fingerprint。
+
+        detect_company_action_change 检测到变化时会立即存储新 fingerprint，
+        若后续 rebuild_factor_series 失败，必须调用本方法回滚 fingerprint，
+        保证下次运行重新检测并重建（避免因子永久停留在旧值）。
+        """
+        try:
+            from app.core.redis_client import get_sync_redis
+            client = get_sync_redis()
+            key = f"{_FP_PREFIX}:{instrument_id}"
+            client.delete(key)
+        except Exception as exc:
+            logger.warning(
+                "删除 fingerprint 失败 instrument_id=%s: %s", instrument_id, exc
+            )
+
 
 if __name__ == "__main__":
     # 自测入口：验证函数签名与基础逻辑（不连 DB/网络，无副作用）

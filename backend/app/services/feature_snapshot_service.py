@@ -465,11 +465,18 @@ async def _fetch_bars_from_db(
             adjustment_as_of=trade_date,
         )
         bars = result.bars
+        # [CHANGE-20260717-002 SSOT] completed_through 从 MDAS 返回为 pd.Timestamp，
+        # 转换为 tz-aware datetime 便于 finish_snapshot_run 落库（DateTime(timezone=True) 列）
+        _ct = result.completed_through
+        if _ct is not None and isinstance(_ct, pd.Timestamp):
+            if _ct.tzinfo is None:
+                _ct = _ct.tz_localize("Asia/Shanghai")
+            _ct = _ct.to_pydatetime()
         diag: dict[str, Any] = {
             "source_bar_hash": result.source_bar_hash,
             "adj_factor_hash": result.adj_factor_hash,
             "market_data_contract_version": result.market_data_contract_version,
-            "completed_through": result.completed_through,
+            "completed_through": _ct,
             "adjustment_as_of": result.adjustment_as_of,
             "degraded": result.degraded,
             "degraded_reason": result.degraded_reason,

@@ -1517,6 +1517,14 @@ async def execute_after_close_run(
                             )
                             _snapshot_count = (await db.execute(_count_stmt)).scalar() or 0
                             _failed_count = (run_to_finish.expected_count or 0) - _snapshot_count
+                        # [CHANGE-20260717-002 SSOT] 提取 MDAS 诊断字段
+                        # snapshot_result is None（断点恢复）时 diag 为 None，
+                        # 不覆盖 run 已有值（finish_snapshot_run 内部 if not None 才写）
+                        _source_bar_hash = snapshot_result.get("source_bar_hash") if snapshot_result else None
+                        _adj_factor_hash = snapshot_result.get("adj_factor_hash") if snapshot_result else None
+                        _mdc_version = snapshot_result.get("market_data_contract_version") if snapshot_result else None
+                        _completed_through = snapshot_result.get("completed_through") if snapshot_result else None
+                        _adjustment_as_of = snapshot_result.get("adjustment_as_of") if snapshot_result else None
                         await finish_snapshot_run(
                             db, run_to_finish,
                             status="succeeded",
@@ -1527,6 +1535,12 @@ async def execute_after_close_run(
                                 "source": "after_close_orchestrator",
                                 "scope": "full",
                             },
+                            # [CHANGE-20260717-002 SSOT] MDAS 诊断字段落库
+                            source_bar_hash=_source_bar_hash,
+                            adj_factor_hash=_adj_factor_hash,
+                            market_data_contract_version=_mdc_version,
+                            completed_through=_completed_through,
+                            adjustment_as_of=_adjustment_as_of,
                         )
                         await db.commit()
                         logger.info(
