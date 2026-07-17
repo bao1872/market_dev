@@ -82,7 +82,7 @@ logger = logging.getLogger(__name__)
 
 # 常量
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2  # [CHANGE-20260717-002 SSOT] 1→2: bars 来源改为 MDAS point-in-time + hash/contract 落库
 _PRIMARY_LOOKBACK = 500  # 日线回看天数（与 structural_factor_service 对齐）
 _SECONDARY_LOOKBACK = 500  # 15m 回看天数
 _BB_WIN = 20
@@ -287,6 +287,7 @@ async def compute_feature_snapshot_for_date(
     primary_bars: pd.DataFrame | None = None,
     secondary_bars: pd.DataFrame | None = None,
     source_run_id: uuid.UUID | None = None,
+    _diag_sink: dict[str, Any] | None = None,
 ) -> StockFeatureSnapshot:
     """为指定 instrument + trade_date 计算 point-in-time 特征快照。
 
@@ -318,11 +319,14 @@ async def compute_feature_snapshot_for_date(
 
     # 获取 K 线（如果未预加载）
     if primary_bars is None:
-        primary_bars = await _fetch_bars_from_db(
+        primary_bars, primary_diag = await _fetch_bars_from_db(
             session, instrument_id, primary_timeframe, adj, trade_date,
         )
+        # [CHANGE-20260717-002 SSOT] 主周期诊断为权威，写入 _diag_sink 供 run 级收集
+        if _diag_sink is not None and primary_diag:
+            _diag_sink.update(primary_diag)
     if secondary_bars is None:
-        secondary_bars = await _fetch_bars_from_db(
+        secondary_bars, _secondary_diag = await _fetch_bars_from_db(
             session, instrument_id, secondary_timeframe, adj, trade_date,
         )
 
@@ -434,11 +438,17 @@ async def _fetch_bars_from_db(
     timeframe: str,
     adj: str,
     trade_date: date,
-) -> pd.DataFrame | None:
-    """从 DB 获取 K 线数据（通过 MarketDataAggregationService）。
+) -> tuple[pd.DataFrame | None, dict[str, Any]]:
+    """从 DB 获取 K 线数据（通过 MarketDataAggregationService，point-in-time）。
 
-    使用 include_realtime=False 只获取已完成 bar。
-    失败时返回 None 并由调用方写入 degraded_reasons。
+    [CHANGE-20260717-002 SSOT] 盘后/历史回算必须 point-in-time：
+    - include_realtime=False / completed_only=True（只用已完成 bar）
+    - end_date=trade_date（不读取 trade_date 之后数据）
+    - adjustment_as_of=trade_date（复权锚点，禁止未来除权事件泄漏）
+
+    返回 (bars, diag) 二元组；diag 含 source_bar_hash/adj_factor_hash/
+    market_data_contract_version/completed_through/adjustment_as_of/degraded/degraded_reason。
+    失败时返回 (None, {})。
     """
     from app.services.market_data_aggregation_service import MarketDataAggregationService
 
@@ -450,17 +460,29 @@ async def _fetch_bars_from_db(
             timeframe=timeframe,
             adj=adj,
             include_realtime=False,
+            completed_only=True,
+            end_date=trade_date,
+            adjustment_as_of=trade_date,
         )
         bars = result.bars
+        diag: dict[str, Any] = {
+            "source_bar_hash": result.source_bar_hash,
+            "adj_factor_hash": result.adj_factor_hash,
+            "market_data_contract_version": result.market_data_contract_version,
+            "completed_through": result.completed_through,
+            "adjustment_as_of": result.adjustment_as_of,
+            "degraded": result.degraded,
+            "degraded_reason": result.degraded_reason,
+        }
         if bars is None or bars.empty:
-            return None
-        return bars
+            return None, diag
+        return bars, diag
     except Exception as exc:
         logger.warning(
             "get_bars 失败 instrument_id=%s timeframe=%s: %s",
             instrument_id, timeframe, exc,
         )
-        return None
+        return None, {}
 
 
 def _extract_extra_fields(df_1d: pd.DataFrame | None) -> dict[str, Any]:
@@ -669,6 +691,8 @@ async def compute_for_trade_date(
     total = len(instrument_ids)
     snapshot_count = 0
     failed_count = 0
+    # [CHANGE-20260717-002 SSOT] run 级行情诊断（取首个成功 instrument 的 primary_diag 为权威）
+    run_diag: dict[str, Any] = {}
 
     for i in range(0, total, batch_size):
         batch = instrument_ids[i : i + batch_size]
@@ -677,6 +701,7 @@ async def compute_for_trade_date(
                 snapshot = await compute_feature_snapshot_for_date(
                     session, instrument_id, trade_date,
                     source_run_id=source_run_id,
+                    _diag_sink=run_diag,
                 )
                 await upsert_snapshot(session, snapshot)
                 snapshot_count += 1
@@ -721,6 +746,12 @@ async def compute_for_trade_date(
         "failed_count": failed_count,
         "schema_version": _SCHEMA_VERSION,
         "trade_date": trade_date.isoformat(),
+        # [CHANGE-20260717-002 SSOT] run 级行情诊断（供 finish_snapshot_run 落库）
+        "source_bar_hash": run_diag.get("source_bar_hash"),
+        "adj_factor_hash": run_diag.get("adj_factor_hash"),
+        "market_data_contract_version": run_diag.get("market_data_contract_version"),
+        "completed_through": run_diag.get("completed_through"),
+        "adjustment_as_of": run_diag.get("adjustment_as_of"),
     }
 
 
@@ -901,6 +932,11 @@ async def finish_snapshot_run(
     expected_count: int | None = None,
     failure_rate: float | None = None,
     metadata: dict[str, Any] | None = None,
+    source_bar_hash: str | None = None,
+    adj_factor_hash: str | None = None,
+    market_data_contract_version: str | None = None,
+    completed_through: datetime | None = None,
+    adjustment_as_of: date | None = None,
 ) -> StockFeatureSnapshotRun:
     """更新 run 状态为 succeeded/failed，写入统计与时间戳。
 
@@ -945,6 +981,17 @@ async def finish_snapshot_run(
         run.failure_rate = failure_rate
     if metadata is not None:
         run.metadata_ = metadata
+    # [CHANGE-20260717-002 SSOT] 写入行情诊断字段（供审计与跨调用方对账）
+    if source_bar_hash is not None:
+        run.source_bar_hash = source_bar_hash
+    if adj_factor_hash is not None:
+        run.adj_factor_hash = adj_factor_hash
+    if market_data_contract_version is not None:
+        run.market_data_contract_version = market_data_contract_version
+    if completed_through is not None:
+        run.completed_through = completed_through
+    if adjustment_as_of is not None:
+        run.adjustment_as_of = adjustment_as_of
     # [RunGate] - succeeded 时写 published_at，failed 时保持 None
     if status == STATUS_SUCCEEDED:
         run.published_at = now
