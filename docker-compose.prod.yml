@@ -264,6 +264,9 @@ services:
       CAPTURE_WORKER_URL: ${CAPTURE_WORKER_URL:-http://worker-capture:8001}
       TZ: Asia/Shanghai
       CONFIG_FILE: /app/app/config.production.py
+      # [CHANGE-20260716-007] 板块同步开关：盘后编排读取此环境变量决定是否执行 syncing_boards
+      # 由 market.env 中 BOARD_SYNC_ENABLED 控制，默认 false
+      BOARD_SYNC_ENABLED: ${BOARD_SYNC_ENABLED:-false}
     depends_on:
       redis:
         condition: service_healthy

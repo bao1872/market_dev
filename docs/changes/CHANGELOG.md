@@ -4,6 +4,31 @@
 
 ## 2026-07-16
 
+- CHANGE-20260716-007: 板块同步迁移 pywencai 唯一数据源（BoardSnapshot 原子切换 + 软失败编排 + 陈旧数据契约 + 行业关键词 ilike 筛选 + BoardFilterCombobox 自定义下拉 + Dockerfile Node.js + BOARD_SYNC_ENABLED 环境变量注入）
+  - **数据源迁移**：删除 `backend/app/services/qstock_fetcher.py`、`backend/app/services/ths_adapter.py`、`backend/tests/test_qstock_fetcher.py`；新增 `backend/app/services/wencai_board_provider.py`（pywencai 作为唯一板块分类数据源，查询 `同花顺概念，行业分类`，通过 `asyncio.to_thread` 包装同步调用，附带 Referer 头，3 次重试）
+  - **board_sync_service 重构**：采用 `BoardSnapshot` 暂存集合 + 事务内原子切换（TRUNCATE+INSERT）；硬门禁（绝对门禁）——原始记录 ≥5000、代码唯一性 ≥99.9%、行业板块 ≥200、概念板块 ≥300、关系数 ≥60000、解析率 ≥95%；相对门禁（与上一成功版本比较降幅 >20% 拒绝）；首次同步不做相对降幅检查
+  - **after_close_orchestrator 新增 syncing_boards 步骤**：位于 `refreshing_daily` 与 `waiting_dsa_worker` 之间；软失败设计（不阻断 DSA/snapshot/publish 链路）；非交易日自动跳过；`mode=dsa_only` 模式跳过
+  - **worker.py**：删除原 17:00 独立 qstock board_sync 任务；`BOARD_SYNC_ENABLED` 环境变量保留并改为 pywencai 语义（默认 `true`，`false` 时 `syncing_boards` 步骤跳过）
+  - **/market/boards 响应扩展**：新增 `source`（str\|null，数据源标识）、`stale`（bool，存在旧数据但最新同步失败时为 true）、`last_attempt_status`（str\|null，最近一次同步状态）；stale=true 时前端展示"沿用上次板块数据"
+  - **前端筛选行为**：行业/概念输入仅 Enter/失焦提交（不再每次按键提交）；清空立即提交并重置分页；`boards.available=false` 时输入禁用；`stale=true` 时输入仍可用但显示"沿用上次板块数据"提示；行业值 `-` 在前端可渲染为 `/`（API 值不变）
+  - **Redis 状态跟踪**：`record_sync_status()`/`get_sync_status()` 写入 key `board_sync:status`，TTL 7 天
+  - **依赖变更**：`pyproject.toml` 移除 `py-mini-racer`，新增 `pywencai==0.13.1`，保留 `qstock==1.3.1`
+  - **测试覆盖**：后端 `test_wencai_board_provider.py`（53 用例）、`test_board_sync.py`（17 用例，含 source=wencai）、`test_after_close_board_sync.py`（10 用例覆盖软失败/非交易日跳过/dsa_only 跳过）、`test_board_filter_helper.py`（23 用例覆盖 ilike 匹配/转义/NFKC/AND）、`test_board_sync_enabled_config.py`（12 用例覆盖环境变量解析）；前端 `wencaiBoardSyncContract.test.ts`（28 用例覆盖 BoardFilterCombobox + stale/source/last_attempt_status/禁用输入/Enter 提交/`-`→`/` 渲染）、`marketToolbarSearch.test.ts`（8 用例 keywordInput）
+  - **ALIGN-041 关闭**：pywencai 配合 `WENCAI_COOKIE` 在物理机真实烟测返回完整目录与代表性成分，ALIGN-041 由 KNOWN_GAP 移入 CLOSED
+  - **PR #77 收口（行业关键词筛选 + 自定义 Combobox + 同步链路遗留修复）**：
+    - **行业筛选语义改为关键词匹配**：`board_filter_helper.build_board_filter_conditions` 的 industry 条件从 `MarketBoard.name == industry` 改为 `MarketBoard.name.ilike('%keyword%', escape='\\')`，匹配完整路径中的任意一级；`_normalize_keyword()` NFKC 规范化 + trim；`_escape_ilike_pattern()` 转义 `\`/`%`/`_`；空值不生成条件；concept 保持精确匹配；industry+concept 继续 AND；market stocks/StrategyRunResults/行情/自选/Excel 复用同一 helper；URL/preset/导出字段名继续用 `industry`（语义为关键词）
+    - **BoardFilterCombobox 自定义下拉**：删除 `MarketToolbar.tsx` 原生 `<datalist>`，新增 `BoardFilterCombobox.tsx`（行业+概念共用）；行业模式允许任意关键词、placeholder「搜索行业关键词」、本地过滤完整路径最多 12 条建议、展示「一级 / 二级 / 三级」并高亮命中、Enter 提交关键词/点击提交完整路径/清空立即提交；概念模式本地搜索目录、只提交精确概念、不逐字符请求后端；ArrowUp/Down/Enter/Escape + 点击外部关闭 + 清除按钮 + aria-combobox/listbox/option + 150ms blur 延迟解决点击问题；盘迹 SCSS 变量、行业 200~240px、概念 160~200px、深色 panel/1px 边框/8px 圆角/轻阴影/荧感绿 focus/青绿色 hover/最大高度 320px/z-index 高于表格
+    - **Dockerfile Node.js 依赖**：`backend/Dockerfile` 安装 `nodejs`（pywencai `get_token()` 需 `subprocess.run(['node', ...])` 执行 `hexin-v.bundle.js` 计算反爬 token）；纳入 commit，不能让 c41799c 镜像与 Git 代码不同
+    - **source=wencai 修复**：`board_sync_service.sync_boards()` 成功返回 dict 显式带 `source: "wencai"`，防止手工 `record_sync_status(result)` 丢失 source；`/market/boards` 不再返回 `source=None`
+    - **BOARD_SYNC_ENABLED 环境变量注入**：`config.py` 新增 `_resolve_board_sync_enabled()`（优先级：环境变量 > CONFIG_FILE > 默认 False）；`docker-compose.prod.yml` worker-after-close 服务注入 `BOARD_SYNC_ENABLED: ${BOARD_SYNC_ENABLED:-false}`；启用时真实执行 syncing_boards，禁用时明确 skipped
+    - **249 只未解析股票分类**（仅调查，不降低 95% 门禁）：全部 `DB_NOT_EXIST`，BJ 234 + SH 13 + SZ 2，以 920xxx 北交所新股为主；调查脚本 `backend/scripts/classify_unresolved_stocks.py`（PR #77 收口第二轮已删除，仅一次性调查用途）
+  - **PR #77 收口第二轮（P0 前端 + P1 后端 + 新测试）**：
+    - **P0 BoardFilterCombobox 行为收紧**：`openPanel()` 与 `handleInputChange` 改为 `activeIndex=-1`（不再默认选中首项，Enter 不自动选第一条）；Enter 无激活建议时行业提交关键词（非首条路径）、概念仅当存在精确匹配时提交；`normalizeInput` 增加 `.normalize('NFKC')` 与后端 `_normalize_keyword` 对齐；`useId()` 生成唯一 listbox/option ID 防多实例冲突；新增 `suggestionRank()`（exact=0/prefix=1/contains=2 + `localeCompare('zh-Hans-CN')` 稳定排序）；清除按钮移除 `tabIndex={-1}` 恢复键盘可达；新增「无匹配行业」/「未找到该概念」无结果反馈（`hasInputNoMatch`）；SCSS 行业面板宽 360-480px（原 220px）、概念面板最大 240px、`.comboboxPanel` 改 `min-width: 100%`（原 `left:0;right:0`）；建议项 `<li>` 增加 `title` 显示完整行业路径
+    - **P1 后端修复**：`board_filter_helper.py` concept 应用 `_normalize_keyword()`（NFKC+trim）后再 `==` 精确匹配（原 raw string）；`config.py::_resolve_board_sync_enabled()` 严格解析（truthy 集合 `{1,true,yes,on}` / falsy 集合 `{0,false,no,off}`，非法值 `RuntimeError` fail-fast，修复 `bool("false")` bug，同时处理 bool 与 str）；`after_close_orchestrator.py` 模块 docstring 状态机补 `syncing_boards`，新增 `_record_board_sync_outcome()` 同时写 `job_run_events`（`append_event`）和 `SchedulerJobRun.metadata_json.board_sync_result`，在 success/failure/skip 三分支调用；`market_stocks_service.py` 新增 `_get_board_sync_status_from_job()` 从近期 `SchedulerJobRun.metadata_json` 读取 `board_sync_result` 作为 Redis 缺失时的回退，`get_market_boards()` Redis None 时回退 job metadata，DB 有数据但无任何状态源时 `source="unknown"`（非 None）；删除一次性调查脚本 `backend/scripts/classify_unresolved_stocks.py`
+    - **新测试**：`test_board_filter_helper.py` +8（concept NFKC+trim，共 32）；`test_board_sync_enabled_config.py` +16（config 文件严格解析，共 28）；`test_board_sync_status_fallback.py` 新增 14（Redis 回退 + event/metadata 写入）；`wencaiBoardSyncContract.test.ts` +15（P0 修复契约 + SCSS 宽度契约，共 37）；全部通过
+    - **EXPLAIN ANALYZE 性能验收**（生产数据）：「电子」0.819ms、「半导体」0.589ms、「电子 + 光刻机」AND 1.044ms
+  - **部署**：`COMPOSE_PARALLEL_LIMIT=1 NODE_OPTIONS=--max-old-space-size=1536 CORE_ONLY=1 ./scripts/deploy.sh` 重新部署前后端和核心 worker
+
 - CHANGE-20260716-005: AFC V1 终审修正（M5 单侧缺失 + per-fact 精度 recentChanges + PersistedAtomicFactsPayload 严格 schema + as_of 截止语义 + legacy degradedReasons + meta 三版本 + presentation secondaryLabel 真源 + 前端布局修正）
   - **后端 M5 单侧缺失**：`_squeeze_state` 改 `if on is None or off is None: return None`（任一缺失即缺失，旧 `and` 改 `or`）；新增四个单侧缺失组合测试均不进入 Core
   - **RecentChanges per-fact 精度**：`_quantize_fact_value` 按 presentation `valuePrecision` 量化（禁止统一 `round(...,4)`）；`FACT_DIMENSION_BY_ID` 从冻结合同导出 fact_id→dimension 映射，事实消失时仍返回正确维度（禁止默认 trend）；`_combine_text` 组合短值和 category（避免丢失 M3 双文本状态）

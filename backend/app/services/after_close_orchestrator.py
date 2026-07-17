@@ -16,10 +16,11 @@
   feature_snapshot_service.compute_for_trade_date
 - DSA Worker 异步执行，编排层轮询 StrategyRun.status 直到 completed/failed/超时
 
-状态机：
-queued → refreshing_daily → checking_coverage → creating_dsa
+状态机（PR #77 收口：含 syncing_boards）：
+queued → refreshing_daily → syncing_boards → checking_coverage → creating_dsa
   → waiting_dsa_worker → quality_gate → feature_snapshot → publishing → succeeded
-任意步骤异常 → failed
+任意步骤异常 → failed（syncing_boards 除外：软失败不阻断主流程）
+syncing_boards 在 BOARD_SYNC_ENABLED=false / 非交易日 / dsa_only 模式时跳过
 
 禁异常吞没：所有异常补充上下文后 re-raise 或写入 ERROR 事件后标记 failed。
 """
@@ -29,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import date, datetime, timedelta
@@ -74,13 +76,14 @@ class AfterCloseRunStatus(StrEnum):
     """盘后编排流水线状态枚举。
 
     状态流转：
-    queued → refreshing_daily → checking_coverage → creating_dsa
-      → waiting_dsa_worker → quality_gate → feature_snapshot → publishing → succeeded
-    任意步骤异常 → failed
+    queued → refreshing_daily → syncing_boards → waiting_dsa_worker
+      → quality_gate → feature_snapshot → publishing → succeeded
+    任意步骤异常 → failed（syncing_boards 除外：软失败不阻断主流程）
     """
 
     QUEUED = "queued"
     REFRESHING_DAILY = "refreshing_daily"
+    SYNCING_BOARDS = "syncing_boards"
     CHECKING_COVERAGE = "checking_coverage"
     CREATING_DSA = "creating_dsa"
     WAITING_DSA_WORKER = "waiting_dsa_worker"
@@ -203,6 +206,40 @@ async def _update_orchestrator_status(
         payload=event_payload,
     )
     await db.flush()
+
+
+async def _record_board_sync_outcome(
+    job_run_id: uuid.UUID,
+    outcome: dict[str, Any],
+    level: str,
+    message: str,
+) -> None:
+    """[AfterClose] - 记录板块同步结果到 job_run_events + metadata_json。
+
+    PR #77 收口 §三.3：成功/失败/跳过均写入持久事件和 metadata，
+    使管理后台盘后流水线时间线可看到完整结果（不只 Redis 和 logger）。
+
+    Args:
+        job_run_id: SchedulerJobRun ID
+        outcome: 同步结果 dict（status/source/raw_rows/resolved/unresolved/...）
+        level: 事件级别 info/warn/error
+        message: 事件消息
+    """
+    async with AsyncSessionLocal() as db:
+        job_run = await _get_job_run_or_raise(db, job_run_id)
+        existing_meta = _parse_metadata(job_run)
+        new_meta = dict(existing_meta)
+        new_meta["board_sync_result"] = outcome
+        job_run.metadata_json = json.dumps(new_meta, ensure_ascii=False)
+        await append_event(
+            db=db,
+            job_run_id=job_run.id,
+            step=AfterCloseRunStatus.SYNCING_BOARDS.value,
+            level=level,
+            message=message,
+            payload=outcome,
+        )
+        await db.commit()
 
 
 async def create_after_close_run(
@@ -385,6 +422,35 @@ async def _job_run_heartbeat_loop(
 
 # [Heartbeat] - feature_snapshot 进度事件采样间隔（instrument 数）
 _FEATURE_SNAPSHOT_PROGRESS_EVENT_INTERVAL = 500
+
+
+async def _resolve_instruments_for_board_sync(
+    symbols: list[str],
+    session: AsyncSession | None = None,
+) -> dict[str, uuid.UUID]:
+    """[BoardSync] - 按 symbol 批量查询现有 Instrument.id（供 board_sync_service 使用）。
+
+    与 worker.py 的 _resolve_instruments 逻辑一致，独立定义为模块级函数避免循环依赖。
+    session 参数仅供测试注入；生产调用不传，内部新建 AsyncSessionLocal。
+    """
+    from sqlalchemy import select
+
+    from app.models.instrument import Instrument
+
+    if not symbols:
+        return {}
+
+    async def _do_resolve(s: AsyncSession) -> dict[str, uuid.UUID]:
+        stmt = select(Instrument.id, Instrument.symbol).where(
+            Instrument.symbol.in_(symbols)
+        )
+        result = await s.execute(stmt)
+        return {row.symbol: row.id for row in result}
+
+    if session is not None:
+        return await _do_resolve(session)
+    async with AsyncSessionLocal() as session:
+        return await _do_resolve(session)
 
 
 def _build_feature_snapshot_progress_callback(
@@ -783,25 +849,31 @@ async def execute_after_close_run(
             )
 
         # [Phase5] - 根据last_completed_step 计算各阶段跳过标志
-        # 阶段顺序：refreshing_daily → waiting_dsa_worker → quality_gate
-        #   → feature_snapshot → publishing → succeeded
+        # 阶段顺序：refreshing_daily → syncing_boards → waiting_dsa_worker
+        #   → quality_gate → feature_snapshot → publishing → succeeded
         _completed_steps: dict[str | None, set[str]] = {
             None: set(),
             "queued": set(),
             "refreshing_daily": {"refreshing_daily"},
-            "waiting_dsa_worker": {"refreshing_daily", "waiting_dsa_worker"},
-            "quality_gate": {"refreshing_daily", "waiting_dsa_worker", "quality_gate"},
+            "syncing_boards": {"refreshing_daily", "syncing_boards"},
+            "waiting_dsa_worker": {
+                "refreshing_daily", "syncing_boards", "waiting_dsa_worker",
+            },
+            "quality_gate": {
+                "refreshing_daily", "syncing_boards", "waiting_dsa_worker",
+                "quality_gate",
+            },
             "feature_snapshot": {
-                "refreshing_daily", "waiting_dsa_worker", "quality_gate",
-                "feature_snapshot",
+                "refreshing_daily", "syncing_boards", "waiting_dsa_worker",
+                "quality_gate", "feature_snapshot",
             },
             "publishing": {
-                "refreshing_daily", "waiting_dsa_worker", "quality_gate",
-                "feature_snapshot", "publishing",
+                "refreshing_daily", "syncing_boards", "waiting_dsa_worker",
+                "quality_gate", "feature_snapshot", "publishing",
             },
             "succeeded": {
-                "refreshing_daily", "waiting_dsa_worker", "quality_gate",
-                "feature_snapshot", "publishing", "succeeded",
+                "refreshing_daily", "syncing_boards", "waiting_dsa_worker",
+                "quality_gate", "feature_snapshot", "publishing", "succeeded",
             },
         }
         completed: set[str] = _completed_steps.get(last_completed_step, set())
@@ -812,16 +884,18 @@ async def execute_after_close_run(
             )
             return
 
-        # [Phase6] - dsa_only 模式：跳过日线刷新（覆盖率已由 API 层校验）
+        # [Phase6] - dsa_only 模式：跳过日线刷新和板块同步（覆盖率已由 API 层校验）
+        # 避免人工 DSA 重跑访问问财
         mode = meta.get("mode")
         if mode == "dsa_only":
-            completed = completed | {"refreshing_daily"}
+            completed = completed | {"refreshing_daily", "syncing_boards"}
             logger.info(
-                "[AfterClose] dsa_only 模式: 强制跳过 refreshing_daily: job_run_id=%s",
+                "[AfterClose] dsa_only 模式: 强制跳过 refreshing_daily + syncing_boards: job_run_id=%s",
                 job_run_id,
             )
 
         skip_refresh = "refreshing_daily" in completed
+        skip_board_sync = "syncing_boards" in completed
         skip_wait = "waiting_dsa_worker" in completed
         skip_quality = "quality_gate" in completed
         skip_snapshot = "feature_snapshot" in completed
@@ -829,9 +903,9 @@ async def execute_after_close_run(
 
         logger.info(
             "[AfterClose] 断点恢复: last_completed_step=%s, "
-            "skip_refresh=%s, skip_wait=%s, skip_quality=%s, "
+            "skip_refresh=%s, skip_board_sync=%s, skip_wait=%s, skip_quality=%s, "
             "skip_snapshot=%s, skip_publish=%s",
-            last_completed_step, skip_refresh, skip_wait, skip_quality,
+            last_completed_step, skip_refresh, skip_board_sync, skip_wait, skip_quality,
             skip_snapshot, skip_publish,
         )
 
@@ -866,6 +940,158 @@ async def execute_after_close_run(
                 except asyncio.CancelledError:
                     pass
             dsa_run_id = batch_result.dsa_run_id
+
+            # ---- 步骤 2: syncing_boards（软失败，不阻断主流程）----
+            # 板块与 DSA 独立，在日线刷新后、DSA 未触发提前结束之前执行
+            # 非交易日跳过；dsa_only 模式已在上文 skip_board_sync=True
+            if not skip_board_sync and batch_result.skip_reason != "NON_TRADING_DAY":
+                from app.config import get_settings
+                from app.services.board_sync_service import (
+                    record_sync_status,
+                    sync_boards,
+                )
+                from app.services.wencai_board_provider import fetch_board_snapshot
+
+                settings = get_settings()
+                if settings.board_sync_enabled:
+                    board_sync_start = time.monotonic()
+                    # 写状态切换事件
+                    async with AsyncSessionLocal() as db:
+                        job_run = await _get_job_run_or_raise(db, job_run_id)
+                        await _update_orchestrator_status(
+                            db=db,
+                            job_run=job_run,
+                            status=AfterCloseRunStatus.SYNCING_BOARDS,
+                            message="开始同步问财板块数据",
+                        )
+                        await db.commit()
+
+                    try:
+                        # 1. 拉取问财板块快照（asyncio.to_thread 内部不阻塞事件循环）
+                        snapshot = await fetch_board_snapshot()
+
+                        # 2. 单事务原子切换（异常自动 rollback 保留旧数据）
+                        async with AsyncSessionLocal() as db:
+                            async with db.begin():
+                                board_result = await sync_boards(
+                                    db,
+                                    snapshot,
+                                    instrument_resolver=_resolve_instruments_for_board_sync,
+                                )
+
+                        # 3. 记录成功状态到 Redis（供 /market/boards API 读取）
+                        await record_sync_status({
+                            "status": "succeeded",
+                            "source": "wencai",
+                            "raw_rows": board_result["raw_rows"],
+                            "resolved": board_result["resolved"],
+                            "unresolved": board_result["unresolved"],
+                            "industry_count": board_result["industry_count"],
+                            "concept_count": board_result["concept_count"],
+                            "membership_count": board_result["membership_count"],
+                            "duration_ms": int((time.monotonic() - board_sync_start) * 1000),
+                            "error_code": None,
+                            "reused_previous_snapshot": False,
+                        })
+
+                        logger.info(
+                            "[AfterClose] 板块同步成功: boards=%d, industry=%d, "
+                            "concept=%d, memberships=%d, duration_ms=%d",
+                            board_result["board_count"],
+                            board_result["industry_count"],
+                            board_result["concept_count"],
+                            board_result["membership_count"],
+                            int((time.monotonic() - board_sync_start) * 1000),
+                        )
+
+                        # 4. 写入 job_run_event + metadata_json（PR #77 收口 §三.3）
+                        board_sync_duration_ms = int((time.monotonic() - board_sync_start) * 1000)
+                        board_success_outcome = {
+                            "status": "succeeded",
+                            "source": "wencai",
+                            "raw_rows": board_result["raw_rows"],
+                            "resolved": board_result["resolved"],
+                            "unresolved": board_result["unresolved"],
+                            "industry_count": board_result["industry_count"],
+                            "concept_count": board_result["concept_count"],
+                            "membership_count": board_result["membership_count"],
+                            "duration_ms": board_sync_duration_ms,
+                            "error_code": None,
+                            "reused_previous_snapshot": False,
+                        }
+                        await _record_board_sync_outcome(
+                            job_run_id=job_run_id,
+                            outcome=board_success_outcome,
+                            level="info",
+                            message=(
+                                f"板块同步成功: 行业={board_result['industry_count']}, "
+                                f"概念={board_result['concept_count']}, "
+                                f"关系={board_result['membership_count']}, "
+                                f"耗时={board_sync_duration_ms}ms"
+                            ),
+                        )
+                    except Exception as board_exc:
+                        # 软失败：不覆盖旧数据、不阻断 DSA/快照/发布
+                        logger.exception(
+                            "[AfterClose] 板块同步失败（软失败，沿用上次数据）: %s",
+                            board_exc,
+                        )
+                        await record_sync_status({
+                            "status": "failed",
+                            "source": "wencai",
+                            "error_code": type(board_exc).__name__,
+                            "reused_previous_snapshot": True,
+                            "duration_ms": int((time.monotonic() - board_sync_start) * 1000),
+                        })
+                        # 写入 job_run_event + metadata_json（PR #77 收口 §三.3）
+                        board_fail_duration_ms = int((time.monotonic() - board_sync_start) * 1000)
+                        board_fail_outcome = {
+                            "status": "failed",
+                            "source": "wencai",
+                            "error_code": type(board_exc).__name__,
+                            "reused_previous_snapshot": True,
+                            "duration_ms": board_fail_duration_ms,
+                        }
+                        await _record_board_sync_outcome(
+                            job_run_id=job_run_id,
+                            outcome=board_fail_outcome,
+                            level="warn",
+                            message=(
+                                f"板块同步失败（软失败，沿用上次数据）: "
+                                f"error={type(board_exc).__name__}, "
+                                f"耗时={board_fail_duration_ms}ms"
+                            ),
+                        )
+                else:
+                    logger.info(
+                        "[AfterClose] BOARD_SYNC_ENABLED=false，跳过板块同步: job_run_id=%s",
+                        job_run_id,
+                    )
+                    await record_sync_status({
+                        "status": "skipped",
+                        "source": "wencai",
+                        "reused_previous_snapshot": True,
+                    })
+                    # 写入 job_run_event + metadata_json（PR #77 收口 §三.3）
+                    await _record_board_sync_outcome(
+                        job_run_id=job_run_id,
+                        outcome={
+                            "status": "skipped",
+                            "source": "wencai",
+                            "reused_previous_snapshot": True,
+                            "reason_code": "board_sync_disabled",
+                        },
+                        level="info",
+                        message="板块同步跳过（BOARD_SYNC_ENABLED=false）",
+                    )
+
+            # [Phase5] - syncing_boards 完成（或跳过），更新心跳 + 检查点
+            async with AsyncSessionLocal() as db:
+                job_run = await _get_job_run_or_raise(db, job_run_id)
+                await _update_heartbeat_and_step(
+                    db, job_run, AfterCloseRunStatus.SYNCING_BOARDS.value, worker_id,
+                )
+                await db.commit()
 
             if dsa_run_id is None:
                 # [AfterClose] - 区分跳过原因：NON_TRADING_DAY（非交易日）vs None（覆盖率不足）
@@ -913,13 +1139,6 @@ async def execute_after_close_run(
                 )
                 return
 
-            # [Phase5] - refreshing_daily 完成，更新心跳 + 检查点
-            async with AsyncSessionLocal() as db:
-                job_run = await _get_job_run_or_raise(db, job_run_id)
-                await _update_heartbeat_and_step(
-                    db, job_run, AfterCloseRunStatus.REFRESHING_DAILY.value, worker_id,
-                )
-                await db.commit()
         else:
             # [Phase5] - 断点恢复跳过日线刷新，dsa_run_id 从 metadata 读取
             # [Phase6] - dsa_only 模式：跳过日线刷新，直接创建 DSA run（覆盖率已由 API 层校验）

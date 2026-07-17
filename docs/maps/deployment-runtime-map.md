@@ -8,7 +8,7 @@
 | redis | trading-redis | 内网 | Redis 7，volume `trading-redisdata` |
 | backend | trading-backend | 8000 | FastAPI |
 | frontend | trading-frontend | 80 | Nginx + React build |
-| worker-bars-scheduler | trading-worker-bars-scheduler | 无 | 行情调度（16:00 bars_refresh + 17:00 board_sync，同一 AsyncIOScheduler） |
+| worker-bars-scheduler | trading-worker-bars-scheduler | 无 | 行情调度（16:00 bars_refresh，AsyncIOScheduler；板块同步已迁移至 `worker-after-close` 的 `syncing_boards` 步骤，CHANGE-20260716-007） |
 | worker-strategy-scheduler | trading-worker-strategy-scheduler | 无 | DSA 调度 |
 | worker-calendar | trading-worker-calendar | 无 | 交易日历 |
 | worker-monitor | trading-worker-monitor | 无 | 盘中监控 |
@@ -34,7 +34,7 @@
 | CONFIG_FILE | 生产配置 |
 | POSTGRES_USER/PASSWORD/DB | PostgreSQL 容器 |
 | STRATEGY_RUN_TOTAL_TIMEOUT_SECONDS | worker-strategy-batch run 级总超时（默认 7200） |
-| BOARD_SYNC_ENABLED | board_sync 开关（默认 `false`）；`false` 时 scheduled_board_sync 跳过执行并记录 `status=skipped` + `reason_code=board_provider_unavailable`；仅当 THS provider 可用时设置 `true` |
+| BOARD_SYNC_ENABLED | `after_close_orchestrator` 的 `syncing_boards` 步骤开关（默认 `false`，CHANGE-20260716-007 改为 pywencai 语义；PR #77：`config.py` `_resolve_board_sync_enabled()` 优先级「环境变量 > CONFIG_FILE > 默认 False」，`docker-compose.prod.yml` worker-after-close 注入 `BOARD_SYNC_ENABLED: ${BOARD_SYNC_ENABLED:-false}`）；环境变量接受 `1`/`true`/`yes`/`on`（大小写不敏感）为真；`false` 时 `syncing_boards` 步骤跳过执行并记录 `status=skipped` + `reason_code=board_sync_disabled`；`true` 时通过 pywencai 拉取板块目录与成分股关系（`wencai_board_provider.WencaiBoardProvider`，需配置 `WENCAI_COOKIE`，容器需安装 Node.js —— pywencai `get_token()` 需 `subprocess.run(['node', ...])` 执行 `hexin-v.bundle.js`）；生产部署时设为 `true` |
 
 Secret 不写入文档示例，不回显日志。
 

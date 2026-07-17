@@ -128,6 +128,61 @@ def _resolve_database_url() -> str:
     )
 
 
+def _resolve_board_sync_enabled() -> bool:
+    """解析板块同步开关（CHANGE-20260716-007，PR #77 收口严格解析）。
+
+    优先级（同字段，高到低）：
+    1. 环境变量 BOARD_SYNC_ENABLED（docker-compose.environment 显式注入）
+    2. CONFIG_FILE 指向的配置文件中的 BOARD_SYNC_ENABLED
+    3. 默认 False（未配置时盘后编排跳过 syncing_boards）
+
+    环境变量与配置文件统一严格解析（不区分大小写）：
+    - truthy：1 / true / yes / on
+    - falsy：0 / false / no / off / 空串
+    - 非法值：启动失败并给出明确错误（防止 "false" 字符串被 bool() 误判为 True）
+
+    Returns:
+        bool: True 时盘后编排执行 syncing_boards，False 时跳过
+
+    Raises:
+        RuntimeError: 配置值为无法识别的字符串
+    """
+    truthy = {"1", "true", "yes", "on"}
+    falsy = {"0", "false", "no", "off", ""}
+
+    env_val = os.environ.get("BOARD_SYNC_ENABLED")
+    if env_val is not None:
+        normalized = env_val.strip().lower()
+        if normalized in truthy:
+            return True
+        if normalized in falsy:
+            return False
+        raise RuntimeError(
+            f"BOARD_SYNC_ENABLED 环境变量值非法: {env_val!r}，"
+            f"合法值: {sorted(truthy | falsy)}"
+        )
+
+    file_val = _load_py_config().get("BOARD_SYNC_ENABLED")
+    if file_val is not None:
+        if isinstance(file_val, bool):
+            return file_val
+        if isinstance(file_val, str):
+            normalized = file_val.strip().lower()
+            if normalized in truthy:
+                return True
+            if normalized in falsy:
+                return False
+            raise RuntimeError(
+                f"BOARD_SYNC_ENABLED 配置文件值非法: {file_val!r}，"
+                f"合法值: {sorted(truthy | falsy)}"
+            )
+        raise RuntimeError(
+            f"BOARD_SYNC_ENABLED 配置文件类型非法: {type(file_val).__name__}，"
+            f"期望 bool 或 str"
+        )
+    return False
+
+
 def _safe_database_url(url: str) -> str:
     """返回脱敏后的数据库 URL（隐藏密码），用于日志与异常。
 
@@ -341,13 +396,16 @@ class Settings(BaseSettings):
         description="Redis 缓存 TTL（秒）",
     )
 
-    # 板块同步开关（C10 降级保护）
-    # 生产默认 false：当前物理机 IP 被 THS 反爬拦截（成分股 403），
-    # akshare 无 THS 成分接口。未配置时不得发起 THS 请求。
-    # ALIGN-041 OPEN：至少一个同花顺语义 provider 真实返回完整目录+成分后方可开启。
+    # 板块同步开关（CHANGE-20260716-007：pywencai provider 已上线）
+    # 加载优先级（同字段，高到低）：
+    #   1. 环境变量 BOARD_SYNC_ENABLED（docker-compose 显式 environment 注入）
+    #   2. CONFIG_FILE 配置文件中的 BOARD_SYNC_ENABLED
+    #   3. 默认 False（未配置时跳过 syncing_boards）
+    # 部署时在 docker-compose.prod.yml worker-after-close.environment 中显式传入
+    # BOARD_SYNC_ENABLED: ${BOARD_SYNC_ENABLED:-false}，并通过 market.env 控制。
     board_sync_enabled: bool = Field(
-        default_factory=lambda: _load_py_config().get("BOARD_SYNC_ENABLED", False),
-        description="板块同步开关：false 时 scheduled_board_sync 跳过执行",
+        default_factory=_resolve_board_sync_enabled,
+        description="板块同步开关：false 时盘后编排跳过 syncing_boards",
     )
 
 

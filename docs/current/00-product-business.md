@@ -55,6 +55,15 @@ starts_at <= now < expires_at
 - 前端筛选、排序、分页只作用于已发布结果；
 - 当前不支持多策略组合。
 
+### 行业/概念筛选语义（CHANGE-20260716-007 + PR #77 收口）
+
+- **行业按关键词匹配**：`industry` 参数为关键词，`MarketBoard.name.ilike('%keyword%', escape='\\')` 匹配「一级-二级-三级」完整路径中的任意一级；输入「电子」「半导体」「数字芯片」均应匹配所有完整行业路径中包含该词的股票；`_normalize_keyword()` 执行 NFKC 规范化 + trim，`_escape_ilike_pattern()` 转义 `\`/`%`/`_`；空值不生成条件。
+- **概念精确匹配**：`concept` 参数为精确匹配（PR #77 收口第二轮：concept 也应用 `_normalize_keyword()` NFKC + trim 后再 `==` 比较，与 industry 共用同一规范化函数，避免全角/半角不一致）。
+- **二者 AND**：industry + concept 同时提供时取交集（AND 语义）。
+- **单一 helper 复用**：market stocks、StrategyRunResults、行情、自选和 Excel 必须复用同一 `backend/app/repositories/board_filter_helper.py::build_board_filter_conditions`，禁止出现两套筛选逻辑。
+- **板块数据源**：pywencai 为唯一板块分类源（`wencai_board_provider.py`），盘后 `syncing_boards` 步骤原子写入；用户请求链只读 DB + Redis 状态，不访问问财。
+- **stale 数据契约**：旧数据存在而最新同步失败时 `/market/boards` 返回 `available=true, stale=true`，仍允许筛选；从未成功才 `available=false`。
+
 ### 自选与监控
 
 - 有效会员添加 active 自选后自动进入监控；

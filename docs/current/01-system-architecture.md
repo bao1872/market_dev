@@ -114,6 +114,28 @@ user_watchlist_items
 → Feishu Platform App
 ```
 
+### 板块分类同步与筛选（CHANGE-20260716-007 + PR #77 收口）
+
+```text
+盘后 after_close_orchestrator syncing_boards 步骤
+→ wencai_board_provider（pywencai 唯一数据源，asyncio.to_thread 包装）
+→ BoardSnapshot 内存快照（boards + memberships）
+→ 绝对门禁 + 相对门禁校验
+→ 单事务原子切换（TRUNCATE+INSERT，异常 rollback 保留旧数据）
+→ market_boards / market_board_memberships 表
+→ Redis board_sync:status（TTL 7 天）+ SchedulerJobRun.metadata_json.board_sync_result（PR #77 收口第二轮）
+→ /market/boards 读 DB + Redis（Redis 缺失回退 job metadata，DB 有数据无状态源时 source="unknown"）
+→ 前端 BoardFilterCombobox 行业关键词 ilike + 概念精确匹配
+```
+
+- **唯一入口**：`after_close_orchestrator.py` 的 `syncing_boards` 步骤是板块同步唯一入口；`worker.py` 17:00 独立 qstock 任务已删除；`mode=dsa_only` 跳过。
+- **Node 运行时**：`backend/Dockerfile` 必须安装 `nodejs`，pywencai `get_token()` 通过 `subprocess.run(['node', ...])` 计算反爬 token。
+- **BOARD_SYNC_ENABLED 严格解析（PR #77 收口第二轮）**：`config.py::_resolve_board_sync_enabled()` 使用 truthy/falsy 集合严格解析，非法值 fail-fast，同时处理 bool 与 str 类型；优先级「环境变量 > CONFIG_FILE > 默认 False」。
+- **事件 + metadata 持久化（PR #77 收口第二轮）**：`_record_board_sync_outcome()` 在 success/failure/skip 三分支同时写入 `job_run_events` 和 `SchedulerJobRun.metadata_json.board_sync_result`，保证 Redis 缺失时仍可从 job metadata 回退。
+- **Redis + DB 状态回退（PR #77 收口第二轮）**：`/market/boards` 优先读 Redis，Redis None 时回退 `market_stocks_service._get_board_sync_status_from_job()` 查询近期 job metadata；DB 有数据但无任何状态源时 `source="unknown"`（非 None）。
+- **软失败**：同步失败不覆盖旧数据、不阻断 DSA/快照/发布链路；写 `job_run_event` + metadata 记录失败原因。
+- **筛选语义**：industry 关键词 ilike 匹配完整路径任意一级（NFKC + trim + 转义）；concept 精确匹配（PR #77 收口第二轮：concept 也应用 `_normalize_keyword()` NFKC + trim 后再 `==`）；industry + concept AND；market stocks/StrategyRunResults/行情/自选/Excel 复用同一 `board_filter_helper`。
+
 ## 6. 实验隔离
 
 实验可以共享只读基础行情，但必须隔离策略版本、结果标识、运行键、结果表或 schema。实验不得覆盖正式 published results、生产用户数据，也不得与生产 Worker 争抢任务。

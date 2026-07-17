@@ -47,8 +47,8 @@ test('MarketToolbar 默认 placeholder 为"搜索股票代码/名称/拼音首�
 test('MarketToolbar Enter 键触发 onKeywordChange', () => {
   const src = readSource(TOOLBAR_PATH)
   assert.ok(
-    src.includes("e.key === 'Enter'") && src.includes('onKeywordChange(inputValue)'),
-    'MarketToolbar Enter 键必须触发 onKeywordChange(inputValue)',
+    src.includes("e.key === 'Enter'") && src.includes('onKeywordChange(keywordInput)'),
+    'MarketToolbar Enter 键必须触发 onKeywordChange(keywordInput)',
   )
 })
 
@@ -56,7 +56,7 @@ test('MarketToolbar Enter 键触发 onKeywordChange', () => {
 test('MarketToolbar onBlur 触发 onKeywordChange', () => {
   const src = readSource(TOOLBAR_PATH)
   assert.ok(
-    src.includes('onBlur=') && src.includes('onKeywordChange(inputValue)'),
+    src.includes('onBlur=') && src.includes('onKeywordChange(keywordInput)'),
     'MarketToolbar onBlur 必须触发 onKeywordChange',
   )
 })

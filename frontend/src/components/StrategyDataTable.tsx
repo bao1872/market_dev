@@ -106,6 +106,9 @@ export interface DataTableProps<Row> {
   onConceptChange?: (concept: string) => void
   // CHANGE-20260713-006: preset 应用时校验 industry/concept 是否仍在当前板块目录中
   // 提供 boardsValidation 时，applyPresetConfig 会检测失效字段并调用 onPresetStaleField
+  // CHANGE-20260716-007: industry 改为关键词匹配，不再校验是否在目录中；
+  //   保留 industryNames 字段仅为类型兼容，实际不再使用。
+  //   concept 仍校验精确匹配。
   boardsValidation?: {
     available: boolean
     industryNames: Set<string>
@@ -762,14 +765,12 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     // - boardsValidation.available=true 且值不在目录中 → 视为失效字段，跳过应用并通知父组件 toast
     // - boardsValidation.available=false → 保留 preset 值但禁用输入（父组件处理 disabled 状态）
     // - 无 boardsValidation → 直接应用（兼容 ScreenerPage 等不传板块校验的场景）
+    // CHANGE-20260716-007: industry 改为关键词匹配，不再校验是否在目录中（任何关键词都合法）；
+    //   只校验 concept 是否在概念目录中。
     const staleFields: Array<{ field: 'industry' | 'concept'; value: string }> = []
     let effectiveIndustry = config.industry ?? ''
     let effectiveConcept = config.concept ?? ''
     if (boardsValidation && boardsValidation.available) {
-      if (effectiveIndustry && !boardsValidation.industryNames.has(effectiveIndustry)) {
-        staleFields.push({ field: 'industry', value: effectiveIndustry })
-        effectiveIndustry = ''
-      }
       if (effectiveConcept && !boardsValidation.conceptNames.has(effectiveConcept)) {
         staleFields.push({ field: 'concept', value: effectiveConcept })
         effectiveConcept = ''

@@ -18,12 +18,12 @@
 | `instruments` | 股票主数据；**市值字段（CHANGE-20260713-010，migration 063）**：新增 `total_share`（BIGINT NULL，总股本，单位：股）、`float_share`（BIGINT NULL，流通股本，单位：股）、`share_as_of`（DATE NULL，股本数据日期，与 `total_share`/`float_share` 同步写入）；每日 18:00（Asia/Shanghai）由 `instrument_share_capital_sync_service.sync_share_capitals` 通过 `pytdx.get_finance_info` 同步 SH/SZ 股本（BJ 跳过），批次 500，`asyncio.to_thread` 包装阻塞调用；只保留最新态不做历史回填；quote 端点从 DB 读取股本 + 当前价格计算 `total_market_cap`/`float_market_cap`，禁止用户请求时第三方联网；数据缺失返回 `market_cap_degraded_reason="market_cap_data_unavailable"` 不伪造 |
 | `trading_calendar` | 交易日和开闭市 |
 | `bars_daily`, `bars_15min`, `bars_60min`, `bars_minute` | 已完成正式 Bar |
-| `market_boards` | qstock 板块目录（行业/概念），只存最新态；字段：`id`/`external_code`/`name`/`type`/`updated_at`；唯一约束 `uq_market_boards_code_type (external_code, type)`；索引 `ix_market_boards_type`；migration 062 |
+| `market_boards` | wencai 板块目录（行业/概念，pywencai 唯一数据源，CHANGE-20260716-007），只存最新态；字段：`id`/`external_code`/`name`/`type`/`updated_at`；唯一约束 `uq_market_boards_code_type (external_code, type)`；索引 `ix_market_boards_type`；migration 062 |
 | `market_board_memberships` | 板块成分股关系，只存最新态；复合主键 `(board_id, instrument_id)`；字段含 `updated_at`；FK `board_id`→`market_boards.id`（CASCADE）/`instrument_id`→`instruments.id`（CASCADE）；索引 `ix_market_board_memberships_instrument`；migration 062 |
 
 周线/月线由日线聚合，不作为独立业务源。partial Bar 不写入完成 Bar 表。
 
-`market_boards`/`market_board_memberships` 只保存最新关系，不增加历史日期维度，不存板块行情/资金流。`/market/stocks` 的 `industry`/`concept` 筛选通过 `filter_instruments_by_board()` 查询 `market_boards` 表实现；未同步板块数据时筛选返回空列表。
+`market_boards`/`market_board_memberships` 只保存最新关系，不增加历史日期维度，不存板块行情/资金流。`/market/stocks` 的 `industry`/`concept` 筛选通过 `filter_instruments_by_board()` 查询 `market_boards` 表实现（**精确值匹配**，不支持模糊匹配）；未同步板块数据时筛选返回空列表。板块数据由 `after_close_orchestrator` 的 `syncing_boards` 步骤通过 pywencai 同步（软失败：失败时保留上一成功版本，`/market/boards` 返回 `stale=true`）；同步状态写入 Redis key `board_sync:status`（TTL 7 天）。
 
 ## 3. 策略与发布
 

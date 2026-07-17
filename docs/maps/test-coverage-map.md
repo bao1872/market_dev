@@ -172,18 +172,22 @@
 | `ResearchFeatureMatrixRun` 16 列结构 + `run_key` 唯一约束 + month/status 索引；`ResearchFeatureMatrixRow` 39 列（5 metadata + 33 feature + 1 created_at）+ `(instrument_id, trade_date)` 唯一约束 + 3 btree 索引 | `test_research_feature_matrix_model.py`（model 自测入口，无 DB） |
 | `compute_all_features(bars)` 返回 DataFrame 含 33 个 feature 列；per-bar 计算 vs single-snapshot 区分；causal rolling/DSA 双轨/confirmed_delay swing/label 字段；空输入不抛异常 | `test_feature_computer.py`（~23 个用例） |
 
-## 3.9 qstock 板块同步（board sync）
+## 3.9 wencai 板块同步（pywencai 唯一数据源，CHANGE-20260716-007 + PR #77 收口）
 
 | 规则 | 测试 |
 |---|---|
-| **完整性校验（V1.1 门禁）**：空板块目录拒绝 / 空成分关系拒绝 / 板块数不足拒绝（<100）/ 成分数不足拒绝（<3000）/ 异常降幅拒绝（>20%）/ 正常降幅通过（<20%）/ 首次同步不做降幅检查（prev=0） | `test_board_sync.py::TestStagingValidation`（7 个用例） |
-| **原子切换 + 事务回滚**：成功同步后数据写入 + 计数一致；校验失败时保持旧数据不删除；异常时不修改现有数据 | `test_board_sync.py::TestAtomicSwap`（3 个用例，async DB） |
-| **Migration 循环**：062 migration `upgrade → downgrade → upgrade` 循环不报错；表 `market_boards`/`market_board_memberships` 存在 | `test_board_sync.py::TestMigrationCycle`（1 个用例） |
-| **board_sync 注册在 bars_scheduler**：`run_bars_scheduler_worker` 内的 `AsyncIOScheduler` 注册了 `board_sync_daily` job（17:00 CronTrigger，max_instances=1）；board_sync 与 bars_refresh 共用同一 scheduler | `test_worker_idempotency.py::test_board_sync_registered_in_bars_scheduler` |
-| **board_sync 不是独立 WORKER_TYPE**：`board_sync_scheduler` 不在 WORKER_TYPE dispatch 列表中；无 `run_board_sync_scheduler_worker` 函数；`worker-board-sync` Docker 服务已移除 | `test_worker_idempotency.py::test_board_sync_not_separate_worker_type` |
-| **QStockFetcher adapter**：HTTP 拉取/重试/超时/解析/异常隔离/空响应/缓存键/provider 不可用降级 | `test_qstock_fetcher.py`（47 个用例） |
-| **BOARD_SYNC_ENABLED 开关**：`false` 时 `scheduled_board_sync` 跳过执行记录 `status=skipped` + `reason_code=board_provider_unavailable`，不发 THS 请求；`true` 时正常执行 | `test_board_sync.py`（现有用例） |
-| **/market/boards API**：`available`/`reason_code` 字段；无数据时 `available=false` + `reason_code=board_provider_unavailable`；有数据时 `available=true` | `test_market_stocks.py`（现有用例） |
+| **WencaiBoardProvider adapter**：pywencai 查询 `同花顺概念，行业分类` / `asyncio.to_thread` 包装同步调用 / Referer 头 / 3 次重试 / 超时 / 解析 / 异常隔离 / 空响应 / cookie 失效 / provider 不可用降级 | `test_wencai_board_provider.py`（53 个用例） |
+| **BoardSnapshot 完整性门禁（绝对门禁）**：空板块目录拒绝 / 空成分关系拒绝 / 原始记录 <5000 拒绝 / 代码唯一性 <99.9% 拒绝 / 行业板块 <200 拒绝 / 概念板块 <300 拒绝 / 关系数 <60000 拒绝 / 解析率 <95% 拒绝 / 全部门禁通过 | `test_board_sync.py`（重写，17 个用例覆盖 BoardSnapshot + 新门禁阈值 + source=wencai） |
+| **BoardSnapshot 完整性门禁（相对门禁）**：异常降幅 >20% 拒绝 / 正常降幅 ≤20% 通过 / 首次同步不做降幅检查（prev=0） | `test_board_sync.py`（重写，17 个用例） |
+| **原子切换 + 事务回滚**：成功同步后数据写入 + 计数一致；校验失败时保持旧数据不删除（`stale=true`）；异常时不修改现有数据 | `test_board_sync.py`（重写，17 个用例，async DB） |
+| **Migration 循环**：062 migration `upgrade → downgrade → upgrade` 循环不报错；表 `market_boards`/`market_board_memberships` 存在 | `test_board_sync.py`（重写，17 个用例） |
+| **source=wencai**（PR #77）：`sync_boards()` 成功返回 dict 显式带 `source: "wencai"`，防止手工 `record_sync_status(result)` 丢失 source | `test_board_sync.py`（17 个用例） |
+| **after_close_orchestrator `syncing_boards` 步骤**：软失败不阻断 DSA/snapshot/publish / 非交易日跳过 / `mode=dsa_only` 跳过 / `BOARD_SYNC_ENABLED=false` 跳过（`reason_code=board_sync_disabled`）/ 成功后 `last_completed_step` 推进 / 失败后仍推进（视为已尝试）/ `degraded_reasons` 记录失败原因 | `test_after_close_board_sync.py`（10 个用例） |
+| **BOARD_SYNC_ENABLED 开关**：`false` 时 `syncing_boards` 步骤跳过执行记录 `status=skipped` + `reason_code=board_sync_disabled`，不发任何 pywencai 请求；`true` 时正常执行 | `test_after_close_board_sync.py`（10 个用例） |
+| **BOARD_SYNC_ENABLED 环境变量解析**（PR #77）：`config.py` `_resolve_board_sync_enabled()` 优先级「环境变量 > CONFIG_FILE > 默认 False」；接受 `1`/`true`/`yes`/`on`（大小写不敏感）；空值回退 CONFIG_FILE | `test_board_sync_enabled_config.py`（12 个用例，PR #77 新增） |
+| **行业关键词 ilike 筛选**（PR #77）：`board_filter_helper.build_board_filter_conditions` industry 改 `MarketBoard.name.ilike('%keyword%', escape='\\')`，匹配完整路径任意一级；`_normalize_keyword` NFKC + trim；`_escape_ilike_pattern` 转义 `\`/`%`/`_`；一级/二级/三级/局部关键词匹配；空值不生成条件；industry+concept AND；concept 精确匹配 | `test_board_filter_helper.py`（23 个用例，PR #77 新增） |
+| **/market/boards API**：`available`/`reason_code`/`source`/`stale`/`last_attempt_status` 字段；无数据时 `available=false` + `reason_code=board_provider_unavailable`；有数据时 `available=true`；存在旧数据但最新同步失败时 `stale=true` | `test_market_stocks.py`（现有用例 + 新字段断言） |
+| **前端 wencaiBoardSyncContract**（PR #77 重写，28 个用例）：`stale=true` 时展示"沿用上次板块数据"提示 / `source` 字段渲染 / `last_attempt_status` 字段渲染 / `boards.available=false` 时输入禁用 / 行业值 `-` 渲染为 `/`（API 值不变） / **BoardFilterCombobox**：`mode="industry"` 允许任意关键词 / `mode="concept"` 精确匹配 / 本地过滤完整路径最多 12 条建议 / ArrowUp/Down/Enter/Escape 键盘导航 / 点击外部关闭 / 清除按钮 / aria-combobox/listbox/option / 150ms blur 延迟 / 高亮命中 / 不逐字符请求后端 | `frontend/src/features/market-workspace/__tests__/wencaiBoardSyncContract.test.ts`（28 个用例） |
 
 ## 4. 飞书与通知
 
@@ -268,10 +272,14 @@
 | 范围 | 数量 | 说明 |
 |---|---|---|
 | 后端 pytest | 225 tests passing | 全量 backend 测试通过基线 |
-| `test_qstock_fetcher.py` | 47 tests | QStockFetcher adapter HTTP/重试/超时/解析/异常 |
+| `test_wencai_board_provider.py` | 53 tests | WencaiBoardProvider adapter pywencai 查询/重试/超时/解析/异常（CHANGE-20260716-007） |
 | `test_bar_repository_get_recent_bars.py` | 8 tests | BarRepository.get_recent_bars 边界/隔离/排序 |
-| `test_board_sync.py` | 现有用例 | 完整性校验 + 原子切换 + Migration 循环 |
-| `test_market_stocks.py` | 现有用例 | /market/stocks + /market/boards available/reason_code |
+| `test_board_sync.py` | 17 tests（重写） | BoardSnapshot + 绝对门禁 + 相对门禁 + 原子切换 + Migration 循环 + source=wencai（CHANGE-20260716-007 + PR #77） |
+| `test_after_close_board_sync.py` | 10 tests | `syncing_boards` 步骤软失败/非交易日跳过/dsa_only 跳过/BOARD_SYNC_ENABLED 开关（CHANGE-20260716-007） |
+| `test_board_filter_helper.py` | 23 tests（PR #77 新增） | industry ilike 关键词匹配/转义 `\`/`%`/`_`/NFKC/AND/concept 精确（CHANGE-20260716-007 PR #77） |
+| `test_board_sync_enabled_config.py` | 12 tests（PR #77 新增） | BOARD_SYNC_ENABLED 环境变量解析 1/true/yes/on/TRUE/false/0/no/off/empty/precedence/default（CHANGE-20260716-007 PR #77） |
+| `test_market_stocks.py` | 现有用例 + 新字段断言 | /market/stocks + /market/boards available/reason_code/source/stale/last_attempt_status（CHANGE-20260716-007） |
+| `wencaiBoardSyncContract.test.ts` | 28 tests（PR #77 重写） | 前端 wencai 板块同步契约 + BoardFilterCombobox：stale/source/last_attempt_status/禁用输入/BoardFilterCombobox mode/keyboard/12-item/clear/blur/aria/highlight（CHANGE-20260716-007 + PR #77） |
 | `test_stock_state_and_events.py` | 现有用例 | 个股状态与事件 |
 | `test_after_close_orchestrator.py` | 现有用例 | 盘后编排状态机 + feature_snapshot 步骤 |
 | `test_excel_export_api.py` | 21 tests | Excel 导出 API 集成（CHANGE-20260713-010） |
