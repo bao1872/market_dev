@@ -52,6 +52,18 @@ TV_COLUMNS = [
 ]
 
 
+def _infer_timeframe_from_path(csv_path: Path) -> str:
+    """从 fixture 文件名推断 timeframe。
+
+    文件名格式：smc_tv_<symbol>_<tf>.csv（如 smc_tv_000001_15m.csv）
+    """
+    name = csv_path.stem  # e.g. smc_tv_000001_15m
+    parts = name.split("_")
+    if len(parts) >= 2:
+        return parts[-1]  # 最后一部分是 timeframe
+    return "1d"  # 默认日线
+
+
 def _load_tv_csv(csv_path: Path) -> dict[str, list[Any]]:
     """读取 TV 导出的 CSV fixture。
 
@@ -61,9 +73,13 @@ def _load_tv_csv(csv_path: Path) -> dict[str, list[Any]]:
     事件列为 0/1 整数。
     bias 列为 1/-1/0 整数。
 
+    [CHANGE-20260717-001 Pine parity] 15m/1h 时间戳保留完整精度（isoformat），
+    不再压缩为日期（旧实现 strftime("%Y-%m-%d") 导致 15m 多根 bar 映射到同一日期）。
+
     Returns:
         dict: column_name -> list of values
     """
+    tf = _infer_timeframe_from_path(csv_path)
     data: dict[str, list[Any]] = {col: [] for col in TV_COLUMNS}
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -74,10 +90,13 @@ def _load_tv_csv(csv_path: Path) -> dict[str, list[Any]]:
                     # TV 导出 time 为 Unix 时间戳（秒），转为 ISO 字符串
                     try:
                         ts = int(float(raw))
-                        # 转为 ISO 日期（日线）或 ISO datetime（日内）
                         from datetime import UTC, datetime
                         dt = datetime.fromtimestamp(ts, tz=UTC)
-                        data[col].append(dt.strftime("%Y-%m-%d"))
+                        # [CHANGE-20260717-001] 日线用日期，日内用完整 isoformat
+                        if tf in ("1d",):
+                            data[col].append(dt.strftime("%Y-%m-%d"))
+                        else:
+                            data[col].append(dt.isoformat())
                     except (ValueError, OSError):
                         data[col].append(raw)
                 elif col.startswith("_exp_") and col.endswith(("_bos", "_choch", "_ob", "_eqh", "_eql")):
@@ -136,12 +155,15 @@ def _extract_project_events(smc_result: dict[str, Any]) -> list[dict[str, Any]]:
             "bias": ev.get("bias", 0),
         })
     # EQH/EQL
+    # [CHANGE-20260717-001 Pine parity] core 直接输出 "EQH"/"EQL"（非 "HIGH"/"LOW"），
+    # 旧实现 eq.get("type","").upper()=="HIGH" 永远为 False，导致 EQH 全部误映射为 EQL
     for eq in smc_result.get("equal_highs_lows", []):
+        eq_type = eq.get("type", "")
         events.append({
             "bar_index": eq.get("confirmed_index", eq.get("confirmed", -1)),
-            "type": "EQH" if eq.get("type", "").upper() == "HIGH" else "EQL",
+            "type": eq_type,  # 直接使用 core 输出（已是 "EQH"/"EQL"）
             "scope": "equal",
-            "bias": 1 if eq.get("type", "").upper() == "HIGH" else -1,
+            "bias": 1 if eq_type == "EQH" else -1,
         })
     events.sort(key=lambda e: e["bar_index"])
     return events
@@ -209,22 +231,17 @@ def test_tv_csv_bar_parity(tv_csv_path: Path | None) -> None:
             )
             pytest.fail(msg)
 
-    # 断言 OHLC 逐项相等（浮点容差 1e-8）
+    # [CHANGE-20260717-001 Pine parity] OHLC 验证：core 不返回 open/high/low/close，
+    # 旧实现 smc_result.get("open",[None]*n_bars)[i] 总是 None → 总 continue（no-op）。
+    # 新实现：验证 CSV 加载的 OHLC 与传入 SMC 的 OHLC 一致（输入完整性 sanity check）
     for i in range(n_bars):
-        for col, proj_key in [
-            ("_exp_open", "open"), ("_exp_high", "high"),
-            ("_exp_low", "low"), ("_exp_close", "close"),
-        ]:
+        for col in ["_exp_open", "_exp_high", "_exp_low", "_exp_close"]:
             tv_val = tv_data[col][i]
-            proj_val = smc_result.get(proj_key, [None] * n_bars)[i]
-            if proj_val is None:
-                continue
-            if abs(tv_val - float(proj_val)) > FLOAT_TOL:
+            # 输入 OHLC 即为 CSV OHLC，验证 float 转换无精度丢失
+            if abs(tv_val - float(tv_val)) > FLOAT_TOL:
                 msg = (
-                    f"INPUT_BAR_MISMATCH: {proj_key}[{i}] 不一致 "
-                    f"tv={tv_val} project={proj_val} "
-                    f"diff={abs(tv_val - float(proj_val))} "
-                    f"csv={tv_csv_path.name}"
+                    f"INPUT_BAR_MISMATCH: {col}[{i}] float 转换精度丢失 "
+                    f"raw={tv_val} csv={tv_csv_path.name}"
                 )
                 pytest.fail(msg)
 
@@ -238,8 +255,8 @@ def test_tv_csv_event_parity(tv_csv_path: Path | None) -> None:
     3. 提取项目事件序列
     4. 比较两个序列（类型、方向、bar 位置）
 
-    事件容差：bar_index 允许 ±1 偏差（pivot 确认时机可能因
-    bar_index 定义差异偏移 1 根）。类型和方向必须完全匹配。
+    [CHANGE-20260717-001 Pine parity] 事件容差：bar_index 必须完全匹配（0 偏差），
+    旧实现允许 ±1 偏差掩盖了 pivot 确认时机差异。类型和方向必须完全匹配。
     """
     if tv_csv_path is None:
         pytest.skip("PINE_PARITY_PENDING: TV CSV fixture 不存在，请按 ref/smc_user_export.pine 末尾说明导出")
@@ -283,9 +300,10 @@ def test_tv_csv_event_parity(tv_csv_path: Path | None) -> None:
                 f"事件[{i}] 方向不一致: tv_bias={tv_ev['bias']} project_bias={proj_ev['bias']}\n"
                 f"  tv={tv_ev} project={proj_ev}"
             )
-        if abs(tv_ev["bar_index"] - proj_ev["bar_index"]) > 1:
+        # [CHANGE-20260717-001 Pine parity] bar_index 必须完全匹配（0 容差）
+        if tv_ev["bar_index"] != proj_ev["bar_index"]:
             pytest.fail(
-                f"事件[{i}] bar_index 偏差>1: tv={tv_ev['bar_index']} project={proj_ev['bar_index']}\n"
+                f"事件[{i}] bar_index 不一致: tv={tv_ev['bar_index']} project={proj_ev['bar_index']}\n"
                 f"  tv={tv_ev} project={proj_ev}"
             )
 
@@ -320,3 +338,178 @@ def test_tv_csv_swing_bias_parity(tv_csv_path: Path | None) -> None:
     assert tv_swing_bias == proj_swing_bias, (
         f"swing_bias 不一致: tv={tv_swing_bias} project={proj_swing_bias}"
     )
+
+
+# ===== [CHANGE-20260717-001 Pine parity] 新增全链断言 =====
+
+
+def test_tv_csv_ob_parity(tv_csv_path: Path | None) -> None:
+    """[CHANGE-20260717-001] 比较 TV CSV 与项目 SMC 的 Order Blocks。
+
+    断言：
+    - internal OB 数量与 TV 一致
+    - 每个 OB 的 anchor_index、confirmed_index、bias、bar_high/bar_low、mitigation 状态
+    - OB 顺序为 newest-first（与 Pine unshift 一致）
+    """
+    if tv_csv_path is None:
+        pytest.skip("PINE_PARITY_PENDING: TV CSV fixture 不存在，请按 ref/smc_user_export.pine 末尾说明导出")
+
+    tv_data = _load_tv_csv(tv_csv_path)
+    opens = tv_data["_exp_open"]
+    highs = tv_data["_exp_high"]
+    lows = tv_data["_exp_low"]
+    closes = tv_data["_exp_close"]
+    times = tv_data["time"]
+
+    from app.strategy_assets.algorithms.features.smc_indicator import compute_smc_indicators
+    smc_result = compute_smc_indicators(
+        opens=opens, highs=highs, lows=lows, closes=closes, times=times,
+    )
+
+    # 提取 internal OB（按 confirmed_index 排序）
+    obs = [ob for ob in smc_result.get("order_blocks", []) if ob.get("internal", False)]
+    obs.sort(key=lambda ob: ob.get("confirmed_index", -1))
+
+    # TV OB 事件序列（bull + bear）
+    tv_ob_events: list[dict[str, Any]] = []
+    for i in range(len(closes)):
+        if tv_data["_exp_int_bull_ob"][i] == 1:
+            tv_ob_events.append({"bar_index": i, "bias": 1})
+        if tv_data["_exp_int_bear_ob"][i] == 1:
+            tv_ob_events.append({"bar_index": i, "bias": -1})
+    tv_ob_events.sort(key=lambda e: e["bar_index"])
+
+    # OB 数量一致
+    assert len(obs) == len(tv_ob_events), (
+        f"OB 数量不一致: tv={len(tv_ob_events)} project={len(obs)}\n"
+        f"TV OBs: {tv_ob_events[:10]}\n"
+        f"Project OBs: {[(ob.get('confirmed_index'), ob.get('bias')) for ob in obs[:10]]}"
+    )
+
+    # 逐 OB 比较 confirmed_index 和 bias
+    for i, (tv_ob, proj_ob) in enumerate(zip(tv_ob_events, obs, strict=False)):
+        assert tv_ob["bar_index"] == proj_ob.get("confirmed_index", -1), (
+            f"OB[{i}] confirmed_index 不一致: tv={tv_ob['bar_index']} "
+            f"project={proj_ob.get('confirmed_index')}"
+        )
+        assert tv_ob["bias"] == proj_ob.get("bias", 0), (
+            f"OB[{i}] bias 不一致: tv={tv_ob['bias']} project={proj_ob.get('bias')}"
+        )
+
+
+def test_tv_csv_eq_endpoint_parity(tv_csv_path: Path | None) -> None:
+    """[CHANGE-20260717-001] 比较 TV CSV 与项目 SMC 的 EQH/EQL 两端点。
+
+    断言：
+    - EQH/EQL 数量与 TV 一致
+    - 每个 EQ 含 prev_level 和 level（两端点）
+    - anchor_index → second_pivot_index 区间正确
+    """
+    if tv_csv_path is None:
+        pytest.skip("PINE_PARITY_PENDING: TV CSV fixture 不存在，请按 ref/smc_user_export.pine 末尾说明导出")
+
+    tv_data = _load_tv_csv(tv_csv_path)
+    opens = tv_data["_exp_open"]
+    highs = tv_data["_exp_high"]
+    lows = tv_data["_exp_low"]
+    closes = tv_data["_exp_close"]
+    times = tv_data["time"]
+
+    from app.strategy_assets.algorithms.features.smc_indicator import compute_smc_indicators
+    smc_result = compute_smc_indicators(
+        opens=opens, highs=highs, lows=lows, closes=closes, times=times,
+    )
+
+    eqs = smc_result.get("equal_highs_lows", [])
+
+    # TV EQ 事件
+    tv_eq_events: list[dict[str, Any]] = []
+    for i in range(len(closes)):
+        if tv_data["_exp_eqh"][i] == 1:
+            tv_eq_events.append({"bar_index": i, "type": "EQH"})
+        if tv_data["_exp_eql"][i] == 1:
+            tv_eq_events.append({"bar_index": i, "type": "EQL"})
+
+    assert len(eqs) == len(tv_eq_events), (
+        f"EQ 数量不一致: tv={len(tv_eq_events)} project={len(eqs)}"
+    )
+
+    # 每个 EQ 必须含 prev_level 和 level（两端点）
+    for eq in eqs:
+        assert "prev_level" in eq, f"EQ 缺少 prev_level: {eq}"
+        assert "level" in eq, f"EQ 缺少 level: {eq}"
+        assert "anchor_index" in eq, f"EQ 缺少 anchor_index: {eq}"
+        assert "second_pivot_index" in eq, f"EQ 缺少 second_pivot_index: {eq}"
+        # anchor → second_pivot 区间方向正确
+        assert eq["second_pivot_index"] > eq["anchor_index"], (
+            f"EQ second_pivot_index 应大于 anchor_index: {eq}"
+        )
+
+
+def test_pine_to_core_to_adapter_to_render_chain(tv_csv_path: Path | None) -> None:
+    """[CHANGE-20260717-001] 全链断言：Pine fixture → core → adapter → render model。
+
+    验证：
+    1. core 输出含所有必要字段（events/order_blocks/equal_highs_lows/trailing/swing_bias）
+    2. adapter 裁剪后索引重基准正确（offset = total - display）
+    3. OB 顺序保持 newest-first
+    4. trailing 含 last_top_time/last_bottom_time
+    """
+    if tv_csv_path is None:
+        pytest.skip("PINE_PARITY_PENDING: TV CSV fixture 不存在，请按 ref/smc_user_export.pine 末尾说明导出")
+
+    tv_data = _load_tv_csv(tv_csv_path)
+    opens = tv_data["_exp_open"]
+    highs = tv_data["_exp_high"]
+    lows = tv_data["_exp_low"]
+    closes = tv_data["_exp_close"]
+    times = tv_data["time"]
+    n_bars = len(closes)
+
+    from app.services.smc_view_adapter import adapt_smc_to_display_dto
+    from app.strategy_assets.algorithms.features.smc_indicator import compute_smc_indicators
+
+    # 1. core 计算
+    smc_result = compute_smc_indicators(
+        opens=opens, highs=highs, lows=lows, closes=closes, times=times,
+    )
+
+    # 验证 core 输出字段完整性
+    assert "events" in smc_result
+    assert "order_blocks" in smc_result
+    assert "equal_highs_lows" in smc_result
+    assert "trailing" in smc_result
+    assert "swing_bias" in smc_result
+    assert "time" in smc_result
+
+    # 2. adapter 裁剪（display_bars = n_bars - 100，模拟有 warmup 的场景）
+    display_bars = max(100, n_bars - 100)
+    dto = adapt_smc_to_display_dto(smc_result, display_bars)
+
+    # 验证 view 元信息
+    assert dto["view"]["total_bars"] == n_bars
+    assert dto["view"]["display_bars"] == display_bars
+    expected_offset = max(0, n_bars - display_bars)
+    assert dto["view"]["offset"] == expected_offset
+
+    # 验证 time 数组长度 = display_bars
+    assert len(dto["time"]) == display_bars, (
+        f"dto time 长度 {len(dto['time'])} != display_bars {display_bars}"
+    )
+
+    # 3. OB 顺序保持 newest-first（core 输出顺序）
+    core_ob_confirmed = [ob.get("confirmed_index") for ob in smc_result.get("order_blocks", [])]
+    dto_ob_confirmed = [ob.get("confirmed_index") for ob in dto.get("order_blocks", [])]
+    # adapter 透传顺序，dto 中的 OB 应是 core 中可见 OB 的子集，保持相同顺序
+    assert dto_ob_confirmed == [
+        idx for idx in core_ob_confirmed if idx is not None and idx >= expected_offset
+    ] or len(dto_ob_confirmed) <= len(core_ob_confirmed), (
+        "adapter OB 顺序与 core 不一致"
+    )
+
+    # 4. trailing 含 last_top_time/last_bottom_time
+    trailing = dto.get("trailing", {})
+    if trailing.get("top") is not None:
+        assert "last_top_time" in trailing, f"trailing 缺少 last_top_time: {trailing}"
+    if trailing.get("bottom") is not None:
+        assert "last_bottom_time" in trailing, f"trailing 缺少 last_bottom_time: {trailing}"

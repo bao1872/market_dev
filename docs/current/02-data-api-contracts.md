@@ -201,7 +201,7 @@ capture worker 浏览器上下文使用 `viewport=1920x1200` + `device_scale_fac
 
 ## 9.5 SMC（Smart Money Concepts）指标契约
 
-`/api/v1/instruments/{instrument_id}/indicators` 支持 `include_smc` 查询参数按需返回 `smc` 全局技术指标。SMC 由后端纯函数 `app.strategy_assets.algorithms.features.smc_pine_core.compute_smc_pine`（Pine 语义核心，仅依赖 Python 标准库）实现，`smc_indicator.py` 为薄包装委托层（`_SMCState = _SMCPineState` 别名）；前端只消费后端 DTO，不重新计算。SMC 实现用户 Pine 代码（`ref/smc_ref.txt`，SHA256 0bd3d2ad，用户原创并授权盘迹使用）的语义原语（`ta.rma` Wilder / `ta.cum(ta.tr)/bar_index` / `ta.atr(200)`）。
+`/api/v1/instruments/{instrument_id}/indicators` 支持 `include_smc` 查询参数按需返回 `smc` 全局技术指标。SMC 由后端纯函数 `app.strategy_assets.algorithms.features.smc_pine_core.compute_smc_pine`（Pine 语义核心，仅依赖 Python 标准库）实现，`smc_indicator.py` 为薄包装委托层（`_SMCState = _SMCPineState` 别名）；前端只消费后端 DTO，不重新计算。SMC 实现用户 Pine 代码（`ref/smc_user_source.pine`，SHA256 0bd3d2ad，843 行，用户原创并授权盘迹使用；导出能力见 `ref/smc_user_export.pine`）的语义原语（`ta.rma` Wilder / `ta.cum(ta.tr)/bar_index` / `ta.atr(200)`）。
 
 ### 9.5.1 查询参数
 
@@ -214,15 +214,26 @@ capture worker 浏览器上下文使用 `viewport=1920x1200` + `device_scale_fac
 - `include_smc=true` 时 cache key 追加 `:smc` 后缀，与默认路径（`include_smc=false`）完全隔离；
 - 默认路径缓存不包含 SMC 字段，不因 SMC 上线影响常规请求性能；
 - SMC 计算路径变更同样需要 bump `ALGORITHM_VERSION` 使旧缓存失效；
-- 当前 `ALGORITHM_VERSION = "v9"`（CHANGE-20260716-001：crossover/crossunder level_curr/level_prev 快照修正，旧 v8 缓存强制失效；CHANGE-20260715-002：SMC 从 SMA 基线升级为 Pine parity v7；CHANGE-20260715-006：RMA NA 语义 + off-by-one + EQH/EQL 三时间点 v8）；
+- 当前 `ALGORITHM_VERSION = "v10"`（**CHANGE-20260717-001**：SMC Pine parity 最终收口——warmup/历史分离、execution gate、trailing NaN、OB 顺序 newest-first，旧 v9 缓存强制失效；CHANGE-20260716-001：crossover/crossunder level_curr/level_prev 快照修正 v9；CHANGE-20260715-002：SMC 从 SMA 基线升级为 Pine parity v7；CHANGE-20260715-006：RMA NA 语义 + off-by-one + EQH/EQL 三时间点 v8）；
 - 禁止 Redis FLUSHDB/FLUSHALL，只允许精确 DEL 测试键。
 
 ### 9.5.3 输出字段
 
 `data.smc`（仅 `include_smc=true` 时存在）包含市场结构关键点位序列，**time 数组保持完整长度对齐 anchor/confirmed 索引**（不调用 `_truncate_lists` 截断 SMC 输出）；前端 `smcToDisplay` 通过时间匹配自动过滤展示区外事件。**FVG（Fair Value Gap）完全排除**——不计算、不返回、不缓存、不渲染，不暴露 FVG 开关；FVG 排除不改变其他逻辑的索引、执行顺序和右侧延伸。
 
+**[CHANGE-20260717-001] SMC 计算历史与展示窗口分离**：SMC 计算完整历史，view adapter 裁成展示窗口 DTO（`adapt_smc_to_display_dto`）：
+- **1d**: `full_daily_bars`（DB 全量日线，≥500 warmup）
+- **15m**: 独立查询 `bars + _SMC_WARMUP_BARS`（5000）根作为 `smc_bars`，计算后 adapter 裁成 `bars`（4000）展示；前复权与主 15m 路径一致；查询不足回退 `macd_bars`
+- **1h/1w**: `macd_bars`（可获得完整历史）
+- **1mo**: 若 `len(macd_bars) < _SMC_MONTHLY_MIN_BARS(200)` 则扩展回看到 `_SMC_MONTHLY_LOOKBACK_DAYS(7000)` 天（≈233 月），确保 ATR200 可初始化；查询为空回退 `macd_bars`
+
+**[CHANGE-20260717-001] DTO 字段语义**：
+- `order_blocks`：**newest-first** 顺序（core `insert(0, ...)` 复刻 Pine `array.unshift`）；前端 `slice(0,5)` 取最新 5 个 active internal OB
+- `equal_highs_lows`：每个含 `type`（直接为 `"EQH"`/`"EQL"`）/`anchor_index`/`confirmed_index`/`level`/`prev_level`（前端两端点线用 `prev_level`→`level`）
+- `trailing`：含 `top`/`bottom`/`last_top_time`/`last_bottom_time`（前端 Strong/Weak 线起点用 `last_top_time`/`last_bottom_time`；`top`/`bottom` 在首个 swing pivot 前为 NaN，严格复刻 Pine `math.max(high, na)=na`）
+
 **SMC source 诊断字段（CHANGE-20260716-001）**：`include_smc=true` 时响应顶层额外返回以下字段，用于验证 SMC 实际计算的输入数据源：
-- `smc_source_bar_hash`：基于 SMC 实际完整输入（`smc_bars`）计算的 hash；1d timeframe 使用 `full_daily_bars`（DB 全量日线），其他周期使用 `macd_bars`；**不得复用截断后的 `source_bar_hash`**（后者基于截断后的 250 根 macd_bars）
+- `smc_source_bar_hash`：基于 SMC 实际完整输入（`smc_bars`）计算的 hash；1d timeframe 使用 `full_daily_bars`（DB 全量日线），**[CHANGE-20260717-001]** 15m 使用独立查询的 5000 根、1mo 使用扩展回看的 ≥200 根、其他周期使用 `macd_bars`；**不得复用截断后的 `source_bar_hash`**（后者基于截断后的 250 根 macd_bars）
 - `smc_source_first_time`：SMC 输入首根 bar 时间
 - `smc_source_last_time`：SMC 输入末根 bar 时间
 - `smc_source_bars`：SMC 输入 bar 数量
@@ -817,7 +828,7 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 - cache key 格式：`indicator:{algorithm_version}:{timeframe}:{adj}:{bars}:{symbol}`（SMC 按需启用时追加 `:smc` 后缀，与默认路径隔离，避免 SMC 计算结果污染无 SMC 响应缓存）；
 - 旧版本 cache key 与新版本不匹配，强制重算，避免旧格式 `source_bar_times` 或日线阶梯线 BB 污染渲染；
 - 禁止通过手动 `DEL` 单只股票 key 修复缓存问题（不可扩展，且无法覆盖所有时间周期）；
-- 当前 `ALGORITHM_VERSION = "v9"`（CHANGE-20260716-001：crossover/crossunder level_curr/level_prev 快照修正，旧 v8 缓存强制失效；CHANGE-20260715-006：RMA NA 语义 + off-by-one + EQH/EQL 三时间点 v8；CHANGE-20260715-002：SMC 从 SMA 基线升级为 Pine parity 核心 v7，旧 v6 缓存强制失效；CHANGE-20260715-001：新增 SMC 指标并按需启用，缓存 key 追加 `:smc` 后缀隔离）。
+- 当前 `ALGORITHM_VERSION = "v10"`（CHANGE-20260717-001：SMC Pine parity 最终收口——warmup/历史分离、execution gate、trailing NaN、OB 顺序 newest-first，旧 v9 缓存强制失效；CHANGE-20260716-001：crossover/crossunder level_curr/level_prev 快照修正 v9；CHANGE-20260715-006：RMA NA 语义 + off-by-one + EQH/EQL 三时间点 v8；CHANGE-20260715-002：SMC 从 SMA 基线升级为 Pine parity 核心 v7，旧 v6 缓存强制失效；CHANGE-20260715-001：新增 SMC 指标并按需启用，缓存 key 追加 `:smc` 后缀隔离）。
 
 #### 12.5.3.1 `force_refresh` / `capture` 查询参数（旁路缓存）
 

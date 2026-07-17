@@ -1572,12 +1572,14 @@ function renderIndicatorSmc(
     drawText(ctx, label, midX, y - 3, color, fontSize, 'center')
   }
 
-  // ===== 3. 渲染 EQH/EQL =====
-  // [CHANGE-20260715-007] 线段画到 second_pivot_index（新 pivot 所在 bar）；
-  // confirmed_index 用于因果确认/回放测试（不作为线段终点）
-  // [CHANGE-20260716-001] viewport 区间求交（PROMPT.md §三.2）：
-  //   anchor 在左侧时 x1=plotLeft；second_pivot 在右侧时 x2=plotRight。
-  // EQH/EQL 用蓝色（中性色，因为等高/等低不区分涨跌方向）
+  // ===== 3. 渲染 EQH/EQL（两端点线，非水平线）=====
+  // [CHANGE-20260717-001 Pine parity] Pine L396: 两端点线
+  //   line.new(p_ivot.barTime/currentLevel, time[size]/level)
+  //   - 起点：anchor_index, prev_level（前一 pivot 的 level）
+  //   - 终点：second_pivot_index, level（新 pivot 的 level，可能不水平）
+  //   - EQH: bearish 色 (SMC_BEAR_COLOR 绿) + label_down
+  //   - EQL: bullish 色 (SMC_BULL_COLOR 红) + label_up
+  //   - 标签位于两 pivot 中点（Pine L397: math.round(0.5*(p_ivot.barIndex + bar_index - size))）
   for (const eq of equalHLs) {
     // viewport 区间求交（anchor → second_pivot）
     const range = intersectSmcRangeWithViewport(eq.anchor_index, eq.second_pivot_index, smcVisCtx)
@@ -1585,36 +1587,69 @@ function renderIndicatorSmc(
 
     const x1 = g.l + (range.startIdx + 0.5) * step
     const x2 = g.l + (range.endIdx + 0.5) * step
-    const y = py(eq.level)
+    // 两端点 Y：起点用 prev_level，终点用 level（可能不水平）
+    const y1 = py(eq.prev_level)
+    const y2 = py(eq.level)
 
-    drawLine(ctx, x1, y, x2, y, C.blue2, 1, [2, 2])
-    drawText(ctx, eq.type, x1 + 2, y - 3, C.blue2, '8px sans-serif', 'left')
+    const isEQH = eq.type === 'EQH'
+    // Pine L384/L389: EQH=swingBearishColor, EQL=swingBullishColor
+    const eqColor = isEQH ? SMC_BEAR_COLOR : SMC_BULL_COLOR
+
+    drawLine(ctx, x1, y1, x2, y2, eqColor, 1, [2, 2])
+
+    // 标签位于两 pivot 中点（Pine L397）
+    const midX = (x1 + x2) / 2
+    const midY = (y1 + y2) / 2
+    // EQH: label_down（标签在上方）；EQL: label_up（标签在下方）
+    const labelYOffset = isEQH ? -3 : 9
+    drawText(ctx, eq.type, midX, midY + labelYOffset, eqColor, '8px sans-serif', 'center')
   }
 
   // ===== 4. 渲染 trailing strong/weak high/low =====
   // CHANGE-20260715-007: Strong/Weak 直接读取 DTO swing_bias（state.swing_trend.bias）
   // 禁止从最后一个可见 swing 事件猜测
   // 规则：bias===-1 → 强高（否则弱高）；bias===1 → 强低（否则弱低）
+  // [CHANGE-20260717-001 Pine parity] Pine L721-727:
+  //   线起点 = trailing.lastTopTime/lastBottomTime（非最后可见 bar）
+  //   终点 = last_bar_time + 20*(time-time[1])（向右延伸约 20 bar）
+  //   标签位于终点
+
+  // 辅助：ISO 时间字符串 → display index（通过 normalizeChartTime 匹配）
+  const timeToDisplayIdx = (isoTime: string | null | undefined): number => {
+    if (isoTime == null) return 0  // 缺失时 clamp 到窗口左端
+    const key = normalizeChartTime(isoTime, timeframe)
+    if (key != null) {
+      const idx = klineTimeIndex.get(key)
+      if (idx != null) return idx
+    }
+    return 0  // 找不到时 clamp 到窗口左端
+  }
+
   if (trailing && trailing.top != null) {
-    const lastDisplayIdx = displayTimes.length - 1
-    const x = g.l + (lastDisplayIdx + 0.5) * step
+    // Pine L721: 线起点 = trailing.lastTopTime
+    const startIdx = timeToDisplayIdx(trailing.last_top_time)
+    const x1 = g.l + (startIdx + 0.5) * step
+    // Pine L722: 线终点 = last_bar_time + 20 bar（向右延伸，clamp 到 plotRight）
+    const x2 = g.plotRight
     const y = py(trailing.top)
     // 强高=红色，弱高=绿色（bias=-1 时为强高，否则弱高）
     const isStrong = swingBias === -1
     const labelColor = isStrong ? SMC_BULL_COLOR : SMC_BEAR_COLOR
     const label = `${isStrong ? '强高' : '弱高'} ${fmt(trailing.top)}`
-    drawLine(ctx, x, y, g.plotRight, y, hexToRgba(labelColor, 0.5), 1, [3, 3])
+    drawLine(ctx, x1, y, x2, y, hexToRgba(labelColor, 0.5), 1, [3, 3])
     drawText(ctx, label, g.plotRight - 4, y - 3, labelColor, '8px sans-serif', 'right')
   }
   if (trailing && trailing.bottom != null) {
-    const lastDisplayIdx = displayTimes.length - 1
-    const x = g.l + (lastDisplayIdx + 0.5) * step
+    // Pine L726: 线起点 = trailing.lastBottomTime
+    const startIdx = timeToDisplayIdx(trailing.last_bottom_time)
+    const x1 = g.l + (startIdx + 0.5) * step
+    const x2 = g.plotRight
     const y = py(trailing.bottom)
     // 强低=绿色，弱低=红色（bias=1 时为强低，否则弱低）
     const isStrong = swingBias === 1
     const labelColor = isStrong ? SMC_BEAR_COLOR : SMC_BULL_COLOR
     const label = `${isStrong ? '强低' : '弱低'} ${fmt(trailing.bottom)}`
-    drawLine(ctx, x, y, g.plotRight, y, hexToRgba(labelColor, 0.5), 1, [3, 3])
+    drawLine(ctx, x1, y, x2, y, hexToRgba(labelColor, 0.5), 1, [3, 3])
     drawText(ctx, label, g.plotRight - 4, y + 9, labelColor, '8px sans-serif', 'right')
   }
 }
@@ -2619,6 +2654,14 @@ export function StrategyChart({
         {dsaMismatch && (
           <div className="dsa-source-mismatch-banner" style={{ position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)', padding: '4px 12px', background: 'rgba(255,193,7,0.9)', color: '#333', fontSize: 12, borderRadius: 4, zIndex: 10, whiteSpace: 'nowrap' }}>
             DSA 数据源不一致，已暂停渲染
+          </div>
+        )}
+        {/* [CHANGE-20260717-001 Pine parity] SMC 状态提示
+            SMC 基于"最新已完成K线"计算（Pine 语义），盘中实时合成K线不参与 parity 计算。
+            仅在 SMC 图层开启时显示，避免实时合成K线被误解为实时 SMC parity。 */}
+        {effectiveLayers.smc && (
+          <div className="smc-completed-bar-hint" style={{ position: 'absolute', bottom: 6, right: 60, padding: '2px 8px', background: 'rgba(13,17,24,0.7)', color: C.text, fontSize: 11, borderRadius: 3, zIndex: 8, whiteSpace: 'nowrap', pointerEvents: 'none' }}>
+            SMC 基于最新已完成K线
           </div>
         )}
         {!hasData && <div className="tv-chart-empty">暂无行情数据</div>}

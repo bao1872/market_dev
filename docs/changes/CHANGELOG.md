@@ -2,6 +2,22 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-17
+
+- CHANGE-20260717-001: SMC Pine 逻辑对齐最终收口（warmup/历史分离 + execution gate + trailing NaN + OB 顺序 + EQH/EQL 几何 + Strong/Weak 起点 + golden 测试重做 + 确定性测试 + 导出增强 + ALGORITHM_VERSION v10）
+  - **warmup/历史分离**：`indicator_service.py` 新增 `_SMC_WARMUP_BARS=1000`/`_SMC_MONTHLY_MIN_BARS=200`/`_SMC_MONTHLY_LOOKBACK_DAYS=7000`；15m 独立查询 5000 根（计算）后 adapter 裁成 4000（展示）；1mo 扩展回看 7000 天确保 ≥200 根（ATR200 可初始化）；1d 用完整日线，1h/1w 用 macd_bars 完整历史；删除 "15m≈12000" 失真注释
+  - **execution gate 严格复刻 Pine L784/L787**：`smc_pine_core.py` `DEFAULT_PARAMS` 新增 `show_internals`/`show_structure`/`show_trend` 三参数；`internal_gate = show_internals OR show_internal_order_blocks OR show_trend` 门控 internal structure；`swing_gate = show_structure OR show_swing_order_blocks OR show_high_low_swings` 门控 swing structure
+  - **trailing NaN 严格复刻 Pine**：`update_trailing_extremes` 改为 `if self.trailing.top == self.trailing.top:`（非 NaN）才更新，删除旧 `or` 分支凭空用 high/low 初始化；`math.max(high, na)=na`，trailing 只能由 swing pivot 初始化
+  - **OB 顺序 newest-first**：`store_order_block` 从 `append`（oldest-first）改为 `insert(0, ...)`（newest-first，Pine `array.unshift` 语义）；前端 `slice(0,5)` 取最新 5 个 active internal OB
+  - **EQH/EQL 两端点线几何**：`StrategyChart.tsx` 从单一 `eq.level` 水平线改为两端点 `prev_level`→`level`（Pine L396）；EQH=bearish 绿 `SMC_BEAR_COLOR` + label_down，EQL=bullish 红 `SMC_BULL_COLOR` + label_up；标签位于两 pivot 中点（Pine L397）
+  - **Strong/Weak 线起点**：新增 `timeToDisplayIdx` 辅助（ISO 时间→display index）；线起点从 `lastDisplayIdx`（最后可见 bar）改为 `trailing.last_top_time`/`last_bottom_time`（Pine L721-727）；终点延伸到 `plotRight`（约 20 bar）；颜色按 strong/weak 区分列为有意视觉差异
+  - **adapter 文档清理**：`smc_view_adapter.py` docstring 删除 "12000 根" 失真描述，更新 warmup 分离后的准确描述
+  - **golden 测试修复**：`test_smc_tv_parity.py` EQ 类型直接用 core 输出（不再误映射 EQH→EQL）；日内时间戳用 `isoformat()`（不压缩为日期）；容差从 ±1 改为 0（严格逐 bar）；新增 OB/EQ 端点/全链 3 个测试
+  - **新增确定性测试**：`test_smc_pine_deterministic.py`（427 行，8 测试类：CHoCH 规则/BOS/warmup 一致性/OB 顺序/OB 全链/trailing NaN/execution gate/EQ 几何），不依赖 TV CSV fixture
+  - **导出增强**：`ref/smc_user_export.pine` 追加 8 个隐藏 plot（trailing top/bottom/lastTopTime/lastBottomTime + swing/internal pivot level）；真源 `ref/smc_user_source.pine` 不可变（SHA256 `0bd3d2ad`）
+  - **ALGORITHM_VERSION v9→v10**：`indicator_cache.py` bump 使旧 SMC 缓存强制失效；`test_indicator_cache.py` 断言 v10
+  - **parity 口径**：以已完成 bar 为阻断口径；无真实 TV CSV fixture 时 `PINE_PARITY_PENDING`（代码级修复通过，输出级 parity pending），不伪造 fixture，不声称"完全对齐"
+
 ## 2026-07-16
 
 - CHANGE-20260716-007: 板块同步迁移 pywencai 唯一数据源（BoardSnapshot 原子切换 + 软失败编排 + 陈旧数据契约 + 行业关键词 ilike 筛选 + BoardFilterCombobox 自定义下拉 + Dockerfile Node.js + BOARD_SYNC_ENABLED 环境变量注入）

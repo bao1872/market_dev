@@ -36,6 +36,9 @@
 | `showSwingsInput` | `false` | `show_swings: False` | Swing Points 标签关闭 |
 | `swingsLengthInput` | `50` | `swings_length: 50` | Swing pivot 长度 |
 | `showHighLowSwingsInput` | `true` | `show_high_low_swings: True` | Strong/Weak High/Low |
+| `showInternalsInput` | `true` | `show_internals: True` | **[CHANGE-20260717-001]** Internal structure gate（Pine L76） |
+| `showStructureInput` | `true` | `show_structure: True` | **[CHANGE-20260717-001]** Swing structure gate（Pine L84） |
+| `showTrendInput` | `false` | `show_trend: True` | **[CHANGE-20260717-001]** Trend gate（Pine L74；Python 默认 True 以保持 gate 开启，Color Candles 仍由前端独立控制） |
 | `showInternalOrderBlocksInput` | `true` | `show_internal_order_blocks: True` | Internal OB |
 | `internalOrderBlocksSizeInput` | `5` | `internal_ob_size: 5` | 显示最近 5 个 |
 | `showSwingOrderBlocksInput` | `false` | `show_swing_order_blocks: False` | Swing OB 关闭 |
@@ -454,23 +457,19 @@ for i in range(self.n):
 
 **修复**：将 `update_trailing_extremes` 移到循环最前面（step 1），与 Pine 一致。详见 CHANGE-20260715-003。
 
-### 5.4 Parity Divergence — `displayStructure(internal)` 条件（待评估）
+### 5.4 Parity Divergence — `displayStructure(internal)` 条件（**CHANGE-20260717-001 已修复**）
 
-**Pine 条件**：`if showInternalsInput or showInternalOrderBlocksInput or showTrendInput`
-**Python 条件**：`if show_internal_order_blocks`
+**Pine 条件**（L784）：`if showInternalsInput or showInternalOrderBlocksInput or showTrendInput`
+**Python 旧条件**：`if show_internal_order_blocks`（仅由 OB 开关门控）
 
-**默认值下行为一致**（showInternalsInput=true, showInternalOrderBlocksInput=true, showTrendInput=false → 两者都触发）。但若用户自定义参数（如关闭 internal OB 但保留 internal structure），Python 会跳过 internal BOS/CHoCH 检测，Pine 不会。
+**修复**（CHANGE-20260717-001）：新增 `show_internals`/`show_trend` 参数（默认 True），Python 条件改为 `if internal_gate:` 其中 `internal_gate = show_internals or show_internal_order_blocks or show_trend`，严格复刻 Pine L784。
 
-**修复**：将 Python 条件改为 `if show_internals or show_internal_order_blocks or show_trend`（需新增 `show_internals`/`show_trend` 参数，默认 true/false）。当前生产默认值下不影响输出，暂列为 Known Gap。
+### 5.5 Parity Divergence — `displayStructure(swing)` 条件（**CHANGE-20260717-001 已修复**）
 
-### 5.5 Parity Divergence — `displayStructure(swing)` 条件（待评估）
+**Pine 条件**（L787）：`if showStructureInput or showSwingOrderBlocksInput or showHighLowSwingsInput`
+**Python 旧条件**：`（始终执行）`（无门控）
 
-**Pine 条件**：`if showStructureInput or showSwingOrderBlocksInput or showHighLowSwingsInput`
-**Python 条件**：`（始终执行）`
-
-**默认值下行为一致**（showStructureInput=true → 两者都触发）。但若用户关闭 swing structure，Python 仍会执行 swing BOS/CHoCH 检测，Pine 不会。
-
-**修复**：将 Python 条件改为 `if show_structure or show_swing_order_blocks or show_high_low_swings`（需新增 `show_structure` 参数，默认 true）。当前生产默认值下不影响输出，暂列为 Known Gap。
+**修复**（CHANGE-20260717-001）：新增 `show_structure` 参数（默认 True），Python 条件改为 `if swing_gate:` 其中 `swing_gate = show_structure or show_swing_order_blocks or show_high_low_swings`，严格复刻 Pine L787。
 
 ---
 
@@ -498,10 +497,10 @@ for i in range(self.n):
 | 输出字段 | 类型 | 来源 | 说明 |
 |---|---|---|---|
 | `events` | `list[dict]` | BOS/CHoCH | 每个事件含 `type`/`anchor_index`/`anchor_time`/`confirmed_index`/`confirmed_time`/`level`/`bias`/`internal` |
-| `order_blocks` | `list[dict]` | OB 列表 | 每个 OB 含 `bias`/`anchor_index`/`anchor_time`/`confirmed_index`/`confirmed_time`/`bar_high`/`bar_low`/`mitigated`/`mitigated_index`/`mitigated_time`/`internal` |
-| `equal_highs_lows` | `list[dict]` | EQH/EQL | 每个含 `type`/`anchor_index`/`anchor_time`/`confirmed_index`/`confirmed_time`/`level`/`prev_level` |
+| `order_blocks` | `list[dict]` | OB 列表 | 每个 OB 含 `bias`/`anchor_index`/`anchor_time`/`confirmed_index`/`confirmed_time`/`bar_high`/`bar_low`/`mitigated`/`mitigated_index`/`mitigated_time`/`internal`；**[CHANGE-20260717-001] 顺序为 newest-first**（`insert(0, ...)`，与 Pine `array.unshift` 一致），前端 `slice(0,5)` 取最新 5 个 active internal OB |
+| `equal_highs_lows` | `list[dict]` | EQH/EQL | 每个含 `type`/`anchor_index`/`anchor_time`/`confirmed_index`/`confirmed_time`/`level`/`prev_level`（**[CHANGE-20260717-001]** `type` 直接为 `"EQH"`/`"EQL"`，前端两端点线用 `prev_level`→`level`） |
 | `pivots` | `list[dict]` | pivot 记录 | 每个含 `type`/`level`/`bar_index`/`bar_time`/`internal` |
-| `trailing` | `dict` | Strong/Weak | `top`/`bottom`/`bar_time`/`bar_index`/`last_top_time`/`last_bottom_time` |
+| `trailing` | `dict` | Strong/Weak | `top`/`bottom`/`bar_time`/`bar_index`/`last_top_time`/`last_bottom_time`（**[CHANGE-20260717-001]** `last_top_time`/`last_bottom_time` 为前端 Strong/Weak 线起点；`top`/`bottom` 在首个 swing pivot 前为 NaN，严格复刻 Pine `math.max(high, na)=na`） |
 | `time` | `list[str]` | 完整时间序列 | 与输入 bars 等长（**不截断**），用于 anchor/confirmed 索引对齐 |
 | `params` | `dict` | DEFAULT_PARAMS | 实际使用的参数快照 |
 | **FVG** | **不存在** | — | **完全排除**，输出中无 `fvg`/`fair_value_gap` 字段 |
@@ -510,20 +509,29 @@ for i in range(self.n):
 
 ---
 
-## 八、warmup 契约
+## 八、warmup 契约（**CHANGE-20260717-001 计算历史与展示窗口分离**）
 
-| 周期 | 输入数据 | warmup 长度 | 说明 |
-|---|---|---|---|
-| 1d | `full_daily_bars`（DB 全量日线） | ≥500 | 在 `daily_bars.tail(daily_count)` 截断前保存 |
-| 15m | `macd_bars` | ≈12000 | 与 MACD/SQZMOM 同源 |
-| 1h | `macd_bars` | ≈3000 | 同上 |
-| 1w | `macd_bars` | ≈714 | 同上 |
-| 1mo | `macd_bars` | ≈166 | 同上 |
+Pine 使用全历史计算 SMC；项目必须分离**计算历史**与**展示窗口**：SMC 计算完整历史，view adapter 裁成展示窗口 DTO。
+
+| 周期 | SMC 计算输入 | 计算根数 | 展示根数 | 说明 |
+|---|---|---|---|---|
+| 1d | `full_daily_bars`（DB 全量日线） | 完整历史 | 4000 | ≥500 warmup；在 `daily_bars.tail(daily_count)` 截断前保存 |
+| 15m | 独立查询 `bars + _SMC_WARMUP_BARS` | 5000 | 4000 | **[CHANGE-20260717-001]** 独立查询 5000 根（4000 展示 + 1000 warmup），计算后 adapter 裁成 4000；前复权与主 15m 路径一致；查询不足回退 `macd_bars` |
+| 1h | `macd_bars` | 完整历史 | 4000 | 可获得完整历史 |
+| 1w | `macd_bars` | 完整历史 | 4000 | 同上 |
+| 1mo | `macd_bars` 或扩展回看 | ≥200 | 4000 | **[CHANGE-20260717-001]** 若 `len(macd_bars) < _SMC_MONTHLY_MIN_BARS(200)` 则扩展回看到 `_SMC_MONTHLY_LOOKBACK_DAYS(7000)` 天（≈233 月），确保 ATR200 可初始化；EQH/EQL 阈值（× ATR200）不再全 NaN |
+
+**常量**（`indicator_service.py` L89-94）：
+- `_SMC_WARMUP_BARS = 1000`（15m 专用 warmup）
+- `_SMC_MONTHLY_MIN_BARS = 200`（1mo 最少 bar 数）
+- `_SMC_MONTHLY_LOOKBACK_DAYS = 7000`（1mo 扩展回看）
 
 **禁止**：
 - 只用当前可见 bars 初始化状态
 - 用展示区可见 bars 初始化 SMC 状态机
 - 调用 `_truncate_lists` 截断 SMC 输出
+- 15m 只计算 4000 根（无 warmup）— 窗口左缘 pivot/BOS/CHoCH 会丢失
+- 1mo 不足 200 根 — ATR200 无法初始化，EQH/EQL 阈值全 NaN
 
 ---
 
@@ -531,7 +539,7 @@ for i in range(self.n):
 
 | 项目 | 值 | 说明 |
 |---|---|---|
-| `indicator_cache.ALGORITHM_VERSION` | `v7` | 从 v6 bump（v6 SMA 缓存强制失效） |
+| `indicator_cache.ALGORITHM_VERSION` | `v10` | **[CHANGE-20260717-001]** 从 v9 bump；SMC warmup/gate/trailing/OB 逻辑变更，旧 v9 缓存强制失效 |
 | `:smc` 后缀 | `include_smc=True` 时缓存键追加 | SMC 与非 SMC 结果独立缓存 |
 | 默认缓存键 | 不带 `:smc` 后缀 | `include_smc=False`（默认）时使用 |
 | Redis 操作 | 仅允许精确 DEL 测试键 | **禁止** `FLUSHDB`/`FLUSHALL` |
@@ -564,6 +572,8 @@ for i in range(self.n):
 | 颜色（空头） | `#22C55E` | `#22C55E` | A 股绿跌 |
 | OB box alpha | active 0.12 | active 0.12 | 半透明 |
 | OB box alpha（mitigated） | 0.05 | 0.05 | 更低透明度 |
+| **EQH/EQL 线** | — | 两端点 `prev_level`→`level` | **[CHANGE-20260717-001]** Pine L396 两端点线（可能不水平）；EQH=`SMC_BEAR_COLOR` 绿 + label_down，EQL=`SMC_BULL_COLOR` 红 + label_up；标签位于两 pivot 中点（Pine L397） |
+| **Strong/Weak 线起点** | — | `trailing.last_top_time`/`last_bottom_time` | **[CHANGE-20260717-001]** Pine L721-727 线起点为 trailing 时间（非最后可见 bar）；新增 `timeToDisplayIdx` 辅助（ISO 时间→display index，缺失/找不到 clamp 到窗口左端）；终点延伸到 `plotRight`（约 20 bar）；颜色按 strong/weak 区分（**有意视觉差异**，Pine 用固定 bearish/bullish 色） |
 
 ### 11.2 Historical 模式
 
@@ -612,17 +622,17 @@ for i in range(self.n):
 
 **FVG 验收方式**：输出级别断言（检查 result keys/events/order_blocks/equal_highs_lows/params/state 不含 FVG），**不是源码字符串扫描**。
 
-### 12.3 Pine Golden Fixture（PENDING）
+### 12.3 Pine Golden Fixture（PENDING — **PINE_PARITY_PENDING**）
 
 | fixture | 状态 | 说明 |
 |---|---|---|
-| Pine golden CSV | **PENDING** | 等待用户从 TradingView 导出事件/OB CSV |
+| Pine golden CSV | **PENDING** | 等待用户从 TradingView 导出事件/OB CSV（使用 `ref/smc_user_export.pine` 的 26 个隐藏 plot） |
 | `backend/tests/fixtures/smc_pine/README.md` | 已创建 | TV 导出步骤、隐藏 plot 代码、CSV 格式规范 |
-| `TestPineGoldenFixture` | skip（无 fixture 时） | 无 fixture 时跳过，不得宣称"完全对齐" |
+| `TestPineGoldenFixture` / `test_smc_tv_parity.py` | skip（无 fixture 时） | 无 fixture 时跳过（`PINE_PARITY_PENDING`），不得宣称"完全对齐" |
 | 美诺华 603538 日线 1000 根 | 待用户提供 | 用于 golden 测试 |
 | 15m 样本 | 待用户提供 | 用于 golden 测试 |
 
-**PINE_GOLDEN_NOT_PROVIDED**：当前无 Pine 导出的 golden CSV，无法进行输出级完全一致断言。Python 单元测试已覆盖 Pine 语义原语（8 项），但不得声称"已完全对齐 Pine"。
+**PINE_PARITY_PENDING**：当前无 Pine 导出的 golden CSV，无法进行输出级完全一致断言。**[CHANGE-20260717-001]** golden 测试本身已修复（EQH 类型直接用 core 输出不误映射、日内时间戳用 `isoformat()` 不压缩、容差 0 严格逐 bar、新增 OB/EQ 端点/全链 3 个测试），但无真实 TV fixture 时仍 skip。代码级修复通过，输出级 parity pending。不伪造 fixture，不声称"完全对齐"。
 
 ### 12.4 SMC 集成测试
 
@@ -642,17 +652,38 @@ for i in range(self.n):
 | `columnAlignment.test.ts` | 列对齐纯函数 + 源码契约 | PASS |
 | SMC renderer 组件测试 | internal 虚线、swing 实线、OB box、Historical 全量 | 待补 |
 
+### 12.6 SMC Pine 确定性测试（**CHANGE-20260717-001 新增**，`test_smc_pine_deterministic.py`）
+
+不依赖 TV CSV fixture，使用合成 OHLC 数据验证 SMC 核心逻辑的 Pine 语义正确性。
+
+| 测试类 | 验证内容 | 状态 |
+|---|---|---|
+| `TestChoCHRules` | CHoCH 规则（bearish after bullish + tag before bias update） | PASS |
+| `TestBOSRules` | BOS（bias 延续时非 CHoCH） | PASS |
+| `TestWarmupConsistency` | 5000 计算/4000 展示 vs 4000 计算/4000 展示（重叠窗口一致） | PASS |
+| `TestOrderBlockOrder` | OB newest-first（`insert(0, ...)`，Pine `array.unshift`） | PASS |
+| `TestOrderBlockChain` | core→adapter 字段完整性（顺序、anchor、high/low、mitigation） | PASS |
+| `TestTrailingNaN` | trailing NaN + `last_top_time`/`last_bottom_time`（首个 swing pivot 前为 NaN） | PASS |
+| `TestExecutionGate` | internal/swing gate 关闭→事件为空（Pine L784/L787） | PASS |
+| `TestEqualHighLowGeometry` | EQ 两端点 `prev_level`/`level` + anchor→second_pivot 区间 | PASS |
+
 ---
 
 ## 十三、Known Gap
 
 | # | 差异 | 影响 | 修复状态 |
 |---|---|---|---|
-| 1 | `updateTrailingExtremes` 顺序：Python 在 step 6，Pine 在 step 1 | trailing.top/bottom 在新 pivot 检测 bar 与 Pine 不一致 | **本次 CHANGE-20260715-003 修复** |
-| 2 | `displayStructure(internal)` 条件：Python 用 `show_internal_order_blocks`，Pine 用 `showInternalsInput or showInternalOrderBlocksInput or showTrendInput` | 默认值下行为一致；用户自定义参数时会分歧 | Known Gap（默认值下不影响） |
-| 3 | `displayStructure(swing)` 条件：Python 始终执行，Pine 用 `showStructureInput or showSwingOrderBlocksInput or showHighLowSwingsInput` | 同上 | Known Gap（默认值下不影响） |
-| 4 | Pine golden fixture 未提供 | 无法进行输出级完全一致断言 | PENDING（等待用户 TV 导出） |
+| 1 | `updateTrailingExtremes` 顺序：Python 在 step 6，Pine 在 step 1 | trailing.top/bottom 在新 pivot 检测 bar 与 Pine 不一致 | **CHANGE-20260715-003 修复** |
+| 2 | `displayStructure(internal)` 条件：Python 用 `show_internal_order_blocks`，Pine 用 `showInternalsInput or showInternalOrderBlocksInput or showTrendInput` | 默认值下行为一致；用户自定义参数时会分歧 | **CHANGE-20260717-001 修复**（新增 `show_internals`/`show_trend`，`internal_gate` 门控） |
+| 3 | `displayStructure(swing)` 条件：Python 始终执行，Pine 用 `showStructureInput or showSwingOrderBlocksInput or showHighLowSwingsInput` | 同上 | **CHANGE-20260717-001 修复**（新增 `show_structure`，`swing_gate` 门控） |
+| 4 | Pine golden fixture 未提供 | 无法进行输出级完全一致断言 | **PINE_PARITY_PENDING**（等待用户 TV 导出；代码级修复通过，输出级 parity pending） |
 | 5 | SMC renderer 组件测试未补 | 前端渲染契约未在测试中固化 | 待补 |
+| 6 | **[CHANGE-20260717-001]** Strong/Weak 颜色按 strong/weak 区分 | Pine 用固定 bearish/bullish 色；前端按 strong/weak 区分（强高红/弱高绿、强低绿/弱低红） | **有意视觉差异**（不影响数据与几何） |
+| 7 | **[CHANGE-20260717-001]** trailing NaN 旧实现凭空初始化 | `math.max(high, na)=na`，旧 `or` 分支用 high/low 初始化 | **CHANGE-20260717-001 修复**（仅非 NaN 时更新） |
+| 8 | **[CHANGE-20260717-001]** OB 顺序旧实现 oldest-first | Pine `array.unshift` 为 newest-first；前端 `slice(0,5)` 取最旧 5 个 | **CHANGE-20260717-001 修复**（`append`→`insert(0,...)`） |
+| 9 | **[CHANGE-20260717-001]** EQH/EQL 旧实现水平线 | Pine L396 两端点线（`prev_level`→`level`） | **CHANGE-20260717-001 修复**（两端点 + EQH 绿/EQL 红 + 中点标签） |
+| 10 | **[CHANGE-20260717-001]** Strong/Weak 旧实现从最后 bar 起画 | Pine L721-727 线起点 `trailing.lastTopTime/lastBottomTime` | **CHANGE-20260717-001 修复**（`timeToDisplayIdx` + `last_top_time`/`last_bottom_time`） |
+| 11 | **[CHANGE-20260717-001]** 15m warmup 不足 | 窗口左缘 pivot/BOS/CHoCH 丢失；1mo <200 ATR200 全 NaN | **CHANGE-20260717-001 修复**（15m 5000 计算/4000 展示、1mo ≥200） |
 
 ---
 
@@ -661,14 +692,18 @@ for i in range(self.n):
 | 维度 | 状态 | 说明 |
 |---|---|---|
 | Pine 语义原语 | ✅ 单元对齐 | RMA/ATR/CMR/highest/lowest/crossover/crossunder 8 项测试 PASS（**注意**：CHANGE-20260716-001 修正了 `displayStructure` 中 crossover/crossunder 的 level_curr/level_prev 快照语义，旧实现错误地将 `current_level` 同时作为 curr 和 prev） |
-| 默认参数 | ✅ 单元对齐 | 逐项匹配 Pine input 默认值 |
+| 默认参数 | ✅ 单元对齐 | 逐项匹配 Pine input 默认值；**[CHANGE-20260717-001]** 新增 `show_internals`/`show_structure`/`show_trend` 三参数对应 Pine L76/L84/L74 |
 | 状态变量 | ✅ 结构对齐 | 6 个 pivot + 2 个 trend + trailing + OB 列表 |
 | 执行顺序 | ✅ 已修复 | `updateTrailingExtremes` 顺序（CHANGE-20260715-003 修复） |
+| execution gate | ✅ 已修复 | **[CHANGE-20260717-001]** internal/swing gate 严格复刻 Pine L784/L787（`internal_gate`/`swing_gate`） |
+| trailing NaN | ✅ 已修复 | **[CHANGE-20260717-001]** `math.max(high, na)=na`，trailing 仅由 swing pivot 初始化 |
+| OB 顺序 | ✅ 已修复 | **[CHANGE-20260717-001]** `insert(0, ...)` newest-first（Pine `array.unshift`）；前端 `slice(0,5)` 取最新 5 个 |
 | anchor/confirmed 契约 | ✅ 结构对齐 | 6 类事件均含 anchor/confirmed；CHANGE-20260716-001 统一 EQH/EQL 为 anchor/second_pivot/confirmed 三时间点（second_pivot 为视觉线端点） |
 | FVG 排除 | ✅ 完全排除 | 6 项输出级断言 PASS |
-| warmup | ✅ 满足 | 1d 用 full_daily_bars，其他周期用 macd_bars |
-| 缓存隔离 | ✅ 完全隔离 | ALGORITHM_VERSION v9（CHANGE-20260716-001）+ `:smc` 后缀 |
-| 前端渲染 | ⚠️ 待 golden 验证 | CHANGE-20260716-001 修正：anchor_index 统一、viewport 区间求交、slice(0,5)、标签不加 `·I`、纵轴候选完整、Canvas mock 测试；需 golden fixture 验证 |
-| Pine golden fixture | ⏳ PENDING | 等待用户 TV 导出；CHANGE-20260716-001 已建立 TV CSV parity 测试框架 |
+| warmup | ✅ 满足 | **[CHANGE-20260717-001]** 计算历史与展示窗口分离：15m 5000 计算/4000 展示（1000 warmup）、1d 完整日线、1h/1w 完整历史、1mo ≥200（扩展回看 7000 天） |
+| 缓存隔离 | ✅ 完全隔离 | **[CHANGE-20260717-001]** ALGORITHM_VERSION v10（从 v9 bump，旧 SMC 缓存强制失效）+ `:smc` 后缀 |
+| 前端渲染 | ✅ 代码级修复完成 | **[CHANGE-20260717-001]** EQH/EQL 两端点线（`prev_level`→`level`，EQH 绿/EQL 红）、Strong/Weak 线起点 `trailing.last_top_time`/`last_bottom_time`（`timeToDisplayIdx` 辅助）；CHANGE-20260716-001 已修正 anchor_index 统一、viewport 区间求交、slice(0,5)、标签不加 `·I`、纵轴候选完整、Canvas mock 测试；需 golden fixture 输出级验证 |
+| 确定性测试 | ✅ 新增 | **[CHANGE-20260717-001]** `test_smc_pine_deterministic.py` 8 个测试类（不依赖 TV fixture，合成 OHLC 验证 Pine 语义） |
+| Pine golden fixture | ⏳ PENDING | **PINE_PARITY_PENDING**：等待用户 TV 导出；CHANGE-20260717-001 已修复 golden 测试本身（EQH 类型/时间戳/容差 0/全链测试）；无 fixture 时 skip |
 
-**结论**：Pine 语义原语和默认参数已单元级对齐；执行顺序和 crossover 语义已修复（CHANGE-20260715-003 + CHANGE-20260716-001）；前端渲染已修正（CHANGE-20260716-001）；**Pine golden fixture 待用户提供后进行输出级完全一致断言**。**没有 Pine golden fixture 不得宣称"完全对齐"**。
+**结论**：Pine 语义原语、默认参数、执行顺序、execution gate、trailing NaN、OB 顺序、warmup、前端渲染几何均已代码级修复完成（CHANGE-20260715-003 + CHANGE-20260716-001 + CHANGE-20260717-001）；确定性测试 8 个测试类覆盖 CHoCH/BOS/warmup/OB/trailing/gate/EQ 几何；**PINE_PARITY_PENDING：无真实 TV CSV fixture，代码级修复通过，输出级 parity pending**。不伪造 fixture，不声称"完全对齐"。

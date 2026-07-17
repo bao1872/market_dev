@@ -86,6 +86,13 @@ _15MIN_LOOKBACK_DAYS = 400  # 15min 回看 400 天（VP 需要 4000 根，不再
 _MINUTE_LOOKBACK_DAYS = 5  # minute 回看 5 天（VP crossover 仅需 2 根，不再查 750 天 180000 根）
 _60MIN_LOOKBACK_DAYS = 750  # 60min 回看 750 天（1h 指标计算需要完整历史）
 
+# [CHANGE-20260717-001 Pine parity] SMC warmup/历史分离
+# Pine 使用全历史计算 SMC；项目 15m 展示 4000 根时 SMC 必须额外查询 warmup，
+# 计算 5000 根后由 adapter 裁成 4000 展示（pivot/BOS/CHoCH 在窗口左缘不丢失）
+_SMC_WARMUP_BARS = 1000  # 15m 专用 SMC warmup（计算=展示+warmup）
+_SMC_MONTHLY_MIN_BARS = 200  # 1mo 最少 bar 数（ATR200 需 200 根才能初始化）
+_SMC_MONTHLY_LOOKBACK_DAYS = 7000  # 1mo 扩展回看（200 月 ≈ 6000 天，留余量）
+
 # [CHANGE-20260716-001 required_inputs] 策略→所需 bar 类型映射
 # 定义每个注册策略实际需要哪些 bar 类型，避免无条件查询全量日内数据。
 # volume_node_monitor 需要 15min（VP profile）和 minute（crossover 检测），
@@ -762,20 +769,66 @@ async def compute_all_indicators(
     # SMC 是独立图层，不进入 DSA、Node 监控、Capture 或右栏 context；
     # 完全排除 FVG（不计算、不返回、不缓存、不渲染）；
     # 输出 BOS/CHoCH/OB/EQH/EQL/trailing/swing_bias，每个事件含 anchor/confirmed 因果契约。
-    # [warmup 契约] 1d 使用 full_daily_bars（DB 全量日线，≥500 warmup）；
-    # 其他周期复用 macd_bars（15m≈12000、1h≈3000、1w≈714、1mo≈166，均为可获得最大历史）。
+    # [CHANGE-20260717-001 Pine parity warmup/历史分离]
+    #   Pine 使用全历史计算 SMC；项目必须分离计算历史与展示窗口：
+    #   - 1d: full_daily_bars（DB 全量日线，≥500 warmup）
+    #   - 15m: 独立查询 bars+_SMC_WARMUP_BARS（5000）根，计算后 adapter 裁成 bars（4000）展示
+    #   - 1h/1w: macd_bars（可获得完整历史）
+    #   - 1mo: 若 macd_bars < 200 则扩展回看到 _SMC_MONTHLY_LOOKBACK_DAYS（确保 ATR200 可初始化）
     # [view adapter] 完整计算结果经 adapt_smc_to_display_dto 裁成展示窗口 DTO：
     #   - 索引重基准到展示窗口（offset = max(0, total_bars - display_bars)）
     #   - 与窗口相交的活跃 OB 即使 anchor 在窗口左侧也保留并标记 clipped_left
-    #   - 响应大小与 bars 上限同阶（不再透传 12000 根 time 数组）
+    #   - 响应大小与 bars 上限同阶
     #   - swing_bias 显式返回，前端不再从事件猜测
     # [CHANGE-20260716-001 SMC source diagnostics] 新增 smc_source_bar_hash 等诊断字段，
     #   hash 基于 SMC 实际完整输入（smc_bars），不复用截断后的 macd_bars hash。
     smc_source_diagnostics: dict[str, Any] | None = None
     if include_smc:
         try:
-            # [CHANGE-20260715-002] 1d 使用完整日线 warmup，其他周期复用 macd_bars
-            smc_bars = full_daily_bars if timeframe == "1d" and not full_daily_bars.empty else macd_bars
+            # [CHANGE-20260717-001 Pine parity] 计算历史与展示窗口分离
+            smc_bars: pd.DataFrame
+            if timeframe == "1d" and not full_daily_bars.empty:
+                # 1d: 完整日线（已有 ≥500 warmup）
+                smc_bars = full_daily_bars
+            elif timeframe == "15m":
+                # 15m: 独立查询 bars+_SMC_WARMUP_BARS 根（计算 5000，展示 4000）
+                smc_15min_limit = bars + _SMC_WARMUP_BARS
+                smc_start_15min = datetime.combine(
+                    today - timedelta(days=_15MIN_LOOKBACK_DAYS), datetime.min.time(),
+                )
+                smc_bars = await _query_15min_bars(
+                    session, instrument_id, smc_start_15min, intraday_end_dt,
+                    limit=smc_15min_limit,
+                )
+                # 前复权处理（与主 15m 路径一致）
+                if adj == "qfq" and not smc_bars.empty:
+                    adj_factor_df_smc = await _get_adj_factor_df(session, instrument_id)
+                    smc_bars = apply_adj_factor_to_bars(
+                        smc_bars, adj_factor_df_smc, intraday=True
+                    )
+                # 若查询不足则回退到 macd_bars
+                if smc_bars.empty or len(smc_bars) < bars:
+                    smc_bars = macd_bars
+            elif timeframe == "1mo":
+                # 1mo: 若 macd_bars < 200 则扩展回看（确保 ATR200 可初始化）
+                if len(macd_bars) < _SMC_MONTHLY_MIN_BARS:
+                    monthly_start_extended = today - timedelta(days=_SMC_MONTHLY_LOOKBACK_DAYS)
+                    smc_bars = await fetch_monthly_bars(
+                        session, instrument_id, monthly_start_extended, today,
+                    )
+                    if adj == "qfq" and not smc_bars.empty:
+                        adj_factor_df_smc = await _get_adj_factor_df(session, instrument_id)
+                        smc_bars = apply_adj_factor_to_bars(
+                            smc_bars, adj_factor_df_smc, intraday=False
+                        )
+                    if smc_bars.empty:
+                        smc_bars = macd_bars
+                else:
+                    smc_bars = macd_bars
+            else:
+                # 1h/1w: macd_bars（可获得完整历史）
+                smc_bars = macd_bars
+
             smc_opens = smc_bars["open"].to_numpy(float).tolist()
             smc_highs = smc_bars["high"].to_numpy(float).tolist()
             smc_lows = smc_bars["low"].to_numpy(float).tolist()
