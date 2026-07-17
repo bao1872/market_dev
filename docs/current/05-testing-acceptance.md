@@ -1322,16 +1322,18 @@ cd frontend && node --experimental-strip-types --test \
 
 回归要求：修改 `stockDetailNavigation.ts`、`detailNavigation.ts`、`MarketWorkspacePage.tsx`、`useStockDetailActions.ts`、`StockDetailPage.tsx`、`atomic_fact_contract_service.py`、`atomic_fact_product_observations_v1.json`、`stock_context.py`、`AtomicFactsPanel.tsx`、`ConfirmedPositionRow.tsx`、`global.scss`（`.tv-detail-layout` grid）或 `StrategyChart.tsx`（ResizeObserver）时必须跑此组测试。
 
-## 3.20 CHANGE-20260716-007 回归（pywencai 唯一数据源 + BoardSnapshot 原子切换 + 软失败编排 + 陈旧数据契约）
+## 3.20 CHANGE-20260716-007 回归（pywencai 唯一数据源 + BoardSnapshot 原子切换 + 软失败编排 + 陈旧数据契约 + 行业关键词 ilike 筛选 + BoardFilterCombobox + BOARD_SYNC_ENABLED 环境变量）
 
 ```bash
-# 后端 pywencai 适配器 + BoardSnapshot 门禁 + orchestrator syncing_boards 步骤
+# 后端 pywencai 适配器 + BoardSnapshot 门禁 + orchestrator syncing_boards 步骤 + 行业关键词 ilike + BOARD_SYNC_ENABLED 环境变量
 cd backend && APP_ENV=test TEST_DATABASE_URL=postgresql+asyncpg://bz:bz@127.0.0.1:5433/bz_stock_test \
-  .venv/bin/pytest tests/test_wencai_board_provider.py tests/test_board_sync.py tests/test_after_close_board_sync.py -q
+  .venv/bin/pytest tests/test_wencai_board_provider.py tests/test_board_sync.py tests/test_after_close_board_sync.py \
+  tests/test_board_filter_helper.py tests/test_board_sync_enabled_config.py -q
 
-# 前端 wencai 板块同步契约（stale 展示 + source/stale/last_attempt_status + 行业 `-` → `/` + Enter/blur 提交）
+# 前端 wencai 板块同步契约（stale 展示 + source/stale/last_attempt_status + 行业 `-` → `/` + BoardFilterCombobox）
 cd frontend && node --experimental-strip-types --test \
-  scripts/contract-tests/wencaiBoardSyncContract.test.ts
+  src/features/market-workspace/__tests__/wencaiBoardSyncContract.test.ts \
+  src/features/market-workspace/__tests__/marketToolbarSearch.test.ts
 ```
 
 - **WencaiBoardProvider 适配器测试（后端 `test_wencai_board_provider.py`，53 个用例）**：
@@ -1346,14 +1348,15 @@ cd frontend && node --experimental-strip-types --test \
   9. 解析结果字段完整性（board_type/name/code/members）；
   10. 行业/概念分类计数符合绝对门禁下限（行业≥200/概念≥300）；
   11. 成分股关系去重与 instrument_code 归一化。
-- **BoardSnapshot 门禁 + 原子切换测试（后端 `test_board_sync.py`，16 个用例重写）**：
+- **BoardSnapshot 门禁 + 原子切换测试（后端 `test_board_sync.py`，17 个用例重写）**：
   1. **绝对门禁**：空板块目录拒绝 / 空成分关系拒绝 / raw<5000 拒绝 / 代码唯一性<99.9% 拒绝 / 行业<200 拒绝 / 概念<300 拒绝 / 关系<60000 拒绝 / 解析率<95% 拒绝 / 全部门禁通过；
   2. **相对门禁**：异常降幅>20% 拒绝（对比上一成功版本），正常降幅≤20% 通过，首次同步不做降幅检查（prev=0）；
   3. **原子切换**：暂存集合写入 → 门禁校验通过 → 事务内 TRUNCATE+INSERT，中途失败回滚不污染主表；
   4. **校验失败保留旧数据**：门禁未通过时不删除现有 `market_boards`/`market_board_memberships`（`stale=true`）；
   5. **异常时不修改现有数据**：同步过程异常保持旧数据不变；
   6. **Migration 循环**：062 migration `upgrade → downgrade → upgrade` 不报错，表 `market_boards`/`market_board_memberships` 存在；
-  7. **Redis 状态**：`record_sync_status()` 写入 `board_sync:status`（TTL 7 天），`get_sync_status()` 读取 `last_attempt_status`/`last_success_at`/`source`。
+  7. **Redis 状态**：`record_sync_status()` 写入 `board_sync:status`（TTL 7 天），`get_sync_status()` 读取 `last_attempt_status`/`last_success_at`/`source`；
+  8. **source=wencai**（PR #77）：`sync_boards()` 成功返回 dict 显式带 `source: "wencai"`，防止手工 `record_sync_status(result)` 丢失 source。
 - **after_close_orchestrator `syncing_boards` 步骤测试（后端 `test_after_close_board_sync.py`，10 个用例）**：
   1. 状态机顺序 `refreshing_daily → syncing_boards → checking_coverage` 正确推进；
   2. **软失败**：syncing_boards 失败/超时不阻断 DSA/snapshot/publish，仅记录 `degraded_reasons`；
@@ -1365,20 +1368,55 @@ cd frontend && node --experimental-strip-types --test \
   8. 成功时 `last_attempt_status=success` 写入 Redis；
   9. 失败时 `last_attempt_status=failed` 写入 Redis，`/market/boards` 返回 `stale=true`；
   10. `degraded_reasons` 记录失败原因（含超时/校验失败/provider 不可用分类）。
-- **前端 wencai 板块同步契约测试（`wencaiBoardSyncContract.test.ts`，11 个用例）**：
+- **行业关键词 ilike 筛选测试（后端 `test_board_filter_helper.py`，23 个用例，PR #77）**：
+  1. 一级行业关键词匹配完整路径（如「电子」匹配「电子-半导体-数字芯片」）；
+  2. 二级行业关键词匹配（如「半导体」匹配「电子-半导体-数字芯片」）；
+  3. 三级行业关键词匹配（如「数字芯片」匹配「电子-半导体-数字芯片」）；
+  4. 局部关键词匹配（如「芯片」匹配所有含「芯片」的路径）；
+  5. `%` 通配符转义（输入 `%` 不被当通配符）；
+  6. `_` 通配符转义（输入 `_` 不被当通配符）；
+  7. `\` 转义（输入 `\` 不破坏 ilike pattern）；
+  8. NFKC 规范化（全角→半角）；
+  9. trim 空白；
+  10. 空值不生成条件；
+  11. industry + concept AND 语义；
+  12. concept 精确匹配（不支持模糊）。
+- **BOARD_SYNC_ENABLED 环境变量解析测试（后端 `test_board_sync_enabled_config.py`，12 个用例，PR #77）**：
+  1. 环境变量 `1`/`true`/`yes`/`on`（小写）解析为 True；
+  2. 环境变量 `TRUE`（大写）解析为 True；
+  3. 环境变量 `false`/`0`/`no`/`off` 解析为 False；
+  4. 环境变量空字符串回退到 CONFIG_FILE；
+  5. 环境变量优先级高于 CONFIG_FILE；
+  6. 无环境变量且无 CONFIG_FILE 时默认 False。
+- **前端 wencai 板块同步契约测试（`wencaiBoardSyncContract.test.ts`，28 个用例，PR #77 重写）**：
   1. `/market/boards` 响应含 `source`（str|null）/`stale`（bool）/`last_attempt_status`（str|null）三字段；
   2. `stale=true` 时工具栏展示"沿用上次板块数据"提示，输入控件仍可用；
   3. `stale=false` 时不展示提示；
   4. `boards.available=false` 时输入禁用；
-  5. 行业/概念输入仅 Enter/失焦提交（不再每次按键提交）；
-  6. 清空输入立即提交并重置分页；
-  7. 精确值匹配（不支持模糊匹配）；
-  8. 行业值 `-` 在前端可渲染为 `/`（API 值不变）；
-  9. `last_attempt_status=failed` + 旧数据存在时 `stale=true`；
-  10. `last_attempt_status=success` 时 `stale=false`；
-  11. `source` 字段渲染（pywencai 标识展示）。
+  5. 行业值 `-` 在前端可渲染为 `/`（API 值不变）；
+  6. `last_attempt_status=failed` + 旧数据存在时 `stale=true`；
+  7. `last_attempt_status=success` 时 `stale=false`；
+  8. `source` 字段渲染（pywencai 标识展示）；
+  9. **BoardFilterCombobox**（PR #77）：`mode="industry"` 允许任意关键词输入（不再用 `industryNameSet` 拒绝）；
+  10. `mode="concept"` 本地搜索目录只提交精确概念；
+  11. 行业本地过滤完整路径最多 12 条建议，展示「一级 / 二级 / 三级」；
+  12. ArrowUp/ArrowDown 键盘导航；
+  13. Enter 提交当前关键词/选中项；
+  14. Escape 关闭弹层；
+  15. 点击外部关闭弹层；
+  16. 清除按钮清空并提交空值；
+  17. aria-combobox/aria-listbox/aria-option 无障碍属性；
+  18. 150ms blur 延迟解决点击问题；
+  19. 高亮命中关键词；
+  20. 不逐字符请求后端。
+- **前端 marketToolbarSearch 测试（`marketToolbarSearch.test.ts`，8 个用例）**：
+  1. `keywordInput` 受控 props；
+  2. placeholder 为「搜索股票代码/名称/拼音首字母」；
+  3. Enter 提交（onKeywordChange）；
+  4. blur 提交；
+  5. 清空立即提交。
 
-回归要求：修改 `wencai_board_provider.py`、`board_sync_service.py`、`after_close_orchestrator.py`（syncing_boards 步骤）、`worker.py`（BOARD_SYNC_ENABLED 开关）、`/market/boards` API 响应、`MarketToolbar`（行业/概念输入 Enter/blur 提交逻辑）、`boards.stale` 展示逻辑或 `board_filter_helper.py` 时必须跑此组测试。
+回归要求：修改 `wencai_board_provider.py`、`board_sync_service.py`、`after_close_orchestrator.py`（syncing_boards 步骤）、`worker.py`（BOARD_SYNC_ENABLED 开关）、`config.py`（`_resolve_board_sync_enabled`）、`/market/boards` API 响应、`MarketToolbar`（BoardFilterCombobox）、`BoardFilterCombobox.tsx`、`boards.stale` 展示逻辑或 `board_filter_helper.py`（industry ilike 关键词匹配）时必须跑此组测试。
 
 ## 4. CI 门禁
 

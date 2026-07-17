@@ -452,6 +452,29 @@ class TestAtomicSwitch:
 
         assert result["boards_updated"] >= 1  # old_001 name 更新
 
+    @pytest.mark.asyncio
+    async def test_sync_boards_returns_source_wencai(
+        self, db_session: AsyncSession
+    ) -> None:
+        """CHANGE-20260716-007：sync_boards 返回 dict 应包含 source=wencai。
+
+        防止手工调用 record_sync_status(result) 时丢失 source 字段。
+        """
+        snapshot = _make_small_snapshot(num_stocks=20)
+        resolver = _make_instrument_resolver(db_session)
+
+        with patch("app.services.board_sync_service.validate_snapshot", return_value=_mock_stats(snapshot)):
+            with patch("app.services.board_sync_service.get_current_detailed_counts", return_value={
+                "board_count": 0, "membership_count": 0,
+                "industry_count": 0, "concept_count": 0, "stock_count": 0,
+            }):
+                result = await sync_boards(db_session, snapshot, instrument_resolver=resolver)
+        await db_session.commit()
+
+        # source 字段必须存在且为 wencai（即使手工调用 record_sync_status 也能带上）
+        assert result["source"] == "wencai"
+        assert result["status"] == "succeeded"
+
 
 # =============================================================================
 # 4. 详细计数测试

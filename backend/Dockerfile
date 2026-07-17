@@ -34,6 +34,10 @@ FROM python:3.11-slim
 ARG GIT_SHA=unknown
 ARG BUILD_TIME=unknown
 
+# 安装 Node.js 运行时（pywencai 的 get_token() 需要 node 执行 hexin-v.bundle.js 计算反爬 token）
+RUN apt-get update && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # 将构建版本写入运行时环境变量，/version 端点读取

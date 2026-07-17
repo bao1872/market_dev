@@ -34,7 +34,7 @@
 | CONFIG_FILE | 生产配置 |
 | POSTGRES_USER/PASSWORD/DB | PostgreSQL 容器 |
 | STRATEGY_RUN_TOTAL_TIMEOUT_SECONDS | worker-strategy-batch run 级总超时（默认 7200） |
-| BOARD_SYNC_ENABLED | `after_close_orchestrator` 的 `syncing_boards` 步骤开关（默认 `false`，CHANGE-20260716-007 改为 pywencai 语义）；`false` 时 `syncing_boards` 步骤跳过执行并记录 `status=skipped` + `reason_code=board_sync_disabled`；`true` 时通过 pywencai 拉取板块目录与成分股关系（`wencai_board_provider.WencaiBoardProvider`，需配置 `WENCAI_COOKIE`）；生产部署时设为 `true` |
+| BOARD_SYNC_ENABLED | `after_close_orchestrator` 的 `syncing_boards` 步骤开关（默认 `false`，CHANGE-20260716-007 改为 pywencai 语义；PR #77：`config.py` `_resolve_board_sync_enabled()` 优先级「环境变量 > CONFIG_FILE > 默认 False」，`docker-compose.prod.yml` worker-after-close 注入 `BOARD_SYNC_ENABLED: ${BOARD_SYNC_ENABLED:-false}`）；环境变量接受 `1`/`true`/`yes`/`on`（大小写不敏感）为真；`false` 时 `syncing_boards` 步骤跳过执行并记录 `status=skipped` + `reason_code=board_sync_disabled`；`true` 时通过 pywencai 拉取板块目录与成分股关系（`wencai_board_provider.WencaiBoardProvider`，需配置 `WENCAI_COOKIE`，容器需安装 Node.js —— pywencai `get_token()` 需 `subprocess.run(['node', ...])` 执行 `hexin-v.bundle.js`）；生产部署时设为 `true` |
 
 Secret 不写入文档示例，不回显日志。
 

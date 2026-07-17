@@ -304,6 +304,9 @@ async def sync_boards(
 
     return {
         "status": "succeeded",
+        # [CHANGE-20260716-007] source 必须在 sync_boards 返回中带上，
+        # 防止手工调用 record_sync_status(result) 时丢失 source
+        "source": "wencai",
         "board_count": stats["board_count"],
         "industry_count": stats["industry_count"],
         "concept_count": stats["concept_count"],
