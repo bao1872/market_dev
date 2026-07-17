@@ -239,6 +239,10 @@ async def fetch_daily_bars(
 
     raw_df = raw_df.copy()
     raw_df = raw_df.set_index("datetime")
+    # [mdas-dedup] - pytdx 日线 datetime 为 15:00（收盘时刻），DB trade_date 为 00:00（午夜）。
+    # 规范化到午夜，使 _merge_bars 的 index.duplicated() 能按交易日正确去重，
+    # 避免"同日 00:00 和 15:00 两根错误日线"（CHANGE-20260717-002 验收发现）。
+    raw_df.index = raw_df.index.normalize()
     raw_df.index.name = "trade_date"
     if "adj_factor" not in raw_df.columns:
         raw_df["adj_factor"] = 1.0
