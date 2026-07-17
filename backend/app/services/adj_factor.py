@@ -103,9 +103,9 @@ def _apply_adj_factor_core(
     算法步骤：
     1. 准备 adj_factor 序列（按 trade_date 排序去重）
     2. 计算 denominator_factor（latest_adj 或 factor(as_of)）
-    3. 按 trade_date 映射每根 bar 的 adj_factor（用 merge_asof 向前填充）
-    4. 缺失 adj_factor 用 denominator_factor 兜底
-    5. ratio = bar.adj_factor / denominator_factor
+    3. 按 trade_date 映射每根 bar 的权威因子 _adj（用 merge_asof 向前填充）
+    4. 缺失 _adj 用 denominator_factor 兜底
+    5. ratio = _adj / denominator_factor（始终用权威因子，不信任 bar 自带 adj_factor 列）
     6. OHLC *= ratio（volume 不变）
 
     Args:
@@ -169,16 +169,14 @@ def _apply_adj_factor_core(
     # merge_asof 前按 _trade_date 排序会打乱同一天内的时间顺序，需按 index 重新排序
     merged = merged.sort_index()
 
-    # 优先使用 bars_df 中已有的 adj_factor 列（周线/月线从日线合成时 adj_factor 已正确）
-    # 仅在 bars_df 无 adj_factor 列时使用 merge_asof 查找的结果
-    if "adj_factor" in merged.columns:
-        missing_count = 0
-        ratio = merged["adj_factor"] / denominator_factor
-    else:
-        # 缺失的 adj_factor 用 denominator_factor 填充（ratio=1.0，等价不复权该 bar）
-        missing_count = int(merged["_adj"].isna().sum())
-        merged["_adj"] = merged["_adj"].fillna(denominator_factor)
-        ratio = merged["_adj"] / denominator_factor
+    # 始终使用权威因子序列（merge_asof 的 _adj），不信任 bar 自带 adj_factor 列。
+    # 原因：pytdx hybrid bar / 15m/60m/1m 行内旧 adj_factor 不可信（可能为 1.0），
+    # 必须由权威日线因子覆盖（CHANGE-20260717-002 硬规则）。
+    # bars_df 自带的 adj_factor 列仅作兼容保留，不参与复权计算；
+    # 周/月线已在日线完成复权后再聚合，不会再次进入本函数。
+    missing_count = int(merged["_adj"].isna().sum())
+    merged["_adj"] = merged["_adj"].fillna(denominator_factor)
+    ratio = merged["_adj"] / denominator_factor
 
     # 向量化列乘法（替代原始 for col in ["open","high","low","close"] 循环）
     cols_to_adj = [c for c in _PRICE_COLS if c in merged.columns]
