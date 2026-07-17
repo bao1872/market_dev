@@ -869,4 +869,15 @@ plot(currentAlerts.equalLows             ? 1 : 0, '_exp_eql',             displa
 plot(swingTrend.bias,                               '_exp_swing_bias',     display = display.none)
 plot(internalTrend.bias,                            '_exp_int_bias',       display = display.none)
 
+// [CHANGE-20260717-001 Pine parity] 增强：trailing + pivot level 导出
+// 用于 golden 测试的 trailing NaN / Strong-Weak 起点 / pivot level parity 断言
+plot(trailing.top,                        '_exp_trailing_top',          display = display.none)
+plot(trailing.bottom,                     '_exp_trailing_bottom',       display = display.none)
+plot(trailing.lastTopTime,                '_exp_trailing_last_top_time',     display = display.none)
+plot(trailing.lastBottomTime,             '_exp_trailing_last_bottom_time',  display = display.none)
+plot(swingHigh.currentLevel,              '_exp_swing_high_level',      display = display.none)
+plot(swingLow.currentLevel,               '_exp_swing_low_level',       display = display.none)
+plot(internalHigh.currentLevel,           '_exp_int_high_level',        display = display.none)
+plot(internalLow.currentLevel,            '_exp_int_low_level',         display = display.none)
+
 //---------------------------------------------------------------------------------------------------------------------}

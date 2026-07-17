@@ -41,6 +41,10 @@ logger = logging.getLogger("services.indicator_cache")
 CACHE_TTL_SECONDS = 300
 
 # [指标缓存] - 算法版本：指标计算逻辑变更时递增，使旧缓存自动失效
+# v10: CHANGE-20260717-001 - SMC Pine parity 最终收口（warmup/历史分离 15m 5000 计算/4000 展示、
+#      1mo ≥200；execution gate 严格复刻 Pine L784/L787；trailing NaN 严格复刻 math.max(high, na)=na；
+#      OB 顺序 newest-first 复刻 array.unshift）；旧 v9 SMC 输出（事件数量/位置/OB 顺序/窗口左缘）
+#      与新逻辑不一致，必须强制失效
 # v9: CHANGE-20260716-001 - SMC crossover/crossunder 修正（pivot level 上一 bar 快照，
 #     不再将 current_level 同时作为 [0] 和 [1]）；旧 v8 事件数量/位置可能不同，必须强制失效
 # v8: CHANGE-20260715-007 - SMC DTO 重构（EQH/EQL second_pivot/confirmed 重命名、
@@ -50,7 +54,7 @@ CACHE_TTL_SECONDS = 300
 # v6: CHANGE-011 - 新增 SMC 按需计算图层（include_smc 参数 + 缓存键后缀隔离）
 # v5: PR #32 - DSA 全周期支持（bars_daily=macd_bars）+ 1w/1mo BB 用 compute_bollinger 计算
 #     v4 旧缓存返回 1d-only DSA + 1w/1mo 无 BB，必须强制失效
-ALGORITHM_VERSION = "v9"
+ALGORITHM_VERSION = "v10"
 
 # 缓存键前缀
 _CACHE_PREFIX = "indicator"

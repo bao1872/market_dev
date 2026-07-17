@@ -320,7 +320,7 @@ node --experimental-strip-types --test src/components/__tests__/dsaSourceAlignme
 任何修改 `backend/app/services/indicator_cache.py`（`ALGORITHM_VERSION`）、`backend/app/services/indicator_service.py::_adapt_watchlist_bb`、`frontend/src/utils/dsaOverlayPolicy.ts`、`frontend/src/components/StrategyChart.tsx`（DSA toggle / BB overlay 对齐 / debug 工具）必须跑 indicator overlay alignment 回归测试。
 
 后端 cache schema 版本回归：
-- `indicator_cache.ALGORITHM_VERSION == "v7"`（CHANGE-20260715-002 bump：SMC 从 SMA 基线升级为 Pine parity 核心 `smc_pine_core.py`，旧 v6 缓存强制失效；CHANGE-20260715-001：新增 SMC 指标并按需启用，缓存 key 追加 `:smc` 后缀隔离）；
+- `indicator_cache.ALGORITHM_VERSION == "v10"`（**CHANGE-20260717-001 bump**：SMC Pine parity 最终收口——warmup/历史分离、execution gate、trailing NaN、OB 顺序 newest-first，旧 v9 缓存强制失效；CHANGE-20260716-001：crossover/crossunder 修正 v9；CHANGE-20260715-002：SMC 从 SMA 基线升级为 Pine parity 核心 `smc_pine_core.py` v7；CHANGE-20260715-001：新增 SMC 指标并按需启用，缓存 key 追加 `:smc` 后缀隔离）；
 - 旧 v5/v6 cache key 与新 `build_cache_key` 生成的 key 不相等（旧缓存自然失效，避免旧缓存返回无 SMC 数据或 SMA 基线 SMC 结果被误用）；
 - `include_smc=true` 时 cache key 追加 `:smc` 后缀，与默认路径（`include_smc=false`）完全隔离，互不污染；
 - 修改 indicator 计算逻辑、`source_bar_times` 格式、BB/SQZMOM/MACD 计算路径、DSA 全周期支持、1w/1mo BB 计算、SMC 计算路径必须 bump `ALGORITHM_VERSION`。
@@ -1189,7 +1189,7 @@ node --experimental-strip-types --test \
   - `test_tv_csv_swing_bias_parity`：比较最后一根 bar 的 swing_bias
   - **禁止从 DB 重新取另一套 Bar**；产品默认前复权，TV parity fixture 使用与 TV 完全相同的复权方式、数据源和 completed-bar 边界
 - **events 字段契约更新**：`test_event_kind_valid` → `test_event_internal_field_valid`（验证 `internal: bool` 替代旧 `kind` 字段）
-- **缓存隔离（`test_indicator_cache.py`）**：`ALGORITHM_VERSION == "v9"`（CHANGE-20260716-001：v8→v9，crossover/crossunder 修正后旧 v8 缓存强制失效）；SMC/non-SMC 键隔离（`include_smc=true` 追加 `:smc` 后缀）
+- **缓存隔离（`test_indicator_cache.py`）**：`ALGORITHM_VERSION == "v10"`（CHANGE-20260717-001：v9→v10，SMC Pine parity 最终收口——warmup/历史分离、execution gate、trailing NaN、OB 顺序 newest-first，旧 v9 缓存强制失效；CHANGE-20260716-001：v8→v9，crossover/crossunder 修正后旧 v8 缓存强制失效）；SMC/non-SMC 键隔离（`include_smc=true` 追加 `:smc` 后缀）
 - **服务层 warmup（`test_indicator_service.py`）**：1d timeframe 使用 `full_daily_bars`（≥500 warmup）；SMC 输出不调用 `_truncate_lists` 截断（time 数组保持完整长度）；**CHANGE-20260716-001 required_inputs**：`_REQUIRED_INPUTS` 映射 + `_determine_required_bars()`；15min 回看 400 天（limit=4000）、minute 回看 5 天（limit=2）、60min 回看 750 天；`needs_15min = "15min" in required_bars or timeframe == "15m"`、`needs_minute = "minute" in required_bars`；`_query_minute_bars` 新增 `limit` 参数（DESC + LIMIT + 反转）；**SMC source diagnostics（CHANGE-20260716-001）**：`smc_source_bar_hash` 基于 SMC 实际完整输入（1d 用 `full_daily_bars`，其他用 `macd_bars`），不复用截断后的 macd_bars hash
 - **MiniKline viewport（`miniKlineViewport.test.ts`，CHANGE-20260716-001 真实方案）**：
   - 目标根数：15m=48、60m=44、日=40、周=36、月=30（`bars.slice(-target)` 传给 series）
@@ -1478,6 +1478,42 @@ cd frontend && node --experimental-strip-types --test \
   - 结论：ilike 关键词匹配 + EXISTS 子查询在生产数据量下性能符合预期，无需额外索引。
 
 回归要求：修改 `wencai_board_provider.py`、`board_sync_service.py`、`after_close_orchestrator.py`（syncing_boards 步骤 + PR #77 收口第二轮 `_record_board_sync_outcome` event/metadata 持久化）、`worker.py`（BOARD_SYNC_ENABLED 开关）、`config.py`（`_resolve_board_sync_enabled` + PR #77 收口第二轮严格解析）、`market_stocks_service.py`（PR #77 收口第二轮 `_get_board_sync_status_from_job` Redis 回退）、`/market/boards` API 响应、`MarketToolbar`（BoardFilterCombobox）、`BoardFilterCombobox.tsx`（PR #77 收口第二轮 P0 修复）、`boards.stale` 展示逻辑或 `board_filter_helper.py`（industry ilike 关键词匹配 + PR #77 收口第二轮 concept 规范化精确匹配）时必须跑此组测试。
+
+## 3.21 CHANGE-20260717-001 回归（SMC Pine 逻辑对齐最终收口：warmup/历史分离 + execution gate + trailing NaN + OB 顺序 + EQH/EQL 几何 + Strong/Weak 起点 + golden 测试重做 + 确定性测试 + ALGORITHM_VERSION v10）
+
+```bash
+# SMC Pine 确定性测试（新增，不依赖 TV fixture）
+PYTHONDONTWRITEBYTECODE=1 python -m pytest backend/tests/test_smc_pine_deterministic.py -p no:cacheprovider -v
+
+# SMC TV parity（无 fixture 时 skip，PINE_PARITY_PENDING）
+PYTHONDONTWRITEBYTECODE=1 python -m pytest backend/tests/test_smc_tv_parity.py -p no:cacheprovider -v
+
+# SMC 指标 + 缓存（含 ALGORITHM_VERSION v10 断言）
+PYTHONDONTWRITEBYTECODE=1 python -m pytest backend/tests/test_smc_indicator.py backend/tests/test_indicator_cache.py -p no:cacheprovider -v
+
+# ruff/mypy 改动文件
+python -m ruff check backend/app/strategy_assets/algorithms/features/smc_pine_core.py backend/app/services/indicator_service.py backend/app/services/smc_view_adapter.py backend/app/services/indicator_cache.py backend/tests/test_smc_pine_deterministic.py backend/tests/test_smc_tv_parity.py
+python -m mypy backend/app/strategy_assets/algorithms/features/smc_pine_core.py backend/app/services/smc_view_adapter.py backend/app/services/indicator_cache.py
+
+# 前端
+node_modules/.bin/tsc --noEmit
+node_modules/.bin/eslint frontend/src/components/StrategyChart.tsx frontend/src/components/smcRendering.ts
+NODE_OPTIONS=--max-old-space-size=1536 node_modules/.bin/vite build
+```
+
+回归要求：修改 `smc_pine_core.py`（execution gate/trailing NaN/OB 顺序/DEFAULT_PARAMS）、`indicator_service.py`（warmup/历史分离）、`smc_view_adapter.py`、`indicator_cache.py`（ALGORITHM_VERSION）、`StrategyChart.tsx`（EQH/EQL/Strong-Weak 渲染）、`ref/smc_user_export.pine`（导出 plot）或新增 SMC 测试时必须跑此组测试。
+
+**验收要点**：
+- **SMC 确定性测试（`test_smc_pine_deterministic.py`，8 个测试类）**：`TestChoCHRules`（CHoCH 规则 bearish after bullish + tag before bias update）、`TestBOSRules`（BOS bias 延续时非 CHoCH）、`TestWarmupConsistency`（5000 计算/4000 展示 vs 4000 计算/4000 展示重叠窗口一致）、`TestOrderBlockOrder`（OB newest-first）、`TestOrderBlockChain`（core→adapter 字段完整性）、`TestTrailingNaN`（trailing NaN + last_top_time/last_bottom_time）、`TestExecutionGate`（internal/swing gate 关闭→事件为空）、`TestEqualHighLowGeometry`（EQ 两端点 + 区间方向）。
+- **SMC TV parity（`test_smc_tv_parity.py`）**：**PINE_PARITY_PENDING** — 无真实 TV CSV fixture 时 skip，不伪造 fixture，不声称"完全对齐"；CHANGE-20260717-001 修复 golden 测试本身（EQH 类型直接用 core 输出不误映射、日内时间戳 `isoformat()` 不压缩为日期、容差 0 严格逐 bar、新增 OB/EQ 端点/全链 3 个测试）。
+- **缓存版本**：`indicator_cache.ALGORITHM_VERSION == "v10"`（从 v9 bump，旧 SMC 缓存强制失效）；`test_cache_algorithm_version_bumped_to_v10` 断言 v10、新 key 含 `:v10` 不含 `:v9`。
+- **warmup 分离**：15m 独立查询 `bars + _SMC_WARMUP_BARS`（5000）根，计算后 adapter 裁成 `bars`（4000）展示；1mo 扩展回看 7000 天确保 ≥200 根（ATR200 可初始化）。
+- **execution gate**：`internal_gate = show_internals OR show_internal_order_blocks OR show_trend`（Pine L784）；`swing_gate = show_structure OR show_swing_order_blocks OR show_high_low_swings`（Pine L787）。
+- **trailing NaN**：`update_trailing_extremes` 仅在 `trailing.top == trailing.top`（非 NaN）时更新，`math.max(high, na)=na`，trailing 只能由 swing pivot 初始化。
+- **OB 顺序**：core `order_blocks_output` 用 `insert(0, ...)`（newest-first，Pine `array.unshift`）；前端 `slice(0,5)` 取最新 5 个 active internal OB。
+- **前端 EQH/EQL**：两端点线 `prev_level`→`level`（Pine L396）；EQH=`SMC_BEAR_COLOR` 绿 + label_down，EQL=`SMC_BULL_COLOR` 红 + label_up；标签位于两 pivot 中点（Pine L397）。
+- **前端 Strong/Weak 起点**：线起点 `trailing.last_top_time`/`last_bottom_time`（Pine L721-727，新增 `timeToDisplayIdx` 辅助）；终点延伸到 `plotRight`；颜色按 strong/weak 区分列为有意视觉差异。
+- **Pine 真源不可变**：`ref/smc_user_source.pine` SHA256 `0bd3d2ad8819f2dc7a9399f0e869ca3c9eced8100f190aa131aac5fe8191988f`（843 行）；导出能力只改 `ref/smc_user_export.pine`（追加 8 个隐藏 plot：trailing top/bottom/lastTopTime/lastBottomTime + swing/internal pivot level）。
 
 ## 4. CI 门禁
 

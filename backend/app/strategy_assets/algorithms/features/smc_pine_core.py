@@ -79,6 +79,12 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "show_equal_hl": True,
     "show_high_low_swings": True,
     "show_swings": False,
+    # [CHANGE-20260717-001 Pine parity] execution gate 参数（Pine L784/L787）
+    # internal gate: showInternals OR showInternalOrderBlocks OR showTrend
+    # swing gate: showStructure OR showSwingOrderBlocks OR showHighLowSwings
+    "show_internals": True,
+    "show_structure": True,
+    "show_trend": True,
 }
 
 
@@ -695,7 +701,10 @@ class _SMCPineState:
         if len(target) >= 100:
             target.pop()
         target.insert(0, ob)
-        self.order_blocks_output.append({
+        # [CHANGE-20260717-001 Pine parity] order_blocks_output 也保持 newest-first
+        # Pine array.unshift 语义：最新 OB 在数组头部，前端 slice(0,5) 取最新 5 个
+        # 旧实现用 append（oldest-first），前端 slice(0,5) 取最旧 5 个，违反 Pine 语义
+        self.order_blocks_output.insert(0, {
             "internal": internal,
             "bias": bias,
             "anchor_index": parsed_index,
@@ -752,18 +761,31 @@ class _SMCPineState:
     # ----- Trailing Strong/Weak -----
 
     def update_trailing_extremes(self, i: int) -> None:
-        """更新 trailing strong/weak high/low（Pine 语义）。"""
+        """更新 trailing strong/weak high/low（Pine 语义）。
+
+        [CHANGE-20260717-001 Pine parity] 严格复刻 Pine L706-709:
+            trailing.top := math.max(high, trailing.top)
+            trailing.bottom := math.min(low, trailing.bottom)
+
+        Pine math.max(high, na) = na：trailing.top 为 NaN 时不会被当前 high 凭空初始化。
+        初始化只在 get_current_structure 检测到新 swing pivot 时发生（L454-458/L426-429）。
+        旧实现用 `self.trailing.top != self.trailing.top or self.highs[i] >= self.trailing.top`
+        在 NaN 时用 self.highs[i] 初始化，违反 Pine 语义。
+        """
         if self.trailing.bar_index is None:
             return
         if i >= self.n:
             return
 
-        if self.trailing.top != self.trailing.top or self.highs[i] >= self.trailing.top:
-            self.trailing.top = self.highs[i]
-            self.trailing.last_top_time = self.times[i]
-        if self.trailing.bottom != self.trailing.bottom or self.lows[i] <= self.trailing.bottom:
-            self.trailing.bottom = self.lows[i]
-            self.trailing.last_bottom_time = self.times[i]
+        # Pine 语义：math.max(high, na) = na；只有 trailing.top 非 NaN 时才更新
+        if self.trailing.top == self.trailing.top:  # not NaN
+            if self.highs[i] >= self.trailing.top:
+                self.trailing.top = self.highs[i]
+                self.trailing.last_top_time = self.times[i]
+        if self.trailing.bottom == self.trailing.bottom:  # not NaN
+            if self.lows[i] <= self.trailing.bottom:
+                self.trailing.bottom = self.lows[i]
+                self.trailing.last_bottom_time = self.times[i]
 
     # ----- 主循环（Pine 执行顺序）-----
 
@@ -791,6 +813,14 @@ class _SMCPineState:
         show_high_low_swings = self.params["show_high_low_swings"]
         show_internal_order_blocks = self.params["show_internal_order_blocks"]
         show_swing_order_blocks = self.params["show_swing_order_blocks"]
+        # [CHANGE-20260717-001 Pine parity] execution gate 参数（Pine L784/L787）
+        show_internals = self.params.get("show_internals", True)
+        show_structure = self.params.get("show_structure", True)
+        show_trend = self.params.get("show_trend", True)
+        # Pine L784: internal gate = showInternals OR showInternalOrderBlocks OR showTrend
+        internal_gate = show_internals or show_internal_order_blocks or show_trend
+        # Pine L787: swing gate = showStructure OR showSwingOrderBlocks OR showHighLowSwings
+        swing_gate = show_structure or show_swing_order_blocks or show_high_low_swings
 
         for i in range(self.n):
             # 0. 快照上一 bar 结束时的 pivot level（Pine currentLevel[1]）
@@ -819,10 +849,13 @@ class _SMCPineState:
                 self.get_current_structure(i, equal_length, True, False)
 
             # 5. internal BOS/CHoCH + OB 创建
-            if show_internal_order_blocks:
+            # [CHANGE-20260717-001 Pine parity] Pine L784: showInternals OR showInternalOB OR showTrend
+            if internal_gate:
                 self.display_structure(i, True, prev_levels)
             # 6. swing BOS/CHoCH + OB 创建
-            self.display_structure(i, False, prev_levels)
+            # [CHANGE-20260717-001 Pine parity] Pine L787: showStructure OR showSwingOB OR showHighLowSwings
+            if swing_gate:
+                self.display_structure(i, False, prev_levels)
 
             # 7. internal OB mitigation
             if show_internal_order_blocks:

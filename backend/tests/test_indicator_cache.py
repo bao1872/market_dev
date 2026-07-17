@@ -65,24 +65,24 @@ def test_cache_key_construction() -> None:
     assert key_none_adj != key, "不同 adj 应生成不同键"
 
 
-def test_cache_algorithm_version_bumped_to_v9() -> None:
-    """[CHANGE-20260716-001] - ALGORITHM_VERSION 必须 bump 到 v9。
+def test_cache_algorithm_version_bumped_to_v10() -> None:
+    """[CHANGE-20260717-001] - ALGORITHM_VERSION 必须 bump 到 v10。
 
-    v8 → v9 原因：CHANGE-20260716-001 SMC crossover/crossunder 修正（pivot level
-    上一 bar 快照，不再将 current_level 同时作为 [0] 和 [1]）。旧 v8 事件数量/位置
-    可能不同，必须强制失效。
+    v9 → v10 原因：CHANGE-20260717-001 SMC Pine parity 最终收口（warmup/历史分离、
+    execution gate、trailing NaN、OB 顺序 newest-first）。旧 v9 SMC 输出（事件数量/位置、
+    OB 顺序、窗口左缘 pivot/BOS/CHoCH）与新逻辑不一致，必须强制失效。
     """
-    assert indicator_cache.ALGORITHM_VERSION == "v9", (
-        f"ALGORITHM_VERSION 应为 v9（CHANGE-20260716-001 SMC crossover 修正后 bump），"
+    assert indicator_cache.ALGORITHM_VERSION == "v10", (
+        f"ALGORITHM_VERSION 应为 v10（CHANGE-20260717-001 SMC Pine parity 最终收口后 bump），"
         f"实际为 {indicator_cache.ALGORITHM_VERSION}"
     )
 
-    # 验证新 key 包含 v9，不包含 v8
+    # 验证新 key 包含 v10，不包含 v9
     key = indicator_cache.build_cache_key(
         TEST_INSTRUMENT_ID, "1d", "qfq", "2026-07-06",
     )
-    assert ":v9" in key, f"新缓存键应含 v9: {key}"
-    assert ":v8" not in key, f"新缓存键不应含 v8: {key}"
+    assert ":v10" in key, f"新缓存键应含 v10: {key}"
+    assert ":v9" not in key, f"新缓存键不应含 v9: {key}"
 
 
 def test_old_v4_cache_key_not_matched() -> None:
@@ -305,8 +305,8 @@ if __name__ == "__main__":
     assert indicator_cache.CACHE_TTL_SECONDS == 300
     print(f"CACHE_TTL_SECONDS={indicator_cache.CACHE_TTL_SECONDS} OK")
 
-    # 验证算法版本（CHANGE-20260716-001: 已 bump 到 v9）
-    assert indicator_cache.ALGORITHM_VERSION == "v9"
+    # 验证算法版本（CHANGE-20260717-001: 已 bump 到 v10）
+    assert indicator_cache.ALGORITHM_VERSION == "v10"
     print(f"ALGORITHM_VERSION={indicator_cache.ALGORITHM_VERSION} OK")
 
     print("OK")
