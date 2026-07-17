@@ -16,10 +16,11 @@
   feature_snapshot_service.compute_for_trade_date
 - DSA Worker 异步执行，编排层轮询 StrategyRun.status 直到 completed/failed/超时
 
-状态机：
-queued → refreshing_daily → checking_coverage → creating_dsa
+状态机（PR #77 收口：含 syncing_boards）：
+queued → refreshing_daily → syncing_boards → checking_coverage → creating_dsa
   → waiting_dsa_worker → quality_gate → feature_snapshot → publishing → succeeded
-任意步骤异常 → failed
+任意步骤异常 → failed（syncing_boards 除外：软失败不阻断主流程）
+syncing_boards 在 BOARD_SYNC_ENABLED=false / 非交易日 / dsa_only 模式时跳过
 
 禁异常吞没：所有异常补充上下文后 re-raise 或写入 ERROR 事件后标记 failed。
 """
@@ -205,6 +206,40 @@ async def _update_orchestrator_status(
         payload=event_payload,
     )
     await db.flush()
+
+
+async def _record_board_sync_outcome(
+    job_run_id: uuid.UUID,
+    outcome: dict[str, Any],
+    level: str,
+    message: str,
+) -> None:
+    """[AfterClose] - 记录板块同步结果到 job_run_events + metadata_json。
+
+    PR #77 收口 §三.3：成功/失败/跳过均写入持久事件和 metadata，
+    使管理后台盘后流水线时间线可看到完整结果（不只 Redis 和 logger）。
+
+    Args:
+        job_run_id: SchedulerJobRun ID
+        outcome: 同步结果 dict（status/source/raw_rows/resolved/unresolved/...）
+        level: 事件级别 info/warn/error
+        message: 事件消息
+    """
+    async with AsyncSessionLocal() as db:
+        job_run = await _get_job_run_or_raise(db, job_run_id)
+        existing_meta = _parse_metadata(job_run)
+        new_meta = dict(existing_meta)
+        new_meta["board_sync_result"] = outcome
+        job_run.metadata_json = json.dumps(new_meta, ensure_ascii=False)
+        await append_event(
+            db=db,
+            job_run_id=job_run.id,
+            step=AfterCloseRunStatus.SYNCING_BOARDS.value,
+            level=level,
+            message=message,
+            payload=outcome,
+        )
+        await db.commit()
 
 
 async def create_after_close_run(
@@ -968,6 +1003,33 @@ async def execute_after_close_run(
                             board_result["membership_count"],
                             int((time.monotonic() - board_sync_start) * 1000),
                         )
+
+                        # 4. 写入 job_run_event + metadata_json（PR #77 收口 §三.3）
+                        board_sync_duration_ms = int((time.monotonic() - board_sync_start) * 1000)
+                        board_success_outcome = {
+                            "status": "succeeded",
+                            "source": "wencai",
+                            "raw_rows": board_result["raw_rows"],
+                            "resolved": board_result["resolved"],
+                            "unresolved": board_result["unresolved"],
+                            "industry_count": board_result["industry_count"],
+                            "concept_count": board_result["concept_count"],
+                            "membership_count": board_result["membership_count"],
+                            "duration_ms": board_sync_duration_ms,
+                            "error_code": None,
+                            "reused_previous_snapshot": False,
+                        }
+                        await _record_board_sync_outcome(
+                            job_run_id=job_run_id,
+                            outcome=board_success_outcome,
+                            level="info",
+                            message=(
+                                f"板块同步成功: 行业={board_result['industry_count']}, "
+                                f"概念={board_result['concept_count']}, "
+                                f"关系={board_result['membership_count']}, "
+                                f"耗时={board_sync_duration_ms}ms"
+                            ),
+                        )
                     except Exception as board_exc:
                         # 软失败：不覆盖旧数据、不阻断 DSA/快照/发布
                         logger.exception(
@@ -981,6 +1043,25 @@ async def execute_after_close_run(
                             "reused_previous_snapshot": True,
                             "duration_ms": int((time.monotonic() - board_sync_start) * 1000),
                         })
+                        # 写入 job_run_event + metadata_json（PR #77 收口 §三.3）
+                        board_fail_duration_ms = int((time.monotonic() - board_sync_start) * 1000)
+                        board_fail_outcome = {
+                            "status": "failed",
+                            "source": "wencai",
+                            "error_code": type(board_exc).__name__,
+                            "reused_previous_snapshot": True,
+                            "duration_ms": board_fail_duration_ms,
+                        }
+                        await _record_board_sync_outcome(
+                            job_run_id=job_run_id,
+                            outcome=board_fail_outcome,
+                            level="warn",
+                            message=(
+                                f"板块同步失败（软失败，沿用上次数据）: "
+                                f"error={type(board_exc).__name__}, "
+                                f"耗时={board_fail_duration_ms}ms"
+                            ),
+                        )
                 else:
                     logger.info(
                         "[AfterClose] BOARD_SYNC_ENABLED=false，跳过板块同步: job_run_id=%s",
@@ -991,6 +1072,18 @@ async def execute_after_close_run(
                         "source": "wencai",
                         "reused_previous_snapshot": True,
                     })
+                    # 写入 job_run_event + metadata_json（PR #77 收口 §三.3）
+                    await _record_board_sync_outcome(
+                        job_run_id=job_run_id,
+                        outcome={
+                            "status": "skipped",
+                            "source": "wencai",
+                            "reused_previous_snapshot": True,
+                            "reason_code": "board_sync_disabled",
+                        },
+                        level="info",
+                        message="板块同步跳过（BOARD_SYNC_ENABLED=false）",
+                    )
 
             # [Phase5] - syncing_boards 完成（或跳过），更新心跳 + 检查点
             async with AsyncSessionLocal() as db:

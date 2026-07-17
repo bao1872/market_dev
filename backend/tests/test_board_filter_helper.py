@@ -243,3 +243,83 @@ def test_ilike_uses_escape_clause() -> None:
     sql = _compile_conditions(conditions)
     # escape 子句应出现在 SQL 中
     assert "escape" in sql.lower() or "ESCAPE" in sql
+
+
+# ===== 9. PR #77 收口：concept NFKC + trim 精确匹配 =====
+
+
+def test_concept_nfkc_fullwidth_normalized() -> None:
+    """concept 全角字符应经 NFKC 规范化后精确匹配（PR #77 §三.1）。
+
+    全角 "Ａ股" 应规范化为 "A股" 再做精确匹配，
+    防止 URL/preset 携带的全角字符无法命中。
+    """
+    # 全角 Ａ → 半角 A
+    conditions = build_board_filter_conditions(_test_instrument_id, None, "Ａ股概念")
+    assert len(conditions) == 1
+    sql = _compile_conditions(conditions)
+    # NFKC 后 "Ａ股概念" → "A股概念"，应出现在 = 子句中
+    assert "A股概念" in sql
+    # 不应出现全角字符（已被规范化）
+    assert "Ａ股概念" not in sql
+
+
+def test_concept_trim_leading_trailing_spaces() -> None:
+    """concept 首尾空白应被 trim 后精确匹配（PR #77 §三.1）。"""
+    conditions = build_board_filter_conditions(_test_instrument_id, None, "  光刻机  ")
+    assert len(conditions) == 1
+    sql = _compile_conditions(conditions)
+    # trim 后 "光刻机" 出现在 = 子句
+    assert "光刻机" in sql
+
+
+def test_concept_trim_tab_newline() -> None:
+    """concept 制表符/换行应被 trim 后精确匹配。"""
+    conditions = build_board_filter_conditions(_test_instrument_id, None, "\t光刻机\n")
+    assert len(conditions) == 1
+    sql = _compile_conditions(conditions)
+    assert "光刻机" in sql
+
+
+def test_concept_whitespace_only_no_condition() -> None:
+    """concept 纯空白不生成条件（trim 后为空）。"""
+    conditions = build_board_filter_conditions(_test_instrument_id, None, "   \t\n  ")
+    assert len(conditions) == 0
+
+
+def test_concept_none_no_condition() -> None:
+    """concept=None 不生成条件。"""
+    conditions = build_board_filter_conditions(_test_instrument_id, None, None)
+    assert len(conditions) == 0
+
+
+def test_concept_nfkc_fullwidth_digit() -> None:
+    """concept 全角数字应规范化为半角后精确匹配。"""
+    # 全角 １ → 半角 1
+    conditions = build_board_filter_conditions(_test_instrument_id, None, "１号概念")
+    sql = _compile_conditions(conditions)
+    assert "1号概念" in sql
+    assert "１号概念" not in sql
+
+
+def test_concept_still_exact_match_after_nfkc() -> None:
+    """concept NFKC+trim 后仍保持精确匹配（== 而非 ilike）。"""
+    conditions = build_board_filter_conditions(_test_instrument_id, None, "  Ａ股  ")
+    sql = _compile_conditions(conditions)
+    # 精确匹配应生成 = 而非 LIKE
+    assert "LIKE" not in sql.upper()
+    assert "A股" in sql
+
+
+def test_industry_concept_both_nfkc_normalized() -> None:
+    """industry + concept 同时提供时，两者均经 NFKC+trim 规范化。"""
+    conditions = build_board_filter_conditions(
+        _test_instrument_id, "  Ａ股行业  ", "  Ｂ股概念  "
+    )
+    assert len(conditions) == 2
+    sql = _compile_conditions(conditions)
+    # industry: NFKC 后 "A股行业"，ilike 包含匹配
+    assert "%A股行业%" in sql
+    # concept: NFKC 后 "B股概念"，精确匹配
+    assert "B股概念" in sql
+    assert "LIKE" in sql.upper()  # industry 用 ilike

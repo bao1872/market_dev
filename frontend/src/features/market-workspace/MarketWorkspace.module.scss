@@ -201,7 +201,7 @@
   position: absolute;
   top: calc(100% + 4px);
   left: 0;
-  right: 0;
+  min-width: 100%;
   z-index: 100; // 高于表格 sticky header(1) 和批次信息
   max-height: 320px;
   overflow-y: auto;
@@ -227,6 +227,20 @@
   &::-webkit-scrollbar-thumb:hover {
     background: v.$color-text-dim;
   }
+}
+
+// 行业面板更宽（PR #77 收口 §3.4：360~480px，受视口限制）
+// 长路径 "一级 / 二级 / 三级" 不再全部省略
+.comboboxIndustry .comboboxPanel {
+  width: max-content;
+  min-width: 360px;
+  max-width: 480px;
+}
+
+// 概念面板与输入框同宽
+.comboboxConcept .comboboxPanel {
+  width: 100%;
+  max-width: 240px;
 }
 
 // 建议项

@@ -23,6 +23,7 @@ sort=latest_event_time 仍可用（通过标量子查询 ORDER BY，非批量查
 
 from __future__ import annotations
 
+import json
 import logging
 import unicodedata
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ from app.core.time import to_shanghai_iso
 from app.models.bar import BarDaily
 from app.models.instrument import Instrument
 from app.models.market_board import MarketBoard
+from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_state_event import StockStateEvent
 from app.models.watchlist import UserWatchlistItem
@@ -567,6 +569,45 @@ async def get_market_stocks(
 # ===== C9: 板块目录只读 API =====
 
 
+async def _get_board_sync_status_from_job(
+    db: AsyncSession,
+) -> dict[str, object] | None:
+    """从最近 after-close job metadata 回退读取板块同步状态。
+
+    PR #77 收口 §三.4：Redis 缺失/重启时，从 SchedulerJobRun.metadata_json
+    中的 board_sync_result 字段回退得到 source 和 last_attempt_status。
+
+    Args:
+        db: 异步 DB 会话
+
+    Returns:
+        board_sync_result dict 或 None（无任何 after-close job 含板块同步结果）
+    """
+    try:
+        stmt = (
+            select(SchedulerJobRun)
+            .where(SchedulerJobRun.job_name == "after_close_orchestrator")
+            .where(SchedulerJobRun.metadata_json.isnot(None))
+            .order_by(SchedulerJobRun.created_at.desc())
+            .limit(20)
+        )
+        result = await db.execute(stmt)
+        job_runs = result.scalars().all()
+        for job_run in job_runs:
+            if not job_run.metadata_json:
+                continue
+            try:
+                meta = json.loads(job_run.metadata_json)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            board_result = meta.get("board_sync_result")
+            if isinstance(board_result, dict):
+                return board_result
+    except Exception:
+        logger.warning("[MarketStocks] 从 job metadata 回退板块同步状态失败", exc_info=True)
+    return None
+
+
 async def get_market_boards(
     db: AsyncSession,
     board_type: str | None = None,
@@ -601,9 +642,22 @@ async def get_market_boards(
     last_attempt_status = sync_status.get("status") if sync_status else None
     source = sync_status.get("source") if sync_status else None
 
+    # PR #77 收口 §三.4：Redis 缺失/重启时从最近 after-close job metadata 回退
+    # 不让 Redis 成为唯一事实源——DB 已有数据时不得 source=None
+    if sync_status is None:
+        fallback = await _get_board_sync_status_from_job(db)
+        if fallback is not None:
+            last_attempt_status = fallback.get("status")
+            source = fallback.get("source")
+
     # stale: 旧数据存在 + 最新同步失败/降级
     has_data = len(boards) > 0
     is_stale = has_data and last_attempt_status in ("failed", "degraded")
+
+    # DB 有数据但无任何状态来源（Redis 和 job metadata 均无）时，source 标记为 unknown
+    final_source = source if has_data else None
+    if has_data and final_source is None:
+        final_source = "unknown"
 
     return MarketBoardsResponse(
         items=[
@@ -618,7 +672,7 @@ async def get_market_boards(
         available=has_data,
         reason_code=None if has_data else "board_provider_unavailable",
         updated_at=to_shanghai_iso(updated_at_dt) if updated_at_dt else None,
-        source=source if has_data else None,
+        source=final_source,
         stale=is_stale,
         last_attempt_status=last_attempt_status if has_data else None,
     )

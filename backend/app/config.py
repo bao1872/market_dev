@@ -129,24 +129,57 @@ def _resolve_database_url() -> str:
 
 
 def _resolve_board_sync_enabled() -> bool:
-    """解析板块同步开关（CHANGE-20260716-007）。
+    """解析板块同步开关（CHANGE-20260716-007，PR #77 收口严格解析）。
 
     优先级（同字段，高到低）：
     1. 环境变量 BOARD_SYNC_ENABLED（docker-compose.environment 显式注入）
-       接受的 truthy 值（不区分大小写）：1 / true / yes / on
-       接受的 falsy 值：0 / false / no / off / 空串
     2. CONFIG_FILE 指向的配置文件中的 BOARD_SYNC_ENABLED
     3. 默认 False（未配置时盘后编排跳过 syncing_boards）
 
+    环境变量与配置文件统一严格解析（不区分大小写）：
+    - truthy：1 / true / yes / on
+    - falsy：0 / false / no / off / 空串
+    - 非法值：启动失败并给出明确错误（防止 "false" 字符串被 bool() 误判为 True）
+
     Returns:
         bool: True 时盘后编排执行 syncing_boards，False 时跳过
+
+    Raises:
+        RuntimeError: 配置值为无法识别的字符串
     """
+    truthy = {"1", "true", "yes", "on"}
+    falsy = {"0", "false", "no", "off", ""}
+
     env_val = os.environ.get("BOARD_SYNC_ENABLED")
-    if env_val is not None and env_val != "":
-        return env_val.strip().lower() in {"1", "true", "yes", "on"}
+    if env_val is not None:
+        normalized = env_val.strip().lower()
+        if normalized in truthy:
+            return True
+        if normalized in falsy:
+            return False
+        raise RuntimeError(
+            f"BOARD_SYNC_ENABLED 环境变量值非法: {env_val!r}，"
+            f"合法值: {sorted(truthy | falsy)}"
+        )
+
     file_val = _load_py_config().get("BOARD_SYNC_ENABLED")
     if file_val is not None:
-        return bool(file_val)
+        if isinstance(file_val, bool):
+            return file_val
+        if isinstance(file_val, str):
+            normalized = file_val.strip().lower()
+            if normalized in truthy:
+                return True
+            if normalized in falsy:
+                return False
+            raise RuntimeError(
+                f"BOARD_SYNC_ENABLED 配置文件值非法: {file_val!r}，"
+                f"合法值: {sorted(truthy | falsy)}"
+            )
+        raise RuntimeError(
+            f"BOARD_SYNC_ENABLED 配置文件类型非法: {type(file_val).__name__}，"
+            f"期望 bool 或 str"
+        )
     return False
 
 

@@ -531,9 +531,15 @@ Capture Token 只能访问 Capture API。\
 
 **数据源**：pywencai（`wencai_board_provider.py`）为唯一板块分类源；固定查询 `同花顺概念，行业分类`；`asyncio.to_thread` 包装同步调用，不阻塞事件循环；不记录 Cookie 或完整原始响应。\
 **请求链禁联网**：`/market/boards` 只读数据库 + Redis 状态，不在用户 API 请求链访问问财。\
+**Node 运行时**：`backend/Dockerfile` 必须安装 `nodejs`；pywencai `get_token()` 通过 `subprocess.run(['node', ...])` 执行 `hexin-v.bundle.js` 计算反爬 token，无 node 则同步链路必失败。\
+**盘后 worker 唯一同步入口**：`after_close_orchestrator.py` 的 `syncing_boards` 步骤是板块同步唯一入口；`worker.py` 17:00 独立 qstock 任务已删除，不得恢复或新增任何常驻板块 cron；`mode=dsa_only` 跳过该步骤避免人工 DSA 重跑访问问财。\
 **软降级/原子切换**：`BOARD_SYNC_ENABLED` 默认 `false`；`true` 时盘后编排 `syncing_boards` 步骤执行（`after_close_orchestrator.py`），失败不覆盖旧数据、不阻断 DSA/快照/发布。`BoardSnapshot` 原子快照 + 绝对门禁 + 相对门禁校验后单事务差异 upsert/delete；异常 rollback 保留上次成功数据。\
-**stale 契约**：旧数据存在而最新同步失败时 `/market/boards` 返回 `available=true, stale=true`，仍允许筛选；从未成功才 `available=false`。响应扩展 `source`/`stale`/`last_attempt_status`。\
+**BOARD_SYNC_ENABLED 严格解析（PR #77 收口第二轮）**：`config.py::_resolve_board_sync_enabled()` 使用 truthy 集合 `{1, "1", true, "true", "yes", "on"}`（大小写不敏感）/ falsy 集合 `{0, "0", false, "false", "no", "off", ""}`；非法值（如 `"maybe"`）抛 `RuntimeError` fail-fast；同时处理 config 文件中 bool 与 str 两种类型；优先级为「环境变量 > CONFIG_FILE > 默认 False」；修复旧实现 `bool("false")` 恒为 True 的 bug。\
+**事件 + metadata 持久化（PR #77 收口第二轮）**：`after_close_orchestrator.py::_record_board_sync_outcome()` 在 success/failure/skip 三分支同时写入 `job_run_events`（`append_event`）和 `SchedulerJobRun.metadata_json.board_sync_result` 字段；保证 Redis 缺失时仍可从 job metadata 回退读取同步状态。\
+**Redis + DB 状态回退（PR #77 收口第二轮）**：`/market/boards` 优先读 Redis `board_sync:status`，Redis None 时回退到 `market_stocks_service._get_board_sync_status_from_job()` 查询近期 `SchedulerJobRun.metadata_json.board_sync_result`；当 DB 有数据但 Redis 与 job metadata 均无状态时，`source="unknown"`（非 None），避免前端误判为「从未同步」。\
+**stale 契约**：旧数据存在而最新同步失败时 `/market/boards` 返回 `available=true, stale=true`，仍允许筛选；从未成功才 `available=false`。响应扩展 `source`/`stale`/`last_attempt_status`（含 `unknown` 语义）。\
 **编排**：`syncing_boards` 位于 `refreshing_daily` 之后、`waiting_dsa_worker` 之前；非交易日跳过；`mode=dsa_only` 默认跳过。`worker.py` 17:00 独立 qstock 任务已删除。\
+**行业/概念筛选语义（PR #77 收口）**：`industry` 参数为关键词（`MarketBoard.name.ilike('%keyword%', escape='\\')` 匹配完整路径任意一级，`_normalize_keyword` NFKC + trim，`_escape_ilike_pattern` 转义 `\`/`%`/`_`）；`concept` 参数为精确匹配（PR #77 收口第二轮：concept 也应用 `_normalize_keyword()` NFKC + trim 后再 `==` 比较，与 industry 共用同一规范化函数）；industry + concept 同时提供时为 AND；market stocks/StrategyRunResults/行情/自选/Excel 复用同一 `board_filter_helper`。\
 不得增加 akshare、代理、IP 绕过、东方财富混用或新常驻 worker。保留单 provider、事务失败保留旧快照设计。
 
 ### 8. Outbox target\_channel\_id

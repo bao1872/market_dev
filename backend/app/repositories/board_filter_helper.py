@@ -80,7 +80,7 @@ def build_board_filter_conditions(
     - 空值/纯空白：不生成条件
     - URL/preset/导出字段名仍为 industry（兼容现有链接），值现在是关键词
 
-    concept 语义：精确概念名称（暂不改为关键词匹配）
+    concept 语义：精确概念名称（NFKC + trim 规范化后精确匹配，PR #77 收口）
 
     industry+concept 同时提供时为 AND 语义（同时属于该行业和该概念）。
 
@@ -117,7 +117,9 @@ def build_board_filter_conditions(
         )
         conditions.append(industry_exists)
 
-    if concept:
+    # 概念：规范化后非空才生成精确匹配条件（PR #77 收口：NFKC + trim）
+    concept_name = _normalize_keyword(concept or "")
+    if concept_name:
         concept_exists = (
             select(1)
             .select_from(MarketBoardMembership)
@@ -125,7 +127,7 @@ def build_board_filter_conditions(
             .where(
                 MarketBoardMembership.instrumentId == instrument_id_col,
                 MarketBoard.type == "concept",
-                MarketBoard.name == concept,
+                MarketBoard.name == concept_name,
             )
             .exists()
         )
