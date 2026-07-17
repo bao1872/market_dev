@@ -29,6 +29,7 @@ from sqlalchemy import (
     Float,
     Index,
     Integer,
+    String,
     Text,
     func,
     text,
@@ -156,6 +157,22 @@ class StockFeatureSnapshotRun(Base):
         nullable=True,
         comment="额外元数据 JSONB（如 failure_threshold、rollback_reason）",
     )
+    # [CHANGE-20260717-002 SSOT] - 行情 SSOT 诊断字段（run 完成时落库，便于审计与跨调用方对账）
+    source_bar_hash: Mapped[str | None] = mapped_column(
+        String(16), nullable=True, comment="MDAS source_bar_hash（OHLCV SHA256 前16字符）"
+    )
+    adj_factor_hash: Mapped[str | None] = mapped_column(
+        String(16), nullable=True, comment="MDAS adj_factor_hash（因子序列 SHA256 前16字符）"
+    )
+    market_data_contract_version: Mapped[str | None] = mapped_column(
+        String(8), nullable=True, comment="MDAS 契约版本（如 v2）"
+    )
+    completed_through: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="MDAS completed_through（最新已完成 bar 时间）"
+    )
+    adjustment_as_of: Mapped[date | None] = mapped_column(
+        Date(), nullable=True, comment="复权锚点业务日（point-in-time 复权）"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -191,6 +208,9 @@ if __name__ == "__main__":
         "failure_rate",
         "started_at", "finished_at", "published_at",
         "metadata_", "created_at", "updated_at",
+        # [CHANGE-20260717-002 SSOT] 行情诊断字段
+        "source_bar_hash", "adj_factor_hash", "market_data_contract_version",
+        "completed_through", "adjustment_as_of",
     ]
     for col in required_cols:
         assert col in cols, f"缺少列: {col}"

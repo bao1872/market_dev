@@ -68,6 +68,23 @@ PostgreSQL / Redis / External Service
 | admin | 管理 API、审计、运维页面 |
 | indicator | 全局技术指标（SQZMOM_LB、SMC）纯函数计算；位于 `backend/app/strategy_assets/algorithms/features/`，不是 Service；SMC 按需启用（`include_smc=False` 默认），不进入 DSA/Node/Capture/监控/选股；FVG 完全排除（不计算、不返回、不缓存、不渲染）；SMC Pine 语义核心 `smc_pine_core.py`（唯一核心，生产+测试共用），`smc_indicator.py` 为薄包装委托层；Pine 原语（`pine_rma`/`pine_atr`/`pine_cumulative_mean_range`/`pine_highest/lowest`/`pine_crossover/crossunder`）；warmup ≥500 根（1d 用 `full_daily_bars` 全量日线）；SMC 完整历史只在核心内计算，**view adapter（`smc_view_adapter.py`，CHANGE-20260716-001）输出有界 DTO 并重基准索引**，Redis/API 不得返回约 12000 根完整 time 和全部 pivots；前端 `smcToDisplay` 按时间过滤展示区事件；**Pine 语义对齐（CHANGE-20260715-006 → CHANGE-20260716-001 crossover 修正）**：`pine_rma` 严格复现 `ta.rma`（`bar_index < length-1` 返回 `na`，`==length-1` 写 SMA 种子，之后 Wilder 递推）；首个 pivot 在 `i==size` 检测（`i >= size` 非 `i > size`）；**crossover/crossunder level_curr/level_prev 快照**（每 Bar 快照六个 pivot level，swing/internal 独立，不互相覆盖；crossover=`close_curr > level_curr && close_prev <= level_prev`，NaN→False）；EQH/EQL DTO 三时间点（anchor/second_pivot/confirmed，second_pivot 为视觉线端点，confirmed 因果/回放使用）；`swing_bias` 直接返回 `state.swing_trend.bias`（{1,-1,0}，前端不猜测）；OB slice `[start:end)` end-exclusive；**required_inputs（CHANGE-20260716-001）**：`indicator_service` 为注册策略建立 `_REQUIRED_INPUTS` 映射，只加载当前周期和实际依赖，避免 1d 请求无条件读取 750 天 15m/1m |
 
+### 4.1 市场数据 SSOT 与复权唯一出口（CHANGE-20260717-002）
+
+**`MarketDataAggregationService` (MDAS) 是行情读取 + 复权应用 + 周/月聚合的唯一出口**（详见 `docs/analysis/market-data-ssot-adjustment-v2.md`）：
+
+- **职责边界**：
+  - **MDAS**：读取 raw bars（经 repository 私有 `_query_*`）→ 调用 `AdjustmentFactorService` 获取权威因子序列 → 应用复权（`adj_factor._apply_adj_factor_core`，仅一次）→ 周/月"日线完成复权后经 `kline_aggregator` 聚合" → 返回 bars + 诊断字段（hash/contract_version/as_of/completed_through/degraded）。
+  - **`AdjustmentFactorService`**：权威因子序列管理。`get_factor_series(session, instrument_id, as_of=date)` 返回**只含 `trade_date <= as_of` 的截断因子序列**（point-in-time 语义）；`rebuild_factor_series` 从最早受影响日期完整重建（禁止只更新最近 5 根）；失败不得用 1.0 伪装成功，返回 degraded + 原因；成功后精确失效该股票 MDAS/indicator 缓存。
+  - **`bar_repository`**：仅负责 raw OHLCV / 公司行为因子的 DB 读写和上游拉取，**不负责复权应用**。
+  - **`adj_factor`（计算模块）**：纯计算，由 AdjustmentFactorService/MDAS 包装调用，业务层禁止直接导入。
+  - **`kline_aggregator`**：周/月聚合出口，仅 MDAS 导入。
+- **复权规则**：
+  - 原始 bar 在 repository/DB 层**保持不复权**；qfq 只在 MDAS 出口应用**一次**。
+  - **不信任 bar 自带 `adj_factor` 列**（pytdx hybrid bar / 15m/60m/1m 行内旧值可能为 1.0），始终使用权威因子序列 `merge_asof` 结果 `_adj`。
+  - **日内（15m/60m/1m）**：同一交易日映射同一权威日线因子；**周/月**：日线完成复权后聚合，禁止 raw 聚合后再复权。
+  - **公式**：`qfq_price = raw_price × factor(bar_date) / factor(as_of)`；`adjustment_as_of` 锚定请求业务日（None=最新），盘后/历史回算 `as_of=trade_date`，禁止未来除权事件泄漏。
+- **架构守护**：`backend/tests/test_market_data_ssot_architecture.py` 5 个 AST 测试禁止业务模块导入 repository 私有查询/直接导入 adj_factor/导入 kline_aggregator/自行 resample 周/月（例外：`strategy_assets/algorithms/` 算法内部特征计算）。
+
 ## 5. 端到端链路
 
 ### 盘后趋势选股

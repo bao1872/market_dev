@@ -83,15 +83,16 @@ async def load_chart_bars(
     )
 
     service = MarketDataAggregationService()
+    # [CHANGE-20260717-002 SSOT] - 图表场景明确传参：
+    # - completed_only=True：仅已完成 bar（强制 include_realtime=False），
+    #   实时价格由 quote overlay 呈现，禁止后端 partial bar 与 quote 重复合并
+    # - limit=count：MDAS 原生截取最近 N 根，保证 source_bar_hash 稳定，无需本地 tail
     result = await service.get_bars(
         session, instrument_id, timeframe="1d", adj=adj,
+        completed_only=True,
+        limit=count,
     )
-    df = result.bars
-    if df.empty:
-        return df
-
-    # count 截取: 取最近 count 根
-    return df.tail(count)
+    return result.bars
 
 
 def _filter_unfinished_daily_bars(

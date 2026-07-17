@@ -369,6 +369,7 @@ class MonitorBatchService:
         adj: str = "qfq",
         limit: int | None = None,
         include_realtime: bool = True,
+        completed_only: bool = False,
         start_date: date | datetime | None = None,
         end_date: date | datetime | None = None,
     ) -> pd.DataFrame:
@@ -377,10 +378,14 @@ class MonitorBatchService:
         [monitor_batch] - 描述: monitor 链路统一走行情聚合服务，获取缓存、尾部补齐、
         数据源和新鲜度诊断；返回 df 按原语义升序排列。若传入 limit，则取最后 N 根，
         保持 Node Cluster 输入根数不变。
+
+        [CHANGE-20260717-002 SSOT] - completed_only=True 时强制 include_realtime=False
+        且过滤未完成 bar（Node Cluster 计算路径传 True；1m 实时监控保持 False）。
         """
         df, _, _ = await self._fetch_md_bars_with_meta(
             db, instrument_id, timeframe,
             adj=adj, limit=limit, include_realtime=include_realtime,
+            completed_only=completed_only,
             start_date=start_date, end_date=end_date,
         )
         return df
@@ -394,6 +399,7 @@ class MonitorBatchService:
         adj: str = "qfq",
         limit: int | None = None,
         include_realtime: bool = True,
+        completed_only: bool = False,
         start_date: date | datetime | None = None,
         end_date: date | datetime | None = None,
     ) -> tuple[pd.DataFrame, str, bool]:
@@ -408,6 +414,7 @@ class MonitorBatchService:
             timeframe=timeframe,
             adj=adj,
             include_realtime=include_realtime,
+            completed_only=completed_only,
             start_date=start_date,
             end_date=end_date,
         )
@@ -637,7 +644,9 @@ class MonitorBatchService:
             # [Feishu/Monitor] - 恢复保守规则（CHANGE-20260710-002）：watchlist_monitor 计算输入
             # 不得因截图实时性需求而使用实时日线，避免污染事件计算口径；当前价实时展示
             # 由 card 的 change_pct（pytdx live）与 capture snapshot 1d partial daily 负责。
+            # [CHANGE-20260717-002 SSOT] - completed_only=True 明确只用已完成 bar
             include_realtime=False,
+            completed_only=True,
         )
 
         bars_15min = pd.DataFrame()
@@ -648,7 +657,9 @@ class MonitorBatchService:
                 adj="qfq",
                 limit=_15MIN_LOOKBACK_BARS,
                 # [Feishu/Monitor] - 恢复保守规则：15m 计算输入非实时，仅用已完成 bar。
+                # [CHANGE-20260717-002 SSOT] - completed_only=True 明确只用已完成 bar
                 include_realtime=False,
+                completed_only=True,
             )
         except Exception as exc:
             logger.warning("15min行情拉取失败 %s: %s", symbol, exc)

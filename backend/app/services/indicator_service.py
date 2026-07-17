@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date
 from typing import Any
 
 import numpy as np
@@ -49,15 +49,6 @@ from app.constants.indicator_contract import (
 from app.constants.strategy_keys import DSA_SELECTOR, WATCHLIST_MONITOR
 from app.models.instrument import Instrument
 from app.models.strategy import StrategyDefinition, StrategyVersion
-from app.repositories.bar_repository import (
-    _get_adj_factor_df,
-    _query_15min_bars,
-    _query_60min_bars,
-    _query_minute_bars,
-    apply_adj_factor_to_bars,
-    fetch_monthly_bars,
-    fetch_weekly_bars,
-)
 from app.services.chart_bars_service import (
     compute_source_bar_hash,
     compute_source_bar_times,
@@ -76,22 +67,13 @@ from app.strategy_assets.algorithms.features.sqzmom_lb import compute_sqzmom_lb
 
 logger = logging.getLogger("services.indicator_service")
 
-# 查询范围常量（日线 5000 天，日内按需）
-_DEFAULT_DAILY_LOOKBACK_DAYS = 5000  # 日线默认回看 5000 天（与 bars.py 一致）
-# [CHANGE-20260716-001 required_inputs] 日内回看天数按数据类型独立设定：
-#   15min: 400 天足够覆盖 NODE_CLUSTER_LOW_BARS=4000（4000/16=250 交易日≈350 日历日）
-#   minute: 5 天足够覆盖 NODE_CLUSTER_MINUTE_BARS=2（仅需最后 2 根）
-#   60min: 750 天（1h 指标窗口需要更长历史）
-_15MIN_LOOKBACK_DAYS = 400  # 15min 回看 400 天（VP 需要 4000 根，不再查 750 天 12000 根）
-_MINUTE_LOOKBACK_DAYS = 5  # minute 回看 5 天（VP crossover 仅需 2 根，不再查 750 天 180000 根）
-_60MIN_LOOKBACK_DAYS = 750  # 60min 回看 750 天（1h 指标计算需要完整历史）
-
+# [CHANGE-20260717-002 SSOT] 查询回看范围由 MarketDataAggregationService 内部管理，
+# 本层仅保留 SMC warmup/最少 bar 数常量（用于 MDAS limit/warmup_bars 参数）。
 # [CHANGE-20260717-001 Pine parity] SMC warmup/历史分离
 # Pine 使用全历史计算 SMC；项目 15m 展示 4000 根时 SMC 必须额外查询 warmup，
 # 计算 5000 根后由 adapter 裁成 4000 展示（pivot/BOS/CHoCH 在窗口左缘不丢失）
 _SMC_WARMUP_BARS = 1000  # 15m 专用 SMC warmup（计算=展示+warmup）
 _SMC_MONTHLY_MIN_BARS = 200  # 1mo 最少 bar 数（ATR200 需 200 根才能初始化）
-_SMC_MONTHLY_LOOKBACK_DAYS = 7000  # 1mo 扩展回看（200 月 ≈ 6000 天，留余量）
 
 # [CHANGE-20260716-001 required_inputs] 策略→所需 bar 类型映射
 # 定义每个注册策略实际需要哪些 bar 类型，避免无条件查询全量日内数据。
@@ -417,8 +399,8 @@ async def compute_all_indicators(
 
     流程：
     1. 查询 instrument 信息（symbol）
-    2. [图表行情契约] 通过 load_chart_bars 获取日线（与 /bars API 共用 SSOT），
-       日内/周线/月线通过 DB 查询获取
+    2. [图表行情契约] 全部周期通过 MarketDataAggregationService 获取（与 /bars API 共用 SSOT），
+       MDAS 内部完成 DB 查询 + Pytdx 兜底 + 复权一次 + 周月聚合
     3. 遍历 StrategyLoader._registry 中的所有策略
     4. 对每个策略，查询最新 released 版本（复用 StrategyBatchService._get_latest_released_version）
     5. 调用 StrategyLoader.load(version) 获取 runtime
@@ -464,11 +446,9 @@ async def compute_all_indicators(
         raise ValueError(f"instrument 不存在: instrument_id={instrument_id}")
     symbol = inst_row[0]
 
-    # 2. [图表行情契约] 数据获取：日线通过 MarketDataAggregationService（行情聚合 SSOT），
-    #    日内/周线/月线通过 DB 查询获取
+    # 2. [图表行情契约] 数据获取：全部周期通过 MarketDataAggregationService（行情聚合 SSOT），
+    #    MDAS 内部处理 DB 查询 + Pytdx 兜底 + 复权一次 + 周月聚合
     today = date.today()
-    daily_start = today - timedelta(days=_DEFAULT_DAILY_LOOKBACK_DAYS)
-    intraday_end_dt = datetime.combine(today, datetime.max.time())
 
     # [CHANGE-20260716-001 required_inputs] 基于实际可用策略（有 released version）
     #   加载日内数据，避免为数据库中不存在的策略（如 volume_node_monitor 未发布）
@@ -496,68 +476,49 @@ async def compute_all_indicators(
     if not daily_bars.empty:
         daily_bars = daily_bars.tail(daily_count)
 
-    # 日内/周线/月线：DB 查询（与原 DB 降级路径一致，SSOT）
-    # [CHANGE-20260716-001] 15min 仅在需要时查询，limit=NODE_CLUSTER_LOW_BARS 让 DB 只返回 4000 根
+    # 日内/周线/月线：通过 MarketDataAggregationService 获取（SSOT）。
+    # MDAS 内部完成 DB 查询 + Pytdx 兜底 + 复权一次（qfq）+ 周月"日线复权后聚合"。
+    # 外层不再二次复权，保证"复权一次"原则（CHANGE-20260717-002）。
+    _mdas = MarketDataAggregationService()
+    # 15min：仅 needs_15min 时查询（VP profile 需要），limit=NODE_CLUSTER_LOW_BARS
+    bars_15min = pd.DataFrame()
     if needs_15min:
-        start_15min = datetime.combine(
-            today - timedelta(days=_15MIN_LOOKBACK_DAYS), datetime.min.time(),
+        r15 = await _mdas.get_bars(
+            session, instrument_id, timeframe="15m", adj=adj,
+            include_realtime=True, limit=NODE_CLUSTER_LOW_BARS,
         )
-        bars_15min = await _query_15min_bars(
-            session, instrument_id, start_15min, intraday_end_dt,
-            limit=NODE_CLUSTER_LOW_BARS,
-        )
-    else:
-        bars_15min = pd.DataFrame()
-    # [CHANGE-20260716-001] minute 仅在需要时查询，limit=NODE_CLUSTER_MINUTE_BARS 让 DB 只返回 2 根
+        bars_15min = r15.bars
+    # minute：仅 needs_minute 时查询（VP crossover 仅需 2 根）
+    bars_minute = pd.DataFrame()
     if needs_minute:
-        start_minute = datetime.combine(
-            today - timedelta(days=_MINUTE_LOOKBACK_DAYS), datetime.min.time(),
+        rm = await _mdas.get_bars(
+            session, instrument_id, timeframe="1m", adj=adj,
+            include_realtime=True, limit=NODE_CLUSTER_MINUTE_BARS,
         )
-        bars_minute = await _query_minute_bars(
-            session, instrument_id, start_minute, intraday_end_dt,
-            limit=NODE_CLUSTER_MINUTE_BARS,
-        )
-    else:
-        bars_minute = pd.DataFrame()
+        bars_minute = rm.bars
+    # 60min：仅 timeframe=="1h" 时查询（MACD 副图）
     bars_60min: pd.DataFrame | None = None
     if timeframe == "1h":
-        start_60min = datetime.combine(
-            today - timedelta(days=_60MIN_LOOKBACK_DAYS), datetime.min.time(),
+        r60 = await _mdas.get_bars(
+            session, instrument_id, timeframe="1h", adj=adj, include_realtime=True,
         )
-        bars_60min = await _query_60min_bars(
-            session, instrument_id, start_60min, intraday_end_dt,
-        )
+        bars_60min = r60.bars
+    # weekly/monthly：MDAS 内部"日线完成复权后再聚合"
     bars_weekly = pd.DataFrame()
     if timeframe == "1w":
-        bars_weekly = await fetch_weekly_bars(session, instrument_id, daily_start, today)
+        rw = await _mdas.get_bars(
+            session, instrument_id, timeframe="1w", adj=adj, include_realtime=True,
+        )
+        bars_weekly = rw.bars
     bars_monthly = pd.DataFrame()
     if timeframe == "1mo":
-        bars_monthly = await fetch_monthly_bars(session, instrument_id, daily_start, today)
-
-    # 3. [图表行情契约] 前复权处理：仅对非日线（日线已由 load_chart_bars 处理）
-    if adj == "qfq":
-        adj_factor_df = await _get_adj_factor_df(session, instrument_id)
-        # 周线/月线前复权
-        if not bars_weekly.empty:
-            bars_weekly = apply_adj_factor_to_bars(bars_weekly, adj_factor_df, intraday=False)
-        if not bars_monthly.empty:
-            bars_monthly = apply_adj_factor_to_bars(bars_monthly, adj_factor_df, intraday=False)
-        # 15min/1min/60min 日内前复权
-        if not bars_15min.empty:
-            bars_15min = apply_adj_factor_to_bars(
-                bars_15min, adj_factor_df, intraday=True
-            )
-        if not bars_minute.empty:
-            bars_minute = apply_adj_factor_to_bars(
-                bars_minute, adj_factor_df, intraday=True
-            )
-        if bars_60min is not None and not bars_60min.empty:
-            bars_60min = apply_adj_factor_to_bars(
-                bars_60min, adj_factor_df, intraday=True
-            )
+        rmo = await _mdas.get_bars(
+            session, instrument_id, timeframe="1mo", adj=adj, include_realtime=True,
+        )
+        bars_monthly = rmo.bars
 
     # [MACD 副图] - 按当前 timeframe 选择对应周期 bars 计算 MACD
-    # 必须在 apply_adj_factor 完成后选择，确保 macd_bars 指向已复权的 DataFrame
+    # macd_bars 已由 MDAS 完成复权（qfq 在出口应用一次，无需外层二次复权）
     if timeframe == "15m":
         macd_bars = bars_15min
     elif timeframe == "1h":
@@ -774,7 +735,7 @@ async def compute_all_indicators(
     #   - 1d: full_daily_bars（DB 全量日线，≥500 warmup）
     #   - 15m: 独立查询 bars+_SMC_WARMUP_BARS（5000）根，计算后 adapter 裁成 bars（4000）展示
     #   - 1h/1w: macd_bars（可获得完整历史）
-    #   - 1mo: 若 macd_bars < 200 则扩展回看到 _SMC_MONTHLY_LOOKBACK_DAYS（确保 ATR200 可初始化）
+    #   - 1mo: 若 macd_bars < 200 则通过 MDAS 扩展回看到 _SMC_MONTHLY_MIN_BARS（确保 ATR200 可初始化）
     # [view adapter] 完整计算结果经 adapt_smc_to_display_dto 裁成展示窗口 DTO：
     #   - 索引重基准到展示窗口（offset = max(0, total_bars - display_bars)）
     #   - 与窗口相交的活跃 OB 即使 anchor 在窗口左侧也保留并标记 clipped_left
@@ -791,38 +752,29 @@ async def compute_all_indicators(
                 # 1d: 完整日线（已有 ≥500 warmup）
                 smc_bars = full_daily_bars
             elif timeframe == "15m":
-                # 15m: 独立查询 bars+_SMC_WARMUP_BARS 根（计算 5000，展示 4000）
-                smc_15min_limit = bars + _SMC_WARMUP_BARS
-                smc_start_15min = datetime.combine(
-                    today - timedelta(days=_15MIN_LOOKBACK_DAYS), datetime.min.time(),
+                # 15m: MDAS 获取 bars+_SMC_WARMUP_BARS 根计算集（5000），adapter 裁成 bars（4000）展示
+                # MDAS 内部完成 DB 查询 + Pytdx 兜底 + 复权一次 + 周月聚合（SSOT，CHANGE-20260717-002）
+                r_smc15 = await _mdas.get_bars(
+                    session, instrument_id, timeframe="15m", adj=adj,
+                    include_realtime=True, limit=bars, warmup_bars=_SMC_WARMUP_BARS,
                 )
-                smc_bars = await _query_15min_bars(
-                    session, instrument_id, smc_start_15min, intraday_end_dt,
-                    limit=smc_15min_limit,
+                smc_bars = (
+                    r_smc15.warmup_bars_full
+                    if r_smc15.warmup_bars_full is not None
+                    else r_smc15.bars
                 )
-                # 前复权处理（与主 15m 路径一致）
-                if adj == "qfq" and not smc_bars.empty:
-                    adj_factor_df_smc = await _get_adj_factor_df(session, instrument_id)
-                    smc_bars = apply_adj_factor_to_bars(
-                        smc_bars, adj_factor_df_smc, intraday=True
-                    )
                 # 若查询不足则回退到 macd_bars
                 if smc_bars.empty or len(smc_bars) < bars:
                     smc_bars = macd_bars
             elif timeframe == "1mo":
-                # 1mo: 若 macd_bars < 200 则扩展回看（确保 ATR200 可初始化）
+                # 1mo: 若 macd_bars < 200 则通过 MDAS 扩展回看（确保 ATR200 可初始化）
+                # MDAS 内部"日线完成复权后再聚合"成月线（SSOT，CHANGE-20260717-002）
                 if len(macd_bars) < _SMC_MONTHLY_MIN_BARS:
-                    monthly_start_extended = today - timedelta(days=_SMC_MONTHLY_LOOKBACK_DAYS)
-                    smc_bars = await fetch_monthly_bars(
-                        session, instrument_id, monthly_start_extended, today,
+                    r_smcmo = await _mdas.get_bars(
+                        session, instrument_id, timeframe="1mo", adj=adj,
+                        include_realtime=True, limit=_SMC_MONTHLY_MIN_BARS,
                     )
-                    if adj == "qfq" and not smc_bars.empty:
-                        adj_factor_df_smc = await _get_adj_factor_df(session, instrument_id)
-                        smc_bars = apply_adj_factor_to_bars(
-                            smc_bars, adj_factor_df_smc, intraday=False
-                        )
-                    if smc_bars.empty:
-                        smc_bars = macd_bars
+                    smc_bars = r_smcmo.bars if not r_smcmo.bars.empty else macd_bars
                 else:
                     smc_bars = macd_bars
             else:

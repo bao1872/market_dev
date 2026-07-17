@@ -147,6 +147,7 @@ async def test_monitor_cycle_uses_live_minute_bars(
         adj: str = "qfq",
         limit: int | None = None,
         include_realtime: bool = True,
+        completed_only: bool = False,
         start_date=None,
         end_date=None,
     ) -> tuple[pd.DataFrame, str, bool]:
@@ -213,10 +214,11 @@ async def test_monitor_cycle_1m_uses_include_realtime(
         adj: str = "qfq",
         limit: int | None = None,
         include_realtime: bool = True,
+        completed_only: bool = False,
         start_date=None,
         end_date=None,
     ) -> tuple[pd.DataFrame, str, bool]:
-        captured_calls.append({"timeframe": timeframe, "include_realtime": include_realtime})
+        captured_calls.append({"timeframe": timeframe, "include_realtime": include_realtime, "completed_only": completed_only})
         if timeframe == "1m":
             return minute_df, "hybrid", True
         if timeframe == "1d":
@@ -278,10 +280,11 @@ async def test_monitor_calc_inputs_daily_15m_non_realtime(
         adj: str = "qfq",
         limit: int | None = None,
         include_realtime: bool = True,
+        completed_only: bool = False,
         start_date=None,
         end_date=None,
     ) -> tuple[pd.DataFrame, str, bool]:
-        captured_calls.append({"timeframe": timeframe, "include_realtime": include_realtime})
+        captured_calls.append({"timeframe": timeframe, "include_realtime": include_realtime, "completed_only": completed_only})
         if timeframe == "1m":
             return minute_df, "hybrid", True
         if timeframe == "1d":
@@ -312,5 +315,8 @@ async def test_monitor_calc_inputs_daily_15m_non_realtime(
     # daily/15m 计算输入：非实时（保守口径，不被截图实时性污染）
     assert calls_daily, "必须调用 daily 计算输入"
     assert all(c["include_realtime"] is False for c in calls_daily), "daily 计算输入不得 include_realtime=True"
+    # [CHANGE-20260717-002 SSOT] - daily/15m 计算输入必须 completed_only=True（仅已完成 bar）
+    assert all(c["completed_only"] is True for c in calls_daily), "daily 计算输入必须 completed_only=True"
     assert calls_15m, "必须调用 15m 计算输入（Node Cluster 筹码分布）"
     assert all(c["include_realtime"] is False for c in calls_15m), "15m 计算输入不得 include_realtime=True"
+    assert all(c["completed_only"] is True for c in calls_15m), "15m 计算输入必须 completed_only=True"

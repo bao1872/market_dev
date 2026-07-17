@@ -14,9 +14,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pandas as pd
 import pytest
+
 from app.repositories.bar_repository import apply_adj_factor_to_bars
 from app.services import market_data_aggregation_service as mdas
 from app.services.adj_factor import apply_adj_factor, apply_adj_factor_intraday
+from app.services.adjustment_factor_service import AdjustmentFactorService
 from app.services.freshness_sla import (
     _MINUTE_CHECK_SLA_SECONDS,
     DAILY_SLA_SECONDS,
@@ -47,28 +49,32 @@ def _build_sample_bars() -> pd.DataFrame:
 
 
 def _build_sample_adj_factor() -> pd.DataFrame:
-    """构造复权因子样本（06-16 adj=2.0，06-17/18 adj=1.0）。"""
+    """构造复权因子样本（10送10场景：06-16 adj=0.5，06-17/18 adj=1.0）。
+
+    Chanlunpro 语义：最新日期 adj_factor=1.0，除权前 adj_factor=累积 event_factor。
+    10送10时 event_factor=0.5，故除权前 adj_factor=0.5。
+    """
     return pd.DataFrame({
         "trade_date": pd.to_datetime(["2026-06-16", "2026-06-17", "2026-06-18"]),
-        "adj_factor": [2.0, 1.0, 1.0],
+        "adj_factor": [0.5, 1.0, 1.0],
     })
 
 
 def test_apply_adj_factor_basic() -> None:
     """测试日线前复权基本计算。
 
-    场景：06-16 adj=2.0，06-17/18 adj=1.0（latest）
-    预期：06-16 价格 × (2.0/1.0) = ×2；06-17/18 价格不变
+    场景：10送10，06-16 adj=0.5（除权前），06-17/18 adj=1.0（latest）
+    预期：06-16 价格 × (0.5/1.0) = ×0.5（除权前价格下调到除权后基准）；06-17/18 价格不变
     """
     bars_df = _build_sample_bars()
     adj_df = _build_sample_adj_factor()
 
     qfq_df = apply_adj_factor(bars_df, adj_df)
 
-    # 06-16 close = 10.2 × 2.0 = 20.4
-    assert abs(float(qfq_df.loc[pd.Timestamp("2026-06-16"), "close"]) - 20.4) < 1e-6
-    # 06-16 open = 10.0 × 2.0 = 20.0
-    assert abs(float(qfq_df.loc[pd.Timestamp("2026-06-16"), "open"]) - 20.0) < 1e-6
+    # 06-16 close = 10.2 × 0.5 = 5.1（除权前价格下调）
+    assert abs(float(qfq_df.loc[pd.Timestamp("2026-06-16"), "close"]) - 5.1) < 1e-6
+    # 06-16 open = 10.0 × 0.5 = 5.0
+    assert abs(float(qfq_df.loc[pd.Timestamp("2026-06-16"), "open"]) - 5.0) < 1e-6
     # 06-17/18 close 不变（ratio=1.0）
     assert abs(float(qfq_df.loc[pd.Timestamp("2026-06-17"), "close"]) - 5.2) < 1e-6
     assert abs(float(qfq_df.loc[pd.Timestamp("2026-06-18"), "close"]) - 5.4) < 1e-6
@@ -109,10 +115,10 @@ def test_apply_adj_factor_intraday() -> None:
     adj_df = _build_sample_adj_factor()
     qfq_df = apply_adj_factor_intraday(bars_df, adj_df)
 
-    # 06-16 09:30 close = 10.1 × 2.0 = 20.2
-    assert abs(float(qfq_df.loc[minute_idx[0], "close"]) - 20.2) < 1e-6
-    # 06-16 09:31 close = 10.2 × 2.0 = 20.4
-    assert abs(float(qfq_df.loc[minute_idx[1], "close"]) - 20.4) < 1e-6
+    # 06-16 09:30 close = 10.1 × 0.5 = 5.05（除权前价格下调）
+    assert abs(float(qfq_df.loc[minute_idx[0], "close"]) - 5.05) < 1e-6
+    # 06-16 09:31 close = 10.2 × 0.5 = 5.1
+    assert abs(float(qfq_df.loc[minute_idx[1], "close"]) - 5.1) < 1e-6
     # 06-17/18 close 不变
     assert abs(float(qfq_df.loc[minute_idx[2], "close"]) - 5.0) < 1e-6
 
@@ -134,12 +140,12 @@ def test_apply_adj_factor_missing_date_ffill() -> None:
 
     adj_df = pd.DataFrame({
         "trade_date": pd.to_datetime(["2026-06-16", "2026-06-17"]),
-        "adj_factor": [2.0, 1.0],
+        "adj_factor": [0.5, 1.0],
     })
 
     qfq_df = apply_adj_factor(bars_df, adj_df)
-    # 06-16 close = 10.2 × 2.0 = 20.4
-    assert abs(float(qfq_df.loc[pd.Timestamp("2026-06-16"), "close"]) - 20.4) < 1e-6
+    # 06-16 close = 10.2 × 0.5 = 5.1（除权前价格下调）
+    assert abs(float(qfq_df.loc[pd.Timestamp("2026-06-16"), "close"]) - 5.1) < 1e-6
     # 06-18 close = 5.4 × (1.0/1.0) = 5.4（ffill 06-17 的 adj=1.0）
     assert abs(float(qfq_df.loc[pd.Timestamp("2026-06-18"), "close"]) - 5.4) < 1e-6
 
@@ -150,7 +156,7 @@ def test_apply_adj_factor_to_bars_repository_wrapper() -> None:
     adj_df = _build_sample_adj_factor()
 
     qfq_df = apply_adj_factor_to_bars(bars_df, adj_df, intraday=False)
-    assert abs(float(qfq_df.loc[pd.Timestamp("2026-06-16"), "close"]) - 20.4) < 1e-6
+    assert abs(float(qfq_df.loc[pd.Timestamp("2026-06-16"), "close"]) - 5.1) < 1e-6
 
     # 分钟线模式
     minute_idx = pd.to_datetime(["2026-06-16 09:30", "2026-06-17 09:30"])
@@ -160,7 +166,7 @@ def test_apply_adj_factor_to_bars_repository_wrapper() -> None:
         "volume": [1000, 2000],
     }, index=minute_idx)
     qfq_minute = apply_adj_factor_to_bars(minute_bars, adj_df, intraday=True)
-    assert abs(float(qfq_minute.loc[minute_idx[0], "close"]) - 20.4) < 1e-6
+    assert abs(float(qfq_minute.loc[minute_idx[0], "close"]) - 5.1) < 1e-6
 
 
 # ============================================================
@@ -400,8 +406,8 @@ async def test_get_bars_qfq(client, monkeypatch: pytest.MonkeyPatch) -> None:
 
     [Phase 4] - bars.py 已改为调用 MarketDataAggregationService，所有 page_size
     统一走 mdas。patch mdas 内部函数（_query_daily_bars /
-    _call_expected_last_completed_daily_bar / _get_adj_factor_df / cache）替代
-    旧的 chart_bars_service.fetch_daily_bars。
+    _call_expected_last_completed_daily_bar）和 AdjustmentFactorService.get_factor_series
+    替代旧的 chart_bars_service.fetch_daily_bars。
     """
     _disable_mdas_cache(monkeypatch)
 
@@ -413,7 +419,7 @@ async def test_get_bars_qfq(client, monkeypatch: pytest.MonkeyPatch) -> None:
             "close": [10.2, 5.2],
             "volume": [100000, 200000],
             "amount": [1020000, 1040000],
-            "adj_factor": [2.0, 1.0],
+            "adj_factor": [0.5, 1.0],
         }, index=pd.to_datetime(["2026-06-16", "2026-06-17"]))
         df.index.name = "trade_date"
         return df
@@ -425,12 +431,12 @@ async def test_get_bars_qfq(client, monkeypatch: pytest.MonkeyPatch) -> None:
     async def mock_get_adj(*args, **kwargs):
         return pd.DataFrame({
             "trade_date": pd.to_datetime(["2026-06-16", "2026-06-17"]),
-            "adj_factor": [2.0, 1.0],
+            "adj_factor": [0.5, 1.0],
         })
 
     monkeypatch.setattr(mdas, "_query_daily_bars", mock_query_daily)
     monkeypatch.setattr(mdas, "_call_expected_last_completed_daily_bar", mock_expected)
-    monkeypatch.setattr(mdas, "_get_adj_factor_df", mock_get_adj)
+    monkeypatch.setattr(AdjustmentFactorService, "get_factor_series", mock_get_adj)
 
     response = await client.get(
         f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
@@ -440,8 +446,8 @@ async def test_get_bars_qfq(client, monkeypatch: pytest.MonkeyPatch) -> None:
     assert response.status_code == 200
     data = response.json()
     assert data["adj"] == "qfq"
-    # 06-16 close 前复权后 = 10.2 × 2.0 = 20.4
-    assert data["items"][0]["close"] == 20.4
+    # 06-16 close 前复权后 = 10.2 × 0.5 = 5.1（除权前价格下调）
+    assert data["items"][0]["close"] == 5.1
     # 06-17 close 不变 = 5.2
     assert data["items"][1]["close"] == 5.2
 
@@ -462,7 +468,7 @@ async def test_get_bars_qfq_non_chart_scenario(client, monkeypatch: pytest.Monke
             "close": [10.2, 5.2],
             "volume": [100000, 200000],
             "amount": [1020000, 1040000],
-            "adj_factor": [2.0, 1.0],
+            "adj_factor": [0.5, 1.0],
         }, index=pd.to_datetime(["2026-06-16", "2026-06-17"]))
         df.index.name = "trade_date"
         return df
@@ -474,12 +480,12 @@ async def test_get_bars_qfq_non_chart_scenario(client, monkeypatch: pytest.Monke
     async def mock_get_adj(*args, **kwargs):
         return pd.DataFrame({
             "trade_date": pd.to_datetime(["2026-06-16", "2026-06-17"]),
-            "adj_factor": [2.0, 1.0],
+            "adj_factor": [0.5, 1.0],
         })
 
     monkeypatch.setattr(mdas, "_query_daily_bars", mock_query_daily)
     monkeypatch.setattr(mdas, "_call_expected_last_completed_daily_bar", mock_expected)
-    monkeypatch.setattr(mdas, "_get_adj_factor_df", mock_get_adj)
+    monkeypatch.setattr(AdjustmentFactorService, "get_factor_series", mock_get_adj)
 
     # page_size=600 > 500，验证大分页仍正确走 mdas qfq 流程
     response = await client.get(
@@ -490,8 +496,8 @@ async def test_get_bars_qfq_non_chart_scenario(client, monkeypatch: pytest.Monke
     assert response.status_code == 200
     data = response.json()
     assert data["adj"] == "qfq"
-    # 06-16 close 前复权后 = 10.2 × 2.0 = 20.4
-    assert data["items"][0]["close"] == 20.4
+    # 06-16 close 前复权后 = 10.2 × 0.5 = 5.1（除权前价格下调）
+    assert data["items"][0]["close"] == 5.1
     # 06-17 close 不变 = 5.2
     assert data["items"][1]["close"] == 5.2
 

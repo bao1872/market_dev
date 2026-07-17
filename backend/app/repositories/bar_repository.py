@@ -727,6 +727,146 @@ async def _get_adj_factor_df(
     return df
 
 
+async def get_adj_factor_series(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    as_of: date | None = None,
+) -> pd.DataFrame:
+    """公开别名：获取权威日线因子序列（CHANGE-20260717-002）。
+
+    委托 _get_adj_factor_df，支持 as_of point-in-time 过滤。
+    MDAS / AdjustmentFactorService 必须通过此公开别名访问，禁止直接导入 _get_adj_factor_df。
+
+    Args:
+        session: 异步会话
+        instrument_id: 标的 UUID
+        as_of: 复权锚点日期（None=全量；date=只返回 trade_date <= as_of 的因子，
+            用于禁止未来除权事件泄漏）
+
+    Returns:
+        DataFrame: columns=[trade_date, adj_factor]，按 trade_date 排序
+    """
+    df = await _get_adj_factor_df(session, instrument_id)
+    if as_of is not None and not df.empty:
+        as_of_ts = pd.Timestamp(as_of)
+        df = df[df["trade_date"] <= as_of_ts].reset_index(drop=True)
+    return df
+
+
+async def rebuild_adj_factors(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    symbol: str,
+    earliest_affected: date,
+    adapter: PytdxAdapter | None = None,
+) -> int:
+    """公开别名：公司行为变化时重建 adj_factor 序列（CHANGE-20260717-002）。
+
+    从 earliest_affected 起重新计算该股票完整日线 adj_factor 序列并原子 upsert。
+    仅更新 adj_factor 列，不修改 OHLCV。失败时 re-raise（不吞没，不伪装）。
+
+    算法：
+    1. 查询 bars_daily 从 earliest_affected 至今的 trade_date + OHLCV
+    2. 调用 _calculate_adj_factor（Chanlunpro preclose 公式）重算因子
+    3. 批量 UPDATE bars_daily.adj_factor（仅 adj_factor 列）
+
+    Args:
+        session: 异步会话
+        instrument_id: 标的 UUID
+        symbol: 股票代码（用于 pytdx xdxr_info）
+        earliest_affected: 最早受影响日期（从此日起重算）
+        adapter: pytdx 适配器（None 用模块单例）
+
+    Returns:
+        更新的记录数
+
+    Raises:
+        Exception: 重算或 upsert 失败时 re-raise
+    """
+    # 1. 查询现有日线数据（从 earliest_affected 起）
+    try:
+        result = await session.execute(
+            select(
+                BarDaily.trade_date, BarDaily.open, BarDaily.high,
+                BarDaily.low, BarDaily.close, BarDaily.volume, BarDaily.amount,
+            )
+            .where(BarDaily.instrument_id == instrument_id)
+            .where(BarDaily.trade_date >= earliest_affected)
+            .order_by(BarDaily.trade_date)
+        )
+        rows = result.all()
+    except Exception as exc:
+        logger.warning(
+            "rebuild_adj_factors 查询失败 instrument_id=%s: %s", instrument_id, exc,
+        )
+        raise
+
+    if not rows:
+        logger.info(
+            "rebuild_adj_factors 无数据 instrument_id=%s earliest=%s",
+            instrument_id, earliest_affected,
+        )
+        return 0
+
+    # 构造 raw_df 供 _calculate_adj_factor 使用
+    raw_df = pd.DataFrame(rows, columns=[
+        "trade_date", "open", "high", "low", "close", "volume", "amount",
+    ])
+    raw_df["datetime"] = pd.to_datetime(raw_df["trade_date"])
+    for col in ["open", "high", "low", "close", "volume", "amount"]:
+        raw_df[col] = pd.to_numeric(raw_df[col], errors="coerce")
+
+    # 2. 重算 adj_factor（Chanlunpro preclose 公式）
+    try:
+        adj_factors = await asyncio.to_thread(
+            _calculate_adj_factor, symbol, raw_df, adapter,
+            True, earliest_affected,
+        )
+    except Exception as exc:
+        logger.warning(
+            "rebuild_adj_factors 计算失败 symbol=%s: %s", symbol, exc,
+        )
+        raise
+
+    if len(adj_factors) != len(raw_df):
+        logger.warning(
+            "rebuild_adj_factors 因子数量不匹配 symbol=%s expected=%d got=%d",
+            symbol, len(raw_df), len(adj_factors),
+        )
+        raise ValueError(
+            f"adj_factor 数量不匹配: expected={len(raw_df)}, got={len(adj_factors)}"
+        )
+
+    # 3. 批量 UPDATE bars_daily.adj_factor（仅 adj_factor 列，不修改 OHLCV）
+    trade_dates = raw_df["trade_date"].tolist()
+    try:
+        for td, factor in zip(trade_dates, adj_factors, strict=True):
+            await session.execute(
+                text(
+                    "UPDATE bars_daily SET adj_factor = :factor "
+                    "WHERE instrument_id = :iid AND trade_date = :td"
+                ),
+                {
+                    "factor": Decimal(str(factor)),
+                    "iid": instrument_id,
+                    "td": td if isinstance(td, date) else pd.Timestamp(td).date(),
+                },
+            )
+        await session.commit()
+    except Exception as exc:
+        logger.warning(
+            "rebuild_adj_factors upsert 失败 instrument_id=%s: %s", instrument_id, exc,
+        )
+        await session.rollback()
+        raise
+
+    logger.info(
+        "rebuild_adj_factors 完成 instrument_id=%s symbol=%s records=%d earliest=%s",
+        instrument_id, symbol, len(trade_dates), earliest_affected,
+    )
+    return len(trade_dates)
+
+
 async def fetch_daily_bars(
     session: AsyncSession,
     instrument_id: uuid.UUID,

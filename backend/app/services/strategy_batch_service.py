@@ -53,9 +53,12 @@ from app.models.strategy_run import (
     StrategyRunItem,
 )
 from app.repositories import strategy_result_repository
-from app.repositories.bar_repository import get_bars
 from app.services.calendar_service import is_trading_day_async
 from app.services.instrument_maintenance_service import stock_symbol_sql_filter
+
+# [CHANGE-20260717-002 SSOT] - DSA 行情读取改走 MarketDataAggregationService 唯一出口，
+# 禁止业务层直接调用 repository get_bars（自带复权，绕过统一契约/缓存/hash 诊断）
+from app.services.market_data_aggregation_service import MarketDataAggregationService
 from app.services.strategy_service import (
     StrategyNotFoundError,
     list_versions,
@@ -1529,17 +1532,24 @@ class StrategyBatchService:
                 )
 
         # 拉取日线行情（回看 5000 天，与 bars.py 一致）
+        # [CHANGE-20260717-002 SSOT] - 走 MDAS 唯一出口：point-in-time 回算，
+        # adjustment_as_of=run.trade_date 禁止未来除权事件泄漏；
+        # completed_only=True + include_realtime=False 确保只用已完成 bar（盘后 DSA）
         lookback_days = _STRATEGY_BATCH_DAILY_LOOKBACK_DAYS
         start_date = run.trade_date - timedelta(days=lookback_days)
         try:
-            bars_result = await get_bars(
-                db, item.instrument_id,
+            bars_result = await MarketDataAggregationService().get_bars(
+                session=db,
+                instrument_id=item.instrument_id,
                 timeframe="1d",
+                adj="qfq",
+                include_realtime=False,
+                completed_only=True,
                 start_date=start_date,
                 end_date=run.trade_date,
-                adjustment="qfq",
+                adjustment_as_of=run.trade_date,
             )
-            bars_df = bars_result.bars if bars_result.bars is not None else None
+            bars_df = bars_result.bars
         except Exception as exc:
             raise RuntimeError(
                 f"拉取行情失败 instrument_id={item.instrument_id}: {exc}"

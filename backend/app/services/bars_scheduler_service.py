@@ -28,7 +28,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -311,8 +311,30 @@ class BarsSchedulerService:
                 phase_succeeded, phase_failed, result.period_counts[period],
             )
 
-            # [BarsScheduler] - 日线阶段完成后，检查覆盖率并触发/复用 DSA run
+            # [BarsScheduler] - 日线阶段完成后：
+            #   1. [CHANGE-20260717-002 SSOT] 重建复权因子序列（公司行为变化时）
+            #      必须在覆盖率门禁/DSA 前，保证 DSA/snapshot 使用最新因子
+            #   2. 检查覆盖率并触发/复用 DSA run
             if is_daily_refresh and period == "d":
+                # 1. 因子重建（单股失败不阻断；整体异常不阻断后续 DSA/snapshot，
+                #    DSA/snapshot 可基于旧因子 degraded 运行）
+                try:
+                    rebuild_result = await self._rebuild_factors_if_needed(
+                        trade_date, instruments, db_session, job_run_id=job_run_id,
+                    )
+                    logger.info(
+                        "[BarsScheduler] 因子重建阶段完成: checked=%d changed=%d "
+                        "rebuilt=%d failed=%d",
+                        rebuild_result["checked"], rebuild_result["changed"],
+                        rebuild_result["rebuilt"], rebuild_result["failed"],
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[BarsScheduler] 因子重建阶段异常（不阻断后续）: %s", exc,
+                        exc_info=True,
+                    )
+
+                # 2. 覆盖率门禁 + DSA 触发
                 try:
                     result.dsa_run_id = await self._check_daily_coverage_and_trigger_dsa(
                         trade_date, db_session, job_run_id=job_run_id, result=result,
@@ -467,6 +489,185 @@ class BarsSchedulerService:
         else:
             async with AsyncSessionLocal() as session:
                 return await _do_check(session)
+
+    async def _rebuild_factors_if_needed(
+        self,
+        trade_date: date,
+        instruments: list[Instrument],
+        db_session: AsyncSession | None = None,
+        job_run_id: uuid.UUID | None = None,
+    ) -> dict[str, Any]:
+        """[CHANGE-20260717-002 SSOT] - 公司行为变化时重建复权因子序列。
+
+        在日线刷新完成后、覆盖率门禁/DSA 触发前执行，保证 DSA 和 snapshot
+        使用的因子序列已包含最新公司行为（禁止未来除权事件泄漏到 point-in-time 回算）。
+
+        流程：
+        1. 遍历 active A 股，detect_company_action_change 检查 xdxr fingerprint
+        2. fingerprint 变化的股票调用 rebuild_factor_series 重建完整因子序列
+           （从最早受影响日期重算，原子 upsert，禁止只更新最新 5 根）
+        3. 重建成功后精确失效该股票 MDAS 缓存（service 内部完成）
+        4. 单股失败不阻断（MDAS 会标记 degraded）：rebuild 失败时回滚 fingerprint，
+           保证下次运行重新检测重建
+
+        Args:
+            trade_date: 交易日期
+            instruments: active A 股列表（复用调用方已查询的缓存，避免重复查询）
+            db_session: 可选的 DB 会话（None 时内部新建单一 session 复用）
+            job_run_id: 可选的 SchedulerJobRun.id，传入时写 REBUILDING_FACTORS 事件
+
+        Returns:
+            dict: checked / changed / rebuilt / failed / failed_symbols
+        """
+        from app.services.adjustment_factor_service import AdjustmentFactorService
+        from app.services.job_run_event_service import append_event
+
+        adj_service = AdjustmentFactorService()
+        adapter = get_pytdx_adapter()
+
+        total = len(instruments)
+        result: dict[str, Any] = {
+            "checked": 0,
+            "changed": 0,
+            "rebuilt": 0,
+            "failed": 0,
+            "failed_symbols": [],
+        }
+
+        if total == 0:
+            logger.warning("[BarsScheduler] _rebuild_factors_if_needed: 无 active 股票")
+            return result
+
+        logger.info(
+            "[BarsScheduler] 开始因子重建检查 trade_date=%s total=%d", trade_date, total,
+        )
+
+        # 写开始事件
+        if job_run_id is not None:
+            try:
+                async def _write_start(db: AsyncSession) -> None:
+                    await append_event(
+                        db=db, job_run_id=job_run_id,
+                        step="REBUILDING_FACTORS", level="info",
+                        message=f"开始因子重建检查: total={total}",
+                        payload={"total": total, "trade_date": trade_date.isoformat()},
+                    )
+                    await db.commit()
+                if db_session is not None:
+                    await _write_start(db_session)
+                else:
+                    async with AsyncSessionLocal() as session:
+                        await _write_start(session)
+            except Exception as exc:
+                logger.warning(
+                    "[BarsScheduler] 写 REBUILDING_FACTORS start 事件失败: %s", exc,
+                )
+
+        # tqdm 进度条
+        try:
+            from tqdm import tqdm
+            pbar = tqdm(
+                instruments, desc="因子重建检查", position=0, leave=True, dynamic_ncols=True,
+            )
+        except ImportError:
+            pbar = None
+
+        # 使用单一 session 遍历（db_session 为 None 时新建复用，减少连接开销）
+        # detect 不写 DB（仅 pytdx + Redis），rebuild 写 DB（commit per stock）
+        if db_session is not None:
+            session = db_session
+            should_close = False
+        else:
+            session = AsyncSessionLocal()
+            should_close = True
+
+        try:
+            for instrument in (pbar or instruments):
+                symbol = instrument.symbol
+                result["checked"] += 1
+                try:
+                    # 1. detect：检查 xdxr fingerprint 是否变化
+                    #    （detect 内部已存储新 fingerprint，rebuild 失败时需回滚）
+                    earliest = await adj_service.detect_company_action_change(
+                        session, instrument.id, symbol, adapter,
+                    )
+                    if earliest is None:
+                        continue  # 无变化，跳过重建
+
+                    # 2. rebuild：从最早受影响日期重算完整因子序列
+                    result["changed"] += 1
+                    await adj_service.rebuild_factor_series(
+                        session, instrument.id, symbol, earliest, adapter,
+                    )
+                    await session.commit()
+                    result["rebuilt"] += 1
+                except Exception as exc:
+                    # 单股失败不阻断：rollback 保持 session 可用
+                    # 回滚 fingerprint：detect 已存新值，rebuild 失败需删除，
+                    # 保证下次运行重新检测重建（避免因子永久停留在旧值）
+                    try:
+                        await session.rollback()
+                    except Exception:
+                        pass
+                    adj_service._delete_fingerprint(instrument.id)
+                    result["failed"] += 1
+                    if symbol not in result["failed_symbols"]:
+                        result["failed_symbols"].append(symbol)
+                    logger.warning(
+                        "[BarsScheduler] 因子重建失败 symbol=%s: %s", symbol, exc,
+                    )
+
+                if pbar is not None:
+                    pbar.set_postfix(
+                        checked=result["checked"],
+                        changed=result["changed"],
+                        rebuilt=result["rebuilt"],
+                        failed=result["failed"],
+                    )
+        finally:
+            if should_close:
+                await session.close()
+
+        if pbar is not None:
+            pbar.close()
+
+        logger.info(
+            "[BarsScheduler] 因子重建检查完成: checked=%d changed=%d rebuilt=%d failed=%d",
+            result["checked"], result["changed"], result["rebuilt"], result["failed"],
+        )
+
+        # 写完成事件
+        if job_run_id is not None:
+            try:
+                async def _write_done(db: AsyncSession) -> None:
+                    await append_event(
+                        db=db, job_run_id=job_run_id,
+                        step="REBUILDING_FACTORS", level="info",
+                        message=(
+                            f"因子重建检查完成: checked={result['checked']}, "
+                            f"changed={result['changed']}, rebuilt={result['rebuilt']}, "
+                            f"failed={result['failed']}"
+                        ),
+                        payload={
+                            "checked": result["checked"],
+                            "changed": result["changed"],
+                            "rebuilt": result["rebuilt"],
+                            "failed": result["failed"],
+                            "failed_symbols": result["failed_symbols"][:100],
+                        },
+                    )
+                    await db.commit()
+                if db_session is not None:
+                    await _write_done(db_session)
+                else:
+                    async with AsyncSessionLocal() as session:
+                        await _write_done(session)
+            except Exception as exc:
+                logger.warning(
+                    "[BarsScheduler] 写 REBUILDING_FACTORS done 事件失败: %s", exc,
+                )
+
+        return result
 
     async def _append_daily_done_event(
         self,

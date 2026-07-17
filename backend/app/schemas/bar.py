@@ -83,6 +83,14 @@ class BarListResponse(BaseModel):
     freshness_seconds: float = Field(0.0, description="数据新鲜度（秒）")
     degraded: bool = Field(False, description="是否降级（Pytdx 失败等）")
     degraded_reason: str | None = Field(None, description="降级原因")
+    # [CHANGE-20260717-002 SSOT] - MDAS v2 契约诊断字段（跨调用方一致性校验）
+    # source_bar_hash/adj_factor_hash 校验同一标的/周期/结束日下 bars API、
+    # indicator/SMC、feature snapshot 返回的 OHLCV 与因子是否完全一致
+    source_bar_hash: str | None = Field(None, description="bars OHLCV SHA256 前 16 字符（跨调用方一致性校验）")
+    adj_factor_hash: str | None = Field(None, description="复权因子序列 SHA256 前 16 字符（adj=none 时为空串）")
+    market_data_contract_version: str | None = Field(None, description="行情数据契约版本（当前 v2）")
+    completed_through: datetime | None = Field(None, description="最新已完成 bar 时间（不含 partial/realtime）")
+    adjustment_as_of: date | None = Field(None, description="复权锚点（None=最新；point-in-time 回算时为业务日）")
 
 
 if __name__ == "__main__":
