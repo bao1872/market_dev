@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import random
@@ -34,16 +35,16 @@ from app.core.pytdx_adapter import get_pytdx_adapter
 from app.core.redis_client import get_sync_redis
 from app.core.time import SHANGHAI_TZ, now_shanghai, shanghai_business_date
 from app.repositories.bar_repository import (
-    _get_adj_factor_df,
     _get_symbol,
     _query_15min_bars,
     _query_60min_bars,
     _query_daily_bars,
     _query_minute_bars,
-    apply_adj_factor_to_bars,
-    convert_kline_frequency,
 )
+from app.services.adjustment_factor_service import AdjustmentFactorService
 from app.services.calendar_service import is_trading_day_async
+from app.services.chart_bars_service import compute_source_bar_hash
+from app.services.kline_aggregator import aggregate as aggregate_kline
 from app.services.market_status_service import (
     MARKET_SESSION_AFTERNOON,
     MARKET_SESSION_MORNING,
@@ -68,6 +69,9 @@ _MIN_CACHE_TTL: int = 5
 _MAX_CACHE_TTL: int = 15
 _REDIS_CACHE_PREFIX: str = "mdas"
 
+# [mdas] - 描述: 行情数据契约版本（CHANGE-20260717-002 引入 v2，含 hash/as_of/completed_through）
+_MARKET_DATA_CONTRACT_VERSION: str = "v2"
+
 # [mdas] - 描述: 1m → 15m/1h 聚合频率映射
 _TARGET_FREQ: dict[str, str] = {"15m": "15min", "1h": "60min"}
 
@@ -77,7 +81,16 @@ _BAR_COLUMNS: list[str] = ["open", "high", "low", "close", "volume", "amount", "
 
 @dataclass
 class BarAggregationResult:
-    """行情聚合结果，包含 bars DataFrame 与数据源诊断字段。"""
+    """行情聚合结果，包含 bars DataFrame 与数据源诊断字段。
+
+    CHANGE-20260717-002 扩展（v2 契约）：
+    - warmup_bars_full: 含 warmup 的完整计算集（warmup_bars=0 时为 None）
+    - market_data_contract_version: 契约版本常量 "v2"
+    - source_bar_hash: bars 的 OHLCV SHA256 前 16 字符（跨调用方一致性校验）
+    - adj_factor_hash: 因子序列 SHA256 前 16 字符（adj=none 时为空串）
+    - adjustment_as_of: 回显复权锚点（None=最新）
+    - completed_through: 最新已完成 bar 时间（不含 partial/realtime）
+    """
 
     bars: pd.DataFrame
     data_source: str
@@ -89,6 +102,12 @@ class BarAggregationResult:
     degraded: bool
     degraded_reason: str | None
     cache_hit: bool = False
+    warmup_bars_full: pd.DataFrame | None = None
+    market_data_contract_version: str = _MARKET_DATA_CONTRACT_VERSION
+    source_bar_hash: str = ""
+    adj_factor_hash: str = ""
+    adjustment_as_of: date | None = None
+    completed_through: pd.Timestamp | None = None
 
 
 # ===== 交易时间判断 =====
@@ -360,6 +379,31 @@ def _finalize_bars(
     return df
 
 
+# ===== 复权因子哈希（跨调用方一致性校验） =====
+
+
+def _compute_adj_factor_hash(factor_df: pd.DataFrame) -> str:
+    """计算复权因子序列哈希（trade_date|adj_factor 拼接的 SHA256 前 16 字符）。
+
+    用于跨调用方（bars API / indicator / feature snapshot）的因子一致性校验。
+    与 compute_source_bar_hash 配对：source_bar_hash 校验 OHLCV，adj_factor_hash 校验因子。
+
+    Args:
+        factor_df: 复权因子 DataFrame，columns=[trade_date, adj_factor]
+
+    Returns:
+        SHA256 hexdigest 前 16 字符；空 DataFrame 返回空字符串
+    """
+    if factor_df is None or factor_df.empty:
+        return ""
+    parts: list[str] = []
+    for _, row in factor_df.iterrows():
+        td = row["trade_date"]
+        td_str = td.strftime("%Y-%m-%d") if hasattr(td, "strftime") else str(td)
+        parts.append(f"{td_str}|{row['adj_factor']}")
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
 # ===== Redis 短缓存 =====
 
 
@@ -368,33 +412,42 @@ def _cache_key(
     timeframe: str,
     adj: str,
     include_realtime: bool,
+    completed_only: bool,
     start_date: date | datetime | None,
     end_date: date | datetime | None,
+    limit: int | None,
+    warmup_bars: int,
+    adjustment_as_of: date | None,
 ) -> str:
-    """构建缓存键，包含所有影响结果的参数。"""
+    """构建缓存键，包含所有影响结果的参数 + 契约版本（自动隔离新旧缓存）。"""
     start = start_date.isoformat() if start_date is not None else "_"
     end = end_date.isoformat() if end_date is not None else "_"
+    as_of_str = adjustment_as_of.isoformat() if adjustment_as_of is not None else "_"
+    limit_str = str(limit) if limit is not None else "_"
     return (
         f"{_REDIS_CACHE_PREFIX}:"
-        f"{instrument_id}:{timeframe}:{adj}:{include_realtime}:{start}:{end}"
+        f"{instrument_id}:{timeframe}:{adj}:{include_realtime}:{completed_only}:"
+        f"{start}:{end}:{limit_str}:{warmup_bars}:{as_of_str}:"
+        f"{_MARKET_DATA_CONTRACT_VERSION}"
     )
 
 
 def _serialize_result(result: BarAggregationResult) -> str:
     """将结果序列化为 JSON 字符串。"""
-    bars = result.bars
-    if bars.empty:
-        bars_payload: dict[str, Any] = {
-            "index": [],
-            "columns": list(bars.columns),
-            "data": [],
-        }
-    else:
-        bars_payload = bars.to_dict(orient="split")
-        bars_payload["index"] = [idx.isoformat() for idx in bars.index]
+    def _df_to_payload(df: pd.DataFrame) -> dict[str, Any]:
+        if df.empty:
+            return {"index": [], "columns": list(df.columns), "data": []}
+        payload = df.to_dict(orient="split")
+        payload["index"] = [idx.isoformat() for idx in df.index]
+        return payload
 
     payload = {
-        "bars": bars_payload,
+        "bars": _df_to_payload(result.bars),
+        "warmup_bars_full": (
+            _df_to_payload(result.warmup_bars_full)
+            if result.warmup_bars_full is not None
+            else None
+        ),
         "data_source": result.data_source,
         "as_of": result.as_of.isoformat(),
         "is_partial": result.is_partial,
@@ -411,24 +464,47 @@ def _serialize_result(result: BarAggregationResult) -> str:
         "freshness_seconds": result.freshness_seconds,
         "degraded": result.degraded,
         "degraded_reason": result.degraded_reason,
+        "market_data_contract_version": result.market_data_contract_version,
+        "source_bar_hash": result.source_bar_hash,
+        "adj_factor_hash": result.adj_factor_hash,
+        "adjustment_as_of": (
+            result.adjustment_as_of.isoformat()
+            if result.adjustment_as_of is not None
+            else None
+        ),
+        "completed_through": (
+            result.completed_through.isoformat()
+            if result.completed_through is not None
+            else None
+        ),
     }
     return json.dumps(payload)
 
 
 def _deserialize_result(raw: str) -> BarAggregationResult | None:
     """从 JSON 字符串反序列化结果。"""
+    def _payload_to_df(payload_df: dict[str, Any] | None) -> pd.DataFrame:
+        if payload_df is None:
+            return pd.DataFrame()
+        index = pd.to_datetime(payload_df["index"])
+        df = pd.DataFrame(
+            payload_df["data"],
+            index=index,
+            columns=payload_df["columns"],
+        )
+        for col in df.columns:
+            if col in _BAR_COLUMNS:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df
+
     try:
         payload = json.loads(raw)
-        bars_payload = payload["bars"]
-        index = pd.to_datetime(bars_payload["index"])
-        bars = pd.DataFrame(
-            bars_payload["data"],
-            index=index,
-            columns=bars_payload["columns"],
+        bars = _payload_to_df(payload["bars"])
+        warmup = (
+            _payload_to_df(payload.get("warmup_bars_full"))
+            if payload.get("warmup_bars_full") is not None
+            else None
         )
-        for col in bars.columns:
-            if col in _BAR_COLUMNS:
-                bars[col] = pd.to_numeric(bars[col], errors="coerce")
 
         return BarAggregationResult(
             bars=bars,
@@ -449,6 +525,22 @@ def _deserialize_result(raw: str) -> BarAggregationResult | None:
             degraded=payload["degraded"],
             degraded_reason=payload["degraded_reason"],
             cache_hit=payload.get("cache_hit", False),
+            warmup_bars_full=warmup,
+            market_data_contract_version=payload.get(
+                "market_data_contract_version", _MARKET_DATA_CONTRACT_VERSION
+            ),
+            source_bar_hash=payload.get("source_bar_hash", ""),
+            adj_factor_hash=payload.get("adj_factor_hash", ""),
+            adjustment_as_of=(
+                date.fromisoformat(payload["adjustment_as_of"])
+                if payload.get("adjustment_as_of") is not None
+                else None
+            ),
+            completed_through=(
+                pd.Timestamp(payload["completed_through"])
+                if payload.get("completed_through") is not None
+                else None
+            ),
         )
     except Exception as exc:
         logger.warning("MDAS 缓存反序列化失败: %s", exc)
@@ -508,10 +600,14 @@ class MarketDataAggregationService:
         timeframe: str = "1d",
         adj: str = "none",
         include_realtime: bool = True,
+        completed_only: bool = False,
         start_date: date | datetime | None = None,
         end_date: date | datetime | None = None,
+        limit: int | None = None,
+        warmup_bars: int = 0,
+        adjustment_as_of: date | None = None,
     ) -> BarAggregationResult:
-        """获取行情聚合结果。
+        """获取行情聚合结果（v2 契约，CHANGE-20260717-002）。
 
         Args:
             session: 异步 DB 会话
@@ -519,11 +615,15 @@ class MarketDataAggregationService:
             timeframe: 1d | 15m | 1h | 1w | 1mo | 1m
             adj: qfq | none
             include_realtime: 交易时段是否补充实时 1m 数据
+            completed_only: 只返回已完成 bar（True 时强制 include_realtime=False）
             start_date: 起始日期/时间（可选）
             end_date: 结束日期/时间（可选）
+            limit: 返回最近 N 根（服务端截取，保证 source_bar_hash 稳定）
+            warmup_bars: 额外预热根数（>0 时返回 warmup_bars_full 含完整计算集）
+            adjustment_as_of: 复权锚点（None=最新；date=point-in-time，禁止未来除权事件泄漏）
 
         Returns:
-            BarAggregationResult
+            BarAggregationResult（含 bars、warmup_bars_full、hash、contract_version 等诊断字段）
         """
         now = now_shanghai()
         as_of = now
@@ -535,9 +635,14 @@ class MarketDataAggregationService:
         if adj not in _ALLOWED_ADJ:
             raise ValueError(f"adj 只支持 qfq/none, got {adj!r}")
 
-        # [mdas] - 描述: 先查 Redis 短缓存
+        # [mdas] - completed_only 与 include_realtime 互斥：completed_only 强制不含实时
+        if completed_only:
+            include_realtime = False
+
+        # [mdas] - 先查 Redis 短缓存（11 参数 + 契约版本）
         cache_key = _cache_key(
-            instrument_id, timeframe, adj, include_realtime, start_date, end_date
+            instrument_id, timeframe, adj, include_realtime, completed_only,
+            start_date, end_date, limit, warmup_bars, adjustment_as_of,
         )
         cached = _cache_get(cache_key)
         if cached is not None:
@@ -554,6 +659,23 @@ class MarketDataAggregationService:
         last_live_bar_time: pd.Timestamp | None = None
         degraded = False
         degraded_reason: str | None = None
+
+        # [mdas] - 获取复权因子序列（在数据查询前，因子序列用于 qfq 和 adj_factor_hash）
+        # include_realtime=True 时取全量因子（含今日，用于 partial daily qfq）
+        # include_realtime=False 时按 as_of 过滤（历史可复现，无未来泄漏）
+        _adj_service = AdjustmentFactorService()
+        factor_df = pd.DataFrame()
+        if adj == "qfq":
+            fetch_as_of = None if include_realtime else adjustment_as_of
+            try:
+                factor_df = await _adj_service.get_factor_series(
+                    session, instrument_id, as_of=fetch_as_of
+                )
+            except Exception as exc:
+                degraded = True
+                degraded_reason = f"adj_factor_unavailable: {exc}"
+                data_source = "degraded"
+        adj_factor_hash = _compute_adj_factor_hash(factor_df)
 
         # ============================================================
         # 日线 / 周线 / 月线
@@ -580,32 +702,24 @@ class MarketDataAggregationService:
                     degraded_reason = f"pytdx daily fallback failed: {exc}"
                     data_source = "degraded"
 
-            # [mdas] - 描述: 周线/月线从日线合成
-            if timeframe == "1w":
-                bars_df = convert_kline_frequency(daily_df, "w") if not daily_df.empty else daily_df
-            elif timeframe == "1mo":
-                bars_df = convert_kline_frequency(daily_df, "m") if not daily_df.empty else daily_df
-            else:
-                bars_df = daily_df
-
-            # [mdas] - 描述: 日线复权在合成前应用（周线/月线更准确）
-            if adj == "qfq" and not bars_df.empty:
+            # [mdas] - qfq 应用在合成前（"日线完成复权后再聚合"）
+            if adj == "qfq" and not daily_df.empty and not factor_df.empty:
                 try:
-                    adj_factor_df = await _get_adj_factor_df(session, instrument_id)
-                    if not adj_factor_df.empty:
-                        daily_df = apply_adj_factor_to_bars(
-                            daily_df, adj_factor_df, intraday=False
-                        )
-                        if timeframe == "1w":
-                            bars_df = convert_kline_frequency(daily_df, "w")
-                        elif timeframe == "1mo":
-                            bars_df = convert_kline_frequency(daily_df, "m")
-                        else:
-                            bars_df = daily_df
+                    daily_df = _adj_service.apply_qfq(
+                        daily_df, factor_df, as_of=adjustment_as_of, intraday=False
+                    )
                 except Exception as exc:
                     degraded = True
                     degraded_reason = f"qfq failed: {exc}"
                     data_source = "degraded"
+
+            # [mdas] - 周线/月线从已复权日线合成（委托 kline_aggregator）
+            if timeframe == "1w":
+                bars_df = aggregate_kline(daily_df, "1w") if not daily_df.empty else daily_df
+            elif timeframe == "1mo":
+                bars_df = aggregate_kline(daily_df, "1mo") if not daily_df.empty else daily_df
+            else:
+                bars_df = daily_df
 
         # ============================================================
         # 日内周期（含 1m 原始分钟线）
@@ -646,29 +760,28 @@ class MarketDataAggregationService:
                     degraded_reason = f"pytdx realtime fallback failed: {exc}"
                     data_source = "degraded"
 
-            if adj == "qfq" and not bars_df.empty:
+            # [mdas] - qfq 应用（日内按交易日映射同一权威日线因子）
+            if adj == "qfq" and not bars_df.empty and not factor_df.empty:
                 try:
-                    adj_factor_df = await _get_adj_factor_df(session, instrument_id)
-                    if not adj_factor_df.empty:
-                        bars_df = apply_adj_factor_to_bars(
-                            bars_df, adj_factor_df, intraday=True
-                        )
+                    bars_df = _adj_service.apply_qfq(
+                        bars_df, factor_df, as_of=adjustment_as_of, intraday=True
+                    )
                 except Exception as exc:
                     degraded = True
                     degraded_reason = f"qfq failed: {exc}"
                     data_source = "degraded"
 
-        # [mdas] - 描述: 排序、去重、过滤未完成 bar
+        # [mdas] - 排序、去重、过滤未完成 bar
         bars_df = _finalize_bars(bars_df, timeframe, now)
 
-        # [mdas] - 描述: 若 Pytdx 数据被过滤掉，同步 last_live_bar_time
+        # [mdas] - 若 Pytdx 数据被过滤掉，同步 last_live_bar_time
         if last_live_bar_time is not None and not bars_df.empty:
             if last_live_bar_time not in bars_df.index:
                 last_live_bar_time = None
         elif bars_df.empty:
             last_live_bar_time = None
 
-        # [mdas] - 描述: 1d 交易时段合成今日 partial daily bar（不写库，仅响应）
+        # [mdas] - 1d 交易时段合成今日 partial daily bar（不写库，仅响应）
         # 放在 _finalize_bars 之后，避免被过滤未完成日线逻辑误删
         if timeframe == "1d" and include_realtime:
             try:
@@ -686,21 +799,21 @@ class MarketDataAggregationService:
                         # 只使用已完成 1m bar：剔除最后一根可能未完成的 bar
                         if len(live_1m) > 1:
                             live_1m = live_1m.iloc[:-1]
-                        # [mdas] - qfq 场景下，partial daily bar 需与复权后的历史日线连续。
-                        # 1m 数据本身不含复权调整，使用当日最新 adj_factor 整体乘到价格列。
-                        partial_adj_factor: float | None = None
-                        if adj == "qfq":
-                            try:
-                                adj_factor_df = await _get_adj_factor_df(session, instrument_id)
-                                if not adj_factor_df.empty:
-                                    partial_adj_factor = float(adj_factor_df["adj_factor"].iloc[-1])
-                            except Exception as exc:
-                                logger.warning(
-                                    "partial daily 获取复权因子失败 instrument_id=%s: %s",
-                                    instrument_id, exc,
-                                )
-                        partial_daily = _aggregate_minute_to_daily(live_1m, partial_adj_factor)
+                        # [mdas] - partial daily 先合成 raw（factor=1.0），再统一走 apply_qfq
+                        # 保证 partial bar 与复权后的历史日线连续（"复权一次"原则）
+                        partial_daily = _aggregate_minute_to_daily(live_1m, 1.0)
                         if not partial_daily.empty:
+                            if adj == "qfq" and not factor_df.empty:
+                                try:
+                                    partial_daily = _adj_service.apply_qfq(
+                                        partial_daily, factor_df,
+                                        as_of=adjustment_as_of, intraday=False,
+                                    )
+                                except Exception as exc:
+                                    logger.warning(
+                                        "partial daily qfq 失败 instrument_id=%s: %s",
+                                        instrument_id, exc,
+                                    )
                             bars_df = _merge_bars(bars_df, partial_daily)
                             if data_source == "db":
                                 data_source = "hybrid"
@@ -716,6 +829,24 @@ class MarketDataAggregationService:
                 degraded_reason = f"pytdx partial daily failed: {exc}"
                 data_source = "degraded"
 
+        # [mdas] - completed_through = 最新已完成 DB bar 时间（不含 partial/realtime）
+        completed_through = last_persisted_bar_time
+
+        # [mdas] - limit / warmup 截取（在 hash 计算前，保证相同 limit 下 hash 稳定）
+        warmup_bars_full: pd.DataFrame | None = None
+        if warmup_bars > 0 and not bars_df.empty:
+            full_count = (limit or 0) + warmup_bars
+            warmup_bars_full = (
+                bars_df.tail(full_count) if full_count <= len(bars_df) else bars_df
+            )
+        if limit is not None and not bars_df.empty:
+            bars_df = bars_df.tail(limit)
+
+        # [mdas] - source_bar_hash 在 limit 截取后计算（跨调用方一致性校验）
+        source_bar_hash = (
+            compute_source_bar_hash(bars_df, timeframe) if not bars_df.empty else ""
+        )
+
         result = BarAggregationResult(
             bars=bars_df,
             data_source=data_source,
@@ -726,6 +857,11 @@ class MarketDataAggregationService:
             freshness_seconds=0.0,
             degraded=degraded,
             degraded_reason=degraded_reason,
+            warmup_bars_full=warmup_bars_full,
+            source_bar_hash=source_bar_hash,
+            adj_factor_hash=adj_factor_hash,
+            adjustment_as_of=adjustment_as_of,
+            completed_through=completed_through,
         )
 
         _cache_set(cache_key, result)
@@ -805,13 +941,48 @@ if __name__ == "__main__":
     assert agg15.iloc[0]["close"] == 10.06
     print("1m -> 15m 聚合 ✓")
 
-    # 5. 验证 get_bars 签名
+    # 5. 验证 get_bars 签名（v2 契约：11 参数 + self）
     sig = inspect.signature(MarketDataAggregationService.get_bars)
     params = list(sig.parameters.keys())
-    assert params == [
+    expected_params = [
         "self", "session", "instrument_id", "timeframe", "adj",
-        "include_realtime", "start_date", "end_date",
-    ], f"get_bars 参数不匹配: {params}"
+        "include_realtime", "completed_only", "start_date", "end_date",
+        "limit", "warmup_bars", "adjustment_as_of",
+    ]
+    assert params == expected_params, f"get_bars 参数不匹配: {params}"
     print(f"get_bars params={params} ✓")
+
+    # 6. 验证 v2 契约新字段默认值
+    assert result.market_data_contract_version == "v2", \
+        f"contract_version 应为 v2, got {result.market_data_contract_version}"
+    assert result.source_bar_hash == "", \
+        f"source_bar_hash 默认应为空串, got {result.source_bar_hash!r}"
+    assert result.adj_factor_hash == "", \
+        f"adj_factor_hash 默认应为空串, got {result.adj_factor_hash!r}"
+    assert result.adjustment_as_of is None, \
+        f"adjustment_as_of 默认应为 None, got {result.adjustment_as_of!r}"
+    assert result.completed_through is None, \
+        f"completed_through 默认应为 None, got {result.completed_through!r}"
+    assert result.warmup_bars_full is None, \
+        f"warmup_bars_full 默认应为 None, got {result.warmup_bars_full!r}"
+    print("v2 契约新字段默认值 ✓")
+
+    # 7. 验证 _compute_adj_factor_hash
+    factor_df = pd.DataFrame({
+        "trade_date": pd.to_datetime(["2026-06-16", "2026-06-17"]),
+        "adj_factor": [0.5, 1.0],
+    })
+    h = _compute_adj_factor_hash(factor_df)
+    assert len(h) == 16, f"adj_factor_hash 应为 16 字符, got {len(h)}"
+    assert _compute_adj_factor_hash(pd.DataFrame()) == "", "空因子 hash 应为空串"
+    print(f"_compute_adj_factor_hash ✓ (hash={h})")
+
+    # 8. 验证 _cache_key 含契约版本（11 参数）
+    ck = _cache_key(
+        uuid.UUID("00000000-0000-0000-0000-000000000001"), "1d", "qfq", True, False,
+        None, None, 4000, 1000, None,
+    )
+    assert ":v2" in ck, f"缓存键应含契约版本后缀, got {ck}"
+    print("_cache_key 含 v2 契约版本 ✓")
 
     print("OK")

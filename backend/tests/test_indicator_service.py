@@ -67,20 +67,34 @@ def mock_session() -> AsyncMock:
 
 @pytest.fixture
 def mock_bars(monkeypatch: pytest.MonkeyPatch) -> None:
-    """[图表行情契约] - mock MarketDataAggregationService + DB 查询函数。
+    """[图表行情契约] - mock MarketDataAggregationService（行情聚合 SSOT）。
 
-    日线通过 MarketDataAggregationService（行情聚合 SSOT）获取；
-    日内/周线/月线通过 DB 查询函数获取（与 indicator_service.py 当前实现一致）。
+    [CHANGE-20260717-002 SSOT] 全部周期（1d/15m/1m/1h/1w/1mo）通过 MDAS 获取；
+    MDAS 内部完成 DB 查询 + Pytdx 兜底 + 复权一次 + 周月聚合。
     所有 mock 数据使用 naive DatetimeIndex（与 DB 查询的实际行为一致）。
     """
+    monkeypatch.setattr(
+        indicator_service,
+        "MarketDataAggregationService",
+        _make_mock_mdas(),
+    )
+
+
+def _make_mock_mdas() -> type:
+    """构造 mock MarketDataAggregationService，get_bars 按 timeframe 返回对应周期 bars。"""
     from datetime import datetime
 
     from app.services.market_data_aggregation_service import BarAggregationResult
 
     class _MockAggService:
         async def get_bars(self, session, instrument_id, timeframe="1d", adj="qfq", **kwargs):
+            if timeframe == "1m":
+                # minute: 监控策略仅需要 2 根 1 分钟线（用 15m format 构造）
+                bars = _build_bars("15m", length=2)
+            else:
+                bars = _build_bars(timeframe)
             return BarAggregationResult(
-                bars=_build_bars("1d"),
+                bars=bars,
                 data_source="db",
                 as_of=datetime.now(),
                 is_partial=False,
@@ -91,29 +105,38 @@ def mock_bars(monkeypatch: pytest.MonkeyPatch) -> None:
                 degraded_reason=None,
             )
 
-    monkeypatch.setattr(indicator_service, "MarketDataAggregationService", _MockAggService)
+    return _MockAggService
 
-    async def mock_query_15min(session, instrument_id, start, end, limit=None):
-        return _build_bars("15m")
 
-    async def mock_query_minute(session, instrument_id, start, end, limit=None):
-        # 监控策略仅需要 2 根 1 分钟线
-        return _build_bars("15m", length=2)
+def _make_spy_mdas(called_timeframes: list[str]) -> type:
+    """构造 spy MarketDataAggregationService，记录 get_bars 调用的 timeframe。
 
-    async def mock_query_60min(session, instrument_id, start, end):
-        return _build_bars("1h")
+    用于验证特定 timeframe 的 get_bars 是否被调用（替代旧的私有函数 spy）。
+    """
+    from datetime import datetime
 
-    async def mock_fetch_weekly(session, instrument_id, start, end):
-        return _build_bars("1w")
+    from app.services.market_data_aggregation_service import BarAggregationResult
 
-    async def mock_fetch_monthly(session, instrument_id, start, end):
-        return _build_bars("1mo")
+    class _SpyMDAS:
+        async def get_bars(self, session, instrument_id, timeframe="1d", adj="qfq", **kwargs):
+            called_timeframes.append(timeframe)
+            if timeframe == "1m":
+                bars = _build_bars("15m", length=2)
+            else:
+                bars = _build_bars(timeframe)
+            return BarAggregationResult(
+                bars=bars,
+                data_source="db",
+                as_of=datetime.now(),
+                is_partial=False,
+                last_persisted_bar_time=None,
+                last_live_bar_time=None,
+                freshness_seconds=0.0,
+                degraded=False,
+                degraded_reason=None,
+            )
 
-    monkeypatch.setattr(indicator_service, "_query_15min_bars", mock_query_15min)
-    monkeypatch.setattr(indicator_service, "_query_minute_bars", mock_query_minute)
-    monkeypatch.setattr(indicator_service, "_query_60min_bars", mock_query_60min)
-    monkeypatch.setattr(indicator_service, "fetch_weekly_bars", mock_fetch_weekly)
-    monkeypatch.setattr(indicator_service, "fetch_monthly_bars", mock_fetch_monthly)
+    return _SpyMDAS
 
 
 @pytest.fixture
@@ -188,8 +211,12 @@ async def test_daily_bars_from_load_chart_bars_not_exchange(
         async def get_bars(self, session, instrument_id, timeframe="1d", adj="qfq", **kwargs):
             nonlocal get_bars_called
             get_bars_called = True
+            if timeframe == "1m":
+                bars = _build_bars("15m", length=2)
+            else:
+                bars = _build_bars(timeframe)
             return BarAggregationResult(
-                bars=_build_bars("1d"),
+                bars=bars,
                 data_source="db",
                 as_of=datetime.now(),
                 is_partial=False,
@@ -201,16 +228,7 @@ async def test_daily_bars_from_load_chart_bars_not_exchange(
             )
 
     monkeypatch.setattr(indicator_service, "MarketDataAggregationService", _MockService)
-
-    # mock DB 查询（避免连真实 DB）
-    async def mock_query_15min(session, instrument_id, start, end, limit=None):
-        return _build_bars("15m")
-
-    async def mock_query_minute(session, instrument_id, start, end, limit=None):
-        return _build_bars("15m", length=2)
-
-    monkeypatch.setattr(indicator_service, "_query_15min_bars", mock_query_15min)
-    monkeypatch.setattr(indicator_service, "_query_minute_bars", mock_query_minute)
+    # [CHANGE-20260717-002 SSOT] 全部周期通过 MDAS 获取，不再需要 mock 私有查询函数
 
     # [SubTask 1.3] 验证 Exchange 链路已删除：
     # 若模块已无 get_exchange 属性，说明 import 已被删除（理想状态）；
@@ -1082,34 +1100,22 @@ async def test_1d_skips_15min_minute_queries_when_vp_unavailable(
         AsyncMock(return_value=set()),
     )
 
-    # Spy: 记录 _query_15min_bars / _query_minute_bars 是否被调用
-    query_15min_called = False
-    query_minute_called = False
-
-    original_15min = indicator_service._query_15min_bars
-    original_minute = indicator_service._query_minute_bars
-
-    async def spy_15min(*args, **kwargs):
-        nonlocal query_15min_called
-        query_15min_called = True
-        return await original_15min(*args, **kwargs)
-
-    async def spy_minute(*args, **kwargs):
-        nonlocal query_minute_called
-        query_minute_called = True
-        return await original_minute(*args, **kwargs)
-
-    monkeypatch.setattr(indicator_service, "_query_15min_bars", spy_15min)
-    monkeypatch.setattr(indicator_service, "_query_minute_bars", spy_minute)
+    # [CHANGE-20260717-002 SSOT] 全部周期通过 MDAS 获取，spy MDAS.get_bars 调用的 timeframe
+    called_timeframes: list[str] = []
+    monkeypatch.setattr(
+        indicator_service,
+        "MarketDataAggregationService",
+        _make_spy_mdas(called_timeframes),
+    )
 
     await indicator_service.compute_all_indicators(
         mock_session, TEST_INSTRUMENT_ID, "1d", "none", bars=250,
     )
 
-    assert not query_15min_called, (
+    assert "15m" not in called_timeframes, (
         "1d 请求在 VP 不可用时应跳过 15min 查询"
     )
-    assert not query_minute_called, (
+    assert "1m" not in called_timeframes, (
         "1d 请求在 VP 不可用时应跳过 minute 查询"
     )
 
@@ -1128,34 +1134,22 @@ async def test_1d_loads_15min_minute_queries_when_vp_available(
         AsyncMock(return_value={"volume_node_monitor"}),
     )
 
-    # Spy: 记录 _query_15min_bars / _query_minute_bars 是否被调用
-    query_15min_called = False
-    query_minute_called = False
-
-    original_15min = indicator_service._query_15min_bars
-    original_minute = indicator_service._query_minute_bars
-
-    async def spy_15min(*args, **kwargs):
-        nonlocal query_15min_called
-        query_15min_called = True
-        return await original_15min(*args, **kwargs)
-
-    async def spy_minute(*args, **kwargs):
-        nonlocal query_minute_called
-        query_minute_called = True
-        return await original_minute(*args, **kwargs)
-
-    monkeypatch.setattr(indicator_service, "_query_15min_bars", spy_15min)
-    monkeypatch.setattr(indicator_service, "_query_minute_bars", spy_minute)
+    # [CHANGE-20260717-002 SSOT] 全部周期通过 MDAS 获取，spy MDAS.get_bars 调用的 timeframe
+    called_timeframes: list[str] = []
+    monkeypatch.setattr(
+        indicator_service,
+        "MarketDataAggregationService",
+        _make_spy_mdas(called_timeframes),
+    )
 
     await indicator_service.compute_all_indicators(
         mock_session, TEST_INSTRUMENT_ID, "1d", "none", bars=250,
     )
 
-    assert query_15min_called, (
+    assert "15m" in called_timeframes, (
         "1d 请求在 VP 可用时应加载 15min 数据（VP profile）"
     )
-    assert query_minute_called, (
+    assert "1m" in called_timeframes, (
         "1d 请求在 VP 可用时应加载 minute 数据（VP crossover）"
     )
 
@@ -1174,23 +1168,19 @@ async def test_15m_always_loads_15min_regardless_of_vp(
         AsyncMock(return_value=set()),
     )
 
-    # Spy: 记录 _query_15min_bars 是否被调用
-    query_15min_called = False
-
-    original_15min = indicator_service._query_15min_bars
-
-    async def spy_15min(*args, **kwargs):
-        nonlocal query_15min_called
-        query_15min_called = True
-        return await original_15min(*args, **kwargs)
-
-    monkeypatch.setattr(indicator_service, "_query_15min_bars", spy_15min)
+    # [CHANGE-20260717-002 SSOT] 全部周期通过 MDAS 获取，spy MDAS.get_bars 调用的 timeframe
+    called_timeframes: list[str] = []
+    monkeypatch.setattr(
+        indicator_service,
+        "MarketDataAggregationService",
+        _make_spy_mdas(called_timeframes),
+    )
 
     await indicator_service.compute_all_indicators(
         mock_session, TEST_INSTRUMENT_ID, "15m", "none", bars=50,
     )
 
-    assert query_15min_called, (
+    assert "15m" in called_timeframes, (
         "15m 请求应始终加载 15min 数据（macd_bars 用途），独立于策略 registry"
     )
 
