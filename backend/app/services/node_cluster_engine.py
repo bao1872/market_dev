@@ -279,7 +279,9 @@ def _compute_profile_hash(profile_rows: list[dict[str, Any]]) -> str:
     if not profile_rows:
         return "empty"
     # 稳定序列化：按 key 排序
-    content = repr(tuple(sorted(r.items())) for r in profile_rows)
+    # 注意：必须用列表推导 [...] 而非生成器 (...)，否则 repr(generator) 含内存地址
+    # 导致 profile_hash 非确定性（三链一致性断言失败）。
+    content = repr([tuple(sorted(r.items())) for r in profile_rows])
     return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
 
 
