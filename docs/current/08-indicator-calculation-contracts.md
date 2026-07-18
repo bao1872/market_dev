@@ -161,10 +161,262 @@ SMC 参数和执行顺序见 `docs/maps/smc-pine-parity-map.md` 和 `AGENTS.md` 
 
 这些指标不涉及三链一致性约束（单链计算，无跨链 hash 断言）。
 
-## 5. 三链数据流图
+## 5. 全算法族统一注册表（CHANGE-20260718-006 Section 2）
 
-见 `docs/maps/indicator-computation-map.md`。
+> 自 CHANGE-20260718-006 起，全部 12 个算法族通过 `AlgorithmRegistry`
+> （`backend/app/contracts/algorithm_registry.py`）统一注册，四条调用链
+> （详情/盘后/盘中/Capture）通过 `CanonicalComputationService`
+> （`backend/app/services/canonical_computation_service.py`）统一调度。
+> 禁止生产模块直接 `import` 算法 kernel 绕过注册表（AST 守护：
+> `backend/tests/test_algorithm_registry_architecture.py`）。
 
-## 6. 变更历史
+### 5.1 算法族总表
+
+| algorithm_id | algorithm_version | contract_fingerprint | kernel_module | kernel_entrypoint | input_timeframes | adjustment_mode | completed_only | warmup_bars | output_schema_version |
+|---|---|---|---|---|---|---|---|---|---|
+| `node_cluster` | `nc-v1` | `nc-cf-v1` | `app.services.node_cluster_engine` | `app.services.node_cluster_engine:compute_node_cluster_profile` | `("1d","15m")` | `qfq` | True | 250 | 1 |
+| `dsa` | `dsa-v1` | `dsa-cf-v1` | `app.strategy.selectors.dsa_selector` | `app.strategy.selectors.dsa_selector:DSASelector` | `("1d",)` | `qfq` | True | 250 | 1 |
+| `smc` | `smc-v1` | `smc-cf-v1` | `app.services.smc_view_adapter` | `app.services.smc_view_adapter:compute_smc_dto` | `("1d","15m","1h","1w","1mo")` | `qfq` | True | 500 | 1 |
+| `bollinger` | `bb-v1` | `bb-cf-v1` | `app.services.indicator_service` | `app.services.indicator_service:compute_bollinger_bands` | `("1d","15m","1h","1w","1mo")` | `qfq` | False | 250 | 1 |
+| `macd` | `macd-v1` | `macd-cf-v1` | `app.services.indicator_service` | `app.services.indicator_service:compute_macd` | `("1d","15m","1h","1w","1mo")` | `qfq` | False | 250 | 1 |
+| `sqzmom` | `sqzmom-v1` | `sqzmom-cf-v1` | `app.strategy_assets.algorithms.features.sqzmom_lb` | `app.strategy_assets.algorithms.features.sqzmom_lb:compute_sqzmom` | `("1d",)` | `qfq` | True | 250 | 1 |
+| `breakout` | `brk-v1` | `brk-cf-v1` | `app.strategy_assets.algorithms.features.trendlines_with_breaks_luxalgo` | `app.strategy_assets.algorithms.features.trendlines_with_breaks_luxalgo:compute_breakout` | `("1d",)` | `qfq` | True | 250 | 1 |
+| `participation` | `part-v1` | `part-cf-v1` | `app.strategy_assets.algorithms.features.sr_event_factor_lab` | `app.strategy_assets.algorithms.features.sr_event_factor_lab:compute_participation` | `("1d",)` | `qfq` | True | 250 | 1 |
+| `temporal_features` | `tmp-v1` | `tmp-cf-v1` | `app.services.temporal_feature_service` | `app.services.temporal_feature_service:compute_temporal_features` | `("1d","15m")` | `qfq` | True | 250 | 1 |
+| `structural_features` | `str-v1` | `str-cf-v1` | `app.services.structural_factor_service` | `app.services.structural_factor_service:compute_structural_features` | `("1d","15m")` | `qfq` | True | 250 | 1 |
+| `primary_secondary_relation` | `psr-v1` | `psr-cf-v1` | `app.services.feature_snapshot_service` | `app.services.feature_snapshot_service:compute_primary_secondary_relation` | `("1d","15m")` | `qfq` | True | 250 | 1 |
+| `snapshot_derived_features` | `sdf-v1` | `sdf-cf-v1` | `app.services.feature_snapshot_service` | `app.services.feature_snapshot_service:compute_feature_snapshot_for_date` | `("1d","15m")` | `qfq` | True | 250 | 1 |
+
+注册表版本常量：`ALGORITHM_REGISTRY_VERSION = "reg-v1"`（注册表结构变更时 bump，
+不影响各算法自身版本）。
+
+### 5.2 各算法族合同（按 12 项规范记录）
+
+> 12 项：业务含义 / 输入 / 参数 / 复权 / completed 或 partial / warmup /
+> Kernel 路径 / 输出 schema / 算法版本 / 调用链 / 允许差异 / 禁止变化 / 验收样本
+
+#### 5.2.1 node_cluster（筹码分布 / Volume Profile）
+
+详见第 2 节（完整合同）。
+
+- **业务含义**：价格区间分 100 档，按成交量分配，识别 Peak/VA/POC
+- **输入**：1d 250 根 + 15m 4000 根 + 1m 2 根（监控链）
+- **复权**：qfq，`adjustment_as_of` 锚定业务日
+- **completed/partial**：daily/15m completed_only=True；1m include_realtime=True
+- **warmup**：250 根（决定价格范围）
+- **Kernel 路径**：`app.services.node_cluster_engine:compute_node_cluster_profile`
+- **输出 schema**：`NodeClusterProfileResult`（frozen dataclass，version=1）
+- **算法版本**：`nc-v1` / 指纹 `nc-cf-v1`
+- **调用链**：详情 / 盘后 / 盘中（三链同核，profile_hash 必须一致）
+- **允许差异**：不同 stock/as_of 自然不同；监控链 1m 不影响 Profile hash
+- **禁止变化**：VA 外 Peak 不得过滤；不得绕过 engine；不得单周期调用
+- **验收样本**：000725 / 603538 / 三链一致性测试
+
+#### 5.2.2 dsa（DSA 选股策略）
+
+- **业务含义**：基于 VWAP/结构锚的 DSA 选股与可视化分段
+- **输入**：1d 250 根 qfq bars
+- **参数**：引用 `indicator_contract.py`（DSASelector 内部常量）
+- **复权**：qfq，`adjustment_as_of` 锚定业务日
+- **completed/partial**：completed_only=True
+- **warmup**：250 根
+- **Kernel 路径**：`app.strategy.selectors.dsa_selector:DSASelector`
+- **输出 schema**：`DsaSelectorData`（含 `visual_segments` / `anchor_time` / `vwap` 等）
+- **算法版本**：`dsa-v1` / 指纹 `dsa-cf-v1`
+- **调用链**：详情（indicator API） / 盘后（feature_snapshot）
+- **允许差异**：不同 stock 自然不同；非 1d 周期为验证图层
+- **禁止变化**：禁止 1d-only 硬编码（全周期支持）；禁止 source mismatch 时渲染
+- **验收样本**：DSA source alignment 测试（`dsaSourceAlignment.test.ts`）
+
+#### 5.2.3 smc（Smart Money Concepts）
+
+- **业务含义**：BOS/CHoCH 结构事件 + Order Block + EQH/EQL + Swing Bias
+- **输入**：1d/15m/1h/1w/1mo 全周期支持
+- **参数**：详见 `docs/maps/smc-pine-parity-map.md` 和 `AGENTS.md` clause 53
+- **复权**：qfq
+- **completed/partial**：completed_only=True（Pine 语义，最新已完成 K 线）
+- **warmup**：500 根（覆盖足够 swing 结构）
+- **Kernel 路径**：`app.services.smc_view_adapter:compute_smc_dto`
+- **输出 schema**：SMC DTO（events / order_blocks / equal_highs_lows / trailing / swing_bias）
+- **算法版本**：`smc-v1` / 指纹 `smc-cf-v1`
+- **调用链**：详情（include_smc=true 时计算）
+- **允许差异**：PINE_PARITY_PENDING（TV CSV 不可用时 skip，不标完成）
+- **禁止变化**：算法硬约束不得重写（详见 `AGENTS.md` clause 53）；`include_smc=false` 时 0 核心函数调用
+- **验收样本**：000725 回归基线（17 events / 21 OB / 2 EQL / swing_bias=1，项目回归基线非 TV golden）
+
+#### 5.2.4 bollinger（布林带）
+
+- **业务含义**：BB(20, 2.0) 上下轨 + 带宽
+- **输入**：全周期 qfq bars
+- **参数**：`BB_WIN=20`, `BB_K=2.0`（`indicator_contract.py`）
+- **复权**：qfq
+- **completed/partial**：completed_only=False（含 partial bar，主图实时性需要）
+- **warmup**：250 根
+- **Kernel 路径**：`app.services.indicator_service:compute_bollinger_bands`
+- **输出 schema**：BB upper/lower/mid/bandwidth 数组
+- **算法版本**：`bb-v1` / 指纹 `bb-cf-v1`
+- **调用链**：详情（indicator API）
+- **允许差异**：1w/1mo 也支持（不再 skip）
+- **禁止变化**：参数 20/2.0 不得偏离常量；全周期支持不得回退到 1d-only
+- **验收样本**：BB overlay 全周期测试（`dsaOverlayPolicy.test.ts` 第 5 节）
+
+#### 5.2.5 macd（MACD）
+
+- **业务含义**：MACD(12, 26, 9) 标准实现
+- **输入**：全周期 qfq bars
+- **参数**：`MACD_FAST=12`, `MACD_SLOW=26`, `MACD_SIGNAL=9`
+- **复权**：qfq
+- **completed/partial**：completed_only=False
+- **warmup**：250 根
+- **Kernel 路径**：`app.services.indicator_service:compute_macd`
+- **输出 schema**：MACD/SIGNAL/HIST 数组
+- **算法版本**：`macd-v1` / 指纹 `macd-cf-v1`
+- **调用链**：详情（indicator API）
+- **允许差异**：时间对齐命中率低于阈值时输出诊断（不阻塞渲染）
+- **禁止变化**：12/26/9 参数不得偏离
+- **验收样本**：标准 MACD 计算回归
+
+#### 5.2.6 sqzmom（Squeeze Momentum）
+
+- **业务含义**：Squeeze Momentum Indicator（动量挤压）
+- **输入**：1d qfq bars
+- **参数**：`indicator_contract.py` 中 SQZMOM 常量
+- **复权**：qfq
+- **completed/partial**：completed_only=True
+- **warmup**：250 根
+- **Kernel 路径**：`app.strategy_assets.algorithms.features.sqzmom_lb:compute_sqzmom`
+- **输出 schema**：SQZMOM 状态数组
+- **算法版本**：`sqzmom-v1` / 指纹 `sqzmom-cf-v1`
+- **调用链**：盘后（feature_snapshot）
+- **允许差异**：仅 1d 周期计算
+- **禁止变化**：算法公式不得修改
+- **验收样本**：SQZMOM layer 契约测试（`sqzmom-layer.test.ts`）
+
+#### 5.2.7 breakout（突破压力区）
+
+- **业务含义**：基于 trendlines_with_breaks 的突破识别
+- **输入**：1d qfq bars
+- **复权**：qfq
+- **completed/partial**：completed_only=True
+- **warmup**：250 根
+- **Kernel 路径**：`app.strategy_assets.algorithms.features.trendlines_with_breaks_luxalgo:compute_breakout`
+- **输出 schema**：Breakout 事件数组
+- **算法版本**：`brk-v1` / 指纹 `brk-cf-v1`
+- **调用链**：详情（indicator API）
+- **允许差异**：仅 1d 周期计算
+- **禁止变化**：trendlines_with_breaks 算法源不得替换
+- **验收样本**：详情页 Breakout 渲染
+
+#### 5.2.8 participation（成交参与）
+
+- **业务含义**：基于 SR Event Factor 的成交参与度因子
+- **输入**：1d qfq bars
+- **复权**：qfq
+- **completed/partial**：completed_only=True
+- **warmup**：250 根
+- **Kernel 路径**：`app.strategy_assets.algorithms.features.sr_event_factor_lab:compute_participation`
+- **输出 schema**：Participation 因子数组
+- **算法版本**：`part-v1` / 指纹 `part-cf-v1`
+- **调用链**：盘后（feature_snapshot）
+- **允许差异**：仅 1d 周期计算
+- **禁止变化**：SR Event Factor 算法公式不得修改
+- **验收样本**：盘后 snapshot 含 participation 字段
+
+#### 5.2.9 temporal_features（时序特征）
+
+- **业务含义**：基于 K 线时序的特征（如连阳/连阴、缺口等）
+- **输入**：1d + 15m qfq bars
+- **复权**：qfq
+- **completed/partial**：completed_only=True
+- **warmup**：250 根
+- **Kernel 路径**：`app.services.temporal_feature_service:compute_temporal_features`
+- **输出 schema**：时序特征字典
+- **算法版本**：`tmp-v1` / 指纹 `tmp-cf-v1`
+- **调用链**：盘后（feature_snapshot）
+- **允许差异**：1d/15m 双周期计算
+- **禁止变化**：特征定义不得修改
+- **验收样本**：盘后 snapshot 含 temporal 字段
+
+#### 5.2.10 structural_features（结构特征）
+
+- **业务含义**：基于 Node Cluster Profile 的结构因子（含 VA/POC/nearest node）
+- **输入**：1d + 15m qfq bars + 预计算 Node Cluster Profile
+- **复权**：qfq
+- **completed/partial**：completed_only=True
+- **warmup**：250 根
+- **Kernel 路径**：`app.services.structural_factor_service:compute_structural_features`
+- **输出 schema**：结构特征字典
+- **算法版本**：`str-v1` / 指纹 `str-cf-v1`
+- **调用链**：盘后（feature_snapshot）
+- **允许差异**：消费预计算 Node Cluster 结果（不得重算 VP）
+- **禁止变化**：不得绕过 node_cluster_engine 自行计算 VP
+- **验收样本**：盘后 snapshot 含 structural 字段
+
+#### 5.2.11 primary_secondary_relation（主次关系）
+
+- **业务含义**：1d 主结构 + 15m 次结构的关系因子
+- **输入**：1d + 15m qfq bars
+- **复权**：qfq
+- **completed/partial**：completed_only=True
+- **warmup**：250 根
+- **Kernel 路径**：`app.services.feature_snapshot_service:compute_primary_secondary_relation`
+- **输出 schema**：主次关系因子字典（含 `secondary.15m.cost_position` 等）
+- **算法版本**：`psr-v1` / 指纹 `psr-cf-v1`
+- **调用链**：盘后（feature_snapshot）
+- **允许差异**：`secondary.15m.cost_position` 语义已调整（CHANGE-20260718-006）
+- **禁止变化**：主次关系因子定义不得修改
+- **验收样本**：盘后 snapshot schema_version=3
+
+#### 5.2.12 snapshot_derived_features（快照派生特征）
+
+- **业务含义**：从 StockFeatureSnapshot 派生的综合特征（聚合上述各族）
+- **输入**：1d + 15m qfq bars
+- **复权**：qfq，`adjustment_as_of=trade_date`
+- **completed/partial**：completed_only=True
+- **warmup**：250 根
+- **Kernel 路径**：`app.services.feature_snapshot_service:compute_feature_snapshot_for_date`
+- **输出 schema**：完整 StockFeatureSnapshot（schema_version=3）
+- **算法版本**：`sdf-v1` / 指纹 `sdf-cf-v1`
+- **调用链**：盘后（feature_snapshot）
+- **允许差异**：聚合各族结果，本身不做新计算
+- **禁止变化**：schema_version=3 不得降级；`finish_snapshot_run` 必须读实际 snapshot 数量
+- **验收样本**：盘后 snapshot 发布成功
+
+### 5.3 CanonicalComputationService 调度
+
+四条调用链通过 `CanonicalComputationService.compute(algorithm_id, ...)` 统一调度：
+
+```
+CanonicalComputationService.compute
+  → AlgorithmRegistry.get(algorithm_id)            # 查询合同
+  → _validate_contract(contract, kernel_kwargs)    # 校验输入（bars_* 参数）
+  → _load_kernel(contract)                         # importlib 加载 kernel_module:callable
+  → kernel(**kernel_kwargs)                        # 调用算法 kernel
+  → _compute_result_hash(...)                      # SHA256 前 16 字符（5 维度）
+  → CanonicalResult(algorithm_id, version, hash, payload, ...)
+```
+
+result_hash 5 维度：
+- algorithm_id + contract_fingerprint（算法合同维度）
+- instrument_id + as_of（业务维度）
+- source_bar_hash + adj_factor_hash（行情输入维度）
+- result 内容（结果维度）
+
+相同输入必须得到相同 result_hash（缓存键 + 一致性比对基础）。
+
+### 5.4 架构守护测试
+
+- `backend/tests/test_algorithm_registry_architecture.py`（16 tests）
+  - `TestAlgorithmRegistryIntegrity`：注册完整性 + 唯一性 + 模块可导入 + node_cluster 合同与 semantics 一致
+  - `TestAlgorithmRegistryCallConstraint`：只有 registry module 调用 `AlgorithmRegistry.register`
+  - `TestCanonicalComputationServiceInterface`：list/get_contract/未注册异常/hash 确定性/序列化稳定性
+
+## 6. 三链数据流图
+
+见 `docs/maps/indicator-computation-map.md`（CHANGE-20260718-006 Section 5c 扩展为四链）。
+
+## 7. 变更历史
 
 - CHANGE-20260718-004：初始版本（Node Cluster 唯一语义合同 + engine 计算内核 + ref/ 隔离 + 三链统一）
+- CHANGE-20260718-006 Section 2：全算法族统一注册表 + CanonicalComputationService（12 算法族 SSOT）
+- CHANGE-20260718-006 Section 5c：扩展 08 文档为全算法族合同（12 项规范）

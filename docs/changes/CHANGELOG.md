@@ -37,6 +37,23 @@
   - **版本升级**：`ALGORITHM_VERSION` v10→v11（旧缓存自动失效）；`NODE_CLUSTER_ALGORITHM_VERSION="nc-v1"`、`NODE_CLUSTER_OUTPUT_SCHEMA_VERSION=1`、`NODE_CLUSTER_CONTRACT_FINGERPRINT="nc-cf-v1"`；schema_version 2→3
   - **不变量**：SMC 算法不重写；MDAS/复权/构建治理不重新实现；`ref/smc_user_source.pine` 843 行 + SHA256 不变；`PINE_PARITY_PENDING` 保留；不新增依赖/表/migration
 
+- CHANGE-20260718-005: 复权因子全市场一致性审计 + 串行修复基础设施
+  - **因子算法版本常量**：新增 `backend/app/constants/factor_contract.py`（`FACTOR_ALGORITHM_VERSION='fq-v1'` / `FACTOR_RECONCILIATION_VERSION=1` / `FACTOR_COMPARISON_TOLERANCE=1e-6`）；版本变化时触发全市场重审，弥补 xdxr fingerprint 无法发现存量错误的缺口
+  - **只读审计服务**：新增 `backend/app/services/factor_consistency_audit.py`（`FactorConsistencyAuditor`）：`audit_single_stock` 加载 stored 因子 → 重算 expected → 逐日比对 → 分类 mismatch（含 603538 bug 模式识别）；`audit_active_stocks` 分批 yield 全市场审计结果；`_compare_factors` 纯函数 6 类场景；`_hash_factor_series` 因子序列内容 hash；零副作用（不写库、不失效缓存、不导入 rebuild，架构守护测试强制）
+  - **串行修复任务**：新增 `backend/app/services/factor_reconciliation.py`（`FactorReconciliationTask`）：`dry_run` 只读审计 → 生成修复计划（零副作用）；`rebuild_batch` 全程串行，每只股票独立事务，失败回滚不影响其他；失败不写 1.0 伪装成功（`error_code` 非空、`after_hash` 为空）；`partial_success`（rebuild 后仍不一致）标记失败
+  - **只读重算方法**：`bar_repository.compute_expected_adj_factors` 只读重算预期因子序列（不写库），与写库的 `rebuild_adj_factors` 区分
+  - **migration 065**：`instruments` 表新增 3 列（`factor_algorithm_version VARCHAR(8)` / `factor_reconciliation_version INTEGER` / `factor_reconciled_at TIMESTAMPTZ`），全部可空，兼容历史 instruments（NULL=未对账）；Instrument 模型同步更新
+  - **安全约束**：全程串行禁止并发 rebuild；失败不得用 1.0 伪装成功；不做无边界全市场重跑（只重建审计发现的不一致股票）；603538 真实数据缺失时仅对该股票做小范围补齐/重建
+  - **测试**：`test_factor_consistency_audit.py`（442 行，24 passed）+ `test_factor_reconciliation.py`（376 行）+ 38 instrument tests passed；migration 065 upgrade/downgrade/upgrade 验证通过
+  - **不变量**：`bars_daily.adj_factor` 仍为权威因子序列；MDAS 仍为唯一行情读取出口；不新增依赖；不运行全市场回补
+
+- CHANGE-20260718-006: 全算法族 SSOT 统一计算网关 + 飞书图片失败状态机 + 周期切换原子渲染 + 四链地图文档
+  - **Section 2 算法合同注册表**：新增 `backend/app/contracts/algorithm_registry.py`（12 算法族预注册 + `AlgorithmRegistry` 单例 + `AlgorithmContract` frozen dataclass + `ALGORITHM_REGISTRY_VERSION='reg-v1'`）；新增 `backend/app/services/canonical_computation_service.py`（`CanonicalComputationService` 统一调度 + `result_hash` SHA256 前 16 字符 5 维度确定性）；AST 守护 `test_algorithm_registry_architecture.py`（329 行，16 tests，3 测试类）禁止生产模块直接 `import` kernel 绕过注册表
+  - **Section 3 飞书状态机升级**：`partial_failed` → `failed`（图片确定性失败 `image_definitively_failed`：capture 失败 / `image_delivery` failed/dead / `image_upload_status=failed`）或 `pending`（图片仍在进行中）；要求图片时 `card_status=success` 但 `image_status!=success` 整体必须 `failed` 或 `pending`（不允许 `success`）；测试覆盖 `test_state_machine.py`（+208 行）+ `test_stock_detail_feishu_status.py`（+25 行）
+  - **Section 4 周期切换原子渲染**：新增 `frontend/src/utils/chartRenderFrame.ts`（279 行，`ChartRenderFrame` + `computeSourceBarRangeKey` + `buildBarsFrame`/`buildIndicatorsFrame` + `isFrameMatched` + `computeVisiblePriceBounds` + `shouldIncludeNodeInPriceRange` + `shouldIncludeSmcTrailingInPriceRange`）；`StrategyChart.tsx` 集成 frame mismatch 横幅 + 纵轴 domain policy（远端 Node/trailing 不参与纵轴候选）；`StockResearchWorkspace.tsx` 构造 `barsFrame` 传入；`api/endpoints.ts` BarListResponse 新增 `source_bar_hash`/`adj_factor_hash`/`market_data_contract_version`/`adjustment_as_of` 契约字段；测试 `chartRenderFrame.test.ts`（397 行，38 tests）+ 前端套件 149 passed + 21 contract passed
+  - **Section 5c 文档扩展**：`docs/current/08` 扩展为 12 算法族合同（170→422 行，Section 5 总表 + 5.2.1-5.2.12 各族 12 项规范 + 5.3 调度流程 + 5.4 守护测试）；`docs/maps/indicator-computation-map.md` 扩展为四链地图（148→263 行，详情/盘后/盘中/Capture + 算法族→Kernel→调用链矩阵 + result_hash 缓存层）；`AGENTS.md` clause 61 新增 6 条长期规则（样本股只能验证/每算法族唯一 Kernel/四条链统一网关/Bars+Indicators 原子渲染帧/图片失败不掩盖/复权版本变化触发全市场审计）
+  - **不变量**：SMC 算法不重写；MDAS 仍为唯一行情读取出口；不新增依赖/表/migration；`ref/smc_user_source.pine` 843 行 + SHA256 不变；`PINE_PARITY_PENDING` 保留；四条链迁移到 `CanonicalComputationService` 为软约束（逐步迁移）
+
 ## 2026-07-17
 
 - CHANGE-20260717-001: SMC Pine 逻辑对齐最终收口（warmup/历史分离 + execution gate + trailing NaN + OB 顺序 + EQH/EQL 几何 + Strong/Weak 起点 + golden 测试重做 + 确定性测试 + 导出增强 + ALGORITHM_VERSION v10）
