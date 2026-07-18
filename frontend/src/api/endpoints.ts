@@ -616,6 +616,13 @@ export interface BarListResponse {
   freshness_seconds: number
   degraded: boolean
   degraded_reason: string | null
+  // [CHANGE-20260717-002 SSOT] - MDAS v2 契约诊断字段
+  //   用于 ChartRenderFrame 帧匹配（bars 与 indicators source_bar_hash 比对）
+  //   详见 PROMPT.md §五.296-305（周期切换原子渲染门禁）
+  source_bar_hash?: string | null
+  adj_factor_hash?: string | null
+  market_data_contract_version?: string | null
+  adjustment_as_of?: string | null
 }
 
 // ============================================================

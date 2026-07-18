@@ -113,6 +113,11 @@ export interface StrategyChartProps {
   // 由父组件 StockResearchWorkspace 持有并传入；StrategyChart 作为受控组件，不再内部管理 layers state。
   // 截图模式时不传（undefined），由 StrategyChart 内部派生 forced layers。
   layerVisibility?: ChartLayerVisibility
+  // [ChartRenderFrame] - bars 端渲染帧（PROMPT.md §五.296-307）
+  //   父组件从 barsQuery.data 提取 source_bar_hash/market_data_contract_version/bar times 构造，
+  //   StrategyChart 与 indicators 帧比对；mismatch 时跳过指标图层渲染（保留 K线/网格/profile）。
+  //   未传入时降级到"不检查"（保持向后兼容，不阻塞现有调用方）。
+  barsFrame?: ChartRenderFrame | null
 }
 
 // 计算后的 Bar（含指标字段）
@@ -232,6 +237,10 @@ interface ChartState {
   eventHit: MappedEvent[]
   // [DSA 数据源校验] - K 线时间与 indicators.source_bar_times 不一致标记，供 JSX 渲染页面提示横幅
   dsaSourceMismatch: boolean
+  // [ChartRenderFrame] - Bars 与 Indicators 帧不匹配标记（PROMPT.md §五.296-307）
+  //   周期切换过程中短暂出现"新K线+旧指标"时为 true，drawTrading 跳过指标图层渲染，
+  //   仅绘制 K线/网格/profile 基础图层；JSX 显示"指标加载中"提示
+  frameMismatch: boolean
 }
 
 // ===== 通用工具函数 =====
@@ -283,6 +292,18 @@ import {
 } from '@/utils/dsaOverlayPolicy'
 // [DSA Segment Match] - debugIndicatorAlignment 诊断已移除（P1 清理）
 //   computeDsaSegmentMatchStats 工具函数保留在 utils/dsaSegmentMatch.ts
+// [ChartRenderFrame] - 周期切换原子渲染门禁 + 纵轴 domain policy
+//   1. isFrameMatched: Bars 与 Indicators 帧一致才提交指标绘制（PROMPT.md §五.296-307）
+//   2. computeVisiblePriceBounds + shouldIncludeNodeInPriceRange: 过滤远端 Node
+//      避免纵轴被非可见指标扩张（PROMPT.md §五.255-282）
+import {
+  buildIndicatorsFrame,
+  computeVisiblePriceBounds,
+  isFrameMatched,
+  shouldIncludeNodeInPriceRange,
+  shouldIncludeSmcTrailingInPriceRange,
+  type ChartRenderFrame,
+} from '@/utils/chartRenderFrame'
 
 // ===== 指标计算模块（从 charts.js 迁移）=====
 
@@ -1762,10 +1783,17 @@ function drawTrading(
   const displayTimes = display.map(d => d.time)
 
   // [chartViewport] - 纵轴范围：可见 K 线 high/low + 可见 BB upper/lower + 可见 DSA VWAP + 可见节点区间，上下各留约 3% padding
+  // [ChartRenderFrame] - 纵轴 domain policy：先计算可见 K线价格区间 + 容差，
+  //   后续 Node/SMC trailing 候选过滤掉远端历史价位，避免纵轴被非可见指标扩张
+  //   详见 PROMPT.md §五.255-282（一个远端 Node 把纵轴拉大 → K线被压缩）
   const priceCandidates: number[] = []
   display.forEach(d => {
     priceCandidates.push(d.low, d.high)
   })
+  const visibleBounds = computeVisiblePriceBounds(
+    display.map(d => d.low),
+    display.map(d => d.high),
+  )
 
   if (indicators?.layers && indicators?.data) {
     indicators.layers.forEach(layer => {
@@ -1798,15 +1826,27 @@ function drawTrading(
     })
   }
 
+  // [ChartRenderFrame] - Node 纵轴 domain policy（PROMPT.md §五.255-282）
+  //   旧行为：profile.nodes.forEach(n => priceCandidates.push(n.lo, n.hi))
+  //   问题：远端历史高位/低位 Node 把纵轴拉大，K线被压缩，指标比例看起来错误
+  //   新行为：shouldIncludeNodeInPriceRange 过滤远端 Node（可见区间 ± 50% 容差）
+  //   注意：被过滤的 Node 仍由 Node 图层正常渲染（被 Canvas 裁剪），只是不参与纵轴
   if (layers.node && profile?.nodes) {
     profile.nodes.forEach(n => {
-      priceCandidates.push(n.lo, n.hi)
+      if (shouldIncludeNodeInPriceRange(n, visibleBounds)) {
+        priceCandidates.push(n.lo, n.hi)
+      }
     })
   }
 
   // [CHANGE-011 SMC] - SMC 纵轴价格候选（PROMPT.md §四.3）
   // 加入当前可见的：event.level / OB bar_high,bar_low / EQH,EQL level / trailing top,bottom
   // 目的：避免 SMC 元素被画出 Canvas（纵轴范围必须包含所有可见 SMC 价格）
+  // [ChartRenderFrame] - trailing top/bottom 额外应用 domain policy：
+  //   collectVisibleSmcPriceCandidates 把 trailing 视为始终可见（"当前最新结构极值"），
+  //   但若 trailing 来自很久以前的 bar，可能远超当前可见价格，导致纵轴被拉大。
+  //   这里对 smcCandidates 中等于 trailing.top/bottom 的值额外应用 domain policy 过滤。
+  //   注意：若 event.level 恰好等于 trailing 值会被一并过滤（概率极低，可接受）。
   if (layers.smc && indicators?.layers && indicators?.data) {
     const smcLayer = indicators.layers.find(l => l.layer_id === 'smc')
     if (smcLayer) {
@@ -1817,7 +1857,21 @@ function drawTrading(
           smcLayerData,
           { displayCount: displayTimes.length },
         )
-        priceCandidates.push(...smcCandidates)
+        const trailing = smcLayerData.trailing
+        const trailingTop = trailing?.top
+        const trailingBottom = trailing?.bottom
+        if (trailingTop != null || trailingBottom != null) {
+          // 对 trailing 贡献的候选值应用 domain policy；其他候选（event/OB/EQH 已按窗口过滤）直接保留
+          const filtered = smcCandidates.filter(v => {
+            if (v === trailingTop || v === trailingBottom) {
+              return shouldIncludeSmcTrailingInPriceRange(v, visibleBounds)
+            }
+            return true
+          })
+          priceCandidates.push(...filtered)
+        } else {
+          priceCandidates.push(...smcCandidates)
+        }
       }
     }
   }
@@ -2108,6 +2162,7 @@ export function StrategyChart({
   onViewportChange,
   isCaptureMode = false,
   layerVisibility,
+  barsFrame,
 }: StrategyChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -2133,6 +2188,7 @@ export function StrategyChart({
     profileHit: [],
     eventHit: [],
     dsaSourceMismatch: false,
+    frameMismatch: false,
   })
 
   // [chartLayerVisibility] - 受控图层可见性（单一真源 v2）
@@ -2231,13 +2287,42 @@ export function StrategyChart({
   const indicatorsRef = useRef<IndicatorResponse | undefined>(undefined)
   indicatorsRef.current = indicators
 
+  // [ChartRenderFrame] - bars 帧与 indicators 帧比对（PROMPT.md §五.296-307）
+  //   周期切换过程中 bars 已返回新周期，indicators 仍是旧周期；此时若用旧指标覆盖
+  //   新 K线会导致指标位置/比例错误。mismatch 时把 indicators 传给 drawTrading 改为
+  //   undefined，仅渲染 K线/网格/profile 基础图层，state.frameMismatch 驱动 JSX 提示。
+  //   barsFrame 未传入时降级到"不检查"（保持向后兼容，不阻塞现有调用方）。
+  const barsFrameRef = useRef<ChartRenderFrame | null | undefined>(undefined)
+  barsFrameRef.current = barsFrame
+  const [frameMismatch, setFrameMismatch] = useState(false)
+
   // 绘制函数（稳定引用，从 dataRef 读取最新数据）
   const draw = useCallback(() => {
     const canvas = canvasRef.current
     if (!canvas || !canvas.offsetParent) return
     const { calc: c, display: d, mappedEvents: ev, layers: ly, timeframe: tf } = dataRef.current
     if (!d.length) return
-    drawTrading(canvas, c, d, ev, ly, tf, stateRef.current, indicatorsRef.current)
+    const ind = indicatorsRef.current
+    const barsF = barsFrameRef.current
+    // frame 检查：barsFrame 传入且 indicators 存在时才比对（任一缺失降级到不检查）
+    let effectiveIndicators = ind
+    let mismatch = false
+    if (barsF != null && ind != null) {
+      const indFrame = buildIndicatorsFrame({
+        instrumentId: barsF.instrumentId,
+        timeframe: tf,
+        adj: barsF.adj,
+        sourceBarHash: ind.source_bar_hash,
+        sourceBarTimes: ind.source_bar_times,
+      })
+      if (!isFrameMatched(barsF, indFrame)) {
+        // mismatch：不传 indicators 给 drawTrading，仅渲染 K线/网格/profile
+        effectiveIndicators = undefined
+        mismatch = true
+      }
+    }
+    stateRef.current.frameMismatch = mismatch
+    drawTrading(canvas, c, d, ev, ly, tf, stateRef.current, effectiveIndicators)
   }, [])
 
   // 数据/图层变化时重绘
@@ -2246,7 +2331,9 @@ export function StrategyChart({
     // [DSA 数据源校验] - drawTrading 将 mismatch 写入 stateRef，此处同步到 React state 驱动横幅渲染
     //   setDsaMismatch 相同值时 React 自动 bailout，不会触发额外重渲染循环
     setDsaMismatch(stateRef.current.dsaSourceMismatch)
-  }, [draw, calc, display, mappedEvents, effectiveLayers, viewport, indicators])
+    // [ChartRenderFrame] - frame mismatch 同步到 React state 驱动"指标加载中"提示
+    setFrameMismatch(stateRef.current.frameMismatch)
+  }, [draw, calc, display, mappedEvents, effectiveLayers, viewport, indicators, barsFrame])
 
   // 交互事件绑定（仅一次）
   useEffect(() => {
@@ -2651,9 +2738,16 @@ export function StrategyChart({
         <canvas ref={canvasRef} />
         <div className="chart-crosshair-tooltip" ref={tipRef} />
         {/* [DSA 数据源校验] - K 线时间与指标 source_bar_times 不一致时显示页面提示横幅（替代仅 console.warn） */}
-        {dsaMismatch && (
+        {dsaMismatch && !frameMismatch && (
           <div className="dsa-source-mismatch-banner" style={{ position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)', padding: '4px 12px', background: 'rgba(255,193,7,0.9)', color: '#333', fontSize: 12, borderRadius: 4, zIndex: 10, whiteSpace: 'nowrap' }}>
             DSA 数据源不一致，已暂停渲染
+          </div>
+        )}
+        {/* [ChartRenderFrame] - 周期切换过程中 bars 与 indicators 帧不匹配时显示提示横幅
+            （PROMPT.md §五.296-307：不允许旧指标覆盖新 K线，显示短暂加载状态） */}
+        {frameMismatch && (
+          <div className="chart-frame-mismatch-banner" style={{ position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)', padding: '4px 12px', background: 'rgba(13,17,24,0.85)', color: C.text, fontSize: 12, borderRadius: 4, zIndex: 10, whiteSpace: 'nowrap' }}>
+            指标加载中...
           </div>
         )}
         {/* [CHANGE-20260717-001 Pine parity] SMC 状态提示
