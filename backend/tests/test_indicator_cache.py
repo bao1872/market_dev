@@ -65,24 +65,27 @@ def test_cache_key_construction() -> None:
     assert key_none_adj != key, "不同 adj 应生成不同键"
 
 
-def test_cache_algorithm_version_bumped_to_v10() -> None:
-    """[CHANGE-20260717-001] - ALGORITHM_VERSION 必须 bump 到 v10。
+def test_cache_algorithm_version_bumped_to_v11() -> None:
+    """[CHANGE-20260718-004] - ALGORITHM_VERSION 必须 bump 到 v11。
 
-    v9 → v10 原因：CHANGE-20260717-001 SMC Pine parity 最终收口（warmup/历史分离、
-    execution gate、trailing NaN、OB 顺序 newest-first）。旧 v9 SMC 输出（事件数量/位置、
-    OB 顺序、窗口左缘 pivot/BOS/CHoCH）与新逻辑不一致，必须强制失效。
+    v10 → v11 原因：CHANGE-20260718-004 Node Cluster engine 统一三链（详情/监控/盘后全部
+    经 node_cluster_engine.compute_node_cluster_profile 唯一业务入口），输出新增
+    algorithm_version/contract_fingerprint/profile_hash/daily_source_hash/
+    bars_15m_source_hash/adj_factor_hash/adjustment_as_of 等诊断字段；monitor_batch_service
+    adj 由 none→qfq（三链口径对齐），并加实例级 Profile 缓存。旧 v10 缓存的 node_cluster
+    meta 字段缺失且 adj 口径不一致，必须强制失效。
     """
-    assert indicator_cache.ALGORITHM_VERSION == "v10", (
-        f"ALGORITHM_VERSION 应为 v10（CHANGE-20260717-001 SMC Pine parity 最终收口后 bump），"
+    assert indicator_cache.ALGORITHM_VERSION == "v11", (
+        f"ALGORITHM_VERSION 应为 v11（CHANGE-20260718-004 Node Cluster engine 统一三链后 bump），"
         f"实际为 {indicator_cache.ALGORITHM_VERSION}"
     )
 
-    # 验证新 key 包含 v10，不包含 v9
+    # 验证新 key 包含 v11，不包含 v10
     key = indicator_cache.build_cache_key(
         TEST_INSTRUMENT_ID, "1d", "qfq", "2026-07-06",
     )
-    assert ":v10" in key, f"新缓存键应含 v10: {key}"
-    assert ":v9" not in key, f"新缓存键不应含 v9: {key}"
+    assert ":v11" in key, f"新缓存键应含 v11: {key}"
+    assert ":v10" not in key, f"新缓存键不应含 v10: {key}"
 
 
 def test_old_v4_cache_key_not_matched() -> None:
@@ -305,8 +308,8 @@ if __name__ == "__main__":
     assert indicator_cache.CACHE_TTL_SECONDS == 300
     print(f"CACHE_TTL_SECONDS={indicator_cache.CACHE_TTL_SECONDS} OK")
 
-    # 验证算法版本（CHANGE-20260717-001: 已 bump 到 v10）
-    assert indicator_cache.ALGORITHM_VERSION == "v10"
+    # 验证算法版本（CHANGE-20260718-004: 已 bump 到 v11）
+    assert indicator_cache.ALGORITHM_VERSION == "v11"
     print(f"ALGORITHM_VERSION={indicator_cache.ALGORITHM_VERSION} OK")
 
     print("OK")

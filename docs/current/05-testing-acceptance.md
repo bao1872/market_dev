@@ -1191,7 +1191,7 @@ node --experimental-strip-types --test \
   - `pine_crossover`/`pine_crossunder`：穿越检测正确
   - `pine_highest`/`pine_lowest`：滚动极值不含当前 bar
 - **Pine golden fixture（`test_smc_indicator.py::TestPineGoldenFixture`）**：fixture 不存在时 skip，**没有 Pine golden fixture 不得宣称"完全对齐"**；fixture 路径 `backend/tests/fixtures/smc_pine/`，包含美诺华 603538 日线 1000 根 + 一个 15m 样本
-- **TV CSV parity 门禁（`test_smc_tv_parity.py`，CHANGE-20260716-001）**：使用 `ref/smc_user_export.pine`（派生导出副本，真源 `ref/smc_user_source.pine` 不可变）末尾 18 个 `display=display.none` 隐藏 plot 字段从 TV 导出 CSV（含 time/OHLC + Pine 事件布尔值 + bias）；fixture 路径 `backend/tests/fixtures/smc_pine/smc_tv_<symbol>_<tf>.csv`；无 fixture 时 skip（`PINE_PARITY_PENDING`）；3 项测试：
+- **TV CSV parity 门禁（`test_smc_tv_parity.py`，CHANGE-20260716-001）**：使用 `ref/smc_user_export.pine`（派生导出副本，参考源 `ref/smc_user_source.pine` 人工阅读、不可变）末尾 18 个 `display=display.none` 隐藏 plot 字段从 TV 导出 CSV（含 time/OHLC + Pine 事件布尔值 + bias）；fixture 路径 `backend/tests/fixtures/smc_pine/smc_tv_<symbol>_<tf>.csv`；无 fixture 时 skip（`PINE_PARITY_PENDING`）；3 项测试：
   - `test_tv_csv_bar_parity`：断言 time/OHLC/bar 数量逐项相等（浮点容差 1e-8），不相等写 `INPUT_BAR_MISMATCH`，**不得调整算法迎合截图**
   - `test_tv_csv_event_parity`：比较事件有序序列（bar_index ±1 容差）
   - `test_tv_csv_swing_bias_parity`：比较最后一根 bar 的 swing_bias
@@ -1246,7 +1246,7 @@ cd frontend && node --experimental-strip-types --test \
 - **不使用旧 `useMarketStocks`（源码契约）**：`useStockDetailActions.ts` 不存在 `useMarketStocks(` 函数调用（注释允许）
 - **上一只/下一只保留 returnTo（源码契约）**：`returnToParam = returnTo ? \`&returnTo=${encodeURIComponent(returnTo)}\` : ''` 保留 returnTo 参数
 - **生产 E2E 验证（无截图）**：1) `/market` 设置筛选+排序+页码后点击股票名称进入 `/stock/:symbol`，URL 包含 `source=selection&strategy=dsa_selector&returnTo=...`；2) 详情页左栏先显示 loading 占位（`[data-testid="detail-source-list-loading"]`）再切换到实际列表（`[data-testid="detail-source-list"]`）；3) 左栏 header 显示"行情来源"；4) 上一只/下一只 URL 保留 source/strategy/returnTo/timeframe；5) 返回 `/market` 后筛选/排序/页码完整恢复
-- **Pine 真源文件入 Git 跟踪**：`git ls-files ref/smc_user_source.pine` 返回该文件路径；SHA256 为 `0bd3d2ad8819f2dc7a9399f0e869ca3c9eced8100f190aa131aac5fe8191988f`；843 行；`.gitignore` 仍排除 `ref/` 其他文件
+- **Pine 参考源文件入 Git 跟踪**：`git ls-files ref/smc_user_source.pine` 返回该文件路径；SHA256 为 `0bd3d2ad8819f2dc7a9399f0e869ca3c9eced8100f190aa131aac5fe8191988f`；843 行；`.gitignore` 仍排除 `ref/` 其他文件
 
 ## 3.17 CHANGE-20260715-005 回归（详情左栏来源状态四态拆分 + 表格 sticky 列和工具栏对齐根治）
 
@@ -1283,7 +1283,7 @@ cd frontend && node --experimental-strip-types --test \
 - **EQH/EQL DTO 三时间点（后端单元测试，CHANGE-20260715-006 → CHANGE-20260716-001 统一）**：EQL 和 EQH 两处 DTO 含三组时间点：`anchor_index`/`anchor_time`（前一 pivot bar）、`second_pivot_index`/`second_pivot_time`（新 pivot bar, `ref_i=i-size`，**视觉线端点**）、`confirmed_index`/`confirmed_time`（当前检测 Bar `i`，**因果/回放使用**）；`ref_i` 不得命名为 `confirmed`；CHANGE-20260716-001 新增 `detection_index`/`detection_time`（leg change 确认 bar, `i`，与 confirmed 同义但语义更明确）
 - **MiniKline 闭包根治（前端源码契约 16-20）**：`MiniKlineCard.tsx` 新增 `barsLengthRef`/`timeframeRef`/`rafIdRef` 持有最新值（每次 render 同步，在 effects 之前）；`applyViewportRange` 改为 `useCallback([], )` 稳定函数从 refs 读取（不再直接闭包捕获 `bars.length`/`timeframe`）；`scheduleApplyRange` 稳定函数取消 pending rAF 后调度新 rAF；`ResizeObserver` 回调调用 `scheduleApplyRange`（不直接闭包捕获 bars/timeframe）；卸载清理取消 pending rAF（`cancelAnimationFrame`）
 - **Pine 语义核对（源码契约）**：ATR200=`pine_rma(tr, 200)`；highest/lowest 窗口 `[ref_i+1, ref_i+length+1]`（不含当前 bar）；**crossover/crossunder level_curr/level_prev 快照（CHANGE-20260716-001）**：`displayStructure` 接收 `level_curr`（当前 Bar pivot level）和 `level_prev`（上一 Bar pivot level）独立快照，crossover=`close_curr > level_curr && close_prev <= level_prev`，crossunder=`close_curr < level_curr && close_prev >= level_prev`，NaN→False；每 Bar 快照六个 pivot level（swing/internal 独立，不互相覆盖）；OB slice `[piv.bar_index, current_i)` end-exclusive（Python 切片天然 end-exclusive）；trailing 顺序 `update_trailing_extremes → getCurrentStructure(50) → getCurrentStructure(5) → getCurrentStructure(3) → displayStructure → deleteOrderBlocks`
-- **Golden fixture**：仍为 `PINE_OUTPUT_GOLDEN_PENDING`/`PINE_PARITY_PENDING`（`backend/tests/fixtures/smc_pine/` 只有 README.md），无 fixture 时 `TestPineGoldenFixture`/`test_smc_tv_parity.py` 自动 skip，不得宣称"完全对齐"；CHANGE-20260716-001 已建立 TV CSV parity 测试框架（`ref/smc_user_export.pine` 派生文件末尾 18 个隐藏 plot 字段，真源 `ref/smc_user_source.pine` 不可变），待用户从 TradingView 导出 CSV 后即可完成输出级完全一致断言
+- **Golden fixture**：仍为 `PINE_OUTPUT_GOLDEN_PENDING`/`PINE_PARITY_PENDING`（`backend/tests/fixtures/smc_pine/` 只有 README.md），无 fixture 时 `TestPineGoldenFixture`/`test_smc_tv_parity.py` 自动 skip，不得宣称"完全对齐"；CHANGE-20260716-001 已建立 TV CSV parity 测试框架（`ref/smc_user_export.pine` 派生文件末尾 18 个隐藏 plot 字段，参考源 `ref/smc_user_source.pine` 人工阅读、不可变），待用户从 TradingView 导出 CSV 后即可完成输出级完全一致断言
 - **SMC 隔离边界不变（源码契约）**：SMC 仅进入 `/stock` 指标链，默认关闭（`include_smc=false` 时 0 计算）；`/market` 右栏小 K 线不请求 SMC；true/false 缓存键隔离（`:smc` 后缀）；不新增表/migration/worker/依赖
 - **生产 E2E 验证（无截图）**：1) MiniKline 切周期/resize 后 viewport 正确（不使用 stale 值，不出现首次 render 的旧 range）；2) SMC `pine_rma` 前 `length-1` 根为 NaN（ATR200 前 199 根为 NaN）；3) 首个 pivot 在 `i==size` 检测（不延迟到 `i==size+1`）；4) EQH/EQL DTO 含 detection_index/detection_time；5) Pine golden fixture 仍 PENDING
 
@@ -1521,7 +1521,7 @@ NODE_OPTIONS=--max-old-space-size=1536 node_modules/.bin/vite build
 - **OB 顺序**：core `order_blocks_output` 用 `insert(0, ...)`（newest-first，Pine `array.unshift`）；前端 `slice(0,5)` 取最新 5 个 active internal OB。
 - **前端 EQH/EQL**：两端点线 `prev_level`→`level`（Pine L396）；EQH=`SMC_BEAR_COLOR` 绿 + label_down，EQL=`SMC_BULL_COLOR` 红 + label_up；标签位于两 pivot 中点（Pine L397）。
 - **前端 Strong/Weak 起点**：线起点 `trailing.last_top_time`/`last_bottom_time`（Pine L721-727，新增 `timeToDisplayIdx` 辅助）；终点延伸到 `plotRight`；颜色按 strong/weak 区分列为有意视觉差异。
-- **Pine 真源不可变**：`ref/smc_user_source.pine` SHA256 `0bd3d2ad8819f2dc7a9399f0e869ca3c9eced8100f190aa131aac5fe8191988f`（843 行）；导出能力只改 `ref/smc_user_export.pine`（追加 8 个隐藏 plot：trailing top/bottom/lastTopTime/lastBottomTime + swing/internal pivot level）。
+- **Pine 参考源不可变**：`ref/smc_user_source.pine` SHA256 `0bd3d2ad8819f2dc7a9399f0e869ca3c9eced8100f190aa131aac5fe8191988f`（843 行）；导出能力只改 `ref/smc_user_export.pine`（追加 8 个隐藏 plot：trailing top/bottom/lastTopTime/lastBottomTime + swing/internal pivot level）。
 
 ## 4. CI 门禁
 

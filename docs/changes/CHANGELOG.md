@@ -30,6 +30,13 @@
   - **构建验证**：冷构建 backend pip install 85.9s / apt-get 1253s（debian.org 网络慢）；frontend npm ci 4.4s / build 15.7s；热构建 builder 全 CACHED（pip install 0s）+ runtime apt-get 跨版本 CACHED ✓
   - **不变量**：不重建 Capture/PostgreSQL/Redis；不删除 volume/生产数据；不新增项目依赖；buildx 为 Docker CLI 系统插件（apt docker-buildx）
 
+- CHANGE-20260718-004: Node Cluster 唯一语义合同 + 计算内核 + ref/ 彻底隔离 + 文档记忆系统
+  - **Node Cluster 三链统一**：新增 `indicator_semantics.py`（语义合同 frozen）+ `node_cluster_engine.py`（计算内核唯一入口）；盘后/详情/监控三链改走 engine，`profile_hash` 必须一致；`NodeClusterProfileResult` frozen dataclass + 鸭子类型适配器
+  - **ref/ 彻底隔离**：`git rm --cached ref/smc_user_export.pine`；新增 `test_ref_isolation.py`（AST + 文本扫描守护）；`check_docs_consistency.py` 新增规则 13/14/15；修复 10 处文档 ref 隔离违规（"真源"→"参考源（人工阅读）"）
+  - **文档记忆系统**：新增 `docs/current/08-indicator-calculation-contracts.md`（指标计算合同）+ `docs/maps/indicator-computation-map.md`（指标计算地图）；AGENTS clause 59/60 ref/ 隔离规则
+  - **版本升级**：`ALGORITHM_VERSION` v10→v11（旧缓存自动失效）；`NODE_CLUSTER_ALGORITHM_VERSION="nc-v1"`、`NODE_CLUSTER_OUTPUT_SCHEMA_VERSION=1`、`NODE_CLUSTER_CONTRACT_FINGERPRINT="nc-cf-v1"`；schema_version 2→3
+  - **不变量**：SMC 算法不重写；MDAS/复权/构建治理不重新实现；`ref/smc_user_source.pine` 843 行 + SHA256 不变；`PINE_PARITY_PENDING` 保留；不新增依赖/表/migration
+
 ## 2026-07-17
 
 - CHANGE-20260717-001: SMC Pine 逻辑对齐最终收口（warmup/历史分离 + execution gate + trailing NaN + OB 顺序 + EQH/EQL 几何 + Strong/Weak 起点 + golden 测试重做 + 确定性测试 + 导出增强 + ALGORITHM_VERSION v10）

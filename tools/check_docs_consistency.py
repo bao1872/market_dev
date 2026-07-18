@@ -21,6 +21,15 @@ v2 规则（docs/restructure-system-map-v2 之后）:
     architecture-audits/ 等非规范目录（docs/ 根 .md 文件不受限）。
 12. 校验 CHANGE 引用存在性（CHANGE-20260718-002）：扫描 docs/ 递归 + AGENTS.md
     中 `CHANGE-YYYYMMDD-NNN` 引用，验证对应 records/ 文件存在。
+13. 必需新文档存在性（CHANGE-20260718-004）：要求
+    docs/current/08-indicator-calculation-contracts.md 和
+    docs/maps/indicator-computation-map.md 存在。
+14. ref/ 隔离文本扫描（CHANGE-20260718-004）：扫描 docs/current/*.md +
+    docs/maps/*.md + AGENTS.md，禁止把 ref/ 文件称为"真源"、"运行依赖"、
+    "fixture 生成器"（应改用"参考源（人工阅读）"或"历史路径"）。
+    判定逻辑与 backend/tests/test_ref_isolation.py 保持一致。
+15. 必需 CHANGE 记录（CHANGE-20260718-004）：要求
+    docs/changes/records/CHANGE-20260718-004.md 存在且被 CHANGELOG.md 引用。
 
 输出汇总：
 - MANIFEST baseline SHA
@@ -80,6 +89,42 @@ ALLOWED_TOP_LEVEL_DIRS = {"current", "maps", "changes", "archive"}
 # 验证 docs/changes/records/CHANGE-YYYYMMDD-NNN.md 文件存在。
 CHANGE_REF_RE = re.compile(r"CHANGE-(\d{8})-(\d{3})")
 CHANGES_RECORDS_DIR = DOCS_DIR / "changes" / "records"
+CHANGELOG_FILE = DOCS_DIR / "changes" / "CHANGELOG.md"
+
+# 规则 13：必需新文档清单（CHANGE-20260718-004）
+# Node Cluster 合同和指标计算地图必须在 current/ 和 maps/ 中存在。
+# 路径在 check_required_new_docs_exist() 内从 CURRENT_DIR/MAPS_DIR 派生，
+# 以支持测试 monkeypatch 注入临时路径。
+REQUIRED_NEW_DOC_NAMES = (
+    "08-indicator-calculation-contracts.md",
+    "indicator-computation-map.md",
+)
+
+# 规则 14：ref/ 隔离文本扫描（CHANGE-20260718-004）
+# 扫描 current/*.md + maps/*.md + AGENTS.md，禁止把 ref/ 称为真源/运行依赖。
+# 复用 test_ref_isolation.py 的判定逻辑（简化版：检查禁止术语和近邻 claim）。
+REF_PROHIBITED_TERMS = ("Pine 真源", "视觉真源")
+REF_CLAIM_KEYWORDS = ("真源", "运行依赖", "fixture 生成器", "fixture生成器")
+REF_SAFE_PATTERNS = (
+    "称为",
+    "参考源",
+    "人工阅读",
+    "非运行依赖",
+    "历史路径",
+    "git rm",
+    "不再纳入 git 跟踪",
+    "扫描禁止",
+    "文本扫描禁止",
+)
+REF_WINDOW_BEFORE = 60
+REF_WINDOW_AFTER = 80
+REF_PROHIBITED_TERM_WINDOW = 40
+
+# 规则 15：必需 CHANGE 记录（CHANGE-20260718-004）
+# CHANGE-20260718-004.md 必须存在且被 CHANGELOG.md 引用。
+# 路径在 check_required_change_documented() 内从 DOCS_DIR 派生，
+# 以支持测试 monkeypatch 注入临时路径。
+REQUIRED_CHANGE_ID = "CHANGE-20260718-004"
 
 
 def run_git(*args: str) -> subprocess.CompletedProcess[str]:
@@ -303,8 +348,11 @@ def check_change_references(doc_files: list[Path]) -> list[str]:
 
     历史引用（指向已被删除/未创建的 record）会被检出。
     跳过 archive/ 目录（历史快照，不要求引用可达）。
+
+    records 目录从 DOCS_DIR 派生（支持测试 monkeypatch 注入临时路径）。
     """
     errors: list[str] = []
+    records_dir = DOCS_DIR / "changes" / "records"
     for doc_path in doc_files:
         # archive 历史快照不参与 CHANGE 引用可达性检查
         try:
@@ -320,12 +368,161 @@ def check_change_references(doc_files: list[Path]) -> list[str]:
             if ref_id in seen_in_doc:
                 continue
             seen_in_doc.add(ref_id)
-            target = CHANGES_RECORDS_DIR / f"{ref_id}.md"
+            target = records_dir / f"{ref_id}.md"
             if not target.exists():
                 errors.append(
                     f"引用了不存在的 CHANGE record: {ref_id} "
                     f"(在 {doc_path.relative_to(REPO_ROOT)})"
                 )
+    return errors
+
+
+def _is_ref_problematic_line(line: str) -> bool:
+    """规则 14 辅助：检查一行是否把 ref/ 称为真源/运行依赖/fixture 生成器。
+
+    判定逻辑与 backend/tests/test_ref_isolation.py 的 _is_problematic_ref_claim
+    保持一致（同步更新）：
+    - 行含 `ref/` AND 含禁止术语（"Pine 真源"/"视觉真源"）AND 禁止术语附近无安全模式
+    - OR 行含 `ref/` AND ref/ 窗口内含声明关键词 AND 整行无安全模式
+    """
+    if "ref/" not in line:
+        return False
+
+    # 检查禁止术语（局部窗口安全模式检查）
+    for term in REF_PROHIBITED_TERMS:
+        idx = 0
+        while True:
+            pos = line.find(term, idx)
+            if pos < 0:
+                break
+            window_start = max(0, pos - REF_PROHIBITED_TERM_WINDOW)
+            window_end = min(len(line), pos + len(term) + REF_PROHIBITED_TERM_WINDOW)
+            local_window = line[window_start:window_end]
+            if not any(kw in local_window for kw in REF_SAFE_PATTERNS):
+                return True
+            idx = pos + len(term)
+
+    # 检查通用声明关键词（整行安全模式检查）
+    if any(kw in line for kw in REF_SAFE_PATTERNS):
+        return False
+    ref_positions: list[int] = []
+    idx = 0
+    while True:
+        pos = line.find("ref/", idx)
+        if pos < 0:
+            break
+        ref_positions.append(pos)
+        idx = pos + 4
+    for pos in ref_positions:
+        start = max(0, pos - REF_WINDOW_BEFORE)
+        end = min(len(line), pos + REF_WINDOW_AFTER)
+        window = line[start:end]
+        if any(kw in window for kw in REF_CLAIM_KEYWORDS):
+            return True
+    return False
+
+
+def check_required_new_docs_exist() -> list[str]:
+    """规则 13：必需新文档必须存在（CHANGE-20260718-004）。
+
+    要求：
+    - docs/current/08-indicator-calculation-contracts.md（Node Cluster 合同）
+    - docs/maps/indicator-computation-map.md（指标计算地图）
+
+    这两份文档是 CHANGE-20260718-004 的核心交付物，必须在 Section 4 创建。
+
+    路径从 CURRENT_DIR/MAPS_DIR 派生（支持测试 monkeypatch）。
+    """
+    errors: list[str] = []
+    # 第一个文件在 current/，第二个在 maps/
+    required_paths = (
+        CURRENT_DIR / REQUIRED_NEW_DOC_NAMES[0],
+        MAPS_DIR / REQUIRED_NEW_DOC_NAMES[1],
+    )
+    for doc_path in required_paths:
+        if not doc_path.exists():
+            try:
+                rel = doc_path.relative_to(REPO_ROOT)
+            except ValueError:
+                rel = doc_path
+            errors.append(
+                f"缺少必需文档: {rel}（CHANGE-20260718-004 要求）"
+            )
+    return errors
+
+
+def check_current_docs_no_ref_dependency() -> list[str]:
+    """规则 14：current/maps/AGENTS 文档不得把 ref/ 称为真源/运行依赖（CHANGE-20260718-004）。
+
+    扫描 docs/current/*.md + docs/maps/*.md + AGENTS.md，
+    禁止把 ref/ 文件称为"真源"、"运行依赖"、"fixture 生成器"。
+    允许的表述：参考源（人工阅读）、历史路径、派生文件、git rm 状态等。
+
+    历史目录（docs/changes/records/、docs/archive/）不参与扫描。
+
+    判定逻辑与 backend/tests/test_ref_isolation.py 保持一致。
+    """
+    errors: list[str] = []
+    files: list[Path] = []
+    if CURRENT_DIR.exists():
+        files.extend(sorted(p for p in CURRENT_DIR.glob("*.md") if p.is_file()))
+    if MAPS_DIR.exists():
+        files.extend(sorted(p for p in MAPS_DIR.glob("*.md") if p.is_file()))
+    if AGENTS_FILE.exists():
+        files.append(AGENTS_FILE)
+
+    for doc_path in files:
+        content = doc_path.read_text(encoding="utf-8")
+        rel = doc_path.relative_to(REPO_ROOT)
+        for i, line in enumerate(content.splitlines(), start=1):
+            if _is_ref_problematic_line(line):
+                errors.append(
+                    f"{rel}:{i}: 把 ref/ 称为真源/运行依赖/fixture 生成器"
+                    f"（应改用'参考源（人工阅读）'或'历史路径'）: {line.strip()[:200]}"
+                )
+    return errors
+
+
+def check_required_change_documented() -> list[str]:
+    """规则 15：必需 CHANGE 记录必须存在且被 CHANGELOG 引用（CHANGE-20260718-004）。
+
+    要求：
+    - docs/changes/records/CHANGE-20260718-004.md 必须存在
+    - docs/changes/CHANGELOG.md 必须引用 CHANGE-20260718-004
+
+    CHANGE-20260718-004 是本次 Node Cluster 合同 + ref 隔离的核心变更记录，
+    必须在 Section 4.7 创建并加入 CHANGELOG。
+
+    路径从 DOCS_DIR 派生（支持测试 monkeypatch 注入临时路径）。
+    """
+    errors: list[str] = []
+    records_dir = DOCS_DIR / "changes" / "records"
+    record_path = records_dir / f"{REQUIRED_CHANGE_ID}.md"
+    changelog_path = DOCS_DIR / "changes" / "CHANGELOG.md"
+
+    if not record_path.exists():
+        try:
+            rel = record_path.relative_to(REPO_ROOT)
+        except ValueError:
+            rel = record_path
+        errors.append(
+            f"缺少必需 CHANGE record: {rel}（CHANGE-20260718-004 要求）"
+        )
+    if changelog_path.exists():
+        changelog_content = changelog_path.read_text(encoding="utf-8")
+        if REQUIRED_CHANGE_ID not in changelog_content:
+            errors.append(
+                f"CHANGELOG.md 未引用 {REQUIRED_CHANGE_ID}"
+                f"（CHANGE-20260718-004 要求记录在 CHANGELOG）"
+            )
+    else:
+        try:
+            rel = changelog_path.relative_to(REPO_ROOT)
+        except ValueError:
+            rel = changelog_path
+        errors.append(
+            f"缺少 CHANGELOG 文件: {rel}"
+        )
     return errors
 
 
@@ -464,6 +661,46 @@ def main() -> int:
             print(f"       - {e}")
     else:
         print("[PASS] CHANGE 引用可达性（所有 CHANGE-YYYYMMDD-NNN 引用目标存在）")
+
+    # === 第五阶段：CHANGE-20260718-004 新规则（13/14/15）===
+    print()
+
+    # 规则 13：必需新文档必须存在
+    required_docs_errors = check_required_new_docs_exist()
+    if required_docs_errors:
+        all_errors.extend(required_docs_errors)
+        print("[FAIL] 必需新文档存在性（规则 13）")
+        for e in required_docs_errors:
+            print(f"       - {e}")
+    else:
+        print(
+            "[PASS] 必需新文档存在性（规则 13："
+            "08-indicator-calculation-contracts.md + indicator-computation-map.md）"
+        )
+
+    # 规则 14：current/maps/AGENTS 不得把 ref/ 称为真源/运行依赖
+    ref_dep_errors = check_current_docs_no_ref_dependency()
+    if ref_dep_errors:
+        all_errors.extend(ref_dep_errors)
+        print("[FAIL] ref/ 隔离文本扫描（规则 14）")
+        for e in ref_dep_errors:
+            print(f"       - {e}")
+    else:
+        print(
+            "[PASS] ref/ 隔离文本扫描（规则 14：current/maps/AGENTS 未把 ref/ 称为真源）"
+        )
+
+    # 规则 15：必需 CHANGE 记录必须存在且被 CHANGELOG 引用
+    required_change_errors = check_required_change_documented()
+    if required_change_errors:
+        all_errors.extend(required_change_errors)
+        print("[FAIL] 必需 CHANGE 记录（规则 15）")
+        for e in required_change_errors:
+            print(f"       - {e}")
+    else:
+        print(
+            f"[PASS] 必需 CHANGE 记录（规则 15：{REQUIRED_CHANGE_ID} 存在且 CHANGELOG 引用）"
+        )
 
     # === 汇总 ===
     print()

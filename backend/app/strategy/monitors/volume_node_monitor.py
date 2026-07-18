@@ -42,20 +42,26 @@ from uuid import UUID
 
 import pandas as pd
 
-from app.constants.indicator_contract import NODE_CLUSTER_EVENT_TTL_SECONDS
+from app.constants.indicator_contract import (
+    NODE_CLUSTER_EVENT_TTL_SECONDS,
+    NODE_CLUSTER_PRIMARY_BARS,
+)
 from app.models.strategy import StrategyVersion
+# [CHANGE-20260718-004 Node Cluster engine] VolumeNodeMonitor 三入口（compute_indicators /
+# calculate_state / detect_events）改为调用 node_cluster_engine，不再直接调用底层
+# compute_unified_volume_profile / prepare_node_cluster_bars。架构守护测试
+# test_node_cluster_architecture 强制此约束。
+from app.services.node_cluster_engine import (
+    NodeClusterProfileResult,
+    compute_node_cluster_profile,
+    derive_state_for_price,
+    detect_crossover_signals,
+)
 from app.strategy.runtime import (
     MarketDataContext,
     MonitorState,
     StrategyEventDraft,
     StrategyRuntime,
-)
-from app.strategy_assets.algorithms.features.unified_volume_profile import (
-    VP_LOOKBACK,
-    NodeClusterBarsResult,
-    UnifiedVolumeProfileResult,
-    compute_unified_volume_profile,
-    prepare_node_cluster_bars,
 )
 
 logger = logging.getLogger("strategy.monitors.volume_node_monitor")
@@ -64,6 +70,8 @@ logger = logging.getLogger("strategy.monitors.volume_node_monitor")
 EVENT_TYPE_NODE_CLUSTER_TOUCH = "node_cluster_touch"
 # [volume_node_monitor] - 描述: 事件状态 TTL，从 indicator_contract 唯一真源导入，禁止硬编码
 EVENT_STATE_TTL_SECONDS = NODE_CLUSTER_EVENT_TTL_SECONDS
+# VP_LOOKBACK 引用 indicator_contract 唯一真源（原从 unified_volume_profile 导入别名）
+VP_LOOKBACK = NODE_CLUSTER_PRIMARY_BARS
 
 
 class VolumeNodeMonitor(StrategyRuntime):
@@ -84,8 +92,9 @@ class VolumeNodeMonitor(StrategyRuntime):
     def __init__(self) -> None:
         self._lookback: int = VP_LOOKBACK
         self._strategy_version_id: UUID | None = None
-        # VP 缓存：供 detect_events 复用 calculate_state 的计算结果，避免重复计算
-        self._last_vp_result: UnifiedVolumeProfileResult | None = None
+        # [CHANGE-20260718-004] Profile 缓存：供 detect_events 复用 calculate_state 的计算结果，避免重复计算
+        # 原缓存 UnifiedVolumeProfileResult，现缓存 NodeClusterProfileResult（engine 不可变结果）
+        self._last_profile: NodeClusterProfileResult | None = None
         self._last_vp_calc_id: str | None = None
 
     async def initialize(self, version: StrategyVersion) -> None:
@@ -116,17 +125,19 @@ class VolumeNodeMonitor(StrategyRuntime):
     async def compute_indicators(self, context: MarketDataContext) -> dict[str, Any]:
         """计算 Volume Profile + Node 图表指标（供个股详情页面使用）。
 
-        复用 compute_unified_volume_profile 计算最近 lookback 根日线 bar 的 Volume Node。
+        [CHANGE-20260718-004] 调用 node_cluster_engine.compute_node_cluster_profile 计算最近
+        lookback 根日线 bar 的 Volume Node（唯一业务入口，三链同核）。
         主数据为日线 bars（context.bars_daily），当 15m bars 可用时作为 profile_df
         供成交量分配（低周期分配），否则日线 bars 同时作为主数据和分配来源。
 
         VP 只计算一次（expensive），然后对每根日线 bar 的收盘价提取最近 Node 信息。
         本函数是 Volume Profile 图表的唯一真源（SSOT）：
         - profile_rows: 完整 100 行 VP 价格档位快照（非时间序列），供前端直接渲染多空量柱
-        - profile_meta: VP 元信息（row_count/price_step/poc_price/vah_price/val_price）
+        - profile_meta: VP 元信息（row_count/price_step/poc_price/vah_price/val_price +
+          algorithm_version/contract_fingerprint/profile_hash 等诊断字段）
         - peak_rows: 当前 VP 的 peak 节点快照（非时间序列），供前端渲染多空量标签与迷你多空柱
 
-        所有字段直接从 UnifiedVolumeProfileResult 转换，不重新计算（复用 SSOT）。
+        所有字段直接从 NodeClusterProfileResult 转换，不重新计算（复用 SSOT）。
 
         Returns:
             {"upper_node": [...], "lower_node": [...], "poc_price": [...],
@@ -134,37 +145,38 @@ class VolumeNodeMonitor(StrategyRuntime):
              "profile_rows": [{price_low, price_high, price_mid, bullish_volume,
                                bearish_volume, total_volume, is_peak, is_poc,
                                is_value_area}, ...共 100 行],
-             "profile_meta": {row_count, price_step, poc_price, vah_price, val_price},
+             "profile_meta": {row_count, price_step, poc_price, vah_price, val_price,
+                              algorithm_version, output_schema_version, contract_fingerprint,
+                              daily_source_hash, bars_15m_source_hash, profile_hash, ...},
              "peak_rows": [{price_mid, bullish_volume, bearish_volume, total_volume, is_peak}, ...]}
         """
-        # [volume_node_monitor] - 描述: 调用 prepare_node_cluster_bars 统一准备数据
-        # （DatetimeIndex 排序/去重/tail），与 MonitorBatchService/IndicatorService 共用唯一真源
-        prepared: NodeClusterBarsResult = prepare_node_cluster_bars(
-            context.bars_daily, context.bars_15min, context.bars_minute
-        )
-        # 主数据为准备后的日线 bars
-        bars = prepared.daily
-        if bars is None or len(bars) < 10:
+        # [CHANGE-20260718-004] 调用 engine 唯一入口计算 Node Cluster Profile
+        try:
+            profile = compute_node_cluster_profile(
+                context.bars_daily, context.bars_15min,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"compute_node_cluster_profile 失败 instrument_id={context.instrument_id}: {e}"
+            ) from e
+
+        if not profile.profile_rows:
             return {
                 "upper_node": [], "lower_node": [], "poc_price": [],
                 "position_0_1": [], "current_price": [], "peak_rows": [],
                 "profile_rows": [], "profile_meta": {},
             }
 
-        # 15m bars 作为 profile_df（低周期成交量分配来源，使用准备后的数据）
-        profile_df = prepared.bars_15m if not prepared.bars_15m.empty else None
-
-        try:
-            vp_result = compute_unified_volume_profile(
-                bars, profile_df=profile_df, main_period="day"
-            )
-        except Exception as e:
-            raise RuntimeError(
-                f"compute_unified_volume_profile 失败 instrument_id={context.instrument_id}: {e}"
-            ) from e
-
-        # 对每根日线 bar 收盘价提取 Node 信息
-        close_series = bars["close"].astype(float)
+        # 对每根日线 bar 收盘价提取 Node 信息（使用 engine derive_state_for_price）
+        # 取与 engine 内部 prepared.daily 相同根数的 closes（最后 daily_bars_count 根）
+        daily_closes = (
+            context.bars_daily["close"].astype(float)
+            if context.bars_daily is not None and not context.bars_daily.empty
+            else pd.Series(dtype=float)
+        )
+        n_bars = profile.daily_bars_count
+        if len(daily_closes) > n_bars:
+            daily_closes = daily_closes.iloc[-n_bars:]
 
         upper_nodes: list[Any] = []
         lower_nodes: list[Any] = []
@@ -172,65 +184,54 @@ class VolumeNodeMonitor(StrategyRuntime):
         positions: list[float] = []
         current_prices: list[float] = []
 
-        poc_node = vp_result.poc_node()
-        poc_price: float | None = poc_node["price_mid"] if poc_node is not None else None
+        poc_price = profile.poc_price
 
-        for price in close_series:
-            state = vp_result.state_for_price(float(price))
-            upper_nodes.append(state["upper_node"])
-            lower_nodes.append(state["lower_node"])
-            poc_prices.append(poc_price)
-            positions.append(state["position_0_1"])
-            current_prices.append(state["current_price"])
+        for price in daily_closes:
+            try:
+                state = derive_state_for_price(profile, float(price))
+                state_dict = state.to_dict()
+                upper_nodes.append(state_dict["upper_node"])
+                lower_nodes.append(state_dict["lower_node"])
+                poc_prices.append(poc_price)
+                positions.append(state_dict["position_0_1"])
+                current_prices.append(state_dict["current_price"])
+            except Exception:
+                upper_nodes.append(None)
+                lower_nodes.append(None)
+                poc_prices.append(poc_price)
+                positions.append(None)
+                current_prices.append(float(price))
 
-        # [volume_node_monitor] - profile_rows: 完整 100 行 VP 价格档位快照（SSOT）
-        # 直接从 vp_result.profile_df 转换，供前端渲染多空量柱，禁止前端重算
-        profile_rows_list: list[dict[str, Any]] = []
-        vp_profile_df = vp_result.profile_df
-        if vp_profile_df is not None and not vp_profile_df.empty:
-            for _, row in vp_profile_df.iterrows():
-                profile_rows_list.append({
-                    "price_low": round(float(row["price_low"]), 4),
-                    "price_high": round(float(row["price_high"]), 4),
-                    "price_mid": round(float(row["price_mid"]), 4),
-                    "bullish_volume": float(row["bullish_volume"]),
-                    "bearish_volume": float(row["bearish_volume"]),
-                    "total_volume": float(row["total_volume"]),
-                    "is_peak": bool(row["is_peak"]),
-                    "is_poc": bool(row["is_poc"]),
-                    "is_value_area": bool(row["is_value_area"]),
-                })
+        # [volume_node_monitor] - profile_rows: 直接从 engine result 取（已序列化为 list[dict]）
+        profile_rows_list = profile.profile_rows
 
-        # [volume_node_monitor] - profile_meta: VP 元信息（行数/步长/POC/VAH/VAL）
-        # NaN 转为 None 保证 JSON 可序列化
-        def _finite_or_none(v: float) -> float | None:
-            f = float(v)
-            return f if math.isfinite(f) else None
+        # [volume_node_monitor] - peak_rows: 直接从 engine result 取（含 VA 外 Peak，禁止过滤）
+        peak_rows_list = profile.peak_rows
 
+        # [volume_node_monitor] - profile_meta: VP 元信息 + engine 诊断字段
         profile_meta: dict[str, Any] = {
             "row_count": len(profile_rows_list),
-            "price_step": _finite_or_none(vp_result.price_step),
-            "poc_price": _finite_or_none(vp_result.poc_price),
-            "vah_price": _finite_or_none(vp_result.vah_price),
-            "val_price": _finite_or_none(vp_result.val_price),
+            "price_step": profile.price_step,
+            "poc_price": profile.poc_price,
+            "vah_price": profile.vah_price,
+            "val_price": profile.val_price,
+            # [CHANGE-20260718-004] engine 诊断字段（三链一致性 + 缓存键 + 不可变标识）
+            "algorithm_version": profile.algorithm_version,
+            "output_schema_version": profile.output_schema_version,
+            "contract_fingerprint": profile.contract_fingerprint,
+            "daily_source_hash": profile.daily_source_hash,
+            "bars_15m_source_hash": profile.bars_15m_source_hash,
+            "profile_hash": profile.profile_hash,
+            "daily_bars_count": profile.daily_bars_count,
+            "bars_15m_count": profile.bars_15m_count,
+            "adjustment_as_of": profile.adjustment_as_of,
+            # 输入根数/周期（原 prepared.profile_meta 等价字段）
+            "input_daily_bars": profile.daily_bars_count,
+            "input_15m_bars": profile.bars_15m_count,
+            "input_minute_bars": int(len(context.bars_minute)) if context.bars_minute is not None else 0,
+            "primary_period": "1d",
+            "low_period": "15m",
         }
-        # [volume_node_monitor] - 描述: 合并 prepare_node_cluster_bars 诊断字段
-        # （输入根数/周期/参数版本），供前端与日志排查数据完整性
-        profile_meta.update(prepared.profile_meta)
-
-        # [volume_node_monitor] - peak_rows: 当前 VP 的 peak 节点多空量快照
-        # 供前端图表渲染 peak 节点价格标签 + 多空量标签 + 迷你多空柱
-        peak_rows_list: list[dict[str, Any]] = []
-        peak_df = vp_result.peak_rows
-        if peak_df is not None and not peak_df.empty:
-            for _, row in peak_df.iterrows():
-                peak_rows_list.append({
-                    "price_mid": round(float(row["price_mid"]), 4),
-                    "bullish_volume": float(row["bullish_volume"]),
-                    "bearish_volume": float(row["bearish_volume"]),
-                    "total_volume": float(row["total_volume"]),
-                    "is_peak": bool(row["is_peak"]),
-                })
 
         return {
             "upper_node": upper_nodes,
@@ -246,8 +247,9 @@ class VolumeNodeMonitor(StrategyRuntime):
     async def calculate_state(self, context: MarketDataContext) -> MonitorState:
         """计算当前 bar 的监控状态。
 
-        VP 数据源：日线 bars 作为主数据 + 15m bars 作为 profile_df（低周期成交量分配），
-        与 monitoring.py 盘中实时监控逻辑一致。1m bars 仍用于 crossover 事件检测的
+        [CHANGE-20260718-004] 调用 node_cluster_engine.compute_node_cluster_profile 计算
+        Volume Profile（日线主数据 + 15m profile_df，与 monitoring.py 盘中实时监控逻辑一致），
+        再通过 derive_state_for_price 派生当前价格状态。1m bars 仍用于 crossover 事件检测的
         prev_close/cur_close 取值。
 
         state 字典含 manifest.outputs 声明的所有字段：
@@ -262,14 +264,9 @@ class VolumeNodeMonitor(StrategyRuntime):
         Raises:
             ValueError: bars_daily 为 None 或数据不足
         """
-        # [volume_node_monitor] - 描述: 调用 prepare_node_cluster_bars 统一准备数据
-        # 与 compute_indicators 共用同一组准备后数据，保证两入口 VP 计算一致
-        prepared = prepare_node_cluster_bars(
-            context.bars_daily, context.bars_15min, context.bars_minute
-        )
-        bars_daily = prepared.daily
+        bars_daily = context.bars_daily
 
-        if bars_daily.empty:
+        if bars_daily is None or bars_daily.empty:
             raise ValueError(
                 f"VolumeNodeMonitor 需要 daily bars 数据，instrument_id={context.instrument_id}"
             )
@@ -280,22 +277,19 @@ class VolumeNodeMonitor(StrategyRuntime):
                 f"instrument_id={context.instrument_id}"
             )
 
-        # 15m bars 作为 profile_df（使用准备后的数据）
-        ltf_bars = prepared.bars_15m if not prepared.bars_15m.empty else None
-
-        # 计算 Volume Profile（日线主数据 + 15m profile_df，与 monitoring.py 一致）
+        # [CHANGE-20260718-004] 调用 engine 唯一入口计算 Node Cluster Profile
         try:
-            vp_result = compute_unified_volume_profile(
-                bars_daily, profile_df=ltf_bars, main_period="day"
+            profile = compute_node_cluster_profile(
+                context.bars_daily, context.bars_15min,
             )
         except Exception as e:
             raise RuntimeError(
-                f"compute_unified_volume_profile 失败 instrument_id={context.instrument_id}: {e}"
+                f"compute_node_cluster_profile 失败 instrument_id={context.instrument_id}: {e}"
             ) from e
 
-        # 缓存 VP 结果供 detect_events 复用
+        # 缓存 Profile 结果供 detect_events 复用
         calc_id = f"{context.instrument_id}:{context.bar_time.isoformat() if context.bar_time else 'unknown'}"
-        self._last_vp_result = vp_result
+        self._last_profile = profile
         self._last_vp_calc_id = calc_id
 
         # 当前价格：优先从 1m bars 取最后一根 bar 收盘价，否则从日线取
@@ -304,8 +298,8 @@ class VolumeNodeMonitor(StrategyRuntime):
         else:
             current_price = float(bars_daily["close"].iloc[-1])
 
-        # 通过统一结果对象计算状态字段
-        state = vp_result.state_for_price(current_price)
+        # 通过 engine derive_state_for_price 派生状态字段
+        state = derive_state_for_price(profile, current_price).to_dict()
 
         bar_time = context.bar_time or (
             bars_daily.index[-1].to_pydatetime()
@@ -324,45 +318,30 @@ class VolumeNodeMonitor(StrategyRuntime):
     def _detect_node_crossover_signals(
         self,
         bars_minute: pd.DataFrame,
-        vp_result: UnifiedVolumeProfileResult,
+        profile: NodeClusterProfileResult,
     ) -> list[dict[str, Any]]:
         """Crossover 检测：1m bar 收盘价穿越 peak_price 时触发（与 monitoring.py 一致）。
 
-        逻辑：取 1m bars 最后两根 bar 的 close（prev_close / cur_close），
-        遍历 vp_result.all_peak_prices，检测价格穿越：
+        [CHANGE-20260718-004] 委托 node_cluster_engine.detect_crossover_signals，
+        公式零变化：取 1m bars 最后两根 bar 的 close（prev_close / cur_close），
+        遍历 profile.all_peak_prices，检测价格穿越：
         (prev_close <= peak_price < cur_close) or (cur_close <= peak_price < prev_close)
 
         Args:
             bars_minute: 1m OHLCV DataFrame
-            vp_result: UnifiedVolumeProfileResult（含 all_peak_prices）
+            profile: NodeClusterProfileResult（含 all_peak_prices）
 
         Returns:
             信号列表，每项含 boundary/cluster_price/price/dev_pct
         """
-        cluster_prices = vp_result.all_peak_prices
-        if not cluster_prices:
-            return []
-
         if bars_minute is None or len(bars_minute) < 2:
             return []
 
         prev_close = float(bars_minute.iloc[-2]["close"])
         cur_close = float(bars_minute.iloc[-1]["close"])
 
-        signals: list[dict[str, Any]] = []
-        for cp in cluster_prices:
-            peak_cross = (prev_close <= cp < cur_close) or (cur_close <= cp < prev_close)
-            if peak_cross:
-                dev_pct = (cur_close - cp) / cp * 100 if cp != 0 else 0.0
-                signals.append({
-                    "trigger_type": EVENT_TYPE_NODE_CLUSTER_TOUCH,
-                    "price": cur_close,
-                    "cluster_price": cp,
-                    "boundary": cp,
-                    "dev_pct": round(dev_pct, 4),
-                })
-
-        return signals
+        # 委托 engine detect_crossover_signals（公式零变化）
+        return detect_crossover_signals(profile, prev_close, cur_close)
 
     async def detect_events(
         self,
@@ -377,9 +356,9 @@ class VolumeNodeMonitor(StrategyRuntime):
         每个 crossover 信号生成一条事件，dedupe_key 按 instrument+boundary+bar_time 去重。
 
         Args:
-            context: 市场数据上下文（需含 bars_minute + VP 结果）
+            context: 市场数据上下文（需含 bars_minute + Profile 结果）
             prev_state: 前一状态（crossover 模式下不使用，保留接口兼容）
-            curr_state: 当前状态（含 VP 计算结果）
+            curr_state: 当前状态（含 Profile 计算结果）
 
         Returns:
             事件草稿列表（每个穿越信号一条）
@@ -388,33 +367,28 @@ class VolumeNodeMonitor(StrategyRuntime):
         if context.bars_minute is None or len(context.bars_minute) < 2:
             return []
 
-        # 优先从缓存获取 VP 结果（与 calculate_state 共享，避免重复计算）
+        # [CHANGE-20260718-004] 优先从缓存获取 Profile 结果（与 calculate_state 共享，避免重复计算）
         calc_id = f"{context.instrument_id}:{context.bar_time.isoformat() if context.bar_time else 'unknown'}"
-        if self._last_vp_result is not None and self._last_vp_calc_id == calc_id:
-            vp_result = self._last_vp_result
+        if self._last_profile is not None and self._last_vp_calc_id == calc_id:
+            profile = self._last_profile
         else:
             # 缓存未命中，重新计算
             bars_daily = context.bars_daily
             if bars_daily is None or len(bars_daily) < 10:
                 return []
 
-            ltf_bars = (
-                context.bars_15min
-                if context.bars_15min is not None and not context.bars_15min.empty
-                else None
-            )
             try:
-                vp_result = compute_unified_volume_profile(
-                    bars_daily, profile_df=ltf_bars, main_period="day"
+                profile = compute_node_cluster_profile(
+                    context.bars_daily, context.bars_15min,
                 )
             except Exception as e:
                 raise RuntimeError(
-                    f"compute_unified_volume_profile 失败（detect_events）"
+                    f"compute_node_cluster_profile 失败（detect_events）"
                     f"instrument_id={context.instrument_id}: {e}"
                 ) from e
 
-        # Crossover 检测
-        signals = self._detect_node_crossover_signals(context.bars_minute, vp_result)
+        # Crossover 检测（委托 engine，公式零变化）
+        signals = self._detect_node_crossover_signals(context.bars_minute, profile)
         if not signals:
             return []
 
@@ -462,12 +436,16 @@ if __name__ == "__main__":
     print(f"VolumeNodeMonitor.kind={VolumeNodeMonitor.kind}")
     assert VolumeNodeMonitor.kind == "monitor"
 
-    # 验证共享模块已通过包内导入可用
-    assert callable(compute_unified_volume_profile)
-    assert UnifiedVolumeProfileResult is not None
+    # [CHANGE-20260718-004 Node Cluster engine] 验证 engine 函数已通过包内导入可用
+    # （原 compute_unified_volume_profile / UnifiedVolumeProfileResult 已移除直接导入，
+    # 现通过 node_cluster_engine 唯一业务入口访问底层 VP）
+    assert callable(compute_node_cluster_profile)
+    assert callable(derive_state_for_price)
+    assert callable(detect_crossover_signals)
+    assert NodeClusterProfileResult is not None
     # [advice.md 第四节] - VP_LOOKBACK 与 indicator_contract.NODE_CLUSTER_PRIMARY_BARS 对齐（250）
     assert VP_LOOKBACK == 250
-    print("compute_unified_volume_profile/UnifiedVolumeProfileResult/VP_LOOKBACK 可用 ✓")
+    print("compute_node_cluster_profile/derive_state_for_price/detect_crossover_signals/NodeClusterProfileResult/VP_LOOKBACK 可用 ✓")
 
     # 验证 ABC 继承
     from app.strategy.runtime import StrategyRuntime

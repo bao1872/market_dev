@@ -49,6 +49,15 @@ from app.models.stock_feature_snapshot_run import (
     StockFeatureSnapshotRun,
 )
 from app.services.atomic_fact_contract_service import build_persisted_afc_payload
+# [CHANGE-20260718-004 Node Cluster engine] 盘后链一次调用 engine 计算 Node Cluster Profile，
+# 注入 _compute_all_factors_for_bars(primary)，修复三链不一致缺陷（原 _compute_cost_position_factors
+# 单独调用 compute_unified_volume_profile(bars) 单周期 VP，与详情/监控链口径不一致）。
+# 15m secondary 保持单周期 VP 语义（timeframe_volume_profile，非 Node Cluster）。
+from app.services.node_cluster_engine import (
+    NodeClusterProfileResult,
+    compute_node_cluster_profile,
+    profile_to_dict,
+)
 from app.services.structural_factor_service import (
     _compute_all_factors_for_bars,
     _compute_relation,
@@ -82,7 +91,7 @@ logger = logging.getLogger(__name__)
 
 # 常量
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
-_SCHEMA_VERSION = 2  # [CHANGE-20260717-002 SSOT] 1→2: bars 来源改为 MDAS point-in-time + hash/contract 落库
+_SCHEMA_VERSION = 3  # [CHANGE-20260718-004] 2→3: Node Cluster engine 统一三链 + primary.1d.node_cluster canonical 字段 + secondary.15m.cost_position 重命名为 timeframe_volume_profile（旧 schema_version=2 快照不可见，符合"旧新结果不可混用"）
 _PRIMARY_LOOKBACK = 500  # 日线回看天数（与 structural_factor_service 对齐）
 _SECONDARY_LOOKBACK = 500  # 15m 回看天数
 _BB_WIN = 20
@@ -318,6 +327,7 @@ async def compute_feature_snapshot_for_date(
     warmup_notes: list[str] = []
 
     # 获取 K 线（如果未预加载）
+    primary_adj_factor_hash: str | None = None
     if primary_bars is None:
         primary_bars, primary_diag = await _fetch_bars_from_db(
             session, instrument_id, primary_timeframe, adj, trade_date,
@@ -325,6 +335,8 @@ async def compute_feature_snapshot_for_date(
         # [CHANGE-20260717-002 SSOT] 主周期诊断为权威，写入 _diag_sink 供 run 级收集
         if _diag_sink is not None and primary_diag:
             _diag_sink.update(primary_diag)
+        # [CHANGE-20260718-004] 提取 adj_factor_hash 供 engine 诊断字段（point-in-time 复权因子 hash）
+        primary_adj_factor_hash = primary_diag.get("adj_factor_hash") if primary_diag else None
     if secondary_bars is None:
         secondary_bars, _secondary_diag = await _fetch_bars_from_db(
             session, instrument_id, secondary_timeframe, adj, trade_date,
@@ -348,12 +360,29 @@ async def compute_feature_snapshot_for_date(
             f"{secondary_timeframe}: insufficient bars ({len(df_15m)} < 60)"
         )
 
+    # [CHANGE-20260718-004 Node Cluster engine] 盘后链一次调用 engine 计算 Node Cluster Profile，
+    # 注入 _compute_all_factors_for_bars(primary)，修复三链不一致缺陷。
+    # secondary 15m 保持单周期 VP 语义（timeframe_volume_profile，非 Node Cluster）。
+    node_cluster_profile: NodeClusterProfileResult | None = None
+    if df_1d is not None and not df_1d.empty and df_15m is not None and not df_15m.empty:
+        try:
+            node_cluster_profile = compute_node_cluster_profile(
+                df_1d, df_15m,
+                adjustment_as_of=trade_date.isoformat(),
+                adj_factor_hash=primary_adj_factor_hash,
+            )
+        except Exception as exc:
+            logger.warning("Node Cluster engine 计算失败: %s", exc)
+            degraded_reasons.append(f"node_cluster: engine failed: {exc}")
+
     # 计算 structural factors
     primary_factors = _compute_all_factors_for_bars(
-        df_1d, primary_timeframe, degraded_reasons, warmup_notes
+        df_1d, primary_timeframe, degraded_reasons, warmup_notes,
+        precomputed_node_cluster=node_cluster_profile,
     )
     secondary_factors = _compute_all_factors_for_bars(
-        df_15m, secondary_timeframe, degraded_reasons, warmup_notes
+        df_15m, secondary_timeframe, degraded_reasons, warmup_notes,
+        precomputed_node_cluster=None,  # 15m secondary 单周期 VP，非 Node Cluster
     )
 
     # C6: 计算真实 MACD 紧凑状态
@@ -377,9 +406,20 @@ async def compute_feature_snapshot_for_date(
     relation = _compute_relation(primary_factors, secondary_factors)
 
     # 构造 structural_payload（与 compute_structural_factors 输出格式对齐）
+    # [CHANGE-20260718-004] primary.1d 新增 canonical node_cluster 字段（engine 不可变结果），
+    # cost_position 兼容指向 engine 派生字段；secondary.15m.cost_position 重命名为
+    # timeframe_volume_profile（单周期 15m VP，显式非 Node Cluster）。
+    primary_payload: dict[str, Any] = {**primary_factors}
+    if node_cluster_profile is not None:
+        primary_payload["node_cluster"] = profile_to_dict(node_cluster_profile)
+    secondary_payload: dict[str, Any] = {**secondary_factors}
+    # 重命名 cost_position → timeframe_volume_profile（显式非 Node Cluster）
+    if "cost_position" in secondary_payload:
+        secondary_payload["timeframe_volume_profile"] = secondary_payload.pop("cost_position")
+
     structural_payload: dict[str, Any] = {
-        "primary": {primary_timeframe: primary_factors},
-        "secondary": {secondary_timeframe: secondary_factors},
+        "primary": {primary_timeframe: primary_payload},
+        "secondary": {secondary_timeframe: secondary_payload},
         "relation": relation,
         "meta": {
             "degraded_reasons": degraded_reasons,
