@@ -46,4 +46,7 @@ FROM nginx:alpine@sha256:54f2a904c251d5a34adf545a72d32515a15e08418dae0266e23be2e
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 # 复制构建产物到 nginx 静态资源目录
-COPY --from=builder /app/dist /usr/share
+# [CHANGE-20260718-007] 删除 nginx 默认欢迎页，确保 /usr/share/nginx/html 只含 SPA 产物。
+# 生产入口固定 80:80，默认 nginx index.html 不得残留（P0 部署合同）。
+RUN rm -rf /usr/share/nginx/html/*
+COPY --from=builder /app/dist/ /usr/share/nginx/html/
