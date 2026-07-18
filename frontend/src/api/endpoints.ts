@@ -503,7 +503,7 @@ export interface StockDetailFeishuCreateResponse {
   message_group_id: string
   message_id: string
   image_message_id: string | null
-  status: 'pending'
+  status: 'pending' | 'failed'
 }
 
 /** GET /stock-detail-feishu/{test_run_id}/status 响应 - 查询投递状态 */
@@ -514,7 +514,7 @@ export interface StockDetailFeishuStatusResponse {
   capture_status: ShareDeliveryStatus
   image_upload_status: ShareDeliveryStatus
   image_status: ShareDeliveryStatus
-  overall_status: 'pending' | 'success' | 'partial_failed' | 'failed'
+  overall_status: 'pending' | 'success' | 'failed'
   failed_step: 'capture' | 'image_upload' | 'image_delivery' | 'card' | 'image' | null
   error_code: string | null
   error_message: string | null

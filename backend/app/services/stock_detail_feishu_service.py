@@ -15,7 +15,8 @@
 - message_group_id: 关联 text+image 两条 Outbox/MessageDelivery 的组 ID
 - message_id: 文本消息 ID（主消息）
 - image_message_id: 图片消息 ID（截图失败时为 None）
-- status: "pending"（截图成功，Outbox 异步投递中）| "partial_failed"（截图失败）
+- status: "pending"（截图成功，Outbox 异步投递中）| "failed"（截图或图片 Outbox 失败，
+  请求要求图片但未成功，整体标记 failed 以触发显式重试）
 - failed_step: 截图失败时的失败步骤（"capture" | "image_outbox" | None）
 - error_code: 截图失败时的错误码（NO_IMAGE_URL | CAPTURE_REQUEST_FAILED | IMAGE_OUTBOX_FAILED | None）
 - error_message: 截图失败时的错误详情（包含 worker 返回的响应体，最多 500 字符）
@@ -134,7 +135,9 @@ async def send_stock_detail_to_feishu(
         dict 含 test_run_id / message_group_id / message_id / image_message_id /
         status / failed_step / error_code / error_message
         - status="pending": 截图成功，Outbox 异步投递中（终态由 delivery_worker 决定）
-        - status="partial_failed": 截图失败，文本已写入 Outbox，支持仅重试图片
+        - status="failed": 截图或图片 Outbox 失败，文本已写入 Outbox，支持仅重试图片
+          （请求要求图片但未成功，整体标记 failed 而非 partial_failed，
+          以触发显式重试与告警，避免下游系统将 partial_failed 视为"可接受"）
         - failed_step/error_code/error_message: 截图成功时为 None，失败时携带上下文
 
     Raises:
@@ -264,7 +267,7 @@ async def send_stock_detail_to_feishu(
 
     # 8. 截图 → 创建图片消息 → 写入图片 Outbox（截图失败不阻塞文本投递）
     # [StockDetailFeishu] - 图片段：delivery_type=image，与 text 共享 message_group_id
-    # [StockDetailFeishu] - 状态机：在 try 块外维护失败上下文，截图失败时返回 partial_failed
+    # [StockDetailFeishu] - 状态机：在 try 块外维护失败上下文，截图失败时返回 failed
     image_message_id: str | None = None
     image_url: str | None = None
     failed_step_local: str | None = None
@@ -435,10 +438,12 @@ async def send_stock_detail_to_feishu(
         failed_step_local, error_code_local,
     )
 
-    # [StockDetailFeishu] - 状态机：截图失败时返回 partial_failed（advice.md 第七节）
+    # [StockDetailFeishu] - 状态机：截图/图片 Outbox 失败时返回 failed（CHANGE-20260718-006 Section 3）
+    # 请求要求图片但 image_status != success 时，整体标记 failed 而非 partial_failed，
+    # 以触发显式重试与告警，避免下游系统将 partial_failed 视为"可接受"。
     # 截图成功时仍返回 pending（Outbox 异步投递尚未完成，由 delivery_worker 处理）
     if failed_step_local is not None:
-        final_status = "partial_failed"
+        final_status = "failed"
     else:
         final_status = "pending"
 
@@ -596,7 +601,14 @@ async def get_share_status(
         capture_status = "success"
 
     # 汇总 overall_status + failed_step + error_code + error_message
-    # [StockDetailFeishu] - 描述: 文字成功+图片失败 → overall_status=partial_failed
+    # [StockDetailFeishu] - 状态机（CHANGE-20260718-006 Section 3）：
+    # 请求要求图片但 image_status != success 时，整体标记 failed 而非 partial_failed，
+    # 以触发显式重试与告警，避免下游系统将 partial_failed 视为"可接受"。
+    # 区分两种子情况：
+    #   - 图片已确定性失败（capture 失败 / image_delivery failed/dead / image_upload failed）
+    #     → overall_status=failed，填充 failed_step/error_code/error_message
+    #   - 图片仍在进行中（pending/sending/retrying 且 image_upload 未失败 / Outbox 尚未 relay）
+    #     → overall_status=pending（等待图片投递完成）
     failed_step: str | None = None
     error_code: str | None = None
     error_message: str | None = None
@@ -606,29 +618,45 @@ async def get_share_status(
     image_success = image_exists and image_status == "success"
     any_failed_or_dead = any(d.status in ("failed", "dead") for d in deliveries)
 
+    # 判定图片段是否已确定性失败（与"仍在进行中"区分）
+    # - capture 失败：capture_job_failed 存在 → 没有创建 image delivery
+    # - image delivery 状态为 failed/dead：投递已放弃
+    # - image_upload_status=failed：飞书图片上传失败（即使 delivery 仍在 retrying）
+    image_definitively_failed = (
+        capture_job_failed is not None
+        or (
+            image_exists
+            and (
+                image_deliveries[0].status in ("failed", "dead")
+                or image_deliveries[0].image_upload_status == "failed"
+            )
+        )
+    )
+
     if card_success and image_success:
         overall_status = "success"
     elif card_success and not image_success:
-        # 卡片段成功，但图片段未成功（pending/sending/retrying/failed/dead/not_created）
-        # [StockDetailFeishu] - 描述: 文字成功+图片未成功 → partial_failed
-        overall_status = "partial_failed"
-        if capture_job_failed:
-            failed_step = "capture"
-            error_code = capture_job_failed.error_code
-            error_message = capture_job_failed.error_message
-        elif image_deliveries and image_deliveries[0].status in ("failed", "dead", "retrying"):
-            image_delivery = image_deliveries[0]
-            if image_delivery.image_upload_status == "failed":
-                failed_step = "image_upload"
-                error_code = image_delivery.image_upload_error_code
-            else:
-                failed_step = "image_delivery"
-                error_code = image_delivery.last_error_code
-            error_message = _extract_delivery_error_message(image_delivery)
+        # 卡片段成功，但图片段未成功。按"是否确定性失败"二分：
+        if image_definitively_failed:
+            # [StockDetailFeishu] - 描述: 文字成功+图片确定性失败 → failed（CHANGE-20260718-006）
+            overall_status = "failed"
+            if capture_job_failed:
+                failed_step = "capture"
+                error_code = capture_job_failed.error_code
+                error_message = capture_job_failed.error_message
+            elif image_deliveries:
+                image_delivery = image_deliveries[0]
+                if image_delivery.image_upload_status == "failed":
+                    failed_step = "image_upload"
+                    error_code = image_delivery.image_upload_error_code
+                else:
+                    failed_step = "image_delivery"
+                    error_code = image_delivery.last_error_code
+                error_message = _extract_delivery_error_message(image_delivery)
         else:
-            # 卡片段成功但图片段尚未创建，也视为 partial_failed（等待中）
-            # 此时没有具体失败步骤，保持 None
-            pass
+            # [StockDetailFeishu] - 描述: 文字成功+图片仍在进行中（pending/sending/retrying，
+            # Outbox 尚未 relay 或投递未完成）→ pending，等待图片投递完成
+            overall_status = "pending"
     elif any_failed_or_dead:
         overall_status = "failed"
         for d in deliveries:

@@ -2,7 +2,8 @@
 
 覆盖：
 1. capture 成功 → 通过 Outbox Relay 扩张为 card + image 两条 Delivery，共享 message_group_id
-2. capture 失败 → 卡片段成功、图片段未创建，overall_status=partial_failed，failed_step=capture
+2. capture 失败 → 卡片段成功、图片段未创建，overall_status=failed，failed_step=capture
+   （CHANGE-20260718-006 Section 3：从 partial_failed 升级为 failed）
 3. image upload 失败 → 可仅重试图片，不重复发送文字
 4. 同一 message_group_id 关联 text + image
 5. 用户只能查询自己的发送状态
@@ -241,13 +242,17 @@ class TestStockDetailFeishuStatusAggregation:
             app.dependency_overrides.clear()
 
     @pytest.mark.asyncio
-    async def test_capture_failure_returns_partial_failed(
+    async def test_capture_failure_returns_failed(
         self,
         db_session: AsyncSession,
         test_instrument,
         user_with_feishu_platform_app_channel,
     ) -> None:
-        """截图失败 → 卡片段仍可成功，overall_status=partial_failed，failed_step=capture。"""
+        """截图失败 → 卡片段仍可成功，overall_status=failed，failed_step=capture。
+
+        [CHANGE-20260718-006 Section 3] 从 partial_failed 升级为 failed：
+        请求要求图片但未成功时整体标记 failed，触发显式重试与告警。
+        """
         user, channel = user_with_feishu_platform_app_channel
         _override_get_db(db_session)
 
@@ -283,7 +288,7 @@ class TestStockDetailFeishuStatusAggregation:
             deliveries[0].status = "success"
             await db_session.flush()
 
-            # 查询状态应为 partial_failed
+            # 查询状态应为 failed
             transport = make_asgi_transport(app)
             async with AsyncClient(
                 transport=transport, base_url="http://test"
@@ -295,7 +300,7 @@ class TestStockDetailFeishuStatusAggregation:
 
             assert status_resp.status_code == 200
             status_data = status_resp.json()
-            assert status_data["overall_status"] == "partial_failed"
+            assert status_data["overall_status"] == "failed"
             assert status_data["card_status"] == "success"
             assert status_data["image_status"] == "not_created"
             assert status_data["failed_step"] == "capture"
@@ -327,7 +332,11 @@ class TestStockDetailFeishuImageRetry:
         test_instrument,
         user_with_feishu_platform_app_channel,
     ) -> None:
-        """image upload 失败 → partial_failed；重试图片后 success，且不重复发送文字。"""
+        """image upload 失败 → failed；重试图片后 success，且不重复发送文字。
+
+        [CHANGE-20260718-006 Section 3] 从 partial_failed 升级为 failed：
+        image_upload_status=failed 视为图片确定性失败，整体标记 failed。
+        """
         user, channel = user_with_feishu_platform_app_channel
         _override_get_db(db_session)
 
@@ -373,7 +382,7 @@ class TestStockDetailFeishuImageRetry:
                 assert mock_send.called, "卡片段应调用 adapter.send"
                 assert mock_send_image.called, "图片应调用 adapter.send_image_bytes"
 
-            # 验证状态为 partial_failed / image_upload
+            # 验证状态为 failed / image_upload
             deliveries_before = (
                 await db_session.execute(
                     select(MessageDelivery).where(
@@ -398,7 +407,7 @@ class TestStockDetailFeishuImageRetry:
                     headers=_auth_headers(user.id),
                 )
             status_data = status_resp.json()
-            assert status_data["overall_status"] == "partial_failed"
+            assert status_data["overall_status"] == "failed"
             assert status_data["failed_step"] == "image_upload"
             assert status_data["error_code"] == "IMAGE_UPLOAD_FAILED"
 
