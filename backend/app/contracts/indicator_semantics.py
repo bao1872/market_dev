@@ -93,7 +93,7 @@ if __name__ == "__main__":
     for key, value in sem.items():
         if key == "NODE_CLUSTER_SEMANTIC_INVARIANTS":
             print(f"  {key}:")
-            for item in value:  # type: ignore[union-attr]
+            for item in value:  # type: ignore[attr-defined]
                 print(f"    - {item}")
         else:
             print(f"  {key} = {value!r}")

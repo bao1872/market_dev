@@ -35,7 +35,6 @@ VP 数据源（与 monitoring.py 一致）：
 from __future__ import annotations
 
 import logging
-import math
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -47,6 +46,7 @@ from app.constants.indicator_contract import (
     NODE_CLUSTER_PRIMARY_BARS,
 )
 from app.models.strategy import StrategyVersion
+
 # [CHANGE-20260718-004 Node Cluster engine] VolumeNodeMonitor 三入口（compute_indicators /
 # calculate_state / detect_events）改为调用 node_cluster_engine，不再直接调用底层
 # compute_unified_volume_profile / prepare_node_cluster_bars。架构守护测试
@@ -181,7 +181,7 @@ class VolumeNodeMonitor(StrategyRuntime):
         upper_nodes: list[Any] = []
         lower_nodes: list[Any] = []
         poc_prices: list[float | None] = []
-        positions: list[float] = []
+        positions: list[float | None] = []
         current_prices: list[float] = []
 
         poc_price = profile.poc_price

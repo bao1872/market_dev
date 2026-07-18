@@ -55,14 +55,13 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from app.constants.indicator_contract import VP_ROWS
 from app.contracts.indicator_semantics import (
-    NODE_CLUSTER_ADJUSTMENT_MODE,
     NODE_CLUSTER_ALGORITHM_VERSION,
-    NODE_CLUSTER_COMPLETED_ONLY,
     NODE_CLUSTER_CONTRACT_FINGERPRINT,
     NODE_CLUSTER_OUTPUT_SCHEMA_VERSION,
 )
-from app.constants.indicator_contract import VP_ROWS
+
 # [CHANGE-20260718-004 Node Cluster engine] 只有本 engine 可导入底层 VP 模块。
 # 业务模块禁止直接 from ...unified_volume_profile import compute_unified_volume_profile。
 # 架构守护测试 test_node_cluster_architecture.py 强制此约束。
@@ -133,7 +132,7 @@ class NodeClusterProfileResult:
     bars_15m_count: int
     profile_hash: str
     # 私有：底层 VP 结果（供 derive_state_for_price / detect_crossover_signals 复用，禁止业务模块访问）
-    _vp_result: UnifiedVolumeProfileResult = field(default=None, repr=False, compare=False)
+    _vp_result: UnifiedVolumeProfileResult | None = field(default=None, repr=False, compare=False)
 
     # [CHANGE-20260718-004 Section 2.6] 鸭子类型适配器：让 monitor_chart_renderer.render_monitoring_chart
     # 可直接消费 NodeClusterProfileResult（按 profile.profile_df/.peak_df/.price_step 鸭子类型访问，

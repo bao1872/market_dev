@@ -36,6 +36,7 @@ from app.constants.indicator_contract import DAILY_HISTORY_BARS
 from app.services.market_data_aggregation_service import (
     MarketDataAggregationService,
 )
+
 # [CHANGE-20260718-004 Node Cluster engine] 不再直接导入 unified_volume_profile；
 # Node Cluster 三链（盘后 primary / 详情 / 监控）经 node_cluster_engine 统一入口，
 # 15m secondary 单周期 VP 经 engine.compute_single_period_volume_profile。

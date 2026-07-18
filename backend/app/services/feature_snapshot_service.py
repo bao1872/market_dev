@@ -49,6 +49,7 @@ from app.models.stock_feature_snapshot_run import (
     StockFeatureSnapshotRun,
 )
 from app.services.atomic_fact_contract_service import build_persisted_afc_payload
+
 # [CHANGE-20260718-004 Node Cluster engine] 盘后链一次调用 engine 计算 Node Cluster Profile，
 # 注入 _compute_all_factors_for_bars(primary)，修复三链不一致缺陷（原 _compute_cost_position_factors
 # 单独调用 compute_unified_volume_profile(bars) 单周期 VP，与详情/监控链口径不一致）。

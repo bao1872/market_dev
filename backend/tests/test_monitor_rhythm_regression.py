@@ -18,7 +18,7 @@ import ast
 from pathlib import Path
 
 from app.constants.indicator_contract import NODE_CLUSTER_EVENT_TTL_SECONDS
-from app.services.node_cluster_engine import detect_crossover_signals, compute_node_cluster_profile
+from app.services.node_cluster_engine import compute_node_cluster_profile, detect_crossover_signals
 
 _MONITOR_FILE = Path(__file__).parent.parent / "app" / "strategy" / "monitors" / "volume_node_monitor.py"
 _MONITOR_BATCH_FILE = Path(__file__).parent.parent / "app" / "services" / "monitor_batch_service.py"

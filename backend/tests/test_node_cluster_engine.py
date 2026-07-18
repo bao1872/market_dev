@@ -21,20 +21,17 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from app.services.node_cluster_engine import (
-    NodeClusterProfileResult,
     build_engine_cache_key,
     compute_node_cluster_profile,
-    detect_crossover_signals,
     derive_state_for_price,
+    detect_crossover_signals,
 )
-
 
 # =============================================================================
 # 合成数据生成
@@ -238,7 +235,7 @@ class TestPeakPreservation:
         # peak_rows 是 is_peak 行的列表
         assert len(result.peak_rows) == len(result.all_peak_prices)
         # all_peak_prices 是排序去重的 price_mid
-        peak_prices_set = set(round(p, 4) for p in result.all_peak_prices)
+        peak_prices_set = {round(p, 4) for p in result.all_peak_prices}
         for row in result.peak_rows:
             assert round(float(row["price_mid"]), 4) in peak_prices_set
 
