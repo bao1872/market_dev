@@ -1,23 +1,22 @@
+# syntax=docker/dockerfile:1.4
 # V1.1 交易平台 - 截图 Worker Dockerfile
 # 基于官方 Playwright Python 镜像，复用 app.services.stock_capture_service 截图逻辑
 # 用法: docker build -t trading-capture-worker -f Dockerfile.capture ./backend
+#
+# [CHANGE-20260718-003 构建性能] 版本 ARG 移到依赖层之后 + BuildKit pip cache mount
+# + 移除 PIP_NO_CACHE_DIR。基础镜像 playwright 非本地，暂按 tag（维护时显式 --pull 更新并固定 digest）。
 
+# 基础镜像：playwright 预装浏览器；非本地镜像，暂按 tag（维护时显式 --pull 更新并固定 digest）
 FROM mcr.microsoft.com/playwright/python:v1.45.0-jammy
-
-# 构建版本注入
-ARG GIT_SHA=unknown
-ARG BUILD_TIME=unknown
 
 WORKDIR /app
 
-ENV GIT_SHA=${GIT_SHA}
-ENV BUILD_TIME=${BUILD_TIME}
 ENV PYTHONUNBUFFERED=1
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 # 配置清华 PyPI 镜像源
 ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
-ENV PIP_NO_CACHE_DIR=1
+# 注：PIP_NO_CACHE_DIR 已移除——改用 BuildKit cache mount 持久化 pip 下载缓存（见下方 --mount）。
 
 # 安装 Python 3.11 与 pip（Ubuntu 22.04 默认源包含 python3.11）
 RUN apt-get update \
@@ -27,13 +26,22 @@ RUN apt-get update \
 # 为 Python 3.11 安装 pip
 RUN curl -fsSL https://bootstrap.pypa.io/get-pip.py | python3.11
 
-# 复制依赖声明与应用源码
+# 复制依赖声明与应用源码（依赖层仅由 pyproject.toml 触发失效）
 COPY pyproject.toml ./
 COPY app ./app
 
-# 使用 Python 3.11 安装项目及依赖，并固定 playwright 版本与基础镜像预装浏览器一致
-RUN python3.11 -m pip install . \
+# 使用 Python 3.11 安装项目及依赖，并固定 playwright 版本与基础镜像预装浏览器一致；
+# BuildKit cache mount 持久化 pip 下载缓存。
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3.11 -m pip install . \
     && python3.11 -m pip install --force-reinstall playwright==1.45.0
+
+# 版本 ARG 在依赖层之后声明（CHANGE-20260718-003）：仅让最终 metadata 层失效，不影响依赖层缓存
+ARG GIT_SHA=unknown
+ARG BUILD_TIME=unknown
+ENV GIT_SHA=${GIT_SHA}
+ENV BUILD_TIME=${BUILD_TIME}
+LABEL panji.git-sha=${GIT_SHA} panji.build-time=${BUILD_TIME}
 
 # 截图静态文件目录
 RUN mkdir -p /app/static/captures

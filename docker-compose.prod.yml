@@ -2,6 +2,15 @@
 # 包含多个服务：redis, backend, worker-*, frontend
 # PostgreSQL 使用容器实例
 # 用法: docker compose --env-file /etc/market-dev/market.env -f docker-compose.prod.yml up -d
+#
+# [CHANGE-20260718-003] json-file 日志轮转：所有服务复用 x-logging 锚点，
+# 单容器上限 50m × 5 = 250MB，防止日志无限增长占满根盘。
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
 
 services:
   # ===== PostgreSQL 数据库 =====
@@ -9,6 +18,7 @@ services:
     image: postgres:16
     container_name: trading-postgres
     restart: unless-stopped
+    logging: *default-logging
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-bz}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
@@ -29,6 +39,7 @@ services:
     image: redis:7-alpine
     container_name: trading-redis
     restart: unless-stopped
+    logging: *default-logging
     command: redis-server --appendonly yes
     environment:
       TZ: Asia/Shanghai
@@ -48,9 +59,11 @@ services:
       args:
         GIT_SHA: ${GIT_SHA:-unknown}
         BUILD_TIME: ${BUILD_TIME:-unknown}
+        PYPROJECT_LOCK_HASH: ${PYPROJECT_LOCK_HASH:-unspecified}
     image: market-dev-backend:${GIT_SHA:-unknown}
     container_name: trading-backend
     restart: unless-stopped
+    logging: *default-logging
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -79,6 +92,7 @@ services:
     image: market-dev-backend:${GIT_SHA:-unknown}
     container_name: trading-worker-bars-scheduler
     restart: unless-stopped
+    logging: *default-logging
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -103,6 +117,7 @@ services:
     image: market-dev-backend:${GIT_SHA:-unknown}
     container_name: trading-worker-strategy-scheduler
     restart: unless-stopped
+    logging: *default-logging
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -127,6 +142,7 @@ services:
     image: market-dev-backend:${GIT_SHA:-unknown}
     container_name: trading-worker-calendar
     restart: unless-stopped
+    logging: *default-logging
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -151,6 +167,7 @@ services:
     image: market-dev-backend:${GIT_SHA:-unknown}
     container_name: trading-worker-monitor
     restart: unless-stopped
+    logging: *default-logging
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -178,6 +195,7 @@ services:
     image: market-dev-backend:${GIT_SHA:-unknown}
     container_name: trading-worker-strategy-batch
     restart: unless-stopped
+    logging: *default-logging
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -204,6 +222,7 @@ services:
     image: market-dev-backend:${GIT_SHA:-unknown}
     container_name: trading-worker-outbox
     restart: unless-stopped
+    logging: *default-logging
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -228,6 +247,7 @@ services:
     image: market-dev-backend:${GIT_SHA:-unknown}
     container_name: trading-worker-delivery
     restart: unless-stopped
+    logging: *default-logging
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -252,6 +272,7 @@ services:
     image: market-dev-backend:${GIT_SHA:-unknown}
     container_name: trading-worker-after-close
     restart: unless-stopped
+    logging: *default-logging
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -283,6 +304,7 @@ services:
     image: market-dev-backend:${GIT_SHA:-unknown}
     container_name: trading-worker-watchdog
     restart: unless-stopped
+    logging: *default-logging
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -313,6 +335,7 @@ services:
     image: market-dev-capture:${GIT_SHA:-unknown}
     container_name: trading-worker-capture
     restart: unless-stopped
+    logging: *default-logging
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -353,6 +376,7 @@ services:
     image: market-dev-frontend:${GIT_SHA:-dev}
     container_name: trading-frontend
     restart: unless-stopped
+    logging: *default-logging
     environment:
       TZ: Asia/Shanghai
     depends_on:

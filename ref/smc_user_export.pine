@@ -880,4 +880,18 @@ plot(swingLow.currentLevel,               '_exp_swing_low_level',       display 
 plot(internalHigh.currentLevel,           '_exp_int_high_level',        display = display.none)
 plot(internalLow.currentLevel,            '_exp_int_low_level',         display = display.none)
 
+// [CHANGE-20260718-001 SMC parity] 增强：ATR / parsedHigh-Low / pivot crossed / pivot time
+// 用于逐项审计：ATR 种子/递推、parsedHigh-Low 高波动 bar 翻转、crossed 重置、pivot 时间
+plot(atrMeasure,                          '_exp_atr',                   display = display.none)
+plot(parsedHigh,                          '_exp_parsed_high',           display = display.none)
+plot(parsedLow,                           '_exp_parsed_low',            display = display.none)
+plot(swingHigh.crossed ? 1 : 0,           '_exp_swing_high_crossed',    display = display.none)
+plot(swingLow.crossed ? 1 : 0,            '_exp_swing_low_crossed',     display = display.none)
+plot(internalHigh.crossed ? 1 : 0,        '_exp_int_high_crossed',      display = display.none)
+plot(internalLow.crossed ? 1 : 0,         '_exp_int_low_crossed',       display = display.none)
+plot(swingHigh.barTime,                   '_exp_swing_high_time',       display = display.none)
+plot(swingLow.barTime,                    '_exp_swing_low_time',        display = display.none)
+plot(internalHigh.barTime,                '_exp_int_high_time',         display = display.none)
+plot(internalLow.barTime,                 '_exp_int_low_time',          display = display.none)
+
 //---------------------------------------------------------------------------------------------------------------------}

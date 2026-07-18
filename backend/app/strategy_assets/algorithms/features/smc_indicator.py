@@ -11,7 +11,8 @@ FVG 完全排除：
 Pine 语义兼容：
     本模块通过 smc_pine_core 实现 Pine 语义原语（ta.rma/ta.atr/ta.cum 等），
     默认参数逐项匹配原始 Pine，warmup 至少展示区之前 500 根。
-    详见 docs/analysis/smc-pine-parity.md。
+    详见 docs/maps/smc-pine-parity-map.md（实现地图）和
+    docs/changes/records/CHANGE-20260715-002.md（修复过程/证据）。
 """
 
 from __future__ import annotations
@@ -79,7 +80,7 @@ if __name__ == "__main__":
     assert params == expected, f"参数不匹配: {params} != {expected}"
     print(f"compute_smc_indicators params={params} OK")
 
-    # 2. 验证默认参数
+    # 2. 验证默认参数（逐项匹配 Pine L72-131）
     assert DEFAULT_PARAMS["swings_length"] == 50
     assert DEFAULT_PARAMS["equal_length"] == 3
     assert DEFAULT_PARAMS["equal_threshold"] == 0.1
@@ -89,6 +90,12 @@ if __name__ == "__main__":
     assert DEFAULT_PARAMS["show_swing_order_blocks"] is False
     assert DEFAULT_PARAMS["show_equal_hl"] is True
     assert DEFAULT_PARAMS["show_high_low_swings"] is True
+    # [CHANGE-20260718-001] Pine L74: showTrendInput = input(false, ...)
+    assert DEFAULT_PARAMS["show_trend"] is False, (
+        "show_trend 必须为 False（Pine L74 默认 false），当前为 True"
+    )
+    assert DEFAULT_PARAMS["show_internals"] is True
+    assert DEFAULT_PARAMS["show_structure"] is True
     print(f"DEFAULT_PARAMS={DEFAULT_PARAMS} OK")
 
     # 3. 验证空数据

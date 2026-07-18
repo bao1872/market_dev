@@ -16,6 +16,11 @@ v2 规则（docs/restructure-system-map-v2 之后）:
 8. 保留 `待填写` 占位符检查；
 9. 保留 feishu_webhook 当前方案回归阻断（current 文档，删除语境豁免）；
 10. 保留 open-decisions 把 Webhook vs Platform App 写回 OPEN 的阻断。
+11. 拒绝未授权 docs 顶层目录（CHANGE-20260718-002）：docs/ 直属子目录
+    只允许 current/、maps/、changes/、archive/；禁止 analysis/、
+    architecture-audits/ 等非规范目录（docs/ 根 .md 文件不受限）。
+12. 校验 CHANGE 引用存在性（CHANGE-20260718-002）：扫描 docs/ 递归 + AGENTS.md
+    中 `CHANGE-YYYYMMDD-NNN` 引用，验证对应 records/ 文件存在。
 
 输出汇总：
 - MANIFEST baseline SHA
@@ -64,6 +69,17 @@ OPEN_REGRESSION_KEYWORDS = ["仍需决定", "未决", "OPEN"]
 LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 PLACEHOLDER_RE = re.compile(r"待填写")
 FEISHU_WEBHOOK_RE = re.compile(r"feishu_webhook")
+
+# 规则 11：docs/ 直属子目录白名单（CHANGE-20260718-002）
+# AGENTS v2 文档结构规范：docs 顶层只允许 current/maps/changes/archive 四个目录。
+# docs/ 根 .md 文件（如 README.md）不受限，只约束子目录。
+ALLOWED_TOP_LEVEL_DIRS = {"current", "maps", "changes", "archive"}
+
+# 规则 12：CHANGE 引用正则（CHANGE-20260718-002）
+# 匹配 CHANGE-YYYYMMDD-NNN 形式（无论是否在 markdown 链接/反引号中），
+# 验证 docs/changes/records/CHANGE-YYYYMMDD-NNN.md 文件存在。
+CHANGE_REF_RE = re.compile(r"CHANGE-(\d{8})-(\d{3})")
+CHANGES_RECORDS_DIR = DOCS_DIR / "changes" / "records"
 
 
 def run_git(*args: str) -> subprocess.CompletedProcess[str]:
@@ -258,6 +274,61 @@ def check_links(doc_path: Path, content: str) -> list[str]:
     return errors
 
 
+def check_unauthorized_top_level_dirs() -> list[str]:
+    """规则 11：拒绝未授权 docs 顶层目录（CHANGE-20260718-002）。
+
+    docs/ 直属子目录只允许 current/maps/changes/archive。
+    docs/ 根 .md 文件不受限（只约束子目录）。
+    """
+    errors: list[str] = []
+    if not DOCS_DIR.exists():
+        return errors
+    for child in sorted(DOCS_DIR.iterdir()):
+        if not child.is_dir():
+            continue
+        name = child.name
+        if name not in ALLOWED_TOP_LEVEL_DIRS:
+            errors.append(
+                f"未授权的 docs 顶层目录: docs/{name}/（只允许 "
+                f"{sorted(ALLOWED_TOP_LEVEL_DIRS)}）"
+            )
+    return errors
+
+
+def check_change_references(doc_files: list[Path]) -> list[str]:
+    """规则 12：校验 CHANGE 引用存在性（CHANGE-20260718-002）。
+
+    扫描所有 doc_files 中 `CHANGE-YYYYMMDD-NNN` 引用，
+    验证 docs/changes/records/CHANGE-YYYYMMDD-NNN.md 文件存在。
+
+    历史引用（指向已被删除/未创建的 record）会被检出。
+    跳过 archive/ 目录（历史快照，不要求引用可达）。
+    """
+    errors: list[str] = []
+    for doc_path in doc_files:
+        # archive 历史快照不参与 CHANGE 引用可达性检查
+        try:
+            rel = doc_path.relative_to(ARCHIVE_DIR)
+            _ = rel  # 在 archive 下，跳过
+            continue
+        except ValueError:
+            pass
+        content = doc_path.read_text(encoding="utf-8")
+        seen_in_doc: set[str] = set()
+        for match in CHANGE_REF_RE.finditer(content):
+            ref_id = f"CHANGE-{match.group(1)}-{match.group(2)}"
+            if ref_id in seen_in_doc:
+                continue
+            seen_in_doc.add(ref_id)
+            target = CHANGES_RECORDS_DIR / f"{ref_id}.md"
+            if not target.exists():
+                errors.append(
+                    f"引用了不存在的 CHANGE record: {ref_id} "
+                    f"(在 {doc_path.relative_to(REPO_ROOT)})"
+                )
+    return errors
+
+
 def check_manifest_baseline() -> tuple[list[str], str | None]:
     """v2 规则 1-4：检查 docs/current/MANIFEST.md 的全局基线字段。
 
@@ -311,6 +382,17 @@ def main() -> int:
         print("[PASS] docs/current/MANIFEST.md")
     print(f"       MANIFEST baseline: {baseline_sha or '(未解析)'}")
 
+    # === 第一阶段补充：docs 顶层目录结构检查（v2 规则 11，CHANGE-20260718-002）===
+    print()
+    tld_errors = check_unauthorized_top_level_dirs()
+    if tld_errors:
+        all_errors.extend(tld_errors)
+        print("[FAIL] docs/ 顶层目录结构")
+        for e in tld_errors:
+            print(f"       - {e}")
+    else:
+        print("[PASS] docs/ 顶层目录结构（仅 current/maps/changes/archive）")
+
     # === 第二阶段：current 文档回归检查（webhook + open-decisions）===
     current_docs = collect_current_docs()
     print(f"\n共扫描 {len(current_docs)} 个 current 文档（webhook/open 回归检查）\n")
@@ -351,7 +433,8 @@ def main() -> int:
     for doc_path in all_doc_files:
         relative = doc_path.relative_to(REPO_ROOT)
         content = doc_path.read_text(encoding="utf-8")
-        doc_errors: list[str] = []
+        # 复用 Phase 2 同名变量；不重复类型注解以避免 mypy no-redef。
+        doc_errors = []
 
         # 链接检查：所有文档
         link_errors = check_links(doc_path, content)
@@ -370,6 +453,17 @@ def main() -> int:
             for e in doc_errors:
                 print(f"       - {e}")
         # PASS 行不打印，避免输出过长
+
+    # === 第四阶段：CHANGE 引用可达性检查（v2 规则 12，CHANGE-20260718-002）===
+    print()
+    change_ref_errors = check_change_references(all_doc_files)
+    if change_ref_errors:
+        all_errors.extend(change_ref_errors)
+        print("[FAIL] CHANGE 引用可达性")
+        for e in change_ref_errors:
+            print(f"       - {e}")
+    else:
+        print("[PASS] CHANGE 引用可达性（所有 CHANGE-YYYYMMDD-NNN 引用目标存在）")
 
     # === 汇总 ===
     print()

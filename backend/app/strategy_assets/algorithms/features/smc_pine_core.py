@@ -84,7 +84,11 @@ DEFAULT_PARAMS: dict[str, Any] = {
     # swing gate: showStructure OR showSwingOrderBlocks OR showHighLowSwings
     "show_internals": True,
     "show_structure": True,
-    "show_trend": True,
+    # [CHANGE-20260718-001 SMC parity] Pine L74: showTrendInput = input(false, ...)
+    # Pine 默认 false（"Color Candles" 关闭）。旧实现误设 True。
+    # show_trend 仅参与 internal_gate（Pine L784），gate 已由 show_internals=True 满足，
+    # 故改为 false 不影响计算行为，但必须匹配 Pine 默认值以通过 parity 审计。
+    "show_trend": False,
 }
 
 
@@ -805,7 +809,7 @@ class _SMCPineState:
         trailing 必须在最前面：Pine 中 updateTrailingExtremes 用当前 bar 的 high/low
         更新 trailing.top/bottom，然后 getCurrentStructure 检测到新 swing pivot 时会
         覆盖 trailing.top/bottom 为新 pivot level。若顺序颠倒，trailing 会被当前 bar
-        的 high/low 二次覆盖，与 Pine 不一致。详见 docs/analysis/smc-user-pine-parity.md 5.3。
+        的 high/low 二次覆盖，与 Pine 不一致。详见 docs/maps/smc-pine-parity-map.md 5.3。
         """
         swings_length = self.params["swings_length"]
         equal_length = self.params["equal_length"]

@@ -70,7 +70,7 @@ PostgreSQL / Redis / External Service
 
 ### 4.1 市场数据 SSOT 与复权唯一出口（CHANGE-20260717-002）
 
-**`MarketDataAggregationService` (MDAS) 是行情读取 + 复权应用 + 周/月聚合的唯一出口**（详见 `docs/analysis/market-data-ssot-adjustment-v2.md`）：
+**`MarketDataAggregationService` (MDAS) 是行情读取 + 复权应用 + 周/月聚合的唯一出口**（详见 `docs/changes/records/CHANGE-20260717-002.md`）：
 
 - **职责边界**：
   - **MDAS**：读取 raw bars（经 repository 私有 `_query_*`）→ 调用 `AdjustmentFactorService` 获取权威因子序列 → 应用复权（`adj_factor._apply_adj_factor_core`，仅一次）→ 周/月"日线完成复权后经 `kline_aggregator` 聚合" → 返回 bars + 诊断字段（hash/contract_version/as_of/completed_through/degraded）。

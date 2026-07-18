@@ -2,6 +2,34 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-18
+
+- CHANGE-20260718-001: SMC Pine parity 真实对齐修复（show_trend 默认值 + SMC input contract + deterministic 模式 + parity 测试参数化扩展 + first-divergence 报告 + 对齐范围声明）—— 提交 `6167ce1`
+  - **Fix 1 (show_trend 默认值)**：`smc_pine_core.py` `DEFAULT_PARAMS["show_trend"]` 从 `True` 改为 `False`，匹配 Pine L74 `showTrendInput=input(false,...)`；gate 已由 `show_internals=True` 满足，不改计算行为
+  - **Fix 2 (SMC input contract)**：`indicator_service.py` 新增 SMC 输入契约文档，明确各周期实际范围（1d DB 全量、15m bars+1000、1h DB 全量、1mo ≥200），禁止再称"全历史"
+  - **Fix 3 (deterministic 模式)**：所有 SMC bar 获取改为 `completed_only=True`（强制 `include_realtime=False`）；输出 `smc_mode="deterministic"`，与 TV 历史导出可比；realtime 模式独立标识不得混比
+  - **Fix 4 (parity 测试扩展)**：`test_smc_tv_parity.py` 从 515→937 行；TV_COLUMNS 20→37 列；参数化所有 fixture；新增 7 测试函数（internal_bias/trailing/pivot_level/ATR/parsedHigh-Low/default_params/scope_declaration）；NaN 安全 `_float_eq()`
+  - **Fix 5 (first-divergence 报告)**：`_format_first_divergence()` 输出首差异 bar 前后 5 根 OHLC + 全部状态 + 触发条件
+  - **Fix 6 (对齐范围声明)**：明确"默认结构检测子集对齐"，禁止"Pine 完全对齐"；FVG/MTF/Premium-Discount/Pine 原色显式排除
+  - **不变量**：真源 `ref/smc_user_source.pine` SHA256 `0bd3d2ad` 不变；`PINE_PARITY_PENDING` 保留至用户提供 TV CSV fixture；不新增表/migration/worker/依赖
+
+- CHANGE-20260718-002: 文档全盘审核（消除非规范 docs 顶层目录 + 引用收口 + 增强 check_docs_consistency.py）
+  - **文档迁移**：`docs/analysis/smc-user-pine-parity.md` → `docs/maps/smc-pine-parity-map.md`（实现地图）；删除 `docs/analysis/`（3 文件）与 `docs/architecture-audits/`（2 文件）非规范目录及空目录
+  - **引用收口**：`current/{01,02,05,code-doc-alignment}.md`、`maps/{backend-module-map,test-coverage-map}.md`、`AGENTS.md` clause 45、`smc_indicator.py`/`smc_pine_core.py` docstring 引用全部改指规范路径（CHANGE records / maps）；历史引用保留原路径不可变
+  - **增强 check_docs_consistency.py**：新增 `check_unauthorized_top_level_dirs()`（只允许 current/maps/changes/archive + 根 .md）+ `check_change_references()`（校验 CHANGE-YYYYMMDD-NNN.md 引用目标存在）
+  - **AGENTS.md clause 57**：docs 顶层目录规范长期规则
+  - **不变量**：不删除生产代码/表/migration；不把有效文档移入 archive 制造重复事实源
+
+- CHANGE-20260718-003: 磁盘和构建性能优化（Dockerfile ARG 重排 + BuildKit cache mount + 日志轮转 + cleanup 策略）
+  - **版本 ARG 移到依赖层之后**：backend Dockerfile runtime 阶段 `ARG GIT_SHA/BUILD_TIME` 从 apt-get 之前移到所有 COPY 之后，GIT_SHA 变化不再使 apt-get/venv/源码 COPY 层失效；builder 阶段 pip install 仅由 `COPY pyproject.toml` 触发失效；frontend Dockerfile ARG 移到 `npm ci` 之后
+  - **BuildKit cache mount**：pip `--mount=type=cache,target=/root/.cache/pip`，npm `--mount=type=cache,target=/root/.npm`；移除 `PIP_NO_CACHE_DIR=1`；所有 Dockerfile 添加 `# syntax=docker/dockerfile:1.4` directive
+  - **基础镜像 digest 固定**：`python:3.11-slim@sha256:e031123e...`、`node:20-alpine@sha256:fb4cd12c...`、`nginx:alpine@sha256:54f2a904...`；Capture 保留 playwright tag（维护时显式 --pull）；默认不 --pull
+  - **json-file 日志轮转**：`docker-compose.prod.yml` 新增 `x-logging` 锚点（max-size 50m × max-file 5 = 250MB/容器），14 服务全部引用；`/etc/docker/daemon.json` 新增 log-driver/log-opts + builder gc（defaultKeepStorage 20GB）
+  - **cleanup 脚本**：`scripts/cleanup-docker.sh` 重写为 KEEP_VERSIONS=2（当前 + 1 rollback），移除 7 天过滤，保护基础镜像（python/node/nginx/postgres/redis/playwright），rmi 前检查运行容器使用，禁止 prune -a/volume prune
+  - **Makefile**：`docker-build` target 启用 `DOCKER_BUILDKIT=1` + 传递 `PYPROJECT_LOCK_HASH`（pyproject.toml sha256 → LABEL 审计）
+  - **构建验证**：冷构建 backend pip install 85.9s / apt-get 1253s（debian.org 网络慢）；frontend npm ci 4.4s / build 15.7s；热构建 builder 全 CACHED（pip install 0s）+ runtime apt-get 跨版本 CACHED ✓
+  - **不变量**：不重建 Capture/PostgreSQL/Redis；不删除 volume/生产数据；不新增项目依赖；buildx 为 Docker CLI 系统插件（apt docker-buildx）
+
 ## 2026-07-17
 
 - CHANGE-20260717-001: SMC Pine 逻辑对齐最终收口（warmup/历史分离 + execution gate + trailing NaN + OB 顺序 + EQH/EQL 几何 + Strong/Weak 起点 + golden 测试重做 + 确定性测试 + 导出增强 + ALGORITHM_VERSION v10）
