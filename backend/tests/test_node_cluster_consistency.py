@@ -142,14 +142,18 @@ def _make_context(
     )
 
 
-# 诊断字段集合（advice.md 第四节）
+# 诊断字段集合（advice.md 第四节 + CHANGE-20260718-004 engine 迁移）
+# parameter_version 已升级为 algorithm_version + output_schema_version + contract_fingerprint
 _DIAGNOSTIC_KEYS = {
     "input_daily_bars",
     "input_15m_bars",
     "input_minute_bars",
     "primary_period",
     "low_period",
-    "parameter_version",
+    "algorithm_version",
+    "output_schema_version",
+    "contract_fingerprint",
+    "profile_hash",
 }
 
 
@@ -258,6 +262,9 @@ class TestNodeClusterConsistency:
         indicator_poc = indicator_poc_list[-1] if indicator_poc_list else None
 
         # POC 可能为 None 或 dict，比较 price_mid
+        # 注意：calculate_state 返回 4 位精度的 dict（_node_row_to_json round(price_mid, 4)），
+        # compute_indicators 返回全精度 float。两条路径底层共享同一 VP 计算，
+        # 因此用 round(x, 4) 对齐精度后断言一致。
         def _poc_price_mid(p):
             if p is None:
                 return None
@@ -265,9 +272,19 @@ class TestNodeClusterConsistency:
                 return p.get("price_mid")
             return p
 
-        assert _poc_price_mid(state_poc) == _poc_price_mid(indicator_poc), (
-            f"POC 不一致：calculate_state={state_poc}，compute_indicators={indicator_poc}"
-        )
+        state_mid = _poc_price_mid(state_poc)
+        indicator_mid = _poc_price_mid(indicator_poc)
+
+        if state_mid is None or indicator_mid is None:
+            assert state_mid == indicator_mid, (
+                f"POC 不一致（一方为 None）：calculate_state={state_poc}，"
+                f"compute_indicators={indicator_poc}"
+            )
+        else:
+            assert round(float(state_mid), 4) == round(float(indicator_mid), 4), (
+                f"POC 不一致：calculate_state={state_mid}，"
+                f"compute_indicators={indicator_mid}"
+            )
 
     @pytest.mark.asyncio
     async def test_upper_node_consistent_between_paths(
@@ -324,21 +341,38 @@ class TestNodeClusterConsistency:
         assert meta["low_period"] == NODE_CLUSTER_LOW_PERIOD
 
     @pytest.mark.asyncio
-    async def test_parameter_version_is_v1_1_0(
+    async def test_algorithm_version_present(
         self,
         monitor: VolumeNodeMonitor,
         daily_bars: pd.DataFrame,
         minute_bars: pd.DataFrame,
         bars_15m: pd.DataFrame,
     ) -> None:
-        """profile_meta.parameter_version 必须为 'v1.1.0'。
+        """profile_meta 必须含 algorithm_version / output_schema_version / contract_fingerprint。
 
-        profile_meta 为 dict，直接通过 key 访问。
+        旧字段 `parameter_version` 已在 CHANGE-20260718-004 engine 迁移中升级为
+        algorithm_version + output_schema_version + contract_fingerprint 三元组。
+        本测试验证新字段存在且与 indicator_semantics 常量一致。
         """
+        from app.contracts.indicator_semantics import (
+            NODE_CLUSTER_ALGORITHM_VERSION,
+            NODE_CLUSTER_CONTRACT_FINGERPRINT,
+            NODE_CLUSTER_OUTPUT_SCHEMA_VERSION,
+        )
+
         context = _make_context(daily_bars, minute_bars, bars_15m)
         indicators = await monitor.compute_indicators(context)
         meta = indicators["profile_meta"]
 
-        assert meta["parameter_version"] == "v1.1.0", (
-            f"parameter_version 应为 v1.1.0，实际为 {meta['parameter_version']}"
+        assert meta["algorithm_version"] == NODE_CLUSTER_ALGORITHM_VERSION, (
+            f"algorithm_version 应为 {NODE_CLUSTER_ALGORITHM_VERSION}，"
+            f"实际为 {meta['algorithm_version']}"
+        )
+        assert meta["output_schema_version"] == NODE_CLUSTER_OUTPUT_SCHEMA_VERSION, (
+            f"output_schema_version 应为 {NODE_CLUSTER_OUTPUT_SCHEMA_VERSION}，"
+            f"实际为 {meta['output_schema_version']}"
+        )
+        assert meta["contract_fingerprint"] == NODE_CLUSTER_CONTRACT_FINGERPRINT, (
+            f"contract_fingerprint 应为 {NODE_CLUSTER_CONTRACT_FINGERPRINT}，"
+            f"实际为 {meta['contract_fingerprint']}"
         )
