@@ -79,7 +79,7 @@ if __name__ == "__main__":
     assert params == expected, f"参数不匹配: {params} != {expected}"
     print(f"compute_smc_indicators params={params} OK")
 
-    # 2. 验证默认参数
+    # 2. 验证默认参数（逐项匹配 Pine L72-131）
     assert DEFAULT_PARAMS["swings_length"] == 50
     assert DEFAULT_PARAMS["equal_length"] == 3
     assert DEFAULT_PARAMS["equal_threshold"] == 0.1
@@ -89,6 +89,12 @@ if __name__ == "__main__":
     assert DEFAULT_PARAMS["show_swing_order_blocks"] is False
     assert DEFAULT_PARAMS["show_equal_hl"] is True
     assert DEFAULT_PARAMS["show_high_low_swings"] is True
+    # [CHANGE-20260718-001] Pine L74: showTrendInput = input(false, ...)
+    assert DEFAULT_PARAMS["show_trend"] is False, (
+        "show_trend 必须为 False（Pine L74 默认 false），当前为 True"
+    )
+    assert DEFAULT_PARAMS["show_internals"] is True
+    assert DEFAULT_PARAMS["show_structure"] is True
     print(f"DEFAULT_PARAMS={DEFAULT_PARAMS} OK")
 
     # 3. 验证空数据

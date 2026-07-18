@@ -75,6 +75,31 @@ logger = logging.getLogger("services.indicator_service")
 _SMC_WARMUP_BARS = 1000  # 15m 专用 SMC warmup（计算=展示+warmup）
 _SMC_MONTHLY_MIN_BARS = 200  # 1mo 最少 bar 数（ATR200 需 200 根才能初始化）
 
+# [CHANGE-20260718-001 SMC input contract] SMC 输入契约与 deterministic 模式
+#
+# SMC 输入范围（禁止称"全历史"，各周期实际范围如下）：
+#   - 1d:  MDAS 无 limit → DB 全量日线（约 1000-5000 根，受 DB 覆盖范围限制，非"全历史"）
+#   - 15m: MDAS limit=bars + _SMC_WARMUP_BARS(1000) → bars+1000 根（非全历史）
+#   - 1h:  MDAS 无 limit → DB 全量 1h（约 180 交易日，非"全历史"）
+#   - 1mo: MDAS limit=_SMC_MONTHLY_MIN_BARS(200) → 至少 200 根（ATR200 可初始化）
+#   - 1w:  复用 macd_bars（MDAS 无 limit → DB 全量周线）
+#
+# deterministic 模式（Pine parity 对齐）：
+#   - include_realtime=False, completed_only=True → 仅使用已完成 bar
+#   - 不包含当前未完成 bar（partial bar），与 TV 历史导出一致
+#   - 输出 smc_mode="deterministic"
+#
+# realtime 模式（盘中图表展示）：
+#   - include_realtime=True → 包含当前 partial bar
+#   - 输出 smc_mode="realtime"
+#   - 不得与 TV 历史导出混比（TV 历史导出仅含已完成 bar）
+#
+# 当前生产图表 API 使用 deterministic 模式（include_realtime=False），
+# 确保 SMC 计算结果与 TV 历史导出可比。
+# 盘中实时刷新通过前端 quote overlay 呈现，不依赖后端 partial bar SMC 重算。
+_SMC_MODE_DETERMINISTIC = "deterministic"
+_SMC_MODE_REALTIME = "realtime"
+
 # [CHANGE-20260716-001 required_inputs] 策略→所需 bar 类型映射
 # 定义每个注册策略实际需要哪些 bar 类型，避免无条件查询全量日内数据。
 # volume_node_monitor 需要 15min（VP profile）和 minute（crossover 检测），
@@ -746,39 +771,57 @@ async def compute_all_indicators(
     smc_source_diagnostics: dict[str, Any] | None = None
     if include_smc:
         try:
-            # [CHANGE-20260717-001 Pine parity] 计算历史与展示窗口分离
+            # [CHANGE-20260718-001 SMC deterministic mode] SMC 使用 completed_only=True
+            # 确保仅使用已完成 bar（无 partial bar），与 TV 历史导出可比。
+            # 各周期 SMC 输入范围见 _SMC input contract 注释（文件头部）。
             smc_bars: pd.DataFrame
-            if timeframe == "1d" and not full_daily_bars.empty:
-                # 1d: 完整日线（已有 ≥500 warmup）
-                smc_bars = full_daily_bars
+            if timeframe == "1d":
+                # 1d: 独立 deterministic 查询（不复用 include_realtime=True 的 daily_agg）
+                # 确保 SMC 日线不含今日 partial bar
+                r_smc1d = await _mdas.get_bars(
+                    session, instrument_id, timeframe="1d", adj=adj,
+                    completed_only=True,
+                )
+                smc_bars = r_smc1d.bars if not r_smc1d.bars.empty else full_daily_bars
             elif timeframe == "15m":
                 # 15m: MDAS 获取 bars+_SMC_WARMUP_BARS 根计算集（5000），adapter 裁成 bars（4000）展示
-                # MDAS 内部完成 DB 查询 + Pytdx 兜底 + 复权一次 + 周月聚合（SSOT，CHANGE-20260717-002）
+                # [CHANGE-20260718-001] completed_only=True 确保 15m 不含当前未完成 bar
                 r_smc15 = await _mdas.get_bars(
                     session, instrument_id, timeframe="15m", adj=adj,
-                    include_realtime=True, limit=bars, warmup_bars=_SMC_WARMUP_BARS,
+                    completed_only=True, limit=bars, warmup_bars=_SMC_WARMUP_BARS,
                 )
                 smc_bars = (
                     r_smc15.warmup_bars_full
                     if r_smc15.warmup_bars_full is not None
                     else r_smc15.bars
                 )
-                # 若查询不足则回退到 macd_bars
+                # 若查询不足则回退到 macd_bars（标记降级）
                 if smc_bars.empty or len(smc_bars) < bars:
                     smc_bars = macd_bars
             elif timeframe == "1mo":
                 # 1mo: 若 macd_bars < 200 则通过 MDAS 扩展回看（确保 ATR200 可初始化）
-                # MDAS 内部"日线完成复权后再聚合"成月线（SSOT，CHANGE-20260717-002）
+                # [CHANGE-20260718-001] completed_only=True 确保月线不含当前未完成 bar
                 if len(macd_bars) < _SMC_MONTHLY_MIN_BARS:
                     r_smcmo = await _mdas.get_bars(
                         session, instrument_id, timeframe="1mo", adj=adj,
-                        include_realtime=True, limit=_SMC_MONTHLY_MIN_BARS,
+                        completed_only=True, limit=_SMC_MONTHLY_MIN_BARS,
                     )
                     smc_bars = r_smcmo.bars if not r_smcmo.bars.empty else macd_bars
                 else:
-                    smc_bars = macd_bars
+                    # macd_bars 已有 ≥200 根，但可能含 partial bar → 独立 deterministic 查询
+                    r_smcmo = await _mdas.get_bars(
+                        session, instrument_id, timeframe="1mo", adj=adj,
+                        completed_only=True, limit=_SMC_MONTHLY_MIN_BARS,
+                    )
+                    smc_bars = r_smcmo.bars if not r_smcmo.bars.empty else macd_bars
+            elif timeframe in ("1h", "1w"):
+                # 1h/1w: 独立 deterministic 查询（不复用 include_realtime=True 的 macd_bars）
+                r_smc_intra = await _mdas.get_bars(
+                    session, instrument_id, timeframe=timeframe, adj=adj,
+                    completed_only=True,
+                )
+                smc_bars = r_smc_intra.bars if not r_smc_intra.bars.empty else macd_bars
             else:
-                # 1h/1w: macd_bars（可获得完整历史）
                 smc_bars = macd_bars
 
             smc_opens = smc_bars["open"].to_numpy(float).tolist()
@@ -787,12 +830,14 @@ async def compute_all_indicators(
             smc_closes = smc_bars["close"].to_numpy(float).tolist()
             smc_times = [idx.isoformat() for idx in smc_bars.index]
             # [CHANGE-20260716-001] SMC 输入诊断字段（基于完整 smc_bars，非截断 macd_bars）
+            # [CHANGE-20260718-001] 新增 smc_mode 标识 deterministic/realtime
             smc_source_diagnostics = {
                 "smc_source_bar_hash": compute_source_bar_hash(smc_bars, timeframe),
                 "smc_source_first_time": smc_times[0] if smc_times else None,
                 "smc_source_last_time": smc_times[-1] if smc_times else None,
                 "smc_source_bars": len(smc_times),
                 "smc_adj": adj,
+                "smc_mode": _SMC_MODE_DETERMINISTIC,
             }
             smc_result = compute_smc_indicators(
                 opens=smc_opens,

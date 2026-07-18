@@ -84,7 +84,11 @@ DEFAULT_PARAMS: dict[str, Any] = {
     # swing gate: showStructure OR showSwingOrderBlocks OR showHighLowSwings
     "show_internals": True,
     "show_structure": True,
-    "show_trend": True,
+    # [CHANGE-20260718-001 SMC parity] Pine L74: showTrendInput = input(false, ...)
+    # Pine 默认 false（"Color Candles" 关闭）。旧实现误设 True。
+    # show_trend 仅参与 internal_gate（Pine L784），gate 已由 show_internals=True 满足，
+    # 故改为 false 不影响计算行为，但必须匹配 Pine 默认值以通过 parity 审计。
+    "show_trend": False,
 }
 
 
