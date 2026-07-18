@@ -867,6 +867,88 @@ async def rebuild_adj_factors(
     return len(trade_dates)
 
 
+async def compute_expected_adj_factors(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    symbol: str,
+    adapter: PytdxAdapter | None = None,
+    min_date: date | None = None,
+) -> pd.DataFrame:
+    """公开别名：只读重算预期 adj_factor 序列（CHANGE-20260718-005 全市场一致性审计）。
+
+    从 bars_daily 读取 raw OHLCV，调用 _calculate_adj_factor 重算预期因子，
+    **不写库**。供 FactorConsistencyAuditor 比对存量因子是否正确。
+
+    与 rebuild_adj_factors 的区别：
+    - rebuild_adj_factors：重算 + UPDATE 写库（公司行为变化时调用）
+    - compute_expected_adj_factors：只读重算（审计时调用，零副作用）
+
+    Args:
+        session: 异步会话
+        instrument_id: 标的 UUID
+        symbol: 股票代码（用于 pytdx xdxr_info）
+        adapter: pytdx 适配器（None 用模块单例）
+        min_date: 最小日期（仅处理 >= min_date 的除权除息事件，性能优化）；
+            None 表示处理全部事件
+
+    Returns:
+        DataFrame: columns=[trade_date, expected_adj_factor]，按 trade_date 排序；
+                   无数据时返回空 DataFrame
+    """
+    try:
+        result = await session.execute(
+            select(
+                BarDaily.trade_date, BarDaily.open, BarDaily.high,
+                BarDaily.low, BarDaily.close, BarDaily.volume, BarDaily.amount,
+            )
+            .where(BarDaily.instrument_id == instrument_id)
+            .order_by(BarDaily.trade_date)
+        )
+        rows = result.all()
+    except Exception as exc:
+        logger.warning(
+            "compute_expected_adj_factors 查询失败 instrument_id=%s: %s",
+            instrument_id, exc,
+        )
+        raise
+
+    if not rows:
+        return pd.DataFrame(columns=["trade_date", "expected_adj_factor"])
+
+    raw_df = pd.DataFrame(rows, columns=[
+        "trade_date", "open", "high", "low", "close", "volume", "amount",
+    ])
+    raw_df["datetime"] = pd.to_datetime(raw_df["trade_date"])
+    for col in ["open", "high", "low", "close", "volume", "amount"]:
+        raw_df[col] = pd.to_numeric(raw_df[col], errors="coerce")
+
+    try:
+        expected_factors = await asyncio.to_thread(
+            _calculate_adj_factor, symbol, raw_df, adapter,
+            True, min_date,
+        )
+    except Exception as exc:
+        logger.warning(
+            "compute_expected_adj_factors 计算失败 symbol=%s: %s", symbol, exc,
+        )
+        raise
+
+    if len(expected_factors) != len(raw_df):
+        logger.warning(
+            "compute_expected_adj_factors 因子数量不匹配 symbol=%s expected=%d got=%d",
+            symbol, len(raw_df), len(expected_factors),
+        )
+        raise ValueError(
+            f"expected adj_factor 数量不匹配: expected={len(raw_df)}, "
+            f"got={len(expected_factors)}"
+        )
+
+    return pd.DataFrame({
+        "trade_date": raw_df["trade_date"].tolist(),
+        "expected_adj_factor": expected_factors,
+    })
+
+
 async def fetch_daily_bars(
     session: AsyncSession,
     instrument_id: uuid.UUID,
