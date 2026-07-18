@@ -1,6 +1,16 @@
-# SMC 用户 Pine 源码逐项 Parity 文档
+# SMC Pine→Python 实现地图（Parity Map）
 
-本文件逐项记录用户 Pine SMC 源码（`ref/smc_user_source.pine`）与生产 `backend/app/strategy_assets/algorithms/features/smc_pine_core.py` 的函数、状态、初始值、NA 规则、执行顺序、DTO 和测试映射。
+> 文档类型：实现地图（maps/）。本文件逐项记录用户 Pine SMC 源码（`ref/smc_user_source.pine`）
+> 与生产 `backend/app/strategy_assets/algorithms/features/smc_pine_core.py` 的函数、状态、初始值、
+> NA 规则、执行顺序、DTO 和测试映射。
+>
+> 对齐状态：当前为"默认结构检测子集对齐"（排除 FVG/MTF/Premium-Discount/原色），
+> 不宣称"Pine 完全对齐"。当前对齐状态详见 `docs/current/code-doc-alignment.md`
+> （ALIGN-062/072/075/076）。
+>
+> 历史路径：本文件原位于 `docs/analysis/smc-user-pine-parity.md`，
+> CHANGE-20260718-002 迁移至 `docs/maps/`（消除非规范 docs 顶层目录）。
+> 修复过程/证据保留在 CHANGE-20260715-002/003、CHANGE-20260716-001、CHANGE-20260717-001。
 
 ## 参考来源（唯一真源）
 
@@ -38,7 +48,7 @@
 | `showHighLowSwingsInput` | `true` | `show_high_low_swings: True` | Strong/Weak High/Low |
 | `showInternalsInput` | `true` | `show_internals: True` | **[CHANGE-20260717-001]** Internal structure gate（Pine L76） |
 | `showStructureInput` | `true` | `show_structure: True` | **[CHANGE-20260717-001]** Swing structure gate（Pine L84） |
-| `showTrendInput` | `false` | `show_trend: True` | **[CHANGE-20260717-001]** Trend gate（Pine L74；Python 默认 True 以保持 gate 开启，Color Candles 仍由前端独立控制） |
+| `showTrendInput` | `false` | `show_trend: False` | **[CHANGE-20260718-001]** Trend gate（Pine L74 默认 false；旧 Python 误设 True，已改 False。gate 由 `show_internals=True` 满足，Color Candles 仍由前端独立控制） |
 | `showInternalOrderBlocksInput` | `true` | `show_internal_order_blocks: True` | Internal OB |
 | `internalOrderBlocksSizeInput` | `5` | `internal_ob_size: 5` | 显示最近 5 个 |
 | `showSwingOrderBlocksInput` | `false` | `show_swing_order_blocks: False` | Swing OB 关闭 |

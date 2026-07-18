@@ -2,6 +2,24 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-18
+
+- CHANGE-20260718-001: SMC Pine parity 真实对齐修复（show_trend 默认值 + SMC input contract + deterministic 模式 + parity 测试参数化扩展 + first-divergence 报告 + 对齐范围声明）—— 提交 `6167ce1`
+  - **Fix 1 (show_trend 默认值)**：`smc_pine_core.py` `DEFAULT_PARAMS["show_trend"]` 从 `True` 改为 `False`，匹配 Pine L74 `showTrendInput=input(false,...)`；gate 已由 `show_internals=True` 满足，不改计算行为
+  - **Fix 2 (SMC input contract)**：`indicator_service.py` 新增 SMC 输入契约文档，明确各周期实际范围（1d DB 全量、15m bars+1000、1h DB 全量、1mo ≥200），禁止再称"全历史"
+  - **Fix 3 (deterministic 模式)**：所有 SMC bar 获取改为 `completed_only=True`（强制 `include_realtime=False`）；输出 `smc_mode="deterministic"`，与 TV 历史导出可比；realtime 模式独立标识不得混比
+  - **Fix 4 (parity 测试扩展)**：`test_smc_tv_parity.py` 从 515→937 行；TV_COLUMNS 20→37 列；参数化所有 fixture；新增 7 测试函数（internal_bias/trailing/pivot_level/ATR/parsedHigh-Low/default_params/scope_declaration）；NaN 安全 `_float_eq()`
+  - **Fix 5 (first-divergence 报告)**：`_format_first_divergence()` 输出首差异 bar 前后 5 根 OHLC + 全部状态 + 触发条件
+  - **Fix 6 (对齐范围声明)**：明确"默认结构检测子集对齐"，禁止"Pine 完全对齐"；FVG/MTF/Premium-Discount/Pine 原色显式排除
+  - **不变量**：真源 `ref/smc_user_source.pine` SHA256 `0bd3d2ad` 不变；`PINE_PARITY_PENDING` 保留至用户提供 TV CSV fixture；不新增表/migration/worker/依赖
+
+- CHANGE-20260718-002: 文档全盘审核（消除非规范 docs 顶层目录 + 引用收口 + 增强 check_docs_consistency.py）
+  - **文档迁移**：`docs/analysis/smc-user-pine-parity.md` → `docs/maps/smc-pine-parity-map.md`（实现地图）；删除 `docs/analysis/`（3 文件）与 `docs/architecture-audits/`（2 文件）非规范目录及空目录
+  - **引用收口**：`current/{01,02,05,code-doc-alignment}.md`、`maps/{backend-module-map,test-coverage-map}.md`、`AGENTS.md` clause 45、`smc_indicator.py`/`smc_pine_core.py` docstring 引用全部改指规范路径（CHANGE records / maps）；历史引用保留原路径不可变
+  - **增强 check_docs_consistency.py**：新增 `check_unauthorized_top_level_dirs()`（只允许 current/maps/changes/archive + 根 .md）+ `check_change_references()`（校验 CHANGE-YYYYMMDD-NNN.md 引用目标存在）
+  - **AGENTS.md clause 57**：docs 顶层目录规范长期规则
+  - **不变量**：不删除生产代码/表/migration；不把有效文档移入 archive 制造重复事实源
+
 ## 2026-07-17
 
 - CHANGE-20260717-001: SMC Pine 逻辑对齐最终收口（warmup/历史分离 + execution gate + trailing NaN + OB 顺序 + EQH/EQL 几何 + Strong/Weak 起点 + golden 测试重做 + 确定性测试 + 导出增强 + ALGORITHM_VERSION v10）

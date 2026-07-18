@@ -809,7 +809,7 @@ class _SMCPineState:
         trailing 必须在最前面：Pine 中 updateTrailingExtremes 用当前 bar 的 high/low
         更新 trailing.top/bottom，然后 getCurrentStructure 检测到新 swing pivot 时会
         覆盖 trailing.top/bottom 为新 pivot level。若顺序颠倒，trailing 会被当前 bar
-        的 high/low 二次覆盖，与 Pine 不一致。详见 docs/analysis/smc-user-pine-parity.md 5.3。
+        的 high/low 二次覆盖，与 Pine 不一致。详见 docs/maps/smc-pine-parity-map.md 5.3。
         """
         swings_length = self.params["swings_length"]
         equal_length = self.params["equal_length"]

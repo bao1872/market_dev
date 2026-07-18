@@ -11,7 +11,8 @@ FVG 完全排除：
 Pine 语义兼容：
     本模块通过 smc_pine_core 实现 Pine 语义原语（ta.rma/ta.atr/ta.cum 等），
     默认参数逐项匹配原始 Pine，warmup 至少展示区之前 500 根。
-    详见 docs/analysis/smc-pine-parity.md。
+    详见 docs/maps/smc-pine-parity-map.md（实现地图）和
+    docs/changes/records/CHANGE-20260715-002.md（修复过程/证据）。
 """
 
 from __future__ import annotations
