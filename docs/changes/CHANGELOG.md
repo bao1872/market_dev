@@ -20,6 +20,16 @@
   - **AGENTS.md clause 57**：docs 顶层目录规范长期规则
   - **不变量**：不删除生产代码/表/migration；不把有效文档移入 archive 制造重复事实源
 
+- CHANGE-20260718-003: 磁盘和构建性能优化（Dockerfile ARG 重排 + BuildKit cache mount + 日志轮转 + cleanup 策略）
+  - **版本 ARG 移到依赖层之后**：backend Dockerfile runtime 阶段 `ARG GIT_SHA/BUILD_TIME` 从 apt-get 之前移到所有 COPY 之后，GIT_SHA 变化不再使 apt-get/venv/源码 COPY 层失效；builder 阶段 pip install 仅由 `COPY pyproject.toml` 触发失效；frontend Dockerfile ARG 移到 `npm ci` 之后
+  - **BuildKit cache mount**：pip `--mount=type=cache,target=/root/.cache/pip`，npm `--mount=type=cache,target=/root/.npm`；移除 `PIP_NO_CACHE_DIR=1`；所有 Dockerfile 添加 `# syntax=docker/dockerfile:1.4` directive
+  - **基础镜像 digest 固定**：`python:3.11-slim@sha256:e031123e...`、`node:20-alpine@sha256:fb4cd12c...`、`nginx:alpine@sha256:54f2a904...`；Capture 保留 playwright tag（维护时显式 --pull）；默认不 --pull
+  - **json-file 日志轮转**：`docker-compose.prod.yml` 新增 `x-logging` 锚点（max-size 50m × max-file 5 = 250MB/容器），14 服务全部引用；`/etc/docker/daemon.json` 新增 log-driver/log-opts + builder gc（defaultKeepStorage 20GB）
+  - **cleanup 脚本**：`scripts/cleanup-docker.sh` 重写为 KEEP_VERSIONS=2（当前 + 1 rollback），移除 7 天过滤，保护基础镜像（python/node/nginx/postgres/redis/playwright），rmi 前检查运行容器使用，禁止 prune -a/volume prune
+  - **Makefile**：`docker-build` target 启用 `DOCKER_BUILDKIT=1` + 传递 `PYPROJECT_LOCK_HASH`（pyproject.toml sha256 → LABEL 审计）
+  - **构建验证**：冷构建 backend pip install 85.9s / apt-get 1253s（debian.org 网络慢）；frontend npm ci 4.4s / build 15.7s；热构建 builder 全 CACHED（pip install 0s）+ runtime apt-get 跨版本 CACHED ✓
+  - **不变量**：不重建 Capture/PostgreSQL/Redis；不删除 volume/生产数据；不新增项目依赖；buildx 为 Docker CLI 系统插件（apt docker-buildx）
+
 ## 2026-07-17
 
 - CHANGE-20260717-001: SMC Pine 逻辑对齐最终收口（warmup/历史分离 + execution gate + trailing NaN + OB 顺序 + EQH/EQL 几何 + Strong/Weak 起点 + golden 测试重做 + 确定性测试 + 导出增强 + ALGORITHM_VERSION v10）

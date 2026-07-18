@@ -43,9 +43,16 @@ down:
 
 # ===== Docker 生产环境命令 =====
 
-# 构建生产环境镜像（自动注入 GIT_SHA 和 BUILD_TIME）
+# 构建生产环境镜像（自动注入 GIT_SHA / BUILD_TIME / PYPROJECT_LOCK_HASH）
+# [CHANGE-20260718-003] 启用 BuildKit（syntax directive 已在 Dockerfile 声明，此处显式设置环境变量
+# 确保旧版 docker 也能识别）；PYPROJECT_LOCK_HASH 由 backend/pyproject.toml sha256 计算，
+# 写入镜像 LABEL 供审计；依赖层缓存仍由 COPY pyproject.toml 触发失效。
 docker-build:
-	GIT_SHA=$$(git rev-parse --short HEAD) BUILD_TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") docker compose -f docker-compose.prod.yml build
+	DOCKER_BUILDKIT=1 \
+	GIT_SHA=$$(git rev-parse --short HEAD) \
+	BUILD_TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
+	PYPROJECT_LOCK_HASH=$$(sha256sum backend/pyproject.toml | cut -d' ' -f1) \
+	docker compose -f docker-compose.prod.yml build
 
 # 启动生产环境（后台）
 docker-up:
