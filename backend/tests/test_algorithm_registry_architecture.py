@@ -1,4 +1,4 @@
-"""算法合同注册表架构守护测试（CHANGE-20260718-006 Section 2）。
+"""算法合同注册表架构守护测试（CHANGE-20260718-006 Section 2 + CHANGE-20260718-007 S3.2）。
 
 验证 AlgorithmRegistry 是所有算法族合同的唯一注册真源，CanonicalComputationService
 是统一计算入口：
@@ -14,7 +14,13 @@
    - 其他模块禁止调用 AlgorithmRegistry.register（避免运行时动态注册绕过审计）
 3. CanonicalComputationService 入口：
    - 注册表 + 服务模块本身不受约束
-   - 生产模块应通过 CanonicalComputationService 调用算法（后续逐步迁移，当前为软约束）
+   - 生产模块应通过 CanonicalComputationService 调用算法（当前四链均未迁移，
+     migration_status 字段诚实记录每个算法的接线状态；新算法必须经 compute_with_mdas
+     验证后方可标 input_provider_wired）
+4. S3.2 migration_status 守护：
+   - 每个算法都有合法 migration_status（registered_only | input_provider_wired）
+   - input_provider_wired 算法的 kernel_entrypoint callable 必须真实存在
+     （防止 7-broken-entrypoints 类 bug：注册表指向不存在的函数）
 
 覆盖范围：app/ 下全部生产 .py 文件（排除 contracts/algorithm_registry.py 自身与
 services/canonical_computation_service.py）。
@@ -323,6 +329,114 @@ class TestCanonicalComputationServiceInterface:
             {"a": 2, "m": [3, 2, 1], "z": 1}
         )
         assert s1 == s2, f"dict 不同 key 顺序应得到相同序列化: {s1} != {s2}"
+
+
+# =============================================================================
+# S3.2: migration_status 守护测试（CHANGE-20260718-007）
+# =============================================================================
+
+
+class TestMigrationStatusGuard:
+    """S3.2 migration_status 守护 — 诚实记录算法接线状态 + callable 存在性校验。"""
+
+    def test_migration_status_documented_for_all(self) -> None:
+        """每个算法都有合法 migration_status（registered_only | input_provider_wired）。
+
+        AlgorithmContract.__post_init__ 已校验合法值，此处为冗余守护 +
+        打印当前迁移状态摘要用于审计。
+        """
+        from app.contracts.algorithm_registry import AlgorithmRegistry
+
+        valid_statuses = {"registered_only", "input_provider_wired"}
+        all_contracts = AlgorithmRegistry.list_all()
+        for contract in all_contracts:
+            assert contract.migration_status in valid_statuses, (
+                f"algorithm_id={contract.algorithm_id} migration_status="
+                f"{contract.migration_status!r} 不合法"
+            )
+        # 摘要：wired vs registered_only
+        wired = [c.algorithm_id for c in all_contracts if c.migration_status == "input_provider_wired"]
+        registered = [c.algorithm_id for c in all_contracts if c.migration_status == "registered_only"]
+        # 至少 1 个 wired（macd），其余 registered_only
+        assert len(wired) >= 1, f"应至少 1 个 input_provider_wired，实际 0。registered={registered}"
+        assert len(wired) + len(registered) == len(all_contracts)
+
+    def test_wired_algorithms_have_existing_callables(self) -> None:
+        """input_provider_wired 算法的 kernel_entrypoint callable 必须真实存在。
+
+        防止 CHANGE-20260718-007 S3.2 发现的 7-broken-entrypoints 类 bug：
+        注册表指向不存在的函数（如 compute_smc_dto/compute_bollinger_bands 等），
+        但架构测试只校验模块可导入，不校验 callable 存在 — 导致 bug 从未被发现。
+
+        本测试对每个 input_provider_wired 算法：
+        1. 导入 kernel_module（验证模块存在）
+        2. getattr 检查 callable 存在（验证函数/类名正确）
+        """
+        from app.contracts.algorithm_registry import AlgorithmRegistry
+
+        wired = [
+            c for c in AlgorithmRegistry.list_all()
+            if c.migration_status == "input_provider_wired"
+        ]
+        assert wired, "应至少有 1 个 input_provider_wired 算法"
+
+        failures: list[str] = []
+        for contract in wired:
+            # 1. 模块可导入
+            try:
+                module = importlib.import_module(contract.kernel_module)
+            except ImportError as e:
+                failures.append(
+                    f"algorithm_id={contract.algorithm_id} module="
+                    f"{contract.kernel_module} 导入失败: {e}"
+                )
+                continue
+            # 2. callable 存在
+            callable_name = contract.kernel_entrypoint.split(":", 1)[1]
+            kernel = getattr(module, callable_name, None)
+            if kernel is None:
+                failures.append(
+                    f"algorithm_id={contract.algorithm_id} callable="
+                    f"{contract.kernel_entrypoint} 不存在"
+                    f"（module={contract.kernel_module} 中无 {callable_name}）"
+                )
+        assert not failures, (
+            "input_provider_wired 算法 callable 不存在（违反接线契约）:\n"
+            + "\n".join(failures)
+        )
+
+    def test_registered_only_algorithms_need_not_have_callables(self) -> None:
+        """registered_only 算法允许 callable 不存在（诚实记录未接线状态）。
+
+        这是设计意图：registered_only 意味着"合同已登记但未接线统一 adapter"，
+        callable 可能不存在（如 compute_smc_dto）或签名未适配。
+        本测试验证 migration_status 与 callable 存在性的一致性：
+        - input_provider_wired → callable 必须存在（上一个测试）
+        - registered_only → callable 可能存在也可能不存在（本测试只记录，不报错）
+        """
+        from app.contracts.algorithm_registry import AlgorithmRegistry
+
+        registered = [
+            c for c in AlgorithmRegistry.list_all()
+            if c.migration_status == "registered_only"
+        ]
+        # 记录哪些 registered_only 的 callable 存在/不存在（用于审计，不报错）
+        exists_count = 0
+        missing_count = 0
+        for contract in registered:
+            try:
+                module = importlib.import_module(contract.kernel_module)
+                callable_name = contract.kernel_entrypoint.split(":", 1)[1]
+                if getattr(module, callable_name, None) is not None:
+                    exists_count += 1
+                else:
+                    missing_count += 1
+            except ImportError:
+                missing_count += 1
+        # 至少有一些 registered_only（11 个），其中 macd 已 wired 所以 registered_only 应为 11
+        assert len(registered) >= 10, (
+            f"registered_only 算法数应 >= 10，实际 {len(registered)}"
+        )
 
 
 if __name__ == "__main__":

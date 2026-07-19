@@ -80,6 +80,9 @@ class AlgorithmContract:
         warmup_bars: 预热所需根数（用于 MDAS limit，0=无特殊要求）
         output_schema_version: 输出 schema 版本（DTO 字段变更时 bump）
         contract_fingerprint: 合同指纹（语义变更时 bump，缓存键组成部分）
+        migration_status: 迁移状态（CHANGE-20260718-007 S3.2）
+            "registered_only"=合同已登记但 kernel_entrypoint callable 不存在或未适配统一签名（默认，安全假设未接线）
+            "input_provider_wired"=callable 存在且接受统一 (bars_daily: pd.DataFrame, **kwargs) 签名，可经 compute_with_mdas 调用
         description: 算法描述（人类可读）
     """
 
@@ -93,6 +96,7 @@ class AlgorithmContract:
     warmup_bars: int
     output_schema_version: int
     contract_fingerprint: str
+    migration_status: str = "registered_only"
     description: str = ""
 
     def __post_init__(self) -> None:
@@ -121,6 +125,11 @@ class AlgorithmContract:
             )
         if not self.contract_fingerprint:
             raise ValueError("contract_fingerprint 不能为空")
+        if self.migration_status not in ("registered_only", "input_provider_wired"):
+            raise ValueError(
+                f"migration_status 必须为 'registered_only' 或 'input_provider_wired': "
+                f"{self.migration_status!r}"
+            )
         # kernel_module 必须是 kernel_entrypoint 的前缀
         entrypoint_module = self.kernel_entrypoint.split(":", 1)[0]
         if entrypoint_module != self.kernel_module:
@@ -313,21 +322,23 @@ def _register_builtin_algorithms() -> None:
     ))
 
     # ----- MACD -----
-    # kernel: app.services.indicator_service.compute_macd
+    # kernel: app.services.indicator_service.compute_macd（真实计算）
+    # adapter: app.services.canonical_adapters.compute_macd_adapter（统一签名，S3.2 接线）
     AlgorithmRegistry.register(AlgorithmContract(
         algorithm_id="macd",
         algorithm_version="macd-v1",
-        kernel_module="app.services.indicator_service",
-        kernel_entrypoint="app.services.indicator_service:compute_macd",
+        kernel_module="app.services.canonical_adapters",
+        kernel_entrypoint="app.services.canonical_adapters:compute_macd_adapter",
         input_timeframes=("1d", "15m", "1h", "1w", "1mo"),
         adjustment_mode="qfq",
         completed_only=True,
         warmup_bars=250,
         output_schema_version=1,
         contract_fingerprint="macd-cf-v1",
+        migration_status="input_provider_wired",
         description=(
             "MACD：标准 12/26/9 参数，输出 macd_line/signal_line/histogram。"
-            "多周期支持。"
+            "多周期支持。S3.2 已接线统一 adapter（compute_macd_adapter），可经 compute_with_mdas 调用。"
         ),
     ))
 
@@ -484,6 +495,7 @@ def all_contracts() -> dict[str, dict[str, object]]:
             "warmup_bars": c.warmup_bars,
             "output_schema_version": c.output_schema_version,
             "contract_fingerprint": c.contract_fingerprint,
+            "migration_status": c.migration_status,
             "description": c.description,
         }
         for c in AlgorithmRegistry.list_all()

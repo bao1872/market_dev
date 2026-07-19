@@ -45,6 +45,7 @@ from typing import Any
 from uuid import UUID
 
 import pandas as pd
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.contracts.algorithm_registry import (
     ALGORITHM_REGISTRY_VERSION,
@@ -53,6 +54,12 @@ from app.contracts.algorithm_registry import (
 )
 
 logger = logging.getLogger("services.canonical_computation_service")
+
+
+# S3.2: 统一 adapter 签名约定 — compute_with_mdas 把 MDAS 返回的 bars DataFrame
+# 通过通用参数名 `bars` 传给 kernel adapter（不再按 timeframe 映射不同 kwarg 名）。
+# 单 timeframe 算法（如 macd）直接用 bars；多 timeframe 算法的 adapter 可在内部按
+# 显式 timeframe 参数 dispatch，或采用专门的 multi-timeframe adapter 签名。
 
 
 # =============================================================================
@@ -234,20 +241,134 @@ class CanonicalComputationService:
         )
 
     @classmethod
+    async def compute_with_mdas(
+        cls,
+        algorithm_id: str,
+        *,
+        session: AsyncSession,
+        instrument_id: UUID | str,
+        as_of: date | None = None,
+        timeframe: str | None = None,
+        limit: int | None = None,
+        warmup_bars: int | None = None,
+        adjustment_as_of: date | None = None,
+        **kernel_extra_kwargs: Any,
+    ) -> CanonicalResult:
+        """S3.2 统一 InputProvider — 通过 MDAS 获取行情 → 校验合同 → 调用 kernel → 哈希。
+
+        这是四链统一计算入口：调用方只传 MDAS 参数（instrument_id/timeframe/as_of），
+        不传 bars。Canonical 内部：
+        1. 查合同 → 若 migration_status != "input_provider_wired" 抛 ContractViolationError
+        2. 从合同推导 MDAS 参数（adj/completed_only/warmup_bars 从合同读取）
+        3. 校验 timeframe 在合同 input_timeframes 中
+        4. 调用 MDAS.get_bars() 获取 bars + source_bar_hash + adj_factor_hash
+        5. 通过统一参数名 `bars` 调用 compute() 传入 bars + hashes + 合同校验值
+
+        Args:
+            algorithm_id: 算法唯一标识（必须 migration_status="input_provider_wired"）
+            session: 异步 DB 会话
+            instrument_id: 标的 UUID
+            as_of: 业务日锚点（用于 result_hash + adjustment_as_of 默认值）
+            timeframe: 输入周期（None → contract.input_timeframes[0]）
+            limit: 返回最近 N 根（None → 由 MDAS 根据 warmup_bars 决定）
+            warmup_bars: 预热根数（None → contract.warmup_bars）
+            adjustment_as_of: 复权锚点（None → as_of）
+            **kernel_extra_kwargs: 传给 kernel 的额外参数（如 fast/slow/signal）
+
+        Returns:
+            CanonicalResult（含 contract_fingerprint + result_hash + source_bar_hash）
+
+        Raises:
+            AlgorithmNotFoundError: algorithm_id 未注册
+            ContractViolationError: migration_status 不是 input_provider_wired，
+                或 timeframe 不在 input_timeframes 中
+        """
+        # 1. 查合同
+        try:
+            contract = AlgorithmRegistry.get(algorithm_id)
+        except KeyError as e:
+            raise AlgorithmNotFoundError(algorithm_id) from e
+
+        # 2. 校验 migration_status
+        if contract.migration_status != "input_provider_wired":
+            raise ContractViolationError(
+                algorithm_id,
+                f"migration_status={contract.migration_status!r}，"
+                f"无法经 compute_with_mdas 调用（需 input_provider_wired）。"
+                f"该算法尚未接线统一 adapter，请直接调用其 kernel。",
+            )
+
+        # 3. 从合同推导 MDAS 参数
+        tf = timeframe or contract.input_timeframes[0]
+        if tf not in contract.input_timeframes:
+            raise ContractViolationError(
+                algorithm_id,
+                f"timeframe={tf!r} 不在合同 input_timeframes="
+                f"{contract.input_timeframes}",
+            )
+        adj = contract.adjustment_mode
+        completed_only = contract.completed_only
+        warmup = warmup_bars if warmup_bars is not None else contract.warmup_bars
+        adj_as_of = adjustment_as_of or as_of
+
+        # 4. 映射 timeframe → kwarg 名
+        # S3.2: 统一 adapter 签名约定 — 通过通用参数名 `bars` 传给 adapter，
+        # adapter 内部按需提取 close/高低等列。不再按 timeframe 映射不同 kwarg 名。
+
+        # 5. 调用 MDAS 获取行情（延迟 import 避免循环依赖）
+        from app.services.market_data_aggregation_service import (
+            MarketDataAggregationService,
+        )
+
+        mdas = MarketDataAggregationService()
+        bar_result = await mdas.get_bars(
+            session=session,
+            instrument_id=instrument_id,  # type: ignore[arg-type]
+            timeframe=tf,
+            adj=adj,
+            include_realtime=not completed_only,
+            completed_only=completed_only,
+            limit=limit,
+            warmup_bars=warmup,
+            adjustment_as_of=adj_as_of,
+        )
+
+        logger.info(
+            "CANONICAL_INPUT_PROVIDER algorithm_id=%s timeframe=%s adj=%s "
+            "completed_only=%s bars=%d source_bar_hash=%s adj_factor_hash=%s "
+            "data_source=%s",
+            algorithm_id, tf, adj, completed_only,
+            len(bar_result.bars), bar_result.source_bar_hash,
+            bar_result.adj_factor_hash, bar_result.data_source,
+        )
+
+        # 6. 调用 compute() 传入 bars + hashes + 合同校验值
+        return await cls.compute(
+            algorithm_id=algorithm_id,
+            instrument_id=instrument_id,
+            as_of=as_of,
+            source_bar_hash=bar_result.source_bar_hash,
+            adj_factor_hash=bar_result.adj_factor_hash,
+            bars=bar_result.bars,
+            **kernel_extra_kwargs,
+        )
+
+    @classmethod
     def _validate_contract(
         cls,
         contract: AlgorithmContract,
         kernel_kwargs: dict[str, Any],
     ) -> None:
-        """校验输入是否符合算法合同。
+        """校验输入是否符合算法合同（S3.2 强化）。
 
-        当前校验项：
+        校验项：
         - 调用方至少提供一个 timeframe 相关参数（bars_daily/bars_15min/bars_df 等）
-        - 不强制校验具体 timeframe 值（kernel 内部负责）
+        - 若传入 timeframe，校验其在 contract.input_timeframes 中
+        - 若传入 adj，校验其与 contract.adjustment_mode 一致
+        - 若传入 completed_only，校验其与 contract.completed_only 一致
 
-        未来可扩展：
-        - 检查传入的 timeframe 是否在 contract.input_timeframes 中
-        - 检查 adj/completed_only 是否与合同一致
+        向后兼容：不传 timeframe/adj/completed_only 时不报错（旧调用方仍可直接传 bars），
+        仅在显式传入时校验。compute_with_mdas() 会从合同推导这些值并显式传入。
         """
         # 至少有一个 bars 输入参数
         bars_keys = [k for k in kernel_kwargs if k.startswith("bars_")]
@@ -257,6 +378,36 @@ class CanonicalComputationService:
                 "kernel_kwargs 无 bars_* 参数 algorithm_id=%s kwargs=%s",
                 contract.algorithm_id, list(kernel_kwargs.keys()),
             )
+
+        # S3.2: 校验 timeframe（若显式传入）
+        if "timeframe" in kernel_kwargs:
+            tf = kernel_kwargs["timeframe"]
+            if tf not in contract.input_timeframes:
+                raise ContractViolationError(
+                    contract.algorithm_id,
+                    f"timeframe={tf!r} 不在合同 input_timeframes="
+                    f"{contract.input_timeframes}",
+                )
+
+        # S3.2: 校验 adj（若显式传入）
+        if "adj" in kernel_kwargs:
+            adj = kernel_kwargs["adj"]
+            if adj != contract.adjustment_mode:
+                raise ContractViolationError(
+                    contract.algorithm_id,
+                    f"adj={adj!r} != 合同 adjustment_mode="
+                    f"{contract.adjustment_mode!r}",
+                )
+
+        # S3.2: 校验 completed_only（若显式传入）
+        if "completed_only" in kernel_kwargs:
+            co = kernel_kwargs["completed_only"]
+            if co != contract.completed_only:
+                raise ContractViolationError(
+                    contract.algorithm_id,
+                    f"completed_only={co} != 合同 completed_only="
+                    f"{contract.completed_only}",
+                )
 
     @classmethod
     def _load_kernel(cls, contract: AlgorithmContract) -> Any:
