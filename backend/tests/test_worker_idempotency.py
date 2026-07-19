@@ -150,19 +150,24 @@ async def test_board_sync_scheduler_skipped_duplicate(db_session) -> None:
     assert job_run_2 is None
 
 
-def test_board_sync_registered_in_bars_scheduler() -> None:
-    """验证 board_sync job 注册在 run_bars_scheduler_worker 内部（非独立 worker）。"""
+def test_board_sync_registered_in_after_close_orchestrator() -> None:
+    """验证 board_sync 在 after_close_orchestrator 内部调用（非独立 worker）。
+
+    [CHANGE-20260716-007] - board_sync 从 run_bars_scheduler_worker 迁移到
+    after_close_orchestrator 步骤 2（syncing_boards），在日线刷新后、DSA 前执行。
+    旧测试断言 run_bars_scheduler_worker 包含 scheduled_board_sync 已过时。
+    """
     import inspect
 
-    from app.worker import run_bars_scheduler_worker
+    from app.services.after_close_orchestrator import execute_after_close_run
 
-    source = inspect.getsource(run_bars_scheduler_worker)
-    assert "scheduled_board_sync" in source, \
-        "run_bars_scheduler_worker 应包含 scheduled_board_sync 任务"
-    assert "board_sync_daily" in source, \
-        "run_bars_scheduler_worker 应注册 board_sync_daily job"
+    source = inspect.getsource(execute_after_close_run)
     assert "sync_boards" in source, \
-        "run_bars_scheduler_worker 应调用 sync_boards"
+        "after_close_orchestrator 应调用 sync_boards"
+    assert "board_sync" in source, \
+        "after_close_orchestrator 应包含 board_sync 逻辑"
+    assert "skip_board_sync" in source, \
+        "after_close_orchestrator 应支持 skip_board_sync 控制"
 
 
 def test_board_sync_not_separate_worker_type() -> None:

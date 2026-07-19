@@ -49,6 +49,11 @@ from app.models.stock_feature_snapshot_run import (
 from app.models.user import User
 from app.services.after_close_orchestrator import AfterCloseRunStatus
 
+# [CHANGE-20260718-007] - _make_snapshot_run 必须使用生产代码当前 _SCHEMA_VERSION（=3），
+# 否则 has_succeeded_snapshot_run 按 schema_version=3 查询会找不到测试创建的 run，
+# 导致 watchlist_ready=False，overall_status 从 succeeded 变成 failed。
+from app.services.feature_snapshot_service import _SCHEMA_VERSION
+
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 TEST_DATE = date(2026, 6, 24)
@@ -129,6 +134,7 @@ def _make_snapshot_run(
         trade_date=TEST_DATE,
         run_type=run_type,
         status=status,
+        schema_version=_SCHEMA_VERSION,
         metadata_={"scope": scope},
         snapshot_count=10,
         failed_count=0,

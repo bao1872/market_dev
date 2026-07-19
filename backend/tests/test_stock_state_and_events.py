@@ -1330,121 +1330,12 @@ async def test_c4_previous_snapshot_empty_instrument_ids() -> None:
 
 
 # =============================================================================
-# 11. P0-3: _event_to_dto evidence 映射 + 时区边界 + 同日多 run
+# 11. P0-3: 时区边界 + 同日多 run
+# [CHANGE-20260718-007] - _event_to_dto 已在 commit 095f4eb（Atomic Fact Contract V1）
+# 重构中移除，旧 state/events API 替换为 contractVersion/core/auxiliary/availability。
+# 新 API 的 evidence/recentChanges 覆盖由 test_stock_context_atomic_facts.py 和
+# test_atomic_fact_contract_service.py 承担。此处保留时区与 run 查询的纯函数测试。
 # =============================================================================
-
-
-def test_p03_event_to_dto_maps_evidence() -> None:
-    """P0-3: _event_to_dto 将 ORM event.evidence 映射为 Evidence DTO 列表。"""
-    from app.api.stock_context import _event_to_dto
-
-    # 构造 mock ORM event
-    mock_event = MagicMock()
-    mock_event.id = uuid4()
-    mock_event.symbol = "000001"
-    mock_event.occurred_at = datetime(2026, 7, 10, 15, 0, tzinfo=UTC)
-    mock_event.event_type = "state_transition"
-    mock_event.title = "2 项状态发生变化"
-    mock_event.description = "变化字段: SQZMOM 动量, 布林位置"
-    mock_event.changed_fields = ["momentum.sqzmom", "volatility.bollPosition"]
-    mock_event.previous_as_of = date(2026, 7, 9)
-    mock_event.current_as_of = date(2026, 7, 10)
-    mock_event.idempotency_key = "000001:run-uuid:schema_v1+state_v1"
-    mock_event.evidence = [
-        {
-            "field": "momentum.sqzmom",
-            "prevCode": "positive",
-            "currCode": "negative",
-            "prevValue": 0.001,
-            "currValue": -0.001,
-            "unit": None,
-            "timeframe": "1d",
-        },
-        {
-            "field": "volatility.bollPosition",
-            "prevCode": "middle",
-            "currCode": "near_upper",
-            "prevValue": 0.5,
-            "currValue": 0.85,
-            "unit": None,
-            "timeframe": "1d",
-        },
-    ]
-
-    dto = _event_to_dto(mock_event)
-
-    assert dto.symbol == "000001"
-    assert len(dto.evidence) == 2
-    # 第一条证据
-    ev1 = dto.evidence[0]
-    assert ev1.fieldName == "SQZMOM 动量"  # 白名单映射
-    assert ev1.code == "momentum.sqzmom"
-    assert ev1.currentValue == "negative"  # 优先 code
-    assert ev1.previousValue == "positive"
-    assert ev1.timeframe == "1d"
-    # 第二条证据
-    ev2 = dto.evidence[1]
-    assert ev2.fieldName == "布林位置"
-    assert ev2.code == "volatility.bollPosition"
-    assert ev2.currentValue == "near_upper"
-    assert ev2.previousValue == "middle"
-
-
-def test_p03_event_to_dto_empty_evidence() -> None:
-    """P0-3: event.evidence 为空时 DTO evidence 为空列表。"""
-    from app.api.stock_context import _event_to_dto
-
-    mock_event = MagicMock()
-    mock_event.id = uuid4()
-    mock_event.symbol = "000001"
-    mock_event.occurred_at = datetime(2026, 7, 10, 15, 0, tzinfo=UTC)
-    mock_event.event_type = "state_transition"
-    mock_event.title = "无状态变化"
-    mock_event.description = "当前暂无新的状态变化"
-    mock_event.changed_fields = []
-    mock_event.previous_as_of = None
-    mock_event.current_as_of = date(2026, 7, 10)
-    mock_event.idempotency_key = "000001:run-uuid:schema_v1+state_v1"
-    mock_event.evidence = []
-
-    dto = _event_to_dto(mock_event)
-
-    assert dto.evidence == []
-
-
-def test_p03_event_to_dto_evidence_value_fallback() -> None:
-    """P0-3: code 为 None 时 fallback 到 numeric value。"""
-    from app.api.stock_context import _event_to_dto
-
-    mock_event = MagicMock()
-    mock_event.id = uuid4()
-    mock_event.symbol = "000001"
-    mock_event.occurred_at = datetime(2026, 7, 10, 15, 0, tzinfo=UTC)
-    mock_event.event_type = "state_transition"
-    mock_event.title = "1 项状态发生变化"
-    mock_event.description = "变化字段: MACD 动量"
-    mock_event.changed_fields = ["momentum.macd"]
-    mock_event.previous_as_of = date(2026, 7, 9)
-    mock_event.current_as_of = date(2026, 7, 10)
-    mock_event.idempotency_key = "000001:run-uuid:schema_v1+state_v1"
-    mock_event.evidence = [
-        {
-            "field": "momentum.macd",
-            "prevCode": None,
-            "currCode": None,
-            "prevValue": None,
-            "currValue": 0.05,
-            "unit": None,
-            "timeframe": "1d",
-        },
-    ]
-
-    dto = _event_to_dto(mock_event)
-
-    assert len(dto.evidence) == 1
-    ev = dto.evidence[0]
-    assert ev.currentValue == "0.0500"  # code 为 None 时 fallback 到格式化 value
-    assert ev.previousValue is None
 
 
 def test_p03_build_event_evidence_includes_values() -> None:
@@ -1726,7 +1617,12 @@ async def _create_db_snapshot(
 async def test_p02_context_exact_source_run_id_returns_state(
     stock_context_client,
 ) -> None:
-    """P0-2: exact source_run_id 精确匹配 → state 非空, reasonCode=null。"""
+    """P0-2: exact source_run_id 精确匹配 → snapshot 可读, reasonCode=null。
+
+    [CHANGE-20260718-007] - Atomic Fact Contract V1 重构后，API 响应不再包含 `state`
+    字段，改为 `core`/`auxiliary`/`availability`。此处验证 dataQuality 仍正确反映
+    snapshot 可读性（hasSnapshot=True, reasonCode=null）。
+    """
     client, db = stock_context_client
     admin = await _create_admin_user(db)
     inst = await _create_test_instrument(db, "P02001")
@@ -1739,8 +1635,9 @@ async def test_p02_context_exact_source_run_id_returns_state(
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["state"] is not None
-    assert body["state"]["symbol"] == "P02001"
+    # Atomic Fact Contract V1 响应结构
+    assert body["contractVersion"] is not None
+    assert body["asOf"] == "2026-07-10"
     assert body["dataQuality"]["reasonCode"] is None
     assert body["dataQuality"]["hasSucceededRun"] is True
     assert body["dataQuality"]["hasSnapshot"] is True
@@ -1750,7 +1647,11 @@ async def test_p02_context_exact_source_run_id_returns_state(
 async def test_p02_context_no_published_full_run(
     stock_context_client,
 ) -> None:
-    """P0-2: 无 succeeded+published+full run → state=null, reasonCode=no_published_full_run。"""
+    """P0-2: 无 succeeded+published+full run → 空态响应, reasonCode=no_published_full_run。
+
+    [CHANGE-20260718-007] - Atomic Fact Contract V1 重构后，空态响应 core 全缺失，
+    dataQuality.reasonCode 解释空态原因。
+    """
     client, db = stock_context_client
     admin = await _create_admin_user(db)
     await _create_test_instrument(db, "P02002")
@@ -1762,7 +1663,8 @@ async def test_p02_context_no_published_full_run(
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["state"] is None
+    # 空态响应
+    assert body["asOf"] is None
     assert body["dataQuality"]["reasonCode"] == "no_published_full_run"
     assert body["dataQuality"]["hasSucceededRun"] is False
     assert body["dataQuality"]["hasSnapshot"] is False
@@ -1772,7 +1674,10 @@ async def test_p02_context_no_published_full_run(
 async def test_p02_context_snapshot_missing(
     stock_context_client,
 ) -> None:
-    """P0-2: run 存在但该 instrument 无快照 → state=null, reasonCode=snapshot_missing。"""
+    """P0-2: run 存在但该 instrument 无快照 → 空态响应, reasonCode=snapshot_missing。
+
+    [CHANGE-20260718-007] - Atomic Fact Contract V1 重构后，空态响应 core 全缺失。
+    """
     client, db = stock_context_client
     admin = await _create_admin_user(db)
     await _create_test_instrument(db, "P02003")
@@ -1785,7 +1690,10 @@ async def test_p02_context_snapshot_missing(
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["state"] is None
+    # 空态响应：run 存在但 snapshot 缺失 → _empty_atomic_response(asOf=None)
+    # [CHANGE-20260718-007] - Atomic Fact Contract V1 重构后，snapshot 缺失走
+    # _empty_atomic_response，asOf=None（旧 API 的 state=None 等价语义）。
+    assert body["asOf"] is None
     assert body["dataQuality"]["reasonCode"] == "snapshot_missing"
     assert body["dataQuality"]["hasSucceededRun"] is True
     assert body["dataQuality"]["hasSnapshot"] is False
@@ -1797,7 +1705,11 @@ async def test_p02_context_snapshot_run_not_linked(
 ) -> None:
     """P0-2: legacy 快照 source_run_id=NULL → _get_snapshot_for_instrument 返回 snapshot_run_not_linked。
 
-    API 层面：state 非空（legacy 匹配成功），但 _get_snapshot_for_instrument 内部 reasonCode=snapshot_run_not_linked。
+    [CHANGE-20260718-007] - Atomic Fact Contract V1 重构后，API 响应不再包含 `state` 字段。
+    commit d8eda23（AFC V1 终审修正）变更 _build_data_quality 行为：
+    legacy/ambiguous 快照（snapshot 非空但 reason_code 非空）现在传播 reasonCode
+    并加入 degradedReasons，不再清为 None。此为有意设计——legacy 快照虽可读，
+    但归属异常需在 dataQuality 显式标注，前端据此提示修复 source_run_id。
     """
     from app.api.stock_context import _get_snapshot_for_instrument
 
@@ -1813,15 +1725,18 @@ async def test_p02_context_snapshot_run_not_linked(
     assert snapshot is not None
     assert reason_code == "snapshot_run_not_linked"
 
-    # API 层面：state 非空（legacy 匹配成功构建 state），reasonCode=null（因 snapshot 非 None）
+    # API 层面：snapshot 可读（legacy 匹配成功，hasSnapshot=True），
+    # reasonCode 传播为 "snapshot_run_not_linked"（commit d8eda23 有意行为）
     resp = await client.get(
         "/api/v1/stocks/P02004/context",
         headers=_auth_headers(admin.id),
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["state"] is not None
-    assert body["dataQuality"]["reasonCode"] is None  # state 非空时 reasonCode=null
+    assert body["dataQuality"]["hasSnapshot"] is True
+    assert body["dataQuality"]["reasonCode"] == "snapshot_run_not_linked"
+    # 同时加入 degradedReasons
+    assert "snapshot_run_not_linked" in (body["dataQuality"]["degradedReasons"] or [])
 
 
 @pytest.mark.asyncio

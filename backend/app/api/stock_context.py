@@ -276,8 +276,17 @@ def _afc_meta() -> dict[str, str]:
 def _empty_atomic_response(
     instrument: Instrument,
     reason_code: str | None,
+    *,
+    run: StockFeatureSnapshotRun | None = None,
 ) -> dict[str, Any]:
-    """无 run / 无快照时的空态响应（Core 分母仍固定 14，全部缺失）。"""
+    """无 run / 无快照时的空态响应（Core 分母仍固定 14，全部缺失）。
+
+    [CHANGE-20260718-007] - 修复 hasSucceededRun 在 snapshot_missing 场景的错误归零。
+    当 run 存在但 instrument 无 snapshot 时（reason_code="snapshot_missing"），
+    调用方应传入 run，使 dataQuality.hasSucceededRun=True、runTradeDate/runPublishedAt
+    正确反映 run 状态；asOf 仍为 None（无 snapshot 即无 as-of 日期）。
+    无 run 场景（reason_code="no_published_full_run"）保持 run=None 默认。
+    """
     return {
         "contractVersion": CONTRACT_VERSION,
         "meta": _afc_meta(),
@@ -298,7 +307,7 @@ def _empty_atomic_response(
         "latestChangesAsOf": None,
         "productObservations": {"structure": []},
         "dataQuality": _build_data_quality(
-            instrument, None, None, reason_code=reason_code,
+            instrument, run, None, reason_code=reason_code,
         ),
     }
 
@@ -378,7 +387,11 @@ async def _build_stock_context(
         session, instrument.id, run,
     )
     if snapshot is None:
-        return _empty_atomic_response(instrument, reason_code="snapshot_missing")
+        # [CHANGE-20260718-007] 传入 run，使 hasSucceededRun=True、runTradeDate/runPublishedAt
+        # 正确反映 run 状态；asOf 仍为 None（无 snapshot 即无 as-of 日期）
+        return _empty_atomic_response(
+            instrument, reason_code="snapshot_missing", run=run,
+        )
 
     # 优先读取已持久化的原子事实（新快照写入 summary_payload.atomic_fact_contract_v1）；
     # 缺失或版本/结构不匹配 → 同一纯函数 fallback 重算（不回写旧快照）。

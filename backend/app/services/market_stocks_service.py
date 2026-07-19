@@ -49,6 +49,11 @@ from app.schemas.market_stocks import (
     MarketStocksResponse,
 )
 from app.services.board_sync_service import get_instrument_boards_batch
+
+# [CHANGE-20260718-007] - 使用生产者 _SCHEMA_VERSION 替代硬编码 == 1
+# _SCHEMA_VERSION 从 1→2→3 升级后，生产写入 schema_version=3，
+# 消费查询必须用同一常量，否则新快照读不到、as_of 永远为 None。
+from app.services.feature_snapshot_service import _SCHEMA_VERSION
 from app.services.instrument_maintenance_service import stock_symbol_sql_filter
 
 logger = logging.getLogger("market_stocks_service")
@@ -393,7 +398,8 @@ async def get_market_stocks(
         empty_price_as_of = await db.scalar(select(func.max(BarDaily.trade_date)))
         empty_state_as_of = await db.scalar(
             select(func.max(StockFeatureSnapshot.created_at)).where(
-                StockFeatureSnapshot.schema_version == 1
+                # [CHANGE-20260718-007] 使用 _SCHEMA_VERSION，禁止硬编码
+                StockFeatureSnapshot.schema_version == _SCHEMA_VERSION
             )
         )
         empty_boards_as_of = await db.scalar(
@@ -484,7 +490,8 @@ async def get_market_stocks(
         )
         .where(
             StockFeatureSnapshot.instrument_id.in_(instrument_ids),
-            StockFeatureSnapshot.schema_version == 1,
+            # [CHANGE-20260718-007] 使用 _SCHEMA_VERSION，禁止硬编码
+            StockFeatureSnapshot.schema_version == _SCHEMA_VERSION,
         )
         .subquery()
     )
@@ -551,7 +558,8 @@ async def get_market_stocks(
     # ===== Query 8: state_as_of — 全局最新特征快照 created_at（不随分页变化） =====
     state_as_of_dt: datetime | None = await db.scalar(
         select(func.max(StockFeatureSnapshot.created_at)).where(
-            StockFeatureSnapshot.schema_version == 1
+            # [CHANGE-20260718-007] 使用 _SCHEMA_VERSION，禁止硬编码
+            StockFeatureSnapshot.schema_version == _SCHEMA_VERSION
         )
     )
 
