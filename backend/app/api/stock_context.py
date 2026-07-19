@@ -57,6 +57,13 @@ from app.services.atomic_fact_contract_service import (
     compute_recent_changes,
 )
 
+# [CHANGE-20260719-001 §五-D] 使用生产者 _SCHEMA_VERSION 替代本地硬编码 = 1
+# CHANGE-20260718-007 §4.4.1 修复了 watchlist.py / market_stocks_service.py 的硬编码，
+# 但遗漏了 stock_context.py 的本地 _SCHEMA_VERSION = 1（查询 StockFeatureSnapshotRun.schema_version）。
+# 生产写入 schema_version=3（feature_snapshot_service._SCHEMA_VERSION），
+# 本地 = 1 会导致 _find_latest_succeeded_run 查不到生产 run。此处统一从生产者 import。
+from app.services.feature_snapshot_service import _SCHEMA_VERSION
+
 logger = logging.getLogger("api.stock_context")
 
 # 用户侧路由：/api/v1/stocks/{symbol}/context
@@ -65,7 +72,6 @@ stock_router = APIRouter(prefix="/api/v1/stocks", tags=["stock-context"])
 # 管理员路由：/api/v1/admin/stocks/{symbol}/debug
 admin_router = APIRouter(prefix="/api/v1/admin/stocks", tags=["admin-stock-debug"])
 
-_SCHEMA_VERSION = 1
 # P0-3: 使用 Asia/Shanghai 时区计算 as_of 截止边界（非 UTC）
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 

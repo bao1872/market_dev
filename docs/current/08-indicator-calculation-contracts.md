@@ -174,33 +174,40 @@ SMC 参数和执行顺序见 `docs/maps/smc-pine-parity-map.md` 和 `AGENTS.md` 
 
 | algorithm_id | algorithm_version | contract_fingerprint | kernel_module | kernel_entrypoint | input_timeframes | adjustment_mode | completed_only | warmup_bars | output_schema_version | migration_status |
 |---|---|---|---|---|---|---|---|---|---|---|
-| `node_cluster` | `nc-v1` | `nc-cf-v1` | `app.services.node_cluster_engine` | `app.services.node_cluster_engine:compute_node_cluster_profile` | `("1d","15m")` | `qfq` | True | 250 | 1 | `registered_only` |
-| `dsa` | `dsa-v1` | `dsa-cf-v1` | `app.strategy.selectors.dsa_selector` | `app.strategy.selectors.dsa_selector:DSASelector` | `("1d",)` | `qfq` | True | 250 | 1 | `registered_only` |
-| `smc` | `smc-v1` | `smc-cf-v1` | `app.services.smc_view_adapter` | `app.services.smc_view_adapter:compute_smc_dto` | `("1d","15m","1h","1w","1mo")` | `qfq` | True | 500 | 1 | `registered_only` |
-| `bollinger` | `bb-v1` | `bb-cf-v1` | `app.services.indicator_service` | `app.services.indicator_service:compute_bollinger_bands` | `("1d","15m","1h","1w","1mo")` | `qfq` | True | 250 | 1 | `registered_only` |
-| `macd` | `macd-v1` | `macd-cf-v1` | `app.services.canonical_adapters` | `app.services.canonical_adapters:compute_macd_adapter` | `("1d","15m","1h","1w","1mo")` | `qfq` | True | 250 | 1 | `input_provider_wired` |
-| `sqzmom` | `sqzmom-v1` | `sqzmom-cf-v1` | `app.strategy_assets.algorithms.features.sqzmom_lb` | `app.strategy_assets.algorithms.features.sqzmom_lb:compute_sqzmom` | `("1d",)` | `qfq` | True | 250 | 1 | `registered_only` |
-| `breakout` | `brk-v1` | `brk-cf-v1` | `app.strategy_assets.algorithms.features.trendlines_with_breaks_luxalgo` | `app.strategy_assets.algorithms.features.trendlines_with_breaks_luxalgo:compute_breakout` | `("1d",)` | `qfq` | True | 250 | 1 | `registered_only` |
-| `participation` | `part-v1` | `part-cf-v1` | `app.strategy_assets.algorithms.features.sr_event_factor_lab` | `app.strategy_assets.algorithms.features.sr_event_factor_lab:compute_participation` | `("1d",)` | `qfq` | True | 250 | 1 | `registered_only` |
-| `temporal_features` | `tmp-v1` | `tmp-cf-v1` | `app.services.temporal_feature_service` | `app.services.temporal_feature_service:compute_temporal_features` | `("1d","15m")` | `qfq` | True | 250 | 1 | `registered_only` |
-| `structural_features` | `str-v1` | `str-cf-v1` | `app.services.structural_factor_service` | `app.services.structural_factor_service:compute_structural_features` | `("1d","15m")` | `qfq` | True | 250 | 1 | `registered_only` |
-| `primary_secondary_relation` | `psr-v1` | `psr-cf-v1` | `app.services.feature_snapshot_service` | `app.services.feature_snapshot_service:compute_primary_secondary_relation` | `("1d","15m")` | `qfq` | True | 250 | 1 | `registered_only` |
-| `snapshot_derived_features` | `sdf-v1` | `sdf-cf-v1` | `app.services.feature_snapshot_service` | `app.services.feature_snapshot_service:compute_feature_snapshot_for_date` | `("1d","15m")` | `qfq` | True | 250 | 1 | `registered_only` |
+| `node_cluster` | `nc-v1` | `nc-cf-v1` | `app.services.canonical_adapters` | `app.services.canonical_adapters:compute_node_cluster_adapter` | `("1d","15m")` | `qfq` | True | 250 | 1 | `production_wired` |
+| `dsa` | `dsa-v1` | `dsa-cf-v1` | `app.services.canonical_adapters` | `app.services.canonical_adapters:compute_dsa_adapter` | `("1d",)` | `qfq` | True | 250 | 1 | `production_wired` |
+| `smc` | `smc-v1` | `smc-cf-v1` | `app.services.canonical_adapters` | `app.services.canonical_adapters:compute_smc_adapter` | `("1d","15m","1h","1w","1mo")` | `qfq` | True | 500 | 1 | `production_wired` |
+| `bollinger` | `bb-v1` | `bb-cf-v1` | `app.services.canonical_adapters` | `app.services.canonical_adapters:compute_bollinger_adapter` | `("1d","15m","1h","1w","1mo")` | `qfq` | True | 250 | 1 | `production_wired` |
+| `macd` | `macd-v1` | `macd-cf-v1` | `app.services.canonical_adapters` | `app.services.canonical_adapters:compute_macd_adapter` | `("1d","15m","1h","1w","1mo")` | `qfq` | True | 250 | 1 | `production_wired` |
+| `sqzmom` | `sqzmom-v1` | `sqzmom-cf-v1` | `app.services.canonical_adapters` | `app.services.canonical_adapters:compute_sqzmom_adapter` | `("1d",)` | `qfq` | True | 250 | 1 | `production_wired` |
+| `breakout` | `brk-v1` | `brk-cf-v1` | `app.services.canonical_adapters` | `app.services.canonical_adapters:compute_breakout_adapter` | `("1d",)` | `qfq` | True | 250 | 1 | `production_wired` |
+| `participation` | `part-v1` | `part-cf-v1` | `app.services.canonical_adapters` | `app.services.canonical_adapters:compute_participation_adapter` | `("1d",)` | `qfq` | True | 250 | 1 | `production_wired` |
+| `temporal_features` | `tmp-v1` | `tmp-cf-v1` | `app.services.canonical_adapters` | `app.services.canonical_adapters:compute_temporal_features_adapter` | `("1d","15m")` | `qfq` | True | 250 | 1 | `production_wired` |
+| `structural_features` | `str-v1` | `str-cf-v1` | `app.services.canonical_adapters` | `app.services.canonical_adapters:compute_structural_features_adapter` | `("1d","15m")` | `qfq` | True | 250 | 1 | `production_wired` |
+| `primary_secondary_relation` | `psr-v1` | `psr-cf-v1` | `app.services.canonical_adapters` | `app.services.canonical_adapters:compute_primary_secondary_relation_adapter` | `("1d","15m")` | `qfq` | True | 250 | 1 | `production_wired` |
+| `snapshot_derived_features` | `sdf-v1` | `sdf-cf-v1` | `app.services.canonical_adapters` | `app.services.canonical_adapters:compute_snapshot_derived_adapter` | `("1d","15m")` | `qfq` | True | 250 | 1 | `production_wired` |
 
 注册表版本常量：`ALGORITHM_REGISTRY_VERSION = "reg-v1"`（注册表结构变更时 bump，
 不影响各算法自身版本）。
 
-**`migration_status` 含义**（CHANGE-20260718-007 S3.2）：
+**`migration_status` 含义**（CHANGE-20260718-007 S3.2 + CHANGE-20260719-001 §二）：
 
 | 状态 | 含义 | 是否可经 `compute_with_mdas` 调用 |
 |---|---|---|
 | `registered_only` | 合同已登记，但 `kernel_entrypoint` callable 不存在或未适配统一 `(bars: pd.DataFrame, **kwargs)` 签名 | 否（直接调用 kernel 或先 wiring） |
 | `input_provider_wired` | callable 存在且接受统一签名 | 是（经 `compute_with_mdas` 自动取行情+校验+哈希） |
+| `production_wired` | adapter 已在 `canonical_adapters.py` 中实现并通过自测；与 `input_provider_wired` 语义等价（`compute_with_mdas` 接受），但更强地断言"该算法已是生产 canonical 入口"，禁止再退回 `registered_only` | 是 |
 
-当前**仅 macd 完成 wiring**（参考实现），其余 11 个算法族均为 `registered_only`（诚实记录，不重写）。
-7 个算法族的 `kernel_entrypoint` 指向不存在的 callable（`compute_smc_dto`/`compute_bollinger_bands`/
-`compute_sqzmom`/`compute_breakout`/`compute_participation`/`compute_structural_features`/
-`compute_primary_secondary_relation`），保留为 `registered_only` 待后续按需 wiring。
+**当前全部 12 个算法族已完成 `production_wired` 迁移**（CHANGE-20260719-001 §二）：
+adapter 在 `backend/app/services/canonical_adapters.py` 中实现并通过自测，
+`compute_with_mdas` 接受 `production_wired` 算法。
+
+**诚实声明**（PROMPT.md L693）：
+- §二 **仅完成 adapter 层基础设施**——`migration_status` 升级到 `production_wired`，7 个 broken
+  entrypoints 已修复（指向真实存在的 adapter callable）
+- **四链实际未迁移到 `compute_with_mdas`**：详情/盘后/盘中/Capture 当前仍直接调 MDAS + 各自 kernel
+- AST 硬门禁 `test_four_chain_no_direct_kernel_import` 以 `@pytest.mark.xfail(strict=True)` 标记此目标
+- **result_hash 矩阵仍是基线**：四链 result_hash 字段为 None，迁移后才能填充对比
 
 ### 5.2 各算法族合同（按 12 项规范记录）
 
@@ -216,7 +223,7 @@ SMC 参数和执行顺序见 `docs/maps/smc-pine-parity-map.md` 和 `AGENTS.md` 
 - **复权**：qfq，`adjustment_as_of` 锚定业务日
 - **completed/partial**：daily/15m completed_only=True；1m include_realtime=True
 - **warmup**：250 根（决定价格范围）
-- **Kernel 路径**：`app.services.node_cluster_engine:compute_node_cluster_profile`
+- **Kernel 路径**：`app.services.canonical_adapters:compute_node_cluster_adapter`（CHANGE-20260719-001 §二 迁移；多 timeframe，adapter 接受 `daily_bars` + `bars_15m`，内部委托 `node_cluster_engine.compute_node_cluster_profile`）
 - **输出 schema**：`NodeClusterProfileResult`（frozen dataclass，version=1）
 - **算法版本**：`nc-v1` / 指纹 `nc-cf-v1`
 - **调用链**：详情 / 盘后 / 盘中（三链同核，profile_hash 必须一致）
@@ -232,7 +239,7 @@ SMC 参数和执行顺序见 `docs/maps/smc-pine-parity-map.md` 和 `AGENTS.md` 
 - **复权**：qfq，`adjustment_as_of` 锚定业务日
 - **completed/partial**：completed_only=True
 - **warmup**：250 根
-- **Kernel 路径**：`app.strategy.selectors.dsa_selector:DSASelector`
+- **Kernel 路径**：`app.services.canonical_adapters:compute_dsa_adapter`（CHANGE-20260719-001 §二 迁移；包装 `dsa_selector.compute_dsa_bundle`）
 - **输出 schema**：`DsaSelectorData`（含 `visual_segments` / `anchor_time` / `vwap` 等）
 - **算法版本**：`dsa-v1` / 指纹 `dsa-cf-v1`
 - **调用链**：详情（indicator API） / 盘后（feature_snapshot）
@@ -248,7 +255,7 @@ SMC 参数和执行顺序见 `docs/maps/smc-pine-parity-map.md` 和 `AGENTS.md` 
 - **复权**：qfq
 - **completed/partial**：completed_only=True（Pine 语义，最新已完成 K 线）
 - **warmup**：500 根（覆盖足够 swing 结构）
-- **Kernel 路径**：`app.services.smc_view_adapter:compute_smc_dto`
+- **Kernel 路径**：`app.services.canonical_adapters:compute_smc_adapter`（CHANGE-20260719-001 §二 迁移；二合一 adapter：`smc_indicator.compute_smc_indicators` + `smc_view_adapter.adapt_smc_to_display_dto`）
 - **输出 schema**：SMC DTO（events / order_blocks / equal_highs_lows / trailing / swing_bias）
 - **算法版本**：`smc-v1` / 指纹 `smc-cf-v1`
 - **调用链**：详情（include_smc=true 时计算）
@@ -264,7 +271,7 @@ SMC 参数和执行顺序见 `docs/maps/smc-pine-parity-map.md` 和 `AGENTS.md` 
 - **复权**：qfq
 - **completed/partial**：completed_only=True（与 `algorithm_registry.py` 合同一致；partial bar 由前端 quote overlay 单独呈现，不进入指标计算）
 - **warmup**：250 根
-- **Kernel 路径**：`app.services.indicator_service:compute_bollinger_bands`
+- **Kernel 路径**：`app.services.canonical_adapters:compute_bollinger_adapter`（CHANGE-20260719-001 §二 迁移；包装 `bollinger_features_plotly.bollinger`）
 - **输出 schema**：BB upper/lower/mid/bandwidth 数组
 - **算法版本**：`bb-v1` / 指纹 `bb-cf-v1`
 - **调用链**：详情（indicator API）
@@ -280,12 +287,12 @@ SMC 参数和执行顺序见 `docs/maps/smc-pine-parity-map.md` 和 `AGENTS.md` 
 - **复权**：qfq
 - **completed/partial**：completed_only=True
 - **warmup**：250 根
-- **Kernel 路径**：`app.services.canonical_adapters:compute_macd_adapter`（统一 adapter，CHANGE-20260718-007 S3.2 接线）
+- **Kernel 路径**：`app.services.canonical_adapters:compute_macd_adapter`（CHANGE-20260718-007 S3.2 接线 + CHANGE-20260719-001 §二 升级到 production_wired）
   - adapter 内部从 bars 提取 close 后调用 `app.services.indicator_service:compute_macd`
 - **输出 schema**：MACD/SIGNAL/HIST 数组
 - **算法版本**：`macd-v1` / 指纹 `macd-cf-v1`
 - **调用链**：详情（indicator API）；可经 `CanonicalComputationService.compute_with_mdas` 调用
-- **migration_status**：`input_provider_wired`（参考实现，唯一已接线的算法族）
+- **migration_status**：`production_wired`（CHANGE-20260719-001 §二 从 `input_provider_wired` 升级；adapter 已通过自测）
 - **允许差异**：时间对齐命中率低于阈值时输出诊断（不阻塞渲染）
 - **禁止变化**：12/26/9 参数不得偏离
 - **验收样本**：标准 MACD 计算回归；result_hash 矩阵基线测试（`test_canonical_result_hash_matrix.py`）
@@ -298,7 +305,7 @@ SMC 参数和执行顺序见 `docs/maps/smc-pine-parity-map.md` 和 `AGENTS.md` 
 - **复权**：qfq
 - **completed/partial**：completed_only=True
 - **warmup**：250 根
-- **Kernel 路径**：`app.strategy_assets.algorithms.features.sqzmom_lb:compute_sqzmom`
+- **Kernel 路径**：`app.services.canonical_adapters:compute_sqzmom_adapter`（CHANGE-20260719-001 §二 迁移；包装 `sqzmom_lb.compute_sqzmom_lb`）
 - **输出 schema**：SQZMOM 状态数组
 - **算法版本**：`sqzmom-v1` / 指纹 `sqzmom-cf-v1`
 - **调用链**：盘后（feature_snapshot）
@@ -313,7 +320,7 @@ SMC 参数和执行顺序见 `docs/maps/smc-pine-parity-map.md` 和 `AGENTS.md` 
 - **复权**：qfq
 - **completed/partial**：completed_only=True
 - **warmup**：250 根
-- **Kernel 路径**：`app.strategy_assets.algorithms.features.trendlines_with_breaks_luxalgo:compute_breakout`
+- **Kernel 路径**：`app.services.canonical_adapters:compute_breakout_adapter`（CHANGE-20260719-001 §二 迁移；包装 `trendlines_with_breaks_luxalgo.trendlines_with_breaks`）
 - **输出 schema**：Breakout 事件数组
 - **算法版本**：`brk-v1` / 指纹 `brk-cf-v1`
 - **调用链**：详情（indicator API）
@@ -328,7 +335,7 @@ SMC 参数和执行顺序见 `docs/maps/smc-pine-parity-map.md` 和 `AGENTS.md` 
 - **复权**：qfq
 - **completed/partial**：completed_only=True
 - **warmup**：250 根
-- **Kernel 路径**：`app.strategy_assets.algorithms.features.sr_event_factor_lab:compute_participation`
+- **Kernel 路径**：`app.services.canonical_adapters:compute_participation_adapter`（CHANGE-20260719-001 §二 迁移；包装 `sr_event_factor_lab.compute_sr_factor_lab`）
 - **输出 schema**：Participation 因子数组
 - **算法版本**：`part-v1` / 指纹 `part-cf-v1`
 - **调用链**：盘后（feature_snapshot）
@@ -343,7 +350,7 @@ SMC 参数和执行顺序见 `docs/maps/smc-pine-parity-map.md` 和 `AGENTS.md` 
 - **复权**：qfq
 - **completed/partial**：completed_only=True
 - **warmup**：250 根
-- **Kernel 路径**：`app.services.temporal_feature_service:compute_temporal_features`
+- **Kernel 路径**：`app.services.canonical_adapters:compute_temporal_features_adapter`（CHANGE-20260719-001 §二 迁移；异步编排，包装 `temporal_feature_service.compute_temporal_features`，调用方用 `compute()` 直接调度）
 - **输出 schema**：时序特征字典
 - **算法版本**：`tmp-v1` / 指纹 `tmp-cf-v1`
 - **调用链**：盘后（feature_snapshot）
@@ -358,7 +365,7 @@ SMC 参数和执行顺序见 `docs/maps/smc-pine-parity-map.md` 和 `AGENTS.md` 
 - **复权**：qfq
 - **completed/partial**：completed_only=True
 - **warmup**：250 根
-- **Kernel 路径**：`app.services.structural_factor_service:compute_structural_features`
+- **Kernel 路径**：`app.services.canonical_adapters:compute_structural_features_adapter`（CHANGE-20260719-001 §二 迁移；包装 `structural_factor_service._compute_all_factors_for_bars`，接受 `precomputed_node_cluster`）
 - **输出 schema**：结构特征字典
 - **算法版本**：`str-v1` / 指纹 `str-cf-v1`
 - **调用链**：盘后（feature_snapshot）
@@ -373,7 +380,7 @@ SMC 参数和执行顺序见 `docs/maps/smc-pine-parity-map.md` 和 `AGENTS.md` 
 - **复权**：qfq
 - **completed/partial**：completed_only=True
 - **warmup**：250 根
-- **Kernel 路径**：`app.services.feature_snapshot_service:compute_primary_secondary_relation`
+- **Kernel 路径**：`app.services.canonical_adapters:compute_primary_secondary_relation_adapter`（CHANGE-20260719-001 §二 迁移；包装 `structural_factor_service._compute_relation`）
 - **输出 schema**：主次关系因子字典（含 `secondary.15m.cost_position` 等）
 - **算法版本**：`psr-v1` / 指纹 `psr-cf-v1`
 - **调用链**：盘后（feature_snapshot）
@@ -388,7 +395,7 @@ SMC 参数和执行顺序见 `docs/maps/smc-pine-parity-map.md` 和 `AGENTS.md` 
 - **复权**：qfq，`adjustment_as_of=trade_date`
 - **completed/partial**：completed_only=True
 - **warmup**：250 根
-- **Kernel 路径**：`app.services.feature_snapshot_service:compute_feature_snapshot_for_date`
+- **Kernel 路径**：`app.services.canonical_adapters:compute_snapshot_derived_adapter`（CHANGE-20260719-001 §二 迁移；异步编排，包装 `feature_snapshot_service.compute_feature_snapshot_for_date`，调用方用 `compute()` 直接调度）
 - **输出 schema**：完整 StockFeatureSnapshot（schema_version=3）
 - **算法版本**：`sdf-v1` / 指纹 `sdf-cf-v1`
 - **调用链**：盘后（feature_snapshot）
@@ -416,7 +423,8 @@ CanonicalComputationService.compute
 ```
 CanonicalComputationService.compute_with_mdas
   → AlgorithmRegistry.get(algorithm_id)            # 查合同
-  → 校验 migration_status == "input_provider_wired" # 否则抛 ContractViolationError
+  → 校验 migration_status ∈ {"input_provider_wired", "production_wired"} # 否则抛 ContractViolationError
+                                                     # CHANGE-20260719-001 §二 增加 production_wired
   → 从合同推导 MDAS 参数（adj/completed_only/warmup_bars）
   → 校验 timeframe 在 contract.input_timeframes 中
   → MarketDataAggregationService.get_bars(...)     # 取 bars + source_bar_hash + adj_factor_hash
@@ -441,9 +449,21 @@ result_hash 5 维度：
   - `TestAlgorithmRegistryIntegrity`：注册完整性 + 唯一性 + 模块可导入 + node_cluster 合同与 semantics 一致
   - `TestAlgorithmRegistryCallConstraint`：只有 registry module 调用 `AlgorithmRegistry.register`
   - `TestCanonicalComputationServiceInterface`：list/get_contract/未注册异常/hash 确定性/序列化稳定性
-  - `TestMigrationStatusGuard`（S3.2）：migration_status 合法值守护 + wired callable 必须真实存在 + registered_only 允许 callable 缺失
-- `backend/tests/test_canonical_input_provider.py`（S3.2，8 用例）：mock MDAS 验证 compute_with_mdas 端到端
-- `backend/tests/test_canonical_result_hash_matrix.py`（S3.2，6 用例）：result_hash 矩阵基线，作为四链迁移后验收标准
+  - `TestMigrationStatusGuard`（S3.2 + CHANGE-20260719-001 §二）：
+    - `test_migration_status_documented_for_all`：valid_statuses 含 `registered_only`/`input_provider_wired`/`production_wired`；断言 12 个 `production_wired` + 0 个 `registered_only`
+    - `test_wired_algorithms_have_existing_callables`：`wired` 列表含 `input_provider_wired` 和 `production_wired`，callable 必须真实存在
+    - `test_all_adapters_in_canonical_adapters_module`（§二 新增）：所有 `production_wired` 算法的 `kernel_module` 必须是 `app.services.canonical_adapters`
+    - `test_registered_only_algorithms_need_not_have_callables`：保留作为未来新算法守护
+  - `TestFourChainDirectImportGate`（CHANGE-20260719-001 §二 新增，AST 硬门禁）：
+    - `_FOUR_CHAIN_MODULES`：indicator_service / feature_snapshot_service / stock_capture_service / monitor_batch_service
+    - `_KERNEL_MODULE_PREFIXES`：strategy_assets.algorithms.features / node_cluster_engine / smc_view_adapter / structural_factor_service / temporal_feature_service
+    - `test_four_chain_no_direct_kernel_import`：`@pytest.mark.xfail(strict=True)` 标记，待四链迁移完成后移除 xfail
+    - `test_canonical_adapters_exports_all_12`：验证 `canonical_adapters.py` 导出全部 12 个 adapter callable
+- `backend/tests/test_canonical_input_provider.py`（S3.2，8 用例 + CHANGE-20260719-001 §二 新增 2 用例）：
+  - mock MDAS 验证 compute_with_mdas 端到端
+  - §二 新增 `test_compute_with_mdas_accepts_production_wired_smc` 和 `test_compute_with_mdas_accepts_production_wired_bollinger`
+  - §二 重写 `test_compute_with_mdas_rejects_registered_only`：临时注册 `_test_registered_only_algo` 算法验证拒绝逻辑
+- `backend/tests/test_canonical_result_hash_matrix.py`（S3.2，6 用例）：result_hash 矩阵基线，作为四链迁移后验收标准；§二 更新 macd `migration_status` 断言为 `production_wired`
 
 ## 6. 三链数据流图
 
@@ -455,3 +475,4 @@ result_hash 5 维度：
 - CHANGE-20260718-006 Section 2：全算法族统一注册表 + CanonicalComputationService（12 算法族 SSOT）
 - CHANGE-20260718-006 Section 5c：扩展 08 文档为全算法族合同（12 项规范）
 - CHANGE-20260718-007 S3.2：AlgorithmContract 增加 `migration_status` 字段 + `compute_with_mdas` InputProvider + macd 统一 adapter（参考实现）+ result_hash 矩阵基线测试 + `TestMigrationStatusGuard` 守护
+- CHANGE-20260719-001 §二：12 算法族全部迁移到 `production_wired` adapter（`canonical_adapters.py` 实现 12 个 adapter + 自测）+ `compute_with_mdas` 接受 `production_wired` + 7 broken entrypoints 修复 + `TestFourChainDirectImportGate` AST 硬门禁（`xfail(strict=True)`，待四链迁移完成后移除）+ `test_all_adapters_in_canonical_adapters_module` 守护 + `test_canonical_adapters_exports_all_12` 守护

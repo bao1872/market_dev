@@ -37,6 +37,10 @@ from app.schemas.stock_state import (
     StockVolatility,
     build_stock_state,
 )
+
+# [CHANGE-20260719-001 §五-D] 使用生产者 _SCHEMA_VERSION 替代硬编码 = 1
+# 与 stock_context.py / watchlist.py / market_stocks_service.py 保持一致
+from app.services.feature_snapshot_service import _SCHEMA_VERSION
 from app.services.state_event_service import (
     _STATE_FIELD_PATHS,
     build_event_evidence,
@@ -67,7 +71,7 @@ def _make_mock_snapshot(
         primary_timeframe="1d",
         secondary_timeframe="15m",
         adj="qfq",
-        schema_version=1,
+        schema_version=_SCHEMA_VERSION,
         source_primary_bar_time=datetime(2026, 7, 10, 15, 0, tzinfo=UTC),
         source_secondary_bar_time=None,
         structural_payload={
@@ -115,7 +119,7 @@ def _make_mock_snapshot(
 def _make_mock_run(
     run_id=None,
     trade_date: date = date(2026, 7, 10),
-    schema_version: int = 1,
+    schema_version: int = _SCHEMA_VERSION,
 ) -> StockFeatureSnapshotRun:
     """构造 mock StockFeatureSnapshotRun。"""
     return StockFeatureSnapshotRun(
@@ -210,7 +214,8 @@ def test_build_stock_state_source_run_id_from_real_run() -> None:
     state = build_stock_state(snapshot, run, symbol="000001")
 
     assert state.sourceRunId == str(run_id), "sourceRunId 必须来自真实 run.id"
-    assert state.version == "v1", "version 必须来自 schema_version"
+    # [CHANGE-20260719-001 §五-D] schema_version 从 1 升级到 _SCHEMA_VERSION(=3)，version 相应为 "v3"
+    assert state.version == f"v{_SCHEMA_VERSION}", "version 必须来自 schema_version"
 
 
 def test_build_stock_state_as_of_from_snapshot_trade_date() -> None:
@@ -1250,7 +1255,7 @@ async def test_c4_previous_snapshot_picks_latest_run_same_day() -> None:
         mock_session,
         [inst_id],
         current_trade_date=date(2026, 7, 10),
-        schema_version=1,
+        schema_version=_SCHEMA_VERSION,
         primary_timeframe="1d",
         secondary_timeframe="15m",
         adj="qfq",
@@ -1295,7 +1300,7 @@ async def test_c4_previous_snapshot_first_row_wins() -> None:
         mock_session,
         [inst_id],
         current_trade_date=date(2026, 7, 10),
-        schema_version=1,
+        schema_version=_SCHEMA_VERSION,
         primary_timeframe="1d",
         secondary_timeframe="15m",
         adj="qfq",
@@ -1319,7 +1324,7 @@ async def test_c4_previous_snapshot_empty_instrument_ids() -> None:
         mock_session,
         [],
         current_trade_date=date(2026, 7, 10),
-        schema_version=1,
+        schema_version=_SCHEMA_VERSION,
         primary_timeframe="1d",
         secondary_timeframe="15m",
         adj="qfq",
@@ -1436,7 +1441,7 @@ async def test_p03_find_latest_succeeded_run_deterministic_order() -> None:
     # 构造两个同日 run（run_a 仅作为上下文，mock 返回 run_b）
     StockFeatureSnapshotRun(
         trade_date=date(2026, 7, 10),
-        schema_version=1,
+        schema_version=_SCHEMA_VERSION,
         primary_timeframe="1d",
         secondary_timeframe="15m",
         adj="qfq",
@@ -1448,7 +1453,7 @@ async def test_p03_find_latest_succeeded_run_deterministic_order() -> None:
     )
     run_b = StockFeatureSnapshotRun(
         trade_date=date(2026, 7, 10),
-        schema_version=1,
+        schema_version=_SCHEMA_VERSION,
         primary_timeframe="1d",
         secondary_timeframe="15m",
         adj="qfq",
@@ -1491,7 +1496,7 @@ async def test_p03_find_run_by_trade_date_deterministic_order() -> None:
     # run_a 仅作为上下文，mock 返回 run_b
     StockFeatureSnapshotRun(
         trade_date=date(2026, 7, 10),
-        schema_version=1,
+        schema_version=_SCHEMA_VERSION,
         primary_timeframe="1d",
         secondary_timeframe="15m",
         adj="qfq",
@@ -1503,7 +1508,7 @@ async def test_p03_find_run_by_trade_date_deterministic_order() -> None:
     )
     run_b = StockFeatureSnapshotRun(
         trade_date=date(2026, 7, 10),
-        schema_version=1,
+        schema_version=_SCHEMA_VERSION,
         primary_timeframe="1d",
         secondary_timeframe="15m",
         adj="qfq",
@@ -1554,7 +1559,7 @@ async def _create_db_run(
     run = StockFeatureSnapshotRun(
         id=run_id or uuid.uuid4(),
         trade_date=trade_date,
-        schema_version=1,
+        schema_version=_SCHEMA_VERSION,
         primary_timeframe="1d",
         secondary_timeframe="15m",
         adj="qfq",

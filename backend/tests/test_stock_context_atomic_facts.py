@@ -39,10 +39,11 @@ from app.models.stock_feature_snapshot_run import (
 )
 from app.models.user import User
 from app.services.atomic_fact_contract_service import compute_atomic_facts
-from app.services.feature_snapshot_service import build_summary_payload
-from tests.conftest import AsyncFactory
 
-_SCHEMA_VERSION = 1
+# [CHANGE-20260719-001 §五-D] 使用生产者 _SCHEMA_VERSION 替代本地硬编码 = 1
+# 与 stock_context.py / watchlist.py / market_stocks_service.py 保持一致
+from app.services.feature_snapshot_service import _SCHEMA_VERSION, build_summary_payload
+from tests.conftest import AsyncFactory
 
 # factId -> publicKey 映射（用于断言）
 _PK = {

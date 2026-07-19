@@ -46,16 +46,22 @@ GET /api/v1/instruments/{id}/indicators
       （禁止重算，禁止 VA 过滤，VA 外 Peak 必须可见）
 ```
 
-详情链调用的算法族（按 kernel 路径）：
+详情链调用的算法族（CHANGE-20260719-001 §二 后 canonical adapter 为合同真源）：
 
-| algorithm_id | kernel_entrypoint | 详情链调用方 |
+| algorithm_id | canonical adapter（合同真源，production_wired） | 详情链当前调用方（待迁移到 `compute_with_mdas`） |
 |---|---|---|
-| `node_cluster` | `node_cluster_engine:compute_node_cluster_profile` | `VolumeNodeMonitor.compute_indicators` |
-| `dsa` | `dsa_selector:DSASelector` | `indicator_service`（按策略 key 路由） |
-| `smc` | `smc_view_adapter:compute_smc_dto` | `indicator_service`（`include_smc=true` 时） |
-| `bollinger` | `indicator_service:compute_bollinger_bands` | `indicator_service._compute_bb` |
-| `macd` | `indicator_service:compute_macd` | `indicator_service._compute_macd` |
-| `breakout` | `trendlines_with_breaks_luxalgo:compute_breakout` | `indicator_service._compute_breakout` |
+| `node_cluster` | `canonical_adapters:compute_node_cluster_adapter` | `VolumeNodeMonitor.compute_indicators`（直接调 `node_cluster_engine.compute_node_cluster_profile`） |
+| `dsa` | `canonical_adapters:compute_dsa_adapter` | `indicator_service`（按策略 key 路由，直接调 `dsa_selector.compute_dsa_bundle`） |
+| `smc` | `canonical_adapters:compute_smc_adapter` | `indicator_service`（`include_smc=true` 时，直接调 `smc_indicator.compute_smc_indicators` + `smc_view_adapter.adapt_smc_to_display_dto`） |
+| `bollinger` | `canonical_adapters:compute_bollinger_adapter` | `indicator_service._compute_bb`（直接调 `bollinger_features_plotly.bollinger`） |
+| `macd` | `canonical_adapters:compute_macd_adapter` | `indicator_service._compute_macd`（直接调 `indicator_service.compute_macd`） |
+| `breakout` | `canonical_adapters:compute_breakout_adapter` | `indicator_service._compute_breakout`（直接调 `trendlines_with_breaks_luxalgo.trendlines_with_breaks`） |
+| `sqzmom` | `canonical_adapters:compute_sqzmom_adapter` | （详情链不调用，盘后链专用） |
+| `participation` | `canonical_adapters:compute_participation_adapter` | （详情链不调用，盘后链专用） |
+
+**诚实声明**（PROMPT.md L693）：§二 仅完成 adapter 层基础设施，详情链当前仍直接调 kernel，
+未替换为 `CanonicalComputationService.compute_with_mdas` 调用。AST 硬门禁
+`test_four_chain_no_direct_kernel_import` 以 `xfail(strict=True)` 标记此目标。
 
 前端渲染契约（CHANGE-20260718-006 Section 4 强化）：
 
@@ -85,18 +91,21 @@ after_close_orchestrator
     → finish_snapshot_run (读取实际 snapshot 数量)
 ```
 
-盘后链调用的算法族（按 kernel 路径）：
+盘后链调用的算法族（CHANGE-20260719-001 §二 后 canonical adapter 为合同真源）：
 
-| algorithm_id | kernel_entrypoint | 盘后链调用方 |
+| algorithm_id | canonical adapter（合同真源，production_wired） | 盘后链当前调用方（待迁移到 `compute_with_mdas`） |
 |---|---|---|
-| `node_cluster` | `node_cluster_engine:compute_node_cluster_profile` | `_compute_cost_position_factors` |
-| `dsa` | `dsa_selector:DSASelector` | `feature_snapshot_service`（结构锚字段） |
-| `sqzmom` | `sqzmom_lb:compute_sqzmom` | `_compute_sqzmom_factor` |
-| `participation` | `sr_event_factor_lab:compute_participation` | `_compute_participation_factor` |
-| `temporal_features` | `temporal_feature_service:compute_temporal_features` | `_compute_temporal_factors` |
-| `structural_features` | `structural_factor_service:compute_structural_features` | `_compute_structural_factors` |
-| `primary_secondary_relation` | `feature_snapshot_service:compute_primary_secondary_relation` | `_compute_primary_secondary_relation` |
-| `snapshot_derived_features` | `feature_snapshot_service:compute_feature_snapshot_for_date` | 聚合入口（本身不计算新值） |
+| `node_cluster` | `canonical_adapters:compute_node_cluster_adapter` | `_compute_cost_position_factors`（直接调 `node_cluster_engine.compute_node_cluster_profile`） |
+| `dsa` | `canonical_adapters:compute_dsa_adapter` | `feature_snapshot_service`（结构锚字段，直接调 `dsa_selector.compute_dsa_bundle`） |
+| `sqzmom` | `canonical_adapters:compute_sqzmom_adapter` | `_compute_sqzmom_factor`（直接调 `sqzmom_lb.compute_sqzmom_lb`） |
+| `participation` | `canonical_adapters:compute_participation_adapter` | `_compute_participation_factor`（直接调 `sr_event_factor_lab.compute_sr_factor_lab`） |
+| `temporal_features` | `canonical_adapters:compute_temporal_features_adapter` | `_compute_temporal_factors`（直接调 `temporal_feature_service.compute_temporal_features`，异步编排） |
+| `structural_features` | `canonical_adapters:compute_structural_features_adapter` | `_compute_structural_factors`（直接调 `structural_factor_service._compute_all_factors_for_bars`） |
+| `primary_secondary_relation` | `canonical_adapters:compute_primary_secondary_relation_adapter` | `_compute_primary_secondary_relation`（直接调 `structural_factor_service._compute_relation`） |
+| `snapshot_derived_features` | `canonical_adapters:compute_snapshot_derived_adapter` | 聚合入口（直接调 `feature_snapshot_service.compute_feature_snapshot_for_date`，异步编排） |
+
+**诚实声明**（PROMPT.md L693）：§二 仅完成 adapter 层基础设施，盘后链当前仍直接调 kernel，
+未替换为 `CanonicalComputationService.compute_with_mdas` 调用。
 
 **关键修复（CHANGE-20260718-004）**：盘后链 `_compute_cost_position_factors` 原先调用
 `compute_unified_volume_profile(bars)` 只传单一周期 bars，已改为通过 engine 传入
@@ -181,22 +190,26 @@ Capture/飞书链约束（CHANGE-20260718-006 Section 3）：
 
 ## 7. 算法族→Kernel→调用链矩阵
 
-| algorithm_id | Kernel | 详情链 | 盘后链 | 盘中链 | Capture/飞书 |
-|---|---|---|---|---|---|
-| `node_cluster` | `node_cluster_engine:compute_node_cluster_profile` | ✓ | ✓ | ✓（缓存） | （复用详情） |
-| `dsa` | `dsa_selector:DSASelector` | ✓ | ✓ | — | （复用详情） |
-| `smc` | `smc_view_adapter:compute_smc_dto` | ✓（include_smc=true） | — | — | （复用详情） |
-| `bollinger` | `indicator_service:compute_bollinger_bands` | ✓ | — | — | （复用详情） |
-| `macd` | `indicator_service:compute_macd` | ✓ | — | — | （复用详情） |
-| `sqzmom` | `sqzmom_lb:compute_sqzmom` | — | ✓ | — | — |
-| `breakout` | `trendlines_with_breaks_luxalgo:compute_breakout` | ✓ | — | — | （复用详情） |
-| `participation` | `sr_event_factor_lab:compute_participation` | — | ✓ | — | — |
-| `temporal_features` | `temporal_feature_service:compute_temporal_features` | — | ✓ | — | — |
-| `structural_features` | `structural_factor_service:compute_structural_features` | — | ✓ | — | — |
-| `primary_secondary_relation` | `feature_snapshot_service:compute_primary_secondary_relation` | — | ✓ | — | — |
-| `snapshot_derived_features` | `feature_snapshot_service:compute_feature_snapshot_for_date` | — | ✓（聚合） | — | — |
+> CHANGE-20260719-001 §二 后，每个算法族的合同真源是 `canonical_adapters:compute_<algo>_adapter`
+> （`migration_status=production_wired`）。adapter 内部委托到唯一底层 kernel。
+> 四链当前仍直接调底层 kernel（未迁移到 `compute_with_mdas`），AST 硬门禁以 `xfail(strict=True)` 标记。
 
-每个算法族唯一 Kernel：禁止同一算法族存在多个计算入口（AST 守护：
+| algorithm_id | canonical adapter（合同真源） | 底层 kernel（adapter 内部委托） | 详情链 | 盘后链 | 盘中链 | Capture/飞书 |
+|---|---|---|---|---|---|---|
+| `node_cluster` | `canonical_adapters:compute_node_cluster_adapter` | `node_cluster_engine:compute_node_cluster_profile` | ✓ | ✓ | ✓（缓存） | （复用详情） |
+| `dsa` | `canonical_adapters:compute_dsa_adapter` | `dsa_selector:compute_dsa_bundle` | ✓ | ✓ | — | （复用详情） |
+| `smc` | `canonical_adapters:compute_smc_adapter` | `smc_indicator.compute_smc_indicators` + `smc_view_adapter.adapt_smc_to_display_dto` | ✓（include_smc=true） | — | — | （复用详情） |
+| `bollinger` | `canonical_adapters:compute_bollinger_adapter` | `bollinger_features_plotly.bollinger` | ✓ | — | — | （复用详情） |
+| `macd` | `canonical_adapters:compute_macd_adapter` | `indicator_service.compute_macd` | ✓ | — | — | （复用详情） |
+| `sqzmom` | `canonical_adapters:compute_sqzmom_adapter` | `sqzmom_lb.compute_sqzmom_lb` | — | ✓ | — | — |
+| `breakout` | `canonical_adapters:compute_breakout_adapter` | `trendlines_with_breaks_luxalgo.trendlines_with_breaks` | ✓ | — | — | （复用详情） |
+| `participation` | `canonical_adapters:compute_participation_adapter` | `sr_event_factor_lab.compute_sr_factor_lab` | — | ✓ | — | — |
+| `temporal_features` | `canonical_adapters:compute_temporal_features_adapter` | `temporal_feature_service.compute_temporal_features`（异步） | — | ✓ | — | — |
+| `structural_features` | `canonical_adapters:compute_structural_features_adapter` | `structural_factor_service._compute_all_factors_for_bars` | — | ✓ | — | — |
+| `primary_secondary_relation` | `canonical_adapters:compute_primary_secondary_relation_adapter` | `structural_factor_service._compute_relation` | — | ✓ | — | — |
+| `snapshot_derived_features` | `canonical_adapters:compute_snapshot_derived_adapter` | `feature_snapshot_service.compute_feature_snapshot_for_date`（异步） | — | ✓（聚合） | — | — |
+
+每个算法族唯一 canonical adapter + 唯一底层 kernel：禁止同一算法族存在多个计算入口（AST 守护：
 `backend/tests/test_algorithm_registry_architecture.py`）。
 
 ## 8. 缓存层
@@ -261,3 +274,4 @@ Capture/飞书链约束（CHANGE-20260718-006 Section 3）：
 
 - CHANGE-20260718-004：初始版本（Node Cluster 三链数据流 + MDAS 矩阵 + 缓存层 + ref/ 隔离边界）
 - CHANGE-20260718-006 Section 5c：扩展为四链地图（详情/盘后/盘中/Capture）+ 算法族→Kernel→调用链矩阵 + CanonicalComputationService result_hash 缓存层
+- CHANGE-20260719-001 §二：12 算法族 canonical adapter 升级为 `production_wired`（§2 详情链表 + §3 盘后链表 + §7 矩阵新增 "canonical adapter（合同真源）" 列，底层 kernel 列保留）+ 诚实声明四链当前仍直接调 kernel（AST 硬门禁 `xfail(strict=True)` 标记）

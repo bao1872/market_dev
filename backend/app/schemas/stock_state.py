@@ -552,6 +552,9 @@ if __name__ == "__main__":
     from datetime import UTC, date, datetime
     from uuid import uuid4
 
+    # [CHANGE-20260719-001 §五-D] 使用生产者 _SCHEMA_VERSION 替代硬编码 = 1
+    from app.services.feature_snapshot_service import _SCHEMA_VERSION
+
     print("stock_state schema 自测...")
 
     # 构造 mock snapshot
@@ -561,7 +564,7 @@ if __name__ == "__main__":
         primary_timeframe="1d",
         secondary_timeframe="15m",
         adj="qfq",
-        schema_version=1,
+        schema_version=_SCHEMA_VERSION,
         source_primary_bar_time=datetime(2026, 7, 10, 15, 0, tzinfo=UTC),
         source_secondary_bar_time=None,
         structural_payload={
@@ -607,7 +610,7 @@ if __name__ == "__main__":
     mock_run = StockFeatureSnapshotRun(
         id=uuid4(),
         trade_date=date(2026, 7, 10),
-        schema_version=1,
+        schema_version=_SCHEMA_VERSION,
         primary_timeframe="1d",
         secondary_timeframe="15m",
         adj="qfq",
@@ -621,7 +624,7 @@ if __name__ == "__main__":
     assert state.symbol == "000001"
     assert state.asOf == "2026-07-10"
     assert state.sourceRunId == str(mock_run.id), "source_run_id 必须来自真实 run"
-    assert state.version == "v1", "version 必须来自 schema_version"
+    assert state.version == f"v{_SCHEMA_VERSION}", "version 必须来自 schema_version"
 
     # C6: MACD 来自真实 macd_state（不再 code=null）
     assert state.momentum.macd.code == "bullish_above", "MACD code 必须来自真实 macd_state"
