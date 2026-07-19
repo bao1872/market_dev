@@ -289,7 +289,7 @@ class TestSummarizeAuditResults:
     """审计结果汇总。"""
 
     def test_summary_counts(self):
-        """汇总 consistent/inconsistent/error 计数。"""
+        """汇总 consistent/inconsistent/error/degraded 计数。"""
         results = [
             FactorAuditResult(
                 instrument_id=uuid.uuid4(), symbol="600276",
@@ -308,17 +308,51 @@ class TestSummarizeAuditResults:
                 missing_factor_count=0, mismatch_count=3,
                 error="compute_expected_failed: timeout",
             ),
+            # [CHANGE-20260719-001 §1.2] degraded 场景（bars_daily 缺口）
+            FactorAuditResult(
+                instrument_id=uuid.uuid4(), symbol="000688",
+                is_consistent=False, stored_count=303, expected_count=0,
+                missing_factor_count=0, mismatch_count=0,
+                degraded_reason="bars_daily_missing_data",
+            ),
         ]
         summary = asyncio_run(summarize_audit_results(results))
-        assert summary.total_audited == 3
+        assert summary.total_audited == 4
         assert summary.consistent_count == 1
-        assert summary.inconsistent_count == 1  # 603538（无 error）
+        assert summary.inconsistent_count == 1  # 603538（无 error、无 degraded）
         assert summary.error_count == 1  # 000001（有 error）
+        assert summary.degraded_count == 1  # 000688（有 degraded_reason）
         assert summary.factor_all_unit_with_events_count == 1
         assert summary.total_mismatches == 53
         assert "603538" in summary.inconsistent_symbols
         assert "000001" in summary.error_symbols
-        assert summary.consistency_rate == pytest.approx(1 / 3)
+        assert "000688" in summary.degraded_symbols
+        # consistency_rate 分母 = consistent + inconsistent = 2（排除 error/degraded）
+        assert summary.consistency_rate == pytest.approx(1 / 2)
+
+    def test_summary_degraded_excluded_from_inconsistent(self):
+        """[CHANGE-20260719-001 §1.2] degraded 不计入 inconsistent（数据缺失≠算法不一致）。"""
+        results = [
+            FactorAuditResult(
+                instrument_id=uuid.uuid4(), symbol="600276",
+                is_consistent=True, stored_count=100, expected_count=100,
+                missing_factor_count=0, mismatch_count=0,
+            ),
+            FactorAuditResult(
+                instrument_id=uuid.uuid4(), symbol="000688",
+                is_consistent=False, stored_count=303, expected_count=0,
+                missing_factor_count=0, mismatch_count=0,
+                degraded_reason="bars_daily_missing_data",
+            ),
+        ]
+        summary = asyncio_run(summarize_audit_results(results))
+        assert summary.total_audited == 2
+        assert summary.consistent_count == 1
+        assert summary.inconsistent_count == 0  # degraded 不计入 inconsistent
+        assert summary.degraded_count == 1
+        assert summary.error_count == 0
+        # consistency_rate = 1 / (1 + 0) = 1.0（degraded 不影响分母）
+        assert summary.consistency_rate == pytest.approx(1.0)
 
     def test_empty_summary(self):
         """空结果汇总。"""

@@ -56,6 +56,7 @@ from app.repositories.bar_repository import (
     compute_expected_adj_factors,
     get_adj_factor_series,
 )
+from app.services.adjustment_factor_calculator import AdjustmentFactorDataError
 
 logger = logging.getLogger("services.factor_consistency_audit")
 
@@ -99,6 +100,10 @@ class FactorAuditResult:
         algorithm_version: 审计时使用的算法版本
         reconciliation_version: 审计逻辑版本
         error: 审计失败原因（xdxr 获取失败等）；None 表示审计成功完成
+        degraded_reason: 数据缺失原因（CHANGE-20260719-001 §1.2）；
+            非 None 表示 bars_daily 缺口导致无法计算 expected，
+            不得归类为算法不一致（mismatch）或审计失败（error）。
+            典型值："bars_daily_missing_data"
     """
 
     instrument_id: uuid.UUID
@@ -118,6 +123,7 @@ class FactorAuditResult:
     algorithm_version: str = FACTOR_ALGORITHM_VERSION
     reconciliation_version: int = FACTOR_RECONCILIATION_VERSION
     error: str | None = None
+    degraded_reason: str | None = None
 
 
 # =============================================================================
@@ -175,9 +181,25 @@ class FactorConsistencyAuditor:
         stored_count = len(stored_df)
 
         # 2. 重算 expected 因子序列（只读，不写库）
+        # [CHANGE-20260719-001 §1.2] compute_expected_adj_factors 已删除 min_date 参数，
+        # 内部调用 calculate_adjustment_factor_series 纯函数（不补齐 supplement_df）。
+        # 数据缺失时抛 AdjustmentFactorDataError，auditor 捕获后标记 degraded_reason，
+        # 不得归类为算法不一致（mismatch）或审计失败（error）。
         try:
             expected_df = await compute_expected_adj_factors(
-                session, instrument_id, symbol, adapter=adapter, min_date=None,
+                session, instrument_id, symbol, adapter=adapter,
+            )
+        except AdjustmentFactorDataError as exc:
+            # 数据缺失（如 000688 bars_daily 缺口）：标记 degraded，不是 mismatch/error
+            logger.warning(
+                "audit_single_stock 数据缺失 symbol=%s: %s（标记 degraded）",
+                symbol, exc,
+            )
+            return FactorAuditResult(
+                instrument_id=instrument_id, symbol=symbol,
+                is_consistent=False, stored_count=stored_count, expected_count=0,
+                missing_factor_count=0, mismatch_count=0,
+                degraded_reason=exc.degraded_reason,
             )
         except Exception as exc:
             logger.warning(
@@ -445,7 +467,15 @@ class FactorConsistencyAuditor:
 
 @dataclass(frozen=True)
 class FactorAuditSummary:
-    """全市场因子审计汇总（不可变）。"""
+    """全市场因子审计汇总（不可变）。
+
+    分类（CHANGE-20260719-001 §1.2 引入 degraded）：
+    - consistent: 因子一致（is_consistent=True）
+    - inconsistent: 因子不一致/mismatch（is_consistent=False, error=None, degraded_reason=None）
+    - degraded: 数据缺失无法判断（degraded_reason != None，如 bars_daily 缺口）
+    - error: 审计失败（error != None，如 xdxr 获取失败）
+    四类互斥，total_audited = consistent + inconsistent + degraded + error
+    """
 
     total_audited: int
     consistent_count: int
@@ -455,15 +485,19 @@ class FactorAuditSummary:
     total_mismatches: int
     algorithm_version: str
     reconciliation_version: int
+    degraded_count: int = 0
     inconsistent_symbols: list[str] = field(default_factory=list)
     error_symbols: list[str] = field(default_factory=list)
+    degraded_symbols: list[str] = field(default_factory=list)
 
     @property
     def consistency_rate(self) -> float:
-        """一致率（0.0-1.0）。"""
-        if self.total_audited == 0:
+        """一致率（0.0-1.0，分母排除 degraded/error）。"""
+        # degraded 和 error 不计入分母（无法判断一致性）
+        denominator = self.consistent_count + self.inconsistent_count
+        if denominator == 0:
             return 0.0
-        return self.consistent_count / self.total_audited
+        return self.consistent_count / denominator
 
 
 async def summarize_audit_results(
@@ -471,8 +505,13 @@ async def summarize_audit_results(
 ) -> FactorAuditSummary:
     """汇总审计结果列表为 FactorAuditSummary。"""
     consistent = [r for r in results if r.is_consistent]
-    inconsistent = [r for r in results if not r.is_consistent and r.error is None]
+    # inconsistent 排除 degraded（degraded_reason != None）和 error（error != None）
+    inconsistent = [
+        r for r in results
+        if not r.is_consistent and r.error is None and r.degraded_reason is None
+    ]
     errors = [r for r in results if r.error is not None]
+    degraded = [r for r in results if r.degraded_reason is not None]
     all_unit_events = [r for r in results if r.factor_all_unit_with_events]
     total_mismatches = sum(r.mismatch_count for r in results)
 
@@ -485,8 +524,10 @@ async def summarize_audit_results(
         total_mismatches=total_mismatches,
         algorithm_version=FACTOR_ALGORITHM_VERSION,
         reconciliation_version=FACTOR_RECONCILIATION_VERSION,
+        degraded_count=len(degraded),
         inconsistent_symbols=[r.symbol for r in inconsistent],
         error_symbols=[r.symbol for r in errors],
+        degraded_symbols=[r.symbol for r in degraded],
     )
 
 

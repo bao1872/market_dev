@@ -44,6 +44,10 @@ from app.core.pytdx_adapter import PytdxAdapter, get_pytdx_adapter
 from app.core.time import SHANGHAI_TZ
 from app.models.bar import Bar15Min, Bar60Min, BarDaily, BarMinute, BarMonthly, BarWeekly
 from app.services.adj_factor import apply_adj_factor, apply_adj_factor_intraday
+from app.services.adjustment_factor_calculator import (
+    AdjustmentFactorDataError,
+    calculate_adjustment_factor_series,
+)
 from app.services.bars_validator import validate_bars
 
 if TYPE_CHECKING:
@@ -382,11 +386,12 @@ async def _upsert_daily_bars(
         return 0
 
     # 计算 adj_factor（基于 pytdx 除权除息数据）
+    # [CHANGE-20260719-001 §1.2] _calculate_adj_factor wrapper 已删除 use_raw_close/min_date 参数，
+    # 内部委托 calculate_adjustment_factor_series 纯函数 + 保留 supplement_df 补齐
     if symbol:
         try:
             adj_factors = await asyncio.to_thread(
                 _calculate_adj_factor, symbol, raw_df, adapter,
-                True, start_date,
             )
         except Exception as exc:
             logger.warning("计算 adj_factor 失败 symbol=%s: %s，使用默认 1.0", symbol, exc)
@@ -511,39 +516,27 @@ def _calculate_adj_factor(
     symbol: str,
     raw_df: pd.DataFrame,
     adapter: _AdjFactorAdapterLike | None = None,
-    use_raw_close: bool = True,
-    min_date: date | None = None,
 ) -> list[float]:
-    """基于 pytdx 除权除息数据计算前复权因子。
+    """[Deprecated CHANGE-20260719-001 §1.2] 委托给 calculate_adjustment_factor_series 纯函数。
 
-    算法（参考 Chanlunpro klines_fq 的 preclose 公式）：
-    1. 获取除权除息事件（category=1），含 fenhong/songzhuangu/peigu/peigujia
-    2. 对每个事件日 D，获取 close_{D-1}（事件日前一交易日收盘价）
-    3. 计算除权参考价：
-       preclose = (close_{D-1} × 10 - fenhong + peigu × peigujia) / (10 + peigu + songzhuangu)
-    4. 计算单次事件因子 = preclose / close_{D-1}
-       化简为：event_factor = (10 - fenhong/close_{D-1} + peigu×peigujia/close_{D-1})
-                                 / (10 + peigu + songzhuangu)
-    5. 累积因子 = 所有晚于该 bar 日期的事件因子乘积
-    6. 最新日期（无后续事件）的 adj_factor = 1.0
+    保留向后兼容：拉 xdxr + 补齐 supplement_df + 调纯函数。
+    新代码应直接调用 calculate_adjustment_factor_series（不补齐 supplement_df，
+    数据缺失时抛 AdjustmentFactorDataError，由调用方决定 degraded 或 re-raise）。
 
-    前复权公式：qfq_price = raw_price × adj_factor
-    其中 adj_factor = 累积因子，最新日期 adj_factor = 1.0
+    删除的参数（000688 根因修复）：
+    - use_raw_close: 死代码（所有调用方都传 True）；MDAS 统一行情出口后
+      分钟线/周线/月线不再调用本函数（通过 apply_adj_factor_intraday 应用日线因子）
+    - min_date: 000688 根因（过滤事件导致累积因子不完整）；纯函数处理全部事件
 
-    性能优化（min_date 参数）：
-    - 仅处理 >= min_date 的除权除息事件
-    - min_date 之前的事件不影响 min_date 之后 bar 的 adj_factor
-      （因为 bar_date > 旧事件日期，旧事件不更新 factor）
-    - supplement_df 仅拉取 min_date 附近的数据，避免从1990年代拉取8000条
+    保留的行为（仅 _upsert_daily_bars 回补场景使用）：
+    - xdxr 获取失败 → 返回全 1.0（向后兼容）
+    - 事件日 close 缺失 → 拉 supplement_df 补齐 → 调纯函数
+    - 纯函数抛 AdjustmentFactorDataError → 返回全 1.0（向后兼容）
 
     Args:
         symbol: 股票代码（如 '000001'）
         raw_df: pytdx 返回的 DataFrame，含 datetime 列（用于提取 bar 日期）
         adapter: pytdx 适配器，None 使用模块单例
-        use_raw_close: True 时从 raw_df 提取事件日收盘价（适用于日线）；
-            False 时始终从 pytdx 拉取日线 close（适用于周线/月线/分钟线，其 close 非日线 close）
-        min_date: 最小日期，仅处理 >= min_date 的除权除息事件；
-            None 表示处理全部事件（向后兼容）
 
     Returns:
         adj_factor 列表，与 raw_df 行一一对应；获取失败时全为 1.0
@@ -551,7 +544,6 @@ def _calculate_adj_factor(
     if raw_df.empty:
         return []
 
-    # 默认 adj_factor = 1.0（获取 xdxr 失败时的兜底）
     default_factors = [1.0] * len(raw_df)
 
     pytdx = adapter or get_pytdx_adapter()
@@ -561,7 +553,7 @@ def _calculate_adj_factor(
         logger.warning("获取除权除息数据失败 symbol=%s: %s，adj_factor 默认 1.0", symbol, exc)
         return default_factors
 
-    if xdxr_df.empty:
+    if xdxr_df is None or xdxr_df.empty:
         return default_factors
 
     # 筛选 category=1 的除权除息事件
@@ -569,130 +561,72 @@ def _calculate_adj_factor(
     if exc_events.empty:
         return default_factors
 
-    # [行情] - 性能优化: 仅处理 >= min_date 的事件
-    # min_date 之前的事件不影响 min_date 之后 bar 的 adj_factor
-    # （因为 bar_date > 旧事件日期时，旧事件不更新 factor）
-    if min_date is not None:
-        exc_events_before = len(exc_events)
-        exc_events = exc_events[exc_events["date"].dt.date >= min_date].copy()
-        exc_events_after = len(exc_events)
-        if exc_events_before != exc_events_after:
-            logger.debug(
-                "过滤旧事件 symbol=%s: %d -> %d（跳过 %d 个 < %s 的事件）",
-                symbol, exc_events_before, exc_events_after,
-                exc_events_before - exc_events_after, min_date,
-            )
-        if exc_events.empty:
-            return default_factors
-
-    # 构建 close 查找表：date -> close
-    # use_raw_close=True 时从 raw_df 提取（日线场景）；
-    # use_raw_close=False 时不从 raw_df 提取（周线/月线/分钟线场景，close 非日线值）
+    # 构建 close 查找表：date -> close（从 raw_df）
     close_map: dict[date, float] = {}
-    if use_raw_close:
-        for _, row in raw_df.iterrows():
-            dt = pd.Timestamp(row["datetime"]).date()
-            close_map[dt] = float(row["close"])
+    for _, row in raw_df.iterrows():
+        dt = pd.Timestamp(row["datetime"]).date()
+        close_map[dt] = float(row["close"])
 
-    # 对事件日不在 close_map 中的，批量从 pytdx 拉取日线补充 close
-    # 同时扩展范围向前 10 天，以获取事件日前一交易日的收盘价（close_{D-1}）
+    # 检测 missing_dates：事件日不在 close_map 中
     missing_dates: list[date] = []
     for _, event in exc_events.iterrows():
-        event_date = event["date"].date()
+        event_date = pd.Timestamp(event["date"]).date()
         if event_date not in close_map:
             missing_dates.append(event_date)
 
-    if missing_dates or not use_raw_close:
-        # [行情] - 性能优化: 拉取范围从 min_date 附近开始，而非从1990年代
-        all_event_dates = [event["date"].date() for _, event in exc_events.iterrows()]
+    # 补齐 supplement_df（仅 _upsert_daily_bars 回补场景需要）
+    # 新代码（rebuild_adj_factors / compute_expected_adj_factors）不补齐，
+    # 数据缺失时抛 AdjustmentFactorDataError，由调用方决定 degraded 或 re-raise
+    extended_raw_df = raw_df
+    if missing_dates:
+        all_event_dates = [
+            pd.Timestamp(e["date"]).date() for _, e in exc_events.iterrows()
+        ]
         min_d = min(all_event_dates) if all_event_dates else date.today()
         max_d = max(all_event_dates) if all_event_dates else date.today()
         # 向前扩展 10 天确保覆盖前一交易日
         fetch_start = min_d - timedelta(days=10)
         try:
             supplement_df = pytdx.get_daily_bars(symbol, fetch_start, max_d)
-            for _, row in supplement_df.iterrows():
-                dt = pd.Timestamp(row["datetime"]).date()
-                close_map[dt] = float(row["close"])
+            if supplement_df is not None and not supplement_df.empty:
+                extended_raw_df = pd.concat(
+                    [raw_df, supplement_df], ignore_index=True
+                )
+                extended_raw_df = extended_raw_df.drop_duplicates(
+                    subset=["datetime"]
+                ).sort_values("datetime").reset_index(drop=True)
         except Exception as exc:
             logger.warning(
                 "补充拉取事件日收盘价失败 symbol=%s dates=%s~%s: %s",
                 symbol, fetch_start, max_d, exc,
             )
 
-    # 按日期升序排列事件
-    exc_events = exc_events.sort_values("date")
+    # 调纯函数（算法唯一入口）
+    try:
+        all_factors = calculate_adjustment_factor_series(extended_raw_df, xdxr_df)
+    except AdjustmentFactorDataError as exc:
+        logger.warning(
+            "纯函数计算失败 symbol=%s: %s，使用默认 1.0", symbol, exc,
+        )
+        return default_factors
 
-    # 构建 sorted_dates 用于查找前一交易日
-    sorted_close_dates = sorted(close_map.keys())
+    # 只返回与原 raw_df 行对应的 factor
+    if len(extended_raw_df) == len(raw_df):
+        return all_factors
 
-    def _find_prev_close(target_date: date) -> float | None:
-        """查找 target_date 前一交易日的收盘价。"""
-        prev_close = None
-        for d in sorted_close_dates:
-            if d >= target_date:
-                break
-            prev_close = close_map[d]
-        return prev_close
-
-    # 计算每个事件的因子，并构建 (event_date, cumulative_factor) 列表
-    # cumulative_factor 表示：日期 < event_date 的 bar 需要乘以该因子
-    # 从最新事件向最旧事件累积
-    events_with_factor: list[tuple[date, float]] = []
-    cumulative = 1.0
-    for _, event in exc_events[::-1].iterrows():
-        event_date = event["date"].date()
-        # 获取事件日前一交易日的收盘价（close_{D-1}）
-        prev_close = _find_prev_close(event_date)
-        if prev_close is None or prev_close == 0:
-            logger.warning(
-                "事件日 %s 前一交易日无收盘价数据 symbol=%s，跳过该事件", event_date, symbol,
-            )
-            continue
-
-        fenhong = float(event["fenhong"]) if pd.notna(event["fenhong"]) else 0.0
-        songzhuangu = float(event["songzhuangu"]) if pd.notna(event["songzhuangu"]) else 0.0
-        peigu = float(event["peigu"]) if pd.notna(event["peigu"]) else 0.0
-        peigujia = float(event["peigujia"]) if pd.notna(event["peigujia"]) else 0.0
-
-        # Chanlunpro preclose 公式：
-        # preclose = (close_{D-1} × 10 - fenhong + peigu × peigujia) / (10 + peigu + songzhuangu)
-        # event_factor = preclose / close_{D-1}
-        denominator = 10 + peigu + songzhuangu
-        if denominator == 0:
-            logger.warning(
-                "事件日 %s 除权除息分母为 0 symbol=%s，跳过该事件", event_date, symbol,
-            )
-            continue
-
-        preclose = (prev_close * 10 - fenhong + peigu * peigujia) / denominator
-        event_factor = preclose / prev_close
-
-        # 仅当事件因子不为 1.0 时才累积（避免无意义的事件）
-        if abs(event_factor - 1.0) > 1e-10:
-            cumulative *= event_factor
-        events_with_factor.append((event_date, cumulative))
-
-    # events_with_factor 按 event_date 降序（最新事件在前）
-    # 对每个 bar 日期，adj_factor = bar_date 之后第一个事件的 cumulative_factor
-    # 即降序列表中最后一个 event_date > bar_date 的事件
-    # 如果没有晚于 bar_date 的事件，adj_factor = 1.0
-    adj_factors: list[float] = []
-    for _, row in raw_df.iterrows():
-        bar_date = pd.Timestamp(row["datetime"]).date()
-        factor = 1.0
-        for event_date, cumulative_factor in events_with_factor:
-            if event_date > bar_date:
-                factor = cumulative_factor
-        adj_factors.append(factor)
-
-    logger.info(
-        "计算 adj_factor symbol=%s bars=%d events=%d adj_range=[%.6f, %.6f]",
-        symbol, len(adj_factors), len(events_with_factor),
-        min(adj_factors) if adj_factors else 1.0,
-        max(adj_factors) if adj_factors else 1.0,
+    # extended_raw_df 包含 supplement_df 的行，通过 datetime 匹配提取原 raw_df 的 factor
+    extended_df = extended_raw_df.copy()
+    extended_df["_factor"] = all_factors
+    extended_df["_date"] = extended_df["datetime"].apply(
+        lambda x: pd.Timestamp(x).date()
     )
-    return adj_factors
+    factor_map = dict(
+        zip(extended_df["_date"], extended_df["_factor"], strict=True)
+    )
+    original_dates = raw_df["datetime"].apply(
+        lambda x: pd.Timestamp(x).date()
+    ).tolist()
+    return [factor_map.get(d, 1.0) for d in original_dates]
 
 
 async def _get_adj_factor_df(
@@ -765,25 +699,35 @@ async def rebuild_adj_factors(
     从 earliest_affected 起重新计算该股票完整日线 adj_factor 序列并原子 upsert。
     仅更新 adj_factor 列，不修改 OHLCV。失败时 re-raise（不吞没，不伪装）。
 
+    [CHANGE-20260719-001 §1.2] 算法迁移到 calculate_adjustment_factor_series 纯函数：
+    - 查询全量 bars_daily（不限日期，确保事件日前一交易日 close 可查找）
+    - 显式拉 xdxr（不再通过 _calculate_adj_factor wrapper）
+    - 调纯函数（不补齐 supplement_df；数据缺失抛 AdjustmentFactorDataError）
+    - 只写入 >= earliest_affected 的部分（earliest_affected 之前的事件也会被
+      纯函数处理，确保累积因子完整，修复 000688 min_date 过滤事件 bug）
+
     算法：
-    1. 查询 bars_daily 从 earliest_affected 至今的 trade_date + OHLCV
-    2. 调用 _calculate_adj_factor（Chanlunpro preclose 公式）重算因子
-    3. 批量 UPDATE bars_daily.adj_factor（仅 adj_factor 列）
+    1. 查询 bars_daily 全量 trade_date + OHLCV（确保 prev_close 可查找）
+    2. 拉 xdxr（pytdx 除权除息事件）
+    3. 调 calculate_adjustment_factor_series 纯函数重算全量因子
+    4. 批量 UPDATE bars_daily.adj_factor（仅 >= earliest_affected 的部分）
 
     Args:
         session: 异步会话
         instrument_id: 标的 UUID
         symbol: 股票代码（用于 pytdx xdxr_info）
-        earliest_affected: 最早受影响日期（从此日起重算）
+        earliest_affected: 最早受影响日期（从此日起写入；但纯函数处理全量事件）
         adapter: pytdx 适配器（None 用模块单例）
 
     Returns:
-        更新的记录数
+        更新的记录数（>= earliest_affected 的行数）
 
     Raises:
+        RuntimeError: 数据缺失（AdjustmentFactorDataError）时抛出，
+            调用方需补齐 bars_daily 后重试（禁止 1.0 伪装成功）
         Exception: 重算或 upsert 失败时 re-raise
     """
-    # 1. 查询现有日线数据（从 earliest_affected 起）
+    # 1. 查询全量 bars_daily（不限日期，确保事件日前一交易日 close 可查找）
     try:
         result = await session.execute(
             select(
@@ -791,7 +735,6 @@ async def rebuild_adj_factors(
                 BarDaily.low, BarDaily.close, BarDaily.volume, BarDaily.amount,
             )
             .where(BarDaily.instrument_id == instrument_id)
-            .where(BarDaily.trade_date >= earliest_affected)
             .order_by(BarDaily.trade_date)
         )
         rows = result.all()
@@ -808,7 +751,7 @@ async def rebuild_adj_factors(
         )
         return 0
 
-    # 构造 raw_df 供 _calculate_adj_factor 使用
+    # 构造 raw_df 供纯函数使用
     raw_df = pd.DataFrame(rows, columns=[
         "trade_date", "open", "high", "low", "close", "volume", "amount",
     ])
@@ -816,17 +759,44 @@ async def rebuild_adj_factors(
     for col in ["open", "high", "low", "close", "volume", "amount"]:
         raw_df[col] = pd.to_numeric(raw_df[col], errors="coerce")
 
-    # 2. 重算 adj_factor（Chanlunpro preclose 公式）
+    # 2. 拉 xdxr（显式拉取，不通过 wrapper）
+    pytdx = adapter or get_pytdx_adapter()
     try:
-        adj_factors = await asyncio.to_thread(
-            _calculate_adj_factor, symbol, raw_df, adapter,
-            True, earliest_affected,
-        )
+        xdxr_df = await asyncio.to_thread(pytdx.get_xdxr_info, symbol)
     except Exception as exc:
         logger.warning(
-            "rebuild_adj_factors 计算失败 symbol=%s: %s", symbol, exc,
+            "rebuild_adj_factors 拉 xdxr 失败 symbol=%s: %s", symbol, exc,
         )
         raise
+
+    if xdxr_df is None or xdxr_df.empty:
+        # 无除权除息事件：adj_factor 应全 1.0，写入 earliest_affected 之后的所有行
+        logger.info(
+            "rebuild_adj_factors 无 xdxr 事件 symbol=%s，写入 adj_factor=1.0",
+            symbol,
+        )
+        adj_factors: list[float] = [1.0] * len(raw_df)
+    else:
+        # 3. 调纯函数（不补齐 supplement_df）
+        try:
+            adj_factors = await asyncio.to_thread(
+                calculate_adjustment_factor_series, raw_df, xdxr_df,
+            )
+        except AdjustmentFactorDataError as exc:
+            # 数据缺失（如 000688 bars_daily 缺口）：不 1.0 伪装，抛异常让上层处理
+            logger.error(
+                "rebuild_adj_factors 数据缺失 symbol=%s: %s"
+                "（需补齐 bars_daily 后重试，禁止 1.0 伪装）",
+                symbol, exc,
+            )
+            raise RuntimeError(
+                f"rebuild_adj_factors 数据缺失 symbol={symbol}: {exc}"
+            ) from exc
+        except Exception as exc:
+            logger.warning(
+                "rebuild_adj_factors 计算失败 symbol=%s: %s", symbol, exc,
+            )
+            raise
 
     if len(adj_factors) != len(raw_df):
         logger.warning(
@@ -837,10 +807,14 @@ async def rebuild_adj_factors(
             f"adj_factor 数量不匹配: expected={len(raw_df)}, got={len(adj_factors)}"
         )
 
-    # 3. 批量 UPDATE bars_daily.adj_factor（仅 adj_factor 列，不修改 OHLCV）
+    # 4. 批量 UPDATE bars_daily.adj_factor（仅 >= earliest_affected 的部分）
     trade_dates = raw_df["trade_date"].tolist()
+    written = 0
     try:
         for td, factor in zip(trade_dates, adj_factors, strict=True):
+            td_date = td if isinstance(td, date) else pd.Timestamp(td).date()
+            if td_date < earliest_affected:
+                continue
             await session.execute(
                 text(
                     "UPDATE bars_daily SET adj_factor = :factor "
@@ -849,9 +823,10 @@ async def rebuild_adj_factors(
                 {
                     "factor": Decimal(str(factor)),
                     "iid": instrument_id,
-                    "td": td if isinstance(td, date) else pd.Timestamp(td).date(),
+                    "td": td_date,
                 },
             )
+            written += 1
         await session.commit()
     except Exception as exc:
         logger.warning(
@@ -861,10 +836,11 @@ async def rebuild_adj_factors(
         raise
 
     logger.info(
-        "rebuild_adj_factors 完成 instrument_id=%s symbol=%s records=%d earliest=%s",
-        instrument_id, symbol, len(trade_dates), earliest_affected,
+        "rebuild_adj_factors 完成 instrument_id=%s symbol=%s written=%d "
+        "total_bars=%d earliest=%s",
+        instrument_id, symbol, written, len(trade_dates), earliest_affected,
     )
-    return len(trade_dates)
+    return written
 
 
 async def compute_expected_adj_factors(
@@ -872,28 +848,37 @@ async def compute_expected_adj_factors(
     instrument_id: uuid.UUID,
     symbol: str,
     adapter: PytdxAdapter | None = None,
-    min_date: date | None = None,
 ) -> pd.DataFrame:
     """公开别名：只读重算预期 adj_factor 序列（CHANGE-20260718-005 全市场一致性审计）。
 
-    从 bars_daily 读取 raw OHLCV，调用 _calculate_adj_factor 重算预期因子，
-    **不写库**。供 FactorConsistencyAuditor 比对存量因子是否正确。
+    从 bars_daily 读取 raw OHLCV，调用 calculate_adjustment_factor_series 纯函数
+    重算预期因子，**不写库**。供 FactorConsistencyAuditor 比对存量因子是否正确。
+
+    [CHANGE-20260719-001 §1.2] 算法迁移到纯函数：
+    - 删除 min_date 参数（000688 根因：min_date 过滤事件导致累积因子不完整）
+    - 不补齐 supplement_df（数据缺失抛 AdjustmentFactorDataError，让 auditor 标记 degraded）
+    - 与 rebuild_adj_factors 共用同一纯函数，禁止两套算法
 
     与 rebuild_adj_factors 的区别：
-    - rebuild_adj_factors：重算 + UPDATE 写库（公司行为变化时调用）
-    - compute_expected_adj_factors：只读重算（审计时调用，零副作用）
+    - rebuild_adj_factors：重算 + UPDATE 写库（公司行为变化时调用）；
+        数据缺失抛 RuntimeError（不 1.0 伪装）
+    - compute_expected_adj_factors：只读重算（审计时调用，零副作用）；
+        数据缺失抛 AdjustmentFactorDataError（让 auditor 标记 degraded_reason）
 
     Args:
         session: 异步会话
         instrument_id: 标的 UUID
         symbol: 股票代码（用于 pytdx xdxr_info）
         adapter: pytdx 适配器（None 用模块单例）
-        min_date: 最小日期（仅处理 >= min_date 的除权除息事件，性能优化）；
-            None 表示处理全部事件
 
     Returns:
         DataFrame: columns=[trade_date, expected_adj_factor]，按 trade_date 排序；
                    无数据时返回空 DataFrame
+
+    Raises:
+        AdjustmentFactorDataError: 事件日前一交易日 close 缺失（bars_daily 缺口）。
+            Auditor 应捕获并标记 degraded_reason，不得归类为算法不一致（mismatch）。
+        Exception: 其他计算失败时 re-raise
     """
     try:
         result = await session.execute(
@@ -922,16 +907,33 @@ async def compute_expected_adj_factors(
     for col in ["open", "high", "low", "close", "volume", "amount"]:
         raw_df[col] = pd.to_numeric(raw_df[col], errors="coerce")
 
+    # 拉 xdxr（显式拉取，不通过 wrapper）
+    pytdx = adapter or get_pytdx_adapter()
     try:
-        expected_factors = await asyncio.to_thread(
-            _calculate_adj_factor, symbol, raw_df, adapter,
-            True, min_date,
-        )
+        xdxr_df = await asyncio.to_thread(pytdx.get_xdxr_info, symbol)
     except Exception as exc:
         logger.warning(
-            "compute_expected_adj_factors 计算失败 symbol=%s: %s", symbol, exc,
+            "compute_expected_adj_factors 拉 xdxr 失败 symbol=%s: %s", symbol, exc,
         )
         raise
+
+    if xdxr_df is None or xdxr_df.empty:
+        # 无除权除息事件：expected 全 1.0
+        expected_factors: list[float] = [1.0] * len(raw_df)
+    else:
+        # 调纯函数（不补齐 supplement_df；数据缺失抛 AdjustmentFactorDataError）
+        try:
+            expected_factors = await asyncio.to_thread(
+                calculate_adjustment_factor_series, raw_df, xdxr_df,
+            )
+        except AdjustmentFactorDataError:
+            # 数据缺失：让 auditor 捕获并标记 degraded_reason
+            raise
+        except Exception as exc:
+            logger.warning(
+                "compute_expected_adj_factors 计算失败 symbol=%s: %s", symbol, exc,
+            )
+            raise
 
     if len(expected_factors) != len(raw_df):
         logger.warning(
@@ -2308,7 +2310,7 @@ if __name__ == "__main__":
         ("2026-06-13", 9.9),
     ])
     mock_adapter_1 = _MockPytdxAdapter(xdxr_df_1)
-    adj_factors_1 = _calculate_adj_factor("000001", raw_df_1, mock_adapter_1, use_raw_close=True)
+    adj_factors_1 = _calculate_adj_factor("000001", raw_df_1, mock_adapter_1)
     assert len(adj_factors_1) == 5, f"仅分红: adj_factors 长度应为 5，实际 {len(adj_factors_1)}"
     # 事件日前的 bar（06-09, 06-10, 06-11）adj_factor = 0.98
     for i in range(3):
@@ -2331,7 +2333,7 @@ if __name__ == "__main__":
         ("2026-06-13", 13.5),
     ])
     mock_adapter_2 = _MockPytdxAdapter(xdxr_df_2)
-    adj_factors_2 = _calculate_adj_factor("000001", raw_df_2, mock_adapter_2, use_raw_close=True)
+    adj_factors_2 = _calculate_adj_factor("000001", raw_df_2, mock_adapter_2)
     expected_factor_2 = (200.0 / 15.0) / 20.0  # ≈ 0.6667
     assert abs(adj_factors_2[0] - expected_factor_2) < 1e-6, \
         f"仅送转: 事件日前 adj_factor 应为 {expected_factor_2}，实际 {adj_factors_2[0]}"
@@ -2351,7 +2353,7 @@ if __name__ == "__main__":
         ("2026-06-13", 11.0),
     ])
     mock_adapter_3 = _MockPytdxAdapter(xdxr_df_3)
-    adj_factors_3 = _calculate_adj_factor("000001", raw_df_3, mock_adapter_3, use_raw_close=True)
+    adj_factors_3 = _calculate_adj_factor("000001", raw_df_3, mock_adapter_3)
     expected_factor_3 = (164.0 / 15.0) / 15.0  # ≈ 0.7289
     assert abs(adj_factors_3[0] - expected_factor_3) < 1e-6, \
         f"混合: 事件日前 adj_factor 应为 {expected_factor_3}，实际 {adj_factors_3[0]}"
