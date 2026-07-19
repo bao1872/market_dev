@@ -59,12 +59,13 @@ def _error_detail(
 class SendFeishuResponse(BaseModel):
     """发送飞书响应 - 走 Outbox 异步链路，返回追踪 ID + 状态机上下文。
 
-    [StockDetailFeishu] - 描述: 响应字段对齐 advice.md 第七节状态机
+    [StockDetailFeishu] - 描述: 响应字段对齐 advice.md 第七节状态机 + CHANGE-20260718-006 Section 3
     - test_run_id: 本次分享唯一标识（用于状态查询）
     - message_group_id: 关联 text+image 两条投递的组 ID
     - message_id: 文本消息 ID（主消息）
     - image_message_id: 图片消息 ID（截图失败时为 None）
-    - status: "pending"（截图成功，Outbox 异步投递中）| "partial_failed"（截图失败）
+    - status: "pending"（截图成功，Outbox 异步投递中）| "failed"（截图或图片 Outbox 失败；
+      请求要求图片但未成功，整体标记 failed 而非 partial_failed，触发显式重试与告警）
     - failed_step: 失败步骤（capture | image_outbox | None）
     - error_code: 错误码（NO_IMAGE_URL | CAPTURE_REQUEST_FAILED | IMAGE_OUTBOX_FAILED | None）
     - error_message: 错误详情（包含 worker 返回的响应体，最多 500 字符）
@@ -74,7 +75,7 @@ class SendFeishuResponse(BaseModel):
     message_group_id: str = Field(..., description="消息组 ID（关联 text+image 投递）")
     message_id: str = Field(..., description="文本消息 ID")
     image_message_id: str | None = Field(None, description="图片消息 ID（截图失败时为 None）")
-    status: str = Field(..., description="投递状态（pending|partial_failed）")
+    status: str = Field(..., description="投递状态（pending|failed）")
     failed_step: str | None = Field(None, description="失败步骤（capture|image_outbox|None）")
     error_code: str | None = Field(None, description="错误码（NO_IMAGE_URL|CAPTURE_REQUEST_FAILED|IMAGE_OUTBOX_FAILED|None）")
     error_message: str | None = Field(None, description="错误详情（最多 500 字符）")
@@ -90,7 +91,13 @@ class ShareStatusResponse(BaseModel):
     - capture_status: 截图任务状态（pending/success/failed）
     - image_upload_status: 图片上传状态（pending/success/failed/not_created）
     - image_status: 图片投递状态（同上，未创建截图时为 not_created）
-    - overall_status: 汇总状态（pending/success/partial_failed/failed）
+    - overall_status: 汇总状态（pending/success/failed）
+      * success: 卡片+图片均成功
+      * failed: 卡片成功但图片确定性失败（capture/image_upload/image_delivery 失败），
+        或任意投递 failed/dead
+      * pending: 图片仍在进行中（pending/sending/retrying，Outbox 尚未 relay 或投递未完成）
+      [CHANGE-20260718-006 Section 3] 不再使用 partial_failed：请求要求图片但未成功时
+      整体标记 failed，触发显式重试与告警
     - failed_step: 失败步骤（capture/image_upload/image_delivery/card/image，无失败时为 None）
     - error_code: 失败错误码（无失败时为 None）
     - image_message_id: 图片消息 ID（未创建时为 None）

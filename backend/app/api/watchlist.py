@@ -68,7 +68,16 @@ from app.services.calendar_service import (
     get_previous_trading_day_async,
     is_trading_day_async,
 )
-from app.services.feature_snapshot_service import has_succeeded_snapshot_run
+
+# [CHANGE-20260718-007] - 修复 watchlist API 读取 snapshot 时 schema_version 硬编码 == 1
+# 的生产缺陷。feature_snapshot_service._SCHEMA_VERSION 从 1→2→3 升级后，
+# 生产写入用 schema_version=3，但此处查询仍用 == 1，导致新快照永远读不到，
+# 表现为 metrics={}、calculation_status=WAITING_SNAPSHOT（已收盘场景）。
+# 必须与生产者使用同一 _SCHEMA_VERSION 常量，保证读写口径一致。
+from app.services.feature_snapshot_service import (
+    _SCHEMA_VERSION,
+    has_succeeded_snapshot_run,
+)
 from app.services.market_status_service import compute_market_session
 
 logger = logging.getLogger("watchlist_api")
@@ -359,7 +368,8 @@ async def get_watchlist_monitor_status(
                 .where(
                     StockFeatureSnapshot.instrument_id.in_(instrument_ids),
                     StockFeatureSnapshot.trade_date == expected_trade_date,
-                    StockFeatureSnapshot.schema_version == 1,
+                    # [CHANGE-20260718-007] 使用生产者 _SCHEMA_VERSION，禁止硬编码
+                    StockFeatureSnapshot.schema_version == _SCHEMA_VERSION,
                 )
             )
             snapshot_result = await db.execute(snapshot_stmt)

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -99,6 +100,10 @@ _DAILY_LOOKBACK_BARS = indicator_contract.NODE_CLUSTER_PRIMARY_BARS  # 250
 _15MIN_LOOKBACK_BARS = indicator_contract.NODE_CLUSTER_LOW_BARS  # 4000 = 250 * 16
 _MINUTE_LOOKBACK_BARS = indicator_contract.NODE_CLUSTER_MINUTE_BARS  # 2
 
+# [CHANGE-20260718-004 Node Cluster engine] Profile 缓存 TTL：同一监控周期内 daily/15m 输入不变时
+# 复用 NodeClusterProfileResult，避免重复计算。300s 覆盖多个 1m bar 周期，且短于 daily/15m 刷新周期。
+_NODE_CLUSTER_PROFILE_CACHE_TTL_SECONDS = 300
+
 # 北京时间
 _CST = ZoneInfo("Asia/Shanghai")
 
@@ -159,6 +164,13 @@ class MonitorBatchService:
         service = MonitorBatchService()
         result = await service.execute_monitor_cycle(db)
     """
+
+    def __init__(self) -> None:
+        # [CHANGE-20260718-004 Node Cluster engine] Profile 缓存：实例级 in-memory 缓存，
+        # 键 (instrument_id, daily_last_bar, 15m_last_bar) → (NodeClusterProfileResult, monotonic_ts)。
+        # 保留 _vp_result 供 render_monitoring_chart 鸭子类型访问 profile_df/peak_df。
+        # 简单 LRU：超过 256 项时清空最早一半（见 _compute_node_cluster_profile）。
+        self._node_cluster_profile_cache: dict[tuple[str, str, str], tuple[Any, float]] = {}
 
     async def execute_monitor_cycle(self, db: AsyncSession) -> MonitorCycleResult:
         """执行单轮监控周期（基于评估表）。
@@ -1764,7 +1776,7 @@ class MonitorBatchService:
         # 计算筹码分布（可选，失败时 profile=None）
         profile = None
         try:
-            profile = await self._compute_volume_profile(bars_daily, instrument_id, db)
+            profile = await self._compute_node_cluster_profile(bars_daily, instrument_id, db)
         except Exception as exc:
             logger.debug("筹码分布计算失败 symbol=%s（不影响 PNG 渲染）: %s", symbol, exc)
 
@@ -1779,56 +1791,84 @@ class MonitorBatchService:
             stock_name=stock_name,
         )
 
-    async def _compute_volume_profile(
+    async def _compute_node_cluster_profile(
         self,
         bars_daily: pd.DataFrame,
         instrument_id: uuid.UUID,
         db: AsyncSession,
     ) -> Any:
-        """计算筹码分布（Volume Profile）。
+        """计算 Node Cluster Profile（筹码分布）。
 
-        调用唯一真源 compute_unified_volume_profile，参数固定为
-        VP_LOOKBACK=250/VP_ROWS=100/VP_VALUE_AREA_PCT=0.70 等（见 unified_volume_profile.py）。
-        返回 UnifiedVolumeProfileResult，其 profile_df/peak_df/price_step 属性
-        与历史 VolumeProfileResult 接口兼容，可直接传给 render_monitoring_chart。
+        [CHANGE-20260718-004 Node Cluster engine] 调用唯一业务入口
+        `node_cluster_engine.compute_node_cluster_profile`，不再直接调用底层
+        `compute_unified_volume_profile`。架构守护测试 test_node_cluster_architecture
+        强制此约束（只有 engine 可导入底层 VP）。
+
+        返回 `NodeClusterProfileResult`，其 `profile_df`/`peak_df`/`price_step` 属性
+        通过鸭子类型适配器（engine 内部委托 `_vp_result`）与历史 `UnifiedVolumeProfileResult`
+        接口兼容，可直接传给 `render_monitoring_chart`（renderer 零改动）。
+
+        Profile 缓存：实例级 in-memory 缓存（避免 Redis 序列化丢失 `_vp_result`），
+        键为 `(instrument_id, daily_last_bar, 15m_last_bar)`，TTL 300s。
+        同一监控周期内 daily/15m 输入不变时复用 Profile，避免重复计算。
 
         Args:
-            bars_daily: 日线行情
+            bars_daily: 日线行情（qfq）
             instrument_id: 标的 UUID
             db: 异步会话
 
         Returns:
-            UnifiedVolumeProfileResult 对象；15m 数据不可用时返回 None（由上层降级处理）
+            NodeClusterProfileResult 对象；15m 数据不可用时返回 None（由上层降级处理）
         """
+        from app.services.node_cluster_engine import compute_node_cluster_profile
         from app.strategy._plotly_mock import ensure_plotly_mock
-        from app.strategy_assets.algorithms.features.unified_volume_profile import (
-            compute_unified_volume_profile,
-        )
 
         ensure_plotly_mock()
 
         # 获取 15min 行情（低周期成交量分配来源）
         # [Node Cluster] - 描述: 统一走 MarketDataAggregationService，再 tail(N) 保留最近 N 根
+        # [CHANGE-20260718-004] 修复 adj 不一致：原 adj="none" 改为 adj="qfq"，
+        # 与详情链/盘后链统一（completed qfq），符合项目记忆规则
+        # "禁止信任15m/60m/1m行内旧adj_factor作为复权真源; 读取时必须由权威日线因子覆盖"
         bars_15min = await self._fetch_md_bars(
             db, instrument_id,
             timeframe="15m",
-            adj="none",
+            adj="qfq",
             limit=_15MIN_LOOKBACK_BARS,
             include_realtime=False,
         )
         if bars_15min.empty:
             return None
 
+        # Profile 缓存检查：键为 (instrument_id, daily_last_bar, 15m_last_bar)
+        # 同一监控周期内 daily/15m 输入不变时复用 Profile（_vp_result 保留供 renderer 鸭子类型访问）
+        daily_last = str(bars_daily.index[-1]) if not bars_daily.empty else "empty"
+        bars_15m_last = str(bars_15min.index[-1]) if not bars_15min.empty else "empty"
+        cache_key = (str(instrument_id), daily_last, bars_15m_last)
+        now_ts = time.monotonic()
+        cached = self._node_cluster_profile_cache.get(cache_key)
+        if cached is not None:
+            cached_profile, cached_ts = cached
+            if now_ts - cached_ts < _NODE_CLUSTER_PROFILE_CACHE_TTL_SECONDS:
+                return cached_profile
+
         try:
-            return compute_unified_volume_profile(
+            profile = compute_node_cluster_profile(
                 bars_daily,
-                profile_df=bars_15min,
-                main_period="day",
+                bars_15min,
             )
         except Exception as e:
             raise RuntimeError(
-                f"compute_unified_volume_profile 失败 instrument_id={instrument_id}: {e}"
+                f"compute_node_cluster_profile 失败 instrument_id={instrument_id}: {e}"
             ) from e
+
+        # 写入缓存（保留 _vp_result 供 renderer 鸭子类型访问 profile_df/peak_df）
+        self._node_cluster_profile_cache[cache_key] = (profile, now_ts)
+        # 简单 LRU：缓存超过 256 项时清空最早一半（避免无界增长）
+        if len(self._node_cluster_profile_cache) > 256:
+            sorted_items = sorted(self._node_cluster_profile_cache.items(), key=lambda kv: kv[1][1])
+            self._node_cluster_profile_cache = dict(sorted_items[len(sorted_items) // 2:])
+        return profile
 
     @staticmethod
     def _orm_to_runtime_state(orm: _MonitorStateLike) -> MonitorState:

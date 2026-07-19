@@ -34,6 +34,11 @@ from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.user import User
 from app.models.watchlist import UserWatchlistItem
 
+# [CHANGE-20260718-007] - 测试 helper 必须使用生产代码当前 _SCHEMA_VERSION（=3），
+# 否则 has_succeeded_snapshot_run 按 schema_version=3 查询会找不到测试创建的 run。
+# 旧测试硬编码 schema_version=1 在 _SCHEMA_VERSION 从 1→2→3 升级后全部失效。
+from app.services.feature_snapshot_service import _SCHEMA_VERSION
+
 
 def _make_calendar_row(trade_date, is_trading: bool = True) -> TradingCalendar:
     """构造 TradingCalendar 行（market=A, status=OPEN）。"""
@@ -120,7 +125,7 @@ def _make_snapshot_record(instrument_id: uuid.UUID, trade_date) -> StockFeatureS
         primary_timeframe="1d",
         secondary_timeframe="15m",
         adj="qfq",
-        schema_version=1,
+        schema_version=_SCHEMA_VERSION,
         source_primary_bar_time=datetime(
             trade_date.year, trade_date.month, trade_date.day,
             15, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"),
@@ -153,7 +158,7 @@ def _make_succeeded_run(trade_date, run_type: str = "after_close") -> StockFeatu
     now = datetime.now(UTC)
     return StockFeatureSnapshotRun(
         trade_date=trade_date,
-        schema_version=1,
+        schema_version=_SCHEMA_VERSION,
         primary_timeframe="1d",
         secondary_timeframe="15m",
         adj="qfq",
@@ -175,7 +180,7 @@ def _make_running_run(trade_date, run_type: str = "after_close") -> StockFeature
     """构造一个 status='running' 的 StockFeatureSnapshotRun 记录（未 published）。"""
     return StockFeatureSnapshotRun(
         trade_date=trade_date,
-        schema_version=1,
+        schema_version=_SCHEMA_VERSION,
         primary_timeframe="1d",
         secondary_timeframe="15m",
         adj="qfq",
@@ -190,7 +195,7 @@ def _make_failed_run(trade_date, run_type: str = "after_close") -> StockFeatureS
     now = datetime.now(UTC)
     return StockFeatureSnapshotRun(
         trade_date=trade_date,
-        schema_version=1,
+        schema_version=_SCHEMA_VERSION,
         primary_timeframe="1d",
         secondary_timeframe="15m",
         adj="qfq",
@@ -703,7 +708,7 @@ async def test_monitor_status_succeeded_run_null_published_at_blocks_read(
     now = datetime.now(UTC)
     run_with_null_published = StockFeatureSnapshotRun(
         trade_date=today,
-        schema_version=1,
+        schema_version=_SCHEMA_VERSION,
         primary_timeframe="1d",
         secondary_timeframe="15m",
         adj="qfq",
@@ -766,7 +771,7 @@ async def test_monitor_status_backfill_full_scope_run_allows_read(
     now = datetime.now(UTC)
     run_full = StockFeatureSnapshotRun(
         trade_date=today,
-        schema_version=1,
+        schema_version=_SCHEMA_VERSION,
         primary_timeframe="1d",
         secondary_timeframe="15m",
         adj="qfq",
@@ -831,7 +836,7 @@ async def test_monitor_status_backfill_sample_scope_run_blocks_read(
     now = datetime.now(UTC)
     run_sample = StockFeatureSnapshotRun(
         trade_date=today,
-        schema_version=1,
+        schema_version=_SCHEMA_VERSION,
         primary_timeframe="1d",
         secondary_timeframe="15m",
         adj="qfq",

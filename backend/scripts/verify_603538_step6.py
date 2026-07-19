@@ -120,8 +120,8 @@ async def step1_factor_rebuild(afs: AdjustmentFactorService, session) -> bool:
     # 1f. 验证：除权日前 factor 应一致（~0.711），除权日后应为 1.0
     pre_div = window_after[window_after["trade_date"] < pd.Timestamp(EX_DIV_DATE)]
     post_div = window_after[window_after["trade_date"] >= pd.Timestamp(EX_DIV_DATE)]
-    pre_factors = set(round(float(f), 4) for f in pre_div["adj_factor"])
-    post_factors = set(round(float(f), 4) for f in post_div["adj_factor"])
+    pre_factors = {round(float(f), 4) for f in pre_div["adj_factor"]}
+    post_factors = {round(float(f), 4) for f in post_div["adj_factor"]}
     print(f"\n[验证] 除权日前 unique factors: {pre_factors}")
     print(f"[验证] 除权日后 unique factors: {post_factors}")
 
@@ -130,20 +130,17 @@ async def step1_factor_rebuild(afs: AdjustmentFactorService, session) -> bool:
         print(f"  [失败] 除权日前 factor 不一致（应全部~0.711）: {pre_factors}")
         ok = False
     else:
-        print(f"  [通过] 除权日前 factor 一致（~0.711）✓")
+        print("  [通过] 除权日前 factor 一致（~0.711）✓")
     if post_factors != {1.0}:
         print(f"  [失败] 除权日后 factor 应为 1.0: {post_factors}")
         ok = False
     else:
-        print(f"  [通过] 除权日后 factor=1.0 ✓")
+        print("  [通过] 除权日后 factor=1.0 ✓")
 
     # 价格连续性验证：除权日前最后 close × factor ≈ 除权日后第一 close
     if not pre_div.empty and not post_div.empty:
-        last_pre_close = float(pre_div.iloc[-1]["adj_factor"])  # placeholder
-        # 取 raw close
         pre_last = pre_div.iloc[-1]
         post_first = post_div.iloc[0]
-        ratio = float(post_first["adj_factor"]) / float(pre_last["adj_factor"]) if float(pre_last["adj_factor"]) != 0 else 0
         print(f"\n[价格连续性] 除权前最后 factor={float(pre_last['adj_factor']):.4f}, 除权后第一 factor={float(post_first['adj_factor']):.4f}")
         print(f"  factor 比值 = {float(pre_last['adj_factor']):.4f}（应≈0.711，即价格除权后约为之前的 71%）")
 
@@ -184,13 +181,13 @@ async def step2_bars_none_qfq(mdas: MarketDataAggregationService, session) -> bo
         if not none_df.empty:
             # 时间索引一致
             if not none_df.index.equals(qfq_df.index):
-                print(f"  [失败] 时间索引不一致")
+                print("  [失败] 时间索引不一致")
                 ok = False
                 continue
             print(f"  [通过] bar 数量和时间索引一致（{len(none_df)} 根）✓")
 
             # 输出除权日附近的逐 bar 对比
-            print(f"\n  除权日附近逐 bar 对比（none vs qfq）:")
+            print("\n  除权日附近逐 bar 对比（none vs qfq）:")
             ex_div_ts = pd.Timestamp(EX_DIV_DATE)
             # 找除权日前后各 3 根
             if tf == "1d":
@@ -210,16 +207,16 @@ async def step2_bars_none_qfq(mdas: MarketDataAggregationService, session) -> bo
 
             # 验证 none 的 source_bar_hash 与 qfq 不同（OHLCV 不同）
             if results["none"].source_bar_hash == results["qfq"].source_bar_hash:
-                print(f"  [警告] none 和 qfq source_bar_hash 相同（可能 OHLCV 一致，adj=none 时 qfq 无变化）")
+                print("  [警告] none 和 qfq source_bar_hash 相同（可能 OHLCV 一致，adj=none 时 qfq 无变化）")
             else:
-                print(f"  [通过] none 和 qfq source_bar_hash 不同（OHLCV 已复权）✓")
+                print("  [通过] none 和 qfq source_bar_hash 不同（OHLCV 已复权）✓")
 
             # 验证 adj=none 时 adj_factor_hash 为空
             if results["none"].adj_factor_hash != "":
                 print(f"  [失败] adj=none 时 adj_factor_hash 应为空，实际={results['none'].adj_factor_hash}")
                 ok = False
             else:
-                print(f"  [通过] adj=none 时 adj_factor_hash 为空 ✓")
+                print("  [通过] adj=none 时 adj_factor_hash 为空 ✓")
 
     return ok
 
@@ -263,7 +260,7 @@ async def step3_adjustment_as_of(mdas: MarketDataAggregationService, afs: Adjust
               f"completed_through={result.completed_through}")
 
         if result.bars.empty:
-            print(f"  [跳过] 无数据")
+            print("  [跳过] 无数据")
             continue
 
         # 获取截断因子序列（只含 trade_date <= as_of，与 MDAS 内部 get_factor_series(as_of=) 一致）。
@@ -284,7 +281,7 @@ async def step3_adjustment_as_of(mdas: MarketDataAggregationService, afs: Adjust
         # 公式验证: qfq = raw × factor(bar_date) / factor(as_of)
         # factor(bar_date) 用截断序列 ffill：bar_date > as_of 时取截断序列最后因子
         # （因为 as_of 之后的公司行为未知，bar 不得用未来因子）
-        print(f"\n  逐 bar 公式验证 (qfq = raw × factor(bar_date) / factor(as_of)):")
+        print("\n  逐 bar 公式验证 (qfq = raw × factor(bar_date) / factor(as_of)):")
         print(f"  {'日期':<12} {'raw_close':>10} {'f(bar)':>10} {'f(as_of)':>10} {'预期qfq':>10} {'实际qfq':>10} {'误差':>10}")
         formula_ok = True
         for ts in result.bars.index:
@@ -308,16 +305,16 @@ async def step3_adjustment_as_of(mdas: MarketDataAggregationService, afs: Adjust
                   f"{expected_qfq:>10.2f} {qfq_close:>10.2f} {diff:>10.4f} {status}")
 
         if formula_ok:
-            print(f"  [通过] 公式验证全部通过 ✓")
+            print("  [通过] 公式验证全部通过 ✓")
         else:
-            print(f"  [失败] 公式验证存在误差")
+            print("  [失败] 公式验证存在误差")
             ok = False
 
         # 无未来泄漏验证：截断序列不得包含 > as_of 的因子；
         # as_of 早于除权日时，factor(as_of) 必须是除权前因子（~0.711），不得是除权后 1.0。
         # 正确语义：as_of 之后的除权事件对 as_of 时点未知，bar 用截断序列 ffill 因子，
         # 因此 as_of 早于除权日时所有 bar qfq=raw（ratio=1），这是无泄漏的正确表现。
-        print(f"\n  无未来泄漏验证（截断序列不得读取 as_of 之后的事件）:")
+        print("\n  无未来泄漏验证（截断序列不得读取 as_of 之后的事件）:")
         leak_ok = True
         # 1. 截断序列不应包含任何 trade_date > as_of
         future_in_trunc = [d for d in trunc_map if d > as_of]
@@ -337,7 +334,7 @@ async def step3_adjustment_as_of(mdas: MarketDataAggregationService, afs: Adjust
         print(f"    截断序列因子数={len(trunc_map)} 完整序列<=as_of 因子数={full_upto}")
         if len(trunc_map) > full_upto:
             leak_ok = False
-            print(f"    [失败] 截断序列因子数多于 <=as_of 的因子数（未来泄漏）✗")
+            print("    [失败] 截断序列因子数多于 <=as_of 的因子数（未来泄漏）✗")
         if leak_ok:
             print(f"    [通过] factor(as_of={as_of}) 只用 <=as_of 的因子（无未来泄漏）✓")
         else:
@@ -377,7 +374,7 @@ async def step4_control_stock(mdas: MarketDataAggregationService, session) -> bo
     )
 
     if none_res.bars.empty or qfq_res.bars.empty:
-        print(f"  [跳过] 无数据")
+        print("  [跳过] 无数据")
         return True
 
     # OHLCV 完全一致
@@ -385,23 +382,23 @@ async def step4_control_stock(mdas: MarketDataAggregationService, session) -> bo
     qfq_ohlcv = qfq_res.bars[["open", "high", "low", "close", "volume"]]
     try:
         pd.testing.assert_frame_equal(none_ohlcv, qfq_ohlcv)
-        print(f"  [通过] none 与 qfq OHLCV 完全一致（factor=1.0，无公司行为）✓")
+        print("  [通过] none 与 qfq OHLCV 完全一致（factor=1.0，无公司行为）✓")
     except AssertionError as e:
         print(f"  [失败] none 与 qfq OHLCV 不一致: {e}")
         ok = False
 
     # source_bar_hash 一致
     if none_res.source_bar_hash == qfq_res.source_bar_hash:
-        print(f"  [通过] source_bar_hash 一致 ✓")
+        print("  [通过] source_bar_hash 一致 ✓")
     else:
         print(f"  [失败] source_bar_hash 不一致: {none_res.source_bar_hash} vs {qfq_res.source_bar_hash}")
         ok = False
 
     # adj_factor_hash: none 应为空，qfq 应非空（但全为 1.0）
     if none_res.adj_factor_hash == "":
-        print(f"  [通过] adj=none 时 adj_factor_hash 为空 ✓")
+        print("  [通过] adj=none 时 adj_factor_hash 为空 ✓")
     else:
-        print(f"  [失败] adj=none 时 adj_factor_hash 应为空")
+        print("  [失败] adj=none 时 adj_factor_hash 应为空")
         ok = False
 
     return ok
@@ -474,14 +471,13 @@ async def step6_idempotency(afs: AdjustmentFactorService, session) -> bool:
     earliest2 = await afs.detect_company_action_change(session, IID_603538, SYMBOL_603538)
     print(f"[6a] detect 再次执行 earliest_affected={earliest2}")
     if earliest2 is None:
-        print(f"  [通过] fingerprint 已存储，detect 返回 None（无变化）✓")
+        print("  [通过] fingerprint 已存储，detect 返回 None（无变化）✓")
     else:
-        print(f"  [失败] detect 应返回 None（fingerprint 未正确存储或事件变化）")
+        print("  [失败] detect 应返回 None（fingerprint 未正确存储或事件变化）")
         ok = False
 
     # 6b. 重建前 factor 快照
     factor_before = await afs.get_factor_series(session, IID_603538)
-    before_hash = afs._invalidate_mdas_cache  # placeholder
 
     # 6c. 再次 rebuild（幂等验证）
     try:
@@ -507,7 +503,7 @@ async def step6_idempotency(afs: AdjustmentFactorService, session) -> bool:
             if abs(b - a) > 1e-6:
                 diffs += 1
         if diffs == 0:
-            print(f"[6d] [通过] 两次 rebuild factor 序列完全一致（幂等）✓")
+            print("[6d] [通过] 两次 rebuild factor 序列完全一致（幂等）✓")
         else:
             print(f"[6d] [失败] 两次 rebuild factor 有 {diffs} 处不一致")
             ok = False
@@ -521,7 +517,7 @@ async def step6_idempotency(afs: AdjustmentFactorService, session) -> bool:
 async def main() -> int:
     print("=" * 70)
     print("Step6 真实回归验证: 603538 美诺华 @ 2026-07-03 前后")
-    print(f"分支: fix/market-data-ssot-adjustment-v2-20260717")
+    print("分支: fix/market-data-ssot-adjustment-v2-20260717")
     print(f"验证窗口: {WINDOW_START} ~ {WINDOW_END}")
     print(f"除权日: {EX_DIV_DATE}")
     print("=" * 70)

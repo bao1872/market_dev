@@ -54,7 +54,13 @@ CACHE_TTL_SECONDS = 300
 # v6: CHANGE-011 - 新增 SMC 按需计算图层（include_smc 参数 + 缓存键后缀隔离）
 # v5: PR #32 - DSA 全周期支持（bars_daily=macd_bars）+ 1w/1mo BB 用 compute_bollinger 计算
 #     v4 旧缓存返回 1d-only DSA + 1w/1mo 无 BB，必须强制失效
-ALGORITHM_VERSION = "v10"
+# v11: CHANGE-20260718-004 - Node Cluster engine 统一三链（详情/监控/盘后全部经
+#      node_cluster_engine.compute_node_cluster_profile 入口），输出新增
+#      algorithm_version/contract_fingerprint/profile_hash/daily_source_hash/
+#      bars_15m_source_hash/adj_factor_hash/adjustment_as_of 等诊断字段；
+#      monitor_batch_service adj 由 none→qfq（三链口径对齐），并加实例级 Profile 缓存。
+#      旧 v10 缓存的 node_cluster meta 字段缺失且 adj 口径不一致，必须强制失效。
+ALGORITHM_VERSION = "v11"
 
 # 缓存键前缀
 _CACHE_PREFIX = "indicator"

@@ -51,6 +51,18 @@ class Instrument(Base):
         Numeric(precision=20, scale=0), nullable=True
     )
     share_as_of: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # CHANGE-20260718-005: 复权因子对账版本跟踪（全市场一致性修复）
+    # 版本 < 当前常量版本时标记 needs_reaudit（即使因子值看起来正确）
+    # 弥补 xdxr fingerprint 无法发现"fingerprint 未变但历史序列已错误"的缺口
+    factor_algorithm_version: Mapped[str | None] = mapped_column(
+        String(8), nullable=True
+    )
+    factor_reconciliation_version: Mapped[int | None] = mapped_column(
+        nullable=True
+    )
+    factor_reconciled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

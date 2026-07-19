@@ -36,6 +36,16 @@ from app.constants.indicator_contract import DAILY_HISTORY_BARS
 from app.services.market_data_aggregation_service import (
     MarketDataAggregationService,
 )
+
+# [CHANGE-20260718-004 Node Cluster engine] 不再直接导入 unified_volume_profile；
+# Node Cluster 三链（盘后 primary / 详情 / 监控）经 node_cluster_engine 统一入口，
+# 15m secondary 单周期 VP 经 engine.compute_single_period_volume_profile。
+# 架构守护测试 test_node_cluster_architecture 强制此约束。
+from app.services.node_cluster_engine import (
+    NodeClusterProfileResult,
+    compute_single_period_volume_profile,
+    derive_state_for_price,
+)
 from app.strategy.selectors.dsa_selector import compute_dsa_bundle
 from app.strategy_assets.algorithms.features.atr_utils import compute_atr
 from app.strategy_assets.algorithms.features.bollinger_features_plotly import (
@@ -45,9 +55,6 @@ from app.strategy_assets.algorithms.features.price_action_toolkit_lite_ualgo imp
     _tv_pivots_confirmed,
 )
 from app.strategy_assets.algorithms.features.sqzmom_lb import compute_sqzmom_lb
-from app.strategy_assets.algorithms.features.unified_volume_profile import (
-    compute_unified_volume_profile,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -1050,9 +1057,23 @@ def _compute_node_interval_position(
 
 
 def _compute_cost_position_factors(
-    bars: pd.DataFrame, atr: np.ndarray | None = None
+    bars: pd.DataFrame,
+    atr: np.ndarray | None = None,
+    *,
+    precomputed_profile: NodeClusterProfileResult | None = None,
 ) -> dict[str, Any]:
     """计算成本/节点因子 (Volume Profile / POC / Node)。
+
+    Args:
+        bars: K 线 DataFrame
+        atr: ATR 数组（可选）
+        precomputed_profile: 预计算的 Node Cluster Profile（由调用方通过
+            `node_cluster_engine.compute_node_cluster_profile` 一次计算后注入）。
+            当提供时（盘后 primary 1d 链路），直接消费其公共字段 + `derive_state_for_price`，
+            **不再调用底层 VP**（修复三链不一致缺陷：原实现 `compute_unified_volume_profile(bars)`
+            只用单周期 bars，与详情/监控链 1d 价格范围 + 15m 成交量分配口径不一致）。
+            当为 None（15m secondary 单周期链路），经 engine.compute_single_period_volume_profile
+            计算单周期 VP，结果落库为 `timeframe_volume_profile`（显式非 Node Cluster）。
 
     Returns:
         V1.7 保留字段 + V1.8 新增字段（atr_distance/value_area/node_strength）
@@ -1083,15 +1104,6 @@ def _compute_cost_position_factors(
     if bars is None or len(bars) < 20:
         return result
 
-    try:
-        vp_result = compute_unified_volume_profile(bars)
-    except Exception as exc:
-        logger.warning("Volume Profile 计算失败: %s", exc)
-        return result
-
-    if vp_result is None:
-        return result
-
     closes = bars["close"].to_numpy(dtype=float)
     last_close = closes[-1]
     if not np.isfinite(last_close):
@@ -1099,10 +1111,71 @@ def _compute_cost_position_factors(
 
     last_atr = float(atr[-1]) if atr is not None and len(atr) > 0 and np.isfinite(atr[-1]) and atr[-1] > 0 else None
 
-    # POC
-    try:
+    # ===== Profile 来源：优先消费预计算 engine 结果（三链同核） =====
+    # [CHANGE-20260718-004] 修复缺陷：原实现单独调用 compute_unified_volume_profile(bars)
+    # （profile_df=None，单周期 VP），导致盘后链与详情/监控链口径不一致。
+    # 当 precomputed_profile 提供时，直接消费 engine 结果，不再调用底层 VP。
+    # 当 precomputed_profile 为 None（15m secondary），经 engine 计算单周期 VP。
+    profile = precomputed_profile
+    poc: float | None
+    vah: float | None
+    val: float | None
+    upper: dict[str, float] | None
+    lower: dict[str, float] | None
+    pos_0_1: float | None
+    peak_rows_for_strength: list[dict[str, Any]] | None
+    vp_result_legacy: Any = None
+
+    if profile is not None:
+        # 三链同核路径：消费 engine 结果（Node Cluster Profile）
+        if not profile.profile_rows:
+            # engine 返回空 Profile（数据不足），保持默认 result
+            return result
+        poc = profile.poc_price
+        vah = profile.vah_price
+        val = profile.val_price
+        peak_rows_for_strength = profile.peak_rows
+        upper = None
+        lower = None
+        pos_0_1 = None
+        try:
+            state = derive_state_for_price(profile, last_close)
+            upper = state.upper_node
+            lower = state.lower_node
+            pos_0_1 = state.position_0_1
+        except Exception as exc:
+            logger.warning("engine derive_state_for_price 失败: %s", exc)
+    else:
+        # 15m secondary 单周期路径（非 Node Cluster）
+        try:
+            vp_result = compute_single_period_volume_profile(bars)
+        except Exception as exc:
+            logger.warning("Volume Profile 计算失败: %s", exc)
+            return result
+        if vp_result is None:
+            return result
         poc = vp_result.poc_price
-        if np.isfinite(poc):
+        vah = vp_result.vah_price
+        val = vp_result.val_price
+        peak_rows_for_strength = None
+        vp_result_legacy = vp_result
+        upper = None
+        lower = None
+        pos_0_1 = None
+        try:
+            nodes = vp_result.nearest_nodes(last_close)
+            upper = nodes.get("upper_node")
+            lower = nodes.get("lower_node")
+        except Exception as exc:
+            logger.warning("Node 提取失败: %s", exc)
+        try:
+            pos_0_1 = vp_result.position_0_1(last_close)
+        except Exception as exc:
+            logger.warning("position_0_1 计算失败: %s", exc)
+
+    # POC（poc 可能为 None（engine 路径）或 NaN（单周期路径），统一处理）
+    try:
+        if poc is not None and np.isfinite(poc):
             result["poc_price"] = float(poc)
             if poc > 0:
                 result["close_to_poc_pct"] = float((last_close - poc) / poc)
@@ -1114,31 +1187,26 @@ def _compute_cost_position_factors(
 
     # V1.8 value_area_position_0_1
     try:
-        vah = vp_result.vah_price
-        val = vp_result.val_price
-        if np.isfinite(vah) and np.isfinite(val) and (vah - val) != 0:
+        if vah is not None and val is not None and np.isfinite(vah) and np.isfinite(val) and (vah - val) != 0:
             result["value_area_position_0_1"] = float(
                 (last_close - val) / (vah - val)
             )
         # V1.8 暴露 VAL/VAH 原值供前端显示
-        if np.isfinite(val):
+        if val is not None and np.isfinite(val):
             result["val_price"] = float(val)
-        if np.isfinite(vah):
+        if vah is not None and np.isfinite(vah):
             result["vah_price"] = float(vah)
         # V1.8 value_area_zone（close 相对 VA 的位置分类）
         result["value_area_zone"] = _classify_value_area_zone(
             last_close,
-            float(vah) if np.isfinite(vah) else None,
-            float(val) if np.isfinite(val) else None,
+            float(vah) if (vah is not None and np.isfinite(vah)) else None,
+            float(val) if (val is not None and np.isfinite(val)) else None,
         )
     except Exception as exc:
         logger.warning("value_area_position 计算失败: %s", exc)
 
     # nearest nodes
     try:
-        nodes = vp_result.nearest_nodes(last_close)
-        upper = nodes.get("upper_node")
-        lower = nodes.get("lower_node")
         if upper is not None:
             upper_mid = float(upper.get("price_mid", 0))
             result["nearest_upper_node"] = {
@@ -1152,9 +1220,9 @@ def _compute_cost_position_factors(
                 result["distance_to_node_above_atr"] = float(
                     (last_close - upper_mid) / last_atr
                 )
-            # V1.8 node_above_strength from peak_df
-            result["node_above_strength"] = _lookup_node_strength(
-                vp_result, upper_mid
+            # V1.8 node_above_strength（engine 路径用 peak_rows，单周期路径用 vp_result.peak_df）
+            result["node_above_strength"] = _lookup_node_strength_unified(
+                peak_rows_for_strength, vp_result_legacy, upper_mid
             )
         if lower is not None:
             lower_mid = float(lower.get("price_mid", 0))
@@ -1169,9 +1237,9 @@ def _compute_cost_position_factors(
                 result["distance_to_node_below_atr"] = float(
                     (last_close - lower_mid) / last_atr
                 )
-            # V1.8 node_below_strength from peak_df
-            result["node_below_strength"] = _lookup_node_strength(
-                vp_result, lower_mid
+            # V1.8 node_below_strength
+            result["node_below_strength"] = _lookup_node_strength_unified(
+                peak_rows_for_strength, vp_result_legacy, lower_mid
             )
     except Exception as exc:
         logger.warning("Node 提取失败: %s", exc)
@@ -1191,9 +1259,8 @@ def _compute_cost_position_factors(
 
     # position_0_1（保持原 VP 全区间语义：lowest_price~highest_price 中的位置，不 clip）
     try:
-        pos = vp_result.position_0_1(last_close)
-        if np.isfinite(pos):
-            result["position_0_1"] = float(pos)
+        if pos_0_1 is not None and np.isfinite(pos_0_1):
+            result["position_0_1"] = float(pos_0_1)
     except Exception as exc:
         logger.warning("position_0_1 计算失败: %s", exc)
 
@@ -1226,6 +1293,53 @@ def _lookup_node_strength(vp_result: Any, price_mid: float) -> float | None:
             return float(val)
     except Exception:
         pass
+    return None
+
+
+def _lookup_node_strength_from_rows(
+    peak_rows: list[dict[str, Any]], price_mid: float
+) -> float | None:
+    """从 peak_rows（list[dict]，engine 路径）按 price_mid 近似匹配 total_volume。
+
+    与 _lookup_node_strength 的 peak_df 路径语义一致（atol=1e-4），
+    仅数据源不同：engine NodeClusterProfileResult.peak_rows 是 list[dict]。
+
+    Args:
+        peak_rows: NodeClusterProfileResult.peak_rows（含 price_mid/total_volume）
+        price_mid: 节点的 price_mid 值
+
+    Returns:
+        total_volume（float）或 None
+    """
+    try:
+        for row in peak_rows:
+            row_mid = row.get("price_mid")
+            if row_mid is None:
+                continue
+            if abs(float(row_mid) - float(price_mid)) < 1e-4:
+                val = row.get("total_volume")
+                if val is not None and val > 0:
+                    return float(val)
+                return None
+        return None
+    except Exception:
+        return None
+
+
+def _lookup_node_strength_unified(
+    peak_rows: list[dict[str, Any]] | None,
+    vp_result_legacy: Any | None,
+    price_mid: float,
+) -> float | None:
+    """统一节点强度查找入口（engine 路径 + 单周期路径派发）。
+
+    - engine 路径（peak_rows 非空）：从 NodeClusterProfileResult.peak_rows 查找
+    - 单周期路径（vp_result_legacy 非空）：从 UnifiedVolumeProfileResult.peak_df 查找
+    """
+    if peak_rows is not None:
+        return _lookup_node_strength_from_rows(peak_rows, price_mid)
+    if vp_result_legacy is not None:
+        return _lookup_node_strength(vp_result_legacy, price_mid)
     return None
 
 
@@ -1339,8 +1453,21 @@ def _compute_all_factors_for_bars(
     timeframe: str,
     degraded_reasons: list[str],
     warmup_notes: list[str],
+    *,
+    precomputed_node_cluster: NodeClusterProfileResult | None = None,
 ) -> dict[str, Any]:
-    """计算单周期所有因子组，每组独立异常隔离。"""
+    """计算单周期所有因子组，每组独立异常隔离。
+
+    Args:
+        bars: K 线 DataFrame
+        timeframe: 周期标识（"1d" / "15m" 等）
+        degraded_reasons: 降级原因列表（异常时追加）
+        warmup_notes: 预热提示列表
+        precomputed_node_cluster: 预计算的 Node Cluster Profile（仅盘后 primary 1d 链路
+            由 feature_snapshot_service 注入）。当提供时，cost_position 消费 engine 结果
+            （三链同核）；当为 None，cost_position 走单周期 VP（15m secondary 或
+            compute_structural_factors 独立调用）。
+    """
     factors: dict[str, Any] = {
         "dsa_segment": None,
         "swing_position": None,
@@ -1378,9 +1505,11 @@ def _compute_all_factors_for_bars(
         degraded_reasons.append(f"{timeframe}: swing_position failed: {exc}")
         logger.warning("%s Swing 计算失败: %s", timeframe, exc)
 
-    # 3. 成本/节点
+    # 3. 成本/节点（precomputed_node_cluster 非空时消费 engine 结果，否则单周期 VP）
     try:
-        factors["cost_position"] = _compute_cost_position_factors(bars, atr)
+        factors["cost_position"] = _compute_cost_position_factors(
+            bars, atr, precomputed_profile=precomputed_node_cluster
+        )
     except Exception as exc:
         degraded_reasons.append(f"{timeframe}: cost_position failed: {exc}")
         logger.warning("%s 成本/节点计算失败: %s", timeframe, exc)

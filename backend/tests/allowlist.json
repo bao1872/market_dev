@@ -1,4 +1,12 @@
 {
   "description": "全量 pytest 中已知但未在当前治理任务内修复的失败项。任何新增项必须附带 issue、原因、owner 和过期日期，禁止只写'预存在问题'。",
-  "items": []
+  "items": [
+    {
+      "test": "tests/test_algorithm_registry_architecture.py::TestFourChainDirectImportGate::test_four_chain_no_direct_kernel_import",
+      "reason": "CHANGE-20260719-001 §二：四链（详情/盘后/盘中/Capture）仍有直接 kernel import，未切换到 CanonicalComputationService.compute_with_mdas 或 canonical_adapters.compute_*_adapter。xfail strict=True，迁移完成后应自动失败提示移除 xfail。",
+      "issue": "83",
+      "owner": "bao1872",
+      "expires": "2026-09-30"
+    }
+  ]
 }

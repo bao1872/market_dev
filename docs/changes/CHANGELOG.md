@@ -30,6 +30,37 @@
   - **构建验证**：冷构建 backend pip install 85.9s / apt-get 1253s（debian.org 网络慢）；frontend npm ci 4.4s / build 15.7s；热构建 builder 全 CACHED（pip install 0s）+ runtime apt-get 跨版本 CACHED ✓
   - **不变量**：不重建 Capture/PostgreSQL/Redis；不删除 volume/生产数据；不新增项目依赖；buildx 为 Docker CLI 系统插件（apt docker-buildx）
 
+- CHANGE-20260718-004: Node Cluster 唯一语义合同 + 计算内核 + ref/ 彻底隔离 + 文档记忆系统
+  - **Node Cluster 三链统一**：新增 `indicator_semantics.py`（语义合同 frozen）+ `node_cluster_engine.py`（计算内核唯一入口）；盘后/详情/监控三链改走 engine，`profile_hash` 必须一致；`NodeClusterProfileResult` frozen dataclass + 鸭子类型适配器
+  - **ref/ 彻底隔离**：`git rm --cached ref/smc_user_export.pine`；新增 `test_ref_isolation.py`（AST + 文本扫描守护）；`check_docs_consistency.py` 新增规则 13/14/15；修复 10 处文档 ref 隔离违规（"真源"→"参考源（人工阅读）"）
+  - **文档记忆系统**：新增 `docs/current/08-indicator-calculation-contracts.md`（指标计算合同）+ `docs/maps/indicator-computation-map.md`（指标计算地图）；AGENTS clause 59/60 ref/ 隔离规则
+  - **版本升级**：`ALGORITHM_VERSION` v10→v11（旧缓存自动失效）；`NODE_CLUSTER_ALGORITHM_VERSION="nc-v1"`、`NODE_CLUSTER_OUTPUT_SCHEMA_VERSION=1`、`NODE_CLUSTER_CONTRACT_FINGERPRINT="nc-cf-v1"`；schema_version 2→3
+  - **不变量**：SMC 算法不重写；MDAS/复权/构建治理不重新实现；`ref/smc_user_source.pine` 843 行 + SHA256 不变；`PINE_PARITY_PENDING` 保留；不新增依赖/表/migration
+
+- CHANGE-20260718-005: 复权因子全市场一致性审计 + 串行修复基础设施
+  - **因子算法版本常量**：新增 `backend/app/constants/factor_contract.py`（`FACTOR_ALGORITHM_VERSION='fq-v1'` / `FACTOR_RECONCILIATION_VERSION=1` / `FACTOR_COMPARISON_TOLERANCE=1e-6`）；版本变化时触发全市场重审，弥补 xdxr fingerprint 无法发现存量错误的缺口
+  - **只读审计服务**：新增 `backend/app/services/factor_consistency_audit.py`（`FactorConsistencyAuditor`）：`audit_single_stock` 加载 stored 因子 → 重算 expected → 逐日比对 → 分类 mismatch（含 603538 bug 模式识别）；`audit_active_stocks` 分批 yield 全市场审计结果；`_compare_factors` 纯函数 6 类场景；`_hash_factor_series` 因子序列内容 hash；零副作用（不写库、不失效缓存、不导入 rebuild，架构守护测试强制）
+  - **串行修复任务**：新增 `backend/app/services/factor_reconciliation.py`（`FactorReconciliationTask`）：`dry_run` 只读审计 → 生成修复计划（零副作用）；`rebuild_batch` 全程串行，每只股票独立事务，失败回滚不影响其他；失败不写 1.0 伪装成功（`error_code` 非空、`after_hash` 为空）；`partial_success`（rebuild 后仍不一致）标记失败
+  - **只读重算方法**：`bar_repository.compute_expected_adj_factors` 只读重算预期因子序列（不写库），与写库的 `rebuild_adj_factors` 区分
+  - **migration 065**：`instruments` 表新增 3 列（`factor_algorithm_version VARCHAR(8)` / `factor_reconciliation_version INTEGER` / `factor_reconciled_at TIMESTAMPTZ`），全部可空，兼容历史 instruments（NULL=未对账）；Instrument 模型同步更新
+  - **安全约束**：全程串行禁止并发 rebuild；失败不得用 1.0 伪装成功；不做无边界全市场重跑（只重建审计发现的不一致股票）；603538 真实数据缺失时仅对该股票做小范围补齐/重建
+  - **测试**：`test_factor_consistency_audit.py`（442 行，24 passed）+ `test_factor_reconciliation.py`（376 行）+ 38 instrument tests passed；migration 065 upgrade/downgrade/upgrade 验证通过
+  - **不变量**：`bars_daily.adj_factor` 仍为权威因子序列；MDAS 仍为唯一行情读取出口；不新增依赖；不运行全市场回补
+
+- CHANGE-20260718-007: 80 端口前端 P0 修复 + CI 诊断清零 + 部署合同静态测试 + PostgreSQL Integration Tests 修复 —— 提交 `51f1178`（待续提交）
+  - **P0 80 端口修复**：`frontend/Dockerfile` 误将构建产物 COPY 到 `/usr/share`（非 nginx root），导致用户入口 80 呈现默认 nginx 欢迎页而非 SPA；修复为 `RUN rm -rf /usr/share/nginx/html/*` + `COPY --from=builder /app/dist/ /usr/share/nginx/html/`；5 项内容探针全 PASS（root div / assets 200 / SPA 回退 / API 代理 / 默认 index 删除）
+  - **部署合同静态测试**：新增 `tools/tests/test_frontend_runtime_contract.py`（14 用例）守护 Dockerfile COPY 目标、nginx root、compose 80:80、卷挂载、多阶段一致性；CI 阻断回归
+  - **CI 诊断清零**：25 Ruff（W292/I001/F401/C401/F541/F841）+ 4 mypy（attr-defined/arg-type/assignment）+ 4 architecture（duplicate-plan-feature-list）全部修复；所有 required CI checks 绿色
+  - **PostgreSQL Integration Tests 修复（20 失败 → 0）**：(A) 生产缺陷——`watchlist.py`/`market_stocks_service.py` 共 4 处 `schema_version == 1` 硬编码改为 `_SCHEMA_VERSION`（=3），修复 `_SCHEMA_VERSION` 1→2→3 升级后消费侧读不到新快照的缺陷；`stock_context._empty_atomic_response` 新增 `run` 参数修复 `snapshot_missing` 场景 `hasSucceededRun` 错误归零；(B) 测试未跟进——5 文件修复（watchlist_monitor_status schema_version / admin_after_close_pipeline schema_version / dsa_full_feature patch 目标改 MDAS / stock_state_and_events 删 `_event_to_dto` 过时测试+更新 P0-2 新 API 断言 / worker_idempotency board_sync 迁移到 after_close_orchestrator）；本地全量 2258 passed
+  - **不变量**：不改端口（80:80 永久固定）；不改 nginx proxy 逻辑；不改 backend health 路由；不新增依赖；不改 SMC/MDAS/Atomic Fact 业务语义
+
+- CHANGE-20260718-006: 全算法族 SSOT 统一计算网关 + 飞书图片失败状态机 + 周期切换原子渲染 + 四链地图文档
+  - **Section 2 算法合同注册表**：新增 `backend/app/contracts/algorithm_registry.py`（12 算法族预注册 + `AlgorithmRegistry` 单例 + `AlgorithmContract` frozen dataclass + `ALGORITHM_REGISTRY_VERSION='reg-v1'`）；新增 `backend/app/services/canonical_computation_service.py`（`CanonicalComputationService` 统一调度 + `result_hash` SHA256 前 16 字符 5 维度确定性）；AST 守护 `test_algorithm_registry_architecture.py`（329 行，16 tests，3 测试类）禁止生产模块直接 `import` kernel 绕过注册表
+  - **Section 3 飞书状态机升级**：`partial_failed` → `failed`（图片确定性失败 `image_definitively_failed`：capture 失败 / `image_delivery` failed/dead / `image_upload_status=failed`）或 `pending`（图片仍在进行中）；要求图片时 `card_status=success` 但 `image_status!=success` 整体必须 `failed` 或 `pending`（不允许 `success`）；测试覆盖 `test_state_machine.py`（+208 行）+ `test_stock_detail_feishu_status.py`（+25 行）
+  - **Section 4 周期切换原子渲染**：新增 `frontend/src/utils/chartRenderFrame.ts`（279 行，`ChartRenderFrame` + `computeSourceBarRangeKey` + `buildBarsFrame`/`buildIndicatorsFrame` + `isFrameMatched` + `computeVisiblePriceBounds` + `shouldIncludeNodeInPriceRange` + `shouldIncludeSmcTrailingInPriceRange`）；`StrategyChart.tsx` 集成 frame mismatch 横幅 + 纵轴 domain policy（远端 Node/trailing 不参与纵轴候选）；`StockResearchWorkspace.tsx` 构造 `barsFrame` 传入；`api/endpoints.ts` BarListResponse 新增 `source_bar_hash`/`adj_factor_hash`/`market_data_contract_version`/`adjustment_as_of` 契约字段；测试 `chartRenderFrame.test.ts`（397 行，38 tests）+ 前端套件 149 passed + 21 contract passed
+  - **Section 5c 文档扩展**：`docs/current/08` 扩展为 12 算法族合同（170→422 行，Section 5 总表 + 5.2.1-5.2.12 各族 12 项规范 + 5.3 调度流程 + 5.4 守护测试）；`docs/maps/indicator-computation-map.md` 扩展为四链地图（148→263 行，详情/盘后/盘中/Capture + 算法族→Kernel→调用链矩阵 + result_hash 缓存层）；`AGENTS.md` clause 61 新增 6 条长期规则（样本股只能验证/每算法族唯一 Kernel/四条链统一网关/Bars+Indicators 原子渲染帧/图片失败不掩盖/复权版本变化触发全市场审计）
+  - **不变量**：SMC 算法不重写；MDAS 仍为唯一行情读取出口；不新增依赖/表/migration；`ref/smc_user_source.pine` 843 行 + SHA256 不变；`PINE_PARITY_PENDING` 保留；四条链迁移到 `CanonicalComputationService` 为软约束（逐步迁移）
+
 ## 2026-07-17
 
 - CHANGE-20260717-001: SMC Pine 逻辑对齐最终收口（warmup/历史分离 + execution gate + trailing NaN + OB 顺序 + EQH/EQL 几何 + Strong/Weak 起点 + golden 测试重做 + 确定性测试 + 导出增强 + ALGORITHM_VERSION v10）

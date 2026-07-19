@@ -207,6 +207,23 @@ const CARDS: Array<{ title: string; group: FactorGroup; rows: FactorRow[] }> = [
 ]
 
 // ===== 子组件：单张卡片 =====
+// [CHANGE-20260718-004] secondary.15m.cost_position 重命名为 timeframe_volume_profile
+// （单周期 15m VP，显式非 Node Cluster）。primary.1d.cost_position 保持原名（兼容指向 engine 结果）。
+// 本 helper 在副周期 tab 下用 timeframe_volume_profile 作为 cost_position 的别名回退。
+function resolveFactorsByGroup(
+  factors: Record<string, unknown> | null,
+  group: FactorGroup,
+): Record<string, unknown> | null {
+  if (!factors) return null
+  const direct = factors[group]
+  if (direct !== undefined) return direct as Record<string, unknown> | null
+  // 副周期 15m：cost_position 已重命名为 timeframe_volume_profile
+  if (group === 'cost_position' && factors['timeframe_volume_profile'] !== undefined) {
+    return factors['timeframe_volume_profile'] as Record<string, unknown> | null
+  }
+  return null
+}
+
 function FactorCard({
   title,
   factors,
@@ -409,7 +426,7 @@ export function StockStructuralStatePanel({
           <FactorCard
             key={card.group}
             title={card.title}
-            factors={activeFactors ? (activeFactors[card.group] as Record<string, unknown> | null) : null}
+            factors={resolveFactorsByGroup(activeFactors, card.group)}
             rows={card.rows}
           />
         ))}

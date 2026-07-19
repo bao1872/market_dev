@@ -32,6 +32,7 @@
 | 测试、CI、验收 | `05-testing-acceptance.md` |
 | 研究特征矩阵与因果口径 | `06-research-feature-matrix.md` |
 | Atomic Fact Contract V1 个股状态观察 | `07-atomic-fact-contract-v1.md` |
+| 指标计算合同（业务含义/输入/语义/输出/调用方/版本） | `08-indicator-calculation-contracts.md` |
 | 未决问题 | `open-decisions.md` |
 | 当前差异 | `code-doc-alignment.md` |
 | 真实代码入口 | `../maps/*.md` |

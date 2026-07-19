@@ -75,14 +75,21 @@ def _setup_docs(
 
     Returns:
         tmp_path（作为 REPO_ROOT）
+
+    说明：自动创建规则 13/15 要求的必需文件（08-indicator-calculation-contracts.md、
+    indicator-computation-map.md、CHANGE-20260718-004.md、CHANGELOG.md），
+    使 "passes" 场景在新规则下仍返回 rc==0。
     """
     docs_dir = tmp_path / "docs"
     current_dir = docs_dir / "current"
     maps_dir = docs_dir / "maps"
     archive_dir = docs_dir / "archive" / "current-legacy-20260703"
+    changes_dir = docs_dir / "changes"
+    records_dir = changes_dir / "records"
     current_dir.mkdir(parents=True, exist_ok=True)
     maps_dir.mkdir(parents=True, exist_ok=True)
     archive_dir.mkdir(parents=True, exist_ok=True)
+    records_dir.mkdir(parents=True, exist_ok=True)
 
     if readme is not None:
         (docs_dir / "README.md").write_text(readme, encoding="utf-8")
@@ -104,6 +111,35 @@ def _setup_docs(
 
     if agents is not None:
         (tmp_path / "AGENTS.md").write_text(agents, encoding="utf-8")
+
+    # 规则 13 必需新文档（若测试未显式提供则创建最小内容）
+    _required_current = "08-indicator-calculation-contracts.md"
+    _required_maps = "indicator-computation-map.md"
+    if not (current_dir / _required_current).exists():
+        (current_dir / _required_current).write_text(
+            "# 指标计算合同\n\nNode Cluster 语义合同（测试占位）。\n",
+            encoding="utf-8",
+        )
+    if not (maps_dir / _required_maps).exists():
+        (maps_dir / _required_maps).write_text(
+            "# 指标计算地图\n\n三链指标计算入口地图（测试占位）。\n",
+            encoding="utf-8",
+        )
+
+    # 规则 15 必需 CHANGE 记录 + CHANGELOG 引用
+    _change_id = "CHANGE-20260718-004"
+    _record_file = records_dir / f"{_change_id}.md"
+    if not _record_file.exists():
+        _record_file.write_text(
+            f"# {_change_id}\n\nNode Cluster 合同 + ref 隔离（测试占位）。\n",
+            encoding="utf-8",
+        )
+    _changelog = changes_dir / "CHANGELOG.md"
+    if not _changelog.exists():
+        _changelog.write_text(
+            f"# CHANGELOG\n\n- {_change_id}: Node Cluster 合同 + ref 隔离。\n",
+            encoding="utf-8",
+        )
 
     # 注入模块路径变量（v2 新增 MANIFEST_FILE 与 MAPS_DIR）
     monkeypatch.setattr(cdc, "REPO_ROOT", tmp_path)

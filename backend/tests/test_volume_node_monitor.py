@@ -46,11 +46,18 @@ _PROFILE_ROW_KEYS = {
     "bullish_volume", "bearish_volume", "total_volume",
     "is_peak", "is_poc", "is_value_area",
 }
-# profile_meta 必需字段（5 个核心 VP 字段 + 6 个 prepare_node_cluster_bars 诊断字段）
+# profile_meta 必需字段（5 个核心 VP 字段 + prepare_node_cluster_bars 诊断字段 +
+# CHANGE-20260718-004 engine 迁移后的算法版本三元组 + source/profile hash 诊断）
+# 旧字段 parameter_version 已升级为 algorithm_version + output_schema_version +
+# contract_fingerprint；新增 daily_source_hash/bars_15m_source_hash/profile_hash/
+# daily_bars_count/bars_15m_count/adjustment_as_of 用于三链一致性断言与缓存键。
 _PROFILE_META_KEYS = {
     "row_count", "price_step", "poc_price", "vah_price", "val_price",
     "input_daily_bars", "input_15m_bars", "input_minute_bars",
-    "primary_period", "low_period", "parameter_version",
+    "primary_period", "low_period",
+    "algorithm_version", "output_schema_version", "contract_fingerprint",
+    "daily_source_hash", "bars_15m_source_hash", "profile_hash",
+    "daily_bars_count", "bars_15m_count", "adjustment_as_of",
 }
 
 
@@ -415,8 +422,8 @@ class TestVolumeNodeMonitorEvents:
         context = _make_context(daily_bars, minute_bars)
         curr_state = await monitor.calculate_state(context)
 
-        assert monitor._last_vp_result is not None
-        peak_prices = monitor._last_vp_result.all_peak_prices
+        assert monitor._last_profile is not None
+        peak_prices = monitor._last_profile.all_peak_prices
         assert peak_prices, "需要至少一个 peak_price 才能构造穿越"
         crossover_price = float(peak_prices[len(peak_prices) // 2])
 
@@ -444,8 +451,8 @@ class TestVolumeNodeMonitorEvents:
         context = _make_context(daily_bars, minute_bars)
         curr_state = await monitor.calculate_state(context)
 
-        assert monitor._last_vp_result is not None
-        peak_prices = monitor._last_vp_result.all_peak_prices
+        assert monitor._last_profile is not None
+        peak_prices = monitor._last_profile.all_peak_prices
         assert peak_prices
         crossover_price = float(peak_prices[len(peak_prices) // 2])
 
@@ -468,8 +475,8 @@ class TestVolumeNodeMonitorEvents:
         context = _make_context(daily_bars, minute_bars)
         curr_state = await monitor.calculate_state(context)
 
-        assert monitor._last_vp_result is not None
-        peak_prices = monitor._last_vp_result.all_peak_prices
+        assert monitor._last_profile is not None
+        peak_prices = monitor._last_profile.all_peak_prices
         assert len(peak_prices) >= 2, "需要至少 2 个 peak_price"
         price_a = float(peak_prices[0])
         price_b = float(peak_prices[1])
@@ -593,7 +600,14 @@ class TestVolumeNodeMonitorComputeIndicators:
         assert isinstance(meta["input_minute_bars"], int)
         assert meta["primary_period"] == "1d"
         assert meta["low_period"] == "15m"
-        assert isinstance(meta["parameter_version"], str)
+        # CHANGE-20260718-004: parameter_version 升级为算法版本三元组
+        assert isinstance(meta["algorithm_version"], str) and meta["algorithm_version"]
+        assert isinstance(meta["output_schema_version"], int)
+        assert isinstance(meta["contract_fingerprint"], str) and meta["contract_fingerprint"]
+        # source/profile hash 用于三链一致性断言与缓存键
+        assert isinstance(meta["profile_hash"], str) and meta["profile_hash"]
+        assert isinstance(meta["daily_source_hash"], str)
+        assert isinstance(meta["bars_15m_source_hash"], str)
 
     @pytest.mark.asyncio
     async def test_is_poc_exactly_one_row(

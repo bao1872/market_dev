@@ -1,10 +1,12 @@
-"""飞书发送状态机测试（Phase C Task C.11.3）。
+"""飞书发送状态机测试（Phase C Task C.11.3 + CHANGE-20260718-006 Section 3）。
 
 测试 send_stock_detail_to_feishu 状态机：
-1. 截图失败时返回 status="partial_failed" + failed_step + error_code + error_message
+1. 截图失败时返回 status="failed" + failed_step + error_code + error_message
+   （CHANGE-20260718-006 Section 3：从 partial_failed 升级为 failed，
+   请求要求图片但未成功时整体标记 failed，触发显式重试与告警）
 2. 截图成功时返回 status="pending"
 3. 模拟 capture worker 返回 502 + 错误详情，验证 error_message 包含详情
-4. get_share_status 在 partial_failed 时正确汇总
+4. get_share_status 在 failed 时正确汇总
 
 复用现有 fixture：参考 backend/tests/test_stock_detail_feishu.py 和 backend/tests/conftest.py
 """
@@ -161,15 +163,16 @@ class TestStateMachineSend:
     """
 
     @pytest.mark.asyncio
-    async def test_capture_502_returns_partial_failed_with_error_details(
+    async def test_capture_502_returns_failed_with_error_details(
         self,
         db_session: AsyncSession,
         test_instrument,
         feishu_user_channel: tuple[User, NotificationChannel],
     ) -> None:
-        """截图 worker 返回 502 + JSON 详情 → status=partial_failed + error_message 含详情。
+        """截图 worker 返回 502 + JSON 详情 → status=failed + error_message 含详情。
 
-        [TestStateMachine] - 描述: 验证 502 响应体不被丢弃，error_message 包含 worker 返回的详情
+        [TestStateMachine] - 描述: 验证 502 响应体不被丢弃，error_message 包含 worker 返回的详情。
+        [CHANGE-20260718-006 Section 3] 截图失败时 status 从 partial_failed 升级为 failed。
         """
         user, _ = feishu_user_channel
         capture_resp = _make_capture_502_response()
@@ -189,8 +192,8 @@ class TestStateMachineSend:
                 capture_worker_url="http://capture.test",
             )
 
-        # 验证状态机：截图失败 → partial_failed
-        assert result["status"] == "partial_failed"
+        # 验证状态机：截图失败 → failed（CHANGE-20260718-006 Section 3）
+        assert result["status"] == "failed"
         assert result["failed_step"] == "capture"
         assert result["error_code"] == "CAPTURE_REQUEST_FAILED"
         assert result["image_message_id"] is None
@@ -212,15 +215,16 @@ class TestStateMachineSend:
         assert "worker 内部截图超时" in capture_jobs[0].error_message
 
     @pytest.mark.asyncio
-    async def test_capture_no_image_url_returns_partial_failed_no_image_url(
+    async def test_capture_no_image_url_returns_failed_no_image_url(
         self,
         db_session: AsyncSession,
         test_instrument,
         feishu_user_channel: tuple[User, NotificationChannel],
     ) -> None:
-        """截图 worker 返回 200 但无 image_url → partial_failed + NO_IMAGE_URL。
+        """截图 worker 返回 200 但无 image_url → failed + NO_IMAGE_URL。
 
-        [TestStateMachine] - 描述: 验证 200 但缺 image_url 字段时的错误码判定
+        [TestStateMachine] - 描述: 验证 200 但缺 image_url 字段时的错误码判定。
+        [CHANGE-20260718-006 Section 3] status 从 partial_failed 升级为 failed。
         """
         user, _ = feishu_user_channel
         capture_resp = _make_capture_no_image_url_response()
@@ -240,22 +244,23 @@ class TestStateMachineSend:
                 capture_worker_url="http://capture.test",
             )
 
-        assert result["status"] == "partial_failed"
+        assert result["status"] == "failed"
         assert result["failed_step"] == "capture"
         assert result["error_code"] == "NO_IMAGE_URL"
         assert result["image_message_id"] is None
         assert "image_url" in result["error_message"]
 
     @pytest.mark.asyncio
-    async def test_image_outbox_failure_returns_partial_failed_image_outbox(
+    async def test_image_outbox_failure_returns_failed_image_outbox(
         self,
         db_session: AsyncSession,
         test_instrument,
         feishu_user_channel: tuple[User, NotificationChannel],
     ) -> None:
-        """截图成功但图片 Outbox 失败 → partial_failed + IMAGE_OUTBOX_FAILED。
+        """截图成功但图片 Outbox 失败 → failed + IMAGE_OUTBOX_FAILED。
 
-        [TestStateMachine] - 描述: 验证截图成功后 image_outbox 失败时的错误码判定
+        [TestStateMachine] - 描述: 验证截图成功后 image_outbox 失败时的错误码判定。
+        [CHANGE-20260718-006 Section 3] status 从 partial_failed 升级为 failed。
         """
         user, _ = feishu_user_channel
         capture_resp = _make_capture_success_response()
@@ -283,7 +288,7 @@ class TestStateMachineSend:
                 capture_worker_url="http://capture.test",
             )
 
-        assert result["status"] == "partial_failed"
+        assert result["status"] == "failed"
         assert result["failed_step"] == "image_outbox"
         assert result["error_code"] == "IMAGE_OUTBOX_FAILED"
         assert "图片 Outbox 写入失败" in result["error_message"]
@@ -331,21 +336,22 @@ class TestStateMachineSend:
 
 
 class TestStateMachineGetShareStatus:
-    """get_share_status 状态机汇总测试（C.11.3）。
+    """get_share_status 状态机汇总测试（C.11.3 + CHANGE-20260718-006 Section 3）。
 
-    [TestStateMachine] - 描述: 验证 get_share_status 在 partial_failed/success 时的汇总逻辑
+    [TestStateMachine] - 描述: 验证 get_share_status 在 failed/success/pending 时的汇总逻辑
     """
 
     @pytest.mark.asyncio
-    async def test_get_share_status_partial_failed_with_capture_failure(
+    async def test_get_share_status_failed_with_capture_failure(
         self,
         db_session: AsyncSession,
         test_instrument,
         feishu_user_channel: tuple[User, NotificationChannel],
     ) -> None:
-        """get_share_status 在 capture 失败时返回 partial_failed + capture 失败信息。
+        """get_share_status 在 capture 失败时返回 failed + capture 失败信息。
 
-        [TestStateMachine] - 描述: 卡片段 success + 图片段未创建 → overall_status=partial_failed
+        [TestStateMachine] - 描述: 卡片段 success + 图片段未创建（capture 失败）→ overall_status=failed。
+        [CHANGE-20260718-006 Section 3] 从 partial_failed 升级为 failed。
         """
         user, channel = feishu_user_channel
         capture_resp = _make_capture_502_response()
@@ -391,7 +397,7 @@ class TestStateMachineGetShareStatus:
         )
 
         # 验证状态机汇总
-        assert status["overall_status"] == "partial_failed"
+        assert status["overall_status"] == "failed"
         assert status["card_status"] == "success"
         assert status["capture_status"] == "failed"
         assert status["image_upload_status"] == "not_created"
@@ -524,6 +530,164 @@ class TestStateMachineGetShareStatus:
         assert status["image_status"] == "not_created"
         assert status["failed_step"] is None
         assert status["error_code"] is None
+
+    @pytest.mark.asyncio
+    async def test_get_share_status_pending_when_card_success_image_in_progress(
+        self,
+        db_session: AsyncSession,
+        test_instrument,
+        feishu_user_channel: tuple[User, NotificationChannel],
+    ) -> None:
+        """get_share_status 在 card 成功但图片仍在进行中时返回 pending（非 failed）。
+
+        [TestStateMachine] - 描述: 卡片段 success + 图片段 pending/sending/retrying
+        （image_upload 未失败）→ overall_status=pending，等待图片投递完成。
+        [CHANGE-20260718-006 Section 3] 区分"图片确定性失败"与"图片仍在进行中"：
+        前者 → failed，后者 → pending。避免误判进行中投递为失败。
+        """
+        user, channel = feishu_user_channel
+        capture_resp = _make_capture_success_response()
+        snapshot_mock = _make_snapshot_mock()
+
+        with patch(
+            "app.services.stock_detail_feishu_service.MonitorSnapshotService.get_snapshot",
+            new=AsyncMock(return_value=snapshot_mock),
+        ), patch("httpx.AsyncClient") as mock_client_cls:
+            _configure_mock_httpx(mock_client_cls, capture_resp)
+
+            send_result = await send_stock_detail_to_feishu(
+                db=db_session,
+                instrument_id=test_instrument.id,
+                user_id=user.id,
+                frontend_base_url="http://frontend.test",
+                capture_worker_url="http://capture.test",
+            )
+
+        test_run_id = uuid.UUID(send_result["test_run_id"])
+        message_group_id = send_result["message_group_id"]
+        await db_session.flush()
+
+        # 创建 card delivery（success）+ image delivery（pending，image_upload 也 pending）
+        card_msg_id = uuid.UUID(send_result["message_id"])
+        image_msg_id = uuid.UUID(send_result["image_message_id"])
+
+        card_delivery = MessageDelivery(
+            id=uuid.uuid4(),
+            notification_message_id=card_msg_id,
+            channel_id=channel.id,
+            status="success",
+            delivery_type="card",
+            attempt_count=1,
+            message_group_id=message_group_id,
+            idempotency_key=f"test-card-delivery-{uuid.uuid4().hex}",
+        )
+        # image delivery 处于 pending（正在上传中），image_upload_status 也为 pending
+        image_delivery = MessageDelivery(
+            id=uuid.uuid4(),
+            notification_message_id=image_msg_id,
+            channel_id=channel.id,
+            status="pending",
+            delivery_type="image",
+            attempt_count=0,
+            message_group_id=message_group_id,
+            idempotency_key=f"test-image-delivery-{uuid.uuid4().hex}",
+            image_upload_status="pending",
+        )
+        db_session.add(card_delivery)
+        db_session.add(image_delivery)
+        await db_session.flush()
+
+        # 调用 get_share_status 查询
+        status = await get_share_status(
+            db=db_session, test_run_id=test_run_id, user_id=user.id
+        )
+
+        # 验证状态机汇总：card 成功 + 图片仍在进行中 → pending（不是 failed）
+        assert status["overall_status"] == "pending"
+        assert status["card_status"] == "success"
+        assert status["image_status"] == "pending"
+        assert status["image_upload_status"] == "pending"
+        assert status["failed_step"] is None
+        assert status["error_code"] is None
+        assert status["error_message"] is None
+
+    @pytest.mark.asyncio
+    async def test_get_share_status_failed_when_card_success_image_delivery_dead(
+        self,
+        db_session: AsyncSession,
+        test_instrument,
+        feishu_user_channel: tuple[User, NotificationChannel],
+    ) -> None:
+        """get_share_status 在 card 成功但图片投递 dead 时返回 failed。
+
+        [TestStateMachine] - 描述: 卡片段 success + 图片段 dead（投递已放弃）→ overall_status=failed。
+        [CHANGE-20260718-006 Section 3] image_delivery 状态为 dead 视为确定性失败。
+        """
+        user, channel = feishu_user_channel
+        capture_resp = _make_capture_success_response()
+        snapshot_mock = _make_snapshot_mock()
+
+        with patch(
+            "app.services.stock_detail_feishu_service.MonitorSnapshotService.get_snapshot",
+            new=AsyncMock(return_value=snapshot_mock),
+        ), patch("httpx.AsyncClient") as mock_client_cls:
+            _configure_mock_httpx(mock_client_cls, capture_resp)
+
+            send_result = await send_stock_detail_to_feishu(
+                db=db_session,
+                instrument_id=test_instrument.id,
+                user_id=user.id,
+                frontend_base_url="http://frontend.test",
+                capture_worker_url="http://capture.test",
+            )
+
+        test_run_id = uuid.UUID(send_result["test_run_id"])
+        message_group_id = send_result["message_group_id"]
+        await db_session.flush()
+
+        # 创建 card delivery（success）+ image delivery（dead，投递已放弃）
+        card_msg_id = uuid.UUID(send_result["message_id"])
+        image_msg_id = uuid.UUID(send_result["image_message_id"])
+
+        card_delivery = MessageDelivery(
+            id=uuid.uuid4(),
+            notification_message_id=card_msg_id,
+            channel_id=channel.id,
+            status="success",
+            delivery_type="card",
+            attempt_count=1,
+            message_group_id=message_group_id,
+            idempotency_key=f"test-card-delivery-{uuid.uuid4().hex}",
+        )
+        image_delivery = MessageDelivery(
+            id=uuid.uuid4(),
+            notification_message_id=image_msg_id,
+            channel_id=channel.id,
+            status="dead",
+            delivery_type="image",
+            attempt_count=5,
+            message_group_id=message_group_id,
+            idempotency_key=f"test-image-delivery-{uuid.uuid4().hex}",
+            image_upload_status="pending",
+            last_error_code="IMAGE_DELIVERY_DEAD",
+            provider_response={"error_message": "图片投递已达最大重试次数"},
+        )
+        db_session.add(card_delivery)
+        db_session.add(image_delivery)
+        await db_session.flush()
+
+        # 调用 get_share_status 查询
+        status = await get_share_status(
+            db=db_session, test_run_id=test_run_id, user_id=user.id
+        )
+
+        # 验证状态机汇总：card 成功 + 图片 dead → failed
+        assert status["overall_status"] == "failed"
+        assert status["card_status"] == "success"
+        assert status["image_status"] == "dead"
+        assert status["failed_step"] == "image_delivery"
+        assert status["error_code"] == "IMAGE_DELIVERY_DEAD"
+        assert "图片投递已达最大重试次数" in (status["error_message"] or "")
 
 
 if __name__ == "__main__":

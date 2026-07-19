@@ -262,7 +262,7 @@ export default function MarketWorkspacePage() {
       }
       const onSuccess = () => {
         // useAddToWatchlist/useRemoveFromWatchlist 的 onSuccess 已 invalidate:
-        // ['watchlist'] + ['watchlist','monitor-status'] + ['strategy-runs']
+        // watchlist / watchlist+monitor-status / strategy-runs 三个 queryKey
         // watchlist scope 下移除自选后该行立即消失（strategy-runs 失效后重新请求 universe=watchlist）
         toast.show(add ? '已加入自选' : '已移除自选', '')
       }

@@ -142,7 +142,7 @@ async def test_full_feature_no_result_dropping(
         new=AsyncMock(return_value=FakeRuntime()),
     ):
         with patch(
-            "app.services.strategy_batch_service.get_bars",
+            "app.services.market_data_aggregation_service.MarketDataAggregationService.get_bars",
             new=AsyncMock(return_value=SimpleNamespace(bars=_fake_bars())),
         ):
             with patch(
@@ -186,7 +186,7 @@ async def test_single_stock_timeout_marks_failed_with_reason_code(
         new=AsyncMock(return_value=FakeRuntime()),
     ):
         with patch(
-            "app.services.strategy_batch_service.get_bars",
+            "app.services.market_data_aggregation_service.MarketDataAggregationService.get_bars",
             new=AsyncMock(return_value=SimpleNamespace(bars=_fake_bars())),
         ):
             with patch(
@@ -221,7 +221,7 @@ async def test_insufficient_data_marks_skipped_with_reason_code(
         new=AsyncMock(return_value=FakeRuntime()),
     ):
         with patch(
-            "app.services.strategy_batch_service.get_bars",
+            "app.services.market_data_aggregation_service.MarketDataAggregationService.get_bars",
             new=AsyncMock(return_value=SimpleNamespace(bars=_fake_bars())),
         ):
             with patch(
@@ -255,7 +255,7 @@ async def test_auto_publish_blocked_when_failed_exists(
         new=AsyncMock(return_value=FakeRuntime()),
     ):
         with patch(
-            "app.services.strategy_batch_service.get_bars",
+            "app.services.market_data_aggregation_service.MarketDataAggregationService.get_bars",
             new=AsyncMock(return_value=SimpleNamespace(bars=_fake_bars())),
         ):
             with patch(
@@ -293,7 +293,7 @@ async def test_run_level_total_timeout_cancels_remaining(
         new=AsyncMock(return_value=FakeRuntime()),
     ):
         with patch(
-            "app.services.strategy_batch_service.get_bars",
+            "app.services.market_data_aggregation_service.MarketDataAggregationService.get_bars",
             new=AsyncMock(return_value=SimpleNamespace(bars=_fake_bars())),
         ):
             with patch.object(FakeRuntime, "execute", new=_slow_execute):

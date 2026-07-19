@@ -7,11 +7,12 @@
 //   - 切换周期时各周期 viewport 独立不串台
 //   - 无保存 viewport 时传 undefined 给 StrategyChart，由其基于真实 calc.length 初始化末尾视区
 // 可选 toolbar/rightPanel/chartColumnProps 支持 StockDetailPage 的结构面板开关和截图模式属性。
-import { useState, useCallback, useEffect, type ReactNode } from 'react'
+import { useState, useCallback, useEffect, useMemo, type ReactNode } from 'react'
 import StrategyChart from '@/components/StrategyChart'
 import { type ChartViewport } from '@/components/chartViewport'
 import { formatShanghaiTimeShort } from '@/utils/datetime'
 import { resolveStrategy } from '@/lib/strategy-manifest'
+import { buildBarsFrame } from '@/utils/chartRenderFrame'
 import type { ResearchSource, DisplayTimeframe } from './stockResearchTypes'
 import { ALLOWED_TIMEFRAMES, type ChartLayerKey, type ChartLayerVisibility } from './stockResearchTypes'
 import { IndicatorToolbar } from './IndicatorToolbar'
@@ -160,6 +161,29 @@ export function StockResearchWorkspace({
 
   const captureRenderReady = isCaptureMode && isRenderReady && feishuLayersReady
 
+  // [ChartRenderFrame] - 从 barsQuery.data 构造 bars 端渲染帧（PROMPT.md §五.296-307）
+  //   字段对齐后端 BarListResponse：source_bar_hash / market_data_contract_version /
+  //   bar times（取 items 首末 trade_date/trade_time 用于范围 key）。
+  //   传给 StrategyChart 与 indicators 帧比对；mismatch 时跳过指标图层渲染。
+  const barsFrame = useMemo(() => {
+    const barsData = barsQuery.data
+    if (!barsData || !inst) return null
+    const items = barsData.items
+    const barTimes = items.length > 0
+      ? items
+          .map(b => b.trade_time ?? b.trade_date ?? null)
+          .filter((t): t is string => t != null)
+      : []
+    return buildBarsFrame({
+      instrumentId: inst.id,
+      timeframe,
+      adj: 'qfq',
+      sourceBarHash: barsData.source_bar_hash ?? null,
+      marketDataContractVersion: barsData.market_data_contract_version ?? null,
+      barTimes,
+    })
+  }, [barsQuery.data, inst, timeframe])
+
   // 错误状态：instrument/bars/indicators 失败时显示明确错误，不伪装为空图
   if (instrumentQuery.isError) {
     return (
@@ -226,6 +250,7 @@ export function StockResearchWorkspace({
               onViewportChange={handleViewportChange}
               isCaptureMode={isCaptureMode}
               layerVisibility={isCaptureMode ? undefined : layerVisibility}
+              barsFrame={barsFrame}
             />
             <div className="tv-chart-status">
               <span className={quoteStatus.badgeClass}>{quoteStatus.label}</span>
