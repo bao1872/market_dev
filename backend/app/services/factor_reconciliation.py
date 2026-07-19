@@ -80,11 +80,20 @@ class ReconciliationItem:
 class ReconciliationPlan:
     """修复计划（不可变）。
 
+    分类（CHANGE-20260719-001 §1.3 引入 degraded）：
+    - items: 需要修复的股票（mismatch，可重建）
+    - degraded: 数据缺失无法判断（如 bars_daily 缺口），不在 items 中，
+      需要先回补数据再重新审计
+    - error: 审计失败（如 xdxr 获取失败）
+    四类互斥，total_audited = consistent + needs_rebuild + degraded + error
+
     Attributes:
-        items: 需要修复的股票列表
+        items: 需要修复的股票列表（mismatch，可重建）
         total_audited: 审计的总股票数
         consistent_count: 一致股票数
         error_count: 审计失败股票数
+        degraded_count: 数据缺失股票数（不在 items 中，需先回补数据）
+        degraded_symbols: 数据缺失股票代码列表
         algorithm_version: 审计时使用的算法版本
         reconciliation_version: 对账版本
         dry_run_at: dry-run 执行时间（UTC）
@@ -94,6 +103,8 @@ class ReconciliationPlan:
     total_audited: int
     consistent_count: int
     error_count: int
+    degraded_count: int = 0
+    degraded_symbols: list[str] = field(default_factory=list)
     algorithm_version: str = FACTOR_ALGORITHM_VERSION
     reconciliation_version: int = FACTOR_RECONCILIATION_VERSION
     dry_run_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -212,6 +223,8 @@ class FactorReconciliationTask:
         total_audited = 0
         consistent_count = 0
         error_count = 0
+        degraded_count = 0
+        degraded_symbols: list[str] = []
 
         if symbols:
             # 指定股票：逐只审计
@@ -236,6 +249,12 @@ class FactorReconciliationTask:
                 total_audited += 1
                 if audit_result.error:
                     error_count += 1
+                elif audit_result.degraded_reason is not None:
+                    # [CHANGE-20260719-001 §1.3] 数据缺失（如 bars_daily 缺口）
+                    # 不归类为算法不一致（mismatch），不加入 items（无法重建），
+                    # 需先回补数据再重新审计
+                    degraded_count += 1
+                    degraded_symbols.append(sym)
                 elif audit_result.is_consistent:
                     consistent_count += 1
                 else:
@@ -248,20 +267,28 @@ class FactorReconciliationTask:
                 total_audited += 1
                 if audit_result.error:
                     error_count += 1
+                elif audit_result.degraded_reason is not None:
+                    # [CHANGE-20260719-001 §1.3] 数据缺失不归类为 mismatch
+                    degraded_count += 1
+                    degraded_symbols.append(audit_result.symbol)
                 elif audit_result.is_consistent:
                     consistent_count += 1
                 else:
                     items.append(self._build_item(audit_result))
 
         logger.info(
-            "dry_run 完成: audited=%d consistent=%d needs_rebuild=%d errors=%d",
-            total_audited, consistent_count, len(items), error_count,
+            "dry_run 完成: audited=%d consistent=%d needs_rebuild=%d "
+            "degraded=%d errors=%d",
+            total_audited, consistent_count, len(items),
+            degraded_count, error_count,
         )
         return ReconciliationPlan(
             items=items,
             total_audited=total_audited,
             consistent_count=consistent_count,
             error_count=error_count,
+            degraded_count=degraded_count,
+            degraded_symbols=degraded_symbols,
         )
 
     async def rebuild_batch(

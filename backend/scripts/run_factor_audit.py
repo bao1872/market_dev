@@ -103,6 +103,7 @@ async def _audit_sample_stocks(symbols: list[str]) -> dict[str, dict]:
                     else None
                 ),
                 "error": result.error,
+                "degraded_reason": result.degraded_reason,
                 "mismatches_preview": [
                     {
                         "trade_date": m.trade_date.isoformat(),
@@ -186,9 +187,10 @@ async def main() -> int:
         )
 
     logger.info(
-        "[S3.1] dry-run 完成: total_audited=%d consistent=%d needs_rebuild=%d errors=%d",
+        "[S3.1] dry-run 完成: total_audited=%d consistent=%d needs_rebuild=%d "
+        "degraded=%d errors=%d",
         plan.total_audited, plan.consistent_count,
-        plan.needs_rebuild_count, plan.error_count,
+        plan.needs_rebuild_count, plan.degraded_count, plan.error_count,
     )
 
     # 收集 needs_rebuild 的股票清单（symbol + before_hash + reason）
@@ -213,6 +215,16 @@ async def main() -> int:
         if plan.needs_rebuild_count > 20:
             logger.warning("[S3.1] ... 及其余 %d 只",
                            plan.needs_rebuild_count - 20)
+
+    if plan.degraded_count > 0:
+        logger.warning(
+            "[S3.1] 发现 %d 只数据缺失股票（degraded，非算法不一致）: %s",
+            plan.degraded_count,
+            plan.degraded_symbols[:20],
+        )
+        if plan.degraded_count > 20:
+            logger.warning("[S3.1] ... 及其余 %d 只",
+                           plan.degraded_count - 20)
 
     # =========================================================================
     # Phase 2: 串行重建（仅 --rebuild 且发现不一致时执行）
@@ -299,6 +311,8 @@ async def main() -> int:
             "total_audited": plan.total_audited,
             "consistent_count": plan.consistent_count,
             "needs_rebuild_count": plan.needs_rebuild_count,
+            "degraded_count": plan.degraded_count,
+            "degraded_symbols": plan.degraded_symbols,
             "error_count": plan.error_count,
             "algorithm_version": plan.algorithm_version,
             "reconciliation_version": plan.reconciliation_version,
@@ -330,7 +344,8 @@ async def main() -> int:
     print(f"耗时: {duration_seconds:.1f}s")
     print(f"审计总数: {plan.total_audited}")
     print(f"一致股票: {plan.consistent_count}")
-    print(f"不一致需重建: {plan.needs_rebuild_count}")
+    print(f"不一致需重建（mismatch）: {plan.needs_rebuild_count}")
+    print(f"数据缺失（degraded）: {plan.degraded_count}")
     print(f"审计错误: {plan.error_count}")
     if rebuild_report:
         print(f"重建成功: {rebuild_report['success_count']}"
@@ -342,7 +357,12 @@ async def main() -> int:
         if info.get("error") == "instrument_not_found":
             print(f"  {sym}: NOT_FOUND")
             continue
-        status = "一致" if info.get("is_consistent") else "不一致"
+        if info.get("is_consistent"):
+            status = "一致"
+        elif info.get("degraded_reason"):
+            status = f"数据缺失 degraded={info.get('degraded_reason')}"
+        else:
+            status = "不一致"
         audit_err = info.get("error") or ""
         err_suffix = f" err={audit_err}" if audit_err else ""
         print(f"  {sym} ({info.get('name', '?')}): {status}"
