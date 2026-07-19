@@ -61,6 +61,12 @@ logger = logging.getLogger("services.adjustment_factor_calculator")
 # event_factor 与 1.0 差距小于此值时视为无效事件，不累积
 _UNIT_EVENT_THRESHOLD = 1e-10
 
+# 数据缺口检测阈值（日历日）
+# 若事件日的前一交易日 close 距事件日超过此阈值，视为数据缺口（如 000688
+# 2026-01-31 至 2026-06-28 缺口导致 2026-04-24 事件 prev_close 错误）。
+# 14 天覆盖春节/国庆等长假（最长 10 天）+ 安全余量。
+_BARS_DAILY_GAP_THRESHOLD_DAYS = 14
+
 
 @dataclass(frozen=True)
 class MissingEventClose:
@@ -176,17 +182,39 @@ def calculate_adjustment_factor_series(
         close_map[dt] = float(row["close"])
 
     sorted_close_dates = sorted(close_map.keys())
+    earliest_bar_date = sorted_close_dates[0] if sorted_close_dates else None
 
     # 检测数据缺失：事件日的前一交易日 close 不在 close_map 中
+    # [CHANGE-20260719-001 §1.3] 修复 000688 误报：
+    # - 事件日 <= earliest_bar_date 的事件不影响任何 bar 的因子（bar_date >= earliest_bar_date
+    #   >= event_date，event_date 不在 bar_date 之后），直接跳过，不算数据缺失。
+    # - 事件日 > earliest_bar_date 的事件需要 prev_close；若 prev_close 为 None 或
+    #   prev_close 距事件日超过 _BARS_DAILY_GAP_THRESHOLD_DAYS（数据缺口），抛异常。
     missing_event_dates: list[date] = []
+    gap_event_dates: list[date] = []
     for _, event in exc_events.iterrows():
         event_date = pd.Timestamp(event["date"]).date()
-        prev_close = _find_prev_close(event_date, sorted_close_dates, close_map)
-        if prev_close is None:
+        # 跳过早于等于最早 bar 的事件（不影响任何 bar 因子）
+        if earliest_bar_date is not None and event_date <= earliest_bar_date:
+            continue
+        prev_result = _find_prev_close(event_date, sorted_close_dates, close_map)
+        if prev_result is None:
             missing_event_dates.append(event_date)
+            continue
+        prev_close_date, _ = prev_result
+        # 数据缺口检测：prev_close 距事件日超过阈值 → 缺口（非简单数据缺失）
+        gap_days = (event_date - prev_close_date).days
+        if gap_days > _BARS_DAILY_GAP_THRESHOLD_DAYS:
+            gap_event_dates.append(event_date)
 
     if missing_event_dates:
         raise AdjustmentFactorDataError(missing_event_dates)
+    if gap_event_dates:
+        # 数据缺口（如 000688 2026-01-31 至 2026-06-28 缺口导致 2026-04-24
+        # 事件 prev_close 错误取 2026-01-30 的 26.80 而非 2026-04-23 的 40.97）
+        raise AdjustmentFactorDataError(
+            gap_event_dates, degraded_reason="bars_daily_gap",
+        )
 
     # 按日期升序排列事件
     exc_events = exc_events.sort_values("date")
@@ -198,11 +226,15 @@ def calculate_adjustment_factor_series(
     cumulative = 1.0
     for _, event in exc_events[::-1].iterrows():
         event_date = pd.Timestamp(event["date"]).date()
+        # 跳过早于等于最早 bar 的事件（不影响任何 bar 因子，前面已检测）
+        if earliest_bar_date is not None and event_date <= earliest_bar_date:
+            continue
         # prev_close 必非 None（前面已检测）
-        prev_close = _find_prev_close(event_date, sorted_close_dates, close_map)
-        assert prev_close is not None, (
+        prev_result = _find_prev_close(event_date, sorted_close_dates, close_map)
+        assert prev_result is not None, (
             f"prev_close 不应为 None（已检测数据缺失）：event_date={event_date}"
         )
+        _, prev_close = prev_result
         if prev_close == 0:
             logger.warning(
                 "事件日 %s 前一交易日 close=0（数据异常），跳过该事件", event_date,
@@ -265,10 +297,10 @@ def _find_prev_close(
     target_date: date,
     sorted_close_dates: list[date],
     close_map: dict[date, float],
-) -> float | None:
-    """查找 target_date 前一交易日的收盘价（纯函数）。
+) -> tuple[date, float] | None:
+    """查找 target_date 前一交易日的收盘价及日期（纯函数）。
 
-    在 sorted_close_dates 中找 < target_date 的最大日期，返回其 close。
+    在 sorted_close_dates 中找 < target_date 的最大日期，返回 (该日期, close)。
     若无（target_date 早于所有 close_date），返回 None。
 
     Args:
@@ -277,14 +309,18 @@ def _find_prev_close(
         close_map: 日期 -> 收盘价映射
 
     Returns:
-        前一交易日收盘价，或 None（数据缺失）
+        (前一交易日日期, 前一交易日收盘价)，或 None（数据缺失）
     """
-    prev_close = None
+    prev_date: date | None = None
+    prev_close: float | None = None
     for d in sorted_close_dates:
         if d >= target_date:
             break
+        prev_date = d
         prev_close = close_map[d]
-    return prev_close
+    if prev_date is None or prev_close is None:
+        return None
+    return (prev_date, prev_close)
 
 
 if __name__ == "__main__":
@@ -326,20 +362,36 @@ if __name__ == "__main__":
     )
     print(f"Case2 单事件 ✓ factor={factors2}")
 
-    # Case 3: 数据缺失 → 抛 AdjustmentFactorDataError
-    # 事件日 2026-04-24，但 raw_df 只有 2026-04-24（缺 2026-04-23 的 close）
+    # Case 3: 数据缺口 → 抛 AdjustmentFactorDataError（degraded_reason="bars_daily_gap"）
+    # [CHANGE-20260719-001 §1.3] 事件日 2026-04-24 在 raw_df 数据缺口中
+    # （raw_df 有 2026-01-30 和 2026-06-29，缺口 > 14 天阈值）。
+    # 纯函数检测到 prev_close（2026-01-30）距事件日 > 14 天 → 抛 bars_daily_gap。
     raw3 = pd.DataFrame({
-        "datetime": pd.to_datetime(["2026-04-24"]),
-        "close": [41.20],
+        "datetime": pd.to_datetime(["2026-01-30", "2026-06-29"]),
+        "close": [26.80, 33.42],
     })
-    xdxr3 = xdxr2
+    xdxr3 = xdxr2  # 事件日 2026-04-24
     try:
         calculate_adjustment_factor_series(raw3, xdxr3)
         raise AssertionError("Case3 应抛 AdjustmentFactorDataError")
     except AdjustmentFactorDataError as exc:
-        assert exc.degraded_reason == "bars_daily_missing_data"
+        assert exc.degraded_reason == "bars_daily_gap", (
+            f"Case3 degraded_reason 应为 bars_daily_gap，实际 {exc.degraded_reason}"
+        )
         assert date(2026, 4, 24) in exc.missing_event_dates
-        print(f"Case3 数据缺失抛异常 ✓ missing={exc.missing_event_dates}")
+        print(f"Case3 数据缺口抛异常 ✓ missing={exc.missing_event_dates} reason={exc.degraded_reason}")
+
+    # Case 3b: 事件日 <= earliest_bar_date → 跳过事件（不抛异常）
+    # [CHANGE-20260719-001 §1.3] 事件日等于最早 bar 日期时，事件不影响任何 bar
+    # （无 bar 在事件日之前），应跳过而非抛异常。
+    raw3b = pd.DataFrame({
+        "datetime": pd.to_datetime(["2026-04-24"]),
+        "close": [41.20],
+    })
+    xdxr3b = xdxr2  # 事件日 2026-04-24 == earliest_bar_date
+    factors3b = calculate_adjustment_factor_series(raw3b, xdxr3b)
+    assert factors3b == [1.0], f"Case3b 事件<=earliest_bar 应跳过: {factors3b}"
+    print(f"Case3b 事件<=earliest_bar 跳过 ✓ factors={factors3b}")
 
     # Case 4: 空 raw_df → 空列表
     raw4 = pd.DataFrame(columns=["datetime", "close"])
@@ -347,7 +399,9 @@ if __name__ == "__main__":
     assert factors4 == [], f"Case4 应返回空列表: {factors4}"
     print("Case4 空 raw_df ✓")
 
-    # Case 5: 事件日早于 raw_df 最早日期 → 数据缺失
+    # Case 5: 事件日早于 raw_df 最早日期 → 跳过事件（不抛异常）
+    # [CHANGE-20260719-001 §1.3] 事件日 < earliest_bar_date 时，事件不影响任何 bar
+    # （所有 bar 都在事件日之后），应跳过而非抛异常。
     raw5 = pd.DataFrame({
         "datetime": pd.to_datetime(["2026-06-16", "2026-06-17"]),
         "close": [10.0, 10.5],
@@ -357,12 +411,11 @@ if __name__ == "__main__":
         "category": 1, "fenhong": 1.0, "songzhuangu": 0,
         "peigu": 0, "peigujia": 0,
     }])
-    try:
-        calculate_adjustment_factor_series(raw5, xdxr5)
-        raise AssertionError("Case5 应抛 AdjustmentFactorDataError")
-    except AdjustmentFactorDataError as exc:
-        assert date(2026, 6, 15) in exc.missing_event_dates
-        print(f"Case5 事件日早于 raw_df ✓ missing={exc.missing_event_dates}")
+    # [CHANGE-20260719-001 §1.3] 事件日 2026-06-15 < earliest_bar_date 2026-06-16
+    # → 跳过事件，不抛异常，因子全 1.0
+    factors5 = calculate_adjustment_factor_series(raw5, xdxr5)
+    assert factors5 == [1.0, 1.0], f"Case5 事件<earliest_bar 应跳过: {factors5}"
+    print(f"Case5 事件<earliest_bar 跳过 ✓ factors={factors5}")
 
     # Case 6: 算法版本传参（用于日志）
     factors6 = calculate_adjustment_factor_series(

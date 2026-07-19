@@ -240,39 +240,96 @@ class TestMultipleEventsCumulative:
 
 
 class TestAdjustmentFactorDataError:
-    """数据缺失场景：事件日前一交易日 close 不在 raw_daily_bars 中。"""
+    """数据缺口/缺失场景。
 
-    def test_missing_prev_close_raises(self):
-        """事件日的前一交易日 close 缺失 → 抛 AdjustmentFactorDataError。"""
-        # 事件日 2026-04-24，但 raw_df 只有 2026-04-24（缺 2026-04-23）
-        raw = _raw_df(["2026-04-24"], [41.20])
+    [CHANGE-20260719-001 §1.3] 行为变更：
+    - 事件日 <= earliest_bar_date：跳过事件（不影响任何 bar 因子），不抛异常
+    - 事件日 > earliest_bar_date 但 prev_close 距事件日 > 14 天：抛 bars_daily_gap
+    - 事件日 > earliest_bar_date 且 prev_close 完全缺失：抛 bars_daily_missing_data
+      （实际不会发生，因为 earliest_bar_date 之后总有至少一个 bar 在事件日之前）
+    """
+
+    def test_gap_detection_raises(self):
+        """数据缺口 → 抛 AdjustmentFactorDataError（degraded_reason="bars_daily_gap"）。
+
+        事件日 2026-04-24 在 raw_df 缺口中（raw_df 有 2026-01-30 和 2026-06-29，
+        缺口 > 14 天阈值）。纯函数检测到 prev_close（2026-01-30）距事件日 > 14 天
+        → 抛 bars_daily_gap，防止用错误的 prev_close（26.80 而非 40.97）计算因子。
+        """
+        raw = _raw_df(["2026-01-30", "2026-06-29"], [26.80, 33.42])
         xdxr = _xdxr_df([{"date": "2026-04-24", "fenhong": 1.3}])
         with pytest.raises(AdjustmentFactorDataError) as exc_info:
             calculate_adjustment_factor_series(raw, xdxr)
         assert date(2026, 4, 24) in exc_info.value.missing_event_dates
-        assert exc_info.value.degraded_reason == "bars_daily_missing_data"
+        assert exc_info.value.degraded_reason == "bars_daily_gap"
 
-    def test_event_date_before_raw_earliest_raises(self):
-        """事件日早于 raw_daily_bars 最早日期 → 数据缺失。"""
+    def test_event_on_earliest_bar_skipped(self):
+        """事件日 == earliest_bar_date → 跳过事件（不抛异常，因子全 1.0）。
+
+        事件日等于最早 bar 日期时，事件不影响任何 bar（无 bar 在事件日之前），
+        应跳过而非抛异常。
+        """
+        raw = _raw_df(["2026-04-24"], [41.20])
+        xdxr = _xdxr_df([{"date": "2026-04-24", "fenhong": 1.3}])
+        factors = calculate_adjustment_factor_series(raw, xdxr)
+        assert factors == [1.0]
+
+    def test_event_before_earliest_bar_skipped(self):
+        """事件日 < earliest_bar_date → 跳过事件（不抛异常，因子全 1.0）。
+
+        事件日早于最早 bar 日期时，事件不影响任何 bar（所有 bar 都在事件日之后），
+        应跳过而非抛异常。这是 000688 误报修复的核心：1997-2001 年的旧事件
+        不应阻止 2024+ 年数据的因子计算。
+        """
         raw = _raw_df(["2026-06-16", "2026-06-17"], [10.0, 10.5])
         xdxr = _xdxr_df([{"date": "2026-06-15", "fenhong": 1.0}])
-        with pytest.raises(AdjustmentFactorDataError) as exc_info:
-            calculate_adjustment_factor_series(raw, xdxr)
-        assert date(2026, 6, 15) in exc_info.value.missing_event_dates
+        factors = calculate_adjustment_factor_series(raw, xdxr)
+        assert factors == [1.0, 1.0]
 
-    def test_multiple_missing_event_dates(self):
-        """多个事件日 close 缺失 → missing_event_dates 列表完整。"""
-        # 两个事件日 (06-15, 06-20)，raw_df 只有 06-22 之后 → 两个事件均缺前一交易日 close
+    def test_multiple_old_events_skipped(self):
+        """多个早于 earliest_bar 的事件全部跳过（不抛异常）。"""
         raw = _raw_df(["2026-06-22", "2026-06-23"], [11.0, 11.5])
         xdxr = _xdxr_df([
             {"date": "2026-06-15", "fenhong": 1.0},
             {"date": "2026-06-20", "fenhong": 1.0},
         ])
-        with pytest.raises(AdjustmentFactorDataError) as exc_info:
-            calculate_adjustment_factor_series(raw, xdxr)
-        assert date(2026, 6, 15) in exc_info.value.missing_event_dates
-        assert date(2026, 6, 20) in exc_info.value.missing_event_dates
-        assert len(exc_info.value.missing_event_dates) == 2
+        factors = calculate_adjustment_factor_series(raw, xdxr)
+        assert factors == [1.0, 1.0]
+
+    def test_mixed_old_and_valid_events(self):
+        """混合事件：早于 earliest_bar 的跳过，之后的正常处理。"""
+        # earliest_bar = 2026-06-16
+        # 事件 2026-06-10（早于 earliest_bar）→ 跳过
+        # 事件 2026-06-20（晚于 earliest_bar）→ 正常处理
+        raw = _raw_df(
+            ["2026-06-16", "2026-06-19", "2026-06-20"],
+            [10.0, 10.0, 12.0],
+        )
+        xdxr = _xdxr_df([
+            {"date": "2026-06-10", "fenhong": 5.0},  # 跳过
+            {"date": "2026-06-20", "fenhong": 1.0},  # 处理
+        ])
+        factors = calculate_adjustment_factor_series(raw, xdxr)
+        # 06-10 事件被跳过，不影响因子
+        # 06-20 事件：preclose = (10×10 - 1)/10 = 9.9, factor = 9.9/10 = 0.99
+        # 06-16, 06-19: 事件日在后 → factor = 0.99
+        # 06-20: 事件日当天 → factor = 1.0
+        expected_factor = (10.0 * 10 - 1.0) / 10 / 10.0
+        assert factors[0] == pytest.approx(expected_factor, abs=1e-10)
+        assert factors[1] == pytest.approx(expected_factor, abs=1e-10)
+        assert factors[2] == pytest.approx(1.0, abs=1e-10)
+
+    def test_gap_within_threshold_not_raised(self):
+        """prev_close 距事件日 <= 14 天（如长假）→ 不算缺口，正常计算。"""
+        # 模拟春节缺口：2026-02-14（节前最后交易日）→ 2026-02-25（节后事件日）
+        # 缺口 11 天 <= 14 天阈值 → 正常计算
+        raw = _raw_df(["2026-02-14", "2026-02-25"], [10.0, 11.0])
+        xdxr = _xdxr_df([{"date": "2026-02-25", "fenhong": 1.0}])
+        # 不应抛异常
+        factors = calculate_adjustment_factor_series(raw, xdxr)
+        expected_factor = (10.0 * 10 - 1.0) / 10 / 10.0
+        assert factors[0] == pytest.approx(expected_factor, abs=1e-10)
+        assert factors[1] == pytest.approx(1.0, abs=1e-10)
 
     def test_custom_degraded_reason(self):
         """AdjustmentFactorDataError 支持自定义 degraded_reason。"""
