@@ -1,18 +1,18 @@
-"""Canonical InputProvider 集成测试（CHANGE-20260718-007 S3.2）。
+"""Canonical InputProvider 集成测试（CHANGE-20260718-007 S3.2 + CHANGE-20260719-001 §二）。
 
 验证 compute_with_mdas() 的核心行为：
 1. 通过 MDAS 获取行情（mock MDAS，验证 get_bars 被调用且参数从合同推导）
-2. 拒绝 registered_only 算法（抛 ContractViolationError）
-3. source_bar_hash/adj_factor_hash 透传到 compute()
-4. timeframe 校验（不在 input_timeframes 时抛 ContractViolationError）
-5. kernel_extra_kwargs 透传（如 fast/slow/signal）
-6. 未注册算法抛 AlgorithmNotFoundError
+2. 接受 production_wired 算法（smc/bollinger 已迁移到 canonical_adapters）
+3. 拒绝 registered_only 算法（抛 ContractViolationError，通过临时注册算法测试）
+4. source_bar_hash/adj_factor_hash 透传到 compute()
+5. timeframe 校验（不在 input_timeframes 时抛 ContractViolationError）
+6. kernel_extra_kwargs 透传（如 fast/slow/signal）
+7. 未注册算法抛 AlgorithmNotFoundError
 
 设计要点：
 - mock MarketDataAggregationService（不连真实 DB/pytdx）
 - 测试 hermetic，不依赖外部状态
-- macd 作为 input_provider_wired 参考算法
-- smc/bollinger 等作为 registered_only 对照
+- macd/smc/bollinger 均为 production_wired 参考算法（§二 后全部迁移）
 """
 
 from __future__ import annotations
@@ -118,38 +118,86 @@ async def test_compute_with_mdas_fetches_via_mdas() -> None:
 
 
 # =============================================================================
-# 2. compute_with_mdas 拒绝 registered_only 算法
+# 2. compute_with_mdas 拒绝 registered_only 算法 / 接受 production_wired
 # =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_compute_with_mdas_accepts_production_wired_smc() -> None:
+    """CHANGE-20260719-001 §二：smc 已迁移到 production_wired，应被 compute_with_mdas 接受。
+
+    之前 smc 的 migration_status=registered_only（compute_smc_dto callable 不存在），
+    §二 迁移后 smc 使用 canonical_adapters.compute_smc_adapter，应可经 compute_with_mdas 调用。
+    """
+    bar_result = _make_mock_bar_result()
+    with _patch_mdas(bar_result):
+        result = await CanonicalComputationService.compute_with_mdas(
+            algorithm_id="smc",
+            session=MagicMock(),
+            instrument_id=_INSTRUMENT_ID,
+            as_of=date(2026, 7, 18),
+        )
+    assert result.algorithm_id == "smc"
+    assert result.contract_fingerprint == "smc-cf-v1"
+    assert result.result_hash  # 非空
+
+
+@pytest.mark.asyncio
+async def test_compute_with_mdas_accepts_production_wired_bollinger() -> None:
+    """CHANGE-20260719-001 §二：bollinger 已迁移到 production_wired，应被 compute_with_mdas 接受。"""
+    bar_result = _make_mock_bar_result()
+    with _patch_mdas(bar_result):
+        result = await CanonicalComputationService.compute_with_mdas(
+            algorithm_id="bollinger",
+            session=MagicMock(),
+            instrument_id=_INSTRUMENT_ID,
+            as_of=date(2026, 7, 18),
+        )
+    assert result.algorithm_id == "bollinger"
+    assert result.contract_fingerprint == "bb-cf-v1"
 
 
 @pytest.mark.asyncio
 async def test_compute_with_mdas_rejects_registered_only() -> None:
     """registered_only 算法不能经 compute_with_mdas 调用（抛 ContractViolationError）。
 
-    smc 的 migration_status=registered_only（compute_smc_dto callable 不存在）。
+    CHANGE-20260719-001 §二 后所有内置算法已 production_wired，
+    本测试通过临时注册一个 registered_only 算法验证拒绝逻辑。
     """
-    with _patch_mdas():
-        with pytest.raises(ContractViolationError) as exc_info:
-            await CanonicalComputationService.compute_with_mdas(
-                algorithm_id="smc",
-                session=MagicMock(),
-                instrument_id=_INSTRUMENT_ID,
-            )
-    assert "registered_only" in str(exc_info.value)
-    assert "smc" in str(exc_info.value)
+    from app.contracts.algorithm_registry import (
+        AlgorithmContract,
+        AlgorithmRegistry,
+    )
 
-
-@pytest.mark.asyncio
-async def test_compute_with_mdas_rejects_bollinger_registered_only() -> None:
-    """bollinger 也是 registered_only（compute_bollinger_bands callable 不存在）。"""
-    with _patch_mdas():
-        with pytest.raises(ContractViolationError) as exc_info:
-            await CanonicalComputationService.compute_with_mdas(
-                algorithm_id="bollinger",
-                session=MagicMock(),
-                instrument_id=_INSTRUMENT_ID,
-            )
-    assert "registered_only" in str(exc_info.value)
+    # 临时注册一个 registered_only 算法
+    temp_id = "_test_registered_only_algo"
+    AlgorithmRegistry.register(AlgorithmContract(
+        algorithm_id=temp_id,
+        algorithm_version="test-v1",
+        kernel_module="app.services.canonical_adapters",
+        kernel_entrypoint="app.services.canonical_adapters:compute_macd_adapter",
+        input_timeframes=("1d",),
+        adjustment_mode="qfq",
+        completed_only=True,
+        warmup_bars=10,
+        output_schema_version=1,
+        contract_fingerprint="test-cf-v1",
+        migration_status="registered_only",
+        description="临时测试算法",
+    ))
+    try:
+        with _patch_mdas():
+            with pytest.raises(ContractViolationError) as exc_info:
+                await CanonicalComputationService.compute_with_mdas(
+                    algorithm_id=temp_id,
+                    session=MagicMock(),
+                    instrument_id=_INSTRUMENT_ID,
+                )
+        assert "registered_only" in str(exc_info.value)
+        assert temp_id in str(exc_info.value)
+    finally:
+        # 清理临时注册
+        AlgorithmRegistry._contracts.pop(temp_id, None)
 
 
 # =============================================================================

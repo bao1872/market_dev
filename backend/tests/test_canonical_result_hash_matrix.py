@@ -209,9 +209,12 @@ async def test_four_chain_baseline_matrix_documented() -> None:
     assert len(baseline_hash) == 16, f"result_hash 应为 16 字符: {baseline_hash}"
 
     # 断言 migration_status 字段存在且合法（矩阵文档的一部分）
+    # CHANGE-20260719-001 §二：macd 已从 input_provider_wired 升级到 production_wired
     contract = AlgorithmRegistry.get("macd")
-    assert contract.migration_status == "input_provider_wired"
-    assert contract.migration_status in ("registered_only", "input_provider_wired")
+    assert contract.migration_status == "production_wired"
+    assert contract.migration_status in (
+        "registered_only", "input_provider_wired", "production_wired"
+    )
 
     # 文档化基线矩阵（当前四链均未迁移，result_hash 为 None）
     four_chain_matrix = {

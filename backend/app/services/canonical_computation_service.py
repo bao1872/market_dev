@@ -280,8 +280,8 @@ class CanonicalComputationService:
 
         Raises:
             AlgorithmNotFoundError: algorithm_id 未注册
-            ContractViolationError: migration_status 不是 input_provider_wired，
-                或 timeframe 不在 input_timeframes 中
+            ContractViolationError: migration_status 不是 input_provider_wired/
+                production_wired，或 timeframe 不在 input_timeframes 中
         """
         # 1. 查合同
         try:
@@ -289,12 +289,12 @@ class CanonicalComputationService:
         except KeyError as e:
             raise AlgorithmNotFoundError(algorithm_id) from e
 
-        # 2. 校验 migration_status
-        if contract.migration_status != "input_provider_wired":
+        # 2. 校验 migration_status（CHANGE-20260719-001 §二：接受 production_wired）
+        if contract.migration_status not in ("input_provider_wired", "production_wired"):
             raise ContractViolationError(
                 algorithm_id,
                 f"migration_status={contract.migration_status!r}，"
-                f"无法经 compute_with_mdas 调用（需 input_provider_wired）。"
+                f"无法经 compute_with_mdas 调用（需 input_provider_wired 或 production_wired）。"
                 f"该算法尚未接线统一 adapter，请直接调用其 kernel。",
             )
 
