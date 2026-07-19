@@ -319,9 +319,13 @@ class FactorConsistencyAuditor:
         stored_sorted = stored_df.sort_values("trade_date").reset_index(drop=True)
         expected_sorted = expected_df.sort_values("trade_date").reset_index(drop=True)
 
-        # 确认 trade_date 完全一致（行数相同但日期不同也算 mismatch）
-        stored_dates = stored_sorted["trade_date"].tolist()
-        expected_dates = expected_sorted["trade_date"].tolist()
+        # [Bugfix CHANGE-20260718-007] - 归一化 trade_date 类型后再比较。
+        # stored 的 trade_date 来自 DB，可能是 datetime64[s]（pandas.Timestamp）；
+        # expected 的 trade_date 来自 compute_expected_adj_factors，可能是 object
+        #（datetime.date）。类型不同时 == 比较恒为 False，导致全部股票误报
+        # date_sequence_mismatch（审计从未真正工作过）。统一转 date 对象后再比较。
+        stored_dates = pd.to_datetime(stored_sorted["trade_date"]).dt.date.tolist()
+        expected_dates = pd.to_datetime(expected_sorted["trade_date"]).dt.date.tolist()
         dates_match = stored_dates == expected_dates
 
         mismatches: list[FactorMismatchDetail] = []
@@ -344,10 +348,9 @@ class FactorConsistencyAuditor:
                 error="date_sequence_mismatch",
             )
 
-        # 逐日比对因子值
+        # 逐日比对因子值（stored_dates 已归一化为 date 对象）
         for i in range(stored_count):
-            td = stored_dates[i]
-            td_date = td.date() if hasattr(td, "date") else pd.Timestamp(td).date()
+            td_date = stored_dates[i]
             stored_val = stored_sorted["adj_factor"].iloc[i]
             expected_val = float(expected_sorted["expected_adj_factor"].iloc[i])
 
@@ -582,5 +585,26 @@ if __name__ == "__main__":
     h3 = FactorConsistencyAuditor._hash_factor_series(stored3)
     assert h1 != h3, "不同因子序列 hash 应不同"
     print("Case6 hash 确定性 ✓")
+
+    # Case 7: [Bugfix CHANGE-20260718-007] 日期类型不一致（stored=Timestamp, expected=date）
+    # 生产场景：stored 来自 DB（datetime64[s] → Timestamp），expected 来自
+    # compute_expected_adj_factors（object → datetime.date）。日期相同但类型不同，
+    # 修复前 == 比较恒 False，误报 date_sequence_mismatch。修复后应正确识别为一致。
+    dates7_stored = pd.to_datetime(["2026-06-16", "2026-06-17", "2026-06-18"])  # Timestamp
+    dates7_expected = pd.Series([date(2026, 6, 16), date(2026, 6, 17), date(2026, 6, 18)])  # date
+    stored7 = pd.DataFrame({
+        "trade_date": dates7_stored, "adj_factor": [1.0, 1.0, 1.0],
+    })
+    expected7 = pd.DataFrame({
+        "trade_date": dates7_expected, "expected_adj_factor": [1.0, 1.0, 1.0],
+    })
+    r7 = FactorConsistencyAuditor._compare_factors(
+        test_iid, "CASE7_TYPE_MISMATCH", stored7, expected7, max_mismatches=20,
+    )
+    assert r7.is_consistent, (
+        f"Case7 日期类型不一致但值相同应一致: error={r7.error}, mismatch={r7.mismatch_count}"
+    )
+    assert r7.error is None, f"Case7 不应有 error: {r7.error}"
+    print("Case7 日期类型不一致归一化 ✓")
 
     print("OK")

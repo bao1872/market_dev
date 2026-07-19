@@ -97,6 +97,9 @@ class BatchResult:
     daily_coverage: float | None = None
     # [BarsScheduler] - 描述: 跳过原因（如 NON_TRADING_DAY），供上游编排透传到 metadata
     skip_reason: str | None = None
+    # [S3.1 CHANGE-20260718-007] - 因子一致性审计结果（日线阶段完成后填充）
+    # 包含 total_audited / consistent / needs_rebuild / rebuilt / failed / errors
+    factor_audit: dict[str, int] | None = None
 
 
 class BarsSchedulerService:
@@ -331,6 +334,30 @@ class BarsSchedulerService:
                 except Exception as exc:
                     logger.warning(
                         "[BarsScheduler] 因子重建阶段异常（不阻断后续）: %s", exc,
+                        exc_info=True,
+                    )
+
+                # [S3.1 CHANGE-20260718-007] - 1.5. 因子一致性审计 + 串行重建
+                # 审计发现 _rebuild_factors_if_needed 漏掉的不一致股票（legacy 错误、
+                # fingerprint 未变但存量错误、1.0 伪装成功等），立即串行重建。
+                # 必须在覆盖率门禁/DSA 前，保证 DSA/snapshot 使用一致因子。
+                # 软失败：审计/重建异常不阻断 DSA（DSA 可基于旧因子 degraded 运行），
+                # 但失败清单写入 job_run_event 留下诊断痕迹。
+                try:
+                    audit_result = await self._audit_and_rebuild_factors(
+                        trade_date, instruments, db_session, job_run_id=job_run_id,
+                    )
+                    result.factor_audit = audit_result
+                    logger.info(
+                        "[BarsScheduler] 因子审计阶段完成: audited=%d consistent=%d "
+                        "needs_rebuild=%d rebuilt=%d failed=%d errors=%d",
+                        audit_result["total_audited"], audit_result["consistent"],
+                        audit_result["needs_rebuild"], audit_result["rebuilt"],
+                        audit_result["failed"], audit_result["errors"],
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[BarsScheduler] 因子审计阶段异常（不阻断后续）: %s", exc,
                         exc_info=True,
                     )
 
@@ -668,6 +695,247 @@ class BarsSchedulerService:
                 )
 
         return result
+
+    async def _audit_and_rebuild_factors(
+        self,
+        trade_date: date,
+        instruments: list[Instrument],
+        db_session: AsyncSession | None = None,
+        job_run_id: uuid.UUID | None = None,
+    ) -> dict[str, Any]:
+        """[S3.1 CHANGE-20260718-007] - 因子一致性审计 + 串行重建。
+
+        在 _rebuild_factors_if_needed 之后、_check_daily_coverage_and_trigger_dsa 之前
+        执行，审计 _rebuild_factors_if_needed 可能漏掉的不一致股票（legacy 错误、
+        fingerprint 未变但存量错误、1.0 伪装成功等），立即串行重建。
+
+        流程：
+        1. FactorReconciliationTask.dry_run: 全市场只读审计 → ReconciliationPlan
+        2. 若 needs_rebuild > 0: rebuild_batch 串行重建（每只股票独立事务）
+        3. 写 FACTOR_AUDIT job_run_event（start + done，含 before/after hash 摘要）
+
+        软失败：审计/重建异常不阻断 DSA（DSA 可基于旧因子 degraded 运行），
+        但失败清单写入事件留下诊断痕迹。调用方已 try/except 包裹。
+
+        Args:
+            trade_date: 交易日期
+            instruments: active A 股列表（复用调用方缓存，本方法未直接使用，
+                仅供日志记录总数；dry_run 内部独立查询 active 股票保证一致性）
+            db_session: 可选的 DB 会话（None 时内部新建）
+            job_run_id: 可选的 SchedulerJobRun.id，传入时写 FACTOR_AUDIT 事件
+
+        Returns:
+            dict: total_audited / consistent / needs_rebuild / rebuilt / failed / errors
+        """
+        from app.services.factor_reconciliation import FactorReconciliationTask
+        from app.services.job_run_event_service import append_event
+
+        total = len(instruments)
+        summary: dict[str, Any] = {
+            "total_audited": 0,
+            "consistent": 0,
+            "needs_rebuild": 0,
+            "rebuilt": 0,
+            "failed": 0,
+            "errors": 0,
+        }
+
+        if total == 0:
+            logger.warning("[BarsScheduler] _audit_and_rebuild_factors: 无 active 股票")
+            return summary
+
+        logger.info(
+            "[BarsScheduler] 开始因子一致性审计 trade_date=%s total=%d",
+            trade_date, total,
+        )
+
+        # 写开始事件
+        if job_run_id is not None:
+            try:
+                async def _write_audit_start(db: AsyncSession) -> None:
+                    await append_event(
+                        db=db, job_run_id=job_run_id,
+                        step="FACTOR_AUDIT", level="info",
+                        message=f"开始因子一致性审计: total={total}",
+                        payload={"total": total, "trade_date": trade_date.isoformat()},
+                    )
+                    await db.commit()
+                if db_session is not None:
+                    await _write_audit_start(db_session)
+                else:
+                    async with AsyncSessionLocal() as session:
+                        await _write_audit_start(session)
+            except Exception as exc:
+                logger.warning(
+                    "[BarsScheduler] 写 FACTOR_AUDIT start 事件失败: %s", exc,
+                )
+
+        task = FactorReconciliationTask()
+
+        # =========================================================================
+        # Phase 1: dry-run 全市场审计
+        # =========================================================================
+        try:
+            if db_session is not None:
+                plan = await task.dry_run(
+                    db_session, batch_size=50, max_mismatches=20,
+                )
+            else:
+                async with AsyncSessionLocal() as session:
+                    plan = await task.dry_run(
+                        session, batch_size=50, max_mismatches=20,
+                    )
+        except Exception as exc:
+            logger.error(
+                "[BarsScheduler] 因子审计 dry_run 失败: %s", exc, exc_info=True,
+            )
+            summary["errors"] = total  # 无法审计，全部计为 error
+            await self._write_audit_done_event(
+                db_session, job_run_id, summary,
+                error=f"dry_run_failed: {type(exc).__name__}: {exc}",
+            )
+            return summary
+
+        summary["total_audited"] = plan.total_audited
+        summary["consistent"] = plan.consistent_count
+        summary["needs_rebuild"] = plan.needs_rebuild_count
+        summary["errors"] = plan.error_count
+
+        logger.info(
+            "[BarsScheduler] 因子审计 dry_run 完成: audited=%d consistent=%d "
+            "needs_rebuild=%d errors=%d",
+            plan.total_audited, plan.consistent_count,
+            plan.needs_rebuild_count, plan.error_count,
+        )
+
+        if plan.needs_rebuild_count > 0:
+            logger.warning(
+                "[BarsScheduler] 发现 %d 只不一致股票: %s",
+                plan.needs_rebuild_count,
+                [i.symbol for i in plan.items[:20]],
+            )
+
+        # =========================================================================
+        # Phase 2: 串行重建不一致股票
+        # =========================================================================
+        if plan.needs_rebuild_count > 0:
+            try:
+                if db_session is not None:
+                    report = await task.rebuild_batch(
+                        db_session, plan, batch_size=10,
+                    )
+                else:
+                    async with AsyncSessionLocal() as session:
+                        report = await task.rebuild_batch(
+                            session, plan, batch_size=10,
+                        )
+                summary["rebuilt"] = report.success_count
+                summary["failed"] = report.failure_count
+
+                logger.info(
+                    "[BarsScheduler] 因子重建完成: total=%d success=%d failure=%d",
+                    report.total_planned, report.success_count, report.failure_count,
+                )
+
+                # 收集失败清单用于事件
+                failed_list = [
+                    {
+                        "symbol": r.symbol,
+                        "error_code": r.error_code,
+                        "before_hash": r.before_hash,
+                        "after_hash": r.after_hash,
+                    }
+                    for r in report.results if not r.success
+                ]
+                success_before_after = [
+                    {
+                        "symbol": r.symbol,
+                        "before_hash": r.before_hash,
+                        "after_hash": r.after_hash,
+                    }
+                    for r in report.results if r.success
+                ]
+                await self._write_audit_done_event(
+                    db_session, job_run_id, summary,
+                    needs_rebuild_symbols=[i.symbol for i in plan.items],
+                    failed_list=failed_list,
+                    success_before_after=success_before_after,
+                )
+            except Exception as exc:
+                logger.error(
+                    "[BarsScheduler] 因子重建 rebuild_batch 失败: %s",
+                    exc, exc_info=True,
+                )
+                summary["failed"] = plan.needs_rebuild_count  # 全部计为失败
+                await self._write_audit_done_event(
+                    db_session, job_run_id, summary,
+                    error=f"rebuild_batch_failed: {type(exc).__name__}: {exc}",
+                    needs_rebuild_symbols=[i.symbol for i in plan.items],
+                )
+        else:
+            await self._write_audit_done_event(db_session, job_run_id, summary)
+
+        return summary
+
+    async def _write_audit_done_event(
+        self,
+        db_session: AsyncSession | None,
+        job_run_id: uuid.UUID | None,
+        summary: dict[str, Any],
+        *,
+        error: str | None = None,
+        needs_rebuild_symbols: list[str] | None = None,
+        failed_list: list[dict[str, Any]] | None = None,
+        success_before_after: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """[S3.1] - 写入 FACTOR_AUDIT_DONE 事件（含 before/after hash 摘要）。"""
+        if job_run_id is None:
+            return
+        from app.services.job_run_event_service import append_event
+
+        payload: dict[str, Any] = dict(summary)
+        if error:
+            payload["error"] = error
+            level = "error"
+        elif summary.get("failed", 0) > 0:
+            level = "warn"
+        else:
+            level = "info"
+        if needs_rebuild_symbols:
+            payload["needs_rebuild_symbols"] = needs_rebuild_symbols[:50]
+        if failed_list:
+            payload["failed_list"] = failed_list[:50]
+        if success_before_after:
+            # 只记录前 20 个 before/after hash，避免事件过大
+            payload["success_before_after_sample"] = success_before_after[:20]
+
+        message = (
+            f"因子审计完成: audited={summary['total_audited']} "
+            f"consistent={summary['consistent']} "
+            f"needs_rebuild={summary['needs_rebuild']} "
+            f"rebuilt={summary['rebuilt']} failed={summary['failed']} "
+            f"errors={summary['errors']}"
+        )
+        if error:
+            message += f" error={error}"
+
+        try:
+            async def _write_done(db: AsyncSession) -> None:
+                await append_event(
+                    db=db, job_run_id=job_run_id,
+                    step="FACTOR_AUDIT", level=level,
+                    message=message, payload=payload,
+                )
+                await db.commit()
+            if db_session is not None:
+                await _write_done(db_session)
+            else:
+                async with AsyncSessionLocal() as session:
+                    await _write_done(session)
+        except Exception as exc:
+            logger.warning(
+                "[BarsScheduler] 写 FACTOR_AUDIT done 事件失败: %s", exc,
+            )
 
     async def _append_daily_done_event(
         self,
