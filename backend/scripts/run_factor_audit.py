@@ -46,7 +46,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 # 确保可以 import app.*（容器内 WORKDIR=/app，宿主机调试时需手动 cd）
-sys.path.insert(0, "/root/web_dev/backend")
+# 两个路径都插入，Python 自动选择包含 app 包的那个
+sys.path.insert(0, "/app")  # 容器内
+sys.path.insert(0, "/root/web_dev/backend")  # 宿主机调试
 
 from app.db import AsyncSessionLocal  # noqa: E402
 from app.services.factor_consistency_audit import FactorConsistencyAuditor  # noqa: E402
