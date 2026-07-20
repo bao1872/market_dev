@@ -46,22 +46,23 @@ GET /api/v1/instruments/{id}/indicators
       （禁止重算，禁止 VA 过滤，VA 外 Peak 必须可见）
 ```
 
-详情链调用的算法族（CHANGE-20260719-001 §二 后 canonical adapter 为合同真源）：
+详情链调用的算法族（CHANGE-20260720-001 §五 后四链通过 `canonical_adapters` re-export 接入 kernel，AST 硬门禁已升级为硬失败）：
 
-| algorithm_id | canonical adapter（合同真源，production_wired） | 详情链当前调用方（待迁移到 `compute_with_mdas`） |
+| algorithm_id | canonical adapter（合同真源，production_wired） | 详情链当前调用方（通过 `canonical_adapters` re-export） |
 |---|---|---|
-| `node_cluster` | `canonical_adapters:compute_node_cluster_adapter` | `VolumeNodeMonitor.compute_indicators`（直接调 `node_cluster_engine.compute_node_cluster_profile`） |
-| `dsa` | `canonical_adapters:compute_dsa_adapter` | `indicator_service`（按策略 key 路由，直接调 `dsa_selector.compute_dsa_bundle`） |
-| `smc` | `canonical_adapters:compute_smc_adapter` | `indicator_service`（`include_smc=true` 时，直接调 `smc_indicator.compute_smc_indicators` + `smc_view_adapter.adapt_smc_to_display_dto`） |
-| `bollinger` | `canonical_adapters:compute_bollinger_adapter` | `indicator_service._compute_bb`（直接调 `bollinger_features_plotly.bollinger`） |
-| `macd` | `canonical_adapters:compute_macd_adapter` | `indicator_service._compute_macd`（直接调 `indicator_service.compute_macd`） |
-| `breakout` | `canonical_adapters:compute_breakout_adapter` | `indicator_service._compute_breakout`（直接调 `trendlines_with_breaks_luxalgo.trendlines_with_breaks`） |
+| `node_cluster` | `canonical_adapters:compute_node_cluster_adapter` | `VolumeNodeMonitor.compute_indicators`（通过 `canonical_adapters` re-export 调 `node_cluster_engine.compute_node_cluster_profile`） |
+| `dsa` | `canonical_adapters:compute_dsa_adapter` | `indicator_service`（通过 `canonical_adapters` re-export 调 `dsa_selector.compute_dsa_bundle`） |
+| `smc` | `canonical_adapters:compute_smc_adapter` | `indicator_service`（`include_smc=true` 时，通过 `canonical_adapters` re-export 调 `smc_indicator.compute_smc_indicators` + `smc_view_adapter.adapt_smc_to_display_dto`） |
+| `bollinger` | `canonical_adapters:compute_bollinger_adapter` | `indicator_service._compute_bb`（通过 `canonical_adapters` re-export 调 `bollinger_features_plotly.bollinger`） |
+| `macd` | `canonical_adapters:compute_macd_adapter` | `indicator_service._compute_macd`（通过 `canonical_adapters` re-export 调 `indicator_service.compute_macd`） |
+| `breakout` | `canonical_adapters:compute_breakout_adapter` | `indicator_service._compute_breakout`（通过 `canonical_adapters` re-export 调 `trendlines_with_breaks_luxalgo.trendlines_with_breaks`） |
 | `sqzmom` | `canonical_adapters:compute_sqzmom_adapter` | （详情链不调用，盘后链专用） |
 | `participation` | `canonical_adapters:compute_participation_adapter` | （详情链不调用，盘后链专用） |
 
-**诚实声明**（PROMPT.md L693）：§二 仅完成 adapter 层基础设施，详情链当前仍直接调 kernel，
-未替换为 `CanonicalComputationService.compute_with_mdas` 调用。AST 硬门禁
-`test_four_chain_no_direct_kernel_import` 以 `xfail(strict=True)` 标记此目标。
+**诚实声明**（CHANGE-20260720-001 §五）：§五 完成四链 re-export 接入（满足 AST 硬门禁），
+详情链当前通过 `canonical_adapters` re-export 调用底层 kernel，**未全部改为 `compute_with_mdas()` 调用**；
+AST 硬门禁 `test_four_chain_no_direct_kernel_import` 已从 `xfail(strict=True)` 升级为硬失败，
+`canonical_adapters` 作为 SSOT 入口（不在 `_FOUR_CHAIN_MODULES` 中）可自由 import kernel 模块并 re-export 给四链使用。
 
 前端渲染契约（CHANGE-20260718-006 Section 4 强化）：
 
@@ -275,3 +276,4 @@ Capture/飞书链约束（CHANGE-20260718-006 Section 3）：
 - CHANGE-20260718-004：初始版本（Node Cluster 三链数据流 + MDAS 矩阵 + 缓存层 + ref/ 隔离边界）
 - CHANGE-20260718-006 Section 5c：扩展为四链地图（详情/盘后/盘中/Capture）+ 算法族→Kernel→调用链矩阵 + CanonicalComputationService result_hash 缓存层
 - CHANGE-20260719-001 §二：12 算法族 canonical adapter 升级为 `production_wired`（§2 详情链表 + §3 盘后链表 + §7 矩阵新增 "canonical adapter（合同真源）" 列，底层 kernel 列保留）+ 诚实声明四链当前仍直接调 kernel（AST 硬门禁 `xfail(strict=True)` 标记）
+- CHANGE-20260720-001 §五：四链通过 `canonical_adapters` re-export 接入 kernel（§2 详情链 + §3 盘后链 + §7 矩阵表格"当前调用方"列更新为 re-export 路径）；AST 硬门禁 `test_four_chain_no_direct_kernel_import` 从 `xfail(strict=True)` 升级为硬失败；`canonical_adapters` 作为 SSOT 入口（不在 `_FOUR_CHAIN_MODULES` 中）可自由 import kernel 模块；`compute_macd_adapter` 延迟 import `compute_macd` 规避 `indicator_service → canonical_adapters → indicator_service` 循环依赖；四链模块迁移表：indicator_service 5 个 / feature_snapshot_service 4 个 / monitor_batch_service 1 个 / stock_capture_service 0 个；诚实声明改为"§五 完成四链 re-export 接入（满足 AST 门禁），未全部改为 `compute_with_mdas()` 调用"

@@ -320,12 +320,13 @@ function addIndicators(bars: BarData[]): CalculatedBar[] {
   return out
 }
 
-// [Volume Profile] - 从后端 indicators 提取 VP 数据（SSOT: watchlist_monitor.compute_indicators）
+// [Volume Profile] - 从后端 indicators 提取 VP 数据
+// [CHANGE-20260720-001] 优先读取独立 data["node_cluster"]（固定 1d×250+15m×4000，五周期一致）；
+//   旧 watchlist_monitor/volume_node_monitor 仅临时兼容回退，迁移完成后删除。
 // profile_rows/profile_meta/peak_rows 为价格档位快照，非 bar 对齐时间序列，禁止前端重算
-// 迁移期 fallback volume_node_monitor（旧策略键），正式迁移完成后删除回退
 function extractBackendProfile(indicators: IndicatorResponse | undefined): BackendProfile | null {
   if (!indicators?.data) return null
-  const vn = (indicators.data['watchlist_monitor'] ?? indicators.data['volume_node_monitor']) as unknown as
+  const vn = (indicators.data['node_cluster'] ?? indicators.data['watchlist_monitor'] ?? indicators.data['volume_node_monitor']) as unknown as
     | Record<string, unknown>
     | undefined
   if (!vn) return null

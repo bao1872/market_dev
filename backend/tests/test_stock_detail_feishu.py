@@ -519,3 +519,384 @@ class TestStockDetailFeishuCapturePayload:
             assert captured_payload.get("disable_cache") is True
         finally:
             app.dependency_overrides.clear()
+
+
+class TestStockDetailFeishuIndicatorView:
+    """[CHANGE-20260720-003 §四] 详情页手动分享时 POST body 携带 indicator_view。
+
+    测试覆盖：
+    1. POST body {"indicator_view": "bollinger"} → capture_payload.indicator_view == "bollinger"
+    2. POST body {"indicator_view": "smc"} → output_filename 含 -smc 后缀
+    3. POST body {"indicator_view": "node_cluster"} → capture_payload.indicator_view == "node_cluster"
+    4. POST body {} → 向后兼容（capture_payload 不含 indicator_view 键）
+    5. POST body {"indicator_view": "invalid"} → 非法值降级为 None（向后兼容）
+    6. 文字消息 text_content 按 indicator_view 拆分字段（bollinger 不含节点字段）
+    """
+
+    @pytest.mark.asyncio
+    async def test_post_body_bollinger_propagates_to_capture_payload(
+        self, db_session, test_instrument, user_with_feishu_channel,
+    ) -> None:
+        """POST body {"indicator_view": "bollinger"} → capture_payload.indicator_view == "bollinger"。"""
+        user, _ = user_with_feishu_channel
+        _override_get_db(db_session)
+
+        try:
+            capture_resp = _make_capture_response()
+            image_fetch_resp = _make_image_fetch_response()
+
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=capture_resp)
+            mock_client.get = AsyncMock(return_value=image_fetch_resp)
+
+            with patch(
+                "app.services.monitor_snapshot_service.compute_all_indicators",
+                new=AsyncMock(return_value={
+                    "layers": [],
+                    "data": {
+                        "watchlist_monitor": {
+                            "current_price": [25.50],
+                            "bb_upper": [27.00],
+                            "bb_mid": [25.00],
+                            "bb_lower": [23.00],
+                            "upper_node": [{"price_mid": 26.00}],
+                            "lower_node": [{"price_mid": 24.00}],
+                            "poc_price": [25.00],
+                            "position_0_1": [0.50],
+                        },
+                    },
+                }),
+            ), patch("httpx.AsyncClient") as mock_client_cls:
+                mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+                transport = make_asgi_transport(app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    response = await client.post(
+                        f"/instruments/{test_instrument.id}/send-feishu",
+                        headers=_auth_headers(user.id),
+                        json={"indicator_view": "bollinger"},
+                    )
+
+            assert response.status_code == 200, f"响应体: {response.text}"
+
+            # capture worker 收到的 payload 应含 indicator_view
+            assert mock_client.post.call_args is not None
+            captured_payload = mock_client.post.call_args.kwargs.get("json")
+            assert captured_payload is not None
+            assert captured_payload.get("indicator_view") == "bollinger"
+            # output_filename 应含 -bollinger 后缀
+            assert "-bollinger" in captured_payload.get("output_filename", ""), (
+                f"output_filename 应含 '-bollinger': {captured_payload.get('output_filename')}"
+            )
+        finally:
+            app.dependency_overrides.clear()
+
+    @pytest.mark.asyncio
+    async def test_post_body_smc_propagates_to_output_filename(
+        self, db_session, test_instrument, user_with_feishu_channel,
+    ) -> None:
+        """POST body {"indicator_view": "smc"} → output_filename 含 -smc 后缀。"""
+        user, _ = user_with_feishu_channel
+        _override_get_db(db_session)
+
+        try:
+            capture_resp = _make_capture_response()
+            image_fetch_resp = _make_image_fetch_response()
+
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=capture_resp)
+            mock_client.get = AsyncMock(return_value=image_fetch_resp)
+
+            with patch(
+                "app.services.monitor_snapshot_service.compute_all_indicators",
+                new=AsyncMock(return_value={
+                    "layers": [],
+                    "data": {
+                        "watchlist_monitor": {
+                            "current_price": [25.50],
+                            "bb_upper": [27.00],
+                            "bb_mid": [25.00],
+                            "bb_lower": [23.00],
+                            "upper_node": [{"price_mid": 26.00}],
+                            "lower_node": [{"price_mid": 24.00}],
+                            "poc_price": [25.00],
+                            "position_0_1": [0.50],
+                        },
+                    },
+                }),
+            ), patch("httpx.AsyncClient") as mock_client_cls:
+                mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+                transport = make_asgi_transport(app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    response = await client.post(
+                        f"/instruments/{test_instrument.id}/send-feishu",
+                        headers=_auth_headers(user.id),
+                        json={"indicator_view": "smc"},
+                    )
+
+            assert response.status_code == 200, f"响应体: {response.text}"
+
+            assert mock_client.post.call_args is not None
+            captured_payload = mock_client.post.call_args.kwargs.get("json")
+            assert captured_payload is not None
+            assert captured_payload.get("indicator_view") == "smc"
+            # output_filename 应含 -smc 后缀
+            assert "-smc" in captured_payload.get("output_filename", ""), (
+                f"output_filename 应含 '-smc': {captured_payload.get('output_filename')}"
+            )
+        finally:
+            app.dependency_overrides.clear()
+
+    @pytest.mark.asyncio
+    async def test_post_body_node_cluster_propagates_to_capture_payload(
+        self, db_session, test_instrument, user_with_feishu_channel,
+    ) -> None:
+        """POST body {"indicator_view": "node_cluster"} → capture_payload.indicator_view == "node_cluster"。"""
+        user, _ = user_with_feishu_channel
+        _override_get_db(db_session)
+
+        try:
+            capture_resp = _make_capture_response()
+            image_fetch_resp = _make_image_fetch_response()
+
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=capture_resp)
+            mock_client.get = AsyncMock(return_value=image_fetch_resp)
+
+            with patch(
+                "app.services.monitor_snapshot_service.compute_all_indicators",
+                new=AsyncMock(return_value={
+                    "layers": [],
+                    "data": {
+                        "watchlist_monitor": {
+                            "current_price": [25.50],
+                            "bb_upper": [27.00],
+                            "bb_mid": [25.00],
+                            "bb_lower": [23.00],
+                            "upper_node": [{"price_mid": 26.00}],
+                            "lower_node": [{"price_mid": 24.00}],
+                            "poc_price": [25.00],
+                            "position_0_1": [0.50],
+                        },
+                    },
+                }),
+            ), patch("httpx.AsyncClient") as mock_client_cls:
+                mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+                transport = make_asgi_transport(app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    response = await client.post(
+                        f"/instruments/{test_instrument.id}/send-feishu",
+                        headers=_auth_headers(user.id),
+                        json={"indicator_view": "node_cluster"},
+                    )
+
+            assert response.status_code == 200, f"响应体: {response.text}"
+
+            assert mock_client.post.call_args is not None
+            captured_payload = mock_client.post.call_args.kwargs.get("json")
+            assert captured_payload is not None
+            assert captured_payload.get("indicator_view") == "node_cluster"
+            assert "-node_cluster" in captured_payload.get("output_filename", ""), (
+                f"output_filename 应含 '-node_cluster': {captured_payload.get('output_filename')}"
+            )
+        finally:
+            app.dependency_overrides.clear()
+
+    @pytest.mark.asyncio
+    async def test_post_body_empty_backwards_compatible(
+        self, db_session, test_instrument, user_with_feishu_channel,
+    ) -> None:
+        """POST body {} → 向后兼容（capture_payload 不含 indicator_view 键）。"""
+        user, _ = user_with_feishu_channel
+        _override_get_db(db_session)
+
+        try:
+            capture_resp = _make_capture_response()
+            image_fetch_resp = _make_image_fetch_response()
+
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=capture_resp)
+            mock_client.get = AsyncMock(return_value=image_fetch_resp)
+
+            with patch(
+                "app.services.monitor_snapshot_service.compute_all_indicators",
+                new=AsyncMock(return_value={
+                    "layers": [],
+                    "data": {
+                        "watchlist_monitor": {
+                            "current_price": [25.50],
+                            "bb_upper": [27.00],
+                            "bb_mid": [25.00],
+                            "bb_lower": [23.00],
+                            "upper_node": [{"price_mid": 26.00}],
+                            "lower_node": [{"price_mid": 24.00}],
+                            "poc_price": [25.00],
+                            "position_0_1": [0.50],
+                        },
+                    },
+                }),
+            ), patch("httpx.AsyncClient") as mock_client_cls:
+                mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+                transport = make_asgi_transport(app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    response = await client.post(
+                        f"/instruments/{test_instrument.id}/send-feishu",
+                        headers=_auth_headers(user.id),
+                        json={},
+                    )
+
+            assert response.status_code == 200, f"响应体: {response.text}"
+
+            assert mock_client.post.call_args is not None
+            captured_payload = mock_client.post.call_args.kwargs.get("json")
+            assert captured_payload is not None
+            # 向后兼容：空 body 时 capture_payload 不应含 indicator_view 键
+            assert "indicator_view" not in captured_payload, (
+                f"空 body 不应在 capture_payload 中产生 indicator_view: {captured_payload}"
+            )
+            # output_filename 也不应含 indicator_view 后缀
+            output_filename = captured_payload.get("output_filename", "")
+            assert "-bollinger" not in output_filename
+            assert "-smc" not in output_filename
+            assert "-node_cluster" not in output_filename
+        finally:
+            app.dependency_overrides.clear()
+
+    @pytest.mark.asyncio
+    async def test_post_body_invalid_indicator_view_falls_back_to_none(
+        self, db_session, test_instrument, user_with_feishu_channel,
+    ) -> None:
+        """POST body {"indicator_view": "invalid"} → 非法值降级为 None（向后兼容）。"""
+        user, _ = user_with_feishu_channel
+        _override_get_db(db_session)
+
+        try:
+            capture_resp = _make_capture_response()
+            image_fetch_resp = _make_image_fetch_response()
+
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=capture_resp)
+            mock_client.get = AsyncMock(return_value=image_fetch_resp)
+
+            with patch(
+                "app.services.monitor_snapshot_service.compute_all_indicators",
+                new=AsyncMock(return_value={
+                    "layers": [],
+                    "data": {
+                        "watchlist_monitor": {
+                            "current_price": [25.50],
+                            "bb_upper": [27.00],
+                            "bb_mid": [25.00],
+                            "bb_lower": [23.00],
+                            "upper_node": [{"price_mid": 26.00}],
+                            "lower_node": [{"price_mid": 24.00}],
+                            "poc_price": [25.00],
+                            "position_0_1": [0.50],
+                        },
+                    },
+                }),
+            ), patch("httpx.AsyncClient") as mock_client_cls:
+                mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+                transport = make_asgi_transport(app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    response = await client.post(
+                        f"/instruments/{test_instrument.id}/send-feishu",
+                        headers=_auth_headers(user.id),
+                        json={"indicator_view": "invalid_view"},
+                    )
+
+            assert response.status_code == 200, f"响应体: {response.text}"
+
+            assert mock_client.post.call_args is not None
+            captured_payload = mock_client.post.call_args.kwargs.get("json")
+            assert captured_payload is not None
+            # 非法值降级为 None（与空 body 行为一致，向后兼容）
+            assert "indicator_view" not in captured_payload, (
+                f"非法 indicator_view 不应透传到 capture_payload: {captured_payload}"
+            )
+        finally:
+            app.dependency_overrides.clear()
+
+    @pytest.mark.asyncio
+    async def test_post_body_bollinger_splits_text_content(
+        self, db_session, test_instrument, user_with_feishu_channel,
+    ) -> None:
+        """POST body {"indicator_view": "bollinger"} → 文字消息只含 BB 字段，不含节点字段。"""
+        user, _ = user_with_feishu_channel
+        _override_get_db(db_session)
+
+        try:
+            capture_resp = _make_capture_response()
+            image_fetch_resp = _make_image_fetch_response()
+
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=capture_resp)
+            mock_client.get = AsyncMock(return_value=image_fetch_resp)
+
+            with patch(
+                "app.services.monitor_snapshot_service.compute_all_indicators",
+                new=AsyncMock(return_value={
+                    "layers": [],
+                    "data": {
+                        "watchlist_monitor": {
+                            "current_price": [25.50],
+                            "bb_upper": [27.00],
+                            "bb_mid": [25.00],
+                            "bb_lower": [23.00],
+                            "upper_node": [{"price_mid": 26.00}],
+                            "lower_node": [{"price_mid": 24.00}],
+                            "poc_price": [25.00],
+                            "position_0_1": [0.50],
+                        },
+                    },
+                }),
+            ), patch("httpx.AsyncClient") as mock_client_cls:
+                mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+                transport = make_asgi_transport(app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    response = await client.post(
+                        f"/instruments/{test_instrument.id}/send-feishu",
+                        headers=_auth_headers(user.id),
+                        json={"indicator_view": "bollinger"},
+                    )
+
+            assert response.status_code == 200, f"响应体: {response.text}"
+            data = response.json()
+
+            # 查询文本消息 body 是否按 indicator_view 拆分
+            result = await db_session.execute(
+                select(NotificationMessage).where(NotificationMessage.id == data["message_id"])
+            )
+            message = result.scalar_one()
+            text_content = message.body.get("text_content", "")
+
+            # 应包含 BB 字段
+            assert "近期波动上沿：27.00" in text_content, (
+                f"bollinger 文字应含 BB 上沿: {text_content}"
+            )
+            assert "近期价格中枢：25.00" in text_content, (
+                f"bollinger 文字应含 BB 中枢: {text_content}"
+            )
+            assert "近期波动下沿：23.00" in text_content, (
+                f"bollinger 文字应含 BB 下沿: {text_content}"
+            )
+            # 不应包含节点字段
+            assert "上方成交密集区" not in text_content, (
+                f"bollinger 文字不应含节点字段: {text_content}"
+            )
+            assert "下方成交密集区" not in text_content
+            assert "最密集成交价" not in text_content
+            assert "当前区间位置" not in text_content
+        finally:
+            app.dependency_overrides.clear()

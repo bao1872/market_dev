@@ -285,6 +285,12 @@ def build_monitor_event_text(
     position_0_1: float | None = None,
     resource_refs: dict[str, Any] | None = None,
     memo: str | None = None,
+    indicator_view: str | None = None,
+    smc_bos_level: float | None = None,
+    smc_choch_level: float | None = None,
+    smc_ob_high: float | None = None,
+    smc_ob_low: float | None = None,
+    smc_swing_bias: int | None = None,
 ) -> NotificationMessageDTO:
     """构建监控事件纯文本消息（飞书两段式投递 - 文本段）。
 
@@ -298,7 +304,14 @@ def build_monitor_event_text(
     [advice.md 第七节] - 备忘录闭环：
     - memo 非空时在文本末尾追加"备忘录:{memo}"行
 
-    模板：
+    [CHANGE-20260720-003 §三/§四] indicator_view 拆分：
+    - None / "node_cluster" / 默认：保留全部字段（向后兼容旧调用）
+    - "node_cluster": 现价 + upper_node + lower_node + poc + position
+    - "bollinger": 现价 + bb_upper + bb_mid + bb_lower
+    - "smc": 现价 + smc_bos_level + smc_choch_level + smc_ob_zone + smc_swing_bias
+    文字卡片和图片都只能描述所选指标，禁止混合指标。
+
+    模板（默认全字段）：
         【自选监控触发】
         {股票名称} {股票代码}
         触发：{触发类型通俗文案}
@@ -325,6 +338,11 @@ def build_monitor_event_text(
         position_0_1: 节点位置 0~1
         resource_refs: 资源引用（instrument_id/symbol/event_id 等）
         memo: 个股备忘录内容（非空时追加到文本末尾）
+        indicator_view: 指标视图 node_cluster|bollinger|smc；None 表示全字段（向后兼容）
+        smc_bos_level: SMC BOS level（indicator_view="smc" 时使用）
+        smc_choch_level: SMC CHoCH level（indicator_view="smc" 时使用）
+        smc_ob_high / smc_ob_low: SMC OB zone 高低点（indicator_view="smc" 时使用）
+        smc_swing_bias: SMC 主趋势方向 1/-1/0（indicator_view="smc" 时使用）
 
     Returns:
         NotificationMessageDTO（text_content 字段填充纯文本）
@@ -353,27 +371,81 @@ def build_monitor_event_text(
     def _fmt_pos(v: float | None) -> str:
         return f"{v:.2f}" if v is not None else "-"
 
-    # [advice.md 第二节] - 字段名通俗化（BB/上节点/下节点/POC/位置 → 通俗文案）
+    def _fmt_bias(v: int | None) -> str:
+        if v is None:
+            return "-"
+        if v == 1:
+            return "上行"
+        if v == -1:
+            return "下行"
+        return "震荡"
+
+    # [CHANGE-20260720-003 §三/§四] 文字卡片只描述所选指标，禁止混合
+    # - None: 全字段（向后兼容旧调用，不指定 view 时展示所有指标）
+    # - node_cluster: 现价 + upper_node + lower_node + poc + position
+    # - bollinger: 现价 + bb_upper + bb_mid + bb_lower
+    # - smc: 现价 + smc_bos_level + smc_choch_level + smc_ob_zone + smc_swing_bias
     text_lines = [
         "【自选监控触发】",
         f"{stock_name} {symbol}",
         f"触发：{event_label}",
         f"触发时间：{trigger_time}",
         f"现价：{_fmt(current_price)}",
-        f"{get_field_label('bb_upper')}：{_fmt(bb_upper)}",
-        f"{get_field_label('bb_mid')}：{_fmt(bb_mid)}",
-        f"{get_field_label('bb_lower')}：{_fmt(bb_lower)}",
-        f"{get_field_label('upper_node')}：{_fmt(upper_node)}",
-        f"{get_field_label('lower_node')}：{_fmt(lower_node)}",
-        f"{get_field_label('poc')}：{_fmt(poc_price)}",
-        f"{get_field_label('position')}：{_fmt_pos(position_0_1)}",
     ]
+
+    if indicator_view is None:
+        # 默认全字段（向后兼容）
+        text_lines.extend([
+            f"{get_field_label('bb_upper')}：{_fmt(bb_upper)}",
+            f"{get_field_label('bb_mid')}：{_fmt(bb_mid)}",
+            f"{get_field_label('bb_lower')}：{_fmt(bb_lower)}",
+            f"{get_field_label('upper_node')}：{_fmt(upper_node)}",
+            f"{get_field_label('lower_node')}：{_fmt(lower_node)}",
+            f"{get_field_label('poc')}：{_fmt(poc_price)}",
+            f"{get_field_label('position')}：{_fmt_pos(position_0_1)}",
+        ])
+    elif indicator_view == "node_cluster":
+        text_lines.extend([
+            f"{get_field_label('upper_node')}：{_fmt(upper_node)}",
+            f"{get_field_label('lower_node')}：{_fmt(lower_node)}",
+            f"{get_field_label('poc')}：{_fmt(poc_price)}",
+            f"{get_field_label('position')}：{_fmt_pos(position_0_1)}",
+        ])
+    elif indicator_view == "bollinger":
+        text_lines.extend([
+            f"{get_field_label('bb_upper')}：{_fmt(bb_upper)}",
+            f"{get_field_label('bb_mid')}：{_fmt(bb_mid)}",
+            f"{get_field_label('bb_lower')}：{_fmt(bb_lower)}",
+        ])
+    elif indicator_view == "smc":
+        # SMC OB zone 用区间表示
+        ob_zone = (
+            f"{_fmt(smc_ob_low)} ~ {_fmt(smc_ob_high)}"
+            if smc_ob_low is not None or smc_ob_high is not None
+            else "-"
+        )
+        text_lines.extend([
+            f"{get_field_label('smc_bos_level')}：{_fmt(smc_bos_level)}",
+            f"{get_field_label('smc_choch_level')}：{_fmt(smc_choch_level)}",
+            f"{get_field_label('smc_ob_zone')}：{ob_zone}",
+            f"{get_field_label('smc_swing_bias')}：{_fmt_bias(smc_swing_bias)}",
+        ])
+
     # [advice.md 第七节] - 备忘录闭环：memo 非空时追加一行
     if memo and memo.strip():
         text_lines.append(f"备忘录：{memo.strip()}")
     text_content = "\n".join(text_lines)
 
     refs = resource_refs or {}
+    # [CHANGE-20260720-003 §三] resource_refs 携带 indicator_view 贯穿状态查询链路
+    resource_refs_final: dict[str, Any] = {
+        "instrument_id": refs.get("instrument_id", ""),
+        "symbol": symbol,
+        "event_type": event_type,
+        **refs,
+    }
+    if indicator_view is not None:
+        resource_refs_final["indicator_view"] = indicator_view
     return NotificationMessageDTO(
         message_type="MONITOR_EVENT",
         template_key="monitor_event_text",
@@ -381,12 +453,7 @@ def build_monitor_event_text(
         title=f"监控触发｜{stock_name} {symbol}",
         summary=text_content,
         text_content=text_content,
-        resource_refs={
-            "instrument_id": refs.get("instrument_id", ""),
-            "symbol": symbol,
-            "event_type": event_type,
-            **refs,
-        },
+        resource_refs=resource_refs_final,
         data_time=display_data_time,
         primary_instrument={
             "instrument_id": refs.get("instrument_id", ""),

@@ -307,6 +307,8 @@ class BollingerMonitor(StrategyRuntime):
                     "boundary": ref_upper,
                     "dev_pct": dev_pct,
                     "bb_snapshot": bb_snapshot,
+                    # [CHANGE-20260720-003 §三] 贯穿全链的 indicator_view
+                    "indicator_view": "bollinger",
                 },
                 state_ttl_seconds=NOTIFY_COOLDOWN_SECONDS,
             ))
@@ -328,6 +330,8 @@ class BollingerMonitor(StrategyRuntime):
                         "boundary": ref_mid,
                         "dev_pct": dev_pct,
                         "bb_snapshot": bb_snapshot,
+                        # [CHANGE-20260720-003 §三] 贯穿全链的 indicator_view
+                        "indicator_view": "bollinger",
                     },
                     state_ttl_seconds=NOTIFY_COOLDOWN_SECONDS,
                 ))
@@ -347,6 +351,8 @@ class BollingerMonitor(StrategyRuntime):
                     "boundary": ref_lower,
                     "dev_pct": dev_pct,
                     "bb_snapshot": bb_snapshot,
+                    # [CHANGE-20260720-003 §三] 贯穿全链的 indicator_view
+                    "indicator_view": "bollinger",
                 },
                 state_ttl_seconds=NOTIFY_COOLDOWN_SECONDS,
             ))

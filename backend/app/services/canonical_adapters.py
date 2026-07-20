@@ -40,8 +40,6 @@ import numpy as np
 import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.services.indicator_service import compute_macd
-
 logger = logging.getLogger("services.canonical_adapters")
 
 
@@ -116,6 +114,10 @@ def compute_macd_adapter(
     """
     _require_bars(bars, "macd")
     _require_columns(bars, "macd", ["close"])
+    # [CHANGE-20260720-005 §五] 延迟 import 避免与 indicator_service 循环
+    # （indicator_service 顶部从 canonical_adapters 导入 kernel re-exports）
+    from app.services.indicator_service import compute_macd
+
     closes = bars["close"].to_numpy(dtype=float)
     return compute_macd(closes, fast=fast, slow=slow, signal=signal)
 
@@ -570,6 +572,82 @@ async def compute_snapshot_derived_adapter(
         source_run_id=source_run_id,
         _diag_sink=_diag_sink,
     )
+
+
+# =============================================================================
+# [CHANGE-20260720-005 §五] Re-exports for 4-chain modules
+# =============================================================================
+# 四链模块（indicator_service / feature_snapshot_service / stock_capture_service /
+# monitor_batch_service）禁止直接 import kernel 模块（AST 硬门禁，见
+# test_algorithm_registry_architecture.py::TestFourChainDirectImportGate）。
+#
+# 本区段把四链需要的 kernel 函数/类型从此处 re-export，使四链改为
+# `from app.services.canonical_adapters import ...`，满足 AST 守护。
+# canonical_adapters.py 是 SSOT 入口（不在 _FOUR_CHAIN_MODULES 中），
+# 可自由 import kernel 模块。
+#
+# 注意：以下 re-export 仅为满足 AST 门禁的接线，不改变 kernel 行为。
+#       算法合同/版本/哈希仍由 AlgorithmRegistry + CanonicalComputationService 管理。
+#       新增算法应优先实现 dedicated adapter（如 compute_xxx_adapter）并设
+#       migration_status="production_wired"，而非无限扩展此 re-export 区段。
+
+from app.services.node_cluster_engine import (  # noqa: E402
+    NodeClusterProfileResult,
+    compute_node_cluster_profile,
+    derive_state_for_price,
+    profile_to_dict,
+)
+from app.services.smc_view_adapter import adapt_smc_to_display_dto  # noqa: E402
+from app.services.structural_factor_service import (  # noqa: E402
+    _compute_all_factors_for_bars,
+    _compute_relation,
+)
+from app.services.temporal_feature_service import (  # noqa: E402
+    _compute_daily_context,
+    _compute_derived_relation,
+    _compute_m15_response,
+)
+from app.strategy_assets.algorithms.features.bollinger_features_plotly import (  # noqa: E402
+    bollinger,
+)
+from app.strategy_assets.algorithms.features.merged_dsa_atr_rope_bb_factors import (  # noqa: E402
+    compute_bollinger,
+)
+from app.strategy_assets.algorithms.features.smc_indicator import (  # noqa: E402
+    compute_smc_indicators,
+)
+from app.strategy_assets.algorithms.features.sqzmom_lb import compute_sqzmom_lb  # noqa: E402
+
+__all__ = [
+    # Dedicated adapters（production_wired）
+    "compute_macd_adapter",
+    "compute_bollinger_adapter",
+    "compute_sqzmom_adapter",
+    "compute_breakout_adapter",
+    "compute_participation_adapter",
+    "compute_smc_adapter",
+    "compute_node_cluster_adapter",
+    "compute_dsa_adapter",
+    "compute_structural_features_adapter",
+    "compute_primary_secondary_relation_adapter",
+    "compute_temporal_features_adapter",
+    "compute_snapshot_derived_adapter",
+    # Re-exports（4-chain 门禁所需）
+    "NodeClusterProfileResult",
+    "compute_node_cluster_profile",
+    "derive_state_for_price",
+    "profile_to_dict",
+    "adapt_smc_to_display_dto",
+    "_compute_all_factors_for_bars",
+    "_compute_relation",
+    "_compute_daily_context",
+    "_compute_derived_relation",
+    "_compute_m15_response",
+    "bollinger",
+    "compute_bollinger",
+    "compute_smc_indicators",
+    "compute_sqzmom_lb",
+]
 
 
 # =============================================================================

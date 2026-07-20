@@ -38,6 +38,7 @@ from app.constants.capture import (
     CAPTURE_SCOPE_STOCK_DETAIL,
     FEISHU_CAPTURE_TIMEFRAME,
 )
+from app.constants.indicator_view import resolve_indicator_view
 from app.constants.strategy_keys import WATCHLIST_MONITOR
 from app.constants.user_facing_labels import get_event_label, get_field_label
 from app.core.time import format_shanghai_datetime
@@ -110,11 +111,15 @@ _CST = ZoneInfo("Asia/Shanghai")
 # 事件类型 → emoji 映射（与旧版 monitoring.py 一致）
 # [advice.md 第二节] - 文案已迁移至 app.constants.user_facing_labels.get_event_label
 # emoji 与文案分离：emoji 仅在此处维护，文案由 get_event_label 提供
+# [CHANGE-20260720-002 §二] 新增 SMC 三类事件 emoji/severity
 _EVENT_EMOJI: dict[str, str] = {
     "bb_upper_touch": "🔴",
     "bb_mid_touch": "🟠",
     "bb_lower_touch": "🟢",
     "node_cluster_touch": "🟣",
+    "smc_bos_retest": "🔵",
+    "smc_choch_retest": "🟦",
+    "smc_order_block_first_touch": "🔷",
 }
 
 # 事件类型 → 严重级别
@@ -123,6 +128,9 @@ _EVENT_SEVERITY: dict[str, str] = {
     "bb_mid_touch": "warn",
     "bb_lower_touch": "info",
     "node_cluster_touch": "warn",
+    "smc_bos_retest": "warn",
+    "smc_choch_retest": "danger",
+    "smc_order_block_first_touch": "warn",
 }
 
 # 严重级别 → 飞书卡片 header 颜色
@@ -1543,6 +1551,15 @@ class MonitorBatchService:
                 if not user_ids:
                     continue
 
+                # [CHANGE-20260720-003 §三] 从事件类型 + payload 自动映射 indicator_view
+                # 监控自动发送时不需要用户选择，由 event_type → indicator_view 映射决定
+                first_payload = first_event.payload if isinstance(
+                    first_event.payload, dict
+                ) else None
+                indicator_view = resolve_indicator_view(
+                    first_event.event_type, first_payload
+                )
+
                 # [飞书两段式投递] - 生成短期 capture token
                 # 必须携带 scope/instrument_id/user_id，否则 capture API 会 401/403
                 token = create_capture_token(
@@ -1557,20 +1574,24 @@ class MonitorBatchService:
                 # 调用 capture worker 截图
                 # [screenshot-cache] - 传入 instrument_id 与 chart_version 启用缓存（任务 6.1）
                 # 同一 event+instrument+chart_version 在 TTL 600s 内复用截图，避免重试时重复截图
+                # [CHANGE-20260720-003 §三] output_filename 含 indicator_view，
+                # 缓存键由 capture_stock_chart 内部按 indicator_view 维度区分
                 capture_payload = {
                     "symbol": symbol,
                     "event_id": str(first_event.id),
                     "token": token,
                     "frontend_base_url": frontend_base_url,
-                    "output_filename": f"monitor-{inst_id}-{first_event.id}",
+                    "output_filename": f"monitor-{inst_id}-{first_event.id}-{indicator_view}",
                     "instrument_id": str(inst_id),
                     "chart_version": "v1",
                     # [Feishu] - 飞书盘中截图业务默认 1d（日线）：实时性由 Capture Snapshot
                     # 1d + include_realtime=True 的 partial daily 合成保证，不依赖 15m。
                     "timeframe": FEISHU_CAPTURE_TIMEFRAME,
-                    "capture_run_id": f"monitor-{inst_id}-{first_event.id}",
+                    "capture_run_id": f"monitor-{inst_id}-{first_event.id}-{indicator_view}",
                     "source_bar_time": first_event.event_time.isoformat(),
                     "disable_cache": True,
+                    # [CHANGE-20260720-003 §三] 贯穿全链的 indicator_view
+                    "indicator_view": indicator_view,
                 }
                 try:
                     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -1591,6 +1612,7 @@ class MonitorBatchService:
                         instrument_id=inst_id,
                         user_id=user_ids[0],
                         message_group_id=message_group_id,
+                        indicator_view=indicator_view,
                         status=CAPTURE_STATUS_FAILED,
                         attempt_count=1,
                         error_code="CAPTURE_REQUEST_FAILED",
@@ -1611,6 +1633,7 @@ class MonitorBatchService:
                         instrument_id=inst_id,
                         user_id=user_ids[0],
                         message_group_id=message_group_id,
+                        indicator_view=indicator_view,
                         status=CAPTURE_STATUS_FAILED,
                         attempt_count=1,
                         error_code="NO_IMAGE_URL",
@@ -1626,6 +1649,7 @@ class MonitorBatchService:
                     instrument_id=inst_id,
                     user_id=user_ids[0],
                     message_group_id=message_group_id,
+                    indicator_view=indicator_view,
                     status=CAPTURE_STATUS_SUCCEEDED,
                     attempt_count=1,
                     image_url=image_url,
@@ -1820,7 +1844,9 @@ class MonitorBatchService:
         Returns:
             NodeClusterProfileResult 对象；15m 数据不可用时返回 None（由上层降级处理）
         """
-        from app.services.node_cluster_engine import compute_node_cluster_profile
+        # [CHANGE-20260720-005 §五] kernel 函数经 canonical_adapters re-export，
+        # 满足四链 AST 门禁（禁止直接 import kernel 模块）
+        from app.services.canonical_adapters import compute_node_cluster_profile
         from app.strategy._plotly_mock import ensure_plotly_mock
 
         ensure_plotly_mock()

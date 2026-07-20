@@ -528,32 +528,25 @@ def _find_direct_kernel_imports(tree: ast.AST, file_rel: str) -> list[str]:
 
 
 class TestFourChainDirectImportGate:
-    """CHANGE-20260719-001 §二：AST 硬门禁 — 禁止四链直接 import kernel。
+    """CHANGE-20260719-001 §二 + CHANGE-20260720-005 §五：AST 硬门禁 — 禁止四链直接 import kernel。
 
     目标：四条调用链（详情/盘后/盘中/Capture）必须通过 CanonicalComputationService
     或 canonical_adapters 调用算法，禁止直接 import kernel 模块绕过注册表。
 
-    当前状态：四链仍有直接 kernel import（§二-A/B 已创建 adapter + 更新注册表，
-    但四链迁移尚未完成）。本测试以 xfail 标记目标，待四链迁移完成后移除 xfail。
+    CHANGE-20260720-005 §五：四链迁移已完成 — indicator_service / feature_snapshot_service
+    已改为从 canonical_adapters 导入 kernel re-exports；stock_capture_service /
+    monitor_batch_service 早已无直接 kernel import。xfail 标记已移除，本测试为硬失败。
 
-    迁移路径：
+    迁移路径（已完成）：
     1. 在四链中用 `from app.services.canonical_adapters import compute_xxx_adapter`
-       或 `from app.services.canonical_computation_service import CanonicalComputationService`
-       替换直接 kernel import
+       或 kernel re-exports 替换直接 kernel import ✓
     2. 调用方改为 `CanonicalComputationService.compute_with_mdas(...)` 或
-       `compute_xxx_adapter(bars, ...)` 直接调用
-    3. 移除本测试的 xfail 标记
+       `compute_xxx_adapter(bars, ...)` 直接调用（可选，后续优化）
+    3. 移除本测试的 xfail 标记 ✓
     """
 
-    @pytest.mark.xfail(
-        reason="CHANGE-20260719-001 §二：四链迁移尚未完成，仍有直接 kernel import",
-        strict=True,
-    )
     def test_four_chain_no_direct_kernel_import(self) -> None:
-        """四链模块禁止直接 import kernel 模块。
-
-        迁移完成后此测试应通过（xfail strict=True 会失败，提示移除 xfail）。
-        """
+        """四链模块禁止直接 import kernel 模块（CHANGE-20260720-005 §五 硬失败）。"""
         violations: list[str] = []
         for p, rel in _iter_production_files():
             if rel not in _FOUR_CHAIN_MODULES:

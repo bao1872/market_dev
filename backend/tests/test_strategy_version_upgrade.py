@@ -1,7 +1,7 @@
 """策略版本升级测试（advice.md 第五节 / Task 5.4）。
 
 测试覆盖：
-- seed_strategies 在空库上创建 watchlist_monitor 1.1.0 / dsa_selector 1.4.0 released 版本
+- seed_strategies 在空库上创建 watchlist_monitor 1.2.0 / dsa_selector 1.4.0 released 版本
 - manifest outputs 包含新增字段（previous_close, change_pct）
 - 旧版本被人工创建后，再次 seed_strategies 不会修改旧版本的 released_at
 - 升级后同一策略存在多个 released 版本，seed_strategies 不抛 MultipleResultsFound
@@ -24,25 +24,25 @@ from app.services.strategy_seed import seed_strategies
 
 @pytest.mark.asyncio
 async def test_seed_creates_new_released_versions(db_session):
-    """seed_strategies 在空库上创建 1.1.0/1.4.1 released 版本。"""
+    """seed_strategies 在空库上创建 1.2.0/1.4.1 released 版本。"""
     # patch commit 为 flush，避免破坏 db_session 的 nested 事务
     with patch.object(db_session, "commit", new=db_session.flush):
         results = await seed_strategies(db_session, release=True)
 
     result_map = {(k, v): s for k, v, s in results}
-    assert ("watchlist_monitor", "1.1.0") in result_map, (
-        "watchlist_monitor v1.1.0 必须被 seed_strategies 创建"
+    assert ("watchlist_monitor", "1.2.0") in result_map, (
+        "watchlist_monitor v1.2.0 必须被 seed_strategies 创建"
     )
     assert ("dsa_selector", "1.4.1") in result_map, (
         "dsa_selector v1.4.1 必须被 seed_strategies 创建"
     )
-    assert result_map[("watchlist_monitor", "1.1.0")] == "released"
+    assert result_map[("watchlist_monitor", "1.2.0")] == "released"
     assert result_map[("dsa_selector", "1.4.1")] == "released"
 
 
 @pytest.mark.asyncio
 async def test_watchlist_monitor_manifest_contains_new_fields(db_session):
-    """watchlist_monitor v1.1.0 manifest outputs 必须包含 previous_close 和 change_pct。"""
+    """watchlist_monitor v1.2.0 manifest outputs 必须包含 previous_close 和 change_pct。"""
     with patch.object(db_session, "commit", new=db_session.flush):
         await seed_strategies(db_session, release=True)
 
@@ -51,21 +51,21 @@ async def test_watchlist_monitor_manifest_contains_new_fields(db_session):
         .join(StrategyDefinition, StrategyDefinition.id == StrategyVersion.strategy_definition_id)
         .where(
             StrategyDefinition.strategy_key == "watchlist_monitor",
-            StrategyVersion.version == "1.1.0",
+            StrategyVersion.version == "1.2.0",
         )
     )
     result = await db_session.execute(stmt)
     version = result.scalar_one_or_none()
-    assert version is not None, "watchlist_monitor v1.1.0 必须存在"
+    assert version is not None, "watchlist_monitor v1.2.0 必须存在"
     assert version.status == "released"
 
     manifest = version.manifest
     output_keys = [o["key"] for o in manifest.get("outputs", [])]
     assert "previous_close" in output_keys, (
-        "watchlist_monitor v1.1.0 manifest.outputs 必须包含 previous_close 字段"
+        "watchlist_monitor v1.2.0 manifest.outputs 必须包含 previous_close 字段"
     )
     assert "change_pct" in output_keys, (
-        "watchlist_monitor v1.1.0 manifest.outputs 必须包含 change_pct 字段"
+        "watchlist_monitor v1.2.0 manifest.outputs 必须包含 change_pct 字段"
     )
 
 
@@ -115,7 +115,7 @@ async def test_seed_does_not_modify_old_released_version(db_session):
     """
     from app.constants.strategy_keys import WATCHLIST_MONITOR
 
-    # 1. 第一次 seed，创建 1.1.0
+    # 1. 第一次 seed，创建 1.2.0
     with patch.object(db_session, "commit", new=db_session.flush):
         await seed_strategies(db_session, release=True)
 
@@ -161,14 +161,14 @@ async def test_seed_does_not_modify_old_released_version(db_session):
         f"期望 {old_released_at}，实际 {retrieved_old.released_at}"
     )
 
-    # 6. 同时验证 1.1.0 仍然存在
+    # 6. 同时验证 1.2.0 仍然存在
     stmt_new = (
         select(StrategyVersion)
         .where(
             StrategyVersion.strategy_definition_id == definition.id,
-            StrategyVersion.version == "1.1.0",
+            StrategyVersion.version == "1.2.0",
         )
     )
     new_version = (await db_session.execute(stmt_new)).scalar_one_or_none()
-    assert new_version is not None, "1.1.0 版本必须仍然存在"
+    assert new_version is not None, "1.2.0 版本必须仍然存在"
     assert new_version.status == "released"

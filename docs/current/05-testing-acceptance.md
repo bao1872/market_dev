@@ -1523,6 +1523,60 @@ NODE_OPTIONS=--max-old-space-size=1536 node_modules/.bin/vite build
 - **前端 Strong/Weak 起点**：线起点 `trailing.last_top_time`/`last_bottom_time`（Pine L721-727，新增 `timeToDisplayIdx` 辅助）；终点延伸到 `plotRight`；颜色按 strong/weak 区分列为有意视觉差异。
 - **Pine 参考源不可变**：`ref/smc_user_source.pine` SHA256 `0bd3d2ad8819f2dc7a9399f0e869ca3c9eced8100f190aa131aac5fe8191988f`（843 行）；导出能力只改 `ref/smc_user_export.pine`（追加 8 个隐藏 plot：trailing top/bottom/lastTopTime/lastBottomTime + swing/internal pivot level）。
 
+## 3.22 CHANGE-20260720-001 回归（blocking）
+
+合并 §一-§五：日线监控 SMC + 三类独立飞书图片 + Canonical 四链生产接入。
+
+### 3.22.1 §一 详情页 Node 输入修复
+
+- **MarketDataContext 字段拆分**：`bars_display` / `display_timeframe` / `bars_daily` / `bars_15min` / `bars_minute` 五字段；`bars_display` 供 DSA/MACD/SQZMOM 及图表周期指标；`bars_daily` 只供日线结构算法；`bars_15min` Node 成交量分配；`bars_minute` 盘中触发。
+- **`_REQUIRED_INPUTS` 修复**：`WATCHLIST_MONITOR` 从 `{daily}` 改为 `{daily, 15min}`（含 VolumeNodeMonitor）。
+- **独立 `_compute_independent_node_cluster`**：固定输入 completed qfq 1d×250 + 15m×4000；输出 `data.node_cluster`（`profile_rows` / `profile_meta` / `peak_rows` / `state` / `availability` / `degraded_reason`）。
+- **五周期一致性测试** `test_indicator_service.py::TestNodeClusterFivePeriodConsistency`：1d/15m/1h/1w/1mo 切换时 `profile_hash` 完全一致，`daily_source_hash` / `15m_source_hash` 完全一致，图表 bars frame hash 允许不同。
+- **运行命令**：`APP_ENV=test pytest backend/tests/test_indicator_service.py::TestNodeClusterFivePeriodConsistency -v`
+
+### 3.22.2 §二 日线 SMC 盘中监控
+
+- **`SmcMonitor`** `backend/app/strategy/monitors/smc_monitor.py`：主输入已完成前复权日线；当天盘中结构固定，1m 仅触发检测；调用 `compute_smc_adapter`（禁止复制公式）；FVG 完全排除。
+- **三个 SMC 事件**：`smc_bos_retest` / `smc_choch_retest` / `smc_order_block_first_touch`；含稳定 `smc_entity_id` + `direction` + `boundary` + `zone` + `confirmed_at` + `trigger_price` + `source_1m_bar_time`；去重键 `instrument + event_type + smc_entity_id + touch_episode`。
+- **`WatchlistMonitor` 三合一**：`self._bb` + `self._vn` + `self._smc`；单 sub-monitor 失败只标记该 item degraded。
+- **`MonitorState` 命名空间**：`bb` / `node_cluster` / `smc` / `market`（含 `current_price` / `previous_close` / `change_pct`）；兼容读取旧平铺状态一次。
+- **`EVENT_LABELS` 扩展**：5 → 8（4 监控 + 3 SMC + 1 快照分享）。
+- **测试** `test_smc_monitor.py`（34 项全绿）+ `test_user_facing_labels.py`（17 项全绿，EVENT_LABELS 数量断言 5→8）。
+- **运行命令**：`APP_ENV=test pytest backend/tests/test_smc_monitor.py backend/tests/test_user_facing_labels.py -v`
+
+### 3.22.3 §三 三类监控独立飞书图片
+
+- **共享枚举** `backend/app/constants/indicator_view.py`：`IndicatorView = Literal["node_cluster", "bollinger", "smc"]`；`EVENT_TYPE_TO_INDICATOR_VIEW` 自动映射；`resolve_indicator_view(event_type, payload)`。
+- **三套 Capture Preset** `frontend/src/features/feishu/capturePresets.ts`：`FEISHU_CAPTURE_PRESETS` dict；layers 互斥（除共享 candlestick）。
+- **`IndicatorView` 贯穿全链**：`StrategyEvent.payload` → `NotificationMessage.resource_refs` → Capture 请求 → `CaptureJob` → 输出文件名 → 缓存键 → 幂等键 → 状态查询 → 前端 URL 参数。
+- **`CaptureJob` 新增 `indicator_view` 字段**：nullable=True 兼容历史；成功/失败均记录。
+- **`build_monitor_event_text(indicator_view, ...)`**：按 view 拆分文字卡片字段（None=全字段，node_cluster=只节点字段，bollinger=只 BB 字段，smc=只 SMC 字段）。
+- **测试** `test_indicator_view.py`（66 项全绿，9 个测试类）+ `test_monitor_batch_capture_image.py`（10 项全绿，含 4 项 indicator_view 集成测试）+ `test_monitor_batch_text_content.py`（8 项全绿）。
+- **运行命令**：`APP_ENV=test pytest backend/tests/test_indicator_view.py backend/tests/test_monitor_batch_capture_image.py backend/tests/test_monitor_batch_text_content.py -v`
+
+### 3.22.4 §四 详情页发送飞书增加选择
+
+- **`SendFeishuRequest` body schema**：`indicator_view: Literal["node_cluster", "bollinger", "smc"] | None = None`；`normalized_indicator_view()` 返回默认值或具体值。
+- **前端弹窗三单选项**：`StockDetailPage.tsx` 新增指标视图三单选项（筹码共识价/布林带/SMC 结构）。
+- **`useStockDetailFeishu` hook 改造**：`selectedIndicatorView` / `setSelectedIndicatorView` / `handleSendFeishu(indicatorView)`；POST body 透传到 capture worker。
+- **`output_filename` 加 `-{indicator_view}` 后缀**；图片消息 `resource_refs` 携带 `indicator_view`。
+- **测试** `test_stock_detail_feishu.py`（14 项全绿，含 6 项 POST body indicator_view 测试）。
+- **运行命令**：`APP_ENV=test pytest backend/tests/test_stock_detail_feishu.py -v`
+
+### 3.22.5 §五 Canonical 四链生产接入 + AST 硬门禁
+
+- **`canonical_adapters.py` re-exports 区段**：re-export `NodeClusterProfileResult` / `compute_node_cluster_profile` / `derive_state_for_price` / `profile_to_dict` / `adapt_smc_to_display_dto` / `_compute_all_factors_for_bars` / `_compute_relation` / `_compute_daily_context` / `_compute_derived_relation` / `_compute_m15_response` / `bollinger` / `compute_bollinger` / `compute_smc_indicators` / `compute_sqzmom_lb`；`compute_macd` 改为延迟 import 避免循环。
+- **四链模块 imports 迁移**：
+  - `indicator_service.py` 移除 5 个顶层 kernel import
+  - `feature_snapshot_service.py` 移除 4 个顶层 kernel import
+  - `monitor_batch_service.py` 修复 L1847 延迟 import
+  - `stock_capture_service.py` 早已无直接 kernel import
+- **AST 硬门禁升级**：`test_algorithm_registry_architecture.py::TestFourChainDirectImportGate::test_four_chain_no_direct_kernel_import` 移除 `@pytest.mark.xfail(strict=True)`，升级为**硬失败**。
+- **`tests/allowlist.json` 清理**：移除 issue #83 条目（`items: []`）。
+- **测试** `test_algorithm_registry_architecture.py`（22 项全绿，含硬失败的四链门禁）+ `test_indicator_service.py` + `test_node_cluster_engine.py` + `test_smc_indicator.py` + `test_canonical_input_provider.py` + `test_canonical_result_hash_matrix.py`（124 项全绿，1 skipped）+ `test_feature_snapshot_service.py` + `test_monitor_batch_capture_image.py` + `test_stock_capture_service.py` + `test_node_cluster_three_chain_consistency.py`（40 项全绿，1 skipped）+ `test_indicators_api.py` + `test_chart_bars_service.py` + `test_structural_factor_service.py` + `test_temporal_feature_service.py`（126 项全绿）。
+- **运行命令**：`APP_ENV=test pytest backend/tests/test_algorithm_registry_architecture.py -v`（AST 硬门禁）；`APP_ENV=test pytest backend/tests/test_indicator_service.py backend/tests/test_node_cluster_engine.py backend/tests/test_smc_indicator.py backend/tests/test_canonical_input_provider.py backend/tests/test_canonical_result_hash_matrix.py backend/tests/test_feature_snapshot_service.py backend/tests/test_stock_capture_service.py backend/tests/test_node_cluster_three_chain_consistency.py backend/tests/test_indicators_api.py backend/tests/test_chart_bars_service.py backend/tests/test_structural_factor_service.py backend/tests/test_temporal_feature_service.py -v`
+
 ## 4. CI 门禁
 
 阻断项：

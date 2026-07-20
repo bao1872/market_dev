@@ -108,28 +108,36 @@ user_watchlist_items
 → eligible_user_service
 → monitor_scheduler
 → 最新两根 completed 1m Bar
-→ MonitorEvaluation
-→ StrategyEvent
+→ WatchlistMonitor (BB + VN + SMC 三合一, CHANGE-20260720-001 §二)
+→ MonitorEvaluation (含 bb/node_cluster/smc/market 命名空间状态)
+→ StrategyEvent (event_type 含 smc_bos_retest/smc_choch_retest/smc_order_block_first_touch)
 → EventRecipient
-→ Outbox
-→ MessageDelivery
+→ Outbox (payload 含 indicator_view, CHANGE-20260720-001 §三)
+→ MessageDelivery (text/card + image)
 → Feishu / message center
 ```
+
+- **WatchlistMonitor 三合一**（CHANGE-20260720-001 §二）：`self._bb = BollingerMonitor()` + `self._vn = VolumeNodeMonitor()` + `self._smc = SmcMonitor()`；BB/VN/SMC 三监控独立失败互不影响（单 sub-monitor 失败只标记该 item degraded）。
+- **SmcMonitor**（CHANGE-20260720-001 §二）：主输入已完成前复权日线（`bars_daily`），当天盘中结构固定，1 分钟线仅用于触发检测；调用现有 SMC Canonical Adapter（`compute_smc_adapter`），禁止复制公式；FVG 完全排除；第一版事件 `smc_bos_retest`/`smc_choch_retest`/`smc_order_block_first_touch`（含稳定 `smc_entity_id` + `touch_episode` 去重）。
+- **MonitorState 命名空间**（CHANGE-20260720-001 §二）：升级为 `bb`/`node_cluster`/`smc`/`market`（含 `current_price`/`previous_close`/`change_pct`）；兼容读取旧平铺状态一次。
 
 ### 个股详情截图分享
 
 ```text
-用户/管理员触发分享
-→ stock_detail_feishu_service
+用户/管理员触发分享 (POST /instruments/{id}/send-feishu, body: {indicator_view: "node_cluster"|"bollinger"|"smc"|null})
+→ stock_detail_feishu_service (透传 indicator_view, CHANGE-20260720-001 §四)
 → 文字 NotificationMessage + Outbox
 → create_capture_token
-→ worker-capture 访问 /capture/stock/:symbol
-→ Capture Snapshot API
-→ 图片 NotificationMessage + Outbox
+→ worker-capture 访问 /capture/stock/:symbol?indicator_view=...
+→ Capture Snapshot API (三套 Capture Preset 之一, CHANGE-20260720-001 §三)
+→ 图片 NotificationMessage + Outbox (resource_refs 含 indicator_view)
 → Outbox Relay
 → Delivery Worker
 → Feishu Platform App
 ```
+
+- **三类 IndicatorView 独立图片**（CHANGE-20260720-001 §三）：`IndicatorView = Literal["node_cluster", "bollinger", "smc"]` 贯穿 `StrategyEvent.payload` → `NotificationMessage.resource_refs` → Capture 请求 → `CaptureJob` → 输出文件名 → 缓存键 → 幂等键 → 状态查询 → 前端 URL 参数；三套 Capture Preset `FEISHU_CAPTURE_PRESETS`（layers 互斥，除共享 candlestick）；监控自动发送从事件类型映射 `indicator_view`。
+- **POST body schema**（CHANGE-20260720-001 §四）：`SendFeishuRequest` 接受 `indicator_view: Literal["node_cluster", "bollinger", "smc"] | None`；前端弹窗三单选项（筹码共识价/布林带/SMC 结构）；`output_filename` 加 `-{indicator_view}` 后缀。
 
 ### 板块分类同步与筛选（CHANGE-20260716-007 + PR #77 收口）
 

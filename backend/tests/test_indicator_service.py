@@ -504,14 +504,18 @@ async def test_indicator_time_injected_from_macd_bars_in_15m(
     )
 
 
-async def test_dsa_context_bars_daily_uses_macd_bars_in_15m(
+async def test_dsa_context_bars_display_uses_macd_bars_and_bars_daily_uses_daily_in_15m(
     mock_session: AsyncMock,
     mock_bars: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """[PR #32] - 15m 下传给策略的 context.bars_daily 应是 macd_bars（当前 tf），非 daily_bars。
+    """[CHANGE-20260720-001] - 15m 下 context.bars_display 是 macd_bars（当前 tf），bars_daily 是真正日线。
 
-    验证 DSA 在 15m 下用 15m bars 计算（通过捕获 MarketDataContext）。
+    [PR #32] 之前 bars_daily=macd_bars（15m bars），导致 Node/BB 日线结构算法收到非日线数据。
+    修复后严格分离：
+    - bars_display = macd_bars（15m），供 DSA/MACD/SQZMOM 等当前周期图层使用；
+    - bars_daily = daily_bars（真正日线），供 Node/BB/SMC 日线结构算法使用；
+    - display_timeframe = "15m"。
     """
     monkeypatch.setattr(
         indicator_service.StrategyLoader, "_registry", {"mock_strategy": None}
@@ -551,20 +555,39 @@ async def test_dsa_context_bars_daily_uses_macd_bars_in_15m(
 
     assert len(captured_contexts) > 0, "应至少调用一次策略"
     ctx = captured_contexts[0]
-    # bars_daily 应是 15m bars（macd_bars），长度与 15m bars 一致
+    # display_timeframe 应为 15m
+    assert ctx.display_timeframe == "15m", (
+        f"15m 请求下 display_timeframe 应为 '15m'，实际: {ctx.display_timeframe!r}"
+    )
+    # bars_display 应是 15m bars（macd_bars），长度与 15m bars 一致
     expected_15m_bars = _build_bars("15m")
-    assert len(ctx.bars_daily) == len(expected_15m_bars), (
-        f"15m 下 context.bars_daily 长度应等于 15m bars({len(expected_15m_bars)}), "
+    assert ctx.bars_display is not None, "15m 下 context.bars_display 不应为 None"
+    assert len(ctx.bars_display) == len(expected_15m_bars), (
+        f"15m 下 context.bars_display 长度应等于 15m bars({len(expected_15m_bars)}), "
+        f"实际={len(ctx.bars_display)}"
+    )
+    # bars_display 时间应为 15m 格式（含 HH:MM:SS）
+    display_first_time = ctx.bars_display.index[0]
+    assert hasattr(display_first_time, 'hour'), (
+        f"15m bars_display 应是 DatetimeIndex 含时间: {display_first_time}"
+    )
+    # 15m 第一个 bar 是 09:30（hour=9）
+    assert display_first_time.hour == 9, (
+        f"15m bars_display 第一个时间应为 09:30（hour=9），实际: {display_first_time}（hour={display_first_time.hour}）"
+    )
+    # bars_daily 应是真正日线（hour=0），长度等于 daily bars
+    expected_daily_bars = _build_bars("1d")
+    assert len(ctx.bars_daily) == len(expected_daily_bars), (
+        f"15m 下 context.bars_daily 长度应等于 daily bars({len(expected_daily_bars)}), "
         f"实际={len(ctx.bars_daily)}"
     )
-    # bars_daily 时间应为 15m 格式（含 HH:MM:SS），非日线日期 00:00:00
-    first_time = ctx.bars_daily.index[0]
-    assert hasattr(first_time, 'hour'), (
-        f"15m bars_daily 应是 DatetimeIndex 含时间: {first_time}"
+    daily_first_time = ctx.bars_daily.index[0]
+    assert hasattr(daily_first_time, 'hour'), (
+        f"daily bars_daily 应是 DatetimeIndex: {daily_first_time}"
     )
-    # 15m 第一个 bar 是 09:30（hour=9），daily 第一个 bar 是 00:00（hour=0）
-    assert first_time.hour == 9, (
-        f"15m bars_daily 第一个时间应为 09:30（hour=9），实际: {first_time}（hour={first_time.hour}）"
+    assert daily_first_time.hour == 0, (
+        f"15m 下 context.bars_daily 第一个时间应为日线 00:00（hour=0），"
+        f"实际: {daily_first_time}（hour={daily_first_time.hour}）"
     )
 
 
@@ -1092,12 +1115,23 @@ def test_determine_required_bars_includes_15min_minute_when_vp_available() -> No
     assert "daily" in result, "VP 可用时应包含 daily"
 
 
-def test_determine_required_bars_excludes_15min_minute_when_vp_unavailable() -> None:
-    """VP 策略不可用时不包含 15min/minute（只有 dsa_selector + watchlist_monitor）。"""
+def test_determine_required_bars_includes_15min_excludes_minute_when_vp_unavailable() -> None:
+    """[CHANGE-20260720-001] WATCHLIST_MONITOR 现在声明 15min（内部含 VolumeNodeMonitor）。
+
+    VP（volume_node_monitor）不可用时（只有 dsa_selector + watchlist_monitor）：
+    - daily 始终需要（MACD/DSA 基础指标）
+    - 15min 需要（WATCHLIST_MONITOR 内部 VolumeNodeMonitor 用 15m 做 VP profile）
+    - minute 不需要（VP 不可用，无 crossover 检测）
+    """
     result = indicator_service._determine_required_bars({"dsa_selector", "watchlist_monitor"})
-    assert "15min" not in result, "VP 不可用时应不包含 15min"
+    assert "daily" in result, "应包含 daily"
+    assert "15min" in result, (
+        "WATCHLIST_MONITOR 声明 15min（内部含 VolumeNodeMonitor），应包含 15min"
+    )
     assert "minute" not in result, "VP 不可用时应不包含 minute"
-    assert result == frozenset({"daily"}), f"应只返回 daily，实得 {result}"
+    assert result == frozenset({"daily", "15min"}), (
+        f"应返回 daily+15min（WATCHLIST_MONITOR 声明），实得 {result}"
+    )
 
 
 async def test_1d_skips_15min_minute_queries_when_vp_unavailable(
@@ -1201,6 +1235,242 @@ async def test_15m_always_loads_15min_regardless_of_vp(
 
     assert "15m" in called_timeframes, (
         "15m 请求应始终加载 15min 数据（macd_bars 用途），独立于策略 registry"
+    )
+
+
+# ============================================================
+# [CHANGE-20260720-001] 五周期 Node profile_hash 一致性测试
+# Node Cluster 固定使用 daily_bars + bars_15min（不依赖显示周期），
+# 五周期（1d/15m/1h/1w/1mo）切换时 profile_hash 必须一致。
+# ============================================================
+
+
+def _make_overlapping_mock_mdas() -> type:
+    """构造 mock MDAS，daily/15m bars 使用重叠日期范围（满足 Node Cluster 覆盖率约束）。
+
+    - daily: 260 根日线，end_date=2026-06-18
+    - 15m: 4100 根 15m bars，end_date=2026-06-18 15:00（覆盖 daily 最后若干日）
+    - 1m/1h/1w/1mo: 复用 _build_bars 默认构造（仅用于显示周期，Node 不读取）
+    """
+    from datetime import datetime
+
+    import numpy as np
+
+    from app.services.market_data_aggregation_service import BarAggregationResult
+
+    # 复用 test_node_cluster_engine.py 的构造方式，确保 daily/15m 时间范围重叠
+    def _make_daily_bars(n: int = 260, end_date: str = "2026-06-18") -> pd.DataFrame:
+        np.random.seed(43)
+        dates = pd.date_range(end=end_date, periods=n, freq="B")
+        price_low, price_high = 9.0, 15.0
+        span = price_high - price_low
+        mid = (price_low + price_high) / 2
+        returns = np.random.uniform(-0.01, 0.01, size=n)
+        close = mid * np.cumprod(1 + returns)
+        close = np.clip(close, price_low + span * 0.1, price_high - span * 0.1)
+        open_ = close * (1 + np.random.uniform(-0.005, 0.005, size=n))
+        high = np.maximum(open_, close) * (1 + np.random.uniform(0.002, 0.01, size=n))
+        low = np.minimum(open_, close) * (1 - np.random.uniform(0.002, 0.01, size=n))
+        high = np.maximum(high, price_high - span * 0.05)
+        low = np.minimum(low, price_low + span * 0.05)
+        volume = np.random.uniform(1_000_000, 5_000_000, size=n)
+        amount = volume * close
+        df = pd.DataFrame(
+            {"open": open_, "high": high, "low": low, "close": close,
+             "volume": volume, "amount": amount, "adj_factor": [1.0] * n},
+            index=dates,
+        )
+        df.index.name = "datetime"
+        return df
+
+    def _make_15m_bars(n_total: int = 4100, end_date: str = "2026-06-18 15:00") -> pd.DataFrame:
+        np.random.seed(7)
+        dates = pd.date_range(end=end_date, periods=n_total, freq="15min")
+        # 簇：3 个价格簇 + 低量填充
+        clusters = [(10.0, 200_000.0, 0.3), (12.0, 200_000.0, 0.3), (14.0, 200_000.0, 0.3)]
+        parts: list[pd.DataFrame] = []
+        consumed = 0
+        for price, vol, frac in clusters:
+            n_cluster = int(n_total * frac)
+            idx = dates[consumed:consumed + n_cluster]
+            consumed += n_cluster
+            jitter = price * 0.0005
+            close = price + np.random.uniform(-jitter, jitter, size=n_cluster)
+            parts.append(pd.DataFrame(
+                {"open": close, "high": close + jitter, "low": close - jitter,
+                 "close": close, "volume": np.full(n_cluster, vol, dtype=float),
+                 "amount": close * vol, "adj_factor": [1.0] * n_cluster},
+                index=idx,
+            ))
+        remaining = n_total - consumed
+        if remaining > 0:
+            idx = dates[consumed:]
+            close = np.full(remaining, clusters[0][0], dtype=float)
+            parts.append(pd.DataFrame(
+                {"open": close, "high": close, "low": close, "close": close,
+                 "volume": np.full(remaining, 1000.0), "amount": close * 1000.0,
+                 "adj_factor": [1.0] * remaining},
+                index=idx,
+            ))
+        df = pd.concat(parts, ignore_index=False)
+        df.index.name = "datetime"
+        return df
+
+    daily_cache = _make_daily_bars()
+    bars_15m_cache = _make_15m_bars()
+
+    class _MockAggService:
+        async def get_bars(self, session, instrument_id, timeframe="1d", adj="qfq", **kwargs):
+            if timeframe == "1d":
+                bars = daily_cache
+            elif timeframe == "15m":
+                bars = bars_15m_cache
+            elif timeframe == "1m":
+                # minute: 监控策略仅需要 2 根 1 分钟线（用 15m format 构造）
+                bars = _build_bars("15m", length=2)
+            else:
+                # 1h/1w/1mo: 显示周期用 _build_bars（Node 不读取，仅 macd_bars 使用）
+                bars = _build_bars(timeframe)
+            return BarAggregationResult(
+                bars=bars,
+                data_source="db",
+                as_of=datetime.now(),
+                is_partial=False,
+                last_persisted_bar_time=None,
+                last_live_bar_time=None,
+                freshness_seconds=0.0,
+                degraded=False,
+                degraded_reason=None,
+            )
+
+    return _MockAggService
+
+
+@pytest.mark.parametrize("timeframe", ["1d", "15m", "1h", "1w", "1mo"])
+async def test_node_cluster_profile_hash_consistent_across_timeframes(
+    mock_session: AsyncMock,
+    empty_registry: None,
+    monkeypatch: pytest.MonkeyPatch,
+    timeframe: str,
+) -> None:
+    """[CHANGE-20260720-001] 五周期 Node profile_hash 一致性。
+
+    Node Cluster 固定使用 completed qfq 1d×250 + 15m×4000，不随页面周期变化。
+    五周期切换时 data["node_cluster"]["profile_meta"]["profile_hash"] 必须一致。
+
+    实现要点：
+    - bars_daily/bars_15min 与显示周期分离（修复前 bars_daily=macd_bars 导致非 1d 周期 Node 不可用）；
+    - _compute_independent_node_cluster 只读取 daily_bars + bars_15min，不读取 macd_bars。
+
+    测试环境：
+    - 使用 _make_overlapping_mock_mdas 提供 daily(260根) + 15m(4100根) 重叠 bars；
+    - WATCHLIST_MONITOR 可用（_get_available_strategy_keys 返回 {"watchlist_monitor"}），
+      确保所有 timeframe 下都加载 15min bars。
+    """
+    # 使用重叠日期的 mock MDAS
+    monkeypatch.setattr(
+        indicator_service,
+        "MarketDataAggregationService",
+        _make_overlapping_mock_mdas(),
+    )
+    # Mock _get_available_strategy_keys 返回 WATCHLIST_MONITOR（确保 15min 被加载）
+    monkeypatch.setattr(
+        indicator_service,
+        "_get_available_strategy_keys",
+        AsyncMock(return_value={"watchlist_monitor"}),
+    )
+
+    result = await indicator_service.compute_all_indicators(
+        mock_session, TEST_INSTRUMENT_ID, timeframe, "none", bars=250,
+    )
+
+    assert "node_cluster" in result["data"], (
+        f"{timeframe} 下应独立输出 data['node_cluster']"
+    )
+    node_cluster = result["data"]["node_cluster"]
+    assert isinstance(node_cluster, dict), (
+        f"{timeframe} 下 node_cluster 应为 dict，实际: {type(node_cluster)}"
+    )
+    # availability 应为 available（daily_bars 和 15m_bars 都已 mock 提供）
+    assert node_cluster["availability"] == "available", (
+        f"{timeframe} 下 node_cluster.availability 应为 'available'，"
+        f"实际: {node_cluster.get('availability')!r}, "
+        f"degraded_reason={node_cluster.get('degraded_reason')!r}"
+    )
+    assert node_cluster["degraded_reason"] is None, (
+        f"{timeframe} 下 node_cluster.degraded_reason 应为 None，"
+        f"实际: {node_cluster.get('degraded_reason')!r}"
+    )
+    profile_meta = node_cluster["profile_meta"]
+    assert isinstance(profile_meta, dict), "profile_meta 应为 dict"
+    assert "profile_hash" in profile_meta, "profile_meta 应包含 profile_hash"
+    assert profile_meta["profile_hash"], (
+        f"{timeframe} 下 profile_hash 不应为空: {profile_meta.get('profile_hash')!r}"
+    )
+    # daily_source_hash 和 bars_15m_source_hash 应存在（验证输入确定性）
+    assert profile_meta.get("daily_source_hash"), (
+        f"{timeframe} 下 daily_source_hash 不应为空"
+    )
+    assert profile_meta.get("bars_15m_source_hash"), (
+        f"{timeframe} 下 bars_15m_source_hash 不应为空"
+    )
+    # row_count 应为 100（完整 VP profile）
+    assert profile_meta.get("row_count") == 100, (
+        f"{timeframe} 下 row_count 应为 100，实际: {profile_meta.get('row_count')}"
+    )
+
+
+async def test_node_cluster_profile_hash_identical_across_all_five_timeframes(
+    mock_session: AsyncMock,
+    empty_registry: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[CHANGE-20260720-001] 五周期 Node profile_hash 必须完全一致。
+
+    Node Cluster 输入固定为 daily_bars + bars_15min，不依赖显示周期。
+    五周期（1d/15m/1h/1w/1mo）下 profile_hash / daily_source_hash / bars_15m_source_hash
+    必须完全一致，证明 Node Cluster 独立于显示周期。
+    """
+    # 使用重叠日期的 mock MDAS
+    monkeypatch.setattr(
+        indicator_service,
+        "MarketDataAggregationService",
+        _make_overlapping_mock_mdas(),
+    )
+    # Mock _get_available_strategy_keys
+    monkeypatch.setattr(
+        indicator_service,
+        "_get_available_strategy_keys",
+        AsyncMock(return_value={"watchlist_monitor"}),
+    )
+
+    hashes_by_tf: dict[str, dict[str, str]] = {}
+    for tf in ("1d", "15m", "1h", "1w", "1mo"):
+        result = await indicator_service.compute_all_indicators(
+            mock_session, TEST_INSTRUMENT_ID, tf, "none", bars=250,
+        )
+        node_cluster = result["data"]["node_cluster"]
+        meta = node_cluster["profile_meta"]
+        hashes_by_tf[tf] = {
+            "profile_hash": meta["profile_hash"],
+            "daily_source_hash": meta["daily_source_hash"],
+            "bars_15m_source_hash": meta["bars_15m_source_hash"],
+        }
+
+    # 五周期 profile_hash 必须完全一致
+    profile_hashes = {h["profile_hash"] for h in hashes_by_tf.values()}
+    assert len(profile_hashes) == 1, (
+        f"五周期 profile_hash 必须完全一致，实际: {hashes_by_tf}"
+    )
+    # 五周期 daily_source_hash 必须完全一致
+    daily_hashes = {h["daily_source_hash"] for h in hashes_by_tf.values()}
+    assert len(daily_hashes) == 1, (
+        f"五周期 daily_source_hash 必须完全一致，实际: {hashes_by_tf}"
+    )
+    # 五周期 bars_15m_source_hash 必须完全一致
+    bars_15m_hashes = {h["bars_15m_source_hash"] for h in hashes_by_tf.values()}
+    assert len(bars_15m_hashes) == 1, (
+        f"五周期 bars_15m_source_hash 必须完全一致，实际: {hashes_by_tf}"
     )
 
 

@@ -108,6 +108,7 @@ async def send_stock_detail_to_feishu(
     frontend_base_url: str,
     capture_worker_url: str,
     capture_token_ttl_seconds: int = 300,
+    indicator_view: str | None = None,
 ) -> dict[str, Any]:
     """发送个股详情到飞书，走正式 Outbox 链路（异步投递）。
 
@@ -123,6 +124,11 @@ async def send_stock_detail_to_feishu(
     7. capture worker HTTP 截图 → create_message + write_outbox(image)
     8. 返回 test_run_id/message_group_id/message_id/status
 
+    [CHANGE-20260720-003 §四] indicator_view 贯穿详情页手动分享链路：
+    - None: 向后兼容，全字段文案 + 默认截图图层（无 indicator_view URL 参数）
+    - "node_cluster" | "bollinger" | "smc": 文字卡片只展示该指标对应字段，
+      截图 URL 加 &indicator_view=... 切换图层组合，缓存键加 iv=... 维度
+
     Args:
         db: 异步会话
         instrument_id: 个股 ID
@@ -130,6 +136,7 @@ async def send_stock_detail_to_feishu(
         frontend_base_url: 前端 base URL（截图服务访问）
         capture_worker_url: 截图 Worker HTTP 服务地址
         capture_token_ttl_seconds: capture token 有效期（秒）
+        indicator_view: 指标视图 node_cluster|bollinger|smc；None 表示全字段（向后兼容）
 
     Returns:
         dict 含 test_run_id / message_group_id / message_id / image_message_id /
@@ -227,6 +234,8 @@ async def send_stock_detail_to_feishu(
             "share": True,
         },
         memo=memo_content,
+        # [CHANGE-20260720-003 §四] 按 indicator_view 拆分文字卡片内容，一张图/一段文案只描述一个指标
+        indicator_view=indicator_view,
     )
 
     # 6. 复用 create_message 创建文本消息 + 写入文本 Outbox
@@ -290,7 +299,11 @@ async def send_stock_detail_to_feishu(
             "event_id": str(instrument_id),
             "token": token,
             "frontend_base_url": frontend_base_url,
-            "output_filename": f"stock-detail-{instrument_id}-{test_run_id}",
+            # [CHANGE-20260720-003 §四] output_filename 含 indicator_view 防止不同指标复用旧图
+            "output_filename": (
+                f"stock-detail-{instrument_id}-{test_run_id}"
+                + (f"-{indicator_view}" if indicator_view else "")
+            ),
             "instrument_id": str(instrument_id),
             "chart_version": "v1",
             # [Feishu] - 飞书盘中截图业务默认 1d（日线）：实时性由 Capture Snapshot
@@ -299,6 +312,9 @@ async def send_stock_detail_to_feishu(
             "capture_run_id": str(test_run_id),
             "source_bar_time": snapshot.as_of.isoformat(),
             "disable_cache": True,
+            # [CHANGE-20260720-003 §四] 透传 indicator_view 到 capture worker
+            # 截图页面按 indicator_view 切换图层组合，缓存键加 iv={indicator_view} 维度
+            **({"indicator_view": indicator_view} if indicator_view else {}),
         }
         async with httpx.AsyncClient(timeout=60.0) as client:
             capture_resp = await client.post(
@@ -337,19 +353,23 @@ async def send_stock_detail_to_feishu(
         capture_ms = (time.time() - capture_start) * 1000
 
         # 构建图片消息 DTO（与 monitor_batch_service._create_chart_image_message 同款）
+        image_resource_refs: dict[str, Any] = {
+            "instrument_id": str(instrument.id),
+            "symbol": instrument.symbol,
+            "channel_id": str(channel.id),
+            "test_run_id": str(test_run_id),
+            "image_url": image_url,
+        }
+        # [CHANGE-20260720-003 §四] 图片消息 resource_refs 携带 indicator_view 贯穿状态查询链路
+        if indicator_view:
+            image_resource_refs["indicator_view"] = indicator_view
         image_dto = NotificationMessageDTO(
             message_type="MONITOR_EVENT",
             template_key="monitor_event",
             template_version="1.1.0",
             title=f"个股截图｜{instrument.name or instrument.symbol}",
             summary=f"{instrument.symbol} 个股详情截图，详见附图",
-            resource_refs={
-                "instrument_id": str(instrument.id),
-                "symbol": instrument.symbol,
-                "channel_id": str(channel.id),
-                "test_run_id": str(test_run_id),
-                "image_url": image_url,
-            },
+            resource_refs=image_resource_refs,
             data_time=format_shanghai_datetime(),
             primary_instrument={
                 "instrument_id": str(instrument.id),
@@ -417,6 +437,8 @@ async def send_stock_detail_to_feishu(
                 image_url=image_url,
                 error_code=error_code_local,
                 error_message=error_message_local,
+                # [CHANGE-20260720-003 §四] CaptureJob 记录 indicator_view 便于状态查询区分
+                indicator_view=indicator_view,
             )
         )
         logger.warning(
@@ -701,6 +723,7 @@ if __name__ == "__main__":
     expected = [
         "db", "instrument_id", "user_id",
         "frontend_base_url", "capture_worker_url", "capture_token_ttl_seconds",
+        "indicator_view",
     ]
     assert params == expected, f"参数不匹配: {params}"
     print(f"params={params} OK")

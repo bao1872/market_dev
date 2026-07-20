@@ -116,6 +116,7 @@ def _build_cache_key(
     source_bar_time: str | None = None,
     capture_run_id: str | None = None,
     device_scale_factor: int | None = None,
+    indicator_view: str | None = None,
 ) -> str:
     """构建截图缓存 key。
 
@@ -124,7 +125,10 @@ def _build_cache_key(
         event_id + instrument_id + chart_version
         + tf={timeframe} + sbt={source_bar_time}
         + run={capture_run_id} + dsf={device_scale_factor}
-    source_bar_time/capture_run_id 变化即视为新图，禁止跨时间点复用。
+    [CHANGE-20260720-003 §三] 新增 indicator_view 维度：
+        + iv={indicator_view}
+    不同指标视图（node_cluster|bollinger|smc）天然区分缓存，禁止不同指标复用旧图。
+    source_bar_time/capture_run_id/indicator_view 变化即视为新图，禁止跨时间点/跨视图复用。
     """
     parts = [str(event_id), str(instrument_id), str(chart_version)]
     if timeframe is not None:
@@ -134,6 +138,8 @@ def _build_cache_key(
     if capture_run_id is not None:
         parts.append(f"run={capture_run_id}")
     parts.append(f"dsf={device_scale_factor}")
+    if indicator_view is not None:
+        parts.append(f"iv={indicator_view}")
     return "_".join(parts)
 
 
@@ -189,6 +195,7 @@ async def capture_stock_chart(
     viewport_width: int | None = None,
     viewport_height: int | None = None,
     device_scale_factor: int | None = None,
+    indicator_view: str | None = None,
 ) -> CaptureResult:
     """截取个股详情页指定区域，返回 PNG bytes 与渲染元数据。
 
@@ -206,6 +213,8 @@ async def capture_stock_chart(
         capture_run_id: 本次截图运行 ID（扩展缓存 key，防旧图）
         disable_cache: True 时跳过读缓存但允许写新缓存（飞书实时截图默认 True）
         viewport_width/height/device_scale_factor: 高清渲染参数（默认 env 1920x1200 dsf=2）
+        indicator_view: 指标视图 node_cluster|bollinger|smc（扩展缓存 key + URL 参数，
+            [CHANGE-20260720-003 §三] 一张图只渲染一个指标视图，禁止混合指标叠图）
 
     Returns:
         CaptureResult（png_bytes + 渲染元数据）
@@ -229,6 +238,7 @@ async def capture_stock_chart(
             source_bar_time=source_bar_time,
             capture_run_id=capture_run_id,
             device_scale_factor=dsf,
+            indicator_view=indicator_view,
         )
         cache_path = os.path.join(_CACHE_DIR, f"{cache_key}.png")
         if not disable_cache:
@@ -269,6 +279,9 @@ async def capture_stock_chart(
         url += f"&source_bar_time={source_bar_time}"
     if capture_run_id is not None:
         url += f"&capture_run_id={capture_run_id}"
+    if indicator_view is not None:
+        # [CHANGE-20260720-003 §三] 前端按 indicator_view 切换图层组合
+        url += f"&indicator_view={indicator_view}"
     if disable_cache:
         url += "&disable_cache=true"
     # [capture-realtime] - 截图页面始终强制实时指标/行情（等价 force_refresh）
@@ -387,6 +400,26 @@ if __name__ == "__main__":
         and "run=run-1" in key_full, f"扩展 key 维度缺失: {key_full}"
     assert key_full != key, "不同维度应产生不同 key"
     print(f"cache_key_ext={key_full}")
+
+    # [CHANGE-20260720-003 §三] indicator_view 维度：不同视图应产生不同 key
+    key_nc = _build_cache_key(
+        "evt-123", "inst-456", "v1",
+        device_scale_factor=2, indicator_view="node_cluster",
+    )
+    key_bb = _build_cache_key(
+        "evt-123", "inst-456", "v1",
+        device_scale_factor=2, indicator_view="bollinger",
+    )
+    key_smc = _build_cache_key(
+        "evt-123", "inst-456", "v1",
+        device_scale_factor=2, indicator_view="smc",
+    )
+    assert "iv=node_cluster" in key_nc, f"indicator_view 维度缺失: {key_nc}"
+    assert "iv=bollinger" in key_bb, f"indicator_view 维度缺失: {key_bb}"
+    assert "iv=smc" in key_smc, f"indicator_view 维度缺失: {key_smc}"
+    assert key_nc != key_bb != key_smc != key_nc, \
+        f"不同 indicator_view 应产生不同 key: {key_nc} / {key_bb} / {key_smc}"
+    print(f"cache_key_iv: nc={key_nc} bb={key_bb} smc={key_smc}")
 
     # 测试 _write_cache / _read_cache（TTL 内命中）
     with tempfile.TemporaryDirectory() as tmpdir:

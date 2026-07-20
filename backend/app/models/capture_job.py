@@ -52,6 +52,13 @@ class CaptureJob(Base):
     message_group_id: Mapped[str] = mapped_column(
         Text, nullable=False, comment="消息组 ID（关联 card/image Outbox）"
     )
+    # [CHANGE-20260720-003 §三] 贯穿全链的 indicator_view
+    # 一张截图只渲染一个指标视图（node_cluster|bollinger|smc），禁止混合指标叠图。
+    # nullable=True 兼容历史数据；新写入必须填充。
+    indicator_view: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="指标视图 node_cluster|bollinger|smc（历史数据为 NULL）",
+    )
     status: Mapped[str] = mapped_column(
         Text, nullable=False, default=CAPTURE_STATUS_PENDING,
         comment="pending/running/succeeded/failed/dead",
@@ -88,8 +95,8 @@ if __name__ == "__main__":
     cols = {c.name for c in CaptureJob.__table__.columns}
     expected = {
         "id", "event_id", "instrument_id", "user_id", "message_group_id",
-        "status", "attempt_count", "image_url", "error_code", "error_message",
-        "created_at", "finished_at",
+        "indicator_view", "status", "attempt_count", "image_url", "error_code",
+        "error_message", "created_at", "finished_at",
     }
     assert expected.issubset(cols), f"缺失字段: {expected - cols}"
     print(f"columns OK: {sorted(cols)}")

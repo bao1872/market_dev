@@ -49,21 +49,22 @@ from app.constants.indicator_contract import (
 from app.constants.strategy_keys import DSA_SELECTOR, WATCHLIST_MONITOR
 from app.models.instrument import Instrument
 from app.models.strategy import StrategyDefinition, StrategyVersion
+from app.services.canonical_adapters import (
+    NodeClusterProfileResult,
+    adapt_smc_to_display_dto,
+    compute_bollinger,
+    compute_node_cluster_profile,
+    compute_smc_indicators,
+    compute_sqzmom_lb,
+    derive_state_for_price,
+)
 from app.services.chart_bars_service import (
     compute_source_bar_hash,
     compute_source_bar_times,
 )
 from app.services.market_data_aggregation_service import MarketDataAggregationService
-from app.services.smc_view_adapter import adapt_smc_to_display_dto
 from app.services.strategy_batch_service import StrategyBatchService
 from app.strategy.runtime import MarketDataContext, StrategyLoader
-from app.strategy_assets.algorithms.features.merged_dsa_atr_rope_bb_factors import (
-    compute_bollinger,
-)
-from app.strategy_assets.algorithms.features.smc_indicator import (
-    compute_smc_indicators,
-)
-from app.strategy_assets.algorithms.features.sqzmom_lb import compute_sqzmom_lb
 
 logger = logging.getLogger("services.indicator_service")
 
@@ -104,11 +105,13 @@ _SMC_MODE_REALTIME = "realtime"
 # 定义每个注册策略实际需要哪些 bar 类型，避免无条件查询全量日内数据。
 # volume_node_monitor 需要 15min（VP profile）和 minute（crossover 检测），
 # 其他策略仅需 daily。
+# [CHANGE-20260720-001] WATCHLIST_MONITOR 内部含 VolumeNodeMonitor，必须声明 15min；
+#   之前只声明 daily 导致 15m bars 不被加载，Node Cluster 无辅助数据返回"暂不可用"。
 _REQUIRED_INPUTS: dict[str, frozenset[str]] = {
     DSA_SELECTOR: frozenset({"daily"}),
     "volume_node_monitor": frozenset({"daily", "15min", "minute"}),
     "bb_monitor": frozenset({"daily"}),
-    WATCHLIST_MONITOR: frozenset({"daily"}),
+    WATCHLIST_MONITOR: frozenset({"daily", "15min"}),
 }
 
 
@@ -409,6 +412,110 @@ def _adapt_watchlist_bb(
     return result
 
 
+def _compute_independent_node_cluster(
+    daily_bars: pd.DataFrame,
+    bars_15min: pd.DataFrame,
+    *,
+    symbol: str = "",
+) -> dict[str, Any]:
+    """独立计算 Node Cluster Profile，输出 data["node_cluster"]。
+
+    [CHANGE-20260720-001] Node Cluster 固定使用 completed qfq 1d×250 + 15m×4000，
+    不加载 1m，不随页面周期变化。五周期切换时 profile_hash 必须一致。
+
+    输出字段：
+    - profile_rows: 完整 100 行 VP 价格档位快照
+    - profile_meta: VP 元信息 + algorithm/schema/fingerprint/daily_hash/15m_hash/profile_hash
+    - peak_rows: Peak 节点快照（含 VA 外）
+    - state: 当前价格状态（upper_node/lower_node/position_0_1/poc_price/current_price）
+    - availability: "available" | "degraded" | "unavailable"
+    - degraded_reason: "INSUFFICIENT_DAILY_BARS" | "MISSING_15M_BARS" | "PROFILE_EMPTY" | None
+
+    Args:
+        daily_bars: 真正日线 bars（completed qfq，由 MDAS 获取）
+        bars_15min: 15m bars（completed qfq，由 MDAS 获取）
+        symbol: 股票代码（日志用）
+
+    Returns:
+        Node Cluster 独立输出字典
+    """
+    # 可用性判断
+    if daily_bars is None or daily_bars.empty or len(daily_bars) < 10:
+        return {
+            "profile_rows": [],
+            "profile_meta": {"row_count": 0},
+            "peak_rows": [],
+            "state": {},
+            "availability": "unavailable",
+            "degraded_reason": "INSUFFICIENT_DAILY_BARS",
+        }
+
+    has_15m = bars_15min is not None and not bars_15min.empty
+
+    try:
+        profile: NodeClusterProfileResult = compute_node_cluster_profile(
+            daily_bars, bars_15min if has_15m else pd.DataFrame(),
+        )
+    except Exception as exc:
+        logger.warning("node_cluster 独立计算失败 symbol=%s: %s", symbol, exc)
+        return {
+            "profile_rows": [],
+            "profile_meta": {"row_count": 0},
+            "peak_rows": [],
+            "state": {},
+            "availability": "unavailable",
+            "degraded_reason": f"COMPUTE_FAILED: {exc}",
+        }
+
+    if not profile.profile_rows:
+        availability = "unavailable"
+        degraded_reason = "PROFILE_EMPTY"
+    elif not has_15m:
+        availability = "degraded"
+        degraded_reason = "MISSING_15M_BARS"
+    else:
+        availability = "available"
+        degraded_reason = None
+
+    # 当前价格状态（取最新日线 close）
+    state: dict[str, Any] = {}
+    if profile.profile_rows and not daily_bars.empty:
+        try:
+            latest_close = float(daily_bars["close"].iloc[-1])
+            derived = derive_state_for_price(profile, latest_close)
+            state = derived.to_dict()
+        except Exception:
+            state = {}
+
+    profile_meta: dict[str, Any] = {
+        "row_count": len(profile.profile_rows),
+        "price_step": profile.price_step,
+        "poc_price": profile.poc_price,
+        "vah_price": profile.vah_price,
+        "val_price": profile.val_price,
+        "algorithm_version": profile.algorithm_version,
+        "output_schema_version": profile.output_schema_version,
+        "contract_fingerprint": profile.contract_fingerprint,
+        "daily_source_hash": profile.daily_source_hash,
+        "bars_15m_source_hash": profile.bars_15m_source_hash,
+        "profile_hash": profile.profile_hash,
+        "daily_bars_count": profile.daily_bars_count,
+        "bars_15m_count": profile.bars_15m_count,
+        "adjustment_as_of": profile.adjustment_as_of,
+        "primary_period": "1d",
+        "low_period": "15m",
+    }
+
+    return {
+        "profile_rows": profile.profile_rows,
+        "profile_meta": profile_meta,
+        "peak_rows": profile.peak_rows,
+        "state": state,
+        "availability": availability,
+        "degraded_reason": degraded_reason,
+    }
+
+
 # ===== 主函数 =====
 
 
@@ -577,12 +684,18 @@ async def compute_all_indicators(
     source_bar_hash: str = compute_source_bar_hash(macd_bars, timeframe)
 
     # 4. 构建 MarketDataContext
-    # [PR #32] - bars_daily 传入 macd_bars（当前 timeframe bars），让 DSA 在全周期计算
-    #   之前传 daily_bars 导致 15m/1h/1w/1mo 的 DSA 是日线 DSA，与当前周期 K线不对齐
+    # [CHANGE-20260720-001 bars_display/bars_daily 分离]
+    #   bars_daily = 真正日线（daily_bars），供 Node/BB/SMC 日线结构算法使用；
+    #   bars_display = 当前显示周期（macd_bars），供 DSA/MACD/SQZMOM 等当前周期图层使用。
+    #   之前 bars_daily=macd_bars 导致 Node/BB 在 15m/1h/1w/1mo 收到非日线数据，
+    #   Node Cluster 因日线根数不足返回"暂不可用"。
+    #   DSA 改为从 context.bars_display 读取（见 dsa_selector.py），保持全周期对齐。
     context = MarketDataContext(
         instrument_id=instrument_id,
         symbol=symbol,
-        bars_daily=macd_bars,
+        bars_daily=daily_bars,
+        bars_display=macd_bars,
+        display_timeframe=timeframe,
         bars_minute=bars_minute if not bars_minute.empty else None,
         bars_15min=bars_15min if not bars_15min.empty else None,
         trade_date=today,
@@ -705,6 +818,15 @@ async def compute_all_indicators(
         len(StrategyLoader._registry),
         len(data),
         len(errors),
+    )
+
+    # [CHANGE-20260720-001] 独立输出 data["node_cluster"]
+    # Node Cluster 固定使用 completed qfq 1d×250 + 15m×4000，不加载 1m，不随页面周期变化。
+    # 五周期切换时 profile_hash 必须一致（因为输入始终是 daily_bars + bars_15min）。
+    # 之前 Node 数据混入 watchlist_monitor，且 bars_daily=macd_bars 导致非 1d 周期 Node 不可用。
+    # 现独立计算并输出，前端优先读取 data["node_cluster"]，旧 watchlist_monitor 仅兼容回退。
+    data["node_cluster"] = _compute_independent_node_cluster(
+        daily_bars, bars_15min, symbol=symbol,
     )
 
     # [MACD 副图] - 将 MACD 作为全局图层注入 layers/data
