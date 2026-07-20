@@ -5,7 +5,7 @@ capture worker / Outbox / MessageDelivery），走正式 Outbox 异步链路。
 
 端点：
 - POST /instruments/{instrument_id}/send-feishu
-    请求体: 空（后端自动查找当前用户唯一 active Feishu 渠道）
+    请求体: {"indicator_view": "node_cluster" | "bollinger" | "smc"}（可选，默认 None 全字段）
     响应: {"test_run_id", "message_group_id", "message_id", "image_message_id", "status"}
 - GET /stock-detail-feishu/{test_run_id}/status
     响应: {"test_run_id", "message_group_id", "card_status", "image_status",
@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.constants.indicator_view import INDICATOR_VIEW_VALUES
 from app.core.deps import get_current_active_user, get_db
 from app.models.user import User
 from app.schemas.notification import MessageDeliveryResponse
@@ -81,6 +82,40 @@ class SendFeishuResponse(BaseModel):
     error_message: str | None = Field(None, description="错误详情（最多 500 字符）")
 
 
+class SendFeishuRequest(BaseModel):
+    """发送飞书请求体 - 指标视图选择（PROMPT.md §四）。
+
+    [CHANGE-20260720-003 §四] 详情页手动发送飞书时，用户从弹窗三单选项中选择指标视图：
+    - node_cluster: 筹码共识价（默认）
+    - bollinger: 布林带
+    - smc: SMC 结构
+
+    后端透传到：
+    - build_monitor_event_text：文字卡片按 indicator_view 拆分字段
+    - capture_payload：截图 URL 加 &indicator_view=... 切换图层组合
+    - CaptureJob：记录 indicator_view 便于状态查询区分
+    - 图片消息 resource_refs：携带 indicator_view 贯穿状态查询链路
+
+    默认 None 时为全字段（向后兼容旧调用），但前端弹窗始终显式选择一个值。
+    """
+
+    indicator_view: str | None = Field(
+        default=None,
+        description=(
+            "指标视图：node_cluster（筹码共识价）| bollinger（布林带）| smc（SMC 结构）；"
+            "None 表示全字段（向后兼容）"
+        ),
+    )
+
+    def normalized_indicator_view(self) -> str | None:
+        """校验并归一化 indicator_view，非法值返回 None。"""
+        if self.indicator_view is None:
+            return None
+        if self.indicator_view in INDICATOR_VIEW_VALUES:
+            return self.indicator_view
+        return None
+
+
 class ShareStatusResponse(BaseModel):
     """分享状态查询响应。
 
@@ -135,6 +170,7 @@ class RetryImageResponse(BaseModel):
 )
 async def send_stock_detail_feishu_endpoint(
     instrument_id: uuid.UUID,
+    payload: SendFeishuRequest | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ) -> SendFeishuResponse:
@@ -149,11 +185,20 @@ async def send_stock_detail_feishu_endpoint(
     4. write_outbox（事务性发件箱，outbox_relay 同款）
     5. capture worker HTTP（截图，test_channel_latest_event 同款）
 
+    [CHANGE-20260720-003 §四] 请求体携带 indicator_view：
+    - None: 全字段文案 + 默认截图图层（向后兼容）
+    - "node_cluster" | "bollinger" | "smc": 文字卡片只展示该指标对应字段，
+      截图 URL 加 &indicator_view=... 切换图层组合，缓存键加 iv=... 维度
+
     后端自动查找当前用户唯一 active Feishu 渠道；无渠道时返回 404。
     返回 test_run_id/message_group_id/message_id，客户端可通过
     GET /stock-detail-feishu/{test_run_id}/status 查询投递状态。
     """
     settings = get_settings()
+    # [CHANGE-20260720-003 §四] 归一化 indicator_view，非法值降级为 None（向后兼容）
+    indicator_view: str | None = None
+    if payload is not None:
+        indicator_view = payload.normalized_indicator_view()
 
     try:
         result = await send_stock_detail_to_feishu(
@@ -163,6 +208,7 @@ async def send_stock_detail_feishu_endpoint(
             frontend_base_url=settings.frontend_base_url,
             capture_worker_url=settings.capture_worker_url,
             capture_token_ttl_seconds=settings.jwt_capture_ttl_seconds,
+            indicator_view=indicator_view,
         )
     except InstrumentNotFoundError as e:
         # [StockDetailFeishu] - 个股不存在返回 404（三字段结构）
@@ -285,5 +331,20 @@ if __name__ == "__main__":
         "failed_step": "snapshot",
     }, f"三字段结构不匹配: {detail}"
     print(f"_error_detail={detail} OK")
+
+    # [CHANGE-20260720-003 §四] 验证 SendFeishuRequest body schema
+    req_none = SendFeishuRequest()
+    assert req_none.indicator_view is None, "默认应为 None"
+    assert req_none.normalized_indicator_view() is None, "None 归一化为 None"
+    req_nc = SendFeishuRequest(indicator_view="node_cluster")
+    assert req_nc.normalized_indicator_view() == "node_cluster"
+    req_bb = SendFeishuRequest(indicator_view="bollinger")
+    assert req_bb.normalized_indicator_view() == "bollinger"
+    req_smc = SendFeishuRequest(indicator_view="smc")
+    assert req_smc.normalized_indicator_view() == "smc"
+    # 非法值降级为 None（向后兼容）
+    req_invalid = SendFeishuRequest(indicator_view="invalid_view")
+    assert req_invalid.normalized_indicator_view() is None, "非法值应降级为 None"
+    print("SendFeishuRequest body schema OK")
 
     print("OK")

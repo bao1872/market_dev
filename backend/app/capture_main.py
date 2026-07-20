@@ -128,6 +128,12 @@ class CaptureRequest(BaseModel):
     device_scale_factor: int | None = Field(
         None, description="设备像素比（覆盖 env CAPTURE_DEVICE_SCALE_FACTOR，默认 2，严禁 4）"
     )
+    # [CHANGE-20260720-003 §三] 指标视图：node_cluster|bollinger|smc
+    # 一张图只渲染一个指标视图，禁止混合指标叠图；前端按此参数切换图层组合。
+    indicator_view: str | None = Field(
+        None,
+        description="指标视图 node_cluster|bollinger|smc（扩展缓存 key + URL 参数）",
+    )
 
 
 class CaptureResponse(BaseModel):
@@ -171,6 +177,7 @@ async def capture(request: CaptureRequest, background_tasks: BackgroundTasks) ->
             viewport_width=request.viewport_width,
             viewport_height=request.viewport_height,
             device_scale_factor=request.device_scale_factor,
+            indicator_view=request.indicator_view,
         )
     except StockCaptureError as e:
         # [capture-worker] - 区分超时与失败：错误消息含"超时"归为 CAPTURE_TIMEOUT

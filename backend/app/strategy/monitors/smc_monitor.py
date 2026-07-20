@@ -574,6 +574,8 @@ class SmcMonitor(StrategyRuntime):
             "touch_episode": touch_episode,
             "current_price": current_price,
             "bar_time": bar_time_key,
+            # [CHANGE-20260720-003 §三] 贯穿全链的 indicator_view
+            "indicator_view": "smc",
         }
 
         if event_type == SMC_BOS_RETEST:

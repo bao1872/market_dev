@@ -497,6 +497,18 @@ export type ShareDeliveryStatus =
   | 'dead'
   | 'not_created'
 
+// [CHANGE-20260720-003 §四] 指标视图共享枚举（与后端 app.constants.indicator_view 对齐）
+// 详情页手动发送飞书时，用户从弹窗三单选项中选择指标视图：
+// - node_cluster: 筹码共识价
+// - bollinger: 布林带
+// - smc: SMC 结构
+export type IndicatorView = 'node_cluster' | 'bollinger' | 'smc'
+
+/** POST /instruments/{instrument_id}/send-feishu 请求体 - 指标视图选择 */
+export interface SendFeishuRequest {
+  indicator_view?: IndicatorView
+}
+
 /** POST /instruments/{instrument_id}/send-feishu 响应 - 创建异步投递任务 */
 export interface StockDetailFeishuCreateResponse {
   test_run_id: string
@@ -1348,12 +1360,17 @@ export async function testNotificationChannelLatestEvent(channelId: string): Pro
 }
 
 // [StockDetailFeishu] - 描述: 创建异步投递任务（Outbox 链路），返回 test_run_id 供轮询
+// [CHANGE-20260720-003 §四] body 携带 indicator_view 透传到后端，影响：
+// - 文字卡片：按 indicator_view 拆分字段（一张图/一段文案只描述一个指标）
+// - 截图：URL 加 &indicator_view=... 切换图层组合，缓存键加 iv=... 维度
+// - CaptureJob：记录 indicator_view 便于状态查询区分
 export async function sendStockDetailFeishu(
   instrumentId: string,
+  payload?: SendFeishuRequest,
 ): Promise<StockDetailFeishuCreateResponse> {
   const { data } = await apiClient.post<StockDetailFeishuCreateResponse>(
     `/instruments/${instrumentId}/send-feishu`,
-    {},
+    payload ?? {},
   )
   return data
 }

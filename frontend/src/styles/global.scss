@@ -748,6 +748,52 @@ button { cursor: pointer; }
   color: #aab4c8;
 }
 
+// [CHANGE-20260720-003 §四] 指标视图三单选项 - 单选按钮组样式
+.feishu-indicator-view-group {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0 12px;
+  flex-wrap: wrap;
+}
+
+.feishu-indicator-view-option {
+  flex: 1 1 0;
+  min-width: 100px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 10px;
+  border: 1px solid #2c3547;
+  border-radius: 5px;
+  background: #0d1118;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+
+  input[type='radio'] {
+    margin: 0 6px 0 0;
+    cursor: pointer;
+    accent-color: var(--brand, #4f7cff);
+  }
+
+  .feishu-indicator-view-label {
+    font-size: 13px;
+    color: #c4ccda;
+    user-select: none;
+  }
+
+  &:hover { border-color: #40517a; }
+
+  &.active {
+    border-color: var(--brand, #4f7cff);
+    background: rgba(79, 124, 255, 0.08);
+  }
+
+  input:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+}
+
 .feishu-channel-select {
   width: 100%;
   height: 36px;

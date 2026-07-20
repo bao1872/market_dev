@@ -415,6 +415,8 @@ class VolumeNodeMonitor(StrategyRuntime):
                 "lower_node": curr_state.state.get("lower_node"),
                 "poc_price": curr_state.state.get("poc_price"),
                 "bar_time": bar_time_key,
+                # [CHANGE-20260720-003 §三] 贯穿全链的 indicator_view
+                "indicator_view": "node_cluster",
             }
 
             events.append(
