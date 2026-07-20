@@ -58,11 +58,12 @@ import os
 import uuid
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.core.route_utils import get_route_paths
+from app.services.capture_cleanup import cleanup_old_captures
 from app.services.stock_capture_service import (
     StockCaptureError,
     capture_stock_chart,
@@ -148,7 +149,7 @@ app.mount(CAPTURE_STATIC_URL_PREFIX, StaticFiles(directory=CAPTURE_STATIC_DIR), 
 
 
 @app.post("/capture", response_model=CaptureResponse)
-async def capture(request: CaptureRequest) -> CaptureResponse:
+async def capture(request: CaptureRequest, background_tasks: BackgroundTasks) -> CaptureResponse:
     """截取个股详情页并返回本地静态 URL。"""
     filename_prefix = request.output_filename or str(uuid.uuid4())
     filename = f"{filename_prefix}.png"
@@ -196,6 +197,10 @@ async def capture(request: CaptureRequest) -> CaptureResponse:
             status_code=500,
             detail=_error_detail("SAVE_FAILED", f"保存截图失败: {e}", "save"),
         ) from e
+
+    # [CHANGE-20260719-002 §三] 临时文件清理（PROMPT.md §3 要求 8）
+    # 截图保存成功后，异步清理旧文件，保留最近 20 个，避免目录无限增长
+    background_tasks.add_task(cleanup_old_captures, keep_count=20)
 
     return CaptureResponse(
         symbol=request.symbol,

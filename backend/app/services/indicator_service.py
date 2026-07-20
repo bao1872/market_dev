@@ -895,6 +895,9 @@ async def compute_all_indicators(
         "calculation_window": calculation_window,
         "warmup_bars": warmup_bars,
         "visible_bars": bars,
+        # [CHANGE-20260719-003 §四] 响应 echo timeframe 字段，供前端周期切换乱序丢弃检查
+        #   （PROMPT.md §4 要求"generation 不一致响应丢弃"，前端比对 response.timeframe vs 当前 timeframe）
+        "timeframe": timeframe,
         # [图表行情契约] - 数据源诊断字段（SubTask 1.4）
         #   前端据此验证 K 线时间与指标数据源一致性；hash 用于跨场景比对
         "source_bar_times": source_bar_times,

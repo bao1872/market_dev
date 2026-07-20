@@ -689,6 +689,8 @@ function renderBreakout(
 // 通用渲染器：根据 layer.renderer 分发
 // [chartViewport] - 描述: 所有 renderer 统一按 normalizeChartTime 时间键逐根匹配，
 //   不再用 values.length - barsCount 尾部截取，避免 K 线与指标错位
+// [CHANGE-20260719-003 §四] indexMap 参数：由 drawTrading 顶部构建并传入（time-index map 共享），
+//   避免每个 render 函数重复构建 O(n) Map；未传入时各 render 内部回退到 buildDisplayIndexMap。
 function renderIndicatorLayer(
   ctx: CanvasRenderingContext2D,
   g: Geometry,
@@ -699,28 +701,31 @@ function renderIndicatorLayer(
   py: (v: number) => number,
   displayTimes: string[],
   timeframe: string,
+  indexMap?: (number | undefined)[],
 ): void {
   switch (layer.renderer) {
     case 'line':
-      renderIndicatorLine(ctx, g, layer, data, displayTimes, step, py, timeframe)
+      renderIndicatorLine(ctx, g, layer, data, displayTimes, step, py, timeframe, indexMap)
       break
     case 'dsa_polyline':
+      // renderDsaPolyline 用 visual_segments 自有时间匹配，不消费 indexMap
       renderDsaPolyline(ctx, g, layer, data, displayTimes, step, py, timeframe)
       break
     case 'price_zone':
-      renderIndicatorPriceZone(ctx, g, layer, data, displayTimes, step, py, timeframe)
+      renderIndicatorPriceZone(ctx, g, layer, data, displayTimes, step, py, timeframe, indexMap)
       break
     case 'band':
-      renderIndicatorBand(ctx, g, layer, data, displayTimes, step, py, timeframe)
+      renderIndicatorBand(ctx, g, layer, data, displayTimes, step, py, timeframe, indexMap)
       break
     case 'macd':
-      renderIndicatorMacd(ctx, g, layer, data, barsCount, step, displayTimes, timeframe)
+      renderIndicatorMacd(ctx, g, layer, data, barsCount, step, displayTimes, timeframe, indexMap)
       break
     case 'sqzmom':
-      renderIndicatorSqzmom(ctx, g, layer, data, barsCount, step, displayTimes, timeframe)
+      renderIndicatorSqzmom(ctx, g, layer, data, barsCount, step, displayTimes, timeframe, indexMap)
       break
     // [CHANGE-011 SMC] - 智能资金概念图层渲染（BOS/CHoCH/OB/EQH/EQL/trailing）
     case 'smc':
+      // renderIndicatorSmc 用 klineTimeIndex（displayTimes → display index）反向映射，不消费 indexMap
       renderIndicatorSmc(ctx, g, layer, data, displayTimes, step, py, timeframe)
       break
   }
@@ -750,6 +755,7 @@ function renderIndicatorLine(
   step: number,
   py: (v: number) => number,
   timeframe: string,
+  sharedIndexMap?: (number | undefined)[],
 ): void {
   // layer.fields[0] 是主值字段（如 dsa_vwap）
   // layer.fields[1] 是方向字段（如 dsa_dir，1=上涨，0=下跌）
@@ -759,7 +765,8 @@ function renderIndicatorLine(
   if (!values || !values.length) return
 
   // [chartViewport] - 按 normalizeChartTime 时间键逐根匹配，不再 tail 截取
-  const indexMap = buildDisplayIndexMap(displayTimes, data.time, timeframe)
+  // [CHANGE-20260719-003 §四] 复用 drawTrading 传入的 indexMap（time-index map 共享）
+  const indexMap = sharedIndexMap ?? buildDisplayIndexMap(displayTimes, data.time, timeframe)
   const len = indexMap.length
 
   // [DSA 分段] - 分组键：优先 regime_field（regime_id），回退 dirField
@@ -1016,6 +1023,7 @@ function renderIndicatorPriceZone(
   step: number,
   py: (v: number) => number,
   timeframe: string,
+  sharedIndexMap?: (number | undefined)[],
 ): void {
   // layer.fields: [upper_node, lower_node, poc_price]
   const upperField = layer.fields[0]
@@ -1025,7 +1033,8 @@ function renderIndicatorPriceZone(
   if (!upperVals || !lowerVals) return
 
   // [chartViewport] - 按 normalizeChartTime 时间键逐根匹配，不再 tail 截取
-  const indexMap = buildDisplayIndexMap(displayTimes, data.time, timeframe)
+  // [CHANGE-20260719-003 §四] 复用 drawTrading 传入的 indexMap（time-index map 共享）
+  const indexMap = sharedIndexMap ?? buildDisplayIndexMap(displayTimes, data.time, timeframe)
   const len = indexMap.length
 
   ctx.fillStyle = layer.color || 'rgba(33,150,243,0.50)'
@@ -1053,6 +1062,7 @@ function renderIndicatorBand(
   step: number,
   py: (v: number) => number,
   timeframe: string,
+  sharedIndexMap?: (number | undefined)[],
 ): void {
   const upperField = layer.fields[0]
   const lowerField = layer.fields[1]
@@ -1063,7 +1073,8 @@ function renderIndicatorBand(
   if (!upperVals || !lowerVals) return
 
   // [chartViewport] - 按 normalizeChartTime 时间键逐根匹配，不再 tail 截取
-  const indexMap = buildDisplayIndexMap(displayTimes, data.time, timeframe)
+  // [CHANGE-20260719-003 §四] 复用 drawTrading 传入的 indexMap（time-index map 共享）
+  const indexMap = sharedIndexMap ?? buildDisplayIndexMap(displayTimes, data.time, timeframe)
   const len = indexMap.length
 
   // A 股 BB 配色：填充浅蓝半透明、上轨/下轨蓝色、中轨橙黄
@@ -1178,6 +1189,7 @@ function renderIndicatorMacd(
   step: number,
   displayTimes: string[],
   timeframe: string,
+  sharedIndexMap?: (number | undefined)[],
 ): void {
   const p = g.panes.macd
   if (!p || !displayTimes.length) return
@@ -1188,11 +1200,9 @@ function renderIndicatorMacd(
   if (!difVals?.length || !deaVals?.length || !histVals?.length) return
 
   // [MACD 副图] - 描述: 用后端 time 数组与 K 线 time 数组按 normalizeChartTime 对齐，禁止数组尾部长度猜测
-  const timeIndex = buildTimeIndex(data.time, timeframe)
-  const indexes = displayTimes.map(t => {
-    const key = normalizeChartTime(t, timeframe)
-    return key != null ? timeIndex.get(key) : undefined
-  })
+  // [CHANGE-20260719-003 §四] 复用 drawTrading 传入的 indexMap（time-index map 共享）
+  //   buildDisplayIndexMap 与原 buildTimeIndex + displayTimes.map 输出等价（均为 display→indicator 索引数组）
+  const indexes = sharedIndexMap ?? buildDisplayIndexMap(displayTimes, data.time, timeframe)
 
   // [MACD 副图] - 描述: 硬性检查对齐命中率，正常情况应与可见 K 线数量接近
   const matchedCount = indexes.filter((v) => v != null).length
@@ -1316,6 +1326,7 @@ function renderIndicatorSqzmom(
   step: number,
   displayTimes: string[],
   timeframe: string,
+  sharedIndexMap?: (number | undefined)[],
 ): void {
   const p = g.panes.sqzmom
   if (!p || !displayTimes.length) return
@@ -1327,11 +1338,8 @@ function renderIndicatorSqzmom(
   if (!vals?.length) return
 
   // [chartViewport] - 描述: 用后端 time 数组与 K 线 time 数组按 normalizeChartTime 对齐
-  const timeIndex = buildTimeIndex(data.time, timeframe)
-  const indexes = displayTimes.map(t => {
-    const key = normalizeChartTime(t, timeframe)
-    return key != null ? timeIndex.get(key) : undefined
-  })
+  // [CHANGE-20260719-003 §四] 复用 drawTrading 传入的 indexMap（time-index map 共享）
+  const indexes = sharedIndexMap ?? buildDisplayIndexMap(displayTimes, data.time, timeframe)
 
   // 计算 val 范围（含 0 轴对称）
   const visible: number[] = []
@@ -1795,12 +1803,19 @@ function drawTrading(
     display.map(d => d.high),
   )
 
+  // [CHANGE-20260719-003 §四] time-index map 共享（PROMPT.md §4 要求"共享 time-index map"）
+  //   每个 layer 的 (displayTimes, layerData.time, timeframe) → indexMap 在一次 drawTrading 中只计算一次，
+  //   纵轴候选计算和后续 renderIndicatorLayer 共享同一份，避免每层重复 O(n) 构建。
+  //   key = layer.strategy_id；layerData.time 不同的 layer 各自缓存独立 entry。
+  const layerIndexMaps = new Map<string, (number | undefined)[]>()
+
   if (indicators?.layers && indicators?.data) {
     indicators.layers.forEach(layer => {
       // [DSA 数据契约] - union 类型（DsaSelectorData | Record）按 Record 索引访问，dsa_polyline 渲染器内部再 cast 到 DsaSelectorData
       const layerData = indicators.data![layer.strategy_id] as Record<string, (number | string | null)[]>
       if (!layerData) return
       const indexMap = buildDisplayIndexMap(displayTimes, layerData.time, timeframe)
+      layerIndexMaps.set(layer.strategy_id, indexMap)
       if (layer.layer_id === 'bb' && layers.bb) {
         const upperVals = layerData[layer.fields[0]]
         const lowerVals = layerData[layer.fields[1]]
@@ -2003,7 +2018,9 @@ function drawTrading(
       // [DSA 数据契约] - union 类型（DsaSelectorData | Record）按 Record 索引访问，dsa_polyline 渲染器内部再 cast 到 DsaSelectorData
       const layerData = indicators.data![layer.strategy_id] as Record<string, (number | string | null)[]>
       if (layerData) {
-        renderIndicatorLayer(ctx, g, layer, layerData, display.length, step, py, displayTimes, timeframe)
+        // [CHANGE-20260719-003 §四] 复用纵轴候选阶段构建的 indexMap（time-index map 共享）
+        const sharedIndexMap = layerIndexMaps.get(layer.strategy_id)
+        renderIndicatorLayer(ctx, g, layer, layerData, display.length, step, py, displayTimes, timeframe, sharedIndexMap)
       }
     })
   }

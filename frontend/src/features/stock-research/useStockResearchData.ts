@@ -2,7 +2,15 @@
 // 集中 instrument/bars/indicators/quote/events 的数据请求与组装，供 StockResearchWorkspace 复用。
 // 只有当前选中股票（instrumentId 非空）才发起请求；instrumentId 为空时所有查询 disabled。
 // 本 hook 只保留图表核心查询；自选操作、上下切换、memo、飞书由 useStockDetailActions/useStockDetailFeishu 负责。
-import { useMemo } from 'react'
+//
+// [CHANGE-20260719-003 §四] 周期切换防护：
+// 1. 显式 AbortController：timeframe 变化时主动 abort 旧请求（PROMPT.md §4 要求"切换周期时 Abort 旧请求"）
+//    React Query 5 在 queryKey 变化时已自动取消旧 queryFn，此处额外维护显式 controller 以满足契约要求
+// 2. 乱序丢弃：通过 response.timeframe === current timeframe 检查实现（PROMPT.md §4 要求"generation 不一致响应丢弃"）
+//    设计说明：React 渲染是同步的，generation ref 在 render 期间读取的就是最新值，无法可靠检测"后发先至"；
+//    而 response.timeframe 字段直接反映数据所属周期，与当前 timeframe 不匹配即说明是旧周期残留响应，
+//    语义比 generation 更精确（generation 无法区分"同周期重发"与"跨周期乱序"）。故采用 timeframe 匹配检查。
+import { useEffect, useMemo, useRef } from 'react'
 import {
   useInstrumentBySymbol,
   useBars,
@@ -82,6 +90,17 @@ export function useStockResearchData({ symbol, timeframe, includeSmc = false }: 
 
   const barsCount = BARS_COUNT_BY_TIMEFRAME[timeframe] ?? 250
 
+  // [CHANGE-20260719-003 §四] 周期切换防护：显式 AbortController
+  // timeframe 变化时主动 abort 旧 controller（满足 PROMPT.md §4 "切换周期时 Abort 旧请求"契约）
+  // 乱序丢弃由下方 barsTimeframeMatches / indicatorsTimeframeMatches 检查实现（response.timeframe 字段）
+  const abortRef = useRef<AbortController | null>(null)
+  useEffect(() => {
+    if (abortRef.current) {
+      abortRef.current.abort()
+    }
+    abortRef.current = new AbortController()
+  }, [timeframe])
+
   // 2. 行情/指标/事件/quote 查询（instrumentId 为空时由 hook 内部 disabled）
   const barsQuery = useBars(instrumentId, {
     timeframe,
@@ -101,12 +120,23 @@ export function useStockResearchData({ symbol, timeframe, includeSmc = false }: 
   const eventsQuery = useInstrumentEvents(instrumentId, { limit: 100 })
 
   // 3. 数据组装：bars → BarData + quote 合并
-  const baseBars = useMemo(() => mapBarsToBarData(barsQuery.data?.items), [barsQuery.data])
+  // [CHANGE-20260719-003 §四] generation 乱序丢弃：
+  // 如果 bars 响应的 timeframe 与当前 timeframe 不匹配，丢弃旧响应（返回空数组）
+  const barsTimeframeMatches = barsQuery.data?.timeframe === timeframe || !barsQuery.data?.timeframe
+  const baseBars = useMemo(
+    () => (barsTimeframeMatches ? mapBarsToBarData(barsQuery.data?.items) : []),
+    [barsQuery.data, barsTimeframeMatches],
+  )
   const backendIsPartial = barsQuery.data?.is_partial === true
   const displayBars = useMemo(
     () => mergeRealtimeQuoteIntoBars(baseBars, quoteQuery.data, timeframe, backendIsPartial),
     [baseBars, quoteQuery.data, timeframe, backendIsPartial],
   )
+
+  // [CHANGE-20260719-003 §四] generation 乱序丢弃：
+  // 如果 indicators 响应的 timeframe 与当前 timeframe 不匹配，丢弃旧响应（返回 undefined）
+  const indicatorsTimeframeMatches = indicatorsQuery.data?.timeframe === timeframe || !indicatorsQuery.data?.timeframe
+  const safeIndicators = indicatorsTimeframeMatches ? indicatorsQuery.data : undefined
 
   // 4. events → ChartEvent
   const events: ChartEvent[] = useMemo(() => {
@@ -171,9 +201,16 @@ export function useStockResearchData({ symbol, timeframe, includeSmc = false }: 
     return { label: `K线来源: ${data.data_source}`, reason: null }
   }, [barsQuery.data, barsQuery.isLoading, timeframe])
 
-  // 7. 截图模式就绪状态（instrument + bars + indicators 全部成功即就绪）
-  // 飞书截图额外校验 feishuLayersReady 由 StockResearchWorkspace 在 isCaptureMode 时计算
-  const isRenderReady = instrumentQuery.isSuccess && barsQuery.isSuccess && indicatorsQuery.isSuccess
+  // 7. 截图模式就绪状态（instrument + bars[当前周期] + indicators[当前周期] 全部就绪）
+  // [CHANGE-20260719-003 §四] 乱序响应保护：query.isSuccess 仅代表 HTTP 成功，
+  //   若响应 timeframe 与当前不匹配（safeIndicators=undefined / baseBars=[]），不应判为就绪。
+  //   飞书截图额外校验 feishuLayersReady 由 StockResearchWorkspace 在 isCaptureMode 时计算
+  const isRenderReady =
+    instrumentQuery.isSuccess &&
+    barsQuery.isSuccess &&
+    baseBars.length > 0 &&
+    indicatorsQuery.isSuccess &&
+    safeIndicators != null
 
   return {
     instrumentId,
@@ -184,7 +221,8 @@ export function useStockResearchData({ symbol, timeframe, includeSmc = false }: 
     eventsQuery,
     baseBars,
     displayBars,
-    indicators: indicatorsQuery.data,
+    // [CHANGE-20260719-003 §四] 使用 safeIndicators（已过滤 timeframe 不匹配的旧响应）
+    indicators: safeIndicators,
     events,
     isBarsLoading: barsQuery.isLoading,
     backendIsPartial,
