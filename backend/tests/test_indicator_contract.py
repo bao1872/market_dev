@@ -271,6 +271,10 @@ _KNOWN_SEMANTIC_DIFFERENCES: set[tuple[str, str, int]] = {
     ("app/strategy/events/registry.py", "DEFAULT_STATE_TTL_SECONDS", 3600),
     # 截图缓存 TTL（600 秒），与 NODE_CLUSTER_EVENT_TTL_SECONDS=600 语义不同（截图缓存 vs 事件状态过期）
     ("app/services/stock_capture_service.py", "_CACHE_TTL_SECONDS", 600),
+    # 截图缓存清理 TTL（600 秒），与 stock_capture_service._CACHE_TTL_SECONDS 同语义（截图缓存），
+    # 与 NODE_CLUSTER_EVENT_TTL_SECONDS=600 语义不同（截图缓存清理 vs 事件状态过期）；
+    # capture_cleanup 是轻量清理模块，不从 stock_capture_service 导入以避免 playwright 重依赖
+    ("app/services/capture_cleanup.py", "_CACHE_TTL_SECONDS", 600),
     # 事件写入去重冷却（600 秒）：同一 instrument+event_type+boundary 在窗口内不重复写入，
     # 与 NODE_CLUSTER_EVENT_TTL_SECONDS=600（状态过期）业务规则不同（去重 vs 过期）
     ("app/services/monitor_batch_service.py", "_EVENT_COOLDOWN_SECONDS", 600),
