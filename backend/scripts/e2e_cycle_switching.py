@@ -72,9 +72,10 @@ REPORT_PATH = BACKEND_DIR / "tests" / "e2e_cycle_result.json"
 # 视口尺寸
 VIEWPORT = {"width": 1440, "height": 900}
 # 渲染等待时间（ms）：networkidle 后额外等待 indicators 渲染
-RENDER_WAIT_MS = 5000
-# 初始加载等待时间（ms）：首次访问详情页等待更久
-INITIAL_WAIT_MS = 7000
+# 注：部署后容器 warmup 期间 indicators 计算可能较慢，需 10s 确保渲染完成
+RENDER_WAIT_MS = 10000
+# 初始加载等待时间（ms）：首次访问详情页等待更久（SPA 初始化 + 首次 indicators）
+INITIAL_WAIT_MS = 10000
 
 
 def _generate_admin_token() -> tuple[str, str]:
