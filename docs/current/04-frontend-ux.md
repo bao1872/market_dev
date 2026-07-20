@@ -241,6 +241,18 @@ Node Cluster 算法
   - 状态栏展示 K线 `data_source` / `is_partial` / `last_live_bar_time` 与 quote status，供人工核对图片为实时数据；
   - 后端 partial daily bar 为真（`/bars?timeframe=1d&include_realtime=true` 返回 `is_partial=true`），前端 `mergeRealtimeQuoteIntoBars()` 仅作兜底视觉增强，不替代后端 partial bar。
 
+### 飞书发送弹窗指标视图选择（CHANGE-20260720-001 §四）
+
+- **POST body schema**：`POST /api/v1/instruments/{id}/send-feishu` 接受 body `SendFeishuRequest`：`indicator_view: Literal["node_cluster", "bollinger", "smc"] | None = None`；`normalized_indicator_view()` 返回默认值（`node_cluster`）或具体值；空 body 兼容历史请求。
+- **前端弹窗三单选项**：`StockDetailPage.tsx` 新增指标视图三单选项：
+  - `node_cluster` → "筹码共识价"
+  - `bollinger` → "布林带"
+  - `smc` → "SMC 结构"
+- **`useStockDetailFeishu` hook 改造**：新增 `selectedIndicatorView: IndicatorView` state、`setSelectedIndicatorView` setter、`handleSendFeishu(indicatorView)` 显式传参调用；POST body 透传到 capture worker。
+- **文件名与缓存键**：`output_filename` 加 `-{indicator_view}` 后缀；缓存键含 `iv={indicator_view}` 段；图片消息 `resource_refs` 携带 `indicator_view`。
+- **监控自动发送不需要用户选择**：监控链路从事件类型自动映射 `indicator_view`（`EVENT_TYPE_TO_INDICATOR_VIEW`），用户不需要手动选择。
+- **三套 Capture Preset**：`FEISHU_CAPTURE_PRESETS` 每个 view 独立 preset，layers 互斥（除共享 candlestick）；详见 `docs/current/03-jobs-integrations-operations.md` §2.5.5。
+
 ### 消息与飞书
 
 - 消息数量 SSOT（CHANGE-20260713-005）：`MessagesPage` 使用 `useUnreadCount`（`GET /messages/unread-count`，queryKey `['messages', 'unread-count']`）作为未读权威数量；"全部"显示后端列表 `messagesQuery.data?.total`（不用 `items.length`）；页头显示"共 X 条 · 未读 Y 条"；分段按钮仅 `all`/`unread` 显示计数，`selection`/`price`/`system`/`process` 不显示误导数字；标记单条/全部已读后 `useMarkMessageRead`/`useReadAllMessages` 的 `onSuccess` invalidate `['messages']`，自动刷新列表 + unread-count + 菜单角标。

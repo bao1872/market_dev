@@ -2,6 +2,17 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-20
+
+- CHANGE-20260720-001: 日线监控 SMC + 三类独立飞书图片 + Canonical 四链生产接入（合并 §一-§五）—— 提交 `cf70e91`
+  - **§一 详情页 Node 输入修复**（commits `fffcea1`/`69e700e`）：`MarketDataContext` 字段拆分为 `bars_display`/`display_timeframe`/`bars_daily`/`bars_15min`/`bars_minute`；`WATCHLIST_MONITOR` required_inputs 修复为 `{daily, 15min}`；新增 `_compute_independent_node_cluster` 固定输入 completed qfq 1d×250 + 15m×4000；返回 `data.node_cluster` + `availability` + `degraded_reason`；五周期一致性测试 `TestNodeClusterFivePeriodConsistency`（1d/15m/1h/1w/1mo profile_hash 完全一致）
+  - **§二 日线 SMC 盘中监控**（commit `2def073`）：新增 `backend/app/strategy/monitors/smc_monitor.py`；`WatchlistMonitor` 改为 `self._bb + self._vn + self._smc` 三合一；主输入已完成前复权日线，1m 仅用于触发检测；调用现有 SMC Canonical Adapter（禁止复制公式）；FVG 完全排除；第一版事件 `smc_bos_retest`/`smc_choch_retest`/`smc_order_block_first_touch`（含稳定 `smc_entity_id` + `touch_episode` 去重）；`MonitorState` 升级为 `bb/node_cluster/smc/market` 命名空间；`EVENT_LABELS` 5→8
+  - **§三 三类监控独立飞书图片**（commit `278b937`）：新增共享枚举 `backend/app/constants/indicator_view.py`（`IndicatorView = Literal["node_cluster", "bollinger", "smc"]` + `EVENT_TYPE_TO_INDICATOR_VIEW` 自动映射 + `resolve_indicator_view`）；`IndicatorView` 贯穿 `StrategyEvent.payload` → `NotificationMessage.resource_refs` → Capture 请求 → `CaptureJob` → 输出文件名 → 缓存键 → 幂等键 → 状态查询 → 前端 URL 参数；三套 Capture Preset `FEISHU_CAPTURE_PRESETS`（layers 互斥，除共享 candlestick）；`build_monitor_event_text(indicator_view, ...)` 按 view 拆分文字卡片字段；`CaptureJob` 新增 `indicator_view` 字段（nullable 兼容历史）；监控自动发送从事件类型映射 `indicator_view`
+  - **§四 详情页发送飞书增加选择**（commit `278b937`）：`SendFeishuRequest` body schema（`indicator_view: Literal["node_cluster", "bollinger", "smc"] | None`）；前端弹窗三单选项（筹码共识价/布林带/SMC 结构）；`useStockDetailFeishu` 新增 `selectedIndicatorView`/`setSelectedIndicatorView`/`handleSendFeishu(indicatorView)`；POST body 透传到 capture worker；`output_filename` 加 `-{indicator_view}` 后缀
+  - **§五 Canonical 生产接入**（commit `cf70e91`）：`canonical_adapters.py` 新增 re-exports 区段（node_cluster_engine/smc_view_adapter/structural_factor_service/temporal_feature_service/bollinger_features_plotly/merged_dsa_atr_rope_bb_factors/smc_indicator/sqzmom_lb）；`indicator_service.py` 移除 5 个直接 kernel import；`feature_snapshot_service.py` 移除 4 个直接 kernel import；`monitor_batch_service.py` 修复 L1847 延迟 import；`stock_capture_service.py` 早已无直接 kernel import；`compute_macd` 改为延迟 import 避免循环；`test_four_chain_no_direct_kernel_import` 移除 `xfail=True`，AST 守护升级为硬失败；`tests/allowlist.json` 移除 issue #83 条目
+  - **诚实声明**：§五 四链当前通过 `canonical_adapters` re-export 接入（满足 AST 门禁），未全部改为 `compute_with_mdas()` 调用（后续优化）；SMC 对齐基准为京东方 A 000725 真实 golden，`PINE_PARITY_PENDING` 保留；§六 文档同步更新 docs/current + maps + AGENTS + CHANGELOG；§七 分支部署 + 真实飞书 E2E + merge main + 最终部署待后续
+  - **不变量**：SMC 算法不重写；MDAS 仍为唯一行情读取出口；`ref/smc_user_source.pine` 843 行 + SHA256 不变；`PINE_PARITY_PENDING` 保留；不新增依赖/表/migration
+
 ## 2026-07-18
 
 - CHANGE-20260718-001: SMC Pine parity 真实对齐修复（show_trend 默认值 + SMC input contract + deterministic 模式 + parity 测试参数化扩展 + first-divergence 报告 + 对齐范围声明）—— 提交 `6167ce1`

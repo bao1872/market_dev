@@ -476,3 +476,4 @@ result_hash 5 维度：
 - CHANGE-20260718-006 Section 5c：扩展 08 文档为全算法族合同（12 项规范）
 - CHANGE-20260718-007 S3.2：AlgorithmContract 增加 `migration_status` 字段 + `compute_with_mdas` InputProvider + macd 统一 adapter（参考实现）+ result_hash 矩阵基线测试 + `TestMigrationStatusGuard` 守护
 - CHANGE-20260719-001 §二：12 算法族全部迁移到 `production_wired` adapter（`canonical_adapters.py` 实现 12 个 adapter + 自测）+ `compute_with_mdas` 接受 `production_wired` + 7 broken entrypoints 修复 + `TestFourChainDirectImportGate` AST 硬门禁（`xfail(strict=True)`，待四链迁移完成后移除）+ `test_all_adapters_in_canonical_adapters_module` 守护 + `test_canonical_adapters_exports_all_12` 守护
+- CHANGE-20260720-001 §五：四链 re-export 接入完成（`canonical_adapters.py` 新增 re-exports 区段；indicator_service/feature_snapshot_service/monitor_batch_service 移除直接 kernel import）+ AST 门禁移除 `xfail` 升级为硬失败 + `tests/allowlist.json` 移除 issue #83 条目
