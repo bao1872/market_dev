@@ -40,11 +40,24 @@ class MarketDataContext:
 
     包含单只标的的市场数据，策略运行时根据这些数据计算指标和状态。
 
+    [CHANGE-20260720-001 bars_display/bars_daily 分离]
+    bars_display 与 bars_daily 必须严格分离，禁止用显示周期回退日线输入：
+    - bars_display: 当前页面显示周期 bars（1d/15m/1h/1w/1mo），供 DSA/MACD/SQZMOM
+      等当前周期图层使用。切换周期时此字段变化。
+    - bars_daily: 真正日线 bars（completed qfq），供 Node/BB/SMC 日线结构算法使用。
+      不随页面周期变化，始终为完整日线。
+    - bars_15min: Node 成交量分配辅助数据（4000 根 completed qfq 15m）。
+    - bars_minute: 盘中事件触发数据（1m），详情页不加载。
+
     Attributes:
         instrument_id: 标的 UUID（对应 instruments 表主键）
         symbol: 股票代码（如 '600519'，便于日志和调试）
-        bars_daily: 日线行情 DataFrame，index=DatetimeIndex，
-                    columns 含 open/high/low/close/volume/amount/adj_factor
+        bars_daily: 真正日线行情 DataFrame（completed qfq），index=DatetimeIndex，
+                    columns 含 open/high/low/close/volume/amount/adj_factor；
+                    Node/BB/SMC 日线结构只能使用此字段，禁止用 bars_display 回退。
+        bars_display: 当前显示周期 bars DataFrame（可选），供 DSA/MACD/SQZMOM
+                      等当前周期图层使用；None 时回退到 bars_daily。
+        display_timeframe: 当前显示周期（"1d"|"15m"|"1h"|"1w"|"1mo"），与 bars_display 对应。
         bars_minute: 分钟线行情 DataFrame（可选，monitor 策略使用）
         bars_15min: 15 分钟线行情 DataFrame（可选，Volume Node Monitor
                     的 node_ltf=15m 低周期数据，供 compute_indicators 使用）
@@ -55,6 +68,8 @@ class MarketDataContext:
     instrument_id: UUID
     symbol: str
     bars_daily: pd.DataFrame
+    bars_display: pd.DataFrame | None = None
+    display_timeframe: str | None = None
     bars_minute: pd.DataFrame | None = None
     bars_15min: pd.DataFrame | None = None
     adj_factor: pd.DataFrame | None = None

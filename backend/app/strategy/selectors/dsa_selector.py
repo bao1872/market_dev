@@ -839,7 +839,10 @@ class DSASelector(StrategyRuntime):
             - pivot_type: list[str|None] 每 bar 的 pivot 类型（HH/HL/LH/LL）
             - pivot_price: list[float|None] 每 bar 的 pivot 价格
         """
-        daily_df = context.bars_daily
+        # [CHANGE-20260720-001] DSA 是当前周期图层，使用 bars_display（显示周期 bars）；
+        #   bars_display 为 None 时回退到 bars_daily（batch processing 路径）。
+        #   之前 bars_daily=macd_bars 由 indicator_service 注入，现拆分后 DSA 显式取 display。
+        daily_df = context.bars_display if context.bars_display is not None else context.bars_daily
         n_input = len(daily_df) if daily_df is not None else 0
         _empty: dict[str, list] = {
             "time": [],
