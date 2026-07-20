@@ -238,7 +238,8 @@
               "price_zone",
               "marker",
               "band",
-              "macd"
+              "macd",
+              "smc_structure"
             ]
           },
           "pane": {
