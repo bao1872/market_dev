@@ -49,26 +49,22 @@ from app.constants.indicator_contract import (
 from app.constants.strategy_keys import DSA_SELECTOR, WATCHLIST_MONITOR
 from app.models.instrument import Instrument
 from app.models.strategy import StrategyDefinition, StrategyVersion
+from app.services.canonical_adapters import (
+    NodeClusterProfileResult,
+    adapt_smc_to_display_dto,
+    compute_bollinger,
+    compute_node_cluster_profile,
+    compute_smc_indicators,
+    compute_sqzmom_lb,
+    derive_state_for_price,
+)
 from app.services.chart_bars_service import (
     compute_source_bar_hash,
     compute_source_bar_times,
 )
 from app.services.market_data_aggregation_service import MarketDataAggregationService
-from app.services.node_cluster_engine import (
-    NodeClusterProfileResult,
-    compute_node_cluster_profile,
-    derive_state_for_price,
-)
-from app.services.smc_view_adapter import adapt_smc_to_display_dto
 from app.services.strategy_batch_service import StrategyBatchService
 from app.strategy.runtime import MarketDataContext, StrategyLoader
-from app.strategy_assets.algorithms.features.merged_dsa_atr_rope_bb_factors import (
-    compute_bollinger,
-)
-from app.strategy_assets.algorithms.features.smc_indicator import (
-    compute_smc_indicators,
-)
-from app.strategy_assets.algorithms.features.sqzmom_lb import compute_sqzmom_lb
 
 logger = logging.getLogger("services.indicator_service")
 

@@ -54,21 +54,19 @@ from app.services.atomic_fact_contract_service import build_persisted_afc_payloa
 # 注入 _compute_all_factors_for_bars(primary)，修复三链不一致缺陷（原 _compute_cost_position_factors
 # 单独调用 compute_unified_volume_profile(bars) 单周期 VP，与详情/监控链口径不一致）。
 # 15m secondary 保持单周期 VP 语义（timeframe_volume_profile，非 Node Cluster）。
-from app.services.node_cluster_engine import (
+# [CHANGE-20260720-005 §五] 以下 kernel 函数经 canonical_adapters re-export，
+# 满足四链 AST 门禁（禁止直接 import kernel 模块）。
+from app.services.canonical_adapters import (
     NodeClusterProfileResult,
-    compute_node_cluster_profile,
-    profile_to_dict,
-)
-from app.services.structural_factor_service import (
     _compute_all_factors_for_bars,
-    _compute_relation,
-)
-from app.services.temporal_feature_service import (
     _compute_daily_context,
     _compute_derived_relation,
     _compute_m15_response,
+    _compute_relation,
+    bollinger,
+    compute_node_cluster_profile,
+    profile_to_dict,
 )
-from app.strategy_assets.algorithms.features.bollinger_features_plotly import bollinger
 
 
 class PublishedSnapshotRunExistsError(Exception):

@@ -1844,7 +1844,9 @@ class MonitorBatchService:
         Returns:
             NodeClusterProfileResult 对象；15m 数据不可用时返回 None（由上层降级处理）
         """
-        from app.services.node_cluster_engine import compute_node_cluster_profile
+        # [CHANGE-20260720-005 §五] kernel 函数经 canonical_adapters re-export，
+        # 满足四链 AST 门禁（禁止直接 import kernel 模块）
+        from app.services.canonical_adapters import compute_node_cluster_profile
         from app.strategy._plotly_mock import ensure_plotly_mock
 
         ensure_plotly_mock()
