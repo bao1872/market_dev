@@ -45,6 +45,8 @@ from uuid import UUID
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 
+from app.services.png_validator import validate_png
+
 logger = logging.getLogger("stock_capture_service")
 
 # 默认渲染超时（秒）
@@ -320,6 +322,17 @@ async def capture_stock_chart(
                 if not png_bytes or len(png_bytes) < 100:
                     raise StockCaptureError(
                         f"截图结果异常（空或过小）: symbol={symbol}, size={len(png_bytes) if png_bytes else 0}"
+                    )
+
+                # [CHANGE-20260719-002 §三] PNG 内容校验（PROMPT.md §3 要求 1-4）
+                # 校验：PNG 存在、合理尺寸、合理字节数、非全透明/非纯色
+                png_result = validate_png(png_bytes)
+                if not png_result.valid:
+                    raise StockCaptureError(
+                        f"PNG 内容校验失败: symbol={symbol}, "
+                        f"error_code={png_result.error_code}, "
+                        f"error_message={png_result.error_message}, "
+                        f"size={len(png_bytes)}"
                     )
 
                 logger.info(

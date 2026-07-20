@@ -1606,6 +1606,9 @@ export interface IndicatorResponse {
   //   dsa_selector 键的值为 DsaSelectorData（含 visual_segments），其他策略保持泛型数组结构
   data: Record<string, DsaSelectorData | Record<string, (number | string | null)[]>>
   errors?: Record<string, string>
+  // [CHANGE-20260719-003 §四] 后端 echo 的 timeframe 字段，供前端周期切换乱序丢弃检查
+  //   前端比对 response.timeframe vs 当前 timeframe，不匹配则丢弃旧响应（PROMPT.md §4）
+  timeframe?: string
   // [DSA 数据源校验] - source_bar_times 指标计算所基于的 K 线时间序列，前端与当前 K 线时间比对，不一致则跳过 DSA 渲染
   source_bar_times?: string[]
   // [DSA 数据源校验] - source_bar_hash K 线时间序列哈希，便于调试与后端联调定位数据源漂移

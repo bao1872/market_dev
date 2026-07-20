@@ -290,6 +290,25 @@ async def test_source_bar_hash_in_response(
     int(result["source_bar_hash"], 16)  # 验证为 hex
 
 
+async def test_timeframe_echoed_in_response(
+    mock_session: AsyncMock,
+    mock_bars: None,
+    empty_registry: None,
+) -> None:
+    """[CHANGE-20260719-003 §四] 响应应 echo timeframe 字段，供前端周期切换乱序丢弃检查。
+
+    前端 useStockResearchData 比对 response.timeframe vs 当前 timeframe，
+    不匹配则丢弃旧响应（PROMPT.md §4 "generation 不一致响应丢弃"）。
+    """
+    for tf in ("1d", "15m", "1h", "1w", "1mo"):
+        result = await indicator_service.compute_all_indicators(
+            mock_session, TEST_INSTRUMENT_ID, tf, "none", bars=100,
+        )
+        assert result.get("timeframe") == tf, (
+            f"响应应 echo timeframe={tf}, 实际={result.get('timeframe')!r}"
+        )
+
+
 async def test_source_bar_hash_consistent_with_chart_bars_service(
     mock_session: AsyncMock,
     mock_bars: None,
