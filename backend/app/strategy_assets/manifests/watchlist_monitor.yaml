@@ -1,8 +1,8 @@
 strategy_id: watchlist_monitor
 kind: monitor
-version: 1.1.0
+version: 1.2.0
 display_name: 自选股监控
-description: 唯一监控算法，包含布林带穿越和成交量节点触碰检测
+description: 唯一监控算法，包含布林带穿越、成交量节点触碰、SMC 日线结构触碰检测（BB+VN+SMC 薄包装）
 entrypoint: app.strategy.monitors.watchlist_monitor:WatchlistMonitor
 input:
   bar_frequency: 1m
@@ -28,6 +28,8 @@ parameters:
     algorithm_affecting: true
   # VN 参数：Node Cluster lookback 由 indicator_contract.VP_LOOKBACK 唯一控制，
   # 不在 manifest 暴露可编辑入口（advice.md v6 第4条参数固化）
+  # SMC 参数：由 smc_pine_core.DEFAULT_PARAMS 唯一控制（已逐项匹配 Pine），
+  # 不在 manifest 暴露可编辑入口
 outputs:
   # BB 输出（来自 bb_monitor）
   - key: bb_upper
@@ -65,6 +67,23 @@ outputs:
   - {key: position_0_1, type: number, unit: ratio_0_1, sortable: true}
   - {key: poc_price, type: json}
   - {key: last_touched_node, type: json}
+  # [CHANGE-20260720-002 §二] SMC 输出（来自 smc_monitor）
+  - {key: smc_confirmed_bos, type: json, description: 已确认日线 BOS 事件列表}
+  - {key: smc_confirmed_choch, type: json, description: 已确认日线 CHoCH 事件列表}
+  - {key: smc_active_obs, type: json, description: 当前有效未mitigated日线 OB 列表}
+  - {key: smc_current_price, type: number, description: SMC 监控当前价（1m close）}
+  - {key: smc_currently_touched, type: json, description: "当前 1m 触碰状态 dict[entity_id,bool]"}
+  - {key: smc_swing_bias, type: number, description: SMC swing bias（1/-1/0，仅显示不通知）}
+  - {key: smc_trailing, type: json, description: SMC trailing extremes（仅显示不通知）}
+  - {key: smc_availability, type: string, description: SMC 可用性（available/degraded/unavailable）}
+  - {key: smc_degraded_reason, type: string, description: SMC 降级原因（可用时为 null）}
+  - {key: smc_episode_tracker, type: json, description: "SMC episode 跟踪 dict[entity_id,{episode,last_touched}]"}
+  # [CHANGE-20260720-002 §二] 命名空间 + degraded 标记
+  - {key: bb, type: json, description: BB 子 monitor 命名空间状态}
+  - {key: node_cluster, type: json, description: VN 子 monitor 命名空间状态}
+  - {key: smc, type: json, description: SMC 子 monitor 命名空间状态}
+  - {key: market, type: json, description: 市场数据命名空间（current_price/previous_close/change_pct）}
+  - {key: degraded, type: json, description: "子 monitor 降级标记 {bb,node_cluster,smc}"}
 event_types:
   # BB 事件（来自 bb_monitor）
   - key: bb_upper_touch
@@ -75,6 +94,15 @@ event_types:
     dedupe: boundary_cooldown
   # VN 事件（来自 volume_node_monitor）
   - key: node_cluster_touch
+    dedupe: touch_episode
+  # [CHANGE-20260720-002 §二] SMC 事件（来自 smc_monitor）
+  # 日线 SMC 结构盘中触碰：1m 检测已确认日线 BOS/CHoCH level 回踩或穿越，
+  # 以及第一次进入当前有效未mitigated日线 OB。EQH/EQL 和 Strong/Weak 只显示不通知。
+  - key: smc_bos_retest
+    dedupe: touch_episode
+  - key: smc_choch_retest
+    dedupe: touch_episode
+  - key: smc_order_block_first_touch
     dedupe: touch_episode
 chart_layers:
   - id: bb
@@ -92,5 +120,13 @@ chart_layers:
     fields: [upper_node, lower_node, poc_price]
     hover_fields: [current_price, upper_node, lower_node, position_0_1, poc_price]
     description: "成交量节点密集区间"
+  - id: smc
+    name: SMC 结构
+    renderer: smc_structure
+    pane: price
+    color: "rgba(255,77,79,0.50)"
+    fields: [smc_confirmed_bos, smc_confirmed_choch, smc_active_obs, smc_swing_bias, smc_trailing]
+    hover_fields: [smc_current_price, smc_swing_bias, smc_currently_touched]
+    description: "日线 SMC 结构（BOS/CHoCH/OB/Strong-Weak，仅显示不通知 EQH/EQL）"
 resource_budget:
   target_ms_per_instrument: 500

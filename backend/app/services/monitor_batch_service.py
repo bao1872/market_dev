@@ -110,11 +110,15 @@ _CST = ZoneInfo("Asia/Shanghai")
 # 事件类型 → emoji 映射（与旧版 monitoring.py 一致）
 # [advice.md 第二节] - 文案已迁移至 app.constants.user_facing_labels.get_event_label
 # emoji 与文案分离：emoji 仅在此处维护，文案由 get_event_label 提供
+# [CHANGE-20260720-002 §二] 新增 SMC 三类事件 emoji/severity
 _EVENT_EMOJI: dict[str, str] = {
     "bb_upper_touch": "🔴",
     "bb_mid_touch": "🟠",
     "bb_lower_touch": "🟢",
     "node_cluster_touch": "🟣",
+    "smc_bos_retest": "🔵",
+    "smc_choch_retest": "🟦",
+    "smc_order_block_first_touch": "🔷",
 }
 
 # 事件类型 → 严重级别
@@ -123,6 +127,9 @@ _EVENT_SEVERITY: dict[str, str] = {
     "bb_mid_touch": "warn",
     "bb_lower_touch": "info",
     "node_cluster_touch": "warn",
+    "smc_bos_retest": "warn",
+    "smc_choch_retest": "danger",
+    "smc_order_block_first_touch": "warn",
 }
 
 # 严重级别 → 飞书卡片 header 颜色

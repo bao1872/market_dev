@@ -26,17 +26,22 @@ from __future__ import annotations
 
 # 事件类型 → 通俗文案（用户在飞书/消息中心看到的名称）
 # [user_facing_labels] - 描述: 事件类型权威文案表，service 层禁止重复定义
+# [CHANGE-20260720-002 §二] 新增 SMC 三类事件文案
 EVENT_LABELS: dict[str, str] = {
     "bb_upper_touch": "价格触及近期波动上沿",
     "bb_mid_touch": "价格回到近期价格中枢",
     "bb_lower_touch": "价格触及近期波动下沿",
     "node_cluster_touch": "价格触及成交密集区",
+    "smc_bos_retest": "价格回踩日线 SMC 破位结构",
+    "smc_choch_retest": "价格回踩日线 SMC 趋势反转结构",
+    "smc_order_block_first_touch": "价格首次进入日线 SMC 订单块",
     # [StockDetailFeishu] - 个股快照主动分享（不暴露内部 manual_send 代码）
     "STOCK_SNAPSHOT_SHARE": "个股快照",
 }
 
 # 字段名 → 通俗文案（飞书正文/合并卡片中各数据行的标签）
 # [user_facing_labels] - 描述: 字段名权威文案表，替代 "BB上轨/上节点/POC" 等专业术语
+# [CHANGE-20260720-002 §二] 新增 SMC 字段文案
 FIELD_LABELS: dict[str, str] = {
     "bb_upper": "近期波动上沿",
     "bb_mid": "近期价格中枢",
@@ -50,6 +55,12 @@ FIELD_LABELS: dict[str, str] = {
     "bb_mid_short": "价格中枢",
     "bb_lower_short": "波动下沿",
     "node_cluster_short": "密集区",
+    # SMC 字段
+    "smc_bos_level": "日线 SMC 破位结构位",
+    "smc_choch_level": "日线 SMC 趋势反转结构位",
+    "smc_ob_zone": "日线 SMC 订单块区间",
+    "smc_swing_bias": "日线 SMC 主趋势方向",
+    "smc_trailing": "日线 SMC 极值跟踪",
 }
 
 
@@ -84,6 +95,10 @@ if __name__ == "__main__":
     assert get_event_label("bb_mid_touch") == "价格回到近期价格中枢"
     assert get_event_label("bb_lower_touch") == "价格触及近期波动下沿"
     assert get_event_label("node_cluster_touch") == "价格触及成交密集区"
+    # [CHANGE-20260720-002 §二] SMC 三类事件文案
+    assert get_event_label("smc_bos_retest") == "价格回踩日线 SMC 破位结构"
+    assert get_event_label("smc_choch_retest") == "价格回踩日线 SMC 趋势反转结构"
+    assert get_event_label("smc_order_block_first_touch") == "价格首次进入日线 SMC 订单块"
     assert get_event_label("STOCK_SNAPSHOT_SHARE") == "个股快照"
     # 未知 event_type 原样返回
     assert get_event_label("unknown_event") == "unknown_event"
