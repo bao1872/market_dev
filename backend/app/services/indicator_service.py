@@ -62,6 +62,10 @@ from app.services.chart_bars_service import (
     compute_source_bar_hash,
     compute_source_bar_times,
 )
+from app.services.indicator_display_frame import (
+    build_calculation_diagnostics,
+    build_display_frame,
+)
 from app.services.market_data_aggregation_service import MarketDataAggregationService
 from app.services.strategy_batch_service import StrategyBatchService
 from app.strategy.runtime import MarketDataContext, StrategyLoader
@@ -1010,6 +1014,55 @@ async def compute_all_indicators(
     calculation_window = INDICATOR_BARS.get(timeframe, 800)
     warmup_bars = INDICATOR_WARMUP_BARS.get(timeframe, 60)
 
+    # [display_frame] - 展示帧（PROMPT.md §二.1）：只描述真正交给前端绘制的 K线窗口。
+    #   bars API 默认 page_size=100，indicators API 的展示窗口取 macd_bars 末尾 100 根，
+    #   保证同一展示窗口产生同一 display_hash。算法输入 hash 移入 calculation_diagnostics。
+    #   Node 的 daily_hash/15m_hash/profile_hash 不参与展示帧匹配。
+    _display_window = 100  # 与 bars API 默认 page_size 对齐
+    display_df = macd_bars.tail(_display_window) if len(macd_bars) > _display_window else macd_bars
+    # completed_through：优先用 daily_agg.completed_through（MDAS 诊断），回退到 macd_bars 末根时间
+    _display_completed_through: str | None = None
+    try:
+        if daily_agg.completed_through is not None:
+            ct = daily_agg.completed_through
+            _display_completed_through = (
+                ct.isoformat() if hasattr(ct, "isoformat") else str(ct)
+            )
+    except Exception:
+        pass
+    if _display_completed_through is None and not macd_bars.empty:
+        _display_completed_through = macd_bars.index[-1].isoformat()
+    display_frame = build_display_frame(
+        instrument_id=str(instrument_id),
+        timeframe=timeframe,
+        adj=adj,
+        display_df=display_df,
+        completed_through=_display_completed_through,
+    )
+
+    # [calculation_diagnostics] - 算法输入诊断（PROMPT.md §二.1）
+    #   所有算法输入侧的 hash/warmup 信息放这里，不参与展示帧匹配。
+    #   前端只读不阻塞，用于审计和排查算法输入与展示窗口的偏差。
+    _node_meta = (data.get("node_cluster") or {}).get("profile_meta") or {}
+    calculation_diagnostics = build_calculation_diagnostics(
+        source_bar_hash=source_bar_hash or None,
+        source_bar_times=source_bar_times,
+        warmup_bars=warmup_bars,
+        calculation_window=calculation_window,
+        smc_source_bar_hash=(smc_source_diagnostics or {}).get("smc_source_bar_hash"),
+        smc_source_bars=(smc_source_diagnostics or {}).get("smc_source_bars") or 0,
+        smc_source_first_time=(smc_source_diagnostics or {}).get("smc_source_first_time"),
+        smc_source_last_time=(smc_source_diagnostics or {}).get("smc_source_last_time"),
+        node_daily_hash=_node_meta.get("daily_source_hash"),
+        node_15m_hash=_node_meta.get("bars_15m_source_hash"),
+        node_profile_hash=_node_meta.get("profile_hash"),
+        algorithm_version=_node_meta.get("algorithm_version"),
+        contract_fingerprint=_node_meta.get("contract_fingerprint"),
+        market_data_contract_version=(daily_agg.market_data_contract_version if hasattr(daily_agg, "market_data_contract_version") else None),
+        adj_factor_hash=(daily_agg.adj_factor_hash if hasattr(daily_agg, "adj_factor_hash") else None),
+        adjustment_as_of=(str(daily_agg.adjustment_as_of) if hasattr(daily_agg, "adjustment_as_of") and daily_agg.adjustment_as_of else None),
+    )
+
     return {
         "layers": layers,
         "data": data,
@@ -1032,6 +1085,13 @@ async def compute_all_indicators(
         "smc_source_last_time": smc_source_diagnostics["smc_source_last_time"] if smc_source_diagnostics else None,
         "smc_source_bars": smc_source_diagnostics["smc_source_bars"] if smc_source_diagnostics else 0,
         "smc_adj": smc_source_diagnostics["smc_adj"] if smc_source_diagnostics else None,
+        # [display_frame] - 展示帧（PROMPT.md §二.1）：前端 ChartRenderFrame 只比较此字段。
+        #   与 bars API 的 display_frame 调用同一个 build_display_frame() 生成，
+        #   保证同一展示窗口产生同一 display_hash。
+        "display_frame": display_frame,
+        # [calculation_diagnostics] - 算法输入诊断（PROMPT.md §二.1）：
+        #   算法输入 hash/warmup/版本信息，不参与展示帧匹配，前端只读不阻塞。
+        "calculation_diagnostics": calculation_diagnostics,
     }
 
 

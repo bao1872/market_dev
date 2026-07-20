@@ -1203,6 +1203,47 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 - 不属于合同定义的事实集，仅作相邻快照对比展示（普通用户 UI 在 `/stock/:symbol` expanded「近期变化」区块）；**禁止显示 publicKey**；
 - 产品观察变化（confirmed_swing_position）可纳入产品观察变化列表，标 `scope=product`，不伪装 V4.13 Core。
 
+### 15.5 Node Cluster 可用性诊断（nodeAvailability，CHANGE-20260721-001）
+
+**问题背景**：旧版本 StockContext 对所有 Node 不可用场景统一返回"筹码共识价暂不可用"，前端无法区分原因，用户体验差。Atomic Facts 中的"筹码共识价"与详情页 Node Cluster 没有共享同一个 Canonical 结果，导致同一股票在不同入口展示的 POC/Peak 不一致。
+
+**修复方案**：盘后 Snapshot 必须写入 Canonical Node Cluster 诊断字段（`availability`/`degraded_reason`/`profile_hash`/`daily_source_hash`/`bars_15m_source_hash`），StockContext 新增 `nodeAvailability` 字段输出 5 态状态机。
+
+**响应字段 `nodeAvailability`**（必填，普通用户与管理员均返回）：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `state` | `string` | 可用性状态：`available`/`unavailable` |
+| `reasonCode` | `string \| null` | 不可用时的稳定原因码；可用时为 `null` |
+| `pocPrice` | `float \| null` | POC 价格（来自 Canonical Node Cluster） |
+| `profileHash` | `string \| null` | 100 行 profile 内容 hash（三链一致性断言用） |
+| `dailySourceHash` | `string \| null` | 日线 source_bar_hash（输入指纹） |
+| `bars15mSourceHash` | `string \| null` | 15m source_bar_hash（输入指纹） |
+| `algorithmVersion` | `string \| null` | 算法版本（`nc-v1`） |
+| `dailyBarsCount` | `int \| null` | 实际日线根数 |
+| `bars15mCount` | `int \| null` | 实际 15m 根数 |
+
+**5 态状态机**（`reasonCode` 取值）：
+
+| reasonCode | 触发条件 | 前端展示 |
+|---|---|---|
+| `NO_PUBLISHED_RUN` | 该股票无任何 succeeded+published full snapshot run | "筹码共识价暂不可用"（提示稍后） |
+| `SNAPSHOT_MISSING` | run 存在但 snapshot 行缺失 | "筹码共识价暂不可用" |
+| `NODE_PROFILE_EMPTY` | snapshot 存在但 `node_cluster.profile` 为空 | "筹码共识价暂不可用"（数据异常） |
+| `NODE_15M_MISSING` | snapshot 存在但 `bars_15m_source_hash` 缺失 | "筹码共识价暂不可用（15m 数据缺失）" |
+| `NODE_COMPUTE_FAILED` | snapshot 存在但 `node_cluster.availability=unavailable + degraded_reason=COMPUTE_FAILED` | "筹码共识价暂不可用（计算失败）" |
+| `NODE_INSUFFICIENT_DAILY_BARS` | snapshot 存在但 `daily_bars_count < 250` | "筹码共识价暂不可用（数据不足）" |
+| `LEGACY_SNAPSHOT_NO_NODE_CLUSTER` | snapshot schema_version < 4（旧 schema 无 node_cluster 诊断字段） | "筹码共识价暂不可用（快照版本过旧）" |
+| `null`（available） | `node_cluster.availability=available` + `poc_price` 非空 | 正常显示 POC/Peak/Profile |
+
+**关键约束**：
+
+- `_SCHEMA_VERSION` 3→4：旧 schema_version=3 的 snapshot 不可见（查询按新 schema_version=4 过滤），保证旧新结果不可混用；回滚方式：将 `_SCHEMA_VERSION` 改回 3 即可恢复旧快照可见。
+- Atomic Facts 中的"筹码共识价"与详情页 Node Cluster 必须消费同一个 Canonical 结果（`node_cluster_engine.compute_node_cluster_profile` 唯一入口，三链同核）。
+- `nodeAvailability` 字段是顶层必填字段，与 `core`/`auxiliary`/`availability` 并列，不计入 Core 14 / `availability.coreDenominator`。
+- 管理员 debug 接口 `GET /api/v1/admin/stocks/{symbol}/debug` 在用户响应基础上同样返回 `nodeAvailability`（无额外字段，普通用户与管理员字段一致）。
+- 五周期一致性：1d/15m/1h/1w/1mo 切换时 `profile_hash`/`daily_source_hash`/`bars_15m_source_hash` 完全一致（图表 bars frame hash 允许不同）；测试 `TestNodeClusterFivePeriodConsistency` 覆盖。
+
 ## 16. Excel 导出 API 契约（CHANGE-20260713-010）
 
 ### 16.1 端点

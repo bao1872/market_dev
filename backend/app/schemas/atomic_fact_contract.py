@@ -97,6 +97,43 @@ class AtomicFactAvailability(BaseModel):
     )
 
 
+class NodeAvailabilityInfo(BaseModel):
+    """Node Cluster 可用性状态（Canonical Node 结果的诊断视图）。
+
+    [CHANGE-20260721-001] StockContext 只读，从已发布 snapshot 的
+    primary.1d.node_cluster 提取，禁止与 indicators API 实时计算混用。
+
+    state 取值：
+    - available: POC/VAH/VAL 齐全（日线 + 15m 均有，profile 非空）
+    - degraded: 15m 缺失但日线 profile 可用（仍可展示 POC，但不能做 15m 节点分析）
+    - unavailable: 引擎失败 / profile 空 / 日线不足 / 旧快照无 node_cluster 字段
+    - unknown: 旧 schema_version<4 快照无 availability 字段（不应出现，schema_version 已 bump）
+
+    reasonCode（state != available 时非 null）：
+    - NODE_PROFILE_EMPTY: profile_rows 为空（engine 无法生成有效价格档位）
+    - NODE_15M_MISSING: 15m bars 缺失（state=degraded）
+    - NODE_COMPUTE_FAILED: engine 抛异常（含原始异常信息）
+    - NODE_INSUFFICIENT_DAILY_BARS: 日线 bars 不足 10 根
+    - LEGACY_SNAPSHOT_NO_NODE_CLUSTER: 旧快照缺少 node_cluster 字段（兼容场景）
+    """
+
+    state: Literal["available", "degraded", "unavailable", "unknown"] = Field(
+        ..., description="Node Cluster 可用性状态"
+    )
+    reasonCode: str | None = Field(
+        None, description="state != available 时的稳定码（NODE_PROFILE_EMPTY/NODE_15M_MISSING/NODE_COMPUTE_FAILED/NODE_INSUFFICIENT_DAILY_BARS/LEGACY_SNAPSHOT_NO_NODE_CLUSTER）"
+    )
+    pocPrice: float | None = Field(None, description="POC 价格（Canonical Node 结果）")
+    profileHash: str | None = Field(None, description="Node Cluster profile_hash（三链一致性基础）")
+    dailySourceHash: str | None = Field(
+        None, description="日线 source_bar_hash（与 indicators API 帧比对）"
+    )
+    bars15mSourceHash: str | None = Field(None, description="15m source_bar_hash")
+    algorithmVersion: str | None = Field(None, description="Node Cluster engine 算法版本")
+    dailyBarsCount: int = Field(0, description="日线 bars 数量（诊断用）")
+    bars15mCount: int = Field(0, description="15m bars 数量（诊断用）")
+
+
 class AtomicFactChange(BaseModel):
     """近期变化记录（between consecutive published snapshots）。
 
@@ -147,6 +184,9 @@ class AtomicFactsContextResponse(BaseModel):
         description="产品观察扩展（CHANGE-20260716-006，不计入 Core 14/14）",
     )
     dataQuality: StockContextDataQuality = Field(..., description="数据质量（含 reasonCode）")
+    nodeAvailability: NodeAvailabilityInfo = Field(
+        ..., description="Node Cluster 可用性（CHANGE-20260721-001，区分 NODE_PROFILE_EMPTY/NODE_15M_MISSING/NODE_COMPUTE_FAILED）"
+    )
 
 
 class AdminAtomicFactDebugItem(BaseModel):
@@ -336,6 +376,10 @@ if __name__ == "__main__":
             runTradeDate=None,
             runPublishedAt=None,
             instrumentStatus="active",
+        ),
+        nodeAvailability=NodeAvailabilityInfo(
+            state="unknown",
+            reasonCode="LEGACY_SNAPSHOT_NO_NODE_CLUSTER",
         ),
     )
     assert resp.contractVersion == "Atomic Fact Contract V1"

@@ -53,6 +53,7 @@ from app.core.time import now_shanghai
 from app.models.bar import Bar15Min, Bar60Min, BarDaily, BarMinute, BarMonthly, BarWeekly
 from app.schemas.bar import BarListResponse, BarResponse, QuoteResponse
 from app.services.calendar_service import is_trading_day_async
+from app.services.indicator_display_frame import build_display_frame
 from app.services.market_data_aggregation_service import MarketDataAggregationService
 from app.services.market_status_service import (
     MARKET_SESSION_AFTERNOON,
@@ -528,6 +529,14 @@ async def get_bars(
             response.headers["X-Data-Source"] = result.data_source
             response.headers["X-Cache-Hit"] = "true" if result.cache_hit else "false"
             response.headers["X-Total-Ms"] = str(total_ms)
+        # [display_frame] - 空数据时仍返回 display_frame（display_hash="", display_times=[]）
+        empty_display_frame = build_display_frame(
+            instrument_id=str(instrument_id),
+            timeframe=timeframe,
+            adj=adj,
+            display_df=df,
+            completed_through=_completed_through.isoformat() if _completed_through else None,
+        )
         return BarListResponse(
             items=[],
             total=0,
@@ -557,6 +566,7 @@ async def get_bars(
             market_data_contract_version=result.market_data_contract_version,
             completed_through=_completed_through,
             adjustment_as_of=result.adjustment_as_of,
+            display_frame=empty_display_frame,
         )
 
     # 服务端分页：返回最新的数据（page=1 返回最新 page_size 条）
@@ -567,6 +577,17 @@ async def get_bars(
     page_df = df.iloc[start_idx:end_idx]
 
     items = _df_to_responses(page_df, instrument_id, timeframe)
+
+    # [display_frame] - 从展示窗口 page_df 构建展示帧（PROMPT.md §二.1）
+    #   bars API 与 indicators API 调用同一个 build_display_frame()，保证同一展示
+    #   窗口产生同一 display_hash。前端只比较 display_frame，不再比较 source_bar_hash。
+    display_frame = build_display_frame(
+        instrument_id=str(instrument_id),
+        timeframe=timeframe,
+        adj=adj,
+        display_df=page_df,
+        completed_through=_completed_through.isoformat() if _completed_through else None,
+    )
 
     # --- 响应头 ---
     if response is not None:
@@ -603,6 +624,7 @@ async def get_bars(
         market_data_contract_version=result.market_data_contract_version,
         completed_through=_completed_through,
         adjustment_as_of=result.adjustment_as_of,
+        display_frame=display_frame,
     )
 
 

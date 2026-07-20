@@ -112,7 +112,16 @@ class AdjustmentFactorService:
     ) -> int:
         """公司行为变化时重建完整因子序列并原子 upsert。
 
-        重建成功后精确失效该股票的 MDAS 缓存。
+        重建成功后精确失效该股票的下游缓存（FR-11）：
+        - MDAS 缓存（Redis mdas:{instrument_id}:*）
+        - bars 缓存（Redis bars:{instrument_id}:*，默认禁用时返回 0）
+        - indicator 缓存（Redis indicator:{instrument_id}:*）
+
+        不失效（依赖 TTL 自然过期或重算）：
+        - 监控 Profile 缓存（in-process，跨 worker 无法精确失效；TTL 300s）
+        - Capture 缓存（filesystem，per-event key，新事件自然 miss；TTL 600s）
+        - Snapshot（DB 存储，由 after_close 流水线重算，schema_version bump 保证旧快照不可见）
+
         失败时 re-raise（不吞没，不伪装成功）。
 
         Args:
@@ -131,13 +140,61 @@ class AdjustmentFactorService:
         count = await rebuild_adj_factors(
             session, instrument_id, symbol, earliest_affected, adapter
         )
-        # 精确失效该股票 MDAS 缓存（scan + delete mdas:{instrument_id}:*）
-        self._invalidate_mdas_cache(instrument_id)
+        # [FR-11] 精确失效该股票下游缓存：MDAS + bars + indicator
+        invalidated = await self._invalidate_downstream_caches(instrument_id)
         logger.info(
-            "rebuild_factor_series 完成 instrument_id=%s records=%d 缓存已失效",
-            instrument_id, count,
+            "rebuild_factor_series 完成 instrument_id=%s records=%d 缓存失效: %s",
+            instrument_id, count, invalidated,
         )
         return count
+
+    async def _invalidate_downstream_caches(
+        self, instrument_id: uuid.UUID
+    ) -> dict[str, int]:
+        """[FR-11] 因子变化后精确失效该股票的下游缓存。
+
+        失效范围（按依赖顺序，精确到 instrument_id）：
+        - mdas: 行情聚合层缓存（sync Redis，与现有实现一致）
+        - bars: 原始行情响应缓存（async，默认禁用时返回 0）
+        - indicator: 指标计算结果缓存（async，TTL 300s）
+
+        单层失效失败不阻塞其他层（缓存 TTL 会自然过期）。
+
+        Returns:
+            dict: 各缓存层删除的键数量 {mdas, bars, indicator}
+        """
+        result: dict[str, int] = {"mdas": 0, "bars": 0, "indicator": 0}
+
+        # 1. MDAS 缓存（sync Redis，与现有实现一致）
+        result["mdas"] = self._invalidate_mdas_cache(instrument_id)
+
+        # 2. bars 缓存（async，默认禁用时返回 0）
+        try:
+            from app.services.bars_cache import invalidate_bars_cache
+            result["bars"] = await invalidate_bars_cache(instrument_id)
+        except Exception as exc:
+            logger.warning(
+                "bars 缓存失效失败 instrument_id=%s: %s（缓存 TTL 会自然过期）",
+                instrument_id, exc,
+            )
+
+        # 3. indicator 缓存（async，TTL 300s）
+        try:
+            from app.services.indicator_cache import invalidate as invalidate_indicator
+            result["indicator"] = await invalidate_indicator(instrument_id)
+        except Exception as exc:
+            logger.warning(
+                "indicator 缓存失效失败 instrument_id=%s: %s（缓存 TTL 会自然过期）",
+                instrument_id, exc,
+            )
+
+        total = sum(result.values())
+        if total > 0:
+            logger.info(
+                "下游缓存失效 instrument_id=%s mdas=%d bars=%d indicator=%d",
+                instrument_id, result["mdas"], result["bars"], result["indicator"],
+            )
+        return result
 
     def _invalidate_mdas_cache(self, instrument_id: uuid.UUID) -> int:
         """失效该股票的 MDAS 缓存（scan + delete mdas:{instrument_id}:*）。

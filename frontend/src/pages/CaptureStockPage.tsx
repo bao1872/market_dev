@@ -1,6 +1,6 @@
 // [Capture] - 描述: 专用 Capture 页面 - 截图模式专用，不经过 ProtectedLayout/AppShell
 //
-// 用法：路由 /capture/stock/:symbol?capture=feishu&token=xxx&instrument_id=xxx
+// 用法：路由 /capture/stock/:symbol?capture=feishu&token=xxx&instrument_id=xxx&indicator_view=smc
 //
 // 设计要点（修复 C.7 调查发现的 30s 截图超时根因）：
 // 1. 不经过 ProtectedLayout / SubscriberRoute / AppShell（避免认证守卫与全局布局副作用）
@@ -12,6 +12,14 @@
 //    历史根因：事件查询接口超时导致 data-render-ready 永远为 false，capture worker 30s 超时返回 502
 // 5. 全屏渲染图表区域，无侧栏/导航/操作按钮/模态框
 // 6. 复用 StockDetailPage 的图表组件（StrategyChart）与策略配置（resolveStrategy）
+//
+// [CHANGE-20260720-Phase4 §四] 移动舞台改造：
+//   - 旧版 1920×1200 PC 布局 → 新版 1440×2560 9:16 移动舞台（MobileIndicatorStage）
+//   - 视觉参考：ref/panji_short_video_integrated_studio_v1_15_event_flash_fix
+//   - URL 新增 indicator_view=node_cluster|bollinger|smc 参数
+//     · 携带时使用 INDICATOR_VIEW_LAYER_PRESETS（每张图只渲染一个指标视图）
+//     · 缺失时回退到 FEISHU_CAPTURE_LAYERS（向后兼容旧 capture URL）
+//   - indicatorView 通过 props 传递给 StrategyChart（替代旧版 isCaptureMode 强制 5 层）
 
 import { useEffect, useMemo, useState, useCallback } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
@@ -19,13 +27,27 @@ import { useQuery } from '@tanstack/react-query'
 import { captureClient } from '@/api/client'
 import { CAPTURE_TOKEN_KEY } from '@/store/auth'
 import StrategyChart from '@/components/StrategyChart'
+import MobileIndicatorStage from '@/components/MobileIndicatorStage'
 import type { ChartViewport } from '@/components/chartViewport'
-import type { CaptureSnapshotResponse } from '@/api/endpoints'
+import type { CaptureSnapshotResponse, IndicatorView } from '@/api/endpoints'
 import { resolveStrategy } from '@/lib/strategy-manifest'
 import { STRATEGY_KEYS } from '@/constants/strategyKeys'
-import { MARKET_LABELS, formatAmount } from '@/utils/market'
 import { mapBarsToBarData } from '@/utils/chart'
-import { formatShanghaiTimeShort } from '@/utils/datetime'
+import {
+  normalizeIndicatorView,
+  DEFAULT_TIMEFRAME,
+} from '@/features/stock-research/stockResearchTypes'
+
+// 默认 indicator_view（与后端 DEFAULT_INDICATOR_VIEW 对齐）
+// 当 URL 未携带 indicator_view 参数时使用，保证新版本截图链路始终产出"单一指标视图"
+const DEFAULT_CAPTURE_INDICATOR_VIEW: IndicatorView = 'node_cluster'
+
+// [MobileIndicatorStage] 图表区域高度常量
+// 几何推导（与 global.scss 中 .mobile-stage-chart-card / .mobile-stage-chart-viewport 对齐）：
+//   stage-h (2560) - chart-card.top (262) - chart-card.bottom (240) - chart-head.height (112) = 1946
+// 当 isCaptureMode && 在 mobile-stage 内时，StrategyChart 工具栏通过 CSS 隐藏，
+// canvas-wrap 占满 chart-viewport 全高度。
+const MOBILE_STAGE_CHART_HEIGHT = 1946
 
 export default function CaptureStockPage() {
   const { symbol } = useParams<{ symbol: string }>()
@@ -50,7 +72,7 @@ export default function CaptureStockPage() {
   const strategyDef = useMemo(() => resolveStrategy(source, strategy), [source, strategy])
 
   // [capture-realtime] - 截图周期优先使用 URL 传入的 timeframe（默认 1d），支持盘中 15m 等
-  const timeframeParam = searchParams.get('timeframe') || '1d'
+  const timeframeParam = searchParams.get('timeframe') || DEFAULT_TIMEFRAME
   const [timeframe] = useState<string>(timeframeParam)
   const sourceBarTime = searchParams.get('source_bar_time') || undefined
   // [chartViewport] - 每个周期独立保存 viewport（截图模式仅日线，保留结构以复用 StrategyChart 受控 viewport）
@@ -59,10 +81,20 @@ export default function CaptureStockPage() {
     setViewportByTimeframe((prev) => ({ ...prev, [timeframe]: vp }))
   }, [timeframe])
 
+  // [CHANGE-20260720-Phase4 §四] 解析 indicator_view URL 参数
+  //   - 合法值：node_cluster | bollinger | smc（与后端 INDICATOR_VIEW_VALUES 对齐）
+  //   - 非法或缺失：回退到 DEFAULT_CAPTURE_INDICATOR_VIEW（node_cluster）
+  //   - 透传到 StrategyChart prop，影响图层预设；同时作为 MobileIndicatorStage 的 module-label 文案
+  const indicatorView: IndicatorView = useMemo(() => {
+    const raw = searchParams.get('indicator_view')
+    const normalized = normalizeIndicatorView(raw)
+    return normalized ?? DEFAULT_CAPTURE_INDICATOR_VIEW
+  }, [searchParams])
+
   // [Capture] - 描述: 截图模式唯一业务数据请求
   // 通过 Capture Token 访问专用 Snapshot API，不调用普通业务端点
   const snapshotQuery = useQuery({
-    queryKey: ['capture', 'snapshot', instrumentId],
+    queryKey: ['capture', 'snapshot', instrumentId, indicatorView],
     queryFn: async () => {
       if (!instrumentId) throw new Error('缺少 instrument_id 参数')
       const { data } = await captureClient.get<CaptureSnapshotResponse>(
@@ -70,6 +102,10 @@ export default function CaptureStockPage() {
         {
           params: {
             timeframe,
+            // [CHANGE-20260720-Phase4] 透传 indicator_view 到后端 snapshot
+            //   后端可基于此参数决定 include_smc 等计算开关（smc 视图需要 include_smc=true）
+            //   也可用于缓存键维度（iv=smc）与 CaptureJob 元数据记录
+            indicator_view: indicatorView,
             ...(sourceBarTime ? { source_bar_time: sourceBarTime } : {}),
             // 截图链路固定强制实时计算，跳过 Redis 指标缓存，不复用旧指标
             force_refresh: 1,
@@ -94,16 +130,21 @@ export default function CaptureStockPage() {
 
   // 最新报价（Snapshot 当前未单独返回 quote，使用 bars 最后一根 bar）
   const lastBar = barsResponse?.items?.[barsResponse.items.length - 1] || null
-  const prevBar = barsResponse?.items?.[barsResponse.items.length - 2] || null
   const currentPrice = lastBar?.close ?? null
-  const openPrice = lastBar?.open ?? null
-  const highPrice = lastBar?.high ?? null
-  const lowPrice = lastBar?.low ?? null
-  const amountValue = (lastBar as { amount?: number } | null)?.amount ?? null
-  const changePercent = lastBar && prevBar
-    ? ((lastBar.close - prevBar.close) / prevBar.close * 100)
-    : null
-  const isUp = changePercent !== null ? changePercent >= 0 : true
+
+  // [MobileIndicatorStage] 累计涨跌幅：从可见 bar 首根 close 到末根 close
+  //   注意：这是简化口径（仅基于 snapshot 返回的 bars 计算），与产品约定的"区间累计涨跌幅"对齐
+  //   后端 snapshot 已按 adjustment_as_of=trade_date 截止；前端只展示，不重算
+  const firstBar = barsResponse?.items?.[0] || null
+  const changePercent = useMemo(() => {
+    if (!firstBar || !lastBar || !firstBar.close) return null
+    return ((lastBar.close - firstBar.close) / firstBar.close) * 100
+  }, [firstBar, lastBar])
+
+  // 当前 K 线日期（用于 chart-head time 显示）
+  // 优先 trade_time（盘中含时分），回退 trade_date（仅日期）
+  // 与 mapBarsToBarData 的 time 字段构造保持一致
+  const chartDate = lastBar?.trade_time || lastBar?.trade_date || null
 
   // [feishu-capture] - 描述: 截图模式渲染就绪标志
   // 只依赖 bars + indicators 加载完成（不依赖 events）
@@ -114,25 +155,15 @@ export default function CaptureStockPage() {
   if (snapshotQuery.isLoading) {
     return (
       <div
-        className="tv-content"
+        className="mobile-stage mobile-stage-loading"
         data-testid="stock-detail-capture"
         data-render-ready="false"
+        data-loading="true"
       >
-        <div className="tv-symbol-bar">
-          <div className="tv-symbol-left">
-            <div>
-              <div className="tv-symbol-title">
-                <span>加载中...</span>
-                <span className="tv-code">{symbol || ''}</span>
-              </div>
-              <div className="tv-symbol-meta">正在获取股票数据</div>
-            </div>
-          </div>
-        </div>
-        <div className="tv-workspace">
-          <section className="tv-chart-column">
-            <div className="tv-chart-loading">行情数据加载中...</div>
-          </section>
+        <div className="mobile-stage-texture" aria-hidden="true" />
+        <div className="mobile-stage-loading-text">
+          <span className="mobile-stage-loading-spinner" />
+          <b>正在获取股票数据</b>
         </div>
       </div>
     )
@@ -142,123 +173,62 @@ export default function CaptureStockPage() {
   if (!inst) {
     return (
       <div
-        className="tv-content"
+        className="mobile-stage mobile-stage-error"
         data-testid="stock-detail-capture"
         data-render-ready="false"
+        data-error="true"
       >
-        <div className="tv-symbol-bar">
-          <div className="tv-symbol-left">
-            <div>
-              <div className="tv-symbol-title">
-                <span>未找到股票</span>
-                <span className="tv-code">{symbol || ''}</span>
-              </div>
-              <div className="tv-symbol-meta">
-                {!instrumentId
-                  ? '缺少 instrument_id 参数'
-                  : snapshotQuery.isError
-                    ? '股票信息查询失败，请稍后重试'
-                    : '请检查股票代码是否正确'}
-              </div>
-            </div>
-          </div>
+        <div className="mobile-stage-texture" aria-hidden="true" />
+        <div className="mobile-stage-error-text">
+          <b>未找到股票</b>
+          <span>{symbol || ''}</span>
+          <small>
+            {!instrumentId
+              ? '缺少 instrument_id 参数'
+              : snapshotQuery.isError
+                ? '股票信息查询失败，请稍后重试'
+                : '请检查股票代码是否正确'}
+          </small>
         </div>
       </div>
     )
   }
 
-  const metaParts = [
-    MARKET_LABELS[inst.market] || inst.market,
-    '人民币',
-    '实时行情',
-  ].filter(Boolean)
-
   return (
-    <div
-      className="tv-content"
+    <MobileIndicatorStage
+      stockName={inst.name}
+      stockSymbol={inst.symbol}
+      indicatorView={indicatorView}
+      currentPrice={currentPrice}
+      changePercent={changePercent}
+      chartDate={chartDate}
+      testId="capture"
     >
-      {/* ===== 股票信息栏（精简：名称+代码+报价，无操作按钮） ===== */}
-      <div className="tv-symbol-bar">
-        <div className="tv-symbol-left">
-          <div>
-              <div className="tv-symbol-title">
-                <span>{inst.name}（{inst.symbol}）</span>
-              </div>
-            <div className="tv-symbol-meta">{metaParts.join(' · ')}</div>
-          </div>
-        </div>
-        {/* 报价条：现价/涨跌/开盘/最高/最低/成交额 */}
-        <div className="tv-quote-strip">
-          <div>
-            <span>现价</span>
-            <b className={isUp ? 'market-up' : 'market-down'}>{currentPrice !== null ? currentPrice.toFixed(2) : '--'}</b>
-          </div>
-          <div>
-            <span>涨跌</span>
-            <b className={isUp ? 'market-up' : 'market-down'}>
-              {changePercent !== null ? `${isUp ? '+' : ''}${changePercent.toFixed(2)}%` : '--'}
-            </b>
-          </div>
-          <div>
-            <span>开盘</span>
-            <b>{openPrice !== null ? openPrice.toFixed(2) : '--'}</b>
-          </div>
-          <div>
-            <span>最高</span>
-            <b>{highPrice !== null ? highPrice.toFixed(2) : '--'}</b>
-          </div>
-          <div>
-            <span>最低</span>
-            <b>{lowPrice !== null ? lowPrice.toFixed(2) : '--'}</b>
-          </div>
-          <div>
-            <span>成交额</span>
-            <b>{amountValue !== null ? formatAmount(amountValue) : '--'}</b>
-          </div>
-        </div>
+      <div
+        data-testid="stock-detail-capture"
+        data-render-ready={isRenderReady ? 'true' : 'false'}
+        data-indicator-view={indicatorView}
+        style={{ width: '100%', height: '100%' }}
+      >
+        {bars.length === 0 ? (
+          <div className="mobile-stage-chart-placeholder">行情数据加载中...</div>
+        ) : (
+          <StrategyChart
+            symbol={inst.symbol}
+            displayName={inst.name}
+            bars={bars}
+            indicators={indicatorsResponse}
+            strategyId={strategyDef.id}
+            source={source}
+            height={MOBILE_STAGE_CHART_HEIGHT}
+            timeframe={timeframe}
+            viewport={viewportByTimeframe[timeframe]}
+            onViewportChange={handleViewportChange}
+            isCaptureMode
+            indicatorView={indicatorView}
+          />
+        )}
       </div>
-
-      {/* ===== 工作区：单列布局（全屏图表，无侧栏/导航） ===== */}
-      <div className="tv-workspace">
-        <section
-          className="tv-chart-column"
-          data-testid="stock-detail-capture"
-          data-render-ready={isRenderReady ? 'true' : 'false'}
-        >
-          {bars.length === 0 ? (
-            <div className="tv-chart-loading">行情数据加载中...</div>
-          ) : (
-            <>
-              {/* StrategyChart 内部渲染：工具栏 + 策略图示区 + 画布区 */}
-              <StrategyChart
-                symbol={inst.symbol}
-                displayName={inst.name}
-                bars={bars}
-                indicators={indicatorsResponse}
-                strategyId={strategyDef.id}
-                source={source}
-                height={655}
-                timeframe={timeframe}
-                viewport={viewportByTimeframe[timeframe]}
-                onViewportChange={handleViewportChange}
-                isCaptureMode
-              />
-              {/* 状态栏：复权/时区（不依赖运行时数据，精简展示） */}
-              <div className="tv-chart-status">
-                {barsResponse?.data_source && (
-                  <span>K线来源: {barsResponse.data_source}</span>
-                )}
-                {barsResponse?.is_partial && <span>含未完成 bar</span>}
-                {barsResponse?.last_live_bar_time && (
-                  <span>实时bar: {formatShanghaiTimeShort(barsResponse.last_live_bar_time)}</span>
-                )}
-                <span>复权：前复权</span>
-                <span>时区：Asia/Shanghai</span>
-              </div>
-            </>
-          )}
-        </section>
-      </div>
-    </div>
+    </MobileIndicatorStage>
   )
 }

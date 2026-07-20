@@ -6,7 +6,7 @@
 1. dry_run: 审计全市场（或指定股票），收集不一致股票 → ReconciliationPlan
 2. rebuild_batch: 按 plan 串行重建，每只股票独立事务，记录 before/after hash + 成功/失败
 3. 失败处理：re-raise，不吞没，不写 1.0 伪装成功，记录 error_code
-4. 成功后：精确失效该股票 MDAS 缓存（AdjustmentFactorService.rebuild_factor_series 已处理）
+4. 成功后：精确失效该股票下游缓存（AdjustmentFactorService.rebuild_factor_series 已处理）
 
 安全约束：
 - 全程串行（禁止并发 rebuild）
@@ -16,10 +16,13 @@
 - dry-run 零副作用（不写库、不失效缓存）
 - 不做无边界全市场重跑（只重建审计发现的不一致股票）
 
-缓存失效范围：
-- MDAS: rebuild_factor_series 已调用 _invalidate_mdas_cache(instrument_id)
-- indicator/snapshot/DSA/monitor: 由调用方按受影响 trade_date 精确重算
-  （本任务只负责因子重建，不触发 snapshot 重算——避免无边界全市场重跑）
+缓存失效范围（FR-11，rebuild_factor_series 内部 _invalidate_downstream_caches）：
+- MDAS: 行情聚合层缓存（Redis mdas:{instrument_id}:*）
+- bars: 原始行情响应缓存（Redis bars:{instrument_id}:*，默认禁用时返回 0）
+- indicator: 指标计算结果缓存（Redis indicator:{instrument_id}:*）
+- snapshot/DSA/monitor: 由调用方按受影响 trade_date 精确重算
+  （本任务只负责因子重建，不触发 snapshot 重算——避免无边界全市场重跑；
+   监控 Profile in-process 缓存与 Capture filesystem 缓存依赖 TTL 自然过期）
 
 用法：
     from app.services.factor_reconciliation import FactorReconciliationTask
@@ -392,7 +395,7 @@ class FactorReconciliationTask:
         """
         rebuilt_at = datetime.now(UTC)
         try:
-            # rebuild_factor_series 内部会 commit 事务并失效 MDAS 缓存
+            # rebuild_factor_series 内部会 commit 事务并失效下游缓存（MDAS/bars/indicator，FR-11）
             records = await self._adj_service.rebuild_factor_series(
                 session,
                 item.instrument_id,

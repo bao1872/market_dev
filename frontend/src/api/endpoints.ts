@@ -635,6 +635,31 @@ export interface BarListResponse {
   adj_factor_hash?: string | null
   market_data_contract_version?: string | null
   adjustment_as_of?: string | null
+  // [display_frame] - 展示帧（PROMPT.md §二.1）：与 indicators API 共用 build_display_frame 生成。
+  //   前端 ChartRenderFrame 优先比对 display_frame.display_hash，
+  //   display_frame 缺失时降级到 source_bar_hash（向后兼容）。
+  //   source_bar_hash 描述算法输入（含 warmup），display_hash 只描述真正展示给前端的 K线窗口。
+  display_frame?: DisplayFrame | null
+}
+
+/**
+ * 展示帧结构（bars API 与 indicators API 共用）。
+ *
+ * 字段对齐后端 app.services.indicator_display_frame.build_display_frame：
+ *   - instrument_id / timeframe / adj：基础标识
+ *   - display_times：展示窗口 bar 时间数组
+ *   - display_hash：展示窗口 OHLCV SHA256 前 16 字符
+ *   - completed_through：已完成到的时间
+ *
+ * 空数据路径：display_times=[]，display_hash=""（视为缺失，触发降级）。
+ */
+export interface DisplayFrame {
+  instrument_id: string
+  timeframe: string
+  adj: string
+  display_times: string[]
+  display_hash: string
+  completed_through: string | null
 }
 
 // ============================================================
@@ -1630,6 +1655,44 @@ export interface IndicatorResponse {
   source_bar_times?: string[]
   // [DSA 数据源校验] - source_bar_hash K 线时间序列哈希，便于调试与后端联调定位数据源漂移
   source_bar_hash?: string
+  // [display_frame] - 展示帧（PROMPT.md §二.1）：与 bars API 共用 build_display_frame 生成。
+  //   ChartRenderFrame 优先比对 display_frame.display_hash，不再直接比对 source_bar_hash。
+  //   原因：bars API 返回展示窗口 100 根，indicators API 算法输入 250 根（含 Node warmup），
+  //   source_bar_hash 永远不等，导致 1d 周期永久 mismatch、指标图层被屏蔽、页面持续显示"指标加载中"。
+  display_frame?: DisplayFrame | null
+  // [calculation_diagnostics] - 算法输入诊断（PROMPT.md §二.1）：仅用于调试与日志，
+  //   不参与前端 ChartRenderFrame 帧比对。包含 source_bar_hash/warmup_bars/calculation_window/
+  //   smc_source_bar_hash/node_daily_hash/node_15m_hash/node_profile_hash 等算法输入层 hash。
+  calculation_diagnostics?: CalculationDiagnostics | null
+}
+
+/**
+ * 算法输入诊断（indicators API 返回，不参与前端帧比对）。
+ *
+ * 字段对齐后端 app.services.indicator_display_frame.build_calculation_diagnostics：
+ *   - source_bar_hash / source_bar_times：算法输入 K线 hash 与时间序列
+ *   - warmup_bars / calculation_window：算法 warmup 与计算窗口大小
+ *   - smc_source_bar_hash：SMC 算法输入 hash（如启用）
+ *   - node_daily_hash / node_15m_hash / node_profile_hash：Node Cluster 算法各输入 hash
+ *   - algorithm_version / contract_fingerprint：Node Cluster 算法版本与契约指纹
+ *   - market_data_contract_version / adj_factor_hash：MDAS 契约版本与复权因子 hash
+ *
+ * 所有字段均为可选（build_calculation_diagnostics 过滤 None 字段）。
+ */
+export interface CalculationDiagnostics {
+  source_bar_hash?: string | null
+  source_bar_times?: string[]
+  warmup_bars?: number
+  calculation_window?: number
+  smc_source_bar_hash?: string | null
+  smc_source_bar_times?: string[]
+  node_daily_hash?: string | null
+  node_15m_hash?: string | null
+  node_profile_hash?: string | null
+  algorithm_version?: string | null
+  contract_fingerprint?: string | null
+  market_data_contract_version?: string | null
+  adj_factor_hash?: string | null
 }
 
 /**

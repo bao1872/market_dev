@@ -403,6 +403,238 @@ class TestCaptureSnapshot:
 
         assert resp.status_code == 404
 
+    # ============================================================
+    # [CHANGE-20260720-Phase4 §四] indicator_view 参数测试
+    # ============================================================
+
+    @pytest.mark.asyncio
+    async def test_capture_snapshot_indicator_view_smc_triggers_include_smc(
+        self, capture_client: tuple[AsyncClient, AsyncSession], test_instrument,
+    ) -> None:
+        """indicator_view=smc → compute_all_indicators 透传 include_smc=True。
+
+        阻断验收：smc 视图必须触发 SMC 算法计算（BOS/CHoCH/OB/EQH/EQL/trailing），
+        否则前端 SMC 图层无数据可渲染。
+        """
+        client, db = capture_client
+        from app.models.user import User
+        user = User(
+            id=uuid.uuid4(),
+            email=f"capture_{uuid.uuid4().hex[:8]}@test.com",
+            password_hash="$2b$12$dummyhash",
+            status="active",
+        )
+        db.add(user)
+        await db.flush()
+
+        headers = _capture_token_headers(user.id, test_instrument.id)
+        bars_result = _make_bars_result_with_data(test_instrument.id)
+        indicators_data: dict[str, Any] = {"layers": [], "data": {}, "errors": {}}
+
+        spy_compute = AsyncMock(return_value=indicators_data)
+        with patch(
+            "app.api.capture.MarketDataAggregationService.get_bars",
+            new=AsyncMock(return_value=bars_result),
+        ), patch(
+            "app.api.capture.compute_all_indicators",
+            new=spy_compute,
+        ):
+            resp = await client.get(
+                f"/api/v1/capture/stocks/{test_instrument.id}/snapshot"
+                "?indicator_view=smc",
+                headers=headers,
+            )
+
+        assert resp.status_code == 200, f"响应体: {resp.text}"
+        data = resp.json()
+
+        # compute_all_indicators 必须以 include_smc=True 调用
+        assert spy_compute.await_count == 1
+        compute_kwargs = spy_compute.call_args.kwargs
+        assert compute_kwargs.get("include_smc") is True, \
+            "indicator_view=smc 必须透传 include_smc=True"
+
+        # 响应必须包含 indicator_view 与 include_smc 字段
+        assert data["indicator_view"] == "smc"
+        assert data["include_smc"] is True
+
+    @pytest.mark.asyncio
+    async def test_capture_snapshot_indicator_view_node_cluster_skips_smc(
+        self, capture_client: tuple[AsyncClient, AsyncSession], test_instrument,
+    ) -> None:
+        """indicator_view=node_cluster → include_smc=False（不消耗 SMC CPU）。"""
+        client, db = capture_client
+        from app.models.user import User
+        user = User(
+            id=uuid.uuid4(),
+            email=f"capture_{uuid.uuid4().hex[:8]}@test.com",
+            password_hash="$2b$12$dummyhash",
+            status="active",
+        )
+        db.add(user)
+        await db.flush()
+
+        headers = _capture_token_headers(user.id, test_instrument.id)
+        bars_result = _make_bars_result_with_data(test_instrument.id)
+        indicators_data: dict[str, Any] = {"layers": [], "data": {}, "errors": {}}
+
+        spy_compute = AsyncMock(return_value=indicators_data)
+        with patch(
+            "app.api.capture.MarketDataAggregationService.get_bars",
+            new=AsyncMock(return_value=bars_result),
+        ), patch(
+            "app.api.capture.compute_all_indicators",
+            new=spy_compute,
+        ):
+            resp = await client.get(
+                f"/api/v1/capture/stocks/{test_instrument.id}/snapshot"
+                "?indicator_view=node_cluster",
+                headers=headers,
+            )
+
+        assert resp.status_code == 200, f"响应体: {resp.text}"
+        data = resp.json()
+
+        # node_cluster 视图不应触发 SMC 计算（按需计算约束）
+        assert spy_compute.await_count == 1
+        compute_kwargs = spy_compute.call_args.kwargs
+        assert compute_kwargs.get("include_smc") is False, \
+            "indicator_view=node_cluster 必须透传 include_smc=False（按需计算）"
+
+        assert data["indicator_view"] == "node_cluster"
+        assert data["include_smc"] is False
+
+    @pytest.mark.asyncio
+    async def test_capture_snapshot_indicator_view_bollinger_skips_smc(
+        self, capture_client: tuple[AsyncClient, AsyncSession], test_instrument,
+    ) -> None:
+        """indicator_view=bollinger → include_smc=False。"""
+        client, db = capture_client
+        from app.models.user import User
+        user = User(
+            id=uuid.uuid4(),
+            email=f"capture_{uuid.uuid4().hex[:8]}@test.com",
+            password_hash="$2b$12$dummyhash",
+            status="active",
+        )
+        db.add(user)
+        await db.flush()
+
+        headers = _capture_token_headers(user.id, test_instrument.id)
+        bars_result = _make_bars_result_with_data(test_instrument.id)
+        indicators_data: dict[str, Any] = {"layers": [], "data": {}, "errors": {}}
+
+        spy_compute = AsyncMock(return_value=indicators_data)
+        with patch(
+            "app.api.capture.MarketDataAggregationService.get_bars",
+            new=AsyncMock(return_value=bars_result),
+        ), patch(
+            "app.api.capture.compute_all_indicators",
+            new=spy_compute,
+        ):
+            resp = await client.get(
+                f"/api/v1/capture/stocks/{test_instrument.id}/snapshot"
+                "?indicator_view=bollinger",
+                headers=headers,
+            )
+
+        assert resp.status_code == 200, f"响应体: {resp.text}"
+        data = resp.json()
+
+        assert spy_compute.await_count == 1
+        compute_kwargs = spy_compute.call_args.kwargs
+        assert compute_kwargs.get("include_smc") is False
+
+        assert data["indicator_view"] == "bollinger"
+        assert data["include_smc"] is False
+
+    @pytest.mark.asyncio
+    async def test_capture_snapshot_indicator_view_invalid_falls_back_to_default(
+        self, capture_client: tuple[AsyncClient, AsyncSession], test_instrument,
+    ) -> None:
+        """indicator_view=invalid → 回退到 DEFAULT_INDICATOR_VIEW（node_cluster），不抛 400。
+
+        阻断验收：截图链路必须鲁棒，非法值不阻塞截图（advice.md 第六节）。
+        """
+        client, db = capture_client
+        from app.models.user import User
+        user = User(
+            id=uuid.uuid4(),
+            email=f"capture_{uuid.uuid4().hex[:8]}@test.com",
+            password_hash="$2b$12$dummyhash",
+            status="active",
+        )
+        db.add(user)
+        await db.flush()
+
+        headers = _capture_token_headers(user.id, test_instrument.id)
+        bars_result = _make_bars_result_with_data(test_instrument.id)
+        indicators_data: dict[str, Any] = {"layers": [], "data": {}, "errors": {}}
+
+        spy_compute = AsyncMock(return_value=indicators_data)
+        with patch(
+            "app.api.capture.MarketDataAggregationService.get_bars",
+            new=AsyncMock(return_value=bars_result),
+        ), patch(
+            "app.api.capture.compute_all_indicators",
+            new=spy_compute,
+        ):
+            resp = await client.get(
+                f"/api/v1/capture/stocks/{test_instrument.id}/snapshot"
+                "?indicator_view=invalid_view",
+                headers=headers,
+            )
+
+        assert resp.status_code == 200, f"响应体: {resp.text}"
+        data = resp.json()
+
+        # 非法值回退到 DEFAULT_INDICATOR_VIEW（node_cluster）
+        assert data["indicator_view"] == "node_cluster"
+        assert data["include_smc"] is False
+
+    @pytest.mark.asyncio
+    async def test_capture_snapshot_indicator_view_missing_falls_back_to_default(
+        self, capture_client: tuple[AsyncClient, AsyncSession], test_instrument,
+    ) -> None:
+        """indicator_view 缺失 → 回退到 DEFAULT_INDICATOR_VIEW（node_cluster）。
+
+        向后兼容：旧 capture URL 不携带 indicator_view 时，按默认视图渲染。
+        """
+        client, db = capture_client
+        from app.models.user import User
+        user = User(
+            id=uuid.uuid4(),
+            email=f"capture_{uuid.uuid4().hex[:8]}@test.com",
+            password_hash="$2b$12$dummyhash",
+            status="active",
+        )
+        db.add(user)
+        await db.flush()
+
+        headers = _capture_token_headers(user.id, test_instrument.id)
+        bars_result = _make_bars_result_with_data(test_instrument.id)
+        indicators_data: dict[str, Any] = {"layers": [], "data": {}, "errors": {}}
+
+        spy_compute = AsyncMock(return_value=indicators_data)
+        with patch(
+            "app.api.capture.MarketDataAggregationService.get_bars",
+            new=AsyncMock(return_value=bars_result),
+        ), patch(
+            "app.api.capture.compute_all_indicators",
+            new=spy_compute,
+        ):
+            resp = await client.get(
+                f"/api/v1/capture/stocks/{test_instrument.id}/snapshot",
+                headers=headers,
+            )
+
+        assert resp.status_code == 200, f"响应体: {resp.text}"
+        data = resp.json()
+
+        # 缺失 indicator_view 回退到 node_cluster（DEFAULT_INDICATOR_VIEW）
+        assert data["indicator_view"] == "node_cluster"
+        assert data["include_smc"] is False
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

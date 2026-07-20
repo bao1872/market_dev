@@ -35,6 +35,7 @@ from app.models.stock_feature_snapshot_run import (
 from app.schemas.atomic_fact_contract import (
     AdminStockDebugResponse,
     AtomicFactsContextResponse,
+    NodeAvailabilityInfo,
     PersistedAtomicFactsPayload,
 )
 from app.schemas.stock_state import (
@@ -267,6 +268,114 @@ def _is_valid_stored_afc(stored: Any) -> bool:
         return False
 
 
+# [CHANGE-20260721-001] Node Availability 状态机构建：从 snapshot.structural_payload
+# .primary.1d.node_cluster 提取 Canonical Node 诊断字段，映射为 NodeAvailabilityInfo。
+# 5 态区分：NO_PUBLISHED_RUN/SNAPSHOT_MISSING（run/snapshot 级，由 dataQuality.reasonCode 承载）
+# + NODE_PROFILE_EMPTY/NODE_15M_MISSING/NODE_COMPUTE_FAILED（node 级，由 nodeAvailability 承载）。
+def _build_node_availability(
+    snapshot: StockFeatureSnapshot | None,
+    *,
+    run_reason_code: str | None = None,
+) -> NodeAvailabilityInfo:
+    """从已发布 snapshot 构建 NodeAvailabilityInfo（只读，禁止实时计算）。
+
+    Args:
+        snapshot: StockFeatureSnapshot ORM 对象；None 时表示无快照（run_reason_code
+            必为 no_published_full_run / snapshot_missing 之一）
+        run_reason_code: 顶层 reason_code（用于在无 snapshot 时选择 unknown vs legacy）
+
+    Returns:
+        NodeAvailabilityInfo：state/reasonCode/pocPrice/profileHash 等诊断字段
+    """
+    if snapshot is None or not snapshot.structural_payload:
+        # 无 snapshot 或无 structural_payload：无法判断 Node 状态
+        return NodeAvailabilityInfo(
+            state="unknown",
+            reasonCode="LEGACY_SNAPSHOT_NO_NODE_CLUSTER",
+        )
+
+    sp = snapshot.structural_payload
+    if not isinstance(sp, dict):
+        return NodeAvailabilityInfo(
+            state="unknown",
+            reasonCode="LEGACY_SNAPSHOT_NO_NODE_CLUSTER",
+        )
+
+    primary = sp.get("primary") or {}
+    if not isinstance(primary, dict):
+        return NodeAvailabilityInfo(
+            state="unknown",
+            reasonCode="LEGACY_SNAPSHOT_NO_NODE_CLUSTER",
+        )
+
+    primary_1d = primary.get("1d") or {}
+    if not isinstance(primary_1d, dict):
+        return NodeAvailabilityInfo(
+            state="unknown",
+            reasonCode="LEGACY_SNAPSHOT_NO_NODE_CLUSTER",
+        )
+
+    node_cluster = primary_1d.get("node_cluster")
+    if not isinstance(node_cluster, dict):
+        # 旧 schema_version<4 快照无 node_cluster 字段（理论上 schema_version bump 后不应出现）
+        return NodeAvailabilityInfo(
+            state="unknown",
+            reasonCode="LEGACY_SNAPSHOT_NO_NODE_CLUSTER",
+        )
+
+    # 读取 availability / degraded_reason（schema_version>=4 必有）
+    raw_availability = node_cluster.get("availability")
+    raw_degraded_reason = node_cluster.get("degraded_reason")
+
+    # 映射 degraded_reason → 稳定 reasonCode
+    # degraded_reason 可能值：INSUFFICIENT_DAILY_BARS / MISSING_15M_BARS / PROFILE_EMPTY
+    # / COMPUTE_FAILED: <exc> / None
+    def _map_reason_code(
+        avail: str | None, degraded: str | None,
+    ) -> str | None:
+        if avail == "available":
+            return None
+        if degraded is None:
+            return "NODE_PROFILE_EMPTY" if avail == "unavailable" else None
+        if degraded == "INSUFFICIENT_DAILY_BARS":
+            return "NODE_INSUFFICIENT_DAILY_BARS"
+        if degraded == "MISSING_15M_BARS":
+            return "NODE_15M_MISSING"
+        if degraded == "PROFILE_EMPTY":
+            return "NODE_PROFILE_EMPTY"
+        if degraded.startswith("COMPUTE_FAILED"):
+            return "NODE_COMPUTE_FAILED"
+        # 未知 degraded_reason：归入 COMPUTE_FAILED 以便前端显示"暂不可用"
+        return "NODE_COMPUTE_FAILED"
+
+    state: str
+    if raw_availability in ("available", "degraded", "unavailable"):
+        state = raw_availability  # type: ignore[assignment]
+    else:
+        # 旧快照无 availability 字段但存在 node_cluster（如 schema_version=3 升级后第一次访问）
+        # 通过 profile_rows 推断：非空 + poc_price 存在 → available，否则 unavailable
+        state = "available" if node_cluster.get("profile_rows") and node_cluster.get("poc_price") is not None else "unavailable"
+
+    reason_code = _map_reason_code(raw_availability, raw_degraded_reason)
+    if state == "available" and reason_code is None:
+        pass  # 正常态
+    elif state != "available" and reason_code is None:
+        # state 非 available 但 reason_code 为 None：兜底归入 PROFILE_EMPTY
+        reason_code = "NODE_PROFILE_EMPTY"
+
+    return NodeAvailabilityInfo(
+        state=state,  # type: ignore[arg-type]
+        reasonCode=reason_code,
+        pocPrice=node_cluster.get("poc_price"),
+        profileHash=node_cluster.get("profile_hash"),
+        dailySourceHash=node_cluster.get("daily_source_hash"),
+        bars15mSourceHash=node_cluster.get("bars_15m_source_hash"),
+        algorithmVersion=node_cluster.get("algorithm_version"),
+        dailyBarsCount=int(node_cluster.get("daily_bars_count") or 0),
+        bars15mCount=int(node_cluster.get("bars_15m_count") or 0),
+    )
+
+
 # 管理员 debug 由 compute_atomic_fact_debug 按需即时生成（见下方 include_raw 分支）。
 
 
@@ -292,7 +401,11 @@ def _empty_atomic_response(
     调用方应传入 run，使 dataQuality.hasSucceededRun=True、runTradeDate/runPublishedAt
     正确反映 run 状态；asOf 仍为 None（无 snapshot 即无 as-of 日期）。
     无 run 场景（reason_code="no_published_full_run"）保持 run=None 默认。
+
+    [CHANGE-20260721-001] - nodeAvailability 始终返回（无 snapshot → unknown/LEGACY_SNAPSHOT_NO_NODE_CLUSTER），
+    前端可据此区分 NO_PUBLISHED_RUN/SNAPSHOT_MISSING 与 NODE_* 三态。
     """
+    node_avail = _build_node_availability(None, run_reason_code=reason_code)
     return {
         "contractVersion": CONTRACT_VERSION,
         "meta": _afc_meta(),
@@ -315,6 +428,7 @@ def _empty_atomic_response(
         "dataQuality": _build_data_quality(
             instrument, run, None, reason_code=reason_code,
         ),
+        "nodeAvailability": node_avail.model_dump(),
     }
 
 
@@ -433,6 +547,10 @@ async def _build_stock_context(
             _cur.append("m5_inconsistent")
             data_quality.degradedReasons = _cur
 
+    # [CHANGE-20260721-001] 从已发布 snapshot 提取 Node 可用性状态（只读，
+    # 禁止实时计算；与 indicators API 共用同一 Canonical Node 结果）
+    node_availability = _build_node_availability(snapshot, run_reason_code=reason_code)
+
     response: dict[str, Any] = {
         "contractVersion": CONTRACT_VERSION,
         "meta": _afc_meta(),
@@ -445,6 +563,7 @@ async def _build_stock_context(
         "latestChangesAsOf": latest_changes_as_of,
         "productObservations": product_observations,
         "dataQuality": data_quality,
+        "nodeAvailability": node_availability.model_dump(),
     }
 
     if include_raw:

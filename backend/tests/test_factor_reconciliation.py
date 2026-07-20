@@ -374,3 +374,165 @@ class TestRebuildBatchMock:
         await task.rebuild_batch(MagicMock(), plan, batch_size=2)
 
         assert executed_order == symbols, "必须按 plan.items 顺序串行执行"
+
+
+# =============================================================================
+# 5. _invalidate_downstream_caches 测试（FR-11 因子变化后精确失效下游缓存）
+# =============================================================================
+
+
+class TestInvalidateDownstreamCaches:
+    """AdjustmentFactorService._invalidate_downstream_caches 单元测试。
+
+    FR-11: 因子变化后精确失效 MDAS / bars / indicator 三层 Redis 缓存。
+    单层失败不阻塞其他层（缓存 TTL 会自然过期）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_invalidates_all_three_cache_layers(self):
+        """成功场景：三层缓存均被精确失效，返回各层删除键数。"""
+        from app.services.adjustment_factor_service import AdjustmentFactorService
+
+        service = AdjustmentFactorService()
+        instrument_id = uuid.uuid4()
+
+        # mock 三层失效函数
+        service._invalidate_mdas_cache = MagicMock(return_value=5)  # type: ignore[assignment]
+
+        bars_deleted = []
+        indicator_deleted = []
+
+        async def mock_bars_invalidate(inst_id):
+            bars_deleted.append(inst_id)
+            return 3
+
+        async def mock_indicator_invalidate(inst_id):
+            indicator_deleted.append(inst_id)
+            return 2
+
+        import app.services.bars_cache as bars_cache_mod
+        import app.services.indicator_cache as indicator_cache_mod
+
+        original_bars = bars_cache_mod.invalidate_bars_cache
+        original_indicator = indicator_cache_mod.invalidate
+        bars_cache_mod.invalidate_bars_cache = mock_bars_invalidate  # type: ignore[assignment]
+        indicator_cache_mod.invalidate = mock_indicator_invalidate  # type: ignore[assignment]
+        try:
+            result = await service._invalidate_downstream_caches(instrument_id)
+        finally:
+            bars_cache_mod.invalidate_bars_cache = original_bars  # type: ignore[assignment]
+            indicator_cache_mod.invalidate = original_indicator  # type: ignore[assignment]
+
+        assert result == {"mdas": 5, "bars": 3, "indicator": 2}
+        service._invalidate_mdas_cache.assert_called_once_with(instrument_id)
+        assert bars_deleted == [instrument_id]
+        assert indicator_deleted == [instrument_id]
+
+    @pytest.mark.asyncio
+    async def test_bars_cache_failure_does_not_block_indicator(self):
+        """bars 缓存失效异常不阻塞 indicator 缓存失效。"""
+        from app.services.adjustment_factor_service import AdjustmentFactorService
+
+        service = AdjustmentFactorService()
+        instrument_id = uuid.uuid4()
+
+        service._invalidate_mdas_cache = MagicMock(return_value=1)  # type: ignore[assignment]
+
+        async def failing_bars_invalidate(inst_id):
+            raise RuntimeError("redis connection refused")
+
+        indicator_called = []
+
+        async def mock_indicator_invalidate(inst_id):
+            indicator_called.append(inst_id)
+            return 4
+
+        import app.services.bars_cache as bars_cache_mod
+        import app.services.indicator_cache as indicator_cache_mod
+
+        original_bars = bars_cache_mod.invalidate_bars_cache
+        original_indicator = indicator_cache_mod.invalidate
+        bars_cache_mod.invalidate_bars_cache = failing_bars_invalidate  # type: ignore[assignment]
+        indicator_cache_mod.invalidate = mock_indicator_invalidate  # type: ignore[assignment]
+        try:
+            result = await service._invalidate_downstream_caches(instrument_id)
+        finally:
+            bars_cache_mod.invalidate_bars_cache = original_bars  # type: ignore[assignment]
+            indicator_cache_mod.invalidate = original_indicator  # type: ignore[assignment]
+
+        # MDAS 成功、bars 异常返回 0、indicator 成功
+        assert result["mdas"] == 1
+        assert result["bars"] == 0
+        assert result["indicator"] == 4
+        assert indicator_called == [instrument_id]
+
+    @pytest.mark.asyncio
+    async def test_indicator_cache_failure_does_not_block_bars(self):
+        """indicator 缓存失效异常不阻塞 bars 缓存失效。"""
+        from app.services.adjustment_factor_service import AdjustmentFactorService
+
+        service = AdjustmentFactorService()
+        instrument_id = uuid.uuid4()
+
+        service._invalidate_mdas_cache = MagicMock(return_value=2)  # type: ignore[assignment]
+
+        bars_called = []
+
+        async def mock_bars_invalidate(inst_id):
+            bars_called.append(inst_id)
+            return 7
+
+        async def failing_indicator_invalidate(inst_id):
+            raise ConnectionError("redis timeout")
+
+        import app.services.bars_cache as bars_cache_mod
+        import app.services.indicator_cache as indicator_cache_mod
+
+        original_bars = bars_cache_mod.invalidate_bars_cache
+        original_indicator = indicator_cache_mod.invalidate
+        bars_cache_mod.invalidate_bars_cache = mock_bars_invalidate  # type: ignore[assignment]
+        indicator_cache_mod.invalidate = failing_indicator_invalidate  # type: ignore[assignment]
+        try:
+            result = await service._invalidate_downstream_caches(instrument_id)
+        finally:
+            bars_cache_mod.invalidate_bars_cache = original_bars  # type: ignore[assignment]
+            indicator_cache_mod.invalidate = original_indicator  # type: ignore[assignment]
+
+        # MDAS 成功、bars 成功、indicator 异常返回 0
+        assert result["mdas"] == 2
+        assert result["bars"] == 7
+        assert result["indicator"] == 0
+        assert bars_called == [instrument_id]
+
+    @pytest.mark.asyncio
+    async def test_rebuild_factor_series_calls_invalidate_downstream(self):
+        """rebuild_factor_series 成功后必须调用 _invalidate_downstream_caches（FR-11）。"""
+        from app.services import adjustment_factor_service as afs_mod
+        from app.services.adjustment_factor_service import AdjustmentFactorService
+
+        service = AdjustmentFactorService()
+        instrument_id = uuid.uuid4()
+
+        # mock rebuild_adj_factors 返回固定 records 数
+        async def mock_rebuild(session, inst_id, symbol, earliest, adapter=None):
+            return 42
+
+        # mock _invalidate_downstream_caches 验证被调用
+        invalidate_called = []
+
+        async def mock_invalidate(inst_id):
+            invalidate_called.append(inst_id)
+            return {"mdas": 1, "bars": 0, "indicator": 2}
+
+        original_rebuild = afs_mod.rebuild_adj_factors
+        service._invalidate_downstream_caches = mock_invalidate  # type: ignore[assignment]
+        afs_mod.rebuild_adj_factors = mock_rebuild  # type: ignore[assignment]
+        try:
+            count = await service.rebuild_factor_series(
+                MagicMock(), instrument_id, "600519", date(2024, 1, 1),
+            )
+        finally:
+            afs_mod.rebuild_adj_factors = original_rebuild  # type: ignore[assignment]
+
+        assert count == 42
+        assert invalidate_called == [instrument_id]

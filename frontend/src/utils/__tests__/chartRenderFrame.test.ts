@@ -20,10 +20,12 @@ import {
   buildIndicatorsFrame,
   computeSourceBarRangeKey,
   computeVisiblePriceBounds,
+  extractDisplayFrameFields,
   isFrameMatched,
   shouldIncludeNodeInPriceRange,
   shouldIncludeSmcTrailingInPriceRange,
 } from '../chartRenderFrame.ts'
+import type { DisplayFrame } from '../../api/endpoints.ts'
 
 // ===== 1. computeSourceBarRangeKey =====
 
@@ -394,4 +396,233 @@ test('E2E: Node domain policy 过滤远端历史高位（PROMPT.md §五.255-282
   // 当前区间 Node 保留
   const nearNode = { lo: 12, hi: 14 }
   assert.equal(shouldIncludeNodeInPriceRange(nearNode, bounds), true)
+})
+
+// ===== 8. display_frame 匹配路径（PROMPT.md §二.1 展示帧/算法输入帧分离） =====
+
+// 构造测试用 DisplayFrame 辅助函数
+function makeDisplayFrame(overrides: Partial<DisplayFrame> = {}): DisplayFrame {
+  return {
+    instrument_id: 'inst-001',
+    timeframe: '1d',
+    adj: 'qfq',
+    display_times: ['2026-07-01', '2026-07-02', '2026-07-03'],
+    display_hash: 'display-hash-abc',
+    completed_through: '2026-07-03',
+    ...overrides,
+  }
+}
+
+test('extractDisplayFrameFields: 完整 display_frame 提取 hash + rangeKey', () => {
+  const df = makeDisplayFrame()
+  const { displayHash, displayRangeKey } = extractDisplayFrameFields(df)
+  assert.equal(displayHash, 'display-hash-abc')
+  assert.equal(displayRangeKey, '2026-07-01|2026-07-03')
+})
+
+test('extractDisplayFrameFields: null/undefined 返回 null/null（触发降级）', () => {
+  assert.deepEqual(extractDisplayFrameFields(null), { displayHash: null, displayRangeKey: null })
+  assert.deepEqual(extractDisplayFrameFields(undefined), { displayHash: null, displayRangeKey: null })
+})
+
+test('extractDisplayFrameFields: display_hash 空串视为 null（后端空 DataFrame 路径）', () => {
+  const df = makeDisplayFrame({ display_hash: '' })
+  const { displayHash, displayRangeKey } = extractDisplayFrameFields(df)
+  assert.equal(displayHash, null)
+  // display_times 仍可构造 rangeKey（但 isFrameMatched 中 displayHash=null 会触发降级）
+  assert.equal(displayRangeKey, '2026-07-01|2026-07-03')
+})
+
+test('extractDisplayFrameFields: display_times 为空数组返回 null rangeKey', () => {
+  const df = makeDisplayFrame({ display_times: [] })
+  const { displayHash, displayRangeKey } = extractDisplayFrameFields(df)
+  assert.equal(displayHash, 'display-hash-abc')
+  assert.equal(displayRangeKey, null)
+})
+
+test('buildBarsFrame: display_frame 字段提取到 displayHash/displayRangeKey', () => {
+  const df = makeDisplayFrame({
+    display_hash: 'bars-display-hash',
+    display_times: ['2026-07-01', '2026-07-05'],
+  })
+  const frame = buildBarsFrame({
+    instrumentId: 'inst-001',
+    timeframe: '1d',
+    adj: 'qfq',
+    displayFrame: df,
+  })
+  assert.ok(frame)
+  assert.equal(frame!.displayHash, 'bars-display-hash')
+  assert.equal(frame!.displayRangeKey, '2026-07-01|2026-07-05')
+})
+
+test('buildIndicatorsFrame: display_frame 字段提取到 displayHash/displayRangeKey', () => {
+  const df = makeDisplayFrame({
+    display_hash: 'ind-display-hash',
+    display_times: ['2026-07-01', '2026-07-05'],
+  })
+  const frame = buildIndicatorsFrame({
+    instrumentId: 'inst-001',
+    timeframe: '1d',
+    adj: 'qfq',
+    displayFrame: df,
+  })
+  assert.ok(frame)
+  assert.equal(frame!.displayHash, 'ind-display-hash')
+  assert.equal(frame!.displayRangeKey, '2026-07-01|2026-07-05')
+})
+
+test('isFrameMatched: 双侧 display_frame 一致返回 true（优先路径）', () => {
+  // 核心修复场景：1d 周期 bars.source_bar_hash（100根展示窗口）≠ indicators.source_bar_hash
+  // （250根算法输入），但 display_frame 一致 → matched
+  const barsFrame = buildBarsFrame({
+    instrumentId: 'inst-001',
+    timeframe: '1d',
+    adj: 'qfq',
+    sourceBarHash: 'bars-100-bars-hash',  // 展示窗口 100 根
+    barTimes: ['2026-07-01', '2026-07-05'],
+    displayFrame: makeDisplayFrame({
+      display_hash: 'shared-display-hash',
+      display_times: ['2026-07-01', '2026-07-05'],
+    }),
+  })
+  const indFrame = buildIndicatorsFrame({
+    instrumentId: 'inst-001',
+    timeframe: '1d',
+    adj: 'qfq',
+    sourceBarHash: 'ind-250-bars-hash',  // 算法输入 250 根，不同于 bars
+    sourceBarTimes: ['2026-05-01', '2026-07-05'],  // 更长范围
+    displayFrame: makeDisplayFrame({
+      display_hash: 'shared-display-hash',  // 同一展示窗口
+      display_times: ['2026-07-01', '2026-07-05'],
+    }),
+  })
+  assert.equal(isFrameMatched(barsFrame, indFrame), true)
+})
+
+test('isFrameMatched: display_frame 不一致返回 false（即使 source_bar_hash 一致）', () => {
+  // display_frame 优先级高于 source_bar_hash：display_hash 不匹配则 mismatch
+  const barsFrame = buildBarsFrame({
+    instrumentId: 'inst-001',
+    timeframe: '1d',
+    adj: 'qfq',
+    sourceBarHash: 'shared-source-hash',
+    displayFrame: makeDisplayFrame({ display_hash: 'display-A' }),
+  })
+  const indFrame = buildIndicatorsFrame({
+    instrumentId: 'inst-001',
+    timeframe: '1d',
+    adj: 'qfq',
+    sourceBarHash: 'shared-source-hash',
+    displayFrame: makeDisplayFrame({ display_hash: 'display-B' }),
+  })
+  assert.equal(isFrameMatched(barsFrame, indFrame), false)
+})
+
+test('isFrameMatched: display_hash 一致但 displayRangeKey 不一致返回 false', () => {
+  // 防御性：hash 相同但窗口不同（理论上不应出现，但防止 hash 碰撞）
+  const barsFrame = buildBarsFrame({
+    instrumentId: 'inst-001',
+    timeframe: '1d',
+    adj: 'qfq',
+    displayFrame: makeDisplayFrame({
+      display_hash: 'shared-hash',
+      display_times: ['2026-07-01', '2026-07-05'],
+    }),
+  })
+  const indFrame = buildIndicatorsFrame({
+    instrumentId: 'inst-001',
+    timeframe: '1d',
+    adj: 'qfq',
+    displayFrame: makeDisplayFrame({
+      display_hash: 'shared-hash',
+      display_times: ['2026-07-01', '2026-07-10'],  // 末时间不同
+    }),
+  })
+  assert.equal(isFrameMatched(barsFrame, indFrame), false)
+})
+
+test('isFrameMatched: bars 有 display_frame，indicators 无 → mismatch（不对称）', () => {
+  // API 升级过渡期：bars 已返回 display_frame，indicators 未返回 → 不应静默降级
+  const barsFrame = buildBarsFrame({
+    instrumentId: 'inst-001',
+    timeframe: '1d',
+    adj: 'qfq',
+    sourceBarHash: 'abc',
+    displayFrame: makeDisplayFrame({ display_hash: 'bars-display' }),
+  })
+  const indFrame = buildIndicatorsFrame({
+    instrumentId: 'inst-001',
+    timeframe: '1d',
+    adj: 'qfq',
+    sourceBarHash: 'abc',  // source_bar_hash 一致
+    sourceBarTimes: ['2026-07-01', '2026-07-05'],
+    // display_frame 未传入
+  })
+  assert.equal(isFrameMatched(barsFrame, indFrame), false)
+})
+
+test('isFrameMatched: 双侧 display_frame 缺失，降级到 source_bar_hash 一致返回 true', () => {
+  // 向后兼容：旧后端未返回 display_frame，仍按 source_bar_hash 比对
+  const barsFrame = buildBarsFrame({
+    instrumentId: 'inst-001',
+    timeframe: '1d',
+    adj: 'qfq',
+    sourceBarHash: 'shared-source-hash',
+    barTimes: ['2026-07-01', '2026-07-05'],
+    // display_frame 未传入
+  })
+  const indFrame = buildIndicatorsFrame({
+    instrumentId: 'inst-001',
+    timeframe: '1d',
+    adj: 'qfq',
+    sourceBarHash: 'shared-source-hash',
+    sourceBarTimes: ['2026-07-01', '2026-07-05'],
+    // display_frame 未传入
+  })
+  assert.equal(isFrameMatched(barsFrame, indFrame), true)
+})
+
+test('isFrameMatched: 双侧 display_frame 缺失，source_bar_hash 不一致返回 false', () => {
+  // 降级路径仍严格比对 source_bar_hash
+  const barsFrame = buildBarsFrame({
+    instrumentId: 'inst-001',
+    timeframe: '1d',
+    adj: 'qfq',
+    sourceBarHash: 'hash-A',
+  })
+  const indFrame = buildIndicatorsFrame({
+    instrumentId: 'inst-001',
+    timeframe: '1d',
+    adj: 'qfq',
+    sourceBarHash: 'hash-B',
+  })
+  assert.equal(isFrameMatched(barsFrame, indFrame), false)
+})
+
+test('E2E: 1d 周期 Node 算法输入 250 根，bars 展示窗口 100 根，display_frame 一致 → matched', () => {
+  // PROMPT.md §二.1 核心修复场景：之前永久 mismatch，现在 display_frame 一致 → matched
+  const barsFrame = buildBarsFrame({
+    instrumentId: 'inst-001',
+    timeframe: '1d',
+    adj: 'qfq',
+    sourceBarHash: 'bars-100-hash',  // 100 根展示窗口
+    barTimes: Array.from({ length: 100 }, (_, i) => `2026-${String(Math.floor(i / 30) + 1).padStart(2, '0')}-${String((i % 28) + 1).padStart(2, '0')}`),
+    displayFrame: makeDisplayFrame({
+      display_hash: 'display-100-bars',
+      display_times: ['2026-03-01', '2026-07-05'],  // 100 根展示窗口
+    }),
+  })
+  const indFrame = buildIndicatorsFrame({
+    instrumentId: 'inst-001',
+    timeframe: '1d',
+    adj: 'qfq',
+    sourceBarHash: 'ind-250-hash',  // 250 根算法输入（含 Node warmup）
+    sourceBarTimes: ['2025-09-01', '2026-07-05'],  // 250 根范围
+    displayFrame: makeDisplayFrame({
+      display_hash: 'display-100-bars',  // 同一展示窗口
+      display_times: ['2026-03-01', '2026-07-05'],
+    }),
+  })
+  assert.equal(isFrameMatched(barsFrame, indFrame), true)
 })

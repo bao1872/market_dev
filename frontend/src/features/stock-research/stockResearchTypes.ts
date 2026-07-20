@@ -24,6 +24,8 @@ export {
 
 // 本模块内部使用的类型（从 detailSourceContext 导入，不再本地声明）
 import type { ResearchSource } from './detailSourceContext.ts'
+// [CHANGE-20260720-Phase4] 指标视图枚举（与后端 app.constants.indicator_view 对齐）
+import type { IndicatorView } from '../../api/endpoints.ts'
 
 // 按 timeframe 映射请求根数（与 Node Cluster / indicator_contract 对齐）
 export const BARS_COUNT_BY_TIMEFRAME: Record<DisplayTimeframe, number> = {
@@ -109,4 +111,78 @@ export function chartLayersForSource(
   source: ResearchSource,
 ): ChartLayerManifestEntry[] {
   return manifest.filter((e) => !e.selectionOnly || source === 'selection')
+}
+
+// ===== [CHANGE-20260720-Phase4 §四] indicator_view → ChartLayerVisibility 预设 =====
+// 三类监控独立飞书图片（PROMPT.md §四 + advice.md v6）：
+//   node_cluster → 筹码共识价（Node + Profile + POC）
+//   bollinger    → 布林带（BB）
+//   smc          → SMC 结构（BOS/CHoCH/OB/EQH/EQL/trailing）
+//
+// 每张截图只渲染一个 indicator_view 对应的图层，禁止三类指标叠在同一张图。
+// Capture URL 携带 &indicator_view=... 时，StrategyChart 在 isCaptureMode 下使用
+// 此预设替代 FEISHU_CAPTURE_LAYERS（FEISHU_CAPTURE_LAYERS 同时开启 5 个图层，
+// 与"每张图只渲染一个指标"语义冲突）。
+//
+// 设计原则：
+//   - 主图基线（K 线 + 成交量）始终开启，保证可读性
+//   - trend(breakout/selection) 在监控截图场景无关，关闭
+//   - macd/sqzmom 副图在移动舞台副图区域不渲染，关闭（节省垂直空间给主图）
+export const INDICATOR_VIEW_LAYER_PRESETS: Record<IndicatorView, ChartLayerVisibility> = {
+  // 筹码共识价：成交量分布 + 节点区间 + POC
+  node_cluster: {
+    trend: false,
+    node: true,
+    boll: false,
+    volume: true,
+    macd: false,
+    sqzmom: false,
+    breakout: false,
+    smc: false,
+  },
+  // 布林带：上中下轨
+  bollinger: {
+    trend: false,
+    node: false,
+    boll: true,
+    volume: true,
+    macd: false,
+    sqzmom: false,
+    breakout: false,
+    smc: false,
+  },
+  // SMC 结构：BOS/CHoCH/订单块/等高/等低
+  smc: {
+    trend: false,
+    node: false,
+    boll: false,
+    volume: true,
+    macd: false,
+    sqzmom: false,
+    breakout: false,
+    smc: true,
+  },
+}
+
+// indicator_view 用户可见文案（与后端 INDICATOR_VIEW_LABELS 对齐）
+export const INDICATOR_VIEW_LABELS: Record<IndicatorView, string> = {
+  node_cluster: '筹码共识价',
+  bollinger: '布林带',
+  smc: 'SMC结构',
+}
+
+// 合法 indicator_view 集合（前端校验 URL 参数用）
+export const INDICATOR_VIEW_VALUES: readonly IndicatorView[] = ['node_cluster', 'bollinger', 'smc'] as const
+
+// 校验 indicator_view URL 参数；非法或缺失时返回 null（由调用方决定回退策略）
+export function normalizeIndicatorView(raw: string | null): IndicatorView | null {
+  if (raw && (INDICATOR_VIEW_VALUES as readonly string[]).includes(raw)) {
+    return raw as IndicatorView
+  }
+  return null
+}
+
+// 获取 indicator_view 对应的 ChartLayerVisibility 预设
+export function getIndicatorViewLayerPreset(view: IndicatorView): ChartLayerVisibility {
+  return INDICATOR_VIEW_LAYER_PRESETS[view]
 }

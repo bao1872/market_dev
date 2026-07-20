@@ -92,6 +92,19 @@ Node Cluster（筹码分布 / 成交量分布图）将价格区间划分为 100 
 | `degraded` | `bool` | 是否降级（数据不足等） |
 | `degraded_reason` | `str \| None` | 降级原因 |
 
+**CHANGE-20260721-001 availability/degraded_reason 字段**：feature_snapshot_service 持久化的 `node_cluster` 字段除 `NodeClusterProfileResult` 序列化字段外，新增诊断字段（即使 profile 为 None 也写入最小诊断字段）：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `availability` | `Literal["available", "degraded", "unavailable"]` | 可用性状态（`available`=正常 / `degraded`=部分数据缺失但可降级 / `unavailable`=无法计算） |
+| `degraded_reason` | `str \| None` | 不可用/降级时的稳定原因码：`INSUFFICIENT_DAILY_BARS` / `MISSING_15M_BARS` / `PROFILE_EMPTY` / `COMPUTE_FAILED` / `None` |
+| `daily_source_hash` | `str \| None` | 日线 source_bar_hash（输入指纹，三链一致性断言用） |
+| `bars_15m_source_hash` | `str \| None` | 15m source_bar_hash（输入指纹，三链一致性断言用） |
+| `daily_bars_count` | `int \| None` | 实际日线根数（用于诊断 `INSUFFICIENT_DAILY_BARS`） |
+| `bars_15m_count` | `int \| None` | 实际 15m 根数（用于诊断 `MISSING_15M_BARS`） |
+
+StockContext API 的 `nodeAvailability` 字段直接从 snapshot.primary.1d.node_cluster 提取上述字段，并映射 `degraded_reason` 到稳定 `reasonCode`（见 `docs/current/02-data-api-contracts.md` §15.5 与 `docs/current/07-atomic-fact-contract-v1.md` §9）。
+
 鸭子类型适配器（委托 `_vp_result`，兼容旧消费者）：
 - `profile_df` → `pd.DataFrame`（100 行 VP）
 - `peak_df` → `pd.DataFrame | None`（Peak 节点）
