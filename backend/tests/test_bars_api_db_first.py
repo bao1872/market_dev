@@ -128,6 +128,22 @@ def _disable_mdas_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(mdas, "_cache_set", lambda *_a, **_k: None)
 
 
+@pytest.fixture(autouse=True)
+def _freeze_non_trading_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    """固定 is_trading_day_async 返回 False，避免 1d partial daily 合成分支依赖 CI 运行时间。
+
+    根因: MDAS get_bars 在 ``timeframe=="1d" and include_realtime`` 时（默认 True），
+    会调用 ``is_trading_day_async`` + ``compute_market_session`` 判断是否进入 partial daily 合成。
+    该调用未被测试 mock，导致 CI 在交易时段运行时进入合成分支、mock session 不匹配返回 degraded。
+    本文件 1d 用例均 mock 了 ``_call_expected_last_completed_daily_bar``，不依赖
+    ``is_trading_day_async`` 真实行为；15m 用例走 ``_is_trading_hours`` 分支不受影响。
+    """
+    monkeypatch.setattr(
+        mdas, "is_trading_day_async",
+        AsyncMock(return_value=False),
+    )
+
+
 # ============================================================
 # 测试 1: DB 命中且为最新，X-Data-Source: db
 # ============================================================

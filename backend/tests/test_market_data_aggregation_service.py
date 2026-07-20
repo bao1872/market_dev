@@ -79,6 +79,26 @@ def _mock_session() -> AsyncMock:
     return AsyncMock()
 
 
+@pytest.fixture(autouse=True)
+def _freeze_non_trading_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    """固定 is_trading_day_async 返回 False，避免 1d partial daily 合成分支依赖 CI 运行时间。
+
+    根因: MDAS get_bars 在 ``timeframe=="1d" and include_realtime`` 时（默认 True），
+    会调用 ``is_trading_day_async(session, now.date())`` + ``compute_market_session(now, is_trading_day)``
+    判断是否进入 partial daily 合成。该调用未被测试 mock，导致：
+      - CI 在交易时段运行（北京时间 9:30-15:00）→ 进入合成分支 → mock session 不匹配 → degraded
+      - CI 在非交易时段运行 → 不进入合成分支 → 测试通过（main CI 即此情况）
+
+    本测试文件的所有 1d 用例均 mock 了 ``_expected_last_completed_daily_bar``，
+    不依赖 ``is_trading_day_async`` 的真实行为；15m 用例走 ``_is_trading_hours`` 分支不受影响。
+    固定为非交易日可让测试结果与 CI 运行时间解耦。
+    """
+    monkeypatch.setattr(
+        mdas, "is_trading_day_async",
+        lambda *a, **kw: _async_return(False),
+    )
+
+
 # ============================================================
 # 基础返回结构
 # ============================================================
