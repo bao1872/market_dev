@@ -1,35 +1,42 @@
 // [ChartRenderFrame] - 描述: 周期切换原子渲染门禁 + 纵轴 domain policy
 //
-// 问题背景（PROMPT.md §五.255-307）：
+// 问题背景（PROMPT.md §一、§二）：
 //   1. Bars 和 Indicators 是两个独立 React Query 请求，切换周期时可能短暂出现
 //      "新周期 K线 + 旧周期指标"。当前只有 DSA 做了 source mismatch 检查，
 //      其他 BB/Node/SMC 没有统一 frame 级门禁，导致指标与 K线错位渲染。
-//   2. drawTrading() 计算主图纵轴时直接 push 全部 Node lo/hi：
+//   2. 之前严格比较 bars.source_bar_hash 与 indicators.source_bar_hash，但两者
+//      来源不同（bars 是展示窗口 100 根，indicators 是算法输入 250 根），导致
+//      1d 周期永久 mismatch，指标图层被屏蔽，页面持续显示"指标加载中"。
+//   3. drawTrading() 计算主图纵轴时直接 push 全部 Node lo/hi：
 //        profile.nodes.forEach(n => { priceCandidates.push(n.lo, n.hi) })
 //      没有判断该 Node 是否属于当前可见价格区间，结果远端 Node（如历史高/低
 //      位）把纵轴拉大，K线被压缩，指标绝对位置和比例看起来错误。
 //
-// 解决方案：
-//   1. ChartRenderFrame：从 bars response 和 indicators response 各自提取 frame，
-//      frame 一致时才提交绘制，否则显示短暂加载状态（不允许旧指标覆盖新 K线）。
-//   2. shouldIncludeNodeInPriceRange：基于可见 K线高低区间 + 容差，过滤远端 Node，
-//      避免纵轴被非可见指标扩张。同样适用于 SMC trailing top/bottom。
+// 解决方案（PROMPT.md §二.1 展示帧/算法输入帧分离）：
+//   1. 后端新增 display_frame：只描述真正交给前端绘制的 K线窗口。
+//      bars API 与 indicators API 调用同一个 build_display_frame() 生成。
+//   2. 算法输入 hash（source_bar_hash/daily_hash/15m_hash/profile_hash）
+//      移入 calculation_diagnostics，不参与展示帧匹配。
+//   3. ChartRenderFrame：优先比较 display_frame（display_hash + display_times），
+//      display_frame 缺失时降级到旧 source_bar_hash 比对（向后兼容）。
+//   4. shouldIncludeNodeInPriceRange：基于可见 K线高低区间 + 容差，过滤远端 Node。
 //
 // 设计原则：
 //   - 纯函数模块（无 JSX），便于 Node --experimental-strip-types 单元测试
-//   - frame 字段对齐 PROMPT.md §五.296-305：instrument / timeframe / adj /
-//     source bar 时间范围 / source hash / market data contract version
+//   - 展示帧 ≠ 算法输入帧：display_hash 只描述展示窗口，不包含 warmup/算法输入
 //   - 容差采用"可见区间 ± 50%"策略：远端历史 Node 不参与纵轴，但仍由 Node
 //     图层渲染（被裁剪到画布外，不影响交互命中检测）
+
+import type { DisplayFrame } from '../api/endpoints'
+
+// 重新导出 DisplayFrame，方便调用方从 chartRenderFrame 统一入口导入
+export type { DisplayFrame }
 
 /**
  * 图表渲染帧 — Bars 与 Indicators 必须帧一致才提交绘制。
  *
- * 字段对齐 PROMPT.md §五.296-305：
- *   - instrumentId / timeframe / adj：基础标识
- *   - sourceBarHash：bars OHLCV SHA256 前 16 字符（与 indicators.source_bar_hash 比对）
- *   - sourceBarRangeKey：source_bar_times 首末时间拼接的 key（检测范围漂移）
- *   - marketDataContractVersion：MDAS 契约版本（v2 等）
+ * 优先比较 display_frame（display_hash + display_times 范围 key），
+ * display_frame 缺失时降级到旧 source_bar_hash 比对（向后兼容）。
  */
 export interface ChartRenderFrame {
   instrumentId: string
@@ -38,6 +45,10 @@ export interface ChartRenderFrame {
   sourceBarHash: string | null
   sourceBarRangeKey: string | null
   marketDataContractVersion: string | null
+  /** 展示帧 hash（来自 display_frame.display_hash），优先参与比对 */
+  displayHash: string | null
+  /** 展示帧时间范围 key（display_times 首末拼接），优先参与比对 */
+  displayRangeKey: string | null
 }
 
 /**
@@ -61,10 +72,34 @@ export function computeSourceBarRangeKey(
 }
 
 /**
+ * 从后端 display_frame 提取展示帧字段，返回 ChartRenderFrame 所需的 displayHash
+ * 与 displayRangeKey（基于 display_times 首末时间拼接）。
+ *
+ * display_frame 缺失时返回 { displayHash: null, displayRangeKey: null }，
+ * 调用方据此降级到旧 source_bar_hash 比对（向后兼容）。
+ *
+ * 注意：display_times 为空数组时 displayHash 也视为 null（与后端 build_display_frame
+ * 的空 DataFrame 路径一致：display_hash="" → 视为缺失，触发降级）。
+ */
+export function extractDisplayFrameFields(
+  displayFrame: DisplayFrame | null | undefined,
+): { displayHash: string | null; displayRangeKey: string | null } {
+  if (!displayFrame) return { displayHash: null, displayRangeKey: null }
+  const times = displayFrame.display_times
+  const rangeKey = computeSourceBarRangeKey(times)
+  const hash = displayFrame.display_hash || null
+  return { displayHash: hash, displayRangeKey: rangeKey }
+}
+
+/**
  * 从 bars response 提取渲染帧。
  *
  * 入参字段对齐后端 BarListResponse（market_data_contract_version / source_bar_hash /
- * adjustment_as_of）。bars 时间范围通过 items 首末 trade_date/trade_time 计算。
+ * adjustment_as_of / display_frame）。bars 时间范围通过 items 首末 trade_date/trade_time 计算。
+ *
+ * display_frame（PROMPT.md §二.1）优先参与比对：
+ *   - 传入 displayFrame 时从中提取 displayHash/displayRangeKey
+ *   - 未传入时 displayHash/displayRangeKey 为 null，isFrameMatched 自动降级到 source_bar_hash
  *
  * 返回 null 表示 bars 数据不完整（无法构造帧，不应触发渲染）。
  */
@@ -75,9 +110,11 @@ export function buildBarsFrame(params: {
   sourceBarHash?: string | null
   marketDataContractVersion?: string | null
   barTimes?: readonly string[]
+  displayFrame?: DisplayFrame | null
 }): ChartRenderFrame | null {
   if (!params.instrumentId) return null
   if (!params.timeframe || !params.adj) return null
+  const { displayHash, displayRangeKey } = extractDisplayFrameFields(params.displayFrame)
   return {
     instrumentId: params.instrumentId,
     timeframe: params.timeframe,
@@ -85,15 +122,20 @@ export function buildBarsFrame(params: {
     sourceBarHash: params.sourceBarHash ?? null,
     sourceBarRangeKey: computeSourceBarRangeKey(params.barTimes ?? null),
     marketDataContractVersion: params.marketDataContractVersion ?? null,
+    displayHash,
+    displayRangeKey,
   }
 }
 
 /**
  * 从 indicators response 提取渲染帧。
  *
- * indicators.source_bar_hash 与 bars.source_bar_hash 应一致（同标的同周期同结束日）。
- * indicators 自身没有 instrumentId/timeframe/adj 字段（请求参数中有但响应不回显），
- * 由调用方传入用于帧比对。
+ * indicators.source_bar_hash 与 bars.source_bar_hash 在算法输入层面可能不同
+ * （如 1d 周期 Node 算法输入 250 根，bars 展示窗口 100 根），因此不能直接比对。
+ *
+ * PROMPT.md §二.1 解决方案：indicators API 同样返回 display_frame（描述真正展示
+ * 给前端的 K 线窗口，与 bars API 共用 build_display_frame 生成），ChartRenderFrame
+ * 只比对 display_frame；source_bar_hash 移入 calculation_diagnostics 不参与匹配。
  *
  * 返回 null 表示 indicators 数据不完整。
  */
@@ -104,9 +146,11 @@ export function buildIndicatorsFrame(params: {
   sourceBarHash?: string | null
   sourceBarTimes?: readonly string[] | null
   marketDataContractVersion?: string | null
+  displayFrame?: DisplayFrame | null
 }): ChartRenderFrame | null {
   if (!params.instrumentId) return null
   if (!params.timeframe || !params.adj) return null
+  const { displayHash, displayRangeKey } = extractDisplayFrameFields(params.displayFrame)
   return {
     instrumentId: params.instrumentId,
     timeframe: params.timeframe,
@@ -114,27 +158,30 @@ export function buildIndicatorsFrame(params: {
     sourceBarHash: params.sourceBarHash ?? null,
     sourceBarRangeKey: computeSourceBarRangeKey(params.sourceBarTimes ?? null),
     marketDataContractVersion: params.marketDataContractVersion ?? null,
+    displayHash,
+    displayRangeKey,
   }
 }
 
 /**
  * 判断 Bars 帧与 Indicators 帧是否匹配（一致时才提交指标绘制）。
  *
- * 比对维度（PROMPT.md §五.296-305）：
+ * 比对维度（PROMPT.md §二.1 + §五.296-305）：
  *   1. instrumentId：标的必须一致
  *   2. timeframe：周期必须一致（防止新周期 K线 + 旧周期指标）
  *   3. adj：复权方式必须一致
- *   4. sourceBarHash：bars OHLCV 哈希应一致（任一端为 null 时降级到 range key）
- *   5. sourceBarRangeKey：bar 时间范围应一致（hash 缺失时降级比对）
+ *   4. displayHash（优先）：两端都非 null 时必须一致；displayRangeKey 同样比对
+ *   5. sourceBarHash（降级）：display_frame 双侧都缺失时降级到 source_bar_hash 比对
  *
  * 比对策略：
  *   - 严格字段（instrumentId/timeframe/adj）：必须完全一致
- *   - 哈希字段（sourceBarHash）：两端都非 null 时必须一致；任一为 null 时降级
- *   - 范围字段（sourceBarRangeKey）：两端都非 null 时必须一致；任一为 null 时不阻塞
+ *   - display_frame 路径（优先）：bars/indicators 都提供 displayHash 时严格比对；
+ *     displayRangeKey 双侧非 null 时也必须一致（防止 hash 相同但窗口不同）
+ *   - source_bar_hash 路径（降级）：仅当双侧 displayHash 都为 null 时启用
  *   - 任一帧为 null 时返回 false（保护性：未完整数据不应触发指标渲染）
  *
- * marketDataContractVersion 当前不参与严格比对（仅诊断用），因为 bars/indicators
- * 都从同一 MDAS 取行情，契约版本理论上必然一致；若未来出现分歧再启用严格比对。
+ * 一侧提供 display_frame、另一侧缺失时，视为 mismatch（display_frame 不对称，
+ * 通常出现在 API 升级过渡期，应提示而非静默降级），由调用方显示 mismatch-error。
  */
 export function isFrameMatched(
   barsFrame: ChartRenderFrame | null,
@@ -148,6 +195,26 @@ export function isFrameMatched(
   if (barsFrame.timeframe !== indicatorsFrame.timeframe) return false
   if (barsFrame.adj !== indicatorsFrame.adj) return false
 
+  // display_frame 路径（优先）：任一端提供 displayHash 即进入 display_frame 比对
+  const barsHasDisplay = barsFrame.displayHash != null
+  const indHasDisplay = indicatorsFrame.displayHash != null
+  if (barsHasDisplay || indHasDisplay) {
+    // 一侧提供、另一侧缺失：display_frame 不对称 → mismatch
+    if (!barsHasDisplay || !indHasDisplay) return false
+    // 双侧都提供：displayHash 必须一致
+    if (barsFrame.displayHash !== indicatorsFrame.displayHash) return false
+    // displayRangeKey 双侧非 null 时必须一致（防止 hash 相同但窗口不同）
+    if (
+      barsFrame.displayRangeKey != null &&
+      indicatorsFrame.displayRangeKey != null &&
+      barsFrame.displayRangeKey !== indicatorsFrame.displayRangeKey
+    ) {
+      return false
+    }
+    return true
+  }
+
+  // 降级路径：双侧 display_frame 都缺失，使用 source_bar_hash 比对（向后兼容）
   // sourceBarHash：两端都非 null 时必须一致
   if (
     barsFrame.sourceBarHash != null &&

@@ -161,10 +161,15 @@ export function StockResearchWorkspace({
 
   const captureRenderReady = isCaptureMode && isRenderReady && feishuLayersReady
 
-  // [ChartRenderFrame] - 从 barsQuery.data 构造 bars 端渲染帧（PROMPT.md §五.296-307）
-  //   字段对齐后端 BarListResponse：source_bar_hash / market_data_contract_version /
-  //   bar times（取 items 首末 trade_date/trade_time 用于范围 key）。
+  // [ChartRenderFrame] - 从 barsQuery.data 构造 bars 端渲染帧（PROMPT.md §二.1 + §五.296-307）
+  //   字段对齐后端 BarListResponse：display_frame / source_bar_hash /
+  //   market_data_contract_version / bar times（取 items 首末 trade_date/trade_time 用于范围 key）。
   //   传给 StrategyChart 与 indicators 帧比对；mismatch 时跳过指标图层渲染。
+  //
+  //   [PROMPT.md §二.1] 优先使用 display_frame（与 indicators API 共用 build_display_frame 生成），
+  //     避免之前 bars.source_bar_hash（100 根展示窗口）与 indicators.source_bar_hash
+  //     （250 根算法输入）严格比对导致 1d 周期永久 mismatch、指标永久加载中。
+  //     display_frame 缺失时降级到 source_bar_hash（向后兼容旧后端响应）。
   const barsFrame = useMemo(() => {
     const barsData = barsQuery.data
     if (!barsData || !inst) return null
@@ -181,6 +186,7 @@ export function StockResearchWorkspace({
       sourceBarHash: barsData.source_bar_hash ?? null,
       marketDataContractVersion: barsData.market_data_contract_version ?? null,
       barTimes,
+      displayFrame: barsData.display_frame ?? null,
     })
   }, [barsQuery.data, inst, timeframe])
 
@@ -251,6 +257,10 @@ export function StockResearchWorkspace({
               isCaptureMode={isCaptureMode}
               layerVisibility={isCaptureMode ? undefined : layerVisibility}
               barsFrame={barsFrame}
+              // [ChartRenderFrame 3 态] - PROMPT.md §二.1：indicatorsFetching=true 显示"指标加载中"，
+              //   请求结束后 mismatch 显示错误 + 重试按钮，禁止无限 loading
+              indicatorsFetching={indicatorsQuery.isFetching}
+              onIndicatorsRetry={() => indicatorsQuery.refetch()}
             />
             <div className="tv-chart-status">
               <span className={quoteStatus.badgeClass}>{quoteStatus.label}</span>

@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -91,6 +91,17 @@ class BarListResponse(BaseModel):
     market_data_contract_version: str | None = Field(None, description="行情数据契约版本（当前 v2）")
     completed_through: datetime | None = Field(None, description="最新已完成 bar 时间（不含 partial/realtime）")
     adjustment_as_of: date | None = Field(None, description="复权锚点（None=最新；point-in-time 回算时为业务日）")
+    # [display_frame] - 展示帧（PROMPT.md §二.1）：只描述真正交给前端绘制的 K线窗口。
+    # bars API 与 indicators API 调用同一个 build_display_frame() 生成，保证同一展示
+    # 窗口产生同一 display_hash。前端 ChartRenderFrame 只比较 display_frame，
+    # 不再比较 source_bar_hash（source_bar_hash 移入 calculation_diagnostics）。
+    display_frame: dict[str, Any] | None = Field(
+        None,
+        description=(
+            "展示帧：instrument_id/timeframe/adj/display_times/display_hash/completed_through。"
+            "前端据此判断 bars 与 indicators 是否同一展示窗口，禁止用 source_bar_hash 比对。"
+        ),
+    )
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -989,3 +990,338 @@ async def test_persisted_all_missing_is_valid(
     # all core arrays empty
     for dim in ("trend", "momentum", "structure", "volume"):
         assert body["core"][dim] == [], f"{dim} 应为空"
+
+
+# =============================================================================
+# 16. [CHANGE-20260721-001] nodeAvailability 状态机 - 5 态区分
+# =============================================================================
+
+
+def _sp_with_node_cluster(node_cluster: dict | None) -> tuple[dict, dict]:
+    """构造包含 node_cluster 字段的 structural_payload（不修改 _base_payload 默认值）。"""
+    sp, tp = _base_payload()
+    if node_cluster is not None:
+        sp["primary"]["1d"]["node_cluster"] = node_cluster
+    return sp, tp
+
+
+@pytest.mark.asyncio
+async def test_node_availability_no_published_run(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    instrument_factory: AsyncFactory,
+    member_with_sub: User,
+) -> None:
+    """无 published run → nodeAvailability.state=unknown, reasonCode=LEGACY_SNAPSHOT_NO_NODE_CLUSTER。"""
+    inst = await instrument_factory(symbol="NODENOPRUN")
+    resp = await client.get(
+        f"/api/v1/stocks/{inst.symbol}/context",
+        headers=_auth_headers(member_with_sub.id),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    na = body["nodeAvailability"]
+    assert na["state"] == "unknown"
+    assert na["reasonCode"] == "LEGACY_SNAPSHOT_NO_NODE_CLUSTER"
+    # 顶层 dataQuality.reasonCode 仍为 no_published_full_run（run 级，不混入 node 级）
+    assert body["dataQuality"]["reasonCode"] == "no_published_full_run"
+
+
+@pytest.mark.asyncio
+async def test_node_availability_snapshot_missing(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    instrument_factory: AsyncFactory,
+    member_with_sub: User,
+) -> None:
+    """run 存在但 instrument 无 snapshot → nodeAvailability.state=unknown。"""
+    inst = await instrument_factory(symbol="NODESNAPMISS")
+    now = datetime.now(UTC)
+    run = StockFeatureSnapshotRun(
+        schema_version=_SCHEMA_VERSION,
+        status=STATUS_SUCCEEDED,
+        run_type="scheduled",
+        trade_date=date(2026, 7, 14),
+        started_at=now,
+        finished_at=now,
+        published_at=now,
+        metadata_={"scope": "full"},
+    )
+    db_session.add(run)
+    await db_session.flush()
+    # 不创建 snapshot
+    resp = await client.get(
+        f"/api/v1/stocks/{inst.symbol}/context",
+        headers=_auth_headers(member_with_sub.id),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    na = body["nodeAvailability"]
+    assert na["state"] == "unknown"
+    assert na["reasonCode"] == "LEGACY_SNAPSHOT_NO_NODE_CLUSTER"
+    assert body["dataQuality"]["reasonCode"] == "snapshot_missing"
+
+
+@pytest.mark.asyncio
+async def test_node_availability_available(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    instrument_factory: AsyncFactory,
+    member_with_sub: User,
+) -> None:
+    """node_cluster.availability=available → state=available, reasonCode=None。"""
+    inst = await instrument_factory(symbol="NODEAVAIL")
+    nc: dict[str, Any] = {
+        "availability": "available",
+        "degraded_reason": None,
+        "poc_price": 12.34,
+        "profile_hash": "abc123",
+        "daily_source_hash": "dh1",
+        "bars_15m_source_hash": "15mh1",
+        "algorithm_version": "nc-v1",
+        "daily_bars_count": 250,
+        "bars_15m_count": 4000,
+        "profile_rows": [{"price": 12.34, "volume": 100.0}],
+    }
+    sp, tp = _sp_with_node_cluster(nc)
+    await _make_published_run_and_snapshot(db_session, inst.id, date(2026, 7, 14), sp, tp)
+    resp = await client.get(
+        f"/api/v1/stocks/{inst.symbol}/context",
+        headers=_auth_headers(member_with_sub.id),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    na = body["nodeAvailability"]
+    assert na["state"] == "available"
+    assert na["reasonCode"] is None
+    assert na["pocPrice"] == 12.34
+    assert na["profileHash"] == "abc123"
+    assert na["dailySourceHash"] == "dh1"
+    assert na["bars15mSourceHash"] == "15mh1"
+    assert na["algorithmVersion"] == "nc-v1"
+    assert na["dailyBarsCount"] == 250
+    assert na["bars15mCount"] == 4000
+
+
+@pytest.mark.asyncio
+async def test_node_availability_profile_empty(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    instrument_factory: AsyncFactory,
+    member_with_sub: User,
+) -> None:
+    """node_cluster.availability=unavailable + PROFILE_EMPTY → NODE_PROFILE_EMPTY。"""
+    inst = await instrument_factory(symbol="NODEPROFEMPTY")
+    nc: dict[str, Any] = {
+        "availability": "unavailable",
+        "degraded_reason": "PROFILE_EMPTY",
+        "poc_price": None,
+        "profile_hash": None,
+        "profile_rows": [],
+        "daily_bars_count": 250,
+        "bars_15m_count": 4000,
+    }
+    sp, tp = _sp_with_node_cluster(nc)
+    await _make_published_run_and_snapshot(db_session, inst.id, date(2026, 7, 14), sp, tp)
+    resp = await client.get(
+        f"/api/v1/stocks/{inst.symbol}/context",
+        headers=_auth_headers(member_with_sub.id),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    na = body["nodeAvailability"]
+    assert na["state"] == "unavailable"
+    assert na["reasonCode"] == "NODE_PROFILE_EMPTY"
+    assert na["pocPrice"] is None
+
+
+@pytest.mark.asyncio
+async def test_node_availability_15m_missing(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    instrument_factory: AsyncFactory,
+    member_with_sub: User,
+) -> None:
+    """node_cluster.availability=degraded + MISSING_15M_BARS → NODE_15M_MISSING。"""
+    inst = await instrument_factory(symbol="NODE15MMISS")
+    nc: dict[str, Any] = {
+        "availability": "degraded",
+        "degraded_reason": "MISSING_15M_BARS",
+        "poc_price": 9.87,
+        "profile_hash": "def456",
+        "daily_source_hash": "dh2",
+        "bars_15m_source_hash": None,
+        "daily_bars_count": 250,
+        "bars_15m_count": 0,
+        "profile_rows": [{"price": 9.87, "volume": 50.0}],
+    }
+    sp, tp = _sp_with_node_cluster(nc)
+    await _make_published_run_and_snapshot(db_session, inst.id, date(2026, 7, 14), sp, tp)
+    resp = await client.get(
+        f"/api/v1/stocks/{inst.symbol}/context",
+        headers=_auth_headers(member_with_sub.id),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    na = body["nodeAvailability"]
+    assert na["state"] == "degraded"
+    assert na["reasonCode"] == "NODE_15M_MISSING"
+    # 降级态仍返回 POC（日线生成的部分）
+    assert na["pocPrice"] == 9.87
+
+
+@pytest.mark.asyncio
+async def test_node_availability_compute_failed(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    instrument_factory: AsyncFactory,
+    member_with_sub: User,
+) -> None:
+    """node_cluster.availability=unavailable + COMPUTE_FAILED: <exc> → NODE_COMPUTE_FAILED。"""
+    inst = await instrument_factory(symbol="NODECOMPFAIL")
+    nc: dict[str, Any] = {
+        "availability": "unavailable",
+        "degraded_reason": "COMPUTE_FAILED: ValueError: bad bars",
+        "poc_price": None,
+        "profile_hash": None,
+        "profile_rows": [],
+        "daily_bars_count": 250,
+        "bars_15m_count": 4000,
+    }
+    sp, tp = _sp_with_node_cluster(nc)
+    await _make_published_run_and_snapshot(db_session, inst.id, date(2026, 7, 14), sp, tp)
+    resp = await client.get(
+        f"/api/v1/stocks/{inst.symbol}/context",
+        headers=_auth_headers(member_with_sub.id),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    na = body["nodeAvailability"]
+    assert na["state"] == "unavailable"
+    assert na["reasonCode"] == "NODE_COMPUTE_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_node_availability_insufficient_daily_bars(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    instrument_factory: AsyncFactory,
+    member_with_sub: User,
+) -> None:
+    """node_cluster.availability=unavailable + INSUFFICIENT_DAILY_BARS → NODE_INSUFFICIENT_DAILY_BARS。"""
+    inst = await instrument_factory(symbol="NODEINSDAILY")
+    nc: dict[str, Any] = {
+        "availability": "unavailable",
+        "degraded_reason": "INSUFFICIENT_DAILY_BARS",
+        "poc_price": None,
+        "profile_hash": None,
+        "profile_rows": [],
+        "daily_bars_count": 5,
+        "bars_15m_count": 0,
+    }
+    sp, tp = _sp_with_node_cluster(nc)
+    await _make_published_run_and_snapshot(db_session, inst.id, date(2026, 7, 14), sp, tp)
+    resp = await client.get(
+        f"/api/v1/stocks/{inst.symbol}/context",
+        headers=_auth_headers(member_with_sub.id),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    na = body["nodeAvailability"]
+    assert na["state"] == "unavailable"
+    assert na["reasonCode"] == "NODE_INSUFFICIENT_DAILY_BARS"
+
+
+@pytest.mark.asyncio
+async def test_node_availability_legacy_no_node_cluster(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    instrument_factory: AsyncFactory,
+    member_with_sub: User,
+) -> None:
+    """旧 schema_version=3 快照无 node_cluster 字段 → unknown/LEGACY_SNAPSHOT_NO_NODE_CLUSTER。
+
+    schema_version bump 到 4 后，理论上不应查到 schema_version=3 的快照；
+    但如果存在历史数据未及时迁移，仍应优雅降级（不 500）。
+    """
+    inst = await instrument_factory(symbol="NODELEGACY")
+    sp, tp = _base_payload()  # 无 node_cluster 字段
+    # 强制写入 schema_version=3（绕过 _SCHEMA_VERSION import）
+    now = datetime.now(UTC)
+    run = StockFeatureSnapshotRun(
+        schema_version=3,  # 旧版本
+        status=STATUS_SUCCEEDED,
+        run_type="scheduled",
+        trade_date=date(2026, 7, 14),
+        started_at=now,
+        finished_at=now,
+        published_at=now,
+        metadata_={"scope": "full"},
+    )
+    db_session.add(run)
+    await db_session.flush()
+    summary = build_summary_payload(sp, tp, date(2026, 7, 14))
+    snapshot = StockFeatureSnapshot(
+        instrument_id=inst.id,
+        trade_date=date(2026, 7, 14),
+        primary_timeframe="1d",
+        secondary_timeframe="15m",
+        adj="hfq",
+        schema_version=3,
+        source_run_id=run.id,
+        structural_payload=sp,
+        temporal_payload=tp,
+        summary_payload=summary,
+        source_primary_bar_time=datetime(2026, 7, 14, 15, 0, tzinfo=UTC),
+        source_secondary_bar_time=datetime(2026, 7, 14, 15, 0, tzinfo=UTC),
+    )
+    db_session.add(snapshot)
+    await db_session.flush()
+    # _find_latest_succeeded_run 按 schema_version=_SCHEMA_VERSION=4 过滤，不会查到 schema_version=3 的 run
+    # → 顶层 reasonCode=no_published_full_run + nodeAvailability.state=unknown
+    resp = await client.get(
+        f"/api/v1/stocks/{inst.symbol}/context",
+        headers=_auth_headers(member_with_sub.id),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["dataQuality"]["reasonCode"] == "no_published_full_run"
+    na = body["nodeAvailability"]
+    assert na["state"] == "unknown"
+    assert na["reasonCode"] == "LEGACY_SNAPSHOT_NO_NODE_CLUSTER"
+
+
+@pytest.mark.asyncio
+async def test_node_availability_admin_debug_includes_node_availability(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    instrument_factory: AsyncFactory,
+    admin_user: User,
+) -> None:
+    """管理员 debug 接口也包含 nodeAvailability 字段（继承 AtomicFactsContextResponse）。"""
+    inst = await instrument_factory(symbol="NODEADMIN")
+    nc: dict[str, Any] = {
+        "availability": "available",
+        "degraded_reason": None,
+        "poc_price": 15.55,
+        "profile_hash": "admin_hash",
+        "daily_source_hash": "admin_dh",
+        "bars_15m_source_hash": "admin_15mh",
+        "algorithm_version": "nc-v1",
+        "daily_bars_count": 250,
+        "bars_15m_count": 4000,
+        "profile_rows": [{"price": 15.55, "volume": 200.0}],
+    }
+    sp, tp = _sp_with_node_cluster(nc)
+    await _make_published_run_and_snapshot(db_session, inst.id, date(2026, 7, 14), sp, tp)
+    resp = await client.get(
+        f"/api/v1/admin/stocks/{inst.symbol}/debug",
+        headers=_auth_headers(admin_user.id),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    na = body["nodeAvailability"]
+    assert na["state"] == "available"
+    assert na["reasonCode"] is None
+    assert na["pocPrice"] == 15.55
+    assert na["profileHash"] == "admin_hash"

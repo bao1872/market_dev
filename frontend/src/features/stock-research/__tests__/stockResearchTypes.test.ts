@@ -26,6 +26,11 @@ import {
   defaultStrategyForSource,
   normalizeDisplayTimeframe,
   normalizeResearchSource,
+  INDICATOR_VIEW_LAYER_PRESETS,
+  INDICATOR_VIEW_LABELS,
+  INDICATOR_VIEW_VALUES,
+  normalizeIndicatorView,
+  getIndicatorViewLayerPreset,
 } from '../stockResearchTypes.ts'
 
 test('ALLOWED_TIMEFRAMES 包含 5 个允许值且顺序固定', () => {
@@ -88,4 +93,104 @@ test('normalizeResearchSource：非法值回退 watchlist', () => {
 
 test('normalizeResearchSource：空字符串回退 watchlist', () => {
   assert.equal(normalizeResearchSource(''), 'watchlist')
+})
+
+// ===== [CHANGE-20260720-Phase4 §四] indicator_view 预设测试 =====
+
+test('INDICATOR_VIEW_VALUES 包含 3 个允许值且顺序固定', () => {
+  assert.deepEqual([...INDICATOR_VIEW_VALUES], ['node_cluster', 'bollinger', 'smc'])
+})
+
+test('INDICATOR_VIEW_LABELS：三个视图对应中文文案', () => {
+  assert.equal(INDICATOR_VIEW_LABELS.node_cluster, '筹码共识价')
+  assert.equal(INDICATOR_VIEW_LABELS.bollinger, '布林带')
+  assert.equal(INDICATOR_VIEW_LABELS.smc, 'SMC结构')
+})
+
+test('INDICATOR_VIEW_LAYER_PRESETS：node_cluster 只开启 node + volume', () => {
+  const preset = INDICATOR_VIEW_LAYER_PRESETS.node_cluster
+  assert.equal(preset.node, true, 'node_cluster 必须开启 node')
+  assert.equal(preset.volume, true, '主图基线 volume 始终开启')
+  assert.equal(preset.boll, false, 'node_cluster 不应开启 boll')
+  assert.equal(preset.smc, false, 'node_cluster 不应开启 smc')
+  assert.equal(preset.trend, false, '监控截图场景 trend 关闭')
+  assert.equal(preset.macd, false, '副图 macd 关闭以节省垂直空间')
+  assert.equal(preset.sqzmom, false, '副图 sqzmom 关闭以节省垂直空间')
+  assert.equal(preset.breakout, false, 'breakout 是 selection 专属，监控场景关闭')
+})
+
+test('INDICATOR_VIEW_LAYER_PRESETS：bollinger 只开启 boll + volume', () => {
+  const preset = INDICATOR_VIEW_LAYER_PRESETS.bollinger
+  assert.equal(preset.boll, true, 'bollinger 必须开启 boll')
+  assert.equal(preset.volume, true, '主图基线 volume 始终开启')
+  assert.equal(preset.node, false, 'bollinger 不应开启 node')
+  assert.equal(preset.smc, false, 'bollinger 不应开启 smc')
+  assert.equal(preset.trend, false)
+  assert.equal(preset.macd, false)
+  assert.equal(preset.sqzmom, false)
+  assert.equal(preset.breakout, false)
+})
+
+test('INDICATOR_VIEW_LAYER_PRESETS：smc 只开启 smc + volume', () => {
+  const preset = INDICATOR_VIEW_LAYER_PRESETS.smc
+  assert.equal(preset.smc, true, 'smc 必须开启 smc')
+  assert.equal(preset.volume, true, '主图基线 volume 始终开启')
+  assert.equal(preset.node, false, 'smc 不应开启 node')
+  assert.equal(preset.boll, false, 'smc 不应开启 boll')
+  assert.equal(preset.trend, false)
+  assert.equal(preset.macd, false)
+  assert.equal(preset.sqzmom, false)
+  assert.equal(preset.breakout, false)
+})
+
+test('INDICATOR_VIEW_LAYER_PRESETS：三个视图互斥（每个视图只开启一个主图指标）', () => {
+  // 核心约束：每张截图只渲染一个 indicator_view 对应的图层
+  // node_cluster 开 node，bollinger 开 boll，smc 开 smc；三者不可同时为 true
+  const nodePreset = INDICATOR_VIEW_LAYER_PRESETS.node_cluster
+  const bollPreset = INDICATOR_VIEW_LAYER_PRESETS.bollinger
+  const smcPreset = INDICATOR_VIEW_LAYER_PRESETS.smc
+
+  // node_cluster 与 bollinger 不应同时开 node/boll
+  assert.equal(nodePreset.node && bollPreset.node, false)
+  assert.equal(nodePreset.boll && bollPreset.boll, false)
+  // smc 与其他两个不应同时开 smc/node/boll
+  assert.equal(smcPreset.smc && nodePreset.smc, false)
+  assert.equal(smcPreset.smc && bollPreset.smc, false)
+  assert.equal(smcPreset.node && nodePreset.node, false)
+  assert.equal(smcPreset.boll && bollPreset.boll, false)
+})
+
+test('normalizeIndicatorView：合法值原样返回', () => {
+  assert.equal(normalizeIndicatorView('node_cluster'), 'node_cluster')
+  assert.equal(normalizeIndicatorView('bollinger'), 'bollinger')
+  assert.equal(normalizeIndicatorView('smc'), 'smc')
+})
+
+test('normalizeIndicatorView：null 返回 null', () => {
+  assert.equal(normalizeIndicatorView(null), null)
+})
+
+test('normalizeIndicatorView：空字符串返回 null', () => {
+  assert.equal(normalizeIndicatorView(''), null)
+})
+
+test('normalizeIndicatorView：非法值返回 null', () => {
+  assert.equal(normalizeIndicatorView('invalid'), null)
+  assert.equal(normalizeIndicatorView('NODE_CLUSTER'), null) // 大小写敏感
+  assert.equal(normalizeIndicatorView('fvg'), null) // FVG 已完全排除
+})
+
+test('getIndicatorViewLayerPreset：返回与直接索引相同的结果', () => {
+  assert.deepEqual(
+    getIndicatorViewLayerPreset('node_cluster'),
+    INDICATOR_VIEW_LAYER_PRESETS.node_cluster,
+  )
+  assert.deepEqual(
+    getIndicatorViewLayerPreset('bollinger'),
+    INDICATOR_VIEW_LAYER_PRESETS.bollinger,
+  )
+  assert.deepEqual(
+    getIndicatorViewLayerPreset('smc'),
+    INDICATOR_VIEW_LAYER_PRESETS.smc,
+  )
 })

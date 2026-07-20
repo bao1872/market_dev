@@ -90,7 +90,7 @@ logger = logging.getLogger(__name__)
 
 # 常量
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
-_SCHEMA_VERSION = 3  # [CHANGE-20260718-004] 2→3: Node Cluster engine 统一三链 + primary.1d.node_cluster canonical 字段 + secondary.15m.cost_position 重命名为 timeframe_volume_profile（旧 schema_version=2 快照不可见，符合"旧新结果不可混用"）
+_SCHEMA_VERSION = 4  # [CHANGE-20260721-001] 3→4: node_cluster 字段增加 availability/degraded_reason，StockContext 据此区分 5 态（NO_PUBLISHED_RUN/SNAPSHOT_MISSING/NODE_PROFILE_EMPTY/NODE_15M_MISSING/NODE_COMPUTE_FAILED）。旧 schema_version=3 快照不可见，符合"旧新结果不可混用"。
 _PRIMARY_LOOKBACK = 500  # 日线回看天数（与 structural_factor_service 对齐）
 _SECONDARY_LOOKBACK = 500  # 15m 回看天数
 _BB_WIN = 20
@@ -362,17 +362,40 @@ async def compute_feature_snapshot_for_date(
     # [CHANGE-20260718-004 Node Cluster engine] 盘后链一次调用 engine 计算 Node Cluster Profile，
     # 注入 _compute_all_factors_for_bars(primary)，修复三链不一致缺陷。
     # secondary 15m 保持单周期 VP 语义（timeframe_volume_profile，非 Node Cluster）。
+    # [CHANGE-20260721-001] 与 indicator_service.compute_node_cluster_standalone 对齐：
+    # 即使 15m 缺失也尝试用空 DataFrame 调用 engine（profile_rows 仍由日线生成），
+    # 显式标记 availability/degraded_reason，供 StockContext 区分 5 态。
     node_cluster_profile: NodeClusterProfileResult | None = None
-    if df_1d is not None and not df_1d.empty and df_15m is not None and not df_15m.empty:
+    node_availability: str = "unavailable"
+    node_degraded_reason: str | None = "INSUFFICIENT_DAILY_BARS"
+    has_daily = df_1d is not None and not df_1d.empty and len(df_1d) >= 10
+    has_15m = df_15m is not None and not df_15m.empty
+    if not has_daily:
+        node_availability = "unavailable"
+        node_degraded_reason = "INSUFFICIENT_DAILY_BARS"
+    else:
         try:
             node_cluster_profile = compute_node_cluster_profile(
-                df_1d, df_15m,
+                df_1d, df_15m if has_15m else pd.DataFrame(),
                 adjustment_as_of=trade_date.isoformat(),
                 adj_factor_hash=primary_adj_factor_hash,
             )
         except Exception as exc:
             logger.warning("Node Cluster engine 计算失败: %s", exc)
+            node_cluster_profile = None
+            node_availability = "unavailable"
+            node_degraded_reason = f"COMPUTE_FAILED: {exc}"
             degraded_reasons.append(f"node_cluster: engine failed: {exc}")
+        else:
+            if not node_cluster_profile.profile_rows:
+                node_availability = "unavailable"
+                node_degraded_reason = "PROFILE_EMPTY"
+            elif not has_15m:
+                node_availability = "degraded"
+                node_degraded_reason = "MISSING_15M_BARS"
+            else:
+                node_availability = "available"
+                node_degraded_reason = None
 
     # 计算 structural factors
     primary_factors = _compute_all_factors_for_bars(
@@ -408,9 +431,34 @@ async def compute_feature_snapshot_for_date(
     # [CHANGE-20260718-004] primary.1d 新增 canonical node_cluster 字段（engine 不可变结果），
     # cost_position 兼容指向 engine 派生字段；secondary.15m.cost_position 重命名为
     # timeframe_volume_profile（单周期 15m VP，显式非 Node Cluster）。
+    # [CHANGE-20260721-001] node_cluster 始终写入 availability/degraded_reason（即使 profile 为 None），
+    # 供 StockContext 区分 NODE_PROFILE_EMPTY/NODE_15M_MISSING/NODE_COMPUTE_FAILED 三态。
     primary_payload: dict[str, Any] = {**primary_factors}
     if node_cluster_profile is not None:
-        primary_payload["node_cluster"] = profile_to_dict(node_cluster_profile)
+        node_cluster_dict = profile_to_dict(node_cluster_profile)
+        node_cluster_dict["availability"] = node_availability
+        node_cluster_dict["degraded_reason"] = node_degraded_reason
+        primary_payload["node_cluster"] = node_cluster_dict
+    else:
+        # profile 计算失败或日线不足：仍写入最小诊断字段，StockContext 显式区分 unavailable 原因
+        primary_payload["node_cluster"] = {
+            "availability": node_availability,
+            "degraded_reason": node_degraded_reason,
+            "profile_hash": None,
+            "poc_price": None,
+            "vah_price": None,
+            "val_price": None,
+            "daily_source_hash": None,
+            "bars_15m_source_hash": None,
+            "algorithm_version": None,
+            "output_schema_version": None,
+            "contract_fingerprint": None,
+            "daily_bars_count": 0 if df_1d is None else len(df_1d) if not df_1d.empty else 0,
+            "bars_15m_count": 0 if df_15m is None else len(df_15m) if not df_15m.empty else 0,
+            "profile_rows": [],
+            "peak_rows": [],
+            "all_peak_prices": [],
+        }
     secondary_payload: dict[str, Any] = {**secondary_factors}
     # 重命名 cost_position → timeframe_volume_profile（显式非 Node Cluster）
     if "cost_position" in secondary_payload:

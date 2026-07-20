@@ -32,6 +32,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.bars import _df_to_responses
 from app.constants.indicator_contract import CHART_BARS_COUNT, INDICATOR_BARS
+from app.constants.indicator_view import (
+    DEFAULT_INDICATOR_VIEW,
+    is_valid_indicator_view,
+)
 from app.core.deps import get_capture_token_payload, get_db
 from app.models.instrument import Instrument
 from app.repositories.strategy_event_repository import query_events
@@ -68,6 +72,14 @@ async def get_capture_snapshot(
     source_bar_time: str | None = Query(None, description="实时 bar 时间（防旧图，用于日志/cache key）"),
     force_refresh: bool = Query(False, description="跳过指标缓存强制实时计算（截图链路默认 True）"),
     capture: bool = Query(False, description="截图模式标记（等价 force_refresh）"),
+    indicator_view: str | None = Query(
+        None,
+        description=(
+            "指标视图：node_cluster|bollinger|smc（CHANGE-20260720-Phase4 §四）。"
+            "携带时：smc 视图触发 include_smc=True；缓存键维度 iv=...；"
+            "CaptureJob 元数据记录。缺失回退到 DEFAULT_INDICATOR_VIEW。"
+        ),
+    ),
 ) -> dict[str, Any]:
     """一次返回截图所需完整数据（行情、指标、事件）。
 
@@ -83,8 +95,15 @@ async def get_capture_snapshot(
     - compute_all_indicators：策略指标（与 /indicators API 同款）
     - query_events：策略事件（与 /instruments/{id}/events 同款）
 
+    [CHANGE-20260720-Phase4 §四] indicator_view 参数：
+    - 合法值 node_cluster|bollinger|smc（与 app.constants.indicator_view 对齐）
+    - 非法或缺失时回退到 DEFAULT_INDICATOR_VIEW（node_cluster）
+    - indicator_view=smc 时设置 include_smc=True，触发 SMC 算法计算
+      （BOS/CHoCH/OB/EQH/EQL/trailing），其他视图不消耗 SMC CPU
+    - 返回值包含 indicator_view 字段，便于前端校验与 CaptureJob 元数据记录
+
     Returns:
-        dict 含 instrument/bars/indicators/events/snapshot_time
+        dict 含 instrument/bars/indicators/events/snapshot_time/indicator_view
     """
     # 1. 校验 path instrument_id 与 token instrument_id 一致（防越权）
     token_instrument_id = capture_payload.get("instrument_id")
@@ -103,13 +122,24 @@ async def get_capture_snapshot(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"不支持的周期: {timeframe}, 允许: {sorted(_CAPTURE_ALLOWED_TIMEFRAMES)}",
         )
+
+    # [CHANGE-20260720-Phase4 §四] indicator_view 校验 + 回退
+    #   - URL 携带非法值时回退到 DEFAULT_INDICATOR_VIEW（不抛 400，保证截图链路鲁棒）
+    #   - 缺失时同样回退（前端默认 node_cluster，与 DEFAULT_INDICATOR_VIEW 对齐）
+    resolved_indicator_view = (
+        indicator_view if is_valid_indicator_view(indicator_view) else DEFAULT_INDICATOR_VIEW
+    )
+    # indicator_view=smc 时需要计算 SMC 指标（BOS/CHoCH/OB/EQH/EQL/trailing）
+    # 其他视图 include_smc=False（0 SMC CPU 消耗，符合"按需计算"约束）
+    include_smc = resolved_indicator_view == "smc"
+
     bars_limit = INDICATOR_BARS.get(timeframe, CHART_BARS_COUNT)
     # 截图场景始终使用实时聚合（include_realtime=True 为硬规则），保证 K线为当前盘中数据
     logger.info(
         "[Capture] 快照请求 instrument_id=%s timeframe=%s bars_limit=%s source_bar_time=%s "
-        "force_refresh=%s capture=%d",
+        "force_refresh=%s capture=%d indicator_view=%s include_smc=%s",
         instrument_id, timeframe, bars_limit, source_bar_time, force_refresh,
-        1 if capture else 0,
+        1 if capture else 0, resolved_indicator_view, include_smc,
     )
 
     snapshot_start = datetime.now(UTC)
@@ -165,6 +195,9 @@ async def get_capture_snapshot(
     bars_items = _df_to_responses(df, instrument_id, timeframe)
 
     # 4. 指标：复用 compute_all_indicators（与 /indicators API 同款），周期与 bars 根数按 timeframe 透传
+    # [CHANGE-20260720-Phase4 §四] indicator_view=smc 时透传 include_smc=True
+    #   - smc 视图需要 BOS/CHoCH/OB/EQH/EQL/trailing 数据支撑前端 SMC 图层渲染
+    #   - 其他视图 include_smc=False（默认值），跳过 SMC 计算（0 CPU 消耗）
     try:
         indicators = await compute_all_indicators(
             session=db,
@@ -172,10 +205,12 @@ async def get_capture_snapshot(
             timeframe=timeframe,
             adj=_CAPTURE_ADJ,
             bars=bars_limit,
+            include_smc=include_smc,
         )
     except Exception as exc:
         logger.warning(
-            "Capture 指标计算失败 instrument_id=%s: %s", instrument_id, exc
+            "Capture 指标计算失败 instrument_id=%s indicator_view=%s include_smc=%s: %s",
+            instrument_id, resolved_indicator_view, include_smc, exc,
         )
         # 指标失败不阻塞截图（行情已就绪），返回空指标 + 错误信息
         indicators = {"layers": [], "data": {}, "errors": {"_capture": str(exc)}}
@@ -196,12 +231,15 @@ async def get_capture_snapshot(
 
     snapshot_ms = int((datetime.now(UTC) - snapshot_start).total_seconds() * 1000)
     logger.info(
-        "[Capture] 快照完成 instrument_id=%s bars=%d indicators_layers=%d events=%d ms=%d",
+        "[Capture] 快照完成 instrument_id=%s bars=%d indicators_layers=%d events=%d ms=%d "
+        "indicator_view=%s include_smc=%s",
         instrument_id,
         len(bars_items),
         len(indicators.get("layers", [])) if isinstance(indicators, dict) else 0,
         len(event_items),
         snapshot_ms,
+        resolved_indicator_view,
+        include_smc,
     )
 
     return {
@@ -234,6 +272,11 @@ async def get_capture_snapshot(
             "total": len(event_items),
         },
         "snapshot_time": datetime.now(UTC).isoformat(),
+        # [CHANGE-20260720-Phase4 §四] 透出 indicator_view 供前端校验与 CaptureJob 元数据记录
+        #   - resolved_indicator_view：经校验后的合法值（非法/缺失回退到 DEFAULT_INDICATOR_VIEW）
+        #   - include_smc：是否触发了 SMC 计算（仅 smc 视图为 True）
+        "indicator_view": resolved_indicator_view,
+        "include_smc": include_smc,
         "capture": {
             "user_id": capture_payload.get("user_id"),
             "event_id": capture_payload.get("event_id"),

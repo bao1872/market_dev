@@ -23,6 +23,10 @@ import {
   zoomAtAnchor,
 } from './chartViewport'
 import type { ChartLayerVisibility } from '../features/stock-research/stockResearchTypes'
+import {
+  getIndicatorViewLayerPreset,
+} from '../features/stock-research/stockResearchTypes'
+import type { IndicatorView } from '../api/endpoints'
 
 // [ChartRightPadding] - 描述: K 线绘图区右侧留白比例（CHANGE-20260713-008）
 // 最新 K 线位于绘图区约 80% 位置（留白 20%，落在 18%-22% 要求区间内）。
@@ -109,15 +113,29 @@ export interface StrategyChartProps {
   onViewportChange?: (vp: ChartViewport) => void
   // [feishu-capture] - 描述: 飞书截图模式，强制开启 FEISHU_CAPTURE_LAYERS 且不可关闭，不读写 localStorage
   isCaptureMode?: boolean
+  // [CHANGE-20260720-Phase4 §四] indicator_view 选择（仅 capture 模式生效）
+  //   携带时使用 INDICATOR_VIEW_LAYER_PRESETS 替代 FEISHU_CAPTURE_LAYERS，
+  //   保证"每张截图只渲染一个指标视图"（advice.md v6 + 后端 INDICATOR_VIEW_VALUES）。
+  //   - node_cluster: Node + Profile + POC（筹码共识价）
+  //   - bollinger: BB（布林带）
+  //   - smc: SMC 结构（BOS/CHoCH/OB/EQH/EQL/trailing）
+  //   未传入时回退到 FEISHU_CAPTURE_LAYERS（向后兼容旧 capture URL）。
+  indicatorView?: IndicatorView | null
   // [chartLayerVisibility] - 图表图层显隐偏好（PRD §6.2 单一真源 v2）
   // 由父组件 StockResearchWorkspace 持有并传入；StrategyChart 作为受控组件，不再内部管理 layers state。
   // 截图模式时不传（undefined），由 StrategyChart 内部派生 forced layers。
   layerVisibility?: ChartLayerVisibility
-  // [ChartRenderFrame] - bars 端渲染帧（PROMPT.md §五.296-307）
-  //   父组件从 barsQuery.data 提取 source_bar_hash/market_data_contract_version/bar times 构造，
-  //   StrategyChart 与 indicators 帧比对；mismatch 时跳过指标图层渲染（保留 K线/网格/profile）。
+  // [ChartRenderFrame] - bars 端渲染帧（PROMPT.md §二.1 + §五.296-307）
+  //   父组件从 barsQuery.data 提取 display_frame / source_bar_hash / market_data_contract_version /
+  //   bar times 构造，StrategyChart 与 indicators 帧比对；mismatch 时跳过指标图层渲染（保留 K线/网格/profile）。
   //   未传入时降级到"不检查"（保持向后兼容，不阻塞现有调用方）。
   barsFrame?: ChartRenderFrame | null
+  // [ChartRenderFrame 3 态] - PROMPT.md §二.1：loading 只在请求 pending 时显示；
+  //   请求结束后不匹配必须显示明确错误码 + 重试按钮，禁止无限 loading。
+  //   indicatorsFetching=true 时显示"指标加载中"；indicatorsFetching=false 且 mismatch 时显示错误 + 重试。
+  indicatorsFetching?: boolean
+  // 点击"重试"按钮回调（父组件调用 indicatorsQuery.refetch）
+  onIndicatorsRetry?: () => void
 }
 
 // 计算后的 Bar（含指标字段）
@@ -2179,8 +2197,11 @@ export function StrategyChart({
   viewport: viewportProp,
   onViewportChange,
   isCaptureMode = false,
+  indicatorView = null,
   layerVisibility,
   barsFrame,
+  indicatorsFetching = false,
+  onIndicatorsRetry,
 }: StrategyChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -2215,7 +2236,18 @@ export function StrategyChart({
   const effectiveLayers: LayerVisibility = useMemo(() => {
     // [feishu-capture] - 描述: 截图模式强制开启 FEISHU_CAPTURE_LAYERS，忽略用户偏好
     //   advice.md v6 第 2 条：dsa/bb/profile/node/poc 必须开启
+    //
+    // [CHANGE-20260720-Phase4 §四] 当 indicatorView 提供时，优先使用
+    //   INDICATOR_VIEW_LAYER_PRESETS（每张图只渲染一个指标视图），
+    //   替代 FEISHU_CAPTURE_LAYERS（同时开 5 层，与新语义冲突）。
+    //   未提供 indicatorView 时回退到 FEISHU_CAPTURE_LAYERS（向后兼容）。
     if (isCaptureMode) {
+      if (indicatorView) {
+        return chartLayerVisibilityToInternal(
+          getIndicatorViewLayerPreset(indicatorView),
+          source,
+        )
+      }
       const forced = getDefaultLayers(strategyId)
       FEISHU_CAPTURE_LAYERS.forEach(layerId => {
         forced[layerId as keyof LayerVisibility] = true
@@ -2228,7 +2260,7 @@ export function StrategyChart({
     }
     // fallback：无父组件偏好时使用策略默认值（不应出现在正常流程中）
     return getDefaultLayers(strategyId)
-  }, [layerVisibility, isCaptureMode, strategyId, source])
+  }, [layerVisibility, isCaptureMode, indicatorView, strategyId, source])
 
   // [chartViewport] - 显示 bar 数量（缩放控制）：保留为内部状态作为 fallback，
   //   当父组件未传入 viewport 时使用；受控时由 viewportProp 驱动
@@ -2323,6 +2355,10 @@ export function StrategyChart({
     const ind = indicatorsRef.current
     const barsF = barsFrameRef.current
     // frame 检查：barsFrame 传入且 indicators 存在时才比对（任一缺失降级到不检查）
+    // [PROMPT.md §二.1] 优先比对 display_frame.display_hash（与 bars API 共用 build_display_frame 生成），
+    //   display_frame 缺失时降级到 source_bar_hash（向后兼容旧后端响应）。
+    //   避免 1d 周期 bars.source_bar_hash（100 根展示窗口）与 indicators.source_bar_hash
+    //   （250 根算法输入）严格比对导致永久 mismatch。
     let effectiveIndicators = ind
     let mismatch = false
     if (barsF != null && ind != null) {
@@ -2332,6 +2368,7 @@ export function StrategyChart({
         adj: barsF.adj,
         sourceBarHash: ind.source_bar_hash,
         sourceBarTimes: ind.source_bar_times,
+        displayFrame: ind.display_frame ?? null,
       })
       if (!isFrameMatched(barsF, indFrame)) {
         // mismatch：不传 indicators 给 drawTrading，仅渲染 K线/网格/profile
@@ -2689,6 +2726,21 @@ export function StrategyChart({
 
   const hasData = bars.length > 0
 
+  // [ChartRenderFrame 3 态] - PROMPT.md §二.1：loading 只在请求 pending 时显示；
+  //   请求结束后不匹配必须显示明确错误码 + 重试按钮，禁止无限 loading。
+  //   - pending: indicators 未到（首次加载）或 indicatorsFetching=true（refetch 中，旧数据临时不匹配）
+  //   - success: indicators 已到且 frame 匹配
+  //   - mismatch-error: indicators 已到且 frame 不匹配（请求已结束，数据不对）
+  //   bars 未就绪（hasData=false）时不显示任何状态（避免与"暂无行情数据"重复）
+  const indicatorsLoadState: 'pending' | 'success' | 'mismatch-error' =
+    !hasData
+      ? 'success'
+      : indicators == null || indicatorsFetching
+        ? 'pending'
+        : frameMismatch
+          ? 'mismatch-error'
+          : 'success'
+
   return (
     <div className="strategy-chart-wrap">
       {/* 工具栏 */}
@@ -2755,17 +2807,35 @@ export function StrategyChart({
       <div className="tv-canvas-wrap" ref={wrapRef} style={{ '--tv-chart-height': `${height}px` } as React.CSSProperties}>
         <canvas ref={canvasRef} />
         <div className="chart-crosshair-tooltip" ref={tipRef} />
-        {/* [DSA 数据源校验] - K 线时间与指标 source_bar_times 不一致时显示页面提示横幅（替代仅 console.warn） */}
-        {dsaMismatch && !frameMismatch && (
+        {/* [DSA 数据源校验] - K 线时间与指标 source_bar_times 不一致时显示页面提示横幅（替代仅 console.warn）。
+            当 indicatorsLoadState=mismatch-error 时优先显示 mismatch-error 横幅，DSA 横幅隐藏避免堆叠。 */}
+        {dsaMismatch && indicatorsLoadState === 'success' && (
           <div className="dsa-source-mismatch-banner" style={{ position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)', padding: '4px 12px', background: 'rgba(255,193,7,0.9)', color: '#333', fontSize: 12, borderRadius: 4, zIndex: 10, whiteSpace: 'nowrap' }}>
             DSA 数据源不一致，已暂停渲染
           </div>
         )}
-        {/* [ChartRenderFrame] - 周期切换过程中 bars 与 indicators 帧不匹配时显示提示横幅
-            （PROMPT.md §五.296-307：不允许旧指标覆盖新 K线，显示短暂加载状态） */}
-        {frameMismatch && (
-          <div className="chart-frame-mismatch-banner" style={{ position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)', padding: '4px 12px', background: 'rgba(13,17,24,0.85)', color: C.text, fontSize: 12, borderRadius: 4, zIndex: 10, whiteSpace: 'nowrap' }}>
+        {/* [ChartRenderFrame 3 态] - PROMPT.md §二.1：loading 只在请求 pending 时显示；
+            请求结束后不匹配必须显示明确错误码 + 重试按钮，禁止无限 loading。
+            - pending: 请求在飞（首次加载 / 周期切换 refetch 中）→ 显示"指标加载中"
+            - mismatch-error: 请求已结束但 display_frame 不匹配 → 显示错误码 + 重试按钮
+            success 不显示横幅。 */}
+        {indicatorsLoadState === 'pending' && (
+          <div className="chart-frame-mismatch-banner chart-frame-pending" style={{ position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)', padding: '4px 12px', background: 'rgba(13,17,24,0.85)', color: C.text, fontSize: 12, borderRadius: 4, zIndex: 10, whiteSpace: 'nowrap' }}>
             指标加载中...
+          </div>
+        )}
+        {indicatorsLoadState === 'mismatch-error' && (
+          <div className="chart-frame-mismatch-banner chart-frame-error" style={{ position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)', padding: '6px 12px', background: 'rgba(255,77,79,0.92)', color: '#fff', fontSize: 12, borderRadius: 4, zIndex: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span>指标加载失败：display_frame 不匹配</span>
+            {onIndicatorsRetry && (
+              <button
+                type="button"
+                onClick={onIndicatorsRetry}
+                style={{ padding: '2px 8px', background: 'rgba(255,255,255,0.18)', color: '#fff', border: '1px solid rgba(255,255,255,0.35)', borderRadius: 3, fontSize: 11, cursor: 'pointer' }}
+              >
+                重试
+              </button>
+            )}
           </div>
         )}
         {/* [CHANGE-20260717-001 Pine parity] SMC 状态提示

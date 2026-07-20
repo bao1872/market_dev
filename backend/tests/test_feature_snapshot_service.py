@@ -1020,3 +1020,148 @@ async def test_p0_4_upsert_snapshot_protects_published_run_ownership(
     assert len(rows) == 1
     assert rows[0].source_run_id == run_a.id, "published run 归属不应被覆盖"
     assert rows[0].structural_payload["run"] == "A"
+
+
+# ===== 7. [CHANGE-20260721-001] Node Cluster availability/degraded_reason 注入 =====
+
+
+def _build_15m_bars(n: int = 1000, seed: int = 7) -> pd.DataFrame:
+    """构造 15m bars（覆盖足够多交易日，确保 has_15m=True）。"""
+    rng = np.random.default_rng(seed)
+    idx = pd.date_range("2025-06-01 09:45", periods=n, freq="15min")
+    base = 100.0
+    closes = base + rng.normal(0, 1.5, n).cumsum()
+    intrabar = np.abs(rng.normal(0, 0.5, n)) + 0.1
+    return pd.DataFrame({
+        "open": closes, "high": closes + intrabar, "low": closes - intrabar,
+        "close": closes, "volume": rng.integers(100_000, 1_000_000, n).astype(float),
+        "amount": closes * 1_000_000,
+    }, index=idx)
+
+
+@pytest.mark.asyncio
+async def test_compute_snapshot_writes_node_cluster_available_state() -> None:
+    """日线 + 15m 齐全且 profile 非空 → node_cluster.availability='available'。"""
+    from app.services.feature_snapshot_service import _SCHEMA_VERSION
+
+    daily = _build_daily_bars(n=250)
+    bars_15m = _build_15m_bars(n=2000)
+    target_date = daily.index[200].date()
+
+    mock_session = MagicMock()
+    mock_result = MagicMock()
+    mock_result.first.return_value = ("000001",)
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    snapshot = await compute_feature_snapshot_for_date(
+        mock_session, uuid.uuid4(), target_date,
+        primary_bars=daily, secondary_bars=bars_15m,
+    )
+
+    # schema_version 必须 bump 到 4
+    assert _SCHEMA_VERSION == 4
+    assert snapshot.schema_version == 4
+
+    sp = snapshot.structural_payload
+    nc = sp["primary"]["1d"].get("node_cluster")
+    assert nc is not None, "node_cluster 字段必须写入"
+    # available 态：availability/degraded_reason 齐全
+    assert nc["availability"] == "available"
+    assert nc["degraded_reason"] is None
+    # Canonical 字段齐全（poc_price 可能因合成数据无法计算 POC 为 None，但不影响 available 判定）
+    assert nc["profile_hash"] is not None, "profile_hash 必须有值"
+    assert nc["daily_source_hash"] is not None, "daily_source_hash 必须有值"
+    assert nc["bars_15m_source_hash"] is not None, "bars_15m_source_hash 必须有值"
+    assert nc["algorithm_version"] is not None
+    assert nc["profile_rows"], "profile_rows 非空"
+    # availability/degraded_reason 字段必须存在（即使 poc_price 可能为 None）
+    assert "availability" in nc
+    assert "degraded_reason" in nc
+
+
+@pytest.mark.asyncio
+async def test_compute_snapshot_writes_node_cluster_missing_15m_state() -> None:
+    """日线齐全但 15m bars 为空 → availability='degraded', degraded_reason='MISSING_15M_BARS'。"""
+    daily = _build_daily_bars(n=250)
+    target_date = daily.index[200].date()
+    empty_15m = pd.DataFrame()
+
+    mock_session = MagicMock()
+    mock_result = MagicMock()
+    mock_result.first.return_value = ("000001",)
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    snapshot = await compute_feature_snapshot_for_date(
+        mock_session, uuid.uuid4(), target_date,
+        primary_bars=daily, secondary_bars=empty_15m,
+    )
+
+    sp = snapshot.structural_payload
+    nc = sp["primary"]["1d"].get("node_cluster")
+    # 15m 缺失时，engine 仍尝试用空 df 计算；如果生成 profile_rows，则为 degraded；否则为 unavailable
+    assert nc is not None, "node_cluster 字段必须写入（即使 15m 缺失）"
+    assert nc["availability"] in ("degraded", "unavailable")
+    if nc["availability"] == "degraded":
+        assert nc["degraded_reason"] == "MISSING_15M_BARS"
+    else:
+        # engine 用空 15m 无法生成 profile → unavailable/PROFILE_EMPTY
+        assert nc["degraded_reason"] == "PROFILE_EMPTY"
+
+
+@pytest.mark.asyncio
+async def test_compute_snapshot_writes_node_cluster_insufficient_daily_state() -> None:
+    """日线 < 10 根 → availability='unavailable', degraded_reason='INSUFFICIENT_DAILY_BARS'。"""
+    short_daily = _build_daily_bars(n=5)
+    target_date = short_daily.index[-1].date()
+
+    mock_session = MagicMock()
+    mock_result = MagicMock()
+    mock_result.first.return_value = ("000001",)
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    snapshot = await compute_feature_snapshot_for_date(
+        mock_session, uuid.uuid4(), target_date,
+        primary_bars=short_daily, secondary_bars=short_daily,
+    )
+
+    sp = snapshot.structural_payload
+    nc = sp["primary"]["1d"].get("node_cluster")
+    assert nc is not None, "node_cluster 字段必须写入（即使日线不足）"
+    assert nc["availability"] == "unavailable"
+    assert nc["degraded_reason"] == "INSUFFICIENT_DAILY_BARS"
+    # 诊断字段为 None
+    assert nc["poc_price"] is None
+    assert nc["profile_hash"] is None
+    assert nc["daily_source_hash"] is None
+
+
+@pytest.mark.asyncio
+async def test_compute_snapshot_node_cluster_field_stable_when_engine_raises() -> None:
+    """engine 抛异常时，node_cluster 字段仍写入 availability=unavailable + COMPUTE_FAILED。"""
+    daily = _build_daily_bars(n=250)
+    bars_15m = _build_15m_bars(n=2000)
+    target_date = daily.index[200].date()
+
+    mock_session = MagicMock()
+    mock_result = MagicMock()
+    mock_result.first.return_value = ("000001",)
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    with patch(
+        "app.services.feature_snapshot_service.compute_node_cluster_profile",
+        side_effect=RuntimeError("mocked engine failure"),
+    ):
+        snapshot = await compute_feature_snapshot_for_date(
+            mock_session, uuid.uuid4(), target_date,
+            primary_bars=daily, secondary_bars=bars_15m,
+        )
+
+    sp = snapshot.structural_payload
+    nc = sp["primary"]["1d"].get("node_cluster")
+    assert nc is not None, "engine 失败时仍必须写入 node_cluster（含诊断字段）"
+    assert nc["availability"] == "unavailable"
+    assert nc["degraded_reason"] is not None
+    assert nc["degraded_reason"].startswith("COMPUTE_FAILED")
+    assert "mocked engine failure" in nc["degraded_reason"]
+    # degraded_reasons 也应记录
+    assert any("node_cluster" in r and "engine failed" in r for r in snapshot.degraded_reasons)

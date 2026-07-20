@@ -2,6 +2,17 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-21
+
+- CHANGE-20260721-001: 移动飞书指标舞台与数据链修复 V1.0（合并 Phase 2 剩余 + Phase 3 + Phase 4 + Phase 5 后端测试）
+  - **Phase 2 剩余：Feature Snapshot 写入 Canonical Node 字段**：`_SCHEMA_VERSION` 3→4（旧快照不可见）；`feature_snapshot_service` `node_cluster` 始终写入 `availability`/`degraded_reason`（即使 profile 为 None 也写入最小诊断字段）；`atomic_fact_contract.py` 新增 `NodeAvailabilityInfo` Pydantic 模型 + `AtomicFactsContextResponse.nodeAvailability` 必填字段；`stock_context.py` 新增 `_build_node_availability` 函数 + 5 态状态机（NO_PUBLISHED_RUN/SNAPSHOT_MISSING/NODE_PROFILE_EMPTY/NODE_15M_MISSING/NODE_COMPUTE_FAILED/NODE_INSUFFICIENT_DAILY_BARS/LEGACY_SNAPSHOT_NO_NODE_CLUSTER）；9 个 StockContext nodeAvailability 测试 + 4 个 Feature Snapshot node_cluster 字段写入测试 + 4 个五周期 Node profile_hash 一致性测试
+  - **Phase 3：FR-11 缓存失效修复**：`AdjustmentFactorService.rebuild_factor_series` 改为调用新增 `_invalidate_downstream_caches` 方法（原仅调 `_invalidate_mdas_cache`）；精确失效 MDAS + bars + indicator 三层 Redis 缓存（按 `instrument_id`）；单层失效失败不阻塞其他层（缓存 TTL 会自然过期）；监控 Profile（in-process）和 Capture（filesystem per-event）依赖 TTL 自然过期；4 个 `_invalidate_downstream_caches` 测试
+  - **Phase 4：indicator_view 真正控制 Capture**（前序会话已完成）：`stockResearchTypes.ts` `INDICATOR_VIEW_LAYER_PRESETS` + `normalizeIndicatorView` + `getIndicatorViewLayerPreset`；`StrategyChart.tsx` `indicatorView` prop + `effectiveLayers` 预设替代 `FEISHU_CAPTURE_LAYERS`；新增 `MobileIndicatorStage.tsx` 1440×2560 9:16 移动舞台组件；`CaptureStockPage.tsx` 读取 `indicator_view` URL 参数 + `MobileIndicatorStage` 包裹；`backend/app/constants/indicator_view.py` `IndicatorView` 类型 + `is_valid_indicator_view`；`backend/app/api/capture.py` Snapshot API 接收 `indicator_view` 参数驱动 `include_smc`
+  - **Phase 2 修复：ChartRenderFrame 帧比对门禁**（前序会话已完成）：`chartRenderFrame.ts` `displayHash`/`displayRangeKey` 优先，降级到 `sourceBarHash`；`indicator_service.py` `build_display_frame()` 生成 display_frame（展示帧与算法输入诊断分离）；新增 `indicator_display_frame.py` 独立模块；`bars.py` + `bar.py` bars API 返回 display_frame
+  - **Phase 5 测试**：244 passed + 1 skipped；ruff 全绿（修复 `_DISPLAY_WINDOW` → `_display_window`）；mypy 3 个预存 baseline 错误（`redis_client.py`/`bar_repository.py`，与本次改动无关）；前端测试待 Phase 6 Docker 构建时运行
+  - **诚实声明**：Phase 6 部署 + 前端测试 + Playwright E2E + 真实飞书 E2E + 全市场 Snapshot 重算（schema_version=4）待后续
+  - **不变量**：不新增依赖/表/migration；不重写 SMC 算法；MDAS 仍为唯一行情读取出口；`PINE_PARITY_PENDING` 保留
+
 ## 2026-07-20
 
 - CHANGE-20260720-001: 日线监控 SMC + 三类独立飞书图片 + Canonical 四链生产接入（合并 §一-§五）—— 提交 `cf70e91`
