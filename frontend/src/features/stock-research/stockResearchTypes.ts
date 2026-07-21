@@ -55,7 +55,7 @@ export function normalizeDisplayTimeframe(raw: string | null): DisplayTimeframe 
 //   macd     → macd（MACD 副图）
 //   sqzmom   → sqzmom（SQZMOM 副图）
 //   breakout → breakout（突破标记，仅 selection 来源可用）
-//   smc      → smc（SMC 智能资金概念，CHANGE-011 新增，默认关闭，按需开启）
+//   smc      → smc（结构概念，CHANGE-011 新增，默认关闭，按需开启）
 // [CHANGE-011 SMC] - smc 是按需计算的独立图层（BOS/CHoCH/OB/EQH/EQL/trailing），
 //   默认关闭；不开启时后端不计算 SMC（include_smc=false），不消耗 CPU；
 //   完全排除 FVG；不进入 DSA、Node 监控、Capture 或右栏 context。
@@ -79,14 +79,14 @@ export interface ChartLayerManifestEntry {
 // [ChartLayerManifest] - 描述: 用户可见图层名（仅展示文案，不改内部 id/DTO/算法）
 // - node 显示为"筹码共识价"：基于历史成交量分布的估算代理，不是股东真实持仓成本
 // - sqzmom 显示为"挤压动量"：波动收窄后的方向与强弱（LazyBear Pine 复刻）
-// - smc 显示为"智能资金"：SMC 智能资金概念（BOS/CHoCH/订单块/等高/等低），默认关闭
+// - smc 显示为"结构"：结构概念（BOS/CHoCH/订单块/等高/等低），默认关闭
 // 内部 ChartLayerKey 'node'/'sqzmom'/'smc' 不变，profile/node/poc 字段名不变
 export const CHART_LAYER_MANIFEST: ChartLayerManifestEntry[] = [
   { id: 'trend', name: '趋势', kind: 'main', enabled: true, description: '趋势参考价 · 选股命中标记' },
   { id: 'node', name: '筹码共识价', kind: 'main', enabled: true, description: '成交量分布估算 · 节点区间 · POC（基于历史成交量分布的估算代理，非股东真实持仓成本）' },
   { id: 'boll', name: '布林带', kind: 'main', enabled: true, description: '布林带 · SMA(20) ± 2σ' },
   { id: 'breakout', name: '突破', kind: 'main', enabled: true, selectionOnly: true, description: '压力区 · 突破确认' },
-  { id: 'smc', name: '智能资金', kind: 'main', enabled: true, description: 'SMC 智能资金概念 · BOS/CHoCH/订单块/等高/等低（按需计算，默认关闭；完全排除 FVG）' },
+  { id: 'smc', name: '结构', kind: 'main', enabled: true, description: '结构 · BOS/CHoCH/订单块/等高/等低（按需计算，默认关闭；完全排除 FVG）' },
   { id: 'volume', name: '成交量', kind: 'sub', enabled: true, description: '成交量副图' },
   { id: 'macd', name: 'MACD', kind: 'sub', enabled: true, description: 'MACD 副图 · DIF/DEA/Histogram' },
   { id: 'sqzmom', name: '挤压动量', kind: 'sub', enabled: true, description: '波动收窄后的方向与强弱 · LazyBear Pine 复刻' },
@@ -117,7 +117,7 @@ export function chartLayersForSource(
 // 三类监控独立飞书图片（PROMPT.md §四 + advice.md v6）：
 //   node_cluster → 筹码共识价（Node + Profile + POC）
 //   bollinger    → 布林带（BB）
-//   smc          → SMC 结构（BOS/CHoCH/OB/EQH/EQL/trailing）
+//   smc          → 结构（BOS/CHoCH/OB/EQH/EQL/trailing）
 //
 // 每张截图只渲染一个 indicator_view 对应的图层，禁止三类指标叠在同一张图。
 // Capture URL 携带 &indicator_view=... 时，StrategyChart 在 isCaptureMode 下使用
@@ -151,7 +151,7 @@ export const INDICATOR_VIEW_LAYER_PRESETS: Record<IndicatorView, ChartLayerVisib
     breakout: false,
     smc: false,
   },
-  // SMC 结构：BOS/CHoCH/订单块/等高/等低
+  // 结构：BOS/CHoCH/订单块/等高/等低
   smc: {
     trend: false,
     node: false,
@@ -168,7 +168,7 @@ export const INDICATOR_VIEW_LAYER_PRESETS: Record<IndicatorView, ChartLayerVisib
 export const INDICATOR_VIEW_LABELS: Record<IndicatorView, string> = {
   node_cluster: '筹码共识价',
   bollinger: '布林带',
-  smc: 'SMC结构',
+  smc: '结构',
 }
 
 // 合法 indicator_view 集合（前端校验 URL 参数用）

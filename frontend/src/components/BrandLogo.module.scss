@@ -44,3 +44,12 @@
   width: auto;
   font-size: 18px;
 }
+
+// mobile：飞书移动舞台 1440×2560 顶部品牌行
+// 使用 symbol 资产（正方形），高度 72px 适配舞台顶部大字号视觉
+// 文字（品牌名/副标题）由 MobileIndicatorStage 渲染，本 variant 只负责 logo 图形
+.mobile {
+  height: 72px;
+  width: 72px;
+  font-size: 36px;
+}

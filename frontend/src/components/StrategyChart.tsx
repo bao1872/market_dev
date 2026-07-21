@@ -33,6 +33,12 @@ import {
   type RenderDensity,
   getRenderScale,
 } from './chartRenderScale'
+// [2026-07-21 反馈] SMC 中文显示文案唯一映射（前后端/详情/飞书共用）
+import {
+  getSmcEventLabel,
+  getSmcEqLabel,
+  getSmcObLabel,
+} from './smcLabels'
 
 // [ChartRightPadding] - 描述: K 线绘图区右侧留白比例（CHANGE-20260713-008）
 // 最新 K 线位于绘图区约 80% 位置（留白 20%，落在 18%-22% 要求区间内）。
@@ -117,6 +123,10 @@ export interface StrategyChartProps {
   // 未传入或失效时由组件内部计算默认值（取末尾 MAX_VISIBLE_BARS 根）
   viewport?: ChartViewport
   onViewportChange?: (vp: ChartViewport) => void
+  // [2026-07-21 反馈] 飞书移动舞台默认显示窗口（仅 isCaptureMode 下生效）
+  //   未传入时回退到 MAX_VISIBLE_BARS（250）；传入 90 时飞书舞台只显示最近 90 根
+  //   不影响底层数据拉取总长度，也不影响详情页用户缩放逻辑
+  defaultVisibleBars?: number
   // [feishu-capture] - 描述: 飞书截图模式，强制开启 FEISHU_CAPTURE_LAYERS 且不可关闭，不读写 localStorage
   isCaptureMode?: boolean
   // [CHANGE-20260720-Phase4 §四] indicator_view 选择（仅 capture 模式生效）
@@ -505,7 +515,14 @@ function extractBackendProfile(indicators: IndicatorResponse | undefined): Backe
 
 // ===== 布局几何模块 =====
 // 根据启用的图层动态分配窗格高度（价格/成交量/MACD 共享同一 X 轴与十字线索引）
-function geometry(layers: Set<string>, w: number, h: number): Geometry {
+// [2026-07-21 反馈] mobile_capture 模式下成交量区按舞台高度 18% 分配（主图:成交量 ≈ 82:18），
+//   desktop 模式保持 76px 固定高度（向后兼容）
+function geometry(
+  layers: Set<string>,
+  w: number,
+  h: number,
+  scale?: ChartRenderScale,
+): Geometry {
   const profileOn = layers.has('profile')
   const volumeOn = layers.has('volume')
   const macdOn = layers.has('macd')
@@ -530,7 +547,15 @@ function geometry(layers: Set<string>, w: number, h: number): Geometry {
     cursor = panes.sqzmom.top - paneGap
   }
   if (volumeOn) {
-    panes.volume = { bottom: cursor, top: cursor - 76 }
+    // [2026-07-21 反馈] mobile_capture 下成交量区按剩余高度 18% 分配
+    //   飞书舞台 INDICATOR_VIEW_LAYER_PRESETS 只开 volume（macd/sqzmom 关闭），
+    //   所以 (h - 24 - bottom - paneGap) 是 price + volume 总高，18% 给 volume ≈ 82:18
+    //   desktop 保持 76px 固定高度（向后兼容）
+    const isMobile = scale?.density === 'mobile_capture'
+    const volumeH = isMobile
+      ? Math.max(150, Math.round((h - 24 - bottom - paneGap) * 0.18))
+      : 76
+    panes.volume = { bottom: cursor, top: cursor - volumeH }
     cursor = panes.volume.top - paneGap
   }
   panes.price = { top: 24, bottom: Math.max(220, cursor) }
@@ -1582,6 +1607,7 @@ import {
   collectVisibleSmcPriceCandidates,
   intersectSmcRangeWithViewport,
   hexToRgba,
+  layoutSmcLabels,
   SMC_BULL_COLOR,
   SMC_BEAR_COLOR,
   type SmcEvent,
@@ -1589,6 +1615,7 @@ import {
   type SmcEqualHighLow,
   type SmcTrailing,
   type SmcSwingBias,
+  type SmcLabelAnchor,
 } from './smcRendering'
 
 function renderIndicatorSmc(
@@ -1648,6 +1675,11 @@ function renderIndicatorSmc(
     return undefined
   }
 
+  // [2026-07-21 P0 反馈] SMC 标签碰撞布局：收集所有标签锚点，mobile_capture 下用 layoutSmcLabels 防重叠
+  // desktop 模式保持自然位置（250 bar 窗口下碰撞罕见）
+  const labelAnchors: SmcLabelAnchor[] = []
+  const isMobileCapture = scale.density === 'mobile_capture'
+
   // ===== 1. 渲染 Order Blocks（低透明度矩形区域）=====
   // [CHANGE-20260715-008] OB 选择逻辑抽离至 selectVisibleSmcOrderBlocks（可独立测试）
   // 规则（PROMPT.md §四.2）：
@@ -1686,6 +1718,24 @@ function renderIndicatorSmc(
     // [PROMPT.md §5.3.4 V2] OB 边框线宽按 scale.strokes.obBorder（mobile_capture 2px）
     ctx.lineWidth = scale.strokes.obBorder
     ctx.strokeRect(x1, yTop, Math.max(1, x2 - x1), height)
+
+    // [2026-07-21 反馈] OB 区域内加中文文字标签（多头承接区/空头压制区）
+    //   [P0 碰撞布局] mobile_capture 下收集锚点，由 layoutSmcLabels 统一布局
+    //   desktop 模式不渲染 OB 文字标签（区域太窄）
+    if (isMobileCapture && height > 40 && (x2 - x1) > 80) {
+      const obLabel = getSmcObLabel(ob.bias)
+      const obLabelY = yTop + height / 2
+      labelAnchors.push({
+        kind: 'ob',
+        anchorX: x1 + 8,
+        anchorY: obLabelY,
+        text: obLabel,
+        color: hexToRgba(color, 0.85),
+        fontSize: scale.fonts.smcInternalLabel,
+        align: 'left',
+        preferredVertical: 'center',
+      })
+    }
   }
 
   // ===== 2. 渲染 BOS/CHoCH 线 =====
@@ -1727,13 +1777,22 @@ function renderIndicatorSmc(
 
     // 标签位于结构线中点（CHANGE-20260715-002）
     // [CHANGE-20260716-001] 标签不加 ·I，与 TV 文字一致
-    // [PROMPT.md §5.3.4 V2] SMC internal 标签字号按 scale.fonts.smcInternalLabel（mobile_capture ≥28px），
-    //   swing 标签字号按 scale.fonts.smcSwingLabel（mobile_capture ≥34px）
+    // [2026-07-21 反馈] 标签改用中文通俗名词（突破前高/跌破前低/转强拐点/转弱拐点）
+    // [P0 碰撞布局] 收集锚点，由 layoutSmcLabels（mobile_capture）或自然位置（desktop）统一绘制
     const midX = (x1 + x2) / 2
-    const label = ev.type
+    const label = getSmcEventLabel(ev.type, ev.bias)
     const fontSize = isInternal ? scale.fonts.smcInternalLabel : scale.fonts.smcSwingLabel
     const labelOffset = Math.round(parseFloat(fontSize) * 0.3)
-    drawText(ctx, label, midX, y - labelOffset, color, fontSize, 'center')
+    labelAnchors.push({
+      kind: ev.type === 'BOS' ? 'bos' : 'choch',
+      anchorX: midX,
+      anchorY: y - labelOffset,
+      text: label,
+      color,
+      fontSize,
+      align: 'center',
+      preferredVertical: 'up',
+    })
   }
 
   // ===== 3. 渲染 EQH/EQL（两端点线，非水平线）=====
@@ -1762,13 +1821,24 @@ function renderIndicatorSmc(
     drawLine(ctx, x1, y1, x2, y2, eqColor, scale.strokes.eqLine, [2, 2])
 
     // 标签位于两 pivot 中点（Pine L397）
+    // [2026-07-21 反馈] 标签改用中文通俗名词（双顶压力/双底支撑）
+    // [P0 碰撞布局] 收集锚点，由 layoutSmcLabels（mobile_capture）或自然位置（desktop）统一绘制
     const midX = (x1 + x2) / 2
     const midY = (y1 + y2) / 2
     // EQH: label_down（标签在上方）；EQL: label_up（标签在下方）
     // [PROMPT.md §5.3.4 V2] EQ 标签字号按 scale.fonts.eqLabel（mobile_capture 34px）
     const _eqSize = parseFloat(scale.fonts.eqLabel)
     const labelYOffset = isEQH ? -Math.round(_eqSize * 0.3) : Math.round(_eqSize * 0.9)
-    drawText(ctx, eq.type, midX, midY + labelYOffset, eqColor, scale.fonts.eqLabel, 'center')
+    labelAnchors.push({
+      kind: isEQH ? 'eqh' : 'eql',
+      anchorX: midX,
+      anchorY: midY + labelYOffset,
+      text: getSmcEqLabel(eq.type),
+      color: eqColor,
+      fontSize: scale.fonts.eqLabel,
+      align: 'center',
+      preferredVertical: isEQH ? 'up' : 'down',
+    })
   }
 
   // ===== 4. 渲染 trailing strong/weak high/low =====
@@ -1804,7 +1874,17 @@ function renderIndicatorSmc(
     const label = `${isStrong ? '强高' : '弱高'} ${fmt(trailing.top)}`
     // [PROMPT.md §5.3.4 V2] trailing 线宽按 scale.strokes.smcSwing，标签按 scale.fonts.smcSwingLabel
     drawLine(ctx, x1, y, x2, y, hexToRgba(labelColor, 0.5), scale.strokes.smcSwing, [3, 3])
-    drawText(ctx, label, g.plotRight - 4, y - 3, labelColor, scale.fonts.smcSwingLabel, 'right')
+    // [P0 碰撞布局] 收集锚点，由 layoutSmcLabels 统一布局
+    labelAnchors.push({
+      kind: 'trailing_high',
+      anchorX: g.plotRight - 4,
+      anchorY: y - 3,
+      text: label,
+      color: labelColor,
+      fontSize: scale.fonts.smcSwingLabel,
+      align: 'right',
+      preferredVertical: 'up',
+    })
   }
   if (trailing && trailing.bottom != null) {
     // Pine L726: 线起点 = trailing.lastBottomTime
@@ -1817,7 +1897,83 @@ function renderIndicatorSmc(
     const labelColor = isStrong ? SMC_BEAR_COLOR : SMC_BULL_COLOR
     const label = `${isStrong ? '强低' : '弱低'} ${fmt(trailing.bottom)}`
     drawLine(ctx, x1, y, x2, y, hexToRgba(labelColor, 0.5), scale.strokes.smcSwing, [3, 3])
-    drawText(ctx, label, g.plotRight - 4, y + 9, labelColor, scale.fonts.smcSwingLabel, 'right')
+    // [P0 碰撞布局] 收集锚点，由 layoutSmcLabels 统一布局
+    labelAnchors.push({
+      kind: 'trailing_low',
+      anchorX: g.plotRight - 4,
+      anchorY: y + 9,
+      text: label,
+      color: labelColor,
+      fontSize: scale.fonts.smcSwingLabel,
+      align: 'right',
+      preferredVertical: 'down',
+    })
+  }
+
+  // ===== 5. 绘制所有 SMC 标签 =====
+  // [P0 碰撞布局] mobile_capture: 用 layoutSmcLabels 防重叠 + 短引导线
+  //   desktop: 自然位置绘制（250 bar 窗口下碰撞罕见，保持原行为）
+  if (labelAnchors.length === 0) return
+
+  if (isMobileCapture) {
+    // mobile_capture: 碰撞布局 + 引导线
+    // [P0 fix] Geometry 接口无 t/b，主图 pane 边界通过 g.panes.price.top/bottom 获取
+    //   [P0 fix] scale 无 fontFamily，fontSize 字段已是完整 CSS font 字符串（如 "36px sans-serif"）
+    const fontSizeNum = parseFloat(scale.fonts.smcSwingLabel)
+    const laneHeight = fontSizeNum + 4
+    const laidOut = layoutSmcLabels(
+      labelAnchors,
+      {
+        plotLeft: g.l,
+        plotRight: g.plotRight,
+        plotTop: g.panes.price.top,
+        plotBottom: g.panes.price.bottom,
+        laneHeight,
+        laneGap: 4,
+        maxLanes: 4,
+      },
+      (text: string, fs: string) => {
+        ctx.font = fs  // fs 已是完整 CSS font 字符串（如 "36px sans-serif"）
+        return ctx.measureText(text).width
+      },
+    )
+    // 先画引导线（在标签下方）
+    // [P0 fix] 引导线颜色需同时支持 hex 和 rgba 输入：
+    //   - OB/BOS/CHoCH 标签 color 是 rgba(...)（已带 alpha）
+    //   - EQH/EQL/trailing 标签 color 是 #RRGGBB hex
+    //   统一提取 r,g,b 后用 0.4 alpha 重绘引导线
+    for (const label of laidOut) {
+      if (label.lane === 0) continue  // lane 0 = 自然位置，无需引导线
+      const guideColor = (() => {
+        const c = label.anchor.color
+        const m = c.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/)
+        if (m) return `rgba(${m[1]}, ${m[2]}, ${m[3]}, 0.4)`
+        return hexToRgba(c, 0.4)
+      })()
+      ctx.strokeStyle = guideColor
+      ctx.lineWidth = 1
+      ctx.setLineDash([2, 2])
+      ctx.beginPath()
+      ctx.moveTo(label.guideStartX, label.guideStartY)
+      ctx.lineTo(label.guideEndX, label.guideEndY)
+      ctx.stroke()
+      ctx.setLineDash([])
+    }
+    // 再画标签
+    for (const label of laidOut) {
+      const align = label.anchor.align === 'left' ? 'left'
+        : label.anchor.align === 'right' ? 'right' : 'center'
+      const tx = align === 'left' ? label.boxX + 4
+        : align === 'right' ? label.boxX + label.boxW - 4
+        : label.boxX + label.boxW / 2
+      const ty = label.boxY + label.boxH / 2 + parseFloat(label.anchor.fontSize) * 0.35
+      drawText(ctx, label.anchor.text, tx, ty, label.anchor.color, label.anchor.fontSize, align)
+    }
+  } else {
+    // desktop: 自然位置绘制（无碰撞布局，无引导线）
+    for (const anchor of labelAnchors) {
+      drawText(ctx, anchor.text, anchor.anchorX, anchor.anchorY, anchor.color, anchor.fontSize, anchor.align)
+    }
   }
 }
 
@@ -1926,7 +2082,7 @@ function drawTrading(
   //   所有 draw 子函数与内联 drawText/drawLine 调用必须使用 scale.*，禁止硬编码 '8px monospace' 等
   const { scale } = state
   const layerSet = new Set(Object.entries(layers).filter(([, v]) => v).map(([k]) => k))
-  const g = geometry(layerSet, w, h)
+  const g = geometry(layerSet, w, h, scale)
   // [Volume Profile] - 从后端 indicators 提取 VP 数据（SSOT，禁止前端重算）
   const profile = extractBackendProfile(indicators)
   const displayTimes = display.map(d => d.time)
@@ -2329,6 +2485,7 @@ export function StrategyChart({
   onTimeframeChange,
   viewport: viewportProp,
   onViewportChange,
+  defaultVisibleBars,
   isCaptureMode = false,
   indicatorView = null,
   renderDensity = 'desktop',
@@ -2405,7 +2562,9 @@ export function StrategyChart({
 
   // [chartViewport] - 显示 bar 数量（缩放控制）：保留为内部状态作为 fallback，
   //   当父组件未传入 viewport 时使用；受控时由 viewportProp 驱动
-  const [displayBars, setDisplayBars] = useState(MAX_VISIBLE_BARS)
+  //   [2026-07-21 反馈] 飞书舞台可传 defaultVisibleBars=90 限制默认显示窗口
+  const initialVisibleBars = defaultVisibleBars ?? MAX_VISIBLE_BARS
+  const [displayBars, setDisplayBars] = useState(initialVisibleBars)
 
   // 十字线联动图例 bar 索引（-1 表示无十字线，显示最后一根）
   const [legendIdx, setLegendIdx] = useState(-1)
@@ -2731,9 +2890,10 @@ export function StrategyChart({
     }
 
     // [Task 16] - 双击恢复自动范围（回到最新数据末尾视区）
+    //   [2026-07-21 反馈] 飞书舞台传 defaultVisibleBars=90 时，双击恢复也用 90
     const handleDoubleClick = () => {
       if (onViewportChange) {
-        onViewportChange(createDefaultViewport(calc.length, MAX_VISIBLE_BARS))
+        onViewportChange(createDefaultViewport(calc.length, initialVisibleBars))
       }
     }
 
@@ -2861,9 +3021,9 @@ export function StrategyChart({
   }
   const resetZoom = () => {
     if (onViewportChange) {
-      onViewportChange(createDefaultViewport(calc.length, MAX_VISIBLE_BARS))
+      onViewportChange(createDefaultViewport(calc.length, initialVisibleBars))
     } else {
-      setDisplayBars(MAX_VISIBLE_BARS)
+      setDisplayBars(initialVisibleBars)
     }
   }
 

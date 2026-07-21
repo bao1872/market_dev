@@ -510,7 +510,7 @@ export default function StockDetailPage() {
                     onChange={() => feishu.setSelectedIndicatorView('smc')}
                     disabled={feishu.sendFeishuPending || feishu.feishuPolling}
                   />
-                  <span className="feishu-indicator-view-label">SMC 结构</span>
+                  <span className="feishu-indicator-view-label">结构</span>
                 </label>
               </div>
 

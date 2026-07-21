@@ -507,7 +507,7 @@ export type ShareDeliveryStatus =
 // 详情页手动发送飞书时，用户从弹窗三单选项中选择指标视图：
 // - node_cluster: 筹码共识价
 // - bollinger: 布林带
-// - smc: SMC 结构
+// - smc: 结构
 export type IndicatorView = 'node_cluster' | 'bollinger' | 'smc'
 
 /** POST /instruments/{instrument_id}/send-feishu 请求体 - 指标视图选择 */

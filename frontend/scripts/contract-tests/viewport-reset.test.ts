@@ -71,8 +71,10 @@ test('P0-5: StrategyChart 有新行情追加 auto-follow effect', () => {
 // ===== 6. StrategyChart range/reset 按钮使用 createDefaultViewport(calc.length) =====
 test('P0-5: StrategyChart range/reset 按钮以 calc.length 为右边界', () => {
   // 复位按钮
-  assert.ok(chartSrc.includes('createDefaultViewport(calc.length, MAX_VISIBLE_BARS)'),
-    '复位按钮应使用 createDefaultViewport(calc.length, MAX_VISIBLE_BARS)')
+  // [2026-07-21 反馈] 复位按钮使用 initialVisibleBars（= defaultVisibleBars ?? MAX_VISIBLE_BARS），
+  //   飞书移动舞台传 defaultVisibleBars=90 时复位到 90 根，桌面端不传时复位到 MAX_VISIBLE_BARS
+  assert.ok(chartSrc.includes('createDefaultViewport(calc.length, initialVisibleBars)'),
+    '复位按钮应使用 createDefaultViewport(calc.length, initialVisibleBars)')
   // 范围按钮
   assert.ok(chartSrc.includes('createDefaultViewport(calc.length, Math.max(MIN_VISIBLE_BARS, visible))'),
     '范围按钮应使用 createDefaultViewport(calc.length, ...) 以最新 bar 为右边界')

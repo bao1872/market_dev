@@ -265,3 +265,195 @@ export function hexToRgba(hex: string, alpha: number): string {
   }
   return `rgba(${r}, ${g}, ${b}, ${alpha})`
 }
+
+// ===== [P0 SMC 标签碰撞布局] =====
+// [2026-07-21 P0 反馈] 飞书移动舞台 90 bar 窗口下 SMC 标签集中重叠
+//   根因：renderIndicatorSmc 原将标签放在结构线中点/OB 锚点/右边缘，无碰撞检测
+//   修复：纯函数 layoutSmcLabels 按x分组 + 3~4 lane 上下错位 + 短引导线
+//   约束：真实事件 x/price 锚点不动；只有标签框可移动；标签框不得超出图表区域
+
+/** 标签的自然锚点（输入） */
+export interface SmcLabelAnchor {
+  kind: 'bos' | 'choch' | 'eqh' | 'eql' | 'ob' | 'trailing_high' | 'trailing_low'
+  /** 真实锚点 X（像素，结构线中点 / OB 锚点 / 右边缘） */
+  anchorX: number
+  /** 真实锚点 Y（像素，价格水平） */
+  anchorY: number
+  /** 标签文本 */
+  text: string
+  /** 标签颜色 */
+  color: string
+  /** CSS font-size 字符串（如 '28px'） */
+  fontSize: string
+  /** 文字对齐方式 */
+  align: 'left' | 'center' | 'right'
+  /** 优先偏移方向：up=标签在锚点上方，down=下方，center=居中 */
+  preferredVertical: 'up' | 'down' | 'center'
+}
+
+/** 标签布局结果（输出） */
+export interface LaidOutSmcLabel {
+  anchor: SmcLabelAnchor
+  /** 标签框左上角 X */
+  boxX: number
+  /** 标签框左上角 Y */
+  boxY: number
+  /** 标签框宽度 */
+  boxW: number
+  /** 标签框高度 */
+  boxH: number
+  /** 分配的 lane（0=自然位置，1-3=偏移） */
+  lane: number
+  /** 引导线起点（真实锚点） */
+  guideStartX: number
+  guideStartY: number
+  /** 引导线终点（标签框中心） */
+  guideEndX: number
+  guideEndY: number
+}
+
+/** 碰撞布局上下文 */
+export interface SmcLabelLayoutContext {
+  /** 图表左边界（像素） */
+  plotLeft: number
+  /** 图表右边界（像素） */
+  plotRight: number
+  /** 图表上边界（像素） */
+  plotTop: number
+  /** 图表下边界（像素） */
+  plotBottom: number
+  /** lane 高度（像素，= fontSize + 间隙） */
+  laneHeight: number
+  /** lane 之间的间隙（像素） */
+  laneGap: number
+  /** 最大 lane 数（默认 4） */
+  maxLanes?: number
+  /** 标签框水平内边距（像素） */
+  boxPaddingX?: number
+  /** 标签框垂直内边距（像素） */
+  boxPaddingY?: number
+}
+
+/**
+ * 测量文本宽度的函数类型（由调用方提供 ctx.measureText 实现）
+ */
+export type MeasureTextFn = (text: string, fontSize: string) => number
+
+/**
+ * SMC 标签碰撞布局纯函数。
+ *
+ * 算法：
+ * 1. 测量每个标签宽度
+ * 2. 按 anchorX 排序
+ * 3. 对每个标签，依次尝试 lane 0（自然位置）、lane 1、2、3（上下错位）
+ * 4. lane 偏移方向由 preferredVertical 决定（up=向上偏移，down=向下偏移）
+ * 5. 检查标签框与已放置标签的矩形重叠
+ * 6. 选第一个不重叠的 lane；若都重叠则选 lane 0（best effort）
+ * 7. 标签框 X 钳制到 [plotLeft, plotRight - boxW]
+ * 8. 标签框 Y 钳制到 [plotTop, plotBottom - boxH]
+ * 9. 引导线从 (anchorX, anchorY) 到 (boxCenterX, boxCenterY)
+ *
+ * 不改变真实事件的 x 和 price 锚点，只移动标签框。
+ */
+export function layoutSmcLabels(
+  anchors: SmcLabelAnchor[],
+  ctx: SmcLabelLayoutContext,
+  measureText: MeasureTextFn,
+): LaidOutSmcLabel[] {
+  const maxLanes = ctx.maxLanes ?? 4
+  const padX = ctx.boxPaddingX ?? 4
+  const padY = ctx.boxPaddingY ?? 2
+  const fontSizeNum = parseFloat(anchors[0]?.fontSize ?? '28')
+  const boxH = fontSizeNum + padY * 2
+
+  // 1. 测量宽度 + 按 anchorX 排序
+  const withWidth = anchors.map(a => ({
+    anchor: a,
+    boxW: measureText(a.text, a.fontSize) + padX * 2,
+  }))
+  withWidth.sort((a, b) => a.anchor.anchorX - b.anchor.anchorX)
+
+  const placed: LaidOutSmcLabel[] = []
+
+  for (const item of withWidth) {
+    const { anchor, boxW } = item
+    let bestLabel: LaidOutSmcLabel | null = null
+
+    // 2. 尝试每个 lane
+    for (let lane = 0; lane < maxLanes; lane++) {
+      // lane 偏移量：lane 0 = 0, lane 1 = ±laneHeight, lane 2 = ±2*laneHeight, ...
+      const offsetMagnitude = lane * (ctx.laneHeight + ctx.laneGap)
+      const direction = anchor.preferredVertical === 'down' ? 1
+        : anchor.preferredVertical === 'up' ? -1
+        : lane % 2 === 1 ? -1 : 1  // center: 交替上下
+      const offsetY = offsetMagnitude * direction
+
+      // 标签框自然位置（align 决定 X 基准）
+      let boxX: number
+      if (anchor.align === 'left') {
+        boxX = anchor.anchorX + 4
+      } else if (anchor.align === 'right') {
+        boxX = anchor.anchorX - boxW - 4
+      } else {
+        boxX = anchor.anchorX - boxW / 2
+      }
+      let boxY = anchor.anchorY - boxH / 2 + offsetY
+
+      // 3. 钳制到图表区域
+      boxX = Math.max(ctx.plotLeft, Math.min(boxX, ctx.plotRight - boxW))
+      boxY = Math.max(ctx.plotTop, Math.min(boxY, ctx.plotBottom - boxH))
+
+      // 4. 检查与已放置标签的重叠
+      const overlaps = placed.some(p =>
+        boxX < p.boxX + p.boxW + 2 &&
+        boxX + boxW + 2 > p.boxX &&
+        boxY < p.boxY + p.boxH + 2 &&
+        boxY + boxH + 2 > p.boxY,
+      )
+
+      if (!overlaps || lane === 0) {
+        // 第一个不重叠的 lane，或 lane 0 作为 fallback
+        bestLabel = {
+          anchor,
+          boxX,
+          boxY,
+          boxW,
+          boxH,
+          lane,
+          guideStartX: anchor.anchorX,
+          guideStartY: anchor.anchorY,
+          guideEndX: boxX + boxW / 2,
+          guideEndY: boxY + boxH / 2,
+        }
+        if (!overlaps) break
+      }
+    }
+
+    if (bestLabel) {
+      placed.push(bestLabel)
+    } else {
+      // 兜底：lane 0
+      const boxX = Math.max(ctx.plotLeft, Math.min(
+        anchor.align === 'left' ? anchor.anchorX + 4
+          : anchor.align === 'right' ? anchor.anchorX - boxW - 4
+          : anchor.anchorX - boxW / 2,
+        ctx.plotRight - boxW,
+      ))
+      const boxY = Math.max(ctx.plotTop, Math.min(anchor.anchorY - boxH / 2, ctx.plotBottom - boxH))
+      placed.push({
+        anchor,
+        boxX,
+        boxY,
+        boxW,
+        boxH,
+        lane: 0,
+        guideStartX: anchor.anchorX,
+        guideStartY: anchor.anchorY,
+        guideEndX: boxX + boxW / 2,
+        guideEndY: boxY + boxH / 2,
+      })
+    }
+  }
+
+  return placed
+}

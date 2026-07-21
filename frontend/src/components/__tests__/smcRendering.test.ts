@@ -16,12 +16,15 @@ import {
   mapSmcIndexToDisplay,
   intersectSmcRangeWithViewport,
   hexToRgba,
+  layoutSmcLabels,
   SMC_BULL_COLOR,
   SMC_BEAR_COLOR,
   type SmcOrderBlock,
   type SmcEvent,
   type SmcEqualHighLow,
   type SmcTrailing,
+  type SmcLabelAnchor,
+  type SmcLabelLayoutContext,
 } from '../smcRendering.ts'
 
 // ===== 工具：构造测试用 OB =====
@@ -604,4 +607,252 @@ test('intersectSmcRangeWithViewport: anchor=0, confirmed=displayCount-1 → 边�
   assert.equal(range!.endIdx, 29)
   assert.equal(range!.clippedLeft, false)
   assert.equal(range!.clippedRight, false)
+})
+
+// ===== 11. layoutSmcLabels: P0 SMC 标签碰撞布局 =====
+//
+// [2026-07-21 P0 反馈] 飞书移动舞台 90 bar 窗口下 SMC 标签集中重叠
+//   验证点：
+//   1. 空输入 → 空输出
+//   2. 单标签 → lane 0
+//   3. 非重叠两标签 → 都在 lane 0
+//   4. 重叠两标签 → 第二个移到 lane 1（不重叠）
+//   5. 标签框不超出图表区域（plotLeft/plotRight/plotTop/plotBottom）
+//   6. 引导线起点 = 真实锚点，终点 = 标签框中心
+//   7. 真实锚点（anchorX/anchorY）不被改变
+//   8. 京东方A 真实数据 13 标签 → 输出无矩形重叠
+
+// 固定 measureText：每个字符 10px 宽（简化测试）
+function fixedMeasureText(text: string, _fontSize: string): number {
+  return text.length * 10
+}
+
+const defaultLayoutCtx: SmcLabelLayoutContext = {
+  plotLeft: 0,
+  plotRight: 800,
+  plotTop: 0,
+  plotBottom: 600,
+  laneHeight: 32,
+  laneGap: 4,
+  maxLanes: 4,
+}
+
+function makeAnchor(overrides: Partial<SmcLabelAnchor> = {}): SmcLabelAnchor {
+  return {
+    kind: 'bos',
+    anchorX: 100,
+    anchorY: 200,
+    text: 'BOS',
+    color: SMC_BULL_COLOR,
+    fontSize: '28px',
+    align: 'center',
+    preferredVertical: 'up',
+    ...overrides,
+  }
+}
+
+test('layoutSmcLabels: 空输入 → 空输出', () => {
+  const result = layoutSmcLabels([], defaultLayoutCtx, fixedMeasureText)
+  assert.deepEqual(result, [])
+})
+
+test('layoutSmcLabels: 单标签 → lane 0, 框居中于锚点', () => {
+  const anchor = makeAnchor({ anchorX: 400, anchorY: 300, text: 'BOS', align: 'center' })
+  const result = layoutSmcLabels([anchor], defaultLayoutCtx, fixedMeasureText)
+  assert.equal(result.length, 1)
+  assert.equal(result[0].lane, 0, '单标签应在 lane 0')
+  // 框居中：boxX = anchorX - boxW/2
+  const expectedBoxW = 3 * 10 + 4 * 2 // 38
+  assert.equal(result[0].boxX, 400 - expectedBoxW / 2)
+  assert.equal(result[0].boxY, 300 - (28 + 4) / 2, 'boxY 居中于 anchorY (lane 0)')
+})
+
+test('layoutSmcLabels: 两非重叠标签 → 都在 lane 0', () => {
+  // 两标签 anchorX 相距 500px，框宽 ~38px，绝不重叠
+  const a1 = makeAnchor({ anchorX: 100, anchorY: 200, text: 'BOS' })
+  const a2 = makeAnchor({ anchorX: 600, anchorY: 200, text: 'CHoCH' })
+  const result = layoutSmcLabels([a1, a2], defaultLayoutCtx, fixedMeasureText)
+  assert.equal(result.length, 2)
+  assert.equal(result[0].lane, 0)
+  assert.equal(result[1].lane, 0)
+})
+
+test('layoutSmcLabels: 两重叠标签 → 第二个移到 lane 1 (不重叠)', () => {
+  // 两标签 anchorX 相同，必然重叠
+  const a1 = makeAnchor({ anchorX: 400, anchorY: 300, text: 'BOS', preferredVertical: 'up' })
+  const a2 = makeAnchor({ anchorX: 400, anchorY: 300, text: 'CHoCH', preferredVertical: 'up' })
+  const result = layoutSmcLabels([a1, a2], defaultLayoutCtx, fixedMeasureText)
+  assert.equal(result.length, 2)
+  // 第一个在 lane 0，第二个必然移到 lane 1（向上偏移）
+  const lanes = result.map(r => r.lane).sort()
+  assert.equal(lanes[0], 0, '至少一个在 lane 0')
+  assert.ok(lanes.some(l => l > 0), '至少一个移到 lane > 0')
+  // 验证两个标签框不重叠
+  const [r1, r2] = result
+  const overlapX = r1.boxX < r2.boxX + r2.boxW + 2 && r1.boxX + r1.boxW + 2 > r2.boxX
+  const overlapY = r1.boxY < r2.boxY + r2.boxH + 2 && r1.boxY + r1.boxH + 2 > r2.boxY
+  assert.ok(!(overlapX && overlapY), '两标签框不得重叠')
+})
+
+test('layoutSmcLabels: 标签框 X 钳制到 [plotLeft, plotRight - boxW]', () => {
+  // anchorX 在左边界外（负值），align=center → boxX 应钳制到 plotLeft
+  const a1 = makeAnchor({ anchorX: -50, anchorY: 100, text: 'BOS', align: 'center' })
+  // anchorX 在右边界外，align=center → boxX 应钳制到 plotRight - boxW
+  const a2 = makeAnchor({ anchorX: 900, anchorY: 100, text: 'CHoCH', align: 'center' })
+  const result = layoutSmcLabels([a1, a2], defaultLayoutCtx, fixedMeasureText)
+  assert.equal(result.length, 2)
+  for (const r of result) {
+    assert.ok(r.boxX >= defaultLayoutCtx.plotLeft, `boxX ${r.boxX} 不得小于 plotLeft ${defaultLayoutCtx.plotLeft}`)
+    assert.ok(r.boxX + r.boxW <= defaultLayoutCtx.plotRight,
+      `boxX+boxW ${r.boxX + r.boxW} 不得大于 plotRight ${defaultLayoutCtx.plotRight}`)
+  }
+})
+
+test('layoutSmcLabels: 标签框 Y 钳制到 [plotTop, plotBottom - boxH]', () => {
+  // anchorY 在上边界外（负值），lane 偏移仍向上 → boxY 应钳制到 plotTop
+  const a1 = makeAnchor({ anchorX: 400, anchorY: -50, text: 'BOS', preferredVertical: 'up' })
+  // anchorY 在下边界外 → boxY 应钳制到 plotBottom - boxH
+  const a2 = makeAnchor({ anchorX: 500, anchorY: 700, text: 'CHoCH', preferredVertical: 'down' })
+  const result = layoutSmcLabels([a1, a2], defaultLayoutCtx, fixedMeasureText)
+  assert.equal(result.length, 2)
+  for (const r of result) {
+    assert.ok(r.boxY >= defaultLayoutCtx.plotTop, `boxY ${r.boxY} 不得小于 plotTop ${defaultLayoutCtx.plotTop}`)
+    assert.ok(r.boxY + r.boxH <= defaultLayoutCtx.plotBottom,
+      `boxY+boxH ${r.boxY + r.boxH} 不得大于 plotBottom ${defaultLayoutCtx.plotBottom}`)
+  }
+})
+
+test('layoutSmcLabels: 引导线起点 = 真实锚点, 终点 = 标签框中心', () => {
+  // 强制 lane > 0：两个完全重叠的标签
+  const a1 = makeAnchor({ anchorX: 400, anchorY: 300, text: 'BOS', preferredVertical: 'up' })
+  const a2 = makeAnchor({ anchorX: 400, anchorY: 300, text: 'CHoCH', preferredVertical: 'up' })
+  const result = layoutSmcLabels([a1, a2], defaultLayoutCtx, fixedMeasureText)
+  // 找到 lane > 0 的那个
+  const offset = result.find(r => r.lane > 0)
+  assert.ok(offset, '应至少有一个标签在 lane > 0')
+  assert.equal(offset!.guideStartX, offset!.anchor.anchorX, '引导线起点 X = 真实锚点 X')
+  assert.equal(offset!.guideStartY, offset!.anchor.anchorY, '引导线起点 Y = 真实锚点 Y')
+  assert.equal(offset!.guideEndX, offset!.boxX + offset!.boxW / 2, '引导线终点 X = 标签框中心 X')
+  assert.equal(offset!.guideEndY, offset!.boxY + offset!.boxH / 2, '引导线终点 Y = 标签框中心 Y')
+})
+
+test('layoutSmcLabels: 真实锚点 (anchorX/anchorY) 不被改变', () => {
+  // [P0 fix] layoutSmcLabels 内部按 anchorX 排序后再布局，输出顺序可能与输入不同。
+  //   验证方式：用 Set<text> 匹配输入与输出，确保每个 anchor 的 X/Y/text 在输出中存在且未变。
+  const anchors = [
+    makeAnchor({ anchorX: 100, anchorY: 200, text: 'BOS' }),
+    makeAnchor({ anchorX: 200, anchorY: 250, text: 'CHoCH' }),
+    makeAnchor({ anchorX: 100, anchorY: 200, text: 'EQL', preferredVertical: 'down' }),
+  ]
+  const result = layoutSmcLabels(anchors, defaultLayoutCtx, fixedMeasureText)
+  assert.equal(result.length, anchors.length, '输入输出数量一致')
+  // 用 text 作为 key 匹配（BOS/CHoCH/EQL 唯一）
+  const byText = new Map(result.map(r => [r.anchor.text, r]))
+  for (const input of anchors) {
+    const out = byText.get(input.text)
+    assert.ok(out, `输出中应包含 text=${input.text}`)
+    assert.equal(out!.anchor.anchorX, input.anchorX, `text=${input.text} anchorX 不变`)
+    assert.equal(out!.anchor.anchorY, input.anchorY, `text=${input.text} anchorY 不变`)
+    assert.equal(out!.anchor.text, input.text, `text=${input.text} text 不变`)
+  }
+})
+
+test('layoutSmcLabels: 京东方A 真实 13 标签场景 → 输出无矩形重叠', () => {
+  // 模拟 /tmp/smc_analysis_output.txt 中的 13 个真实标签
+  // 使用 step≈9.4px, plotLeft≈58, plotRight≈900（90 bar 窗口近似）
+  // 价格转 Y: 用线性映射 (price - 3.5) * 50 + 100（覆盖 3.5-9.5 价格区间）
+  const step = 9.4
+  const plotLeft = 58
+  const plotRight = plotLeft + 90 * step
+  const priceToY = (p: number) => 100 + (p - 3.5) * 50
+
+  const anchors: SmcLabelAnchor[] = [
+    // 6 events
+    { kind: 'choch', anchorX: plotLeft + 3.0 * step, anchorY: priceToY(4.135) - 8, text: '转弱拐点', color: SMC_BEAR_COLOR, fontSize: '28px', align: 'center', preferredVertical: 'up' },
+    { kind: 'choch', anchorX: plotLeft + 21.0 * step, anchorY: priceToY(4.026) - 8, text: '转强拐点', color: SMC_BULL_COLOR, fontSize: '28px', align: 'center', preferredVertical: 'up' },
+    { kind: 'bos', anchorX: plotLeft + 37.5 * step, anchorY: priceToY(4.304) - 8, text: '突破前高', color: SMC_BULL_COLOR, fontSize: '28px', align: 'center', preferredVertical: 'up' },
+    { kind: 'choch', anchorX: plotLeft + 24.0 * step, anchorY: priceToY(4.691) - 8, text: '转强拐点', color: SMC_BULL_COLOR, fontSize: '28px', align: 'center', preferredVertical: 'up' },
+    { kind: 'bos', anchorX: plotLeft + 54.0 * step, anchorY: priceToY(6.039) - 8, text: '突破前高', color: SMC_BULL_COLOR, fontSize: '28px', align: 'center', preferredVertical: 'up' },
+    { kind: 'bos', anchorX: plotLeft + 63.0 * step, anchorY: priceToY(6.713) - 8, text: '突破前高', color: SMC_BULL_COLOR, fontSize: '28px', align: 'center', preferredVertical: 'up' },
+    // 5 visible OBs
+    { kind: 'ob', anchorX: plotLeft + 55.0 * step + 8, anchorY: priceToY((5.067 + 5.494) / 2), text: '多头承接区', color: hexToRgba(SMC_BULL_COLOR, 0.85), fontSize: '28px', align: 'left', preferredVertical: 'center' },
+    { kind: 'ob', anchorX: plotLeft + 35.0 * step + 8, anchorY: priceToY((4.145 + 4.046) / 2), text: '多头承接区', color: hexToRgba(SMC_BULL_COLOR, 0.85), fontSize: '28px', align: 'left', preferredVertical: 'center' },
+    { kind: 'ob', anchorX: plotLeft + 18.0 * step + 8, anchorY: priceToY((3.917 + 3.858) / 2), text: '多头承接区', color: hexToRgba(SMC_BULL_COLOR, 0.85), fontSize: '28px', align: 'left', preferredVertical: 'center' },
+    { kind: 'ob', anchorX: plotLeft + 0.0 * step + 8, anchorY: priceToY((3.818 + 3.758) / 2), text: '多头承接区', color: hexToRgba(SMC_BULL_COLOR, 0.85), fontSize: '28px', align: 'left', preferredVertical: 'center' },
+    { kind: 'ob', anchorX: plotLeft + 0.0 * step + 8, anchorY: priceToY((3.594 + 3.515) / 2), text: '多头承接区', color: hexToRgba(SMC_BULL_COLOR, 0.85), fontSize: '28px', align: 'left', preferredVertical: 'center' },
+    // trailing high/low
+    { kind: 'trailing_high', anchorX: plotRight - 4, anchorY: priceToY(9.5) - 3, text: '强高 9.50', color: SMC_BULL_COLOR, fontSize: '28px', align: 'right', preferredVertical: 'up' },
+    { kind: 'trailing_low', anchorX: plotRight - 4, anchorY: priceToY(3.818) + 9, text: '强低 3.82', color: SMC_BEAR_COLOR, fontSize: '28px', align: 'right', preferredVertical: 'down' },
+  ]
+
+  const ctx: SmcLabelLayoutContext = {
+    plotLeft, plotRight,
+    plotTop: 0, plotBottom: 600,
+    laneHeight: 32, laneGap: 4,
+    maxLanes: 4,
+  }
+  const result = layoutSmcLabels(anchors, ctx, fixedMeasureText)
+  assert.equal(result.length, 13, '所有 13 个标签都应被布局')
+
+  // 核心断言：任意两个标签框不得重叠（2px 容差）
+  for (let i = 0; i < result.length; i++) {
+    for (let j = i + 1; j < result.length; j++) {
+      const a = result[i], b = result[j]
+      const overlapX = a.boxX < b.boxX + b.boxW + 2 && a.boxX + a.boxW + 2 > b.boxX
+      const overlapY = a.boxY < b.boxY + b.boxH + 2 && a.boxY + a.boxH + 2 > b.boxY
+      assert.ok(!(overlapX && overlapY),
+        `标签 ${i} (${a.anchor.text}@${a.boxX},${a.boxY}) 与标签 ${j} (${b.anchor.text}@${b.boxX},${b.boxY}) 不得重叠`)
+    }
+  }
+})
+
+test('layoutSmcLabels: preferredVertical=up → lane 偏移向上 (boxY < anchorY)', () => {
+  // 两个完全重叠的标签，preferredVertical=up
+  const a1 = makeAnchor({ anchorX: 400, anchorY: 300, text: 'BOS', preferredVertical: 'up' })
+  const a2 = makeAnchor({ anchorX: 400, anchorY: 300, text: 'CHoCH', preferredVertical: 'up' })
+  const result = layoutSmcLabels([a1, a2], defaultLayoutCtx, fixedMeasureText)
+  const offset = result.find(r => r.lane > 0)
+  assert.ok(offset, '应有 lane > 0')
+  // up → boxY 应在 anchorY 上方（小于）
+  assert.ok(offset!.boxY + offset!.boxH / 2 < offset!.anchor.anchorY,
+    `up: 标签框中心 Y (${offset!.boxY + offset!.boxH / 2}) 应在锚点 Y (${offset!.anchor.anchorY}) 上方`)
+})
+
+test('layoutSmcLabels: preferredVertical=down → lane 偏移向下 (boxY > anchorY)', () => {
+  const a1 = makeAnchor({ anchorX: 400, anchorY: 300, text: 'BOS', preferredVertical: 'down' })
+  const a2 = makeAnchor({ anchorX: 400, anchorY: 300, text: 'CHoCH', preferredVertical: 'down' })
+  const result = layoutSmcLabels([a1, a2], defaultLayoutCtx, fixedMeasureText)
+  const offset = result.find(r => r.lane > 0)
+  assert.ok(offset, '应有 lane > 0')
+  assert.ok(offset!.boxY + offset!.boxH / 2 > offset!.anchor.anchorY,
+    `down: 标签框中心 Y (${offset!.boxY + offset!.boxH / 2}) 应在锚点 Y (${offset!.anchor.anchorY}) 下方`)
+})
+
+test('layoutSmcLabels: align=left → boxX = anchorX + 4', () => {
+  const anchor = makeAnchor({ anchorX: 100, anchorY: 200, text: 'OB', align: 'left' })
+  const result = layoutSmcLabels([anchor], defaultLayoutCtx, fixedMeasureText)
+  assert.equal(result.length, 1)
+  assert.equal(result[0].boxX, 100 + 4, 'align=left: boxX = anchorX + 4')
+})
+
+test('layoutSmcLabels: align=right → boxX = anchorX - boxW - 4', () => {
+  const anchor = makeAnchor({ anchorX: 700, anchorY: 200, text: 'trailing', align: 'right' })
+  const result = layoutSmcLabels([anchor], defaultLayoutCtx, fixedMeasureText)
+  assert.equal(result.length, 1)
+  const expectedBoxW = 'trailing'.length * 10 + 4 * 2 // 88
+  assert.equal(result[0].boxX, 700 - expectedBoxW - 4, 'align=right: boxX = anchorX - boxW - 4')
+})
+
+test('layoutSmcLabels: maxLanes=2 → 超过时回退到 lane 0', () => {
+  // 3 个完全重叠的标签，maxLanes=2 → 第 3 个无法找到不重叠 lane，回退 lane 0
+  const anchors: SmcLabelAnchor[] = [
+    makeAnchor({ anchorX: 400, anchorY: 300, text: 'A', preferredVertical: 'up' }),
+    makeAnchor({ anchorX: 400, anchorY: 300, text: 'B', preferredVertical: 'up' }),
+    makeAnchor({ anchorX: 400, anchorY: 300, text: 'C', preferredVertical: 'up' }),
+  ]
+  const ctx: SmcLabelLayoutContext = { ...defaultLayoutCtx, maxLanes: 2 }
+  const result = layoutSmcLabels(anchors, ctx, fixedMeasureText)
+  assert.equal(result.length, 3)
+  // 第 3 个标签会回退到 lane 0（best-effort）
+  assert.ok(result.every(r => r.lane <= 2), '所有标签 lane <= maxLanes')
 })

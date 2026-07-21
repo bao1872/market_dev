@@ -104,7 +104,7 @@ test('INDICATOR_VIEW_VALUES 包含 3 个允许值且顺序固定', () => {
 test('INDICATOR_VIEW_LABELS：三个视图对应中文文案', () => {
   assert.equal(INDICATOR_VIEW_LABELS.node_cluster, '筹码共识价')
   assert.equal(INDICATOR_VIEW_LABELS.bollinger, '布林带')
-  assert.equal(INDICATOR_VIEW_LABELS.smc, 'SMC结构')
+  assert.equal(INDICATOR_VIEW_LABELS.smc, '结构')
 })
 
 test('INDICATOR_VIEW_LAYER_PRESETS：node_cluster 只开启 node + volume', () => {

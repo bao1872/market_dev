@@ -31,6 +31,7 @@
 import type { ReactNode } from 'react'
 import type { IndicatorView } from '../api/endpoints'
 import { INDICATOR_VIEW_LABELS } from '../features/stock-research/stockResearchTypes'
+import BrandLogo from './BrandLogo'
 
 export interface MobileIndicatorStageProps {
   /** 股票名称（如 "京东方A"） */
@@ -48,7 +49,7 @@ export interface MobileIndicatorStageProps {
   /** 图表区域子节点（StrategyChart with isCaptureMode + indicatorView）。
    *    loading/error/mismatch 三态可不传（只渲染舞台外壳 + 居中文案） */
   children?: ReactNode
-  /** 品牌名（默认 "盘迹"） */
+  /** 品牌名（默认 "小Z拆市场"） */
   brandName?: string
   /** 品牌副标题（默认 "用数据拆解市场和价格背后的结构"） */
   brandTagline?: string
@@ -91,7 +92,7 @@ export default function MobileIndicatorStage({
   changePercent,
   chartDate,
   children,
-  brandName = '盘迹',
+  brandName = '小Z拆市场',
   brandTagline = '用数据拆解市场和价格背后的结构',
   testId,
   captureRoot = true,
@@ -111,7 +112,10 @@ export default function MobileIndicatorStage({
 
   // [PROMPT.md §5.3.3 V2] 发送时间：后端 snapshot_time 转 Asia/Shanghai
   //   禁止浏览器本地时间猜测；缺失时不渲染发送时间行
+  //   [2026-07-21 反馈] chart-head 右侧改显示发送时间（格式 2026-07-21 13:23）；
+  //   sendTimeText 缺失时回退到 chartDate，避免空白
   const sendTimeText = formatSendTime(snapshotTime)
+  const chartHeadTimeText = sendTimeText || chartDateText
 
   // [PROMPT.md §5.3.1 V2] 截图根选择器 + 动态 Ready
   //   - captureRoot=true 时根节点 data-testid="stock-detail-capture"（Playwright 截完整舞台）
@@ -151,9 +155,7 @@ export default function MobileIndicatorStage({
       <header className="mobile-stage-header">
         <div className="mobile-stage-brand-row">
           <div className="mobile-stage-brand">
-            <div className="mobile-stage-brand-mark" aria-hidden="true">
-              <span />
-            </div>
+            <BrandLogo variant="mobile" />
             <div className="mobile-stage-brand-text">
               <strong>{brandName}</strong>
               <span>{brandTagline}</span>
@@ -171,7 +173,7 @@ export default function MobileIndicatorStage({
             <div
               className={`mobile-stage-return-summary${isUp ? '' : ' down'}`}
             >
-              <span>累计涨跌幅</span>
+              <span>当天涨跌幅</span>
               <b>{changeText}</b>
             </div>
             <div className="mobile-stage-price-summary">
@@ -189,25 +191,17 @@ export default function MobileIndicatorStage({
             <i aria-hidden="true" />
             <span>K线图（日线）</span>
           </div>
-          <time>{chartDateText}</time>
+          <time>{chartHeadTimeText}</time>
         </header>
         <div className="mobile-stage-chart-viewport">
           {children}
         </div>
       </section>
 
-      {/* ===== 底部发送时间 + 三行风险提示 ===== */}
+      {/* ===== 底部免责声明（精简为单行）===== */}
       <div className="mobile-stage-footer">
-        {sendTimeText && (
-          <div className="mobile-stage-send-time" data-testid="mobile-stage-send-time">
-            <span>发送时间</span>
-            <time>{sendTimeText}</time>
-          </div>
-        )}
         <div className="mobile-stage-risk-notice" aria-label="内容声明">
-          <span>随机历史数据复盘</span>
           <span>内容仅做科普，不构成投资建议</span>
-          <span>投资有风险，入市需谨慎</span>
         </div>
       </div>
     </div>
