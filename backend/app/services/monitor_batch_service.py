@@ -55,6 +55,7 @@ from app.models.strategy_event import StrategyEvent
 from app.models.watchlist import UserWatchlistItem
 from app.repositories import monitor_state_repository, strategy_event_repository
 from app.schemas.notification import NotificationMessageDTO
+from app.services.canonical_computation_service import CanonicalComputationService
 from app.services.instrument_maintenance_service import is_index_symbol
 from app.services.market_data_aggregation_service import MarketDataAggregationService
 from app.services.notification_service import create_message
@@ -1759,10 +1760,7 @@ class MonitorBatchService:
         Returns:
             PNG 文件路径，失败返回 None
         """
-        from app.services.monitor_chart_renderer import (
-            _load_bollinger_module,
-            render_monitoring_chart,
-        )
+        from app.services.monitor_chart_renderer import render_monitoring_chart
 
         # 获取日线行情
         # [Node Cluster] - 描述: 统一走 MarketDataAggregationService，再 tail(N) 保留最近 N 根
@@ -1777,22 +1775,21 @@ class MonitorBatchService:
             logger.debug("日线行情不足，跳过 PNG 渲染: symbol=%s bars=%d", symbol, len(bars_daily))
             return None
 
-        # 计算布林带
+        # [CP-13] 经 canonical 调用 bollinger adapter（v2: DataFrame 11 列）
+        # 替代原 _load_bollinger_module + bb_module.bollinger 直接 kernel 调用。
+        # bb_mid/bb_upper/bb_lower 公式不变，从 DataFrame 提取对应列即可。
         try:
-            bb_module = _load_bollinger_module()
-        except (FileNotFoundError, ImportError) as exc:
-            logger.warning("bollinger features 模块不可用，跳过 PNG 渲染: %s", exc)
-            return None
-
-        try:
-            bb_result = bb_module.bollinger(bars_daily, win=20, k=2.0)
-            # bollinger() 返回 tuple (bb_mid, bb_upper, bb_lower)
-            if isinstance(bb_result, tuple):
-                bb_mid, bb_upper, bb_lower = bb_result
-            else:
-                bb_mid = bb_result["bb_mid"]
-                bb_upper = bb_result["bb_upper"]
-                bb_lower = bb_result["bb_lower"]
+            bb_canonical = await CanonicalComputationService.compute(
+                algorithm_id="bollinger",
+                instrument_id=instrument_id,
+                bars=bars_daily,
+                length=20,
+                mult=2.0,
+            )
+            bb_df = bb_canonical.payload
+            bb_mid = bb_df["bb_mid"]
+            bb_upper = bb_df["bb_upper"]
+            bb_lower = bb_df["bb_lower"]
         except Exception as exc:
             logger.warning("布林带计算失败 symbol=%s: %s", symbol, exc)
             return None
@@ -1823,10 +1820,9 @@ class MonitorBatchService:
     ) -> Any:
         """计算 Node Cluster Profile（筹码分布）。
 
-        [CHANGE-20260718-004 Node Cluster engine] 调用唯一业务入口
-        `node_cluster_engine.compute_node_cluster_profile`，不再直接调用底层
-        `compute_unified_volume_profile`。架构守护测试 test_node_cluster_architecture
-        强制此约束（只有 engine 可导入底层 VP）。
+        [CP-13 Canonical 四链迁移] 经 CanonicalComputationService.compute(algorithm_id="node_cluster", ...)
+        调用，不再直接 import compute_node_cluster_profile kernel。adapter 包装
+        `node_cluster_engine.compute_node_cluster_profile`，行为不变。
 
         返回 `NodeClusterProfileResult`，其 `profile_df`/`peak_df`/`price_step` 属性
         通过鸭子类型适配器（engine 内部委托 `_vp_result`）与历史 `UnifiedVolumeProfileResult`
@@ -1844,9 +1840,6 @@ class MonitorBatchService:
         Returns:
             NodeClusterProfileResult 对象；15m 数据不可用时返回 None（由上层降级处理）
         """
-        # [CHANGE-20260720-005 §五] kernel 函数经 canonical_adapters re-export，
-        # 满足四链 AST 门禁（禁止直接 import kernel 模块）
-        from app.services.canonical_adapters import compute_node_cluster_profile
         from app.strategy._plotly_mock import ensure_plotly_mock
 
         ensure_plotly_mock()
@@ -1879,10 +1872,14 @@ class MonitorBatchService:
                 return cached_profile
 
         try:
-            profile = compute_node_cluster_profile(
-                bars_daily,
-                bars_15min,
+            # [CP-13] 经 canonical 调用 node_cluster adapter
+            node_cluster_canonical = await CanonicalComputationService.compute(
+                algorithm_id="node_cluster",
+                instrument_id=instrument_id,
+                daily_bars=bars_daily,
+                bars_15m=bars_15min,
             )
+            profile = node_cluster_canonical.payload
         except Exception as e:
             raise RuntimeError(
                 f"compute_node_cluster_profile 失败 instrument_id={instrument_id}: {e}"

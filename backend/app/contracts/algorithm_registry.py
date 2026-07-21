@@ -299,7 +299,7 @@ def _register_builtin_algorithms() -> None:
         algorithm_version="smc-v1",
         kernel_module="app.services.canonical_adapters",
         kernel_entrypoint="app.services.canonical_adapters:compute_smc_adapter",
-        input_timeframes=("1d",),
+        input_timeframes=("1d", "15m", "1h", "1w", "1mo"),
         adjustment_mode="qfq",
         completed_only=True,
         warmup_bars=500,
@@ -307,32 +307,36 @@ def _register_builtin_algorithms() -> None:
         contract_fingerprint="smc-cf-v1",
         migration_status="production_wired",
         description=(
-            "SMC（Smart Money Concepts）：日线 qfq，按需计算（include_smc=true）。"
+            "SMC（Smart Money Concepts）：qfq，按需计算（include_smc=true）。"
             "参数：Historical=true, Internal=true, All=true, Swing length=50, "
             "Internal OB count=5, EQH/EQL confirmation=3 threshold=0.1。"
             "FVG 完全排除。adapter 二合一：compute_smc_indicators + adapt_smc_to_display_dto。"
+            "[CP-13] input_timeframes 扩展为多周期（与 indicator_service 实际使用一致）。"
         ),
     ))
 
     # ----- Bollinger Bands -----
     # adapter: app.services.canonical_adapters.compute_bollinger_adapter
-    # 包装 bollinger_features_plotly.bollinger(df, win, k)
-    # 参数：BB_WIN=20, BB_K=2.0
+    # [CP-13] 包装 merged_dsa_atr_rope_bb_factors.compute_bollinger(df, length, mult, pct_lookback)
+    # 返回 DataFrame（11 列：bb_mid/bb_upper/bb_lower/bb_pos_01/bb_width_norm 等）
+    # 参数：length=20, mult=2.0, pct_lookback=120
     AlgorithmRegistry.register(AlgorithmContract(
         algorithm_id="bollinger",
-        algorithm_version="bb-v1",
+        algorithm_version="bb-v2",
         kernel_module="app.services.canonical_adapters",
         kernel_entrypoint="app.services.canonical_adapters:compute_bollinger_adapter",
         input_timeframes=("1d", "15m", "1h", "1w", "1mo"),
         adjustment_mode="qfq",
         completed_only=True,
         warmup_bars=250,
-        output_schema_version=1,
-        contract_fingerprint="bb-cf-v1",
+        output_schema_version=2,
+        contract_fingerprint="bb-cf-v2",
         migration_status="production_wired",
         description=(
-            "Bollinger Bands：BB_WIN=20, BB_K=2.0，多周期支持。"
-            "输出 bb_upper/bb_mid/bb_lower + 位置 0-1。"
+            "Bollinger Bands：length=20, mult=2.0, pct_lookback=120，多周期支持。"
+            "[CP-13] v2: 返回 DataFrame（11 列），含 bb_upper/bb_mid/bb_lower/"
+            "bb_pos_01/bb_width_norm/bb_width_percentile 等字段。"
+            "v1（dict 3 字段）已废弃。"
         ),
     ))
 
@@ -365,7 +369,7 @@ def _register_builtin_algorithms() -> None:
         algorithm_version="sqzmom-v1",
         kernel_module="app.services.canonical_adapters",
         kernel_entrypoint="app.services.canonical_adapters:compute_sqzmom_adapter",
-        input_timeframes=("1d",),
+        input_timeframes=("1d", "15m", "1h", "1w", "1mo"),
         adjustment_mode="qfq",
         completed_only=True,
         warmup_bars=250,
@@ -375,6 +379,7 @@ def _register_builtin_algorithms() -> None:
         description=(
             "SQZMOM（Squeeze Momentum）：BB/Keltner 通道挤压 + 动量直方图。"
             "输出 squeeze_on/squeeze_off/momentum + 历史信号。"
+            "[CP-13] input_timeframes 扩展为多周期（与 indicator_service 实际使用一致）。"
         ),
     ))
 

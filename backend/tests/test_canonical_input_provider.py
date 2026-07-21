@@ -154,7 +154,8 @@ async def test_compute_with_mdas_accepts_production_wired_bollinger() -> None:
             as_of=date(2026, 7, 18),
         )
     assert result.algorithm_id == "bollinger"
-    assert result.contract_fingerprint == "bb-cf-v1"
+    # [CP-13] bollinger 合同升级到 bb-v2（kernel 切换为 compute_bollinger 11 列 DataFrame）
+    assert result.contract_fingerprint == "bb-cf-v2"
 
 
 @pytest.mark.asyncio

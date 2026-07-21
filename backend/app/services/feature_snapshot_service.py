@@ -54,20 +54,22 @@ from app.services.atomic_fact_contract_service import build_persisted_afc_payloa
 # 注入 _compute_all_factors_for_bars(primary)，修复三链不一致缺陷（原 _compute_cost_position_factors
 # 单独调用 compute_unified_volume_profile(bars) 单周期 VP，与详情/监控链口径不一致）。
 # 15m secondary 保持单周期 VP 语义（timeframe_volume_profile，非 Node Cluster）。
-# [CHANGE-20260720-005 §五] 以下 kernel 函数经 canonical_adapters re-export，
-# 满足四链 AST 门禁（禁止直接 import kernel 模块）。
+#
+# [CP-13 Canonical 四链迁移] 四链禁止直接 import 算法 kernel 函数；
+# 所有注册算法（node_cluster/bollinger/macd/structural_features/primary_secondary_relation）
+# 必须经 CanonicalComputationService.compute() 调用。
+# 仅保留 DTO builders（非算法 kernel，是视图层工具）、类型引用和 temporal 子函数
+# （temporal 子函数无独立 registered adapter，compute_temporal_features_adapter 会
+#  重复获取 bars 和重算因子，故保留直接调用）。
 from app.services.canonical_adapters import (
     NodeClusterProfileResult,
-    _compute_all_factors_for_bars,
     _compute_daily_context,
     _compute_derived_relation,
     _compute_m15_response,
-    _compute_relation,
-    bollinger,
     build_price_state,
-    compute_node_cluster_profile,
     profile_to_dict,
 )
+from app.services.canonical_computation_service import CanonicalComputationService
 
 
 class PublishedSnapshotRunExistsError(Exception):
@@ -108,11 +110,17 @@ _MACD_SIGNAL = 9
 # =============================================================================
 
 
-def _compute_macd_state(df_1d: pd.DataFrame | None) -> dict[str, Any]:
+async def _compute_macd_state(
+    df_1d: pd.DataFrame | None,
+    instrument_id: uuid.UUID,
+    trade_date: date,
+    source_bar_hash: str | None = None,
+    adj_factor_hash: str | None = None,
+) -> dict[str, Any]:
     """C6: 计算MACD紧凑状态（只保存最终值+code，不保存完整序列）。
 
-    调用 indicator_service.compute_macd 真源（A 股 2× 版本），
-    禁止在本模块内复制 EMA/MACD 公式形成第二套实现。
+    [CP-13] 经 CanonicalComputationService.compute(algorithm_id="macd", ...) 调用，
+    禁止直接 import compute_macd kernel，禁止在本模块内复制 EMA/MACD 公式。
 
     code 四象限（基于 DIF 和 DEA）：
     - bullish_above: DIF > 0 且 DIF > DEA（最强多头）
@@ -128,12 +136,19 @@ def _compute_macd_state(df_1d: pd.DataFrame | None) -> dict[str, Any]:
     if len(df_1d) < min_len:
         return empty
 
-    from app.services.indicator_service import compute_macd
-
-    closes = df_1d["close"].to_numpy(dtype=float)
-    macd_result = compute_macd(
-        closes, fast=_MACD_FAST, slow=_MACD_SLOW, signal=_MACD_SIGNAL,
+    # [CP-13] 经 canonical 调用 macd adapter（包装 indicator_service.compute_macd）
+    canonical_result = await CanonicalComputationService.compute(
+        algorithm_id="macd",
+        instrument_id=instrument_id,
+        as_of=trade_date.isoformat(),
+        source_bar_hash=source_bar_hash,
+        adj_factor_hash=adj_factor_hash,
+        bars=df_1d,
+        fast=_MACD_FAST,
+        slow=_MACD_SLOW,
+        signal=_MACD_SIGNAL,
     )
+    macd_result = canonical_result.payload
     # 取最后一个非 None 值
     dif_list = macd_result["macd_dif"]
     dea_list = macd_result["macd_dea"]
@@ -328,6 +343,7 @@ async def compute_feature_snapshot_for_date(
 
     # 获取 K 线（如果未预加载）
     primary_adj_factor_hash: str | None = None
+    primary_source_bar_hash: str | None = None
     if primary_bars is None:
         primary_bars, primary_diag = await _fetch_bars_from_db(
             session, instrument_id, primary_timeframe, adj, trade_date,
@@ -337,6 +353,8 @@ async def compute_feature_snapshot_for_date(
             _diag_sink.update(primary_diag)
         # [CHANGE-20260718-004] 提取 adj_factor_hash 供 engine 诊断字段（point-in-time 复权因子 hash）
         primary_adj_factor_hash = primary_diag.get("adj_factor_hash") if primary_diag else None
+        # [CP-13] 提取 source_bar_hash 供 canonical result_hash 计算
+        primary_source_bar_hash = primary_diag.get("source_bar_hash") if primary_diag else None
     if secondary_bars is None:
         secondary_bars, _secondary_diag = await _fetch_bars_from_db(
             session, instrument_id, secondary_timeframe, adj, trade_date,
@@ -376,11 +394,20 @@ async def compute_feature_snapshot_for_date(
         node_degraded_reason = "INSUFFICIENT_DAILY_BARS"
     else:
         try:
-            node_cluster_profile = compute_node_cluster_profile(
-                df_1d, df_15m if has_15m else pd.DataFrame(),
-                adjustment_as_of=trade_date.isoformat(),
+            # [CP-13] 经 canonical 调用 node_cluster adapter
+            # adj_factor_hash 是 compute() 命名参数，会被拦截用于 result_hash，
+            # 不传入 kernel_kwargs；adapter 内 adj_factor_hash 默认 None（仅诊断用）。
+            node_cluster_canonical = await CanonicalComputationService.compute(
+                algorithm_id="node_cluster",
+                instrument_id=instrument_id,
+                as_of=trade_date.isoformat(),
+                source_bar_hash=primary_source_bar_hash,
                 adj_factor_hash=primary_adj_factor_hash,
+                daily_bars=df_1d,
+                bars_15m=df_15m if has_15m else pd.DataFrame(),
+                adjustment_as_of=trade_date.isoformat(),
             )
+            node_cluster_profile = node_cluster_canonical.payload
         except Exception as exc:
             logger.warning("Node Cluster engine 计算失败: %s", exc)
             node_cluster_profile = None
@@ -388,7 +415,8 @@ async def compute_feature_snapshot_for_date(
             node_degraded_reason = f"COMPUTE_FAILED: {exc}"
             degraded_reasons.append(f"node_cluster: engine failed: {exc}")
         else:
-            if not node_cluster_profile.profile_rows:
+            # [CP-13] mypy: node_cluster_profile 在 else 分支非 None（except 分支已 return/continue）
+            if node_cluster_profile is None or not node_cluster_profile.profile_rows:
                 node_availability = "unavailable"
                 node_degraded_reason = "PROFILE_EMPTY"
             elif not has_15m:
@@ -399,20 +427,44 @@ async def compute_feature_snapshot_for_date(
                 node_degraded_reason = None
 
     # 计算 structural factors
-    primary_factors = _compute_all_factors_for_bars(
-        df_1d, primary_timeframe, degraded_reasons, warmup_notes,
+    # [CP-13] 经 canonical 调用 structural_features adapter
+    # adapter 内部创建 degraded_reasons/warmup_notes 列表并附加到 result，
+    # 调用方需 pop 出来扩展到自身的 degraded_reasons/warmup_notes（保持原 side-effect 语义）。
+    primary_canonical = await CanonicalComputationService.compute(
+        algorithm_id="structural_features",
+        instrument_id=instrument_id,
+        as_of=trade_date.isoformat(),
+        source_bar_hash=primary_source_bar_hash,
+        adj_factor_hash=primary_adj_factor_hash,
+        bars=df_1d if df_1d is not None else pd.DataFrame(),
+        timeframe=primary_timeframe,
         precomputed_node_cluster=node_cluster_profile,
     )
-    secondary_factors = _compute_all_factors_for_bars(
-        df_15m, secondary_timeframe, degraded_reasons, warmup_notes,
+    primary_factors = primary_canonical.payload
+    degraded_reasons.extend(primary_factors.pop("degraded_reasons", []))
+    warmup_notes.extend(primary_factors.pop("warmup_notes", []))
+
+    secondary_canonical = await CanonicalComputationService.compute(
+        algorithm_id="structural_features",
+        instrument_id=instrument_id,
+        as_of=trade_date.isoformat(),
+        bars=df_15m if df_15m is not None else pd.DataFrame(),
+        timeframe=secondary_timeframe,
         precomputed_node_cluster=None,  # 15m secondary 单周期 VP，非 Node Cluster
     )
+    secondary_factors = secondary_canonical.payload
+    degraded_reasons.extend(secondary_factors.pop("degraded_reasons", []))
+    warmup_notes.extend(secondary_factors.pop("warmup_notes", []))
 
     # C6: 计算真实 MACD 紧凑状态
     # 只保存紧凑状态（最终值+code），不保存完整指标序列
-    primary_factors["macd_state"] = _compute_macd_state(df_1d)
+    primary_factors["macd_state"] = await _compute_macd_state(
+        df_1d, instrument_id, trade_date, primary_source_bar_hash, primary_adj_factor_hash,
+    )
 
     # 计算 temporal features（复用内部函数）
+    # [CP-13] temporal 子函数无独立 registered adapter（compute_temporal_features_adapter
+    # 会重复获取 bars 和重算因子），故保留直接调用。
     daily_context = _compute_daily_context(
         primary_factors, df_1d, degraded_reasons, warmup_notes
     )
@@ -426,7 +478,15 @@ async def compute_feature_snapshot_for_date(
     # [Blocker4] - 复用 structural_factor_service._compute_relation 计算 primary vs secondary
     # 客观关系（trend_alignment / secondary_vs_primary_position_delta 等），
     # 禁止在 feature_snapshot_service 内复制关系计算公式。
-    relation = _compute_relation(primary_factors, secondary_factors)
+    # [CP-13] 经 canonical 调用 primary_secondary_relation adapter
+    relation_canonical = await CanonicalComputationService.compute(
+        algorithm_id="primary_secondary_relation",
+        instrument_id=instrument_id,
+        as_of=trade_date.isoformat(),
+        primary_factors=primary_factors,
+        secondary_factors=secondary_factors,
+    )
+    relation = relation_canonical.payload
 
     # 构造 structural_payload（与 compute_structural_factors 输出格式对齐）
     # [CHANGE-20260718-004] primary.1d 新增 canonical node_cluster 字段（engine 不可变结果），
@@ -516,7 +576,9 @@ async def compute_feature_snapshot_for_date(
     }
 
     # 提取额外字段（current_price, change_pct, BB 绝对值）
-    extra = _extract_extra_fields(df_1d)
+    extra = await _extract_extra_fields(
+        df_1d, instrument_id, trade_date, primary_source_bar_hash, primary_adj_factor_hash,
+    )
 
     # source_bar_time
     source_primary = _normalize_primary_bar_time(df_1d, trade_date)
@@ -609,10 +671,18 @@ async def _fetch_bars_from_db(
         return None, {}
 
 
-def _extract_extra_fields(df_1d: pd.DataFrame | None) -> dict[str, Any]:
+async def _extract_extra_fields(
+    df_1d: pd.DataFrame | None,
+    instrument_id: uuid.UUID,
+    trade_date: date,
+    source_bar_hash: str | None = None,
+    adj_factor_hash: str | None = None,
+) -> dict[str, Any]:
     """从日线 bars 最后一根提取 current_price, change_pct, BB 绝对值。
 
-    BB 使用 bollinger(bars, 20, 2.0) 计算，与 structural_factor_service 一致。
+    [CP-13] BB 经 CanonicalComputationService.compute(algorithm_id="bollinger", ...) 调用，
+    使用 compute_bollinger kernel（DataFrame 11 列）替代旧 bollinger 3-tuple kernel。
+    bb_mid/bb_upper/bb_lower 公式不变（与 structural_factor_service 对齐）。
     """
     extra: dict[str, Any] = {
         "current_price": None,
@@ -636,10 +706,24 @@ def _extract_extra_fields(df_1d: pd.DataFrame | None) -> dict[str, Any]:
     # BB 绝对值（需要 >= 20 根 bar）
     if len(df_1d) >= _BB_WIN + 1:
         try:
-            mid, upper, lower = bollinger(df_1d, _BB_WIN, _BB_K)
-            extra["bb_upper"] = float(upper.iloc[-1]) if pd.notna(upper.iloc[-1]) else None
-            extra["bb_mid"] = float(mid.iloc[-1]) if pd.notna(mid.iloc[-1]) else None
-            extra["bb_lower"] = float(lower.iloc[-1]) if pd.notna(lower.iloc[-1]) else None
+            # [CP-13] 经 canonical 调用 bollinger adapter（v2: DataFrame 11 列）
+            bb_canonical = await CanonicalComputationService.compute(
+                algorithm_id="bollinger",
+                instrument_id=instrument_id,
+                as_of=trade_date.isoformat(),
+                source_bar_hash=source_bar_hash,
+                adj_factor_hash=adj_factor_hash,
+                bars=df_1d,
+                length=_BB_WIN,
+                mult=_BB_K,
+            )
+            bb_df = bb_canonical.payload
+            upper_series = bb_df["bb_upper"]
+            mid_series = bb_df["bb_mid"]
+            lower_series = bb_df["bb_lower"]
+            extra["bb_upper"] = float(upper_series.iloc[-1]) if pd.notna(upper_series.iloc[-1]) else None
+            extra["bb_mid"] = float(mid_series.iloc[-1]) if pd.notna(mid_series.iloc[-1]) else None
+            extra["bb_lower"] = float(lower_series.iloc[-1]) if pd.notna(lower_series.iloc[-1]) else None
         except Exception:
             pass
 

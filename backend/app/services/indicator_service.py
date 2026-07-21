@@ -50,18 +50,18 @@ from app.constants.indicator_contract import (
 from app.constants.strategy_keys import DSA_SELECTOR, WATCHLIST_MONITOR
 from app.models.instrument import Instrument
 from app.models.strategy import StrategyDefinition, StrategyVersion
+
+# [CP-13 Canonical 四链迁移] 四链禁止直接 import 算法 kernel 函数；
+# 所有注册算法（macd/sqzmom/bollinger/smc/node_cluster）必须经 CanonicalComputationService.compute() 调用。
+# 仅保留 DTO builders（非算法 kernel，是视图层工具）和类型引用。
 from app.services.canonical_adapters import (
     NodeClusterProfileResult,
-    adapt_smc_to_display_dto,
     build_node_regions,
     build_price_state,
-    compute_bollinger,
-    compute_node_cluster_profile,
     compute_node_regions_hash,
-    compute_smc_indicators,
-    compute_sqzmom_lb,
     derive_state_for_price,
 )
+from app.services.canonical_computation_service import CanonicalComputationService
 from app.services.chart_bars_service import (
     compute_source_bar_hash,
     compute_source_bar_times,
@@ -350,25 +350,35 @@ def _map_daily_to_intraday(
     return [daily_values[i] for i in pos]
 
 
-def _adapt_watchlist_bb(
+async def _adapt_watchlist_bb(
     indicators: dict[str, Any],
     timeframe: str,
     macd_bars: pd.DataFrame,
     macd_time_list: list[str],
     daily_time_list: list[str],
+    *,
+    instrument_id: uuid.UUID | None = None,
+    adjustment_as_of: str | None = None,
+    source_bar_hash: str | None = None,
+    adj_factor_hash: str | None = None,
 ) -> dict[str, Any]:
     """调整 watchlist_monitor 的 BB 输出以匹配当前 timeframe。
 
     - 日线：保留完整日线 BB 序列（不截断），time 同步完整
     - 15m/1h/1w/1mo：用 macd_bars 重新计算 BB（length=20, mult=2.0），不再映射日线阶梯线
 
+    [CP-13 Canonical 四链迁移] BB kernel 通过 CanonicalComputationService.compute()
+    调用（algorithm_id="bollinger"），不再直接调用 compute_bollinger。
+    canonical result_hash 含 source_bar_hash/adj_factor_hash/contract_fingerprint，
+    供四链一致性矩阵断言。
+
     修复根因（PR #31）：
         之前 15m/1h 调用 _map_daily_to_intraday 把日线 BB 映射到日内时间轴，
         导致 15m BB 全部相同（阶梯线），不是真正的 15m 周期 BB。
-        新行为：15m/1h 用 compute_bollinger(macd_bars) 重新计算 BB，
+        新行为：15m/1h 用 canonical BB（基于 macd_bars）重新计算，
         bb_upper/bb_mid/bb_lower 反映当前 timeframe close 的波动。
 
-    [PR #32] - 1w/1mo 也用 compute_bollinger(macd_bars) 计算，不再移除 BB 字段。
+    [PR #32] - 1w/1mo 也用 canonical BB 计算，不再移除 BB 字段。
         之前 1w/1mo 直接 pop BB 字段导致前端无 BB overlay。
 
     Args:
@@ -377,6 +387,10 @@ def _adapt_watchlist_bb(
         macd_bars: 当前 timeframe 对应的 bars（用于 BB 计算）
         macd_time_list: 当前 timeframe 对应的时间列表
         daily_time_list: 日线时间列表（15m/1h 路径不再使用，保留参数兼容）
+        instrument_id: 标的 UUID（canonical result_hash 维度）
+        adjustment_as_of: 复权锚点 ISO 字符串
+        source_bar_hash: 当前 timeframe bars 的 source_bar_hash
+        adj_factor_hash: 当前 timeframe bars 的 adj_factor_hash
 
     Returns:
         调整后的指标字典
@@ -386,7 +400,7 @@ def _adapt_watchlist_bb(
 
     if timeframe in ("15m", "1h", "1w", "1mo"):
         # [PR #31/#32] - 15m/1h/1w/1mo BB 用 macd_bars 重新计算，不再映射日线阶梯线或移除
-        #   compute_bollinger 返回 bb_upper/bb_mid/bb_lower/bb_pos_01/bb_width_norm
+        #   canonical BB adapter 返回 DataFrame: bb_upper/bb_mid/bb_lower/bb_pos_01/bb_width_norm
         #   映射到 watchlist_monitor 字段名：bb_pos_01→bb_pos, bb_width_norm→bb_width
         if not bb_fields_present or macd_bars.empty or not macd_time_list:
             return result
@@ -398,8 +412,19 @@ def _adapt_watchlist_bb(
             result["time"] = macd_time_list
             return result
 
-        bb_result = compute_bollinger(macd_bars, length=20, mult=2.0)
-        # 字段映射：compute_bollinger 返回名 → watchlist_monitor 字段名
+        # [CP-13] 通过 CanonicalComputationService.compute() 调用 bollinger kernel
+        canonical_result = await CanonicalComputationService.compute(
+            algorithm_id="bollinger",
+            instrument_id=instrument_id or uuid.UUID(int=0),
+            as_of=adjustment_as_of,
+            source_bar_hash=source_bar_hash,
+            adj_factor_hash=adj_factor_hash,
+            bars=macd_bars,
+            length=20,
+            mult=2.0,
+        )
+        bb_result = canonical_result.payload  # DataFrame（11 列）
+        # 字段映射：canonical BB 返回名 → watchlist_monitor 字段名
         field_map = {
             "bb_upper": "bb_upper",
             "bb_mid": "bb_mid",
@@ -421,16 +446,25 @@ def _adapt_watchlist_bb(
     return result
 
 
-def _compute_independent_node_cluster(
+async def _compute_independent_node_cluster(
     daily_bars: pd.DataFrame,
     bars_15min: pd.DataFrame,
     *,
     symbol: str = "",
+    instrument_id: uuid.UUID | None = None,
+    adjustment_as_of: str | None = None,
+    daily_source_hash: str | None = None,
+    daily_adj_factor_hash: str | None = None,
 ) -> dict[str, Any]:
     """独立计算 Node Cluster Profile，输出 data["node_cluster"]。
 
     [CHANGE-20260720-001] Node Cluster 固定使用 completed qfq 1d×250 + 15m×4000，
     不加载 1m，不随页面周期变化。五周期切换时 profile_hash 必须一致。
+
+    [CP-13 Canonical 四链迁移] Node Cluster kernel 通过 CanonicalComputationService.compute()
+    调用（algorithm_id="node_cluster"），不再直接调用 compute_node_cluster_profile。
+    canonical result_hash 含 source_bar_hash/adj_factor_hash/contract_fingerprint，
+    供四链一致性矩阵断言。
 
     [PROMPT.md §三.3 V2] 新增 Canonical Node DTO V2：
     - node_regions: 稳定的 Peak Node 列表（entity_id/kind/low/mid/high/多空量/is_poc）
@@ -454,6 +488,10 @@ def _compute_independent_node_cluster(
         daily_bars: 真正日线 bars（completed qfq，由 MDAS 获取）
         bars_15min: 15m bars（completed qfq，由 MDAS 获取）
         symbol: 股票代码（日志用）
+        instrument_id: 标的 UUID（canonical result_hash 维度）
+        adjustment_as_of: 复权锚点 ISO 字符串（canonical result_hash 维度）
+        daily_source_hash: 日线 source_bar_hash（canonical result_hash 维度）
+        daily_adj_factor_hash: 日线 adj_factor_hash（canonical result_hash 维度）
 
     Returns:
         Node Cluster 独立输出字典
@@ -475,9 +513,20 @@ def _compute_independent_node_cluster(
     has_15m = bars_15min is not None and not bars_15min.empty
 
     try:
-        profile: NodeClusterProfileResult = compute_node_cluster_profile(
-            daily_bars, bars_15min if has_15m else pd.DataFrame(),
+        # [CP-13] 通过 CanonicalComputationService.compute() 调用 node_cluster kernel
+        # canonical result_hash 含 contract_fingerprint + source_bar_hash + adj_factor_hash，
+        # 供四链一致性矩阵断言（详情/盘后/盘中/Capture 同输入 → 同 result_hash）
+        canonical_result = await CanonicalComputationService.compute(
+            algorithm_id="node_cluster",
+            instrument_id=instrument_id or uuid.UUID(int=0),
+            as_of=adjustment_as_of,
+            source_bar_hash=daily_source_hash,
+            adj_factor_hash=daily_adj_factor_hash,
+            daily_bars=daily_bars,
+            bars_15m=bars_15min if has_15m else pd.DataFrame(),
+            adjustment_as_of=adjustment_as_of,
         )
+        profile: NodeClusterProfileResult = canonical_result.payload
     except Exception as exc:
         logger.warning("node_cluster 独立计算失败 symbol=%s: %s", symbol, exc)
         return {
@@ -540,6 +589,12 @@ def _compute_independent_node_cluster(
         "adjustment_as_of": profile.adjustment_as_of,
         "primary_period": "1d",
         "low_period": "15m",
+        # [CP-13] canonical result_hash — 四链一致性矩阵权威 hash
+        # 同 instrument/timeframe/as_of/adjustment_as_of 下四链必须一致
+        "canonical_result_hash": canonical_result.result_hash,
+        "canonical_algorithm_id": canonical_result.algorithm_id,
+        "canonical_algorithm_version": canonical_result.algorithm_version,
+        "canonical_output_schema_version": canonical_result.output_schema_version,
     }
 
     return {
@@ -565,7 +620,7 @@ async def _load_node_cluster_inputs(
     *,
     adjustment_as_of: date | None = None,
     load_15m: bool = True,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, str | None, str | None]:
     """[NC-01/NC-02/NC-03 V2] 独立加载 Node Cluster 输入，固定 completed qfq。
 
     Node Cluster 输入合同（PROMPT.md §三 V2 / PRD V2.0 NC-01..NC-03）：
@@ -579,6 +634,9 @@ async def _load_node_cluster_inputs(
       - 4000 是 NODE_CLUSTER_LOW_BARS（Node 15m 输入合同常量，非页面 bars 参数）。
     本函数是 Node Cluster 输入合同隔离的唯一入口，禁止在其他位置查询 Node 输入。
 
+    [CP-13 Canonical 四链迁移] 返回 daily_agg 的 source_bar_hash/adj_factor_hash，
+    供 CanonicalComputationService.compute() 计算 result_hash（四链一致性矩阵依赖）。
+
     Args:
         session: 异步 DB 会话
         instrument_id: 标的 UUID
@@ -588,8 +646,10 @@ async def _load_node_cluster_inputs(
             needs_15min=False 时传 False 以跳过 15m 查询（性能优化，不改合同语义）。
 
     Returns:
-        (daily_bars, bars_15min) 元组，均为 completed qfq。
+        (daily_bars, bars_15min, daily_source_hash, daily_adj_factor_hash) 元组。
+        daily_bars/bars_15min 均为 completed qfq。
         daily_bars 已 tail(DAILY_HISTORY_BARS)；bars_15min 长度 ≤ NODE_CLUSTER_LOW_BARS。
+        daily_source_hash/daily_adj_factor_hash 来自 MDAS 诊断，供 canonical result_hash 使用。
     """
     _mdas = MarketDataAggregationService()
 
@@ -617,7 +677,7 @@ async def _load_node_cluster_inputs(
         )
         bars_15min = r15.bars
 
-    return daily_bars, bars_15min
+    return daily_bars, bars_15min, daily_agg.source_bar_hash, daily_agg.adj_factor_hash
 
 
 # ===== 主函数 =====
@@ -748,7 +808,7 @@ async def compute_all_indicators(
     # node_daily_bars/bars_15min 同时供 MarketDataContext.bars_15min（volume_node_monitor 等策略）
     #   和 _compute_independent_node_cluster 使用，保证四链一致。
     # 旧的 include_realtime=True 查询已移除（NC-02 修复）。
-    node_daily_bars, bars_15min = await _load_node_cluster_inputs(
+    node_daily_bars, bars_15min, node_daily_source_hash, node_daily_adj_factor_hash = await _load_node_cluster_inputs(
         session, instrument_id, adj,
         adjustment_as_of=adjustment_as_of,
         load_15m=needs_15min,
@@ -877,7 +937,21 @@ async def compute_all_indicators(
 
     # [MACD 副图] - 统一在后端按当前 timeframe 计算 MACD 指标，避免前后端多套实现
     # 使用当前 timeframe 对应 bars 的 close 计算，参数 fast=12, slow=26, signal=9
-    macd_indicators = compute_macd(macd_bars["close"].to_numpy(float))
+    # [CP-13] 通过 CanonicalComputationService.compute() 调用 macd kernel
+    #   canonical adapter 接收 bars DataFrame，内部提取 close 转发到 compute_macd
+    #   canonical result_hash 含 source_bar_hash/adj_factor_hash，供四链一致性断言
+    macd_canonical = await CanonicalComputationService.compute(
+        algorithm_id="macd",
+        instrument_id=instrument_id,
+        as_of=str(adjustment_as_of) if adjustment_as_of else str(today),
+        source_bar_hash=source_bar_hash,
+        adj_factor_hash=macd_agg.adj_factor_hash if macd_agg is not None else None,
+        bars=macd_bars,
+        fast=12,
+        slow=26,
+        signal=9,
+    )
+    macd_indicators = macd_canonical.payload  # dict: macd_dif/macd_dea/macd_hist
 
     # [MACD 副图] - MACD time 与当前 timeframe bars 时间对齐（advice.md 第八节）
     macd_time_list: list[str] = [
@@ -888,13 +962,17 @@ async def compute_all_indicators(
     # 不修正 dev = multKC * stdev(...)（Pine 原代码如此）
     # 参数：length=20, mult=2.0, lengthKC=20, multKC=1.5, useTrueRange=True
     # 复用 macd_bars（当前 timeframe 已选好的 bars），与 MACD 同源
-    sqzmom_indicators = compute_sqzmom_lb(
-        opens=macd_bars["open"].to_numpy(float),
-        highs=macd_bars["high"].to_numpy(float),
-        lows=macd_bars["low"].to_numpy(float),
-        closes=macd_bars["close"].to_numpy(float),
+    # [CP-13] 通过 CanonicalComputationService.compute() 调用 sqzmom kernel
+    sqzmom_canonical = await CanonicalComputationService.compute(
+        algorithm_id="sqzmom",
+        instrument_id=instrument_id,
+        as_of=str(adjustment_as_of) if adjustment_as_of else str(today),
+        source_bar_hash=source_bar_hash,
+        adj_factor_hash=macd_agg.adj_factor_hash if macd_agg is not None else None,
+        bars=macd_bars,
         params={"length": 20, "mult": 2.0, "lengthKC": 20, "multKC": 1.5, "useTrueRange": True},
     )
+    sqzmom_indicators = sqzmom_canonical.payload  # dict: val/sqzOn/sqzOff/noSqz/bcolor/scolor/params
 
     # 复用 StrategyBatchService._get_latest_released_version 查询最新 released 版本
     batch_service = StrategyBatchService()
@@ -948,12 +1026,17 @@ async def compute_all_indicators(
             # [BB 图层] - watchlist_monitor BB 按 timeframe 调整后处理
             preserve_keys: frozenset[str] | None = None
             if strategy_id == "watchlist_monitor":
-                indicators_with_time = _adapt_watchlist_bb(
+                # [CP-13] _adapt_watchlist_bb 已改为 async + canonical BB 调用
+                indicators_with_time = await _adapt_watchlist_bb(
                     indicators_with_time,
                     timeframe,
                     macd_bars,
                     macd_time_list,
                     daily_time_list,
+                    instrument_id=instrument_id,
+                    adjustment_as_of=str(adjustment_as_of) if adjustment_as_of else None,
+                    source_bar_hash=source_bar_hash,
+                    adj_factor_hash=macd_agg.adj_factor_hash if macd_agg is not None else None,
                 )
                 if timeframe == "1d":
                     # 日线保留完整 BB 序列与完整 time，便于前端按时间键匹配
@@ -990,8 +1073,16 @@ async def compute_all_indicators(
     # 现独立计算并输出，前端优先读取 data["node_cluster"]，旧 watchlist_monitor 仅兼容回退。
     # [NC-01/NC-02 V2] 使用 _load_node_cluster_inputs 返回的 node_daily_bars（completed qfq），
     #   不复用 display 的 daily_bars（可能含 realtime partial bar）。
-    data["node_cluster"] = _compute_independent_node_cluster(
-        node_daily_bars, bars_15min, symbol=symbol,
+    # [CP-13] _compute_independent_node_cluster 已改为 async + canonical node_cluster 调用
+    #   传入 instrument_id/adjustment_as_of/source_bar_hash/adj_factor_hash
+    #   使 canonical result_hash 含四链一致性维度
+    data["node_cluster"] = await _compute_independent_node_cluster(
+        node_daily_bars, bars_15min,
+        symbol=symbol,
+        instrument_id=instrument_id,
+        adjustment_as_of=str(adjustment_as_of) if adjustment_as_of else None,
+        daily_source_hash=node_daily_source_hash,
+        daily_adj_factor_hash=node_daily_adj_factor_hash,
     )
 
     # [MACD 副图] - 将 MACD 作为全局图层注入 layers/data
@@ -1111,13 +1202,9 @@ async def compute_all_indicators(
             else:
                 smc_bars = macd_bars
 
-            smc_opens = smc_bars["open"].to_numpy(float).tolist()
-            smc_highs = smc_bars["high"].to_numpy(float).tolist()
-            smc_lows = smc_bars["low"].to_numpy(float).tolist()
-            smc_closes = smc_bars["close"].to_numpy(float).tolist()
             smc_times = [idx.isoformat() for idx in smc_bars.index]
             # [CHANGE-20260716-001] SMC 输入诊断字段（基于完整 smc_bars，非截断 macd_bars）
-            # [CHANGE-20260718-001] 新增 smc_mode 标识 deterministic/realtime
+            # [CP-13] smc_opens/highs/lows/closes 已移除 — canonical adapter 直接接收 bars DataFrame
             smc_source_diagnostics = {
                 "smc_source_bar_hash": compute_source_bar_hash(smc_bars, timeframe),
                 "smc_source_first_time": smc_times[0] if smc_times else None,
@@ -1126,16 +1213,20 @@ async def compute_all_indicators(
                 "smc_adj": adj,
                 "smc_mode": _SMC_MODE_DETERMINISTIC,
             }
-            smc_result = compute_smc_indicators(
-                opens=smc_opens,
-                highs=smc_highs,
-                lows=smc_lows,
-                closes=smc_closes,
-                times=smc_times,
+            # [CP-13] 通过 CanonicalComputationService.compute() 调用 smc kernel
+            #   canonical adapter 内部调 compute_smc_indicators + adapt_smc_to_display_dto
+            #   接收 bars DataFrame + display_bars，返回展示窗口 DTO
+            #   canonical result_hash 含 source_bar_hash/adj_factor_hash，供四链一致性断言
+            smc_canonical = await CanonicalComputationService.compute(
+                algorithm_id="smc",
+                instrument_id=instrument_id,
+                as_of=str(adjustment_as_of) if adjustment_as_of else str(today),
+                source_bar_hash=smc_source_diagnostics["smc_source_bar_hash"],
+                adj_factor_hash=macd_agg.adj_factor_hash if macd_agg is not None else None,
+                bars=smc_bars,
+                display_bars=bars,
             )
-            # [CHANGE-20260715-007] 调用 view adapter 裁成展示窗口 DTO
-            # display_bars = bars（前端可见窗口上限），与 indicators API 的 bars 参数同源
-            smc_dto = adapt_smc_to_display_dto(smc_result, bars)
+            smc_dto = smc_canonical.payload  # 展示窗口 DTO dict
             # 注入 smc 图层（main pane，renderer=smc）
             layers.append({
                 "strategy_id": "smc",
@@ -1348,31 +1439,12 @@ if __name__ == "__main__":
         "短列表和标量应保持不变"
     print("_truncate_lists 截取 ✓")
 
-    # 6. [SQZMOM_LB 副图] - 验证 compute_sqzmom_lb 可导入且签名正确
-    assert callable(compute_sqzmom_lb), "compute_sqzmom_lb 应可调用"
-    sig_sqzmom = inspect.signature(compute_sqzmom_lb)
-    sqzmom_params = list(sig_sqzmom.parameters.keys())
-    expected_sqzmom = ["opens", "highs", "lows", "closes", "params"]
-    assert sqzmom_params == expected_sqzmom, \
-        f"compute_sqzmom_lb 参数不匹配: {sqzmom_params} != {expected_sqzmom}"
-    print(f"compute_sqzmom_lb params={sqzmom_params} ✓")
+    # 6. [SQZMOM_LB 副图] - [CP-13] kernel 签名验证已移至 canonical_adapters 自测
+    #    四链模块不再直接 import kernel 函数，签名检查由 canonical_adapters/__main__ 负责
+    print("compute_sqzmom_lb 签名检查已移至 canonical_adapters 自测 ✓")
 
-    # 7. [SQZMOM_LB 副图] - 验证小样本计算不抛异常
-    import numpy as np
-    rng = np.random.default_rng(42)
-    n = 60
-    closes_t = 100.0 + np.cumsum(rng.normal(0, 0.5, n))
-    highs_t = closes_t + np.abs(rng.normal(0, 1.0, n))
-    lows_t = closes_t - np.abs(rng.normal(0, 1.0, n))
-    opens_t = closes_t + rng.normal(0, 0.3, n)
-    sqzmom_result = compute_sqzmom_lb(
-        opens=opens_t, highs=highs_t, lows=lows_t, closes=closes_t,
-    )
-    assert "val" in sqzmom_result and "bcolor" in sqzmom_result
-    assert "sqzOn" in sqzmom_result and "sqzOff" in sqzmom_result
-    assert "noSqz" in sqzmom_result and "scolor" in sqzmom_result
-    assert sqzmom_result["params"]["bb_dev_uses"] == "multKC"
-    print(f"compute_sqzmom_lb full run OK (n={n}) ✓")
+    # 7. [SQZMOM_LB 副图] - [CP-13] 小样本计算验证已移至 canonical_adapters 自测
+    print("compute_sqzmom_lb 小样本计算已移至 canonical_adapters 自测 ✓")
 
     # 5.1 验证 time 字段注入与截取（advice.md 第三节问题 2/3 修复）
     #   daily_time_list 与其他 list 字段一起被 _truncate_lists 截取，保持长度一致
@@ -1421,14 +1493,9 @@ if __name__ == "__main__":
             assert abs(hist - 2.0 * (dif - dea)) < 1e-9, "MACD 柱值公式错误"
     print("compute_macd 公式 ✓")
 
-    # 9. [CHANGE-011 SMC] - 验证 compute_smc_indicators 可导入且签名正确
-    assert callable(compute_smc_indicators), "compute_smc_indicators 应可调用"
-    sig_smc = inspect.signature(compute_smc_indicators)
-    smc_params = list(sig_smc.parameters.keys())
-    expected_smc = ["opens", "highs", "lows", "closes", "times", "params"]
-    assert smc_params == expected_smc, \
-        f"compute_smc_indicators 参数不匹配: {smc_params} != {expected_smc}"
-    print(f"compute_smc_indicators params={smc_params} ✓")
+    # 9. [CHANGE-011 SMC] - [CP-13] kernel 签名验证已移至 canonical_adapters 自测
+    #    四链模块不再直接 import kernel 函数，签名检查由 canonical_adapters/__main__ 负责
+    print("compute_smc_indicators 签名检查已移至 canonical_adapters 自测 ✓")
 
     # 10. [CHANGE-011 SMC] - 验证 include_smc=False 不影响计算（默认值）
     sig_all = inspect.signature(compute_all_indicators)

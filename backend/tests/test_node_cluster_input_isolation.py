@@ -82,7 +82,7 @@ async def test_load_node_cluster_inputs_uses_completed_qfq_for_daily() -> None:
             ]
         )
 
-        daily_bars, bars_15min = await _load_node_cluster_inputs(
+        daily_bars, bars_15min, _src_hash, _adj_hash = await _load_node_cluster_inputs(
             MagicMock(), MagicMock(), "qfq",
         )
 
@@ -118,7 +118,7 @@ async def test_load_node_cluster_inputs_uses_completed_qfq_for_15m() -> None:
             ]
         )
 
-        daily_bars, bars_15min = await _load_node_cluster_inputs(
+        daily_bars, bars_15min, _src_hash, _adj_hash = await _load_node_cluster_inputs(
             MagicMock(), MagicMock(), "qfq",
         )
 
@@ -154,7 +154,7 @@ async def test_load_node_cluster_inputs_daily_tailed_to_250() -> None:
             ]
         )
 
-        daily_bars, _ = await _load_node_cluster_inputs(
+        daily_bars, _, _src_hash, _adj_hash = await _load_node_cluster_inputs(
             MagicMock(), MagicMock(), "qfq",
         )
 
@@ -177,7 +177,7 @@ async def test_load_node_cluster_inputs_load_15m_false_skips_15m_query() -> None
             side_effect=[_make_agg_result(daily_bars_df)]
         )
 
-        daily_bars, bars_15min = await _load_node_cluster_inputs(
+        daily_bars, bars_15min, _src_hash, _adj_hash = await _load_node_cluster_inputs(
             MagicMock(), MagicMock(), "qfq",
             load_15m=False,
         )

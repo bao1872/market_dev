@@ -617,7 +617,7 @@ def test_map_daily_to_intraday_staircase() -> None:
     assert result == [11.0, 11.0, 12.0, 12.0], f"unexpected mapping: {result}"
 
 
-def test_adapt_watchlist_bb_daily_preserved() -> None:
+async def test_adapt_watchlist_bb_daily_preserved() -> None:
     """日线 timeframe 保留完整 BB 序列与 time 字段。"""
     indicators = {
         "bb_upper": [1.0, 2.0, 3.0, 4.0, 5.0],
@@ -628,7 +628,7 @@ def test_adapt_watchlist_bb_daily_preserved() -> None:
     daily_time_list = ["t1", "t2", "t3", "t4", "t5"]
     macd_bars = pd.DataFrame()
     macd_time_list: list[str] = []
-    result = indicator_service._adapt_watchlist_bb(
+    result = await indicator_service._adapt_watchlist_bb(
         indicators, "1d", macd_bars, macd_time_list, daily_time_list,
     )
     assert result["bb_upper"] == [1.0, 2.0, 3.0, 4.0, 5.0]
@@ -636,7 +636,7 @@ def test_adapt_watchlist_bb_daily_preserved() -> None:
     assert result["upper_node"] == {"price_mid": 10.0}
 
 
-def test_adapt_watchlist_bb_15m_uses_macd_bars_not_daily_staircase() -> None:
+async def test_adapt_watchlist_bb_15m_uses_macd_bars_not_daily_staircase() -> None:
     """[PR #31] - 15m BB 必须用 macd_bars 计算，不再映射日线阶梯线。
 
     修复根因：之前 _adapt_watchlist_bb 在 15m 路径下调用 _map_daily_to_intraday，
@@ -668,7 +668,7 @@ def test_adapt_watchlist_bb_15m_uses_macd_bars_not_daily_staircase() -> None:
         "volume": [100000] * 25,
     }, index=pd.to_datetime(macd_times))
 
-    result = indicator_service._adapt_watchlist_bb(
+    result = await indicator_service._adapt_watchlist_bb(
         indicators, "15m", macd_bars, macd_times, daily_time_list,
     )
 
@@ -700,7 +700,7 @@ def test_adapt_watchlist_bb_15m_uses_macd_bars_not_daily_staircase() -> None:
     assert len(result["bb_lower"]) == len(macd_times)
 
 
-def test_adapt_watchlist_bb_1h_uses_macd_bars_not_daily_staircase() -> None:
+async def test_adapt_watchlist_bb_1h_uses_macd_bars_not_daily_staircase() -> None:
     """[PR #31] - 1h BB 同样用 macd_bars 计算，不映射日线阶梯线。"""
     indicators = {
         "bb_upper": [10.0, 11.0, 12.0],
@@ -723,7 +723,7 @@ def test_adapt_watchlist_bb_1h_uses_macd_bars_not_daily_staircase() -> None:
         "volume": [100000] * 25,
     }, index=pd.to_datetime(macd_times))
 
-    result = indicator_service._adapt_watchlist_bb(
+    result = await indicator_service._adapt_watchlist_bb(
         indicators, "1h", macd_bars, macd_times, daily_time_list,
     )
 
@@ -735,7 +735,7 @@ def test_adapt_watchlist_bb_1h_uses_macd_bars_not_daily_staircase() -> None:
     )
 
 
-def test_adapt_watchlist_bb_15m_bb_matches_compute_bollinger() -> None:
+async def test_adapt_watchlist_bb_15m_bb_matches_compute_bollinger() -> None:
     """[PR #31] - 15m BB 与 compute_bollinger(macd_bars) 计算结果一致。
 
     验证 _adapt_watchlist_bb 内部调用了 compute_bollinger(macd_bars)，
@@ -761,7 +761,7 @@ def test_adapt_watchlist_bb_15m_bb_matches_compute_bollinger() -> None:
         "volume": [100000] * 25,
     }, index=pd.to_datetime(macd_times))
 
-    result = indicator_service._adapt_watchlist_bb(
+    result = await indicator_service._adapt_watchlist_bb(
         indicators, "15m", macd_bars, macd_times, daily_time_list,
     )
 
@@ -779,7 +779,7 @@ def test_adapt_watchlist_bb_15m_bb_matches_compute_bollinger() -> None:
     )
 
 
-def test_adapt_watchlist_bb_1w_uses_macd_bars_not_removed() -> None:
+async def test_adapt_watchlist_bb_1w_uses_macd_bars_not_removed() -> None:
     """[PR #32] - 1w BB 必须用 macd_bars 计算，不再移除 BB 字段。
 
     修复根因：之前 _adapt_watchlist_bb 在 1w/1mo 路径直接 pop BB 字段，
@@ -802,7 +802,7 @@ def test_adapt_watchlist_bb_1w_uses_macd_bars_not_removed() -> None:
         "volume": [1000000] * 25,
     }, index=pd.to_datetime(macd_times))
 
-    result = indicator_service._adapt_watchlist_bb(
+    result = await indicator_service._adapt_watchlist_bb(
         indicators, "1w", macd_bars, macd_times, [],
     )
 
@@ -826,7 +826,7 @@ def test_adapt_watchlist_bb_1w_uses_macd_bars_not_removed() -> None:
     )
 
 
-def test_adapt_watchlist_bb_1mo_uses_macd_bars_not_removed() -> None:
+async def test_adapt_watchlist_bb_1mo_uses_macd_bars_not_removed() -> None:
     """[PR #32] - 1mo BB 同样用 macd_bars 计算，不移除。"""
     indicators = {
         "bb_upper": [10.0, 11.0, 12.0],
@@ -843,7 +843,7 @@ def test_adapt_watchlist_bb_1mo_uses_macd_bars_not_removed() -> None:
         "volume": [5000000] * 25,
     }, index=pd.to_datetime(macd_times))
 
-    result = indicator_service._adapt_watchlist_bb(
+    result = await indicator_service._adapt_watchlist_bb(
         indicators, "1mo", macd_bars, macd_times, [],
     )
 
@@ -988,17 +988,22 @@ async def test_smc_not_calculated_when_include_smc_false(
     """[CHANGE-011] include_smc=False（默认）时不计算 SMC，响应无 smc layer。
 
     SMC 默认关闭，不消耗 CPU；前端通过 IndicatorToolbar 显式开启。
+
+    [CP-13] SMC kernel 现通过 CanonicalComputationService.compute(algorithm_id="smc")
+    调用，内部经 compute_smc_adapter。spy 改为 patch compute_smc_adapter。
     """
-    # spy: 记录 compute_smc_indicators 是否被调用
+    from app.services import canonical_adapters
+
+    # spy: 记录 compute_smc_adapter 是否被调用
     smc_called = False
-    original_compute = indicator_service.compute_smc_indicators
+    original_compute = canonical_adapters.compute_smc_adapter
 
     def spy_compute(*args, **kwargs):
         nonlocal smc_called
         smc_called = True
         return original_compute(*args, **kwargs)
 
-    monkeypatch.setattr(indicator_service, "compute_smc_indicators", spy_compute)
+    monkeypatch.setattr(canonical_adapters, "compute_smc_adapter", spy_compute)
 
     # 默认调用（不传 include_smc → 默认 False）
     result = await indicator_service.compute_all_indicators(

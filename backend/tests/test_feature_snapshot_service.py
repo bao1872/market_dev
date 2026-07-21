@@ -1176,8 +1176,10 @@ async def test_compute_snapshot_node_cluster_field_stable_when_engine_raises() -
     mock_result.first.return_value = ("000001",)
     mock_session.execute = AsyncMock(return_value=mock_result)
 
+    # [CP-13] 迁移到 canonical 后，patch compute_node_cluster_adapter（仅 node_cluster 失败）
+    # 其他算法（structural_features/macd/bollinger/relation）仍走真实 canonical 路径。
     with patch(
-        "app.services.feature_snapshot_service.compute_node_cluster_profile",
+        "app.services.canonical_adapters.compute_node_cluster_adapter",
         side_effect=RuntimeError("mocked engine failure"),
     ):
         snapshot = await compute_feature_snapshot_for_date(
