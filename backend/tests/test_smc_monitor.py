@@ -4,17 +4,20 @@
 1. calculate_state: 返回 smc_confirmed_bos/smc_confirmed_choch/smc_active_obs/
    smc_current_price/smc_currently_touched/smc_swing_bias/smc_trailing/smc_availability
    /smc_episode_tracker 等字段
-2. detect_events: 1m 价格穿越 BOS/CHoCH level 触发 smc_bos_retest/smc_choch_retest
-3. detect_events: 1m 价格首次进入 OB zone 触发 smc_order_block_first_touch
+2. detect_events: 1m high/low 与 BOS/CHoCH level 相交触发 smc_bos_retest/smc_choch_retest
+3. detect_events: 1m high/low 与 OB zone 相交触发 smc_order_block_first_touch
 4. touch_episode dedupe: 同一 episode 多次触碰只触发一次事件
 5. episode tracker: detect_events 直接 mutate curr_state.state["smc_episode_tracker"]
 6. smc_entity_id 稳定性: BOS:{anchor_index}:{level} / CHoCH:... / OB:...
 7. WatchlistMonitor 命名空间合并: bb/node_cluster/smc/market/degraded
 8. WatchlistMonitor 单子 monitor 失败只标记 degraded 不阻断其他
 
+[PRD V2.0 §3.2 L117 / SMC-02] 触碰检测使用最新已完成 1m 的 high/low 与线/区域相交，
+覆盖影线触碰场景（close 未穿越但 high/low 相交）。
+
 测试数据：
 - 使用合成的日线 bars（≥250 根）满足 SMC ATR200 + swings_length=50 warmup 要求
-- 使用合成的 1m bars（2 根）做穿越检测
+- 使用合成的 1m bars（2 根）做触碰检测，支持显式 cur_high/cur_low 测试影线
 - 1m bars 价格锚定最近日线 BOS level 触发 smc_bos_retest 事件
 """
 
@@ -84,22 +87,33 @@ def _make_minute_bars(
     prev_close: float,
     cur_close: float,
     bar_time: datetime | None = None,
+    cur_high: float | None = None,
+    cur_low: float | None = None,
 ) -> pd.DataFrame:
-    """构造 2 根 1m bars（用于穿越检测）。
+    """构造 2 根 1m bars（用于触碰检测）。
+
+    [PRD V2.0 §3.2 L117] 触发使用最新已完成 1m 的 high/low 与线/区域相交。
+    支持 cur_high/cur_low 显式传入以测试影线触碰场景（close 未穿越但 high/low 相交）。
 
     Args:
         prev_close: 前一根 1m close
         cur_close: 当前 1m close
         bar_time: 当前 bar 时间（默认 2026-06-18 10:30）
+        cur_high: 当前 1m high（默认 max(prev_close, cur_close)，向后兼容）
+        cur_low: 当前 1m low（默认 min(prev_close, cur_close)，向后兼容）
     """
     if bar_time is None:
         bar_time = datetime(2026, 6, 18, 10, 30, tzinfo=UTC)
+    if cur_high is None:
+        cur_high = max(prev_close, cur_close)
+    if cur_low is None:
+        cur_low = min(prev_close, cur_close)
     times = pd.date_range(end=bar_time, periods=2, freq="1min", tz=UTC)
     return pd.DataFrame(
         {
             "open": [prev_close, cur_close],
-            "high": [max(prev_close, cur_close), max(prev_close, cur_close)],
-            "low": [min(prev_close, cur_close), min(prev_close, cur_close)],
+            "high": [max(prev_close, cur_close), cur_high],
+            "low": [min(prev_close, cur_close), cur_low],
             "close": [prev_close, cur_close],
             "volume": [100_000.0, 120_000.0],
             "amount": [prev_close * 100_000, cur_close * 120_000],
@@ -198,34 +212,62 @@ class TestSmcMonitorHelpers:
         id2 = _make_ob_entity_id(150, 11.0, 10.0, 1)
         assert id1 == id2 == "OB:150:11.0:10.0:1"
 
-    def test_is_bos_touched_cross_up(self) -> None:
-        """BOS 从下方穿越：prev < level <= cur。"""
-        assert _is_bos_touched(9.5, 10.5, 10.0) is True
+    def test_is_bos_touched_level_inside_bar(self) -> None:
+        """BOS level 在 bar 的 [cur_low, cur_high] 范围内：触碰。"""
+        assert _is_bos_touched(cur_high=10.5, cur_low=9.5, level=10.0) is True
 
-    def test_is_bos_touched_cross_down(self) -> None:
-        """BOS 从上方穿越：prev > level >= cur。"""
-        assert _is_bos_touched(10.5, 9.5, 10.0) is True
+    def test_is_bos_touched_level_at_cur_low(self) -> None:
+        """BOS level = cur_low 边界：触碰（含边界）。"""
+        assert _is_bos_touched(cur_high=10.5, cur_low=10.0, level=10.0) is True
 
-    def test_is_bos_touched_no_cross(self) -> None:
-        """BOS 未穿越。"""
-        assert _is_bos_touched(9.5, 9.8, 10.0) is False
-        assert _is_bos_touched(10.5, 10.8, 10.0) is False
+    def test_is_bos_touched_level_at_cur_high(self) -> None:
+        """BOS level = cur_high 边界：触碰（含边界）。"""
+        assert _is_bos_touched(cur_high=10.0, cur_low=9.5, level=10.0) is True
 
-    def test_is_ob_touched_enter_from_below(self) -> None:
-        """OB 从下方进入 zone。"""
-        assert _is_ob_touched(9.0, 10.5, 11.0, 10.0) is True
+    def test_is_bos_touched_wick_only(self) -> None:
+        """BOS 影线触碰正例：close 未触及 level，但 high 触及（[PRD V2.0 SMC-02] 修复）。"""
+        # cur_close=9.8（在 level 10.0 下方），但 cur_high=10.5 触及 level
+        assert _is_bos_touched(cur_high=10.5, cur_low=9.3, level=10.0) is True
 
-    def test_is_ob_touched_enter_from_above(self) -> None:
-        """OB 从上方进入 zone。"""
-        assert _is_ob_touched(11.5, 10.5, 11.0, 10.0) is True
+    def test_is_bos_touched_level_below_bar(self) -> None:
+        """BOS level 在 bar 下方：未触碰。"""
+        assert _is_bos_touched(cur_high=9.5, cur_low=9.0, level=10.0) is False
 
-    def test_is_ob_touched_already_in_zone(self) -> None:
-        """OB prev 已在 zone 内，cur 也在 zone 内，不算触碰（同 episode）。"""
-        assert _is_ob_touched(10.5, 10.8, 11.0, 10.0) is False
+    def test_is_bos_touched_level_above_bar(self) -> None:
+        """BOS level 在 bar 上方：未触碰。"""
+        assert _is_bos_touched(cur_high=10.8, cur_low=10.5, level=11.0) is False
 
-    def test_is_ob_touched_both_outside(self) -> None:
-        """OB prev 和 cur 都在 zone 外，不算触碰。"""
-        assert _is_ob_touched(9.0, 9.5, 11.0, 10.0) is False
+    def test_is_ob_touched_bar_inside_zone(self) -> None:
+        """OB bar 完全在 zone 内：触碰。"""
+        assert _is_ob_touched(cur_high=10.8, cur_low=10.5, bar_high=11.0, bar_low=10.0) is True
+
+    def test_is_ob_touched_bar_overlaps_from_below(self) -> None:
+        """OB bar 从下方部分进入 zone：触碰。"""
+        assert _is_ob_touched(cur_high=10.5, cur_low=9.5, bar_high=11.0, bar_low=10.0) is True
+
+    def test_is_ob_touched_bar_overlaps_from_above(self) -> None:
+        """OB bar 从上方部分进入 zone：触碰。"""
+        assert _is_ob_touched(cur_high=11.5, cur_low=10.5, bar_high=11.0, bar_low=10.0) is True
+
+    def test_is_ob_touched_wick_only(self) -> None:
+        """OB 影线触碰正例：close 未进入 zone，但 high 进入（[PRD V2.0 SMC-02] 修复）。"""
+        # cur_close=9.5（在 zone 下方），但 cur_high=10.5 进入 zone [10.0, 11.0]
+        assert _is_ob_touched(cur_high=10.5, cur_low=9.0, bar_high=11.0, bar_low=10.0) is True
+
+    def test_is_ob_touched_bar_touches_boundary(self) -> None:
+        """OB bar 边界相切 zone：触碰（含边界）。"""
+        # cur_high = bar_low
+        assert _is_ob_touched(cur_high=10.0, cur_low=9.0, bar_high=11.0, bar_low=10.0) is True
+        # cur_low = bar_high
+        assert _is_ob_touched(cur_high=12.0, cur_low=11.0, bar_high=11.0, bar_low=10.0) is True
+
+    def test_is_ob_touched_bar_below_zone(self) -> None:
+        """OB bar 完全在 zone 下方：未触碰。"""
+        assert _is_ob_touched(cur_high=9.5, cur_low=9.0, bar_high=11.0, bar_low=10.0) is False
+
+    def test_is_ob_touched_bar_above_zone(self) -> None:
+        """OB bar 完全在 zone 上方：未触碰。"""
+        assert _is_ob_touched(cur_high=12.0, cur_low=11.5, bar_high=11.0, bar_low=10.0) is False
 
 
 # =============================================================================

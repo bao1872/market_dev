@@ -83,8 +83,9 @@ STATE_SMC_EPISODE_TRACKER = "smc_episode_tracker"
 STATE_SMC_AVAILABILITY = "smc_availability"
 STATE_SMC_DEGRADED_REASON = "smc_degraded_reason"
 
-# 触发检测的最小 1m bars 数（需要 prev_close + cur_close）
-_MIN_MINUTE_BARS_FOR_TRIGGER = 2
+# 触发检测的最小 1m bars 数（需要最新已完成 1m 的 high/low）
+# [PRD V2.0 §3.2 L117] 触发使用最新已完成 1m 的 high/low 与线/区域相交
+_MIN_MINUTE_BARS_FOR_TRIGGER = 1
 
 
 def _make_bos_entity_id(anchor_index: int | None, level: float | None) -> str:
@@ -115,31 +116,31 @@ def _make_ob_entity_id(
     return f"OB:{anchor_index}:{bar_high}:{bar_low}:{bias}"
 
 
-def _is_bos_touched(prev_close: float, cur_close: float, level: float) -> bool:
-    """BOS level 触碰检测：1m close 穿越 level（任一方向）。
+def _is_bos_touched(cur_high: float, cur_low: float, level: float) -> bool:
+    """BOS level 触碰检测：1m bar 的 high/low 与 level 相交。
 
-    与 BollingerMonitor 穿越检测一致：
-    - 从下方穿越：prev_close < level <= cur_close
-    - 从上方穿越：prev_close > level >= cur_close
+    [PRD V2.0 §3.2 L117] 触发使用最新已完成 1m 的 high/low 与线/区域相交。
+    [PRD V2.0 SMC-02] 修复 close-only 漏报：影线触碰 level 也算触碰。
+    相交条件：cur_low <= level <= cur_high（含边界）。
     """
-    return (prev_close < level <= cur_close) or (prev_close > level >= cur_close)
+    return cur_low <= level <= cur_high
 
 
-def _is_choch_touched(prev_close: float, cur_close: float, level: float) -> bool:
-    """CHoCH level 触碰检测（与 BOS 一致，穿越即触碰）。"""
-    return _is_bos_touched(prev_close, cur_close, level)
+def _is_choch_touched(cur_high: float, cur_low: float, level: float) -> bool:
+    """CHoCH level 触碰检测（与 BOS 一致，high/low 相交即触碰）。"""
+    return _is_bos_touched(cur_high, cur_low, level)
 
 
 def _is_ob_touched(
-    prev_close: float, cur_close: float, bar_high: float, bar_low: float
+    cur_high: float, cur_low: float, bar_high: float, bar_low: float
 ) -> bool:
-    """OB zone 触碰检测：1m close 进入 [bar_low, bar_high] 区间。
+    """OB zone 触碰检测：1m bar 的 high/low 与 [bar_low, bar_high] 区间相交。
 
-    首次进入：prev_close 在 zone 外，cur_close 在 zone 内（含边界）。
+    [PRD V2.0 §3.2 L117] 触发使用最新已完成 1m 的 high/low 与线/区域相交。
+    [PRD V2.0 SMC-02] 修复 close-only 漏报：影线进入 zone 也算触碰。
+    相交条件：cur_high >= bar_low and cur_low <= bar_high（含边界）。
     """
-    prev_in_zone = bar_low <= prev_close <= bar_high
-    cur_in_zone = bar_low <= cur_close <= bar_high
-    return (not prev_in_zone) and cur_in_zone
+    return cur_high >= bar_low and cur_low <= bar_high
 
 
 class SmcMonitor(StrategyRuntime):
@@ -155,7 +156,7 @@ class SmcMonitor(StrategyRuntime):
     4. detect_events(context, prev, curr) 对比 prev/curr touch status 检测触碰事件
 
     主结构：context.bars_daily（已完成 qfq 日线）
-    触发：context.bars_minute（1m bars，仅取最后两根的 close 做穿越检测）
+    触发：context.bars_minute（1m bars，取最后一根的 high/low 与线/区域相交）
     """
 
     kind = "monitor"
@@ -256,19 +257,21 @@ class SmcMonitor(StrategyRuntime):
             current_price = float(bars_daily["close"].iloc[-1])
 
         # 计算 currently_touched：当前 1m 是否触碰每个 entity
-        # 需要 1m bars 的 prev_close + cur_close 做穿越检测
+        # [PRD V2.0 §3.2 L117] 触发使用最新已完成 1m 的 high/low 与线/区域相交
+        # （touch_episode dedupe 由 detect_events 通过 prev_state 对比实现，
+        #   此处只计算当前 bar 的 touched 状态）
         currently_touched: dict[str, bool] = {}
-        prev_close: float | None = None
-        cur_close: float | None = None
+        cur_high: float | None = None
+        cur_low: float | None = None
         if (
             context.bars_minute is not None
             and len(context.bars_minute) >= _MIN_MINUTE_BARS_FOR_TRIGGER
         ):
-            prev_close = float(context.bars_minute["close"].iloc[-2])
-            cur_close = float(context.bars_minute["close"].iloc[-1])
+            cur_high = float(context.bars_minute["high"].iloc[-1])
+            cur_low = float(context.bars_minute["low"].iloc[-1])
 
-        if prev_close is not None and cur_close is not None:
-            # BOS level 触碰检测
+        if cur_high is not None and cur_low is not None:
+            # BOS level 触碰检测（high/low 相交）
             for bos in confirmed_bos:
                 level = bos.get("level")
                 anchor_idx = bos.get("anchor_index")
@@ -276,10 +279,10 @@ class SmcMonitor(StrategyRuntime):
                     continue
                 entity_id = _make_bos_entity_id(anchor_idx, float(level))
                 currently_touched[entity_id] = _is_bos_touched(
-                    prev_close, cur_close, float(level)
+                    cur_high, cur_low, float(level)
                 )
 
-            # CHoCH level 触碰检测
+            # CHoCH level 触碰检测（high/low 相交）
             for choch in confirmed_choch:
                 level = choch.get("level")
                 anchor_idx = choch.get("anchor_index")
@@ -287,10 +290,10 @@ class SmcMonitor(StrategyRuntime):
                     continue
                 entity_id = _make_choch_entity_id(anchor_idx, float(level))
                 currently_touched[entity_id] = _is_choch_touched(
-                    prev_close, cur_close, float(level)
+                    cur_high, cur_low, float(level)
                 )
 
-            # OB zone 触碰检测
+            # OB zone 触碰检测（high/low 相交）
             for ob in active_obs:
                 anchor_idx = ob.get("anchor_index")
                 bar_high = ob.get("bar_high")
@@ -307,7 +310,7 @@ class SmcMonitor(StrategyRuntime):
                     int(anchor_idx), float(bar_high), float(bar_low), int(bias)
                 )
                 currently_touched[entity_id] = _is_ob_touched(
-                    prev_close, cur_close, float(bar_high), float(bar_low)
+                    cur_high, cur_low, float(bar_high), float(bar_low)
                 )
 
         # 构造精简的 state（避免存储完整 DTO，仅存监控必需字段）
@@ -708,18 +711,23 @@ if __name__ == "__main__":
     assert _make_ob_entity_id(150, 11.0, 10.0, 1) == "OB:150:11.0:10.0:1"
     print("entity_id 生成 ✓")
 
-    # 验证 touch 检测
-    assert _is_bos_touched(9.5, 10.5, 10.0) is True  # 从下方穿越
-    assert _is_bos_touched(10.5, 9.5, 10.0) is True  # 从上方穿越
-    assert _is_bos_touched(9.5, 9.8, 10.0) is False  # 未穿越
-    assert _is_bos_touched(10.5, 10.8, 10.0) is False  # 都在上方
+    # 验证 touch 检测（high/low 相交，[PRD V2.0 §3.2 L117]）
+    # BOS/CHoCH: cur_low <= level <= cur_high
+    assert _is_bos_touched(10.5, 9.5, 10.0) is True  # level 在 [low, high] 内
+    assert _is_bos_touched(10.5, 10.0, 10.0) is True  # level = cur_low 边界
+    assert _is_bos_touched(10.0, 9.5, 10.0) is True  # level = cur_high 边界
+    assert _is_bos_touched(9.5, 9.0, 10.0) is False  # level 在 bar 上方
+    assert _is_bos_touched(11.0, 10.5, 10.0) is False  # level 在 bar 下方
     print("BOS/CHoCH touch 检测 ✓")
 
-    # OB touch 检测
-    assert _is_ob_touched(9.0, 10.5, 11.0, 10.0) is True  # 从下方进入 zone
-    assert _is_ob_touched(11.5, 10.5, 11.0, 10.0) is True  # 从上方进入 zone
-    assert _is_ob_touched(10.5, 10.8, 11.0, 10.0) is False  # 已在 zone 内
-    assert _is_ob_touched(9.0, 9.5, 11.0, 10.0) is False  # 都在 zone 外
+    # OB touch 检测: cur_high >= bar_low and cur_low <= bar_high
+    assert _is_ob_touched(10.5, 9.5, 11.0, 10.0) is True  # bar 部分进入 zone（从下方）
+    assert _is_ob_touched(11.5, 10.5, 11.0, 10.0) is True  # bar 部分进入 zone（从上方）
+    assert _is_ob_touched(10.8, 10.5, 11.0, 10.0) is True  # bar 完全在 zone 内
+    assert _is_ob_touched(10.0, 9.0, 11.0, 10.0) is True  # 边界相切 cur_high=bar_low
+    assert _is_ob_touched(12.0, 11.0, 11.0, 10.0) is True  # 边界相切 cur_low=bar_high
+    assert _is_ob_touched(9.5, 9.0, 11.0, 10.0) is False  # bar 完全在 zone 下方
+    assert _is_ob_touched(12.0, 11.5, 11.0, 10.0) is False  # bar 完全在 zone 上方
     print("OB touch 检测 ✓")
 
     # 验证 _resolve_event_type
