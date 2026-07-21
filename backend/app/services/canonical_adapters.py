@@ -144,7 +144,7 @@ def compute_bollinger_adapter(
 
     Args:
         bars: MDAS 返回的 DataFrame，必须含 "close" 列（周期由合同 input_timeframes 约束）
-        length: BB 窗口（默认 20，与 watchlist_monitor/feature_snapshot 对齐）
+        length: BB 窗口长度，默认 20（标准布林带参数，与盘后/盘中链对齐）
         mult: BB 标准差倍数（默认 2.0）
         pct_lookback: width_percentile 回看窗口（默认 120）
 

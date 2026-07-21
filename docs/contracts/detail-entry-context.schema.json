@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "详情入口上下文 Schema",
+  "description": "PRD V2.0 §4.4 DETAIL-01 / §7.2 — 详情页入口上下文契约。对应代码：backend/app/services/detail_entry_context.py::DetailEntryContext",
+  "contract_id": "detail-entry-context",
+  "version": 2,
+  "as_of": "2026-07-21",
+  "type": "object",
+  "required": ["instrument_id", "origin_scope", "return_to"],
+  "properties": {
+    "instrument_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "标的 UUID"
+    },
+    "origin_scope": {
+      "type": "string",
+      "enum": ["watchlist", "market", "search", "capture", "direct"],
+      "description": "来源范围：watchlist=自选, market=市场筛选, search=搜索, capture=截图, direct=直链"
+    },
+    "return_to": {
+      "type": "string",
+      "description": "返回路径 URL（含 query params）"
+    },
+    "navigation_chain": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "导航链（上一只/下一只股票切换时使用）"
+    }
+  },
+  "invariants": {
+    "market_not_revert_watchlist": "market 上下文不得回退 watchlist（DETAIL-01 核心断言）",
+    "context_invalidation": "上下文失效时必须清除 navigation_chain",
+    "forward_back_navigation": "前进/后退导航必须保留 origin_scope"
+  },
+  "enforcement": {
+    "ci_gate": "market 上下文不得回退 watchlist",
+    "tests": [
+      "frontend: detailSourceLoadingContract.test.ts (13 场景)",
+      "frontend: change010Contract.test.ts"
+    ]
+  },
+  "cp_introduced": "CP-11 (DetailEntryContext) + CP-12 (导航修复) + CP-14 (schema 文档化)"
+}

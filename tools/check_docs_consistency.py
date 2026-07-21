@@ -80,9 +80,13 @@ PLACEHOLDER_RE = re.compile(r"待填写")
 FEISHU_WEBHOOK_RE = re.compile(r"feishu_webhook")
 
 # 规则 11：docs/ 直属子目录白名单（CHANGE-20260718-002）
-# AGENTS v2 文档结构规范：docs 顶层只允许 current/maps/changes/archive 四个目录。
-# docs/ 根 .md 文件（如 README.md）不受限，只约束子目录。
-ALLOWED_TOP_LEVEL_DIRS = {"current", "maps", "changes", "archive"}
+# AGENTS v2 文档结构规范：docs 顶层允许的目录（PRD V2.0 §7.1 权威层级入口）。
+# docs/ 根 .md 文件（如 README.md、INDEX.md）不受限，只约束子目录。
+# [CP-14] 扩展为 PRD V2.0 §7.1 定义的完整目录集：contracts/decisions/runbooks/acceptance/evidence/work
+ALLOWED_TOP_LEVEL_DIRS = {
+    "current", "maps", "changes", "archive",  # 历史 v2 目录
+    "contracts", "decisions", "runbooks", "acceptance", "evidence", "work",  # CP-14 新增
+}
 
 # 规则 12：CHANGE 引用正则（CHANGE-20260718-002）
 # 匹配 CHANGE-YYYYMMDD-NNN 形式（无论是否在 markdown 链接/反引号中），

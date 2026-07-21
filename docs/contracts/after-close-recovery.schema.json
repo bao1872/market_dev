@@ -1,0 +1,71 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "盘后恢复与 Lease Fencing Schema",
+  "description": "PRD V2.0 §3 / §7.2 — 盘后任务恢复与 lease fencing 契约。对应代码：backend/app/services/after_close_orchestrator.py",
+  "contract_id": "after-close-recovery",
+  "version": 2,
+  "as_of": "2026-07-21",
+  "type": "object",
+  "required": ["run_id", "lease_epoch", "status", "interrupted"],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "盘后运行批次 ID"
+    },
+    "lease_epoch": {
+      "type": "integer",
+      "description": "lease 纪元（每次 acquire 递增，用于 fencing 检测）"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["pending", "running", "interrupted", "completed", "failed"],
+      "description": "任务状态"
+    },
+    "interrupted": {
+      "type": "boolean",
+      "description": "是否被中断（中断后必须有 resume 路径）"
+    },
+    "resume_path": {
+      "type": "object",
+      "description": "恢复路径（interrupted=true 时必填）",
+      "properties": {
+        "last_completed_step": {"type": "string"},
+        "next_step": {"type": "string"},
+        "fencing_token": {"type": "integer"}
+      }
+    },
+    "lease_owner": {
+      "type": "string",
+      "description": "当前 lease 持有者 worker ID"
+    },
+    "lease_expires_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "lease 过期时间"
+    }
+  },
+  "invariants": {
+    "interrupted_must_have_resume": "interrupted 任务必须有 resume 路径",
+    "lease_fencing": "所有写入必须携带 lease_epoch，过期 lease 的写入必须被拒绝",
+    "no_manual_recovery": "禁止手工 resume 盘后任务（必须经 fencing 验证后自动恢复）"
+  },
+  "sequence": {
+    "description": "盘后顺序必须是：raw日线刷新 → factor重建成功 → 覆盖率门禁/DSA → snapshot发布",
+    "steps": [
+      "1. raw 日线刷新",
+      "2. factor 重建成功",
+      "3. 覆盖率门禁 / DSA",
+      "4. snapshot 发布"
+    ]
+  },
+  "enforcement": {
+    "ci_gate": "interrupted 必须有 resume 路径和 lease fencing",
+    "tests": [
+      "tests/test_after_close_orchestrator.py",
+      "tests/test_after_close_idempotent_dsa_pipeline.py",
+      "tests/test_after_close_worker.py"
+    ]
+  },
+  "cp_introduced": "CP-8 (lease fencing) + CP-14 (schema 文档化)"
+}
