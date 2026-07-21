@@ -1881,16 +1881,19 @@ async def retry_after_close_run(
         raise ValueError(
             f"任务非盘后编排: job_name={job_run.job_name}"
         )
-    if job_run.status != "failed":
+    # [PRD §4.3 JOB-01] 允许 failed 和 interrupted 状态重试（interrupted 可自动或手动恢复）
+    if job_run.status not in ("failed", "interrupted"):
         raise ValueError(
-            f"仅 failed 状态可重试（当前 {job_run.status}）: job_run_id={job_run_id}"
+            f"仅 failed/interrupted 状态可重试（当前 {job_run.status}）: job_run_id={job_run_id}"
         )
 
     # [Phase5] - 重置为 queued（不是 running），由独立 Worker 领取执行
+    # [JOB-01] 手动重试也递增 attempt_no（与 auto_resume 一致）
     job_run.status = "queued"
     job_run.error_message = None
     job_run.error_code = None
     job_run.finished_at = None
+    job_run.attempt_no = (job_run.attempt_no or 0) + 1
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
     job_run.started_at = now
     job_run.heartbeat_at = now
@@ -1900,11 +1903,11 @@ async def retry_after_close_run(
         db=db,
         job_run=job_run,
         status=AfterCloseRunStatus.QUEUED,
-        message=f"管理员手动重试: job_run_id={job_run_id}",
+        message=f"管理员手动重试: job_run_id={job_run_id}, attempt_no={job_run.attempt_no}",
     )
     await db.commit()
 
-    logger.info("[AfterClose] 重试盘后编排: job_run_id=%s", job_run_id)
+    logger.info("[AfterClose] 重试盘后编排: job_run_id=%s, attempt_no=%s", job_run_id, job_run.attempt_no)
     return job_run
 
 

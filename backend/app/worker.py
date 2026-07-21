@@ -42,6 +42,7 @@ from app.db import AsyncSessionLocal
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.strategy_run import StrategyRun
 from app.services.scheduler_job_run_recovery_service import (
+    auto_resume_interrupted_after_close_runs,
     recover_stale_scheduler_job_runs,
 )
 
@@ -1430,10 +1431,14 @@ async def _recovery_watchdog_loop(interval_seconds: int = 60) -> None:
         try:
             async with AsyncSessionLocal() as db:
                 recovered = await recover_stale_scheduler_job_runs(db)
+                # [PRD §4.3 JOB-01] 自动恢复 interrupted 的盘后任务 → resume_queued
+                resumed = await auto_resume_interrupted_after_close_runs(db)
                 stale_marked = await mark_stale_worker_heartbeats(db)
                 await db.commit()
                 if recovered > 0:
                     logger.info("[Recovery] 看门狗恢复: %d 个过期任务", recovered)
+                if resumed > 0:
+                    logger.info("[Recovery] 看门狗自动恢复: %d 个 interrupted 盘后任务", resumed)
                 if stale_marked > 0:
                     logger.info("[Recovery] 看门狗清理: %d 个僵尸心跳", stale_marked)
         except Exception as exc:
@@ -1442,14 +1447,22 @@ async def _recovery_watchdog_loop(interval_seconds: int = 60) -> None:
 
 
 async def _after_close_poll_once() -> bool:
-    """[AfterCloseWorker] - 单次轮询：领取并执行一个 queued 盘后编排任务。
+    """[AfterCloseWorker] - 单次轮询：领取并执行一个 queued/resume_queued 盘后编排任务。
 
     使用 SELECT ... FOR UPDATE SKIP LOCKED 领取任务，多个 Worker 实例只有一个能领取。
     领取后更新 status='running' + worker_instance_id + heartbeat + lease，
     然后调用 execute_after_close_run（含断点恢复 + 心跳更新）。
 
+    [PRD §4.3 JOB-01] 领取 queued（首次）或 resume_queued（自动恢复）任务：
+    - queued：首次执行，attempt_no=0
+    - resume_queued：自动恢复，attempt_no>=1，execute_after_close_run 按 last_completed_step 断点恢复
+
+    [PRD §4.3 JOB-02] 领取时递增 lease_epoch（fencing）：
+    - 旧 Worker（lease 已过期）的写操作会因 lease_epoch 不匹配被拒绝
+    - 防止僵尸 Worker 继续写状态
+
     Returns:
-        True 如果领取到任务（无论执行成功与否），False 如果无 queued 任务
+        True 如果领取到任务（无论执行成功与否），False 如果无 queued/resume_queued 任务
     """
     from datetime import date as date_cls
 
@@ -1461,12 +1474,13 @@ async def _after_close_poll_once() -> bool:
     )
 
     async with AsyncSessionLocal() as db:
-        # [AfterCloseWorker] - FOR UPDATE SKIP LOCKED 领取一个 queued 任务
+        # [AfterCloseWorker] - FOR UPDATE SKIP LOCKED 领取一个 queued 或 resume_queued 任务
+        # [JOB-01] resume_queued 任务由 auto_resume_interrupted_after_close_runs 自动转换
         stmt = (
             select(SchedulerJobRun)
             .where(
                 SchedulerJobRun.job_name == "after_close_orchestrator",
-                SchedulerJobRun.status == "queued",
+                SchedulerJobRun.status.in_(("queued", "resume_queued")),
             )
             .order_by(SchedulerJobRun.created_at)
             .limit(1)
@@ -1476,11 +1490,16 @@ async def _after_close_poll_once() -> bool:
         job_run = result.scalar_one_or_none()
 
         if job_run is None:
-            # 无 queued 任务，释放锁（rollback 释放 FOR UPDATE 锁）
+            # 无 queued/resume_queued 任务，释放锁（rollback 释放 FOR UPDATE 锁）
             await db.rollback()
             return False
 
+        # [JOB-01] 记录领取前状态（queued=首次, resume_queued=自动恢复）
+        prev_status = job_run.status
+        is_resume = prev_status == "resume_queued"
+
         # 领取任务：更新 status='running' + worker + heartbeat + lease
+        # [JOB-02] 递增 lease_epoch（fencing）：旧 Worker 写操作会因 lease_epoch 不匹配被拒绝
         now = datetime.now(ZoneInfo("Asia/Shanghai"))
         job_run.status = "running"
         job_run.worker_instance_id = _WORKER_INSTANCE_ID
@@ -1488,12 +1507,20 @@ async def _after_close_poll_once() -> bool:
             job_run.started_at = now
         job_run.heartbeat_at = now
         job_run.lease_expires_at = now + timedelta(seconds=_ORCHESTRATOR_LEASE_SECONDS)
+        job_run.lease_epoch = job_run.lease_epoch + 1  # [JOB-02] fencing
         await db.commit()
 
         # 提取 trade_date（expire_on_commit=False 让 commit 后属性仍可用）
         meta = json.loads(job_run.metadata_json) if job_run.metadata_json else {}
         trade_date_str = meta.get("trade_date")
         job_run_id = job_run.id
+        current_lease_epoch = job_run.lease_epoch
+
+        logger.info(
+            "[AfterCloseWorker] 领取任务: job_run_id=%s, prev_status=%s, "
+            "attempt_no=%s, lease_epoch=%s, is_resume=%s",
+            job_run_id, prev_status, job_run.attempt_no, current_lease_epoch, is_resume,
+        )
 
     if not trade_date_str:
         # advice.md: 任务缺 trade_date 必须立即写 ERROR 事件 + status=failed + finished_at + 释放 run_key
@@ -1561,14 +1588,17 @@ async def run_after_close_orchestrator_worker() -> None:
         "[AfterCloseWorker] 启动（间隔=%ds）", WORKER_INTERVAL,
     )
 
-    # 启动恢复：清理上次崩溃残留的 running 任务
+    # 启动恢复：清理上次崩溃残留的 running 任务 + 自动恢复 interrupted 任务
     try:
         async with AsyncSessionLocal() as db:
             recovered = await recover_stale_scheduler_job_runs(db)
+            # [PRD §4.3 JOB-01] 自动将 interrupted 的盘后任务转为 resume_queued
+            resumed = await auto_resume_interrupted_after_close_runs(db)
             await db.commit()
-            if recovered > 0:
+            if recovered > 0 or resumed > 0:
                 logger.info(
-                    "[AfterCloseWorker] 启动恢复: %d 个过期任务", recovered,
+                    "[AfterCloseWorker] 启动恢复: %d 个过期任务, %d 个自动恢复",
+                    recovered, resumed,
                 )
     except Exception as exc:
         logger.exception("[AfterCloseWorker] 启动恢复异常: %s", exc)
