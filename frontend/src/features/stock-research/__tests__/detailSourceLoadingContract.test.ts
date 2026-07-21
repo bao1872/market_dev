@@ -112,18 +112,38 @@ test('CHANGE-005-7: CSS .tv-source-list-placeholder 存在', () => {
   assert.ok(/\.tv-source-list-placeholder\s*\{/.test(src), 'global.scss 必须定义 .tv-source-list-placeholder')
 })
 
-test('CHANGE-005-8: MarketWorkspacePage.handleNavigateToStock 显式传 source/strategy', () => {
+test('CHANGE-005-8: MarketWorkspacePage.handleNavigateToStock 通过 buildStockDetailUrl 传递 originScope + returnTo', () => {
   const src = readSource(MARKET_WORKSPACE_PAGE)
   assert.ok(/handleNavigateToStock/.test(src), 'MarketWorkspacePage 必须实现 handleNavigateToStock')
-  assert.ok(/scope === 'market' \? 'selection' : 'watchlist'/.test(src), '必须根据 scope 显式传 source')
-  assert.ok(/DSA_STRATEGY_KEY/.test(src), 'scope=market 时必须传 DSA_STRATEGY_KEY')
-  assert.ok(/'watchlist_monitor'/.test(src), 'scope=watchlist 时必须传 watchlist_monitor')
-  assert.ok(/returnTo=\$\{encodeURIComponent\(returnTo\)\}/.test(src), '必须编码并保留 returnTo')
+  // CHANGE-20260716-006: 必须从 stockDetailNavigation.ts 导入 buildStockDetailUrl（统一构建）
+  assert.ok(/from '@[/]features[/]stock-research[/]stockDetailNavigation'/.test(src), '必须从 stockDetailNavigation 导入 buildStockDetailUrl')
+  // 必须调用 buildStockDetailUrl 并传入 originScope: scope（market|watchlist）
+  assert.ok(/buildStockDetailUrl\(\s*symbol,\s*\{\s*originScope:\s*scope,/.test(src), 'handleNavigateToStock 必须调用 buildStockDetailUrl(symbol, { originScope: scope, ... })')
+  // 必须传入 returnTo（基于当前 searchParams 副本构造，强制写入 scope 和 selected）
+  assert.ok(/returnToParams\.set\('scope',\s*scope\)/.test(src), 'returnTo 必须强制写入 scope')
+  assert.ok(/returnToParams\.set\('selected',\s*symbol\)/.test(src), 'returnTo 必须强制写入 selected')
+  // 间接验证 source/strategy 推导：scope=market → source=selection + strategy=dsa_selector
+  // （buildStockDetailUrl 内部通过 sourceForOriginScope/strategyForOriginScope 推导，由 stockDetailNavigation.test.ts 守护）
+  const navSrc = readSource(join(__dirname, '..', 'stockDetailNavigation.ts'))
+  assert.ok(/originScope === 'market' \? 'selection' : 'watchlist'/.test(navSrc), 'stockDetailNavigation.sourceForOriginScope: market → selection')
+  assert.ok(/originScope === 'market' \? 'dsa_selector' : 'watchlist_monitor'/.test(navSrc), 'stockDetailNavigation.strategyForOriginScope: market → dsa_selector')
 })
 
-test('CHANGE-005-9: 来源 URL 包含完整 source + strategy + returnTo', () => {
-  const src = readSource(MARKET_WORKSPACE_PAGE)
-  assert.ok(/\/stock\/\$\{symbol\}\?source=\$\{src\}&strategy=\$\{strat\}&returnTo=/.test(src), '详情 URL 必须包含 source/strategy/returnTo')
+test('CHANGE-005-9: buildStockDetailUrl 统一生成 source + strategy + returnTo 完整 URL', () => {
+  // CHANGE-20260716-006: URL 构建合同已统一到 stockDetailNavigation.ts buildStockDetailUrl
+  // 3 个导航点（MarketWorkspacePage / useStockDetailActions / StockDetailPage 左栏）必须全部使用此函数
+  const navSrc = readSource(join(__dirname, '..', 'stockDetailNavigation.ts'))
+  // 必须生成 /stock/:symbol?originScope=...&source=...&strategy=... 模式
+  assert.ok(/`[/]stock[/]\$\{symbol\}\?\$\{params\.toString\(\)\}`/.test(navSrc), 'buildStockDetailUrl 必须返回 /stock/:symbol?params 模式')
+  // params 必须包含 originScope + source + strategy
+  assert.ok(/originScope:\s*opts\.originScope/.test(navSrc), 'params 必须包含 originScope')
+  assert.ok(/source,/.test(navSrc), 'params 必须包含 source')
+  assert.ok(/strategy,/.test(navSrc), 'params 必须包含 strategy')
+  // returnTo 通过 params.set 编码（URLSearchParams 自动编码）
+  assert.ok(/params\.set\('returnTo',\s*opts\.returnTo\)/.test(navSrc), 'returnTo 必须通过 params.set 编码')
+  // MarketWorkspacePage 必须调用 buildStockDetailUrl 且传 returnTo
+  const marketSrc = readSource(MARKET_WORKSPACE_PAGE)
+  assert.ok(/buildStockDetailUrl\(symbol,\s*\{[\s\S]*?returnTo,[\s\S]*?\}\)/.test(marketSrc), 'MarketWorkspacePage 必须调用 buildStockDetailUrl 并传 returnTo')
 })
 
 test('CHANGE-005-10: useStockDetailActions 不使用 useMarketStocks', () => {
@@ -141,12 +161,20 @@ test('CHANGE-005-10: useStockDetailActions 不使用 useMarketStocks', () => {
   assert.ok(/decodeMarketListContext\(returnTo\)/.test(detailSrc), 'resolveDetailSourceContext 必须调用 decodeMarketListContext(returnTo)')
 })
 
-test('CHANGE-005-11: 上一只/下一只保留 source/strategy/returnTo/timeframe', () => {
+test('CHANGE-005-11: 上一只/下一只通过 buildStockDetailUrl 保留 originScope/returnTo/timeframe', () => {
   const src = readSource(USE_DETAIL_ACTIONS)
-  assert.ok(/\/stock\/\$\{target\.symbol\}\?source=\$\{source\}&strategy=\$\{strategy\}/.test(src), '上一只/下一只必须保留 source + strategy')
-  assert.ok(/returnToParam = returnTo \? `&returnTo=/.test(src), '上一只/下一只必须保留 returnTo')
-  // CHANGE-20260715-007: 上一只/下一只必须保留 timeframe
-  assert.ok(/timeframeParam = timeframe \? `&timeframe=/.test(src), '上一只/下一只必须保留 timeframe')
+  // CHANGE-20260716-006: 上一只/下一只必须使用 buildStockDetailUrl 统一构建
+  // useStockDetailActions.ts 与 stockDetailNavigation.ts 同目录，使用相对路径 './stockDetailNavigation'
+  assert.ok(/from '\.\/stockDetailNavigation'/.test(src), '必须从 ./stockDetailNavigation 导入 buildStockDetailUrl')
+  // 必须调用 buildStockDetailUrl(target.symbol, { originScope, returnTo, timeframe })
+  assert.ok(/buildStockDetailUrl\(target\.symbol,\s*\{[\s\S]*?originScope,[\s\S]*?returnTo,[\s\S]*?timeframe,[\s\S]*?\}\)/.test(src), '上一只/下一只必须调用 buildStockDetailUrl 并传 originScope/returnTo/timeframe')
+  // originScope 必须基于 source 推导（source=selection → market；source=watchlist → watchlist）
+  // 实际代码：const originScope: OriginScope = source === 'selection' ? 'market' : 'watchlist'
+  assert.ok(/originScope[^=]*=\s*source === 'selection' \? 'market' : 'watchlist'/.test(src), 'originScope 必须基于 source 推导（source=selection → market）')
+  // buildStockDetailUrl 内部必须处理 timeframe（由 stockDetailNavigation.ts 守护）
+  const navSrc = readSource(join(__dirname, '..', 'stockDetailNavigation.ts'))
+  assert.ok(/if \(opts\.timeframe\)\s*\{[\s\S]*?params\.set\('timeframe',\s*opts\.timeframe\)/.test(navSrc), 'buildStockDetailUrl 必须处理 timeframe 参数')
+  assert.ok(/if \(opts\.returnTo\)\s*\{[\s\S]*?params\.set\('returnTo',\s*opts\.returnTo\)/.test(navSrc), 'buildStockDetailUrl 必须处理 returnTo 参数')
 })
 
 test('CHANGE-005-12: normalizeInternalReturnTo 上限为 4096', () => {

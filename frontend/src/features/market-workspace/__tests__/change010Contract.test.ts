@@ -32,6 +32,8 @@ const USE_MINI_KLINE_PATH = join(__dirname, '..', 'useMiniKlineData.ts')
 const MARKET_RIGHT_PANEL_PATH = join(__dirname, '..', 'MarketRightPanel.tsx')
 const PAGE_PATH = join(__dirname, '..', 'MarketWorkspacePage.tsx')
 const URL_STATE_PATH = join(__dirname, '..', 'marketWorkspaceUrlState.ts')
+// [PRD V2.0 §4.4 DETAIL-01] 详情页导航唯一真源模块（buildStockDetailUrl + originScope→source/strategy 映射）
+const NAVIGATION_PATH = join(FRONTEND_ROOT, 'features', 'stock-research', 'stockDetailNavigation.ts')
 
 const BAR_SCHEMA_PATH = join(BACKEND_ROOT, 'app', 'schemas', 'bar.py')
 const BARS_API_PATH = join(BACKEND_ROOT, 'app', 'api', 'bars.py')
@@ -508,26 +510,50 @@ test('MarketRightPanel 面板收起时不挂载（父组件控制 0 请求）', 
 // =================================================================
 
 test('MarketWorkspacePage handleNavigateToStock 根据 scope 传递 source/strategy', () => {
+  // [PRD V2.0 §4.4 DETAIL-01] CP-11 重构后 handleNavigateToStock 通过 buildStockDetailUrl 统一构建 URL，
+  //   source/strategy 映收归 stockDetailNavigation.ts（sourceForOriginScope/strategyForOriginScope）。
+  //   本测试检查：MarketWorkspacePage 调用 buildStockDetailUrl 并透传 originScope: scope；
+  //   导航模块存在 market→selection/dsa_selector 与 watchlist→watchlist/watchlist_monitor 映射。
   const src = readSource(PAGE_PATH)
   assert.ok(
-    src.includes("scope === 'market' ? 'selection'") && src.includes("'watchlist'"),
-    'handleNavigateToStock 必须根据 scope 传递 source（market→selection, watchlist→watchlist）',
+    src.includes('buildStockDetailUrl'),
+    'handleNavigateToStock 必须调用 buildStockDetailUrl 统一构建详情页 URL',
   )
   assert.ok(
-    src.includes('dsa_selector') && src.includes('watchlist_monitor'),
-    'handleNavigateToStock 必须根据 scope 传递 strategy（market→dsa_selector, watchlist→watchlist_monitor）',
+    /originScope:\s*scope/.test(src),
+    'handleNavigateToStock 必须将当前 scope 透传为 originScope（来源唯一真源）',
+  )
+  const navSrc = readSource(NAVIGATION_PATH)
+  assert.ok(
+    navSrc.includes("=== 'market' ? 'selection'") && navSrc.includes("'watchlist'"),
+    'stockDetailNavigation.sourceForOriginScope 必须实现 market→selection, watchlist→watchlist 映射',
+  )
+  assert.ok(
+    navSrc.includes("'dsa_selector'") && navSrc.includes("'watchlist_monitor'"),
+    'stockDetailNavigation.strategyForOriginScope 必须实现 market→dsa_selector, watchlist→watchlist_monitor 映射',
   )
 })
 
 test('MarketWorkspacePage handleNavigateToStock returnTo 保存完整当前 URL', () => {
+  // [PRD V2.0 §4.4 DETAIL-01] CP-11 重构后 returnTo 由 URLSearchParams 构造（自动 encodeURIComponent），
+  //   不再手工拼接 location.pathname/location.search。本测试检查 returnTo 包含 /market 前缀与 scope 参数，
+  //   且通过 buildStockDetailUrl 透传（URLSearchParams.toString 自动编码）。
   const src = readSource(PAGE_PATH)
   assert.ok(
-    src.includes('location.pathname') && src.includes('location.search'),
-    'handleNavigateToStock returnTo 必须保存完整 pathname + search',
+    /\/market\?/.test(src),
+    'handleNavigateToStock returnTo 必须以 /market? 前缀构造（保存完整列表页上下文）',
   )
   assert.ok(
-    src.includes('encodeURIComponent(returnTo)'),
-    'returnTo 必须 encodeURIComponent 编码',
+    /returnToParams\.set\(['"]scope['"]/.test(src),
+    'returnTo 必须包含 scope 参数（保存当前列表 scope 上下文）',
+  )
+  assert.ok(
+    /returnToParams\.set\(['"]selected['"]/.test(src),
+    'returnTo 必须包含 selected 参数（保存当前选中股票）',
+  )
+  assert.ok(
+    /returnTo,?\s*\n?\s*\}\)/.test(src) || /returnTo:\s*returnTo/.test(src),
+    'returnTo 必须透传给 buildStockDetailUrl（URLSearchParams.toString 自动 encodeURIComponent）',
   )
 })
 
