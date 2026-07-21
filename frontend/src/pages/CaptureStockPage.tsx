@@ -320,45 +320,68 @@ function computeTypeSpecificReady(
 
   if (indicatorView === 'node_cluster') {
     // [PROMPT.md §5.3.5] Node: 100 行 profile + profile_hash + node_regions
+    // [V2 fix] 实际 API 返回 `node_regions_hash`（profile_to_dict 序列化的 hash 字段名），
+    //   旧版前端误用 `profile_hash`，导致 data-render-ready 永远 false，capture 30s 超时。
+    //   同时兼容 `profile_hash`（保留向后兼容，若未来 DTO 添加该字段则同样识别）。
     const vn = (data['node_cluster'] ?? data['watchlist_monitor'] ?? data['volume_node_monitor']) as
       | Record<string, unknown>
       | undefined
     if (!vn) return false
     const profileRows = vn.profile_rows
+    const nodeRegionsHash = vn.node_regions_hash
     const profileHash = vn.profile_hash
     const nodeRegions = vn.node_regions
+    const hasHash =
+      (typeof nodeRegionsHash === 'string' && nodeRegionsHash.length > 0) ||
+      (typeof profileHash === 'string' && profileHash.length > 0)
     return (
       Array.isArray(profileRows) && profileRows.length > 0 &&
-      typeof profileHash === 'string' && profileHash.length > 0 &&
+      hasHash &&
       Array.isArray(nodeRegions)
     )
   }
 
   if (indicatorView === 'bollinger') {
     // [PROMPT.md §5.3.5] BB: 三轨（upper/middle/lower）非空
+    // [V2 fix] 实际 API 在 `watchlist_monitor` 中返回 `bb_upper/bb_mid/bb_lower` 数组
+    //   （BollingerBandsMonitor 计算结果挂在 watchlist_monitor 命名空间下），
+    //   不存在独立的 `bb_monitor`/`bollinger` 顶层键。
+    //   旧版前端只查 `bb_monitor`/`bollinger`，导致 bollinger 视图永远 not ready。
     const bb = (data['bb_monitor'] ?? data['bollinger']) as Record<string, unknown> | undefined
-    if (!bb) return false
-    const upper = bb.upper
-    const middle = bb.middle
-    const lower = bb.lower
+    const wm = data['watchlist_monitor'] as Record<string, unknown> | undefined
+    const upper = bb?.upper ?? wm?.bb_upper
+    const middle = bb?.middle ?? wm?.bb_mid
+    const lower = bb?.lower ?? wm?.bb_lower
     return (
-      Array.isArray(upper) && upper.length > 0 &&
-      Array.isArray(middle) && middle.length > 0 &&
-      Array.isArray(lower) && lower.length > 0
+      Array.isArray(upper) && (upper as unknown[]).length > 0 &&
+      Array.isArray(middle) && (middle as unknown[]).length > 0 &&
+      Array.isArray(lower) && (lower as unknown[]).length > 0
     )
   }
 
   if (indicatorView === 'smc') {
-    // [PROMPT.md §5.3.5] SMC: DTO 存在 + 版本正确
+    // [PROMPT.md §5.3.5] SMC: DTO 存在 + 版本正确 + render_frame matched
+    // [V2 fix] 实际 API 返回扁平结构：`events`/`order_blocks`/`equal_highs_lows`/`trailing`/
+    //   `swing_bias`/`pivots`/`params`/`view`，不存在 `dto` 包装层，也不存在顶层
+    //   `algorithm_version`/`bos`/`choch` 键。
+    //   BOS/CHoCH 事件位于 `events` 数组中（按 event_type 区分），order_blocks 数组
+    //   表示已检测到的 OB 区。算法版本可在 `params.algorithm_version` 或 `view.algorithm_version`
+    //   中查找（若存在），但 Ready 条件只要求核心数据结构非空即可（与 node_cluster 一致）。
     const smc = data['smc'] as Record<string, unknown> | undefined
     if (!smc) return false
-    const algorithmVersion = smc.algorithm_version
-    const bos = smc.bos
-    const choch = smc.choch
-    return (
-      typeof algorithmVersion === 'string' && algorithmVersion.length > 0 &&
-      (Array.isArray(bos) || Array.isArray(choch))
-    )
+    const events = smc.events
+    const orderBlocks = smc.order_blocks
+    const params = smc.params as Record<string, unknown> | undefined
+    const view = smc.view as Record<string, unknown> | undefined
+    const algorithmVersion =
+      (params?.algorithm_version as string | undefined) ??
+      (view?.algorithm_version as string | undefined) ??
+      (smc.algorithm_version as string | undefined)
+    const hasCoreData =
+      (Array.isArray(events) && (events as unknown[]).length > 0) ||
+      (Array.isArray(orderBlocks) && (orderBlocks as unknown[]).length > 0)
+    // algorithm_version 可选（部分 SMC 实现未返回该字段，只要有核心数据即视为 Ready）
+    return hasCoreData || (typeof algorithmVersion === 'string' && algorithmVersion.length > 0)
   }
 
   return true
