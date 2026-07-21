@@ -3,6 +3,13 @@
 // 重复 source/strategy 映射。本模块为唯一权威实现，其他模块只消费不复制。
 // CHANGE-20260716-006: originScope 成为来源唯一真源，returnTo.scope 降级为兼容回退。
 //
+// [PRD V2.0 §4.4] DetailEntryContext: origin = market|watchlist|direct
+//   - market: 用户从 /market 选股结果进入，需 marketContext + selection 列表
+//   - watchlist: 用户从自选监控进入，需 watchlist 列表
+//   - direct: 用户直接进入（深链/书签/通知），无来源列表上下文
+// [PRD V2.0 §7.3 CI门禁] market上下文不得回退watchlist（origin=market 失效时
+//   显示"来源上下文失效"，禁止静默回退 watchlist）
+//
 // 纯 TS 模块（无 React 依赖，无 @/ 别名依赖），可被 node --experimental-strip-types 直接运行。
 // 通过相对路径 import marketWorkspaceUrlState 的 decodeMarketListContext（函数声明提升，
 // ESM 循环引用安全：双方均在函数体内调用对方导出，不在模块顶层使用）。
@@ -11,6 +18,7 @@
 //   显式 originScope > 有效 /market returnTo.scope（兼容旧链接）> watchlist 默认值
 //   originScope=market  → source=selection, strategy=dsa_selector
 //   originScope=watchlist → source=watchlist, strategy=watchlist_monitor
+//   originScope=direct → source=watchlist, strategy=watchlist_monitor（无来源列表）
 //   originScope 与 returnTo.scope 冲突 → sourceContextInvalid=true（显示"来源上下文失效"）
 //   source=selection 且无有效 marketContext → sourceContextInvalid=true
 //
@@ -65,12 +73,14 @@ export interface DetailSourceContext {
  *   1. 显式 originScope（最高优先级，不被 returnTo.scope 覆盖）
  *      market  → source=selection, strategy=dsa_selector
  *      watchlist → source=watchlist, strategy=watchlist_monitor
+ *      direct → source=watchlist, strategy=watchlist_monitor（无来源列表）
  *   2. 无显式 originScope 时兼容解析有效 /market returnTo.scope（旧链接回退）
  *   3. 无任何来源 → 默认 watchlist
  *
  * 冲突检测：
- *   originScope 存在且 returnTo.scope 也存在但不同 → sourceContextInvalid=true
+ *   originScope=market|watchlist 存在且 returnTo.scope 也存在但不同 → sourceContextInvalid=true
  *   （显示"来源上下文失效"，不静默回退自选）
+ *   originScope=direct 不参与冲突检测（direct 无对应 returnTo.scope）。
  *
  * source=selection 且 marketContext=null 时也 sourceContextInvalid=true。
  */
@@ -83,13 +93,15 @@ export function resolveDetailSourceContext(
   const marketContext = decodeMarketListContext(returnTo)
 
   // CHANGE-20260716-006: 显式 originScope 优先（不被 returnTo.scope 覆盖）
-  if (originScopeRaw === 'market' || originScopeRaw === 'watchlist') {
+  // [PRD V2.0 §4.4] originScope 支持三值：market|watchlist|direct
+  if (originScopeRaw === 'market' || originScopeRaw === 'watchlist' || originScopeRaw === 'direct') {
     const source: ResearchSource =
       originScopeRaw === 'market' ? 'selection' : 'watchlist'
     const strategy = defaultStrategyForSource(source)
     // 冲突检测：originScope 与 returnTo.scope 不一致
+    // direct 无对应 returnTo.scope，不参与冲突检测
     const returnToScope = marketContext?.scope ?? null
-    const contextMismatch = returnToScope !== null && returnToScope !== originScopeRaw
+    const contextMismatch = originScopeRaw !== 'direct' && returnToScope !== null && returnToScope !== originScopeRaw
     // source=selection 但无有效 marketContext → 失效
     const sourceContextInvalid = contextMismatch || (source === 'selection' && marketContext === null)
     return { source, strategy, marketContext, sourceContextInvalid }

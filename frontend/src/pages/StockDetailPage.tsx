@@ -53,8 +53,9 @@ export default function StockDetailPage() {
 
   // CHANGE-20260716-006: originScope 为来源唯一真源，resolveDetailSourceContext 优先使用
   // 优先级：显式 originScope > 有效 /market returnTo.scope（兼容旧链接）> 默认 watchlist
+  // [PRD V2.0 §4.4] originScope 支持三值：market|watchlist|direct
   const returnToParam = searchParams.get('returnTo')
-  const originScopeParam = searchParams.get('originScope') as 'market' | 'watchlist' | null
+  const originScopeParam = searchParams.get('originScope') as 'market' | 'watchlist' | 'direct' | null
   const { source, strategy, marketContext, sourceContextInvalid } = resolveDetailSourceContext(
     returnToParam,
     searchParams.get('source'),
