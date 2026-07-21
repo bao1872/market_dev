@@ -18,7 +18,7 @@ import {
   useInstrumentEvents,
   useRealtimeQuote,
 } from '@/hooks/useApi'
-import { mapBarsToBarData, mergeRealtimeQuoteIntoBars } from '@/utils/chart'
+import { mapBarsToBarData } from '@/utils/chart'
 import type { ChartEvent } from '@/components/StrategyChart'
 import type { IndicatorResponse } from '@/api/endpoints'
 import {
@@ -128,10 +128,10 @@ export function useStockResearchData({ symbol, timeframe, includeSmc = false }: 
     [barsQuery.data, barsTimeframeMatches],
   )
   const backendIsPartial = barsQuery.data?.is_partial === true
-  const displayBars = useMemo(
-    () => mergeRealtimeQuoteIntoBars(baseBars, quoteQuery.data, timeframe, backendIsPartial),
-    [baseBars, quoteQuery.data, timeframe, backendIsPartial],
-  )
+  // [CH-03 fix] PRD §3.3: MDAS 是唯一 Bar 真源，前端 quote 不再构造/修改 K 线。
+  // displayBars 直接等于 baseBars；realtime 价格更新走 priceSummary（见下方）。
+  // 旧 mergeRealtimeQuoteIntoBars 已移除（曾用 quote 合成末根 bar，违反 MDAS 唯一出口）。
+  const displayBars = baseBars
 
   // [CHANGE-20260719-003 §四] generation 乱序丢弃：
   // 如果 indicators 响应的 timeframe 与当前 timeframe 不匹配，丢弃旧响应（返回 undefined）
