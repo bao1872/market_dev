@@ -53,7 +53,10 @@ from app.core.time import now_shanghai
 from app.models.bar import Bar15Min, Bar60Min, BarDaily, BarMinute, BarMonthly, BarWeekly
 from app.schemas.bar import BarListResponse, BarResponse, QuoteResponse
 from app.services.calendar_service import is_trading_day_async
-from app.services.indicator_display_frame import build_display_frame
+from app.services.indicator_display_frame import (
+    DisplayWindowSpec,
+    build_display_frame,
+)
 from app.services.market_data_aggregation_service import MarketDataAggregationService
 from app.services.market_status_service import (
     MARKET_SESSION_AFTERNOON,
@@ -529,13 +532,26 @@ async def get_bars(
             response.headers["X-Data-Source"] = result.data_source
             response.headers["X-Cache-Hit"] = "true" if result.cache_hit else "false"
             response.headers["X-Total-Ms"] = str(total_ms)
-        # [display_frame] - 空数据时仍返回 display_frame（display_hash="", display_times=[]）
+        # [display_frame V2] - 空数据时仍返回 display_frame（display_hash="", display_times=[]）
+        #   传入 spec 以附加 requested_count/actual_count/include_realtime/is_partial/
+        #   adjustment_as_of 字段，保证空数据响应也带 V2 元信息。
+        empty_spec = DisplayWindowSpec(
+            instrument_id=str(instrument_id),
+            timeframe=timeframe,
+            adj=adj,
+            requested_count=page_size,
+            include_realtime=include_realtime,
+            completed_only=completed_only,
+            adjustment_as_of=(str(adjustment_as_of) if adjustment_as_of else None),
+        )
         empty_display_frame = build_display_frame(
             instrument_id=str(instrument_id),
             timeframe=timeframe,
             adj=adj,
             display_df=df,
             completed_through=_completed_through.isoformat() if _completed_through else None,
+            spec=empty_spec,
+            is_partial=result.is_partial,
         )
         return BarListResponse(
             items=[],
@@ -578,15 +594,28 @@ async def get_bars(
 
     items = _df_to_responses(page_df, instrument_id, timeframe)
 
-    # [display_frame] - 从展示窗口 page_df 构建展示帧（PROMPT.md §二.1）
+    # [display_frame V2] - 从展示窗口 page_df 构建展示帧（PROMPT.md §二.1 DisplayWindowSpec V2）
     #   bars API 与 indicators API 调用同一个 build_display_frame()，保证同一展示
     #   窗口产生同一 display_hash。前端只比较 display_frame，不再比较 source_bar_hash。
+    #   V2 传入 DisplayWindowSpec 附加 requested_count/actual_count/first_time/last_time/
+    #   include_realtime/is_partial/adjustment_as_of 字段，供前端 mismatch 时显示差异。
+    bars_spec = DisplayWindowSpec(
+        instrument_id=str(instrument_id),
+        timeframe=timeframe,
+        adj=adj,
+        requested_count=page_size,
+        include_realtime=include_realtime,
+        completed_only=completed_only,
+        adjustment_as_of=(str(adjustment_as_of) if adjustment_as_of else None),
+    )
     display_frame = build_display_frame(
         instrument_id=str(instrument_id),
         timeframe=timeframe,
         adj=adj,
         display_df=page_df,
         completed_through=_completed_through.isoformat() if _completed_through else None,
+        spec=bars_spec,
+        is_partial=result.is_partial,
     )
 
     # --- 响应头 ---

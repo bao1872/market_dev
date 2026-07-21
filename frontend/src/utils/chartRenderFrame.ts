@@ -37,6 +37,9 @@ export type { DisplayFrame }
  *
  * 优先比较 display_frame（display_hash + display_times 范围 key），
  * display_frame 缺失时降级到旧 source_bar_hash 比对（向后兼容）。
+ *
+ * [PROMPT.md §二 V2] displayFrame 保留原始 DisplayFrame 对象，
+ * 供 mismatch 横幅显示 V2 diff（count/time/hash/as_of）。
  */
 export interface ChartRenderFrame {
   instrumentId: string
@@ -49,6 +52,8 @@ export interface ChartRenderFrame {
   displayHash: string | null
   /** 展示帧时间范围 key（display_times 首末拼接），优先参与比对 */
   displayRangeKey: string | null
+  /** [V2] 原始 DisplayFrame 对象，供 mismatch 横幅显示 V2 diff（count/time/hash/as_of） */
+  displayFrame: DisplayFrame | null
 }
 
 /**
@@ -124,6 +129,8 @@ export function buildBarsFrame(params: {
     marketDataContractVersion: params.marketDataContractVersion ?? null,
     displayHash,
     displayRangeKey,
+    // [V2] 保留原始 DisplayFrame 供 mismatch 横幅显示 count/time/hash/as_of diff
+    displayFrame: params.displayFrame ?? null,
   }
 }
 
@@ -160,6 +167,8 @@ export function buildIndicatorsFrame(params: {
     marketDataContractVersion: params.marketDataContractVersion ?? null,
     displayHash,
     displayRangeKey,
+    // [V2] 保留原始 DisplayFrame 供 mismatch 横幅显示 count/time/hash/as_of diff
+    displayFrame: params.displayFrame ?? null,
   }
 }
 

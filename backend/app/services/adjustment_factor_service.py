@@ -116,11 +116,12 @@ class AdjustmentFactorService:
         - MDAS 缓存（Redis mdas:{instrument_id}:*）
         - bars 缓存（Redis bars:{instrument_id}:*，默认禁用时返回 0）
         - indicator 缓存（Redis indicator:{instrument_id}:*）
+        - [PROMPT.md §5.4.4 V2] Capture 缓存（filesystem，按 instrument_id 精确删除）
 
         不失效（依赖 TTL 自然过期或重算）：
         - 监控 Profile 缓存（in-process，跨 worker 无法精确失效；TTL 300s）
-        - Capture 缓存（filesystem，per-event key，新事件自然 miss；TTL 600s）
-        - Snapshot（DB 存储，由 after_close 流水线重算，schema_version bump 保证旧快照不可见）
+        - Feature Snapshot（DB 存储，由 after_close 同次盘后重算发布，
+          schema_version bump 保证旧快照不可见；历史快照保留不删除）
 
         失败时 re-raise（不吞没，不伪装成功）。
 
@@ -140,7 +141,8 @@ class AdjustmentFactorService:
         count = await rebuild_adj_factors(
             session, instrument_id, symbol, earliest_affected, adapter
         )
-        # [FR-11] 精确失效该股票下游缓存：MDAS + bars + indicator
+        # [FR-11] 精确失效该股票下游缓存：MDAS + bars + indicator + capture
+        # [PROMPT.md §5.4.4 V2] Capture 缓存应精确清理（避免因子变化后截图复用旧指标）
         invalidated = await self._invalidate_downstream_caches(instrument_id)
         logger.info(
             "rebuild_factor_series 完成 instrument_id=%s records=%d 缓存失效: %s",
@@ -157,13 +159,21 @@ class AdjustmentFactorService:
         - mdas: 行情聚合层缓存（sync Redis，与现有实现一致）
         - bars: 原始行情响应缓存（async，默认禁用时返回 0）
         - indicator: 指标计算结果缓存（async，TTL 300s）
+        - capture: 截图文件缓存（filesystem per-event key，[PROMPT.md §5.4.4 V2] 新增）
+
+        [PROMPT.md §5.4.4 V2] 下游处理策略：
+        - MDAS/Bars/Indicator: 精确清理（必须）
+        - Capture: 精确清理（必须，避免因子变化后截图复用旧指标）
+        - Monitor Profile: 可等待 TTL（in-process，跨 worker 无法精确失效；TTL 300s）
+        - Feature Snapshot: 由 after_close 同次盘后重算发布（schema_version bump 保证旧快照不可见）；
+          历史快照保留，不删除
 
         单层失效失败不阻塞其他层（缓存 TTL 会自然过期）。
 
         Returns:
-            dict: 各缓存层删除的键数量 {mdas, bars, indicator}
+            dict: 各缓存层删除的键数量 {mdas, bars, indicator, capture}
         """
-        result: dict[str, int] = {"mdas": 0, "bars": 0, "indicator": 0}
+        result: dict[str, int] = {"mdas": 0, "bars": 0, "indicator": 0, "capture": 0}
 
         # 1. MDAS 缓存（sync Redis，与现有实现一致）
         result["mdas"] = self._invalidate_mdas_cache(instrument_id)
@@ -188,13 +198,70 @@ class AdjustmentFactorService:
                 instrument_id, exc,
             )
 
+        # 4. [PROMPT.md §5.4.4 V2] Capture 缓存（filesystem，精确清理该股票所有 event 的截图）
+        #   避免因子变化后飞书截图复用旧指标的 PNG（TTL 600s 太长，盘后重建后立即清）
+        result["capture"] = self._invalidate_capture_cache(instrument_id)
+
         total = sum(result.values())
         if total > 0:
             logger.info(
-                "下游缓存失效 instrument_id=%s mdas=%d bars=%d indicator=%d",
+                "下游缓存失效 instrument_id=%s mdas=%d bars=%d indicator=%d capture=%d",
                 instrument_id, result["mdas"], result["bars"], result["indicator"],
+                result["capture"],
             )
         return result
+
+    def _invalidate_capture_cache(self, instrument_id: uuid.UUID) -> int:
+        """[PROMPT.md §5.4.4 V2] 失效该股票的 Capture 文件缓存。
+
+        Capture 缓存文件名格式（来自 stock_capture_service._build_cache_key）：
+            {event_id}_{instrument_id}_{chart_version}_tf=..._sbt=..._run=..._dsf=..._iv=...
+
+        清理策略：扫描 CAPTURE_CACHE_DIR，删除文件名包含 `_{instrument_id}_` 的文件。
+        精确到 instrument_id，不影响其他股票；保留目录结构。
+
+        Returns:
+            删除的缓存文件数量
+        """
+        import os
+
+        try:
+            # 复用 stock_capture_service 的缓存目录常量（避免重复定义）
+            from app.services.stock_capture_service import _CACHE_DIR
+        except ImportError:
+            logger.debug(
+                "stock_capture_service 不可导入，跳过 Capture 缓存失效 instrument_id=%s",
+                instrument_id,
+            )
+            return 0
+
+        if not _CACHE_DIR or not os.path.isdir(_CACHE_DIR):
+            return 0
+
+        # UUID 字符串作为精确匹配 token（前后下划线避免前缀误匹配）
+        token = f"_{instrument_id}_"
+        deleted = 0
+        try:
+            for entry in os.scandir(_CACHE_DIR):
+                if entry.is_file() and token in entry.name:
+                    try:
+                        os.remove(entry.path)
+                        deleted += 1
+                    except OSError as exc:
+                        logger.debug(
+                            "删除 Capture 缓存文件失败 %s: %s", entry.path, exc,
+                        )
+            if deleted > 0:
+                logger.info(
+                    "Capture 缓存失效 instrument_id=%s deleted=%d", instrument_id, deleted,
+                )
+            return deleted
+        except OSError as exc:
+            logger.warning(
+                "Capture 缓存目录扫描失败 instrument_id=%s: %s（TTL 600s 会自然过期）",
+                instrument_id, exc,
+            )
+            return 0
 
     def _invalidate_mdas_cache(self, instrument_id: uuid.UUID) -> int:
         """失效该股票的 MDAS 缓存（scan + delete mdas:{instrument_id}:*）。

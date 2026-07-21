@@ -127,7 +127,16 @@ StockContext API 的 `nodeAvailability` 字段直接从 snapshot.primary.1d.node
 | `NODE_CLUSTER_ALGORITHM_VERSION` | `nc-v1` | engine 算法版本 |
 | `NODE_CLUSTER_OUTPUT_SCHEMA_VERSION` | `1` | `NodeClusterProfileResult` 字段版本 |
 | `NODE_CLUSTER_CONTRACT_FINGERPRINT` | `nc-cf-v1` | 语义合同指纹（变更时自动失效缓存） |
-| `indicator_cache.ALGORITHM_VERSION` | `v11` | 全局指标缓存版本（v10→v11，CHANGE-20260718-004） |
+| `indicator_cache.ALGORITHM_VERSION` | `v12` | 全局指标缓存版本（v11→v12，CHANGE-20260721-002 Display Frame Contract V2；删除 `_display_window=100` 硬编码，display_frame 新增 V2 字段，indicators API 新增 `include_realtime`/`completed_only`/`adjustment_as_of` 参数，缓存键追加 `DisplayWindowSpec` 后缀） |
+
+### 2.7.1 Node Cluster DTO V2（CHANGE-20260721-002）
+
+`node_cluster` DTO 结构升级为 `node_regions` + 独立 `price_state`：
+
+- **`node_regions`**：节点区域列表，每个区域含 `price_low`/`price_high`/`volume`/`is_poc`/`is_value_area`/`peaks`（结构化节点数据，前端按区域渲染）
+- **`price_state`**：当前价格状态独立字段，含 `current_price`/`nearest_node_above`/`nearest_node_below`/`position_in_value_area`/`position_pct`（前端消费价格位置信息不再从 node_regions 解析）
+- **四链统一消费**：详情/盘后/盘中/Capture 四链均消费 V2 DTO；`canonical_adapters.compute_node_cluster_adapter` 返回 V2 结构
+- **类型特定 Ready 条件**：不同 indicator_view 有额外 Ready 条件（如 `indicator_view=smc` 时需 SMC layer 加载完成）
 
 ### 2.8 允许差异
 

@@ -593,7 +593,10 @@ async def compute_snapshot_derived_adapter(
 
 from app.services.node_cluster_engine import (  # noqa: E402
     NodeClusterProfileResult,
+    build_node_regions,
+    build_price_state,
     compute_node_cluster_profile,
+    compute_node_regions_hash,
     derive_state_for_price,
     profile_to_dict,
 )
@@ -637,6 +640,10 @@ __all__ = [
     "compute_node_cluster_profile",
     "derive_state_for_price",
     "profile_to_dict",
+    # [PROMPT.md §三.3 V2] Canonical Node DTO V2 helpers
+    "build_node_regions",
+    "build_price_state",
+    "compute_node_regions_hash",
     "adapt_smc_to_display_dto",
     "_compute_all_factors_for_bars",
     "_compute_relation",

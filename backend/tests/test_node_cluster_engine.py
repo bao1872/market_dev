@@ -28,9 +28,13 @@ import pytest
 
 from app.services.node_cluster_engine import (
     build_engine_cache_key,
+    build_node_regions,
+    build_price_state,
     compute_node_cluster_profile,
+    compute_node_regions_hash,
     derive_state_for_price,
     detect_crossover_signals,
+    profile_to_dict,
 )
 
 # =============================================================================
@@ -345,3 +349,288 @@ class TestBuildCacheKey:
         assert profile.contract_fingerprint in key
         assert profile.daily_source_hash in key
         assert profile
+
+
+# =============================================================================
+# Canonical Node DTO V2 测试（PROMPT.md §三.3）
+# =============================================================================
+# 验证 build_node_regions / build_price_state / compute_node_regions_hash / profile_to_dict
+# 满足四链一致性约束：详情/Capture/Snapshot/Monitor 必须读同一 DTO，
+# 前端禁止从 state/peak_rows 重建 Node 列表。
+
+
+# node_regions 每项必须包含的字段（与前端 BackendNode 接口对齐）
+_NODE_REGION_REQUIRED_KEYS = {
+    "entity_id", "kind", "low", "mid", "high",
+    "bullish_volume", "bearish_volume", "total_volume", "is_poc",
+}
+
+# price_state 必须包含的字段
+_PRICE_STATE_REQUIRED_KEYS = {
+    "current_price", "position_0_1",
+    "upper_node_ref", "lower_node_ref", "poc_node_ref", "last_touched_node_ref",
+}
+
+
+class TestCanonicalNodeDtoV2:
+    """Canonical Node DTO V2 字段完整性 / 确定性 / 四链一致性 / 引用有效性。"""
+
+    def test_node_regions_field_completeness(self):
+        """[PROMPT.md §三.3] 每个 node_region 必须含 9 个必填字段。"""
+        daily = _make_daily_bars()
+        bars_15m = _make_clustered_15m_bars(THREE_CLUSTER_SPEC)
+        profile = compute_node_cluster_profile(daily, bars_15m)
+
+        regions = build_node_regions(profile)
+        assert len(regions) > 0, "合成 3 簇数据应产生至少 1 个 peak"
+        for r in regions:
+            assert set(r.keys()) >= _NODE_REGION_REQUIRED_KEYS, (
+                f"node_region 缺少字段：actual={set(r.keys())} expected>={_NODE_REGION_REQUIRED_KEYS}"
+            )
+            # 类型断言
+            assert isinstance(r["entity_id"], str) and r["entity_id"].startswith("peak_")
+            assert r["kind"] == "peak"
+            assert isinstance(r["low"], float) and r["low"] <= r["mid"] <= r["high"]
+            assert isinstance(r["bullish_volume"], float)
+            assert isinstance(r["bearish_volume"], float)
+            assert isinstance(r["total_volume"], float)
+            assert isinstance(r["is_poc"], bool)
+
+    def test_node_regions_entity_id_stable_format(self):
+        """entity_id 必须按 peak_rows 顺序索引生成（peak_000/peak_001/...）。"""
+        daily = _make_daily_bars()
+        bars_15m = _make_clustered_15m_bars(THREE_CLUSTER_SPEC)
+        profile = compute_node_cluster_profile(daily, bars_15m)
+
+        regions = build_node_regions(profile)
+        expected_ids = [f"peak_{i:03d}" for i in range(len(regions))]
+        actual_ids = [r["entity_id"] for r in regions]
+        assert actual_ids == expected_ids, (
+            f"entity_id 顺序错误：actual={actual_ids} expected={expected_ids}"
+        )
+
+    def test_node_regions_determinism(self):
+        """同输入重算 node_regions 必须完全一致（含 entity_id 顺序）。"""
+        daily = _make_daily_bars()
+        bars_15m = _make_clustered_15m_bars(THREE_CLUSTER_SPEC)
+        profile = compute_node_cluster_profile(daily, bars_15m)
+
+        regions_1 = build_node_regions(profile)
+        regions_2 = build_node_regions(profile)
+        assert regions_1 == regions_2, "同 profile 重算 node_regions 不一致"
+
+        hash_1 = compute_node_regions_hash(regions_1)
+        hash_2 = compute_node_regions_hash(regions_2)
+        assert hash_1 == hash_2, f"node_regions_hash 不一致：{hash_1} vs {hash_2}"
+
+    def test_node_regions_hash_is_16_char_hex(self):
+        """node_regions_hash 必须是 16 字符 hex（SHA256 前 16 字符）。"""
+        daily = _make_daily_bars()
+        bars_15m = _make_clustered_15m_bars(THREE_CLUSTER_SPEC)
+        profile = compute_node_cluster_profile(daily, bars_15m)
+
+        regions = build_node_regions(profile)
+        h = compute_node_regions_hash(regions)
+        assert len(h) == 16, f"hash 长度错误：{h}"
+        int(h, 16)  # 必须可解析为 hex
+
+    def test_node_regions_hash_empty_for_no_peaks(self):
+        """无 Peak 时 node_regions=[] 且 hash='empty'。"""
+        daily = _make_daily_bars()
+        bars_15m = _make_flat_15m_bars()  # 均匀分布 → 无 Peak
+        profile = compute_node_cluster_profile(daily, bars_15m)
+
+        regions = build_node_regions(profile)
+        assert regions == [], "flat bars 不应产生 peak"
+        assert compute_node_regions_hash(regions) == "empty"
+
+    def test_node_regions_hash_differs_for_different_profiles(self):
+        """不同 profile 的 node_regions_hash 必须不同。"""
+        daily_a = _make_daily_bars(seed=43)
+        bars_15m_a = _make_clustered_15m_bars(THREE_CLUSTER_SPEC)
+        profile_a = compute_node_cluster_profile(daily_a, bars_15m_a)
+
+        daily_b = _make_daily_bars(seed=99, price_low=20.0, price_high=30.0)
+        bars_15m_b = _make_clustered_15m_bars([
+            (22.0, 200_000.0, 0.15),
+            (25.0, 500_000.0, 0.65),
+            (28.0, 200_000.0, 0.15),
+        ])
+        profile_b = compute_node_cluster_profile(daily_b, bars_15m_b)
+
+        hash_a = compute_node_regions_hash(build_node_regions(profile_a))
+        hash_b = compute_node_regions_hash(build_node_regions(profile_b))
+        assert hash_a != hash_b, (
+            f"不同 profile 的 hash 不应相同：{hash_a} vs {hash_b}"
+        )
+
+    def test_node_regions_exactly_one_poc_when_poc_price_set(self):
+        """poc_price 非空时 node_regions 中有且仅有一个 is_poc=True。"""
+        daily = _make_daily_bars()
+        bars_15m = _make_clustered_15m_bars(THREE_CLUSTER_SPEC)
+        profile = compute_node_cluster_profile(daily, bars_15m)
+
+        if profile.poc_price is None:
+            pytest.skip("poc_price 为空，跳过 POC 唯一性断言")
+
+        regions = build_node_regions(profile)
+        poc_regions = [r for r in regions if r["is_poc"]]
+        assert len(poc_regions) == 1, (
+            f"is_poc=True 的 region 数量应为 1，实际 {len(poc_regions)}"
+        )
+        # POC region 的 mid 必须等于 poc_price
+        assert abs(poc_regions[0]["mid"] - float(profile.poc_price)) < 1e-4
+
+    def test_price_state_field_completeness(self):
+        """[PROMPT.md §三.3] price_state 必须含 6 个必填字段。"""
+        daily = _make_daily_bars()
+        bars_15m = _make_clustered_15m_bars(THREE_CLUSTER_SPEC)
+        profile = compute_node_cluster_profile(daily, bars_15m)
+
+        price_state = build_price_state(profile, current_price=12.0)
+        assert set(price_state.keys()) >= _PRICE_STATE_REQUIRED_KEYS, (
+            f"price_state 缺少字段：actual={set(price_state.keys())}"
+        )
+        assert price_state["current_price"] == pytest.approx(12.0)
+        assert isinstance(price_state["position_0_1"], (float, type(None)))
+
+    def test_price_state_refs_resolve_to_node_regions(self):
+        """price_state 中的 *_ref 必须能在 node_regions 中找到对应 entity_id。
+
+        [PROMPT.md §三.3] 前端通过 entity_id 在 node_regions 中查找完整节点信息，
+        因此 upper_node_ref/lower_node_ref/poc_node_ref/last_touched_node_ref
+        非 None 时必须指向 node_regions 中实际存在的 entity_id。
+        """
+        daily = _make_daily_bars()
+        bars_15m = _make_clustered_15m_bars(THREE_CLUSTER_SPEC)
+        profile = compute_node_cluster_profile(daily, bars_15m)
+
+        # 当前价在 POC 附近（中簇 12.0），应能找到 upper/lower 节点
+        price_state = build_price_state(profile, current_price=12.0)
+        regions = build_node_regions(profile)
+        all_entity_ids = {r["entity_id"] for r in regions}
+
+        for ref_key in ("upper_node_ref", "lower_node_ref", "poc_node_ref", "last_touched_node_ref"):
+            ref = price_state[ref_key]
+            if ref is not None:
+                assert ref in all_entity_ids, (
+                    f"price_state.{ref_key}={ref} 未在 node_regions entity_ids={all_entity_ids} 中找到"
+                )
+
+    def test_price_state_empty_profile_returns_minimal_structure(self):
+        """profile 无 profile_rows 时 price_state 返回最小结构（refs 全 None）。"""
+        # 验证 build_price_state 在 profile_rows 空时的兜底逻辑
+        # 通过手动构造空 profile 来触发兜底路径
+        from app.services.node_cluster_engine import NodeClusterProfileResult
+
+        empty_profile = NodeClusterProfileResult(
+            profile_rows=[],
+            peak_rows=[],
+            all_peak_prices=[],
+            poc_price=None,
+            vah_price=None,
+            val_price=None,
+            price_step=None,
+            lowest_price=None,
+            highest_price=None,
+            daily_source_hash="empty",
+            bars_15m_source_hash="empty",
+            adj_factor_hash=None,
+            adjustment_as_of=None,
+            daily_bars_count=0,
+            bars_15m_count=0,
+            profile_hash="empty",
+            algorithm_version="nc-v1",
+            output_schema_version=1,
+            contract_fingerprint="nc-cf-v1",
+        )
+        price_state = build_price_state(empty_profile, current_price=10.0)
+        assert price_state["current_price"] == 10.0
+        assert price_state["position_0_1"] is None
+        for ref_key in ("upper_node_ref", "lower_node_ref", "poc_node_ref", "last_touched_node_ref"):
+            assert price_state[ref_key] is None
+
+    def test_profile_to_dict_contains_v2_fields(self):
+        """[PROMPT.md §三.3] profile_to_dict 必须输出 node_regions + node_regions_hash。
+
+        四链一致性：Snapshot 落库 structural_payload 通过 profile_to_dict 序列化，
+        必须与详情/Capture 链路的 build_node_regions 输出完全一致。
+        """
+        daily = _make_daily_bars()
+        bars_15m = _make_clustered_15m_bars(THREE_CLUSTER_SPEC)
+        profile = compute_node_cluster_profile(daily, bars_15m)
+
+        d = profile_to_dict(profile)
+        assert "node_regions" in d, "profile_to_dict 缺少 node_regions 字段"
+        assert "node_regions_hash" in d, "profile_to_dict 缺少 node_regions_hash 字段"
+        assert "profile_hash" in d, "profile_to_dict 缺少 profile_hash 字段"
+
+        # 四链一致性：profile_to_dict 输出的 node_regions 必须与直接调用 build_node_regions 一致
+        direct_regions = build_node_regions(profile)
+        assert d["node_regions"] == direct_regions, (
+            "profile_to_dict.node_regions 与 build_node_regions 输出不一致"
+        )
+
+        # hash 也必须一致
+        direct_hash = compute_node_regions_hash(direct_regions)
+        assert d["node_regions_hash"] == direct_hash, (
+            f"profile_to_dict.node_regions_hash={d['node_regions_hash']} "
+            f"与 compute_node_regions_hash={direct_hash} 不一致"
+        )
+
+    def test_four_chain_hash_consistency(self):
+        """[PROMPT.md §三.4] 四链 node_regions_hash 必须一致。
+
+        模拟四条链路（详情/Capture/Snapshot/Monitor）对同一 profile 计算 hash：
+        - 链路1（详情 indicator_service）：build_node_regions → compute_node_regions_hash
+        - 链路2（Capture stock_capture_service）：同上
+        - 链路3（Snapshot feature_snapshot_service）：profile_to_dict.node_regions_hash
+        - 链路4（Monitor volume_node_monitor）：同链路1（共享 compute_indicators）
+
+        四条链路对同一 stock/as_of/输入 → node_regions_hash 必须完全相同。
+        """
+        daily = _make_daily_bars()
+        bars_15m = _make_clustered_15m_bars(THREE_CLUSTER_SPEC)
+        profile = compute_node_cluster_profile(daily, bars_15m)
+
+        # 链路1/2/4：直接调用 build_node_regions + compute_node_regions_hash
+        regions_chain_1 = build_node_regions(profile)
+        hash_chain_1 = compute_node_regions_hash(regions_chain_1)
+
+        # 链路3：通过 profile_to_dict 序列化（Snapshot 落库路径）
+        dict_chain_3 = profile_to_dict(profile)
+        hash_chain_3 = dict_chain_3["node_regions_hash"]
+
+        # 再次重算验证确定性（链路2/4 模拟）
+        regions_chain_2 = build_node_regions(profile)
+        hash_chain_2 = compute_node_regions_hash(regions_chain_2)
+
+        assert hash_chain_1 == hash_chain_2 == hash_chain_3, (
+            f"四链 node_regions_hash 不一致："
+            f"chain1={hash_chain_1} chain2={hash_chain_2} chain3={hash_chain_3}"
+        )
+
+    def test_node_regions_preserves_all_peaks_no_va_filter(self):
+        """[PROMPT.md §三.3] node_regions 必须保留全部 Peak（禁止 VA 过滤）。
+
+        peak_rows 包含 VA 外 Peak（VAH 上方 / VAL 下方），node_regions
+        必须完整透传，不得因 VA 过滤丢弃远端 Peak。
+        """
+        daily = _make_daily_bars()
+        bars_15m = _make_clustered_15m_bars(THREE_CLUSTER_SPEC)
+        profile = compute_node_cluster_profile(daily, bars_15m)
+
+        regions = build_node_regions(profile)
+        # node_regions 数量必须等于 peak_rows 数量（不得过滤）
+        assert len(regions) == len(profile.peak_rows), (
+            f"node_regions 数量 {len(regions)} != peak_rows 数量 {len(profile.peak_rows)}，"
+            f"疑似 VA 过滤"
+        )
+
+        # 验证 VA 外 Peak 仍保留（低簇 10.0 在 VAL 下方，高簇 14.0 在 VAH 上方）
+        if profile.val_price is not None and profile.vah_price is not None:
+            below_val = [r for r in regions if r["mid"] < profile.val_price]
+            above_vah = [r for r in regions if r["mid"] > profile.vah_price]
+            # 3 簇数据中低簇和高簇应为 VA 外 Peak
+            assert len(below_val) >= 1, "VAL 下方 Peak 被过滤"
+            assert len(above_vah) >= 1, "VAH 上方 Peak 被过滤"

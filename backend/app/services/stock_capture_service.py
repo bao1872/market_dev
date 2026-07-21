@@ -32,6 +32,11 @@
 高清渲染（飞书清晰度升级）：
 - viewport 默认 1920x1200（CAPTURE_VIEWPORT_WIDTH/HEIGHT），device_scale_factor 默认 2
 - device_scale_factor 严禁 4（避免超大图/OOM）；截图 PNG 不落库、不存 base64
+
+[PROMPT.md §5.3.2 V2 移动舞台规格]：
+- viewport 固定 1440×2560（9:16 移动竖屏），device_scale_factor=1
+- 旧版 1920×1200 DPR=2 已废弃（PC 横屏布局不匹配移动舞台）
+- PNG width/height 从真实 IHDR 头读取（validate_png 返回），禁止 viewport×DPR 推算
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import UUID
 
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -64,23 +70,30 @@ _CACHE_DIR = os.getenv(
 _CACHE_TTL_SECONDS = 600
 
 # [capture-hd] - 高清截图渲染参数（提升飞书图片清晰度，不落库/base64）
-# 默认 1920x1200 viewport + device_scale_factor=2；device_scale_factor 严禁 4（避免超大图/OOM）
-_CAPTURE_VIEWPORT_WIDTH = int(os.getenv("CAPTURE_VIEWPORT_WIDTH", "1920"))
-_CAPTURE_VIEWPORT_HEIGHT = int(os.getenv("CAPTURE_VIEWPORT_HEIGHT", "1200"))
-_CAPTURE_DEVICE_SCALE_FACTOR = int(os.getenv("CAPTURE_DEVICE_SCALE_FACTOR", "2"))
+# [PROMPT.md §5.3.2 V2] 移动舞台固定 1440×2560 9:16 竖屏 + DPR=1
+#   - 旧版 1920×1200 DPR=2 已废弃（PC 横屏不匹配移动舞台，且 DPR=2 产生 3840×2400 超大图）
+#   - 1440×2560 DPR=1 直接产出 1:1 PNG，与 MobileIndicatorStage CSS 尺寸一致
+#   - env 变量保留以支持运维紧急覆盖（如 A/B 测试不同规格），但默认值已改为移动规格
+_CAPTURE_VIEWPORT_WIDTH = int(os.getenv("CAPTURE_VIEWPORT_WIDTH", "1440"))
+_CAPTURE_VIEWPORT_HEIGHT = int(os.getenv("CAPTURE_VIEWPORT_HEIGHT", "2560"))
+_CAPTURE_DEVICE_SCALE_FACTOR = int(os.getenv("CAPTURE_DEVICE_SCALE_FACTOR", "1"))
 
 
 @dataclass
 class CaptureResult:
     """截图结果（含渲染元数据，供 CaptureResponse 透传）。
 
+    [PROMPT.md §5.3.2 V2] width/height 从真实 PNG IHDR 头读取，
+    不再用 viewport × DPR 推算（避免 Playwright 元素截图实际尺寸与 viewport 不一致时失真）。
+
     Attributes:
         png_bytes: PNG 图片字节
-        width: 截图像素宽（= viewport_width * device_scale_factor）
-        height: 截图像素高（= viewport_height * device_scale_factor）
+        width: 真实 PNG 像素宽（从 IHDR 读取）
+        height: 真实 PNG 像素高（从 IHDR 读取）
         device_scale_factor: 设备像素比
         cache_hit: 是否命中文件缓存（仅读缓存命中为 True）
         source_bar_time: 透传的实时 bar 时间（可选，用于日志）
+        snapshot_time: 截图完成时间（UTC ISO，供前端转 Asia/Shanghai 显示发送时间）
     """
 
     png_bytes: bytes
@@ -89,6 +102,7 @@ class CaptureResult:
     device_scale_factor: int
     cache_hit: bool
     source_bar_time: str | None = None
+    snapshot_time: str | None = None
 
 
 def get_capture_render_config() -> dict[str, int]:
@@ -245,19 +259,34 @@ async def capture_stock_chart(
             cached = _read_cache(cache_path)
             if cached is not None:
                 cache_hit = True
-                logger.info(
-                    "截图命中缓存: symbol=%s event_id=%s cache_hit=true "
-                    "size=%d viewport=%dx%d dsf=%d",
-                    symbol, event_id, len(cached), vw, vh, dsf,
-                )
-                return CaptureResult(
-                    png_bytes=cached,
-                    width=vw * dsf,
-                    height=vh * dsf,
-                    device_scale_factor=dsf,
-                    cache_hit=cache_hit,
-                    source_bar_time=source_bar_time,
-                )
+                # [PROMPT.md §5.3.2 V2] 从真实 PNG IHDR 读取宽高（禁止 viewport×DPR 推算）
+                cached_png_result = validate_png(cached)
+                if not cached_png_result.valid:
+                    logger.warning(
+                        "缓存 PNG 校验失败，删除并重截: symbol=%s error=%s",
+                        symbol, cached_png_result.error_code,
+                    )
+                    try:
+                        os.remove(cache_path)
+                    except OSError:
+                        pass
+                else:
+                    logger.info(
+                        "截图命中缓存: symbol=%s event_id=%s cache_hit=true "
+                        "size=%d png=%dx%d viewport=%dx%d dsf=%d",
+                        symbol, event_id, len(cached),
+                        cached_png_result.width, cached_png_result.height,
+                        vw, vh, dsf,
+                    )
+                    return CaptureResult(
+                        png_bytes=cached,
+                        width=cached_png_result.width,
+                        height=cached_png_result.height,
+                        device_scale_factor=dsf,
+                        cache_hit=cache_hit,
+                        source_bar_time=source_bar_time,
+                        snapshot_time=datetime.now(UTC).isoformat(),
+                    )
         else:
             logger.info(
                 "disable_cache=true 跳过读缓存: symbol=%s event_id=%s "
@@ -350,21 +379,27 @@ async def capture_stock_chart(
 
                 logger.info(
                     "截图成功: symbol=%s event_id=%s cache_hit=false "
-                    "size=%d viewport=%dx%d dsf=%d",
-                    symbol, event_id, len(png_bytes), vw, vh, dsf,
+                    "size=%d png=%dx%d viewport=%dx%d dsf=%d",
+                    symbol, event_id, len(png_bytes),
+                    png_result.width, png_result.height,
+                    vw, vh, dsf,
                 )
 
                 # [screenshot-cache] - 截图成功后写入缓存（disable_cache 仍允许写新缓存）
                 if cache_path is not None:
                     _write_cache(cache_path, png_bytes)
 
+                # [PROMPT.md §5.3.2 V2] width/height 从真实 PNG IHDR 读取
+                #   validate_png 已解析 IHDR，直接使用其结果（png_result.width/height）
+                #   禁止用 viewport × DPR 推算（元素截图实际尺寸可能因 CSS 布局微调与 viewport 不同）
                 return CaptureResult(
                     png_bytes=png_bytes,
-                    width=vw * dsf,
-                    height=vh * dsf,
+                    width=png_result.width,
+                    height=png_result.height,
                     device_scale_factor=dsf,
                     cache_hit=False,
                     source_bar_time=source_bar_time,
+                    snapshot_time=datetime.now(UTC).isoformat(),
                 )
             finally:
                 await context.close()

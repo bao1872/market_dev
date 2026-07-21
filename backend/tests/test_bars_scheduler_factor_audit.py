@@ -245,7 +245,10 @@ async def test_audit_needs_rebuild_all_success(db_session) -> None:
     # summary 验证
     assert summary["needs_rebuild"] == 1
     assert summary["rebuilt"] == 1
+    assert summary["audit_rebuilt"] == 1  # [PROMPT.md §5.4.2 V2]
     assert summary["failed"] == 0
+    assert summary["failed_symbols"] == []  # [PROMPT.md §5.4.2 V2] 无失败
+    assert summary["trade_date"] == "2026-07-18"  # [PROMPT.md §5.4.2 V2]
 
     # 事件验证：done 事件应含 success_before_after_sample
     events = await list_events(db_session, job_run.id, limit=10)
@@ -292,7 +295,11 @@ async def test_audit_needs_rebuild_partial_failure(db_session) -> None:
     # summary 验证：rebuilt=2, failed=1
     assert summary["needs_rebuild"] == 3
     assert summary["rebuilt"] == 2
+    assert summary["audit_rebuilt"] == 2  # [PROMPT.md §5.4.2 V2]
     assert summary["failed"] == 1
+    # [PROMPT.md §5.4.2 V2] failed_symbols 应包含失败股票代码
+    assert isinstance(summary["failed_symbols"], list)
+    assert len(summary["failed_symbols"]) == 1
 
     # 事件验证：done 事件应为 warn 级别（有失败）
     events = await list_events(db_session, job_run.id, limit=10)
@@ -383,6 +390,10 @@ async def test_audit_rebuild_failure_soft_fail(db_session) -> None:
     assert summary["needs_rebuild"] == 1
     assert summary["failed"] == 1
     assert summary["rebuilt"] == 0
+    assert summary["audit_rebuilt"] == 0  # [PROMPT.md §5.4.2 V2]
+    # [PROMPT.md §5.4.2 V2] rebuild_batch 异常时所有 needs_rebuild 都进入 failed_symbols
+    assert isinstance(summary["failed_symbols"], list)
+    assert len(summary["failed_symbols"]) == 1
 
     # 事件验证：done 事件应为 error 级别
     events = await list_events(db_session, job_run.id, limit=10)
@@ -450,9 +461,12 @@ async def test_audit_empty_instruments(db_session) -> None:
         )
 
     # 零 summary
+    # [PROMPT.md §5.4.2 V2] summary 必须包含 trade_date / audit_rebuilt / failed_symbols 字段
     assert summary == {
+        "trade_date": "2026-07-18",
         "total_audited": 0, "consistent": 0, "needs_rebuild": 0,
-        "rebuilt": 0, "failed": 0, "errors": 0,
+        "audit_rebuilt": 0, "rebuilt": 0, "failed": 0, "errors": 0,
+        "failed_symbols": [],
     }
     # dry_run 不应被调用
     mock_task.dry_run.assert_not_called()
@@ -479,12 +493,117 @@ async def test_factor_audit_field_populated_in_result() -> None:
 
     # 模拟 _audit_and_rebuild_factors 返回值赋给 result
     result.factor_audit = {
+        "trade_date": "2026-07-18",  # [PROMPT.md §5.4.2 V2]
         "total_audited": 3, "consistent": 2, "needs_rebuild": 1,
-        "rebuilt": 1, "failed": 0, "errors": 0,
+        "audit_rebuilt": 1, "rebuilt": 1, "failed": 0, "errors": 0,
+        "failed_symbols": [],
     }
     assert result.factor_audit is not None
     assert result.factor_audit["total_audited"] == 3
     assert result.factor_audit["rebuilt"] == 1
+    # [PROMPT.md §5.4.2 V2] 新增字段
+    assert result.factor_audit["audit_rebuilt"] == 1
+    assert result.factor_audit["trade_date"] == "2026-07-18"
+    assert result.factor_audit["failed_symbols"] == []
+
+
+# =============================================================================
+# 9. [PROMPT.md §5.4.4 V2] AdjustmentFactorService._invalidate_capture_cache
+#    Capture 缓存清理（filesystem per-event key，按 instrument_id 精确删除）
+# =============================================================================
+
+
+def test_invalidate_capture_cache_deletes_only_matching_files(tmp_path) -> None:
+    """测试 9：_invalidate_capture_cache 只删除匹配 instrument_id 的缓存文件。
+
+    场景：cache 目录下有 3 个文件
+      - {event_a}_{target_iid}_v1_...  → 应删除
+      - {event_b}_{target_iid}_v1_...  → 应删除（同 instrument_id 不同 event）
+      - {event_a}_{other_iid}_v1_...   → 不应删除（不同 instrument_id）
+      - random_other_file.png          → 不应删除（无 instrument_id token）
+    """
+    from app.services.adjustment_factor_service import AdjustmentFactorService
+
+    target_iid = uuid.uuid4()
+    other_iid = uuid.uuid4()
+    event_a = uuid.uuid4()
+    event_b = uuid.uuid4()
+
+    cache_dir = tmp_path / "captures" / "cache"
+    cache_dir.mkdir(parents=True)
+
+    # 创建 4 个缓存文件
+    target_file_a = cache_dir / f"{event_a}_{target_iid}_v1_tf=1d_dsf=1_iv=node_cluster"
+    target_file_b = cache_dir / f"{event_b}_{target_iid}_v1_tf=1d_dsf=1_iv=smc"
+    other_file = cache_dir / f"{event_a}_{other_iid}_v1_tf=1d_dsf=1_iv=node_cluster"
+    unrelated_file = cache_dir / "random_other_file.png"
+
+    for f in [target_file_a, target_file_b, other_file, unrelated_file]:
+        f.write_bytes(b"\x89PNG\r\n\x1a\nfake_png_bytes")
+
+    # patch _CACHE_DIR 到 tmp_path 下的目录
+    with patch("app.services.stock_capture_service._CACHE_DIR", str(cache_dir)):
+        service = AdjustmentFactorService()
+        deleted = service._invalidate_capture_cache(target_iid)
+
+    # 验证：删除 2 个（target_file_a + target_file_b），保留 2 个
+    assert deleted == 2
+    assert not target_file_a.exists()
+    assert not target_file_b.exists()
+    assert other_file.exists()  # 不同 instrument_id 保留
+    assert unrelated_file.exists()  # 无关文件保留
+
+
+def test_invalidate_capture_cache_missing_dir_returns_zero(tmp_path) -> None:
+    """测试 10：cache 目录不存在时返回 0，不抛异常。"""
+    from app.services.adjustment_factor_service import AdjustmentFactorService
+
+    nonexistent_dir = tmp_path / "nonexistent"
+    with patch("app.services.stock_capture_service._CACHE_DIR", str(nonexistent_dir)):
+        service = AdjustmentFactorService()
+        deleted = service._invalidate_capture_cache(uuid.uuid4())
+
+    assert deleted == 0
+
+
+def test_invalidate_capture_cache_empty_dir_returns_zero(tmp_path) -> None:
+    """测试 11：cache 目录为空时返回 0。"""
+    from app.services.adjustment_factor_service import AdjustmentFactorService
+
+    empty_dir = tmp_path / "captures" / "cache"
+    empty_dir.mkdir(parents=True)
+    with patch("app.services.stock_capture_service._CACHE_DIR", str(empty_dir)):
+        service = AdjustmentFactorService()
+        deleted = service._invalidate_capture_cache(uuid.uuid4())
+
+    assert deleted == 0
+
+
+@pytest.mark.asyncio
+async def test_invalidate_downstream_caches_includes_capture_field() -> None:
+    """测试 12：_invalidate_downstream_caches 返回值包含 capture 字段。
+
+    [PROMPT.md §5.4.4 V2] 因子变化后必须清理 Capture 缓存。
+    验证返回 dict 含 4 个键：mdas / bars / indicator / capture
+    """
+    from app.services.adjustment_factor_service import AdjustmentFactorService
+
+    service = AdjustmentFactorService()
+    target_iid = uuid.uuid4()
+
+    # mock 各缓存清理函数（不实际连 Redis / DB / filesystem）
+    with patch.object(service, "_invalidate_mdas_cache", return_value=5), \
+         patch("app.services.bars_cache.invalidate_bars_cache", new=AsyncMock(return_value=3)), \
+         patch("app.services.indicator_cache.invalidate", new=AsyncMock(return_value=2)), \
+         patch.object(service, "_invalidate_capture_cache", return_value=4):
+        result = await service._invalidate_downstream_caches(target_iid)
+
+    # 4 个字段全部存在
+    assert set(result.keys()) == {"mdas", "bars", "indicator", "capture"}
+    assert result["mdas"] == 5
+    assert result["bars"] == 3
+    assert result["indicator"] == 2
+    assert result["capture"] == 4  # [PROMPT.md §5.4.4 V2] Capture 字段必须有值
 
 
 if __name__ == "__main__":

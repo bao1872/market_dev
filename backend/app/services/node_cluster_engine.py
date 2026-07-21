@@ -562,6 +562,10 @@ def build_engine_cache_key(
 def profile_to_dict(profile: NodeClusterProfileResult) -> dict[str, Any]:
     """将 NodeClusterProfileResult 序列化为 dict（供 snapshot structural_payload 落库）。
 
+    [PROMPT.md §三.3 V2] 新增 node_regions 和 node_regions_hash 字段：
+    - node_regions: Canonical Node DTO V2 列表（详情/Capture/Snapshot/Monitor 四链统一读取）
+    - node_regions_hash: 四链一致性断言用 hash（与 profile_hash 同源生成）
+
     输出结构：
     ```
     {
@@ -584,9 +588,15 @@ def profile_to_dict(profile: NodeClusterProfileResult) -> dict[str, Any]:
         "daily_bars_count": int,
         "bars_15m_count": int,
         "profile_hash": str,
+        "node_regions": [...],        # [V2] Canonical Node DTO
+        "node_regions_hash": str,     # [V2] 四链一致性 hash
     }
     ```
     """
+    # [PROMPT.md §三.3 V2] 同步生成 node_regions 和 hash，保证 snapshot 落库与
+    # 详情/Capture 链路完全一致
+    node_regions = build_node_regions(profile)
+    node_regions_hash = compute_node_regions_hash(node_regions)
     return {
         "algorithm_version": profile.algorithm_version,
         "output_schema_version": profile.output_schema_version,
@@ -607,12 +617,176 @@ def profile_to_dict(profile: NodeClusterProfileResult) -> dict[str, Any]:
         "daily_bars_count": profile.daily_bars_count,
         "bars_15m_count": profile.bars_15m_count,
         "profile_hash": profile.profile_hash,
+        # [V2] Canonical Node DTO + 四链一致性 hash
+        "node_regions": node_regions,
+        "node_regions_hash": node_regions_hash,
     }
 
 
 def state_to_dict(state: NodeClusterPriceState) -> dict[str, Any]:
     """将 NodeClusterPriceState 序列化为 dict（与 volume_node_monitor.yaml outputs 对齐）。"""
     return state.to_dict()
+
+
+# =============================================================================
+# Canonical Node DTO V2（PROMPT.md §三.3）
+# =============================================================================
+# 稳定的 Node Region + Price State 输出，供详情/Capture/Snapshot/Monitor 四链
+# 统一消费。前端禁止从 state/peak_rows 重建 Node 列表，必须直接读 node_regions。
+#
+# 字段定义（与前端 BackendNode 接口对齐）：
+#   node_regions: list[dict]  每个 dict 含：
+#     - entity_id: 稳定 ID（peak_<sorted_index>），同 stock/as_of 输入下重算结果一致
+#     - kind: "peak"（当前所有 Node Regions 都源自 peak 检测；保留枚举便于后续扩展）
+#     - low/mid/high: 价格区间（low=price_low, mid=price_mid, high=price_high）
+#     - bullish_volume/bearish_volume/total_volume: 多空量（来自 peak_rows）
+#     - is_poc: 是否为 POC（price_mid 等于 profile.poc_price）
+#
+#   price_state: dict  含：
+#     - current_price: 当前价（float）
+#     - position_0_1: VP 全区间相对位置 [0, 1]
+#     - upper_node_ref/lower_node_ref: 对应 node_regions[].entity_id 或 None
+#     - poc_node_ref: POC entity_id 或 None
+#     - last_touched_node_ref: 触碰节点 entity_id 或 None
+#
+# 稳定性保证：
+#   - entity_id 按 peak_rows 在 profile_df 中的原始顺序索引生成（不从价格 hash 生成，
+#     避免浮点比较误差导致 ID 漂移）
+#   - 同 stock/as_of/输入 → node_regions 列表完全一致（含 entity_id 顺序）
+#   - node_regions_hash: 用于四链一致性断言（与 profile_hash 同源生成）
+
+
+def build_node_regions(profile: NodeClusterProfileResult) -> list[dict[str, Any]]:
+    """从 NodeClusterProfileResult 构建稳定的 Canonical Node Region 列表。
+
+    [PROMPT.md §三.3] 详情/Capture/Snapshot/Monitor 四链统一读取本函数输出，
+    前端禁止从 state/peak_rows 重建 Node 列表。
+
+    构建规则：
+    - 遍历 profile.peak_rows（含 VA 外 Peak，禁止过滤）
+    - 查找 profile.profile_rows 中匹配 price_mid 的行获取 price_low/price_high
+      （peak_rows 只含 price_mid，需从 profile_rows 补全价格区间）
+    - entity_id 按 peak_rows 顺序索引生成（peak_000/peak_001/...），
+      保证同输入重算结果一致（避免浮点 hash 漂移）
+    - is_poc 通过 price_mid 与 profile.poc_price 近似比较（atol=1e-4）
+
+    Args:
+        profile: NodeClusterProfileResult（不可变）
+
+    Returns:
+        Node Region 字典列表，按 peak_rows 原始顺序输出
+    """
+    if not profile.peak_rows:
+        return []
+
+    # 构建 price_mid → profile_row 索引（peak_rows 缺 price_low/price_high）
+    profile_by_mid: dict[float, dict[str, Any]] = {}
+    for row in profile.profile_rows:
+        mid = round(float(row["price_mid"]), 4)
+        profile_by_mid[mid] = row
+
+    poc_price = profile.poc_price
+    regions: list[dict[str, Any]] = []
+    for idx, peak in enumerate(profile.peak_rows):
+        mid = round(float(peak["price_mid"]), 4)
+        # 优先从 profile_rows 取价格区间；缺失时退化为 mid ± 0.0（兜底，不应出现）
+        prof_row = profile_by_mid.get(mid)
+        if prof_row is not None:
+            low = round(float(prof_row["price_low"]), 4)
+            high = round(float(prof_row["price_high"]), 4)
+        else:
+            low = mid
+            high = mid
+
+        is_poc = (
+            poc_price is not None
+            and abs(mid - float(poc_price)) < 1e-4
+        )
+
+        regions.append({
+            "entity_id": f"peak_{idx:03d}",
+            "kind": "peak",
+            "low": low,
+            "mid": mid,
+            "high": high,
+            "bullish_volume": float(peak["bullish_volume"]),
+            "bearish_volume": float(peak["bearish_volume"]),
+            "total_volume": float(peak["total_volume"]),
+            "is_poc": is_poc,
+        })
+
+    return regions
+
+
+def build_price_state(
+    profile: NodeClusterProfileResult,
+    current_price: float,
+) -> dict[str, Any]:
+    """从 Profile + 当前价构建 Canonical Price State（含 node_regions entity_id 引用）。
+
+    [PROMPT.md §三.3] price_state 与 node_regions 配对使用：
+    - upper_node_ref/lower_node_ref/poc_node_ref/last_touched_node_ref
+      均指向 node_regions[].entity_id
+    - 前端读取 price_state 后通过 entity_id 在 node_regions 中查找完整节点信息
+
+    Args:
+        profile: NodeClusterProfileResult（不可变）
+        current_price: 当前价
+
+    Returns:
+        price_state 字典（含 entity_id 引用）；profile 为空时返回最小结构
+    """
+    if not profile.profile_rows:
+        return {
+            "current_price": round(float(current_price), 4),
+            "position_0_1": None,
+            "upper_node_ref": None,
+            "lower_node_ref": None,
+            "poc_node_ref": None,
+            "last_touched_node_ref": None,
+        }
+
+    # 调用 derive_state_for_price 获取 upper/lower/poc/last_touched 节点 dict
+    state = derive_state_for_price(profile, float(current_price))
+    regions = build_node_regions(profile)
+
+    # 构建 price_mid → entity_id 索引（用于将 dict 转为 entity_id 引用）
+    mid_to_entity: dict[float, str] = {}
+    for r in regions:
+        mid_to_entity[round(float(r["mid"]), 4)] = r["entity_id"]
+
+    def _to_ref(node: dict[str, Any] | None) -> str | None:
+        if not node or "price_mid" not in node:
+            return None
+        mid = round(float(node["price_mid"]), 4)
+        return mid_to_entity.get(mid)
+
+    return {
+        "current_price": state.current_price,
+        "position_0_1": state.position_0_1,
+        "upper_node_ref": _to_ref(state.upper_node),
+        "lower_node_ref": _to_ref(state.lower_node),
+        "poc_node_ref": _to_ref(state.poc_node),
+        "last_touched_node_ref": _to_ref(state.last_touched_node),
+    }
+
+
+def compute_node_regions_hash(node_regions: list[dict[str, Any]]) -> str:
+    """计算 node_regions 内容 hash（四链一致性断言用）。
+
+    同 stock/as_of/输入 → node_regions_hash 必须完全一致。
+
+    Args:
+        node_regions: build_node_regions 输出
+
+    Returns:
+        16 字符 hex hash（SHA256 前 16 字符）；空列表返回 "empty"
+    """
+    if not node_regions:
+        return "empty"
+    # 稳定序列化：按 key 排序（与 _compute_profile_hash 同策略）
+    content = repr([tuple(sorted(r.items())) for r in node_regions])
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
 
 
 # =============================================================================
@@ -692,6 +866,67 @@ if __name__ == "__main__":
     profile_dict = profile_to_dict(profile)
     assert "algorithm_version" in profile_dict
     assert "profile_hash" in profile_dict
+    # [PROMPT.md §三.3 V2] node_regions + node_regions_hash 必须存在
+    assert "node_regions" in profile_dict, "profile_to_dict 必须含 node_regions"
+    assert "node_regions_hash" in profile_dict, "profile_to_dict 必须含 node_regions_hash"
     print(f"profile_to_dict keys={len(profile_dict)} ✓")
+
+    # [PROMPT.md §三.3 V2] Canonical Node DTO 自测
+    regions = build_node_regions(profile)
+    assert isinstance(regions, list)
+    assert len(regions) == len(profile.peak_rows), \
+        f"node_regions 数量应等于 peak_rows 数量，实际 {len(regions)} != {len(profile.peak_rows)}"
+    if regions:
+        r0 = regions[0]
+        # 必须字段全集
+        expected_keys = {
+            "entity_id", "kind", "low", "mid", "high",
+            "bullish_volume", "bearish_volume", "total_volume", "is_poc",
+        }
+        assert expected_keys.issubset(set(r0.keys())), \
+            f"node_regions[0] 缺字段: {expected_keys - set(r0.keys())}"
+        # entity_id 格式 peak_XXX
+        assert r0["entity_id"].startswith("peak_"), \
+            f"entity_id 格式应为 peak_XXX，实际 {r0['entity_id']}"
+        assert r0["kind"] == "peak"
+        # is_poc 应为 bool
+        assert isinstance(r0["is_poc"], bool)
+    print(f"node_regions count={len(regions)} ✓")
+
+    # 确定性：相同 profile 重算 node_regions 必须完全一致
+    regions2 = build_node_regions(profile)
+    assert regions == regions2, "相同 profile 重算 node_regions 必须一致"
+    print("node_regions determinism ✓")
+
+    # node_regions_hash 确定性
+    hash1 = compute_node_regions_hash(regions)
+    hash2 = compute_node_regions_hash(regions2)
+    assert hash1 == hash2, "相同 node_regions 重算 hash 必须一致"
+    assert len(hash1) == 16, f"hash 长度应为 16，实际 {len(hash1)}"
+    print(f"node_regions_hash={hash1} ✓")
+
+    # price_state 自测
+    price_state = build_price_state(profile, current_price)
+    assert "current_price" in price_state
+    assert "position_0_1" in price_state
+    assert "upper_node_ref" in price_state
+    assert "lower_node_ref" in price_state
+    assert "poc_node_ref" in price_state
+    assert "last_touched_node_ref" in price_state
+    # current_price 应等于 latest close（4 位小数）
+    assert price_state["current_price"] == round(current_price, 4)
+    # upper_node_ref 应能在 regions 中找到对应 entity_id（若有）
+    if price_state["upper_node_ref"]:
+        ref = price_state["upper_node_ref"]
+        matched = [r for r in regions if r["entity_id"] == ref]
+        assert len(matched) == 1, f"upper_node_ref={ref} 应在 node_regions 中唯一匹配"
+    print(f"price_state upper_ref={price_state['upper_node_ref']} ✓")
+
+    # profile_to_dict 包含的 node_regions 应与独立调用 build_node_regions 完全一致
+    assert profile_dict["node_regions"] == regions, \
+        "profile_to_dict.node_regions 必须与 build_node_regions 独立调用一致"
+    assert profile_dict["node_regions_hash"] == hash1, \
+        "profile_to_dict.node_regions_hash 必须与 compute_node_regions_hash 一致"
+    print("profile_to_dict.node_regions 与独立 build_node_regions 一致 ✓")
 
     print("OK")

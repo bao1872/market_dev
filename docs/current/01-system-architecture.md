@@ -138,6 +138,17 @@ user_watchlist_items
 
 - **三类 IndicatorView 独立图片**（CHANGE-20260720-001 §三）：`IndicatorView = Literal["node_cluster", "bollinger", "smc"]` 贯穿 `StrategyEvent.payload` → `NotificationMessage.resource_refs` → Capture 请求 → `CaptureJob` → 输出文件名 → 缓存键 → 幂等键 → 状态查询 → 前端 URL 参数；三套 Capture Preset `FEISHU_CAPTURE_PRESETS`（layers 互斥，除共享 candlestick）；监控自动发送从事件类型映射 `indicator_view`。
 - **POST body schema**（CHANGE-20260720-001 §四）：`SendFeishuRequest` 接受 `indicator_view: Literal["node_cluster", "bollinger", "smc"] | None`；前端弹窗三单选项（筹码共识价/布林带/SMC 结构）；`output_filename` 加 `-{indicator_view}` 后缀。
+- **Display Frame Contract V2**（CHANGE-20260721-002）：`display_frame` 分离展示帧与算法输入诊断；删除 `_display_window=100` 硬编码，改用请求 bars 参数；新增 V2 字段（`requested_count`/`actual_count`/`first_time`/`last_time`/`include_realtime`/`is_partial`/`adjustment_as_of`）；indicators API 新增 `include_realtime`/`completed_only`/`adjustment_as_of` 参数与 `/bars` 同款；`DisplayWindowSpec.to_cache_suffix()` 编码三参数追加到 indicator_cache key；`ALGORITHM_VERSION` v11→v12 强制旧缓存失效；四链统一消费 Node Cluster V2 DTO（`node_regions` + 独立 `price_state`）。
+- **MDAS → InputProvider → Canonical Service → Kernel → 四链**（CHANGE-20260721-002 V2 完整链路）：
+  ```text
+  MarketDataAggregationService (MDAS, 唯一行情读取出口)
+  → CanonicalComputationService.compute_with_mdas (InputProvider 自动取行情+校验+哈希)
+  → AlgorithmRegistry[algorithm_id] (12 个算法族, migration_status=production_wired)
+  → Kernel (node_cluster_engine / smc_pine_core / compute_bollinger / compute_sqzmom_lb / ...)
+  → 四链消费 (详情 / 盘后 feature_snapshot / 盘中 monitor / Capture)
+  → V2 DTO (node_regions + price_state + display_frame V2 字段)
+  ```
+  四条调用链禁止直接 `import` kernel 绕过注册表（AST 硬门禁 `test_four_chain_no_direct_kernel_import`）；相同输入（instrument + timeframe + as_of + source_bar_hash + adj_factor_hash）必须得到相同 `result_hash`（5 维度确定性）。
 
 ### 板块分类同步与筛选（CHANGE-20260716-007 + PR #77 收口）
 

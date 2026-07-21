@@ -27,6 +27,12 @@ import {
   getIndicatorViewLayerPreset,
 } from '../features/stock-research/stockResearchTypes'
 import type { IndicatorView } from '../api/endpoints'
+// [PROMPT.md §5.3.4 V2] Canvas 字体/线宽/几何集中缩放
+import {
+  type ChartRenderScale,
+  type RenderDensity,
+  getRenderScale,
+} from './chartRenderScale'
 
 // [ChartRightPadding] - 描述: K 线绘图区右侧留白比例（CHANGE-20260713-008）
 // 最新 K 线位于绘图区约 80% 位置（留白 20%，落在 18%-22% 要求区间内）。
@@ -121,6 +127,13 @@ export interface StrategyChartProps {
   //   - smc: SMC 结构（BOS/CHoCH/OB/EQH/EQL/trailing）
   //   未传入时回退到 FEISHU_CAPTURE_LAYERS（向后兼容旧 capture URL）。
   indicatorView?: IndicatorView | null
+  // [PROMPT.md §5.3.4 V2] Canvas 字体/线宽/几何集中缩放密度。
+  //   - 'desktop'（默认）：保持现有 8-11px 字号 / 1-1.5px 线宽，PC 端浏览体验不变
+  //   - 'mobile_capture'：按 §5.3.4 规范表放大字号（价格轴 32px / Node 36px / SMC swing 36px 等）
+  //     与线宽（BB 3px / POC 3.5px / K线最小实体 4px），用于 1440×2560 移动舞台截图。
+  //   截图页面（CaptureStockPage）在 isCaptureMode=true 时显式传入 'mobile_capture'，
+  //   普通详情页保持默认 'desktop'。
+  renderDensity?: RenderDensity
   // [chartLayerVisibility] - 图表图层显隐偏好（PRD §6.2 单一真源 v2）
   // 由父组件 StockResearchWorkspace 持有并传入；StrategyChart 作为受控组件，不再内部管理 layers state。
   // 截图模式时不传（undefined），由 StrategyChart 内部派生 forced layers。
@@ -259,6 +272,10 @@ interface ChartState {
   //   周期切换过程中短暂出现"新K线+旧指标"时为 true，drawTrading 跳过指标图层渲染，
   //   仅绘制 K线/网格/profile 基础图层；JSX 显示"指标加载中"提示
   frameMismatch: boolean
+  // [PROMPT.md §5.3.4 V2] Canvas 字体/线宽/几何缩放（desktop | mobile_capture）
+  //   由组件顶层根据 renderDensity prop 写入，drawTrading 及所有子 draw 函数读取此字段，
+  //   禁止 renderer 直接写 '8px monospace' / lineWidth=1 等魔法数字。
+  scale: ChartRenderScale
 }
 
 // ===== 通用工具函数 =====
@@ -342,6 +359,11 @@ function addIndicators(bars: BarData[]): CalculatedBar[] {
 // [CHANGE-20260720-001] 优先读取独立 data["node_cluster"]（固定 1d×250+15m×4000，五周期一致）；
 //   旧 watchlist_monitor/volume_node_monitor 仅临时兼容回退，迁移完成后删除。
 // profile_rows/profile_meta/peak_rows 为价格档位快照，非 bar 对齐时间序列，禁止前端重算
+//
+// [PROMPT.md §三.3 V2] Canonical Node DTO V2：
+//   优先读取 vn.node_regions（稳定 entity_id/kind/low/mid/high/多空量/is_poc），
+//   禁止从 state/peak_rows 重建 Node 列表。V1 缓存缺失 node_regions 时降级到旧路径
+//   （从 upper_node/lower_node/peak_rows 收集），保持向后兼容。
 function extractBackendProfile(indicators: IndicatorResponse | undefined): BackendProfile | null {
   if (!indicators?.data) return null
   const vn = (indicators.data['node_cluster'] ?? indicators.data['watchlist_monitor'] ?? indicators.data['volume_node_monitor']) as unknown as
@@ -409,24 +431,6 @@ function extractBackendProfile(indicators: IndicatorResponse | undefined): Backe
     })
   }
 
-  // 从 upper_node/lower_node 收集 peak 节点价格区间 + peak_rows 多空量
-  const peakVolMap = new Map<number, { bullish: number; bearish: number }>()
-  peaks.forEach(p => {
-    peakVolMap.set(p.price_mid, { bullish: p.bullish_volume, bearish: p.bearish_volume })
-  })
-  const peakMap = new Map<number, { lo: number; hi: number }>()
-  const collect = (arr: unknown) => {
-    if (!Array.isArray(arr)) return
-    arr.forEach(v => {
-      if (v != null && typeof v === 'object' && (v as Record<string, unknown>).price_mid != null) {
-        const o = v as Record<string, number>
-        const mid = Number(o.price_mid)
-        if (!peakMap.has(mid)) peakMap.set(mid, { lo: Number(o.price_low), hi: Number(o.price_high) })
-      }
-    })
-  }
-  collect(vn.upper_node)
-  collect(vn.lower_node)
   let pocPrice: number | null = null
   if (meta.poc_price != null) {
     pocPrice = meta.poc_price
@@ -435,18 +439,66 @@ function extractBackendProfile(indicators: IndicatorResponse | undefined): Backe
       if (p != null) { pocPrice = Number(p); break }
     }
   }
-  const nodes: BackendNode[] = Array.from(peakMap.entries())
-    .map(([mid, { lo, hi }], i) => {
-      const vol = peakVolMap.get(mid)
-      return {
-        id: `backend_node_${i + 1}`,
-        mid, lo, hi,
-        poc: pocPrice != null && Math.abs(mid - pocPrice) < 0.01,
-        bullish_volume: vol?.bullish ?? 0,
-        bearish_volume: vol?.bearish ?? 0,
-      }
+
+  // [PROMPT.md §三.3 V2] 优先读取 Canonical Node DTO V2（vn.node_regions）
+  //   后端 _compute_independent_node_cluster / profile_to_dict 都已输出 node_regions，
+  //   四链（详情/Capture/Snapshot/Monitor）统一读取该字段，前端禁止从 state/peak_rows 重建。
+  //   V1 缓存可能缺失 node_regions（旧 schema），降级到旧路径保持向后兼容。
+  const rawNodeRegions = vn.node_regions
+  let nodes: BackendNode[] = []
+  if (Array.isArray(rawNodeRegions) && rawNodeRegions.length > 0) {
+    // [V2] 直接读 Canonical Node DTO（不重建）
+    nodes = rawNodeRegions
+      .map((v): BackendNode | null => {
+        if (v == null || typeof v !== 'object') return null
+        const o = v as Record<string, unknown>
+        const entityId = typeof o.entity_id === 'string' ? o.entity_id : ''
+        const mid = Number(o.mid) || Number(o.price_mid) || 0
+        const lo = Number(o.low) || Number(o.price_low) || mid
+        const hi = Number(o.high) || Number(o.price_high) || mid
+        return {
+          id: entityId || `peak_${mid}`,
+          mid, lo, hi,
+          poc: Boolean(o.is_poc) || (pocPrice != null && Math.abs(mid - pocPrice) < 0.01),
+          bullish_volume: Number(o.bullish_volume) || 0,
+          bearish_volume: Number(o.bearish_volume) || 0,
+        }
+      })
+      .filter((n): n is BackendNode => n != null)
+      .sort((a, b) => a.lo - b.lo)
+  } else {
+    // [V1 fallback] 旧缓存无 node_regions，从 upper_node/lower_node/peak_rows 重建
+    //   保留旧逻辑以兼容 V1 缓存；缓存失效后自动走 V2 路径
+    const peakVolMap = new Map<number, { bullish: number; bearish: number }>()
+    peaks.forEach(p => {
+      peakVolMap.set(p.price_mid, { bullish: p.bullish_volume, bearish: p.bearish_volume })
     })
-    .sort((a, b) => a.lo - b.lo)
+    const peakMap = new Map<number, { lo: number; hi: number }>()
+    const collect = (arr: unknown) => {
+      if (!Array.isArray(arr)) return
+      arr.forEach(v => {
+        if (v != null && typeof v === 'object' && (v as Record<string, unknown>).price_mid != null) {
+          const o = v as Record<string, number>
+          const mid = Number(o.price_mid)
+          if (!peakMap.has(mid)) peakMap.set(mid, { lo: Number(o.price_low), hi: Number(o.price_high) })
+        }
+      })
+    }
+    collect(vn.upper_node)
+    collect(vn.lower_node)
+    nodes = Array.from(peakMap.entries())
+      .map(([mid, { lo, hi }], i) => {
+        const vol = peakVolMap.get(mid)
+        return {
+          id: `backend_node_${i + 1}`,
+          mid, lo, hi,
+          poc: pocPrice != null && Math.abs(mid - pocPrice) < 0.01,
+          bullish_volume: vol?.bullish ?? 0,
+          bearish_volume: vol?.bearish ?? 0,
+        }
+      })
+      .sort((a, b) => a.lo - b.lo)
+  }
 
   return { rows, meta, peaks, nodes, pocPrice }
 }
@@ -525,7 +577,9 @@ function drawText(
   ctx: CanvasRenderingContext2D,
   t: string, x: number, y: number,
   color: string = C.text,
-  font = '10px ui-monospace, SFMono-Regular, Menlo, monospace',
+  // [PROMPT.md §5.3.4 V2] font 由调用方从 scale.fonts.* 显式传入（默认空串仅作类型 fallback，
+  //   实际所有 27 处 drawText 调用都已传 scale.fonts.axisLabel / paneLabel / nodeLabel 等）
+  font = '',
   align: CanvasTextAlign = 'left',
 ): void {
   ctx.fillStyle = color
@@ -544,18 +598,28 @@ function drawPaneTicks(
   label: string,
   current: number | undefined,
   color: string,
+  scale: ChartRenderScale,
 ): void {
   const p = g.panes[pane]
   if (!p) return
-  drawLine(ctx, g.l, (p.top + p.bottom) / 2, g.plotRight, (p.top + p.bottom) / 2, C.grid2)
-  drawText(ctx, label, g.l + 5, p.top + 12, color, '9px sans-serif')
-  drawText(ctx, fmt(max, 2), g.plotRight + 5, p.top + 9, C.text, '8px monospace')
-  drawText(ctx, fmt(min, 2), g.plotRight + 5, p.bottom - 2, C.text, '8px monospace')
+  drawLine(ctx, g.l, (p.top + p.bottom) / 2, g.plotRight, (p.top + p.bottom) / 2, C.grid2, scale.strokes.grid2)
+  // [PROMPT.md §5.3.4 V2] 副图标题/刻度/当前值字号按 scale.fonts.paneLabel / paneTick / paneCurrent 缩放
+  //   mobile_capture 下 paneLabel=30px / paneTick=30px / paneCurrent=30px（≥30px）
+  //   垂直偏移按字号比例放大（top+12 → top + scale 字号的 1.2 倍）
+  const labelOffset = Math.round(parseFloat(scale.fonts.paneLabel) * 1.2)
+  const tickOffsetTop = Math.round(parseFloat(scale.fonts.paneTick) * 1.0)
+  const tickOffsetBottom = Math.round(parseFloat(scale.fonts.paneTick) * 0.2)
+  drawText(ctx, label, g.l + 5, p.top + labelOffset, color, scale.fonts.paneLabel)
+  drawText(ctx, fmt(max, 2), g.plotRight + 5, p.top + tickOffsetTop, C.text, scale.fonts.paneTick)
+  drawText(ctx, fmt(min, 2), g.plotRight + 5, p.bottom - tickOffsetBottom, C.text, scale.fonts.paneTick)
   if (current !== undefined) {
     const y = p.top + (max - current) / Math.max(0.0001, max - min) * (p.bottom - p.top)
     ctx.fillStyle = color
-    ctx.fillRect(g.plotRight + 1, y - 7, 54, 14)
-    drawText(ctx, fmt(current, 2), g.plotRight + 28, y + 3, '#fff', '8px monospace', 'center')
+    // [PROMPT.md §5.3.4 V2] 当前值标签背景尺寸按 scale.geometry.paneCurrentBox* 缩放
+    const boxW = scale.geometry.paneCurrentBoxWidth
+    const boxH = scale.geometry.paneCurrentBoxHeight
+    ctx.fillRect(g.plotRight + 1, y - boxH / 2, boxW, boxH)
+    drawText(ctx, fmt(current, 2), g.plotRight + boxW / 2, y + boxH / 4, '#fff', scale.fonts.paneCurrent, 'center')
   }
 }
 
@@ -567,6 +631,7 @@ function drawGrid(
   w: number, h: number,
   g: Geometry,
   min: number, max: number,
+  scale: ChartRenderScale,
 ): void {
   ctx.fillStyle = C.bg
   ctx.fillRect(0, 0, w, h)
@@ -574,22 +639,26 @@ function drawGrid(
     if (name !== 'price') {
       ctx.fillStyle = C.panel
       ctx.fillRect(g.l, p.top, g.plotRight - g.l, p.bottom - p.top)
-      drawLine(ctx, g.l, p.top, g.plotRight, p.top, C.grid)
+      drawLine(ctx, g.l, p.top, g.plotRight, p.top, C.grid, scale.strokes.paneSep)
     }
   })
   if (g.profileW) {
     ctx.fillStyle = '#0b0f16'
     ctx.fillRect(g.profileStart, g.panes.price.top, g.profileEnd - g.profileStart, g.panes.price.bottom - g.panes.price.top)
-    drawLine(ctx, g.profileStart, g.panes.price.top, g.profileStart, g.panes.price.bottom, C.grid)
+    drawLine(ctx, g.profileStart, g.panes.price.top, g.profileStart, g.panes.price.bottom, C.grid, scale.strokes.grid)
   }
+  // [PROMPT.md §5.3.4 V2] 价格轴标签字号按 scale.fonts.axisLabel 缩放（mobile_capture ≥32px）
+  //   垂直偏移按字号 0.3 倍（保持视觉居中）
+  const axisFont = scale.fonts.axisLabel
+  const axisOffset = Math.round(parseFloat(axisFont) * 0.3)
   for (let i = 0; i < 7; i++) {
     const y = g.panes.price.top + (g.panes.price.bottom - g.panes.price.top) * i / 6
-    drawLine(ctx, g.l, y, g.plotRight, y, C.grid)
-    drawText(ctx, fmt(max - (max - min) * i / 6), w - g.axis + 7, y + 3)
+    drawLine(ctx, g.l, y, g.plotRight, y, C.grid, scale.strokes.grid)
+    drawText(ctx, fmt(max - (max - min) * i / 6), w - g.axis + 7, y + axisOffset, C.text, axisFont)
   }
   for (let i = 0; i < 9; i++) {
     const x = g.l + (g.plotRight - g.l) * i / 8
-    drawLine(ctx, x, g.panes.price.top, x, h - g.bottom, C.grid2)
+    drawLine(ctx, x, g.panes.price.top, x, h - g.bottom, C.grid2, scale.strokes.grid2)
   }
 }
 
@@ -607,6 +676,8 @@ function renderProfile(
   // 后端返回的 total_volume 最大值作为归一化基准
   const maxTotal = Math.max(...rows.map(r => r.total_volume), 1)
   state.profileHit = []
+  // [PROMPT.md §5.3.4 V2] 从 state.scale 读取字体/线宽（mobile_capture 放大）
+  const { scale } = state
 
   // 价值区填充 + VAH/VAL 虚线（从后端 profile_meta 读取）
   if (profile.meta.vah_price != null && profile.meta.val_price != null) {
@@ -614,10 +685,10 @@ function renderProfile(
     const valueBottom = py(profile.meta.val_price)
     ctx.fillStyle = 'rgba(95,127,216,.055)'
     ctx.fillRect(g.l, valueTop, g.profileEnd - g.l, Math.max(1, valueBottom - valueTop))
-    drawLine(ctx, g.l, valueTop, g.profileEnd, valueTop, 'rgba(130,160,255,.58)', 1, [3, 3])
-    drawLine(ctx, g.l, valueBottom, g.profileEnd, valueBottom, 'rgba(130,160,255,.58)', 1, [3, 3])
-    drawText(ctx, 'VAH', g.plotRight - 4, valueTop - 4, C.blue2, '8px sans-serif', 'right')
-    drawText(ctx, 'VAL', g.plotRight - 4, valueBottom - 4, C.blue2, '8px sans-serif', 'right')
+    drawLine(ctx, g.l, valueTop, g.profileEnd, valueTop, 'rgba(130,160,255,.58)', scale.strokes.vaLine, [3, 3])
+    drawLine(ctx, g.l, valueBottom, g.profileEnd, valueBottom, 'rgba(130,160,255,.58)', scale.strokes.vaLine, [3, 3])
+    drawText(ctx, 'VAH', g.plotRight - 4, valueTop - 4, C.blue2, scale.fonts.vaLabel, 'right')
+    drawText(ctx, 'VAL', g.plotRight - 4, valueBottom - 4, C.blue2, scale.fonts.vaLabel, 'right')
   }
 
   // 买卖量双色条（从后端 profile_rows 直接渲染：price_high/price_low → y 坐标，total_volume → 宽度）
@@ -639,7 +710,7 @@ function renderProfile(
     // POC 行高亮（从后端 is_poc 标记）
     if (row.is_poc && layers.has('poc')) {
       ctx.strokeStyle = C.orange
-      ctx.lineWidth = 1.3
+      ctx.lineWidth = scale.strokes.pocLine
       ctx.strokeRect(x - 0.5, y1 - 0.5, totalW + 1, bh + 1)
     }
     // Peak 节点标记（从后端 is_peak 标记，左侧黄色短条）
@@ -655,8 +726,12 @@ function renderProfile(
     state.profileHit.push({ i, y1, y2, x, totalW, row })
   })
 
-  drawText(ctx, '卖量', g.profileStart + 3, g.panes.price.top + 12, C.profileSell, '8px sans-serif')
-  drawText(ctx, '买量', g.profileStart + 32, g.panes.price.top + 12, C.profileBuy, '8px sans-serif')
+  // [PROMPT.md §5.3.4 V2] 买卖量头部标签按 scale.fonts.profileLabel 缩放（mobile_capture 34px）
+  //   垂直偏移按字号 1.2 倍（与 paneLabel 一致）
+  const profileLabelOffset = Math.round(parseFloat(scale.fonts.profileLabel) * 1.2)
+  const profileLabelGap = Math.round(parseFloat(scale.fonts.profileLabel) * 3.5)
+  drawText(ctx, '卖量', g.profileStart + 3, g.panes.price.top + profileLabelOffset, C.profileSell, scale.fonts.profileLabel)
+  drawText(ctx, '买量', g.profileStart + profileLabelGap, g.panes.price.top + profileLabelOffset, C.profileBuy, scale.fonts.profileLabel)
 
   // Node Cluster 节点矩形框（从后端 upper_node/lower_node 提取的节点区间）
   if (layers.has('node') && profile.nodes.length > 0) {
@@ -665,7 +740,8 @@ function renderProfile(
       const y2 = py(n.lo)
       const selected = state.selectedNodeId === n.id
       ctx.strokeStyle = n.poc ? C.orange : selected ? '#dce6ff' : 'rgba(79,124,255,.72)'
-      ctx.lineWidth = selected ? 2 : n.poc ? 1.4 : 1
+      // [PROMPT.md §5.3.4 V2] Node 边线宽度按 scale.strokes.nodeLine 缩放
+      ctx.lineWidth = selected ? scale.strokes.nodeLine * 1.5 : n.poc ? scale.strokes.pocLine : scale.strokes.nodeLine
       ctx.strokeRect(g.profileStart + 0.5, y1 + 0.5, width - 1, Math.max(2, y2 - y1 - 1))
     })
   }
@@ -678,6 +754,7 @@ function renderVolume(
   data: CalculatedBar[],
   step: number,
   barW: number,
+  scale: ChartRenderScale,
 ): void {
   const p = g.panes.volume
   if (!p) return
@@ -688,7 +765,7 @@ function renderVolume(
     ctx.fillStyle = d.close >= d.open ? 'rgba(239,83,80,.58)' : 'rgba(38,166,154,.58)'
     ctx.fillRect(x - barW / 2, p.bottom - bh, barW, bh)
   })
-  drawPaneTicks(ctx, g, 'volume', 0, vmax, 'VOL', data[data.length - 1].volume, C.text)
+  drawPaneTicks(ctx, g, 'volume', 0, vmax, 'VOL', data[data.length - 1].volume, C.text, scale)
 }
 
 // 突破压力区
@@ -697,10 +774,12 @@ function renderBreakout(
   g: Geometry,
   data: CalculatedBar[],
   py: (v: number) => number,
+  scale: ChartRenderScale,
 ): void {
   const pressure = Math.max(...data.slice(-55, -18).map(d => d.high))
-  drawLine(ctx, g.l, py(pressure), g.plotRight, py(pressure), C.down, 1, [7, 4])
-  drawText(ctx, '结构压力', g.plotRight - 54, py(pressure) - 5, C.down, '8px sans-serif')
+  // [PROMPT.md §5.3.4 V2] 结构压力位线宽/字号按 scale.strokes.grid / fonts.structureLabel 缩放
+  drawLine(ctx, g.l, py(pressure), g.plotRight, py(pressure), C.down, scale.strokes.grid, [7, 4])
+  drawText(ctx, '结构压力', g.plotRight - 54, py(pressure) - 5, C.down, scale.fonts.structureLabel)
 }
 
 // ===== 通用渲染器（根据后端返回的 ChartLayer.renderer 分发）=====
@@ -720,32 +799,33 @@ function renderIndicatorLayer(
   py: (v: number) => number,
   displayTimes: string[],
   timeframe: string,
-  indexMap?: (number | undefined)[],
+  indexMap: (number | undefined)[],
+  scale: ChartRenderScale,
 ): void {
   switch (layer.renderer) {
     case 'line':
-      renderIndicatorLine(ctx, g, layer, data, displayTimes, step, py, timeframe, indexMap)
+      renderIndicatorLine(ctx, g, layer, data, displayTimes, step, py, timeframe, indexMap, scale)
       break
     case 'dsa_polyline':
       // renderDsaPolyline 用 visual_segments 自有时间匹配，不消费 indexMap
-      renderDsaPolyline(ctx, g, layer, data, displayTimes, step, py, timeframe)
+      renderDsaPolyline(ctx, g, layer, data, displayTimes, step, py, timeframe, scale)
       break
     case 'price_zone':
-      renderIndicatorPriceZone(ctx, g, layer, data, displayTimes, step, py, timeframe, indexMap)
+      renderIndicatorPriceZone(ctx, g, layer, data, displayTimes, step, py, timeframe, indexMap, scale)
       break
     case 'band':
-      renderIndicatorBand(ctx, g, layer, data, displayTimes, step, py, timeframe, indexMap)
+      renderIndicatorBand(ctx, g, layer, data, displayTimes, step, py, timeframe, indexMap, scale)
       break
     case 'macd':
-      renderIndicatorMacd(ctx, g, layer, data, barsCount, step, displayTimes, timeframe, indexMap)
+      renderIndicatorMacd(ctx, g, layer, data, barsCount, step, displayTimes, timeframe, indexMap, scale)
       break
     case 'sqzmom':
-      renderIndicatorSqzmom(ctx, g, layer, data, barsCount, step, displayTimes, timeframe, indexMap)
+      renderIndicatorSqzmom(ctx, g, layer, data, barsCount, step, displayTimes, timeframe, indexMap, scale)
       break
     // [CHANGE-011 SMC] - 智能资金概念图层渲染（BOS/CHoCH/OB/EQH/EQL/trailing）
     case 'smc':
       // renderIndicatorSmc 用 klineTimeIndex（displayTimes → display index）反向映射，不消费 indexMap
-      renderIndicatorSmc(ctx, g, layer, data, displayTimes, step, py, timeframe)
+      renderIndicatorSmc(ctx, g, layer, data, displayTimes, step, py, timeframe, scale)
       break
   }
 }
@@ -774,7 +854,8 @@ function renderIndicatorLine(
   step: number,
   py: (v: number) => number,
   timeframe: string,
-  sharedIndexMap?: (number | undefined)[],
+  sharedIndexMap: (number | undefined)[],
+  scale: ChartRenderScale,
 ): void {
   // layer.fields[0] 是主值字段（如 dsa_vwap）
   // layer.fields[1] 是方向字段（如 dsa_dir，1=上涨，0=下跌）
@@ -821,7 +902,8 @@ function renderIndicatorLine(
           else ctx.lineTo(x, y)
         }
         ctx.strokeStyle = color
-        ctx.lineWidth = 1.5
+        // [PROMPT.md §5.3.4 V2] DSA VWAP 线宽按 scale.strokes.dsaVwap（mobile_capture 3px）
+        ctx.lineWidth = scale.strokes.dsaVwap
         ctx.stroke()
         // [DSA 分段] - 切换点不连接：新段从 i 开始（不是 i-1），避免跨段连线
         segStart = i
@@ -845,7 +927,8 @@ function renderIndicatorLine(
       else ctx.lineTo(x, y)
     }
     ctx.strokeStyle = layer.color || C.yellow
-    ctx.lineWidth = 1.5
+    // [PROMPT.md §5.3.4 V2] 单色线宽按 scale.strokes.dsaVwap（mobile_capture 3px）
+    ctx.lineWidth = scale.strokes.dsaVwap
     ctx.stroke()
   }
 
@@ -895,9 +978,12 @@ function renderIndicatorLine(
       // HH/LH 为波段高点，标签画在 K 线上方；HL/LL 为波段低点，画在下方
       const isHigh = label === 'HH' || label === 'LH'
       const labelColor = isHigh ? C.up : C.down
-      const textY = isHigh ? y - 9 : y + 14
+      // [PROMPT.md §5.3.4 V2] DSA Pine 标签字号按 scale.fonts.legendBold（mobile_capture 30px）
+      //   垂直偏移按字号比例放大（保持视觉间距）
+      const _legendSize = parseFloat(scale.fonts.legendBold)
+      const textY = isHigh ? y - Math.round(_legendSize * 0.9) : y + Math.round(_legendSize * 1.4)
       ctx.fillStyle = labelColor
-      ctx.font = 'bold 9px ui-monospace, SFMono-Regular, Menlo, monospace'
+      ctx.font = scale.fonts.legendBold
       ctx.textAlign = 'center'
       ctx.fillText(label, x, textY)
     }
@@ -917,6 +1003,7 @@ function renderDsaPolyline(
   step: number,
   py: (v: number) => number,
   timeframe: string,
+  scale: ChartRenderScale,
 ): void {
   // [DSA 数据契约] - visual_segments 属于 data（DsaSelectorData），不属于 ChartLayer
   const segments = (data as DsaSelectorData).visual_segments
@@ -966,7 +1053,8 @@ function renderDsaPolyline(
     }
     if (started) {
       ctx.strokeStyle = color
-      ctx.lineWidth = 2
+      // [PROMPT.md §5.3.4 V2] DSA polyline 线宽按 scale.strokes.dsaPolyline（mobile_capture 2.5px）
+      ctx.lineWidth = scale.strokes.dsaPolyline
       ctx.stroke()
     }
   }
@@ -1023,9 +1111,12 @@ function renderDsaPolyline(
       // HH/LH 为波段高点，标签画在 K 线上方；HL/LL 为波段低点，画在下方
       const isHigh = label === 'HH' || label === 'LH'
       const labelColor = isHigh ? C.up : C.down
-      const textY = isHigh ? y - 9 : y + 14
+      // [PROMPT.md §5.3.4 V2] DSA Pine 标签字号按 scale.fonts.legendBold（mobile_capture 30px）
+      //   垂直偏移按字号比例放大（保持视觉间距）
+      const _legendSize = parseFloat(scale.fonts.legendBold)
+      const textY = isHigh ? y - Math.round(_legendSize * 0.9) : y + Math.round(_legendSize * 1.4)
       ctx.fillStyle = labelColor
-      ctx.font = 'bold 9px ui-monospace, SFMono-Regular, Menlo, monospace'
+      ctx.font = scale.fonts.legendBold
       ctx.textAlign = 'center'
       ctx.fillText(label, x, textY)
     }
@@ -1042,7 +1133,8 @@ function renderIndicatorPriceZone(
   step: number,
   py: (v: number) => number,
   timeframe: string,
-  sharedIndexMap?: (number | undefined)[],
+  sharedIndexMap: (number | undefined)[],
+  _scale: ChartRenderScale,
 ): void {
   // layer.fields: [upper_node, lower_node, poc_price]
   const upperField = layer.fields[0]
@@ -1081,7 +1173,8 @@ function renderIndicatorBand(
   step: number,
   py: (v: number) => number,
   timeframe: string,
-  sharedIndexMap?: (number | undefined)[],
+  sharedIndexMap: (number | undefined)[],
+  scale: ChartRenderScale,
 ): void {
   const upperField = layer.fields[0]
   const lowerField = layer.fields[1]
@@ -1141,7 +1234,8 @@ function renderIndicatorBand(
     else ctx.lineTo(x, py(vn))
   }
   ctx.strokeStyle = upperLowerColor
-  ctx.lineWidth = 1
+  // [PROMPT.md §5.3.4 V2] BB 上轨线宽按 scale.strokes.bbLine（mobile_capture 3px）
+  ctx.lineWidth = scale.strokes.bbLine
   ctx.setLineDash([5, 3])
   ctx.stroke()
   ctx.setLineDash([])
@@ -1160,7 +1254,8 @@ function renderIndicatorBand(
     else ctx.lineTo(x, py(vn))
   }
   ctx.strokeStyle = upperLowerColor
-  ctx.lineWidth = 1
+  // [PROMPT.md §5.3.4 V2] BB 下轨线宽按 scale.strokes.bbLine（mobile_capture 3px）
+  ctx.lineWidth = scale.strokes.bbLine
   ctx.setLineDash([5, 3])
   ctx.stroke()
   ctx.setLineDash([])
@@ -1180,7 +1275,8 @@ function renderIndicatorBand(
       else ctx.lineTo(x, py(vn))
     }
     ctx.strokeStyle = middleColor
-    ctx.lineWidth = 1.5
+    // [PROMPT.md §5.3.4 V2] BB 中轨线宽按 scale.strokes.bbLine（mobile_capture 3px）
+    ctx.lineWidth = scale.strokes.bbLine
     ctx.stroke()
   }
 }
@@ -1208,7 +1304,8 @@ function renderIndicatorMacd(
   step: number,
   displayTimes: string[],
   timeframe: string,
-  sharedIndexMap?: (number | undefined)[],
+  sharedIndexMap: (number | undefined)[],
+  scale: ChartRenderScale,
 ): void {
   const p = g.panes.macd
   if (!p || !displayTimes.length) return
@@ -1282,7 +1379,8 @@ function renderIndicatorMacd(
     else ctx.lineTo(x, y)
   }
   ctx.strokeStyle = '#f4c430'
-  ctx.lineWidth = 1.2
+  // [PROMPT.md §5.3.4 V2] MACD DIF 线宽按 scale.strokes.macdDif（mobile_capture 2px）
+  ctx.lineWidth = scale.strokes.macdDif
   ctx.stroke()
 
   // 4. DEA 慢线
@@ -1299,12 +1397,16 @@ function renderIndicatorMacd(
     else ctx.lineTo(x, y)
   }
   ctx.strokeStyle = '#2196f3'
-  ctx.lineWidth = 1.2
+  // [PROMPT.md §5.3.4 V2] MACD DEA 线宽按 scale.strokes.macdDea（mobile_capture 2px）
+  ctx.lineWidth = scale.strokes.macdDea
   ctx.stroke()
 
   // 5. 右侧刻度与当前值标签
-  drawText(ctx, fmt(bound, 3), g.plotRight + 5, p.top + 9, C.text, '8px monospace')
-  drawText(ctx, fmt(-bound, 3), g.plotRight + 5, p.bottom - 2, C.text, '8px monospace')
+  // [PROMPT.md §5.3.4 V2] 副图刻度字号按 scale.fonts.paneTick（mobile_capture 30px）
+  const _macdTickOffsetTop = Math.round(parseFloat(scale.fonts.paneTick) * 1.0)
+  const _macdTickOffsetBottom = Math.round(parseFloat(scale.fonts.paneTick) * 0.2)
+  drawText(ctx, fmt(bound, 3), g.plotRight + 5, p.top + _macdTickOffsetTop, C.text, scale.fonts.paneTick)
+  drawText(ctx, fmt(-bound, 3), g.plotRight + 5, p.bottom - _macdTickOffsetBottom, C.text, scale.fonts.paneTick)
   let lastDif: number | undefined
   for (let i = indexes.length - 1; i >= 0; i--) {
     const idx = indexes[i]
@@ -1315,8 +1417,9 @@ function renderIndicatorMacd(
   if (typeof lastDif === 'number') {
     const yDif = my(lastDif)
     ctx.fillStyle = '#f4c430'
-    ctx.fillRect(g.plotRight + 1, yDif - 7, 54, 14)
-    drawText(ctx, fmt(lastDif, 3), g.plotRight + 28, yDif + 3, '#fff', '8px monospace', 'center')
+    // [PROMPT.md §5.3.4 V2] MACD 当前值标签背景按 scale.geometry.paneCurrentBox* 缩放
+    ctx.fillRect(g.plotRight + 1, yDif - scale.geometry.paneCurrentBoxHeight / 2, scale.geometry.paneCurrentBoxWidth, scale.geometry.paneCurrentBoxHeight)
+    drawText(ctx, fmt(lastDif, 3), g.plotRight + scale.geometry.paneCurrentBoxWidth / 2, yDif + scale.geometry.paneCurrentBoxHeight / 4, '#fff', scale.fonts.paneCurrent, 'center')
   }
 }
 
@@ -1345,7 +1448,8 @@ function renderIndicatorSqzmom(
   step: number,
   displayTimes: string[],
   timeframe: string,
-  sharedIndexMap?: (number | undefined)[],
+  sharedIndexMap: (number | undefined)[],
+  scale: ChartRenderScale,
 ): void {
   const p = g.panes.sqzmom
   if (!p || !displayTimes.length) return
@@ -1407,7 +1511,8 @@ function renderIndicatorSqzmom(
     const x = g.l + (i + 0.5) * step
     const y = my(0)
     ctx.strokeStyle = colorHex
-    ctx.lineWidth = 1.5
+    // [PROMPT.md §5.3.4 V2] SQZMOM squeeze marker 线宽按 scale.strokes.sqzMomLine（mobile_capture 2.5px）
+    ctx.lineWidth = scale.strokes.sqzMomLine
     ctx.beginPath()
     ctx.moveTo(x - 3, y)
     ctx.lineTo(x + 3, y)
@@ -1417,8 +1522,11 @@ function renderIndicatorSqzmom(
   }
 
   // 4. 右侧刻度标签
-  drawText(ctx, fmt(bound, 3), g.plotRight + 5, p.top + 9, C.text, '8px monospace')
-  drawText(ctx, fmt(-bound, 3), g.plotRight + 5, p.bottom - 2, C.text, '8px monospace')
+  // [PROMPT.md §5.3.4 V2] 副图刻度字号按 scale.fonts.paneTick（mobile_capture 30px）
+  const _sqzTickOffsetTop = Math.round(parseFloat(scale.fonts.paneTick) * 1.0)
+  const _sqzTickOffsetBottom = Math.round(parseFloat(scale.fonts.paneTick) * 0.2)
+  drawText(ctx, fmt(bound, 3), g.plotRight + 5, p.top + _sqzTickOffsetTop, C.text, scale.fonts.paneTick)
+  drawText(ctx, fmt(-bound, 3), g.plotRight + 5, p.bottom - _sqzTickOffsetBottom, C.text, scale.fonts.paneTick)
 
   // 5. 当前 val 标签
   let lastVal: number | undefined
@@ -1442,8 +1550,9 @@ function renderIndicatorSqzmom(
       }
     }
     ctx.fillStyle = labelColor
-    ctx.fillRect(g.plotRight + 1, yVal - 7, 54, 14)
-    drawText(ctx, fmt(lastVal, 3), g.plotRight + 28, yVal + 3, '#fff', '8px monospace', 'center')
+    // [PROMPT.md §5.3.4 V2] SQZMOM 当前值标签背景按 scale.geometry.paneCurrentBox* 缩放
+    ctx.fillRect(g.plotRight + 1, yVal - scale.geometry.paneCurrentBoxHeight / 2, scale.geometry.paneCurrentBoxWidth, scale.geometry.paneCurrentBoxHeight)
+    drawText(ctx, fmt(lastVal, 3), g.plotRight + scale.geometry.paneCurrentBoxWidth / 2, yVal + scale.geometry.paneCurrentBoxHeight / 4, '#fff', scale.fonts.paneCurrent, 'center')
   }
 }
 
@@ -1491,6 +1600,7 @@ function renderIndicatorSmc(
   step: number,
   py: (v: number) => number,
   timeframe: string,
+  scale: ChartRenderScale,
 ): void {
   // [CHANGE-011 SMC] - 数据字段为对象数组（非基本类型数组），按 any 取值后 cast 到内部类型
   // FVG 完全排除：本函数不渲染任何 Fair Value Gap 元素
@@ -1573,7 +1683,8 @@ function renderIndicatorSmc(
 
     // OB 边框（更淡）
     ctx.strokeStyle = hexToRgba(color, 0.3)
-    ctx.lineWidth = 0.8
+    // [PROMPT.md §5.3.4 V2] OB 边框线宽按 scale.strokes.obBorder（mobile_capture 2px）
+    ctx.lineWidth = scale.strokes.obBorder
     ctx.strokeRect(x1, yTop, Math.max(1, x2 - x1), height)
   }
 
@@ -1601,7 +1712,9 @@ function renderIndicatorSmc(
     const baseColor = isBull ? SMC_BULL_COLOR : SMC_BEAR_COLOR
     const isInternal = ev.internal === true
     const alpha = isInternal ? 0.7 : 1.0
-    const lineWidth = isInternal ? 1 : 1.5
+    // [PROMPT.md §5.3.4 V2] SMC internal 线宽按 scale.strokes.smcInternal（mobile_capture 2px），
+    //   swing 线宽按 scale.strokes.smcSwing（mobile_capture 3px）
+    const lineWidth = isInternal ? scale.strokes.smcInternal : scale.strokes.smcSwing
     const color = hexToRgba(baseColor, alpha)
 
     // CHANGE-20260715-002: internal=虚线，swing=实线（不再按 BOS/CHoCH 区分线型）
@@ -1614,10 +1727,13 @@ function renderIndicatorSmc(
 
     // 标签位于结构线中点（CHANGE-20260715-002）
     // [CHANGE-20260716-001] 标签不加 ·I，与 TV 文字一致
+    // [PROMPT.md §5.3.4 V2] SMC internal 标签字号按 scale.fonts.smcInternalLabel（mobile_capture ≥28px），
+    //   swing 标签字号按 scale.fonts.smcSwingLabel（mobile_capture ≥34px）
     const midX = (x1 + x2) / 2
     const label = ev.type
-    const fontSize = isInternal ? '8px sans-serif' : '11px sans-serif'
-    drawText(ctx, label, midX, y - 3, color, fontSize, 'center')
+    const fontSize = isInternal ? scale.fonts.smcInternalLabel : scale.fonts.smcSwingLabel
+    const labelOffset = Math.round(parseFloat(fontSize) * 0.3)
+    drawText(ctx, label, midX, y - labelOffset, color, fontSize, 'center')
   }
 
   // ===== 3. 渲染 EQH/EQL（两端点线，非水平线）=====
@@ -1643,14 +1759,16 @@ function renderIndicatorSmc(
     // Pine L384/L389: EQH=swingBearishColor, EQL=swingBullishColor
     const eqColor = isEQH ? SMC_BEAR_COLOR : SMC_BULL_COLOR
 
-    drawLine(ctx, x1, y1, x2, y2, eqColor, 1, [2, 2])
+    drawLine(ctx, x1, y1, x2, y2, eqColor, scale.strokes.eqLine, [2, 2])
 
     // 标签位于两 pivot 中点（Pine L397）
     const midX = (x1 + x2) / 2
     const midY = (y1 + y2) / 2
     // EQH: label_down（标签在上方）；EQL: label_up（标签在下方）
-    const labelYOffset = isEQH ? -3 : 9
-    drawText(ctx, eq.type, midX, midY + labelYOffset, eqColor, '8px sans-serif', 'center')
+    // [PROMPT.md §5.3.4 V2] EQ 标签字号按 scale.fonts.eqLabel（mobile_capture 34px）
+    const _eqSize = parseFloat(scale.fonts.eqLabel)
+    const labelYOffset = isEQH ? -Math.round(_eqSize * 0.3) : Math.round(_eqSize * 0.9)
+    drawText(ctx, eq.type, midX, midY + labelYOffset, eqColor, scale.fonts.eqLabel, 'center')
   }
 
   // ===== 4. 渲染 trailing strong/weak high/low =====
@@ -1684,8 +1802,9 @@ function renderIndicatorSmc(
     const isStrong = swingBias === -1
     const labelColor = isStrong ? SMC_BULL_COLOR : SMC_BEAR_COLOR
     const label = `${isStrong ? '强高' : '弱高'} ${fmt(trailing.top)}`
-    drawLine(ctx, x1, y, x2, y, hexToRgba(labelColor, 0.5), 1, [3, 3])
-    drawText(ctx, label, g.plotRight - 4, y - 3, labelColor, '8px sans-serif', 'right')
+    // [PROMPT.md §5.3.4 V2] trailing 线宽按 scale.strokes.smcSwing，标签按 scale.fonts.smcSwingLabel
+    drawLine(ctx, x1, y, x2, y, hexToRgba(labelColor, 0.5), scale.strokes.smcSwing, [3, 3])
+    drawText(ctx, label, g.plotRight - 4, y - 3, labelColor, scale.fonts.smcSwingLabel, 'right')
   }
   if (trailing && trailing.bottom != null) {
     // Pine L726: 线起点 = trailing.lastBottomTime
@@ -1697,8 +1816,8 @@ function renderIndicatorSmc(
     const isStrong = swingBias === 1
     const labelColor = isStrong ? SMC_BEAR_COLOR : SMC_BULL_COLOR
     const label = `${isStrong ? '强低' : '弱低'} ${fmt(trailing.bottom)}`
-    drawLine(ctx, x1, y, x2, y, hexToRgba(labelColor, 0.5), 1, [3, 3])
-    drawText(ctx, label, g.plotRight - 4, y + 9, labelColor, '8px sans-serif', 'right')
+    drawLine(ctx, x1, y, x2, y, hexToRgba(labelColor, 0.5), scale.strokes.smcSwing, [3, 3])
+    drawText(ctx, label, g.plotRight - 4, y + 9, labelColor, scale.fonts.smcSwingLabel, 'right')
   }
 }
 
@@ -1803,6 +1922,9 @@ function drawTrading(
 ): void {
   if (!display.length) return
   const { ctx, w, h } = fit(canvas)
+  // [PROMPT.md §5.3.4 V2] 从 state.scale 读取字体/线宽/几何（desktop | mobile_capture）
+  //   所有 draw 子函数与内联 drawText/drawLine 调用必须使用 scale.*，禁止硬编码 '8px monospace' 等
+  const { scale } = state
   const layerSet = new Set(Object.entries(layers).filter(([, v]) => v).map(([k]) => k))
   const g = geometry(layerSet, w, h)
   // [Volume Profile] - 从后端 indicators 提取 VP 数据（SSOT，禁止前端重算）
@@ -1922,10 +2044,11 @@ function drawTrading(
   // 所有交互坐标映射（十字线/滚轮锚点/Pointer 拖拽/命中）统一使用此 step，自动同步到压缩后的 bar 分布
   const effectivePlotW = plotW * (1 - RIGHT_PADDING_RATIO)
   const step = effectivePlotW / display.length
-  const barW = Math.max(2.2, step * 0.56)
+  // [PROMPT.md §5.3.4 V2] K 线最小实体宽按 scale.strokes.candleBodyMin（mobile_capture ≥4px）
+  const barW = Math.max(scale.strokes.candleBodyMin, step * 0.56)
 
   // 1. 背景 + 网格
-  drawGrid(ctx, w, h, g, min, max)
+  drawGrid(ctx, w, h, g, min, max, scale)
 
   // 2. 右侧 Volume Profile（后端 profile_rows 直接渲染；缺失时显示提示）
   if (layers.profile) {
@@ -1936,7 +2059,7 @@ function drawTrading(
       // [筹码共识价] - 描述: 缺失提示文案统一为"筹码共识价暂不可用"（基于历史成交量分布的估算代理）
       const cx = (g.profileStart + g.profileEnd) / 2
       const cy = (g.panes.price.top + g.panes.price.bottom) / 2
-      drawText(ctx, '筹码共识价暂不可用', cx, cy, C.text, '11px sans-serif', 'center')
+      drawText(ctx, '筹码共识价暂不可用', cx, cy, C.text, scale.fonts.emptyHint, 'center')
     }
   }
 
@@ -1944,21 +2067,25 @@ function drawTrading(
   if (layers.node && profile && profile.nodes.length > 0) {
     const backendNodes = profile.nodes
     const maxVol = Math.max(...backendNodes.map(n => Math.max(n.bullish_volume, n.bearish_volume)), 1)
+    // [PROMPT.md §5.3.4 V2] Node 标签/多空量标签字号按 scale.fonts.nodeLabel / nodeVolLabel 缩放
+    const nodeLabelOffset = Math.round(parseFloat(scale.fonts.nodeLabel) * 0.9)
+    const nodeVolLabelOffset = Math.round(parseFloat(scale.fonts.nodeVolLabel) * 2.4)
     backendNodes.forEach(n => {
       const y1 = py(n.hi)
       const y2 = py(n.lo)
       const selected = state.selectedNodeId === n.id
       ctx.fillStyle = n.poc ? 'rgba(255,152,0,.11)' : selected ? 'rgba(156,179,255,.15)' : 'rgba(79,124,255,.075)'
       ctx.fillRect(g.l, y1, plotW, y2 - y1)
-      drawLine(ctx, g.l, py(n.mid), g.plotRight, py(n.mid), n.poc ? C.orange : selected ? '#dce6ff' : C.blue, selected ? 2 : 1, n.poc ? [8, 4] : [4, 5])
+      // [PROMPT.md §5.3.4 V2] Node 主线宽按 scale.strokes.nodeLine 缩放（mobile_capture 2.5px）
+      drawLine(ctx, g.l, py(n.mid), g.plotRight, py(n.mid), n.poc ? C.orange : selected ? '#dce6ff' : C.blue, selected ? scale.strokes.nodeLine * 1.5 : scale.strokes.nodeLine, n.poc ? [8, 4] : [4, 5])
       // [筹码共识价] - 描述: 节点价格标签（POC=核心共识价，普通峰=共识价）
       // 文案仅为展示，内部 n.poc/字段名不变；筹码共识价是基于历史成交量分布的估算代理
       const labelText = n.poc ? `核心共识价 ${fmt(n.mid)}` : `共识价 ${fmt(n.mid)}`
-      drawText(ctx, labelText, g.l + 5, y1 + 10, n.poc ? C.orange : C.blue, '11px sans-serif')
+      drawText(ctx, labelText, g.l + 5, y1 + nodeLabelOffset, n.poc ? C.orange : C.blue, scale.fonts.nodeLabel)
       // 多空量标签 + 迷你多空柱（A 股：多头红色 / 空头绿色）
       if (n.bullish_volume > 0 || n.bearish_volume > 0) {
         const volText = `多 ${formatVolume(n.bullish_volume)} / 空 ${formatVolume(n.bearish_volume)}`
-        drawText(ctx, volText, g.l + 5, y1 + 22, C.text2, '9px sans-serif')
+        drawText(ctx, volText, g.l + 5, y1 + nodeVolLabelOffset, C.text2, scale.fonts.nodeVolLabel)
         // 迷你多空柱：在节点垂直中心绘制水平柱
         const nodeH = y2 - y1
         const barH = Math.max(2, nodeH * 0.3)
@@ -1978,13 +2105,15 @@ function drawTrading(
   // [筹码共识价] - 描述: POC 中心线标签显示"核心共识价"（基于历史成交量分布的估算代理）
   if (layers.poc && profile && profile.pocPrice != null) {
     const pocVal = profile.pocPrice
-    drawLine(ctx, g.l, py(pocVal), layers.profile ? g.profileEnd : g.plotRight, py(pocVal), C.orange, 1.35, [9, 4])
-    drawText(ctx, `核心共识价 ${fmt(pocVal)}`, g.plotRight - 80, py(pocVal) - 5, C.orange, '9px sans-serif')
+    // [PROMPT.md §5.3.4 V2] POC 线宽按 scale.strokes.pocLine（mobile_capture 3.5px），
+    //   标签字号按 scale.fonts.pocLabel（mobile_capture 32px）
+    drawLine(ctx, g.l, py(pocVal), layers.profile ? g.profileEnd : g.plotRight, py(pocVal), C.orange, scale.strokes.pocLine, [9, 4])
+    drawText(ctx, `核心共识价 ${fmt(pocVal)}`, g.plotRight - 80, py(pocVal) - 5, C.orange, scale.fonts.pocLabel)
   }
 
   // 5. 突破压力区
   if (layers.breakout) {
-    renderBreakout(ctx, g, display, py)
+    renderBreakout(ctx, g, display, py, scale)
   }
 
   // 7. 通用渲染器：渲染后端返回的策略指标图层（DSA VWAP 等）
@@ -2039,16 +2168,17 @@ function drawTrading(
       if (layerData) {
         // [CHANGE-20260719-003 §四] 复用纵轴候选阶段构建的 indexMap（time-index map 共享）
         const sharedIndexMap = layerIndexMaps.get(layer.strategy_id)
-        renderIndicatorLayer(ctx, g, layer, layerData, display.length, step, py, displayTimes, timeframe, sharedIndexMap)
+        renderIndicatorLayer(ctx, g, layer, layerData, display.length, step, py, displayTimes, timeframe, sharedIndexMap ?? [], scale)
       }
     })
   }
 
   // 8. K 线蜡烛图
+  // [PROMPT.md §5.3.4 V2] K线 wick 线宽按 scale.strokes.candleWick（mobile_capture 2.5px）
   display.forEach((d, i) => {
     const x = g.l + (i + 0.5) * step
     const col = d.close >= d.open ? C.up : C.down
-    drawLine(ctx, x, py(d.high), x, py(d.low), col)
+    drawLine(ctx, x, py(d.high), x, py(d.low), col, scale.strokes.candleWick)
     ctx.fillStyle = col
     const yy = Math.min(py(d.open), py(d.close))
     const hh = Math.max(1, Math.abs(py(d.open) - py(d.close)))
@@ -2076,7 +2206,8 @@ function drawTrading(
     ctx.fill()
     if (state.focusEventId === ev.id) {
       ctx.strokeStyle = '#fff'
-      ctx.lineWidth = 2
+      // [PROMPT.md §5.3.4 V2] 事件焦点环线宽按 scale.strokes.eventMarker
+      ctx.lineWidth = scale.strokes.eventMarker * 2
       ctx.beginPath()
       ctx.arc(x, y, 8, 0, Math.PI * 2)
       ctx.stroke()
@@ -2085,21 +2216,23 @@ function drawTrading(
   })
 
   // 10. Volume 副图
-  if (layers.volume) renderVolume(ctx, g, display, step, barW)
+  if (layers.volume) renderVolume(ctx, g, display, step, barW, scale)
 
   // 11. 时间轴刻度
   // [ChartRightPadding] - 时间轴标签跟随 bar 分布（使用 effectivePlotW），不延伸到留白区
+  // [PROMPT.md §5.3.4 V2] 时间轴字号按 scale.fonts.axisLabel（mobile_capture 32px）
   const labels = timeTicks(display, 7, timeframe)
   labels.forEach((item, i) => {
-    drawText(ctx, item.label, g.l + effectivePlotW * i / (labels.length - 1), h - 7, C.text, '9px sans-serif', i === 0 ? 'left' : i === labels.length - 1 ? 'right' : 'center')
+    drawText(ctx, item.label, g.l + effectivePlotW * i / (labels.length - 1), h - 7, C.text, scale.fonts.axisLabel, i === 0 ? 'left' : i === labels.length - 1 ? 'right' : 'center')
   })
 
   // 12. 最新价虚线 + 右侧价格标签
+  // [PROMPT.md §5.3.4 V2] 最新价虚线线宽/标签字号按 scale.strokes.grid / fonts.axisLabel
   const last = display[display.length - 1]
-  drawLine(ctx, g.l, py(last.close), g.plotRight, py(last.close), last.close >= last.open ? C.up : C.down, 1, [3, 3])
+  drawLine(ctx, g.l, py(last.close), g.plotRight, py(last.close), last.close >= last.open ? C.up : C.down, scale.strokes.grid, [3, 3])
   ctx.fillStyle = last.close >= last.open ? C.up : C.down
   ctx.fillRect(w - g.axis + 2, py(last.close) - 8, 50, 16)
-  drawText(ctx, fmt(last.close), w - g.axis + 27, py(last.close) + 3, '#fff', '10px monospace', 'center')
+  drawText(ctx, fmt(last.close), w - g.axis + 27, py(last.close) + 3, '#fff', scale.fonts.axisLabel, 'center')
 
   // 更新运行时状态
   state.ctx = ctx
@@ -2198,6 +2331,7 @@ export function StrategyChart({
   onViewportChange,
   isCaptureMode = false,
   indicatorView = null,
+  renderDensity = 'desktop',
   layerVisibility,
   barsFrame,
   indicatorsFetching = false,
@@ -2206,6 +2340,12 @@ export function StrategyChart({
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
   const tipRef = useRef<HTMLDivElement>(null)
+
+  // [PROMPT.md §5.3.4 V2] Canvas 缩放密度：根据 renderDensity prop 选择 desktop / mobile_capture
+  //   - desktop: 保持现有 8-11px 字号 / 1-1.5px 线宽（普通详情页）
+  //   - mobile_capture: 32-36px 字号 / 2-3.5px 线宽（飞书移动舞台截图）
+  //   scale 在 drawTrading 调用前写入 stateRef.current.scale，供所有 draw 子函数读取。
+  const scale = useMemo(() => getRenderScale(renderDensity), [renderDensity])
 
   // 图表运行时状态（供交互命中检测使用，不触发 re-render）
   const stateRef = useRef<ChartState>({
@@ -2227,6 +2367,7 @@ export function StrategyChart({
     profileHit: [],
     eventHit: [],
     dsaSourceMismatch: false,
+    scale,
     frameMismatch: false,
   })
 
@@ -2352,6 +2493,8 @@ export function StrategyChart({
     if (!canvas || !canvas.offsetParent) return
     const { calc: c, display: d, mappedEvents: ev, layers: ly, timeframe: tf } = dataRef.current
     if (!d.length) return
+    // [PROMPT.md §5.3.4 V2] 同步 scale 到 stateRef，供 drawTrading 内所有 draw 子函数读取
+    stateRef.current.scale = scale
     const ind = indicatorsRef.current
     const barsF = barsFrameRef.current
     // frame 检查：barsFrame 传入且 indicators 存在时才比对（任一缺失降级到不检查）
@@ -2388,7 +2531,7 @@ export function StrategyChart({
     setDsaMismatch(stateRef.current.dsaSourceMismatch)
     // [ChartRenderFrame] - frame mismatch 同步到 React state 驱动"指标加载中"提示
     setFrameMismatch(stateRef.current.frameMismatch)
-  }, [draw, calc, display, mappedEvents, effectiveLayers, viewport, indicators, barsFrame])
+  }, [draw, calc, display, mappedEvents, effectiveLayers, viewport, indicators, barsFrame, scale])
 
   // 交互事件绑定（仅一次）
   useEffect(() => {
@@ -2825,8 +2968,56 @@ export function StrategyChart({
           </div>
         )}
         {indicatorsLoadState === 'mismatch-error' && (
-          <div className="chart-frame-mismatch-banner chart-frame-error" style={{ position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)', padding: '6px 12px', background: 'rgba(255,77,79,0.92)', color: '#fff', fontSize: 12, borderRadius: 4, zIndex: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div
+            className="chart-frame-mismatch-banner chart-frame-error"
+            data-testid="chart-frame-mismatch-banner"
+            style={{
+              position: 'absolute',
+              top: 10,
+              left: '50%',
+              transform: 'translateX(-50%)',
+              padding: '6px 12px',
+              background: 'rgba(255,77,79,0.92)',
+              color: '#fff',
+              fontSize: 12,
+              borderRadius: 4,
+              zIndex: 10,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              maxWidth: '90%',
+              flexWrap: 'wrap',
+            }}
+          >
             <span>指标加载失败：display_frame 不匹配</span>
+            {/* [PROMPT.md §二 V2] 显示两端 count/time/hash/as_of 差异，便于运维定位 */}
+            {(() => {
+              const barsDf = barsFrame?.displayFrame
+              const indDf = indicators?.display_frame ?? null
+              const diffs: string[] = []
+              if (barsDf && indDf) {
+                if (barsDf.actual_count != null || indDf.actual_count != null) {
+                  diffs.push(`count: ${barsDf.actual_count ?? 'N/A'} / ${indDf.actual_count ?? 'N/A'}`)
+                }
+                if (barsDf.first_time || indDf.first_time) {
+                  diffs.push(`first: ${barsDf.first_time ?? 'N/A'} / ${indDf.first_time ?? 'N/A'}`)
+                }
+                if (barsDf.last_time || indDf.last_time) {
+                  diffs.push(`last: ${barsDf.last_time ?? 'N/A'} / ${indDf.last_time ?? 'N/A'}`)
+                }
+                if (barsDf.display_hash || indDf.display_hash) {
+                  diffs.push(`hash: ${barsDf.display_hash || 'N/A'} / ${indDf.display_hash || 'N/A'}`)
+                }
+                if (barsDf.adjustment_as_of || indDf.adjustment_as_of) {
+                  diffs.push(`as_of: ${barsDf.adjustment_as_of ?? 'N/A'} / ${indDf.adjustment_as_of ?? 'N/A'}`)
+                }
+              }
+              return diffs.length > 0 ? (
+                <span style={{ opacity: 0.9, fontSize: 11 }}>
+                  （{diffs.join(' | ')}）
+                </span>
+              ) : null
+            })()}
             {onIndicatorsRetry && (
               <button
                 type="button"

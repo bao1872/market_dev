@@ -4,6 +4,15 @@
 
 ## 2026-07-21
 
+- CHANGE-20260721-002: Display Frame Contract V2 + Node DTO V2 + 移动舞台 V2 + 复权闭环收口（合并 Phase 2-6）
+  - **Phase 2：Display Frame Contract V2**：删除 `_display_window=100` 硬编码，改用请求 bars 参数；`display_frame` 新增 V2 字段（`requested_count`/`actual_count`/`first_time`/`last_time`/`include_realtime`/`is_partial`/`adjustment_as_of`）；indicators API 新增 `include_realtime`/`completed_only`/`adjustment_as_of` 参数与 `/bars` 同款；`DisplayWindowSpec.to_cache_suffix()` 编码三参数追加到 indicator_cache key；`ALGORITHM_VERSION` v11→v12 强制旧缓存失效
+  - **Phase 3：Canonical Node DTO V2**：`node_cluster` DTO 升级为 `node_regions` + 独立 `price_state`；四链统一消费（详情/盘后/盘中/Capture）；类型特定 Ready 条件（不同 indicator_view 有额外 Ready 条件）
+  - **Phase 4：MobileIndicatorStage 1440×2560 V2**：移动舞台组件 + 新建 `chartRenderScale.ts` 集中管理 Canvas 字号/线宽/节点标记尺寸（`renderDensity`，desktop 保持不变，mobile_capture 放大）；`ChartTypography`/`ChartStrokeScale`/`ChartGeometryScale` 三类缩放规格接口；`StrategyChart` 所有 27 处 `drawText` 调用显式传 `scale.fonts.*`；`drawLine` 增加 `scale.strokes.grid` 参数；Playwright 截图选择器 `[data-testid="stock-detail-capture"]`；`global.scss` 风险提示字号 30-32px + 透明度 ≥0.72
+  - **Phase 5：复权+Snapshot 生产闭环**：`_invalidate_downstream_caches` 扩展为四层（新增 Capture 缓存精确清理）；新增 `_invalidate_capture_cache` 方法按 instrument_id 精确扫描 `CAPTURE_CACHE_DIR` 删除匹配文件；`_audit_and_rebuild_factors` summary 补全 PROMPT.md §5.4.2 字段（`trade_date`/`audit_rebuilt`/`failed_symbols`）；`_rebuild_factors_if_needed` 返回值新增 `trade_date`
+  - **Phase 6：完整测试套件验证**：后端 599 passed + 14 skipped；前端 420 passed + 3 pre-existing failed（structural-state-toggle，StockDetailPage 未修改）；Ruff 全绿；Mypy 3 pre-existing errors；TypeScript 仅 pre-existing errors；ESLint pre-existing 模块损坏；架构测试 46/46 PASS；修复 3 个测试（v11→v12 断言、新增字段断言、chartRightPadding 正则匹配）+ 新增 4 个 Capture 缓存清理测试
+  - **诚实声明**：分支部署 + 真实飞书 E2E + 全市场 Snapshot 重算（schema_version=4, ALGORITHM_VERSION=v12）+ PINE_PARITY_PENDING 待后续
+  - **不变量**：不新增依赖/表/migration；不重写 SMC 算法；MDAS 仍为唯一行情读取出口；`PINE_PARITY_PENDING` 保留
+
 - CHANGE-20260721-001: 移动飞书指标舞台与数据链修复 V1.0（合并 Phase 2 剩余 + Phase 3 + Phase 4 + Phase 5 后端测试）
   - **Phase 2 剩余：Feature Snapshot 写入 Canonical Node 字段**：`_SCHEMA_VERSION` 3→4（旧快照不可见）；`feature_snapshot_service` `node_cluster` 始终写入 `availability`/`degraded_reason`（即使 profile 为 None 也写入最小诊断字段）；`atomic_fact_contract.py` 新增 `NodeAvailabilityInfo` Pydantic 模型 + `AtomicFactsContextResponse.nodeAvailability` 必填字段；`stock_context.py` 新增 `_build_node_availability` 函数 + 5 态状态机（NO_PUBLISHED_RUN/SNAPSHOT_MISSING/NODE_PROFILE_EMPTY/NODE_15M_MISSING/NODE_COMPUTE_FAILED/NODE_INSUFFICIENT_DAILY_BARS/LEGACY_SNAPSHOT_NO_NODE_CLUSTER）；9 个 StockContext nodeAvailability 测试 + 4 个 Feature Snapshot node_cluster 字段写入测试 + 4 个五周期 Node profile_hash 一致性测试
   - **Phase 3：FR-11 缓存失效修复**：`AdjustmentFactorService.rebuild_factor_series` 改为调用新增 `_invalidate_downstream_caches` 方法（原仅调 `_invalidate_mdas_cache`）；精确失效 MDAS + bars + indicator 三层 Redis 缓存（按 `instrument_id`）；单层失效失败不阻塞其他层（缓存 TTL 会自然过期）；监控 Profile（in-process）和 Capture（filesystem per-event）依赖 TTL 自然过期；4 个 `_invalidate_downstream_caches` 测试
