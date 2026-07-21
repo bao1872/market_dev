@@ -471,3 +471,49 @@ jobs:
         run: npm ci
       - name: Run contract tests
         run: npm run test:contract
+
+  frontend-e2e:
+    # [CP-18] 最小 Playwright E2E 纳入 CI 门禁
+    # - 仅 chromium，workers=1 串行执行（资源约束）
+    # - webServer 自动构建并启动 vite preview（playwright.config.ts 管理）
+    # - 失败阻塞 merge；通过条件：22 个测试全部 pass
+    # - 不依赖生产数据：所有 API 由 page.route() 拦截返回 fixture
+    name: Frontend Playwright E2E
+    runs-on: ubuntu-latest
+    needs:
+      - frontend-build
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('frontend/package-lock.json') }}
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+      - name: Run Playwright E2E tests
+        run: npm run test:e2e
+        env:
+          CI: "true"
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+      - name: Upload Playwright traces (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: frontend/test-results/
