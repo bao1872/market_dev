@@ -71,7 +71,10 @@ from app.services.indicator_display_frame import (
     build_calculation_diagnostics,
     build_display_frame,
 )
-from app.services.market_data_aggregation_service import MarketDataAggregationService
+from app.services.market_data_aggregation_service import (
+    BarAggregationResult,
+    MarketDataAggregationService,
+)
 from app.services.strategy_batch_service import StrategyBatchService
 from app.strategy.runtime import MarketDataContext, StrategyLoader
 
@@ -694,6 +697,7 @@ async def compute_all_indicators(
     include_realtime: bool = True,
     completed_only: bool = False,
     adjustment_as_of: date | None = None,
+    preloaded_display_bars: BarAggregationResult | None = None,
 ) -> dict[str, Any]:
     """从 StrategyLoader._registry 获取所有策略，实时计算图表指标。
 
@@ -734,6 +738,13 @@ async def compute_all_indicators(
             固定 completed_only=True（合同常量，不受页面参数影响）。
         adjustment_as_of: 复权锚点 YYYY-MM-DD（默认 None=最新）。透传到 MDAS（display
             与 Node 输入共用同一锚点，保证四链 hash 一致）。
+        preloaded_display_bars: [CP-16] 预加载的展示周期行情结果（BarAggregationResult）。
+            由 chart_snapshot 端点在一次 MDAS 读取后传入，避免 compute_all_indicators
+            内部对同一展示周期再次调用 MDAS get_bars（"一次 MDAS 读取"原子性保证）。
+            - 传入时：跳过当前 timeframe 对应的 MDAS 调用，直接使用 preloaded.bars
+            - 不传时（None）：保持原有行为，内部自行调 MDAS（向后兼容 /indicators API）
+            Node Cluster 输入仍由 _load_node_cluster_inputs 独立查询（completed qfq 合同，
+            与展示参数隔离），不受 preloaded 影响。
 
     Returns:
         dict 包含：
@@ -784,13 +795,18 @@ async def compute_all_indicators(
     # 前复权 + 去重 + 未完成 Bar 过滤；本层再截取最近 N 根
     # [PROMPT.md §二 V2] 透传 include_realtime/completed_only/adjustment_as_of 到 MDAS，
     #   与 bars API 同款参数，保证同一展示窗口产生同一 display_hash。
+    # [CP-16] 当 timeframe=="1d" 且 preloaded_display_bars 传入时，复用预加载结果，
+    #   避免对同一展示周期再次调用 MDAS get_bars（"一次 MDAS 读取"原子性保证）。
     daily_count = INDICATOR_BARS.get("1d", 250)
-    daily_agg = await MarketDataAggregationService().get_bars(
-        session, instrument_id, timeframe="1d", adj=adj,
-        include_realtime=include_realtime,
-        completed_only=completed_only,
-        adjustment_as_of=adjustment_as_of,
-    )
+    if preloaded_display_bars is not None and timeframe == "1d":
+        daily_agg = preloaded_display_bars
+    else:
+        daily_agg = await MarketDataAggregationService().get_bars(
+            session, instrument_id, timeframe="1d", adj=adj,
+            include_realtime=include_realtime,
+            completed_only=completed_only,
+            adjustment_as_of=adjustment_as_of,
+        )
     daily_bars = daily_agg.bars
     # [CHANGE-20260715-002 SMC warmup] 保存完整日线用于 SMC 预热（ATR200 需 200 根，
     # 用户要求展示区之前至少 500 根 warmup；daily_agg.bars 含 DB 全量日线，约 1000+ 根）
@@ -826,49 +842,66 @@ async def compute_all_indicators(
     #   与 bars API 同款，保证 display_hash 一致。
     macd_agg = None  # 由下方各分支赋值
     # 60min：仅 timeframe=="1h" 时查询（MACD 副图 + display）
+    # [CP-16] preloaded_display_bars 传入时复用，跳过 MDAS 调用
     bars_60min: pd.DataFrame | None = None
     if timeframe == "1h":
-        r60 = await _mdas.get_bars(
-            session, instrument_id, timeframe="1h", adj=adj,
-            include_realtime=include_realtime,
-            completed_only=completed_only,
-            adjustment_as_of=adjustment_as_of,
-        )
+        if preloaded_display_bars is not None:
+            r60 = preloaded_display_bars
+        else:
+            r60 = await _mdas.get_bars(
+                session, instrument_id, timeframe="1h", adj=adj,
+                include_realtime=include_realtime,
+                completed_only=completed_only,
+                adjustment_as_of=adjustment_as_of,
+            )
         bars_60min = r60.bars
         macd_agg = r60
     # weekly/monthly：MDAS 内部"日线完成复权后再聚合"
+    # [CP-16] preloaded_display_bars 传入时复用，跳过 MDAS 调用
     bars_weekly = pd.DataFrame()
     if timeframe == "1w":
-        rw = await _mdas.get_bars(
-            session, instrument_id, timeframe="1w", adj=adj,
-            include_realtime=include_realtime,
-            completed_only=completed_only,
-            adjustment_as_of=adjustment_as_of,
-        )
+        if preloaded_display_bars is not None:
+            rw = preloaded_display_bars
+        else:
+            rw = await _mdas.get_bars(
+                session, instrument_id, timeframe="1w", adj=adj,
+                include_realtime=include_realtime,
+                completed_only=completed_only,
+                adjustment_as_of=adjustment_as_of,
+            )
         bars_weekly = rw.bars
         macd_agg = rw
     bars_monthly = pd.DataFrame()
     if timeframe == "1mo":
-        rmo = await _mdas.get_bars(
-            session, instrument_id, timeframe="1mo", adj=adj,
-            include_realtime=include_realtime,
-            completed_only=completed_only,
-            adjustment_as_of=adjustment_as_of,
-        )
+        if preloaded_display_bars is not None:
+            rmo = preloaded_display_bars
+        else:
+            rmo = await _mdas.get_bars(
+                session, instrument_id, timeframe="1mo", adj=adj,
+                include_realtime=include_realtime,
+                completed_only=completed_only,
+                adjustment_as_of=adjustment_as_of,
+            )
         bars_monthly = rmo.bars
         macd_agg = rmo
     # 15m display：独立查询以透传 include_realtime（不复用 Node 的 bars_15min）
     #   仅当 timeframe=="15m" 时查询；Node 的 bars_15min 仍用 include_realtime=True（Phase 3 将切换）
+    # [CP-16] preloaded_display_bars 传入时复用，跳过 MDAS 调用。
+    #   注意：chart_snapshot 传入的 preloaded 是无 limit 的完整 DataFrame，
+    #   下游 display_df=macd_bars.tail(bars) 会正确截取末尾 bars 根，保证 display_hash 一致。
     macd_agg_15m = None
     if timeframe == "15m":
-        r15_display = await _mdas.get_bars(
-            session, instrument_id, timeframe="15m", adj=adj,
-            include_realtime=include_realtime,
-            completed_only=completed_only,
-            adjustment_as_of=adjustment_as_of,
-            limit=bars,
-        )
-        macd_agg_15m = r15_display
+        if preloaded_display_bars is not None:
+            macd_agg_15m = preloaded_display_bars
+        else:
+            r15_display = await _mdas.get_bars(
+                session, instrument_id, timeframe="15m", adj=adj,
+                include_realtime=include_realtime,
+                completed_only=completed_only,
+                adjustment_as_of=adjustment_as_of,
+                limit=bars,
+            )
+            macd_agg_15m = r15_display
 
     # [MACD 副图] - 按当前 timeframe 选择对应周期 bars 计算 MACD
     # macd_bars 已由 MDAS 完成复权（qfq 在出口应用一次，无需外层二次复权）

@@ -9,14 +9,22 @@ completed_frame + live_revision + diagnostics，禁止详情页 Bars/Indicators 
     一次返回个股详情页图表所需的完整数据（bars + indicators + display_frame +
     render_frame + snapshot_time），替代详情页独立 useBars + useIndicators 两次请求。
 
-原子性保证（"一次 MDAS 获取同一 DataFrame"）：
-1. 端点先调用 MarketDataAggregationService.get_bars() 获取展示窗口 DataFrame
-   （MDAS 内部写入 Redis 短缓存，TTL 5-15s，cache_key 含全部影响结果的参数）。
+原子性保证（[CP-16] 真正单输入 — 不再依赖 Redis 缓存间接同步）：
+1. 端点调用 MarketDataAggregationService.get_bars() 获取展示窗口 DataFrame
+   （仅此一次 MDAS 行情读取；Redis 只缓存最终 Snapshot 响应，不作为同请求
+   内部两次调用的同步手段）。
 2. 端点用同一 DataFrame 构建 bars response（items + display_frame + 诊断字段）。
-3. 端点调用 compute_all_indicators()，其内部对展示周期再次调用 MDAS get_bars
-   （参数完全一致），命中 Redis 缓存，返回同一 DataFrame。
+3. 端点将同一 BarAggregationResult 通过 preloaded_display_bars 参数传给
+   compute_all_indicators()，指标计算直接接收预加载 DataFrame，不再第二次
+   调用 MDAS get_bars 获取展示周期行情。
 4. 端点用 is_display_frame_match() 校验 bars vs indicators display_frame，
    返回 render_frame.matched。前端 mismatch 时可重试。
+
+Node Cluster 输入隔离：
+- compute_all_indicators 内部 _load_node_cluster_inputs 仍独立查询 completed qfq
+  日线/15m（合同常量 250/4000，与页面 include_realtime/completed_only/bars 隔离）。
+- 这不算"第二次行情读取"——Node 输入是不同参数（completed_only=True）的独立查询，
+  保证 Node 计算不受展示窗口 partial bar 污染。
 
 认证：
 - 依赖 get_db（标准 AsyncSession），与 /bars 和 /indicators 端点一致。
@@ -24,7 +32,7 @@ completed_frame + live_revision + diagnostics，禁止详情页 Bars/Indicators 
 
 复用现有服务（禁止重新实现）：
 - MarketDataAggregationService.get_bars：行情聚合 SSOT（与 /bars API 同款）
-- compute_all_indicators：策略指标计算（与 /indicators API 同款）
+- compute_all_indicators：策略指标计算（与 /indicators API 同款，新增 preloaded_display_bars 参数）
 - _df_to_responses：DataFrame → BarResponse 列表（与 bars API 同款）
 - build_display_frame：展示帧构建（与 bars/indicators API 同款）
 - is_display_frame_match：展示帧匹配校验（与 capture API 同款）
@@ -107,10 +115,11 @@ async def get_chart_snapshot(
     本端点保证 bars 和 indicators 基于同一 MDAS DataFrame 生成 display_frame，
     display_hash 必然一致（render_frame.matched=true）。
 
-    原子性实现：
-    1. MDAS get_bars() 获取展示窗口 DataFrame（写入 Redis 短缓存）
+    [CP-16] 原子性实现（真正单输入，不依赖 Redis 缓存间接同步）：
+    1. MDAS get_bars() 获取展示窗口 DataFrame（仅此一次行情读取）
     2. 用同一 DataFrame 构建 bars response（items + display_frame + 诊断字段）
-    3. compute_all_indicators() 内部 MDAS 调用命中 Redis 缓存，返回同一 DataFrame
+    3. 将同一 BarAggregationResult 通过 preloaded_display_bars 传给
+       compute_all_indicators()，指标计算直接接收预加载 DataFrame
     4. is_display_frame_match() 校验 bars vs indicators display_frame，返回 render_frame
 
     响应头：
@@ -324,9 +333,10 @@ async def get_chart_snapshot(
         display_frame=bars_display_frame,
     )
 
-    # 6. 调用 compute_all_indicators（内部 MDAS 调用命中 Redis 缓存，返回同一 DataFrame）
-    #    [PRD V2.0 §4.2] 禁止 Bars/Indicators 两次独立实时请求；
-    #    本端点是详情页唯一入口，保证 bars 和 indicators 基于同一 MDAS DataFrame。
+    # 6. 调用 compute_all_indicators — 传入预加载的 bars_result（CP-16 单输入原子性）
+    #    [CP-16] 不再依赖 Redis 缓存间接同步，直接将同一 DataFrame 传给指标计算。
+    #    一个 chart-snapshot 请求内，展示周期 MDAS get_bars 调用次数 = 1（仅 L164 那次）。
+    #    compute_all_indicators 内部 Node Cluster 日线/15m 仍独立查询（completed qfq 合同）。
     try:
         indicators_response = await compute_all_indicators(
             session=db,
@@ -338,6 +348,7 @@ async def get_chart_snapshot(
             include_realtime=include_realtime,
             completed_only=completed_only,
             adjustment_as_of=adjustment_as_of,
+            preloaded_display_bars=bars_result,
         )
     except ValueError as exc:
         logger.warning(
