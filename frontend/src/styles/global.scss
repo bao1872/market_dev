@@ -3158,7 +3158,8 @@ button.switch {
   min-width: 0;
 
   strong {
-    font-size: 44px;
+    // [PROMPT.md §5.3.4 V2] 品牌名 44–48px
+    font-size: 48px;
     line-height: 1.06;
     letter-spacing: 0.012em;
     font-weight: 760;
@@ -3166,8 +3167,9 @@ button.switch {
   }
 
   span {
+    // [PROMPT.md §5.3.4 V2] 品牌副标题 24–28px
     color: var(--stage-muted);
-    font-size: 22px;
+    font-size: 26px;
     line-height: 1;
     letter-spacing: 0.03em;
     white-space: nowrap;
@@ -3178,12 +3180,13 @@ button.switch {
 
 // 模块标签（移植自 panji .module-label）
 .mobile-stage-module-label {
+  // [PROMPT.md §5.3.4 V2] 指标标签 30–34px
   padding: 12px 22px;
   border: 1px solid rgba(0, 226, 184, 0.42);
   border-radius: 999px;
   background: rgba(0, 226, 184, 0.055);
   color: #b8fff0;
-  font-size: 25px;
+  font-size: 32px;
   font-weight: 650;
   letter-spacing: 0.04em;
   white-space: nowrap;
@@ -3209,7 +3212,8 @@ button.switch {
   min-width: 0;
 
   strong {
-    font-size: 68px;
+    // [PROMPT.md §5.3.4 V2] 股票名称 72–80px
+    font-size: 76px;
     line-height: 1;
     font-weight: 830;
     color: var(--stage-text);
@@ -3220,7 +3224,8 @@ button.switch {
   }
 
   span {
-    font-size: 31px;
+    // [PROMPT.md §5.3.4 V2] 股票代码 34–38px
+    font-size: 36px;
     color: var(--stage-muted);
     font-weight: 580;
     letter-spacing: 0.05em;
@@ -3246,10 +3251,11 @@ button.switch {
   }
 
   b {
+    // [PROMPT.md §5.3.4 V2] 涨跌幅数值 72–84px
     display: block;
     margin-top: 8px;
     color: var(--stage-up); // A 股红涨
-    font-size: 72px;
+    font-size: 76px;
     line-height: 1;
     font-weight: 850;
     letter-spacing: -0.04em;
@@ -3274,10 +3280,11 @@ button.switch {
   }
 
   b {
+    // [PROMPT.md §5.3.4 V2] 当前价 44–56px
     display: block;
     margin-top: 8px;
     color: var(--stage-text);
-    font-size: 32px;
+    font-size: 52px;
     line-height: 1;
     font-weight: 700;
     font-variant-numeric: tabular-nums;
@@ -3317,19 +3324,21 @@ button.switch {
   background: rgba(4, 17, 23, 0.86);
 
   time {
+    // [PROMPT.md §5.3.4 V2] 行情截止时间 30–34px
     color: var(--stage-muted);
-    font-size: 27px;
+    font-size: 32px;
     font-variant-numeric: tabular-nums;
     letter-spacing: 0.02em;
   }
 }
 
 .mobile-stage-chart-title {
+  // [PROMPT.md §5.3.4 V2] 图表标题 32–36px
   display: flex;
   align-items: center;
   gap: 13px;
   color: #b7c7cc;
-  font-size: 29px;
+  font-size: 34px;
   font-weight: 620;
 
   i {
@@ -3361,27 +3370,58 @@ button.switch {
   }
 }
 
-// ===== 底部风险提示（移植自 panji .stage-risk-notice） =====
-// 布局：left:100px right:100px bottom:50px
-//   三行 span 居中、低饱和度、小字号，与图表内容不抢视线
-//   panji 原版使用大字号水印效果（69px, opacity 0.18）；静态截图改为可读小字号
-.mobile-stage-risk-notice {
+// ===== 底部发送时间 + 风险提示（PROMPT.md §5.3.3 V2 发送时间） =====
+// 布局：left:100px right:100px bottom:40px
+//   mobile-stage-footer 包含 send-time + risk-notice 两块
+//   send-time 显示后端 snapshot_time 转 Asia/Shanghai（禁止浏览器本地时间）
+//   risk-notice 三行 span 居中、低饱和度、小字号，与图表内容不抢视线
+.mobile-stage-footer {
   position: absolute;
   z-index: 7;
   left: 100px;
   right: 100px;
-  bottom: 50px;
+  bottom: 40px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  pointer-events: none;
+  user-select: none;
+}
+
+// [PROMPT.md §5.3.4 V2] 发送时间字号 30–34px
+.mobile-stage-send-time {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--stage-muted, #789297);
+  font-size: 32px;
+  line-height: 1;
+  font-weight: 580;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+
+  span {
+    color: var(--stage-muted-2, #536d72);
+    font-size: 30px;
+  }
+
+  time {
+    color: var(--stage-text-2, #d7e5e2);
+  }
+}
+
+// [PROMPT.md §5.3.4 V2] 风险提示字号 30–32px，opacity ≥ 0.72
+.mobile-stage-risk-notice {
   display: grid;
   justify-items: center;
   gap: 10px;
-  color: rgba(126, 159, 160, 0.55);
-  font-size: 28px;
+  color: rgba(126, 159, 160, 0.75); // opacity ≥ 0.72（旧版 0.55 已废弃，不可读）
+  font-size: 31px;
   line-height: 1.2;
   font-weight: 600;
   letter-spacing: 0.08em;
   text-align: center;
-  pointer-events: none;
-  user-select: none;
 
   span {
     display: block;
@@ -3415,9 +3455,10 @@ button.switch {
   min-height: 0;
 }
 
-// 加载/错误状态文案居中
+// 加载/错误/帧不匹配状态文案居中（PROMPT.md §5.3.1 V2 三态统一根选择器）
 .mobile-stage-loading-text,
 .mobile-stage-error-text,
+.mobile-stage-mismatch-text,
 .mobile-stage-chart-placeholder {
   position: absolute;
   inset: 0;

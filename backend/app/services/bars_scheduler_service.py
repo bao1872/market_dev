@@ -544,7 +544,13 @@ class BarsSchedulerService:
             job_run_id: 可选的 SchedulerJobRun.id，传入时写 REBUILDING_FACTORS 事件
 
         Returns:
-            dict: checked / changed / rebuilt / failed / failed_symbols
+            dict: [PROMPT.md §5.4.2 V2] 生产审计字段（_rebuild 阶段）
+                - trade_date: 业务交易日
+                - checked: 检查的股票数
+                - changed: fingerprint 变化的股票数
+                - rebuilt: 重建成功的股票数
+                - failed: 重建失败的股票数
+                - failed_symbols: 失败股票代码列表
         """
         from app.services.adjustment_factor_service import AdjustmentFactorService
         from app.services.job_run_event_service import append_event
@@ -554,6 +560,7 @@ class BarsSchedulerService:
 
         total = len(instruments)
         result: dict[str, Any] = {
+            "trade_date": trade_date.isoformat(),  # [PROMPT.md §5.4.2 V2]
             "checked": 0,
             "changed": 0,
             "rebuilt": 0,
@@ -725,19 +732,32 @@ class BarsSchedulerService:
             job_run_id: 可选的 SchedulerJobRun.id，传入时写 FACTOR_AUDIT 事件
 
         Returns:
-            dict: total_audited / consistent / needs_rebuild / rebuilt / failed / errors
+            dict: [PROMPT.md §5.4.2 V2] 完整生产审计字段
+                - trade_date: 业务交易日
+                - total_audited: 审计的股票数
+                - consistent: 因子一致的数量
+                - needs_rebuild: 需要重建的数量
+                - audit_rebuilt: 审计阶段实际重建成功数（与 rebuilt 同义，便于区分 _rebuild 阶段）
+                - rebuilt: 重建成功数（兼容旧字段，等于 audit_rebuilt）
+                - failed: 重建失败数
+                - errors: 审计/重建异常计数
+                - failed_symbols: 失败股票代码列表（便于生产验证定位）
         """
         from app.services.factor_reconciliation import FactorReconciliationTask
         from app.services.job_run_event_service import append_event
 
         total = len(instruments)
+        # [PROMPT.md §5.4.2 V2] 生产审计字段完整集合
         summary: dict[str, Any] = {
+            "trade_date": trade_date.isoformat(),
             "total_audited": 0,
             "consistent": 0,
             "needs_rebuild": 0,
-            "rebuilt": 0,
+            "audit_rebuilt": 0,  # V2: 区分 _rebuild_factors_if_needed.rebuilt 与本阶段 rebuilt
+            "rebuilt": 0,        # 向后兼容：等于 audit_rebuilt
             "failed": 0,
             "errors": 0,
+            "failed_symbols": [],  # V2: 失败股票代码列表
         }
 
         if total == 0:
@@ -830,7 +850,11 @@ class BarsSchedulerService:
                             session, plan, batch_size=10,
                         )
                 summary["rebuilt"] = report.success_count
+                summary["audit_rebuilt"] = report.success_count  # [PROMPT.md §5.4.2 V2]
                 summary["failed"] = report.failure_count
+                # [PROMPT.md §5.4.2 V2] 失败股票代码列表（便于生产验证定位）
+                failed_symbols_list = [r.symbol for r in report.results if not r.success]
+                summary["failed_symbols"] = failed_symbols_list
 
                 logger.info(
                     "[BarsScheduler] 因子重建完成: total=%d success=%d failure=%d",
@@ -867,6 +891,8 @@ class BarsSchedulerService:
                     exc, exc_info=True,
                 )
                 summary["failed"] = plan.needs_rebuild_count  # 全部计为失败
+                # [PROMPT.md §5.4.2 V2] 失败股票代码列表（重建异常时所有 needs_rebuild 都视为失败）
+                summary["failed_symbols"] = [i.symbol for i in plan.items]
                 await self._write_audit_done_event(
                     db_session, job_run_id, summary,
                     error=f"rebuild_batch_failed: {type(exc).__name__}: {exc}",

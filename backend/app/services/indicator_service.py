@@ -52,8 +52,11 @@ from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.services.canonical_adapters import (
     NodeClusterProfileResult,
     adapt_smc_to_display_dto,
+    build_node_regions,
+    build_price_state,
     compute_bollinger,
     compute_node_cluster_profile,
+    compute_node_regions_hash,
     compute_smc_indicators,
     compute_sqzmom_lb,
     derive_state_for_price,
@@ -63,6 +66,7 @@ from app.services.chart_bars_service import (
     compute_source_bar_times,
 )
 from app.services.indicator_display_frame import (
+    DisplayWindowSpec,
     build_calculation_diagnostics,
     build_display_frame,
 )
@@ -427,11 +431,21 @@ def _compute_independent_node_cluster(
     [CHANGE-20260720-001] Node Cluster 固定使用 completed qfq 1d×250 + 15m×4000，
     不加载 1m，不随页面周期变化。五周期切换时 profile_hash 必须一致。
 
+    [PROMPT.md §三.3 V2] 新增 Canonical Node DTO V2：
+    - node_regions: 稳定的 Peak Node 列表（entity_id/kind/low/mid/high/多空量/is_poc）
+    - price_state: 独立的当前价状态（含 upper/lower/poc/last_touched 节点的 entity_id 引用）
+    - node_regions_hash: 四链一致性 hash
+    前端禁止从 state/peak_rows 重建 Node 列表，必须直接读 node_regions。
+    state 字段保留向后兼容（旧 volume_node_monitor schema），新代码应读 price_state。
+
     输出字段：
     - profile_rows: 完整 100 行 VP 价格档位快照
     - profile_meta: VP 元信息 + algorithm/schema/fingerprint/daily_hash/15m_hash/profile_hash
     - peak_rows: Peak 节点快照（含 VA 外）
-    - state: 当前价格状态（upper_node/lower_node/position_0_1/poc_price/current_price）
+    - node_regions: [V2] Canonical Node DTO 列表（四链统一读取）
+    - node_regions_hash: [V2] 四链一致性 hash
+    - state: 当前价格状态（旧 schema，向后兼容；新代码读 price_state）
+    - price_state: [V2] 独立价格状态（含 entity_id 引用）
     - availability: "available" | "degraded" | "unavailable"
     - degraded_reason: "INSUFFICIENT_DAILY_BARS" | "MISSING_15M_BARS" | "PROFILE_EMPTY" | None
 
@@ -449,7 +463,10 @@ def _compute_independent_node_cluster(
             "profile_rows": [],
             "profile_meta": {"row_count": 0},
             "peak_rows": [],
+            "node_regions": [],
+            "node_regions_hash": "empty",
             "state": {},
+            "price_state": {},
             "availability": "unavailable",
             "degraded_reason": "INSUFFICIENT_DAILY_BARS",
         }
@@ -466,7 +483,10 @@ def _compute_independent_node_cluster(
             "profile_rows": [],
             "profile_meta": {"row_count": 0},
             "peak_rows": [],
+            "node_regions": [],
+            "node_regions_hash": "empty",
             "state": {},
+            "price_state": {},
             "availability": "unavailable",
             "degraded_reason": f"COMPUTE_FAILED: {exc}",
         }
@@ -481,15 +501,24 @@ def _compute_independent_node_cluster(
         availability = "available"
         degraded_reason = None
 
+    # [PROMPT.md §三.3 V2] Canonical Node DTO V2：node_regions + hash
+    # 详情/Capture/Monitor 四链统一读取；前端禁止从 state/peak_rows 重建
+    node_regions = build_node_regions(profile)
+    node_regions_hash = compute_node_regions_hash(node_regions)
+
     # 当前价格状态（取最新日线 close）
     state: dict[str, Any] = {}
+    price_state: dict[str, Any] = {}
     if profile.profile_rows and not daily_bars.empty:
         try:
             latest_close = float(daily_bars["close"].iloc[-1])
             derived = derive_state_for_price(profile, latest_close)
             state = derived.to_dict()
+            # [V2] price_state 与 node_regions 配对（entity_id 引用）
+            price_state = build_price_state(profile, latest_close)
         except Exception:
             state = {}
+            price_state = {}
 
     profile_meta: dict[str, Any] = {
         "row_count": len(profile.profile_rows),
@@ -503,6 +532,8 @@ def _compute_independent_node_cluster(
         "daily_source_hash": profile.daily_source_hash,
         "bars_15m_source_hash": profile.bars_15m_source_hash,
         "profile_hash": profile.profile_hash,
+        # [V2] node_regions_hash 进 meta 供四链一致性断言（与 profile_hash 同源）
+        "node_regions_hash": node_regions_hash,
         "daily_bars_count": profile.daily_bars_count,
         "bars_15m_count": profile.bars_15m_count,
         "adjustment_as_of": profile.adjustment_as_of,
@@ -514,7 +545,13 @@ def _compute_independent_node_cluster(
         "profile_rows": profile.profile_rows,
         "profile_meta": profile_meta,
         "peak_rows": profile.peak_rows,
+        # [V2] Canonical Node DTO + hash（四链统一读取）
+        "node_regions": node_regions,
+        "node_regions_hash": node_regions_hash,
+        # 旧 schema 字段（向后兼容，新代码应读 price_state/node_regions）
         "state": state,
+        # [V2] 独立价格状态（含 entity_id 引用）
+        "price_state": price_state,
         "availability": availability,
         "degraded_reason": degraded_reason,
     }
@@ -530,6 +567,10 @@ async def compute_all_indicators(
     adj: str,
     bars: int = 250,
     include_smc: bool = False,
+    *,
+    include_realtime: bool = True,
+    completed_only: bool = False,
+    adjustment_as_of: date | None = None,
 ) -> dict[str, Any]:
     """从 StrategyLoader._registry 获取所有策略，实时计算图表指标。
 
@@ -546,6 +587,11 @@ async def compute_all_indicators(
     9. [CHANGE-011 SMC] 当 include_smc=True 时，按需计算 SMC 指标并注入 smc 图层；
        include_smc=False 时跳过 SMC 计算（不消耗 CPU）。
 
+    [PROMPT.md §二 V2 DisplayWindowSpec] 新增 include_realtime/completed_only/
+    adjustment_as_of 参数，与 bars API 同款。展示帧基于同一 DisplayWindowSpec 生成，
+    删除 _display_window=100 硬编码，改用 bars 参数。Capture 透传同款 Spec，
+    render_frame.matched 由 is_display_frame_match 校验。
+
     异常处理：单个策略失败不阻塞其他策略，错误记录到 errors 字典返回给前端。
 
     Args:
@@ -553,10 +599,16 @@ async def compute_all_indicators(
         instrument_id: 标的 UUID
         timeframe: 周期 1d | 15m | 1h | 1w | 1mo（当前图表指标基于日线）
         adj: 复权方式 qfq | none
-        bars: 返回最近 N 根 bar 的指标（默认 250）
+        bars: 返回最近 N 根 bar 的指标（默认 250）；同时作为展示窗口大小（V2）
         include_smc: 是否计算 SMC 指标（默认 False，前端通过 ?include_smc=true 显式开启）；
             SMC 是按需计算的独立图层，不进入 DSA、Node 监控、Capture 或右栏 context；
             完全排除 FVG（不计算、不返回、不缓存、不渲染）。
+        include_realtime: 是否包含实时 partial bar（默认 True，与 bars API 默认对齐）。
+            透传到 MDAS 的 macd_bars 查询；Node 算法输入仍使用 completed qfq bars
+            （Phase 3 将独立查询，本轮保持现状）。
+        completed_only: 是否只返回已完成 bar（默认 False，与 bars API 默认对齐）。
+            True 时强制 include_realtime=False。
+        adjustment_as_of: 复权锚点 YYYY-MM-DD（默认 None=最新）。透传到 MDAS。
 
     Returns:
         dict 包含：
@@ -565,13 +617,17 @@ async def compute_all_indicators(
         - errors: dict[str, str] - 策略错误信息（strategy_id -> error message）
         - source_bar_times: list[str] - 日线行情 ISO 日期字符串数组（数据源诊断）
         - source_bar_hash: str - 日线 OHLCV 拼接的 SHA256 哈希前 16 字符（数据源诊断）
+        - display_frame: dict - 展示帧（V2 含 requested_count/actual_count/first_time/
+          last_time/include_realtime/is_partial/adjustment_as_of）
 
     Raises:
         ValueError: instrument 不存在或无日线数据
     """
     logger.info(
-        "计算全部策略指标 instrument_id=%s timeframe=%s adj=%s bars=%d",
+        "计算全部策略指标 instrument_id=%s timeframe=%s adj=%s bars=%d "
+        "include_realtime=%s completed_only=%s adjustment_as_of=%s",
         instrument_id, timeframe, adj, bars,
+        include_realtime, completed_only, adjustment_as_of,
     )
 
     # 1. 查询 instrument symbol
@@ -601,9 +657,14 @@ async def compute_all_indicators(
 
     # 日线：MarketDataAggregationService 统一处理 DB 优先 + Pytdx 兜底 +
     # 前复权 + 去重 + 未完成 Bar 过滤；本层再截取最近 N 根
+    # [PROMPT.md §二 V2] 透传 include_realtime/completed_only/adjustment_as_of 到 MDAS，
+    #   与 bars API 同款参数，保证同一展示窗口产生同一 display_hash。
     daily_count = INDICATOR_BARS.get("1d", 250)
     daily_agg = await MarketDataAggregationService().get_bars(
         session, instrument_id, timeframe="1d", adj=adj,
+        include_realtime=include_realtime,
+        completed_only=completed_only,
+        adjustment_as_of=adjustment_as_of,
     )
     daily_bars = daily_agg.bars
     # [CHANGE-20260715-002 SMC warmup] 保存完整日线用于 SMC 预热（ATR200 需 200 根，
@@ -616,7 +677,10 @@ async def compute_all_indicators(
     # MDAS 内部完成 DB 查询 + Pytdx 兜底 + 复权一次（qfq）+ 周月"日线复权后聚合"。
     # 外层不再二次复权，保证"复权一次"原则（CHANGE-20260717-002）。
     _mdas = MarketDataAggregationService()
-    # 15min：仅 needs_15min 时查询（VP profile 需要），limit=NODE_CLUSTER_LOW_BARS
+    # 15min（Node 输入）：仅 needs_15min 时查询（VP profile 需要），limit=NODE_CLUSTER_LOW_BARS
+    # [PROMPT.md §三 V2] Node 独立取 completed qfq 15m 4000 根，include_realtime=False；
+    #   本轮（Phase 2）保持 include_realtime=True 现状，Phase 3 将切换为 completed qfq。
+    #   macd_bars（display）改由独立查询透传 include_realtime（见下方 macd_agg_15m）。
     bars_15min = pd.DataFrame()
     if needs_15min:
         r15 = await _mdas.get_bars(
@@ -632,35 +696,65 @@ async def compute_all_indicators(
             include_realtime=True, limit=NODE_CLUSTER_MINUTE_BARS,
         )
         bars_minute = rm.bars
-    # 60min：仅 timeframe=="1h" 时查询（MACD 副图）
+    # [PROMPT.md §二 V2] macd_agg：当前 timeframe 对应的 MDAS 结果，用于提取 is_partial
+    #   和构建 display_frame。各周期均透传 include_realtime/completed_only/adjustment_as_of，
+    #   与 bars API 同款，保证 display_hash 一致。
+    macd_agg = None  # 由下方各分支赋值
+    # 60min：仅 timeframe=="1h" 时查询（MACD 副图 + display）
     bars_60min: pd.DataFrame | None = None
     if timeframe == "1h":
         r60 = await _mdas.get_bars(
-            session, instrument_id, timeframe="1h", adj=adj, include_realtime=True,
+            session, instrument_id, timeframe="1h", adj=adj,
+            include_realtime=include_realtime,
+            completed_only=completed_only,
+            adjustment_as_of=adjustment_as_of,
         )
         bars_60min = r60.bars
+        macd_agg = r60
     # weekly/monthly：MDAS 内部"日线完成复权后再聚合"
     bars_weekly = pd.DataFrame()
     if timeframe == "1w":
         rw = await _mdas.get_bars(
-            session, instrument_id, timeframe="1w", adj=adj, include_realtime=True,
+            session, instrument_id, timeframe="1w", adj=adj,
+            include_realtime=include_realtime,
+            completed_only=completed_only,
+            adjustment_as_of=adjustment_as_of,
         )
         bars_weekly = rw.bars
+        macd_agg = rw
     bars_monthly = pd.DataFrame()
     if timeframe == "1mo":
         rmo = await _mdas.get_bars(
-            session, instrument_id, timeframe="1mo", adj=adj, include_realtime=True,
+            session, instrument_id, timeframe="1mo", adj=adj,
+            include_realtime=include_realtime,
+            completed_only=completed_only,
+            adjustment_as_of=adjustment_as_of,
         )
         bars_monthly = rmo.bars
+        macd_agg = rmo
+    # 15m display：独立查询以透传 include_realtime（不复用 Node 的 bars_15min）
+    #   仅当 timeframe=="15m" 时查询；Node 的 bars_15min 仍用 include_realtime=True（Phase 3 将切换）
+    macd_agg_15m = None
+    if timeframe == "15m":
+        r15_display = await _mdas.get_bars(
+            session, instrument_id, timeframe="15m", adj=adj,
+            include_realtime=include_realtime,
+            completed_only=completed_only,
+            adjustment_as_of=adjustment_as_of,
+            limit=bars,
+        )
+        macd_agg_15m = r15_display
 
     # [MACD 副图] - 按当前 timeframe 选择对应周期 bars 计算 MACD
     # macd_bars 已由 MDAS 完成复权（qfq 在出口应用一次，无需外层二次复权）
     if timeframe == "15m":
-        macd_bars = bars_15min
+        macd_bars = macd_agg_15m.bars if macd_agg_15m is not None else pd.DataFrame()
+        macd_agg = macd_agg_15m
     elif timeframe == "1h":
         macd_bars = bars_60min if bars_60min is not None else pd.DataFrame()
     elif timeframe == "1d":
         macd_bars = daily_bars
+        macd_agg = daily_agg
     elif timeframe == "1w":
         macd_bars = bars_weekly
     elif timeframe == "1mo":
@@ -1014,17 +1108,18 @@ async def compute_all_indicators(
     calculation_window = INDICATOR_BARS.get(timeframe, 800)
     warmup_bars = INDICATOR_WARMUP_BARS.get(timeframe, 60)
 
-    # [display_frame] - 展示帧（PROMPT.md §二.1）：只描述真正交给前端绘制的 K线窗口。
-    #   bars API 默认 page_size=100，indicators API 的展示窗口取 macd_bars 末尾 100 根，
+    # [display_frame V2] - 展示帧（PROMPT.md §二.1 DisplayWindowSpec V2）：
+    #   只描述真正交给前端绘制的 K线窗口。删除 _display_window=100 硬编码，
+    #   改用请求 bars 参数作为展示窗口大小，与 bars API page_size 对齐。
+    #   bars API 与 indicators API 基于同一 DisplayWindowSpec 生成 frame，
     #   保证同一展示窗口产生同一 display_hash。算法输入 hash 移入 calculation_diagnostics。
     #   Node 的 daily_hash/15m_hash/profile_hash 不参与展示帧匹配。
-    _display_window = 100  # 与 bars API 默认 page_size 对齐
-    display_df = macd_bars.tail(_display_window) if len(macd_bars) > _display_window else macd_bars
-    # completed_through：优先用 daily_agg.completed_through（MDAS 诊断），回退到 macd_bars 末根时间
+    display_df = macd_bars.tail(bars) if len(macd_bars) > bars else macd_bars
+    # completed_through：优先用 macd_agg.completed_through（MDAS 诊断），回退到 macd_bars 末根时间
     _display_completed_through: str | None = None
     try:
-        if daily_agg.completed_through is not None:
-            ct = daily_agg.completed_through
+        if macd_agg is not None and macd_agg.completed_through is not None:
+            ct = macd_agg.completed_through
             _display_completed_through = (
                 ct.isoformat() if hasattr(ct, "isoformat") else str(ct)
             )
@@ -1032,12 +1127,31 @@ async def compute_all_indicators(
         pass
     if _display_completed_through is None and not macd_bars.empty:
         _display_completed_through = macd_bars.index[-1].isoformat()
+    # [PROMPT.md §二 V2] 构建 DisplayWindowSpec，与 bars API 共用同一规格
+    display_spec = DisplayWindowSpec(
+        instrument_id=str(instrument_id),
+        timeframe=timeframe,
+        adj=adj,
+        requested_count=bars,
+        include_realtime=include_realtime,
+        completed_only=completed_only,
+        adjustment_as_of=(str(adjustment_as_of) if adjustment_as_of else None),
+    )
+    # is_partial 来自 macd_agg（当前 timeframe 的 MDAS 结果）
+    _display_is_partial: bool | None = None
+    if macd_agg is not None:
+        try:
+            _display_is_partial = bool(macd_agg.is_partial)
+        except Exception:
+            _display_is_partial = None
     display_frame = build_display_frame(
         instrument_id=str(instrument_id),
         timeframe=timeframe,
         adj=adj,
         display_df=display_df,
         completed_through=_display_completed_through,
+        spec=display_spec,
+        is_partial=_display_is_partial,
     )
 
     # [calculation_diagnostics] - 算法输入诊断（PROMPT.md §二.1）
@@ -1104,12 +1218,23 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     # 1. 验证 compute_all_indicators 函数存在且签名正确
+    # [PROMPT.md §二 V2] 新增 include_realtime/completed_only/adjustment_as_of 关键字参数
     assert callable(compute_all_indicators), "compute_all_indicators 应可调用"
     sig = inspect.signature(compute_all_indicators)
     params = list(sig.parameters.keys())
-    expected_params = ["session", "instrument_id", "timeframe", "adj", "bars", "include_smc"]
+    expected_params = [
+        "session", "instrument_id", "timeframe", "adj", "bars", "include_smc",
+        "include_realtime", "completed_only", "adjustment_as_of",
+    ]
     assert params == expected_params, \
         f"compute_all_indicators 参数不匹配: {params} != {expected_params}"
+    # 验证 V2 新参数默认值与 bars API 对齐
+    assert sig.parameters["include_realtime"].default is True, \
+        "include_realtime 默认应为 True（与 bars API 默认对齐）"
+    assert sig.parameters["completed_only"].default is False, \
+        "completed_only 默认应为 False（与 bars API 默认对齐）"
+    assert sig.parameters["adjustment_as_of"].default is None, \
+        "adjustment_as_of 默认应为 None（最新）"
     print(f"compute_all_indicators params={params} ✓")
 
     # 2. 验证 StrategyLoader._registry 可访问且非空

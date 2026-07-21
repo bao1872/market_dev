@@ -16,6 +16,13 @@ GET /api/v1/instruments/{instrument_id}/indicators
     timeframe: 1d | 15m | 1h | 1w | 1mo（默认 1d）
     adj: qfq | none（默认 qfq）
     bars: 返回最近 N 根 bar 的指标（默认 250，最大 4000，与 Node Cluster 15m/1h 契约对齐）
+    include_realtime: 是否包含实时 partial bar（默认 True，与 bars API 默认对齐）
+    completed_only: 是否只返回已完成 bar（默认 False，与 bars API 默认对齐）
+    adjustment_as_of: 复权锚点 YYYY-MM-DD（默认 None=最新）
+
+[PROMPT.md §二 V2] DisplayWindowSpec V2：indicators API 与 bars API 共用同一 Spec，
+    保证同一展示窗口产生同一 display_hash。前端 BARS_COUNT_BY_TIMEFRAME 控制 bars 参数，
+    与 bars API page_size 对齐。
 
 响应头：
     X-Data-Source: redis | computed
@@ -28,6 +35,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from datetime import date
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -38,6 +46,7 @@ from app.core.deps import get_db
 from app.models.bar import BarDaily
 from app.models.monitor_evaluation import MonitorEvaluation
 from app.services import indicator_cache
+from app.services.indicator_display_frame import DisplayWindowSpec
 from app.services.indicator_service import compute_all_indicators
 
 logger = logging.getLogger("api.indicators")
@@ -138,6 +147,11 @@ async def get_indicators(
     force_refresh: bool = Query(False, description="跳过 Redis 指标缓存强制实时计算（截图链路使用）"),
     capture: bool = Query(False, description="截图模式标记（等价 force_refresh）"),
     include_smc: bool = Query(False, description="CHANGE-011: 是否计算 SMC 指标（默认 False，前端通过 IndicatorToolbar 显式开启；不开启时后端不计算 SMC，不消耗 CPU）"),
+    # [PROMPT.md §二 V2 DisplayWindowSpec] 新增 include_realtime/completed_only/adjustment_as_of
+    #   与 bars API 同款参数，保证同一展示窗口产生同一 display_hash。
+    include_realtime: bool = Query(True, description="是否包含实时 partial bar（默认 True，与 bars API 默认对齐）"),
+    completed_only: bool = Query(False, description="只返回已完成 bar（True 时强制 include_realtime=False）"),
+    adjustment_as_of: date | None = Query(None, description="复权锚点 YYYY-MM-DD（None=最新；历史回算传业务日，禁止未来除权事件泄漏）"),
     db: AsyncSession = Depends(get_db),
     *,
     response: Response,
@@ -152,6 +166,10 @@ async def get_indicators(
     注：MonitorEvaluation.metrics 复用路径已禁用（结构不兼容）。
     注：include_smc=True 时额外计算 SMC 指标（BOS/CHoCH/OB/EQH/EQL/trailing），
         完全排除 FVG；SMC 是按需计算的独立图层，不进入 DSA、Node 监控、Capture 或右栏 context。
+
+    [PROMPT.md §二 V2] include_realtime/completed_only/adjustment_as_of 透传到
+        compute_all_indicators 与 MDAS，与 bars API 同款。缓存键追加 spec 后缀
+        （rt{0/1}co{0/1}ao{as_of_or_None}），不同 Spec 独立缓存。
 
     响应头：
         X-Data-Source: redis | computed
@@ -171,16 +189,31 @@ async def get_indicators(
 
     start_ms = time.time()
 
+    # [PROMPT.md §二 V2] 构建 DisplayWindowSpec 并预计算 spec_suffix（缓存键维度）
+    #   与 bars API 共用同一 Spec，保证 display_hash 一致。
+    spec = DisplayWindowSpec(
+        instrument_id=str(instrument_id),
+        timeframe=timeframe,
+        adj=adj,
+        requested_count=bars,
+        include_realtime=include_realtime,
+        completed_only=completed_only,
+        adjustment_as_of=(str(adjustment_as_of) if adjustment_as_of else None),
+    )
+    spec_suffix = spec.to_cache_suffix()
+
     # [指标缓存] - 获取 last_bar_time 用于缓存键
     last_bar_time = await _get_last_bar_time(db, instrument_id)
 
     # [指标缓存] - 1. 查询 Redis 缓存（force_refresh/capture 跳过读取，但仍写回最新结果）
     # [CHANGE-011 SMC] - include_smc 作为缓存键后缀，SMC 与非 SMC 独立缓存
+    # [V2] - spec_suffix 作为缓存键后缀，不同 DisplayWindowSpec 独立缓存
     bypass_cache = force_refresh or capture
     cached = None
     if not bypass_cache:
         cached = await indicator_cache.get(
-            instrument_id, timeframe, adj, last_bar_time, include_smc=include_smc,
+            instrument_id, timeframe, adj, last_bar_time,
+            include_smc=include_smc, spec_suffix=spec_suffix,
         )
     if cached is not None:
         total_ms = int((time.time() - start_ms) * 1000)
@@ -189,14 +222,14 @@ async def get_indicators(
             response.headers["X-Cache-Hit"] = "true"
             response.headers["X-Total-Ms"] = str(total_ms)
         logger.info(
-            "指标缓存命中 instrument_id=%s timeframe=%s last_bar=%s include_smc=%s",
-            instrument_id, timeframe, last_bar_time, include_smc,
+            "指标缓存命中 instrument_id=%s timeframe=%s last_bar=%s include_smc=%s spec=%s",
+            instrument_id, timeframe, last_bar_time, include_smc, spec_suffix,
         )
         return cached
     if bypass_cache:
         logger.info(
-            "指标缓存跳过读取(force_refresh/capture) instrument_id=%s timeframe=%s last_bar=%s include_smc=%s",
-            instrument_id, timeframe, last_bar_time, include_smc,
+            "指标缓存跳过读取(force_refresh/capture) instrument_id=%s timeframe=%s last_bar=%s include_smc=%s spec=%s",
+            instrument_id, timeframe, last_bar_time, include_smc, spec_suffix,
         )
 
     # [指标缓存] - 2. 缓存未命中：实时计算（_try_monitor_evaluation 已禁用，结构不兼容）
@@ -207,7 +240,7 @@ async def get_indicators(
             # 此分支当前不会进入（_try_monitor_evaluation 已禁用，保留以防未来恢复）
             await indicator_cache.set(
                 instrument_id, timeframe, adj, last_bar_time, eval_metrics,
-                include_smc=include_smc,
+                include_smc=include_smc, spec_suffix=spec_suffix,
             )
             total_ms = int((time.time() - start_ms) * 1000)
             if response is not None:
@@ -222,6 +255,7 @@ async def get_indicators(
 
         # [指标缓存] - 3. 实时计算（默认路径）
         # [CHANGE-011 SMC] - 传递 include_smc 参数；include_smc=False 时后端不计算 SMC
+        # [PROMPT.md §二 V2] - 传递 include_realtime/completed_only/adjustment_as_of
         result = await compute_all_indicators(
             session=db,
             instrument_id=instrument_id,
@@ -229,14 +263,18 @@ async def get_indicators(
             adj=adj,
             bars=bars,
             include_smc=include_smc,
+            include_realtime=include_realtime,
+            completed_only=completed_only,
+            adjustment_as_of=adjustment_as_of,
         )
         data_source = "computed"
 
         # [指标缓存] - 4. 写入 Redis 缓存
         # [CHANGE-011 SMC] - include_smc 作为缓存键后缀，SMC 与非 SMC 独立缓存
+        # [V2] - spec_suffix 作为缓存键后缀，不同 DisplayWindowSpec 独立缓存
         await indicator_cache.set(
             instrument_id, timeframe, adj, last_bar_time, result,
-            include_smc=include_smc,
+            include_smc=include_smc, spec_suffix=spec_suffix,
         )
 
         total_ms = int((time.time() - start_ms) * 1000)
@@ -258,6 +296,13 @@ if __name__ == "__main__":
     # 自测入口：验证模块加载和 router 定义
     import inspect
 
+    # FastAPI Query 对象的 default 属性访问器：
+    # `Query(False, ...)` 返回 Query 对象，真实默认值在其 .default 属性。
+    # 非 Query 类型（如直接传 bool/None）则取值本身。
+    def _param_default(p: inspect.Parameter):
+        d = p.default
+        return getattr(d, "default", d)
+
     # 1. 验证 router 存在
     assert router is not None, "router 应存在"
     print(f"router prefix={router.prefix} OK")
@@ -273,8 +318,18 @@ if __name__ == "__main__":
     assert "response" in params, "应有 response 参数"
     # [CHANGE-011 SMC] - 验证 include_smc 参数存在且默认为 False
     assert "include_smc" in params, "应有 include_smc 参数（CHANGE-011 SMC 按需计算）"
-    assert sig.parameters["include_smc"].default is False, \
+    assert _param_default(sig.parameters["include_smc"]) is False, \
         "include_smc 默认值应为 False（按需计算，前端默认不开启 SMC）"
+    # [PROMPT.md §二 V2] - 验证 DisplayWindowSpec 参数存在且默认值与 bars API 对齐
+    assert "include_realtime" in params, "应有 include_realtime 参数（V2）"
+    assert _param_default(sig.parameters["include_realtime"]) is True, \
+        "include_realtime 默认值应为 True（与 bars API 默认对齐）"
+    assert "completed_only" in params, "应有 completed_only 参数（V2）"
+    assert _param_default(sig.parameters["completed_only"]) is False, \
+        "completed_only 默认值应为 False（与 bars API 默认对齐）"
+    assert "adjustment_as_of" in params, "应有 adjustment_as_of 参数（V2）"
+    assert _param_default(sig.parameters["adjustment_as_of"]) is None, \
+        "adjustment_as_of 默认值应为 None（最新）"
     print(f"get_indicators params={params} OK")
 
     # 3. 验证常量

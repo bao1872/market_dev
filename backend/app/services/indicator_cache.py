@@ -60,7 +60,13 @@ CACHE_TTL_SECONDS = 300
 #      bars_15m_source_hash/adj_factor_hash/adjustment_as_of 等诊断字段；
 #      monitor_batch_service adj 由 none→qfq（三链口径对齐），并加实例级 Profile 缓存。
 #      旧 v10 缓存的 node_cluster meta 字段缺失且 adj 口径不一致，必须强制失效。
-ALGORITHM_VERSION = "v11"
+# v12: CHANGE-20260721-002 - Display Frame Contract V2（PROMPT.md §二）。
+#      删除 _display_window=100 硬编码，改用请求 bars 参数；display_frame 新增
+#      requested_count/actual_count/first_time/last_time/include_realtime/is_partial/
+#      adjustment_as_of 字段。indicators API 新增 include_realtime/completed_only/
+#      adjustment_as_of 参数，与 bars API 同款，缓存键追加 spec 后缀。
+#      旧 v11 缓存的 display_frame 缺失 V2 字段且展示窗口固定 100 根，必须强制失效。
+ALGORITHM_VERSION = "v12"
 
 # 缓存键前缀
 _CACHE_PREFIX = "indicator"
@@ -73,12 +79,13 @@ def build_cache_key(
     last_bar_time: str | None,
     algorithm_version: str = ALGORITHM_VERSION,
     include_smc: bool = False,
+    spec_suffix: str | None = None,
 ) -> str:
     """[指标缓存] - 构造缓存键。
 
     格式：
-        include_smc=False: indicator:{instrument_id}:{timeframe}:{adj}:{last_bar_time}:{algorithm_version}
-        include_smc=True:  indicator:{instrument_id}:{timeframe}:{adj}:{last_bar_time}:{algorithm_version}:smc
+        include_smc=False: indicator:{instrument_id}:{timeframe}:{adj}:{last_bar_time}:{algorithm_version}[:{spec_suffix}]
+        include_smc=True:  indicator:{instrument_id}:{timeframe}:{adj}:{last_bar_time}:{algorithm_version}:smc[:{spec_suffix}]
 
     Args:
         instrument_id: 标的 UUID
@@ -88,6 +95,9 @@ def build_cache_key(
         algorithm_version: 算法版本号
         include_smc: 是否包含 SMC 图层（CHANGE-011）；True 时缓存键追加 :smc 后缀，
             使 SMC 与非 SMC 结果独立缓存，互不污染。
+        spec_suffix: DisplayWindowSpec 后缀（V2，CHANGE-20260721-002）。
+            来自 DisplayWindowSpec.to_cache_suffix()，编码 include_realtime/
+            completed_only/adjustment_as_of 三参数。None 时省略（向后兼容）。
 
     Returns:
         Redis 缓存键字符串
@@ -96,7 +106,10 @@ def build_cache_key(
     safe_last_bar = last_bar_time or "unknown"
     base = f"{_CACHE_PREFIX}:{instrument_id}:{timeframe}:{adj}:{safe_last_bar}:{algorithm_version}"
     # [CHANGE-011 SMC] - include_smc=True 时追加 :smc 后缀，SMC 与非 SMC 独立缓存
-    return f"{base}:smc" if include_smc else base
+    smc_part = ":smc" if include_smc else ""
+    # [CHANGE-20260721-002 V2] - 追加 spec 后缀，不同 DisplayWindowSpec 独立缓存
+    spec_part = f":{spec_suffix}" if spec_suffix else ""
+    return f"{base}{smc_part}{spec_part}"
 
 
 async def get(
@@ -105,6 +118,7 @@ async def get(
     adj: str,
     last_bar_time: str | None,
     include_smc: bool = False,
+    spec_suffix: str | None = None,
 ) -> dict[str, Any] | None:
     """[指标缓存] - 从 Redis 读取缓存的指标结果。
 
@@ -116,11 +130,15 @@ async def get(
         adj: 复权方式
         last_bar_time: 最新 bar 时间戳（ISO 字符串）
         include_smc: 是否读取 SMC 版本缓存（CHANGE-011）
+        spec_suffix: DisplayWindowSpec 后缀（V2，CHANGE-20260721-002）
 
     Returns:
         dict: 缓存的指标结果；None 表示未命中或读取失败
     """
-    key = build_cache_key(instrument_id, timeframe, adj, last_bar_time, include_smc=include_smc)
+    key = build_cache_key(
+        instrument_id, timeframe, adj, last_bar_time,
+        include_smc=include_smc, spec_suffix=spec_suffix,
+    )
     try:
         redis = get_redis()
         raw = await redis.get(key)
@@ -140,6 +158,7 @@ async def set(
     last_bar_time: str | None,
     value: dict[str, Any],
     include_smc: bool = False,
+    spec_suffix: str | None = None,
 ) -> None:
     """[指标缓存] - 将指标结果写入 Redis 缓存。
 
@@ -150,8 +169,12 @@ async def set(
         last_bar_time: 最新 bar 时间戳（ISO 字符串）
         value: 指标结果字典
         include_smc: 是否写入 SMC 版本缓存（CHANGE-011）
+        spec_suffix: DisplayWindowSpec 后缀（V2，CHANGE-20260721-002）
     """
-    key = build_cache_key(instrument_id, timeframe, adj, last_bar_time, include_smc=include_smc)
+    key = build_cache_key(
+        instrument_id, timeframe, adj, last_bar_time,
+        include_smc=include_smc, spec_suffix=spec_suffix,
+    )
     try:
         redis = get_redis()
         # [指标缓存] - JSON 序列化，default=str 处理不可序列化类型（如 UUID/datetime）

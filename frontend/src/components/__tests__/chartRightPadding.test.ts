@@ -61,11 +61,13 @@ test('十字线/滚轮锚点/Pointer 拖拽/命中坐标统一使用 step', () =
 })
 
 // ===== 4. 网格线和十字线水平线保持全宽 =====
+// [PROMPT.md §5.3.4 V2] drawLine 增加 scale.strokes.grid 参数后，
+//   测试断言改为正则匹配（接受可选的 scale 参数后缀）
 test('网格线和十字线水平线仍延伸到 g.plotRight（保持全宽）', () => {
   const src = readSource()
   assert.ok(
-    src.includes('drawLine(ctx, g.l, y, g.plotRight, y, C.grid)'),
-    '水平网格线必须延伸到 g.plotRight',
+    /drawLine\(ctx, g\.l, y, g\.plotRight, y, C\.grid(?:,\s*scale\.strokes\.grid)?\)/.test(src),
+    '水平网格线必须延伸到 g.plotRight（可附加 scale.strokes.grid 参数）',
   )
   assert.ok(
     src.includes('drawLine(s2.ctx, g.l, my, g.plotRight, my,'),

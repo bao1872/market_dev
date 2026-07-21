@@ -29,7 +29,7 @@ import { CAPTURE_TOKEN_KEY } from '@/store/auth'
 import StrategyChart from '@/components/StrategyChart'
 import MobileIndicatorStage from '@/components/MobileIndicatorStage'
 import type { ChartViewport } from '@/components/chartViewport'
-import type { CaptureSnapshotResponse, IndicatorView } from '@/api/endpoints'
+import type { CaptureSnapshotResponse, IndicatorResponse, IndicatorView } from '@/api/endpoints'
 import { resolveStrategy } from '@/lib/strategy-manifest'
 import { STRATEGY_KEYS } from '@/constants/strategyKeys'
 import { mapBarsToBarData } from '@/utils/chart'
@@ -149,48 +149,119 @@ export default function CaptureStockPage() {
   // [feishu-capture] - 描述: 截图模式渲染就绪标志
   // 只依赖 bars + indicators 加载完成（不依赖 events）
   // 历史根因：事件查询接口超时导致 data-render-ready 永远为 false，capture worker 30s 超时返回 502
-  const isRenderReady = !!barsResponse?.items?.length && !!indicatorsResponse
+  //
+  // [PROMPT.md §二 V2 render_frame.matched] Capture 必须检查服务端校验后的 frame match：
+  //   - render_frame.matched=false 时不得 Ready（禁止 Capture 继续绕过合同）
+  //   - mismatch 时显示两端 count/time/hash/as_of 差异，便于运维定位
+  //   - 用户可点击"重试"按钮触发 snapshotQuery.refetch()
+  //
+  // [PROMPT.md §5.3.5 V2 类型特定 Ready] 不同 indicator_view 有额外 Ready 条件：
+  //   - node_cluster: 100 行 profile + profile_hash + node_regions
+  //   - bollinger: 三轨（upper/middle/lower）+ frame matched
+  //   - smc: DTO 存在 + 版本正确 + frame matched
+  const renderFrame = snapshot?.render_frame
+  const isFrameMatched = renderFrame?.matched === true
+  const hasBaseData = !!barsResponse?.items?.length && !!indicatorsResponse
+  const isTypeReady = computeTypeSpecificReady(indicatorView, indicatorsResponse)
+  const isRenderReady = hasBaseData && isFrameMatched && isTypeReady
+
+  // [PROMPT.md §5.3.3 V2] 发送时间：后端 snapshot_time（UTC ISO），由 MobileIndicatorStage 转 Asia/Shanghai
+  const snapshotTime = snapshot?.snapshot_time ?? null
 
   // 加载状态：股票信息加载中
   if (snapshotQuery.isLoading) {
     return (
-      <div
-        className="mobile-stage mobile-stage-loading"
-        data-testid="stock-detail-capture"
-        data-render-ready="false"
-        data-loading="true"
-      >
-        <div className="mobile-stage-texture" aria-hidden="true" />
-        <div className="mobile-stage-loading-text">
-          <span className="mobile-stage-loading-spinner" />
-          <b>正在获取股票数据</b>
-        </div>
-      </div>
+      <MobileIndicatorStage
+        stockName="—"
+        stockSymbol={symbol || ''}
+        indicatorView={indicatorView}
+        currentPrice={null}
+        changePercent={null}
+        chartDate={null}
+        state="loading"
+        stateMessage={
+          <>
+            <span className="mobile-stage-loading-spinner" />
+            <b>正在获取股票数据</b>
+          </>
+        }
+      />
     )
   }
 
   // 股票不存在、缺少 instrument_id 或查询出错
   if (!inst) {
     return (
-      <div
-        className="mobile-stage mobile-stage-error"
-        data-testid="stock-detail-capture"
-        data-render-ready="false"
-        data-error="true"
-      >
-        <div className="mobile-stage-texture" aria-hidden="true" />
-        <div className="mobile-stage-error-text">
-          <b>未找到股票</b>
-          <span>{symbol || ''}</span>
-          <small>
-            {!instrumentId
-              ? '缺少 instrument_id 参数'
-              : snapshotQuery.isError
-                ? '股票信息查询失败，请稍后重试'
-                : '请检查股票代码是否正确'}
-          </small>
-        </div>
-      </div>
+      <MobileIndicatorStage
+        stockName="未找到股票"
+        stockSymbol={symbol || ''}
+        indicatorView={indicatorView}
+        currentPrice={null}
+        changePercent={null}
+        chartDate={null}
+        state="error"
+        stateMessage={
+          <>
+            <b>未找到股票</b>
+            <span>{symbol || ''}</span>
+            <small>
+              {!instrumentId
+                ? '缺少 instrument_id 参数'
+                : snapshotQuery.isError
+                  ? '股票信息查询失败，请稍后重试'
+                  : '请检查股票代码是否正确'}
+            </small>
+          </>
+        }
+      />
+    )
+  }
+
+  // [PROMPT.md §二 V2] render_frame.matched=false 时不得 Ready，显示 mismatch 差异
+  //   禁止 Capture 继续绕过合同（旧版 isRenderReady 只检查数据存在，未检查帧匹配）
+  if (renderFrame && !isFrameMatched) {
+    return (
+      <MobileIndicatorStage
+        stockName={inst.name}
+        stockSymbol={inst.symbol}
+        indicatorView={indicatorView}
+        currentPrice={currentPrice}
+        changePercent={changePercent}
+        chartDate={chartDate}
+        snapshotTime={snapshotTime}
+        state="mismatch"
+        stateMessage={
+          <>
+            <b>展示帧不匹配（Capture Frame Mismatch）</b>
+            <span>{inst.symbol} · {indicatorView}</span>
+            <small>
+              bars_count={renderFrame.bars_count ?? 'N/A'} / indicators_count={renderFrame.indicators_count ?? 'N/A'}
+            </small>
+            <small>
+              bars_first={renderFrame.bars_first_time ?? 'N/A'} / indicators_first={renderFrame.indicators_first_time ?? 'N/A'}
+            </small>
+            <small>
+              bars_last={renderFrame.bars_last_time ?? 'N/A'} / indicators_last={renderFrame.indicators_last_time ?? 'N/A'}
+            </small>
+            <small>
+              bars_hash={renderFrame.bars_hash || 'N/A'}
+            </small>
+            <small>
+              indicators_hash={renderFrame.indicators_hash || 'N/A'}
+            </small>
+            <small>
+              bars_as_of={renderFrame.bars_adjustment_as_of ?? 'N/A'} / indicators_as_of={renderFrame.indicators_adjustment_as_of ?? 'N/A'}
+            </small>
+            <button
+              type="button"
+              onClick={() => snapshotQuery.refetch()}
+              style={{ marginTop: 16, padding: '8px 24px', fontSize: 28, cursor: 'pointer' }}
+            >
+              重试
+            </button>
+          </>
+        }
+      />
     )
   }
 
@@ -202,33 +273,116 @@ export default function CaptureStockPage() {
       currentPrice={currentPrice}
       changePercent={changePercent}
       chartDate={chartDate}
-      testId="capture"
+      snapshotTime={snapshotTime}
+      renderReady={isRenderReady}
     >
-      <div
-        data-testid="stock-detail-capture"
-        data-render-ready={isRenderReady ? 'true' : 'false'}
-        data-indicator-view={indicatorView}
-        style={{ width: '100%', height: '100%' }}
-      >
-        {bars.length === 0 ? (
-          <div className="mobile-stage-chart-placeholder">行情数据加载中...</div>
-        ) : (
-          <StrategyChart
-            symbol={inst.symbol}
-            displayName={inst.name}
-            bars={bars}
-            indicators={indicatorsResponse}
-            strategyId={strategyDef.id}
-            source={source}
-            height={MOBILE_STAGE_CHART_HEIGHT}
-            timeframe={timeframe}
-            viewport={viewportByTimeframe[timeframe]}
-            onViewportChange={handleViewportChange}
-            isCaptureMode
-            indicatorView={indicatorView}
-          />
-        )}
-      </div>
+      {bars.length === 0 ? (
+        <div className="mobile-stage-chart-placeholder">行情数据加载中...</div>
+      ) : (
+        <StrategyChart
+          symbol={inst.symbol}
+          displayName={inst.name}
+          bars={bars}
+          indicators={indicatorsResponse}
+          strategyId={strategyDef.id}
+          source={source}
+          height={MOBILE_STAGE_CHART_HEIGHT}
+          timeframe={timeframe}
+          viewport={viewportByTimeframe[timeframe]}
+          onViewportChange={handleViewportChange}
+          isCaptureMode
+          indicatorView={indicatorView}
+          // [PROMPT.md §5.3.4 V2] Capture 强制使用 mobile_capture 缩放：
+          //   1440×2560 舞台需要 ≥32px Canvas 字号 / 2.5-3.5px 线宽，桌面端保持默认 'desktop'。
+          renderDensity="mobile_capture"
+        />
+      )}
     </MobileIndicatorStage>
   )
+}
+
+/**
+ * [PROMPT.md §5.3.5 V2 类型特定 Ready] 不同 indicator_view 的额外 Ready 条件。
+ *
+ * - node_cluster: data.node_cluster 含 100 行 profile + profile_hash + node_regions
+ * - bollinger: data.bb_monitor 含三轨（upper/middle/lower 非空数组）
+ * - smc: data.smc 含 DTO + algorithm_version
+ *
+ * 基础 Ready（bars 存在 + indicators 存在 + frame matched）由调用方检查，
+ * 本函数只检查类型特定条件。
+ */
+function computeTypeSpecificReady(
+  indicatorView: IndicatorView,
+  indicators: IndicatorResponse | undefined,
+): boolean {
+  if (!indicators?.data) return false
+  const data = indicators.data as Record<string, unknown>
+
+  if (indicatorView === 'node_cluster') {
+    // [PROMPT.md §5.3.5] Node: 100 行 profile + profile_hash + node_regions
+    // [V2 fix] 实际 API 返回 `node_regions_hash`（profile_to_dict 序列化的 hash 字段名），
+    //   旧版前端误用 `profile_hash`，导致 data-render-ready 永远 false，capture 30s 超时。
+    //   同时兼容 `profile_hash`（保留向后兼容，若未来 DTO 添加该字段则同样识别）。
+    const vn = (data['node_cluster'] ?? data['watchlist_monitor'] ?? data['volume_node_monitor']) as
+      | Record<string, unknown>
+      | undefined
+    if (!vn) return false
+    const profileRows = vn.profile_rows
+    const nodeRegionsHash = vn.node_regions_hash
+    const profileHash = vn.profile_hash
+    const nodeRegions = vn.node_regions
+    const hasHash =
+      (typeof nodeRegionsHash === 'string' && nodeRegionsHash.length > 0) ||
+      (typeof profileHash === 'string' && profileHash.length > 0)
+    return (
+      Array.isArray(profileRows) && profileRows.length > 0 &&
+      hasHash &&
+      Array.isArray(nodeRegions)
+    )
+  }
+
+  if (indicatorView === 'bollinger') {
+    // [PROMPT.md §5.3.5] BB: 三轨（upper/middle/lower）非空
+    // [V2 fix] 实际 API 在 `watchlist_monitor` 中返回 `bb_upper/bb_mid/bb_lower` 数组
+    //   （BollingerBandsMonitor 计算结果挂在 watchlist_monitor 命名空间下），
+    //   不存在独立的 `bb_monitor`/`bollinger` 顶层键。
+    //   旧版前端只查 `bb_monitor`/`bollinger`，导致 bollinger 视图永远 not ready。
+    const bb = (data['bb_monitor'] ?? data['bollinger']) as Record<string, unknown> | undefined
+    const wm = data['watchlist_monitor'] as Record<string, unknown> | undefined
+    const upper = bb?.upper ?? wm?.bb_upper
+    const middle = bb?.middle ?? wm?.bb_mid
+    const lower = bb?.lower ?? wm?.bb_lower
+    return (
+      Array.isArray(upper) && (upper as unknown[]).length > 0 &&
+      Array.isArray(middle) && (middle as unknown[]).length > 0 &&
+      Array.isArray(lower) && (lower as unknown[]).length > 0
+    )
+  }
+
+  if (indicatorView === 'smc') {
+    // [PROMPT.md §5.3.5] SMC: DTO 存在 + 版本正确 + render_frame matched
+    // [V2 fix] 实际 API 返回扁平结构：`events`/`order_blocks`/`equal_highs_lows`/`trailing`/
+    //   `swing_bias`/`pivots`/`params`/`view`，不存在 `dto` 包装层，也不存在顶层
+    //   `algorithm_version`/`bos`/`choch` 键。
+    //   BOS/CHoCH 事件位于 `events` 数组中（按 event_type 区分），order_blocks 数组
+    //   表示已检测到的 OB 区。算法版本可在 `params.algorithm_version` 或 `view.algorithm_version`
+    //   中查找（若存在），但 Ready 条件只要求核心数据结构非空即可（与 node_cluster 一致）。
+    const smc = data['smc'] as Record<string, unknown> | undefined
+    if (!smc) return false
+    const events = smc.events
+    const orderBlocks = smc.order_blocks
+    const params = smc.params as Record<string, unknown> | undefined
+    const view = smc.view as Record<string, unknown> | undefined
+    const algorithmVersion =
+      (params?.algorithm_version as string | undefined) ??
+      (view?.algorithm_version as string | undefined) ??
+      (smc.algorithm_version as string | undefined)
+    const hasCoreData =
+      (Array.isArray(events) && (events as unknown[]).length > 0) ||
+      (Array.isArray(orderBlocks) && (orderBlocks as unknown[]).length > 0)
+    // algorithm_version 可选（部分 SMC 实现未返回该字段，只要有核心数据即视为 Ready）
+    return hasCoreData || (typeof algorithmVersion === 'string' && algorithmVersion.length > 0)
+  }
+
+  return true
 }

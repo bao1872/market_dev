@@ -143,10 +143,13 @@ class CaptureResponse(BaseModel):
     event_id: str = Field(..., description="事件 ID")
     image_url: str = Field(..., description="图片本地静态 URL")
     size: int = Field(..., description="图片字节数")
-    width: int | None = Field(None, description="截图像素宽（viewport_width * device_scale_factor）")
-    height: int | None = Field(None, description="截图像素高（viewport_height * device_scale_factor）")
+    width: int | None = Field(None, description="截图像素宽（从真实 PNG IHDR 读取）")
+    height: int | None = Field(None, description="截图像素高（从真实 PNG IHDR 读取）")
     device_scale_factor: int | None = Field(None, description="设备像素比")
     cache_hit: bool = Field(False, description="是否命中文件缓存（仅读缓存命中为 True）")
+    # [PROMPT.md §5.3.3 V2] 发送时间：后端截图完成时间（UTC ISO），
+    #   前端转 Asia/Shanghai 显示，禁止浏览器本地时间猜测
+    snapshot_time: str | None = Field(None, description="截图完成时间（UTC ISO，前端转 Asia/Shanghai 显示）")
 
 
 # [capture-worker] - 确保静态目录存在，并挂载静态文件服务
@@ -218,6 +221,7 @@ async def capture(request: CaptureRequest, background_tasks: BackgroundTasks) ->
         height=result.height,
         device_scale_factor=result.device_scale_factor,
         cache_hit=result.cache_hit,
+        snapshot_time=result.snapshot_time,
     )
 
 

@@ -1577,6 +1577,24 @@ NODE_OPTIONS=--max-old-space-size=1536 node_modules/.bin/vite build
 - **测试** `test_algorithm_registry_architecture.py`（22 项全绿，含硬失败的四链门禁）+ `test_indicator_service.py` + `test_node_cluster_engine.py` + `test_smc_indicator.py` + `test_canonical_input_provider.py` + `test_canonical_result_hash_matrix.py`（124 项全绿，1 skipped）+ `test_feature_snapshot_service.py` + `test_monitor_batch_capture_image.py` + `test_stock_capture_service.py` + `test_node_cluster_three_chain_consistency.py`（40 项全绿，1 skipped）+ `test_indicators_api.py` + `test_chart_bars_service.py` + `test_structural_factor_service.py` + `test_temporal_feature_service.py`（126 项全绿）。
 - **运行命令**：`APP_ENV=test pytest backend/tests/test_algorithm_registry_architecture.py -v`（AST 硬门禁）；`APP_ENV=test pytest backend/tests/test_indicator_service.py backend/tests/test_node_cluster_engine.py backend/tests/test_smc_indicator.py backend/tests/test_canonical_input_provider.py backend/tests/test_canonical_result_hash_matrix.py backend/tests/test_feature_snapshot_service.py backend/tests/test_stock_capture_service.py backend/tests/test_node_cluster_three_chain_consistency.py backend/tests/test_indicators_api.py backend/tests/test_chart_bars_service.py backend/tests/test_structural_factor_service.py backend/tests/test_temporal_feature_service.py -v`
 
+### 3.22.6 CHANGE-20260721-002 V2：Display Frame Contract V2 + 移动舞台 V2 + 四层缓存失效
+
+- **Phase 2 - ALGORITHM_VERSION v11→v12**：`test_indicator_cache.py::test_cache_algorithm_version_bumped_to_v12` 断言 `ALGORITHM_VERSION == "v12"` + 新缓存键含 `:v12` + 旧 `:v11` 不命中。
+- **Phase 4 - 移动舞台契约测试** `frontend/scripts/contract-tests/capture-stock-page.test.ts`：
+  - Test 23：`StrategyChart` 禁止硬编码 `"8px/9px/10px/11px monospace|sans-serif"`，`drawText` 默认 font 改为空串（所有 27 处调用显式传 `scale.fonts.*`）
+  - Test 25：风险提示字号 30-32px + 透明度 ≥0.72，接受 `opacity:` 属性 或 `rgba(..., α)` alpha 通道（CSS 等价可读性）
+- **Phase 4 - chartRightPadding 网格线断言** `frontend/src/components/__tests__/chartRightPadding.test.ts`：网格线断言改正则匹配 `/drawLine\(ctx, g\.l, y, g\.plotRight, y, C\.grid(?:,\s*scale\.strokes\.grid)?\)/`，接受 `scale.strokes.grid` 后缀。
+- **Phase 5 - Capture 缓存清理测试** `backend/tests/test_bars_scheduler_factor_audit.py`：
+  - `test_invalidate_capture_cache_deletes_only_matching_files`：精确删除匹配 instrument_id 的文件，不影响其他股票
+  - `test_invalidate_capture_cache_missing_dir_returns_zero`：目录不存在返回 0
+  - `test_invalidate_capture_cache_empty_dir_returns_zero`：空目录返回 0
+  - `test_invalidate_downstream_caches_includes_capture_field`：返回 dict 含 4 个键（mdas/bars/indicator/capture）
+  - `test_audit_empty_instruments` / `test_audit_needs_rebuild_all_success`：summary 新增 `trade_date`/`audit_rebuilt`/`failed_symbols` 字段断言
+- **运行命令**：
+  - `APP_ENV=test pytest backend/tests/test_indicator_cache.py backend/tests/test_bars_scheduler_factor_audit.py -v`
+  - `NODE_OPTIONS=--max-old-space-size=1536 node --experimental-strip-types --test frontend/scripts/contract-tests/capture-stock-page.test.ts frontend/src/components/__tests__/chartRightPadding.test.ts`
+- **完整测试套件验证结果（Phase 6）**：后端 599 passed + 14 skipped；前端 420 passed + 3 pre-existing failed（structural-state-toggle，StockDetailPage 未修改）；Ruff 全绿；Mypy 3 pre-existing errors；TypeScript 仅 pre-existing errors；ESLint pre-existing 模块损坏；架构测试 46/46 PASS。
+
 ## 4. CI 门禁
 
 阻断项：

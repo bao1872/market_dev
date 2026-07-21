@@ -346,6 +346,9 @@ services:
       CAPTURE_STATIC_URL_PREFIX: /static/captures
       APP_ENV: production
       TZ: Asia/Shanghai
+      # [PROMPT.md §5.3 V2] 移动舞台 1440×2560 渲染较慢，超时从 30s 提升到 90s
+      CAPTURE_RENDER_TIMEOUT_MS: "90000"
+      CAPTURE_SCREENSHOT_TIMEOUT_MS: "20000"
     volumes:
       - capture_static:/app/static/captures
     ports:

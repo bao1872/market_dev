@@ -482,6 +482,12 @@ export interface CaptureSnapshotResponse {
     event_id: string
     scope: string
   }
+  // [CHANGE-20260720-Phase4 §四] indicator_view 与 include_smc 透传
+  indicator_view?: string
+  include_smc?: boolean
+  // [PROMPT.md §二 V2 render_frame.matched] 服务端校验后的 frame match 状态
+  //   false 时前端 CaptureStockPage 不得 Ready（data-render-ready="false"），禁止 Capture 继续绕过合同
+  render_frame?: CaptureRenderFrame
 }
 
 // [StockDetailFeishu] - 描述: 异步 Outbox 投递模式类型契约（POST 创建 + GET 状态轮询）
@@ -651,7 +657,16 @@ export interface BarListResponse {
  *   - display_hash：展示窗口 OHLCV SHA256 前 16 字符
  *   - completed_through：已完成到的时间
  *
+ * [PROMPT.md §二 V2] 新增 V2 字段（build_display_frame 传入 DisplayWindowSpec 时附加）：
+ *   - requested_count：请求的展示窗口大小（前端 BARS_COUNT_BY_TIMEFRAME）
+ *   - actual_count：实际返回的 bar 数量（可能小于 requested_count）
+ *   - first_time / last_time：展示窗口首末 bar 时间（ISO 字符串）
+ *   - include_realtime：是否包含实时 partial bar
+ *   - is_partial：最后一根 bar 是否为未完成 partial bar
+ *   - adjustment_as_of：复权锚点（None=最新）
+ *
  * 空数据路径：display_times=[]，display_hash=""（视为缺失，触发降级）。
+ * V1 向后兼容：requested_count 等新字段为可选，旧缓存返回的 display_frame 不含这些字段。
  */
 export interface DisplayFrame {
   instrument_id: string
@@ -660,6 +675,43 @@ export interface DisplayFrame {
   display_times: string[]
   display_hash: string
   completed_through: string | null
+  // [PROMPT.md §二 V2] 新增字段（可选，V1 缓存可能缺失）
+  requested_count?: number | null
+  actual_count?: number | null
+  first_time?: string | null
+  last_time?: string | null
+  include_realtime?: boolean | null
+  is_partial?: boolean | null
+  adjustment_as_of?: string | null
+}
+
+/**
+ * Capture render_frame 比对结果（PROMPT.md §二 V2）。
+ *
+ * 后端 capture.py 使用 is_display_frame_match 比对 bars_display_frame 与
+ * indicators display_frame 后返回此结构。前端 CaptureStockPage 必须检查
+ * matched 字段，false 时不得 Ready（data-render-ready="false"）。
+ *
+ * 字段对齐后端 app.api.capture.py return render_frame 字典：
+ *   - matched：bars 与 indicators display_frame 是否匹配
+ *   - bars_hash / indicators_hash：两端 display_hash
+ *   - bars_count / indicators_count：两端 actual_count
+ *   - bars_first_time / indicators_first_time：两端 first_time
+ *   - bars_last_time / indicators_last_time：两端 last_time
+ *   - bars_adjustment_as_of / indicators_adjustment_as_of：两端 adjustment_as_of
+ */
+export interface CaptureRenderFrame {
+  matched: boolean
+  bars_hash: string
+  indicators_hash: string
+  bars_count: number | null
+  indicators_count: number | null
+  bars_first_time: string | null
+  indicators_first_time: string | null
+  bars_last_time: string | null
+  indicators_last_time: string | null
+  bars_adjustment_as_of: string | null
+  indicators_adjustment_as_of: string | null
 }
 
 // ============================================================

@@ -1,17 +1,22 @@
 """展示帧（display_frame）构建器 - 展示窗口与算法输入帧分离。
 
-背景（PROMPT.md §一、§二）：
+背景（PROMPT.md §一、§二 V2）：
     前端 ChartRenderFrame 之前严格比较 bars.source_bar_hash 与
     indicators.source_bar_hash，但两者来源不同：
-      - bars API 的 source_bar_hash 来自展示窗口（默认 100 根）
+      - bars API 的 source_bar_hash 来自展示窗口（page_size 根）
       - indicators API 的 source_bar_hash 来自算法输入（Node 250 根日线）
     导致 1d 周期永久 mismatch，指标图层被屏蔽，页面持续显示"指标加载中"。
 
-解决方案（PROMPT.md §二.1）：
-    新增 display_frame：只描述真正交给前端绘制的 K线窗口。
-    bars API 与 indicators API 调用同一个 build_display_frame() 生成它。
-    算法输入 hash（source_bar_hash/daily_hash/15m_hash/profile_hash）
-    移入 calculation_diagnostics，不参与展示帧匹配。
+    V1 修复仍硬编码 _display_window=100，与 bars API 实际 page_size
+    （1d=250/15m=4000/1h=1200/1w=260/1mo=120）不一致，导致 4/5 周期 mismatch。
+    Capture 单 Snapshot 直接渲染，未参与帧比对门禁，能出图只是绕过详情页门禁。
+
+V2 解决方案（PROMPT.md §二.1 DisplayWindowSpec V2）：
+    抽出唯一 DisplayWindowSpec，bars/indicators/capture 必须基于同一 Spec 和
+    同一最终展示 DataFrame 生成 frame。删除所有展示窗口 100 硬编码；
+    indicators 按请求 bars 生成展示窗口。DisplayFrame 增加 requested_count、
+    actual_count、first_time、last_time、include_realtime、is_partial、adjustment_as_of。
+    Capture Snapshot 返回服务端校验后的 render_frame.matched；false 不得 Ready。
 
 display_frame 字段：
     - instrument_id: 标的 UUID
@@ -20,15 +25,64 @@ display_frame 字段：
     - display_times: 展示窗口 bar 时间数组（首末用于范围 key）
     - display_hash: 展示窗口 OHLCV SHA256 前 16 字符
     - completed_through: 已完成到的时间（来自 MDAS 诊断）
+    - requested_count: 请求的 bar 数量（Spec.requested_count）
+    - actual_count: 实际返回的 bar 数量（len(display_df)）
+    - first_time: 展示窗口首根 bar 时间
+    - last_time: 展示窗口末根 bar 时间
+    - include_realtime: 是否包含实时 bar
+    - is_partial: 末根 bar 是否为 partial（未完成）
+    - adjustment_as_of: 复权锚点（None=最新）
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
 
 from app.services.chart_bars_service import compute_source_bar_hash, compute_source_bar_times
+
+
+@dataclass(frozen=True)
+class DisplayWindowSpec:
+    """展示窗口规格（PROMPT.md §二.1 DisplayWindowSpec V2）。
+
+    bars/indicators/capture 必须基于同一 Spec 和同一最终展示 DataFrame 生成 frame。
+    任一字段不同即视为不同窗口，display_hash 必然不同，前端据此判定 mismatch。
+
+    Attributes:
+        instrument_id: 标的 UUID 字符串
+        timeframe: 周期 1d | 15m | 1h | 1w | 1mo
+        adj: 复权方式 qfq | none
+        requested_count: 请求的 bar 数量（bars API page_size / indicators API bars）
+        end_time: 请求截止时间（end_date 或 end_time ISO 字符串），None 表示最新
+        include_realtime: 是否包含实时 partial bar
+        completed_only: 是否只返回已完成 bar（True 时强制 include_realtime=False）
+        adjustment_as_of: 复权锚点 YYYY-MM-DD（None=最新；历史回算传业务日）
+    """
+
+    instrument_id: str
+    timeframe: str
+    adj: str
+    requested_count: int
+    end_time: str | None = None
+    include_realtime: bool = False
+    completed_only: bool = False
+    adjustment_as_of: str | None = None
+
+    def to_cache_suffix(self) -> str:
+        """生成用于缓存键的紧凑后缀（保证不同 Spec 产生不同键）。
+
+        格式：rt{0/1}co{0/1}ao{as_of_or_None}
+        默认值（include_realtime=True, completed_only=False, adjustment_as_of=None）
+        产生 "rt1co0aoNone"，与历史行为等价。
+        """
+        return (
+            f"rt{1 if self.include_realtime else 0}"
+            f"co{1 if self.completed_only else 0}"
+            f"ao{self.adjustment_as_of or 'None'}"
+        )
 
 
 def build_display_frame(
@@ -37,12 +91,20 @@ def build_display_frame(
     adj: str,
     display_df: pd.DataFrame,
     completed_through: str | None = None,
+    *,
+    spec: DisplayWindowSpec | None = None,
+    is_partial: bool | None = None,
 ) -> dict[str, Any]:
     """构建展示帧（display_frame）。
 
     bars API 与 indicators API 必须调用本函数生成 display_frame，保证同一展示
     窗口产生同一 display_hash。display_df 必须是真正交给前端绘制的 K线窗口
     （bars API 的 page_df，或 indicators API 的 macd_bars 末尾 N 根）。
+
+    V2（PROMPT.md §二.1）：传入 spec 时附加 requested_count/actual_count/
+    first_time/last_time/include_realtime/is_partial/adjustment_as_of 字段，
+    供前端 mismatch 时显示两端 count/time/hash/as_of 差异和重试按钮。
+    未传 spec 时保持 V1 行为（向后兼容，仅返回基础 6 字段）。
 
     Args:
         instrument_id: 标的 UUID 字符串
@@ -52,20 +114,14 @@ def build_display_frame(
             空 DataFrame 时返回 display_hash="" 和 display_times=[]，不阻塞。
         completed_through: 已完成到的时间字符串（来自 MDAS completed_through 诊断），
             透传到 display_frame 供前端展示"数据截止"。
+        spec: 展示窗口规格（V2）。传入时附加新字段；None 时保持 V1 行为。
+        is_partial: 末根 bar 是否为 partial（未完成）。None 时不写入该字段。
 
     Returns:
-        display_frame 字典：
-            {
-              "instrument_id": str,
-              "timeframe": str,
-              "adj": str,
-              "display_times": list[str],
-              "display_hash": str,
-              "completed_through": str | None,
-            }
+        display_frame 字典（V2 含 spec 时附加新字段）
     """
     if display_df.empty:
-        return {
+        base: dict[str, Any] = {
             "instrument_id": str(instrument_id),
             "timeframe": timeframe,
             "adj": adj,
@@ -73,14 +129,80 @@ def build_display_frame(
             "display_hash": "",
             "completed_through": completed_through,
         }
-    return {
-        "instrument_id": str(instrument_id),
-        "timeframe": timeframe,
-        "adj": adj,
-        "display_times": compute_source_bar_times(display_df, timeframe),
-        "display_hash": compute_source_bar_hash(display_df, timeframe),
-        "completed_through": completed_through,
-    }
+    else:
+        base = {
+            "instrument_id": str(instrument_id),
+            "timeframe": timeframe,
+            "adj": adj,
+            "display_times": compute_source_bar_times(display_df, timeframe),
+            "display_hash": compute_source_bar_hash(display_df, timeframe),
+            "completed_through": completed_through,
+        }
+
+    # V2: 传入 spec 时附加新字段
+    if spec is not None:
+        base["requested_count"] = spec.requested_count
+        base["actual_count"] = len(display_df)
+        if not display_df.empty:
+            first_ts = display_df.index[0]
+            last_ts = display_df.index[-1]
+            base["first_time"] = (
+                first_ts.isoformat() if hasattr(first_ts, "isoformat") else str(first_ts)
+            )
+            base["last_time"] = (
+                last_ts.isoformat() if hasattr(last_ts, "isoformat") else str(last_ts)
+            )
+        else:
+            base["first_time"] = None
+            base["last_time"] = None
+        base["include_realtime"] = spec.include_realtime
+        if is_partial is not None:
+            base["is_partial"] = bool(is_partial)
+        base["adjustment_as_of"] = spec.adjustment_as_of
+
+    return base
+
+
+def is_display_frame_match(
+    bars_frame: dict[str, Any] | None,
+    indicators_frame: dict[str, Any] | None,
+) -> bool:
+    """判断 bars 与 indicators 的 display_frame 是否匹配（V2 Capture render_frame.matched）。
+
+    比对规则：
+        - 任一为 None：mismatch（保护性拒绝）
+        - instrument_id / timeframe / adj：必须完全一致
+        - display_hash：双侧非空时必须一致；双侧都空视为匹配（均为空数据）
+        - display_range_key（display_times 首末）：双侧非空时必须一致
+
+    Args:
+        bars_frame: bars API 的 display_frame 字典
+        indicators_frame: indicators API 的 display_frame 字典
+
+    Returns:
+        True 表示匹配；False 表示 mismatch
+    """
+    if bars_frame is None or indicators_frame is None:
+        return False
+    # 严格字段
+    for key in ("instrument_id", "timeframe", "adj"):
+        if bars_frame.get(key) != indicators_frame.get(key):
+            return False
+    bars_hash = bars_frame.get("display_hash") or ""
+    ind_hash = indicators_frame.get("display_hash") or ""
+    # 双侧空 hash 视为匹配（均为空数据）
+    if not bars_hash and not ind_hash:
+        return True
+    # 任一非空时必须一致
+    if bars_hash != ind_hash:
+        return False
+    # display_times 首末比对
+    bars_times = bars_frame.get("display_times") or []
+    ind_times = indicators_frame.get("display_times") or []
+    if bars_times and ind_times:
+        if bars_times[0] != ind_times[0] or bars_times[-1] != ind_times[-1]:
+            return False
+    return True
 
 
 def build_calculation_diagnostics(
@@ -172,4 +294,50 @@ if __name__ == "__main__":
     assert "warmup_bars" in diag
     assert "adjustment_as_of" not in diag  # None 被过滤
     print("calculation_diagnostics 过滤 None: PASS")
+
+    # V2 自测：DisplayWindowSpec 附加新字段
+    spec = DisplayWindowSpec(
+        instrument_id="id-1",
+        timeframe="1d",
+        adj="qfq",
+        requested_count=250,
+        include_realtime=True,
+        completed_only=False,
+        adjustment_as_of=None,
+    )
+    frame_v2 = build_display_frame(
+        "id-1", "1d", "qfq", df, completed_through="2026-07-02",
+        spec=spec, is_partial=False,
+    )
+    assert frame_v2["requested_count"] == 250
+    assert frame_v2["actual_count"] == 2
+    assert frame_v2["first_time"] == "2026-07-01T00:00:00"
+    assert frame_v2["last_time"] == "2026-07-02T00:00:00"
+    assert frame_v2["include_realtime"] is True
+    assert frame_v2["is_partial"] is False
+    assert frame_v2["adjustment_as_of"] is None
+    print(f"DisplayWindowSpec V2 附加字段: PASS (suffix={spec.to_cache_suffix()})")
+
+    # V2 自测：spec 缺失时保持 V1 行为（无新字段）
+    frame_v1 = build_display_frame("id-1", "1d", "qfq", df, completed_through="2026-07-02")
+    assert "requested_count" not in frame_v1
+    assert "actual_count" not in frame_v1
+    print("V1 向后兼容: PASS")
+
+    # V2 自测：is_display_frame_match
+    bars_frame = build_display_frame(
+        "id-1", "1d", "qfq", df, completed_through="2026-07-02", spec=spec,
+    )
+    ind_frame_match = build_display_frame(
+        "id-1", "1d", "qfq", df, completed_through="2026-07-02", spec=spec,
+    )
+    assert is_display_frame_match(bars_frame, ind_frame_match) is True
+    # 不同 display_df → 不同 hash → mismatch
+    df2 = df.copy()
+    df2.loc["2026-07-02", "close"] = 99.9
+    ind_frame_mismatch = build_display_frame(
+        "id-1", "1d", "qfq", df2, completed_through="2026-07-02", spec=spec,
+    )
+    assert is_display_frame_match(bars_frame, ind_frame_mismatch) is False
+    print("is_display_frame_match: PASS")
     print("OK")

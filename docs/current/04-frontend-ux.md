@@ -248,10 +248,27 @@ Node Cluster 算法
   - `node_cluster` → "筹码共识价"
   - `bollinger` → "布林带"
   - `smc` → "SMC 结构"
-- **`useStockDetailFeishu` hook 改造**：新增 `selectedIndicatorView: IndicatorView` state、`setSelectedIndicatorView` setter、`handleSendFeishu(indicatorView)` 显式传参调用；POST body 透传到 capture worker。
+- **`useStockDetailFeishu` hook 改造**：新增 `selectedIndicatorView: IndicatorView` state、`setSelectedIndicatorView` Setter、`handleSendFeishu(indicatorView)` 显式传参调用；POST body 透传到 capture worker。
 - **文件名与缓存键**：`output_filename` 加 `-{indicator_view}` 后缀；缓存键含 `iv={indicator_view}` 段；图片消息 `resource_refs` 携带 `indicator_view`。
 - **监控自动发送不需要用户选择**：监控链路从事件类型自动映射 `indicator_view`（`EVENT_TYPE_TO_INDICATOR_VIEW`），用户不需要手动选择。
 - **三套 Capture Preset**：`FEISHU_CAPTURE_PRESETS` 每个 view 独立 preset，layers 互斥（除共享 candlestick）；详见 `docs/current/03-jobs-integrations-operations.md` §2.5.5。
+
+### 移动飞书指标舞台 V2（CHANGE-20260721-001 §四 + CHANGE-20260721-002 V2）
+
+- **`MobileIndicatorStage` 组件**（`frontend/src/components/MobileIndicatorStage.tsx`）：1440×2560 9:16 移动竖屏舞台，移植自 `ref/panji_short_video_integrated_studio_v1_15_event_flash_fix/` 舞台视觉外壳；`device_scale_factor=1`；包含品牌区 + 事件槽 + 图表卡 + 底部风险提示。
+- **`renderDensity` 集中管理**（`frontend/src/components/chartRenderScale.ts`，CHANGE-20260721-002 V2 新建）：集中管理 Canvas 字号/线宽/节点标记尺寸；`desktop` 保持不变，`mobile_capture` 放大；三类缩放规格接口：
+  - `ChartTypography`：axisLabel / paneLabel / nodeLabel / riskNotice 等字号
+  - `ChartStrokeScale`：grid / crosshair / candlestick 等线宽
+  - `ChartGeometryScale`：nodeMarker / eventDot 等几何尺寸
+- **`StrategyChart` V2 改造**（CHANGE-20260721-002 V2）：
+  - `drawText` 默认 font 改为空串（所有 27 处调用显式传 `scale.fonts.*`）
+  - `drawLine` 增加 `scale.strokes.grid` 参数
+  - `indicatorView` prop + `effectiveLayers` 预设替代默认全图层
+  - `INDICATOR_VIEW_LAYER_PRESETS` 每个 indicator_view 对应一个 `ChartLayerVisibility` 预设
+- **`CaptureStockPage` Playwright 选择器**：`[data-testid="stock-detail-capture"]`；`CaptureStockPage` 读取 `indicator_view` URL 参数并包裹 `MobileIndicatorStage`。
+- **`global.scss` 移动舞台样式**：风险提示字号 30-32px + 透明度 ≥0.72（`opacity:` 属性 或 `rgba(..., α)` alpha 通道均可接受，CSS 等价可读性）。
+- **`chartRenderFrame` V2 帧比对门禁**：`displayHash`/`displayRangeKey` 优先，降级到 `sourceBarHash`；展示帧（display_frame）与算法输入诊断（calculation_diagnostics）分离，由 `build_display_frame()` 生成；3 态状态机：pending/success/mismatch-error；bars API 与 indicators API 共用 `build_display_frame()`；测试 `chartRenderFrame.test.ts` 覆盖。
+- **`endpoints.ts` V2 参数**：indicators API 请求函数透传 `include_realtime`/`completed_only`/`adjustment_as_of` 参数，与 `/bars` 同款。
 
 ### 消息与飞书
 

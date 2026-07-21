@@ -45,14 +45,35 @@ export interface MobileIndicatorStageProps {
   changePercent: number | null
   /** 当前 K 线日期（YYYY-MM-DD 或 ISO 字符串） */
   chartDate: string | null
-  /** 图表区域子节点（StrategyChart with isCaptureMode + indicatorView） */
-  children: ReactNode
+  /** 图表区域子节点（StrategyChart with isCaptureMode + indicatorView）。
+   *    loading/error/mismatch 三态可不传（只渲染舞台外壳 + 居中文案） */
+  children?: ReactNode
   /** 品牌名（默认 "盘迹"） */
   brandName?: string
   /** 品牌副标题（默认 "用数据拆解市场和价格背后的结构"） */
   brandTagline?: string
   /** 测试用 data-testid 后缀，便于 Playwright 选择 */
   testId?: string
+  /** [PROMPT.md §5.3.1 V2] 截图根选择器：true 时根节点 data-testid="stock-detail-capture"，
+   *    Playwright 截取完整舞台（含品牌/股票名/风险提示），不再只截图表。
+   *    默认 true（CaptureStockPage 正常态）；loading/error 态由 CaptureStockPage 自行设置。
+   */
+  captureRoot?: boolean
+  /** [PROMPT.md §5.3.1 V2] 动态 Ready 状态：false 时根节点 data-render-ready="false"，
+   *    Playwright 等待该属性为 "true" 才截图；类型特定 Ready 由 CaptureStockPage 计算。
+   */
+  renderReady?: boolean
+  /** [PROMPT.md §5.3.3 V2] 发送时间（后端 snapshot_time UTC ISO 字符串），
+   *    组件内部转 Asia/Shanghai 显示，禁止浏览器本地时间猜测。
+   *    缺失时不渲染发送时间行。
+   */
+  snapshotTime?: string | null
+  /** [PROMPT.md §5.3.1 V2] 错误/加载态标记：'loading' | 'error' | 'mismatch' | null
+   *    非 null 时根节点附加 data-state 属性，便于 Playwright 统一选择器处理三态。
+   */
+  state?: 'loading' | 'error' | 'mismatch' | null
+  /** [PROMPT.md §5.3.1 V2] 错误/加载态文案（state 非 null 时显示） */
+  stateMessage?: ReactNode
 }
 
 /**
@@ -73,6 +94,11 @@ export default function MobileIndicatorStage({
   brandName = '盘迹',
   brandTagline = '用数据拆解市场和价格背后的结构',
   testId,
+  captureRoot = true,
+  renderReady = true,
+  snapshotTime,
+  state = null,
+  stateMessage,
 }: MobileIndicatorStageProps) {
   const isUp = changePercent === null ? true : changePercent >= 0
   const moduleLabel = INDICATOR_VIEW_LABELS[indicatorView]
@@ -83,12 +109,40 @@ export default function MobileIndicatorStage({
       : '—'
   const chartDateText = chartDate || '—'
 
+  // [PROMPT.md §5.3.3 V2] 发送时间：后端 snapshot_time 转 Asia/Shanghai
+  //   禁止浏览器本地时间猜测；缺失时不渲染发送时间行
+  const sendTimeText = formatSendTime(snapshotTime)
+
+  // [PROMPT.md §5.3.1 V2] 截图根选择器 + 动态 Ready
+  //   - captureRoot=true 时根节点 data-testid="stock-detail-capture"（Playwright 截完整舞台）
+  //   - renderReady 驱动 data-render-ready，类型特定 Ready 由 CaptureStockPage 计算
+  //   - state 非 null 时附加 data-state，loading/error/mismatch 三态统一根选择器
+  const rootTestId = captureRoot ? 'stock-detail-capture' : (testId ? `mobile-stage-${testId}` : 'mobile-stage')
+
+  // 错误/加载态：只渲染舞台外壳 + 居中文案，不渲染 header/chart/risk-notice
+  if (state !== null) {
+    return (
+      <div
+        className={`mobile-stage mobile-stage-${state}`}
+        data-testid={rootTestId}
+        data-render-ready="false"
+        data-indicator-view={indicatorView}
+        data-state={state}
+      >
+        <div className="mobile-stage-texture" aria-hidden="true" />
+        <div className={`mobile-stage-${state}-text`}>
+          {stateMessage}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div
       className="mobile-stage"
-      data-testid={testId ? `mobile-stage-${testId}` : 'mobile-stage'}
+      data-testid={rootTestId}
       data-indicator-view={indicatorView}
-      data-render-ready="true"
+      data-render-ready={renderReady ? 'true' : 'false'}
     >
       {/* 舞台背景纹理（移植自 .stage::before + .stage-texture） */}
       <div className="mobile-stage-texture" aria-hidden="true" />
@@ -142,12 +196,47 @@ export default function MobileIndicatorStage({
         </div>
       </section>
 
-      {/* ===== 底部三行风险提示（移植自 .stage-risk-notice） ===== */}
-      <div className="mobile-stage-risk-notice" aria-label="内容声明">
-        <span>随机历史数据复盘</span>
-        <span>内容仅做科普，不构成投资建议</span>
-        <span>投资有风险，入市需谨慎</span>
+      {/* ===== 底部发送时间 + 三行风险提示 ===== */}
+      <div className="mobile-stage-footer">
+        {sendTimeText && (
+          <div className="mobile-stage-send-time" data-testid="mobile-stage-send-time">
+            <span>发送时间</span>
+            <time>{sendTimeText}</time>
+          </div>
+        )}
+        <div className="mobile-stage-risk-notice" aria-label="内容声明">
+          <span>随机历史数据复盘</span>
+          <span>内容仅做科普，不构成投资建议</span>
+          <span>投资有风险，入市需谨慎</span>
+        </div>
       </div>
     </div>
   )
+}
+
+/**
+ * [PROMPT.md §5.3.3 V2] 将后端 snapshot_time（UTC ISO）转为 Asia/Shanghai 显示。
+ *
+ * 禁止使用浏览器本地时间（new Date().toLocaleString()），
+ * 因为截图 worker 可能运行在不同时区，导致发送时间与用户时区不一致。
+ *
+ * @param snapshotTimeUtc ISO 8601 字符串（含时区，如 "2026-07-20T15:30:00Z"）
+ * @returns "YYYY-MM-DD HH:mm" 格式字符串（Asia/Shanghai），或 null（输入缺失/无效）
+ */
+function formatSendTime(snapshotTimeUtc: string | null | undefined): string | null {
+  if (!snapshotTimeUtc) return null
+  const d = new Date(snapshotTimeUtc)
+  if (isNaN(d.getTime())) return null
+  // 强制 Asia/Shanghai 时区显示（+08:00）
+  const dateFmt = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+  // zh-CN 格式：2026/07/20 15:30 → 转 2026-07-20 15:30
+  return dateFmt.format(d).replace(/\//g, '-')
 }

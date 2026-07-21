@@ -65,27 +65,31 @@ def test_cache_key_construction() -> None:
     assert key_none_adj != key, "不同 adj 应生成不同键"
 
 
-def test_cache_algorithm_version_bumped_to_v11() -> None:
-    """[CHANGE-20260718-004] - ALGORITHM_VERSION 必须 bump 到 v11。
+def test_cache_algorithm_version_bumped_to_v12() -> None:
+    """[CHANGE-20260721-002 V2] - ALGORITHM_VERSION 必须 bump 到 v12。
 
-    v10 → v11 原因：CHANGE-20260718-004 Node Cluster engine 统一三链（详情/监控/盘后全部
-    经 node_cluster_engine.compute_node_cluster_profile 唯一业务入口），输出新增
-    algorithm_version/contract_fingerprint/profile_hash/daily_source_hash/
-    bars_15m_source_hash/adj_factor_hash/adjustment_as_of 等诊断字段；monitor_batch_service
-    adj 由 none→qfq（三链口径对齐），并加实例级 Profile 缓存。旧 v10 缓存的 node_cluster
-    meta 字段缺失且 adj 口径不一致，必须强制失效。
+    v11 → v12 原因：Display Frame Contract V2（PROMPT.md §二）。
+    删除 _display_window=100 硬编码，改用请求 bars 参数；display_frame 新增
+    requested_count/actual_count/first_time/last_time/include_realtime/is_partial/
+    adjustment_as_of 字段。indicators API 新增 include_realtime/completed_only/
+    adjustment_as_of 参数，与 bars API 同款，缓存键追加 spec 后缀。
+    旧 v11 缓存的 display_frame 缺失 V2 字段且展示窗口固定 100 根，必须强制失效。
+
+    历史 bump 记录：
+    - v10 → v11: CHANGE-20260718-004 Node Cluster engine 统一三链
+    - v11 → v12: CHANGE-20260721-002 Display Frame Contract V2
     """
-    assert indicator_cache.ALGORITHM_VERSION == "v11", (
-        f"ALGORITHM_VERSION 应为 v11（CHANGE-20260718-004 Node Cluster engine 统一三链后 bump），"
+    assert indicator_cache.ALGORITHM_VERSION == "v12", (
+        f"ALGORITHM_VERSION 应为 v12（CHANGE-20260721-002 Display Frame Contract V2 后 bump），"
         f"实际为 {indicator_cache.ALGORITHM_VERSION}"
     )
 
-    # 验证新 key 包含 v11，不包含 v10
+    # 验证新 key 包含 v12，不包含 v11
     key = indicator_cache.build_cache_key(
         TEST_INSTRUMENT_ID, "1d", "qfq", "2026-07-06",
     )
-    assert ":v11" in key, f"新缓存键应含 v11: {key}"
-    assert ":v10" not in key, f"新缓存键不应含 v10: {key}"
+    assert ":v12" in key, f"新缓存键应含 v12: {key}"
+    assert ":v11" not in key, f"新缓存键不应含 v11: {key}"
 
 
 def test_old_v4_cache_key_not_matched() -> None:

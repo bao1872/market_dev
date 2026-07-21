@@ -1077,6 +1077,23 @@ async def test_compute_snapshot_writes_node_cluster_available_state() -> None:
     # availability/degraded_reason 字段必须存在（即使 poc_price 可能为 None）
     assert "availability" in nc
     assert "degraded_reason" in nc
+    # [PROMPT.md §5.2.2 V2] price_state 必须存在且含必填字段
+    assert "price_state" in nc, "node_cluster 必须包含 price_state 字段"
+    ps = nc["price_state"]
+    for k in (
+        "current_price", "position_0_1",
+        "upper_node_ref", "lower_node_ref", "poc_node_ref", "last_touched_node_ref",
+    ):
+        assert k in ps, f"price_state 缺少字段: {k}"
+    # current_price 必须是 float（engine 可能按 price_step 对齐，不强制等于原始 close）
+    assert isinstance(ps["current_price"], (int, float)), "current_price 必须是数值"
+    # price_state 中的 *_ref 必须能在 node_regions 中找到对应 entity_id（若非 None）
+    if ps.get("upper_node_ref") is not None:
+        all_entity_ids = {r["entity_id"] for r in nc["node_regions"]}
+        for ref_key in ("upper_node_ref", "lower_node_ref", "poc_node_ref", "last_touched_node_ref"):
+            ref = ps.get(ref_key)
+            if ref is not None:
+                assert ref in all_entity_ids, f"price_state.{ref_key}={ref} 未在 node_regions 中找到"
 
 
 @pytest.mark.asyncio
@@ -1133,6 +1150,18 @@ async def test_compute_snapshot_writes_node_cluster_insufficient_daily_state() -
     assert nc["poc_price"] is None
     assert nc["profile_hash"] is None
     assert nc["daily_source_hash"] is None
+    # [PROMPT.md §5.2.2 V2] profile 为空时 price_state 仍写入最小结构
+    assert "price_state" in nc, "unavailable 态也必须包含 price_state"
+    ps = nc["price_state"]
+    for k in (
+        "current_price", "position_0_1",
+        "upper_node_ref", "lower_node_ref", "poc_node_ref", "last_touched_node_ref",
+    ):
+        assert k in ps, f"price_state 缺少字段: {k}"
+    # refs 必须全 None（profile 为空）
+    for ref_key in ("upper_node_ref", "lower_node_ref", "poc_node_ref", "last_touched_node_ref"):
+        assert ps[ref_key] is None, f"unavailable 态 price_state.{ref_key} 必须为 None"
+    assert ps["position_0_1"] is None
 
 
 @pytest.mark.asyncio
