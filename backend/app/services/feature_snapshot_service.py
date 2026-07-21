@@ -64,6 +64,7 @@ from app.services.canonical_adapters import (
     _compute_m15_response,
     _compute_relation,
     bollinger,
+    build_price_state,
     compute_node_cluster_profile,
     profile_to_dict,
 )
@@ -433,11 +434,31 @@ async def compute_feature_snapshot_for_date(
     # timeframe_volume_profile（单周期 15m VP，显式非 Node Cluster）。
     # [CHANGE-20260721-001] node_cluster 始终写入 availability/degraded_reason（即使 profile 为 None），
     # 供 StockContext 区分 NODE_PROFILE_EMPTY/NODE_15M_MISSING/NODE_COMPUTE_FAILED 三态。
+    # [PROMPT.md §5.2.2 V2] node_cluster 必须包含 price_state（与 node_regions 配对）：
+    # 前端通过 price_state.*_ref 在 node_regions 中查找完整节点信息。
+    # snapshot 是 point-in-time，current_price 取 df_1d 最后一根收盘价（与 extra.current_price 一致）。
+    current_price_for_state: float | None = None
+    if df_1d is not None and not df_1d.empty:
+        try:
+            current_price_for_state = float(df_1d["close"].iloc[-1])
+        except (IndexError, ValueError, KeyError):
+            current_price_for_state = None
     primary_payload: dict[str, Any] = {**primary_factors}
     if node_cluster_profile is not None:
         node_cluster_dict = profile_to_dict(node_cluster_profile)
         node_cluster_dict["availability"] = node_availability
         node_cluster_dict["degraded_reason"] = node_degraded_reason
+        # [PROMPT.md §5.2.2 V2] price_state：与 node_regions 配对的当前价状态
+        # profile 为 None 时由 else 分支处理；profile 存在时调用 build_price_state
+        # 当 current_price 不可得时传入 NaN 触发 build_price_state 的兜底逻辑
+        try:
+            price_for_state = current_price_for_state if current_price_for_state is not None else float("nan")
+            node_cluster_dict["price_state"] = build_price_state(
+                node_cluster_profile, price_for_state
+            )
+        except Exception as exc:
+            logger.warning("build_price_state 失败: %s", exc)
+            node_cluster_dict["price_state"] = {}
         primary_payload["node_cluster"] = node_cluster_dict
     else:
         # profile 计算失败或日线不足：仍写入最小诊断字段，StockContext 显式区分 unavailable 原因
@@ -458,6 +479,15 @@ async def compute_feature_snapshot_for_date(
             "profile_rows": [],
             "peak_rows": [],
             "all_peak_prices": [],
+            # [PROMPT.md §5.2.2 V2] profile 为空时 price_state 写最小结构（current_price + 全 None refs）
+            "price_state": {
+                "current_price": current_price_for_state,
+                "position_0_1": None,
+                "upper_node_ref": None,
+                "lower_node_ref": None,
+                "poc_node_ref": None,
+                "last_touched_node_ref": None,
+            },
         }
     secondary_payload: dict[str, Any] = {**secondary_factors}
     # 重命名 cost_position → timeframe_volume_profile（显式非 Node Cluster）
