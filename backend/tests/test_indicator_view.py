@@ -3,7 +3,7 @@
 [CHANGE-20260720-003 §三+§四] 三类监控独立飞书图片：
 - node_cluster: 筹码共识价（VolumeNodeMonitor）
 - bollinger: 布林带（BollingerMonitor）
-- smc: SMC 结构（SmcMonitor）
+- smc: 结构（SmcMonitor）
 
 测试覆盖：
 1. 共享枚举常量值正确性（INDICATOR_VIEW_VALUES / DEFAULT_INDICATOR_VIEW / INDICATOR_VIEW_LABELS）
@@ -53,7 +53,7 @@ class TestIndicatorViewConstants:
         assert set(INDICATOR_VIEW_LABELS.keys()) == set(INDICATOR_VIEW_VALUES)
         assert INDICATOR_VIEW_LABELS["node_cluster"] == "筹码共识价"
         assert INDICATOR_VIEW_LABELS["bollinger"] == "布林带"
-        assert INDICATOR_VIEW_LABELS["smc"] == "SMC结构"
+        assert INDICATOR_VIEW_LABELS["smc"] == "结构"
         for view, label in INDICATOR_VIEW_LABELS.items():
             assert isinstance(label, str) and label, f"视图 {view} 文案不应为空"
 

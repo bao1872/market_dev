@@ -4,7 +4,7 @@ CaptureJob / 输出文件名 / 缓存键 / 幂等键 / 状态查询 / 前端 URL
 [CHANGE-20260720-003 §三] 三类监控独立飞书图片：
 - node_cluster: 筹码共识价（VolumeNodeMonitor）
 - bollinger: 布林带（BollingerMonitor）
-- smc: SMC 结构（SmcMonitor）
+- smc: 结构（SmcMonitor）
 
 禁止三类指标叠在同一张图：每张截图只渲染一个 indicator_view 对应的图层。
 """
@@ -42,7 +42,7 @@ EVENT_TYPE_TO_INDICATOR_VIEW: dict[str, str] = {
 INDICATOR_VIEW_LABELS: dict[str, str] = {
     "node_cluster": "筹码共识价",
     "bollinger": "布林带",
-    "smc": "SMC结构",
+    "smc": "结构",
 }
 
 
@@ -124,7 +124,7 @@ if __name__ == "__main__":
     # 用户可见文案
     assert INDICATOR_VIEW_LABELS["node_cluster"] == "筹码共识价"
     assert INDICATOR_VIEW_LABELS["bollinger"] == "布林带"
-    assert INDICATOR_VIEW_LABELS["smc"] == "SMC结构"
+    assert INDICATOR_VIEW_LABELS["smc"] == "结构"
 
     print(f"INDICATOR_VIEW_VALUES={INDICATOR_VIEW_VALUES}")
     print(f"EVENT_TYPE_TO_INDICATOR_VIEW ({len(EVENT_TYPE_TO_INDICATOR_VIEW)} 项) ✓")
