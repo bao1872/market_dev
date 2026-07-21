@@ -42,6 +42,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.indicator_contract import (
+    DAILY_HISTORY_BARS,
     INDICATOR_BARS,
     NODE_CLUSTER_LOW_BARS,
     NODE_CLUSTER_MINUTE_BARS,
@@ -557,6 +558,68 @@ def _compute_independent_node_cluster(
     }
 
 
+async def _load_node_cluster_inputs(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    adj: str,
+    *,
+    adjustment_as_of: date | None = None,
+    load_15m: bool = True,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """[NC-01/NC-02/NC-03 V2] 独立加载 Node Cluster 输入，固定 completed qfq。
+
+    Node Cluster 输入合同（PROMPT.md §三 V2 / PRD V2.0 NC-01..NC-03）：
+    - daily: include_realtime=False, completed_only=True, limit=DAILY_HISTORY_BARS=250
+    - 15m:   include_realtime=False, completed_only=True, limit=NODE_CLUSTER_LOW_BARS=4000
+
+    与页面 include_realtime/completed_only/bars 参数结构隔离，禁止显示需求污染 Node 计算。
+    [NC-03] 90/250/4000 语义隔离：
+      - 90 是前端 defaultVisibleBars（飞书舞台），不传后端 API；
+      - 250 是 DAILY_HISTORY_BARS（Node daily 输入合同常量，非页面 bars 参数）；
+      - 4000 是 NODE_CLUSTER_LOW_BARS（Node 15m 输入合同常量，非页面 bars 参数）。
+    本函数是 Node Cluster 输入合同隔离的唯一入口，禁止在其他位置查询 Node 输入。
+
+    Args:
+        session: 异步 DB 会话
+        instrument_id: 标的 UUID
+        adj: 复权方式 qfq | none
+        adjustment_as_of: 复权锚点（透传到 MDAS）
+        load_15m: 是否加载 15m bars（False 时返回空 15m，Node 进入 degraded 模式）。
+            needs_15min=False 时传 False 以跳过 15m 查询（性能优化，不改合同语义）。
+
+    Returns:
+        (daily_bars, bars_15min) 元组，均为 completed qfq。
+        daily_bars 已 tail(DAILY_HISTORY_BARS)；bars_15min 长度 ≤ NODE_CLUSTER_LOW_BARS。
+    """
+    _mdas = MarketDataAggregationService()
+
+    # daily: completed qfq DAILY_HISTORY_BARS 根（合同常量，禁止用页面 bars 参数）
+    daily_agg = await _mdas.get_bars(
+        session, instrument_id, timeframe="1d", adj=adj,
+        include_realtime=False,
+        completed_only=True,
+        adjustment_as_of=adjustment_as_of,
+        limit=DAILY_HISTORY_BARS,
+    )
+    daily_bars = daily_agg.bars
+    if not daily_bars.empty:
+        daily_bars = daily_bars.tail(DAILY_HISTORY_BARS)
+
+    # 15m: completed qfq NODE_CLUSTER_LOW_BARS 根（合同常量）
+    bars_15min = pd.DataFrame()
+    if load_15m:
+        r15 = await _mdas.get_bars(
+            session, instrument_id, timeframe="15m", adj=adj,
+            include_realtime=False,
+            completed_only=True,
+            adjustment_as_of=adjustment_as_of,
+            limit=NODE_CLUSTER_LOW_BARS,
+        )
+        bars_15min = r15.bars
+
+    return daily_bars, bars_15min
+
+
 # ===== 主函数 =====
 
 
@@ -604,11 +667,13 @@ async def compute_all_indicators(
             SMC 是按需计算的独立图层，不进入 DSA、Node 监控、Capture 或右栏 context；
             完全排除 FVG（不计算、不返回、不缓存、不渲染）。
         include_realtime: 是否包含实时 partial bar（默认 True，与 bars API 默认对齐）。
-            透传到 MDAS 的 macd_bars 查询；Node 算法输入仍使用 completed qfq bars
-            （Phase 3 将独立查询，本轮保持现状）。
+            仅影响 macd_bars（display）查询；Node Cluster 输入固定 completed qfq
+            （由 _load_node_cluster_inputs 独立查询，NC-01/NC-02 V2 修复）。
         completed_only: 是否只返回已完成 bar（默认 False，与 bars API 默认对齐）。
-            True 时强制 include_realtime=False。
-        adjustment_as_of: 复权锚点 YYYY-MM-DD（默认 None=最新）。透传到 MDAS。
+            True 时强制 include_realtime=False。仅影响 display；Node Cluster 输入
+            固定 completed_only=True（合同常量，不受页面参数影响）。
+        adjustment_as_of: 复权锚点 YYYY-MM-DD（默认 None=最新）。透传到 MDAS（display
+            与 Node 输入共用同一锚点，保证四链 hash 一致）。
 
     Returns:
         dict 包含：
@@ -677,17 +742,17 @@ async def compute_all_indicators(
     # MDAS 内部完成 DB 查询 + Pytdx 兜底 + 复权一次（qfq）+ 周月"日线复权后聚合"。
     # 外层不再二次复权，保证"复权一次"原则（CHANGE-20260717-002）。
     _mdas = MarketDataAggregationService()
-    # 15min（Node 输入）：仅 needs_15min 时查询（VP profile 需要），limit=NODE_CLUSTER_LOW_BARS
-    # [PROMPT.md §三 V2] Node 独立取 completed qfq 15m 4000 根，include_realtime=False；
-    #   本轮（Phase 2）保持 include_realtime=True 现状，Phase 3 将切换为 completed qfq。
-    #   macd_bars（display）改由独立查询透传 include_realtime（见下方 macd_agg_15m）。
-    bars_15min = pd.DataFrame()
-    if needs_15min:
-        r15 = await _mdas.get_bars(
-            session, instrument_id, timeframe="15m", adj=adj,
-            include_realtime=True, limit=NODE_CLUSTER_LOW_BARS,
-        )
-        bars_15min = r15.bars
+    # [NC-01/NC-02/NC-03 V2] Node Cluster 输入独立查询：completed qfq 1d×250 + 15m×4000
+    # 与页面 include_realtime/completed_only/bars 参数结构隔离，禁止显示需求污染 Node 计算。
+    # needs_15min=False 时跳过 15m（Node 进入 degraded 模式，不影响 display）。
+    # node_daily_bars/bars_15min 同时供 MarketDataContext.bars_15min（volume_node_monitor 等策略）
+    #   和 _compute_independent_node_cluster 使用，保证四链一致。
+    # 旧的 include_realtime=True 查询已移除（NC-02 修复）。
+    node_daily_bars, bars_15min = await _load_node_cluster_inputs(
+        session, instrument_id, adj,
+        adjustment_as_of=adjustment_as_of,
+        load_15m=needs_15min,
+    )
     # minute：仅 needs_minute 时查询（VP crossover 仅需 2 根）
     bars_minute = pd.DataFrame()
     if needs_minute:
@@ -920,11 +985,13 @@ async def compute_all_indicators(
 
     # [CHANGE-20260720-001] 独立输出 data["node_cluster"]
     # Node Cluster 固定使用 completed qfq 1d×250 + 15m×4000，不加载 1m，不随页面周期变化。
-    # 五周期切换时 profile_hash 必须一致（因为输入始终是 daily_bars + bars_15min）。
+    # 五周期切换时 profile_hash 必须一致（因为输入始终是 node_daily_bars + bars_15min）。
     # 之前 Node 数据混入 watchlist_monitor，且 bars_daily=macd_bars 导致非 1d 周期 Node 不可用。
     # 现独立计算并输出，前端优先读取 data["node_cluster"]，旧 watchlist_monitor 仅兼容回退。
+    # [NC-01/NC-02 V2] 使用 _load_node_cluster_inputs 返回的 node_daily_bars（completed qfq），
+    #   不复用 display 的 daily_bars（可能含 realtime partial bar）。
     data["node_cluster"] = _compute_independent_node_cluster(
-        daily_bars, bars_15min, symbol=symbol,
+        node_daily_bars, bars_15min, symbol=symbol,
     )
 
     # [MACD 副图] - 将 MACD 作为全局图层注入 layers/data
