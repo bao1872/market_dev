@@ -1554,11 +1554,13 @@ async def _after_close_poll_once() -> bool:
 
     # 执行编排（异常由 execute_after_close_run 内部处理为 failed 后 re-raise）
     # Worker 捕获 re-raised 异常仅记录日志，不崩溃
+    # [JOB-02] 传递 lease_epoch 使 execute_after_close_run 启用 fenced UPDATE
     try:
         await execute_after_close_run(
             job_run_id=job_run_id,
             trade_date=trade_date,
             worker_id=_WORKER_INSTANCE_ID,
+            lease_epoch=current_lease_epoch,
         )
     except Exception as exc:
         logger.exception(
