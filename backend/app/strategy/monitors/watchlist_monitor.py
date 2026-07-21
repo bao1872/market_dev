@@ -17,9 +17,9 @@ MonitorState 命名空间升级（PROMPT.md §二.4）：
 - state["bb"]: BB 子 monitor 状态（bb_upper/bb_mid/bb_lower/current_price/prev_close/bb_width/bb_pos）
 - state["node_cluster"]: VN 子 monitor 状态（current_price/upper_node/lower_node/
   position_0_1/poc_price/last_touched_node）
-- state["smc"]: SMC 子 monitor 状态（smc_confirmed_bos/smc_confirmed_choch/smc_active_obs/
-  smc_current_price/smc_currently_touched/smc_swing_bias/smc_trailing/smc_availability/
-  smc_degraded_reason）
+- state["smc"]: SMC 子 monitor 状态（smc_confirmed_bos/smc_confirmed_choch/
+  smc_equal_highs_lows/smc_active_obs/smc_current_price/smc_currently_touched/
+  smc_swing_bias/smc_trailing/smc_availability/smc_degraded_reason）
 - state["market"]: 市场数据（current_price/previous_close/change_pct）
 - state["degraded"]: {"bb": bool, "node_cluster": bool, "smc": bool}
 - state["smc_episode_tracker"]: SMC episode 跟踪（detect_events 直接 mutate）
@@ -78,10 +78,10 @@ _VN_KEYS = {
 
 # SMC 字段集合
 _SMC_KEYS = {
-    "smc_confirmed_bos", "smc_confirmed_choch", "smc_active_obs",
-    "smc_current_price", "smc_currently_touched", "smc_swing_bias",
-    "smc_trailing", "smc_availability", "smc_degraded_reason",
-    "smc_episode_tracker",
+    "smc_confirmed_bos", "smc_confirmed_choch", "smc_equal_highs_lows",
+    "smc_active_obs", "smc_current_price", "smc_currently_touched",
+    "smc_swing_bias", "smc_trailing", "smc_availability",
+    "smc_degraded_reason", "smc_episode_tracker",
 }
 
 # 市场字段集合
@@ -366,9 +366,10 @@ class WatchlistMonitor(StrategyRuntime):
 
         BB 字段: bb_upper/bb_mid/bb_lower/current_price/prev_close/bb_width/bb_pos
         VN 字段: current_price/upper_node/lower_node/position_0_1/poc_price/last_touched_node
-        SMC 字段: smc_confirmed_bos/smc_confirmed_choch/smc_active_obs/
-                  smc_current_price/smc_currently_touched/smc_swing_bias/
-                  smc_trailing/smc_availability/smc_degraded_reason/smc_episode_tracker
+        SMC 字段: smc_confirmed_bos/smc_confirmed_choch/smc_equal_highs_lows/
+                  smc_active_obs/smc_current_price/smc_currently_touched/
+                  smc_swing_bias/smc_trailing/smc_availability/smc_degraded_reason/
+                  smc_episode_tracker
 
         Args:
             state: 合并后的 MonitorState
@@ -485,6 +486,7 @@ if __name__ == "__main__":
             "smc": {
                 "smc_confirmed_bos": [{"anchor_index": 100, "level": 10.0}],
                 "smc_confirmed_choch": [],
+                "smc_equal_highs_lows": [],
                 "smc_active_obs": [],
                 "smc_current_price": 9.5,
                 "smc_currently_touched": {"BOS:100:10.0": False},
