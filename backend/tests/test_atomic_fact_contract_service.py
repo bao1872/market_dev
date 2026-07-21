@@ -28,7 +28,11 @@ import json
 
 import pytest
 
-from app.schemas.atomic_fact_contract import AtomicFactsContextResponse, AtomicFactsMeta
+from app.schemas.atomic_fact_contract import (
+    AtomicFactsContextResponse,
+    AtomicFactsMeta,
+    NodeAvailabilityInfo,
+)
 from app.schemas.stock_state import StockContextDataQuality
 from app.services import atomic_fact_contract_service as svc
 from app.services.atomic_fact_contract_service import (
@@ -617,6 +621,10 @@ def test_response_schema_assembly():
             hasSucceededRun=True, hasSnapshot=True, reasonCode=None,
             degradedReasons=[], runTradeDate="2026-07-14", runPublishedAt=None,
             instrumentStatus="active",
+        ),
+        nodeAvailability=NodeAvailabilityInfo(
+            state="unknown",
+            reasonCode="LEGACY_SNAPSHOT_NO_NODE_CLUSTER",
         ),
     )
     assert resp.contractVersion == "Atomic Fact Contract V1"

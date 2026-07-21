@@ -423,7 +423,7 @@ class TestInvalidateDownstreamCaches:
             bars_cache_mod.invalidate_bars_cache = original_bars  # type: ignore[assignment]
             indicator_cache_mod.invalidate = original_indicator  # type: ignore[assignment]
 
-        assert result == {"mdas": 5, "bars": 3, "indicator": 2}
+        assert result == {"mdas": 5, "bars": 3, "indicator": 2, "capture": 0}
         service._invalidate_mdas_cache.assert_called_once_with(instrument_id)
         assert bars_deleted == [instrument_id]
         assert indicator_deleted == [instrument_id]
