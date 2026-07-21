@@ -449,3 +449,25 @@ jobs:
         run: npm ci
       - name: Build frontend
         run: npm run build
+
+  frontend-contract-tests:
+    # [CP-17] 前端契约测试纳入 CI 门禁
+    # - 使用 Node 22（PRD V2.0 Phase 4.1 要求干净 Node 22 环境）
+    # - 必须在仓库根目录运行（测试文件读取 ../backend/app/contracts/*.json）
+    # - 失败阻塞 merge（禁止标记 pre-existing 后跳过）
+    name: Frontend Contract Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Run contract tests
+        run: npm run test:contract
