@@ -55,10 +55,11 @@ from app.services.png_validator import validate_png
 
 logger = logging.getLogger("stock_capture_service")
 
-# 默认渲染超时（秒）
-_DEFAULT_RENDER_TIMEOUT = 30_000  # 30s
-# 默认截图超时（秒）
-_DEFAULT_SCREENSHOT_TIMEOUT = 10_000  # 10s
+# 默认渲染超时（毫秒）
+# [PROMPT.md §5.3 V2] 移动舞台 1440×2560 渲染较慢，允许通过 env var 覆盖默认 30s
+_DEFAULT_RENDER_TIMEOUT = int(os.getenv("CAPTURE_RENDER_TIMEOUT_MS", "30000"))
+# 默认截图超时（毫秒）
+_DEFAULT_SCREENSHOT_TIMEOUT = int(os.getenv("CAPTURE_SCREENSHOT_TIMEOUT_MS", "10000"))
 
 # [screenshot-cache] - 截图缓存配置（任务 6.1）
 # 缓存目录：env CAPTURE_CACHE_DIR，默认位于 captures 目录下的 cache 子目录
