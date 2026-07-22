@@ -109,6 +109,16 @@ async def find_stale_version_instruments(
     用于盘后 after_close 流程识别"影响集"——当 FACTOR_ALGORITHM_VERSION 或
     FACTOR_RECONCILIATION_VERSION bump 后，所有版本不匹配的股票需要重新审计。
 
+    [CP-V3-D2] 重要安全约束：
+    本函数会将 factor_algorithm_version IS NULL 识别为 stale。生产 DB 中 8272 只
+    active 股票的版本字段均为 NULL（迁移 065 添加但未 bootstrap）。**禁止**在未执行
+    `bootstrap_factor_version_baseline` 前将本函数接入 after_close 流程，否则会
+    一次性把 8272 只股票全部识别为 stale，触发无控制的全市场重建，违反资源约束。
+
+    部署后首次盘后流程实际使用的是 `_audit_and_rebuild_factors`（基于 dry_run
+    hash 比对，不基于版本字段），所以 NULL 版本字段不会触发全市场重建。
+    本函数仅作为未来版本驱动影响集识别的预留入口。
+
     匹配条件（任一满足即视为 stale）：
     - factor_algorithm_version IS NULL（从未对账）
     - factor_algorithm_version != current_algorithm_version
@@ -142,6 +152,194 @@ async def find_stale_version_instruments(
         "recon_ver": current_reconciliation_version,
     })
     return [(row.id, row.symbol) for row in result.fetchall()]
+
+
+async def bootstrap_factor_version_baseline(
+    session: AsyncSession,
+    *,
+    dry_run_plan: ReconciliationPlan | None = None,
+    batch_size: int = 100,
+    current_algorithm_version: str = FACTOR_ALGORITHM_VERSION,
+    current_reconciliation_version: int = FACTOR_RECONCILIATION_VERSION,
+) -> dict[str, int]:
+    """[CP-V3-D2] 安全 bootstrap：基于已有审计证据写入版本基线，不重复重算。
+
+    用于 8272 NULL 版本字段的首次运行安全处理。禁止直接将
+    `find_stale_version_instruments` 接入 after_close 流程而不先 bootstrap，
+    否则会一次性把 8272 只股票全部识别为 stale，触发无控制的全市场重建。
+
+    流程：
+    1. 获取 dry_run_plan（传入或内部调用 dry_run 全市场审计）
+    2. 查询所有 factor_algorithm_version IS NULL 的 active 股票
+    3. 排除 dry_run_plan.items（needs_rebuild）和 dry_run_plan.degraded_symbols
+    4. 对剩余股票（consistent 且 NULL 版本）写入版本基线
+    5. 分批 commit（每批 batch_size 只），可中断、可恢复
+
+    安全保证：
+    - 不触发全市场重建（只写版本字段，不修改因子数据）
+    - 不修改因子数据（不调用 rebuild_factor_series）
+    - 幂等：只处理 factor_algorithm_version IS NULL 的股票
+    - 可中断：分批 commit，中断后可重跑（已写入的跳过）
+    - 可恢复：失败批次不影响已 commit 的批次
+    - 有限流：batch_size 控制每批数量，串行执行
+
+    使用场景：
+    - 部署后首次盘后前，手动执行一次 bootstrap
+    - 基于最近的 dry_run 审计结果，对 consistent 股票写入版本基线
+    - 之后 find_stale_version_instruments 只识别版本变化的影响集（不再是 8272 NULL）
+
+    Args:
+        session: 异步 DB 会话
+        dry_run_plan: 可选的预审计结果（None 时内部调用 dry_run 全市场审计）。
+            传入时必须为最近的 dry_run 结果，避免重复审计。
+        batch_size: 每批写入数量（默认 100），控制事务大小和内存峰值
+        current_algorithm_version: 当前算法版本常量
+        current_reconciliation_version: 当前对账版本常量
+
+    Returns:
+        dict: bootstrap 统计
+            - total_null: NULL 版本字段的 active 股票总数
+            - stamped: 写入版本基线的股票数（consistent 且 NULL）
+            - skipped_needs_rebuild: 跳过的 needs_rebuild 数量
+            - skipped_degraded: 跳过的 degraded 数量
+            - errors: 错误数（写入失败）
+            - dry_run_total_audited: dry_run 审计总数（诊断）
+            - dry_run_consistent: dry_run 一致数量（诊断）
+    """
+    # 1. 获取 dry_run_plan（传入或内部调用）
+    if dry_run_plan is None:
+        task = FactorReconciliationTask()
+        dry_run_plan = await task.dry_run(session, batch_size=50, max_mismatches=20)
+        logger.info(
+            "[CP-V3-D2 bootstrap] 内部 dry_run 完成: audited=%d consistent=%d "
+            "needs_rebuild=%d degraded=%d",
+            dry_run_plan.total_audited, dry_run_plan.consistent_count,
+            dry_run_plan.needs_rebuild_count, dry_run_plan.degraded_count,
+        )
+
+    # 2. 收集需要排除的股票（needs_rebuild + degraded）
+    exclude_symbols: set[str] = set()
+    for item in dry_run_plan.items:
+        exclude_symbols.add(item.symbol)
+    for sym in dry_run_plan.degraded_symbols:
+        exclude_symbols.add(sym)
+
+    # 3. 查询所有 factor_algorithm_version IS NULL 的 active 股票
+    null_sql = text(
+        """
+        SELECT id, symbol
+        FROM instruments
+        WHERE status = 'active'
+            AND factor_algorithm_version IS NULL
+        ORDER BY symbol
+        """
+    )
+    result = await session.execute(null_sql)
+    null_rows = result.fetchall()
+
+    total_null = len(null_rows)
+    stamped = 0
+    skipped_needs_rebuild = 0
+    skipped_degraded = 0
+    errors = 0
+
+    # 4. 分批写入版本基线（只对 consistent 且 NULL 的股票）
+    batch: list[tuple[uuid.UUID, str]] = []
+    for row in null_rows:
+        symbol = row.symbol
+        if symbol in exclude_symbols:
+            # 区分 needs_rebuild 和 degraded（都跳过，但统计分开）
+            if symbol in dry_run_plan.degraded_symbols:
+                skipped_degraded += 1
+            else:
+                skipped_needs_rebuild += 1
+            continue
+        batch.append((row.id, symbol))
+
+        if len(batch) >= batch_size:
+            stamped += await _stamp_batch(
+                session, batch, current_algorithm_version, current_reconciliation_version,
+            )
+            batch.clear()
+
+    # 处理最后一批
+    if batch:
+        stamped += await _stamp_batch(
+            session, batch, current_algorithm_version, current_reconciliation_version,
+        )
+
+    logger.info(
+        "[CP-V3-D2 bootstrap] 完成: total_null=%d stamped=%d "
+        "skipped_needs_rebuild=%d skipped_degraded=%d errors=%d",
+        total_null, stamped, skipped_needs_rebuild, skipped_degraded, errors,
+    )
+
+    return {
+        "total_null": total_null,
+        "stamped": stamped,
+        "skipped_needs_rebuild": skipped_needs_rebuild,
+        "skipped_degraded": skipped_degraded,
+        "errors": errors,
+        "dry_run_total_audited": dry_run_plan.total_audited,
+        "dry_run_consistent": dry_run_plan.consistent_count,
+    }
+
+
+async def _stamp_batch(
+    session: AsyncSession,
+    batch: list[tuple[uuid.UUID, str]],
+    algorithm_version: str,
+    reconciliation_version: int,
+) -> int:
+    """[CP-V3-D2] 批量写入版本基线（内部辅助函数）。
+
+    只更新 factor_algorithm_version IS NULL 的行（幂等）。
+    成功后 commit，返回成功写入的数量。
+
+    Args:
+        session: 异步 DB 会话
+        batch: [(instrument_id, symbol), ...] 批次
+        algorithm_version: 算法版本
+        reconciliation_version: 对账版本
+
+    Returns:
+        成功写入的数量
+    """
+    if not batch:
+        return 0
+
+    ids = [row[0] for row in batch]
+    now = datetime.now(UTC)
+
+    # 幂等：只更新 NULL 的行（已写入的不会被覆盖）
+    stamp_sql = text(
+        """
+        UPDATE instruments
+        SET factor_algorithm_version = :algo_ver,
+            factor_reconciliation_version = :recon_ver,
+            factor_reconciled_at = :now,
+            updated_at = :now
+        WHERE id = ANY(:ids)
+            AND factor_algorithm_version IS NULL
+        """
+    )
+    try:
+        result = await session.execute(stamp_sql, {
+            "algo_ver": algorithm_version,
+            "recon_ver": reconciliation_version,
+            "now": now,
+            "ids": ids,
+        })
+        await session.commit()
+        # rowcount 是 CursorResult 的属性，mypy 对 Result 类型不识别
+        return int(getattr(result, "rowcount", 0) or 0)
+    except Exception as exc:
+        await session.rollback()
+        logger.error(
+            "[CP-V3-D2 bootstrap] 批量 stamp 失败 batch_size=%d: %s",
+            len(batch), exc, exc_info=True,
+        )
+        return 0
 
 
 # =============================================================================

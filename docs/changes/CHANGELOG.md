@@ -4,6 +4,14 @@
 
 ## 2026-07-23
 
+- CHANGE-20260723-002: V3.3 部署前门禁 — MDAS 长期停牌边界修正 + 因子版本首次运行安全 bootstrap
+  - **CP-V3-A3** (@ d5e0848): MDAS 长期停牌边界 — listing_date 作为历史下界，no_progress 有界递增步长（90→720），max_rounds 未到边界→INPUT_CONTRACT_VIOLATION
+  - **CP-V3-D2**: 因子版本安全 bootstrap — bootstrap_factor_version_baseline 基于 dry_run 证据写版本基线，跳过 needs_rebuild/degraded，幂等可中断
+  - **调用链分析**: find_stale_version_instruments 未接入生产；stamp_factor_reconciliation_version 已接入 _rebuild_single 成功路径
+  - **8272 NULL 回答**: 首次盘后不会全市场重建（after-close 用 dry_run hash 比对，非版本驱动）
+  - **10+3 逐只状态**: 3 degraded (000032/001331/688689) 已确认；10 needs_rebuild 清单 UNKNOWN（/tmp 文件已删除）
+  - **测试**: 5 A3 + 7 D2 = 12 测试全 PASS；ruff/mypy 通过
+
 - CHANGE-20260723-001: V3.3 生产正确性修复 — MDAS count-aware 回补 + 实时 partial bar 收口 + SMC 严格 time-key + 因子版本追踪与 auto-resume + docs/AGENTS 收口
   - **CP-V3-A2** (@ ca38a0c): MDAS count-aware 回补 — daily=250/15m=4000 自动向前扩展，history_exhausted 区分两种不足
   - **CP-V3-B2** (@ 4dab274): 实时 partial bar 收口 — /bars?timeframe=1d&include_realtime=true 返回今日 partial daily bar，前端 mergeRealtimeQuoteIntoBars 只作兜底
