@@ -327,3 +327,19 @@
 | `test_factor_reconciliation.py`（CHANGE-20260721-001 扩展） | 4 个新增 `_invalidate_downstream_caches` 测试 | FR-11 缓存失效：test_invalidates_all_three_cache_layers / test_bars_cache_failure_does_not_block_indicator / test_indicator_cache_failure_does_not_block_bars / test_rebuild_factor_series_calls_invalidate_downstream |
 | `test_capture_snapshot.py`（CHANGE-20260721-001 扩展） | 6 个 indicator_view 测试 | CaptureStockPage 读取 indicator_view URL 参数；Snapshot API 接收 indicator_view 驱动 include_smc；StrategyChart 使用 INDICATOR_VIEW_LAYER_PRESETS |
 | `stockResearchTypes.test.ts`（CHANGE-20260721-001 扩展） | 9 个 INDICATOR_VIEW_LAYER_PRESETS 测试 | INDICATOR_VIEW_LAYER_PRESETS / normalizeIndicatorView / getIndicatorViewLayerPreset 三函数纯函数测试 |
+
+## Phase D 测试（CP-V3-D）
+
+### Auto-resume 受控测试
+- `backend/tests/test_phase_d_auto_resume.py`（9 个测试）：
+  - refreshing_daily / waiting_dsa_worker / feature_snapshot 三步骤中断恢复
+  - attempt_no 递增 + max=3 限制
+  - lease_epoch fencing
+  - 唯一活跃记录 / 无僵尸 running / 非 after_close 排除
+  - 完整状态机闭环（2 轮）
+
+### 因子版本字段测试
+- `backend/tests/test_phase_d_factor_version.py`（6 个测试）：
+  - stamp 写入 3 个字段
+  - find 识别 NULL / 旧算法版本 / 旧对账版本
+  - 当前版本不被识别 / 非 active 排除 / 混合场景

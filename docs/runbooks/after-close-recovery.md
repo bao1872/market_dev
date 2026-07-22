@@ -107,6 +107,45 @@ print('OK')
 - 每个阶段必须独立可重跑（`mode` 参数支持 `full` / `dsa_only` / `feishu_only`）
 - `job_run_events` 必须完整记录每个阶段的开始/结束/失败事件，便于排查
 
+## Auto-resume 自动恢复（CP-V3-D）
+
+### 状态机
+queued → running → interrupted → resume_queued → running → succeeded/failed
+
+### 恢复流程
+1. `recover_stale_scheduler_job_runs`：running + lease过期/heartbeat超时90s → interrupted + recovery 事件
+2. `auto_resume_interrupted_after_close_runs`：interrupted + after_close_orchestrator + attempt_no < 3 → resume_queued + attempt_no+1 + auto_resume 事件
+3. Worker 领取 resume_queued：递增 lease_epoch（fencing）+ 读取 metadata.last_completed_step 断点恢复
+
+### 关键参数
+- `_MAX_AUTO_RESUME_ATTEMPTS = 3`：最大自动重试次数，超过需人工介入
+- `_AFTER_CLOSE_JOB_NAME = "after_close_orchestrator"`：唯一支持 auto-resume 的 job
+- `HEARTBEAT_TIMEOUT_SECONDS = 90`：心跳超时阈值
+
+### lease_epoch fencing
+Worker 领取任务时递增 lease_epoch。旧 Worker 恢复后尝试写入时，WHERE lease_epoch = old_epoch 不匹配，写入被拒绝。
+
+### last_completed_step 断点恢复
+存储在 metadata_json 中，resume 时保留。Worker 读取后跳过已成功阶段，从下一阶段继续。
+
+### 因子版本追踪
+成功因子重建后调用 `stamp_factor_reconciliation_version` 写入：
+- `factor_algorithm_version`（当前 "fq-v1"）
+- `factor_reconciliation_version`（当前 1）
+- `factor_reconciled_at`（UTC 时间戳）
+
+盘后流程通过 `find_stale_version_instruments` 识别版本过期的 active 股票作为影响集。
+
+### 人工介入条件
+- attempt_no >= 3（自动恢复已达上限）
+- 非 after_close_orchestrator 任务的 interrupted 状态
+- 持续失败（每次 resume 后都中断）
+
+### 测试
+- `backend/tests/test_phase_d_auto_resume.py`：9 个受控测试覆盖完整状态机
+- `backend/tests/test_phase_d_factor_version.py`：6 个因子版本字段测试
+- `backend/tests/test_scheduler_job_run_recovery_service.py`：5 个恢复服务测试
+
 ## 关联
 
 - CHANGE-20260717-002（MDAS SSOT 与盘后顺序门禁）

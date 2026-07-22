@@ -77,3 +77,30 @@
 ## 关闭要求
 
 每项关闭必须有：代码 commit、测试、CI 或生产验证证据、CHANGE 记录。关闭后只保留摘要，详细历史归入 CHANGE。
+
+## V3.3 差异闭合（CP-V3-A2/B2/C2/D/E）
+
+### CP-V3-A2: MDAS count-aware 回补
+- **差异**: MDAS `_DEFAULT_INTRADAY_LOOKBACK_DAYS=180` 导致 15m 不足 4000 根
+- **修复**: count-aware 回补 — daily=250/15m=4000 自动向前扩展，返回 history_exhausted
+- **状态**: CLOSED (@ ca38a0c)
+
+### CP-V3-B2: 实时 partial bar 收口
+- **差异**: /quote 实时与 /bars 1d realtime 语义混淆
+- **修复**: /bars?timeframe=1d&include_realtime=true 必须返回今日 partial daily bar；前端 mergeRealtimeQuoteIntoBars 只作兜底
+- **状态**: CLOSED (@ 4dab274)
+
+### CP-V3-C2: SMC 严格 time-key
+- **差异**: SMC 渲染使用 index fallback，viewport 250→90 时标签错位
+- **修复**: strictTimeKey=true 禁止 index fallback；events/EQH/EQL OR 逻辑
+- **状态**: CLOSED (@ 3393d16)
+
+### CP-V3-D: 因子版本追踪 + auto-resume
+- **差异**: instruments factor 版本字段从未写入；auto-resume 缺乏受控测试
+- **修复**: stamp_factor_reconciliation_version + find_stale_version_instruments；9 个 auto-resume + 6 个因子版本测试
+- **状态**: CLOSED (@ 9001ca0)
+
+### CP-V3-E: docs/AGENTS 收口
+- **差异**: AGENTS.md 289 行超过 180-220 目标
+- **修复**: 压缩到 181 行；新增 §7.12/§7.14/§7.22 规则；ADR-0003 SMC time-key
+- **状态**: CLOSED

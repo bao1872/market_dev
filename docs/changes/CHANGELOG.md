@@ -2,6 +2,17 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-23
+
+- CHANGE-20260723-001: V3.3 生产正确性修复 — MDAS count-aware 回补 + 实时 partial bar 收口 + SMC 严格 time-key + 因子版本追踪与 auto-resume + docs/AGENTS 收口
+  - **CP-V3-A2** (@ ca38a0c): MDAS count-aware 回补 — daily=250/15m=4000 自动向前扩展，history_exhausted 区分两种不足
+  - **CP-V3-B2** (@ 4dab274): 实时 partial bar 收口 — /bars?timeframe=1d&include_realtime=true 返回今日 partial daily bar，前端 mergeRealtimeQuoteIntoBars 只作兜底
+  - **CP-V3-C2** (@ 3393d16): SMC 严格 time-key — strictTimeKey=true 禁止 index fallback，events/EQH/EQL OR 逻辑，详情链与 Capture 共用坐标映射核心
+  - **CP-V3-D** (@ 9001ca0): 因子版本追踪 + auto-resume 受控测试 — stamp_factor_reconciliation_version + find_stale_version_instruments，9 个 auto-resume + 6 个因子版本测试
+  - **CP-V3-E**: docs/maps/AGENTS 收口 — AGENTS 289→181 行，新 ADR-0003 SMC time-key，runbook 更新
+  - **因子审计**: 80 只样本全 CONSISTENT（0 needs_rebuild），生产因子数据干净
+  - **遗留**: PNG 视觉验收推迟到部署后；生产 auto-resume 未触发；因子版本字段生产首次盘后才写入
+
 ## 2026-07-22
 
 - CHANGE-20260722-003: 生产验收证据文件 — Phase 4.2 完整验收记录
