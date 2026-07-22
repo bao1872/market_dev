@@ -541,3 +541,129 @@ async def test_render_frame_matched_true_with_preloaded(
         f"bars_hash={bars_display_frame.get('display_hash')}, "
         f"indicators_hash={(indicators_display_frame or {}).get('display_hash')}"
     )
+
+
+# =============================================================================
+# [CP-V3-B2] 交易时段双刷新测试 — Fake Exchange 模拟 partial bar 变化
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_b2_trading_hours_two_refreshes_render_frame_matched(
+    mock_session: AsyncMock,
+    empty_registry: None,
+    mock_canonical: None,
+    mock_node_cluster: None,
+    mock_node_input_provider: None,
+    mock_strategy_keys: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[CP-V3-B2] 交易时段连续两次刷新，partial bar 变化但 render_frame.matched 始终 True。
+
+    模拟 Fake Exchange：两次调用返回不同的 partial bar（最后一根 bar 的 close 变化），
+    验证 ChartSnapshotService 每次都能正确生成 bars + indicators 且 render_frame.matched=True。
+    """
+    from app.services import chart_snapshot_service as css_module
+    from app.services.chart_snapshot_service import ChartSnapshotService
+
+    # 第一次刷新的 bars（含 partial bar）
+    bars_refresh1 = _build_bars("1d", length=60, with_partial=True)
+    r1_expected_close = float(bars_refresh1.iloc[-1]["close"])
+    # 第二次刷新的 bars（partial bar 更新，最后一根 close 变化）
+    bars_refresh2 = bars_refresh1.copy()
+    bars_refresh2.iloc[-1, bars_refresh2.columns.get_loc("close")] = r1_expected_close + 1.0
+    bars_refresh2.iloc[-1, bars_refresh2.columns.get_loc("high")] = r1_expected_close + 1.5
+
+    refresh_count = {"n": 0}
+
+    class _FakeExchangeMDAS:
+        """Fake Exchange MDAS — 模拟交易时段两次刷新返回不同 partial bar。"""
+        async def get_bars(self, session, instrument_id, timeframe="1d", adj="qfq", **kwargs):
+            refresh_count["n"] += 1
+            bars = bars_refresh1 if refresh_count["n"] == 1 else bars_refresh2
+            is_partial = kwargs.get("include_realtime", True) and not kwargs.get("completed_only", False)
+            return _make_result(
+                bars,
+                source_bar_hash=f"fake_hash_r{refresh_count['n']}",
+                adj_factor_hash="fake_adjhash",
+                is_partial=is_partial,
+            )
+
+    monkeypatch.setattr(css_module, "MarketDataAggregationService", _FakeExchangeMDAS)
+    # 也 mock indicator_service 的 MDAS（compute_all_indicators 内部引用）
+    monkeypatch.setattr(indicator_service, "MarketDataAggregationService", _FakeExchangeMDAS)
+
+    # 第一次刷新
+    result1 = await ChartSnapshotService.compute_bars_and_indicators(
+        mock_session, TEST_INSTRUMENT_ID,
+        timeframe="1d", adj="none", bars=50,
+        include_smc=False, include_realtime=True,
+    )
+    # 第二次刷新
+    result2 = await ChartSnapshotService.compute_bars_and_indicators(
+        mock_session, TEST_INSTRUMENT_ID,
+        timeframe="1d", adj="none", bars=50,
+        include_smc=False, include_realtime=True,
+    )
+
+    # 两次刷新 render_frame.matched 都应为 True
+    assert result1.render_frame["matched"] is True, "第一次刷新 render_frame.matched 应为 True"
+    assert result2.render_frame["matched"] is True, "第二次刷新 render_frame.matched 应为 True"
+
+    # 两次刷新的 bars count 应一致
+    assert result1.render_frame["bars_count"] == result2.render_frame["bars_count"]
+
+    # 两次刷新的最后一根 bar close 应不同（partial bar 更新）
+    r1_last_close = float(result1.page_df.iloc[-1]["close"])
+    r2_last_close = float(result2.page_df.iloc[-1]["close"])
+    assert r1_last_close != r2_last_close, (
+        f"两次刷新的 partial bar close 应不同: r1={r1_last_close}, r2={r2_last_close}"
+    )
+    assert r1_last_close == r1_expected_close, (
+        f"第一次刷新 close 应为 {r1_expected_close}, 实际={r1_last_close}"
+    )
+    assert r2_last_close == r1_expected_close + 1.0, (
+        f"第二次刷新 close 应为 {r1_expected_close + 1.0}, 实际={r2_last_close}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_b2_non_trading_hours_no_partial_bar(
+    mock_session: AsyncMock,
+    empty_registry: None,
+    mock_canonical: None,
+    mock_node_cluster: None,
+    mock_node_input_provider: None,
+    mock_strategy_keys: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[CP-V3-B2] 非交易时段 include_realtime=True 也不产生 partial bar。
+
+    验证：MDAS 返回 is_partial=False 时，ChartSnapshotService 正确传递到 render_frame。
+    """
+    from app.services import chart_snapshot_service as css_module
+    from app.services.chart_snapshot_service import ChartSnapshotService
+
+    bars = _build_bars("1d", length=60, with_partial=False)
+
+    class _NonTradingMDAS:
+        async def get_bars(self, session, instrument_id, timeframe="1d", adj="qfq", **kwargs):
+            return _make_result(
+                bars,
+                source_bar_hash="nontrading_hash",
+                adj_factor_hash="nontrading_adjhash",
+                is_partial=False,
+            )
+
+    monkeypatch.setattr(css_module, "MarketDataAggregationService", _NonTradingMDAS)
+    monkeypatch.setattr(indicator_service, "MarketDataAggregationService", _NonTradingMDAS)
+
+    result = await ChartSnapshotService.compute_bars_and_indicators(
+        mock_session, TEST_INSTRUMENT_ID,
+        timeframe="1d", adj="none", bars=50,
+        include_smc=False, include_realtime=True,
+    )
+
+    assert result.bars_result.is_partial is False, "非交易时段不应有 partial bar"
+    assert result.render_frame["matched"] is True
+    assert result.render_frame["bars_count"] == result.render_frame["indicators_count"]
