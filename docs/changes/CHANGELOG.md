@@ -4,6 +4,17 @@
 
 ## 2026-07-22
 
+- CHANGE-20260722-003: 生产验收证据文件 — Phase 4.2 完整验收记录
+  - **新增**: `docs/evidence/evidence-2026-07-22-fix-production-pipeline-stability-v1.md`
+  - **覆盖**: A-H 全部 8 项验收（容器健康 / 5 周期+实时 / 来源上下文 / Node Cluster / 飞书手动+自动 / SMC 5 类事件 / lease_epoch fencing / 000688 复权）
+  - **部署 SHA**: b29da0e（已部署到生产 12 容器，0 重启）
+  - **Migration**: 067_scheduler_job_runs_lease_epoch_attempt_no 已应用
+  - **资源**: Mem 4.3GiB available、Swap 473M 稳定、Disk 46G free
+  - **回滚 SHA**: 8aae487（镜像级别回滚）
+  - **遗留问题**: PINE_PARITY_PENDING / instruments 因子版本列未写入 / smc_equal_lows_retest 今日未触发 / 生产未触发 auto-resume
+  - **不修改**: 代码/配置/测试/migration/contracts/AGENTS/current/maps
+  - **诚实声明**: 所有 ✅ 均有 SQL/API/容器/测试证据支撑；生产未触发 auto-resume 属事实陈述
+
 - CHANGE-20260722-002: mypy baseline 修正 — 从 0 更新为真实诊断集合（CP-20）
   - **mypy 版本对齐**：系统 mypy 1.9.0 → 2.1.0（匹配 pyproject.toml + CI）
   - **main vs branch 对比**：临时 worktree 对比 origin/main（631b191）与 branch HEAD（8aae487），mypy 2.1.0 结果完全相同（1 error + 10 notes）
