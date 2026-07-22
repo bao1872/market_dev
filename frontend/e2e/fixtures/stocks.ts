@@ -200,15 +200,80 @@ export function buildBollingerIndicators(barsCount: number) {
 }
 
 // SMC 指标 fixture
-export function buildSmcIndicators(barsCount: number) {
+// [CP-V3-C2] 使用新 time-key 格式（anchor_time/confirmed_time/second_pivot_time）
+// strictTimeKey=true 模式下，缺失 time 的事件会被 skip，因此必须提供匹配 bar 时间的 time 字段
+export function buildSmcIndicators(barsCount: number, timeframe: string = '1d') {
+  const startMs = Date.UTC(2024, 5, 1)
+  const intervalMs = TIMEFRAME_MS[timeframe] ?? TIMEFRAME_MS['1d']
+  const barTime = (i: number): string => {
+    const t = startMs + i * intervalMs
+    const d = new Date(t).toISOString()
+    return timeframe === '1d' ? d.slice(0, 10) : d.slice(0, 16).replace('T', ' ')
+  }
+  // bar 价格近似（与 buildBars 一致的确定性公式）
+  const barClose = (i: number): number => Number((11.5 + i * 0.0115 + Math.sin(i * 0.3) * 0.23).toFixed(2))
+  const barHigh = (i: number): number => Number((barClose(i) + 0.115).toFixed(2))
+  const barLow = (i: number): number => Number((barClose(i) - 0.115).toFixed(2))
+
+  // 12 个 SMC 事件（3 BOS + 2 CHoCH + 3 OB + 2 EQH + 2 EQL），覆盖 display 60/90/120/250
+  const events: { type: 'BOS' | 'CHoCH'; bias: number; internal: boolean; anchor_index: number; confirmed_index: number; level: number }[] = [
+    { type: 'BOS', bias: 1, internal: true, anchor_index: 10, confirmed_index: 12, level: barClose(10) },
+    { type: 'BOS', bias: -1, internal: false, anchor_index: 50, confirmed_index: 52, level: barClose(50) },
+    { type: 'BOS', bias: 1, internal: true, anchor_index: 100, confirmed_index: 102, level: barClose(100) },
+    { type: 'CHoCH', bias: -1, internal: true, anchor_index: 30, confirmed_index: 32, level: barClose(30) },
+    { type: 'CHoCH', bias: 1, internal: false, anchor_index: 80, confirmed_index: 82, level: barClose(80) },
+  ]
+  const obs: { anchor_index: number; confirmed_index: number; bias: number; internal: boolean; mitigated: boolean }[] = [
+    { anchor_index: 5, confirmed_index: 7, bias: 1, internal: true, mitigated: false },
+    { anchor_index: 40, confirmed_index: 42, bias: -1, internal: false, mitigated: false },
+    { anchor_index: 70, confirmed_index: 72, bias: 1, internal: true, mitigated: true },
+  ]
+  const eqs: { type: 'EQH' | 'EQL'; anchor_index: number; second_pivot_index: number; confirmed_index: number; level: number; prev_level: number }[] = [
+    { type: 'EQH', anchor_index: 20, second_pivot_index: 15, confirmed_index: 22, level: barHigh(20), prev_level: barHigh(15) },
+    { type: 'EQH', anchor_index: 60, second_pivot_index: 55, confirmed_index: 62, level: barHigh(60), prev_level: barHigh(55) },
+    { type: 'EQL', anchor_index: 15, second_pivot_index: 10, confirmed_index: 17, level: barLow(15), prev_level: barLow(10) },
+    { type: 'EQL', anchor_index: 90, second_pivot_index: 85, confirmed_index: 92, level: barLow(90), prev_level: barLow(85) },
+  ]
+
   return {
     smc: {
       algorithm_version: '1.0.0',
-      bos: [{ index: 10, type: 'bullish', price: 11.0 }],
-      choch: [{ index: 20, type: 'bearish', price: 11.5 }],
-      ob: [{ start: 5, end: 8, type: 'bullish', mitigated: false }],
-      eqh: [{ index: 15, ref_index: 5, threshold: 0.1 }],
-      eql: [{ index: 25, ref_index: 12, threshold: 0.1 }],
+      time: Array.from({ length: barsCount }, (_, i) => barTime(i)),
+      swing_bias: 1,
+      events: events.map((e) => ({
+        type: e.type,
+        bias: e.bias,
+        internal: e.internal,
+        anchor_index: e.anchor_index,
+        anchor_time: barTime(e.anchor_index),
+        confirmed_index: e.confirmed_index,
+        confirmed_time: barTime(e.confirmed_index),
+        level: e.level,
+      })),
+      order_blocks: obs.map((o) => ({
+        anchor_index: o.anchor_index,
+        anchor_time: barTime(o.anchor_index),
+        bar_high: barHigh(o.anchor_index),
+        bar_low: barLow(o.anchor_index),
+        bias: o.bias,
+        internal: o.internal,
+        confirmed_index: o.confirmed_index,
+        confirmed_time: barTime(o.confirmed_index),
+        mitigated: o.mitigated,
+        mitigated_index: o.mitigated ? o.confirmed_index + 5 : null,
+        mitigated_time: o.mitigated ? barTime(o.confirmed_index + 5) : null,
+      })),
+      equal_highs_lows: eqs.map((e) => ({
+        type: e.type,
+        anchor_index: e.anchor_index,
+        anchor_time: barTime(e.anchor_index),
+        second_pivot_index: e.second_pivot_index,
+        second_pivot_time: barTime(e.second_pivot_index),
+        confirmed_index: e.confirmed_index,
+        confirmed_time: barTime(e.confirmed_index),
+        level: e.level,
+        prev_level: e.prev_level,
+      })),
     },
   }
 }
@@ -231,7 +296,7 @@ export function buildChartSnapshot(
     indicatorData = buildBollingerIndicators(barsCount)
     algorithmId = 'bollinger_bands'
   } else if (indicatorView === 'smc') {
-    indicatorData = buildSmcIndicators(barsCount)
+    indicatorData = buildSmcIndicators(barsCount, timeframe)
     algorithmId = 'smc_module'
   } else {
     indicatorData = buildNodeClusterIndicators(symbol, barsCount)

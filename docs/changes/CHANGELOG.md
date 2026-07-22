@@ -4,6 +4,12 @@
 
 ## 2026-07-23
 
+- CHANGE-20260723-004: V3.3 部署前门禁 — Task 6 隔离视觉验收 SMC E2E fixture 增强
+  - **fixture 升级**: `buildSmcIndicators` 从 index-based 旧格式升级为 CP-V3-C2 time-key 格式（anchor_time/confirmed_time/second_pivot_time）
+  - **12 SMC 事件**: 3 BOS + 2 CHoCH + 3 OB + 2 EQH + 2 EQL，10 可见（满足 ≥10 要求）
+  - **视觉证据**: 5 张截图（SMC Capture 1440×2560/360×640、SMC Detail、Node Cluster、Bollinger）+ 12 锚点表
+  - **验证**: Playwright SMC E2E 3/3 PASS + 视觉验收 6/6 PASS + tsc/build 通过
+
 - CHANGE-20260723-003: V3.3 部署前门禁 — CP-V3-A3 listing_date 类型防御 + CP-V3-A2 测试对齐 A3 语义
   - **Bug fix**: `_fetch_intraday_with_backfill` listing_date 类型防御（str→date.fromisoformat / datetime→.date），修复 28 indicator + 4 feature_snapshot 测试 TypeError
   - **测试对齐**: 3 个 CP-V3-A2 旧测试更新为 A3 新语义（no_progress 不再→history_exhausted，需到达 listing_date 边界）
