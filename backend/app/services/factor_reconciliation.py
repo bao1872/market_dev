@@ -37,6 +37,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.factor_contract import (
@@ -51,6 +52,96 @@ from app.services.factor_consistency_audit import (
 )
 
 logger = logging.getLogger("services.factor_reconciliation")
+
+
+# =============================================================================
+# 因子版本字段读写（Phase D / DEVELOP.md §4.1）
+# =============================================================================
+
+
+async def stamp_factor_reconciliation_version(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    *,
+    algorithm_version: str = FACTOR_ALGORITHM_VERSION,
+    reconciliation_version: int = FACTOR_RECONCILIATION_VERSION,
+) -> None:
+    """[Phase D] 成功对账/重建后写入 instrument 因子版本字段。
+
+    将 factor_algorithm_version / factor_reconciliation_version / factor_reconciled_at
+    更新为当前常量值，使下次盘后通过 find_stale_version_instruments 识别影响集。
+
+    不 commit（由调用方控制事务）。
+
+    Args:
+        session: 异步 DB 会话
+        instrument_id: 标的 UUID
+        algorithm_version: 算法版本（默认 FACTOR_ALGORITHM_VERSION）
+        reconciliation_version: 对账版本（默认 FACTOR_RECONCILIATION_VERSION）
+    """
+    stamp_sql = text(
+        """
+        UPDATE instruments
+        SET factor_algorithm_version = :algo_ver,
+            factor_reconciliation_version = :recon_ver,
+            factor_reconciled_at = :now,
+            updated_at = :now
+        WHERE id = :id
+        """
+    )
+    await session.execute(stamp_sql, {
+        "id": instrument_id,
+        "algo_ver": algorithm_version,
+        "recon_ver": reconciliation_version,
+        "now": datetime.now(UTC),
+    })
+    await session.flush()
+
+
+async def find_stale_version_instruments(
+    session: AsyncSession,
+    *,
+    current_algorithm_version: str = FACTOR_ALGORITHM_VERSION,
+    current_reconciliation_version: int = FACTOR_RECONCILIATION_VERSION,
+) -> list[tuple[uuid.UUID, str]]:
+    """[Phase D] 查找因子版本过期（或从未对账）的 active 股票。
+
+    用于盘后 after_close 流程识别"影响集"——当 FACTOR_ALGORITHM_VERSION 或
+    FACTOR_RECONCILIATION_VERSION bump 后，所有版本不匹配的股票需要重新审计。
+
+    匹配条件（任一满足即视为 stale）：
+    - factor_algorithm_version IS NULL（从未对账）
+    - factor_algorithm_version != current_algorithm_version
+    - factor_reconciliation_version IS NULL（从未对账）
+    - factor_reconciliation_version != current_reconciliation_version
+
+    Args:
+        session: 异步 DB 会话
+        current_algorithm_version: 当前算法版本常量
+        current_reconciliation_version: 当前对账版本常量
+
+    Returns:
+        list of (instrument_id, symbol) — 需要重新审计的股票清单
+    """
+    query_sql = text(
+        """
+        SELECT id, symbol
+        FROM instruments
+        WHERE status = 'active'
+            AND (
+                factor_algorithm_version IS NULL
+                OR factor_algorithm_version != :algo_ver
+                OR factor_reconciliation_version IS NULL
+                OR factor_reconciliation_version != :recon_ver
+            )
+        ORDER BY symbol
+        """
+    )
+    result = await session.execute(query_sql, {
+        "algo_ver": current_algorithm_version,
+        "recon_ver": current_reconciliation_version,
+    })
+    return [(row.id, row.symbol) for row in result.fetchall()]
 
 
 # =============================================================================
@@ -390,8 +481,11 @@ class FactorReconciliationTask:
     ) -> ReconciliationItemResult:
         """重建单只股票的因子序列（独立事务）。
 
-        成功：记录 after_hash + records_updated
+        成功：记录 after_hash + records_updated + 写入 instrument 因子版本字段
         失败：记录 error_code + error_message，不写 1.0 伪装
+
+        [Phase D / DEVELOP.md §4.1] 成功重建后写入 factor_algorithm_version /
+        factor_reconciliation_version / factor_reconciled_at，使下次盘后能识别影响集。
         """
         rebuilt_at = datetime.now(UTC)
         try:
@@ -429,6 +523,9 @@ class FactorReconciliationTask:
                     ),
                     rebuilt_at=rebuilt_at,
                 )
+
+            # [Phase D / DEVELOP.md §4.1] 写入因子版本字段，使下次盘后影响集可识别
+            await stamp_factor_reconciliation_version(session, item.instrument_id)
 
             logger.info(
                 "_rebuild_single 成功 symbol=%s records=%d before=%s after=%s",
