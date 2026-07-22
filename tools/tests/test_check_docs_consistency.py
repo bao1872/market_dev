@@ -1,6 +1,6 @@
 """tools/check_docs_consistency.py v2 治理规则测试。
 
-覆盖 v2 MANIFEST 集中基线规则的 11 个场景：
+覆盖 v2 MANIFEST 集中基线规则的 13 个场景：
 1. MANIFEST 合法 baseline 通过；
 2. MANIFEST 缺 baseline 失败；
 3. baseline 非 40 位 SHA 失败；
@@ -12,6 +12,8 @@
 9. feishu_webhook 当前方案失败（删除语境豁免）；
 10. open-decisions 写回 Webhook OPEN 失败；
 11. archive 旧 baseline 不触发失败。
+12. baseline 落后 HEAD 超过窗口失败（CP-19 规则 16）；
+13. baseline 在窗口内通过（CP-19 规则 16）。
 
 使用 tmp_path + monkeypatch 注入临时文档目录，不修改真实文档。
 
@@ -153,6 +155,9 @@ def _setup_docs(
     # 默认 mock git 校验为通过
     monkeypatch.setattr(cdc, "is_valid_commit", lambda sha: True)
     monkeypatch.setattr(cdc, "is_ancestor_of_head", lambda sha: True)
+    # 规则 16 默认 mock：baseline 在窗口内（既有 11 个场景不应因新规则失败）
+    # 单独测试场景 12 会覆盖此 mock 触发失败
+    monkeypatch.setattr(cdc, "count_commits_ahead_of_baseline", lambda sha: 10)
 
     return tmp_path
 
@@ -408,3 +413,71 @@ class TestCheckDocsConsistencyV2:
             "archive 旧文档 baseline 不应触发一致性检查失败；"
             f"实际返回 {rc}"
         )
+
+    def test_12_baseline_stale_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """场景 12：baseline 落后 HEAD 超过窗口失败（CP-19 规则 16）。
+
+        修复 PROMPT.md §4 指出的问题：旧规则 4 只要求 baseline 是 HEAD 祖先，
+        即使 baseline 落后 88 个 commit 仍能通过。新规则 16 要求 baseline
+        必须在最近 N 个 commit 内，防止文档与代码严重脱节。
+        """
+        _setup_docs(
+            tmp_path,
+            monkeypatch,
+            manifest=_manifest_content(VALID_SHA),
+            readme="# README\n",
+        )
+        # mock count_commits_ahead_of_baseline 返回超过窗口的值
+        # 窗口默认 50，返回 88 模拟当前生产 baseline 落后 88 commit
+        monkeypatch.setattr(
+            cdc, "count_commits_ahead_of_baseline", lambda sha: 88
+        )
+
+        rc = cdc.main()
+        assert rc == 1, "baseline 落后 HEAD 88 个 commit（超过窗口 50）应失败"
+
+        captured = capsys.readouterr()
+        assert "严重落后" in captured.out, "错误信息应包含'严重落后'"
+        assert "88" in captured.out, "错误信息应包含落后 commit 数量"
+
+    def test_13_baseline_within_window_passes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """场景 13：baseline 在窗口内通过（CP-19 规则 16）。"""
+        _setup_docs(
+            tmp_path,
+            monkeypatch,
+            manifest=_manifest_content(VALID_SHA),
+            current_docs={"00-product-business.md": "# 产品业务\n"},
+            maps_docs={"api-route-map.md": "# API 路由\n"},
+            readme="# README\n",
+        )
+        # mock count_commits_ahead_of_baseline 返回窗口内的值
+        monkeypatch.setattr(
+            cdc, "count_commits_ahead_of_baseline", lambda sha: 10
+        )
+
+        rc = cdc.main()
+        assert rc == 0, "baseline 落后 HEAD 10 个 commit（窗口 50 内）应通过"
+
+    def test_13b_baseline_at_window_boundary_passes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """场景 13b：baseline 正好在窗口边界通过（CP-19 规则 16 边界）。"""
+        _setup_docs(
+            tmp_path,
+            monkeypatch,
+            manifest=_manifest_content(VALID_SHA),
+            current_docs={"00-product-business.md": "# 产品业务\n"},
+            maps_docs={"api-route-map.md": "# API 路由\n"},
+            readme="# README\n",
+        )
+        # 边界：窗口 50，正好落后 50 commit 应通过（> 才失败）
+        monkeypatch.setattr(
+            cdc, "count_commits_ahead_of_baseline", lambda sha: 50
+        )
+
+        rc = cdc.main()
+        assert rc == 0, "baseline 落后 HEAD 50 commit（等于窗口）应通过"

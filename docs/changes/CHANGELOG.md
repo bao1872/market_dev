@@ -2,6 +2,15 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-22
+
+- CHANGE-20260722-001: docs/记忆系统真正收口 — AGENTS.md v3 压缩 + ADR/Runbook/Evidence 模板 + MANIFEST baseline 新鲜度门禁（CP-19）
+  - **CP-19.1 AGENTS.md v3 收口**：从 909 行压缩到 290 行；移除内联 clause 39-64 变更历史，保留硬规则与必读入口；变更历史指向 `docs/changes/CHANGELOG.md` + `docs/changes/records/CHANGE-*.md`
+  - **CP-19.2 ADR/Runbook/Evidence 模板**：`docs/decisions/README.md` + ADR-0001（Atomic Snapshot 单 MDAS）+ ADR-0002（Node Cluster 输入契约隔离）；`docs/runbooks/README.md` + 3 个 Runbook（after-close-recovery / feishu-image-issues / branch-deployment-rollback）；`docs/evidence/README.md` 生产验收证据模板
+  - **CP-19.3 MANIFEST baseline 新鲜度门禁**：`tools/check_docs_consistency.py` 新增规则 16（baseline SHA 必须在 HEAD 的最近 50 个 commit 内）；修复 PROMPT.md §4 指出的问题（旧 baseline `18049da` 落后 88 commit 仍通过）；`docs/current/MANIFEST.md` baseline 同步到 CP-18 HEAD `2c4ad50`；3 个新测试场景
+  - **诚实声明**：不包含部署、生产验收、merge main；Runbook 命令需部署后验证；Evidence 模板待部署后填充
+  - **不变量**：不新增依赖/表/migration；不重写 Node/SMC/Canonical/After-close；MDAS 仍为唯一行情读取出口；`PINE_PARITY_PENDING` 保留
+
 ## 2026-07-21
 
 - CHANGE-20260721-002: Display Frame Contract V2 + Node DTO V2 + 移动舞台 V2 + 复权闭环收口（合并 Phase 2-6）
