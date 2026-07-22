@@ -88,6 +88,19 @@ export interface SmcVisibleContext {
    * when viewport changes from 250 to 90 bars — view adapter rebasing can misalign).
    */
   timeToDisplayIndex?: (time: string | null | undefined) => number | undefined
+  /**
+   * [CP-V3-C2] Strict time-key mode.
+   * - true: anchor_time/confirmed_time/second_pivot_time 缺失或匹配失败时
+   *   → diagnostic + skip（返回 undefined），禁止静默 index fallback。
+   *   仅显式 legacy 模式（false）允许 index fallback。
+   * - false (default): CP-V3-C 行为（time primary, index fallback）。
+   */
+  strictTimeKey?: boolean
+  /**
+   * [CP-V3-C2] Optional diagnostic sink for time-key match failures.
+   * When provided, strict mode logs failures for debugging.
+   */
+  onTimeKeyMiss?: (reason: 'missing_time' | 'match_failed', smcIdx: number | null | undefined, time: string | null | undefined) => void
 }
 
 /**
@@ -98,7 +111,12 @@ export interface SmcVisibleContext {
  * regardless of viewport size). Index-based lookup is the FALLBACK (relies on
  * view adapter rebasing, which can misalign when viewport changes from 250 to 90).
  *
- * Fallback logic (index-based, view adapter rebased):
+ * [CP-V3-C2] Strict time-key mode (ctx.strictTimeKey=true):
+ *   - time 缺失（null/undefined）→ diagnostic + skip（返回 undefined）
+ *   - time 提供但 timeToDisplayIndex(time) 返回 undefined（匹配失败）→ diagnostic + skip
+ *   - 禁止静默 index fallback；仅显式 legacy 模式（strictTimeKey=false）允许 fallback
+ *
+ * Fallback logic (index-based, view adapter rebased, legacy mode only):
  *   - null/undefined → undefined（不可见）
  *   - 负索引 → 0（OB clipped_left 时 anchor 在窗口左侧，clamp 到窗口左端）
  *   - 索引 >= displayCount → undefined（在窗口右侧，不可见）
@@ -109,12 +127,25 @@ export function mapSmcIndexToDisplay(
   ctx: SmcVisibleContext,
   time?: string | null,
 ): number | undefined {
+  const strict = ctx.strictTimeKey === true
+
   // [CP-V3-C] Primary: time-based lookup (most reliable across viewport changes)
   if (time != null && ctx.timeToDisplayIndex) {
     const displayIdx = ctx.timeToDisplayIndex(time)
     if (displayIdx != null) return displayIdx
+    // [CP-V3-C2] Strict mode: match failed → diagnostic + skip (NO index fallback)
+    if (strict) {
+      ctx.onTimeKeyMiss?.('match_failed', smcIdx, time)
+      return undefined
+    }
+    // Legacy mode: fall through to index-based fallback
+  } else if (strict) {
+    // [CP-V3-C2] Strict mode: time missing → diagnostic + skip (NO index fallback)
+    ctx.onTimeKeyMiss?.('missing_time', smcIdx, time)
+    return undefined
   }
-  // Fallback: index-based (view adapter rebased)
+
+  // Fallback: index-based (view adapter rebased) — legacy mode only
   if (smcIdx == null) return undefined
   if (smcIdx < 0) return 0  // clipped_left: clamp to display left
   if (smcIdx >= ctx.displayCount) return undefined

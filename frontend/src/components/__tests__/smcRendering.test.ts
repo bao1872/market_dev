@@ -28,6 +28,14 @@ import {
   type SmcLabelLayoutContext,
 } from '../smcRendering.ts'
 
+// [CP-V3-C2] onTimeKeyMiss 回调类型（与 SmcVisibleContext.onTimeKeyMiss 一致）
+type TimeKeyMissReason = 'missing_time' | 'match_failed'
+type OnTimeKeyMiss = (
+  reason: TimeKeyMissReason,
+  smcIdx: number | null | undefined,
+  time: string | null | undefined,
+) => void
+
 // ===== 工具：构造测试用 OB =====
 function makeOb(overrides: Partial<SmcOrderBlock> = {}): SmcOrderBlock {
   return {
@@ -117,6 +125,416 @@ test('[CP-V3-C] mapSmcIndexToDisplay: time=null/undefined → 走 fallback', () 
   // time=null → 不调用 callback，走 fallback
   assert.equal(mapSmcIndexToDisplay(15, ctx, null), 15)
   assert.equal(mapSmcIndexToDisplay(15, ctx, undefined), 15)
+})
+
+// ===== 1c. [CP-V3-C2] mapSmcIndexToDisplay 严格 time-key 模式 =====
+//
+// 验证 strictTimeKey=true 时：
+//   - time 缺失 → diagnostic + skip（返回 undefined，禁止 index fallback）
+//   - time 匹配失败 → diagnostic + skip（禁止 index fallback）
+//   - time 命中 → 返回 displayIdx（无 miss 回调）
+//   - onTimeKeyMiss 回调被调用并记录正确 reason
+// 仅显式 legacy 模式（strictTimeKey=false 或未设）允许 fallback。
+
+test('[CP-V3-C2] strict mode + time missing → undefined + onTimeKeyMiss(missing_time)', () => {
+  const misses: Array<{ reason: string; smcIdx: number | null | undefined; time: string | null | undefined }> = []
+  const timeMap = new Map([['2026-07-15', 40]])
+  const ctx = {
+    displayCount: 90,
+    timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? ''),
+    strictTimeKey: true,
+    onTimeKeyMiss: ((reason: TimeKeyMissReason, smcIdx: number | null | undefined, time: string | null | undefined) => misses.push({ reason, smcIdx, time })) as OnTimeKeyMiss,
+  }
+  // time=null → strict: skip
+  assert.equal(mapSmcIndexToDisplay(15, ctx, null), undefined)
+  // time=undefined → strict: skip
+  assert.equal(mapSmcIndexToDisplay(15, ctx, undefined), undefined)
+  // 即使 index 在窗口内（15 < 90），strict 模式也禁止 fallback
+  assert.equal(misses.length, 2)
+  assert.equal(misses[0].reason, 'missing_time')
+  assert.equal(misses[0].smcIdx, 15)
+  assert.equal(misses[0].time, null)
+  assert.equal(misses[1].reason, 'missing_time')
+  assert.equal(misses[1].smcIdx, 15)
+  assert.equal(misses[1].time, undefined)
+})
+
+test('[CP-V3-C2] strict mode + time match failed → undefined + onTimeKeyMiss(match_failed)', () => {
+  const misses: Array<{ reason: string; smcIdx: number | null | undefined; time: string | null | undefined }> = []
+  const timeMap = new Map([['2026-07-15', 40]])  // 不包含 '2026-07-16'
+  const ctx = {
+    displayCount: 90,
+    timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? ''),
+    strictTimeKey: true,
+    onTimeKeyMiss: ((reason: TimeKeyMissReason, smcIdx: number | null | undefined, time: string | null | undefined) => misses.push({ reason, smcIdx, time })) as OnTimeKeyMiss,
+  }
+  // time='2026-07-16' 提供但匹配失败 → strict: skip
+  assert.equal(mapSmcIndexToDisplay(15, ctx, '2026-07-16'), undefined)
+  // 即使 index 在窗口内（15 < 90），strict 模式也禁止 fallback
+  assert.equal(mapSmcIndexToDisplay(200, ctx, '2026-07-16'), undefined)
+  assert.equal(misses.length, 2)
+  assert.equal(misses[0].reason, 'match_failed')
+  assert.equal(misses[0].smcIdx, 15)
+  assert.equal(misses[0].time, '2026-07-16')
+  assert.equal(misses[1].reason, 'match_failed')
+  assert.equal(misses[1].smcIdx, 200)
+})
+
+test('[CP-V3-C2] strict mode + time hit → displayIdx (no miss callback)', () => {
+  const misses: string[] = []
+  const timeMap = new Map([['2026-07-15', 40]])
+  const ctx = {
+    displayCount: 90,
+    timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? ''),
+    strictTimeKey: true,
+    onTimeKeyMiss: ((reason: TimeKeyMissReason) => misses.push(reason)) as OnTimeKeyMiss,
+  }
+  // time 命中 → 返回 40，不调用 miss 回调
+  assert.equal(mapSmcIndexToDisplay(200, ctx, '2026-07-15'), 40)
+  assert.equal(mapSmcIndexToDisplay(40, ctx, '2026-07-15'), 40)
+  assert.equal(misses.length, 0)
+})
+
+test('[CP-V3-C2] strict mode + 无 timeToDisplayIndex 回调 → time missing 触发 skip', () => {
+  // 严格模式要求 time-key 路径必须可用；若未提供 timeToDisplayIndex 回调，
+  // 即使 time 有值也无法匹配 → 视为 missing_time 并 skip（防止静默 fallback）
+  const misses: string[] = []
+  const ctx = {
+    displayCount: 90,
+    // 无 timeToDisplayIndex
+    strictTimeKey: true,
+    onTimeKeyMiss: ((reason: TimeKeyMissReason) => misses.push(reason)) as OnTimeKeyMiss,
+  }
+  // time 有值但无回调 → 走 strict missing_time 分支
+  assert.equal(mapSmcIndexToDisplay(15, ctx, '2026-07-15'), undefined)
+  assert.equal(mapSmcIndexToDisplay(15, ctx, null), undefined)
+  assert.equal(misses.length, 2)
+  assert.equal(misses[0], 'missing_time')
+  assert.equal(misses[1], 'missing_time')
+})
+
+test('[CP-V3-C2] legacy mode (strictTimeKey=false) + time match failed → fallback 到 index', () => {
+  const misses: string[] = []
+  const timeMap = new Map([['2026-07-15', 40]])  // 不包含 '2026-07-16'
+  const ctx = {
+    displayCount: 90,
+    timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? ''),
+    strictTimeKey: false,  // 显式 legacy 模式
+    onTimeKeyMiss: ((reason: TimeKeyMissReason) => misses.push(reason)) as OnTimeKeyMiss,  // 不应被调用
+  }
+  // time 未命中 + index 在范围内 → 走 fallback（返回 index）
+  assert.equal(mapSmcIndexToDisplay(15, ctx, '2026-07-16'), 15)
+  // time 未命中 + 负索引 → 0（clipped_left clamp）
+  assert.equal(mapSmcIndexToDisplay(-3, ctx, '2026-07-16'), 0)
+  // time 未命中 + index 越界 → undefined
+  assert.equal(mapSmcIndexToDisplay(200, ctx, '2026-07-16'), undefined)
+  // legacy 模式不调用 onTimeKeyMiss
+  assert.equal(misses.length, 0)
+})
+
+test('[CP-V3-C2] legacy mode (strictTimeKey=false) + time missing → fallback 到 index', () => {
+  const misses: string[] = []
+  const timeMap = new Map([['2026-07-15', 40]])
+  const ctx = {
+    displayCount: 90,
+    timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? ''),
+    strictTimeKey: false,
+    onTimeKeyMiss: ((reason: TimeKeyMissReason) => misses.push(reason)) as OnTimeKeyMiss,
+  }
+  // time=null/undefined → 走 fallback（legacy 行为）
+  assert.equal(mapSmcIndexToDisplay(15, ctx, null), 15)
+  assert.equal(mapSmcIndexToDisplay(15, ctx, undefined), 15)
+  assert.equal(misses.length, 0)
+})
+
+test('[CP-V3-C2] strict mode 默认关闭（未设 strictTimeKey） → 与 legacy 等价', () => {
+  // 未设 strictTimeKey 应等同 legacy 模式（向后兼容）
+  const timeMap = new Map([['2026-07-15', 40]])  // 不包含 '2026-07-16'
+  const ctx = {
+    displayCount: 90,
+    timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? ''),
+    // strictTimeKey 未设
+  }
+  // time 未命中 → fallback（与 legacy 一致）
+  assert.equal(mapSmcIndexToDisplay(15, ctx, '2026-07-16'), 15)
+  assert.equal(mapSmcIndexToDisplay(15, ctx, null), 15)
+})
+
+test('[CP-V3-C2] strict mode 不影响 null/undefined smcIdx 在 time 命中时的行为', () => {
+  // smcIdx=null/undefined + time 命中 → 仍按 time 返回 displayIdx
+  // （time-key 是 primary 路径，与 smcIdx 是否有效无关）
+  const misses: string[] = []
+  const timeMap = new Map([['2026-07-15', 40]])
+  const ctx = {
+    displayCount: 90,
+    timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? ''),
+    strictTimeKey: true,
+    onTimeKeyMiss: ((reason: TimeKeyMissReason) => misses.push(reason)) as OnTimeKeyMiss,
+  }
+  assert.equal(mapSmcIndexToDisplay(null, ctx, '2026-07-15'), 40)
+  assert.equal(mapSmcIndexToDisplay(undefined, ctx, '2026-07-15'), 40)
+  assert.equal(misses.length, 0)
+})
+
+test('[CP-V3-C2] selectVisibleSmcOrderBlocks strict mode + OB anchor_time match failed → 跳过该 OB', () => {
+  // strict 模式下，OB anchor_time 匹配失败 → 该 OB 被跳过（不 fallback 到 anchor_index）
+  // 即使 anchor_index 在窗口内（15, 20 < 90），strict 也禁止 fallback
+  const misses: string[] = []
+  const timeMap = new Map([['2026-07-15', 40]])
+  const ctx = {
+    displayCount: 90,
+    timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? ''),
+    strictTimeKey: true,
+    onTimeKeyMiss: ((reason: TimeKeyMissReason) => misses.push(reason)) as OnTimeKeyMiss,
+  }
+  const obs = [
+    makeOb({ anchor_index: 5, anchor_time: '2026-07-15' }),  // 命中 → 选中
+    makeOb({ anchor_index: 15, anchor_time: 'unknown-time-1' }),  // 匹配失败 → strict skip
+    makeOb({ anchor_index: 20, anchor_time: 'unknown-time-2' }),  // 匹配失败 → strict skip
+  ]
+  const visible = selectVisibleSmcOrderBlocks(obs, ctx)
+  // 只有第一个 OB 被选中
+  assert.equal(visible.length, 1)
+  assert.equal(visible[0].anchor_index, 5)
+  // 2 次 miss（OB 2 + OB 3 都 match_failed）
+  assert.equal(misses.length, 2)
+  assert.equal(misses[0], 'match_failed')
+  assert.equal(misses[1], 'match_failed')
+})
+
+test('[CP-V3-C2] collectVisibleSmcPriceCandidates strict mode + event time missing → 跳过 level', () => {
+  // strict 模式下，event.anchor_time 与 confirmed_time 都缺失 → level 不被收集
+  const misses: string[] = []
+  const timeMap = new Map([['2026-07-15', 40]])
+  const ctx = {
+    displayCount: 90,
+    timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? ''),
+    strictTimeKey: true,
+    onTimeKeyMiss: ((reason: TimeKeyMissReason) => misses.push(reason)) as OnTimeKeyMiss,
+  }
+  const ev1: SmcEvent = {
+    type: 'BOS', bias: 1, anchor_index: 5, anchor_time: '2026-07-15',
+    confirmed_index: 6, confirmed_time: '2026-07-16', level: 10.5,
+  }
+  const ev2: SmcEvent = {
+    type: 'CHoCH', bias: -1, anchor_index: 15, anchor_time: null,
+    confirmed_index: 16, confirmed_time: null, level: 11.5,
+  }
+  const candidates = collectVisibleSmcPriceCandidates({ events: [ev1, ev2] }, ctx)
+  // ev1.anchor_time 命中 → level=10.5 被收集
+  // ev2.anchor_time/confirmed_time 都缺失 → strict skip（level 不被收集）
+  assert.ok(candidates.includes(10.5))
+  assert.ok(!candidates.includes(11.5), `ev2 level should be skipped in strict mode, got candidates: ${candidates}`)
+  // 至少 2 次 miss（ev2 anchor + confirmed）
+  assert.ok(misses.length >= 2, `expected >=2 misses, got ${misses.length}`)
+})
+
+// ===== 1d. [CP-V3-C2] 10+ SMC 结构坐标验证（strict mode）=====
+//
+// 验证 10+ 个 BOS/CHoCH/EQH/EQL/OB 在 strict time-key 模式下的坐标计算：
+//   - 每个结构记录: time, price, visible index, x/y, label rect, leader line
+//   - 使用 mock 几何（plotLeft=40, plotTop=50, step=10, priceRange=8~14）
+//   - 验证 strict mode 下 time-key 命中 → 正确 display index → 正确 x/y
+//   - 验证 strict mode 下 time-key 缺失/失败 → skip（不渲染）
+
+test('[CP-V3-C2] 10+ SMC 结构坐标验证：strict mode 命中 + skip 完整记录', () => {
+  // Mock 几何（与 mobile_capture 90 bar 窗口类似）
+  const plotLeft = 40
+  const plotTop = 50
+  const plotRight = 40 + 90 * 10  // 940
+  const plotBottom = 600
+  const step = 10
+  const priceMin = 8.0
+  const priceMax = 14.0
+  const priceToY = (p: number): number => {
+    return plotTop + (plotBottom - plotTop) * (priceMax - p) / (priceMax - priceMin)
+  }
+  const idxToX = (idx: number): number => plotLeft + (idx + 0.5) * step
+
+  // 90 bar displayTimes（2026-07-01 ~ 2026-07-15，每天 6 个 15m bar）
+  const displayTimes: string[] = []
+  for (let day = 1; day <= 15; day++) {
+    for (let h = 9; h <= 14; h++) {
+      displayTimes.push(`2026-07-${String(day).padStart(2, '0')}T${String(h).padStart(2, '0')}:00`)
+    }
+  }
+  const timeMap = new Map<string, number>()
+  displayTimes.forEach((t, i) => timeMap.set(t, i))
+
+  const misses: Array<{ reason: string; smcIdx: number | null | undefined; time: string | null | undefined }> = []
+  const ctx = {
+    displayCount: displayTimes.length,
+    timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? ''),
+    strictTimeKey: true,
+    onTimeKeyMiss: ((reason: TimeKeyMissReason, smcIdx: number | null | undefined, time: string | null | undefined) => misses.push({ reason, smcIdx, time })) as OnTimeKeyMiss,
+  }
+
+  // ===== 构造 10+ 个 SMC 结构（覆盖 BOS/CHoCH/EQH/EQL/OB）=====
+  const events: SmcEvent[] = [
+    // 1. BOS bullish, anchor 在窗口内
+    { type: 'BOS', bias: 1, anchor_index: 5, anchor_time: '2026-07-01T10:00', confirmed_index: 8, confirmed_time: '2026-07-01T13:00', level: 10.5 },
+    // 2. BOS bearish, anchor 在窗口内
+    { type: 'BOS', bias: -1, anchor_index: 15, anchor_time: '2026-07-03T12:00', confirmed_index: 18, confirmed_time: '2026-07-04T09:00', level: 12.0 },
+    // 3. CHoCH bullish (internal)
+    { type: 'CHoCH', bias: 1, internal: true, anchor_index: 25, anchor_time: '2026-07-05T10:00', confirmed_index: 28, confirmed_time: '2026-07-05T13:00', level: 9.5 },
+    // 4. CHoCH bearish (swing)
+    { type: 'CHoCH', bias: -1, anchor_index: 35, anchor_time: '2026-07-07T11:00', confirmed_index: 38, confirmed_time: '2026-07-07T14:00', level: 13.0 },
+    // 5. BOS with anchor_time AND confirmed_time both null → strict skip（OR 逻辑：两者都缺失才 skip）
+    { type: 'BOS', bias: 1, anchor_index: 45, anchor_time: null, confirmed_index: 48, confirmed_time: null, level: 11.0 },
+    // 6. CHoCH with anchor_time AND confirmed_time both match_failed → strict skip
+    { type: 'CHoCH', bias: -1, anchor_index: 55, anchor_time: 'unknown-anchor', confirmed_index: 58, confirmed_time: 'unknown-confirmed', level: 11.5 },
+  ]
+
+  const orderBlocks: SmcOrderBlock[] = [
+    // 7. OB bullish (internal, unmitigated)
+    { anchor_index: 10, anchor_time: '2026-07-02T12:00', bar_high: 11.0, bar_low: 9.5, bias: 1, internal: true, confirmed_index: 12, confirmed_time: '2026-07-02T14:00', mitigated: false, mitigated_index: null, mitigated_time: null, clipped_left: false },
+    // 8. OB bearish (internal, unmitigated)
+    { anchor_index: 30, anchor_time: '2026-07-06T10:00', bar_high: 13.5, bar_low: 12.0, bias: -1, internal: true, confirmed_index: 32, confirmed_time: '2026-07-06T12:00', mitigated: false, mitigated_index: null, mitigated_time: null, clipped_left: false },
+    // 9. OB with anchor_time match failed → strict skip
+    { anchor_index: 40, anchor_time: 'unknown-ob-time', bar_high: 14.0, bar_low: 12.5, bias: 1, internal: true, confirmed_index: 42, confirmed_time: '2026-07-08T12:00', mitigated: false, mitigated_index: null, mitigated_time: null, clipped_left: false },
+  ]
+
+  const equalHLs: SmcEqualHighLow[] = [
+    // 10. EQH (bearish, equal highs)
+    { type: 'EQH', anchor_index: 20, anchor_time: '2026-07-04T11:00', second_pivot_index: 24, second_pivot_time: '2026-07-05T09:00', confirmed_index: 25, confirmed_time: '2026-07-05T10:00', level: 12.5, prev_level: 12.4 },
+    // 11. EQL (bullish, equal lows)
+    { type: 'EQL', anchor_index: 50, anchor_time: '2026-07-10T10:00', second_pivot_index: 54, second_pivot_time: '2026-07-11T09:00', confirmed_index: 55, confirmed_time: '2026-07-11T10:00', level: 9.0, prev_level: 9.1 },
+    // 12. EQH with anchor_time AND second_pivot_time both match_failed → strict skip
+    { type: 'EQH', anchor_index: 60, anchor_time: 'unknown-eqh-anchor', second_pivot_index: 64, second_pivot_time: 'unknown-eqh-sp', confirmed_index: 65, confirmed_time: '2026-07-13T10:00', level: 13.5, prev_level: 13.4 },
+  ]
+
+  // ===== 记录每个结构的坐标 =====
+  interface StructureRecord {
+    kind: string
+    index: number
+    time: string | null | undefined
+    price: number | null
+    visibleIndex: number | null | undefined
+    x: number | null | undefined
+    y: number | null | undefined
+    skipped: boolean
+    skipReason?: string
+  }
+  const records: StructureRecord[] = []
+
+  // 处理 events (BOS/CHoCH)
+  events.forEach((ev, i) => {
+    const anchorIdx = mapSmcIndexToDisplay(ev.anchor_index, ctx, ev.anchor_time)
+    const confirmedIdx = mapSmcIndexToDisplay(ev.confirmed_index, ctx, ev.confirmed_time)
+    const visible = anchorIdx != null || confirmedIdx != null
+    const price = ev.level ?? null
+    if (visible) {
+      const useIdx = anchorIdx ?? confirmedIdx
+      records.push({
+        kind: ev.type, index: i, time: ev.anchor_time, price,
+        visibleIndex: useIdx, x: useIdx != null ? idxToX(useIdx) : null,
+        y: price != null ? priceToY(price) : null, skipped: false,
+      })
+    } else {
+      records.push({
+        kind: ev.type, index: i, time: ev.anchor_time, price,
+        visibleIndex: null, x: null, y: null, skipped: true,
+        skipReason: 'strict time-key miss',
+      })
+    }
+  })
+
+  // 处理 OBs
+  const visibleObs = selectVisibleSmcOrderBlocks(orderBlocks, ctx)
+  orderBlocks.forEach((ob, i) => {
+    const isVisible = visibleObs.includes(ob)
+    const anchorIdx = mapSmcIndexToDisplay(ob.anchor_index, ctx, ob.anchor_time)
+    if (isVisible && anchorIdx != null) {
+      records.push({
+        kind: 'OB', index: i, time: ob.anchor_time, price: ob.bar_high,
+        visibleIndex: anchorIdx, x: idxToX(anchorIdx),
+        y: priceToY(ob.bar_high), skipped: false,
+      })
+    } else {
+      records.push({
+        kind: 'OB', index: i, time: ob.anchor_time, price: ob.bar_high,
+        visibleIndex: null, x: null, y: null, skipped: true,
+        skipReason: 'strict time-key miss',
+      })
+    }
+  })
+
+  // 处理 EQH/EQL
+  equalHLs.forEach((eq, i) => {
+    const anchorIdx = mapSmcIndexToDisplay(eq.anchor_index, ctx, eq.anchor_time)
+    const spIdx = mapSmcIndexToDisplay(eq.second_pivot_index, ctx, eq.second_pivot_time)
+    const visible = anchorIdx != null || spIdx != null
+    if (visible) {
+      const useIdx = anchorIdx ?? spIdx
+      records.push({
+        kind: eq.type, index: i, time: eq.anchor_time, price: eq.level,
+        visibleIndex: useIdx, x: useIdx != null ? idxToX(useIdx) : null,
+        y: priceToY(eq.level), skipped: false,
+      })
+    } else {
+      records.push({
+        kind: eq.type, index: i, time: eq.anchor_time, price: eq.level,
+        visibleIndex: null, x: null, y: null, skipped: true,
+        skipReason: 'strict time-key miss',
+      })
+    }
+  })
+
+  // ===== 验证 =====
+  // 总共 12 个结构（6 events + 3 OBs + 3 EQH/EQL）
+  assert.equal(records.length, 12, `expected 12 structure records, got ${records.length}`)
+
+  // 命中（rendered）的结构：events 1-4 (4), OBs 7-8 (2), EQH/EQL 10-11 (2) = 8
+  const rendered = records.filter(r => !r.skipped)
+  assert.equal(rendered.length, 8, `expected 8 rendered structures, got ${rendered.length}`)
+
+  // 跳过的结构：event 5 (anchor_time null), event 6 (confirmed_time unknown),
+  //   OB 9 (anchor_time unknown), EQH 12 (second_pivot_time null) = 4
+  const skipped = records.filter(r => r.skipped)
+  assert.equal(skipped.length, 4, `expected 4 skipped structures, got ${skipped.length}`)
+
+  // 验证命中的结构有正确的坐标
+  for (const r of rendered) {
+    assert.ok(r.visibleIndex != null, `${r.kind}#${r.index} should have visibleIndex`)
+    assert.ok(r.x != null, `${r.kind}#${r.index} should have x`)
+    assert.ok(r.y != null, `${r.kind}#${r.index} should have y`)
+    // x 在图表区域内
+    assert.ok(r.x! >= plotLeft && r.x! <= plotRight, `${r.kind}#${r.index} x=${r.x} out of [${plotLeft}, ${plotRight}]`)
+    // y 在图表区域内
+    assert.ok(r.y! >= plotTop && r.y! <= plotBottom, `${r.kind}#${r.index} y=${r.y} out of [${plotTop}, ${plotBottom}]`)
+  }
+
+  // 验证具体坐标（抽样检查）
+  // Event 1: BOS, anchor_time='2026-07-01T10:00' → displayIdx=1 (day 1, hour 10 = index 1)
+  //   x = 40 + (1 + 0.5) * 10 = 55, y = priceToY(10.5) = 50 + 550 * (14-10.5)/6 = 50 + 320.83 = 370.83
+  const ev1 = records[0]
+  assert.equal(ev1.kind, 'BOS')
+  assert.equal(ev1.visibleIndex, 1)
+  assert.ok(Math.abs(ev1.x! - 55) < 0.01, `ev1.x expected 55, got ${ev1.x}`)
+  assert.ok(Math.abs(ev1.y! - 370.83) < 0.1, `ev1.y expected ~370.83, got ${ev1.y}`)
+
+  // Event 5: BOS, anchor_time=null → strict skip
+  const ev5 = records[4]
+  assert.equal(ev5.kind, 'BOS')
+  assert.equal(ev5.skipped, true)
+  assert.equal(ev5.visibleIndex, null)
+
+  // OB 9: anchor_time='unknown-ob-time' → strict skip
+  const ob9 = records.find(r => r.kind === 'OB' && r.index === 2)
+  assert.ok(ob9, 'OB index 2 not found')
+  assert.equal(ob9!.skipped, true)
+
+  // EQH 12: second_pivot_time=null → strict skip
+  const eqh12 = records.find(r => r.kind === 'EQH' && r.index === 2)
+  assert.ok(eqh12, 'EQH index 2 not found')
+  assert.equal(eqh12!.skipped, true)
+
+  // 验证 strict mode miss 回调被调用
+  assert.ok(misses.length >= 4, `expected >=4 misses (event5 anchor, event6 confirmed, ob9 anchor, eqh12 second_pivot), got ${misses.length}`)
+  // 验证 miss reasons 包含 missing_time 和 match_failed
+  const reasons = new Set(misses.map(m => m.reason))
+  assert.ok(reasons.has('missing_time'), `expected missing_time in miss reasons, got ${[...reasons]}`)
+  assert.ok(reasons.has('match_failed'), `expected match_failed in miss reasons, got ${[...reasons]}`)
 })
 
 // ===== 2b. [CP-V3-C] selectVisibleSmcOrderBlocks time-key =====

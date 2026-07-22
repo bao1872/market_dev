@@ -1666,9 +1666,22 @@ function renderIndicatorSmc(
   }
 
   // [CP-V3-C] SmcVisibleContext: 提供 timeToDisplayIndex 回调，让纯函数优先用 time 匹配
+  // [CP-V3-C2] 启用 strictTimeKey=true：
+  //   - 新 schema 中 anchor_time/confirmed_time/second_pivot_time 缺失或匹配失败时
+  //     → diagnostic + skip（返回 undefined），禁止静默 index fallback
+  //   - 仅显式 legacy 模式（strictTimeKey=false）允许 fallback
+  //   - onTimeKeyMiss 回调在 dev 模式下打印诊断信息，便于发现后端 schema 缺陷
   const smcVisCtx: SmcVisibleContext = {
     displayCount: displayTimes.length,
     timeToDisplayIndex: smcTimeToDisplay,
+    strictTimeKey: true,
+    onTimeKeyMiss: (reason, smcIdx, time) => {
+      if (process.env.NODE_ENV !== 'production') {
+        console.warn(
+          `[StrategyChart][SMC] time-key miss: reason=${reason} smcIdx=${smcIdx ?? 'null'} time=${time ?? 'null'} timeframe=${timeframe}`,
+        )
+      }
+    },
   }
 
   // 辅助：SMC time 数组索引 → K 线 display 索引
@@ -1706,28 +1719,43 @@ function renderIndicatorSmc(
   // [CP-V3-C] SMC 事件区间（anchor + confirmed）映射到 display 索引
   // 与 mapSmcIndexToDisplay 不同：保留 raw index 作为 fallback，不 clamp，
   // 让 intersectSmcRangeWithViewport 正确判断 clipped_left/clipped_right
+  // [CP-V3-C2] strict mode: time 缺失或匹配失败 → null（让 intersect 返回 null → skip）
+  //   仅 legacy 模式保留 raw index fallback（用于 clipped_left/clipped_right）
   const mapSmcEventRange = (
     anchorIdx: number | null | undefined,
     anchorTime: string | null | undefined,
     confirmedIdx: number | null | undefined,
     confirmedTime: string | null | undefined,
   ): { anchorDisplay: number | null; confirmedDisplay: number | null } => {
-    // anchor: primary = time, fallback = raw index（保留负值表示 clipped_left）
+    const strict = smcVisCtx.strictTimeKey === true
+    // anchor: primary = time
     let anchorDisplay: number | null = null
     if (anchorTime != null) {
       const idx = smcTimeToDisplay(anchorTime)
       if (idx != null) anchorDisplay = idx
+      else if (strict) {
+        smcVisCtx.onTimeKeyMiss?.('match_failed', anchorIdx, anchorTime)
+      }
+    } else if (strict) {
+      smcVisCtx.onTimeKeyMiss?.('missing_time', anchorIdx, anchorTime)
     }
-    if (anchorDisplay == null && anchorIdx != null) {
-      anchorDisplay = anchorIdx  // 保留 raw（可能 < 0 或 >= displayCount）
+    // legacy fallback: 保留 raw index（可能 < 0 或 >= displayCount，用于 clipped_left/right）
+    if (anchorDisplay == null && !strict && anchorIdx != null) {
+      anchorDisplay = anchorIdx
     }
-    // confirmed: primary = time, fallback = raw index（保留 >= displayCount 表示 clipped_right）
+    // confirmed: primary = time
     let confirmedDisplay: number | null = null
     if (confirmedTime != null) {
       const idx = smcTimeToDisplay(confirmedTime)
       if (idx != null) confirmedDisplay = idx
+      else if (strict) {
+        smcVisCtx.onTimeKeyMiss?.('match_failed', confirmedIdx, confirmedTime)
+      }
+    } else if (strict) {
+      smcVisCtx.onTimeKeyMiss?.('missing_time', confirmedIdx, confirmedTime)
     }
-    if (confirmedDisplay == null && confirmedIdx != null) {
+    // legacy fallback
+    if (confirmedDisplay == null && !strict && confirmedIdx != null) {
       confirmedDisplay = confirmedIdx
     }
     return { anchorDisplay, confirmedDisplay }
