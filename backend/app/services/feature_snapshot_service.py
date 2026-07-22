@@ -70,6 +70,7 @@ from app.services.canonical_adapters import (
     profile_to_dict,
 )
 from app.services.canonical_computation_service import CanonicalComputationService
+from app.services.node_cluster_input_provider import NodeClusterInputProvider
 
 
 class PublishedSnapshotRunExistsError(Exception):
@@ -378,33 +379,44 @@ async def compute_feature_snapshot_for_date(
             f"{secondary_timeframe}: insufficient bars ({len(df_15m)} < 60)"
         )
 
-    # [CHANGE-20260718-004 Node Cluster engine] 盘后链一次调用 engine 计算 Node Cluster Profile，
-    # 注入 _compute_all_factors_for_bars(primary)，修复三链不一致缺陷。
-    # secondary 15m 保持单周期 VP 语义（timeframe_volume_profile，非 Node Cluster）。
-    # [CHANGE-20260721-001] 与 indicator_service.compute_node_cluster_standalone 对齐：
-    # 即使 15m 缺失也尝试用空 DataFrame 调用 engine（profile_rows 仍由日线生成），
-    # 显式标记 availability/degraded_reason，供 StockContext 区分 5 态。
+    # [CP-V3-A] Node Cluster 输入由 NodeClusterInputProvider 唯一提供（四链统一入口）。
+    # 盘后链 point-in-time：adjustment_as_of=trade_date + end_date=trade_date，
+    # 保证不读取 trade_date 之后数据，且 qfq 因子不含未来除权事件。
+    # availability 三态状态机由 Provider 预计算：
+    # - available: 250+4000，正常计算
+    # - degraded: history_exhausted=true 且真实历史不足，允许降级计算
+    # - unavailable: INPUT_CONTRACT_VIOLATION / INSUFFICIENT_DAILY_BARS / MISSING_15M_BARS
+    #   → 禁止生成看似正常的 Profile
+    node_input = await NodeClusterInputProvider.get_inputs(
+        session,
+        instrument_id,
+        adjustment_as_of=trade_date,
+        end_date=trade_date,
+    )
     node_cluster_profile: NodeClusterProfileResult | None = None
-    node_availability: str = "unavailable"
-    node_degraded_reason: str | None = "INSUFFICIENT_DAILY_BARS"
-    has_daily = df_1d is not None and not df_1d.empty and len(df_1d) >= 10
-    has_15m = df_15m is not None and not df_15m.empty
-    if not has_daily:
-        node_availability = "unavailable"
-        node_degraded_reason = "INSUFFICIENT_DAILY_BARS"
+    node_availability: str = node_input.availability
+    node_degraded_reason: str | None = node_input.degraded_reason
+    if node_input.availability == "unavailable":
+        # INPUT_CONTRACT_VIOLATION / INSUFFICIENT_DAILY_BARS / MISSING_15M_BARS
+        # 禁止生成 Profile（不调用 Canonical compute）
+        if node_degraded_reason and node_degraded_reason.startswith("INPUT_CONTRACT"):
+            degraded_reasons.append(
+                f"node_cluster: {node_degraded_reason} "
+                f"(daily={node_input.daily_count}/{node_input.daily_requested}, "
+                f"15m={node_input.m15_count}/{node_input.m15_requested})"
+            )
     else:
         try:
             # [CP-13] 经 canonical 调用 node_cluster adapter
-            # adj_factor_hash 是 compute() 命名参数，会被拦截用于 result_hash，
-            # 不传入 kernel_kwargs；adapter 内 adj_factor_hash 默认 None（仅诊断用）。
+            # 使用 Provider 返回的 250+4000 bars + hash（四链一致）
             node_cluster_canonical = await CanonicalComputationService.compute(
                 algorithm_id="node_cluster",
                 instrument_id=instrument_id,
                 as_of=trade_date.isoformat(),
-                source_bar_hash=primary_source_bar_hash,
-                adj_factor_hash=primary_adj_factor_hash,
-                daily_bars=df_1d,
-                bars_15m=df_15m if has_15m else pd.DataFrame(),
+                source_bar_hash=node_input.daily_source_hash,
+                adj_factor_hash=node_input.daily_adj_factor_hash,
+                daily_bars=node_input.daily_bars,
+                bars_15m=node_input.bars_15m,
                 adjustment_as_of=trade_date.isoformat(),
             )
             node_cluster_profile = node_cluster_canonical.payload
@@ -415,16 +427,10 @@ async def compute_feature_snapshot_for_date(
             node_degraded_reason = f"COMPUTE_FAILED: {exc}"
             degraded_reasons.append(f"node_cluster: engine failed: {exc}")
         else:
-            # [CP-13] mypy: node_cluster_profile 在 else 分支非 None（except 分支已 return/continue）
             if node_cluster_profile is None or not node_cluster_profile.profile_rows:
                 node_availability = "unavailable"
                 node_degraded_reason = "PROFILE_EMPTY"
-            elif not has_15m:
-                node_availability = "degraded"
-                node_degraded_reason = "MISSING_15M_BARS"
-            else:
-                node_availability = "available"
-                node_degraded_reason = None
+            # else: 使用 Provider 预计算的 availability（available 或 degraded/INSUFFICIENT_15M_HISTORY）
 
     # 计算 structural factors
     # [CP-13] 经 canonical 调用 structural_features adapter
@@ -522,6 +528,7 @@ async def compute_feature_snapshot_for_date(
         primary_payload["node_cluster"] = node_cluster_dict
     else:
         # profile 计算失败或日线不足：仍写入最小诊断字段，StockContext 显式区分 unavailable 原因
+        # [CP-V3-A] count/hash 来自 NodeClusterInputProvider（四链一致诊断）
         primary_payload["node_cluster"] = {
             "availability": node_availability,
             "degraded_reason": node_degraded_reason,
@@ -529,13 +536,13 @@ async def compute_feature_snapshot_for_date(
             "poc_price": None,
             "vah_price": None,
             "val_price": None,
-            "daily_source_hash": None,
-            "bars_15m_source_hash": None,
+            "daily_source_hash": node_input.daily_source_hash,
+            "bars_15m_source_hash": node_input.m15_source_hash,
             "algorithm_version": None,
             "output_schema_version": None,
             "contract_fingerprint": None,
-            "daily_bars_count": 0 if df_1d is None else len(df_1d) if not df_1d.empty else 0,
-            "bars_15m_count": 0 if df_15m is None else len(df_15m) if not df_15m.empty else 0,
+            "daily_bars_count": node_input.daily_count,
+            "bars_15m_count": node_input.m15_count,
             "profile_rows": [],
             "peak_rows": [],
             "all_peak_prices": [],

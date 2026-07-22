@@ -9,8 +9,9 @@
 5. render_frame.matched=true（bars vs indicators display_frame 一致）
 
 Node Cluster 输入隔离（不视为"第二次行情读取"）：
-- _load_node_cluster_inputs 仍独立查询 completed qfq 日线/15m（合同常量 250/4000）
+- [CP-V3-A] NodeClusterInputProvider 独立查询 completed qfq 日线/15m（合同常量 250/4000）
 - 这些查询参数与展示窗口不同（completed_only=True vs 页面参数），不计入展示周期调用次数
+- 本测试 mock NodeClusterInputProvider.get_inputs，避免 Provider 内部 MDAS 调用干扰展示周期计数
 
 用法：
     APP_ENV=test pytest tests/test_chart_snapshot_atomic.py -v
@@ -157,17 +158,19 @@ def mock_canonical(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def mock_node_cluster(monkeypatch: pytest.MonkeyPatch) -> None:
-    """mock _compute_independent_node_cluster，返回简单 dict（避免真实 Node 计算）。"""
-    async def _mock_node_cluster(daily_bars, bars_15min, *, symbol="",
-                                  instrument_id=None, adjustment_as_of=None,
-                                  daily_source_hash=None, daily_adj_factor_hash=None):
+    """mock _compute_independent_node_cluster，返回简单 dict（避免真实 Node 计算）。
+
+    [CP-V3-A] 新签名：第一参数为 NodeClusterInput 对象（含 daily_bars/bars_15m/hash 等）。
+    """
+    async def _mock_node_cluster(node_input, *, symbol="",
+                                  instrument_id=None):
         return {
             "availability": "available",
             "degraded_reason": None,
             "profile_meta": {
                 "profile_hash": "mock_profile_hash",
-                "daily_source_hash": daily_source_hash,
-                "bars_15m_source_hash": None,
+                "daily_source_hash": getattr(node_input, "daily_source_hash", None),
+                "bars_15m_source_hash": getattr(node_input, "m15_source_hash", None),
                 "algorithm_version": "nc-v1",
                 "contract_fingerprint": "nc-cf-v1",
             },
@@ -177,6 +180,39 @@ def mock_node_cluster(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(
         indicator_service, "_compute_independent_node_cluster", _mock_node_cluster
+    )
+
+
+@pytest.fixture
+def mock_node_input_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[CP-V3-A] mock NodeClusterInputProvider.get_inputs，返回 availability=available 的输入。
+
+    避免 Provider 内部 MDAS 调用干扰展示周期 MDAS 调用计数（spy MDAS 只 patch
+    indicator_service.MarketDataAggregationService，不 patch Provider 内部的 MDAS）。
+    """
+    from app.services.node_cluster_input_provider import NodeClusterInput, NodeClusterInputProvider
+
+    async def _mock_get_inputs(session, instrument_id, *, adjustment_as_of=None, end_date=None):
+        return NodeClusterInput(
+            daily_bars=_build_bars("1d", length=250),
+            bars_15m=_build_bars("15m", length=4000),
+            daily_source_hash="mock_daily_hash",
+            daily_adj_factor_hash="mock_daily_adj",
+            m15_source_hash="mock_m15_hash",
+            m15_adj_factor_hash="mock_m15_adj",
+            daily_count=250,
+            m15_count=4000,
+            daily_requested=250,
+            m15_requested=4000,
+            daily_history_exhausted=False,
+            m15_history_exhausted=False,
+            availability="available",
+            degraded_reason=None,
+            adjustment_as_of=adjustment_as_of,
+        )
+
+    monkeypatch.setattr(
+        NodeClusterInputProvider, "get_inputs", _mock_get_inputs
     )
 
 
@@ -201,6 +237,7 @@ async def test_preloaded_skips_display_timeframe_mdas_call(
     empty_registry: None,
     mock_canonical: None,
     mock_node_cluster: None,
+    mock_node_input_provider: None,
     mock_strategy_keys: None,
     monkeypatch: pytest.MonkeyPatch,
     display_tf: str,
@@ -242,6 +279,7 @@ async def test_without_preloaded_calls_mdas_for_display_timeframe(
     empty_registry: None,
     mock_canonical: None,
     mock_node_cluster: None,
+    mock_node_input_provider: None,
     mock_strategy_keys: None,
     monkeypatch: pytest.MonkeyPatch,
     display_tf: str,
@@ -280,6 +318,7 @@ async def test_preloaded_hash_propagated_to_indicators(
     empty_registry: None,
     mock_canonical: None,
     mock_node_cluster: None,
+    mock_node_input_provider: None,
     mock_strategy_keys: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -328,6 +367,7 @@ async def test_redis_unavailable_still_atomic(
     empty_registry: None,
     mock_canonical: None,
     mock_node_cluster: None,
+    mock_node_input_provider: None,
     mock_strategy_keys: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -385,6 +425,7 @@ async def test_partial_bar_does_not_change_completed_hash(
     empty_registry: None,
     mock_canonical: None,
     mock_node_cluster: None,
+    mock_node_input_provider: None,
     mock_strategy_keys: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -443,6 +484,7 @@ async def test_render_frame_matched_true_with_preloaded(
     empty_registry: None,
     mock_canonical: None,
     mock_node_cluster: None,
+    mock_node_input_provider: None,
     mock_strategy_keys: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -34,6 +34,7 @@ from app.services.feature_snapshot_service import (
     compute_feature_snapshot_for_date,
     upsert_snapshot,
 )
+from app.services.node_cluster_input_provider import NodeClusterInput
 
 # ===== 1. build_summary_payload =====
 
@@ -1039,6 +1040,44 @@ def _build_15m_bars(n: int = 1000, seed: int = 7) -> pd.DataFrame:
     }, index=idx)
 
 
+def _build_node_input(
+    *,
+    daily_bars: pd.DataFrame | None = None,
+    bars_15m: pd.DataFrame | None = None,
+    availability: str = "available",
+    degraded_reason: str | None = None,
+    daily_count: int | None = None,
+    m15_count: int | None = None,
+    adjustment_as_of: date | None = None,
+) -> NodeClusterInput:
+    """[CP-V3-A] 构造 mock NodeClusterInput（4 个 Node 状态测试共用）。
+
+    默认返回 available 态 + 250 daily + 4000 15m bars，调用方可覆盖任一字段。
+    count 默认从 bars 长度推断；空 DataFrame 须显式传 daily_count/m15_count。
+    """
+    if daily_bars is None:
+        daily_bars = _build_daily_bars(n=250)
+    if bars_15m is None:
+        bars_15m = _build_15m_bars(n=4000)
+    return NodeClusterInput(
+        daily_bars=daily_bars,
+        bars_15m=bars_15m,
+        daily_source_hash="mock_daily_hash",
+        daily_adj_factor_hash="mock_daily_adj",
+        m15_source_hash="mock_m15_hash",
+        m15_adj_factor_hash="mock_m15_adj",
+        daily_count=daily_count if daily_count is not None else len(daily_bars),
+        m15_count=m15_count if m15_count is not None else len(bars_15m),
+        daily_requested=250,
+        m15_requested=4000,
+        daily_history_exhausted=False,
+        m15_history_exhausted=False,
+        availability=availability,
+        degraded_reason=degraded_reason,
+        adjustment_as_of=adjustment_as_of,
+    )
+
+
 @pytest.mark.asyncio
 async def test_compute_snapshot_writes_node_cluster_available_state() -> None:
     """日线 + 15m 齐全且 profile 非空 → node_cluster.availability='available'。"""
@@ -1053,10 +1092,23 @@ async def test_compute_snapshot_writes_node_cluster_available_state() -> None:
     mock_result.first.return_value = ("000001",)
     mock_session.execute = AsyncMock(return_value=mock_result)
 
-    snapshot = await compute_feature_snapshot_for_date(
-        mock_session, uuid.uuid4(), target_date,
-        primary_bars=daily, secondary_bars=bars_15m,
+    # [CP-V3-A] mock NodeClusterInputProvider.get_inputs 返回 available 态 + 完整 250+4000 bars。
+    # primary_bars/secondary_bars 仅供 structural factors 计算使用；
+    # node_cluster 输入由 Provider 唯一提供（四链统一入口）。
+    mock_node_input = _build_node_input(
+        daily_bars=_build_daily_bars(n=250),
+        bars_15m=_build_15m_bars(n=4000),
+        availability="available",
+        adjustment_as_of=target_date,
     )
+    with patch(
+        "app.services.feature_snapshot_service.NodeClusterInputProvider.get_inputs",
+        AsyncMock(return_value=mock_node_input),
+    ):
+        snapshot = await compute_feature_snapshot_for_date(
+            mock_session, uuid.uuid4(), target_date,
+            primary_bars=daily, secondary_bars=bars_15m,
+        )
 
     # schema_version 必须 bump 到 4
     assert _SCHEMA_VERSION == 4
@@ -1098,7 +1150,7 @@ async def test_compute_snapshot_writes_node_cluster_available_state() -> None:
 
 @pytest.mark.asyncio
 async def test_compute_snapshot_writes_node_cluster_missing_15m_state() -> None:
-    """日线齐全但 15m bars 为空 → availability='degraded', degraded_reason='MISSING_15M_BARS'。"""
+    """日线齐全但 15m bars 为空 → availability='unavailable', degraded_reason='MISSING_15M_BARS'。"""
     daily = _build_daily_bars(n=250)
     target_date = daily.index[200].date()
     empty_15m = pd.DataFrame()
@@ -1108,21 +1160,32 @@ async def test_compute_snapshot_writes_node_cluster_missing_15m_state() -> None:
     mock_result.first.return_value = ("000001",)
     mock_session.execute = AsyncMock(return_value=mock_result)
 
-    snapshot = await compute_feature_snapshot_for_date(
-        mock_session, uuid.uuid4(), target_date,
-        primary_bars=daily, secondary_bars=empty_15m,
+    # [CP-V3-A] mock NodeClusterInputProvider.get_inputs 返回 unavailable/MISSING_15M_BARS。
+    # 新状态机：15m=0 直接 unavailable，禁止调用 engine 生成看似正常的 Profile。
+    mock_node_input = _build_node_input(
+        daily_bars=_build_daily_bars(n=250),
+        bars_15m=empty_15m,
+        availability="unavailable",
+        degraded_reason="MISSING_15M_BARS",
+        daily_count=250,
+        m15_count=0,
+        adjustment_as_of=target_date,
     )
+    with patch(
+        "app.services.feature_snapshot_service.NodeClusterInputProvider.get_inputs",
+        AsyncMock(return_value=mock_node_input),
+    ):
+        snapshot = await compute_feature_snapshot_for_date(
+            mock_session, uuid.uuid4(), target_date,
+            primary_bars=daily, secondary_bars=empty_15m,
+        )
 
     sp = snapshot.structural_payload
     nc = sp["primary"]["1d"].get("node_cluster")
-    # 15m 缺失时，engine 仍尝试用空 df 计算；如果生成 profile_rows，则为 degraded；否则为 unavailable
     assert nc is not None, "node_cluster 字段必须写入（即使 15m 缺失）"
-    assert nc["availability"] in ("degraded", "unavailable")
-    if nc["availability"] == "degraded":
-        assert nc["degraded_reason"] == "MISSING_15M_BARS"
-    else:
-        # engine 用空 15m 无法生成 profile → unavailable/PROFILE_EMPTY
-        assert nc["degraded_reason"] == "PROFILE_EMPTY"
+    # [CP-V3-A] 新状态机：15m=0 → unavailable/MISSING_15M_BARS（不再生成 PROFILE_EMPTY）
+    assert nc["availability"] == "unavailable"
+    assert nc["degraded_reason"] == "MISSING_15M_BARS"
 
 
 @pytest.mark.asyncio
@@ -1136,20 +1199,39 @@ async def test_compute_snapshot_writes_node_cluster_insufficient_daily_state() -
     mock_result.first.return_value = ("000001",)
     mock_session.execute = AsyncMock(return_value=mock_result)
 
-    snapshot = await compute_feature_snapshot_for_date(
-        mock_session, uuid.uuid4(), target_date,
-        primary_bars=short_daily, secondary_bars=short_daily,
+    # [CP-V3-A] mock NodeClusterInputProvider.get_inputs 返回 unavailable/INSUFFICIENT_DAILY_BARS。
+    # Provider 状态机检测到 daily<10 时直接 unavailable，禁止调用 engine。
+    mock_node_input = _build_node_input(
+        daily_bars=short_daily,
+        bars_15m=_build_15m_bars(n=4000),
+        availability="unavailable",
+        degraded_reason="INSUFFICIENT_DAILY_BARS",
+        daily_count=5,
+        m15_count=4000,
+        adjustment_as_of=target_date,
     )
+    with patch(
+        "app.services.feature_snapshot_service.NodeClusterInputProvider.get_inputs",
+        AsyncMock(return_value=mock_node_input),
+    ):
+        snapshot = await compute_feature_snapshot_for_date(
+            mock_session, uuid.uuid4(), target_date,
+            primary_bars=short_daily, secondary_bars=short_daily,
+        )
 
     sp = snapshot.structural_payload
     nc = sp["primary"]["1d"].get("node_cluster")
     assert nc is not None, "node_cluster 字段必须写入（即使日线不足）"
     assert nc["availability"] == "unavailable"
     assert nc["degraded_reason"] == "INSUFFICIENT_DAILY_BARS"
-    # 诊断字段为 None
+    # profile 相关字段为 None（engine 未运行）
     assert nc["poc_price"] is None
     assert nc["profile_hash"] is None
-    assert nc["daily_source_hash"] is None
+    # [CP-V3-A] count/hash 仍从 Provider 写入（四链一致诊断字段，不再为 None）
+    assert nc["daily_source_hash"] == "mock_daily_hash"
+    assert nc["bars_15m_source_hash"] == "mock_m15_hash"
+    assert nc["daily_bars_count"] == 5
+    assert nc["bars_15m_count"] == 4000
     # [PROMPT.md §5.2.2 V2] profile 为空时 price_state 仍写入最小结构
     assert "price_state" in nc, "unavailable 态也必须包含 price_state"
     ps = nc["price_state"]
@@ -1176,9 +1258,19 @@ async def test_compute_snapshot_node_cluster_field_stable_when_engine_raises() -
     mock_result.first.return_value = ("000001",)
     mock_session.execute = AsyncMock(return_value=mock_result)
 
+    # [CP-V3-A] mock Provider 返回 available 态，让 engine 真正被调用后抛异常 → 验证 COMPUTE_FAILED 降级
+    mock_node_input = _build_node_input(
+        daily_bars=_build_daily_bars(n=250),
+        bars_15m=_build_15m_bars(n=4000),
+        availability="available",
+        adjustment_as_of=target_date,
+    )
     # [CP-13] 迁移到 canonical 后，patch compute_node_cluster_adapter（仅 node_cluster 失败）
     # 其他算法（structural_features/macd/bollinger/relation）仍走真实 canonical 路径。
     with patch(
+        "app.services.feature_snapshot_service.NodeClusterInputProvider.get_inputs",
+        AsyncMock(return_value=mock_node_input),
+    ), patch(
         "app.services.canonical_adapters.compute_node_cluster_adapter",
         side_effect=RuntimeError("mocked engine failure"),
     ):

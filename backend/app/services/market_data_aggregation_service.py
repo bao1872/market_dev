@@ -21,6 +21,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import random
 import uuid
 from dataclasses import dataclass
@@ -61,6 +62,16 @@ _ALLOWED_ADJ: set[str] = {"qfq", "none"}
 _DEFAULT_DAILY_LOOKBACK_DAYS: int = 5000
 _DEFAULT_INTRADAY_LOOKBACK_DAYS: int = 180
 
+# [CP-V3-A] - 描述: 日内周期每交易日 bar 根数（用于 limit 驱动的回看天数计算）
+# A 股交易日 4 小时：15m=16 根，1h=4 根，1m=240 根
+_BARS_PER_DAY: dict[str, int] = {"15m": 16, "1h": 4, "1m": 240}
+
+# [CP-V3-A] - 描述: 日内回看安全边界（最大回看天数，约 20 年，防止无限扩大查询）
+_MAX_INTRADAY_LOOKBACK_DAYS: int = 5000
+
+# [CP-V3-A] - 描述: limit 驱动回看的额外 buffer 天数（确保交易日充足）
+_LIMIT_LOOKBACK_BUFFER_DAYS: int = 10
+
 # [mdas] - 描述: A 股收盘时间，日线 bar 完成边界
 _DAILY_CLOSE_TIME: dt_time = dt_time(15, 0)
 
@@ -69,8 +80,9 @@ _MIN_CACHE_TTL: int = 5
 _MAX_CACHE_TTL: int = 15
 _REDIS_CACHE_PREFIX: str = "mdas"
 
-# [mdas] - 描述: 行情数据契约版本（CHANGE-20260717-002 引入 v2，含 hash/as_of/completed_through）
-_MARKET_DATA_CONTRACT_VERSION: str = "v2"
+# [CP-V3-A] - 描述: 行情数据契约版本 v3（count-aware：含 requested_count/actual_count/
+#   coverage_start/coverage_end/history_exhausted，支持 availability 三态状态机）
+_MARKET_DATA_CONTRACT_VERSION: str = "v3"
 
 # [mdas] - 描述: 1m → 15m/1h 聚合频率映射
 _TARGET_FREQ: dict[str, str] = {"15m": "15min", "1h": "60min"}
@@ -90,6 +102,14 @@ class BarAggregationResult:
     - adj_factor_hash: 因子序列 SHA256 前 16 字符（adj=none 时为空串）
     - adjustment_as_of: 回显复权锚点（None=最新）
     - completed_through: 最新已完成 bar 时间（不含 partial/realtime）
+
+    [CP-V3-A] v3 契约扩展（count-aware，支持 availability 三态状态机）：
+    - requested_count: 调用方请求的 limit 值（None=未指定）
+    - actual_count: 实际返回的 bars 数量
+    - coverage_start: bars 最早时间（None=空数据）
+    - coverage_end: bars 最晚时间（None=空数据）
+    - history_exhausted: DB/上游历史是否不足（True=真实历史不够；
+      False=历史足够但可能因系统回看窗口未取满——后者为 INPUT_CONTRACT_VIOLATION）
     """
 
     bars: pd.DataFrame
@@ -108,6 +128,12 @@ class BarAggregationResult:
     adj_factor_hash: str = ""
     adjustment_as_of: date | None = None
     completed_through: pd.Timestamp | None = None
+    # [CP-V3-A] count-aware 字段
+    requested_count: int | None = None
+    actual_count: int = 0
+    coverage_start: pd.Timestamp | None = None
+    coverage_end: pd.Timestamp | None = None
+    history_exhausted: bool = False
 
 
 # ===== 交易时间判断 =====
@@ -178,8 +204,16 @@ def _resolve_date_range(
     timeframe: str,
     start_date: date | datetime | None,
     end_date: date | datetime | None,
+    *,
+    limit: int | None = None,
 ) -> tuple[date, date] | tuple[datetime, datetime]:
-    """解析查询范围。"""
+    """解析查询范围。
+
+    [CP-V3-A] count-aware 回补：当 limit 指定且 timeframe 为日内周期时，
+    自动根据 limit 和每交易日 bar 根数计算所需最小回看天数，与
+    _DEFAULT_INTRADAY_LOOKBACK_DAYS 取较大值，确保 actual_count 达到 limit。
+    安全边界：最大不超过 _MAX_INTRADAY_LOOKBACK_DAYS（约 20 年）。
+    """
     # [mdas] - 描述: 统一使用上海业务日期，避免服务器本地时区跨日误判
     today = shanghai_business_date()
     if timeframe in ("1d", "1w", "1mo"):
@@ -197,7 +231,7 @@ def _resolve_date_range(
             start = end - timedelta(days=_DEFAULT_DAILY_LOOKBACK_DAYS)
         return start, end
 
-    # 15m / 1h
+    # 15m / 1h / 1m
     if isinstance(end_date, datetime):
         end = end_date
     else:
@@ -205,8 +239,19 @@ def _resolve_date_range(
     if isinstance(start_date, datetime):
         start = start_date
     else:
+        # [CP-V3-A] count-aware：limit 驱动的回看天数计算
+        lookback_days = _DEFAULT_INTRADAY_LOOKBACK_DAYS
+        if start_date is None and limit is not None:
+            bars_per_day = _BARS_PER_DAY.get(timeframe, 16)
+            min_days_needed = (
+                math.ceil(limit / bars_per_day) + _LIMIT_LOOKBACK_BUFFER_DAYS
+            )
+            lookback_days = min(
+                max(_DEFAULT_INTRADAY_LOOKBACK_DAYS, min_days_needed),
+                _MAX_INTRADAY_LOOKBACK_DAYS,
+            )
         start = datetime.combine(
-            start_date or (end.date() - timedelta(days=_DEFAULT_INTRADAY_LOOKBACK_DAYS)),
+            start_date or (end.date() - timedelta(days=lookback_days)),
             datetime.min.time(),
         )
     return start, end
@@ -481,6 +526,20 @@ def _serialize_result(result: BarAggregationResult) -> str:
             if result.completed_through is not None
             else None
         ),
+        # [CP-V3-A] count-aware 字段
+        "requested_count": result.requested_count,
+        "actual_count": result.actual_count,
+        "coverage_start": (
+            result.coverage_start.isoformat()
+            if result.coverage_start is not None
+            else None
+        ),
+        "coverage_end": (
+            result.coverage_end.isoformat()
+            if result.coverage_end is not None
+            else None
+        ),
+        "history_exhausted": result.history_exhausted,
     }
     return json.dumps(payload)
 
@@ -545,6 +604,20 @@ def _deserialize_result(raw: str) -> BarAggregationResult | None:
                 if payload.get("completed_through") is not None
                 else None
             ),
+            # [CP-V3-A] count-aware 字段（向后兼容：旧缓存无这些字段时用默认值）
+            requested_count=payload.get("requested_count"),
+            actual_count=payload.get("actual_count", len(bars)),
+            coverage_start=(
+                pd.Timestamp(payload["coverage_start"])
+                if payload.get("coverage_start") is not None
+                else None
+            ),
+            coverage_end=(
+                pd.Timestamp(payload["coverage_end"])
+                if payload.get("coverage_end") is not None
+                else None
+            ),
+            history_exhausted=payload.get("history_exhausted", False),
         )
     except Exception as exc:
         logger.warning("MDAS 缓存反序列化失败: %s", exc)
@@ -654,7 +727,7 @@ class MarketDataAggregationService:
             cached.freshness_seconds = (now - cached.as_of).total_seconds()
             return cached
 
-        start, end = _resolve_date_range(timeframe, start_date, end_date)
+        start, end = _resolve_date_range(timeframe, start_date, end_date, limit=limit)
 
         bars_df = pd.DataFrame()
         data_source = "db"
@@ -836,6 +909,9 @@ class MarketDataAggregationService:
         # [mdas] - completed_through = 最新已完成 DB bar 时间（不含 partial/realtime）
         completed_through = last_persisted_bar_time
 
+        # [CP-V3-A] 记录 limit 截取前的原始数量（用于 history_exhausted 判定）
+        pre_limit_count = len(bars_df) if not bars_df.empty else 0
+
         # [mdas] - limit / warmup 截取（在 hash 计算前，保证相同 limit 下 hash 稳定）
         warmup_bars_full: pd.DataFrame | None = None
         if warmup_bars > 0 and not bars_df.empty:
@@ -850,6 +926,21 @@ class MarketDataAggregationService:
         source_bar_hash = (
             compute_source_bar_hash(bars_df, timeframe) if not bars_df.empty else ""
         )
+
+        # [CP-V3-A] count-aware 诊断字段
+        actual_count = len(bars_df) if not bars_df.empty else 0
+        coverage_start: pd.Timestamp | None = (
+            pd.Timestamp(bars_df.index[0]) if not bars_df.empty else None
+        )
+        coverage_end: pd.Timestamp | None = (
+            pd.Timestamp(bars_df.index[-1]) if not bars_df.empty else None
+        )
+        # history_exhausted: DB 原始返回数量 < limit 说明 DB/上游真实历史不足
+        # （False 时若 actual_count < limit 则为系统回看窗口不足 = INPUT_CONTRACT_VIOLATION）
+        if limit is not None and pre_limit_count < limit:
+            history_exhausted = True
+        else:
+            history_exhausted = False
 
         result = BarAggregationResult(
             bars=bars_df,
@@ -866,6 +957,12 @@ class MarketDataAggregationService:
             adj_factor_hash=adj_factor_hash,
             adjustment_as_of=adjustment_as_of,
             completed_through=completed_through,
+            # [CP-V3-A] count-aware 字段
+            requested_count=limit,
+            actual_count=actual_count,
+            coverage_start=coverage_start,
+            coverage_end=coverage_end,
+            history_exhausted=history_exhausted,
         )
 
         _cache_set(cache_key, result)
