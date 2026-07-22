@@ -70,7 +70,7 @@
 | `/quote` 时区输出 `+08:00` | `test_quote_timezone.py` |
 | `/quote` 可信化字段（source/is_realtime/freshness_seconds/degraded/degraded_reason） | `test_quote_trustworthy.py` |
 | K线实时契约（blocking）：交易时段 1d partial、收盘后 non-partial、`/quote` +08:00、前端 bars 状态展示、不可信 quote 不混入 K 线 | `test_market_data_aggregation_partial_daily.py`, `test_quote_timezone.py`, `test_quote_trustworthy.py`, `frontend/src/utils/__tests__/chart.test.ts` |
-| 后端已返回 1d partial bar 时前端不得用 quote 覆盖；后端未返回 partial bar 时 quote 可兜底追加 | `frontend/src/utils/__tests__/chart.test.ts` |
+| **禁止前端 quote→bar 兜底（CP-V3-D2 修正）**：Exchange→MDAS→ChartSnapshot→Canvas 为唯一 K 线链；后端已返回 1d partial bar 时前端不得用 quote 覆盖；后端未返回 partial bar 时也不得用 quote 兜底追加（前端 `mergeRealtimeQuoteIntoBars` 禁用） | `frontend/src/utils/__tests__/chart.test.ts` |
 | **BarRepository.get_recent_bars**：按 instrument/timeframe 查询最近 N 根 bar；空表/不足/边界/多 instrument 隔离/时间排序/limit 截断/字段完整 | `test_bar_repository_get_recent_bars.py`（8 个用例） |
 | **个股详情市值字段（CHANGE-20260713-010）**：`/quote` 返回 `total_market_cap`/`float_market_cap`/`market_cap_as_of`/`market_cap_source`/`market_cap_degraded_reason`；价格与股本必须同一 `share_as_of`；股本缺失时 `degraded_reason="market_cap_data_unavailable"` 不伪造；quote 端点不发起第三方联网，从 `instruments.total_share`/`float_share`/`share_as_of` 读取并按当前价格计算 | `test_share_capital.py`（14 用例：migration upgrade/downgrade、字段 nullable、sync_share_capitals 成功/失败/BJ 跳过、quote 端点 market_cap 计算 + 数据缺失降级、单位校验）+ 84 项无截图 E2E 已 PASS |
 | **股本每日同步（CHANGE-20260713-010）**：`instrument_share_capital_sync_service.sync_share_capitals` 通过 `pytdx.get_finance_info` 同步 SH/SZ 股本（BJ 跳过）；批次 500；`asyncio.to_thread` 包装阻塞调用；写 `share_as_of=trade_date`；幂等 upsert；只保留最新态不做历史回填；18:00 触发；失败保留旧值（不更新失败 symbol） | `test_share_capital.py`（14 用例，含失败保留旧值断言）+ 84 项无截图 E2E 已 PASS |

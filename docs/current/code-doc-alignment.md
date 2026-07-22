@@ -87,8 +87,8 @@
 
 ### CP-V3-B2: 实时 partial bar 收口
 - **差异**: /quote 实时与 /bars 1d realtime 语义混淆
-- **修复**: /bars?timeframe=1d&include_realtime=true 必须返回今日 partial daily bar；前端 mergeRealtimeQuoteIntoBars 只作兜底
-- **状态**: CLOSED (@ 4dab274)
+- **修复**: /bars?timeframe=1d&include_realtime=true 必须返回今日 partial daily bar；**禁止前端 mergeRealtimeQuoteIntoBars 或任何 quote→bar 兜底**（CP-V3-D2 修正：Exchange→MDAS→ChartSnapshot→Canvas 为唯一 K 线链）
+- **状态**: CLOSED (@ 4dab274) — 后端 partial bar 合同已实现；前端兜底禁止在 CP-V3-D2 修正
 
 ### CP-V3-C2: SMC 严格 time-key
 - **差异**: SMC 渲染使用 index fallback，viewport 250→90 时标签错位
@@ -98,9 +98,19 @@
 ### CP-V3-D: 因子版本追踪 + auto-resume
 - **差异**: instruments factor 版本字段从未写入；auto-resume 缺乏受控测试
 - **修复**: stamp_factor_reconciliation_version + find_stale_version_instruments；9 个 auto-resume + 6 个因子版本测试
-- **状态**: CLOSED (@ 9001ca0)
+- **状态**: CLOSED (@ 9001ca0) — 注：`find_stale_version_instruments` 定义但未接入 after-close 生产调用链（CP-V3-D2 分析）；`stamp_factor_reconciliation_version` 已接入 `_rebuild_single` 成功路径
 
 ### CP-V3-E: docs/AGENTS 收口
 - **差异**: AGENTS.md 289 行超过 180-220 目标
 - **修复**: 压缩到 181 行；新增 §7.12/§7.14/§7.22 规则；ADR-0003 SMC time-key
 - **状态**: CLOSED
+
+### CP-V3-A3: MDAS 长期停牌边界修正
+- **差异**: `_fetch_intraday_with_backfill` 的"连续2轮无新增→history_exhausted"对长期停牌不安全
+- **修复**: listing_date 作为历史下界；no_progress 有界递增步长（90→720）；max_rounds 未到边界→INPUT_CONTRACT_VIOLATION
+- **状态**: CLOSED (@ d5e0848)
+
+### CP-V3-D2: 因子版本首次运行安全 bootstrap
+- **差异**: `find_stale_version_instruments` 未接入生产；8272 NULL 版本字段无安全 bootstrap；`mergeRealtimeQuoteIntoBars` 矛盾
+- **修复**: `bootstrap_factor_version_baseline` 基于 dry_run 证据写版本基线；find_stale docstring 警告；禁止前端 quote→bar 兜底（04-frontend-ux/code-doc-alignment/test-coverage-map/frontend-route-map/AGENTS 同步）
+- **状态**: CLOSED (@ 64514d2) — 注：bootstrap 未在生产执行（本轮不修改生产 DB）；10 needs_rebuild 清单 UNKNOWN
