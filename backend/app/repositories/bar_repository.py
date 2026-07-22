@@ -192,6 +192,32 @@ async def _get_symbol(session: AsyncSession, instrument_id: uuid.UUID) -> str | 
         raise
 
 
+async def _get_listing_date(session: AsyncSession, instrument_id: uuid.UUID) -> date | None:
+    """查询 instruments 表获取上市日期。
+
+    Args:
+        session: 异步会话
+        instrument_id: 标的 UUID
+
+    Returns:
+        上市日期（date）或 None（未记录或标的不存在）
+    """
+    try:
+        result = await session.execute(
+            text("SELECT listing_date FROM instruments WHERE id = :id"),
+            {"id": instrument_id},
+        )
+        row = result.first()
+        return row[0] if row else None
+    except Exception as exc:
+        logger.warning(
+            "查询 instrument listing_date 失败 instrument_id=%s: %s",
+            instrument_id,
+            exc,
+        )
+        return None
+
+
 async def _query_daily_bars(
     session: AsyncSession,
     instrument_id: uuid.UUID,
