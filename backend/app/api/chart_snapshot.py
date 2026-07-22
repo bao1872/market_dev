@@ -58,13 +58,7 @@ from app.api.bars import _df_to_responses
 from app.core.deps import get_db
 from app.core.time import now_shanghai
 from app.schemas.bar import BarListResponse
-from app.services.indicator_display_frame import (
-    DisplayWindowSpec,
-    build_display_frame,
-    is_display_frame_match,
-)
-from app.services.indicator_service import compute_all_indicators
-from app.services.market_data_aggregation_service import MarketDataAggregationService
+from app.services.chart_snapshot_service import ChartSnapshotService
 
 logger = logging.getLogger("api.chart_snapshot")
 
@@ -156,25 +150,16 @@ async def get_chart_snapshot(
         include_smc, include_realtime, completed_only, adjustment_as_of,
     )
 
-    # 2. 构建 DisplayWindowSpec（与 bars/indicators API 共用同一 Spec）
-    spec = DisplayWindowSpec(
-        instrument_id=str(instrument_id),
-        timeframe=timeframe,
-        adj=adj,
-        requested_count=bars,
-        include_realtime=include_realtime,
-        completed_only=completed_only,
-        adjustment_as_of=(str(adjustment_as_of) if adjustment_as_of else None),
-    )
-
-    # 3. 一次 MDAS get_bars 获取展示窗口 DataFrame（写入 Redis 短缓存）
-    mdas = MarketDataAggregationService()
+    # 2. [CP-V3-B] 调用统一 ChartSnapshotService — 一次 MDAS 读取 → 同一 DataFrame
+    #    生成 bars 和 indicators → render_frame（与 Capture 共用同一服务）
     try:
-        bars_result = await mdas.get_bars(
-            db,
-            instrument_id,
+        snapshot_result = await ChartSnapshotService.compute_bars_and_indicators(
+            session=db,
+            instrument_id=instrument_id,
             timeframe=timeframe,
             adj=adj,
+            bars=bars,
+            include_smc=include_smc,
             include_realtime=include_realtime,
             completed_only=completed_only,
             adjustment_as_of=adjustment_as_of,
@@ -188,7 +173,7 @@ async def get_chart_snapshot(
         ) from exc
     except Exception as exc:
         logger.warning(
-            "[ChartSnapshot] MDAS 行情聚合失败 instrument_id=%s: %s",
+            "[ChartSnapshot] ChartSnapshotService 失败 instrument_id=%s: %s",
             instrument_id, exc,
         )
         raise HTTPException(
@@ -196,115 +181,23 @@ async def get_chart_snapshot(
             detail=f"行情聚合失败: {exc}",
         ) from exc
 
-    df = bars_result.bars
+    bars_result = snapshot_result.bars_result
+    bars_display_frame = snapshot_result.bars_display_frame
+    indicators_response = snapshot_result.indicators
+    render_frame = snapshot_result.render_frame
 
-    # completed_through 转换为 tz-aware datetime（与 bars API 同款）
+    # completed_through 转换为 tz-aware datetime（BarListResponse 需要 datetime 对象）
     _completed_through = bars_result.completed_through
     if _completed_through is not None and isinstance(_completed_through, pd.Timestamp):
         if _completed_through.tzinfo is None:
             _completed_through = _completed_through.tz_localize("Asia/Shanghai")
         _completed_through = _completed_through.to_pydatetime()
 
-    # 4. 服务端分页：取末尾 `bars` 根（与 bars API page=1, page_size=bars 等价）
-    if df.empty:
-        # 空数据：构建空 bars response（display_hash="", display_times=[]）
-        empty_display_frame = build_display_frame(
-            instrument_id=str(instrument_id),
-            timeframe=timeframe,
-            adj=adj,
-            display_df=df,
-            completed_through=_completed_through.isoformat() if _completed_through else None,
-            spec=spec,
-            is_partial=bars_result.is_partial,
-        )
-        bars_response = BarListResponse(
-            items=[],
-            total=0,
-            page=1,
-            page_size=bars,
-            timeframe=timeframe,
-            adj=adj,
-            data_source=bars_result.data_source,
-            as_of=bars_result.as_of,
-            is_partial=bars_result.is_partial,
-            last_persisted_bar_time=(
-                bars_result.last_persisted_bar_time.to_pydatetime()
-                if bars_result.last_persisted_bar_time is not None
-                else None
-            ),
-            last_live_bar_time=(
-                bars_result.last_live_bar_time.to_pydatetime()
-                if bars_result.last_live_bar_time is not None
-                else None
-            ),
-            freshness_seconds=bars_result.freshness_seconds,
-            degraded=bars_result.degraded,
-            degraded_reason=bars_result.degraded_reason,
-            source_bar_hash=bars_result.source_bar_hash or None,
-            adj_factor_hash=bars_result.adj_factor_hash or None,
-            market_data_contract_version=bars_result.market_data_contract_version,
-            completed_through=_completed_through,
-            adjustment_as_of=bars_result.adjustment_as_of,
-            display_frame=empty_display_frame,
-        )
-        # 空数据时 indicators 也无法计算，返回空响应
-        empty_indicators = {
-            "layers": [],
-            "data": {},
-            "errors": {"_chart_snapshot": "no bars data"},
-            "timeframe": timeframe,
-            "source_bar_times": [],
-            "source_bar_hash": "",
-            "display_frame": empty_display_frame,
-        }
-        total_ms = int((time.time() - start_ms) * 1000)
-        if response is not None:
-            response.headers["X-Data-Source"] = bars_result.data_source
-            response.headers["X-Cache-Hit"] = "true" if bars_result.cache_hit else "false"
-            response.headers["X-Render-Matched"] = "true"
-            response.headers["X-Total-Ms"] = str(total_ms)
-        return {
-            "bars": bars_response.model_dump(mode="json"),
-            "indicators": empty_indicators,
-            "snapshot_time": now_shanghai().isoformat(),
-            "render_frame": {
-                "matched": True,
-                "bars_hash": "",
-                "indicators_hash": "",
-                "bars_count": 0,
-                "indicators_count": 0,
-                "bars_first_time": None,
-                "indicators_first_time": None,
-                "bars_last_time": None,
-                "indicators_last_time": None,
-                "bars_adjustment_as_of": spec.adjustment_as_of,
-                "indicators_adjustment_as_of": spec.adjustment_as_of,
-            },
-            "timeframe": timeframe,
-        }
-
-    # 非空数据：分页取末尾 `bars` 根
-    total = len(df)
-    end_idx = total
-    start_idx = max(0, end_idx - bars)
-    page_df = df.iloc[start_idx:end_idx]
-
-    items = _df_to_responses(page_df, instrument_id, timeframe)
-
-    # 5. 构建 bars display_frame（与 bars API 同款 build_display_frame）
-    bars_display_frame = build_display_frame(
-        instrument_id=str(instrument_id),
-        timeframe=timeframe,
-        adj=adj,
-        display_df=page_df,
-        completed_through=_completed_through.isoformat() if _completed_through else None,
-        spec=spec,
-        is_partial=bars_result.is_partial,
-    )
-
+    # 3. 构建 BarListResponse（从 service 返回的 page_df 构建 bars items）
+    items = _df_to_responses(snapshot_result.page_df, instrument_id, timeframe)
     bars_response = BarListResponse(
         items=items,
-        total=total,
+        total=len(snapshot_result.page_df),
         page=1,
         page_size=bars,
         timeframe=timeframe,
@@ -333,83 +226,12 @@ async def get_chart_snapshot(
         display_frame=bars_display_frame,
     )
 
-    # 6. 调用 compute_all_indicators — 传入预加载的 bars_result（CP-16 单输入原子性）
-    #    [CP-16] 不再依赖 Redis 缓存间接同步，直接将同一 DataFrame 传给指标计算。
-    #    一个 chart-snapshot 请求内，展示周期 MDAS get_bars 调用次数 = 1（仅 L164 那次）。
-    #    compute_all_indicators 内部 Node Cluster 日线/15m 仍独立查询（completed qfq 合同）。
-    try:
-        indicators_response = await compute_all_indicators(
-            session=db,
-            instrument_id=instrument_id,
-            timeframe=timeframe,
-            adj=adj,
-            bars=bars,
-            include_smc=include_smc,
-            include_realtime=include_realtime,
-            completed_only=completed_only,
-            adjustment_as_of=adjustment_as_of,
-            preloaded_display_bars=bars_result,
-        )
-    except ValueError as exc:
-        logger.warning(
-            "[ChartSnapshot] compute_all_indicators 失败(业务) instrument_id=%s: %s",
-            instrument_id, exc,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"指标计算失败: {exc}",
-        ) from exc
-    except Exception as exc:
-        logger.error(
-            "[ChartSnapshot] compute_all_indicators 失败(系统) instrument_id=%s: %s",
-            instrument_id, exc,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"指标计算失败: {exc}",
-        ) from exc
-
-    # 7. 校验 bars vs indicators display_frame（render_frame.matched）
-    indicators_display_frame = indicators_response.get("display_frame")
-    render_matched = is_display_frame_match(bars_display_frame, indicators_display_frame)
-    if not render_matched:
-        logger.warning(
-            "[ChartSnapshot] render_frame mismatch instrument_id=%s timeframe=%s "
-            "bars_hash=%s indicators_hash=%s "
-            "bars_count=%s indicators_count=%s "
-            "bars_first=%s indicators_first=%s "
-            "bars_last=%s indicators_last=%s",
-            instrument_id, timeframe,
-            bars_display_frame.get("display_hash"),
-            (indicators_display_frame or {}).get("display_hash"),
-            bars_display_frame.get("actual_count"),
-            (indicators_display_frame or {}).get("actual_count"),
-            bars_display_frame.get("first_time"),
-            (indicators_display_frame or {}).get("first_time"),
-            bars_display_frame.get("last_time"),
-            (indicators_display_frame or {}).get("last_time"),
-        )
-
-    render_frame = {
-        "matched": render_matched,
-        "bars_hash": bars_display_frame.get("display_hash") or "",
-        "indicators_hash": (indicators_display_frame or {}).get("display_hash") or "",
-        "bars_count": bars_display_frame.get("actual_count"),
-        "indicators_count": (indicators_display_frame or {}).get("actual_count"),
-        "bars_first_time": bars_display_frame.get("first_time"),
-        "indicators_first_time": (indicators_display_frame or {}).get("first_time"),
-        "bars_last_time": bars_display_frame.get("last_time"),
-        "indicators_last_time": (indicators_display_frame or {}).get("last_time"),
-        "bars_adjustment_as_of": bars_display_frame.get("adjustment_as_of"),
-        "indicators_adjustment_as_of": (indicators_display_frame or {}).get("adjustment_as_of"),
-    }
-
-    # 8. 响应头
+    # 4. 响应头
     total_ms = int((time.time() - start_ms) * 1000)
     if response is not None:
         response.headers["X-Data-Source"] = bars_result.data_source
         response.headers["X-Cache-Hit"] = "true" if bars_result.cache_hit else "false"
-        response.headers["X-Render-Matched"] = "true" if render_matched else "false"
+        response.headers["X-Render-Matched"] = "true" if render_frame.get("matched") else "false"
         response.headers["X-Total-Ms"] = str(total_ms)
 
     logger.info(
@@ -417,7 +239,7 @@ async def get_chart_snapshot(
         "indicators_layers=%d render_matched=%s ms=%d",
         instrument_id, timeframe, len(items),
         len(indicators_response.get("layers", [])),
-        render_matched, total_ms,
+        render_frame.get("matched"), total_ms,
     )
 
     return {
@@ -458,12 +280,11 @@ if __name__ == "__main__":
     print(f"_ALLOWED_TIMEFRAMES={sorted(_ALLOWED_TIMEFRAMES)} OK")
     print(f"_ALLOWED_ADJ={sorted(_ALLOWED_ADJ)} OK")
 
-    # 4. 验证依赖导入
-    assert callable(compute_all_indicators), "compute_all_indicators 应可导入"
+    # 4. 验证依赖导入（[CP-V3-B] 改为 ChartSnapshotService 唯一入口）
     assert callable(_df_to_responses), "_df_to_responses 应可导入"
-    assert callable(build_display_frame), "build_display_frame 应可导入"
-    assert callable(is_display_frame_match), "is_display_frame_match 应可导入"
-    assert MarketDataAggregationService is not None, "MarketDataAggregationService 应可导入"
+    assert callable(ChartSnapshotService.compute_bars_and_indicators), (
+        "ChartSnapshotService.compute_bars_and_indicators 应可导入"
+    )
     print("依赖导入 OK")
 
     print("OK")

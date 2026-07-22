@@ -556,6 +556,8 @@ async def _compute_independent_node_cluster(
 
     # [CP-V3-A] 计算后可用性：profile 空 → unavailable/PROFILE_EMPTY；
     # 否则使用 Provider 预计算的 availability（available 或 degraded/INSUFFICIENT_15M_HISTORY）
+    availability: str
+    degraded_reason: str | None
     if not profile.profile_rows:
         availability = "unavailable"
         degraded_reason = "PROFILE_EMPTY"
@@ -698,7 +700,7 @@ async def compute_all_indicators(
             完全排除 FVG（不计算、不返回、不缓存、不渲染）。
         include_realtime: 是否包含实时 partial bar（默认 True，与 bars API 默认对齐）。
             仅影响 macd_bars（display）查询；Node Cluster 输入固定 completed qfq
-            （由 _load_node_cluster_inputs 独立查询，NC-01/NC-02 V2 修复）。
+            （由 NodeClusterInputProvider 独立查询，NC-01/NC-02 V2 修复）。
         completed_only: 是否只返回已完成 bar（默认 False，与 bars API 默认对齐）。
             True 时强制 include_realtime=False。仅影响 display；Node Cluster 输入
             固定 completed_only=True（合同常量，不受页面参数影响）。
@@ -709,7 +711,7 @@ async def compute_all_indicators(
             内部对同一展示周期再次调用 MDAS get_bars（"一次 MDAS 读取"原子性保证）。
             - 传入时：跳过当前 timeframe 对应的 MDAS 调用，直接使用 preloaded.bars
             - 不传时（None）：保持原有行为，内部自行调 MDAS（向后兼容 /indicators API）
-            Node Cluster 输入仍由 _load_node_cluster_inputs 独立查询（completed qfq 合同，
+            Node Cluster 输入仍由 NodeClusterInputProvider 独立查询（completed qfq 合同，
             与展示参数隔离），不受 preloaded 影响。
 
     Returns:

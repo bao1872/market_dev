@@ -8,7 +8,9 @@
 
 测试策略：
 - 复用 conftest 的 db_session / test_instrument fixture
-- mock MarketDataAggregationService.get_bars 与 compute_all_indicators（避免依赖真实行情数据）
+- [CP-V3-B] mock ChartSnapshotService.compute_bars_and_indicators（避免依赖真实行情数据）
+  Phase B 重构后，capture 端点不再直接调用 MarketDataAggregationService/compute_all_indicators，
+  而是通过 ChartSnapshotService 统一入口。
 - 通过 ASGITransport + AsyncClient 调用真实 HTTP 端点
 """
 
@@ -28,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import create_access_token, create_capture_token
 from app.main import app
+from app.services.chart_snapshot_service import ChartSnapshotResult
 from tests.conftest import make_asgi_transport
 
 
@@ -94,6 +97,43 @@ def _make_bars_result_with_data(instrument_id: uuid.UUID) -> MagicMock:
     return mock
 
 
+def _make_snapshot_result(
+    bars_result: MagicMock | None = None,
+    indicators: dict[str, Any] | None = None,
+) -> ChartSnapshotResult:
+    """[CP-V3-B] 构造 ChartSnapshotResult mock（Phase B 重构后 Capture/ChartSnapshot API 共用）。
+
+    Phase B 后 capture/chart_snapshot 端点不再直接调 MarketDataAggregationService/
+    compute_all_indicators，而是通过 ChartSnapshotService.compute_bars_and_indicators 统一入口。
+    本 helper 封装 ChartSnapshotResult 构造，供测试 patch 使用。
+    """
+    if bars_result is None:
+        bars_result = _make_empty_bars_result()
+    df = bars_result.bars
+    return ChartSnapshotResult(
+        bars_result=bars_result,
+        page_df=df,
+        bars_display_frame={
+            "display_hash": "mock_bars_hash",
+            "actual_count": len(df),
+            "first_time": None,
+            "last_time": None,
+            "adjustment_as_of": None,
+        },
+        indicators=indicators if indicators is not None else {"layers": [], "data": {}, "errors": {}},
+        render_frame={
+            "matched": True,
+            "bars_hash": "mock_bars_hash",
+            "indicators_hash": "mock_indicators_hash",
+            "bars_count": len(df),
+            "indicators_count": len(df),
+        },
+        spec=MagicMock(),  # spec 不被 capture/chart_snapshot 端点直接使用
+        is_empty=df.empty,
+        completed_through_iso=None,
+    )
+
+
 @pytest_asyncio.fixture
 async def capture_client(
     db_session: AsyncSession,
@@ -150,11 +190,8 @@ class TestCaptureSnapshot:
         }
 
         with patch(
-            "app.api.capture.MarketDataAggregationService.get_bars",
-            new=AsyncMock(return_value=bars_result),
-        ), patch(
-            "app.api.capture.compute_all_indicators",
-            new=AsyncMock(return_value=indicators_data),
+            "app.api.capture.ChartSnapshotService.compute_bars_and_indicators",
+            new=AsyncMock(return_value=_make_snapshot_result(bars_result, indicators_data)),
         ):
             resp = await client.get(
                 f"/api/v1/capture/stocks/{test_instrument.id}/snapshot",
@@ -216,16 +253,14 @@ class TestCaptureSnapshot:
             "errors": {},
         }
 
-        spy_get_bars = AsyncMock(return_value=bars_result)
-        spy_compute = AsyncMock(return_value=indicators_data)
+        spy_snapshot = AsyncMock(
+            return_value=_make_snapshot_result(bars_result, indicators_data)
+        )
         spy_df = MagicMock(side_effect=real_df_to_responses)
 
         with patch(
-            "app.api.capture.MarketDataAggregationService.get_bars",
-            new=spy_get_bars,
-        ), patch(
-            "app.api.capture.compute_all_indicators",
-            new=spy_compute,
+            "app.api.capture.ChartSnapshotService.compute_bars_and_indicators",
+            new=spy_snapshot,
         ), patch(
             "app.api.capture._df_to_responses",
             new=spy_df,
@@ -239,17 +274,13 @@ class TestCaptureSnapshot:
         assert resp.status_code == 200, f"响应体: {resp.text}"
         data = resp.json()
 
-        # get_bars 必须透传 timeframe=15m 且 include_realtime=True（硬规则）
-        assert spy_get_bars.await_count == 1
-        get_kwargs = spy_get_bars.call_args.kwargs
-        assert get_kwargs.get("timeframe") == "15m"
-        assert get_kwargs.get("include_realtime") is True
-
-        # compute_all_indicators 必须透传 timeframe=15m 且 bars=INDICATOR_BARS["15m"]
-        assert spy_compute.await_count == 1
-        compute_kwargs = spy_compute.call_args.kwargs
-        assert compute_kwargs.get("timeframe") == "15m"
-        assert compute_kwargs.get("bars") == INDICATOR_BARS["15m"]
+        # [CP-V3-B] ChartSnapshotService 必须透传 timeframe=15m 且 include_realtime=True
+        # 且 bars=INDICATOR_BARS["15m"]（Phase B 后由 Service 统一接收所有参数）
+        assert spy_snapshot.await_count == 1
+        snap_kwargs = spy_snapshot.call_args.kwargs
+        assert snap_kwargs.get("timeframe") == "15m"
+        assert snap_kwargs.get("include_realtime") is True
+        assert snap_kwargs.get("bars") == INDICATOR_BARS["15m"]
 
         # _df_to_responses 必须按 15m 格式化（位置参数第 3 个为 timeframe）
         assert spy_df.call_count == 1
@@ -361,11 +392,8 @@ class TestCaptureSnapshot:
         indicators_data: dict[str, Any] = {"layers": [], "data": {}, "errors": {}}
 
         with patch(
-            "app.api.capture.MarketDataAggregationService.get_bars",
-            new=AsyncMock(return_value=bars_result),
-        ), patch(
-            "app.api.capture.compute_all_indicators",
-            new=AsyncMock(return_value=indicators_data),
+            "app.api.capture.ChartSnapshotService.compute_bars_and_indicators",
+            new=AsyncMock(return_value=_make_snapshot_result(bars_result, indicators_data)),
         ):
             resp = await client.get(
                 f"/api/v1/capture/stocks/{test_instrument.id}/snapshot?token={token}",
@@ -431,13 +459,12 @@ class TestCaptureSnapshot:
         bars_result = _make_bars_result_with_data(test_instrument.id)
         indicators_data: dict[str, Any] = {"layers": [], "data": {}, "errors": {}}
 
-        spy_compute = AsyncMock(return_value=indicators_data)
+        spy_snapshot = AsyncMock(
+            return_value=_make_snapshot_result(bars_result, indicators_data)
+        )
         with patch(
-            "app.api.capture.MarketDataAggregationService.get_bars",
-            new=AsyncMock(return_value=bars_result),
-        ), patch(
-            "app.api.capture.compute_all_indicators",
-            new=spy_compute,
+            "app.api.capture.ChartSnapshotService.compute_bars_and_indicators",
+            new=spy_snapshot,
         ):
             resp = await client.get(
                 f"/api/v1/capture/stocks/{test_instrument.id}/snapshot"
@@ -448,10 +475,10 @@ class TestCaptureSnapshot:
         assert resp.status_code == 200, f"响应体: {resp.text}"
         data = resp.json()
 
-        # compute_all_indicators 必须以 include_smc=True 调用
-        assert spy_compute.await_count == 1
-        compute_kwargs = spy_compute.call_args.kwargs
-        assert compute_kwargs.get("include_smc") is True, \
+        # [CP-V3-B] ChartSnapshotService 必须以 include_smc=True 调用
+        assert spy_snapshot.await_count == 1
+        snap_kwargs = spy_snapshot.call_args.kwargs
+        assert snap_kwargs.get("include_smc") is True, \
             "indicator_view=smc 必须透传 include_smc=True"
 
         # 响应必须包含 indicator_view 与 include_smc 字段
@@ -478,13 +505,12 @@ class TestCaptureSnapshot:
         bars_result = _make_bars_result_with_data(test_instrument.id)
         indicators_data: dict[str, Any] = {"layers": [], "data": {}, "errors": {}}
 
-        spy_compute = AsyncMock(return_value=indicators_data)
+        spy_snapshot = AsyncMock(
+            return_value=_make_snapshot_result(bars_result, indicators_data)
+        )
         with patch(
-            "app.api.capture.MarketDataAggregationService.get_bars",
-            new=AsyncMock(return_value=bars_result),
-        ), patch(
-            "app.api.capture.compute_all_indicators",
-            new=spy_compute,
+            "app.api.capture.ChartSnapshotService.compute_bars_and_indicators",
+            new=spy_snapshot,
         ):
             resp = await client.get(
                 f"/api/v1/capture/stocks/{test_instrument.id}/snapshot"
@@ -495,10 +521,10 @@ class TestCaptureSnapshot:
         assert resp.status_code == 200, f"响应体: {resp.text}"
         data = resp.json()
 
-        # node_cluster 视图不应触发 SMC 计算（按需计算约束）
-        assert spy_compute.await_count == 1
-        compute_kwargs = spy_compute.call_args.kwargs
-        assert compute_kwargs.get("include_smc") is False, \
+        # [CP-V3-B] node_cluster 视图不应触发 SMC 计算（按需计算约束）
+        assert spy_snapshot.await_count == 1
+        snap_kwargs = spy_snapshot.call_args.kwargs
+        assert snap_kwargs.get("include_smc") is False, \
             "indicator_view=node_cluster 必须透传 include_smc=False（按需计算）"
 
         assert data["indicator_view"] == "node_cluster"
@@ -524,13 +550,12 @@ class TestCaptureSnapshot:
         bars_result = _make_bars_result_with_data(test_instrument.id)
         indicators_data: dict[str, Any] = {"layers": [], "data": {}, "errors": {}}
 
-        spy_compute = AsyncMock(return_value=indicators_data)
+        spy_snapshot = AsyncMock(
+            return_value=_make_snapshot_result(bars_result, indicators_data)
+        )
         with patch(
-            "app.api.capture.MarketDataAggregationService.get_bars",
-            new=AsyncMock(return_value=bars_result),
-        ), patch(
-            "app.api.capture.compute_all_indicators",
-            new=spy_compute,
+            "app.api.capture.ChartSnapshotService.compute_bars_and_indicators",
+            new=spy_snapshot,
         ):
             resp = await client.get(
                 f"/api/v1/capture/stocks/{test_instrument.id}/snapshot"
@@ -541,9 +566,9 @@ class TestCaptureSnapshot:
         assert resp.status_code == 200, f"响应体: {resp.text}"
         data = resp.json()
 
-        assert spy_compute.await_count == 1
-        compute_kwargs = spy_compute.call_args.kwargs
-        assert compute_kwargs.get("include_smc") is False
+        assert spy_snapshot.await_count == 1
+        snap_kwargs = spy_snapshot.call_args.kwargs
+        assert snap_kwargs.get("include_smc") is False
 
         assert data["indicator_view"] == "bollinger"
         assert data["include_smc"] is False
@@ -571,13 +596,9 @@ class TestCaptureSnapshot:
         bars_result = _make_bars_result_with_data(test_instrument.id)
         indicators_data: dict[str, Any] = {"layers": [], "data": {}, "errors": {}}
 
-        spy_compute = AsyncMock(return_value=indicators_data)
         with patch(
-            "app.api.capture.MarketDataAggregationService.get_bars",
-            new=AsyncMock(return_value=bars_result),
-        ), patch(
-            "app.api.capture.compute_all_indicators",
-            new=spy_compute,
+            "app.api.capture.ChartSnapshotService.compute_bars_and_indicators",
+            new=AsyncMock(return_value=_make_snapshot_result(bars_result, indicators_data)),
         ):
             resp = await client.get(
                 f"/api/v1/capture/stocks/{test_instrument.id}/snapshot"
@@ -615,13 +636,9 @@ class TestCaptureSnapshot:
         bars_result = _make_bars_result_with_data(test_instrument.id)
         indicators_data: dict[str, Any] = {"layers": [], "data": {}, "errors": {}}
 
-        spy_compute = AsyncMock(return_value=indicators_data)
         with patch(
-            "app.api.capture.MarketDataAggregationService.get_bars",
-            new=AsyncMock(return_value=bars_result),
-        ), patch(
-            "app.api.capture.compute_all_indicators",
-            new=spy_compute,
+            "app.api.capture.ChartSnapshotService.compute_bars_and_indicators",
+            new=AsyncMock(return_value=_make_snapshot_result(bars_result, indicators_data)),
         ):
             resp = await client.get(
                 f"/api/v1/capture/stocks/{test_instrument.id}/snapshot",
