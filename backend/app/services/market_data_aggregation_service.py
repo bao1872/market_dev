@@ -82,7 +82,11 @@ _REDIS_CACHE_PREFIX: str = "mdas"
 
 # [CP-V3-A] - 描述: 行情数据契约版本 v3（count-aware：含 requested_count/actual_count/
 #   coverage_start/coverage_end/history_exhausted，支持 availability 三态状态机）
-_MARKET_DATA_CONTRACT_VERSION: str = "v3"
+# [CP-V3-A2] - 描述: v4 — 迭代回补（backfill_rounds/coverage_reason）+ history_exhausted
+#   语义修正（intraday: 基于 _fetch_intraday_with_backfill 真实 earliest bar 判定，
+#   不再"单次查询 < limit 即 True"）。bump v3→v4 自动隔离旧缓存（旧 v3 缓存的
+#   history_exhausted 语义不准确，必须失效）
+_MARKET_DATA_CONTRACT_VERSION: str = "v4"
 
 # [mdas] - 描述: 1m → 15m/1h 聚合频率映射
 _TARGET_FREQ: dict[str, str] = {"15m": "15min", "1h": "60min"}
@@ -110,6 +114,19 @@ class BarAggregationResult:
     - coverage_end: bars 最晚时间（None=空数据）
     - history_exhausted: DB/上游历史是否不足（True=真实历史不够；
       False=历史足够但可能因系统回看窗口未取满——后者为 INPUT_CONTRACT_VIOLATION）
+
+    [CP-V3-A2] v4 契约扩展（迭代回补，修正 history_exhausted 语义）：
+    - backfill_rounds: 日内迭代回补的实际查询轮数（1=单次满足；>1=多轮扩展；
+      日线=0，日线不需要迭代回补）
+    - coverage_reason: 覆盖率原因诊断：
+      * "no_limit" — 未指定 limit，单次查询
+      * "met_after_N_rounds" — N 轮后满足 required_count
+      * "history_exhausted_empty_query" — 查询返回空，已到 listing date 之前
+      * "history_exhausted_no_progress" — 连续扩展无新数据，DB 真实历史不足
+      * "max_rounds_reached" — 达到最大轮数仍不足（INPUT_CONTRACT_VIOLATION 风险）
+      * "daily_no_backfill" — 日线路径不经过迭代回补
+    - history_exhausted 语义修正（intraday）：基于 _fetch_intraday_with_backfill
+      真实 earliest bar 判定，不再"单次查询 < limit 即 True"
     """
 
     bars: pd.DataFrame
@@ -134,6 +151,9 @@ class BarAggregationResult:
     coverage_start: pd.Timestamp | None = None
     coverage_end: pd.Timestamp | None = None
     history_exhausted: bool = False
+    # [CP-V3-A2] 迭代回补诊断字段
+    backfill_rounds: int = 0
+    coverage_reason: str = ""
 
 
 # ===== 交易时间判断 =====
@@ -255,6 +275,104 @@ def _resolve_date_range(
             datetime.min.time(),
         )
     return start, end
+
+
+# [CP-V3-A2] - 描述: 日内迭代回补参数
+# 迭代回补循环：查询→不足→向前扩展→满足 required_count 或确认 history_exhausted
+_MAX_BACKFILL_ROUNDS: int = 10  # 最大查询轮数（防止死循环）
+_BACKFILL_EXPAND_DAYS: int = 90  # 每轮向前扩展的天数（约 60 交易日）
+_NO_PROGRESS_LIMIT: int = 2  # 连续 N 轮无新数据 → 真实历史耗尽
+
+
+async def _fetch_intraday_with_backfill(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    timeframe: str,
+    initial_start: datetime,
+    end: datetime,
+    query_fn: Any,
+    *,
+    required_count: int | None = None,
+) -> tuple[pd.DataFrame, int, bool, str]:
+    """[CP-V3-A2] 日内迭代回补查询。
+
+    正确算法（PRD V3.3 §1.2 + DEVELOP §1.2）：
+      query range → 去重排序 → actual >= required_count：结束
+      → 已到 instrument first_bar/listing date：history_exhausted=True
+      → 否则按固定步长向前扩展 → 达到 max_rounds：coverage_reason=max_rounds_reached
+
+    与 CP-V3-A 的区别：
+      CP-V3-A 只按 limit 估算一次回看日期 → 节假日/停牌/数据缺口会导致返回 < limit
+      CP-V3-A2 实现受控循环，持续扩展直到满足或确认真实历史不足
+
+    Args:
+        session: 异步 DB 会话
+        instrument_id: 标的 UUID
+        timeframe:日内周期（15m/1h/1m）
+        initial_start: 初始查询起始时间（来自 _resolve_date_range 估算）
+        end: 查询结束时间
+        query_fn: 查询函数（_query_15min_bars / _query_60min_bars / _query_minute_bars）
+        required_count: 需要的最小 bar 数（None=无 limit 要求，单次查询）
+
+    Returns:
+        (bars_df, backfill_rounds, history_exhausted, coverage_reason)
+        - bars_df: 合并去重后的 DataFrame（可能 > required_count，由调用方 tail(limit)）
+        - backfill_rounds: 实际查询轮数
+        - history_exhausted: True=真实历史不足；False=历史足够或未指定 limit
+        - coverage_reason: 诊断原因字符串
+    """
+    # 无 limit 要求 → 单次查询
+    if required_count is None:
+        bars_df = await query_fn(session, instrument_id, initial_start, end)
+        return bars_df, 1, False, "no_limit"
+
+    bars_df = pd.DataFrame()
+    current_start = initial_start
+    rounds = 0
+    no_progress_count = 0
+    last_count = 0
+
+    while rounds < _MAX_BACKFILL_ROUNDS:
+        rounds += 1
+        new_bars = await query_fn(session, instrument_id, current_start, end)
+
+        if not new_bars.empty:
+            if bars_df.empty:
+                bars_df = new_bars
+            else:
+                bars_df = _merge_bars(bars_df, new_bars)
+
+        current_count = len(bars_df)
+
+        # 满足要求 → 返回（history_exhausted=False）
+        if current_count >= required_count:
+            return bars_df, rounds, False, f"met_after_{rounds}_rounds"
+
+        # 查询返回空 → 已到 listing date 之前（真实历史不足）
+        if new_bars.empty and rounds > 1:
+            # 第 1 轮可能因 start 过晚返回空，第 2 轮仍空 → 真实历史不足
+            return bars_df, rounds, True, "history_exhausted_empty_query"
+
+        # 连续无进展检测（扩展后没有新数据 → DB 中没有更早的 bar）
+        if current_count == last_count:
+            no_progress_count += 1
+            if no_progress_count >= _NO_PROGRESS_LIMIT:
+                return bars_df, rounds, True, "history_exhausted_no_progress"
+        else:
+            no_progress_count = 0
+
+        last_count = current_count
+
+        # 向前扩展 start
+        new_start = current_start - timedelta(days=_BACKFILL_EXPAND_DAYS)
+        if new_start >= current_start:
+            # 无法继续扩展（datetime 下限）
+            return bars_df, rounds, True, "history_exhausted_cannot_expand"
+        current_start = new_start
+
+    # 达到 max_rounds 仍不足
+    # 此时 history_exhausted=False（可能是查询窗口仍不足 → INPUT_CONTRACT_VIOLATION）
+    return bars_df, rounds, False, f"max_rounds_reached_{rounds}"
 
 
 # ===== 实时源拉取（Pytdx 直调，不走 DB） =====
@@ -540,6 +658,9 @@ def _serialize_result(result: BarAggregationResult) -> str:
             else None
         ),
         "history_exhausted": result.history_exhausted,
+        # [CP-V3-A2] 迭代回补诊断字段
+        "backfill_rounds": result.backfill_rounds,
+        "coverage_reason": result.coverage_reason,
     }
     return json.dumps(payload)
 
@@ -618,6 +739,9 @@ def _deserialize_result(raw: str) -> BarAggregationResult | None:
                 else None
             ),
             history_exhausted=payload.get("history_exhausted", False),
+            # [CP-V3-A2] 迭代回补诊断字段（向后兼容：旧缓存无这些字段时用默认值）
+            backfill_rounds=payload.get("backfill_rounds", 0),
+            coverage_reason=payload.get("coverage_reason", ""),
         )
     except Exception as exc:
         logger.warning("MDAS 缓存反序列化失败: %s", exc)
@@ -754,6 +878,13 @@ class MarketDataAggregationService:
                 data_source = "degraded"
         adj_factor_hash = _compute_adj_factor_hash(factor_df)
 
+        # [CP-V3-A2] 迭代回补诊断字段默认值（日线/周线/月线路径不经过 backfill）。
+        # intraday 路径会通过 _fetch_intraday_with_backfill 覆盖这些值；
+        # daily 路径保持默认值（backfill_rounds=0, coverage_reason="daily_no_backfill"）。
+        backfill_rounds = 0
+        intraday_history_exhausted = False
+        coverage_reason = "daily_no_backfill"
+
         # ============================================================
         # 日线 / 周线 / 月线
         # ============================================================
@@ -802,12 +933,33 @@ class MarketDataAggregationService:
         # 日内周期（含 1m 原始分钟线）
         # ============================================================
         else:
+            # [CP-V3-A2] 日内迭代回补：受控循环查询直到满足 required_count 或确认
+            # history_exhausted。修正 CP-V3-A "只按 limit 估算一次日期"的缺陷：
+            # 节假日/停牌/数据缺口下 CP-V3-A 会误判 history_exhausted=True。
+            # mypy: _query_15min_bars/_query_minute_bars 有可选 limit 参数，
+            # _query_60min_bars 没有，三者签名不完全一致，统一用 Any
+            _intraday_query_fn: Any
             if timeframe == "15m":
-                bars_df = await _query_15min_bars(session, instrument_id, start, end)  # type: ignore[arg-type]
+                _intraday_query_fn = _query_15min_bars
             elif timeframe == "1h":
-                bars_df = await _query_60min_bars(session, instrument_id, start, end)  # type: ignore[arg-type]
+                _intraday_query_fn = _query_60min_bars
             else:  # 1m
-                bars_df = await _query_minute_bars(session, instrument_id, start, end)  # type: ignore[arg-type]
+                _intraday_query_fn = _query_minute_bars
+
+            (
+                bars_df,
+                backfill_rounds,
+                intraday_history_exhausted,
+                coverage_reason,
+            ) = await _fetch_intraday_with_backfill(
+                session,
+                instrument_id,
+                timeframe,
+                start,  # type: ignore[arg-type]
+                end,  # type: ignore[arg-type]
+                _intraday_query_fn,
+                required_count=limit,
+            )
 
             if not bars_df.empty:
                 last_persisted_bar_time = pd.Timestamp(bars_df.index[-1])
@@ -935,12 +1087,19 @@ class MarketDataAggregationService:
         coverage_end: pd.Timestamp | None = (
             pd.Timestamp(bars_df.index[-1]) if not bars_df.empty else None
         )
-        # history_exhausted: DB 原始返回数量 < limit 说明 DB/上游真实历史不足
-        # （False 时若 actual_count < limit 则为系统回看窗口不足 = INPUT_CONTRACT_VIOLATION）
-        if limit is not None and pre_limit_count < limit:
-            history_exhausted = True
+        # [CP-V3-A2] history_exhausted 语义修正：
+        # - intraday 路径：使用 _fetch_intraday_with_backfill 的判定（基于真实 earliest
+        #   bar / empty query / no_progress，而非"单次查询 < limit"）。旧逻辑
+        #   (CP-V3-A) 会在节假日/停牌/查询窗口不足时误判 True，把
+        #   INPUT_CONTRACT_VIOLATION（系统回看窗口不足）当成真实历史不足（degraded）。
+        # - daily 路径：保持 "pre_limit_count < limit" 判定（日线不经过迭代回补，
+        #   DB 历史不足即真实历史不足）。
+        if timeframe in ("1d", "1w", "1mo"):
+            history_exhausted = (
+                limit is not None and pre_limit_count < limit
+            )
         else:
-            history_exhausted = False
+            history_exhausted = intraday_history_exhausted
 
         result = BarAggregationResult(
             bars=bars_df,
@@ -963,6 +1122,9 @@ class MarketDataAggregationService:
             coverage_start=coverage_start,
             coverage_end=coverage_end,
             history_exhausted=history_exhausted,
+            # [CP-V3-A2] 迭代回补诊断字段
+            backfill_rounds=backfill_rounds,
+            coverage_reason=coverage_reason,
         )
 
         _cache_set(cache_key, result)
