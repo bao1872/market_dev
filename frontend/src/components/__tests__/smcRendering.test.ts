@@ -7,6 +7,7 @@
 //   3. mapSmcIndexToDisplay: 负索引 clamp / 越界返回 undefined / 正常索引透传
 //   4. Canvas mock 测试：最多 5 个 OB / 左侧 clamp / EQH 线到 second_pivot / Strong/Weak 读 DTO swing_bias /
 //      SMC 价格进入纵轴 / FVG 绘制调用为 0
+//   5. [CP-V3-C] time-key 渲染：timeToDisplayIndex 优先于 index / fallback / 四类元素均传 time 参数
 
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
@@ -72,6 +73,112 @@ test('mapSmcIndexToDisplay: 正常索引 → 直接返回 (adapter 已重基准)
   assert.equal(mapSmcIndexToDisplay(0, ctx), 0)
   assert.equal(mapSmcIndexToDisplay(15, ctx), 15)
   assert.equal(mapSmcIndexToDisplay(29, ctx), 29)
+})
+
+// ===== 1b. [CP-V3-C] mapSmcIndexToDisplay time-key 渲染 =====
+//
+// 验证 viewport 从 250 → 90 切换时，time-based lookup 优先于 index-based
+// （anchor_time 始终正确，不依赖 view adapter rebasing）
+
+test('[CP-V3-C] mapSmcIndexToDisplay: time 命中 → 优先于 index 返回', () => {
+  // 场景：viewport 90 bar，event 在原 full history index=200，
+  //   view adapter rebased index=40（正确），但若 adapter 未正确 rebase 仍传 200，
+  //   此时 anchor_time 应能命中 klineTimeIndex 给出正确 displayIdx=40
+  const timeMap = new Map([['2026-07-15', 40]])
+  const ctx = { displayCount: 90, timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? '') }
+  // index=200 越界（fallback 会返回 undefined），但 time 命中 → 返回 40
+  assert.equal(mapSmcIndexToDisplay(200, ctx, '2026-07-15'), 40)
+  // index=40 也命中（fallback 路径），但 time 优先 → 返回 40
+  assert.equal(mapSmcIndexToDisplay(40, ctx, '2026-07-15'), 40)
+})
+
+test('[CP-V3-C] mapSmcIndexToDisplay: time 未命中 → fallback 到 index 路径', () => {
+  const timeMap = new Map([['2026-07-15', 40]])  // 不包含 '2026-07-16'
+  const ctx = { displayCount: 90, timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? '') }
+  // time 未命中 + index 在范围内 → 走 fallback
+  assert.equal(mapSmcIndexToDisplay(15, ctx, '2026-07-16'), 15)
+  // time 未命中 + index 越界 → undefined
+  assert.equal(mapSmcIndexToDisplay(200, ctx, '2026-07-16'), undefined)
+  // time 未命中 + 负索引 → 0（clipped_left clamp）
+  assert.equal(mapSmcIndexToDisplay(-3, ctx, '2026-07-16'), 0)
+})
+
+test('[CP-V3-C] mapSmcIndexToDisplay: 无 timeToDisplayIndex 回调 → 走 index 路径（向后兼容）', () => {
+  // 旧调用方（未提供 timeToDisplayIndex）应保持原有行为
+  const ctx = { displayCount: 30 }  // 无 timeToDisplayIndex
+  assert.equal(mapSmcIndexToDisplay(15, ctx, '2026-07-15'), 15)  // time 被忽略
+  assert.equal(mapSmcIndexToDisplay(-3, ctx, '2026-07-15'), 0)
+  assert.equal(mapSmcIndexToDisplay(100, ctx, '2026-07-15'), undefined)
+})
+
+test('[CP-V3-C] mapSmcIndexToDisplay: time=null/undefined → 走 fallback', () => {
+  const timeMap = new Map([['2026-07-15', 40]])
+  const ctx = { displayCount: 90, timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? '') }
+  // time=null → 不调用 callback，走 fallback
+  assert.equal(mapSmcIndexToDisplay(15, ctx, null), 15)
+  assert.equal(mapSmcIndexToDisplay(15, ctx, undefined), 15)
+})
+
+// ===== 2b. [CP-V3-C] selectVisibleSmcOrderBlocks time-key =====
+
+test('[CP-V3-C] selectVisibleSmcOrderBlocks: anchor_time 命中但 anchor_index 越界 → 仍选中', () => {
+  // 场景：viewport 90 bar，OB anchor 在原 full history index=200，
+  //   view adapter 未正确 rebase，anchor_index 仍为 200（越界）
+  //   但 anchor_time 命中 → 应被选中（time 优先）
+  const timeMap = new Map([['2026-07-15', 40]])
+  const ctx = { displayCount: 90, timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? '') }
+  const obs = [
+    makeOb({ anchor_index: 200, anchor_time: '2026-07-15', internal: true, mitigated: false }),
+    makeOb({ anchor_index: 250, anchor_time: '2026-07-20', internal: true, mitigated: false }),  // time/index 都越界
+  ]
+  const result = selectVisibleSmcOrderBlocks(obs, ctx)
+  assert.equal(result.length, 1, '只有 anchor_time 命中的 OB 应被选中')
+  assert.equal(result[0].anchor_time, '2026-07-15')
+})
+
+test('[CP-V3-C] selectVisibleSmcOrderBlocks: 无 timeToDisplayIndex → 走 index 路径（向后兼容）', () => {
+  const ctx = { displayCount: 30 }
+  const obs = [
+    makeOb({ anchor_index: 5, anchor_time: '2026-07-15', internal: true, mitigated: false }),
+    makeOb({ anchor_index: 35, anchor_time: '2026-07-20', internal: true, mitigated: false }),  // 越界
+  ]
+  const result = selectVisibleSmcOrderBlocks(obs, ctx)
+  assert.equal(result.length, 1)
+  assert.equal(result[0].anchor_index, 5)
+})
+
+// ===== 3b. [CP-V3-C] collectVisibleSmcPriceCandidates time-key =====
+
+test('[CP-V3-C] collectVisibleSmcPriceCandidates: event.anchor_time 命中 → level 收集', () => {
+  // 场景：event.anchor_index 越界（fallback 会判不可见），但 anchor_time 命中
+  const timeMap = new Map([['2026-07-15', 40]])
+  const ctx = { displayCount: 90, timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? '') }
+  const events: SmcEvent[] = [
+    { type: 'BOS', bias: 1, anchor_index: 200, anchor_time: '2026-07-15', confirmed_index: 250, confirmed_time: '2026-07-20', level: 100.0 },
+  ]
+  const result = collectVisibleSmcPriceCandidates({ events }, ctx)
+  assert.ok(result.includes(100.0), 'anchor_time 命中 → event.level 应被收集')
+})
+
+test('[CP-V3-C] collectVisibleSmcPriceCandidates: EQH second_pivot_time 命中 → level 收集', () => {
+  const timeMap = new Map([['2026-07-16', 50]])  // second_pivot 命中，anchor 不命中
+  const ctx = { displayCount: 90, timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? '') }
+  const eqs: SmcEqualHighLow[] = [
+    { type: 'EQH', anchor_index: 200, anchor_time: '2026-07-10', second_pivot_index: 250, second_pivot_time: '2026-07-16', confirmed_index: 260, confirmed_time: '2026-07-20', level: 50.0, prev_level: 49.9 },
+  ]
+  const result = collectVisibleSmcPriceCandidates({ equal_highs_lows: eqs }, ctx)
+  assert.ok(result.includes(50.0), 'second_pivot_time 命中 → EQH level 应被收集')
+})
+
+test('[CP-V3-C] collectVisibleSmcPriceCandidates: OB anchor_time 命中 → bar_high/bar_low 收集', () => {
+  const timeMap = new Map([['2026-07-15', 40]])
+  const ctx = { displayCount: 90, timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? '') }
+  const obs: SmcOrderBlock[] = [
+    makeOb({ anchor_index: 200, anchor_time: '2026-07-15', bar_high: 11.5, bar_low: 9.5, internal: true, mitigated: false }),
+  ]
+  const result = collectVisibleSmcPriceCandidates({ order_blocks: obs }, ctx)
+  assert.ok(result.includes(11.5), 'OB bar_high 应被收集（anchor_time 命中）')
+  assert.ok(result.includes(9.5), 'OB bar_low 应被收集（anchor_time 命中）')
 })
 
 // ===== 2. selectVisibleSmcOrderBlocks =====

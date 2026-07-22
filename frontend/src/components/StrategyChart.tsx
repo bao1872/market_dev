@@ -1616,6 +1616,7 @@ import {
   type SmcTrailing,
   type SmcSwingBias,
   type SmcLabelAnchor,
+  type SmcVisibleContext,
 } from './smcRendering'
 
 function renderIndicatorSmc(
@@ -1654,8 +1655,35 @@ function renderIndicatorSmc(
     if (key != null) klineTimeIndex.set(key, i)
   })
 
+  // [CP-V3-C] 直接 time → display index 查找（viewport 250→90 切换时最可靠）
+  // 用于 SmcVisibleContext.timeToDisplayIndex 回调，被 smcRendering 纯函数使用
+  const smcTimeToDisplay = (time: string | null | undefined): number | undefined => {
+    if (time == null) return undefined
+    const key = normalizeChartTime(time, timeframe)
+    if (key == null) return undefined
+    const idx = klineTimeIndex.get(key)
+    return idx  // undefined when not in viewport
+  }
+
+  // [CP-V3-C] SmcVisibleContext: 提供 timeToDisplayIndex 回调，让纯函数优先用 time 匹配
+  const smcVisCtx: SmcVisibleContext = {
+    displayCount: displayTimes.length,
+    timeToDisplayIndex: smcTimeToDisplay,
+  }
+
   // 辅助：SMC time 数组索引 → K 线 display 索引
-  const smcToDisplay = (smcIdx: number | null | undefined): number | undefined => {
+  // [CP-V3-C] 新增可选 time 参数：primary 路径直接用 anchor_time 等字段匹配
+  // （比 smcTimes[smcIdx] 间接匹配更可靠，viewport 250→90 切换时不会因索引 rebasing 错位）
+  const smcToDisplay = (
+    smcIdx: number | null | undefined,
+    time?: string | null,
+  ): number | undefined => {
+    // [CP-V3-C] Primary: 直接用 time 字段匹配（最可靠）
+    if (time != null) {
+      const idx = smcTimeToDisplay(time)
+      if (idx != null) return idx
+    }
+    // Fallback: 索引路径（依赖 adapter rebasing）
     if (smcIdx == null) return undefined
     // 负索引（view adapter clipped_left 时 anchor 在窗口左侧）→ clamp 到 0
     if (smcIdx < 0) return 0
@@ -1675,6 +1703,36 @@ function renderIndicatorSmc(
     return undefined
   }
 
+  // [CP-V3-C] SMC 事件区间（anchor + confirmed）映射到 display 索引
+  // 与 mapSmcIndexToDisplay 不同：保留 raw index 作为 fallback，不 clamp，
+  // 让 intersectSmcRangeWithViewport 正确判断 clipped_left/clipped_right
+  const mapSmcEventRange = (
+    anchorIdx: number | null | undefined,
+    anchorTime: string | null | undefined,
+    confirmedIdx: number | null | undefined,
+    confirmedTime: string | null | undefined,
+  ): { anchorDisplay: number | null; confirmedDisplay: number | null } => {
+    // anchor: primary = time, fallback = raw index（保留负值表示 clipped_left）
+    let anchorDisplay: number | null = null
+    if (anchorTime != null) {
+      const idx = smcTimeToDisplay(anchorTime)
+      if (idx != null) anchorDisplay = idx
+    }
+    if (anchorDisplay == null && anchorIdx != null) {
+      anchorDisplay = anchorIdx  // 保留 raw（可能 < 0 或 >= displayCount）
+    }
+    // confirmed: primary = time, fallback = raw index（保留 >= displayCount 表示 clipped_right）
+    let confirmedDisplay: number | null = null
+    if (confirmedTime != null) {
+      const idx = smcTimeToDisplay(confirmedTime)
+      if (idx != null) confirmedDisplay = idx
+    }
+    if (confirmedDisplay == null && confirmedIdx != null) {
+      confirmedDisplay = confirmedIdx
+    }
+    return { anchorDisplay, confirmedDisplay }
+  }
+
   // [2026-07-21 P0 反馈] SMC 标签碰撞布局：收集所有标签锚点，mobile_capture 下用 layoutSmcLabels 防重叠
   // desktop 模式保持自然位置（250 bar 窗口下碰撞罕见）
   const labelAnchors: SmcLabelAnchor[] = []
@@ -1688,9 +1746,10 @@ function renderIndicatorSmc(
   //   - clipped_left=True 时左端 clamp 到 plotLeft（g.l）
   //   - x2 = 可见区右端（OB 未 mitigated → 延伸到当前可见区末尾）
   //   - 与 viewport 无交集时跳过（由 selectVisibleSmcOrderBlocks 过滤）
-  const visibleObs = selectVisibleSmcOrderBlocks(orderBlocks, { displayCount: displayTimes.length })
+  const visibleObs = selectVisibleSmcOrderBlocks(orderBlocks, smcVisCtx)
   for (const ob of visibleObs) {
-    const anchorDisplayIdx = smcToDisplay(ob.anchor_index)
+    // [CP-V3-C] 优先用 ob.anchor_time 匹配（viewport 250→90 切换时最可靠）
+    const anchorDisplayIdx = smcToDisplay(ob.anchor_index, ob.anchor_time)
     if (anchorDisplayIdx == null) continue
     // x2 = 可见区右端（plotRight）：OB 未 mitigated → 延伸到当前可见区末尾
     const x2 = g.plotRight
@@ -1747,11 +1806,16 @@ function renderIndicatorSmc(
   // 标签位于结构线中点（非左端）
   // internal: 更淡（alpha 0.7），更细（width 1）；swing: 实色，更粗（width 1.5）
   // [CHANGE-20260716-001] 标签不加 ·I，与 TV 文字一致（PROMPT.md §三.3）
-  const smcVisCtx = { displayCount: displayTimes.length }
+  // [CP-V3-C] 优先用 anchor_time/confirmed_time 匹配（viewport 250→90 切换时最可靠）
+  // mapSmcEventRange 保留 raw index 作为 fallback（不 clamp），让 intersectSmcRangeWithViewport
+  // 正确判断 clipped_left/clipped_right
   for (const ev of events) {
     if (ev.level == null) continue
-    // viewport 区间求交（使用 view adapter 重基准后的索引，不依赖时间匹配）
-    const range = intersectSmcRangeWithViewport(ev.anchor_index, ev.confirmed_index, smcVisCtx)
+    const { anchorDisplay, confirmedDisplay } = mapSmcEventRange(
+      ev.anchor_index, ev.anchor_time,
+      ev.confirmed_index, ev.confirmed_time,
+    )
+    const range = intersectSmcRangeWithViewport(anchorDisplay, confirmedDisplay, smcVisCtx)
     if (range == null) continue
 
     const x1 = g.l + (range.startIdx + 0.5) * step
@@ -1804,8 +1868,12 @@ function renderIndicatorSmc(
   //   - EQL: bullish 色 (SMC_BULL_COLOR 红) + label_up
   //   - 标签位于两 pivot 中点（Pine L397: math.round(0.5*(p_ivot.barIndex + bar_index - size))）
   for (const eq of equalHLs) {
-    // viewport 区间求交（anchor → second_pivot）
-    const range = intersectSmcRangeWithViewport(eq.anchor_index, eq.second_pivot_index, smcVisCtx)
+    // [CP-V3-C] 优先用 anchor_time/second_pivot_time 匹配（viewport 250→90 切换时最可靠）
+    const { anchorDisplay, confirmedDisplay } = mapSmcEventRange(
+      eq.anchor_index, eq.anchor_time,
+      eq.second_pivot_index, eq.second_pivot_time,
+    )
+    const range = intersectSmcRangeWithViewport(anchorDisplay, confirmedDisplay, smcVisCtx)
     if (range == null) continue
 
     const x1 = g.l + (range.startIdx + 0.5) * step

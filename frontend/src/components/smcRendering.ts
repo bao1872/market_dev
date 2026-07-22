@@ -82,24 +82,39 @@ export const SMC_BEAR_COLOR = '#22C55E'   // 下跌结构（bias=-1）
 export interface SmcVisibleContext {
   /** Number of bars in the visible display window (= displayTimes.length). */
   displayCount: number
+  /**
+   * [CP-V3-C] Optional: map an SMC event time string to a K-line display index.
+   * When provided, time-based lookup is preferred over index-based (more reliable
+   * when viewport changes from 250 to 90 bars — view adapter rebasing can misalign).
+   */
+  timeToDisplayIndex?: (time: string | null | undefined) => number | undefined
 }
 
 /**
  * Map a (rebased) SMC index to a K-line display index.
  *
- * view adapter 已将所有 SMC 索引重基准到展示窗口坐标系，因此本函数只需处理：
+ * [CP-V3-C] SMC time-key rendering: when `time` and `ctx.timeToDisplayIndex` are
+ * provided, time-based lookup is the PRIMARY path (anchor_time is always correct
+ * regardless of viewport size). Index-based lookup is the FALLBACK (relies on
+ * view adapter rebasing, which can misalign when viewport changes from 250 to 90).
+ *
+ * Fallback logic (index-based, view adapter rebased):
  *   - null/undefined → undefined（不可见）
  *   - 负索引 → 0（OB clipped_left 时 anchor 在窗口左侧，clamp 到窗口左端）
  *   - 索引 >= displayCount → undefined（在窗口右侧，不可见）
  *   - 其他 → 直接返回（已在展示坐标系）
- *
- * 注：StrategyChart 的 smcToDisplay 在此基础上再做时间匹配作为防御性回退，
- *     但在 adapter 正常工作时直接使用本函数即可。
  */
 export function mapSmcIndexToDisplay(
   smcIdx: number | null | undefined,
   ctx: SmcVisibleContext,
+  time?: string | null,
 ): number | undefined {
+  // [CP-V3-C] Primary: time-based lookup (most reliable across viewport changes)
+  if (time != null && ctx.timeToDisplayIndex) {
+    const displayIdx = ctx.timeToDisplayIndex(time)
+    if (displayIdx != null) return displayIdx
+  }
+  // Fallback: index-based (view adapter rebased)
   if (smcIdx == null) return undefined
   if (smcIdx < 0) return 0  // clipped_left: clamp to display left
   if (smcIdx >= ctx.displayCount) return undefined
@@ -131,7 +146,8 @@ export function selectVisibleSmcOrderBlocks(
   //   - anchor >= displayCount（在窗口右侧）→ 不可见
   //   - clipped_left（anchor 为负）→ 仍可见（mapSmcIndexToDisplay clamp 到 0）
   return top5.filter(ob => {
-    const anchorIdx = mapSmcIndexToDisplay(ob.anchor_index, ctx)
+    // [CP-V3-C] 优先用 anchor_time 匹配（viewport 250→90 切换时索引 rebasing 可能错位）
+    const anchorIdx = mapSmcIndexToDisplay(ob.anchor_index, ctx, ob.anchor_time)
     return anchorIdx != null
   })
 }
@@ -162,8 +178,9 @@ export function collectVisibleSmcPriceCandidates(
   // event.level（anchor 或 confirmed 在窗口内）
   for (const ev of smcData.events ?? []) {
     if (ev.level == null) continue
-    const aIdx = mapSmcIndexToDisplay(ev.anchor_index, ctx)
-    const cIdx = mapSmcIndexToDisplay(ev.confirmed_index, ctx)
+    // [CP-V3-C] 优先用 anchor_time/confirmed_time 匹配（viewport 250→90 切换时索引 rebasing 可能错位）
+    const aIdx = mapSmcIndexToDisplay(ev.anchor_index, ctx, ev.anchor_time)
+    const cIdx = mapSmcIndexToDisplay(ev.confirmed_index, ctx, ev.confirmed_time)
     if (aIdx != null || cIdx != null) {
       candidates.push(ev.level)
     }
@@ -177,8 +194,9 @@ export function collectVisibleSmcPriceCandidates(
 
   // EQH/EQL level（anchor 或 second_pivot 在窗口内）
   for (const eq of smcData.equal_highs_lows ?? []) {
-    const aIdx = mapSmcIndexToDisplay(eq.anchor_index, ctx)
-    const spIdx = mapSmcIndexToDisplay(eq.second_pivot_index, ctx)
+    // [CP-V3-C] 优先用 anchor_time/second_pivot_time 匹配（viewport 250→90 切换时索引 rebasing 可能错位）
+    const aIdx = mapSmcIndexToDisplay(eq.anchor_index, ctx, eq.anchor_time)
+    const spIdx = mapSmcIndexToDisplay(eq.second_pivot_index, ctx, eq.second_pivot_time)
     if (aIdx != null || spIdx != null) {
       candidates.push(eq.level)
     }
