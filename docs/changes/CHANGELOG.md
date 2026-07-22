@@ -4,6 +4,15 @@
 
 ## 2026-07-22
 
+- CHANGE-20260722-002: mypy baseline 修正 — 从 0 更新为真实诊断集合（CP-20）
+  - **mypy 版本对齐**：系统 mypy 1.9.0 → 2.1.0（匹配 pyproject.toml + CI）
+  - **main vs branch 对比**：临时 worktree 对比 origin/main（631b191）与 branch HEAD（8aae487），mypy 2.1.0 结果完全相同（1 error + 10 notes）
+  - **baseline 更新**：`tools/quality_baselines/mypy.json` 从 `total:0, diagnostics:[]` 更新为 `total:1, diagnostics:[redis_client.py attr-defined]`
+  - **处理规则 b**：main 与 branch 完全相同，记录历史债务，不是修复；redis_client.py `aclose` error 是 pre-existing
+  - **验证**：`compare_mypy_baseline.py` exit 0，`OK: No new or increased mypy diagnostics relative to baseline.`
+  - **.gitignore**：添加 `mypy-report.jsonl`（CI 临时文件）
+  - **诚实声明**：10 个 annotation-unchecked 是 note 不是 error，不计入 baseline；redis_client.py error 未修复
+
 - CHANGE-20260722-001: docs/记忆系统真正收口 — AGENTS.md v3 压缩 + ADR/Runbook/Evidence 模板 + MANIFEST baseline 新鲜度门禁（CP-19）
   - **CP-19.1 AGENTS.md v3 收口**：从 909 行压缩到 290 行；移除内联 clause 39-64 变更历史，保留硬规则与必读入口；变更历史指向 `docs/changes/CHANGELOG.md` + `docs/changes/records/CHANGE-*.md`
   - **CP-19.2 ADR/Runbook/Evidence 模板**：`docs/decisions/README.md` + ADR-0001（Atomic Snapshot 单 MDAS）+ ADR-0002（Node Cluster 输入契约隔离）；`docs/runbooks/README.md` + 3 个 Runbook（after-close-recovery / feishu-image-issues / branch-deployment-rollback）；`docs/evidence/README.md` 生产验收证据模板

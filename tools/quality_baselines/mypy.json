@@ -1,6 +1,14 @@
 {
-  "baseline_commit": "a8481c7e98e11dd570e340de606a0d8e38c4dd64",
-  "total": 0,
-  "unique": 0,
-  "diagnostics": []
+  "baseline_commit": "8aae4874850c01f33b7e24a0c7ba5c2e1dacfbe1",
+  "total": 1,
+  "unique": 1,
+  "diagnostics": [
+    {
+      "filename": "app/core/redis_client.py",
+      "error_code": "attr-defined",
+      "message": "\"Redis[Any]\" has no attribute \"aclose\"; maybe \"close\"?",
+      "count": 1
+    }
+  ],
+  "_note": "CP-20: baseline 从 0 更新为真实诊断集合（mypy 2.1.0，severity=error）。branch HEAD 8aae487 与 origin/main 631b191 mypy 结果完全相同（1 error + 10 notes）。10 个 annotation-unchecked 是 note 不是 error，不计入 baseline。这是记录历史债务，不是修复。"
 }

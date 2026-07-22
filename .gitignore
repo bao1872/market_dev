@@ -31,6 +31,7 @@ env/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+mypy-report.jsonl
 
 # ===== 覆盖率产物 =====
 .coverage
