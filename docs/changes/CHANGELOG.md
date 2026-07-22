@@ -4,6 +4,11 @@
 
 ## 2026-07-23
 
+- CHANGE-20260723-003: V3.3 部署前门禁 — CP-V3-A3 listing_date 类型防御 + CP-V3-A2 测试对齐 A3 语义
+  - **Bug fix**: `_fetch_intraday_with_backfill` listing_date 类型防御（str→date.fromisoformat / datetime→.date），修复 28 indicator + 4 feature_snapshot 测试 TypeError
+  - **测试对齐**: 3 个 CP-V3-A2 旧测试更新为 A3 新语义（no_progress 不再→history_exhausted，需到达 listing_date 边界）
+  - **验证**: 4 文件 100/100 PASS
+
 - CHANGE-20260723-002: V3.3 部署前门禁 — MDAS 长期停牌边界修正 + 因子版本首次运行安全 bootstrap
   - **CP-V3-A3** (@ d5e0848): MDAS 长期停牌边界 — listing_date 作为历史下界，no_progress 有界递增步长（90→720），max_rounds 未到边界→INPUT_CONTRACT_VIOLATION
   - **CP-V3-D2**: 因子版本安全 bootstrap — bootstrap_factor_version_baseline 基于 dry_run 证据写版本基线，跳过 needs_rebuild/degraded，幂等可中断

@@ -335,7 +335,17 @@ async def _fetch_intraday_with_backfill(
         return bars_df, 1, False, "no_limit"
 
     # [CP-V3-A3] 确定历史下界：listing_date 或 _MIN_A_SHARE_DATE
-    history_boundary_date = listing_date if listing_date is not None else _MIN_A_SHARE_DATE
+    # 防御性类型转换：DB 驱动或测试 fixture 可能返回 str，统一转为 date
+    _raw_listing = listing_date if listing_date is not None else _MIN_A_SHARE_DATE
+    if isinstance(_raw_listing, str):
+        try:
+            history_boundary_date = date.fromisoformat(_raw_listing[:10])
+        except ValueError:
+            history_boundary_date = _MIN_A_SHARE_DATE
+    elif isinstance(_raw_listing, datetime):
+        history_boundary_date = _raw_listing.date()
+    else:
+        history_boundary_date = _raw_listing
     history_boundary = datetime.combine(
         history_boundary_date, datetime.min.time()
     )
