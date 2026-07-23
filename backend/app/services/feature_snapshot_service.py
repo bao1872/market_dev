@@ -312,6 +312,7 @@ async def compute_feature_snapshot_for_date(
     primary_bars: pd.DataFrame | None = None,
     secondary_bars: pd.DataFrame | None = None,
     source_run_id: uuid.UUID | None = None,
+    precomputed_dsa_bundle: dict[str, Any] | None = None,
     _diag_sink: dict[str, Any] | None = None,
 ) -> StockFeatureSnapshot:
     """为指定 instrument + trade_date 计算 point-in-time 特征快照。
@@ -335,6 +336,9 @@ async def compute_feature_snapshot_for_date(
         adj: 复权方式（默认 qfq）
         primary_bars: 预加载的日线 bars（可选，不传则从 DB 获取）
         secondary_bars: 预加载的 15m bars（可选，不传则从 DB 获取）
+        precomputed_dsa_bundle: 预计算的 DSA bundle（可选，不传则内部计算）
+            [CHANGE-20260724-002 Phase 3] compute-once: 盘后统一计算时传入，
+            避免 StrategyResult 和 snapshot 重复计算 DSA。
 
     Returns:
         StockFeatureSnapshot ORM 对象（未写入 DB）
@@ -445,6 +449,7 @@ async def compute_feature_snapshot_for_date(
         bars=df_1d if df_1d is not None else pd.DataFrame(),
         timeframe=primary_timeframe,
         precomputed_node_cluster=node_cluster_profile,
+        precomputed_dsa_bundle=precomputed_dsa_bundle,
     )
     primary_factors = primary_canonical.payload
     degraded_reasons.extend(primary_factors.pop("degraded_reasons", []))

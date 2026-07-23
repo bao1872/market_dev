@@ -164,6 +164,80 @@ async def query_events(
     return list(result.scalars().all())
 
 
+async def batch_latest_events(
+    session: AsyncSession,
+    *,
+    instrument_ids: list[UUID],
+    event_types: list[str],
+    end_time: datetime,
+) -> list[dict[str, Any]]:
+    """批量查询每只股票每类事件的最新一条（DISTINCT ON，禁止 N+1）。
+
+    [CHANGE-20260724-002 Phase 3] 一次查询多 instrument × 多 event_type，
+    按 (instrument_id, event_type, payload->>'cross_direction') 取最新事件。
+    旧事件无 cross_direction 时 NULL 作为独立分组，由 aggregate_latest_monitor_events 推断。
+
+    Args:
+        session: 异步会话
+        instrument_ids: 股票 ID 列表（批量）
+        event_types: 事件类型列表（如 node_cluster_touch / bb_upper_touch 等）
+        end_time: 事件时间上界（<= end_time）
+
+    Returns:
+        list[dict]: 每项含 instrument_id / event_type / event_time / payload / logical_entity_id
+
+    Raises:
+        Exception: 查询失败时补充上下文后 re-raise
+    """
+    if not instrument_ids or not event_types:
+        return []
+
+    # payload->>'cross_direction' 作为 DISTINCT ON 第三键（PostgreSQL JSONB 操作符）
+    direction_expr = StrategyEvent.payload.op("->>")("cross_direction")
+
+    stmt = (
+        select(
+            StrategyEvent.instrument_id,
+            StrategyEvent.event_type,
+            StrategyEvent.event_time,
+            StrategyEvent.payload,
+            StrategyEvent.logical_entity_id,
+        )
+        .distinct(
+            StrategyEvent.instrument_id,
+            StrategyEvent.event_type,
+            direction_expr,
+        )
+        .where(StrategyEvent.instrument_id.in_(instrument_ids))
+        .where(StrategyEvent.event_time <= end_time)
+        .where(StrategyEvent.event_type.in_(event_types))
+        .order_by(
+            StrategyEvent.instrument_id,
+            StrategyEvent.event_type,
+            direction_expr,
+            StrategyEvent.event_time.desc(),
+        )
+    )
+
+    try:
+        result = await session.execute(stmt)
+    except Exception as exc:
+        logger.warning("批量查询 strategy_event 最新事件失败: %s", exc)
+        raise
+
+    rows = result.all()
+    return [
+        {
+            "instrument_id": row.instrument_id,
+            "event_type": row.event_type,
+            "event_time": row.event_time,
+            "payload": row.payload,
+            "logical_entity_id": row.logical_entity_id,
+        }
+        for row in rows
+    ]
+
+
 async def get_event(
     session: AsyncSession,
     event_id: UUID,
@@ -193,7 +267,7 @@ if __name__ == "__main__":
     # 自测入口：验证函数签名与可调用性（不连 DB，无副作用）
     import inspect
 
-    for fn in (write_event, query_events, get_event):
+    for fn in (write_event, query_events, batch_latest_events, get_event):
         assert inspect.iscoroutinefunction(fn), f"{fn.__name__} 应为协程函数"
         print(f"{fn.__name__} params={list(inspect.signature(fn).parameters.keys())}")
     print(f"EVENT_SCHEMA_VERSION={EVENT_SCHEMA_VERSION}")
