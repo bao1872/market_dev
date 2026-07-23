@@ -417,6 +417,13 @@ class VolumeNodeMonitor(StrategyRuntime):
                 "bar_time": bar_time_key,
                 # [CHANGE-20260720-003 §三] 贯穿全链的 indicator_view
                 "indicator_view": "node_cluster",
+                # [CHANGE-20260724-002] 显式方向 + node 元数据（禁止下游用 dev_pct 猜方向）
+                "cross_direction": sig.get("cross_direction"),
+                "node_id": sig.get("node_id"),
+                "node_price": sig.get("node_price"),
+                "strength": sig.get("strength"),
+                "is_poc": sig.get("is_poc"),
+                "profile_hash": sig.get("profile_hash"),
             }
 
             events.append(

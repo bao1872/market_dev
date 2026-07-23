@@ -292,7 +292,7 @@ class BollingerMonitor(StrategyRuntime):
             "current_price": current_price,
         }
 
-        # 上轨穿越：prev_close < ref_upper <= current_price
+        # 上轨穿越：prev_close < ref_upper <= current_price → up
         if ref_upper is not None and prev_close < ref_upper <= current_price:
             dev_pct = _calc_deviation_pct(current_price, ref_upper)
             dedupe_key = f"{BB_UPPER_TOUCH}:{instrument_id_str}:{ref_upper}:{bar_time_key}"
@@ -309,14 +309,18 @@ class BollingerMonitor(StrategyRuntime):
                     "bb_snapshot": bb_snapshot,
                     # [CHANGE-20260720-003 §三] 贯穿全链的 indicator_view
                     "indicator_view": "bollinger",
+                    # [CHANGE-20260724-002] 显式方向（upper touch = up）
+                    "cross_direction": "up",
                 },
                 state_ttl_seconds=NOTIFY_COOLDOWN_SECONDS,
             ))
 
-        # 中轨穿越：prev_close 和 current_price 分列中轨两侧
+        # 中轨穿越：prev_close 和 current_price 分列中轨两侧 → up/down 显式
         if ref_mid is not None:
-            mid_cross = (prev_close <= ref_mid < current_price) or (current_price <= ref_mid < prev_close)
-            if mid_cross:
+            mid_cross_up = prev_close <= ref_mid < current_price
+            mid_cross_down = current_price <= ref_mid < prev_close
+            if mid_cross_up or mid_cross_down:
+                mid_direction = "up" if mid_cross_up else "down"
                 dev_pct = _calc_deviation_pct(current_price, ref_mid)
                 dedupe_key = f"{BB_MID_TOUCH}:{instrument_id_str}:{ref_mid}:{bar_time_key}"
                 events.append(StrategyEventDraft(
@@ -332,11 +336,13 @@ class BollingerMonitor(StrategyRuntime):
                         "bb_snapshot": bb_snapshot,
                         # [CHANGE-20260720-003 §三] 贯穿全链的 indicator_view
                         "indicator_view": "bollinger",
+                        # [CHANGE-20260724-002] 显式方向
+                        "cross_direction": mid_direction,
                     },
                     state_ttl_seconds=NOTIFY_COOLDOWN_SECONDS,
                 ))
 
-        # 下轨穿越：prev_close > ref_lower >= current_price
+        # 下轨穿越：prev_close > ref_lower >= current_price → down
         if ref_lower is not None and prev_close > ref_lower >= current_price:
             dev_pct = _calc_deviation_pct(current_price, ref_lower)
             dedupe_key = f"{BB_LOWER_TOUCH}:{instrument_id_str}:{ref_lower}:{bar_time_key}"
@@ -353,6 +359,8 @@ class BollingerMonitor(StrategyRuntime):
                     "bb_snapshot": bb_snapshot,
                     # [CHANGE-20260720-003 §三] 贯穿全链的 indicator_view
                     "indicator_view": "bollinger",
+                    # [CHANGE-20260724-002] 显式方向（lower touch = down）
+                    "cross_direction": "down",
                 },
                 state_ttl_seconds=NOTIFY_COOLDOWN_SECONDS,
             ))

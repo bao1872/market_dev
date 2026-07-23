@@ -1449,140 +1449,33 @@ async def _fetch_bars(
 
 
 def _compute_smc_freshness_factors(bars: pd.DataFrame) -> dict[str, Any]:
-    """计算 14 个细分日线 SMC freshness 因子。
+    """[DEPRECATED] 旧入口，委托到 event_freshness_service.build_smc_daily_freshness。
 
-    [PROMPT.md §三] 按方向(bullish/bearish)和结构级别(internal/swing)拆分：
-    - BOS: 4 个因子 (bullish/bearish × internal/swing)
-    - CHoCH: 4 个因子 (bullish/bearish × internal/swing)
-    - OB touch: 4 个因子 (bullish/bearish × internal/swing)
-    - EQH: 1 个因子 (Canonical DTO 无 internal/swing 字段，不拆分)
-    - EQL: 1 个因子 (同 EQH)
+    [CHANGE-20260724-002] SMC freshness 从 structural_payload 迁出到
+    event_freshness_payload.daily_structure.smc。本函数保留用于兼容已有直接调用方，
+    内部委托到新实现。盘后新路径应直接使用 build_smc_daily_freshness + precomputed_smc_dto。
 
-    计算规则：
-    - BOS/CHoCH: freshness=0 在 confirmed_index 所在已完成日线 bar
-    - EQH/EQL: freshness=0 在 confirmed_index（第二 pivot 确认 bar）
-    - OB touch: freshness=0 在价格第一次实际触碰 zone 的日线 bar
-      （不得使用订单块创建 bar 或当前 bar）
-    - 从未发生: null
-    - 每完成一根日线 +1
-    - 同子类型多个事件取最近事件（最小 freshness）
-
-    复用一次 Canonical SMC 计算结果，禁止重复运行 SMC 算法。
-
-    Args:
-        bars: 已完成日线 DataFrame（需 >= 250 根）
-
-    Returns:
-        dict with 14 个 freshness 因子（int 或 null）
+    返回 18 个 freshness 因子（14 旧项改名 + 4 项 OB formation 新增）：
+    - BOS: 4 (bullish/bearish × internal/swing)
+    - CHoCH: 4 (同上)
+    - EQH/EQL: 2
+    - OB formation: 4 — 新增
+    - OB first_touch: 4 — 原 OB touch 改名
     """
     from app.services.canonical_adapters import compute_smc_adapter
-
-    result: dict[str, Any] = {
-        # BOS (4)
-        "smc_bos_bullish_internal_freshness_bars": None,
-        "smc_bos_bullish_swing_freshness_bars": None,
-        "smc_bos_bearish_internal_freshness_bars": None,
-        "smc_bos_bearish_swing_freshness_bars": None,
-        # CHoCH (4)
-        "smc_choch_bullish_internal_freshness_bars": None,
-        "smc_choch_bullish_swing_freshness_bars": None,
-        "smc_choch_bearish_internal_freshness_bars": None,
-        "smc_choch_bearish_swing_freshness_bars": None,
-        # OB touch (4)
-        "smc_order_block_touch_bullish_internal_freshness_bars": None,
-        "smc_order_block_touch_bullish_swing_freshness_bars": None,
-        "smc_order_block_touch_bearish_internal_freshness_bars": None,
-        "smc_order_block_touch_bearish_swing_freshness_bars": None,
-        # EQH/EQL (2) — Canonical DTO 无 internal/swing 字段
-        "smc_eqh_freshness_bars": None,
-        "smc_eql_freshness_bars": None,
-    }
+    from app.services.event_freshness_service import build_smc_daily_freshness
 
     if bars is None or bars.empty or len(bars) < 250:
-        return result
+        return build_smc_daily_freshness(None, bars, 0)
 
     try:
         smc_dto = compute_smc_adapter(bars, display_bars=len(bars))
     except Exception as exc:
         logger.warning("SMC freshness 计算失败: %s", exc)
-        return result
+        return build_smc_daily_freshness(None, bars, 0)
 
     current_index = len(bars) - 1
-
-    # --- BOS/CHoCH: 按 bullish/bearish × internal/swing 拆分 ---
-    # 取每子类型最近事件（最大 confirmed_index → 最小 freshness）
-    bos_choch_subtypes: dict[str, int] = {}  # key → best_confirmed_index
-    for e in smc_dto.get("events", []):
-        etype = e.get("type")
-        if etype not in ("BOS", "CHoCH"):
-            continue
-        bullish = e.get("bullish")
-        internal = e.get("internal")
-        confirmed_idx = e.get("confirmed_index")
-        if bullish is None or internal is None or confirmed_idx is None:
-            continue
-        direction = "bullish" if bullish else "bearish"
-        level = "internal" if internal else "swing"
-        key = f"{etype.lower()}_{direction}_{level}"
-        idx = int(confirmed_idx)
-        if key not in bos_choch_subtypes or idx > bos_choch_subtypes[key]:
-            bos_choch_subtypes[key] = idx
-
-    for key, best_idx in bos_choch_subtypes.items():
-        factor_key = f"smc_{key}_freshness_bars"
-        if factor_key in result:
-            result[factor_key] = current_index - best_idx
-
-    # --- OB touch: 按 bullish/bearish × internal/swing 拆分 ---
-    # 每个子类型取最近首次触碰（最大 first_touch_index → 最小 freshness）
-    bars_high = bars["high"].to_numpy(dtype=float)
-    bars_low = bars["low"].to_numpy(dtype=float)
-    ob_touch_subtypes: dict[str, int] = {}  # key → best_first_touch_index
-    for ob in smc_dto.get("order_blocks", []):
-        ob_high = ob.get("bar_high")
-        ob_low = ob.get("bar_low")
-        confirmed_idx = ob.get("confirmed_index")
-        bias = ob.get("bias")
-        internal = ob.get("internal")
-        if ob_high is None or ob_low is None or confirmed_idx is None:
-            continue
-        if bias is None or internal is None:
-            continue
-        ob_high_f = float(ob_high)
-        ob_low_f = float(ob_low)
-        # 从创建 bar 之后开始搜索首次触碰
-        start_idx = int(confirmed_idx) + 1
-        direction = "bullish" if bias == 1 else "bearish"
-        level = "internal" if internal else "swing"
-        key = f"order_block_touch_{direction}_{level}"
-        first_touch = -1
-        for i in range(start_idx, len(bars)):
-            if bars_high[i] >= ob_low_f and bars_low[i] <= ob_high_f:
-                first_touch = i
-                break
-        if first_touch >= 0:
-            if key not in ob_touch_subtypes or first_touch > ob_touch_subtypes[key]:
-                ob_touch_subtypes[key] = first_touch
-
-    for key, best_idx in ob_touch_subtypes.items():
-        factor_key = f"smc_{key}_freshness_bars"
-        if factor_key in result:
-            result[factor_key] = current_index - best_idx
-
-    # --- EQH/EQL: 无 internal/swing 字段，单因子 ---
-    for eqhl in smc_dto.get("equal_highs_lows", []):
-        etype = eqhl.get("type")
-        confirmed_idx = eqhl.get("confirmed_index")
-        if etype is None or confirmed_idx is None:
-            continue
-        factor_key = f"smc_{etype.lower()}_freshness_bars"
-        if factor_key not in result:
-            continue
-        idx = int(confirmed_idx)
-        if result[factor_key] is None or idx > (current_index - result[factor_key]):
-            result[factor_key] = current_index - idx
-
-    return result
+    return build_smc_daily_freshness(smc_dto, bars, current_index)
 
 
 def _compute_all_factors_for_bars(
@@ -1592,6 +1485,7 @@ def _compute_all_factors_for_bars(
     warmup_notes: list[str],
     *,
     precomputed_node_cluster: NodeClusterProfileResult | None = None,
+    precomputed_dsa_bundle: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """计算单周期所有因子组，每组独立异常隔离。
 
@@ -1604,6 +1498,9 @@ def _compute_all_factors_for_bars(
             由 feature_snapshot_service 注入）。当提供时，cost_position 消费 engine 结果
             （三链同核）；当为 None，cost_position 走单周期 VP（15m secondary 或
             compute_structural_factors 独立调用）。
+        precomputed_dsa_bundle: 预计算的日线 DSA bundle（[CHANGE-20260724-002] compute-once）。
+            盘后传入时复用同一 bundle 写 StrategyResult 和 snapshot dsa_segment；
+            为 None 时内部调 compute_dsa_bundle（15m 或独立调用路径）。
     """
     factors: dict[str, Any] = {
         "dsa_segment": None,
@@ -1611,7 +1508,7 @@ def _compute_all_factors_for_bars(
         "cost_position": None,
         "volatility_momentum": None,
         "participation": None,
-        "smc_freshness": None,
+        # [CHANGE-20260724-002] smc_freshness 迁出到 event_freshness_payload.daily_structure.smc
     }
     if bars is None or bars.empty:
         degraded_reasons.append(f"{timeframe}: bars is None or empty")
@@ -1629,8 +1526,9 @@ def _compute_all_factors_for_bars(
         logger.warning("%s ATR 计算失败: %s", timeframe, exc)
 
     # 1. DSA 段质量
+    # [CHANGE-20260724-002] compute-once: 盘后传入 precomputed_dsa_bundle 时复用，不调 kernel
     try:
-        dsa_bundle = compute_dsa_bundle(bars, {})
+        dsa_bundle = precomputed_dsa_bundle if precomputed_dsa_bundle is not None else compute_dsa_bundle(bars, {})
         factors["dsa_segment"] = _compute_dsa_segment_factors(bars, dsa_bundle, atr)
     except Exception as exc:
         degraded_reasons.append(f"{timeframe}: dsa_segment failed: {exc}")
@@ -1668,14 +1566,8 @@ def _compute_all_factors_for_bars(
         degraded_reasons.append(f"{timeframe}: participation failed: {exc}")
         logger.warning("%s 成交参与计算失败: %s", timeframe, exc)
 
-    # 6. SMC freshness（5 个独立日线因子，仅 1d 周期计算）
-    #    [PROMPT.md §四.4] 事件 bar=0，此后按已完成日线 bar 递增，从未发生为 null
-    if timeframe == "1d":
-        try:
-            factors["smc_freshness"] = _compute_smc_freshness_factors(bars)
-        except Exception as exc:
-            degraded_reasons.append(f"{timeframe}: smc_freshness failed: {exc}")
-            logger.warning("%s SMC freshness 计算失败: %s", timeframe, exc)
+    # [CHANGE-20260724-002] SMC freshness 迁出到 event_freshness_service.build_smc_daily_freshness
+    # structural_payload 不再含 smc_freshness，避免双真源
 
     return factors
 

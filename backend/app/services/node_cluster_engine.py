@@ -490,15 +490,26 @@ def detect_crossover_signals(
     """1m 穿越检测（公式与 volume_node_monitor._detect_node_crossover_signals 完全一致）。
 
     逻辑：遍历 profile.all_peak_prices（含 VA 外），检测价格穿越：
-        (prev_close <= peak_price < cur_close) or (cur_close <= peak_price < prev_close)
+        up:   prev_close <= peak_price < cur_close
+        down: cur_close <= peak_price < prev_close
+
+    [CHANGE-20260724-002] 显式输出 cross_direction=up|down 及 node 元数据，
+    禁止下游用 dev_pct 猜方向。
 
     Args:
-        profile: NodeClusterProfileResult（含 all_peak_prices）
+        profile: NodeClusterProfileResult（含 all_peak_prices / peak_rows / profile_hash）
         prev_close: 1m 前一根 bar 收盘价
         cur_close: 1m 当前 bar 收盘价
 
     Returns:
-        信号列表，每项含 trigger_type/price/cluster_price/boundary/dev_pct
+        信号列表，每项含:
+        - trigger_type / price / cluster_price / boundary / dev_pct（兼容旧字段）
+        - cross_direction: "up" | "down"（显式方向）
+        - node_id: peak entity_id（如 "peak_000"）
+        - node_price: 节点价格（= cluster_price）
+        - strength: 节点总成交量（total_volume）
+        - is_poc: 是否为 POC 节点
+        - profile_hash: profile hash（四链一致性）
     """
     cluster_prices = profile.all_peak_prices
     if not cluster_prices:
@@ -507,18 +518,54 @@ def detect_crossover_signals(
     prev_close_f = float(prev_close)
     cur_close_f = float(cur_close)
 
+    # 构建 price_mid(4位小数) → (peak_index, peak_row) 查找表
+    # 与 build_node_regions 的 entity_id 生成逻辑一致（peak_{idx:03d}）
+    peak_lookup: dict[float, tuple[int, dict[str, Any]]] = {}
+    for idx, peak in enumerate(profile.peak_rows):
+        mid = round(float(peak["price_mid"]), 4)
+        peak_lookup[mid] = (idx, peak)
+
+    poc_price = profile.poc_price
+    profile_hash = profile.profile_hash
+
     signals: list[dict[str, Any]] = []
     for cp in cluster_prices:
-        peak_cross = (prev_close_f <= cp < cur_close_f) or (cur_close_f <= cp < prev_close_f)
-        if peak_cross:
-            dev_pct = (cur_close_f - cp) / cp * 100 if cp != 0 else 0.0
-            signals.append({
-                "trigger_type": EVENT_TYPE_NODE_CLUSTER_TOUCH,
-                "price": cur_close_f,
-                "cluster_price": cp,
-                "boundary": cp,
-                "dev_pct": round(dev_pct, 4),
-            })
+        # 方向判定（PRD §7.4 Node Cluster）：
+        # up:   prev_close <= node_price < cur_close
+        # down: cur_close <= node_price < prev_close
+        is_up = prev_close_f <= cp < cur_close_f
+        is_down = cur_close_f <= cp < prev_close_f
+        if not (is_up or is_down):
+            continue
+
+        cross_direction = "up" if is_up else "down"
+        dev_pct = (cur_close_f - cp) / cp * 100 if cp != 0 else 0.0
+
+        # 查找节点元数据
+        cp_key = round(float(cp), 4)
+        peak_idx, peak_row = peak_lookup.get(cp_key, (-1, {}))
+        node_id = f"peak_{peak_idx:03d}" if peak_idx >= 0 else None
+        strength = float(peak_row["total_volume"]) if peak_row else None
+        is_poc = (
+            poc_price is not None
+            and peak_row
+            and abs(cp_key - float(poc_price)) < 1e-4
+        )
+
+        signals.append({
+            "trigger_type": EVENT_TYPE_NODE_CLUSTER_TOUCH,
+            "price": cur_close_f,
+            "cluster_price": cp,
+            "boundary": cp,
+            "dev_pct": round(dev_pct, 4),
+            # [CHANGE-20260724-002] 显式方向 + node 元数据
+            "cross_direction": cross_direction,
+            "node_id": node_id,
+            "node_price": cp,
+            "strength": strength,
+            "is_poc": is_poc,
+            "profile_hash": profile_hash,
+        })
 
     return signals
 
