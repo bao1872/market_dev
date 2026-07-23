@@ -22,7 +22,7 @@
 - `assets/js/site.js`
 - `assets/data/factors.public.js`
 - `assets/data/factors.public.json`
-- `assets/images/wechat-qr-placeholder.svg`（占位图）
+- `assets/images/wechat-qr.jpg`（管理员真实微信二维码，来自 `/root/web_dev/ref/IMG_3054.JPG`，SHA256=`ee67d531d0d0ba9b5a1073d58cb56ade514a5ec1eabb69b1410c6ea654709cc8`）
 - `assets/images/logo_symbol_128.png`（从仓库批准资产 `frontend/src/assets/brand/logo_symbol_128.png` 复制，非附件资产）
 - `content/site.json`
 - `SOURCE.md`（本文件）
@@ -90,8 +90,9 @@
 
 ## 6. 上线阻塞
 
-**BLOCKED_EXTERNAL_ASSET：管理员真实微信二维码**
+**已解除**：管理员真实微信二维码已替换（2026-07-24）。
 
-当前 `assets/images/wechat-qr-placeholder.svg` 为占位图。真实管理员微信二维码尚未提供。
-- 允许使用占位图完成开发和测试。
-- 未替换真实二维码前，PR 可以完成，但禁止生产上线。
+- 旧占位图 `assets/images/wechat-qr-placeholder.svg` 已删除。
+- 真实二维码 `assets/images/wechat-qr.jpg`（SHA256=`ee67d531d0d0ba9b5a1073d58cb56ade514a5ec1eabb69b1410c6ea654709cc8`）已就位，13 处引用全部更新，alt 文案已纠正为「管理员微信二维码」。
+- 来源：`/root/web_dev/ref/IMG_3054.JPG`（用户提供）。
+- 测试环境可正常上线，用户扫码可联系真实管理员。
