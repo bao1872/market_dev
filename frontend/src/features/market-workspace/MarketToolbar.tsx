@@ -86,18 +86,18 @@ export function MarketToolbar({
     <div className={styles.toolbar}>
       <div className={styles.scopeTabs}>
         <button
-          className={clsx(styles.scopeTab, scope === 'watchlist' && styles.scopeTabActive)}
-          onClick={() => onScopeChange('watchlist')}
-          aria-label="自选"
-        >
-          自选
-        </button>
-        <button
           className={clsx(styles.scopeTab, scope === 'market' && styles.scopeTabActive)}
           onClick={() => onScopeChange('market')}
           aria-label="行情"
         >
           行情
+        </button>
+        <button
+          className={clsx(styles.scopeTab, scope === 'watchlist' && styles.scopeTabActive)}
+          onClick={() => onScopeChange('watchlist')}
+          aria-label="自选"
+        >
+          自选
         </button>
       </div>
       <input
