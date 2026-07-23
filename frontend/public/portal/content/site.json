@@ -1,0 +1,86 @@
+{
+  "site": {
+    "name": "盘迹使用说明",
+    "version": "0.5.1",
+    "updated": "2026-07-22"
+  },
+  "pages": [
+    {
+      "id": "home",
+      "title": "使用说明首页",
+      "path": "index.html",
+      "status": "implemented",
+      "keywords": "首页 总览 使用说明 功能 入口"
+    },
+    {
+      "id": "start",
+      "title": "快速开始",
+      "path": "pages/quick-start.html",
+      "status": "implemented",
+      "keywords": "邀请码 注册 登录 页面 第一次使用"
+    },
+    {
+      "id": "market",
+      "title": "行情查看",
+      "path": "pages/market.html",
+      "status": "implemented",
+      "keywords": "搜索 股票 周期 列表 图表"
+    },
+    {
+      "id": "watchlist",
+      "title": "自选管理",
+      "path": "pages/watchlist.html",
+      "status": "implemented",
+      "keywords": "加入 移除 自选 数量 权限"
+    },
+    {
+      "id": "stock",
+      "title": "个股详情",
+      "path": "pages/stock-detail.html",
+      "status": "implemented",
+      "keywords": "详情 数据 字段 图表 状态"
+    },
+    {
+      "id": "alerts",
+      "title": "提醒记录",
+      "path": "pages/alerts.html",
+      "status": "implemented",
+      "keywords": "提醒 条件 历史 记录"
+    },
+    {
+      "id": "messages",
+      "title": "消息通知",
+      "path": "pages/messages.html",
+      "status": "implemented",
+      "keywords": "站内消息 通知 设置 失败"
+    },
+    {
+      "id": "data",
+      "title": "指标原理",
+      "path": "pages/data.html",
+      "status": "implemented",
+      "keywords": "筹码共识 价格结构 成交聚集 指标 原理"
+    },
+    {
+      "id": "faq",
+      "title": "常见问题",
+      "path": "pages/faq.html",
+      "status": "implemented",
+      "keywords": "问题 排查 账户 功能 邀请码"
+    },
+    {
+      "id": "boundaries",
+      "title": "使用边界",
+      "path": "pages/boundaries.html",
+      "status": "implemented",
+      "keywords": "边界 风险 数据 建议"
+    },
+    {
+      "id": "customization",
+      "title": "量化定制",
+      "path": "pages/customization.html",
+      "status": "implemented",
+      "keywords": "因子 量化 定制 回测 筛选 监控 新因子 已交付案例"
+    }
+  ]
+}
