@@ -81,9 +81,9 @@ class TestEventTypeToIndicatorViewMapping:
                 f"事件 {event_type} 映射到非法 indicator_view: {view!r}"
             )
 
-    def test_mapping_has_seven_entries(self) -> None:
-        """映射表应有 7 项（4 监控事件 + 3 SMC 事件）。"""
-        assert len(EVENT_TYPE_TO_INDICATOR_VIEW) == 7
+    def test_mapping_has_nine_entries(self) -> None:
+        """映射表应有 9 项（4 监控事件 + 5 SMC 事件：BOS/CHoCH/OB/EQH/EQL）。"""
+        assert len(EVENT_TYPE_TO_INDICATOR_VIEW) == 9
 
 
 class TestGetIndicatorViewForEvent:
@@ -99,6 +99,8 @@ class TestGetIndicatorViewForEvent:
             ("smc_bos_retest", "smc"),
             ("smc_choch_retest", "smc"),
             ("smc_order_block_first_touch", "smc"),
+            ("smc_equal_highs_retest", "smc"),
+            ("smc_equal_lows_retest", "smc"),
         ],
     )
     def test_known_event_types(self, event_type: str, expected: str) -> None:

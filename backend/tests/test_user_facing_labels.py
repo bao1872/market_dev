@@ -50,11 +50,12 @@ class TestEventLabels:
         assert get_event_label("") == ""
 
     def test_event_labels_count(self) -> None:
-        """事件类型映射应覆盖 8 项（4 个监控事件 + 3 个 SMC 事件 + 1 个快照分享）。
+        """事件类型映射应覆盖 10 项（4 个监控事件 + 5 个 SMC 事件 + 1 个快照分享）。
 
         [CHANGE-20260720-002 §二] 新增 3 个 SMC 事件后，总数从 5 扩展到 8。
+        [PROMPT-V3] 新增 EQH/EQL 2 个 SMC 事件后，总数从 8 扩展到 10。
         """
-        assert len(EVENT_LABELS) == 8
+        assert len(EVENT_LABELS) == 10
 
     def test_event_labels_start_with_price_verb(self) -> None:
         """advice.md 第二节要求：监控事件文案以"价格"开头（动词前缀，便于用户理解）。"""
@@ -62,6 +63,7 @@ class TestEventLabels:
         for event_type in (
             "bb_upper_touch", "bb_mid_touch", "bb_lower_touch", "node_cluster_touch",
             "smc_bos_retest", "smc_choch_retest", "smc_order_block_first_touch",
+            "smc_equal_highs_retest", "smc_equal_lows_retest",
         ):
             label = EVENT_LABELS[event_type]
             assert label.startswith("价格"), f"{event_type} 文案应以'价格'开头: {label}"

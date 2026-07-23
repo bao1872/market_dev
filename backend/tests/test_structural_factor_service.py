@@ -703,10 +703,10 @@ def test_v18_dual_period_difference() -> None:
         secondary_bars, "15m", secondary_degraded, secondary_warmup
     )
 
-    # 结构相同：5 个 factor group key
+    # 结构相同：6 个 factor group key（含 smc_freshness，15m 时值为 None）
     expected_keys = {
         "dsa_segment", "swing_position", "cost_position",
-        "volatility_momentum", "participation",
+        "volatility_momentum", "participation", "smc_freshness",
     }
     assert set(primary_factors.keys()) == expected_keys
     assert set(secondary_factors.keys()) == expected_keys
