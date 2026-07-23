@@ -94,6 +94,12 @@ class StockFeatureSnapshot(Base):
     summary_payload: Mapped[dict[str, Any]] = mapped_column(
         JSONB(astext_type=Text()), nullable=False, comment="前端列表用摘要 JSONB"
     )
+    event_freshness_payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB(astext_type=Text()),
+        nullable=False,
+        server_default=func.text("'{}'"),
+        comment="事件新鲜度 payload JSONB（SMC 18 项 + monitor 交互事件 freshness）",
+    )
     degraded_reasons: Mapped[list[str]] = mapped_column(
         JSONB(astext_type=Text()),
         nullable=False,
@@ -194,6 +200,7 @@ if __name__ == "__main__":
         "structural_payload",
         "temporal_payload",
         "summary_payload",
+        "event_freshness_payload",
         "degraded_reasons",
         "created_at",
         "updated_at",

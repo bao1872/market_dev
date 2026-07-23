@@ -70,6 +70,7 @@ from app.services.canonical_adapters import (
     profile_to_dict,
 )
 from app.services.canonical_computation_service import CanonicalComputationService
+from app.services.event_freshness_service import build_empty_event_freshness_payload
 from app.services.node_cluster_input_provider import NodeClusterInputProvider
 
 
@@ -94,7 +95,7 @@ logger = logging.getLogger(__name__)
 
 # 常量
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
-_SCHEMA_VERSION = 4  # [CHANGE-20260721-001] 3→4: node_cluster 字段增加 availability/degraded_reason，StockContext 据此区分 5 态（NO_PUBLISHED_RUN/SNAPSHOT_MISSING/NODE_PROFILE_EMPTY/NODE_15M_MISSING/NODE_COMPUTE_FAILED）。旧 schema_version=3 快照不可见，符合"旧新结果不可混用"。
+_SCHEMA_VERSION = 5  # [CHANGE-20260724-002 Phase 4] 4→5: 新增 event_freshness_payload JSONB 列，SMC freshness 从 structural_payload 迁出到 event 层。旧 schema_version=4 快照不可见（schema gate 过滤 schema_version==5），符合"旧新结果不可混用"。
 _PRIMARY_LOOKBACK = 500  # 日线回看天数（与 structural_factor_service 对齐）
 _SECONDARY_LOOKBACK = 500  # 15m 回看天数
 _BB_WIN = 20
@@ -313,6 +314,7 @@ async def compute_feature_snapshot_for_date(
     secondary_bars: pd.DataFrame | None = None,
     source_run_id: uuid.UUID | None = None,
     precomputed_dsa_bundle: dict[str, Any] | None = None,
+    event_freshness_payload: dict[str, Any] | None = None,
     _diag_sink: dict[str, Any] | None = None,
 ) -> StockFeatureSnapshot:
     """为指定 instrument + trade_date 计算 point-in-time 特征快照。
@@ -339,6 +341,10 @@ async def compute_feature_snapshot_for_date(
         precomputed_dsa_bundle: 预计算的 DSA bundle（可选，不传则内部计算）
             [CHANGE-20260724-002 Phase 3] compute-once: 盘后统一计算时传入，
             避免 StrategyResult 和 snapshot 重复计算 DSA。
+        event_freshness_payload: 预构建的事件新鲜度 payload（可选，不传则空骨架）
+            [CHANGE-20260724-002 Phase 4] 由 MarketFeatureComputationService 从预计算
+            SMC DTO + 批量 monitor 事件聚合后传入。None 时写入空骨架（daily_structure.smc={}
+            和 monitor_interaction={}），保持 v5 结构一致性。
 
     Returns:
         StockFeatureSnapshot ORM 对象（未写入 DB）
@@ -606,6 +612,14 @@ async def compute_feature_snapshot_for_date(
         source_bar_time=source_bar_time_str, extra=extra,
     )
 
+    # [CHANGE-20260724-002 Phase 4] event_freshness_payload
+    # 盘后 MarketFeatureComputationService 传入预构建 payload（含 SMC freshness + monitor 事件）。
+    # None 时写入空骨架，保持 v5 结构一致性（daily_structure.smc={} 和 monitor_interaction={}）。
+    if event_freshness_payload is None:
+        event_freshness_payload = build_empty_event_freshness_payload(
+            as_of=trade_date, schema_version=_SCHEMA_VERSION,
+        )
+
     return StockFeatureSnapshot(
         instrument_id=instrument_id,
         trade_date=trade_date,
@@ -619,6 +633,7 @@ async def compute_feature_snapshot_for_date(
         structural_payload=structural_payload,
         temporal_payload=temporal_payload,
         summary_payload=summary_payload,
+        event_freshness_payload=event_freshness_payload,
         degraded_reasons=degraded_reasons,
     )
 
