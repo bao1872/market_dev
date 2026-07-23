@@ -35,6 +35,8 @@ EVENT_TYPE_TO_INDICATOR_VIEW: dict[str, str] = {
     # SMC
     "smc_bos_retest": "smc",
     "smc_choch_retest": "smc",
+    "smc_equal_highs_retest": "smc",
+    "smc_equal_lows_retest": "smc",
     "smc_order_block_first_touch": "smc",
 }
 
@@ -101,6 +103,8 @@ if __name__ == "__main__":
     assert get_indicator_view_for_event("node_cluster_touch") == "node_cluster"
     assert get_indicator_view_for_event("smc_bos_retest") == "smc"
     assert get_indicator_view_for_event("smc_choch_retest") == "smc"
+    assert get_indicator_view_for_event("smc_equal_highs_retest") == "smc"
+    assert get_indicator_view_for_event("smc_equal_lows_retest") == "smc"
     assert get_indicator_view_for_event("smc_order_block_first_touch") == "smc"
     # 未知事件类型回退默认
     assert get_indicator_view_for_event("unknown_event") == DEFAULT_INDICATOR_VIEW

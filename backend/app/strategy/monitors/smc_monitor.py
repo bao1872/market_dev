@@ -721,6 +721,9 @@ class SmcMonitor(StrategyRuntime):
             payload["level"] = bos.get("level")
             payload["anchor_index"] = bos.get("anchor_index")
             payload["anchor_time"] = bos.get("anchor_time")
+            # [Task 2] confirmed_time 为 close 穿越 pivot 的 bar 时间（focus_event 链路必需）
+            payload["confirmed_index"] = bos.get("confirmed_index")
+            payload["confirmed_time"] = bos.get("confirmed_time")
             payload["bias"] = bos.get("bias")
             payload["internal"] = bos.get("internal")
             payload["bullish"] = bos.get("bullish")
@@ -731,6 +734,9 @@ class SmcMonitor(StrategyRuntime):
             payload["level"] = choch.get("level")
             payload["anchor_index"] = choch.get("anchor_index")
             payload["anchor_time"] = choch.get("anchor_time")
+            # [Task 2] confirmed_time 为 close 穿越 pivot 的 bar 时间（focus_event 链路必需）
+            payload["confirmed_index"] = choch.get("confirmed_index")
+            payload["confirmed_time"] = choch.get("confirmed_time")
             payload["bias"] = choch.get("bias")
             payload["internal"] = choch.get("internal")
             payload["bullish"] = choch.get("bullish")
@@ -744,6 +750,9 @@ class SmcMonitor(StrategyRuntime):
             payload["anchor_time"] = eqhl.get("anchor_time")
             payload["second_pivot_index"] = eqhl.get("second_pivot_index")
             payload["second_pivot_time"] = eqhl.get("second_pivot_time")
+            # [Task 2] confirmed_time 为 leg change 确认 bar 时间（focus_event 链路必需）
+            payload["confirmed_index"] = eqhl.get("confirmed_index")
+            payload["confirmed_time"] = eqhl.get("confirmed_time")
             payload["eqhl_type"] = eqhl.get("type")  # "EQH" or "EQL"
         elif event_type == SMC_ORDER_BLOCK_FIRST_TOUCH:
             ob = ob_by_entity.get(entity_id)
@@ -753,6 +762,9 @@ class SmcMonitor(StrategyRuntime):
             payload["bar_low"] = ob.get("bar_low")
             payload["anchor_index"] = ob.get("anchor_index")
             payload["anchor_time"] = ob.get("anchor_time")
+            # [Task 2] confirmed_time 为触发 OB 创建的 BOS/CHoCH bar 时间（focus_event 链路必需）
+            payload["confirmed_index"] = ob.get("confirmed_index")
+            payload["confirmed_time"] = ob.get("confirmed_time")
             payload["bias"] = ob.get("bias")
             payload["internal"] = ob.get("internal")
 

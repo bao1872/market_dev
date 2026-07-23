@@ -211,6 +211,7 @@ async def capture_stock_chart(
     viewport_height: int | None = None,
     device_scale_factor: int | None = None,
     indicator_view: str | None = None,
+    focus_event: dict[str, str] | None = None,
 ) -> CaptureResult:
     """截取个股详情页指定区域，返回 PNG bytes 与渲染元数据。
 
@@ -230,6 +231,9 @@ async def capture_stock_chart(
         viewport_width/height/device_scale_factor: 高清渲染参数（默认 env 1920x1200 dsf=2）
         indicator_view: 指标视图 node_cluster|bollinger|smc（扩展缓存 key + URL 参数，
             [CHANGE-20260720-003 §三] 一张图只渲染一个指标视图，禁止混合指标叠图）
+        focus_event: [Task 2] 监控触发事件信息 dict（focus_event_id/type/anchor_time/
+            confirmed_time/level/zone 等）。透传到 Capture URL query，前端 StrategyChart
+            据此突出本次触发事件，淡化其他历史结构。
 
     Returns:
         CaptureResult（png_bytes + 渲染元数据）
@@ -312,6 +316,15 @@ async def capture_stock_chart(
     if indicator_view is not None:
         # [CHANGE-20260720-003 §三] 前端按 indicator_view 切换图层组合
         url += f"&indicator_view={indicator_view}"
+    # [Task 2] focus_event 透传到 Capture URL query
+    #   前端 CaptureStockPage 读取后传入 StrategyChart.focusEventId/focusEventType,
+    #   StrategyChart 突出本次触发事件（高亮 + 完整不透明度），淡化其他历史结构（半透明）。
+    if focus_event is not None:
+        from urllib.parse import quote
+        for k, v in focus_event.items():
+            if v is None:
+                continue
+            url += f"&{k}={quote(str(v))}"
     if disable_cache:
         url += "&disable_cache=true"
     # [capture-realtime] - 截图页面始终强制实时指标/行情（等价 force_refresh）

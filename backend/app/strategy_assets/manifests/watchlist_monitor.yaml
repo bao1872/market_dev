@@ -96,11 +96,16 @@ event_types:
   - key: node_cluster_touch
     dedupe: touch_episode
   # [CHANGE-20260720-002 §二] SMC 事件（来自 smc_monitor）
-  # 日线 SMC 结构盘中触碰：1m 检测已确认日线 BOS/CHoCH level 回踩或穿越，
-  # 以及第一次进入当前有效未mitigated日线 OB。EQH/EQL 和 Strong/Weak 只显示不通知。
+  # 日线 SMC 结构盘中触碰：1m 检测已确认日线 BOS/CHoCH/EQH/EQL level 回踩或穿越，
+  # 以及第一次进入当前有效未mitigated日线 OB。Strong/Weak 只显示不通知。
+  # [Task 2] EQH/EQL 升级为通知事件（五类 SMC 全部通知）
   - key: smc_bos_retest
     dedupe: touch_episode
   - key: smc_choch_retest
+    dedupe: touch_episode
+  - key: smc_equal_highs_retest
+    dedupe: touch_episode
+  - key: smc_equal_lows_retest
     dedupe: touch_episode
   - key: smc_order_block_first_touch
     dedupe: touch_episode

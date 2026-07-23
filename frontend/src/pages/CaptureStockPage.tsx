@@ -96,6 +96,44 @@ export default function CaptureStockPage() {
     return normalized ?? DEFAULT_CAPTURE_INDICATOR_VIEW
   }, [searchParams])
 
+  // [Task 2] focus_event 解析：从 URL query 读取监控触发事件信息
+  //   字段：focus_event_id / focus_event_type / anchor_time / confirmed_time /
+  //   level / bar_high / bar_low / bias / internal / bullish / eqhl_type / second_pivot_time
+  //   传递到 StrategyChart.focusEventId/focusEventType，前端据此突出本次触发事件，
+  //   淡化其他历史结构（半透明 / 不绘制标签）
+  const focusEventId = searchParams.get('focus_event_id') || null
+  const focusEventType = searchParams.get('focus_event_type') || null
+  const focusEventAnchorTime = searchParams.get('anchor_time') || null
+  const focusEventConfirmedTime = searchParams.get('confirmed_time') || null
+  const focusEventLevel = searchParams.get('level')
+  const focusEventBarHigh = searchParams.get('bar_high')
+  const focusEventBarLow = searchParams.get('bar_low')
+  const focusEventBias = searchParams.get('bias')
+  const focusEventInternal = searchParams.get('internal')
+  const focusEventBullish = searchParams.get('bullish')
+  const focusEventEqhlType = searchParams.get('eqhl_type')
+  const focusEventSecondPivotTime = searchParams.get('second_pivot_time')
+  const focusEventInfo = useMemo(() => {
+    if (!focusEventId) return null
+    return {
+      focus_event_id: focusEventId,
+      focus_event_type: focusEventType,
+      anchor_time: focusEventAnchorTime,
+      confirmed_time: focusEventConfirmedTime,
+      level: focusEventLevel,
+      bar_high: focusEventBarHigh,
+      bar_low: focusEventBarLow,
+      bias: focusEventBias,
+      internal: focusEventInternal,
+      bullish: focusEventBullish,
+      eqhl_type: focusEventEqhlType,
+      second_pivot_time: focusEventSecondPivotTime,
+    }
+  }, [focusEventId, focusEventType, focusEventAnchorTime, focusEventConfirmedTime,
+      focusEventLevel, focusEventBarHigh, focusEventBarLow,
+      focusEventBias, focusEventInternal, focusEventBullish,
+      focusEventEqhlType, focusEventSecondPivotTime])
+
   // [Capture] - 描述: 截图模式唯一业务数据请求
   // 通过 Capture Token 访问专用 Snapshot API，不调用普通业务端点
   const snapshotQuery = useQuery({
@@ -304,6 +342,10 @@ export default function CaptureStockPage() {
           // [PROMPT.md §5.3.4 V2] Capture 强制使用 mobile_capture 缩放：
           //   1440×2560 舞台需要 ≥32px Canvas 字号 / 2.5-3.5px 线宽，桌面端保持默认 'desktop'。
           renderDensity="mobile_capture"
+          // [Task 2] focus_event 透传：突出本次触发事件，淡化其他历史结构
+          focusEventId={focusEventId}
+          focusEventType={focusEventType}
+          focusEventInfo={focusEventInfo}
         />
       )}
     </MobileIndicatorStage>

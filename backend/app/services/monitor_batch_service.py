@@ -114,6 +114,7 @@ _CST = ZoneInfo("Asia/Shanghai")
 # [advice.md 第二节] - 文案已迁移至 app.constants.user_facing_labels.get_event_label
 # emoji 与文案分离：emoji 仅在此处维护，文案由 get_event_label 提供
 # [CHANGE-20260720-002 §二] 新增 SMC 三类事件 emoji/severity
+# [Task 2] 补齐 EQH/EQL 两类事件 emoji/severity（五类 SMC 全覆盖）
 _EVENT_EMOJI: dict[str, str] = {
     "bb_upper_touch": "🔴",
     "bb_mid_touch": "🟠",
@@ -121,7 +122,9 @@ _EVENT_EMOJI: dict[str, str] = {
     "node_cluster_touch": "🟣",
     "smc_bos_retest": "🔵",
     "smc_choch_retest": "🟦",
-    "smc_order_block_first_touch": "🔷",
+    "smc_equal_highs_retest": "🔹",
+    "smc_equal_lows_retest": "🔷",
+    "smc_order_block_first_touch": "🔶",
 }
 
 # 事件类型 → 严重级别
@@ -132,6 +135,8 @@ _EVENT_SEVERITY: dict[str, str] = {
     "node_cluster_touch": "warn",
     "smc_bos_retest": "warn",
     "smc_choch_retest": "danger",
+    "smc_equal_highs_retest": "info",
+    "smc_equal_lows_retest": "info",
     "smc_order_block_first_touch": "warn",
 }
 
@@ -1545,6 +1550,22 @@ class MonitorBatchService:
                     first_event.event_type, first_payload
                 )
 
+                # [Task 2] focus_event 贯穿链路：从 first_event.payload 提取 focus 字段
+                #   传递到 capture worker → capture API → 前端 StrategyChart，
+                #   前端据此突出本次触发事件，淡化其他历史结构。
+                #   字段来源：smc_monitor._build_event_draft 写入 payload
+                focus_event_info: dict[str, Any] = {
+                    "focus_event_id": str(first_event.id),
+                    "focus_event_type": first_event.event_type,
+                }
+                if first_payload is not None:
+                    for k in ("anchor_time", "confirmed_time", "level",
+                              "bar_high", "bar_low", "bias", "internal",
+                              "bullish", "eqhl_type", "second_pivot_time"):
+                        v = first_payload.get(k)
+                        if v is not None:
+                            focus_event_info[k] = v
+
                 # [飞书两段式投递] - 生成短期 capture token
                 # 必须携带 scope/instrument_id/user_id，否则 capture API 会 401/403
                 token = create_capture_token(
@@ -1577,6 +1598,8 @@ class MonitorBatchService:
                     "disable_cache": True,
                     # [CHANGE-20260720-003 §三] 贯穿全链的 indicator_view
                     "indicator_view": indicator_view,
+                    # [Task 2] focus_event 透传到前端 URL query
+                    "focus_event": focus_event_info,
                 }
                 try:
                     async with httpx.AsyncClient(timeout=60.0) as client:
