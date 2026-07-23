@@ -1,0 +1,598 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>提醒记录｜盘迹使用说明</title>
+<meta name="description" content="通过真实消息中心动画演示学习筛选提醒记录、查看时间与价格、处理未读消息以及打开相关股票详情。">
+<link rel="stylesheet" href="../assets/css/site.css">
+<style>
+  .article-wrap{--demo-green:#51e77d;--demo-red:#ef746c;--demo-blue:#5ba9ff;--demo-gold:#e8c46f}
+  .alerts-intro{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}
+  .alerts-intro span{padding:7px 11px;border:1px solid rgba(81,231,125,.22);border-radius:999px;background:rgba(81,231,125,.07);color:#bdf3cc;font-size:12px}
+  .visual-section{margin-top:30px;scroll-margin-top:96px}
+  .visual-title{display:flex;align-items:end;justify-content:space-between;gap:20px;margin-bottom:14px}
+  .visual-title h2{margin:0;font-size:22px}
+  .visual-title p{margin:0;color:var(--muted);font-size:13px;line-height:1.6}
+  .demo-shell{overflow:hidden;border:1px solid #2a3944;border-radius:18px;background:#060d12;box-shadow:0 20px 60px rgba(0,0,0,.32)}
+  .demo-head{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 16px;border-bottom:1px solid #202d36;background:#0c151b}
+  .demo-progress{display:flex;align-items:center;gap:10px;min-width:0}
+  .demo-count{display:grid;place-items:center;min-width:36px;height:28px;padding:0 8px;border-radius:8px;background:rgba(81,231,125,.12);color:var(--demo-green);font-size:12px;font-weight:800}
+  .demo-title-wrap{min-width:0}
+  .demo-title-wrap strong{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:14px}
+  .demo-title-wrap span{display:block;margin-top:2px;color:#91a0a9;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .demo-controls{display:flex;gap:7px}
+  .demo-control{width:32px;height:32px;display:grid;place-items:center;border:1px solid #2b3944;border-radius:8px;background:#111b22;color:#d7e2e7}
+  .demo-control:hover{border-color:rgba(81,231,125,.5);color:var(--demo-green)}
+  .demo-control svg{width:15px;height:15px}
+  .demo-viewport{position:relative;overflow:hidden;padding:14px;background:radial-gradient(circle at 78% -5%,rgba(54,142,101,.14),transparent 34%),#060d12}
+  .message-app{position:relative;min-height:520px;overflow:hidden;border:1px solid #263540;border-radius:14px;background:#091117}
+  .product-topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;height:48px;padding:0 13px;border-bottom:1px solid #27343e;background:#101920}
+  .product-left{display:flex;align-items:center;gap:16px}
+  .mini-brand{display:flex;align-items:center;gap:6px;color:#dce9e3;font-size:11px;font-weight:800}
+  .mini-brand-mark{width:24px;height:24px;display:grid;place-items:center;border-radius:7px;background:var(--demo-green);color:#07160d;font-size:9px}
+  .product-nav{display:flex;gap:4px}
+  .product-nav a{padding:7px 9px;border-radius:6px;color:#7f8f98;font-size:8px}
+  .product-nav a.active{background:rgba(81,231,125,.08);color:#c5efd1}
+  .market-clock{color:#71818b;font-size:8px}
+  .account-wrap{position:relative}
+  .account-btn{display:flex;align-items:center;gap:7px;height:30px;padding:0 8px;border:1px solid #2a3944;border-radius:8px;background:#0c151b;color:#a7b4ba;font-size:8px}
+  .avatar{width:18px;height:18px;display:grid;place-items:center;border-radius:50%;background:#24323b;color:#c9d5d9;font-size:8px}
+  .account-menu{position:absolute;z-index:12;right:0;top:36px;width:148px;padding:5px;border:1px solid #2d3b45;border-radius:9px;background:#101a21;box-shadow:0 18px 45px rgba(0,0,0,.4);opacity:0;transform:translateY(-7px);pointer-events:none;transition:.28s}
+  .account-menu.open{opacity:1;transform:none;pointer-events:auto}
+  .account-menu button{width:100%;display:flex;align-items:center;justify-content:space-between;height:31px;padding:0 9px;border:0;border-radius:6px;background:transparent;color:#9eabb2;text-align:left;font-size:8px}
+  .account-menu button:hover,.account-menu button.active{background:rgba(81,231,125,.08);color:#d7f3df}
+  .unread-badge{min-width:16px;height:16px;display:grid;place-items:center;padding:0 4px;border-radius:999px;background:#e66862;color:#fff;font-size:7px}
+  .message-page{padding:14px}
+  .page-head-demo{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:12px}
+  .page-title-demo h3{margin:0;color:#e9f3ee;font-size:18px}
+  .page-title-demo p{margin:5px 0 0;color:#758690;font-size:9px}
+  .page-actions-demo{display:flex;gap:6px}
+  .page-action{height:29px;padding:0 9px;border:1px solid #2c3943;border-radius:7px;background:#111b22;color:#9eabb3;font-size:8px}
+  .page-action.primary{border-color:rgba(81,231,125,.33);background:rgba(81,231,125,.07);color:#b9efc8}
+  .message-toolbar{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+  .segments{display:flex;gap:3px;padding:3px;border:1px solid #293741;border-radius:9px;background:#0b141a}
+  .segment-btn{height:27px;padding:0 9px;border:0;border-radius:6px;background:transparent;color:#7d8d96;font-size:8px}
+  .segment-btn.active{background:var(--demo-green);color:#07160d;font-weight:800}
+  .toolbar-spacer{flex:1}
+  .range-select{height:33px;display:flex;align-items:center;gap:14px;padding:0 10px;border:1px solid #2b3943;border-radius:7px;background:#0d161c;color:#a1aeb5;font-size:8px}
+  .range-select svg{width:11px;height:11px;color:#6f8089}
+  .table-card{overflow:hidden;border:1px solid #25333d;border-radius:10px;background:#0b141a}
+  .messages-table-wrap{overflow:auto}
+  .messages-table{width:100%;min-width:850px;border-collapse:collapse;color:#c6d2d7;font-size:8px}
+  .messages-table th{height:35px;padding:0 8px;border-bottom:1px solid #293741;background:#111b22;color:#83939c;text-align:left;font-weight:680;white-space:nowrap}
+  .messages-table td{height:54px;padding:0 8px;border-bottom:1px solid #1d2932;vertical-align:middle;transition:.25s}
+  .messages-table tbody tr{transition:.25s}
+  .messages-table tbody tr:hover,.messages-table tbody tr.selected{background:rgba(81,231,125,.045)}
+  .type-cell{display:flex;align-items:center;gap:7px}
+  .unread-dot{width:8px;height:8px;border:0;border-radius:50%;background:#5ba9ff;box-shadow:0 0 0 4px rgba(91,169,255,.1)}
+  .unread-dot.read{opacity:0}
+  .type-tag{padding:4px 6px;border-radius:999px;background:rgba(81,231,125,.1);color:#aef0c0;white-space:nowrap}
+  .type-tag.selection{background:rgba(91,169,255,.1);color:#b6d8ff}
+  .type-tag.system{background:rgba(232,196,111,.1);color:#ead18e}
+  .stock-text strong{display:block;color:#e2ece7;font-size:9px}
+  .stock-text span{display:block;margin-top:3px;color:#6f8089}
+  .event-text{max-width:190px;color:#aebbc1;line-height:1.45}
+  .price-text,.time-text{font-variant-numeric:tabular-nums;color:#a9b7bd;white-space:nowrap}
+  .delivery-pill{display:inline-flex;align-items:center;padding:4px 6px;border-radius:999px;white-space:nowrap}
+  .delivery-pill.ok{background:rgba(81,231,125,.09);color:#b6efc5}
+  .delivery-pill.off{background:rgba(132,149,160,.1);color:#9dabb2}
+  .delivery-pill.warn{background:rgba(239,116,108,.1);color:#efaaa5}
+  .view-btn{height:26px;padding:0 8px;border:1px solid #2e3c46;border-radius:6px;background:#111b22;color:#b8c5cb;font-size:8px}
+  .empty-demo{display:none;min-height:235px;place-items:center;color:#788993;font-size:10px}
+  .empty-demo.show{display:grid}
+  .messages-table.hidden{display:none}
+  .account-overlay{position:absolute;z-index:10;inset:48px 0 0;background:rgba(4,9,12,.54);opacity:0;pointer-events:none;transition:.28s}
+  .account-overlay.show{opacity:1}
+  .row-guide{position:absolute;z-index:11;left:16%;right:5%;top:246px;display:grid;grid-template-columns:repeat(7,1fr);gap:5px;opacity:0;pointer-events:none;transition:.28s}
+  .row-guide.show{opacity:1}
+  .guide-chip{padding:6px 4px;border:1px solid rgba(81,231,125,.35);border-radius:6px;background:#102019;color:#c8f4d4;text-align:center;font-size:7px;box-shadow:0 8px 20px rgba(0,0,0,.2)}
+  .instrument-drawer{position:absolute;z-index:13;right:0;top:48px;bottom:0;width:280px;border-left:1px solid #30404a;background:#0c151b;box-shadow:-20px 0 45px rgba(0,0,0,.34);transform:translateX(103%);transition:.4s ease}
+  .message-app.drawer-open .instrument-drawer{transform:none}
+  .drawer-head-demo{display:flex;align-items:center;justify-content:space-between;height:46px;padding:0 12px;border-bottom:1px solid #283640}
+  .drawer-head-demo strong{display:block;color:#e1ece7;font-size:10px}
+  .drawer-head-demo span{display:block;margin-top:3px;color:#71818b;font-size:8px}
+  .drawer-close{width:27px;height:27px;display:grid;place-items:center;border:1px solid #2d3b45;border-radius:6px;background:#111b22;color:#98a6ae}
+  .drawer-list{padding:10px}
+  .drawer-stock{display:grid;grid-template-columns:30px 1fr auto;gap:9px;align-items:center;padding:10px;border-bottom:1px solid #202d36}
+  .drawer-stock-icon{width:30px;height:30px;display:grid;place-items:center;border-radius:8px;background:#19252d;color:#b8c5cb;font-size:9px}
+  .drawer-stock strong{display:block;color:#dce7e2;font-size:9px}
+  .drawer-stock span{display:block;margin-top:3px;color:#6e7f88;font-size:8px}
+  .drawer-stock .view-btn{height:24px}
+  .detail-overlay{position:absolute;z-index:14;inset:0;display:grid;place-items:center;background:rgba(3,8,11,.84);opacity:0;pointer-events:none;transition:.35s}
+  .detail-overlay.show{opacity:1}
+  .detail-card{width:min(76%,500px);padding:21px;border:1px solid rgba(81,231,125,.28);border-radius:14px;background:#101a20;box-shadow:0 22px 60px rgba(0,0,0,.45);transform:translateY(12px);transition:.35s}
+  .detail-overlay.show .detail-card{transform:none}
+  .detail-card .eyebrow{color:var(--demo-green);font-size:9px}
+  .detail-card h3{margin:7px 0 5px;color:#e6f1ec;font-size:18px}
+  .detail-card p{margin:0;color:#8e9da5;font-size:10px;line-height:1.65}
+  .detail-preview{margin-top:12px;padding:10px;border:1px solid #27343e;border-radius:8px;background:#0b141a}
+  .detail-preview-line{display:flex;justify-content:space-between;padding:6px 0;border-top:1px solid #1d2a33;color:#87969e;font-size:8px}
+  .detail-preview-line:first-child{border-top:0}.detail-preview-line.active{color:#dff3e5}
+  .toast-demo{position:absolute;z-index:15;right:18px;top:62px;min-width:155px;padding:11px 13px;border:1px solid rgba(81,231,125,.35);border-radius:10px;background:#102019;color:#dff6e6;font-size:10px;box-shadow:0 12px 35px rgba(0,0,0,.35);opacity:0;transform:translateY(-8px);transition:.28s}
+  .toast-demo.show{opacity:1;transform:none}
+  .demo-focus{position:relative;z-index:8!important;box-shadow:0 0 0 2px var(--demo-green),0 0 0 7px rgba(81,231,125,.12)!important}
+  .demo-cursor{position:absolute;z-index:18;width:23px;height:28px;pointer-events:none;opacity:0;transform:translate(-3px,-2px);transition:left .72s cubic-bezier(.2,.8,.2,1),top .72s cubic-bezier(.2,.8,.2,1),opacity .2s}
+  .demo-cursor.visible{opacity:1}.demo-cursor svg{filter:drop-shadow(0 3px 5px rgba(0,0,0,.6))}
+  .click-ring{position:absolute;z-index:17;width:28px;height:28px;border:2px solid var(--demo-green);border-radius:50%;opacity:0;pointer-events:none}
+  .click-ring.pop{animation:ring .65s ease-out}
+  @keyframes ring{0%{opacity:.9;transform:scale(.35)}100%{opacity:0;transform:scale(1.8)}}
+  .demo-caption{display:grid;grid-template-columns:44px minmax(0,1fr);gap:12px;padding:14px 16px;border-top:1px solid #22313a;background:#0c151b}
+  .caption-no{width:40px;height:40px;display:grid;place-items:center;border-radius:11px;background:var(--demo-green);color:#06170d;font-weight:850}
+  .caption-copy strong{display:block;margin-bottom:4px;font-size:14px}
+  .caption-copy span{display:block;color:#91a0a9;font-size:12px;line-height:1.6}
+  .step-strip{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin-top:10px}
+  .step-button{min-height:70px;padding:10px 8px;border:1px solid var(--border);border-radius:11px;background:var(--surface);color:var(--muted);text-align:left;font-size:10px;line-height:1.5;transition:.2s}
+  .step-button b{display:block;margin-bottom:4px;color:var(--soft);font-size:11px}
+  .step-button.active{border-color:rgba(81,231,125,.48);background:rgba(81,231,125,.08);color:#b5c5bc}
+  .step-button.active b{color:var(--demo-green)}
+  .reading-flow{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px}
+  .reading-card{padding:14px 10px;border:1px solid var(--border);border-radius:11px;background:var(--surface);text-align:center}
+  .reading-card .num{width:25px;height:25px;display:grid;place-items:center;margin:0 auto 9px;border-radius:7px;background:rgba(81,231,125,.08);color:var(--demo-green);font-size:10px;font-weight:800}
+  .reading-card strong{display:block;margin-bottom:5px;font-size:11px}
+  .reading-card span{display:block;color:var(--muted);font-size:9px;line-height:1.5}
+  .delivery-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+  .delivery-card{padding:17px;border:1px solid var(--border);border-radius:13px;background:var(--surface)}
+  .delivery-card .delivery-pill{margin-bottom:10px}
+  .delivery-card h3{margin:0 0 6px;font-size:13px}.delivery-card p{margin:0;color:var(--muted);font-size:11px;line-height:1.65}
+  .delivery-note{margin-top:12px;padding:13px 15px;border-left:3px solid var(--demo-gold);border-radius:0 9px 9px 0;background:rgba(232,196,111,.07);color:#d6c28d;font-size:12px;line-height:1.65}
+  .destination-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+  .destination-card{padding:17px;border:1px solid var(--border);border-radius:13px;background:var(--surface)}
+  .destination-card h3{margin:0 0 6px;font-size:13px}.destination-card p{margin:0;color:var(--muted);font-size:11px;line-height:1.65}
+  .boundary-compact{display:grid;grid-template-columns:auto 1fr;gap:14px;padding:18px;border:1px solid rgba(228,187,97,.37);border-radius:14px;background:rgba(228,187,97,.08)}
+  .boundary-icon{width:36px;height:36px;display:grid;place-items:center;border-radius:10px;background:rgba(228,187,97,.15);color:#ebcc87;font-weight:850}
+  .boundary-compact strong{display:block;margin-bottom:5px;color:#f0dba6}.boundary-compact p{margin:0;color:#c7b98f;font-size:12px;line-height:1.7}
+  .next-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+  .next-card{padding:18px;border:1px solid var(--border);border-radius:14px;background:var(--surface)}
+  .next-card h3{margin:0 0 5px;font-size:15px}.next-card p{min-height:40px;margin:0;color:var(--muted);font-size:11px;line-height:1.65}.next-card .btn{margin-top:13px}
+  @media(max-width:1250px){
+    .step-strip{grid-template-columns:repeat(3,1fr)}
+    .reading-flow{grid-template-columns:repeat(4,1fr)}
+    .delivery-grid,.destination-grid{grid-template-columns:repeat(2,1fr)}
+  }
+  @media(max-width:820px){
+    .visual-title{display:block}.visual-title p{margin-top:5px}
+    .demo-viewport{padding:8px;overflow:auto}
+    .message-app{min-width:930px}
+    .next-grid{grid-template-columns:1fr}
+  }
+  @media(max-width:620px){
+    .demo-head{align-items:flex-start}.demo-title-wrap span{display:none}.demo-controls{flex-shrink:0}
+    .demo-caption{grid-template-columns:36px 1fr}.caption-no{width:34px;height:34px}
+    .step-strip{grid-template-columns:1fr 1fr}
+    .reading-flow{grid-template-columns:repeat(2,1fr)}
+    .delivery-grid,.destination-grid{grid-template-columns:1fr}
+  }
+  @media(prefers-reduced-motion:reduce){
+    .demo-cursor{display:none}.account-menu,.account-overlay,.instrument-drawer,.detail-overlay,.detail-card,.toast-demo{transition:none!important}
+  }
+</style>
+</head>
+<body data-page="alerts" data-root="..">
+<header class="site-header">
+  <a class="brand" href="../index.html" aria-label="盘迹首页"><img class="brand-logo" src="../assets/images/logo_symbol_128.png" alt="" aria-hidden="true"><span class="brand-mark">盘迹</span></a>
+  <div class="search-wrap">
+    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="m20 20-4.5-4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    <input class="doc-search" type="search" placeholder="搜索文档、功能或问题" aria-label="搜索文档">
+    <div class="search-results"></div>
+  </div>
+  <div class="header-actions"><a class="btn" href="/market">返回系统</a><a class="btn btn-primary" href="/login">登录盘迹</a><button class="btn icon-btn" type="button" data-menu-toggle aria-expanded="false" aria-label="打开目录">☰</button></div>
+</header>
+<div class="mobile-backdrop"></div>
+
+<div class="docs-layout">
+<aside class="docs-sidebar" aria-label="文档目录">
+  <h2 class="sidebar-title">目录</h2>
+  <nav class="nav-list">
+    <a class="nav-item" href="../index.html"><span class="nav-icon">⌂</span><span>使用说明首页</span></a>
+    <a class="nav-item" href="../pages/quick-start.html"><span class="nav-icon">↗</span><span>快速开始</span></a>
+    <a class="nav-item" href="../pages/market.html"><span class="nav-icon">⌁</span><span>行情查看</span></a>
+    <a class="nav-item" href="../pages/watchlist.html"><span class="nav-icon">★</span><span>自选管理</span></a>
+    <a class="nav-item" href="../pages/stock-detail.html"><span class="nav-icon">▥</span><span>个股详情</span></a>
+    <a class="nav-item active" href="../pages/alerts.html"><span class="nav-icon">♢</span><span>提醒记录</span></a>
+    <a class="nav-item" href="../pages/messages.html"><span class="nav-icon">□</span><span>消息通知</span></a>
+    <a class="nav-item" href="../pages/data.html"><span class="nav-icon">◉</span><span>指标原理</span></a>
+    <a class="nav-item" href="../pages/faq.html"><span class="nav-icon">?</span><span>常见问题</span></a>
+    <a class="nav-item" href="../pages/boundaries.html"><span class="nav-icon">!</span><span>使用边界</span></a>
+    <a class="nav-item" href="../pages/customization.html"><span class="nav-icon">工</span><span>量化定制</span></a>
+  </nav>
+</aside>
+
+<main class="article-main">
+<article class="article-wrap">
+  <div class="breadcrumb">帮助中心 / <strong>提醒记录</strong></div>
+  <h1 class="article-title">提醒记录</h1>
+  <p class="article-lead">系统生成的价格提醒、选股结果和系统通知会统一保存在消息中心，可以按类别和时间查看，并继续打开相关股票或数据页面。</p>
+  <div class="alerts-intro"><span>实际入口：消息中心</span><span>最近7天或30天</span><span>支持未读管理</span><span>记录不等于预测</span></div>
+
+  <section class="visual-section" id="demo">
+    <div class="visual-title"><h2>一分钟看懂提醒记录</h2><p>动画按照真实消息中心流程演示，也可以点击下方步骤单独查看。</p></div>
+    <div class="demo-shell">
+      <div class="demo-head">
+        <div class="demo-progress">
+          <span class="demo-count" id="demoCount">1 / 6</span>
+          <div class="demo-title-wrap"><strong id="demoHeading">进入消息中心</strong><span id="demoSubheading">消息和设置都位于右上角账户菜单。</span></div>
+        </div>
+        <div class="demo-controls">
+          <button class="demo-control" id="demoPrev" type="button" aria-label="上一步"><svg viewBox="0 0 24 24" fill="none"><path d="m15 6-6 6 6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <button class="demo-control" id="demoPlay" type="button" aria-label="暂停自动播放"><svg viewBox="0 0 24 24" fill="none"><path d="M9 7v10M15 7v10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+          <button class="demo-control" id="demoNext" type="button" aria-label="下一步"><svg viewBox="0 0 24 24" fill="none"><path d="m9 6 6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+      </div>
+
+      <div class="demo-viewport" id="demoViewport">
+        <div class="message-app" id="messageApp">
+          <header class="product-topbar">
+            <div class="product-left">
+              <div class="mini-brand"><span class="mini-brand-mark">盘</span><span>盘迹</span></div>
+              <nav class="product-nav"><a href="/market">行情</a></nav>
+              <span class="market-clock">A股交易结束 · 15:12</span>
+            </div>
+            <div class="account-wrap" id="accountTarget">
+              <button class="account-btn" id="accountBtn" type="button"><span class="avatar">用</span><span>我的账户</span><span>⌄</span><span class="unread-badge" id="topUnread">3</span></button>
+              <div class="account-menu" id="accountMenu">
+                <button class="active" id="messageEntry" type="button"><span>消息中心</span><span class="unread-badge">3</span></button>
+                <button type="button"><span>通知与设置</span><span>›</span></button>
+                <button type="button"><span>退出登录</span><span></span></button>
+              </div>
+            </div>
+          </header>
+
+          <div class="message-page">
+            <div class="page-head-demo">
+              <div class="page-title-demo"><h3>消息中心</h3><p id="countText">共 18 条 · 未读 3 条</p></div>
+              <div class="page-actions-demo"><button class="page-action" id="readAllTarget" type="button">全部已读</button><button class="page-action primary" type="button">通知设置与示例</button></div>
+            </div>
+
+            <div class="message-toolbar">
+              <div class="segments" id="filterTarget">
+                <button class="segment-btn active" data-filter="all" type="button">全部 18</button>
+                <button class="segment-btn" data-filter="unread" type="button">未读 3</button>
+                <button class="segment-btn" data-filter="selection" type="button">选股结果</button>
+                <button class="segment-btn" data-filter="price" type="button">价格提醒</button>
+                <button class="segment-btn" data-filter="system" type="button">系统通知</button>
+              </div>
+              <div class="toolbar-spacer"></div>
+              <button class="range-select" id="rangeTarget" type="button"><span id="rangeText">最近 7 天</span><svg viewBox="0 0 24 24" fill="none"><path d="m7 10 5 5 5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+            </div>
+
+            <div class="table-card" id="tableTarget">
+              <div class="messages-table-wrap">
+                <table class="messages-table" id="messagesTable">
+                  <thead><tr><th>提醒类别</th><th>股票</th><th>发生了什么</th><th>当时价格</th><th>触发时间</th><th>发送情况</th><th>操作</th></tr></thead>
+                  <tbody>
+                    <tr class="selected" data-type="price" id="singleRow">
+                      <td><div class="type-cell"><button class="unread-dot" id="singleUnread" type="button" aria-label="标记已读"></button><span class="type-tag">价格提醒</span></div></td>
+                      <td><div class="stock-text"><strong>示例科技</strong><span>000001</span></div></td>
+                      <td><div class="event-text">价格进入已记录的结构区间</div></td>
+                      <td class="price-text">18.42</td>
+                      <td class="time-text">07-22 14:36</td>
+                      <td><span class="delivery-pill ok">飞书成功</span></td>
+                      <td><button class="view-btn" id="singleView" type="button">查看</button></td>
+                    </tr>
+                    <tr data-type="selection" id="multiRow">
+                      <td><div class="type-cell"><button class="unread-dot" id="multiUnread" type="button" aria-label="标记已读"></button><span class="type-tag selection">选股结果</span></div></td>
+                      <td><div class="stock-text"><strong>示例制造 等 3 只</strong><span>组合记录</span></div></td>
+                      <td><div class="event-text">盘后筛选结果已经生成</div></td>
+                      <td class="price-text">-</td>
+                      <td class="time-text">07-22 15:08</td>
+                      <td><span class="delivery-pill warn">部分失败</span></td>
+                      <td><button class="view-btn" id="multiView" type="button">查看列表</button></td>
+                    </tr>
+                    <tr data-type="system">
+                      <td><div class="type-cell"><button class="unread-dot read" type="button"></button><span class="type-tag system">系统通知</span></div></td>
+                      <td><div class="stock-text"><strong>-</strong><span>系统</span></div></td>
+                      <td><div class="event-text">通知渠道设置已更新</div></td>
+                      <td class="price-text">-</td>
+                      <td class="time-text">07-21 09:20</td>
+                      <td><span class="delivery-pill off">仅站内</span></td>
+                      <td><button class="view-btn" type="button">查看</button></td>
+                    </tr>
+                    <tr data-type="price">
+                      <td><div class="type-cell"><button class="unread-dot read" type="button"></button><span class="type-tag">价格提醒</span></div></td>
+                      <td><div class="stock-text"><strong>示例能源</strong><span>300003</span></div></td>
+                      <td><div class="event-text">成交参与状态发生变化</div></td>
+                      <td class="price-text">11.68</td>
+                      <td class="time-text">07-20 10:42</td>
+                      <td><span class="delivery-pill warn">投递失败</span></td>
+                      <td><button class="view-btn" type="button">查看</button></td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div class="empty-demo" id="emptyDemo">没有符合条件的消息</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="account-overlay" id="accountOverlay"></div>
+
+          <div class="row-guide" id="rowGuide">
+            <span class="guide-chip">类别</span><span class="guide-chip">股票</span><span class="guide-chip">发生了什么</span><span class="guide-chip">当时价格</span><span class="guide-chip">触发时间</span><span class="guide-chip">发送情况</span><span class="guide-chip">操作</span>
+          </div>
+
+          <aside class="instrument-drawer" id="instrumentDrawer">
+            <div class="drawer-head-demo"><div><strong>涉及标的</strong><span>共 3 只股票</span></div><button class="drawer-close" id="drawerClose" type="button">×</button></div>
+            <div class="drawer-list">
+              <div class="drawer-stock"><div class="drawer-stock-icon">示</div><div><strong>示例制造</strong><span>600002</span></div><button class="view-btn" type="button">查看</button></div>
+              <div class="drawer-stock"><div class="drawer-stock-icon">示</div><div><strong>示例电子</strong><span>688004</span></div><button class="view-btn" type="button">查看</button></div>
+              <div class="drawer-stock"><div class="drawer-stock-icon">示</div><div><strong>示例材料</strong><span>002005</span></div><button class="view-btn" type="button">查看</button></div>
+            </div>
+          </aside>
+
+          <div class="detail-overlay" id="detailOverlay">
+            <div class="detail-card">
+              <div class="eyebrow">进入个股详情</div>
+              <h3>示例科技 · 000001</h3>
+              <p>单只股票记录会进入对应个股详情，并保留返回消息中心的入口。</p>
+              <div class="detail-preview"><div class="detail-preview-line active"><span>事件时间</span><span>07-22 14:36</span></div><div class="detail-preview-line"><span>当时价格</span><span>18.42</span></div><div class="detail-preview-line"><span>返回位置</span><span>消息中心</span></div></div>
+            </div>
+          </div>
+
+          <div class="toast-demo" id="toastDemo">已标记 3 条消息</div>
+        </div>
+
+        <div class="demo-cursor" id="demoCursor" aria-hidden="true"><svg width="24" height="29" viewBox="0 0 24 29"><path d="M2 1 20 18l-8 1 4 8-4 2-4-8-6 6Z" fill="#f4fbf6" stroke="#06130b" stroke-width="1.5"/></svg></div>
+        <div class="click-ring" id="clickRing" aria-hidden="true"></div>
+      </div>
+
+      <div class="demo-caption">
+        <div class="caption-no" id="captionNo">1</div>
+        <div class="caption-copy"><strong id="captionTitle">从右上角进入消息中心</strong><span id="captionText">所有提醒记录统一保存在消息中心，不在顶部一级导航中单独显示。</span></div>
+      </div>
+    </div>
+
+    <div class="step-strip">
+      <button class="step-button active" data-step="0" type="button"><b>1 进入消息中心</b>账户菜单入口</button>
+      <button class="step-button" data-step="1" type="button"><b>2 选择类别</b>全部 / 未读 / 提醒</button>
+      <button class="step-button" data-step="2" type="button"><b>3 选择时间</b>最近7天或30天</button>
+      <button class="step-button" data-step="3" type="button"><b>4 看懂一行</b>七个字段</button>
+      <button class="step-button" data-step="4" type="button"><b>5 处理未读</b>单条或全部已读</button>
+      <button class="step-button" data-step="5" type="button"><b>6 打开详情</b>单只或多股票</button>
+    </div>
+  </section>
+
+  <section class="visual-section" id="reading">
+    <div class="visual-title"><h2>一行记录怎么读</h2><p>建议按照从左到右的顺序核对。</p></div>
+    <div class="reading-flow">
+      <article class="reading-card"><span class="num">1</span><strong>提醒类别</strong><span>记录属于哪一类</span></article>
+      <article class="reading-card"><span class="num">2</span><strong>股票</strong><span>涉及哪只股票</span></article>
+      <article class="reading-card"><span class="num">3</span><strong>发生了什么</strong><span>已经出现的数据变化</span></article>
+      <article class="reading-card"><span class="num">4</span><strong>当时价格</strong><span>记录形成时的价格</span></article>
+      <article class="reading-card"><span class="num">5</span><strong>触发时间</strong><span>按照上海时区显示</span></article>
+      <article class="reading-card"><span class="num">6</span><strong>发送情况</strong><span>外部通知是否成功</span></article>
+      <article class="reading-card"><span class="num">7</span><strong>操作</strong><span>打开详情或股票列表</span></article>
+    </div>
+  </section>
+
+  <section class="visual-section" id="delivery">
+    <div class="visual-title"><h2>发送情况是什么意思</h2><p>站内记录和外部通知是两件不同的事。</p></div>
+    <div class="delivery-grid">
+      <article class="delivery-card"><span class="delivery-pill off">仅站内</span><h3>记录已保存</h3><p>消息中心中可以看到，但没有成功发送到外部渠道。</p></article>
+      <article class="delivery-card"><span class="delivery-pill ok">飞书成功</span><h3>外部通知成功</h3><p>飞书或多个已启用渠道已经完成投递。</p></article>
+      <article class="delivery-card"><span class="delivery-pill off">投递中</span><h3>正在处理</h3><p>外部渠道仍在发送，稍后可以再次查看状态。</p></article>
+      <article class="delivery-card"><span class="delivery-pill warn">部分失败 / 投递失败</span><h3>外部渠道异常</h3><p>一个或多个外部渠道未发送成功，但站内记录仍然存在。</p></article>
+    </div>
+    <div class="delivery-note"><strong>“发送失败”不等于提醒没有发生。</strong> 提醒记录已经形成并保存在消息中心，失败的是外部通知投递。</div>
+  </section>
+
+  <section class="visual-section" id="destinations">
+    <div class="visual-title"><h2>不同记录会打开哪里</h2><p>系统根据记录类型决定后续入口。</p></div>
+    <div class="destination-grid">
+      <article class="destination-card"><h3>价格提醒</h3><p>单只股票时进入对应个股详情。</p></article>
+      <article class="destination-card"><h3>选股结果</h3><p>进入行情页面查看相应结果范围。</p></article>
+      <article class="destination-card"><h3>系统通知</h3><p>进入通知与设置页面查看相关配置。</p></article>
+      <article class="destination-card"><h3>涉及多只股票</h3><p>先打开股票列表，再选择一只进入详情。</p></article>
+    </div>
+  </section>
+
+  <section class="visual-section" id="faq">
+    <div class="visual-title"><h2>常见问题</h2><p>提醒记录中最容易混淆的几个问题。</p></div>
+    <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>为什么消息中心有记录，但没有收到飞书？</span><span>⌄</span></button><div class="faq-answer">记录已经在站内生成，但外部渠道可能未启用、仍在投递或发送失败。请查看该行的“发送情况”。</div></div>
+    <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>为什么“当时价格”和现在价格不同？</span><span>⌄</span></button><div class="faq-answer">“当时价格”记录的是提醒形成时的价格，不会随最新行情变化。</div></div>
+    <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>为什么点击查看后未读数量减少了？</span><span>⌄</span></button><div class="faq-answer">打开记录时，系统会把该条消息标记为已读。已读只表示已经查看，不会改变提醒内容。</div></div>
+    <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>为什么筛选后没有内容？</span><span>⌄</span></button><div class="faq-answer">当前类别或时间范围内可能没有记录。可以切换到“全部”或“最近30天”。</div></div>
+    <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>为什么有些记录显示多只股票？</span><span>⌄</span></button><div class="faq-answer">部分选股结果或组合记录会同时涉及多只股票，点击“查看列表”后可以逐只查看。</div></div>
+  </section>
+
+  <section class="visual-section" id="boundary">
+    <div class="boundary-compact"><div class="boundary-icon">!</div><div><strong>提醒记录描述的是已经发生的数据变化和通知状态</strong><p>记录不代表未来价格方向，也不构成买入、卖出或持有建议。</p></div></div>
+  </section>
+
+  <section class="visual-section" id="next">
+    <div class="visual-title"><h2>继续了解盘迹</h2><p>查看个股详情、通知设置或数据规则。</p></div>
+    <div class="next-grid">
+      <article class="next-card"><h3>个股详情</h3><p>从单只股票记录继续查看完整图表和状态。</p><a class="btn" href="../pages/stock-detail.html">查看说明</a></article>
+      <article class="next-card"><h3>消息通知</h3><p>了解站内和飞书通知渠道如何设置。</p><a class="btn btn-primary" href="../pages/messages.html">查看说明</a></article>
+      <article class="next-card"><h3>指标原理</h3><p>了解记录时间、行情更新时间和数据差异。</p><a class="btn" href="../pages/data.html">查看说明</a></article>
+    </div>
+  </section>
+</article>
+</main>
+
+<aside class="right-rail" aria-label="本页辅助信息">
+  <section class="rail-card"><h3>本页目录</h3><nav class="rail-list">
+    <a class="rail-link active" data-anchor href="#demo">一分钟看懂</a>
+    <a class="rail-link" data-anchor href="#reading">一行怎么读</a>
+    <a class="rail-link" data-anchor href="#delivery">发送情况</a>
+    <a class="rail-link" data-anchor href="#destinations">打开哪里</a>
+    <a class="rail-link" data-anchor href="#faq">常见问题</a>
+    <a class="rail-link" data-anchor href="#boundary">使用边界</a>
+    <a class="rail-link" data-anchor href="#next">下一步</a>
+  </nav></section>
+  <section class="rail-card"><h3>更新时间</h3><div class="update-date">2026年7月22日</div></section>
+  <section class="rail-card"><h3>相关教程</h3><nav class="rail-list">
+    <a class="rail-link" href="../pages/stock-detail.html">个股详情</a>
+    <a class="rail-link" href="../pages/messages.html">消息通知</a>
+    <a class="rail-link" href="../pages/data.html">指标原理</a>
+  </nav></section>
+</aside>
+</div>
+
+<footer class="site-footer">
+  <div class="footer-inner">
+    <div>
+      <h2 class="footer-heading">联系管理员</h2>
+      <p class="footer-copy">如遇到账号、权限、邀请码、系统使用或数据问题，请通过微信联系管理员。</p>
+      <nav class="footer-links"><a href="../pages/faq.html">常见问题</a><a href="../pages/data.html">指标原理</a><a href="../pages/boundaries.html">使用边界</a></nav>
+    </div>
+    <figure class="footer-qr"><img src="../assets/images/wechat-qr-placeholder.svg" alt="管理员微信二维码占位图"><figcaption>微信联系管理员<br>添加时请备注来意</figcaption></figure>
+  </div>
+  <div class="footer-bottom">盘迹使用说明中心</div>
+</footer>
+
+<script src="../assets/js/site.js"></script>
+<script>
+(function(){
+  const steps=[
+    {heading:'进入消息中心',sub:'消息和设置都位于右上角账户菜单。',title:'从右上角进入消息中心',text:'所有提醒记录统一保存在消息中心，不在顶部一级导航中单独显示。',target:'accountTarget',action:'entry'},
+    {heading:'选择记录类别',sub:'普通用户可以查看全部、未读、选股结果、价格提醒和系统通知。',title:'先选择需要查看的记录',text:'只有“全部”和“未读”显示权威数量，其他类别不显示容易误导的计数。',target:'filterTarget',action:'filter'},
+    {heading:'选择时间范围',sub:'在最近7天和最近30天之间切换。',title:'再确定查看时间',text:'默认查看最近7天，需要回看更早记录时切换到最近30天。',target:'rangeTarget',action:'range'},
+    {heading:'看懂一行记录',sub:'按类别、股票、事件、价格、时间、发送情况和操作阅读。',title:'一行代表一次已经形成的记录',text:'先看发生了什么，再核对股票、当时价格和触发时间。',target:'singleRow',action:'row'},
+    {heading:'处理未读记录',sub:'可以标记单条已读，也可以一次标记全部已读。',title:'已读只表示是否查看过',text:'已读状态不会改变提醒内容，也不会删除记录。',target:'singleUnread',action:'read'},
+    {heading:'打开记录详情',sub:'单只股票直接进入详情，多只股票先打开涉及标的列表。',title:'根据记录内容继续查看',text:'单只股票进入详情；涉及多只股票时先从抽屉中选择。',target:'singleView',action:'view'}
+  ];
+  let current=0,playing=true,timer=null,actionTimer=null,subTimer=null;
+  const viewport=document.getElementById('demoViewport');
+  const app=document.getElementById('messageApp');
+  const cursor=document.getElementById('demoCursor');
+  const ring=document.getElementById('clickRing');
+  const buttons=[...document.querySelectorAll('.step-button')];
+  const playBtn=document.getElementById('demoPlay');
+  const reduced=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function clearTimers(){if(actionTimer)clearTimeout(actionTimer);if(subTimer)clearTimeout(subTimer);actionTimer=subTimer=null}
+  function showToast(text){const t=document.getElementById('toastDemo');t.textContent=text;t.classList.add('show');subTimer=setTimeout(()=>t.classList.remove('show'),1500)}
+  function setFilter(value){
+    document.querySelectorAll('.segment-btn').forEach(el=>el.classList.toggle('active',el.dataset.filter===value));
+    document.querySelectorAll('#messagesTable tbody tr').forEach(row=>{
+      row.style.display=(value==='all'||value==='unread'||row.dataset.type===value)?'':'none';
+    });
+  }
+  function resetDemo(){
+    clearTimers();
+    document.querySelectorAll('.demo-focus').forEach(el=>el.classList.remove('demo-focus'));
+    document.getElementById('accountMenu').classList.remove('open');
+    document.getElementById('accountOverlay').classList.remove('show');
+    document.getElementById('rowGuide').classList.remove('show');
+    document.getElementById('detailOverlay').classList.remove('show');
+    document.getElementById('toastDemo').classList.remove('show');
+    app.classList.remove('drawer-open');
+    document.getElementById('rangeText').textContent='最近 7 天';
+    setFilter('all');
+    document.getElementById('singleUnread').classList.remove('read');
+    document.getElementById('multiUnread').classList.remove('read');
+    document.getElementById('topUnread').textContent='3';
+    document.getElementById('countText').textContent='共 18 条 · 未读 3 条';
+    document.getElementById('readAllTarget').disabled=false;
+    document.getElementById('messagesTable').classList.remove('hidden');
+    document.getElementById('emptyDemo').classList.remove('show');
+  }
+  function moveCursor(target){
+    if(reduced||!target)return;
+    const vr=viewport.getBoundingClientRect(),tr=target.getBoundingClientRect();
+    const left=tr.left-vr.left+Math.min(tr.width*.65,115),top=tr.top-vr.top+Math.min(tr.height*.55,42);
+    cursor.style.left=left+'px';cursor.style.top=top+'px';
+    ring.style.left=(left-4)+'px';ring.style.top=(top-3)+'px';
+    cursor.classList.add('visible');
+    setTimeout(()=>{ring.classList.remove('pop');void ring.offsetWidth;ring.classList.add('pop')},720);
+  }
+  function runAction(step){
+    const target=document.getElementById(step.target);target&&target.classList.add('demo-focus');
+    requestAnimationFrame(()=>moveCursor(target));
+    actionTimer=setTimeout(()=>{
+      if(step.action==='entry'){
+        document.getElementById('accountOverlay').classList.add('show');
+        document.getElementById('accountMenu').classList.add('open');
+        subTimer=setTimeout(()=>{
+          document.getElementById('messageEntry').classList.add('demo-focus');
+          moveCursor(document.getElementById('messageEntry'));
+        },800);
+      }
+      if(step.action==='filter'){
+        const sequence=['unread','selection','price'];let i=0;
+        const tick=()=>{
+          setFilter(sequence[i]);
+          i++;
+          if(i<sequence.length)subTimer=setTimeout(tick,600);
+        };
+        tick();
+      }
+      if(step.action==='range'){
+        document.getElementById('rangeText').textContent='最近 30 天';
+        showToast('已切换到最近 30 天');
+      }
+      if(step.action==='row'){
+        document.getElementById('rowGuide').classList.add('show');
+        subTimer=setTimeout(()=>document.getElementById('rowGuide').classList.remove('show'),2200);
+      }
+      if(step.action==='read'){
+        document.getElementById('singleUnread').classList.add('read');
+        document.getElementById('topUnread').textContent='2';
+        document.getElementById('countText').textContent='共 18 条 · 未读 2 条';
+        subTimer=setTimeout(()=>{
+          document.getElementById('readAllTarget').classList.add('demo-focus');
+          moveCursor(document.getElementById('readAllTarget'));
+          document.querySelectorAll('.unread-dot').forEach(el=>el.classList.add('read'));
+          document.getElementById('topUnread').textContent='0';
+          document.getElementById('countText').textContent='共 18 条 · 未读 0 条';
+          document.getElementById('readAllTarget').disabled=true;
+          showToast('已标记 3 条消息');
+        },1050);
+      }
+      if(step.action==='view'){
+        document.getElementById('detailOverlay').classList.add('show');
+        subTimer=setTimeout(()=>{
+          document.getElementById('detailOverlay').classList.remove('show');
+          document.getElementById('multiView').classList.add('demo-focus');
+          moveCursor(document.getElementById('multiView'));
+          app.classList.add('drawer-open');
+        },1900);
+      }
+    },reduced?0:1000);
+  }
+  function showStep(index,fromUser){
+    current=(index+steps.length)%steps.length;
+    resetDemo();
+    const s=steps[current];
+    document.getElementById('demoCount').textContent=(current+1)+' / '+steps.length;
+    document.getElementById('demoHeading').textContent=s.heading;
+    document.getElementById('demoSubheading').textContent=s.sub;
+    document.getElementById('captionNo').textContent=current+1;
+    document.getElementById('captionTitle').textContent=s.title;
+    document.getElementById('captionText').textContent=s.text;
+    buttons.forEach((b,i)=>b.classList.toggle('active',i===current));
+    setTimeout(()=>runAction(s),180);
+    if(fromUser&&playing)restart();
+  }
+  function restart(){clearInterval(timer);if(playing&&!reduced)timer=setInterval(()=>showStep(current+1,false),6200)}
+  document.getElementById('demoPrev').addEventListener('click',()=>showStep(current-1,true));
+  document.getElementById('demoNext').addEventListener('click',()=>showStep(current+1,true));
+  playBtn.addEventListener('click',()=>{
+    playing=!playing;
+    playBtn.innerHTML=playing?'<svg viewBox="0 0 24 24" fill="none"><path d="M9 7v10M15 7v10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>':'<svg viewBox="0 0 24 24" fill="none"><path d="m9 7 8 5-8 5Z" fill="currentColor"/></svg>';
+    playBtn.setAttribute('aria-label',playing?'暂停自动播放':'开始自动播放');
+    restart();
+  });
+  buttons.forEach(b=>b.addEventListener('click',()=>showStep(Number(b.dataset.step),true)));
+  document.getElementById('accountBtn').addEventListener('click',()=>document.getElementById('accountMenu').classList.toggle('open'));
+  document.querySelectorAll('.segment-btn').forEach(el=>el.addEventListener('click',()=>setFilter(el.dataset.filter)));
+  document.getElementById('rangeTarget').addEventListener('click',()=>{
+    const next=document.getElementById('rangeText').textContent.includes('7')?'最近 30 天':'最近 7 天';
+    document.getElementById('rangeText').textContent=next;
+  });
+  document.getElementById('singleUnread').addEventListener('click',e=>{e.currentTarget.classList.add('read');showToast('已标记为已读')});
+  document.getElementById('readAllTarget').addEventListener('click',()=>{
+    document.querySelectorAll('.unread-dot').forEach(el=>el.classList.add('read'));
+    document.getElementById('topUnread').textContent='0';
+    document.getElementById('countText').textContent='共 18 条 · 未读 0 条';
+    showToast('全部消息已读');
+  });
+  document.getElementById('singleView').addEventListener('click',()=>{document.getElementById('detailOverlay').classList.add('show');setTimeout(()=>document.getElementById('detailOverlay').classList.remove('show'),1800)});
+  document.getElementById('multiView').addEventListener('click',()=>app.classList.add('drawer-open'));
+  document.getElementById('drawerClose').addEventListener('click',()=>app.classList.remove('drawer-open'));
+  showStep(0,false);restart();
+  document.addEventListener('visibilitychange',()=>document.hidden?clearInterval(timer):restart());
+})();
+</script>
+</body>
+</html>

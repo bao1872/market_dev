@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width,initial-scale=1" name="viewport"/>
+<title>常见问题｜盘迹使用说明</title>
+<meta content="按关键词和功能分类快速查找盘迹账号、行情、自选、个股详情、提醒通知、指标和数据问题。" name="description"/>
+<link href="../assets/css/site.css" rel="stylesheet"/>
+<style>
+  .article-wrap{--green:#51e77d;--blue:#5da8ff;--red:#ef746c;--gold:#e8c46f}
+  .faq-hero{position:relative;overflow:hidden;padding:28px;border:1px solid var(--border);border-radius:18px;background:
+    radial-gradient(circle at 88% 10%,rgba(81,231,125,.13),transparent 28%),
+    linear-gradient(150deg,rgba(81,231,125,.045),transparent 50%),var(--surface)}
+  .faq-hero::after{content:"?";position:absolute;right:24px;top:5px;color:rgba(81,231,125,.08);font-size:150px;font-weight:900;line-height:1}
+  .faq-hero h1{position:relative;z-index:1;margin:0;font-size:38px}
+  .faq-hero p{position:relative;z-index:1;max-width:720px;margin:12px 0 0;color:var(--muted);font-size:15px;line-height:1.8}
+  .faq-search-panel{position:relative;z-index:2;margin-top:22px}
+  .faq-search-box{display:grid;grid-template-columns:46px minmax(0,1fr) auto;align-items:center;min-height:54px;border:1px solid #30404a;border-radius:13px;background:#091117;box-shadow:0 12px 35px rgba(0,0,0,.18)}
+  .faq-search-icon{display:grid;place-items:center;color:#788992}
+  .faq-search-icon svg{width:20px;height:20px}
+  .faq-search-input{height:52px;border:0;outline:0;background:transparent;color:#e7f1ec;font-size:14px}
+  .faq-search-input::placeholder{color:#667781}
+  .faq-search-clear{height:32px;margin-right:10px;padding:0 10px;border:1px solid #2d3b45;border-radius:7px;background:#111b22;color:#98a6ad;font-size:11px;opacity:0;pointer-events:none;transition:.2s}
+  .faq-search-clear.show{opacity:1;pointer-events:auto}
+  .faq-search-meta{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:9px;color:#74858e;font-size:11px}
+  .faq-search-meta strong{color:#bceec9}
+  .topic-tags{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}
+  .topic-tags button{height:34px;padding:0 12px;border:1px solid var(--border);border-radius:999px;background:var(--surface);color:var(--muted);font-size:11px;transition:.2s}
+  .topic-tags button:hover{border-color:rgba(81,231,125,.35);color:#c5efd1}
+  .topic-tags button.active{border-color:rgba(81,231,125,.5);background:rgba(81,231,125,.1);color:var(--green);font-weight:750}
+  .section-block{margin-top:30px;scroll-margin-top:95px}
+  .section-head{display:flex;align-items:end;justify-content:space-between;gap:18px;margin-bottom:13px}
+  .section-head h2{margin:0;font-size:22px}
+  .section-head p{margin:0;color:var(--muted);font-size:12px}
+  .popular-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px}
+  .popular-card{display:flex;align-items:flex-start;gap:13px;padding:17px;border:1px solid var(--border);border-radius:14px;background:var(--surface);transition:.22s}
+  .popular-card:hover{border-color:rgba(81,231,125,.35);transform:translateY(-1px)}
+  .popular-no{flex:0 0 auto;width:30px;height:30px;display:grid;place-items:center;border-radius:9px;background:rgba(81,231,125,.09);color:var(--green);font-size:11px;font-weight:850}
+  .popular-copy{min-width:0}
+  .popular-copy button{width:100%;padding:0;border:0;background:transparent;color:#e4eee9;text-align:left;font-size:13px;font-weight:760;line-height:1.5}
+  .popular-copy p{margin:6px 0 0;color:var(--muted);font-size:11px;line-height:1.65}
+  .popular-link{display:inline-flex;margin-top:8px;color:#aeeec0;font-size:10px}
+  .faq-group{margin-top:24px}
+  .faq-group[hidden]{display:none!important}
+  .faq-group-title{display:flex;align-items:center;gap:9px;margin:0 0 10px;font-size:17px}
+  .faq-group-icon{width:31px;height:31px;display:grid;place-items:center;border-radius:9px;background:rgba(81,231,125,.08);color:#b6efc5;font-size:13px}
+  .faq-list{display:flex;flex-direction:column;gap:8px}
+  .qa-item{overflow:hidden;border:1px solid var(--border);border-radius:12px;background:var(--surface);transition:.2s}
+  .qa-item.hidden{display:none}
+  .qa-item.match{border-color:rgba(81,231,125,.38);box-shadow:0 0 0 1px rgba(81,231,125,.05)}
+  .qa-question{width:100%;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;align-items:center;padding:15px 16px;border:0;background:transparent;color:#dfe9e4;text-align:left;font-size:13px;font-weight:720;line-height:1.5}
+  .qa-question:hover{background:rgba(81,231,125,.03)}
+  .qa-caret{width:24px;height:24px;display:grid;place-items:center;border-radius:7px;background:#111b22;color:#788992;transition:.22s}
+  .qa-item.open .qa-caret{transform:rotate(180deg);color:var(--green)}
+  .qa-answer{display:none;padding:0 16px 15px;color:#93a2aa;font-size:12px;line-height:1.75}
+  .qa-item.open .qa-answer{display:block}
+  .qa-answer p{margin:0}
+  .qa-answer .check-line{margin-top:9px;padding:9px 11px;border-left:3px solid rgba(81,231,125,.45);border-radius:0 8px 8px 0;background:rgba(81,231,125,.045);color:#aec0b6}
+  .qa-answer .doc-link{display:inline-flex;align-items:center;gap:5px;margin-top:10px;color:#b5efc5;font-size:11px}
+  .qa-answer .doc-link::after{content:"›";font-size:15px}
+  .no-results{display:none;padding:38px 20px;border:1px dashed #34434d;border-radius:14px;background:rgba(255,255,255,.015);text-align:center}
+  .no-results.show{display:block}
+  .no-results-icon{width:48px;height:48px;display:grid;place-items:center;margin:0 auto 12px;border-radius:14px;background:#121e25;color:#81929b}
+  .no-results h3{margin:0 0 6px;font-size:15px}
+  .no-results p{margin:0;color:var(--muted);font-size:12px;line-height:1.7}
+  mark{padding:0 2px;border-radius:3px;background:rgba(81,231,125,.2);color:#d8f6e1}
+  .contact-panel{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(230px,.75fr);gap:16px;padding:22px;border:1px solid rgba(81,231,125,.24);border-radius:16px;background:
+    radial-gradient(circle at 92% 20%,rgba(81,231,125,.12),transparent 35%),
+    rgba(81,231,125,.04)}
+  .contact-panel h2{margin:0 0 8px;font-size:22px}
+  .contact-panel p{margin:0;color:#91a1a9;font-size:12px;line-height:1.75}
+  .contact-checklist{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:15px}
+  .contact-check{display:flex;align-items:center;gap:8px;padding:9px 10px;border:1px solid #2b3a44;border-radius:9px;background:#0d171d;color:#a9b7bd;font-size:11px}
+  .contact-check span{width:20px;height:20px;display:grid;place-items:center;border-radius:6px;background:rgba(81,231,125,.09);color:var(--green);font-size:9px;font-weight:800}
+  .contact-side{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:15px;border:1px solid #2d3c46;border-radius:12px;background:#0a1319;text-align:center}
+  .contact-side img{width:118px;height:118px;border-radius:10px;background:#fff}
+  .contact-side strong{display:block;margin-top:10px;font-size:13px}
+  .contact-side span{display:block;margin-top:5px;color:#7d8e97;font-size:10px;line-height:1.5}
+  .summary-strip{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:15px}
+  .summary-card{padding:14px;border:1px solid var(--border);border-radius:11px;background:var(--surface)}
+  .summary-card strong{display:block;margin-bottom:5px;font-size:12px}
+  .summary-card span{color:var(--muted);font-size:10px;line-height:1.55}
+  @media(max-width:1050px){
+    .popular-grid{grid-template-columns:1fr}
+    .contact-panel{grid-template-columns:1fr}
+    .contact-side{align-items:flex-start;text-align:left}
+    .contact-side img{display:none}
+  }
+  @media(max-width:720px){
+    .faq-hero{padding:22px}.faq-hero h1{font-size:31px}.faq-hero::after{font-size:115px}
+    .section-head{display:block}.section-head p{margin-top:5px}
+    .contact-checklist,.summary-strip{grid-template-columns:1fr}
+  }
+  @media(max-width:520px){
+    .faq-search-box{grid-template-columns:40px minmax(0,1fr) auto}
+    .faq-search-input{font-size:12px}
+    .topic-tags button{height:32px;padding:0 10px}
+  }
+</style>
+</head>
+<body data-page="faq" data-root="..">
+<header class="site-header">
+<a class="brand" href="../index.html" aria-label="盘迹首页"><img class="brand-logo" src="../assets/images/logo_symbol_128.png" alt="" aria-hidden="true"><span class="brand-mark">盘迹</span></a>
+<div class="search-wrap">
+<svg aria-hidden="true" fill="none" height="19" viewbox="0 0 24 24" width="19"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"></circle><path d="m20 20-4.5-4.5" stroke="currentColor" stroke-linecap="round" stroke-width="2"></path></svg>
+<input aria-label="搜索文档" class="doc-search" placeholder="搜索文档、功能或问题" type="search"/>
+<div class="search-results"></div>
+</div>
+<div class="header-actions"><a class="btn" href="/market">返回系统</a><a class="btn btn-primary" href="/login">登录盘迹</a><button aria-expanded="false" aria-label="打开目录" class="btn icon-btn" data-menu-toggle="" type="button">☰</button></div>
+</header>
+<div class="mobile-backdrop"></div>
+<div class="docs-layout">
+<aside aria-label="文档目录" class="docs-sidebar">
+<h2 class="sidebar-title">目录</h2>
+<nav class="nav-list">
+<a class="nav-item" href="../index.html"><span class="nav-icon">⌂</span><span>使用说明首页</span></a>
+<a class="nav-item" href="../pages/quick-start.html"><span class="nav-icon">↗</span><span>快速开始</span></a>
+<a class="nav-item" href="../pages/market.html"><span class="nav-icon">⌁</span><span>行情查看</span></a>
+<a class="nav-item" href="../pages/watchlist.html"><span class="nav-icon">★</span><span>自选管理</span></a>
+<a class="nav-item" href="../pages/stock-detail.html"><span class="nav-icon">▥</span><span>个股详情</span></a>
+<a class="nav-item" href="../pages/alerts.html"><span class="nav-icon">♢</span><span>提醒记录</span></a>
+<a class="nav-item" href="../pages/messages.html"><span class="nav-icon">□</span><span>消息通知</span></a>
+<a class="nav-item" href="../pages/data.html"><span class="nav-icon">◉</span><span>指标原理</span></a>
+<a class="nav-item active" href="../pages/faq.html"><span class="nav-icon">?</span><span>常见问题</span></a>
+<a class="nav-item" href="../pages/boundaries.html"><span class="nav-icon">!</span><span>使用边界</span></a>
+    <a class="nav-item" href="../pages/customization.html"><span class="nav-icon">工</span><span>量化定制</span></a>
+</nav>
+</aside>
+<main class="article-main">
+<article class="article-wrap">
+<div class="breadcrumb">帮助中心 / <strong>常见问题</strong></div>
+<section class="faq-hero">
+<h1>常见问题</h1>
+<p>按功能查找使用问题。多数问题可以通过检查账号权限、当前页面范围、数据状态或通知配置解决。</p>
+<div class="faq-search-panel">
+<div class="faq-search-box">
+<span class="faq-search-icon"><svg fill="none" viewbox="0 0 24 24"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"></circle><path d="m20 20-4.5-4.5" stroke="currentColor" stroke-linecap="round" stroke-width="2"></path></svg></span>
+<input aria-label="搜索常见问题" class="faq-search-input" id="faqSearch" placeholder="搜索：无法进入详情、飞书未收到、自选数量、共识区移动" type="search"/>
+<button class="faq-search-clear" id="faqClear" type="button">清空</button>
+</div>
+<div class="faq-search-meta"><span id="resultText">共 25 个问题</span><span>搜索后自动展开最相关答案</span></div>
+</div>
+<div class="topic-tags" id="categoryTabs">
+<button class="active" data-category="all" type="button">全部问题</button>
+<button data-category="account" type="button">账号与权限</button>
+<button data-category="market" type="button">行情与自选</button>
+<button data-category="detail" type="button">个股详情</button>
+<button data-category="notice" type="button">提醒与通知</button>
+<button data-category="indicator" type="button">指标理解</button>
+<button data-category="data" type="button">页面与数据</button>
+</div>
+</section>
+<section class="section-block" id="popular">
+<div class="section-head"><h2>高频问题</h2><p>第一次使用时最常遇到的六个问题。</p></div>
+<div class="popular-grid">
+<article class="popular-card"><span class="popular-no">1</span><div class="popular-copy"><button data-open-faq="account-detail-permission" type="button">为什么能看到行情列表，却不能进入个股详情？</button><p>当前账号可能只有自选管理权限，没有个股详情权限。</p><a class="popular-link" href="../pages/stock-detail.html">查看个股详情说明 ›</a></div></article>
+<article class="popular-card"><span class="popular-no">2</span><div class="popular-copy"><button data-open-faq="market-watch-limit" type="button">为什么不能继续加入自选？</button><p>可能已达到数量上限，或者当前账号没有自选管理权限。</p><a class="popular-link" href="../pages/watchlist.html">查看自选管理说明 ›</a></div></article>
+<article class="popular-card"><span class="popular-no">3</span><div class="popular-copy"><button data-open-faq="notice-no-feishu" type="button">为什么消息中心有记录，但没有收到飞书？</button><p>站内记录和飞书投递是两个独立过程。</p><a class="popular-link" href="../pages/messages.html">查看消息通知说明 ›</a></div></article>
+<article class="popular-card"><span class="popular-no">4</span><div class="popular-copy"><button data-open-faq="notice-unverified" type="button">为什么飞书配置保存后仍显示“未验证”？</button><p>保存只完成配置记录，还需要测试成功才会变为可用。</p><a class="popular-link" href="../pages/messages.html">查看飞书配置说明 ›</a></div></article>
+<article class="popular-card"><span class="popular-no">5</span><div class="popular-copy"><button data-open-faq="indicator-average-cost" type="button">筹码共识价是不是所有人的平均成本？</button><p>不是。它是根据价格和成交量计算出的成交聚集位置。</p><a class="popular-link" href="../pages/data.html">查看指标原理 ›</a></div></article>
+<article class="popular-card"><span class="popular-no">6</span><div class="popular-copy"><button data-open-faq="indicator-reversal" type="button">结构变化是不是代表行情一定反转？</button><p>不是。它只表示此前的关键高低点关系已经被打破。</p><a class="popular-link" href="../pages/data.html">查看价格结构原理 ›</a></div></article>
+</div>
+</section>
+<section class="section-block" id="allQuestions">
+<div class="section-head"><h2>按分类查找</h2><p>答案先说明可能原因，再给出下一步处理方式。</p></div>
+<section class="faq-group" data-group="account">
+<h3 class="faq-group-title"><span class="faq-group-icon">钥</span>账号与权限</h3>
+<div class="faq-list">
+<article class="qa-item" data-category="account" data-keywords="详情 权限 不能进入 行情列表 自选" id="account-detail-permission">
+<button aria-expanded="false" class="qa-question" type="button"><span>为什么能看到行情列表，却不能进入个股详情？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>当前账号可能只有自选管理权限，没有个股详情权限。看到列表不等于可以进入完整详情。</p><div class="check-line">先确认点击的是股票名称；仍无法进入时，请联系管理员核对账号权限。</div><a class="doc-link" href="../pages/stock-detail.html">查看个股详情说明</a></div>
+</article>
+<article class="qa-item" data-category="account" data-keywords="功能 看不到 权限 账号">
+<button aria-expanded="false" class="qa-question" type="button"><span>为什么有些功能在我的账号中看不到？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>不同账号拥有的功能权限可能不同。自选管理、个股详情和后续复盘功能分别受账号权限控制。</p><div class="check-line">先确认当前登录账号；对权限范围有疑问时联系管理员。</div></div>
+</article>
+<article class="qa-item" data-category="account" data-keywords="以前能用 现在不能 有效期 到期">
+<button aria-expanded="false" class="qa-question" type="button"><span>为什么以前能使用，现在不能使用？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>当前账号的有效期可能已经结束，或者管理员调整了账号权限。</p><div class="check-line">重新登录后仍无法使用时，请联系管理员核对有效期和权限状态。</div></div>
+</article>
+<article class="qa-item" data-category="account" data-keywords="邀请码 无法使用 过期 次数">
+<button aria-expanded="false" class="qa-question" type="button"><span>为什么邀请码无法使用？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>邀请码可能已经过期、达到使用次数限制，或者不适用于当前账号。</p><div class="check-line">请保留完整页面提示，并发送给管理员核对。</div></div>
+</article>
+
+</div>
+</section>
+<section class="faq-group" data-group="market">
+<h3 class="faq-group-title"><span class="faq-group-icon">列</span>行情与自选</h3>
+<div class="faq-list">
+<article class="qa-item" data-category="market" data-keywords="默认 自选 行情页 范围">
+<button aria-expanded="false" class="qa-question" type="button"><span>为什么进入行情页后默认显示自选？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>当前页面默认范围是“自选”。需要查看市场结果时，点击页面顶部的“行情”。</p><a class="doc-link" href="../pages/market.html">查看行情页说明</a></div>
+</article>
+<article class="qa-item" data-category="market" data-keywords="搜索不到 股票 代码 名称 拼音">
+<button aria-expanded="false" class="qa-question" type="button"><span>为什么搜索不到股票？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>请检查股票代码、名称或拼音首字母是否正确，并确认当前正在搜索“行情”还是“自选”范围。</p><div class="check-line">自选范围只会搜索已经加入自选的股票。</div></div>
+</article>
+<article class="qa-item" data-category="market" data-keywords="不能加入 自选 数量 上限 权限" id="market-watch-limit">
+<button aria-expanded="false" class="qa-question" type="button"><span>为什么不能继续加入自选？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>当前账号可能已经达到自选数量上限，也可能没有自选管理权限。</p><div class="check-line">先移除不再观察的股票；仍无法添加时联系管理员核对权限。</div><a class="doc-link" href="../pages/watchlist.html">查看自选管理说明</a></div>
+</article>
+
+<article class="qa-item" data-category="market" data-keywords="点击一行 没进入 详情 名称 右侧">
+<button aria-expanded="false" class="qa-question" type="button"><span>为什么点击一行没有进入个股详情？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>点击股票名称才会进入详情。点击行内其他位置只会选中股票，并更新右侧简要状态。</p></div>
+</article>
+
+</div>
+</section>
+<section class="faq-group" data-group="detail">
+<h3 class="faq-group-title"><span class="faq-group-icon">图</span>个股详情</h3>
+<div class="faq-list">
+<article class="qa-item" data-category="detail" data-keywords="切换股票 图表位置 最新数据">
+<button aria-expanded="false" class="qa-question" type="button"><span>为什么切换股票后，图表位置恢复到最新数据？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>每只股票都会从自己的最新K线位置开始显示，不会沿用上一只股票的横向浏览位置。</p></div>
+</article>
+<article class="qa-item" data-category="detail" data-keywords="时间范围 结构不同 15分钟 60分钟 日 周 月">
+<button aria-expanded="false" class="qa-question" type="button"><span>为什么不同时间范围看到的结构不一样？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>15分钟、60分钟、日、周和月使用不同时间尺度。同一段行情在不同尺度下，阶段高低点和结构关系可能不同。</p></div>
+</article>
+<article class="qa-item" data-category="detail" data-keywords="图层 加载中 没显示 重试">
+<button aria-expanded="false" class="qa-question" type="button"><span>为什么图表图层暂时没有显示？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>股票信息、K线和指标内容可能分开加载。等待后仍未完成时，可以刷新页面或使用页面提供的重试功能。</p></div>
+</article>
+<article class="qa-item" data-category="detail" data-keywords="返回 行情 筛选 保留">
+<button aria-expanded="false" class="qa-question" type="button"><span>为什么返回行情页后，之前的筛选还在？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>个股详情会保留进入前的行情范围、搜索和筛选状态，方便返回后继续查看。</p></div>
+</article>
+</div>
+</section>
+<section class="faq-group" data-group="notice">
+<h3 class="faq-group-title"><span class="faq-group-icon">铃</span>提醒与通知</h3>
+<div class="faq-list">
+<article class="qa-item" data-category="notice" data-keywords="消息中心 有记录 飞书 没收到 投递" id="notice-no-feishu">
+<button aria-expanded="false" class="qa-question" type="button"><span>为什么消息中心有记录，但没有收到飞书？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>站内记录和飞书投递是两个独立过程。提醒可能已经形成，但飞书渠道未配置、未验证、正在投递或发送失败。</p><div class="check-line">先查看该条记录的“发送情况”，再检查飞书渠道状态。</div><a class="doc-link" href="../pages/messages.html">查看消息通知说明</a></div>
+</article>
+<article class="qa-item" data-category="notice" data-keywords="发送失败 提醒没发生 站内">
+<button aria-expanded="false" class="qa-question" type="button"><span>“发送失败”是不是表示提醒没有发生？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>不是。提醒记录可能已经保存在消息中心，失败的只是飞书等外部渠道的投递。</p></div>
+</article>
+
+
+<article class="qa-item" data-category="notice" data-keywords="飞书 保存 未验证 测试 启用" id="notice-unverified">
+<button aria-expanded="false" class="qa-question" type="button"><span>为什么飞书配置保存后仍显示“未验证”？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>保存只完成配置记录。还需要点击“测试并启用”，测试成功后状态才会变为“可用”。</p><a class="doc-link" href="../pages/messages.html">查看飞书配置说明</a></div>
+</article>
+
+<article class="qa-item" data-category="notice" data-keywords="飞书 测试 没收到 App ID Secret 接收者 权限">
+<button aria-expanded="false" class="qa-question" type="button"><span>为什么飞书没有收到测试消息？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>请依次检查应用编号、应用密钥、接收者ID、接收者类型、机器人能力和发送消息权限。</p><div class="check-line">接收者ID必须与所选类型对应；群聊使用chat_id。</div></div>
+</article>
+<article class="qa-item" data-category="notice" data-keywords="删除 飞书 站内消息 历史">
+<button aria-expanded="false" class="qa-question" type="button"><span>删除飞书渠道后，站内消息还在吗？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>在。站内消息始终由系统保存，删除飞书配置不会删除历史记录。</p></div>
+</article>
+</div>
+</section>
+<section class="faq-group" data-group="indicator">
+<h3 class="faq-group-title"><span class="faq-group-icon">析</span>指标理解</h3>
+<div class="faq-list">
+<article class="qa-item" data-category="indicator" data-keywords="筹码共识价 平均成本 所有人 成交聚集" id="indicator-average-cost">
+<button aria-expanded="false" class="qa-question" type="button"><span>筹码共识价是不是所有人的平均成本？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>不是。筹码共识价是根据价格和成交量计算出的成交聚集位置，不是投资者账户中的真实持仓成本。</p><a class="doc-link" href="../pages/data.html">查看指标原理</a></div>
+</article>
+<article class="qa-item" data-category="indicator" data-keywords="筹码共识区 移动 更新">
+<button aria-expanded="false" class="qa-question" type="button"><span>为什么筹码共识区会移动？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>新的价格和成交数据不断加入后，成交最集中的区域可能发生变化，因此共识价格和区间会动态更新。</p></div>
+</article>
+<article class="qa-item" data-category="indicator" data-keywords="到共识区 没反弹 支撑">
+<button aria-expanded="false" class="qa-question" type="button"><span>为什么价格到了共识区，却没有反弹？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>共识区只说明这里曾经成交集中，不保证价格一定形成支撑或反弹。</p></div>
+</article>
+<article class="qa-item" data-category="indicator" data-keywords="结构点 肉眼 不一样 高点 低点 过滤">
+<button aria-expanded="false" class="qa-question" type="button"><span>为什么系统标记的结构点和我看到的不一样？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>系统会过滤较小的价格波动，只保留符合计算条件的阶段高点和低点。</p></div>
+</article>
+<article class="qa-item" data-category="indicator" data-keywords="结构变化 反转 一定" id="indicator-reversal">
+<button aria-expanded="false" class="qa-question" type="button"><span>结构变化是不是代表行情一定反转？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>不是。结构变化只表示此前的关键高低点关系已经被打破，后续方向仍需要继续观察。</p></div>
+</article>
+
+
+</div>
+</section>
+<section class="faq-group" data-group="data">
+<h3 class="faq-group-title"><span class="faq-group-icon">数</span>页面与数据</h3>
+<div class="faq-list">
+<article class="qa-item" data-category="data" data-keywords="页面 一直 加载中 网络 接口">
+<button aria-expanded="false" class="qa-question" type="button"><span>为什么页面一直显示加载中？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>可能是网络、接口或数据任务暂时未完成。</p><div class="check-line">先刷新页面；持续出现时，请记录页面、股票代码和发生时间并联系管理员。</div></div>
+</article>
+
+<article class="qa-item" data-category="data" data-keywords="其他平台 数据差异 复权 更新时间">
+<button aria-expanded="false" class="qa-question" type="button"><span>为什么盘迹和其他平台的数据略有差异？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>不同平台可能采用不同的数据源、复权方式、更新时间和时间范围，因此价格或指标结果可能存在差异。</p></div>
+</article>
+<article class="qa-item" data-category="data" data-keywords="当天 数据 没更新 日线 盘后">
+<button aria-expanded="false" class="qa-question" type="button"><span>为什么当天的数据还没有更新？</span><span class="qa-caret">⌄</span></button>
+<div class="qa-answer"><p>日线和盘后结果需要等待对应交易时段结束并完成计算。盘中功能也只使用已经完成的时间周期数据。</p></div>
+</article>
+
+</div>
+</section>
+<div class="no-results" id="noResults">
+<div class="no-results-icon">?</div>
+<h3>没有找到完全匹配的问题</h3>
+<p>换一个更短的关键词，例如“飞书”“自选”“权限”“共识”或“加载”。</p>
+</div>
+</section>
+<section class="section-block" id="contact">
+<div class="contact-panel">
+<div>
+<h2>仍未解决？</h2>
+<p>联系管理员时，请尽量同时提供下面的信息。信息越完整，越容易快速定位问题。</p>
+<div class="contact-checklist">
+<div class="contact-check"><span>1</span>出现问题的页面</div>
+<div class="contact-check"><span>2</span>股票代码或相关记录</div>
+<div class="contact-check"><span>3</span>问题发生时间</div>
+<div class="contact-check"><span>4</span>页面完整截图</div>
+<div class="contact-check"><span>5</span>页面显示的错误文字</div>
+<div class="contact-check"><span>6</span>使用的是电脑还是手机</div>
+</div>
+<div class="summary-strip">
+<article class="summary-card"><strong>先描述现象</strong><span>说明点了什么、看到了什么。</span></article>
+<article class="summary-card"><strong>再提供时间</strong><span>便于核对对应的数据和系统记录。</span></article>
+<article class="summary-card"><strong>不要只发局部截图</strong><span>尽量保留页面地址和完整提示。</span></article>
+</div>
+</div>
+<div class="contact-side">
+<img alt="管理员微信二维码占位图" src="../assets/images/wechat-qr-placeholder.svg"/>
+<strong>微信联系管理员</strong>
+<span>添加时请备注账号和问题类型</span>
+</div>
+</div>
+</section>
+</article>
+</main>
+<aside aria-label="本页辅助信息" class="right-rail">
+<section class="rail-card"><h3>本页目录</h3><nav class="rail-list">
+<a class="rail-link active" data-anchor="" href="#popular">高频问题</a>
+<a class="rail-link" data-anchor="" href="#allQuestions">按分类查找</a>
+<a class="rail-link" data-anchor="" href="#contact">联系管理员</a>
+</nav></section>
+<section class="rail-card"><h3>快速关键词</h3><nav class="rail-list">
+<button class="rail-link faq-keyword" data-keyword="权限" type="button">权限</button>
+<button class="rail-link faq-keyword" data-keyword="自选" type="button">自选</button>
+<button class="rail-link faq-keyword" data-keyword="飞书" type="button">飞书</button>
+<button class="rail-link faq-keyword" data-keyword="共识" type="button">共识</button>
+<button class="rail-link faq-keyword" data-keyword="加载" type="button">加载</button>
+</nav></section>
+<section class="rail-card"><h3>更新时间</h3><div class="update-date">2026年7月22日</div></section>
+</aside>
+</div>
+<footer class="site-footer">
+<div class="footer-inner">
+<div>
+<h2 class="footer-heading">联系管理员</h2>
+<p class="footer-copy">如遇到账号、权限、邀请码、系统使用或数据问题，请通过微信联系管理员。</p>
+<nav class="footer-links"><a href="../pages/faq.html">常见问题</a><a href="../pages/data.html">指标原理</a><a href="../pages/boundaries.html">使用边界</a></nav>
+</div>
+<figure class="footer-qr"><img alt="管理员微信二维码占位图" src="../assets/images/wechat-qr-placeholder.svg"/><figcaption>微信联系管理员<br/>添加时请备注来意</figcaption></figure>
+</div>
+<div class="footer-bottom">盘迹使用说明中心</div>
+</footer>
+<script src="../assets/js/site.js"></script>
+<script>
+(function(){
+  const search=document.getElementById('faqSearch');
+  const clear=document.getElementById('faqClear');
+  const resultText=document.getElementById('resultText');
+  const noResults=document.getElementById('noResults');
+  const tabs=[...document.querySelectorAll('#categoryTabs button')];
+  const groups=[...document.querySelectorAll('.faq-group')];
+  const items=[...document.querySelectorAll('.qa-item')];
+  let category='all';
+
+  function plainText(el){
+    return (el.textContent||'').replace(/\s+/g,' ').trim();
+  }
+  function setOpen(item,open){
+    item.classList.toggle('open',open);
+    const button=item.querySelector('.qa-question');
+    button.setAttribute('aria-expanded',open?'true':'false');
+  }
+  function highlightText(node,term){
+    if(!term){
+      node.querySelectorAll('mark').forEach(mark=>mark.replaceWith(document.createTextNode(mark.textContent)));
+      node.normalize();
+      return;
+    }
+    const walker=document.createTreeWalker(node,NodeFilter.SHOW_TEXT,{
+      acceptNode(t){
+        if(!t.nodeValue.trim()||t.parentElement.closest('mark'))return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+    const texts=[];while(walker.nextNode())texts.push(walker.currentNode);
+    texts.forEach(t=>{
+      const value=t.nodeValue;
+      const idx=value.toLowerCase().indexOf(term.toLowerCase());
+      if(idx<0)return;
+      const frag=document.createDocumentFragment();
+      frag.append(value.slice(0,idx));
+      const mark=document.createElement('mark');mark.textContent=value.slice(idx,idx+term.length);frag.append(mark);
+      frag.append(value.slice(idx+term.length));
+      t.parentNode.replaceChild(frag,t);
+    });
+  }
+  function resetHighlights(){
+    document.querySelectorAll('mark').forEach(mark=>mark.replaceWith(document.createTextNode(mark.textContent)));
+    document.querySelectorAll('.qa-question span:first-child,.qa-answer p,.qa-answer .check-line').forEach(el=>el.normalize());
+  }
+  function applyFilter(options={}){
+    const term=search.value.trim().toLowerCase();
+    resetHighlights();
+    let visibleCount=0;
+    let firstMatch=null;
+
+    groups.forEach(group=>{
+      let groupVisible=0;
+      group.querySelectorAll('.qa-item').forEach(item=>{
+        const inCategory=category==='all'||item.dataset.category===category;
+        const haystack=(plainText(item)+' '+(item.dataset.keywords||'')).toLowerCase();
+        const matches=!term||haystack.includes(term);
+        const visible=inCategory&&matches;
+        item.classList.toggle('hidden',!visible);
+        item.classList.toggle('match',Boolean(term&&visible));
+        if(visible){
+          visibleCount++;groupVisible++;
+          if(!firstMatch)firstMatch=item;
+          if(term){
+            highlightText(item.querySelector('.qa-question span:first-child'),term);
+            const answerP=item.querySelector('.qa-answer p');if(answerP)highlightText(answerP,term);
+            const check=item.querySelector('.check-line');if(check)highlightText(check,term);
+          }
+        }else if(term){
+          setOpen(item,false);
+        }
+      });
+      group.hidden=groupVisible===0;
+    });
+
+    resultText.innerHTML=term||category!=='all'
+      ? `找到 <strong>${visibleCount}</strong> 个相关问题`
+      : `共 ${items.length} 个问题`;
+    clear.classList.toggle('show',Boolean(term));
+    noResults.classList.toggle('show',visibleCount===0);
+
+    if((term||options.openFirst)&&firstMatch){
+      items.forEach(item=>{if(item!==firstMatch&&term)setOpen(item,false)});
+      setOpen(firstMatch,true);
+      if(options.scroll){
+        firstMatch.scrollIntoView({behavior:'smooth',block:'center'});
+      }
+    }
+  }
+
+  items.forEach(item=>{
+    item.querySelector('.qa-question').addEventListener('click',()=>setOpen(item,!item.classList.contains('open')));
+  });
+  tabs.forEach(tab=>tab.addEventListener('click',()=>{
+    category=tab.dataset.category;
+    tabs.forEach(t=>t.classList.toggle('active',t===tab));
+    applyFilter();
+  }));
+  search.addEventListener('input',()=>applyFilter({openFirst:true}));
+  clear.addEventListener('click',()=>{search.value='';search.focus();applyFilter()});
+  document.querySelectorAll('[data-open-faq]').forEach(btn=>btn.addEventListener('click',()=>{
+    category='all';tabs.forEach(t=>t.classList.toggle('active',t.dataset.category==='all'));
+    search.value='';
+    applyFilter();
+    const target=document.getElementById(btn.dataset.openFaq);
+    if(target){setOpen(target,true);target.scrollIntoView({behavior:'smooth',block:'center'})}
+  }));
+  document.querySelectorAll('.faq-keyword').forEach(btn=>btn.addEventListener('click',()=>{
+    category='all';tabs.forEach(t=>t.classList.toggle('active',t.dataset.category==='all'));
+    search.value=btn.dataset.keyword;
+    applyFilter({openFirst:true,scroll:true});
+  }));
+
+  applyFilter();
+})();
+</script>
+</body>
+</html>

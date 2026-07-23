@@ -4,6 +4,12 @@
 
 ## 2026-07-23
 
+- CHANGE-20260723-006: 盘迹公开门户替换 V1.1 — 静态门户替换公开根路径 /，业务路由原样保留
+  - **架构**: Vite `public/portal/` 静态门户 + Nginx `location = /` 精确分流 + `LandingPage` SPA 兜底；`/` 不进入 React SPA，业务路由 `/login`/`/market`/`/stock/:symbol`/`/capture/*`/`/messages`/`/settings`/`/admin/*`/`/api/*` 全部保留原 SPA fallback
+  - **门户**: 11 个静态 HTML（index + 10 pages）+ CSS/JS/JSON（240 因子目录 verified_current_core=24/extended_catalog=216/15 categories）+ PNG/SVG；`SOURCE.md` 记录 zip SHA256=4e89469330e0d5050a87a37305e7571bc67c401156c155bbebf0e1654192f523
+  - **清理**: 删除旧 React 门户组件 ~2797 行（components/landing/*、BetaApplicationModal、LandingPage hooks/scss/data），`LandingPage.tsx` 153→14 行兜底
+  - **测试**: portal-static 12/12 + 完整 test:contract 438/438 + tsc/eslint clean + vite build ✓ + Docker 镜像隔离容器路由验收矩阵 31/31 PASS（含内容正确性：`/` 返回门户 HTML、`/login` 返回 SPA index.html、Cache-Control 头正确）
+
 - CHANGE-20260723-005: DetailSourceContextV2 — 详情页来源列表同源同序合同 V2（行情来源失真 + 自选排序跳变根治）
   - **根因修复**: V2 透传 sourceRunId + canonicalQuery（入口快照），useStockDetailActions 用固定 sourceRunId 调 useStrategyRunResults（禁止 fresh usePublishedRuns）
   - **stableContextId 合同纠正**: computeStableContextIdV2 只由 origin + sourceRunId + canonicalQueryRaw 计算（不含 selectedSymbol/returnTo，切股不变）

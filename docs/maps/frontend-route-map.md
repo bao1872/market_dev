@@ -6,7 +6,7 @@
 
 | 路由 | 页面 | 守卫 | 说明 |
 |---|---|---|---|
-| `/` | `LandingPage` | Public | 门户页 lazy load |
+| `/` | 静态门户（Nginx `location = /` → `/portal/index.html`）+ `LandingPage` 兜底 | Public | 公开根路径 `/` 由 Nginx 精确分流直接返回 `/portal/index.html`（11 个静态 HTML + CSS/JS/JSON/PNG/SVG，**不进入 React SPA**，CHANGE-20260723-006）；`LandingPage` 仅作为 SPA 内部导航到 `/` 的兜底（mount 后 `window.location.replace('/')` 让浏览器重新请求由 Nginx 返回静态门户）；业务路由 `/login`、`/market`、`/stock/:symbol`、`/capture/stock/:symbol`、`/messages`、`/settings`、`/admin/*`、`/api/*` 全部保留原 SPA fallback `try_files $uri $uri/ /index.html` 行为 |
 | `/login` | `LoginPage` | Public | 登录/邀请码注册 |
 | `/subscription-expired` | `SubscriptionExpiredPage` | Authenticated | canonical 到期/续期页 |
 | `/membership-expired` | redirect | Public | 兼容路由 |

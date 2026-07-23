@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>使用边界与免责声明｜盘迹使用说明</title>
+<meta name="description" content="说明盘迹能够提供的功能、数据与指标边界、提醒和通知限制，以及正式免责声明。">
+<link rel="stylesheet" href="../assets/css/site.css">
+<style>
+  .article-wrap{--green:#51e77d;--blue:#5da8ff;--red:#ef746c;--gold:#e8c46f;--purple:#a787ff}
+  .visual-section{margin-top:30px;scroll-margin-top:96px}
+  .visual-title{display:flex;align-items:end;justify-content:space-between;gap:20px;margin-bottom:14px}
+  .visual-title h2{margin:0;font-size:22px}
+  .visual-title p{margin:0;color:var(--muted);font-size:13px;line-height:1.6}
+
+  .boundary-hero{position:relative;overflow:hidden;padding:30px;border:1px solid rgba(81,231,125,.24);border-radius:19px;background:
+    radial-gradient(circle at 86% 8%,rgba(81,231,125,.15),transparent 31%),
+    linear-gradient(145deg,rgba(81,231,125,.055),transparent 52%),var(--surface)}
+  .boundary-hero::after{content:"!";position:absolute;right:30px;top:-22px;color:rgba(81,231,125,.07);font-size:180px;font-weight:900;line-height:1}
+  .boundary-hero h1{position:relative;z-index:1;margin:0;font-size:38px}
+  .boundary-hero .lead{position:relative;z-index:1;max-width:780px;margin:12px 0 0;color:var(--muted);font-size:15px;line-height:1.8}
+  .core-statement{position:relative;z-index:1;max-width:860px;margin-top:22px;padding:18px 20px;border:1px solid rgba(81,231,125,.28);border-radius:14px;background:#0a1410}
+  .core-statement strong{display:block;color:#d8f7e0;font-size:17px;line-height:1.65}
+  .core-statement p{margin:8px 0 0;color:#9db4a5;font-size:13px;line-height:1.75}
+  .hero-tags{position:relative;z-index:1;display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+  .hero-tags span{padding:7px 11px;border:1px solid rgba(81,231,125,.22);border-radius:999px;background:rgba(81,231,125,.07);color:#bdf3cc;font-size:11px}
+
+  .can-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+  .can-card{padding:21px;border:1px solid var(--border);border-radius:15px;background:var(--surface)}
+  .can-card h3{display:flex;align-items:center;gap:9px;margin:0 0 15px;font-size:17px}
+  .can-icon{width:32px;height:32px;display:grid;place-items:center;border-radius:9px}
+  .can-card.positive .can-icon{background:rgba(81,231,125,.1);color:#b8efc7}
+  .can-card.negative .can-icon{background:rgba(239,116,108,.1);color:#efaaa5}
+  .can-list{display:flex;flex-direction:column;gap:10px}
+  .can-row{display:grid;grid-template-columns:24px minmax(0,1fr);gap:9px;align-items:start}
+  .can-row-no{width:24px;height:24px;display:grid;place-items:center;border-radius:7px;background:#132028;color:#82949d;font-size:8px;font-weight:800}
+  .can-row strong{display:block;margin-bottom:3px;font-size:12px}
+  .can-row span{display:block;color:var(--muted);font-size:11px;line-height:1.65}
+
+  .flow-shell{overflow:hidden;border:1px solid #2a3944;border-radius:18px;background:#060d12;box-shadow:0 20px 60px rgba(0,0,0,.32)}
+  .flow-head{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px 16px;border-bottom:1px solid #21303a;background:#0c151b}
+  .flow-head-left{display:flex;align-items:center;gap:10px;min-width:0}
+  .flow-count{display:grid;place-items:center;min-width:40px;height:28px;padding:0 8px;border-radius:8px;background:rgba(81,231,125,.12);color:var(--green);font-size:12px;font-weight:800}
+  .flow-copy{min-width:0}
+  .flow-copy strong{display:block;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .flow-copy span{display:block;margin-top:3px;color:#81919a;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .flow-controls{display:flex;gap:7px}
+  .flow-btn{width:32px;height:32px;display:grid;place-items:center;border:1px solid #2b3944;border-radius:8px;background:#111b22;color:#d7e2e7}
+  .flow-btn svg{width:15px;height:15px}
+  .flow-stage{position:relative;padding:16px;background:radial-gradient(circle at 76% -8%,rgba(54,142,101,.14),transparent 35%),#060d12}
+  .flow-canvas{position:relative;min-height:390px;overflow:hidden;border:1px solid #263540;border-radius:14px;background:#091117}
+  .flow-canvas::before{content:"";position:absolute;left:8%;right:8%;top:50%;height:2px;background:#263741;transform:translateY(-50%)}
+  .flow-nodes{position:absolute;inset:0;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;align-items:center;padding:28px}
+  .flow-node{position:relative;z-index:2;min-height:155px;padding:16px 12px;border:1px solid #2a3944;border-radius:12px;background:#0d171d;text-align:center;transition:.35s}
+  .flow-node.active{border-color:rgba(81,231,125,.55);background:rgba(81,231,125,.08);box-shadow:0 0 0 5px rgba(81,231,125,.06)}
+  .flow-node.done{border-color:rgba(81,231,125,.24)}
+  .node-icon{width:42px;height:42px;display:grid;place-items:center;margin:0 auto 11px;border-radius:12px;background:#18252d;color:#aab8bf;font-size:17px;transition:.35s}
+  .flow-node.active .node-icon{background:var(--green);color:#07160d}
+  .flow-node strong{display:block;color:#dce7e2;font-size:11px}
+  .flow-node span{display:block;margin-top:7px;color:#768790;font-size:8px;line-height:1.55}
+  .flow-pulse{position:absolute;z-index:1;top:50%;left:9%;width:16px;height:16px;border-radius:50%;background:var(--green);box-shadow:0 0 0 8px rgba(81,231,125,.12);transform:translate(-50%,-50%);transition:left .7s cubic-bezier(.2,.8,.2,1)}
+  .flow-caption{display:grid;grid-template-columns:44px 1fr;gap:12px;padding:14px 16px;border-top:1px solid #22313a;background:#0c151b}
+  .caption-no{width:40px;height:40px;display:grid;place-items:center;border-radius:11px;background:var(--green);color:#06170d;font-weight:850}
+  .flow-caption strong{display:block;margin-bottom:4px;font-size:14px}
+  .flow-caption span{display:block;color:#91a0a9;font-size:12px;line-height:1.65}
+  .step-strip{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-top:10px}
+  .step-button{min-height:68px;padding:10px 8px;border:1px solid var(--border);border-radius:11px;background:var(--surface);color:var(--muted);text-align:left;font-size:10px;line-height:1.45;transition:.2s}
+  .step-button b{display:block;margin-bottom:4px;color:var(--soft);font-size:11px}
+  .step-button.active{border-color:rgba(81,231,125,.48);background:rgba(81,231,125,.08);color:#b5c5bc}
+  .step-button.active b{color:var(--green)}
+  .flow-summary{margin-top:12px;padding:13px 15px;border-left:3px solid var(--green);border-radius:0 9px 9px 0;background:rgba(81,231,125,.06);color:#c2e9cd;font-size:12px;line-height:1.7}
+
+  .limits-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+  .limit-card{padding:17px;border:1px solid var(--border);border-radius:13px;background:var(--surface)}
+  .limit-icon{width:34px;height:34px;display:grid;place-items:center;margin-bottom:11px;border-radius:9px;background:rgba(91,169,255,.08);color:#acd1ff;font-size:13px}
+  .limit-card h3{margin:0 0 7px;font-size:13px}
+  .limit-card p{margin:0;color:var(--muted);font-size:10px;line-height:1.7}
+  .limit-tip{margin-top:10px;padding-top:9px;border-top:1px solid var(--border);color:#d6c28d;font-size:9px;line-height:1.55}
+
+  .misunderstand-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:11px}
+  .flip-card{position:relative;min-height:170px;perspective:900px}
+  .flip-inner{position:absolute;inset:0;transition:transform .5s;transform-style:preserve-3d}
+  .flip-card.flipped .flip-inner{transform:rotateY(180deg)}
+  .flip-face{position:absolute;inset:0;padding:17px;border:1px solid var(--border);border-radius:13px;background:var(--surface);backface-visibility:hidden;box-sizing:border-box}
+  .flip-back{transform:rotateY(180deg);border-color:rgba(81,231,125,.3);background:#0c1812}
+  .flip-label{display:inline-flex;padding:4px 7px;border-radius:999px;background:rgba(239,116,108,.1);color:#efaaa5;font-size:8px}
+  .flip-back .flip-label{background:rgba(81,231,125,.1);color:#b8efc7}
+  .flip-face h3{margin:11px 0 7px;font-size:13px;line-height:1.55}
+  .flip-face p{margin:0;color:var(--muted);font-size:10px;line-height:1.65}
+  .flip-hint{position:absolute;right:13px;bottom:12px;color:#70818a;font-size:8px}
+  .flip-card button{position:absolute;inset:0;z-index:3;width:100%;border:0;background:transparent;cursor:pointer}
+
+  .action-list{display:flex;flex-direction:column;gap:9px}
+  .action-row{display:grid;grid-template-columns:46px minmax(0,1fr) auto;gap:12px;align-items:center;padding:14px 15px;border:1px solid var(--border);border-radius:12px;background:var(--surface)}
+  .action-no{width:38px;height:38px;display:grid;place-items:center;border-radius:10px;background:rgba(232,196,111,.09);color:#e9cf8d;font-size:11px;font-weight:800}
+  .action-row strong{display:block;margin-bottom:4px;font-size:13px}
+  .action-row span{display:block;color:var(--muted);font-size:11px;line-height:1.6}
+  .action-badge{padding:5px 8px;border-radius:999px;background:#111b22;color:#83949d;font-size:8px;white-space:nowrap}
+
+  .sharing-panel{display:grid;grid-template-columns:44px 1fr;gap:13px;padding:19px;border:1px solid rgba(167,135,255,.28);border-radius:14px;background:rgba(167,135,255,.055)}
+  .sharing-icon{width:44px;height:44px;display:grid;place-items:center;border-radius:12px;background:rgba(167,135,255,.12);color:#c7b5ff;font-size:18px}
+  .sharing-panel h3{margin:0 0 7px;font-size:16px}
+  .sharing-panel p{margin:0;color:#a99dc4;font-size:12px;line-height:1.75}
+  .sharing-panel p+p{margin-top:8px}
+
+  .disclaimer-panel{position:relative;overflow:hidden;padding:24px;border:1px solid rgba(239,116,108,.38);border-radius:16px;background:
+    radial-gradient(circle at 96% 5%,rgba(239,116,108,.12),transparent 30%),
+    #160e0f}
+  .disclaimer-panel::after{content:"免责声明";position:absolute;right:-12px;top:18px;color:rgba(239,116,108,.055);font-size:62px;font-weight:900;white-space:nowrap;transform:rotate(-8deg)}
+  .disclaimer-title{position:relative;z-index:1;display:flex;align-items:center;gap:11px;margin:0 0 10px}
+  .disclaimer-mark{width:38px;height:38px;display:grid;place-items:center;border-radius:10px;background:rgba(239,116,108,.13);color:#efaaa5;font-size:18px;font-weight:850}
+  .disclaimer-title h2{margin:0;font-size:23px}
+  .disclaimer-intro{position:relative;z-index:1;max-width:850px;margin:0;color:#c5a7a9;font-size:12px;line-height:1.75}
+  .disclaimer-list{position:relative;z-index:1;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:16px}
+  .disclaimer-item{display:grid;grid-template-columns:26px minmax(0,1fr);gap:9px;padding:12px;border:1px solid rgba(239,116,108,.19);border-radius:10px;background:rgba(255,255,255,.018)}
+  .disclaimer-no{width:26px;height:26px;display:grid;place-items:center;border-radius:7px;background:rgba(239,116,108,.1);color:#efaaa5;font-size:9px;font-weight:800}
+  .disclaimer-item strong{display:block;margin-bottom:4px;color:#ead6d7;font-size:11px}
+  .disclaimer-item span{display:block;color:#a98f91;font-size:10px;line-height:1.65}
+  .disclaimer-foot{position:relative;z-index:1;margin-top:14px;padding-top:13px;border-top:1px solid rgba(239,116,108,.18);color:#bca0a2;font-size:10px;line-height:1.7}
+
+  .final-statement{padding:23px;border:1px solid rgba(81,231,125,.28);border-radius:15px;background:#0a1510;text-align:center}
+  .final-statement h2{margin:0;color:#d6f5de;font-size:22px}
+  .final-statement p{max-width:850px;margin:10px auto 0;color:#91ad99;font-size:12px;line-height:1.8}
+  .memory-lines{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin-top:16px}
+  .memory-line{padding:11px;border:1px solid rgba(81,231,125,.16);border-radius:9px;background:rgba(81,231,125,.035);color:#bdebc8;font-size:10px;line-height:1.55}
+
+  @media(max-width:1200px){
+    .limits-grid{grid-template-columns:repeat(3,1fr)}
+    .step-strip{grid-template-columns:repeat(3,1fr)}
+    .memory-lines{grid-template-columns:repeat(2,1fr)}
+  }
+  @media(max-width:900px){
+    .can-grid{grid-template-columns:1fr}
+    .misunderstand-grid{grid-template-columns:repeat(2,1fr)}
+    .flow-canvas{overflow:auto}
+    .flow-nodes{min-width:830px}
+    .disclaimer-list{grid-template-columns:1fr}
+  }
+  @media(max-width:720px){
+    .boundary-hero{padding:23px}.boundary-hero h1{font-size:31px}.boundary-hero::after{font-size:130px}
+    .visual-title{display:block}.visual-title p{margin-top:5px}
+    .limits-grid{grid-template-columns:1fr 1fr}
+    .action-row{grid-template-columns:40px 1fr}.action-badge{grid-column:2}
+    .sharing-panel{grid-template-columns:36px 1fr}.sharing-icon{width:36px;height:36px}
+  }
+  @media(max-width:540px){
+    .flow-head{align-items:flex-start}.flow-copy span{display:none}.flow-controls{flex-shrink:0}
+    .flow-caption{grid-template-columns:36px 1fr}.caption-no{width:34px;height:34px}
+    .step-strip,.misunderstand-grid,.limits-grid,.memory-lines{grid-template-columns:1fr}
+  }
+  @media(prefers-reduced-motion:reduce){
+    .flow-node,.flow-pulse,.flip-inner{transition:none!important}
+  }
+</style>
+</head>
+<body data-page="boundaries" data-root="..">
+<header class="site-header">
+  <a class="brand" href="../index.html" aria-label="盘迹首页"><img class="brand-logo" src="../assets/images/logo_symbol_128.png" alt="" aria-hidden="true"><span class="brand-mark">盘迹</span></a>
+  <div class="search-wrap">
+    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="m20 20-4.5-4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    <input class="doc-search" type="search" placeholder="搜索文档、功能或问题" aria-label="搜索文档">
+    <div class="search-results"></div>
+  </div>
+  <div class="header-actions"><a class="btn" href="/market">返回系统</a><a class="btn btn-primary" href="/login">登录盘迹</a><button class="btn icon-btn" type="button" data-menu-toggle aria-expanded="false" aria-label="打开目录">☰</button></div>
+</header>
+<div class="mobile-backdrop"></div>
+
+<div class="docs-layout">
+<aside class="docs-sidebar" aria-label="文档目录">
+  <h2 class="sidebar-title">目录</h2>
+  <nav class="nav-list">
+    <a class="nav-item" href="../index.html"><span class="nav-icon">⌂</span><span>使用说明首页</span></a>
+    <a class="nav-item" href="../pages/quick-start.html"><span class="nav-icon">↗</span><span>快速开始</span></a>
+    <a class="nav-item" href="../pages/market.html"><span class="nav-icon">⌁</span><span>行情查看</span></a>
+    <a class="nav-item" href="../pages/watchlist.html"><span class="nav-icon">★</span><span>自选管理</span></a>
+    <a class="nav-item" href="../pages/stock-detail.html"><span class="nav-icon">▥</span><span>个股详情</span></a>
+    <a class="nav-item" href="../pages/alerts.html"><span class="nav-icon">♢</span><span>提醒记录</span></a>
+    <a class="nav-item" href="../pages/messages.html"><span class="nav-icon">□</span><span>消息通知</span></a>
+    <a class="nav-item" href="../pages/data.html"><span class="nav-icon">◉</span><span>指标原理</span></a>
+    <a class="nav-item" href="../pages/faq.html"><span class="nav-icon">?</span><span>常见问题</span></a>
+    <a class="nav-item active" href="../pages/boundaries.html"><span class="nav-icon">!</span><span>使用边界</span></a>
+    <a class="nav-item" href="../pages/customization.html"><span class="nav-icon">工</span><span>量化定制</span></a>
+  </nav>
+</aside>
+
+<main class="article-main">
+<article class="article-wrap">
+  <div class="breadcrumb">帮助中心 / <strong>使用边界</strong></div>
+
+  <section class="boundary-hero">
+    <h1>使用边界</h1>
+    <p class="lead">了解盘迹能做什么、不能做什么，以及数据、指标、提醒和通知应当怎样正确理解。</p>
+    <div class="core-statement">
+      <strong>盘迹用于整理行情数据、呈现已经发生的市场状态，并保存相关提醒记录。</strong>
+      <p>它不预测未来，不识别具体交易者，也不代替使用者作出投资判断。</p>
+    </div>
+    <div class="hero-tags"><span>数据整理工具</span><span>描述已经发生的状态</span><span>不提供投资建议</span><span>不保证外部通知必然送达</span></div>
+  </section>
+
+  <section class="visual-section" id="abilities">
+    <div class="visual-title"><h2>盘迹能做什么，不能替代什么</h2><p>先明确工具的职责，再使用具体功能。</p></div>
+    <div class="can-grid">
+      <article class="can-card positive">
+        <h3><span class="can-icon">✓</span>可以帮助</h3>
+        <div class="can-list">
+          <div class="can-row"><span class="can-row-no">1</span><div><strong>集中查看行情</strong><span>在统一页面中查看股票、趋势、位置、成交和结构状态。</span></div></div>
+          <div class="can-row"><span class="can-row-no">2</span><div><strong>建立个人观察范围</strong><span>将自己决定持续关注的股票加入自选。</span></div></div>
+          <div class="can-row"><span class="can-row-no">3</span><div><strong>整理已经发生的状态</strong><span>把价格、成交量和结构关系整理成更容易阅读的描述。</span></div></div>
+          <div class="can-row"><span class="can-row-no">4</span><div><strong>保存提醒记录</strong><span>当条件已经形成时保存站内记录，并尝试向外部渠道发送。</span></div></div>
+          <div class="can-row"><span class="can-row-no">5</span><div><strong>支持回看与复盘</strong><span>帮助回顾状态形成的时间及后续行情变化。</span></div></div>
+        </div>
+      </article>
+      <article class="can-card negative">
+        <h3><span class="can-icon">×</span>不能替代</h3>
+        <div class="can-list">
+          <div class="can-row"><span class="can-row-no">1</span><div><strong>不代替独立判断</strong><span>系统不会替使用者决定是否买入、卖出或继续持有。</span></div></div>
+          <div class="can-row"><span class="can-row-no">2</span><div><strong>不预测未来价格</strong><span>当前状态和历史结构不能证明下一段行情一定向某个方向运行。</span></div></div>
+          <div class="can-row"><span class="can-row-no">3</span><div><strong>不识别交易者身份</strong><span>公开价格与成交数据无法确认具体是谁在交易。</span></div></div>
+          <div class="can-row"><span class="can-row-no">4</span><div><strong>不保证数据完全实时</strong><span>数据接收、整理和计算可能产生延迟、缺失或来源差异。</span></div></div>
+          <div class="can-row"><span class="can-row-no">5</span><div><strong>不保证外部通知必然送达</strong><span>飞书等渠道可能受到配置、网络和外部平台影响。</span></div></div>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <section class="visual-section" id="flow">
+    <div class="visual-title"><h2>一条状态是怎样形成的</h2><p>数据经过系统整理后形成状态，但不会自动变成交易结论。</p></div>
+    <div class="flow-shell">
+      <div class="flow-head">
+        <div class="flow-head-left"><span class="flow-count" id="flowCount">1 / 5</span><div class="flow-copy"><strong id="flowHeading">行情数据进入系统</strong><span id="flowSub">系统接收价格、成交量和相关市场数据。</span></div></div>
+        <div class="flow-controls">
+          <button class="flow-btn" id="flowPrev" type="button" aria-label="上一步"><svg viewBox="0 0 24 24" fill="none"><path d="m15 6-6 6 6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <button class="flow-btn" id="flowPlay" type="button" aria-label="暂停自动播放"><svg viewBox="0 0 24 24" fill="none"><path d="M9 7v10M15 7v10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+          <button class="flow-btn" id="flowNext" type="button" aria-label="下一步"><svg viewBox="0 0 24 24" fill="none"><path d="m9 6 6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+      </div>
+      <div class="flow-stage">
+        <div class="flow-canvas">
+          <div class="flow-pulse" id="flowPulse"></div>
+          <div class="flow-nodes">
+            <article class="flow-node active" data-node="0"><div class="node-icon">数</div><strong>行情数据</strong><span>价格、成交量和相关市场数据进入系统。</span></article>
+            <article class="flow-node" data-node="1"><div class="node-icon">时</div><strong>完成的周期</strong><span>等待当前分钟或交易周期完成后再形成状态。</span></article>
+            <article class="flow-node" data-node="2"><div class="node-icon">算</div><strong>规则计算</strong><span>按照固定方法整理价格、成交和结构关系。</span></article>
+            <article class="flow-node" data-node="3"><div class="node-icon">记</div><strong>状态与提醒</strong><span>条件满足后形成描述或提醒记录。</span></article>
+            <article class="flow-node" data-node="4"><div class="node-icon">人</div><strong>独立判断</strong><span>使用者结合其他信息自行作出判断。</span></article>
+          </div>
+        </div>
+      </div>
+      <div class="flow-caption"><div class="caption-no" id="flowNo">1</div><div><strong id="flowTitle">系统接收已经产生的行情数据</strong><span id="flowText">不同数据来源、复权方式和更新时间可能造成结果差异。</span></div></div>
+    </div>
+    <div class="step-strip" id="flowSteps">
+      <button class="step-button active" data-step="0" type="button"><b>1 行情数据</b>价格与成交量</button>
+      <button class="step-button" data-step="1" type="button"><b>2 周期完成</b>不使用未结束数据</button>
+      <button class="step-button" data-step="2" type="button"><b>3 规则计算</b>整理已发生关系</button>
+      <button class="step-button" data-step="3" type="button"><b>4 形成记录</b>条件已经满足</button>
+      <button class="step-button" data-step="4" type="button"><b>5 独立判断</b>由使用者决定</button>
+    </div>
+    <div class="flow-summary"><strong>盘中监控使用已经完成的分钟周期进行判断，不是逐笔成交级的实时监控。</strong></div>
+  </section>
+
+  <section class="visual-section" id="limits">
+    <div class="visual-title"><h2>五类核心使用边界</h2><p>不同功能有不同的限制，不能用同一种方式理解。</p></div>
+    <div class="limits-grid">
+      <article class="limit-card"><div class="limit-icon">数</div><h3>数据边界</h3><p>数据需要经过接收、整理和计算，可能存在更新延迟、缺失或平台差异。</p><div class="limit-tip">“暂无数据”不能被理解为状态正常。</div></article>
+      <article class="limit-card"><div class="limit-icon">析</div><h3>指标边界</h3><p>筹码共识整理成交聚集位置，价格结构整理阶段高低点关系。</p><div class="limit-tip">指标不是买入、卖出或持有建议。</div></article>
+      <article class="limit-card"><div class="limit-icon">铃</div><h3>提醒边界</h3><p>提醒描述的是已经发生的数据变化，不是对未来走势的预测。</p><div class="limit-tip">提醒形成不等于交易机会出现。</div></article>
+      <article class="limit-card"><div class="limit-icon">信</div><h3>通知边界</h3><p>站内记录和飞书投递是两个过程，外部渠道可能发送失败。</p><div class="limit-tip">“可用”不表示未来每条消息都保证送达。</div></article>
+      <article class="limit-card"><div class="limit-icon">权</div><h3>权限边界</h3><p>功能范围、自选数量和有效期以当前账号权限为准。</p><div class="limit-tip">自选由用户本人建立，不代表平台推荐。</div></article>
+    </div>
+  </section>
+
+  <section class="visual-section" id="misunderstandings">
+    <div class="visual-title"><h2>六个常见误解</h2><p>点击卡片，查看正确理解。</p></div>
+    <div class="misunderstand-grid">
+      <article class="flip-card"><div class="flip-inner"><div class="flip-face"><span class="flip-label">错误理解</span><h3>页面显示红色或绿色，就是买卖提示。</h3><p>颜色看起来很直观，但它并不自动构成交易含义。</p><span class="flip-hint">点击查看正确理解</span></div><div class="flip-face flip-back"><span class="flip-label">正确理解</span><h3>颜色只用于区分价格或状态变化。</h3><p>它不代表平台给出买入或卖出建议。</p></div></div><button type="button" aria-label="切换正确理解"></button></article>
+      <article class="flip-card"><div class="flip-inner"><div class="flip-face"><span class="flip-label">错误理解</span><h3>收到提醒说明出现了交易机会。</h3><p>提醒容易让人联想到应该立刻行动。</p><span class="flip-hint">点击查看正确理解</span></div><div class="flip-face flip-back"><span class="flip-label">正确理解</span><h3>提醒只说明数据条件已经形成。</h3><p>使用者仍需继续核对其他信息。</p></div></div><button type="button" aria-label="切换正确理解"></button></article>
+      <article class="flip-card"><div class="flip-inner"><div class="flip-face"><span class="flip-label">错误理解</span><h3>筹码共识区就是所有人的真实成本。</h3><p>成交聚集和真实账户持仓不是一回事。</p><span class="flip-hint">点击查看正确理解</span></div><div class="flip-face flip-back"><span class="flip-label">正确理解</span><h3>它是根据价格和成交量整理的区域。</h3><p>不是账户级真实持仓数据。</p></div></div><button type="button" aria-label="切换正确理解"></button></article>
+      <article class="flip-card"><div class="flip-inner"><div class="flip-face"><span class="flip-label">错误理解</span><h3>价格结构变化说明趋势已经确定反转。</h3><p>一次关系变化不能证明后续路径。</p><span class="flip-hint">点击查看正确理解</span></div><div class="flip-face flip-back"><span class="flip-label">正确理解</span><h3>它只说明此前关键关系被打破。</h3><p>后续结构仍需继续观察。</p></div></div><button type="button" aria-label="切换正确理解"></button></article>
+      <article class="flip-card"><div class="flip-inner"><div class="flip-face"><span class="flip-label">错误理解</span><h3>页面没有数据，说明当前没有异常。</h3><p>空白状态本身不能作为市场结论。</p><span class="flip-hint">点击查看正确理解</span></div><div class="flip-face flip-back"><span class="flip-label">正确理解</span><h3>没有数据可能是尚未更新或加载失败。</h3><p>应先确认数据状态，不能解释为正常。</p></div></div><button type="button" aria-label="切换正确理解"></button></article>
+      <article class="flip-card"><div class="flip-inner"><div class="flip-face"><span class="flip-label">错误理解</span><h3>飞书显示可用，就不会漏掉任何消息。</h3><p>外部通知仍然依赖网络和平台接口。</p><span class="flip-hint">点击查看正确理解</span></div><div class="flip-face flip-back"><span class="flip-label">正确理解</span><h3>“可用”只表示最近一次测试成功。</h3><p>实际发送仍可能受到外部条件影响。</p></div></div><button type="button" aria-label="切换正确理解"></button></article>
+    </div>
+  </section>
+
+  <section class="visual-section" id="actions">
+    <div class="visual-title"><h2>出现这些情况时，请先核对数据</h2><p>数据状态没有确认前，不应把当前页面作为唯一判断依据。</p></div>
+    <div class="action-list">
+      <article class="action-row"><span class="action-no">1</span><div><strong>更新时间明显落后</strong><span>检查页面显示的数据时间，确认是否已经更新到预期交易周期。</span></div><span class="action-badge">检查时间</span></article>
+      <article class="action-row"><span class="action-no">2</span><div><strong>价格与其他可靠来源明显不一致</strong><span>检查复权方式、股票代码和时间范围，再核对可靠行情来源。</span></div><span class="action-badge">交叉核对</span></article>
+      <article class="action-row"><span class="action-no">3</span><div><strong>页面持续加载或反复报错</strong><span>刷新后仍未恢复时，记录页面、股票代码、发生时间和完整错误提示。</span></div><span class="action-badge">保留证据</span></article>
+      <article class="action-row"><span class="action-no">4</span><div><strong>飞书没有收到消息</strong><span>先到消息中心确认站内记录是否存在，再核对飞书发送情况。</span></div><span class="action-badge">先查站内</span></article>
+      <article class="action-row"><span class="action-no">5</span><div><strong>账号功能与预期不一致</strong><span>检查当前登录账号；仍有问题时联系管理员核对权限和有效期。</span></div><span class="action-badge">核对权限</span></article>
+    </div>
+  </section>
+
+  <section class="visual-section" id="sharing">
+    <div class="sharing-panel">
+      <div class="sharing-icon">↗</div>
+      <div>
+        <h3>对外分享时应保持原意</h3>
+        <p>页面中的股票、图表、状态和提醒可以用于个人研究与复盘说明，但不应被表述为盘迹提供的荐股、买卖指令或收益保证。</p>
+        <p>截图或转述时，不应删除原有时间、股票范围和使用边界，避免将历史状态误解为当前结论。</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="visual-section" id="disclaimer">
+    <div class="disclaimer-panel">
+      <div class="disclaimer-title"><span class="disclaimer-mark">!</span><h2>免责声明</h2></div>
+      <p class="disclaimer-intro">使用盘迹前，请阅读并理解以下内容。继续使用相关页面、指标、提醒和通知，表示使用者知悉这些功能的基本性质与限制。</p>
+      <div class="disclaimer-list">
+        <article class="disclaimer-item"><span class="disclaimer-no">1</span><div><strong>不构成投资建议</strong><span>盘迹提供的信息、图表、指标、结构描述、提醒和通知，仅用于数据整理、研究与复盘，不构成买入、卖出、持有或其他投资建议。</span></div></article>
+        <article class="disclaimer-item"><span class="disclaimer-no">2</span><div><strong>不保证未来结果</strong><span>历史数据、当前状态和系统提醒均不能保证未来价格方向、投资收益或风险结果。</span></div></article>
+        <article class="disclaimer-item"><span class="disclaimer-no">3</span><div><strong>不保证数据绝对准确、完整或实时</strong><span>数据可能受到来源、网络、复权方式、更新时间、计算过程和外部服务影响，出现延迟、缺失或差异。</span></div></article>
+        <article class="disclaimer-item"><span class="disclaimer-no">4</span><div><strong>不保证外部通知必然送达</strong><span>飞书等外部通知可能因用户配置、权限、网络、接口或外部平台状态而延迟或失败。站内记录应作为核对入口之一。</span></div></article>
+        <article class="disclaimer-item"><span class="disclaimer-no">5</span><div><strong>使用者应独立核对并自行决定</strong><span>作出任何决定前，使用者应结合上市公司公告、可靠行情来源、市场环境和自身情况进行独立判断，并自行承担相应结果。</span></div></article>
+        <article class="disclaimer-item"><span class="disclaimer-no">6</span><div><strong>正式信息以权威来源为准</strong><span>涉及公司事项、交易规则、停复牌、除权除息和其他重要信息时，应以交易所、上市公司公告及其他正式来源为准。</span></div></article>
+      </div>
+      <div class="disclaimer-foot">本免责声明用于说明产品的基本使用边界，不替代完整的用户协议、隐私说明、服务规则或依法应当提供的其他正式文件。涉及法律、税务、投资或其他专业问题时，应咨询具备相应资格的专业人士。</div>
+    </div>
+  </section>
+
+  <section class="visual-section" id="faq">
+    <div class="visual-title"><h2>边界类常见问题</h2><p>这里仅回答使用边界，不重复完整常见问题页。</p></div>
+    <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>盘迹是不是投资顾问？</span><span>⌄</span></button><div class="faq-answer">不是。盘迹提供数据整理和状态观察工具，不提供个性化投资建议。</div></div>
+    <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>系统提醒是否可以直接作为交易依据？</span><span>⌄</span></button><div class="faq-answer">不可以。提醒只说明预设条件已经形成，仍需结合其他信息独立判断。</div></div>
+    <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>数据和其他平台不一致时以哪个为准？</span><span>⌄</span></button><div class="faq-answer">先检查数据时间、复权方式和时间范围。涉及交易或正式记录时，应同时核对可靠行情来源和正式公告。</div></div>
+    <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>飞书发送失败会不会导致提醒记录丢失？</span><span>⌄</span></button><div class="faq-answer">不一定。站内记录和外部投递相互独立，应先到消息中心确认记录是否存在。</div></div>
+    <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>使用盘迹后产生的操作结果由谁决定？</span><span>⌄</span></button><div class="faq-answer">任何操作都由使用者本人决定。系统页面、指标和提醒不替代使用者的判断。</div></div>
+  </section>
+
+  <section class="visual-section" id="final">
+    <div class="final-statement">
+      <h2>盘迹提供工具，不提供交易结论</h2>
+      <p>盘迹中的行情、指标、结构、提醒和通知，均用于整理和展示已经发生的数据状态。使用者应结合上市公司公告、基本情况、市场环境和自身承受能力独立判断，任何操作均由使用者自行决定。</p>
+      <div class="memory-lines">
+        <div class="memory-line">盘迹整理数据，不预测未来。</div>
+        <div class="memory-line">提醒表示条件已经发生，不表示交易机会。</div>
+        <div class="memory-line">站内记录和外部通知是两个过程。</div>
+        <div class="memory-line">最终判断和操作由使用者本人完成。</div>
+      </div>
+    </div>
+  </section>
+</article>
+</main>
+
+<aside class="right-rail" aria-label="本页辅助信息">
+  <section class="rail-card"><h3>本页目录</h3><nav class="rail-list">
+    <a class="rail-link active" data-anchor href="#abilities">能与不能</a>
+    <a class="rail-link" data-anchor href="#flow">状态形成</a>
+    <a class="rail-link" data-anchor href="#limits">五类边界</a>
+    <a class="rail-link" data-anchor href="#misunderstandings">常见误解</a>
+    <a class="rail-link" data-anchor href="#actions">异常处理</a>
+    <a class="rail-link" data-anchor href="#sharing">分享边界</a>
+    <a class="rail-link" data-anchor href="#disclaimer">免责声明</a>
+    <a class="rail-link" data-anchor href="#faq">常见问题</a>
+    <a class="rail-link" data-anchor href="#final">最终声明</a>
+  </nav></section>
+  <section class="rail-card"><h3>更新时间</h3><div class="update-date">2026年7月22日</div></section>
+  <section class="rail-card"><h3>相关教程</h3><nav class="rail-list">
+    <a class="rail-link" href="../pages/data.html">指标原理</a>
+    <a class="rail-link" href="../pages/alerts.html">提醒记录</a>
+    <a class="rail-link" href="../pages/messages.html">消息通知</a>
+    <a class="rail-link" href="../pages/faq.html">常见问题</a>
+  </nav></section>
+</aside>
+</div>
+
+<footer class="site-footer">
+  <div class="footer-inner">
+    <div>
+      <h2 class="footer-heading">联系管理员</h2>
+      <p class="footer-copy">如遇到账号、权限、邀请码、系统使用或数据问题，请通过微信联系管理员。</p>
+      <nav class="footer-links"><a href="../pages/faq.html">常见问题</a><a href="../pages/data.html">指标原理</a><a href="../pages/boundaries.html">使用边界</a></nav>
+    </div>
+    <figure class="footer-qr"><img src="../assets/images/wechat-qr-placeholder.svg" alt="管理员微信二维码占位图"><figcaption>微信联系管理员<br>添加时请备注来意</figcaption></figure>
+  </div>
+  <div class="footer-bottom">盘迹使用说明中心</div>
+</footer>
+
+<script src="../assets/js/site.js"></script>
+<script>
+(function(){
+  const steps=[
+    {heading:'行情数据进入系统',sub:'系统接收价格、成交量和相关市场数据。',title:'系统接收已经产生的行情数据',text:'不同数据来源、复权方式和更新时间可能造成结果差异。'},
+    {heading:'等待当前周期完成',sub:'不使用尚未结束的数据直接形成最终状态。',title:'系统主要根据已经完成的时间周期计算',text:'盘中监控使用已完成的分钟周期，不是逐笔成交级实时监控。'},
+    {heading:'按照固定规则计算',sub:'整理价格、成交和结构之间的关系。',title:'计算结果来自数据规则',text:'系统根据预先设定的方法整理数据，但并不知道交易者的真实意图。'},
+    {heading:'形成状态或提醒记录',sub:'当相应条件已经满足时生成记录。',title:'提醒表示条件已经发生',text:'状态或提醒描述已经发生的数据变化，不表示机会已经出现。'},
+    {heading:'由使用者进行判断',sub:'系统整理数据，使用者作出最终决定。',title:'最终判断仍由使用者本人完成',text:'需要结合公司情况、市场环境、新的信息和自身情况独立判断。'}
+  ];
+  let index=0,playing=true,timer=null;
+  const nodes=[...document.querySelectorAll('.flow-node')];
+  const buttons=[...document.querySelectorAll('#flowSteps .step-button')];
+  const positions=[9,29.5,50,70.5,91];
+
+  function render(step,manual){
+    index=(step+steps.length)%steps.length;
+    const s=steps[index];
+    document.getElementById('flowCount').textContent=(index+1)+' / '+steps.length;
+    document.getElementById('flowHeading').textContent=s.heading;
+    document.getElementById('flowSub').textContent=s.sub;
+    document.getElementById('flowNo').textContent=index+1;
+    document.getElementById('flowTitle').textContent=s.title;
+    document.getElementById('flowText').textContent=s.text;
+    document.getElementById('flowPulse').style.left=positions[index]+'%';
+    nodes.forEach((node,i)=>{
+      node.classList.toggle('active',i===index);
+      node.classList.toggle('done',i<index);
+    });
+    buttons.forEach((b,i)=>b.classList.toggle('active',i===index));
+    if(manual&&playing)restart();
+  }
+  function restart(){
+    clearInterval(timer);
+    if(playing)timer=setInterval(()=>render(index+1,false),5200);
+  }
+  document.getElementById('flowPrev').addEventListener('click',()=>render(index-1,true));
+  document.getElementById('flowNext').addEventListener('click',()=>render(index+1,true));
+  document.getElementById('flowPlay').addEventListener('click',e=>{
+    playing=!playing;
+    e.currentTarget.innerHTML=playing?'<svg viewBox="0 0 24 24" fill="none"><path d="M9 7v10M15 7v10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>':'<svg viewBox="0 0 24 24" fill="none"><path d="m9 7 8 5-8 5Z" fill="currentColor"/></svg>';
+    e.currentTarget.setAttribute('aria-label',playing?'暂停自动播放':'开始自动播放');
+    restart();
+  });
+  buttons.forEach(btn=>btn.addEventListener('click',()=>render(Number(btn.dataset.step),true)));
+
+  document.querySelectorAll('.flip-card button').forEach(btn=>btn.addEventListener('click',()=>{
+    btn.closest('.flip-card').classList.toggle('flipped');
+  }));
+
+  render(0,false);
+  restart();
+  document.addEventListener('visibilitychange',()=>document.hidden?clearInterval(timer):restart());
+})();
+</script>
+</body>
+</html>

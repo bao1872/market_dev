@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>自选管理｜盘迹使用说明</title>
+<meta name="description" content="通过真实页面动画演示学习加入自选、切换自选范围、搜索自选股票、查看右侧状态和移除自选。">
+<link rel="stylesheet" href="../assets/css/site.css">
+<style>
+  .article-wrap{--demo-green:#51e77d;--demo-red:#f47770;--demo-bg:#071015}
+  .watch-intro{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}
+  .watch-intro span{padding:7px 11px;border:1px solid rgba(81,231,125,.22);border-radius:999px;background:rgba(81,231,125,.07);color:#bdf3cc;font-size:12px}
+  .visual-section{margin-top:30px;scroll-margin-top:96px}
+  .visual-title{display:flex;align-items:end;justify-content:space-between;gap:20px;margin-bottom:14px}
+  .visual-title h2{margin:0;font-size:22px}
+  .visual-title p{margin:0;color:var(--muted);font-size:13px;line-height:1.6}
+  .demo-shell{overflow:hidden;border:1px solid #2a3944;border-radius:18px;background:#060d12;box-shadow:0 20px 60px rgba(0,0,0,.32)}
+  .demo-head{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 16px;border-bottom:1px solid #202d36;background:#0c151b}
+  .demo-progress{display:flex;align-items:center;gap:10px;min-width:0}
+  .demo-count{display:grid;place-items:center;min-width:34px;height:28px;padding:0 8px;border-radius:8px;background:rgba(81,231,125,.12);color:var(--demo-green);font-size:12px;font-weight:800}
+  .demo-title-wrap{min-width:0}
+  .demo-title-wrap strong{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:14px}
+  .demo-title-wrap span{display:block;margin-top:2px;color:#91a0a9;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .demo-controls{display:flex;gap:7px}
+  .demo-control{width:32px;height:32px;display:grid;place-items:center;border:1px solid #2b3944;border-radius:8px;background:#111b22;color:#d7e2e7}
+  .demo-control:hover{border-color:rgba(81,231,125,.5);color:var(--demo-green)}
+  .demo-viewport{position:relative;overflow:hidden;padding:14px;background:radial-gradient(circle at 80% 0,rgba(60,142,104,.12),transparent 32%),#060d12}
+  .mock-app{position:relative;display:grid;grid-template-columns:minmax(0,1fr) 0;min-height:470px;overflow:hidden;border:1px solid #263540;border-radius:14px;background:#0b1319;transition:grid-template-columns .45s ease}
+  .mock-app.panel-open{grid-template-columns:minmax(0,1fr) 272px}
+  .mock-main{min-width:0;overflow:hidden}
+  .mock-toolbar{display:grid;grid-template-columns:auto minmax(180px,1fr) 150px 138px;gap:8px;padding:10px;border-bottom:1px solid #24313b;background:#101920}
+  .scope-tabs{display:flex;padding:3px;border:1px solid #2a3944;border-radius:9px;background:#091117}
+  .scope-btn{min-width:52px;height:30px;border:0;border-radius:7px;background:transparent;color:#84939d;font-size:12px;transition:.25s}
+  .scope-btn.active{background:var(--demo-green);color:#07160d;font-weight:800;box-shadow:0 5px 14px rgba(81,231,125,.17)}
+  .mock-input,.mock-select{height:36px;display:flex;align-items:center;padding:0 11px;border:1px solid #2a3944;border-radius:8px;background:#0a1218;color:#8d9ca5;font-size:11px}
+  .mock-input .typing{color:#e6f0eb}
+  .mock-select::after{content:"⌄";margin-left:auto;color:#63727d}
+  .table-meta{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 10px;border-bottom:1px solid #222f39;background:#0d161c}
+  .result-meta{display:flex;gap:8px;align-items:center;color:#8898a1;font-size:10px}
+  .result-meta strong{color:#dbe5e9}
+  .meta-actions{display:flex;gap:5px}
+  .mini-btn{height:25px;padding:0 8px;border:1px solid #2a3944;border-radius:6px;background:#121c23;color:#9eabb3;font-size:9px}
+  .table-wrap{overflow:auto;background:#091117}
+  .mock-table{width:100%;min-width:690px;border-collapse:collapse;font-size:10px;color:#c5d0d6}
+  .mock-table th{height:36px;padding:0 8px;border-bottom:1px solid #2a3640;background:#111b22;color:#8f9fa8;text-align:left;font-weight:650;white-space:nowrap}
+  .mock-table td{height:50px;padding:0 8px;border-bottom:1px solid #1d2932;white-space:nowrap;transition:.25s}
+  .mock-table tbody tr{transition:opacity .42s,transform .42s,height .42s,background .25s}
+  .mock-table tbody tr:hover,.mock-table tbody tr.selected{background:rgba(81,231,125,.055)}
+  .mock-table tbody tr.filtered-out{opacity:.13}
+  .mock-table tbody tr.removing{opacity:0;transform:translateX(45px)}
+  .stock-cell{min-width:128px;position:sticky;left:0;background:#0c151b;z-index:1}
+  tr.selected .stock-cell{background:#102019}
+  .stock-name{display:inline-flex;align-items:center;gap:4px;color:#e7f1ed;font-size:11px;font-weight:760}
+  .stock-name .arrow{color:#54e47d}
+  .stock-code{display:block;margin-top:3px;color:#71808a;font-size:9px}
+  .up{color:#f47a72}.down{color:#47d38a}.flat{color:#9aa8b0}
+  .watch-btn{height:27px;padding:0 8px;border:1px solid rgba(81,231,125,.32);border-radius:6px;background:rgba(81,231,125,.07);color:#aaf0be;font-size:9px;min-width:62px}
+  .watch-btn.watched{border-color:#40505a;background:#131d24;color:#89979f}
+  .watch-btn.pending{color:#d9e6dd}
+  .right-panel{min-width:0;overflow:hidden;border-left:1px solid #293741;background:#0c151b;opacity:0;transform:translateX(18px);transition:.45s ease}
+  .panel-open .right-panel{opacity:1;transform:none}
+  .panel-head{display:flex;align-items:center;justify-content:space-between;height:39px;padding:0 11px;border-bottom:1px solid #25323c;color:#d9e4e8;font-size:11px;font-weight:700}
+  .panel-tabs{display:flex;gap:4px;padding:9px 9px 5px}
+  .panel-tab{height:23px;padding:0 7px;border:1px solid #293742;border-radius:5px;background:#101a21;color:#788893;font-size:8px}
+  .panel-tab.active{border-color:rgba(81,231,125,.38);color:#c7f5d3;background:rgba(81,231,125,.08)}
+  .chart-box{height:126px;margin:0 9px 9px;border:1px solid #22303a;border-radius:8px;background:#081116;overflow:hidden}
+  .facts{padding:0 9px 10px}
+  .fact-group{margin-top:7px;padding:8px;border:1px solid #22303a;border-radius:8px;background:#0e181e}
+  .fact-group h4{margin:0 0 6px;color:#8fa1aa;font-size:9px}
+  .fact-row{display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-top:1px solid #1d2a33;color:#74848e;font-size:8px}
+  .fact-row:first-of-type{border-top:0}.fact-row b{color:#d7e4df;font-weight:650}
+  .panel-toggle{position:absolute;right:4px;top:50%;z-index:4;width:24px;height:50px;display:grid;place-items:center;border:1px solid #2a3944;border-radius:8px 0 0 8px;background:#111c23;color:#88a097;font-size:18px;transition:right .45s}
+  .panel-open .panel-toggle{right:272px}
+  .toast-demo{position:absolute;z-index:10;right:18px;top:18px;min-width:150px;padding:11px 13px;border:1px solid rgba(81,231,125,.35);border-radius:10px;background:#102019;color:#dff6e6;font-size:11px;box-shadow:0 12px 35px rgba(0,0,0,.35);opacity:0;transform:translateY(-8px);transition:.28s}
+  .toast-demo.show{opacity:1;transform:none}
+  .empty-state{display:none;min-height:230px;place-items:center;color:#7f9099;font-size:12px}
+  .empty-state.show{display:grid}
+  .demo-focus{position:relative;z-index:6!important;box-shadow:0 0 0 2px var(--demo-green),0 0 0 7px rgba(81,231,125,.12)!important}
+  .demo-cursor{position:absolute;z-index:12;width:23px;height:28px;pointer-events:none;opacity:0;transform:translate(-3px,-2px);transition:left .72s cubic-bezier(.2,.8,.2,1),top .72s cubic-bezier(.2,.8,.2,1),opacity .2s}
+  .demo-cursor.visible{opacity:1}.demo-cursor svg{filter:drop-shadow(0 3px 5px rgba(0,0,0,.6))}
+  .click-ring{position:absolute;z-index:11;width:28px;height:28px;border:2px solid var(--demo-green);border-radius:50%;opacity:0;pointer-events:none}
+  .click-ring.pop{animation:ring .65s ease-out}
+  @keyframes ring{0%{opacity:.9;transform:scale(.35)}100%{opacity:0;transform:scale(1.8)}}
+  .demo-caption{display:grid;grid-template-columns:44px minmax(0,1fr);gap:12px;padding:14px 16px;border-top:1px solid #22313a;background:#0c151b}
+  .caption-no{width:40px;height:40px;display:grid;place-items:center;border-radius:11px;background:var(--demo-green);color:#06170d;font-weight:850}
+  .caption-copy strong{display:block;margin-bottom:4px;font-size:14px}
+  .caption-copy span{display:block;color:#91a0a9;font-size:12px;line-height:1.6}
+  .step-strip{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-top:10px}
+  .step-button{min-height:70px;padding:10px 8px;border:1px solid var(--border);border-radius:11px;background:var(--surface);color:var(--muted);text-align:left;font-size:10px;line-height:1.5;transition:.2s}
+  .step-button b{display:block;margin-bottom:4px;color:var(--soft);font-size:11px}
+  .step-button.active{border-color:rgba(81,231,125,.48);background:rgba(81,231,125,.08);color:#b5c5bc}
+  .step-button.active b{color:var(--demo-green)}
+  .interaction-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+  .interaction-card{padding:18px;border:1px solid var(--border);border-radius:14px;background:var(--surface)}
+  .interaction-card .mock-click{height:90px;display:grid;place-items:center;margin-bottom:13px;border:1px solid #2a3944;border-radius:10px;background:#091117}
+  .fake-row{width:84%;height:42px;display:grid;grid-template-columns:1fr 68px;align-items:center;padding:0 10px;border:1px solid #26343e;border-radius:7px;background:#101920;color:#99a8b0;font-size:10px}
+  .fake-name{color:#e5eeea;font-weight:750}.fake-action{height:24px;display:grid;place-items:center;border:1px solid rgba(81,231,125,.35);border-radius:5px;color:#a9efbd}
+  .interaction-card h3{margin:0 0 6px;font-size:15px}.interaction-card p{margin:0;color:var(--muted);font-size:12px;line-height:1.65}
+  .note-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+  .note-card{display:grid;grid-template-columns:40px 1fr;gap:13px;padding:18px;border:1px solid var(--border);border-radius:14px;background:var(--surface)}
+  .note-icon{width:40px;height:40px;display:grid;place-items:center;border-radius:11px;background:rgba(81,231,125,.08);color:var(--demo-green);font-weight:850}
+  .note-card h3{margin:0 0 6px;font-size:15px}.note-card p{margin:0;color:var(--muted);font-size:12px;line-height:1.7}
+  .boundary-compact{display:grid;grid-template-columns:auto 1fr;gap:14px;padding:18px;border:1px solid rgba(228,187,97,.37);border-radius:14px;background:rgba(228,187,97,.08)}
+  .boundary-icon{width:36px;height:36px;display:grid;place-items:center;border-radius:10px;background:rgba(228,187,97,.15);color:#ebcc87;font-weight:850}
+  .boundary-compact strong{display:block;margin-bottom:5px;color:#f0dba6}.boundary-compact p{margin:0;color:#c7b98f;font-size:12px;line-height:1.7}
+  .next-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+  .next-card{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:20px;border:1px solid var(--border);border-radius:14px;background:var(--surface)}
+  .next-card h3{margin:0 0 5px;font-size:16px}.next-card p{margin:0;color:var(--muted);font-size:12px;line-height:1.6}
+  @media(max-width:1180px){.step-strip{grid-template-columns:repeat(3,1fr)}}
+  @media(max-width:780px){
+    .visual-title{display:block}.visual-title p{margin-top:5px}
+    .demo-viewport{padding:8px;overflow:auto}
+    .mock-app,.mock-app.panel-open{grid-template-columns:minmax(710px,1fr) 0;min-height:455px;overflow:auto}
+    .mock-app.panel-open{grid-template-columns:minmax(710px,1fr) 250px}
+    .mock-toolbar{grid-template-columns:120px 190px 150px 140px}
+    .panel-open .panel-toggle{right:250px}
+    .interaction-grid,.note-grid,.next-grid{grid-template-columns:1fr}
+  }
+  @media(max-width:520px){
+    .demo-head{align-items:flex-start}.demo-title-wrap span{display:none}.demo-controls{flex-shrink:0}
+    .demo-caption{grid-template-columns:36px 1fr}.caption-no{width:34px;height:34px}
+    .step-strip{grid-template-columns:1fr 1fr}
+  }
+  @media(prefers-reduced-motion:reduce){
+    .demo-cursor{display:none}.mock-app,.right-panel,.scope-btn,.mock-table td,.mock-table tbody tr,.toast-demo{transition:none!important}
+  }
+</style>
+</head>
+<body data-page="watchlist" data-root="..">
+<header class="site-header">
+  <a class="brand" href="../index.html" aria-label="盘迹首页"><img class="brand-logo" src="../assets/images/logo_symbol_128.png" alt="" aria-hidden="true"><span class="brand-mark">盘迹</span></a>
+  <div class="search-wrap">
+    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="m20 20-4.5-4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    <input class="doc-search" type="search" placeholder="搜索文档、功能或问题" aria-label="搜索文档">
+    <div class="search-results"></div>
+  </div>
+  <div class="header-actions"><a class="btn" href="/market">返回系统</a><a class="btn btn-primary" href="/login">登录盘迹</a><button class="btn icon-btn" type="button" data-menu-toggle aria-expanded="false" aria-label="打开目录">☰</button></div>
+</header>
+<div class="mobile-backdrop"></div>
+
+<div class="docs-layout">
+<aside class="docs-sidebar" aria-label="文档目录">
+  <h2 class="sidebar-title">目录</h2>
+  <nav class="nav-list">
+    <a class="nav-item" href="../index.html"><span class="nav-icon">⌂</span><span>使用说明首页</span></a>
+    <a class="nav-item" href="../pages/quick-start.html"><span class="nav-icon">↗</span><span>快速开始</span></a>
+    <a class="nav-item" href="../pages/market.html"><span class="nav-icon">⌁</span><span>行情查看</span></a>
+    <a class="nav-item active" href="../pages/watchlist.html"><span class="nav-icon">★</span><span>自选管理</span></a>
+    <a class="nav-item" href="../pages/stock-detail.html"><span class="nav-icon">▥</span><span>个股详情</span></a>
+    <a class="nav-item" href="../pages/alerts.html"><span class="nav-icon">♢</span><span>提醒记录</span></a>
+    <a class="nav-item" href="../pages/messages.html"><span class="nav-icon">□</span><span>消息通知</span></a>
+    <a class="nav-item" href="../pages/data.html"><span class="nav-icon">◉</span><span>指标原理</span></a>
+    <a class="nav-item" href="../pages/faq.html"><span class="nav-icon">?</span><span>常见问题</span></a>
+    <a class="nav-item" href="../pages/boundaries.html"><span class="nav-icon">!</span><span>使用边界</span></a>
+    <a class="nav-item" href="../pages/customization.html"><span class="nav-icon">工</span><span>量化定制</span></a>
+  </nav>
+</aside>
+
+<main class="article-main">
+<article class="article-wrap">
+  <div class="breadcrumb">帮助中心 / <strong>自选管理</strong></div>
+  <h1 class="article-title">自选管理</h1>
+  <p class="article-lead">把自己决定持续观察的股票加入自选，并在自选范围中集中查看、快速观察或移除。</p>
+  <div class="watch-intro"><span>个人观察列表</span><span>5 个核心动作</span><span>加入与移除即时生效</span><span>脱敏示例数据</span></div>
+
+  <section class="visual-section" id="demo">
+    <div class="visual-title"><h2>一分钟看懂自选管理</h2><p>自动播放完整操作闭环，也可以点击下方步骤单独查看。</p></div>
+    <div class="demo-shell">
+      <div class="demo-head">
+        <div class="demo-progress">
+          <span class="demo-count" id="demoCount">1 / 5</span>
+          <div class="demo-title-wrap"><strong id="demoHeading">加入自选</strong><span id="demoSubheading">从行情结果中加入自己决定继续观察的股票。</span></div>
+        </div>
+        <div class="demo-controls">
+          <button class="demo-control" id="demoPrev" type="button" aria-label="上一步">‹</button>
+          <button class="demo-control" id="demoPlay" type="button" aria-label="暂停自动播放">Ⅱ</button>
+          <button class="demo-control" id="demoNext" type="button" aria-label="下一步">›</button>
+        </div>
+      </div>
+
+      <div class="demo-viewport" id="demoViewport">
+        <div class="mock-app" id="mockApp">
+          <section class="mock-main">
+            <div class="mock-toolbar">
+              <div class="scope-tabs">
+                <button class="scope-btn" id="scopeWatch" type="button">自选</button>
+                <button class="scope-btn active" id="scopeMarket" type="button">行情</button>
+              </div>
+              <div class="mock-input" id="searchTarget"><span class="typing" id="typingText">搜索股票代码/名称/拼音首字母</span></div>
+              <div class="mock-select"><span>搜索行业关键词</span></div>
+              <div class="mock-select"><span>概念</span></div>
+            </div>
+
+            <div class="table-meta">
+              <div class="result-meta"><strong id="resultCount">结果 286</strong><span id="activeState">行情范围</span></div>
+              <div class="meta-actions"><button class="mini-btn">常用查看</button><button class="mini-btn">列设置</button><button class="mini-btn">清除排序与筛选</button></div>
+            </div>
+
+            <div class="table-wrap" id="tableWrap">
+              <table class="mock-table">
+                <thead><tr><th class="stock-cell">股票</th><th>当日涨跌幅</th><th>当前趋势</th><th>本轮趋势涨跌</th><th>当前强弱位置</th><th>自选</th></tr></thead>
+                <tbody>
+                  <tr id="techRow">
+                    <td class="stock-cell"><span class="stock-name">示例科技 <span class="arrow">›</span></span><span class="stock-code">000001 · 深市</span></td>
+                    <td class="up">+2.46%</td><td class="up">上涨 8天</td><td class="up">+12.30%</td><td>78%</td>
+                    <td><button class="watch-btn" id="addTarget" type="button">加入自选</button></td>
+                  </tr>
+                  <tr id="rowTarget">
+                    <td class="stock-cell"><span class="stock-name">示例制造 <span class="arrow">›</span></span><span class="stock-code">600002 · 沪市</span></td>
+                    <td class="up">+1.15%</td><td class="up">上涨 5天</td><td class="up">+7.80%</td><td>64%</td>
+                    <td><button class="watch-btn watched" id="removeTarget" type="button">移除自选</button></td>
+                  </tr>
+                  <tr id="energyRow">
+                    <td class="stock-cell"><span class="stock-name">示例能源 <span class="arrow">›</span></span><span class="stock-code">300003 · 深市</span></td>
+                    <td class="down">-0.82%</td><td class="flat">方向未形成</td><td class="flat">+0.90%</td><td>47%</td>
+                    <td><button class="watch-btn watched" type="button">移除自选</button></td>
+                  </tr>
+                  <tr id="electronicRow">
+                    <td class="stock-cell"><span class="stock-name">示例电子 <span class="arrow">›</span></span><span class="stock-code">688004 · 沪市</span></td>
+                    <td class="down">-2.10%</td><td class="down">下跌 4天</td><td class="down">-6.40%</td><td>29%</td>
+                    <td><button class="watch-btn watched" type="button">移除自选</button></td>
+                  </tr>
+                </tbody>
+              </table>
+              <div class="empty-state" id="emptyState">当前自选列表为空</div>
+            </div>
+          </section>
+
+          <aside class="right-panel">
+            <div class="panel-head"><span>事件与状态</span><span>›</span></div>
+            <div class="panel-tabs"><button class="panel-tab">15m</button><button class="panel-tab">60m</button><button class="panel-tab active">日</button><button class="panel-tab">周</button><button class="panel-tab">月</button></div>
+            <div class="chart-box">
+              <svg viewBox="0 0 260 126" width="100%" height="100%" aria-label="示例走势">
+                <defs><linearGradient id="areaWatch" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4fe27b" stop-opacity=".28"/><stop offset="1" stop-color="#4fe27b" stop-opacity="0"/></linearGradient></defs>
+                <g stroke="#1b2a32" stroke-width="1"><path d="M0 25H260M0 63H260M0 101H260"/><path d="M52 0V126M104 0V126M156 0V126M208 0V126"/></g>
+                <path d="M8 104 C28 99 30 91 48 94 S74 78 92 80 S116 59 132 64 S159 43 176 48 S202 32 220 36 S239 20 252 23 L252 126 L8 126Z" fill="url(#areaWatch)"/>
+                <path d="M8 104 C28 99 30 91 48 94 S74 78 92 80 S116 59 132 64 S159 43 176 48 S202 32 220 36 S239 20 252 23" fill="none" stroke="#56e680" stroke-width="2.2"/>
+              </svg>
+            </div>
+            <div class="facts">
+              <section class="fact-group"><h4>趋势运行</h4><div class="fact-row"><span>持续时间</span><b>上涨 5天</b></div><div class="fact-row"><span>参考位置</span><b>高于参考价</b></div></section>
+              <section class="fact-group"><h4>结构位置</h4><div class="fact-row"><span>当前位置</span><b>中间区域</b></div><div class="fact-row"><span>最近交易日</span><b>无状态变化</b></div></section>
+              <section class="fact-group"><h4>成交参与</h4><div class="fact-row"><span>参与程度</span><b>正常</b></div></section>
+            </div>
+          </aside>
+          <button class="panel-toggle" id="panelToggle" type="button" aria-label="展开右侧面板">‹</button>
+          <div class="toast-demo" id="toastDemo">已加入自选</div>
+        </div>
+
+        <div class="demo-cursor" id="demoCursor" aria-hidden="true">
+          <svg width="24" height="29" viewBox="0 0 24 29"><path d="M2 1 20 18l-8 1 4 8-4 2-4-8-6 6Z" fill="#f4fbf6" stroke="#06130b" stroke-width="1.5"/></svg>
+        </div>
+        <div class="click-ring" id="clickRing" aria-hidden="true"></div>
+      </div>
+
+      <div class="demo-caption">
+        <div class="caption-no" id="captionNo">1</div>
+        <div class="caption-copy"><strong id="captionTitle">加入个人观察列表</strong><span id="captionText">点击“加入自选”，该股票会进入当前账号的自选范围。</span></div>
+      </div>
+    </div>
+
+    <div class="step-strip">
+      <button class="step-button active" data-step="0" type="button"><b>1 加入自选</b>从行情加入</button>
+      <button class="step-button" data-step="1" type="button"><b>2 切换范围</b>集中查看自选</button>
+      <button class="step-button" data-step="2" type="button"><b>3 搜索自选</b>快速找到股票</button>
+      <button class="step-button" data-step="3" type="button"><b>4 右侧观察</b>点击行内空白</button>
+      <button class="step-button" data-step="4" type="button"><b>5 移除自选</b>停止持续观察</button>
+    </div>
+  </section>
+
+  <section class="visual-section" id="clicks">
+    <div class="visual-title"><h2>点击不同位置，会发生什么</h2><p>三个按钮的作用互不相同。</p></div>
+    <div class="interaction-grid">
+      <article class="interaction-card"><div class="mock-click"><div class="fake-row"><span class="fake-name">股票名称 ›</span><span></span></div></div><h3>点击股票名称</h3><p>进入完整个股详情页面。</p></article>
+      <article class="interaction-card"><div class="mock-click"><div class="fake-row"><span>行内其他区域</span><span></span></div></div><h3>点击行内其他区域</h3><p>选中股票，并更新右侧简要走势和状态。</p></article>
+      <article class="interaction-card"><div class="mock-click"><div class="fake-row"><span>示例股票</span><span class="fake-action">移除自选</span></div></div><h3>点击自选按钮</h3><p>只执行加入或移除，不会打开详情。</p></article>
+    </div>
+  </section>
+
+  <section class="visual-section" id="limits">
+    <div class="visual-title"><h2>自选数量与监控</h2><p>以当前账号的实际权限和系统状态为准。</p></div>
+    <div class="note-grid">
+      <article class="note-card"><div class="note-icon">#</div><div><h3>自选数量</h3><p>当前账号可以添加的自选数量由账号权限决定。达到上限后，可以先移除不再观察的股票；对权限有疑问时联系管理员。</p></div></article>
+      <article class="note-card"><div class="note-icon">◎</div><div><h3>相关监控</h3><p>加入自选后，系统会按照当前账号权限处理相关监控。当前页面没有单独的手动监控开关，是否启用以账号权限和系统状态为准。</p></div></article>
+    </div>
+  </section>
+
+  <section class="visual-section" id="faq">
+    <div class="visual-title"><h2>常见问题</h2><p>只保留自选管理中最常遇到的问题。</p></div>
+    <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>为什么刚移除股票，整行就消失了？</span><span>⌄</span></button><div class="faq-answer">当前正在查看自选范围。移除成功后，该股票不再属于自选，因此会立即从列表中消失。</div></div>
+    <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>为什么不能继续加入自选？</span><span>⌄</span></button><div class="faq-answer">当前账号可能已经达到可用数量上限，也可能没有自选管理权限。请先检查现有自选或联系管理员。</div></div>
+    <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>为什么点击股票后没有进入详情？</span><span>⌄</span></button><div class="faq-answer">只有点击股票名称才会进入详情。点击行内其他区域只会更新右侧状态面板。</div></div>
+    <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>为什么右侧没有内容？</span><span>⌄</span></button><div class="faq-answer">请确认已经展开右侧面板并选中一只股票。当前周期无可用数据时，也可能显示暂无数据。</div></div>
+  </section>
+
+  <section class="visual-section" id="boundary">
+    <div class="boundary-compact"><div class="boundary-icon">!</div><div><strong>自选是使用者本人建立的观察列表</strong><p>加入自选不代表平台推荐，也不表示相应股票未来会上涨或下跌。</p></div></div>
+  </section>
+
+  <section class="visual-section" id="next">
+    <div class="visual-title"><h2>继续了解盘迹</h2><p>完成自选管理后，可以继续查看详细数据和变化记录。</p></div>
+    <div class="next-grid">
+      <article class="next-card"><div><h3>个股详情</h3><p>查看完整走势、数据字段和状态信息。</p></div><a class="btn btn-primary" href="../pages/stock-detail.html">查看说明</a></article>
+      <article class="next-card"><div><h3>提醒记录</h3><p>了解相关数据变化如何记录和展示。</p></div><a class="btn" href="../pages/alerts.html">查看说明</a></article>
+    </div>
+  </section>
+</article>
+</main>
+
+<aside class="right-rail" aria-label="本页辅助信息">
+  <section class="rail-card"><h3>本页目录</h3><nav class="rail-list">
+    <a class="rail-link active" data-anchor href="#demo">一分钟看懂</a>
+    <a class="rail-link" data-anchor href="#clicks">点击位置</a>
+    <a class="rail-link" data-anchor href="#limits">数量与监控</a>
+    <a class="rail-link" data-anchor href="#faq">常见问题</a>
+    <a class="rail-link" data-anchor href="#boundary">使用边界</a>
+    <a class="rail-link" data-anchor href="#next">下一步</a>
+  </nav></section>
+  <section class="rail-card"><h3>更新时间</h3><div class="update-date">2026年7月21日</div></section>
+  <section class="rail-card"><h3>相关教程</h3><nav class="rail-list">
+    <a class="rail-link" href="../pages/market.html">行情查看</a>
+    <a class="rail-link" href="../pages/stock-detail.html">个股详情</a>
+    <a class="rail-link" href="../pages/alerts.html">提醒记录</a>
+  </nav></section>
+</aside>
+</div>
+
+<footer class="site-footer">
+  <div class="footer-inner">
+    <div>
+      <h2 class="footer-heading">联系管理员</h2>
+      <p class="footer-copy">如遇到账号、权限、邀请码、系统使用或数据问题，请通过微信联系管理员。</p>
+      <nav class="footer-links"><a href="../pages/faq.html">常见问题</a><a href="../pages/data.html">指标原理</a><a href="../pages/boundaries.html">使用边界</a></nav>
+    </div>
+    <figure class="footer-qr"><img src="../assets/images/wechat-qr-placeholder.svg" alt="管理员微信二维码占位图"><figcaption>微信联系管理员<br>添加时请备注来意</figcaption></figure>
+  </div>
+  <div class="footer-bottom">盘迹使用说明中心</div>
+</footer>
+
+<script src="../assets/js/site.js"></script>
+<script>
+(function(){
+  const steps=[
+    {heading:'加入自选',sub:'从行情结果中加入自己决定继续观察的股票。',title:'加入个人观察列表',text:'点击“加入自选”，该股票会进入当前账号的自选范围。',target:'addTarget',action:'add'},
+    {heading:'切换到自选范围',sub:'集中查看当前账号已经加入的股票。',title:'统一查看正在观察的股票',text:'点击顶部“自选”，列表只保留当前账号的自选股票。',target:'scopeWatch',action:'scope'},
+    {heading:'在自选中搜索',sub:'自选较多时，用代码、名称或拼音快速查找。',title:'快速找到一只自选股票',text:'输入关键词后提交；清空搜索框即可恢复完整自选列表。',target:'searchTarget',action:'search'},
+    {heading:'快速查看右侧状态',sub:'点击行内空白区域，不会离开当前列表。',title:'不离开列表快速观察',text:'右侧显示五个时间范围的简要走势，以及趋势、结构和成交状态。',target:'rowTarget',action:'panel'},
+    {heading:'移除自选',sub:'不再持续观察时，从自选范围中移除。',title:'移除后当前行会消失',text:'在自选范围中移除成功后，该股票会立即从列表中消失。',target:'removeTarget',action:'remove'}
+  ];
+  let current=0,playing=true,timer=null,actionTimer=null,toastTimer=null,typeTimer=null;
+  const viewport=document.getElementById('demoViewport');
+  const app=document.getElementById('mockApp');
+  const cursor=document.getElementById('demoCursor');
+  const ring=document.getElementById('clickRing');
+  const playBtn=document.getElementById('demoPlay');
+  const buttons=[...document.querySelectorAll('.step-button')];
+  const reduced=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function clearTimers(){
+    [actionTimer,toastTimer].forEach(t=>t&&clearTimeout(t));
+    if(typeTimer) clearInterval(typeTimer);
+    actionTimer=toastTimer=typeTimer=null;
+  }
+  function setScope(scope){
+    const watch=document.getElementById('scopeWatch'),market=document.getElementById('scopeMarket');
+    watch.classList.toggle('active',scope==='watch');
+    market.classList.toggle('active',scope==='market');
+    document.getElementById('activeState').textContent=scope==='watch'?'自选范围':'行情范围';
+    document.getElementById('resultCount').textContent=scope==='watch'?'结果 4':'结果 286';
+  }
+  function showToast(text){
+    const toast=document.getElementById('toastDemo');
+    toast.textContent=text;toast.classList.add('show');
+    toastTimer=setTimeout(()=>toast.classList.remove('show'),1500);
+  }
+  function resetRows(){
+    ['techRow','rowTarget','energyRow','electronicRow'].forEach(id=>{
+      const r=document.getElementById(id);r.style.display='';r.classList.remove('filtered-out','removing','selected');
+    });
+  }
+  function clearDemo(){
+    clearTimers();
+    document.querySelectorAll('.demo-focus').forEach(el=>el.classList.remove('demo-focus'));
+    resetRows();setScope('market');app.classList.remove('panel-open');
+    document.getElementById('typingText').textContent='搜索股票代码/名称/拼音首字母';
+    const add=document.getElementById('addTarget');add.textContent='加入自选';add.className='watch-btn';
+    const remove=document.getElementById('removeTarget');remove.textContent='移除自选';remove.className='watch-btn watched';
+    document.getElementById('toastDemo').classList.remove('show');
+  }
+  function moveCursor(target){
+    if(reduced||!target)return;
+    const vr=viewport.getBoundingClientRect(),tr=target.getBoundingClientRect();
+    const left=tr.left-vr.left+tr.width*.58,top=tr.top-vr.top+tr.height*.56;
+    cursor.style.left=left+'px';cursor.style.top=top+'px';
+    ring.style.left=(left-4)+'px';ring.style.top=(top-3)+'px';cursor.classList.add('visible');
+    setTimeout(()=>{ring.classList.remove('pop');void ring.offsetWidth;ring.classList.add('pop')},720);
+  }
+  function typeText(text,done){
+    const el=document.getElementById('typingText');el.textContent='';let i=0;
+    typeTimer=setInterval(()=>{el.textContent=text.slice(0,++i);if(i>=text.length){clearInterval(typeTimer);typeTimer=null;done&&done()}},90);
+  }
+  function prepareFor(step){
+    if(step.action!=='add'){
+      const add=document.getElementById('addTarget');add.textContent='移除自选';add.className='watch-btn watched';
+    }
+    if(['scope','search','panel','remove'].includes(step.action)) setScope('watch');
+  }
+  function runAction(step){
+    prepareFor(step);
+    const target=document.getElementById(step.target);target&&target.classList.add('demo-focus');
+    requestAnimationFrame(()=>moveCursor(target));
+    actionTimer=setTimeout(()=>{
+      if(step.action==='add'){
+        const b=document.getElementById('addTarget');b.textContent='…';b.classList.add('pending');
+        setTimeout(()=>{b.textContent='移除自选';b.className='watch-btn watched';showToast('已加入自选')},600);
+      }
+      if(step.action==='scope'){
+        setScope('watch');showToast('已切换到自选');
+      }
+      if(step.action==='search'){
+        typeText('示例科技',()=>{
+          ['rowTarget','energyRow','electronicRow'].forEach(id=>document.getElementById(id).classList.add('filtered-out'));
+          document.getElementById('resultCount').textContent='结果 1';
+          document.getElementById('activeState').textContent='自选 · 全文搜索';
+        });
+      }
+      if(step.action==='panel'){
+        document.getElementById('rowTarget').classList.add('selected');app.classList.add('panel-open');
+      }
+      if(step.action==='remove'){
+        const b=document.getElementById('removeTarget');b.textContent='…';b.classList.add('pending');
+        setTimeout(()=>{
+          const row=document.getElementById('rowTarget');row.classList.add('removing');showToast('已移除自选');
+          setTimeout(()=>{row.style.display='none';document.getElementById('resultCount').textContent='结果 3'},480);
+        },550);
+      }
+    },reduced?0:1000);
+  }
+  function showStep(index,fromUser){
+    current=(index+steps.length)%steps.length;clearDemo();
+    const s=steps[current];
+    document.getElementById('demoCount').textContent=(current+1)+' / '+steps.length;
+    document.getElementById('demoHeading').textContent=s.heading;
+    document.getElementById('demoSubheading').textContent=s.sub;
+    document.getElementById('captionNo').textContent=current+1;
+    document.getElementById('captionTitle').textContent=s.title;
+    document.getElementById('captionText').textContent=s.text;
+    buttons.forEach((b,i)=>b.classList.toggle('active',i===current));
+    setTimeout(()=>runAction(s),180);
+    if(fromUser&&playing)restart();
+  }
+  function restart(){
+    clearInterval(timer);
+    if(playing&&!reduced)timer=setInterval(()=>showStep(current+1,false),5600);
+  }
+  document.getElementById('demoPrev').addEventListener('click',()=>showStep(current-1,true));
+  document.getElementById('demoNext').addEventListener('click',()=>showStep(current+1,true));
+  playBtn.addEventListener('click',()=>{playing=!playing;playBtn.textContent=playing?'Ⅱ':'▶';playBtn.setAttribute('aria-label',playing?'暂停自动播放':'开始自动播放');restart()});
+  buttons.forEach(b=>b.addEventListener('click',()=>showStep(Number(b.dataset.step),true)));
+  document.getElementById('panelToggle').addEventListener('click',()=>app.classList.toggle('panel-open'));
+  showStep(0,false);restart();
+  document.addEventListener('visibilitychange',()=>document.hidden?clearInterval(timer):restart());
+})();
+</script>
+</body>
+</html>

@@ -19,7 +19,7 @@ Node Cluster 算法
 
 | 路由 | 守卫 | 壳层 | 页面 |
 |---|---|---|---|
-| `/` | Public | — | 门户 |
+| `/` | Public | — | 门户（静态，Nginx 精确分流 `/portal/index.html`，不进入 React SPA；详见 §2.5） |
 | `/login` | Public | — | 登录/注册 |
 | `/subscription-expired` | Authenticated | — | 续期 |
 | `/membership-expired` | Redirect | — | 兼容跳转 |
@@ -100,6 +100,25 @@ Node Cluster 算法
 - `AccountMenu` 复用 `appNavigation.getAccountMenuItemsForVariant(isAdmin, variant)` 单一真源构建菜单项；消息项动态化（CHANGE-20260713-005）：`unread>0` 时菜单链接为 `/messages?filter=unread`，否则为 `/messages`；消息项右侧显示未读数 badge（`>99` 显示 `99+`），数据来自 `useUnreadCount`。
 - 研究上下文纯函数：`buildStructureSummary`（`frontend/src/features/research-context/buildStructureSummary.ts`）从 `primary[timeframe].cost_position` 等真实 DTO 路径提取结构状态摘要（合并 degraded_reasons/warmup_notes、日线/15m 摘要、成本位置/节点）；`buildUserEventExplanation`（`frontend/src/features/research-context/buildUserEventExplanation.ts`）只消费白名单字段（event_time/event_type/payload.facts[].text_content/summary）并校验 `event.instrument_id` 与 `currentInstrumentId` 一致性（不一致时隐藏价格，显示"该事件属于其他股票"）。两个纯函数无 React 依赖，可被 `node --test` 直接运行。
 - **板块筛选已恢复（CHANGE-20260713-006）**：`/market` DSA 列表支持行业/概念筛选，数据源仍为 published DSA run（`usePublishedRuns` + `useStrategyRunResults`），禁止同时请求 `/market/stocks` 拼接结果；`MarketToolbar` 渲染"搜索、行业、概念"同一行布局；`MarketStockTable` 已删除，由 `StrategyDataTable` + `getTrendSelectionColumns` 替代；`/market/boards` API 提供板块目录，`boards.available=false` 时行业/概念输入禁用但显示（placeholder "板块数据暂不可用"）；后端通过共享 `board_filter_helper.build_board_filter_conditions` 构造 EXISTS 子查询，`strategy_result_repository` 和 `market_stocks_service` 共用；industry+concept 同时提供时为 AND 语义。
+
+### 2.5 公开静态门户（CHANGE-20260723-006）
+
+- **架构**：Vite `public/portal/` 静态门户 + Nginx 根路径精确分流 + React 兜底。`/` 由 Nginx `location = /` 精确匹配直接返回 `/portal/index.html`，**不进入 React SPA**；地址栏保持 `/`。业务路由（`/login`、`/market`、`/stock/:symbol`、`/capture/stock/:symbol`、`/messages`、`/settings`、`/admin/*`、`/api/*`）全部保留原 SPA fallback `try_files $uri $uri/ /index.html` 行为。
+- **门户文件清单**（11 个 HTML，纯静态 HTML/CSS/JS，无 React）：
+  - `index.html`（使用说明首页）
+  - `pages/quick-start.html`（快速开始）/ `pages/market.html`（行情查看）/ `pages/watchlist.html`（自选管理）/ `pages/stock-detail.html`（个股详情）/ `pages/alerts.html`（提醒记录）/ `pages/messages.html`（消息通知）/ `pages/data.html`（指标原理）/ `pages/faq.html`（常见问题）/ `pages/boundaries.html`（使用边界）/ `pages/customization.html`（量化定制）
+  - `assets/css/site.css` + `assets/js/site.js`（搜索、菜单、FAQ 折叠、定制摘要生成 + clipboard 复制 fallback）
+  - `assets/data/factors.public.{json,js}`（公开因子目录：240 个，verified_current_core=24，extended_catalog=216，15 个 categories，ID 唯一；JS 挂载到 `window.PANJI_FACTOR_CATALOG`）
+  - `assets/images/logo_symbol_128.png` + `assets/images/wechat-qr-placeholder.svg`
+  - `content/site.json`（站点配置）+ `SOURCE.md`（zip 来源 + SHA256 + 版本 0.5.1）
+- **Nginx 路由**（4 条新规则，no-cache；保留 `/api/`、`/api/v1/health`、`/index.html`、`/assets/`、SPA fallback、resolver、WebSocket headers 不变）：
+  - `location = /` → `try_files /portal/index.html =404`（精确匹配，优先级高于 `location /` 前缀）
+  - `location = /portal/index.html` → no-cache
+  - `location ~ ^/portal/pages/.*\.html$` → no-cache
+  - `location /portal/` → 静态资源正常访问
+- **LandingPage 兜底**（`frontend/src/pages/LandingPage/LandingPage.tsx`）：仅处理 SPA 内部导航到 `/` 的场景，mount 后 `window.location.replace('/')` 让浏览器重新请求 `/` 由 Nginx 返回静态门户首页；不使用 react-router `Navigate`（Navigate 只在 SPA 内切换，无法离开 SPA 进入静态 HTML）。
+- **删除的旧门户组件**：`components/landing/*`（FeishuNotificationDemo/HeroMarketDemo/LandingFooter/LegalModal/OpportunityWorkflow/PricingSection）、`components/BetaApplicationModal.{tsx,scss}`、`pages/LandingPage/{LandingPage.module.scss,hooks/*,landingData.ts}`（共 ~2797 行删除）。旧 BetaApplicationModal 未通过管理员 active `feishu_platform_app` NotificationChannel（违反 AGENTS.md §七.6），由 `/admin/beta-applications` 后台处理替代。
+- **公开因子目录 vs 生产 Core 14 边界**：`factors.public.json` 的 `verified_current_core=24` 是面向用户的公开目录口径，**与生产 AFC V1 Core 14 口径不同**（公开目录覆盖更广）；边界在 `pages/data.html` / `pages/customization.html` 文案中明确。
 
 ## 3. 页面职责
 

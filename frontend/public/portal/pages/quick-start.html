@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>快速开始｜盘迹使用说明</title>
+  <meta name="description" content="本页适用于已经获得邀请码的成员，帮助完成邀请注册、首次登录、认识页面结构并完成一次基本使用流程。">
+  <link rel="stylesheet" href="../assets/css/site.css">
+  <style>
+    .quick-summary{
+      display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;
+      margin-top:24px;padding:16px;border:1px solid var(--border);border-radius:var(--radius);
+      background:linear-gradient(135deg,rgba(80,227,125,.07),transparent 54%),var(--surface)
+    }
+    .quick-summary-item{position:relative;padding:14px 14px 14px 48px;border-radius:11px;background:rgba(255,255,255,.018)}
+    .quick-summary-item:not(:last-child)::after{content:"";position:absolute;right:-7px;top:50%;width:14px;height:1px;background:var(--border-strong)}
+    .quick-summary-no{position:absolute;left:13px;top:13px;width:25px;height:25px;display:grid;place-items:center;border-radius:8px;background:var(--accent);color:#05220f;font-size:12px;font-weight:850}
+    .quick-summary-item strong{display:block;margin-bottom:4px;font-size:13px}.quick-summary-item span{display:block;color:var(--muted);font-size:11px;line-height:1.5}
+    .prep-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+    .prep-card{padding:20px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface)}
+    .prep-card-head{display:flex;align-items:center;gap:11px;margin-bottom:10px}.prep-icon{width:36px;height:36px;display:grid;place-items:center;border:1px solid rgba(80,227,125,.22);border-radius:11px;background:var(--accent-soft);color:var(--accent);font-weight:800}
+    .prep-card h3{margin:0;font-size:16px}.prep-card p{margin:0;color:var(--muted);font-size:13px;line-height:1.75}
+    .issue-panel{display:grid;grid-template-columns:minmax(0,1fr) minmax(250px,.55fr);gap:14px}
+    .issue-list,.contact-note{padding:20px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface)}
+    .issue-row{display:grid;grid-template-columns:120px minmax(0,1fr);gap:14px;padding:13px 0;border-top:1px solid var(--border)}
+    .issue-row:first-child{padding-top:0;border-top:0}.issue-row strong{font-size:13px}.issue-row span{color:var(--muted);font-size:13px;line-height:1.65}
+    .contact-note{border-color:rgba(227,186,96,.38);background:rgba(227,186,96,.08)}.contact-note h3{margin:0 0 9px;color:#f1db9f;font-size:16px}.contact-note p{margin:0;color:#dfcca0;font-size:13px;line-height:1.75}
+    .page-map{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+    .page-map-card{padding:19px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface)}
+    .page-map-title{display:flex;align-items:center;gap:10px;margin-bottom:8px}.page-map-title span{width:33px;height:33px;display:grid;place-items:center;border-radius:10px;background:var(--accent-soft);color:var(--accent);font-weight:800}
+    .page-map-card h3{margin:0;font-size:16px}.page-map-card p{margin:0;color:var(--muted);font-size:13px;line-height:1.7}
+    .workflow-note{margin-top:8px;padding-left:58px;color:var(--soft);font-size:12px;line-height:1.65}
+    .permission-table-wrap{overflow:auto;border-radius:var(--radius)}
+    .permission-table{min-width:720px}
+    .tips-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+    .tip-card{padding:18px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface)}
+    .tip-card strong{display:block;margin-bottom:7px;color:var(--accent);font-size:13px}.tip-card p{margin:0;color:var(--muted);font-size:13px;line-height:1.7}
+    .boundary-box{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;padding:16px;border:1px solid rgba(227,186,96,.36);border-radius:var(--radius);background:rgba(227,186,96,.07)}
+    .boundary-item{padding:13px;border:1px solid rgba(227,186,96,.16);border-radius:11px;background:rgba(0,0,0,.1)}
+    .boundary-item strong{display:block;margin-bottom:5px;color:#f0dca7;font-size:13px}.boundary-item span{color:#cbbd98;font-size:12px;line-height:1.65}
+    .next-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.next-card{display:flex;flex-direction:column;min-height:150px;padding:17px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);transition:.18s ease}.next-card:hover{transform:translateY(-2px);border-color:rgba(80,227,125,.34)}.next-card h3{margin:0 0 8px;font-size:15px}.next-card p{flex:1;margin:0;color:var(--muted);font-size:12px;line-height:1.65}.next-card span{margin-top:13px;color:var(--accent);font-size:12px;font-weight:700}
+    @media(max-width:1180px){.quick-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.quick-summary-item::after{display:none}.next-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+    @media(max-width:680px){.quick-summary,.prep-grid,.issue-panel,.page-map,.tips-grid,.boundary-box,.next-grid{grid-template-columns:1fr}.issue-row{grid-template-columns:1fr;gap:5px}.workflow-note{padding-left:0}.quick-summary{padding:12px}}
+  </style>
+</head>
+<body data-page="start" data-root="..">
+<header class="site-header">
+  <a class="brand" href="../index.html" aria-label="盘迹首页"><img class="brand-logo" src="../assets/images/logo_symbol_128.png" alt="" aria-hidden="true"><span class="brand-mark">盘迹</span></a>
+  <div class="search-wrap">
+    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="m20 20-4.5-4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    <input class="doc-search" type="search" placeholder="搜索文档、功能或问题" aria-label="搜索文档">
+    <div class="search-results"></div>
+  </div>
+  <div class="header-actions">
+    <a class="btn" href="/market">返回系统</a>
+    <a class="btn btn-primary" href="/login">登录盘迹</a>
+    <button class="btn icon-btn" type="button" data-menu-toggle aria-expanded="false" aria-label="打开目录">☰</button>
+  </div>
+</header>
+<div class="mobile-backdrop"></div>
+
+<div class="docs-layout">
+  <aside class="docs-sidebar" aria-label="文档目录">
+    <h2 class="sidebar-title">目录</h2>
+    <nav class="nav-list">
+      <a class="nav-item" href="../index.html"><span class="nav-icon">⌂</span><span>使用说明首页</span></a>
+      <a class="nav-item active" href="quick-start.html"><span class="nav-icon">↗</span><span>快速开始</span></a>
+      <a class="nav-item" href="market.html"><span class="nav-icon">⌁</span><span>行情查看</span></a>
+      <a class="nav-item" href="watchlist.html"><span class="nav-icon">★</span><span>自选管理</span></a>
+      <a class="nav-item" href="stock-detail.html"><span class="nav-icon">▥</span><span>个股详情</span></a>
+      <a class="nav-item" href="alerts.html"><span class="nav-icon">♢</span><span>提醒记录</span></a>
+      <a class="nav-item" href="messages.html"><span class="nav-icon">□</span><span>消息通知</span></a>
+      <a class="nav-item" href="data.html"><span class="nav-icon">◉</span><span>指标原理</span></a>
+      <a class="nav-item" href="faq.html"><span class="nav-icon">?</span><span>常见问题</span></a>
+      <a class="nav-item" href="boundaries.html"><span class="nav-icon">!</span><span>使用边界</span></a>
+    <a class="nav-item" href="../pages/customization.html"><span class="nav-icon">工</span><span>量化定制</span></a>
+    </nav>
+  </aside>
+
+  <main class="article-main">
+    <article class="article-wrap">
+      <div class="breadcrumb">帮助中心 / <strong>快速开始</strong></div>
+      <h1 class="article-title">快速开始</h1>
+      <p class="article-lead">本页帮助第一次使用盘迹的成员完成邀请码注册、首次登录，并了解行情查看、自选管理、个股详情和提醒记录的基本操作。不同账号可以使用的功能可能不同，具体以管理员分配的权限为准。</p>
+
+      <div class="quick-summary" aria-label="快速开始流程概览">
+        <div class="quick-summary-item"><span class="quick-summary-no">1</span><strong>准备邀请码</strong><span>确认地址、邀请码和注册信息。</span></div>
+        <div class="quick-summary-item"><span class="quick-summary-no">2</span><strong>完成注册</strong><span>设置账号密码并提交注册。</span></div>
+        <div class="quick-summary-item"><span class="quick-summary-no">3</span><strong>首次登录</strong><span>检查账号、权限和基础设置。</span></div>
+        <div class="quick-summary-item"><span class="quick-summary-no">4</span><strong>完成基本操作</strong><span>查找、查看、加入自选和查看记录。</span></div>
+      </div>
+
+      <section class="article-section" id="prepare">
+        <h2 class="section-heading">开始使用前，请先确认</h2>
+        <div class="prep-grid">
+          <article class="prep-card"><div class="prep-card-head"><span class="prep-icon">码</span><h3>邀请码</h3></div><p>准备好管理员提供的邀请码。邀请码可能存在有效期、使用次数或指定权限，请在管理员说明的期限内完成注册。</p></article>
+          <article class="prep-card"><div class="prep-card-head"><span class="prep-icon">密</span><h3>注册信息</h3></div><p>准备一个自己能够记住的账号和安全密码。不要使用过于简单的密码，也不要把账号和密码发送给其他人。</p></article>
+          <article class="prep-card"><div class="prep-card-head"><span class="prep-icon">址</span><h3>系统地址</h3></div><p>使用管理员提供的正式地址进入注册页面。不要通过来历不明的链接输入邀请码、账号或密码。</p></article>
+          <article class="prep-card"><div class="prep-card-head"><span class="prep-icon">网</span><h3>浏览器和网络</h3></div><p>建议使用较新版本的主流浏览器。网络不稳定时，行情、图表和消息记录可能加载缓慢或暂时没有数据。</p></article>
+        </div>
+      </section>
+
+      <section class="article-section" id="register">
+        <h2 class="section-heading">第一步：完成邀请注册</h2>
+        <div class="numbered-flow">
+          <article class="flow-step"><div class="flow-number">1</div><div><h3>打开注册页面</h3><p>通过管理员提供的系统地址进入邀请注册页面。</p></div></article>
+          <article class="flow-step"><div class="flow-number">2</div><div><h3>输入邀请码</h3><p>在邀请码输入框中填写管理员提供的邀请码。请注意字母、数字和大小写，不要输入多余空格。</p></div></article>
+          <article class="flow-step"><div class="flow-number">3</div><div><h3>设置账号和密码</h3><p>按照页面要求填写账号、密码和必要的验证信息。</p></div></article>
+          <article class="flow-step"><div class="flow-number">4</div><div><h3>提交注册</h3><p>确认信息无误后提交。注册成功后，邀请码通常不能再次使用。</p></div></article>
+          <article class="flow-step"><div class="flow-number">5</div><div><h3>返回登录页面</h3><p>使用刚刚设置的账号和密码登录盘迹。</p></div></article>
+        </div>
+        <div class="notice" style="margin-top:14px"><strong>邀请码和账号只供本人使用</strong>不要转发、出售或与其他人共用。共享可能造成自选列表、消息记录和权限状态混乱。</div>
+      </section>
+
+      <section class="article-section" id="invite-problems">
+        <h2 class="section-heading">邀请码无法使用时</h2>
+        <div class="issue-panel">
+          <div class="issue-list">
+            <div class="issue-row"><strong>提示邀请码无效</strong><span>检查是否输入错误、已经过期、已经使用，或不适用于当前注册入口。</span></div>
+            <div class="issue-row"><strong>提示权限不匹配</strong><span>邀请码可能只适用于指定功能或账号类型，请联系管理员确认。</span></div>
+            <div class="issue-row"><strong>页面没有反应</strong><span>刷新页面，检查网络连接，并确认浏览器没有阻止页面脚本运行。</span></div>
+          </div>
+          <aside class="contact-note"><h3>仍然无法注册？</h3><p>请保存页面提示或截图，并记录发生时间，再联系管理员。不要连续尝试来源不明的邀请码。</p></aside>
+        </div>
+      </section>
+
+      <section class="article-section" id="login">
+        <h2 class="section-heading">第二步：首次登录盘迹</h2>
+        <div class="numbered-flow">
+          <article class="flow-step"><div class="flow-number">1</div><div><h3>打开登录页面</h3><p>进入管理员提供的正式系统地址。</p></div></article>
+          <article class="flow-step"><div class="flow-number">2</div><div><h3>输入账号和密码</h3><p>使用注册时设置的账号和密码登录，并按页面提示完成验证。</p></div></article>
+          <article class="flow-step"><div class="flow-number">3</div><div><h3>检查账号信息</h3><p>登录成功后，确认页面显示的账号信息正确。</p></div></article>
+          <article class="flow-step"><div class="flow-number">4</div><div><h3>检查可用功能</h3><p>查看顶部导航和页面入口是否与管理员分配的权限一致。</p></div></article>
+          <article class="flow-step"><div class="flow-number">5</div><div><h3>完成基础设置</h3><p>进入设置页面，检查密码、通知方式和其他个人设置。</p></div></article>
+        </div>
+      </section>
+
+      <section class="article-section" id="layout">
+        <h2 class="section-heading">第三步：认识盘迹的基本页面</h2>
+        <p class="section-copy">登录后，页面会根据当前账号权限显示相应功能。没有权限的功能可能不会出现，这并不代表系统故障。</p>
+        <div class="page-map" style="margin-top:14px">
+          <article class="page-map-card"><div class="page-map-title"><span>导</span><h3>顶部导航</h3></div><p>用于切换行情、自选、消息、设置等主要功能。</p></article>
+          <article class="page-map-card"><div class="page-map-title"><span>行</span><h3>行情页面</h3></div><p>用于搜索和浏览市场数据，查看股票列表和不同时间范围的历史走势。</p></article>
+          <article class="page-map-card"><div class="page-map-title"><span>自</span><h3>自选页面</h3></div><p>用于管理自己决定持续观察的股票，自选数量可能受账号权限限制。</p></article>
+          <article class="page-map-card"><div class="page-map-title"><span>详</span><h3>个股详情</h3></div><p>用于查看某只股票更完整的价格、成交、图表和其他经过整理的数据。</p></article>
+          <article class="page-map-card"><div class="page-map-title"><span>记</span><h3>提醒记录</h3></div><p>用于查看系统按照既定规则生成的数据变化记录。</p></article>
+          <article class="page-map-card"><div class="page-map-title"><span>消</span><h3>消息页面</h3></div><p>用于查看站内消息、提醒信息和系统通知。</p></article>
+          <article class="page-map-card"><div class="page-map-title"><span>设</span><h3>设置页面</h3></div><p>用于管理账号资料、密码和通知方式。</p></article>
+        </div>
+      </section>
+
+      <section class="article-section" id="workflow">
+        <h2 class="section-heading">第四步：完成一次基本操作</h2>
+        <div class="numbered-flow">
+          <article class="flow-step"><div class="flow-number">1</div><div><h3>查找股票</h3><p>在行情页面或搜索框中输入股票名称或代码，系统会显示与输入内容相符的结果。</p><div class="workflow-note">搜索结果只表示名称或代码匹配，不代表平台推荐该股票。</div></div></article>
+          <article class="flow-step"><div class="flow-number">2</div><div><h3>查看行情列表</h3><p>根据自己的需要使用搜索、筛选、排序或时间范围切换功能。</p><div class="workflow-note">列表排序只表示相应字段数值的先后顺序，不代表股票优劣。</div></div></article>
+          <article class="flow-step"><div class="flow-number">3</div><div><h3>打开个股详情</h3><p>点击股票名称或详情入口，查看历史价格走势、成交数据、不同时间范围和相关记录。</p><div class="workflow-note">无法进入详情时，可能是当前账号没有个股详情权限。</div></div></article>
+          <article class="flow-step"><div class="flow-number">4</div><div><h3>加入自选</h3><p>在行情列表或个股详情页面点击“加入自选”，加入成功后会显示在当前账号的自选列表中。</p><div class="workflow-note">加入自选只表示使用者希望继续观察，不代表平台推荐。</div></div></article>
+          <article class="flow-step"><div class="flow-number">5</div><div><h3>查看提醒记录</h3><p>当相应的数据条件已经发生时，在提醒记录或消息页面查看股票、时间和数据变化。</p><div class="workflow-note">提醒只描述已经发生的数据状态，不表示价格之后必然上涨或下跌。</div></div></article>
+        </div>
+      </section>
+
+      <section class="article-section" id="permissions">
+        <h2 class="section-heading">功能显示与账号权限</h2>
+        <p class="section-copy">盘迹按照邀请码对应的权限控制功能范围，因此不同成员登录后看到的页面可能不同。</p>
+        <div class="permission-table-wrap" style="margin-top:14px">
+          <table class="fee-table permission-table">
+            <thead><tr><th>权限类型</th><th>可以看到的内容</th><th>可能存在的限制</th></tr></thead>
+            <tbody>
+              <tr><td>行情查看</td><td>行情列表、搜索和相关市场数据。</td><td>部分账号只能查看列表，不能进入完整个股详情。</td></tr>
+              <tr><td>自选管理</td><td>个人自选列表、变化记录和相关通知。</td><td>可加入股票数量和有效期由管理员设置。</td></tr>
+              <tr><td>个股详情</td><td>更完整的历史数据、图表和相关状态。</td><td>没有详情权限时无法进入。</td></tr>
+              <tr><td>复盘功能</td><td>用于整理和回看历史研究记录。</td><td>当前功能未完成时可能不显示或显示建设中。</td></tr>
+              <tr><td>管理功能</td><td>账号、邀请码、权限和有效期管理。</td><td>普通成员不会看到管理页面。</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="notice" style="margin-top:14px"><strong>功能没有显示时</strong>先确认当前账号的权限范围，不要直接判断为页面故障。权限与管理员说明不一致时，再联系管理员核实。</div>
+      </section>
+
+      <section class="article-section" id="faq">
+        <h2 class="section-heading">第一次使用时的常见问题</h2>
+        <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>为什么无法登录？</span><span>⌄</span></button><div class="faq-answer">检查账号和密码是否正确、是否使用正式登录地址、账号是否仍在有效期内，以及网络是否正常。</div></div>
+        <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>为什么登录后没有看到某个功能？</span><span>⌄</span></button><div class="faq-answer">该功能可能没有分配给当前账号，请以管理员分配的权限为准。</div></div>
+        <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>为什么搜索不到股票？</span><span>⌄</span></button><div class="faq-answer">可能是名称或代码输入错误、数据尚未完成更新，或者当前数据范围暂未包含该股票。</div></div>
+        <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>为什么点击股票后无法进入详情？</span><span>⌄</span></button><div class="faq-answer">当前账号可能没有个股详情权限。部分账号只能查看行情列表。</div></div>
+        <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>为什么无法继续加入自选？</span><span>⌄</span></button><div class="faq-answer">当前账号可能已经达到自选数量上限，可以先移除不再观察的股票，或联系管理员核实权限。</div></div>
+        <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>为什么没有收到提醒或图表暂时没有数据？</span><span>⌄</span></button><div class="faq-answer">确认股票仍在自选列表、通知已经开启、相应数据条件确实发生。图表无数据也可能是数据正在更新，或当前时间范围暂时没有可用数据。</div></div>
+      </section>
+
+      <section class="article-section" id="tips">
+        <h2 class="section-heading">建议按照这个顺序熟悉盘迹</h2>
+        <div class="tips-grid">
+          <article class="tip-card"><strong>先理解字段</strong><p>先了解行情列表中每一列数据的含义，再使用筛选和排序功能。</p></article>
+          <article class="tip-card"><strong>再建立自选</strong><p>只把自己已经研究并希望继续观察的股票加入自选。</p></article>
+          <article class="tip-card"><strong>提醒后查看原始数据</strong><p>收到提醒后先查看原始行情和相关数据，不要只根据提醒文字作出判断。</p></article>
+          <article class="tip-card"><strong>遇到差异先查说明</strong><p>遇到数据差异时，先查看数据说明中的更新时间和复权说明。</p></article>
+          <article class="tip-card"><strong>保护账号和数据</strong><p>不要把账号、邀请码、截图、数据或提醒记录转发给无关人员。</p></article>
+        </div>
+      </section>
+
+      <section class="article-section" id="boundaries">
+        <h2 class="section-heading">需要特别注意</h2>
+        <div class="boundary-box">
+          <div class="boundary-item"><strong>不提供股票推荐</strong><span>系统展示的股票列表、搜索结果和自选内容，不表示平台推荐其中任何股票。</span></div>
+          <div class="boundary-item"><strong>不提供买卖建议</strong><span>页面中的数据、图表和提醒，不构成买入、卖出或持有建议。</span></div>
+          <div class="boundary-item"><strong>不预测未来价格</strong><span>历史数据和已经发生的数据变化，不能保证未来走势重复。</span></div>
+          <div class="boundary-item"><strong>提醒不代表方向</strong><span>提醒只表示某项数据条件已经发生，不表示价格之后必然上涨或下跌。</span></div>
+          <div class="boundary-item"><strong>使用者独立判断</strong><span>每名使用者应根据自己的研究独立作出判断，并自行承担相应风险。</span></div>
+        </div>
+      </section>
+
+      <section class="article-section" id="next">
+        <h2 class="section-heading">继续了解盘迹</h2>
+        <div class="next-grid">
+          <a class="next-card" href="market.html"><h3>行情查看</h3><p>了解搜索、筛选、列表和图表操作。</p><span>查看行情说明 →</span></a>
+          <a class="next-card" href="watchlist.html"><h3>自选管理</h3><p>了解加入、移除和管理自选股票。</p><span>查看自选说明 →</span></a>
+          <a class="next-card" href="stock-detail.html"><h3>个股详情</h3><p>了解详情页面中的数据和图表。</p><span>查看详情说明 →</span></a>
+          <a class="next-card" href="alerts.html"><h3>提醒记录</h3><p>了解提醒如何产生以及如何查看。</p><span>查看提醒说明 →</span></a>
+        </div>
+      </section>
+    </article>
+  </main>
+
+  <aside class="right-rail" aria-label="本页辅助信息">
+    <section class="rail-card">
+      <h3>本页目录</h3>
+      <nav class="rail-list">
+        <a class="rail-link active" data-anchor href="#prepare">开始前的准备</a>
+        <a class="rail-link" data-anchor href="#register">邀请码注册</a>
+        <a class="rail-link" data-anchor href="#invite-problems">邀请码问题</a>
+        <a class="rail-link" data-anchor href="#login">首次登录</a>
+        <a class="rail-link" data-anchor href="#layout">页面结构</a>
+        <a class="rail-link" data-anchor href="#workflow">基本使用流程</a>
+        <a class="rail-link" data-anchor href="#permissions">账号权限</a>
+        <a class="rail-link" data-anchor href="#faq">常见问题</a>
+        <a class="rail-link" data-anchor href="#tips">使用建议</a>
+        <a class="rail-link" data-anchor href="#boundaries">使用边界</a>
+        <a class="rail-link" data-anchor href="#next">下一步</a>
+      </nav>
+    </section>
+    <section class="rail-card"><h3>更新时间</h3><div class="update-date">2026年7月21日</div></section>
+    <section class="rail-card">
+      <h3>相关教程</h3>
+      <nav class="rail-list">
+        <a class="rail-link" href="market.html">行情查看</a>
+        <a class="rail-link" href="watchlist.html">自选管理</a>
+        <a class="rail-link" href="stock-detail.html">个股详情</a>
+        <a class="rail-link" href="alerts.html">提醒记录</a>
+      </nav>
+    </section>
+  </aside>
+</div>
+
+<footer class="site-footer">
+  <div class="footer-inner">
+    <div>
+      <h2 class="footer-heading">联系管理员</h2>
+      <p class="footer-copy">如遇到账号、权限、邀请码、系统使用或数据问题，请通过微信联系管理员。</p>
+      <nav class="footer-links"><a href="faq.html">常见问题</a><a href="data.html">指标原理</a><a href="boundaries.html">使用边界</a></nav>
+    </div>
+    <figure class="footer-qr"><img src="../assets/images/wechat-qr-placeholder.svg" alt="管理员微信二维码占位图"><figcaption>微信联系管理员<br>添加时请备注来意</figcaption></figure>
+  </div>
+  <div class="footer-bottom">盘迹使用说明中心</div>
+</footer>
+<script src="../assets/js/site.js"></script>
+</body>
+</html>
