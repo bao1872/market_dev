@@ -1,0 +1,94 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SMC 事件输出 Schema",
+  "description": "PRD V2.0 §5 SMC-01/SMC-03 / §7.2 — SMC 指标事件输出契约。对应代码：backend/app/services/canonical_adapters.py::compute_smc_adapter",
+  "contract_id": "smc-events",
+  "version": 2,
+  "as_of": "2026-07-21",
+  "type": "object",
+  "required": ["events", "order_blocks", "equal_highs_lows", "trailing", "swing_bias", "pivots", "time", "view"],
+  "properties": {
+    "events": {
+      "type": "array",
+      "description": "BOS/CHoCH 事件列表",
+      "items": {
+        "type": "object",
+        "required": ["type", "time", "price", "direction"],
+        "properties": {
+          "type": {"type": "string", "enum": ["BOS", "CHoCH"]},
+          "time": {"type": "string"},
+          "price": {"type": "number"},
+          "direction": {"type": "integer", "enum": [1, -1]}
+        }
+      }
+    },
+    "order_blocks": {
+      "type": "array",
+      "description": "Order Block 列表（internal OB，count<=5）"
+    },
+    "equal_highs_lows": {
+      "type": "array",
+      "description": "EQH/EQL 列表（confirmation=3, threshold=0.1）"
+    },
+    "trailing": {
+      "type": "array",
+      "description": "Trailing 结构列表"
+    },
+    "swing_bias": {
+      "type": "integer",
+      "enum": [1, -1, 0],
+      "description": "Swing bias：1=多, -1=空, 0=中性"
+    },
+    "pivots": {
+      "type": "array",
+      "description": "Pivot 点列表"
+    },
+    "time": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "时间轴（长度 <= display_bars）"
+    },
+    "view": {
+      "type": "object",
+      "required": ["total_bars", "display_bars", "offset", "window_start", "window_end"],
+      "description": "展示窗口元信息"
+    }
+  },
+  "smc_parameters": {
+    "historical": true,
+    "colored": false,
+    "color_candles": false,
+    "internal": true,
+    "all": true,
+    "confluence": false,
+    "swing_length": 50,
+    "swing_points": false,
+    "strong_weak": true,
+    "internal_ob": true,
+    "internal_ob_count": 5,
+    "swing_ob": false,
+    "eqh_eql": true,
+    "eqh_eql_confirmation": 3,
+    "eqh_eql_threshold": 0.1,
+    "daily_levels": false,
+    "weekly_levels": false,
+    "monthly_levels": false,
+    "premium_discount": false
+  },
+  "rendering": {
+    "internal_structure": "dashed line, tiny",
+    "swing_structure": "solid line, small",
+    "bullish_color": "#FF4D4F",
+    "bearish_color": "#22C55E",
+    "ob_opacity": "low"
+  },
+  "enforcement": {
+    "ci_gate": "Canonical 四链禁止直接 Kernel",
+    "tests": [
+      "tests/test_smc_indicator.py",
+      "tests/test_smc_monitor.py",
+      "tests/test_algorithm_registry_architecture.py"
+    ]
+  },
+  "cp_introduced": "CP-10 (SMC EQH/EQL) + CP-13 (canonical 迁移) + CP-14 (schema 文档化)"
+}

@@ -33,6 +33,12 @@ import {
   type RenderDensity,
   getRenderScale,
 } from './chartRenderScale'
+// [2026-07-21 反馈] SMC 中文显示文案唯一映射（前后端/详情/飞书共用）
+import {
+  getSmcEventLabel,
+  getSmcEqLabel,
+  getSmcObLabel,
+} from './smcLabels'
 
 // [ChartRightPadding] - 描述: K 线绘图区右侧留白比例（CHANGE-20260713-008）
 // 最新 K 线位于绘图区约 80% 位置（留白 20%，落在 18%-22% 要求区间内）。
@@ -117,6 +123,10 @@ export interface StrategyChartProps {
   // 未传入或失效时由组件内部计算默认值（取末尾 MAX_VISIBLE_BARS 根）
   viewport?: ChartViewport
   onViewportChange?: (vp: ChartViewport) => void
+  // [2026-07-21 反馈] 飞书移动舞台默认显示窗口（仅 isCaptureMode 下生效）
+  //   未传入时回退到 MAX_VISIBLE_BARS（250）；传入 90 时飞书舞台只显示最近 90 根
+  //   不影响底层数据拉取总长度，也不影响详情页用户缩放逻辑
+  defaultVisibleBars?: number
   // [feishu-capture] - 描述: 飞书截图模式，强制开启 FEISHU_CAPTURE_LAYERS 且不可关闭，不读写 localStorage
   isCaptureMode?: boolean
   // [CHANGE-20260720-Phase4 §四] indicator_view 选择（仅 capture 模式生效）
@@ -149,6 +159,35 @@ export interface StrategyChartProps {
   indicatorsFetching?: boolean
   // 点击"重试"按钮回调（父组件调用 indicatorsQuery.refetch）
   onIndicatorsRetry?: () => void
+  // [Task 2] focus_event：监控触发事件信息（飞书 Capture 链路）
+  //   传入时 StrategyChart 突出本次触发事件（高亮 + 完整不透明度 + 标签），
+  //   淡化其他历史结构（半透明 / 不绘制标签）。
+  //   - focusEventId: 事件 ID（用于匹配 SMC 结构 entity_id）
+  //   - focusEventType: 事件类型（smc_bos_retest / smc_choch_retest / smc_equal_highs_retest /
+  //     smc_equal_lows_retest / smc_order_block_first_touch）
+  //   - focusEventInfo: 完整事件信息（anchor_time/confirmed_time/level/bar_high/bar_low 等）
+  focusEventId?: string | null
+  focusEventType?: string | null
+  focusEventInfo?: FocusEventInfo | null
+}
+
+// [Task 2] focus_event 完整字段（与后端 monitor_batch_service.focus_event_info 对齐）
+//   - BOS/CHoCH 匹配：anchor_time + level + bias + internal
+//   - EQH/EQL 匹配：anchor_time + eqhl_type + second_pivot_time
+//   - OB 匹配：bar_high + bar_low + bias
+interface FocusEventInfo {
+  focus_event_id: string
+  focus_event_type: string | null
+  anchor_time: string | null
+  confirmed_time: string | null
+  level: string | null
+  bar_high: string | null
+  bar_low: string | null
+  bias: string | null
+  internal: string | null
+  bullish: string | null
+  eqhl_type: string | null
+  second_pivot_time: string | null
 }
 
 // 计算后的 Bar（含指标字段）
@@ -505,7 +544,14 @@ function extractBackendProfile(indicators: IndicatorResponse | undefined): Backe
 
 // ===== 布局几何模块 =====
 // 根据启用的图层动态分配窗格高度（价格/成交量/MACD 共享同一 X 轴与十字线索引）
-function geometry(layers: Set<string>, w: number, h: number): Geometry {
+// [2026-07-21 反馈] mobile_capture 模式下成交量区按舞台高度 18% 分配（主图:成交量 ≈ 82:18），
+//   desktop 模式保持 76px 固定高度（向后兼容）
+function geometry(
+  layers: Set<string>,
+  w: number,
+  h: number,
+  scale?: ChartRenderScale,
+): Geometry {
   const profileOn = layers.has('profile')
   const volumeOn = layers.has('volume')
   const macdOn = layers.has('macd')
@@ -530,7 +576,15 @@ function geometry(layers: Set<string>, w: number, h: number): Geometry {
     cursor = panes.sqzmom.top - paneGap
   }
   if (volumeOn) {
-    panes.volume = { bottom: cursor, top: cursor - 76 }
+    // [2026-07-21 反馈] mobile_capture 下成交量区按剩余高度 18% 分配
+    //   飞书舞台 INDICATOR_VIEW_LAYER_PRESETS 只开 volume（macd/sqzmom 关闭），
+    //   所以 (h - 24 - bottom - paneGap) 是 price + volume 总高，18% 给 volume ≈ 82:18
+    //   desktop 保持 76px 固定高度（向后兼容）
+    const isMobile = scale?.density === 'mobile_capture'
+    const volumeH = isMobile
+      ? Math.max(150, Math.round((h - 24 - bottom - paneGap) * 0.18))
+      : 76
+    panes.volume = { bottom: cursor, top: cursor - volumeH }
     cursor = panes.volume.top - paneGap
   }
   panes.price = { top: 24, bottom: Math.max(220, cursor) }
@@ -789,6 +843,8 @@ function renderBreakout(
 //   不再用 values.length - barsCount 尾部截取，避免 K 线与指标错位
 // [CHANGE-20260719-003 §四] indexMap 参数：由 drawTrading 顶部构建并传入（time-index map 共享），
 //   避免每个 render 函数重复构建 O(n) Map；未传入时各 render 内部回退到 buildDisplayIndexMap。
+// [Task 2] focusEventId/focusEventType/focusEventInfo：透传到 renderIndicatorSmc，
+//   突出本次触发事件，淡化其他历史结构
 function renderIndicatorLayer(
   ctx: CanvasRenderingContext2D,
   g: Geometry,
@@ -801,6 +857,9 @@ function renderIndicatorLayer(
   timeframe: string,
   indexMap: (number | undefined)[],
   scale: ChartRenderScale,
+  focusEventId: string | null = null,
+  focusEventType: string | null = null,
+  focusEventInfo: FocusEventInfo | null = null,
 ): void {
   switch (layer.renderer) {
     case 'line':
@@ -825,7 +884,9 @@ function renderIndicatorLayer(
     // [CHANGE-011 SMC] - 智能资金概念图层渲染（BOS/CHoCH/OB/EQH/EQL/trailing）
     case 'smc':
       // renderIndicatorSmc 用 klineTimeIndex（displayTimes → display index）反向映射，不消费 indexMap
-      renderIndicatorSmc(ctx, g, layer, data, displayTimes, step, py, timeframe, scale)
+      // [Task 2] 透传 focus_event 给 renderIndicatorSmc，突出本次触发事件，淡化其他历史结构
+      renderIndicatorSmc(ctx, g, layer, data, displayTimes, step, py, timeframe, scale,
+        focusEventId, focusEventType, focusEventInfo)
       break
   }
 }
@@ -1582,6 +1643,7 @@ import {
   collectVisibleSmcPriceCandidates,
   intersectSmcRangeWithViewport,
   hexToRgba,
+  layoutSmcLabels,
   SMC_BULL_COLOR,
   SMC_BEAR_COLOR,
   type SmcEvent,
@@ -1589,6 +1651,8 @@ import {
   type SmcEqualHighLow,
   type SmcTrailing,
   type SmcSwingBias,
+  type SmcLabelAnchor,
+  type SmcVisibleContext,
 } from './smcRendering'
 
 function renderIndicatorSmc(
@@ -1601,6 +1665,10 @@ function renderIndicatorSmc(
   py: (v: number) => number,
   timeframe: string,
   scale: ChartRenderScale,
+  // [Task 2] focus_event：突出本次触发事件，淡化其他历史结构
+  focusEventId: string | null = null,
+  _focusEventType: string | null = null,
+  focusEventInfo: FocusEventInfo | null = null,
 ): void {
   // [CHANGE-011 SMC] - 数据字段为对象数组（非基本类型数组），按 any 取值后 cast 到内部类型
   // FVG 完全排除：本函数不渲染任何 Fair Value Gap 元素
@@ -1627,8 +1695,48 @@ function renderIndicatorSmc(
     if (key != null) klineTimeIndex.set(key, i)
   })
 
+  // [CP-V3-C] 直接 time → display index 查找（viewport 250→90 切换时最可靠）
+  // 用于 SmcVisibleContext.timeToDisplayIndex 回调，被 smcRendering 纯函数使用
+  const smcTimeToDisplay = (time: string | null | undefined): number | undefined => {
+    if (time == null) return undefined
+    const key = normalizeChartTime(time, timeframe)
+    if (key == null) return undefined
+    const idx = klineTimeIndex.get(key)
+    return idx  // undefined when not in viewport
+  }
+
+  // [CP-V3-C] SmcVisibleContext: 提供 timeToDisplayIndex 回调，让纯函数优先用 time 匹配
+  // [CP-V3-C2] 启用 strictTimeKey=true：
+  //   - 新 schema 中 anchor_time/confirmed_time/second_pivot_time 缺失或匹配失败时
+  //     → diagnostic + skip（返回 undefined），禁止静默 index fallback
+  //   - 仅显式 legacy 模式（strictTimeKey=false）允许 fallback
+  //   - onTimeKeyMiss 回调在 dev 模式下打印诊断信息，便于发现后端 schema 缺陷
+  const smcVisCtx: SmcVisibleContext = {
+    displayCount: displayTimes.length,
+    timeToDisplayIndex: smcTimeToDisplay,
+    strictTimeKey: true,
+    onTimeKeyMiss: (reason, smcIdx, time) => {
+      if (process.env.NODE_ENV !== 'production') {
+        console.warn(
+          `[StrategyChart][SMC] time-key miss: reason=${reason} smcIdx=${smcIdx ?? 'null'} time=${time ?? 'null'} timeframe=${timeframe}`,
+        )
+      }
+    },
+  }
+
   // 辅助：SMC time 数组索引 → K 线 display 索引
-  const smcToDisplay = (smcIdx: number | null | undefined): number | undefined => {
+  // [CP-V3-C] 新增可选 time 参数：primary 路径直接用 anchor_time 等字段匹配
+  // （比 smcTimes[smcIdx] 间接匹配更可靠，viewport 250→90 切换时不会因索引 rebasing 错位）
+  const smcToDisplay = (
+    smcIdx: number | null | undefined,
+    time?: string | null,
+  ): number | undefined => {
+    // [CP-V3-C] Primary: 直接用 time 字段匹配（最可靠）
+    if (time != null) {
+      const idx = smcTimeToDisplay(time)
+      if (idx != null) return idx
+    }
+    // Fallback: 索引路径（依赖 adapter rebasing）
     if (smcIdx == null) return undefined
     // 负索引（view adapter clipped_left 时 anchor 在窗口左侧）→ clamp 到 0
     if (smcIdx < 0) return 0
@@ -1648,6 +1756,129 @@ function renderIndicatorSmc(
     return undefined
   }
 
+  // [CP-V3-C] SMC 事件区间（anchor + confirmed）映射到 display 索引
+  // 与 mapSmcIndexToDisplay 不同：保留 raw index 作为 fallback，不 clamp，
+  // 让 intersectSmcRangeWithViewport 正确判断 clipped_left/clipped_right
+  // [CP-V3-C2] strict mode: time 缺失或匹配失败 → null（让 intersect 返回 null → skip）
+  //   仅 legacy 模式保留 raw index fallback（用于 clipped_left/clipped_right）
+  const mapSmcEventRange = (
+    anchorIdx: number | null | undefined,
+    anchorTime: string | null | undefined,
+    confirmedIdx: number | null | undefined,
+    confirmedTime: string | null | undefined,
+  ): { anchorDisplay: number | null; confirmedDisplay: number | null } => {
+    const strict = smcVisCtx.strictTimeKey === true
+    // anchor: primary = time
+    let anchorDisplay: number | null = null
+    if (anchorTime != null) {
+      const idx = smcTimeToDisplay(anchorTime)
+      if (idx != null) anchorDisplay = idx
+      else if (strict) {
+        smcVisCtx.onTimeKeyMiss?.('match_failed', anchorIdx, anchorTime)
+      }
+    } else if (strict) {
+      smcVisCtx.onTimeKeyMiss?.('missing_time', anchorIdx, anchorTime)
+    }
+    // legacy fallback: 保留 raw index（可能 < 0 或 >= displayCount，用于 clipped_left/right）
+    if (anchorDisplay == null && !strict && anchorIdx != null) {
+      anchorDisplay = anchorIdx
+    }
+    // confirmed: primary = time
+    let confirmedDisplay: number | null = null
+    if (confirmedTime != null) {
+      const idx = smcTimeToDisplay(confirmedTime)
+      if (idx != null) confirmedDisplay = idx
+      else if (strict) {
+        smcVisCtx.onTimeKeyMiss?.('match_failed', confirmedIdx, confirmedTime)
+      }
+    } else if (strict) {
+      smcVisCtx.onTimeKeyMiss?.('missing_time', confirmedIdx, confirmedTime)
+    }
+    // legacy fallback
+    if (confirmedDisplay == null && !strict && confirmedIdx != null) {
+      confirmedDisplay = confirmedIdx
+    }
+    return { anchorDisplay, confirmedDisplay }
+  }
+
+  // [2026-07-21 P0 反馈] SMC 标签碰撞布局：收集所有标签锚点，mobile_capture 下用 layoutSmcLabels 防重叠
+  // desktop 模式保持自然位置（250 bar 窗口下碰撞罕见）
+  const labelAnchors: SmcLabelAnchor[] = []
+  const isMobileCapture = scale.density === 'mobile_capture'
+
+  // [Task 2] focus_event 匹配：突出本次触发事件，淡化其他历史结构
+  //   - hasFocus: 是否启用 focus 模式（focusEventId 非空时启用）
+  //   - 匹配策略：
+  //     · BOS/CHoCH: anchor_time（normalizeChartTime 后比较）+ level（parseFloat 后比较，容差 1e-6）
+  //     · EQH/EQL:   anchor_time + second_pivot_time
+  //     · OB:        bar_high + bar_low（parseFloat 后比较，容差 1e-6）
+  //   - focus 模式下：focus 结构 alpha=1.0 + lineWidth×1.3；非 focus 结构 alpha×0.25 + 不绘制标签
+  const hasFocus = focusEventId != null && focusEventInfo != null
+  const focusAnchorKey = hasFocus
+    ? normalizeChartTime(focusEventInfo!.anchor_time, timeframe)
+    : null
+  const focusSecondPivotKey = hasFocus
+    ? normalizeChartTime(focusEventInfo!.second_pivot_time, timeframe)
+    : null
+  const focusLevelNum = hasFocus && focusEventInfo!.level != null
+    ? parseFloat(focusEventInfo!.level)
+    : null
+  const focusBarHighNum = hasFocus && focusEventInfo!.bar_high != null
+    ? parseFloat(focusEventInfo!.bar_high)
+    : null
+  const focusBarLowNum = hasFocus && focusEventInfo!.bar_low != null
+    ? parseFloat(focusEventInfo!.bar_low)
+    : null
+  const focusIsBosChoch = hasFocus
+    && (focusEventInfo!.focus_event_type === 'smc_bos_retest'
+      || focusEventInfo!.focus_event_type === 'smc_choch_retest')
+  const focusIsEqhl = hasFocus
+    && (focusEventInfo!.focus_event_type === 'smc_equal_highs_retest'
+      || focusEventInfo!.focus_event_type === 'smc_equal_lows_retest')
+  const focusIsOb = hasFocus
+    && focusEventInfo!.focus_event_type === 'smc_order_block_first_touch'
+
+  const isFocusBosChoch = (ev: SmcEvent): boolean => {
+    if (!focusIsBosChoch || focusAnchorKey == null) return false
+    const evAnchorKey = normalizeChartTime(ev.anchor_time, timeframe)
+    if (evAnchorKey == null || evAnchorKey !== focusAnchorKey) return false
+    // level 匹配（容差 1e-6）
+    if (focusLevelNum != null && ev.level != null) {
+      return Math.abs(ev.level - focusLevelNum) < 1e-6
+    }
+    // level 缺失时仅用 anchor_time 匹配（保守起见仍判为 focus）
+    return focusLevelNum == null
+  }
+  const isFocusEq = (eq: SmcEqualHighLow): boolean => {
+    if (!focusIsEqhl || focusAnchorKey == null) return false
+    const eqAnchorKey = normalizeChartTime(eq.anchor_time, timeframe)
+    if (eqAnchorKey == null || eqAnchorKey !== focusAnchorKey) return false
+    // second_pivot_time 匹配（若 focus 提供）
+    if (focusSecondPivotKey != null) {
+      const eqSecondKey = normalizeChartTime(eq.second_pivot_time, timeframe)
+      return eqSecondKey != null && eqSecondKey === focusSecondPivotKey
+    }
+    return true
+  }
+  const isFocusOb = (ob: SmcOrderBlock): boolean => {
+    if (!focusIsOb) return false
+    // OB 用 bar_high + bar_low 匹配（容差 1e-6）
+    if (focusBarHighNum == null || focusBarLowNum == null) return false
+    return Math.abs(ob.bar_high - focusBarHighNum) < 1e-6
+      && Math.abs(ob.bar_low - focusBarLowNum) < 1e-6
+  }
+
+  // [Task 2] 价格图层 clip：SMC 结构（BOS/CHoCH 线、OB 矩形、EQH/EQL 线、trailing 线）
+  //   必须裁剪在价格 pane 内，禁止进入 VOL pane。
+  //   g.panes.price.top/bottom 是价格 pane 的像素边界。
+  //   标签绘制不 clip（标签可能需要 lane 错位到价格 pane 上方/下方）。
+  if (g.panes?.price) {
+    ctx.save()
+    ctx.beginPath()
+    ctx.rect(g.l, g.panes.price.top, g.plotRight - g.l, g.panes.price.bottom - g.panes.price.top)
+    ctx.clip()
+  }
+
   // ===== 1. 渲染 Order Blocks（低透明度矩形区域）=====
   // [CHANGE-20260715-008] OB 选择逻辑抽离至 selectVisibleSmcOrderBlocks（可独立测试）
   // 规则（PROMPT.md §四.2）：
@@ -1656,9 +1887,10 @@ function renderIndicatorSmc(
   //   - clipped_left=True 时左端 clamp 到 plotLeft（g.l）
   //   - x2 = 可见区右端（OB 未 mitigated → 延伸到当前可见区末尾）
   //   - 与 viewport 无交集时跳过（由 selectVisibleSmcOrderBlocks 过滤）
-  const visibleObs = selectVisibleSmcOrderBlocks(orderBlocks, { displayCount: displayTimes.length })
+  const visibleObs = selectVisibleSmcOrderBlocks(orderBlocks, smcVisCtx)
   for (const ob of visibleObs) {
-    const anchorDisplayIdx = smcToDisplay(ob.anchor_index)
+    // [CP-V3-C] 优先用 ob.anchor_time 匹配（viewport 250→90 切换时最可靠）
+    const anchorDisplayIdx = smcToDisplay(ob.anchor_index, ob.anchor_time)
     if (anchorDisplayIdx == null) continue
     // x2 = 可见区右端（plotRight）：OB 未 mitigated → 延伸到当前可见区末尾
     const x2 = g.plotRight
@@ -1675,17 +1907,46 @@ function renderIndicatorSmc(
     const yTop = Math.min(yHigh, yLow)
     const height = Math.max(2, Math.abs(yHigh - yLow))
 
+    // [Task 2] focus 突出/淡化：focus OB 完整不透明度 + 更粗边框；
+    //   非 focus OB 在 focus 模式下 alpha×0.25（明显淡化）
+    const obIsFocus = isFocusOb(ob)
+    const obAlphaMul = hasFocus ? (obIsFocus ? 1.0 : 0.25) : 1.0
+    const obFillAlpha = 0.12 * obAlphaMul
+    const obBorderAlpha = 0.3 * obAlphaMul
+    const obBorderWidth = obIsFocus ? scale.strokes.obBorder * 1.5 : scale.strokes.obBorder
+
     // 颜色与透明度（仅未 mitigated OB，alpha 0.12）
     const isBull = ob.bias === 1
     const color = isBull ? SMC_BULL_COLOR : SMC_BEAR_COLOR
-    ctx.fillStyle = hexToRgba(color, 0.12)
+    ctx.fillStyle = hexToRgba(color, obFillAlpha)
     ctx.fillRect(x1, yTop, Math.max(1, x2 - x1), height)
 
     // OB 边框（更淡）
-    ctx.strokeStyle = hexToRgba(color, 0.3)
+    ctx.strokeStyle = hexToRgba(color, obBorderAlpha)
     // [PROMPT.md §5.3.4 V2] OB 边框线宽按 scale.strokes.obBorder（mobile_capture 2px）
-    ctx.lineWidth = scale.strokes.obBorder
+    ctx.lineWidth = obBorderWidth
     ctx.strokeRect(x1, yTop, Math.max(1, x2 - x1), height)
+
+    // [2026-07-21 反馈] OB 区域内加中文文字标签（多头承接区/空头压制区）
+    //   [P0 碰撞布局] mobile_capture 下收集锚点，由 layoutSmcLabels 统一布局
+    //   desktop 模式不渲染 OB 文字标签（区域太窄）
+    //   [Task 2] focus 模式下：非 focus OB 不绘制标签（避免历史结构干扰本次触发事件）
+    const drawObLabel = isMobileCapture && height > 40 && (x2 - x1) > 80
+      && (!hasFocus || obIsFocus)
+    if (drawObLabel) {
+      const obLabel = getSmcObLabel(ob.bias)
+      const obLabelY = yTop + height / 2
+      labelAnchors.push({
+        kind: 'ob',
+        anchorX: x1 + 8,
+        anchorY: obLabelY,
+        text: obLabel,
+        color: hexToRgba(color, 0.85),
+        fontSize: scale.fonts.smcInternalLabel,
+        align: 'left',
+        preferredVertical: 'center',
+      })
+    }
   }
 
   // ===== 2. 渲染 BOS/CHoCH 线 =====
@@ -1697,25 +1958,37 @@ function renderIndicatorSmc(
   // 标签位于结构线中点（非左端）
   // internal: 更淡（alpha 0.7），更细（width 1）；swing: 实色，更粗（width 1.5）
   // [CHANGE-20260716-001] 标签不加 ·I，与 TV 文字一致（PROMPT.md §三.3）
-  const smcVisCtx = { displayCount: displayTimes.length }
+  // [CP-V3-C] 优先用 anchor_time/confirmed_time 匹配（viewport 250→90 切换时最可靠）
+  // mapSmcEventRange 保留 raw index 作为 fallback（不 clamp），让 intersectSmcRangeWithViewport
+  // 正确判断 clipped_left/clipped_right
   for (const ev of events) {
     if (ev.level == null) continue
-    // viewport 区间求交（使用 view adapter 重基准后的索引，不依赖时间匹配）
-    const range = intersectSmcRangeWithViewport(ev.anchor_index, ev.confirmed_index, smcVisCtx)
+    const { anchorDisplay, confirmedDisplay } = mapSmcEventRange(
+      ev.anchor_index, ev.anchor_time,
+      ev.confirmed_index, ev.confirmed_time,
+    )
+    const range = intersectSmcRangeWithViewport(anchorDisplay, confirmedDisplay, smcVisCtx)
     if (range == null) continue
 
     const x1 = g.l + (range.startIdx + 0.5) * step
     const x2 = g.l + (range.endIdx + 0.5) * step
     const y = py(ev.level)
 
+    // [Task 2] focus 突出/淡化：focus BOS/CHoCH 完整不透明度 + 更粗线宽；
+    //   非 focus 事件在 focus 模式下 alpha×0.25（明显淡化），不绘制标签
+    const evIsFocus = isFocusBosChoch(ev)
+    const evAlphaMul = hasFocus ? (evIsFocus ? 1.0 : 0.25) : 1.0
+
     const isBull = ev.bias === 1
     const baseColor = isBull ? SMC_BULL_COLOR : SMC_BEAR_COLOR
     const isInternal = ev.internal === true
-    const alpha = isInternal ? 0.7 : 1.0
+    const baseAlpha = (isInternal ? 0.7 : 1.0) * evAlphaMul
     // [PROMPT.md §5.3.4 V2] SMC internal 线宽按 scale.strokes.smcInternal（mobile_capture 2px），
     //   swing 线宽按 scale.strokes.smcSwing（mobile_capture 3px）
-    const lineWidth = isInternal ? scale.strokes.smcInternal : scale.strokes.smcSwing
-    const color = hexToRgba(baseColor, alpha)
+    //   [Task 2] focus 事件线宽×1.3 突出
+    const baseLineWidth = isInternal ? scale.strokes.smcInternal : scale.strokes.smcSwing
+    const lineWidth = evIsFocus ? baseLineWidth * 1.3 : baseLineWidth
+    const color = hexToRgba(baseColor, baseAlpha)
 
     // CHANGE-20260715-002: internal=虚线，swing=实线（不再按 BOS/CHoCH 区分线型）
     if (isInternal) {
@@ -1727,13 +2000,25 @@ function renderIndicatorSmc(
 
     // 标签位于结构线中点（CHANGE-20260715-002）
     // [CHANGE-20260716-001] 标签不加 ·I，与 TV 文字一致
-    // [PROMPT.md §5.3.4 V2] SMC internal 标签字号按 scale.fonts.smcInternalLabel（mobile_capture ≥28px），
-    //   swing 标签字号按 scale.fonts.smcSwingLabel（mobile_capture ≥34px）
-    const midX = (x1 + x2) / 2
-    const label = ev.type
-    const fontSize = isInternal ? scale.fonts.smcInternalLabel : scale.fonts.smcSwingLabel
-    const labelOffset = Math.round(parseFloat(fontSize) * 0.3)
-    drawText(ctx, label, midX, y - labelOffset, color, fontSize, 'center')
+    // [2026-07-21 反馈] 标签改用中文通俗名词（突破前高/跌破前低/转强拐点/转弱拐点）
+    // [P0 碰撞布局] 收集锚点，由 layoutSmcLabels（mobile_capture）或自然位置（desktop）统一绘制
+    // [Task 2] focus 模式下：非 focus 事件不绘制标签（避免历史结构干扰本次触发事件）
+    if (!hasFocus || evIsFocus) {
+      const midX = (x1 + x2) / 2
+      const label = getSmcEventLabel(ev.type, ev.bias)
+      const fontSize = isInternal ? scale.fonts.smcInternalLabel : scale.fonts.smcSwingLabel
+      const labelOffset = Math.round(parseFloat(fontSize) * 0.3)
+      labelAnchors.push({
+        kind: ev.type === 'BOS' ? 'bos' : 'choch',
+        anchorX: midX,
+        anchorY: y - labelOffset,
+        text: label,
+        color,
+        fontSize,
+        align: 'center',
+        preferredVertical: 'up',
+      })
+    }
   }
 
   // ===== 3. 渲染 EQH/EQL（两端点线，非水平线）=====
@@ -1745,8 +2030,12 @@ function renderIndicatorSmc(
   //   - EQL: bullish 色 (SMC_BULL_COLOR 红) + label_up
   //   - 标签位于两 pivot 中点（Pine L397: math.round(0.5*(p_ivot.barIndex + bar_index - size))）
   for (const eq of equalHLs) {
-    // viewport 区间求交（anchor → second_pivot）
-    const range = intersectSmcRangeWithViewport(eq.anchor_index, eq.second_pivot_index, smcVisCtx)
+    // [CP-V3-C] 优先用 anchor_time/second_pivot_time 匹配（viewport 250→90 切换时最可靠）
+    const { anchorDisplay, confirmedDisplay } = mapSmcEventRange(
+      eq.anchor_index, eq.anchor_time,
+      eq.second_pivot_index, eq.second_pivot_time,
+    )
+    const range = intersectSmcRangeWithViewport(anchorDisplay, confirmedDisplay, smcVisCtx)
     if (range == null) continue
 
     const x1 = g.l + (range.startIdx + 0.5) * step
@@ -1755,20 +2044,41 @@ function renderIndicatorSmc(
     const y1 = py(eq.prev_level)
     const y2 = py(eq.level)
 
+    // [Task 2] focus 突出/淡化：focus EQH/EQL 完整不透明度 + 更粗线宽；
+    //   非 focus EQ 在 focus 模式下 alpha×0.25（明显淡化），不绘制标签
+    const eqIsFocus = isFocusEq(eq)
+    const eqAlphaMul = hasFocus ? (eqIsFocus ? 1.0 : 0.25) : 1.0
+    const eqLineWidth = eqIsFocus ? scale.strokes.eqLine * 1.3 : scale.strokes.eqLine
+
     const isEQH = eq.type === 'EQH'
     // Pine L384/L389: EQH=swingBearishColor, EQL=swingBullishColor
-    const eqColor = isEQH ? SMC_BEAR_COLOR : SMC_BULL_COLOR
+    const eqBaseColor = isEQH ? SMC_BEAR_COLOR : SMC_BULL_COLOR
+    const eqColor = hexToRgba(eqBaseColor, eqAlphaMul)
 
-    drawLine(ctx, x1, y1, x2, y2, eqColor, scale.strokes.eqLine, [2, 2])
+    drawLine(ctx, x1, y1, x2, y2, eqColor, eqLineWidth, [2, 2])
 
     // 标签位于两 pivot 中点（Pine L397）
-    const midX = (x1 + x2) / 2
-    const midY = (y1 + y2) / 2
-    // EQH: label_down（标签在上方）；EQL: label_up（标签在下方）
-    // [PROMPT.md §5.3.4 V2] EQ 标签字号按 scale.fonts.eqLabel（mobile_capture 34px）
-    const _eqSize = parseFloat(scale.fonts.eqLabel)
-    const labelYOffset = isEQH ? -Math.round(_eqSize * 0.3) : Math.round(_eqSize * 0.9)
-    drawText(ctx, eq.type, midX, midY + labelYOffset, eqColor, scale.fonts.eqLabel, 'center')
+    // [2026-07-21 反馈] 标签改用中文通俗名词（双顶压力/双底支撑）
+    // [P0 碰撞布局] 收集锚点，由 layoutSmcLabels（mobile_capture）或自然位置（desktop）统一绘制
+    // [Task 2] focus 模式下：非 focus EQ 不绘制标签
+    if (!hasFocus || eqIsFocus) {
+      const midX = (x1 + x2) / 2
+      const midY = (y1 + y2) / 2
+      // EQH: label_down（标签在上方）；EQL: label_up（标签在下方）
+      // [PROMPT.md §5.3.4 V2] EQ 标签字号按 scale.fonts.eqLabel（mobile_capture 34px）
+      const _eqSize = parseFloat(scale.fonts.eqLabel)
+      const labelYOffset = isEQH ? -Math.round(_eqSize * 0.3) : Math.round(_eqSize * 0.9)
+      labelAnchors.push({
+        kind: isEQH ? 'eqh' : 'eql',
+        anchorX: midX,
+        anchorY: midY + labelYOffset,
+        text: getSmcEqLabel(eq.type),
+        color: eqColor,
+        fontSize: scale.fonts.eqLabel,
+        align: 'center',
+        preferredVertical: isEQH ? 'up' : 'down',
+      })
+    }
   }
 
   // ===== 4. 渲染 trailing strong/weak high/low =====
@@ -1804,7 +2114,17 @@ function renderIndicatorSmc(
     const label = `${isStrong ? '强高' : '弱高'} ${fmt(trailing.top)}`
     // [PROMPT.md §5.3.4 V2] trailing 线宽按 scale.strokes.smcSwing，标签按 scale.fonts.smcSwingLabel
     drawLine(ctx, x1, y, x2, y, hexToRgba(labelColor, 0.5), scale.strokes.smcSwing, [3, 3])
-    drawText(ctx, label, g.plotRight - 4, y - 3, labelColor, scale.fonts.smcSwingLabel, 'right')
+    // [P0 碰撞布局] 收集锚点，由 layoutSmcLabels 统一布局
+    labelAnchors.push({
+      kind: 'trailing_high',
+      anchorX: g.plotRight - 4,
+      anchorY: y - 3,
+      text: label,
+      color: labelColor,
+      fontSize: scale.fonts.smcSwingLabel,
+      align: 'right',
+      preferredVertical: 'up',
+    })
   }
   if (trailing && trailing.bottom != null) {
     // Pine L726: 线起点 = trailing.lastBottomTime
@@ -1817,7 +2137,94 @@ function renderIndicatorSmc(
     const labelColor = isStrong ? SMC_BEAR_COLOR : SMC_BULL_COLOR
     const label = `${isStrong ? '强低' : '弱低'} ${fmt(trailing.bottom)}`
     drawLine(ctx, x1, y, x2, y, hexToRgba(labelColor, 0.5), scale.strokes.smcSwing, [3, 3])
-    drawText(ctx, label, g.plotRight - 4, y + 9, labelColor, scale.fonts.smcSwingLabel, 'right')
+    // [P0 碰撞布局] 收集锚点，由 layoutSmcLabels 统一布局
+    labelAnchors.push({
+      kind: 'trailing_low',
+      anchorX: g.plotRight - 4,
+      anchorY: y + 9,
+      text: label,
+      color: labelColor,
+      fontSize: scale.fonts.smcSwingLabel,
+      align: 'right',
+      preferredVertical: 'down',
+    })
+  }
+
+  // [Task 2] 结束价格图层 clip：SMC 结构（BOS/CHoCH 线、OB 矩形、EQH/EQL 线、trailing 线）
+  //   已全部绘制完成，恢复 ctx 状态。标签绘制不 clip（标签可能需要 lane 错位到价格 pane 上方/下方）。
+  if (g.panes?.price) {
+    ctx.restore()
+  }
+
+  // ===== 5. 绘制所有 SMC 标签 =====
+  // [P0 碰撞布局] mobile_capture: 用 layoutSmcLabels 防重叠 + 短引导线
+  //   desktop: 自然位置绘制（250 bar 窗口下碰撞罕见，保持原行为）
+  //   [Task 2] focus 模式下：desktop 也使用 layoutSmcLabels（Capture 场景标签少，碰撞布局更稳）
+  if (labelAnchors.length === 0) return
+
+  const useCollisionLayout = isMobileCapture || hasFocus
+
+  if (useCollisionLayout) {
+    // mobile_capture 或 focus 模式: 碰撞布局 + 引导线
+    // [P0 fix] Geometry 接口无 t/b，主图 pane 边界通过 g.panes.price.top/bottom 获取
+    //   [P0 fix] scale 无 fontFamily，fontSize 字段已是完整 CSS font 字符串（如 "36px sans-serif"）
+    //   [Task 2] focus 模式下（Capture 场景）也启用碰撞布局，确保标签不重叠 +
+    //   每个标签通过 leader line 指向准确 K 线和价格
+    const fontSizeNum = parseFloat(scale.fonts.smcSwingLabel)
+    const laneHeight = fontSizeNum + 4
+    const laidOut = layoutSmcLabels(
+      labelAnchors,
+      {
+        plotLeft: g.l,
+        plotRight: g.plotRight,
+        plotTop: g.panes.price.top,
+        plotBottom: g.panes.price.bottom,
+        laneHeight,
+        laneGap: 4,
+        maxLanes: 4,
+      },
+      (text: string, fs: string) => {
+        ctx.font = fs  // fs 已是完整 CSS font 字符串（如 "36px sans-serif"）
+        return ctx.measureText(text).width
+      },
+    )
+    // 先画引导线（在标签下方）
+    // [P0 fix] 引导线颜色需同时支持 hex 和 rgba 输入：
+    //   - OB/BOS/CHoCH 标签 color 是 rgba(...)（已带 alpha）
+    //   - EQH/EQL/trailing 标签 color 是 #RRGGBB hex
+    //   统一提取 r,g,b 后用 0.4 alpha 重绘引导线
+    for (const label of laidOut) {
+      if (label.lane === 0) continue  // lane 0 = 自然位置，无需引导线
+      const guideColor = (() => {
+        const c = label.anchor.color
+        const m = c.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/)
+        if (m) return `rgba(${m[1]}, ${m[2]}, ${m[3]}, 0.4)`
+        return hexToRgba(c, 0.4)
+      })()
+      ctx.strokeStyle = guideColor
+      ctx.lineWidth = 1
+      ctx.setLineDash([2, 2])
+      ctx.beginPath()
+      ctx.moveTo(label.guideStartX, label.guideStartY)
+      ctx.lineTo(label.guideEndX, label.guideEndY)
+      ctx.stroke()
+      ctx.setLineDash([])
+    }
+    // 再画标签
+    for (const label of laidOut) {
+      const align = label.anchor.align === 'left' ? 'left'
+        : label.anchor.align === 'right' ? 'right' : 'center'
+      const tx = align === 'left' ? label.boxX + 4
+        : align === 'right' ? label.boxX + label.boxW - 4
+        : label.boxX + label.boxW / 2
+      const ty = label.boxY + label.boxH / 2 + parseFloat(label.anchor.fontSize) * 0.35
+      drawText(ctx, label.anchor.text, tx, ty, label.anchor.color, label.anchor.fontSize, align)
+    }
+  } else {
+    // desktop 非 focus 模式: 自然位置绘制（无碰撞布局，无引导线）
+    for (const anchor of labelAnchors) {
+      drawText(ctx, anchor.text, anchor.anchorX, anchor.anchorY, anchor.color, anchor.fontSize, anchor.align)
+    }
   }
 }
 
@@ -1919,6 +2326,10 @@ function drawTrading(
   timeframe: string,
   state: ChartState,
   indicators?: IndicatorResponse | undefined,
+  // [Task 2] focus_event 透传到 renderIndicatorLayer → renderIndicatorSmc
+  focusEventId: string | null = null,
+  focusEventType: string | null = null,
+  focusEventInfo: FocusEventInfo | null = null,
 ): void {
   if (!display.length) return
   const { ctx, w, h } = fit(canvas)
@@ -1926,7 +2337,7 @@ function drawTrading(
   //   所有 draw 子函数与内联 drawText/drawLine 调用必须使用 scale.*，禁止硬编码 '8px monospace' 等
   const { scale } = state
   const layerSet = new Set(Object.entries(layers).filter(([, v]) => v).map(([k]) => k))
-  const g = geometry(layerSet, w, h)
+  const g = geometry(layerSet, w, h, scale)
   // [Volume Profile] - 从后端 indicators 提取 VP 数据（SSOT，禁止前端重算）
   const profile = extractBackendProfile(indicators)
   const displayTimes = display.map(d => d.time)
@@ -2168,7 +2579,9 @@ function drawTrading(
       if (layerData) {
         // [CHANGE-20260719-003 §四] 复用纵轴候选阶段构建的 indexMap（time-index map 共享）
         const sharedIndexMap = layerIndexMaps.get(layer.strategy_id)
-        renderIndicatorLayer(ctx, g, layer, layerData, display.length, step, py, displayTimes, timeframe, sharedIndexMap ?? [], scale)
+        // [Task 2] 透传 focus_event 给 renderIndicatorLayer → renderIndicatorSmc
+        renderIndicatorLayer(ctx, g, layer, layerData, display.length, step, py, displayTimes, timeframe, sharedIndexMap ?? [], scale,
+          focusEventId, focusEventType, focusEventInfo)
       }
     })
   }
@@ -2329,6 +2742,7 @@ export function StrategyChart({
   onTimeframeChange,
   viewport: viewportProp,
   onViewportChange,
+  defaultVisibleBars,
   isCaptureMode = false,
   indicatorView = null,
   renderDensity = 'desktop',
@@ -2336,6 +2750,9 @@ export function StrategyChart({
   barsFrame,
   indicatorsFetching = false,
   onIndicatorsRetry,
+  focusEventId = null,
+  focusEventType = null,
+  focusEventInfo = null,
 }: StrategyChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -2363,7 +2780,8 @@ export function StrategyChart({
     events: [],
     hoverProfileIndex: null,
     selectedNodeId: null,
-    focusEventId: null,
+    // [Task 2] 初始化 focusEventId 为 prop 传入值（飞书 Capture 链路）
+    focusEventId: focusEventId,
     profileHit: [],
     eventHit: [],
     dsaSourceMismatch: false,
@@ -2405,7 +2823,9 @@ export function StrategyChart({
 
   // [chartViewport] - 显示 bar 数量（缩放控制）：保留为内部状态作为 fallback，
   //   当父组件未传入 viewport 时使用；受控时由 viewportProp 驱动
-  const [displayBars, setDisplayBars] = useState(MAX_VISIBLE_BARS)
+  //   [2026-07-21 反馈] 飞书舞台可传 defaultVisibleBars=90 限制默认显示窗口
+  const initialVisibleBars = defaultVisibleBars ?? MAX_VISIBLE_BARS
+  const [displayBars, setDisplayBars] = useState(initialVisibleBars)
 
   // 十字线联动图例 bar 索引（-1 表示无十字线，显示最后一根）
   const [legendIdx, setLegendIdx] = useState(-1)
@@ -2520,8 +2940,9 @@ export function StrategyChart({
       }
     }
     stateRef.current.frameMismatch = mismatch
-    drawTrading(canvas, c, d, ev, ly, tf, stateRef.current, effectiveIndicators)
-  }, [])
+    drawTrading(canvas, c, d, ev, ly, tf, stateRef.current, effectiveIndicators,
+      focusEventId, focusEventType, focusEventInfo)
+  }, [focusEventId, focusEventType, focusEventInfo, scale])
 
   // 数据/图层变化时重绘
   useEffect(() => {
@@ -2731,9 +3152,10 @@ export function StrategyChart({
     }
 
     // [Task 16] - 双击恢复自动范围（回到最新数据末尾视区）
+    //   [2026-07-21 反馈] 飞书舞台传 defaultVisibleBars=90 时，双击恢复也用 90
     const handleDoubleClick = () => {
       if (onViewportChange) {
-        onViewportChange(createDefaultViewport(calc.length, MAX_VISIBLE_BARS))
+        onViewportChange(createDefaultViewport(calc.length, initialVisibleBars))
       }
     }
 
@@ -2861,9 +3283,9 @@ export function StrategyChart({
   }
   const resetZoom = () => {
     if (onViewportChange) {
-      onViewportChange(createDefaultViewport(calc.length, MAX_VISIBLE_BARS))
+      onViewportChange(createDefaultViewport(calc.length, initialVisibleBars))
     } else {
-      setDisplayBars(MAX_VISIBLE_BARS)
+      setDisplayBars(initialVisibleBars)
     }
   }
 

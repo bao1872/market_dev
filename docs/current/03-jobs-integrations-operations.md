@@ -140,6 +140,8 @@ queued → refreshing_daily → syncing_boards → checking_coverage → creatin
 
 `syncing_boards` 软失败时 `last_completed_step` 仍推进到 `syncing_boards`（即使同步失败也视为已尝试，不阻断重试流程）。`feature_snapshot` 失败时 `last_completed_step` 不会推进到 `feature_snapshot`，重试会从 `quality_gate` 之后重新进入 `feature_snapshot`。
 
+**Auto-resume（CP-V3-D）**: after_close_orchestrator 任务支持自动恢复。`interrupted` → `resume_queued`（attempt_no 递增，max=3），`lease_epoch` fencing 防止旧 worker 写入，`last_completed_step` 支持断点恢复。成功因子重建后调用 `stamp_factor_reconciliation_version` 写入版本字段，盘后通过 `find_stale_version_instruments` 识别影响集。
+
 ### 2.3.1 盘后流水线可视化面板（admin）
 
 `backend/app/services/after_close_pipeline_service.py` 为管理员提供盘后流水线聚合状态视图，复用现有 after_close_orchestrator 状态机、job_run_events、stock_feature_snapshot_runs run gate，不引入新的状态定义。

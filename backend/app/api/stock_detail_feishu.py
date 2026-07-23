@@ -88,7 +88,7 @@ class SendFeishuRequest(BaseModel):
     [CHANGE-20260720-003 §四] 详情页手动发送飞书时，用户从弹窗三单选项中选择指标视图：
     - node_cluster: 筹码共识价（默认）
     - bollinger: 布林带
-    - smc: SMC 结构
+    - smc: 结构
 
     后端透传到：
     - build_monitor_event_text：文字卡片按 indicator_view 拆分字段
@@ -102,7 +102,7 @@ class SendFeishuRequest(BaseModel):
     indicator_view: str | None = Field(
         default=None,
         description=(
-            "指标视图：node_cluster（筹码共识价）| bollinger（布林带）| smc（SMC 结构）；"
+            "指标视图：node_cluster（筹码共识价）| bollinger（布林带）| smc（结构）；"
             "None 表示全字段（向后兼容）"
         ),
     )

@@ -175,12 +175,12 @@ test('旧 toolbar key 迁移：4 键 → 8 键', () => {
   assert.equal(loaded.smc, false, 'smc should use default (false)')
 })
 
-// ===== 11. 用户文案：sqzmom 显示为"挤压动量"，node 显示为"筹码共识价"，smc 显示为"智能资金" =====
+// ===== 11. 用户文案：sqzmom 显示为"挤压动量"，node 显示为"筹码共识价"，smc 显示为"结构" =====
 // [文案契约] - 描述: 仅改用户可见文案，不改内部 id/DTO/算法
 // sqzmom 内部 key 不变，但 manifest.name 必须为"挤压动量"
 // node 内部 key 不变，但 manifest.name 必须为"筹码共识价"
-// smc 内部 key 不变，但 manifest.name 必须为"智能资金"
-test('manifest 用户文案：sqzmom → "挤压动量"，node → "筹码共识价"，smc → "智能资金"', () => {
+// smc 内部 key 不变，但 manifest.name 必须为"结构"
+test('manifest 用户文案：sqzmom → "挤压动量"，node → "筹码共识价"，smc → "结构"', () => {
   const sqzmom = CHART_LAYER_MANIFEST.find((e) => e.id === 'sqzmom')
   assert.ok(sqzmom, '必须存在 sqzmom 条目')
   assert.equal(sqzmom!.name, '挤压动量', 'sqzmom manifest.name 必须为"挤压动量"')
@@ -200,7 +200,7 @@ test('manifest 用户文案：sqzmom → "挤压动量"，node → "筹码共识
   // [CHANGE-011 SMC] smc 文案契约
   const smc = CHART_LAYER_MANIFEST.find((e) => e.id === 'smc')
   assert.ok(smc, '必须存在 smc 条目')
-  assert.equal(smc!.name, '智能资金', 'smc manifest.name 必须为"智能资金"')
+  assert.equal(smc!.name, '结构', 'smc manifest.name 必须为"结构"')
   assert.ok(
     smc!.description.includes('FVG'),
     'smc description 应注明"完全排除 FVG"（FVG 完全排除契约）',

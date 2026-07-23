@@ -55,8 +55,10 @@ from app.models.strategy_event import StrategyEvent
 from app.models.watchlist import UserWatchlistItem
 from app.repositories import monitor_state_repository, strategy_event_repository
 from app.schemas.notification import NotificationMessageDTO
+from app.services.canonical_computation_service import CanonicalComputationService
 from app.services.instrument_maintenance_service import is_index_symbol
 from app.services.market_data_aggregation_service import MarketDataAggregationService
+from app.services.node_cluster_input_provider import NodeClusterInputProvider
 from app.services.notification_service import create_message
 from app.services.outbox_relay import write_outbox
 from app.strategy.monitors.watchlist_monitor import WatchlistMonitor
@@ -112,6 +114,7 @@ _CST = ZoneInfo("Asia/Shanghai")
 # [advice.md 第二节] - 文案已迁移至 app.constants.user_facing_labels.get_event_label
 # emoji 与文案分离：emoji 仅在此处维护，文案由 get_event_label 提供
 # [CHANGE-20260720-002 §二] 新增 SMC 三类事件 emoji/severity
+# [Task 2] 补齐 EQH/EQL 两类事件 emoji/severity（五类 SMC 全覆盖）
 _EVENT_EMOJI: dict[str, str] = {
     "bb_upper_touch": "🔴",
     "bb_mid_touch": "🟠",
@@ -119,7 +122,9 @@ _EVENT_EMOJI: dict[str, str] = {
     "node_cluster_touch": "🟣",
     "smc_bos_retest": "🔵",
     "smc_choch_retest": "🟦",
-    "smc_order_block_first_touch": "🔷",
+    "smc_equal_highs_retest": "🔹",
+    "smc_equal_lows_retest": "🔷",
+    "smc_order_block_first_touch": "🔶",
 }
 
 # 事件类型 → 严重级别
@@ -130,6 +135,8 @@ _EVENT_SEVERITY: dict[str, str] = {
     "node_cluster_touch": "warn",
     "smc_bos_retest": "warn",
     "smc_choch_retest": "danger",
+    "smc_equal_highs_retest": "info",
+    "smc_equal_lows_retest": "info",
     "smc_order_block_first_touch": "warn",
 }
 
@@ -653,36 +660,14 @@ class MonitorBatchService:
             return []
 
         # c. 拉取行情
-        # [Node Cluster] - 描述: 统一走 MarketDataAggregationService，再 tail(N) 保留最近 N 根
-        # （indicator_contract.NODE_CLUSTER_PRIMARY_BARS=250 /
-        #  indicator_contract.NODE_CLUSTER_LOW_BARS=4000）
-        bars_daily = await self._fetch_md_bars(
+        # [CP-V3-A] NodeClusterInputProvider 唯一入口：daily 250 + 15m 4000（completed qfq）
+        # 同时供 MarketDataContext（策略执行）和 _compute_node_cluster_profile（PNG）使用，
+        # 保证四链一致。Provider 返回 availability 三态 + hash/count 供 payload 补全。
+        node_input = await NodeClusterInputProvider.get_inputs(
             db, instrument_id,
-            timeframe="1d",
-            adj="qfq",
-            limit=_DAILY_LOOKBACK_BARS,
-            # [Feishu/Monitor] - 恢复保守规则（CHANGE-20260710-002）：watchlist_monitor 计算输入
-            # 不得因截图实时性需求而使用实时日线，避免污染事件计算口径；当前价实时展示
-            # 由 card 的 change_pct（pytdx live）与 capture snapshot 1d partial daily 负责。
-            # [CHANGE-20260717-002 SSOT] - completed_only=True 明确只用已完成 bar
-            include_realtime=False,
-            completed_only=True,
         )
-
-        bars_15min = pd.DataFrame()
-        try:
-            bars_15min = await self._fetch_md_bars(
-                db, instrument_id,
-                timeframe="15m",
-                adj="qfq",
-                limit=_15MIN_LOOKBACK_BARS,
-                # [Feishu/Monitor] - 恢复保守规则：15m 计算输入非实时，仅用已完成 bar。
-                # [CHANGE-20260717-002 SSOT] - completed_only=True 明确只用已完成 bar
-                include_realtime=False,
-                completed_only=True,
-            )
-        except Exception as exc:
-            logger.warning("15min行情拉取失败 %s: %s", symbol, exc)
+        bars_daily = node_input.daily_bars
+        bars_15min = node_input.bars_15m
 
         # [MonitorBatchService] - 心跳: 行情数据拉取完成
         await self.update_heartbeat(db, evaluation_id)
@@ -729,6 +714,11 @@ class MonitorBatchService:
         # [MonitorBatchService] - 心跳: 指标计算完成
         await self.update_heartbeat(db, evaluation_id)
         await db.flush()
+
+        # [CP-V3-A] 补全 Monitor payload：注入 Node 输入诊断字段（四链可直接比较）
+        # daily/15m count、source hash、adj_factor_hash、availability、degraded_reason
+        if isinstance(curr_state.state, dict):
+            curr_state.state["node_cluster_input"] = NodeClusterInputProvider.to_dict(node_input)
 
         # 获取 prev_state
         prev_state_orm = await monitor_state_repository.get_state(
@@ -1560,6 +1550,22 @@ class MonitorBatchService:
                     first_event.event_type, first_payload
                 )
 
+                # [Task 2] focus_event 贯穿链路：从 first_event.payload 提取 focus 字段
+                #   传递到 capture worker → capture API → 前端 StrategyChart，
+                #   前端据此突出本次触发事件，淡化其他历史结构。
+                #   字段来源：smc_monitor._build_event_draft 写入 payload
+                focus_event_info: dict[str, Any] = {
+                    "focus_event_id": str(first_event.id),
+                    "focus_event_type": first_event.event_type,
+                }
+                if first_payload is not None:
+                    for k in ("anchor_time", "confirmed_time", "level",
+                              "bar_high", "bar_low", "bias", "internal",
+                              "bullish", "eqhl_type", "second_pivot_time"):
+                        v = first_payload.get(k)
+                        if v is not None:
+                            focus_event_info[k] = v
+
                 # [飞书两段式投递] - 生成短期 capture token
                 # 必须携带 scope/instrument_id/user_id，否则 capture API 会 401/403
                 token = create_capture_token(
@@ -1592,6 +1598,8 @@ class MonitorBatchService:
                     "disable_cache": True,
                     # [CHANGE-20260720-003 §三] 贯穿全链的 indicator_view
                     "indicator_view": indicator_view,
+                    # [Task 2] focus_event 透传到前端 URL query
+                    "focus_event": focus_event_info,
                 }
                 try:
                     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -1759,48 +1767,40 @@ class MonitorBatchService:
         Returns:
             PNG 文件路径，失败返回 None
         """
-        from app.services.monitor_chart_renderer import (
-            _load_bollinger_module,
-            render_monitoring_chart,
-        )
+        from app.services.monitor_chart_renderer import render_monitoring_chart
 
-        # 获取日线行情
-        # [Node Cluster] - 描述: 统一走 MarketDataAggregationService，再 tail(N) 保留最近 N 根
-        bars_daily = await self._fetch_md_bars(
-            db, instrument_id,
-            timeframe="1d",
-            adj="qfq",
-            limit=_DAILY_LOOKBACK_BARS,
-            include_realtime=False,
-        )
+        # [CP-V3-A] NodeClusterInputProvider 唯一入口：daily 250 + 15m 4000（completed qfq）
+        # 供 BB 计算、PNG 渲染和 Node Cluster profile 使用（四链一致）
+        node_input = await NodeClusterInputProvider.get_inputs(db, instrument_id)
+        bars_daily = node_input.daily_bars
         if bars_daily.empty or len(bars_daily) < 20:
             logger.debug("日线行情不足，跳过 PNG 渲染: symbol=%s bars=%d", symbol, len(bars_daily))
             return None
 
-        # 计算布林带
+        # [CP-13] 经 canonical 调用 bollinger adapter（v2: DataFrame 11 列）
+        # 替代原 _load_bollinger_module + bb_module.bollinger 直接 kernel 调用。
+        # bb_mid/bb_upper/bb_lower 公式不变，从 DataFrame 提取对应列即可。
         try:
-            bb_module = _load_bollinger_module()
-        except (FileNotFoundError, ImportError) as exc:
-            logger.warning("bollinger features 模块不可用，跳过 PNG 渲染: %s", exc)
-            return None
-
-        try:
-            bb_result = bb_module.bollinger(bars_daily, win=20, k=2.0)
-            # bollinger() 返回 tuple (bb_mid, bb_upper, bb_lower)
-            if isinstance(bb_result, tuple):
-                bb_mid, bb_upper, bb_lower = bb_result
-            else:
-                bb_mid = bb_result["bb_mid"]
-                bb_upper = bb_result["bb_upper"]
-                bb_lower = bb_result["bb_lower"]
+            bb_canonical = await CanonicalComputationService.compute(
+                algorithm_id="bollinger",
+                instrument_id=instrument_id,
+                bars=bars_daily,
+                length=20,
+                mult=2.0,
+            )
+            bb_df = bb_canonical.payload
+            bb_mid = bb_df["bb_mid"]
+            bb_upper = bb_df["bb_upper"]
+            bb_lower = bb_df["bb_lower"]
         except Exception as exc:
             logger.warning("布林带计算失败 symbol=%s: %s", symbol, exc)
             return None
 
         # 计算筹码分布（可选，失败时 profile=None）
+        # [CP-V3-A] 使用 Provider 的 bars_15m（不再内部 fetch 15m）
         profile = None
         try:
-            profile = await self._compute_node_cluster_profile(bars_daily, instrument_id, db)
+            profile = await self._compute_node_cluster_profile(node_input, instrument_id)
         except Exception as exc:
             logger.debug("筹码分布计算失败 symbol=%s（不影响 PNG 渲染）: %s", symbol, exc)
 
@@ -1817,16 +1817,18 @@ class MonitorBatchService:
 
     async def _compute_node_cluster_profile(
         self,
-        bars_daily: pd.DataFrame,
+        node_input: Any,
         instrument_id: uuid.UUID,
-        db: AsyncSession,
     ) -> Any:
         """计算 Node Cluster Profile（筹码分布）。
 
-        [CHANGE-20260718-004 Node Cluster engine] 调用唯一业务入口
-        `node_cluster_engine.compute_node_cluster_profile`，不再直接调用底层
-        `compute_unified_volume_profile`。架构守护测试 test_node_cluster_architecture
-        强制此约束（只有 engine 可导入底层 VP）。
+        [CP-V3-A] Node 输入由 NodeClusterInputProvider 唯一提供（四链统一入口）。
+        不再内部 fetch 15m——使用 node_input.bars_15m 和 node_input.daily_bars。
+        availability 三态状态机由 Provider 预计算；unavailable 时返回 None。
+
+        [CP-13 Canonical 四链迁移] 经 CanonicalComputationService.compute(algorithm_id="node_cluster", ...)
+        调用，不再直接 import compute_node_cluster_profile kernel。adapter 包装
+        `node_cluster_engine.compute_node_cluster_profile`，行为不变。
 
         返回 `NodeClusterProfileResult`，其 `profile_df`/`peak_df`/`price_step` 属性
         通过鸭子类型适配器（engine 内部委托 `_vp_result`）与历史 `UnifiedVolumeProfileResult`
@@ -1837,37 +1839,26 @@ class MonitorBatchService:
         同一监控周期内 daily/15m 输入不变时复用 Profile，避免重复计算。
 
         Args:
-            bars_daily: 日线行情（qfq）
+            node_input: NodeClusterInput（由 Provider 提供，含 bars + hash + availability）
             instrument_id: 标的 UUID
-            db: 异步会话
 
         Returns:
-            NodeClusterProfileResult 对象；15m 数据不可用时返回 None（由上层降级处理）
+            NodeClusterProfileResult 对象；unavailable 或 15m 缺失时返回 None
         """
-        # [CHANGE-20260720-005 §五] kernel 函数经 canonical_adapters re-export，
-        # 满足四链 AST 门禁（禁止直接 import kernel 模块）
-        from app.services.canonical_adapters import compute_node_cluster_profile
         from app.strategy._plotly_mock import ensure_plotly_mock
 
         ensure_plotly_mock()
 
-        # 获取 15min 行情（低周期成交量分配来源）
-        # [Node Cluster] - 描述: 统一走 MarketDataAggregationService，再 tail(N) 保留最近 N 根
-        # [CHANGE-20260718-004] 修复 adj 不一致：原 adj="none" 改为 adj="qfq"，
-        # 与详情链/盘后链统一（completed qfq），符合项目记忆规则
-        # "禁止信任15m/60m/1m行内旧adj_factor作为复权真源; 读取时必须由权威日线因子覆盖"
-        bars_15min = await self._fetch_md_bars(
-            db, instrument_id,
-            timeframe="15m",
-            adj="qfq",
-            limit=_15MIN_LOOKBACK_BARS,
-            include_realtime=False,
-        )
+        # [CP-V3-A] availability 门禁：unavailable 禁止生成 Profile
+        if node_input.availability == "unavailable":
+            return None
+
+        bars_daily = node_input.daily_bars
+        bars_15min = node_input.bars_15m
         if bars_15min.empty:
             return None
 
         # Profile 缓存检查：键为 (instrument_id, daily_last_bar, 15m_last_bar)
-        # 同一监控周期内 daily/15m 输入不变时复用 Profile（_vp_result 保留供 renderer 鸭子类型访问）
         daily_last = str(bars_daily.index[-1]) if not bars_daily.empty else "empty"
         bars_15m_last = str(bars_15min.index[-1]) if not bars_15min.empty else "empty"
         cache_key = (str(instrument_id), daily_last, bars_15m_last)
@@ -1879,10 +1870,14 @@ class MonitorBatchService:
                 return cached_profile
 
         try:
-            profile = compute_node_cluster_profile(
-                bars_daily,
-                bars_15min,
+            # [CP-13] 经 canonical 调用 node_cluster adapter
+            node_cluster_canonical = await CanonicalComputationService.compute(
+                algorithm_id="node_cluster",
+                instrument_id=instrument_id,
+                daily_bars=bars_daily,
+                bars_15m=bars_15min,
             )
+            profile = node_cluster_canonical.payload
         except Exception as e:
             raise RuntimeError(
                 f"compute_node_cluster_profile 失败 instrument_id={instrument_id}: {e}"

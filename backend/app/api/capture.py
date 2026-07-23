@@ -29,7 +29,6 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,13 +43,7 @@ from app.models.instrument import Instrument
 from app.repositories.strategy_event_repository import query_events
 from app.schemas.instrument import InstrumentResponse
 from app.schemas.strategy_event import StrategyEventResponse
-from app.services.indicator_display_frame import (
-    DisplayWindowSpec,
-    build_display_frame,
-    is_display_frame_match,
-)
-from app.services.indicator_service import compute_all_indicators
-from app.services.market_data_aggregation_service import MarketDataAggregationService
+from app.services.chart_snapshot_service import ChartSnapshotService
 
 logger = logging.getLogger("api.capture")
 
@@ -160,15 +153,20 @@ async def get_capture_snapshot(
             detail=f"标的不存在: instrument_id={instrument_id}",
         )
 
-    # 3. 行情：复用 MarketDataAggregationService（与 /bars API 同款 SSOT）
-    bars_service = MarketDataAggregationService()
+    # 3. [CP-V3-B] 调用统一 ChartSnapshotService — 一次 MDAS 读取 → 同一 DataFrame
+    #    生成 bars 和 indicators → render_frame（删除 Capture 二次 MDAS 读取旧路径）
+    #    Capture 硬规则：include_realtime=True, completed_only=False（始终实时聚合）
     try:
-        bars_result = await bars_service.get_bars(
-            db,
-            instrument_id,
+        snapshot_result = await ChartSnapshotService.compute_bars_and_indicators(
+            session=db,
+            instrument_id=instrument_id,
             timeframe=timeframe,
             adj=_CAPTURE_ADJ,
-            include_realtime=True,  # 截图硬规则：始终实时聚合，保证盘中 K线为当前实时数据
+            bars=bars_limit,
+            include_smc=include_smc,
+            include_realtime=True,  # Capture 硬规则：始终实时聚合
+            completed_only=False,
+            adjustment_as_of=None,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -184,10 +182,10 @@ async def get_capture_snapshot(
             detail=f"行情聚合失败: {exc}",
         ) from exc
 
-    # 截取最近 bars_limit 根（与页面显示一致，引用 indicator_contract 唯一真源 INDICATOR_BARS）
-    df: pd.DataFrame = bars_result.bars
-    if not df.empty:
-        df = df.tail(bars_limit)
+    bars_result = snapshot_result.bars_result
+    bars_display_frame = snapshot_result.bars_display_frame
+    indicators = snapshot_result.indicators
+    render_frame = snapshot_result.render_frame
 
     # [capture-realtime] - 实时聚合日志：timeframe/data_source/is_partial/last_live_bar_time
     logger.info(
@@ -200,97 +198,9 @@ async def get_capture_snapshot(
 
     # [capture-realtime] - 周期透传：_df_to_responses 必须按 URL timeframe 格式化
     # （15m/1h 用 trade_time，1d/1w/1mo 用 trade_date，禁止回退 _CAPTURE_TIMEFRAME）
-    bars_items = _df_to_responses(df, instrument_id, timeframe)
+    bars_items = _df_to_responses(snapshot_result.page_df, instrument_id, timeframe)
 
-    # [PROMPT.md §二 V2] 构建 bars DisplayWindowSpec（与 bars API 同款）和 bars display_frame
-    #   Capture 必须基于同一 Spec 生成 bars display_frame，并与 indicators display_frame 比对，
-    #   返回 render_frame.matched。false 不得 Ready（前端 CaptureStockPage 据此设置 data-render-ready）。
-    bars_spec = DisplayWindowSpec(
-        instrument_id=str(instrument_id),
-        timeframe=timeframe,
-        adj=_CAPTURE_ADJ,
-        requested_count=bars_limit,
-        include_realtime=True,  # Capture 硬规则：始终实时聚合
-        completed_only=False,
-        adjustment_as_of=None,
-    )
-    bars_completed_through: str | None = None
-    if bars_result.completed_through is not None:
-        ct = bars_result.completed_through
-        bars_completed_through = (
-            ct.isoformat() if hasattr(ct, "isoformat") else str(ct)
-        )
-    bars_display_frame = build_display_frame(
-        instrument_id=str(instrument_id),
-        timeframe=timeframe,
-        adj=_CAPTURE_ADJ,
-        display_df=df,
-        completed_through=bars_completed_through,
-        spec=bars_spec,
-        is_partial=bars_result.is_partial,
-    )
-
-    # 4. 指标：复用 compute_all_indicators（与 /indicators API 同款），周期与 bars 根数按 timeframe 透传
-    # [CHANGE-20260720-Phase4 §四] indicator_view=smc 时透传 include_smc=True
-    #   - smc 视图需要 BOS/CHoCH/OB/EQH/EQL/trailing 数据支撑前端 SMC 图层渲染
-    #   - 其他视图 include_smc=False（默认值），跳过 SMC 计算（0 CPU 消耗）
-    # [PROMPT.md §二 V2] 透传 include_realtime=True（Capture 硬规则：始终实时聚合）
-    try:
-        indicators = await compute_all_indicators(
-            session=db,
-            instrument_id=instrument_id,
-            timeframe=timeframe,
-            adj=_CAPTURE_ADJ,
-            bars=bars_limit,
-            include_smc=include_smc,
-            include_realtime=True,  # Capture 硬规则：始终实时聚合
-            completed_only=False,
-            adjustment_as_of=None,
-        )
-    except Exception as exc:
-        logger.warning(
-            "Capture 指标计算失败 instrument_id=%s indicator_view=%s include_smc=%s: %s",
-            instrument_id, resolved_indicator_view, include_smc, exc,
-        )
-        # 指标失败不阻塞截图（行情已就绪），返回空指标 + 错误信息
-        indicators = {"layers": [], "data": {}, "errors": {"_capture": str(exc)}}
-
-    # [PROMPT.md §二 V2 render_frame.matched] 服务端校验 bars vs indicators display_frame
-    #   false 不得 Ready，禁止 Capture 继续绕过合同。
-    indicators_display_frame = indicators.get("display_frame") if isinstance(indicators, dict) else None
-    render_matched = is_display_frame_match(bars_display_frame, indicators_display_frame)
-    if not render_matched:
-        logger.warning(
-            "[Capture] render_frame mismatch instrument_id=%s timeframe=%s "
-            "bars_hash=%s indicators_hash=%s "
-            "bars_count=%s indicators_count=%s "
-            "bars_first=%s indicators_first=%s "
-            "bars_last=%s indicators_last=%s",
-            instrument_id, timeframe,
-            bars_display_frame.get("display_hash"),
-            (indicators_display_frame or {}).get("display_hash"),
-            bars_display_frame.get("actual_count"),
-            (indicators_display_frame or {}).get("actual_count"),
-            bars_display_frame.get("first_time"),
-            (indicators_display_frame or {}).get("first_time"),
-            bars_display_frame.get("last_time"),
-            (indicators_display_frame or {}).get("last_time"),
-        )
-    render_frame = {
-        "matched": render_matched,
-        "bars_hash": bars_display_frame.get("display_hash") or "",
-        "indicators_hash": (indicators_display_frame or {}).get("display_hash") or "",
-        "bars_count": bars_display_frame.get("actual_count"),
-        "indicators_count": (indicators_display_frame or {}).get("actual_count"),
-        "bars_first_time": bars_display_frame.get("first_time"),
-        "indicators_first_time": (indicators_display_frame or {}).get("first_time"),
-        "bars_last_time": bars_display_frame.get("last_time"),
-        "indicators_last_time": (indicators_display_frame or {}).get("last_time"),
-        "bars_adjustment_as_of": bars_display_frame.get("adjustment_as_of"),
-        "indicators_adjustment_as_of": (indicators_display_frame or {}).get("adjustment_as_of"),
-    }
-
-    # 5. 事件：复用 query_events（与 /instruments/{id}/events 同款）
+    # 4. 事件：复用 query_events（与 /instruments/{id}/events 同款）
     try:
         events = await query_events(
             db,
@@ -379,9 +289,9 @@ if __name__ == "__main__":
 
     # 验证依赖导入
     assert callable(get_capture_token_payload), "get_capture_token_payload 应可导入"
-    assert callable(compute_all_indicators), "compute_all_indicators 应可导入"
     assert callable(_df_to_responses), "_df_to_responses 应可导入"
     assert callable(query_events), "query_events 应可导入"
+    assert callable(ChartSnapshotService.compute_bars_and_indicators), "ChartSnapshotService.compute_bars_and_indicators 应可导入"
     print("依赖导入 OK")
 
     # 验证常量（bars_limit 引用 indicator_contract 唯一真源）
@@ -390,20 +300,6 @@ if __name__ == "__main__":
     assert CHART_BARS_COUNT == 250, f"CHART_BARS_COUNT 应为 250，实际 {CHART_BARS_COUNT}"
     print(f"常量: timeframe={_CAPTURE_TIMEFRAME} adj={_CAPTURE_ADJ} bars={CHART_BARS_COUNT}")
 
-    # [PROMPT.md §二 V2] 验证 DisplayWindowSpec / is_display_frame_match 导入
-    assert callable(build_display_frame), "build_display_frame 应可导入"
-    assert callable(is_display_frame_match), "is_display_frame_match 应可导入"
-    # DisplayWindowSpec 是 dataclass，验证可构造
-    spec = DisplayWindowSpec(
-        instrument_id="test",
-        timeframe="1d",
-        adj="qfq",
-        requested_count=250,
-        include_realtime=True,
-        completed_only=False,
-        adjustment_as_of=None,
-    )
-    assert spec.to_cache_suffix() == "rt1co0aoNone", \
-        f"to_cache_suffix 应为 'rt1co0aoNone'，实际 {spec.to_cache_suffix()}"
-    print(f"DisplayWindowSpec + is_display_frame_match 导入 OK，suffix={spec.to_cache_suffix()}")
+    # [CP-V3-B] DisplayWindowSpec / build_display_frame / is_display_frame_match
+    # 已下沉到 ChartSnapshotService 内部，capture 端点不再直接引用
     print("OK")

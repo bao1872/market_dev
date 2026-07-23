@@ -1,0 +1,45 @@
+# Node Cluster 输入合同（机器可执行）
+# PRD V2.0 §7.2 / §3 NC-01/NC-02/NC-03
+# 对应代码：backend/app/services/indicator_service.py::_load_node_cluster_inputs
+# 最后更新：CP-14
+---
+contract_id: node-cluster-input
+version: 2
+as_of: 2026-07-21
+
+# 固定参数（禁止显示需求污染）
+parameters:
+  daily:
+    timeframe: "1d"
+    limit: 250              # DAILY_HISTORY_BARS（合同常量，非页面 bars 参数）
+    include_realtime: false # NC-01: Node daily 不得实时
+    completed_only: true    # NC-01: Node daily 必须 completed
+    adj: qfq                # NC-01: Node daily 必须 qfq
+  low_timeframe:
+    timeframe: "15m"
+    limit: 4000             # NODE_CLUSTER_LOW_BARS（合同常量）
+    include_realtime: false # NC-02: Node 15m 不得实时
+    completed_only: true    # NC-02: Node 15m 必须 completed
+    adj: qfq                # NC-02: Node 15m 必须 qfq
+
+# 60/90/120 显示窗口隔离（NC-03）
+display_window_isolation:
+  - 90 是前端 defaultVisibleBars（飞书舞台），不传后端 API
+  - 250 是 DAILY_HISTORY_BARS（Node daily 输入合同常量）
+  - 4000 是 NODE_CLUSTER_LOW_BARS（Node 15m 输入合同常量）
+  - 60/90/120 不得出现在 Node Cluster 输入合同中
+
+# 输出
+output:
+  daily_bars: "pd.DataFrame tail(250)"
+  bars_15min: "pd.DataFrame (load_15m=False 时为空)"
+  daily_source_bar_hash: "str | None（供 canonical result_hash）"
+  daily_adj_factor_hash: "str | None（供 canonical result_hash）"
+
+# 执行测试
+enforcement:
+  - "tests/test_node_cluster_input_isolation.py（4 个合同验证 + 60/90/120 不变性）"
+  - "tests/test_algorithm_registry_architecture.py::TestFourChainDirectImportGate（AST 门禁）"
+
+# CI 门禁
+ci_gate: "Node 不得读取显示窗口；Node daily/15m 不得实时"

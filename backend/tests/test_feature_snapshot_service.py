@@ -34,6 +34,30 @@ from app.services.feature_snapshot_service import (
     compute_feature_snapshot_for_date,
     upsert_snapshot,
 )
+from app.services.node_cluster_input_provider import NodeClusterInput
+from app.services.structural_factor_service import _compute_all_factors_for_bars
+
+# [PROMPT-V3 Task 3] 14 个 SMC freshness 因子键（BOS 4 + CHoCH 4 + OB touch 4 + EQH 1 + EQL 1）
+_EXPECTED_SMC_FRESHNESS_KEYS: set[str] = {
+    # BOS (4)
+    "smc_bos_bullish_internal_freshness_bars",
+    "smc_bos_bullish_swing_freshness_bars",
+    "smc_bos_bearish_internal_freshness_bars",
+    "smc_bos_bearish_swing_freshness_bars",
+    # CHoCH (4)
+    "smc_choch_bullish_internal_freshness_bars",
+    "smc_choch_bullish_swing_freshness_bars",
+    "smc_choch_bearish_internal_freshness_bars",
+    "smc_choch_bearish_swing_freshness_bars",
+    # OB touch (4)
+    "smc_order_block_touch_bullish_internal_freshness_bars",
+    "smc_order_block_touch_bullish_swing_freshness_bars",
+    "smc_order_block_touch_bearish_internal_freshness_bars",
+    "smc_order_block_touch_bearish_swing_freshness_bars",
+    # EQH/EQL (2)
+    "smc_eqh_freshness_bars",
+    "smc_eql_freshness_bars",
+}
 
 # ===== 1. build_summary_payload =====
 
@@ -1039,6 +1063,44 @@ def _build_15m_bars(n: int = 1000, seed: int = 7) -> pd.DataFrame:
     }, index=idx)
 
 
+def _build_node_input(
+    *,
+    daily_bars: pd.DataFrame | None = None,
+    bars_15m: pd.DataFrame | None = None,
+    availability: str = "available",
+    degraded_reason: str | None = None,
+    daily_count: int | None = None,
+    m15_count: int | None = None,
+    adjustment_as_of: date | None = None,
+) -> NodeClusterInput:
+    """[CP-V3-A] 构造 mock NodeClusterInput（4 个 Node 状态测试共用）。
+
+    默认返回 available 态 + 250 daily + 4000 15m bars，调用方可覆盖任一字段。
+    count 默认从 bars 长度推断；空 DataFrame 须显式传 daily_count/m15_count。
+    """
+    if daily_bars is None:
+        daily_bars = _build_daily_bars(n=250)
+    if bars_15m is None:
+        bars_15m = _build_15m_bars(n=4000)
+    return NodeClusterInput(
+        daily_bars=daily_bars,
+        bars_15m=bars_15m,
+        daily_source_hash="mock_daily_hash",
+        daily_adj_factor_hash="mock_daily_adj",
+        m15_source_hash="mock_m15_hash",
+        m15_adj_factor_hash="mock_m15_adj",
+        daily_count=daily_count if daily_count is not None else len(daily_bars),
+        m15_count=m15_count if m15_count is not None else len(bars_15m),
+        daily_requested=250,
+        m15_requested=4000,
+        daily_history_exhausted=False,
+        m15_history_exhausted=False,
+        availability=availability,
+        degraded_reason=degraded_reason,
+        adjustment_as_of=adjustment_as_of,
+    )
+
+
 @pytest.mark.asyncio
 async def test_compute_snapshot_writes_node_cluster_available_state() -> None:
     """日线 + 15m 齐全且 profile 非空 → node_cluster.availability='available'。"""
@@ -1053,10 +1115,23 @@ async def test_compute_snapshot_writes_node_cluster_available_state() -> None:
     mock_result.first.return_value = ("000001",)
     mock_session.execute = AsyncMock(return_value=mock_result)
 
-    snapshot = await compute_feature_snapshot_for_date(
-        mock_session, uuid.uuid4(), target_date,
-        primary_bars=daily, secondary_bars=bars_15m,
+    # [CP-V3-A] mock NodeClusterInputProvider.get_inputs 返回 available 态 + 完整 250+4000 bars。
+    # primary_bars/secondary_bars 仅供 structural factors 计算使用；
+    # node_cluster 输入由 Provider 唯一提供（四链统一入口）。
+    mock_node_input = _build_node_input(
+        daily_bars=_build_daily_bars(n=250),
+        bars_15m=_build_15m_bars(n=4000),
+        availability="available",
+        adjustment_as_of=target_date,
     )
+    with patch(
+        "app.services.feature_snapshot_service.NodeClusterInputProvider.get_inputs",
+        AsyncMock(return_value=mock_node_input),
+    ):
+        snapshot = await compute_feature_snapshot_for_date(
+            mock_session, uuid.uuid4(), target_date,
+            primary_bars=daily, secondary_bars=bars_15m,
+        )
 
     # schema_version 必须 bump 到 4
     assert _SCHEMA_VERSION == 4
@@ -1098,7 +1173,7 @@ async def test_compute_snapshot_writes_node_cluster_available_state() -> None:
 
 @pytest.mark.asyncio
 async def test_compute_snapshot_writes_node_cluster_missing_15m_state() -> None:
-    """日线齐全但 15m bars 为空 → availability='degraded', degraded_reason='MISSING_15M_BARS'。"""
+    """日线齐全但 15m bars 为空 → availability='unavailable', degraded_reason='MISSING_15M_BARS'。"""
     daily = _build_daily_bars(n=250)
     target_date = daily.index[200].date()
     empty_15m = pd.DataFrame()
@@ -1108,21 +1183,32 @@ async def test_compute_snapshot_writes_node_cluster_missing_15m_state() -> None:
     mock_result.first.return_value = ("000001",)
     mock_session.execute = AsyncMock(return_value=mock_result)
 
-    snapshot = await compute_feature_snapshot_for_date(
-        mock_session, uuid.uuid4(), target_date,
-        primary_bars=daily, secondary_bars=empty_15m,
+    # [CP-V3-A] mock NodeClusterInputProvider.get_inputs 返回 unavailable/MISSING_15M_BARS。
+    # 新状态机：15m=0 直接 unavailable，禁止调用 engine 生成看似正常的 Profile。
+    mock_node_input = _build_node_input(
+        daily_bars=_build_daily_bars(n=250),
+        bars_15m=empty_15m,
+        availability="unavailable",
+        degraded_reason="MISSING_15M_BARS",
+        daily_count=250,
+        m15_count=0,
+        adjustment_as_of=target_date,
     )
+    with patch(
+        "app.services.feature_snapshot_service.NodeClusterInputProvider.get_inputs",
+        AsyncMock(return_value=mock_node_input),
+    ):
+        snapshot = await compute_feature_snapshot_for_date(
+            mock_session, uuid.uuid4(), target_date,
+            primary_bars=daily, secondary_bars=empty_15m,
+        )
 
     sp = snapshot.structural_payload
     nc = sp["primary"]["1d"].get("node_cluster")
-    # 15m 缺失时，engine 仍尝试用空 df 计算；如果生成 profile_rows，则为 degraded；否则为 unavailable
     assert nc is not None, "node_cluster 字段必须写入（即使 15m 缺失）"
-    assert nc["availability"] in ("degraded", "unavailable")
-    if nc["availability"] == "degraded":
-        assert nc["degraded_reason"] == "MISSING_15M_BARS"
-    else:
-        # engine 用空 15m 无法生成 profile → unavailable/PROFILE_EMPTY
-        assert nc["degraded_reason"] == "PROFILE_EMPTY"
+    # [CP-V3-A] 新状态机：15m=0 → unavailable/MISSING_15M_BARS（不再生成 PROFILE_EMPTY）
+    assert nc["availability"] == "unavailable"
+    assert nc["degraded_reason"] == "MISSING_15M_BARS"
 
 
 @pytest.mark.asyncio
@@ -1136,20 +1222,39 @@ async def test_compute_snapshot_writes_node_cluster_insufficient_daily_state() -
     mock_result.first.return_value = ("000001",)
     mock_session.execute = AsyncMock(return_value=mock_result)
 
-    snapshot = await compute_feature_snapshot_for_date(
-        mock_session, uuid.uuid4(), target_date,
-        primary_bars=short_daily, secondary_bars=short_daily,
+    # [CP-V3-A] mock NodeClusterInputProvider.get_inputs 返回 unavailable/INSUFFICIENT_DAILY_BARS。
+    # Provider 状态机检测到 daily<10 时直接 unavailable，禁止调用 engine。
+    mock_node_input = _build_node_input(
+        daily_bars=short_daily,
+        bars_15m=_build_15m_bars(n=4000),
+        availability="unavailable",
+        degraded_reason="INSUFFICIENT_DAILY_BARS",
+        daily_count=5,
+        m15_count=4000,
+        adjustment_as_of=target_date,
     )
+    with patch(
+        "app.services.feature_snapshot_service.NodeClusterInputProvider.get_inputs",
+        AsyncMock(return_value=mock_node_input),
+    ):
+        snapshot = await compute_feature_snapshot_for_date(
+            mock_session, uuid.uuid4(), target_date,
+            primary_bars=short_daily, secondary_bars=short_daily,
+        )
 
     sp = snapshot.structural_payload
     nc = sp["primary"]["1d"].get("node_cluster")
     assert nc is not None, "node_cluster 字段必须写入（即使日线不足）"
     assert nc["availability"] == "unavailable"
     assert nc["degraded_reason"] == "INSUFFICIENT_DAILY_BARS"
-    # 诊断字段为 None
+    # profile 相关字段为 None（engine 未运行）
     assert nc["poc_price"] is None
     assert nc["profile_hash"] is None
-    assert nc["daily_source_hash"] is None
+    # [CP-V3-A] count/hash 仍从 Provider 写入（四链一致诊断字段，不再为 None）
+    assert nc["daily_source_hash"] == "mock_daily_hash"
+    assert nc["bars_15m_source_hash"] == "mock_m15_hash"
+    assert nc["daily_bars_count"] == 5
+    assert nc["bars_15m_count"] == 4000
     # [PROMPT.md §5.2.2 V2] profile 为空时 price_state 仍写入最小结构
     assert "price_state" in nc, "unavailable 态也必须包含 price_state"
     ps = nc["price_state"]
@@ -1176,8 +1281,20 @@ async def test_compute_snapshot_node_cluster_field_stable_when_engine_raises() -
     mock_result.first.return_value = ("000001",)
     mock_session.execute = AsyncMock(return_value=mock_result)
 
+    # [CP-V3-A] mock Provider 返回 available 态，让 engine 真正被调用后抛异常 → 验证 COMPUTE_FAILED 降级
+    mock_node_input = _build_node_input(
+        daily_bars=_build_daily_bars(n=250),
+        bars_15m=_build_15m_bars(n=4000),
+        availability="available",
+        adjustment_as_of=target_date,
+    )
+    # [CP-13] 迁移到 canonical 后，patch compute_node_cluster_adapter（仅 node_cluster 失败）
+    # 其他算法（structural_features/macd/bollinger/relation）仍走真实 canonical 路径。
     with patch(
-        "app.services.feature_snapshot_service.compute_node_cluster_profile",
+        "app.services.feature_snapshot_service.NodeClusterInputProvider.get_inputs",
+        AsyncMock(return_value=mock_node_input),
+    ), patch(
+        "app.services.canonical_adapters.compute_node_cluster_adapter",
         side_effect=RuntimeError("mocked engine failure"),
     ):
         snapshot = await compute_feature_snapshot_for_date(
@@ -1194,3 +1311,196 @@ async def test_compute_snapshot_node_cluster_field_stable_when_engine_raises() -
     assert "mocked engine failure" in nc["degraded_reason"]
     # degraded_reasons 也应记录
     assert any("node_cluster" in r and "engine failed" in r for r in snapshot.degraded_reasons)
+
+
+# ===== [PROMPT-V3 Task 3] SMC 因子持久化验证 =====
+#
+# 验证 _compute_all_factors_for_bars → factors["smc_freshness"]
+#      → Feature Snapshot primary_payload → 持久化后重新读取
+# 断言 14 个因子键全部存在（int 或 null），方向和 internal/swing 序列化后不丢失。
+
+
+def _assert_14_smc_keys(smc_freshness: Any, *, context: str) -> None:
+    """断言 14 个 SMC freshness 因子键全部存在，值为 int 或 None，方向/internal-swing 不丢失。"""
+    assert isinstance(smc_freshness, dict), f"[{context}] smc_freshness 必须为 dict"
+    actual_keys = set(smc_freshness.keys())
+    missing = _EXPECTED_SMC_FRESHNESS_KEYS - actual_keys
+    extra = actual_keys - _EXPECTED_SMC_FRESHNESS_KEYS
+    assert not missing, f"[{context}] 缺失因子键: {sorted(missing)}"
+    assert not extra, f"[{context}] 多出未知因子键: {sorted(extra)}"
+
+    # 值类型断言：int 或 None（从未发生）
+    for key, val in smc_freshness.items():
+        assert val is None or isinstance(val, int), (
+            f"[{context}] 因子 {key} 值必须为 int 或 None，实际为 {type(val).__name__}: {val!r}"
+        )
+
+    # 方向（bullish/bearish）和结构级别（internal/swing）必须在键名中保留
+    # BOS / CHoCH / OB touch 各 4 个：bullish/bearish × internal/swing
+    for prefix in ("smc_bos", "smc_choch", "smc_order_block_touch"):
+        for direction in ("bullish", "bearish"):
+            for level in ("internal", "swing"):
+                key = f"{prefix}_{direction}_{level}_freshness_bars"
+                assert key in smc_freshness, (
+                    f"[{context}] 方向/级别组合缺失: {key}"
+                )
+    # EQH / EQL 无 internal/swing 拆分
+    assert "smc_eqh_freshness_bars" in smc_freshness
+    assert "smc_eql_freshness_bars" in smc_freshness
+
+
+def test_smc_freshness_factors_direct_computation() -> None:
+    """[PROMPT-V3 Task 3] 直接调用 _compute_all_factors_for_bars 验证 14 个 SMC 因子键。
+
+    覆盖 PROMPT.md §三：BOS 4 + CHoCH 4 + OB touch 4 + EQH 1 + EQL 1。
+    使用含趋势切换的合成日线数据，确保至少部分因子被触发（非全 null）。
+    """
+    # 构造 300 根日线，含趋势切换（每 50 根切换方向），触发 BOS/CHoCH/OB
+    rng = np.random.default_rng(42)
+    n = 300
+    dates = pd.bdate_range(start="2024-01-01", periods=n)
+    close = 100.0
+    closes: list[float] = [close]
+    for i in range(1, n):
+        trend = 0.3 if (i // 50) % 2 == 0 else -0.3
+        noise = rng.normal(0, 1.5)
+        close = max(5.0, close + trend + noise)
+        closes.append(close)
+    closes_arr = np.array(closes)
+    opens = closes_arr - rng.normal(0, 0.5, n)
+    highs = np.maximum(opens, closes_arr) + rng.uniform(0.1, 1.0, n)
+    lows = np.minimum(opens, closes_arr) - rng.uniform(0.1, 1.0, n)
+    volumes = rng.integers(100000, 500000, n).astype(float)
+    amounts = volumes * closes_arr
+    bars = pd.DataFrame(
+        {"open": opens, "high": highs, "low": lows, "close": closes_arr,
+         "volume": volumes, "amount": amounts, "adj_factor": [1.0] * n},
+        index=pd.DatetimeIndex(dates, name="trade_date"),
+    )
+
+    degraded_reasons: list[str] = []
+    warmup_notes: list[str] = []
+    factors = _compute_all_factors_for_bars(
+        bars, timeframe="1d",
+        degraded_reasons=degraded_reasons,
+        warmup_notes=warmup_notes,
+    )
+
+    # smc_freshness 必须存在且包含 14 个键
+    assert "smc_freshness" in factors, "factors 必须包含 smc_freshness 顶层键"
+    _assert_14_smc_keys(factors["smc_freshness"], context="直接计算")
+
+    # 15m 周期不应计算 smc_freshness（仅 1d 周期计算）
+    factors_15m = _compute_all_factors_for_bars(
+        bars, timeframe="15m",
+        degraded_reasons=[], warmup_notes=[],
+    )
+    assert factors_15m["smc_freshness"] is None, "15m 周期不应计算 smc_freshness"
+
+
+@pytest.mark.asyncio
+async def test_smc_freshness_factors_persist_through_snapshot(
+    db_session: AsyncSession,
+) -> None:
+    """[PROMPT-V3 Task 3] 验证 14 个 SMC 因子经 compute_feature_snapshot_for_date
+    → primary_payload → upsert_snapshot → 重新读取后仍保留，方向/internal-swing 不丢失。
+
+    链路：
+      _compute_all_factors_for_bars → factors["smc_freshness"]
+      → Feature Snapshot structural_payload["primary"]["1d"]["smc_freshness"]
+      → upsert_snapshot 写入 stock_feature_snapshots.structural_payload (JSONB)
+      → 重新查询读取 → 反序列化后的 dict 仍含 14 个键
+    """
+    from app.models.instrument import Instrument
+
+    # 构造 300 根含趋势切换的日线（与直接计算测试一致）
+    rng = np.random.default_rng(42)
+    n = 300
+    dates = pd.bdate_range(start="2024-01-01", periods=n)
+    close = 100.0
+    closes: list[float] = [close]
+    for i in range(1, n):
+        trend = 0.3 if (i // 50) % 2 == 0 else -0.3
+        noise = rng.normal(0, 1.5)
+        close = max(5.0, close + trend + noise)
+        closes.append(close)
+    closes_arr = np.array(closes)
+    opens = closes_arr - rng.normal(0, 0.5, n)
+    highs = np.maximum(opens, closes_arr) + rng.uniform(0.1, 1.0, n)
+    lows = np.minimum(opens, closes_arr) - rng.uniform(0.1, 1.0, n)
+    volumes = rng.integers(100000, 500000, n).astype(float)
+    amounts = volumes * closes_arr
+    daily_bars = pd.DataFrame(
+        {"open": opens, "high": highs, "low": lows, "close": closes_arr,
+         "volume": volumes, "amount": amounts, "adj_factor": [1.0] * n},
+        index=pd.DatetimeIndex(dates, name="trade_date"),
+    )
+
+    target_date = daily_bars.index[250].date()
+
+    # mock session（compute_feature_snapshot_for_date 只需 instrument symbol 查询）
+    mock_session = MagicMock()
+    mock_result = MagicMock()
+    mock_result.first.return_value = ("000001",)
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    # 计算 snapshot（内部调用 _compute_all_factors_for_bars → smc_freshness）
+    snapshot = await compute_feature_snapshot_for_date(
+        mock_session,
+        uuid.uuid4(),
+        target_date,
+        primary_bars=daily_bars,
+        secondary_bars=daily_bars,  # 简化：副周期复用日线
+    )
+
+    # 阶段 1：snapshot.structural_payload["primary"]["1d"]["smc_freshness"] 必须含 14 键
+    sp = snapshot.structural_payload
+    assert isinstance(sp, dict), "structural_payload 必须为 dict"
+    assert "primary" in sp, "structural_payload 必须含 primary"
+    assert "1d" in sp["primary"], "primary 必须含 1d 周期"
+    primary_1d = sp["primary"]["1d"]
+    assert "smc_freshness" in primary_1d, "primary.1d 必须含 smc_freshness"
+    _assert_14_smc_keys(primary_1d["smc_freshness"], context="snapshot 内存对象")
+
+    # 记录内存中的值，用于和持久化后对比
+    in_memory_smc = dict(primary_1d["smc_freshness"])
+
+    # 阶段 2：写入 DB（需要先创建 instrument 满足外键约束）
+    inst = Instrument(
+        id=snapshot.instrument_id,
+        symbol="SMCTEST001",
+        name="SMC 持久化测试",
+        market="SH",
+        status="active",
+    )
+    db_session.add(inst)
+    await db_session.flush()
+
+    # snapshot.source_run_id 保持 None，避免触发 published run 保护
+    await upsert_snapshot(db_session, snapshot)
+    await db_session.flush()
+
+    # 阶段 3：重新从 DB 读取
+    stmt = select(StockFeatureSnapshot).where(
+        StockFeatureSnapshot.instrument_id == snapshot.instrument_id,
+        StockFeatureSnapshot.trade_date == target_date,
+    )
+    rows = (await db_session.execute(stmt)).scalars().all()
+    assert len(rows) == 1, "upsert 后应只有一行 snapshot"
+    persisted = rows[0]
+
+    persisted_sp = persisted.structural_payload
+    assert isinstance(persisted_sp, dict), "持久化后 structural_payload 必须为 dict"
+    persisted_primary_1d = persisted_sp["primary"]["1d"]
+    assert "smc_freshness" in persisted_primary_1d, "持久化后 primary.1d 仍必须含 smc_freshness"
+
+    persisted_smc = persisted_primary_1d["smc_freshness"]
+    _assert_14_smc_keys(persisted_smc, context="DB 反序列化后")
+
+    # 阶段 4：值必须与内存中完全一致（JSON 序列化/反序列化无损）
+    for key in _EXPECTED_SMC_FRESHNESS_KEYS:
+        mem_val = in_memory_smc[key]
+        db_val = persisted_smc[key]
+        assert mem_val == db_val, (
+            f"因子 {key} 持久化后值变化: 内存={mem_val!r} → DB={db_val!r}"
+        )

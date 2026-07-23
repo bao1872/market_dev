@@ -112,6 +112,8 @@ def _make_spy_mdas(called_timeframes: list[str]) -> type:
     """构造 spy MarketDataAggregationService，记录 get_bars 调用的 timeframe。
 
     用于验证特定 timeframe 的 get_bars 是否被调用（替代旧的私有函数 spy）。
+    [CP-V3-A] 包含 source_bar_hash/adj_factor_hash/history_exhausted 字段，
+    供 NodeClusterInputProvider 使用时返回 availability=available。
     """
     from datetime import datetime
 
@@ -134,6 +136,9 @@ def _make_spy_mdas(called_timeframes: list[str]) -> type:
                 freshness_seconds=0.0,
                 degraded=False,
                 degraded_reason=None,
+                source_bar_hash=f"spy_{timeframe}_hash",
+                adj_factor_hash=f"spy_{timeframe}_adj",
+                history_exhausted=False,
             )
 
     return _SpyMDAS
@@ -617,7 +622,7 @@ def test_map_daily_to_intraday_staircase() -> None:
     assert result == [11.0, 11.0, 12.0, 12.0], f"unexpected mapping: {result}"
 
 
-def test_adapt_watchlist_bb_daily_preserved() -> None:
+async def test_adapt_watchlist_bb_daily_preserved() -> None:
     """日线 timeframe 保留完整 BB 序列与 time 字段。"""
     indicators = {
         "bb_upper": [1.0, 2.0, 3.0, 4.0, 5.0],
@@ -628,7 +633,7 @@ def test_adapt_watchlist_bb_daily_preserved() -> None:
     daily_time_list = ["t1", "t2", "t3", "t4", "t5"]
     macd_bars = pd.DataFrame()
     macd_time_list: list[str] = []
-    result = indicator_service._adapt_watchlist_bb(
+    result = await indicator_service._adapt_watchlist_bb(
         indicators, "1d", macd_bars, macd_time_list, daily_time_list,
     )
     assert result["bb_upper"] == [1.0, 2.0, 3.0, 4.0, 5.0]
@@ -636,7 +641,7 @@ def test_adapt_watchlist_bb_daily_preserved() -> None:
     assert result["upper_node"] == {"price_mid": 10.0}
 
 
-def test_adapt_watchlist_bb_15m_uses_macd_bars_not_daily_staircase() -> None:
+async def test_adapt_watchlist_bb_15m_uses_macd_bars_not_daily_staircase() -> None:
     """[PR #31] - 15m BB 必须用 macd_bars 计算，不再映射日线阶梯线。
 
     修复根因：之前 _adapt_watchlist_bb 在 15m 路径下调用 _map_daily_to_intraday，
@@ -668,7 +673,7 @@ def test_adapt_watchlist_bb_15m_uses_macd_bars_not_daily_staircase() -> None:
         "volume": [100000] * 25,
     }, index=pd.to_datetime(macd_times))
 
-    result = indicator_service._adapt_watchlist_bb(
+    result = await indicator_service._adapt_watchlist_bb(
         indicators, "15m", macd_bars, macd_times, daily_time_list,
     )
 
@@ -700,7 +705,7 @@ def test_adapt_watchlist_bb_15m_uses_macd_bars_not_daily_staircase() -> None:
     assert len(result["bb_lower"]) == len(macd_times)
 
 
-def test_adapt_watchlist_bb_1h_uses_macd_bars_not_daily_staircase() -> None:
+async def test_adapt_watchlist_bb_1h_uses_macd_bars_not_daily_staircase() -> None:
     """[PR #31] - 1h BB 同样用 macd_bars 计算，不映射日线阶梯线。"""
     indicators = {
         "bb_upper": [10.0, 11.0, 12.0],
@@ -723,7 +728,7 @@ def test_adapt_watchlist_bb_1h_uses_macd_bars_not_daily_staircase() -> None:
         "volume": [100000] * 25,
     }, index=pd.to_datetime(macd_times))
 
-    result = indicator_service._adapt_watchlist_bb(
+    result = await indicator_service._adapt_watchlist_bb(
         indicators, "1h", macd_bars, macd_times, daily_time_list,
     )
 
@@ -735,7 +740,7 @@ def test_adapt_watchlist_bb_1h_uses_macd_bars_not_daily_staircase() -> None:
     )
 
 
-def test_adapt_watchlist_bb_15m_bb_matches_compute_bollinger() -> None:
+async def test_adapt_watchlist_bb_15m_bb_matches_compute_bollinger() -> None:
     """[PR #31] - 15m BB 与 compute_bollinger(macd_bars) 计算结果一致。
 
     验证 _adapt_watchlist_bb 内部调用了 compute_bollinger(macd_bars)，
@@ -761,7 +766,7 @@ def test_adapt_watchlist_bb_15m_bb_matches_compute_bollinger() -> None:
         "volume": [100000] * 25,
     }, index=pd.to_datetime(macd_times))
 
-    result = indicator_service._adapt_watchlist_bb(
+    result = await indicator_service._adapt_watchlist_bb(
         indicators, "15m", macd_bars, macd_times, daily_time_list,
     )
 
@@ -779,7 +784,7 @@ def test_adapt_watchlist_bb_15m_bb_matches_compute_bollinger() -> None:
     )
 
 
-def test_adapt_watchlist_bb_1w_uses_macd_bars_not_removed() -> None:
+async def test_adapt_watchlist_bb_1w_uses_macd_bars_not_removed() -> None:
     """[PR #32] - 1w BB 必须用 macd_bars 计算，不再移除 BB 字段。
 
     修复根因：之前 _adapt_watchlist_bb 在 1w/1mo 路径直接 pop BB 字段，
@@ -802,7 +807,7 @@ def test_adapt_watchlist_bb_1w_uses_macd_bars_not_removed() -> None:
         "volume": [1000000] * 25,
     }, index=pd.to_datetime(macd_times))
 
-    result = indicator_service._adapt_watchlist_bb(
+    result = await indicator_service._adapt_watchlist_bb(
         indicators, "1w", macd_bars, macd_times, [],
     )
 
@@ -826,7 +831,7 @@ def test_adapt_watchlist_bb_1w_uses_macd_bars_not_removed() -> None:
     )
 
 
-def test_adapt_watchlist_bb_1mo_uses_macd_bars_not_removed() -> None:
+async def test_adapt_watchlist_bb_1mo_uses_macd_bars_not_removed() -> None:
     """[PR #32] - 1mo BB 同样用 macd_bars 计算，不移除。"""
     indicators = {
         "bb_upper": [10.0, 11.0, 12.0],
@@ -843,7 +848,7 @@ def test_adapt_watchlist_bb_1mo_uses_macd_bars_not_removed() -> None:
         "volume": [5000000] * 25,
     }, index=pd.to_datetime(macd_times))
 
-    result = indicator_service._adapt_watchlist_bb(
+    result = await indicator_service._adapt_watchlist_bb(
         indicators, "1mo", macd_bars, macd_times, [],
     )
 
@@ -988,17 +993,22 @@ async def test_smc_not_calculated_when_include_smc_false(
     """[CHANGE-011] include_smc=False（默认）时不计算 SMC，响应无 smc layer。
 
     SMC 默认关闭，不消耗 CPU；前端通过 IndicatorToolbar 显式开启。
+
+    [CP-13] SMC kernel 现通过 CanonicalComputationService.compute(algorithm_id="smc")
+    调用，内部经 compute_smc_adapter。spy 改为 patch compute_smc_adapter。
     """
-    # spy: 记录 compute_smc_indicators 是否被调用
+    from app.services import canonical_adapters
+
+    # spy: 记录 compute_smc_adapter 是否被调用
     smc_called = False
-    original_compute = indicator_service.compute_smc_indicators
+    original_compute = canonical_adapters.compute_smc_adapter
 
     def spy_compute(*args, **kwargs):
         nonlocal smc_called
         smc_called = True
         return original_compute(*args, **kwargs)
 
-    monkeypatch.setattr(indicator_service, "compute_smc_indicators", spy_compute)
+    monkeypatch.setattr(canonical_adapters, "compute_smc_adapter", spy_compute)
 
     # 默认调用（不传 include_smc → 默认 False）
     result = await indicator_service.compute_all_indicators(
@@ -1140,36 +1150,37 @@ async def test_1d_skips_15min_minute_queries_when_vp_unavailable(
     empty_registry: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """[CHANGE-20260716-001] 1d 请求在 VP 策略不可用时不查询 15min/minute。
+    """[CHANGE-20260716-001] 1d 请求在策略不可用时不查询 minute。
 
-    修复根因：静态 _registry 包含 volume_node_monitor，但数据库无定义，
-    导致旧逻辑错误地加载 15min/minute 数据。
-    新逻辑：基于数据库实际可用策略（有 released version）计算 required_bars。
+    [CP-V3-A] 15m 现由 NodeClusterInputProvider 无条件加载（不依赖策略），
+    只有 1m 仍由 needs_minute 控制。测试验证：策略不可用时 1m 不被加载。
     """
-    # Mock _get_available_strategy_keys 返回空集合（模拟 VP 不可用）
+    from app.services import node_cluster_input_provider as ncip
+
+    # Mock _get_available_strategy_keys 返回空集合（模拟策略不可用）
     monkeypatch.setattr(
         indicator_service,
         "_get_available_strategy_keys",
         AsyncMock(return_value=set()),
     )
 
-    # [CHANGE-20260717-002 SSOT] 全部周期通过 MDAS 获取，spy MDAS.get_bars 调用的 timeframe
+    # [CP-V3-A] spy MDAS 需同时 patch indicator_service 和 node_cluster_input_provider
     called_timeframes: list[str] = []
-    monkeypatch.setattr(
-        indicator_service,
-        "MarketDataAggregationService",
-        _make_spy_mdas(called_timeframes),
-    )
+    spy_cls = _make_spy_mdas(called_timeframes)
+    monkeypatch.setattr(indicator_service, "MarketDataAggregationService", spy_cls)
+    monkeypatch.setattr(ncip, "MarketDataAggregationService", spy_cls)
 
     await indicator_service.compute_all_indicators(
         mock_session, TEST_INSTRUMENT_ID, "1d", "none", bars=250,
     )
 
-    assert "15m" not in called_timeframes, (
-        "1d 请求在 VP 不可用时应跳过 15min 查询"
+    # [CP-V3-A] 15m 由 Provider 无条件加载，始终出现在 called_timeframes
+    assert "15m" in called_timeframes, (
+        "15m 由 NodeClusterInputProvider 无条件加载（不依赖策略状态）"
     )
+    # 1m 仅在策略需要时加载（needs_minute）
     assert "1m" not in called_timeframes, (
-        "1d 请求在 VP 不可用时应跳过 minute 查询"
+        "1d 请求在策略不可用时应跳过 minute 查询（needs_minute=False）"
     )
 
 
@@ -1179,31 +1190,36 @@ async def test_1d_loads_15min_minute_queries_when_vp_available(
     empty_registry: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """[CHANGE-20260716-001] 1d 请求在 VP 策略可用时查询 15min/minute。"""
-    # Mock _get_available_strategy_keys 返回 volume_node_monitor（模拟 VP 可用）
+    """[CHANGE-20260716-001] 1d 请求在 VP 策略可用时查询 15min/minute。
+
+    [CP-V3-A] 15m 现由 NodeClusterInputProvider 无条件加载（不依赖策略），
+    1m 仍由 needs_minute 控制（volume_node_monitor crossover）。
+    """
+    from app.services import node_cluster_input_provider as ncip
+
+    # Mock _get_available_strategy_keys 返回 volume_node_monitor（含 1m crossover）
     monkeypatch.setattr(
         indicator_service,
         "_get_available_strategy_keys",
         AsyncMock(return_value={"volume_node_monitor"}),
     )
 
-    # [CHANGE-20260717-002 SSOT] 全部周期通过 MDAS 获取，spy MDAS.get_bars 调用的 timeframe
+    # [CP-V3-A] spy MDAS 需同时 patch indicator_service 和 node_cluster_input_provider，
+    # 因 Provider 内部使用自己的 MarketDataAggregationService 引用。
     called_timeframes: list[str] = []
-    monkeypatch.setattr(
-        indicator_service,
-        "MarketDataAggregationService",
-        _make_spy_mdas(called_timeframes),
-    )
+    spy_cls = _make_spy_mdas(called_timeframes)
+    monkeypatch.setattr(indicator_service, "MarketDataAggregationService", spy_cls)
+    monkeypatch.setattr(ncip, "MarketDataAggregationService", spy_cls)
 
     await indicator_service.compute_all_indicators(
         mock_session, TEST_INSTRUMENT_ID, "1d", "none", bars=250,
     )
 
     assert "15m" in called_timeframes, (
-        "1d 请求在 VP 可用时应加载 15min 数据（VP profile）"
+        "1d 请求应加载 15m 数据（NodeClusterInputProvider 无条件加载 250+4000）"
     )
     assert "1m" in called_timeframes, (
-        "1d 请求在 VP 可用时应加载 minute 数据（VP crossover）"
+        "1d 请求在 volume_node_monitor 可用时应加载 minute 数据（VP crossover）"
     )
 
 
@@ -1213,7 +1229,13 @@ async def test_15m_always_loads_15min_regardless_of_vp(
     empty_registry: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """[CHANGE-20260716-001] 15m 请求始终加载 15min 数据（macd_bars 用途），独立于策略 registry。"""
+    """[CHANGE-20260716-001] 15m 请求始终加载 15min 数据（macd_bars 用途），独立于策略 registry。
+
+    [CP-V3-A] 15m 同时由 NodeClusterInputProvider 无条件加载（Node 输入），
+    以及 indicator_service 直接加载（display 15m）。两者通过同一 spy MDAS 捕获。
+    """
+    from app.services import node_cluster_input_provider as ncip
+
     # Mock _get_available_strategy_keys 返回空集合（模拟 VP 不可用）
     monkeypatch.setattr(
         indicator_service,
@@ -1221,20 +1243,18 @@ async def test_15m_always_loads_15min_regardless_of_vp(
         AsyncMock(return_value=set()),
     )
 
-    # [CHANGE-20260717-002 SSOT] 全部周期通过 MDAS 获取，spy MDAS.get_bars 调用的 timeframe
+    # [CP-V3-A] spy MDAS 需同时 patch indicator_service 和 node_cluster_input_provider
     called_timeframes: list[str] = []
-    monkeypatch.setattr(
-        indicator_service,
-        "MarketDataAggregationService",
-        _make_spy_mdas(called_timeframes),
-    )
+    spy_cls = _make_spy_mdas(called_timeframes)
+    monkeypatch.setattr(indicator_service, "MarketDataAggregationService", spy_cls)
+    monkeypatch.setattr(ncip, "MarketDataAggregationService", spy_cls)
 
     await indicator_service.compute_all_indicators(
         mock_session, TEST_INSTRUMENT_ID, "15m", "none", bars=50,
     )
 
     assert "15m" in called_timeframes, (
-        "15m 请求应始终加载 15min 数据（macd_bars 用途），独立于策略 registry"
+        "15m 请求应始终加载 15min 数据（display + Provider 无条件加载）"
     )
 
 
@@ -1341,6 +1361,9 @@ def _make_overlapping_mock_mdas() -> type:
                 freshness_seconds=0.0,
                 degraded=False,
                 degraded_reason=None,
+                source_bar_hash=f"overlap_{timeframe}_hash",
+                adj_factor_hash=f"overlap_{timeframe}_adj",
+                history_exhausted=False,
             )
 
     return _MockAggService
@@ -1358,22 +1381,21 @@ async def test_node_cluster_profile_hash_consistent_across_timeframes(
     Node Cluster 固定使用 completed qfq 1d×250 + 15m×4000，不随页面周期变化。
     五周期切换时 data["node_cluster"]["profile_meta"]["profile_hash"] 必须一致。
 
-    实现要点：
-    - bars_daily/bars_15min 与显示周期分离（修复前 bars_daily=macd_bars 导致非 1d 周期 Node 不可用）；
-    - _compute_independent_node_cluster 只读取 daily_bars + bars_15min，不读取 macd_bars。
+    [CP-V3-A] Node 输入由 NodeClusterInputProvider 唯一提供（四链统一入口），
+    availability 三态状态机由 Provider 预计算。测试需同时 patch
+    indicator_service 和 node_cluster_input_provider 的 MDAS 引用。
 
     测试环境：
     - 使用 _make_overlapping_mock_mdas 提供 daily(260根) + 15m(4100根) 重叠 bars；
-    - WATCHLIST_MONITOR 可用（_get_available_strategy_keys 返回 {"watchlist_monitor"}），
-      确保所有 timeframe 下都加载 15min bars。
+    - WATCHLIST_MONITOR 可用（_get_available_strategy_keys 返回 {"watchlist_monitor"}）。
     """
-    # 使用重叠日期的 mock MDAS
-    monkeypatch.setattr(
-        indicator_service,
-        "MarketDataAggregationService",
-        _make_overlapping_mock_mdas(),
-    )
-    # Mock _get_available_strategy_keys 返回 WATCHLIST_MONITOR（确保 15min 被加载）
+    from app.services import node_cluster_input_provider as ncip
+
+    # [CP-V3-A] 同时 patch indicator_service 和 node_cluster_input_provider 的 MDAS
+    mock_mdas_cls = _make_overlapping_mock_mdas()
+    monkeypatch.setattr(indicator_service, "MarketDataAggregationService", mock_mdas_cls)
+    monkeypatch.setattr(ncip, "MarketDataAggregationService", mock_mdas_cls)
+    # Mock _get_available_strategy_keys 返回 WATCHLIST_MONITOR
     monkeypatch.setattr(
         indicator_service,
         "_get_available_strategy_keys",
@@ -1430,13 +1452,16 @@ async def test_node_cluster_profile_hash_identical_across_all_five_timeframes(
     Node Cluster 输入固定为 daily_bars + bars_15min，不依赖显示周期。
     五周期（1d/15m/1h/1w/1mo）下 profile_hash / daily_source_hash / bars_15m_source_hash
     必须完全一致，证明 Node Cluster 独立于显示周期。
+
+    [CP-V3-A] Node 输入由 NodeClusterInputProvider 唯一提供，需同时 patch
+    indicator_service 和 node_cluster_input_provider 的 MDAS 引用。
     """
-    # 使用重叠日期的 mock MDAS
-    monkeypatch.setattr(
-        indicator_service,
-        "MarketDataAggregationService",
-        _make_overlapping_mock_mdas(),
-    )
+    from app.services import node_cluster_input_provider as ncip
+
+    # [CP-V3-A] 同时 patch indicator_service 和 node_cluster_input_provider 的 MDAS
+    mock_mdas_cls = _make_overlapping_mock_mdas()
+    monkeypatch.setattr(indicator_service, "MarketDataAggregationService", mock_mdas_cls)
+    monkeypatch.setattr(ncip, "MarketDataAggregationService", mock_mdas_cls)
     # Mock _get_available_strategy_keys
     monkeypatch.setattr(
         indicator_service,

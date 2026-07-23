@@ -39,6 +39,7 @@ from app.api.auth import router as auth_router
 from app.api.bars import router as bars_router
 from app.api.calendar import router as calendar_router
 from app.api.capture import router as capture_router
+from app.api.chart_snapshot import router as chart_snapshot_router
 from app.api.health import router as health_router
 from app.api.indicators import router as indicators_router
 from app.api.instruments import router as instruments_router
@@ -155,6 +156,9 @@ app.include_router(market_router)
 app.include_router(bars_router)
 # [Capture] - 个股详情截图专用数据快照路由（Capture Token 隔离，不走普通认证）
 app.include_router(capture_router)
+# [ChartSnapshot SNAP-01] 个股详情页原子图表快照路由（一次返回 bars+indicators+display_frame）
+#   替代详情页独立 useBars + useIndicators 两次请求，保证同一 MDAS DataFrame 生成 display_frame。
+app.include_router(chart_snapshot_router)
 # 策略指标实时计算路由
 app.include_router(indicators_router)
 # 策略目录与版本路由（R7）

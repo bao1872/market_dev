@@ -2,6 +2,71 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-23
+
+- CHANGE-20260723-005: DetailSourceContextV2 — 详情页来源列表同源同序合同 V2（行情来源失真 + 自选排序跳变根治）
+  - **根因修复**: V2 透传 sourceRunId + canonicalQuery（入口快照），useStockDetailActions 用固定 sourceRunId 调 useStrategyRunResults（禁止 fresh usePublishedRuns）
+  - **stableContextId 合同纠正**: computeStableContextIdV2 只由 origin + sourceRunId + canonicalQueryRaw 计算（不含 selectedSymbol/returnTo，切股不变）
+  - **mock-api 修复**: /market/boards 格式 {items,available,stale} + page.route `**/api/**` + sort_by/sort_desc 支持
+  - **测试**: detailSourceContextV2 24/24 + detailSourceLoadingContract 13/13 + marketWorkspaceUrlState 31/31 + change010Contract 53/53 + tsc/eslint clean
+
+- CHANGE-20260723-004: V3.3 部署前门禁 — Task 6 隔离视觉验收 SMC E2E fixture 增强
+  - **fixture 升级**: `buildSmcIndicators` 从 index-based 旧格式升级为 CP-V3-C2 time-key 格式（anchor_time/confirmed_time/second_pivot_time）
+  - **12 SMC 事件**: 3 BOS + 2 CHoCH + 3 OB + 2 EQH + 2 EQL，10 可见（满足 ≥10 要求）
+  - **视觉证据**: 5 张截图（SMC Capture 1440×2560/360×640、SMC Detail、Node Cluster、Bollinger）+ 12 锚点表
+  - **验证**: Playwright SMC E2E 3/3 PASS + 视觉验收 6/6 PASS + tsc/build 通过
+
+- CHANGE-20260723-003: V3.3 部署前门禁 — CP-V3-A3 listing_date 类型防御 + CP-V3-A2 测试对齐 A3 语义
+  - **Bug fix**: `_fetch_intraday_with_backfill` listing_date 类型防御（str→date.fromisoformat / datetime→.date），修复 28 indicator + 4 feature_snapshot 测试 TypeError
+  - **测试对齐**: 3 个 CP-V3-A2 旧测试更新为 A3 新语义（no_progress 不再→history_exhausted，需到达 listing_date 边界）
+  - **验证**: 4 文件 100/100 PASS
+
+- CHANGE-20260723-002: V3.3 部署前门禁 — MDAS 长期停牌边界修正 + 因子版本首次运行安全 bootstrap
+  - **CP-V3-A3** (@ d5e0848): MDAS 长期停牌边界 — listing_date 作为历史下界，no_progress 有界递增步长（90→720），max_rounds 未到边界→INPUT_CONTRACT_VIOLATION
+  - **CP-V3-D2**: 因子版本安全 bootstrap — bootstrap_factor_version_baseline 基于 dry_run 证据写版本基线，跳过 needs_rebuild/degraded，幂等可中断
+  - **调用链分析**: find_stale_version_instruments 未接入生产；stamp_factor_reconciliation_version 已接入 _rebuild_single 成功路径
+  - **8272 NULL 回答**: 首次盘后不会全市场重建（after-close 用 dry_run hash 比对，非版本驱动）
+  - **10+3 逐只状态**: 3 degraded (000032/001331/688689) 已确认；10 needs_rebuild 清单 UNKNOWN（/tmp 文件已删除）
+  - **测试**: 5 A3 + 7 D2 = 12 测试全 PASS；ruff/mypy 通过
+
+- CHANGE-20260723-001: V3.3 生产正确性修复 — MDAS count-aware 回补 + 实时 partial bar 收口 + SMC 严格 time-key + 因子版本追踪与 auto-resume + docs/AGENTS 收口
+  - **CP-V3-A2** (@ ca38a0c): MDAS count-aware 回补 — daily=250/15m=4000 自动向前扩展，history_exhausted 区分两种不足
+  - **CP-V3-B2** (@ 4dab274): 实时 partial bar 收口 — /bars?timeframe=1d&include_realtime=true 返回今日 partial daily bar，前端 mergeRealtimeQuoteIntoBars 只作兜底
+  - **CP-V3-C2** (@ 3393d16): SMC 严格 time-key — strictTimeKey=true 禁止 index fallback，events/EQH/EQL OR 逻辑，详情链与 Capture 共用坐标映射核心
+  - **CP-V3-D** (@ 9001ca0): 因子版本追踪 + auto-resume 受控测试 — stamp_factor_reconciliation_version + find_stale_version_instruments，9 个 auto-resume + 6 个因子版本测试
+  - **CP-V3-E**: docs/maps/AGENTS 收口 — AGENTS 289→181 行，新 ADR-0003 SMC time-key，runbook 更新
+  - **因子审计**: 80 只样本全 CONSISTENT（0 needs_rebuild），生产因子数据干净
+  - **遗留**: PNG 视觉验收推迟到部署后；生产 auto-resume 未触发；因子版本字段生产首次盘后才写入
+
+## 2026-07-22
+
+- CHANGE-20260722-003: 生产验收证据文件 — Phase 4.2 完整验收记录
+  - **新增**: `docs/evidence/evidence-2026-07-22-fix-production-pipeline-stability-v1.md`
+  - **覆盖**: A-H 全部 8 项验收（容器健康 / 5 周期+实时 / 来源上下文 / Node Cluster / 飞书手动+自动 / SMC 5 类事件 / lease_epoch fencing / 000688 复权）
+  - **部署 SHA**: b29da0e（已部署到生产 12 容器，0 重启）
+  - **Migration**: 067_scheduler_job_runs_lease_epoch_attempt_no 已应用
+  - **资源**: Mem 4.3GiB available、Swap 473M 稳定、Disk 46G free
+  - **回滚 SHA**: 8aae487（镜像级别回滚）
+  - **遗留问题**: PINE_PARITY_PENDING / instruments 因子版本列未写入 / smc_equal_lows_retest 今日未触发 / 生产未触发 auto-resume
+  - **不修改**: 代码/配置/测试/migration/contracts/AGENTS/current/maps
+  - **诚实声明**: 所有 ✅ 均有 SQL/API/容器/测试证据支撑；生产未触发 auto-resume 属事实陈述
+
+- CHANGE-20260722-002: mypy baseline 修正 — 从 0 更新为真实诊断集合（CP-20）
+  - **mypy 版本对齐**：系统 mypy 1.9.0 → 2.1.0（匹配 pyproject.toml + CI）
+  - **main vs branch 对比**：临时 worktree 对比 origin/main（631b191）与 branch HEAD（8aae487），mypy 2.1.0 结果完全相同（1 error + 10 notes）
+  - **baseline 更新**：`tools/quality_baselines/mypy.json` 从 `total:0, diagnostics:[]` 更新为 `total:1, diagnostics:[redis_client.py attr-defined]`
+  - **处理规则 b**：main 与 branch 完全相同，记录历史债务，不是修复；redis_client.py `aclose` error 是 pre-existing
+  - **验证**：`compare_mypy_baseline.py` exit 0，`OK: No new or increased mypy diagnostics relative to baseline.`
+  - **.gitignore**：添加 `mypy-report.jsonl`（CI 临时文件）
+  - **诚实声明**：10 个 annotation-unchecked 是 note 不是 error，不计入 baseline；redis_client.py error 未修复
+
+- CHANGE-20260722-001: docs/记忆系统真正收口 — AGENTS.md v3 压缩 + ADR/Runbook/Evidence 模板 + MANIFEST baseline 新鲜度门禁（CP-19）
+  - **CP-19.1 AGENTS.md v3 收口**：从 909 行压缩到 290 行；移除内联 clause 39-64 变更历史，保留硬规则与必读入口；变更历史指向 `docs/changes/CHANGELOG.md` + `docs/changes/records/CHANGE-*.md`
+  - **CP-19.2 ADR/Runbook/Evidence 模板**：`docs/decisions/README.md` + ADR-0001（Atomic Snapshot 单 MDAS）+ ADR-0002（Node Cluster 输入契约隔离）；`docs/runbooks/README.md` + 3 个 Runbook（after-close-recovery / feishu-image-issues / branch-deployment-rollback）；`docs/evidence/README.md` 生产验收证据模板
+  - **CP-19.3 MANIFEST baseline 新鲜度门禁**：`tools/check_docs_consistency.py` 新增规则 16（baseline SHA 必须在 HEAD 的最近 50 个 commit 内）；修复 PROMPT.md §4 指出的问题（旧 baseline `18049da` 落后 88 commit 仍通过）；`docs/current/MANIFEST.md` baseline 同步到 CP-18 HEAD `2c4ad50`；3 个新测试场景
+  - **诚实声明**：不包含部署、生产验收、merge main；Runbook 命令需部署后验证；Evidence 模板待部署后填充
+  - **不变量**：不新增依赖/表/migration；不重写 Node/SMC/Canonical/After-close；MDAS 仍为唯一行情读取出口；`PINE_PARITY_PENDING` 保留
+
 ## 2026-07-21
 
 - CHANGE-20260721-002: Display Frame Contract V2 + Node DTO V2 + 移动舞台 V2 + 复权闭环收口（合并 Phase 2-6）

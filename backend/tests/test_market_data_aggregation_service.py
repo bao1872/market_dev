@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
@@ -490,6 +490,343 @@ async def test_diagnostic_fields_present(monkeypatch: pytest.MonkeyPatch) -> Non
     assert hasattr(result, "degraded")
     assert hasattr(result, "degraded_reason")
     assert isinstance(result.freshness_seconds, (int, float))
+
+
+# ============================================================
+# [CP-V3-A2] 迭代回补（_fetch_intraday_with_backfill）单元测试
+# ============================================================
+
+
+def _build_15m_bars(start: str, periods: int) -> pd.DataFrame:
+    """构造 mock 15m DataFrame（naive DatetimeIndex, 15min freq）。"""
+    times = pd.date_range(start, periods=periods, freq="15min")
+    closes = [10.0 + i * 0.01 for i in range(len(times))]
+    df = pd.DataFrame({
+        "open": [c - 0.01 for c in closes],
+        "high": [c + 0.01 for c in closes],
+        "low": [c - 0.02 for c in closes],
+        "close": closes,
+        "volume": [1000.0 + i for i in range(len(times))],
+        "amount": [10000.0 + i * 10 for i in range(len(times))],
+        "adj_factor": [1.0] * len(times),
+    }, index=times)
+    df.index.name = "trade_time"
+    return df
+
+
+async def test_backfill_single_round_met(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[CP-V3-A2] limit=100，首轮查询即满足 → backfill_rounds=1, history_exhausted=False。"""
+    bars = _build_15m_bars("2026-06-01 09:30:00", periods=100)
+    call_count = {"n": 0}
+
+    async def fake_query(session, instrument_id, start, end):
+        call_count["n"] += 1
+        return bars.copy()
+
+    result_df, rounds, exhausted, reason = await mdas._fetch_intraday_with_backfill(
+        _mock_session(), TEST_INSTRUMENT_ID, "15m",
+        datetime(2026, 5, 1), datetime(2026, 6, 18),
+        fake_query, required_count=100,
+    )
+    assert rounds == 1
+    assert exhausted is False
+    assert reason == "met_after_1_rounds"
+    assert len(result_df) >= 100
+    assert call_count["n"] == 1, "满足后不应继续查询"
+
+
+async def test_backfill_multi_round_until_met(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[CP-V3-A2] limit=200，首轮返回 100，第二轮扩展后返回更多，合计 ≥200 → rounds=2。"""
+    batch1 = _build_15m_bars("2026-06-10 09:30:00", periods=100)
+    batch2 = _build_15m_bars("2026-05-10 09:30:00", periods=120)
+
+    call_count = {"n": 0}
+
+    async def fake_query(session, instrument_id, start, end):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return batch1.copy()
+        return batch2.copy()
+
+    result_df, rounds, exhausted, reason = await mdas._fetch_intraday_with_backfill(
+        _mock_session(), TEST_INSTRUMENT_ID, "15m",
+        datetime(2026, 6, 1), datetime(2026, 6, 18),
+        fake_query, required_count=200,
+    )
+    assert rounds == 2
+    assert exhausted is False
+    assert reason == "met_after_2_rounds"
+    assert len(result_df) >= 200
+    # 去重后不应有重复索引
+    assert not result_df.index.duplicated().any()
+
+
+async def test_backfill_history_exhausted_empty_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[CP-V3-A3] limit=4000，首轮 100 根，第二轮空且已到 listing_date → history_exhausted=True。
+
+    CP-V3-A2 旧行为：连续 2 轮空查询 → history_exhausted=True（reason=history_exhausted_empty_query）
+    CP-V3-A3 新行为：空查询必须同时到达 listing_date 边界才允许 history_exhausted=True；
+                   no_progress 只扩大步长（90→180→360...），不直接终止。
+    本测试传 listing_date=initial_start-90d，使第 2 轮扩展后 current_start 恰好到达边界。
+    """
+    batch1 = _build_15m_bars("2026-06-10 09:30:00", periods=100)
+
+    call_count = {"n": 0}
+
+    async def fake_query(session, instrument_id, start, end):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return batch1.copy()
+        return pd.DataFrame()  # 第二轮空 → 已到 listing date 之前
+
+    # [CP-V3-A3] listing_date = initial_start - expand_step(90d)，使第 2 轮到达边界
+    _initial_start = datetime(2026, 6, 1)
+    _listing_date = (_initial_start - timedelta(days=90)).date()  # 2026-03-03
+
+    result_df, rounds, exhausted, reason = await mdas._fetch_intraday_with_backfill(
+        _mock_session(), TEST_INSTRUMENT_ID, "15m",
+        _initial_start, datetime(2026, 6, 18),
+        fake_query, required_count=4000,
+        listing_date=_listing_date,
+    )
+    assert rounds == 2
+    assert exhausted is True
+    assert reason == "history_exhausted_at_listing_date"
+    assert len(result_df) == 100
+
+
+async def test_backfill_history_exhausted_no_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[CP-V3-A3] no_progress（每轮返回相同数据）不再等同于 history_exhausted。
+
+    CP-V3-A2 旧行为：no_progress_count=2 → history_exhausted=True（reason=history_exhausted_no_progress）
+    CP-V3-A3 新行为：no_progress 只扩大步长（90→180→360...），未到 listing_date 边界时
+                   继续扩展直到 max_rounds → history_exhausted=False (max_rounds_reached)。
+    长期停牌股票可能在更早时间仍有历史数据，no_progress 不能直接判定为真实历史不足。
+    """
+    batch1 = _build_15m_bars("2026-06-10 09:30:00", periods=100)
+
+    async def fake_query(session, instrument_id, start, end):
+        # 每轮都返回相同数据（模拟 DB 中没有更早的 bar，但可能更早仍有历史）
+        return batch1.copy()
+
+    result_df, rounds, exhausted, reason = await mdas._fetch_intraday_with_backfill(
+        _mock_session(), TEST_INSTRUMENT_ID, "15m",
+        datetime(2026, 6, 1), datetime(2026, 6, 18),
+        fake_query, required_count=4000,
+        # [CP-V3-A3] 不传 listing_date → 使用 _MIN_A_SHARE_DATE=1990-01-01 安全下界
+        # current_start 不会在 max_rounds=10 内到达 1990-01-01
+    )
+    # [CP-V3-A3] no_progress 不再设置 history_exhausted=True
+    # 未到达真实历史边界（listing_date/_MIN_A_SHARE_DATE）→ max_rounds_reached
+    assert exhausted is False
+    assert "max_rounds_reached" in reason
+    assert len(result_df) == 100
+
+
+async def test_backfill_max_rounds_reached(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[CP-V3-A2] limit=4000，每轮返回递增但永远不满，达到 max_rounds → INPUT_CONTRACT_VIOLATION 风险。
+
+    history_exhausted=False（因为持续有新数据，只是不够 required_count）。
+    """
+    # 每轮返回不同的 100 根（模拟持续有新数据但每轮量少）
+    def make_batch(offset_days: int):
+        start = f"2026-{6 - offset_days:02d}-01 09:30:00"
+        return _build_15m_bars(start, periods=100)
+
+    call_count = {"n": 0}
+
+    async def fake_query(session, instrument_id, start, end):
+        call_count["n"] += 1
+        return make_batch(call_count["n"])
+
+    # 临时降低 max_rounds 以加速测试
+    original_max = mdas._MAX_BACKFILL_ROUNDS
+    monkeypatch.setattr(mdas, "_MAX_BACKFILL_ROUNDS", 3)
+    try:
+        result_df, rounds, exhausted, reason = await mdas._fetch_intraday_with_backfill(
+            _mock_session(), TEST_INSTRUMENT_ID, "15m",
+            datetime(2026, 6, 1), datetime(2026, 6, 18),
+            fake_query, required_count=4000,
+        )
+    finally:
+        mdas._MAX_BACKFILL_ROUNDS = original_max
+
+    assert rounds == 3
+    assert exhausted is False  # 持续有新数据，不是真实历史不足
+    assert reason.startswith("max_rounds_reached")
+    assert len(result_df) < 4000  # 未满足 required_count
+
+
+async def test_backfill_no_limit_single_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[CP-V3-A2] limit=None → 单次查询，backfill_rounds=1, coverage_reason='no_limit'。"""
+    bars = _build_15m_bars("2026-06-01 09:30:00", periods=50)
+    call_count = {"n": 0}
+
+    async def fake_query(session, instrument_id, start, end):
+        call_count["n"] += 1
+        return bars.copy()
+
+    result_df, rounds, exhausted, reason = await mdas._fetch_intraday_with_backfill(
+        _mock_session(), TEST_INSTRUMENT_ID, "15m",
+        datetime(2026, 5, 1), datetime(2026, 6, 18),
+        fake_query, required_count=None,
+    )
+    assert rounds == 1
+    assert exhausted is False
+    assert reason == "no_limit"
+    assert call_count["n"] == 1
+
+
+# ============================================================
+# [CP-V3-A2] get_bars 集成：诊断字段 + history_exhausted 语义
+# ============================================================
+
+
+async def test_get_bars_daily_path_coverage_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[CP-V3-A2] 日线路径 → backfill_rounds=0, coverage_reason='daily_no_backfill'。"""
+    service = mdas.MarketDataAggregationService()
+    db_df = _build_daily_bars(["2026-06-16", "2026-06-17", "2026-06-18"])
+
+    monkeypatch.setattr(
+        mdas, "_query_daily_bars",
+        lambda *a, **kw: _async_return(db_df.copy()),
+    )
+    monkeypatch.setattr(
+        mdas, "_expected_last_completed_daily_bar",
+        lambda session, now: date(2026, 6, 18),
+    )
+    monkeypatch.setattr(mdas, "_is_trading_hours", lambda now: False)
+
+    result = await service.get_bars(
+        _mock_session(), TEST_INSTRUMENT_ID, timeframe="1d", adj="none",
+    )
+    assert result.backfill_rounds == 0
+    assert result.coverage_reason == "daily_no_backfill"
+    assert result.market_data_contract_version == "v4"
+
+
+async def test_get_bars_intraday_backfill_met(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[CP-V3-A2] 15m limit=100，迭代回补满足 → backfill_rounds≥1, history_exhausted=False。"""
+    service = mdas.MarketDataAggregationService()
+    bars = _build_15m_bars("2026-06-01 09:30:00", periods=100)
+
+    monkeypatch.setattr(
+        mdas, "_query_15min_bars",
+        lambda *a, **kw: _async_return(bars.copy()),
+    )
+    monkeypatch.setattr(mdas, "_is_trading_hours", lambda now: False)
+
+    result = await service.get_bars(
+        _mock_session(), TEST_INSTRUMENT_ID, timeframe="15m", adj="none",
+        limit=100, include_realtime=False,
+    )
+    assert result.backfill_rounds >= 1
+    assert result.history_exhausted is False
+    assert result.coverage_reason.startswith("met_after_")
+    assert result.actual_count == 100
+
+
+async def test_get_bars_intraday_history_exhausted_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[CP-V3-A3] 15m limit=4000，DB 真实历史不足且到达 listing_date → history_exhausted=True。
+
+    CP-V3-A2 旧行为：第二轮空查询 → history_exhausted=True (reason=history_exhausted_empty_query)
+    CP-V3-A3 新行为：空查询必须同时到达 listing_date 边界才允许 history_exhausted=True。
+    本测试 mock _get_listing_date = initial_start - 90d，使第 2 轮扩展后到达边界。
+    """
+    service = mdas.MarketDataAggregationService()
+    # DB 只有 100 根 15m，且第二轮查询返回空（真实历史不足）
+    batch1 = _build_15m_bars("2026-06-10 09:30:00", periods=100)
+    call_count = {"n": 0}
+
+    async def fake_query(session, instrument_id, start, end):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return batch1.copy()
+        return pd.DataFrame()  # 没有更早的数据
+
+    monkeypatch.setattr(mdas, "_query_15min_bars", fake_query)
+    monkeypatch.setattr(mdas, "_is_trading_hours", lambda now: False)
+
+    # [CP-V3-A3] mock _get_listing_date：计算 get_bars 将使用的 initial_start，
+    # 设 listing_date = initial_start - 90d 使第 2 轮扩展到达边界
+    _initial_start, _ = mdas._resolve_date_range("15m", None, None, limit=4000)
+    _listing_date = (_initial_start - timedelta(days=90)).date()
+
+    async def fake_listing_date(session, instrument_id):
+        return _listing_date
+
+    monkeypatch.setattr(mdas, "_get_listing_date", fake_listing_date)
+
+    result = await service.get_bars(
+        _mock_session(), TEST_INSTRUMENT_ID, timeframe="15m", adj="none",
+        limit=4000, include_realtime=False,
+    )
+    assert result.history_exhausted is True
+    assert result.coverage_reason == "history_exhausted_at_listing_date"
+    assert result.backfill_rounds == 2
+    assert result.actual_count == 100
+
+
+async def test_get_bars_intraday_history_exhausted_false_when_max_rounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[CP-V3-A2] 15m limit=4000，持续有新数据但不满 → history_exhausted=False (INPUT_CONTRACT_VIOLATION)。
+
+    关键：不再像 CP-V3-A 那样 "pre_limit_count < limit 即 True"，
+    而是基于 _fetch_intraday_with_backfill 判定（持续有新数据 → False）。
+    """
+    service = mdas.MarketDataAggregationService()
+
+    def make_batch(round_n: int):
+        start = f"2026-{6 - round_n:02d}-01 09:30:00"
+        return _build_15m_bars(start, periods=100)
+
+    call_count = {"n": 0}
+
+    async def fake_query(session, instrument_id, start, end):
+        call_count["n"] += 1
+        return make_batch(call_count["n"])
+
+    monkeypatch.setattr(mdas, "_query_15min_bars", fake_query)
+    monkeypatch.setattr(mdas, "_is_trading_hours", lambda now: False)
+    monkeypatch.setattr(mdas, "_MAX_BACKFILL_ROUNDS", 3)
+
+    result = await service.get_bars(
+        _mock_session(), TEST_INSTRUMENT_ID, timeframe="15m", adj="none",
+        limit=4000, include_realtime=False,
+    )
+    # 持续有新数据但不满 → history_exhausted=False（INPUT_CONTRACT_VIOLATION，非真实历史不足）
+    assert result.history_exhausted is False
+    assert result.coverage_reason.startswith("max_rounds_reached")
+    assert result.backfill_rounds == 3
+    assert result.actual_count < 4000
+
+
+# ============================================================
+# [CP-V3-A2] 序列化/反序列化 round-trip（新字段持久化）
+# ============================================================
+
+
+async def test_serialize_deserialize_backfill_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[CP-V3-A2] backfill_rounds 和 coverage_reason 在 serialize→deserialize 后保持一致。"""
+    service = mdas.MarketDataAggregationService()
+    bars = _build_15m_bars("2026-06-01 09:30:00", periods=100)
+
+    monkeypatch.setattr(
+        mdas, "_query_15min_bars",
+        lambda *a, **kw: _async_return(bars.copy()),
+    )
+    monkeypatch.setattr(mdas, "_is_trading_hours", lambda now: False)
+
+    result = await service.get_bars(
+        _mock_session(), TEST_INSTRUMENT_ID, timeframe="15m", adj="none",
+        limit=100, include_realtime=False,
+    )
+    serialized = mdas._serialize_result(result)
+    restored = mdas._deserialize_result(serialized)
+
+    assert restored is not None
+    assert restored.backfill_rounds == result.backfill_rounds
+    assert restored.coverage_reason == result.coverage_reason
+    assert restored.market_data_contract_version == "v4"
 
 
 if __name__ == "__main__":

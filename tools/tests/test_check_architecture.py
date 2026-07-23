@@ -30,17 +30,32 @@ import check_architecture as ca  # noqa: E402
 
 
 def _create_full_v2_structure(root: Path) -> None:
-    """在 root 下创建完整的 v2 docs 结构（9 current + 8 maps）。"""
+    """在 root 下创建完整的 v2 docs 结构。
+
+    包含 CP-14 新增的 docs/INDEX.md + docs/contracts/ 6 份机器合同，
+    使 check_v2_docs_structure() 返回 0 violations。
+    """
     current_dir = root / "docs" / "current"
     maps_dir = root / "docs" / "maps"
+    docs_dir = root / "docs"
+    contracts_dir = docs_dir / "contracts"
     current_dir.mkdir(parents=True, exist_ok=True)
     maps_dir.mkdir(parents=True, exist_ok=True)
+    contracts_dir.mkdir(parents=True, exist_ok=True)
 
     for name in ca.V2_REQUIRED_CURRENT_FILES:
         (current_dir / name).write_text(f"# {name}\n", encoding="utf-8")
 
     for name in ca.V2_REQUIRED_MAP_FILES:
         (maps_dir / name).write_text(f"# {name}\n", encoding="utf-8")
+
+    # [CP-19] CP-14 新增的 docs/ 根必需文件（INDEX.md）
+    for name in ca.V2_REQUIRED_DOCS_ROOT_FILES:
+        (docs_dir / name).write_text(f"# {name}\n", encoding="utf-8")
+
+    # [CP-19] CP-14 新增的 docs/contracts/ 6 份机器合同
+    for name in ca.V2_REQUIRED_CONTRACT_FILES:
+        (contracts_dir / name).write_text(f"# {name}\n", encoding="utf-8")
 
 
 def _run_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[ca.Violation]:

@@ -134,6 +134,17 @@ class CaptureRequest(BaseModel):
         None,
         description="指标视图 node_cluster|bollinger|smc（扩展缓存 key + URL 参数）",
     )
+    # [Task 2] focus_event 透传：监控事件触发时携带 focus_event_id/type/anchor_time/
+    # confirmed_time/level/zone 等字段，前端据此突出本次触发事件，淡化其他历史结构
+    focus_event: dict[str, str] | None = Field(
+        None,
+        description=(
+            "focus_event 透传 dict（监控触发事件信息）。"
+            "字段：focus_event_id/focus_event_type/anchor_time/confirmed_time/"
+            "level/bar_high/bar_low/bias/internal/bullish/eqhl_type/second_pivot_time。"
+            "前端 StrategyChart 据此突出本次触发事件，淡化其他历史结构。"
+        ),
+    )
 
 
 class CaptureResponse(BaseModel):
@@ -181,6 +192,7 @@ async def capture(request: CaptureRequest, background_tasks: BackgroundTasks) ->
             viewport_height=request.viewport_height,
             device_scale_factor=request.device_scale_factor,
             indicator_view=request.indicator_view,
+            focus_event=request.focus_event,
         )
     except StockCaptureError as e:
         # [capture-worker] - 区分超时与失败：错误消息含"超时"归为 CAPTURE_TIMEOUT

@@ -2,7 +2,7 @@
 // 负责 POST 创建截图任务 → 1s 轮询至 success/failed 或 30s 超时 → interval/timeout 清理。
 // 保持飞书默认 1d 截图契约，不改 Capture API。
 // [CHANGE-20260720-003 §四] 新增 selectedIndicatorView 状态 + handleSendFeishu(indicatorView) 参数，
-// 用户在弹窗中三选一（筹码共识价/布林带/SMC 结构），透传到后端影响文字卡片字段与截图图层。
+// 用户在弹窗中三选一（筹码共识价/布林带/结构），透传到后端影响文字卡片字段与截图图层。
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { sendStockDetailFeishu, getStockDetailFeishuStatus } from '@/api/endpoints'

@@ -24,6 +24,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.watchlist import UserWatchlistItem
 from app.services.monitor_batch_service import MonitorBatchService
+from app.services.node_cluster_input_provider import (
+    NodeClusterInput,
+    NodeClusterInputProvider,
+)
 
 
 async def _create_watchlist_monitor_version(db_session: AsyncSession) -> StrategyVersion:
@@ -243,10 +247,12 @@ async def test_monitor_calc_inputs_daily_15m_non_realtime(
     instrument_factory,
     monkeypatch,
 ):
-    """watchlist_monitor 计算输入口径（CHANGE-20260710-002）：
+    """watchlist_monitor 计算输入口径（CHANGE-20260710-002 + CP-V3-A）：
 
     - 1m 必须 include_realtime=True 且剔除最后一根未完成 bar；
-    - daily/15m 计算输入必须 include_realtime=False（保守口径，不得被截图实时性污染）；
+    - daily/15m 计算输入由 NodeClusterInputProvider 唯一提供（保守口径，
+      include_realtime=False / completed_only=True 由 Provider 内部合同强制，
+      不再由 monitor_batch_service 传参——见 test_node_cluster_input_isolation.py）；
     - source_bar_time 仍来自最新已完成 1m bar（剔除最后一根）。
     """
     active_admin = await user_factory(roles=["admin"], status="active")
@@ -287,20 +293,53 @@ async def test_monitor_calc_inputs_daily_15m_non_realtime(
         captured_calls.append({"timeframe": timeframe, "include_realtime": include_realtime, "completed_only": completed_only})
         if timeframe == "1m":
             return minute_df, "hybrid", True
-        if timeframe == "1d":
-            return daily_df, "db", False
-        if timeframe == "15m":
-            return pd.DataFrame(), "db", False
+        # [CP-V3-A] daily/15m 不再经此路径（由 NodeClusterInputProvider 提供）
         return pd.DataFrame(), "db", False
 
     monkeypatch.setattr(MonitorBatchService, "_fetch_md_bars_with_meta", _mock_fetch_md_bars_with_meta)
+
+    # [CP-V3-A] mock NodeClusterInputProvider.get_inputs 返回 daily + 空 15m（与原测试口径一致）
+    # Provider 内部合同 include_realtime=False / completed_only=True 由
+    # test_node_cluster_input_isolation.py 验证，此处只验证 monitor 链调用了 Provider。
+    provider_calls: list[dict[str, Any]] = []
+
+    async def _mock_provider_get_inputs(
+        cls,
+        session,
+        instrument_id,
+        *,
+        adjustment_as_of=None,
+        end_date=None,
+    ) -> NodeClusterInput:
+        provider_calls.append({
+            "instrument_id": instrument_id,
+            "adjustment_as_of": adjustment_as_of,
+            "end_date": end_date,
+        })
+        return NodeClusterInput(
+            daily_bars=daily_df,
+            bars_15m=pd.DataFrame(),
+            daily_source_hash="mock_daily_hash",
+            daily_adj_factor_hash="mock_daily_adj",
+            m15_source_hash="mock_m15_hash",
+            m15_adj_factor_hash="mock_m15_adj",
+            daily_count=len(daily_df),
+            m15_count=0,
+            daily_requested=250,
+            m15_requested=4000,
+            daily_history_exhausted=False,
+            m15_history_exhausted=False,
+            availability="unavailable",
+            degraded_reason="MISSING_15M_BARS",
+            adjustment_as_of=adjustment_as_of,
+        )
+
+    monkeypatch.setattr(NodeClusterInputProvider, "get_inputs", classmethod(_mock_provider_get_inputs))
 
     service = MonitorBatchService()
     result = await service.execute_monitor_cycle(db_session)
 
     calls_1m = [c for c in captured_calls if c["timeframe"] == "1m"]
-    calls_daily = [c for c in captured_calls if c["timeframe"] == "1d"]
-    calls_15m = [c for c in captured_calls if c["timeframe"] == "15m"]
 
     # 1m：实时 + 剔除最后一根未完成 bar → source_bar_time 为倒数第二根
     assert calls_1m, "必须调用 timeframe=1m"
@@ -312,11 +351,6 @@ async def test_monitor_calc_inputs_daily_15m_non_realtime(
         actual_time = actual_time.replace(tzinfo=expected_time.tzinfo)
     assert actual_time == expected_time
 
-    # daily/15m 计算输入：非实时（保守口径，不被截图实时性污染）
-    assert calls_daily, "必须调用 daily 计算输入"
-    assert all(c["include_realtime"] is False for c in calls_daily), "daily 计算输入不得 include_realtime=True"
-    # [CHANGE-20260717-002 SSOT] - daily/15m 计算输入必须 completed_only=True（仅已完成 bar）
-    assert all(c["completed_only"] is True for c in calls_daily), "daily 计算输入必须 completed_only=True"
-    assert calls_15m, "必须调用 15m 计算输入（Node Cluster 筹码分布）"
-    assert all(c["include_realtime"] is False for c in calls_15m), "15m 计算输入不得 include_realtime=True"
-    assert all(c["completed_only"] is True for c in calls_15m), "15m 计算输入必须 completed_only=True"
+    # [CP-V3-A] daily/15m 计算输入：必须经 NodeClusterInputProvider.get_inputs（唯一入口）
+    # include_realtime=False / completed_only=True 由 Provider 内部合同强制（不再由调用方传参）
+    assert provider_calls, "必须调用 NodeClusterInputProvider.get_inputs（daily/15m 唯一入口）"

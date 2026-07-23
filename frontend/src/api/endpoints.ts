@@ -507,7 +507,7 @@ export type ShareDeliveryStatus =
 // 详情页手动发送飞书时，用户从弹窗三单选项中选择指标视图：
 // - node_cluster: 筹码共识价
 // - bollinger: 布林带
-// - smc: SMC 结构
+// - smc: 结构
 export type IndicatorView = 'node_cluster' | 'bollinger' | 'smc'
 
 /** POST /instruments/{instrument_id}/send-feishu 请求体 - 指标视图选择 */
@@ -1759,6 +1759,73 @@ export async function getIndicators(
 ): Promise<IndicatorResponse> {
   const { data } = await apiClient.get<IndicatorResponse>(
     `/api/v1/instruments/${instrumentId}/indicators`,
+    { params, signal: options?.signal },
+  )
+  return data
+}
+
+// ============================================================
+// ===== Chart Snapshot 端点（PRD V2.0 §4.2 SNAP-01 Atomic Chart Snapshot）=====
+// ============================================================
+
+/**
+ * Atomic Chart Snapshot 查询参数。
+ *
+ * [PRD V2.0 §4.2 SNAP-01] 详情页必须使用 chart-snapshot 端点，禁止独立调用 /bars + /indicators。
+ * 一次请求返回 bars + indicators + display_frame + render_frame，保证同一 MDAS DataFrame。
+ *
+ * 参数与 /bars + /indicators 同款（DisplayWindowSpec V2）：
+ * - timeframe / adj / bars：展示窗口规格
+ * - include_smc：是否计算 SMC 指标（默认 0；前端通过 IndicatorToolbar 显式开启）
+ * - include_realtime / completed_only / adjustment_as_of：MDAS v2 契约参数
+ */
+export interface ChartSnapshotQueryParams {
+  timeframe?: string
+  adj?: string
+  bars?: number
+  include_smc?: number
+  include_realtime?: boolean
+  completed_only?: boolean
+  adjustment_as_of?: string
+}
+
+/**
+ * Atomic Chart Snapshot 响应。
+ *
+ * 一次返回详情页图表所需的完整数据，替代独立 useBars + useIndicators 两次请求。
+ * bars 和 indicators 基于同一 MDAS DataFrame 生成 display_frame，display_hash 必然一致。
+ *
+ * 字段对齐后端 app.api.chart_snapshot.get_chart_snapshot 返回结构：
+ * - bars: BarListResponse（items + 分页 + 诊断 + display_frame）
+ * - indicators: IndicatorResponse（layers + data + display_frame + calculation_diagnostics）
+ * - snapshot_time: ISO 8601 时间戳
+ * - render_frame: {matched, bars_hash, indicators_hash, ...} display_frame 匹配结果
+ * - timeframe: 周期 echo（供前端周期切换乱序丢弃检查）
+ */
+export interface ChartSnapshotResponse {
+  bars: BarListResponse
+  indicators: IndicatorResponse
+  snapshot_time: string
+  render_frame: CaptureRenderFrame
+  timeframe: string
+}
+
+/**
+ * 查询指定标的的原子图表快照（PRD V2.0 §4.2 SNAP-01）。
+ *
+ * 一次 MDAS DataFrame 同时生成 bars + indicators + display_frame + render_frame。
+ * 详情页必须使用本端点，禁止独立调用 /bars + /indicators。
+ *
+ * 后端 chart_snapshot router 自带 prefix="/api/v1"，
+ * 完整路径为 /api/v1/instruments/{id}/chart-snapshot
+ */
+export async function getChartSnapshot(
+  instrumentId: string,
+  params?: ChartSnapshotQueryParams,
+  options?: { signal?: AbortSignal },
+): Promise<ChartSnapshotResponse> {
+  const { data } = await apiClient.get<ChartSnapshotResponse>(
+    `/api/v1/instruments/${instrumentId}/chart-snapshot`,
     { params, signal: options?.signal },
   )
   return data

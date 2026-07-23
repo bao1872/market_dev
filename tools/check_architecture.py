@@ -700,6 +700,20 @@ V2_REQUIRED_MAP_FILES = [
     "deployment-runtime-map.md",
 ]
 
+# [CP-14] PRD V2.0 §7.1/§7.2 — docs/INDEX.md 权威入口 + 6 份机器可执行合同
+V2_REQUIRED_DOCS_ROOT_FILES = [
+    "INDEX.md",
+]
+
+V2_REQUIRED_CONTRACT_FILES = [
+    "node-cluster-input.yaml",
+    "chart-frame.schema.json",
+    "smc-events.schema.json",
+    "detail-entry-context.schema.json",
+    "message-group.schema.json",
+    "after-close-recovery.schema.json",
+]
+
 V2_LEGACY_CURRENT_FILES = [
     "00-project-overview.md",
     "01-product-requirements.md",
@@ -791,6 +805,43 @@ def check_v2_docs_structure() -> list[Violation]:
                 maps_dir,
                 1,
                 "docs/maps/ 目录不存在",
+            )
+        )
+
+    # [CP-14] 4. docs/ 根目录必需文件（INDEX.md 权威入口）
+    for required in V2_REQUIRED_DOCS_ROOT_FILES:
+        required_path = ROOT / "docs" / required
+        if not required_path.exists():
+            violations.append(
+                Violation(
+                    "v2-docs-structure",
+                    required_path,
+                    1,
+                    f"缺少 v2 必需 docs 根文件：{required}（PRD V2.0 §7.1 权威层级入口）",
+                )
+            )
+
+    # [CP-14] 5. docs/contracts/ 6 份机器可执行合同（PRD V2.0 §7.2）
+    contracts_dir = ROOT / "docs" / "contracts"
+    if contracts_dir.exists():
+        for required in V2_REQUIRED_CONTRACT_FILES:
+            required_path = contracts_dir / required
+            if not required_path.exists():
+                violations.append(
+                    Violation(
+                        "v2-docs-structure",
+                        required_path,
+                        1,
+                        f"缺少 v2 必需机器合同文件：docs/contracts/{required}（PRD V2.0 §7.2）",
+                    )
+                )
+    else:
+        violations.append(
+            Violation(
+                "v2-docs-structure",
+                contracts_dir,
+                1,
+                "docs/contracts/ 目录不存在（PRD V2.0 §7.2 要求 6 份机器可执行合同）",
             )
         )
 

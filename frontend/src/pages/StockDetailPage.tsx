@@ -31,18 +31,12 @@ import { MARKET_LABELS } from '@/utils/market'
 import { resolveBackPath } from './detailNavigation'
 import { useToast } from '@/store/toast'
 import { changePctColorClass, fmtChange } from '@/features/trend-selection'
-import { resolveDetailSourceContext } from '@/features/stock-research/detailSourceContext'
+import { resolveDetailSourceContextV2 } from '@/features/stock-research/detailSourceContext'
 import { buildStockDetailUrl } from '@/features/stock-research/stockDetailNavigation'
 
-// CHANGE-20260714-001: 左栏来源列表滚动位置 sessionStorage key 前缀
-// key 由 returnTo + scope 生成稳定 hash，避免不同来源上下文串扰
-const SOURCE_LIST_SCROLL_KEY_PREFIX = 'panji:detail-source-scroll:v1'
-
-function makeSourceListScrollKey(returnTo: string | null, scope: string | null): string {
-  // 简单 hash：returnTo + scope 字符串拼接（无需密码学强度，仅做 namespace 隔离）
-  const raw = `${returnTo ?? ''}|${scope ?? ''}`
-  return `${SOURCE_LIST_SCROLL_KEY_PREFIX}:${raw}`
-}
+// [DetailSourceContextV2] 左栏来源列表滚动位置 sessionStorage key 前缀
+// key 由 stableContextId 生成（不含 selectedSymbol，切股时不变），避免不同来源上下文串扰
+const SOURCE_LIST_SCROLL_KEY_PREFIX = 'panji:detail-source-scroll:v2'
 
 export default function StockDetailPage() {
   const { symbol } = useParams<{ symbol: string }>()
@@ -51,16 +45,27 @@ export default function StockDetailPage() {
   const location = useLocation()
   const showToast = useToast((s) => s.show)
 
-  // CHANGE-20260716-006: originScope 为来源唯一真源，resolveDetailSourceContext 优先使用
-  // 优先级：显式 originScope > 有效 /market returnTo.scope（兼容旧链接）> 默认 watchlist
+  // [DetailSourceContextV2] origin 为来源唯一真源，resolveDetailSourceContextV2 统一解析。
+  // 优先级：显式 originScope > 有效 /market returnTo.scope（兼容旧链接）> direct（不伪造行情来源）
+  // V2 字段：origin + sourceRunId + canonicalQuery + returnTo + stableContextId + sourceContextInvalid
+  //   - market/watchlist 有效：用 sourceRunId + canonicalQuery 固定入口快照查询 DSA results
+  //   - direct：无来源列表（UI 隐藏左栏，显示"直接访问"占位）
+  //   - 失效：显示 invalid 占位，禁止静默回退自选或另一来源
   const returnToParam = searchParams.get('returnTo')
-  const originScopeParam = searchParams.get('originScope') as 'market' | 'watchlist' | null
-  const { source, strategy, marketContext, sourceContextInvalid } = resolveDetailSourceContext(
-    returnToParam,
-    searchParams.get('source'),
-    searchParams.get('strategy'),
+  const originScopeParam = searchParams.get('originScope') as 'market' | 'watchlist' | 'direct' | null
+  const sourceRunIdParam = searchParams.get('sourceRunId')
+  const canonicalQueryParam = searchParams.get('cq')
+  const sourceCtxV2 = resolveDetailSourceContextV2(
     originScopeParam,
+    returnToParam,
+    sourceRunIdParam,
+    canonicalQueryParam,
   )
+  // V1 兼容派生：source/strategy 供 loadChartLayerVisibility / AtomicFactsDrawer 使用
+  // V2 origin 为来源唯一真源，source/strategy 由 origin 推导
+  const source = sourceCtxV2.origin === 'market' ? 'selection' : 'watchlist'
+  const strategy = sourceCtxV2.origin === 'market' ? 'dsa_selector' : 'watchlist_monitor'
+  const sourceContextInvalid = sourceCtxV2.sourceContextInvalid
   const isCaptureMode = searchParams.get('capture') === 'feishu'
   // [结构状态隐藏开关] - hideStructuralState=1 / capture=1 / capture=feishu 强制隐藏面板
   const hideStructuralStateParam =
@@ -131,25 +136,25 @@ export default function StockDetailPage() {
   const instrumentId = researchData.instrumentId
 
   // 详情页专属 actions（自选/上下切换/memo + returnTo 上下文恢复左栏列表）
-  // CHANGE-20260715-007: 传入 resolveDetailSourceContext 的解析结果，不再各自推导
+  // [DetailSourceContextV2] 传入 V2 解析结果，useStockDetailActions 不再自行推导
   const detailActions = useStockDetailActions({
     instrumentId,
     symbol,
-    source,
-    strategy,
-    marketContext,
+    origin: sourceCtxV2.origin,
+    sourceRunId: sourceCtxV2.sourceRunId,
+    canonicalQuery: sourceCtxV2.canonicalQuery,
+    canonicalQueryRaw: sourceCtxV2.canonicalQueryRaw,
     sourceContextInvalid,
     returnTo: returnToParam,
     timeframe,
   })
 
-  // CHANGE-20260714-001: 左栏来源列表滚动位置保存/恢复
-  // 切换股票前保存 scrollTop 到 sessionStorage；新股票渲染后恢复
-  // 只有活动行完全离开可视区时才 scrollIntoView({block:'nearest'})，避免每次切换都滚回顶部
+  // [DetailSourceContextV2] 左栏来源列表滚动位置保存/恢复
+  // 切股时 stableContextId 不变（不含 selectedSymbol），故滚动位置按来源上下文隔离
   const sourceListRef = useRef<HTMLDivElement | null>(null)
   const sourceListScrollKey = useMemo(
-    () => makeSourceListScrollKey(returnToParam, detailActions.sourceListKind),
-    [returnToParam, detailActions.sourceListKind],
+    () => `${SOURCE_LIST_SCROLL_KEY_PREFIX}:${sourceCtxV2.stableContextId}`,
+    [sourceCtxV2.stableContextId],
   )
   const lastSavedScrollRef = useRef<number>(0)
 
@@ -510,7 +515,7 @@ export default function StockDetailPage() {
                     onChange={() => feishu.setSelectedIndicatorView('smc')}
                     disabled={feishu.sendFeishuPending || feishu.feishuPolling}
                   />
-                  <span className="feishu-indicator-view-label">SMC 结构</span>
+                  <span className="feishu-indicator-view-label">结构</span>
                 </label>
               </div>
 
@@ -632,7 +637,7 @@ export default function StockDetailPage() {
               <div
                 key={s.symbol}
                 className={clsx('tv-source-list-item', s.symbol === symbol && 'active')}
-                onClick={() => navigate(buildStockDetailUrl(s.symbol, { originScope: source === 'selection' ? 'market' : 'watchlist', returnTo: returnToParam, timeframe }))}
+                onClick={() => navigate(buildStockDetailUrl(s.symbol, { originScope: sourceCtxV2.origin, returnTo: returnToParam, timeframe, sourceRunId: sourceCtxV2.sourceRunId, canonicalQuery: sourceCtxV2.canonicalQueryRaw }))}
               >
                 <span className="tv-source-name">{s.name}</span>
                 <div className="tv-source-meta">

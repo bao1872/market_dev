@@ -30,6 +30,12 @@ v2 规则（docs/restructure-system-map-v2 之后）:
     判定逻辑与 backend/tests/test_ref_isolation.py 保持一致。
 15. 必需 CHANGE 记录（CHANGE-20260718-004）：要求
     docs/changes/records/CHANGE-20260718-004.md 存在且被 CHANGELOG.md 引用。
+16. MANIFEST baseline 新鲜度（CP-19 / CHANGE-20260722-001）：baseline SHA
+    必须在 HEAD 的最近 BASELINE_FRESHNESS_WINDOW 个 commit 内。
+    修复 PROMPT.md §4 指出的问题：旧规则只要求 baseline 是 HEAD 祖先，
+    即使 baseline 落后 88 个 commit 仍能通过，导致文档与代码严重脱节。
+    新规则要求 baseline 必须在最近 N 个 commit 内，强制每次 checkpoint
+    提交时同步更新 MANIFEST baseline。
 
 输出汇总：
 - MANIFEST baseline SHA
@@ -80,9 +86,13 @@ PLACEHOLDER_RE = re.compile(r"待填写")
 FEISHU_WEBHOOK_RE = re.compile(r"feishu_webhook")
 
 # 规则 11：docs/ 直属子目录白名单（CHANGE-20260718-002）
-# AGENTS v2 文档结构规范：docs 顶层只允许 current/maps/changes/archive 四个目录。
-# docs/ 根 .md 文件（如 README.md）不受限，只约束子目录。
-ALLOWED_TOP_LEVEL_DIRS = {"current", "maps", "changes", "archive"}
+# AGENTS v2 文档结构规范：docs 顶层允许的目录（PRD V2.0 §7.1 权威层级入口）。
+# docs/ 根 .md 文件（如 README.md、INDEX.md）不受限，只约束子目录。
+# [CP-14] 扩展为 PRD V2.0 §7.1 定义的完整目录集：contracts/decisions/runbooks/acceptance/evidence/work
+ALLOWED_TOP_LEVEL_DIRS = {
+    "current", "maps", "changes", "archive",  # 历史 v2 目录
+    "contracts", "decisions", "runbooks", "acceptance", "evidence", "work",  # CP-14 新增
+}
 
 # 规则 12：CHANGE 引用正则（CHANGE-20260718-002）
 # 匹配 CHANGE-YYYYMMDD-NNN 形式（无论是否在 markdown 链接/反引号中），
@@ -125,6 +135,12 @@ REF_PROHIBITED_TERM_WINDOW = 40
 # 路径在 check_required_change_documented() 内从 DOCS_DIR 派生，
 # 以支持测试 monkeypatch 注入临时路径。
 REQUIRED_CHANGE_ID = "CHANGE-20260718-004"
+
+# 规则 16：MANIFEST baseline 新鲜度窗口（CP-19 / CHANGE-20260722-001）
+# baseline SHA 必须在 HEAD 的最近 N 个 commit 内，防止 baseline 严重落后。
+# 窗口大小 50 覆盖约 2-3 个 Phase 的 checkpoint 数量，平衡新鲜度与历史容错。
+# 测试可通过 monkeypatch 注入 BASELINE_FRESHNESS_WINDOW 覆盖。
+BASELINE_FRESHNESS_WINDOW = 50
 
 
 def run_git(*args: str) -> subprocess.CompletedProcess[str]:
@@ -211,6 +227,60 @@ def check_baseline_ancestor(shas: list[str]) -> list[str]:
         if re.fullmatch(r"[0-9a-fA-F]{40}", sha) and is_valid_commit(sha):
             if not is_ancestor_of_head(sha):
                 errors.append(f"SHA 不是当前 HEAD 的祖先: {sha}")
+    return errors
+
+
+def count_commits_ahead_of_baseline(sha: str) -> int | None:
+    """规则 16 辅助：统计 baseline SHA 落后 HEAD 多少个 commit。
+
+    使用 `git rev-list --count HEAD ^<sha>` 计算从 baseline 到 HEAD
+    之间的 commit 数量（不含 baseline 自身）。
+
+    Returns:
+        commit 数量；如果 sha 不是 HEAD 祖先或 git 失败则返回 None。
+    """
+    if not is_ancestor_of_head(sha):
+        return None
+    result = run_git("rev-list", "--count", "HEAD", f"^{sha}")
+    if result.returncode != 0:
+        return None
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        return None
+
+
+def check_baseline_freshness(shas: list[str]) -> list[str]:
+    """规则 16：检查 baseline SHA 是否在 HEAD 的最近 N 个 commit 内（CP-19）。
+
+    修复 PROMPT.md §4 指出的问题：旧规则 4 只要求 baseline 是 HEAD 祖先，
+    即使 baseline 落后 88 个 commit 仍能通过，导致文档与代码严重脱节。
+
+    新规则要求 baseline 到 HEAD 的 commit 距离不得超过
+    BASELINE_FRESHNESS_WINDOW，强制每次 checkpoint 提交时同步更新
+    MANIFEST baseline。
+    """
+    errors: list[str] = []
+    for sha in shas:
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+            continue  # 格式错误由规则 2 报告
+        if not is_valid_commit(sha):
+            continue  # 真实性错误由规则 3 报告
+        if not is_ancestor_of_head(sha):
+            continue  # 祖先错误由规则 4 报告
+        ahead = count_commits_ahead_of_baseline(sha)
+        if ahead is None:
+            errors.append(
+                f"无法计算 baseline 落后 HEAD 的 commit 数量: {sha}"
+            )
+            continue
+        if ahead > BASELINE_FRESHNESS_WINDOW:
+            errors.append(
+                f"MANIFEST baseline 严重落后：{sha} 落后 HEAD {ahead} 个 commit，"
+                f"超过窗口 {BASELINE_FRESHNESS_WINDOW}。"
+                f"请在本次 checkpoint 提交时同步更新 docs/current/MANIFEST.md "
+                f"中的实现核对基线到当前 HEAD。"
+            )
     return errors
 
 
@@ -554,6 +624,10 @@ def check_manifest_baseline() -> tuple[list[str], str | None]:
 
     # 规则 4：祖先校验
     errors.extend(check_baseline_ancestor(shas))
+
+    # 规则 16：新鲜度校验（CP-19 / CHANGE-20260722-001）
+    # baseline 必须在 HEAD 的最近 BASELINE_FRESHNESS_WINDOW 个 commit 内
+    errors.extend(check_baseline_freshness(shas))
 
     # v2 不再要求多文档 baseline 一致性（MANIFEST 是唯一基线头）
     # 取第一个合法 SHA 作为统一 baseline

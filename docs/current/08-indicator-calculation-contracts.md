@@ -169,6 +169,8 @@ StockContext API 的 `nodeAvailability` 字段直接从 snapshot.primary.1d.node
 
 SMC 参数和执行顺序见 `docs/maps/smc-pine-parity-map.md` 和 `AGENTS.md` clause 53。
 
+**SMC 严格 time-key（CP-V3-C2）**: SMC 渲染必须使用严格 time-key 匹配。`strictTimeKey=true` 时 time 缺失→`missing_time`+skip，time 匹配失败→`match_failed`+skip，禁止 index fallback。events（BOS/CHoCH）和 EQH/EQL 使用 OR 逻辑（anchor/confirmed 任一匹配即渲染）。详情链和 Capture（90-bar 舞台）共用同一 SMC 坐标映射核心。
+
 ## 4. MACD / SQZMOM / Bollinger / DSA / Swing
 
 这些指标的计算合同引用现有文档：

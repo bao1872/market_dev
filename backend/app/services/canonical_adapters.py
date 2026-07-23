@@ -129,29 +129,36 @@ def compute_macd_adapter(
 
 def compute_bollinger_adapter(
     bars: pd.DataFrame,
-    win: int = 20,
-    k: float = 2.0,
-) -> dict[str, list[float | None]]:
-    """Bollinger Bands 统一 adapter — wraps bollinger_features_plotly.bollinger。
+    length: int = 20,
+    mult: float = 2.0,
+    pct_lookback: int = 120,
+) -> pd.DataFrame:
+    """[CP-13] Bollinger Bands 统一 adapter — wraps merged_dsa_atr_rope_bb_factors.compute_bollinger。
+
+    统一 BB 算法入口：使用 compute_bollinger kernel（5+ 字段 DataFrame），
+    替代旧 bollinger 3-tuple kernel。输出包含 bb_mid/bb_upper/bb_lower/bb_pos_01/
+    bb_width_norm 等字段，满足 watchlist_monitor 和 feature_snapshot 两种调用方需求。
+
+    output_schema_version=2（bb-cf-v2）：返回 DataFrame（11 列），
+    旧 v1 返回 dict（3 字段）已废弃。
 
     Args:
-        bars: MDAS 返回的 DataFrame，必须含 "close" 列
-        win: BB 窗口（默认 20）
-        k: BB 标准差倍数（默认 2.0）
+        bars: MDAS 返回的 DataFrame，必须含 "close" 列（周期由合同 input_timeframes 约束）
+        length: BB 窗口长度，默认 20（标准布林带参数，与盘后/盘中链对齐）
+        mult: BB 标准差倍数（默认 2.0）
+        pct_lookback: width_percentile 回看窗口（默认 120）
 
     Returns:
-        dict: bb_mid / bb_upper / bb_lower 数组（NaN 转 None，便于 JSON 序列化）
+        pd.DataFrame: 含 bb_mid/bb_upper/bb_lower/bb_pos_01/bb_width_norm 等 11 列，
+        index 与 bars 对齐。NaN 保留（调用方按需转 None）。
     """
-    from app.strategy_assets.algorithms.features.bollinger_features_plotly import bollinger
+    from app.strategy_assets.algorithms.features.merged_dsa_atr_rope_bb_factors import (
+        compute_bollinger,
+    )
 
     _require_bars(bars, "bollinger")
     _require_columns(bars, "bollinger", ["close"])
-    mid, upper, lower = bollinger(bars, win, k)
-    return {
-        "bb_mid": [None if pd.isna(v) else float(v) for v in mid.tolist()],
-        "bb_upper": [None if pd.isna(v) else float(v) for v in upper.tolist()],
-        "bb_lower": [None if pd.isna(v) else float(v) for v in lower.tolist()],
-    }
+    return compute_bollinger(bars, length=length, mult=mult, pct_lookback=pct_lookback)
 
 
 # =============================================================================
@@ -355,8 +362,11 @@ def compute_node_cluster_adapter(
 
     if daily_bars is None or daily_bars.empty:
         raise ValueError("compute_node_cluster_adapter: daily_bars 为空")
-    if bars_15m is None or bars_15m.empty:
-        raise ValueError("compute_node_cluster_adapter: bars_15m 为空")
+    # [CP-13] 允许 bars_15m 为空 DataFrame（盘后链 15m 缺失场景）：
+    # kernel 会生成 profile_rows（仅 daily），调用方按 availability=degraded 标记。
+    # 仅拒绝 None（避免 kernel 内部 TypeError）。
+    if bars_15m is None:
+        bars_15m = pd.DataFrame()
     return compute_node_cluster_profile(
         daily_bars,
         bars_15m,
@@ -575,51 +585,41 @@ async def compute_snapshot_derived_adapter(
 
 
 # =============================================================================
-# [CHANGE-20260720-005 §五] Re-exports for 4-chain modules
+# [CP-13 Canonical 四链迁移] DTO builders + temporal helpers re-exports
 # =============================================================================
 # 四链模块（indicator_service / feature_snapshot_service / stock_capture_service /
 # monitor_batch_service）禁止直接 import kernel 模块（AST 硬门禁，见
 # test_algorithm_registry_architecture.py::TestFourChainDirectImportGate）。
 #
-# 本区段把四链需要的 kernel 函数/类型从此处 re-export，使四链改为
-# `from app.services.canonical_adapters import ...`，满足 AST 守护。
-# canonical_adapters.py 是 SSOT 入口（不在 _FOUR_CHAIN_MODULES 中），
-# 可自由 import kernel 模块。
+# [CP-13] 四链已全部迁移到 CanonicalComputationService.compute() 调度：
+# - 所有注册算法（node_cluster/bollinger/macd/sqzmom/smc/structural_features/
+#   primary_secondary_relation）通过 canonical compute() 调用，不再需要 kernel re-exports
+# - 以下 re-exports 仅保留两类：
+#   1. DTO builders / 类型（非算法 kernel，是视图层工具，无对应 registered adapter）
+#   2. temporal 子函数（内部 kernel helper，无独立 registered adapter；
+#      compute_temporal_features_adapter 会重复获取 bars 和重算因子，故保留直接调用）
+# - 已删除的 kernel re-exports（被 dedicated adapter 包装，四链改走 canonical）：
+#   compute_node_cluster_profile / _compute_all_factors_for_bars / _compute_relation /
+#   bollinger / compute_bollinger / compute_smc_indicators / compute_sqzmom_lb /
+#   adapt_smc_to_display_dto
 #
-# 注意：以下 re-export 仅为满足 AST 门禁的接线，不改变 kernel 行为。
-#       算法合同/版本/哈希仍由 AlgorithmRegistry + CanonicalComputationService 管理。
-#       新增算法应优先实现 dedicated adapter（如 compute_xxx_adapter）并设
-#       migration_status="production_wired"，而非无限扩展此 re-export 区段。
+# canonical_adapters.py 是 SSOT 入口（不在 _FOUR_CHAIN_MODULES 中），
+# 可自由 import kernel 模块。新增算法应实现 dedicated adapter 并设
+# migration_status="production_wired"，禁止扩展此 re-export 区段。
 
 from app.services.node_cluster_engine import (  # noqa: E402
     NodeClusterProfileResult,
     build_node_regions,
     build_price_state,
-    compute_node_cluster_profile,
     compute_node_regions_hash,
     derive_state_for_price,
     profile_to_dict,
-)
-from app.services.smc_view_adapter import adapt_smc_to_display_dto  # noqa: E402
-from app.services.structural_factor_service import (  # noqa: E402
-    _compute_all_factors_for_bars,
-    _compute_relation,
 )
 from app.services.temporal_feature_service import (  # noqa: E402
     _compute_daily_context,
     _compute_derived_relation,
     _compute_m15_response,
 )
-from app.strategy_assets.algorithms.features.bollinger_features_plotly import (  # noqa: E402
-    bollinger,
-)
-from app.strategy_assets.algorithms.features.merged_dsa_atr_rope_bb_factors import (  # noqa: E402
-    compute_bollinger,
-)
-from app.strategy_assets.algorithms.features.smc_indicator import (  # noqa: E402
-    compute_smc_indicators,
-)
-from app.strategy_assets.algorithms.features.sqzmom_lb import compute_sqzmom_lb  # noqa: E402
 
 __all__ = [
     # Dedicated adapters（production_wired）
@@ -635,25 +635,17 @@ __all__ = [
     "compute_primary_secondary_relation_adapter",
     "compute_temporal_features_adapter",
     "compute_snapshot_derived_adapter",
-    # Re-exports（4-chain 门禁所需）
+    # [CP-13] Re-exports — DTO builders / 类型（非算法 kernel）
     "NodeClusterProfileResult",
-    "compute_node_cluster_profile",
     "derive_state_for_price",
     "profile_to_dict",
-    # [PROMPT.md §三.3 V2] Canonical Node DTO V2 helpers
     "build_node_regions",
     "build_price_state",
     "compute_node_regions_hash",
-    "adapt_smc_to_display_dto",
-    "_compute_all_factors_for_bars",
-    "_compute_relation",
+    # [CP-13] Re-exports — temporal 子函数（无独立 registered adapter）
     "_compute_daily_context",
     "_compute_derived_relation",
     "_compute_m15_response",
-    "bollinger",
-    "compute_bollinger",
-    "compute_smc_indicators",
-    "compute_sqzmom_lb",
 ]
 
 

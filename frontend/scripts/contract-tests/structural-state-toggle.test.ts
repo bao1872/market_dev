@@ -1,4 +1,4 @@
-// [事件状态面板开关] - 描述: StockDetailPage 事件状态面板开关契约测试
+// [事件状态面板开关] - 描述: StockDetailPage 状态观察开关契约测试
 // 用法：node --experimental-strip-types --test scripts/contract-tests/structural-state-toggle.test.ts
 // 覆盖：
 // 1. 面板首次默认收起（P0-4: eventPanelCollapsed 默认 true；localStorage 持久化用户选择）
@@ -9,10 +9,16 @@
 // 6. capture=feishu 强制隐藏（保留现有 isCaptureMode 逻辑）
 // 7. 强制隐藏时禁用 toggle 按钮（early return）
 // 8. toggle 按钮在 tv-chart-column 内部（定位上下文）
-// 9. 按钮文案动态切换（显示事件状态 / 隐藏事件状态）
-// 10. shouldShowPanel=true 时渲染 EventStatePanel
-// 11. shouldShowPanel=true 时渲染 EventStatePanel
+// 9. 按钮文案动态切换（显示状态观察 / 隐藏状态观察）
+// 10. shouldShowPanel=true 时渲染状态观察组件
+// 11. shouldShowPanel=true 时渲染 AtomicFactsDrawer（overlay drawer 架构）
 // 12. Temporal Features 卡片在 StockStructuralStatePanel 内（useTemporalFeatures 引用）
+//
+// [CP-17 架构演化对齐] 原 EventStatePanel（内联 panel 压缩 K 线）已演化为 AtomicFactsDrawer
+// （overlay drawer 不压缩 K 线），按钮文案从「显示/隐藏事件状态」改为「显示/隐藏状态观察」
+// 以匹配 Atomic Fact Contract V1 术语。测试断言更新为新组件名与文案，但核心行为契约保留：
+// toggle 按钮控制 drawer 可见性、文案随 eventPanelCollapsed 动态切换、shouldShowPanel=true 时
+// 渲染状态观察组件。
 
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
@@ -63,10 +69,10 @@ test('Toggle button is rendered by default (non-capture mode + symbol)', () => {
     /structural-state-toggle-btn/.test(src),
     'StockDetailPage 必须含 "structural-state-toggle-btn" className 的开关按钮',
   )
-  // 必须含「显示事件状态」/「隐藏事件状态」文案
+  // [CP-17] 文案从「显示/隐藏事件状态」更新为「显示/隐藏状态观察」（Atomic Fact Contract V1 术语）
   assert.ok(
-    /显示事件状态/.test(src) && /隐藏事件状态/.test(src),
-    'StockDetailPage 开关按钮必须含「显示事件状态」/「隐藏事件状态」文案',
+    /显示状态观察/.test(src) && /隐藏状态观察/.test(src),
+    'StockDetailPage 开关按钮必须含「显示状态观察」/「隐藏状态观察」文案',
   )
   // 必须在 !hideStructuralStateParam && symbol 时渲染按钮
   assert.ok(
@@ -193,14 +199,15 @@ test('Toggle button is inside tv-chart-column for stable absolute positioning', 
   )
 })
 
-// ===== 9. 按钮文案动态切换（显示/隐藏事件状态） =====
-test('Toggle button label switches between "显示事件状态" and "隐藏事件状态"', () => {
+// ===== 9. 按钮文案动态切换（显示/隐藏状态观察） =====
+test('Toggle button label switches between "显示状态观察" and "隐藏状态观察"', () => {
   const src = readSource()
 
-  // 必须含三元表达式：eventPanelCollapsed ? '显示事件状态' : '隐藏事件状态'
+  // [CP-17] 文案更新为「显示状态观察」/「隐藏状态观察」（Atomic Fact Contract V1 术语）
+  // 必须含三元表达式：eventPanelCollapsed ? '显示状态观察' : '隐藏状态观察'
   assert.ok(
-    /eventPanelCollapsed\s*\?\s*['"]显示事件状态['"]\s*:\s*['"]隐藏事件状态['"]/.test(src),
-    'StockDetailPage toggle 按钮文案必须根据 eventPanelCollapsed 动态切换（收起时显示"显示事件状态"，展开时显示"隐藏事件状态"）',
+    /eventPanelCollapsed\s*\?\s*['"]显示状态观察['"]\s*:\s*['"]隐藏状态观察['"]/.test(src),
+    'StockDetailPage toggle 按钮文案必须根据 eventPanelCollapsed 动态切换（收起时显示"显示状态观察"，展开时显示"隐藏状态观察"）',
   )
 })
 
@@ -220,19 +227,21 @@ test('EventStatePanel is rendered when shouldShowPanel=!eventPanelCollapsed && !
   )
 })
 
-// ===== 11. shouldShowPanel=true 时渲染 EventStatePanel =====
-test('EventStatePanel is rendered when shouldShowPanel=true', () => {
+// ===== 11. shouldShowPanel=true 时渲染 AtomicFactsDrawer（overlay drawer 架构）=====
+test('AtomicFactsDrawer is rendered when shouldShowPanel=true', () => {
   const src = readSource()
 
-  // 必须导入 EventStatePanel
+  // [CP-17] 组件从 EventStatePanel（内联 panel）演化为 AtomicFactsDrawer（overlay drawer 不压缩 K 线）
+  // 必须导入 AtomicFactsDrawer
   assert.ok(
-    /import\s*\{[^}]*EventStatePanel[^}]*\}\s*from\s*['"]@\/features\/research-context\/EventStatePanel['"]/.test(src),
-    'StockDetailPage 必须导入 EventStatePanel',
+    /import\s*\{[^}]*AtomicFactsDrawer[^}]*\}\s*from\s*['"]@\/features\/research-context\/AtomicFactsDrawer['"]/.test(src),
+    'StockDetailPage 必须导入 AtomicFactsDrawer',
   )
-  // 必须渲染 <EventStatePanel symbol={symbol} />
+  // 必须渲染 <AtomicFactsDrawer symbol={symbol} open onClose={...} />
+  // 接受 open 布尔简写或 open={...} 显式值两种形式
   assert.ok(
-    /<EventStatePanel\s+symbol=\{symbol\}\s*\/>/.test(src),
-    'StockDetailPage 必须渲染 <EventStatePanel symbol={symbol} />',
+    /<AtomicFactsDrawer\s+symbol=\{symbol\}\s+open(?:=\{[^}]+\})?\s+onClose=\{[^}]+\}\s*\/>/.test(src),
+    'StockDetailPage 必须渲染 <AtomicFactsDrawer symbol={symbol} open onClose={...} />',
   )
 })
 

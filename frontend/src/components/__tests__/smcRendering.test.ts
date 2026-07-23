@@ -7,6 +7,7 @@
 //   3. mapSmcIndexToDisplay: 负索引 clamp / 越界返回 undefined / 正常索引透传
 //   4. Canvas mock 测试：最多 5 个 OB / 左侧 clamp / EQH 线到 second_pivot / Strong/Weak 读 DTO swing_bias /
 //      SMC 价格进入纵轴 / FVG 绘制调用为 0
+//   5. [CP-V3-C] time-key 渲染：timeToDisplayIndex 优先于 index / fallback / 四类元素均传 time 参数
 
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
@@ -16,13 +17,24 @@ import {
   mapSmcIndexToDisplay,
   intersectSmcRangeWithViewport,
   hexToRgba,
+  layoutSmcLabels,
   SMC_BULL_COLOR,
   SMC_BEAR_COLOR,
   type SmcOrderBlock,
   type SmcEvent,
   type SmcEqualHighLow,
   type SmcTrailing,
+  type SmcLabelAnchor,
+  type SmcLabelLayoutContext,
 } from '../smcRendering.ts'
+
+// [CP-V3-C2] onTimeKeyMiss 回调类型（与 SmcVisibleContext.onTimeKeyMiss 一致）
+type TimeKeyMissReason = 'missing_time' | 'match_failed'
+type OnTimeKeyMiss = (
+  reason: TimeKeyMissReason,
+  smcIdx: number | null | undefined,
+  time: string | null | undefined,
+) => void
 
 // ===== 工具：构造测试用 OB =====
 function makeOb(overrides: Partial<SmcOrderBlock> = {}): SmcOrderBlock {
@@ -69,6 +81,522 @@ test('mapSmcIndexToDisplay: 正常索引 → 直接返回 (adapter 已重基准)
   assert.equal(mapSmcIndexToDisplay(0, ctx), 0)
   assert.equal(mapSmcIndexToDisplay(15, ctx), 15)
   assert.equal(mapSmcIndexToDisplay(29, ctx), 29)
+})
+
+// ===== 1b. [CP-V3-C] mapSmcIndexToDisplay time-key 渲染 =====
+//
+// 验证 viewport 从 250 → 90 切换时，time-based lookup 优先于 index-based
+// （anchor_time 始终正确，不依赖 view adapter rebasing）
+
+test('[CP-V3-C] mapSmcIndexToDisplay: time 命中 → 优先于 index 返回', () => {
+  // 场景：viewport 90 bar，event 在原 full history index=200，
+  //   view adapter rebased index=40（正确），但若 adapter 未正确 rebase 仍传 200，
+  //   此时 anchor_time 应能命中 klineTimeIndex 给出正确 displayIdx=40
+  const timeMap = new Map([['2026-07-15', 40]])
+  const ctx = { displayCount: 90, timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? '') }
+  // index=200 越界（fallback 会返回 undefined），但 time 命中 → 返回 40
+  assert.equal(mapSmcIndexToDisplay(200, ctx, '2026-07-15'), 40)
+  // index=40 也命中（fallback 路径），但 time 优先 → 返回 40
+  assert.equal(mapSmcIndexToDisplay(40, ctx, '2026-07-15'), 40)
+})
+
+test('[CP-V3-C] mapSmcIndexToDisplay: time 未命中 → fallback 到 index 路径', () => {
+  const timeMap = new Map([['2026-07-15', 40]])  // 不包含 '2026-07-16'
+  const ctx = { displayCount: 90, timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? '') }
+  // time 未命中 + index 在范围内 → 走 fallback
+  assert.equal(mapSmcIndexToDisplay(15, ctx, '2026-07-16'), 15)
+  // time 未命中 + index 越界 → undefined
+  assert.equal(mapSmcIndexToDisplay(200, ctx, '2026-07-16'), undefined)
+  // time 未命中 + 负索引 → 0（clipped_left clamp）
+  assert.equal(mapSmcIndexToDisplay(-3, ctx, '2026-07-16'), 0)
+})
+
+test('[CP-V3-C] mapSmcIndexToDisplay: 无 timeToDisplayIndex 回调 → 走 index 路径（向后兼容）', () => {
+  // 旧调用方（未提供 timeToDisplayIndex）应保持原有行为
+  const ctx = { displayCount: 30 }  // 无 timeToDisplayIndex
+  assert.equal(mapSmcIndexToDisplay(15, ctx, '2026-07-15'), 15)  // time 被忽略
+  assert.equal(mapSmcIndexToDisplay(-3, ctx, '2026-07-15'), 0)
+  assert.equal(mapSmcIndexToDisplay(100, ctx, '2026-07-15'), undefined)
+})
+
+test('[CP-V3-C] mapSmcIndexToDisplay: time=null/undefined → 走 fallback', () => {
+  const timeMap = new Map([['2026-07-15', 40]])
+  const ctx = { displayCount: 90, timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? '') }
+  // time=null → 不调用 callback，走 fallback
+  assert.equal(mapSmcIndexToDisplay(15, ctx, null), 15)
+  assert.equal(mapSmcIndexToDisplay(15, ctx, undefined), 15)
+})
+
+// ===== 1c. [CP-V3-C2] mapSmcIndexToDisplay 严格 time-key 模式 =====
+//
+// 验证 strictTimeKey=true 时：
+//   - time 缺失 → diagnostic + skip（返回 undefined，禁止 index fallback）
+//   - time 匹配失败 → diagnostic + skip（禁止 index fallback）
+//   - time 命中 → 返回 displayIdx（无 miss 回调）
+//   - onTimeKeyMiss 回调被调用并记录正确 reason
+// 仅显式 legacy 模式（strictTimeKey=false 或未设）允许 fallback。
+
+test('[CP-V3-C2] strict mode + time missing → undefined + onTimeKeyMiss(missing_time)', () => {
+  const misses: Array<{ reason: string; smcIdx: number | null | undefined; time: string | null | undefined }> = []
+  const timeMap = new Map([['2026-07-15', 40]])
+  const ctx = {
+    displayCount: 90,
+    timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? ''),
+    strictTimeKey: true,
+    onTimeKeyMiss: ((reason: TimeKeyMissReason, smcIdx: number | null | undefined, time: string | null | undefined) => misses.push({ reason, smcIdx, time })) as OnTimeKeyMiss,
+  }
+  // time=null → strict: skip
+  assert.equal(mapSmcIndexToDisplay(15, ctx, null), undefined)
+  // time=undefined → strict: skip
+  assert.equal(mapSmcIndexToDisplay(15, ctx, undefined), undefined)
+  // 即使 index 在窗口内（15 < 90），strict 模式也禁止 fallback
+  assert.equal(misses.length, 2)
+  assert.equal(misses[0].reason, 'missing_time')
+  assert.equal(misses[0].smcIdx, 15)
+  assert.equal(misses[0].time, null)
+  assert.equal(misses[1].reason, 'missing_time')
+  assert.equal(misses[1].smcIdx, 15)
+  assert.equal(misses[1].time, undefined)
+})
+
+test('[CP-V3-C2] strict mode + time match failed → undefined + onTimeKeyMiss(match_failed)', () => {
+  const misses: Array<{ reason: string; smcIdx: number | null | undefined; time: string | null | undefined }> = []
+  const timeMap = new Map([['2026-07-15', 40]])  // 不包含 '2026-07-16'
+  const ctx = {
+    displayCount: 90,
+    timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? ''),
+    strictTimeKey: true,
+    onTimeKeyMiss: ((reason: TimeKeyMissReason, smcIdx: number | null | undefined, time: string | null | undefined) => misses.push({ reason, smcIdx, time })) as OnTimeKeyMiss,
+  }
+  // time='2026-07-16' 提供但匹配失败 → strict: skip
+  assert.equal(mapSmcIndexToDisplay(15, ctx, '2026-07-16'), undefined)
+  // 即使 index 在窗口内（15 < 90），strict 模式也禁止 fallback
+  assert.equal(mapSmcIndexToDisplay(200, ctx, '2026-07-16'), undefined)
+  assert.equal(misses.length, 2)
+  assert.equal(misses[0].reason, 'match_failed')
+  assert.equal(misses[0].smcIdx, 15)
+  assert.equal(misses[0].time, '2026-07-16')
+  assert.equal(misses[1].reason, 'match_failed')
+  assert.equal(misses[1].smcIdx, 200)
+})
+
+test('[CP-V3-C2] strict mode + time hit → displayIdx (no miss callback)', () => {
+  const misses: string[] = []
+  const timeMap = new Map([['2026-07-15', 40]])
+  const ctx = {
+    displayCount: 90,
+    timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? ''),
+    strictTimeKey: true,
+    onTimeKeyMiss: ((reason: TimeKeyMissReason) => misses.push(reason)) as OnTimeKeyMiss,
+  }
+  // time 命中 → 返回 40，不调用 miss 回调
+  assert.equal(mapSmcIndexToDisplay(200, ctx, '2026-07-15'), 40)
+  assert.equal(mapSmcIndexToDisplay(40, ctx, '2026-07-15'), 40)
+  assert.equal(misses.length, 0)
+})
+
+test('[CP-V3-C2] strict mode + 无 timeToDisplayIndex 回调 → time missing 触发 skip', () => {
+  // 严格模式要求 time-key 路径必须可用；若未提供 timeToDisplayIndex 回调，
+  // 即使 time 有值也无法匹配 → 视为 missing_time 并 skip（防止静默 fallback）
+  const misses: string[] = []
+  const ctx = {
+    displayCount: 90,
+    // 无 timeToDisplayIndex
+    strictTimeKey: true,
+    onTimeKeyMiss: ((reason: TimeKeyMissReason) => misses.push(reason)) as OnTimeKeyMiss,
+  }
+  // time 有值但无回调 → 走 strict missing_time 分支
+  assert.equal(mapSmcIndexToDisplay(15, ctx, '2026-07-15'), undefined)
+  assert.equal(mapSmcIndexToDisplay(15, ctx, null), undefined)
+  assert.equal(misses.length, 2)
+  assert.equal(misses[0], 'missing_time')
+  assert.equal(misses[1], 'missing_time')
+})
+
+test('[CP-V3-C2] legacy mode (strictTimeKey=false) + time match failed → fallback 到 index', () => {
+  const misses: string[] = []
+  const timeMap = new Map([['2026-07-15', 40]])  // 不包含 '2026-07-16'
+  const ctx = {
+    displayCount: 90,
+    timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? ''),
+    strictTimeKey: false,  // 显式 legacy 模式
+    onTimeKeyMiss: ((reason: TimeKeyMissReason) => misses.push(reason)) as OnTimeKeyMiss,  // 不应被调用
+  }
+  // time 未命中 + index 在范围内 → 走 fallback（返回 index）
+  assert.equal(mapSmcIndexToDisplay(15, ctx, '2026-07-16'), 15)
+  // time 未命中 + 负索引 → 0（clipped_left clamp）
+  assert.equal(mapSmcIndexToDisplay(-3, ctx, '2026-07-16'), 0)
+  // time 未命中 + index 越界 → undefined
+  assert.equal(mapSmcIndexToDisplay(200, ctx, '2026-07-16'), undefined)
+  // legacy 模式不调用 onTimeKeyMiss
+  assert.equal(misses.length, 0)
+})
+
+test('[CP-V3-C2] legacy mode (strictTimeKey=false) + time missing → fallback 到 index', () => {
+  const misses: string[] = []
+  const timeMap = new Map([['2026-07-15', 40]])
+  const ctx = {
+    displayCount: 90,
+    timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? ''),
+    strictTimeKey: false,
+    onTimeKeyMiss: ((reason: TimeKeyMissReason) => misses.push(reason)) as OnTimeKeyMiss,
+  }
+  // time=null/undefined → 走 fallback（legacy 行为）
+  assert.equal(mapSmcIndexToDisplay(15, ctx, null), 15)
+  assert.equal(mapSmcIndexToDisplay(15, ctx, undefined), 15)
+  assert.equal(misses.length, 0)
+})
+
+test('[CP-V3-C2] strict mode 默认关闭（未设 strictTimeKey） → 与 legacy 等价', () => {
+  // 未设 strictTimeKey 应等同 legacy 模式（向后兼容）
+  const timeMap = new Map([['2026-07-15', 40]])  // 不包含 '2026-07-16'
+  const ctx = {
+    displayCount: 90,
+    timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? ''),
+    // strictTimeKey 未设
+  }
+  // time 未命中 → fallback（与 legacy 一致）
+  assert.equal(mapSmcIndexToDisplay(15, ctx, '2026-07-16'), 15)
+  assert.equal(mapSmcIndexToDisplay(15, ctx, null), 15)
+})
+
+test('[CP-V3-C2] strict mode 不影响 null/undefined smcIdx 在 time 命中时的行为', () => {
+  // smcIdx=null/undefined + time 命中 → 仍按 time 返回 displayIdx
+  // （time-key 是 primary 路径，与 smcIdx 是否有效无关）
+  const misses: string[] = []
+  const timeMap = new Map([['2026-07-15', 40]])
+  const ctx = {
+    displayCount: 90,
+    timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? ''),
+    strictTimeKey: true,
+    onTimeKeyMiss: ((reason: TimeKeyMissReason) => misses.push(reason)) as OnTimeKeyMiss,
+  }
+  assert.equal(mapSmcIndexToDisplay(null, ctx, '2026-07-15'), 40)
+  assert.equal(mapSmcIndexToDisplay(undefined, ctx, '2026-07-15'), 40)
+  assert.equal(misses.length, 0)
+})
+
+test('[CP-V3-C2] selectVisibleSmcOrderBlocks strict mode + OB anchor_time match failed → 跳过该 OB', () => {
+  // strict 模式下，OB anchor_time 匹配失败 → 该 OB 被跳过（不 fallback 到 anchor_index）
+  // 即使 anchor_index 在窗口内（15, 20 < 90），strict 也禁止 fallback
+  const misses: string[] = []
+  const timeMap = new Map([['2026-07-15', 40]])
+  const ctx = {
+    displayCount: 90,
+    timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? ''),
+    strictTimeKey: true,
+    onTimeKeyMiss: ((reason: TimeKeyMissReason) => misses.push(reason)) as OnTimeKeyMiss,
+  }
+  const obs = [
+    makeOb({ anchor_index: 5, anchor_time: '2026-07-15' }),  // 命中 → 选中
+    makeOb({ anchor_index: 15, anchor_time: 'unknown-time-1' }),  // 匹配失败 → strict skip
+    makeOb({ anchor_index: 20, anchor_time: 'unknown-time-2' }),  // 匹配失败 → strict skip
+  ]
+  const visible = selectVisibleSmcOrderBlocks(obs, ctx)
+  // 只有第一个 OB 被选中
+  assert.equal(visible.length, 1)
+  assert.equal(visible[0].anchor_index, 5)
+  // 2 次 miss（OB 2 + OB 3 都 match_failed）
+  assert.equal(misses.length, 2)
+  assert.equal(misses[0], 'match_failed')
+  assert.equal(misses[1], 'match_failed')
+})
+
+test('[CP-V3-C2] collectVisibleSmcPriceCandidates strict mode + event time missing → 跳过 level', () => {
+  // strict 模式下，event.anchor_time 与 confirmed_time 都缺失 → level 不被收集
+  const misses: string[] = []
+  const timeMap = new Map([['2026-07-15', 40]])
+  const ctx = {
+    displayCount: 90,
+    timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? ''),
+    strictTimeKey: true,
+    onTimeKeyMiss: ((reason: TimeKeyMissReason) => misses.push(reason)) as OnTimeKeyMiss,
+  }
+  const ev1: SmcEvent = {
+    type: 'BOS', bias: 1, anchor_index: 5, anchor_time: '2026-07-15',
+    confirmed_index: 6, confirmed_time: '2026-07-16', level: 10.5,
+  }
+  const ev2: SmcEvent = {
+    type: 'CHoCH', bias: -1, anchor_index: 15, anchor_time: null,
+    confirmed_index: 16, confirmed_time: null, level: 11.5,
+  }
+  const candidates = collectVisibleSmcPriceCandidates({ events: [ev1, ev2] }, ctx)
+  // ev1.anchor_time 命中 → level=10.5 被收集
+  // ev2.anchor_time/confirmed_time 都缺失 → strict skip（level 不被收集）
+  assert.ok(candidates.includes(10.5))
+  assert.ok(!candidates.includes(11.5), `ev2 level should be skipped in strict mode, got candidates: ${candidates}`)
+  // 至少 2 次 miss（ev2 anchor + confirmed）
+  assert.ok(misses.length >= 2, `expected >=2 misses, got ${misses.length}`)
+})
+
+// ===== 1d. [CP-V3-C2] 10+ SMC 结构坐标验证（strict mode）=====
+//
+// 验证 10+ 个 BOS/CHoCH/EQH/EQL/OB 在 strict time-key 模式下的坐标计算：
+//   - 每个结构记录: time, price, visible index, x/y, label rect, leader line
+//   - 使用 mock 几何（plotLeft=40, plotTop=50, step=10, priceRange=8~14）
+//   - 验证 strict mode 下 time-key 命中 → 正确 display index → 正确 x/y
+//   - 验证 strict mode 下 time-key 缺失/失败 → skip（不渲染）
+
+test('[CP-V3-C2] 10+ SMC 结构坐标验证：strict mode 命中 + skip 完整记录', () => {
+  // Mock 几何（与 mobile_capture 90 bar 窗口类似）
+  const plotLeft = 40
+  const plotTop = 50
+  const plotRight = 40 + 90 * 10  // 940
+  const plotBottom = 600
+  const step = 10
+  const priceMin = 8.0
+  const priceMax = 14.0
+  const priceToY = (p: number): number => {
+    return plotTop + (plotBottom - plotTop) * (priceMax - p) / (priceMax - priceMin)
+  }
+  const idxToX = (idx: number): number => plotLeft + (idx + 0.5) * step
+
+  // 90 bar displayTimes（2026-07-01 ~ 2026-07-15，每天 6 个 15m bar）
+  const displayTimes: string[] = []
+  for (let day = 1; day <= 15; day++) {
+    for (let h = 9; h <= 14; h++) {
+      displayTimes.push(`2026-07-${String(day).padStart(2, '0')}T${String(h).padStart(2, '0')}:00`)
+    }
+  }
+  const timeMap = new Map<string, number>()
+  displayTimes.forEach((t, i) => timeMap.set(t, i))
+
+  const misses: Array<{ reason: string; smcIdx: number | null | undefined; time: string | null | undefined }> = []
+  const ctx = {
+    displayCount: displayTimes.length,
+    timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? ''),
+    strictTimeKey: true,
+    onTimeKeyMiss: ((reason: TimeKeyMissReason, smcIdx: number | null | undefined, time: string | null | undefined) => misses.push({ reason, smcIdx, time })) as OnTimeKeyMiss,
+  }
+
+  // ===== 构造 10+ 个 SMC 结构（覆盖 BOS/CHoCH/EQH/EQL/OB）=====
+  const events: SmcEvent[] = [
+    // 1. BOS bullish, anchor 在窗口内
+    { type: 'BOS', bias: 1, anchor_index: 5, anchor_time: '2026-07-01T10:00', confirmed_index: 8, confirmed_time: '2026-07-01T13:00', level: 10.5 },
+    // 2. BOS bearish, anchor 在窗口内
+    { type: 'BOS', bias: -1, anchor_index: 15, anchor_time: '2026-07-03T12:00', confirmed_index: 18, confirmed_time: '2026-07-04T09:00', level: 12.0 },
+    // 3. CHoCH bullish (internal)
+    { type: 'CHoCH', bias: 1, internal: true, anchor_index: 25, anchor_time: '2026-07-05T10:00', confirmed_index: 28, confirmed_time: '2026-07-05T13:00', level: 9.5 },
+    // 4. CHoCH bearish (swing)
+    { type: 'CHoCH', bias: -1, anchor_index: 35, anchor_time: '2026-07-07T11:00', confirmed_index: 38, confirmed_time: '2026-07-07T14:00', level: 13.0 },
+    // 5. BOS with anchor_time AND confirmed_time both null → strict skip（OR 逻辑：两者都缺失才 skip）
+    { type: 'BOS', bias: 1, anchor_index: 45, anchor_time: null, confirmed_index: 48, confirmed_time: null, level: 11.0 },
+    // 6. CHoCH with anchor_time AND confirmed_time both match_failed → strict skip
+    { type: 'CHoCH', bias: -1, anchor_index: 55, anchor_time: 'unknown-anchor', confirmed_index: 58, confirmed_time: 'unknown-confirmed', level: 11.5 },
+  ]
+
+  const orderBlocks: SmcOrderBlock[] = [
+    // 7. OB bullish (internal, unmitigated)
+    { anchor_index: 10, anchor_time: '2026-07-02T12:00', bar_high: 11.0, bar_low: 9.5, bias: 1, internal: true, confirmed_index: 12, confirmed_time: '2026-07-02T14:00', mitigated: false, mitigated_index: null, mitigated_time: null, clipped_left: false },
+    // 8. OB bearish (internal, unmitigated)
+    { anchor_index: 30, anchor_time: '2026-07-06T10:00', bar_high: 13.5, bar_low: 12.0, bias: -1, internal: true, confirmed_index: 32, confirmed_time: '2026-07-06T12:00', mitigated: false, mitigated_index: null, mitigated_time: null, clipped_left: false },
+    // 9. OB with anchor_time match failed → strict skip
+    { anchor_index: 40, anchor_time: 'unknown-ob-time', bar_high: 14.0, bar_low: 12.5, bias: 1, internal: true, confirmed_index: 42, confirmed_time: '2026-07-08T12:00', mitigated: false, mitigated_index: null, mitigated_time: null, clipped_left: false },
+  ]
+
+  const equalHLs: SmcEqualHighLow[] = [
+    // 10. EQH (bearish, equal highs)
+    { type: 'EQH', anchor_index: 20, anchor_time: '2026-07-04T11:00', second_pivot_index: 24, second_pivot_time: '2026-07-05T09:00', confirmed_index: 25, confirmed_time: '2026-07-05T10:00', level: 12.5, prev_level: 12.4 },
+    // 11. EQL (bullish, equal lows)
+    { type: 'EQL', anchor_index: 50, anchor_time: '2026-07-10T10:00', second_pivot_index: 54, second_pivot_time: '2026-07-11T09:00', confirmed_index: 55, confirmed_time: '2026-07-11T10:00', level: 9.0, prev_level: 9.1 },
+    // 12. EQH with anchor_time AND second_pivot_time both match_failed → strict skip
+    { type: 'EQH', anchor_index: 60, anchor_time: 'unknown-eqh-anchor', second_pivot_index: 64, second_pivot_time: 'unknown-eqh-sp', confirmed_index: 65, confirmed_time: '2026-07-13T10:00', level: 13.5, prev_level: 13.4 },
+  ]
+
+  // ===== 记录每个结构的坐标 =====
+  interface StructureRecord {
+    kind: string
+    index: number
+    time: string | null | undefined
+    price: number | null
+    visibleIndex: number | null | undefined
+    x: number | null | undefined
+    y: number | null | undefined
+    skipped: boolean
+    skipReason?: string
+  }
+  const records: StructureRecord[] = []
+
+  // 处理 events (BOS/CHoCH)
+  events.forEach((ev, i) => {
+    const anchorIdx = mapSmcIndexToDisplay(ev.anchor_index, ctx, ev.anchor_time)
+    const confirmedIdx = mapSmcIndexToDisplay(ev.confirmed_index, ctx, ev.confirmed_time)
+    const visible = anchorIdx != null || confirmedIdx != null
+    const price = ev.level ?? null
+    if (visible) {
+      const useIdx = anchorIdx ?? confirmedIdx
+      records.push({
+        kind: ev.type, index: i, time: ev.anchor_time, price,
+        visibleIndex: useIdx, x: useIdx != null ? idxToX(useIdx) : null,
+        y: price != null ? priceToY(price) : null, skipped: false,
+      })
+    } else {
+      records.push({
+        kind: ev.type, index: i, time: ev.anchor_time, price,
+        visibleIndex: null, x: null, y: null, skipped: true,
+        skipReason: 'strict time-key miss',
+      })
+    }
+  })
+
+  // 处理 OBs
+  const visibleObs = selectVisibleSmcOrderBlocks(orderBlocks, ctx)
+  orderBlocks.forEach((ob, i) => {
+    const isVisible = visibleObs.includes(ob)
+    const anchorIdx = mapSmcIndexToDisplay(ob.anchor_index, ctx, ob.anchor_time)
+    if (isVisible && anchorIdx != null) {
+      records.push({
+        kind: 'OB', index: i, time: ob.anchor_time, price: ob.bar_high,
+        visibleIndex: anchorIdx, x: idxToX(anchorIdx),
+        y: priceToY(ob.bar_high), skipped: false,
+      })
+    } else {
+      records.push({
+        kind: 'OB', index: i, time: ob.anchor_time, price: ob.bar_high,
+        visibleIndex: null, x: null, y: null, skipped: true,
+        skipReason: 'strict time-key miss',
+      })
+    }
+  })
+
+  // 处理 EQH/EQL
+  equalHLs.forEach((eq, i) => {
+    const anchorIdx = mapSmcIndexToDisplay(eq.anchor_index, ctx, eq.anchor_time)
+    const spIdx = mapSmcIndexToDisplay(eq.second_pivot_index, ctx, eq.second_pivot_time)
+    const visible = anchorIdx != null || spIdx != null
+    if (visible) {
+      const useIdx = anchorIdx ?? spIdx
+      records.push({
+        kind: eq.type, index: i, time: eq.anchor_time, price: eq.level,
+        visibleIndex: useIdx, x: useIdx != null ? idxToX(useIdx) : null,
+        y: priceToY(eq.level), skipped: false,
+      })
+    } else {
+      records.push({
+        kind: eq.type, index: i, time: eq.anchor_time, price: eq.level,
+        visibleIndex: null, x: null, y: null, skipped: true,
+        skipReason: 'strict time-key miss',
+      })
+    }
+  })
+
+  // ===== 验证 =====
+  // 总共 12 个结构（6 events + 3 OBs + 3 EQH/EQL）
+  assert.equal(records.length, 12, `expected 12 structure records, got ${records.length}`)
+
+  // 命中（rendered）的结构：events 1-4 (4), OBs 7-8 (2), EQH/EQL 10-11 (2) = 8
+  const rendered = records.filter(r => !r.skipped)
+  assert.equal(rendered.length, 8, `expected 8 rendered structures, got ${rendered.length}`)
+
+  // 跳过的结构：event 5 (anchor_time null), event 6 (confirmed_time unknown),
+  //   OB 9 (anchor_time unknown), EQH 12 (second_pivot_time null) = 4
+  const skipped = records.filter(r => r.skipped)
+  assert.equal(skipped.length, 4, `expected 4 skipped structures, got ${skipped.length}`)
+
+  // 验证命中的结构有正确的坐标
+  for (const r of rendered) {
+    assert.ok(r.visibleIndex != null, `${r.kind}#${r.index} should have visibleIndex`)
+    assert.ok(r.x != null, `${r.kind}#${r.index} should have x`)
+    assert.ok(r.y != null, `${r.kind}#${r.index} should have y`)
+    // x 在图表区域内
+    assert.ok(r.x! >= plotLeft && r.x! <= plotRight, `${r.kind}#${r.index} x=${r.x} out of [${plotLeft}, ${plotRight}]`)
+    // y 在图表区域内
+    assert.ok(r.y! >= plotTop && r.y! <= plotBottom, `${r.kind}#${r.index} y=${r.y} out of [${plotTop}, ${plotBottom}]`)
+  }
+
+  // 验证具体坐标（抽样检查）
+  // Event 1: BOS, anchor_time='2026-07-01T10:00' → displayIdx=1 (day 1, hour 10 = index 1)
+  //   x = 40 + (1 + 0.5) * 10 = 55, y = priceToY(10.5) = 50 + 550 * (14-10.5)/6 = 50 + 320.83 = 370.83
+  const ev1 = records[0]
+  assert.equal(ev1.kind, 'BOS')
+  assert.equal(ev1.visibleIndex, 1)
+  assert.ok(Math.abs(ev1.x! - 55) < 0.01, `ev1.x expected 55, got ${ev1.x}`)
+  assert.ok(Math.abs(ev1.y! - 370.83) < 0.1, `ev1.y expected ~370.83, got ${ev1.y}`)
+
+  // Event 5: BOS, anchor_time=null → strict skip
+  const ev5 = records[4]
+  assert.equal(ev5.kind, 'BOS')
+  assert.equal(ev5.skipped, true)
+  assert.equal(ev5.visibleIndex, null)
+
+  // OB 9: anchor_time='unknown-ob-time' → strict skip
+  const ob9 = records.find(r => r.kind === 'OB' && r.index === 2)
+  assert.ok(ob9, 'OB index 2 not found')
+  assert.equal(ob9!.skipped, true)
+
+  // EQH 12: second_pivot_time=null → strict skip
+  const eqh12 = records.find(r => r.kind === 'EQH' && r.index === 2)
+  assert.ok(eqh12, 'EQH index 2 not found')
+  assert.equal(eqh12!.skipped, true)
+
+  // 验证 strict mode miss 回调被调用
+  assert.ok(misses.length >= 4, `expected >=4 misses (event5 anchor, event6 confirmed, ob9 anchor, eqh12 second_pivot), got ${misses.length}`)
+  // 验证 miss reasons 包含 missing_time 和 match_failed
+  const reasons = new Set(misses.map(m => m.reason))
+  assert.ok(reasons.has('missing_time'), `expected missing_time in miss reasons, got ${[...reasons]}`)
+  assert.ok(reasons.has('match_failed'), `expected match_failed in miss reasons, got ${[...reasons]}`)
+})
+
+// ===== 2b. [CP-V3-C] selectVisibleSmcOrderBlocks time-key =====
+
+test('[CP-V3-C] selectVisibleSmcOrderBlocks: anchor_time 命中但 anchor_index 越界 → 仍选中', () => {
+  // 场景：viewport 90 bar，OB anchor 在原 full history index=200，
+  //   view adapter 未正确 rebase，anchor_index 仍为 200（越界）
+  //   但 anchor_time 命中 → 应被选中（time 优先）
+  const timeMap = new Map([['2026-07-15', 40]])
+  const ctx = { displayCount: 90, timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? '') }
+  const obs = [
+    makeOb({ anchor_index: 200, anchor_time: '2026-07-15', internal: true, mitigated: false }),
+    makeOb({ anchor_index: 250, anchor_time: '2026-07-20', internal: true, mitigated: false }),  // time/index 都越界
+  ]
+  const result = selectVisibleSmcOrderBlocks(obs, ctx)
+  assert.equal(result.length, 1, '只有 anchor_time 命中的 OB 应被选中')
+  assert.equal(result[0].anchor_time, '2026-07-15')
+})
+
+test('[CP-V3-C] selectVisibleSmcOrderBlocks: 无 timeToDisplayIndex → 走 index 路径（向后兼容）', () => {
+  const ctx = { displayCount: 30 }
+  const obs = [
+    makeOb({ anchor_index: 5, anchor_time: '2026-07-15', internal: true, mitigated: false }),
+    makeOb({ anchor_index: 35, anchor_time: '2026-07-20', internal: true, mitigated: false }),  // 越界
+  ]
+  const result = selectVisibleSmcOrderBlocks(obs, ctx)
+  assert.equal(result.length, 1)
+  assert.equal(result[0].anchor_index, 5)
+})
+
+// ===== 3b. [CP-V3-C] collectVisibleSmcPriceCandidates time-key =====
+
+test('[CP-V3-C] collectVisibleSmcPriceCandidates: event.anchor_time 命中 → level 收集', () => {
+  // 场景：event.anchor_index 越界（fallback 会判不可见），但 anchor_time 命中
+  const timeMap = new Map([['2026-07-15', 40]])
+  const ctx = { displayCount: 90, timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? '') }
+  const events: SmcEvent[] = [
+    { type: 'BOS', bias: 1, anchor_index: 200, anchor_time: '2026-07-15', confirmed_index: 250, confirmed_time: '2026-07-20', level: 100.0 },
+  ]
+  const result = collectVisibleSmcPriceCandidates({ events }, ctx)
+  assert.ok(result.includes(100.0), 'anchor_time 命中 → event.level 应被收集')
+})
+
+test('[CP-V3-C] collectVisibleSmcPriceCandidates: EQH second_pivot_time 命中 → level 收集', () => {
+  const timeMap = new Map([['2026-07-16', 50]])  // second_pivot 命中，anchor 不命中
+  const ctx = { displayCount: 90, timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? '') }
+  const eqs: SmcEqualHighLow[] = [
+    { type: 'EQH', anchor_index: 200, anchor_time: '2026-07-10', second_pivot_index: 250, second_pivot_time: '2026-07-16', confirmed_index: 260, confirmed_time: '2026-07-20', level: 50.0, prev_level: 49.9 },
+  ]
+  const result = collectVisibleSmcPriceCandidates({ equal_highs_lows: eqs }, ctx)
+  assert.ok(result.includes(50.0), 'second_pivot_time 命中 → EQH level 应被收集')
+})
+
+test('[CP-V3-C] collectVisibleSmcPriceCandidates: OB anchor_time 命中 → bar_high/bar_low 收集', () => {
+  const timeMap = new Map([['2026-07-15', 40]])
+  const ctx = { displayCount: 90, timeToDisplayIndex: (t: string | null | undefined) => timeMap.get(t ?? '') }
+  const obs: SmcOrderBlock[] = [
+    makeOb({ anchor_index: 200, anchor_time: '2026-07-15', bar_high: 11.5, bar_low: 9.5, internal: true, mitigated: false }),
+  ]
+  const result = collectVisibleSmcPriceCandidates({ order_blocks: obs }, ctx)
+  assert.ok(result.includes(11.5), 'OB bar_high 应被收集（anchor_time 命中）')
+  assert.ok(result.includes(9.5), 'OB bar_low 应被收集（anchor_time 命中）')
 })
 
 // ===== 2. selectVisibleSmcOrderBlocks =====
@@ -604,4 +1132,252 @@ test('intersectSmcRangeWithViewport: anchor=0, confirmed=displayCount-1 → 边�
   assert.equal(range!.endIdx, 29)
   assert.equal(range!.clippedLeft, false)
   assert.equal(range!.clippedRight, false)
+})
+
+// ===== 11. layoutSmcLabels: P0 SMC 标签碰撞布局 =====
+//
+// [2026-07-21 P0 反馈] 飞书移动舞台 90 bar 窗口下 SMC 标签集中重叠
+//   验证点：
+//   1. 空输入 → 空输出
+//   2. 单标签 → lane 0
+//   3. 非重叠两标签 → 都在 lane 0
+//   4. 重叠两标签 → 第二个移到 lane 1（不重叠）
+//   5. 标签框不超出图表区域（plotLeft/plotRight/plotTop/plotBottom）
+//   6. 引导线起点 = 真实锚点，终点 = 标签框中心
+//   7. 真实锚点（anchorX/anchorY）不被改变
+//   8. 京东方A 真实数据 13 标签 → 输出无矩形重叠
+
+// 固定 measureText：每个字符 10px 宽（简化测试）
+function fixedMeasureText(text: string, _fontSize: string): number {
+  return text.length * 10
+}
+
+const defaultLayoutCtx: SmcLabelLayoutContext = {
+  plotLeft: 0,
+  plotRight: 800,
+  plotTop: 0,
+  plotBottom: 600,
+  laneHeight: 32,
+  laneGap: 4,
+  maxLanes: 4,
+}
+
+function makeAnchor(overrides: Partial<SmcLabelAnchor> = {}): SmcLabelAnchor {
+  return {
+    kind: 'bos',
+    anchorX: 100,
+    anchorY: 200,
+    text: 'BOS',
+    color: SMC_BULL_COLOR,
+    fontSize: '28px',
+    align: 'center',
+    preferredVertical: 'up',
+    ...overrides,
+  }
+}
+
+test('layoutSmcLabels: 空输入 → 空输出', () => {
+  const result = layoutSmcLabels([], defaultLayoutCtx, fixedMeasureText)
+  assert.deepEqual(result, [])
+})
+
+test('layoutSmcLabels: 单标签 → lane 0, 框居中于锚点', () => {
+  const anchor = makeAnchor({ anchorX: 400, anchorY: 300, text: 'BOS', align: 'center' })
+  const result = layoutSmcLabels([anchor], defaultLayoutCtx, fixedMeasureText)
+  assert.equal(result.length, 1)
+  assert.equal(result[0].lane, 0, '单标签应在 lane 0')
+  // 框居中：boxX = anchorX - boxW/2
+  const expectedBoxW = 3 * 10 + 4 * 2 // 38
+  assert.equal(result[0].boxX, 400 - expectedBoxW / 2)
+  assert.equal(result[0].boxY, 300 - (28 + 4) / 2, 'boxY 居中于 anchorY (lane 0)')
+})
+
+test('layoutSmcLabels: 两非重叠标签 → 都在 lane 0', () => {
+  // 两标签 anchorX 相距 500px，框宽 ~38px，绝不重叠
+  const a1 = makeAnchor({ anchorX: 100, anchorY: 200, text: 'BOS' })
+  const a2 = makeAnchor({ anchorX: 600, anchorY: 200, text: 'CHoCH' })
+  const result = layoutSmcLabels([a1, a2], defaultLayoutCtx, fixedMeasureText)
+  assert.equal(result.length, 2)
+  assert.equal(result[0].lane, 0)
+  assert.equal(result[1].lane, 0)
+})
+
+test('layoutSmcLabels: 两重叠标签 → 第二个移到 lane 1 (不重叠)', () => {
+  // 两标签 anchorX 相同，必然重叠
+  const a1 = makeAnchor({ anchorX: 400, anchorY: 300, text: 'BOS', preferredVertical: 'up' })
+  const a2 = makeAnchor({ anchorX: 400, anchorY: 300, text: 'CHoCH', preferredVertical: 'up' })
+  const result = layoutSmcLabels([a1, a2], defaultLayoutCtx, fixedMeasureText)
+  assert.equal(result.length, 2)
+  // 第一个在 lane 0，第二个必然移到 lane 1（向上偏移）
+  const lanes = result.map(r => r.lane).sort()
+  assert.equal(lanes[0], 0, '至少一个在 lane 0')
+  assert.ok(lanes.some(l => l > 0), '至少一个移到 lane > 0')
+  // 验证两个标签框不重叠
+  const [r1, r2] = result
+  const overlapX = r1.boxX < r2.boxX + r2.boxW + 2 && r1.boxX + r1.boxW + 2 > r2.boxX
+  const overlapY = r1.boxY < r2.boxY + r2.boxH + 2 && r1.boxY + r1.boxH + 2 > r2.boxY
+  assert.ok(!(overlapX && overlapY), '两标签框不得重叠')
+})
+
+test('layoutSmcLabels: 标签框 X 钳制到 [plotLeft, plotRight - boxW]', () => {
+  // anchorX 在左边界外（负值），align=center → boxX 应钳制到 plotLeft
+  const a1 = makeAnchor({ anchorX: -50, anchorY: 100, text: 'BOS', align: 'center' })
+  // anchorX 在右边界外，align=center → boxX 应钳制到 plotRight - boxW
+  const a2 = makeAnchor({ anchorX: 900, anchorY: 100, text: 'CHoCH', align: 'center' })
+  const result = layoutSmcLabels([a1, a2], defaultLayoutCtx, fixedMeasureText)
+  assert.equal(result.length, 2)
+  for (const r of result) {
+    assert.ok(r.boxX >= defaultLayoutCtx.plotLeft, `boxX ${r.boxX} 不得小于 plotLeft ${defaultLayoutCtx.plotLeft}`)
+    assert.ok(r.boxX + r.boxW <= defaultLayoutCtx.plotRight,
+      `boxX+boxW ${r.boxX + r.boxW} 不得大于 plotRight ${defaultLayoutCtx.plotRight}`)
+  }
+})
+
+test('layoutSmcLabels: 标签框 Y 钳制到 [plotTop, plotBottom - boxH]', () => {
+  // anchorY 在上边界外（负值），lane 偏移仍向上 → boxY 应钳制到 plotTop
+  const a1 = makeAnchor({ anchorX: 400, anchorY: -50, text: 'BOS', preferredVertical: 'up' })
+  // anchorY 在下边界外 → boxY 应钳制到 plotBottom - boxH
+  const a2 = makeAnchor({ anchorX: 500, anchorY: 700, text: 'CHoCH', preferredVertical: 'down' })
+  const result = layoutSmcLabels([a1, a2], defaultLayoutCtx, fixedMeasureText)
+  assert.equal(result.length, 2)
+  for (const r of result) {
+    assert.ok(r.boxY >= defaultLayoutCtx.plotTop, `boxY ${r.boxY} 不得小于 plotTop ${defaultLayoutCtx.plotTop}`)
+    assert.ok(r.boxY + r.boxH <= defaultLayoutCtx.plotBottom,
+      `boxY+boxH ${r.boxY + r.boxH} 不得大于 plotBottom ${defaultLayoutCtx.plotBottom}`)
+  }
+})
+
+test('layoutSmcLabels: 引导线起点 = 真实锚点, 终点 = 标签框中心', () => {
+  // 强制 lane > 0：两个完全重叠的标签
+  const a1 = makeAnchor({ anchorX: 400, anchorY: 300, text: 'BOS', preferredVertical: 'up' })
+  const a2 = makeAnchor({ anchorX: 400, anchorY: 300, text: 'CHoCH', preferredVertical: 'up' })
+  const result = layoutSmcLabels([a1, a2], defaultLayoutCtx, fixedMeasureText)
+  // 找到 lane > 0 的那个
+  const offset = result.find(r => r.lane > 0)
+  assert.ok(offset, '应至少有一个标签在 lane > 0')
+  assert.equal(offset!.guideStartX, offset!.anchor.anchorX, '引导线起点 X = 真实锚点 X')
+  assert.equal(offset!.guideStartY, offset!.anchor.anchorY, '引导线起点 Y = 真实锚点 Y')
+  assert.equal(offset!.guideEndX, offset!.boxX + offset!.boxW / 2, '引导线终点 X = 标签框中心 X')
+  assert.equal(offset!.guideEndY, offset!.boxY + offset!.boxH / 2, '引导线终点 Y = 标签框中心 Y')
+})
+
+test('layoutSmcLabels: 真实锚点 (anchorX/anchorY) 不被改变', () => {
+  // [P0 fix] layoutSmcLabels 内部按 anchorX 排序后再布局，输出顺序可能与输入不同。
+  //   验证方式：用 Set<text> 匹配输入与输出，确保每个 anchor 的 X/Y/text 在输出中存在且未变。
+  const anchors = [
+    makeAnchor({ anchorX: 100, anchorY: 200, text: 'BOS' }),
+    makeAnchor({ anchorX: 200, anchorY: 250, text: 'CHoCH' }),
+    makeAnchor({ anchorX: 100, anchorY: 200, text: 'EQL', preferredVertical: 'down' }),
+  ]
+  const result = layoutSmcLabels(anchors, defaultLayoutCtx, fixedMeasureText)
+  assert.equal(result.length, anchors.length, '输入输出数量一致')
+  // 用 text 作为 key 匹配（BOS/CHoCH/EQL 唯一）
+  const byText = new Map(result.map(r => [r.anchor.text, r]))
+  for (const input of anchors) {
+    const out = byText.get(input.text)
+    assert.ok(out, `输出中应包含 text=${input.text}`)
+    assert.equal(out!.anchor.anchorX, input.anchorX, `text=${input.text} anchorX 不变`)
+    assert.equal(out!.anchor.anchorY, input.anchorY, `text=${input.text} anchorY 不变`)
+    assert.equal(out!.anchor.text, input.text, `text=${input.text} text 不变`)
+  }
+})
+
+test('layoutSmcLabels: 京东方A 真实 13 标签场景 → 输出无矩形重叠', () => {
+  // 模拟 /tmp/smc_analysis_output.txt 中的 13 个真实标签
+  // 使用 step≈9.4px, plotLeft≈58, plotRight≈900（90 bar 窗口近似）
+  // 价格转 Y: 用线性映射 (price - 3.5) * 50 + 100（覆盖 3.5-9.5 价格区间）
+  const step = 9.4
+  const plotLeft = 58
+  const plotRight = plotLeft + 90 * step
+  const priceToY = (p: number) => 100 + (p - 3.5) * 50
+
+  const anchors: SmcLabelAnchor[] = [
+    // 6 events
+    { kind: 'choch', anchorX: plotLeft + 3.0 * step, anchorY: priceToY(4.135) - 8, text: '转弱拐点', color: SMC_BEAR_COLOR, fontSize: '28px', align: 'center', preferredVertical: 'up' },
+    { kind: 'choch', anchorX: plotLeft + 21.0 * step, anchorY: priceToY(4.026) - 8, text: '转强拐点', color: SMC_BULL_COLOR, fontSize: '28px', align: 'center', preferredVertical: 'up' },
+    { kind: 'bos', anchorX: plotLeft + 37.5 * step, anchorY: priceToY(4.304) - 8, text: '突破前高', color: SMC_BULL_COLOR, fontSize: '28px', align: 'center', preferredVertical: 'up' },
+    { kind: 'choch', anchorX: plotLeft + 24.0 * step, anchorY: priceToY(4.691) - 8, text: '转强拐点', color: SMC_BULL_COLOR, fontSize: '28px', align: 'center', preferredVertical: 'up' },
+    { kind: 'bos', anchorX: plotLeft + 54.0 * step, anchorY: priceToY(6.039) - 8, text: '突破前高', color: SMC_BULL_COLOR, fontSize: '28px', align: 'center', preferredVertical: 'up' },
+    { kind: 'bos', anchorX: plotLeft + 63.0 * step, anchorY: priceToY(6.713) - 8, text: '突破前高', color: SMC_BULL_COLOR, fontSize: '28px', align: 'center', preferredVertical: 'up' },
+    // 5 visible OBs
+    { kind: 'ob', anchorX: plotLeft + 55.0 * step + 8, anchorY: priceToY((5.067 + 5.494) / 2), text: '多头承接区', color: hexToRgba(SMC_BULL_COLOR, 0.85), fontSize: '28px', align: 'left', preferredVertical: 'center' },
+    { kind: 'ob', anchorX: plotLeft + 35.0 * step + 8, anchorY: priceToY((4.145 + 4.046) / 2), text: '多头承接区', color: hexToRgba(SMC_BULL_COLOR, 0.85), fontSize: '28px', align: 'left', preferredVertical: 'center' },
+    { kind: 'ob', anchorX: plotLeft + 18.0 * step + 8, anchorY: priceToY((3.917 + 3.858) / 2), text: '多头承接区', color: hexToRgba(SMC_BULL_COLOR, 0.85), fontSize: '28px', align: 'left', preferredVertical: 'center' },
+    { kind: 'ob', anchorX: plotLeft + 0.0 * step + 8, anchorY: priceToY((3.818 + 3.758) / 2), text: '多头承接区', color: hexToRgba(SMC_BULL_COLOR, 0.85), fontSize: '28px', align: 'left', preferredVertical: 'center' },
+    { kind: 'ob', anchorX: plotLeft + 0.0 * step + 8, anchorY: priceToY((3.594 + 3.515) / 2), text: '多头承接区', color: hexToRgba(SMC_BULL_COLOR, 0.85), fontSize: '28px', align: 'left', preferredVertical: 'center' },
+    // trailing high/low
+    { kind: 'trailing_high', anchorX: plotRight - 4, anchorY: priceToY(9.5) - 3, text: '强高 9.50', color: SMC_BULL_COLOR, fontSize: '28px', align: 'right', preferredVertical: 'up' },
+    { kind: 'trailing_low', anchorX: plotRight - 4, anchorY: priceToY(3.818) + 9, text: '强低 3.82', color: SMC_BEAR_COLOR, fontSize: '28px', align: 'right', preferredVertical: 'down' },
+  ]
+
+  const ctx: SmcLabelLayoutContext = {
+    plotLeft, plotRight,
+    plotTop: 0, plotBottom: 600,
+    laneHeight: 32, laneGap: 4,
+    maxLanes: 4,
+  }
+  const result = layoutSmcLabels(anchors, ctx, fixedMeasureText)
+  assert.equal(result.length, 13, '所有 13 个标签都应被布局')
+
+  // 核心断言：任意两个标签框不得重叠（2px 容差）
+  for (let i = 0; i < result.length; i++) {
+    for (let j = i + 1; j < result.length; j++) {
+      const a = result[i], b = result[j]
+      const overlapX = a.boxX < b.boxX + b.boxW + 2 && a.boxX + a.boxW + 2 > b.boxX
+      const overlapY = a.boxY < b.boxY + b.boxH + 2 && a.boxY + a.boxH + 2 > b.boxY
+      assert.ok(!(overlapX && overlapY),
+        `标签 ${i} (${a.anchor.text}@${a.boxX},${a.boxY}) 与标签 ${j} (${b.anchor.text}@${b.boxX},${b.boxY}) 不得重叠`)
+    }
+  }
+})
+
+test('layoutSmcLabels: preferredVertical=up → lane 偏移向上 (boxY < anchorY)', () => {
+  // 两个完全重叠的标签，preferredVertical=up
+  const a1 = makeAnchor({ anchorX: 400, anchorY: 300, text: 'BOS', preferredVertical: 'up' })
+  const a2 = makeAnchor({ anchorX: 400, anchorY: 300, text: 'CHoCH', preferredVertical: 'up' })
+  const result = layoutSmcLabels([a1, a2], defaultLayoutCtx, fixedMeasureText)
+  const offset = result.find(r => r.lane > 0)
+  assert.ok(offset, '应有 lane > 0')
+  // up → boxY 应在 anchorY 上方（小于）
+  assert.ok(offset!.boxY + offset!.boxH / 2 < offset!.anchor.anchorY,
+    `up: 标签框中心 Y (${offset!.boxY + offset!.boxH / 2}) 应在锚点 Y (${offset!.anchor.anchorY}) 上方`)
+})
+
+test('layoutSmcLabels: preferredVertical=down → lane 偏移向下 (boxY > anchorY)', () => {
+  const a1 = makeAnchor({ anchorX: 400, anchorY: 300, text: 'BOS', preferredVertical: 'down' })
+  const a2 = makeAnchor({ anchorX: 400, anchorY: 300, text: 'CHoCH', preferredVertical: 'down' })
+  const result = layoutSmcLabels([a1, a2], defaultLayoutCtx, fixedMeasureText)
+  const offset = result.find(r => r.lane > 0)
+  assert.ok(offset, '应有 lane > 0')
+  assert.ok(offset!.boxY + offset!.boxH / 2 > offset!.anchor.anchorY,
+    `down: 标签框中心 Y (${offset!.boxY + offset!.boxH / 2}) 应在锚点 Y (${offset!.anchor.anchorY}) 下方`)
+})
+
+test('layoutSmcLabels: align=left → boxX = anchorX + 4', () => {
+  const anchor = makeAnchor({ anchorX: 100, anchorY: 200, text: 'OB', align: 'left' })
+  const result = layoutSmcLabels([anchor], defaultLayoutCtx, fixedMeasureText)
+  assert.equal(result.length, 1)
+  assert.equal(result[0].boxX, 100 + 4, 'align=left: boxX = anchorX + 4')
+})
+
+test('layoutSmcLabels: align=right → boxX = anchorX - boxW - 4', () => {
+  const anchor = makeAnchor({ anchorX: 700, anchorY: 200, text: 'trailing', align: 'right' })
+  const result = layoutSmcLabels([anchor], defaultLayoutCtx, fixedMeasureText)
+  assert.equal(result.length, 1)
+  const expectedBoxW = 'trailing'.length * 10 + 4 * 2 // 88
+  assert.equal(result[0].boxX, 700 - expectedBoxW - 4, 'align=right: boxX = anchorX - boxW - 4')
+})
+
+test('layoutSmcLabels: maxLanes=2 → 超过时回退到 lane 0', () => {
+  // 3 个完全重叠的标签，maxLanes=2 → 第 3 个无法找到不重叠 lane，回退 lane 0
+  const anchors: SmcLabelAnchor[] = [
+    makeAnchor({ anchorX: 400, anchorY: 300, text: 'A', preferredVertical: 'up' }),
+    makeAnchor({ anchorX: 400, anchorY: 300, text: 'B', preferredVertical: 'up' }),
+    makeAnchor({ anchorX: 400, anchorY: 300, text: 'C', preferredVertical: 'up' }),
+  ]
+  const ctx: SmcLabelLayoutContext = { ...defaultLayoutCtx, maxLanes: 2 }
+  const result = layoutSmcLabels(anchors, ctx, fixedMeasureText)
+  assert.equal(result.length, 3)
+  // 第 3 个标签会回退到 lane 0（best-effort）
+  assert.ok(result.every(r => r.lane <= 2), '所有标签 lane <= maxLanes')
 })

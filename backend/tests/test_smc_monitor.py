@@ -1,21 +1,30 @@
 """SmcMonitor 监控策略测试 - 验证 SMC 日线结构盘中监控。
 
 [CHANGE-20260720-002 §二] 测试内容：
-1. calculate_state: 返回 smc_confirmed_bos/smc_confirmed_choch/smc_active_obs/
-   smc_current_price/smc_currently_touched/smc_swing_bias/smc_trailing/smc_availability
-   /smc_episode_tracker 等字段
-2. detect_events: 1m 价格穿越 BOS/CHoCH level 触发 smc_bos_retest/smc_choch_retest
-3. detect_events: 1m 价格首次进入 OB zone 触发 smc_order_block_first_touch
-4. touch_episode dedupe: 同一 episode 多次触碰只触发一次事件
-5. episode tracker: detect_events 直接 mutate curr_state.state["smc_episode_tracker"]
-6. smc_entity_id 稳定性: BOS:{anchor_index}:{level} / CHoCH:... / OB:...
-7. WatchlistMonitor 命名空间合并: bb/node_cluster/smc/market/degraded
-8. WatchlistMonitor 单子 monitor 失败只标记 degraded 不阻断其他
+1. calculate_state: 返回 smc_confirmed_bos/smc_confirmed_choch/smc_equal_highs_lows/
+   smc_active_obs/smc_current_price/smc_currently_touched/smc_swing_bias/smc_trailing/
+   smc_availability/smc_episode_tracker 等字段
+2. detect_events: 1m high/low 与 BOS/CHoCH level 相交触发 smc_bos_retest/smc_choch_retest
+3. detect_events: 1m high/low 与 EQH/EQL level 相交触发 smc_equal_highs_retest/
+   smc_equal_lows_retest（[PRD V2.0 SMC-01/SMC-03] 五类事件全覆盖）
+4. detect_events: 1m high/low 与 OB zone 相交触发 smc_order_block_first_touch
+5. touch_episode dedupe: 同一 episode 多次触碰只触发一次事件
+6. episode tracker: detect_events 直接 mutate curr_state.state["smc_episode_tracker"]
+7. smc_entity_id 稳定性: BOS/CHoCH/EQH/EQL/OB 五类
+8. WatchlistMonitor 命名空间合并: bb/node_cluster/smc/market/degraded
+9. WatchlistMonitor 单子 monitor 失败只标记 degraded 不阻断其他
+
+[PRD V2.0 §3.2 L117 / SMC-02] 触碰检测使用最新已完成 1m 的 high/low 与线/区域相交，
+覆盖影线触碰场景（close 未穿越但 high/low 相交）。
+
+[PRD V2.0 SMC-01/SMC-03] 监控全部五类已确认日线 internal/swing 事件：
+BOS/CHoCH/EQH/EQL/OB，全部触发通知（不再仅显示）。
 
 测试数据：
 - 使用合成的日线 bars（≥250 根）满足 SMC ATR200 + swings_length=50 warmup 要求
-- 使用合成的 1m bars（2 根）做穿越检测
+- 使用合成的 1m bars（2 根）做触碰检测，支持显式 cur_high/cur_low 测试影线
 - 1m bars 价格锚定最近日线 BOS level 触发 smc_bos_retest 事件
+- EQH/EQL 测试直接注入 state（避免合成数据 EQH/EQL 事件不稳定）
 """
 
 from __future__ import annotations
@@ -33,12 +42,18 @@ from app.strategy.monitors.smc_monitor import (
     NOTIFY_COOLDOWN_SECONDS,
     SMC_BOS_RETEST,
     SMC_CHOCH_RETEST,
+    SMC_EQUAL_HIGHS_RETEST,
+    SMC_EQUAL_LOWS_RETEST,
     SMC_ORDER_BLOCK_FIRST_TOUCH,
     SmcMonitor,
     _is_bos_touched,
+    _is_eqh_touched,
+    _is_eql_touched,
     _is_ob_touched,
     _make_bos_entity_id,
     _make_choch_entity_id,
+    _make_eqh_entity_id,
+    _make_eql_entity_id,
     _make_ob_entity_id,
 )
 from app.strategy.monitors.watchlist_monitor import WatchlistMonitor
@@ -84,22 +99,33 @@ def _make_minute_bars(
     prev_close: float,
     cur_close: float,
     bar_time: datetime | None = None,
+    cur_high: float | None = None,
+    cur_low: float | None = None,
 ) -> pd.DataFrame:
-    """构造 2 根 1m bars（用于穿越检测）。
+    """构造 2 根 1m bars（用于触碰检测）。
+
+    [PRD V2.0 §3.2 L117] 触发使用最新已完成 1m 的 high/low 与线/区域相交。
+    支持 cur_high/cur_low 显式传入以测试影线触碰场景（close 未穿越但 high/low 相交）。
 
     Args:
         prev_close: 前一根 1m close
         cur_close: 当前 1m close
         bar_time: 当前 bar 时间（默认 2026-06-18 10:30）
+        cur_high: 当前 1m high（默认 max(prev_close, cur_close)，向后兼容）
+        cur_low: 当前 1m low（默认 min(prev_close, cur_close)，向后兼容）
     """
     if bar_time is None:
         bar_time = datetime(2026, 6, 18, 10, 30, tzinfo=UTC)
+    if cur_high is None:
+        cur_high = max(prev_close, cur_close)
+    if cur_low is None:
+        cur_low = min(prev_close, cur_close)
     times = pd.date_range(end=bar_time, periods=2, freq="1min", tz=UTC)
     return pd.DataFrame(
         {
             "open": [prev_close, cur_close],
-            "high": [max(prev_close, cur_close), max(prev_close, cur_close)],
-            "low": [min(prev_close, cur_close), min(prev_close, cur_close)],
+            "high": [max(prev_close, cur_close), cur_high],
+            "low": [min(prev_close, cur_close), cur_low],
             "close": [prev_close, cur_close],
             "volume": [100_000.0, 120_000.0],
             "amount": [prev_close * 100_000, cur_close * 120_000],
@@ -123,6 +149,7 @@ def _make_mock_version(strategy_id: str = "watchlist_monitor") -> MagicMock:
         "outputs": [
             {"key": "smc_confirmed_bos", "type": "json"},
             {"key": "smc_confirmed_choch", "type": "json"},
+            {"key": "smc_equal_highs_lows", "type": "json"},
             {"key": "smc_active_obs", "type": "json"},
             {"key": "smc_current_price", "type": "number"},
             {"key": "smc_currently_touched", "type": "json"},
@@ -135,6 +162,8 @@ def _make_mock_version(strategy_id: str = "watchlist_monitor") -> MagicMock:
         "event_types": [
             {"key": "smc_bos_retest", "dedupe": "touch_episode"},
             {"key": "smc_choch_retest", "dedupe": "touch_episode"},
+            {"key": "smc_equal_highs_retest", "dedupe": "touch_episode"},
+            {"key": "smc_equal_lows_retest", "dedupe": "touch_episode"},
             {"key": "smc_order_block_first_touch", "dedupe": "touch_episode"},
         ],
     }
@@ -198,34 +227,132 @@ class TestSmcMonitorHelpers:
         id2 = _make_ob_entity_id(150, 11.0, 10.0, 1)
         assert id1 == id2 == "OB:150:11.0:10.0:1"
 
-    def test_is_bos_touched_cross_up(self) -> None:
-        """BOS 从下方穿越：prev < level <= cur。"""
-        assert _is_bos_touched(9.5, 10.5, 10.0) is True
+    def test_make_eqh_entity_id_stable(self) -> None:
+        """[PRD V2.0 SMC-01/SMC-03] EQH entity_id 稳定：相同 anchor/second_pivot/level 生成相同 ID。"""
+        id1 = _make_eqh_entity_id(100, 120, 10.5)
+        id2 = _make_eqh_entity_id(100, 120, 10.5)
+        assert id1 == id2 == "EQH:100:120:10.5"
 
-    def test_is_bos_touched_cross_down(self) -> None:
-        """BOS 从上方穿越：prev > level >= cur。"""
-        assert _is_bos_touched(10.5, 9.5, 10.0) is True
+    def test_make_eqh_entity_id_distinct_from_eql(self) -> None:
+        """EQH 与 EQL entity_id 必须不同（前缀不同）。"""
+        eqh_id = _make_eqh_entity_id(100, 120, 10.5)
+        eql_id = _make_eql_entity_id(100, 120, 10.5)
+        assert eqh_id != eql_id
+        assert eqh_id.startswith("EQH:")
+        assert eql_id.startswith("EQL:")
 
-    def test_is_bos_touched_no_cross(self) -> None:
-        """BOS 未穿越。"""
-        assert _is_bos_touched(9.5, 9.8, 10.0) is False
-        assert _is_bos_touched(10.5, 10.8, 10.0) is False
+    def test_make_eqh_entity_id_distinct_by_second_pivot(self) -> None:
+        """相同 anchor 但 second_pivot 不同 → 不同 entity_id。"""
+        id1 = _make_eqh_entity_id(100, 120, 10.5)
+        id2 = _make_eqh_entity_id(100, 130, 10.5)
+        assert id1 != id2
 
-    def test_is_ob_touched_enter_from_below(self) -> None:
-        """OB 从下方进入 zone。"""
-        assert _is_ob_touched(9.0, 10.5, 11.0, 10.0) is True
+    def test_make_eql_entity_id_stable(self) -> None:
+        """[PRD V2.0 SMC-01/SMC-03] EQL entity_id 稳定。"""
+        id1 = _make_eql_entity_id(200, 220, 9.8)
+        id2 = _make_eql_entity_id(200, 220, 9.8)
+        assert id1 == id2 == "EQL:200:220:9.8"
 
-    def test_is_ob_touched_enter_from_above(self) -> None:
-        """OB 从上方进入 zone。"""
-        assert _is_ob_touched(11.5, 10.5, 11.0, 10.0) is True
+    def test_is_bos_touched_level_inside_bar(self) -> None:
+        """BOS level 在 bar 的 [cur_low, cur_high] 范围内：触碰。"""
+        assert _is_bos_touched(cur_high=10.5, cur_low=9.5, level=10.0) is True
 
-    def test_is_ob_touched_already_in_zone(self) -> None:
-        """OB prev 已在 zone 内，cur 也在 zone 内，不算触碰（同 episode）。"""
-        assert _is_ob_touched(10.5, 10.8, 11.0, 10.0) is False
+    def test_is_bos_touched_level_at_cur_low(self) -> None:
+        """BOS level = cur_low 边界：触碰（含边界）。"""
+        assert _is_bos_touched(cur_high=10.5, cur_low=10.0, level=10.0) is True
 
-    def test_is_ob_touched_both_outside(self) -> None:
-        """OB prev 和 cur 都在 zone 外，不算触碰。"""
-        assert _is_ob_touched(9.0, 9.5, 11.0, 10.0) is False
+    def test_is_bos_touched_level_at_cur_high(self) -> None:
+        """BOS level = cur_high 边界：触碰（含边界）。"""
+        assert _is_bos_touched(cur_high=10.0, cur_low=9.5, level=10.0) is True
+
+    def test_is_bos_touched_wick_only(self) -> None:
+        """BOS 影线触碰正例：close 未触及 level，但 high 触及（[PRD V2.0 SMC-02] 修复）。"""
+        # cur_close=9.8（在 level 10.0 下方），但 cur_high=10.5 触及 level
+        assert _is_bos_touched(cur_high=10.5, cur_low=9.3, level=10.0) is True
+
+    def test_is_bos_touched_level_below_bar(self) -> None:
+        """BOS level 在 bar 下方：未触碰。"""
+        assert _is_bos_touched(cur_high=9.5, cur_low=9.0, level=10.0) is False
+
+    def test_is_bos_touched_level_above_bar(self) -> None:
+        """BOS level 在 bar 上方：未触碰。"""
+        assert _is_bos_touched(cur_high=10.8, cur_low=10.5, level=11.0) is False
+
+    # ----- [PRD V2.0 SMC-01/SMC-03] EQH/EQL touch 检测（与 BOS 一致，high/low 相交） -----
+
+    def test_is_eqh_touched_level_inside_bar(self) -> None:
+        """EQH level 在 bar 的 [cur_low, cur_high] 范围内：触碰。"""
+        assert _is_eqh_touched(cur_high=10.5, cur_low=9.5, level=10.0) is True
+
+    def test_is_eqh_touched_level_at_cur_low(self) -> None:
+        """EQH level = cur_low 边界：触碰（含边界）。"""
+        assert _is_eqh_touched(cur_high=10.5, cur_low=10.0, level=10.0) is True
+
+    def test_is_eqh_touched_level_at_cur_high(self) -> None:
+        """EQH level = cur_high 边界：触碰（含边界）。"""
+        assert _is_eqh_touched(cur_high=10.0, cur_low=9.5, level=10.0) is True
+
+    def test_is_eqh_touched_wick_only(self) -> None:
+        """EQH 影线触碰正例：close 未触及 level，但 high 触及（[PRD V2.0 SMC-02] 修复）。"""
+        # cur_close 在 level 下方，但 cur_high 触及 level
+        assert _is_eqh_touched(cur_high=10.5, cur_low=9.3, level=10.0) is True
+
+    def test_is_eqh_touched_level_below_bar(self) -> None:
+        """EQH level 在 bar 下方：未触碰。"""
+        assert _is_eqh_touched(cur_high=9.5, cur_low=9.0, level=10.0) is False
+
+    def test_is_eqh_touched_level_above_bar(self) -> None:
+        """EQH level 在 bar 上方：未触碰。"""
+        assert _is_eqh_touched(cur_high=10.8, cur_low=10.5, level=11.0) is False
+
+    def test_is_eql_touched_level_inside_bar(self) -> None:
+        """EQL level 在 bar 的 [cur_low, cur_high] 范围内：触碰。"""
+        assert _is_eql_touched(cur_high=10.5, cur_low=9.5, level=10.0) is True
+
+    def test_is_eql_touched_wick_only(self) -> None:
+        """EQL 影线触碰正例（[PRD V2.0 SMC-02] 修复）。"""
+        # cur_close 在 level 上方，但 cur_low 触及 level
+        assert _is_eql_touched(cur_high=10.8, cur_low=10.0, level=10.0) is True
+
+    def test_is_eql_touched_level_below_bar(self) -> None:
+        """EQL level 在 bar 下方：未触碰。"""
+        assert _is_eql_touched(cur_high=9.5, cur_low=9.0, level=10.0) is False
+
+    def test_is_eql_touched_level_above_bar(self) -> None:
+        """EQL level 在 bar 上方：未触碰。"""
+        assert _is_eql_touched(cur_high=10.8, cur_low=10.5, level=11.0) is False
+
+    def test_is_ob_touched_bar_inside_zone(self) -> None:
+        """OB bar 完全在 zone 内：触碰。"""
+        assert _is_ob_touched(cur_high=10.8, cur_low=10.5, bar_high=11.0, bar_low=10.0) is True
+
+    def test_is_ob_touched_bar_overlaps_from_below(self) -> None:
+        """OB bar 从下方部分进入 zone：触碰。"""
+        assert _is_ob_touched(cur_high=10.5, cur_low=9.5, bar_high=11.0, bar_low=10.0) is True
+
+    def test_is_ob_touched_bar_overlaps_from_above(self) -> None:
+        """OB bar 从上方部分进入 zone：触碰。"""
+        assert _is_ob_touched(cur_high=11.5, cur_low=10.5, bar_high=11.0, bar_low=10.0) is True
+
+    def test_is_ob_touched_wick_only(self) -> None:
+        """OB 影线触碰正例：close 未进入 zone，但 high 进入（[PRD V2.0 SMC-02] 修复）。"""
+        # cur_close=9.5（在 zone 下方），但 cur_high=10.5 进入 zone [10.0, 11.0]
+        assert _is_ob_touched(cur_high=10.5, cur_low=9.0, bar_high=11.0, bar_low=10.0) is True
+
+    def test_is_ob_touched_bar_touches_boundary(self) -> None:
+        """OB bar 边界相切 zone：触碰（含边界）。"""
+        # cur_high = bar_low
+        assert _is_ob_touched(cur_high=10.0, cur_low=9.0, bar_high=11.0, bar_low=10.0) is True
+        # cur_low = bar_high
+        assert _is_ob_touched(cur_high=12.0, cur_low=11.0, bar_high=11.0, bar_low=10.0) is True
+
+    def test_is_ob_touched_bar_below_zone(self) -> None:
+        """OB bar 完全在 zone 下方：未触碰。"""
+        assert _is_ob_touched(cur_high=9.5, cur_low=9.0, bar_high=11.0, bar_low=10.0) is False
+
+    def test_is_ob_touched_bar_above_zone(self) -> None:
+        """OB bar 完全在 zone 上方：未触碰。"""
+        assert _is_ob_touched(cur_high=12.0, cur_low=11.5, bar_high=11.0, bar_low=10.0) is False
 
 
 # =============================================================================
@@ -248,6 +375,7 @@ class TestSmcMonitorCalculateState:
         # 验证所有必需字段存在
         assert "smc_confirmed_bos" in state.state
         assert "smc_confirmed_choch" in state.state
+        assert "smc_equal_highs_lows" in state.state  # [PRD V2.0 SMC-01/SMC-03]
         assert "smc_active_obs" in state.state
         assert "smc_current_price" in state.state
         assert "smc_currently_touched" in state.state
@@ -583,6 +711,320 @@ class TestSmcMonitorDetectEvents:
             # 至少有一个 entity 的 last_touched=True
             assert any(info.get("last_touched") for info in tracker.values())
 
+    # ----- [PRD V2.0 SMC-01/SMC-03] EQH/EQL detect_events 测试 -----
+
+    @pytest.mark.asyncio
+    async def test_detect_events_eqh_retest_triggers(
+        self, smc_monitor: SmcMonitor, daily_bars: pd.DataFrame
+    ) -> None:
+        """[PRD V2.0 SMC-01/SMC-03] 1m high/low 与已确认 EQH level 相交触发 smc_equal_highs_retest。
+
+        策略：直接注入 EQH 结构 + currently_touched，验证事件触发与 payload。
+        """
+        from uuid import uuid4
+
+        inst_id = uuid4()
+        version_id = uuid4()
+        eqh_entity = "EQH:100:120:10.5"
+        bar_time = datetime(2026, 6, 18, 10, 30, tzinfo=UTC)
+
+        # 构造 curr_state：EQH touched
+        eqhl_struct = {
+            "type": "EQH",
+            "anchor_index": 100,
+            "anchor_time": "2026-05-01",
+            "second_pivot_index": 120,
+            "second_pivot_time": "2026-05-15",
+            "confirmed_index": 125,
+            "confirmed_time": "2026-05-18",
+            "level": 10.5,
+            "prev_level": 10.4,
+        }
+        curr_state = MonitorState(
+            instrument_id=inst_id,
+            strategy_version_id=version_id,
+            state={
+                "smc_confirmed_bos": [],
+                "smc_confirmed_choch": [],
+                "smc_equal_highs_lows": [eqhl_struct],
+                "smc_active_obs": [],
+                "smc_current_price": 10.5,
+                "smc_currently_touched": {eqh_entity: True},
+                "smc_swing_bias": 1,
+                "smc_trailing": {},
+                "smc_availability": "available",
+                "smc_degraded_reason": None,
+                "smc_episode_tracker": {},  # detect_events 会填充
+            },
+            state_version=1,
+            updated_at=bar_time,
+        )
+
+        ctx = _make_context(daily_bars, _make_minute_bars(prev_close=10.0, cur_close=10.5), bar_time)
+        events = await smc_monitor.detect_events(ctx, None, curr_state)
+
+        eqh_events = [e for e in events if e.event_type == SMC_EQUAL_HIGHS_RETEST]
+        assert len(eqh_events) == 1
+        ev = eqh_events[0]
+        assert ev.event_type == SMC_EQUAL_HIGHS_RETEST
+        assert ev.state_ttl_seconds == NOTIFY_COOLDOWN_SECONDS
+        assert ev.payload["smc_entity_id"] == eqh_entity
+        assert ev.payload["touch_episode"] == 1
+        assert ev.payload["level"] == 10.5
+        assert ev.payload["prev_level"] == 10.4
+        assert ev.payload["anchor_index"] == 100
+        assert ev.payload["second_pivot_index"] == 120
+        assert ev.payload["eqhl_type"] == "EQH"
+        assert SMC_EQUAL_HIGHS_RETEST in ev.dedupe_key
+        assert ":1" in ev.dedupe_key  # episode=1
+
+    @pytest.mark.asyncio
+    async def test_detect_events_eql_retest_triggers(
+        self, smc_monitor: SmcMonitor, daily_bars: pd.DataFrame
+    ) -> None:
+        """[PRD V2.0 SMC-01/SMC-03] 1m high/low 与已确认 EQL level 相交触发 smc_equal_lows_retest。"""
+        from uuid import uuid4
+
+        inst_id = uuid4()
+        version_id = uuid4()
+        eql_entity = "EQL:200:220:9.8"
+        bar_time = datetime(2026, 6, 18, 10, 30, tzinfo=UTC)
+
+        eql_struct = {
+            "type": "EQL",
+            "anchor_index": 200,
+            "anchor_time": "2026-05-10",
+            "second_pivot_index": 220,
+            "second_pivot_time": "2026-05-25",
+            "confirmed_index": 225,
+            "confirmed_time": "2026-05-28",
+            "level": 9.8,
+            "prev_level": 9.7,
+        }
+        curr_state = MonitorState(
+            instrument_id=inst_id,
+            strategy_version_id=version_id,
+            state={
+                "smc_confirmed_bos": [],
+                "smc_confirmed_choch": [],
+                "smc_equal_highs_lows": [eql_struct],
+                "smc_active_obs": [],
+                "smc_current_price": 9.8,
+                "smc_currently_touched": {eql_entity: True},
+                "smc_swing_bias": -1,
+                "smc_trailing": {},
+                "smc_availability": "available",
+                "smc_degraded_reason": None,
+                "smc_episode_tracker": {},
+            },
+            state_version=1,
+            updated_at=bar_time,
+        )
+
+        ctx = _make_context(daily_bars, _make_minute_bars(prev_close=10.0, cur_close=9.8), bar_time)
+        events = await smc_monitor.detect_events(ctx, None, curr_state)
+
+        eql_events = [e for e in events if e.event_type == SMC_EQUAL_LOWS_RETEST]
+        assert len(eql_events) == 1
+        ev = eql_events[0]
+        assert ev.event_type == SMC_EQUAL_LOWS_RETEST
+        assert ev.payload["smc_entity_id"] == eql_entity
+        assert ev.payload["touch_episode"] == 1
+        assert ev.payload["level"] == 9.8
+        assert ev.payload["prev_level"] == 9.7
+        assert ev.payload["anchor_index"] == 200
+        assert ev.payload["second_pivot_index"] == 220
+        assert ev.payload["eqhl_type"] == "EQL"
+        assert SMC_EQUAL_LOWS_RETEST in ev.dedupe_key
+
+    @pytest.mark.asyncio
+    async def test_detect_events_eqh_eql_episode_dedupe(
+        self, smc_monitor: SmcMonitor, daily_bars: pd.DataFrame
+    ) -> None:
+        """[PRD V2.0 SMC-01/SMC-03] EQH/EQL touch_episode dedupe：同 episode 不重复触发。"""
+        from uuid import uuid4
+
+        inst_id = uuid4()
+        version_id = uuid4()
+        eqh_entity = "EQH:100:120:10.5"
+        bar_time = datetime(2026, 6, 18, 10, 30, tzinfo=UTC)
+
+        eqhl_struct = {
+            "type": "EQH",
+            "anchor_index": 100,
+            "anchor_time": "2026-05-01",
+            "second_pivot_index": 120,
+            "second_pivot_time": "2026-05-15",
+            "confirmed_index": 125,
+            "confirmed_time": "2026-05-18",
+            "level": 10.5,
+            "prev_level": 10.4,
+        }
+
+        # prev_state: EQH 已 touched（episode=1, last_touched=True）
+        prev_state = MonitorState(
+            instrument_id=inst_id,
+            strategy_version_id=version_id,
+            state={
+                "smc_confirmed_bos": [],
+                "smc_confirmed_choch": [],
+                "smc_equal_highs_lows": [eqhl_struct],
+                "smc_active_obs": [],
+                "smc_current_price": 10.5,
+                "smc_currently_touched": {eqh_entity: True},
+                "smc_swing_bias": 1,
+                "smc_trailing": {},
+                "smc_availability": "available",
+                "smc_degraded_reason": None,
+                "smc_episode_tracker": {
+                    eqh_entity: {"episode": 1, "last_touched": True},
+                },
+            },
+            state_version=1,
+            updated_at=bar_time,
+        )
+
+        # curr_state: EQH 仍 touched（同 episode，不触发）
+        curr_state = MonitorState(
+            instrument_id=inst_id,
+            strategy_version_id=version_id,
+            state={
+                "smc_confirmed_bos": [],
+                "smc_confirmed_choch": [],
+                "smc_equal_highs_lows": [eqhl_struct],
+                "smc_active_obs": [],
+                "smc_current_price": 10.5,
+                "smc_currently_touched": {eqh_entity: True},
+                "smc_swing_bias": 1,
+                "smc_trailing": {},
+                "smc_availability": "available",
+                "smc_degraded_reason": None,
+                "smc_episode_tracker": {},  # detect_events 会填充
+            },
+            state_version=1,
+            updated_at=bar_time,
+        )
+
+        ctx = _make_context(daily_bars, _make_minute_bars(prev_close=10.0, cur_close=10.5), bar_time)
+        events = await smc_monitor.detect_events(ctx, prev_state, curr_state)
+
+        # 同 episode 不应触发新事件
+        eqh_events = [e for e in events if e.event_type == SMC_EQUAL_HIGHS_RETEST]
+        assert len(eqh_events) == 0
+        # tracker 保留 episode=1, last_touched=True
+        tracker = curr_state.state["smc_episode_tracker"]
+        assert tracker[eqh_entity]["episode"] == 1
+        assert tracker[eqh_entity]["last_touched"] is True
+
+    @pytest.mark.asyncio
+    async def test_detect_events_eqh_new_episode_after_release(
+        self, smc_monitor: SmcMonitor, daily_bars: pd.DataFrame
+    ) -> None:
+        """[PRD V2.0 SMC-01/SMC-03] EQH 触碰释放后再次触碰触发新 episode=2。"""
+        from uuid import uuid4
+
+        inst_id = uuid4()
+        version_id = uuid4()
+        eqh_entity = "EQH:100:120:10.5"
+        bar_time = datetime(2026, 6, 18, 10, 30, tzinfo=UTC)
+
+        eqhl_struct = {
+            "type": "EQH",
+            "anchor_index": 100,
+            "anchor_time": "2026-05-01",
+            "second_pivot_index": 120,
+            "second_pivot_time": "2026-05-15",
+            "confirmed_index": 125,
+            "confirmed_time": "2026-05-18",
+            "level": 10.5,
+            "prev_level": 10.4,
+        }
+
+        # prev_state: EQH 已 touched（episode=1, last_touched=True）
+        prev_state = MonitorState(
+            instrument_id=inst_id,
+            strategy_version_id=version_id,
+            state={
+                "smc_confirmed_bos": [],
+                "smc_confirmed_choch": [],
+                "smc_equal_highs_lows": [eqhl_struct],
+                "smc_active_obs": [],
+                "smc_current_price": 10.5,
+                "smc_currently_touched": {eqh_entity: True},
+                "smc_swing_bias": 1,
+                "smc_trailing": {},
+                "smc_availability": "available",
+                "smc_degraded_reason": None,
+                "smc_episode_tracker": {
+                    eqh_entity: {"episode": 1, "last_touched": True},
+                },
+            },
+            state_version=1,
+            updated_at=bar_time,
+        )
+
+        # curr_state（释放）：EQH 未 touched
+        curr_state_release = MonitorState(
+            instrument_id=inst_id,
+            strategy_version_id=version_id,
+            state={
+                "smc_confirmed_bos": [],
+                "smc_confirmed_choch": [],
+                "smc_equal_highs_lows": [eqhl_struct],
+                "smc_active_obs": [],
+                "smc_current_price": 15.0,
+                "smc_currently_touched": {eqh_entity: False},
+                "smc_swing_bias": 1,
+                "smc_trailing": {},
+                "smc_availability": "available",
+                "smc_degraded_reason": None,
+                "smc_episode_tracker": {},
+            },
+            state_version=1,
+            updated_at=bar_time,
+        )
+
+        ctx = _make_context(daily_bars, _make_minute_bars(prev_close=10.0, cur_close=15.0), bar_time)
+        events_release = await smc_monitor.detect_events(ctx, prev_state, curr_state_release)
+        # 释放期不应有 EQH 事件
+        assert len([e for e in events_release if e.event_type == SMC_EQUAL_HIGHS_RETEST]) == 0
+        # tracker 应更新 last_touched=False，保留 episode=1
+        tracker_after_release = curr_state_release.state["smc_episode_tracker"]
+        assert tracker_after_release[eqh_entity]["episode"] == 1
+        assert tracker_after_release[eqh_entity]["last_touched"] is False
+
+        # curr_state（再次触碰）：EQH touched
+        curr_state_retouch = MonitorState(
+            instrument_id=inst_id,
+            strategy_version_id=version_id,
+            state={
+                "smc_confirmed_bos": [],
+                "smc_confirmed_choch": [],
+                "smc_equal_highs_lows": [eqhl_struct],
+                "smc_active_obs": [],
+                "smc_current_price": 10.5,
+                "smc_currently_touched": {eqh_entity: True},
+                "smc_swing_bias": 1,
+                "smc_trailing": {},
+                "smc_availability": "available",
+                "smc_degraded_reason": None,
+                "smc_episode_tracker": {},
+            },
+            state_version=1,
+            updated_at=bar_time,
+        )
+
+        events_retouch = await smc_monitor.detect_events(
+            ctx, curr_state_release, curr_state_retouch
+        )
+        eqh_events_retouch = [
+            e for e in events_retouch if e.event_type == SMC_EQUAL_HIGHS_RETEST
+        ]
+        assert len(eqh_events_retouch) == 1
+        # episode 应为 2（释放后新 episode）
+        assert eqh_events_retouch[0].payload["touch_episode"] == 2
+        assert ":2" in eqh_events_retouch[0].dedupe_key
+
 
 # =============================================================================
 # 4. SmcMonitor.compute_indicators 测试
@@ -791,11 +1233,13 @@ class TestWatchlistMonitorNamespaces:
         assert isinstance(events, list)
         for ev in events:
             assert isinstance(ev, StrategyEventDraft)
-            # 事件类型应为已知 7 种之一
+            # 事件类型应为已知 9 种之一（含 SMC 五类：BOS/CHoCH/EQH/EQL/OB）
             assert ev.event_type in {
                 "bb_upper_touch", "bb_mid_touch", "bb_lower_touch",
                 "node_cluster_touch",
-                "smc_bos_retest", "smc_choch_retest", "smc_order_block_first_touch",
+                "smc_bos_retest", "smc_choch_retest",
+                "smc_equal_highs_retest", "smc_equal_lows_retest",
+                "smc_order_block_first_touch",
             }
 
 
@@ -814,5 +1258,28 @@ class TestSmcMonitorSelfTest:
         assert SmcMonitor.kind == "monitor"
         assert SMC_BOS_RETEST == "smc_bos_retest"
         assert SMC_CHOCH_RETEST == "smc_choch_retest"
+        assert SMC_EQUAL_HIGHS_RETEST == "smc_equal_highs_retest"
+        assert SMC_EQUAL_LOWS_RETEST == "smc_equal_lows_retest"
         assert SMC_ORDER_BLOCK_FIRST_TOUCH == "smc_order_block_first_touch"
         assert NOTIFY_COOLDOWN_SECONDS == 600
+
+    def test_eqh_eql_entity_id_and_resolve_event_type(self) -> None:
+        """[PRD V2.0 SMC-01/SMC-03] EQH/EQL entity_id 生成与 _resolve_event_type 解析。"""
+        # entity_id 生成
+        assert _make_eqh_entity_id(100, 120, 10.5) == "EQH:100:120:10.5"
+        assert _make_eql_entity_id(200, 220, 9.8) == "EQL:200:220:9.8"
+
+        # _resolve_event_type 解析（五类）
+        assert SmcMonitor._resolve_event_type("EQH:100:120:10.5") == SMC_EQUAL_HIGHS_RETEST
+        assert SmcMonitor._resolve_event_type("EQL:200:220:9.8") == SMC_EQUAL_LOWS_RETEST
+
+    def test_eqh_eql_touch_detection(self) -> None:
+        """[PRD V2.0 SMC-02] EQH/EQL 影线触碰正例与负例。"""
+        # 正例：level 在 [cur_low, cur_high] 内（含边界）
+        assert _is_eqh_touched(cur_high=10.5, cur_low=9.5, level=10.0) is True
+        assert _is_eqh_touched(cur_high=10.0, cur_low=9.5, level=10.0) is True  # 边界
+        assert _is_eql_touched(cur_high=10.5, cur_low=10.0, level=10.0) is True  # 边界
+
+        # 负例：level 在 bar 范围外
+        assert _is_eqh_touched(cur_high=9.5, cur_low=9.0, level=10.0) is False
+        assert _is_eql_touched(cur_high=11.0, cur_low=10.5, level=10.0) is False

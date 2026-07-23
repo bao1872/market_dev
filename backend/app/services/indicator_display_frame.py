@@ -106,6 +106,14 @@ def build_display_frame(
     供前端 mismatch 时显示两端 count/time/hash/as_of 差异和重试按钮。
     未传 spec 时保持 V1 行为（向后兼容，仅返回基础 6 字段）。
 
+    [CH-01/CH-02 fix] PRD §3.3: strict hash 只比较 completed frame；
+    partial bar 使用独立 live_revision，不触发 completed mismatch。
+    当 is_partial=True 且 display_df 至少 2 根时，display_hash 和 display_times
+    只基于 completed bars（排除末根 partial bar）。partial bar 信息放入
+    live_revision 字段（独立于 completed frame，可随 realtime 更新）。
+    这确保 bars API 和 indicators API 在不同时间调用 MDAS 时，即使 partial bar
+    OHLCV 已更新，completed frame hash 仍一致，消除 display_frame 反复失败。
+
     Args:
         instrument_id: 标的 UUID 字符串
         timeframe: 周期 1d | 15m | 1h | 1w | 1mo
@@ -120,6 +128,15 @@ def build_display_frame(
     Returns:
         display_frame 字典（V2 含 spec 时附加新字段）
     """
+    # [CH-01/CH-02 fix] 区分 completed frame 和 full display frame
+    # 当 is_partial=True 时，display_hash/times 只基于 completed bars（排除末根 partial）
+    # partial bar 信息放入 live_revision（独立字段，不参与 frame match）
+    _has_partial = bool(is_partial) and not display_df.empty
+    if _has_partial and len(display_df) > 1:
+        completed_df = display_df.iloc[:-1]
+    else:
+        completed_df = display_df
+
     if display_df.empty:
         base: dict[str, Any] = {
             "instrument_id": str(instrument_id),
@@ -134,15 +151,36 @@ def build_display_frame(
             "instrument_id": str(instrument_id),
             "timeframe": timeframe,
             "adj": adj,
-            "display_times": compute_source_bar_times(display_df, timeframe),
-            "display_hash": compute_source_bar_hash(display_df, timeframe),
+            # [CH-01/CH-02 fix] display_hash/times 基于 completed frame（排除 partial）
+            "display_times": compute_source_bar_times(completed_df, timeframe),
+            "display_hash": compute_source_bar_hash(completed_df, timeframe),
             "completed_through": completed_through,
         }
+
+    # [CH-01/CH-02 fix] live_revision: partial bar 独立字段（不参与 frame match）
+    # 前端可读取此字段显示 realtime 价格，但不影响 display_hash 比较
+    if _has_partial and not display_df.empty:
+        last_bar = display_df.iloc[-1]
+        last_ts = display_df.index[-1]
+        try:
+            base["live_revision"] = {
+                "time": last_ts.isoformat() if hasattr(last_ts, "isoformat") else str(last_ts),
+                "open": float(last_bar["open"]),
+                "high": float(last_bar["high"]),
+                "low": float(last_bar["low"]),
+                "close": float(last_bar["close"]),
+                "volume": float(last_bar["volume"]),
+            }
+        except (KeyError, ValueError, TypeError):
+            # OHLCV 列缺失或类型异常时跳过 live_revision（不阻塞 display_frame）
+            pass
 
     # V2: 传入 spec 时附加新字段
     if spec is not None:
         base["requested_count"] = spec.requested_count
         base["actual_count"] = len(display_df)
+        # [CH-01/CH-02 fix] completed_count: completed bars 数量（排除 partial）
+        base["completed_count"] = len(completed_df)
         if not display_df.empty:
             first_ts = display_df.index[0]
             last_ts = display_df.index[-1]
@@ -340,4 +378,116 @@ if __name__ == "__main__":
     )
     assert is_display_frame_match(bars_frame, ind_frame_mismatch) is False
     print("is_display_frame_match: PASS")
+
+    # =================================================================
+    # [CH-01/CH-02 fix] partial bar → completed frame hash 稳定性测试
+    # =================================================================
+    # 场景：交易时段内，bars API 和 indicators API 各自调用 MDAS，
+    # 末根 partial bar 的 OHLCV 可能在两次调用间更新，导致 display_hash 不一致。
+    # 修复后：display_hash 只基于 completed bars（排除末根 partial），
+    # partial bar 信息放入独立 live_revision 字段。
+
+    # 三根 bar：前两根 completed，第三根 partial（OHLCV 随 realtime 变化）
+    df_partial_v1 = pd.DataFrame(
+        {
+            "open": [10.0, 11.0, 12.0],
+            "high": [10.5, 11.5, 12.5],
+            "low": [9.5, 10.5, 11.5],
+            "close": [10.2, 11.1, 12.3],
+            "volume": [1000, 2000, 1500],
+            "amount": [10200.0, 22200.0, 18450.0],
+        },
+        index=pd.to_datetime(["2026-07-01", "2026-07-02", "2026-07-03"]),
+    )
+    # 同一交易日，partial bar OHLCV 更新（close 从 12.3 → 12.8）
+    df_partial_v2 = df_partial_v1.copy()
+    df_partial_v2.loc["2026-07-03", "close"] = 12.8
+    df_partial_v2.loc["2026-07-03", "high"] = 13.0
+    df_partial_v2.loc["2026-07-03", "volume"] = 1800
+
+    # 两次调用都标记 is_partial=True（同一交易日 partial bar）
+    frame_partial_v1 = build_display_frame(
+        "id-1", "1d", "qfq", df_partial_v1, completed_through="2026-07-02",
+        spec=spec, is_partial=True,
+    )
+    frame_partial_v2 = build_display_frame(
+        "id-1", "1d", "qfq", df_partial_v2, completed_through="2026-07-02",
+        spec=spec, is_partial=True,
+    )
+    # [CH-01 fix] 核心：completed frame hash 必须一致（partial bar 不参与 hash）
+    assert frame_partial_v1["display_hash"] == frame_partial_v2["display_hash"], (
+        "CH-01 fix: partial bar 更新后 completed frame hash 必须保持稳定"
+    )
+    # [CH-01 fix] display_times 也只基于 completed bars（2 根，不含 partial）
+    assert len(frame_partial_v1["display_times"]) == 2
+    assert frame_partial_v1["display_times"][0] == "2026-07-01"
+    assert frame_partial_v1["display_times"][1] == "2026-07-02"
+    print(f"CH-01 partial bar 排除: PASS (hash={frame_partial_v1['display_hash']})")
+
+    # [CH-02 fix] live_revision 字段：partial bar OHLCV 独立存放
+    assert "live_revision" in frame_partial_v1
+    assert frame_partial_v1["live_revision"]["time"] == "2026-07-03T00:00:00"
+    assert frame_partial_v1["live_revision"]["close"] == 12.3
+    assert frame_partial_v2["live_revision"]["close"] == 12.8
+    # live_revision 不影响 display_hash
+    assert frame_partial_v1["live_revision"] != frame_partial_v2["live_revision"]
+    print("CH-02 live_revision 独立字段: PASS")
+
+    # [CH-01/CH-02 fix] completed_count 字段：V2 spec 时附加
+    assert frame_partial_v1["completed_count"] == 2  # 排除 partial
+    assert frame_partial_v1["actual_count"] == 3  # 含 partial
+    print("CH-01 completed_count 字段: PASS")
+
+    # [CH-01 fix] is_partial=False 时无 live_revision，display_hash 基于完整 df
+    frame_full = build_display_frame(
+        "id-1", "1d", "qfq", df_partial_v1, completed_through="2026-07-03",
+        spec=spec, is_partial=False,
+    )
+    assert "live_revision" not in frame_full
+    assert len(frame_full["display_times"]) == 3  # 完整 3 根
+    assert frame_full["completed_count"] == 3
+    print("CH-01 is_partial=False 无 live_revision: PASS")
+
+    # [CH-01 fix] is_partial=None（V1 行为）时无 live_revision
+    frame_v1_partial = build_display_frame(
+        "id-1", "1d", "qfq", df_partial_v1, completed_through="2026-07-03",
+        spec=spec,  # 不传 is_partial
+    )
+    assert "live_revision" not in frame_v1_partial
+    assert len(frame_v1_partial["display_times"]) == 3  # 完整 3 根
+    print("CH-01 is_partial=None V1 行为: PASS")
+
+    # [CH-01 fix] 单根 partial bar：len==1 时不能排除（completed_df = display_df）
+    df_single_partial = df_partial_v1.iloc[-1:].copy()
+    frame_single = build_display_frame(
+        "id-1", "1d", "qfq", df_single_partial, completed_through="2026-07-02",
+        spec=spec, is_partial=True,
+    )
+    # 单根时 completed_df = display_df（无法排除唯一 bar）
+    assert len(frame_single["display_times"]) == 1
+    assert frame_single["completed_count"] == 1
+    # 但 live_revision 仍存在（partial bar 信息）
+    assert "live_revision" in frame_single
+    print("CH-01 单根 partial 不排除: PASS")
+
+    # [CH-01 fix] is_display_frame_match：相同 completed bars + 不同 partial → 匹配
+    assert is_display_frame_match(frame_partial_v1, frame_partial_v2) is True, (
+        "CH-01 fix: 相同 completed bars + 不同 partial bar 必须匹配"
+    )
+    # [CH-01 fix] is_display_frame_match：不同 completed bars → 不匹配
+    df_different_completed = df_partial_v1.copy()
+    df_different_completed.loc["2026-07-02", "close"] = 99.9  # 修改 completed bar
+    df_different_completed_v2 = pd.concat([
+        df_different_completed.iloc[:-1],
+        df_partial_v2.iloc[-1:],
+    ])
+    frame_diff_completed = build_display_frame(
+        "id-1", "1d", "qfq", df_different_completed_v2, completed_through="2026-07-02",
+        spec=spec, is_partial=True,
+    )
+    assert is_display_frame_match(frame_partial_v1, frame_diff_completed) is False, (
+        "CH-01 fix: 不同 completed bars 必须不匹配"
+    )
+    print("CH-01 is_display_frame_match partial 稳定性: PASS")
+
     print("OK")

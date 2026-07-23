@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Chart Display Frame 契约",
+  "description": "PRD V2.0 §4.2 SNAP-01 / §7.2 — 图表 display frame 契约。对应代码：backend/app/services/indicator_display_frame.py::build_display_frame",
+  "contract_id": "chart-frame",
+  "version": 2,
+  "as_of": "2026-07-21",
+  "type": "object",
+  "required": ["matched", "total_bars", "display_bars", "offset", "window_start", "window_end"],
+  "properties": {
+    "matched": {
+      "type": "boolean",
+      "description": "bars 与 indicators 的 display_frame 是否匹配（Atomic Chart Snapshot 核心断言）"
+    },
+    "total_bars": {
+      "type": "integer",
+      "description": "输入 bars 总数"
+    },
+    "display_bars": {
+      "type": "integer",
+      "description": "展示窗口 bars 数（受 90/120 显示窗口影响，但不影响 Node 计算）"
+    },
+    "offset": {
+      "type": "integer",
+      "description": "展示窗口偏移量"
+    },
+    "window_start": {
+      "type": "string",
+      "description": "窗口起始时间 ISO 字符串"
+    },
+    "window_end": {
+      "type": "string",
+      "description": "窗口结束时间 ISO 字符串"
+    }
+  },
+  "enforcement": {
+    "ci_gate": "前端不得用 quote 构造 K 线",
+    "tests": [
+      "tests/test_capture_snapshot.py",
+      "tests/test_indicators_api.py"
+    ]
+  },
+  "cp_introduced": "CP-12 (SNAP-01) + CP-14 (schema 文档化)"
+}

@@ -44,6 +44,7 @@ import type {
   AfterClosePipelineRunRequest,
   TableViewPresetCreateRequest,
   TableViewPresetPatchRequest,
+  ChartSnapshotQueryParams,
 } from '../api/endpoints'
 
 // ============================================================
@@ -762,6 +763,33 @@ export function useRealtimeQuote(instrumentId: string | undefined) {
     enabled: !!instrumentId,
     staleTime: STALE_REALTIME,
     refetchInterval: () => isInTradingHours() ? 10000 : false,
+    refetchIntervalInBackground: false,
+  })
+}
+
+/**
+ * [PRD V2.0 §4.2 SNAP-01 Atomic Chart Snapshot] 个股详情页原子图表快照。
+ *
+ * 一次 MDAS DataFrame 同时返回 bars + indicators + render_frame，
+ * 替代详情页独立的 useBars + useIndicators 两次实时请求，
+ * 保证前端拿到的 bars 与 indicators 基于同一份后端 DataFrame 生成。
+ *
+ * render_frame.matched=false 时前端不得 Ready（与 Capture 同款合同）。
+ *
+ * 轮询策略与 useBars/useIndicators 一致：交易时段 30s，非交易时段不轮询。
+ */
+export function useChartSnapshot(
+  instrumentId: string | undefined,
+  params?: ChartSnapshotQueryParams,
+  options?: { refetchInterval?: number | false },
+) {
+  return useQuery({
+    // queryKey 包含 'v1' 版本标识，便于未来响应结构变更时强制刷新缓存
+    queryKey: ['chart-snapshot', 'v1', instrumentId, params],
+    queryFn: ({ signal }) => api.getChartSnapshot(instrumentId!, params, { signal }),
+    enabled: !!instrumentId,
+    staleTime: STALE_WATCHLIST,
+    refetchInterval: options?.refetchInterval ?? (() => isInTradingHours() ? 30000 : false),
     refetchIntervalInBackground: false,
   })
 }

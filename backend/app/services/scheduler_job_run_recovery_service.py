@@ -1,8 +1,11 @@
 """SchedulerJobRun 僵尸任务统一恢复服务。
 
-提供 recover_stale_scheduler_job_runs(db, now) 函数，原子更新
-status='running' 且 (lease 过期 OR heartbeat 超时 90s) 的任务为 interrupted，
-并写唯一一条 recovery 事件。
+提供两个核心函数：
+1. recover_stale_scheduler_job_runs(db, now): 原子更新 status='running' 且
+   (lease 过期 OR heartbeat 超时 90s) 的任务为 interrupted，并写唯一一条 recovery 事件。
+2. auto_resume_interrupted_after_close_runs(db, now): [PRD §4.3 JOB-01] 自动将
+   interrupted 的 after_close_orchestrator 任务转换为 resume_queued，递增 attempt_no，
+   允许 Worker 领取重试（断点恢复 via last_completed_step）。
 
 调用点（4 处，由 Phase 4 接入）：
 - main.py lifespan 启动时
@@ -15,6 +18,7 @@ status='running' 且 (lease 过期 OR heartbeat 超时 90s) 的任务为 interru
 - strategy_batch_service.recover_stale_runs() 针对 strategy_runs 表，与本函数职责不同。
 - 不单独 commit（由调用方控制事务），仅 flush。
 - 幂等：每条任务最多一条 recovery 事件（先 SELECT 判断）。
+- [JOB-01] auto_resume 仅处理 after_close_orchestrator 任务（其他 job 不含断点恢复）。
 """
 
 from __future__ import annotations
@@ -152,6 +156,108 @@ async def recover_stale_scheduler_job_runs(
     return len(recovered_rows)
 
 
+# [PRD §4.3 JOB-01] - after_close_orchestrator 任务名（仅此 job 支持 auto-resume）
+_AFTER_CLOSE_JOB_NAME = "after_close_orchestrator"
+
+# [PRD §4.3 JOB-01] - 最大自动重试次数（超过则不再 auto-resume，需人工介入）
+_MAX_AUTO_RESUME_ATTEMPTS = 3
+
+
+async def auto_resume_interrupted_after_close_runs(
+    db: AsyncSession,
+    now: datetime | None = None,
+) -> int:
+    """[PRD §4.3 JOB-01] 自动将 interrupted 的 after_close_orchestrator 任务转为 resume_queued。
+
+    状态闭环：queued → running → interrupted → resume_queued → running → succeeded/failed
+
+    此函数实现 interrupted → resume_queued 转换：
+    1. 查找 status='interrupted' 且 job_name='after_close_orchestrator' 的任务
+    2. 过滤 attempt_no < _MAX_AUTO_RESUME_ATTEMPTS（超过上限不自动恢复，需人工介入）
+    3. 原子 UPDATE：status → resume_queued, attempt_no + 1, error_code/message 清空
+    4. 写 resume 事件（记录 attempt_no 和 last_completed_step）
+
+    Worker 领取 resume_queued 任务时（_after_close_poll_once）：
+    - 递增 lease_epoch（fencing）
+    - execute_after_close_run 读取 metadata.last_completed_step 跳过已成功阶段
+
+    Args:
+        db: 异步会话（不 commit，由调用方控制事务）
+        now: 当前时间（默认 Asia/Shanghai 当前时间）
+
+    Returns:
+        转换为 resume_queued 的任务数量
+
+    Raises:
+        Exception: 数据库执行异常向上传播（不吞异常）
+    """
+    if now is None:
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+
+    # [JOB-01] 原子 UPDATE：interrupted → resume_queued + attempt_no + 1
+    # WHERE attempt_no < _MAX_AUTO_RESUME_ATTEMPTS 限制最大重试次数
+    update_sql = text(
+        """
+        UPDATE scheduler_job_runs
+        SET status = 'resume_queued',
+            attempt_no = attempt_no + 1,
+            error_code = NULL,
+            error_message = NULL,
+            finished_at = NULL,
+            heartbeat_at = :now,
+            updated_at = :now
+        WHERE status = 'interrupted'
+            AND job_name = :job_name
+            AND attempt_no < :max_attempts
+        RETURNING id, attempt_no, metadata_json
+        """
+    )
+    result = await db.execute(update_sql, {
+        "now": now,
+        "job_name": _AFTER_CLOSE_JOB_NAME,
+        "max_attempts": _MAX_AUTO_RESUME_ATTEMPTS,
+    })
+    resumed_rows = result.fetchall()
+
+    if not resumed_rows:
+        return 0
+
+    # [JOB-01] 每条恢复任务：写 resume 事件（记录 attempt_no + last_completed_step）
+    for row in resumed_rows:
+        job_run_id = row.id
+        new_attempt_no = row.attempt_no
+
+        # 提取 last_completed_step（从 metadata_json）
+        last_completed_step = None
+        if row.metadata_json:
+            try:
+                metadata = json.loads(row.metadata_json)
+                last_completed_step = metadata.get("last_completed_step")
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        event = JobRunEvent(
+            job_run_id=job_run_id,
+            step="auto_resume",
+            level="info",
+            message=f"自动恢复：interrupted → resume_queued (attempt_no={new_attempt_no})",
+            payload={
+                "action": "interrupted_to_resume_queued",
+                "attempt_no": new_attempt_no,
+                "last_completed_step": last_completed_step,
+                "resumed_at": now.isoformat(),
+            },
+        )
+        db.add(event)
+
+    await db.flush()
+    logger.info(
+        "[Recovery] [JOB-01] 自动恢复 %d 个 interrupted 盘后任务 → resume_queued",
+        len(resumed_rows),
+    )
+    return len(resumed_rows)
+
+
 if __name__ == "__main__":
     # 自测入口：验证函数签名与模块导入（不连接数据库，无副作用）
     import inspect
@@ -178,5 +284,21 @@ if __name__ == "__main__":
     assert JobRunEvent is not None
     assert JobRunEvent.__tablename__ == "job_run_events"
     print(f"JobRunEvent.__tablename__={JobRunEvent.__tablename__} ✓")
+
+    # [PRD §4.3 JOB-01] 验证 auto_resume_interrupted_after_close_runs
+    sig_resume = inspect.signature(auto_resume_interrupted_after_close_runs)
+    params_resume = set(sig_resume.parameters.keys())
+    assert params_resume == {"db", "now"}, f"auto_resume 参数不匹配: {params_resume}"
+    assert sig_resume.parameters["now"].default is None, "auto_resume now 默认值应为 None"
+    assert sig_resume.return_annotation in (int, "int"), (
+        f"auto_resume 返回类型应为 int, 实际: {sig_resume.return_annotation}"
+    )
+    print("auto_resume_interrupted_after_close_runs 签名验证 ✓")
+
+    # 验证 JOB-01 常量
+    assert _AFTER_CLOSE_JOB_NAME == "after_close_orchestrator"
+    assert _MAX_AUTO_RESUME_ATTEMPTS == 3
+    print(f"_AFTER_CLOSE_JOB_NAME={_AFTER_CLOSE_JOB_NAME} ✓")
+    print(f"_MAX_AUTO_RESUME_ATTEMPTS={_MAX_AUTO_RESUME_ATTEMPTS} ✓")
 
     print("OK")

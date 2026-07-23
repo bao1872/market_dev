@@ -34,6 +34,8 @@ EVENT_LABELS: dict[str, str] = {
     "node_cluster_touch": "价格触及成交密集区",
     "smc_bos_retest": "价格回踩日线 SMC 破位结构",
     "smc_choch_retest": "价格回踩日线 SMC 趋势反转结构",
+    "smc_equal_highs_retest": "价格回踩日线 SMC 等高",
+    "smc_equal_lows_retest": "价格回踩日线 SMC 等低",
     "smc_order_block_first_touch": "价格首次进入日线 SMC 订单块",
     # [StockDetailFeishu] - 个股快照主动分享（不暴露内部 manual_send 代码）
     "STOCK_SNAPSHOT_SHARE": "个股快照",
@@ -98,6 +100,8 @@ if __name__ == "__main__":
     # [CHANGE-20260720-002 §二] SMC 三类事件文案
     assert get_event_label("smc_bos_retest") == "价格回踩日线 SMC 破位结构"
     assert get_event_label("smc_choch_retest") == "价格回踩日线 SMC 趋势反转结构"
+    assert get_event_label("smc_equal_highs_retest") == "价格回踩日线 SMC 等高"
+    assert get_event_label("smc_equal_lows_retest") == "价格回踩日线 SMC 等低"
     assert get_event_label("smc_order_block_first_touch") == "价格首次进入日线 SMC 订单块"
     assert get_event_label("STOCK_SNAPSHOT_SHARE") == "个股快照"
     # 未知 event_type 原样返回

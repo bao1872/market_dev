@@ -2,25 +2,29 @@
 
 [CHANGE-20260720-002 §二] 新增 SmcMonitor - 日线 SMC 结构盘中监控。
 
-设计原则（PROMPT.md §二）：
+设计原则（PROMPT.md §二 / PRD V2.0 §3.2）：
 - 三种监控全部以已完成前复权日线为主结构；Node 的 15m 只负责成交量分配；最新已完成 1m 仅检测触发。
 - 禁止复制 SMC 公式，调用现有 Canonical SMC Adapter（compute_smc_adapter）。
 - 继续排除 FVG（adapter 内已防御性过滤）。
-- EQH/EQL 和 Strong/Weak 结构只显示不通知。
+- [PRD V2.0 SMC-01/SMC-03] 监控全部五类已确认日线 internal/swing 事件：BOS/CHoCH/EQH/EQL/OB，
+  全部触发通知（不再仅显示）。
+- Strong/Weak 结构（swing_bias）只显示不通知。
 - 每个对象生成稳定 smc_entity_id，dedupe 含 instrument/event_type/entity/touch_episode，禁止历史事件重复补发。
 
 输入：MarketDataContext（bars_daily + bars_minute）
-  - bars_daily: 已完成 qfq 日线，主结构（BOS/CHoCH/OB 都基于日线）
+  - bars_daily: 已完成 qfq 日线，主结构（BOS/CHoCH/EQH/EQL/OB 都基于日线）
   - bars_minute: 1m bars，仅用于检测当前价是否触及/穿越日线结构位
 
-输出：MonitorState（smc_confirmed_bos/smc_confirmed_choch/smc_active_obs/
+输出：MonitorState（smc_confirmed_bos/smc_confirmed_choch/smc_equal_highs_lows/smc_active_obs/
                    smc_current_price/smc_currently_touched/smc_swing_bias/smc_trailing）
-      + StrategyEventDraft（smc_bos_retest/smc_choch_retest/smc_order_block_first_touch 事件）
+      + StrategyEventDraft（五类触碰事件）
 
-三个 V1 事件类型：
-- smc_bos_retest: 1m price 回踩或穿越已确认日线 BOS level
-- smc_choch_retest: 1m price 回踩或穿越已确认日线 CHoCH level
-- smc_order_block_first_touch: 1m price 第一次进入当前有效未mitigated日线 OB
+五个事件类型（[PRD V2.0 §3.2]）：
+- smc_bos_retest: 1m high/low 与已确认日线 BOS level 相交
+- smc_choch_retest: 1m high/low 与已确认日线 CHoCH level 相交
+- smc_equal_highs_retest: 1m high/low 与已确认日线 EQH level 相交
+- smc_equal_lows_retest: 1m high/low 与已确认日线 EQL level 相交
+- smc_order_block_first_touch: 1m high/low 与当前有效未mitigated日线 OB zone 相交
 
 touch_episode dedupe 机制：
 - prev_state.state["smc_episode_tracker"] 保存每个 entity 的 episode 计数和 last_touched 状态
@@ -34,6 +38,8 @@ touch_episode dedupe 机制：
 smc_entity_id 设计（稳定标识，跨 bar 一致）：
 - BOS:   f"BOS:{anchor_index}:{level}"
 - CHoCH: f"CHoCH:{anchor_index}:{level}"
+- EQH:   f"EQH:{anchor_index}:{second_pivot_index}:{level}"
+- EQL:   f"EQL:{anchor_index}:{second_pivot_index}:{level}"
 - OB:    f"OB:{anchor_index}:{bar_high}:{bar_low}:{bias}"
 
 dedupe_key: f"{event_type}:{instrument_id_str}:{smc_entity_id}:{touch_episode}"
@@ -63,9 +69,11 @@ from app.strategy.runtime import (
 
 logger = logging.getLogger("strategy.monitors.smc_monitor")
 
-# 事件类型常量（V1 SMC 监控事件）
+# 事件类型常量（SMC 监控事件，[PRD V2.0 §3.2] 五类）
 SMC_BOS_RETEST = "smc_bos_retest"
 SMC_CHOCH_RETEST = "smc_choch_retest"
+SMC_EQUAL_HIGHS_RETEST = "smc_equal_highs_retest"
+SMC_EQUAL_LOWS_RETEST = "smc_equal_lows_retest"
 SMC_ORDER_BLOCK_FIRST_TOUCH = "smc_order_block_first_touch"
 
 # 事件冷却时间（秒）：与 BB/Node 一致，由 indicator_contract 唯一真源控制
@@ -74,6 +82,7 @@ NOTIFY_COOLDOWN_SECONDS = NODE_CLUSTER_EVENT_TTL_SECONDS  # 600
 # State 字段键
 STATE_SMC_CONFIRMED_BOS = "smc_confirmed_bos"
 STATE_SMC_CONFIRMED_CHOCH = "smc_confirmed_choch"
+STATE_SMC_EQUAL_HIGHS_LOWS = "smc_equal_highs_lows"
 STATE_SMC_ACTIVE_OBS = "smc_active_obs"
 STATE_SMC_CURRENT_PRICE = "smc_current_price"
 STATE_SMC_CURRENTLY_TOUCHED = "smc_currently_touched"
@@ -83,8 +92,9 @@ STATE_SMC_EPISODE_TRACKER = "smc_episode_tracker"
 STATE_SMC_AVAILABILITY = "smc_availability"
 STATE_SMC_DEGRADED_REASON = "smc_degraded_reason"
 
-# 触发检测的最小 1m bars 数（需要 prev_close + cur_close）
-_MIN_MINUTE_BARS_FOR_TRIGGER = 2
+# 触发检测的最小 1m bars 数（需要最新已完成 1m 的 high/low）
+# [PRD V2.0 §3.2 L117] 触发使用最新已完成 1m 的 high/low 与线/区域相交
+_MIN_MINUTE_BARS_FOR_TRIGGER = 1
 
 
 def _make_bos_entity_id(anchor_index: int | None, level: float | None) -> str:
@@ -115,31 +125,77 @@ def _make_ob_entity_id(
     return f"OB:{anchor_index}:{bar_high}:{bar_low}:{bias}"
 
 
-def _is_bos_touched(prev_close: float, cur_close: float, level: float) -> bool:
-    """BOS level 触碰检测：1m close 穿越 level（任一方向）。
+def _make_eqh_entity_id(
+    anchor_index: int | None, second_pivot_index: int | None, level: float | None
+) -> str:
+    """EQH 稳定 entity_id。
 
-    与 BollingerMonitor 穿越检测一致：
-    - 从下方穿越：prev_close < level <= cur_close
-    - 从上方穿越：prev_close > level >= cur_close
+    [PRD V2.0 SMC-01/SMC-03] EQH 触碰事件监控。
+
+    Args:
+        anchor_index: 前一个 pivot 的 bar index
+        second_pivot_index: 新 pivot 的 bar index（与 anchor 形成 equal high）
+        level: equal high level 价格
+
+    Returns:
+        "EQH:{anchor_index}:{second_pivot_index}:{level}" 字符串
     """
-    return (prev_close < level <= cur_close) or (prev_close > level >= cur_close)
+    return f"EQH:{anchor_index}:{second_pivot_index}:{level}"
 
 
-def _is_choch_touched(prev_close: float, cur_close: float, level: float) -> bool:
-    """CHoCH level 触碰检测（与 BOS 一致，穿越即触碰）。"""
-    return _is_bos_touched(prev_close, cur_close, level)
+def _make_eql_entity_id(
+    anchor_index: int | None, second_pivot_index: int | None, level: float | None
+) -> str:
+    """EQL 稳定 entity_id。
+
+    [PRD V2.0 SMC-01/SMC-03] EQL 触碰事件监控。
+
+    Args:
+        anchor_index: 前一个 pivot 的 bar index
+        second_pivot_index: 新 pivot 的 bar index（与 anchor 形成 equal low）
+        level: equal low level 价格
+
+    Returns:
+        "EQL:{anchor_index}:{second_pivot_index}:{level}" 字符串
+    """
+    return f"EQL:{anchor_index}:{second_pivot_index}:{level}"
+
+
+def _is_bos_touched(cur_high: float, cur_low: float, level: float) -> bool:
+    """BOS level 触碰检测：1m bar 的 high/low 与 level 相交。
+
+    [PRD V2.0 §3.2 L117] 触发使用最新已完成 1m 的 high/low 与线/区域相交。
+    [PRD V2.0 SMC-02] 修复 close-only 漏报：影线触碰 level 也算触碰。
+    相交条件：cur_low <= level <= cur_high（含边界）。
+    """
+    return cur_low <= level <= cur_high
+
+
+def _is_choch_touched(cur_high: float, cur_low: float, level: float) -> bool:
+    """CHoCH level 触碰检测（与 BOS 一致，high/low 相交即触碰）。"""
+    return _is_bos_touched(cur_high, cur_low, level)
+
+
+def _is_eqh_touched(cur_high: float, cur_low: float, level: float) -> bool:
+    """EQH level 触碰检测（与 BOS 一致，high/low 相交即触碰）。"""
+    return _is_bos_touched(cur_high, cur_low, level)
+
+
+def _is_eql_touched(cur_high: float, cur_low: float, level: float) -> bool:
+    """EQL level 触碰检测（与 BOS 一致，high/low 相交即触碰）。"""
+    return _is_bos_touched(cur_high, cur_low, level)
 
 
 def _is_ob_touched(
-    prev_close: float, cur_close: float, bar_high: float, bar_low: float
+    cur_high: float, cur_low: float, bar_high: float, bar_low: float
 ) -> bool:
-    """OB zone 触碰检测：1m close 进入 [bar_low, bar_high] 区间。
+    """OB zone 触碰检测：1m bar 的 high/low 与 [bar_low, bar_high] 区间相交。
 
-    首次进入：prev_close 在 zone 外，cur_close 在 zone 内（含边界）。
+    [PRD V2.0 §3.2 L117] 触发使用最新已完成 1m 的 high/low 与线/区域相交。
+    [PRD V2.0 SMC-02] 修复 close-only 漏报：影线进入 zone 也算触碰。
+    相交条件：cur_high >= bar_low and cur_low <= bar_high（含边界）。
     """
-    prev_in_zone = bar_low <= prev_close <= bar_high
-    cur_in_zone = bar_low <= cur_close <= bar_high
-    return (not prev_in_zone) and cur_in_zone
+    return cur_high >= bar_low and cur_low <= bar_high
 
 
 class SmcMonitor(StrategyRuntime):
@@ -155,7 +211,7 @@ class SmcMonitor(StrategyRuntime):
     4. detect_events(context, prev, curr) 对比 prev/curr touch status 检测触碰事件
 
     主结构：context.bars_daily（已完成 qfq 日线）
-    触发：context.bars_minute（1m bars，仅取最后两根的 close 做穿越检测）
+    触发：context.bars_minute（1m bars，取最后一根的 high/low 与线/区域相交）
     """
 
     kind = "monitor"
@@ -245,6 +301,11 @@ class SmcMonitor(StrategyRuntime):
         confirmed_bos = [e for e in all_events if e.get("type") == "BOS"]
         confirmed_choch = [e for e in all_events if e.get("type") == "CHoCH"]
 
+        # [PRD V2.0 SMC-01/SMC-03] 提取已确认 EQH/EQL 事件
+        all_eqhls = smc_dto.get("equal_highs_lows", [])
+        confirmed_eqh = [e for e in all_eqhls if e.get("type") == "EQH"]
+        confirmed_eql = [e for e in all_eqhls if e.get("type") == "EQL"]
+
         # 提取当前有效未mitigated OB（mitigated_index is None）
         all_obs = smc_dto.get("order_blocks", [])
         active_obs = [ob for ob in all_obs if ob.get("mitigated_index") is None]
@@ -256,19 +317,21 @@ class SmcMonitor(StrategyRuntime):
             current_price = float(bars_daily["close"].iloc[-1])
 
         # 计算 currently_touched：当前 1m 是否触碰每个 entity
-        # 需要 1m bars 的 prev_close + cur_close 做穿越检测
+        # [PRD V2.0 §3.2 L117] 触发使用最新已完成 1m 的 high/low 与线/区域相交
+        # （touch_episode dedupe 由 detect_events 通过 prev_state 对比实现，
+        #   此处只计算当前 bar 的 touched 状态）
         currently_touched: dict[str, bool] = {}
-        prev_close: float | None = None
-        cur_close: float | None = None
+        cur_high: float | None = None
+        cur_low: float | None = None
         if (
             context.bars_minute is not None
             and len(context.bars_minute) >= _MIN_MINUTE_BARS_FOR_TRIGGER
         ):
-            prev_close = float(context.bars_minute["close"].iloc[-2])
-            cur_close = float(context.bars_minute["close"].iloc[-1])
+            cur_high = float(context.bars_minute["high"].iloc[-1])
+            cur_low = float(context.bars_minute["low"].iloc[-1])
 
-        if prev_close is not None and cur_close is not None:
-            # BOS level 触碰检测
+        if cur_high is not None and cur_low is not None:
+            # BOS level 触碰检测（high/low 相交）
             for bos in confirmed_bos:
                 level = bos.get("level")
                 anchor_idx = bos.get("anchor_index")
@@ -276,10 +339,10 @@ class SmcMonitor(StrategyRuntime):
                     continue
                 entity_id = _make_bos_entity_id(anchor_idx, float(level))
                 currently_touched[entity_id] = _is_bos_touched(
-                    prev_close, cur_close, float(level)
+                    cur_high, cur_low, float(level)
                 )
 
-            # CHoCH level 触碰检测
+            # CHoCH level 触碰检测（high/low 相交）
             for choch in confirmed_choch:
                 level = choch.get("level")
                 anchor_idx = choch.get("anchor_index")
@@ -287,10 +350,38 @@ class SmcMonitor(StrategyRuntime):
                     continue
                 entity_id = _make_choch_entity_id(anchor_idx, float(level))
                 currently_touched[entity_id] = _is_choch_touched(
-                    prev_close, cur_close, float(level)
+                    cur_high, cur_low, float(level)
                 )
 
-            # OB zone 触碰检测
+            # [PRD V2.0 SMC-01/SMC-03] EQH level 触碰检测（high/low 相交）
+            for eqh in confirmed_eqh:
+                level = eqh.get("level")
+                anchor_idx = eqh.get("anchor_index")
+                second_pivot_idx = eqh.get("second_pivot_index")
+                if level is None or anchor_idx is None or second_pivot_idx is None:
+                    continue
+                entity_id = _make_eqh_entity_id(
+                    anchor_idx, second_pivot_idx, float(level)
+                )
+                currently_touched[entity_id] = _is_eqh_touched(
+                    cur_high, cur_low, float(level)
+                )
+
+            # [PRD V2.0 SMC-01/SMC-03] EQL level 触碰检测（high/low 相交）
+            for eql in confirmed_eql:
+                level = eql.get("level")
+                anchor_idx = eql.get("anchor_index")
+                second_pivot_idx = eql.get("second_pivot_index")
+                if level is None or anchor_idx is None or second_pivot_idx is None:
+                    continue
+                entity_id = _make_eql_entity_id(
+                    anchor_idx, second_pivot_idx, float(level)
+                )
+                currently_touched[entity_id] = _is_eql_touched(
+                    cur_high, cur_low, float(level)
+                )
+
+            # OB zone 触碰检测（high/low 相交）
             for ob in active_obs:
                 anchor_idx = ob.get("anchor_index")
                 bar_high = ob.get("bar_high")
@@ -307,7 +398,7 @@ class SmcMonitor(StrategyRuntime):
                     int(anchor_idx), float(bar_high), float(bar_low), int(bias)
                 )
                 currently_touched[entity_id] = _is_ob_touched(
-                    prev_close, cur_close, float(bar_high), float(bar_low)
+                    cur_high, cur_low, float(bar_high), float(bar_low)
                 )
 
         # 构造精简的 state（避免存储完整 DTO，仅存监控必需字段）
@@ -338,9 +429,26 @@ class SmcMonitor(StrategyRuntime):
                 "clipped_left": ob.get("clipped_left", False),
             }
 
+        # [PRD V2.0 SMC-01/SMC-03] EQH/EQL 只保留监控必需字段
+        def _slim_eqhl(e: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "type": e.get("type"),
+                "anchor_index": e.get("anchor_index"),
+                "anchor_time": e.get("anchor_time"),
+                "second_pivot_index": e.get("second_pivot_index"),
+                "second_pivot_time": e.get("second_pivot_time"),
+                "confirmed_index": e.get("confirmed_index"),
+                "confirmed_time": e.get("confirmed_time"),
+                "level": e.get("level"),
+                "prev_level": e.get("prev_level"),
+            }
+
         state: dict[str, Any] = {
             STATE_SMC_CONFIRMED_BOS: [_slim_event(e) for e in confirmed_bos],
             STATE_SMC_CONFIRMED_CHOCH: [_slim_event(e) for e in confirmed_choch],
+            STATE_SMC_EQUAL_HIGHS_LOWS: [
+                _slim_eqhl(e) for e in (confirmed_eqh + confirmed_eql)
+            ],
             STATE_SMC_ACTIVE_OBS: [_slim_ob(ob) for ob in active_obs],
             STATE_SMC_CURRENT_PRICE: round(current_price, 4) if current_price else None,
             STATE_SMC_CURRENTLY_TOUCHED: currently_touched,
@@ -374,10 +482,12 @@ class SmcMonitor(StrategyRuntime):
     ) -> list[StrategyEventDraft]:
         """检测 SMC 触碰事件（touch_episode dedupe）。
 
-        三个事件类型：
-        - smc_bos_retest: 1m price 穿越/回踩已确认日线 BOS level（新 episode 触发）
-        - smc_choch_retest: 1m price 穿越/回踩已确认日线 CHoCH level（新 episode 触发）
-        - smc_order_block_first_touch: 1m price 首次进入当前有效未mitigated日线 OB zone（新 episode 触发）
+        [PRD V2.0 §3.2] 五个事件类型：
+        - smc_bos_retest: 1m high/low 与已确认日线 BOS level 相交（新 episode 触发）
+        - smc_choch_retest: 1m high/low 与已确认日线 CHoCH level 相交（新 episode 触发）
+        - smc_equal_highs_retest: 1m high/low 与已确认日线 EQH level 相交（新 episode 触发）
+        - smc_equal_lows_retest: 1m high/low 与已确认日线 EQL level 相交（新 episode 触发）
+        - smc_order_block_first_touch: 1m high/low 与当前有效未mitigated日线 OB zone 相交（新 episode 触发）
 
         touch_episode 机制：
         - prev_state.state["smc_episode_tracker"] 保存每个 entity 的 episode 计数和 last_touched
@@ -417,6 +527,7 @@ class SmcMonitor(StrategyRuntime):
         # 加载 SMC 结构（从 curr_state 提取，用于构造 payload）
         confirmed_bos = curr_state_dict.get(STATE_SMC_CONFIRMED_BOS, [])
         confirmed_choch = curr_state_dict.get(STATE_SMC_CONFIRMED_CHOCH, [])
+        all_eqhls = curr_state_dict.get(STATE_SMC_EQUAL_HIGHS_LOWS, [])
         active_obs = curr_state_dict.get(STATE_SMC_ACTIVE_OBS, [])
         bos_by_entity = {
             _make_bos_entity_id(e.get("anchor_index"), e.get("level")): e
@@ -428,6 +539,22 @@ class SmcMonitor(StrategyRuntime):
             for e in confirmed_choch
             if e.get("anchor_index") is not None and e.get("level") is not None
         }
+        # [PRD V2.0 SMC-01/SMC-03] EQH/EQL entity → 结构 dict
+        eqhl_by_entity: dict[str, dict[str, Any]] = {}
+        for e in all_eqhls:
+            etype = e.get("type")
+            anchor_idx = e.get("anchor_index")
+            second_pivot_idx = e.get("second_pivot_index")
+            level = e.get("level")
+            if anchor_idx is None or second_pivot_idx is None or level is None:
+                continue
+            if etype == "EQH":
+                entity_id = _make_eqh_entity_id(anchor_idx, second_pivot_idx, level)
+            elif etype == "EQL":
+                entity_id = _make_eql_entity_id(anchor_idx, second_pivot_idx, level)
+            else:
+                continue
+            eqhl_by_entity[entity_id] = e
         ob_by_entity = {
             _make_ob_entity_id(
                 ob.get("anchor_index"),
@@ -504,6 +631,7 @@ class SmcMonitor(StrategyRuntime):
                 current_price=current_price,
                 bos_by_entity=bos_by_entity,
                 choch_by_entity=choch_by_entity,
+                eqhl_by_entity=eqhl_by_entity,
                 ob_by_entity=ob_by_entity,
             )
             if event_draft is not None:
@@ -519,10 +647,12 @@ class SmcMonitor(StrategyRuntime):
         """根据 entity_id 前缀解析事件类型。
 
         Args:
-            entity_id: BOS:... / CHoCH:... / OB:...
+            entity_id: BOS:... / CHoCH:... / EQH:... / EQL:... / OB:...
 
         Returns:
-            smc_bos_retest / smc_choch_retest / smc_order_block_first_touch
+            smc_bos_retest / smc_choch_retest /
+            smc_equal_highs_retest / smc_equal_lows_retest /
+            smc_order_block_first_touch
 
         Raises:
             ValueError: entity_id 前缀无法识别
@@ -531,6 +661,10 @@ class SmcMonitor(StrategyRuntime):
             return SMC_BOS_RETEST
         if entity_id.startswith("CHoCH:"):
             return SMC_CHOCH_RETEST
+        if entity_id.startswith("EQH:"):
+            return SMC_EQUAL_HIGHS_RETEST
+        if entity_id.startswith("EQL:"):
+            return SMC_EQUAL_LOWS_RETEST
         if entity_id.startswith("OB:"):
             return SMC_ORDER_BLOCK_FIRST_TOUCH
         raise ValueError(f"无法识别的 smc_entity_id 前缀: {entity_id}")
@@ -546,19 +680,21 @@ class SmcMonitor(StrategyRuntime):
         current_price: float | None,
         bos_by_entity: dict[str, dict[str, Any]],
         choch_by_entity: dict[str, dict[str, Any]],
+        eqhl_by_entity: dict[str, dict[str, Any]],
         ob_by_entity: dict[str, dict[str, Any]],
     ) -> StrategyEventDraft | None:
         """构造 SMC 事件草稿。
 
         Args:
-            entity_id: 稳定标识（BOS:.../CHoCH:.../OB:...）
-            event_type: smc_bos_retest/smc_choch_retest/smc_order_block_first_touch
+            entity_id: 稳定标识（BOS:.../CHoCH:.../EQH:.../EQL:.../OB:...）
+            event_type: smc_bos_retest/smc_choch_retest/smc_equal_highs_retest/
+                       smc_equal_lows_retest/smc_order_block_first_touch
             instrument_id_str: 标的 UUID 字符串
             bar_time: 事件发生时间（bar 时间）
             bar_time_key: 整分钟时间戳（用于 dedupe_key）
             touch_episode: 本次触碰的 episode 编号
             current_price: 当前 1m close
-            bos_by_entity/choch_by_entity/ob_by_entity: entity_id → 结构 dict
+            bos_by_entity/choch_by_entity/eqhl_by_entity/ob_by_entity: entity_id → 结构 dict
 
         Returns:
             StrategyEventDraft 或 None（结构缺失时）
@@ -585,6 +721,9 @@ class SmcMonitor(StrategyRuntime):
             payload["level"] = bos.get("level")
             payload["anchor_index"] = bos.get("anchor_index")
             payload["anchor_time"] = bos.get("anchor_time")
+            # [Task 2] confirmed_time 为 close 穿越 pivot 的 bar 时间（focus_event 链路必需）
+            payload["confirmed_index"] = bos.get("confirmed_index")
+            payload["confirmed_time"] = bos.get("confirmed_time")
             payload["bias"] = bos.get("bias")
             payload["internal"] = bos.get("internal")
             payload["bullish"] = bos.get("bullish")
@@ -595,9 +734,26 @@ class SmcMonitor(StrategyRuntime):
             payload["level"] = choch.get("level")
             payload["anchor_index"] = choch.get("anchor_index")
             payload["anchor_time"] = choch.get("anchor_time")
+            # [Task 2] confirmed_time 为 close 穿越 pivot 的 bar 时间（focus_event 链路必需）
+            payload["confirmed_index"] = choch.get("confirmed_index")
+            payload["confirmed_time"] = choch.get("confirmed_time")
             payload["bias"] = choch.get("bias")
             payload["internal"] = choch.get("internal")
             payload["bullish"] = choch.get("bullish")
+        elif event_type in (SMC_EQUAL_HIGHS_RETEST, SMC_EQUAL_LOWS_RETEST):
+            eqhl = eqhl_by_entity.get(entity_id)
+            if eqhl is None:
+                return None
+            payload["level"] = eqhl.get("level")
+            payload["prev_level"] = eqhl.get("prev_level")
+            payload["anchor_index"] = eqhl.get("anchor_index")
+            payload["anchor_time"] = eqhl.get("anchor_time")
+            payload["second_pivot_index"] = eqhl.get("second_pivot_index")
+            payload["second_pivot_time"] = eqhl.get("second_pivot_time")
+            # [Task 2] confirmed_time 为 leg change 确认 bar 时间（focus_event 链路必需）
+            payload["confirmed_index"] = eqhl.get("confirmed_index")
+            payload["confirmed_time"] = eqhl.get("confirmed_time")
+            payload["eqhl_type"] = eqhl.get("type")  # "EQH" or "EQL"
         elif event_type == SMC_ORDER_BLOCK_FIRST_TOUCH:
             ob = ob_by_entity.get(entity_id)
             if ob is None:
@@ -606,6 +762,9 @@ class SmcMonitor(StrategyRuntime):
             payload["bar_low"] = ob.get("bar_low")
             payload["anchor_index"] = ob.get("anchor_index")
             payload["anchor_time"] = ob.get("anchor_time")
+            # [Task 2] confirmed_time 为触发 OB 创建的 BOS/CHoCH bar 时间（focus_event 链路必需）
+            payload["confirmed_index"] = ob.get("confirmed_index")
+            payload["confirmed_time"] = ob.get("confirmed_time")
             payload["bias"] = ob.get("bias")
             payload["internal"] = ob.get("internal")
 
@@ -696,35 +855,51 @@ if __name__ == "__main__":
     assert issubclass(SmcMonitor, StrategyRuntime)
     print("SmcMonitor 继承 StrategyRuntime ✓")
 
-    # 验证事件类型常量
+    # 验证事件类型常量（[PRD V2.0 §3.2] 五类）
     assert SMC_BOS_RETEST == "smc_bos_retest"
     assert SMC_CHOCH_RETEST == "smc_choch_retest"
+    assert SMC_EQUAL_HIGHS_RETEST == "smc_equal_highs_retest"
+    assert SMC_EQUAL_LOWS_RETEST == "smc_equal_lows_retest"
     assert SMC_ORDER_BLOCK_FIRST_TOUCH == "smc_order_block_first_touch"
     print("事件类型常量 ✓")
 
     # 验证 entity_id 生成
     assert _make_bos_entity_id(100, 10.5) == "BOS:100:10.5"
     assert _make_choch_entity_id(200, 9.8) == "CHoCH:200:9.8"
+    assert _make_eqh_entity_id(100, 120, 10.5) == "EQH:100:120:10.5"
+    assert _make_eql_entity_id(100, 120, 9.8) == "EQL:100:120:9.8"
     assert _make_ob_entity_id(150, 11.0, 10.0, 1) == "OB:150:11.0:10.0:1"
     print("entity_id 生成 ✓")
 
-    # 验证 touch 检测
-    assert _is_bos_touched(9.5, 10.5, 10.0) is True  # 从下方穿越
-    assert _is_bos_touched(10.5, 9.5, 10.0) is True  # 从上方穿越
-    assert _is_bos_touched(9.5, 9.8, 10.0) is False  # 未穿越
-    assert _is_bos_touched(10.5, 10.8, 10.0) is False  # 都在上方
-    print("BOS/CHoCH touch 检测 ✓")
+    # 验证 touch 检测（high/low 相交，[PRD V2.0 §3.2 L117]）
+    # BOS/CHoCH/EQH/EQL: cur_low <= level <= cur_high
+    assert _is_bos_touched(10.5, 9.5, 10.0) is True  # level 在 [low, high] 内
+    assert _is_bos_touched(10.5, 10.0, 10.0) is True  # level = cur_low 边界
+    assert _is_bos_touched(10.0, 9.5, 10.0) is True  # level = cur_high 边界
+    assert _is_bos_touched(9.5, 9.0, 10.0) is False  # level 在 bar 上方
+    assert _is_bos_touched(11.0, 10.5, 10.0) is False  # level 在 bar 下方
+    # EQH/EQL 与 BOS 一致
+    assert _is_eqh_touched(10.5, 9.5, 10.0) is True
+    assert _is_eql_touched(10.5, 9.5, 10.0) is True
+    assert _is_eqh_touched(11.0, 10.5, 10.0) is False
+    assert _is_eql_touched(9.5, 9.0, 10.0) is False
+    print("BOS/CHoCH/EQH/EQL touch 检测 ✓")
 
-    # OB touch 检测
-    assert _is_ob_touched(9.0, 10.5, 11.0, 10.0) is True  # 从下方进入 zone
-    assert _is_ob_touched(11.5, 10.5, 11.0, 10.0) is True  # 从上方进入 zone
-    assert _is_ob_touched(10.5, 10.8, 11.0, 10.0) is False  # 已在 zone 内
-    assert _is_ob_touched(9.0, 9.5, 11.0, 10.0) is False  # 都在 zone 外
+    # OB touch 检测: cur_high >= bar_low and cur_low <= bar_high
+    assert _is_ob_touched(10.5, 9.5, 11.0, 10.0) is True  # bar 部分进入 zone（从下方）
+    assert _is_ob_touched(11.5, 10.5, 11.0, 10.0) is True  # bar 部分进入 zone（从上方）
+    assert _is_ob_touched(10.8, 10.5, 11.0, 10.0) is True  # bar 完全在 zone 内
+    assert _is_ob_touched(10.0, 9.0, 11.0, 10.0) is True  # 边界相切 cur_high=bar_low
+    assert _is_ob_touched(12.0, 11.0, 11.0, 10.0) is True  # 边界相切 cur_low=bar_high
+    assert _is_ob_touched(9.5, 9.0, 11.0, 10.0) is False  # bar 完全在 zone 下方
+    assert _is_ob_touched(12.0, 11.5, 11.0, 10.0) is False  # bar 完全在 zone 上方
     print("OB touch 检测 ✓")
 
-    # 验证 _resolve_event_type
+    # 验证 _resolve_event_type（五类）
     assert SmcMonitor._resolve_event_type("BOS:100:10.5") == SMC_BOS_RETEST
     assert SmcMonitor._resolve_event_type("CHoCH:200:9.8") == SMC_CHOCH_RETEST
+    assert SmcMonitor._resolve_event_type("EQH:100:120:10.5") == SMC_EQUAL_HIGHS_RETEST
+    assert SmcMonitor._resolve_event_type("EQL:100:120:9.8") == SMC_EQUAL_LOWS_RETEST
     assert SmcMonitor._resolve_event_type("OB:150:11.0:10.0:1") == SMC_ORDER_BLOCK_FIRST_TOUCH
     print("_resolve_event_type ✓")
 

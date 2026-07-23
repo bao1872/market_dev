@@ -49,6 +49,11 @@ const DEFAULT_CAPTURE_INDICATOR_VIEW: IndicatorView = 'node_cluster'
 // canvas-wrap 占满 chart-viewport 全高度。
 const MOBILE_STAGE_CHART_HEIGHT = 1946
 
+// [2026-07-21 反馈] 飞书移动舞台默认显示窗口：最近 90 根 bar
+//   不影响底层数据拉取总长度（snapshot 仍返回 250 根日线），也不影响详情页用户缩放逻辑
+//   只控制 StrategyChart 在 capture 模式下的初始 viewport
+const MOBILE_STAGE_DEFAULT_VISIBLE_BARS = 90
+
 export default function CaptureStockPage() {
   const { symbol } = useParams<{ symbol: string }>()
   const [searchParams] = useSearchParams()
@@ -91,6 +96,44 @@ export default function CaptureStockPage() {
     return normalized ?? DEFAULT_CAPTURE_INDICATOR_VIEW
   }, [searchParams])
 
+  // [Task 2] focus_event 解析：从 URL query 读取监控触发事件信息
+  //   字段：focus_event_id / focus_event_type / anchor_time / confirmed_time /
+  //   level / bar_high / bar_low / bias / internal / bullish / eqhl_type / second_pivot_time
+  //   传递到 StrategyChart.focusEventId/focusEventType，前端据此突出本次触发事件，
+  //   淡化其他历史结构（半透明 / 不绘制标签）
+  const focusEventId = searchParams.get('focus_event_id') || null
+  const focusEventType = searchParams.get('focus_event_type') || null
+  const focusEventAnchorTime = searchParams.get('anchor_time') || null
+  const focusEventConfirmedTime = searchParams.get('confirmed_time') || null
+  const focusEventLevel = searchParams.get('level')
+  const focusEventBarHigh = searchParams.get('bar_high')
+  const focusEventBarLow = searchParams.get('bar_low')
+  const focusEventBias = searchParams.get('bias')
+  const focusEventInternal = searchParams.get('internal')
+  const focusEventBullish = searchParams.get('bullish')
+  const focusEventEqhlType = searchParams.get('eqhl_type')
+  const focusEventSecondPivotTime = searchParams.get('second_pivot_time')
+  const focusEventInfo = useMemo(() => {
+    if (!focusEventId) return null
+    return {
+      focus_event_id: focusEventId,
+      focus_event_type: focusEventType,
+      anchor_time: focusEventAnchorTime,
+      confirmed_time: focusEventConfirmedTime,
+      level: focusEventLevel,
+      bar_high: focusEventBarHigh,
+      bar_low: focusEventBarLow,
+      bias: focusEventBias,
+      internal: focusEventInternal,
+      bullish: focusEventBullish,
+      eqhl_type: focusEventEqhlType,
+      second_pivot_time: focusEventSecondPivotTime,
+    }
+  }, [focusEventId, focusEventType, focusEventAnchorTime, focusEventConfirmedTime,
+      focusEventLevel, focusEventBarHigh, focusEventBarLow,
+      focusEventBias, focusEventInternal, focusEventBullish,
+      focusEventEqhlType, focusEventSecondPivotTime])
+
   // [Capture] - 描述: 截图模式唯一业务数据请求
   // 通过 Capture Token 访问专用 Snapshot API，不调用普通业务端点
   const snapshotQuery = useQuery({
@@ -132,14 +175,16 @@ export default function CaptureStockPage() {
   const lastBar = barsResponse?.items?.[barsResponse.items.length - 1] || null
   const currentPrice = lastBar?.close ?? null
 
-  // [MobileIndicatorStage] 累计涨跌幅：从可见 bar 首根 close 到末根 close
-  //   注意：这是简化口径（仅基于 snapshot 返回的 bars 计算），与产品约定的"区间累计涨跌幅"对齐
+  // [2026-07-21 反馈] 当天涨跌幅：最新价相对前收（倒数第二根 close）
+  //   旧口径"累计涨跌幅"用首根 close 到末根 close，不符合用户预期（应显示当日涨跌幅）
+  //   日线场景：最后一根 = 当日 bar（盘中为 partial），倒数第二根 = 昨日收盘
+  //   盘中 15m 等周期同理：最后一根 = 当前 bar，倒数第二根 = 前一根
   //   后端 snapshot 已按 adjustment_as_of=trade_date 截止；前端只展示，不重算
-  const firstBar = barsResponse?.items?.[0] || null
+  const prevBar = barsResponse?.items?.[barsResponse.items.length - 2] || null
   const changePercent = useMemo(() => {
-    if (!firstBar || !lastBar || !firstBar.close) return null
-    return ((lastBar.close - firstBar.close) / firstBar.close) * 100
-  }, [firstBar, lastBar])
+    if (!prevBar || !lastBar || !prevBar.close) return null
+    return ((lastBar.close - prevBar.close) / prevBar.close) * 100
+  }, [prevBar, lastBar])
 
   // 当前 K 线日期（用于 chart-head time 显示）
   // 优先 trade_time（盘中含时分），回退 trade_date（仅日期）
@@ -292,9 +337,15 @@ export default function CaptureStockPage() {
           onViewportChange={handleViewportChange}
           isCaptureMode
           indicatorView={indicatorView}
+          // [2026-07-21 反馈] 飞书移动舞台默认显示最近 90 根 bar（不改底层数据拉取，不改详情页缩放）
+          defaultVisibleBars={MOBILE_STAGE_DEFAULT_VISIBLE_BARS}
           // [PROMPT.md §5.3.4 V2] Capture 强制使用 mobile_capture 缩放：
           //   1440×2560 舞台需要 ≥32px Canvas 字号 / 2.5-3.5px 线宽，桌面端保持默认 'desktop'。
           renderDensity="mobile_capture"
+          // [Task 2] focus_event 透传：突出本次触发事件，淡化其他历史结构
+          focusEventId={focusEventId}
+          focusEventType={focusEventType}
+          focusEventInfo={focusEventInfo}
         />
       )}
     </MobileIndicatorStage>

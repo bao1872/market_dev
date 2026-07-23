@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "飞书消息分组 Schema",
+  "description": "PRD V2.0 §4.3 / §7.2 — 飞书消息分组契约。对应代码：backend/app/services/feishu_*.py",
+  "contract_id": "message-group",
+  "version": 2,
+  "as_of": "2026-07-21",
+  "type": "object",
+  "required": ["group_id", "message_type", "content", "stage"],
+  "properties": {
+    "group_id": {
+      "type": "string",
+      "description": "消息分组 ID（同一批次共享）"
+    },
+    "message_type": {
+      "type": "string",
+      "enum": ["text", "image", "rich_text", "interactive"],
+      "description": "消息类型"
+    },
+    "content": {
+      "type": "object",
+      "description": "消息内容（按 message_type 不同结构不同）"
+    },
+    "stage": {
+      "type": "string",
+      "enum": ["preview", "formal", "retry"],
+      "description": "发送阶段：preview=预览, formal=正式, retry=重试"
+    },
+    "image_state": {
+      "type": "object",
+      "description": "图片状态链（飞书持久图片状态）",
+      "properties": {
+        "image_key": {"type": "string"},
+        "upload_status": {"type": "string", "enum": ["pending", "success", "failed"]},
+        "retry_count": {"type": "integer"}
+      }
+    }
+  },
+  "invariants": {
+    "image_failure_not_success": "图片失败不得 result in overall success",
+    "stage_isolation": "preview 与 formal 消息不得混用 group_id"
+  },
+  "enforcement": {
+    "ci_gate": "图片失败不得 overall success",
+    "tests": [
+      "tests/test_after_close_board_sync.py",
+      "tests/test_delivery_worker_monitor_eligible.py"
+    ]
+  },
+  "cp_introduced": "CP-14 (schema 文档化)"
+}

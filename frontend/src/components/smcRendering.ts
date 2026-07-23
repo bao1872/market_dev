@@ -82,24 +82,70 @@ export const SMC_BEAR_COLOR = '#22C55E'   // 下跌结构（bias=-1）
 export interface SmcVisibleContext {
   /** Number of bars in the visible display window (= displayTimes.length). */
   displayCount: number
+  /**
+   * [CP-V3-C] Optional: map an SMC event time string to a K-line display index.
+   * When provided, time-based lookup is preferred over index-based (more reliable
+   * when viewport changes from 250 to 90 bars — view adapter rebasing can misalign).
+   */
+  timeToDisplayIndex?: (time: string | null | undefined) => number | undefined
+  /**
+   * [CP-V3-C2] Strict time-key mode.
+   * - true: anchor_time/confirmed_time/second_pivot_time 缺失或匹配失败时
+   *   → diagnostic + skip（返回 undefined），禁止静默 index fallback。
+   *   仅显式 legacy 模式（false）允许 index fallback。
+   * - false (default): CP-V3-C 行为（time primary, index fallback）。
+   */
+  strictTimeKey?: boolean
+  /**
+   * [CP-V3-C2] Optional diagnostic sink for time-key match failures.
+   * When provided, strict mode logs failures for debugging.
+   */
+  onTimeKeyMiss?: (reason: 'missing_time' | 'match_failed', smcIdx: number | null | undefined, time: string | null | undefined) => void
 }
 
 /**
  * Map a (rebased) SMC index to a K-line display index.
  *
- * view adapter 已将所有 SMC 索引重基准到展示窗口坐标系，因此本函数只需处理：
+ * [CP-V3-C] SMC time-key rendering: when `time` and `ctx.timeToDisplayIndex` are
+ * provided, time-based lookup is the PRIMARY path (anchor_time is always correct
+ * regardless of viewport size). Index-based lookup is the FALLBACK (relies on
+ * view adapter rebasing, which can misalign when viewport changes from 250 to 90).
+ *
+ * [CP-V3-C2] Strict time-key mode (ctx.strictTimeKey=true):
+ *   - time 缺失（null/undefined）→ diagnostic + skip（返回 undefined）
+ *   - time 提供但 timeToDisplayIndex(time) 返回 undefined（匹配失败）→ diagnostic + skip
+ *   - 禁止静默 index fallback；仅显式 legacy 模式（strictTimeKey=false）允许 fallback
+ *
+ * Fallback logic (index-based, view adapter rebased, legacy mode only):
  *   - null/undefined → undefined（不可见）
  *   - 负索引 → 0（OB clipped_left 时 anchor 在窗口左侧，clamp 到窗口左端）
  *   - 索引 >= displayCount → undefined（在窗口右侧，不可见）
  *   - 其他 → 直接返回（已在展示坐标系）
- *
- * 注：StrategyChart 的 smcToDisplay 在此基础上再做时间匹配作为防御性回退，
- *     但在 adapter 正常工作时直接使用本函数即可。
  */
 export function mapSmcIndexToDisplay(
   smcIdx: number | null | undefined,
   ctx: SmcVisibleContext,
+  time?: string | null,
 ): number | undefined {
+  const strict = ctx.strictTimeKey === true
+
+  // [CP-V3-C] Primary: time-based lookup (most reliable across viewport changes)
+  if (time != null && ctx.timeToDisplayIndex) {
+    const displayIdx = ctx.timeToDisplayIndex(time)
+    if (displayIdx != null) return displayIdx
+    // [CP-V3-C2] Strict mode: match failed → diagnostic + skip (NO index fallback)
+    if (strict) {
+      ctx.onTimeKeyMiss?.('match_failed', smcIdx, time)
+      return undefined
+    }
+    // Legacy mode: fall through to index-based fallback
+  } else if (strict) {
+    // [CP-V3-C2] Strict mode: time missing → diagnostic + skip (NO index fallback)
+    ctx.onTimeKeyMiss?.('missing_time', smcIdx, time)
+    return undefined
+  }
+
+  // Fallback: index-based (view adapter rebased) — legacy mode only
   if (smcIdx == null) return undefined
   if (smcIdx < 0) return 0  // clipped_left: clamp to display left
   if (smcIdx >= ctx.displayCount) return undefined
@@ -131,7 +177,8 @@ export function selectVisibleSmcOrderBlocks(
   //   - anchor >= displayCount（在窗口右侧）→ 不可见
   //   - clipped_left（anchor 为负）→ 仍可见（mapSmcIndexToDisplay clamp 到 0）
   return top5.filter(ob => {
-    const anchorIdx = mapSmcIndexToDisplay(ob.anchor_index, ctx)
+    // [CP-V3-C] 优先用 anchor_time 匹配（viewport 250→90 切换时索引 rebasing 可能错位）
+    const anchorIdx = mapSmcIndexToDisplay(ob.anchor_index, ctx, ob.anchor_time)
     return anchorIdx != null
   })
 }
@@ -162,8 +209,9 @@ export function collectVisibleSmcPriceCandidates(
   // event.level（anchor 或 confirmed 在窗口内）
   for (const ev of smcData.events ?? []) {
     if (ev.level == null) continue
-    const aIdx = mapSmcIndexToDisplay(ev.anchor_index, ctx)
-    const cIdx = mapSmcIndexToDisplay(ev.confirmed_index, ctx)
+    // [CP-V3-C] 优先用 anchor_time/confirmed_time 匹配（viewport 250→90 切换时索引 rebasing 可能错位）
+    const aIdx = mapSmcIndexToDisplay(ev.anchor_index, ctx, ev.anchor_time)
+    const cIdx = mapSmcIndexToDisplay(ev.confirmed_index, ctx, ev.confirmed_time)
     if (aIdx != null || cIdx != null) {
       candidates.push(ev.level)
     }
@@ -177,8 +225,9 @@ export function collectVisibleSmcPriceCandidates(
 
   // EQH/EQL level（anchor 或 second_pivot 在窗口内）
   for (const eq of smcData.equal_highs_lows ?? []) {
-    const aIdx = mapSmcIndexToDisplay(eq.anchor_index, ctx)
-    const spIdx = mapSmcIndexToDisplay(eq.second_pivot_index, ctx)
+    // [CP-V3-C] 优先用 anchor_time/second_pivot_time 匹配（viewport 250→90 切换时索引 rebasing 可能错位）
+    const aIdx = mapSmcIndexToDisplay(eq.anchor_index, ctx, eq.anchor_time)
+    const spIdx = mapSmcIndexToDisplay(eq.second_pivot_index, ctx, eq.second_pivot_time)
     if (aIdx != null || spIdx != null) {
       candidates.push(eq.level)
     }
@@ -264,4 +313,196 @@ export function hexToRgba(hex: string, alpha: number): string {
     return hex
   }
   return `rgba(${r}, ${g}, ${b}, ${alpha})`
+}
+
+// ===== [P0 SMC 标签碰撞布局] =====
+// [2026-07-21 P0 反馈] 飞书移动舞台 90 bar 窗口下 SMC 标签集中重叠
+//   根因：renderIndicatorSmc 原将标签放在结构线中点/OB 锚点/右边缘，无碰撞检测
+//   修复：纯函数 layoutSmcLabels 按x分组 + 3~4 lane 上下错位 + 短引导线
+//   约束：真实事件 x/price 锚点不动；只有标签框可移动；标签框不得超出图表区域
+
+/** 标签的自然锚点（输入） */
+export interface SmcLabelAnchor {
+  kind: 'bos' | 'choch' | 'eqh' | 'eql' | 'ob' | 'trailing_high' | 'trailing_low'
+  /** 真实锚点 X（像素，结构线中点 / OB 锚点 / 右边缘） */
+  anchorX: number
+  /** 真实锚点 Y（像素，价格水平） */
+  anchorY: number
+  /** 标签文本 */
+  text: string
+  /** 标签颜色 */
+  color: string
+  /** CSS font-size 字符串（如 '28px'） */
+  fontSize: string
+  /** 文字对齐方式 */
+  align: 'left' | 'center' | 'right'
+  /** 优先偏移方向：up=标签在锚点上方，down=下方，center=居中 */
+  preferredVertical: 'up' | 'down' | 'center'
+}
+
+/** 标签布局结果（输出） */
+export interface LaidOutSmcLabel {
+  anchor: SmcLabelAnchor
+  /** 标签框左上角 X */
+  boxX: number
+  /** 标签框左上角 Y */
+  boxY: number
+  /** 标签框宽度 */
+  boxW: number
+  /** 标签框高度 */
+  boxH: number
+  /** 分配的 lane（0=自然位置，1-3=偏移） */
+  lane: number
+  /** 引导线起点（真实锚点） */
+  guideStartX: number
+  guideStartY: number
+  /** 引导线终点（标签框中心） */
+  guideEndX: number
+  guideEndY: number
+}
+
+/** 碰撞布局上下文 */
+export interface SmcLabelLayoutContext {
+  /** 图表左边界（像素） */
+  plotLeft: number
+  /** 图表右边界（像素） */
+  plotRight: number
+  /** 图表上边界（像素） */
+  plotTop: number
+  /** 图表下边界（像素） */
+  plotBottom: number
+  /** lane 高度（像素，= fontSize + 间隙） */
+  laneHeight: number
+  /** lane 之间的间隙（像素） */
+  laneGap: number
+  /** 最大 lane 数（默认 4） */
+  maxLanes?: number
+  /** 标签框水平内边距（像素） */
+  boxPaddingX?: number
+  /** 标签框垂直内边距（像素） */
+  boxPaddingY?: number
+}
+
+/**
+ * 测量文本宽度的函数类型（由调用方提供 ctx.measureText 实现）
+ */
+export type MeasureTextFn = (text: string, fontSize: string) => number
+
+/**
+ * SMC 标签碰撞布局纯函数。
+ *
+ * 算法：
+ * 1. 测量每个标签宽度
+ * 2. 按 anchorX 排序
+ * 3. 对每个标签，依次尝试 lane 0（自然位置）、lane 1、2、3（上下错位）
+ * 4. lane 偏移方向由 preferredVertical 决定（up=向上偏移，down=向下偏移）
+ * 5. 检查标签框与已放置标签的矩形重叠
+ * 6. 选第一个不重叠的 lane；若都重叠则选 lane 0（best effort）
+ * 7. 标签框 X 钳制到 [plotLeft, plotRight - boxW]
+ * 8. 标签框 Y 钳制到 [plotTop, plotBottom - boxH]
+ * 9. 引导线从 (anchorX, anchorY) 到 (boxCenterX, boxCenterY)
+ *
+ * 不改变真实事件的 x 和 price 锚点，只移动标签框。
+ */
+export function layoutSmcLabels(
+  anchors: SmcLabelAnchor[],
+  ctx: SmcLabelLayoutContext,
+  measureText: MeasureTextFn,
+): LaidOutSmcLabel[] {
+  const maxLanes = ctx.maxLanes ?? 4
+  const padX = ctx.boxPaddingX ?? 4
+  const padY = ctx.boxPaddingY ?? 2
+  const fontSizeNum = parseFloat(anchors[0]?.fontSize ?? '28')
+  const boxH = fontSizeNum + padY * 2
+
+  // 1. 测量宽度 + 按 anchorX 排序
+  const withWidth = anchors.map(a => ({
+    anchor: a,
+    boxW: measureText(a.text, a.fontSize) + padX * 2,
+  }))
+  withWidth.sort((a, b) => a.anchor.anchorX - b.anchor.anchorX)
+
+  const placed: LaidOutSmcLabel[] = []
+
+  for (const item of withWidth) {
+    const { anchor, boxW } = item
+    let bestLabel: LaidOutSmcLabel | null = null
+
+    // 2. 尝试每个 lane
+    for (let lane = 0; lane < maxLanes; lane++) {
+      // lane 偏移量：lane 0 = 0, lane 1 = ±laneHeight, lane 2 = ±2*laneHeight, ...
+      const offsetMagnitude = lane * (ctx.laneHeight + ctx.laneGap)
+      const direction = anchor.preferredVertical === 'down' ? 1
+        : anchor.preferredVertical === 'up' ? -1
+        : lane % 2 === 1 ? -1 : 1  // center: 交替上下
+      const offsetY = offsetMagnitude * direction
+
+      // 标签框自然位置（align 决定 X 基准）
+      let boxX: number
+      if (anchor.align === 'left') {
+        boxX = anchor.anchorX + 4
+      } else if (anchor.align === 'right') {
+        boxX = anchor.anchorX - boxW - 4
+      } else {
+        boxX = anchor.anchorX - boxW / 2
+      }
+      let boxY = anchor.anchorY - boxH / 2 + offsetY
+
+      // 3. 钳制到图表区域
+      boxX = Math.max(ctx.plotLeft, Math.min(boxX, ctx.plotRight - boxW))
+      boxY = Math.max(ctx.plotTop, Math.min(boxY, ctx.plotBottom - boxH))
+
+      // 4. 检查与已放置标签的重叠
+      const overlaps = placed.some(p =>
+        boxX < p.boxX + p.boxW + 2 &&
+        boxX + boxW + 2 > p.boxX &&
+        boxY < p.boxY + p.boxH + 2 &&
+        boxY + boxH + 2 > p.boxY,
+      )
+
+      if (!overlaps || lane === 0) {
+        // 第一个不重叠的 lane，或 lane 0 作为 fallback
+        bestLabel = {
+          anchor,
+          boxX,
+          boxY,
+          boxW,
+          boxH,
+          lane,
+          guideStartX: anchor.anchorX,
+          guideStartY: anchor.anchorY,
+          guideEndX: boxX + boxW / 2,
+          guideEndY: boxY + boxH / 2,
+        }
+        if (!overlaps) break
+      }
+    }
+
+    if (bestLabel) {
+      placed.push(bestLabel)
+    } else {
+      // 兜底：lane 0
+      const boxX = Math.max(ctx.plotLeft, Math.min(
+        anchor.align === 'left' ? anchor.anchorX + 4
+          : anchor.align === 'right' ? anchor.anchorX - boxW - 4
+          : anchor.anchorX - boxW / 2,
+        ctx.plotRight - boxW,
+      ))
+      const boxY = Math.max(ctx.plotTop, Math.min(anchor.anchorY - boxH / 2, ctx.plotBottom - boxH))
+      placed.push({
+        anchor,
+        boxX,
+        boxY,
+        boxW,
+        boxH,
+        lane: 0,
+        guideStartX: anchor.anchorX,
+        guideStartY: anchor.anchorY,
+        guideEndX: boxX + boxW / 2,
+        guideEndY: boxY + boxH / 2,
+      })
+    }
+  }
+
+  return placed
 }
