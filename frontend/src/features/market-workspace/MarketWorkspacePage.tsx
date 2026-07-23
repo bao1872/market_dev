@@ -38,6 +38,7 @@ import {
   decodeMarketWorkspaceUrl,
   changeMarketScope,
   buildStrategyResultQueryParams,
+  buildMarketReturnToUrl,
   convertFiltersToMetricFilters,
   extractStockNameFilter,
   type MarketScope,
@@ -293,8 +294,12 @@ export default function MarketWorkspacePage() {
   // CHANGE-20260713-009: 使用共享 buildStrategyResultQueryParams 纯函数
   // MarketWorkspacePage 和 useStockDetailActions 共用同一转换逻辑，避免筛选口径漂移
   // scope=market → universe=all；scope=watchlist → universe=watchlist（在 buildStrategyResultQueryParams 内映射）
-  const resultParams: StrategyResultQueryParams = useMemo(() => {
-    const ctx: MarketListContext = {
+  //
+  // [DetailSourceContextV2] marketListCtx 为入口时刻列表上下文快照，
+  // handleNavigateToStock 用它构建 returnTo（buildMarketReturnToUrl）和 canonicalQuery。
+  // 禁止从 searchParams 副本构建 returnTo（可能滞后于内存 query 状态）。
+  const marketListCtx: MarketListContext = useMemo(() => {
+    return {
       scope,
       keyword: query.keyword || null,
       industry: industry || null,
@@ -311,8 +316,12 @@ export default function MarketWorkspacePage() {
       // CHANGE-20260713-011: preset=none 透传（不影响查询，仅用于默认 preset 自动应用门控）
       preset: urlState.preset,
     }
-    return buildStrategyResultQueryParams(ctx) as StrategyResultQueryParams
   }, [query, scope, industry, concept, urlState.preset])
+
+  const resultParams: StrategyResultQueryParams = useMemo(
+    () => buildStrategyResultQueryParams(marketListCtx) as StrategyResultQueryParams,
+    [marketListCtx],
+  )
 
   const resultsQuery = useStrategyRunResults(activeRunId || undefined, resultParams)
   const totalResults = resultsQuery.data?.total ?? 0
@@ -403,26 +412,30 @@ export default function MarketWorkspacePage() {
     [searchParams, setSearchParams],
   )
 
-  // 股票名称链接：进入 /stock/:symbol?originScope=...&source=...&strategy=...&returnTo=...
+  // 股票名称链接：进入 /stock/:symbol?originScope=...&source=...&strategy=...&returnTo=...&sourceRunId=...&cq=...
   // CHANGE-20260716-006: 使用 buildStockDetailUrl 统一构建，originScope 为来源唯一真源
-  // returnTo 基于当前 searchParams 副本构造（非可能滞后的 location.search），强制写入 scope 和 selected
+  // [DetailSourceContextV2] returnTo 从当前内存 marketListCtx 构建（buildMarketReturnToUrl），
+  //   禁止从 searchParams 副本构建（可能滞后于内存 query 状态）。
+  //   sourceRunId + canonicalQuery 固定入口时刻快照，详情左栏用此快照查询 DSA results，
+  //   禁止重新推导 activeRunId（避免新 run 发布后漂移）。
   const handleNavigateToStock = useCallback(
     (row: TrendSelectionRow) => {
       const { symbol } = getStockDisplay(row)
       if (!symbol || symbol === '-') return
-      // 使用当前 searchParams 副本，强制写入 scope 和 selected（避免 location.search 滞后）
-      const returnToParams = new URLSearchParams(searchParams)
-      returnToParams.set('scope', scope)
-      returnToParams.set('selected', symbol)
-      const returnTo = `/market?${returnToParams.toString()}`
+      // V2: returnTo 从当前内存 marketListCtx 构建（含完整筛选/排序/分页），selected 写入入口股票
+      const returnTo = buildMarketReturnToUrl(marketListCtx, symbol)
+      // V2: canonicalQuery 为 resultParams 的 JSON 序列化（入口时刻查询快照）
+      const canonicalQuery = JSON.stringify(resultParams)
       navigate(
         buildStockDetailUrl(symbol, {
           originScope: scope,
           returnTo,
+          sourceRunId: activeRunId || null,
+          canonicalQuery,
         }),
       )
     },
-    [navigate, searchParams, scope],
+    [navigate, marketListCtx, resultParams, scope, activeRunId],
   )
 
   // 服务端查询变更

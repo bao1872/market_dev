@@ -21,6 +21,18 @@ export interface BuildStockDetailUrlOptions {
   returnTo?: string | null
   /** 时间周期（1d|15m|1h|1w|1mo），切换股票时保留 */
   timeframe?: string | null
+  /**
+   * [DetailSourceContextV2] 入口时刻已发布的 DSA run id。
+   * 详情左栏用此 runId + canonicalQuery 固定入口快照，禁止重新推导（避免新 run 发布后漂移）。
+   * market/watchlist 来源必填；direct 可空。
+   */
+  sourceRunId?: string | null
+  /**
+   * [DetailSourceContextV2] 序列化的 canonical query（StrategyResultQuery JSON 字符串）。
+   * 与 sourceRunId 一起固定入口时刻的筛选/排序/分页口径，切换股票时原样透传。
+   * market 来源 universe=all；watchlist 来源 universe=watchlist。
+   */
+  canonicalQuery?: string | null
 }
 
 export interface ResolvedDetailOrigin {
@@ -50,12 +62,15 @@ export function strategyForOriginScope(originScope: OriginScope): string {
 /**
  * 构建个股详情页 URL（唯一入口，3 个导航点共用）。
  *
- * 生成：/stock/:symbol?originScope=market&source=selection&strategy=dsa_selector&returnTo=...&timeframe=...
+ * 生成：/stock/:symbol?originScope=market&source=selection&strategy=dsa_selector&returnTo=...&timeframe=...&sourceRunId=...&cq=...
  *
  * originScope 是来源唯一真源；source/strategy 由 originScope 推导。
  * returnTo 只编码在 URL 中用于返回，不参与来源决策。
+ * sourceRunId + cq（canonicalQuery）固定入口时刻快照，切换股票时原样透传，
+ * 详情左栏用此快照查询 DSA results，禁止重新推导 activeRunId。
  *
  * [PRD V2.0 §4.4] originScope 支持三值：market|watchlist|direct
+ * [DetailSourceContextV2] sourceRunId + cq 为 V2 来源同源同序合同载体。
  */
 export function buildStockDetailUrl(symbol: string, opts: BuildStockDetailUrlOptions): string {
   const source = sourceForOriginScope(opts.originScope)
@@ -71,7 +86,31 @@ export function buildStockDetailUrl(symbol: string, opts: BuildStockDetailUrlOpt
   if (opts.timeframe) {
     params.set('timeframe', opts.timeframe)
   }
+  // [DetailSourceContextV2] 入口快照：sourceRunId + canonicalQuery
+  if (opts.sourceRunId) {
+    params.set('sourceRunId', opts.sourceRunId)
+  }
+  if (opts.canonicalQuery) {
+    params.set('cq', opts.canonicalQuery)
+  }
   return `/stock/${symbol}?${params.toString()}`
+}
+
+/**
+ * [DetailSourceContextV2] 计算稳定 contextId（不含 selectedSymbol）。
+ *
+ * 切换股票时 sourceRunId/canonicalQuery/returnTo 不变，故 stableContextId 不变。
+ * 用于 React key 和左栏滚动位置 storage key，避免每次切股重置。
+ *
+ * 禁止：将 selectedSymbol 纳入 stableContextId（违反不变性）。
+ */
+export function computeStableContextIdV2(
+  origin: OriginScope,
+  sourceRunId: string | null,
+  canonicalQueryRaw: string | null,
+  returnTo: string | null,
+): string {
+  return `${origin}|${sourceRunId ?? ''}|${canonicalQueryRaw ?? ''}|${returnTo ?? ''}`
 }
 
 /**

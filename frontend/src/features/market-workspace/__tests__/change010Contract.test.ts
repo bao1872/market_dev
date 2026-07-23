@@ -534,26 +534,34 @@ test('MarketWorkspacePage handleNavigateToStock 根据 scope 传递 source/strat
   )
 })
 
-test('MarketWorkspacePage handleNavigateToStock returnTo 保存完整当前 URL', () => {
-  // [PRD V2.0 §4.4 DETAIL-01] CP-11 重构后 returnTo 由 URLSearchParams 构造（自动 encodeURIComponent），
-  //   不再手工拼接 location.pathname/location.search。本测试检查 returnTo 包含 /market 前缀与 scope 参数，
-  //   且通过 buildStockDetailUrl 透传（URLSearchParams.toString 自动编码）。
+test('MarketWorkspacePage handleNavigateToStock returnTo V2 从 buildMarketReturnToUrl 构建', () => {
+  // [DetailSourceContextV2] V2 returnTo 从当前内存 marketListCtx 构建（buildMarketReturnToUrl），
+  //   不再从 searchParams 副本构造（避免滞后于内存 query 状态）。
+  //   buildMarketReturnToUrl 内部用 URLSearchParams 编码（自动 encodeURIComponent），
+  //   包含 /market 前缀 + scope + selected + 完整筛选/排序/分页。
   const src = readSource(PAGE_PATH)
   assert.ok(
-    /\/market\?/.test(src),
-    'handleNavigateToStock returnTo 必须以 /market? 前缀构造（保存完整列表页上下文）',
+    /buildMarketReturnToUrl\(marketListCtx,\s*symbol\)/.test(src),
+    'V2 returnTo 必须用 buildMarketReturnToUrl(marketListCtx, symbol) 构建（从内存状态，非 searchParams 副本）',
+  )
+  // V2 禁止用 returnToParams.set 构造 returnTo
+  assert.ok(
+    !/returnToParams\.set\(['"]scope['"]/.test(src),
+    'V2 禁止用 returnToParams.set(scope) 构造 returnTo',
   )
   assert.ok(
-    /returnToParams\.set\(['"]scope['"]/.test(src),
-    'returnTo 必须包含 scope 参数（保存当前列表 scope 上下文）',
+    !/returnToParams\.set\(['"]selected['"]/.test(src),
+    'V2 禁止用 returnToParams.set(selected) 构造 returnTo',
   )
+  // returnTo 必须透传给 buildStockDetailUrl
   assert.ok(
-    /returnToParams\.set\(['"]selected['"]/.test(src),
-    'returnTo 必须包含 selected 参数（保存当前选中股票）',
+    /returnTo,?\s*\n?\s*\}\)/.test(src) || /returnTo:\s*returnTo/.test(src) || /returnTo,/.test(src),
+    'returnTo 必须透传给 buildStockDetailUrl',
   )
+  // buildMarketReturnToUrl 必须从 marketWorkspaceUrlState 导入
   assert.ok(
-    /returnTo,?\s*\n?\s*\}\)/.test(src) || /returnTo:\s*returnTo/.test(src),
-    'returnTo 必须透传给 buildStockDetailUrl（URLSearchParams.toString 自动 encodeURIComponent）',
+    /buildMarketReturnToUrl/.test(src),
+    'MarketWorkspacePage 必须导入 buildMarketReturnToUrl',
   )
 })
 

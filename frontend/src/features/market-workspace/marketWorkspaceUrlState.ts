@@ -395,3 +395,59 @@ export function extractStockNameFilter(
   }
   return null
 }
+
+/**
+ * [DetailSourceContextV2] 从 MarketListContext 构建完整 /market returnTo URL。
+ *
+ * 编码全部列表页状态：scope + selected + industry + concept + preset + keyword + sort + dir + filters(JSON) + page + page_size。
+ * 与 decodeMarketListContext 互逆，确保返回列表页时能恢复完整的筛选/排序/分页。
+ *
+ * MarketWorkspacePage.handleNavigateToStock 用此函数从当前内存 query 状态构建 returnTo，
+ * 避免复制可能滞后的 searchParams（V2 根因修复）。
+ *
+ * @param ctx 列表上下文（含 scope/keyword/industry/concept/sort/filters/page/page_size/preset）
+ * @param selectedSymbol 当前选中股票（写入 selected 参数）
+ * @returns /market?... 完整 URL
+ */
+export function buildMarketReturnToUrl(ctx: MarketListContext, selectedSymbol: string | null): string {
+  const params = new URLSearchParams()
+  params.set('scope', ctx.scope)
+  if (selectedSymbol) {
+    params.set('selected', selectedSymbol)
+  }
+  if (ctx.keyword) {
+    params.set('keyword', ctx.keyword)
+  }
+  if (ctx.industry) {
+    params.set('industry', ctx.industry)
+  }
+  if (ctx.concept) {
+    params.set('concept', ctx.concept)
+  }
+  if (ctx.sort) {
+    params.set('sort', ctx.sort.key)
+    params.set('dir', ctx.sort.direction)
+  }
+  if (ctx.filters && ctx.filters.length > 0) {
+    // 与 screenerUrlState 编码一致：[{key, op, value, value2}, ...]
+    const filtersJson = JSON.stringify(
+      ctx.filters.map((f) => {
+        const item: Record<string, unknown> = { key: f.key, op: f.operator }
+        if (f.value !== undefined) item.value = f.value
+        if (f.value2 !== undefined) item.value2 = f.value2
+        return item
+      }),
+    )
+    params.set('filters', filtersJson)
+  }
+  if (ctx.page !== null) {
+    params.set('page', String(ctx.page))
+  }
+  if (ctx.page_size !== null) {
+    params.set('page_size', String(ctx.page_size))
+  }
+  if (ctx.preset === 'none') {
+    params.set('preset', 'none')
+  }
+  return `/market?${params.toString()}`
+}
