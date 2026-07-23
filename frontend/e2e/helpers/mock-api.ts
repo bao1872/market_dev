@@ -105,6 +105,14 @@ export async function setupMockApi(
   const recordCalls = options.recordCalls ?? true
   const defaultIndicatorView = options.defaultIndicatorView ?? 'node_cluster'
 
+  // URL 模式 `**/api/**`：
+  // Playwright 使用 preview 模式（npm run build && npm run preview），JS bundle 在 /assets/，
+  // 不会有 /src/api/ 模块加载请求，故 `**/api/**` 不会误拦截模块。
+  // 真实 API 请求路径有两种形式：
+  //   1. /api/api/v1/...（apiClient.get('/api/v1/...')，baseURL=/api 双 /api）
+  //   2. /api/me/... 或 /api/auth/...（apiClient.get('/me/...')，baseURL=/api 单 /api）
+  // `**/api/api/**` 会漏掉第 2 种导致 /me/access、/auth/refresh 401 → 跳转 /login。
+  // 故用 `**/api/**` 覆盖所有真实 API 请求。
   await page.route('**/api/**', async (route: Route) => {
     const request = route.request()
     const url = request.url()
@@ -270,9 +278,27 @@ export async function setupMockApi(
     // === Strategy Runs / Results ===
     // /strategy-runs/{run_id}/results — 必须先于 /strategy-runs 匹配
     if (url.match(/\/strategy-runs\/[^/]+\/results/)) {
-      const items = Object.keys(FIXTURE_INSTRUMENTS).flatMap((symbol) =>
+      let items = Object.keys(FIXTURE_INSTRUMENTS).flatMap((symbol) =>
         buildStrategyRunResults(symbol).items,
       )
+      // [V2 同源同序验收] 尊重 sort_by/sort_desc 参数，使非默认排序产生不同数组顺序。
+      // 列表页为 serverSide 模式，排序由后端负责；mock 必须根据 sort 参数返回对应顺序，
+      // 才能验证详情左栏（用相同 canonicalQuery 请求）与列表页数组完全一致。
+      const sortBy = params.sort_by
+      const sortDesc = params.sort_desc === 'true' || params.sort_desc === '1'
+      if (sortBy) {
+        items = [...items].sort((a, b) => {
+          let cmp = 0
+          if (sortBy === 'stock') {
+            cmp = String(a.instrument_symbol).localeCompare(String(b.instrument_symbol))
+          } else if (sortBy === 'change_pct') {
+            cmp = Number(a.latest_change_pct) - Number(b.latest_change_pct)
+          } else {
+            cmp = String(a.instrument_symbol).localeCompare(String(b.instrument_symbol))
+          }
+          return sortDesc ? -cmp : cmp
+        })
+      }
       return route.fulfill({
         status: 200,
         json: {
@@ -347,7 +373,8 @@ export async function setupMockApi(
       })
     }
     if (url.includes('/market/boards')) {
-      return route.fulfill({ status: 200, json: { boards: [], total: 0 } })
+      // 前端 MarketWorkspacePage 期望 boardsQuery.data 为 { items, available, stale }
+      return route.fulfill({ status: 200, json: { items: [], available: true, stale: false } })
     }
 
     // === Messages / Notifications ===

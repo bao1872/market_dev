@@ -139,7 +139,7 @@ export function resolveDetailSourceContext(
 //   - sourceRunId: 入口时刻 DSA published run id（market/watchlist 必填，direct 可空）
 //   - canonicalQuery: 入口时刻 StrategyResultQuery（market=universe=all, watchlist=universe=watchlist）
 //   - returnTo: 返回原页面 URL（仅用于返回按钮，不决定来源）
-//   - stableContextId: origin+sourceRunId+canonicalQuery+returnTo 的 hash（不含 selectedSymbol，切股不变）
+//   - stableContextId: origin+sourceRunId+canonicalQuery 的 hash（不含 selectedSymbol，不含 returnTo，切股不变）
 //   - sourceContextInvalid: market/watchlist 缺 runId/cq/universe不匹配/冲突 → true；direct 永不 invalid
 //   - invalidReason: 失效原因（供 UI 显示）
 //
@@ -203,7 +203,7 @@ function parseCanonicalQuery(raw: string | null): [StrategyResultQuery | null, b
  *   - 缺 canonicalQuery → missing_canonical_query
  *   - canonicalQuery.universe 与 origin 不匹配 → universe_mismatch
  *
- * stableContextId：origin+sourceRunId+canonicalQueryRaw+returnTo（不含 selectedSymbol，切股不变）。
+ * stableContextId：origin+sourceRunId+canonicalQueryRaw（不含 selectedSymbol，不含 returnTo，切股不变）。
  */
 export function resolveDetailSourceContextV2(
   originScopeRaw: string | null,
@@ -260,12 +260,12 @@ export function resolveDetailSourceContextV2(
     }
   }
 
-  // 4. stableContextId（不含 selectedSymbol，切股不变）
+  // 4. stableContextId（不含 selectedSymbol，不含 returnTo；切股不变）
+  // returnTo 含 selected=入口symbol，纳入会间接破坏不变性，故只由 origin+runId+cq 计算。
   const stableContextId = computeStableContextIdV2(
     origin,
     sourceRunIdRaw,
     canonicalQueryRaw,
-    returnTo ?? null,
   )
 
   return {

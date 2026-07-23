@@ -4,6 +4,12 @@
 
 ## 2026-07-23
 
+- CHANGE-20260723-005: DetailSourceContextV2 — 详情页来源列表同源同序合同 V2（行情来源失真 + 自选排序跳变根治）
+  - **根因修复**: V2 透传 sourceRunId + canonicalQuery（入口快照），useStockDetailActions 用固定 sourceRunId 调 useStrategyRunResults（禁止 fresh usePublishedRuns）
+  - **stableContextId 合同纠正**: computeStableContextIdV2 只由 origin + sourceRunId + canonicalQueryRaw 计算（不含 selectedSymbol/returnTo，切股不变）
+  - **mock-api 修复**: /market/boards 格式 {items,available,stale} + page.route `**/api/**` + sort_by/sort_desc 支持
+  - **测试**: detailSourceContextV2 24/24 + detailSourceLoadingContract 13/13 + marketWorkspaceUrlState 31/31 + change010Contract 53/53 + tsc/eslint clean
+
 - CHANGE-20260723-004: V3.3 部署前门禁 — Task 6 隔离视觉验收 SMC E2E fixture 增强
   - **fixture 升级**: `buildSmcIndicators` 从 index-based 旧格式升级为 CP-V3-C2 time-key 格式（anchor_time/confirmed_time/second_pivot_time）
   - **12 SMC 事件**: 3 BOS + 2 CHoCH + 3 OB + 2 EQH + 2 EQL，10 可见（满足 ≥10 要求）

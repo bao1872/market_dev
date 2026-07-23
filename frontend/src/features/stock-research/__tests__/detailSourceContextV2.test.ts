@@ -63,20 +63,22 @@ test('V2-1b: buildStockDetailUrl 不传 sourceRunId/cq 时不编码（direct 场
 
 // ===== 2. computeStableContextIdV2 不含 selectedSymbol =====
 
-test('V2-2: computeStableContextIdV2 不含 selectedSymbol（切股不变）', () => {
-  const id1 = computeStableContextIdV2('market', 'run-1', '{"universe":"all"}', '/market?scope=market')
-  const id2 = computeStableContextIdV2('market', 'run-1', '{"universe":"all"}', '/market?scope=market')
-  // 同一来源上下文 → 同一 stableContextId（函数本身不接 selectedSymbol，所以天然不变）
+test('V2-2: computeStableContextIdV2 不含 selectedSymbol 和 returnTo（切股不变）', () => {
+  const id1 = computeStableContextIdV2('market', 'run-1', '{"universe":"all"}')
+  const id2 = computeStableContextIdV2('market', 'run-1', '{"universe":"all"}')
+  // 同一来源上下文 → 同一 stableContextId
   assert.equal(id1, id2, '同一来源上下文 stableContextId 必须相等')
   // 不同 sourceRunId → 不同 stableContextId
-  const id3 = computeStableContextIdV2('market', 'run-2', '{"universe":"all"}', '/market?scope=market')
+  const id3 = computeStableContextIdV2('market', 'run-2', '{"universe":"all"}')
   assert.notEqual(id1, id3, '不同 sourceRunId stableContextId 必须不同')
   // 不同 canonicalQuery → 不同 stableContextId
-  const id4 = computeStableContextIdV2('market', 'run-1', '{"universe":"all","sort_by":"x"}', '/market?scope=market')
+  const id4 = computeStableContextIdV2('market', 'run-1', '{"universe":"all","sort_by":"x"}')
   assert.notEqual(id1, id4, '不同 canonicalQuery stableContextId 必须不同')
-  // 不同 returnTo → 不同 stableContextId
-  const id5 = computeStableContextIdV2('market', 'run-1', '{"universe":"all"}', '/market?scope=market&selected=600519')
-  assert.notEqual(id1, id5, '不同 returnTo stableContextId 必须不同')
+  // 不同 origin → 不同 stableContextId
+  const id5 = computeStableContextIdV2('watchlist', 'run-1', '{"universe":"all"}')
+  assert.notEqual(id1, id5, '不同 origin stableContextId 必须不同')
+  // 函数签名不含 returnTo，returnTo 不影响 stableContextId（合同：returnTo 仅用于返回导航）
+  // 此处无法传入 returnTo，天然保证不变性
 })
 
 // ===== 3. resolveDetailSourceContextV2 origin 解析优先级 =====
@@ -237,22 +239,23 @@ test('V2-4k: direct 即使有 sourceRunId/cq 也不失效（不校验）', () =>
 
 // ===== 5. stableContextId 切股不变性（端到端验证）=====
 
-test('V2-5: 切换股票时 stableContextId 不变（同一来源上下文）', () => {
+test('V2-5: 切换股票时 stableContextId 不变（同一来源上下文，不同入口 symbol）', () => {
   const cq: StrategyResultQuery = { universe: 'all', sort_by: 'change_pct', sort_desc: true }
   const cqRaw = JSON.stringify(cq)
-  // 入口时刻 returnTo（固定，切股时不重建）
-  const returnTo = '/market?scope=market&selected=600519'
-  // 从 /market 进入 600519，再切换到 000001：returnTo/sourceRunId/cq 不变 → stableContextId 不变
-  const ctx1 = resolveDetailSourceContextV2('market', returnTo, 'run-1', cqRaw)
-  const ctx2 = resolveDetailSourceContextV2('market', returnTo, 'run-1', cqRaw)
-  assert.equal(ctx1.stableContextId, ctx2.stableContextId, '同一来源上下文切股 stableContextId 必须不变')
-  // 关键不变性：computeStableContextIdV2 不接收 selectedSymbol 参数，
-  // 切换当前 :symbol 不影响 stableContextId（returnTo 固定为入口时刻快照）
-  const idFor600519 = computeStableContextIdV2('market', 'run-1', cqRaw, returnTo)
-  const idFor000001 = computeStableContextIdV2('market', 'run-1', cqRaw, returnTo)
-  assert.equal(idFor600519, idFor000001, 'computeStableContextIdV2 不含 selectedSymbol 参数，切股不变')
+  // 入口时刻 returnTo（含 selected=入口symbol，但 stableContextId 不含 returnTo）
+  const returnTo600519 = '/market?scope=market&selected=600519'
+  const returnTo000001 = '/market?scope=market&selected=000001'
+  // 从 /market 进入 600519，再切换到 000001：sourceRunId/cq 不变 → stableContextId 不变
+  // 即使 returnTo 不同（selected 不同），stableContextId 也不变（returnTo 不参与计算）
+  const ctx1 = resolveDetailSourceContextV2('market', returnTo600519, 'run-1', cqRaw)
+  const ctx2 = resolveDetailSourceContextV2('market', returnTo000001, 'run-1', cqRaw)
+  assert.equal(ctx1.stableContextId, ctx2.stableContextId, '不同入口 symbol（returnTo.selected 不同）stableContextId 必须不变')
+  // 关键不变性：computeStableContextIdV2 不接收 selectedSymbol 和 returnTo 参数
+  const idFor600519 = computeStableContextIdV2('market', 'run-1', cqRaw)
+  const idFor000001 = computeStableContextIdV2('market', 'run-1', cqRaw)
+  assert.equal(idFor600519, idFor000001, 'computeStableContextIdV2 不含 selectedSymbol/returnTo，切股不变')
   // 不同 sourceRunId → 不同 stableContextId（验证函数对真实变化敏感）
-  const idDiffRun = computeStableContextIdV2('market', 'run-2', cqRaw, returnTo)
+  const idDiffRun = computeStableContextIdV2('market', 'run-2', cqRaw)
   assert.notEqual(idFor600519, idDiffRun, '不同 sourceRunId 必须产生不同 stableContextId')
 })
 

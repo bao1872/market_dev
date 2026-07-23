@@ -97,20 +97,23 @@ export function buildStockDetailUrl(symbol: string, opts: BuildStockDetailUrlOpt
 }
 
 /**
- * [DetailSourceContextV2] 计算稳定 contextId（不含 selectedSymbol）。
+ * [DetailSourceContextV2] 计算稳定 contextId（不含 selectedSymbol，不含 returnTo）。
  *
- * 切换股票时 sourceRunId/canonicalQuery/returnTo 不变，故 stableContextId 不变。
+ * 来源列表身份 = origin + sourceRunId + canonicalQuery。
+ * 切换股票时这三者不变，故 stableContextId 不变。
  * 用于 React key 和左栏滚动位置 storage key，避免每次切股重置。
  *
- * 禁止：将 selectedSymbol 纳入 stableContextId（违反不变性）。
+ * 禁止：
+ *   - 将 selectedSymbol 纳入 stableContextId（违反不变性）。
+ *   - 将 returnTo 纳入 stableContextId（returnTo 含 selected=入口symbol，会间接纳入 symbol）。
+ *     returnTo 仅用于返回导航，不参与来源身份。
  */
 export function computeStableContextIdV2(
   origin: OriginScope,
   sourceRunId: string | null,
   canonicalQueryRaw: string | null,
-  returnTo: string | null,
 ): string {
-  return `${origin}|${sourceRunId ?? ''}|${canonicalQueryRaw ?? ''}|${returnTo ?? ''}`
+  return `${origin}|${sourceRunId ?? ''}|${canonicalQueryRaw ?? ''}`
 }
 
 /**
