@@ -27,7 +27,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -566,3 +566,200 @@ def test_frontend_no_quote_to_bar_synthesis() -> None:
     assert "mergeRealtimeQuoteIntoBars(" not in research_src.replace(
         "// 旧 mergeRealtimeQuoteIntoBars 已移除", ""
     ), "mergeRealtimeQuoteIntoBars 不应被调用（quote→bar 兜底已禁止）"
+
+
+# =============================================================================
+# Task 2: Fake Exchange adapter → 真实 MDAS → ChartSnapshotService
+# 区别于 fake_mdas（替换整个 MDAS 类跳过聚合），本 fixture mock 数据获取层，
+# 让真实 MarketDataAggregationService.get_bars 运行聚合逻辑
+# （_aggregate_minute_to_daily / _aggregate_minute_to_target / _merge_bars /
+#   compute_source_bar_hash），验证 Exchange→MDAS 聚合链。
+# =============================================================================
+@pytest.fixture
+def fake_exchange(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Fake Exchange → 真实 MDAS。
+
+    mock MDAS 模块数据获取层（DB query + pytdx fetch + calendar + cache），
+    fetch_minute_bars 为 Fake Exchange，T0/T1 切换实时 1m。
+    """
+    from app.services import market_data_aggregation_service as mdas_mod
+    from app.services.market_status_service import MARKET_SESSION_MORNING
+
+    now = datetime.now()
+    today = now.date()
+
+    # 历史日线基线（250 根，末根昨日，不含今日）
+    daily_baseline = _build_daily_bars(250, seed=42)
+    daily_baseline.index = pd.date_range(
+        end=today - timedelta(days=1), periods=250, freq="B"
+    )
+    daily_baseline.index.name = "trade_date"
+
+    m15_baseline = _build_15m_bars(4000, seed=43)
+    h1_baseline = _build_1h_bars(260, seed=44)
+
+    # Fake Exchange 实时 1m（今日 9:30/9:31/9:32，naive datetime 与 baseline 一致）
+    # T0 返回 2 根 [9:30, 9:31]，T1 返回 3 根 [9:30, 9:31, 9:32]
+    # 1d 路径剔除最后根未完成 1m：T0=[9:30]，T1=[9:30,9:31] → partial daily 变化
+    # intraday 路径不剔除：T0=[9:30,9:31]，T1=[9:30,9:31,9:32] → partial 变化
+    _ohlc = [
+        (9.95, 10.1, 9.9, 10.0, 1000.0),   # 9:30
+        (10.0, 10.3, 10.0, 10.2, 1500.0),  # 9:31
+        (10.2, 10.2, 10.0, 10.1, 800.0),   # 9:32 (T1 末根，1d 剔除)
+    ]
+
+    def _make_live_1m(tick: int) -> pd.DataFrame:
+        n = 2 + tick  # T0=2, T1=3
+        base = pd.Timestamp(f"{today.isoformat()} 09:30:00")
+        times = [base + pd.Timedelta(minutes=i) for i in range(n)]
+        rows = []
+        for i in range(n):
+            o, h, low, c, v = _ohlc[i]
+            rows.append({
+                "open": o, "high": h, "low": low, "close": c,
+                "volume": v, "amount": v * 10, "adj_factor": 1.0,
+            })
+        return pd.DataFrame(rows, index=pd.DatetimeIndex(times, name="datetime"))
+
+    state = {"tick": 0}
+
+    async def _fake_fetch_minute_bars(session, instrument_id, start, end):
+        return _make_live_1m(state["tick"])
+
+    async def _fake_query_daily_bars(session, instrument_id, start, end):
+        return daily_baseline.copy()
+
+    async def _fake_fetch_intraday(
+        session, instrument_id, timeframe, initial_start, end,
+        query_fn, *, required_count=None, listing_date=None,
+    ):
+        if timeframe == "15m":
+            return m15_baseline.copy(), 1, True, "mock_baseline"
+        if timeframe == "1h":
+            return h1_baseline.copy(), 1, True, "mock_baseline"
+        return pd.DataFrame(), 1, True, "mock_baseline"
+
+    async def _fake_fetch_daily_bars(session, instrument_id, start, end):
+        return pd.DataFrame()
+
+    async def _fake_expected_last_completed(session, now_):
+        return daily_baseline.index[-1].date()
+
+    async def _fake_is_trading_day(session, d):
+        return True
+
+    async def _fake_get_listing_date(session, instrument_id):
+        return today - timedelta(days=365 * 5)
+
+    def _fake_is_trading_hours(now_=None):
+        return True
+
+    def _fake_cache_get(key):
+        return None
+
+    def _fake_cache_set(key, result):
+        pass
+
+    monkeypatch.setattr(mdas_mod, "_query_daily_bars", _fake_query_daily_bars)
+    monkeypatch.setattr(mdas_mod, "_fetch_intraday_with_backfill", _fake_fetch_intraday)
+    monkeypatch.setattr(mdas_mod, "fetch_minute_bars", _fake_fetch_minute_bars)
+    monkeypatch.setattr(mdas_mod, "fetch_daily_bars", _fake_fetch_daily_bars)
+    monkeypatch.setattr(mdas_mod, "_call_expected_last_completed_daily_bar", _fake_expected_last_completed)
+    monkeypatch.setattr(mdas_mod, "is_trading_day_async", _fake_is_trading_day)
+    monkeypatch.setattr(mdas_mod, "_get_listing_date", _fake_get_listing_date)
+    monkeypatch.setattr(mdas_mod, "_is_trading_hours", _fake_is_trading_hours)
+    monkeypatch.setattr(mdas_mod, "_cache_get", _fake_cache_get)
+    monkeypatch.setattr(mdas_mod, "_cache_set", _fake_cache_set)
+    monkeypatch.setattr(
+        mdas_mod, "compute_market_session", lambda now_, is_td: MARKET_SESSION_MORNING
+    )
+
+    def _advance_tick():
+        state["tick"] = 1
+
+    return {"advance_tick": _advance_tick, "state": state}
+
+
+@pytest.mark.asyncio
+async def test_realtime_via_real_mdas_fake_exchange(
+    mock_session: AsyncMock,
+    empty_registry: None,
+    mock_canonical_non_node: None,
+    spy_node_cluster: dict,
+    fake_exchange: dict,
+) -> None:
+    """Fake Exchange → 真实 MDAS → ChartSnapshotService：1d/15m/1h T0/T1。
+
+    验证真实 MDAS 聚合（非 FakeMDAS 替换）：
+    - T1 实时 1m 推进 → MDAS partial bar 末根 high/low/close/volume 变化
+    - is_partial=true
+    - ChartSnapshot bars 使用该 MDAS 结果（末根 close 一致）
+    - source_bar_hash T1≠T0（真实 MDAS 计算）
+    """
+    from app.services.market_data_aggregation_service import MarketDataAggregationService
+
+    mdas = MarketDataAggregationService()
+
+    for timeframe in ("1d", "15m", "1h"):
+        # --- T0 ---
+        fake_exchange["state"]["tick"] = 0
+        result_t0 = await mdas.get_bars(
+            session=mock_session,
+            instrument_id=TEST_INSTRUMENT,
+            timeframe=timeframe,
+            adj="none",
+            include_realtime=True,
+            completed_only=False,
+            limit=120,
+        )
+        assert result_t0.is_partial is True, (
+            f"[{timeframe}] T0 is_partial 应为 True（真实 MDAS 聚合 partial）"
+        )
+        t0_last = result_t0.bars.iloc[-1]
+
+        # --- T1：实时 1m 推进 ---
+        fake_exchange["state"]["tick"] = 1
+        result_t1 = await mdas.get_bars(
+            session=mock_session,
+            instrument_id=TEST_INSTRUMENT,
+            timeframe=timeframe,
+            adj="none",
+            include_realtime=True,
+            completed_only=False,
+            limit=120,
+        )
+        assert result_t1.is_partial is True, f"[{timeframe}] T1 is_partial 应为 True"
+        t1_last = result_t1.bars.iloc[-1]
+
+        # T1 partial bar 末根 close/volume 与 T0 不同（MDAS 聚合 1m 变化）
+        assert float(t1_last["close"]) != float(t0_last["close"]), (
+            f"[{timeframe}] T1 close 应变化: T0={t0_last['close']}, T1={t1_last['close']}"
+        )
+        assert float(t1_last["volume"]) != float(t0_last["volume"]), (
+            f"[{timeframe}] T1 volume 应变化: T0={t0_last['volume']}, T1={t1_last['volume']}"
+        )
+
+        # source_bar_hash 非空且 T1≠T0（真实 MDAS compute_source_bar_hash）
+        assert result_t0.source_bar_hash, f"[{timeframe}] T0 source_bar_hash 非空"
+        assert result_t1.source_bar_hash != result_t0.source_bar_hash, (
+            f"[{timeframe}] T1 hash 应不同于 T0（真实 MDAS 重新计算）"
+        )
+
+        # --- ChartSnapshotService 使用该 MDAS 结果 ---
+        fake_exchange["state"]["tick"] = 0
+        snap_t0 = await ChartSnapshotService.compute_bars_and_indicators(
+            session=mock_session,
+            instrument_id=TEST_INSTRUMENT,
+            timeframe=timeframe,
+            adj="none",
+            bars=120,
+            include_smc=False,
+            include_realtime=True,
+            completed_only=False,
+        )
+        # ChartSnapshot bars 末根 == MDAS T0 末根（使用 MDAS 结果，非独立获取）
+        snap_last = snap_t0.page_df.iloc[-1]
+        assert float(snap_last["close"]) == float(t0_last["close"]), (
+            f"[{timeframe}] ChartSnapshot 末根 close 应等于 MDAS T0（使用 MDAS 结果）"
+        )
+        assert snap_t0.bars_result.is_partial is True
