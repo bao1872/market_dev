@@ -64,7 +64,7 @@ test('2. 必需资源存在', () => {
     'assets/data/factors.public.js',
     'assets/data/factors.public.json',
     'assets/images/logo_symbol_128.png',
-    'assets/images/wechat-qr.jpg',
+    'assets/images/wechat-qr.png',
     'content/site.json',
     'SOURCE.md',
   ]
@@ -77,15 +77,19 @@ test('2b. 真实微信二维码已替换占位图', () => {
   // 旧占位图应已删除
   assert.ok(!existsSync(join(PORTAL_DIR, 'assets/images/wechat-qr-placeholder.svg')),
     'wechat-qr-placeholder.svg 应已删除（被真实二维码替换）')
+  // 旧 jpg 二维码应已删除（被 png 替换）
+  assert.ok(!existsSync(join(PORTAL_DIR, 'assets/images/wechat-qr.jpg')),
+    'wechat-qr.jpg 应已删除（被 wechat-qr.png 替换）')
   // 真实二维码存在且非空
-  const qrPath = join(PORTAL_DIR, 'assets/images/wechat-qr.jpg')
-  assert.ok(existsSync(qrPath), 'wechat-qr.jpg 应存在')
+  const qrPath = join(PORTAL_DIR, 'assets/images/wechat-qr.png')
+  assert.ok(existsSync(qrPath), 'wechat-qr.png 应存在')
   const stat = readFileSync(qrPath)
-  assert.ok(stat.length > 1000, 'wechat-qr.jpg 应为非空真实图片')
-  // 所有 HTML 引用应指向 wechat-qr.jpg，不残留占位图
+  assert.ok(stat.length > 1000, 'wechat-qr.png 应为非空真实图片')
+  // 所有 HTML 引用应指向 wechat-qr.png，不残留旧引用
   for (const f of HTML_FILES) {
     const html = readText(f)
     assert.ok(!/wechat-qr-placeholder\.svg/.test(html), `${f} 仍引用占位图 wechat-qr-placeholder.svg`)
+    assert.ok(!/wechat-qr\.jpg/.test(html), `${f} 仍引用旧 wechat-qr.jpg`)
     assert.ok(!/管理员微信二维码占位图/.test(html), `${f} 仍使用占位图 alt 文案`)
   }
 })
