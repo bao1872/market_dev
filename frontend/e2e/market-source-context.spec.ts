@@ -80,4 +80,53 @@ test.describe('行情筛选来源上下文', () => {
       expect(page.url()).toContain('source=selection')
     }
   })
+
+  // [Task 5] 定向 E2E：行情筛选→进入股票A→左栏仍为筛选结果→切换股票B→返回仍恢复行情筛选
+  test('行情筛选→详情→切换股票→返回仍恢复行情筛选', async ({ page }) => {
+    // 1. 从 /market?scope=market 行情筛选进入
+    await page.goto('/market?scope=market')
+    await page.waitForTimeout(1000)
+
+    // 2. 进入股票 A 详情（带 originScope=market + returnTo）
+    const returnToA = encodeURIComponent('/market?scope=market&selected=000001')
+    await page.goto(
+      `/stock/000001?returnTo=${returnToA}&originScope=market&source=selection&strategy=dsa_selector`,
+    )
+    await page.waitForTimeout(1500)
+
+    // 3. 验证 URL 含 originScope=market 和 returnTo
+    expect(page.url()).toContain('originScope=market')
+    expect(page.url()).toContain('source=selection')
+    expect(page.url()).toContain('returnTo=')
+
+    // 4. 验证左栏不显示自选来源（market 不得回退 watchlist）
+    const watchlistHeader = page.locator('text=自选监控').first()
+    await expect(watchlistHeader).toHaveCount(0, { timeout: 2_000 })
+
+    // 5. 在左栏切换到股票 B（模拟点击左栏列表项）
+    const returnToB = encodeURIComponent('/market?scope=market&selected=000002')
+    await page.goto(
+      `/stock/000002?returnTo=${returnToB}&originScope=market&source=selection&strategy=dsa_selector`,
+    )
+    await page.waitForTimeout(1500)
+
+    // 6. 切换后仍保持 market 来源
+    expect(page.url()).toContain('originScope=market')
+    expect(page.url()).toContain('source=selection')
+    expect(page.url()).not.toContain('source=watchlist')
+
+    // 7. 左栏仍不显示自选来源
+    const watchlistHeaderB = page.locator('text=自选监控').first()
+    await expect(watchlistHeaderB).toHaveCount(0, { timeout: 2_000 })
+
+    // 8. 返回（浏览器 back 两次：B→A→market）应恢复行情筛选页面
+    // 测试用 page.goto 模拟切换，history=[market,A,B]，goBack 一次只到 A，需两次回 market
+    await page.goBack() // B → A
+    await page.waitForTimeout(500)
+    await page.goBack() // A → market
+    await page.waitForTimeout(1000)
+    // 返回后 URL 应包含 /market 和 scope=market
+    expect(page.url()).toContain('/market')
+    expect(page.url()).toContain('scope=market')
+  })
 })

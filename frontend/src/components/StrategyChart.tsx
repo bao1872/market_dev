@@ -159,6 +159,35 @@ export interface StrategyChartProps {
   indicatorsFetching?: boolean
   // 点击"重试"按钮回调（父组件调用 indicatorsQuery.refetch）
   onIndicatorsRetry?: () => void
+  // [Task 2] focus_event：监控触发事件信息（飞书 Capture 链路）
+  //   传入时 StrategyChart 突出本次触发事件（高亮 + 完整不透明度 + 标签），
+  //   淡化其他历史结构（半透明 / 不绘制标签）。
+  //   - focusEventId: 事件 ID（用于匹配 SMC 结构 entity_id）
+  //   - focusEventType: 事件类型（smc_bos_retest / smc_choch_retest / smc_equal_highs_retest /
+  //     smc_equal_lows_retest / smc_order_block_first_touch）
+  //   - focusEventInfo: 完整事件信息（anchor_time/confirmed_time/level/bar_high/bar_low 等）
+  focusEventId?: string | null
+  focusEventType?: string | null
+  focusEventInfo?: FocusEventInfo | null
+}
+
+// [Task 2] focus_event 完整字段（与后端 monitor_batch_service.focus_event_info 对齐）
+//   - BOS/CHoCH 匹配：anchor_time + level + bias + internal
+//   - EQH/EQL 匹配：anchor_time + eqhl_type + second_pivot_time
+//   - OB 匹配：bar_high + bar_low + bias
+interface FocusEventInfo {
+  focus_event_id: string
+  focus_event_type: string | null
+  anchor_time: string | null
+  confirmed_time: string | null
+  level: string | null
+  bar_high: string | null
+  bar_low: string | null
+  bias: string | null
+  internal: string | null
+  bullish: string | null
+  eqhl_type: string | null
+  second_pivot_time: string | null
 }
 
 // 计算后的 Bar（含指标字段）
@@ -814,6 +843,8 @@ function renderBreakout(
 //   不再用 values.length - barsCount 尾部截取，避免 K 线与指标错位
 // [CHANGE-20260719-003 §四] indexMap 参数：由 drawTrading 顶部构建并传入（time-index map 共享），
 //   避免每个 render 函数重复构建 O(n) Map；未传入时各 render 内部回退到 buildDisplayIndexMap。
+// [Task 2] focusEventId/focusEventType/focusEventInfo：透传到 renderIndicatorSmc，
+//   突出本次触发事件，淡化其他历史结构
 function renderIndicatorLayer(
   ctx: CanvasRenderingContext2D,
   g: Geometry,
@@ -826,6 +857,9 @@ function renderIndicatorLayer(
   timeframe: string,
   indexMap: (number | undefined)[],
   scale: ChartRenderScale,
+  focusEventId: string | null = null,
+  focusEventType: string | null = null,
+  focusEventInfo: FocusEventInfo | null = null,
 ): void {
   switch (layer.renderer) {
     case 'line':
@@ -850,7 +884,9 @@ function renderIndicatorLayer(
     // [CHANGE-011 SMC] - 智能资金概念图层渲染（BOS/CHoCH/OB/EQH/EQL/trailing）
     case 'smc':
       // renderIndicatorSmc 用 klineTimeIndex（displayTimes → display index）反向映射，不消费 indexMap
-      renderIndicatorSmc(ctx, g, layer, data, displayTimes, step, py, timeframe, scale)
+      // [Task 2] 透传 focus_event 给 renderIndicatorSmc，突出本次触发事件，淡化其他历史结构
+      renderIndicatorSmc(ctx, g, layer, data, displayTimes, step, py, timeframe, scale,
+        focusEventId, focusEventType, focusEventInfo)
       break
   }
 }
@@ -1629,6 +1665,10 @@ function renderIndicatorSmc(
   py: (v: number) => number,
   timeframe: string,
   scale: ChartRenderScale,
+  // [Task 2] focus_event：突出本次触发事件，淡化其他历史结构
+  focusEventId: string | null = null,
+  _focusEventType: string | null = null,
+  focusEventInfo: FocusEventInfo | null = null,
 ): void {
   // [CHANGE-011 SMC] - 数据字段为对象数组（非基本类型数组），按 any 取值后 cast 到内部类型
   // FVG 完全排除：本函数不渲染任何 Fair Value Gap 元素
@@ -1766,6 +1806,79 @@ function renderIndicatorSmc(
   const labelAnchors: SmcLabelAnchor[] = []
   const isMobileCapture = scale.density === 'mobile_capture'
 
+  // [Task 2] focus_event 匹配：突出本次触发事件，淡化其他历史结构
+  //   - hasFocus: 是否启用 focus 模式（focusEventId 非空时启用）
+  //   - 匹配策略：
+  //     · BOS/CHoCH: anchor_time（normalizeChartTime 后比较）+ level（parseFloat 后比较，容差 1e-6）
+  //     · EQH/EQL:   anchor_time + second_pivot_time
+  //     · OB:        bar_high + bar_low（parseFloat 后比较，容差 1e-6）
+  //   - focus 模式下：focus 结构 alpha=1.0 + lineWidth×1.3；非 focus 结构 alpha×0.25 + 不绘制标签
+  const hasFocus = focusEventId != null && focusEventInfo != null
+  const focusAnchorKey = hasFocus
+    ? normalizeChartTime(focusEventInfo!.anchor_time, timeframe)
+    : null
+  const focusSecondPivotKey = hasFocus
+    ? normalizeChartTime(focusEventInfo!.second_pivot_time, timeframe)
+    : null
+  const focusLevelNum = hasFocus && focusEventInfo!.level != null
+    ? parseFloat(focusEventInfo!.level)
+    : null
+  const focusBarHighNum = hasFocus && focusEventInfo!.bar_high != null
+    ? parseFloat(focusEventInfo!.bar_high)
+    : null
+  const focusBarLowNum = hasFocus && focusEventInfo!.bar_low != null
+    ? parseFloat(focusEventInfo!.bar_low)
+    : null
+  const focusIsBosChoch = hasFocus
+    && (focusEventInfo!.focus_event_type === 'smc_bos_retest'
+      || focusEventInfo!.focus_event_type === 'smc_choch_retest')
+  const focusIsEqhl = hasFocus
+    && (focusEventInfo!.focus_event_type === 'smc_equal_highs_retest'
+      || focusEventInfo!.focus_event_type === 'smc_equal_lows_retest')
+  const focusIsOb = hasFocus
+    && focusEventInfo!.focus_event_type === 'smc_order_block_first_touch'
+
+  const isFocusBosChoch = (ev: SmcEvent): boolean => {
+    if (!focusIsBosChoch || focusAnchorKey == null) return false
+    const evAnchorKey = normalizeChartTime(ev.anchor_time, timeframe)
+    if (evAnchorKey == null || evAnchorKey !== focusAnchorKey) return false
+    // level 匹配（容差 1e-6）
+    if (focusLevelNum != null && ev.level != null) {
+      return Math.abs(ev.level - focusLevelNum) < 1e-6
+    }
+    // level 缺失时仅用 anchor_time 匹配（保守起见仍判为 focus）
+    return focusLevelNum == null
+  }
+  const isFocusEq = (eq: SmcEqualHighLow): boolean => {
+    if (!focusIsEqhl || focusAnchorKey == null) return false
+    const eqAnchorKey = normalizeChartTime(eq.anchor_time, timeframe)
+    if (eqAnchorKey == null || eqAnchorKey !== focusAnchorKey) return false
+    // second_pivot_time 匹配（若 focus 提供）
+    if (focusSecondPivotKey != null) {
+      const eqSecondKey = normalizeChartTime(eq.second_pivot_time, timeframe)
+      return eqSecondKey != null && eqSecondKey === focusSecondPivotKey
+    }
+    return true
+  }
+  const isFocusOb = (ob: SmcOrderBlock): boolean => {
+    if (!focusIsOb) return false
+    // OB 用 bar_high + bar_low 匹配（容差 1e-6）
+    if (focusBarHighNum == null || focusBarLowNum == null) return false
+    return Math.abs(ob.bar_high - focusBarHighNum) < 1e-6
+      && Math.abs(ob.bar_low - focusBarLowNum) < 1e-6
+  }
+
+  // [Task 2] 价格图层 clip：SMC 结构（BOS/CHoCH 线、OB 矩形、EQH/EQL 线、trailing 线）
+  //   必须裁剪在价格 pane 内，禁止进入 VOL pane。
+  //   g.panes.price.top/bottom 是价格 pane 的像素边界。
+  //   标签绘制不 clip（标签可能需要 lane 错位到价格 pane 上方/下方）。
+  if (g.panes?.price) {
+    ctx.save()
+    ctx.beginPath()
+    ctx.rect(g.l, g.panes.price.top, g.plotRight - g.l, g.panes.price.bottom - g.panes.price.top)
+    ctx.clip()
+  }
+
   // ===== 1. 渲染 Order Blocks（低透明度矩形区域）=====
   // [CHANGE-20260715-008] OB 选择逻辑抽离至 selectVisibleSmcOrderBlocks（可独立测试）
   // 规则（PROMPT.md §四.2）：
@@ -1794,22 +1907,33 @@ function renderIndicatorSmc(
     const yTop = Math.min(yHigh, yLow)
     const height = Math.max(2, Math.abs(yHigh - yLow))
 
+    // [Task 2] focus 突出/淡化：focus OB 完整不透明度 + 更粗边框；
+    //   非 focus OB 在 focus 模式下 alpha×0.25（明显淡化）
+    const obIsFocus = isFocusOb(ob)
+    const obAlphaMul = hasFocus ? (obIsFocus ? 1.0 : 0.25) : 1.0
+    const obFillAlpha = 0.12 * obAlphaMul
+    const obBorderAlpha = 0.3 * obAlphaMul
+    const obBorderWidth = obIsFocus ? scale.strokes.obBorder * 1.5 : scale.strokes.obBorder
+
     // 颜色与透明度（仅未 mitigated OB，alpha 0.12）
     const isBull = ob.bias === 1
     const color = isBull ? SMC_BULL_COLOR : SMC_BEAR_COLOR
-    ctx.fillStyle = hexToRgba(color, 0.12)
+    ctx.fillStyle = hexToRgba(color, obFillAlpha)
     ctx.fillRect(x1, yTop, Math.max(1, x2 - x1), height)
 
     // OB 边框（更淡）
-    ctx.strokeStyle = hexToRgba(color, 0.3)
+    ctx.strokeStyle = hexToRgba(color, obBorderAlpha)
     // [PROMPT.md §5.3.4 V2] OB 边框线宽按 scale.strokes.obBorder（mobile_capture 2px）
-    ctx.lineWidth = scale.strokes.obBorder
+    ctx.lineWidth = obBorderWidth
     ctx.strokeRect(x1, yTop, Math.max(1, x2 - x1), height)
 
     // [2026-07-21 反馈] OB 区域内加中文文字标签（多头承接区/空头压制区）
     //   [P0 碰撞布局] mobile_capture 下收集锚点，由 layoutSmcLabels 统一布局
     //   desktop 模式不渲染 OB 文字标签（区域太窄）
-    if (isMobileCapture && height > 40 && (x2 - x1) > 80) {
+    //   [Task 2] focus 模式下：非 focus OB 不绘制标签（避免历史结构干扰本次触发事件）
+    const drawObLabel = isMobileCapture && height > 40 && (x2 - x1) > 80
+      && (!hasFocus || obIsFocus)
+    if (drawObLabel) {
       const obLabel = getSmcObLabel(ob.bias)
       const obLabelY = yTop + height / 2
       labelAnchors.push({
@@ -1850,14 +1974,21 @@ function renderIndicatorSmc(
     const x2 = g.l + (range.endIdx + 0.5) * step
     const y = py(ev.level)
 
+    // [Task 2] focus 突出/淡化：focus BOS/CHoCH 完整不透明度 + 更粗线宽；
+    //   非 focus 事件在 focus 模式下 alpha×0.25（明显淡化），不绘制标签
+    const evIsFocus = isFocusBosChoch(ev)
+    const evAlphaMul = hasFocus ? (evIsFocus ? 1.0 : 0.25) : 1.0
+
     const isBull = ev.bias === 1
     const baseColor = isBull ? SMC_BULL_COLOR : SMC_BEAR_COLOR
     const isInternal = ev.internal === true
-    const alpha = isInternal ? 0.7 : 1.0
+    const baseAlpha = (isInternal ? 0.7 : 1.0) * evAlphaMul
     // [PROMPT.md §5.3.4 V2] SMC internal 线宽按 scale.strokes.smcInternal（mobile_capture 2px），
     //   swing 线宽按 scale.strokes.smcSwing（mobile_capture 3px）
-    const lineWidth = isInternal ? scale.strokes.smcInternal : scale.strokes.smcSwing
-    const color = hexToRgba(baseColor, alpha)
+    //   [Task 2] focus 事件线宽×1.3 突出
+    const baseLineWidth = isInternal ? scale.strokes.smcInternal : scale.strokes.smcSwing
+    const lineWidth = evIsFocus ? baseLineWidth * 1.3 : baseLineWidth
+    const color = hexToRgba(baseColor, baseAlpha)
 
     // CHANGE-20260715-002: internal=虚线，swing=实线（不再按 BOS/CHoCH 区分线型）
     if (isInternal) {
@@ -1871,20 +2002,23 @@ function renderIndicatorSmc(
     // [CHANGE-20260716-001] 标签不加 ·I，与 TV 文字一致
     // [2026-07-21 反馈] 标签改用中文通俗名词（突破前高/跌破前低/转强拐点/转弱拐点）
     // [P0 碰撞布局] 收集锚点，由 layoutSmcLabels（mobile_capture）或自然位置（desktop）统一绘制
-    const midX = (x1 + x2) / 2
-    const label = getSmcEventLabel(ev.type, ev.bias)
-    const fontSize = isInternal ? scale.fonts.smcInternalLabel : scale.fonts.smcSwingLabel
-    const labelOffset = Math.round(parseFloat(fontSize) * 0.3)
-    labelAnchors.push({
-      kind: ev.type === 'BOS' ? 'bos' : 'choch',
-      anchorX: midX,
-      anchorY: y - labelOffset,
-      text: label,
-      color,
-      fontSize,
-      align: 'center',
-      preferredVertical: 'up',
-    })
+    // [Task 2] focus 模式下：非 focus 事件不绘制标签（避免历史结构干扰本次触发事件）
+    if (!hasFocus || evIsFocus) {
+      const midX = (x1 + x2) / 2
+      const label = getSmcEventLabel(ev.type, ev.bias)
+      const fontSize = isInternal ? scale.fonts.smcInternalLabel : scale.fonts.smcSwingLabel
+      const labelOffset = Math.round(parseFloat(fontSize) * 0.3)
+      labelAnchors.push({
+        kind: ev.type === 'BOS' ? 'bos' : 'choch',
+        anchorX: midX,
+        anchorY: y - labelOffset,
+        text: label,
+        color,
+        fontSize,
+        align: 'center',
+        preferredVertical: 'up',
+      })
+    }
   }
 
   // ===== 3. 渲染 EQH/EQL（两端点线，非水平线）=====
@@ -1910,31 +2044,41 @@ function renderIndicatorSmc(
     const y1 = py(eq.prev_level)
     const y2 = py(eq.level)
 
+    // [Task 2] focus 突出/淡化：focus EQH/EQL 完整不透明度 + 更粗线宽；
+    //   非 focus EQ 在 focus 模式下 alpha×0.25（明显淡化），不绘制标签
+    const eqIsFocus = isFocusEq(eq)
+    const eqAlphaMul = hasFocus ? (eqIsFocus ? 1.0 : 0.25) : 1.0
+    const eqLineWidth = eqIsFocus ? scale.strokes.eqLine * 1.3 : scale.strokes.eqLine
+
     const isEQH = eq.type === 'EQH'
     // Pine L384/L389: EQH=swingBearishColor, EQL=swingBullishColor
-    const eqColor = isEQH ? SMC_BEAR_COLOR : SMC_BULL_COLOR
+    const eqBaseColor = isEQH ? SMC_BEAR_COLOR : SMC_BULL_COLOR
+    const eqColor = hexToRgba(eqBaseColor, eqAlphaMul)
 
-    drawLine(ctx, x1, y1, x2, y2, eqColor, scale.strokes.eqLine, [2, 2])
+    drawLine(ctx, x1, y1, x2, y2, eqColor, eqLineWidth, [2, 2])
 
     // 标签位于两 pivot 中点（Pine L397）
     // [2026-07-21 反馈] 标签改用中文通俗名词（双顶压力/双底支撑）
     // [P0 碰撞布局] 收集锚点，由 layoutSmcLabels（mobile_capture）或自然位置（desktop）统一绘制
-    const midX = (x1 + x2) / 2
-    const midY = (y1 + y2) / 2
-    // EQH: label_down（标签在上方）；EQL: label_up（标签在下方）
-    // [PROMPT.md §5.3.4 V2] EQ 标签字号按 scale.fonts.eqLabel（mobile_capture 34px）
-    const _eqSize = parseFloat(scale.fonts.eqLabel)
-    const labelYOffset = isEQH ? -Math.round(_eqSize * 0.3) : Math.round(_eqSize * 0.9)
-    labelAnchors.push({
-      kind: isEQH ? 'eqh' : 'eql',
-      anchorX: midX,
-      anchorY: midY + labelYOffset,
-      text: getSmcEqLabel(eq.type),
-      color: eqColor,
-      fontSize: scale.fonts.eqLabel,
-      align: 'center',
-      preferredVertical: isEQH ? 'up' : 'down',
-    })
+    // [Task 2] focus 模式下：非 focus EQ 不绘制标签
+    if (!hasFocus || eqIsFocus) {
+      const midX = (x1 + x2) / 2
+      const midY = (y1 + y2) / 2
+      // EQH: label_down（标签在上方）；EQL: label_up（标签在下方）
+      // [PROMPT.md §5.3.4 V2] EQ 标签字号按 scale.fonts.eqLabel（mobile_capture 34px）
+      const _eqSize = parseFloat(scale.fonts.eqLabel)
+      const labelYOffset = isEQH ? -Math.round(_eqSize * 0.3) : Math.round(_eqSize * 0.9)
+      labelAnchors.push({
+        kind: isEQH ? 'eqh' : 'eql',
+        anchorX: midX,
+        anchorY: midY + labelYOffset,
+        text: getSmcEqLabel(eq.type),
+        color: eqColor,
+        fontSize: scale.fonts.eqLabel,
+        align: 'center',
+        preferredVertical: isEQH ? 'up' : 'down',
+      })
+    }
   }
 
   // ===== 4. 渲染 trailing strong/weak high/low =====
@@ -2006,15 +2150,26 @@ function renderIndicatorSmc(
     })
   }
 
+  // [Task 2] 结束价格图层 clip：SMC 结构（BOS/CHoCH 线、OB 矩形、EQH/EQL 线、trailing 线）
+  //   已全部绘制完成，恢复 ctx 状态。标签绘制不 clip（标签可能需要 lane 错位到价格 pane 上方/下方）。
+  if (g.panes?.price) {
+    ctx.restore()
+  }
+
   // ===== 5. 绘制所有 SMC 标签 =====
   // [P0 碰撞布局] mobile_capture: 用 layoutSmcLabels 防重叠 + 短引导线
   //   desktop: 自然位置绘制（250 bar 窗口下碰撞罕见，保持原行为）
+  //   [Task 2] focus 模式下：desktop 也使用 layoutSmcLabels（Capture 场景标签少，碰撞布局更稳）
   if (labelAnchors.length === 0) return
 
-  if (isMobileCapture) {
-    // mobile_capture: 碰撞布局 + 引导线
+  const useCollisionLayout = isMobileCapture || hasFocus
+
+  if (useCollisionLayout) {
+    // mobile_capture 或 focus 模式: 碰撞布局 + 引导线
     // [P0 fix] Geometry 接口无 t/b，主图 pane 边界通过 g.panes.price.top/bottom 获取
     //   [P0 fix] scale 无 fontFamily，fontSize 字段已是完整 CSS font 字符串（如 "36px sans-serif"）
+    //   [Task 2] focus 模式下（Capture 场景）也启用碰撞布局，确保标签不重叠 +
+    //   每个标签通过 leader line 指向准确 K 线和价格
     const fontSizeNum = parseFloat(scale.fonts.smcSwingLabel)
     const laneHeight = fontSizeNum + 4
     const laidOut = layoutSmcLabels(
@@ -2066,7 +2221,7 @@ function renderIndicatorSmc(
       drawText(ctx, label.anchor.text, tx, ty, label.anchor.color, label.anchor.fontSize, align)
     }
   } else {
-    // desktop: 自然位置绘制（无碰撞布局，无引导线）
+    // desktop 非 focus 模式: 自然位置绘制（无碰撞布局，无引导线）
     for (const anchor of labelAnchors) {
       drawText(ctx, anchor.text, anchor.anchorX, anchor.anchorY, anchor.color, anchor.fontSize, anchor.align)
     }
@@ -2171,6 +2326,10 @@ function drawTrading(
   timeframe: string,
   state: ChartState,
   indicators?: IndicatorResponse | undefined,
+  // [Task 2] focus_event 透传到 renderIndicatorLayer → renderIndicatorSmc
+  focusEventId: string | null = null,
+  focusEventType: string | null = null,
+  focusEventInfo: FocusEventInfo | null = null,
 ): void {
   if (!display.length) return
   const { ctx, w, h } = fit(canvas)
@@ -2420,7 +2579,9 @@ function drawTrading(
       if (layerData) {
         // [CHANGE-20260719-003 §四] 复用纵轴候选阶段构建的 indexMap（time-index map 共享）
         const sharedIndexMap = layerIndexMaps.get(layer.strategy_id)
-        renderIndicatorLayer(ctx, g, layer, layerData, display.length, step, py, displayTimes, timeframe, sharedIndexMap ?? [], scale)
+        // [Task 2] 透传 focus_event 给 renderIndicatorLayer → renderIndicatorSmc
+        renderIndicatorLayer(ctx, g, layer, layerData, display.length, step, py, displayTimes, timeframe, sharedIndexMap ?? [], scale,
+          focusEventId, focusEventType, focusEventInfo)
       }
     })
   }
@@ -2589,6 +2750,9 @@ export function StrategyChart({
   barsFrame,
   indicatorsFetching = false,
   onIndicatorsRetry,
+  focusEventId = null,
+  focusEventType = null,
+  focusEventInfo = null,
 }: StrategyChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -2616,7 +2780,8 @@ export function StrategyChart({
     events: [],
     hoverProfileIndex: null,
     selectedNodeId: null,
-    focusEventId: null,
+    // [Task 2] 初始化 focusEventId 为 prop 传入值（飞书 Capture 链路）
+    focusEventId: focusEventId,
     profileHit: [],
     eventHit: [],
     dsaSourceMismatch: false,
@@ -2775,8 +2940,9 @@ export function StrategyChart({
       }
     }
     stateRef.current.frameMismatch = mismatch
-    drawTrading(canvas, c, d, ev, ly, tf, stateRef.current, effectiveIndicators)
-  }, [])
+    drawTrading(canvas, c, d, ev, ly, tf, stateRef.current, effectiveIndicators,
+      focusEventId, focusEventType, focusEventInfo)
+  }, [focusEventId, focusEventType, focusEventInfo, scale])
 
   // 数据/图层变化时重绘
   useEffect(() => {
