@@ -8,7 +8,7 @@
 - base: `origin/main@9ba3fa8` (ab87c61 的后继)
 - Phase 4 HEAD: `a0a11d8`
 - Phase 5 HEAD: `db61601`
-- Phase 6 HEAD: 待 commit（working tree 有 Phase 6 修正）
+- Phase 6 HEAD: `212c88a`
 
 ## 已完成 Phase 及 commit
 
@@ -18,7 +18,7 @@
 | 3 | `66907be` | MarketFeatureComputationService + batch_latest_events + DSA call-count 验证 |
 | 4 | `a0a11d8` | migration 068 + event_freshness_payload JSONB + _SCHEMA_VERSION=5 + 9 项定向测试 |
 | 5 | `db61601` | computing_features 状态机收敛 + MFCS 接入盘后编排 + compute-once + 批次事件预取 + 组合质量门禁 + 空壳修正 + 26 项定向测试 + orchestrator 测试适配 |
-| 6 | 待 commit | 7 项缺口修正：MDAS 1d 去重（precomputed_daily_bars）+ payload 空壳/unavailable reason 校验 + 1161 行真实 DB 验证测试 |
+| 6 | `212c88a` | 7 项缺口修正：MDAS 1d 去重（precomputed_daily_bars）+ payload 空壳/unavailable reason 校验 + 1161 行真实 DB 验证测试 |
 
 ## Phase 5 交付摘要
 
