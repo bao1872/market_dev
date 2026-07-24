@@ -4,6 +4,7 @@
 
 ## 2026-07-24
 
+- CHANGE-20260724-002: 指标原理页替换 + 全部盘中监控截图增加二维码入口（data.html 新版动画 + MobileIndicatorStage 二维码页脚 + indicator-principles-qr.png）
 - CHANGE-20260724-001: 门户二维码更新 — 替换为用户提供的新二维码 PNG（wechat-qr.jpg → wechat-qr.png，860×860 PNG）
 
 ## 2026-07-23

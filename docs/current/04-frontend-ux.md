@@ -293,6 +293,27 @@ Node Cluster 算法
 - **`chartRenderFrame` V2 帧比对门禁**：`displayHash`/`displayRangeKey` 优先，降级到 `sourceBarHash`；展示帧（display_frame）与算法输入诊断（calculation_diagnostics）分离，由 `build_display_frame()` 生成；3 态状态机：pending/success/mismatch-error；bars API 与 indicators API 共用 `build_display_frame()`；测试 `chartRenderFrame.test.ts` 覆盖。
 - **`endpoints.ts` V2 参数**：indicators API 请求函数透传 `include_realtime`/`completed_only`/`adjustment_as_of` 参数，与 `/bars` 同款。
 
+### 移动飞书指标舞台二维码页脚（CHANGE-20260724-002）
+
+- **三类 indicator_view 共用二维码页脚**：`MobileIndicatorStage` 正常态在 chart-card 后新增统一 `<footer className="mobile-stage-footer">`，包含 `mobile-stage-guide-card`（二维码引导卡）+ `mobile-stage-risk-notice`（免责声明）；loading/error/mismatch 状态不渲染此页脚（由 `state !== null` 提前 return 保证）。
+- **二维码静态资源**：`/portal/assets/images/indicator-principles-qr.png`（410×410 1-bit 灰度 PNG），指向 `http://43.136.118.82/portal/pages/data.html`（指标原理页）；Capture 时不请求第三方二维码服务，`image-rendering: pixelated` 保持清晰。
+- **主文案严格为「扫码了解原理和解读方法」**，辅助文案「查看指标原理页」，免责声明「内容仅做科普，不构成投资建议」；禁止营销或投资引导含义文案。
+- **几何参数**（参考 `ref/panji_mobile_stage_qr_source_preview.html`）：
+  - `.mobile-stage-chart-card`：left 34px / right 34px / top 262px / **bottom 430px**（从 240px 调整，压缩图表可用高度，非简单覆盖）
+  - `.mobile-stage-footer`：left 44px / right 44px / bottom 25px
+  - `.mobile-stage-guide-card`：height 286px / border-radius 30px / 绿色低亮度描边 / 深色渐变背景
+  - 二维码：220×220px 白色底，左侧放置
+  - `MOBILE_STAGE_CHART_HEIGHT = 1756`（2560 - 262 - 430 - 112）
+- **不改变**：指标计算、行情数据、截图 Ready 门禁（`data-render-ready`/`render_frame.matched`/`computeTypeSpecificReady`）、飞书发送链路、Screenshot cache key、`indicator_view` 参数。
+
+### 指标原理页替换（CHANGE-20260724-002）
+
+- **`/portal/pages/data.html` 替换为新版**：以 `ref/panji_indicator_principles_demo.html` 为内容和交互真源，保留门户公共导航/site.css/site.js/相对链接，主体使用独立作用域 `.indicator-principles-page`。
+- **筹码共识完整解释流程**（6 步）：原始输入 → 映射价格 → 形成分布 → 识别聚集 → 提取共识 → 观察位置。
+- **价格结构完整解释流程**（5 步）：原始路径 → 候选拐点 → 过滤噪声 → 标注关系（HH/HL/LH/LL）→ 两种情景（结构延续/结构失效）。
+- **交互**：上一步/下一步/步骤直接选择/可选自动播放（默认不自动播放），移动端正常显示，不依赖外部 CDN。
+- **独立 CSS/JS**：`assets/css/data-principles.css` + `assets/js/data-principles.js`（IIFE 封装），不污染其他 portal 页面。
+
 ### 消息与飞书
 
 - 消息数量 SSOT（CHANGE-20260713-005）：`MessagesPage` 使用 `useUnreadCount`（`GET /messages/unread-count`，queryKey `['messages', 'unread-count']`）作为未读权威数量；"全部"显示后端列表 `messagesQuery.data?.total`（不用 `items.length`）；页头显示"共 X 条 · 未读 Y 条"；分段按钮仅 `all`/`unread` 显示计数，`selection`/`price`/`system`/`process` 不显示误导数字；标记单条/全部已读后 `useMarkMessageRead`/`useReadAllMessages` 的 `onSuccess` invalidate `['messages']`，自动刷新列表 + unread-count + 菜单角标。

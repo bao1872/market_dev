@@ -94,6 +94,69 @@ test('2b. 真实微信二维码已替换占位图', () => {
   }
 })
 
+test('2c. 指标原理页二维码静态资源存在（CHANGE-20260724-002）', () => {
+  // 二维码图片必须存在且为非空真实 PNG
+  const qrPath = join(PORTAL_DIR, 'assets/images/indicator-principles-qr.png')
+  assert.ok(existsSync(qrPath), 'indicator-principles-qr.png 应存在')
+  const stat = readFileSync(qrPath)
+  // 1-bit 灰度二维码 PNG 自然较小（410×410 约 800+ 字节），阈值设为 500
+  assert.ok(stat.length > 500, `indicator-principles-qr.png 应为非空真实图片（实际 ${stat.length} 字节）`)
+  // PNG 文件签名校验（前 8 字节）
+  const pngSig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  assert.ok(stat.slice(0, 8).equals(pngSig), 'indicator-principles-qr.png 应为合法 PNG 文件')
+})
+
+test('2d. 指标原理页专用 CSS/JS 资源存在（CHANGE-20260724-002）', () => {
+  // 页面专用 CSS/JS 必须独立文件，不在 data.html 中堆放全局样式
+  assertExists('assets/css/data-principles.css')
+  assertExists('assets/js/data-principles.js')
+  // 专用 CSS 必须使用独立作用域 .indicator-principles-page
+  const css = readText('assets/css/data-principles.css')
+  assert.ok(/\.indicator-principles-page/.test(css),
+    'data-principles.css 必须使用 .indicator-principles-page 作用域，禁止污染其他 portal 页面')
+  // 专用 JS 必须使用 IIFE 封装（避免污染全局）
+  const js = readText('assets/js/data-principles.js')
+  assert.ok(/^\(function\s*\(/m.test(js.trim()) || /\(function\s*\(\)\s*\{/.test(js),
+    'data-principles.js 必须使用 IIFE 封装，不污染全局作用域')
+})
+
+test('2e. data.html 整合指标原理页且不破坏门户脚手架（CHANGE-20260724-002）', () => {
+  const html = readText('pages/data.html')
+  // 保留门户公共导航与 site.css/site.js
+  assert.ok(html.includes('assets/css/site.css'), 'data.html 必须保留公共 site.css')
+  assert.ok(html.includes('assets/js/site.js'), 'data.html 必须保留公共 site.js')
+  // 引入页面专用 CSS/JS
+  assert.ok(html.includes('assets/css/data-principles.css'),
+    'data.html 必须引入 data-principles.css')
+  assert.ok(html.includes('assets/js/data-principles.js'),
+    'data.html 必须引入 data-principles.js')
+  // 主体内容使用独立作用域
+  assert.ok(/class="[^"]*indicator-principles-page/.test(html),
+    'data.html 主体必须使用 indicator-principles-page 作用域 class')
+  // 筹码共识完整解释流程（6 步骤按钮存在于 HTML）
+  const consensusSteps = ['原始输入', '映射价格', '形成分布', '识别聚集', '提取共识', '观察位置']
+  for (const s of consensusSteps) {
+    assert.ok(html.includes(s), `data.html 筹码共识流程缺少步骤：${s}`)
+  }
+  // 价格结构完整解释流程（5 步骤按钮存在于 HTML）
+  const structureSteps = ['原始路径', '候选拐点', '过滤噪声', '标注关系', '两种情景']
+  for (const s of structureSteps) {
+    assert.ok(html.includes(s), `data.html 价格结构流程缺少步骤：${s}`)
+  }
+  // HH/HL/LH/LL 结构关系 + 结构延续/失效两个情景存在于 JS 动画
+  const js = readText('assets/js/data-principles.js')
+  assert.ok(/HH/.test(js) && /HL/.test(js) && /LH/.test(js) && /LL/.test(js),
+    'data-principles.js 必须包含 HH/HL/LH/LL 结构关系标签')
+  assert.ok(/结构延续/.test(js) && /结构失效/.test(js),
+    'data-principles.js 必须包含结构延续与结构失效两个独立情景')
+  // 步骤控制按钮（上一步/下一步 aria-label）
+  assert.ok(/上一步/.test(html), 'data.html 必须包含上一步控制')
+  assert.ok(/下一步/.test(html), 'data.html 必须包含下一步控制')
+  // 不依赖外部 CDN（无 https://CDN 引用）
+  assert.ok(!/https?:\/\/(cdn|unpkg|jsdelivr|cdnjs)/.test(html),
+    'data.html 禁止依赖外部 CDN（cdn/unpkg/jsdelivr/cdnjs）')
+})
+
 test('3. SOURCE.md 记录 zip 来源与 SHA256', () => {
   const src = readText('SOURCE.md')
   assert.ok(src.includes('盘迹门户_完整版_Logo与需求摘要修正版.zip'), 'SOURCE.md 缺少 zip 名称')
