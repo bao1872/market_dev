@@ -34,7 +34,7 @@ import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -49,7 +49,7 @@ from app.repositories import strategy_result_repository
 from app.services.bars_scheduler_service import BarsSchedulerService
 from app.services.feature_snapshot_service import (
     PublishedSnapshotRunExistsError,
-    compute_for_trade_date,
+    compute_for_trade_date_with_mfcs,
     create_snapshot_run,
     finish_snapshot_run,
     get_active_a_share_instruments,
@@ -112,10 +112,13 @@ class AfterCloseRunStatus(StrEnum):
     REFRESHING_DAILY = "refreshing_daily"
     SYNCING_BOARDS = "syncing_boards"
     CHECKING_COVERAGE = "checking_coverage"
+    # [CHANGE-20260724-002 Phase 5] 4 步收敛为 computing_features
+    # 旧 enum 保留用于历史 run 兼容读取（admin 页面不报错）
     CREATING_DSA = "creating_dsa"
     WAITING_DSA_WORKER = "waiting_dsa_worker"
     QUALITY_GATE = "quality_gate"
     FEATURE_SNAPSHOT = "feature_snapshot"
+    COMPUTING_FEATURES = "computing_features"
     PUBLISHING = "publishing"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
@@ -988,31 +991,35 @@ async def execute_after_close_run(
             )
 
         # [Phase5] - 根据last_completed_step 计算各阶段跳过标志
-        # 阶段顺序：refreshing_daily → syncing_boards → waiting_dsa_worker
-        #   → quality_gate → feature_snapshot → publishing → succeeded
+        # 阶段顺序（Phase 5 收敛后）：refreshing_daily → syncing_boards → computing_features
+        #   → publishing → succeeded
+        # 旧步骤名（waiting_dsa_worker/quality_gate/feature_snapshot）兼容读取历史 run
         _completed_steps: dict[str | None, set[str]] = {
             None: set(),
             "queued": set(),
             "refreshing_daily": {"refreshing_daily"},
             "syncing_boards": {"refreshing_daily", "syncing_boards"},
-            "waiting_dsa_worker": {
-                "refreshing_daily", "syncing_boards", "waiting_dsa_worker",
-            },
-            "quality_gate": {
-                "refreshing_daily", "syncing_boards", "waiting_dsa_worker",
-                "quality_gate",
-            },
-            "feature_snapshot": {
-                "refreshing_daily", "syncing_boards", "waiting_dsa_worker",
-                "quality_gate", "feature_snapshot",
+            # [Phase 5] 4 步收敛为 computing_features
+            "computing_features": {
+                "refreshing_daily", "syncing_boards", "computing_features",
             },
             "publishing": {
-                "refreshing_daily", "syncing_boards", "waiting_dsa_worker",
-                "quality_gate", "feature_snapshot", "publishing",
+                "refreshing_daily", "syncing_boards", "computing_features",
+                "publishing",
             },
             "succeeded": {
-                "refreshing_daily", "syncing_boards", "waiting_dsa_worker",
-                "quality_gate", "feature_snapshot", "publishing", "succeeded",
+                "refreshing_daily", "syncing_boards", "computing_features",
+                "publishing", "succeeded",
+            },
+            # [Phase 5] 旧步骤名兼容：历史 run 读取时映射到 computing_features 已完成
+            "waiting_dsa_worker": {
+                "refreshing_daily", "syncing_boards", "computing_features",
+            },
+            "quality_gate": {
+                "refreshing_daily", "syncing_boards", "computing_features",
+            },
+            "feature_snapshot": {
+                "refreshing_daily", "syncing_boards", "computing_features",
             },
         }
         completed: set[str] = _completed_steps.get(last_completed_step, set())
@@ -1035,17 +1042,16 @@ async def execute_after_close_run(
 
         skip_refresh = "refreshing_daily" in completed
         skip_board_sync = "syncing_boards" in completed
-        skip_wait = "waiting_dsa_worker" in completed
-        skip_quality = "quality_gate" in completed
-        skip_snapshot = "feature_snapshot" in completed
+        # [Phase 5] 3 个旧 skip 标志收敛为 skip_computing
+        skip_computing = "computing_features" in completed
         skip_publish = "publishing" in completed
 
         logger.info(
             "[AfterClose] 断点恢复: last_completed_step=%s, "
-            "skip_refresh=%s, skip_board_sync=%s, skip_wait=%s, skip_quality=%s, "
-            "skip_snapshot=%s, skip_publish=%s",
-            last_completed_step, skip_refresh, skip_board_sync, skip_wait, skip_quality,
-            skip_snapshot, skip_publish,
+            "skip_refresh=%s, skip_board_sync=%s, skip_computing=%s, "
+            "skip_publish=%s",
+            last_completed_step, skip_refresh, skip_board_sync, skip_computing,
+            skip_publish,
         )
 
         # ---- 步骤 1: refreshing_daily ----
@@ -1323,131 +1329,60 @@ async def execute_after_close_run(
                         f"但 metadata 缺少 dsa_run_id: job_run_id={job_run_id}"
                     )
 
-        # ---- 步骤 2: waiting_dsa_worker ----
-        if not skip_wait:
+        # ---- 步骤 2: computing_features (Phase 5: 收敛 waiting_dsa_worker + quality_gate + feature_snapshot) ----
+        # [CHANGE-20260724-002 Phase 5] scheduled after-close DSA 接入 MFCS 统一计算服务：
+        # - DSA run 创建后 inline claim（status=running），防止 DSA worker 领取
+        # - MFCS compute-once: DSA/SMC/Node 各 1 次，同一结果供 StrategyResult + snapshot
+        # - 批次级事件预取（SQL=1）
+        # - 组合质量门禁: DSA + continuous + event freshness 任一失败不 publish
+        # manual DSA 和非 scheduled StrategyRun 继续走原 worker 路径，不受影响。
+        if not skip_computing:
+            # 2.1 设置 computing_features 状态
             async with AsyncSessionLocal() as db:
                 job_run = await _get_job_run_or_raise(db, job_run_id)
                 await _update_orchestrator_status(
                     db=db,
                     job_run=job_run,
-                    status=AfterCloseRunStatus.WAITING_DSA_WORKER,
-                    message=f"等待 DSA Worker 执行完成: dsa_run_id={dsa_run_id}",
+                    status=AfterCloseRunStatus.COMPUTING_FEATURES,
+                    message=f"开始统一特征计算: dsa_run_id={dsa_run_id}",
                     dsa_run_id=dsa_run_id,
                     payload={"dsa_run_id": str(dsa_run_id)},
                 )
                 await db.commit()
 
-            # 轮询 DSA run 状态（每轮更新心跳，防止 waiting_dsa_worker 阶段被误判为 stale）
-            dsa_final_status = await _poll_dsa_run_status(
-                dsa_run_id=dsa_run_id,
-                poll_interval=dsa_poll_interval,
-                timeout=dsa_poll_timeout,
-                job_run_id=job_run_id,
-                worker_id=worker_id,
-            )
-
-            # [AfterClose] - 描述: 接受 completed 和 published 都为成功终态
-            # dsa_only 模式下 worker 会自动执行 quality_gate + publish，
-            # DSA run 最终状态为 published（与 _poll_dsa_run_status 的 terminal_statuses 对齐）
-            if dsa_final_status not in ("completed", "published"):
-                raise RuntimeError(
-                    f"DSA 运行未完成: dsa_run_id={dsa_run_id}, "
-                    f"final_status={dsa_final_status}"
-                )
-
-            # [Phase5] - waiting_dsa_worker 完成，更新心跳 + 检查点
+            # 2.2 inline claim DSA run（防止 worker 领取）+ 获取 strategy_version_id
+            dsa_already_completed = False
+            strategy_version_id: uuid.UUID | None = None
             async with AsyncSessionLocal() as db:
-                job_run = await _get_job_run_or_raise(db, job_run_id)
-                await _update_heartbeat_and_step(
-                    db, job_run, AfterCloseRunStatus.WAITING_DSA_WORKER.value, worker_id,
-                )
-                await db.commit()
-
-        # ---- 步骤 3: quality_gate ----
-        if not skip_quality:
-            async with AsyncSessionLocal() as db:
-                job_run = await _get_job_run_or_raise(db, job_run_id)
                 dsa_run = await _get_strategy_run_or_raise(db, dsa_run_id)
-
-                result_count = await strategy_result_repository.count_by_run(
-                    db, dsa_run_id
-                )
-                quality_passed = await batch_service._check_quality_gates(
-                    dsa_run, result_count=result_count, db=db
-                )
-                await _update_orchestrator_status(
-                    db=db,
-                    job_run=job_run,
-                    status=AfterCloseRunStatus.QUALITY_GATE,
-                    message=(
-                        f"质量门禁{'通过' if quality_passed else '未通过'}: "
-                        f"dsa_run_id={dsa_run_id}, "
-                        f"succeeded={dsa_run.succeeded_count}, "
-                        f"total={dsa_run.total_instruments}, "
-                        f"failed={dsa_run.failed_count}"
-                    ),
-                    dsa_run_id=dsa_run_id,
-                    payload={
-                        "quality_passed": quality_passed,
-                        "succeeded_count": dsa_run.succeeded_count,
-                        "total_instruments": dsa_run.total_instruments,
-                        "failed_count": dsa_run.failed_count,
-                    },
-                )
-                await db.commit()
-
-                if not quality_passed:
-                    raise RuntimeError(
-                        f"质量门禁未通过: dsa_run_id={dsa_run_id}, "
-                        f"status={dsa_run.status}"
+                strategy_version_id = dsa_run.strategy_version_id
+                if dsa_run.status == "queued":
+                    # Phase 5: inline claim，防止 DSA worker 领取
+                    dsa_run.status = "running"
+                    dsa_run.started_at = datetime.now(UTC)
+                    dsa_run.heartbeat_at = datetime.now(UTC)
+                    dsa_run.worker_id = f"orchestrator:{worker_id}"
+                    await db.commit()
+                    logger.info(
+                        "[AfterClose] Phase 5 inline claim DSA run: run_id=%s, worker_id=%s",
+                        dsa_run_id, dsa_run.worker_id,
+                    )
+                elif dsa_run.status in ("completed", "published"):
+                    # Worker 已完成（race condition），跳过 DSA 写入避免 DSA=2
+                    dsa_already_completed = True
+                    logger.info(
+                        "[AfterClose] DSA run 已完成（worker 已处理），跳过 DSA 写入: run_id=%s status=%s",
+                        dsa_run_id, dsa_run.status,
                     )
 
-            # [Phase5] - quality_gate 完成，更新心跳 + 检查点
-            async with AsyncSessionLocal() as db:
-                job_run = await _get_job_run_or_raise(db, job_run_id)
-                await _update_heartbeat_and_step(
-                    db, job_run, AfterCloseRunStatus.QUALITY_GATE.value, worker_id,
-                )
-                await db.commit()
-
-        # ---- 步骤 3.5: feature_snapshot ----
-        # 生成特征快照供 /watchlist/monitor-status 读取，不再走实时 fallback。
-        # snapshot 失败比例超过阈值时抛 RuntimeError，编排标记 failed。
-        # 单股失败由 compute_for_trade_date 内部记录到 degraded_reasons，不阻塞其他股票。
-        #
-        # [Phase7] Run lifecycle：
-        # - 开始时创建 status='running' 的 StockFeatureSnapshotRun（独立 session + commit）
-        # - 成功时 finish_snapshot_run(status='succeeded') + 写 published_at
-        # - 失败时 finish_snapshot_run(status='failed') + 不写 published_at
-        # - watchlist 通过 _has_succeeded_snapshot_run 判断是否可读 snapshot
-        # - run 记录在独立 session 中提交，保证失败时 run.status='failed' 持久化
-        if not skip_snapshot:
-            async with AsyncSessionLocal() as db:
-                job_run = await _get_job_run_or_raise(db, job_run_id)
-                if job_run is None:
-                    raise RuntimeError(
-                        f"SchedulerJobRun not found: job_run_id={job_run_id}"
-                    )
-                await _update_orchestrator_status(
-                    db=db,
-                    job_run=job_run,
-                    status=AfterCloseRunStatus.FEATURE_SNAPSHOT,
-                    message=f"开始生成特征快照: trade_date={trade_date}",
-                )
-                await db.commit()
-
-            # [Phase7] 创建 running run + commit（独立 session，避免 snapshot rollback 影响）
-            # [P0-4] 如已存在 published full run（如手动 backfill 已完成），跳过计算复用已有 run
-            # [P0-4] 断点恢复：如 metadata 中有 tracked running run，复用不新建
+            # 2.3 创建 snapshot run（复用原 feature_snapshot 步骤的 run 生命周期逻辑）
             snapshot_already_published = False
             try:
                 async with AsyncSessionLocal() as db:
                     instrument_ids = await get_active_a_share_instruments(db)
-                    # instrument_ids 复用，避免下个 session 重复查询
                     cached_instrument_ids = instrument_ids
 
                     # [P0-4] 断点恢复：检查是否已有 tracked running snapshot run 可复用
-                    # 避免同 trade_date 的 running run 触发 partial unique index 冲突
                     _create_new_run = True
                     if snapshot_run_id is not None:
                         from app.models.stock_feature_snapshot_run import (
@@ -1463,7 +1398,6 @@ async def execute_after_close_run(
                             _create_new_run = False
 
                     if _create_new_run:
-                        # [Blocker Fix] after_close 处理全市场 A 股，scope='full'（watchlist 可读）
                         snapshot_run = await create_snapshot_run(
                             db, trade_date, "after_close",
                             expected_count=len(instrument_ids),
@@ -1474,7 +1408,7 @@ async def execute_after_close_run(
                         snapshot_run_id = snapshot_run.id
             except PublishedSnapshotRunExistsError as exc:
                 logger.warning(
-                    "[AfterClose] feature_snapshot 已存在 published full run，"
+                    "[AfterClose] computing_features 已存在 published full run，"
                     "跳过 snapshot 计算，复用已有 run: trade_date=%s "
                     "existing_run_id=%s published_at=%s",
                     trade_date, exc.existing_run.id, exc.existing_run.published_at,
@@ -1487,30 +1421,24 @@ async def execute_after_close_run(
                 }
                 snapshot_already_published = True
 
-            # [Heartbeat] feature_snapshot 开始后立即写入 run_id 与 last_started_step，
-            # 这样 UI 不会显示 feature_snapshot 待执行，且中断后知道从哪一步恢复。
+            # 2.4 写入 run_id 与 last_started_step（UI 不显示待执行，中断后知道从哪步恢复）
             async with AsyncSessionLocal() as db:
                 job_run = await _get_job_run_or_raise(db, job_run_id)
-                if job_run is None:
-                    raise RuntimeError(
-                        f"SchedulerJobRun not found: job_run_id={job_run_id}"
-                    )
                 await _update_orchestrator_status(
                     db=db,
                     job_run=job_run,
-                    status=AfterCloseRunStatus.FEATURE_SNAPSHOT,
-                    message=f"开始生成特征快照: trade_date={trade_date}, run_id={snapshot_run_id}",
+                    status=AfterCloseRunStatus.COMPUTING_FEATURES,
+                    message=f"开始统一特征计算: trade_date={trade_date}, run_id={snapshot_run_id}",
                     extra={
                         "feature_snapshot_run_id": str(snapshot_run_id),
-                        "last_started_step": AfterCloseRunStatus.FEATURE_SNAPSHOT.value,
+                        "last_started_step": AfterCloseRunStatus.COMPUTING_FEATURES.value,
                     },
                 )
                 await db.commit()
 
-            # 计算 snapshots（独立 session + 后台心跳保活 + 进度回调）
+            # 2.5 执行统一计算（MFCS compute-once + 批量事件预取 + snapshot 写入 + StrategyResult 写入）
             # [P0 Atomicity] snapshot 计算完成后不立即 finalize succeeded，
             # 等 DSA publish_run 成功后才标记 succeeded/published_at。
-            # [P0-4] 已存在 published run 时跳过计算（snapshot_already_published）
             if not snapshot_already_published:
                 heartbeat_task = asyncio.create_task(
                     _job_run_heartbeat_loop(
@@ -1522,30 +1450,35 @@ async def execute_after_close_run(
                         job_run_id, worker_id
                     )
                     async with AsyncSessionLocal() as db:
-                        snapshot_result = await compute_for_trade_date(
-                            db, trade_date, cached_instrument_ids,
-                            progress_callback=progress_callback,
-                            source_run_id=snapshot_run_id,
+                        # Phase 5: 传 dsa_run_id 让 MFCS 同时写 StrategyResult（DSA=1）
+                        # 如果 DSA run 已完成（worker 已写），不传 dsa_run_id（避免 DSA=2）
+                        mfcs_kwargs: dict[str, Any] = {
+                            "progress_callback": progress_callback,
+                            "source_run_id": snapshot_run_id,
+                        }
+                        if not dsa_already_completed and strategy_version_id is not None:
+                            mfcs_kwargs["dsa_run_id"] = dsa_run_id
+                            mfcs_kwargs["strategy_version_id"] = strategy_version_id
+
+                        snapshot_result = await compute_for_trade_date_with_mfcs(
+                            db, trade_date, cached_instrument_ids, **mfcs_kwargs,
                         )
                         await db.commit()
                 except RuntimeError as snapshot_exc:
                     # [Blocker2] 失败比例超阈值：snapshot session 已自动 rollback 半成品行。
-                    # 异常暂存，先 finalize run 为 failed，再向上传播触发 orchestrator FAILED。
                     snapshot_error = snapshot_exc
                     logger.error(
-                        "[AfterClose] feature_snapshot 失败比例超阈值，"
+                        "[AfterClose] computing_features 失败比例超阈值，"
                         "snapshot session 已 rollback: trade_date=%s, error=%s",
                         trade_date, snapshot_exc,
                     )
                 except Exception as snapshot_exc:
-                    # 其他异常同样暂存，先 finalize run 为 failed
                     snapshot_error = snapshot_exc
                     logger.error(
-                        "[AfterClose] feature_snapshot 异常: trade_date=%s, error=%s",
+                        "[AfterClose] computing_features 异常: trade_date=%s, error=%s",
                         trade_date, snapshot_exc, exc_info=True,
                     )
                 finally:
-                    # [Heartbeat] 取消后台心跳任务，安静忽略 CancelledError
                     heartbeat_task.cancel()
                     try:
                         await heartbeat_task
@@ -1553,8 +1486,6 @@ async def execute_after_close_run(
                         pass
 
                 # [P0 Atomicity] 仅在 snapshot_error 时 finalize 为 failed。
-                # 成功时不立即 finalize succeeded —— 等 DSA publish_run 成功后才标记，
-                # 保证发布失败时 snapshot run=failed、published_at=null、无事件、用户 context 不读取该批次。
                 if snapshot_error is not None:
                     async with AsyncSessionLocal() as db:
                         from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
@@ -1570,26 +1501,66 @@ async def execute_after_close_run(
                                 },
                             )
                             await db.commit()
-                    # 失败时向上传播 RuntimeError，触发 orchestrator FAILED 状态写入，跳过 publishing
                     raise snapshot_error
 
             logger.info(
-                "[AfterClose] 特征快照生成完成（待发布后 finalize）: trade_date=%s, "
-                "snapshot_count=%s, failed_count=%s",
+                "[AfterClose] 统一特征计算完成（待发布后 finalize）: trade_date=%s, "
+                "snapshot_count=%s, failed_count=%s, dsa_succeeded=%s",
                 trade_date,
                 snapshot_result.get("snapshot_count") if snapshot_result else 0,
                 snapshot_result.get("failed_count") if snapshot_result else 0,
+                snapshot_result.get("dsa_succeeded") if snapshot_result else 0,
             )
 
-            # [Phase5] - feature_snapshot 完成，更新心跳 + 检查点
+            # 2.6 组合质量门禁（DSA + continuous + event freshness）
+            # continuous + event freshness 已在 compute_for_trade_date_with_mfcs 内部检查：
+            # - failure_rate > threshold → RuntimeError（continuous 门禁）
+            # - require_event_freshness=True → ValueError（event freshness 门禁）
+            # 这里检查 DSA 质量门禁（仅在 MFCS 写了 DSA results 时）
+            if not dsa_already_completed and snapshot_result and snapshot_result.get("dsa_succeeded", 0) > 0:
+                async with AsyncSessionLocal() as db:
+                    job_run = await _get_job_run_or_raise(db, job_run_id)
+                    dsa_run = await _get_strategy_run_or_raise(db, dsa_run_id)
+
+                    result_count = await strategy_result_repository.count_by_run(
+                        db, dsa_run_id
+                    )
+                    quality_passed = await batch_service._check_quality_gates(
+                        dsa_run, result_count=result_count, db=db
+                    )
+                    await _update_orchestrator_status(
+                        db=db,
+                        job_run=job_run,
+                        status=AfterCloseRunStatus.COMPUTING_FEATURES,
+                        message=(
+                            f"组合质量门禁{'通过' if quality_passed else '未通过'}: "
+                            f"dsa_run_id={dsa_run_id}, "
+                            f"succeeded={dsa_run.succeeded_count}, "
+                            f"total={dsa_run.total_instruments}, "
+                            f"failed={dsa_run.failed_count}"
+                        ),
+                        dsa_run_id=dsa_run_id,
+                        payload={
+                            "quality_passed": quality_passed,
+                            "succeeded_count": dsa_run.succeeded_count,
+                            "total_instruments": dsa_run.total_instruments,
+                            "failed_count": dsa_run.failed_count,
+                            "snapshot_count": snapshot_result.get("snapshot_count", 0) if snapshot_result else 0,
+                        },
+                    )
+                    await db.commit()
+
+                    if not quality_passed:
+                        raise RuntimeError(
+                            f"组合质量门禁未通过: dsa_run_id={dsa_run_id}, "
+                            f"status={dsa_run.status}"
+                        )
+
+            # 2.7 computing_features 完成，更新心跳 + 检查点
             async with AsyncSessionLocal() as db:
                 job_run = await _get_job_run_or_raise(db, job_run_id)
-                if job_run is None:
-                    raise RuntimeError(
-                        f"SchedulerJobRun not found: job_run_id={job_run_id}"
-                    )
                 await _update_heartbeat_and_step(
-                    db, job_run, AfterCloseRunStatus.FEATURE_SNAPSHOT.value, worker_id,
+                    db, job_run, AfterCloseRunStatus.COMPUTING_FEATURES.value, worker_id,
                 )
                 await db.commit()
 

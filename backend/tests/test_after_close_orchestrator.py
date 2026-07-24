@@ -365,7 +365,7 @@ async def test_execute_writes_status_events(db_session) -> None:
         "app.services.after_close_orchestrator.get_active_a_share_instruments",
         new=AsyncMock(return_value=[uuid.uuid4()]),
     ), patch(
-        "app.services.after_close_orchestrator.compute_for_trade_date",
+        "app.services.after_close_orchestrator.compute_for_trade_date_with_mfcs",
         new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
     ):
         await execute_after_close_run(
@@ -375,18 +375,26 @@ async def test_execute_writes_status_events(db_session) -> None:
             dsa_poll_timeout=1,
         )
 
-    # 验证事件序列：应包含 refreshing_daily → waiting_dsa_worker → quality_gate
-    #   → feature_snapshot → publishing → succeeded
+    # [Phase5] 验证事件序列：应包含 refreshing_daily → computing_features
+    #   → publishing → succeeded（旧 4 步收敛为 computing_features）
     from app.services.job_run_event_service import list_events
     events = await list_events(db_session, job_run.id, limit=20)
     steps = [e.step for e in events]
 
     assert AfterCloseRunStatus.REFRESHING_DAILY.value in steps, f"缺少 refreshing_daily 事件: {steps}"
-    assert AfterCloseRunStatus.WAITING_DSA_WORKER.value in steps, f"缺少 waiting_dsa_worker 事件: {steps}"
-    assert AfterCloseRunStatus.QUALITY_GATE.value in steps, f"缺少 quality_gate 事件: {steps}"
-    assert AfterCloseRunStatus.FEATURE_SNAPSHOT.value in steps, f"缺少 feature_snapshot 事件: {steps}"
+    assert AfterCloseRunStatus.COMPUTING_FEATURES.value in steps, f"缺少 computing_features 事件: {steps}"
     assert AfterCloseRunStatus.PUBLISHING.value in steps, f"缺少 publishing 事件: {steps}"
     assert AfterCloseRunStatus.SUCCEEDED.value in steps, f"缺少 succeeded 事件: {steps}"
+    # [Phase5] 新 run 不应生成旧步骤名
+    assert AfterCloseRunStatus.WAITING_DSA_WORKER.value not in steps, (
+        f"新 run 不应生成 waiting_dsa_worker 事件: {steps}"
+    )
+    assert AfterCloseRunStatus.QUALITY_GATE.value not in steps, (
+        f"新 run 不应生成 quality_gate 事件: {steps}"
+    )
+    assert AfterCloseRunStatus.FEATURE_SNAPSHOT.value not in steps, (
+        f"新 run 不应生成 feature_snapshot 事件: {steps}"
+    )
 
     # [AfterClose] - 不断言事件顺序：同一事务内 created_at 可能相同，
     # list_events 的倒序仅保证 created_at 不同时正确排序。
@@ -524,7 +532,7 @@ async def test_execute_feature_snapshot_failure_skips_publishing(db_session) -> 
         "app.services.after_close_orchestrator.get_active_a_share_instruments",
         new=AsyncMock(return_value=[uuid.uuid4()]),
     ), patch(
-        "app.services.after_close_orchestrator.compute_for_trade_date",
+        "app.services.after_close_orchestrator.compute_for_trade_date_with_mfcs",
         new=AsyncMock(side_effect=snapshot_exc),
     ):
         with pytest.raises(RuntimeError, match="失败比例"):
@@ -633,7 +641,7 @@ async def test_execute_feature_snapshot_success_creates_succeeded_run(db_session
         "app.services.after_close_orchestrator.get_active_a_share_instruments",
         new=AsyncMock(return_value=[uuid.uuid4()]),
     ), patch(
-        "app.services.after_close_orchestrator.compute_for_trade_date",
+        "app.services.after_close_orchestrator.compute_for_trade_date_with_mfcs",
         new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
     ):
         await execute_after_close_run(
@@ -742,7 +750,7 @@ async def test_execute_feature_snapshot_failure_creates_failed_run(db_session) -
         "app.services.after_close_orchestrator.get_active_a_share_instruments",
         new=AsyncMock(return_value=[uuid.uuid4()]),
     ), patch(
-        "app.services.after_close_orchestrator.compute_for_trade_date",
+        "app.services.after_close_orchestrator.compute_for_trade_date_with_mfcs",
         new=AsyncMock(side_effect=snapshot_exc),
     ):
         with pytest.raises(RuntimeError, match="失败比例"):
@@ -1003,7 +1011,7 @@ async def test_feature_snapshot_stage_starts_heartbeat_loop(db_session) -> None:
         "app.services.after_close_orchestrator.get_active_a_share_instruments",
         new=AsyncMock(return_value=[uuid.uuid4()]),
     ), patch(
-        "app.services.after_close_orchestrator.compute_for_trade_date",
+        "app.services.after_close_orchestrator.compute_for_trade_date_with_mfcs",
         new=_fake_compute,
     ):
         await execute_after_close_run(
@@ -1089,7 +1097,7 @@ async def test_feature_snapshot_progress_callback_updates_heartbeat_and_metadata
         "app.services.after_close_orchestrator.get_active_a_share_instruments",
         new=AsyncMock(return_value=[uuid.uuid4()]),
     ), patch(
-        "app.services.after_close_orchestrator.compute_for_trade_date",
+        "app.services.after_close_orchestrator.compute_for_trade_date_with_mfcs",
         new=_fake_compute,
     ):
         await execute_after_close_run(
@@ -1117,7 +1125,7 @@ async def test_feature_snapshot_progress_callback_updates_heartbeat_and_metadata
     assert progress["snapshot_count"] == 999
     assert progress["failed_count"] == 1
     assert "feature_snapshot_run_id" in meta
-    assert meta["last_started_step"] == AfterCloseRunStatus.FEATURE_SNAPSHOT.value
+    assert meta["last_started_step"] == AfterCloseRunStatus.COMPUTING_FEATURES.value
 
 
 @pytest.mark.asyncio
@@ -1452,7 +1460,7 @@ async def test_repair_clears_stuck_run_before_new_after_close(db_session) -> Non
         "app.services.after_close_orchestrator.get_active_a_share_instruments",
         new=AsyncMock(return_value=[uuid.uuid4()]),
     ), patch(
-        "app.services.after_close_orchestrator.compute_for_trade_date",
+        "app.services.after_close_orchestrator.compute_for_trade_date_with_mfcs",
         new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
     ):
         await execute_after_close_run(
@@ -1536,7 +1544,7 @@ async def test_execute_calls_repair_at_start(db_session) -> None:
         "app.services.after_close_orchestrator.get_active_a_share_instruments",
         new=AsyncMock(return_value=[uuid.uuid4()]),
     ), patch(
-        "app.services.after_close_orchestrator.compute_for_trade_date",
+        "app.services.after_close_orchestrator.compute_for_trade_date_with_mfcs",
         new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
     ):
         await execute_after_close_run(
@@ -1627,7 +1635,7 @@ async def test_c5_publishing_failure_skips_event_generation(db_session) -> None:
         "app.services.after_close_orchestrator.get_active_a_share_instruments",
         new=AsyncMock(return_value=[uuid.uuid4()]),
     ), patch(
-        "app.services.after_close_orchestrator.compute_for_trade_date",
+        "app.services.after_close_orchestrator.compute_for_trade_date_with_mfcs",
         new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
     ), patch(
         "app.services.state_event_service.generate_events_for_run",
@@ -1720,7 +1728,7 @@ async def test_c5_publishing_success_generates_events_once(db_session) -> None:
         "app.services.after_close_orchestrator.get_active_a_share_instruments",
         new=AsyncMock(return_value=[uuid.uuid4()]),
     ), patch(
-        "app.services.after_close_orchestrator.compute_for_trade_date",
+        "app.services.after_close_orchestrator.compute_for_trade_date_with_mfcs",
         new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
     ), patch(
         "app.services.state_event_service.generate_events_for_run",
@@ -1826,7 +1834,7 @@ async def test_p0_publish_failure_marks_snapshot_run_failed_no_events(
         "app.services.after_close_orchestrator.get_active_a_share_instruments",
         new=AsyncMock(return_value=[uuid.uuid4()]),
     ), patch(
-        "app.services.after_close_orchestrator.compute_for_trade_date",
+        "app.services.after_close_orchestrator.compute_for_trade_date_with_mfcs",
         new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
     ), patch(
         "app.services.state_event_service.generate_events_for_run",
@@ -1941,7 +1949,7 @@ async def test_p0_publish_success_finalizes_snapshot_run_succeeded(
         "app.services.after_close_orchestrator.get_active_a_share_instruments",
         new=AsyncMock(return_value=[uuid.uuid4()]),
     ), patch(
-        "app.services.after_close_orchestrator.compute_for_trade_date",
+        "app.services.after_close_orchestrator.compute_for_trade_date_with_mfcs",
         new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
     ), patch(
         "app.services.state_event_service.generate_events_for_run",
@@ -2478,7 +2486,7 @@ async def test_resume_skips_completed_steps_no_new_run(db_session) -> None:
         "app.services.after_close_orchestrator.get_active_a_share_instruments",
         new=AsyncMock(return_value=[uuid.uuid4()]),
     ), patch(
-        "app.services.after_close_orchestrator.compute_for_trade_date",
+        "app.services.after_close_orchestrator.compute_for_trade_date_with_mfcs",
         new=AsyncMock(return_value={"snapshot_count": 5, "failed_count": 0}),
     ), patch(
         "app.services.state_event_service.generate_events_for_run",

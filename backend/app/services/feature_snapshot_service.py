@@ -297,6 +297,42 @@ def build_summary_payload(
     }
 
 
+def _validate_event_freshness_payload(
+    payload: dict[str, Any],
+    instrument_id: uuid.UUID,
+    trade_date: date,
+) -> None:
+    """[Phase 5] 校验 event_freshness_payload 含必需定义键。
+
+    正式 full/after_close 流程必须包含：
+    - daily_structure（含 smc 子键）
+    - monitor_interaction
+    - meta（含 schema_version）
+
+    缺失任一键直接 ValueError，禁止空壳发布。
+    """
+    required_top_keys = {"daily_structure", "monitor_interaction", "meta"}
+    missing = required_top_keys - set(payload.keys())
+    if missing:
+        raise ValueError(
+            f"event_freshness_payload 缺少定义键 {missing}: "
+            f"instrument_id={instrument_id} trade_date={trade_date}"
+        )
+    daily = payload.get("daily_structure") or {}
+    if "smc" not in daily:
+        raise ValueError(
+            f"event_freshness_payload.daily_structure 缺少 smc: "
+            f"instrument_id={instrument_id} trade_date={trade_date}"
+        )
+    meta = payload.get("meta") or {}
+    if meta.get("schema_version") != _SCHEMA_VERSION:
+        raise ValueError(
+            f"event_freshness_payload.meta.schema_version 不匹配: "
+            f"expected={_SCHEMA_VERSION} actual={meta.get('schema_version')} "
+            f"instrument_id={instrument_id} trade_date={trade_date}"
+        )
+
+
 # =============================================================================
 # 核心：计算单股单日 snapshot
 # =============================================================================
@@ -315,6 +351,9 @@ async def compute_feature_snapshot_for_date(
     source_run_id: uuid.UUID | None = None,
     precomputed_dsa_bundle: dict[str, Any] | None = None,
     event_freshness_payload: dict[str, Any] | None = None,
+    precomputed_node_cluster_profile: Any | None = None,
+    precomputed_node_input: Any | None = None,
+    require_event_freshness: bool = False,
     _diag_sink: dict[str, Any] | None = None,
 ) -> StockFeatureSnapshot:
     """为指定 instrument + trade_date 计算 point-in-time 特征快照。
@@ -345,6 +384,16 @@ async def compute_feature_snapshot_for_date(
             [CHANGE-20260724-002 Phase 4] 由 MarketFeatureComputationService 从预计算
             SMC DTO + 批量 monitor 事件聚合后传入。None 时写入空骨架（daily_structure.smc={}
             和 monitor_interaction={}），保持 v5 结构一致性。
+        precomputed_node_cluster_profile: 预计算 Node Cluster Profile（可选）
+            [CHANGE-20260724-002 Phase 5] 由 MarketFeatureComputationService 传入，
+            跳过本函数内部的 NodeClusterInputProvider + Canonical compute，避免重复 MDAS 读取。
+        precomputed_node_input: 预计算 NodeClusterInput（可选）
+            [CHANGE-20260724-002 Phase 5] 含 15m bars + 诊断 hash，供 secondary_bars 复用
+            和诊断字段（availability/degraded_reason/counts）。
+        require_event_freshness: 是否强制要求非空 event_freshness_payload（默认 False）
+            [CHANGE-20260724-002 Phase 5] 正式 scope=full/after_close 流程设为 True，
+            None 或缺少 daily_structure/monitor_interaction 键时直接 ValueError。
+            unit/sample 模式设为 False，允许空骨架。
 
     Returns:
         StockFeatureSnapshot ORM 对象（未写入 DB）
@@ -366,6 +415,9 @@ async def compute_feature_snapshot_for_date(
         primary_adj_factor_hash = primary_diag.get("adj_factor_hash") if primary_diag else None
         # [CP-13] 提取 source_bar_hash 供 canonical result_hash 计算
         primary_source_bar_hash = primary_diag.get("source_bar_hash") if primary_diag else None
+    if secondary_bars is None and precomputed_node_input is not None:
+        # [Phase 5] 复用 MFCS 预取的 15m bars（来自 NodeClusterInputProvider），避免重复 MDAS 读取
+        secondary_bars = getattr(precomputed_node_input, "bars_15m", None)
     if secondary_bars is None:
         secondary_bars, _secondary_diag = await _fetch_bars_from_db(
             session, instrument_id, secondary_timeframe, adj, trade_date,
@@ -397,50 +449,72 @@ async def compute_feature_snapshot_for_date(
     # - degraded: history_exhausted=true 且真实历史不足，允许降级计算
     # - unavailable: INPUT_CONTRACT_VIOLATION / INSUFFICIENT_DAILY_BARS / MISSING_15M_BARS
     #   → 禁止生成看似正常的 Profile
-    node_input = await NodeClusterInputProvider.get_inputs(
-        session,
-        instrument_id,
-        adjustment_as_of=trade_date,
-        end_date=trade_date,
-    )
+    #
+    # [CHANGE-20260724-002 Phase 5] 当 precomputed_node_cluster_profile + precomputed_node_input
+    # 同时提供时（盘后统一计算），跳过 NodeClusterInputProvider.get_inputs + Canonical compute，
+    # 直接复用 MarketFeatureComputationService 的预计算结果（Node=1, MDAS 1d/15m 不重复读取）。
     node_cluster_profile: NodeClusterProfileResult | None = None
-    node_availability: str = node_input.availability
-    node_degraded_reason: str | None = node_input.degraded_reason
-    if node_input.availability == "unavailable":
-        # INPUT_CONTRACT_VIOLATION / INSUFFICIENT_DAILY_BARS / MISSING_15M_BARS
-        # 禁止生成 Profile（不调用 Canonical compute）
-        if node_degraded_reason and node_degraded_reason.startswith("INPUT_CONTRACT"):
-            degraded_reasons.append(
-                f"node_cluster: {node_degraded_reason} "
-                f"(daily={node_input.daily_count}/{node_input.daily_requested}, "
-                f"15m={node_input.m15_count}/{node_input.m15_requested})"
-            )
-    else:
-        try:
-            # [CP-13] 经 canonical 调用 node_cluster adapter
-            # 使用 Provider 返回的 250+4000 bars + hash（四链一致）
-            node_cluster_canonical = await CanonicalComputationService.compute(
-                algorithm_id="node_cluster",
-                instrument_id=instrument_id,
-                as_of=trade_date.isoformat(),
-                source_bar_hash=node_input.daily_source_hash,
-                adj_factor_hash=node_input.daily_adj_factor_hash,
-                daily_bars=node_input.daily_bars,
-                bars_15m=node_input.bars_15m,
-                adjustment_as_of=trade_date.isoformat(),
-            )
-            node_cluster_profile = node_cluster_canonical.payload
-        except Exception as exc:
-            logger.warning("Node Cluster engine 计算失败: %s", exc)
-            node_cluster_profile = None
-            node_availability = "unavailable"
-            node_degraded_reason = f"COMPUTE_FAILED: {exc}"
-            degraded_reasons.append(f"node_cluster: engine failed: {exc}")
-        else:
-            if node_cluster_profile is None or not node_cluster_profile.profile_rows:
+    if precomputed_node_cluster_profile is not None and precomputed_node_input is not None:
+        # Phase 5: 复用预计算结果
+        node_input = precomputed_node_input
+        node_cluster_profile = precomputed_node_cluster_profile
+        node_availability = node_input.availability
+        node_degraded_reason = node_input.degraded_reason
+        if node_input.availability == "unavailable":
+            if node_degraded_reason and node_degraded_reason.startswith("INPUT_CONTRACT"):
+                degraded_reasons.append(
+                    f"node_cluster: {node_degraded_reason} "
+                    f"(daily={node_input.daily_count}/{node_input.daily_requested}, "
+                    f"15m={node_input.m15_count}/{node_input.m15_requested})"
+                )
+            elif node_cluster_profile is None or not node_cluster_profile.profile_rows:
                 node_availability = "unavailable"
                 node_degraded_reason = "PROFILE_EMPTY"
-            # else: 使用 Provider 预计算的 availability（available 或 degraded/INSUFFICIENT_15M_HISTORY）
+    else:
+        # 原路径：内部获取 Node input + 计算
+        node_input = await NodeClusterInputProvider.get_inputs(
+            session,
+            instrument_id,
+            adjustment_as_of=trade_date,
+            end_date=trade_date,
+        )
+        node_availability = node_input.availability
+        node_degraded_reason = node_input.degraded_reason
+        if node_input.availability == "unavailable":
+            # INPUT_CONTRACT_VIOLATION / INSUFFICIENT_DAILY_BARS / MISSING_15M_BARS
+            # 禁止生成 Profile（不调用 Canonical compute）
+            if node_degraded_reason and node_degraded_reason.startswith("INPUT_CONTRACT"):
+                degraded_reasons.append(
+                    f"node_cluster: {node_degraded_reason} "
+                    f"(daily={node_input.daily_count}/{node_input.daily_requested}, "
+                    f"15m={node_input.m15_count}/{node_input.m15_requested})"
+                )
+        else:
+            try:
+                # [CP-13] 经 canonical 调用 node_cluster adapter
+                # 使用 Provider 返回的 250+4000 bars + hash（四链一致）
+                node_cluster_canonical = await CanonicalComputationService.compute(
+                    algorithm_id="node_cluster",
+                    instrument_id=instrument_id,
+                    as_of=trade_date.isoformat(),
+                    source_bar_hash=node_input.daily_source_hash,
+                    adj_factor_hash=node_input.daily_adj_factor_hash,
+                    daily_bars=node_input.daily_bars,
+                    bars_15m=node_input.bars_15m,
+                    adjustment_as_of=trade_date.isoformat(),
+                )
+                node_cluster_profile = node_cluster_canonical.payload
+            except Exception as exc:
+                logger.warning("Node Cluster engine 计算失败: %s", exc)
+                node_cluster_profile = None
+                node_availability = "unavailable"
+                node_degraded_reason = f"COMPUTE_FAILED: {exc}"
+                degraded_reasons.append(f"node_cluster: engine failed: {exc}")
+            else:
+                if node_cluster_profile is None or not node_cluster_profile.profile_rows:
+                    node_availability = "unavailable"
+                    node_degraded_reason = "PROFILE_EMPTY"
+                # else: 使用 Provider 预计算的 availability（available 或 degraded/INSUFFICIENT_15M_HISTORY）
 
     # 计算 structural factors
     # [CP-13] 经 canonical 调用 structural_features adapter
@@ -612,10 +686,19 @@ async def compute_feature_snapshot_for_date(
         source_bar_time=source_bar_time_str, extra=extra,
     )
 
-    # [CHANGE-20260724-002 Phase 4] event_freshness_payload
+    # [CHANGE-20260724-002 Phase 4/5] event_freshness_payload
     # 盘后 MarketFeatureComputationService 传入预构建 payload（含 SMC freshness + monitor 事件）。
-    # None 时写入空骨架，保持 v5 结构一致性（daily_structure.smc={} 和 monitor_interaction={}）。
-    if event_freshness_payload is None:
+    # Phase 5: require_event_freshness=True 时（正式 full/after_close 流程），
+    # None 或缺少定义键直接 ValueError，禁止自动写空骨架后继续发布。
+    # unit/sample 模式（require_event_freshness=False）允许 None，写入空骨架。
+    if require_event_freshness:
+        if event_freshness_payload is None:
+            raise ValueError(
+                f"正式流程 require_event_freshness=True 禁止 event_freshness_payload=None: "
+                f"instrument_id={instrument_id} trade_date={trade_date}"
+            )
+        _validate_event_freshness_payload(event_freshness_payload, instrument_id, trade_date)
+    elif event_freshness_payload is None:
         event_freshness_payload = build_empty_event_freshness_payload(
             as_of=trade_date, schema_version=_SCHEMA_VERSION,
         )
@@ -988,6 +1071,261 @@ async def compute_for_trade_date(
         "completed_through": run_diag.get("completed_through"),
         "adjustment_as_of": run_diag.get("adjustment_as_of"),
     }
+
+
+async def compute_for_trade_date_with_mfcs(
+    session: AsyncSession,
+    trade_date: date,
+    instrument_ids: Sequence[uuid.UUID],
+    batch_size: int = 20,
+    failure_threshold: float = 0.3,
+    progress_callback: Callable[..., Awaitable[None]] | None = None,
+    source_run_id: uuid.UUID | None = None,
+    dsa_run_id: uuid.UUID | None = None,
+    strategy_version_id: uuid.UUID | None = None,
+) -> dict[str, Any]:
+    """[CHANGE-20260724-002 Phase 5] 用 MarketFeatureComputationService 统一计算 + 批量事件预取。
+
+    与 compute_for_trade_date 的区别：
+    1. 批次开始时一次性预取所有股票的 monitor 事件（SQL 次数=1，禁止 N+1）
+    2. 每股调用 MFCS.compute_features_for_instrument（compute-once: DSA/SMC/Node 各 1 次）
+    3. snapshot 复用预计算值（MDAS 不重复读取，DSA/SMC/Node 不重复计算）
+    4. require_event_freshness=True（正式 full scope 禁止空壳）
+    5. [Phase 5] 当 dsa_run_id + strategy_version_id 提供时，同一份 MFCS dsa_bundle
+       同时构建 StrategyResult（DSA=1，不调用 runtime.execute），写 strategy_results +
+       更新 strategy_run_items + 更新 run 状态。
+
+    事务边界与 compute_for_trade_date 一致：只 flush 不 commit，caller 决定 commit/rollback。
+    """
+    from app.services.market_feature_computation_service import (
+        MarketFeatureComputationService,
+    )
+
+    total = len(instrument_ids)
+    snapshot_count = 0
+    failed_count = 0
+    run_diag: dict[str, Any] = {}
+
+    # Phase 5 DSA 统计
+    dsa_succeeded = 0
+    dsa_failed = 0
+    dsa_skipped = 0
+    write_dsa = dsa_run_id is not None and strategy_version_id is not None
+
+    # Phase 5: 批次级一次性预取所有股票的 monitor 事件（SQL 次数=1）
+    events_by_instrument = await MarketFeatureComputationService.prefetch_monitor_events(
+        session, list(instrument_ids), trade_date,
+    )
+    logger.info(
+        "[Phase5] 批量预取 monitor 事件完成: trade_date=%s instruments=%d events_groups=%d",
+        trade_date, total, len(events_by_instrument),
+    )
+
+    # Phase 5: 如果有 DSA run，批量查询 symbols + items（SQL 次数=1 each）
+    item_map: dict[uuid.UUID, Any] = {}
+    if write_dsa:
+        from app.models.strategy_run import StrategyRunItem
+
+        assert dsa_run_id is not None  # write_dsa guarantees non-None
+        item_result = await session.execute(
+            select(StrategyRunItem).where(
+                StrategyRunItem.run_id == dsa_run_id,
+                StrategyRunItem.instrument_id.in_(list(instrument_ids)),
+            )
+        )
+        for item in item_result.scalars().all():
+            item_map[item.instrument_id] = item
+
+    for i in range(0, total, batch_size):
+        batch = instrument_ids[i : i + batch_size]
+        batch_dsa_results: list[Any] = []
+
+        for instrument_id in batch:
+            try:
+                # Phase 5: compute-once via MFCS（DSA/SMC/Node 各 1 次，事件用预取）
+                mfcs_result = await MarketFeatureComputationService.compute_features_for_instrument(
+                    session, instrument_id, trade_date,
+                    monitoring_event_context=events_by_instrument.get(instrument_id, []),
+                )
+
+                # 写 snapshot，复用预计算值（MDAS 不重复读取）
+                snapshot = await compute_feature_snapshot_for_date(
+                    session, instrument_id, trade_date,
+                    primary_bars=mfcs_result.bars_daily,
+                    source_run_id=source_run_id,
+                    precomputed_dsa_bundle=mfcs_result.dsa_bundle,
+                    event_freshness_payload=mfcs_result.event_freshness_payload,
+                    precomputed_node_cluster_profile=mfcs_result.node_cluster_profile,
+                    precomputed_node_input=mfcs_result.node_input,
+                    require_event_freshness=True,
+                    _diag_sink=run_diag,
+                )
+                await upsert_snapshot(session, snapshot)
+                snapshot_count += 1
+
+                # Phase 5: 从同一份 MFCS dsa_bundle 构建 StrategyResult（DSA kernel 不重复调用）
+                if write_dsa:
+                    assert strategy_version_id is not None  # write_dsa guarantees non-None
+                    _build_and_collect_strategy_result(
+                        mfcs_result, instrument_id, trade_date,
+                        strategy_version_id, batch_dsa_results,
+                        item_map,
+                    )
+                    if mfcs_result.dsa_bundle is not None and mfcs_result.bars_daily is not None:
+                        dsa_succeeded += 1
+                    else:
+                        dsa_skipped += 1
+
+            except Exception as exc:
+                failed_count += 1
+                dsa_failed += 1
+                logger.error(
+                    "[Phase5] 计算失败 instrument_id=%s trade_date=%s: %s",
+                    instrument_id, trade_date, exc, exc_info=True,
+                )
+                if write_dsa:
+                    _mark_item_failed(item_map, instrument_id, str(exc))
+
+        # Phase 5: 批量写入 DSA results（每批一次）
+        if write_dsa and batch_dsa_results:
+            from app.repositories import strategy_result_repository
+
+            assert dsa_run_id is not None  # write_dsa guarantees non-None
+            assert strategy_version_id is not None  # write_dsa guarantees non-None
+            await strategy_result_repository.write_results(
+                session, dsa_run_id, strategy_version_id, batch_dsa_results,
+            )
+
+        await session.flush()
+
+        if progress_callback is not None:
+            try:
+                await progress_callback(
+                    processed=min(i + len(batch), total),
+                    total=total,
+                    snapshot_count=snapshot_count,
+                    failed_count=failed_count,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[Phase5] progress_callback 失败 trade_date=%s: %s",
+                    trade_date, exc,
+                )
+
+    # Phase 5: 更新 DSA run 状态（succeeded/failed/skipped counts + status）
+    if write_dsa:
+        from datetime import UTC, datetime
+
+        from app.models.strategy_run import StrategyRun
+
+        assert dsa_run_id is not None  # write_dsa guarantees non-None
+        run = await session.get(StrategyRun, dsa_run_id)
+        if run is not None:
+            run.succeeded_count = dsa_succeeded
+            run.failed_count = dsa_failed
+            run.skipped_count = dsa_skipped
+            run.finished_at = datetime.now(UTC)
+            if dsa_failed == 0:
+                run.status = "completed"
+            elif dsa_succeeded > 0:
+                run.status = "partial_failed"
+            else:
+                run.status = "failed"
+            await session.flush()
+
+    if total > 0:
+        failure_rate = failed_count / total
+        if failure_rate > failure_threshold:
+            raise RuntimeError(
+                f"[Phase5] computing_features 失败比例 {failure_rate:.1%} "
+                f"超过阈值 {failure_threshold:.0%} "
+                f"(failed={failed_count}, total={total})"
+            )
+
+    logger.info(
+        "[Phase5] computing_features 批量完成 trade_date=%s snapshot_count=%d failed_count=%d "
+        "dsa_succeeded=%d dsa_failed=%d dsa_skipped=%d",
+        trade_date, snapshot_count, failed_count,
+        dsa_succeeded, dsa_failed, dsa_skipped,
+    )
+
+    return {
+        "snapshot_count": snapshot_count,
+        "failed_count": failed_count,
+        "dsa_succeeded": dsa_succeeded,
+        "dsa_failed": dsa_failed,
+        "dsa_skipped": dsa_skipped,
+        "schema_version": _SCHEMA_VERSION,
+        "trade_date": trade_date.isoformat(),
+        "source_bar_hash": run_diag.get("source_bar_hash"),
+        "adj_factor_hash": run_diag.get("adj_factor_hash"),
+        "market_data_contract_version": run_diag.get("market_data_contract_version"),
+        "completed_through": run_diag.get("completed_through"),
+        "adjustment_as_of": run_diag.get("adjustment_as_of"),
+    }
+
+
+def _build_and_collect_strategy_result(
+    mfcs_result: Any,
+    instrument_id: uuid.UUID,
+    trade_date: date,
+    strategy_version_id: uuid.UUID,
+    batch_dsa_results: list[Any],
+    item_map: dict[uuid.UUID, Any],
+) -> None:
+    """[Phase 5] 从 MFCS dsa_bundle 构建 StrategyResult（DSA kernel 不重复调用）。
+
+    与 DSASelector.execute 语义对齐：
+    - dsa_bundle 非空 → matched=True, metrics=last_row_metrics + last_close
+    - dsa_bundle 为 None → skipped (no_data)
+
+    同时更新 strategy_run_items 状态。
+    """
+    from datetime import UTC, datetime
+
+    if mfcs_result.dsa_bundle is not None and mfcs_result.bars_daily is not None:
+        from app.strategy.runtime import StrategyResult
+
+        metrics = dict(mfcs_result.dsa_bundle.get("last_row_metrics", {}))
+        try:
+            metrics["last_close"] = float(mfcs_result.bars_daily["close"].iloc[-1])
+        except (IndexError, KeyError, TypeError):
+            pass
+        result = StrategyResult(
+            instrument_id=instrument_id,
+            strategy_version_id=strategy_version_id,
+            trade_date=trade_date,
+            matched=True,
+            metrics=metrics,
+            calculation_id=uuid.uuid4().hex,
+        )
+        batch_dsa_results.append(result)
+        item = item_map.get(instrument_id)
+        if item is not None:
+            item.status = "succeeded"
+            item.finished_at = datetime.now(UTC)
+    else:
+        item = item_map.get(instrument_id)
+        if item is not None:
+            item.status = "skipped"
+            item.reason_code = "no_data"
+            item.finished_at = datetime.now(UTC)
+
+
+def _mark_item_failed(
+    item_map: dict[uuid.UUID, Any],
+    instrument_id: uuid.UUID,
+    error: str,
+) -> None:
+    """[Phase 5] 标记 strategy_run_item 为 failed。"""
+    from datetime import UTC, datetime
+
+    item = item_map.get(instrument_id)
+    if item is not None:
+        item.status = "failed"
+        item.reason_code = "compute_error"
+        item.error_message = error[:500]
+        item.finished_at = datetime.now(UTC)
 
 
 # =============================================================================

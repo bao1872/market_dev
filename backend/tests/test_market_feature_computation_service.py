@@ -155,6 +155,7 @@ class TestMarketFeatureResultStructure:
             "instrument_id",
             "trade_date",
             "bars_daily",
+            "node_input",
             "primary_source_bar_hash",
             "primary_adj_factor_hash",
             "dsa_bundle",

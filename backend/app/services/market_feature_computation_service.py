@@ -68,6 +68,8 @@ class MarketFeatureResult:
     trade_date: date
     # 预计算 bars（供 snapshot 复用）
     bars_daily: pd.DataFrame | None
+    # 预计算 Node input（含 15m bars + 诊断 hash，供 snapshot 复用避免重复 MDAS 读取）
+    node_input: Any | None
     # 诊断 hash（供 canonical result_hash 一致性）
     primary_source_bar_hash: str | None
     primary_adj_factor_hash: str | None
@@ -101,6 +103,7 @@ class MarketFeatureComputationService:
         trade_date: date,
         *,
         monitoring_event_types: list[str] | None = None,
+        monitoring_event_context: list[dict[str, Any]] | None = None,
     ) -> MarketFeatureResult:
         """单股 compute-once 计算。
 
@@ -109,6 +112,9 @@ class MarketFeatureComputationService:
             instrument_id: 股票 ID
             trade_date: 业务交易日
             monitoring_event_types: 监控事件类型列表（None 用默认 4 类）
+            monitoring_event_context: 预取的 monitor 事件列表（Phase 5 批量预取）。
+                非空时跳过 batch_latest_events 查询，直接用预取事件聚合。
+                None 时内部调用 batch_latest_events（单股查询，仅用于 standalone/测试）。
 
         Returns:
             MarketFeatureResult（含所有预计算结果）
@@ -141,19 +147,29 @@ class MarketFeatureComputationService:
         )
 
         # 4. 获取 Node Cluster input + 计算
-        node_profile, node_avail, node_reason = await cls._compute_node_cluster(
-            session, instrument_id, trade_date,
+        node_profile, node_avail, node_reason, node_input = (
+            await cls._compute_node_cluster(session, instrument_id, trade_date)
         )
 
         # 5. 构建 SMC daily freshness（从预计算 SMC DTO，不调 kernel）
         current_index = len(bars_daily) - 1
         smc_daily_freshness = build_smc_daily_freshness(smc_dto, bars_daily, current_index)
 
-        # 6. 批量查询 monitor events + 聚合
-        monitor_event_freshness = await cls._build_monitor_event_freshness(
-            session, instrument_id, trade_date,
-            monitoring_event_types, bars_daily,
-        )
+        # 6. monitor event freshness（用预取事件或内部查询）
+        if monitoring_event_context is not None:
+            # Phase 5: 批量预取模式，跳过 DB 查询（SQL 次数=0 per stock）
+            trading_calendar = _build_trading_calendar(bars_daily)
+            monitor_event_freshness = aggregate_latest_monitor_events(
+                monitoring_event_context,
+                as_of=trade_date,
+                trading_calendar=trading_calendar,
+            )
+        else:
+            # Standalone/测试模式：内部查询（N+1，仅用于非编排场景）
+            monitor_event_freshness = await cls._build_monitor_event_freshness(
+                session, instrument_id, trade_date,
+                monitoring_event_types, bars_daily,
+            )
 
         # 7. 组装 event_freshness_payload
         event_freshness_payload = build_empty_event_freshness_payload(as_of=trade_date)
@@ -164,6 +180,7 @@ class MarketFeatureComputationService:
             instrument_id=instrument_id,
             trade_date=trade_date,
             bars_daily=bars_daily,
+            node_input=node_input,
             primary_source_bar_hash=primary_source_bar_hash,
             primary_adj_factor_hash=primary_adj_factor_hash,
             dsa_bundle=dsa_bundle,
@@ -177,6 +194,48 @@ class MarketFeatureComputationService:
         )
 
     # ---- 内部方法 ----
+
+    @staticmethod
+    async def prefetch_monitor_events(
+        session: AsyncSession,
+        instrument_ids: list[UUID],
+        trade_date: date,
+        event_types: list[str] | None = None,
+    ) -> dict[UUID, list[dict[str, Any]]]:
+        """Phase 5: 批次级一次性预取所有股票的 monitor 事件（SQL 次数=1）。
+
+        返回 instrument_id → events 列表映射，供每股 compute_features_for_instrument 复用。
+        禁止在每股循环内调用 batch_latest_events（N+1）。
+
+        Args:
+            session: 异步 DB 会话
+            instrument_ids: 本批全部股票 ID
+            trade_date: 业务交易日
+            event_types: 事件类型（None 用默认 4 类）
+
+        Returns:
+            dict[instrument_id, list[events]] 映射
+        """
+        if not instrument_ids:
+            return {}
+
+        types = event_types or DEFAULT_MONITOR_EVENT_TYPES
+        end_time = datetime.combine(trade_date, time(23, 59, 59), tzinfo=_SHANGHAI)
+
+        raw_events = await batch_latest_events(
+            session,
+            instrument_ids=instrument_ids,
+            event_types=types,
+            end_time=end_time,
+        )
+
+        # 按 instrument_id 分组
+        events_by_instrument: dict[UUID, list[dict[str, Any]]] = {}
+        for event in raw_events:
+            inst_id = event["instrument_id"]
+            events_by_instrument.setdefault(inst_id, []).append(event)
+
+        return events_by_instrument
 
     @staticmethod
     async def _read_daily_bars(
@@ -261,11 +320,12 @@ class MarketFeatureComputationService:
         session: AsyncSession,
         instrument_id: UUID,
         trade_date: date,
-    ) -> tuple[NodeClusterProfileResult | None, str, str | None]:
+    ) -> tuple[NodeClusterProfileResult | None, str, str | None, Any | None]:
         """获取 Node Cluster input + 计算（一次）。
 
         Returns:
-            (profile, availability, degraded_reason)
+            (profile, availability, degraded_reason, node_input)
+            node_input 供 snapshot 复用（含 15m bars + 诊断 hash），避免重复 MDAS 读取。
         """
         try:
             node_input = await NodeClusterInputProvider.get_inputs(
@@ -273,7 +333,7 @@ class MarketFeatureComputationService:
                 adjustment_as_of=trade_date, end_date=trade_date,
             )
             if node_input.availability == "unavailable":
-                return None, "unavailable", node_input.degraded_reason
+                return None, "unavailable", node_input.degraded_reason, node_input
 
             canonical = await CanonicalComputationService.compute(
                 algorithm_id="node_cluster",
@@ -287,11 +347,11 @@ class MarketFeatureComputationService:
             )
             profile = canonical.payload
             if profile is None or not profile.profile_rows:
-                return None, "unavailable", "PROFILE_EMPTY"
-            return profile, node_input.availability, node_input.degraded_reason
+                return None, "unavailable", "PROFILE_EMPTY", node_input
+            return profile, node_input.availability, node_input.degraded_reason, node_input
         except Exception as exc:
             logger.warning("Node Cluster 计算失败 instrument_id=%s: %s", instrument_id, exc)
-            return None, "unavailable", f"COMPUTE_FAILED: {exc}"
+            return None, "unavailable", f"COMPUTE_FAILED: {exc}", None
 
     @staticmethod
     async def _build_monitor_event_freshness(
@@ -336,6 +396,7 @@ class MarketFeatureComputationService:
             instrument_id=instrument_id,
             trade_date=trade_date,
             bars_daily=None,
+            node_input=None,
             primary_source_bar_hash=source_bar_hash,
             primary_adj_factor_hash=adj_factor_hash,
             dsa_bundle=None,
