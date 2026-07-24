@@ -2,7 +2,7 @@
    data-principles.js — 指标原理页专用脚本
    作用域：IIFE，仅在 #consensusSvg 存在时初始化（即 data.html）
    来源：ref/panji_indicator_principles_demo.html，移植为独立文件
-   规则：默认不自动播放；不依赖外部 CDN；不污染全局
+   规则：默认自动播放（prefers-reduced-motion 除外）；不依赖外部 CDN；不污染全局
    ========================================================================== */
 (function () {
   'use strict';
@@ -293,24 +293,110 @@
     q('sMetrics').innerHTML = d.metrics ? '<div class="ip-metric"><span>候选拐点</span><strong>' + sData.candidates.length + '</strong></div><div class="ip-metric"><span>保留结构点</span><strong>' + sData.filtered.length + '</strong></div><div class="ip-metric"><span>最近关键高点</span><strong>' + (sData.lastHigh ? fmt(sData.lastHigh.p) : '—') + '</strong></div><div class="ip-metric"><span>最近关键低点</span><strong>' + (sData.lastLow ? fmt(sData.lastLow.p) : '—') + '</strong></div>' : '';
   }
 
-  // setupPlayer: 默认不自动播放（playing=false，仅 draw(0)）
+  // setupPlayer: 默认自动播放状态机（CHANGE-20260724-002）
+  // 状态分离：
+  //   wantsPlay        — 用户播放意图（默认 true，除非 prefers-reduced-motion 或用户点击暂停）
+  //   inViewport       — 动画区域是否在视口中（IntersectionObserver，35% 阈值）
+  //   documentVisible  — 页面是否可见（visibilitychange）
+  //   timer            — 当前 setInterval 句柄，仅在三者全为 true 时创建
+  // 行为：
+  //   1. 页面加载后默认播放意图；初始按钮显示「暂停」图标，aria-label="暂停自动播放"
+  //   2. 每步停留 6000ms，最后一步循环回第一步
+  //   3. 手动切换（上一步/下一步/步骤按钮）后保持播放意图并重新开始本步计时
+  //   4. 用户点击暂停后 wantsPlay=false；再次点击恢复
+  //   5. 页面隐藏 → 停止计时；恢复可见时仅在 wantsPlay=true 时继续
+  //   6. IntersectionObserver 离开视口 → 停止计时但不改变 wantsPlay；再次进入后继续
+  //   7. 不支持 IntersectionObserver 时视为始终在视口内
+  //   8. prefers-reduced-motion: reduce 时默认不自动轮播，手动控制仍可用
+  var STEP_MS = 6000;
+  var reducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
   function setupPlayer(prefix, steps, render) {
-    var index = 0, playing = false, timer = null; var play = q(prefix + 'Play');
-    function draw(i, manual) { index = (i + steps.length) % steps.length; render(index); if (manual && playing) restart(); }
-    function restart() { clearInterval(timer); if (playing) timer = setInterval(function () { draw(index + 1); }, 6200); }
+    var index = 0;
+    var wantsPlay = !reducedMotion; // 默认播放意图（reduced-motion 时不自动轮播）
+    var inViewport = false;          // IntersectionObserver 设置
+    var documentVisible = !document.hidden;
+    var timer = null;
+    var play = q(prefix + 'Play');
+
+    function syncPlayButton() {
+      if (wantsPlay) {
+        play.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><path d="M9 7v10M15 7v10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+        play.setAttribute('aria-label', '暂停自动播放');
+      } else {
+        play.innerHTML = '<svg viewBox="0 0 24 24"><path d="m9 7 8 5-8 5Z" fill="currentColor"/></svg>';
+        play.setAttribute('aria-label', '开始自动播放');
+      }
+    }
+
+    function clearTimer() {
+      if (timer !== null) { clearInterval(timer); timer = null; }
+    }
+
+    function restart() {
+      clearTimer();
+      // 仅在三者全为 true 时创建 timer
+      if (wantsPlay && inViewport && documentVisible) {
+        timer = setInterval(function () { draw(index + 1); }, STEP_MS);
+      }
+    }
+
+    function draw(i, manual) {
+      index = (i + steps.length) % steps.length; // 循环回绕
+      render(index);
+      if (manual) {
+        // 手动切换后保持播放意图并重新开始本步计时
+        restart();
+      }
+    }
+
     q(prefix + 'Prev').addEventListener('click', function () { draw(index - 1, true); });
     q(prefix + 'Next').addEventListener('click', function () { draw(index + 1, true); });
     play.addEventListener('click', function () {
-      playing = !playing;
-      play.innerHTML = playing ? '<svg viewBox="0 0 24 24" fill="none"><path d="M9 7v10M15 7v10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>' : '<svg viewBox="0 0 24 24"><path d="m9 7 8 5-8 5Z" fill="currentColor"/></svg>';
-      play.setAttribute('aria-label', playing ? '暂停自动播放' : '开始自动播放');
+      wantsPlay = !wantsPlay;
+      syncPlayButton();
       restart();
     });
     var stepBtns = q(prefix + 'Steps').querySelectorAll('.ip-step-btn');
-    for (var i = 0; i < stepBtns.length; i++) stepBtns[i].addEventListener('click', function (ev) { draw(Number(ev.currentTarget.dataset.step), true); });
+    for (var i = 0; i < stepBtns.length; i++) {
+      stepBtns[i].addEventListener('click', function (ev) { draw(Number(ev.currentTarget.dataset.step), true); });
+    }
+
+    // IntersectionObserver：进入视口 35% 后运行，离开后暂停计时但不改变 wantsPlay
+    var lab = q(prefix + 'Steps') ? q(prefix + 'Steps').closest('.ip-lab') : null;
+    if (lab && 'IntersectionObserver' in window) {
+      var io = new IntersectionObserver(function (entries) {
+        for (var k = 0; k < entries.length; k++) {
+          if (entries[k].target === lab) {
+            inViewport = entries[k].intersectionRatio >= 0.35;
+            restart();
+          }
+        }
+      }, { threshold: [0, 0.35, 1] });
+      io.observe(lab);
+    } else {
+      // 不支持 IntersectionObserver 时视为始终在视口内
+      inViewport = true;
+    }
+
+    syncPlayButton();
     draw(0);
-    return function () { clearInterval(timer); };
+    // 初始若已在视口内则启动计时（IntersectionObserver 回调异步触发，这里做一次兜底）
+    if (inViewport && documentVisible && wantsPlay) restart();
+
+    return {
+      stop: function () { clearTimer(); },
+      onVisibilityChange: function () {
+        documentVisible = !document.hidden;
+        restart();
+      },
+    };
   }
-  var stopC = setupPlayer('c', cSteps, renderConsensus), stopS = setupPlayer('s', sSteps, renderStructure);
-  document.addEventListener('visibilitychange', function () { if (document.hidden) { stopC(); stopS(); } });
+
+  var playerC = setupPlayer('c', cSteps, renderConsensus);
+  var playerS = setupPlayer('s', sSteps, renderStructure);
+  document.addEventListener('visibilitychange', function () {
+    playerC.onVisibilityChange();
+    playerS.onVisibilityChange();
+  });
 })();
