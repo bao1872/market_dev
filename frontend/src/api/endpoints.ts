@@ -2358,6 +2358,12 @@ export interface SystemOverview {
     lease_expires_at: string | null
     // [AfterClose] - 最后成功步骤（断点检查点）
     last_completed_step: string | null
+    // [Phase8A] - 计划启动时间（16:00 调度创建时写入）
+    scheduled_at: string | null
+    // [Phase8A] - 实际启动时间（Worker 领取时写入）
+    started_at: string | null
+    // [Phase8A] - 当前执行步骤（与 orchestrator_status 同义，便于前端直接读取）
+    current_step: string | null
   }
 }
 

@@ -388,15 +388,13 @@ async def test_execute_with_checkpoint_skips_refresh_daily(db_session) -> None:
     mock_refresh.assert_not_called()
 
     # 验证后续阶段正常执行
+    # [Phase 5] 旧 waiting_dsa_worker/quality_gate/feature_snapshot 已收敛为 computing_features
     from app.services.job_run_event_service import list_events
     events = await list_events(db_session, job_run.id, limit=20)
     steps = [e.step for e in events]
 
-    assert AfterCloseRunStatus.WAITING_DSA_WORKER.value in steps, (
-        f"应执行 waiting_dsa_worker 阶段: {steps}"
-    )
-    assert AfterCloseRunStatus.QUALITY_GATE.value in steps, (
-        f"应执行 quality_gate 阶段: {steps}"
+    assert AfterCloseRunStatus.COMPUTING_FEATURES.value in steps, (
+        f"应执行 computing_features 阶段: {steps}"
     )
     assert AfterCloseRunStatus.PUBLISHING.value in steps, (
         f"应执行 publishing 阶段: {steps}"

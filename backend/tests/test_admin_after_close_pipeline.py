@@ -278,27 +278,30 @@ async def test_pipeline_running_current_step(
     admin_user: User,
     db_session: AsyncSession,
 ):
-    """after_close running 且处于 feature_snapshot 步骤 → 当前 step 正确。"""
+    """[Phase8A] after_close running 且处于 computing_features 步骤 → 当前 step 正确。
+
+    旧 feature_snapshot/quality_gate 已收敛为 computing_features（6 步状态机）。
+    """
     now = datetime(2026, 6, 24, 18, 0, tzinfo=SHANGHAI)
     started_at = now - timedelta(minutes=10)
 
     job_run = _make_after_close_job_run(
         status=STATUS_RUNNING,
-        orchestrator_status=AfterCloseRunStatus.FEATURE_SNAPSHOT.value,
-        last_completed_step=AfterCloseRunStatus.QUALITY_GATE.value,
+        orchestrator_status=AfterCloseRunStatus.COMPUTING_FEATURES.value,
+        last_completed_step=AfterCloseRunStatus.CHECKING_COVERAGE.value,
         started_at=started_at,
         heartbeat_at=now - timedelta(seconds=30),
     )
     db_session.add(job_run)
     await db_session.flush()
 
-    # 写入 feature_snapshot 步骤事件
+    # 写入 computing_features 步骤事件
     db_session.add(
         JobRunEvent(
             job_run_id=job_run.id,
-            step=AfterCloseRunStatus.FEATURE_SNAPSHOT.value,
+            step=AfterCloseRunStatus.COMPUTING_FEATURES.value,
             level="info",
-            message="开始 feature snapshot",
+            message="开始 computing features",
             payload={"snapshot_count": 10},
             created_at=started_at + timedelta(minutes=5),
         )
@@ -318,10 +321,10 @@ async def test_pipeline_running_current_step(
     data = resp.json()
     assert data["overall_status"] == "running"
     assert data["after_close_run"]["status"] == STATUS_RUNNING
-    assert data["after_close_run"]["orchestrator_status"] == AfterCloseRunStatus.FEATURE_SNAPSHOT.value
+    assert data["after_close_run"]["orchestrator_status"] == AfterCloseRunStatus.COMPUTING_FEATURES.value
 
     steps = {step["step"]: step for step in data["steps"]}
-    assert steps[AfterCloseRunStatus.FEATURE_SNAPSHOT.value]["status"] == "running"
+    assert steps[AfterCloseRunStatus.COMPUTING_FEATURES.value]["status"] == "running"
     assert steps[AfterCloseRunStatus.REFRESHING_DAILY.value]["status"] == "completed"
     assert steps[AfterCloseRunStatus.PUBLISHING.value]["status"] == "pending"
     assert steps["watchlist_ready"]["status"] == "pending"
@@ -336,14 +339,14 @@ async def test_pipeline_interrupted_with_running_snapshot(
     admin_user: User,
     db_session: AsyncSession,
 ):
-    """orchestrator 已中断但 snapshot_run 仍在 running，第 6 步应显示 running 并标记失联。"""
+    """[Phase8A] orchestrator 已中断但 snapshot_run 仍在 running，computing_features 步骤应显示 running 并标记失联。"""
     now = datetime(2026, 6, 24, 18, 0, tzinfo=SHANGHAI)
     started_at = now - timedelta(minutes=60)
 
     job_run = _make_after_close_job_run(
         status="interrupted",
         orchestrator_status="interrupted",
-        last_completed_step=AfterCloseRunStatus.QUALITY_GATE.value,
+        last_completed_step=AfterCloseRunStatus.CHECKING_COVERAGE.value,
         started_at=started_at,
         finished_at=now - timedelta(minutes=30),
         heartbeat_at=now - timedelta(minutes=35),
@@ -387,8 +390,8 @@ async def test_pipeline_interrupted_with_running_snapshot(
     assert data["feature_snapshot_lost_contact"] is True
 
     steps = {step["step"]: step for step in data["steps"]}
-    assert steps[AfterCloseRunStatus.FEATURE_SNAPSHOT.value]["status"] == "running"
-    assert steps[AfterCloseRunStatus.QUALITY_GATE.value]["status"] == "completed"
+    assert steps[AfterCloseRunStatus.COMPUTING_FEATURES.value]["status"] == "running"
+    assert steps[AfterCloseRunStatus.CHECKING_COVERAGE.value]["status"] == "completed"
     assert steps[AfterCloseRunStatus.PUBLISHING.value]["status"] == "pending"
     assert steps["watchlist_ready"]["status"] == "pending"
 

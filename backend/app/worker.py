@@ -40,7 +40,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import AsyncSessionLocal
 from app.models.scheduler_job_run import SchedulerJobRun
-from app.models.strategy_run import StrategyRun
 from app.services.scheduler_job_run_recovery_service import (
     auto_resume_interrupted_after_close_runs,
     recover_stale_scheduler_job_runs,
@@ -326,79 +325,6 @@ async def run_delivery_worker() -> None:
         await asyncio.sleep(WORKER_INTERVAL)
 
 
-async def _maybe_trigger_after_close_orchestrator(
-    db: AsyncSession,
-    run: StrategyRun,
-) -> None:
-    """[AfterCloseAutoTrigger] - DSA scheduled 完成后自动触发盘后编排。
-
-    仅当 strategy_key == 'dsa_selector' 时触发。
-    create_after_close_run 是幂等的：同 trade_date 已有 queued/running 任务时返回已有任务。
-
-    异常处理：触发失败仅记录日志，不传播异常，避免影响 worker 主流程
-    （execute_run 已完成，auto-trigger 失败不应导致 worker 崩溃）。
-
-    Args:
-        db: 异步数据库会话（execute_run 已 commit，session 干净）
-        run: 已完成的 StrategyRun
-    """
-    from sqlalchemy import select
-
-    from app.constants.strategy_keys import DSA_SELECTOR
-    from app.models.strategy import StrategyDefinition, StrategyVersion
-    from app.services.after_close_orchestrator import create_after_close_run
-
-    # 查询 strategy_key（通过 strategy_version_id 关联）
-    stmt = (
-        select(StrategyDefinition.strategy_key)
-        .select_from(StrategyRun)
-        .join(
-            StrategyVersion,
-            StrategyRun.strategy_version_id == StrategyVersion.id,
-        )
-        .join(
-            StrategyDefinition,
-            StrategyVersion.strategy_definition_id == StrategyDefinition.id,
-        )
-        .where(StrategyRun.id == run.id)
-    )
-    result = await db.execute(stmt)
-    strategy_key = result.scalar_one_or_none()
-
-    if strategy_key != DSA_SELECTOR:
-        return
-
-    trade_date = run.trade_date
-    if trade_date is None:
-        logger.warning(
-            "[AfterCloseAutoTrigger] DSA run 缺少 trade_date，跳过: run_id=%s",
-            run.id,
-        )
-        return
-
-    try:
-        job_run, is_new = await create_after_close_run(db=db, trade_date=trade_date)
-        if is_new:
-            logger.info(
-                "[AfterCloseAutoTrigger] DSA 完成后自动触发盘后编排: "
-                "dsa_run_id=%s, trade_date=%s, after_close_run_id=%s",
-                run.id, trade_date, job_run.id,
-            )
-        else:
-            logger.info(
-                "[AfterCloseAutoTrigger] 盘后编排任务已存在（幂等）: "
-                "dsa_run_id=%s, trade_date=%s, after_close_run_id=%s, status=%s",
-                run.id, trade_date, job_run.id, job_run.status,
-            )
-    except Exception as exc:
-        # 触发失败不传播异常：execute_run 已完成，auto-trigger 失败不应影响 worker
-        logger.exception(
-            "[AfterCloseAutoTrigger] 触发盘后编排失败（不影响 worker 主流程）: "
-            "dsa_run_id=%s, trade_date=%s, error=%s",
-            run.id, trade_date, exc,
-        )
-
-
 async def run_strategy_batch_worker() -> None:
     """策略批量计算 Worker：轮询 queued 状态的运行并执行。
 
@@ -454,10 +380,10 @@ async def run_strategy_batch_worker() -> None:
                     "策略批量计算完成: run_id=%s, status=%s",
                     run.id, run.status,
                 )
-                # [AfterCloseAutoTrigger] - DSA scheduled 完成后自动触发盘后编排
-                # 仅对 scheduled + completed 的 run 触发，manual run 或失败 run 不触发
-                if run.status == "completed" and run.run_type == "scheduled":
-                    await _maybe_trigger_after_close_orchestrator(db, run)
+                # [Phase8A] 删除 _maybe_trigger_after_close_orchestrator 自动触发路径：
+                # 旧路径在 DSA completed 后才创建 after-close run（倒序），
+                # Phase8A 改为 16:00/18:30 先创建 after-close run，orchestrator 内部创建 DSA。
+                # manual DSA 和非 DSA selector 仍由 strategy_batch worker 正常执行。
         except Exception as exc:
             logger.exception("Strategy Batch Worker 异常: %s", exc)
             # 异常时回滚，等待下次轮询重试
@@ -486,11 +412,8 @@ async def run_bars_scheduler_worker() -> None:
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.cron import CronTrigger
 
-    from app.services.bars_scheduler_service import BarsSchedulerService
-
     _hb_task = asyncio.create_task(_heartbeat_loop("bars_scheduler"))
     scheduler = AsyncIOScheduler()
-    service = BarsSchedulerService()
 
     # 启动时恢复过期 running 任务
     try:
@@ -503,9 +426,18 @@ async def run_bars_scheduler_worker() -> None:
         logger.exception("Bars Scheduler 启动恢复异常: %s", exc)
 
     async def scheduled_bars_refresh() -> None:
-        """定时任务：每日 16:00 刷新全市场多周期行情。"""
+        """[Phase8A] 定时任务：每日 16:00 创建/复用盘后编排任务。
+
+        Phase8A 变更：16:00 不再直接刷新行情和触发 DSA，而是创建 after-close run。
+        行情刷新、DSA 创建、特征计算、发布等全部由 after-close orchestrator 统一编排，
+        避免双路径（bars_scheduler 直接触发 DSA vs orchestrator 内部创建 DSA）造成的
+        重复执行和 race condition。
+
+        幂等：create_after_close_run 内部基于 run_key 去重，18:30 兜底重复调用安全。
+        """
         from datetime import date as date_cls
 
+        from app.services.after_close_orchestrator import create_after_close_run
         from app.services.calendar_service import is_trading_day_async
 
         trade_date = date_cls.today()
@@ -515,122 +447,29 @@ async def run_bars_scheduler_worker() -> None:
             is_trading = await is_trading_day_async(session, trade_date)
 
         if not is_trading:
-            logger.info("非交易日 %s，跳过行情刷新", trade_date)
+            logger.info("非交易日 %s，跳过盘后编排创建", trade_date)
             return
 
-        logger.info("交易日 %s，开始行情刷新", trade_date)
-        job_run = None
-        heartbeat_task_ref: asyncio.Task | None = None
+        logger.info("交易日 %s，16:00 创建/复用盘后编排任务", trade_date)
         try:
             async with AsyncSessionLocal() as db:
-                # [BarsScheduler] - scheduled_at 为 CronTrigger 计划时间（16:00），不等于 started_at
-                scheduled_at = datetime.combine(
-                    trade_date, time(16, 0), tzinfo=ZoneInfo("Asia/Shanghai")
-                )
-                job_run = await _create_job_run(
-                    db, "bars_scheduler", str(trade_date), scheduled_at=scheduled_at,
-                    run_key=f"bars_scheduler:{trade_date}",
-                )
-                if job_run is None:
-                    logger.info("bars_scheduler SKIPPED_DUPLICATE business_date=%s", trade_date)
-                    return
-                # [JobRunEvent] - 任务开始写入 START 事件
-                from app.services.job_run_event_service import append_event
-                await append_event(
-                    db=db,
-                    job_run_id=job_run.id,
-                    step="START",
-                    level="info",
-                    message="开始更新日线",
-                )
-                await db.commit()
-
-            # 行情刷新耗时约 1.8 小时，后台每 30 秒更新心跳与租约
-            async def _bars_heartbeat_loop() -> None:
-                while True:
-                    await asyncio.sleep(30)
-                    async with AsyncSessionLocal() as db:
-                        if job_run is not None:
-                            await _update_job_heartbeat(db, job_run)
-
-            heartbeat_task_ref = asyncio.create_task(_bars_heartbeat_loop())
-            # [JobRunEvent] - 传入 job_run_id 让 service 在日线阶段完成后写 DAILY_DONE/DSA_CREATED
-            result = await service.refresh_all_instruments(
-                trade_date, job_run_id=job_run.id,
-            )
-            if heartbeat_task_ref is not None:
-                heartbeat_task_ref.cancel()
-                try:
-                    await heartbeat_task_ref
-                except asyncio.CancelledError:
-                    pass
-            logger.info(
-                "定时任务完成: total=%d succeeded=%d failed=%d period_counts=%s",
-                result.total, result.succeeded, result.failed, result.period_counts,
-            )
-            if job_run is not None:
-                async with AsyncSessionLocal() as db:
-                    job_run = await db.get(SchedulerJobRun, job_run.id)
-                    if job_run is not None:
-                        # [BarsScheduler] - 记录 strategy_run_id 和 last_bar_time 到 metadata_json
-                        meta: dict[str, object] = {}
-                        if result.dsa_run_id is not None:
-                            meta["strategy_run_id"] = str(result.dsa_run_id)
-                        # 查询业务日最新 15min bar 的 trade_time 作为 last_bar_time
-                        try:
-                            from datetime import date as date_cls
-
-                            from sqlalchemy import func as sa_func
-                            from sqlalchemy import select as sa_select
-
-                            from app.models.bar import Bar15Min
-
-                            bd = job_run.business_date
-                            if bd:
-                                bd_date = date_cls.fromisoformat(bd)
-                                latest_bt = await db.scalar(
-                                    sa_select(sa_func.max(Bar15Min.trade_time)).where(
-                                        Bar15Min.trade_time >= bd_date,
-                                        Bar15Min.trade_time < bd_date + timedelta(days=1),
-                                    )
-                                )
-                                if latest_bt is not None:
-                                    meta["last_bar_time"] = latest_bt.isoformat()
-                        except Exception as exc:
-                            logger.debug("查询 latest bar trade_time 失败: %s", exc)
-                        if meta:
-                            job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
-                        await _finish_job_run(
-                            db, job_run, "succeeded",
-                            success_count=result.succeeded,
-                            failure_count=result.failed,
-                        )
-        except Exception as exc:
-            logger.exception("定时任务异常: %s", exc)
-            if heartbeat_task_ref is not None:
-                heartbeat_task_ref.cancel()
-                try:
-                    await heartbeat_task_ref
-                except asyncio.CancelledError:
-                    pass
-            if job_run is not None:
-                async with AsyncSessionLocal() as db:
-                    # [JobRunEvent] - 任务失败写入 ERROR 事件（含 traceback）
-                    import traceback as tb_mod
-
-                    from app.services.job_run_event_service import append_event
-                    await append_event(
-                        db=db,
-                        job_run_id=job_run.id,
-                        step="ERROR",
-                        level="error",
-                        message=str(exc)[:500],
-                        payload={
-                            "traceback": tb_mod.format_exc()[:4000],
-                            "error_type": type(exc).__name__,
-                        },
+                job_run, is_new = await create_after_close_run(db=db, trade_date=trade_date)
+                if is_new:
+                    logger.info(
+                        "[BarsScheduler] 16:00 已创建盘后编排任务: run_id=%s, trade_date=%s",
+                        job_run.id, trade_date,
                     )
-                    await _finish_job_run(db, job_run, "failed", error_message=str(exc)[:500])
+                else:
+                    logger.info(
+                        "[BarsScheduler] 16:00 盘后编排任务已存在（幂等）: "
+                        "run_id=%s, trade_date=%s, status=%s",
+                        job_run.id, trade_date, job_run.status,
+                    )
+        except Exception as exc:
+            logger.exception(
+                "[BarsScheduler] 16:00 创建盘后编排任务失败: trade_date=%s, error=%s",
+                trade_date, exc,
+            )
 
     # 每日 16:00 触发（含非交易日，由内部交易日历判断是否执行）
     scheduler.add_job(
@@ -767,9 +606,17 @@ async def run_strategy_scheduler_worker() -> None:
         logger.exception("Strategy Scheduler 启动恢复异常: %s", exc)
 
     async def scheduled_strategy_run() -> None:
-        """定时任务：每日 18:30 为所有 selector 策略创建/复用 queued run（兜底）。"""
+        """[Phase8A] 定时任务：每日 18:30 兜底创建/复用 after-close run + 非 DSA selector run。
+
+        Phase8A 变更：
+        - DSA_SELECTOR: 创建/复用 after-close run（幂等，16:00 已创建则跳过）
+          DSA 由 after-close orchestrator 内部创建和 inline claim，不再直接创建 DSA batch_run
+        - 非 DSA selector: 仍走原 strategy_batch worker 路径创建 batch_run
+        """
         from datetime import date as date_cls
 
+        from app.constants.strategy_keys import DSA_SELECTOR
+        from app.services.after_close_orchestrator import create_after_close_run
         from app.services.calendar_service import is_trading_day_async
 
         trade_date = date_cls.today()
@@ -830,25 +677,43 @@ async def run_strategy_scheduler_worker() -> None:
                 strategy_run_ids: list[str] = []
                 for idx, strategy_key in enumerate(strategy_keys):
                     try:
-                        # create_batch_run 内部统一处理新建/复用/重试
-                        run = await service.create_batch_run(
-                            db=db,
-                            strategy_key=strategy_key,
-                            trade_date=trade_date,
-                            run_type="scheduled",
-                        )
-                        await db.commit()
-                        strategy_run_ids.append(str(run.id))
-                        # [StrategyScheduler] - 无论新建还是复用，均记录 strategy_run_id
-                        job_run.metadata_json = json.dumps({
-                            "strategy_run_id": str(run.id),
-                            "strategy_run_ids": strategy_run_ids,
-                        })
-                        await db.commit()
-                        logger.info(
-                            "策略 %s 创建/复用 run 成功: run_id=%s",
-                            strategy_key, run.id,
-                        )
+                        if strategy_key == DSA_SELECTOR:
+                            # [Phase8A] DSA 走 after-close orchestrator 路径
+                            # 创建/复用 after-close run（幂等），DSA 由 orchestrator 内部创建
+                            after_close_run, is_new = await create_after_close_run(
+                                db=db, trade_date=trade_date,
+                            )
+                            await db.commit()
+                            strategy_run_ids.append(str(after_close_run.id))
+                            job_run.metadata_json = json.dumps({
+                                "after_close_run_id": str(after_close_run.id),
+                                "strategy_run_ids": strategy_run_ids,
+                            })
+                            await db.commit()
+                            logger.info(
+                                "[StrategyScheduler] DSA after-close run 创建/复用: "
+                                "run_id=%s, is_new=%s, trade_date=%s",
+                                after_close_run.id, is_new, trade_date,
+                            )
+                        else:
+                            # 非 DSA selector: 仍走原 strategy_batch worker 路径
+                            run = await service.create_batch_run(
+                                db=db,
+                                strategy_key=strategy_key,
+                                trade_date=trade_date,
+                                run_type="scheduled",
+                            )
+                            await db.commit()
+                            strategy_run_ids.append(str(run.id))
+                            job_run.metadata_json = json.dumps({
+                                "strategy_run_id": str(run.id),
+                                "strategy_run_ids": strategy_run_ids,
+                            })
+                            await db.commit()
+                            logger.info(
+                                "策略 %s 创建/复用 run 成功: run_id=%s",
+                                strategy_key, run.id,
+                            )
                         succeeded += 1
                     except ValueError as exc:
                         # 非交易日/数据未就绪/策略无可用版本
