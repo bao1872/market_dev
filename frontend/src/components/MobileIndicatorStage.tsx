@@ -199,7 +199,7 @@ export default function MobileIndicatorStage({
       </section>
 
       {/* ===== 底部二维码入口 + 免责声明 =====
-          [CHANGE-20260724-001] 三类 indicator_view 共用同一二维码页脚：
+          [CHANGE-20260724-002] 三类 indicator_view 共用同一二维码页脚：
             - node_cluster / bollinger / smc 正常成功截图均显示 guide-card
             - loading / error / mismatch 状态不渲染此页脚（由上方 state !== null 提前 return）
             - QR 指向 /portal/pages/data.html（指标原理页）

@@ -94,7 +94,7 @@ test('2b. 真实微信二维码已替换占位图', () => {
   }
 })
 
-test('2c. 指标原理页二维码静态资源存在（CHANGE-20260724-001）', () => {
+test('2c. 指标原理页二维码静态资源存在（CHANGE-20260724-002）', () => {
   // 二维码图片必须存在且为非空真实 PNG
   const qrPath = join(PORTAL_DIR, 'assets/images/indicator-principles-qr.png')
   assert.ok(existsSync(qrPath), 'indicator-principles-qr.png 应存在')
@@ -106,7 +106,7 @@ test('2c. 指标原理页二维码静态资源存在（CHANGE-20260724-001）', 
   assert.ok(stat.slice(0, 8).equals(pngSig), 'indicator-principles-qr.png 应为合法 PNG 文件')
 })
 
-test('2d. 指标原理页专用 CSS/JS 资源存在（CHANGE-20260724-001）', () => {
+test('2d. 指标原理页专用 CSS/JS 资源存在（CHANGE-20260724-002）', () => {
   // 页面专用 CSS/JS 必须独立文件，不在 data.html 中堆放全局样式
   assertExists('assets/css/data-principles.css')
   assertExists('assets/js/data-principles.js')
@@ -120,7 +120,7 @@ test('2d. 指标原理页专用 CSS/JS 资源存在（CHANGE-20260724-001）', (
     'data-principles.js 必须使用 IIFE 封装，不污染全局作用域')
 })
 
-test('2e. data.html 整合指标原理页且不破坏门户脚手架（CHANGE-20260724-001）', () => {
+test('2e. data.html 整合指标原理页且不破坏门户脚手架（CHANGE-20260724-002）', () => {
   const html = readText('pages/data.html')
   // 保留门户公共导航与 site.css/site.js
   assert.ok(html.includes('assets/css/site.css'), 'data.html 必须保留公共 site.css')

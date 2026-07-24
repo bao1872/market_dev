@@ -643,13 +643,13 @@ test('global.scss mobile-stage 元素字号符合 PROMPT.md §5.3.4 规范表', 
 })
 
 // ============================================================================
-// [CHANGE-20260724-001] MobileIndicatorStage 二维码页脚契约测试
+// [CHANGE-20260724-002] MobileIndicatorStage 二维码页脚契约测试
 // 三类 indicator_view (node_cluster / bollinger / smc) 共用同一二维码页脚
 // 仅正常成功截图显示二维码区域；loading/error/mismatch 状态不渲染此页脚
 // ============================================================================
 
 // ===== 26. MobileIndicatorStage 正常态包含二维码页脚 DOM 结构 =====
-test('MobileIndicatorStage 正常态包含二维码页脚 DOM 结构（CHANGE-20260724-001）', () => {
+test('MobileIndicatorStage 正常态包含二维码页脚 DOM 结构（CHANGE-20260724-002）', () => {
   const src = readSource(MOBILE_STAGE_PATH)
   // 页脚容器
   assert.ok(/className="mobile-stage-footer"/.test(src),
@@ -672,7 +672,7 @@ test('MobileIndicatorStage 正常态包含二维码页脚 DOM 结构（CHANGE-20
 })
 
 // ===== 27. 二维码图片路径 + 主文案精确匹配 =====
-test('MobileIndicatorStage 二维码图片路径与主文案精确匹配（CHANGE-20260724-001）', () => {
+test('MobileIndicatorStage 二维码图片路径与主文案精确匹配（CHANGE-20260724-002）', () => {
   const src = readSource(MOBILE_STAGE_PATH)
   // QR 图片必须使用项目本地静态资源路径
   assert.ok(
@@ -702,7 +702,7 @@ test('MobileIndicatorStage 二维码图片路径与主文案精确匹配（CHANG
 })
 
 // ===== 28. loading/error/mismatch 状态不渲染二维码页脚 =====
-test('MobileIndicatorStage loading/error/mismatch 状态不渲染二维码页脚（CHANGE-20260724-001）', () => {
+test('MobileIndicatorStage loading/error/mismatch 状态不渲染二维码页脚（CHANGE-20260724-002）', () => {
   const src = readSource(MOBILE_STAGE_PATH)
   // state !== null 时提前 return（不渲染 footer）
   // 校验：在 state !== null 的 if 块的 return 之前不出现 mobile-stage-footer
@@ -721,7 +721,7 @@ test('MobileIndicatorStage loading/error/mismatch 状态不渲染二维码页脚
 })
 
 // ===== 29. global.scss 二维码页脚几何参数符合规范 =====
-test('global.scss 二维码页脚几何参数符合规范（CHANGE-20260724-001）', () => {
+test('global.scss 二维码页脚几何参数符合规范（CHANGE-20260724-002）', () => {
   const scss = readSource(GLOBAL_SCSS_PATH)
   // .mobile-stage-chart-card bottom 必须为 430px（压缩图表高度，非简单覆盖）
   const chartCardM = scss.match(/\.mobile-stage-chart-card\s*\{([\s\S]*?)\}/)
@@ -755,7 +755,7 @@ test('global.scss 二维码页脚几何参数符合规范（CHANGE-20260724-001�
 })
 
 // ===== 30. 三类 indicator_view 共用同一二维码页脚（非分别修改） =====
-test('三类 indicator_view 共用 MobileIndicatorStage 二维码页脚（CHANGE-20260724-001）', () => {
+test('三类 indicator_view 共用 MobileIndicatorStage 二维码页脚（CHANGE-20260724-002）', () => {
   const src = readSource(MOBILE_STAGE_PATH)
   // MobileIndicatorStage 不按 indicatorView 分支渲染 footer
   // 校验：footer 渲染不依赖 indicatorView 条件判断

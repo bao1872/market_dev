@@ -45,7 +45,7 @@ const DEFAULT_CAPTURE_INDICATOR_VIEW: IndicatorView = 'node_cluster'
 // [MobileIndicatorStage] 图表区域高度常量
 // 几何推导（与 global.scss 中 .mobile-stage-chart-card / .mobile-stage-chart-viewport 对齐）：
 //   stage-h (2560) - chart-card.top (262) - chart-card.bottom (430) - chart-head.height (112) = 1756
-//   [CHANGE-20260724-001] chart-card.bottom 从 240 调整为 430，为二维码 guide-card 页脚留出空间
+//   [CHANGE-20260724-002] chart-card.bottom 从 240 调整为 430，为二维码 guide-card 页脚留出空间
 // 当 isCaptureMode && 在 mobile-stage 内时，StrategyChart 工具栏通过 CSS 隐藏，
 // canvas-wrap 占满 chart-viewport 全高度。
 const MOBILE_STAGE_CHART_HEIGHT = 1756

@@ -183,7 +183,17 @@
     q('cMetrics').innerHTML = d.metrics ? '<div class="ip-metric"><span>共识中心</span><strong>' + fmt(cData.main.center) + '</strong></div><div class="ip-metric"><span>主要区域占比</span><strong>' + (cData.main.volume / cData.totalVolume * 100).toFixed(1) + '%</strong></div><div class="ip-metric"><span>下边界</span><strong>' + fmt(cData.main.low) + '</strong></div><div class="ip-metric"><span>上边界</span><strong>' + fmt(cData.main.high) + '</strong></div>' : '';
   }
 
-  var structureRaw = [100, 101, 100.6, 102, 101.7, 104, 103.5, 106, 105.4, 104.8, 105.2, 103.8, 104.2, 102, 103, 102.5, 105, 104.4, 107, 106.5, 110, 109.3, 108.6, 109, 107.5, 108.2, 105, 106.1, 105.5, 108, 107.4, 111, 110.4, 114, 113.2, 112.6, 113.0, 111.5, 112.1, 109, 110.2, 109.8, 112, 111.4, 115, 114.2, 118, 117.1, 116.2, 116.8, 115.1, 116.0, 113, 114.0, 113.6, 116, 115.5, 119, 118.2, 121.7];
+  // [CHANGE-20260724-002] 教学脱敏数据：上升段(100→115) + 下降段(115→100) + 上升段(100→121.7)
+  // 设计目的：让 zigzag(.025) 过滤后的标签算法真实生成 HH/HL/LH/LL 四种标签，
+  // 与页面"标注关系"步骤的说明文案保持一致。不修改生产指标算法，仅门户教学动画。
+  var structureRaw = [
+    // 上升段1：100 → 115（20点，含小回调，生成 H/L/HH/HL）
+    100, 102, 104, 106, 108, 106, 104, 103, 105, 108, 110, 112, 110, 108, 106, 108, 110, 112, 114, 115,
+    // 下降段：115 → 100（24点，含小反弹，生成 LH/LL）
+    114, 113, 112, 111, 110, 109, 110, 111, 112, 110, 108, 106, 105, 106, 107, 108, 107, 106, 105, 104, 103, 102, 101, 100,
+    // 上升段2：100 → 121.7（16点，配合情景判断的向上突破演示）
+    101, 102, 104, 106, 108, 110, 112, 114, 116, 118, 120, 121.7, 121, 121.5, 121.7, 121
+  ];
 
   function localExtrema(arr) { var pts = []; for (var i = 1; i < arr.length - 1; i++) { if ((arr[i] > arr[i - 1] && arr[i] >= arr[i + 1]) || (arr[i] < arr[i - 1] && arr[i] <= arr[i + 1])) pts.push(i); } return pts; }
   function zigzag(arr, threshold) {

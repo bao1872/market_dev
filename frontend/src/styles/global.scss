@@ -3294,7 +3294,7 @@ button.switch {
 // ===== 主图卡片（移植自 panji .chart-card） =====
 // 布局：left:34px right:34px top:262px bottom:430px
 //   内含 chart-head (height 112px) + chart-viewport (top:112px bottom:0)
-//   [CHANGE-20260724-001] bottom 调整为 430px（原 240px），为二维码 guide-card 页脚留出独立空间
+//   [CHANGE-20260724-002] bottom 调整为 430px（原 240px），为二维码 guide-card 页脚留出独立空间
 //   几何推导：2560 - 262(top) - 430(bottom) - 112(chart-head) = 1756 = MOBILE_STAGE_CHART_HEIGHT
 .mobile-stage-chart-card {
   position: absolute;
@@ -3371,7 +3371,7 @@ button.switch {
   }
 }
 
-// ===== 底部二维码入口 + 风险提示（CHANGE-20260724-001） =====
+// ===== 底部二维码入口 + 风险提示（CHANGE-20260724-002） =====
 // 布局：left:44px right:44px bottom:25px
 //   mobile-stage-footer 包含 guide-card + risk-notice 两块
 //   guide-card：二维码 + 主文案「扫码了解原理和解读方法」+ 辅助文案 + SVG 趋势线装饰
@@ -3413,7 +3413,7 @@ button.switch {
   }
 }
 
-// ===== 二维码引导卡（CHANGE-20260724-001） =====
+// ===== 二维码引导卡（CHANGE-20260724-002） =====
 // 几何：height 286px，grid 232px / 1fr / 270px
 //   绿色低亮度描边 + 深色渐变背景，不覆盖 K线/成交量/价格轴/筹码分布/时间轴
 .mobile-stage-guide-card {
