@@ -641,3 +641,142 @@ test('global.scss mobile-stage 元素字号符合 PROMPT.md §5.3.4 规范表', 
   assert.ok(moduleLabel !== null && moduleLabel >= 30 && moduleLabel <= 34,
     `模块标签字号必须在 30-34px（实际 ${moduleLabel}）`)
 })
+
+// ============================================================================
+// [CHANGE-20260724-001] MobileIndicatorStage 二维码页脚契约测试
+// 三类 indicator_view (node_cluster / bollinger / smc) 共用同一二维码页脚
+// 仅正常成功截图显示二维码区域；loading/error/mismatch 状态不渲染此页脚
+// ============================================================================
+
+// ===== 26. MobileIndicatorStage 正常态包含二维码页脚 DOM 结构 =====
+test('MobileIndicatorStage 正常态包含二维码页脚 DOM 结构（CHANGE-20260724-001）', () => {
+  const src = readSource(MOBILE_STAGE_PATH)
+  // 页脚容器
+  assert.ok(/className="mobile-stage-footer"/.test(src),
+    'MobileIndicatorStage 必须包含 <footer className="mobile-stage-footer">')
+  // 引导卡
+  assert.ok(/className="mobile-stage-guide-card"/.test(src),
+    'MobileIndicatorStage 必须包含 <section className="mobile-stage-guide-card">')
+  // 二维码容器
+  assert.ok(/className="mobile-stage-guide-qr"/.test(src),
+    'MobileIndicatorStage 必须包含 <div className="mobile-stage-guide-qr">')
+  // 文案容器
+  assert.ok(/className="mobile-stage-guide-copy"/.test(src),
+    'MobileIndicatorStage 必须包含 <div className="mobile-stage-guide-copy">')
+  // 装饰容器
+  assert.ok(/className="mobile-stage-guide-visual"/.test(src),
+    'MobileIndicatorStage 必须包含 <div className="mobile-stage-guide-visual">')
+  // 风险提示
+  assert.ok(/className="mobile-stage-risk-notice"/.test(src),
+    'MobileIndicatorStage 必须包含 <div className="mobile-stage-risk-notice">')
+})
+
+// ===== 27. 二维码图片路径 + 主文案精确匹配 =====
+test('MobileIndicatorStage 二维码图片路径与主文案精确匹配（CHANGE-20260724-001）', () => {
+  const src = readSource(MOBILE_STAGE_PATH)
+  // QR 图片必须使用项目本地静态资源路径
+  assert.ok(
+    src.includes('src="/portal/assets/images/indicator-principles-qr.png"'),
+    'MobileIndicatorStage 二维码 img src 必须为 /portal/assets/images/indicator-principles-qr.png（本地静态资源）',
+  )
+  // 禁止第三方二维码服务
+  assert.ok(
+    !/https?:\/\/(api\.qrserver|qrserver|quickchart|googleapis|chart\?)/.test(src),
+    'MobileIndicatorStage 禁止请求第三方二维码服务',
+  )
+  // 主文案必须严格为「扫码了解原理和解读方法」
+  assert.ok(
+    src.includes('扫码了解原理和解读方法'),
+    'MobileIndicatorStage 主文案必须包含「扫码了解原理和解读方法」',
+  )
+  // 禁止营销或投资引导含义文案
+  const forbiddenCopy = ['扫码关注', '获取信号', '查看买卖点', '立即购买', '加入会员']
+  for (const bad of forbiddenCopy) {
+    assert.ok(!src.includes(bad), `MobileIndicatorStage 禁止出现营销文案：${bad}`)
+  }
+  // 免责声明文案
+  assert.ok(
+    src.includes('内容仅做科普，不构成投资建议'),
+    'MobileIndicatorStage 必须包含免责声明「内容仅做科普，不构成投资建议」',
+  )
+})
+
+// ===== 28. loading/error/mismatch 状态不渲染二维码页脚 =====
+test('MobileIndicatorStage loading/error/mismatch 状态不渲染二维码页脚（CHANGE-20260724-001）', () => {
+  const src = readSource(MOBILE_STAGE_PATH)
+  // state !== null 时提前 return（不渲染 footer）
+  // 校验：在 state !== null 的 if 块的 return 之前不出现 mobile-stage-footer
+  const stateBlockM = src.match(/if\s*\(\s*state\s*!==\s*null\s*\)\s*\{([\s\S]*?)\n\s*\}/)
+  assert.ok(stateBlockM, 'MobileIndicatorStage 必须有 state !== null 提前 return 分支')
+  const stateBlock = stateBlockM[1]
+  assert.ok(
+    !/mobile-stage-footer/.test(stateBlock) && !/mobile-stage-guide-card/.test(stateBlock),
+    'loading/error/mismatch 状态分支不得渲染二维码页脚（mobile-stage-footer / mobile-stage-guide-card）',
+  )
+  // 校验 footer 在 state !== null 分支之后（正常态渲染）
+  const footerIdx = src.indexOf('mobile-stage-footer')
+  const stateReturnIdx = src.indexOf('return', src.indexOf('state !== null'))
+  assert.ok(footerIdx > stateReturnIdx,
+    'mobile-stage-footer 必须在 state !== null 分支之后（仅正常态渲染）')
+})
+
+// ===== 29. global.scss 二维码页脚几何参数符合规范 =====
+test('global.scss 二维码页脚几何参数符合规范（CHANGE-20260724-001）', () => {
+  const scss = readSource(GLOBAL_SCSS_PATH)
+  // .mobile-stage-chart-card bottom 必须为 430px（压缩图表高度，非简单覆盖）
+  const chartCardM = scss.match(/\.mobile-stage-chart-card\s*\{([\s\S]*?)\}/)
+  assert.ok(chartCardM, 'global.scss 必须定义 .mobile-stage-chart-card')
+  const chartCardBlock = chartCardM[1]
+  assert.ok(/bottom:\s*430px/.test(chartCardBlock),
+    '.mobile-stage-chart-card bottom 必须为 430px（为二维码页脚留出空间，压缩图表可用高度）')
+  // .mobile-stage-footer 几何
+  const footerM = scss.match(/\.mobile-stage-footer\s*\{([\s\S]*?)\}/)
+  assert.ok(footerM, 'global.scss 必须定义 .mobile-stage-footer')
+  const footerBlock = footerM[1]
+  assert.ok(/left:\s*44px/.test(footerBlock), '.mobile-stage-footer left 必须为 44px')
+  assert.ok(/right:\s*44px/.test(footerBlock), '.mobile-stage-footer right 必须为 44px')
+  assert.ok(/bottom:\s*25px/.test(footerBlock), '.mobile-stage-footer bottom 必须为 25px')
+  // .mobile-stage-guide-card 高度 286px + 圆角约 30px + 绿色描边
+  const guideM = scss.match(/\.mobile-stage-guide-card\s*\{([\s\S]*?)\}/)
+  assert.ok(guideM, 'global.scss 必须定义 .mobile-stage-guide-card')
+  const guideBlock = guideM[1]
+  assert.ok(/height:\s*286px/.test(guideBlock), '.mobile-stage-guide-card height 必须为 286px')
+  assert.ok(/border-radius:\s*30px/.test(guideBlock), '.mobile-stage-guide-card border-radius 必须约 30px')
+  // 绿色低亮度描边（rgba 含绿色通道或 #00e2b8 系）
+  assert.ok(
+    /rgba\(\s*0\s*,\s*226\s*,\s*184/.test(guideBlock) || /#00e2b8/.test(guideBlock),
+    '.mobile-stage-guide-card 必须使用绿色低亮度描边',
+  )
+  // 二维码图片 image-rendering: pixelated（SCSS 嵌套：img 在 .mobile-stage-guide-qr 内）
+  const qrBlockM = scss.match(/\.mobile-stage-guide-qr\s*\{([\s\S]*?)^}/m)
+  assert.ok(qrBlockM, 'global.scss 必须定义 .mobile-stage-guide-qr 样式块')
+  assert.ok(/image-rendering:\s*pixelated/.test(qrBlockM[1]),
+    '.mobile-stage-guide-qr 块内必须设置 image-rendering: pixelated（保持二维码清晰）')
+})
+
+// ===== 30. 三类 indicator_view 共用同一二维码页脚（非分别修改） =====
+test('三类 indicator_view 共用 MobileIndicatorStage 二维码页脚（CHANGE-20260724-001）', () => {
+  const src = readSource(MOBILE_STAGE_PATH)
+  // MobileIndicatorStage 不按 indicatorView 分支渲染 footer
+  // 校验：footer 渲染不依赖 indicatorView 条件判断
+  const footerSection = src.slice(
+    src.indexOf('mobile-stage-footer'),
+    src.indexOf('</footer>') + '</footer>'.length,
+  )
+  assert.ok(
+    !/indicatorView\s*===/.test(footerSection),
+    '二维码页脚不得按 indicatorView 分支渲染（三类视图共用同一页脚）',
+  )
+  // CaptureStockPage 三种 indicator_view 都通过同一 MobileIndicatorStage 输出
+  const captureSrc = readSource(CAPTURE_PAGE_PATH)
+  assert.ok(
+    /<MobileIndicatorStage[\s\S]*?indicatorView=\{indicatorView\}/.test(captureSrc),
+    'CaptureStockPage 必须通过 <MobileIndicatorStage indicatorView={indicatorView}> 统一输出三种视图',
+  )
+  // CaptureStockPage MOBILE_STAGE_CHART_HEIGHT 与 chart-card bottom=430 对齐
+  // 几何：2560 - 262(top) - 430(bottom) - 112(chart-head) = 1756
+  const heightM = captureSrc.match(/MOBILE_STAGE_CHART_HEIGHT\s*=\s*(\d+)/)
+  assert.ok(heightM, 'CaptureStockPage 必须定义 MOBILE_STAGE_CHART_HEIGHT')
+  assert.equal(heightM[1], '1756',
+    `MOBILE_STAGE_CHART_HEIGHT 必须为 1756（2560-262-430-112，与 chart-card bottom=430 对齐），实际: ${heightM[1]}`)
+})

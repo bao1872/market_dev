@@ -198,12 +198,39 @@ export default function MobileIndicatorStage({
         </div>
       </section>
 
-      {/* ===== 底部免责声明（精简为单行）===== */}
-      <div className="mobile-stage-footer">
+      {/* ===== 底部二维码入口 + 免责声明 =====
+          [CHANGE-20260724-001] 三类 indicator_view 共用同一二维码页脚：
+            - node_cluster / bollinger / smc 正常成功截图均显示 guide-card
+            - loading / error / mismatch 状态不渲染此页脚（由上方 state !== null 提前 return）
+            - QR 指向 /portal/pages/data.html（指标原理页）
+            - 主文案严格为「扫码了解原理和解读方法」，不带营销或投资引导含义
+          几何：footer left/right 44, bottom 25; guide-card height 286; risk-notice 在 guide-card 下方 */}
+      <footer className="mobile-stage-footer">
+        <section className="mobile-stage-guide-card" aria-label="指标原理解读入口">
+          <div className="mobile-stage-guide-qr">
+            <img
+              src="/portal/assets/images/indicator-principles-qr.png"
+              alt="扫码进入盘迹指标原理页"
+            />
+          </div>
+
+          <div className="mobile-stage-guide-copy">
+            <strong>扫码了解原理和解读方法</strong>
+            <span>查看指标原理页</span>
+          </div>
+
+          <div className="mobile-stage-guide-visual" aria-hidden="true">
+            <svg viewBox="0 0 270 170" fill="none">
+              <path d="M8 142L52 122L84 129L119 94L151 104L184 56L216 64L258 20" stroke="rgba(0,226,184,.23)" strokeWidth="3" />
+              <path d="M8 142L52 122L84 129L119 94L151 104L184 56L216 64L258 20" stroke="rgba(0,226,184,.55)" strokeWidth="1.5" strokeDasharray="2 10" />
+            </svg>
+          </div>
+        </section>
+
         <div className="mobile-stage-risk-notice" aria-label="内容声明">
           <span>内容仅做科普，不构成投资建议</span>
         </div>
-      </div>
+      </footer>
     </div>
   )
 }

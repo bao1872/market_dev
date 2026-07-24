@@ -343,3 +343,15 @@
   - stamp 写入 3 个字段
   - find 识别 NULL / 旧算法版本 / 旧对账版本
   - 当前版本不被识别 / 非 active 排除 / 混合场景
+
+### CHANGE-20260724-002 指标原理页 + 二维码页脚契约测试
+- `frontend/scripts/contract-tests/portal-static.test.ts`（新增 3 个测试 2c/2d/2e）：
+  - 2c: indicator-principles-qr.png 存在 + PNG 签名校验
+  - 2d: data-principles.css/js 存在 + .indicator-principles-page 作用域 + IIFE 封装
+  - 2e: data.html 保留 site.css/site.js + 引入 data-principles.css/js + 筹码共识 6 步 + 价格结构 5 步 + HH/HL/LH/LL + 结构延续/失效 + 无 CDN
+- `frontend/scripts/contract-tests/capture-stock-page.test.ts`（新增 5 个测试 26-30）：
+  - 26: MobileIndicatorStage 正常态包含 footer/guide-card/guide-qr/guide-copy/guide-visual/risk-notice DOM
+  - 27: QR 路径 /portal/assets/images/indicator-principles-qr.png + 主文案"扫码了解原理和解读方法" + 禁止营销文案 + 免责声明
+  - 28: loading/error/mismatch 状态不渲染二维码页脚（state !== null 提前 return）
+  - 29: global.scss 几何参数（chart-card bottom 430px / footer 44px/25px / guide-card 286px/30px / pixelated）
+  - 30: 三类 indicator_view 共用 footer + MOBILE_STAGE_CHART_HEIGHT=1756
