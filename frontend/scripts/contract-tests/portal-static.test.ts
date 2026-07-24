@@ -157,6 +157,44 @@ test('2e. data.html 整合指标原理页且不破坏门户脚手架（CHANGE-20
     'data.html 禁止依赖外部 CDN（cdn/unpkg/jsdelivr/cdnjs）')
 })
 
+test('2f. data.html 紧凑头部与导航卡布局（CHANGE-20260724-002 布局精简）', () => {
+  const html = readText('pages/data.html')
+  // 旧 .ip-hero 大面积介绍区必须不存在
+  assert.ok(!/class="[^"]*ip-hero/.test(html),
+    'data.html 不应残留旧 ip-hero 介绍区')
+  // 被删除的两段冗余文案必须不存在
+  assert.ok(!/不是把结果['"]?亮出来/.test(html),
+    'data.html 不应残留"不是把结果亮出来"文案')
+  assert.ok(!/新版动画沿着['"]?原始输入/.test(html),
+    'data.html 不应残留"新版动画沿着原始输入"文案')
+  // 新紧凑头部必须存在
+  assert.ok(html.includes('class="ip-page-head"'),
+    'data.html 必须包含 ip-page-head 紧凑头部')
+  assert.ok(html.includes('class="ip-page-title"'),
+    'data.html 必须包含 ip-page-title')
+  assert.ok(html.includes('class="ip-page-note"'),
+    'data.html 必须包含 ip-page-note')
+  assert.ok(html.includes('核心指标'),
+    'data.html 必须包含"核心指标"副标题')
+  assert.ok(html.includes('筹码共识 · 价格结构'),
+    'data.html 必须包含"筹码共识 · 价格结构"描述')
+  assert.ok(html.includes('教学示意'),
+    'data.html 必须包含"教学示意"说明')
+  // 导航卡必须指向 #consensus 与 #structure
+  assert.ok(/class="[^"]*ip-nav-card[^"]*"[^>]*href="#consensus"/.test(html),
+    'data.html 必须存在指向 #consensus 的导航卡')
+  assert.ok(/class="[^"]*ip-nav-card[^"]*"[^>]*href="#structure"/.test(html),
+    'data.html 必须存在指向 #structure 的导航卡')
+  // 导航卡使用 <a> 标签（可访问、支持键盘）
+  assert.ok(html.includes('ip-nav-cards'),
+    'data.html 必须包含 ip-nav-cards 导航卡容器')
+  // 导航卡文案符合要求
+  assert.ok(html.includes('市场主要在哪里成交'),
+    'data.html 筹码共识导航卡必须包含"市场主要在哪里成交"')
+  assert.ok(html.includes('行情怎样运行到这里'),
+    'data.html 价格结构导航卡必须包含"行情怎样运行到这里"')
+})
+
 test('3. SOURCE.md 记录 zip 来源与 SHA256', () => {
   const src = readText('SOURCE.md')
   assert.ok(src.includes('盘迹门户_完整版_Logo与需求摘要修正版.zip'), 'SOURCE.md 缺少 zip 名称')

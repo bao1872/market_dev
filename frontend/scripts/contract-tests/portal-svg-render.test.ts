@@ -54,6 +54,7 @@ function createDomMock() {
       removeEventListener() {},
       querySelectorAll() { return [] },
       querySelector() { return null },
+      closest() { return null }, // setupPlayer 使用 closest('.ip-lab')
     }
     Object.defineProperty(el, 'textContent', {
       get() { return el._textContent ?? '' },
@@ -87,13 +88,25 @@ function createDomMock() {
   const globalThis_ = globalThis as any
   const origSetInterval = globalThis_.setInterval
   const origClearInterval = globalThis_.clearInterval
+  const origMatchMedia = globalThis_.matchMedia
+  const origWindow = globalThis_.window
+
+  // window mock（matchMedia 用于 prefers-reduced-motion 检测）
+  const windowMock = {
+    matchMedia() { return { matches: false, addEventListener() {}, removeEventListener() {} } },
+  }
+  globalThis_.matchMedia = windowMock.matchMedia
+  globalThis_.window = windowMock
 
   return {
     document: documentMock,
+    window: windowMock,
     textContents,
     restore() {
       globalThis_.setInterval = origSetInterval
       globalThis_.clearInterval = origClearInterval
+      globalThis_.matchMedia = origMatchMedia
+      globalThis_.window = origWindow
     },
   }
 }
@@ -101,16 +114,16 @@ function createDomMock() {
 test('结构 SVG 渲染后真实包含 HH/HL/LH/LL 四种标签（CHANGE-20260724-002）', () => {
   const js = readFileSync(JS_PATH, 'utf8')
 
-  const { document, textContents, restore } = createDomMock()
+  const { document, window, textContents, restore } = createDomMock()
 
   // mock setInterval/clearInterval（setupPlayer 调用）
   ;(globalThis as any).setInterval = () => 0
   ;(globalThis as any).clearInterval = () => {}
 
   try {
-    // 用 new Function 在沙箱中执行整个 IIFE 文件，注入 document
-    const exec = new Function('document', js)
-    exec(document)
+    // 用 new Function 在沙箱中执行整个 IIFE 文件，注入 document 和 window
+    const exec = new Function('document', 'window', js)
+    exec(document, window)
   } finally {
     restore()
   }
@@ -132,13 +145,13 @@ test('结构 SVG 渲染后真实包含 HH/HL/LH/LL 四种标签（CHANGE-2026072
 test('结构 SVG 渲染后标签集合至少包含 4 种不同标签类型', () => {
   const js = readFileSync(JS_PATH, 'utf8')
 
-  const { document, textContents, restore } = createDomMock()
+  const { document, window, textContents, restore } = createDomMock()
   ;(globalThis as any).setInterval = () => 0
   ;(globalThis as any).clearInterval = () => {}
 
   try {
-    const exec = new Function('document', js)
-    exec(document)
+    const exec = new Function('document', 'window', js)
+    exec(document, window)
   } finally {
     restore()
   }

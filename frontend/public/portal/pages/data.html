@@ -43,18 +43,36 @@
 
   <div class="breadcrumb">帮助中心 / <strong>指标原理</strong></div>
 
-  <section class="ip-hero">
-    <div>
-      <h1>不是把结果“亮出来”，而是解释数据<em>如何变成指标</em></h1>
-      <p>新版动画沿着“原始输入 → 数据转换 → 中间结果 → 指标输出 → 可观察状态”逐步推进。用户可以暂停、回退和点击任意步骤，明确看到每个结论从哪里来。</p>
+  <header class="ip-page-head">
+    <div class="ip-page-title">
+      <span class="ip-page-eyebrow">核心指标</span>
+      <h1>指标原理</h1>
+      <p>筹码共识 · 价格结构</p>
     </div>
-    <div class="ip-hero-note"><strong>重要说明</strong>本页使用脱敏教学数据演示指标关系，重点解释计算逻辑与观察方法；动画中的简化分配和分组仅用于帮助理解，不披露或替代生产系统的具体参数。</div>
-  </section>
+    <div class="ip-page-note">
+      <strong>教学示意</strong>
+      <span>用于理解计算逻辑，不披露生产参数</span>
+    </div>
+  </header>
 
-  <section class="ip-overview" id="overview" aria-label="两个指标概览">
-    <article class="ip-overview-card"><span class="ip-overview-no">01</span><h2>筹码共识</h2><p>把按时间排列的价格和成交量，转换为按价格排列的成交分布，再识别主要成交聚集区。</p><span class="question">回答：市场主要在哪里成交？</span></article>
-    <article class="ip-overview-card"><span class="ip-overview-no">02</span><h2>价格结构</h2><p>从原始价格路径中标记候选拐点，过滤噪声，保留阶段高低点，再判断关键关系是否延续。</p><span class="question">回答：行情怎样运行到这里？</span></article>
-  </section>
+  <nav class="ip-overview ip-nav-cards" id="overview" aria-label="两个指标导航">
+    <a class="ip-overview-card ip-nav-card" href="#consensus">
+      <span class="ip-overview-no">01</span>
+      <div class="ip-nav-body">
+        <h2>筹码共识</h2>
+        <span class="ip-nav-question">市场主要在哪里成交</span>
+      </div>
+      <span class="ip-nav-arrow" aria-hidden="true">→</span>
+    </a>
+    <a class="ip-overview-card ip-nav-card" href="#structure">
+      <span class="ip-overview-no">02</span>
+      <div class="ip-nav-body">
+        <h2>价格结构</h2>
+        <span class="ip-nav-question">行情怎样运行到这里</span>
+      </div>
+      <span class="ip-nav-arrow" aria-hidden="true">→</span>
+    </a>
+  </nav>
 
   <section class="ip-section" id="consensus">
     <div class="ip-section-head"><h2>筹码共识：从成交数据到共识区</h2><p>关键不是“出现一个绿色区域”，而是看清成交量如何从时间轴转移到价格轴。</p></div>
