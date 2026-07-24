@@ -662,19 +662,22 @@ async def _compute_after_close_orchestrator_summary(
     """[AfterClose] - 查询当日 after_close_orchestrator job_run 摘要字段。
 
     供系统概览返回 job_run_id / orchestrator_status / heartbeat_at /
-    lease_expires_at / last_completed_step，使前端能：
+    lease_expires_at / last_completed_step / scheduled_at / started_at /
+    current_step，使前端能：
     - 进入任务详情（GET /admin/after-close-runs/{id}）
     - 断点继续 / 重试 / 强制执行
     - 判断冲突任务（创建按钮禁用条件）
     - 识别 worker 离线（heartbeat_at 过期）
+    - [Phase8A] 区分计划启动时间(scheduled_at)与实际启动时间(started_at)
 
     Args:
         db: 异步数据库会话
         business_date_str: 业务日期字符串（YYYY-MM-DD）
 
     Returns:
-        含 5 个字段的字典（无任务时均为 None）：
-        job_run_id / orchestrator_status / heartbeat_at / lease_expires_at / last_completed_step
+        含 8 个字段的字典（无任务时均为 None）：
+        job_run_id / orchestrator_status / heartbeat_at / lease_expires_at /
+        last_completed_step / scheduled_at / started_at / current_step
     """
     empty = {
         "job_run_id": None,
@@ -682,6 +685,9 @@ async def _compute_after_close_orchestrator_summary(
         "heartbeat_at": None,
         "lease_expires_at": None,
         "last_completed_step": None,
+        "scheduled_at": None,
+        "started_at": None,
+        "current_step": None,
     }
     stmt = (
         select(SchedulerJobRun)
@@ -709,9 +715,11 @@ async def _compute_after_close_orchestrator_summary(
                 job_run.id, exc,
             )
 
+    orchestrator_status = meta.get("orchestrator_status")
+    # [Phase8A] current_step = orchestrator_status（当前执行步骤）
     return {
         "job_run_id": str(job_run.id),
-        "orchestrator_status": meta.get("orchestrator_status"),
+        "orchestrator_status": orchestrator_status,
         "heartbeat_at": (
             job_run.heartbeat_at.isoformat() if job_run.heartbeat_at else None
         ),
@@ -719,6 +727,15 @@ async def _compute_after_close_orchestrator_summary(
             job_run.lease_expires_at.isoformat() if job_run.lease_expires_at else None
         ),
         "last_completed_step": meta.get("last_completed_step"),
+        # [Phase8A] 计划启动时间（16:00 调度创建时写入）vs 实际启动时间（Worker 领取时写入）
+        "scheduled_at": (
+            job_run.scheduled_at.isoformat() if job_run.scheduled_at else None
+        ),
+        "started_at": (
+            job_run.started_at.isoformat() if job_run.started_at else None
+        ),
+        # [Phase8A] current_step 与 orchestrator_status 同义，便于前端直接读取
+        "current_step": orchestrator_status,
     }
 
 
@@ -766,6 +783,10 @@ async def _compute_after_close_pipeline(
             "heartbeat_at": None,
             "lease_expires_at": None,
             "last_completed_step": None,
+            # [Phase8A] 新增字段
+            "scheduled_at": None,
+            "started_at": None,
+            "current_step": None,
         }
 
     # [AfterClose] - 查当日 after_close_orchestrator job_run（取最新一条）

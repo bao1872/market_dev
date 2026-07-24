@@ -307,8 +307,10 @@ class StrategyBatchService:
         trade_date: date,
         run_type: str = "scheduled",
         instrument_ids: list[uuid.UUID] | None = None,
+        *,
+        claim_for_worker: str | None = None,
     ) -> StrategyRun:
-        """创建批量计算运行（status=queued）。
+        """创建批量计算运行（status=queued 或 status=running 当 claim_for_worker 设置）。
 
         流程：
         1. 校验 run_type 合法
@@ -319,6 +321,8 @@ class StrategyBatchService:
         6. 若存在 failed/partial_failed/interrupted 状态 run，创建 attempt_no = max + 1
         7. 生成幂等键：strategy_key:strategy_version_id:trade_date:run_type:attempt_no
         8. 创建 StrategyRun（status=queued, effective_config 从 manifest 读取）
+           [Phase8A] claim_for_worker 非 None 时创建为 status=running + worker_id，
+           原子 inline claim 避免 generic worker 抢先领取
         9. 预创建 strategy_run_items（status=pending）
 
         Args:
@@ -327,9 +331,12 @@ class StrategyBatchService:
             trade_date: 交易日
             run_type: 触发方式（manual/scheduled/replay）
             instrument_ids: 指定标的列表（None 表示全市场活跃标的）
+            claim_for_worker: [Phase8A] 非 None 时原子 inline claim，
+                创建为 status=running + worker_id，generic worker 无法领取。
+                用于 after-close orchestrator 创建 DSA run。
 
         Returns:
-            StrategyRun ORM 对象（status=queued）
+            StrategyRun ORM 对象（status=queued 或 status=running）
 
         Raises:
             ValueError: 非交易日/数据未就绪/策略无可用版本/非法 run_type
@@ -443,16 +450,36 @@ class StrategyBatchService:
             computable_ids = list(instrument_ids)
 
         # 11. 创建 StrategyRun
+        # [Phase8A] claim_for_worker 非 None 时原子 inline claim：
+        # 创建为 status=running + worker_id，generic worker 无法领取
+        if claim_for_worker is not None:
+            _initial_status = "running"
+            _initial_worker_id = claim_for_worker
+            _initial_started_at = datetime.now(UTC)
+            _initial_heartbeat = _initial_started_at
+            _initial_lease_expires = _initial_started_at + timedelta(minutes=_LEASE_DURATION_MINUTES)
+        else:
+            _initial_status = "queued"
+            _initial_worker_id = None
+            _initial_started_at = None
+            _initial_heartbeat = None
+            _initial_lease_expires = None
+
+        _input_overrides = {
+            "strategy_key": strategy_key,
+            "instrument_count": len(instrument_ids),
+        }
+        # [Phase8A] 标记 after-close 所有权（claim_next_run 安全过滤用）
+        if claim_for_worker is not None:
+            _input_overrides["_owner"] = "after_close_orchestrator"
+
         run = StrategyRun(
             strategy_version_id=version_id,
             run_type=run_type,
             trade_date=trade_date,
-            status="queued",
-            input_overrides={
-                "strategy_key": strategy_key,
-                "instrument_count": len(instrument_ids),
-            },
-            started_at=None,
+            status=_initial_status,
+            input_overrides=_input_overrides,
+            started_at=_initial_started_at,
             queued_at=datetime.now(UTC),
             idempotency_key=idempotency_key,
             effective_config=effective_config,
@@ -462,6 +489,9 @@ class StrategyBatchService:
             failed_count=0,
             skipped_count=len(insufficient_history_ids),
             attempt_no=attempt_no,
+            worker_id=_initial_worker_id,
+            heartbeat_at=_initial_heartbeat,
+            lease_expires_at=_initial_lease_expires,
         )
         db.add(run)
         try:
@@ -645,6 +675,12 @@ class StrategyBatchService:
         使用 SELECT ... FOR UPDATE SKIP LOCKED 避免多 Worker 竞争。
         领取成功后更新 status=running，设置 worker_id / 心跳 / 租约。
 
+        [Phase8A] 排除 after-close orchestrator 拥有的 run：
+        input_overrides->>'_owner' = 'after_close_orchestrator' 的 run
+        由 orchestrator 创建并 inline claim，generic worker 不得领取。
+        正常情况下这些 run 创建时即为 status=running，不会出现在 queued 查询中；
+        此过滤为安全兜底（如恢复后 re-queue 场景）。
+
         Args:
             db: 异步会话
 
@@ -654,9 +690,15 @@ class StrategyBatchService:
         Raises:
             RuntimeError: 领取失败
         """
+        from sqlalchemy import text as sa_text
+
         stmt = (
             select(StrategyRun)
             .where(StrategyRun.status == "queued")
+            # [Phase8A] 排除 after-close orchestrator 拥有的 run
+            .where(
+                sa_text("(input_overrides->>'_owner') IS DISTINCT FROM 'after_close_orchestrator'")
+            )
             .order_by(StrategyRun.queued_at)
             .limit(1)
             .with_for_update(skip_locked=True)
@@ -1048,13 +1090,14 @@ class StrategyBatchService:
             )
 
     async def publish_run(self, db: AsyncSession, run_id: uuid.UUID) -> StrategyRun:
-        """发布运行结果（admin 调用）。
+        """发布运行结果（admin 调用或盘后编排器调用）。
 
-        status: completed → published
+        status: completed → published（已 published 时幂等返回）
         记录 published_at 时间戳
 
         [DSA] - 描述: admin 手动发布同样禁止 partial_failed，与自动发布门禁一致，
         仅允许 completed 状态进入 published。
+        [Phase8A] - 幂等：已 published 的 run 直接返回，支持崩溃恢复（不重复发布、不抛异常）。
 
         Args:
             db: 异步会话
@@ -1070,6 +1113,19 @@ class StrategyBatchService:
         run = await db.get(StrategyRun, run_id)
         if run is None:
             raise ValueError(f"运行不存在: run_id={run_id}")
+
+        # [Phase8A] 幂等发布：已 published 的 run 直接返回，支持崩溃恢复。
+        # 崩溃窗口1: DSA publish_run commit 后、snapshot pointer 前崩溃 →
+        #   恢复时 last_completed_step 仍为 computing_features，会再次调用 publish_run。
+        # 崩溃窗口2: snapshot pointer 后、parent succeeded 前崩溃 →
+        #   恢复时同样会再次调用 publish_run。
+        # 此处幂等返回避免重复 publish 和 ValueError。
+        if run.status == "published":
+            logger.info(
+                "[Phase8A] run 已 published，幂等返回: run_id=%s, published_at=%s",
+                run_id, run.published_at,
+            )
+            return run
 
         # [DSA] - 描述: publish_run 显式拒绝 partial_failed，仅 completed 可发布
         if run.status != "completed":

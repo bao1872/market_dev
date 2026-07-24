@@ -6,7 +6,7 @@
 //    - running 状态 10s 轮询，非 running 60s 轮询，页面不可见暂停（hook 内实现）
 // 3. 页面结构（5 个区块）：
 //    - 顶部状态卡：trade_date / market_session / overall_status / watchlist_ready / watchlist_reason
-//    - 8 步骤时间线（垂直，每步显示 status/started_at/finished_at/duration/counts/error）
+//    - 步骤时间线（垂直，每步显示 status/started_at/finished_at/duration/counts/error）
 //    - 数据新鲜度卡：行情 + 选股（复用 .data-freshness-grid 样式）
 //    - 编排状态详情：当前阶段/Worker/心跳/租约/检查点/中断原因（来自 after_close_run 摘要）
 //    - 最近 20 次运行列表（after_close_orchestrator + snapshot_run 混合）
@@ -30,126 +30,37 @@ import {
 import { useToast } from '@/store/toast'
 import { shanghaiBusinessDate, formatShanghaiTime } from '@/utils/datetime'
 import type { PipelineStep, PipelineRunItem } from '@/api/endpoints'
+import {
+  stepLabel,
+  overallStatusLabel,
+  overallStatusPillClass,
+  marketSessionLabel,
+  stepStatusLabel,
+  stepStatusClass,
+  runItemStatusPillClass,
+  runItemKindLabel,
+  formatDurationSeconds,
+  getStepKeys,
+} from './adminAfterClosePipelineHelpers'
 
-// ===== 8 步骤定义（与后端 _PIPELINE_STEPS 严格对齐）=====
-// [AfterClosePipelinePage] - 描述: 8 个展示步骤（前 7 个来自 after_close_orchestrator 状态机，最后一个是 watchlist gate）
-const PIPELINE_STEPS: { key: string; label: string }[] = [
-  { key: 'refreshing_daily', label: '刷新日线' },
-  { key: 'checking_coverage', label: '检查覆盖率' },
-  { key: 'creating_dsa', label: '创建DSA任务' },
-  { key: 'waiting_dsa_worker', label: '等待DSA计算' },
-  { key: 'quality_gate', label: '质量门禁' },
-  { key: 'feature_snapshot', label: '特征快照' },
-  { key: 'publishing', label: '发布结果' },
-  { key: 'watchlist_ready', label: '自选可用' },
-]
-
-// ===== overall_status → 中文标签 + pill 样式 =====
-function overallStatusLabel(status: string | undefined): string {
-  switch (status) {
-    case 'not_started': return '未开始'
-    case 'running': return '运行中'
-    case 'succeeded': return '成功'
-    case 'failed': return '失败'
-    case 'blocked': return '阻塞'
-    case 'skipped': return '跳过（非交易日）'
-    default: return '-'
-  }
-}
-
-function overallStatusPillClass(status: string | undefined): string {
-  switch (status) {
-    case 'succeeded': return 'ok'
-    case 'running': return 'warn'
-    case 'failed':
-    case 'blocked': return 'error'
-    case 'skipped':
-    case 'not_started':
-    default: return 'off'
-  }
-}
-
-// ===== market_session → 中文标签 =====
-function marketSessionLabel(session: string | undefined): string {
-  switch (session) {
-    case 'NON_TRADING_DAY': return '非交易日'
-    case 'PRE_OPEN': return '盘前'
-    case 'MORNING_SESSION': return '上午盘'
-    case 'LUNCH_BREAK': return '午间休市'
-    case 'AFTERNOON_SESSION': return '下午盘'
-    case 'MARKET_CLOSED': return '已收盘'
-    default: return '-'
-  }
-}
-
-// ===== 步骤状态 → 中文标签 + 样式 =====
-function stepStatusLabel(status: string): string {
-  switch (status) {
-    case 'pending': return '待执行'
-    case 'running': return '执行中'
-    case 'completed': return '已完成'
-    case 'failed': return '失败'
-    case 'skipped': return '跳过'
-    default: return '-'
-  }
-}
-
-function stepStatusClass(status: string): string {
-  switch (status) {
-    case 'completed': return 'done'
-    case 'running': return 'active'
-    case 'failed': return 'error'
-    case 'skipped': return 'skipped'
-    default: return ''
-  }
-}
-
-// ===== 运行列表项状态 → 中文标签 + pill 样式 =====
-function runItemStatusPillClass(status: string): string {
-  switch (status) {
-    case 'succeeded': return 'ok'
-    case 'running':
-    case 'queued': return 'warn'
-    case 'failed':
-    case 'interrupted': return 'error'
-    default: return 'off'
-  }
-}
-
-function runItemKindLabel(kind: string): string {
-  switch (kind) {
-    case 'after_close_orchestrator': return '盘后编排'
-    case 'snapshot_run': return '特征快照'
-    default: return kind
-  }
-}
-
-// ===== 格式化耗时（秒 → "Xm Ys"）=====
-function formatDurationSeconds(seconds: number | null | undefined): string {
-  if (seconds == null) return '-'
-  if (seconds < 60) return `${seconds.toFixed(1)}s`
-  const m = Math.floor(seconds / 60)
-  const s = Math.round(seconds % 60)
-  return `${m}m ${s}s`
-}
-
-// ===== 8 步骤时间线组件 =====
+// ===== [Phase8A] 步骤时间线组件（以 API steps 为主，不硬编码步骤数量）=====
 function PipelineTimeline({ steps }: { steps: PipelineStep[] }) {
-  // 构建步骤索引映射，处理 watchlist_ready 不在 steps 中的情况
-  const stepMap = new Map<string, PipelineStep>(steps.map((s) => [s.step, s]))
+  // [Phase8A] 以 API 返回的 steps 为主；API 未返回时用 DEFAULT_STEP_ORDER 兜底
+  const stepKeys = getStepKeys(steps)
 
   return (
     <div className="pipeline-timeline">
-      {PIPELINE_STEPS.map((stage, idx) => {
-        const step = stepMap.get(stage.key)
+      {stepKeys.map((stepKey, idx) => {
+        // 从 API steps 中查找对应数据
+        const step = steps.find((s) => s.step === stepKey)
         const status = step?.status ?? 'pending'
         const cls = stepStatusClass(status)
         return (
-          <div key={stage.key} className={`pipeline-timeline-item ${cls}`}>
+          <div key={stepKey} className={`pipeline-timeline-item ${cls}`}>
             <div className="pipeline-timeline-index">{idx + 1}</div>
             <div className="pipeline-timeline-main">
               <div className="pipeline-timeline-head">
-                <b>{stage.label}</b>
+                <b>{stepLabel(stepKey)}</b>
                 <span className={`status-pill ${cls === 'done' ? 'ok' : cls === 'active' ? 'warn' : cls === 'error' ? 'error' : 'off'}`}>
                   {stepStatusLabel(status)}
                 </span>
@@ -264,7 +175,7 @@ export default function AdminAfterClosePipelinePage() {
         <div>
           <h1 className="page-title">盘后流水线详情</h1>
           <div className="page-desc">
-            交易日 {tradeDate} · 8 步骤时间线 · 数据新鲜度 · 最近运行
+            交易日 {tradeDate} · 步骤时间线 · 数据新鲜度 · 最近运行
           </div>
         </div>
         <div className="actions">
@@ -380,15 +291,15 @@ export default function AdminAfterClosePipelinePage() {
         </section>
       </div>
 
-      {/* ===== 8 步骤时间线 ===== */}
+      {/* ===== 步骤时间线 ===== */}
       <div className="grid section-gap">
         <section className="card">
           <div className="card-head">
             <div>
-              <div className="card-title">8 步骤时间线</div>
+              <div className="card-title">步骤时间线</div>
               <div className="card-sub">
-                refreshing_daily → checking_coverage → creating_dsa → waiting_dsa_worker →
-                quality_gate → feature_snapshot → publishing → watchlist_ready
+                refreshing_daily → syncing_boards → checking_coverage →
+                computing_features → publishing → watchlist_ready
               </div>
             </div>
           </div>

@@ -1,7 +1,7 @@
 """盘后流水线可视化聚合服务。
 
 为 /admin/after-close/pipeline/* 端点提供只读聚合：
-- 按 trade_date 聚合 after_close_orchestrator 状态 + 8 步骤时间线
+- 按 trade_date 聚合 after_close_orchestrator 状态 + 6 步骤时间线
 - 复用 system_overview_service._compute_data_freshness 计算数据新鲜度
 - 复用 feature_snapshot_service.has_succeeded_snapshot_run 判定 watchlist_ready
 - 复用 after_close_orchestrator 状态机与 job_run_event_service.list_events
@@ -10,6 +10,10 @@
 - 不新建大表，不复制 SQL。
 - 不对 after_close_orchestrator 状态机做语义扩展。
 - overall_status 与系统概览的 PIPELINE_STATUS_* 是两套枚举，不可混用。
+[Phase8A] 步骤序列：refreshing_daily → syncing_boards → checking_coverage
+  → computing_features → publishing → watchlist_ready
+  旧四状态（creating_dsa/waiting_dsa_worker/quality_gate/feature_snapshot）
+  映射到 computing_features，仅历史 run 兼容读取。
 """
 
 from __future__ import annotations
@@ -51,28 +55,41 @@ _AFTER_CLOSE_JOB_NAME = "after_close_orchestrator"
 # 收盘后超过该阈值（分钟）仍无 after_close run，视为 blocked
 _BLOCKED_AFTER_CLOSE_MINUTES = 30
 
-# 8 个展示步骤（前 7 个来自 after_close_orchestrator 状态机，最后一个是 watchlist gate）
+# [Phase8A] 6 个展示步骤（前 5 个来自 after_close_orchestrator 新状态机，
+# 最后一个是 watchlist gate）。旧 4 步（creating_dsa/waiting_dsa_worker/
+# quality_gate/feature_snapshot）收敛为 computing_features，仅历史映射。
 _PIPELINE_STEPS = [
     AfterCloseRunStatus.REFRESHING_DAILY.value,
+    AfterCloseRunStatus.SYNCING_BOARDS.value,
     AfterCloseRunStatus.CHECKING_COVERAGE.value,
-    AfterCloseRunStatus.CREATING_DSA.value,
-    AfterCloseRunStatus.WAITING_DSA_WORKER.value,
-    AfterCloseRunStatus.QUALITY_GATE.value,
-    AfterCloseRunStatus.FEATURE_SNAPSHOT.value,
+    AfterCloseRunStatus.COMPUTING_FEATURES.value,
     AfterCloseRunStatus.PUBLISHING.value,
     "watchlist_ready",
 ]
 
-# last_completed_step -> 已完成步骤索引（含 checking_coverage/creating_dsa 的隐式完成）
+# [Phase8A] 旧四状态 → computing_features 的映射（历史 run 兼容读取）
+_LEGACY_STATUS_MAP = {
+    AfterCloseRunStatus.CREATING_DSA.value: AfterCloseRunStatus.COMPUTING_FEATURES.value,
+    AfterCloseRunStatus.WAITING_DSA_WORKER.value: AfterCloseRunStatus.COMPUTING_FEATURES.value,
+    AfterCloseRunStatus.QUALITY_GATE.value: AfterCloseRunStatus.COMPUTING_FEATURES.value,
+    AfterCloseRunStatus.FEATURE_SNAPSHOT.value: AfterCloseRunStatus.COMPUTING_FEATURES.value,
+}
+
+# last_completed_step -> 已完成步骤索引（新状态机 + 旧四状态历史映射）
 _COMPLETED_STEP_INDEX = {
     None: -1,
     AfterCloseRunStatus.QUEUED.value: -1,
     AfterCloseRunStatus.REFRESHING_DAILY.value: 0,
+    AfterCloseRunStatus.SYNCING_BOARDS.value: 1,
+    AfterCloseRunStatus.CHECKING_COVERAGE.value: 2,
+    AfterCloseRunStatus.COMPUTING_FEATURES.value: 3,
+    AfterCloseRunStatus.PUBLISHING.value: 4,
+    AfterCloseRunStatus.SUCCEEDED.value: 5,
+    # 旧四状态映射到 computing_features 的索引（历史 run 兼容）
+    AfterCloseRunStatus.CREATING_DSA.value: 3,
     AfterCloseRunStatus.WAITING_DSA_WORKER.value: 3,
-    AfterCloseRunStatus.QUALITY_GATE.value: 4,
-    AfterCloseRunStatus.FEATURE_SNAPSHOT.value: 5,
-    AfterCloseRunStatus.PUBLISHING.value: 6,
-    AfterCloseRunStatus.SUCCEEDED.value: 7,
+    AfterCloseRunStatus.QUALITY_GATE.value: 3,
+    AfterCloseRunStatus.FEATURE_SNAPSHOT.value: 3,
 }
 
 
@@ -170,10 +187,18 @@ async def _get_snapshot_run_summary(
 def _aggregate_step_events(
     events: list[JobRunEvent],
 ) -> dict[str, dict[str, Any]]:
-    """按 step 聚合事件，得到每个步骤的启停时间、count、错误信息。"""
+    """按 step 聚合事件，得到每个步骤的启停时间、count、错误信息。
+
+    [Phase8A] 旧四状态事件（creating_dsa/waiting_dsa_worker/quality_gate/
+    feature_snapshot）映射到 computing_features，使历史 run 的时间线数据
+    在新 6 步序列中正确显示。
+    """
     stats: dict[str, dict[str, Any]] = {}
     for event in events:
         step = event.step
+        # [Phase8A] 旧四状态映射到 computing_features
+        if step in _LEGACY_STATUS_MAP:
+            step = _LEGACY_STATUS_MAP[step]
         # 只关注状态机步骤或 ERROR 事件
         if step not in _PIPELINE_STEPS and step not in {
             AfterCloseRunStatus.QUEUED.value,
@@ -221,7 +246,11 @@ def _compute_step_states(
     watchlist_ready: bool,
     snapshot_summary: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """根据 job_run 状态、事件、watchlist_ready、snapshot_summary 计算 8 步骤状态。"""
+    """根据 job_run 状态、事件、watchlist_ready、snapshot_summary 计算 6 步骤状态。
+
+    [Phase8A] 旧四状态（creating_dsa/waiting_dsa_worker/quality_gate/
+    feature_snapshot）映射到 computing_features 展示，历史 run 兼容。
+    """
     if job_run is None:
         return [
             {
@@ -238,6 +267,9 @@ def _compute_step_states(
 
     meta = _parse_metadata(job_run)
     orchestrator_status = meta.get("orchestrator_status")
+    # [Phase8A] 旧四状态映射到 computing_features（历史 run 兼容读取）
+    if orchestrator_status in _LEGACY_STATUS_MAP:
+        orchestrator_status = _LEGACY_STATUS_MAP[orchestrator_status]
     last_completed_step = meta.get("last_completed_step")
     completed_idx = _COMPLETED_STEP_INDEX.get(last_completed_step, -1)
     step_events = _aggregate_step_events(events)
@@ -252,6 +284,9 @@ def _compute_step_states(
             for event in events:
                 if event.level == "error" and isinstance(event.payload, dict) and event.payload.get("step"):
                     failed_step = event.payload["step"]
+                    # [Phase8A] 映射旧四状态
+                    if failed_step in _LEGACY_STATUS_MAP:
+                        failed_step = _LEGACY_STATUS_MAP[failed_step]
                     break
             if failed_step is None and last_completed_step is not None:
                 failed_step = _step_after(last_completed_step)
@@ -297,9 +332,10 @@ def _compute_step_states(
                 step_status = "pending"
         elif job_run.status == "interrupted":
             # [Repair] orchestrator 已中断但 snapshot 仍在 running，
-            # feature_snapshot 步骤应显示 running，提示“快照计算失联/待修复”。
+            # computing_features 步骤应显示 running，提示"快照计算失联/待修复"。
+            # [Phase8A] 旧 run 的 feature_snapshot 已映射到 computing_features
             if (
-                step == AfterCloseRunStatus.FEATURE_SNAPSHOT.value
+                step == AfterCloseRunStatus.COMPUTING_FEATURES.value
                 and snapshot_summary is not None
                 and snapshot_summary.get("status") == "running"
             ):
@@ -618,7 +654,16 @@ if __name__ == "__main__":
     # 自测入口：验证常量与映射一致性（不连 DB）
     assert "refreshing_daily" in _PIPELINE_STEPS
     assert "watchlist_ready" in _PIPELINE_STEPS
-    assert len(_PIPELINE_STEPS) == 8
+    assert "computing_features" in _PIPELINE_STEPS
+    assert "syncing_boards" in _PIPELINE_STEPS
+    # [Phase8A] 6 步序列（旧 8 步收敛后）
+    assert len(_PIPELINE_STEPS) == 6
+    # 旧四状态映射到 computing_features 索引（=3）
     assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.WAITING_DSA_WORKER.value] == 3
-    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.SUCCEEDED.value] == 7
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.FEATURE_SNAPSHOT.value] == 3
+    # 新状态机索引
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.COMPUTING_FEATURES.value] == 3
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.SUCCEEDED.value] == 5
+    # 旧四状态映射
+    assert _LEGACY_STATUS_MAP[AfterCloseRunStatus.CREATING_DSA.value] == "computing_features"
     print("after_close_pipeline_service 常量与映射自测通过")

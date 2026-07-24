@@ -13,6 +13,7 @@
   - **schema_version 4→5**：应用层所有读取路径（`feature_snapshot_service` / `stock_context` / `watchlist` / `market_stocks_service` / `state_event_service`）过滤 `schema_version==5`，v4 不进入当前发布视图，不能被 v5 门禁误用；v4 快照数据保留在数据库（migration 068 只新增列不删除历史行），如需审计 v4 数据需直接 SQL 查询，应用层无接口；正式 full/after_close 流程禁止 `event_freshness_payload=None`、空骨架和缺 reason 的 `unavailable`；`never_observed` 与 `unavailable` 语义不同
   - **组合门禁**：DSA + continuous + event freshness 三门禁在 `computing_features` 末尾执行一次，全部通过后才进入 `publishing`
   - **Phase 7 文档对齐**：更新 current（01/02/03/05/07/MANIFEST）、maps（backend-module/test-coverage/frontend-route/worker-job/indicator-computation）、contracts（新增 `feature-event-freshness.schema.json` v1 + 升级 `after-close-recovery.schema.json` v3）、INDEX、CHANGELOG、CHANGE 记录与 checkpoint 执行纪律；不修改生产代码/测试/migration/前端/门户/权限/飞书/Capture
+  - **Phase 8A 端到端链路正确性收口**：16:00/18:30 调度入口改为 `create_after_close_run`（幂等）；orchestrator 内部创建 DSA（`claim_for_worker` + `_owner` 标记 + `claim_next_run` 排除）；`refresh_all_instruments(trigger_dsa=False)` 解耦行情刷新与 DSA 创建；`_maybe_trigger_after_close_orchestrator` 废弃为 no-op；`publish_run` 幂等返回支持崩溃恢复；pipeline 6 步 + legacy 四状态映射；前端动态 steps + legacy 降级；system_overview 新增 `scheduled_at`/`started_at`/`current_step`；10 项定向测试 + 28 项回归全通过
   - **回滚**：仅回滚 Phase 7 文档对齐时使用 `git revert <Phase 7 commit>`；涉及 schema、状态机或计算链的功能回滚必须单独制定代码和 migration 回滚计划，禁止只修改 `_SCHEMA_VERSION`（单独改常量会导致表结构与代码逻辑不匹配、v5 payload 被 v4 路径误读、migration 版本与代码不一致等风险）
 
 ## 2026-07-23

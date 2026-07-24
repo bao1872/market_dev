@@ -45,20 +45,32 @@ worker-strategy-batch 的 run 级总超时由 STRATEGY_RUN_TOTAL_TIMEOUT_SECONDS
 - 个股详情 `/bars?timeframe=1d&include_realtime=true` 通过同一份 live 1m 数据合成 partial daily bar 供页面展示；
 - 两条链路均要求 `start_time`/`end_time` 同为 `Asia/Shanghai` aware datetime，禁止 naive/aware 混用。
 
-行情调度与盘后编排中的覆盖率检查统一复用 `BarsCoverageService`，禁止复制 SQL。`worker-bars-scheduler` 与 `worker-after-close` 均以 `shanghai_business_date()` 作为业务日期，避免服务器时区偏差。所有覆盖率门禁（`bars_scheduler` 自动触发 DSA、`dsa-only`、系统概览 `WAITING_DSA` 判定）均使用 `BarsCoverageService.compute_daily_coverage` 返回的 `coverage_raw` 原始值进行阈值判断，`coverage` 仅用于展示。`/admin/after-close-runs/dsa-only` 在当日无数据时 fallback 到最新可用交易日再校验覆盖率。
+行情调度与盘后编排中的覆盖率检查统一复用 `BarsCoverageService`，禁止复制 SQL。`worker-bars-scheduler` 与 `worker-after-close` 均以 `shanghai_business_date()` 作为业务日期，避免服务器时区偏差。所有覆盖率门禁（orchestrator `refreshing_daily` 后的覆盖率检查、`dsa-only`、系统概览 `WAITING_DSA` 判定）均使用 `BarsCoverageService.compute_daily_coverage` 返回的 `coverage_raw` 原始值进行阈值判断，`coverage` 仅用于展示。`/admin/after-close-runs/dsa-only` 在当日无数据时 fallback 到最新可用交易日再校验覆盖率。
 
-### 2.2 盘后 publish auto-trigger
+### 2.2 盘后调度入口（Phase 8A 端到端收口）
 
-当前系统使用 DSA 完成后自动触发盘后 publish 流水线，避免 `strategy_batch_worker` 完成 DSA run 后 `after_close_orchestrator` 未启动导致 publish 缺失。
+**Phase 8A 变更**：删除旧"DSA 完成后自动触发 after-close"路径（`_maybe_trigger_after_close_orchestrator` 已废弃为 no-op），改为 16:00/18:30 先创建 after-close run，orchestrator 内部创建并 inline claim DSA。
 
-触发链路：
-- `worker.py` 在 `strategy_batch_worker` 完成 DSA run 后检查 `strategy_type == "dsa_selector"` 且 `trigger_source == "scheduled"` 且 `status == "completed"`；
-- 满足条件时自动调用 `create_after_close_run(trade_date, run_id)`，触发 `after_close_orchestrator` 执行 publish；
-- 仅对 `dsa_selector + scheduled + completed` 触发，其他策略类型、手动触发、非 completed 状态不触发；
-- `create_after_close_run` 幂等：同 `trade_date` 已有 after_close 任务时返回已有任务，不重复创建；
-- 触发失败不传播异常，仅记录日志（`logger.exception`），不影响 `strategy_batch_worker` 主流程；
-- 非 DSA 策略（如 `watchlist_monitor`）不触发 auto-trigger；
-- `trade_date` 缺失时不触发，记录 warning 日志。
+**16:00 bars scheduler**（`worker-bars-scheduler`）：
+- 每个交易日 16:00 调用 `create_after_close_run(trade_date)` 创建/复用 after-close run（幂等）；
+- 不再直接刷新行情和触发 DSA；行情刷新由 orchestrator 的 `refreshing_daily` 步骤执行（`trigger_dsa=False`，不触发 DSA）；
+- DSA 由 orchestrator 在覆盖率达标后创建并 inline claim。
+
+**18:30 strategy scheduler**（`worker-strategy-scheduler`）兜底：
+- 对 `dsa_selector` 策略调用 `create_after_close_run(trade_date)` 创建/复用 after-close run（幂等，16:00 已创建则跳过）；
+- 非 DSA selector 策略仍走原 `create_batch_run(run_type="scheduled")` 路径，由 generic worker 领取；
+- 不进入旧"DSA 完成后触发 after-close"路径。
+
+**DSA 所有权**（`claim_for_worker` + `_owner` 标记）：
+- orchestrator 调用 `create_batch_run(strategy_key=DSA_SELECTOR, claim_for_worker="orchestrator:{worker_id}")` 创建 DSA run；
+- `claim_for_worker` 非 None 时创建为 `status=running + worker_id`（原子 inline claim），`input_overrides._owner="after_close_orchestrator"`；
+- `StrategyBatchService.claim_next_run` 排除 `_owner='after_close_orchestrator'` 的 run，generic worker 无法领取；
+- manual DSA（无 `_owner` 标记）仍由 generic worker 领取和执行。
+
+**发布原子性**（`publish_run` 幂等）：
+- `publish_run` 对已 `published` 的 run 幂等返回，支持崩溃恢复（不重复发布、不抛异常）；
+- 崩溃窗口1：DSA publish_run commit 后、snapshot pointer 前崩溃 → 恢复时再次调用 publish_run，幂等返回；
+- 崩溃窗口2：snapshot pointer 后、parent succeeded 前崩溃 → 恢复时再次调用 publish_run，幂等返回。
 
 ### 2.3 盘后编排状态机与 computing_features 步骤
 

@@ -39,7 +39,7 @@ from enum import StrEnum
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import AsyncSessionLocal
@@ -49,7 +49,7 @@ from app.repositories import strategy_result_repository
 from app.services.bars_scheduler_service import BarsSchedulerService
 from app.services.feature_snapshot_service import (
     PublishedSnapshotRunExistsError,
-    compute_for_trade_date_with_mfcs,
+    compute_for_trade_date,
     create_snapshot_run,
     finish_snapshot_run,
     get_active_a_share_instruments,
@@ -1076,10 +1076,13 @@ async def execute_after_close_run(
             )
             try:
                 # 调用 bars_scheduler（使用独立 session，内部会传 job_run_id 写事件）
+                # [Phase8A] trigger_dsa=False: DSA 由 orchestrator 在 computing_features 创建，
+                # 避免与 refresh_all_instruments 内部的 _check_daily_coverage_and_trigger_dsa 重复创建
                 batch_result = await bars_service.refresh_all_instruments(
                     trade_date=trade_date,
                     db_session=None,  # 服务内部创建 session
                     job_run_id=job_run_id,
+                    trigger_dsa=False,
                 )
             finally:
                 heartbeat_task.cancel()
@@ -1242,7 +1245,7 @@ async def execute_after_close_run(
                 await db.commit()
 
             if dsa_run_id is None:
-                # [AfterClose] - 区分跳过原因：NON_TRADING_DAY（非交易日）vs None（覆盖率不足）
+                # [AfterClose] - 区分跳过原因：NON_TRADING_DAY（非交易日）vs 覆盖率不足 vs trigger_dsa=False
                 skip_reason = batch_result.skip_reason
                 if skip_reason == "NON_TRADING_DAY":
                     success_message = (
@@ -1250,42 +1253,143 @@ async def execute_after_close_run(
                     )
                     success_payload: dict[str, Any] = {"skip_reason": "NON_TRADING_DAY"}
                     success_extra: dict[str, Any] | None = {"skip_reason": "NON_TRADING_DAY"}
-                else:
-                    success_message = (
-                        f"日线覆盖率不足未触发 DSA，编排结束: "
-                        f"covered={batch_result.daily_covered}, "
-                        f"total={batch_result.daily_total}, "
-                        f"coverage={batch_result.daily_coverage}"
+                    async with AsyncSessionLocal() as db:
+                        job_run = await _get_job_run_or_raise(db, job_run_id)
+                        await _update_orchestrator_status(
+                            db=db,
+                            job_run=job_run,
+                            status=AfterCloseRunStatus.SUCCEEDED,
+                            message=success_message,
+                            payload=success_payload,
+                            extra=success_extra,
+                        )
+                        job_run.status = "succeeded"
+                        job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+                        await _update_heartbeat_and_step(
+                            db, job_run, "succeeded", worker_id,
+                        )
+                        await db.commit()
+                    logger.info(
+                        "[AfterClose] 非交易日，编排成功结束: job_run_id=%s", job_run_id,
                     )
-                    success_payload = {
-                        "daily_covered": batch_result.daily_covered,
-                        "daily_total": batch_result.daily_total,
-                        "daily_coverage": batch_result.daily_coverage,
-                    }
-                    success_extra = None
+                    return
 
+                # [Phase8A] checking_coverage 步骤：验证日线 + 15m 覆盖率就绪
+                # 不得把日线 coverage 当作 15m 测试；15m 不完整时不得进入 computing_features
                 async with AsyncSessionLocal() as db:
                     job_run = await _get_job_run_or_raise(db, job_run_id)
                     await _update_orchestrator_status(
                         db=db,
                         job_run=job_run,
-                        status=AfterCloseRunStatus.SUCCEEDED,
-                        message=success_message,
-                        payload=success_payload,
-                        extra=success_extra,
-                    )
-                    job_run.status = "succeeded"
-                    job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
-                    await _update_heartbeat_and_step(
-                        db, job_run, "succeeded", worker_id,
+                        status=AfterCloseRunStatus.CHECKING_COVERAGE,
+                        message=f"开始检查覆盖率: trade_date={trade_date}",
                     )
                     await db.commit()
 
-                logger.info(
-                    "[AfterClose] DSA 未触发，编排成功结束: job_run_id=%s skip_reason=%s",
-                    job_run_id, skip_reason,
+                # 1. 日线覆盖率检查（从 batch_result 读取，refreshing_daily 已计算）
+                daily_coverage_ok = (
+                    batch_result.daily_coverage is not None
+                    and batch_result.daily_coverage >= 0.9
                 )
-                return
+                # 2. 15m 覆盖率 + 最后 bar 时间检查（独立查询 bars_15min）
+                from app.services.bars_coverage_service import BarsCoverageService
+                async with AsyncSessionLocal() as db:
+                    intraday_result = await BarsCoverageService.compute_intraday_coverage(
+                        db, trade_date,
+                    )
+
+                if not daily_coverage_ok or not intraday_result["ready"]:
+                    # [Phase8A] 覆盖率不足 → 标记 failed（不是 succeeded），不创建 DSA
+                    fail_reasons: list[str] = []
+                    if not daily_coverage_ok:
+                        fail_reasons.append(
+                            f"daily_coverage={batch_result.daily_coverage} < 0.9"
+                        )
+                    if not intraday_result["ready"]:
+                        fail_reasons.append(
+                            f"intraday not ready: "
+                            f"complete_ratio={intraday_result['complete_ratio_raw']}, "
+                            f"complete_to_close={intraday_result['complete_to_close_count']}/"
+                            f"{intraday_result['eligible_count']}, "
+                            f"latest_bar={intraday_result['latest_latest_bar']}, "
+                            f"cutoff={intraday_result['cutoff_time']}"
+                        )
+                    fail_message = (
+                        f"覆盖率检查未通过，不创建 DSA: {', '.join(fail_reasons)}"
+                    )
+                    async with AsyncSessionLocal() as db:
+                        job_run = await _get_job_run_or_raise(db, job_run_id)
+                        await _update_orchestrator_status(
+                            db=db,
+                            job_run=job_run,
+                            status=AfterCloseRunStatus.FAILED,
+                            message=fail_message,
+                            payload={
+                                "daily_coverage": batch_result.daily_coverage,
+                                "intraday_complete_ratio": intraday_result["complete_ratio_raw"],
+                                "intraday_complete_to_close": intraday_result["complete_to_close_count"],
+                                "intraday_eligible": intraday_result["eligible_count"],
+                                "intraday_latest_bar": intraday_result["latest_latest_bar"],
+                                "intraday_cutoff": intraday_result["cutoff_time"],
+                                "fail_reasons": fail_reasons,
+                            },
+                        )
+                        job_run.status = "failed"
+                        job_run.error_message = fail_message[:500]
+                        job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+                        await _update_heartbeat_and_step(
+                            db, job_run, "failed", worker_id,
+                        )
+                        await db.commit()
+                    logger.warning(
+                        "[AfterClose] [Phase8A] 覆盖率检查未通过，编排失败: "
+                        "job_run_id=%s, %s",
+                        job_run_id, fail_message,
+                    )
+                    return
+
+                logger.info(
+                    "[AfterClose] [Phase8A] 覆盖率检查通过: daily=%.1f%%, "
+                    "intraday_complete=%.1f%% (%d/%d), latest_bar=%s",
+                    (batch_result.daily_coverage or 0) * 100,
+                    intraday_result["complete_ratio_raw"] * 100,
+                    intraday_result["complete_to_close_count"],
+                    intraday_result["eligible_count"],
+                    intraday_result["latest_latest_bar"],
+                )
+
+                # [Phase8A] trigger_dsa=False 且覆盖率达标：在 computing_features 前创建 DSA run
+                # DSA 由 orchestrator 创建并原子 inline claim，避免 generic worker 抢先领取
+                logger.info(
+                    "[AfterClose] [Phase8A] 覆盖率达标，orchestrator 创建 DSA run: "
+                    "trade_date=%s, coverage=%.1f%%",
+                    trade_date, (batch_result.daily_coverage or 0) * 100,
+                )
+                from app.constants.strategy_keys import DSA_SELECTOR
+                async with AsyncSessionLocal() as db:
+                    dsa_run = await batch_service.create_batch_run(
+                        db=db,
+                        strategy_key=DSA_SELECTOR,
+                        trade_date=trade_date,
+                        run_type="scheduled",
+                        claim_for_worker=f"orchestrator:{worker_id}",
+                    )
+                    await db.commit()
+                    dsa_run_id = dsa_run.id
+                    # 更新 metadata 记录 dsa_run_id
+                    job_run = await _get_job_run_or_raise(db, job_run_id)
+                    await _update_orchestrator_status(
+                        db=db,
+                        job_run=job_run,
+                        status=AfterCloseRunStatus.REFRESHING_DAILY,
+                        message=f"orchestrator 已创建 DSA run: dsa_run_id={dsa_run_id}",
+                        dsa_run_id=dsa_run_id,
+                        payload={"dsa_run_id": str(dsa_run_id)},
+                    )
+                    await _update_heartbeat_and_step(
+                        db, job_run, AfterCloseRunStatus.REFRESHING_DAILY.value, worker_id,
+                    )
+                    await db.commit()
 
         else:
             # [Phase5] - 断点恢复跳过日线刷新，dsa_run_id 从 metadata 读取
@@ -1306,6 +1410,7 @@ async def execute_after_close_run(
                             strategy_key=DSA_SELECTOR,
                             trade_date=trade_date,
                             run_type="scheduled",
+                            claim_for_worker=f"orchestrator:{worker_id}",
                         )
                         await db.commit()
                         dsa_run_id = dsa_run.id
@@ -1351,22 +1456,92 @@ async def execute_after_close_run(
                 await db.commit()
 
             # 2.2 inline claim DSA run（防止 worker 领取）+ 获取 strategy_version_id
+            # [Phase8A] DSA run 通过 claim_for_worker 创建时已是 status=running + worker_id，
+            # 无需再次 claim；仅在 status=queued 时执行 legacy inline claim（断点恢复场景）
             dsa_already_completed = False
             strategy_version_id: uuid.UUID | None = None
             async with AsyncSessionLocal() as db:
                 dsa_run = await _get_strategy_run_or_raise(db, dsa_run_id)
                 strategy_version_id = dsa_run.strategy_version_id
                 if dsa_run.status == "queued":
-                    # Phase 5: inline claim，防止 DSA worker 领取
+                    # Legacy/断点恢复：inline claim，防止 DSA worker 领取
                     dsa_run.status = "running"
                     dsa_run.started_at = datetime.now(UTC)
                     dsa_run.heartbeat_at = datetime.now(UTC)
                     dsa_run.worker_id = f"orchestrator:{worker_id}"
                     await db.commit()
                     logger.info(
-                        "[AfterClose] Phase 5 inline claim DSA run: run_id=%s, worker_id=%s",
+                        "[AfterClose] legacy inline claim DSA run: run_id=%s, worker_id=%s",
                         dsa_run_id, dsa_run.worker_id,
                     )
+                elif dsa_run.status == "running":
+                    # [Phase8A-correction] cross-worker recovery with real fencing
+                    # worker A 崩溃后 worker B 重新认领 child DSA
+                    # 使用条件原子 UPDATE：基于 attempt_count（租约恢复计数）作为 fencing token
+                    # 防止 worker A 恢复后使用旧 token 继续写入
+                    expected_worker = f"orchestrator:{worker_id}"
+                    if dsa_run.worker_id != expected_worker:
+                        old_worker_id = dsa_run.worker_id
+                        old_attempt_count = dsa_run.attempt_count or 0
+                        now_utc = datetime.now(UTC)
+                        new_lease_expires = now_utc + timedelta(minutes=30)
+
+                        # 条件 UPDATE：status=running AND attempt_count=old（fencing token 匹配）
+                        fence_stmt = (
+                            update(StrategyRun)
+                            .where(StrategyRun.id == dsa_run_id)
+                            .where(StrategyRun.status == "running")
+                            .where(StrategyRun.attempt_count == old_attempt_count)
+                            .values(
+                                worker_id=expected_worker,
+                                attempt_count=old_attempt_count + 1,
+                                heartbeat_at=now_utc,
+                                lease_expires_at=new_lease_expires,
+                            )
+                        )
+                        fence_result = await db.execute(fence_stmt)
+
+                        # CursorResult.rowcount 在 Result 基类 typing 中缺失（SQLAlchemy 2.0 async 限制）
+                        if fence_result.rowcount == 1:  # type: ignore[attr-defined]
+                            await db.commit()
+                            await db.refresh(dsa_run)
+                            logger.info(
+                                "[AfterClose] [Phase8A] 跨 worker fencing 成功: "
+                                "run_id=%s, old_worker=%s, new_worker=%s, "
+                                "attempt_count %d→%d, lease_expires=%s",
+                                dsa_run_id, old_worker_id, expected_worker,
+                                old_attempt_count, old_attempt_count + 1,
+                                new_lease_expires.isoformat(),
+                            )
+                        else:
+                            # 条件更新失败：重新读取当前状态
+                            await db.rollback()
+                            dsa_run = await _get_strategy_run_or_raise(db, dsa_run_id)
+                            if dsa_run.status in ("completed", "published"):
+                                dsa_already_completed = True
+                                logger.info(
+                                    "[AfterClose] 跨 worker fencing 失败（DSA 已完成）: "
+                                    "run_id=%s, status=%s",
+                                    dsa_run_id, dsa_run.status,
+                                )
+                            elif dsa_run.worker_id == expected_worker:
+                                logger.info(
+                                    "[AfterClose] 跨 worker fencing 跳过（已是当前 worker）: "
+                                    "run_id=%s, worker_id=%s",
+                                    dsa_run_id, dsa_run.worker_id,
+                                )
+                            else:
+                                raise RuntimeError(
+                                    f"跨 worker fencing 失败: run_id={dsa_run_id}, "
+                                    f"current_worker={dsa_run.worker_id}, "
+                                    f"current_attempt_count={dsa_run.attempt_count}, "
+                                    f"expected_old_attempt_count={old_attempt_count}"
+                                )
+                    else:
+                        logger.info(
+                            "[AfterClose] DSA run 已原子 claim（Phase8A）: run_id=%s, worker_id=%s",
+                            dsa_run_id, dsa_run.worker_id,
+                        )
                 elif dsa_run.status in ("completed", "published"):
                     # Worker 已完成（race condition），跳过 DSA 写入避免 DSA=2
                     dsa_already_completed = True
@@ -1460,7 +1635,7 @@ async def execute_after_close_run(
                             mfcs_kwargs["dsa_run_id"] = dsa_run_id
                             mfcs_kwargs["strategy_version_id"] = strategy_version_id
 
-                        snapshot_result = await compute_for_trade_date_with_mfcs(
+                        snapshot_result = await compute_for_trade_date(
                             db, trade_date, cached_instrument_ids, **mfcs_kwargs,
                         )
                         await db.commit()
@@ -1513,7 +1688,7 @@ async def execute_after_close_run(
             )
 
             # 2.6 组合质量门禁（DSA + continuous + event freshness）
-            # continuous + event freshness 已在 compute_for_trade_date_with_mfcs 内部检查：
+            # continuous + event freshness 已在 compute_for_trade_date 内部检查：
             # - failure_rate > threshold → RuntimeError（continuous 门禁）
             # - require_event_freshness=True → ValueError（event freshness 门禁）
             # 这里检查 DSA 质量门禁（仅在 MFCS 写了 DSA results 时）
@@ -1565,8 +1740,9 @@ async def execute_after_close_run(
                 await db.commit()
 
         # ---- 步骤 4: publishing ----
-        # [P0 Atomicity] DSA publish_run 成功后才将 snapshot run 标记 succeeded/published_at。
-        # 失败时 snapshot run 标记 failed（无 published_at，无事件，用户 context 不读取该批次）。
+        # [Phase8A 两阶段幂等发布] DSA publish_run（阶段1）与 snapshot run finalize（阶段2）
+        # 在各自独立 session/事务中提交，非单一原子事务。故障恢复后通过 publish_run 幂等
+        # 返回 + skip_publish 断点跳过达到最终一致。失败时 snapshot run 标记 failed。
         publish_failed = False
         if not skip_publish:
             async with AsyncSessionLocal() as db:
@@ -1586,7 +1762,7 @@ async def execute_after_close_run(
                     published_run = await batch_service.publish_run(db, dsa_run_id)
                     await db.commit()
             except Exception as publish_exc:
-                # [P0 Atomicity] DSA 发布失败：snapshot run 标记 failed，不生成事件
+                # [Phase8A 两阶段幂等发布] 阶段1失败：snapshot run 标记 failed，不生成事件
                 publish_failed = True
                 logger.error(
                     "[AfterClose] DSA publish_run 失败，snapshot run 将标记 failed: "
@@ -1610,7 +1786,7 @@ async def execute_after_close_run(
                             await db.commit()
                 raise
 
-            # [P0 Atomicity] DSA publish_run 成功 → 此时才将 snapshot run 标记 succeeded/published_at
+            # [Phase8A 两阶段幂等发布] 阶段1成功 → 阶段2：将 snapshot run 标记 succeeded/published_at
             if snapshot_run_id is not None and snapshot_error is None:
                 async with AsyncSessionLocal() as db:
                     from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun

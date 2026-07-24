@@ -23,18 +23,22 @@ system_overview_service._compute_bars_coverage（系统概览副本）。
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime
+from datetime import time as dtime
 from typing import Any
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.time import shanghai_business_date
-from app.models.bar import BarDaily
+from app.models.bar import Bar15Min, BarDaily
 from app.models.instrument import Instrument
 from app.services.instrument_maintenance_service import stock_symbol_sql_filter
 
 logger = logging.getLogger("bars_coverage_service")
+
+_SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 class BarsCoverageService:
@@ -118,6 +122,118 @@ class BarsCoverageService:
             "coverage": round(coverage, 4),
             "coverage_raw": coverage,
             "source": "bars_daily",
+        }
+
+    @staticmethod
+    async def compute_intraday_coverage(
+        db: AsyncSession,
+        trade_date: date | None = None,
+    ) -> dict[str, Any]:
+        """[Phase8A-correction] 计算指定交易日的 15m 行情覆盖率与就绪状态（按 instrument 聚合）。
+
+        盘后 checking_coverage 步骤使用，验证 15m 数据就绪。
+
+        算法（按 instrument 聚合，避免全局 max 误判）：
+        - eligible_count = 活跃 A 股股票数（status='active' + stock_symbol_sql_filter）
+        - per_instrument_last = GROUP BY instrument_id MAX(trade_time) WHERE DATE(trade_time)=trade_date
+        - any_bar_count = 有任意 15m bar 的 instrument 数
+        - complete_to_close_count = per_instrument_last >= 14:45（Shanghai）的 instrument 数
+        - complete_ratio = complete_to_close_count / eligible_count
+        - ready = complete_ratio >= 0.9
+
+        关键修正：时间完整性必须进入每只股票的覆盖率分子，不能只看全局最大时间。
+        例如 90% 股票只更新到 10:00 + 1 只更新到 15:00 → 全局 max 达标但 complete_ratio 低 → fail。
+
+        Args:
+            db: 异步数据库会话
+            trade_date: 交易日期，None 时使用当前上海业务日期
+
+        Returns:
+            {trade_date, eligible_count, any_bar_count, complete_to_close_count,
+             complete_ratio, complete_ratio_raw, earliest_latest_bar,
+             latest_latest_bar, cutoff_time, ready, source}
+        """
+        if trade_date is None:
+            trade_date = shanghai_business_date()
+
+        # 分母：活跃 A 股股票数
+        eligible_result = await db.execute(
+            select(func.count(Instrument.id))
+            .where(Instrument.status == "active")
+            .where(stock_symbol_sql_filter(Instrument))
+        )
+        eligible_count = int(eligible_result.scalar() or 0)
+
+        # 按instrument聚合：MAX(trade_time) per instrument_id WHERE DATE(trade_time)=trade_date
+        per_instrument_subq = (
+            select(
+                Bar15Min.instrument_id.label("instrument_id"),
+                func.max(Bar15Min.trade_time).label("last_bar_time"),
+            )
+            .join(Instrument, Bar15Min.instrument_id == Instrument.id)
+            .where(func.date(Bar15Min.trade_time) == trade_date)
+            .where(stock_symbol_sql_filter(Instrument))
+            .group_by(Bar15Min.instrument_id)
+            .subquery()
+        )
+
+        # 聚合统计：any_bar_count, complete_to_close_count, min/max last_bar
+        # cutoff 为上海时间 14:45，DB存储naive Shanghai时间，直接比较
+        cutoff_naive = datetime.combine(trade_date, dtime(14, 45))
+        stats_result = await db.execute(
+            select(
+                func.count().label("any_bar_count"),
+                func.count(
+                    case((per_instrument_subq.c.last_bar_time >= cutoff_naive, 1))
+                ).label("complete_to_close_count"),
+                func.min(per_instrument_subq.c.last_bar_time).label("earliest_latest_bar"),
+                func.max(per_instrument_subq.c.last_bar_time).label("latest_latest_bar"),
+            )
+        )
+        stats_row = stats_result.one()
+
+        any_bar_count = int(stats_row.any_bar_count or 0)
+        complete_to_close_count = int(stats_row.complete_to_close_count or 0)
+
+        # min/max last_bar 可能带tzinfo（asyncpg UTC-aware），统一转Shanghai naive
+        def _to_shanghai_naive(dt: datetime | None) -> datetime | None:
+            if dt is None:
+                return None
+            if dt.tzinfo is not None:
+                return dt.astimezone(_SHANGHAI).replace(tzinfo=None)
+            return dt
+
+        earliest_latest_bar = _to_shanghai_naive(stats_row.earliest_latest_bar)
+        latest_latest_bar = _to_shanghai_naive(stats_row.latest_latest_bar)
+
+        complete_ratio = (
+            complete_to_close_count / eligible_count if eligible_count > 0 else 0.0
+        )
+
+        # 就绪判断：完整收盘覆盖率 >= 0.9
+        ready = complete_ratio >= 0.9
+
+        logger.info(
+            "[BarsCoverage] intraday trade_date=%s eligible=%d any_bar=%d "
+            "complete_to_close=%d complete_ratio=%.4f ready=%s "
+            "earliest_latest=%s latest_latest=%s cutoff=%s",
+            trade_date, eligible_count, any_bar_count,
+            complete_to_close_count, complete_ratio, ready,
+            earliest_latest_bar, latest_latest_bar, cutoff_naive,
+        )
+
+        return {
+            "trade_date": trade_date.isoformat(),
+            "eligible_count": eligible_count,
+            "any_bar_count": any_bar_count,
+            "complete_to_close_count": complete_to_close_count,
+            "complete_ratio": round(complete_ratio, 4),
+            "complete_ratio_raw": complete_ratio,
+            "earliest_latest_bar": earliest_latest_bar.isoformat() if earliest_latest_bar else None,
+            "latest_latest_bar": latest_latest_bar.isoformat() if latest_latest_bar else None,
+            "cutoff_time": cutoff_naive.isoformat(),
+            "ready": ready,
+            "source": "bars_15min",
         }
 
 

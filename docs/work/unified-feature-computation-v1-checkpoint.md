@@ -10,6 +10,8 @@
 - Phase 5 HEAD: `db61601`
 - Phase 6 HEAD: `212c88a`
 - Phase 7 基线（文档对齐源头）: `ebf1eb9`
+- Phase 7 最终 HEAD（文档修正后）: `0f42a1e33a315de912bcf55eb82da7577ab15d35`
+- Phase 8A 基线（端到端链路正确性收口）: `0f42a1e33a315de912bcf55eb82da7577ab15d35`
 
 ## 已完成 Phase 及 commit
 
@@ -20,7 +22,8 @@
 | 4 | `a0a11d8` | migration 068 + event_freshness_payload JSONB + _SCHEMA_VERSION=5 + 9 项定向测试 |
 | 5 | `db61601` | computing_features 状态机收敛 + MFCS 接入盘后编排 + compute-once + 批次事件预取 + 组合质量门禁 + 空壳修正 + 26 项定向测试 + orchestrator 测试适配 |
 | 6 | `212c88a` | 7 项缺口修正：MDAS 1d 去重（precomputed_daily_bars）+ payload 空壳/unavailable reason 校验 + 1161 行真实 DB 验证测试 |
-| 7 | 待提交（单一文档 commit） | 文档/合同/记忆对齐：current 6 文档 + maps 5 文档 + contracts 2（新增 feature-event-freshness v1 + 升级 after-close-recovery v3）+ INDEX + CHANGELOG + CHANGE 记录「文档更新」节 + checkpoint 执行纪律；未触碰生产代码/测试/migration/前端/门户/权限/飞书/Capture |
+| 7 | `0f42a1e` | 文档/合同/记忆对齐：current 6 文档 + maps 5 文档 + contracts 2（新增 feature-event-freshness v1 + 升级 after-close-recovery v3）+ INDEX + CHANGELOG + CHANGE 记录「文档更新」节 + checkpoint 执行纪律；未触碰生产代码/测试/migration/前端/门户/权限/飞书/Capture |
+| 8A | Phase 8A完成，commit见Git历史 | 端到端链路正确性收口：16:00/18:30 调度入口改为 create_after_close_run + orchestrator 内部创建 DSA（claim_for_worker + _owner）+ trigger_dsa=False 解耦 + _maybe_trigger 废弃 no-op + publish_run 幂等崩溃恢复 + pipeline 6 步 + legacy 映射 + 前端动态 steps + system_overview 新字段 + 15 项后端定向测试 + 30 项前端定向测试 + 文档同步。Phase 8A 纠偏：15m readiness 改为 per-instrument complete_ratio 算法 + 跨 worker 恢复改为 lease epoch fencing（条件原子UPDATE + attempt_count 递增）+ test_execute_with_checkpoint_skips_refresh_daily 断言修复 + 前端 helpers 提取供测试导入 |
 
 ## Phase 5 交付摘要
 
@@ -85,6 +88,43 @@
 4. grep 确认 current/maps 中不再把旧 4 步（creating_dsa/waiting_dsa_worker/quality_gate/feature_snapshot）写成当前主流程（仅作为历史 enum 兼容映射说明保留）
 5. `git diff --check` 通过（无空白错误）
 6. 修改文件列表精确匹配预期（14 文档 + 1 新建 schema = 15 文件）
+
+## Phase 8A 交付摘要
+
+**阶段定性**：盘后端到端链路正确性收口。基线 `0f42a1e`、working tree 含 8 个 Phase 8A 未提交修改进入。
+
+**修复的旧自动链断点**：
+1. 16:00 bars scheduler 不再直接刷新行情和触发 DSA，改为创建/复用 after-close run
+2. 18:30 strategy scheduler 不再直接创建 DSA run，改为创建/复用 after-close run（dsa_selector）
+3. `_maybe_trigger_after_close_orchestrator` 废弃为 no-op（旧"DSA 完成后触发 after-close"路径删除）
+4. 行情刷新与 DSA 创建解耦：`refresh_all_instruments(trigger_dsa=False)`
+5. DSA 所有权：`create_batch_run(claim_for_worker=...)` + `input_overrides._owner` + `claim_next_run` 排除
+6. 发布原子性：`publish_run` 幂等返回（支持两个崩溃窗口恢复）
+7. Pipeline service 6 步序列 + legacy 四状态映射
+8. 前端动态 steps（以 API 为准，不硬编码）+ legacy 降级
+9. system_overview 新增 scheduled_at/started_at/current_step 字段
+
+**修改文件**（8 生产代码 + 1 测试 + 4 文档）：
+- 生产代码：`after_close_orchestrator.py` / `after_close_pipeline_service.py` / `bars_scheduler_service.py` / `strategy_batch_service.py` / `system_overview_service.py` / `worker.py` / `endpoints.ts` / `AdminAfterClosePipelinePage.tsx`
+- 测试：`backend/tests/test_phase8a_e2e_correctness.py`（10 项定向测试）
+- 文档：`03-jobs-integrations-operations.md` / `worker-job-map.md` / `deployment-runtime-map.md` / `test-coverage-map.md` / `checkpoint.md`
+
+**定向测试结果**（10 passed + 28 regression passed）：
+```bash
+cd backend && APP_ENV=test TEST_DATABASE_URL=postgresql+psycopg://bz:bz@127.0.0.1:5433/bz_stock_test \
+  python -m pytest tests/test_phase8a_e2e_correctness.py tests/test_after_close_orchestrator.py \
+  -v --tb=short -p no:cacheprovider
+```
+- Phase 8A 新增：10 passed
+- Orchestrator 回归：28 passed
+
+**资源统计**（Phase 8A 结束）：
+```
+MemAvailable: 3249 MiB (threshold > 3072)
+根盘 free: ~45.4 GiB (threshold > 20)
+Swap used: 119 MiB (stable)
+.pytest_cache: 未生成（-p no:cacheprovider）
+```
 
 ## 已通过定向测试（Phase 2-6 + orchestrator 合并命令）
 

@@ -1196,9 +1196,14 @@ export function useForceAfterCloseRun() {
 // - 页面不可见暂停轮询（refetchIntervalInBackground=false）
 // - queryKey 与 useAdminSystemOverview / useAfterCloseRunStatus 隔离，避免缓存串扰
 
-// [AfterClosePipeline] - 轮询间隔常量
-const PIPELINE_POLL_RUNNING = 10_000 // running 状态 10s
-const PIPELINE_POLL_IDLE = 60_000 // 非 running 状态 60s
+// [AfterClosePipeline] - 轮询间隔常量 + helper（从 adminAfterClosePipelineHelpers 导入并重导出）
+// 定义在 helpers 文件中以便 node --experimental-strip-types 直接导入测试
+import {
+  PIPELINE_POLL_RUNNING,
+  PIPELINE_POLL_IDLE,
+  getPipelinePollInterval,
+} from '@/pages/adminAfterClosePipelineHelpers'
+export { PIPELINE_POLL_RUNNING, PIPELINE_POLL_IDLE, getPipelinePollInterval }
 
 /**
  * 查询最近交易日的盘后流水线聚合状态（admin）。
@@ -1211,10 +1216,7 @@ export function useAfterClosePipelineLatest(enabled: boolean = true) {
     queryFn: api.getAfterClosePipelineLatest,
     enabled,
     staleTime: STALE_REALTIME,
-    refetchInterval: (query) => {
-      const status = query.state.data?.overall_status
-      return status === 'running' ? PIPELINE_POLL_RUNNING : PIPELINE_POLL_IDLE
-    },
+    refetchInterval: (query) => getPipelinePollInterval(query.state.data?.overall_status),
     refetchIntervalInBackground: false,
   })
 }
@@ -1234,10 +1236,7 @@ export function useAfterClosePipelineByDate(
     queryFn: () => api.getAfterClosePipelineByDate(tradeDate!),
     enabled: !!tradeDate && enabled,
     staleTime: STALE_REALTIME,
-    refetchInterval: (query) => {
-      const status = query.state.data?.overall_status
-      return status === 'running' ? PIPELINE_POLL_RUNNING : PIPELINE_POLL_IDLE
-    },
+    refetchInterval: (query) => getPipelinePollInterval(query.state.data?.overall_status),
     refetchIntervalInBackground: false,
   })
 }

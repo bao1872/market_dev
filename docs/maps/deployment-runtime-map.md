@@ -8,8 +8,8 @@
 | redis | trading-redis | 内网 | Redis 7，volume `trading-redisdata` |
 | backend | trading-backend | 8000 | FastAPI |
 | frontend | trading-frontend | 80 | Nginx + React build |
-| worker-bars-scheduler | trading-worker-bars-scheduler | 无 | 行情调度（16:00 bars_refresh，AsyncIOScheduler；板块同步已迁移至 `worker-after-close` 的 `syncing_boards` 步骤，CHANGE-20260716-007） |
-| worker-strategy-scheduler | trading-worker-strategy-scheduler | 无 | DSA 调度 |
+| worker-bars-scheduler | trading-worker-bars-scheduler | 无 | 行情调度（**Phase 8A**：16:00 创建/复用 after-close run，不直接刷新行情和触发 DSA；AsyncIOScheduler；板块同步已迁移至 `worker-after-close` 的 `syncing_boards` 步骤，CHANGE-20260716-007） |
+| worker-strategy-scheduler | trading-worker-strategy-scheduler | 无 | DSA 调度（**Phase 8A**：18:30 对 dsa_selector 创建/复用 after-close run；非 DSA selector 走原 worker 路径） |
 | worker-calendar | trading-worker-calendar | 无 | 交易日历 |
 | worker-monitor | trading-worker-monitor | 无 | 盘中监控 |
 | worker-strategy-batch | trading-worker-strategy-batch | 无 | 策略批处理 |
@@ -77,6 +77,7 @@ SELECT job_name, status, business_date, started_at, finished_at FROM scheduler_j
 - **MDAS v2 SSOT 验收（CHANGE-20260717-002）**：所有导入共享行情代码的容器（backend、worker-bars-scheduler、worker-strategy-scheduler、worker-strategy-batch、worker-after-close、worker-monitor、worker-capture）必须同一分支 SHA；禁止使用 `CORE_ONLY=1` 部分更新留下旧 worker；`/bars` 响应含 `market_data_contract_version`/`source_bar_hash`/`adj_factor_hash` 诊断字段；盘后 run metadata 含 `contract_version`/`source_bar_hash`/`adj_factor_hash`/`completed_through`/`adjustment_as_of`；603538 美诺华 1d/15m/1h 除权日前后无价格断层；600276 恒瑞医药 none/qfq 切换 factor 全 1.0。
 - **Canonical 四链 re-export 接入验收（CHANGE-20260720-001 §五）**：所有导入 `canonical_adapters` 的容器（backend、worker-strategy-batch、worker-after-close、worker-monitor、worker-capture）必须同一分支 SHA；`backend/app/services/canonical_adapters.py` 作为 SSOT 入口（不在 `_FOUR_CHAIN_MODULES` 中）可自由 import kernel 模块并 re-export 给四链使用；四链模块（`indicator_service`/`feature_snapshot_service`/`monitor_batch_service`/`stock_capture_service`）禁止直接 import kernel 模块（AST 硬门禁 `test_four_chain_no_direct_kernel_import` 硬失败）；`compute_macd_adapter` 延迟 import `compute_macd` 规避 `indicator_service → canonical_adapters → indicator_service` 循环依赖；`tests/allowlist.json` 不再含 issue #83 xfail 条目；部署后执行 `pytest backend/tests/test_four_chain_canonical_architecture.py -q` 必须全绿。
 - **三类 IndicatorView 独立飞书图片验收（CHANGE-20260720-001 §三+§四）**：`worker-capture` 必须支持 `CaptureJob.indicator_view` 字段（`node_cluster`/`bollinger`/`smc`）；三套 `FEISHU_CAPTURE_PRESETS` layers 互斥（除共享 candlestick）；缓存键/输出文件名/幂等键含 `indicator_view`；`/api/v1/stock-detail-feishu` POST body `SendFeishuRequest` 含 `indicator_view` 字段；前端 `useStockDetailFeishu` hook 支持三单选项（筹码共识价/布林带/智能资金）；部署后真实飞书测试渠道 E2E 必须发送 3 张不同 IndicatorView 图片验证。
+- **v4→v5 首次切换方案A（Phase 8A）**：部署新代码后，应用层所有读取路径过滤 `schema_version==5`，首个 v5 snapshot 发布前 watchlist_ready=False（不误报 ready）。部署验收必须：(1) 部署后手动或等待 16:00 触发一次受控 full v5 盘后运行；(2) 运行成功前 Admin 页面显示 after-close run 进行中，watchlist 显示未就绪；(3) v5 snapshot published 后确认 `has_succeeded_snapshot_run` 返回 True、watchlist_ready=True；(4) 首个 v5 成功后才完成发布验收。不增加 v4 兼容读取代码——v4 数据保留在 DB 供审计 SQL 查询，应用层无 v4 读取路径。
 
 ## 4.0 AFC V1 部署状态（CHANGE-20260716-003 Known Gap）
 

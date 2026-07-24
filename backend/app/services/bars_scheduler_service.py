@@ -142,6 +142,8 @@ class BarsSchedulerService:
         trade_date: date,
         db_session: AsyncSession | None = None,
         job_run_id: uuid.UUID | None = None,
+        *,
+        trigger_dsa: bool = True,
     ) -> BatchResult:
         """每日增量更新：串行拉取全市场 active 股票的最新行情。
 
@@ -152,17 +154,21 @@ class BarsSchedulerService:
             db_session: 可选的 DB 会话（不传则内部创建）
             job_run_id: 可选的 SchedulerJobRun.id，传入时在日线阶段完成/DSA 触发后
                 写入 job_run_events 时间线事件（DAILY_DONE / DSA_CREATED）
+            trigger_dsa: [Phase8A] True=日线完成后触发DSA（16:00独立路径）；
+                False=仅刷新行情+计算覆盖率，不触发DSA（orchestrator调用时使用，
+                DSA由orchestrator在computing_features步骤创建并inline claim）
 
         Returns:
             BatchResult: 批量刷新结果
         """
-        logger.info("开始每日增量更新 trade_date=%s", trade_date)
+        logger.info("开始每日增量更新 trade_date=%s trigger_dsa=%s", trade_date, trigger_dsa)
         return await self._process_all_instruments(
             trade_date=trade_date,
             counts=self.DAILY_COUNTS,
             db_session=db_session,
             task_name="每日增量更新",
             job_run_id=job_run_id,
+            trigger_dsa=trigger_dsa,
         )
 
     async def backfill_all_instruments(
@@ -203,12 +209,14 @@ class BarsSchedulerService:
         task_name: str,
         start_date: date | None = None,
         job_run_id: uuid.UUID | None = None,
+        *,
+        trigger_dsa: bool = True,
     ) -> BatchResult:
         """处理全市场股票的多周期行情刷新（按周期分阶段）。
 
         分阶段执行：
         1. Phase 1: 全部标的日线刷新
-        2. 日线完成后检查覆盖率，满足阈值则自动触发 DSA 选股
+        2. 日线完成后检查覆盖率，满足阈值则自动触发 DSA 选股（trigger_dsa=True 时）
         3. Phase 2: 全部标的 15min 刷新
         4. Phase 3: 全部标的 60min 刷新
 
@@ -220,6 +228,7 @@ class BarsSchedulerService:
             start_date: 日线回补起始日期（仅回补模式使用，None 时用 count 模式）
             job_run_id: 可选的 SchedulerJobRun.id，传入时在日线阶段完成/DSA 触发后
                 写入 job_run_events 时间线事件
+            trigger_dsa: [Phase8A] False 时仅计算覆盖率不触发DSA（orchestrator调用）
 
         Returns:
             BatchResult: 批量刷新结果
@@ -362,9 +371,12 @@ class BarsSchedulerService:
                     )
 
                 # 2. 覆盖率门禁 + DSA 触发
+                # [Phase8A] trigger_dsa=False 时仅计算覆盖率写DAILY_DONE，不创建DSA run
+                # （orchestrator调用时使用，DSA由orchestrator在computing_features创建）
                 try:
                     result.dsa_run_id = await self._check_daily_coverage_and_trigger_dsa(
                         trade_date, db_session, job_run_id=job_run_id, result=result,
+                        trigger_dsa=trigger_dsa,
                     )
                     # [JobRunEvent] - 日线阶段完成后写入 DAILY_DONE 事件（含覆盖率）
                     if job_run_id is not None and result.daily_coverage is not None:
@@ -405,22 +417,25 @@ class BarsSchedulerService:
         db_session: AsyncSession | None = None,
         job_run_id: uuid.UUID | None = None,
         result: BatchResult | None = None,
+        *,
+        trigger_dsa: bool = True,
     ) -> uuid.UUID | None:
         """[BarsScheduler] - 检查日线覆盖率，满足阈值则自动触发 DSA 选股。
 
         流程：
         1. 统计今日 bars_daily 中不同标的数
         2. 统计活跃标的总数
-        3. 覆盖率 ≥ 90% 时，调用 create_batch_run 创建/复用 dsa_selector queued run
-           - create_batch_run 内部统一处理 published/completed/running/queued 跳过
-             与 failed/partial_failed/interrupted 重试，本函数不再手动去重
-        4. 返回关联的 StrategyRun id（无论新建还是复用），供 job_run.metadata_json 记录
+        3. 覆盖率 ≥ 90% 时：
+           - trigger_dsa=True：调用 create_batch_run 创建/复用 dsa_selector queued run
+           - trigger_dsa=False：[Phase8A] 仅记录覆盖率，不创建DSA（orchestrator调用）
+        4. 返回关联的 StrategyRun id（trigger_dsa=False 时恒为 None）
 
         Args:
             trade_date: 交易日期
             db_session: 可选的 DB 会话
             job_run_id: 可选的 SchedulerJobRun.id，传入时在 DSA 触发后写 DSA_CREATED 事件
             result: 可选的 BatchResult，传入时填充 daily_covered/daily_total/daily_coverage
+            trigger_dsa: [Phase8A] False 时仅计算覆盖率不创建DSA run
 
         Returns:
             关联的 StrategyRun id，未触发时返回 None
@@ -473,6 +488,16 @@ class BarsSchedulerService:
                         },
                     )
                     await db.commit()
+                return None
+
+            # [Phase8A] trigger_dsa=False：仅计算覆盖率，不创建DSA run
+            # orchestrator调用时使用，DSA由orchestrator在computing_features步骤创建
+            if not trigger_dsa:
+                logger.info(
+                    "[BarsScheduler] 日线覆盖率达标但 trigger_dsa=False，跳过 DSA 创建: "
+                    "covered=%d/total=%d, coverage=%.1f%%",
+                    covered, total, coverage * 100,
+                )
                 return None
 
             # 触发 DSA run（create_batch_run 内部统一去重/重试）
