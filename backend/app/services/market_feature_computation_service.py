@@ -146,9 +146,9 @@ class MarketFeatureComputationService:
             bars_daily, primary_source_bar_hash, primary_adj_factor_hash,
         )
 
-        # 4. 获取 Node Cluster input + 计算
+        # 4. 获取 Node Cluster input + 计算（传入已读日线 bars，避免 1d MDAS 重复读取）
         node_profile, node_avail, node_reason, node_input = (
-            await cls._compute_node_cluster(session, instrument_id, trade_date)
+            await cls._compute_node_cluster(session, instrument_id, trade_date, bars_daily)
         )
 
         # 5. 构建 SMC daily freshness（从预计算 SMC DTO，不调 kernel）
@@ -320,8 +320,13 @@ class MarketFeatureComputationService:
         session: AsyncSession,
         instrument_id: UUID,
         trade_date: date,
+        bars_daily: pd.DataFrame | None = None,
     ) -> tuple[NodeClusterProfileResult | None, str, str | None, Any | None]:
         """获取 Node Cluster input + 计算（一次）。
+
+        Args:
+            bars_daily: [Phase 6] 调用方已读取的日线 bars（_read_daily_bars 结果）。
+                非空时传给 NodeClusterInputProvider 跳过 1d MDAS 重复读取。
 
         Returns:
             (profile, availability, degraded_reason, node_input)
@@ -331,6 +336,7 @@ class MarketFeatureComputationService:
             node_input = await NodeClusterInputProvider.get_inputs(
                 session, instrument_id,
                 adjustment_as_of=trade_date, end_date=trade_date,
+                precomputed_daily_bars=bars_daily,
             )
             if node_input.availability == "unavailable":
                 return None, "unavailable", node_input.degraded_reason, node_input

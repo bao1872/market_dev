@@ -245,9 +245,10 @@ class TestEventFreshnessPayloadPersistence:
         """schema_version 不匹配被拒绝。"""
         from app.services.feature_snapshot_service import _validate_event_freshness_payload
 
+        # [Phase 6] payload 需含非空 smc + monitor_interaction，否则先被空骨架检查拦截
         payload = {
-            "daily_structure": {"smc": {}},
-            "monitor_interaction": {},
+            "daily_structure": {"smc": {"bos_bullish": {"status": "observed"}}},
+            "monitor_interaction": {"node_cluster_touch": {"cross_up": {"status": "observed"}}},
             "meta": {"schema_version": 999},
         }
         with pytest.raises(ValueError, match="schema_version 不匹配"):

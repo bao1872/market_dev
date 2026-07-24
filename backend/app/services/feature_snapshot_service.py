@@ -298,19 +298,25 @@ def build_summary_payload(
 
 
 def _validate_event_freshness_payload(
-    payload: dict[str, Any],
+    payload: dict[str, Any] | None,
     instrument_id: uuid.UUID,
     trade_date: date,
 ) -> None:
-    """[Phase 5] 校验 event_freshness_payload 含必需定义键。
+    """[Phase 5/6] 校验 event_freshness_payload 含必需定义键和非空内容。
 
     正式 full/after_close 流程必须包含：
-    - daily_structure（含 smc 子键）
-    - monitor_interaction
+    - daily_structure（含 smc 子键，smc 至少 1 个事件）
+    - monitor_interaction（至少 1 个事件类型）
     - meta（含 schema_version）
+    - 任何 unavailable 事件必须有 reason（不等同于 never_observed）
 
-    缺失任一键直接 ValueError，禁止空壳发布。
+    缺失任一条件直接 ValueError，禁止空壳发布。
     """
+    if payload is None:
+        raise ValueError(
+            f"event_freshness_payload 为 None: "
+            f"instrument_id={instrument_id} trade_date={trade_date}"
+        )
     required_top_keys = {"daily_structure", "monitor_interaction", "meta"}
     missing = required_top_keys - set(payload.keys())
     if missing:
@@ -324,6 +330,32 @@ def _validate_event_freshness_payload(
             f"event_freshness_payload.daily_structure 缺少 smc: "
             f"instrument_id={instrument_id} trade_date={trade_date}"
         )
+    # [Phase 6] 空壳检查：smc 和 monitor_interaction 不能全为空
+    smc = daily.get("smc") or {}
+    if not smc:
+        raise ValueError(
+            f"event_freshness_payload.daily_structure.smc 为空骨架: "
+            f"instrument_id={instrument_id} trade_date={trade_date}"
+        )
+    monitor = payload.get("monitor_interaction") or {}
+    if not monitor:
+        raise ValueError(
+            f"event_freshness_payload.monitor_interaction 为空骨架: "
+            f"instrument_id={instrument_id} trade_date={trade_date}"
+        )
+    # [Phase 6] unavailable 事件必须有 reason
+    for event_type, directions in monitor.items():
+        if not isinstance(directions, dict):
+            continue
+        for direction, evt in directions.items():
+            if not isinstance(evt, dict):
+                continue
+            if evt.get("status") == "unavailable" and "reason" not in evt:
+                raise ValueError(
+                    f"event_freshness_payload.monitor_interaction."
+                    f"{event_type}.{direction} 状态为 unavailable 但缺少 reason: "
+                    f"instrument_id={instrument_id} trade_date={trade_date}"
+                )
     meta = payload.get("meta") or {}
     if meta.get("schema_version") != _SCHEMA_VERSION:
         raise ValueError(

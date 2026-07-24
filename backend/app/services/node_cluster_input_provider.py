@@ -41,7 +41,11 @@ from app.constants.indicator_contract import (
     DAILY_HISTORY_BARS,
     NODE_CLUSTER_LOW_BARS,
 )
-from app.services.market_data_aggregation_service import MarketDataAggregationService
+from app.services.chart_bars_service import compute_source_bar_hash
+from app.services.market_data_aggregation_service import (
+    MarketDataAggregationService,
+    _compute_adj_factor_hash,
+)
 
 logger = logging.getLogger("services.node_cluster_input_provider")
 
@@ -114,6 +118,7 @@ class NodeClusterInputProvider:
         *,
         adjustment_as_of: date | None = None,
         end_date: date | None = None,
+        precomputed_daily_bars: pd.DataFrame | None = None,
     ) -> NodeClusterInput:
         """获取 Node Cluster 输入（固定 250 daily + 4000 15m, completed qfq）。
 
@@ -126,6 +131,9 @@ class NodeClusterInputProvider:
             adjustment_as_of: 复权锚点（None=最新；date=point-in-time qfq 因子截断）
             end_date: 行情截止日期（None=最新；date=point-in-time，仅返回 <= end_date 的 bar）。
                 Feature Snapshot 盘后链使用 end_date=trade_date 保证不读取未来数据。
+            precomputed_daily_bars: [Phase 6] 调用方已读取的日线 bars（如 MFCS _read_daily_bars）。
+                非空时跳过 1d MDAS 读取，截断到最新 250 根并重算 source_bar_hash / adj_factor_hash，
+                保证四链 hash 一致。仅 FeatureSnapshot 盘后链使用；Detail/Capture/Monitor 不传此参数。
 
         Returns:
             NodeClusterInput（含 bars + hash + availability 状态机结果）
@@ -133,17 +141,36 @@ class NodeClusterInputProvider:
         mdas = MarketDataAggregationService()
 
         # daily: completed qfq DAILY_HISTORY_BARS=250 根（合同常量）
-        daily_agg = await mdas.get_bars(
-            session,
-            instrument_id,
-            timeframe="1d",
-            adj="qfq",
-            include_realtime=False,
-            completed_only=True,
-            adjustment_as_of=adjustment_as_of,
-            end_date=end_date,
-            limit=_NODE_DAILY_REQUIRED,
-        )
+        if precomputed_daily_bars is not None:
+            # [Phase 6] 复用调用方已读取的日线 bars，避免 MDAS 1d 重复读取
+            daily_bars = precomputed_daily_bars.tail(_NODE_DAILY_REQUIRED)
+            daily_source_hash = compute_source_bar_hash(daily_bars, "1d")
+            # 从 bars 重建 factor_df 计算 adj_factor_hash（与 MDAS 250-bar 读取一致）
+            if "adj_factor" in daily_bars.columns and not daily_bars.empty:
+                factor_df = pd.DataFrame({
+                    "trade_date": daily_bars.index,
+                    "adj_factor": daily_bars["adj_factor"].values,
+                })
+                daily_adj_factor_hash = _compute_adj_factor_hash(factor_df)
+            else:
+                daily_adj_factor_hash = ""
+            daily_history_exhausted = len(daily_bars) < _NODE_DAILY_REQUIRED
+        else:
+            daily_agg = await mdas.get_bars(
+                session,
+                instrument_id,
+                timeframe="1d",
+                adj="qfq",
+                include_realtime=False,
+                completed_only=True,
+                adjustment_as_of=adjustment_as_of,
+                end_date=end_date,
+                limit=_NODE_DAILY_REQUIRED,
+            )
+            daily_bars = daily_agg.bars
+            daily_source_hash = daily_agg.source_bar_hash
+            daily_adj_factor_hash = daily_agg.adj_factor_hash
+            daily_history_exhausted = daily_agg.history_exhausted
 
         # 15m: completed qfq NODE_CLUSTER_LOW_BARS=4000 根（合同常量）
         # [CP-V3-A] MDAS 内部 count-aware 回补：limit=4000 时自动扩大回看天数
@@ -159,14 +186,13 @@ class NodeClusterInputProvider:
             limit=_NODE_15M_REQUIRED,
         )
 
-        daily_bars = daily_agg.bars
         bars_15m = m15_agg.bars
 
         # availability 三态状态机
         availability, degraded_reason = cls._compute_availability(
             daily_count=len(daily_bars),
             m15_count=len(bars_15m),
-            daily_history_exhausted=daily_agg.history_exhausted,
+            daily_history_exhausted=daily_history_exhausted,
             m15_history_exhausted=m15_agg.history_exhausted,
         )
 
@@ -179,23 +205,23 @@ class NodeClusterInputProvider:
             instrument_id,
             len(daily_bars), _NODE_DAILY_REQUIRED,
             len(bars_15m), _NODE_15M_REQUIRED,
-            daily_agg.history_exhausted, m15_agg.history_exhausted,
+            daily_history_exhausted, m15_agg.history_exhausted,
             availability, degraded_reason,
-            daily_agg.source_bar_hash, m15_agg.source_bar_hash,
+            daily_source_hash, m15_agg.source_bar_hash,
         )
 
         return NodeClusterInput(
             daily_bars=daily_bars,
             bars_15m=bars_15m,
-            daily_source_hash=daily_agg.source_bar_hash,
-            daily_adj_factor_hash=daily_agg.adj_factor_hash,
+            daily_source_hash=daily_source_hash,
+            daily_adj_factor_hash=daily_adj_factor_hash,
             m15_source_hash=m15_agg.source_bar_hash,
             m15_adj_factor_hash=m15_agg.adj_factor_hash,
             daily_count=len(daily_bars),
             m15_count=len(bars_15m),
             daily_requested=_NODE_DAILY_REQUIRED,
             m15_requested=_NODE_15M_REQUIRED,
-            daily_history_exhausted=daily_agg.history_exhausted,
+            daily_history_exhausted=daily_history_exhausted,
             m15_history_exhausted=m15_agg.history_exhausted,
             availability=availability,
             degraded_reason=degraded_reason,
