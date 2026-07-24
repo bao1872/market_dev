@@ -117,8 +117,8 @@
 | **[P0-4 published snapshot 保护]** `create_snapshot_run(scope='full', allow_republish=False)` 在已存在 published full run 时抛 `PublishedSnapshotRunExistsError`；`allow_republish=True` 绕过检查；`scope='sample'` 不受限 | `test_feature_snapshot_service.py::test_p0_4_create_snapshot_run_blocks_when_published_full_exists` + `test_p0_4_create_snapshot_run_allow_republish_bypasses_check` + `test_p0_4_create_snapshot_run_sample_scope_not_blocked` |
 | **[P0-4 upsert WHERE 保护]** `upsert_snapshot(allow_republish=False)` ON CONFLICT DO UPDATE 时 WHERE 子句保护已归属 published run 的 snapshot 不被覆盖；`allow_republish=True` 覆盖 | `test_feature_snapshot_service.py::test_p0_4_upsert_snapshot_protects_published_run_ownership` + `test_p0_4_upsert_snapshot_allow_republish_overwrites` |
 | **[PR #74 idempotency key]** `strategy_events.idempotency_key` 格式 `symbol:source_run_id:algorithm_version`；每只股票每个 run 至多一个事件；旧格式 `symbol:trade_date:algorithm_version:hash(evidence)` 不再生成 | `test_strategy_events_idempotency.py` |
-| `compute_for_trade_date` 单股失败不阻断其他股票；失败比例超 30% 抛 `RuntimeError` | `test_feature_snapshot_service.py::test_compute_for_trade_date_single_failure_does_not_block` |
-| [half-baked rollback] `compute_for_trade_date` 不内部 commit；超阈值抛 `RuntimeError` 后 caller rollback，DB 无半成品残留 | `test_feature_snapshot_service.py::test_compute_for_trade_date_over_threshold_no_partial_after_rollback` |
+| `compute_for_trade_date_with_mfcs` 单股失败不阻断其他股票；失败比例超 30% 抛 `RuntimeError` | `test_feature_snapshot_service.py::test_compute_for_trade_date_single_failure_does_not_block` |
+| [half-baked rollback] `compute_for_trade_date_with_mfcs` 不内部 commit；超阈值抛 `RuntimeError` 后 caller rollback，DB 无半成品残留 | `test_feature_snapshot_service.py::test_compute_for_trade_date_over_threshold_no_partial_after_rollback` |
 | `structural_payload` 必须包含 `primary`/`secondary`/`relation`/`meta` 4 key；`relation` 来自 `_compute_relation` | `test_feature_snapshot_service.py::test_compute_snapshot_structural_payload_contains_relation` |
 | `parse_args` 默认值（end=latest/batch_size=20/failure_threshold=0.3）+ 自定义值 + 缺失 `--start` 报 `SystemExit`；**`commit_every` 已移除**；**`--allow-republish` 默认 False** | `test_feature_snapshot_backfill.py::test_parse_args_*` |
 | `get_trade_dates_from_bars` 升序 trade_dates + 空表返回空列表 | `test_feature_snapshot_backfill.py::test_get_trade_dates_from_bars*` |
@@ -126,10 +126,10 @@
 | `get_existing_instrument_ids` 返回某日已存在 snapshot 的 instrument_id 集合；按完整唯一键过滤；按 schema_version 严格过滤 | `test_feature_snapshot_backfill.py::test_get_existing_instrument_ids_*` |
 | `backfill_single_date` `--dry-run` 输出 missing 数量不写库；正常模式调用 compute；`--resume` 真正跳过已存在 instrument（不重新计算）；全部已存在时跳过 compute | `test_feature_snapshot_backfill.py::test_backfill_single_date_*` |
 | `main` `--dry-run` 端到端不写库；单日失败 rollback 半成品不阻断其他日期（验证 rollback/commit 计数）；`--end=latest` 解析；`start > end` 直接 `sys.exit(1)` | `test_feature_snapshot_backfill.py::test_main_*` |
-| 盘后编排状态机新增 `feature_snapshot` 步骤（`quality_gate → feature_snapshot → publishing`） | `test_after_close_orchestrator.py`（9 个用例） |
-| [feature_snapshot 失败不进入 publishing] `compute_for_trade_date` 抛 `RuntimeError` → `publish_run` 未被调用 + `job_run.status='failed'` + 不应有 publishing/succeeded 事件 | `test_after_close_orchestrator.py::test_execute_feature_snapshot_failure_skips_publishing` |
+| 盘后编排状态机 `computing_features` 步骤（`checking_coverage → computing_features → publishing`，CHANGE-20260724-002 旧 `creating_dsa`/`waiting_dsa_worker`/`quality_gate`/`feature_snapshot` 四阶段收敛为 `computing_features`，新 run 不生成旧步骤名） | `test_after_close_orchestrator.py`（9 个用例） |
+| [computing_features 失败不进入 publishing] `compute_for_trade_date_with_mfcs` 抛 `RuntimeError` → `publish_run` 未被调用 + `job_run.status='failed'` + 不应有 publishing/succeeded 事件 | `test_after_close_orchestrator.py::test_execute_feature_snapshot_failure_skips_publishing` |
 | **[PR #74 发布原子性]** snapshot 计算完成后不立即写 `succeeded`/`published_at`；只有 DSA `publish_run` 成功后才 `finish_snapshot_run(status='succeeded')` 写 `published_at` 并生成事件；`publish_run` 失败时 snapshot run=`failed`、`published_at=null`、不生成事件 | `test_after_close_orchestrator_atomicity.py`（发布原子性测试） |
-| 断点恢复：`last_completed_step='quality_gate'` → `skip_snapshot=False`；`'feature_snapshot'` → `skip_snapshot=True` | `test_after_close_orchestrator.py` |
+| 断点恢复：`last_completed_step='checking_coverage'` → `skip_computing_features=False`；`'computing_features'` → `skip_computing_features=True`；历史 run 旧值（`creating_dsa`/`waiting_dsa_worker`/`quality_gate`/`feature_snapshot`）映射到 `computing_features` 已完成 | `test_after_close_orchestrator.py` |
 | 盘后流水线聚合 API（11 场景）：盘前 not_started/收盘后 blocked/latest 不回退历史/运行中/成功/watchlist_ready 判定/sample 不计入/full 优先展示/失败带 error/POST 幂等/events 限 100 条/非 admin 403 | `test_admin_after_close_pipeline.py`（11 个用例） |
 | 迁移幂等：`alembic upgrade head` / `downgrade -1` / `upgrade head` 链路不报错；表含唯一约束与 3 个 btree 索引 | 手动验证（test DB） |
 
@@ -332,7 +332,7 @@
 
 ### Auto-resume 受控测试
 - `backend/tests/test_phase_d_auto_resume.py`（9 个测试）：
-  - refreshing_daily / waiting_dsa_worker / feature_snapshot 三步骤中断恢复
+  - refreshing_daily / waiting_dsa_worker / feature_snapshot 三步骤中断恢复（**legacy**：`waiting_dsa_worker`/`feature_snapshot` 为 CHANGE-20260724-002 收敛前的旧状态名，新 run 不再生成；该测试文件仍按旧 enum 验证历史兼容映射）
   - attempt_no 递增 + max=3 限制
   - lease_epoch fencing
   - 唯一活跃记录 / 无僵尸 running / 非 after_close 排除

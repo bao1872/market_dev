@@ -88,7 +88,7 @@ after_close_orchestrator
         primary.1d.cost_position,        # 兼容字段
         secondary.15m.timeframe_volume_profile
       }
-    → StockFeatureSnapshot (schema_version=3)
+    → StockFeatureSnapshot (schema_version=5)
     → finish_snapshot_run (读取实际 snapshot 数量)
 ```
 
@@ -282,3 +282,9 @@ Capture/飞书链约束（CHANGE-20260718-006 Section 3）：
   - **availability/degraded_reason 诊断字段**：盘后 snapshot 持久化的 `node_cluster` 字段除 `NodeClusterProfileResult` 序列化字段外，新增 `availability`（available/degraded/unavailable）+ `degraded_reason`（INSUFFICIENT_DAILY_BARS/MISSING_15M_BARS/PROFILE_EMPTY/COMPUTE_FAILED）+ `daily_source_hash`/`bars_15m_source_hash`/`daily_bars_count`/`bars_15m_count` 诊断字段（即使 profile 为 None 也写入最小诊断字段）
   - **StockContext 5 态状态机**：`nodeAvailability` 字段从 snapshot.primary.1d.node_cluster 提取诊断字段，映射 `degraded_reason` 到稳定 `reasonCode`（详见 `docs/current/02-data-api-contracts.md` §15.5 与 `docs/current/07-atomic-fact-contract-v1.md` §9）
   - **schema_version 3→4**：旧 schema_version=3 snapshot 不可见（查询按 `schema_version=4` 过滤），保证旧新结果不可混用
+- CHANGE-20260724-002：盘后状态机收敛 + compute-once + event freshness 层 + schema v5
+  - **盘后状态机收敛**：`queued → refreshing_daily → syncing_boards → checking_coverage → computing_features → publishing → succeeded`；旧的 `creating_dsa` / `waiting_dsa_worker` / `quality_gate` / `feature_snapshot` 四个处理阶段收敛为 `computing_features`（内部 checkpoint：`prepare_inputs → continuous_factors → event_freshness → combined_quality_gate`）；旧 enum 保留供历史 run 兼容读取，新 run 不再生成旧步骤名
+  - **compute-once 注入**：盘后日线 DSA 只算一次，`compute_structural_features_adapter` 支持 `precomputed_dsa_bundle`，同时写 `StrategyResult` 和 snapshot `dsa_segment`；`_compute_smc_freshness_factors` 接收 `precomputed_smc_dto` 不再内部调 `compute_smc_adapter`
+  - **event_freshness_payload 独立层**：SMC freshness 从 `structural_payload.smc_freshness` 迁出到 `event_freshness_payload.daily_structure.smc`；新增 swing anchor（6 类）/ OB formation（4 项）/ DSA switch（1 项）；批量查询 `strategy_events`（DISTINCT ON / 窗口函数）禁止 N+1
+  - **schema_version 4→5**：应用层所有读取路径过滤 `schema_version==5`，v4 不进入当前发布视图；v4 快照数据保留在数据库（migration 068 只新增列不删除历史行），如需审计 v4 数据需直接 SQL 查询；正式 full/after_close 流程禁止 `event_freshness_payload=None`、空骨架和缺 reason 的 `unavailable`；回滚：仅回滚 Phase 7 文档对齐时使用 `git revert <Phase 7 commit>`，涉及 schema/状态机/计算链的功能回滚必须单独制定代码和 migration 回滚计划，禁止只修改 `_SCHEMA_VERSION`
+  - **组合门禁**：DSA + continuous + event 三门禁在 `computing_features` 末尾执行一次，全部通过后才进入 `publishing`

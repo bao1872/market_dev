@@ -133,7 +133,7 @@ strategy_run_items.reason_code 标准编码：
 | 表格视图配置 | `/me/table-view-presets` | 用户表格视图配置 CRUD；JWT user_id 隔离；active subscription + trend_selection feature（admin 豁免）；config 仅允许 keyword/sort/filters/hiddenColumns/pageSize；每 user+table_id+strategy_key 最多 20 个；`(user_id, table_id, strategy_key, name)` 唯一约束用两个 partial unique index 实现（strategy_key IS NOT NULL / IS NULL 分离，解决 NULL!=NULL 问题）；is_default 同维度互斥；**写操作（POST/PATCH/DELETE）必须在返回前 `await db.commit()`，异常分支 `rollback` 后 re-raise，禁止吞异常；写后读跨请求必须可见** |
 | 个股详情分享 | `/stock-detail-feishu` | target_channel_id 支持手动指定渠道 |
 | Capture | `/api/v1/capture/*` | 只接受 Capture Token |
-| Admin | `/admin/*` | Admin 角色 + 审计；含 `GET /admin/worker-heartbeats` 只读心跳视图（health_state 后端计算：fresh<120s / stale 120-600s / stopped≥600s 或 status=stopped）；新增盘后流水线聚合状态端点 `/admin/after-close/pipeline/latest`、`/admin/after-close/pipeline?trade_date=`、`/admin/after-close/pipeline/runs?limit=`、`POST /admin/after-close/pipeline/run`（admin，幂等），响应 `AfterClosePipelineResponse` 含 8 步骤时间线 + watchlist_ready 严格判定 + data_freshness + 最近 100 条 events |
+| Admin | `/admin/*` | Admin 角色 + 审计；含 `GET /admin/worker-heartbeats` 只读心跳视图（health_state 后端计算：fresh<120s / stale 120-600s / stopped≥600s 或 status=stopped）；新增盘后流水线聚合状态端点 `/admin/after-close/pipeline/latest`、`/admin/after-close/pipeline?trade_date=`、`/admin/after-close/pipeline/runs?limit=`、`POST /admin/after-close/pipeline/run`（admin，幂等），响应 `AfterClosePipelineResponse` 含时间线（refreshing_daily → checking_coverage → computing_features → publishing → watchlist_ready + syncing_boards 软失败独立显示；CHANGE-20260724-002 旧四阶段收敛为 computing_features）+ watchlist_ready 严格判定 + data_freshness + 最近 100 条 events |
 | Metrics | `/metrics` | Prometheus 指标，无需认证 |
 
 ## 4. Capture Token 契约
@@ -1023,7 +1023,7 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 
 ### 13.6 事务边界与不可读取失败半成品
 
-- `compute_for_trade_date` 只负责 upsert（flush）+ 返回统计，**不内部 commit**；
+- `compute_for_trade_date_with_mfcs` 只负责 upsert（flush）+ 返回统计，**不内部 commit**；
 - caller（`after_close_orchestrator` / `feature_snapshot_backfill`）决定 commit / rollback：
   - 成功（`failure_rate <= threshold`）→ commit；
   - `RuntimeError`（失败比例超阈值）→ rollback 半成品 → 标记 `failed`；
@@ -1268,7 +1268,7 @@ BB / MACD / SQZMOM overlay 必须使用当前图表周期（timeframe）的 bars
 
 **关键约束**：
 
-- `_SCHEMA_VERSION` 3→4：旧 schema_version=3 的 snapshot 不可见（查询按新 schema_version=4 过滤），保证旧新结果不可混用；回滚方式：将 `_SCHEMA_VERSION` 改回 3 即可恢复旧快照可见。
+- `_SCHEMA_VERSION` 4→5（CHANGE-20260724-002）：新增 `event_freshness_payload` JSONB 独立事件新鲜度层；应用层所有读取路径过滤 `schema_version==5`（`feature_snapshot_service` / `stock_context` / `watchlist` / `market_stocks_service` / `state_event_service`），v4 不进入当前发布视图，不能被 v5 门禁误用；v4 快照数据保留在数据库（migration 068 只新增列不删除历史行），如需审计 v4 数据需直接 SQL 查询，应用层无接口；正式 full/after_close 流程禁止 `event_freshness_payload=None`、空骨架和缺 reason 的 `unavailable`；`never_observed` 和 `unavailable` 语义不同；回滚：仅回滚 Phase 7 文档对齐时使用 `git revert <Phase 7 commit>`，涉及 schema/状态机/计算链的功能回滚必须单独制定代码和 migration 回滚计划，禁止只修改 `_SCHEMA_VERSION`。
 - Atomic Facts 中的"筹码共识价"与详情页 Node Cluster 必须消费同一个 Canonical 结果（`node_cluster_engine.compute_node_cluster_profile` 唯一入口，三链同核）。
 - `nodeAvailability` 字段是顶层必填字段，与 `core`/`auxiliary`/`availability` 并列，不计入 Core 14 / `availability.coreDenominator`。
 - 管理员 debug 接口 `GET /api/v1/admin/stocks/{symbol}/debug` 在用户响应基础上同样返回 `nodeAvailability`（无额外字段，普通用户与管理员字段一致）。

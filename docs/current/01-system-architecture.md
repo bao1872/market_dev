@@ -145,7 +145,7 @@ user_watchlist_items
   → CanonicalComputationService.compute_with_mdas (InputProvider 自动取行情+校验+哈希)
   → AlgorithmRegistry[algorithm_id] (12 个算法族, migration_status=production_wired)
   → Kernel (node_cluster_engine / smc_pine_core / compute_bollinger / compute_sqzmom_lb / ...)
-  → 四链消费 (详情 / 盘后 feature_snapshot / 盘中 monitor / Capture)
+  → 四链消费 (详情 / 盘后 computing_features / 盘中 monitor / Capture)
   → V2 DTO (node_regions + price_state + display_frame V2 字段)
   ```
   四条调用链禁止直接 `import` kernel 绕过注册表（AST 硬门禁 `test_four_chain_no_direct_kernel_import`）；相同输入（instrument + timeframe + as_of + source_bar_hash + adj_factor_hash）必须得到相同 `result_hash`（5 维度确定性）。

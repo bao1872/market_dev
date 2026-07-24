@@ -60,15 +60,23 @@ worker-strategy-batch 的 run 级总超时由 STRATEGY_RUN_TOTAL_TIMEOUT_SECONDS
 - 非 DSA 策略（如 `watchlist_monitor`）不触发 auto-trigger；
 - `trade_date` 缺失时不触发，记录 warning 日志。
 
-### 2.3 盘后编排状态机与 feature_snapshot 步骤
+### 2.3 盘后编排状态机与 computing_features 步骤
 
-`after_close_orchestrator.execute_after_close_run` 状态机当前为：
+`after_close_orchestrator.execute_after_close_run` 状态机当前为（CHANGE-20260724-002 统一特征计算）：
 
 ```text
-queued → refreshing_daily → syncing_boards → checking_coverage → creating_dsa
-  → waiting_dsa_worker → quality_gate → feature_snapshot → publishing → succeeded
+queued → refreshing_daily → syncing_boards → checking_coverage → computing_features
+  → publishing → succeeded
 任意步骤异常 → failed（syncing_boards 除外：软失败，不阻断后续步骤）
 ```
+
+`computing_features` 内部逻辑（Phase 5 收敛旧 4 步为单步）：
+
+```text
+prepare_inputs → continuous_factors → event_freshness → combined_quality_gate
+```
+
+**旧状态（历史 run 兼容读取，不作为新 run 执行步骤）**：`creating_dsa` / `waiting_dsa_worker` / `quality_gate` / `feature_snapshot` 旧 enum 保留，admin/API 可读取展示历史 run；新 run 不生成旧步骤名。旧 `last_completed_step` 值在新代码中映射到 `computing_features` 已完成。
 
 `syncing_boards` 步骤位于 `refreshing_daily` 之后、`checking_coverage` 之前，调用 `board_sync_service.sync_boards()` 通过 pywencai 同步板块目录与成分股关系（详见 §2.6）。**软失败设计**：`syncing_boards` 失败/校验失败/超时不抛出阻断异常，仅记录 `degraded_reasons` 并保留上一成功版本，after_close_orchestrator 继续执行 `checking_coverage` 及后续步骤；非交易日整体不运行；`mode=dsa_only` 跳过此步骤。
 
@@ -87,7 +95,7 @@ queued → refreshing_daily → syncing_boards → checking_coverage → creatin
 - 监控 Profile 缓存（`monitor_batch_service._node_cluster_profile_cache`，in-process dict，跨 worker 无法精确失效，TTL 300s）；
 - Snapshot（DB 存储，由 after_close 流水线重算，schema_version bump 保证旧快照不可见）。
 
-**因子失败门禁**：因子未完成时不得创建 DSA 或发布 snapshot；rebuild 失败不得用 1.0 伪装成功，必须返回 degraded 状态和原因，受影响结果不发布。**重试/恢复**：factor rebuild 失败时回滚 fingerprint（`_delete_fingerprint`），可重试；`detect_company_action_change` → `earliest_affected` → rebuild → 成功后更新 fingerprint + 失效下游缓存。**feature_snapshot schema v4（CHANGE-20260721-001）**：盘后调用 MDAS 显式 `include_realtime=False, end_date=trade_date, adjustment_as_of=trade_date`，保存 `source_bar_hash`/`adj_factor_hash`/`contract_version`/`completed_through`/`adjustment_as_of` 到 run metadata；`_SCHEMA_VERSION` 3→4（CHANGE-20260721-001，旧 schema_version=3 snapshot 不可见，需重算）；输入语义变化时 snapshot schema version 递增，禁止新旧语义混用/覆盖（alembic 063↔064 落库）。
+**因子失败门禁**：因子未完成时不得创建 DSA 或发布 snapshot；rebuild 失败不得用 1.0 伪装成功，必须返回 degraded 状态和原因，受影响结果不发布。**重试/恢复**：factor rebuild 失败时回滚 fingerprint（`_delete_fingerprint`），可重试；`detect_company_action_change` → `earliest_affected` → rebuild → 成功后更新 fingerprint + 失效下游缓存。**feature_snapshot schema v5（CHANGE-20260724-002 统一特征计算）**：盘后调用 MDAS 显式 `include_realtime=False, end_date=trade_date, adjustment_as_of=trade_date`，保存 `source_bar_hash`/`adj_factor_hash`/`contract_version`/`completed_through`/`adjustment_as_of` 到 run metadata；`_SCHEMA_VERSION` 4→5（CHANGE-20260724-002，新增 `event_freshness_payload` JSONB 独立事件新鲜度层，旧 schema_version≤4 snapshot 不可见，需重算）；正式 full/after_close 流程禁止 `event_freshness_payload=None`、空骨架和缺 reason 的 `unavailable`；`never_observed` 和 `unavailable` 语义不同；输入语义变化时 snapshot schema version 递增，禁止新旧语义混用/覆盖（alembic 068 落库）。
 
 **因子审计完整字段集合（CHANGE-20260721-002 V2，PROMPT.md §5.4.2）**：`bars_scheduler_service._audit_and_rebuild_factors` 返回的 summary dict 必须包含以下生产审计字段：
 
@@ -105,23 +113,25 @@ queued → refreshing_daily → syncing_boards → checking_coverage → creatin
 
 `_rebuild_factors_if_needed` 返回值同样新增 `trade_date`/`failed_symbols` 字段；rebuild_batch 成功/异常路径均同步设置 `audit_rebuilt`/`failed_symbols`。
 
-`feature_snapshot` 步骤位于 `quality_gate` 与 `publishing` 之间，调用 `feature_snapshot_service.compute_for_trade_date` 为当日 active A 股全集生成 `stock_feature_snapshots` 行：
+`computing_features` 步骤位于 `checking_coverage` 与 `publishing` 之间（CHANGE-20260724-002 统一特征计算），调用 `feature_snapshot_service.compute_for_trade_date_with_mfcs` 为当日 active A 股全集生成 `stock_feature_snapshots` 行：
 
 - 使用独立 `AsyncSessionLocal`，不依赖 HTTP 请求 session；
+- **Compute-once 所有权**（Phase 5/6 验证）：scheduled after-close 由 orchestrator inline claim scheduled DSA run（防止 worker 领取）；每股 MDAS 1d 读取 1 次、15m 读取 1 次；DSA、SMC、Node 各计算 1 次；DSA bundle 同时生成 StrategyResult 和 snapshot；snapshot 复用 MFCS 预计算结果（`NodeClusterInputProvider` 通过 `precomputed_daily_bars` 复用已读日线 bars）；StrategyEvent 整批查询 1 次（`prefetch_monitor_events`），不允许 N+1；manual 和其他非 scheduled StrategyRun 仍由原 `run_strategy_batch_worker/StrategyBatchService` 处理，不触发 after-close；
 - 单股失败写 `degraded_reasons` 不阻断其他股票；
 - 失败比例超过 `failure_threshold`（默认 0.3）抛 `RuntimeError`；
-- **事务边界**：`compute_for_trade_date` 不内部 commit，只 upsert（flush）+ 检查阈值；caller（`after_close_orchestrator`）显式控制：
+- **组合质量门禁**：DSA + continuous + event freshness 任一失败不 publish。continuous 门禁：`failure_rate > threshold` → `RuntimeError`；event freshness 门禁：正式 full/after_close 流程 `require_event_freshness=True`，None/空骨架/缺 reason 的 unavailable → `ValueError`；DSA 门禁：`_check_quality_gates` 检查 run.status；任一失败时 StrategyRun 不 published、snapshot run 不 succeeded、parent after-close run 不 succeeded、published pointer 保持不变、error_code 区分失败来源；
+- **事务边界**：`compute_for_trade_date_with_mfcs` 不内部 commit，只 upsert（flush）+ 检查阈值；caller（`after_close_orchestrator`）显式控制：
   - 成功（`failure_rate <= threshold`）→ `db.commit()`，进入 `publishing`；
   - `RuntimeError`（超阈值）→ 显式 `db.rollback()` 丢弃半成品行 → 异常向上传播 → orchestrator 写 `failed` 事件 → **不进入 publishing**；
-- `feature_snapshot` 失败时 `last_completed_step` 不推进，重试从 `quality_gate` 之后重新进入；
-- 完成后更新心跳与 `last_completed_step='feature_snapshot'`；
-- **Heartbeat 保活（CHANGE-20260709-003）**：feature_snapshot 阶段启动后台 `_job_run_heartbeat_loop`（间隔 30s），并在 `compute_for_trade_date` 每批完成后通过 `_build_feature_snapshot_progress_callback` 刷新 `heartbeat_at`、`lease_expires_at` 与 `metadata.feature_snapshot_progress`，防止长计算被 watchdog/recovery 误判为 stale；进度事件按每 500 只股票采样写入 `job_run_events`，避免事件表膨胀；
-- **Run lifecycle（Phase 8 新增，PR #74 发布原子性收紧）**：feature_snapshot 步骤前后写 `stock_feature_snapshot_runs`：
-  - 开始时 `create_snapshot_run(trade_date, 'after_close')` 创建 `running` run（独立 session + commit），并立即把 `feature_snapshot_run_id` / `last_started_step=feature_snapshot` 写回 orchestrator metadata；
+- `computing_features` 失败时 `last_completed_step` 不推进，重试从 `checking_coverage` 之后重新进入；
+- 完成后更新心跳与 `last_completed_step='computing_features'`；
+- **Heartbeat 保活（CHANGE-20260709-003）**：computing_features 阶段启动后台 `_job_run_heartbeat_loop`（间隔 30s），并在 `compute_for_trade_date_with_mfcs` 每批完成后通过 `_build_feature_snapshot_progress_callback` 刷新 `heartbeat_at`、`lease_expires_at` 与 `metadata.feature_snapshot_progress`，防止长计算被 watchdog/recovery 误判为 stale；进度事件按每 500 只股票采样写入 `job_run_events`，避免事件表膨胀；
+- **Run lifecycle（Phase 8 新增，PR #74 发布原子性收紧）**：computing_features 步骤前后写 `stock_feature_snapshot_runs`：
+  - 开始时 `create_snapshot_run(trade_date, 'after_close')` 创建 `running` run（独立 session + commit），并立即把 `feature_snapshot_run_id` / `last_started_step=computing_features` 写回 orchestrator metadata；
   - snapshot 计算完成后**不再立即**写 `succeeded`/`published_at`；只有当后续 DSA `publish_run` 成功后才 `finish_snapshot_run(status='succeeded')` 写 `published_at`（独立 session + commit）并生成事件；
   - 失败时（snapshot 计算超阈值或 `publish_run` 失败）`finish_snapshot_run(status='failed')` 不写 `published_at`（独立 session + commit），不生成事件，再向上传播异常触发 orchestrator FAILED；
   - run 记录在独立 session 中提交，保证 snapshot session rollback 不影响 run 状态持久化。
-- **Published snapshot 保护（CHANGE-20260713-001）**：`create_snapshot_run(scope='full', allow_republish=False)` 在创建前检查是否已存在 canonical succeeded+published+full run（按 `trade_date+schema_version+primary_timeframe+secondary_timeframe+adj` 完整 key 匹配）；若存在则抛 `PublishedSnapshotRunExistsError`，禁止普通重跑覆盖已发布的快照。`after_close_orchestrator` 捕获该异常后跳过 `compute_for_trade_date`，复用已有 published run 的 ID 继续 publish + events 步骤（优雅降级）。`upsert_snapshot(allow_republish=False)` 在 ON CONFLICT DO UPDATE 时添加 WHERE 子句，保护已归属 published run 的 snapshot 不被覆盖。`feature_snapshot_backfill.py` 新增 `--allow-republish` 标志，管理员强制重跑时传 `True` 绕过双层保护。
+- **Published snapshot 保护（CHANGE-20260713-001）**：`create_snapshot_run(scope='full', allow_republish=False)` 在创建前检查是否已存在 canonical succeeded+published+full run（按 `trade_date+schema_version+primary_timeframe+secondary_timeframe+adj` 完整 key 匹配）；若存在则抛 `PublishedSnapshotRunExistsError`，禁止普通重跑覆盖已发布的快照。`after_close_orchestrator` 捕获该异常后跳过 `compute_for_trade_date_with_mfcs`，复用已有 published run 的 ID 继续 publish + events 步骤（优雅降级）。`upsert_snapshot(allow_republish=False)` 在 ON CONFLICT DO UPDATE 时添加 WHERE 子句，保护已归属 published run 的 snapshot 不被覆盖。`feature_snapshot_backfill.py` 新增 `--allow-republish` 标志，管理员强制重跑时传 `True` 绕过双层保护。
 
 断点恢复路径（`last_completed_step` → 已完成步骤集合）：
 
@@ -131,14 +141,13 @@ queued → refreshing_daily → syncing_boards → checking_coverage → creatin
 | `refreshing_daily` | `{refreshing_daily}` |
 | `syncing_boards` | `{refreshing_daily, syncing_boards}` |
 | `checking_coverage` | `{refreshing_daily, syncing_boards, checking_coverage}` |
-| `creating_dsa` | `{refreshing_daily, syncing_boards, checking_coverage, creating_dsa}` |
-| `waiting_dsa_worker` | `{refreshing_daily, syncing_boards, checking_coverage, creating_dsa, waiting_dsa_worker}` |
-| `quality_gate` | `{refreshing_daily, syncing_boards, checking_coverage, creating_dsa, waiting_dsa_worker, quality_gate}` |
-| `feature_snapshot` | `{refreshing_daily, syncing_boards, checking_coverage, creating_dsa, waiting_dsa_worker, quality_gate, feature_snapshot}` |
-| `publishing` | `{refreshing_daily, syncing_boards, checking_coverage, creating_dsa, waiting_dsa_worker, quality_gate, feature_snapshot, publishing}` |
+| `computing_features` | `{refreshing_daily, syncing_boards, checking_coverage, computing_features}` |
+| `publishing` | `{refreshing_daily, syncing_boards, checking_coverage, computing_features, publishing}` |
 | `succeeded` | 全部（直接返回） |
 
-`syncing_boards` 软失败时 `last_completed_step` 仍推进到 `syncing_boards`（即使同步失败也视为已尝试，不阻断重试流程）。`feature_snapshot` 失败时 `last_completed_step` 不会推进到 `feature_snapshot`，重试会从 `quality_gate` 之后重新进入 `feature_snapshot`。
+**旧步骤兼容映射**（历史 run 的 `creating_dsa`/`waiting_dsa_worker`/`quality_gate`/`feature_snapshot` 值在新代码中映射到 `computing_features` 已完成，admin/API 可读取展示）。
+
+`syncing_boards` 软失败时 `last_completed_step` 仍推进到 `syncing_boards`（即使同步失败也视为已尝试，不阻断重试流程）。`computing_features` 失败时 `last_completed_step` 不会推进到 `computing_features`，重试会从 `checking_coverage` 之后重新进入 `computing_features`。
 
 **Auto-resume（CP-V3-D）**: after_close_orchestrator 任务支持自动恢复。`interrupted` → `resume_queued`（attempt_no 递增，max=3），`lease_epoch` fencing 防止旧 worker 写入，`last_completed_step` 支持断点恢复。成功因子重建后调用 `stamp_factor_reconciliation_version` 写入版本字段，盘后通过 `find_stale_version_instruments` 识别影响集。
 
@@ -160,14 +169,14 @@ queued → refreshing_daily → syncing_boards → checking_coverage → creatin
 - `latest` 策略：交易日（含今日）始终以 today 为目标 trade_date，即使无 run 也返回 today 的 not_started/blocked，不回退历史 run 掩盖"今天未执行"；非交易日回退到最近有记录的交易日；
 - `feature_snapshot_run` 摘要优先返回 succeeded+published+full run（即 watchlist_ready 的实际数据源），若不存在再 fallback 到最新任意 run；
 - `watchlist_ready`：严格复用 `feature_snapshot_service.has_succeeded_snapshot_run`（`status='succeeded' AND published_at IS NOT NULL AND metadata_.scope='full'`），sample backfill 不计入；
-- `steps`：8 步骤时间线（refreshing_daily → checking_coverage → creating_dsa → waiting_dsa_worker → quality_gate → feature_snapshot → publishing → watchlist_ready），每步 status 为 pending/running/completed/failed/skipped；
+- `steps`：时间线展示新状态序列（refreshing_daily → checking_coverage → computing_features → publishing → watchlist_ready + syncing_boards 软失败独立显示），每步 status 为 pending/running/completed/failed/skipped；历史 run 的旧处理阶段（creating_dsa/waiting_dsa_worker/quality_gate/feature_snapshot）在 admin 中映射到 computing_features 展示（historical/legacy compatibility）；
 - `after_close_run`：job_run 摘要（status/orchestrator_status/heartbeat/lease_expires/last_completed_step/error）；
 - `feature_snapshot_run`：snapshot_run 摘要（run_type/scope/snapshot_count/failed_count/published_at）；
 - `data_freshness`：复用 `system_overview_service._compute_data_freshness`；
 - `events`：最近 100 条 job_run_events（来自 `job_run_event_service.list_events`）。
 
 **前端页面**：
-- `/admin/after-close` 详情页：顶部状态卡 + 8 步骤垂直时间线 + 数据新鲜度卡 + 编排状态详情 + 最近 20 次运行列表 + 事件日志抽屉；
+- `/admin/after-close` 详情页：顶部状态卡 + 新状态序列垂直时间线 + 数据新鲜度卡 + 编排状态详情 + 最近 20 次运行列表 + 事件日志抽屉；
 - `/admin/overview` 中的 `AfterClosePipelineCard` 改造为摘要卡（状态 pill + 编排阶段 + Worker 心跳 + 行情/选股发布至 + 进入详情链接）；
 - 轮询策略：running 状态 10s，非 running 60s，页面不可见暂停。
 
@@ -199,8 +208,8 @@ queued → refreshing_daily → syncing_boards → checking_coverage → creatin
 1. 确认 `trading-worker-after-close` 已停止或已部署修复版本；
 2. 在 backend 容器或管理脚本中调用 `repair_stale_after_close_snapshot_runs`；
 3. 检查返回结果中 `action` 为 `succeeded` 或 `failed`；
-4. 若 repair 为 `failed`，通过 admin 页面或 API 重试当日 after_close，利用 `last_completed_step='quality_gate'` 断点恢复，仅重跑 `feature_snapshot`；
-5. 验证 `watchlist_ready=true` 且 `/admin/after-close` 第 6-8 步状态正确。
+4. 若 repair 为 `failed`，通过 admin 页面或 API 重试当日 after_close，利用 `last_completed_step='checking_coverage'` 断点恢复，仅重跑 `computing_features`；
+5. 验证 `watchlist_ready=true` 且 `/admin/after-close` 时间线中 `computing_features`/`publishing`/`watchlist_ready` 状态正确。
 
 **禁止操作**：
 - 不要直接删除 `stock_feature_snapshot_runs`；
@@ -320,7 +329,7 @@ CLI 参数：
 
 约束：
 - 不修改 DSA/BB/swing/temporal 数学公式；
-- 复用 `feature_snapshot_service.compute_for_trade_date`；
+- 复用 `feature_snapshot_service.compute_for_trade_date_with_mfcs`；
 - 单股失败记录到 `degraded_reasons`，不阻塞其他股票；
 - upsert 幂等，可重复执行；
 - `start > end` 直接 `sys.exit(1)`。
@@ -603,7 +612,7 @@ capture worker 在截图时还会校验 token 中的 `instrument_id` 与路径�
 
 wencai 板块同步是盘后编排链路的组成步骤（PRD §7.5），用于同步 A 股行业/概念板块目录和成分股关系到 `market_boards` / `market_board_memberships` 表，供 `/market/stocks` 与 `/strategy-runs/{run_id}/results` 的 `industry`/`concept` 筛选使用。
 
-**当前状态：作为 `after_close_orchestrator` 的 `syncing_boards` 步骤执行**（位于 `refreshing_daily` 与 `waiting_dsa_worker` 之间），pywencai 是唯一的板块分类数据源。服务层 `board_sync_service.sync_boards()` 调用 `wencai_board_provider.WencaiBoardProvider`（pywencai 包装层）拉取数据。
+**当前状态：作为 `after_close_orchestrator` 的 `syncing_boards` 步骤执行**（位于 `refreshing_daily` 与 `checking_coverage` 之间），pywencai 是唯一的板块分类数据源。服务层 `board_sync_service.sync_boards()` 调用 `wencai_board_provider.WencaiBoardProvider`（pywencai 包装层）拉取数据。
 
 ### 2.6.0 BOARD_SYNC_ENABLED 开关与 provider 现状
 
@@ -670,7 +679,7 @@ board_sync_service.sync_boards()
 
 ### 2.6.5 调度集成
 
-- `syncing_boards` 作为 `after_close_orchestrator` 的步骤执行，位于 `refreshing_daily` 之后、`waiting_dsa_worker` 之前；
+- `syncing_boards` 作为 `after_close_orchestrator` 的步骤执行，位于 `refreshing_daily` 之后、`checking_coverage` 之前；
 - 非交易日自动跳过 `syncing_boards` 步骤（after_close_orchestrator 整体不运行）；
 - `mode=dsa_only` 模式跳过 `syncing_boards` 步骤（仅重跑 DSA，不重复同步板块）；
 - `BOARD_SYNC_ENABLED=false` 时步骤仍被触发但立即跳过（`status=skipped`，`reason_code=board_sync_disabled`），不发任何 HTTP 请求；

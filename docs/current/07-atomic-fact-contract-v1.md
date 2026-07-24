@@ -191,7 +191,7 @@ class AtomicFactsContextResponse(BaseModel):
 
 ### 9.3 关键约束
 
-- **Schema Version 3→4**：`feature_snapshot_service._SCHEMA_VERSION` 从 3 bump 到 4；旧 schema_version=3 snapshot 不可见（查询按 `schema_version=4` 过滤）；旧新结果不可混用；回滚方式：将 `_SCHEMA_VERSION` 改回 3 即可恢复旧快照可见。
+- **Schema Version 4→5（CHANGE-20260724-002）**：`feature_snapshot_service._SCHEMA_VERSION` 从 4 bump 到 5；新增 `event_freshness_payload` JSONB 独立事件新鲜度层；应用层所有读取路径过滤 `schema_version==5`，v4 不进入当前发布视图，不能被 v5 门禁误用；v4 快照数据保留在数据库（migration 068 只新增列不删除历史行）；旧新结果不可混用；event freshness 不进入 AFC Core 14 / auxiliary / availability；回滚：仅回滚 Phase 7 文档对齐时使用 `git revert <Phase 7 commit>`，涉及 schema/状态机/计算链的功能回滚必须单独制定代码和 migration 回滚计划，禁止只修改 `_SCHEMA_VERSION`。
 - **三链同核**：Atomic Facts 中的"筹码共识价"与详情页 Node Cluster 必须消费同一个 Canonical 结果（`node_cluster_engine.compute_node_cluster_profile` 唯一入口）。
 - **不计入 Core 14**：`nodeAvailability` 是顶层必填字段，与 `core`/`auxiliary`/`availability`/`productObservations` 并列，**不计入 Core 14 / `availability.coreDenominator`**。
 - **普通用户与管理员一致**：管理员 debug 接口 `GET /api/v1/admin/stocks/{symbol}/debug` 在用户响应基础上同样返回 `nodeAvailability`（无额外字段）。

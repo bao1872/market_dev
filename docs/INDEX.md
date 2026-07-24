@@ -42,7 +42,8 @@ PRD V2.0 §7.2 要求的 6 份合同文件：
 | `smc-events.schema.json` | SMC 事件输出 schema | `compute_smc_adapter` |
 | `detail-entry-context.schema.json` | 详情入口上下文 schema | `DetailEntryContext` |
 | `message-group.schema.json` | 飞书消息分组 schema | `MessageGroup` |
-| `after-close-recovery.schema.json` | 盘后恢复与 lease fencing schema | `AfterCloseRecovery` |
+| `after-close-recovery.schema.json` | 盘后恢复与 lease fencing schema（v3：状态机收敛 + computing_features 内部 checkpoint + idempotent recovery） | `AfterCloseRecovery` |
+| `feature-event-freshness.schema.json` | event_freshness_payload 独立事件新鲜度层 schema（CHANGE-20260724-002，schema v5+ 必备） | `event_freshness_service` / `feature_snapshot_service._SCHEMA_VERSION=5` |
 
 ## CI 门禁映射（docs/acceptance/ci-gates.md）
 

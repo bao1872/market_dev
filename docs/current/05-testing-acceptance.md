@@ -402,8 +402,8 @@ node --experimental-strip-types --test src/components/__tests__/dsaSourceAlignme
 - `compute_feature_snapshot_for_date` 必须使用 `<= trade_date` 数据；数据不足时写 `degraded_reasons` 不抛异常；`source_primary_bar_time` 与 `source_secondary_bar_time` 必须为 `Asia/Shanghai` aware datetime；1d bar 时间规范化为 `trade_date 15:00+08:00`；
 - **`structural_payload` 必须包含 4 个 top-level key：`primary` / `secondary` / `relation` / `meta`**；`relation` 来自 `_compute_relation(primary_factors, secondary_factors)`；
 - `upsert_snapshot` 必须幂等：同 `(instrument_id, trade_date, primary_timeframe, secondary_timeframe, adj, schema_version)` 重复 upsert 只生成一行，`structural_payload`/`temporal_payload`/`summary_payload` 被第二次覆盖；
-- `compute_for_trade_date` 单股失败不阻断其他股票，失败比例超过 `failure_threshold`（默认 0.3）抛 `RuntimeError`；
-- **[half-baked rollback] `compute_for_trade_date` 不内部 commit**：超阈值抛 `RuntimeError` 后 caller rollback，DB 中不应残留该 trade_date 的部分 snapshot 行。
+- `compute_for_trade_date_with_mfcs` 单股失败不阻断其他股票，失败比例超过 `failure_threshold`（默认 0.3）抛 `RuntimeError`；
+- **[half-baked rollback] `compute_for_trade_date_with_mfcs` 不内部 commit**：超阈值抛 `RuntimeError` 后 caller rollback，DB 中不应残留该 trade_date 的部分 snapshot 行。
 - **[P0-4 published snapshot 保护]** `create_snapshot_run(scope='full', allow_republish=False)` 在已存在 canonical succeeded+published+full run 时抛 `PublishedSnapshotRunExistsError`；`allow_republish=True` 绕过检查；`scope='sample'` 不受限；`upsert_snapshot(allow_republish=False)` WHERE 子句保护已归属 published run 的 snapshot 不被覆盖；`allow_republish=True` 可覆盖；`after_close_orchestrator` 捕获 `PublishedSnapshotRunExistsError` 后跳过计算复用已有 run。
 
 后端 backfill 脚本回归（`tests/test_feature_snapshot_backfill.py`，42 个用例，含 multiprocessing + [Blocker Fix] 事务/统计修正）：
@@ -467,17 +467,17 @@ API 契约回归（`tests/test_watchlist_monitor_status_snapshot.py`，14 个用
   - `backfill` sample scope run（`scope='sample'` + `published_at` 非空）→ watchlist 不得读 snapshot（`calculation_status != 'SUCCEEDED'` + `metrics={}`），防止小样本验证数据污染生产 watchlist SUCCEEDED 状态。
 
 orchestrator 状态机回归（`tests/test_after_close_orchestrator.py`，17 个用例）：
-- `AfterCloseRunStatus` 枚举包含 `FEATURE_SNAPSHOT`；
-- 状态机流转顺序：`quality_gate → feature_snapshot → publishing`；
-- 断点恢复：`last_completed_step='quality_gate'` 时 `skip_snapshot=False`；`last_completed_step='feature_snapshot'` 时 `skip_snapshot=True`；
-- `feature_snapshot` 步骤使用独立 `AsyncSessionLocal`，不依赖请求 session；
-- **[feature_snapshot 失败不进入 publishing] `compute_for_trade_date` 抛 `RuntimeError` → `publish_run` 不被调用 + `job_run.status='failed'` + 不应有 publishing/succeeded 事件**；
+- `AfterCloseRunStatus` 枚举包含 `COMPUTING_FEATURES`（CHANGE-20260724-002 状态机收敛后，旧 `CREATING_DSA`/`WAITING_DSA_WORKER`/`QUALITY_GATE`/`FEATURE_SNAPSHOT` enum 保留供历史 run 兼容读取）；
+- 状态机流转顺序：`checking_coverage → computing_features → publishing`（`computing_features` 内部 checkpoint：`prepare_inputs → continuous_factors → event_freshness → combined_quality_gate`）；
+- 断点恢复：`last_completed_step='checking_coverage'` 时 `skip_computing_features=False`；`last_completed_step='computing_features'` 时 `skip_computing_features=True`；历史 run 的旧 `last_completed_step` 值（`creating_dsa`/`waiting_dsa_worker`/`quality_gate`/`feature_snapshot`）在新代码中映射到 `computing_features` 已完成；
+- `computing_features` 步骤使用独立 `AsyncSessionLocal`，不依赖请求 session；
+- **[computing_features 失败不进入 publishing] `compute_for_trade_date_with_mfcs` 抛 `RuntimeError` → `publish_run` 不被调用 + `job_run.status='failed'` + 不应有 publishing/succeeded 事件**；
 - **[Run lifecycle - Phase 8 新增]**：
-  - feature_snapshot 成功写 `stock_feature_snapshot_runs.status='succeeded'` + `published_at` 非空 + `snapshot_count` / `failed_count` 正确；
-  - feature_snapshot 失败写 `stock_feature_snapshot_runs.status='failed'` + `published_at` 为 None + 不进入 publishing。
+  - computing_features 成功写 `stock_feature_snapshot_runs.status='succeeded'` + `published_at` 非空 + `snapshot_count` / `failed_count` 正确；
+  - computing_features 失败写 `stock_feature_snapshot_runs.status='failed'` + `published_at` 为 None + 不进入 publishing。
 - **[Heartbeat 保活 - CHANGE-20260709-006]**：
-  - `feature_snapshot` 阶段启动 `_job_run_heartbeat_loop`（间隔 30s），长计算期间持续刷新 `heartbeat_at` 与 `lease_expires_at`；
-  - `compute_for_trade_date` 每处理完一个 batch 调用 `progress_callback`，回调写入 `metadata.feature_snapshot_progress` 并按每 500 只股票采样生成 `job_run_events`；
+  - `computing_features` 阶段启动 `_job_run_heartbeat_loop`（间隔 30s），长计算期间持续刷新 `heartbeat_at` 与 `lease_expires_at`；
+  - `compute_for_trade_date_with_mfcs` 每处理完一个 batch 调用 `progress_callback`，回调写入 `metadata.feature_snapshot_progress` 并按每 500 只股票采样生成 `job_run_events`；
 - **[Repair 修复 - CHANGE-20260709-006]**：
   - `repair_stale_after_close_snapshot_runs`：存在 `status='interrupted'/'failed'` 的 after_close job_run 且同 trade_date 的 `feature_snapshot_run.status='running'` 超阈值时，实际 snapshot 行数 ≥ 95% 标 `succeeded` 并写 `published_at`，否则标 `failed`；
   - `execute_after_close_run` 启动前自动调用 repair，避免 stuck running snapshot_run 阻塞新任务；
@@ -548,7 +548,7 @@ cd /root/web_dev/backend && .venv/bin/python -m scripts.feature_snapshot_backfil
 - `watchlist_ready` 严格判定：snapshot `scope='sample'` 时 `watchlist_ready=false`（sample backfill 不计入）；
 - full+sample 同日共存：watchlist_ready=true 时 feature_snapshot_run 主摘要必须为 full run（显式 created_at，不依赖 DB 默认顺序）；
 - 失败 run（status=failed）时返回 `overall_status='failed'` + error_message 非空；
-- **中断后 UI 展示（CHANGE-20260709-006）**：`orchestrator_status='interrupted'` 且 `feature_snapshot_run.status='running'` 时，第 6 步 `feature_snapshot` 显示 `running`，`feature_snapshot_lost_contact=true`，`after_close_run` 摘要暴露 `feature_snapshot_run_id` 与 `feature_snapshot_progress`；
+- **中断后 UI 展示（CHANGE-20260709-006，CHANGE-20260724-002 状态机收敛后 step 名调整）**：`orchestrator_status='interrupted'` 且 `feature_snapshot_run.status='running'` 时，`computing_features` 步骤显示 `running`，`feature_snapshot_lost_contact=true`，`after_close_run` 摘要暴露 `feature_snapshot_run_id` 与 `feature_snapshot_progress`；
 - POST `/after-close/pipeline/run` 幂等：同 trade_date 已有 queued/running/succeeded run 时返回 existing（`is_new=false`）；
 - events 列表限制 100 条；
 - 非 admin 用户访问返回 403。

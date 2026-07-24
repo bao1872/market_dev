@@ -6,6 +6,15 @@
 
 - CHANGE-20260724-001: 门户二维码更新 — 替换为用户提供的新二维码 PNG（wechat-qr.jpg → wechat-qr.png，860×860 PNG）
 
+- CHANGE-20260724-002: 盘迹统一特征计算与事件新鲜度 V1 — 状态机收敛 + compute-once + event freshness 层 + v5 schema（Phase 7 文档/合同/记忆对齐）
+  - **盘后状态机收敛**：旧的 `creating_dsa` / `waiting_dsa_worker` / `quality_gate` / `feature_snapshot` 四个处理阶段收敛为 `computing_features`；当前外部状态序列 `queued → refreshing_daily → syncing_boards → checking_coverage → computing_features → publishing → succeeded`；`computing_features` 内部 checkpoint `prepare_inputs → continuous_factors → event_freshness → combined_quality_gate`；旧 enum 保留供历史 run 兼容读取（historical/legacy compatibility），新 run 不再生成旧步骤名
+  - **compute-once 注入**：盘后日线 DSA 只算一次，`compute_structural_features_adapter` 支持 `precomputed_dsa_bundle`，同时写 StrategyResult 和 snapshot `dsa_segment`；`_compute_smc_freshness_factors` 接收 `precomputed_smc_dto` 不再内部调 `compute_smc_adapter`
+  - **event_freshness_payload 独立层**：SMC freshness 从 `structural_payload.smc_freshness` 迁出到 `event_freshness_payload.daily_structure.smc`；新增 swing anchor（6 类）/ OB formation（4 项）/ DSA switch（1 项）；批量查询 `strategy_events`（DISTINCT ON / 窗口函数）禁止 N+1
+  - **schema_version 4→5**：应用层所有读取路径（`feature_snapshot_service` / `stock_context` / `watchlist` / `market_stocks_service` / `state_event_service`）过滤 `schema_version==5`，v4 不进入当前发布视图，不能被 v5 门禁误用；v4 快照数据保留在数据库（migration 068 只新增列不删除历史行），如需审计 v4 数据需直接 SQL 查询，应用层无接口；正式 full/after_close 流程禁止 `event_freshness_payload=None`、空骨架和缺 reason 的 `unavailable`；`never_observed` 与 `unavailable` 语义不同
+  - **组合门禁**：DSA + continuous + event freshness 三门禁在 `computing_features` 末尾执行一次，全部通过后才进入 `publishing`
+  - **Phase 7 文档对齐**：更新 current（01/02/03/05/07/MANIFEST）、maps（backend-module/test-coverage/frontend-route/worker-job/indicator-computation）、contracts（新增 `feature-event-freshness.schema.json` v1 + 升级 `after-close-recovery.schema.json` v3）、INDEX、CHANGELOG、CHANGE 记录与 checkpoint 执行纪律；不修改生产代码/测试/migration/前端/门户/权限/飞书/Capture
+  - **回滚**：仅回滚 Phase 7 文档对齐时使用 `git revert <Phase 7 commit>`；涉及 schema、状态机或计算链的功能回滚必须单独制定代码和 migration 回滚计划，禁止只修改 `_SCHEMA_VERSION`（单独改常量会导致表结构与代码逻辑不匹配、v5 payload 被 v4 路径误读、migration 版本与代码不一致等风险）
+
 ## 2026-07-23
 
 - CHANGE-20260723-006: 盘迹公开门户替换 V1.1 — 静态门户替换公开根路径 /，业务路由原样保留

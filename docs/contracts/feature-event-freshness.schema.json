@@ -1,0 +1,157 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Feature Event Freshness Payload Schema",
+  "description": "CHANGE-20260724-002 — stock_feature_snapshots.event_freshness_payload JSONB 独立事件新鲜度层契约。对应代码：backend/app/services/event_freshness_service.py + backend/app/services/feature_snapshot_service.py",
+  "contract_id": "feature-event-freshness",
+  "version": 1,
+  "as_of": "2026-07-24",
+  "schema_version_min": 5,
+  "type": "object",
+  "required": ["payload_version", "as_of_trade_date", "daily_structure"],
+  "properties": {
+    "payload_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "event_freshness_payload 自身版本（独立于 stock_feature_snapshots.schema_version）"
+    },
+    "as_of_trade_date": {
+      "type": "string",
+      "format": "date",
+      "description": "事件新鲜度截止交易日（必须等于 snapshot.trade_date，point-in-time 语义）"
+    },
+    "daily_structure": {
+      "type": "object",
+      "description": "日线结构事件新鲜度层（SMC freshness 从 structural_payload.smc_freshness 迁出至此）",
+      "required": ["smc", "swing_anchor", "ob_formation", "dsa_switch"],
+      "properties": {
+        "smc": {
+          "type": "object",
+          "description": "SMC 结构事件新鲜度（14 项），由 _compute_smc_freshness_factors(precomputed_smc_dto=...) 计算；不再内部调 compute_smc_adapter（compute-once 注入）",
+          "required": ["status", "items"],
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": ["available", "degraded", "unavailable", "never_observed"],
+              "description": "never_observed（从未观测到该事件类型）与 unavailable（曾观测但本日不可用，必填 reason）语义不同，禁止混淆"
+            },
+            "items": {
+              "type": "array",
+              "description": "SMC 事件新鲜度项列表（status=available/degraded 时非空；status=never_observed/unavailable 时为空数组）",
+              "items": {
+                "type": "object",
+                "required": ["event_type", "entity_id", "last_observed_at", "episodes"],
+                "properties": {
+                  "event_type": {
+                    "type": "string",
+                    "enum": ["smc_bos_retest", "smc_choch_retest", "smc_order_block_first_touch"]
+                  },
+                  "entity_id": {"type": "string", "description": "稳定 smc_entity_id（含 touch_episode 去重）"},
+                  "last_observed_at": {"type": "string", "format": "date-time"},
+                  "episodes": {"type": "integer", "minimum": 0}
+                }
+              }
+            },
+            "reason": {
+              "type": "string",
+              "description": "status=unavailable 时必填（缺 reason 的 unavailable 禁止写入正式 full/after_close 流程）；status=available/degraded/never_observed 时省略"
+            }
+          }
+        },
+        "swing_anchor": {
+          "type": "array",
+          "description": "Swing anchor 事件新鲜度（6 类）",
+          "items": {
+            "type": "object",
+            "required": ["anchor_type", "status"],
+            "properties": {
+              "anchor_type": {
+                "type": "string",
+                "enum": ["bos_bull", "bos_bear", "choch_bull", "choch_bear", "swing_high", "swing_low"]
+              },
+              "status": {
+                "type": "string",
+                "enum": ["available", "degraded", "unavailable", "never_observed"]
+              },
+              "last_observed_at": {"type": ["string", "null"], "format": "date-time"},
+              "reason": {"type": ["string", "null"], "description": "unavailable 必填"}
+            }
+          }
+        },
+        "ob_formation": {
+          "type": "array",
+          "description": "Order Block formation 事件新鲜度（4 项）",
+          "items": {
+            "type": "object",
+            "required": ["ob_kind", "status"],
+            "properties": {
+              "ob_kind": {
+                "type": "string",
+                "enum": ["bullish_internal", "bearish_internal", "bullish_swing", "bearish_swing"]
+              },
+              "status": {
+                "type": "string",
+                "enum": ["available", "degraded", "unavailable", "never_observed"]
+              },
+              "last_observed_at": {"type": ["string", "null"], "format": "date-time"},
+              "reason": {"type": ["string", "null"], "description": "unavailable 必填"}
+            }
+          }
+        },
+        "dsa_switch": {
+          "type": "object",
+          "description": "DSA switch 事件新鲜度（1 项）",
+          "required": ["status"],
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": ["available", "degraded", "unavailable", "never_observed"]
+            },
+            "last_observed_at": {"type": ["string", "null"], "format": "date-time"},
+            "reason": {"type": ["string", "null"], "description": "unavailable 必填"}
+          }
+        }
+      }
+    },
+    "batch_query": {
+      "type": "object",
+      "description": "批量查询诊断信息（禁止 N+1）",
+      "properties": {
+        "strategy_events_queried": {"type": "integer", "minimum": 0},
+        "query_strategy": {
+          "type": "string",
+          "enum": ["distinct_on", "window_function"],
+          "description": "批量查询 strategy_events 必须 DISTINCT ON 或窗口函数，禁止逐股 N+1"
+        }
+      }
+    }
+  },
+  "invariants": {
+    "schema_version_lock": "event_freshness_payload 仅在 stock_feature_snapshots.schema_version=5 时可见；旧 schema_version≤4 snapshot 不可见（查询按 schema_version=5 过滤）",
+    "no_none_payload": "正式 full/after_close 流程禁止 event_freshness_payload=None；列默认 '{}' 仅用于历史回填兼容，新 run 必须写入完整结构",
+    "no_empty_skeleton": "正式 full/after_close 流程禁止写入空骨架（payload_version/as_of_trade_date/daily_structure 必填且非空）",
+    "unavailable_must_have_reason": "任何 status=unavailable 必须填 reason；缺 reason 的 unavailable 禁止写入正式 full/after_close 流程",
+    "never_observed_vs_unavailable": "never_observed（从未观测到该事件类型）与 unavailable（曾观测但本日不可用）语义不同，禁止互换",
+    "smc_freshness_migrated": "SMC freshness 已从 structural_payload.smc_freshness 迁出至 event_freshness_payload.daily_structure.smc；structural_payload 不再含 smc_freshness 字段",
+    "compute_once_injection": "_compute_smc_freshness_factors 接收 precomputed_smc_dto 参数，不再内部调 compute_smc_adapter；盘后日线 SMC 计算只执行一次",
+    "rollback": "仅回滚 Phase 7 文档对齐时使用 git revert <Phase 7 commit>；涉及 schema、状态机或计算链的功能回滚必须单独制定代码和 migration 回滚计划，禁止只修改 _SCHEMA_VERSION（单独改常量会导致表结构与代码逻辑不匹配、v5 payload 被 v4 路径误读、migration 版本与代码不一致等风险）"
+  },
+  "not_in_afc": {
+    "description": "event_freshness_payload 不进入 AFC Core 14 / auxiliary / availability；AFC V1 Core 14 严格 14 项，event freshness 是独立事件观察层，不计入 Core 分母",
+    "core_demoninator": 14,
+    "excluded": ["smc_freshness", "swing_anchor", "ob_formation", "dsa_switch"]
+  },
+  "combined_quality_gate": {
+    "description": "computing_features 末尾组合门禁：DSA + continuous + event freshness 三门禁必须全部通过才能进入 publishing",
+    "gates": ["dsa_quality_gate", "continuous_factors_gate", "event_freshness_gate"],
+    "failure_behavior": "任一门禁失败 → computing_features 异常 → run status=failed → 不进入 publishing"
+  },
+  "enforcement": {
+    "ci_gate": "schema_version=5 + event_freshness_payload 完整性 + 无 None/空骨架/缺 reason unavailable",
+    "tests": [
+      "tests/test_feature_snapshot_service.py",
+      "tests/test_event_freshness_service.py",
+      "tests/test_after_close_orchestrator.py::test_execute_feature_snapshot_failure_skips_publishing"
+    ]
+  },
+  "cp_introduced": "CHANGE-20260724-002 (event freshness 独立层 + schema v5 + compute-once + 组合门禁)"
+}
